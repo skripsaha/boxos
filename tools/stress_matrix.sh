@@ -93,7 +93,7 @@ run_config() {
 
     make run-stop >/dev/null 2>&1 || true
 
-    eval "${extra} make run-bg" >/dev/null 2>&1
+    eval "DEBUG=$DEBUG_FLAG ${extra} make run-bg" >/dev/null 2>&1
     # Wait for shell prompt (UEFI GOP is slow). Poll instead of fixed sleep.
     for i in $(seq 1 120); do
         grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
@@ -463,8 +463,13 @@ for arg in "$@"; do
     esac
 done
 
-echo "Building kernel + userspace... (mode=$MODE debug=$DEBUG_FLAG)"
-make DEBUG=$DEBUG_FLAG >/dev/null 2>&1 || { echo "BUILD FAILED"; exit 2; }
+# Built as every config below boots it. STRICT=on is a build key as well as a
+# machine key (Makefile, "STRICT=on, the kernel's half"), and so is DEBUG: a
+# tree built with one value and booted with the other is built again inside
+# the first run-bg, its output thrown away. So both are given here and to
+# every run-bg (run_config), and the matrix builds once.
+echo "Building kernel + userspace... (mode=$MODE debug=$DEBUG_FLAG strict=on)"
+make DEBUG=$DEBUG_FLAG STRICT=on >/dev/null 2>&1 || { echo "BUILD FAILED"; exit 2; }
 
 #
 # STRICT=on is the DEFAULT for every config: production-grade BoxOS must

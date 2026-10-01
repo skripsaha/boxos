@@ -22,14 +22,14 @@
 #
 # SCENARIOS (MACHINE KEYS are `make run-bg` keys; none is the plain BIOS stand)
 #   noanchor    persist write, never anchored; 5+D s later the power goes; the
-#               final state booted and `persist verify` asked. Red on HEAD:
-#               caveat 1.7.
+#               final state booted and `persist verify` asked: the cadence
+#               settled the write (step 1.7 lifted the caveat).
 #   nextfid     anchor_test, then the power goes. Every prefix of the anchor's
-#               sync is booted and anchor_test asked again: a fid the cut's table
-#               already names, issued twice. Red on HEAD: caveat 1.6.
+#               sync is booted and anchor_test asked again: no cut hands out an
+#               id its medium already shows (step 1.6 lifted the caveat).
 #   hog         one core: quilltest settle (a write, not anchored, beside a
-#               hog); 5+D s later the power goes; `quilltest verify`. Red on
-#               HEAD: caveat 1.7. And the design's "an anchor under the hog
+#               hog); 5+D s later the power goes; `quilltest verify` (step 1.7
+#               lifted the caveat). And the design's "an anchor under the hog
 #               answers": `quilltest hogged anchor_test` on the booted state.
 #   halt        quilltest churn writes for ever; the power button. The machine
 #               must switch off, and what churn wrote is durable behind the
@@ -48,9 +48,11 @@
 #               census is kept by kind: a prefix that links into unstamped
 #               ground, which step 1.1 lifted, has one such cut booted to be
 #               refused by the kernel itself; a subset doing the same, apart.
-#   noanchormut nextfidmut tablemut flushmut chaingrowmut
-#               the fix or the fault put in on purpose: the caveat must be
-#               lifted early, the durability or the ack oracle must go red.
+#   noanchormut nextfidmut poolmut flushmut chaingrowmut
+#               the fix taken out or the fault put in on purpose: the cadence
+#               off (noanchor's verify), the mount's derived next file id off
+#               (nextfid's reissue), the durability, the ack or the chains'
+#               lifted rows must say the defect is back.
 #   selftest    the planner's arithmetic, and a record forged by one byte that
 #               the record's self-check must refuse.
 #
@@ -152,14 +154,17 @@ pc_clone() {   # pc_clone FROM TO — a copy-on-write clone where the filesystem
 # The plate is stamped when the kernel is linked, so an edit that relinks
 # nothing (a program, a script) leaves the plate naming the tree before it;
 # the kernel is then linked again, and the plate must say WANT: 0 for a clean
-# tree, 4 (UNDER TEST) for one a *mut scenario mutated.
+# tree, 4 (UNDER TEST) for one a *mut scenario mutated. Built with the STRICT
+# the scenario's machine boots with (stand.sh, strict_key): every disk a
+# scenario boots is a clone of this image and carries its kernel.
 pc_build() {
-    local rc
-    build
+    local rc strict
+    strict=$(strict_key ${PC_KEYS[@]+"${PC_KEYS[@]}"})
+    build "$strict"
     tools/buildplate verify build/boxos.img --root . >"$SCRATCH/plate.txt" 2>&1; rc=$?
     if [ "$rc" = 3 ]; then
         rm -f build/kernel.bin
-        build
+        build "$strict"
         tools/buildplate verify build/boxos.img --root . >"$SCRATCH/plate.txt" 2>&1; rc=$?
     fi
     [ "$rc" = "$1" ] && return 0
@@ -418,7 +423,7 @@ pc_caveats() {
     case "$1" in
         noanchor|noanchormut) base=noanchor; echo "verify=noanchor"; codes="ORPHAN" ;;
         hog)                  base=hog; echo "verify=hog"; codes="ORPHAN" ;;
-        nextfid|nextfidmut|tablemut|flushmut)
+        nextfid|nextfidmut|poolmut|flushmut)
             base=nextfid; echo "reissue=nextfid"
             codes="FID_PAST_NEXT FILE_LOST ORPHAN UNNAMED_RECORD"
             case "$2" in *" sync") codes="$codes MISSING TAG_ABSENT" ;; esac ;;
@@ -665,7 +670,7 @@ run_scenario() {   # run_scenario NAME KEYS... — build, run, judge, say
 # booted again, anchor_test, and the machine stops itself inside that sync.
 sc_boot_cut() {
     local pid img="$PC_DIR/$1.img"
-    if ! build_with_key SETTLECUT="$1"; then
+    if ! build_with_key SETTLECUT="$1" "$(strict_key ${PC_KEYS[@]+"${PC_KEYS[@]}"})"; then
         bad "settlecut: SETTLECUT=$1 does not build: $(tail -3 "$SCRATCH/build.log" | tr '\n' ' ')"; return 1
     fi
     pc_clone build/boxos.img "$img"
@@ -745,77 +750,84 @@ mut_run() {  # mut_run NAME BASE KEY SEEN WHY [KEYS...] — the mutated tree thr
     pc_expect "$3" "$4" "$5"
 }
 
+# Since step 1.7 nothing waits for an anchor to settle a write: the cadence
+# begins a cycle of its own (settle.h — the window, Lull, and a demand such as
+# a program leaving with changes unsettled). So noanchor's fix is in, and its
+# mutant takes the cadence out: the committer begins a cycle only for a waiter,
+# as the Settle did under step 1.4 — and persist's write, which nobody waits
+# for, must be gone after the power.
 run_noanchormut() {
-    mut_on src/userspace/apps/persist.c "logcheck mutation" <<'EOF'
+    mut_on src/kernel/tagfs/settle/cadence.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    kdbg_print(\"[PERSIST] WROTE fid=%d seq=%u magic=0x%x checksum=0x%x\","
+a = "    if (waiters || closed || demand)\n        return CADENCE_NOW;\n"
 assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "    anchor((uint32_t)fid); /* logcheck mutation: the write is anchored */\n" + a))
+open(p, "w").write(s.replace(a, "    if (waiters)\n        return CADENCE_NOW;\n"
+                                "    return CADENCE_REST;   /* logcheck mutation: the cadence is off, only a waiter starts a cycle */\n"))
 EOF
-    mut_run noanchormut noanchor verify behaves \
-        "persist anchoring its write, the noanchor caveat is lifted early"
-    restore src/userspace/apps/persist.c; rm -f build/kernel.bin
+    mut_run noanchormut noanchor verify defect \
+        "the cadence off, nothing settles persist's write before the power goes"
+    restore src/kernel/tagfs/settle/cadence.c
 }
 
+# Since step 1.6 the mount's next file id is past every id the medium shows
+# (mount/mount.c MountFidBoundary), so nextfid's fix is in, and its mutant
+# takes it out: the Ledger's count stands, and a cut whose medium names the
+# anchor's file ahead of its Ledger must hand that id out again.
 run_nextfidmut() {
+    mut_on src/kernel/tagfs/mount/mount.c "logcheck mutation" <<'EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+a = "    if (next != led->next_file_id) {\n"
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, "    if (0 && next != led->next_file_id) {   /* logcheck mutation: the Ledger's count stands */\n"))
+EOF
+    mut_run nextfidmut nextfid reissue defect \
+        "the Ledger's count standing at the mount, a cut whose medium names the anchor's file hands its id out again"
+    restore src/kernel/tagfs/mount/mount.c
+}
+
+# The durability oracle's own mutant. It used to leave the file table
+# unwritten; since step 1.6 a sealed volume derives the table from the pool
+# (mount/mount.c MountFile: a row the table lacks is set from the record), so
+# the file is whole without it and that claim is gone. What a file's
+# durability stands on now is its record in the pool, under the seal: the
+# cycle's S3 writes nothing of the pool, and the anchored file must not be
+# found whole after the flush its ack stands on.
+run_poolmut() {
     mut_on src/kernel/tagfs/settle/settle.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    SETTLE_CUT_AT(SETTLE_CUT_POINT_REGISTRY);"
+a = "        rc          = PoolSnapWriteNext(&snap->pool, &done);\n"
 assert s.count(a) == 1
-s = s.replace(a, "    (void)LedgerImageWrite(); /* logcheck mutation: the ledger is written first */\n" + a)
-a = "        rc = LedgerImageWrite();\n"
-assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "        rc = OK;\n"))
+open(p, "w").write(s.replace(a, "        rc          = OK;   /* logcheck mutation: the cycle writes nothing of the pool */\n"
+                                "        done        = true;\n"))
 EOF
-    mut_run nextfidmut nextfid reissue behaves "the ledger written first, no fid is issued twice"
-    # First in time, but in the same epoch as the table: a medium that keeps
-    # the table and loses the ledger still holds a row past next_file_id, and
-    # the checker, which sees every subset, must still say so.
-    pc_expect code:FID_PAST_NEXT defect \
-        "the ledger written first but behind no flush of its own, a cut that keeps the table and loses it still holds a row past it"
+    mut_run poolmut nextfid "durable:_anchor_test@anchor_test" fail \
+        "the cycle writing nothing of the pool, the anchored file is not durable"
     restore src/kernel/tagfs/settle/settle.c
 }
 
-run_tablemut() {
-    mut_on src/kernel/tagfs/settle/settle.c "logcheck mutation" <<'EOF'
-import sys
-p = sys.argv[1]; s = open(p).read()
-a = "    if (file_table_flush() != 0) {"
-assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "    if (0) {   /* logcheck mutation: the file table is never written */"))
-EOF
-    mut_run tablemut nextfid "durable:_anchor_test@anchor_test" fail \
-        "the file table never written, the anchored file is not durable"
-    restore src/kernel/tagfs/settle/settle.c
-}
-
-# Only the anchor's flushes are taken out — the sync's own, and the one
-# ObjAnchor asks for after the sync; the WriteJob still flushes the data it
-# writes. So the mutant is asked on the WriteJob's machine too, where a flush
-# of anchor_test's own data comes before the anchor's sync: the ack must not
-# be credited with it.
+# Since step 1.7 an anchor asks the medium for nothing itself: it waits for
+# the cycle that settles its change, and is answered from that cycle's end
+# (settle_ops.c). So the one flush its ack stands on is the cycle's last, S5,
+# after the Ledger — and that alone is taken out; the cycle's first flush, S2,
+# still covers the data and the chains. The mutant is asked on the WriteJob's
+# machine too, where the data's own flush comes before the cycle: the ack must
+# not be credited with it.
 run_flushmut() {
     mut_on src/kernel/tagfs/settle/settle.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "        rc = VolumeFlushFor(VolumeFlushNeed());"
+a = "        rc = VolumeFlushFor(VolumeFlushNeed());\n        snap->stage = \"the flush after the ledger\";"
 assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "        rc = OK;   /* logcheck mutation: the cycle never asks the medium to flush */"))
+open(p, "w").write(s.replace(a, "        rc = OK;   /* logcheck mutation: the cycle never asks the medium to flush after its ledger */\n"
+                                "        snap->stage = \"the flush after the ledger\";"))
 EOF
-    mut_on src/kernel/core/decks/storage/storage_ops.c "logcheck mutation" <<'EOF'
-import sys
-p = sys.argv[1]; s = open(p).read()
-a = "    error_t flushed = VolumeFlushFor(VolumeFlushNeed());"
-assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "    error_t flushed = OK;   /* logcheck mutation: the anchor never asks the medium to flush */"))
-EOF
-    mut_run flushmut nextfid ack:anchor_test fail "the anchor never asking the medium to flush, its ack has none behind it"
+    mut_run flushmut nextfid ack:anchor_test fail "the cycle never flushing after its Ledger, the anchor's ack has no flush behind it"
     mut_run flushmut nextfid ack:anchor_test fail \
         "on the WriteJob the data's own flush comes first, and still the anchor's ack has none behind it" \
         STRICT=on CORES=4 MEM=4G
-    restore src/kernel/core/decks/storage/storage_ops.c
     restore src/kernel/tagfs/settle/settle.c
 }
 
@@ -894,7 +906,7 @@ case "${1:-}" in
     settlecut)   shift; run_settlecut "$@" ;;
     noanchormut) run_noanchormut ;;
     nextfidmut)  run_nextfidmut ;;
-    tablemut)    run_tablemut ;;
+    poolmut)     run_poolmut ;;
     flushmut)    run_flushmut ;;
     chaingrowmut) run_chaingrowmut ;;
     selftest)    run_selftest ;;
@@ -911,10 +923,10 @@ case "${1:-}" in
         done
         run_settlecut
         run_scenario chaingrow
-        run_noanchormut; run_nextfidmut; run_tablemut; run_flushmut; run_chaingrowmut ;;
+        run_noanchormut; run_nextfidmut; run_poolmut; run_flushmut; run_chaingrowmut ;;
     *)
         echo "usage: $0 noanchor|nextfid|hog|halt|race|settlecut|chaingrow [MACHINE KEYS...]"
-        echo "       $0 noanchormut|nextfidmut|tablemut|flushmut|chaingrowmut|selftest|all"
+        echo "       $0 noanchormut|nextfidmut|poolmut|flushmut|chaingrowmut|selftest|all"
         exit 2 ;;
 esac
 

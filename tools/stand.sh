@@ -75,10 +75,73 @@ chk()  { if [ "$1" = 0 ]; then ok "$2"; else bad "$2"; fi }
 # here is stamped exactly as `make` alone would stamp it. The verdict comes from
 # what the tree CONTAINS, never from this key. And it waits for the last
 # mutation stamp to pass first (mut_bump, below says why).
-make() { mut_stamp_passed; command make HARNESS=on "$@"; }
+make() {
+    mut_stamp_passed
+    case " $* " in
+        *" run-bg "*) strict_agrees "$@" || return 1 ;;
+    esac
+    command make HARNESS=on "$@"
+}
+
+# ===========================================================================
+# A BOOT ASKS FOR THE KERNEL IT BOOTS, AND STRICT IS HALF KERNEL
+# ===========================================================================
+#
+# Since step 1.5 STRICT=on is a build key as well as a machine key (Makefile,
+# "STRICT=on, the kernel's half"): it builds LockRank's panic in. A tree built
+# with one STRICT and booted with the other was built again INSIDE run-bg —
+# with its output thrown away, and with build/boxos.img packed afresh under
+# whatever volume the scenario had made or grown on it (stand's second boot
+# found another Deed and judged nothing). A disk handed in by BOOTDISK is not
+# built at all: it boots the kernel it carries, whatever the machine is.
+#
+# So every build here is given the STRICT its boots will ask for (strict_key),
+# and a run-bg that would boot a kernel of the other STRICT is refused, said to
+# the terminal as the harness's failure, and its stale serial log removed so
+# nothing is judged off it: the tree's mark (build/.strict.on|off) is held to
+# the words of the run-bg, and a BOOTDISK's plate (tools/buildplate say, the
+# keys it was built with) to them too.
+exec 8>&1
+
+# strict_asked WORDS... — the STRICT a make invocation's words ask for: the
+# last STRICT= among them, else the environment's, else off (Makefile).
+strict_asked() {
+    local w v=${STRICT:-off}
+    for w in "$@"; do case "$w" in STRICT=*) v=${w#STRICT=} ;; esac; done
+    [ "$v" = on ] && echo on || echo off
+}
+
+# strict_key WORDS... — the build key for the STRICT WORDS (a machine's keys)
+# boot with, spelt out either way, so a build never inherits the one before.
+strict_key() { echo "STRICT=$(strict_asked "$@")"; }
+
+# strict_agrees RUN-BG-WORDS... — 0 when the kernel the run-bg would boot was
+# built with the STRICT it asks for, or nothing says otherwise.
+strict_agrees() {
+    local want had disk="" w why
+    want=$(strict_asked "$@")
+    for w in "$@"; do case "$w" in BOOTDISK=*) disk=${w#BOOTDISK=} ;; esac; done
+    if [ -n "$disk" ] && [ "$disk" != build/boxos.img ]; then
+        case "$(tools/buildplate say "$disk" 2>/dev/null)" in
+            *"keys: "*STRICT=on*) had=on ;;
+            *"keys: "*)           had=off ;;
+            *)                    return 0 ;;
+        esac
+        why="the disk $disk carries a kernel built with STRICT=$had"
+    elif [ -f build/.strict.on ] || [ -f build/.strict.off ]; then
+        had=off; [ -f build/.strict.on ] && had=on
+        why="the tree was built with STRICT=$had, and run-bg would build it again unseen"
+    else
+        return 0
+    fi
+    [ "$had" = "$want" ] && return 0
+    rm -f build/serial.log
+    harness "a boot that asks STRICT=$want is refused: $why ($*)" >&8
+    return 1
+}
 
 build() {
-    make >"$SCRATCH/build.log" 2>&1
+    make "$@" >"$SCRATCH/build.log" 2>&1
     if [ $? -ne 0 ]; then
         echo "BUILD FAILED — tail:"; tail -25 "$SCRATCH/build.log"; exit 1
     fi

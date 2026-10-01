@@ -44,6 +44,15 @@ cfg_env() {
     esac
 }
 
+# Every config is STRICT=on, which is a build key as well as a machine key: a
+# tree built without it would be built again inside the first run-bg, its
+# output thrown away. Built here, where a failure is seen (a no-op when the
+# tree already is).
+if ! make STRICT=on >build/cxx_matrix_build.log 2>&1; then
+    echo "[matrix] BUILD FAILED (STRICT=on) — build/cxx_matrix_build.log"
+    exit 2
+fi
+
 FAILED=0
 for cfg in $CONFIGS; do
     extra=$(cfg_env "$cfg")

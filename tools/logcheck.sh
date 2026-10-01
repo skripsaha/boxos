@@ -867,8 +867,20 @@ run_healthy() {
     distinct=$(grep '^\[PROBE\] logbook' "$L" | sed "s/.*logbook //;s/ full.*//" | sort -u | wc -l | tr -d ' ')
     [ "$distinct" -ge 24 ]; chk $? "Logbook holds the full vocabulary ($distinct distinct names, $names resolves)"
 
-    # (6) TagFS itself still healthy
+    # (6) TagFS itself still healthy — and every test it counts is one this
+    # tree registers. The numbers are the code's, not a run's (K9): a build
+    # without VOLUME_TESTS walks the seven suites of tests.h TEST_SUITES not
+    # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 5,
+    # integrity 3, use_context 5 TestCases, 22 run; the 11 whose reach is
+    # TEST_WRITES_TO_VOLUME are skipped (tests.c, g_volume_tests_allowed),
+    # and the 11 that only read pass — none of them stands aside on this
+    # stand's fresh image, whose first file wears a tag (use_context_narrows).
+    # A test added or taken out moves this line in the same commit.
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
+    local said
+    said=$(stand_summary "$L")
+    [ "$said" = "TagFS: 22 run, 11 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
+    chk $? "TagFS startup tests: the 22 this tree registers ran, 11 reads passed and 11 writes stood down (${said:-no summary})"
     lockrank_judge "$L" "healthy 1c"
 
     # (7) the kernel's ear works — mutation-proven harness, see commit
@@ -3722,7 +3734,7 @@ qemu_cpu_cs() {
 
 run_sleeps() {
     echo "== sleeps: an idle box costs nothing, and a sleeping console still hears =="
-    build
+    build STRICT=on
 
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
@@ -3972,7 +3984,7 @@ claim_boot() {
 
 run_kcoreclaim() {
     echo "== kcoreclaim: a claim stands unpublished for 2 ms and the K-Core must wait for it =="
-    kcoreclaim_window_on; build
+    kcoreclaim_window_on; build STRICT=on
     claim_boot kcoreclaim
     kcoreclaim_window_off
     L="$SCRATCH/serial.kcoreclaim.log"
@@ -3989,7 +4001,7 @@ run_kcoreclaim() {
 # same run must STOP, and Nightwatch must be the one to say why.
 run_kcoreclaimmut() {
     echo "== kcoreclaimmut: put the impatient consumer back and require the machine to stop =="
-    kcoreclaim_window_on; impatient_on; build
+    kcoreclaim_window_on; impatient_on; build STRICT=on
     claim_boot kcoreclaimmut
     kcoreclaim_window_off
     L="$SCRATCH/serial.kcoreclaimmut.log"
@@ -4066,7 +4078,7 @@ runnable_drop_off() {
 
 run_runnable() {
     echo "== runnable: bench three times at sixteen cores, and RUNNABLE UNSCHEDULED stays silent =="
-    build
+    build STRICT=on
     runnable_boot runnable
     L="$SCRATCH/serial.runnable.log"
     local rows
@@ -4079,7 +4091,7 @@ run_runnable() {
 
 run_runnablemut() {
     echo "== runnablemut: schedule() drops one strand after dequeuing it, and Nightwatch must name it =="
-    runnable_drop_on; build
+    runnable_drop_on; build STRICT=on
     runnable_boot runnablemut
     runnable_drop_off
     L="$SCRATCH/serial.runnablemut.log"
@@ -4252,7 +4264,7 @@ lostwake_boot() {
 
 run_lostwake() {
     echo "== lostwake: the watch walks slowly through a brigade, and must not cry wolf =="
-    slowwalk_on; build
+    slowwalk_on; build STRICT=on
     lostwake_boot lostwake 8 3
     slowwalk_off
     L="$SCRATCH/serial.lostwake.log"
@@ -4278,7 +4290,7 @@ run_lostwake() {
 # run must STOP, and Nightwatch must be the one to say on whom.
 run_lostwakemut() {
     echo "== lostwakemut: one wake is never rung, and the watch must name the sleeper =="
-    wakedrop_on; build
+    wakedrop_on; build STRICT=on
     lostwake_boot lostwakemut 1
     wakedrop_off
     L="$SCRATCH/serial.lostwakemut.log"
@@ -4348,7 +4360,7 @@ chit_command() {
 
 run_chit() {
     echo "== chit: every deferral leaves its chit, and a healthy machine is convicted of nothing =="
-    build
+    build STRICT=on
     chit_boot_and_prompt
     local rounds=0 r
     for r in 1 2; do
@@ -4461,7 +4473,7 @@ chit_wait_for_verdict() {
 
 run_chitmut() {
     echo "== chitmut: a child's death is determined and its answer withheld — the watch must name the shell and the holder =="
-    chitwithhold_on; build
+    chitwithhold_on; build STRICT=on
     chit_boot_and_prompt
     chit_command "say hi" "^hi"
     chit_wait_for_verdict
@@ -4486,7 +4498,7 @@ run_chitmut() {
 
 run_chitmissmut() {
     echo "== chitmissmut: a handler raises the async flag and leaves no chit — the guide must say so at once, the watch two looks later =="
-    chitforgot_on; build
+    chitforgot_on; build STRICT=on
     chit_boot_and_prompt
     chit_command "cxxtest" "\[GUIDE\] DEFECT"     # the child runs for minutes; the omission is said as it is deferred
     chit_wait_for_verdict
@@ -4625,7 +4637,7 @@ turnin_boot() {
 
 run_turnin() {
     echo "== turnin: a slot claimed before the sleeper's mark and released after its look =="
-    turnin_window_on; build
+    turnin_window_on; build STRICT=on
     turnin_boot turnin
     turnin_window_off
     L="$SCRATCH/serial.turnin.log"
@@ -4640,7 +4652,7 @@ run_turnin() {
 # same run must STOP on its first lane request.
 run_turninmut() {
     echo "== turninmut: put the cursor-only sleep back and require the machine to stop =="
-    turnin_window_on; cursoronly_on; build
+    turnin_window_on; cursoronly_on; build STRICT=on
     turnin_boot turninmut
     cursoronly_off; turnin_window_off
     L="$SCRATCH/serial.turninmut.log"
@@ -4704,7 +4716,7 @@ run_sleepsmut() {
     local before_fail
     before_fail=$FAIL
 
-    bell_off; build
+    bell_off; build STRICT=on
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
@@ -4742,7 +4754,7 @@ run_sleepsmut() {
         bad "sleepsmut: nobody rang and NOBODY SAID SO — a stream can now jam in silence"
     fi
 
-    turnin_off; build
+    turnin_off; build STRICT=on
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
@@ -4760,7 +4772,7 @@ run_sleepsmut() {
         ok "sleepsmut: Turn In removed — the box went back to ${USED}% of a core"
     fi
 
-    brookpop_off; build
+    brookpop_off; build STRICT=on
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
@@ -4812,7 +4824,7 @@ run_sleepsmut() {
 # the fix, 0 of 32000 after.
 run_lines() {
     echo "== lines: sixteen strands printing at once, and not one line spliced =="
-    build
+    build STRICT=on
 
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
@@ -4873,7 +4885,7 @@ linecut_restore() {
 
 run_linesmut() {
     echo "== linesmut: cut frames anywhere again, and require the oracle to notice =="
-    linecut_off; build
+    linecut_off; build STRICT=on
 
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
@@ -4963,7 +4975,7 @@ rollcall_count() {
 
 run_rollcall() {
     echo "== rollcall: 1600 numbered lines from four strands, every one answering, none carrying another =="
-    build
+    build STRICT=on
     if ! rollcall_boot rollcall; then bad "rollcall: never reached a shell"; return; fi
     L="$SCRATCH/serial.rollcall.log"
 
@@ -5025,7 +5037,7 @@ rollcall_defects_off() {
 
 run_rollcallmut() {
     echo "== rollcallmut: both defects put back, and the roll call must see each =="
-    rollcall_defects_on; build
+    rollcall_defects_on; build STRICT=on
     rollcall_boot rollcallmut; local booted=$?
     rollcall_defects_off
     if [ $booted -ne 0 ]; then bad "rollcallmut: never reached a shell"; build; return; fi
@@ -5113,7 +5125,7 @@ handset_boot() {
 
 run_handset() {
     echo "== handset: the child hears, the shell hears again, nothing typed early is lost =="
-    build
+    build STRICT=on
     if ! handset_boot handset; then bad "handset: never reached a shell"; return; fi
     L="$SCRATCH/serial.handset.log"
 
@@ -5155,7 +5167,7 @@ handset_deaf_off() {
 
 run_handsetmut() {
     echo "== handsetmut: keys consumed while nobody listens, and the early line must be lost =="
-    handset_deaf_on; build
+    handset_deaf_on; build STRICT=on
     handset_boot handsetmut; local booted=$?
     handset_deaf_off
     if [ $booted -ne 0 ]; then bad "handsetmut: never reached a shell"; build; return; fi
@@ -5254,7 +5266,7 @@ draft_session() {
 
 run_draft() {
     echo "== draft: ten bytes typed and saved, five taken back and saved again =="
-    build
+    build STRICT=on
     if ! draft_session draft "STRICT=on CORES=4 MEM=4G"; then
         bad "draft: never reached a shell"; return
     fi
@@ -5293,7 +5305,7 @@ draft_notail_off() {
 
 run_draftmut() {
     echo "== draftmut: the span taken out, and the old tail must come back =="
-    draft_notail_on; build
+    draft_notail_on; build STRICT=on
     draft_session draftmut "STRICT=on CORES=4 MEM=4G"; local booted=$?
     draft_notail_off
     if [ $booted -ne 0 ]; then bad "draftmut: never reached a shell"; build; return; fi
@@ -5384,7 +5396,7 @@ paint_boot() {
 
 run_paint() {
     echo "== paint: one op lays a whole screen of colour, and the log stays quiet =="
-    build
+    build STRICT=on
     if ! paint_boot paint "UEFI=on STRICT=on CORES=4 MEM=4G"; then
         bad "paint: never reached a shell"; return
     fi
@@ -5428,7 +5440,7 @@ paint_blind_off() {
 
 run_paintmut() {
     echo "== paintmut: the op answers OK and paints nothing, and the screen must stay bare =="
-    paint_blind_on; build
+    paint_blind_on; build STRICT=on
     paint_boot paintmut "UEFI=on STRICT=on CORES=4 MEM=4G"; local booted=$?
     paint_blind_off
     if [ $booted -ne 0 ]; then bad "paintmut: never reached a shell"; build; return; fi
@@ -5481,7 +5493,7 @@ finish_boot() {
 
 run_finish() {
     echo "== finish: nobody wears it, the daemon is held back, and anyway ends it =="
-    build
+    build STRICT=on
     if ! finish_boot finish "STRICT=on CORES=4 MEM=4G"; then
         bad "finish: never reached a shell"; return
     fi
@@ -5525,7 +5537,7 @@ finish_unguarded_off() {
 
 run_finishmut() {
     echo "== finishmut: the guard taken out, and the daemon must fall to a bare finish =="
-    finish_unguarded_on; build
+    finish_unguarded_on; build STRICT=on
     finish_boot finishmut "STRICT=on CORES=4 MEM=4G"; local booted=$?
     finish_unguarded_off
     if [ $booted -ne 0 ]; then bad "finishmut: never reached a shell"; build; return; fi
@@ -5697,7 +5709,7 @@ overtake_tally() {
 
 run_overtake() {
     echo "== overtake: a finished program's last words come before the next prompt =="
-    overtake_slow_on; build
+    overtake_slow_on; build STRICT=on
     local booted=1
     overtake_listing overtake && booted=0
     overtake_slow_off
@@ -5718,7 +5730,7 @@ run_overtake() {
 
 run_overtakemut() {
     echo "== overtakemut: with the clock deciding again, the prompt must cut in =="
-    overtake_clockonly_on; overtake_slow_on; build
+    overtake_clockonly_on; overtake_slow_on; build STRICT=on
     local booted=1
     overtake_listing overtakemut && booted=0
     overtake_clockonly_off; overtake_slow_off
@@ -5823,7 +5835,7 @@ orderlife_run() {
 
 run_orderlife() {
     echo "== orderlife: the strand that opened the console's order finishes first, and the rest keep printing =="
-    orderlife_shape_on; build
+    orderlife_shape_on; build STRICT=on
     local booted=1
     orderlife_run orderlife && booted=0
     orderlife_shape_off
@@ -5847,7 +5859,7 @@ run_orderlife() {
 
 run_orderlifemut() {
     echo "== orderlifemut: let a strand's death take the cabin's windows, and require the oracle to notice =="
-    orderlife_shape_on; orderlife_strandkill_on; build
+    orderlife_shape_on; orderlife_strandkill_on; build STRICT=on
     local booted=1
     orderlife_run orderlifemut && booted=0
     orderlife_shape_off; orderlife_strandkill_off
@@ -5969,7 +5981,7 @@ batchfail_tally() {
 
 run_batchfail() {
     echo "== batchfail: a refused op costs its own cell and nothing behind it =="
-    batchfail_inject_on; build
+    batchfail_inject_on; build STRICT=on
     local booted=1
     batchfail_run batchfail && booted=0
     batchfail_inject_off
@@ -6006,7 +6018,7 @@ run_batchfail() {
 
 run_batchfailmut() {
     echo "== batchfailmut: with the ops not optional, the tail must disappear =="
-    batchfail_inject_on; batchfail_optional_off; build
+    batchfail_inject_on; batchfail_optional_off; build STRICT=on
     local booted=1
     batchfail_run batchfailmut && booted=0
     batchfail_inject_off; batchfail_optional_on
@@ -6144,7 +6156,7 @@ caret_run() {
 
 run_caret() {
     echo "== caret: one cursor on the glass, standing where the editor put it =="
-    build
+    build STRICT=on
     if ! caret_boot; then bad "caret: never reached a shell"; make run-stop >/dev/null 2>&1; return; fi
     caret_run caret
     make run-stop >/dev/null 2>&1
@@ -6198,7 +6210,7 @@ caret_blind_off() {
 
 run_caretmut() {
     echo "== caretmut: with the commit taken out, the caret must stop following the cursor =="
-    caret_blind_on; build
+    caret_blind_on; build STRICT=on
     local booted=1
     caret_boot && booted=0
     if [ $booted -eq 0 ]; then caret_run caretmut; fi
@@ -6298,7 +6310,7 @@ EOF2
 run_grow() {
     echo "== grow: a volume on a bigger medium takes the ground behind it =="
     rm -f build/boxos.img   # a scenario that measures growth starts from a volume that has not grown
-    build
+    build STRICT=on
     make run-stop >/dev/null 2>&1
 
     # The stretched image goes under the manifest as the build product it is,
@@ -6376,7 +6388,7 @@ run_growcut() {
     # exact state a power cut between the two leaves — a new far copy and the
     # old head — by rolling the head deed back on the medium afterwards.
     rm -f build/boxos.img   # a scenario that measures growth starts from a volume that has not grown
-    build
+    build STRICT=on
     make run-stop >/dev/null 2>&1
     # ‼ THIS COPY IS EVIDENCE, NOT A BACKUP. The scenario needs the bytes of the
     # head deed as they stood BEFORE the growth, because writing them back is
@@ -6440,7 +6452,7 @@ p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
 anchor = "        volume_take_more_ground(seat, ground_run, &head);"
 assert s.count(anchor) == 1, "grow mutation anchor missing"
-s = s.replace(anchor, "        (void)ground_run;   /* logcheck mutation: the ground is left unclaimed */", 1)
+s = s.replace(anchor, "        (void)ground_run; (void)volume_take_more_ground;   /* logcheck mutation: the ground is left unclaimed */", 1)
 open(p, "w").write(s)
 EOF2
     mut_done src/kernel/tagfs/tagfs.c "logcheck mutation"
@@ -6453,7 +6465,7 @@ grow_blind_off() {
 run_growmut() {
     echo "== growmut: with the taking removed, the volume must leave the ground unclaimed =="
     rm -f build/boxos.img
-    grow_blind_on; build
+    grow_blind_on; build STRICT=on
     make run-stop >/dev/null 2>&1
     mutate_product build/boxos.img
     local grown booted=1 stood
@@ -6507,7 +6519,7 @@ util_boot() {
 
 run_brigade() {
     echo "== brigade: 300 strands parked on one word, one wake, all 300 back =="
-    build
+    build STRICT=on
     if ! util_boot brigade "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade"; then
         bad "brigade: never reached a shell"; return
     fi
@@ -6541,7 +6553,7 @@ brigade_tray_off() {
 
 run_brigademut() {
     echo "== brigademut: the tray of 256 put back, and 44 sleepers must be left behind =="
-    brigade_tray_on; build
+    brigade_tray_on; build STRICT=on
     util_boot brigademut "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade"; local booted=$?
     brigade_tray_off
     if [ $booted -ne 0 ]; then bad "brigademut: never reached a shell"; build; return; fi
@@ -6567,7 +6579,7 @@ run_brigademut() {
 # the parent says one word to the tag, and every child answers with a Touch.
 run_headcount() {
     echo "== headcount: one word to 300 carriers of a tag, 300 answers =="
-    build
+    build STRICT=on
     if ! util_boot headcount "STRICT=on CORES=16 MEM=8G" headcount "\[HEADCOUNT\] (PASS|FAIL)"; then
         bad "headcount: never reached a shell"; return
     fi
@@ -6599,7 +6611,7 @@ headcount_tray_off() {
 
 run_headcountmut() {
     echo "== headcountmut: the tray of 256 put back, and 44 carriers must go untold =="
-    headcount_tray_on; build
+    headcount_tray_on; build STRICT=on
     util_boot headcountmut "STRICT=on CORES=16 MEM=8G" headcount "\[HEADCOUNT\] (PASS|FAIL)"; local booted=$?
     headcount_tray_off
     if [ $booted -ne 0 ]; then bad "headcountmut: never reached a shell"; build; return; fi
@@ -6719,7 +6731,7 @@ byname_judge() {
 run_byname() {
     echo "== byname: a file is found by its name through the index, and the tag follows a rename =="
     rm -f build/boxos.img   # a fresh volume: the host listing judges this session's files alone
-    build
+    build STRICT=on
     if ! byname_session byname "STRICT=on CORES=4 MEM=4G"; then
         bad "byname: never reached a shell"; return
     fi
@@ -6747,7 +6759,7 @@ byname_mut_off() {
 
 run_bynamemut() {
     echo "== bynamemut: rename leaves the tag behind, and the oracle must see the file answer to the wrong name =="
-    byname_mut_on; build
+    byname_mut_on; build STRICT=on
     byname_session bynamemut "STRICT=on CORES=4 MEM=4G"; local booted=$?
     byname_mut_off
     if [ $booted -ne 0 ]; then bad "bynamemut: never reached a shell"; build; return; fi
@@ -6772,7 +6784,7 @@ run_bynamemut() {
 # TT 24 sends 300 messages past a kernel reply; both must all be there.
 run_stash() {
     echo "== stash: 300 events of another tag and 300 messages ahead of a reply, all kept =="
-    build
+    build STRICT=on
     if ! util_boot stash "STRICT=on CORES=4 MEM=4G" touch_test "\[TT SUMMARY\]"; then
         bad "stash: never reached a shell"; return
     fi
@@ -6809,7 +6821,7 @@ stash_cap_off() {
 
 run_stashmut() {
     echo "== stashmut: the stash of 256 put back — TT 23 and TT 24 must go red, and the strand must say why =="
-    stash_cap_on; build
+    stash_cap_on; build STRICT=on
     util_boot stashmut "STRICT=on CORES=4 MEM=4G" touch_test "\[TT SUMMARY\]"; local booted=$?
     stash_cap_off
     if [ $booted -ne 0 ]; then bad "stashmut: never reached a shell"; build; return; fi
@@ -6866,7 +6878,7 @@ wire_session() {
 
 run_wire() {
     echo "== wire: the line reads the ring by interrupt; the last words are drained at halt =="
-    build
+    build STRICT=on
     wire_session wire; local reached=$?
     L="$SCRATCH/serial.wire.log"
     [ $reached -eq 0 ] \
@@ -6917,7 +6929,7 @@ wire_deaf_off() {
 
 run_wiremut() {
     echo "== wiremut: nobody tells the line the ring grew — the shell must NOT reach the wire, and the drain at halt must bring it out =="
-    wire_deaf_on; build
+    wire_deaf_on; build STRICT=on
     wire_session wiremut; local reached=$?
     wire_deaf_off
     L="$SCRATCH/serial.wiremut.log"
@@ -6949,7 +6961,7 @@ run_wiremut() {
 # at boot (a thousand knocks, one pass; a knock after the open, one more).
 run_knock() {
     echo "== knock: a keystroke rides the ring and one knock, on 16 cores and on one =="
-    build
+    build STRICT=on
     if ! util_boot knock16 "STRICT=on CORES=16 MEM=8G" help "Show available commands" "$REACT_QUIET_S"; then
         bad "knock: never reached a shell (16c)"; return
     fi
@@ -7003,7 +7015,7 @@ knock_deaf_off() {
 
 run_knockmut() {
     echo "== knockmut: nobody knocks — the machine must boot and be deaf, and the oracle must see it =="
-    knock_deaf_on; build
+    knock_deaf_on; build STRICT=on
     util_boot knockmut "STRICT=on CORES=4 MEM=4G" help "Show available commands" "$REACT_QUIET_S"; local booted=$?
     knock_deaf_off
     if [ $booted -ne 0 ]; then bad "knockmut: never reached a shell"; build; return; fi
@@ -7096,7 +7108,7 @@ EOF2
 
 run_knockstorm() {
     echo "== knockstorm: a key held five seconds — more events than two rings, every one delivered =="
-    build
+    build STRICT=on
     if ! storm_session knockstorm "STRICT=on CORES=4 MEM=4G"; then
         bad "knockstorm: never reached a shell"; return
     fi
@@ -7151,7 +7163,7 @@ storm_stall_off() {
 
 run_knockstormmut() {
     echo "== knockstormmut: the reader stalls, the ring is outrun, and the loss must be named exactly =="
-    storm_stall_on; build
+    storm_stall_on; build STRICT=on
     storm_session knockstormmut "STRICT=on CORES=4 MEM=4G"; local booted=$?
     storm_stall_off
     if [ $booted -ne 0 ]; then bad "knockstormmut: never reached a shell"; build; return; fi
@@ -7186,7 +7198,7 @@ run_knockstormmut() {
 # idle loop and the tick from ring 3, so that path is boot-tested too.
 run_deadline() {
     echo "== deadline: 600 timed parks answered at their deadline, on 16 cores and on one =="
-    build
+    build STRICT=on
     if ! util_boot deadline16 "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade"; then
         bad "deadline: never reached a shell (16c)"; return
     fi
@@ -7237,7 +7249,7 @@ deadline_drop_off() {
 
 run_deadlinemut() {
     echo "== deadlinemut: the pass dropped, and the kernel must name the answer it owes =="
-    deadline_drop_on; build
+    deadline_drop_on; build STRICT=on
     util_boot deadlinemut "STRICT=on CORES=16 MEM=8G" strandpark "ANSWER OWED|\[SPK\] (PASS|FAIL): brigade"; local booted=$?
     deadline_drop_off
     if [ $booted -ne 0 ]; then bad "deadlinemut: never reached a shell"; build; return; fi
@@ -7299,7 +7311,7 @@ handsetdeaf_boot() {
 
 run_handsetdeaf() {
     echo "== handsetdeaf: the reader on top hears nothing, and the line still reaches the next =="
-    build
+    build STRICT=on
     if ! handsetdeaf_boot handsetdeaf; then bad "handsetdeaf: never reached a shell"; return; fi
     L="$SCRATCH/serial.handsetdeaf.log"
     grep -q "\[HANDSET\] got: abc" "$L" \
@@ -7331,7 +7343,7 @@ handsetdeaf_blind_off() {
 
 run_handsetdeafmut() {
     echo "== handsetdeafmut: the count ignored, and the line at the deaf ear must be lost =="
-    handsetdeaf_blind_on; build
+    handsetdeaf_blind_on; build STRICT=on
     handsetdeaf_boot handsetdeafmut; local booted=$?
     handsetdeaf_blind_off
     if [ $booted -ne 0 ]; then bad "handsetdeafmut: never reached a shell"; build; return; fi
@@ -7375,7 +7387,7 @@ unattended_boot() {   # $1 = tag, the rest = run-bg arguments
 
 run_unattended() {
     echo "== unattended: the volume's seat answers a read nobody stands over, at boot =="
-    build
+    build STRICT=on
     unattended_boot unattended UEFI=on STRICT=on CORES=4 MEM=4G
     L="$SCRATCH/serial.unattended.log"
     grep -q "BoxOS Shell" "$L"; chk $? "unattended: UEFI 4c reaches the shell"
@@ -7407,6 +7419,7 @@ run_unattended() {
     ! grep -q "\[UNATTENDED READ\].*FAILED" "$L"; chk $? "unattended: BIOS on q35 — nothing about it failed"
     # A plain BIOS run is i440fx: the legacy channel, the one machine left that
     # has it, whose seat answers only a read somebody stands over.
+    build
     unattended_boot unattendedbios CORES=4 MEM=4G
     L="$SCRATCH/serial.unattendedbios.log"
     grep -qE "\[UNATTENDED READ\] not asked: seat [0-9]+ \(ATA [a-z ]+\) answers only a read somebody stands over" "$L"
@@ -7460,7 +7473,7 @@ unattended_wrongblock_off() {
 
 run_unattendedmut() {
     echo "== unattendedmut: withhold the disk's answer, then ask for the wrong block =="
-    unattended_silence_on; build
+    unattended_silence_on; build STRICT=on
     # The wait is the disk's own patience, thirty seconds; the boot waits it out.
     unattended_boot unattendedmut UEFI=on STRICT=on CORES=4 MEM=4G
     unattended_silence_off
@@ -7476,7 +7489,7 @@ run_unattendedmut() {
     external_ok "$L"; chk $? "unattendedmut: and runs a program afterwards"
     ! grep -qE "PANIC|^\[EXCEPTION\]" "$L"; chk $? "unattendedmut: no panic, no exception"
 
-    unattended_wrongblock_on; build
+    unattended_wrongblock_on; build STRICT=on
     unattended_boot unattendedwrong UEFI=on STRICT=on CORES=4 MEM=4G
     unattended_wrongblock_off
     L="$SCRATCH/serial.unattendedwrong.log"
@@ -7505,7 +7518,7 @@ run_unattendedmut() {
 # ---------------------------------------------------------------------------
 run_footing() {
     echo "== footing: the map under the firmware, and the ladder that survives it =="
-    build
+    build STRICT=on
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
@@ -7936,6 +7949,18 @@ run_censusmut() {
 STAND_HELD="
 "
 
+# How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
+# suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
+# the 106 of the stand's own twenty suites: stand 26, stand_lock 4,
+# stand_chain 7, stand_spelling 6, stand_roadstead 3, stand_map 3,
+# stand_plot 4, stand_index 5, stand_ink 3, stand_helm 7, stand_port 2,
+# stand_use 3, stand_use_chain 4, stand_seal 5, stand_settle 4, stand_glean 5,
+# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 4. Counted off
+# the code, not a run (K9): a suite that drops out of the walk is a test that
+# stopped covering anything, and the count is where that shows. How many of
+# them pass and how many stand aside is the road's — said, not pinned.
+STAND_RUN=128
+
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
 # WRITE ITS RECORDS", which comes BEFORE the flush, and a machine stopped
@@ -8046,8 +8071,8 @@ stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
     said=$(stand_summary "$L")
-    echo "$said" | grep -qE "^TagFS: [0-9]+ run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $count held under a caveat"
-    chk $? "stand: $what — nothing failed and exactly $count caveats are held (${said:-no summary})"
+    echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $count held under a caveat"
+    chk $? "stand: $what — the $STAND_RUN tests this tree registers ran, nothing failed and exactly $count caveats are held (${said:-no summary})"
     grep -aq '^\[TESTS\] All tests PASSED' "$L"
     chk $? "stand: $what — and the runner answers PASSED"
     ! grep -aq 'caveat lifted early' "$L"
@@ -8087,8 +8112,8 @@ stand_again() {
     mounted=$(grep -aoE '\[TagFS\] [0-9]+ data blocks, [0-9]+ free, [0-9]+ files' "$L" | head -1)
     [ -n "$mounted" ] && ! grep -aq 'Bitmap mismatch' "$L"
     chk $? "stand: $what, second boot — the roll call finds no Bitmap mismatch (${mounted:-no mount line})"
-    echo "$said" | grep -qE "^TagFS: [0-9]+ run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $count held under a caveat"
-    chk $? "stand: $what, second boot — nothing failed and the same $count caveats are held (${said:-no summary})"
+    echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $count held under a caveat"
+    chk $? "stand: $what, second boot — the $STAND_RUN ran again, nothing failed and the same $count caveats are held (${said:-no summary})"
     ! grep -aq 'KERNEL PANIC' "$L"
     chk $? "stand: $what, second boot — no panic"
     stand_held "$L" "$what, second boot" "$road"
@@ -8101,7 +8126,7 @@ stand_twice() {
     local tag=$1 what=$2 road=$3 seat=$4 want=$5 img built kept rc; shift 5
     img="$SCRATCH/stand.$tag.img"
     rm -f build/boxos.img "$img"
-    if ! build_with_key VOLUME_TESTS=on; then
+    if ! build_with_key VOLUME_TESTS=on "$(strict_key "$@")"; then
         echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
         bad "stand: $what — VOLUME_TESTS=on does not build"
         return
@@ -8189,7 +8214,7 @@ run_stand() {
 stand_mut_boot() {
     local tag=$1; shift
     rm -f build/boxos.img
-    if ! build_with_key VOLUME_TESTS=on; then
+    if ! build_with_key VOLUME_TESTS=on "$(strict_key "$@")"; then
         echo "BUILD FAILED ($tag) — tail:"; tail -25 "$SCRATCH/build.log"
         bad "standmut: $tag does not build"
         return 1
@@ -8231,7 +8256,7 @@ stand_mech_on() {
         flushneed) marks="src/kernel/tagfs/scribe/scribe.c:1" ;;
         dmawait)   marks="src/kernel/drivers/disk/ata_async.c:1" ;;
         table)     marks="src/kernel/tagfs/file_table/file_table.c:4" ;;
-        registry)     marks="src/kernel/tagfs/tag_registry/tag_registry.c:6" ;;
+        registry)     marks="src/kernel/tagfs/tag_registry/tag_registry.c:4 src/kernel/tagfs/tag_registry/tag_registry_load.c:2" ;;
         registrykeep) marks="src/kernel/tagfs/tag_registry/tag_registry.c:1" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
@@ -8312,7 +8337,7 @@ edits = {
    "    TagFSLockDrop(&g_ledger_lock);\n"),
   ("src/kernel/tagfs/integrity/integrity.c",
    "    TagFSLockDropAt(&g_map_lock, site);\n\n    error_t got = tagfs_read_block(at, g_map_page[s]);\n\n    TagFSLockTakeAt(&g_map_lock, site);\n",
-   "    /* " + M + ": the map's page comes in under its lock again */\n"
+   "    (void)site;   /* " + M + ": the map's page comes in under its lock again */\n"
    "    error_t got = tagfs_read_block(at, g_map_page[s]);\n\n"),
  ],
  "scribe": [
@@ -8440,7 +8465,8 @@ stand_mech_off() {
              src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c \
              src/kernel/tagfs/scribe/scribe.c src/kernel/drivers/disk/ata_async.c \
              src/kernel/tagfs/ledger/ledger.c src/kernel/tagfs/integrity/integrity.c \
-             src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/tag_registry/tag_registry.c; do
+             src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/tag_registry/tag_registry.c \
+             src/kernel/tagfs/tag_registry/tag_registry_load.c; do
         restore "$f"
     done
 }
@@ -8808,7 +8834,7 @@ quill_session() {
     rm -f "$SCRATCH/serial.quill.$tag"[123].log "$SCRATCH/quill.$tag.list"[13]
     quill_keys || return 1
     rm -f build/boxos.img
-    if ! build_with_key VOLUME_TESTS=on; then
+    if ! build_with_key VOLUME_TESTS=on "$(strict_key ${QUILL_KEYS[@]+"${QUILL_KEYS[@]}"})"; then
         echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
         bad "quill: VOLUME_TESTS=on does not build"
         return 1
@@ -9162,45 +9188,47 @@ run_quill() {
 # quillmut — every quill oracle, shown the behaviour it waits for, must turn
 # ---------------------------------------------------------------------------
 #
-# One defect can have its fix emulated in a line: the system and boot tags
-# refused to untag (systemtag); longquery's fix is the tree's own since step
-# 1.1b, and bigwrite, sequential and interleave are the tree's own since step
-# 1.3 — each must behave with nothing put in. The others cannot before their
-# step lands, so their numbers are made small enough that HEAD already copes:
-# a Use Context of 395 bytes, which the Ledger holds. fidhistory
-# keeps one file in a thousand, so its guest must count them. The slab stops
-# counting, so the kernel's heap self-test must say FAILED. The kernel's copies
-# stop bringing in a page the program has not touched (VmmUserCopyWindow), so
-# coldread and coldwrite must turn to a refusal that reports 0 bytes — never a
-# count, which is the half of the fix that stands without the other. And first,
-# with no machine at all, caveat_judge's three answers in their approved words.
+# longquery's fix is the tree's own since step 1.1b, and bigwrite, sequential
+# and interleave are the tree's own since step 1.3 — each must behave with
+# nothing put in. Two fixes that used to be emulated here are the tree's own
+# as well, and so they are taken OUT, and their oracle must see the defect
+# come back: the Ink guard (step 1.4, ink.c) — down, untag takes the system
+# tag off kernel.bin and erase deletes it (systemtag); the Use Context's
+# chain (step 1.6B, use_memory.c) — never staked, a context of 1000 bytes is
+# carried by nothing and the volume does not remember it (usememory).
+# fidhistory keeps one file in a thousand, so its guest must count them. The
+# slab stops counting, so the kernel's heap self-test must say FAILED. The
+# kernel's copies stop bringing in a page the program has not touched
+# (VmmUserCopyWindow), so coldread and coldwrite must turn to a refusal that
+# reports 0 bytes — never a count, which is the half of the fix that stands
+# without the other. And first, with no machine at all, caveat_judge's three
+# answers in their approved words.
 quill_mutants_on() {
-    mutate src/kernel/core/decks/storage/storage_ops.c
-    python3 - <<'EOF2'
-p = "src/kernel/core/decks/storage/storage_ops.c"
-s = open(p).read()
-anchor = "    int removed = tagfs_remove_tag_string(param_u32(op, 0), &tag);\n"
-assert s.count(anchor) == 1, "quillmut untag anchor missing"
-s = s.replace(anchor, "    if (TagSpanIs(\"system\", tag.key, tag.key_len) || TagSpanIs(\"boot\", tag.key, tag.key_len)) { crate_buf_free(text); return ERR_PERMISSION_DENIED; }   /* logcheck mutation: the guard tags stay on */\n" + anchor, 1)
-open(p, "w").write(s)
-EOF2
-    mut_done src/kernel/core/decks/storage/storage_ops.c "logcheck mutation"
-
-    mutate src/userspace/apps/quilltest.c
+    mutate src/kernel/tagfs/ink/ink.c
+    mutate src/kernel/tagfs/use_memory/use_memory.c
     mutate src/userspace/apps/quilltest_throwaway.c
     python3 - <<'EOF2'
 for p, a, b in (
-    ("src/userspace/apps/quilltest.c",
-     "#define QUILL_USE_TAGS       91          /* 91 x \"quiluNNNNN\" + 90 commas = 1000 bytes */\n",
-     "#define QUILL_USE_TAGS       36   /* logcheck mutation: 395 bytes, which the Ledger holds */\n"),
+    ("src/kernel/tagfs/ink/ink.c",
+     "        if (InkTagGuarded(f.dropped[i]))\n",
+     "        if (0 && InkTagGuarded(f.dropped[i]))   /* logcheck mutation: the guard is down, a guarded tag comes off */\n"),
+    ("src/kernel/tagfs/ink/ink.c",
+     "    if (InkWearsGuarded(tags, tag_count) || InkTouchesBoot(runs, run_count) ||\n"
+     "        InkTouchesBoot(freed, freed_count)) {\n",
+     "    if (0 && (InkWearsGuarded(tags, tag_count) || InkTouchesBoot(runs, run_count) ||\n"
+     "        InkTouchesBoot(freed, freed_count))) {   /* logcheck mutation: the guard is down, the kernel's file changes */\n"),
+    ("src/kernel/tagfs/use_memory/use_memory.c",
+     "    error_t rc   = UseChainStake(s_cycle.need, &s_cycle.chain, &s_cycle.got);\n",
+     "    error_t rc   = ERR_TAGFS_NO_SPACE;   /* logcheck mutation: no chain is staked, a Use Context rides on nothing */\n"),
     ("src/userspace/apps/quilltest_throwaway.c", "        int drc = delete((uint32_t)fid);\n",
      "        int drc = (i % 1000u == 999u) ? 0 : delete((uint32_t)fid);   /* logcheck mutation: one in a thousand stays */\n"),
 ):
     s = open(p).read()
-    assert s.count(a) == 1, "quillmut quilltest anchor missing in %s: %s" % (p, a.strip())
+    assert s.count(a) == 1, "quillmut anchor missing in %s: %s" % (p, a.strip().splitlines()[0])
     open(p, "w").write(s.replace(a, b, 1))
 EOF2
-    mut_done src/userspace/apps/quilltest.c "logcheck mutation" 1
+    mut_done src/kernel/tagfs/ink/ink.c "logcheck mutation" 2
+    mut_done src/kernel/tagfs/use_memory/use_memory.c "logcheck mutation" 1
     mut_done src/userspace/apps/quilltest_throwaway.c "logcheck mutation" 1
 
     mutate src/lib/kernel/slab.c
@@ -9227,8 +9255,8 @@ EOF2
 }
 
 quill_mutants_off() {
-    restore src/kernel/core/decks/storage/storage_ops.c
-    restore src/userspace/apps/quilltest.c
+    restore src/kernel/tagfs/ink/ink.c
+    restore src/kernel/tagfs/use_memory/use_memory.c
     restore src/userspace/apps/quilltest_throwaway.c
     restore src/lib/kernel/slab.c
     restore src/kernel/core/memory/vmm/vmm.c
@@ -9236,21 +9264,33 @@ quill_mutants_off() {
 
 # The judge with no machine: a caveated test that shows its defect is held, one
 # that behaves is lifted early, and a test with no caveat that behaves passes —
-# each in the approved words, and each counted where it must be.
+# each in the approved words, and each counted where it must be. Since step
+# 1.6B no quill case is held under a step, so the first of them, longquery, is
+# given its step back for the length of the check — in the file (restore puts
+# it back), read by subshells that source the table again — the way
+# lockrankmut shows its judge a held place.
+quill_step_given() {   # quill_step_given NAME STEP — NAME's row given STEP back
+    mutate tools/stand_caveat.sh
+    python3 - "$1" "$2" <<'EOF'
+import re, sys
+p = "tools/stand_caveat.sh"
+s = open(p).read()
+s, n = re.subn(r'(\n\s*' + re.escape(sys.argv[1]) + r'\)\s+echo ")(\|[^\n]*;;)',
+               lambda m: m.group(1) + sys.argv[2] + m.group(2) + "   # logcheck mutation: the step given back",
+               s, count=1)
+assert n == 1, "quillmut: the row of " + sys.argv[1] + " was not found"
+open(p, "w").write(s)
+EOF
+    mut_done tools/stand_caveat.sh "logcheck mutation" 1
+}
+
 quill_judge_selfcheck() {
-    local said step defect held
-    # The first quill case still held under a step: which one moves as the
-    # steps land, and the judge's answers are the same words for any of them.
-    for held in bigwrite sequential interleave usememory fidhistory systemtag ""; do
-        [ -n "$held" ] && [ -n "$(caveat_step "$held")" ] && break
-    done
-    if [ -z "$held" ]; then
-        harness "quillmut: no quill case is held under a step any more, so the judge's held answer cannot be shown"
-        return
-    fi
-    step=$(caveat_step "$held")
-    defect=$(caveat_defect "$held")
-    said=$(PASS=0; FAIL=0; CAVEAT=0; HARNESS=0
+    local said step defect held=longquery
+    quill_step_given "$held" 1.1b
+    step=$(. tools/stand_caveat.sh; caveat_step "$held")
+    defect=$(. tools/stand_caveat.sh; caveat_defect "$held")
+    said=$(. tools/stand_caveat.sh
+           PASS=0; FAIL=0; CAVEAT=0; HARNESS=0
            caveat_judge "$held" defect "seen 1"
            caveat_judge "$held" behaves "seen 2"
            caveat_judge quillnocaveat behaves "seen 3"
@@ -9263,6 +9303,7 @@ quill_judge_selfcheck() {
     chk $? "quillmut: a test with no caveat that behaves passes"
     printf '%s\n' "$said" | grep -qx "counted 1 1 1"
     chk $? "quillmut: the three were counted as one PASS, one FAIL and one held caveat ($(printf '%s\n' "$said" | tail -1))"
+    restore tools/stand_caveat.sh
 }
 
 run_quillmut() {
@@ -9276,7 +9317,7 @@ run_quillmut() {
     make run-stop >/dev/null 2>&1
     quill_mutants_off
     restore build/boxos.img
-    quill_judge quillmut 268435456 3145728 67108864 395 36 50000
+    quill_judge quillmut 268435456 3145728 67108864 1000 91 50000
     while IFS=$'\t' read -r kind a b c; do
         case "$kind" in
             check)    if [ "$a" = ok ]; then ok "quillmut: $b"; else bad "quillmut: $b"; fi ;;
@@ -9289,6 +9330,8 @@ run_quillmut() {
                           fidhistory)            want="fail:[0-9]+ files were live before and [0-9]+ after" ;;
                           coldread)              want="fail:a read of [0-9]+ bytes into memory this program never touched answered -[0-9]+ \(error [0-9]+\); 0 of the bytes" ;;
                           coldwrite)             want="fail:a write of [0-9]+ bytes out of memory this program never touched answered -[0-9]+ \(error [0-9]+\); the file holds 0 bytes" ;;
+                          systemtag)             want="defect:kernel\.bin \(file [0-9]+\) gave up its system tag to untag and was deleted by erase trashed" ;;
+                          usememory)             want="defect:a Use Context of 1000 bytes in 91 tags was set and the volume did not remember it" ;;
                           *)                     want="behaves:" ;;
                       esac
                       line="$b:$c"
@@ -9820,7 +9863,8 @@ abba_session() {
     rm -f "$SCRATCH/serial.abba.$tag.log" "$SCRATCH/abba.$tag.before.json" "$SCRATCH/abba.$tag.after.json"
     make run-stop >/dev/null 2>&1
     rm -f build/boxos.img
-    if ! build_with_key VOLUME_TESTS=on; then
+    # shellcheck disable=SC2086
+    if ! build_with_key VOLUME_TESTS=on "$(strict_key $ABBA_STAND)"; then
         echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
         bad "abba: $tag — VOLUME_TESTS=on does not build"
         return 1
@@ -9908,8 +9952,8 @@ abba_order() {
 abba_judge() {
     local tag=$1 what=$2 L="$SCRATCH/serial.abba.$1.log" said fault verdict made r1 t1
     said=$(stand_summary "$L")
-    echo "$said" | grep -qE '^TagFS: [0-9]+ run, [0-9]+ passed, 0 failed'
-    chk $? "abba: $what — the boot's startup tests ran before the case and none failed (${said:-no summary})"
+    echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed"
+    chk $? "abba: $what — the boot's $STAND_RUN startup tests ran before the case and none failed (${said:-no summary})"
     fault=$(grep -aE 'KERNEL PANIC|\[EXCEPTION\]' "$L" | tr -d '\r' | head -1 | cut -c1-160)
     [ -z "$fault" ]
     chk $? "abba: $what — no panic, no exception${fault:+: $fault}"
@@ -10003,6 +10047,11 @@ run_abbamut() {
     echo "== abbamut: a block taken under the registry's lock at every flush, the step lifted — abba's demand must turn =="
     local key=registry@tag_registry_flush/state@tagfs_alloc_blocks_inside L="$SCRATCH/serial.abba.abbamut.log"
     local rc line said defect at typed
+    # Since step 1.5B a STRICT kernel stops the machine at every place LockRank
+    # names (lock_rank.c, LockRankStops), and this mutant's place has to be
+    # NAMED, at the first flush, for abba's judge to be shown it: the session
+    # runs on the same stand with STRICT's kernel half off.
+    local ABBA_STAND="${ABBA_STAND//STRICT=on/STRICT=off}"
     abbamut_kernel_on
     abba_session abbamut; rc=$?
     make run-stop >/dev/null 2>&1

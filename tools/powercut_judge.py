@@ -313,10 +313,16 @@ class Judge:
                      % ("; ".join(re.findall(r"\[QUILL\] verify: [^\n]*", log)) or "no answer"))
 
     def Reissue(self, step_name):
+        """No booted prefix cut hands its first create an id its medium already
+        shows. The id due is volume-read's: past every id a row or a record of
+        the cut names, and past the Ledger's count (mount/mount.c); a create
+        given less is given an id that was issued before. Asked only where it
+        means something — a cut whose medium names more than its Ledger counts
+        — and at least one such cut must have been booted."""
         step = self.run.Step(step_name)
         m = re.search(r"fid=(\d+)", step["line"]) if step else None
         fid = m.group(1) if m else None
-        seen, judged = [], 0
+        seen, judged, ahead, blind = [], 0, 0, []
         for b in self.boots:
             if not b["why"].startswith("prefix"):
                 continue
@@ -324,18 +330,31 @@ class Judge:
             if not a:
                 continue
             judged += 1
-            named = any(x[0] == "FID_PAST_NEXT" and x[2].startswith("fid %s '" % fid)
-                        for x in self.run.results.get(b["id"], {}).get("findings", []))
-            if a.group(1) == fid and named:
-                seen.append("%s (%s): its table names fid %s and anchor_test was issued fid %s again"
-                            % (b["id"], b["why"], fid, a.group(1)))
-        if not judged:
+            r = self.run.results.get(b["id"], {})
+            due, counted = r.get("next_file_id"), r.get("ledger_next")
+            if due is None or counted is None:
+                blind.append(b["id"])
+                continue
+            if due > counted:
+                ahead += 1
+            if a.group(1) and int(a.group(1)) < due:
+                seen.append("%s (%s): its medium names ids below %d, its Ledger counts %d, and "
+                            "anchor_test was issued fid %s" % (b["id"], b["why"], due, counted,
+                                                               a.group(1)))
+        if blind:
+            self.Out("reissue", "harness", "volume-read gave no next file id for %d booted cut(s), "
+                     "e.g. %s" % (len(blind), blind[0]))
+        elif not judged:
             self.Out("reissue", "fail", "no prefix cut of the anchor's epoch answered anchor_test")
         elif seen:
-            self.Out("reissue", "defect", "%d of %d prefix cuts issued a file id their table already "
-                     "names: %s" % (len(seen), judged, "; ".join(seen[:2])))
+            self.Out("reissue", "defect", "%d of %d prefix cuts issued a file id their medium already "
+                     "shows: %s" % (len(seen), judged, "; ".join(seen[:2])))
+        elif not ahead:
+            self.Out("reissue", "fail", "none of %d prefix cuts has a medium naming more files than "
+                     "its Ledger counts, so no cut asked the question" % judged)
         else:
-            self.Out("reissue", "behaves", "none of %d prefix cuts issued fid %s twice" % (judged, fid))
+            self.Out("reissue", "behaves", "none of %d prefix cuts issued an id its medium shows — "
+                     "%d of them name the anchor's fid %s ahead of their Ledger" % (judged, ahead, fid))
 
     def Grown(self):
         """chaingrow's own question: did the recorded run give the tag registry
