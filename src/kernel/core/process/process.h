@@ -390,10 +390,12 @@ typedef struct process_t
      * while the last one's wake still waits moves it to its own tick. */
     TouchQueueNode    park_wake;
 
-    /* The newest change of the mounted volume this strand asked for — the
-     * volume's Ink gen after the storage deck served it (TagFSNoteInker). A
-     * strand that ends with it unsettled demands the next Settle cycle. */
-    volatile uint64_t volume_inked_gen;
+    /* The newest change of a volume this strand's own calls made — the place
+     * of their newest Ink, which tells a mount before this one apart
+     * (TagFSNoteInker). A strand that ends with it unsettled on the mounted
+     * volume demands the next Settle cycle; a strand that only read owes
+     * nothing. */
+    volatile uint64_t volume_ink_place;
 
     /* Nameplate — where this image's "address -> name" table is mapped, found
      * by the loader (nameplate_locate) at the one moment the whole file is in

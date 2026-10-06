@@ -7951,16 +7951,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 119 of the stand's own twenty-one suites: stand 26, stand_lock 4,
+# the 126 of the stand's own twenty-one suites: stand 26, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 3,
 # stand_plot 4, stand_index 5, stand_ink 5, stand_helm 7, stand_port 2,
-# stand_use 3, stand_use_chain 4, stand_seal 5, stand_settle 4, stand_glean 5,
+# stand_use 3, stand_use_chain 4, stand_seal 5, stand_settle 11, stand_glean 5,
 # stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 8,
 # stand_warrant 6. Counted off the code, not a run (K9): a suite that drops
 # out of the walk is a test that stopped covering anything, and the count is
 # where that shows. How many of them pass and how many stand aside is the
 # road's — said, not pinned.
-STAND_RUN=141
+STAND_RUN=148
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -8093,7 +8093,10 @@ stand_orders() {
 #   stand_medium_bell_rings_once                          1        1
 #   stand_medium_mount_hears_the_ready_it_was_owed        1        1   the mount's first read of the data
 #   stand_roadstead_refusal_rings_once                    0        1   no asynchronous read on the legacy channel
-#   total                                                15       20
+#   stand_settle_refusal_waits_for_the_bell               1        1   its Ledger; then a plan that only counts
+#   stand_settle_ring_during_the_cycle                    1        1   its Ledger
+#   stand_settle_table_refusal_is_the_mediums             2        2   the block written alone, then by the cycle
+#   total                                                19       24
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -8119,6 +8122,9 @@ stand_judge() {
     chk $? "stand: $what — a write refused before it reached the medium"
     grep -aqE '^\[BLOCKFAIL\] seat [0-9]+: the cache flush is refused as a medium error — occurrence 2 since arming' "$L"
     chk $? "stand: $what — the second of three flushes refused"
+    got=$(grep -ac '^\[Nightwatch\] SETTLE PARKED: 1 waiter(s) of the volume wait for a cycle, and the cycle refused [0-9]* ms ago waits for the volume.s seat to say seat:ready' "$L")
+    [ "$got" = 1 ]
+    chk $? "stand: $what — Nightwatch said the refused cycle its waiter waits on, parked a window long, once (stand_settle_refusal_waits_for_the_bell; said $got time(s))"
     grep -aqE '^\[HEAPFAIL\] core [0-9]+: allocation 3 since arming \(32 bytes\) is answered NULL' "$L"
     chk $? "stand: $what — HEAPFAIL refused the third allocation of its plan, a slab one"
     grep -aqE '^\[HEAPFAIL\] core [0-9]+: allocation 4 since arming \(3000 bytes\) is answered NULL' "$L"
@@ -8183,8 +8189,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 15 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 20 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 19 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 24 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
@@ -8424,11 +8430,8 @@ edits = {
    "    error_t ready = OK;   /* " + M + ": and no flush stands between it and its link */\n    (void)need;\n"),
   ("src/kernel/tagfs/file_table/file_table.c",
    "    if (LinksReserve(wanted) != OK) {\n"
-   "        kprintf(\"[FileTable] there is no memory to hold the %u links the file \"\n"
-   "                \"table's rows need \u2014 its chain stays %u block(s) long, and the \"\n"
-   "                \"rows from file id %u on stay in memory until a later Settle cycle\\n\",\n"
-   "                wanted, have, have * TAGFS_FTABLE_PER_BLOCK);\n"
-   "        return -1;\n"
+   "        FileTableShortSay(wanted, have, ERR_NO_MEMORY);\n"
+   "        return OK;\n"
    "    }\n",
    "    /* " + M + ": the memory for a link is asked only after its block is taken */\n"),
   ("src/kernel/tagfs/file_table/file_table.c",

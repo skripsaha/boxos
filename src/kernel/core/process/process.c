@@ -821,7 +821,7 @@ void process_destroy(process_t *proc)
      * to a strand that is gone, so the deadline goes with it. */
     TouchQueueDisarm(&proc->park_wake);
 
-    /* And a change of the volume it left unsettled is not left to Lull. */
+    /* And a change of its own it left unsettled is not left to Lull. */
     TagFSInkerLeaves(proc);
 
     ManifestReleaseAllForOwner(proc->pid);
@@ -2114,7 +2114,12 @@ void process_cleanup_deferred(void)
     }
 
     if (cleaned > 0)
+    {
         debug_printf("[PROCESS] Deferred cleanup: freed %u processes\n", cleaned);
+        /* Their memory is the machine's again — the event a Settle cycle
+         * refused for want of it waits for. */
+        TagFSHeapCameBack();
+    }
 }
 
 /* True while some core may still be executing on `proc`'s kernel stack, so the

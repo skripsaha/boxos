@@ -26,6 +26,7 @@ static volatile uint64_t s_eager_gen;      /* the newest Ink that starts a cycle
 static volatile uint32_t s_demand;         /* SettleDemandKind */
 static volatile uint64_t s_lull_fire;      /* the tick the Lull's node was last armed for */
 static volatile int32_t  s_held;           /* the test runner's holds */
+static volatile uint64_t s_room_asked;     /* SETTLE_DEMAND_ROOM, counted */
 static bool              s_binds_said;     /* the window binds the Lull: said once an episode */
 
 static void SettleKnocked(void* ctx);
@@ -71,16 +72,63 @@ uint64_t SettleLastDUs(void)
     return __atomic_load_n(&s_d_us, __ATOMIC_RELAXED);
 }
 
+/*
+ * ‼ A PROGRAM'S DEBT IS ITS OWN INK, OF THIS MOUNT. What a program leaves
+ * unsettled is the newest Ink one of its own calls made — never the volume's
+ * newest, which a reader that leaves would otherwise owe for a writer still
+ * running, and never an Ink of a mount before this one, whose gens begin again
+ * at 1. So an Ink has a place in one order across every mount of the boot —
+ * this mount's base and its gen — and a program keeps the newest place of its
+ * own (process_t, volume_ink_place): a place below this mount's base is a
+ * mount's before it, and owes nothing here. One number, so it is kept by one
+ * compare-and-swap from any core that serves the program.
+ *
+ * The core that made an Ink remembers its place: the guide serves a program's
+ * call without giving its core away, so an Ink the core made while serving it
+ * is the call's own (TagFSInkedHere, read before and after the handler).
+ */
+static volatile uint64_t s_ink_base;               /* the place of this mount's Ink 0 */
+static volatile uint64_t s_ink_top;                /* the newest gen of this mount given a place */
+static volatile uint64_t s_inked_here[MAX_CORES];  /* the place of each core's newest Ink */
+
+uint64_t TagFSInkPlace(uint64_t gen)
+{
+    uint64_t top = __atomic_load_n(&s_ink_top, __ATOMIC_RELAXED);
+    while (top < gen &&
+           !__atomic_compare_exchange_n(&s_ink_top, &top, gen, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        ;
+    return __atomic_load_n(&s_ink_base, __ATOMIC_ACQUIRE) + gen;
+}
+
+uint64_t TagFSInkedHere(void)
+{
+    return __atomic_load_n(&s_inked_here[amp_get_core_index()], __ATOMIC_RELAXED);
+}
+
+/* A mount's first word, with the door shut: no Ink of the volume before it is
+ * owed here, and what its medium cost — the Lull, the binding window, the
+ * Lull's armed tick — is measured again by this one's first cycle: another
+ * medium may sit in the seat. */
 void CadenceMountReset(void)
 {
     __atomic_store_n(&s_owed_since_us, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&s_eager_gen, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_demand, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_end_us, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_d_us, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_lull_fire, 0, __ATOMIC_RELAXED);
+    s_binds_said = false;
+    __atomic_store_n(&s_ink_base,
+                     __atomic_load_n(&s_ink_base, __ATOMIC_RELAXED) +
+                         __atomic_load_n(&s_ink_top, __ATOMIC_RELAXED) + 1u,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&s_ink_top, 0, __ATOMIC_RELEASE);
 }
 
 void SettleInked(uint64_t gen, bool lazy)
 {
+    __atomic_store_n(&s_inked_here[amp_get_core_index()], TagFSInkPlace(gen), __ATOMIC_RELAXED);
     uint64_t none = 0;
     (void)__atomic_compare_exchange_n(&s_owed_since_us, &none, SettleNowUs(), false,
                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
@@ -96,8 +144,15 @@ void SettleInked(uint64_t gen, bool lazy)
 
 void SettleDemand(uint32_t kinds)
 {
+    if (kinds & SETTLE_DEMAND_ROOM)
+        __atomic_add_fetch(&s_room_asked, 1u, __ATOMIC_ACQ_REL);
     __atomic_fetch_or(&s_demand, kinds, __ATOMIC_SEQ_CST);
     KnockOn(&g_quill_knock);
+}
+
+uint64_t CadenceRoomAsked(void)
+{
+    return __atomic_load_n(&s_room_asked, __ATOMIC_ACQUIRE);
 }
 
 void SettleKnock(void)
@@ -152,7 +207,7 @@ void CadenceRunEnded(error_t rc, uint64_t busy_us, uint64_t s0_us, uint64_t targ
 }
 
 typedef enum {
-    CADENCE_REST = 0,       /* nothing owed, or a refusal waits for seat:ready */
+    CADENCE_REST = 0,       /* nothing owed, or a refusal waits for its event */
     CADENCE_NOW,
     CADENCE_LATER,          /* at *at_us: the Lull's permit, or the window's end */
 } CadenceVerdict;
@@ -286,24 +341,36 @@ void TagFSWatchLook(void)
     SettleWatchLook(SettleNowUs());
 }
 
-void TagFSNoteInker(process_t* proc)
+void TagFSNoteInker(process_t* proc, uint64_t place)
 {
-    if (!tagfs_get_state()->initialized)
-        return;
-    uint64_t gen  = InkedGen();
-    uint64_t seen = __atomic_load_n(&proc->volume_inked_gen, __ATOMIC_RELAXED);
-    while (seen < gen &&
-           !__atomic_compare_exchange_n(&proc->volume_inked_gen, &seen, gen, false,
+    uint64_t seen = __atomic_load_n(&proc->volume_ink_place, __ATOMIC_RELAXED);
+    while (seen < place &&
+           !__atomic_compare_exchange_n(&proc->volume_ink_place, &seen, place, false,
                                         __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
         ;
 }
 
-/* A gen past the newest Ink is a mount's before this one: its changes went
- * with that volume. */
+void TagFSNoteInkerSince(process_t* proc, uint64_t inked_before)
+{
+    uint64_t inked = TagFSInkedHere();
+    if (inked != inked_before)
+        TagFSNoteInker(proc, inked);
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+uint32_t TagFSStandSettleDemands(void)
+{
+    return __atomic_load_n(&s_demand, __ATOMIC_ACQUIRE);
+}
+#endif
+
+/* A place below this mount's base is an Ink of a volume before it: its
+ * changes went with that volume, and nothing of this one is owed for it. */
 void TagFSInkerLeaves(process_t* proc)
 {
-    uint64_t gen = __atomic_load_n(&proc->volume_inked_gen, __ATOMIC_ACQUIRE);
-    if (!CadenceMounted() || gen == 0 || gen > InkedGen() || gen <= SettledGen())
+    uint64_t place = __atomic_load_n(&proc->volume_ink_place, __ATOMIC_ACQUIRE);
+    uint64_t base  = __atomic_load_n(&s_ink_base, __ATOMIC_ACQUIRE);
+    if (!CadenceMounted() || place <= base || place - base <= SettledGen())
         return;
     SettleDemand(SETTLE_DEMAND_LEAVE);
 }
@@ -336,12 +403,41 @@ static void SettleWatchSay(void* ctx)
     __atomic_store_n(&s_watch_passed, 0u, __ATOMIC_RELEASE);
 }
 
+/* The park's own voice: a refused cycle that waiters wait on, parked longer
+ * than the window, is waiting for an event that has not come — said once for
+ * that park, by a baton, since the look runs in the tick. */
+static void SettleWatchParkSay(void* ctx);
+static Baton    s_park_baton = { .next = NULL, .run = SettleWatchParkSay, .ctx = NULL,
+                                 .one_way = 0 };
+static volatile uint32_t s_park_passed;
+static uint64_t s_park_said;        /* when the park last said was decided */
+
+static void SettleWatchParkSay(void* ctx)
+{
+    (void)ctx;
+    SettleParkSay();
+    __atomic_store_n(&s_park_passed, 0u, __ATOMIC_RELEASE);
+}
+
+static void SettleWatchParked(uint64_t now_us)
+{
+    uint64_t since = SettleParkedSinceUs();
+    if (!since || since == s_park_said || !SettleWaitersOwed() || now_us <= since ||
+        now_us - since <= SETTLE_WINDOW_US)
+        return;
+    s_park_said = since;
+    if (__atomic_exchange_n(&s_park_passed, 1u, __ATOMIC_ACQ_REL) == 0)
+        (void)BatonPass(&s_park_baton);
+}
+
 /* From the PIT tick, a look apart: a debt older than the window, no committer
- * holding the Scribe, no refusal parked on seat:ready — and the same debt, not
+ * holding the Scribe, no refusal parked on its event — and the same debt, not
  * a byte of it settled, at the next look. The first half alone is a cycle about
- * to begin; the second is a launch rule that did not. */
+ * to begin; the second is a launch rule that did not. A park is its own
+ * question (SettleWatchParked). */
 void SettleWatchLook(uint64_t now_us)
 {
+    SettleWatchParked(now_us);
     uint64_t since   = __atomic_load_n(&s_owed_since_us, __ATOMIC_SEQ_CST);
     uint64_t settled = SettledGen();
     bool     late    = CadenceMounted() && since && now_us > since &&

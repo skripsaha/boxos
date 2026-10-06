@@ -16,6 +16,9 @@
 #include "kheap.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#ifdef CONFIG_VOLUME_TESTS
+#include "boardroom.h"     /* BoardroomNoteSeatReady — the stand's ring inside a cycle */
+#endif
 
 /*
  * The Settle cycle (settle.h). Its holder is the one committer, and is never
@@ -61,6 +64,11 @@ static bool     s_failing;
 /* Said once for each run of cycles that could not make the reserve whole,
  * until one could. The Settle's holder's alone. */
 static bool     s_spares_short;
+
+/* The cycles in a row whose S1 could not write the tag registry: the first is
+ * said, and how many they were once a cycle writes it again. The Settle's
+ * holder's alone. */
+static uint64_t s_registry_refused;
 
 /* Blocks the last settled cycle's S6 gave back: the map carries them to the
  * medium at the next cycle's S1. The Settle's holder's alone. */
@@ -129,9 +137,10 @@ void SettleMountReset(void)
     s_given = 0;
     __atomic_store_n(&s_settled_gen, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_cycles, 0, __ATOMIC_RELEASE);
-    s_failing      = false;
-    s_spares_short = false;
-    s_halt_ran     = false;
+    s_failing          = false;
+    s_spares_short     = false;
+    s_registry_refused = 0;
+    s_halt_ran         = false;
 }
 
 void SettleMountStand(uint32_t from_block, uint32_t from_bytes, bool medium_lied)
@@ -284,6 +293,50 @@ static void SettleSparesMake(void)
     s_spares_short = true;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's turns of the next cycle: its seat rings right before it takes its
+ * count, or right after its S0; its block map answers a refusal of the stand's
+ * choosing. */
+enum { SETTLE_STAND_RINGS_BEFORE = 1, SETTLE_STAND_RINGS_AFTER };
+static volatile uint8_t s_stand_rings;
+static volatile error_t s_stand_refusal;
+
+void TagFSStandSettleRings(bool before_its_count)
+{
+    __atomic_store_n(&s_stand_rings,
+                     (uint8_t)(before_its_count ? SETTLE_STAND_RINGS_BEFORE
+                                                : SETTLE_STAND_RINGS_AFTER),
+                     __ATOMIC_RELEASE);
+}
+
+void TagFSStandSettleRefuses(error_t code)
+{
+    __atomic_store_n(&s_stand_refusal, code, __ATOMIC_RELEASE);
+}
+
+/* seat:ready noted of the volume's seat, as a driver's recovery notes it while
+ * a cycle runs — `when` the stand chose: just before the cycle takes the count
+ * its refusal is judged by, or after, before anything it decides. Noted, not
+ * said: the room's pass says it later. */
+static void SettleStandRingsHere(uint8_t when)
+{
+    uint8_t chosen = when;
+    if (!__atomic_compare_exchange_n(&s_stand_rings, &chosen, 0u, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    uint8_t seat = tagfs_get_seat();
+    BoardroomNoteSeatReady(BoardroomSeatKind(seat), BoardroomSeatIndex(seat));
+}
+
+/* The block map's answer as the stand chose it, once — none of the medium's:
+ * the map wrote what it owed, and the step answers the stand's code. */
+static error_t SettleStandRefusalHere(error_t rc)
+{
+    error_t chosen = __atomic_exchange_n(&s_stand_refusal, OK, __ATOMIC_ACQ_REL);
+    return rc == OK ? chosen : rc;
+}
+#endif
+
 /* S0's step: the reserve made whole for the early close — S0 itself takes
  * nothing from the heap or the medium; a volume with no Spare it may close
  * onto keeps its tail open, and the cycle writes it as it stands — the Use
@@ -294,23 +347,50 @@ static void SettleTakeStep(SettleSnap* snap)
     if (s_run.why != SETTLE_FOR_HALT)
         SettleSparesMake();
     UseMemoryStake();
+#ifdef CONFIG_VOLUME_TESTS
+    SettleStandRingsHere(SETTLE_STAND_RINGS_BEFORE);
+#endif
     SettleWaitersRunBegins();
     SettleTake(snap, s_run.why, CadenceRunBegins());
     s_run.s0_us = SettleNowUs();
+#ifdef CONFIG_VOLUME_TESTS
+    SettleStandRingsHere(SETTLE_STAND_RINGS_AFTER);
+#endif
 }
 
 /*
- * One step, and the step after it. S1's registry refusal is said by it and
- * ends nothing: no record wears a tag the medium does not define — an Ink
- * takes none that is not on it (InkNameTagIntern, TagRegistryFlushFor) — so
- * what it could not write is only the tags nobody wears yet. Every other
- * refusal ends the cycle, and names its stage.
+ * S1's registry. Its refusal ends nothing: no record wears a tag the medium
+ * does not define — an Ink takes none that is not on it (InkNameTagIntern,
+ * TagRegistryFlushFor) — so what it could not write is only the tags nobody
+ * wears yet, and the next cycle writes them. A refusal by the medium is the
+ * seat's like any other — the seat rings seat:ready on the first command it
+ * answers after (boardroom.h) — and the cycle goes on. Said for the first
+ * cycle of a run of them, and counted until one writes it.
  */
+static void SettleRegistryWrite(uint64_t cycle)
+{
+    error_t rc = tag_registry_flush(tagfs_get_state()->registry);
+    if (rc == OK) {
+        if (s_registry_refused)
+            kprintf("[Settle] cycle %llu wrote the tag registry, after %llu cycle(s) that went "
+                    "on without its newest tags\n",
+                    (unsigned long long)cycle, (unsigned long long)s_registry_refused);
+        s_registry_refused = 0;
+        return;
+    }
+    if (s_registry_refused++ == 0)
+        kprintf("[Settle] cycle %llu goes on without the tag registry's newest tags — their "
+                "write was refused (error %u); no record wears a tag the medium does not "
+                "define, and every cycle writes them again\n",
+                (unsigned long long)cycle, (unsigned)rc);
+}
+
+/* One step, and the step after it. A refusal ends the cycle, and names its
+ * stage; the steps whose refusal ends nothing answer OK and say their own. */
 static error_t SettleStepRun(SettleSnap* snap, SettleStep* step)
 {
-    TagFSState* fs = tagfs_get_state();
-    error_t     rc = OK;
-    bool        done;
+    error_t rc = OK;
+    bool    done;
 
     switch (*step) {
     case SETTLE_STEP_GLEAN:
@@ -326,22 +406,26 @@ static error_t SettleStepRun(SettleSnap* snap, SettleStep* step)
         return OK;
     case SETTLE_STEP_REGISTRY:
         SETTLE_CUT_AT(SETTLE_CUT_POINT_REGISTRY);
-        (void)tag_registry_flush(fs->registry);
+        SettleRegistryWrite(snap->cycle);
         *step = SETTLE_STEP_MAP;
         return OK;
     case SETTLE_STEP_MAP:
         SETTLE_CUT_AT(SETTLE_CUT_POINT_BITMAP);
         rc          = BlockMapFlush();
+#ifdef CONFIG_VOLUME_TESTS
+        rc          = SettleStandRefusalHere(rc);
+#endif
         snap->stage = "the block map";
         *step       = SETTLE_STEP_TABLE;
         break;
     case SETTLE_STEP_TABLE:
+        /* Rows past the chain that found no ground or memory to grow it by
+         * wait in memory for a later cycle (file_table.h): under its seal the
+         * pool names them, and the mount derives them from it. */
         SETTLE_CUT_AT(SETTLE_CUT_POINT_TABLE);
-        if (file_table_flush() != 0) {
-            rc          = ERR_TAGFS_METADATA_ERROR;
-            snap->stage = "the file table";
-        }
-        *step = SETTLE_STEP_HEAD;
+        rc          = file_table_flush();
+        snap->stage = "the file table";
+        *step       = SETTLE_STEP_HEAD;
         break;
     case SETTLE_STEP_HEAD:
         GleanHeadStep(&snap->head, &done);
@@ -466,9 +550,10 @@ static void SettleRunBegin(SettleWhy why, uint64_t cover, bool door)
 
 /*
  * The end of the cycle in flight, settled or refused: the Scribe answers its
- * askers, the cadence learns what it cost, and its waiters are answered. What
- * the end needs is read out before the Give: from the Give on, the next holder
- * may be beginning its own cycle in s_run.
+ * askers, the cadence learns what it cost, and its waiters are answered — or,
+ * refused, left to wait for the event its refusal names (SettleWaitersPark).
+ * What the end needs is read out before the Give: from the Give on, the next
+ * holder may be beginning its own cycle in s_run.
  */
 static void SettleRunEnd(error_t rc)
 {
@@ -497,6 +582,9 @@ static void SettleRunEnd(error_t rc)
         s_failing = false;
     }
 
+    /* Its park before its Give: from the Give on the next cycle may end, and
+     * a park this one left after it would stand on that cycle's answer. */
+    SettleWaitersPark(rc);
     __atomic_store_n(&s_run.active, 0u, __ATOMIC_RELEASE);
     ScribeGive(&g_settle_scribe, s_run.cover, rc);
 

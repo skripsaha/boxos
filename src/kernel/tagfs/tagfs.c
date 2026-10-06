@@ -1705,7 +1705,7 @@ static void tagfs_on_seat_ready(TouchTag tag, const void *payload,
     if (plen < sizeof(*ev))
         return;
     if (g_state.initialized && ev->first == g_tagfs_seat)
-        SettleSeatReady();          /* a refused cycle may run again */
+        SettleKnock();   /* a refused cycle looks again: its count moved with the bell */
     if (__atomic_load_n(&g_mount_owed, __ATOMIC_SEQ_CST))
         __atomic_store_n(&g_mount_ready, 1u, __ATOMIC_RELEASE);
 }

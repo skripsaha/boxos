@@ -523,7 +523,7 @@ void file_table_shutdown(void);
 int  file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
 int  file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset);
 int  file_table_delete(uint32_t file_id);
-int  file_table_flush(void);
+error_t file_table_flush(void);
 
 /* What tagfs_get_metadata filled in, let go. The pool itself is
  * metadata_pool/meta_pool.h's. */
@@ -586,12 +586,29 @@ bool     TagFSIdleOwed(void);
 /* Nightwatch's look at the Settle, from the PIT tick (RT-11). */
 void     TagFSWatchLook(void);
 
-/* A program's newest change of the volume, noted after the storage deck
- * served it; and the program leaving (settle.h): with a change of its own no
- * cycle settled, the next cycle is demanded rather than left to Lull. */
+/*
+ * A program's own changes of the volume (settle/cadence.c). An Ink's place is
+ * its gen in one order across every mount of the boot, so a place of a volume
+ * mounted before this one is told apart. TagFSInkedHere: the place of the
+ * newest Ink this core made. TagFSNoteInkerSince: a call of the program was
+ * just served on this core, with TagFSInkedHere read before it — the Ink it
+ * made, if it made one, is noted; a call that read made none. TagFSInkPlace:
+ * the place of this mount's Ink `gen`, inside the door. TagFSNoteInker: the
+ * program made the Ink at `place` — the newest is kept. TagFSInkerLeaves: the
+ * program is leaving (settle.h) — with a change of its own on this volume no
+ * cycle settled, the next cycle is demanded rather than left to Lull.
+ */
 struct process_t;
-void     TagFSNoteInker(struct process_t* proc);
+uint64_t TagFSInkedHere(void);
+void     TagFSNoteInkerSince(struct process_t* proc, uint64_t inked_before);
+uint64_t TagFSInkPlace(uint64_t gen);
+void     TagFSNoteInker(struct process_t* proc, uint64_t place);
 void     TagFSInkerLeaves(struct process_t* proc);
+
+/* Memory came back to the machine — a cabin's, torn down: a Settle cycle
+ * refused for want of it is looked at again (settle/settle_wait.c). From any
+ * context. */
+void     TagFSHeapCameBack(void);
 
 /*
  * Where this volume's ground begins on that medium, in the medium's own
