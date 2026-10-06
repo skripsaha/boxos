@@ -90,6 +90,7 @@ static uint32_t       g_link_count   = 0;   /* links of the chain on the medium 
 static uint32_t       g_link_cap     = 0;   /* slots in g_links */
 static uint32_t       g_links_wanted = 0;   /* links the rows named since the mount need */
 static uint64_t       g_gen          = 0;   /* one step per change, under the state lock */
+static bool           g_grow_short   = false; /* short of its rows' links: said (FileTableGrow) */
 
 /* The one block image there is: the mount's walk reads into it, and the flush
  * stamps a Spare and snapshots a link through it — the flush alone, under the
@@ -138,6 +139,7 @@ static void table_release(void) {
     g_link_cap     = 0;
     g_links_wanted = 0;
     g_gen          = 0;
+    g_grow_short   = false;
 }
 
 /*
@@ -353,8 +355,39 @@ int file_table_delete(uint32_t file_id) {
  * block back; a flush the medium will not keep leaves the stamped Spares in
  * their slots, unlinked, for the next pass to link once a flush is kept.
  * Rows past the chain stay in memory until then.
+ *
+ * ‼ A TABLE SHORT OF GROUND OR MEMORY IS NOT A REFUSED CYCLE. Its rows wait in
+ * memory, and the pool's records name them: under the seal every cycle
+ * writes, the mount derives the table's rows from the pool (mount/mount.c,
+ * MountFile), so a cycle settles whole without them. Refusing it instead
+ * refused every cycle after it at the same place — and the ground a short
+ * volume waits for comes back only when a cycle settles (Fallow, at S6): the
+ * volume stopped settling for good. The allocator asks for the cycle that
+ * gives Fallow's ground back itself (MapShort's ROOM), and a later cycle
+ * grows the chain. Said once until the chain has grown to what its rows need.
+ * Only the medium's own refusal — a stamp, a flush — refuses the cycle.
  */
-static int FileTableGrow(void)
+static void FileTableShortSay(uint32_t wanted, uint32_t have, error_t why)
+{
+    if (!g_grow_short)
+        kprintf("[FileTable] the file table needs %u more block(s) to hold file ids up to %u "
+                "and the %s (error %u) — the rows from file id %u on wait in memory, the "
+                "pool's records name them, and a later Settle cycle grows the chain\n",
+                wanted - have, wanted * TAGFS_FTABLE_PER_BLOCK - 1,
+                why == ERR_NO_MEMORY ? "machine had no memory to take them with"
+                                     : "volume gave none",
+                (unsigned)why, have * TAGFS_FTABLE_PER_BLOCK);
+    g_grow_short = true;
+}
+
+/* A refusal that is not the medium's: no ground, ground on its way, or no
+ * memory. */
+static bool FileTableShortOfRoom(error_t got)
+{
+    return got == ERR_TAGFS_NO_SPACE || got == ERR_WOULD_BLOCK || got == ERR_NO_MEMORY;
+}
+
+static error_t FileTableGrow(void)
 {
     TagFSLockTake(table_lock());
     uint32_t wanted  = g_links_wanted;
@@ -363,33 +396,34 @@ static int FileTableGrow(void)
     while (have + in_hand < g_link_cap && g_links[have + in_hand].block != 0)
         in_hand++;
     TagFSLockDrop(table_lock());
-    if (have >= wanted)
-        return 0;
+    if (have >= wanted) {
+        g_grow_short = false;
+        return OK;
+    }
 
     if (LinksReserve(wanted) != OK) {
-        kprintf("[FileTable] there is no memory to hold the %u links the file "
-                "table's rows need — its chain stays %u block(s) long, and the "
-                "rows from file id %u on stay in memory until a later Settle cycle\n",
-                wanted, have, have * TAGFS_FTABLE_PER_BLOCK);
-        return -1;
+        FileTableShortSay(wanted, have, ERR_NO_MEMORY);
+        return OK;
     }
 
     /* Spares a pass before this one stamped were seen written before this
      * read, so a flush issued after it covers them too. */
     uint64_t need = in_hand ? VolumeFlushNeed() : 0;
-    int      rc   = 0;
+    error_t  rc   = OK;
     while (have + in_hand < wanted) {
         uint32_t block   = 0;
         uint64_t stamped = 0;
         error_t  got     = SpareStamp(TAGFS_FILETBL_MAGIC, &g_image, &block, &stamped);
         if (got != OK) {
-            kprintf("[FileTable] the file table needs %u more block(s) to hold "
-                    "file ids up to %u and the volume gave none (error %d) — "
-                    "the rows from file id %u on stay in memory until a later "
-                    "Settle cycle\n", wanted - have - in_hand,
-                    wanted * TAGFS_FTABLE_PER_BLOCK - 1, (int)got,
-                    (have + in_hand) * TAGFS_FTABLE_PER_BLOCK);
-            rc = -1;
+            if (FileTableShortOfRoom(got)) {
+                FileTableShortSay(wanted, have + in_hand, got);
+            } else {
+                kprintf("[FileTable] the medium would not take the stamp of a block the file "
+                        "table's chain grows by (error %u) — the rows from file id %u on are "
+                        "written by the next Settle cycle\n",
+                        (unsigned)got, (have + in_hand) * TAGFS_FTABLE_PER_BLOCK);
+                rc = got;
+            }
             break;
         }
         TagFSLockTake(table_lock());
@@ -406,7 +440,7 @@ static int FileTableGrow(void)
         kprintf("[FileTable] %u block(s) were stamped for the file table and the "
                 "medium would not commit its cache (error %d) — they are linked "
                 "only once it does\n", in_hand, (int)ready);
-        return -1;
+        return ready;
     }
 
     /* The old last link's next changes, and each new link is born owed. */
@@ -423,21 +457,23 @@ static int FileTableGrow(void)
 
 /*
  * Write the first link at or past *at that is owed to the medium, and leave
- * *at on it: 1 when one was written, 0 when none is owed from *at on, -1 when
- * the medium refused it. The generation it is written at is read, and its rows
- * are copied out of the map into g_image, in one hold of the state lock — the
- * rows of the files the generation names, no fewer; the image is written with
- * no lock held, and that generation is what the write marks landed.
+ * *at on it: OK and *wrote_one when one was written, OK alone when none is owed
+ * from *at on, or the medium's refusal. The generation it is written at is
+ * read, and its rows are copied out of the map into g_image, in one hold of the
+ * state lock — the rows of the files the generation names, no fewer; the image
+ * is written with no lock held, and that generation is what the write marks
+ * landed.
  */
-static int FileTableWriteLink(uint32_t* at)
+static error_t FileTableWriteLink(uint32_t* at, bool* wrote_one)
 {
+    *wrote_one = false;
     TagFSLockTake(table_lock());
     uint32_t i = *at;
     while (i < g_link_count && g_links[i].edited <= g_links[i].landed)
         i++;
     if (i >= g_link_count) {
         TagFSLockDrop(table_lock());
-        return 0;
+        return OK;
     }
     uint64_t gen   = g_links[i].edited;
     uint32_t block = g_links[i].block;
@@ -456,14 +492,15 @@ static int FileTableWriteLink(uint32_t* at)
                 "%u..%u (error %d) — they are written again by the next Settle cycle\n",
                 block, i * TAGFS_FTABLE_PER_BLOCK,
                 i * TAGFS_FTABLE_PER_BLOCK + TAGFS_FTABLE_PER_BLOCK - 1, (int)wrote);
-        return -1;
+        return wrote;
     }
 
     TagFSLockTake(table_lock());
     if (g_links[i].landed < gen)
         g_links[i].landed = gen;
     TagFSLockDrop(table_lock());
-    return 1;
+    *wrote_one = true;
+    return OK;
 }
 
 /*
@@ -476,19 +513,23 @@ static int FileTableWriteLink(uint32_t* at)
  * Every link owed is written, in chain order; the first refusal ends the pass,
  * so a link to a new block is never followed by nothing but its rows.
  */
-int file_table_flush(void) {
+error_t file_table_flush(void) {
     bool scribed = ScribeHeldHere(&g_settle_scribe);
     if (!scribed || LockRankAnyHeldHere()) {
         kprintf("[FileTable] a flush was asked for %s — nothing is written\n",
                 !scribed ? "outside the Settle cycle, which alone writes the table"
                          : "under a TagFS lock, which its writes would cross the medium holding");
-        return -1;
+        return ERR_INVALID_STATE;
     }
 
-    int      rc = FileTableGrow();
-    uint32_t at = 0;
-    int      wrote;
-    while ((wrote = FileTableWriteLink(&at)) > 0)
-        at++;
-    return wrote < 0 ? -1 : rc;
+    error_t  rc      = FileTableGrow();
+    error_t  refused = OK;
+    uint32_t at      = 0;
+    bool     wrote   = true;
+    while (refused == OK && wrote) {
+        refused = FileTableWriteLink(&at, &wrote);
+        if (wrote)
+            at++;
+    }
+    return refused != OK ? refused : rc;
 }

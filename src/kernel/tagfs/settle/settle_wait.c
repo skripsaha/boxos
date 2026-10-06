@@ -2,10 +2,11 @@
 #include "../metadata_pool/meta_pool.h"
 #include "../settle_cut/settle_cut.h"
 #include "boardroom.h"
+#include "pmm.h"
 
 /*
  * The waiters of the Settle (settle.h): who is answered by which cycle, and
- * the one rule for a cycle the medium refused.
+ * the one rule for a cycle that was refused.
  *
  * A waiter for Ink `gen` is answered OK once every record up to `gen` lies in
  * a closed block a cycle settled (PoolClosedSettledGen) — or, when a cycle
@@ -19,13 +20,114 @@ static SettleWaiter*      s_first;
 static SettleWaiter*      s_last;
 static volatile uint32_t  s_count;
 static volatile uint64_t  s_answered_upto;  /* a waiter for an Ink up to this is answered OK */
-static volatile uint32_t  s_parked;         /* a refusal that may pass waits for seat:ready */
-static volatile uint64_t  s_ready_gen;      /* seat:ready naming the volume's seat, counted */
-static uint64_t           s_ready_at_begin; /* the count the cycle in flight began after */
+static volatile uint64_t  s_ready_gen;      /* the volume's own rings: its book taken up */
+static uint64_t           s_ready_at_begin; /* the rings the cycle in flight began after */
 
+/*
+ * ‼ A PARK IS A COUNT, NEVER A FLAG. What a refused cycle waits for is kept as
+ * the kind of its event and where that event's count stood when the cycle
+ * began or was refused — with the seat, in one word, so a look reads them at
+ * once — and the park stands only while the count has not moved. An event
+ * that comes between the refusal and the park is then never lost: no moment
+ * exists at which the park is decided after its event was looked for. A flag
+ * set after reading the count could land on a seat:ready that came in
+ * between, and erase it (X1-4).
+ */
+typedef enum {
+    SETTLE_PARK_NONE = 0,
+    SETTLE_PARK_SEAT,       /* the medium refused, or left: seat:ready, or its book taken up */
+    SETTLE_PARK_HEAP,       /* the machine had no memory for a step: its pages coming back */
+    SETTLE_PARK_ROOM,       /* no ground for a step: room asked for after the refusal */
+} SettleParkKind;
+
+#define SETTLE_PARK_KIND_BITS  2u
+#define SETTLE_PARK_SEAT_BITS  8u
+#define SETTLE_PARK_KIND_MASK  ((1ull << SETTLE_PARK_KIND_BITS) - 1u)
+#define SETTLE_PARK_SEAT_SHIFT SETTLE_PARK_KIND_BITS
+#define SETTLE_PARK_COUNT_SHIFT (SETTLE_PARK_KIND_BITS + SETTLE_PARK_SEAT_BITS)
+#define SETTLE_PARK_COUNT(c)   ((uint64_t)(c) & (~0ull >> SETTLE_PARK_COUNT_SHIFT))
+
+static volatile uint64_t  s_park;           /* count | seat | SettleParkKind */
+static volatile uint64_t  s_park_us;        /* when the park was decided */
+
+static void SettlePark(SettleParkKind kind, uint64_t count)
+{
+    uint64_t seat = tagfs_get_seat();
+    __atomic_store_n(&s_park_us, SettleNowUs(), __ATOMIC_RELAXED);
+    __atomic_store_n(&s_park,
+                     SETTLE_PARK_COUNT(count) << SETTLE_PARK_COUNT_SHIFT |
+                         seat << SETTLE_PARK_SEAT_SHIFT | kind,
+                     __ATOMIC_RELEASE);
+}
+
+/* seat:ready of the volume's seat as the room counts it — where its bell is
+ * noted, ahead of the announcement (BoardroomSeatReadyGen), so a bell rung
+ * before a cycle took its count is in it however late it is said — and the
+ * volume's own: its book taken up (SettleSeatReady). Each only moves forward,
+ * so their sum moves exactly when either does. The announcement itself only
+ * knocks: counted again, a bell said after a cycle's S0 that was rung before
+ * it would lift the park of a refusal it never answered. */
+static uint64_t SettleRingsNow(void)
+{
+    return (uint64_t)BoardroomSeatReadyGen(tagfs_get_seat()) +
+           __atomic_load_n(&s_ready_gen, __ATOMIC_ACQUIRE);
+}
+
+/* The machine's pages, as the heap's reserve grows from them (kheap.h): the
+ * memory a step was refused comes back when there are more of them free than
+ * when it was refused. */
+static uint64_t SettleHeapNow(void)
+{
+    return PmmFreePagesNow();
+}
+
+/* A park on the medium stands only in the seat it was decided in: a book
+ * taken up in another seat is the event itself. */
 bool SettleParked(void)
 {
-    return __atomic_load_n(&s_parked, __ATOMIC_ACQUIRE) != 0;
+    uint64_t park  = __atomic_load_n(&s_park, __ATOMIC_ACQUIRE);
+    uint64_t count = park >> SETTLE_PARK_COUNT_SHIFT;
+    uint64_t seat  = (park >> SETTLE_PARK_SEAT_SHIFT) & ((1ull << SETTLE_PARK_SEAT_BITS) - 1u);
+    switch ((SettleParkKind)(park & SETTLE_PARK_KIND_MASK)) {
+    case SETTLE_PARK_SEAT:
+        return seat == tagfs_get_seat() && SETTLE_PARK_COUNT(SettleRingsNow()) == count;
+    case SETTLE_PARK_HEAP:
+        return SETTLE_PARK_COUNT(SettleHeapNow()) <= count;
+    case SETTLE_PARK_ROOM:
+        return SETTLE_PARK_COUNT(CadenceRoomAsked()) == count;
+    default:
+        return false;
+    }
+}
+
+uint64_t SettleParkedSinceUs(void)
+{
+    return SettleParked() ? __atomic_load_n(&s_park_us, __ATOMIC_RELAXED) : 0;
+}
+
+void TagFSHeapCameBack(void)
+{
+    uint64_t park = __atomic_load_n(&s_park, __ATOMIC_ACQUIRE);
+    if ((park & SETTLE_PARK_KIND_MASK) == SETTLE_PARK_HEAP)
+        SettleKnock();
+}
+
+void SettleParkSay(void)
+{
+    uint64_t    park  = __atomic_load_n(&s_park, __ATOMIC_ACQUIRE);
+    uint64_t    since = __atomic_load_n(&s_park_us, __ATOMIC_RELAXED);
+    uint64_t    now   = SettleNowUs();
+    const char* event = "room to be asked for";
+    if ((park & SETTLE_PARK_KIND_MASK) == SETTLE_PARK_SEAT)
+        event = "the volume's seat to say seat:ready, or its book to be taken up";
+    else if ((park & SETTLE_PARK_KIND_MASK) == SETTLE_PARK_HEAP)
+        event = "the machine's memory to come back";
+    kprintf("[Nightwatch] SETTLE PARKED: %u waiter(s) of the volume wait for a cycle, and the "
+            "cycle refused %llu ms ago waits for %s — no other event starts it (settled up to "
+            "Ink %llu)\n",
+            (unsigned)__atomic_load_n(&s_count, __ATOMIC_ACQUIRE),
+            (unsigned long long)(now > since ? (now - since) / 1000u : 0), event,
+            (unsigned long long)SettledGen());
 }
 
 bool SettleWaitersOwed(void)
@@ -182,47 +284,72 @@ void SettleWaitersAnswerAll(error_t code)
 
 void SettleWaitersRunBegins(void)
 {
-    s_ready_at_begin = __atomic_load_n(&s_ready_gen, __ATOMIC_ACQUIRE);
+    s_ready_at_begin = SettleRingsNow();
 }
 
 void SettleWaitersMountReset(void)
 {
     SettleWaitersAnswerAll(ERR_DEVICE_NOT_READY);
     __atomic_store_n(&s_answered_upto, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_parked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
 }
 
 /*
- * ‼ ONE RULE FOR A REFUSED CYCLE. A medium that takes no write never will:
- * every waiter hears the code now. So does every waiter of a seat that never
- * says it answers again — its refusal is as final as the medium makes it. A
- * medium that left is its open book's to decide (mount/away.h): the waiters
- * stay, parked until the book is taken up or given up. Any other refusal may
- * pass: the waiters stay, and the cadence waits for seat:ready — unless the
- * seat said it already while this cycle ran, when the next cycle may go at
- * once. No attempt is counted.
+ * ‼ ONE RULE FOR A REFUSED CYCLE (§3): nothing is declared settled, the
+ * waiters stay in their Chit, and the cadence begins no cycle until the event
+ * the refusal waits for — never on a clock, and never at once:
+ *
+ *   - a medium that takes no write never will: the volume is read-only, and
+ *     every waiter hears so (SettleWaitersRunEnded);
+ *   - a medium that left is its open book's to decide (mount/away.h): taken
+ *     up, it rings like seat:ready; given up, it answers every waiter;
+ *   - a step the machine had no memory for waits for its pages to come back;
+ *   - a step with no ground waits for room to be asked for — by a write the
+ *     allocator sent away, which is when Fallow has ground for the cycle to
+ *     give back;
+ *   - any other refusal is the medium's: the seat that refused rings
+ *     seat:ready on the first command it answers after, whatever kind of
+ *     medium sits in it (boardroom.h) — and a seat:ready that came while this
+ *     very cycle ran has been counted since its S0, so the next cycle may go
+ *     at once.
+ *
+ * Decided by the cycle's holder before its Give, so no later cycle's end can
+ * come before it; a settled cycle lifts whatever park stood. No attempt is
+ * counted.
  */
-static void SettleWaitersRefused(error_t rc)
+void SettleWaitersPark(error_t rc)
 {
-    error_t code = rc;
+    if (rc == OK) {
+        __atomic_store_n(&s_park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
+        return;
+    }
     if (TagFSMediumLeft()) {
-        __atomic_store_n(&s_parked, 1u, __ATOMIC_RELEASE);
+        SettlePark(SETTLE_PARK_SEAT, s_ready_at_begin);
         return;
     }
-    if (TagFSReadOnly())
-        code = ERR_TAGFS_READ_ONLY;
-    else if (BoardroomSeatAnnouncesReady(tagfs_get_seat())) {
-        if (__atomic_load_n(&s_ready_gen, __ATOMIC_ACQUIRE) == s_ready_at_begin)
-            __atomic_store_n(&s_parked, 1u, __ATOMIC_RELEASE);
+    if (TagFSReadOnly()) {
+        __atomic_store_n(&s_park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
         return;
     }
-    SettleWaitersAnswerAll(code);
+    switch (rc) {
+    case ERR_NO_MEMORY:
+        SettlePark(SETTLE_PARK_HEAP, SettleHeapNow());
+        break;
+    case ERR_TAGFS_NO_SPACE:
+    case ERR_WOULD_BLOCK:
+        SettlePark(SETTLE_PARK_ROOM, CadenceRoomAsked());
+        break;
+    default:
+        SettlePark(SETTLE_PARK_SEAT, s_ready_at_begin);
+        break;
+    }
 }
 
 void SettleWaitersRunEnded(error_t rc, uint64_t target, bool unclosed)
 {
     if (rc != OK) {
-        SettleWaitersRefused(rc);
+        if (TagFSReadOnly() && !TagFSMediumLeft())
+            SettleWaitersAnswerAll(ERR_TAGFS_READ_ONLY);
         return;
     }
     uint64_t upto = PoolClosedSettledGen();
@@ -233,13 +360,11 @@ void SettleWaitersRunEnded(error_t rc, uint64_t target, bool unclosed)
            !__atomic_compare_exchange_n(&s_answered_upto, &seen, upto, false,
                                         __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
         ;
-    __atomic_store_n(&s_parked, 0u, __ATOMIC_RELEASE);
     SettleWaitersSweep();
 }
 
 void SettleSeatReady(void)
 {
     __atomic_add_fetch(&s_ready_gen, 1u, __ATOMIC_ACQ_REL);
-    __atomic_store_n(&s_parked, 0u, __ATOMIC_RELEASE);
     SettleKnock();
 }

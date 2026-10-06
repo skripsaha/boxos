@@ -45,7 +45,10 @@ int  file_table_delete(uint32_t file_id);
 /* Write every block of the table that changed since it last landed, growing
  * the chain onto stamped Spares first. The Settle cycle alone calls it, under
  * its Scribe and holding no TagFS lock; asked any other way it writes nothing
- * and answers -1. 0 when every row changed before the call is on the medium. */
-int  file_table_flush(void);
+ * and answers ERR_INVALID_STATE. OK when every row changed before the call is
+ * on the medium — or waits in memory past a chain the volume had no ground,
+ * or the machine no memory, to grow (said once; the pool's records name those
+ * rows); else the medium's refusal. */
+error_t file_table_flush(void);
 
 #endif // FILE_TABLE_H

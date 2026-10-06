@@ -99,6 +99,21 @@ uint64_t SettledCycles(void);
  * the stand, whose runner holds the cadence: cycles that close for nobody let
  * Glean bring the pool's chain down to what its live records fill. */
 error_t  TagFSSettleAsCadence(void);
+
+/* The next cycle's seat rings seat:ready once, as a driver's recovery would
+ * while the cycle runs — noted, and said later by the room's pass: just before
+ * the cycle takes the count a refusal of it is judged by (`before_its_count`),
+ * or right after its S0. For the stand. */
+void     TagFSStandSettleRings(bool before_its_count);
+
+/* The next cycle's block map answers `code` once its own writes are done —
+ * a refusal that is not the medium's (ERR_NO_MEMORY, ERR_WOULD_BLOCK), as a
+ * step meets one. For the stand. */
+void     TagFSStandSettleRefuses(error_t code);
+
+/* The demands standing for the next cycle (SettleDemandKind), read and left
+ * as they are. For the stand. */
+uint32_t TagFSStandSettleDemands(void);
 #endif
 
 /* A mount's first word: nothing settled yet, and no waiter of the volume that
@@ -178,8 +193,9 @@ bool     SettleStepOwedHere(void);
  * or the window run out, or a demand (RT-10). */
 bool     SettleIdleOwed(void);
 
-/* seat:ready named the volume's seat, or its open book was taken up: a cycle
- * refused by the medium may run. */
+/* The volume's open book was taken up: a cycle refused by the medium that left
+ * may run. Counted, never a flag (settle_wait.c). seat:ready of the volume's
+ * seat is counted by the room where its bell is noted, and only knocks here. */
 void     SettleSeatReady(void);
 
 /* Nightwatch's look from the PIT tick (RT-11): `now_us`. A debt older than the
@@ -206,9 +222,12 @@ void     SettleCadenceHold(bool hold);
 // block answers it at S6. A medium that takes no write answers every waiter
 // with ERR_TAGFS_READ_ONLY; one that left holds them with its open book
 // (mount/away.h) — the next cycle answers them once the same volume comes back
-// as it was left, and the book given up answers them ERR_DEVICE_NOT_READY; a
-// refusal that may pass waits for seat:ready, and no attempt is counted.
-// Nothing here is ever a timeout.
+// as it was left, and the book given up answers them ERR_DEVICE_NOT_READY; any
+// other refusal leaves them in their Chit, and the cadence begins no cycle
+// until the event the refusal waits for: seat:ready for the medium's, the
+// machine's memory coming back, room asked for (SettleWaitersPark). No attempt
+// is counted, and nothing here is ever a timeout; a park that waiters wait on
+// longer than the window is said by Nightwatch, once.
 // ============================================================================
 
 typedef struct SettleWaiter SettleWaiter;
@@ -239,7 +258,9 @@ void     SettleWaitLinkCycle(SettleWaiter* w, void (*answer)(SettleWaiter* w, er
  * it was still linked. */
 bool     SettleWaitUnlink(SettleWaiter* w);
 
-/* For the cycle and the cadence (settle.c, cadence.c). */
+/* For the cycle and the cadence (settle.c, cadence.c). SettleParked: a
+ * refused cycle's park stands — the event it waits for has not come — and the
+ * cadence begins no cycle. */
 bool     SettleWaitersOwed(void);
 uint64_t SettleWaitersCloseUpto(void);
 void     SettleWaitersRunEnded(error_t rc, uint64_t target, bool unclosed);

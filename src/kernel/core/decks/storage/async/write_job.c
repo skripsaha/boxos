@@ -366,8 +366,11 @@ int wjob_finalize(WriteJob *j, error_t rc)
     wjob_say_refused(j, rc);
     if (rc != OK && !j->medium_left)
         TagFSWriteRefused();
-    if (j->target)
-        TagFSNoteInker(j->target);
+    /* A job that inked owes the file's newest record — its own last Ink, or a
+     * name or tag inked over it since — against its program; one that inked
+     * nothing owes nothing. Inside the door, which is let go of below. */
+    if (j->target && (written != 0 || (j->kind != WRITE_JOB_WRITE && rc == OK)))
+        TagFSNoteInker(j->target, TagFSInkPlace(InkGenOf(j->file_id)));
     wjob_publish(j, rc);
     if (j->kind == WRITE_JOB_WRITE)
         TagFSDataCostWrite();
