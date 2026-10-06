@@ -84,7 +84,7 @@ static void StandTurnRun(HelmWaiter *w)
             return;
         }
     } else {
-        t->rc = HelmDefrag(t->handle, 0);
+        t->rc = HelmDefrag(t->handle);
     }
     HelmLetGo(t->handle->ofe, w);
     __atomic_store_n(&t->done, 1u, __ATOMIC_RELEASE);
@@ -222,7 +222,7 @@ out:
     tagfs_close(first);
     tagfs_close(second);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -255,7 +255,7 @@ static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
     reader = tagfs_open(file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(reader, "a reader opens it");
 
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "the file is deleted under the reader");
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "the file is deleted under the reader");
     file_id = 0;
     TEST_ASSERT(HelmVacated(reader->ofe), "and its Helm says the file was given up");
 
@@ -278,7 +278,7 @@ static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
 out:
     tagfs_close(reader);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -345,7 +345,7 @@ static TestResult TestStandHelmDefragBesideDelete(void)
     TEST_ASSERT(HelmAsk(handle->ofe, &s_first), "and it holds the file's Helm");
     holding = true;
 
-    TEST_ASSERT_OK(PlotLoad(&plot, file_id), "the defrag loads the record under the Helm");
+    TEST_ASSERT_OK(PlotLoad(&plot, file_id, INK_UNWARRANTED), "the defrag loads the record under the Helm");
     loaded = true;
     uint64_t gathered = 0;
     if (plot.run_count > 1) {
@@ -354,7 +354,7 @@ static TestResult TestStandHelmDefragBesideDelete(void)
     }
     TestEvidence("gathers the defrag had made when the delete landed", gathered);
 
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0,
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0,
                    "the delete lands while the defrag holds the Helm, and waits for nothing");
     InkReceipt inked;
     TEST_ASSERT_EQ(TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked), ERR_FILE_NOT_FOUND,
@@ -380,7 +380,7 @@ static TestResult TestStandHelmDefragBesideDelete(void)
     StandTurnSet(STAND_TURN_DEFRAG, waiting, NULL, 0);
     asked = true;
     TEST_ASSERT(!HelmAsk(waiting->ofe, &s_turn.waiter), "the defrag waits for the Helm");
-    TEST_ASSERT_EQ(tagfs_delete_file(queued), 0, "the file is deleted while the defrag waits");
+    TEST_ASSERT_EQ(tagfs_delete_file(queued, INK_UNWARRANTED), 0, "the file is deleted while the defrag waits");
 
     HelmLetGo(handle->ofe, &s_first);
     holding = false;
@@ -396,11 +396,11 @@ out:
     tagfs_close(handle);
     tagfs_close(waiting);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     if (queued)
-        tagfs_delete_file(queued);
+        tagfs_delete_file(queued, INK_UNWARRANTED);
     if (filler)
-        tagfs_delete_file(filler);
+        tagfs_delete_file(filler, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -464,7 +464,7 @@ out:
         writer = NULL;
     tagfs_close(writer);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     kfree(data);
     kfree(back);
     return verdict;
@@ -546,7 +546,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     kfree(old);
     kfree(data);
     kfree(back);
@@ -592,7 +592,7 @@ static TestResult TestStandHelmRecordRoomClaimed(void)
     memset(&s_first, 0, sizeof(s_first));
     TEST_ASSERT(HelmAsk(handle->ofe, &s_first), "and it holds the file's Helm");
     holding = true;
-    TEST_ASSERT_OK(PlotLoad(&plot, file_id), "the write loads the record under the Helm");
+    TEST_ASSERT_OK(PlotLoad(&plot, file_id, INK_UNWARRANTED), "the write loads the record under the Helm");
     loaded    = true;
     plot.helm = &handle->ofe->helm;
 
@@ -619,7 +619,7 @@ static TestResult TestStandHelmRecordRoomClaimed(void)
     TagFSMetadata now = { .filename = name, .extent_count = plot.runs_before };
     TEST_ASSERT(PlotFits(&now, NULL), "the name fits beside the extents the record names now");
 
-    TEST_ASSERT_EQ(tagfs_rename_file(file_id, name), -(int)ERR_TAGFS_RECORD_FULL,
+    TEST_ASSERT_EQ(tagfs_rename_file(file_id, name, INK_UNWARRANTED), -(int)ERR_TAGFS_RECORD_FULL,
                    "and is refused: it would take the room the write in flight claimed");
 
     PlotSource src  = { .kernel = g_test_buffer + 2 * B, .bytes = B };
@@ -648,9 +648,9 @@ out:
     tagfs_close(handle);
     kfree(name);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     if (filler)
-        tagfs_delete_file(filler);
+        tagfs_delete_file(filler, INK_UNWARRANTED);
     return verdict;
 }
 

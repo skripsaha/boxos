@@ -94,13 +94,14 @@ inline status perf_dump() noexcept { return _detail::from_status(::perf_dump());
 // carries the cause on a failed call.
 inline result<int> fragmentation() noexcept { return _detail::from_ret<int>(::fragmentation()); }
 
-// Defragment a file toward target_block. On success the kernel returns the
-// resulting fragmentation SCORE (>= 0) — surfaced as the value here; the error
-// arm carries the cause. (A nonzero score is a SUCCESS, not a failure: the old
-// `== 0` bool form wrongly read any nonzero score as failure.)
-inline result<int> defrag(std::uint32_t file_id, std::uint32_t target_block) noexcept
+// Defragment a file: the volume lays it in one run where it chooses. On
+// success the kernel returns the resulting fragmentation SCORE (>= 0) —
+// surfaced as the value here; the error arm carries the cause. (A nonzero
+// score is a SUCCESS, not a failure: the old `== 0` bool form wrongly read any
+// nonzero score as failure.)
+inline result<int> defrag(std::uint32_t file_id) noexcept
 {
-    return _detail::from_ret<int>(::defrag(file_id, target_block));
+    return _detail::from_ret<int>(::defrag(file_id));
 }
 
 // reboot() / shutdown() act on the whole machine and return ONLY on failure

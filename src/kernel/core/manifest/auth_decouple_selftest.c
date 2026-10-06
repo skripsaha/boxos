@@ -56,8 +56,8 @@ error_t AuthDecoupleSelfTest(void)
         return rc;
 
     /* god's authority bit is FIXED by position, never (1<<god_id). */
-    if (auth_bit_for_key("god") != AUTH_TAG_GOD) {
-        kprintf("[AUTHDEC] FAIL: auth_bit_for_key(god) != AUTH_TAG_GOD\n");
+    if (AuthBitForKey("god", 3) != AUTH_TAG_GOD) {
+        kprintf("[AUTHDEC] FAIL: AuthBitForKey(god) != AUTH_TAG_GOD\n");
         return ERR_INTERNAL;
     }
     /* god overrides a SYSTEM-level op even though its registry id is >= 64. */
@@ -69,8 +69,8 @@ error_t AuthDecoupleSelfTest(void)
     kprintf("[AUTHDEC] god@id%u override=OK\n", (unsigned)god_id);
 
     /* A stopped process is denied even the lowest level. */
-    if (auth_bit_for_key("stopped") != AUTH_TAG_STOPPED) {
-        kprintf("[AUTHDEC] FAIL: auth_bit_for_key(stopped) != AUTH_TAG_STOPPED\n");
+    if (AuthBitForKey("stopped", 7) != AUTH_TAG_STOPPED) {
+        kprintf("[AUTHDEC] FAIL: AuthBitForKey(stopped) != AUTH_TAG_STOPPED\n");
         return ERR_INTERNAL;
     }
     if (auth_level_permits(AUTH_TAG_STOPPED, OP_AUTH_APP)) {

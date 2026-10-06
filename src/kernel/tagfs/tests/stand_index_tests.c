@@ -326,7 +326,7 @@ static TestResult TestStandIndexCursorPast1024(void)
         TEST_ASSERT_EQ(s_crate[2 + k], s_made[k], "each in id order, across the pieces it is written in");
 out:
     for (uint32_t k = 0; k < made; k++)
-        tagfs_delete_file(s_made[k]);
+        tagfs_delete_file(s_made[k], INK_UNWARRANTED);
     return verdict;
 }
 
@@ -424,7 +424,7 @@ out:
         TagFSLockDrop(&fs->lock);
     }
     if (rc == 0)
-        tagfs_delete_file(made);
+        tagfs_delete_file(made, INK_UNWARRANTED);
     return verdict;
 }
 

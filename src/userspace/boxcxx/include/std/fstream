@@ -279,7 +279,7 @@ public:
         if (p.write) role |= CURRENT_WRITE;
         uint32_t flags = 0;
         if (p.create)   flags |= CURRENT_CREATE;
-        if (p.truncate) flags |= CURRENT_TRUNCATE;
+        if (p.truncate) flags |= CURRENT_FRESH;
 
         // "file:" is the Current tag scheme for TagFS-backed byte storage.
         string tag("file:");

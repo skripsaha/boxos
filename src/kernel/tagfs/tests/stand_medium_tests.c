@@ -245,7 +245,7 @@ static TestResult StandBookOpen(StandBook* b, const char* name)
         HelmLetGo(b->waiting->ofe, &s_waiting.waiter);
     TEST_ASSERT(!mine, "and the waiter is queued");
 
-    TEST_ASSERT_EQ(tagfs_remove_tag(b->file_id, b->tag), 0,
+    TEST_ASSERT_EQ(tagfs_remove_tag(b->file_id, b->tag, INK_UNWARRANTED), 0,
                    "stand_book comes off — a change that writes nothing");
     b->gen       = InkedGen();
     b->unsettled = InkedGen() - SettledGen();
@@ -267,7 +267,7 @@ static TestResult StandBookLeaves(StandBook* b)
 
     TagFSStandMediumLeaves();
     TEST_ASSERT(TagFSMediumLeft(), "the medium is said to have left");
-    TEST_ASSERT_EQ(InkFields(b->file_id, NULL, b->tag, TAGFS_INVALID_TAG_ID, &receipt),
+    TEST_ASSERT_EQ(InkFields(b->file_id, NULL, b->tag, TAGFS_INVALID_TAG_ID, INK_UNWARRANTED, &receipt),
                    ERR_DEVICE_NOT_READY, "a new Ink is refused ERR_DEVICE_NOT_READY");
     HelmLetGo(b->holder->ofe, &s_holder);
     b->holding = false;
@@ -305,7 +305,7 @@ static void StandBookClose(StandBook* b)
     tagfs_close(b->holder);
     tagfs_close(b->waiting);
     if (b->file_id)
-        (void)tagfs_delete_file(b->file_id);
+        (void)tagfs_delete_file(b->file_id, INK_UNWARRANTED);
     (void)TagFSSettle();
 }
 
@@ -444,7 +444,7 @@ out:
     if (TagFSMediumLeft())
         (void)TagFSStandMediumReturns(NULL);
     if (file_id)
-        (void)tagfs_delete_file(file_id);
+        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
     (void)TagFSSettle();
     return verdict;
 }

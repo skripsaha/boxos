@@ -170,7 +170,7 @@ static TestResult TestStandSealCutKeepsTheSeal(void)
 out:
     BlockFailDisarm();
     if (file_id) {
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
         (void)TagFSSettle();
     }
     return verdict;

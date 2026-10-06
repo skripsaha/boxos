@@ -71,6 +71,10 @@
 // stand_medium_tests.c   the stand_medium suite: a USB disk's NO MEDIUM to a
 //                        flush refused and its ILLEGAL REQUEST remembered, and
 //                        the open book taken up and given up
+// stand_warrant_tests.c  the stand_warrant suite: a file the system keeps
+//                        changed only with the warrant, the loader's blocks by
+//                        no call, never gathered, the warrant read off the
+//                        cabin, and an untag answered with its reason
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

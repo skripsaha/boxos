@@ -2,6 +2,7 @@
 #include "scribe.h"
 #include "../run/run.h"
 #include "../integrity/integrity.h"
+#include "../ink/ink.h"   /* InkWearsGuarded, InkTouchesBoot — the files whose blocks stay put */
 
 /*
  * PlotGather — a record out of room for extents gets it back by moving the
@@ -130,6 +131,16 @@ static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint32_t start
 
 error_t PlotGather(Plot *p, uint32_t shed, uint32_t hint)
 {
+    /* B10, whatever the warrant: a warrant lets a call change a file the
+     * system keeps, and never moves that file's blocks. */
+    if (InkWearsGuarded(p->meta.tag_ids, p->meta.tag_count) ||
+        InkTouchesBoot(p->runs, p->run_count)) {
+        kprintf("[TagFS] file %u is one the system keeps — it wears system, boot or god, or "
+                "holds the kernel the Deed points the loader at — and its blocks are not "
+                "moved\n", p->fid);
+        return ERR_PERMISSION_DENIED;
+    }
+
     uint32_t first = 0, last = 0;
     uint64_t blocks = 0;
     if (!PlotChooseWindow(p, shed, &first, &last, &blocks)) {

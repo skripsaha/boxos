@@ -65,7 +65,7 @@ typedef struct {
     bool         append;        /* ... or at the file's size */
     uint64_t     waybill;       /* WRITE: a ferry's correlation token (0 = none) */
     uint64_t     size;          /* SPAN: the size the file is made */
-    uint32_t     target_block;  /* DEFRAG: near where its one run is laid */
+    InkWarrant   warrant;       /* the caller's (StorageCallWarrant), carried in the job's handle */
     Crate       *out_crate;     /* WRITE: [u64 inked][u64 size], every answer; DEFRAG: [u32 score]; or NULL */
 #ifdef CONFIG_VOLUME_TESTS
     struct WriteJobStandAnswer *stand;   /* the stand's caller: its answer told here */
@@ -115,7 +115,6 @@ typedef struct WriteJob {
     uint64_t          window_end;        /* where the window being written ends, in the source */
     uint64_t          span_size;
     uint64_t          span_was;          /* the size the span found */
-    uint32_t          defrag_target;
     uint64_t          waybill;           /* Ф26e: ferry correlation token (0 = sync/no-token) */
     uint32_t          submit_cookie;     /* the submit's cloakroom token — echoed into the
                                           * plain (waybill==0) completion so the caller's
@@ -216,5 +215,10 @@ typedef struct WriteJobStandAnswer {
  * submitter listens on (storage_ops.c). */
 int storage_sync_ferry_finalize(const struct OpContext *ctx, Crate *crates, error_t err,
                                 uint64_t bytes, uint64_t waybill);
+
+/* The warrant a program's call carries to the Ink guard (InkWarrant): its
+ * cabin holds system or god. Read once, where a deck takes the call; a caller
+ * in the kernel has no cabin and carries none (storage_ops.c). */
+InkWarrant StorageCallWarrant(const struct OpContext *ctx);
 
 #endif /* WRITE_JOB_H */

@@ -125,7 +125,7 @@ static int wjob_turn(WriteJob *j)
     if (j->kind == WRITE_JOB_SPAN)
         return wjob_finalize(j, HelmSpan(j->handle, j->span_size, &j->span_was));
     if (j->kind == WRITE_JOB_DEFRAG)
-        return wjob_finalize(j, HelmDefrag(j->handle, j->defrag_target));
+        return wjob_finalize(j, HelmDefrag(j->handle));
 
     for (;;) {
         error_t rc = wjob_window(j);
@@ -455,6 +455,7 @@ static error_t wjob_make(const WriteJobAsk *ask, Crate *crates, const OpContext 
         kfree(j);
         return ERR_FILE_NOT_FOUND;
     }
+    j->handle->warrant = ask->warrant;
     if (ctx && ctx->proc) {
         j->target = process_find_ref(ctx->proc->pid);
         if (!j->target) {
@@ -473,7 +474,6 @@ static error_t wjob_make(const WriteJobAsk *ask, Crate *crates, const OpContext 
     j->append        = ask->append;
     j->waybill       = ask->waybill;
     j->span_size     = ask->size;
-    j->defrag_target = ask->target_block;
     j->submit_cookie = ctx ? ctx->submit_cookie : 0;
     j->final_size    = j->handle->file_size;
     j->helm.hand     = wjob_handed;

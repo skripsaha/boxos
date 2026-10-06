@@ -303,7 +303,7 @@ FILE *fopen(const char *filename, const char *mode) noexcept
     if (write) role |= CURRENT_WRITE;
     uint32_t flags = 0;
     if (create) flags |= CURRENT_CREATE;
-    if (trunc)  flags |= CURRENT_TRUNCATE;
+    if (trunc)  flags |= CURRENT_FRESH;
 
     const size_t nlen = ::std::strlen(filename);
     char *tag = static_cast<char *>(::std::malloc(nlen + 6));

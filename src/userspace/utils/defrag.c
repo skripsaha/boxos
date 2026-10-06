@@ -28,7 +28,7 @@ int main(void) {
         file_id = matches[0];
     }
 
-    int result = defrag(file_id, 0);
+    int result = defrag(file_id);
 
     if (result < 0) {
         println("Error: Defragmentation failed");

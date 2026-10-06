@@ -55,7 +55,7 @@ enum class opening : unsigned {
     none     = 0,
     create   = CURRENT_CREATE,    // create the backing if absent (stream / file writer)
     nonblock = CURRENT_NONBLOCK,  // put/take never block: would_block when full / empty
-    truncate = CURRENT_TRUNCATE,  // file writer: the file spanned to nothing at open
+    fresh    = CURRENT_FRESH,     // file writer: the file spanned to nothing at open
 };
 constexpr opening operator|(opening a, opening b) noexcept
 {

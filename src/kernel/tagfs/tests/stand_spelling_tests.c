@@ -322,7 +322,7 @@ out:
         *wk = saved;
     for (uint32_t i = 0; i < 2; i++)
         if (files[i])
-            tagfs_delete_file(files[i]);
+            tagfs_delete_file(files[i], INK_UNWARRANTED);
     return verdict;
 }
 
@@ -359,8 +359,8 @@ static TestResult TestStandCreateRefusesWhatItCannotTag(void)
     TEST_ASSERT(VolumeTallyTake(&after), "and counted again");
     TestEvidence("files made with a tag they could not wear", after.files - before.files);
     if (made == 0 || deck == OK) {
-        if (made == 0) tagfs_delete_file(file_id);
-        if (deck == OK && said == sizeof(created)) tagfs_delete_file(created);
+        if (made == 0) tagfs_delete_file(file_id, INK_UNWARRANTED);
+        if (deck == OK && said == sizeof(created)) tagfs_delete_file(created, INK_UNWARRANTED);
         verdict = TEST_DEFECT;
         goto out;
     }
@@ -436,7 +436,7 @@ static TestResult TestStandTagSetWearsWhatItWasGiven(void)
     TEST_ASSERT(StandInfoHasWhole(file_id, s_text), "and its info carries all 300 bytes of it");
 out:
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 

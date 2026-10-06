@@ -101,7 +101,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -165,7 +165,7 @@ static TestResult StandCreateOnce(uint32_t n, uint16_t stem, bool* fired, bool* 
 
     owned = made;
     TEST_ASSERT_EQ(made, id, "a create takes the next id");
-    TEST_ASSERT_EQ(tagfs_delete_file(made), 0, "the file a create made can be deleted");
+    TEST_ASSERT_EQ(tagfs_delete_file(made, INK_UNWARRANTED), 0, "the file a create made can be deleted");
     owned = 0;
     bool lingers = StandNameFinds(stem, made);
     if (lingers)
@@ -175,7 +175,7 @@ out:
     if (armed)
         HeapFailDisarm();
     if (owned)
-        tagfs_delete_file(owned);
+        tagfs_delete_file(owned, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -196,7 +196,7 @@ TestResult TestStandCreateAllOrNothing(void)
      * file_map/). */
     TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
                    "a create before the sweep interns the name");
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "and its file is deleted");
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "and its file is deleted");
     file_id = 0;
     uint16_t stem = tagfs_tag_lookup("test_file");
     TEST_ASSERT(stem != TAGFS_INVALID_TAG_ID, "the name has a tag");
@@ -228,7 +228,7 @@ TestResult TestStandCreateAllOrNothing(void)
     TestEvidence("creates whole or refused whole, allocations refused", refused);
 out:
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -356,7 +356,7 @@ out:
                                    read_back ? (int64_t)on_medium.meta_block : -1, meta_block);
     }
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -437,7 +437,7 @@ static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired
 
     tagfs_close(handle);
     handle = NULL;
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "the file is deleted");
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "the file is deleted");
     file_id = 0;
     TEST_ASSERT(VolumeTallyTake(&after), "the volume is counted after the delete");
     TEST_ASSERT(after.held >= before.held,
@@ -459,7 +459,7 @@ out:
     if (handle)
         tagfs_close(handle);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -575,7 +575,7 @@ out:
     if (armed)
         HeapFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -671,7 +671,7 @@ TestResult TestStandFrozenBlockFreedTwice(void)
     TEST_ASSERT_EQ(now, kept, "where it was: nothing was copied for a snapshot");
 
     TEST_ASSERT_EQ(TagFSAllocatorRederive(), 0, "the allocator agrees with its bitmap before the delete");
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "the file is deleted");
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "the file is deleted");
     file_id = 0;
     TEST_ASSERT(StandBlockInUse(kept), "its block rests while the Quitclaim is not settled");
     for (uint64_t c = 0; c <= FallowLag(); c++)
@@ -685,7 +685,7 @@ TestResult TestStandFrozenBlockFreedTwice(void)
         verdict = TEST_DEFECT;
 out:
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 

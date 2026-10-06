@@ -393,7 +393,7 @@ static TestResult TestStandTableGrowsOntoAStamp(void)
         uint32_t spent = 0;
         TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &spent), 0,
                        "a file id is spent on the way to the chain's end");
-        TEST_ASSERT_EQ(tagfs_delete_file(spent), 0, "and its file deleted");
+        TEST_ASSERT_EQ(tagfs_delete_file(spent, INK_UNWARRANTED), 0, "and its file deleted");
     }
     TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0, "a file is created");
     TEST_ASSERT_EQ(file_id, edge, "with the first id past the table's chain");
@@ -440,7 +440,7 @@ out:
                  row.meta_block != meta_block || row.meta_offset != meta_offset)
             verdict = TestFailedAt(__FILE__, __LINE__, "with the file's row on it as memory holds "
                                    "it (on the medium, in memory)", row.meta_block, meta_block);
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     }
     return verdict;
 }
@@ -621,7 +621,7 @@ static TestResult TestStandRegistryScratchLeavesTheVolumeAlone(void)
 
     TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
                    "a create that interns nothing new runs on the volume");
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "and its file is deleted");
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "and its file is deleted");
     file_id = 0;
     TEST_ASSERT(StandRegistryChain(&after, s_links_after) && !after.broken,
                 "the registry's chain on the medium is whole after it");
@@ -637,7 +637,7 @@ out:
         tag_registry_destroy(scratch);
     kfree(scratch);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     if (before.links)
         StandRegistryGiveBack(&before);
     return verdict;

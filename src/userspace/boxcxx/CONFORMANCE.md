@@ -5186,7 +5186,7 @@ What is left:
   that no longer names it is committed, or the gap written as zeros to ground
   taken for it) → `STORAGE_OBJ_SPAN` (guarded like `OBJ_DELETE`, and
   publishing the change with `op = 3` in the same 32-byte payload shape a
-  write uses) → `file_span` → `current_span` and the `CURRENT_TRUNCATE` open
+  write uses) → `file_span` → `current_span` and the `CURRENT_FRESH` open
   flag, which spans the file to nothing.
 - `✓` **`tagfs_delete_file` did not unregister the blocks it freed from the
   dedup index.** Found while writing the truncate path above. Gone with the

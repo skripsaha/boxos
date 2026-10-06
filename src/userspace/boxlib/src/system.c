@@ -452,15 +452,11 @@ int sysinfo(system_info_t *info)
  *  Filesystem maintenance / telemetry
  * ========================================================================= */
 
-int defrag(uint32_t file_id, uint32_t target_block)
+int defrag(uint32_t file_id)
 {
-    uint8_t params[8];
-    memcpy(params,     &file_id,      4);
-    memcpy(params + 4, &target_block, 4);
-
     uint32_t score = 0;
     int rc = MfCall1(DECK_SYSTEM, SYS_DEFRAG,
-                     params, sizeof(params),
+                     &file_id, sizeof(file_id),
                      NULL, 0,
                      &score, sizeof(score), NULL,
                      BOX_ANSWER_GUARANTEED, NULL);

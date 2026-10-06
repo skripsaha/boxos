@@ -53,7 +53,7 @@ static TestResult test_stress_many_files(void)
 out:
     for (uint32_t i = 0; i < STRESS_FILE_COUNT; i++)
         if (s_stress_ids[i])
-            tagfs_delete_file(s_stress_ids[i]);
+            tagfs_delete_file(s_stress_ids[i], INK_UNWARRANTED);
     return verdict;
 }
 
@@ -110,7 +110,7 @@ out:
     if (handle)
         tagfs_close(handle);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
