@@ -363,8 +363,12 @@ out:
 
 /* The same question of the file table. File ids are spent up to the first id
  * past the table's chain on the medium, one file is made with that id, and
- * the Settle cycle that has to grow the table for it meets the refusal. The
- * file's row is on the medium once the unarmed cycle afterwards has run. */
+ * the flush that has to grow the table for it meets the refusal. The flush is
+ * asked directly, under the Settle's own Scribe, as a cycle asks it: a whole
+ * cycle takes blocks of its own before the table's step — a Spare for the
+ * pool, a Spare the Glean makes, the registry's growth — and the one it took
+ * first would be the block the plan names. The file's row is on the medium
+ * once the unarmed cycle afterwards has run. */
 static TestResult TestStandTableGrowsOntoAStamp(void)
 {
     TestResult     verdict = TEST_PASS;
@@ -372,6 +376,8 @@ static TestResult TestStandTableGrowsOntoAStamp(void)
     StandChain     before  = { 0 };
     StandChain     after   = { 0 };
     uint32_t       file_id = 0, block = 0;
+    uint64_t       cover   = 0;
+    error_t        said    = OK;
     bool           armed   = false;
     const char*    aside   = StandStepsAsideFor();
 
@@ -392,15 +398,19 @@ static TestResult TestStandTableGrowsOntoAStamp(void)
     TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0, "a file is created");
     TEST_ASSERT_EQ(file_id, edge, "with the first id past the table's chain");
     TEST_ASSERT(StandNextBlock(&block), "the allocator has a block for the growth to take");
+    TEST_ASSERT_EQ(ScribeWait(&g_settle_scribe, ScribeAsk(&g_settle_scribe), &cover, &said),
+                   SCRIBE_MINE, "the test holds the Settle's Scribe, as a cycle does");
 
     BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_WRITE, tagfs_block_to_sector(block),
                  TAGFS_BLOCK_SECTORS, 1);
     armed = true;
-    (void)TagFSSettle();
-    bool fired = BlockFailFired();
+    int  flushed = file_table_flush();
+    bool fired   = BlockFailFired();
     BlockFailDisarm();
     armed = false;
+    ScribeGive(&g_settle_scribe, cover, OK);
     TEST_ASSERT(fired, "the first write of the block the table's growth takes was the write refused");
+    TEST_ASSERT(flushed != 0, "and the flush that met the refusal says so");
     TEST_ASSERT(StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &after),
                 "the chain is walked on the medium after it");
 

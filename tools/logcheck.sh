@@ -8063,10 +8063,33 @@ stand_orders() {
 
 # stand_judge TAG WHAT ROAD SEAT BLOCKFAILS — one first boot, held to all of
 # it. ROAD is bios or uefi; SEAT is the volume seat's name as an ERE;
-# BLOCKFAILS is how many commands the faults refuse on that machine — one per
-# test that arms BLOCKFAIL to refuse and runs there (the asynchronous read has
-# no road on the legacy channel, whose one block a command has no run with an
-# inside to refuse either; a plan that only counts refuses nothing).
+# BLOCKFAILS is how many commands the faults refuse on that machine, counted
+# off the tests' code, test by test. A refusal is said as "seat N: …"; a
+# protection a test puts the seat in (stand_settle_write_protected) is said
+# as "seat N protects …" and is no refusal. A plan that only counts
+# (BLOCK_FAIL_NEVER: stand_run_megabyte_*, stand_helm_guarded_file_refused)
+# refuses nothing, and neither does one armed for a command that never comes
+# (stand_flush_ticket's second plan).
+#
+#   test                                              BIOS 4c  UEFI 4c
+#   stand_blockfail_reads_the_nth                         1        1
+#   stand_blockfail_write_never_lands                     1        1
+#   stand_blockfail_flush_refused                         1        1
+#   stand_blockfail_async_read                            0        1   no asynchronous read on the legacy channel
+#   stand_flush_ticket                                    1        1
+#   stand_rmw_read_refused                                1        1
+#   stand_sync_owns_a_refused_write                       1        1
+#   stand_sync_owns_a_refused_flush                       1        1
+#   stand_registry_growth_links_what_landed               1        1
+#   stand_registry_flush_keeps_its_block                  1        1
+#   stand_table_grows_onto_a_stamp                        1        1
+#   stand_helm_write_refused_part_way                     1        1
+#   stand_port_write_refused_part_way                     0        1   no port on the legacy channel
+#   stand_seal_cut_keeps_the_seal                         2        2   its open block, then its Ledger
+#   stand_run_refused_inside_a_run                        0        1   one block a command: a run has no inside
+#   stand_run_refused_inside_a_run_through_the_port       0        1   and no port either
+#   stand_medium_* (a flush answered with sense)          0        0   a USB seat's own
+#   total                                                13       17
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -8085,7 +8108,7 @@ stand_judge() {
     stand_orders "$L" "$what"
     got=$(grep -ac '^\[BLOCKFAIL\] seat [0-9]*: ' "$L")
     [ "$got" = "$want" ]
-    chk $? "stand: $what — BLOCKFAIL refused $got command(s), one for each test that armed it ($want)"
+    chk $? "stand: $what — BLOCKFAIL refused $got command(s), as many as the tests that arm it refuse on this road ($want)"
     grep -aqE '^\[BLOCKFAIL\] seat [0-9]+: the read of sectors [0-9]+\.\.[0-9]+ is refused as a medium error — occurrence 2 since arming' "$L"
     chk $? "stand: $what — the read it refused was the second one at its block, not the first"
     grep -aqE '^\[BLOCKFAIL\] seat [0-9]+: the write of sectors [0-9]+\.\.[0-9]+ is refused as a medium error — occurrence 1 since arming, and nothing of it was issued' "$L"
@@ -8156,8 +8179,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 10 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 14 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 13 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 17 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
@@ -8175,7 +8198,8 @@ run_stand() {
 # "caveat lifted early", with the number the fix makes it see, and fail. And a
 # test that proves a fault mechanism is only worth passing if the mechanism,
 # broken, fails it: no range check, no kind check, not single-shot, a disarm
-# that does not disarm, a refused write that lands anyway, a flush never
+# that does not disarm, a refused write that lands anyway, a refusal inside
+# a command that lets nothing before its sector through, a flush never
 # asked, an asynchronous refusal returned instead of called back, HEAPFAIL
 # asked after the slab, counting without refusing, blind to the core, the tag
 # row's PF-1 fix taken out, and a test that forgets to take its fault down
@@ -8247,6 +8271,7 @@ stand_mech_on() {
         kind)   marks="src/kernel/core/boardroom/block_fail.c:1 src/lib/kernel/klib_mem.c:1" ;;
         shots)  marks="src/kernel/core/boardroom/block_fail.c:1 src/lib/kernel/klib_mem.c:1" ;;
         disarm) marks="src/kernel/core/boardroom/block_fail.c:1 src/kernel/core/boardroom/boardroom.c:1" ;;
+        inside) marks="src/kernel/core/boardroom/block_fail.c:1" ;;
         lands)  marks="src/kernel/core/boardroom/boardroom.c:2 src/kernel/tagfs/tag_bitmap/tag_bitmap.c:1" ;;
         blind)  marks="src/kernel/tagfs/tests/tests.c:2 src/kernel/tagfs/tests/core_tests.c:1" ;;
         lockrank) marks="src/kernel/tagfs/lock_rank/lock_rank.c:2" ;;
@@ -8307,6 +8332,11 @@ edits = {
   ("src/kernel/core/boardroom/boardroom.c",
    "    if (BlockFailFlushStrikes(seat, sense)) {\n        if (s->kind == BOARD_USB && (sense[0] | sense[1] | sense[2]))\n            return xhci_msd_flush_answered(s->index, sense[0], sense[1], sense[2]);\n        return BoardMediumRefusal(s->kind, BLOCK_FAIL_FLUSH);\n    }\n",
    "    (void)sense;   /* " + M + ": the flush is never asked */\n"),
+ ],
+ "inside": [
+  ("src/kernel/core/boardroom/block_fail.c",
+   "    uint32_t before = (keep && kind != BLOCK_FAIL_FLUSH && plan.first > lba)\n                          ? (uint32_t)(plan.first - lba) : 0;\n",
+   "    uint32_t before = 0;   /* " + M + ": nothing before the refused sector reaches the medium */\n"),
  ],
  "lands": [
   ("src/kernel/core/boardroom/boardroom.c",
@@ -8591,6 +8621,21 @@ STAND_HELD_EOF
     fi
     stand_mech_off
 
+    # A medium that names the sector it failed at keeps what came before it,
+    # and BLOCKFAIL refuses the way one does (step 1.11): taken out, a run
+    # refused at its k-th block answers none of the k-1 before it, on both
+    # roads — an AHCI port takes 32 blocks a command, so k is 17 and the
+    # sixteen before it are 65536 bytes. On q35: the legacy channel takes one
+    # block a command, and a run there has no inside to refuse.
+    stand_mech_on inside
+    if stand_mut_boot standmut_inside UEFI=on STRICT=on CORES=4 MEM=4G; then
+        stand_red standmut_inside "a BLOCKFAIL that holds nothing before the sector answers a run refused inside as refused whole" \
+            'stand_run_refused_inside_a_run failed at [^:]+:[0-9]+: exactly the k-1 blocks of the run before the refused one \(0, 65536\)'
+        stand_red standmut_inside "and through the port the same" \
+            'stand_run_refused_inside_a_run_through_the_port failed at [^:]+:[0-9]+: exactly the k-1 blocks of the run before the refused one \(0, 65536\)'
+    fi
+    stand_mech_off
+
     # On one core, where every system call runs with interrupts off: a read
     # that holds no TagFS lock is exactly what a bare-IF witness would name.
     stand_mech_on lockrank
@@ -8732,9 +8777,9 @@ STAND_HELD_EOF
 # and judges what came back, beside what the kernel said and what the medium
 # holds afterwards:
 #
-#   boot 1  longquery bigwrite sequential interleave coldread coldwrite
-#           usememory; then the host lists the volume and counts the extents
-#           each file was given
+#   boot 1  on QUILL_BOOT1_MEM: longquery bigwrite sequential interleave
+#           coldread coldwrite usememory; then the host lists the volume and
+#           counts the extents each file was given
 #   boot 2  usememory's second half, when the first said PENDING; fidhistory
 #   boot 3  systemtag; then the host lists the volume again: is kernel.bin on it
 #
@@ -8761,7 +8806,15 @@ STAND_HELD_EOF
 # Its keys are read as a shell reads words, so a key whose value holds a
 # blank is quoted inside it: QUILL_STAND="STRICT=on CORES=4 MEM=2G
 # QEMUEXTRA='-machine pc'" is the PIIX stand, one key reaching make whole.
+#
+# Boot 1 runs on less memory than the stand: QUILL_BOOT1_MEM in place of its
+# MEM. bigwrite writes 256 MiB in one fwrite, and what it proves — that a
+# write is not copied through one kernel-heap allocation of its whole size —
+# is only proven where that allocation could not be had beside the program's
+# own 256 MiB: on a machine with less than twice the write. On the stand's
+# 2 GiB the copy would be had, and bigwrite would pass with the defect back.
 QUILL_STAND=${QUILL_STAND:-"UEFI=on STRICT=on CORES=4 MEM=2G"}
+QUILL_BOOT1_MEM=448M
 QUILL_GROW_SECTORS=2097152   # a gigabyte more ground than the image was made with
 QUILL_NEED_FREE=131072       # blocks the grown volume must have free: 512 MiB
 
@@ -8789,15 +8842,22 @@ quill_keep() {    # quill_keep NAME — stop the machine and keep its log
     cp build/serial.log "$SCRATCH/serial.quill.$1.log"
 }
 
-# quill_boot NAME — boot the stretched image, and refuse to go on from a boot
-# that stands on any other ground: a repacked image is a fresh one, and every
-# verdict taken on it would be about a volume nobody stretched. VOLUME_TESTS
-# goes on run-bg as well: it owns a rebuild marker, and a run-bg without it
-# would rebuild the tree plain and repack.
+# quill_boot NAME [MEM] — boot the stretched image, and refuse to go on from a
+# boot that stands on any other ground: a repacked image is a fresh one, and
+# every verdict taken on it would be about a volume nobody stretched.
+# VOLUME_TESTS goes on run-bg as well: it owns a rebuild marker, and a run-bg
+# without it would rebuild the tree plain and repack. MEM, when given, is the
+# machine's memory in place of the stand's; no build key reads it, so the
+# image is booted as it was stretched.
 quill_boot() {
-    local stood
+    local stood key keys=()
+    for key in ${QUILL_KEYS[@]+"${QUILL_KEYS[@]}"}; do
+        [ -n "${2:-}" ] && [ "${key#MEM=}" != "$key" ] && continue
+        keys+=("$key")
+    done
+    [ -n "${2:-}" ] && keys+=("MEM=$2")
     make run-stop >/dev/null 2>&1
-    make run-bg VOLUME_TESTS=on ${QUILL_KEYS[@]+"${QUILL_KEYS[@]}"} >/dev/null 2>&1
+    make run-bg VOLUME_TESTS=on ${keys[@]+"${keys[@]}"} >/dev/null 2>&1
     if ! wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"; then
         quill_keep "$1"
         bad "quill: boot $1 never reached a shell"
@@ -8848,7 +8908,7 @@ quill_session() {
     QUILL_START=${grown% *}
     QUILL_COUNT=${grown#* }
 
-    quill_boot "${tag}1" || return 1
+    quill_boot "${tag}1" "$QUILL_BOOT1_MEM" || return 1
     for c in longquery bigwrite sequential interleave coldread coldwrite usememory; do
         quill_run "$c" "$WAIT_QUIET_SLOW_S" || break
     done
@@ -9164,7 +9224,7 @@ quill_said_path() {   # quill_said_path CASE SEEN
 
 run_quill() {
     echo "== quill: the Quill write core's red tests, each held under the step that discharges it =="
-    echo "   stand: $QUILL_STAND, built VOLUME_TESTS=on"
+    echo "   stand: $QUILL_STAND (boot 1 MEM=$QUILL_BOOT1_MEM), built VOLUME_TESTS=on"
     local kind a b c
     # A session cut short has said why; three boots or none are judged.
     if ! quill_session quill; then

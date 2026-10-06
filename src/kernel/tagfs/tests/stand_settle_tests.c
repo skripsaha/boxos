@@ -5,6 +5,7 @@
 #include "../metadata_pool/meta_pool.h"
 #include "../settle/settle.h"
 #include "amp.h"
+#include "baton.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
 #include "block_fail.h"
@@ -16,10 +17,14 @@
 //
 // The runner holds the cadence off for every other test (settle.h,
 // SettleCadenceHold); these let it go where the cadence is what they ask about.
-// A test runs on a K-Core — or, on one core, inside a call with interrupts off
-// — so it stands in for its own core's loop and calls the service point
-// itself: on the committer's core that is where the cycle runs, anywhere else
-// the call does nothing and the committer's own loop runs it.
+// A test runs at boot on the boot core with its interrupts still off, however
+// many cores there are — and the boot core is the drain core, whose batons
+// carry the cadence's knock and whose tick fires the Lull's node. So a test
+// that waits for the cadence stands in for its own core's loop: it knocks as
+// the tick would, runs the batons the knock leaves there, and calls the
+// service point. On one core the committer is this core, and the cycle runs
+// in that call; on more it is a K-Core, which the knock wakes to look again,
+// and its own loop runs the cycle.
 // ============================================================================
 
 static uint64_t StandNowUs(void)
@@ -54,6 +59,8 @@ static TestResult TestStandSettleWithoutAnchor(void)
     uint64_t gen   = InkedGen();
     uint64_t began = StandNowUs();
     while (SettledGen() < gen && StandNowUs() - began < 2u * SETTLE_WINDOW_US) {
+        SettleKnock();
+        BatonPump(amp_get_core_index());
         SettleServiceIfPending(false);
         cpu_pause();
     }

@@ -94,14 +94,18 @@ static size_t StandTagText(const char* key, char fill, size_t bytes)
 
 /* A query for one tag of 256 bytes used to be dropped unread, and the answer
  * was every file in scope. It is refused as too long; and a tag whose value
- * runs past the old 255 is read whole and answered — no file wears it. */
+ * runs past the old 255 is read whole and answered — no file wears it. The
+ * query for every file that measures "every file" is answered with as many
+ * ids as the answer holds, after its two counts. */
 static TestResult TestStandLongQueryRefused(void)
 {
     TestResult verdict = TEST_PASS;
     uint64_t   said    = 0;
 
     TEST_ASSERT_OK(StandQuery(NULL, 0, &said), "a query for every file is answered");
-    TEST_ASSERT_EQ(said, 8, "with its two counts and no id");
+    TEST_ASSERT_EQ(said, 8 + (uint64_t)s_answer[0] * sizeof(uint32_t),
+                   "with its two counts and an id for each file it delivered");
+    TEST_ASSERT(s_answer[1] >= s_answer[0], "of every file there is");
     uint32_t every = s_answer[1];
 
     memset(s_long, 'q', STAND_LONG_BYTES);
