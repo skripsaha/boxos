@@ -3,6 +3,7 @@
 #include "../tagfs.h"
 #include "boardroom.h"
 #include "roadstead.h"
+#include "block_fail.h"   /* BLOCKFAIL — a read nobody stands over, refused */
 #include "ahci.h"
 #include "pmm.h"
 #include "vmm.h"
@@ -32,6 +33,7 @@
 typedef struct {
     RoadsteadBerth    berth;     /* the seat's from the submit until the answer */
     void*             dma;
+    bool              taken;     /* the room took the read: its answer will come */
     volatile uint32_t answered;
     volatile error_t  status;
 } StandRoadsteadRead;
@@ -73,13 +75,23 @@ static uint32_t StandRoadsteadAnswers(uint32_t n)
     return count;
 }
 
-/* The reads of the first `n` the seat took — the room fills the berth only
- * for a read it takes. */
+/* The read `r` asked of the seat, and taken when the room says so — by its
+ * answer, never by the berth: the room fills the berth before it hands the
+ * read on, taken or not. */
+static error_t StandRoadsteadAsk(uint8_t seat, StandRoadsteadRead* r)
+{
+    error_t rc = BoardroomReadAsync(seat, 0, TAGFS_BLOCK_SECTORS, r->dma,
+                                    StandRoadsteadAnswered, r, &r->berth);
+    r->taken = rc == OK;
+    return rc;
+}
+
+/* The reads of the first `n` the seat took. */
 static uint32_t StandRoadsteadTaken(uint32_t n)
 {
     uint32_t count = 0;
     for (uint32_t i = 0; i < n; i++)
-        count += s_reads[i].berth.answered != NULL;
+        count += s_reads[i].taken;
     return count;
 }
 
@@ -103,7 +115,7 @@ static void StandRoadsteadRelease(uint32_t n)
 {
     for (uint32_t i = 0; i < n; i++) {
         StandRoadsteadRead* r = &s_reads[i];
-        if (r->dma && (r->berth.answered == NULL || r->answered))
+        if (r->dma && (!r->taken || r->answered))
             pmm_free(r->dma, 1);
         r->dma = NULL;
     }
@@ -154,9 +166,7 @@ static TestResult TestStandRoadsteadOneSlotTwoReads(void)
     TEST_ASSERT(held >= 0, "a caller stands over the port's only slot");
 
     for (uint32_t i = 0; i < 2; i++) {
-        TEST_ASSERT_OK(BoardroomReadAsync(seat, 0, TAGFS_BLOCK_SECTORS, s_reads[i].dma,
-                                          StandRoadsteadAnswered, &s_reads[i],
-                                          &s_reads[i].berth),
+        TEST_ASSERT_OK(StandRoadsteadAsk(seat, &s_reads[i]),
                        "a read that finds the only slot taken is taken, not refused");
     }
     TEST_ASSERT_EQ(StandRoadsteadAnswers(2), 0, "and neither is answered while the slot is held");
@@ -204,8 +214,7 @@ static TestResult TestStandRoadsteadReadWaitsForTheDoor(void)
     TEST_ASSERT_EQ(ahci_port_take_whole(port, CONFIG_AHCI_IO_TIMEOUT_MS, &slot), AHCI_TAKE_GOT,
                    "the whole port is taken, as a cache flush takes it");
     door = true;
-    TEST_ASSERT_OK(BoardroomReadAsync(seat, 0, TAGFS_BLOCK_SECTORS, s_reads[0].dma,
-                                      StandRoadsteadAnswered, &s_reads[0], &s_reads[0].berth),
+    TEST_ASSERT_OK(StandRoadsteadAsk(seat, &s_reads[0]),
                    "a read that finds the door shut is taken, not refused");
     TEST_ASSERT_EQ(StandRoadsteadAnswers(1), 0, "and is not answered while the door is shut");
 
@@ -267,6 +276,53 @@ out:
     return verdict;
 }
 
+/*
+ * The bell on the road nobody stands on (B2). A read nobody stands over that
+ * the medium refuses, then one it answers: the seat counts seat:ready once,
+ * for the refusal — the room hears a command's answer on this road as it does
+ * on the attended one, because it stands between every seat and the caller.
+ * Red before: the room never saw an answer on this road at all, and a seat
+ * busy only with programs' reads never rang.
+ */
+static TestResult TestStandRoadsteadRefusalRingsOnce(void)
+{
+    TestResult  verdict = TEST_PASS;
+    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     port    = 0;
+    bool        armed   = false;
+    const char* none    = StandRoadsteadPort(&port);
+
+    if (none)
+        return test_steps_aside(none);
+
+    memset(s_reads, 0, sizeof(s_reads));
+    TEST_ASSERT(StandRoadsteadReadReady(&s_reads[0]) && StandRoadsteadReadReady(&s_reads[1]),
+                "a page for each read");
+
+    uint32_t gen = BoardroomSeatReadyGen(seat);
+    BlockFailArm(seat, BLOCK_FAIL_READ, 0, TAGFS_BLOCK_SECTORS, 1);
+    armed = true;
+    TEST_ASSERT_OK(StandRoadsteadAsk(seat, &s_reads[0]), "a read nobody stands over is taken");
+    TEST_ASSERT(StandRoadsteadAwait(port, 1), "and answered");
+    TEST_ASSERT(BlockFailFired(), "by BLOCKFAIL, in the medium's place");
+    BlockFailDisarm();
+    armed = false;
+    TEST_ASSERT_EQ(s_reads[0].status, ERR_IO, "with a refusal");
+    TEST_ASSERT_EQ(BoardroomSeatReadyGen(seat), gen, "which rings nothing");
+
+    TEST_ASSERT_OK(StandRoadsteadAsk(seat, &s_reads[1]), "the next read nobody stands over");
+    TEST_ASSERT(StandRoadsteadAwait(port, 2), "is answered");
+    TEST_ASSERT_OK(s_reads[1].status, "by the medium");
+    TEST_ASSERT_EQ(BoardroomSeatReadyGen(seat), gen + 1u,
+                   "and the seat counts seat:ready once, for the refusal before it");
+out:
+    if (armed)
+        BlockFailDisarm();
+    (void)StandRoadsteadAwait(port, 2);
+    StandRoadsteadRelease(2);
+    return verdict;
+}
+
 static const TestCase g_stand_roadstead_tests[] = {
     { .name = "stand_roadstead_one_slot_two_reads", .func = TestStandRoadsteadOneSlotTwoReads,
       .reach = TEST_READS_ONLY },
@@ -274,6 +330,8 @@ static const TestCase g_stand_roadstead_tests[] = {
       .func = TestStandRoadsteadReadWaitsForTheDoor, .reach = TEST_READS_ONLY },
     { .name = "stand_roadstead_flush_wants_the_whole_port",
       .func = TestStandRoadsteadFlushWantsTheWholePort, .reach = TEST_READS_ONLY },
+    { .name = "stand_roadstead_refusal_rings_once",
+      .func = TestStandRoadsteadRefusalRingsOnce, .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_stand_roadstead_suite = {

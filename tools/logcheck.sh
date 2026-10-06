@@ -7951,15 +7951,15 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 109 of the stand's own twenty suites: stand 26, stand_lock 4,
-# stand_chain 7, stand_spelling 6, stand_roadstead 3, stand_map 3,
+# the 113 of the stand's own twenty suites: stand 26, stand_lock 4,
+# stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 3,
 # stand_plot 4, stand_index 5, stand_ink 5, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 5, stand_settle 4, stand_glean 5,
-# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 5. Counted off
+# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 8. Counted off
 # the code, not a run (K9): a suite that drops out of the walk is a test that
 # stopped covering anything, and the count is where that shows. How many of
 # them pass and how many stand aside is the road's — said, not pinned.
-STAND_RUN=131
+STAND_RUN=135
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -8089,7 +8089,10 @@ stand_orders() {
 #   stand_run_refused_inside_a_run                        0        1   one block a command: a run has no inside
 #   stand_run_refused_inside_a_run_through_the_port       0        1   and no port either
 #   stand_medium_* (a flush answered with sense)          0        0   a USB seat's own
-#   total                                                13       17
+#   stand_medium_bell_rings_once                          1        1
+#   stand_medium_mount_hears_the_ready_it_was_owed        1        1   the mount's first read of the data
+#   stand_roadstead_refusal_rings_once                    0        1   no asynchronous read on the legacy channel
+#   total                                                15       20
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -8179,8 +8182,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 13 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 17 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 15 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 20 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"

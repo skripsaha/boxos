@@ -3,6 +3,7 @@
 #include "../tagfs.h"
 #include "../helm/helm.h"
 #include "../ink/ink.h"
+#include "../ink/fallow.h"
 #include "../settle/settle.h"
 #include "../scribe/scribe.h"
 #include "../ledger/ledger.h"
@@ -11,6 +12,8 @@
 #include "block_fail.h"   /* BLOCKFAIL — a flush answered with the sense a USB disk gives */
 #include "boardroom.h"
 #include "xhci_msd.h"     /* the USB disk's memory of its SYNCHRONIZE CACHE answer */
+#include "touch.h"        /* an ear on seat:ready */
+#include "logbook.h"
 #include "amp.h"
 #include "atomics.h"
 #include "baton.h"
@@ -449,6 +452,270 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// The bell, and the road a mount takes when the medium does what a hand does
+// ----------------------------------------------------------------------------
+
+/* A mount of the stand's volume, start to end, on a slow medium — the test's
+ * own bound, which turns the defect it stands for into a failure instead of a
+ * machine that stops. */
+#define STAND_MOUNT_BOUND_MS   10000u
+
+/* The block read of a mount the seat empties at: past the first, so the mount
+ * is part way through reading the volume when its medium goes. */
+#define STAND_MOUNT_EMPTIES_AT 2u
+
+/* Cycles enough for everything at rest in Fallow to come back: its freer's
+ * cycle and the lag after it, for any freer the tests left, and the spare. */
+#define STAND_BARE_CYCLES      8u
+
+/* seat:ready of one seat, as an ear on the tag hears it. */
+typedef struct {
+    uint8_t           seat;
+    volatile uint32_t heard;
+} StandBell;
+
+static StandBell s_bell;
+
+static void StandBellHeard(TouchTag tag, const void* payload, uint32_t plen,
+                           uint32_t source_pid, void* ctx)
+{
+    (void)tag; (void)source_pid;
+    StandBell*                b  = (StandBell*)ctx;
+    const BoardroomSeatEvent* ev = (const BoardroomSeatEvent*)payload;
+    if (plen >= sizeof(*ev) && ev->first == b->seat)
+        __atomic_add_fetch(&b->heard, 1u, __ATOMIC_ACQ_REL);
+}
+
+/* The room's pass run here until the ear has heard `want`, bounded: a bell is
+ * said by whichever core passes first. */
+static bool StandBellHeardAt(uint32_t want)
+{
+    uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_BOOK_BOUND_MS);
+    while (__atomic_load_n(&s_bell.heard, __ATOMIC_ACQUIRE) < want) {
+        if (rdtsc() >= bound)
+            return false;
+        BoardroomAttendIfPending();
+        cpu_pause();
+    }
+    return true;
+}
+
+/*
+ * The bell (B2). A seat that refused a command says seat:ready on the first
+ * command it answers after — once, whatever kind of medium sits in it, the
+ * legacy channel's among them. Red before: only an AHCI port's recovery and a
+ * USB disk's settled cache flush ever said it, and a mount or a cycle refused
+ * anywhere else waited for an event that could not come.
+ */
+static TestResult TestStandMediumBellRingsOnce(void)
+{
+    TestResult  verdict = TEST_PASS;
+    uint8_t     seat    = tagfs_get_seat();
+    TouchWatch* ear     = NULL;
+    bool        armed   = false;
+    TouchTag    full    = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT(BoardroomSeatAnnouncesReady(seat), "the volume's seat says seat:ready, whatever it is");
+    memset(&s_bell, 0, sizeof(s_bell));
+    s_bell.seat = seat;
+    TouchLogbookResolve("seat:ready", &full, &bare);
+    ear = TouchWatchSet(full, StandBellHeard, &s_bell);
+    TEST_ASSERT(ear != NULL, "an ear on seat:ready");
+
+    uint32_t gen = BoardroomSeatReadyGen(seat);
+    BlockFailArm(seat, BLOCK_FAIL_READ, 0, TAGFS_BLOCK_SECTORS, 1);
+    armed = true;
+    TEST_ASSERT(BoardroomRead(seat, 0, TAGFS_BLOCK_SECTORS, g_test_output) != 0,
+                "a read the medium refuses");
+    TEST_ASSERT(BlockFailFired(), "refused by BLOCKFAIL in the medium's place");
+    BlockFailDisarm();
+    armed = false;
+    TEST_ASSERT_EQ(BoardroomSeatReadyGen(seat), gen, "a refusal rings nothing");
+
+    TEST_ASSERT_EQ(BoardroomRead(seat, 0, TAGFS_BLOCK_SECTORS, g_test_output), 0,
+                   "the next read is answered");
+    TEST_ASSERT_EQ(BoardroomSeatReadyGen(seat), gen + 1u,
+                   "and the seat counts seat:ready for the refusal before it");
+    TEST_ASSERT(StandBellHeardAt(1), "and the room says seat:ready of it");
+
+    TEST_ASSERT_EQ(BoardroomRead(seat, 0, TAGFS_BLOCK_SECTORS, g_test_output), 0,
+                   "a read after that is answered too");
+    BoardroomAttendIfPending();
+    TEST_ASSERT_EQ(BoardroomSeatReadyGen(seat), gen + 1u,
+                   "and rings nothing: the refusal was answered once");
+    TestEvidence("seat:ready said of the seat, of 1", s_bell.heard);
+    TEST_ASSERT_EQ(s_bell.heard, 1, "seat:ready was said exactly once");
+out:
+    if (armed)
+        BlockFailDisarm();
+    if (ear)
+        TouchWatchClear(ear);
+    return verdict;
+}
+
+/* The room's and the volume's service passes run here until the mount road
+ * has nothing left to do, bounded — whichever core passes its own may do the
+ * work first. */
+static bool StandMountSettles(void)
+{
+    uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_MOUNT_BOUND_MS);
+    uint8_t  me    = amp_get_core_index();
+    for (;;) {
+        BoardroomAttendIfPending();
+        TagFSServiceIfPending();
+        if (TagFSStandMountIdle())
+            return true;
+        if (rdtsc() >= bound)
+            return false;
+        BatonPump(me);
+        cpu_pause();
+    }
+}
+
+/*
+ * The volume as the medium holds it, and nothing resting: cycles until Fallow
+ * has given back all it held, and one more, whose map says on the medium that
+ * the ground came back. A take-down drops what rests without a word
+ * (tagfs_clear_the_ground), and the next mount reads ground the medium's map
+ * still holds as taken and named by nobody — the orphans a census gives back,
+ * once it does (B1). A test that takes the volume down leaves none behind.
+ */
+static bool StandSettledBare(void)
+{
+    TagFSState* fs = tagfs_get_state();
+    for (uint32_t cycle = 0; cycle < STAND_BARE_CYCLES; cycle++) {
+        if (TagFSSettle() != OK)
+            return false;
+        TagFSLockTake(&fs->lock);
+        uint64_t resting = FallowBlocks();
+        TagFSLockDrop(&fs->lock);
+        if (resting == 0)
+            return TagFSSettle() == OK;
+    }
+    return false;
+}
+
+/* Whatever a mount test left: its turn taken down, BLOCKFAIL down, the volume
+ * up again if it is not — the medium seated, and an arrival attended — and
+ * the runner counted back in. */
+static void StandMountClose(uint8_t seat)
+{
+    TagFSStandMountTurn(STAND_MOUNT_AS_IS, 0);
+    BlockFailDisarm();
+    if (!tagfs_get_state()->initialized) {
+        if (!BoardroomSeatOccupied(seat))
+            (void)BoardroomInit();
+        TagFSAttendArrival();
+        (void)StandMountSettles();
+    }
+    TagFSStandHoldAgain();
+}
+
+/*
+ * R5 (Z11-2, Z15-1). The medium leaves in the middle of a mount's reads, and
+ * comes back. The departure is the mount's refusal and nothing more: no book
+ * is opened for a volume that was never up, and nothing waits on seat:ready —
+ * the return is an arrival, and the arrival mounts. And a book a volume gone
+ * left standing is not the next mount's. Red before: the mount's block reads
+ * latched the departure as a mounted volume's, nothing took the latch down,
+ * and every later mount was refused at its first read until the machine was
+ * switched off.
+ */
+static TestResult TestStandMediumMountLosesItsSeat(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    uint8_t     seat    = tagfs_get_seat();
+    BoardKind   kind    = BoardroomSeatKind(seat);
+    uint8_t     index   = BoardroomSeatIndex(seat);
+    uint32_t    epoch   = tagfs_mount_epoch();
+    bool        let_go  = false;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
+    let_go = true;
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    BoardroomNoteDeparture(kind, index);
+    TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
+
+    TagFSStandMountTurn(STAND_MOUNT_SEAT_EMPTIES, STAND_MOUNT_EMPTIES_AT);
+    TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
+    TEST_ASSERT(StandMountSettles(), "and its arrival is attended");
+    TEST_ASSERT(TagFSStandMountTurnFired(),
+                "the seat emptied under the mount, in the middle of its reads");
+    TEST_ASSERT(!fs->initialized, "the mount that lost its medium mounted nothing");
+    TEST_ASSERT(!TagFSMediumLeft(), "and opened no book: no volume was up to hold one");
+    TEST_ASSERT(!TagFSStandMountOwed(),
+                "and nothing waits for seat:ready: the medium's return is the arrival that asks");
+    TagFSStandMountTurn(STAND_MOUNT_AS_IS, 0);
+
+    TagFSStandMediumLeaves();
+    TEST_ASSERT(TagFSMediumLeft(), "a book is left standing while no volume is up");
+    TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium arrives again");
+    TEST_ASSERT(StandMountSettles(), "and its arrival is attended");
+    TEST_ASSERT(fs->initialized, "and the volume is MOUNTED");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
+    TEST_ASSERT(!TagFSMediumLeft(), "and holds no book a volume before it left standing");
+out:
+    if (let_go)
+        StandMountClose(seat);
+    return verdict;
+}
+
+/*
+ * R4 (Z11-5, Z15-4). A read of the mount is refused, and the seat says
+ * seat:ready in the same breath — before the mount has heard it was refused,
+ * as a driver's recovery says it. That seat:ready is the one the mount is owed:
+ * it is asked again at once, and the volume mounts with no other event. Red
+ * before: the event came while nothing was owed yet, was dropped, and the
+ * mount waited for a second one that never came.
+ */
+static TestResult TestStandMediumMountHearsTheReadyItWasOwed(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    uint8_t     seat    = tagfs_get_seat();
+    BoardKind   kind    = BoardroomSeatKind(seat);
+    uint8_t     index   = BoardroomSeatIndex(seat);
+    uint32_t    epoch   = tagfs_mount_epoch();
+    uint64_t    first   = tagfs_block_to_sector(0);
+    uint64_t    span    = (uint64_t)fs->layout.data_blocks * TAGFS_BLOCK_SECTORS;
+    bool        let_go  = false;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
+    let_go = true;
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    BoardroomNoteDeparture(kind, index);
+    TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
+
+    BlockFailArm(seat, BLOCK_FAIL_READ, first, span, 1);
+    TagFSStandMountTurn(STAND_MOUNT_SEAT_RINGS, 0);
+    TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
+    TEST_ASSERT(StandMountSettles(), "and its arrival is attended, and what it owes");
+    TEST_ASSERT(BlockFailFired(), "the mount's first read of the volume's data was refused");
+    TEST_ASSERT(TagFSStandMountTurnFired(),
+                "and the seat said seat:ready before the mount had heard of it");
+    TEST_ASSERT(fs->initialized, "the mount was asked again on it, and the volume is MOUNTED");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
+    TEST_ASSERT(!TagFSStandMountOwed(), "and nothing is owed any more");
+out:
+    if (let_go)
+        StandMountClose(seat);
+    return verdict;
+}
+
 static const TestCase g_stand_medium_tests[] = {
     { .name  = "stand_medium_no_medium_flush_refused",
       .func  = TestStandMediumNoMediumFlushRefused, .reach = TEST_WRITES_TO_VOLUME,
@@ -461,6 +728,13 @@ static const TestCase g_stand_medium_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_idle_taken_up_after_spare",
       .func  = TestStandMediumIdleTakenUpAfterSpare, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_bell_rings_once",
+      .func  = TestStandMediumBellRingsOnce, .reach = TEST_READS_ONLY },
+    /* Last, both: each takes the volume down and mounts it again. */
+    { .name  = "stand_medium_mount_loses_its_seat",
+      .func  = TestStandMediumMountLosesItsSeat, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_mount_hears_the_ready_it_was_owed",
+      .func  = TestStandMediumMountHearsTheReadyItWasOwed, .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_medium_suite = {

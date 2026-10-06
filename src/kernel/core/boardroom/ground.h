@@ -54,8 +54,13 @@ typedef struct {
  * this kernel writes one. A medium that leaves and comes back is a different
  * occupant of the chair and is read again. Anything that ever DOES write a
  * partition table has to drop that memory; ground.c says where.
+ *
+ * Except a survey the medium REFUSED: its zero is not an answer, is not
+ * remembered, and raises `refused` (NULL when the caller does not ask) — the
+ * next survey reads the medium again, and whoever is waiting on the answer
+ * waits for the seat to say it answers again (seat:ready).
  */
-uint8_t GroundSurvey(uint8_t seat, MediumGround *out, uint8_t max);
+uint8_t GroundSurvey(uint8_t seat, MediumGround *out, uint8_t max, bool *refused);
 
 const char *GroundOriginName(GroundOrigin origin);
 

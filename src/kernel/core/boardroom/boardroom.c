@@ -46,6 +46,9 @@ typedef struct BoardSeat {
     bool      removable;
     bool      occupied;         /* is there a medium in it at this moment */
     uint32_t  seating;          /* which taking of the room this occupant is */
+    volatile uint32_t ready_gen;  /* seat:ready said of this chair, counted */
+    volatile uint8_t  refused;    /* a command refused since the last one answered */
+    volatile uint8_t  bell;       /* seat:ready noted, the room's pass yet to say it */
     char      name[48];
 } BoardSeat;
 
@@ -53,6 +56,60 @@ static BoardSeat* g_seats = NULL;
 static uint8_t    g_seat_count = 0;     /* chairs, whether or not anybody is in them */
 static uint32_t   g_seatings = 0;       /* takings anywhere in the room, ever */
 static bool       g_initialised = false;
+
+/*
+ * ‼ THE BELL: A SEAT THAT REFUSED SAYS SO WHEN IT ANSWERS AGAIN.
+ *
+ * Whoever a medium told "not now" waits for seat:ready instead of asking on a
+ * clock — and only two places in the whole kernel ever said it: an AHCI port
+ * its recovery brought back, and a USB disk that reported a state change and
+ * then committed its cache. A legacy channel never said it, and neither did a
+ * USB disk that refused a read, so a mount owed on either was owed for the
+ * rest of the boot, and a Settle cycle refused on one waited for nothing.
+ *
+ * So the room keeps the fact for every chair, because every command any medium
+ * answers passes through here: a command refused marks the chair, and the
+ * first one the chair answers after that rings — seat:ready, once, for that
+ * refusal. The drivers' own recovery points ring it too (an AHCI port back, an
+ * IDE channel reset, a USB transport reset), and a ring answers the refusal
+ * before it.
+ *
+ * Noted where the answer comes — a completion interrupt, a driver's recovery
+ * under its port's lock, a read four frames deep in the integrity map — and
+ * SAID by the room's own pass (BoardroomAttendIfPending), where a listener may
+ * take its time: nothing about who is listening is allowed to land on the
+ * stack or under the locks of whoever happened to be answered. The count
+ * moves where it is noted, so a waiter that compares counts is never behind
+ * the bell.
+ */
+static volatile uint32_t g_ready_gen = 0;   /* seat:ready noted of any chair, counted */
+static volatile uint32_t g_bell_owed = 0;   /* some chair's bell is noted and not yet said */
+
+static void BoardSeatReadyNoted(BoardSeat* s)
+{
+    __atomic_store_n(&s->refused, 0u, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&s->ready_gen, 1u, __ATOMIC_SEQ_CST);
+    __atomic_add_fetch(&g_ready_gen, 1u, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&s->bell, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_bell_owed, 1u, __ATOMIC_RELEASE);
+}
+
+/* What the medium in `s` said to one command, handed to it while the chair's
+ * occupant was `seating`: an answer that comes after the chair changed hands
+ * is the old occupant's and marks nobody. One load when nothing was refused,
+ * which is every command but a handful. */
+static void BoardSeatAnswered(BoardSeat* s, uint32_t seating, bool answered)
+{
+    if (__atomic_load_n(&s->seating, __ATOMIC_ACQUIRE) != seating)
+        return;
+    if (!answered) {
+        __atomic_store_n(&s->refused, 1u, __ATOMIC_RELEASE);
+        return;
+    }
+    if (__atomic_load_n(&s->refused, __ATOMIC_ACQUIRE) &&
+        __atomic_exchange_n(&s->refused, 0u, __ATOMIC_ACQ_REL))
+        BoardSeatReadyNoted(s);
+}
 
 /*
  * The list, and the fields in it.
@@ -208,6 +265,11 @@ static BoardSeat* seat_take(BoardKind kind, uint8_t index, bool removable,
     s->removable = removable;
     s->occupied  = true;
     s->seating   = ++g_seatings;
+    /* A refusal, and a bell not yet said, were the last occupant's. The count
+     * is the chair's and goes on: a waiter holding it holds a number that can
+     * only move forward. */
+    __atomic_store_n(&s->refused, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->bell, 0u, __ATOMIC_RELAXED);
     ksnprintf(s->name, sizeof(s->name), "%s", name);
 
     spin_unlock(&g_seats_lock);
@@ -388,7 +450,7 @@ uint32_t BoardroomInit(void)
         }
 
         MediumGround ground[GROUND_MAX_PER_MEDIUM];
-        uint8_t claimed = GroundSurvey(s->number, ground, GROUND_MAX_PER_MEDIUM);
+        uint8_t claimed = GroundSurvey(s->number, ground, GROUND_MAX_PER_MEDIUM, NULL);
         for (uint8_t g = 0; g < claimed; g++) {
             kprintf("[Boardroom]     ground %u: sectors %llu..%llu "
                     "(%llu MiB), from %s entry %u\n",
@@ -472,27 +534,67 @@ void BoardroomNoteDeparture(BoardKind kind, uint8_t index)
     TouchPublish("seat:emptied", &ev, sizeof(ev));
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+void BoardroomStandSeatEmpties(uint8_t seat)
+{
+    seats_lock_init();
+
+    spin_lock(&g_seats_lock);
+    BoardSeat* s = seat_find(seat);
+    if (s) {
+        s->occupied = false;
+    }
+    spin_unlock(&g_seats_lock);
+}
+#endif
+
 void BoardroomNoteSeatReady(BoardKind kind, uint8_t index)
 {
     seats_lock_init();
 
     spin_lock(&g_seats_lock);
     BoardSeat* s = seat_holding_locked(kind, index);
-    uint8_t    number = s ? s->number : BOARDROOM_NO_SEAT;
-    uint8_t    seated = seat_occupied_count();
-    spin_unlock(&g_seats_lock);
-
     /* A medium nobody seated — one recovered before the room was first called
      * to order — has no chair to name, and nobody could be waiting on it. */
-    if (!s) {
+    if (s) {
+        BoardSeatReadyNoted(s);
+    }
+    spin_unlock(&g_seats_lock);
+}
+
+uint32_t BoardroomSeatReadyGen(uint8_t seat)
+{
+    if (seat == BOARDROOM_NO_SEAT) {
+        return __atomic_load_n(&g_ready_gen, __ATOMIC_SEQ_CST);
+    }
+    BoardSeat* s = seat_find(seat);
+    return s ? __atomic_load_n(&s->ready_gen, __ATOMIC_SEQ_CST) : 0;
+}
+
+/* Every bell the seats noted, said: one seat:ready per chair that rang, and
+ * none for a chair that has emptied since — nobody could be waiting on it. A
+ * bell noted while this walks is either seen by it or leaves the room's flag
+ * up for the next pass, because the chair's bell is put up before the room's.
+ * One load when nothing rang. */
+static void BoardRingOwed(void)
+{
+    if (__atomic_load_n(&g_bell_owed, __ATOMIC_ACQUIRE) == 0 ||
+        __atomic_exchange_n(&g_bell_owed, 0u, __ATOMIC_ACQ_REL) == 0) {
         return;
     }
-    BoardroomSeatEvent ev = { seated, 0, number, 0 };
-    TouchPublish("seat:ready", &ev, sizeof(ev));
+    for (BoardSeat* s = g_seats; s; s = s->next) {
+        if (!__atomic_exchange_n(&s->bell, 0u, __ATOMIC_ACQ_REL) || !s->occupied) {
+            continue;
+        }
+        BoardroomSeatEvent ev = { seat_occupied_count(), 0, s->number, 0 };
+        TouchPublish("seat:ready", &ev, sizeof(ev));
+    }
 }
 
 void BoardroomAttendIfPending(void)
 {
+    BoardRingOwed();
+
     if (__atomic_load_n(&g_arrival_pending, __ATOMIC_ACQUIRE) == 0) {
         return;
     }
@@ -704,6 +806,17 @@ static int BoardMediumRefusal(BoardKind kind, BlockFailKind what)
 }
 #endif
 
+/* One command's read, handed to the seat's driver: its answer. */
+static int BoardSeatRead(const BoardSeat* s, uint64_t lba, uint32_t run, uint8_t* out)
+{
+    switch (s->kind) {
+    case BOARD_AHCI: return ahci_read_sectors_sync(s->index, lba, (uint16_t)run, out);
+    case BOARD_ATA:  return ata_read_sectors_retry(s->index, lba, (uint16_t)run, out);
+    case BOARD_USB:  return xhci_msd_read(s->index, lba, run, out);
+    default:         return -1;
+    }
+}
+
 int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
 {
     LockRankWitness("read", (uintptr_t)__builtin_return_address(0));
@@ -712,37 +825,33 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
         return -1;
     }
 
-    const uint32_t most = BoardroomSeatRun(seat);
-    uint8_t* out = (uint8_t*)buffer;
+    const uint32_t seating = __atomic_load_n(&s->seating, __ATOMIC_ACQUIRE);
+    const uint32_t most    = BoardroomSeatRun(seat);
+    uint8_t*       out     = (uint8_t*)buffer;
+    int            rc      = 0;
     while (count > 0) {
         uint32_t run = (count > most) ? most : count;
-        int rc;
 
 #ifdef CONFIG_VOLUME_TESTS
         /* Per run, because a run is what a driver is handed: the runs before a
          * refused one reach the medium, exactly as they do when it is real. */
         if (BlockFailStrikes(seat, BLOCK_FAIL_READ, lba, run, NULL)) {
-            return BoardMediumRefusal(s->kind, BLOCK_FAIL_READ);
+            rc = BoardMediumRefusal(s->kind, BLOCK_FAIL_READ);
+            break;
         }
 #endif
 
-        switch (s->kind) {
-        case BOARD_AHCI: rc = ahci_read_sectors_sync(s->index, lba,
-                                                     (uint16_t)run, out); break;
-        case BOARD_ATA:  rc = ata_read_sectors_retry(s->index, lba,
-                                                     (uint16_t)run, out); break;
-        case BOARD_USB:  rc = xhci_msd_read(s->index, lba, run, out); break;
-        default:         return -1;
-        }
+        rc = BoardSeatRead(s, lba, run, out);
         if (rc != 0) {
-            return rc;
+            break;
         }
 
         out   += run * BOARDROOM_SECTOR_BYTES;
         lba   += run;
         count -= run;
     }
-    return 0;
+    BoardSeatAnswered(s, seating, rc == 0);
+    return rc;
 }
 
 /* One command's write, handed to the seat's driver: its answer. */
@@ -768,10 +877,11 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
         return -1;
     }
 
-    const uint32_t most = BoardroomSeatRun(seat);
-    const uint8_t* in   = (const uint8_t*)buffer;
-    uint32_t       took = 0;
-    int            rc   = 0;
+    const uint32_t seating = __atomic_load_n(&s->seating, __ATOMIC_ACQUIRE);
+    const uint32_t most    = BoardroomSeatRun(seat);
+    const uint8_t* in      = (const uint8_t*)buffer;
+    uint32_t       took    = 0;
+    int            rc      = 0;
     while (count > 0) {
         uint32_t run = (count > most) ? most : count;
 
@@ -805,6 +915,7 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
     if (landed) {
         *landed = took;
     }
+    BoardSeatAnswered(s, seating, rc == 0);
     return rc;
 }
 
@@ -830,8 +941,7 @@ bool BoardroomSeatRefusesWrites(uint8_t seat)
 
 bool BoardroomSeatAnnouncesReady(uint8_t seat)
 {
-    BoardSeat* s = seat_taken(seat);
-    return s && (s->kind == BOARD_AHCI || s->kind == BOARD_USB);
+    return seat_taken(seat) != NULL;
 }
 
 /* Whether the seat answers a command nobody stands over, read or write. */
@@ -864,23 +974,37 @@ bool BoardroomSeatCanWriteAsync(uint8_t seat)
     return seat_can_async(seat);
 }
 
-#ifdef CONFIG_VOLUME_TESTS
-/* The answer to the sectors a struck write kept, which went out as their own
- * command: the caller hears the refusal it was going to hear, with what
- * landed before the struck sector — or the kept command's own refusal, with
- * nothing. Lean, as every seat's answer is: it may run in an interrupt. */
-static void BoardStruckAnswered(uint8_t index, uint8_t slot, error_t status, void* ctx)
+/*
+ * The room's answer to a command nobody stood over: what the seat said is
+ * noted against its chair (the bell, above) and handed on to whoever moored
+ * the berth. Lean, as every seat's answer is — it may run in the completion
+ * interrupt, so it takes no lock and allocates nothing — and it reads the
+ * berth before handing it on, because from that call on the berth is its
+ * owner's again.
+ *
+ * And under BLOCKFAIL, the answer to the sectors a struck write kept, which
+ * went out as their own command: the caller hears the refusal it was going to
+ * hear, with what landed before the struck sector — or the kept command's own
+ * refusal, with nothing.
+ */
+static void BoardAsyncAnswered(uint8_t index, uint8_t slot, error_t status, void* ctx)
 {
-    RoadsteadBerth*   b        = (RoadsteadBerth*)ctx;
-    RoadsteadAnswered answered = b->struck_answered;
-    void*             theirs   = b->struck_ctx;
+    RoadsteadBerth*   b      = (RoadsteadBerth*)ctx;
+    RoadsteadAnswered theirs = b->theirs;
+    void*             their  = b->theirs_ctx;
+    BoardSeat*        s      = seat_find(b->seat);
 
-    b->landed   = status == OK ? b->sectors : 0;
-    b->answered = answered;
-    b->ctx      = theirs;
-    answered(index, slot, status == OK ? ERR_IO : status, theirs);
-}
+#ifdef CONFIG_VOLUME_TESTS
+    if (b->struck) {
+        b->landed = status == OK ? b->sectors : 0;
+        status    = status == OK ? ERR_IO : status;
+    }
 #endif
+    if (s) {
+        BoardSeatAnswered(s, b->seating, status == OK);
+    }
+    theirs(index, slot, status, their);
+}
 
 /* One command nobody stands over, read or write, handed to its seat. */
 static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_phys,
@@ -892,9 +1016,18 @@ static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_
     }
 
     memset(berth, 0, sizeof(*berth));
-    berth->lba      = lba;
-    berth->sectors  = count;
-    berth->dma_phys = dma_phys;
+    berth->lba        = lba;
+    berth->sectors    = count;
+    berth->dma_phys   = dma_phys;
+    berth->theirs     = cb;
+    berth->theirs_ctx = ctx;
+    berth->seat       = seat;
+    berth->seating    = __atomic_load_n(&s->seating, __ATOMIC_ACQUIRE);
+
+    /* From here the room's answer is the one every road below calls, the
+     * refusals BLOCKFAIL makes in a medium's place among them. */
+    cb  = BoardAsyncAnswered;
+    ctx = berth;
     berth->answered = cb;
     berth->ctx      = ctx;
 
@@ -919,11 +1052,8 @@ static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_
         return OK;
     }
     if (struck) {
-        berth->sectors         = keep;
-        berth->struck_answered = cb;
-        berth->struck_ctx      = ctx;
-        berth->answered        = BoardStruckAnswered;
-        berth->ctx             = berth;
+        berth->sectors = keep;
+        berth->struck  = true;
     }
 #endif
 
@@ -1122,14 +1252,10 @@ void BoardroomProveUnattendedRead(uint8_t seat)
     }
 }
 
-int BoardroomFlush(uint8_t seat)
+/* One cache flush, handed to the seat's driver: its answer. */
+static int BoardSeatFlush(const BoardSeat* s, uint8_t seat)
 {
-    LockRankWitness("flush", (uintptr_t)__builtin_return_address(0));
-    BoardSeat* s = seat_taken(seat);
-    if (!s) {
-        return -1;
-    }
-
+    (void)seat;
 #ifdef CONFIG_VOLUME_TESTS
     /* A plan that answers with a SCSI sense is judged by the USB disk's own
      * driver, as the device's answer would be — remembered, and said. */
@@ -1147,6 +1273,20 @@ int BoardroomFlush(uint8_t seat)
     case BOARD_USB:  return xhci_msd_flush(s->index);
     default:         return -1;
     }
+}
+
+int BoardroomFlush(uint8_t seat)
+{
+    LockRankWitness("flush", (uintptr_t)__builtin_return_address(0));
+    BoardSeat* s = seat_taken(seat);
+    if (!s) {
+        return -1;
+    }
+
+    const uint32_t seating = __atomic_load_n(&s->seating, __ATOMIC_ACQUIRE);
+    int            rc      = BoardSeatFlush(s, seat);
+    BoardSeatAnswered(s, seating, rc == 0);
+    return rc;
 }
 
 /* Sixteen bytes, printed whole. Two volumes made by the same tool on the same

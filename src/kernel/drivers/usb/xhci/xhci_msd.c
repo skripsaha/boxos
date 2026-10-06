@@ -836,6 +836,10 @@ static void msd_bot_reset(XhciMsdUnit* u)
 
     msd_clear_halt(u, u->slot->ep_bulk_in);
     msd_clear_halt(u, u->slot->ep_bulk_out);
+
+    /* Both ends are back at the start of a command — the bell a refusal on
+     * this unit waits for (boardroom.h). */
+    BoardroomNoteSeatReady(BOARD_USB, u->number);
 }
 
 /* ── one command, three transfers ───────────────────────────────────────── */

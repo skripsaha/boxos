@@ -110,30 +110,45 @@ static bool              g_leaving_said    = false;
  *
  * Two different failures, and only one of them is worth asking about again:
  *
- *   the medium REFUSED a read while the volume was being read — the room's
- *   driver is recovering it, and says so when it answers again: `seat:ready`
- *   (boardroom.h). The mount is owed until that event names this volume's seat,
- *   and is asked again then — not on a clock, not a count of tries: a clock
- *   guessed how long the hardware needs, and a count gave up on a medium that
- *   only needed longer, or went on asking one that would never do;
+ *   the medium REFUSED a read while the volume was being read — the room
+ *   says when it answers again: `seat:ready` (boardroom.h), rung by the seat
+ *   itself on the first command it answers after a refusal, and by its
+ *   driver's recovery. The mount is owed until a seat says it, and is asked
+ *   again then — not on a clock, not a count of tries: a clock guessed how
+ *   long the hardware needs, and a count gave up on a medium that only needed
+ *   longer, or went on asking one that would never do;
  *
  *   the medium ANSWERED every read and what it holds was refused — a chain
  *   that leaves the volume, a bitmap too small for the run, no memory to hold
  *   it. Asking again reads the same bytes and refuses them again, so the cause
  *   is said once and nothing asks until a medium arrives.
  *
+ * And a medium that LEFT while it was being read is neither: its return is an
+ * arrival, and the arrival asks.
+ *
+ * ‼ ANY seat's seat:ready, and counted from BEFORE the first read. A mount
+ * reads the whole room to find its volume, so a seat that answers again
+ * anywhere may change what it finds. And the count is taken before the
+ * attempt and compared after its refusal (BoardroomSeatReadyGen), because a
+ * driver's recovery says seat:ready in the same breath as it answers the
+ * refused command ERR_IO — before the mount has even heard it was refused, and
+ * long before it is owed. A flag raised only once the debt stood lost exactly
+ * that one: the event came, nobody was owed, and the mount waited for it for
+ * the rest of the boot.
+ *
  * The retry this replaced was 750 ms × 8, and the count was reset by the very
  * attempt that exhausted it: a volume refused for good was mounted again
  * forever.
  */
 static volatile uint32_t g_mount_owed  = 0;
-static volatile uint32_t g_mount_ready = 0;     /* seat:ready named the owed volume's seat */
+static volatile uint32_t g_mount_ready = 0;     /* a seat said seat:ready since the debt */
 
 /* Refused reads of the volume, counted where the mount's readers meet them
  * (TagFSNoteReadRefused): a mount that saw one failed on a medium that did not
  * answer. The ground's own reads — the partition table and the Deed — are the
- * survey's: a mount refused there is counted as one the medium did not
- * answer. */
+ * survey's, and a mount refused there is one the medium did not answer only
+ * when the medium refused them (volume_take_ground): a Deed that says what
+ * does not fit is an answer. */
 static volatile uint32_t g_reads_refused     = 0;
 static bool              g_ground_refused    = false;
 
@@ -147,19 +162,36 @@ static bool              g_ground_refused    = false;
  * inside tagfs_init at the same moment: two mounts of one volume, each
  * allocating what the other is about to overwrite.
  *
- * Whoever gets here first does the work; the others have nothing to add, so
- * they leave rather than queue up behind it — the same arrangement the hubs
- * and the slot service use.
+ * Whoever gets here first does the work; the others leave rather than queue
+ * up behind it — the same arrangement the hubs and the slot service use.
+ *
+ * ‼ BUT AN ARRIVAL IS NEVER LEFT BEHIND. A medium that arrives while somebody
+ * is mounting is not "nothing to add": the mount under way may have read the
+ * room before it came, and fail on the medium that left it. So an arrival is
+ * a debt (g_arrival_owed), not a call: the room's seat:taken only notes it,
+ * every service pass looks for it, and whoever holds the flag looks again
+ * before letting it go. The retry that used to pick such an arrival up was a
+ * clock, and it is gone.
  */
 static volatile uint32_t g_attending = 0;
+static volatile uint32_t g_arrival_owed = 0;    /* seat:taken heard, not yet attended */
+
+static void attend_arrival(void);
 
 static bool attending_take(void)
 {
     return __atomic_exchange_n(&g_attending, 1u, __ATOMIC_ACQUIRE) == 0;
 }
 
+/* Every attending ends here: an arrival noted while the flag was held found it
+ * taken and only left its debt, so it is attended now, by the holder, before
+ * the flag goes. One noted after the last look is picked up by the next
+ * service pass — the debt stays until somebody attends it. */
 static void attending_done(void)
 {
+    while (__atomic_load_n(&g_arrival_owed, __ATOMIC_ACQUIRE)) {
+        attend_arrival();
+    }
     __atomic_store_n(&g_attending, 0u, __ATOMIC_RELEASE);
 }
 
@@ -261,6 +293,17 @@ uint8_t tagfs_get_seat(void) { return g_tagfs_seat; }
  * Boardroom knows about media, and this is the only thing that knows what a
  * TagFS volume looks like.
  */
+/* The first seat the last search of the room could not read the answer out
+ * of, BOARDROOM_NO_SEAT when every seat answered — "no volume here", said by a
+ * medium that would not be read, is no answer at all. */
+static uint8_t g_search_unread = BOARDROOM_NO_SEAT;
+
+static void search_met_unread(uint8_t *unread, uint8_t seat)
+{
+    if (unread && *unread == BOARDROOM_NO_SEAT)
+        *unread = seat;
+}
+
 /*
  * Is there a TagFS volume in this seat, and what does it call itself?
  *
@@ -269,13 +312,19 @@ uint8_t tagfs_get_seat(void) { return g_tagfs_seat; }
  * volume and wrote its identity on the boarding pass. A machine carrying two
  * TagFS volumes is not unusual: it is what a machine with BoxOS installed and
  * a BoxOS stick in a socket looks like.
+ *
+ * `ctx`, when the caller gives one, is where the search keeps the first seat
+ * whose medium refused the reads that would have answered (g_search_unread):
+ * the mount that asked is owed, not finished (mount_attempt).
  */
 static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
 {
-    (void)ctx;
+    uint8_t *unread = (uint8_t *)ctx;
 
     MediumGround ground[GROUND_MAX_PER_MEDIUM];
-    uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM);
+    bool    refused = false;
+    uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM, &refused);
+    if (refused) search_met_unread(unread, seat);
     if (claimed == 0) return false;
 
     /*
@@ -294,10 +343,16 @@ static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
 
     for (uint8_t g = 0; g < claimed; g++) {
         DeedCopy head;
-        if (DeedReadHead(seat, &ground[g], &head) != OK) {
+        error_t  at_head = DeedReadHead(seat, &ground[g], &head);
+        if (at_head != OK) {
             /* The head is what is damaged, not the volume. Its far copy names
-             * the same volume and is the reason there are two. */
-            if (DeedReadTailAlone(seat, &ground[g], &head) != OK) continue;
+             * the same volume and is the reason there are two. A head the
+             * medium would not give up, with no far copy read either, is a
+             * ground nobody knows the volume of. */
+            if (DeedReadTailAlone(seat, &ground[g], &head) != OK) {
+                if (at_head == ERR_IO) search_met_unread(unread, seat);
+                continue;
+            }
         }
 
         bool wanted = have_pass && memcmp(head.head.uuid, want, 16) == 0;
@@ -360,7 +415,8 @@ static void TagFSProbeDrive(void)
      * return for the rest of the boot.
      */
     uint8_t uuid[16];
-    g_tagfs_seat = BoardroomFindVolume(tagfs_recognise, NULL, uuid);
+    g_search_unread = BOARDROOM_NO_SEAT;
+    g_tagfs_seat = BoardroomFindVolume(tagfs_recognise, &g_search_unread, uuid);
 
     if (g_tagfs_seat == BOARDROOM_NO_SEAT) {
         kprintf("[TagFS] no volume found on any of the %u seated medium(s)\n",
@@ -781,8 +837,12 @@ static void volume_take_more_ground(uint8_t seat, uint64_t ground_sectors,
 static error_t volume_take_ground(uint8_t seat)
 {
     MediumGround ground[GROUND_MAX_PER_MEDIUM];
-    uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM);
+    bool    refused = false;
+    uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM, &refused);
     if (claimed == 0) {
+        /* Said as what it is: the medium would not say, or said there is no
+         * ground — only the first is a refusal worth asking about again. */
+        g_ground_refused = refused;
         kprintf("[TagFS] seat %u claims no ground for BoxOS\n", seat);
         return ERR_FILE_NOT_FOUND;
     }
@@ -792,6 +852,7 @@ static error_t volume_take_ground(uint8_t seat)
 
     DeedCopy head;
     bool     took          = false;
+    bool     unread        = false;   /* a ground whose deeds the medium would not give up */
     uint64_t ground_run    = 0;   /* how far the partition runs, kept past `g` */
 
     /* Two passes rather than one with a "best so far": the volume named on the
@@ -802,8 +863,12 @@ static error_t volume_take_ground(uint8_t seat)
         for (uint8_t g = 0; g < claimed; g++) {
             DeedCopy candidate;
             bool from_tail = false;
-            if (DeedReadHead(seat, &ground[g], &candidate) != OK) {
-                if (DeedReadTailAlone(seat, &ground[g], &candidate) != OK) continue;
+            error_t at_head = DeedReadHead(seat, &ground[g], &candidate);
+            if (at_head != OK) {
+                if (DeedReadTailAlone(seat, &ground[g], &candidate) != OK) {
+                    if (at_head == ERR_IO) unread = true;
+                    continue;
+                }
                 from_tail = true;
             }
 
@@ -835,6 +900,7 @@ static error_t volume_take_ground(uint8_t seat)
     }
 
     if (!took) {
+        g_ground_refused = unread;
         kprintf("[TagFS] seat %u has ground claimed for BoxOS and no deed on "
                 "it this kernel can read\n", seat);
         return ERR_TAGFS_CORRUPTED;
@@ -853,8 +919,12 @@ static error_t volume_take_ground(uint8_t seat)
     }
     memcpy(&g_state.layout, layout, sizeof(g_state.layout));
 
+    /* Cleared first, as the boot run below is: a volume whose Deed carries no
+     * grid is judged by what it says, never by the grid of a volume mounted
+     * before it in this boot. */
     const VolumeGeometry *geo =
         (const VolumeGeometry *)DeedStamp(&head, VOLUME_STAMP_GEOMETRY, &bytes);
+    memset(&g_state.geometry, 0, sizeof(g_state.geometry));
     if (geo && bytes >= sizeof(VolumeGeometry)) {
         memcpy(&g_state.geometry, geo, sizeof(g_state.geometry));
     }
@@ -1039,12 +1109,16 @@ error_t tagfs_flush_cache(void)
 
     /* The one place a flush ticket is taken and answered (scribe.h): taken
      * before the medium is asked, so the flush it stands for was issued after
-     * every write whose completion was seen before it. */
+     * every write whose completion was seen before it. And kept only if the
+     * seat still holds the medium the volume was mounted from once it has
+     * answered: a medium seated in its place while the flush waited for the
+     * port carried it out, and keeps nothing the one that left was given. */
     uint64_t ticket = VolumeFlushBegin();
-    int said = BoardroomFlush(g_tagfs_seat);
-    VolumeFlushEnd(ticket, said == 0);
+    int  said = BoardroomFlush(g_tagfs_seat);
+    bool here = !volume_not_here();
+    VolumeFlushEnd(ticket, said == 0 && here);
     if (said == 0) {
-        return OK;
+        return here ? OK : ERR_DEVICE_NOT_READY;
     }
 
     /*
@@ -1167,38 +1241,128 @@ static bool volume_not_here(void)
            !medium_still_seated(g_tagfs_seat, g_tagfs_seating);
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's turn of the next mount (mount/away.h): armed by a test, met by
+ * the mount, taken down by the test. */
+static volatile uint32_t g_stand_turn  = STAND_MOUNT_AS_IS;
+static volatile uint32_t g_stand_nth   = 0;
+static volatile uint32_t g_stand_reads = 0;   /* a mount's block reads since arming */
+static volatile uint32_t g_stand_fired = 0;
+
+void TagFSStandMountTurn(StandMountTurn turn, uint32_t nth)
+{
+    __atomic_store_n(&g_stand_turn, (uint32_t)STAND_MOUNT_AS_IS, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_stand_reads, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_stand_fired, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_stand_nth, nth, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_stand_turn, (uint32_t)turn, __ATOMIC_RELEASE);
+}
+
+bool TagFSStandMountTurnFired(void)
+{
+    return __atomic_load_n(&g_stand_fired, __ATOMIC_ACQUIRE) != 0;
+}
+
+/* A block read, met before anything of it is asked: the mount's nth finds
+ * the volume's seat emptied under it, the way a hand pulling the medium out in
+ * the middle of the reads leaves it. The chair alone: what the room then says
+ * about it is the room's, on another core, and no part of this read. */
+static void StandMountReadComes(void)
+{
+    if (g_state.initialized ||
+        __atomic_load_n(&g_stand_turn, __ATOMIC_ACQUIRE) != STAND_MOUNT_SEAT_EMPTIES ||
+        __atomic_add_fetch(&g_stand_reads, 1u, __ATOMIC_ACQ_REL) != g_stand_nth ||
+        __atomic_exchange_n(&g_stand_fired, 1u, __ATOMIC_ACQ_REL))
+        return;
+    BoardroomStandSeatEmpties(g_tagfs_seat);
+}
+
+/* A mount the medium refused a read of: its seat says it answers again, and
+ * the room says it on the spot — before the attempt is owed, the way a
+ * driver's recovery says it in the same breath as it answers the refused
+ * command. */
+static void StandMountRefusalRings(uint32_t refused_before)
+{
+    if (__atomic_load_n(&g_reads_refused, __ATOMIC_ACQUIRE) == refused_before ||
+        g_tagfs_seat == BOARDROOM_NO_SEAT ||
+        __atomic_load_n(&g_stand_turn, __ATOMIC_ACQUIRE) != STAND_MOUNT_SEAT_RINGS ||
+        __atomic_exchange_n(&g_stand_fired, 1u, __ATOMIC_ACQ_REL))
+        return;
+    BoardroomNoteSeatReady(BoardroomSeatKind(g_tagfs_seat), BoardroomSeatIndex(g_tagfs_seat));
+    BoardroomAttendIfPending();
+}
+#endif
+
+/*
+ * The arrival owed until a seat says it answers again — the mount, or the
+ * search for a volume whose book is held open. Owed first, then the count
+ * taken before the attempt's first read (`rang`) compared: a seat:ready said
+ * before the debt stood is one the attempt is still owed, and is answered at
+ * once (the note over g_mount_owed). True when the debt is new.
+ */
+static bool attendance_owed(uint32_t rang)
+{
+    bool fresh = __atomic_exchange_n(&g_mount_owed, 1u, __ATOMIC_SEQ_CST) == 0;
+    if (BoardroomSeatReadyGen(BOARDROOM_NO_SEAT) != rang)
+        __atomic_store_n(&g_mount_ready, 1u, __ATOMIC_SEQ_CST);
+    return fresh;
+}
+
 /*
  * One attempt at the mount, and what it leaves owed (the note over
- * g_mount_owed). Only a failure on a volume that is there is worth asking
- * about again: TagFSProbeDrive leaves g_tagfs_seat set only when a medium in
- * the room answered with THIS machine's volume, and a mount that fails
- * because the medium has gone leaves no seat — its return arrives on its own.
+ * g_mount_owed). Only a medium that is there and REFUSED is asked again on
+ * seat:ready: one that answered and was refused for what it holds is said
+ * once; one that left while it was being read comes back as an arrival of its
+ * own; and a room where no medium refused and none carries this machine's
+ * volume has nothing to ask. TagFSProbeDrive leaves g_tagfs_seat set only
+ * when a medium answered with THIS machine's volume, and names the first seat
+ * whose medium would not be read when none did (g_search_unread).
  */
 static error_t mount_attempt(void)
 {
     uint32_t refused = __atomic_load_n(&g_reads_refused, __ATOMIC_ACQUIRE);
+    uint32_t rang    = BoardroomSeatReadyGen(BOARDROOM_NO_SEAT);
     g_ground_refused = false;
     error_t rc = tagfs_init();
     if (rc == OK || rc == ERR_ALREADY_INITIALIZED) {
         mount_settled();
         return rc;
     }
-    if (g_tagfs_seat == BOARDROOM_NO_SEAT)
+#ifdef CONFIG_VOLUME_TESTS
+    StandMountRefusalRings(refused);
+#endif
+
+    bool    found = g_tagfs_seat != BOARDROOM_NO_SEAT;
+    uint8_t seat  = found ? g_tagfs_seat : g_search_unread;
+    if (seat == BOARDROOM_NO_SEAT)
         return rc;
 
-    bool answered = !g_ground_refused &&
+    if (found && !medium_still_seated(seat, g_tagfs_seating)) {
+        kprintf("[TagFS] the medium in seat %u left while its volume was being read — nothing "
+                "is mounted, and its next arrival is met the same way\n", seat);
+        mount_settled();
+        return rc;
+    }
+
+    bool answered = found && !g_ground_refused &&
                     __atomic_load_n(&g_reads_refused, __ATOMIC_ACQUIRE) == refused;
     if (answered) {
         kprintf("[TagFS] the medium in seat %u answered every read and its volume was "
                 "refused for what it holds (said above) — reading it again would refuse it "
-                "again, so the machine asks only when a medium arrives\n", g_tagfs_seat);
+                "again, so the machine asks only when a medium arrives\n", seat);
         mount_settled();
         return rc;
     }
-    if (__atomic_exchange_n(&g_mount_owed, 1u, __ATOMIC_ACQ_REL) == 0)
+    if (!attendance_owed(rang))
+        return rc;
+    if (found)
         kprintf("[TagFS] the medium in seat %u refused a read while its volume was being "
                 "read — the mount is asked again when the seat says it answers again "
-                "(seat:ready)\n", g_tagfs_seat);
+                "(seat:ready)\n", seat);
+    else
+        kprintf("[TagFS] the medium in seat %u would not be read while the room was searched "
+                "for this machine's volume — the mount is asked again when a seat says it "
+                "answers again (seat:ready)\n", seat);
     return rc;
 }
 
@@ -1238,18 +1402,24 @@ static bool tagfs_abandon(void);
 static void tagfs_clear_the_ground(void);
 
 /* Where the ground of volume `uuid` begins on `seat`, and whether its Deed
- * lays it out as the held volume is laid out. */
+ * lays it out as the held volume is laid out. A seat whose medium would not be
+ * read is named to the search (g_search_unread): not finding the volume there
+ * says nothing about whether it is there. */
 static bool volume_ground_on(uint8_t seat, const uint8_t uuid[16], uint64_t *out_base,
                              bool *out_same)
 {
     MediumGround ground[GROUND_MAX_PER_MEDIUM];
-    uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM);
+    bool    refused = false;
+    uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM, &refused);
+    if (refused) search_met_unread(&g_search_unread, seat);
 
     for (uint8_t g = 0; g < claimed; g++) {
         DeedCopy head;
-        if (DeedReadHead(seat, &ground[g], &head) != OK &&
-            DeedReadTailAlone(seat, &ground[g], &head) != OK)
+        error_t  at_head = DeedReadHead(seat, &ground[g], &head);
+        if (at_head != OK && DeedReadTailAlone(seat, &ground[g], &head) != OK) {
+            if (at_head == ERR_IO) search_met_unread(&g_search_unread, seat);
             continue;
+        }
         uint16_t bytes = 0;
         const VolumeLayout *layout =
             (const VolumeLayout *)DeedStamp(&head, VOLUME_STAMP_LAYOUT, &bytes);
@@ -1274,6 +1444,7 @@ static void volume_book_taken_up(uint8_t seat, uint32_t seating, uint64_t base)
     g_tagfs_seating = seating;
     g_volume_base   = base;
     __atomic_store_n(&g_medium_left, false, __ATOMIC_RELEASE);
+    mount_settled();                /* a search owed on seat:ready has its answer */
     AwayTakeUp(seat);
     TagFSHoldGroundResumed();       /* nothing at all unless HOLDGROUND=on */
 }
@@ -1297,11 +1468,14 @@ static bool volume_read_again(uint8_t seat, uint32_t seating)
 
     /* A medium that left again while it was being read is not a volume that
      * would not mount: nothing is wrong with it, and its return will be
-     * announced like any other. One STILL THERE that would not give up a
+     * announced like any other — said by the attempt when it left part way
+     * through reading the volume, and here when it was gone before the room
+     * could find the volume on it. One STILL THERE that would not give up a
      * volume is the other fact, and nothing asks again unless this says so. */
     if (!medium_still_seated(seat, seating)) {
-        kprintf("[TagFS] the medium left again while its volume was being read — nothing "
-                "is mounted, and its next arrival is met the same way\n");
+        if (g_tagfs_seat == BOARDROOM_NO_SEAT)
+            kprintf("[TagFS] the medium left again before its volume could be found — "
+                    "nothing is mounted, and its next arrival is met the same way\n");
         return false;
     }
     kprintf("[TagFS] the volume came back and would not mount — its book was given up, "
@@ -1341,26 +1515,48 @@ static bool TagFSVolumeReturned(void)
         return false;
     }
 
-    for (uint8_t seat = 0; seat < BoardroomSeatCount(); seat++) {
+    uint32_t rang  = BoardroomSeatReadyGen(BOARDROOM_NO_SEAT);
+    bool     found = false;
+    g_search_unread = BOARDROOM_NO_SEAT;
+    for (uint8_t seat = 0; seat < BoardroomSeatCount() && !found; seat++) {
         if (!BoardroomSeatOccupied(seat)) {
             continue;
         }
         uint32_t seating = BoardroomSeatSeating(seat);
         uint64_t base    = 0;
         bool     same    = false;
-        if (volume_ground_on(seat, g_volume_uuid, &base, &same))
-            return volume_book_decided(seat, seating, base,
-                                       same ? AwayJudgeOn(seat, base) : AWAY_OTHER);
+        if (!volume_ground_on(seat, g_volume_uuid, &base, &same))
+            continue;
+
+        /* A Ledger the medium would not give up is not a Ledger other than the
+         * one left: the book is not judged on a refusal — it waits, open, for
+         * the seat to answer again. */
+        uint32_t    refused = __atomic_load_n(&g_reads_refused, __ATOMIC_ACQUIRE);
+        AwayVerdict verdict = same ? AwayJudgeOn(seat, base) : AWAY_OTHER;
+        if (verdict != AWAY_UNREAD ||
+            __atomic_load_n(&g_reads_refused, __ATOMIC_ACQUIRE) == refused)
+            return volume_book_decided(seat, seating, base, verdict);
+        search_met_unread(&g_search_unread, seat);
+        found = true;
     }
 
     /* The volume is nowhere in the room: another volume in the seat the book
      * was held for ends it all the same. */
     uint8_t seat = g_tagfs_seat;
-    if (seat != BOARDROOM_NO_SEAT && BoardroomSeatOccupied(seat)) {
+    if (!found && seat != BOARDROOM_NO_SEAT && BoardroomSeatOccupied(seat)) {
         uint32_t seating = BoardroomSeatSeating(seat);
-        if (tagfs_recognise(NULL, seat, NULL))
+        if (tagfs_recognise(&g_search_unread, seat, NULL))
             return volume_book_decided(seat, seating, 0, AWAY_SEAT_TAKEN);
     }
+
+    /* Nowhere in what the room would say. A medium that would not be read may
+     * be carrying it: the book stays open, and the room is searched again when
+     * a seat says it answers again — the arrival that brought it in has been
+     * spent, and nothing else would ask. */
+    if (g_search_unread != BOARDROOM_NO_SEAT && attendance_owed(rang))
+        kprintf("[TagFS] the medium in seat %u would not be read while the room was searched "
+                "for the volume whose book is held open — it is searched again when a seat "
+                "says it answers again (seat:ready)\n", g_search_unread);
     return false;
 }
 
@@ -1382,6 +1578,40 @@ AwayVerdict TagFSStandMediumReturns(const VolumeLedger *found)
     __atomic_store_n(&g_medium_left, false, __ATOMIC_RELEASE);
     SettleSeatReady();
     return verdict;
+}
+
+/* The runner's own hold on the door let go of, and the volume let go of the
+ * way a book given up lets it go — under the one-at-a-time flag, writing
+ * nothing. True when it is down. */
+bool TagFSStandLetGo(void)
+{
+    tagfs_leave();
+    while (!attending_take())
+        cpu_pause();
+    bool down = tagfs_abandon();
+    attending_done();
+    return down;
+}
+
+/* And counted back in, a volume up or not: the runner lets go of it once more
+ * when it is done. */
+void TagFSStandHoldAgain(void)
+{
+    __atomic_fetch_add(&g_inside, 1, __ATOMIC_ACQ_REL);
+}
+
+/* No arrival owed, nobody attending, and no owed mount waiting to be asked. */
+bool TagFSStandMountIdle(void)
+{
+    return __atomic_load_n(&g_arrival_owed, __ATOMIC_ACQUIRE) == 0 &&
+           __atomic_load_n(&g_attending, __ATOMIC_ACQUIRE) == 0 &&
+           (__atomic_load_n(&g_mount_owed, __ATOMIC_ACQUIRE) == 0 ||
+            __atomic_load_n(&g_mount_ready, __ATOMIC_ACQUIRE) == 0);
+}
+
+bool TagFSStandMountOwed(void)
+{
+    return __atomic_load_n(&g_mount_owed, __ATOMIC_ACQUIRE) != 0;
 }
 #endif
 
@@ -1433,12 +1663,16 @@ void TagFSNoteMediumGone(void)
  * way round it should, and anything else that cares about media arriving can
  * care without either side being changed.
  *
- * These callbacks do real disk I/O, which the TouchWatch contract asks you not
- * to do lightly. It is safe here because of where the publisher stands: the
- * room is called to order from the guide loop and the idle loop, ordinary
- * kernel context with interrupts on, holding nothing but its own one-at-a-time
- * flag. That is exactly where mounting a volume is allowed to happen, and is
- * where this work was already being done before it was a callback.
+ * ‼ AND NOTHING IS DONE ON THE PUBLISHER'S STACK. seat:taken used to mount the
+ * volume right here, inside the room's own pass and Touch's delivery of it —
+ * and the mount then said volume:mounted, and the autostart that listens for
+ * THAT read programs off the medium: two publications deep, four and a half
+ * kilobytes of the room's and Touch's frames under the first read, before the
+ * medium's own driver and an interrupt landed on what was left. The TouchWatch
+ * contract says what belongs on such a stack — note the event and let the loop
+ * pick it up — and that is all these do: an arrival is a debt
+ * (g_arrival_owed) and a seat answering again a mark, both attended by the
+ * service pass on its own stack (TagFSServiceIfPending).
  */
 static TouchWatch *g_seat_taken_watch   = NULL;
 static TouchWatch *g_seat_emptied_watch = NULL;
@@ -1448,7 +1682,7 @@ static void tagfs_on_seat_taken(TouchTag tag, const void *payload,
                                 uint32_t plen, uint32_t source_pid, void *ctx)
 {
     (void)tag; (void)payload; (void)plen; (void)source_pid; (void)ctx;
-    TagFSAttendArrival();
+    __atomic_store_n(&g_arrival_owed, 1u, __ATOMIC_RELEASE);
 }
 
 static void tagfs_on_seat_emptied(TouchTag tag, const void *payload,
@@ -1458,19 +1692,21 @@ static void tagfs_on_seat_emptied(TouchTag tag, const void *payload,
     TagFSNoteMediumGone();
 }
 
-/* A seat answers again. Only noted here — the publisher is a driver's
- * recovery, not a place to read a volume from — and the mount it owes is asked
- * by the service pass, where waiting is allowed. */
+/* A seat answers again. Only noted here, and the mount it owes is asked by the
+ * service pass, where waiting is allowed. Any seat's: the room is searched
+ * whole for the volume, so the seat that answers again may be the one the
+ * search needs (the note over g_mount_owed). A refused cycle waits on the
+ * volume's own. */
 static void tagfs_on_seat_ready(TouchTag tag, const void *payload,
                                 uint32_t plen, uint32_t source_pid, void *ctx)
 {
     (void)tag; (void)source_pid; (void)ctx;
     const BoardroomSeatEvent *ev = payload;
-    if (plen < sizeof(*ev) || ev->first != g_tagfs_seat)
+    if (plen < sizeof(*ev))
         return;
-    if (g_state.initialized)
+    if (g_state.initialized && ev->first == g_tagfs_seat)
         SettleSeatReady();          /* a refused cycle may run again */
-    if (__atomic_load_n(&g_mount_owed, __ATOMIC_ACQUIRE))
+    if (__atomic_load_n(&g_mount_owed, __ATOMIC_SEQ_CST))
         __atomic_store_n(&g_mount_ready, 1u, __ATOMIC_RELEASE);
 }
 
@@ -1497,11 +1733,20 @@ void TagFSWatchSeats(void)
     }
 }
 
-/* The body. Whoever calls it holds the one-at-a-time flag above. */
+/* The body. Whoever calls it holds the one-at-a-time flag above, and this look
+ * covers every arrival noted before it. */
 static void attend_arrival(void)
 {
+    __atomic_store_n(&g_arrival_owed, 0u, __ATOMIC_SEQ_CST);
+
     if (g_state.initialized) {
-        TagFSVolumeReturned();
+        /* A volume on its way out is not judged again: its book was decided,
+         * and the pass that finishes taking it down attends the room as an
+         * arrival of its own (TagFSServiceIfPending). Judged again, a book
+         * already given up — its waiters told their changes were lost — could
+         * be taken up under them. */
+        if (__atomic_load_n(&g_door, __ATOMIC_ACQUIRE) == VOLUME_UP)
+            TagFSVolumeReturned();
         return;
     }
 
@@ -1524,7 +1769,9 @@ void TagFSAttendArrival(void)
         return;
     }
     if (!attending_take()) {
-        return;                 /* somebody is already at it */
+        /* Somebody is at it, and attends this before letting go. */
+        __atomic_store_n(&g_arrival_owed, 1u, __ATOMIC_RELEASE);
+        return;
     }
     attend_arrival();
     attending_done();
@@ -1567,20 +1814,30 @@ uint64_t tagfs_block_to_sector(uint32_t block)
  * block held. A refusal the medium's departure explains is
  * ERR_DEVICE_NOT_READY, in a read and in a write: the caller holds nothing a
  * broken disk would make it hold.
+ *
+ * The departure is asked the way the volume's other doors ask it
+ * (volume_not_here): a mounted volume's is latched and opens its book; a
+ * mount's latches nothing — no volume is up to hold a book for — and is a
+ * read the medium refused, which is what it is to the mount that met it.
  */
 error_t tagfs_read_block(uint32_t block, void *buffer)
 {
     if (!buffer)
         return ERR_NULL_POINTER;
-    if (volume_medium_gone())
+#ifdef CONFIG_VOLUME_TESTS
+    StandMountReadComes();
+#endif
+    if (volume_not_here()) {
+        TagFSNoteReadRefused();
         return ERR_DEVICE_NOT_READY;
+    }
 
     bool got = g_state.braid &&
                BraidReadBlock(g_state.braid, tagfs_block_to_sector(block), buffer, NULL) == OK;
     if (!got && BoardroomRead(g_tagfs_seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS,
                               buffer) != 0) {
         TagFSNoteReadRefused();
-        return volume_medium_gone() ? ERR_DEVICE_NOT_READY : ERR_READ_FAILED;
+        return volume_not_here() ? ERR_DEVICE_NOT_READY : ERR_READ_FAILED;
     }
     return IntegrityVerify(block, buffer) ? OK : ERR_CHECKSUM;
 }
@@ -1589,14 +1846,14 @@ error_t tagfs_write_block(uint32_t block, const void *buffer)
 {
     if (!buffer)
         return ERR_NULL_POINTER;
-    if (volume_medium_gone())
+    if (volume_not_here())
         return ERR_DEVICE_NOT_READY;
 
     bool took = g_state.braid &&
                 BraidWriteBlock(g_state.braid, tagfs_block_to_sector(block), buffer, NULL) == OK;
     if (!took && BoardroomWrite(g_tagfs_seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS,
                                 buffer, NULL) != 0)
-        return volume_medium_gone() ? ERR_DEVICE_NOT_READY : ERR_WRITE_FAILED;
+        return volume_not_here() ? ERR_DEVICE_NOT_READY : ERR_WRITE_FAILED;
     VolumeWriteSeen();
     ReadAheadForgetBlock(block);
     IntegrityUpdate(block, buffer);
@@ -1740,10 +1997,16 @@ error_t tagfs_init(void) {
      * So the guarantee lives in ONE place, where the failure is, and it is
      * provable: take the clearing out of mount_refused and the second mount
      * dies at TagFS_TestsInit exactly as the board did at TagFS_CowInit.
+     *
+     * The departure's latch is the one thing let go of here, and it is not
+     * the ground: it is the open book of a MOUNTED volume (mount/away.h), and
+     * no volume is up. One left standing would be inherited by the volume
+     * about to come up, and every read of it refused from the moment it was.
      */
+    __atomic_store_n(&g_medium_left, false, __ATOMIC_RELEASE);
 
-    /* Detect which ATA drive (master/slave) holds the TagFS volume.
-     * Must run before any disk I/O so g_tagfs_drive is correct. */
+    /* Which seat carries this machine's volume — asked of the whole room
+     * before a sector of the volume is read. */
     TagFSProbeDrive();
 
     /*
@@ -1796,7 +2059,6 @@ error_t tagfs_init(void) {
     /* --- Stand on the ground, and read the deed that describes it --- */
     error_t ground_rc = volume_take_ground(g_tagfs_seat);
     if (ground_rc != OK) {
-        g_ground_refused = true;
         return ground_rc;
     }
 
@@ -2170,9 +2432,9 @@ error_t tagfs_shutdown(void)
 }
 
 /*
- * A mount this machine owes itself, asked again because the seat said it
- * answers again (the note over g_mount_owed). Two atomic loads when nothing is
- * owed.
+ * A mount this machine owes itself — or the search for a volume whose book is
+ * held open — asked again because a seat said it answers again (the note over
+ * g_mount_owed). Two atomic loads when nothing is owed.
  */
 static void tagfs_ask_for_the_mount_again(void)
 {
@@ -2184,13 +2446,32 @@ static void tagfs_ask_for_the_mount_again(void)
         return;                 /* somebody is already at it; the event stays */
     }
     __atomic_store_n(&g_mount_ready, 0u, __ATOMIC_RELEASE);
-    if (g_state.initialized) {
-        mount_settled();        /* somebody got there first */
-    } else {
+    if (!g_state.initialized) {
         kprintf("[TagFS] seat %u answers again — asking for the volume nobody has "
-                "mounted\n", g_tagfs_seat);
+                "mounted\n", g_tagfs_seat != BOARDROOM_NO_SEAT ? g_tagfs_seat : g_search_unread);
         attend_arrival();
+    } else if (TagFSMediumLeft()) {
+        kprintf("[TagFS] a seat answers again — searching the room again for the volume "
+                "whose book is held open\n");
+        attend_arrival();
+    } else {
+        mount_settled();        /* somebody got there first */
     }
+    attending_done();
+}
+
+/* An arrival the room announced (seat:taken), attended here on this pass's own
+ * stack. Two atomic loads when nothing arrived. */
+static void tagfs_attend_owed_arrival(void)
+{
+    if (__atomic_load_n(&g_arrival_owed, __ATOMIC_ACQUIRE) == 0 ||
+        __atomic_load_n(&g_boot_mount_settled, __ATOMIC_ACQUIRE) == 0) {
+        return;
+    }
+    if (!attending_take()) {
+        return;                 /* the holder attends it before letting go */
+    }
+    attend_arrival();
     attending_done();
 }
 
@@ -2199,6 +2480,9 @@ static void tagfs_ask_for_the_mount_again(void)
  * first: a job holds the door for its whole life, so a volume on its way out
  * is let go of only once the work inside it has been done. Then the Settle's
  * turn: a step of its cycle, or the start of one that is due (settle.h).
+ *
+ * And a medium the room seated is attended — the volume mounted, or its open
+ * book judged — and a mount owed is asked again when a seat answers again.
  *
  * And the ground that could not be cleared when the medium left, because
  * somebody was standing on it, is finished here, and then the ordinary road
@@ -2213,6 +2497,7 @@ void TagFSServiceIfPending(void)
 {
     HelmRunReady();
     SettleServiceIfPending(false);
+    tagfs_attend_owed_arrival();
     TagFSReturnFailSeatReady();     /* nothing at all unless RETURNFAIL=on */
     tagfs_ask_for_the_mount_again();
 
@@ -2647,6 +2932,11 @@ char *TagFSKeyList(const uint16_t *tag_ids, uint32_t count)
         size_t at = 0;
         for (uint32_t i = 0; i < count; i++) {
             if (!TagFSTagSpelling(tag_ids[i], &tag, NULL))
+                continue;
+            /* A tag another core interned after the count above is not in
+             * what was measured, and is left out rather than written past
+             * the end of it. */
+            if (at + (at ? 1u : 0u) + tag.key_len >= need)
                 continue;
             if (at)
                 list[at++] = ',';
