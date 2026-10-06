@@ -290,7 +290,8 @@ static void memo_keep(uint8_t seat, uint32_t seating,
 typedef enum {
     GPT_TABLE_READ,      /* believed, and `found` is what it holds */
     GPT_TABLE_ABSENT,    /* no signature there: this is not a GPT header */
-    GPT_TABLE_DAMAGED    /* there IS one, and it does not check out */
+    GPT_TABLE_DAMAGED,   /* there IS one, and it does not check out */
+    GPT_TABLE_REFUSED    /* the medium would not give it up: nothing is known */
 } GptVerdict;
 
 /*
@@ -336,7 +337,7 @@ static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_block,
     if (BoardroomRead(seat, header_sector, (uint32_t)ratio, header) != 0) {
         kprintf("[Ground] seat %u: sector %llu would not be read\n",
                 seat, (unsigned long long)header_sector);
-        verdict = GPT_TABLE_DAMAGED;
+        verdict = GPT_TABLE_REFUSED;
         goto done;
     }
 
@@ -479,7 +480,7 @@ static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_block,
 
     if (BoardroomRead(seat, array_sector, array_secs, array) != 0) {
         kprintf("[Ground] seat %u: would not give up its GPT entries\n", seat);
-        verdict = GPT_TABLE_DAMAGED;
+        verdict = GPT_TABLE_REFUSED;
         goto done;
     }
 
@@ -586,7 +587,8 @@ static void ground_say_unit(uint8_t seat, uint32_t block_bytes)
  * itself in, finest first — see GPT_BLOCK_MAX_BYTES above for why that is a
  * question at all, and why the medium's own table is what answers it.
  */
-static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
+static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max,
+                                 bool *refused)
 {
     const uint64_t medium   = BoardroomSeatSectors(seat);
     uint8_t        found    = 0;
@@ -609,6 +611,7 @@ static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
             if (block != BOARDROOM_SECTOR_BYTES) ground_say_unit(seat, block);
             return found;
         }
+        if (v == GPT_TABLE_REFUSED) *refused = true;
 
         /*
          * ‼ A HEADER THAT IS NOT THERE IS AS MUCH DAMAGE AS ONE THAT IS WRONG.
@@ -633,8 +636,9 @@ static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
              * still be read, and unknowable once it cannot. */
             kprintf("[Ground] seat %u: its GPT %s — reading the copy at the "
                     "far end, sector %llu (UEFI 2.10 5.3.2)\n", seat,
-                    (v == GPT_TABLE_ABSENT) ? "is not where the disk says it is"
-                                            : "is damaged",
+                    (v == GPT_TABLE_ABSENT)  ? "is not where the disk says it is" :
+                    (v == GPT_TABLE_REFUSED) ? "would not be read"
+                                             : "is damaged",
                     (unsigned long long)(medium - ratio));
             said_far = true;
         }
@@ -648,9 +652,14 @@ static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
             if (block != BOARDROOM_SECTOR_BYTES) ground_say_unit(seat, block);
             return found;
         }
+        if (v == GPT_TABLE_REFUSED) *refused = true;
     }
 
-    if (medium == 0) {
+    if (*refused) {
+        kprintf("[Ground] seat %u: the medium refused reads its GPT needs, and "
+                "no copy was read — where its ground lies is not known until "
+                "it answers\n", seat);
+    } else if (medium == 0) {
         kprintf("[Ground] seat %u: its GPT is damaged, and the medium will not "
                 "say how far it runs — so the copy at the far end cannot be "
                 "found\n", seat);
@@ -669,9 +678,10 @@ static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
  * the caller's buffer: what is read off the medium is the whole of what the
  * medium says, so that the memo above holds a complete answer whoever asked
  * first. Trimming to what a particular caller can hold happens in one place,
- * in GroundSurvey.
+ * in GroundSurvey. `refused` is raised when what it found is nothing because
+ * the medium would not be read, rather than because it said so.
  */
-static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out)
+static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out, bool *refused)
 {
     const uint8_t max = GROUND_MAX_PER_MEDIUM;
     const uint64_t medium = BoardroomSeatSectors(seat);
@@ -679,6 +689,7 @@ static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out)
     uint8_t sector0[BOARDROOM_SECTOR_BYTES];
     if (BoardroomRead(seat, 0, 1, sector0) != 0) {
         kprintf("[Ground] seat %u: could not be read at all\n", seat);
+        *refused = true;
         return 0;
     }
 
@@ -697,7 +708,7 @@ static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out)
     for (uint32_t i = 0; i < MBR_ENTRY_COUNT; i++) {
         const uint8_t *e = sector0 + MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES;
         if (e[MBR_ENTRY_TYPE] == GROUND_MBR_TYPE_PROTECTIVE) {
-            return ground_survey_gpt(seat, out, max);
+            return ground_survey_gpt(seat, out, max, refused);
         }
     }
 
@@ -750,8 +761,9 @@ static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out)
     return found;
 }
 
-uint8_t GroundSurvey(uint8_t seat, MediumGround *out, uint8_t max)
+uint8_t GroundSurvey(uint8_t seat, MediumGround *out, uint8_t max, bool *refused)
 {
+    if (refused) *refused = false;
     if (!out || max == 0) return 0;
 
     MediumGround all[GROUND_MAX_PER_MEDIUM];
@@ -765,8 +777,23 @@ uint8_t GroundSurvey(uint8_t seat, MediumGround *out, uint8_t max)
     uint32_t seating = BoardroomSeatSeating(seat);
 
     if (seating == 0 || !memo_recall(seat, seating, all, &claimed)) {
-        claimed = ground_survey_medium(seat, all);
-        if (seating != 0) {
+        bool said_nothing = false;
+        claimed = ground_survey_medium(seat, all, &said_nothing);
+
+        /*
+         * ‼ A REFUSAL IS NOT AN ANSWER, AND IS NOT REMEMBERED AS ONE.
+         *
+         * A stick asked for its table in the instant after it was plugged in
+         * may refuse the read and answer the next one. Remembered, that
+         * refusal was "no BoxOS ground here" for as long as the stick sat in
+         * its socket: the mount found no volume, owed nothing, and its volume
+         * never came up until a hand pulled the stick out and pushed it in
+         * again. Only what the medium said is kept; a refused survey is read
+         * again by whoever asks next, and the asker is told it was refused.
+         */
+        if (said_nothing) {
+            if (refused) *refused = true;
+        } else if (seating != 0) {
             memo_keep(seat, seating, all, claimed);
         }
     }

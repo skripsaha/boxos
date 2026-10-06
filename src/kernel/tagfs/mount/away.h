@@ -88,6 +88,34 @@ bool        AwayLiedLearned(const uint8_t uuid[16]);
  */
 void        TagFSStandMediumLeaves(void);
 AwayVerdict TagFSStandMediumReturns(const VolumeLedger* found);
+
+/*
+ * And the stand's own take-down and mount, for the road a mount takes when the
+ * medium does what a hand does to it. The runner stands inside the volume's
+ * door, so LetGo first lets go of the runner's hold and then takes the volume
+ * down as a book given up does, writing nothing; HoldAgain counts the runner
+ * back in, a volume up or not, because the runner lets go of it once more.
+ *
+ * The turn of the next mount: SEAT_EMPTIES empties the volume's seat at the
+ * mount's nth block read, as a medium pulled out in the middle of its reads;
+ * SEAT_RINGS has the seat say seat:ready, and the room say it on the spot,
+ * the moment a block read of the mount is refused — before the mount has heard
+ * of the refusal. Fired: the turn happened. Idle: no arrival owed, nobody
+ * attending, and no owed mount waiting to be asked. Owed: a mount is owed
+ * until a seat answers again.
+ */
+typedef enum {
+    STAND_MOUNT_AS_IS = 0,
+    STAND_MOUNT_SEAT_EMPTIES,
+    STAND_MOUNT_SEAT_RINGS
+} StandMountTurn;
+
+bool        TagFSStandLetGo(void);
+void        TagFSStandHoldAgain(void);
+void        TagFSStandMountTurn(StandMountTurn turn, uint32_t nth);
+bool        TagFSStandMountTurnFired(void);
+bool        TagFSStandMountIdle(void);
+bool        TagFSStandMountOwed(void);
 #endif
 
 #endif /* TAGFS_MOUNT_AWAY_H */

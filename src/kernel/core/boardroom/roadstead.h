@@ -79,11 +79,21 @@ typedef struct RoadsteadBerth {
      * sector it failed at — read by `answered`; 0 when the medium names no
      * such sector, which ours do not yet (BoardroomWrite's `landed`). */
     uint32_t           landed;
+
+    /* The room stands between the medium and whoever handed it a berth nobody
+     * stands over (boardroom.c, seat_async): `answered` is the room's own,
+     * which notes what the seat said and passes it on to `theirs`. The chair
+     * and the occupant of it the command went to, so an answer that comes
+     * after the chair changed hands is not put down to whoever sits in it
+     * now. */
+    RoadsteadAnswered  theirs;
+    void*              theirs_ctx;
+    uint32_t           seating;
+    uint8_t            seat;
 #ifdef CONFIG_VOLUME_TESTS
-    /* The caller's answer while BLOCKFAIL lets the sectors before the plan's
-     * first one go out as their own command (boardroom.c, seat_async). */
-    RoadsteadAnswered  struck_answered;
-    void*              struck_ctx;
+    /* BLOCKFAIL let the sectors before the plan's first one go out as their
+     * own command: their answer becomes the refusal the caller was to hear. */
+    bool               struck;
 #endif
 } RoadsteadBerth;
 

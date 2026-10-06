@@ -350,7 +350,7 @@ void DeedSurveyAll(uint8_t standing_seat, uint64_t standing_start)
         if (!BoardroomSeatOccupied(seat)) continue;
 
         MediumGround ground[GROUND_MAX_PER_MEDIUM];
-        uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM);
+        uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM, NULL);
 
         for (uint8_t g = 0; g < claimed; g++) {
             /*

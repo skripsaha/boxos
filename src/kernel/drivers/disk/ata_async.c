@@ -67,6 +67,7 @@
 #include "touch.h"
 #include "scheduler.h"     /* SchedulerHoldHere — a recovery is run to its end */
 #include "system_halt.h"   /* HaltStopIfOwedHere — and stopped only after it */
+#include "boardroom.h"     /* BoardroomNoteSeatReady — the channel answers again */
 
 /* ---------------------------------------------------------------------
  *  BMIDE register layout (Intel BMIDE Rev 1.0 §3).
@@ -641,6 +642,10 @@ static void ata_recover_worker(AtaAsyncCh *aa) {
     bmide_launch_next_locked(aa);
     __atomic_store_n(&aa->recovering, BMIDE_RECOVERY_NONE, __ATOMIC_RELEASE);
     spin_unlock(&aa->cmd_lock);
+
+    /* The channel answers again, for whichever of its two drives has a seat
+     * — the bell a refusal on it waits for (boardroom.h). */
+    for (uint8_t d = 0; d < 2; d++) BoardroomNoteSeatReady(BOARD_ATA, (uint8_t)((ch_idx << 1) | d));
 
     /* Publish the wedged cmd's failure LAST — in_flight no longer points at it
      * and the drive is silenced+re-armed, so its (stack) storage is dead to

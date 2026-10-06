@@ -72,21 +72,50 @@ void BoardroomNoteArrival(void);
  */
 void BoardroomNoteDeparture(BoardKind kind, uint8_t index);
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's medium pulled out from under a command in flight: the chair
+ * emptied as a departure empties it, and nothing said yet — what a reader
+ * between two commands meets when the hand is quicker than the room's
+ * announcement. The next BoardroomInit seats it again, as an arrival. */
+void BoardroomStandSeatEmpties(uint8_t seat);
+#endif
+
 /*
  * The medium in a seat answers again, after a spell in which it would not —
  * named the way a departure is, by the controller and the index it has.
  *
  * A transient refusal is not a count of tries to be spent: whoever was told
  * "not now" by a medium waits for this instead, and asks again when it comes.
- * Said where the driver knows the seat is back — an AHCI port its recovery
- * brought back to work, a USB disk that reported a unit attention and then did
- * what it was asked. Nothing is decided here; like the other two, it is an
- * announcement, and cheap: no lock is held and no medium is touched.
+ * The room says it by itself of every seat: a seat that refused a command
+ * rings on the first command it answers after that, whatever kind of medium
+ * sits in it. A driver says it too, where it knows the seat is back — an AHCI
+ * port its recovery brought back to work, an IDE channel it reset, a USB disk
+ * whose transport it reset or that reported a unit attention and then did
+ * what it was asked. Nothing is decided here: the seat's count moves
+ * (BoardroomSeatReadyGen) and seat:ready is said by the room's own pass
+ * (BoardroomAttendIfPending), never on the stack of whoever noted it — so
+ * this takes no time, touches no medium, and may be called holding a port's
+ * lock. Not from an interrupt: it takes the room's.
  */
 void BoardroomNoteSeatReady(BoardKind kind, uint8_t index);
 
-/* Cheap enough for the idle loop: one atomic load when nothing has arrived,
- * which is almost always. */
+/*
+ * How many times seat:ready has been noted of `seat` — or, for
+ * BOARDROOM_NO_SEAT, of any seat in the room.
+ *
+ * A count, not a flag, so a waiter cannot lose the event in the moment
+ * between being refused and starting to listen. Taken BEFORE the medium is
+ * asked; when the answer is a refusal, compared: a count that moved is a
+ * seat:ready that already happened, and the waiter asks again at once instead
+ * of waiting for one that will not come twice. Moves where the seat is noted
+ * ready, ahead of the announcement, and only ever forward — for the chair,
+ * whoever sits in it.
+ */
+uint32_t BoardroomSeatReadyGen(uint8_t seat);
+
+/* The room's pass: seat:ready said for every seat that rang, and whatever
+ * arrived seated. Cheap enough for the idle loop: two atomic loads when
+ * nothing rang and nothing arrived, which is almost always. */
 void BoardroomAttendIfPending(void);
 
 /*
@@ -233,8 +262,8 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
 bool BoardroomSeatRefusesWrites(uint8_t seat);
 
 /* Whether the seat says seat:ready when it answers again after a refusal —
- * AHCI after a port recovery, USB once a unit is ready again. The legacy
- * channels do not, so a refusal there is the last word on the matter. */
+ * every seat with a medium in it does, by the room's own bell
+ * (BoardroomNoteSeatReady). */
 bool BoardroomSeatAnnouncesReady(uint8_t seat);
 
 /*
