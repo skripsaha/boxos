@@ -321,6 +321,7 @@ static error_t SettleStepRun(SettleSnap* snap, SettleStep* step)
         return OK;
     case SETTLE_STEP_TAKE:
         SettleTakeStep(snap);
+        SETTLE_CUT_CYCLE(snap->target);
         *step = SETTLE_STEP_REGISTRY;
         return OK;
     case SETTLE_STEP_REGISTRY:

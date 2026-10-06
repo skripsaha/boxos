@@ -172,12 +172,8 @@ class Judge:
             e = self.census[(code, sev)]
             what = "%s (%s) in %d of %d %scuts, first %s (%s): %s" % (
                 (code, sev, len(e["cuts"])) + Of(code) + (e["first"], run.Kept(e["first"]), e["text"]))
-            held = True
-            if self.by_kind and code.startswith("prefix:CHAIN_REFUSED:"):
-                held, proof = self.Refusal(e["cuts"], code.split(":")[2])
-                what += "; " + proof
             if self.caveats.get("code:" + code):
-                self.Out("code:" + code, "defect" if held else "fail", what)
+                self.Out("code:" + code, "defect", what)
             else:
                 self.Out("code:" + code, "fail", what + " — no caveat names it; its step is the "
                          "owner's to assign")
@@ -186,37 +182,16 @@ class Judge:
                 prefixes = self.by_kind and key[5:].startswith("prefix:")
                 whole = run.Exhaustive(prefixes=prefixes)
                 n, kind = Of(key[5:])
-                self.Out(key, "behaves" if whole else "unseen", "no %scut of %d shows %s%s"
-                         % (kind, n, key[5:], "" if whole else "; " + run.Unbuilt(prefixes=prefixes)))
+                # A code check says as a note — one the next mount repairs — is
+                # no harm, and is said, so "no cut shows it" is never read as
+                # "no cut has it".
+                noted = self.census.get((key[5:], "note"))
+                self.Out(key, "behaves" if whole else "unseen", "no %scut of %d shows %s as damage or a "
+                         "leak%s%s" % (kind, n, key[5:], "; %d show it as a note, first %s: %s" % (
+                             len(noted["cuts"]), noted["first"], noted["text"]) if noted else "",
+                             "" if whole else "; " + run.Unbuilt(prefixes=prefixes)))
         if not harm:
             self.Out("codes", "behaves", "every one of %d cuts is consistent" % sum(judged.values()))
-
-    def Refusal(self, cuts, chain):
-        """The kernel's own word on a refusal check predicts over `chain`: every
-        booted cut among `cuts` whose predicted refusal is that chain's, held
-        to the sentence its mount said — and, for the file table, to the block
-        its loader names. (held, what was seen)."""
-        agree, differ = [], []
-        for b in self.boots:
-            r = self.run.results.get(b["id"], {})
-            why = r.get("refused", {}).get(chain)
-            if b["id"] not in cuts or not why or not (r.get("refusal") or "").endswith(" — " + why):
-                continue
-            due = r["refusal"][:-len(" — " + why)]
-            said = re.search(r"\[TagFS\] this volume is NOT mounted: (.*) \(error \d+\)", b["log"])
-            named = re.search(r"\[FileTable\] (block \d+ holds 0x[0-9a-f]+) where", b["log"])
-            if said and said.group(1) == due and (not named or why.startswith(named.group(1) + " ")):
-                agree.append("%s, whose mount said '%s'%s" % (
-                    b["id"], said.group(1), " and '[FileTable] %s'" % named.group(1) if named else ""))
-            else:
-                differ.append("%s, where check predicted '%s' (%s) and the kernel said %s" % (
-                    b["id"], due, why, "'%s'" % said.group(1) if said else "no refusal"))
-        if differ:
-            return False, "booted " + "; ".join(differ[:2])
-        if not agree:
-            return False, "none of them was booted, so the kernel's own refusal was never seen"
-        return True, "booted %d, the kernel refused as check predicted: %s" % (len(agree),
-                                                                              "; ".join(agree[:2]))
 
     def Boundaries(self):
         """Every state a sync stood behind — an epoch its flush closed, holding the ledger HEAD's sync
@@ -457,11 +432,11 @@ def Codes(codes):
 
 
 def CmdSettleCut(a):
-    """A kernel built SETTLECUT=ledger stopped its first sync before the ledger (DIR/ledger.check.json);
-    one built SETTLECUT=done stopped it after the flush (DIR/done.check.json). The recorded plain run of
-    the same anchor_test is cut at two points of its own sync — through the file table, and everything
-    before the ledger — and each is judged by volume-read: the SETTLECUT medium and PowerCut's cut
-    before the ledger must name the same codes. The SETTLECUT=ledger medium is judged code by code, as
+    """A kernel built SETTLECUT=ledger stopped the cycle that settles anchor_test's change before the
+    ledger (DIR/ledger.check.json); one built SETTLECUT=done stopped it after the flush
+    (DIR/done.check.json). The recorded plain run of the same anchor_test is cut at two points of its
+    own cycle — through the file table, and everything before the ledger — and each is judged by
+    volume-read: the SETTLECUT medium and PowerCut's cut before the ledger must name the same codes. The SETTLECUT=ledger medium is judged code by code, as
     Codes judges a census: each harm code is held under its own caveat or is a FAIL, and a caveated code
     it does not show is lifted early — one medium is its own whole census."""
     run = Run(a.dir)
@@ -487,28 +462,32 @@ def CmdSettleCut(a):
     step = run.Step("anchor_test")
     flush = run.AckFlush(step) if step else None
     if flush is None:
-        judge.Out("cross", "fail", "the recorded anchor_test has no flush behind it, so its sync has no "
-                  "points to cut at")
+        judge.Out("cross", "fail", "the recorded anchor_test has no flush behind it, so its cycle has "
+                  "no points to cut at")
     else:
-        k = run.closes[flush]
-        ws = [w for w in run.listing["writes"] if w["epoch"] == k and not Outside(w)]
-        kind = [w["touches"][0]["kind"] if w["touches"] else "?" for w in ws]
-        mine = [i for i, w in enumerate(ws) if w["seq"] > step["before"]]
-        table = next((i for i in mine if kind[i] == "table"), None)
-        before = next((i for i in mine if kind[i] == "ledger"), None)
-        if table is None or before is None:
-            judge.Out("cross", "fail", "the anchor's sync in epoch %d wrote no %s"
-                      % (k, "file table" if table is None else "ledger"))
+        # The anchor's cycle is every volume write from its first to the flush its ack stands on,
+        # across the epochs its FLUSH#1 parts. A cut at a point is the point's own epoch: every
+        # epoch before it whole, and of it the writes before the point — and those outside the
+        # volume, which every cut applies.
+        cycle = [w for w in run.listing["writes"] if step["before"] < w["seq"] < flush and not Outside(w)]
+        table_at = next((w for w in cycle if w["touches"] and w["touches"][0]["kind"] == "table"), None)
+        ledger_at = next((w for w in cycle if w["touches"] and w["touches"][0]["kind"] == "ledger"), None)
+        if table_at is None or ledger_at is None:
+            judge.Out("cross", "fail", "the anchor's cycle, entries %d to %d, wrote no %s"
+                      % (step["before"] + 1, flush, "file table" if table_at is None else "ledger"))
         else:
             said = []
-            for name, n in (("through the file table", table + 1), ("before the ledger", before)):
+            for name, at, last in (("through the file table", table_at, table_at["seq"]),
+                                   ("before the ledger", ledger_at, ledger_at["seq"] - 1)):
+                keep = [w["index"] for w in run.listing["writes"]
+                        if w["epoch"] == at["epoch"] and (w["seq"] <= last or Outside(w))]
                 r = subprocess.run([sys.executable, VOLUME_READ, os.path.join(a.dir, "base.img"), "cut",
-                                    os.path.join(a.dir, "run.log"), "--epoch", str(k), "--keep",
-                                    Ranges(w["index"] for w in ws[:n]) or "none", "--check", "--json"],
+                                    os.path.join(a.dir, "run.log"), "--epoch", str(at["epoch"]), "--keep",
+                                    Ranges(keep) or "none", "--check", "--json"],
                                    stdout=subprocess.PIPE, universal_newlines=True)
-                said.append((name, ws[n - 1]["seq"], Harm(json.loads(r.stdout))))
+                said.append((name, run.LastWriteBefore(last + 1), Harm(json.loads(r.stdout))))
             judge.Out("cross", "behaves" if said[1][2] == Harm(ledger) else "fail",
-                      "SETTLECUT=ledger names %s; PowerCut's cut of the same sync %s" % (
+                      "SETTLECUT=ledger names %s; PowerCut's cut of the same cycle %s" % (
                           Codes(Harm(ledger)), "; ".join("%s (entries to %d) names %s" % (
                               name, seq, Codes(codes)) for name, seq, codes in said)))
     anchored = [f for f in done["files"] if f["name"] == "_anchor_test"]

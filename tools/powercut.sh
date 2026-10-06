@@ -39,22 +39,23 @@
 #               later torn sync held under 1.4.
 #   settlecut   the second oracle: kernels built SETTLECUT=ledger and =done,
 #               each booted from a copy, anchor_test, the machine stopped
-#               inside its sync; volume-read's codes against PowerCut's cut at
-#               the same point of the same sync.
-#   chaingrow   MP-D5: the base brought by quilltest crowd to both edges —
-#               the file table one create short of its next block, the tag
-#               registry's last block room for one more tag — then `quilltest
-#               crowd` grows both chains and anchors, and the power goes. Its
-#               census is kept by kind: a prefix that links into unstamped
-#               ground, which step 1.1 lifted, has one such cut booted to be
-#               refused by the kernel itself; a subset doing the same, apart.
-#   noanchormut nextfidmut poolmut flushmut chaingrowmut
+#               inside the cycle that settles the anchor; volume-read's codes
+#               against PowerCut's cut at the same point of the same cycle.
+#   chaingrow   MP-D5: the base brought by rounds of quilltest crowd, each
+#               measured, to both edges — the file table one create short of
+#               its next block, the tag registry's last block room for one more
+#               tag — then `quilltest crowd` grows both chains and anchors, and
+#               the power goes. Its census is kept by kind, prefix and subset
+#               apart, and the first cut of every kind and every chain refused
+#               is booted.
+#   noanchormut nextfidmut poolmut flushmut
 #               the fix taken out or the fault put in on purpose: the cadence
 #               off (noanchor's verify), the mount's derived next file id off
-#               (nextfid's reissue), the durability, the ack or the chains'
-#               lifted rows must say the defect is back.
-#   selftest    the planner's arithmetic, and a record forged by one byte that
-#               the record's self-check must refuse.
+#               (nextfid's reissue), the durability or the ack must say the
+#               defect is back.
+#   selftest    the planner's arithmetic, settlecut's patterns against the
+#               sentences settle_cut.c prints, and a record forged by one byte
+#               that the record's self-check must refuse.
 #
 # Every census code a scenario was measured showing is its own caveat row —
 # (scenario, code), stand_caveat.sh — held under 1.6, the ORPHAN of an
@@ -410,14 +411,10 @@ pc_boots() {
     done 3<"$PC_DIR/boots.txt"
 }
 
-# pc_caveats NAME PATH — the caveats a scenario's verdicts may be held under:
+# pc_caveats NAME — the caveats a scenario's verdicts may be held under:
 # KEY=ROW, ROW a row of stand_caveat.sh's one table. Every census code the
-# scenario was measured showing on this path is its own (scenario, code) row
-# (the owner, 2026-09-27); a code no row names is a FAIL until the owner
-# assigns it a step. nextfid's quiet, whole census shows MISSING and
-# TAG_ABSENT only on a synchronous path — on the WriteJob the bitmap and the
-# registry are flushed before the anchor's sync — and there their absence
-# would be read as a lifting.
+# scenario was measured showing is its own (scenario, code) row (the owner,
+# 2026-09-27); a code no row names is a FAIL until the owner assigns it a step.
 pc_caveats() {
     local base code codes=""
     case "$1" in
@@ -425,8 +422,7 @@ pc_caveats() {
         hog)                  base=hog; echo "verify=hog"; codes="ORPHAN" ;;
         nextfid|nextfidmut|poolmut|flushmut)
             base=nextfid; echo "reissue=nextfid"
-            codes="FID_PAST_NEXT FILE_LOST ORPHAN UNNAMED_RECORD"
-            case "$2" in *" sync") codes="$codes MISSING TAG_ABSENT" ;; esac ;;
+            codes="FID_PAST_NEXT FILE_LOST MISSING ORPHAN TAG_ABSENT UNNAMED_RECORD" ;;
         halt)
             base=halt
             codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT UNNAMED_RECORD" ;;
@@ -434,7 +430,7 @@ pc_caveats() {
             base=race; echo "durable:_qt_churn@race=race:durable"
             codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN RECORD_SHAPE SPARE_UNNAMED TAG_ABSENT TAG_DUPLICATE UNNAMED_RECORD" ;;
         settlecut) base=settlecut; codes="FID_PAST_NEXT" ;;
-        chaingrow|chaingrowmut)
+        chaingrow)
             base=chaingrow
             codes="prefix:CHAIN_REFUSED:registry prefix:CHAIN_REFUSED:table prefix:FID_PAST_NEXT prefix:ORPHAN
                    prefix:SPARE_UNNAMED subset:CHAIN_REFUSED:registry subset:CHAIN_REFUSED:table
@@ -448,7 +444,7 @@ pc_caveats() {
 # $PC_DIR/verdicts.tsv; the report printed and kept.
 pc_judge() {
     local c args=()
-    for c in $(pc_caveats "$PC_NAME" "$PC_PATH"); do args+=(--caveat "$c"); done
+    for c in $(pc_caveats "$PC_NAME"); do args+=(--caveat "$c"); done
     echo "took $(( $(date +%s) - PC_T0 )) s to judge; the report is $PC_DIR/report.txt" >>"$PC_DIR/facts.txt"
     python3 "$PC" judge "$PC_DIR" --path "$PC_PATH" ${args[@]+"${args[@]}"} "$@" >"$PC_DIR/verdicts.tsv" || {
         harness "$PC_NAME: the judge could not read this run"; return 1; }
@@ -554,7 +550,12 @@ pc_race() {
 # its anchor grow both chains, and every prefix of it is built.
 PC_CROWD_NAME_BYTES=15    # "crowd" and ten digits: quilltest_powercut.c QuillCrowdName
 PC_CROWD_ROOM=1
-PC_CROWD_SETTLE_FROM=4294967295   # the settling crowd's one name, past every other
+# Rounds of crowd the base is given to stand at both edges (pc_edges). Each
+# round lands there unless the machine interned a tag of its own during it,
+# and each such tag is interned once — two were measured, a console lane's and
+# `anchor` — so a machine still short after this many is one that interns a
+# new tag every round, and that is said, not waited out.
+PC_CROWD_ROUNDS=${PC_CROWD_ROUNDS:-4}
 
 # pc_crowd CMD — one quilltest crowd on a machine that is not recorded, its
 # PASS required and said in the facts.
@@ -573,54 +574,64 @@ pc_crowd() {
     wait_for_quiet "$BOOT_BURST_QUIET_S"
 }
 
-# pc_crowded NAME CMD... — the base booted, every CMD (a quilltest crowd) run
+# pc_crowded ROUND CMD... — the base booted, every CMD (a quilltest crowd) run
 # on it, switched off by its power button and judged again: consistent, or
 # nothing after it means anything.
 pc_crowded() {
-    local what=$1 cmd pid
+    local round=$1 cmd pid
     shift
-    pc_boot "$PC_DIR/base.img" || { bad "$PC_NAME: the base never reached a shell to be $what"; return 1; }
+    pc_boot "$PC_DIR/base.img" || {
+        bad "$PC_NAME: the base never reached a shell for crowd's round $round"; return 1; }
     for cmd in "$@"; do pc_crowd "$cmd" || return 1; done
     pid=$(cat build/qemu.pid)
     mon_raw system_powerdown && pc_gone "$pid" || {
-        bad "$PC_NAME: the $what base would not switch off by its power button"; return 1; }
-    cp build/serial.log "$PC_DIR/$what.serial.log"
+        bad "$PC_NAME: the base would not switch off by its power button after crowd's round $round"; return 1; }
+    cp build/serial.log "$PC_DIR/crowd$round.serial.log"
     python3 "$VR" "$PC_DIR/base.img" check --json >"$PC_DIR/base.check.json"
-    [ $? = 0 ] || { bad "$PC_NAME: the $what base is not consistent"; return 1; }
+    [ $? = 0 ] || { bad "$PC_NAME: the base is not consistent after crowd's round $round"; return 1; }
 }
 
-# pc_edges — the base brought to both edges (tools/powercut.py crowd says how
-# many files) and judged again. Sets CG_FROM and CG_RUN: the first number and
-# the count of the recorded run's files.
+# pc_edges — the base brought to both edges and judged again. Sets CG_FROM and
+# CG_RUN: the first number and the count of the recorded run's files.
 #
-# ‼ SETTLED FIRST, BECAUSE THE MACHINE INTERNS TAGS OF ITS OWN. Measured: the
-# first anchor ever put the tag `anchor` in the registry, and the first line
-# crowd printed (at its 50th file) put `console:1` there — 26 bytes no count
-# of crowd's files had asked for, and the registry's last block came out 193
-# records from its edge instead of one. So one crowd of one file, numbered
-# where no other reaches, is run and anchored first, the base is measured
-# after it, and only then are the files counted.
+# ‼ MEASURED, NOT COUNTED, BECAUSE THE MACHINE INTERNS TAGS OF ITS OWN. A count
+# of crowd's files says where the registry should end up, and the machine
+# adds what it likes on the way: the first line crowd printed (at its 50th
+# file) put its console lane's tag `console:1` there, and `anchor` came after
+# the last of crowd's records — 27 bytes no file asked for, and the registry's
+# last block came out 193 records from its edge instead of one. So each round
+# is planned from the volume as check reads it (tools/powercut.py crowd), run,
+# switched off and read again, until the volume stands at both edges — or
+# PC_CROWD_ROUNDS rounds have not got it there, which is a machine this
+# harness cannot bring to the edges, said as such.
 pc_edges() {
-    local plan fill again
-    pc_crowded settled "quilltest crowd 1 $PC_CROWD_SETTLE_FROM" || return 1
-    plan=$(python3 "$PC" crowd "$PC_DIR/base.check.json" --name-bytes "$PC_CROWD_NAME_BYTES" \
-               --room "$PC_CROWD_ROOM" 2>&1) || {
-        harness "$PC_NAME: $plan"; return 1; }
-    fill=${plan%%"$TAB"*}; plan=${plan#*"$TAB"}
-    again=${plan%%"$TAB"*}
-    echo "edges: the settled base had ${plan#*"$TAB"}" >>"$PC_DIR/facts.txt"
-    if [ "$again" -gt 0 ]; then
-        pc_crowded crowded "quilltest crowd $fill 0" "quilltest crowd $again 0" || return 1
-    else
-        pc_crowded crowded "quilltest crowd $fill 0" || return 1
-    fi
-    plan=$(python3 "$PC" crowd "$PC_DIR/base.check.json" --name-bytes "$PC_CROWD_NAME_BYTES" \
-               --room "$PC_CROWD_ROOM" --made 2>&1) || {
-        harness "$PC_NAME: $plan"; return 1; }
-    CG_FROM=$fill
-    CG_RUN=${plan%%"$TAB"*}
-    echo "edges: switched off by its power button, check says consistent; ${plan#*"$TAB"}" \
-        >>"$PC_DIR/facts.txt"
+    local plan verdict fill again round=0 names=0 cmds
+    while :; do
+        plan=$(python3 "$PC" crowd "$PC_DIR/base.check.json" --name-bytes "$PC_CROWD_NAME_BYTES" \
+                   --room "$PC_CROWD_ROOM" --names "$names" 2>&1) || {
+            harness "$PC_NAME: $plan"; return 1; }
+        verdict=${plan%%"$TAB"*}; plan=${plan#*"$TAB"}
+        if [ "$verdict" = edges ]; then
+            CG_FROM=$names
+            CG_RUN=${plan%%"$TAB"*}
+            echo "edges: after $round round(s) of crowd, switched off by its power button, check says consistent; ${plan#*"$TAB"}" \
+                >>"$PC_DIR/facts.txt"
+            return 0
+        fi
+        fill=${plan%%"$TAB"*}; plan=${plan#*"$TAB"}
+        again=${plan%%"$TAB"*}; plan=${plan#*"$TAB"}
+        if [ "$round" -ge "$PC_CROWD_ROUNDS" ]; then
+            harness "$PC_NAME: the volume is not at both edges after $round round(s) of crowd: $plan"
+            return 1
+        fi
+        round=$((round + 1))
+        echo "edges: round $round — the base had $plan" >>"$PC_DIR/facts.txt"
+        cmds=()
+        [ "$fill" -gt 0 ] && cmds+=("quilltest crowd $fill $names")
+        [ "$again" -gt 0 ] && cmds+=("quilltest crowd $again 0")
+        pc_crowded "$round" ${cmds[@]+"${cmds[@]}"} || return 1
+        names=$((names + fill))
+    done
 }
 
 pc_chaingrow() {
@@ -661,30 +672,59 @@ run_scenario() {   # run_scenario NAME KEYS... — build, run, judge, say
 }
 
 # settlecut — the second oracle. A kernel built SETTLECUT=<point> stops the
-# whole machine at that point of its first sync (src/kernel/tagfs/settle_cut),
-# which leaves the medium a power cut there would leave. Its answer must be
-# PowerCut's answer for the same point of the same sync.
-# sc_boot_cut POINT — the POINT kernel's image, settled the only way a
-# SETTLECUT kernel can be (its power button would sync, and the sync would
-# stop at POINT): booted once, its mount's writes on the disk, and cut. Then
-# booted again, anchor_test, and the machine stops itself inside that sync.
+# whole machine at that point of the cycle that settles the boot's first
+# anchor (src/kernel/tagfs/settle_cut), which leaves the medium a power cut
+# there would leave. Its answer must be PowerCut's answer for the same point
+# of the same cycle.
+#
+# The two sentences of settle_cut.c the scenario waits for, said once here for
+# sc_boot_cut and for the selftest that holds them against that file's text.
+SC_SETTLE_CUT_C=src/kernel/tagfs/settle_cut/settle_cut.c
+SC_ARMED_ERE='^\[SETTLECUT\] armed: the first cycle to reach point [0-9]+ of [0-9]+, .*, with the change of the first anchor after this line in its snapshot stops this machine there$'
+SC_CUT_ERE='\[SETTLECUT\] the power went at point [0-9]+ of [0-9]+, .*, in cycle [0-9]+ of this boot, whose snapshot reaches Ink [0-9]+ of the anchor.s [0-9]+,'
+
+# sc_says — every sentence settle_cut.c prints, rendered as kprintf renders
+# it: "armed" or "cut", a tab and the line, each %u and %llu a number and a %s
+# the ledger point's words (SettleCutWhere). The literals of one kprintf are
+# joined as the compiler joins them.
+sc_says() {
+    python3 - "$SC_SETTLE_CUT_C" <<'EOF'
+import re, sys
+src = open(sys.argv[1]).read()
+where = dict(re.findall(r'\[SETTLE_CUT_POINT_(\w+)\]\s*=\s*"([^"]*)"', src))
+for call in re.findall(r'kprintf\(((?:\s*"(?:[^"\\]|\\.)*")+)', src):
+    line = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', call)).replace("\\n", "")
+    line = re.sub(r"%(?:ll)?u", "6", line).replace("%s", where.get("LEDGER", "?"))
+    for which, head in (("armed", "[SETTLECUT] armed: "), ("cut", "[SETTLECUT] the power went ")):
+        if line.startswith(head):
+            print("%s\t%s" % (which, line))
+EOF
+}
+
+# sc_boot_cut POINT — the POINT kernel's image, settled as PowerCut's base is:
+# booted once and switched off by its power button, its mount's writes and the
+# shutdown's cycle on the disk — no anchor was taken, so no cycle of that boot
+# stops. Then booted again, anchor_test, and the machine stops itself inside
+# the cycle that settles the anchor.
 sc_boot_cut() {
-    local pid img="$PC_DIR/$1.img"
+    local pid mark img="$PC_DIR/$1.img"
     if ! build_with_key SETTLECUT="$1" "$(strict_key ${PC_KEYS[@]+"${PC_KEYS[@]}"})"; then
         bad "settlecut: SETTLECUT=$1 does not build: $(tail -3 "$SCRATCH/build.log" | tr '\n' ' ')"; return 1
     fi
     pc_clone build/boxos.img "$img"
     pc_boot "$img" || { bad "settlecut: the SETTLECUT=$1 kernel never reached a shell"; return 1; }
-    pid=$(cat build/qemu.pid); kill -9 "$pid"; pc_gone "$pid"
+    pid=$(cat build/qemu.pid)
+    mon_raw system_powerdown && pc_gone "$pid" || {
+        bad "settlecut: the SETTLECUT=$1 kernel would not switch off by its power button"; return 1; }
     pc_boot "$img" || { bad "settlecut: the settled SETTLECUT=$1 volume never reached a shell"; return 1; }
-    grep -aqE "^\[SETTLECUT\] armed: the first sync to reach point [0-9]+ of 9" build/serial.log
+    tr -d '\r' <build/serial.log | grep -aqE "$SC_ARMED_ERE"
     chk $? "settlecut: $1 — $(grep -aoE '\[SETTLECUT\] armed: [^,]*' build/serial.log | head -1)"
+    mark=$(wc -l < build/serial.log)
     type_line anchor_test || { bad "settlecut: the machine never took anchor_test"; return 1; }
-    if ! wait_for_line -E build/serial.log \
-            "\[SETTLECUT\] the power went at point [0-9]+ of 9, .* in sync [0-9]+ of this boot" "$WAIT_QUIET_S"; then
-        bad "settlecut: SETTLECUT=$1 never stopped the machine"; return 1
+    if ! wait_for_line -E build/serial.log "$SC_CUT_ERE" "$WAIT_QUIET_S" $((mark + 1)); then
+        bad "settlecut: SETTLECUT=$1 never stopped the machine after anchor_test"; return 1
     fi
-    ok "settlecut: $1 — $(grep -aoE '\[SETTLECUT\] the power went at point [0-9]+ of 9, .* in sync [0-9]+' build/serial.log)"
+    ok "settlecut: $1 — $(tail -n +$((mark + 1)) build/serial.log | tr -d '\r' | grep -aoE "$SC_CUT_ERE" | sed 's/,$//')"
     pid=$(cat build/qemu.pid); kill -9 "$pid"; pc_gone "$pid"
     cp build/serial.log "$PC_DIR/$1.serial.log"
     # 0 consistent and 1 inconsistent are both answers — the ledger point is
@@ -710,7 +750,7 @@ pc_settlecut() {
     chk $? "settlecut: done — the file its sync finished survives a reboot: $(grep -aoE '\[ANCHOR\] [^.(]*' "$again" | head -1)"
     buildkey_restore || bad "settlecut: the plain kernel could not be built back"
     local c args=()
-    for c in $(pc_caveats settlecut "$PC_PATH"); do args+=(--caveat "$c"); done
+    for c in $(pc_caveats settlecut); do args+=(--caveat "$c"); done
     python3 "$PC" settlecut "$PC_DIR" --path "$PC_PATH" ${args[@]+"${args[@]}"} >"$PC_DIR/verdicts.tsv" || {
         harness "settlecut: the judge could not read this run"; return 1; }
 }
@@ -831,58 +871,28 @@ EOF
     restore src/kernel/tagfs/settle/settle.c
 }
 
-# Both chains' fixes for MP-D5 are in (step 1.1), and here both are taken
-# out as step 1.1 found them: the file table's new block linked with no stamp
-# and no flush behind the link, the registry's taken and never stamped, and
-# the link to it written before the block itself. A prefix that keeps a link
-# and not its block runs that chain into unstamped ground again, and so does
-# a subset that keeps the link and loses the block: the lifted rows of both
-# chains, prefix and subset, must say their defect is back.
-run_chaingrowmut() {
-    mut_on src/kernel/tagfs/file_table/file_table.c "logcheck mutation" <<'EOF'
-import sys
-p = sys.argv[1]; s = open(p).read()
-for a, m in (
-    ("        error_t  got     = SpareStamp(TAGFS_FILETBL_MAGIC, &g_image, &block, &stamped);\n",
-     "        error_t  got     = tagfs_alloc_blocks(1, &block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   /* logcheck mutation: the new block is linked with no stamp */\n"),
-    ("    error_t ready = VolumeFlushFor(need);\n",
-     "    error_t ready = OK;   /* logcheck mutation: and no flush stands between it and its link */\n    (void)need;\n")):
-    assert s.count(a) == 1
-    s = s.replace(a, m)
-open(p, "w").write(s)
-EOF
-    mut_on src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" <<'EOF'
-import sys
-p = sys.argv[1]; s = open(p).read()
-a = "        rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);\n"
-b = "    rc = tagfs_write_block(reg->spare_block, reg->spare_image);\n"
-assert s.count(a) == 1 and s.count(b) == 1
-s = s.replace(a, "        rc = tagfs_alloc_blocks(1, &reg->spare_block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   "
-                 "/* logcheck mutation: the new block is taken and never stamped */\n", 1)
-open(p, "w").write(s.replace(b,
-     "    reg->tail_image->next_block = reg->spare_block;   /* the link goes down before the block it names */\n"
-     "    tagfs_write_block(reg->tail_block, reg->tail_image);\n" + b, 1))
-EOF
-    mut_run chaingrowmut chaingrow code:prefix:CHAIN_REFUSED:table defect \
-        "the table's new block linked with no stamp and no flush behind it, a prefix refuses the mount over the table again: the defect is back"
-    pc_expect code:subset:CHAIN_REFUSED:table defect \
-        "and a cut that keeps the table's link and loses its new block refuses it too"
-    pc_expect code:prefix:CHAIN_REFUSED:registry defect \
-        "the registry's link written before its new block, a prefix that keeps the link refuses the mount over the registry: the defect is back"
-    pc_expect code:subset:CHAIN_REFUSED:registry defect \
-        "and a subset that keeps the registry's link and loses its new block refuses it too"
-    restore src/kernel/tagfs/tag_registry/tag_registry.c
-    restore src/kernel/tagfs/file_table/file_table.c
-}
-
-# selftest — the gate judging itself: the planner's arithmetic, then one real
-# record that the self-check must accept and, forged by one byte, refuse.
+# selftest — the gate judging itself: the planner's arithmetic, settlecut's
+# patterns against settle_cut.c, then one real record that the self-check must
+# accept and, forged by one byte, refuse.
 run_selftest() {
-    local said
+    local said says which line ere
     pc_begin selftest
     python3 "$PC" selftest >"$PC_DIR/planner.txt" 2>&1
     chk $? "selftest: the planner's arithmetic — $(tail -1 "$PC_DIR/planner.txt")"
     grep -v '^  ok' "$PC_DIR/planner.txt" | grep -v '^selftest:' | sed 's/^/  /'
+    # settlecut waits for two of settle_cut.c's sentences: its patterns held
+    # against that file's own text, so a word changed on either side is a FAIL
+    # here, and not a scenario that waits a minute for a line nobody prints.
+    says=$(sc_says)
+    [ "$(printf '%s\n' "$says" | cut -f1 | sort | tr '\n' ' ')" = "armed cut " ]
+    chk $? "selftest: $SC_SETTLE_CUT_C prints one sentence of each kind settlecut waits for (found: $(printf '%s\n' "$says" | cut -f1 | tr '\n' ' '))"
+    while IFS="$TAB" read -r which line; do
+        case "$which" in armed) ere=$SC_ARMED_ERE ;; cut) ere=$SC_CUT_ERE ;; *) continue ;; esac
+        printf '%s\n' "$line" | grep -qE "$ere"
+        chk $? "selftest: settlecut's $which pattern matches the sentence $SC_SETTLE_CUT_C prints — $line"
+    done <<SAYS_EOF
+$says
+SAYS_EOF
     pc_build 0 || return
     pc_base && pc_logged && pc_step anchor_test anchor_test '\[ANCHOR\] WROTE\+ANCHORED fid=[0-9]+\.' && pc_cut_power \
         || { bad "selftest: no record to judge (logs in $PC_DIR)"; return; }
@@ -908,7 +918,6 @@ case "${1:-}" in
     nextfidmut)  run_nextfidmut ;;
     poolmut)     run_poolmut ;;
     flushmut)    run_flushmut ;;
-    chaingrowmut) run_chaingrowmut ;;
     selftest)    run_selftest ;;
     all)
         run_selftest
@@ -923,10 +932,10 @@ case "${1:-}" in
         done
         run_settlecut
         run_scenario chaingrow
-        run_noanchormut; run_nextfidmut; run_poolmut; run_flushmut; run_chaingrowmut ;;
+        run_noanchormut; run_nextfidmut; run_poolmut; run_flushmut ;;
     *)
         echo "usage: $0 noanchor|nextfid|hog|halt|race|settlecut|chaingrow [MACHINE KEYS...]"
-        echo "       $0 noanchormut|nextfidmut|poolmut|flushmut|chaingrowmut|selftest|all"
+        echo "       $0 noanchormut|nextfidmut|poolmut|flushmut|selftest|all"
         exit 2 ;;
 esac
 

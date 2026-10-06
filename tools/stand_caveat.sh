@@ -77,8 +77,6 @@ caveat_row() {
                     echo "|a sync cut between its table and its ledger leaves a table row past the ledger's next_file_id" ;;
         nextfid:FILE_LOST|halt:FILE_LOST|race:FILE_LOST)
                     echo "|a sync cut between its writes leaves a table row naming a record the pool never got, and the mount deletes the file" ;;
-        nextfid:MISSING|halt:MISSING|race:MISSING)
-                    echo "1.6|a sync cut between its writes leaves a named block reading free, for the allocator to hand out again" ;;
         # chaingrow's own rows lifted in step 1.1 as a side effect of the two D5
         # fixes (the owner, 2026-09-29: MISSING by name; any other row of chaingrow
         # that vanishes under full enumeration, the same way). MISSING's only cut
@@ -89,16 +87,23 @@ caveat_row() {
         # splits the sync: on the merged step 1.1 tree the run's 14 writes fall in
         # epochs of 3, 5, 6 and 0, every subset of each built (116 media, none left
         # out), and no subset cut of the 87 shows MISSING, FILE_LOST or TAG_ABSENT.
-        chaingrow:subset:MISSING)
+        # MISSING and TAG_ABSENT of nextfid, halt and race lifted at 1.6. nextfid
+        # builds every subset of every epoch of the anchor's cycle, nothing left
+        # out, and on 4ed49b86 none of its 1042 media on the synchronous path —
+        # the one they were measured on — shows either. halt and race keep a
+        # writer writing, so their census can never lift a row itself, and held
+        # under a step that has landed a code that came back would pass as a
+        # caveat: on 4ed49b86 none of halt's 8292 media nor race's 19216 shows
+        # either. A MISSING the mount takes again is a note (volume-read's
+        # census), harm only on a volume the kernel refuses.
+        nextfid:MISSING|halt:MISSING|race:MISSING|chaingrow:subset:MISSING)
                     echo "|a sync cut between its writes leaves a named block reading free, for the allocator to hand out again" ;;
         chaingrow:subset:FILE_LOST)
                     echo "|a sync cut between its writes leaves a table row naming a record the pool never got, and the mount deletes the file" ;;
-        chaingrow:subset:TAG_ABSENT)
+        nextfid:TAG_ABSENT|halt:TAG_ABSENT|race:TAG_ABSENT|chaingrow:subset:TAG_ABSENT)
                     echo "|a sync cut between its writes leaves a file wearing a tag the registry does not define" ;;
         nextfid:ORPHAN|halt:ORPHAN|race:ORPHAN)
                     echo "1.6|a sync cut between its writes leaves blocks marked used that nothing owns" ;;
-        nextfid:TAG_ABSENT|halt:TAG_ABSENT|race:TAG_ABSENT)
-                    echo "1.6|a sync cut between its writes leaves a file wearing a tag the registry does not define" ;;
         # Lifted at 1.6: under the seal a file is the newest record of the
         # sealed span, so no ACTIVE record of it goes without its row; and the
         # pool is read no further than the seal's `to`, so a link past it into
@@ -176,9 +181,6 @@ caveat_row() {
         lockrank:integrity@IntegrityUpdate/braid@BraidIsHealthy|\
         lockrank:integrity@IntegrityFlush/braid@BraidIsHealthy)
                     echo "|a page of the integrity map is read or written with the map's lock held, so the read-ahead cache's and Braid's locks are taken under that leaf" ;;
-        lockrank:ledger@tagfs_write_ledger:write|\
-        lockrank:ledger@tagfs_remember_use_context:write)
-                    echo "|the Ledger is written to the medium under its IRQ-off lock, so a core that reads the Ledger spins with interrupts off for as long as the medium takes" ;;
         lockrank:diskbook@DiskBookCheckpoint:write)
                     echo "|the DiskBook's checkpoint writes its header to the medium under its IRQ-off lock, and a volume being taken down asks for it though nothing else of the take-down writes" ;;
         lockrank:cow@TagFS_CowIsActive:read)
@@ -194,9 +196,6 @@ caveat_row() {
         lockrank:cow@cow_resync_redirect_journal:write|\
         lockrank:diskbook@DiskBookResetRedirects:write)
                     echo "|deleting a snapshot rewrites the DiskBook's header under the copy-on-write and DiskBook locks, a medium write with both held" ;;
-        lockrank:state@meta_pool_flush_retires:read|\
-        lockrank:state@meta_pool_flush_retires:write)
-                    echo "|the sync gives retired metadata records back under the volume's state lock, reading and writing pool blocks while every create, delete, rename and tag waits with interrupts off" ;;
         lockrank:state@tagfs_create_file_inside:read|\
         lockrank:state@tagfs_create_file_inside:write|\
         lockrank:state@tagfs_delete_file_inside:read|\

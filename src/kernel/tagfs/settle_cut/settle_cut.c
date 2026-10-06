@@ -25,16 +25,35 @@ static const char *const SettleCutWhere[] = {
     [SETTLE_CUT_POINT_USECHAIN]  = "before the Use Context's chain is written",
 };
 
-static volatile uint32_t g_settle_syncs;        /* cycles that reached point 1 */
+static volatile uint32_t g_settle_cycles;       /* cycles that took their snapshot */
+static volatile uint64_t g_settle_target;       /* the cycle in flight's: its holder's alone */
+static volatile uint64_t g_settle_anchor;       /* the Ink the anchor waits for; 0 until one is taken */
 static volatile uint32_t g_settle_cut_made;
 
 void SettleCutSayArmed(void)
 {
-    kprintf("[SETTLECUT] armed: the first cycle to reach point %u of %u, %s, "
-            "stops this machine there\n",
+    __atomic_store_n(&g_settle_anchor, 0, __ATOMIC_RELEASE);
+    kprintf("[SETTLECUT] armed: the first cycle to reach point %u of %u, %s, with the "
+            "change of the first anchor after this line in its snapshot stops this "
+            "machine there\n",
             (unsigned)CONFIG_TAGFS_SETTLE_CUT_POINT,
             (unsigned)SETTLE_CUT_POINT_USECHAIN,
             SettleCutWhere[CONFIG_TAGFS_SETTLE_CUT_POINT]);
+}
+
+void SettleCutCycle(uint64_t target)
+{
+    __atomic_add_fetch(&g_settle_cycles, 1u, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&g_settle_target, target, __ATOMIC_RELEASE);
+}
+
+/* Only the first: a later anchor's cycle covers it too, and the scenario asks
+ * about the cycle its own anchor waits for. */
+void SettleCutAnchored(uint64_t gen)
+{
+    uint64_t none = 0;
+    (void)__atomic_compare_exchange_n(&g_settle_anchor, &none, gen, false,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 }
 
 /*
@@ -58,17 +77,18 @@ void SettleCutSayArmed(void)
  */
 void SettleCutAt(SettleCutPoint here)
 {
-    uint32_t sync_no = (here == SETTLE_CUT_POINT_REGISTRY)
-        ? __atomic_add_fetch(&g_settle_syncs, 1u, __ATOMIC_ACQ_REL)
-        : __atomic_load_n(&g_settle_syncs, __ATOMIC_ACQUIRE);
-
     if (here != CONFIG_TAGFS_SETTLE_CUT_POINT)
         return;
+    uint64_t anchor = __atomic_load_n(&g_settle_anchor, __ATOMIC_ACQUIRE);
+    uint64_t target = __atomic_load_n(&g_settle_target, __ATOMIC_ACQUIRE);
+    if (anchor == 0 || target < anchor)
+        return;                 /* a cycle of the cadence's own, not the anchor's */
     if (__atomic_exchange_n(&g_settle_cut_made, 1u, __ATOMIC_ACQ_REL) != 0)
         return;                 /* the first passage, on any core, is the cut */
 
     __asm__ volatile("cli" ::: "memory");
-    uint8_t me = amp_get_core_index();
+    uint8_t  me    = amp_get_core_index();
+    uint32_t cycle = __atomic_load_n(&g_settle_cycles, __ATOMIC_ACQUIRE);
 
     halt_all_ap_cores(false);   /* a power cut: every core stops where it stands */
 
@@ -84,11 +104,12 @@ void SettleCutAt(SettleCutPoint here)
     WireForceRelease();
     WireDrain();
     kprintf("[SETTLECUT] the power went at point %u of %u, %s, in cycle %u of "
-            "this boot, on core %u — %u of the %u other core(s) answered the "
-            "roll call and run no more, and nothing after this point was "
-            "issued to the medium\n",
+            "this boot, whose snapshot reaches Ink %llu of the anchor's %llu, on "
+            "core %u — %u of the %u other core(s) answered the roll call and run "
+            "no more, and nothing after this point was issued to the medium\n",
             (unsigned)here, (unsigned)SETTLE_CUT_POINT_USECHAIN,
-            SettleCutWhere[here], sync_no, (unsigned)me, answered,
+            SettleCutWhere[here], cycle, (unsigned long long)target,
+            (unsigned long long)anchor, (unsigned)me, answered,
             (unsigned)(g_amp.total_cores ? g_amp.total_cores - 1u : 0u));
     WireForceRelease();
     WireDrain();

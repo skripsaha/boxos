@@ -544,15 +544,15 @@ RETURNFAIL_MARK = $(BUILDDIR)/.returnfail.$(if $(filter on,$(RETURNFAIL)),on,off
 
 # ── SETTLECUT=<point> ──────────────────────────────────────────────────────
 #
-# The power goes at a named point of the Settle cycle. The first cycle of the
-# boot to reach it — an `anchor`, or the shutdown — stops the whole machine
-# right there, for the host to read the medium back
-# (tools/volume-read.py check). The medium then holds every write issued before
-# the point and none after it: the best case of a power cut there, the one in
-# which the drive's cache survived. A real cut can also lose any of the writes
-# since the last cache flush; those states are PowerCut's (tools/powercut.sh,
-# `tools/volume-read.py cut`), never this key's. The points are named by the
-# record ABOUT to be written:
+# The power goes at a named point of the Settle cycle. The first cycle to reach
+# it with the change of the boot's first `anchor` in its snapshot stops the
+# whole machine right there — the cadence's own cycles and the shutdown's run
+# on — for the host to read the medium back (tools/volume-read.py check). The
+# medium then holds every write issued before the point and none after it: the
+# best case of a power cut there, the one in which the drive's cache survived.
+# A real cut can also lose any of the writes since the last cache flush; those
+# states are PowerCut's (tools/powercut.sh, `tools/volume-read.py cut`), never
+# this key's. The points are named by the record ABOUT to be written:
 #
 #   registry pool table integrity bitmap ledger flush done usechain
 #
@@ -2109,9 +2109,9 @@ info:
 	@echo "  BOCHS_DISPLAY=...  — sdl2 (default macOS), x, term, nogui, win32"
 	@echo ""
 	@echo "Test-stand build keys (never in a shipped build):"
-	@echo "  SETTLECUT=<point>  — the first Settle cycle to reach <point> stops the machine there,"
-	@echo "                       as a power cut that kept the drive's cache would: registry|"
-	@echo "                       pool|table|integrity|bitmap|ledger|flush|done"
+	@echo "  SETTLECUT=<point>  — the Settle cycle of the boot's first anchor stops the machine"
+	@echo "                       at <point>, as a power cut that kept the drive's cache would:"
+	@echo "                       registry|pool|table|integrity|bitmap|ledger|flush|done|usechain"
 	@echo "                       (not with VOLUME_TESTS=on)"
 
 debug: $(IMAGE)
