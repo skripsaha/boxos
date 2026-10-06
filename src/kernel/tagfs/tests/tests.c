@@ -378,15 +378,17 @@ static const TestSuite* const g_suites[] = { TEST_SUITES(TEST_SUITE_WALKED) };
 /* Said once, before the first test that writes. A red test is only half a
  * report until it says which road its writes took: these write from the boot
  * core as a caller in the kernel, which stands in its call — all but the
- * stand_port suite's, which take the road a program's write takes on this
- * seat (WriteJobSeatRunsAsync): through the port, parked on each answer, on an
- * AHCI port or a USB disk with more than one core. */
+ * stand_port suite's and stand_run's through the port, which take the road a
+ * program's write takes on this seat (WriteJobSeatRunsAsync): through the
+ * port, parked on each answer, on an AHCI port or a USB disk with more than
+ * one core. */
 static void TestSayWritePath(void)
 {
     uint8_t seat = tagfs_get_seat();
     kprintf("[TESTS] the tests that write go through seat %u (%s), on the "
             "synchronous path — as a caller in the kernel, standing in its call; "
-            "a program's write there, and the stand_port suite's, goes %s, on %u core(s)\n",
+            "a program's write there, and the stand_port suite's and stand_run's "
+            "through the port, goes %s, on %u core(s)\n",
             seat, BoardroomSeatName(seat),
             WriteJobSeatRunsAsync(seat) ? "through the port, parked on each answer"
                                         : "the synchronous path too",
@@ -412,10 +414,19 @@ static bool TestLeftAFaultArmed(const TestCase* test)
         BlockFailProtect(tagfs_get_seat(), false);
     if (!block && !heap && !protect)
         return false;
-    kprintf("[TESTS] %s failed: it left %s%s%s armed — taken down by the runner "
-            "before anything else could meet it\n", test->name,
-            block ? "BLOCKFAIL " : "", heap ? "HEAPFAIL " : "",
-            protect ? "a protected medium" : "");
+
+    const char* left[3] = { "", "", "" };
+    uint32_t    n = 0;
+    if (block)
+        left[n++] = "BLOCKFAIL";
+    if (heap)
+        left[n++] = "HEAPFAIL";
+    if (protect)
+        left[n++] = "a protected medium";
+    kprintf("[TESTS] %s failed: it left %s%s%s%s%s armed — taken down by the runner "
+            "before anything else could meet it\n", test->name, left[0],
+            n == 3 ? ", " : n == 2 ? " and " : "", n > 1 ? left[1] : "",
+            n == 3 ? " and " : "", n == 3 ? left[2] : "");
     return true;
 #else
     (void)test;
@@ -528,11 +539,15 @@ error_t TagFS_RunAllTests(TestStats* stats)
     return stats->total_failed == 0 ? OK : ERR_INTERNAL;
 }
 
-/* The runner's door, called from userspace through the System Deck: the tests
- * run inside the volume. kprintf, not debug_printf: without these numbers a run
- * where every single test SKIPPED still printed "All tests PASSED". A test held
- * under a caveat is a known defect reproduced on purpose — counted on its own,
- * neither passed nor failed nor skipped, and it does not fail the run. */
+/* The runner's door, called once at boot from main.c (CONFIG_RUN_STARTUP_TESTS),
+ * before any program runs: the tests run inside the volume, and the ones that
+ * take the whole volume's ground, issue the last file id, swap the well-known
+ * tags, narrow a port, change the machine's Use Context or hold the cadence
+ * are safe only because nobody else is using it yet. kprintf, not debug_printf:
+ * without these numbers a run where every single test SKIPPED still printed
+ * "All tests PASSED". A test held under a caveat is a known defect reproduced
+ * on purpose — counted on its own, neither passed nor failed nor skipped, and
+ * it does not fail the run. */
 error_t TagFS_RunTests(void)
 {
     if (!tagfs_enter())

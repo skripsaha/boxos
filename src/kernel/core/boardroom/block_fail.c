@@ -179,15 +179,18 @@ bool BlockFailFlushStrikes(uint8_t seat, uint8_t out_sense[3])
     return fired;
 }
 
-/* The seat a protection stands on, + 1; 0 for none. */
+/* The seat a protection stands on, + 1; 0 for none. Said without the colon a
+ * refusal is said with: a protection is a state the seat is put in, not a
+ * command refused, and whoever counts the refusals counts those lines alone. */
 static volatile uint32_t g_block_fail_protected;
 
 void BlockFailProtect(uint8_t seat, bool on)
 {
     __atomic_store_n(&g_block_fail_protected, on ? (uint32_t)seat + 1u : 0u, __ATOMIC_RELEASE);
-    kprintf("[BLOCKFAIL] seat %u: %s\n", seat,
-            on ? "every write is refused from here as a protected medium refuses it"
-               : "writes reach the medium again");
+    kprintf("[BLOCKFAIL] seat %u %s\n", seat,
+            on ? "protects its medium — every write is refused from here as a protected "
+                 "medium refuses it"
+               : "protects its medium no longer — writes reach the medium again");
 }
 
 bool BlockFailProtects(uint8_t seat)

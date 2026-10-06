@@ -164,7 +164,10 @@ out:
 
 /* A refused write is refused before the driver is called, so the block keeps
  * what it held: the file's write answers -1, and the block reads back as it
- * was. */
+ * was. Read straight off the medium first, past the digest a read through
+ * TagFS checks it against: a refused write that landed anyway would be a
+ * digest mismatch there, refused before anything was compared — and what
+ * this asks is what the medium holds. */
 static TestResult TestStandBlockFailWriteNeverLands(void)
 {
     TestResult  verdict = TEST_PASS;
@@ -194,10 +197,12 @@ static TestResult TestStandBlockFailWriteNeverLands(void)
     TEST_ASSERT(fired, "the overwrite of the block was the write refused");
     TEST_ASSERT_EQ(seen, 1, "and the only one that met the plan");
     TEST_ASSERT_EQ(wrote, -1, "the file's write answers the refusal");
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
-                   "the block reads back");
+    TEST_ASSERT_OK(BoardroomRead(seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS,
+                                 g_test_output), "the block is read off the medium");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
                    TAGFS_BLOCK_SIZE, "holding what it held — nothing of the refused write landed");
+    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+                   "and the file reads back under the digest of what it held");
 out:
     if (armed)
         BlockFailDisarm();
