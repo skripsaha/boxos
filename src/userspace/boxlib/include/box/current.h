@@ -61,7 +61,7 @@ typedef struct Current Current;
 /* Open flags. */
 #define CURRENT_CREATE      0x10u  /* create the backing if absent (stream / file writer) */
 #define CURRENT_NONBLOCK    0x20u  /* put/take never block: -ERR_WOULD_BLOCK when full/empty */
-#define CURRENT_TRUNCATE    0x40u  /* file writer: the file spanned to nothing at open */
+#define CURRENT_FRESH       0x40u  /* file writer: the file spanned to nothing at open */
 
 /* Capability bits — query with current_caps(). Honest per-backing. */
 #define CURRENT_CAP_READ          0x01u  /* current_read / current_take usable */

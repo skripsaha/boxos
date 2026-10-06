@@ -50,7 +50,7 @@ bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint32_t*
     if (tagfs_create_file(name, NULL, 0, &file_id) != 0)
         return false;
     if (bytes > 0 && TestFileWrite(file_id, data, bytes) != (int)bytes) {
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
         return false;
     }
     *out_file_id = file_id;
@@ -158,7 +158,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -207,7 +207,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -309,7 +309,7 @@ out:
     if (dma && !issued)
         pmm_free(dma, 1);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 

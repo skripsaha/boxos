@@ -88,7 +88,8 @@ uint64_t InkGenOf(uint32_t fid)
 // The guards (RT-09, RT-13)
 // ----------------------------------------------------------------------------
 
-/* Whether a tag's key is one no Ink takes off a file: system, boot, god. */
+/* Whether a tag's key is one the system keeps: system, boot, god — by the key,
+ * so system:foo is the system's as much as system is. */
 static bool InkTagGuarded(uint16_t tag_id)
 {
     TagSpelling tag = { 0 };
@@ -99,9 +100,7 @@ static bool InkTagGuarded(uint16_t tag_id)
            TagSpanIs("god", tag.key, tag.key_len);
 }
 
-/* Whether any of the runs holds a block of the kernel the Deed points the
- * loader at. */
-static bool InkTouchesBoot(const FileExtent* runs, uint32_t count)
+bool InkTouchesBoot(const FileExtent* runs, uint32_t count)
 {
     TagFSState* fs = InkState();
     if (!fs->boot.kernel_blocks || fs->boot.kernel_block < fs->layout.data_block)
@@ -116,7 +115,7 @@ static bool InkTouchesBoot(const FileExtent* runs, uint32_t count)
     return false;
 }
 
-static bool InkWearsGuarded(const uint16_t* tags, uint32_t count)
+bool InkWearsGuarded(const uint16_t* tags, uint32_t count)
 {
     for (uint32_t i = 0; i < count; i++)
         if (InkTagGuarded(tags[i]))
@@ -124,30 +123,45 @@ static bool InkWearsGuarded(const uint16_t* tags, uint32_t count)
     return false;
 }
 
-/* The guard with the ground a change lets go of asked too: a Plot's freed runs
- * are the kernel's no more than its runs may be. */
-static error_t InkGuard(uint32_t fid, const uint16_t* tags, uint32_t tag_count,
-                        const FileExtent* runs, uint32_t run_count,
-                        const FileExtent* freed, uint32_t freed_count)
+/* Whether the volume takes a change at all: asked in the first half, and again
+ * under the state lock where the Ink is laid, so an Ink built while the medium
+ * left or refused a write as protected is not laid after it (RT-13). */
+static error_t InkVolumeTakes(void)
 {
     if (TagFSMediumLeft())
         return ERR_DEVICE_NOT_READY;
     if (TagFSReadOnly())
         return ERR_TAGFS_READ_ONLY;
-    if (InkWearsGuarded(tags, tag_count) || InkTouchesBoot(runs, run_count) ||
-        InkTouchesBoot(freed, freed_count)) {
-        kprintf("[TagFS] file %u is one the loader reads by its blocks — it wears system, boot "
-                "or god, or holds the kernel the Deed points the loader at — and it is not "
-                "changed\n", fid);
+    return OK;
+}
+
+/* The guard with the ground a change lets go of asked too: a Plot's freed runs
+ * are the kernel's no more than its runs may be. The kernel's blocks are
+ * refused to every call; a file the system keeps, to a call with no warrant. */
+static error_t InkGuard(uint32_t fid, const uint16_t* tags, uint32_t tag_count,
+                        const FileExtent* runs, uint32_t run_count,
+                        const FileExtent* freed, uint32_t freed_count, InkWarrant warrant)
+{
+    error_t rc = InkVolumeTakes();
+    if (rc != OK)
+        return rc;
+    bool boot = InkTouchesBoot(runs, run_count) || InkTouchesBoot(freed, freed_count);
+    if (boot || (warrant != INK_WARRANTED && InkWearsGuarded(tags, tag_count))) {
+        if (boot)
+            kprintf("[TagFS] file %u holds the kernel the Deed points the loader at — it is "
+                    "changed by no call, warrant or none\n", fid);
+        else
+            kprintf("[TagFS] file %u wears system, boot or god, and the call that would change "
+                    "it carries no warrant — it is not changed\n", fid);
         return ERR_PERMISSION_DENIED;
     }
     return OK;
 }
 
 error_t InkMayChange(uint32_t fid, const uint16_t* tags, uint32_t tag_count,
-                     const FileExtent* runs, uint32_t run_count)
+                     const FileExtent* runs, uint32_t run_count, InkWarrant warrant)
 {
-    return InkGuard(fid, tags, tag_count, runs, run_count, NULL, 0);
+    return InkGuard(fid, tags, tag_count, runs, run_count, NULL, 0, warrant);
 }
 
 // ----------------------------------------------------------------------------
@@ -298,6 +312,9 @@ static error_t InkPlotRecord(const Plot* p, const FileRecord* cur, uint64_t now,
 static error_t InkPlotLocked(Plot* p, const RecordWhere* was, InkRecord* r, FallowNode* fallow,
                              InkReceipt* out)
 {
+    error_t rc = InkVolumeTakes();
+    if (rc != OK)
+        return rc;
     RecordWhere now;
     FileRecord* still = FileMapRecordHold(InkState()->files, p->fid, &now);
     if (!still)
@@ -307,7 +324,7 @@ static error_t InkPlotLocked(Plot* p, const RecordWhere* was, InkRecord* r, Fall
         return INK_AGAIN;
 
     InkPlan plan;
-    error_t rc = InkPlanFor(p->fid, &now, r->bytes, false, &plan);
+    rc = InkPlanFor(p->fid, &now, r->bytes, false, &plan);
     if (rc != OK)
         return rc;
 
@@ -361,13 +378,14 @@ static bool InkPlotLazy(const Plot* p, const FileRecord* cur, uint64_t now_us, b
            now_us - cur->small_append_us < SettleLullUs();
 }
 
-/* The tags the Plot was loaded with are the ones asked: a file that came to
- * wear a guarded tag after the load had its bytes laid already, and refusing
- * the record now would take back its size, not its bytes. */
+/* The tags the Plot was loaded with are the ones asked, with the warrant it
+ * was loaded with: a file that came to wear a guarded tag after the load had
+ * its bytes laid already, and refusing the record now would take back its
+ * size, not its bytes. */
 error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
 {
     error_t rc = InkGuard(p->fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count,
-                          p->freed, p->freed_count);
+                          p->freed, p->freed_count, p->warrant);
     if (rc != OK)
         return rc;
 
@@ -541,6 +559,9 @@ static error_t InkFieldsLocked(uint32_t fid, const RecordWhere* was, const InkFi
                                TagBitmapStake* stake, InkReceipt* out)
 {
     TagFSState* fs = InkState();
+    error_t     rc = InkVolumeTakes();
+    if (rc != OK)
+        return rc;
     RecordWhere now;
     FileRecord* still = FileMapRecordHold(fs->files, fid, &now);
     if (!still)
@@ -554,7 +575,7 @@ static error_t InkFieldsLocked(uint32_t fid, const RecordWhere* was, const InkFi
         return ERR_TAGFS_RECORD_FULL;
 
     InkPlan plan;
-    error_t rc = InkPlanFor(fid, &now, r->bytes, false, &plan);
+    rc = InkPlanFor(fid, &now, r->bytes, false, &plan);
     if (rc != OK)
         return rc;
 
@@ -576,7 +597,7 @@ static error_t InkFieldsLocked(uint32_t fid, const RecordWhere* was, const InkFi
 
 /* One round of InkFields: OK, a final refusal, or INK_AGAIN / ERR_WOULD_BLOCK. */
 static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint16_t drop,
-                             InkReceipt* out)
+                             InkWarrant warrant, InkReceipt* out)
 {
     TagFSState* fs = InkState();
     RecordWhere was;
@@ -587,9 +608,7 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
     InkFieldsPlan   f;
     InkRecord       r     = { 0 };
     TagBitmapStake* stake = NULL;
-    error_t         rc    = TagFSMediumLeft() ? ERR_DEVICE_NOT_READY
-                            : TagFSReadOnly() ? ERR_TAGFS_READ_ONLY
-                                              : OK;
+    error_t         rc    = InkVolumeTakes();
     if (!InkFieldsTags(cur, name, add, drop, &f)) {
         FileRecordRelease(cur);
         return ERR_NO_MEMORY;
@@ -607,7 +626,7 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
         .extent_count  = cur->extent_count,
     };
     for (uint32_t i = 0; i < f.drops && i < 2 && rc == OK; i++)
-        if (InkTagGuarded(f.dropped[i]))
+        if (warrant != INK_WARRANTED && InkTagGuarded(f.dropped[i]))
             rc = ERR_PERMISSION_DENIED;
     if (rc == OK && !name && !f.adds && f.drops == 0) {
         rc      = drop != TAGFS_INVALID_TAG_ID ? ERR_TAGFS_TAG_NOT_FOUND : OK;
@@ -627,7 +646,8 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
     }
 out:
     if (rc == ERR_PERMISSION_DENIED)
-        kprintf("[TagFS] file %u: a tag of key system, boot or god does not come off it\n", fid);
+        kprintf("[TagFS] file %u: a tag of key system, boot or god comes off it only with the "
+                "warrant, and this call carries none\n", fid);
     else if (rc == ERR_TAGFS_RECORD_FULL)
         kprintf("[TagFS] file %u: its record has no room for this name or tag beside the extents "
                 "it names and those a write in flight will name — refused\n", fid);
@@ -638,11 +658,12 @@ out:
     return rc;
 }
 
-error_t InkFields(uint32_t fid, const char* name, uint16_t add, uint16_t drop, InkReceipt* out)
+error_t InkFields(uint32_t fid, const char* name, uint16_t add, uint16_t drop, InkWarrant warrant,
+                  InkReceipt* out)
 {
     error_t rc;
     do {
-        rc = InkFieldsOnce(fid, name, add, drop, out);
+        rc = InkFieldsOnce(fid, name, add, drop, warrant, out);
     } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
     return rc;
 }
@@ -661,6 +682,9 @@ static error_t InkNewLocked(const uint16_t* tags, uint32_t count, InkRecord* r,
 {
     TagFSState* fs  = InkState();
     uint32_t    fid = fs->ledger.next_file_id;
+    error_t     rc  = InkVolumeTakes();
+    if (rc != OK)
+        return rc;
 
     if (FileMapNodesToAdd(fs->files, fid) > st->map.count ||
         !TagBitmapStakeCovers(fs->bitmap_index, tags, count, fid, st->index))
@@ -668,7 +692,7 @@ static error_t InkNewLocked(const uint16_t* tags, uint32_t count, InkRecord* r,
     /* The id is issued as the last of the checks: a refused one finds nothing
      * changed, and an issued one is the id the stakes were taken for. */
     InkPlan plan;
-    error_t rc = InkPlanFor(fid, NULL, r->bytes, false, &plan);
+    rc = InkPlanFor(fid, NULL, r->bytes, false, &plan);
     if (rc == OK)
         rc = LedgerIssueFileId(&fs->ledger, &fid);
     if (rc != OK)
@@ -708,12 +732,11 @@ error_t InkNew(const char* name, const uint16_t* tags, uint32_t count, uint32_t*
         .tag_count     = count,
     };
 
-    if (TagFSMediumLeft())
-        return ERR_DEVICE_NOT_READY;
-    if (TagFSReadOnly())
-        return ERR_TAGFS_READ_ONLY;
+    error_t rc = InkVolumeTakes();
+    if (rc != OK)
+        return rc;
     InkRecord r;
-    error_t   rc = InkRecordMake(&meta, true, &r);
+    rc = InkRecordMake(&meta, true, &r);
     if (rc == ERR_TAGFS_RECORD_FULL)
         kprintf("[TagFS] create of '%s': %u tag(s) and its name make a record wider than this "
                 "volume holds (%u bytes) — no file is made\n", name, count, TAGFS_MPOOL_DATA_SIZE);
@@ -753,6 +776,9 @@ static error_t InkQuitclaimLocked(uint32_t fid, const RecordWhere* was, const Fi
                                   InkRecord* r, FallowNode* fallow, InkReceipt* out)
 {
     TagFSState* fs = InkState();
+    error_t     rc = InkVolumeTakes();
+    if (rc != OK)
+        return rc;
     RecordWhere now;
     FileRecord* still = FileMapRecordHold(fs->files, fid, &now);
     if (!still)
@@ -762,7 +788,7 @@ static error_t InkQuitclaimLocked(uint32_t fid, const RecordWhere* was, const Fi
         return INK_AGAIN;
 
     InkPlan plan;
-    error_t rc = InkPlanFor(fid, &now, r->bytes, true, &plan);
+    rc = InkPlanFor(fid, &now, r->bytes, true, &plan);
     if (rc != OK)
         return rc;
 
@@ -783,7 +809,7 @@ static error_t InkQuitclaimLocked(uint32_t fid, const RecordWhere* was, const Fi
 }
 
 /* One round of InkQuitclaim. */
-static error_t InkQuitclaimOnce(uint32_t fid, InkReceipt* out)
+static error_t InkQuitclaimOnce(uint32_t fid, InkWarrant warrant, InkReceipt* out)
 {
     TagFSState* fs = InkState();
     RecordWhere was;
@@ -794,7 +820,7 @@ static error_t InkQuitclaimOnce(uint32_t fid, InkReceipt* out)
     FallowNode* fallow = NULL;
     InkRecord   r      = { 0 };
     error_t     rc     = InkMayChange(fid, cur->tags, cur->tag_count, cur->extents,
-                                      cur->extent_count);
+                                      cur->extent_count, warrant);
     if (rc == OK && cur->extent_count &&
         !(fallow = FallowNodeMake(cur->extents, cur->extent_count, FALLOW_BY_RECORD, fid)))
         rc = ERR_NO_MEMORY;
@@ -824,11 +850,11 @@ static error_t InkQuitclaimOnce(uint32_t fid, InkReceipt* out)
 
 /* A holder of the file's Helm is not waited for: the file is vacated, and the
  * holder answers ERR_FILE_NOT_FOUND at its own Ink, its Stakes given back. */
-error_t InkQuitclaim(uint32_t fid, InkReceipt* out)
+error_t InkQuitclaim(uint32_t fid, InkWarrant warrant, InkReceipt* out)
 {
     error_t rc;
     do {
-        rc = InkQuitclaimOnce(fid, out);
+        rc = InkQuitclaimOnce(fid, warrant, out);
     } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
     if (rc == OK)
         HelmVacate(fid);

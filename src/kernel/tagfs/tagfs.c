@@ -2953,7 +2953,7 @@ char *TagFSKeyList(const uint16_t *tag_ids, uint32_t count)
 // Defrag
 // ----------------------------------------------------------------------------
 
-error_t tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
+error_t tagfs_defrag_file(uint32_t file_id)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
@@ -2963,7 +2963,7 @@ error_t tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
     if (handle) {
         rc = ERR_BUSY;
         if (HelmTakeNow(handle, &here)) {
-            rc = HelmDefrag(handle, target_block);
+            rc = HelmDefrag(handle);
             HelmLetGo(handle->ofe, &here);
         }
         tagfs_close(handle);

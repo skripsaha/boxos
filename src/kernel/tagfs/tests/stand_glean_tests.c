@@ -126,7 +126,7 @@ static bool StandGleanFile(const char* name, uint32_t* file_id)
 static void StandGleanLetGo(uint32_t file_id)
 {
     if (file_id) {
-        (void)tagfs_delete_file(file_id);
+        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
         (void)TagFSSettle();
     }
 }
@@ -181,7 +181,7 @@ static void StandGleanSpreadLetGo(void)
 {
     for (uint32_t i = 0; i < STAND_GLEAN_SPREAD; i++) {
         if (s_spread[i])
-            (void)tagfs_delete_file(s_spread[i]);
+            (void)tagfs_delete_file(s_spread[i], INK_UNWARRANTED);
         s_spread[i] = 0;
     }
     (void)TagFSSettle();

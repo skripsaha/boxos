@@ -67,7 +67,7 @@ int main(void)
     s_target[5 + nlen] = '\0';
 
     Current *out = current_open_ex(s_target, CURRENT_WRITE, 0,
-                                   CURRENT_CREATE | CURRENT_TRUNCATE, &why);
+                                   CURRENT_CREATE | CURRENT_FRESH, &why);
     if (!out) {
         printf("%s could not be written (error %u)\n", name, (unsigned)why);
         current_release(log);

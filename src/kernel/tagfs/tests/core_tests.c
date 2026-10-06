@@ -41,7 +41,7 @@ static TestResult test_tagfs_create_file(void)
     TEST_ASSERT(file_id > 0, "File ID should be > 0");
 out:
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -67,7 +67,7 @@ static TestResult test_tagfs_write_read(void)
                    TAGFS_BLOCK_SIZE, "Data should match (first differing byte)");
 out:
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 

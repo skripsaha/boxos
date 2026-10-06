@@ -29,8 +29,9 @@ static bool HelmRoomCameBack(error_t *rc)
  * file a Quitclaim gave up, with nothing loaded. A handle that carries no copy
  * of the record views the file from this load on, not from its open: what a
  * holder before it freed is not this one's to keep resting. The Plot is the
- * Helm's holder's, and the room its extents need in the record is claimed for
- * that Helm (RT-19, PlotReserve). */
+ * Helm's holder's, guarded with the warrant the handle carries, and the room
+ * its extents need in the record is claimed for that Helm (RT-19,
+ * PlotReserve). */
 static error_t HelmPlotLoad(TagFSFileHandle *handle, Plot *plot)
 {
     if (HelmVacated(handle->ofe)) {
@@ -39,7 +40,7 @@ static error_t HelmPlotLoad(TagFSFileHandle *handle, Plot *plot)
     }
     if (!handle->extents)
         HelmViewTake(handle);
-    error_t rc = PlotLoad(plot, handle->file_id);
+    error_t rc = PlotLoad(plot, handle->file_id, handle->warrant);
     if (rc == OK)
         plot->helm = &handle->ofe->helm;
     return rc;
@@ -206,14 +207,15 @@ static bool HelmRunsAreOne(const FileExtent *runs, uint32_t count)
 /*
  * Defrag is a gather of every extent (PlotGather, shed 0) under the file's
  * Helm, so no write and no span of the file runs beside it (D7-defrag): the
- * blocks are copied into one run taken through the block map near the target,
- * made durable, and named by one inked record, and only then does the old
- * ground come to rest in Fallow. Ground the record named past the file's size
- * goes with it. A file the loader reads by its blocks is not moved. A delete
- * beside it cannot bring the file back (CR-9): its Quitclaim leaves no record
- * for this Ink to lay the gathered run over, and the run goes back.
+ * blocks are copied into one run taken through the block map near where the
+ * file begins, made durable, and named by one inked record, and only then does
+ * the old ground come to rest in Fallow. Ground the record named past the
+ * file's size goes with it. A file the system keeps is not moved (PlotGather,
+ * B10). A delete beside it cannot bring the file back (CR-9): its Quitclaim
+ * leaves no record for this Ink to lay the gathered run over, and the run goes
+ * back.
  */
-static error_t HelmDefragOnce(TagFSFileHandle *handle, uint32_t target_block)
+static error_t HelmDefragOnce(TagFSFileHandle *handle)
 {
     Plot    plot;
     bool    moved = false;
@@ -221,7 +223,7 @@ static error_t HelmDefragOnce(TagFSFileHandle *handle, uint32_t target_block)
     if (rc == OK)
         rc = PlotTrimTo(&plot, (plot.size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE);
     if (rc == OK && !HelmRunsAreOne(plot.runs, plot.run_count)) {
-        rc    = PlotGather(&plot, 0, target_block);
+        rc    = PlotGather(&plot, 0, plot.runs[0].start_block);
         moved = rc == OK;
     }
     InkReceipt inked;
@@ -231,11 +233,11 @@ static error_t HelmDefragOnce(TagFSFileHandle *handle, uint32_t target_block)
     return rc;
 }
 
-error_t HelmDefrag(TagFSFileHandle *handle, uint32_t target_block)
+error_t HelmDefrag(TagFSFileHandle *handle)
 {
     error_t rc;
     do {
-        rc = HelmDefragOnce(handle, target_block);
+        rc = HelmDefragOnce(handle);
     } while (HelmRoomCameBack(&rc));
     return rc;
 }

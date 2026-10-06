@@ -180,7 +180,7 @@ out:
         file_id = 0;      /* ... and it holds the file's Helm */
     }
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     kfree(data);
     kfree(expect);
     kfree(back);
@@ -259,7 +259,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     kfree(old);
     kfree(data);
     kfree(back);

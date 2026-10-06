@@ -82,7 +82,7 @@ static bool StandReadMakeRun(uint32_t blocks, uint32_t stream, uint32_t* file_id
     TestFillAt(g_test_buffer, blocks * TAGFS_BLOCK_SIZE, stream, 0);
     if (!StandMakeFile("test_file", g_test_buffer, blocks * TAGFS_BLOCK_SIZE, file_id))
         return false;
-    if (blocks > 1 && tagfs_defrag_file(*file_id, 0) != OK)
+    if (blocks > 1 && tagfs_defrag_file(*file_id) != OK)
         return false;
     for (uint32_t k = 0; k < blocks; k++) {
         uint32_t b = 0;
@@ -136,7 +136,7 @@ static TestResult TestStandReadHoleRefused(void)
 out:
     tagfs_close(handle);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -167,7 +167,7 @@ static TestResult TestStandReadHoleRefusedThroughPort(void)
 out:
     tagfs_close(handle);
     if (file_id && __atomic_load_n(&s_read_answer.answered, __ATOMIC_ACQUIRE))
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -228,7 +228,7 @@ static TestResult TestStandReadAheadForgetsAWrite(void)
 out:
     tagfs_close(handle);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -315,7 +315,7 @@ out:
                                "the rotten block would not take its bytes back — the map and "
                                "the medium disagree over it (block, 0)", first + 1, 0);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -359,7 +359,7 @@ out:
                                "the rotten block would not take its bytes back — the map and "
                                "the medium disagree over it (block, 0)", first + 1, 0);
     if (file_id && __atomic_load_n(&s_read_answer.answered, __ATOMIC_ACQUIRE))
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -402,7 +402,7 @@ out:
                                "the rotten block would not take its bytes back — the map and "
                                "the medium disagree over it (block, 0)", first, 0);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 

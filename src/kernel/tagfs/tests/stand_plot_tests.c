@@ -124,7 +124,7 @@ static TestResult TestStandPlotBeyondSizeRefused(void)
                    "a write that begins at the size grows the file");
 out:
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -195,7 +195,7 @@ out:
     if (handle)
         tagfs_close(handle);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -222,7 +222,7 @@ static TestResult TestStandPlotGapReadsZeros(void)
     TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, STAND_PLOT_GAP_BLOCKS * TAGFS_BLOCK_SIZE,
                               &first),
                 "a file of four blocks of a pattern is made");
-    TEST_ASSERT_EQ(tagfs_delete_file(first), 0, "and deleted, its ground free again");
+    TEST_ASSERT_EQ(tagfs_delete_file(first, INK_UNWARRANTED), 0, "and deleted, its ground free again");
     first = 0;
 
     TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0, "a second file is created");
@@ -237,9 +237,9 @@ static TestResult TestStandPlotGapReadsZeros(void)
         verdict = TEST_DEFECT;
 out:
     if (first)
-        tagfs_delete_file(first);
+        tagfs_delete_file(first, INK_UNWARRANTED);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -305,7 +305,7 @@ static TestResult TestStandPlotSpanGrowsAndShrinks(void)
     TEST_ASSERT_EQ(now.held, base.held, "every block it held is given back");
 out:
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 

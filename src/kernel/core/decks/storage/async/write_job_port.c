@@ -95,7 +95,7 @@ static error_t wjob_load(WriteJob *j)
     if (HelmVacated(j->handle->ofe))
         return ERR_FILE_NOT_FOUND;
     HelmViewTake(j->handle);   /* it views the file from this load on (HelmWriteWindow's rule) */
-    error_t rc = PlotLoad(&j->plot, j->file_id);
+    error_t rc = PlotLoad(&j->plot, j->file_id, j->handle->warrant);
     j->loaded = rc == OK;
     if (rc == OK) {
         j->plot.helm    = &j->handle->ofe->helm;

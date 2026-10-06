@@ -65,7 +65,7 @@ static int said_pour(const char *tag, const char *what, const char *name)
         s_target[5 + nlen] = '\0';
 
         out = current_open_ex(s_target, CURRENT_WRITE, 0,
-                              CURRENT_CREATE | CURRENT_TRUNCATE, &why);
+                              CURRENT_CREATE | CURRENT_FRESH, &why);
         if (!out) {
             /* Named, and then it prints anyway. A volume that will not take
              * the file is the commonest reason anybody types this at all;

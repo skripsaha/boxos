@@ -55,17 +55,19 @@ typedef struct {
     uint32_t      freed_room;
     FileHelm     *helm;           /* the Helm its holder loaded it under; NULL for none */
     uint32_t      claimed;        /* the extents it claimed room for in the record (RT-19) */
+    InkWarrant    warrant;        /* the call's, asked by the guard at the load and at the Ink */
 } Plot;
 
 /* The file's record, out of the map of live files afresh — never a handle's
- * copy of it. OK, or ERR_FILE_NOT_FOUND, ERR_METADATA_CORRUPTED (the record
- * names fewer blocks than its size needs), the refusal of the one guard of a
- * change (InkMayChange: ERR_PERMISSION_DENIED for a file the loader reads by
- * its blocks, ERR_DEVICE_NOT_READY once the medium left) — asked here, before
- * a byte of the call moves — or ERR_NO_MEMORY. A holder of the file's Helm
- * sets `helm` after the load, so the record's room is claimed for it
- * (PlotReserve). */
-error_t  PlotLoad(Plot *p, uint32_t fid);
+ * copy of it — for a call carrying `warrant`. OK, or ERR_FILE_NOT_FOUND,
+ * ERR_METADATA_CORRUPTED (the record names fewer blocks than its size needs),
+ * the refusal of the one guard of a change (InkMayChange: ERR_PERMISSION_DENIED
+ * for a file the system keeps and a call with no warrant, and for the kernel
+ * the loader reads by its blocks; ERR_DEVICE_NOT_READY once the medium left,
+ * ERR_TAGFS_READ_ONLY) — asked here, before a byte of the call moves — or
+ * ERR_NO_MEMORY. A holder of the file's Helm sets `helm` after the load, so the
+ * record's room is claimed for it (PlotReserve). */
+error_t  PlotLoad(Plot *p, uint32_t fid, InkWarrant warrant);
 
 /* Everything the Plot holds let go; every Stake still standing is given back
  * first (PlotPullStakes), and the room it claimed (InkRoomLetGo). Safe on a
@@ -170,9 +172,12 @@ error_t  PlotExtendZero(Plot *p, uint64_t size);
  * every extent of the file in one run (defrag).
  *
  * Only ground the loaded record named is moved, never a Stake — and never a
- * file the loader reads by its blocks: PlotLoad refused that one. Refused —
- * said, with the numbers — when no window sheds enough or no run that long is
- * free.
+ * block of a file the system keeps (B10): one wearing system, boot or god, or
+ * holding the kernel the Deed points the loader at, is refused
+ * ERR_PERMISSION_DENIED, said, whatever warrant the call carries — a change a
+ * warrant lets into such a file lays its bytes where the file has them, and
+ * moves none. Refused — said, with the numbers — when no window sheds enough
+ * or no run that long is free.
  */
 error_t  PlotGather(Plot *p, uint32_t shed, uint32_t hint);
 

@@ -142,12 +142,13 @@ uint64_t HelmViewFloor(uint32_t file_id);
  *
  * HelmSpan: the file made exactly `size` bytes long, as tagfs_span_file, and
  * in *out_was the size it found. HelmDefrag: the file gathered into one run
- * near `target_block`, as tagfs_defrag_file.
+ * near where it begins, as tagfs_defrag_file. Each is guarded with the warrant
+ * the handle carries (InkWarrant).
  */
 uint64_t HelmWindowBytes(uint64_t at);
 error_t  HelmWriteWindow(TagFSFileHandle* handle, const PlotSource* src, uint64_t* inked);
 error_t  HelmWrite(TagFSFileHandle* handle, const PlotSource* src, uint64_t* out_written);
 error_t  HelmSpan(TagFSFileHandle* handle, uint64_t size, uint64_t* out_was);
-error_t  HelmDefrag(TagFSFileHandle* handle, uint32_t target_block);
+error_t  HelmDefrag(TagFSFileHandle* handle);
 
 #endif /* TAGFS_HELM_H */

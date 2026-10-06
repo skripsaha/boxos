@@ -1736,21 +1736,24 @@ static int SysTagCheck(const ManifestOp *op, Crate *crates, uint16_t crate_count
  *  Filesystem maintenance
  * ========================================================================= */
 
-/* SYSTEM_OP_DEFRAG_FILE  params:[u32 file_id][u32 target_block]
+/* SYSTEM_OP_DEFRAG_FILE  params:[u32 file_id]
  *                        out_crate (optional): u32 frag_score
  * A WriteJob (write_job.h): the file's Helm is held for the whole gather, and
- * a caller whose file another holds is parked until it is handed on. */
+ * a caller whose file another holds is parked until it is handed on. Where the
+ * gathered run lies is the volume's to choose — near where the file begins —
+ * and no program names a block. A file the system keeps is not moved, warrant
+ * or none (PlotGather). */
 static int SysDefragFile(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                          const OpContext *ctx)
 {
     (void)crate_count;
-    if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
 
     WriteJobAsk ask;
     memset(&ask, 0, sizeof(ask));
-    ask.kind = WRITE_JOB_DEFRAG;
-    memcpy(&ask.file_id,      op->params,     sizeof(uint32_t));
-    memcpy(&ask.target_block, op->params + 4, sizeof(uint32_t));
+    ask.kind    = WRITE_JOB_DEFRAG;
+    ask.warrant = StorageCallWarrant(ctx);
+    memcpy(&ask.file_id, op->params, sizeof(uint32_t));
     if (op->out_crate != CRATE_INDEX_NONE)
         ask.out_crate = &crates[op->out_crate];
     return WriteJobSubmit(&ask, crates, ctx);

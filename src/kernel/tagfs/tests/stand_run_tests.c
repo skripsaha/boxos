@@ -63,7 +63,7 @@ static bool StandRunMake(uint32_t *out_file_id)
     if (tagfs_create_file("test_file", NULL, 0, &file_id) != 0)
         return false;
     if (tagfs_span_file(file_id, STAND_RUN_BYTES) != OK) {
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
         return false;
     }
     *out_file_id = file_id;
@@ -238,7 +238,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     kfree(data);
     kfree(back);
     return verdict;
@@ -322,7 +322,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     kfree(data);
     kfree(back);
     return verdict;

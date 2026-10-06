@@ -36,7 +36,7 @@ static uint64_t StandNowUs(void)
 static void StandSettleLetGo(uint32_t file_id)
 {
     if (file_id) {
-        (void)tagfs_delete_file(file_id);
+        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
         (void)TagFSSettle();
     }
 }
@@ -181,7 +181,7 @@ static TestResult TestStandSettleWriteProtected(void)
     TEST_ASSERT(TagFSReadOnly(), "and the volume takes no write from here");
     TEST_ASSERT(waiter.answered, "the waiter is answered, not left waiting");
     TEST_ASSERT_EQ(waiter.rc, ERR_TAGFS_READ_ONLY, "with ERR_TAGFS_READ_ONLY");
-    TEST_ASSERT_EQ(InkQuitclaim(file_id, &receipt), ERR_TAGFS_READ_ONLY,
+    TEST_ASSERT_EQ(InkQuitclaim(file_id, INK_UNWARRANTED, &receipt), ERR_TAGFS_READ_ONLY,
                    "an Ink is refused ERR_TAGFS_READ_ONLY");
     TEST_ASSERT_EQ(SettleWaitNow(InkedGen() + 1u), ERR_TAGFS_READ_ONLY,
                    "and so is a new wait for a cycle");

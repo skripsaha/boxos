@@ -244,13 +244,13 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
             /* read of a missing file, or write w/o CREATE */
             free(c); CUR_FAIL(ERR_FILE_NOT_FOUND);
         }
-        /* CURRENT_TRUNCATE: start the writer from an empty file rather than
+        /* CURRENT_FRESH: start the writer from an empty file rather than
          * over the top of the old one — the file spanned to nothing. Without
          * this a shorter rewrite leaves the previous tail readable past the
          * new content, and <fstream>'s ios_base::out could not be honest.
          * A refusal is fatal to the open: silently keeping the old bytes is
          * the one outcome the caller definitely did not ask for. */
-        if ((role & CURRENT_WRITE) && (flags & CURRENT_TRUNCATE)) {
+        if ((role & CURRENT_WRITE) && (flags & CURRENT_FRESH)) {
             int trc = file_span(c->file_id, 0);
             if (trc != 0) { free(c); CUR_FAIL(box_errno_of(trc)); }
         }

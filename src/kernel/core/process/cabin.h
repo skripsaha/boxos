@@ -51,8 +51,8 @@ typedef struct cabin_t
 
     /* Fixed op-authority bitmask (auth_tags.h, NOT keyed by registry id).
      * Holds AUTH_TAG_X iff this cabin carries the bare auth key X. Kept in sync
-     * with tag_bits at the three mutation points via auth_bit_for_key; read by
-     * the manifest gate and the spawn gate. */
+     * with tag_bits at the three mutation points via AuthBitForKey; read by
+     * the manifest gate, the spawn gate and the Ink guard's warrant. */
     uint32_t auth_bits;
 
     uint16_t *tag_overflow_ids;

@@ -50,7 +50,7 @@ static void StandInkLetGo(uint32_t count)
 {
     for (uint32_t i = 0; i < count; i++) {
         if (s_ink_fids[i])
-            tagfs_delete_file(s_ink_fids[i]);
+            tagfs_delete_file(s_ink_fids[i], INK_UNWARRANTED);
         s_ink_fids[i] = 0;
     }
 }
@@ -289,7 +289,7 @@ static TestResult TestStandInkFullVolumeStillDeletes(void)
                  (uint64_t)fs->layout.data_blocks * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
     armed = true;
     for (uint32_t i = 0; i < STAND_INK_DELETES; i++) {
-        int gone = tagfs_delete_file(s_ink_fids[i]);
+        int gone = tagfs_delete_file(s_ink_fids[i], INK_UNWARRANTED);
         if (gone == 0) {
             s_ink_fids[i] = 0;
         } else {
@@ -346,7 +346,7 @@ static TestResult TestStandInkEarlyCloseSparesTheLast(void)
     TEST_ASSERT_EQ(StandInkTakeAll(&ground), ERR_TAGFS_NO_SPACE,
                    "every free block of the volume is taken, and it says it has none");
 
-    TEST_ASSERT_EQ(tagfs_remove_tag(file_id, tag), 0,
+    TEST_ASSERT_EQ(tagfs_remove_tag(file_id, tag, INK_UNWARRANTED), 0,
                    "stand_ink comes off — a change, with no block to make a Spare from");
     uint64_t first = InkedGen();
     TEST_ASSERT_OK(TagFSSettle(), "a cycle with a waiter settles it");
@@ -365,7 +365,7 @@ static TestResult TestStandInkEarlyCloseSparesTheLast(void)
 out:
     StandInkGiveBack(&ground);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     (void)TagFSSettle();
     return verdict;
 }
@@ -502,7 +502,7 @@ static TestResult TestStandInkQuitclaimIsTheNewestRecord(void)
     TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
     TEST_ASSERT_EQ(StandWriteAt(file_id, 0, g_test_buffer, 64), 64, "it is written again");
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "and given up");
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "and given up");
     uint32_t gone = file_id;
     file_id = 0;
     TEST_ASSERT_OK(TagFSSettle(), "the delete is settled");
@@ -528,7 +528,7 @@ static TestResult TestStandInkQuitclaimIsTheNewestRecord(void)
     TEST_ASSERT(!StandBlockInUse(block), "and the block goes back with it");
 out:
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 

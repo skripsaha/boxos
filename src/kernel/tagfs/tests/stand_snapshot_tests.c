@@ -244,7 +244,7 @@ out:
     if (run)
         tagfs_free_blocks(run, 1u + STAND_SNAP_FROZEN);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 

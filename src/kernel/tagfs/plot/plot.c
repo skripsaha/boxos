@@ -40,11 +40,12 @@ static bool PlotRoom(void **array, uint32_t *room, uint32_t have, uint64_t need,
     return true;
 }
 
-error_t PlotLoad(Plot *p, uint32_t fid)
+error_t PlotLoad(Plot *p, uint32_t fid, InkWarrant warrant)
 {
     memset(p, 0, sizeof(*p));
     p->fid         = fid;
     p->mount_epoch = tagfs_mount_epoch();
+    p->warrant     = warrant;
 
     RecordWhere where;
     FileRecord *rec = FileMapRecordHold(tagfs_get_state()->files, fid, &where);
@@ -77,9 +78,11 @@ error_t PlotLoad(Plot *p, uint32_t fid)
                 (unsigned long long)p->size, (unsigned long long)p->blocks);
         return ERR_METADATA_CORRUPTED;
     }
-    /* A file the loader reads by its blocks, or a volume whose medium left,
-     * is changed by nobody: refused here, before a byte of the call moves. */
-    return InkMayChange(fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count);
+    /* A file the system keeps, to a call with no warrant; the kernel the
+     * loader reads by its blocks, or a volume whose medium left, to every
+     * call: refused here, before a byte of the call moves. */
+    return InkMayChange(fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count,
+                        warrant);
 }
 
 void PlotPullStakes(Plot *p)

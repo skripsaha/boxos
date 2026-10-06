@@ -76,7 +76,7 @@ int main(void)
         s_target[5 + nlen] = '\0';
 
         out = current_open_ex(s_target, CURRENT_WRITE, 0,
-                              CURRENT_CREATE | CURRENT_TRUNCATE, &why);
+                              CURRENT_CREATE | CURRENT_FRESH, &why);
         if (!out) {
             /* Named, and then it prints instead. A volume that will not take
              * the file is the commonest reason anybody runs this at all, and

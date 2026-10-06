@@ -124,6 +124,17 @@ int storage_sync_ferry_finalize(const OpContext *ctx, Crate *crates,
     return ERR_WOULD_BLOCK;
 }
 
+/* The warrant is the cabin's authority as it stands when the call is taken:
+ * a tag the program puts on or takes off itself later changes its next call,
+ * not this one. */
+InkWarrant StorageCallWarrant(const OpContext *ctx)
+{
+    if (!ctx || !ctx->proc || !ctx->proc->cabin)
+        return INK_UNWARRANTED;
+    uint32_t auth = __atomic_load_n(&ctx->proc->cabin->auth_bits, __ATOMIC_RELAXED);
+    return (auth & (AUTH_TAG_SYSTEM | AUTH_TAG_GOD)) ? INK_WARRANTED : INK_UNWARRANTED;
+}
+
 /* Ф26e — fail a storage op on the channel its submitter listens on. A waybilled
  * (box::ferry) op MUST answer on KCTX_STORAGE even from an early-error exit, or
  * its awaiter — which only ever collects KCTX_STORAGE records — waits for a
@@ -219,9 +230,11 @@ static int ObjRead(const ManifestOp *op,
  *
  * Every write is a WriteJob (write_job.h): it holds the file's Helm for its
  * whole length, and a program whose file another holds is parked until the
- * Helm is handed to its job. A file the loader reads by its blocks is refused
- * by the volume itself (ink.h, InkMayChange), before a byte of the write moves:
- * no deck asks that question on its own.
+ * Helm is handed to its job. A file the system keeps is refused a program
+ * whose cabin holds no warrant, and the kernel the loader reads by its blocks
+ * every program, by the volume itself (ink.h, InkMayChange), before a byte of
+ * the write moves: the deck only says what warrant the call carries
+ * (StorageCallWarrant), and asks nothing on its own.
  * ------------------------------------------------------------------------- */
 
 static int ObjWrite(const ManifestOp *op,
@@ -239,6 +252,7 @@ static int ObjWrite(const ManifestOp *op,
     ask.file_id = param_u32(op, 0);
     ask.offset  = param_u64(op, 4);
     ask.append  = (param_u32(op, 12) & OBJ_WRITE_APPEND_FLAG) != 0;
+    ask.warrant = StorageCallWarrant(ctx);
     /* Ф26e: optional trailing correlation waybill (box::ferry). Absent for a
      * synchronous write (param_size 16) → 0 → plain KCTX_GUIDE completion. */
     ask.waybill = (op->param_size >= 24) ? param_u64(op, 16) : 0;
@@ -274,11 +288,11 @@ static int ObjWrite(const ManifestOp *op,
 }
 
 /* -------------------------------------------------------------------------
- * OBJ_DELETE — the file given up (a Quitclaim). A file the machine starts
- * from — wearing system, boot or god, or holding the kernel the loader reads
- * by its blocks — is refused ERR_PERMISSION_DENIED by the volume's own guard
- * (InkMayChange), and so is every delete once the medium left: the answer is
- * the volume's.
+ * OBJ_DELETE — the file given up (a Quitclaim). A file the system keeps —
+ * wearing system, boot or god — is refused ERR_PERMISSION_DENIED to a program
+ * whose cabin holds no warrant, the kernel the loader reads by its blocks to
+ * every program, by the volume's own guard (InkMayChange); and so is every
+ * delete once the medium left: the answer is the volume's.
  * ------------------------------------------------------------------------- */
 
 static int ObjDelete(const ManifestOp *op,
@@ -288,10 +302,9 @@ static int ObjDelete(const ManifestOp *op,
 {
     (void)crates;
     (void)crate_count;
-    (void)ctx;
     if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
 
-    int rc = tagfs_delete_file(param_u32(op, 0));
+    int rc = tagfs_delete_file(param_u32(op, 0), StorageCallWarrant(ctx));
     return rc == 0 ? OK : -rc;
 }
 
@@ -301,9 +314,10 @@ static int ObjDelete(const ManifestOp *op,
  * the old size on. A WriteJob, as a write is: it holds the file's Helm, and
  * waits for it parked.
  *
- * Guarded like OBJ_DELETE, by the same one guard: cutting a file the machine
- * starts from down to nothing destroys it just as thoroughly as deleting it,
- * and the span's load of the file refuses it (PlotLoad).
+ * Guarded like OBJ_DELETE, by the same one guard and the same warrant:
+ * cutting a file the system keeps down to nothing destroys it just as
+ * thoroughly as deleting it, and the span's load of the file refuses it
+ * (PlotLoad).
  *
  * The change is published on every tag of the file (op 3, write_job.c): a
  * content change that published nothing would be a hole in the Touch spine —
@@ -324,11 +338,14 @@ static int ObjSpan(const ManifestOp *op,
     ask.kind    = WRITE_JOB_SPAN;
     ask.file_id = param_u32(op, 0);
     ask.size    = param_u64(op, 4);
+    ask.warrant = StorageCallWarrant(ctx);
     return WriteJobSubmit(&ask, crates, ctx);
 }
 
 /* -------------------------------------------------------------------------
- * OBJ_RENAME — params carry the new name inline.
+ * OBJ_RENAME — params carry the new name inline. The old name's tag comes
+ * off with the old name, so a name whose tag is of key system, boot or god
+ * is changed only with the warrant, as an untag of that tag is.
  * ------------------------------------------------------------------------- */
 
 static int ObjRename(const ManifestOp *op,
@@ -338,7 +355,6 @@ static int ObjRename(const ManifestOp *op,
 {
     (void)crates;
     (void)crate_count;
-    (void)ctx;
     if (op->param_size < 6) return ERR_INVALID_ARGUMENT;
 
     uint32_t file_id      = param_u32(op, 0);
@@ -353,7 +369,7 @@ static int ObjRename(const ManifestOp *op,
 
     /* The volume's own answer: ERR_TAGFS_RECORD_FULL for a name that would
      * take the room a write in flight claimed (RT-19) among them. */
-    int rc = tagfs_rename_file(file_id, name);
+    int rc = tagfs_rename_file(file_id, name, StorageCallWarrant(ctx));
     return rc == 0 ? OK : -rc;
 }
 
@@ -721,7 +737,11 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 }
 
 /* STORAGE_TAG_UNSET  params:[u32 file_id]  in_crate: "key" — every tag of the
- * key — or "key:value" — that tag alone. */
+ * key — or "key:value" — that tag alone. The answer is the volume's own: a
+ * tag the file does not wear (ERR_TAGFS_TAG_NOT_FOUND), a file that is not
+ * there, a tag of key system, boot or god and a cabin with no warrant
+ * (ERR_PERMISSION_DENIED), a medium that left — never folded into one code a
+ * program cannot tell its own mistake by. */
 static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -732,9 +752,9 @@ static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count
     TagSpelling tag;
     error_t     rc = storage_one_tag(op, crates, ctx, &text, &tag);
     if (rc != OK) return rc;
-    int removed = tagfs_remove_tag_string(param_u32(op, 0), &tag);
+    int removed = tagfs_remove_tag_string(param_u32(op, 0), &tag, StorageCallWarrant(ctx));
     crate_buf_free(text);
-    return removed == 0 ? OK : ERR_INVALID_ARGUMENT;
+    return removed == 0 ? OK : -removed;
 }
 
 /* The ids of the tags a file is created with, each interned; the first

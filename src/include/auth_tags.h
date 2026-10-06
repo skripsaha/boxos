@@ -7,10 +7,11 @@
  * Each of the 7 auth-privilege keys (TAGFS_AUTH_KEYS) owns a FIXED bit
  * 1u<<position in cabin_t.auth_bits — never (1u<<registry_id). A cabin sets
  * AUTH_TAG_X iff it carries the BARE key X (value empty); the three mutation
- * points (cabin_create, process_add_tag, process_remove_tag) funnel through the
- * single checkpoint auth_bit_for_key. The gate (manifest_auth.h) and the spawn
- * gate (system_ops.c) read these bits, so a privilege never dies when its
- * registry id interns past 63.
+ * points (cabin_create's cabin_wear_tags, process_add_tag, process_remove_tag)
+ * funnel through the single checkpoint AuthBitForKey. The gate
+ * (manifest_auth.h), the spawn gate (system_ops.c) and the Ink guard's warrant
+ * (storage_ops.c, StorageCallWarrant) read these bits, so a privilege never
+ * dies when its registry id interns past 63.
  */
 
 #include "ktypes.h"
@@ -42,11 +43,6 @@ static inline uint32_t AuthBitForKey(const char *key, size_t key_len)
     TAGFS_AUTH_KEYS(X)
 #undef X
     return 0;
-}
-
-static inline uint32_t auth_bit_for_key(const char *key)
-{
-    return AuthBitForKey(key, __builtin_strlen(key));
 }
 
 #endif /* AUTH_TAGS_H */

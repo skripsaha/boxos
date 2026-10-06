@@ -7951,15 +7951,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 113 of the stand's own twenty suites: stand 26, stand_lock 4,
+# the 119 of the stand's own twenty-one suites: stand 26, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 3,
 # stand_plot 4, stand_index 5, stand_ink 5, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 5, stand_settle 4, stand_glean 5,
-# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 8. Counted off
-# the code, not a run (K9): a suite that drops out of the walk is a test that
-# stopped covering anything, and the count is where that shows. How many of
-# them pass and how many stand aside is the road's — said, not pinned.
-STAND_RUN=135
+# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 8,
+# stand_warrant 6. Counted off the code, not a run (K9): a suite that drops
+# out of the walk is a test that stopped covering anything, and the count is
+# where that shows. How many of them pass and how many stand aside is the
+# road's — said, not pinned.
+STAND_RUN=141
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -9273,13 +9274,11 @@ quill_mutants_on() {
     python3 - <<'EOF2'
 for p, a, b in (
     ("src/kernel/tagfs/ink/ink.c",
-     "        if (InkTagGuarded(f.dropped[i]))\n",
-     "        if (0 && InkTagGuarded(f.dropped[i]))   /* logcheck mutation: the guard is down, a guarded tag comes off */\n"),
+     "        if (warrant != INK_WARRANTED && InkTagGuarded(f.dropped[i]))\n",
+     "        if (0 && warrant != INK_WARRANTED && InkTagGuarded(f.dropped[i]))   /* logcheck mutation: the guard is down, a guarded tag comes off */\n"),
     ("src/kernel/tagfs/ink/ink.c",
-     "    if (InkWearsGuarded(tags, tag_count) || InkTouchesBoot(runs, run_count) ||\n"
-     "        InkTouchesBoot(freed, freed_count)) {\n",
-     "    if (0 && (InkWearsGuarded(tags, tag_count) || InkTouchesBoot(runs, run_count) ||\n"
-     "        InkTouchesBoot(freed, freed_count))) {   /* logcheck mutation: the guard is down, the kernel's file changes */\n"),
+     "    if (boot || (warrant != INK_WARRANTED && InkWearsGuarded(tags, tag_count))) {\n",
+     "    if (0 && (boot || (warrant != INK_WARRANTED && InkWearsGuarded(tags, tag_count)))) {   /* logcheck mutation: the guard is down, the kernel's file changes */\n"),
     ("src/kernel/tagfs/use_memory/use_memory.c",
      "    error_t rc   = UseChainStake(s_cycle.need, &s_cycle.chain, &s_cycle.got);\n",
      "    error_t rc   = ERR_TAGFS_NO_SPACE;   /* logcheck mutation: no chain is staked, a Use Context rides on nothing */\n"),

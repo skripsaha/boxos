@@ -58,7 +58,7 @@ static TestResult TestCowMovesOnlyTheBlockWritten(void)
     TestFillAt(now, TAGFS_BLOCK_SIZE, 0xC3DE0000u | file_id, 0);
     TEST_ASSERT_EQ(TestFileWrite(file_id, g_test_output, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE),
                    COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, "three blocks are written");
-    TEST_ASSERT_EQ(tagfs_defrag_file(file_id, 0), 0, "and gathered into one extent");
+    TEST_ASSERT_EQ(tagfs_defrag_file(file_id), 0, "and gathered into one extent");
     TEST_ASSERT_EQ(TestFileWrite(file_id, was, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE),
                    COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, "and written over");
 
@@ -100,7 +100,7 @@ out:
     if (have_meta)
         tagfs_metadata_free(&meta);
     if (file_id)
-        tagfs_delete_file(file_id);
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
 }
 
