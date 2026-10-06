@@ -7,6 +7,7 @@
 #include "../scribe/scribe.h"
 #include "../ledger/ledger.h"
 #include "../mount/away.h"
+#include "../metadata_pool/meta_pool.h"
 #include "block_fail.h"   /* BLOCKFAIL — a flush answered with the sense a USB disk gives */
 #include "boardroom.h"
 #include "xhci_msd.h"     /* the USB disk's memory of its SYNCHRONIZE CACHE answer */
@@ -402,6 +403,52 @@ out:
     return verdict;
 }
 
+/*
+ * K3. A cycle with a waiter closes the tail onto a Spare and makes the reserve
+ * whole again, and the new Spare's stamp is a write: the cycle's last flush
+ * keeps it. So a volume nobody writes to after it — saved, taken out, put back
+ * — comes back as this kernel left it, and its book is taken up. Red before:
+ * the reserve was made again after the last flush, every such book was in
+ * doubt, and the return gave it up.
+ */
+static TestResult TestStandMediumIdleTakenUpAfterSpare(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    uint32_t    file_id = 0;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB1u);
+    TEST_ASSERT(StandMakeFile("idle_after_spare", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+                "a file is made and written");
+    uint64_t gen = InkedGen();
+    TEST_ASSERT_OK(TagFSSettle(), "a cycle with a waiter settles it");
+    TEST_ASSERT(PoolClosedSettledGen() >= gen,
+                "in a closed block: the cycle closed the tail onto a Spare");
+    TagFSLockTake(&fs->lock);
+    uint32_t held = PoolSparesHeld(NULL, 0);
+    TagFSLockDrop(&fs->lock);
+    TEST_ASSERT_EQ(held, SPARE_RESERVE, "and made the reserve whole again");
+    TEST_ASSERT(VolumeWritesKept(),
+                "every write the cycle made, the new Spare's stamp among them, is kept");
+
+    TagFSStandMediumLeaves();
+    TEST_ASSERT(TagFSMediumLeft(), "the medium leaves with nothing owed");
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT,
+                   "and comes back as this kernel left it");
+    TEST_ASSERT(!TagFSMediumLeft(), "its book is taken up");
+out:
+    if (TagFSMediumLeft())
+        (void)TagFSStandMediumReturns(NULL);
+    if (file_id)
+        (void)tagfs_delete_file(file_id);
+    (void)TagFSSettle();
+    return verdict;
+}
+
 static const TestCase g_stand_medium_tests[] = {
     { .name  = "stand_medium_no_medium_flush_refused",
       .func  = TestStandMediumNoMediumFlushRefused, .reach = TEST_WRITES_TO_VOLUME,
@@ -412,6 +459,8 @@ static const TestCase g_stand_medium_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_book_given_up", .func = TestStandMediumBookGivenUp,
       .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_idle_taken_up_after_spare",
+      .func  = TestStandMediumIdleTakenUpAfterSpare, .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_medium_suite = {

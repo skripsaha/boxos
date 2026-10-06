@@ -1989,12 +1989,20 @@ error_t tagfs_init(void) {
 
     /* The Spares a delete stands on, laid by now so a volume with no free
      * block left can still give a file up (meta_pool.h, SPARE_RESERVE). A
-     * volume with no room for them says so, and deletes while its tail lasts. */
+     * volume with no room for them says so, and deletes while its tail lasts.
+     * Their stamps are writes, and a write no flush kept leaves the book of a
+     * volume nobody has written to in doubt (mount/away.h): one flush keeps
+     * them, and every write the mount made before them. */
     error_t spared = PoolSpareRefill(SPARE_RESERVE);
     if (spared != OK)
         kprintf("[TagFS] the Spares a delete stands on could not all be laid (error %u) — "
                 "a full volume deletes only while its pool's tail has room\n",
                 (unsigned)spared);
+    error_t kept = VolumeFlushFor(VolumeFlushNeed());
+    if (kept != OK)
+        kprintf("[TagFS] the flush after the mount's own writes was refused (error %u) — "
+                "until a Settle cycle's flush is kept, a medium that leaves and comes "
+                "back is not taken up as it was left\n", (unsigned)kept);
 
     SettleCutSayArmed();            /* nothing at all unless SETTLECUT=<point> */
     TagFSHoldGroundOpenFile();      /* nothing at all unless HOLDGROUND=on */

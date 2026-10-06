@@ -28,6 +28,8 @@
  *       with the cycle's SettleMark (volume_ledger.h): the pool from
  *       chain_first to where this cycle's records end, the registry up to
  *       its last record, each with the CRC32 a mount holds the medium to;
+ *       then the pool's reserve of Spares made whole again, as it was just
+ *       before S0 — their stamps are writes S5 keeps (meta_pool.h);
  *   S5  FLUSH#2;
  *   S6  under the state lock: settled_gen is the target, the closed blocks
  *       written leave memory, the demand for the Use Context is answered, and
@@ -89,6 +91,15 @@ error_t  SettleHaltAnswer(uint64_t* unsettled);
 /* The settled gen and the settled cycles — for the stand. */
 uint64_t SettledGen(void);
 uint64_t SettledCycles(void);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* A cycle begun as the cadence begins one — it closes the tail only as far as
+ * a waiter is owed — and run to its end on this core: OK once it settled,
+ * ERR_BUSY when another asker holds the Settle, or the cycle's refusal. For
+ * the stand, whose runner holds the cadence: cycles that close for nobody let
+ * Glean bring the pool's chain down to what its live records fill. */
+error_t  TagFSSettleAsCadence(void);
+#endif
 
 /* A mount's first word: nothing settled yet, and no waiter of the volume that
  * went before it left unanswered. With the door shut. */

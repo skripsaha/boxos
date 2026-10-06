@@ -3,8 +3,13 @@
 #include "../tagfs.h"
 #include "../file_map/file_map.h"
 #include "../metadata_pool/meta_pool.h"
+#include "../block_map/block_map.h"
+#include "../ink/ink.h"
+#include "../ink/fallow.h"
+#include "../glean/glean.h"
 #include "../plot/plot.h"
 #include "../settle/settle.h"
+#include "block_fail.h"   /* BLOCKFAIL that refuses nothing — a count of the writes to the data run */
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -17,14 +22,16 @@
 // like any record, and a tail with no room closed onto a Spare — the last two
 // Spares a delete's alone. These tests ask the pool's bookkeeping what the
 // medium and the next mount will be told: where each file's record sits, what
-// the newest record of a deleted file is, and whether a volume with no free
-// block can still give a file up.
+// the newest record of a deleted file is, whether a volume with no free block
+// can still give a file up, and whether a Spare no link names yet is free on
+// the medium's map.
 // ============================================================================
 
 #define STAND_INK_FILES    16u     /* files the interleaved writes go round */
 #define STAND_INK_ROUNDS   8u      /* writes each of them takes */
 #define STAND_INK_CHUNK    16u     /* bytes a write appends */
 #define STAND_INK_DELETES  (POOL_QUITCLAIMS_PER_BLOCK + 2u)   /* one more than a tail holds */
+#define STAND_INK_REST_ROUNDS 16u  /* cycles a volume gets to bring Fallow and Glean to rest */
 
 static uint32_t s_ink_fids[STAND_INK_DELETES];
 
@@ -168,14 +175,16 @@ typedef struct {
     uint32_t  cap;
 } StandInkGround;
 
-/* Every free block taken, run by run; false for no memory, with what was
- * taken so far still listed for StandInkGiveBack. */
-static bool StandInkTakeAll(StandInkGround* g)
+/* Every free block taken, run by run: the answer that ended it — the
+ * allocator's refusal — or ERR_NO_MEMORY for no memory to list a run, with
+ * what was taken so far still listed for StandInkGiveBack. */
+static error_t StandInkTakeAll(StandInkGround* g)
 {
     uint32_t start = 0, got = 0;
     uint32_t all   = tagfs_get_state()->layout.data_blocks;
+    error_t  rc;
 
-    while (TagFSTakeRun(all, 0, &start, &got) == OK) {
+    while ((rc = TagFSTakeRun(all, 0, &start, &got)) == OK) {
         if (g->count == g->cap) {
             uint32_t  cap = g->cap ? g->cap * 2u : 64u;
             uint32_t* at  = kmalloc(sizeof(uint32_t) * cap);
@@ -184,7 +193,7 @@ static bool StandInkTakeAll(StandInkGround* g)
                 kfree(at);
                 kfree(n);
                 tagfs_free_blocks(start, got);
-                return false;
+                return ERR_NO_MEMORY;
             }
             if (g->count) {
                 memcpy(at, g->at, sizeof(uint32_t) * g->count);
@@ -200,7 +209,44 @@ static bool StandInkTakeAll(StandInkGround* g)
         g->n[g->count]  = got;
         g->count++;
     }
-    return true;
+    return rc;
+}
+
+/* Cycles run until nothing rests in Fallow and the pool's chain has no slack
+ * Glean could take off — the pass told the allocator is short, as a take that
+ * met no room would tell it (MapShort) — at least one, so what the test made
+ * is settled, and each with free ground to make the reserve whole from. They
+ * are begun as the cadence begins them: a cycle with a waiter closes the tail
+ * Glean has just laid records in, and the chain would keep a block of slack
+ * for ever. True once at rest: then a volume whose free blocks are all taken
+ * answers ERR_TAGFS_NO_SPACE, never ERR_WOULD_BLOCK, and no cycle can give a
+ * block back. */
+static bool StandInkAtRest(void)
+{
+    TagFSState* fs   = tagfs_get_state();
+    bool        rest = false;
+
+    for (uint32_t round = 0; !rest && round < STAND_INK_REST_ROUNDS; round++) {
+        if (TagFSSettleAsCadence() != OK)
+            return false;
+        TagFSLockTake(&fs->lock);
+        bool slack = GleanMayFree();
+        rest       = FallowBlocks() == 0 && !slack;
+        TagFSLockDrop(&fs->lock);
+        if (slack)
+            GleanShort();
+    }
+    return rest;
+}
+
+/* How many Spares the pool holds, and up to `cap` of their blocks. */
+static uint32_t StandInkSpares(uint32_t* out, uint32_t cap)
+{
+    TagFSState* fs = tagfs_get_state();
+    TagFSLockTake(&fs->lock);
+    uint32_t held = PoolSparesHeld(out, cap);
+    TagFSLockDrop(&fs->lock);
+    return held;
 }
 
 static void StandInkGiveBack(StandInkGround* g)
@@ -216,21 +262,32 @@ static void StandInkGiveBack(StandInkGround* g)
  * given up than an empty tail holds Quitclaims, so the tail must close onto a
  * Spare, and there is no block to make one from. The last Spares are a
  * delete's (SPARE_RESERVE): without them the delete that fills the tail waits
- * for a block no cycle can give back, and a full volume can free nothing. */
+ * for a block no cycle can give back, and a full volume can free nothing.
+ * Nothing rests in Fallow first and the pool's chain has no slack Glean could
+ * take off, so no cycle could hand a Spare's block back either: the deletes
+ * stand on the reserve alone, and not one write reaches the data run while
+ * they run — no Spare stamped, no cycle run for room. */
 static TestResult TestStandInkFullVolumeStillDeletes(void)
 {
     TestResult     verdict = TEST_PASS;
+    TagFSState*    fs      = tagfs_get_state();
     StandInkGround ground  = { NULL, NULL, 0, 0 };
-    uint32_t       refused = 0, first_error = 0;
+    uint32_t       refused = 0, first_error = 0, writes = 0;
+    bool           armed   = false;
     const char*    aside   = StandStepsAsideFor();
 
     if (aside)
         return test_steps_aside(aside);
 
     TEST_ASSERT(StandInkMake(STAND_INK_DELETES), "one file more than a tail holds Quitclaims is made");
-    TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle closes the tail they are in, and the next is empty");
-    TEST_ASSERT(StandInkTakeAll(&ground), "every free block of the volume is taken");
+    TEST_ASSERT(StandInkAtRest(),
+                "cycles settle them, and nothing rests or waits to be gleaned");
+    TEST_ASSERT_EQ(StandInkTakeAll(&ground), ERR_TAGFS_NO_SPACE,
+                   "every free block of the volume is taken, and it says it has none");
 
+    BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_WRITE, tagfs_block_to_sector(0),
+                 (uint64_t)fs->layout.data_blocks * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
+    armed = true;
     for (uint32_t i = 0; i < STAND_INK_DELETES; i++) {
         int gone = tagfs_delete_file(s_ink_fids[i]);
         if (gone == 0) {
@@ -241,16 +298,134 @@ static TestResult TestStandInkFullVolumeStillDeletes(void)
             refused++;
         }
     }
+    writes = BlockFailSeen();
+    BlockFailDisarm();
+    armed = false;
     StandInkGiveBack(&ground);
 
-    TestEvidence("deletes refused on a volume with no free block", refused);
-    if (refused) {
-        kprintf("[TESTS] the first delete refused answered error %u\n", first_error);
+    TestEvidence("deletes refused, and writes to the data run made for them, on a volume with "
+                 "no free block", (uint64_t)refused + writes);
+    if (refused || writes) {
+        kprintf("[TESTS] %u delete(s) refused, the first answering error %u; %u write(s) to "
+                "the data run while they ran\n", refused, first_error, writes);
         verdict = TEST_DEFECT;
     }
 out:
+    if (armed)
+        BlockFailDisarm();
     StandInkGiveBack(&ground);
     StandInkLetGo(STAND_INK_DELETES);
+    return verdict;
+}
+
+/*
+ * A tail a cycle closes early for a waiter leaves the deletes their last
+ * Spare. On a volume with no free block and nothing at rest the reserve cannot
+ * be made again: the first anchored change closes the tail onto one Spare, the
+ * next finds only the deletes' and keeps its tail open — said once — and the
+ * Spare is still there for the delete that fills the tail. An early close that
+ * took it would leave the deletes' Quitclaims in a tail nothing can close, and
+ * the ground they free resting for good (Z09-1).
+ */
+static TestResult TestStandInkEarlyCloseSparesTheLast(void)
+{
+    TestResult     verdict = TEST_PASS;
+    StandInkGround ground  = { NULL, NULL, 0, 0 };
+    uint32_t       file_id = 0;
+    const char*    aside   = StandStepsAsideFor();
+    TagSpelling    key     = TagSpellingOfKey("stand_ink");
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0, "a file is made");
+    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &key), "it wears stand_ink");
+    uint16_t tag = TagRegistryLookup(tagfs_get_state()->registry, &key);
+    TEST_ASSERT(StandInkAtRest(), "cycles settle it, and nothing rests or waits to be gleaned");
+    TEST_ASSERT_EQ(StandInkSpares(NULL, 0), SPARE_RESERVE, "the pool holds the whole reserve");
+    TEST_ASSERT_EQ(StandInkTakeAll(&ground), ERR_TAGFS_NO_SPACE,
+                   "every free block of the volume is taken, and it says it has none");
+
+    TEST_ASSERT_EQ(tagfs_remove_tag(file_id, tag), 0,
+                   "stand_ink comes off — a change, with no block to make a Spare from");
+    uint64_t first = InkedGen();
+    TEST_ASSERT_OK(TagFSSettle(), "a cycle with a waiter settles it");
+    TEST_ASSERT(PoolClosedSettledGen() >= first, "in a closed block: the tail closed onto a Spare");
+    TEST_ASSERT_EQ(StandInkSpares(NULL, 0), SPARE_FOR_QUITCLAIMS,
+                   "and no Spare could be made again: the deletes' share is what is left");
+
+    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &key),
+                   "stand_ink goes on again, a tag the medium already holds — a second change");
+    uint64_t second = InkedGen();
+    TEST_ASSERT_OK(TagFSSettle(), "the next cycle with a waiter settles it too");
+    TEST_ASSERT(PoolClosedSettledGen() < second, "but not in a closed block");
+    TEST_ASSERT(PoolTailGen() >= second, "it lies in the tail the cycle kept open");
+    TEST_ASSERT_EQ(StandInkSpares(NULL, 0), SPARE_FOR_QUITCLAIMS,
+                   "and the deletes' last Spare was not taken");
+out:
+    StandInkGiveBack(&ground);
+    if (file_id)
+        tagfs_delete_file(file_id);
+    (void)TagFSSettle();
+    return verdict;
+}
+
+/*
+ * A Spare is taken in memory and named on the medium only by the link that
+ * closes onto it, so until then every sector of the map goes out leaving it
+ * free: a volume cut by the power finds no stamped block nobody owns. The
+ * creates fill the tail, and it turns onto a Spare with no cycle between —
+ * its link is the next cycle's to write. The map's debts paid by the door a
+ * give pays them through, the medium calls every Spare and the tail they
+ * turned onto free, memory calls them taken; and the next cycle, whose S3
+ * writes the link, writes the tail's block taken at its S1 — a link never
+ * lands on a block the medium calls free.
+ */
+static TestResult TestStandInkSparesFreeOnTheMedium(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    uint32_t    spares[SPARE_RESERVE + 2u];
+    uint32_t    held = 0, tail = 0, wrong = 0;
+    bool        taken = true;
+    RecordWhere first_at, last_at;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles what the tests before left, and empties the tail");
+    TEST_ASSERT(StandInkMake(STAND_INK_DELETES), "more files are made than a tail holds records of");
+    FileRecord* rec = FileMapRecordHold(fs->files, s_ink_fids[0], &first_at);
+    TEST_ASSERT(rec != NULL, "the first file's record is found");
+    FileRecordRelease(rec);
+    rec = FileMapRecordHold(fs->files, s_ink_fids[STAND_INK_DELETES - 1u], &last_at);
+    TEST_ASSERT(rec != NULL, "and the last's");
+    FileRecordRelease(rec);
+    TEST_ASSERT(first_at.link != last_at.link, "the tail turned onto a Spare between them");
+    TagFSLockTake(&fs->lock);
+    bool linked = PoolLinkBlock(last_at.link, &tail);
+    TagFSLockDrop(&fs->lock);
+    TEST_ASSERT(linked, "the tail's block is found");
+
+    BlockMapSettle();
+    held = StandInkSpares(spares, ARRAY_SIZE(spares));
+    TEST_ASSERT(held > 0 && held <= ARRAY_SIZE(spares), "the pool holds Spares, every one listed");
+    for (uint32_t i = 0; i < held; i++)
+        wrong += !BlockMapIsTaken(spares[i]) ||
+                 !BlockMapMediumSays(spares[i], &taken) || taken;
+    TestEvidence("Spares the medium's map calls taken, or memory free, of those held", wrong);
+    TEST_ASSERT_EQ(wrong, 0, "the medium calls every Spare free, and memory every one taken");
+    TEST_ASSERT(BlockMapIsTaken(tail), "memory calls the tail they turned onto taken");
+    TEST_ASSERT(BlockMapMediumSays(tail, &taken) && !taken,
+                "and the medium free: no cycle has written the link naming it");
+
+    TEST_ASSERT_OK(TagFSSettle(), "the cycle that writes the link settles");
+    TEST_ASSERT(BlockMapMediumSays(tail, &taken) && taken,
+                "and its map, written before the link, calls the tail's block taken");
+out:
+    StandInkLetGo(STAND_INK_DELETES);
+    (void)TagFSSettle();
     return verdict;
 }
 
@@ -308,7 +483,8 @@ static bool StandInkNewestOnMedium(uint32_t fid, bool* active, bool* whole)
  * resurrection D7 made of a write committed after its file's retire). Its
  * block rests in Fallow through the cycle that settled the delete — the
  * Ledger's other copy still stands on the cycle before — and goes back with
- * the next. */
+ * the last of the FallowLag() cycles after it: one, or two on a volume whose
+ * medium once lied (fallow.h). */
 static TestResult TestStandInkQuitclaimIsTheNewestRecord(void)
 {
     TestResult     verdict = TEST_PASS;
@@ -344,8 +520,12 @@ static TestResult TestStandInkQuitclaimIsTheNewestRecord(void)
         goto out;
     }
     TEST_ASSERT(StandBlockInUse(block), "its block rests through the cycle that settled the delete");
-    TEST_ASSERT_OK(TagFSSettle(), "one cycle more");
-    TEST_ASSERT(!StandBlockInUse(block), "and goes back with it");
+    for (uint64_t more = 1; more < FallowLag(); more++) {
+        TEST_ASSERT_OK(TagFSSettle(), "a cycle more of Fallow's lag");
+        TEST_ASSERT(StandBlockInUse(block), "and the block still rests");
+    }
+    TEST_ASSERT_OK(TagFSSettle(), "the lag's last cycle");
+    TEST_ASSERT(!StandBlockInUse(block), "and the block goes back with it");
 out:
     if (file_id)
         tagfs_delete_file(file_id);
@@ -365,6 +545,10 @@ static const TestCase g_stand_ink_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a volume with no free block and a full pool tail refuses every delete, "
                        "so nothing can make room on it" },
+    { .name  = "stand_ink_early_close_spares_the_last",
+      .func  = TestStandInkEarlyCloseSparesTheLast, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_ink_spares_free_on_the_medium",
+      .func  = TestStandInkSparesFreeOnTheMedium, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_ink_quitclaim_is_the_newest_record",
       .func  = TestStandInkQuitclaimIsTheNewestRecord, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a file written and then deleted is named again by the next mount, its "

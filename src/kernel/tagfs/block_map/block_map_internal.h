@@ -52,6 +52,7 @@ typedef struct {
     volatile uint32_t holder;   /* core index + 1 of the transfer in flight, else 0 */
     volatile uint8_t  state;
     uint8_t           dirty;    /* it holds a change the medium has not been sent */
+    uint8_t           left_out; /* the medium's copy leaves out a block memory holds taken */
     uint8_t           bits[TAGFS_SECTOR_SIZE];
 } BlockMapPage;
 

@@ -11,11 +11,14 @@
  * never written again once a cycle has settled it. What is still rewritten in
  * place on format v1 is the open tail, a cycle at a time; a cycle with a
  * waiter closes it first (PoolSnapTake), so what an anchor settled lies in a
- * block no later write touches.
+ * block no later write touches — and a cycle that finds no Spare it may close
+ * onto says that its waiter's records stay in the open tail.
  *
  * ‼ A CLOSED BLOCK'S LINK IS WRITTEN AFTER THE FLUSH THAT KEPT THE STAMP IT
  * NAMES. The Spare was stamped when it was made, and its need rides with the
  * closed block; the cycle's first flush covers it before the block goes out.
+ * Until the cycle that writes the link, the map leaves the Spare's block free
+ * on the medium (PoolUnnamedLeftOut).
  */
 MetaPoolBlock* g_pool_tail         = NULL;
 uint32_t       g_pool_tail_block   = 0;
@@ -31,6 +34,13 @@ static MetaPoolPage* s_spares;
 static uint32_t      s_spare_count;
 static uint64_t      s_closed_settled_gen;
 static uint64_t      s_closed_gen_max;       /* the newest record ever closed this mount */
+
+/* The oldest closed block turned since the last S0: from it on, every link
+ * names a block no cycle has yet taken a snapshot to name. NULL: none. */
+static MetaPoolPage* s_unnamed_from;
+
+/* Said once for each run of cycles that owed a close and could not make one. */
+static bool          s_unclosed_said;
 
 /* The tail as the Settle's holder writes it: copied at S0 under the state
  * lock, written at S3 with no lock. The holder's alone — one cycle at a time. */
@@ -147,6 +157,8 @@ static bool TailTurnKeeping(uint32_t keep)
     else
         s_closed_head = page;
     s_closed_tail = page;
+    if (!s_unnamed_from)
+        s_unnamed_from = page;
 
     PoolChainAppend(spare_block);
     g_pool_tail         = spare_image;
@@ -195,7 +207,9 @@ RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen)
 
 /* The page into the stock, once the chain has room for the link it will
  * take: every Spare in the stock has its link's room made, so a tail turns
- * under the state lock without asking the heap. */
+ * under the state lock without asking the heap. A write of the map since the
+ * Spare's take may have carried it taken: its sector is owed again, to go out
+ * leaving it free. */
 static error_t SpareInto(MetaPoolPage* page)
 {
     for (;;) {
@@ -205,6 +219,7 @@ static error_t SpareInto(MetaPoolPage* page)
             page->next = s_spares;
             s_spares   = page;
             s_spare_count++;
+            BlockMapOweLocked(page->block);
             TagFSLockDrop(TailLock());
             return OK;
         }
@@ -301,6 +316,33 @@ MetaPoolPage* PoolSparesGiveBack(void)
     return given;
 }
 
+uint32_t PoolSparesHeld(uint32_t* out, uint32_t cap)
+{
+    uint32_t i = 0;
+    for (MetaPoolPage* p = s_spares; p && out && i < cap; p = p->next)
+        out[i++] = p->block;
+    return s_spare_count;
+}
+
+static uint32_t LeaveOut(uint32_t block, uint32_t first, uint32_t count, uint8_t* bits)
+{
+    if (block < first || block - first >= count)
+        return 0;
+    uint32_t off = block - first;
+    bits[off / 8] &= (uint8_t)~(1u << (off % 8));
+    return 1;
+}
+
+uint32_t PoolUnnamedLeftOut(uint32_t first, uint32_t count, uint8_t* bits)
+{
+    uint32_t left = 0;
+    for (MetaPoolPage* p = s_spares; p; p = p->next)
+        left += LeaveOut(p->block, first, count, bits);
+    for (MetaPoolPage* p = s_unnamed_from; p; p = p->next)
+        left += LeaveOut(p->image->next_block, first, count, bits);
+    return left;
+}
+
 void PoolPagesFree(MetaPoolPage* list)
 {
     while (list) {
@@ -315,7 +357,26 @@ void PoolPagesFree(MetaPoolPage* list)
 // The Settle cycle
 // ---------------------------------------------------------------------------
 
-void PoolSnapTake(PoolSnap* snap, uint64_t close_upto)
+/* The tail closed early for a waiter, onto a Spare the deletes may spare:
+ * otherwise it stays open, is written as it stands, and that is said once. */
+static void TailCloseEarly(PoolSnap* snap, bool dig_reserve)
+{
+    if (TailTurnKeeping(dig_reserve ? 0u : (uint32_t)SPARE_FOR_QUITCLAIMS)) {
+        s_unclosed_said = false;
+        return;
+    }
+    snap->unclosed = true;
+    if (!s_unclosed_said)
+        kprintf("[MetaPool] a cycle owes a waiter a closed block and the pool holds %u "
+                "Spare(s), the last %u of them the deletes' — the tail stays open, and "
+                "what the waiter is answered for lies in a block the next cycle writes "
+                "again in place, where a flash page torn by the power can take it, until "
+                "a Spare can be made\n",
+                s_spare_count, (unsigned)SPARE_FOR_QUITCLAIMS);
+    s_unclosed_said = true;
+}
+
+void PoolSnapTake(PoolSnap* snap, uint64_t close_upto, bool dig_reserve)
 {
     memset(snap, 0, sizeof(*snap));
     if (!g_pool_tail)
@@ -324,8 +385,14 @@ void PoolSnapTake(PoolSnap* snap, uint64_t close_upto)
     /* Every record the tail holds is newer than every closed block's: a record
      * owed a closed block is in the tail exactly when it is newer than the
      * newest record ever closed. */
-    if (close_upto > s_closed_gen_max && g_pool_tail->used_bytes > 0 && !PoolTailTurn(true))
-        snap->unclosed = true;      /* no Spare: the tail stays open, and is written */
+    if (close_upto > s_closed_gen_max && g_pool_tail->used_bytes > 0)
+        TailCloseEarly(snap, dig_reserve);
+
+    /* Every closed block is in this snapshot, so every link turned so far is
+     * written at its S3: the blocks they name are the map's again at its S1. */
+    for (MetaPoolPage* p = s_unnamed_from; p; p = p->next)
+        BlockMapOweLocked(p->image->next_block);
+    s_unnamed_from = NULL;
 
     snap->first = s_closed_head;
     snap->upto  = s_closed_tail;
@@ -440,6 +507,8 @@ void PoolTailShutdown(void)
     s_spare_count        = 0;
     s_closed_settled_gen = 0;
     s_closed_gen_max     = 0;
+    s_unnamed_from       = NULL;
+    s_unclosed_said      = false;
     s_tail_edits         = 0;
     g_pool_tail          = NULL;
     g_pool_tail_block    = 0;
