@@ -159,7 +159,7 @@ void     PoolTakeBack(const RecordWhere* where, uint32_t len);
 
 /* The tail closed onto a Spare, and the Spare the new tail: false — nothing
  * changed — when no Spare may be had. The last SPARE_RESERVE Spares are had
- * only when `dig_reserve` (a Quitclaim, a cycle closing early). */
+ * only when `dig_reserve` (a Quitclaim). */
 bool     PoolTailTurn(bool dig_reserve);
 
 /* The same turn for Glean, which may take its own share of the reserve
@@ -180,10 +180,14 @@ RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen);
 /* ‼ HOW MANY SPARES THE POOL KEEPS FOR A DELETE, DERIVED. One block of the tail
  * holds every Quitclaim a run of deletes needs until a cycle can close it —
  * POOL_QUITCLAIMS_PER_BLOCK of them, 97 — and one more is a Glean step's
- * (glean/): the live records of the oldest block, at most one block's payload. The
- * same two serve a tail closed early: the first becomes the closed block's
- * next, the second the tail after it. A volume with no free block can still
- * delete, and the 98th delete waits for a Spare the Fallow gives back. */
+ * (glean/): the live records of the oldest block, at most one block's payload.
+ * A Quitclaim may take the whole reserve; Glean and a tail a cycle closes early
+ * leave the deletes their SPARE_FOR_QUITCLAIMS, because the ground the deletes
+ * free comes back only once a block holding their Quitclaims is closed
+ * (fallow.h) — a full volume whose last Spare an anchor spent could free
+ * nothing again. A volume with no free block can still delete: the delete
+ * that fills the tail closes it onto the deletes' own Spare, and the delete
+ * after the next tail fills waits for a Spare the Fallow gives back. */
 #define POOL_QUITCLAIMS_PER_BLOCK  (TAGFS_MPOOL_DATA_SIZE / RECORD_HEADER_SIZE)
 #define SPARE_FOR_QUITCLAIMS       ((POOL_QUITCLAIMS_PER_BLOCK * RECORD_HEADER_SIZE + \
                                      TAGFS_MPOOL_DATA_SIZE - 1) / TAGFS_MPOOL_DATA_SIZE)
@@ -198,9 +202,30 @@ RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen);
  * medium's refusal of the stamp. */
 error_t  PoolSpareMake(void);
 
-/* Spares made until the pool holds `want` — the reserve after a mount and
- * after every cycle. With no TagFS lock held. The first refusal ends it. */
+/* Spares made until the pool holds `want` — the reserve at a mount and in
+ * every cycle (settle/). With no TagFS lock held. The first refusal ends it. */
 error_t  PoolSpareRefill(uint32_t want);
+
+/* Under the state lock: how many Spares the pool holds, and the blocks of up
+ * to `cap` of them into `out` (NULL for the count alone). */
+uint32_t PoolSparesHeld(uint32_t* out, uint32_t cap);
+
+/*
+ * ‼ A BLOCK NO LINK NAMES IS FREE ON THE MEDIUM. A Spare is taken in memory
+ * the moment it is made, and named on the medium only by the link of the
+ * block that closes onto it — a cycle's S3. Until then the map's sector goes
+ * out leaving it free: a volume cut by the power finds no stamped block owned
+ * by nothing, and gives the ground straight back to its allocator. A Spare
+ * stops being left out at the S0 of the cycle whose S3 writes the link naming
+ * it — PoolSnapTake owes the medium its sector again (BlockMapOweLocked) — so
+ * the map that cycle's S1 writes holds it taken before the link lands.
+ *
+ * Under the state lock, by the block map as a sector of it goes out: the bit
+ * of every such block in [first, first + count) — the Spares in the stock and
+ * the tails turned onto one since the last S0 — cleared in `bits`, which
+ * covers exactly that run. How many were cleared.
+ */
+uint32_t PoolUnnamedLeftOut(uint32_t first, uint32_t count, uint8_t* bits);
 
 /*
  * A Spare made by a maker that may not stand over the medium — an
@@ -247,9 +272,14 @@ typedef struct {
 /* S0, under the state lock. Every record up to Ink `close_upto` is to lie in a
  * closed block — the anchor's promise: what a cycle with a waiter settles lies
  * in a block never written again — so a tail holding one is closed onto a
- * Spare first; 0 closes nothing. `unclosed` says a close was owed and the pool
- * had no Spare to close onto. */
-void     PoolSnapTake(PoolSnap* snap, uint64_t close_upto);
+ * Spare first; 0 closes nothing. The close leaves the deletes their
+ * SPARE_FOR_QUITCLAIMS, but in the machine's last cycle (`dig_reserve`), whose
+ * S0 gives every Spare back right after (PoolSparesGiveBack). `unclosed` says a
+ * close was owed and no Spare could be had: the waiter is answered once its
+ * records settled in the open tail, and that is said once until a close is
+ * made again. The links this snapshot writes stop leaving the blocks they name
+ * out of the map (PoolUnnamedLeftOut). */
+void     PoolSnapTake(PoolSnap* snap, uint64_t close_upto, bool dig_reserve);
 
 /* S3, with no TagFS lock held, one command at a time: the next closed block in
  * chain order, then the tail. OK with *done once nothing of the snapshot is

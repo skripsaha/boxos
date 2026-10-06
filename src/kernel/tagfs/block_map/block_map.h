@@ -113,6 +113,18 @@ void    BlockMapSettle(void);
 error_t BlockMapFlush(void);
 
 /*
+ * A sector goes out to the medium leaving free every block the pool holds that
+ * no link names yet (PoolUnnamedLeftOut, meta_pool.h); memory keeps it taken.
+ * A sector that left one out is let go of only once it was written whole, so
+ * a sector read back in is always the medium's whole word. Under the state
+ * lock, when `block` starts or stops being one no link names — a Spare put in
+ * the stock, whose take a write may have carried already; a block whose link
+ * the cycle at S0 is about to write — its sector is owed to the medium again,
+ * and the next settle of the map writes it as it now must read.
+ */
+void    BlockMapOweLocked(uint32_t block);
+
+/*
  * TagFSTakeRun — the longest run of free blocks up to `want`, as near `hint`
  * as a run that long lies: *got is `want` wherever a run of `want` exists, and
  * otherwise the longest the volume has. Where the hint itself is free and the
@@ -153,6 +165,10 @@ bool    AllotmentHeld(uint32_t fid, uint32_t *start, uint32_t *count);
  * no hint is handed next — for the startup tests that predict a block. */
 bool    BlockMapIsTaken(uint32_t block);
 bool    BlockMapNextFree(uint32_t *block);
+
+/* Whether the medium's own sector of the map calls a block taken, read past
+ * memory; false when the sector would not read. With no TagFS lock held. */
+bool    BlockMapMediumSays(uint32_t block, bool *taken);
 #endif
 
 #endif /* TAGFS_BLOCK_MAP_H */

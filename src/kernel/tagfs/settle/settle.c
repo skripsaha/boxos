@@ -46,6 +46,7 @@ typedef enum {
     SETTLE_STEP_FIRST_FLUSH,     /* S2 */
     SETTLE_STEP_POOL,            /* S3, a block a turn */
     SETTLE_STEP_LEDGER,          /* S4 */
+    SETTLE_STEP_SPARES,          /* the reserve made again, its stamps for S5 to keep */
     SETTLE_STEP_LAST_FLUSH,      /* S5 */
     SETTLE_STEP_DONE,            /* S6 */
 } SettleStep;
@@ -56,6 +57,10 @@ static uint64_t s_cycles;        /* cycles settled this mount; the next is s_cyc
 
 /* Said once for each run of refused cycles, until one settles. */
 static bool     s_failing;
+
+/* Said once for each run of cycles that could not make the reserve whole,
+ * until one could. The Settle's holder's alone. */
+static bool     s_spares_short;
 
 /* Blocks the last settled cycle's S6 gave back: the map carries them to the
  * medium at the next cycle's S1. The Settle's holder's alone. */
@@ -124,8 +129,9 @@ void SettleMountReset(void)
     s_given = 0;
     __atomic_store_n(&s_settled_gen, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_cycles, 0, __ATOMIC_RELEASE);
-    s_failing  = false;
-    s_halt_ran = false;
+    s_failing      = false;
+    s_spares_short = false;
+    s_halt_ran     = false;
 }
 
 void SettleMountStand(uint32_t from_block, uint32_t from_bytes, bool medium_lied)
@@ -183,7 +189,8 @@ error_t SettleHaltAnswer(uint64_t* unsettled)
  *
  * A cycle somebody asked for and waits on closes the tail onto a Spare, and so
  * does one that must give Fallow's ground back; one the cadence began closes
- * it only as far as a waiter is owed.
+ * it only as far as a waiter is owed. Each leaves the deletes their share of
+ * the reserve, but the halt's, which gives every Spare back right after.
  */
 static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
 {
@@ -195,8 +202,9 @@ static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
     snap->target    = InkedGen();
     snap->cycle     = s_cycles + 1;
     snap->data_need = InkDataNeed();
-    PoolSnapTake(&snap->pool, closes ? snap->target
-                                     : (owed_close < snap->target ? owed_close : snap->target));
+    PoolSnapTake(&snap->pool,
+                 closes ? snap->target : (owed_close < snap->target ? owed_close : snap->target),
+                 why == SETTLE_FOR_HALT);
     if (why == SETTLE_FOR_HALT) {
         snap->given = PoolSparesGiveBack();
         IntegrityLayDrop();
@@ -239,14 +247,52 @@ static error_t SettleFirstFlush(SettleSnap* snap)
     return VolumeFlushFor(need);
 }
 
-/* S0's step: a Spare for the early close, made before S0 — which takes nothing
- * from the heap or the medium; a volume with none keeps its tail open, and the
- * cycle writes it as it stands — the Use Context's new chain staked, and S0
- * itself, whose time the window is measured from. */
+/*
+ * ‼ THE RESERVE IS MADE INSIDE THE CYCLE, BEFORE ITS LAST FLUSH. A Spare is a
+ * write — its stamp — and a write the last flush did not keep leaves the
+ * volume's book in doubt (scribe.h, VolumeWritesKept): a medium taken out and
+ * put back exactly as it was left would be given up, every waiter answered
+ * that the medium left. So the reserve is made whole twice in a cycle, as its
+ * own steps under the heap's reserve: before S0, from the ground the last
+ * cycle gave back, so the early close has a Spare to close onto; and after
+ * S4, in place of what the close took, for S5 to keep. The halt makes none:
+ * its S0 gives every Spare back. A refusal ends nothing — the deletes stand on
+ * what the pool holds, and the next cycle tries again — and is said once
+ * until a cycle makes the reserve whole.
+ */
+static void SettleSparesMake(void)
+{
+    error_t rc = PoolSpareRefill(SPARE_RESERVE);
+    if (rc == OK) {
+        s_spares_short = false;
+        return;
+    }
+    if (!s_spares_short) {
+        TagFSState* fs = tagfs_get_state();
+        TagFSLockTake(&fs->lock);
+        uint32_t held    = PoolSparesHeld(NULL, 0);
+        uint64_t room    = fs->ledger.free_blocks;
+        uint64_t resting = FallowBlocks();
+        uint64_t cycle   = s_cycles + 1;
+        TagFSLockDrop(&fs->lock);
+        kprintf("[Settle] cycle %llu could make the pool only %u of the %u Spare(s) a delete "
+                "stands on (error %u; %llu block(s) free, %llu resting in Fallow) — a delete "
+                "past the tail's room waits for one, and every cycle tries again\n",
+                (unsigned long long)cycle, held, (unsigned)SPARE_RESERVE, (unsigned)rc,
+                (unsigned long long)room, (unsigned long long)resting);
+    }
+    s_spares_short = true;
+}
+
+/* S0's step: the reserve made whole for the early close — S0 itself takes
+ * nothing from the heap or the medium; a volume with no Spare it may close
+ * onto keeps its tail open, and the cycle writes it as it stands — the Use
+ * Context's new chain staked, and S0 itself, whose time the window is
+ * measured from. */
 static void SettleTakeStep(SettleSnap* snap)
 {
     if (s_run.why != SETTLE_FOR_HALT)
-        (void)PoolSpareRefill(1);
+        SettleSparesMake();
     UseMemoryStake();
     SettleWaitersRunBegins();
     SettleTake(snap, s_run.why, CadenceRunBegins());
@@ -340,8 +386,13 @@ static error_t SettleStepRun(SettleSnap* snap, SettleStep* step)
         rc          = LedgerImageWrite(&snap->mark);
         UseMemoryLedgerWritten();
         snap->stage = "the ledger";
-        *step       = SETTLE_STEP_LAST_FLUSH;
+        *step       = SETTLE_STEP_SPARES;
         break;
+    case SETTLE_STEP_SPARES:
+        if (s_run.why != SETTLE_FOR_HALT)
+            SettleSparesMake();
+        *step = SETTLE_STEP_LAST_FLUSH;
+        return OK;
     case SETTLE_STEP_LAST_FLUSH:
         SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);
         rc = VolumeFlushFor(VolumeFlushNeed());
@@ -421,7 +472,6 @@ static void SettleRunBegin(SettleWhy why, uint64_t cover, bool door)
 static void SettleRunEnd(error_t rc)
 {
     SettleSnap* snap     = &s_run.snap;
-    SettleWhy   why      = s_run.why;
     bool        door     = s_run.door;
     uint64_t    target   = snap->target;
     bool        unclosed = snap->pool.unclosed;
@@ -451,10 +501,6 @@ static void SettleRunEnd(error_t rc)
 
     CadenceRunEnded(rc, busy_us, s0_us, target);
     SettleWaitersRunEnded(rc, target, unclosed);
-
-    /* The reserve a delete stands on, made again first from what came back. */
-    if (rc == OK && why != SETTLE_FOR_HALT)
-        (void)PoolSpareRefill(SPARE_RESERVE);
     if (door)
         tagfs_leave();
 }
@@ -523,6 +569,13 @@ bool SettleRunBeginForCadence(void)
     SettleRunBegin(SETTLE_FOR_CADENCE, cover, true);
     return true;
 }
+
+#ifdef CONFIG_VOLUME_TESTS
+error_t TagFSSettleAsCadence(void)
+{
+    return SettleRunBeginForCadence() ? SettleRunDrive() : ERR_BUSY;
+}
+#endif
 
 // ----------------------------------------------------------------------------
 // Askers who wait

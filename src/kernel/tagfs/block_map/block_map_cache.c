@@ -1,5 +1,6 @@
 #include "block_map_internal.h"
 #include "../scribe/scribe.h"
+#include "../metadata_pool/meta_pool.h"
 #include "amp.h"
 #include "atomics.h"
 #include "baton.h"
@@ -16,6 +17,11 @@
  * with the lock let go, and a core that must evict a sector memory changed
  * writes it out first. Nothing here reads or writes the medium for a caller
  * that holds a TagFS lock: those never reach this file.
+ *
+ * ‼ THE MEDIUM'S COPY MAY LEAVE OUT WHAT NO LINK NAMES YET (BlockMapOweLocked),
+ * and memory never does. A sector whose copy left a block out is never taken
+ * for clean: it is let go of only after a write of it whole, so whatever is
+ * read in is the medium's whole word and nothing has to be laid back on.
  */
 
 static inline uint32_t MapCoreHere(void)
@@ -52,9 +58,10 @@ static error_t MapMediumSaid(int said, error_t otherwise)
 
 /*
  * The slot a fetch takes: an empty one, else the clean one least lately used.
- * None clean: the least lately used one that owes the medium comes back in
- * *writeback, to be written before anything else may use it, and NULL. NULL
- * with no *writeback: every slot is on its way somewhere.
+ * None clean: the least lately used one that owes the medium — a change, a
+ * take, or a block its copy there left out — comes back in *writeback, to be
+ * written whole before anything else may use it, and NULL. NULL with no
+ * *writeback: every slot is on its way somewhere.
  */
 static BlockMapPage *MapVictim(BlockMapPage **writeback)
 {
@@ -67,7 +74,7 @@ static BlockMapPage *MapVictim(BlockMapPage **writeback)
             return p;
         if (p->state != MAP_PAGE_READY)
             continue;
-        if (p->dirty || (g_map.win[p->window].flags & MAP_W_OWED)) {
+        if (p->dirty || p->left_out || (g_map.win[p->window].flags & MAP_W_OWED)) {
             if (!owing || p->lru < owing->lru)
                 owing = p;
         } else if (!clean || p->lru < clean->lru) {
@@ -80,18 +87,29 @@ static BlockMapPage *MapVictim(BlockMapPage **writeback)
 }
 
 /*
- * The sector as memory has it, to the medium. Entered and left with the state
- * lock held, taken again in the name of `site`. MapOwed is cleared as the
- * write begins, because the write carries every take laid on the sector before
- * it; a take made while it travels is a delta, and owes again. A refused write
- * owes again too, and is said.
+ * The sector as memory has it, to the medium — `whole`, or leaving out what no
+ * link names yet (PoolUnnamedLeftOut), from a copy: memory's bits are never
+ * touched. Entered and left with the state lock held, taken again in the name
+ * of `site`. MapOwed is cleared as the write begins, because the write carries
+ * every take laid on the sector before it; a take made while it travels is a
+ * delta, and owes again. A refused write owes again too, and is said, and the
+ * medium may hold either copy, so a block left out stays counted as one.
  */
-static error_t MapWriteOut(BlockMapPage *p, const char *site)
+static error_t MapWriteOut(BlockMapPage *p, bool whole, const char *site)
 {
-    uint32_t        w    = p->window;
-    BlockMapWindow *x    = &g_map.win[w];
-    bool            owed = (x->flags & MAP_W_OWED) != 0;
+    uint32_t        w     = p->window;
+    BlockMapWindow *x     = &g_map.win[w];
+    bool            owed  = (x->flags & MAP_W_OWED) != 0;
+    const uint8_t  *image = p->bits;
+    uint32_t        left  = 0;
+    uint8_t         out[TAGFS_SECTOR_SIZE];
 
+    if (!whole) {
+        memcpy(out, p->bits, sizeof(out));
+        left = PoolUnnamedLeftOut(w * MAP_WINDOW_BLOCKS, MAP_WINDOW_BLOCKS, out);
+        if (left)
+            image = out;
+    }
     if (owed) {
         x->flags &= (uint8_t)~MAP_W_OWED;
         g_map.owed--;
@@ -101,7 +119,7 @@ static error_t MapWriteOut(BlockMapPage *p, const char *site)
     __atomic_store_n(&p->state, (uint8_t)MAP_PAGE_WRITING, __ATOMIC_RELEASE);
     TagFSLockDropAt(MapLock(), site);
 
-    int said = tagfs_volume_write(g_map.map_vlba + w, 1, p->bits);
+    int said = tagfs_volume_write(g_map.map_vlba + w, 1, image);
     if (said != 0)
         kprintf("[TagFS] the medium would not take sector %u of this volume's block "
                 "map — the blocks it covers are taken here and may still read as free "
@@ -114,6 +132,9 @@ static error_t MapWriteOut(BlockMapPage *p, const char *site)
         p->dirty = 1;
         if (owed)
             MapOwedMark(w);
+        p->left_out = p->left_out || left != 0;
+    } else {
+        p->left_out = left != 0;
     }
     if (x->flags & MAP_W_DELTAS) {
         MapDeltaApply(w, p);
@@ -194,7 +215,7 @@ error_t MapFetch(uint32_t w, const char *site)
             return got;
         }
         if (writeback) {
-            error_t wrote = MapWriteOut(writeback, site);
+            error_t wrote = MapWriteOut(writeback, true, site);
             TagFSLockDropAt(lock, site);
             if (wrote != OK)
                 return wrote;
@@ -275,7 +296,7 @@ static error_t MapSettleWindows(uint32_t first, uint32_t last, const char *site)
 
         error_t said = OK;
         if (due == MAP_DUE_WRITE) {
-            said = MapWriteOut(p, site);
+            said = MapWriteOut(p, false, site);
             TagFSLockDropAt(lock, site);
         } else {
             TagFSLockDropAt(lock, site);
@@ -325,10 +346,37 @@ error_t BlockMapFlush(void)
         BlockMapPage *p = &g_map.page[s];
         if (p->state != MAP_PAGE_READY || !p->dirty)
             continue;
-        error_t wrote = MapWriteOut(p, __func__);
+        error_t wrote = MapWriteOut(p, false, __func__);
         if (wrote != OK && first == OK)
             first = wrote;
     }
     TagFSLockDrop(MapLock());
     return first;
 }
+
+void BlockMapOweLocked(uint32_t block)
+{
+    if (g_map.up && block < g_map.blocks)
+        MapOwedMark(block / MAP_WINDOW_BLOCKS);
+}
+
+// ----------------------------------------------------------------------------
+// For the startup tests
+// ----------------------------------------------------------------------------
+
+#ifdef CONFIG_VOLUME_TESTS
+bool BlockMapMediumSays(uint32_t block, bool *taken)
+{
+    if (!g_map.up || block >= g_map.blocks)
+        return false;
+    uint8_t *sector = kmalloc(TAGFS_SECTOR_SIZE);
+    if (!sector)
+        return false;
+    uint32_t off  = block % MAP_WINDOW_BLOCKS;
+    bool     read = tagfs_volume_read(g_map.map_vlba + block / MAP_WINDOW_BLOCKS, 1, sector) == 0;
+    if (read)
+        *taken = MapBit(sector, off);
+    kfree(sector);
+    return read;
+}
+#endif
