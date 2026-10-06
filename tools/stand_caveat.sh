@@ -39,10 +39,17 @@ CAVEAT=0
 #
 # PowerCut's census (tools/powercut.sh): every (scenario, code) pair a
 # scenario was measured showing is its own row, held under 1.6 — except the
-# ORPHAN an unanchored create leaves (noanchor, hog) and race's anchored file
-# lost by a later torn sync, lifted at 1.4 (the owner, 2026-09-27): no door
-# writes a take's sector any more, the Settle cycle does, and no record is
-# retired in place. chaingrow
+# race's anchored file lost by a later torn sync, lifted at 1.4 (the owner,
+# 2026-09-27): no record is retired in place. The ORPHAN an unanchored create
+# leaves (noanchor, hog) was lifted at 1.4 too, when no door wrote a take's
+# sector and nothing settled on its own; since 1.7 the cadence settles every
+# change by itself, so a cut between a cycle's map (S1) and its Ledger (S4) is
+# an ordinary cut, and what it leaves — a block the map marks used and no
+# settled record names — is held again under 1.6: the GroundCensus that
+# reports it returns it once the census owns every block (decision 3, held
+# by the owner 2026-10-07 as B1, "two steps"). The same window keeps a Spare
+# its turning cycle stamped and had not linked (SPARE_UNNAMED) in nextfid and
+# settlecut, held alike. chaingrow
 # keeps its census by kind, (scenario, prefix|subset, code), and a chain
 # refused by the chain's name: its refusals are MP-D5, under 1.1 — the subset
 # rows too, because step 1.1 links a new block only once a flush has covered
@@ -63,8 +70,10 @@ caveat_row() {
         hog)        echo "|on one core under a CPU hog nothing settles a write before the power goes" ;;
         settlecut:FID_PAST_NEXT)
                     echo "|a sync stopped by SETTLECUT=ledger before its ledger leaves a table row past the ledger's next_file_id" ;;
-        noanchor:ORPHAN|hog:ORPHAN)
-                    echo "|a create never anchored, cut by the power, leaves a block marked used that nothing owns — the map is written only inside Settle" ;;
+        noanchor:ORPHAN|hog:ORPHAN|settlecut:ORPHAN)
+                    echo "1.6|a cut between a cycle's map and its Ledger leaves a block the map marks used and no settled record names" ;;
+        nextfid:SPARE_UNNAMED|settlecut:SPARE_UNNAMED)
+                    echo "1.6|a cut inside a turning cycle keeps the Spare it stamped before the link to it, a block nothing names" ;;
         race:durable)
                     echo "|an anchored file is lost by a later torn sync — the shutdown sync retires its record in place" ;;
         # Lifted at 1.6: the mount derives the next file id past every row and

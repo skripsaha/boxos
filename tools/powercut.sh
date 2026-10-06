@@ -422,14 +422,14 @@ pc_caveats() {
         hog)                  base=hog; echo "verify=hog"; codes="ORPHAN" ;;
         nextfid|nextfidmut|poolmut|flushmut)
             base=nextfid; echo "reissue=nextfid"
-            codes="FID_PAST_NEXT FILE_LOST MISSING ORPHAN TAG_ABSENT UNNAMED_RECORD" ;;
+            codes="FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT UNNAMED_RECORD" ;;
         halt)
             base=halt
             codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT UNNAMED_RECORD" ;;
         race)
             base=race; echo "durable:_qt_churn@race=race:durable"
             codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN RECORD_SHAPE SPARE_UNNAMED TAG_ABSENT TAG_DUPLICATE UNNAMED_RECORD" ;;
-        settlecut) base=settlecut; codes="FID_PAST_NEXT" ;;
+        settlecut) base=settlecut; codes="FID_PAST_NEXT ORPHAN SPARE_UNNAMED" ;;
         chaingrow)
             base=chaingrow
             codes="prefix:CHAIN_REFUSED:registry prefix:CHAIN_REFUSED:table prefix:FID_PAST_NEXT prefix:ORPHAN
