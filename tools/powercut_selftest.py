@@ -157,7 +157,7 @@ def SelfTest(pc):
          "a medium a subset and a prefix both build is a prefix (%s, %s)"
          % (run.Canon("e0-all"), run.kind.get("e0-s2")))
 
-    def Crowd(nfid, used, made):
+    def Crowd(nfid, used, names=0):
         check = {"ledger": {"standing_on": 0, "copies": [{"copy": 0, "next_file_id": nfid}]},
                  "chains": {"registry": [0], "table": [1], "registry_tail_used": used,
                             "registry_block_data": 4080, "registry_record_header": 6,
@@ -168,16 +168,26 @@ def SelfTest(pc):
                 json.dump(check, fh)
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                rc = pc.CmdCrowd(argparse.Namespace(check=path, name_bytes=15, room=1, made=made))
-        return rc, out.getvalue().split("\t")[:2 if made else 3]
+                rc = pc.CmdCrowd(argparse.Namespace(check=path, name_bytes=15, room=1, names=names))
+        said = out.getvalue().split("\t")
+        return rc, said[:2] if said[0] == "edges" else said[:3]
 
-    rc, said = Crowd(71, 1202, False)
-    Want(rc == 0 and said[:2] == ["330", "108"],
+    rc, said = Crowd(71, 1202)
+    Want(rc == 0 and said == ["more", "330", "108"],
          "fid 71 and 1202 registry bytes: 330 new names and 108 made again — 438 ids, and 137 - 1 + "
-         "194 records leave room for one (%s %s)" % (rc, said[:2]))
-    rc, said = Crowd(509, 4053, True)
-    Want(rc == 0 and said[0] == "2", "at both edges the recorded run makes 2 files (%s %s)" % (rc, said[:1]))
-    Want(Crowd(508, 4053, True)[0] == 1 and Crowd(509, 4032, True)[0] == 1,
+         "194 records leave room for one (%s %s)" % (rc, said))
+    rc, said = Crowd(509, 4053)
+    Want(rc == 0 and said == ["edges", "2"], "at both edges the recorded run makes 2 files (%s %s)"
+         % (rc, said))
+    Want(Crowd(508, 4053)[1][0] == "more" and Crowd(509, 4032)[1][0] == "more",
          "one row or one record off either edge is not at both edges")
+    rc, said = Crowd(509, 12, names=326)
+    Want(rc == 0 and said == ["more", "192", "318"],
+         "a round the machine's own tags carried past the registry's edge — fid 509, 12 bytes in a "
+         "fresh block, 326 names made — goes on to the table's next block: 192 new names and 318 "
+         "made again (%s %s)" % (rc, said))
+    rc, said = Crowd(508, 4053, names=10)
+    Want(rc == 0 and said == ["more", "0", "1"],
+         "one row short with the registry at its edge: one name made again (%s %s)" % (rc, said))
     print("selftest: %d failed" % len(fails))
     return 1 if fails else 0

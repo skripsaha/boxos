@@ -1,5 +1,6 @@
 #include "settle_internal.h"
 #include "../metadata_pool/meta_pool.h"
+#include "../settle_cut/settle_cut.h"
 #include "boardroom.h"
 
 /*
@@ -62,6 +63,7 @@ void SettleWaitLink(SettleWaiter* w, uint64_t gen, void (*answer)(SettleWaiter* 
     w->gen    = gen;
     w->cycle  = 0;
     w->answer = answer;
+    SETTLE_CUT_ANCHORED(gen);       /* nothing at all unless SETTLECUT=<point> */
     SettleWaitAppend(w);
 }
 

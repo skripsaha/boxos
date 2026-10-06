@@ -18,7 +18,7 @@ it had made durable:
     powercut.py judge DIR --path PATH [--caveat KEY=NAME]... [--verify KIND] [--hogged] [--waited S]
                       [--by-kind]
     powercut.py settlecut DIR --path PATH [--caveat KEY=NAME]...
-    powercut.py crowd CHECK --name-bytes N --room N [--made]
+    powercut.py crowd CHECK --name-bytes N --room N [--names N]
     powercut.py forge LIST LOG OUT
     powercut.py selftest
 
@@ -503,8 +503,8 @@ def CmdBoots(a):
         if f is not None:
             Add(run.Canon("e%d-all" % run.closes[f]), "the boundary after the flush of %s" % s["step"])
     # The first medium of every signature is booted — of every kind and
-    # every chain refused, too, when the census is kept by kind: the kernel's
-    # own refusal of a prefix is the evidence a prefix's verdict stands on.
+    # every chain refused, too, when the census is kept by kind, so the
+    # kernel's own mount is held to check's for each (the judge's reconcile).
     seen = set()
     for c in run.canon:
         kind = run.kind[c["id"]] if a.by_kind else None
@@ -529,21 +529,24 @@ def CmdBoots(a):
 
 
 def CmdCrowd(a):
-    """How many of quilltest crowd's files bring a volume to both edges — the
-    file table one create short of the row its blocks run out at, and the tag
-    registry's last block with room for exactly --room more of crowd's tags —
-    read off volume-read's check of it. A crowd file adds a table row and,
-    when its name is new, a registry record; a name made again adds the row
-    alone. So the base takes FILL new names and then AGAIN of them over: FILL
-    + AGAIN rows and FILL records. The registry is filled a record at a time,
-    one that does not fit starting the next block (tag_registry.c flush), so
-    the FILLs that leave --room are one every PER_BLOCK records from the
-    first, and the least of them that AGAIN ≤ FILL allows is taken. Prints
-    FILL, AGAIN and the numbers, tab-separated.
+    """Where a volume stands against both edges — the file table one create
+    short of the row its blocks run out at, and the tag registry's last block
+    with room for exactly --room more of crowd's tags — read off volume-read's
+    check of it, as the volume is and not as a count of crowd's files says it
+    should be: the machine interns tags of its own (a program's console lane,
+    `anchor`) whenever it likes.
 
-    --made asks whether the volume is at both edges: it prints how many files
-    the recorded run makes to grow both chains, and the numbers, and answers
-    1 when the volume is not there."""
+    At both edges it prints "edges", how many files the recorded run makes to
+    grow both chains, and the numbers. Anywhere else, "more", FILL and AGAIN:
+    what one more round of crowd takes to get there. A crowd file adds a table
+    row and, when its name is new, a registry record; a name made again — one
+    of the --names crowd's earlier rounds made, crowd0000000000 up — adds the
+    row alone. The registry is filled a record at a time, one that does not
+    fit starting the next block (tag_registry.c flush), so the FILLs that
+    leave --room are one every PER_BLOCK records from the first; the table's
+    edge is the end of its last block, or of a block past it when the rows
+    left are fewer than that FILL. The least FILL whose AGAIN the names made
+    so far can cover is taken. Tab-separated; 1 when no round reaches both."""
     with open(a.check) as fh:
         d = json.load(fh)
     ch = d["chains"]
@@ -559,27 +562,24 @@ def CmdCrowd(a):
             % (nfid, len(ch["table"]), rows, rows, len(ch["registry"]), ch["registry"][-1],
                ch["registry_tail_used"], ch["registry_block_data"], room, record,
                ch["registry_record_header"], a.name_bytes, per_block))
-    if a.made:
-        if room != a.room or rows - nfid != 1:
-            print("the volume is not at both edges: %s — where 1 row short and room for %d were due"
-                  % (said, a.room), file=sys.stderr)
-            return 1
+    if room == a.room and rows - nfid == 1:
         run = max(room, rows - nfid) + 1
-        print("%d\t%s; so %d of crowd's files grow both chains: the last is fid %d, the first row "
-              "past the table's blocks, and its tag the record past the registry's room"
+        print("edges\t%d\t%s; so %d of crowd's files grow both chains: the last is fid %d, the first "
+              "row past the table's blocks, and its tag the record past the registry's room"
               % (run, said, run, nfid + run - 1))
         return 0
-    fids = rows - 1 - nfid
-    fill = next((t for t in range(room - a.room, fids + 1, per_block) if t >= 0 and 2 * t >= fids),
-                None)
-    if fids < 0 or fill is None:
-        print("no FILL and AGAIN of crowd's reach both edges: %s — %d file id(s) to spend" % (said, fids),
-              file=sys.stderr)
-        return 1
-    print("%d\t%d\t%s; so crowd makes %d new names and %d of them again: %d file ids, next_file_id "
-          "%d, and the registry's last block left room for %d" % (fill, fids - fill, said, fill,
-                                                                   fids - fill, fids, rows - 1, a.room))
-    return 0
+    first = (room - a.room) % per_block
+    for edge in (rows + ch["table_rows_per_block"] * j for j in range(3)):
+        fids = edge - 1 - nfid
+        fill = next((t for t in range(first, fids + 1, per_block) if fids - t <= a.names + t), None)
+        if fids >= 0 and fill is not None:
+            print("more\t%d\t%d\t%s; so crowd makes %d new names and %d of them again: %d file ids, "
+                  "next_file_id %d, and the registry's last block left room for %d"
+                  % (fill, fids - fill, said, fill, fids - fill, fids, edge - 1, a.room))
+            return 0
+    print("no FILL and AGAIN of crowd's reach both edges: %s — %d of its names made so far"
+          % (said, a.names), file=sys.stderr)
+    return 1
 
 
 def Main():
@@ -626,7 +626,7 @@ def Main():
     s.add_argument("check")
     s.add_argument("--name-bytes", type=int, required=True)
     s.add_argument("--room", type=int, required=True)
-    s.add_argument("--made", action="store_true")
+    s.add_argument("--names", type=int, default=0)
     s = sub.add_parser("forge")
     for x in ("list", "log", "out"):
         s.add_argument(x)
