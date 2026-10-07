@@ -334,6 +334,11 @@ error_t BlockMapGiveRoomHold(uint32_t gives)
     return held ? OK : ERR_NO_MEMORY;
 }
 
+bool BlockMapGivesUnseenLocked(void)
+{
+    return g_map.gives != 0;
+}
+
 void MapDeltaAdd(uint32_t start, uint32_t count, bool take)
 {
     uint32_t w = start / MAP_WINDOW_BLOCKS;

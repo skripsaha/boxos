@@ -366,8 +366,11 @@ out:
 // gives back under the state lock at a cycle's end. A take under the lock that
 // found nothing else was told the volume had no room at all. It is told the
 // room is on its way (ERR_WOULD_BLOCK) — after the volume was brought to rest,
-// so neither Fallow nor Glean answers for it — and the cycle after lays the
-// give on: the block is free on the medium, and memory's again to hand out.
+// so neither Fallow nor Glean answers for it — and the asker for room
+// (SettleForRoom) has the cycle run that lays the give on: the block is free
+// on the medium, and memory's again to hand out. An asker that judged room by
+// Fallow and Glean alone answered at once with no cycle, and the take asked
+// again was short again — a caller going round for ever.
 // ----------------------------------------------------------------------------
 
 #define STAND_MAP_REST_ROUNDS 16u
@@ -429,7 +432,12 @@ static TestResult TestStandMapGivesAwayAreRoomOnItsWay(void)
     TEST_ASSERT_EQ(short_by, ERR_WOULD_BLOCK,
                    "a take under the lock that finds nothing else hears the room is on its way");
 
-    TEST_ASSERT_OK(TagFSSettle(), "the cycle that lays the give on settles");
+    TEST_ASSERT_OK(SettleForRoom(), "the asker for room is answered once a cycle laid the give on");
+    TagFSLockTake(&fs->lock);
+    short_by = BlockMapTakeLocked(1, 0, &other);
+    TagFSLockDrop(&fs->lock);
+    took = short_by == OK;
+    TEST_ASSERT_OK(short_by, "and the take asked again has the block");
     TEST_ASSERT(BlockMapMediumSays(block, &taken), "the map's sector is read off the medium");
     TEST_ASSERT(!taken, "and calls the block free");
 out:

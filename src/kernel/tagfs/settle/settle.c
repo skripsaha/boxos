@@ -727,9 +727,12 @@ error_t TagFSSettle(void)
  * back, and a cycle on another core may give all of it back between the
  * allocator's refusal and the first look here. A cycle answers by the ground
  * the S6 of the cycles gave back (s_given_count), or the allocator's free
- * count risen. And nothing resting with no slack to glean is no refusal: the
- * room may have come already, and the take asked again says the last word
- * itself (MapShort).
+ * count risen. Gives that wait as deltas for their sectors are room on its way
+ * like Fallow's: the take that met them was told so (MapShort), and only the
+ * cycle whose S1 lays them on lets the next take see them — answering at once
+ * would send that take round again for ever. And with nothing resting, no
+ * give unseen and no slack to glean there is no refusal: the room may have
+ * come already, and the take asked again says the last word itself.
  */
 error_t SettleForRoom(void)
 {
@@ -751,11 +754,12 @@ error_t SettleForRoom(void)
     for (uint64_t round = 0; round <= FallowLag() + 1u; round++) {
         TagFSLockTake(&fs->lock);
         uint64_t resting = FallowBlocks();
-        bool     glean   = resting == 0 && GleanMayFree();
+        bool     unseen  = BlockMapGivesUnseenLocked();
+        bool     glean   = resting == 0 && !unseen && GleanMayFree();
         uint64_t given   = s_given_count;
         uint64_t had     = fs->ledger.free_blocks;
         TagFSLockDrop(&fs->lock);
-        if (resting == 0 && !glean)
+        if (resting == 0 && !unseen && !glean)
             return OK;
         if (glean)
             GleanShort();
@@ -765,7 +769,8 @@ error_t SettleForRoom(void)
             return rc;
 
         TagFSLockTake(&fs->lock);
-        bool came_back = s_given_count != given || fs->ledger.free_blocks > had;
+        bool came_back = s_given_count != given || fs->ledger.free_blocks > had ||
+                         (unseen && !BlockMapGivesUnseenLocked());
         TagFSLockDrop(&fs->lock);
         if (came_back)
             return OK;

@@ -102,6 +102,12 @@ error_t BlockMapGiveHeldLocked(uint32_t start, uint32_t count);
  * room there is. */
 error_t BlockMapGiveRoomHold(uint32_t gives);
 
+/* With the state lock held: whether gives wait as deltas for sectors not in
+ * memory — ground that is free and still unseen, which the next cycle's S1
+ * lays on. A take that met no other room is told it is on its way (MapShort),
+ * so an asker for room runs that cycle rather than answering at once. */
+bool    BlockMapGivesUnseenLocked(void);
+
 /*
  * The same take, by a door with no TagFS lock held: the sectors it needs are
  * fetched first. Held under a TagFS lock it takes without reading instead.
