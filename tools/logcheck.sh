@@ -732,6 +732,374 @@ run_replug() {
     grep -q "BoxOS Shell" "$L"; chk $? "the machine still has a shell"
 }
 
+# ── replugwrite: the stick leaves while a write is in flight ───────────────
+#
+# replug pulls the stick from an idle machine. This pulls it from under a
+# write going through the port, with writers queued behind it for the file's
+# Helm (RT-13): `quilltest away` appends with REPLUGWRITE_COUNT writers of
+# 4 MiB each to a file of its own on the stick, the stick's writes held to
+# REPLUGWRITE_BPS so one of them is still in the medium when the stick goes —
+# once every writer has asked and the stick has taken a write since, counted
+# off QEMU's own block statistics, never off a clock. Two rounds on one boot
+# (USB, four cores, the stick the volume as in replug):
+#
+#   same   the stick comes back as it left. The book is taken up — every
+#          waiter handed the Helm, its write whole — or, a write the volume saw
+#          complete that no kept flush covered (the holder's last blocks), given
+#          up as AWAY_IN_DOUBT and the volume read again; any other verdict is a
+#          FAIL for a stick nobody touched;
+#   moved  the stick's Ledger is moved on from the host while it is out
+#          (ledger_moved_on_host): AWAY_OTHER, the book given up, and nothing of
+#          the old book reaches the changed medium — no waiter's byte on it.
+#
+# Either way: the holder answers ERR_DEVICE_NOT_READY (203) with the bytes the
+# file holds of its write, every waiter is answered (a book given up: 203 and
+# nothing of it done; taken up: its write whole), away hears every writer, the
+# volume is up again, and `quilltest awaycheck` reads the file back through it:
+# its first block, then one chunk per writer that kept anything, each its
+# writer's stream from its first byte — none longer than its writer was told
+# the file holds, and, taken up, each exactly that. After the second round the
+# machine halts through bye ("Storage sync complete"), volume-read finds the
+# stick consistent, reads both files off it and cuts them into the same chunks
+# awaycheck said, and finds no block of a waiter's stream anywhere on it. A
+# pull that takes a cycle's block map with it and not its Ledger leaves blocks
+# the map marks used and no settled record names: the ORPHAN PowerCut holds
+# under 1.6 (B1, stand_caveat.sh), held here too — only beside a cycle the
+# departure refused, and a FAIL anywhere else.
+#
+# ‼ THE MUTATIONS IT EXISTS FOR, MEASURED:
+#   HelmBookGivenUp answering nobody (helm.c: its walk taken out) — the
+#      waiters wait for good, the take-down waits for them ("2 caller(s) are
+#      still inside it"), nothing is mounted again and away never says: 0
+#      passed, 1 failed, the first round's return gone quiet;
+#   the changed stick taken up as the book this kernel holds (tagfs.c
+#      volume_book_decided: `verdict == AWAY_AS_LEFT` true for AWAY_OTHER
+#      too) — the waiters are handed the Helm and their 4 MiB each go to a
+#      medium another kernel settled: 15 passed, 3 failed — the judgement, the
+#      waiters' answers, and 2048 blocks of their streams found on the stick.
+# Where a round's return is IN_DOUBT the book is given up whatever AwayJudge
+# makes of the Ledger, so taking `if (as == LEDGER_OTHER) return AWAY_OTHER;`
+# out of it reddens only the judgement line, as replug says.
+REPLUGWRITE_BPS=262144     # a quarter of a MiB a second: one writer's 4 MiB takes sixteen
+REPLUGWRITE_COUNT=3
+REPLUGWRITE_BYTES=4194304  # quilltest_away.c QUILL_AWAY_MIB
+REPLUGWRITE_ROUNDS="same:_qaway1:16 moved:_qaway2:32"   # CHANGE:NAME:SEED
+
+replugwrite_wrops() {   # the stick's writes so far, as QEMU counts them
+    ./tools/qemu-input.sh raw "info blockstats" 2>/dev/null | tr -d '\r' |
+        grep -aoE '^stick: .* wr_operations=[0-9]+' | sed 's/.*wr_operations=//'
+}
+
+replugwrite_drive_gone() {   # QEMU has let go of the stick's drive, as its own listing says
+    wait_until "$WAIT_QUIET_S" "QEMU to let go of the stick's drive" \
+        '! ./tools/qemu-input.sh raw "info block" 2>/dev/null | tr -d "\r" | grep -aq "^stick "'
+}
+
+# replugwrite_round CHANGE NAME SEED — one round on the running machine: the
+# stick's writes slowed, away typed, its writers seen asking and the stick seen
+# taking a write since, the stick pulled, changed on the host for `moved`,
+# pushed back, away's verdict and the volume up again waited for, awaycheck
+# typed and answered. Leaves REPLUGWRITE_MOVED (0 when the host moved the
+# Ledger) and REPLUGWRITE_SILENT (what never came once the stick was back).
+# Answers 1 when the round could not be put to the machine, 2 when it was and
+# the machine went quiet without what the return owes — the verdict, not the
+# harness.
+replugwrite_round() {
+    local change=$1 name=$2 seed=$3 from w0
+    REPLUGWRITE_MOVED=1
+    REPLUGWRITE_SILENT=""
+    from=$(wc -l < build/serial.log)
+    mon_raw "block_set_io_throttle stick 0 0 $REPLUGWRITE_BPS 0 0 0" || return 1
+    type_line "quilltest away $name $REPLUGWRITE_COUNT $seed" || return 1
+    wait_until "$WAIT_QUIET_S" "$REPLUGWRITE_COUNT writers of $name to ask" \
+        '[ "$(tail -n +$((from + 1)) build/serial.log | grep -acE "awaywriter: $name fid=[0-9]+ seed [0-9]+ pid [0-9]+ appends")" -ge "$REPLUGWRITE_COUNT" ]' ||
+        return 1
+    w0=$(replugwrite_wrops)
+    [ -n "$w0" ] || return 1
+    wait_until "$WAIT_QUIET_S" "the stick to take a write of theirs" '[ "$(replugwrite_wrops)" -gt "$w0" ]' ||
+        return 1
+    mon_raw "device_del usbstick" || return 1
+    wait_for_line build/serial.log "the medium the volume lives on has left" "$WAIT_QUIET_S" $((from + 1)) ||
+        return 1
+    # The guest's word that the stick left is not QEMU's that its drive is
+    # gone: a drive_add in between is refused as a duplicate, in silence, and
+    # the stick never comes back. So QEMU is asked, and the image is touched
+    # only once nothing in it holds the file.
+    replugwrite_drive_gone || return 1
+    if [ "$change" = moved ]; then
+        ledger_moved_on_host "$SCRATCH/stick.img" && REPLUGWRITE_MOVED=0
+    fi
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" || return 1
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick" || return 1
+    wait_for_line build/serial.log "took a seat while the machine was" "$WAIT_QUIET_S" $((from + 1)) ||
+        return 1
+    REPLUGWRITE_SILENT="away's word that every writer was answered"
+    wait_for_line -E build/serial.log "\[QUILL\] away: (PASS|FAIL) — $name " "$WAIT_QUIET_S" $((from + 1)) ||
+        return 2
+    REPLUGWRITE_SILENT="the volume up again"
+    wait_for_line -E build/serial.log "the volume is back, in seat|\[TagFS\] the volume on seat [0-9]+ is MOUNTED|would not mount" \
+        "$WAIT_QUIET_S" $((from + 1)) || return 2
+    REPLUGWRITE_SILENT="awaycheck's answer"
+    from=$(wc -l < build/serial.log)
+    type_line "quilltest awaycheck $name $REPLUGWRITE_COUNT $seed" &&
+        wait_for_line -E build/serial.log "\[QUILL\] awaycheck: (PASS|FAIL) — $name " "$WAIT_QUIET_S" $((from + 1)) ||
+        return 2
+    REPLUGWRITE_SILENT=""
+}
+
+# replugwrite_answers LOG NAME — "SEED WRITTEN ERROR AFTER" for every writer of
+# NAME that said its answer; AFTER is 1 when it said it after the stick took
+# its seat again — a writer that waited through the return — and 0 before.
+replugwrite_answers() {
+    tr -d '\r' < "$1" | awk -v name="$2" '
+        /took a seat while the machine was/ { back = 1 }
+        $0 ~ "^\\[QUILL\\] awaywriter: " name " seed [0-9]+ answered [0-9]+ of [0-9]+ byte\\(s\\) the file.s \\(error -?[0-9]+\\)$" {
+            e = $NF; sub(/\)$/, "", e)
+            print $5, $7, e, back + 0
+        }'
+}
+
+# replugwrite_chunks LOG NAME — awaycheck's chunks of NAME as "SEED BYTES" lines
+# (SEED 0 for the base), and nothing when it did not pass.
+replugwrite_chunks() {
+    tr -d '\r' < "$1" | sed -nE "s/^\[QUILL\] awaycheck: PASS — $2 fid=[0-9]+ holds [0-9]+ bytes: (.*) \(the first byte no chunk's .*/\1/p" |
+        tail -1 | tr ',' '\n' | sed -E 's/^ *//; s/^base /0 /; s/^seed //'
+}
+
+# replugwrite_judge LOG CHANGE NAME SEED — one round, read off its slice of the
+# log. Adds to REPLUGWRITE_ABSENT the seeds whose bytes must be nowhere on the
+# stick: every writer that waited through a return its book was given up at —
+# and, for the moved stick, through its return whatever it was judged — and
+# every writer answered that the file holds none of its write.
+replugwrite_judge() {
+    local L=$1 change=$2 name=$3 seed=$4 what="the $2 stick" verdict up s w e a c held=0 bad_held="" fid
+    fid=$(tr -d '\r' < "$L" | sed -nE "s/^\[QUILL\] away: $name fid=([0-9]+) laid down.*/\1/p" | head -1)
+    grep -aqE "^\[QUILL\] away: PASS — $name fid=[0-9]+: $REPLUGWRITE_COUNT of $REPLUGWRITE_COUNT writer\(s\) started and $REPLUGWRITE_COUNT answered" "$L"
+    chk $? "replugwrite: $what — every one of the $REPLUGWRITE_COUNT writers was answered ($(tr -d '\r' < "$L" | grep -aoE "\[QUILL\] away: (PASS|FAIL) — .*" | tail -1))"
+    if ! grep -aqE "^\[Storage\] write to file ${fid:-x} refused \(error 203\): [0-9]+ of its $REPLUGWRITE_BYTES byte\(s\) are the file's" "$L"; then
+        harness "replugwrite: $what — no write of $name was in the medium when it left, so the case was not asked"
+        return
+    fi
+    ok "replugwrite: $what — the write in the medium answered ERR_DEVICE_NOT_READY with the bytes the file holds of it: $(tr -d '\r' < "$L" | grep -aoE "write to file $fid refused \(error 203\): [0-9]+ of its [0-9]+ byte\(s\) are the file's" | head -1)"
+    verdict=$(tr -d '\r' < "$L" | grep -aE '^\[TagFS\] (the volume is back, in seat|the volume came back in seat|another volume sits in seat)' | head -1)
+    case "$change:$verdict" in
+        same:*"the volume is back, in seat"*) up=taken ;;
+        same:*"with its Ledger as this kernel left it"*"was never covered by a flush"*) up=given ;;
+        moved:*"with a Ledger or a Deed this kernel did not leave on it"*) up=given ;;
+        *) up="" ;;
+    esac
+    [ -n "$up" ]
+    chk $? "replugwrite: $what — the return was judged as such a stick must be: ${verdict:-no verdict at all}"
+    [ "$change" = moved ] && { [ "$REPLUGWRITE_MOVED" = 0 ]; chk $? "replugwrite: $what — the host moved its Ledger on while it was out"; }
+    if [ "$up" = given ]; then
+        grep -aqE '^\[TagFS\] the volume on seat [0-9]+ is MOUNTED' "$L"
+        chk $? "replugwrite: $what — the book given up, the volume was mounted again from the medium as it now is"
+    fi
+    # Every writer's answer, as the book's fate makes it, and its chunk: one
+    # that waited through the return is handed the Helm and writes whole when
+    # the book is taken up, and is answered 203 with nothing done when it is
+    # given up; one answered before it finished whole, or held the Helm when
+    # the stick left and is answered 203 with what the file holds of it — all
+    # of which a book taken up keeps, and one given up keeps only what a cycle
+    # settled.
+    while read -r s w e a; do
+        [ -n "$s" ] || continue
+        c=$(replugwrite_chunks "$L" "$name" | awk -v s="$s" '$1 == s { print $2 }')
+        c=${c:-0}
+        case "$up:$a:$e" in
+            taken:1:0)   [ "$w" = "$REPLUGWRITE_BYTES" ] && [ "$c" = "$w" ] ;;
+            given:1:203) [ "$w" = 0 ] && [ "$c" = 0 ] ;;
+            taken:0:0)   [ "$w" = "$REPLUGWRITE_BYTES" ] && [ "$c" = "$w" ] ;;
+            taken:0:203) [ "$c" = "$w" ] ;;
+            given:0:0)   [ "$w" = "$REPLUGWRITE_BYTES" ] && [ "$c" -le "$w" ] ;;
+            given:0:203) [ "$c" -le "$w" ] ;;
+            *)           false ;;
+        esac || bad_held="$bad_held seed $s answered $w (error $e, $([ "$a" = 1 ] && echo after || echo before) the return) and the file keeps $c of it;"
+        if [ "$w" = 0 ] || { [ "$a" = 1 ] && { [ "$up" = given ] || [ "$change" = moved ]; }; }; then
+            REPLUGWRITE_ABSENT="$REPLUGWRITE_ABSENT $s"
+        fi
+        held=$((held + 1))
+    done <<REPLUGWRITE_ANSWERS
+$(replugwrite_answers "$L" "$name")
+REPLUGWRITE_ANSWERS
+    [ "$held" = "$REPLUGWRITE_COUNT" ] && [ -n "$up" ] && [ -z "$bad_held" ]
+    chk $? "replugwrite: $what — $held writer answer(s), each as a book ${up:-neither taken nor given} up makes it, and the file keeps of each what it should${bad_held:+ —$bad_held}"
+    grep -aqE "^\[QUILL\] awaycheck: PASS — $name " "$L"
+    chk $? "replugwrite: $what — read back through the volume up now, every byte of the file is its first block or one writer's stream from its first byte ($(tr -d '\r' < "$L" | grep -aoE "\[QUILL\] awaycheck: (PASS|FAIL) — .*" | tail -1))"
+}
+
+# replugwrite_medium IMG ROUNDS LOG — off the stick the machine left: each
+# round's file cut into the same chunks awaycheck said, and no block anywhere
+# on it that begins a block of a stream REPLUGWRITE_ABSENT names — what a
+# waiter would have written had the old book handed it the Helm.
+replugwrite_medium() {
+    local img=$1 rounds=$2 log=$3 r change name seed out rc
+    for r in $rounds; do
+        IFS=: read -r change name seed <<REPLUGWRITE_ROUND
+$r
+REPLUGWRITE_ROUND
+        out="$SCRATCH/replugwrite.$name.bin"
+        rm -f "$out"
+        python3 tools/volume-read.py "$img" get "$name" -o "$out" >/dev/null 2>&1
+        # Into a file, not a $( ): bash 3.2 reads a quote inside a here-document
+        # inside a command substitution as the shell's own.
+        python3 - "$out" "$seed" "$REPLUGWRITE_COUNT" "$REPLUGWRITE_BYTES" \
+            "$(replugwrite_chunks "$log.$name" "$name" | tr '\n' ',')" >"$out.said" 2>&1 <<'REPLUGWRITE_EOF'
+import struct, sys
+path, first, count, cap, said = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+M = (1 << 64) - 1
+def word(seed, off):     # quilltest.c QuillWord, the stream QuillFill lays
+    x = (off ^ ((seed << 56) & M)) & M
+    x = (x * 0x9E3779B97F4A7C15) & M
+    return x ^ (x >> 29)
+try:
+    data = open(path, "rb").read()
+except OSError:
+    sys.exit("volume-read found no such file on the stick")
+chunks = []
+for i in range(0, len(data) - len(data) % 8, 8):
+    w = struct.unpack_from("<Q", data, i)[0]
+    cur = chunks[-1] if chunks else None
+    if cur and i - cur[1] < (4096 if cur[0] == first else cap) and w == word(cur[0], i - cur[1]):
+        cur[2] += 8
+        continue
+    if i == 0:
+        seed = first if w == word(first, 0) else None
+    else:
+        seed = next((first + k for k in range(1, count + 1)
+                     if all(c[0] != first + k for c in chunks) and w == word(first + k, 0)), None)
+    if seed is None:
+        sys.exit("byte %d of its %d is nobody's" % (i, len(data)))
+    chunks.append([seed, i, 8])
+got = ",".join("%d %d" % (0 if s == first else s, n) for s, _a, n in chunks) + ","
+if got != said:
+    sys.exit("the stick holds %s where awaycheck said %s" % (got.rstrip(","), said.rstrip(",") or "nothing"))
+print("%d bytes: %s" % (len(data), got.rstrip(",")))
+REPLUGWRITE_EOF
+        rc=$?
+        chk $rc "replugwrite: the $change stick's $name, read off the medium by volume-read, is cut into the very chunks awaycheck said — $(tail -1 "$out.said")"
+        rm -f "$out" "$out.said"
+    done
+    out="$SCRATCH/replugwrite.scan"
+    # shellcheck disable=SC2086
+    python3 - "$img" "$REPLUGWRITE_BYTES" $REPLUGWRITE_ABSENT >"$out" 2>&1 <<'REPLUGWRITE_EOF'
+import struct, sys
+img, cap, seeds = sys.argv[1], int(sys.argv[2]), [int(s) for s in sys.argv[3:]]
+M = (1 << 64) - 1
+def word(seed, off):     # quilltest.c QuillWord, the stream QuillFill lays
+    x = (off ^ ((seed << 56) & M)) & M
+    x = (x * 0x9E3779B97F4A7C15) & M
+    return x ^ (x >> 29)
+heads = {word(s, k): (s, k) for s in seeds for k in range(0, cap, 4096)}
+found = []
+with open(img, "rb") as f:
+    at = 0
+    while True:
+        b = f.read(4096)
+        if len(b) < 8:
+            break
+        w = struct.unpack_from("<Q", b, 0)[0]
+        if w in heads:
+            found.append((at, heads[w]))
+        at += len(b)
+if found:
+    sys.exit("%d block(s) of them lie on the stick, the first at byte %d (seed %d, its byte %d)"
+             % (len(found), found[0][0], found[0][1][0], found[0][1][1]))
+print("none of the %d block-heads of seeds %s lies on it" % (len(heads), seeds))
+REPLUGWRITE_EOF
+    rc=$?
+    chk $rc "replugwrite: no block of a writer that waited through a book given up, or through the moved stick's return, or was answered that the file holds none of its write, is anywhere on the stick — $(tail -1 "$out")"
+}
+
+# replugwrite_census JSON LOG — volume-read's roll call of the stick the
+# machine left: consistent, or every finding a leak of ORPHAN blocks a pull
+# left by cutting a cycle between its map and its Ledger — held under its row
+# (stand_caveat.sh, B1) only when LOG shows a cycle the departure refused —
+# and anything else a FAIL with its words.
+replugwrite_census() {
+    local json=$1 log=$2 kind text
+    while IFS="$(printf '\t')" read -r kind text; do
+        case "$kind" in
+            consistent) ok "replugwrite: volume-read finds the stick consistent — $text" ;;
+            orphan)
+                if grep -aqE '^\[Settle\] the cycle that would have settled [0-9]+ change\(s\) was refused at ' "$log"; then
+                    caveat_judge replugwrite:ORPHAN defect "the stick after its returns: $text — a cycle the departure refused ($(tr -d '\r' < "$log" | grep -aoE 'the cycle that would have settled [0-9]+ change\(s\) was refused at [a-z ]+' | head -1))"
+                else
+                    bad "replugwrite: the stick after its returns holds an ORPHAN no refused cycle explains — $text"
+                fi ;;
+            *) bad "replugwrite: volume-read finds the stick ${kind:-unread}: $text" ;;
+        esac
+    done <<REPLUGWRITE_CENSUS
+$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (OSError, ValueError) as e:
+    print("unreadable\tno roll call: %s" % e); sys.exit()
+bad = [f for f in d.get("findings", []) if f.get("severity") != "note"]
+if not bad:
+    print("consistent\t%s, %d note(s)" % (d.get("verdict"), len(d.get("findings", []))))
+for f in bad:
+    print("%s\t%s: %s" % ("orphan" if (f.get("code"), f.get("severity")) == ("ORPHAN", "leak") else f.get("severity"),
+                          f.get("code"), f.get("text")))
+' "$json")
+REPLUGWRITE_CENSUS
+}
+
+run_replugwrite() {
+    echo "== replugwrite: the stick leaves while a write is in flight and writers wait for its Helm, and comes back as it left, then changed =="
+    local r change name seed from rc last pid L="$SCRATCH/serial.replugwrite.log"
+    REPLUGWRITE_ABSENT=""
+    latearrival_on; build
+    make run-stop >/dev/null 2>&1
+    make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    stick_from_boot_image \
+        || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
+    sleep 1
+    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
+    if ! wait_for_line build/serial.log "the stand-in .PID 1. hands over" "$WAIT_QUIET_S"; then
+        make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latearrival_off
+        harness "replugwrite: the stick never became this machine's volume"
+        return
+    fi
+    wait_for_quiet "$BOOT_BURST_QUIET_S"
+    for r in $REPLUGWRITE_ROUNDS; do
+        IFS=: read -r change name seed <<REPLUGWRITE_ROUND
+$r
+REPLUGWRITE_ROUND
+        from=$(wc -l < build/serial.log)
+        replugwrite_round "$change" "$name" "$seed"; rc=$?
+        if [ "$rc" != 0 ]; then
+            make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latearrival_off
+            last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Storage)\]' | tail -1 | cut -c1-160)
+            if [ "$rc" = 1 ]; then
+                harness "replugwrite: the $change round could not be put to the machine (last: $last)"
+            else
+                bad "replugwrite: the $change stick came back and the machine went quiet without $REPLUGWRITE_SILENT (last: $last)"
+            fi
+            return
+        fi
+        tail -n +$((from + 1)) build/serial.log > "$L.$name"
+        replugwrite_judge "$L.$name" "$change" "$name" "$seed"
+    done
+    from=$(wc -l < build/serial.log)
+    pid=$(cat build/qemu.pid)
+    type_line bye && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" $((from + 1))
+    wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$L"
+    latearrival_off
+    grep -aq '^\[HALT\] Storage sync complete' "$L"
+    chk $? "replugwrite: the machine halted through bye and its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | tail -1 | cut -c1-100))"
+    python3 tools/volume-read.py "$SCRATCH/stick.img" check --json >"$SCRATCH/replugwrite.check.json" 2>/dev/null
+    replugwrite_census "$SCRATCH/replugwrite.check.json" "$L"
+    replugwrite_medium "$SCRATCH/stick.img" "$REPLUGWRITE_ROUNDS" "$L"
+    ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]|^\[NIGHTWATCH\] VERDICT: .* a defect' "$L"
+    chk $? "replugwrite: no panic, no exception, nothing owed proved unserved"
+}
+
 # ── nofsgsbase: a processor that cannot write its own TLS base ─────────────
 #
 # Every configuration in this file runs with +fsgsbase, so ring 3 installs its
@@ -3275,6 +3643,428 @@ run_haltslow() {
             harness "haltslow: the halt found no core inside a window of the write, so the window case was not asked"
         fi
     fi
+}
+
+# ---------------------------------------------------------------------------
+# haltcycle: the power button while the committer settles a writer's anchor
+# (RT-12), on the machines a person's writes go through the port
+#
+# A writer keeps going — `quilltest keeper` rewrites its record and anchors it,
+# again and again, each anchor said — and the power button lands while a Settle
+# cycle runs on the committer, an AP (settle.h: the first K-Core that is not
+# the BSP), and the halt's drain runs on the drain core. The drain must wait
+# for that cycle as long as it takes steps, then run the volume's last cycle
+# itself before any core is stopped: the machine switches itself off, says
+# "[HALT] Storage sync complete", never "giving up", and the record the
+# writer's last anchor named before the roll call is the record the volume
+# holds when it comes back — read by `quilltest verify` on the next boot, the
+# volume found consistent by volume-read in between. UEFI on q35, AHCI and the
+# WriteJob, with four cores (one committer beside the drain core) and with
+# sixteen (four K-Cores).
+#
+# The cycle is made to be in flight when the button goes, never hoped to be:
+# the disk's writes are held to HALTCYCLE_BPS once the writer runs, so a cycle
+# lasts seconds; the button goes on the first cache flush QEMU counts after an
+# anchor was said — a flush no data write makes (write_job.c, "no flush of its
+# own"), so it is the next cycle's FLUSH#1, and that cycle's pool and Ledger
+# are still to be written. And the halt says it found the cycle ("a Settle
+# cycle runs on another core"); a leg where it did not asked nothing. That
+# happens: on sixteen cores, measured once in three runs, the button met no
+# cycle on another core — the drain found a command in the port and nobody
+# else holding the Settle, "work owed stopped falling at 2 (0 pass(es), 1 AHCI
+# command(s) still issued)", and halted clean all the same. So such a leg is
+# said and booted again on a fresh copy, up to HALTCYCLE_TRIES boots, and only
+# when none of them asked the case is it the harness's failure — never a
+# verdict, and never a leg judged on a case it did not ask.
+#
+# ‼ THE MUTATION IT EXISTS FOR, MEASURED: take the halt's own last cycle out of
+# the drain (halt_drain_async_writes: `refused = TagFSSettleForHalt() != OK;`
+# made `refused = false;`) — the committer still settles the anchors it is
+# asked for, the drain still empties, and the halt never writes the volume's
+# last records: "[HALT] the medium on seat 0 took what it was given, and the
+# volume's own records were not part of it", 13 passed, 2 failed, one a leg.
+# Two others were measured and do NOT turn it, said so it is not believed of
+# them: the halt's cycle begun while the committer's still runs (`owed.Committer
+# == 0` taken out) waits for it at the Settle's Scribe all the same
+# (ScribeWaitTakingOver), 15 passed; and the drain judging a cycle by its
+# measure alone (`going` false) gives up only on a cycle whose rest outlasts
+# the core's five seconds, which an anchor's cycle on AHCI here does not —
+# haltslow, on the legacy channel, is that line's guard.
+# ---------------------------------------------------------------------------
+
+HALTCYCLE_BPS=2048       # two seconds a block, as haltslow's: every step well inside the core's five
+HALTCYCLE_NAME=_qkeep
+HALTCYCLE_ANCHORED="keeper: $HALTCYCLE_NAME fid=[0-9]+ anchored seq=[0-9]+"
+HALTCYCLE_TRIES=3
+
+haltcycle_flushes() {   # the boot disk's cache flushes so far, as QEMU counts them
+    ./tools/qemu-input.sh raw "info blockstats" 2>/dev/null | tr -d '\r' |
+        grep -aoE '^ide0-hd0: .* flush_operations=[0-9]+' | sed 's/.*flush_operations=//'
+}
+
+haltcycle_anchors() {   # how many anchors the keeper has said
+    tr -d '\r' < build/serial.log 2>/dev/null | grep -acE "$HALTCYCLE_ANCHORED"
+}
+
+# haltcycle_press — the writer's disk held to HALTCYCLE_BPS, an anchor said,
+# and the button pressed on the first flush after it. 0 once pressed.
+haltcycle_press() {
+    local n0 f0
+    mon_raw "block_set_io_throttle ide0-hd0 0 0 $HALTCYCLE_BPS 0 0 0" || return 1
+    n0=$(haltcycle_anchors)
+    wait_until "$WAIT_QUIET_S" "an anchor said once the disk was slowed" \
+        '[ "$(haltcycle_anchors)" -gt "$n0" ]' || return 1
+    f0=$(haltcycle_flushes)
+    [ -n "$f0" ] || return 1
+    wait_until "$WAIT_QUIET_S" "the next cycle's first flush" \
+        '[ "$(haltcycle_flushes)" -gt "$f0" ]' || return 1
+    mon_raw system_powerdown
+}
+
+# haltcycle_leg TAG KEYS... — a copy of the image booted, the keeper started,
+# the button pressed (haltcycle_press), the machine left to switch itself off;
+# the copy judged by volume-read, booted again and the keeper's file verified.
+# Leaves serial.haltcycle.TAG.log and .again.log, haltcycle.TAG.check and
+# HALTCYCLE_OFF (0 when the machine switched itself off). 1 when there is no
+# run to judge, said as the harness's failure.
+haltcycle_leg() {
+    local tag=$1 img="$SCRATCH/haltcycle.$1.img" pid mark; shift
+    HALTCYCLE_OFF=1
+    rm -f "$SCRATCH/serial.haltcycle.$tag.log" "$SCRATCH/serial.haltcycle.$tag.again.log" \
+          "$SCRATCH/haltcycle.$tag.check"
+    make run-stop >/dev/null 2>&1
+    cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
+    if ! make run-bg BOOTDISK="$img" "$@" >"$SCRATCH/runbg.haltcycle.$tag.log" 2>&1; then
+        harness "haltcycle: no machine was started for $tag — $(tail -1 "$SCRATCH/runbg.haltcycle.$tag.log")"
+        rm -f "$img"
+        return 1
+    fi
+    pid=$(cat build/qemu.pid)
+    if wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_quiet "$BOOT_BURST_QUIET_S" &&
+       type_line "quilltest keeper $HALTCYCLE_NAME" &&
+       wait_for_line -E build/serial.log "$HALTCYCLE_ANCHORED" "$WAIT_QUIET_S" && haltcycle_press; then
+        wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
+        HALTCYCLE_OFF=$?
+    else
+        cp build/serial.log "$SCRATCH/serial.haltcycle.$tag.log"
+        make run-stop >/dev/null 2>&1
+        harness "haltcycle: the $tag case could not be put to the machine (last: $(tr -d '\r' < "$SCRATCH/serial.haltcycle.$tag.log" | grep -a '^\[QUILL\]' | tail -1))"
+        rm -f "$img"
+        return 1
+    fi
+    cp build/serial.log "$SCRATCH/serial.haltcycle.$tag.log"
+    make run-stop >/dev/null 2>&1
+    python3 tools/volume-read.py "$img" check >"$SCRATCH/haltcycle.$tag.check" 2>&1
+    echo "rc=$?" >>"$SCRATCH/haltcycle.$tag.check"
+    if make run-bg BOOTDISK="$img" "$@" >"$SCRATCH/runbg.haltcycle.$tag.again.log" 2>&1 &&
+       wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_quiet "$BOOT_BURST_QUIET_S"; then
+        mark=$(wc -l < build/serial.log)
+        type_line "quilltest verify $HALTCYCLE_NAME" &&
+            wait_for_line -E build/serial.log '\[QUILL\] verify: (PASS|FAIL)' "$WAIT_QUIET_S" $((mark + 1))
+    fi
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.haltcycle.$tag.again.log"
+    rm -f "$img"
+    return 0
+}
+
+# haltcycle_legs TAG WHAT KEYS... — the leg run until the button meets a cycle
+# on another core, at most HALTCYCLE_TRIES times, each boot that did not said;
+# then judged. Nothing when no leg could be run at all (said by the leg).
+haltcycle_legs() {
+    local tag=$1 what=$2 try=1; shift 2
+    while haltcycle_leg "$tag" "$@"; do
+        if grep -aq '^\[HALT\] a Settle cycle runs on another core' "$SCRATCH/serial.haltcycle.$tag.log" ||
+           [ "$try" -ge "$HALTCYCLE_TRIES" ]; then
+            haltcycle_judge "$tag" "$what"
+            return
+        fi
+        echo "  (haltcycle: $what — boot $try of $HALTCYCLE_TRIES: the button met no cycle on another core ($(grep -aE '^\[HALT\] (work owed|Async writes|giving up)' "$SCRATCH/serial.haltcycle.$tag.log" | tr -d '\r' | head -1 | cut -c1-100)); booted again)"
+        try=$((try + 1))
+    done
+}
+
+# haltcycle_judge TAG WHAT — the leg just run.
+haltcycle_judge() {
+    local tag=$1 what=$2 L="$SCRATCH/serial.haltcycle.$1.log" A="$SCRATCH/serial.haltcycle.$1.again.log"
+    local fault floor seq check
+    if ! grep -aq '^\[HALT\] a Settle cycle runs on another core' "$L"; then
+        harness "haltcycle: $what — the halt found no Settle cycle on another core when the button went, so the case was not asked ($(grep -aE '^\[HALT\] (work owed|Async writes|giving up)' "$L" | head -1 | cut -c1-100))"
+        return
+    fi
+    ok "haltcycle: $what — the button went while a Settle cycle ran on the committer, and the drain found it"
+    [ "$HALTCYCLE_OFF" = 0 ] && grep -aq '^\[HALT\] Powering off' "$L"
+    chk $? "haltcycle: $what — the machine switched itself off ($(grep -a '^\[HALT\]' "$L" | tr -d '\r' | tail -1 | cut -c1-100))"
+    ! grep -aq '^\[HALT\] giving up' "$L"
+    chk $? "haltcycle: $what — the drain waited for the cycle while it took steps, and gave up on nothing ($(grep -aE '^\[HALT\] (work owed|giving up)' "$L" | tr -d '\r' | tail -1 | cut -c1-110))"
+    grep -aq '^\[HALT\] Storage sync complete' "$L"
+    chk $? "haltcycle: $what — the halt's own cycle wrote the volume's records and the medium kept them ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | head -1 | cut -c1-100))"
+    fault=$(grep -aE 'KERNEL PANIC|\[EXCEPTION\]|^\[NIGHTWATCH\] VERDICT: .* a defect' "$L" "$A" | tr -d '\r' | head -1 | cut -c1-160)
+    [ -z "$fault" ]
+    chk $? "haltcycle: $what — no panic, no exception, nothing owed proved unserved${fault:+: $fault}"
+    check=$(grep -a '^check: ' "$SCRATCH/haltcycle.$tag.check" | tail -1)
+    grep -qx 'rc=0' "$SCRATCH/haltcycle.$tag.check"
+    chk $? "haltcycle: $what — volume-read finds the volume the halt left consistent (${check:-$(tail -2 "$SCRATCH/haltcycle.$tag.check" | head -1)})"
+    floor=$(tr -d '\r' < "$L" | sed '/^\[HALT\] Terminating all processes/q' | grep -aoE "$HALTCYCLE_ANCHORED" |
+            tail -1 | sed 's/.*seq=//')
+    seq=$(tr -d '\r' < "$A" | sed -nE "s/^\[QUILL\] verify: PASS — $HALTCYCLE_NAME fid=[0-9]+ seq=([0-9]+) bytes=16: .*/\1/p" | tail -1)
+    [ -n "$floor" ] && [ -n "$seq" ] && [ "$seq" -ge "$floor" ]
+    chk $? "haltcycle: $what — after the reboot the record is whole at seq ${seq:-none}, the last anchor said before the roll call was seq ${floor:-none} ($(tr -d '\r' < "$A" | grep -aoE '\[QUILL\] verify: (PASS|FAIL) — [^:]*' | tail -1))"
+}
+
+run_haltcycle() {
+    echo "== haltcycle: the power button while the committer, an AP, settles a writer's anchor, on UEFI 4c and 16c =="
+    build STRICT=on
+    haltcycle_legs uefi4 "UEFI 4c, one committer beside the drain core" UEFI=on STRICT=on CORES=4 MEM=4G
+    haltcycle_legs uefi16 "UEFI 16c, four K-Cores" UEFI=on STRICT=on CORES=16 MEM=8G
+    lockrank_judge "$SCRATCH/serial.haltcycle.uefi4.log $SCRATCH/serial.haltcycle.uefi4.again.log $SCRATCH/serial.haltcycle.uefi16.log $SCRATCH/serial.haltcycle.uefi16.again.log" "haltcycle"
+    build   # leave the tree built plain, as every scenario here does
+}
+
+# ---------------------------------------------------------------------------
+# fullvolume: a volume with no block left gives a write the ground a delete
+# frees, and answers every delete (RT-06/07)
+#
+# Two legs, each on its own copy of the image, UEFI on q35, four cores:
+#
+#   roomback   the copy's partition stretched by FULLVOLUME_STRETCH sectors, a
+#              GiB, and `quilltest roomback FULLVOLUME_MIB`: _qra.bin of a GiB
+#              and one MiB laid down, the rest of the volume filled until it
+#              answers no-space, anchored; then _qra.bin deleted and at once a
+#              GiB written to _qrc.bin. The ground the delete frees rests in
+#              Fallow until a cycle has its Quitclaim in a closed block and the
+#              cycles after it settle (fallow.h): the write must wait for that,
+#              never be told there is no room, and land whole — read back by
+#              the guest, then off the medium by volume-read, every block of it
+#              beginning with its own stream, _qra.bin gone, the volume
+#              consistent once the machine halted through bye.
+#   emptyfull  the image as built, `quilltest emptyfull FULLVOLUME_EMPTIES`:
+#              that many empty files, the volume filled to its no-space,
+#              anchored, and every one of them deleted, then the file that
+#              filled the volume — each delete answered, and answered OK (the
+#              design: on a full volume the delete past the tail's room waits
+#              for a Spare, it is not refused); the machine halts through bye
+#              and volume-read finds the volume consistent with neither on it.
+#
+# The guest says a line each time a file passes 128 MiB and each 10000 files
+# (quilltest_room.c), so a machine at work talks and one that hangs goes quiet:
+# a leg whose verdict never came is a FAIL — the write or the deletes hung —
+# not the harness's.
+#
+# ‼ THE MUTATION IT EXISTS FOR, MEASURED: the room cycle's close kept off the
+# deletes' Spare — settle.c SettleTake `bool dig = why == SETTLE_FOR_HALT ||
+# (room && FallowRestsOnTail(PoolClosedGenMax()));` cut back to `why ==
+# SETTLE_FOR_HALT`, as the tree stood before this scenario. The fill spends
+# the Glean's Spare and a full volume cannot make it again ("could make the
+# pool only 1 of the 2 Spare(s)"), the delete's Quitclaim stays in the open
+# tail, Fallow never lets its GiB go, and the write waits through cycle after
+# cycle — each a Ledger write and a flush, thousands a second — and never
+# answers: roomback goes quiet after "the volume is full", 1 failed — "the
+# machine went quiet without roomback's verdict: the write of a GiB never
+# answered (last: [MetaPool] a cycle owes a waiter a closed block and the pool
+# holds 1 Spare(s), the last 1 of them the deletes' …)". Left alone, that
+# machine wrote 8.3 million 512-byte Ledger sectors, each with its flush, in
+# twenty-five minutes, and the write never came back. With the line the write
+# lands in ten seconds.
+#
+# ‼ EMPTYFULL IS RED ON THIS TREE, AND THAT IS THE DEFECT, NOT THE SCENARIO:
+# the deletes of empty files free no ground, so once the tail and the deletes'
+# Spare are full of their Quitclaims no Spare can be made, Glean may not move
+# a block's records without a Spare held past the deletes' share, and every
+# delete after is refused ERR_TAGFS_NO_SPACE (852) — the delete of the file
+# that filled the volume among them: nothing on it can be deleted again.
+# ---------------------------------------------------------------------------
+
+FULLVOLUME_MIB=1024
+FULLVOLUME_STRETCH=2097152   # sectors: a GiB of ground more than the image's
+FULLVOLUME_EMPTIES=100000
+FULLVOLUME_KEYS="UEFI=on STRICT=on CORES=4 MEM=4G"
+
+# fullvolume_type COMMAND — typed once, and its echo waited for. Not
+# type_line: a kernel line said right after the prompt carries the prompt away
+# from the echo ("~ [KLIB] …" and then the bare command on a line of its own),
+# and a command that runs for minutes in silence leaves type_line no echo it
+# knows within its window — it types the command a second time, and the shell
+# runs it again after the first. qemu-input.sh has already seen every
+# character echoed; what is waited for here is the line.
+fullvolume_type() {
+    local from
+    from=$(wc -l < build/serial.log)
+    type_cmd "$1" && sleep 1 && key_press ret &&
+        wait_for_line -E build/serial.log "^(~ )?$1" "$TYPE_ECHO_QUIET_S" $((from + 1))
+}
+
+# fullvolume_leg TAG STRETCH COMMAND MODE — a copy of the image, its ground
+# stretched by STRETCH sectors when not 0, booted; COMMAND typed and MODE's
+# verdict waited for, then bye and the machine left to switch itself off; the
+# copy judged by volume-read. Leaves serial.fullvolume.TAG.log,
+# fullvolume.TAG.check.json, fullvolume.TAG.list, FULLVOLUME_OFF (0 when the
+# machine switched itself off) and FULLVOLUME_SILENT (what never came: the
+# verdict, or nothing). 1 when there is no run to judge, said as the
+# harness's failure.
+fullvolume_leg() {
+    local tag=$1 stretch=$2 cmd=$3 mode=$4 img="$SCRATCH/fullvolume.$1.img" L="$SCRATCH/serial.fullvolume.$1.log" pid from
+    FULLVOLUME_OFF=1
+    FULLVOLUME_SILENT=""
+    rm -f "$L" "$SCRATCH/fullvolume.$tag.check.json" "$SCRATCH/fullvolume.$tag.list"
+    make run-stop >/dev/null 2>&1
+    cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
+    if [ "$stretch" != 0 ] && ! grow_stretch "$img" "$stretch" >/dev/null; then
+        harness "fullvolume: the $tag copy has no BoxOS partition to stretch"
+        rm -f "$img"
+        return 1
+    fi
+    # shellcheck disable=SC2086
+    if ! make run-bg BOOTDISK="$img" $FULLVOLUME_KEYS >"$SCRATCH/runbg.fullvolume.$tag.log" 2>&1; then
+        harness "fullvolume: no machine was started for $tag — $(tail -1 "$SCRATCH/runbg.fullvolume.$tag.log")"
+        rm -f "$img"
+        return 1
+    fi
+    pid=$(cat build/qemu.pid)
+    if ! { wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" &&
+           wait_for_quiet "$BOOT_BURST_QUIET_S" && fullvolume_type "$cmd"; }; then
+        cp build/serial.log "$L"
+        make run-stop >/dev/null 2>&1
+        harness "fullvolume: $tag could not be put to the machine (last: $(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS)\]' | tail -1 | cut -c1-120))"
+        rm -f "$img"
+        return 1
+    fi
+    if wait_for_line -E build/serial.log "\[QUILL\] $mode: (PASS|FAIL) — " "$WAIT_QUIET_S"; then
+        from=$(wc -l < build/serial.log)
+        wait_for_quiet "$BOOT_BURST_QUIET_S"
+        fullvolume_type bye && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" $((from + 1))
+        wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
+        FULLVOLUME_OFF=$?
+    else
+        FULLVOLUME_SILENT="$mode's verdict"
+    fi
+    cp build/serial.log "$L"
+    make run-stop >/dev/null 2>&1
+    python3 tools/volume-read.py "$img" check --json >"$SCRATCH/fullvolume.$tag.check.json" 2>/dev/null
+    python3 tools/volume-read.py "$img" list >"$SCRATCH/fullvolume.$tag.list" 2>&1
+    return 0
+}
+
+# fullvolume_census TAG — volume-read's roll call of the copy the leg left:
+# consistent, every finding a note, or a FAIL with its words.
+fullvolume_census() {
+    local said
+    said=$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (OSError, ValueError) as e:
+    print("no roll call: %s" % e); sys.exit(1)
+bad = [f for f in d.get("findings", []) if f.get("severity") != "note"]
+if bad:
+    print("; ".join("%s %s: %s" % (f.get("severity"), f.get("code"), f.get("text")) for f in bad[:3])); sys.exit(1)
+print("%s, %d note(s)" % (d.get("verdict"), len(d.get("findings", []))))
+' "$SCRATCH/fullvolume.$1.check.json")
+    chk $? "fullvolume: $1 — volume-read finds the volume the halt left consistent ($(printf '%s' "$said" | cut -c1-300))"
+}
+
+# fullvolume_halted TAG — the machine halted through bye, its sync wrote the
+# volume, and nothing went wrong on the way.
+fullvolume_halted() {
+    local L="$SCRATCH/serial.fullvolume.$1.log" fault
+    [ "$FULLVOLUME_OFF" = 0 ] && grep -aq '^\[HALT\] Storage sync complete' "$L"
+    chk $? "fullvolume: $1 — the machine halted through bye and its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | tail -1 | cut -c1-100))"
+    fault=$(grep -aE 'KERNEL PANIC|\[EXCEPTION\]|^\[NIGHTWATCH\] VERDICT: .* a defect' "$L" | tr -d '\r' | head -1 | cut -c1-160)
+    [ -z "$fault" ]
+    chk $? "fullvolume: $1 — no panic, no exception, nothing owed proved unserved${fault:+: $fault}"
+}
+
+# fullvolume_roomback_medium — off the copy: no _qra.bin, and _qrc.bin of
+# FULLVOLUME_MIB MiB whose every block begins with its own stream.
+fullvolume_roomback_medium() {
+    local img="$SCRATCH/fullvolume.room.img" out="$SCRATCH/fullvolume.qrc.bin" rc
+    ! grep -qE '^ +_qra\.bin ' "$SCRATCH/fullvolume.room.list"
+    chk $? "fullvolume: roomback — volume-read finds no _qra.bin on the medium"
+    rm -f "$out"
+    python3 tools/volume-read.py "$img" get _qrc.bin -o "$out" >/dev/null 2>&1
+    python3 - "$out" "$((FULLVOLUME_MIB << 20))" >"$out.said" 2>&1 <<'FULLVOLUME_EOF'
+import struct, sys
+path, want = sys.argv[1], int(sys.argv[2])
+M = (1 << 64) - 1
+def word(seed, off):     # quilltest.c QuillWord, the stream QuillFill lays
+    x = (off ^ ((seed << 56) & M)) & M
+    x = (x * 0x9E3779B97F4A7C15) & M
+    return x ^ (x >> 29)
+try:
+    f = open(path, "rb")
+except OSError:
+    sys.exit("volume-read found no _qrc.bin on the medium")
+at = 0
+while True:
+    b = f.read(4096)
+    if not b:
+        break
+    if len(b) < 8 or struct.unpack_from("<Q", b, 0)[0] != word(0xC0, at):
+        sys.exit("its block at byte %d is not its own stream" % at)
+    at += len(b)
+if at != want:
+    sys.exit("it holds %d bytes, not %d" % (at, want))
+print("%d bytes, every one of its %d blocks beginning with its own stream" % (at, at // 4096))
+FULLVOLUME_EOF
+    rc=$?
+    chk $rc "fullvolume: roomback — _qrc.bin read off the medium by volume-read: $(tail -1 "$out.said")"
+    rm -f "$out" "$out.said"
+}
+
+fullvolume_judge_roomback() {
+    local L="$SCRATCH/serial.fullvolume.room.log" full verdict last
+    full=$(tr -d '\r' < "$L" | grep -aoE '\[QUILL\] roomback: the volume is full — .*' | tail -1)
+    verdict=$(tr -d '\r' < "$L" | grep -aoE '\[QUILL\] roomback: (PASS|FAIL) — .*' | tail -1)
+    if [ -z "$full" ]; then
+        harness "fullvolume: roomback never filled the volume, so the case was not asked (${verdict:-no verdict at all})"
+        return
+    fi
+    ok "fullvolume: roomback filled the volume to its no-space — ${full#*— }"
+    if [ -n "$FULLVOLUME_SILENT" ]; then
+        last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Settle|MetaPool|Glean)\]' | tail -1 | cut -c1-160)
+        bad "fullvolume: roomback — _qra.bin deleted, and the machine went quiet without $FULLVOLUME_SILENT: the write of a GiB never answered (last: $last)"
+        return
+    fi
+    grep -aq '^\[QUILL\] roomback: PASS' "$L"
+    chk $? "fullvolume: roomback — a GiB written the moment a GiB was deleted got its room, every byte, and read back whole (${verdict#*— })"
+    fullvolume_halted room
+    fullvolume_census room
+    fullvolume_roomback_medium
+}
+
+fullvolume_judge_emptyfull() {
+    local L="$SCRATCH/serial.fullvolume.empty.log" full verdict last left
+    full=$(tr -d '\r' < "$L" | grep -aoE '\[QUILL\] emptyfull: the volume is full — .*' | tail -1)
+    verdict=$(tr -d '\r' < "$L" | grep -aoE '\[QUILL\] emptyfull: (PASS|FAIL) — .*' | tail -1)
+    if [ -z "$full" ]; then
+        harness "fullvolume: emptyfull never made its files and filled the volume, so the case was not asked (${verdict:-no verdict at all})"
+        return
+    fi
+    ok "fullvolume: emptyfull made its empty files and filled the volume to its no-space — ${full#*— }"
+    if [ -n "$FULLVOLUME_SILENT" ]; then
+        last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Settle|MetaPool|Glean)\]' | tail -1 | cut -c1-160)
+        bad "fullvolume: emptyfull — the machine went quiet without $FULLVOLUME_SILENT: a delete never answered (last: $last)"
+        return
+    fi
+    grep -aq '^\[QUILL\] emptyfull: PASS' "$L"
+    chk $? "fullvolume: emptyfull — all $FULLVOLUME_EMPTIES deletes of empty files on the full volume answered OK, and the delete of the file that filled it after them (${verdict#*— })"
+    fullvolume_halted empty
+    fullvolume_census empty
+    left=$(grep -cE '^ +_qre\.bin ' "$SCRATCH/fullvolume.empty.list")
+    [ "$left" = 0 ] && ! grep -qE '^ +_qrf\.bin ' "$SCRATCH/fullvolume.empty.list"
+    chk $? "fullvolume: emptyfull — volume-read finds $left _qre.bin on the medium, and $(grep -cE '^ +_qrf\.bin ' "$SCRATCH/fullvolume.empty.list") _qrf.bin"
+}
+
+run_fullvolume() {
+    echo "== fullvolume: a full volume gives a GiB deleted to the GiB written after it, and answers every delete of an empty file =="
+    build STRICT=on
+    fullvolume_leg room "$FULLVOLUME_STRETCH" "quilltest roomback $FULLVOLUME_MIB" roomback &&
+        fullvolume_judge_roomback
+    fullvolume_leg empty 0 "quilltest emptyfull $FULLVOLUME_EMPTIES" emptyfull &&
+        fullvolume_judge_emptyfull
+    lockrank_judge "$SCRATCH/serial.fullvolume.room.log $SCRATCH/serial.fullvolume.empty.log" "fullvolume"
+    rm -f "$SCRATCH/fullvolume.room.img" "$SCRATCH/fullvolume.empty.img"
+    build   # leave the tree built plain, as every scenario here does
 }
 
 run_gpt() {
@@ -8194,39 +8984,40 @@ stand_orders() {
 # refuses nothing, and neither does one armed for a command that never comes
 # (stand_flush_ticket's second plan).
 #
-#   test                                              BIOS 4c  UEFI 4c
-#   stand_blockfail_reads_the_nth                         1        1
-#   stand_blockfail_write_never_lands                     1        1
-#   stand_blockfail_flush_refused                         1        1
-#   stand_blockfail_async_read                            0        1   no asynchronous read on the legacy channel
-#   stand_flush_ticket                                    1        1
-#   stand_rmw_read_refused                                1        1
-#   stand_sync_owns_a_refused_write                       1        1
-#   stand_sync_owns_a_refused_flush                       1        1
-#   stand_registry_growth_links_what_landed               1        1
-#   stand_registry_flush_keeps_its_block                  1        1
-#   stand_table_grows_onto_a_stamp                        1        1
-#   stand_helm_write_refused_part_way                     1        1
-#   stand_port_write_refused_part_way                     0        1   no port on the legacy channel
-#   stand_seal_cut_keeps_the_seal                         2        2   its open block, then its Ledger
-#   stand_seal_torn_table_stands                          2        2   its torn block refused, then a bad sector in it
-#   stand_seal_bad_open_block_rolls_back                  2        2   a bad sector: the judging walk, the roll back
-#   stand_seal_bad_closed_block_is_rot                    2        2   a bad sector: the judging walk, the unsealed walk
-#   stand_glean_replaced_waits_for_the_close              2        2   a bad sector: the judging walk, the roll back
-#   stand_run_refused_inside_a_run                        0        1   one block a command: a run has no inside
-#   stand_run_refused_inside_a_run_through_the_port       0        1   and no port either
-#   stand_medium_* (a flush answered with sense)          0        0   a USB seat's own
-#   stand_medium_bell_rings_once                          1        1
-#   stand_medium_mount_rings_in_its_own_breath            1        1   the mount's first read of the data
-#   stand_medium_mount_bad_sector_waits                   4        4   both Ledger copies, in each of its two attempts
-#   stand_medium_mount_refused_read_is_no_verdict         1        1   the pool block a file's record lies in
-#   stand_medium_return_refused_once                      1        1   the newest Ledger copy, on the return
-#   stand_medium_mount_resets_the_seat                    1        1   the mount's first read of the data
-#   stand_roadstead_refusal_rings_once                    0        1   no asynchronous read on the legacy channel
-#   stand_settle_refusal_waits_for_the_bell               1        1   its Ledger; then a plan that only counts
-#   stand_settle_ring_during_the_cycle                    1        1   its Ledger
-#   stand_settle_table_refusal_is_the_mediums             2        2   the block written alone, then by the cycle
-#   total                                                34       39
+#   test                                              BIOS 4c  UEFI 4c  USB 4c
+#   stand_blockfail_reads_the_nth                      1        1        1
+#   stand_blockfail_write_never_lands                  1        1        1
+#   stand_blockfail_flush_refused                      1        1        1
+#   stand_blockfail_async_read                         0        1        1   no asynchronous read on the legacy channel
+#   stand_flush_ticket                                 1        1        1
+#   stand_rmw_read_refused                             1        1        1
+#   stand_sync_owns_a_refused_write                    1        1        1
+#   stand_sync_owns_a_refused_flush                    1        1        1
+#   stand_registry_growth_links_what_landed            1        1        1
+#   stand_registry_flush_keeps_its_block               1        1        1
+#   stand_table_grows_onto_a_stamp                     1        1        1
+#   stand_helm_write_refused_part_way                  1        1        1
+#   stand_port_write_refused_part_way                  0        1        1   no port on the legacy channel
+#   stand_seal_cut_keeps_the_seal                      2        2        2   its open block, then its Ledger
+#   stand_seal_torn_table_stands                       2        2        2   its torn block refused, then a bad sector in it
+#   stand_seal_bad_open_block_rolls_back               2        2        2   a bad sector: the judging walk, the roll back
+#   stand_seal_bad_closed_block_is_rot                 2        2        2   a bad sector: the judging walk, the unsealed walk
+#   stand_glean_replaced_waits_for_the_close           2        2        2   a bad sector: the judging walk, the roll back
+#   stand_run_refused_inside_a_run                     0        1        1   one block a command: a run has no inside
+#   stand_run_refused_inside_a_run_through_the_port    0        1        1   and no port either
+#   stand_medium_no_medium_flush_refused               0        0        1   a USB disk's flush, answered NO MEDIUM
+#   stand_medium_sync_cache_remembered                 0        0        3   ILLEGAL REQUEST, then NO MEDIUM twice
+#   stand_medium_bell_rings_once                       1        1        1
+#   stand_medium_mount_rings_in_its_own_breath         1        1        1   the mount's first read of the data
+#   stand_medium_mount_bad_sector_waits                4        4        4   both Ledger copies, in each of its two attempts
+#   stand_medium_mount_refused_read_is_no_verdict      1        1        1   the pool block a file's record lies in
+#   stand_medium_return_refused_once                   1        1        1   the newest Ledger copy, on the return
+#   stand_medium_mount_resets_the_seat                 1        1        1   the mount's first read of the data
+#   stand_roadstead_refusal_rings_once                 0        1        0   an AHCI port's alone
+#   stand_settle_refusal_waits_for_the_bell            1        1        1   its Ledger; then a plan that only counts
+#   stand_settle_ring_during_the_cycle                 1        1        1   its Ledger
+#   stand_settle_table_refusal_is_the_mediums          2        2        2   the block written alone, then by the cycle
+#   total                                             34       39       42
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -8331,6 +9122,84 @@ run_stand() {
         [ -f "$f" ] && logs="$logs $f"
     done
     lockrank_judge "$logs" "stand, both roads"
+    buildkey_restore
+}
+
+# ---------------------------------------------------------------------------
+# standusb: the startup tests that write, on a USB volume (step 1.5c)
+#
+# stand runs the suite on the two disks a machine boots from. A USB stick is
+# the third road, and the one a person's machine has: a disk that runs one
+# command at a time, whose every step is a baton on the drain core, whose
+# flush answers with sense, and whose port's writes go on at a service point
+# (write_job.c, "A USB DISK'S ANSWER IS NOT AN INTERRUPT'S"). So the suite is
+# booted with the volume on a stick: BIOS, four cores, the image the loader
+# reads on the internal disk, the stick — a copy of that same image, the same
+# sixteen bytes — on the xHCI from power-on, and the internal disk declared
+# not this machine's (latearrival_on), so the mount takes the stick and the
+# tests write through it. Judged as stand judges its roads (stand_judge,
+# stand_again): every test ran, nothing failed, the writes' road named as the
+# stick's seat, BLOCKFAIL refusing as many commands as the tests that arm it
+# refuse on this road (STANDUSB_BLOCKFAILS, the USB column of stand_judge's
+# table), the halt's sync wrote the stick, and the stick that boot left booted
+# again with no Bitmap mismatch.
+#
+# ‼ THE MUTATION IT EXISTS FOR, MEASURED: two tests of the suite run on a USB
+# disk alone, and stand steps them aside on both its roads, so only this sees
+# the line they guard — xhci_msd.c msd_flush_judge, a flush answered NO
+# MEDIUM taken as kept, as Linux takes it (`return MSD_FLUSH_REFUSED;` under
+# ASC_NO_MEDIUM made `return MSD_FLUSH_KEPT;`): stand_medium_no_medium_
+# flush_refused and stand_medium_sync_cache_remembered fail on both boots,
+# "190 run, 184 passed, 2 failed" — 17 passed, 3 failed. And a boot that
+# mounted the internal disk instead names another seat for the writes and is
+# red on that line.
+# ---------------------------------------------------------------------------
+
+STANDUSB_BLOCKFAILS=42   # stand_judge's table, its USB column
+STANDUSB_SEAT="usb[0-9]+ [^)]*"
+
+run_standusb() {
+    echo "== standusb: the startup tests that write, on a USB volume, twice =="
+    local tag=stand_usb what="USB, BIOS 4c" boot="$SCRATCH/standusb.boot.img"
+    local stick="$SCRATCH/standusb.stick.img" built kept rc extra logs="" f
+    rm -f "$SCRATCH"/serial.stand_usb.log "$SCRATCH"/serial.stand_usb_again.log build/boxos.img \
+          "$boot" "$stick"
+    latearrival_on
+    if ! build_with_key VOLUME_TESTS=on STRICT=off; then
+        echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "standusb: VOLUME_TESTS=on does not build"
+        latearrival_off; buildkey_restore
+        return
+    fi
+    # Both copies off the image just built, before any boot: run-bg boots a
+    # BOOTDISK as it stands and lays nothing down, so the stick and the disk
+    # the loader reads carry the one volume the boarding pass will name.
+    built=$(deed_uuid build/boxos.img) || built=""
+    if ! cp build/boxos.img "$boot" || ! cp build/boxos.img "$stick" || [ -z "$built" ]; then
+        harness "standusb: the image could not be copied to the boot disk and the stick (Deed ${built:-unreadable})"
+        latearrival_off; buildkey_restore; rm -f "$boot" "$stick"
+        return
+    fi
+    extra="-drive if=none,id=stick,file=$stick,format=raw -device usb-storage,bus=xhci1.0,drive=stick,id=usbstick"
+    stand_boot "$tag" BOOTDISK="$boot" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra"; rc=$?
+    if [ "$rc" != 2 ]; then
+        stand_judge "$tag" "$what" usb "$STANDUSB_SEAT" "$STANDUSB_BLOCKFAILS"
+        kept=$(deed_uuid "$stick") || kept=""
+        if [ "$rc" != 0 ]; then
+            bad "standusb: $what, second boot — not judged: the first boot never said its halt's sync wrote the stick, so a Bitmap mismatch on the next would be the halt's, not the tests'"
+        elif [ "$kept" != "$built" ]; then
+            bad "standusb: $what, second boot — not judged: the stick the first boot left carries Deed ${kept:-none} and the build laid down $built"
+        else
+            stand_boot "${tag}_again" BOOTDISK="$boot" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra"; rc=$?
+            [ "$rc" = 2 ] || stand_again "${tag}_again" "$what" usb
+        fi
+    fi
+    for f in "$SCRATCH"/serial.stand_usb.log "$SCRATCH"/serial.stand_usb_again.log; do
+        [ -f "$f" ] && logs="$logs $f"
+    done
+    lockrank_judge "$logs" "standusb"
+    latearrival_off
+    rm -f "$boot" "$stick"
     buildkey_restore
 }
 
@@ -10544,12 +11413,15 @@ case "${1:-both}" in
     stranger) run_stranger ;;
     latearrival) run_latearrival ;;
     replug)   run_replug ;;
+    replugwrite) run_replugwrite ;;
     nofsgsbase) run_nofsgsbase ;;
     logsave)  run_logsave ;;
     mountfail) run_mountfail ;;
     yank)     run_yank ;;
     slowdisk) run_slowdisk ;;
     haltslow) run_haltslow ;;
+    haltcycle) run_haltcycle ;;
+    fullvolume) run_fullvolume ;;
     gpt)      run_gpt ;;
     stillthere) run_stillthere ;;
     sleeps)     run_sleeps ;;
@@ -10625,6 +11497,7 @@ case "${1:-both}" in
     census)   run_census ;;
     censusmut) run_censusmut ;;
     stand)    run_stand ;;
+    standusb) run_standusb ;;
     standmut) run_standmut ;;
     quill)    run_quill ;;
     quillmut) run_quillmut ;;
@@ -10635,8 +11508,8 @@ case "${1:-both}" in
     turns)    run_turns ;;
     turnsmut) run_turnsmut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

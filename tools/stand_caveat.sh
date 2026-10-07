@@ -47,7 +47,9 @@ CAVEAT=0
 # an ordinary cut, and what it leaves — a block the map marks used and no
 # settled record names — is held again under 1.6: the GroundCensus that
 # reports it returns it once the census owns every block (decision 3, held
-# by the owner 2026-10-07 as B1, "two steps"). The same window keeps a Spare
+# by the owner 2026-10-07 as B1, "two steps"). logcheck replugwrite holds the
+# same ORPHAN when a stick it pulls takes a cycle's map with it and not its
+# Ledger — a departure is that cut. The same window keeps a Spare
 # its turning cycle stamped and had not linked (SPARE_UNNAMED) in nextfid and
 # settlecut, held alike. chaingrow
 # keeps its census by kind, (scenario, prefix|subset, code), and a chain
@@ -70,7 +72,7 @@ caveat_row() {
         hog)        echo "|on one core under a CPU hog nothing settles a write before the power goes" ;;
         settlecut:FID_PAST_NEXT)
                     echo "|a sync stopped by SETTLECUT=ledger before its ledger leaves a table row past the ledger's next_file_id" ;;
-        noanchor:ORPHAN|hog:ORPHAN|settlecut:ORPHAN)
+        noanchor:ORPHAN|hog:ORPHAN|settlecut:ORPHAN|replugwrite:ORPHAN)
                     echo "1.6|a cut between a cycle's map and its Ledger leaves a block the map marks used and no settled record names" ;;
         nextfid:SPARE_UNNAMED|settlecut:SPARE_UNNAMED)
                     echo "1.6|a cut inside a turning cycle keeps the Spare it stamped before the link to it, a block nothing names" ;;

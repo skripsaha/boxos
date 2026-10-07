@@ -221,8 +221,10 @@ RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen);
  * free comes back only once a block holding their Quitclaims is closed
  * (fallow.h) — a full volume whose last Spare an anchor spent could free
  * nothing again. A volume with no free block can still delete: the delete
- * that fills the tail closes it onto the deletes' own Spare, and the delete
- * after the next tail fills waits for a Spare the Fallow gives back. */
+ * that fills the tail closes it onto the deletes' own Spare, a delete that
+ * leaves the tail room has its Quitclaim closed onto it by the cycle its
+ * ground is asked of (PoolSnapTake), and the delete after the next tail fills
+ * waits for a Spare the Fallow gives back. */
 #define POOL_QUITCLAIMS_PER_BLOCK  (TAGFS_MPOOL_DATA_SIZE / RECORD_HEADER_SIZE)
 #define SPARE_FOR_QUITCLAIMS       ((POOL_QUITCLAIMS_PER_BLOCK * RECORD_HEADER_SIZE + \
                                      TAGFS_MPOOL_DATA_SIZE - 1) / TAGFS_MPOOL_DATA_SIZE)
@@ -312,8 +314,12 @@ typedef struct {
  * in a block never written again; and Glean's: a record it moved lies there
  * before the seal lets its source go — so a tail holding one is closed onto a
  * Spare first; 0 closes nothing. The close leaves the deletes their
- * SPARE_FOR_QUITCLAIMS, but in the machine's last cycle (`dig_reserve`), whose
- * S0 gives every Spare back right after (PoolSparesGiveBack). `unclosed` says a
+ * SPARE_FOR_QUITCLAIMS, but where it may dig it (`dig_reserve`): in the
+ * machine's last cycle, whose S0 gives every Spare back right after
+ * (PoolSparesGiveBack), and in a cycle asked for ground a record in the open
+ * tail freed — ground that comes back only once a block holding that record
+ * is closed (fallow.h), the very close the deletes' Spare is kept for, and
+ * one no other close makes while the tail has room. `unclosed` says a
  * close was owed and no Spare could be had: the waiter is answered once its
  * records settled in the open tail, and that is said once until a close is
  * made again. The links this snapshot writes stop leaving the blocks they name
@@ -329,6 +335,10 @@ error_t  PoolSnapWriteNext(PoolSnap* snap, bool* done);
 /* The newest Ink whose record lies in a closed block a cycle settled — what a
  * waiter owed a closed block is answered by. */
 uint64_t PoolClosedSettledGen(void);
+
+/* Under the state lock: the newest Ink whose record lies in a closed block,
+ * settled or not — every record newer lies in the open tail. */
+uint64_t PoolClosedGenMax(void);
 
 /* Whether a closed block waits for a cycle — the tail filled and turned. A
  * read with no lock, for the cadence. */

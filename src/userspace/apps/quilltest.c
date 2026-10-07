@@ -20,8 +20,9 @@
  *   FAIL     anything else, including a case that could not ask its question
  *
  * Progress lines carry numbers and no verdict word. The power-cut modes are
- * cut rather than ended: hog says only what it started and churn what it
- * wrote, a verdict each only when it fails; settle says PENDING before it
+ * cut rather than ended: hog says only what it started, churn what it
+ * wrote and keeper what it anchored, a verdict each only when it fails;
+ * settle says PENDING before it
  * parks, and a FAIL after it only when the park ends before the power goes.
  *
  * Which defects are known, and which step of the plan discharges each, is
@@ -694,6 +695,9 @@ static const QuillCase g_cases[] = {
       "does NAME hold the whole record settle or churn wrote", "nothing", false },
     { "churn", "NAME", 1, 0, QuillChurn, "for the power-cut stand: a writer that never stops",
       "NAME, rewritten until the machine stops; never returns", false },
+    { "keeper", "NAME", 1, 0, QuillKeeper,
+      "for the halt's stand: a writer that anchors every record it writes, each anchor said",
+      "NAME, rewritten and anchored until the machine stops; never returns", false },
     { "race", "NAME ROUNDS", 2, 0, QuillRace, "do ROUNDS anchors hold while a churn writes NAME",
       "DESTRUCTIVE: every file called NAME that does not wear system or boot is deleted first, "
       "and the anchors make it durable; then NAME, and the churn it started, still writing",
@@ -710,6 +714,28 @@ static const QuillCase g_cases[] = {
     { "flood", "SLOT", 1, 0, QuillFlood,
       "for beside: calls handed in without waiting for them, counted in SLOT of its board",
       "nothing; never returns while beside's board is there", false },
+    { "away", "NAME COUNT SEED", 3, 0, QuillAway,
+      "are COUNT writers appending to NAME — one in the medium, the rest waiting for its Helm — "
+      "each answered when the medium leaves and comes back (seeds SEED + 1 to SEED + COUNT)",
+      "DESTRUCTIVE: every file called NAME that does not wear system or boot is deleted first; "
+      "then NAME, its first block and what the writers' appends left", false },
+    { "awaywriter", "NAME SEED SLOT", 3, 0, QuillAwayWriter,
+      "for away: one append of 4 MiB of SEED's stream to NAME, its answer said and marked in "
+      "SLOT of away's board",
+      "what the volume keeps of its append", false },
+    { "awaycheck", "NAME COUNT SEED", 3, 0, QuillAwayCheck,
+      "is every byte of NAME, read back through the volume mounted now, its first block or one "
+      "of away's writers' streams from that writer's first byte",
+      "nothing", false },
+    { "roomback", "MIB", 1, 0, QuillRoomBack,
+      "does a write of MIB MiB, made the moment a file of MIB MiB and one more is deleted from a "
+      "full volume, get its room from the delete and land whole",
+      "DESTRUCTIVE: the volume full — _qrb.bin fills whatever _qrc.bin of MIB MiB leaves; "
+      "earlier _qra/_qrb/_qrc.bin deleted first", false },
+    { "emptyfull", "COUNT", 1, 0, QuillEmptyFull,
+      "are COUNT deletes of empty files, made on a volume with no block left, and the delete of "
+      "the file that filled it after them, each answered OK",
+      "DESTRUCTIVE: the volume full — _qrf.bin fills it; COUNT file ids spent for good", false },
     { "abba", "NAME TAGS EDGE", 3, 0, QUILL_THROWAWAY(QuillAbba),
       "does a machine of many cores come back while TAGS new tags and file ids past EDGE, where "
       "the file table takes its next block, grow the registry and the table, and three cabins of "

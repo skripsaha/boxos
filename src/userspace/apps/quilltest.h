@@ -7,8 +7,11 @@
  * the power-cut stand drives (tools/powercut.sh); quilltest_locks.c abba, the
  * guard on the two lock orders a growing chain crosses, a throwaway image's
  * case too; quilltest_turns.c beside, a write and its anchor beside cabins that
- * would keep the kernel's time to themselves (logcheck turns). All say their
- * verdict in the same four words and ask the volume for files by name.
+ * would keep the kernel's time to themselves (logcheck turns); quilltest_away.c
+ * away, writers queued behind a write when its medium leaves (logcheck
+ * replugwrite); quilltest_room.c roomback and emptyfull, a full volume
+ * (logcheck fullvolume). All say their verdict in the same four words and ask
+ * the volume for files by name.
  */
 #ifndef QUILLTEST_H
 #define QUILLTEST_H
@@ -56,11 +59,21 @@ QuillVerdict QuillSettle(const char *const *args);
 QuillVerdict QuillHogged(const char *const *args);
 QuillVerdict QuillVerify(const char *const *args);
 QuillVerdict QuillChurn(const char *const *args);
+QuillVerdict QuillKeeper(const char *const *args);
 QuillVerdict QuillRace(const char *const *args);
 QuillVerdict QuillCrowd(const char *const *args);
 
 /* The machine's turns, quilltest_turns.c. */
 QuillVerdict QuillFlood(const char *const *args);
 QuillVerdict QuillBeside(const char *const *args);
+
+/* A medium that leaves under a write and its waiters, quilltest_away.c. */
+QuillVerdict QuillAway(const char *const *args);
+QuillVerdict QuillAwayWriter(const char *const *args);
+QuillVerdict QuillAwayCheck(const char *const *args);
+
+/* A full volume, quilltest_room.c. */
+QuillVerdict QuillRoomBack(const char *const *args);
+QuillVerdict QuillEmptyFull(const char *const *args);
 
 #endif /* QUILLTEST_H */

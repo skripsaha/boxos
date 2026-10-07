@@ -470,6 +470,11 @@ uint64_t PoolClosedSettledGen(void)
     return __atomic_load_n(&s_closed_settled_gen, __ATOMIC_ACQUIRE);
 }
 
+uint64_t PoolClosedGenMax(void)
+{
+    return s_closed_gen_max;
+}
+
 bool PoolClosedWaiting(void)
 {
     return __atomic_load_n(&s_closed_head, __ATOMIC_ACQUIRE) != NULL;

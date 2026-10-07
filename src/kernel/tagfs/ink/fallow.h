@@ -153,6 +153,11 @@ uint32_t    FallowUnnamedLeftOut(uint32_t first, uint32_t count, uint8_t* bits);
  * in *spent, for FallowNodesFree after the lock. */
 uint64_t    FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent);
 
+/* Under the state lock: whether ground rests on a record newer than
+ * `closed_gen` — one in the pool's open tail, whose ground no cycle gives back
+ * until a cycle closes the tail (1). */
+bool        FallowRestsOnTail(uint64_t closed_gen);
+
 /* Nodes FallowRipen spent, freed with no TagFS lock held. */
 void        FallowNodesFree(FallowNode* list);
 

@@ -8,7 +8,9 @@
  * beside that hog (hogged), a writer that never stops (churn), anchors
  * racing that writer (race), files that each add a record to the tag
  * registry and a row to the file table (crowd), and the read that says
- * afterwards whether a record survived (verify). Each says what it did in
+ * afterwards whether a record survived (verify) — and, for the halt's stand
+ * (logcheck haltcycle), a writer that anchors every record it writes
+ * (keeper). Each says what it did in
  * quilltest's four words, with the numbers the judge needs to compute the
  * bytes a surviving file must hold. See quilltest.c for the rest.
  */
@@ -201,32 +203,42 @@ QuillVerdict QuillVerify(const char *const *args)
     return QUILL_FAIL;
 }
 
+/* NAME carried on — the file of that name, and the seq after the record it
+ * holds — or laid down, at seq 1: its file id, or <= 0 with `mode`'s FAIL
+ * said. */
+static int QuillCarryOn(const char *mode, const char *name, uint32_t *seq)
+{
+    uint32_t ids[1];
+    int n = QuillFindEverywhere(name, ids, 1);
+    if (n < 0) {
+        printf("[QUILL] %s: FAIL — could not look for %s (answer %d), so there is no telling "
+               "whether to carry a file on or lay one down\n", mode, name, n);
+        return n;
+    }
+    int fid;
+    *seq = 1;
+    if (n > 0) {
+        fid  = (int)ids[0];
+        *seq = QuillReadSeq(ids[0]) + 1;
+    } else {
+        fid = create_everywhere(name, NULL);
+    }
+    if (fid <= 0)
+        printf("[QUILL] %s: FAIL — %s could not be found or created (answers %d, %d)\n",
+               mode, name, n, fid);
+    return fid;
+}
+
 /* A writer that never stops: NAME's record rewritten with the next seq, over
  * and over, never anchored. Carries on from the record NAME already holds, so
  * `race` can lay the file down first and hand it over. */
 QuillVerdict QuillChurn(const char *const *args)
 {
     const char *name = args[0];
-    uint32_t ids[1];
-    uint32_t seq = 1;
-    int n = QuillFindEverywhere(name, ids, 1);
-    if (n < 0) {
-        printf("[QUILL] churn: FAIL — could not look for %s (answer %d), so there is no telling "
-               "whether to carry a file on or lay one down\n", name, n);
+    uint32_t    seq  = 1;
+    int         fid  = QuillCarryOn("churn", name, &seq);
+    if (fid <= 0)
         return QUILL_FAIL;
-    }
-    int fid;
-    if (n > 0) {
-        fid = (int)ids[0];
-        seq = QuillReadSeq(ids[0]) + 1;
-    } else {
-        fid = create_everywhere(name, NULL);
-    }
-    if (fid <= 0) {
-        printf("[QUILL] churn: FAIL — %s could not be found or created (answers %d, %d)\n",
-               name, n, fid);
-        return QUILL_FAIL;
-    }
     printf("[QUILL] churn: %s fid=%u starts at seq=%u — it writes until the machine stops\n",
            name, (uint32_t)fid, seq);
     for (;; seq++) {
@@ -239,6 +251,34 @@ QuillVerdict QuillChurn(const char *const *args)
         }
         if (seq % QUILL_CHURN_PROGRESS == 0)
             printf("[QUILL] churn: %s fid=%u wrote seq=%u\n", name, (uint32_t)fid, seq);
+    }
+}
+
+/* A writer that keeps what it writes: NAME's record rewritten with the next
+ * seq and anchored, again and again, each anchor said once it answered. The
+ * halt's stand (logcheck haltcycle) presses the power button while a cycle
+ * settles one of them, and the record the last line named must be there
+ * after the reboot. Carries on from the record NAME holds, as churn does;
+ * never returns while the medium takes its writes and its anchors. */
+QuillVerdict QuillKeeper(const char *const *args)
+{
+    const char *name = args[0];
+    uint32_t    seq  = 1;
+    int         fid  = QuillCarryOn("keeper", name, &seq);
+    if (fid <= 0)
+        return QUILL_FAIL;
+    printf("[QUILL] keeper: %s fid=%u starts at seq=%u — it writes and anchors until the "
+           "machine stops\n", name, (uint32_t)fid, seq);
+    for (;; seq++) {
+        QuillRecord rec = QuillRecordOf(seq);
+        int64_t     w   = fwrite((uint32_t)fid, 0, &rec, sizeof(rec));
+        int         arc = w == (int64_t)sizeof(rec) ? anchor((uint32_t)fid) : 0;
+        if (w != (int64_t)sizeof(rec) || arc != 0) {
+            printf("[QUILL] keeper: FAIL — seq=%u of %s fid=%u: the write answered %lld, the "
+                   "anchor %d\n", seq, name, (uint32_t)fid, (long long)w, arc);
+            return QUILL_FAIL;
+        }
+        printf("[QUILL] keeper: %s fid=%u anchored seq=%u\n", name, (uint32_t)fid, seq);
     }
 }
 
