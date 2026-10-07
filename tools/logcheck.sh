@@ -5387,7 +5387,7 @@ draft_notail_on() {
     python3 - <<'EOF2'
 p = "src/userspace/utils/draft_file.c"
 s = open(p).read()
-anchor = "    int rc = file_span(g_fid, len);"
+anchor = "    int rc = file_span(g_fid, len, 0);"
 assert s.count(anchor) == 1, "draft mutation anchor missing"
 s = s.replace(anchor, "    int rc = 0;   /* logcheck mutation: the tail is left where it was */\n    (void)len;", 1)
 open(p, "w").write(s)
@@ -8071,16 +8071,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 160 of the stand's own twenty-three suites: stand 27, stand_lock 4,
+# the 167 of the stand's own twenty-three suites: stand 27, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
-# stand_plot 4, stand_index 6, stand_ink 5, stand_helm 7, stand_port 2,
+# stand_plot 10, stand_index 6, stand_ink 5, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 12, stand_glean 8,
 # stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 19,
-# stand_warrant 6, stand_room 6, stand_integrity 2. Counted off the code, not a
+# stand_warrant 7, stand_room 6, stand_integrity 2. Counted off the code, not a
 # run (K9): a suite that drops out of the walk is a test that stopped covering
 # anything, and the count is where that shows. How many of them pass and how
 # many stand aside is the road's — said, not pinned.
-STAND_RUN=182
+STAND_RUN=189
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT

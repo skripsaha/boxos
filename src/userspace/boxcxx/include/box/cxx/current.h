@@ -299,7 +299,7 @@ public:
     // opened for reading. A cursor left past a shorter end is brought back.
     status span(std::uint64_t n) noexcept
     {
-        return _detail::from_status(c_ ? current_span(c_, n) : -ERR_INVALID_ARGUMENT);
+        return _detail::from_status(c_ ? current_span(c_, n, 0) : -ERR_INVALID_ARGUMENT);
     }
 };
 

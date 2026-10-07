@@ -157,6 +157,14 @@ error_t  PlotEndWrite(Plot *p, uint64_t at, uint64_t done);
  * no longer names it is inked. */
 error_t  PlotTrimTo(Plot *p, uint64_t keep_blocks);
 
+/* Whether the volume could ever give the blocks [0, end) bytes need beyond
+ * those the Plot names: every block free, every one resting in Fallow and every
+ * one the pool's slack would give back counted as the Plot's to have. OK, or
+ * ERR_TAGFS_NO_SPACE — said, with the numbers — when even all of them would not
+ * cover it. Asked before a growth takes its first block, so one past what the
+ * volume has takes none (Z07-5). Nothing is taken. */
+error_t  PlotRoomFor(const Plot *p, uint64_t end);
+
 /* The file grown to `size` with zeros: the old last block's bytes past the old
  * size zeroed (read first — a refused read refuses the span), and every block
  * after it taken and written as zeros. The Plot's size is `size` after OK. */
@@ -179,8 +187,30 @@ error_t  PlotExtendZero(Plot *p, uint64_t size);
  * warrant lets into such a file lays its bytes where the file has them, and
  * moves none. Refused — said, with the numbers — when no window sheds enough
  * or no run that long is free.
+ *
+ * The same gather in windows, for a holder that gives its core back between
+ * two (a defrag, R24): PlotGatherBegin chooses the extents and takes the run —
+ * nothing is copied yet — and each PlotGatherStep copies the next window of
+ * them, as many blocks as the seat takes in one command. The step that copies
+ * the last makes the copy durable, asks B10 again of the record as it is then,
+ * and makes the Plot name the run: *out_laid, and the caller inks. Nothing is
+ * named before that, so a gather let go of part way gives back its run.
+ * PlotGather is all of it in one call.
  */
+typedef struct {
+    uint32_t first;     /* the extents gathered, in the file's order ... */
+    uint32_t last;
+    uint64_t blocks;    /* ... the blocks they hold, which the run taken for them holds */
+    uint32_t to;        /* where that run begins */
+    uint64_t copied;    /* how many of them are copied into it */
+    uint32_t extent;    /* where the copy goes on: the extent, */
+    uint32_t within;    /* ... and its block */
+    bool     laid;      /* the Plot names the run */
+} PlotGathering;
+
 error_t  PlotGather(Plot *p, uint32_t shed, uint32_t hint);
+error_t  PlotGatherBegin(Plot *p, uint32_t shed, uint32_t hint, PlotGathering *g);
+error_t  PlotGatherStep(Plot *p, PlotGathering *g, bool *out_laid);
 
 /*
  * Where a write's bytes come from: the kernel's own memory, or a program's

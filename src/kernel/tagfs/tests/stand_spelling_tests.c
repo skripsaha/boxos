@@ -296,7 +296,7 @@ static TestResult TestStandWellKnownPastTag63(void)
         TEST_ASSERT(StandHighTag(s_well_text[i], sizeof(s_well_text[i]), &ids[i]),
                     "a tag numbered past 63");
         TEST_ASSERT(StandMakeFile(names[i], NULL, 0, &files[i]), "a file of the test's own");
-        TEST_ASSERT_EQ(tagfs_add_tag(files[i], ids[i]), 0, "wears it");
+        TEST_ASSERT_EQ(tagfs_add_tag(files[i], ids[i], INK_UNWARRANTED), 0, "wears it");
     }
 
     wk->trashed = ids[0];
@@ -432,7 +432,8 @@ static TestResult TestStandTagSetWearsWhatItWasGiven(void)
 
     len = StandTagText("stand_info", 'i', STAND_VALUE_BYTES);
     TEST_ASSERT_OK(TagSpell(s_text, len, &spelled), "a tag with a 300-byte value spells");
-    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &spelled), "and is put on the file");
+    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &spelled, INK_UNWARRANTED),
+                   "and is put on the file");
     TEST_ASSERT(StandInfoHasWhole(file_id, s_text), "and its info carries all 300 bytes of it");
 out:
     if (file_id)

@@ -617,6 +617,8 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
     for (uint32_t i = 0; i < f.drops && i < 2 && rc == OK; i++)
         if (warrant != INK_WARRANTED && InkTagGuarded(f.dropped[i]))
             rc = ERR_PERMISSION_DENIED;
+    if (rc == OK && f.adds && warrant != INK_WARRANTED && InkTagGuarded(add))
+        rc = ERR_PERMISSION_DENIED;
     if (rc == OK && !name && !f.adds && f.drops == 0) {
         rc      = drop != TAGFS_INVALID_TAG_ID ? ERR_TAGFS_TAG_NOT_FOUND : OK;
         out->gen = was.gen;
@@ -637,8 +639,8 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
     }
 out:
     if (rc == ERR_PERMISSION_DENIED)
-        kprintf("[TagFS] file %u: a tag of key system, boot or god comes off it only with the "
-                "warrant, and this call carries none\n", fid);
+        kprintf("[TagFS] file %u: a tag of key system, boot or god goes on it or comes off it "
+                "only with the warrant, and this call carries none\n", fid);
     else if (rc == ERR_TAGFS_RECORD_FULL)
         kprintf("[TagFS] file %u: its record has no room for this name or tag beside the extents "
                 "it names and those a write in flight will name — refused\n", fid);

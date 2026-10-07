@@ -10,7 +10,7 @@
  * Param layouts (little-endian, packed):
  *   OBJ_READ      params: [u32 file_id][u64 offset]
  *   OBJ_WRITE     params: [u32 file_id][u64 offset][u32 flags]
- *   OBJ_SPAN      params: [u32 file_id][u64 size]
+ *   OBJ_SPAN      params: [u32 file_id][u64 size][u32 flags]
  *   OBJ_DELETE    params: [u32 file_id]
  *   OBJ_RENAME    params: [u32 file_id][u16 new_name_len][char new_name[]]
  *   OBJ_GET_INFO  params: [u32 file_id]
@@ -313,10 +313,14 @@ static int ObjDelete(const ManifestOp *op,
 }
 
 /* -------------------------------------------------------------------------
- * OBJ_SPAN — params = [u32 file_id][u64 size]: the file made exactly `size`
- * bytes long (HelmSpan). Shorter cuts the tail; longer reads as zeros from
- * the old size on. A WriteJob, as a write is: it holds the file's Helm, and
- * waits for it parked.
+ * OBJ_SPAN — params = [u32 file_id][u64 size][u32 flags]: the file made
+ * exactly `size` bytes long (HelmSpanWindow). Shorter cuts the tail; longer
+ * reads as zeros from the old size on, grown a window at a time. With
+ * STORAGE_SPAN_GROW the file is grown to `size` only if it is shorter, decided
+ * under its Helm — a writer that spans to where its write begins never cuts
+ * back what another writer added meanwhile (Z16-1). flags may be left off: 0.
+ * A flag this deck does not know is refused ERR_INVALID_ARGUMENT. A WriteJob,
+ * as a write is: it holds the file's Helm, and waits for it parked.
  *
  * Guarded like OBJ_DELETE, by the same one guard and the same warrant:
  * cutting a file the system keeps down to nothing destroys it just as
@@ -336,13 +340,16 @@ static int ObjSpan(const ManifestOp *op,
 {
     (void)crate_count;
     if (op->param_size < 12) return ERR_INVALID_ARGUMENT;
+    uint32_t flags = op->param_size >= 16 ? param_u32(op, 12) : 0;
+    if (flags & ~STORAGE_SPAN_GROW) return ERR_INVALID_ARGUMENT;
 
     WriteJobAsk ask;
     memset(&ask, 0, sizeof(ask));
-    ask.kind    = WRITE_JOB_SPAN;
-    ask.file_id = param_u32(op, 0);
-    ask.size    = param_u64(op, 4);
-    ask.warrant = StorageCallWarrant(ctx);
+    ask.kind      = WRITE_JOB_SPAN;
+    ask.file_id   = param_u32(op, 0);
+    ask.size      = param_u64(op, 4);
+    ask.grow_only = (flags & STORAGE_SPAN_GROW) != 0;
+    ask.warrant   = StorageCallWarrant(ctx);
     return WriteJobSubmit(&ask, crates, ctx);
 }
 
@@ -726,9 +733,12 @@ static error_t storage_one_tag(const ManifestOp *op, Crate *crates, const OpCont
 }
 
 /* STORAGE_TAG_SET  params:[u32 file_id]  in_crate: "key" or "key:value" —
- * the file wears exactly that tag, or the call is refused. Room on its way —
- * a new tag's block of the registry, a Spare for the tail — is waited for
- * (SettleOpForRoom). */
+ * the file wears exactly that tag, or the call is refused. A tag of key
+ * system, boot or god goes on any file only for a cabin with the warrant
+ * (ERR_PERMISSION_DENIED otherwise): it makes the file one the system keeps,
+ * which its owner could no longer change; any other tag goes on any file,
+ * one the system keeps among them. Room on its way — a new tag's block of the
+ * registry, a Spare for the tail — is waited for (SettleOpForRoom). */
 static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -738,7 +748,7 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     TagSpelling tag;
     error_t     rc = storage_one_tag(op, crates, ctx, &text, &tag);
     if (rc != OK) return rc;
-    rc = tagfs_add_tag_string(param_u32(op, 0), &tag);
+    rc = tagfs_add_tag_string(param_u32(op, 0), &tag, StorageCallWarrant(ctx));
     crate_buf_free(text);
     if (rc == ERR_WOULD_BLOCK)
         return SettleOpForRoom(op, crates, crate_count, ctx, param_u32(op, 0));

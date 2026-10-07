@@ -164,7 +164,7 @@ void save_book(void)
 
     /* The file made exactly as long as the draft: a shorter draft's old tail
      * is cut, and a draft that grew is that long already. */
-    int rc = file_span(g_fid, len);
+    int rc = file_span(g_fid, len, 0);
     if (rc != 0) {
         msg_begin();
         msg_add(s_name);

@@ -3,9 +3,9 @@
  * (write_job.h).
  *
  * A synchronous job runs under the file's Helm — the caller's call when the
- * Helm was free, a service point when it was handed on: a span and a defrag in
- * one piece (HelmSpan, HelmDefrag), a write a window at a time
- * (HelmWriteWindow). An asynchronous write is a state machine whose every
+ * Helm was free, a service point when it was handed on — a window at a time:
+ * a write's (HelmWriteWindow), a span's (HelmSpanWindow) and a defrag's
+ * (HelmDefragWindow). An asynchronous write is a state machine whose every
  * command goes through the port — an AHCI port's slots or a USB disk's queue —
  * a stretch of the window a command, and which is pumped between two answers
  * where its seat's answers continue (write_job_port.c).
@@ -21,6 +21,14 @@
  * continuations have waiting (wjob_continue). A write of any length holds no
  * more than a window's ground unnamed, and a K-Core for no longer than one
  * window.
+ *
+ * ‼ SO DO A SPAN AND A DEFRAG (R24). A span grows its file a window at a time,
+ * each window inked, so it holds no more ground unnamed than a write does; a
+ * defrag copies its file into the run it took a window at a time and inks
+ * once, at the end, as it always did (D7). Between two windows either gives
+ * its core back exactly as a write does — a span of gigabytes held a K-Core,
+ * on one core the whole machine with interrupts off, for as long as its zeros
+ * took. A span refused part way keeps the windows it inked, and says so.
  *
  * ‼ ONE ANSWER TO EVERY WRITE (W-ERR): the reason, the bytes the file's inked
  * record holds of the write (u64), and the size it left — in the out crate
@@ -129,18 +137,35 @@ static error_t wjob_window(WriteJob *j)
     return rc;
 }
 
-/* The job's work under the Helm it holds: a span or a defrag whole, a write
- * one window. */
+/* The span's next window, the size its first one found kept: the size it
+ * leaves is the handle's, which each window keeps as its record says. */
+static error_t wjob_span_window(WriteJob *j)
+{
+    uint64_t found = UINT64_MAX;
+    error_t  rc    = HelmSpanWindow(j->handle, j->span_size, j->span_grow, &found, &j->ended);
+    if (j->span_was == UINT64_MAX)
+        j->span_was = found;
+    j->final_size = j->handle->file_size;
+    return rc;
+}
+
+/* The job's work under the Helm it holds: one window. */
 static error_t wjob_work(WriteJob *j)
 {
     switch (j->kind) {
     case WRITE_JOB_SPAN:
-        return HelmSpan(j->handle, j->span_size, &j->span_was);
+        return wjob_span_window(j);
     case WRITE_JOB_DEFRAG:
-        return HelmDefrag(j->handle);
+        return HelmDefragWindow(j->handle, &j->defrag, &j->ended);
     default:
         return wjob_window(j);
     }
+}
+
+/* Whether a window is left after one that answered OK. */
+static bool wjob_windows_left(const WriteJob *j)
+{
+    return j->kind == WRITE_JOB_WRITE ? j->bytes_inked < j->source.bytes : !j->ended;
 }
 
 /* The cycle's end the job waited for — or, refused for good, the answer that
@@ -169,7 +194,7 @@ static void wjob_wait_for_room(WriteJob *j)
 }
 
 /* A synchronous job's turn under the Helm it holds: its work, or — when the
- * cycle it waited for was refused for good — that refusal. A write with
+ * cycle it waited for was refused for good — that refusal. A job with
  * windows left gives its core back — its caller parked if it was not yet, the
  * job listed for the next service point, and the turn ends there; a caller in
  * the kernel standing in its call has no core to give back, and its windows
@@ -192,7 +217,7 @@ static int wjob_turn(WriteJob *j)
         }
         if (HelmRoomCameBack(&rc))
             continue;
-        if (rc != OK || j->kind != WRITE_JOB_WRITE || j->bytes_inked >= j->source.bytes)
+        if (rc != OK || !wjob_windows_left(j))
             return wjob_finalize(j, rc);
         if (!j->deferred) {
             if (!j->target)
@@ -244,12 +269,20 @@ static void wjob_handed(HelmWaiter *w)
  *  The end — one for every job, however it ran
  * ========================================================================= */
 
+/* Whether the span changed its file: a window of it inked, the size its first
+ * window found no longer the file's — a span refused part way among them. */
+static bool wjob_span_changed(const WriteJob *j)
+{
+    return j->span_was != UINT64_MAX && j->final_size != j->span_was;
+}
+
 /* A change to a file's bytes, said on every tag it wears — one 32-byte shape
  * for every road that changes them, so one listener reads them all: op 1 a
  * write (the bytes written at offset), op 3 a span (the bytes cut or added
- * from offset, the old or the new size, whichever is less). A defrag moves the
- * bytes and changes none of them, and says nothing. */
-static void wjob_publish(const WriteJob *j, error_t rc)
+ * from offset, the old or the new size, whichever is less — the size it left,
+ * when it was refused part way). A defrag moves the bytes and changes none of
+ * them, and says nothing. */
+static void wjob_publish(const WriteJob *j)
 {
     uint8_t  op;
     uint64_t offset, bytes, final_size;
@@ -260,13 +293,13 @@ static void wjob_publish(const WriteJob *j, error_t rc)
         op = 1, offset = j->start_offset, bytes = j->bytes_inked, final_size = j->final_size;
         break;
     case WRITE_JOB_SPAN:
-        if (rc != OK || j->span_size == j->span_was)
+        if (!wjob_span_changed(j))
             return;
         op         = 3;
-        offset     = j->span_size < j->span_was ? j->span_size : j->span_was;
-        bytes      = j->span_size < j->span_was ? j->span_was - j->span_size
-                                                : j->span_size - j->span_was;
-        final_size = j->span_size;
+        offset     = j->final_size < j->span_was ? j->final_size : j->span_was;
+        bytes      = j->final_size < j->span_was ? j->span_was - j->final_size
+                                                 : j->final_size - j->span_was;
+        final_size = j->final_size;
         break;
     default:
         return;
@@ -375,8 +408,9 @@ static int wjob_answer_now(WriteJob *j, error_t rc, uint64_t written)
 }
 
 /* A refusal said once, on the job's way out: a write's with the one answer
- * every write gives (W-ERR), and a job the medium left before it was handed
- * the Helm with what left with the medium. */
+ * every write gives (W-ERR), a span's that came part way with the size it
+ * left, and a job the medium left before it was handed the Helm with what left
+ * with the medium. */
 static void wjob_say_refused(const WriteJob *j, error_t rc)
 {
     static const char *const what[] = {
@@ -399,6 +433,11 @@ static void wjob_say_refused(const WriteJob *j, error_t rc)
                 "file's, and the file is %llu bytes\n", j->file_id, (unsigned)rc,
                 (unsigned long long)j->bytes_inked, (unsigned long long)j->source.bytes,
                 (unsigned long long)j->final_size);
+    else if (j->kind == WRITE_JOB_SPAN && wjob_span_changed(j))
+        kprintf("[Storage] span of file %u to %llu bytes refused part way (error %u): the "
+                "windows inked before it are the file's, and it is %llu bytes, %llu when the "
+                "span began\n", j->file_id, (unsigned long long)j->span_size, (unsigned)rc,
+                (unsigned long long)j->final_size, (unsigned long long)j->span_was);
 }
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -427,15 +466,19 @@ int wjob_finalize(WriteJob *j, error_t rc)
         j->final_size = j->loaded ? j->plot.size_before : j->handle->file_size;
 
     PlotRelease(&j->plot);
+    HelmDefragLetGo(&j->defrag);
     wjob_say_refused(j, rc);
     if (rc != OK && !j->medium_left)
         TagFSWriteRefused();
     /* A job that inked owes the file's newest record — its own last Ink, or a
      * name or tag inked over it since — against its program; one that inked
      * nothing owes nothing. Inside the door, which is let go of below. */
-    if (j->target && (written != 0 || (j->kind != WRITE_JOB_WRITE && rc == OK)))
+    bool inked = j->kind == WRITE_JOB_WRITE ? written != 0
+               : j->kind == WRITE_JOB_SPAN  ? wjob_span_changed(j)
+                                            : rc == OK;
+    if (j->target && inked)
         TagFSNoteInker(j->target, TagFSInkPlace(InkGenOf(j->file_id)));
-    wjob_publish(j, rc);
+    wjob_publish(j);
     if (j->kind == WRITE_JOB_WRITE)
         TagFSDataCostWrite();
     if (j->holds_helm)
@@ -541,6 +584,8 @@ static error_t wjob_make(const WriteJobAsk *ask, Crate *crates, const OpContext 
     j->append        = ask->append;
     j->waybill       = ask->waybill;
     j->span_size     = ask->size;
+    j->span_grow     = ask->grow_only;
+    j->span_was      = UINT64_MAX;
     j->submit_cookie = ctx ? ctx->submit_cookie : 0;
     j->final_size    = j->handle->file_size;
     j->helm.hand     = wjob_handed;

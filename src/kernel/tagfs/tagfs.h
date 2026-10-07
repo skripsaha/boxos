@@ -740,8 +740,8 @@ error_t TagFSCreateFits(const char* filename, const TagSpelling* tags, uint32_t 
 /* The file given up, or renamed — its old name's tag off, the new one's on.
  * 0, or a negative -ERR_*: a file the system keeps is given up only with the
  * warrant, and so is a tag of key system, boot or god its rename would take
- * off (-ERR_PERMISSION_DENIED); the file holding the kernel the Deed points
- * the loader at is given up by nobody. */
+ * off or put on (-ERR_PERMISSION_DENIED); the file holding the kernel the Deed
+ * points the loader at is given up by nobody. */
 int  tagfs_delete_file(uint32_t file_id, InkWarrant warrant);
 int  tagfs_rename_file(uint32_t file_id, const char* new_filename, InkWarrant warrant);
 
@@ -758,22 +758,26 @@ int  tagfs_rename_file(uint32_t file_id, const char* new_filename, InkWarrant wa
 /* span — the file made exactly `size` bytes long. Shorter: the tail is cut and
  * its blocks given back. Longer: the bytes from the old size to the new one
  * read as zeros, written to blocks taken for them — never a previous owner's
- * bytes. The one way a file grows past its size other than by being written at
- * its end. OK, or the refusal: nothing of the file is changed by one. */
+ * bytes — a window at a time, each inked. The one way a file grows past its
+ * size other than by being written at its end. OK, or the refusal: one before
+ * the first window changes nothing of the file, one part way keeps the windows
+ * inked before it; a growth past every block the volume could give is refused
+ * ERR_TAGFS_NO_SPACE before it takes one. */
 error_t tagfs_span_file(uint32_t file_id, uint64_t size);
 
 /* A tag put on a file, or taken off: 0, or the Ink's refusal as -ERR_*. A tag
- * of key system, boot or god comes off only with the warrant. */
-int  tagfs_add_tag(uint32_t file_id, uint16_t tag_id);
+ * of key system, boot or god goes on or comes off only with the warrant. */
+int  tagfs_add_tag(uint32_t file_id, uint16_t tag_id, InkWarrant warrant);
 int  tagfs_remove_tag(uint32_t file_id, uint16_t tag_id, InkWarrant warrant);
 bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id);
 
 /* The tag a spelling names, interned and put on the file, both inside one
  * mounting of the volume: OK, or the real refusal — the registry's (the tag
  * too long, the registry full), or the Ink's: ERR_FILE_NOT_FOUND,
- * ERR_TAGFS_RECORD_FULL, ERR_DEVICE_NOT_READY, ERR_TAGFS_READ_ONLY,
+ * ERR_PERMISSION_DENIED for a tag of key system, boot or god without the
+ * warrant, ERR_TAGFS_RECORD_FULL, ERR_DEVICE_NOT_READY, ERR_TAGFS_READ_ONLY,
  * ERR_NO_MEMORY, a Spare's refusal; ERR_TAGFS_NOT_INITIALIZED with no volume. */
-error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling* tag);
+error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling* tag, InkWarrant warrant);
 /* What the spelling names comes off the file: that tag when it has a value,
  * every tag of its key when it is bare. 0 once one of them came off, or a
  * negative -ERR_*: -ERR_TAGFS_TAG_NOT_FOUND when the file wore none of them,

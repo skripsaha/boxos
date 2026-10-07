@@ -3,6 +3,9 @@
 #include "atomics.h"
 #include "cpu_calibrate.h"
 #include "../run/run.h"
+#include "../ink/fallow.h"                 /* FallowBlocks — ground a cycle gives back */
+#include "../glean/glean.h"                /* GleanMayFree — ground the pool's slack gives back */
+#include "../metadata_pool/meta_pool.h"
 
 /*
  * Blocks written the synchronous way, a stretch a command (PlotStretchAt):
@@ -212,4 +215,29 @@ error_t PlotExtendZero(Plot *p, uint64_t size)
 out:
     kfree(buf);
     return rc;
+}
+
+error_t PlotRoomFor(const Plot *p, uint64_t end)
+{
+    uint64_t need = end / TAGFS_BLOCK_SIZE + (end % TAGFS_BLOCK_SIZE != 0);
+    if (need <= p->blocks)
+        return OK;
+    need -= p->blocks;
+
+    TagFSState *fs = tagfs_get_state();
+    TagFSLockTake(&fs->lock);
+    uint64_t free    = fs->ledger.free_blocks;
+    uint64_t resting = FallowBlocks();
+    uint64_t slack   = GleanMayFree() ? PoolChainBlocks() - PoolLiveBlocks() - 1u : 0;
+    TagFSLockDrop(&fs->lock);
+
+    if (need <= free + resting + slack)
+        return OK;
+    kprintf("[TagFS] file %u: growing it to %llu bytes needs %llu more block(s), and the volume "
+            "could give it %llu at most — %llu free, %llu resting in Fallow, %llu in the pool's "
+            "slack — refused, the file %llu bytes long\n", p->fid, (unsigned long long)end,
+            (unsigned long long)need, (unsigned long long)(free + resting + slack),
+            (unsigned long long)free, (unsigned long long)resting, (unsigned long long)slack,
+            (unsigned long long)p->size);
+    return ERR_TAGFS_NO_SPACE;
 }

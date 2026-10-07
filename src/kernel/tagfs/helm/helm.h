@@ -145,15 +145,39 @@ uint64_t HelmViewFloor(uint32_t file_id);
  * (W-ERR). HelmWrite: every window, one after another, as tagfs_write
  * describes — for a caller that has no core to give back.
  *
- * HelmSpan: the file made exactly `size` bytes long, as tagfs_span_file, and
- * in *out_was the size it found. HelmDefrag: the file gathered into one run
- * near where it begins, as tagfs_defrag_file. Each is guarded with the warrant
- * the handle carries (InkWarrant).
+ * A span and a defrag go a window at a time too (R24), so neither holds its
+ * holder's core for the length of a file. HelmSpanWindow: the span's next
+ * window — the file grown by a window towards `size`, each its own load,
+ * reservation, zeros and Ink, or cut to `size` in one — and *out_ended once it
+ * is `size` long; with `grow_only` a file no shorter than `size` is left as it
+ * is, decided here under the Helm. *out_found is the size the window found
+ * when it loaded the file, left alone when it did not. The growth is asked of
+ * the volume before its first block is taken (PlotRoomFor): a span past every
+ * block the volume could give is refused ERR_TAGFS_NO_SPACE, said, with what
+ * it already grew kept. HelmDefragWindow: the defrag's next window — the run
+ * taken at the first, then the file's blocks copied into it as many at a time
+ * as the seat takes, and one Ink once the last is copied and durable
+ * (*out_ended) — on the HelmDefragging its holder keeps between windows and
+ * lets go of on every way out (HelmDefragLetGo), which gives back a run
+ * nothing named. HelmSpan and HelmDefrag: every window, one after another, as
+ * tagfs_span_file and tagfs_defrag_file describe, for a caller that has no
+ * core to give back; HelmSpan's *out_was is the size it found. Each is guarded
+ * with the warrant the handle carries (InkWarrant).
  */
+typedef struct {
+    Plot          plot;      /* the file's, loaded at the first window */
+    PlotGathering gather;    /* how far the copy into the run has come */
+    bool          loaded;
+} HelmDefragging;
+
 uint64_t HelmWindowBytes(uint64_t at);
 error_t  HelmWriteWindow(TagFSFileHandle* handle, const PlotSource* src, uint64_t* inked);
 error_t  HelmWrite(TagFSFileHandle* handle, const PlotSource* src, uint64_t* out_written);
+error_t  HelmSpanWindow(TagFSFileHandle* handle, uint64_t size, bool grow_only,
+                        uint64_t* out_found, bool* out_ended);
 error_t  HelmSpan(TagFSFileHandle* handle, uint64_t size, uint64_t* out_was);
+error_t  HelmDefragWindow(TagFSFileHandle* handle, HelmDefragging* d, bool* out_ended);
+void     HelmDefragLetGo(HelmDefragging* d);
 error_t  HelmDefrag(TagFSFileHandle* handle);
 
 /* A caller in the kernel standing in its call, whose call answered *rc: true

@@ -63,13 +63,17 @@ int file_rename(uint32_t file_id, const char* new_filename);
  * blocks given back. Longer: the bytes from the old size on read as zeros —
  * never another file's. A write grows a file only at its end, and one that
  * begins past it is refused -ERR_TAGFS_BEYOND_SIZE: a gap is made by span.
- * Refused on "system"/"boot" files (-ERR_PERMISSION_DENIED), like delete.
+ * flags STORAGE_SPAN_GROW (box/types.h): grown to `size` only if it is
+ * shorter, never cut — the way to make room for a write past the end without
+ * cutting back what another writer added meanwhile; 0 for exactly `size`.
+ * Refused on "system"/"boot" files (-ERR_PERMISSION_DENIED), like delete; a
+ * growth past every block the volume could give, -ERR_TAGFS_NO_SPACE.
  * Returns 0 or a negative -error_t.
  *
  * Publishes the change on every tag of the file — the same 32-byte payload
  * shape as a write, with op = 3, offset = where the file changed (the smaller
  * of the old and the new size), bytes = how many were cut or added. */
-int file_span(uint32_t file_id, uint64_t size);
+int file_span(uint32_t file_id, uint64_t size, uint32_t flags);
 
 int tag_add(uint32_t file_id, const char* tag);
 int tag_remove(uint32_t file_id, const char* key);

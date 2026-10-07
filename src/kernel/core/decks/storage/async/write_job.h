@@ -10,6 +10,7 @@
 #include "baton.h"      /* embedded never-drop MPSC node (cq_node) */
 #include "roadstead.h"  /* the job's own berth at the port */
 #include "settle.h"     /* the job's wait for a cycle's end, when room is on its way */
+#include "helm.h"       /* the defrag's state between its windows */
 
 /*
  * WriteJob — the one automaton every change of a file's extents a program asks
@@ -22,9 +23,10 @@
  * again under it (W-DOOR). It asks for the Helm once, and nobody spins:
  *
  *   free, and the work synchronous — the job runs at once, in the caller's
- *   call, and the answer is the call's; a write longer than a window runs its
- *   first there, then parks its caller and runs each next window at a service
- *   point, giving the core back between two (RT-16);
+ *   call, and the answer is the call's; work longer than a window — a write, a
+ *   span's growth, a defrag's copy — runs its first there, then parks its
+ *   caller and runs each next window at a service point, giving the core back
+ *   between two (RT-16, R24);
  *
  *   held — the caller is parked on its chit and the job waits in the Helm's
  *   FIFO. The holder that lets go hands the Helm on (HelmHand): a synchronous
@@ -53,7 +55,7 @@ struct OpContext;
 
 typedef enum {
     WRITE_JOB_WRITE = 0,    /* bytes at an offset, or at the file's size */
-    WRITE_JOB_SPAN,         /* the file made exactly a size long */
+    WRITE_JOB_SPAN,         /* the file made exactly a size long, or grown to it (grow_only) */
     WRITE_JOB_DEFRAG,       /* the file gathered into one run */
 } WriteJobKind;
 
@@ -65,7 +67,8 @@ typedef struct {
     uint64_t     offset;        /* WRITE: where the write begins ... */
     bool         append;        /* ... or at the file's size */
     uint64_t     waybill;       /* WRITE: a ferry's correlation token (0 = none) */
-    uint64_t     size;          /* SPAN: the size the file is made */
+    uint64_t     size;          /* SPAN: the size the file is made ... */
+    bool         grow_only;     /* ... only if it is shorter (STORAGE_SPAN_GROW) */
     InkWarrant   warrant;       /* the caller's (StorageCallWarrant), carried in the job's handle */
     Crate       *out_crate;     /* WRITE: [u64 inked][u64 size], every answer; DEFRAG: [u32 score]; or NULL */
 #ifdef CONFIG_VOLUME_TESTS
@@ -115,7 +118,10 @@ typedef struct WriteJob {
     uint64_t          bytes_inked;       /* ... and named by the file's inked record */
     uint64_t          window_end;        /* where the window being written ends, in the source */
     uint64_t          span_size;
-    uint64_t          span_was;          /* the size the span found */
+    bool              span_grow;         /* grown to span_size only if shorter */
+    uint64_t          span_was;          /* the size its first window found; UINT64_MAX before */
+    bool              ended;             /* SPAN, DEFRAG: no window is left */
+    HelmDefragging    defrag;            /* DEFRAG: its Plot and copy between windows */
     uint64_t          waybill;           /* Ф26e: ferry correlation token (0 = sync/no-token) */
     uint32_t          submit_cookie;     /* the submit's cloakroom token — echoed into the
                                           * plain (waybill==0) completion so the caller's

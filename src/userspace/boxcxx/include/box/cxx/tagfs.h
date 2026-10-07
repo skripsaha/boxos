@@ -274,7 +274,7 @@ public:
     // change is published on every tag of the file.
     box::status span(std::uint64_t n)
     {
-        return id_ ? box::_detail::from_status(::file_span(id_, n))
+        return id_ ? box::_detail::from_status(::file_span(id_, n, 0))
                    : std::unexpected(box::error{box::errc::invalid_argument});
     }
 

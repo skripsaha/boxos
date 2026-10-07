@@ -351,12 +351,13 @@ int delete(uint32_t file_id)
     return box_fail(rc);
 }
 
-int file_span(uint32_t file_id, uint64_t size)
+int file_span(uint32_t file_id, uint64_t size, uint32_t flags)
 {
-    /* params: [u32 file_id][u64 size]. */
-    uint8_t params[12];
-    memcpy(params,     &file_id, 4);
-    memcpy(params + 4, &size,    8);
+    /* params: [u32 file_id][u64 size][u32 flags]. */
+    uint8_t params[16];
+    memcpy(params,      &file_id, 4);
+    memcpy(params + 4,  &size,    8);
+    memcpy(params + 12, &flags,   4);
 
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_SPAN,
                      params, sizeof(params),
