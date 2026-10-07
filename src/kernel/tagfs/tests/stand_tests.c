@@ -800,6 +800,10 @@ static const TestCase g_stand_tests[] = {
       .func = TestStandHeapLargeTakesPagesAndGivesBack, .reach = TEST_READS_ONLY },
     { .name = "stand_heap_class_refused_reserve_serves",
       .func = TestStandHeapClassRefusedReserveServes, .reach = TEST_READS_ONLY },
+    { .name  = "stand_touch_queue_tick_one_pass", .func = TestStandTouchQueueTickOnePass,
+      .reach = TEST_READS_ONLY,
+      .caveat_defect = "a tick walks the touch queue from its head again for every node it "
+                       "fires, with interrupts off for their number times the queue's depth" },
 
     { .name  = "stand_rmw_read_refused", .func = TestStandRmwReadRefused,
       .reach = TEST_WRITES_TO_VOLUME,

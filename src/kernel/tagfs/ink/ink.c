@@ -630,8 +630,10 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
         TagFSLockTake(&fs->lock);
         rc = InkFieldsLocked(fid, &was, &f, &meta, add, &r, stake, out);
         TagFSLockDrop(&fs->lock);
-        if (rc == OK)
+        if (rc == OK) {
             SettleInked(out->gen, false);
+            TagBitmapShrink(fs->bitmap_index, &fs->lock, f.dropped, f.drops < 2 ? f.drops : 2, fid);
+        }
     }
 out:
     if (rc == ERR_PERMISSION_DENIED)
@@ -829,6 +831,7 @@ static error_t InkQuitclaimOnce(uint32_t fid, InkWarrant warrant, InkReceipt* ou
         if (rc == OK) {
             fallow = NULL;
             SettleInked(out->gen, false);
+            TagBitmapShrink(fs->bitmap_index, &fs->lock, cur->tags, cur->tag_count, fid);
         }
     }
     FallowNodeLetGo(fallow);

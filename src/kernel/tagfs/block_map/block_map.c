@@ -10,7 +10,7 @@
  * pass is block_map_mount.c; where a take goes is block_map_take.c.
  */
 
-BlockMapState g_map = { .work_lo = 1, .work_hi = 0 };
+BlockMapState g_map;
 
 TagFSLock *MapLock(void)
 {
@@ -24,6 +24,49 @@ BlockMapPage *MapReady(uint32_t w)
         return NULL;
     BlockMapPage *p = &g_map.page[slot - 1];
     return p->state == MAP_PAGE_READY ? p : NULL;
+}
+
+// ----------------------------------------------------------------------------
+// The lists of windows by the longest run they hold
+// ----------------------------------------------------------------------------
+
+/* The list a window whose longest run is `longest` sits in, + 1; 0 for none. */
+static uint32_t MapFitList(uint32_t longest)
+{
+    return longest ? 32u - (uint32_t)__builtin_clz(longest) : 0u;
+}
+
+static void MapFitUnlink(uint32_t w, uint32_t list)
+{
+    BlockMapWindow *x = &g_map.win[w];
+    if (x->fit_prev)
+        g_map.win[x->fit_prev - 1].fit_next = x->fit_next;
+    else
+        g_map.fit[list - 1] = x->fit_next;
+    if (x->fit_next)
+        g_map.win[x->fit_next - 1].fit_prev = x->fit_prev;
+    x->fit_prev = x->fit_next = 0;
+}
+
+static void MapFitLink(uint32_t w, uint32_t list)
+{
+    BlockMapWindow *x = &g_map.win[w];
+    x->fit_prev = 0;
+    x->fit_next = g_map.fit[list - 1];
+    if (x->fit_next)
+        g_map.win[x->fit_next - 1].fit_prev = w + 1;
+    g_map.fit[list - 1] = w + 1;
+}
+
+void MapFitMoved(uint32_t w, uint32_t was)
+{
+    uint32_t from = MapFitList(was), to = MapFitList(g_map.win[w].longest);
+    if (from == to)
+        return;
+    if (from)
+        MapFitUnlink(w, from);
+    if (to)
+        MapFitLink(w, to);
 }
 
 // ----------------------------------------------------------------------------
@@ -95,8 +138,10 @@ static void MapMeasureView(const uint8_t *view, BlockMapWindow *x)
 
 void MapMeasureBits(uint32_t w, const uint8_t *bits)
 {
+    uint32_t was = g_map.win[w].longest;
     MapViewOf(w, bits, g_map.view);
     MapMeasureView(g_map.view, &g_map.win[w]);
+    MapFitMoved(w, was);
     if (g_map.win[w].free && w < g_map.first_room)
         g_map.first_room = w;
 }
@@ -111,7 +156,7 @@ void MapMeasure(uint32_t w)
  * is not in memory: the count is exact, and every bound is kept honest — a run
  * the cut went through keeps the longer of its two sides.
  */
-static void MapShrink(BlockMapWindow *x, uint32_t off, uint32_t n)
+static void MapShrinkSummary(BlockMapWindow *x, uint32_t off, uint32_t n)
 {
     uint32_t end = off + n;
 
@@ -148,9 +193,16 @@ static void MapShrink(BlockMapWindow *x, uint32_t off, uint32_t n)
     x->flags &= (uint8_t)~MAP_W_EXACT;
 }
 
+static void MapShrink(uint32_t w, uint32_t off, uint32_t n)
+{
+    uint32_t was = g_map.win[w].longest;
+    MapShrinkSummary(&g_map.win[w], off, n);
+    MapFitMoved(w, was);
+}
+
 /* [off, off + n) becomes blocks a take may have, in a window whose sector is
  * not in memory: what they join is joined, and nothing else is claimed. */
-static void MapGrow(uint32_t w, uint32_t off, uint32_t n)
+static void MapGrowSummary(uint32_t w, uint32_t off, uint32_t n)
 {
     BlockMapWindow *x   = &g_map.win[w];
     uint32_t        end = off + n;
@@ -190,6 +242,13 @@ static void MapGrow(uint32_t w, uint32_t off, uint32_t n)
     x->flags &= (uint8_t)~MAP_W_EXACT;
 }
 
+static void MapGrow(uint32_t w, uint32_t off, uint32_t n)
+{
+    uint32_t was = g_map.win[w].longest;
+    MapGrowSummary(w, off, n);
+    MapFitMoved(w, was);
+}
+
 void MapAvailabilityChanged(uint32_t start, uint32_t count, bool lost)
 {
     for (uint32_t b = start, end = start + count; b < end; ) {
@@ -200,7 +259,7 @@ void MapAvailabilityChanged(uint32_t start, uint32_t count, bool lost)
         if (MapReady(w))
             MapMeasure(w);
         else if (lost)
-            MapShrink(&g_map.win[w], off, n);
+            MapShrink(w, off, n);
         else
             MapGrow(w, off, n);
         b += n;
@@ -221,12 +280,37 @@ uint32_t MapUnreadWindows(uint32_t start, uint32_t count)
 
 void MapWorkAt(uint32_t w)
 {
-    if (g_map.work_lo > g_map.work_hi) {
-        g_map.work_lo = g_map.work_hi = w;
-        return;
+    uint32_t word = w / 64u;
+    g_map.work[word]             |= 1ull << (w % 64u);
+    g_map.work_words[word / 64u] |= 1ull << (word % 64u);
+}
+
+void MapWorkDone(uint32_t w)
+{
+    uint32_t word = w / 64u;
+    g_map.work[word] &= ~(1ull << (w % 64u));
+    if (!g_map.work[word])
+        g_map.work_words[word / 64u] &= ~(1ull << (word % 64u));
+}
+
+uint32_t MapWorkNext(uint32_t w)
+{
+    uint32_t words = (g_map.windows + 63u) / 64u;
+    if (w >= g_map.windows)
+        return g_map.windows;
+
+    uint32_t word = w / 64u;
+    uint64_t bits = g_map.work[word] & (~0ull << (w % 64u));
+    if (bits)
+        return word * 64u + (uint32_t)__builtin_ctzll(bits);
+    for (uint32_t next = word + 1u; next < words; next = (next / 64u + 1u) * 64u) {
+        uint64_t marks = g_map.work_words[next / 64u] & (~0ull << (next % 64u));
+        if (marks) {
+            uint32_t found = (next / 64u) * 64u + (uint32_t)__builtin_ctzll(marks);
+            return found * 64u + (uint32_t)__builtin_ctzll(g_map.work[found]);
+        }
     }
-    if (w < g_map.work_lo) g_map.work_lo = w;
-    if (w > g_map.work_hi) g_map.work_hi = w;
+    return g_map.windows;
 }
 
 void MapOwedMark(uint32_t w)
@@ -257,12 +341,13 @@ static uint32_t MapDeltaCapFor(uint64_t need)
     return cap <= UINT32_MAX / sizeof(BlockMapDelta) ? (uint32_t)cap : 0u;
 }
 
-/* The deltas moved into `grown`, of `cap`: the array it replaces back. */
+/* The pool moved into `grown`, of `cap`, every slot where it was — the chains
+ * name slots: the array it replaces back. */
 static BlockMapDelta *MapDeltaSwap(BlockMapDelta *grown, uint32_t cap)
 {
     BlockMapDelta *old = g_map.delta;
-    if (g_map.deltas)
-        memcpy(grown, g_map.delta, sizeof(BlockMapDelta) * g_map.deltas);
+    if (g_map.delta_high)
+        memcpy(grown, g_map.delta, sizeof(BlockMapDelta) * g_map.delta_high);
     g_map.delta     = grown;
     g_map.delta_cap = cap;
     return old;
@@ -325,7 +410,7 @@ error_t BlockMapGiveRoomHold(uint32_t gives)
      * nothing: the room held is then what there is, so a take is held to no
      * room it was not held to before, and the gives draw on the rest. */
     TagFSLockTake(MapLock());
-    if (grown && g_map.up && cap > g_map.delta_cap && g_map.deltas <= cap)
+    if (grown && g_map.up && cap > g_map.delta_cap && g_map.delta_high <= cap)
         grown = MapDeltaSwap(grown, cap);
     bool held = (uint64_t)g_map.deltas + g_map.delta_held <= g_map.delta_cap;
     MapDeltaHeldFits();
@@ -339,53 +424,78 @@ bool BlockMapGivesUnseenLocked(void)
     return g_map.gives != 0;
 }
 
+/* An edit looked at `looked` deltas: counted for the stand, which holds it
+ * to what the edit's own window has. */
+static inline void MapEditLooked(uint32_t looked)
+{
+#ifdef CONFIG_VOLUME_TESTS
+    if (looked > g_map.edit_most)
+        g_map.edit_most = looked;
+#else
+    (void)looked;
+#endif
+}
+
+/* A slot of the pool for one delta more; room was made first, so the free
+ * ones or the ground past delta_high hold one. */
+static uint32_t MapDeltaSlot(void)
+{
+    if (g_map.delta_free) {
+        uint32_t i = g_map.delta_free - 1u;
+        g_map.delta_free = g_map.delta[i].older;
+        return i;
+    }
+    return g_map.delta_high++;
+}
+
 void MapDeltaAdd(uint32_t start, uint32_t count, bool take)
 {
-    uint32_t w = start / MAP_WINDOW_BLOCKS;
+    uint32_t        w = start / MAP_WINDOW_BLOCKS;
+    BlockMapWindow *x = &g_map.win[w];
+    uint32_t        i = MapDeltaSlot();
 
-    g_map.delta[g_map.deltas].start = start;
-    g_map.delta[g_map.deltas].count = count;
-    g_map.delta[g_map.deltas].take  = take;
+    g_map.delta[i].start = start;
+    g_map.delta[i].count = count;
+    g_map.delta[i].take  = take;
+    g_map.delta[i].older = x->delta_last;
+    x->delta_last        = i + 1u;
     g_map.deltas++;
     if (!take)
         g_map.gives++;
-    g_map.win[w].flags |= MAP_W_DELTAS;
+    x->flags |= MAP_W_DELTAS;
     MapWorkAt(w);
 }
 
-static void MapDeltaDrop(uint32_t i)
+/* Slot i, out of its window's chain already, back with the free ones. */
+static void MapDeltaLetGo(uint32_t i)
 {
     if (!g_map.delta[i].take)
         g_map.gives--;
-    memmove(&g_map.delta[i], &g_map.delta[i + 1], sizeof(BlockMapDelta) * (g_map.deltas - i - 1));
+    g_map.delta[i].older = g_map.delta_free;
+    g_map.delta_free     = i + 1u;
     g_map.deltas--;
 }
 
-static bool MapDeltaIn(uint32_t w)
-{
-    for (uint32_t i = 0; i < g_map.deltas; i++)
-        if (g_map.delta[i].start / MAP_WINDOW_BLOCKS == w)
-            return true;
-    return false;
-}
-
 /* A give of exactly the run a take written down without its sector took is
- * that take undone, not a second edit: the run was never taken on any sector. */
+ * that take undone, not a second edit: the run was never taken on any sector.
+ * Only the window's newest delta can be that take — a later edit of the window
+ * would stand between. */
 static bool MapDeltaUndoTake(uint32_t start, uint32_t count)
 {
-    for (uint32_t i = g_map.deltas; i-- > 0; ) {
-        BlockMapDelta *d = &g_map.delta[i];
-        if (d->start / MAP_WINDOW_BLOCKS != start / MAP_WINDOW_BLOCKS)
-            continue;
-        if (d->take && d->start == start && d->count == count) {
-            MapDeltaDrop(i);
-            if (!MapDeltaIn(start / MAP_WINDOW_BLOCKS))
-                g_map.win[start / MAP_WINDOW_BLOCKS].flags &= (uint8_t)~MAP_W_DELTAS;
-            return true;
-        }
-        return false;       /* a later edit of the window stands between */
-    }
-    return false;
+    BlockMapWindow *x = &g_map.win[start / MAP_WINDOW_BLOCKS];
+    if (!x->delta_last)
+        return false;
+
+    uint32_t       i = x->delta_last - 1u;
+    BlockMapDelta *d = &g_map.delta[i];
+    MapEditLooked(1u);
+    if (!d->take || d->start != start || d->count != count)
+        return false;
+    x->delta_last = d->older;
+    MapDeltaLetGo(i);
+    if (!x->delta_last)
+        x->flags &= (uint8_t)~MAP_W_DELTAS;
+    return true;
 }
 
 /* Set [off, off + n) on the sector. A bit already set means the block was
@@ -450,26 +560,35 @@ static bool MapLayGive(BlockMapPage *p, uint32_t off, uint32_t n)
     return true;
 }
 
-/* Every delta of the window laid onto its sector, in the order made. */
+/* Every delta of the window laid onto its sector, in the order made: its
+ * chain, newest first, turned round, and each slot let go as it is laid. */
 void MapDeltaApply(uint32_t w, BlockMapPage *p)
 {
-    if (!(g_map.win[w].flags & MAP_W_DELTAS))
+    BlockMapWindow *x = &g_map.win[w];
+    if (!(x->flags & MAP_W_DELTAS))
         return;
 
+    uint32_t oldest = 0, looked = 0;
+    for (uint32_t at = x->delta_last; at; looked++) {
+        uint32_t older = g_map.delta[at - 1u].older;
+        g_map.delta[at - 1u].older = oldest;
+        oldest = at;
+        at     = older;
+    }
+    MapEditLooked(looked);
+    x->delta_last = 0;
+    x->flags     &= (uint8_t)~MAP_W_DELTAS;
+
     uint32_t base = w * MAP_WINDOW_BLOCKS;
-    for (uint32_t i = 0; i < g_map.deltas; ) {
-        BlockMapDelta d = g_map.delta[i];
-        if (d.start / MAP_WINDOW_BLOCKS != w) {
-            i++;
-            continue;
-        }
-        MapDeltaDrop(i);
+    for (uint32_t at = oldest; at; ) {
+        BlockMapDelta d = g_map.delta[at - 1u];
+        MapDeltaLetGo(at - 1u);
         if (d.take)
             MapLayTake(p, d.start - base, d.count);
         else
             MapLayGive(p, d.start - base, d.count);
+        at = d.older;
     }
-    g_map.win[w].flags &= (uint8_t)~MAP_W_DELTAS;
 }
 
 // ----------------------------------------------------------------------------
@@ -622,7 +741,7 @@ static void MapTakeEach(uint32_t start, uint32_t count, bool kept)
         } else {
             MapDeltaAdd(b, n, true);
             if (!kept)
-                MapShrink(&g_map.win[w], off, n);
+                MapShrink(w, off, n);
         }
         MapOwedMark(w);
         b += n;

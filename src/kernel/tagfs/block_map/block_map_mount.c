@@ -82,12 +82,16 @@ error_t BlockMapMount(uint32_t data_blocks, uint64_t map_vlba)
     BlockMapUnmount();
 
     uint32_t windows    = (data_blocks + MAP_WINDOW_BLOCKS - 1) / MAP_WINDOW_BLOCKS;
-    size_t   win_bytes  = (size_t)windows * sizeof(BlockMapWindow);
+    uint32_t work_words = (windows + 63u) / 64u;
+    size_t   win_bytes  = (size_t)windows * sizeof(BlockMapWindow) +
+                          ((size_t)work_words + (work_words + 63u) / 64u) * sizeof(uint64_t);
     size_t   page_bytes = (size_t)MAP_PAGE_SLOTS * sizeof(BlockMapPage);
 
-    g_map.win  = kmalloc(win_bytes);
-    g_map.page = kmalloc(page_bytes);
-    if (!g_map.win || !g_map.page) {
+    g_map.win        = kmalloc((size_t)windows * sizeof(BlockMapWindow));
+    g_map.work       = kmalloc((size_t)work_words * sizeof(uint64_t));
+    g_map.work_words = kmalloc((size_t)((work_words + 63u) / 64u) * sizeof(uint64_t));
+    g_map.page       = kmalloc(page_bytes);
+    if (!g_map.win || !g_map.work || !g_map.work_words || !g_map.page) {
         kprintf("[TagFS] the block map of %u blocks keeps a summary of %u window(s) in "
                 "%llu bytes and a cache of %u of its sectors in %llu more, and the kernel "
                 "heap would not give them\n", data_blocks, windows,
@@ -96,7 +100,9 @@ error_t BlockMapMount(uint32_t data_blocks, uint64_t map_vlba)
         BlockMapUnmount();
         return ERR_NO_MEMORY;
     }
-    memset(g_map.win, 0, win_bytes);
+    memset(g_map.win, 0, (size_t)windows * sizeof(BlockMapWindow));
+    memset(g_map.work, 0, (size_t)work_words * sizeof(uint64_t));
+    memset(g_map.work_words, 0, (size_t)((work_words + 63u) / 64u) * sizeof(uint64_t));
     memset(g_map.page, 0, page_bytes);
     for (uint32_t s = 0; s < MAP_PAGE_SLOTS; s++)
         g_map.page[s].window = MAP_NO_WINDOW;
@@ -248,10 +254,10 @@ void BlockMapUnmount(void)
 {
     AllotmentDropAll();
     kfree(g_map.win);
+    kfree(g_map.work);
+    kfree(g_map.work_words);
     kfree(g_map.page);
     kfree(g_map.delta);
     kfree(g_map.unsettled);
     memset(&g_map, 0, sizeof(g_map));
-    g_map.work_lo = 1;
-    g_map.work_hi = 0;
 }

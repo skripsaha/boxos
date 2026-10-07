@@ -150,8 +150,11 @@ void    BlockMapSettle(void);
 
 /* The Settle cycle's S1, for the cycle whose snapshot holds every Ink up to
  * `target`: the runs those Inks named owed and written taken, settled, and
- * every sector memory changed written too. OK, or the first refusal — each
- * one said. */
+ * every sector memory changed written too. A write another core has on its
+ * way with a debt in it is waited for, and its refusal is S1's. OK only once
+ * every debt it came for is on the medium; otherwise the first refusal, each
+ * one said — ERR_DEVICE_NOT_READY for a write whose core a halt stopped, and
+ * ERR_WOULD_BLOCK for one on its way beneath this very caller. */
 error_t BlockMapFlush(uint64_t target);
 
 /*
@@ -174,8 +177,10 @@ void    BlockMapOweLocked(uint32_t block);
  * as a run that long lies: *got is `want` wherever a run of `want` exists, and
  * otherwise the longest the volume has. Where the hint itself is free and the
  * run from it is long enough, the take starts exactly there — a file that
- * grows grows in place. When nothing is free, after every Allotment was taken
- * back: ERR_WOULD_BLOCK while Fallow rests blocks, else ERR_TAGFS_NO_SPACE.
+ * grows grows in place. No take is longer than one extent (PLOT_RUN_MOST): a
+ * caller after more takes again from where the run ended. When nothing is
+ * free, after every Allotment was taken back: ERR_WOULD_BLOCK while Fallow
+ * rests blocks, else ERR_TAGFS_NO_SPACE.
  */
 error_t TagFSTakeRun(uint32_t want, uint32_t hint, uint32_t *start, uint32_t *got);
 
@@ -193,8 +198,9 @@ error_t TagFSTakeRun(uint32_t want, uint32_t hint, uint32_t *start, uint32_t *go
  * told there is none — and when the volume is let go.
  *
  * AllotmentTake: up to `want` blocks for file `fid`, whose size is
- * `file_blocks`, near `hint`; as TagFSTakeRun answers. What it hands out is
- * the file's write's, as BlockMapTakeFor's run is.
+ * `file_blocks`, near `hint` — never more than one extent at a time; as
+ * TagFSTakeRun answers. What it hands out is the file's write's, as
+ * BlockMapTakeFor's run is.
  * AllotmentRelease: the file's window, by a caller holding the state lock.
  */
 error_t AllotmentTake(uint32_t fid, uint32_t want, uint64_t file_blocks, uint32_t hint,
@@ -225,6 +231,49 @@ void    BlockMapSectorAway(uint32_t block);
  * that refuses it: HEAPFAIL armed on the holder's core right before it. false
  * takes the plan down unspent. */
 void    BlockMapGiveRoomRefused(bool refused);
+
+/* The most steps one hold of the state lock gave a take's plan, and the most
+ * deltas one edit of the map looked at — each since it was last asked, which
+ * starts it again. */
+uint32_t BlockMapHoldMost(void);
+uint32_t BlockMapEditMost(void);
+
+/* The next write of the sector of the window holding `block` runs the
+ * Settle's S1 of the map (BlockMapFlush) on its way — with the lock let go,
+ * right before the medium hears it — and keeps S1's answer, which
+ * BlockMapStandFlushedOnItsWay hands back: false while no write ran it. */
+void    BlockMapStandFlushOnItsWay(uint32_t block);
+bool    BlockMapStandFlushedOnItsWay(error_t *said);
+
+/*
+ * A plan the way a take's door makes it — a best fit or the near rule, for
+ * `want` blocks near block 0 — on a volume of `windows` windows that lives in
+ * memory alone, with no sector of it read: SCATTERED is every window holding
+ * a few short runs and the last 20 free whole; RUNS is runs of 15 whole free
+ * windows between full ones. Weighed as a door that lets the lock go weighs
+ * it: how many holds, the most steps one took and how long the longest took,
+ * and the steps of all of them.
+ * Made under the state lock, the volume's own map set aside and put back.
+ * False when there was no memory for it.
+ */
+typedef enum { BLOCK_MAP_APART_SCATTERED = 0, BLOCK_MAP_APART_RUNS } BlockMapApartShape;
+
+typedef struct {
+    uint32_t holds;
+    uint32_t hold_most;
+    uint64_t hold_most_us;   /* the longest of them, in microseconds */
+    uint32_t steps;
+    bool     found;
+    uint32_t at;
+    uint32_t got;
+} BlockMapApartPlan;
+
+bool    BlockMapStandPlanApart(uint32_t windows, BlockMapApartShape shape, bool best_fit,
+                               uint32_t want, BlockMapApartPlan *out);
+
+/* The most steps one hold of a plan for `want` blocks may take: a hold's
+ * budget, the window that spends it, and the run that window measures. */
+uint32_t BlockMapStandHoldBound(uint32_t want);
 #endif
 
 #endif /* TAGFS_BLOCK_MAP_H */

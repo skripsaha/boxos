@@ -28,6 +28,8 @@
 #define STAND_INDEX_PAGE      100u
 #define STAND_INDEX_CRATE     1200u    /* ids the deck's crate has room for */
 #define STAND_INDEX_TAGS      1500u
+#define STAND_INDEX_KEY_TAGS  2000u    /* the values of one key the query test asks */
+#define STAND_INDEX_KEY_FIRST 10u      /* the first tag id of them */
 
 static char     s_index_name[] = "stand_index";
 static uint32_t s_rows[STAND_INDEX_FILES + 1];
@@ -118,6 +120,15 @@ static bool StandIndexPage(TagBitmapIndex* idx, const uint16_t* tags, uint32_t c
                               true, page) == 0;
 }
 
+/* `fid` out from under `tag` the way an Ink takes it out: under the volume's
+ * state lock, which the index changes shape under alone. */
+static void StandIndexLeave(TagBitmapIndex* idx, uint16_t tag, uint32_t fid)
+{
+    TagFSLockTake(&tagfs_get_state()->lock);
+    TagBitmapLeave(idx, tag, fid);
+    TagFSLockDrop(&tagfs_get_state()->lock);
+}
+
 static TestResult TestStandIndexWindowEdge(void)
 {
     TestResult      verdict = TEST_PASS;
@@ -156,17 +167,65 @@ static TestResult TestStandIndexWindowEdge(void)
     TEST_ASSERT(TagBitmapHas(idx, tag, 65536 + 2 * 4096) && !TagBitmapHas(idx, tag, 65539),
                 "the bitmap holds the members and only them");
     for (uint32_t i = 1; i <= 4096; i++)
-        TEST_ASSERT_EQ(tag_bitmap_clear(idx, tag, 65536 + 2 * i), 0, "the 4096 cleared again");
-    TEST_ASSERT(TagBitmapBytes(idx) < 8192, "the window is an array again");
+        StandIndexLeave(idx, tag, 65536 + 2 * i);
+    TEST_ASSERT(TagBitmapBytes(idx) >= 8192, "the leaves allocated nothing: still a bitmap");
+    TEST_ASSERT(!TagBitmapHas(idx, tag, 65536 + 2 * 4096), "but the members left it");
+    TagBitmapShrink(idx, &tagfs_get_state()->lock, &tag, 1, 65536 + 2 * 4096);
+    TEST_ASSERT(TagBitmapBytes(idx) < 8192, "the window is an array again after the last leave");
     TEST_ASSERT(StandIndexPage(idx, &tag, 1, 1, 8, &page), "a page of everything");
     TEST_ASSERT_EQ(page.delivered, ARRAY_SIZE(s_edge), "the six members are back to six");
     for (uint32_t i = 0; i < ARRAY_SIZE(s_edge); i++)
         TEST_ASSERT_EQ(s_page[i], s_edge[i], "each where it was, in order");
 
-    TEST_ASSERT_EQ(tag_bitmap_clear(idx, tag, 65536), 0, "the first of the second window cleared");
+    StandIndexLeave(idx, tag, 65536);
     TEST_ASSERT(TagBitmapHas(idx, tag, 65535) && !TagBitmapHas(idx, tag, 65536) &&
                 TagBitmapHas(idx, tag, 65537), "and nothing on either side of it moved");
 out:
+    tag_bitmap_destroy(idx);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// A wildcard weighed by its tags under the index's lock
+// ----------------------------------------------------------------------------
+
+/*
+ * A key with 2000 values, each worn by a file of its own, asked whole: every
+ * leap of the query asks all 2000 tags, and choosing the lead sizes them all.
+ * The index's lock keeps interrupts off, and a query's leap used to be one step
+ * of a hold's 512 however many tags it asked — a hold of a million asks. Now
+ * no hold gives the query more than its steps and the one ask that crosses
+ * them, however many values the key has.
+ */
+static TestResult TestStandIndexQueryHoldBounded(void)
+{
+    TestResult      verdict = TEST_PASS;
+    TagBitmapIndex* idx     = tag_bitmap_create(4);
+    uint16_t*       ids     = kmalloc(sizeof(uint16_t) * STAND_INDEX_KEY_TAGS);
+    TagFSPage       page;
+
+    TEST_ASSERT(idx && ids, "an index and a key of the test's own");
+    for (uint32_t i = 0; i < STAND_INDEX_KEY_TAGS; i++) {
+        ids[i] = (uint16_t)(STAND_INDEX_KEY_FIRST + i);
+        TEST_ASSERT_EQ(tag_bitmap_set(idx, ids[i], 1 + 3 * i), 0,
+                       "each value of the key worn by a file of its own");
+    }
+
+    TagIdList key = { .ids = ids, .count = STAND_INDEX_KEY_TAGS, .capacity = 0 };
+    (void)TagBitmapQueryMost(idx);
+    TEST_ASSERT_EQ(TagBitmapQueryPage(idx, NULL, 0, &key, 1, NULL, 0, 1, s_page,
+                                      STAND_INDEX_PAGE, true, &page), 0, "the key asked whole");
+    uint32_t most = TagBitmapQueryMost(idx);
+    TEST_ASSERT_EQ(page.total, STAND_INDEX_KEY_TAGS, "every file wearing a value is counted");
+    TEST_ASSERT_EQ(page.delivered, STAND_INDEX_PAGE, "a page of them delivered");
+    for (uint32_t k = 0; k < STAND_INDEX_PAGE; k++)
+        TEST_ASSERT_EQ(s_page[k], 1 + 3 * k, "in id order, none missed");
+    TEST_ASSERT_EQ(page.next, 1 + 3 * STAND_INDEX_PAGE, "and the rest begin past the page");
+    TestEvidence("steps the dearest hold of the index's lock gave the query:", most);
+    TEST_ASSERT(most <= TagBitmapQueryHoldBound(0),
+                "no hold gave the query more than its steps and the ask that crossed them");
+out:
+    kfree(ids);
     tag_bitmap_destroy(idx);
     return verdict;
 }
@@ -437,6 +496,11 @@ static const TestCase g_stand_index_tests[] = {
       .reach = TEST_READS_ONLY,
       .caveat_defect = "a tag's members are lost or misplaced where one window of 65536 ids "
                        "meets the next, or where a window turns bitmap or array" },
+    { .name  = "stand_index_query_hold_bounded", .func = TestStandIndexQueryHoldBounded,
+      .reach = TEST_READS_ONLY,
+      .caveat_defect = "a query asks every tag of a wildcard in one step of its hold, so a key "
+                       "with thousands of values holds the index's lock, and interrupts, for "
+                       "thousands of asks a step" },
     { .name  = "stand_index_registry_rehash", .func = TestStandIndexRegistryRehash,
       .reach = TEST_READS_ONLY,
       .caveat_defect = "the registry's hashes keep a fixed count of buckets however many tags "

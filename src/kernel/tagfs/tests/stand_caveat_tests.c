@@ -128,6 +128,16 @@ static bool StandVolumeNames(uint32_t file_id)
     return true;
 }
 
+/* The file's id out from under the name's tag, the way an Ink takes it out:
+ * under the volume's state lock, under which alone the index changes shape. */
+static void StandNameLetGo(uint16_t stem, uint32_t id)
+{
+    TagFSState* fs = tagfs_get_state();
+    TagFSLockTake(&fs->lock);
+    TagBitmapLeave(fs->bitmap_index, stem, id);
+    TagFSLockDrop(&fs->lock);
+}
+
 /* One create, allocation n refused, judged whole or not. A create is whole
  * when it either made the file — named by the volume, found by its name, and
  * after its delete found by nothing — or made nothing at all. The name's row
@@ -158,7 +168,7 @@ static TestResult StandCreateOnce(uint32_t n, uint16_t stem, bool* fired, bool* 
     if (rc != 0) {
         TEST_ASSERT(!named, "a refused create leaves no record behind");
         if (found)
-            tag_bitmap_clear(tagfs_get_state()->bitmap_index, stem, id);
+            StandNameLetGo(stem, id);
         *whole = !found;
         goto out;
     }
@@ -169,7 +179,7 @@ static TestResult StandCreateOnce(uint32_t n, uint16_t stem, bool* fired, bool* 
     owned = 0;
     bool lingers = StandNameFinds(stem, made);
     if (lingers)
-        tag_bitmap_clear(tagfs_get_state()->bitmap_index, stem, made);
+        StandNameLetGo(stem, made);
     *whole = named && found && !lingers;
 out:
     if (armed)

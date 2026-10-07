@@ -23,6 +23,7 @@
 //                        place on the medium taken wait for their turn
 // stand_heap_tests.c     the kernel heap growing by regions, its large pieces,
 //                        and a class of cabins refused while the reserve serves
+// stand_touch_tests.c    the touch queue's tick firing its nodes in one pass
 // stand_map_tests.c      the stand_map suite: where a take goes, a give that
 //                        comes twice, and the ground a growing file keeps
 // stand_plot_tests.c     the stand_plot suite: where a write may begin, what a
@@ -185,6 +186,9 @@ void    StandInkGiveBack(StandInkGround* g);
 TestResult TestStandHeapGrowsByRegionsAndGivesBack(void);
 TestResult TestStandHeapLargeTakesPagesAndGivesBack(void);
 TestResult TestStandHeapClassRefusedReserveServes(void);
+
+/* The touch queue's tick (stand_touch_tests.c). */
+TestResult TestStandTouchQueueTickOnePass(void);
 
 /* The caveated tests (stand_caveat_tests.c). */
 TestResult TestStandRmwReadRefused(void);
