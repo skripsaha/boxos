@@ -19,20 +19,22 @@
  *   WAKE     a timed park's deadline, embedded in the process (park_wake);
  *            armed, it holds a reference on the process until it fires or is
  *            disarmed;
- *   KNOCK    a Knock knocked at the tick, for a waiter whose next move is due
- *            at a time rather than at an event of its own — the Settle's Lull.
+ *   CALL     a function of the armer's, called by the tick itself, for a waiter
+ *            whose next move is due at a time rather than at an event of its
+ *            own — the Settle's Lull, which wakes its committer's core. In the
+ *            interrupt: it allocates nothing, waits for nothing and takes no
+ *            lock but an IRQ-safe one.
  *
- * A WAKE or KNOCK node armed again while it waits moves to the new tick: one
+ * A WAKE or CALL node armed again while it waits moves to the new tick: one
  * node, one deadline.
  */
 
 struct process_t;
-struct Knock;
 
 typedef enum {
     TOUCH_QUEUE_PUBLISH = 0,
     TOUCH_QUEUE_WAKE    = 1,
-    TOUCH_QUEUE_KNOCK   = 2,
+    TOUCH_QUEUE_CALL    = 2,
 } TouchQueueKind;
 
 typedef struct TouchQueueNode {
@@ -53,7 +55,7 @@ typedef struct TouchQueueNode {
             uint32_t          owes_result;
             uint32_t          park_seq;
         } wake;
-        struct Knock *knock;
+        void (*call)(void);
     } u;
 } TouchQueueNode;
 
@@ -84,10 +86,10 @@ void TouchQueueArm(TouchQueueNode *n, uint64_t fire_tick);
 void TouchQueueArmWake(struct process_t *target, uint64_t fire_tick,
                        uint32_t owes_result, uint32_t park_seq);
 
-/* `k` knocked at `fire_tick`, carried by the caller's node `n`. */
-void TouchQueueArmKnock(TouchQueueNode *n, struct Knock *k, uint64_t fire_tick);
+/* `call` called by the tick at `fire_tick`, carried by the caller's node `n`. */
+void TouchQueueArmCall(TouchQueueNode *n, void (*call)(void), uint64_t fire_tick);
 
-/* A WAKE or KNOCK node taken out of the queue unfired; nothing when it is not
+/* A WAKE or CALL node taken out of the queue unfired; nothing when it is not
  * armed. */
 void TouchQueueDisarm(TouchQueueNode *n);
 

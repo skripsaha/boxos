@@ -439,22 +439,23 @@ void guide(void)
     }
 }
 
+/* ‼ ONE POCKET, NEVER THE RING (RT-11). This served the strand's ring until it
+ * was empty, and a program that hands pockets in faster than they are served
+ * never let it be: its K-Core stayed here for good, and so did every other
+ * program, baton and Settle step waiting on that core. The K-Core goes back
+ * to its loop after one, and queues the strand again behind the others while
+ * its ring holds more (kcore_process_entry). */
 void guide_process_one(process_t *proc)
 {
     if (!proc || !proc->cabin) return;
 
     uint32_t perf_snapshot = perf_trace_snapshot();
-    uint32_t count = 0;
 
     /* The strand is in the kernel: a stale Use Context verdict on its cabin
      * is recounted here, with interrupts on, not in the scheduler. */
     UseContextVerdictRefresh(proc);
-    while (!KPocketIsEmpty(proc)) {
-        guide_process_pocket(proc);
-        count++;
-    }
-
-    if (count > 0) {
-        perf_trace_flush_since(perf_snapshot);
-    }
+    if (KPocketIsEmpty(proc))
+        return;
+    guide_process_pocket(proc);
+    perf_trace_flush_since(perf_snapshot);
 }

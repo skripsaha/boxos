@@ -576,13 +576,12 @@ bool     tagfs_handle_is_of_this_mount(const TagFSFileHandle* handle);
 void     TagFSServiceIfPending(void);
 
 /*
- * The Settle's share of the loops (settle/cadence.c). Between two pockets of
- * the K-Core loop: a step of the cycle this core runs, or a cycle whose window
- * ran out or that was demanded. Whether this core's loop owes the Settle a turn
- * before it sleeps. On one core, whether the idle context is owed the next
- * quantum (RT-10) — read by the scheduler from the tick, lock-free.
+ * The volume's share of the loops (settle/cadence.c). Whether this core's loop
+ * owes the volume a turn before it sleeps: Helm work listed for a service
+ * point, or the Settle's step. On one core, whether the idle context is owed
+ * the next quantum (RT-10) — Helm work listed, or a cycle owed now — read by
+ * the scheduler from the tick, lock-free.
  */
-void     TagFSServiceAtBoundary(void);
 bool     TagFSStepOwedHere(void);
 bool     TagFSIdleOwed(void);
 

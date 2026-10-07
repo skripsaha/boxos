@@ -280,12 +280,15 @@ static void kcore_process_entry(struct process_t* proc)
     atomic_store_u8(&proc->kcore_pending, 0);
     mfence();
 
-    /* Re-arm window: between guide_process_one's last KPocketIsEmpty
-     * check and the kcore_pending=0 store above, userspace can have
-     * pushed a fresh Pocket. The next SYSCALL's CAS would fail (pending
-     * was still 1) and the Pocket would sit forever. After clearing
-     * pending we re-inspect the ring; if it's not empty we resubmit so
-     * a K-Core picks it up.
+    /* The guide served one pocket (RT-11), so a ring that still holds some
+     * is the common case here, not a race: the strand goes back into a queue
+     * — the least loaded, behind whatever waits there — and its next pocket
+     * is served when its turn comes round again, by whichever K-Core that
+     * is. Its pockets stay in order: only the K-Core that holds
+     * kcore_pending serves the ring. And the race is covered by the same
+     * look: between the guide's pocket and the kcore_pending=0 store above,
+     * userspace can have pushed a fresh Pocket whose SYSCALL found pending
+     * still 1, and would otherwise sit forever.
      *
      * We're allowed to call kcore_submit recursively here — the proc
      * goes back into a queue, ref_inc balances ref_dec, and the next
@@ -311,15 +314,29 @@ void kcore_run_loop(void)
     __asm__ volatile("sti");
 
     for (;;) {
-        /* Between two pockets the volume's Settle may take its turn: a step of
-         * the cycle this core runs, or one whose window ran out or that was
-         * demanded — never one Lull merely allows, which waits for the queue
-         * to empty (settle.h). */
-        struct process_t* proc;
-        while ((proc = kcore_queue_pop(q)) != NULL) {
+        /*
+         * ‼ ONE POCKET A TURN, AND THEN THE WHOLE LOOP (RT-11).
+         *
+         * The boundary is the pocket, never the program. This used to pop until
+         * the queue was empty, and the guide served each program's ring until
+         * IT was empty: a program that handed pockets in faster than they were
+         * served — any program, a fire-and-forget call in a loop — kept its
+         * K-Core inside its ring for good. Every other program's pocket queued
+         * behind it; on the drain core no baton ran (a completion, a park's
+         * deadline, the power button), no Helm work, no service below; on the
+         * committer's core no cycle began, the one in flight stood still
+         * between two steps holding the volume's door, and the window the
+         * mount promises was not kept. Now one pocket is served — a program
+         * with more is queued again behind the others (kcore_process_entry) —
+         * and everything below has its turn before the next: the batons and a
+         * halt's one-way pass, the services, the volume's Helm work and a step
+         * of its Settle cycle. Whether pockets still wait is what holds a
+         * cycle Lull merely permits back (settle.h): it never stands before
+         * work already handed in.
+         */
+        struct process_t* proc = kcore_queue_pop(q);
+        if (proc)
             kcore_process_entry(proc);
-            TagFSServiceAtBoundary();
-        }
 
         /* Drain the batons on this K-Core (never-drop MPSC): storage
          * completions that came back from an IRQ, port-recovery COMRESETs,
@@ -329,9 +346,11 @@ void kcore_run_loop(void)
          * them in the same loop body keeps cache-locality with the pocket
          * pump. Single-consumer: each K-Core drains only its own queue. All
          * passes route to the drain core, so non-drain queues are a one-load
-         * early-out. Between pockets the core stands on nothing, so this is
-         * where a one-way pass — the power button's halt — is taken, and a
-         * pump inside a pocket's wait leaves it here (baton.h). */
+         * early-out. No pocket is being served here, so this is where a
+         * one-way pass — the power button's halt — is taken, and a pump inside
+         * a pocket's wait leaves it here (baton.h). A cycle this core runs may
+         * stand between two of its steps meanwhile: the halt runs it to its
+         * end itself (settle.h). */
         BatonPumpAtRest(my_idx);
 
         /* USB hubs, when one has reported a change on its ports.
@@ -392,12 +411,14 @@ void kcore_run_loop(void)
          * it belongs here for the same reason as the three above. */
         BoardroomAttendIfPending();
 
-        /* And a volume that was shut when its medium left and could not be let
-         * go of, because somebody was still inside it. It is here for the same
-         * reason as everything above: giving the memory back and mounting again
-         * cannot happen where the departure was noticed, and on a multi-core
-         * machine this loop is where the cores actually are. One atomic load
-         * when there is nothing to do. */
+        /* And the volume: the work of a file's Helm listed for a service point
+         * — a write's next window, a USB disk's next step — a step of the
+         * Settle cycle this core runs or the start of one that is due, and a
+         * volume that was shut when its medium left and could not be let go
+         * of, because somebody was still inside it. It is here for the same
+         * reason as everything above: none of it can happen where it was
+         * noticed, and on a multi-core machine this loop is where the cores
+         * actually are. One atomic load a duty when there is nothing to do. */
         TagFSServiceIfPending();
 
         /* And the Use Context's verdicts, when one went stale: the recount for
@@ -413,6 +434,10 @@ void kcore_run_loop(void)
             process_reap_strands();
             process_cleanup_deferred();
         }
+
+        /* Pockets still wait: the next turn, with no look at sleeping. */
+        if (kcore_queue_depth(my_idx) != 0)
+            continue;
 
         /* Sleep race-free. kcore_submit() pushes a pocket THEN sends IPI_WAKE;
          * since the K-Core LAPIC timer is masked (App Cores carry preemption),
@@ -444,7 +469,12 @@ void kcore_run_loop(void)
          * throttled to 512 bytes a second sat in PROC_WAITING for 248 seconds
          * with every core idle, and Nightwatch named it ("ring holds head=0
          * tail=1, yet this process still waits"). Everything an interrupt
-         * hands over now rides a baton, and the baton queue is asked. */
+         * hands over now rides a baton, and the baton queue is asked. So is
+         * the volume (TagFSStepOwedHere): Helm work listed meanwhile — its
+         * knock may have been run by a pump nested inside the service point
+         * above, after the list was looked at — a step of this core's cycle,
+         * a cycle due, or one owed later that no Lull is armed yet to wake
+         * this core for. */
         __asm__ volatile("cli");
         __atomic_store_n(&q->in_hlt, 1u, __ATOMIC_SEQ_CST);  /* before the last look */
         if (kcore_queue_depth(my_idx) != 0 || BatonPending(my_idx) || TagFSStepOwedHere()) {

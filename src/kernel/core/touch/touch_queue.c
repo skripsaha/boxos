@@ -4,7 +4,7 @@
  * An unsorted singly-linked list of nodes their armers own. TouchQueueTick
  * scans it each PIT tick — the depth is the number of timed waits and delayed
  * publishes in flight, small — and fires every node whose tick came, one at a
- * time: a WAKE or KNOCK node may be armed again the moment it leaves the list,
+ * time: a WAKE or CALL node may be armed again the moment it leaves the list,
  * so what its fire needs is copied out under the lock and the node itself is
  * never held past it.
  */
@@ -16,7 +16,7 @@
 #include "atomics.h"
 #include "process.h"
 #include "scheduler.h"   /* sched_ring_home — one transition, one bell */
-#include "baton.h"       /* the deadline rides the process's own baton; a Knock */
+#include "baton.h"       /* the deadline rides the process's own baton */
 #include "sync_ops.h"    /* SyncTimeoutDeliver */
 
 static TouchQueueNode *g_head;
@@ -101,11 +101,11 @@ void TouchQueueArmWake(process_t *target, uint64_t fire_tick, uint32_t owes_resu
         process_ref_dec(target);    /* the node already held one */
 }
 
-void TouchQueueArmKnock(TouchQueueNode *n, struct Knock *k, uint64_t fire_tick)
+void TouchQueueArmCall(TouchQueueNode *n, void (*call)(void), uint64_t fire_tick)
 {
     spin_lock(&g_lock);
-    n->kind    = TOUCH_QUEUE_KNOCK;
-    n->u.knock = k;
+    n->kind   = TOUCH_QUEUE_CALL;
+    n->u.call = call;
     touch_queue_link(n, fire_tick);
     spin_unlock(&g_lock);
 }
@@ -207,8 +207,8 @@ void TouchQueueTick(uint64_t now)
                                   due.u.wake.park_seq);
             process_ref_dec(due.u.wake.target);
             break;
-        case TOUCH_QUEUE_KNOCK:
-            KnockOn(due.u.knock);
+        case TOUCH_QUEUE_CALL:
+            due.u.call();
             break;
         default:
             TouchPublishId(publish->u.publish.tag_id, publish->u.publish.payload,
