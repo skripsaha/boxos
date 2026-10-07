@@ -411,6 +411,8 @@ error_t PlotReserve(Plot *p, uint64_t end)
 
         uint32_t start = 0, got = 0;
         error_t  rc    = AllotmentTake(p->fid, want, p->blocks, hint, &start, &got);
+        if (rc == ERR_WOULD_BLOCK)
+            return rc;      /* room on its way: the caller waits for the cycle, and asks again */
         if (rc != OK) {
             kprintf("[TagFS] file %u: %llu more block(s) could not be had for it (error %u) — "
                     "the write is refused\n", p->fid, (unsigned long long)left, (unsigned)rc);

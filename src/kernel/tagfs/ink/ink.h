@@ -35,7 +35,9 @@
  * may take makes one itself, with no state lock held (PoolSpareMake) — or,
  * where it cannot (an asynchronous write's continuation), answers
  * ERR_WOULD_BLOCK and the caller makes one its own way. It never waits for a
- * cycle to make one for it.
+ * cycle to make one for it: a volume with no ground for one while a Settle
+ * cycle would give some back answers ERR_WOULD_BLOCK as well, nothing
+ * changed, and the caller waits for that cycle its own way.
  *
  * ‼ A FILE THE SYSTEM KEEPS IS CHANGED ONLY WITH THE WARRANT, AND WHAT THE
  * LOADER READS BY ITS BLOCKS BY NOBODY (RT-09); THIS IS THE ONE PLACE THAT

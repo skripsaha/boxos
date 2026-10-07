@@ -2,6 +2,7 @@
 #define STORAGE_SETTLE_OPS_H
 
 #include "ktypes.h"
+#include "error.h"
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
 #include "op_registry.h"
@@ -19,5 +20,35 @@ int ObjWriteSettled(const ManifestOp *op, Crate *crates, uint16_t crate_count,
  * parked until the cycle that carries the word settles — or is refused. */
 int SettleUseRemembered(UseText *said, uint64_t saying, const OpContext *ctx, Crate *crates,
                         Crate *out);
+
+/*
+ * A storage deck handler whose operation the volume answered ERR_WOULD_BLOCK —
+ * room a Settle cycle gives back, nothing of the operation done — hands it
+ * here, with what it was called with, and returns what this returns. The word
+ * is no answer: the program is parked behind its Chit (`file_id` the chit's
+ * word), the op waits for the next cycle's end, and a service point then asks
+ * it again through the deck's own handler — the same params, the program's
+ * crates — until it answers something else, which is the program's answer. A
+ * caller in the kernel with no program to park waits for the cycles in its
+ * own call, and is answered the op's own answer. ERR_WOULD_BLOCK with the
+ * program parked, ERR_NO_MEMORY with nothing parked when no wait could be
+ * made, or the kernel caller's answer.
+ */
+int SettleOpForRoom(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                    const OpContext *ctx, uint32_t file_id);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's caller of an op that waits for room: a caller in the kernel has
+ * no program to park, so a test that wants the op parked as a program's is
+ * brings the place its answer is told to — taken by the next op parked, once.
+ * The test turns the machine itself while it waits (the cycles, the service
+ * point). */
+typedef struct SettleOpStandAnswer {
+    volatile uint32_t answered;      /* 1 once the op answered; read rc after it */
+    error_t           rc;
+} SettleOpStandAnswer;
+
+void SettleOpStandAnswerTo(SettleOpStandAnswer *a);
+#endif
 
 #endif /* STORAGE_SETTLE_OPS_H */

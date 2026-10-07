@@ -291,9 +291,10 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
      * the state was already PROC_WORKING, sync cleanup ran, and the
      * staged crates were double-freed by both dispatcher and async.
      *
-     * Sync ERR_WOULD_BLOCK (HwKbReadline "no data ready" etc.) does NOT
-     * set the flag — dispatcher cleans up normally and pushes the
-     * "would block" Result so userspace can retry.
+     * An ERR_WOULD_BLOCK with no chit behind it is no answer at all: boxlib
+     * drops a Result that carries it, and the submit would wait for ever. The
+     * synchronous push below passes the border every answer passes
+     * (ChitAnswer).
      */
     if (rc == ERR_WOULD_BLOCK && async_owns_crates) {
         /* A deferred answer to a submit somebody is waiting for MUST have
@@ -318,6 +319,8 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
         if (cm_pinned) ManifestRelease(handle);
         return;
     }
+
+    pocket->error_code = (uint32_t)ChitAnswer(rc, proc->pid, ctx.submit_cookie, "the guide");
 
     /* Sync path: write any handler-mutated Crate descriptors (crates[i].size
      * for output crates) back to user memory and release the staged kbuf. */

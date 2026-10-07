@@ -12,12 +12,12 @@
 
 /*
  * A call that answered ERR_WOULD_BLOCK changed nothing: the volume is short of
- * ground Fallow still rests, which a Settle cycle gives back. The holder holds
- * no lock, so it has cycles run until some ground came back (SettleForRoom)
- * and makes the call again. True to make it again; otherwise *rc is the answer
- * — ERR_TAGFS_NO_SPACE once nothing rests.
+ * ground a Settle cycle gives back. A caller in the kernel standing in its
+ * call has the cycles run until some came back (SettleForRoom) and makes the
+ * call again: true to make it again; otherwise *rc is the answer — the
+ * allocator's own once nothing is on its way.
  */
-static bool HelmRoomCameBack(error_t *rc)
+bool HelmRoomCameBack(error_t *rc)
 {
     if (*rc != ERR_WOULD_BLOCK)
         return false;
@@ -130,12 +130,7 @@ error_t HelmWriteWindow(TagFSFileHandle *handle, const PlotSource *src, uint64_t
         return ERR_PERMISSION_DENIED;
     if (*inked >= src->bytes)
         return OK;
-    uint64_t before = *inked;
-    error_t  rc;
-    do {
-        rc = HelmWriteWindowOnce(handle, src, inked);
-    } while (*inked == before && HelmRoomCameBack(&rc));
-    return rc;
+    return HelmWriteWindowOnce(handle, src, inked);
 }
 
 error_t HelmWrite(TagFSFileHandle *handle, const PlotSource *src, uint64_t *out_written)
@@ -144,7 +139,7 @@ error_t HelmWrite(TagFSFileHandle *handle, const PlotSource *src, uint64_t *out_
     *out_written = 0;
     do {
         rc = HelmWriteWindow(handle, src, out_written);
-    } while (rc == OK && *out_written < src->bytes);
+    } while ((rc == OK && *out_written < src->bytes) || HelmRoomCameBack(&rc));
     return rc;
 }
 
@@ -157,10 +152,11 @@ error_t HelmWrite(TagFSFileHandle *handle, const PlotSource *src, uint64_t *out_
 // it — a write can never make a gap on its own (ERR_TAGFS_BEYOND_SIZE).
 // ----------------------------------------------------------------------------
 
-static error_t HelmSpanOnce(TagFSFileHandle *handle, uint64_t size, uint64_t *out_was)
+error_t HelmSpan(TagFSFileHandle *handle, uint64_t size, uint64_t *out_was)
 {
     Plot    plot;
     error_t rc = HelmPlotLoad(handle, &plot);
+    *out_was   = 0;
     if (rc == OK)
         *out_was = plot.size;
     if (rc == OK && size != plot.size) {
@@ -177,16 +173,6 @@ static error_t HelmSpanOnce(TagFSFileHandle *handle, uint64_t size, uint64_t *ou
     if (rc == OK)
         handle->file_size = size;
     PlotRelease(&plot);
-    return rc;
-}
-
-error_t HelmSpan(TagFSFileHandle *handle, uint64_t size, uint64_t *out_was)
-{
-    error_t rc;
-    *out_was = 0;
-    do {
-        rc = HelmSpanOnce(handle, size, out_was);
-    } while (HelmRoomCameBack(&rc));
     return rc;
 }
 
@@ -215,7 +201,7 @@ static bool HelmRunsAreOne(const FileExtent *runs, uint32_t count)
  * leaves no record for this Ink to lay the gathered run over, and the run goes
  * back.
  */
-static error_t HelmDefragOnce(TagFSFileHandle *handle)
+error_t HelmDefrag(TagFSFileHandle *handle)
 {
     Plot    plot;
     bool    moved = false;
@@ -230,14 +216,5 @@ static error_t HelmDefragOnce(TagFSFileHandle *handle)
     if (rc == OK && (moved || plot.freed_count > 0))
         rc = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
     PlotRelease(&plot);
-    return rc;
-}
-
-error_t HelmDefrag(TagFSFileHandle *handle)
-{
-    error_t rc;
-    do {
-        rc = HelmDefragOnce(handle);
-    } while (HelmRoomCameBack(&rc));
     return rc;
 }

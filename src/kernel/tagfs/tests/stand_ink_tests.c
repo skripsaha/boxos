@@ -168,17 +168,7 @@ out:
 // A volume with no free block still deletes
 // ----------------------------------------------------------------------------
 
-typedef struct {
-    uint32_t* at;
-    uint32_t* n;
-    uint32_t  count;
-    uint32_t  cap;
-} StandInkGround;
-
-/* Every free block taken, run by run: the answer that ended it — the
- * allocator's refusal — or ERR_NO_MEMORY for no memory to list a run, with
- * what was taken so far still listed for StandInkGiveBack. */
-static error_t StandInkTakeAll(StandInkGround* g)
+error_t StandInkTakeAll(StandInkGround* g)
 {
     uint32_t start = 0, got = 0;
     uint32_t all   = tagfs_get_state()->layout.data_blocks;
@@ -249,7 +239,7 @@ static uint32_t StandInkSpares(uint32_t* out, uint32_t cap)
     return held;
 }
 
-static void StandInkGiveBack(StandInkGround* g)
+void StandInkGiveBack(StandInkGround* g)
 {
     for (uint32_t i = 0; i < g->count; i++)
         tagfs_free_blocks(g->at[i], g->n[i]);

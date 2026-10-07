@@ -59,10 +59,14 @@ error_t  TagFSSettle(void);
 
 /* The volume is short and Fallow rests blocks, or Glean may take the pool's
  * slack off its chain: cycles run until some come back — at most
- * 2 + FallowLag() of them. OK when blocks came back, ERR_TAGFS_NO_SPACE when
- * none rest and the chain has no slack, or a cycle's refusal; ERR_WOULD_BLOCK at
- * once for a caller that may not wait for a cycle — under a TagFS lock or a
- * Scribe, or a baton continuation. Inside the door. */
+ * 2 + FallowLag() of them — for a caller in the kernel standing in its call; a
+ * program's call never runs one (helm.h, settle_ops.h). OK when the cycles gave
+ * ground back, or when nothing rests and the chain has no slack — the take
+ * asked again then says the last word itself; ERR_TAGFS_NO_SPACE when none came
+ * back; or a cycle's refusal. ERR_WOULD_BLOCK at once for a caller that may not
+ * wait for a cycle — under a TagFS lock, a Scribe or a baton continuation —
+ * but the Settle's own holder between two steps of its cycle, which runs that
+ * cycle to its end first. Inside the door. */
 error_t  SettleForRoom(void);
 
 /*
@@ -99,6 +103,13 @@ uint64_t SettledCycles(void);
  * the stand, whose runner holds the cadence: cycles that close for nobody let
  * Glean bring the pool's chain down to what its live records fill. */
 error_t  TagFSSettleAsCadence(void);
+
+/* A cycle begun as the cadence begins one, on this core, and left standing
+ * before its first step — this core then holds the Settle between two of its
+ * steps, as a committer serving a pocket does: true, or false when another
+ * asker holds it. The next cycle asked for on this core runs it to its end
+ * first (TagFSSettle). For the stand. */
+bool     TagFSStandSettleBegin(void);
 
 /* The next cycle's seat rings seat:ready once, as a driver's recovery would
  * while the cycle runs — noted, and said later by the room's pass: just before

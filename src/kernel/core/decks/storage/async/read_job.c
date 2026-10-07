@@ -79,9 +79,10 @@ bool ReadJobSeatRunsAsync(uint8_t seat)
 
 /* The answer: the handle, the DMA page and the door given back, then the
  * caller told — its crate's size and the Result carry the bytes that landed,
- * a refusal included. */
+ * a refusal included — through the border every answer passes (ChitAnswer). */
 static void rjob_answer(ReadJob *j, error_t rc)
 {
+    rc = ChitAnswer(rc, j->target ? j->target->pid : 0, j->submit_cookie, "storage.read");
     if (rc != OK)
         kprintf("[Storage] read of file %u from byte %llu answered %u — %llu of %llu bytes "
                 "had landed\n", j->file_id, (unsigned long long)j->start, (unsigned)rc,
@@ -170,11 +171,13 @@ static void rjob_step(ReadJob *j)
         need = j->dma_blocks;
     j->count = (uint32_t)need;
 
+    /* A seat emptied between the look above and the submit refuses it as a
+     * seat that is not there: the medium left, and that is the answer. */
     rc = BoardroomReadAsync(tagfs_get_seat(), tagfs_block_to_sector(j->block),
                             j->count * TAGFS_BLOCK_SECTORS, j->dma_phys, rjob_answered, j,
                             &j->berth);
     if (rc != OK)
-        rjob_answer(j, rc);
+        rjob_answer(j, TagFSMediumGone() ? ERR_DEVICE_NOT_READY : rc);
 }
 
 /* The run that came in: each block checked against its digest and landed in

@@ -1,9 +1,12 @@
 /*
- * The waits for the volume's Settle a program asks for.
+ * The waits for the volume's Settle a program asks for — and the one it does
+ * not ask for, but meets: room on its way.
  *
  *   OBJ_ANCHOR          params: [u32 file_id]
  *   OBJ_WRITE_SETTLED   params: [u32 file_id]
  *   use (system deck)   the Use Context remembered by the volume
+ *   room                an operation of the deck the volume answered
+ *                       ERR_WOULD_BLOCK, asked again after the cycle's end
  *
  * ‼ A PROGRAM NEVER WAITS INSIDE THE KERNEL FOR A CYCLE. On one core a call
  * runs with interrupts off, and a cycle run inside it would be the medium's
@@ -16,6 +19,17 @@
  * An anchor that is answered OK then says so on the file's tags and on the
  * bare "anchor" tag, so an observer keyed by either wakes: a file announced
  * durable is a file that is.
+ *
+ * ‼ ROOM ON ITS WAY IS WAITED FOR, AND THE OPERATION ASKED AGAIN (RT-06/07,
+ * RT-17). A create, a rename, a tag put on or taken off, a delete: each is a
+ * change the volume refuses ERR_WOULD_BLOCK, nothing of it done, while it is
+ * short of ground a Settle cycle gives back — a block for the registry to
+ * grow by, a Spare for the pool's tail. The program waits behind its Chit for
+ * the next cycle's end, and a service point then asks the very op again —
+ * its params as they were asked, its crates the program's still — through the
+ * deck's own handler (SettleOpForRoom). Its answer is the program's, or it
+ * waits for the next cycle's end again. A caller in the kernel with no
+ * program to park waits for the cycles in its own call.
  */
 
 #include "settle_ops.h"
@@ -32,16 +46,20 @@
 #include "settle.h"
 #include "ink.h"
 #include "use_memory.h"
+#include "helm.h"        /* HelmReady — an op waited for room is asked again at a service point */
+#include "amp.h"
 
 typedef enum {
     SETTLE_OP_ANCHOR = 0,
     SETTLE_OP_SETTLED,
     SETTLE_OP_USE,
+    SETTLE_OP_ROOM,
 } SettleOpKind;
 
 typedef struct {
     SettleWaiter w;              /* first: the waiter is the wait */
-    process_t*   target;         /* pinned until the answer */
+    process_t*   target;         /* pinned until the answer; NULL for the stand's */
+    const char*  holder;         /* who owes the answer: the op's registered name */
     uint32_t     submit_cookie;
     uint32_t     file_id;
     uint8_t      kind;           /* SettleOpKind */
@@ -51,6 +69,13 @@ typedef struct {
     Crate*       crates_kbuf;    /* the staged crates, released with the answer */
     uint16_t     crate_count;
     uintptr_t    crates_uaddr;
+    ManifestOp*  op;             /* ROOM: the op as it was asked, its params with it */
+    HelmWaiter   service;        /* ROOM: where it is asked again */
+    error_t      came;           /* ROOM: what the cycle's end answered */
+    bool         again;          /* ROOM: asked again, it met room on its way again */
+#ifdef CONFIG_VOLUME_TESTS
+    SettleOpStandAnswer* stand;  /* the stand's caller: its answer told here */
+#endif
 } SettleOpWait;
 
 static uint32_t op_file_id(const ManifestOp *op)
@@ -104,14 +129,17 @@ static void SettleOpSay(uint8_t kind, uint32_t file_id, uint32_t pid, error_t rc
                                                    : "the caller is told");
 }
 
-/* The answer, from the cycle's S6 or a service point, with no TagFS lock held:
- * the out crate and the crates back to the program's pages, then the Result —
- * the Chit falls due and is kept by the push. A `use` is told whether the
- * volume remembers, and is never refused: its context stands either way. */
+/* The answer, from the cycle's S6 or a service point, with no TagFS lock held,
+ * through the border every answer passes (ChitAnswer): the out crate and the
+ * crates back to the program's pages, then the Result — the Chit falls due
+ * and is kept by the push. A `use` is told whether the volume remembers, and
+ * is never refused: its context stands either way. An op asked again for room
+ * answers what it answered. */
 static void SettleOpAnswered(SettleWaiter* w, error_t rc)
 {
     SettleOpWait*  s      = (SettleOpWait*)w;
-    vmm_context_t* vmm    = s->target->cabin ? s->target->cabin->vmm : NULL;
+    uint32_t       pid    = s->target ? s->target->pid : 0;
+    vmm_context_t* vmm    = s->target && s->target->cabin ? s->target->cabin->vmm : NULL;
     error_t        answer = rc;
 
     if (s->kind == SETTLE_OP_USE) {
@@ -120,10 +148,20 @@ static void SettleOpAnswered(SettleWaiter* w, error_t rc)
         if (s->out && vmm && vmm_user_buf_commit_out(vmm, (uintptr_t)s->out->addr, &kept, 1) == OK)
             s->out->size = 1;
         answer = OK;
-    } else {
-        SettleOpSay(s->kind, s->file_id, s->target->pid, rc);
+    } else if (s->kind != SETTLE_OP_ROOM) {
+        SettleOpSay(s->kind, s->file_id, pid, rc);
     }
+    answer = ChitAnswer(answer, pid, s->submit_cookie, s->holder);
+    kfree(s->op);
 
+#ifdef CONFIG_VOLUME_TESTS
+    if (s->stand) {
+        s->stand->rc = answer;
+        __atomic_store_n(&s->stand->answered, 1u, __ATOMIC_RELEASE);
+        kfree(s);
+        return;
+    }
+#endif
     if (s->crates_kbuf && s->crate_count)
         crate_stage_commit_and_release(s->crates_kbuf, s->crate_count, vmm, s->crates_uaddr);
     Result r;
@@ -150,6 +188,7 @@ static SettleOpWait* SettleOpPark(const OpContext *ctx, Crate *crates, uint8_t k
         kfree(s);
         return NULL;
     }
+    s->holder        = holder;
     s->submit_cookie = ctx->submit_cookie;
     s->file_id       = file_id;
     s->kind          = kind;
@@ -254,4 +293,178 @@ int SettleUseRemembered(UseText *said, uint64_t saying, const OpContext *ctx, Cr
     }
     tagfs_leave();
     return rc;
+}
+
+// ----------------------------------------------------------------------------
+// Room on its way
+// ----------------------------------------------------------------------------
+
+/* Where the op this core asks again raises its word when it meets room on its
+ * way again: the wait it is asked for is linked again — or its caller in the
+ * kernel waits again — and no new wait is made beneath it. NULL while this
+ * core asks nothing again. */
+static bool* s_asked_again[MAX_CORES];
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The record the next op parked for room by a caller with no program tells its
+ * answer to — the stand's, armed once. */
+static SettleOpStandAnswer* volatile s_stand_answer;
+
+void SettleOpStandAnswerTo(SettleOpStandAnswer* a)
+{
+    __atomic_store_n(&s_stand_answer, a, __ATOMIC_RELEASE);
+}
+#endif
+
+/* The op asked again through the deck's own handler, as `ctx` asks it: the
+ * handler's answer, and *again raised when it met room on its way again. */
+static int SettleOpAskAgain(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                            const OpContext *ctx, bool *again)
+{
+    const OpRegistration* reg  = OpRegistryLookup(op->op_kind);
+    uint8_t               core = amp_get_core_index();
+
+    *again = false;
+    if (!reg)
+        return ERR_NOT_INITIALIZED;
+    s_asked_again[core] = again;
+    int rc = reg->handler(op, crates, crate_count, ctx);
+    s_asked_again[core] = NULL;
+    return rc;
+}
+
+/* A caller in the kernel with no program to park waits for the cycles in its
+ * own call, inside the volume's door, and asks its op again after each. */
+static int SettleOpRoomInCall(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                              const OpContext *ctx)
+{
+    for (;;) {
+        if (!tagfs_enter())
+            return ERR_TAGFS_NOT_INITIALIZED;
+        error_t room = SettleForRoom();
+        tagfs_leave();
+        if (room != OK)
+            return (int)room;
+        bool again;
+        int  rc = SettleOpAskAgain(op, crates, crate_count, ctx, &again);
+        if (rc != ERR_WOULD_BLOCK || !again)
+            return rc;
+    }
+}
+
+static void SettleOpRoomAgain(HelmWaiter *service);
+
+/* The cycle's end the op waited for — or, refused for good, the answer that
+ * ends the wait (a medium that left, one that takes no write): noted, and the
+ * op listed for a service point, which asks it again. */
+static void SettleOpRoomCame(SettleWaiter *w, error_t rc)
+{
+    SettleOpWait* s = (SettleOpWait*)w;
+    s->came = rc;
+    HelmReady(&s->service);
+}
+
+/* Linked for the next cycle's end, inside the volume's door: OK, or — with no
+ * volume mounted — the answer. The wait is room asked for, as the allocator's
+ * refusal was — a cycle refused for want of room before it was linked waits
+ * for exactly that (SettleWaitersPark). A cycle on another core may answer the
+ * wait the moment it is linked: it is not touched again here. */
+static error_t SettleOpRoomLink(SettleOpWait *s)
+{
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+    SettleDemand(SETTLE_DEMAND_ROOM);
+    SettleWaitLinkCycle(&s->w, SettleOpRoomCame);
+    tagfs_leave();
+    return OK;
+}
+
+/* At a service point: the op asked again as its program asked it, and its
+ * answer given — or, meeting room on its way again, the wait linked again. An
+ * Ink the op makes is its program's own (TagFSNoteInkerSince). */
+static void SettleOpRoomAgain(HelmWaiter *service)
+{
+    SettleOpWait* s  = container_of(service, SettleOpWait, service);
+    error_t       rc = s->came;
+
+    if (rc == OK) {
+        bool      owns = false;
+        OpContext ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.proc              = s->target;
+        ctx.submit_cookie     = s->submit_cookie;
+        ctx.crate_count       = s->crate_count;
+        ctx.crates_uaddr      = s->crates_uaddr;
+        ctx.async_owns_crates = &owns;
+
+        uint64_t inked = TagFSInkedHere();
+        rc = (error_t)SettleOpAskAgain(s->op, s->crates_kbuf, s->crate_count,
+                                       s->target ? &ctx : NULL, &s->again);
+        if (s->target)
+            TagFSNoteInkerSince(s->target, inked);
+        if (rc == ERR_WOULD_BLOCK && s->again) {
+            rc = SettleOpRoomLink(s);
+            if (rc == OK)
+                return;
+        }
+    }
+    SettleOpAnswered(&s->w, rc);
+}
+
+int SettleOpForRoom(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                    const OpContext *ctx, uint32_t file_id)
+{
+    bool* again = s_asked_again[amp_get_core_index()];
+    if (again) {
+        *again = true;
+        return ERR_WOULD_BLOCK;
+    }
+
+    bool program = ctx && ctx->proc;
+#ifdef CONFIG_VOLUME_TESTS
+    SettleOpStandAnswer* stand = NULL;
+    if (!program)
+        stand = __atomic_exchange_n(&s_stand_answer, NULL, __ATOMIC_ACQ_REL);
+    bool parks = program || stand;
+#else
+    bool parks = program;
+#endif
+    if (!parks)
+        return SettleOpRoomInCall(op, crates, crate_count, ctx);
+
+    const OpRegistration* reg  = OpRegistryLookup(op->op_kind);
+    size_t                size = sizeof(ManifestOp) + op->param_size;
+    ManifestOp*           copy = reg ? kmalloc(size) : NULL;
+    if (!copy)
+        return reg ? ERR_NO_MEMORY : ERR_NOT_INITIALIZED;
+    memcpy(copy, op, size);
+
+    SettleOpWait* s;
+    if (program) {
+        s = SettleOpPark(ctx, crates, SETTLE_OP_ROOM, file_id, reg->name);
+    } else {
+        s = kmalloc(sizeof(SettleOpWait));
+        if (s) {
+            memset(s, 0, sizeof(*s));
+            s->holder      = reg->name;
+            s->kind        = SETTLE_OP_ROOM;
+            s->file_id     = file_id;
+            s->crates_kbuf = crates;
+            s->crate_count = crate_count;
+#ifdef CONFIG_VOLUME_TESTS
+            s->stand       = stand;
+#endif
+        }
+    }
+    if (!s) {
+        kfree(copy);
+        return ERR_NO_MEMORY;
+    }
+    s->op          = copy;
+    s->service.run = SettleOpRoomAgain;
+
+    error_t linked = SettleOpRoomLink(s);
+    if (linked != OK)
+        SettleOpAnswered(&s->w, linked);
+    return ERR_WOULD_BLOCK;
 }

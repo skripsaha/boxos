@@ -7951,16 +7951,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 126 of the stand's own twenty-one suites: stand 26, stand_lock 4,
+# the 132 of the stand's own twenty-two suites: stand 26, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 3,
 # stand_plot 4, stand_index 5, stand_ink 5, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 5, stand_settle 11, stand_glean 5,
 # stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 8,
-# stand_warrant 6. Counted off the code, not a run (K9): a suite that drops
-# out of the walk is a test that stopped covering anything, and the count is
-# where that shows. How many of them pass and how many stand aside is the
-# road's — said, not pinned.
-STAND_RUN=148
+# stand_warrant 6, stand_room 6. Counted off the code, not a run (K9): a suite
+# that drops out of the walk is a test that stopped covering anything, and the
+# count is where that shows. How many of them pass and how many stand aside is
+# the road's — said, not pinned.
+STAND_RUN=154
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -8228,8 +8228,14 @@ run_stand() {
 # after the block was taken — and the tag registry linking before it stamps,
 # writing under its lock, sharing its mark with a registry beside it, loading
 # what it cannot hold, handing out its own array, and forgetting the block a
-# refused pass took. Mutations whose tests do not meet each other's share a
-# boot; each is judged by its own test's own line, number and all.
+# refused pass took. And room on its way, waited for and never answered (R6):
+# the border every answer passes letting ERR_WOULD_BLOCK through, the Settle's
+# own holder refused its own cycle, a job that runs the cycles in its caller's
+# call, a caller in the kernel answered the word, an op waited for answered
+# without being asked again — and, on a STRICT kernel through the port, a
+# W_SPARE that answers the allocator's word, which the border stops the
+# machine on. Mutations whose tests do not meet each other's share a boot;
+# each is judged by its own test's own line, number and all.
 #
 # And the runner is only worth believing if it cannot be made to pass what it
 # should fail. A failed assertion must say where, and what it saw — shown by
@@ -8293,6 +8299,8 @@ stand_mech_on() {
         table)     marks="src/kernel/tagfs/file_table/file_table.c:4" ;;
         registry)     marks="src/kernel/tagfs/tag_registry/tag_registry.c:4 src/kernel/tagfs/tag_registry/tag_registry_load.c:2" ;;
         registrykeep) marks="src/kernel/tagfs/tag_registry/tag_registry.c:1" ;;
+        room)     marks="src/kernel/core/ipc/chit.c:1 src/kernel/tagfs/settle/settle.c:1 src/kernel/core/decks/storage/async/write_job.c:1 src/kernel/core/decks/storage/settle_ops.c:2" ;;
+        roomport) marks="src/kernel/core/decks/storage/async/write_job_port.c:1" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
@@ -8477,6 +8485,29 @@ edits = {
    "    reg->spare_block  = 0;   /* " + M + ": a refused pass forgets the block it took */\n"
    "    tail->used_bytes  = was_used;\n"),
  ],
+ "room": [
+  ("src/kernel/core/ipc/chit.c",
+   "    if (rc != ERR_WOULD_BLOCK)\n        return rc;\n",
+   "    return rc;   /* " + M + ": the border lets ERR_WOULD_BLOCK through */\n"),
+  ("src/kernel/tagfs/settle/settle.c",
+   "    if (LockRankAnyHeldHere() || BatonRunningHere() || (ScribeAnyHeldHere() && !own)) {\n",
+   "    (void)own;   /* " + M + ": the Settle's own holder may not wait for its own cycle */\n"
+   "    if (LockRankAnyHeldHere() || BatonRunningHere() || ScribeAnyHeldHere()) {\n"),
+  ("src/kernel/core/decks/storage/async/write_job.c",
+   "        if (rc == ERR_WOULD_BLOCK && wjob_answered_later(j)) {\n",
+   "        if (rc == ERR_WOULD_BLOCK && wjob_answered_later(j) && !j) {   /* " + M + ": the job runs the cycles in its caller's call */\n"),
+  ("src/kernel/core/decks/storage/settle_ops.c",
+   "    for (;;) {\n        if (!tagfs_enter())\n            return ERR_TAGFS_NOT_INITIALIZED;\n        error_t room = SettleForRoom();\n",
+   "    for (;;) {\n        if (op)   /* " + M + ": a caller in the kernel is answered the word */\n            return ERR_WOULD_BLOCK;\n        if (!tagfs_enter())\n            return ERR_TAGFS_NOT_INITIALIZED;\n        error_t room = SettleForRoom();\n"),
+  ("src/kernel/core/decks/storage/settle_ops.c",
+   "    if (rc == OK) {\n        bool      owns = false;\n",
+   "    if (rc != OK) {   /* " + M + ": the op waited for is answered, never asked again */\n        bool      owns = false;\n"),
+ ],
+ "roomport": [
+  ("src/kernel/core/decks/storage/async/write_job_port.c",
+   "    error_t rc = PoolSpareBegin(&j->spare_block, &j->spare_image);\n    if (rc == ERR_WOULD_BLOCK) {\n",
+   "    error_t rc = PoolSpareBegin(&j->spare_block, &j->spare_image);\n    if (rc == ERR_WOULD_BLOCK && !j) {   /* " + M + ": W_SPARE answers the allocator's word */\n"),
+ ],
  "blind": [
   ("src/kernel/tagfs/tests/tests.c",
    "    kprintf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n",
@@ -8503,7 +8534,10 @@ stand_mech_off() {
              src/kernel/tagfs/scribe/scribe.c src/kernel/drivers/disk/ata_async.c \
              src/kernel/tagfs/ledger/ledger.c src/kernel/tagfs/integrity/integrity.c \
              src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/tag_registry/tag_registry.c \
-             src/kernel/tagfs/tag_registry/tag_registry_load.c; do
+             src/kernel/tagfs/tag_registry/tag_registry_load.c src/kernel/core/ipc/chit.c \
+             src/kernel/tagfs/settle/settle.c src/kernel/core/decks/storage/async/write_job.c \
+             src/kernel/core/decks/storage/settle_ops.c \
+             src/kernel/core/decks/storage/async/write_job_port.c; do
         restore "$f"
     done
 }
@@ -8743,6 +8777,33 @@ STAND_HELD_EOF
     if stand_mut_boot standmut_registrykeep CORES=4 MEM=4G; then
         stand_red standmut_registrykeep "a refused pass that forgets the block it took leaves it owned by nothing" \
             'stand_registry_flush_keeps_its_block failed: the defect it stands for is back — .* \(blocks a refused registry growth took that its retry did not link 1\)'
+    fi
+    stand_mech_off
+
+    # Room on its way (R6), on the legacy channel, where the border's own test
+    # is asked — a STRICT kernel stands it down — and every wait for room but
+    # the port's is.
+    stand_mech_on room
+    if stand_mut_boot standmut_room CORES=4 MEM=4G; then
+        stand_red standmut_room "a border that lets ERR_WOULD_BLOCK through hands a program the word its boxlib drops" \
+            'stand_room_never_an_answer failed: the defect it stands for is back — .* \(answers of ERR_WOULD_BLOCK the border let through to a program 1\)'
+        stand_red standmut_room "the Settle's own holder refused its own cycle answers a write in the kernel the word" \
+            'stand_room_kernel_write_between_the_steps failed at [^ ]+: a write in the kernel on that core .* \(9, 0\)'
+        stand_red standmut_room "a job that runs the cycles in its caller's call is answered before any cycle ends" \
+            'stand_room_job_between_the_steps failed at [^ ]+: it waits for the cycle.s end as a waiter of the Settle, unanswered \(0, 1\)'
+        stand_red standmut_room "a caller in the kernel answered the word is told ERR_WOULD_BLOCK" \
+            'stand_room_create_grows_the_registry failed at [^ ]+: a create whose name grows the registry .* \(9, 0\)'
+        stand_red standmut_room "an op waited for and answered without being asked again made nothing" \
+            'stand_room_create_parked failed at [^ ]+: and says the new file.s id \(0, 1\)'
+    fi
+    stand_mech_off
+
+    # And through the port, on a STRICT kernel: a W_SPARE that answers the
+    # allocator's word meets the border, which stops the machine naming it.
+    stand_mech_on roomport
+    if stand_mut_boot standmut_roomport UEFI=on STRICT=on CORES=4 MEM=4G; then
+        stand_red standmut_roomport "a W_SPARE that answers the allocator's word stops a STRICT kernel at the border" \
+            'KERNEL PANIC:.*\[CHIT\] DEFECT: storage\.write answered pid 0.s token 0x000000 ERR_WOULD_BLOCK'
     fi
     stand_mech_off
 

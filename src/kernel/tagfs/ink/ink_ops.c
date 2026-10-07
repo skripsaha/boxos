@@ -215,7 +215,11 @@ static bool TagNamedBy(uint16_t tag_id, const TagSpelling* tag)
 /* Remove by what the text names. The registry keys tags by (key, value), so a
  * bare key names no one tag of its own: unset "color" drops "color:red" and a
  * bare "color" alike, and unset "color:red" drops that tag alone. The tags a
- * file wears are its record's. */
+ * file wears are its record's. A tag whose Ink meets room on its way stops the
+ * walk with -ERR_WOULD_BLOCK, whatever came off before it — the first, or one
+ * after the tail turned beneath the walk (another core's Ink, a cycle's close)
+ * with no Spare to be had: the caller asks again once a cycle gave ground
+ * back, and what the text names is then what is still on. */
 int tagfs_remove_tag_string(uint32_t file_id, const TagSpelling* tag, InkWarrant warrant)
 {
     if (!tagfs_enter())
@@ -226,16 +230,21 @@ int tagfs_remove_tag_string(uint32_t file_id, const TagSpelling* tag, InkWarrant
     int answer = tagfs_get_metadata(file_id, &meta) == 0 ? -(int)ERR_TAGFS_TAG_NOT_FOUND
                                                          : -(int)ERR_FILE_NOT_FOUND;
     uint32_t removed = 0;
-    for (uint32_t i = 0; i < meta.tag_count; i++) {
+    bool     room    = false;
+    for (uint32_t i = 0; i < meta.tag_count && !room; i++) {
         if (!TagNamedBy(meta.tag_ids[i], tag))
             continue;
         int rc = tagfs_remove_tag(file_id, meta.tag_ids[i], warrant);
         if (rc == 0)
             removed++;
+        else if (rc == -(int)ERR_WOULD_BLOCK)
+            room = true;
         else if (answer == -(int)ERR_TAGFS_TAG_NOT_FOUND)
             answer = rc;
     }
     tagfs_metadata_free(&meta);
     tagfs_leave();
+    if (room)
+        return -(int)ERR_WOULD_BLOCK;
     return removed > 0 ? 0 : answer;
 }

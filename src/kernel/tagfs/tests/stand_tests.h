@@ -75,6 +75,11 @@
 //                        changed only with the warrant, the loader's blocks by
 //                        no call, never gathered, the warrant read off the
 //                        cabin, and an untag answered with its reason
+// stand_room_tests.c     the stand_room suite: room a cycle gives back waited
+//                        for and never answered — a write through the port
+//                        that needs a Spare, a create that grows the registry,
+//                        and writes on the core whose cycle stands between two
+//                        of its steps
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.
@@ -148,6 +153,21 @@ void StandSayChainsLeft(void);
 /* Whether the volume's tag registry, read off the medium block by block, holds
  * a record of `key` and `value` (NULL: a record with no value). */
 bool StandRegistryHoldsOnMedium(const char* key, const char* value);
+
+/* The volume's free ground taken whole and given back (stand_ink_tests.c),
+ * for the tests that ask what a volume with no free block does. */
+typedef struct {
+    uint32_t* at;
+    uint32_t* n;
+    uint32_t  count;
+    uint32_t  cap;
+} StandInkGround;
+
+/* Every free block taken, run by run: the answer that ended it — the
+ * allocator's refusal — or ERR_NO_MEMORY for no memory to list a run, with
+ * what was taken so far still listed for StandInkGiveBack. */
+error_t StandInkTakeAll(StandInkGround* g);
+void    StandInkGiveBack(StandInkGround* g);
 
 /* The kernel heap (stand_heap_tests.c). */
 TestResult TestStandHeapGrowsByRegionsAndGivesBack(void);

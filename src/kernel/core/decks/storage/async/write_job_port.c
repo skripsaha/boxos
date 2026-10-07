@@ -104,11 +104,25 @@ static error_t wjob_load(WriteJob *j)
     return rc;
 }
 
+/* The volume is short of ground a Settle cycle gives back, and a continuation
+ * cannot wait for the cycle: the job turns synchronous, and the service point
+ * that takes its turn waits (write_job.c) — the window it was in written again
+ * from the last one inked, the ground it reserved given back meanwhile, what
+ * landed of it with that ground. */
+static void wjob_to_service(WriteJob *j)
+{
+    PlotRelease(&j->plot);
+    j->loaded     = false;
+    j->bytes_done = j->bytes_inked;
+    j->stopped    = OK;
+    j->async      = false;
+    HelmReady(&j->helm);
+}
+
 /* W_ALLOC — the window's blocks reserved and the record's room claimed before
  * any byte of it moves; every window after the first goes on from where the
- * last one's Ink left the Plot. A volume short of ground Fallow rests turns
- * the job synchronous: the service point that runs it may wait for the cycle
- * that gives the ground back, and goes on from the last window inked. */
+ * last one's Ink left the Plot. Room on its way turns the job synchronous
+ * (wjob_to_service). */
 static bool w_alloc(WriteJob *j)
 {
     error_t  rc     = j->loaded ? OK : wjob_load(j);
@@ -122,10 +136,7 @@ static bool w_alloc(WriteJob *j)
         rc = PlotBeginWrite(&j->plot, at, false, window, &at);
     }
     if (rc == ERR_WOULD_BLOCK) {
-        PlotRelease(&j->plot);
-        j->loaded = false;
-        j->async  = false;
-        HelmReady(&j->helm);
+        wjob_to_service(j);
         return false;
     }
     if (rc != OK) {
@@ -357,12 +368,17 @@ static bool w_ink(WriteJob *j)
 }
 
 /* W_SPARE — a block taken for the pool and its empty stamp written through
- * the port, from the job's first DMA page like any block of the write. A
- * volume with no block for it ends the job with the allocator's answer:
- * nothing is inked, and the ground the write took goes back. */
+ * the port, from the job's first DMA page like any block of the write. Room
+ * on its way turns the job synchronous (wjob_to_service); a volume with no
+ * block for it at all ends the job with the allocator's answer: nothing is
+ * inked, and the ground the write took goes back. */
 static bool w_spare(WriteJob *j)
 {
     error_t rc = PoolSpareBegin(&j->spare_block, &j->spare_image);
+    if (rc == ERR_WOULD_BLOCK) {
+        wjob_to_service(j);
+        return false;
+    }
     if (rc != OK) {
         kprintf("[Storage] write to file %u: the pool has no Spare to take its record and "
                 "none could be made (error %u) — the write is refused, the file as it was\n",

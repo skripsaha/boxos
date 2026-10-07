@@ -99,11 +99,13 @@ static uint16_t param_u16(const ManifestOp *op, uint16_t off)
  * was NOT parked — it ran synchronously and stays PROC_WORKING, consuming this
  * completion from its own ResultRing via the ferry poll. Descriptor write-back
  * precedes the KResultPush so a ferry that frees its submission block on
- * completion cannot race it (no UAF). */
+ * completion cannot race it (no UAF). The answer passes the border every
+ * answer passes (ChitAnswer). */
 int storage_sync_ferry_finalize(const OpContext *ctx, Crate *crates,
                                 error_t err, uint64_t bytes,
                                 uint64_t waybill)
 {
+    err = ChitAnswer(err, ctx->proc ? ctx->proc->pid : 0, 0, "storage.ferry");
     if (crates && ctx->crate_count > 0 && ctx->proc && ctx->proc->cabin) {
         crate_stage_commit_and_release(crates, ctx->crate_count,
                                        ctx->proc->cabin->vmm, ctx->crates_uaddr);
@@ -292,7 +294,9 @@ static int ObjWrite(const ManifestOp *op,
  * wearing system, boot or god — is refused ERR_PERMISSION_DENIED to a program
  * whose cabin holds no warrant, the kernel the loader reads by its blocks to
  * every program, by the volume's own guard (InkMayChange); and so is every
- * delete once the medium left: the answer is the volume's.
+ * delete once the medium left: the answer is the volume's. A delete whose
+ * Quitclaim finds no Spare to close the tail onto, while a cycle would make
+ * one, waits for that cycle's end and is asked again (SettleOpForRoom).
  * ------------------------------------------------------------------------- */
 
 static int ObjDelete(const ManifestOp *op,
@@ -300,11 +304,11 @@ static int ObjDelete(const ManifestOp *op,
                      uint16_t          crate_count,
                      const OpContext  *ctx)
 {
-    (void)crates;
-    (void)crate_count;
     if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
 
     int rc = tagfs_delete_file(param_u32(op, 0), StorageCallWarrant(ctx));
+    if (-rc == ERR_WOULD_BLOCK)
+        return SettleOpForRoom(op, crates, crate_count, ctx, param_u32(op, 0));
     return rc == 0 ? OK : -rc;
 }
 
@@ -353,8 +357,6 @@ static int ObjRename(const ManifestOp *op,
                      uint16_t          crate_count,
                      const OpContext  *ctx)
 {
-    (void)crates;
-    (void)crate_count;
     if (op->param_size < 6) return ERR_INVALID_ARGUMENT;
 
     uint32_t file_id      = param_u32(op, 0);
@@ -368,8 +370,12 @@ static int ObjRename(const ManifestOp *op,
     name[new_name_len] = '\0';
 
     /* The volume's own answer: ERR_TAGFS_RECORD_FULL for a name that would
-     * take the room a write in flight claimed (RT-19) among them. */
+     * take the room a write in flight claimed (RT-19) among them. Room on its
+     * way — the name's tag for the registry, a Spare for the tail — is waited
+     * for (SettleOpForRoom). */
     int rc = tagfs_rename_file(file_id, name, StorageCallWarrant(ctx));
+    if (-rc == ERR_WOULD_BLOCK)
+        return SettleOpForRoom(op, crates, crate_count, ctx, file_id);
     return rc == 0 ? OK : -rc;
 }
 
@@ -720,11 +726,12 @@ static error_t storage_one_tag(const ManifestOp *op, Crate *crates, const OpCont
 }
 
 /* STORAGE_TAG_SET  params:[u32 file_id]  in_crate: "key" or "key:value" —
- * the file wears exactly that tag, or the call is refused. */
+ * the file wears exactly that tag, or the call is refused. Room on its way —
+ * a new tag's block of the registry, a Spare for the tail — is waited for
+ * (SettleOpForRoom). */
 static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
-    (void)crate_count;
     if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
 
     char       *text = NULL;
@@ -733,6 +740,8 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (rc != OK) return rc;
     rc = tagfs_add_tag_string(param_u32(op, 0), &tag);
     crate_buf_free(text);
+    if (rc == ERR_WOULD_BLOCK)
+        return SettleOpForRoom(op, crates, crate_count, ctx, param_u32(op, 0));
     return rc;
 }
 
@@ -745,7 +754,6 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
-    (void)crate_count;
     if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
 
     char       *text = NULL;
@@ -754,6 +762,8 @@ static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (rc != OK) return rc;
     int removed = tagfs_remove_tag_string(param_u32(op, 0), &tag, StorageCallWarrant(ctx));
     crate_buf_free(text);
+    if (-removed == ERR_WOULD_BLOCK)
+        return SettleOpForRoom(op, crates, crate_count, ctx, param_u32(op, 0));
     return removed == 0 ? OK : -removed;
 }
 
@@ -806,11 +816,12 @@ static error_t storage_create_fits(const char *filename, const TagSpelling *tags
  *                     interned; a tag that does not spell or intern, or a
  *                     record wider than a file may have (ERR_TAGFS_RECORD_FULL),
  *                     refuses the create: no file is made without a tag it
- *                     was asked to wear, least of all its context's. */
+ *                     was asked to wear, least of all its context's. Room on
+ *                     its way — the name's tag for the registry, a Spare for
+ *                     the tail — is waited for (SettleOpForRoom). */
 static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
-    (void)crate_count;
     if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
 
     uint8_t scope;
@@ -858,6 +869,8 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     int made = tagfs_create_file(filename, tag_ids, total, &file_id);
     kfree(filename);
     kfree(tag_ids);
+    if (-made == ERR_WOULD_BLOCK)
+        return SettleOpForRoom(op, crates, crate_count, ctx, 0);
     if (made != 0) return (int)(error_t)(-made);
 
     if (op->out_crate != CRATE_INDEX_NONE) {

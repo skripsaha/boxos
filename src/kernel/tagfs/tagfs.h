@@ -696,6 +696,13 @@ uint64_t tagfs_block_to_sector(uint32_t block);
  * called — so nothing ever ran it, nothing ever checked it, and it went on
  * writing the layout the rest of the kernel had already left behind. */
 
+/* Each change of a file below answers -ERR_WOULD_BLOCK, nothing of it done —
+ * an untag by text, nothing of what its text still names — while the volume
+ * is short of ground a Settle cycle gives back: a block for the registry to
+ * grow by, a Spare for the pool's tail. No cycle is run beneath the call: its
+ * caller waits for one its own way and asks again (settle_ops.h,
+ * SettleOpForRoom). */
+
 /* 0, or a negative -ERR_*: a name whose tag the registry refuses (too long,
  * the registry full) is refused with the registry's code, no file is made
  * without the tag its name gives it, a record wider than format v1 carries

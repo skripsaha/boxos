@@ -3,6 +3,7 @@
 
 #include "ktypes.h"
 #include "klib.h"
+#include "error.h"
 
 /*
  * Chit — the kernel's half of the cloakroom token.
@@ -102,5 +103,20 @@ void ChitKeep(struct process_t *p, uint32_t cookie);
 
 /* Nightwatch's snapshot. */
 void ChitPeek(struct process_t *p, ChitView *out);
+
+/*
+ * ‼ ERR_WOULD_BLOCK IS NEVER AN ANSWER (R6). It is a handler's word to the
+ * guide — the answer is put off, and a chit says who owes it — and a program's
+ * boxlib takes a Result that carries it for the park's own acknowledgment and
+ * drops it: a program answered so waits for ever. So every answer the kernel
+ * gives a program's submit passes here on its way out: the guide's synchronous
+ * push, and each push of an answer put off — a write's, a read's, a wait for
+ * the Settle's. An answer of ERR_WOULD_BLOCK is the kernel's own defect: a
+ * STRICT kernel stops on it, naming who answered; any other says so in a
+ * DEFECT line and answers ERR_TAGFS_NO_SPACE in its place — the one refusal
+ * the word stands for in an answer, room a Settle cycle gives back, which the
+ * answerer failed to wait for. Every other answer passes as it is.
+ */
+error_t ChitAnswer(error_t rc, uint32_t pid, uint32_t cookie, const char *holder);
 
 #endif /* CHIT_H */
