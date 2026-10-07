@@ -2,6 +2,7 @@
 #include "scribe.h"
 #include "../run/run.h"
 #include "../integrity/integrity.h"
+#include "../file_map/file_map.h"
 #include "../ink/ink.h"   /* InkWearsGuarded, InkTouchesBoot — the files whose blocks stay put */
 
 /*
@@ -19,12 +20,31 @@
  * The new run is a Stake like any ground the call takes, so a write that goes
  * no further gives it back; the ground it leaves is the record's until a
  * record that no longer names it is inked, and then rests in Fallow.
+ *
+ * ‼ THE COPY GOES A WINDOW AT A TIME (R24). A defrag gathers every extent of
+ * the file, and a file may be gigabytes: its blocks are copied as many at a
+ * time as the seat takes in one command (PlotGatherStep), and its holder gives
+ * its core back between two windows, the Helm kept. Nothing is named until the
+ * last window is copied and made durable, so the move is one Ink, as before.
  */
 
 /* How many extents `blocks` in one run take. */
 static uint32_t PlotPieces(uint64_t blocks)
 {
     return (uint32_t)((blocks + PLOT_RUN_MOST - 1) / PLOT_RUN_MOST);
+}
+
+/* B10, whatever the warrant: a warrant lets a call change a file the system
+ * keeps, and never moves that file's blocks. Asked with the tags the file
+ * wears and the runs the Plot names. */
+static error_t PlotGatherKept(const Plot *p, const uint16_t *tags, uint32_t count)
+{
+    if (!InkWearsGuarded(tags, count) && !InkTouchesBoot(p->runs, p->run_count))
+        return OK;
+    kprintf("[TagFS] file %u is one the system keeps — it wears system, boot or god, or "
+            "holds the kernel the Deed points the loader at — and its blocks are not "
+            "moved\n", p->fid);
+    return ERR_PERMISSION_DENIED;
 }
 
 /* The window [*first, *last] of extents the loaded record named that sheds at
@@ -68,45 +88,6 @@ static bool PlotChooseWindow(const Plot *p, uint32_t shed, uint32_t *first, uint
     return best != UINT64_MAX;
 }
 
-/* The window's blocks copied into [to, to + blocks), as many at a time as the
- * seat takes, each checked against its digest on the way through, and made
- * durable before any record can name them there — so the copy owes a cycle no
- * flush. */
-static error_t PlotCopyWindow(const Plot *p, uint32_t first, uint32_t last, uint32_t to)
-{
-    uint32_t most = TagFSRunBlocks();
-    uint8_t *buf  = PlotRunBuffer(&most);
-    if (!buf)
-        return ERR_NO_MEMORY;
-
-    error_t rc = OK;
-    for (uint32_t i = first; i <= last && rc == OK; i++) {
-        for (uint32_t b = 0; b < p->runs[i].block_count && rc == OK;) {
-            uint32_t from = p->runs[i].start_block + b;
-            uint32_t n    = p->runs[i].block_count - b;
-            if (n > most)
-                n = most;
-            uint32_t landed = 0;
-            rc = TagFSReadRun(from, n, buf);
-            for (uint32_t j = 0; j < n && rc == OK; j++)
-                if (!IntegrityVerify(from + j, buf + (size_t)j * TAGFS_BLOCK_SIZE))
-                    rc = ERR_CHECKSUM;
-            if (rc == OK)
-                rc = TagFSWriteRun(to, n, buf, &landed);
-            if (rc != OK)
-                kprintf("[TagFS] file %u: blocks %u..%u would not move to %u (error %u) — its "
-                        "extents are left where they are\n", p->fid, from, from + n - 1, to,
-                        (unsigned)rc);
-            b  += n;
-            to += n;
-        }
-    }
-    kfree(buf);
-    if (rc == OK)
-        rc = VolumeFlushFor(VolumeFlushNeed());
-    return rc;
-}
-
 /* The runs with [first, last] replaced by the run [start, start + blocks). */
 static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint32_t start, uint32_t blocks)
 {
@@ -129,17 +110,12 @@ static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint32_t start
     return OK;
 }
 
-error_t PlotGather(Plot *p, uint32_t shed, uint32_t hint)
+error_t PlotGatherBegin(Plot *p, uint32_t shed, uint32_t hint, PlotGathering *g)
 {
-    /* B10, whatever the warrant: a warrant lets a call change a file the
-     * system keeps, and never moves that file's blocks. */
-    if (InkWearsGuarded(p->meta.tag_ids, p->meta.tag_count) ||
-        InkTouchesBoot(p->runs, p->run_count)) {
-        kprintf("[TagFS] file %u is one the system keeps — it wears system, boot or god, or "
-                "holds the kernel the Deed points the loader at — and its blocks are not "
-                "moved\n", p->fid);
-        return ERR_PERMISSION_DENIED;
-    }
+    memset(g, 0, sizeof(*g));
+    error_t rc = PlotGatherKept(p, p->meta.tag_ids, p->meta.tag_count);
+    if (rc != OK)
+        return rc;
 
     uint32_t first = 0, last = 0;
     uint64_t blocks = 0;
@@ -150,7 +126,7 @@ error_t PlotGather(Plot *p, uint32_t shed, uint32_t hint)
     }
 
     uint32_t start = 0;
-    error_t  rc    = BlockMapTakeFor(p->fid, (uint32_t)blocks, hint, &start, __func__);
+    rc = BlockMapTakeFor(p->fid, (uint32_t)blocks, hint, &start, __func__);
     if (rc != OK) {
         kprintf("[TagFS] file %u: gathering extents %u to %u of it needs one free run of %llu "
                 "block(s), and the volume has none that long\n", p->fid, first, last,
@@ -162,25 +138,128 @@ error_t PlotGather(Plot *p, uint32_t shed, uint32_t hint)
         (void)tagfs_free_blocks(start, (uint32_t)blocks);
         return rc;
     }
+    g->first  = first;
+    g->last   = last;
+    g->blocks = blocks;
+    g->to     = start;
+    g->extent = first;
+    return OK;
+}
 
-    rc = PlotCopyWindow(p, first, last, start);
+/* `n` blocks from `from` read into `buf`, each checked against its digest on
+ * the way through: OK, or why they would not move to `to` — said. */
+static error_t PlotGatherRead(const Plot *p, uint32_t from, uint32_t n, uint8_t *buf, uint32_t to)
+{
+    error_t rc = TagFSReadRun(from, n, buf);
+    for (uint32_t j = 0; j < n && rc == OK; j++)
+        if (!IntegrityVerify(from + j, buf + (size_t)j * TAGFS_BLOCK_SIZE))
+            rc = ERR_CHECKSUM;
+    if (rc != OK)
+        kprintf("[TagFS] file %u: blocks %u..%u would not move to %u (error %u) — its "
+                "extents are left where they are\n", p->fid, from, from + n - 1, to,
+                (unsigned)rc);
+    return rc;
+}
+
+/* The next window of the gather: the blocks after the last one copied, from
+ * as many extents as it reaches, read one extent's piece at a time and laid
+ * into the run in one command. */
+static error_t PlotGatherWindow(const Plot *p, PlotGathering *g)
+{
+    uint32_t most = TagFSRunBlocks();
+    uint8_t *buf  = PlotRunBuffer(&most);
+    if (!buf)
+        return ERR_NO_MEMORY;
+
+    uint32_t to     = g->to + (uint32_t)g->copied;
+    uint32_t filled = 0;
+    error_t  rc     = OK;
+    while (rc == OK && filled < most && g->extent <= g->last) {
+        const FileExtent *e    = &p->runs[g->extent];
+        uint32_t          from = e->start_block + g->within;
+        uint32_t          n    = e->block_count - g->within;
+        if (n > most - filled)
+            n = most - filled;
+        rc = PlotGatherRead(p, from, n, buf + (size_t)filled * TAGFS_BLOCK_SIZE, to + filled);
+        if (rc != OK)
+            break;
+        filled    += n;
+        g->within += n;
+        if (g->within == e->block_count) {
+            g->extent++;
+            g->within = 0;
+        }
+    }
+    if (rc == OK && filled > 0) {
+        uint32_t landed = 0;
+        rc = TagFSWriteRun(to, filled, buf, &landed);
+        if (rc != OK)
+            kprintf("[TagFS] file %u: the gathered blocks would not be laid at %u..%u (error "
+                    "%u) — its extents are left where they are\n", p->fid, to,
+                    to + filled - 1, (unsigned)rc);
+    }
+    kfree(buf);
+    if (rc == OK)
+        g->copied += filled;
+    return rc;
+}
+
+/* Every block copied: the copy made durable before any record can name it
+ * there — so it owes a cycle no flush — B10 asked again of the record as it
+ * is now, since a tag of those keys put on while the copy went on keeps the
+ * file's blocks where they lie as much as one it wore at the load, and the
+ * Plot made to name the run. */
+static error_t PlotGatherLay(Plot *p, PlotGathering *g)
+{
+    error_t rc = VolumeFlushFor(VolumeFlushNeed());
     if (rc != OK)
         return rc;
+
+    FileRecord *now = FileMapRecordHold(tagfs_get_state()->files, p->fid, NULL);
+    if (now) {
+        rc = PlotGatherKept(p, now->tags, now->tag_count);
+        FileRecordRelease(now);
+        if (rc != OK)
+            return rc;
+    }
 
     /* The old ground of the window stays the record's until the new record
      * is inked; it is noted now, before the runs forget it. A move that goes
      * no further notes nothing: the new run is a Stake, and goes back. */
     uint32_t noted = p->freed_count;
-    uint32_t count = last - first + 1;
-    for (uint32_t i = first; i <= last && rc == OK; i++)
+    uint32_t count = g->last - g->first + 1;
+    for (uint32_t i = g->first; i <= g->last && rc == OK; i++)
         rc = PlotLetGoLater(p, p->runs[i].start_block, p->runs[i].block_count);
     if (rc == OK)
-        rc = PlotSplice(p, first, last, start, (uint32_t)blocks);
+        rc = PlotSplice(p, g->first, g->last, g->to, (uint32_t)g->blocks);
     if (rc != OK) {
         p->freed_count = noted;
         return rc;
     }
+    g->laid = true;
     kprintf("[TagFS] file %u: %u extent(s) of it, %llu block(s), gathered into one run at %u — "
-            "it now has %u\n", p->fid, count, (unsigned long long)blocks, start, p->run_count);
+            "it now has %u\n", p->fid, count, (unsigned long long)g->blocks, g->to, p->run_count);
     return OK;
+}
+
+error_t PlotGatherStep(Plot *p, PlotGathering *g, bool *out_laid)
+{
+    error_t rc = OK;
+    if (!g->laid) {
+        rc = PlotGatherWindow(p, g);
+        if (rc == OK && g->copied == g->blocks)
+            rc = PlotGatherLay(p, g);
+    }
+    *out_laid = g->laid;
+    return rc;
+}
+
+error_t PlotGather(Plot *p, uint32_t shed, uint32_t hint)
+{
+    PlotGathering g;
+    bool          laid = false;
+    error_t       rc   = PlotGatherBegin(p, shed, hint, &g);
+    while (rc == OK && !laid)
+        rc = PlotGatherStep(p, &g, &laid);
+    return rc;
 }

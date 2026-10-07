@@ -231,7 +231,8 @@ static TestResult StandBookOpen(StandBook* b, const char* name)
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB0u);
     TEST_ASSERT(StandMakeFile(name, g_test_buffer, TAGFS_BLOCK_SIZE, &b->file_id),
                 "a file is made and written");
-    TEST_ASSERT_OK(tagfs_add_tag_string(b->file_id, StandBookTag()), "it wears stand_book");
+    TEST_ASSERT_OK(tagfs_add_tag_string(b->file_id, StandBookTag(), INK_UNWARRANTED),
+                   "it wears stand_book");
     b->tag = TagRegistryLookup(tagfs_get_state()->registry, StandBookTag());
     TEST_ASSERT_OK(TagFSSettle(), "and a cycle settles it, every write it saw kept");
 

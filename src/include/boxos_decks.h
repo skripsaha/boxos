@@ -245,12 +245,17 @@
 #define STORAGE_OBJ_RENAME          0x09
 #define STORAGE_OBJ_GET_INFO        0x0A
 /* obj.span — a file made exactly `size` bytes long. params =
- * [u32 file_id][u64 size]. Shorter: the tail is cut and its blocks given
- * back. Longer: the bytes from the old size to the new one read as zeros,
- * written to blocks taken for them — never a previous owner's bytes. A write
- * grows a file only at its end, and is refused ERR_TAGFS_BEYOND_SIZE past it;
- * span is the one other way a file grows. */
+ * [u32 file_id][u64 size][u32 flags], the flags word optional (0). Shorter:
+ * the tail is cut and its blocks given back. Longer: the bytes from the old
+ * size to the new one read as zeros, written to blocks taken for them — never
+ * a previous owner's bytes. A write grows a file only at its end, and is
+ * refused ERR_TAGFS_BEYOND_SIZE past it; span is the one other way a file
+ * grows. STORAGE_SPAN_GROW: the file is grown to `size` only if it is shorter,
+ * and left as it is otherwise — decided where nothing else changes the file
+ * meanwhile, so a writer that spans to where its write begins never cuts back
+ * what another writer added since it looked. */
 #define STORAGE_OBJ_SPAN            0x0B
+#define STORAGE_SPAN_GROW           (1u << 0)
 /* The four snapshot operations (0x20-0x22, 0x24) are answered ERR_UNSUPPORTED
  * on a format-v1 volume, whatever their params; snapshots arrive with format
  * v2. Their shapes are kept below as the wire they were. */

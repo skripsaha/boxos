@@ -251,7 +251,7 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
          * A refusal is fatal to the open: silently keeping the old bytes is
          * the one outcome the caller definitely did not ask for. */
         if ((role & CURRENT_WRITE) && (flags & CURRENT_FRESH)) {
-            int trc = file_span(c->file_id, 0);
+            int trc = file_span(c->file_id, 0, 0);
             if (trc != 0) { free(c); CUR_FAIL(box_errno_of(trc)); }
         }
         c->file_pos = 0;
@@ -559,18 +559,19 @@ int64_t current_size(const Current *c)
     return (int64_t)info.size;
 }
 
-int current_span(Current *c, uint64_t size)
+int current_span(Current *c, uint64_t size, uint32_t flags)
 {
     if (!c) return -ERR_NULL_POINTER;
     if (!(c->caps & CURRENT_CAP_RESIZABLE)) return -ERR_INVALID_OPERATION;
     if (!(c->caps & CURRENT_CAP_WRITE))     return -ERR_INVALID_OPERATION;
 
-    int rc = file_span(c->file_id, size);
+    int rc = file_span(c->file_id, size, flags);
     if (rc != 0) return rc;
 
     /* Keep the cursor inside the file: past a shorter end, the next write
-     * would begin past the size, and the kernel refuses that. */
-    if (c->file_pos > size) c->file_pos = size;
+     * would begin past the size, and the kernel refuses that. A span that
+     * only grows cuts nothing, and leaves the cursor where it was. */
+    if (!(flags & STORAGE_SPAN_GROW) && c->file_pos > size) c->file_pos = size;
     return OK;
 }
 

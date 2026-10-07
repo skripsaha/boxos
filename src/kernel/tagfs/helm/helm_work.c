@@ -150,29 +150,79 @@ error_t HelmWrite(TagFSFileHandle *handle, const PlotSource *src, uint64_t *out_
 // could be cut, and it grew only by being written at its end. span also grows
 // one across a gap, and the gap reads as zeros, written to ground taken for
 // it — a write can never make a gap on its own (ERR_TAGFS_BEYOND_SIZE).
+//
+// ‼ A SPAN GROWS A WINDOW AT A TIME, AS A WRITE DOES (R24). Growth is zeros
+// laid on ground taken for them, and a span of gigabytes was one piece: every
+// block of it reserved before the first zero moved, and the holder's core held
+// for all of it — on one core with interrupts off. Each window now is its own
+// load, reservation, zeros and Ink, so a span never holds more than a window's
+// ground unnamed, and its holder may give its core back between two. Before
+// the first block of a window is taken the volume is asked whether it could
+// give the whole growth at all, so a span past every block the volume has is
+// refused before it eats them. A cut is one window: it lays no block.
 // ----------------------------------------------------------------------------
+
+/* The span's next window under the Plot loaded for it: the file grown by a
+ * window towards `size`, or cut to it, and inked. *out_ended once the file is
+ * `size` long — or, for `grow_only`, once it is no shorter, which a file
+ * already longer is at once and is left as it is. */
+static error_t HelmSpanStep(Plot *plot, uint64_t size, bool grow_only, bool *out_ended)
+{
+    if (plot->size == size || (grow_only && plot->size > size)) {
+        *out_ended = true;
+        return OK;
+    }
+
+    error_t rc = OK;
+    if (size < plot->size) {
+        rc         = PlotTrimTo(plot, size / TAGFS_BLOCK_SIZE + (size % TAGFS_BLOCK_SIZE != 0));
+        plot->size = size;
+        *out_ended = true;
+    } else {
+        uint64_t end = plot->size + HelmWindowBytes(plot->size);
+        if (end > size || end < plot->size)
+            end = size;
+        rc = PlotRoomFor(plot, size);
+        if (rc == OK)
+            rc = PlotExtendZero(plot, end);
+        *out_ended = end == size;
+    }
+    InkReceipt inked;
+    if (rc == OK)
+        rc = TagFSInkPlot(plot, INK_MAKES_SPARES, &inked);
+    return rc;
+}
+
+error_t HelmSpanWindow(TagFSFileHandle *handle, uint64_t size, bool grow_only,
+                       uint64_t *out_found, bool *out_ended)
+{
+    Plot    plot;
+    error_t rc     = HelmPlotLoad(handle, &plot);
+    bool    loaded = rc == OK;
+
+    *out_ended = false;
+    if (loaded) {
+        *out_found = plot.size;
+        rc         = HelmSpanStep(&plot, size, grow_only, out_ended);
+        handle->file_size = plot.size_before;
+    }
+    PlotRelease(&plot);
+    return rc;
+}
 
 error_t HelmSpan(TagFSFileHandle *handle, uint64_t size, uint64_t *out_was)
 {
-    Plot    plot;
-    error_t rc = HelmPlotLoad(handle, &plot);
-    *out_was   = 0;
-    if (rc == OK)
-        *out_was = plot.size;
-    if (rc == OK && size != plot.size) {
-        if (size < plot.size) {
-            rc = PlotTrimTo(&plot, (size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE);
-            plot.size = size;
-        } else {
-            rc = PlotExtendZero(&plot, size);
-        }
-        InkReceipt inked;
-        if (rc == OK)
-            rc = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
-    }
-    if (rc == OK)
-        handle->file_size = size;
-    PlotRelease(&plot);
+    uint64_t found = UINT64_MAX;
+    bool     ended = false;
+    error_t  rc;
+
+    *out_was = 0;
+    do {
+        uint64_t at = UINT64_MAX;
+        rc = HelmSpanWindow(handle, size, false, &at, &ended);
+        if (found == UINT64_MAX && at != UINT64_MAX)
+            *out_was = found = at;
+    } while ((rc == OK && !ended) || HelmRoomCameBack(&rc));
     return rc;
 }
 
@@ -190,31 +240,79 @@ static bool HelmRunsAreOne(const FileExtent *runs, uint32_t count)
     return true;
 }
 
+void HelmDefragLetGo(HelmDefragging *d)
+{
+    PlotRelease(&d->plot);
+    memset(d, 0, sizeof(*d));
+}
+
+/* The defrag's first window: the file's record loaded and its ground past
+ * its size cut off, and — unless it lies in one run already, which is inked
+ * only when the cut freed ground — the run it is gathered into taken. Room on
+ * its way leaves nothing of it held: the next turn loads afresh. */
+static error_t HelmDefragBegin(TagFSFileHandle *handle, HelmDefragging *d, bool *out_ended)
+{
+    Plot   *plot = &d->plot;
+    error_t rc   = HelmPlotLoad(handle, plot);
+    d->loaded = true;
+    if (rc == OK)
+        rc = PlotTrimTo(plot, plot->size / TAGFS_BLOCK_SIZE + (plot->size % TAGFS_BLOCK_SIZE != 0));
+    if (rc == OK && HelmRunsAreOne(plot->runs, plot->run_count)) {
+        InkReceipt inked;
+        if (plot->freed_count > 0)
+            rc = TagFSInkPlot(plot, INK_MAKES_SPARES, &inked);
+        *out_ended = rc == OK;
+    } else if (rc == OK) {
+        rc = PlotGatherBegin(plot, 0, plot->runs[0].start_block, &d->gather);
+    }
+    if (rc == ERR_WOULD_BLOCK)
+        HelmDefragLetGo(d);
+    return rc;
+}
+
 /*
  * Defrag is a gather of every extent (PlotGather, shed 0) under the file's
  * Helm, so no write and no span of the file runs beside it (D7-defrag): the
  * blocks are copied into one run taken through the block map near where the
- * file begins, made durable, and named by one inked record, and only then does
+ * file begins — a window a step, the holder free to give its core back between
+ * two (R24) — made durable, and named by one inked record, and only then does
  * the old ground come to rest in Fallow. Ground the record named past the
  * file's size goes with it. A file the system keeps is not moved (PlotGather,
- * B10). A delete beside it cannot bring the file back (CR-9): its Quitclaim
- * leaves no record for this Ink to lay the gathered run over, and the run goes
- * back.
+ * B10). A delete beside it cannot bring the file back (CR-9): the next window
+ * finds the file given up, or its Quitclaim leaves no record for this Ink to
+ * lay the gathered run over, and the run goes back.
  */
+error_t HelmDefragWindow(TagFSFileHandle *handle, HelmDefragging *d, bool *out_ended)
+{
+    *out_ended = false;
+    if (!d->loaded) {
+        error_t rc = HelmDefragBegin(handle, d, out_ended);
+        if (rc != OK || *out_ended)
+            return rc;
+    } else if (HelmVacated(handle->ofe)) {
+        return ERR_FILE_NOT_FOUND;
+    }
+
+    bool    laid = false;
+    error_t rc   = PlotGatherStep(&d->plot, &d->gather, &laid);
+    if (rc == OK && laid) {
+        InkReceipt inked;
+        rc         = TagFSInkPlot(&d->plot, INK_MAKES_SPARES, &inked);
+        *out_ended = rc == OK;
+    }
+    return rc;
+}
+
 error_t HelmDefrag(TagFSFileHandle *handle)
 {
-    Plot    plot;
-    bool    moved = false;
-    error_t rc    = HelmPlotLoad(handle, &plot);
-    if (rc == OK)
-        rc = PlotTrimTo(&plot, (plot.size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE);
-    if (rc == OK && !HelmRunsAreOne(plot.runs, plot.run_count)) {
-        rc    = PlotGather(&plot, 0, plot.runs[0].start_block);
-        moved = rc == OK;
-    }
-    InkReceipt inked;
-    if (rc == OK && (moved || plot.freed_count > 0))
-        rc = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
-    PlotRelease(&plot);
+    HelmDefragging d;
+    bool           ended = false;
+    error_t        rc;
+
+    memset(&d, 0, sizeof(d));
+    do {
+        rc = HelmDefragWindow(handle, &d, &ended);
+    } while ((rc == OK && !ended) || HelmRoomCameBack(&rc));
+    HelmDefragLetGo(&d);
     return rc;
 }

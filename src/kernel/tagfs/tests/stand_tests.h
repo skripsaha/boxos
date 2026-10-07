@@ -27,6 +27,7 @@
 //                        comes twice, and the ground a growing file keeps
 // stand_plot_tests.c     the stand_plot suite: where a write may begin, what a
 //                        gap reads as, how a file's extents grow, and span
+//                        and defrag a window at a time
 // stand_index_tests.c    the stand_index suite: what the indexes of the live
 //                        files cost, a tag's members across a window's edge,
 //                        the registry's hashes growing, more files than the
@@ -82,7 +83,8 @@
 // stand_warrant_tests.c  the stand_warrant suite: a file the system keeps
 //                        changed only with the warrant, the loader's blocks by
 //                        no call, never gathered, the warrant read off the
-//                        cabin, and an untag answered with its reason
+//                        cabin, an untag answered with its reason, and a tag
+//                        of the system's keys put on only with the warrant
 // stand_room_tests.c     the stand_room suite: room a cycle gives back waited
 //                        for and never answered — a write through the port
 //                        that needs a Spare, a create that grows the registry,
@@ -129,6 +131,16 @@ int  StandWriteAt(uint32_t file_id, uint64_t offset, const void* data, uint32_t 
 
 /* Whether the block map calls a data-run block taken. */
 bool StandBlockInUse(uint32_t block);
+
+/* One storage-deck op asked as `ctx` asks it — NULL for a caller in the
+ * kernel, which carries no warrant: the params after the op's head, `in` the
+ * in crate when there is one. The handler's answer, or ERR_NOT_INITIALIZED
+ * when the op is not registered or its params do not fit. A context whose
+ * process has a cabin has its in crate read through that cabin's memory, so a
+ * cabin a test makes asks only ops that bring none. */
+struct OpContext;
+int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const void* in,
+                 uint64_t in_size, const struct OpContext* ctx);
 
 /* The newest intact Ledger's sequence number, read off the medium by the
  * Ledger's own reader; 0 when neither copy reads. */

@@ -329,7 +329,7 @@ static TestResult TestStandInkEarlyCloseSparesTheLast(void)
         return test_steps_aside(aside);
 
     TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0, "a file is made");
-    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &key), "it wears stand_ink");
+    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &key, INK_UNWARRANTED), "it wears stand_ink");
     uint16_t tag = TagRegistryLookup(tagfs_get_state()->registry, &key);
     TEST_ASSERT(StandInkAtRest(), "cycles settle it, and nothing rests or waits to be gleaned");
     TEST_ASSERT_EQ(StandInkSpares(NULL, 0), SPARE_RESERVE, "the pool holds the whole reserve");
@@ -344,7 +344,7 @@ static TestResult TestStandInkEarlyCloseSparesTheLast(void)
     TEST_ASSERT_EQ(StandInkSpares(NULL, 0), SPARE_FOR_QUITCLAIMS,
                    "and no Spare could be made again: the deletes' share is what is left");
 
-    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &key),
+    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &key, INK_UNWARRANTED),
                    "stand_ink goes on again, a tag the medium already holds — a second change");
     uint64_t second = InkedGen();
     TEST_ASSERT_OK(TagFSSettle(), "the next cycle with a waiter settles it too");

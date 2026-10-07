@@ -2485,7 +2485,11 @@ combinations the table leaves out.
   (`ERR_TAGFS_BEYOND_SIZE`), so a `seekp` past the end followed by a write
   spans the file to the position first; the gap reads as zeros, never as the
   bytes a block's previous owner left (Quill step 1.3). `fseek` past the end
-  and `fwrite` in `<cstdio>` take the same road.
+  and `fwrite` in `<cstdio>` take the same road. The span only grows
+  (`STORAGE_SPAN_GROW`, decided under the file's Helm): a file another writer
+  grew past the position after the refusal is left as long as it is, so the
+  write overlays `[pos, pos+n)` and cuts nothing — before check #1 it made the
+  file exactly `pos` long and destroyed that writer's bytes (Z16-1).
 - `?` **`binary` is accepted and changes nothing.** A Current is a byte channel
   and boxcxx performs no text translation, so binary and text are one road.
   The standard leaves the difference implementation-defined; this records

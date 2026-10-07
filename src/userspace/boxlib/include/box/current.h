@@ -189,11 +189,12 @@ uint64_t current_tell(const Current *c);
 int64_t current_size(const Current *c);
 
 /* The backing made exactly `size` bytes long (file_span): shorter cuts the
- * tail, longer reads as zeros from the old end on. Returns OK,
- * -ERR_INVALID_OPERATION on a backing without an extent or one opened for
- * reading, or the underlying -ERR_*. A cursor left past a shorter end is
- * brought back to it. */
-int current_span(Current *c, uint64_t size);
+ * tail, longer reads as zeros from the old end on — or, with flags
+ * STORAGE_SPAN_GROW, grown to `size` only if it is shorter and never cut.
+ * Returns OK, -ERR_INVALID_OPERATION on a backing without an extent or one
+ * opened for reading, or the underlying -ERR_*. A cursor left past a shorter
+ * end is brought back to it. */
+int current_span(Current *c, uint64_t size, uint32_t flags);
 
 /* --------------------------------------------------------------------------
  * Introspection

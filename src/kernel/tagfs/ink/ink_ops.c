@@ -148,8 +148,9 @@ int tagfs_rename_file(uint32_t file_id, const char* new_filename, InkWarrant war
     return rc == OK ? 0 : -(int)rc;
 }
 
-/* A tag put on takes none off, so no guard is asked and no warrant carried. */
-int tagfs_add_tag(uint32_t file_id, uint16_t tag_id)
+/* A tag put on takes none off; one of key system, boot or god makes the file
+ * one the system keeps, and asks the warrant as taking it off does. */
+int tagfs_add_tag(uint32_t file_id, uint16_t tag_id, InkWarrant warrant)
 {
     if (!tagfs_enter())
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
@@ -157,7 +158,7 @@ int tagfs_add_tag(uint32_t file_id, uint16_t tag_id)
     error_t    rc = tag_id == TAGFS_INVALID_TAG_ID ? ERR_TAGFS_INVALID_TAG
                                                    : TagRegistryFlushFor(OpsRegistry(), tag_id);
     if (rc == OK)
-        rc = InkFields(file_id, NULL, tag_id, TAGFS_INVALID_TAG_ID, INK_UNWARRANTED, &receipt);
+        rc = InkFields(file_id, NULL, tag_id, TAGFS_INVALID_TAG_ID, warrant, &receipt);
     tagfs_leave();
     return rc == OK ? 0 : -(int)rc;
 }
@@ -184,7 +185,7 @@ bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id)
 /* The id is the registry's of this mounting, and is worn inside the same stay
  * behind the door: a volume read again between the two would number another
  * tag with it. */
-error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling* tag)
+error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling* tag, InkWarrant warrant)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
@@ -192,7 +193,7 @@ error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling* tag)
     error_t  rc = TagRegistryIntern(OpsRegistry(), tag, &tag_id);
     if (rc == OK) {
         UseContextBindTag(tag, tag_id);
-        int added = tagfs_add_tag(file_id, tag_id);
+        int added = tagfs_add_tag(file_id, tag_id, warrant);
         rc        = added == 0 ? OK : (error_t)-added;
     }
     tagfs_leave();

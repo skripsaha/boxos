@@ -294,7 +294,8 @@ TestResult TestStandMediumGivenUpIdsNotGivenAgain(void)
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB3u);
     TEST_ASSERT(StandMakeFile("given_up_ids", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written");
-    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &spelling), "it wears a tag new to the volume");
+    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &spelling, INK_UNWARRANTED),
+                   "it wears a tag new to the volume");
     tag = TagRegistryLookup(fs->registry, &spelling);
     TEST_ASSERT(tag != TAGFS_INVALID_TAG_ID, "whose id the registry gave");
     TEST_ASSERT(InkedGen() > SettledGen(), "and no cycle settled either");

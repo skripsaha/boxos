@@ -109,13 +109,15 @@ int RawWrite(::std::FILE *f, const char *p, ::std::size_t n)
     ::Current *c = Cur(f);
     if (!c) return -1;
     // A file grows only at its end, and a write the kernel refuses as
-    // beginning past it — an fseek past the end — spans the file to the
+    // beginning past it — an fseek past the end — grows the file to the
     // position first: the gap reads as zeros, which is what writing there
-    // means.
+    // means. Grown only if it is still shorter (STORAGE_SPAN_GROW), never
+    // made exactly that long: another writer may have grown the file past
+    // the position since the refusal, and its bytes are not cut back.
     int w = ::current_write(c, p, n);
     if (w == -ERR_TAGFS_BEYOND_SIZE && (f->__flags & kSeekable)) {
         const ::std::uint64_t at = ::current_tell(c);
-        if (::current_span(c, at) == OK && ::current_seek(c, at) == 0)
+        if (::current_span(c, at, STORAGE_SPAN_GROW) == OK && ::current_seek(c, at) == 0)
             w = ::current_write(c, p, n);
     }
     return w;

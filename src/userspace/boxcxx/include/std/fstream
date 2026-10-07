@@ -16,8 +16,9 @@
 // which makes a file exactly as long as asked. Every row of Table 122 below is
 // therefore real; none of them is approximated. span is also how a position
 // past the end is written to: TagFS grows a file only at its end, so a write
-// the kernel refuses as beyond the size spans the file to it first, and the
-// gap reads as zeros (WriteAt).
+// the kernel refuses as beyond the size grows the file to it first — only if
+// it is still shorter, so nothing another writer added is cut — and the gap
+// reads as zeros (WriteAt).
 //
 // ── the buffer strategy ─────────────────────────────────────────────────
 // ONE buffer, serving the get area or the put area but never both at once. A
@@ -805,12 +806,14 @@ private:
 
     // Bytes out at `at`, the backing's cursor already there. The kernel grows
     // a file only at its end and refuses a write that begins past it; a
-    // position a seek put past the end is therefore spanned to first, and the
-    // gap between reads as zeros, which is what writing there means.
+    // position a seek put past the end is therefore grown to first, and the
+    // gap between reads as zeros, which is what writing there means. Grown
+    // only if it is still shorter (STORAGE_SPAN_GROW): another writer may have
+    // grown the file past `at` since the refusal, and nothing it wrote is cut.
     int WriteAt(uint64_t at, const void *p, size_t n)
     {
         int w = ::current_write(__c, p, n);
-        if (w == -ERR_TAGFS_BEYOND_SIZE && ::current_span(__c, at) == OK &&
+        if (w == -ERR_TAGFS_BEYOND_SIZE && ::current_span(__c, at, STORAGE_SPAN_GROW) == OK &&
             ::current_seek(__c, at) == 0)
             w = ::current_write(__c, p, n);
         return w;

@@ -44,7 +44,10 @@
  * SAYS SO. A file wearing a tag whose key is system, boot or god — system:foo
  * as much as system — has its extents changed, is given up, and has one of
  * those tags taken off only by a call that carries the warrant (InkWarrant,
- * tagfs.h: its program's cabin holds system or god). A file holding the kernel
+ * tagfs.h: its program's cabin holds system or god); and only such a call puts
+ * one of those tags on a file, any file — put on by anybody, it would lock the
+ * file away from its own owner. Any other tag goes on any file, one the system
+ * keeps among them, warrant or none. A file holding the kernel
  * the Deed points the loader at is changed by no call at all, warrant or none.
  * Either refusal is ERR_PERMISSION_DENIED, said. A write, a span and a defrag
  * ask the same guard when they load the file (PlotLoad), before a byte of
@@ -102,8 +105,8 @@ void    InkRoomLetGo(Plot* p);
  * moves with it: the tag of the name it had comes off, `add` (the new name's,
  * already interned) goes on first. Otherwise `add` goes on and `drop` comes
  * off (TAGFS_INVALID_TAG_ID for neither). A tag of key system, boot or god
- * comes off only with the warrant. OK — a change that changes nothing is OK
- * with no Ink — or the refusal. */
+ * goes on — a name's tag too — or comes off only with the warrant. OK — a
+ * change that changes nothing is OK with no Ink — or the refusal. */
 error_t InkFields(uint32_t fid, const char* name, uint16_t add, uint16_t drop, InkWarrant warrant,
                   InkReceipt* out);
 

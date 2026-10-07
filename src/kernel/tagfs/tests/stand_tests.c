@@ -11,6 +11,8 @@
 #include "baton.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "op_registry.h"
+#include "boxos_decks.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -91,6 +93,30 @@ int StandWriteAt(uint32_t file_id, uint64_t offset, const void* data, uint32_t b
 bool StandBlockInUse(uint32_t block)
 {
     return BlockMapIsTaken(block);
+}
+
+static uint8_t s_deck_op[sizeof(ManifestOp) + 16] __attribute__((aligned(8)));
+static Crate   s_deck_crate;
+
+int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const void* in,
+                 uint64_t in_size, const OpContext* ctx)
+{
+    const OpRegistration* reg = OpRegistryLookup(OP_KIND(DECK_STORAGE, opcode));
+    ManifestOp*           op  = (ManifestOp*)s_deck_op;
+    if (!reg || param_size > sizeof(s_deck_op) - sizeof(ManifestOp))
+        return ERR_NOT_INITIALIZED;
+    memset(s_deck_op, 0, sizeof(s_deck_op));
+    op->op_kind    = OP_KIND(DECK_STORAGE, opcode);
+    op->param_size = param_size;
+    op->in_crate   = CRATE_INDEX_NONE;
+    op->out_crate  = CRATE_INDEX_NONE;
+    memcpy(op->params, params, param_size);
+    if (in) {
+        s_deck_crate = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)in,
+                                .size = in_size, .capacity = in_size };
+        op->in_crate = 0;
+    }
+    return reg->handler(op, &s_deck_crate, in ? 1 : 0, ctx);
 }
 
 // ----------------------------------------------------------------------------
