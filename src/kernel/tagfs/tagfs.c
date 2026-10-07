@@ -1813,7 +1813,10 @@ uint64_t tagfs_block_to_sector(uint32_t block)
  * landed has its digest recorded, and no read-ahead window hands out what the
  * block held. A refusal the medium's departure explains is
  * ERR_DEVICE_NOT_READY, in a read and in a write: the caller holds nothing a
- * broken disk would make it hold.
+ * broken disk would make it hold. A sector the medium says it cannot read is
+ * ERR_BAD_SECTOR, and no refused read: it is the medium's answer about what
+ * the block holds, for the reader to judge (the mount's by where the block
+ * lies), and no seat:ready will change it.
  *
  * The departure is asked the way the volume's other doors ask it
  * (volume_not_here): a mounted volume's is latched and opens its book; a
@@ -1834,8 +1837,11 @@ error_t tagfs_read_block(uint32_t block, void *buffer)
 
     bool got = g_state.braid &&
                BraidReadBlock(g_state.braid, tagfs_block_to_sector(block), buffer, NULL) == OK;
-    if (!got && BoardroomRead(g_tagfs_seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS,
-                              buffer) != 0) {
+    int  rc  = got ? 0 : BoardroomRead(g_tagfs_seat, tagfs_block_to_sector(block),
+                                       TAGFS_BLOCK_SECTORS, buffer);
+    if (rc == (int)ERR_BAD_SECTOR)
+        return ERR_BAD_SECTOR;
+    if (rc != 0) {
         TagFSNoteReadRefused();
         return volume_not_here() ? ERR_DEVICE_NOT_READY : ERR_READ_FAILED;
     }

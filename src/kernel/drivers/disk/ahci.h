@@ -138,6 +138,7 @@
 #define AHCI_PTFD_STS_DRQ   (1U << 3)
 #define AHCI_PTFD_STS_ERR   (1U << 0)
 #define AHCI_PTFD_ERR_ABRT  (1U << 2)   // in the error byte: the command was aborted (ATA8-ACS)
+#define AHCI_PTFD_ERR_UNC   (1U << 6)   // in the error byte: the data could not be read (ATA8-ACS)
 
 // PxIS/PxIE bits
 #define AHCI_PIS_CPDS       (1U << 31)

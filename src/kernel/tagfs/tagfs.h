@@ -856,7 +856,8 @@ uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps);
 // ----------------------------------------------------------------------------
 
 /* One block: OK, or the real refusal — ERR_DEVICE_NOT_READY once the medium
- * left, ERR_READ_FAILED when it would not give the block, ERR_CHECKSUM when
+ * left, ERR_READ_FAILED when it would not give the block, ERR_BAD_SECTOR when
+ * it answered that a sector of it cannot be read, ERR_CHECKSUM when
  * what it gave does not match the digest recorded when the block was written
  * (integrity/integrity.h, which names the block and publishes it); a write
  * ERR_DEVICE_NOT_READY or ERR_WRITE_FAILED, its digest recorded once it lands. */

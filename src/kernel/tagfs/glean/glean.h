@@ -23,9 +23,25 @@
  * ‼ ONLY THE FRONT, AND THE SEAL SAYS WHERE THE CHAIN BEGINS. Taking a block
  * off is moving chain_first in the seal the cycle's S4 writes; nothing on the
  * medium is written over for it — a closed block never is. The seal names the
- * new front and the tail holding the moved records in one sector, so a cut
- * cycle leaves the chain as the cycle before it had it: the blocks taken off
- * rest in Fallow, whole, until both copies of the Ledger have moved past them.
+ * new front and the closed blocks holding the moved records in one sector, so
+ * a cut cycle leaves the chain as the cycle before it had it: the blocks taken
+ * off rest in Fallow, whole, until both copies of the Ledger have moved past
+ * them.
+ *
+ * ‼ A RECORD MOVED LIES IN A CLOSED BLOCK BEFORE ITS SOURCE IS LET GO. The
+ * open tail is written again in place every cycle (format v1), and a page of
+ * it the power tears rolls all its records back (decision 5): a file with no
+ * record before the one there is gone. A moved record has none — its block
+ * leaves the chain under the same seal — so it would carry a file nobody
+ * touched for years into the one block a cut may take. The cycle a pass moved
+ * records in therefore closes the tail at its S0 (GleanMovedGen, PoolSnapTake),
+ * and they lie in a block no later cycle writes, counted by the seal that lets
+ * their source go. That close is Glean's share of the reserve
+ * (SPARE_FOR_GLEAN): a pass moves a block only while a Spare is held for it
+ * past the deletes' share, and a turn of the tail inside a move leaves the
+ * reserve whole. A Spare leaves the stock only by a turn, and a turn closes
+ * every record the tail holds, so between a move and S0 either that Spare is
+ * still there or the moved records are closed already.
  *
  * ‼ A QUITCLAIM IS LEFT BEHIND, ONCE NO OLDER COPY OF ITS FILE REMAINS — and at
  * the front none ever does. A file's records lie in the order they were
@@ -75,12 +91,17 @@ void     GleanPassBegin(void);
 /* One step of the pass, with no TagFS lock held — at most one command to the
  * medium, and the committer back in its loop between two: *done once nothing
  * is left for this cycle — the chain within its slack, a front Glean may not
- * take yet, or no Spare to move onto. A pass reads each block of the chain at
- * most once: what it moves lands in blocks no cycle has written, which it
- * never takes. What a long pass costs the medium is the cycle's own time, and
- * the Lull that follows it grows with it. Glean never refuses a cycle: what it
+ * take yet, or no Spare to close the tail onto. A pass reads each block of the
+ * chain at most once: what it moves lands in the tail, past every block it may
+ * take. What a long pass costs the medium is the cycle's own time, and the
+ * Lull that follows it grows with it. Glean never refuses a cycle: what it
  * could not do it says once, and leaves to the next. */
 void     GleanStep(bool* done);
+
+/* S0, under the state lock: the Ink of the newest record this cycle's pass
+ * laid again, 0 when it laid none — every record up to it is closed before
+ * the cycle seals (PoolSnapTake). */
+uint64_t GleanMovedGen(void);
 
 /* The head's rewrite, taken at S0 under the state lock and written at S1 —
  * one step to read the block when memory does not hold it, one to write it.

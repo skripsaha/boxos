@@ -201,8 +201,10 @@ error_t SettleHaltAnswer(uint64_t* unsettled)
  *
  * A cycle somebody asked for and waits on closes the tail onto a Spare, and so
  * does one that must give Fallow's ground back; one the cadence began closes
- * it only as far as a waiter is owed. Each leaves the deletes their share of
- * the reserve, but the halt's, which gives every Spare back right after.
+ * it only as far as a waiter is owed, or as far as its Glean laid records
+ * again — a moved record lies in a closed block under the seal that lets its
+ * source go (glean.h). Each leaves the deletes their share of the reserve, but
+ * the halt's, which gives every Spare back right after.
  */
 static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
 {
@@ -214,9 +216,11 @@ static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
     snap->target    = InkedGen();
     snap->cycle     = s_cycles + 1;
     snap->data_need = InkDataNeed();
-    PoolSnapTake(&snap->pool,
-                 closes ? snap->target : (owed_close < snap->target ? owed_close : snap->target),
-                 why == SETTLE_FOR_HALT);
+    uint64_t close_upto = closes ? snap->target
+                                 : (owed_close < snap->target ? owed_close : snap->target);
+    if (!closes && GleanMovedGen() > close_upto)
+        close_upto = GleanMovedGen();
+    PoolSnapTake(&snap->pool, close_upto, why == SETTLE_FOR_HALT);
     if (why == SETTLE_FOR_HALT) {
         snap->given = PoolSparesGiveBack();
         IntegrityLayDrop();

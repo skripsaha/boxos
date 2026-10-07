@@ -804,7 +804,44 @@ static int BoardMediumRefusal(BoardKind kind, BlockFailKind what)
     default:         return -1;
     }
 }
+
+/* And what it answers for a read of a sector the device says it cannot read,
+ * every attempt (BlockFailArmBadSectors). */
+static int BoardBadSectorRefusal(BoardKind kind)
+{
+    switch (kind) {
+    case BOARD_AHCI: return AHCI_ERR_MEDIUM;
+    case BOARD_ATA:  return ATA_ERR_MEDIUM;
+    case BOARD_USB:  return XHCI_MSD_ERR_MEDIUM;
+    default:         return -1;
+    }
+}
 #endif
+
+/*
+ * ‼ A SECTOR THE MEDIUM CANNOT READ IS AN ANSWER, NOT A REFUSAL.
+ *
+ * Every driver gives up on a read in two ways that look the same to whoever
+ * only asks "did it work": the conversation broke down — the link dropped, the
+ * bus timed out, the device never answered — or it went through, and the
+ * device's answer was that the data of a sector it reached cannot be read: UNC
+ * in the ATA error register (ATA8-ACS, READ SECTOR(S) and READ DMA EXT error
+ * outputs; AHCI hands it in PxTFD), MEDIUM ERROR on a USB disk (SPC sense key
+ * 3h). The first says nothing of what the medium holds and is asked again once
+ * the seat answers (seat:ready); the second is what it holds, said by the only
+ * one who knows — a page torn as it was written reads that way until it is
+ * written again. So the room gives the second a name of its own: (int)
+ * ERR_BAD_SECTOR, the error_t carried through the int as the flush carries
+ * ERR_IO (tagfs_flush_cache), and every other answer stays the driver's own.
+ * Each driver says it only when every one of its own attempts ended so.
+ */
+static int BoardReadAnswer(BoardKind kind, int rc)
+{
+    bool bad = (kind == BOARD_AHCI && rc == AHCI_ERR_MEDIUM) ||
+               (kind == BOARD_ATA  && rc == ATA_ERR_MEDIUM)  ||
+               (kind == BOARD_USB  && rc == XHCI_MSD_ERR_MEDIUM);
+    return bad ? (int)ERR_BAD_SECTOR : rc;
+}
 
 /* One command's read, handed to the seat's driver: its answer. */
 static int BoardSeatRead(const BoardSeat* s, uint64_t lba, uint32_t run, uint8_t* out)
@@ -835,13 +872,15 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
 #ifdef CONFIG_VOLUME_TESTS
         /* Per run, because a run is what a driver is handed: the runs before a
          * refused one reach the medium, exactly as they do when it is real. */
-        if (BlockFailStrikes(seat, BLOCK_FAIL_READ, lba, run, NULL)) {
-            rc = BoardMediumRefusal(s->kind, BLOCK_FAIL_READ);
+        bool bad = false;
+        if (BlockFailReadStrikes(seat, lba, run, &bad)) {
+            rc = BoardReadAnswer(s->kind, bad ? BoardBadSectorRefusal(s->kind)
+                                              : BoardMediumRefusal(s->kind, BLOCK_FAIL_READ));
             break;
         }
 #endif
 
-        rc = BoardSeatRead(s, lba, run, out);
+        rc = BoardReadAnswer(s->kind, BoardSeatRead(s, lba, run, out));
         if (rc != 0) {
             break;
         }
@@ -850,7 +889,8 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
         lba   += run;
         count -= run;
     }
-    BoardSeatAnswered(s, seating, rc == 0);
+    /* A sector the medium cannot read is the seat answering: no bell owed. */
+    BoardSeatAnswered(s, seating, rc == 0 || rc == (int)ERR_BAD_SECTOR);
     return rc;
 }
 

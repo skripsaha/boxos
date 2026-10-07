@@ -53,6 +53,8 @@ typedef struct {
     uint32_t          skipped_at;
     uint32_t          dropped;       /* records whose extents are not followed */
     uint32_t          dropped_fid;   /* the first of them */
+    uint32_t          bad_block;     /* the last block a bad sector was said of, every walk */
+    bool              bad_said;
     PoolMountOutcome* out;
 } PoolWalk;
 
@@ -321,16 +323,45 @@ static error_t WalkRefused(uint32_t block, error_t read)
     return read;
 }
 
+/*
+ * ‼ A SECTOR THE MEDIUM CANNOT READ IS JUDGED BY WHERE IT LIES (the owner,
+ * 2026-10-07). It is no refusal: the medium answered, and its answer is what
+ * the block holds (ERR_BAD_SECTOR, boardroom.c BoardReadAnswer). A page of
+ * flash or a sector of a disk the power cut while it was being written reads
+ * so until it is written again — so in a seal's open block it is the tail torn
+ * as it was written, rolled back to the last closed block (decision 5), and
+ * the first cycle writes the block anew, which heals it; in a block a seal
+ * counts closed, which no kernel with a seal writes again, it is rot, and the
+ * rules for closed blocks not borne out stand. The walk holds it against the
+ * seals as a block that is not the pool's, which judges it by place
+ * (WalkJudge). Said once a mount for each block.
+ */
+static const char* WalkBadSector(PoolWalk* w, uint32_t block)
+{
+    if (!w->bad_said || w->bad_block != block)
+        kprintf("[MetaPool] block %u of this volume's metadata chain holds a sector the medium "
+                "answers it cannot read — what the block holds, judged by where it lies: in a "
+                "seal's open block a page torn as it was written, rolled back; in a closed "
+                "block rot\n", block);
+    w->bad_said  = true;
+    w->bad_block = block;
+    return "holds a sector the medium cannot read";
+}
+
 /* Why the walk cannot take `block` as a block of the pool, or NULL — what the
- * block holds, and never the medium's refusal to read it, which is *refused:
- * the read's error, OK when it read. */
+ * block holds, a sector the medium cannot read among it, and never the
+ * medium's refusal to read it, which is *refused: the read's error, OK when
+ * it was answered. */
 static const char* WalkRead(PoolWalk* w, uint32_t block, error_t* refused)
 {
     *refused = OK;
     if (block >= w->run)
         return "lies outside the volume's data run";
-    *refused = tagfs_read_block(block, w->here);
-    if (*refused != OK)
+    error_t read = tagfs_read_block(block, w->here);
+    if (read == ERR_BAD_SECTOR)
+        return WalkBadSector(w, block);
+    *refused = read;
+    if (read != OK)
         return "would not read";
     if (w->here->magic != TAGFS_MPOOL_MAGIC)
         return "holds no metadata pool";
@@ -343,13 +374,23 @@ static const char* WalkRead(PoolWalk* w, uint32_t block, error_t* refused)
  * check out. Their blocks' digests are set back like those of every other file
  * that cycle wrote (RT-22, MountAfterDoor): a block it wrote in place whose
  * digest did not land would otherwise read as rot. Nothing else of the block
- * is taken, and a refused read is the mount's refusal.
+ * is taken, and a refused read is the mount's refusal. A block with a sector
+ * the medium cannot read names none of them, which is said: their digests
+ * stand, and a block of theirs that landed without its digest reads as rot.
  */
 static error_t WalkTornSpan(PoolWalk* w, const PoolPlan* plan, uint32_t block)
 {
     if (block >= w->run)
         return OK;
     error_t read = tagfs_read_block(block, w->here);
+    if (read == ERR_BAD_SECTOR) {
+        (void)WalkBadSector(w, block);
+        kprintf("[MetaPool] the open block %u rolled back does not read, so the files the "
+                "stood seal's cycle wrote records of there are not named — their digests are "
+                "not set back to unknown, and a block of theirs written in place whose digest "
+                "did not land reads as rot\n", block);
+        return OK;
+    }
     if (read != OK)
         return WalkRefused(block, read);
     if (w->here->magic != TAGFS_MPOOL_MAGIC)

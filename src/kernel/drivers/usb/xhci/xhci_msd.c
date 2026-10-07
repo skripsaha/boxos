@@ -198,6 +198,7 @@ static uint32_t msd_patience_ms(uint32_t bytes)
 
 /* The sense keys this driver acts on, by the names SPC gives them. */
 #define SENSE_NOT_READY       0x02
+#define SENSE_MEDIUM_ERROR    0x03
 #define SENSE_ILLEGAL_REQUEST 0x05
 #define SENSE_UNIT_ATTENTION  0x06
 #define SENSE_DATA_PROTECT    0x07
@@ -1881,7 +1882,7 @@ static int msd_run_blocks(XhciMsdUnit* u, uint64_t block, uint32_t nblocks,
     int rc = msd_command(u, cdb, cdb_len, u->bounce_phys, bytes, !write, &moved);
     if (rc != 0 || moved != bytes) {
         uint8_t key = 0, asc = 0, ascq = 0;
-        msd_request_sense(u, &key, &asc, &ascq);
+        bool    told = msd_request_sense(u, &key, &asc, &ascq) == 0;
         if (write && key == SENSE_DATA_PROTECT) {
             if (!__atomic_exchange_n(&u->write_protected, true, __ATOMIC_ACQ_REL))
                 kprintf("[USB disk %u] refuses writes as protected (DATA PROTECT, code "
@@ -1893,6 +1894,10 @@ static int msd_run_blocks(XhciMsdUnit* u, uint64_t block, uint32_t nblocks,
                 "(sense key 0x%x, code 0x%02x/0x%02x)\n",
                 u->number, write ? "write" : "read", nblocks,
                 (unsigned long long)block, key, asc, ascq);
+        /* The device carried the conversation through, failed the command
+         * (CSW status 1, rc > 0) and says why: the sector, not the cable. */
+        if (!write && rc > 0 && told && key == SENSE_MEDIUM_ERROR)
+            return XHCI_MSD_ERR_MEDIUM;
         return -1;
     }
     return 0;
@@ -1956,8 +1961,9 @@ static int msd_rw(uint8_t unit, uint64_t lba, uint32_t count,
         /* A write that does not cover the blocks it touches has to read them
          * first; a read always reads. */
         if (!write || !whole) {
-            if (msd_run_blocks(u, block, nblocks, bytes, false) != 0) {
-                result = -1;
+            int read = msd_run_blocks(u, block, nblocks, bytes, false);
+            if (read != 0) {
+                result = write ? -1 : read;
                 break;
             }
         }

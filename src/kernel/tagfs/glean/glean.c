@@ -37,14 +37,16 @@ static uint32_t      s_front_link;
 static bool          s_front_held;
 static bool          s_front_said;
 static bool          s_drift_said;
+static bool          s_unclosed_said;    /* a move with no Spare to close onto, said once an episode */
 
 static volatile uint8_t s_short;
 
 /* The pass of the cycle in flight. */
 static struct {
     bool     short_room;       /* the allocator was short with nothing resting */
-    bool     dig;              /* no Spare could be made: Glean's share of the reserve */
+    bool     dig;              /* no Spare could be made: Glean moves on what the pool holds */
     bool     counted;
+    uint64_t moved;            /* GleanMovedGen */
 } s_pass;
 
 /* The lowered slack, judged by what it did. `s_short_from`: the chain's length
@@ -81,6 +83,11 @@ static TagFSLock* GleanLock(void)
 uint64_t GleanHintCovers(void)
 {
     return s_covers;
+}
+
+uint64_t GleanMovedGen(void)
+{
+    return s_pass.moved;
 }
 
 void GleanShort(void)
@@ -202,10 +209,12 @@ static bool GleanReadFront(const PoolFront* f)
     return true;
 }
 
-/* Under the state lock: the records of the front block that are still their
- * files' newest, laid again at the tail's end. False when the tail needed a
- * Spare Glean may not take — what moved stands moved, the block stays on the
- * chain. */
+/* Under the state lock, with a Spare held for the cycle's close
+ * (PoolTailMayClose): the records of the front block that are still their
+ * files' newest, laid again at the tail's end. A turn the tail needs on the way
+ * leaves the reserve whole — Glean's share of it is that close. False when the
+ * turn could not be had: what moved stands moved, and is closed at S0 like the
+ * rest; the block stays on the chain. */
 static bool GleanMoveLocked(const PoolFront* f)
 {
     FileMap* files = tagfs_get_state()->files;
@@ -220,10 +229,11 @@ static bool GleanMoveLocked(const PoolFront* f)
         memcpy(&fid, s_front.payload + pos + 2, sizeof(fid));
         uint16_t at = (uint16_t)(GLEAN_RECORDS_AT + pos);
         if (fid && FileMapRecordAt(files, fid, f->link, at)) {
-            if (PoolTailRoom() < len && !PoolTailTurnGlean())
+            if (PoolTailRoom() < len && !PoolTailTurn(false))
                 return false;
             RecordWhere from = { .link = f->link, .offset = at, .len = len };
             InkGleanLocked(fid, &from, s_front.payload + pos);
+            s_pass.moved = InkedGen();
             GLEAN_COUNT(moved_records, 1);
             GLEAN_COUNT(moved_bytes, len);
         }
@@ -251,16 +261,17 @@ static uint32_t GleanTakeLocked(uint32_t count, FallowNode* node, uint32_t* kept
     return taken;
 }
 
-/* A move that will turn the tail wants a Spare past the reserve: made here
- * with no lock held — the step's one command — or, when the volume has none to
- * give, Glean takes its own share of the reserve. True when a command was
- * made. */
+/* A move wants the Spare the cycle's close takes held past the deletes' share,
+ * and one that will turn the tail a Spare past the reserve: made here with no
+ * lock held — the step's one command. When the volume has none to give, the
+ * move stands on what the pool holds. True when a command was made. */
 static bool GleanSpareFor(const PoolFront* f)
 {
     if (s_pass.dig)
         return false;
     TagFSLockTake(GleanLock());
-    bool need = PoolTailRoom() < f->live && !PoolSpareAvailable(false);
+    bool need = !PoolTailMayClose() ||
+                (PoolTailRoom() < f->live && !PoolSpareAvailable(false));
     TagFSLockDrop(GleanLock());
     if (!need)
         return false;
@@ -269,6 +280,22 @@ static bool GleanSpareFor(const PoolFront* f)
         return false;
     }
     return true;
+}
+
+/* Under the state lock: whether the front may be moved now — a Spare is held
+ * for the close its records owe (glean.h); said once an episode when not. */
+static bool GleanMayMoveLocked(const PoolFront* f)
+{
+    if (PoolTailMayClose()) {
+        s_unclosed_said = false;
+        return true;
+    }
+    if (!s_unclosed_said)
+        kprintf("[Glean] block %u of the pool is not gathered: no Spare could be made for the "
+                "closed block its records would owe, and the deletes' is theirs — it stays on "
+                "the chain until a Spare can be had\n", f->block);
+    s_unclosed_said = true;
+    return false;
 }
 
 void GleanStep(bool* done)
@@ -303,7 +330,8 @@ void GleanStep(bool* done)
 
     uint32_t kept = 0, taken = 0;
     TagFSLockTake(GleanLock());
-    bool moved = !moving || GleanMoveLocked(&look.front);
+    bool may   = !moving || GleanMayMoveLocked(&look.front);
+    bool moved = may && (!moving || GleanMoveLocked(&look.front));
     if (moved)
         taken = GleanTakeLocked(want, node, &kept);
     if (kept)
@@ -496,6 +524,7 @@ void GleanMount(uint32_t head, uint32_t first)
     s_front_held    = false;
     s_front_said    = false;
     s_drift_said    = false;
+    s_unclosed_said = false;
     __atomic_store_n(&s_short, 0u, __ATOMIC_RELEASE);
 #ifdef CONFIG_VOLUME_TESTS
     memset(&s_counts, 0, sizeof(s_counts));

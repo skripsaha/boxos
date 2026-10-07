@@ -18,11 +18,14 @@ of what it calls, said once on the host, for `list`, `get` and `check` alike:
                      blocks are borne out and open block is not, beside a
                      second seal (its open block rolls back); or none — the
                      whole chain from the Deed's head. A read the medium
-                     refuses refuses the mount, whatever the seals; only a
-                     record that checks out names an id
+                     refuses refuses the mount, whatever the seals; a sector
+                     it answers it cannot read is what the block holds, and is
+                     judged by where it lies — a seal's open block torn, a
+                     closed one rot; only a record that checks out names an id
                      (metadata_pool/meta_pool_mount.c PoolMount)
     the table        walked from the Deed's head: strictly with no seal, cut
-                     short under one (file_table.c TableWalk)
+                     short under one — but a read the medium refuses refuses
+                     the mount under one too (file_table.c TableWalk)
     the files        a file is its newest readable record; its row is
                      corrected to it, or derived under a seal; the row of a
                      file whose newest record is a Quitclaim goes with it; a
@@ -37,7 +40,9 @@ of what it calls, said once on the host, for `list`, `get` and `check` alike:
                      (mount.c MountCensus, src/include/ground_owner.h)
 
 It reads nothing but through `read_block` (a block of the data run, None when
-it will not read), and writes nothing: the mount itself writes no byte either —
+it will not read) — and `bad_block`, which says of one that would not read
+whether the medium answered a sector of it cannot be read, rather than refusing
+the read — and writes nothing: the mount itself writes no byte either —
 what it repairs in memory the next Settle cycle writes.
 """
 
@@ -180,8 +185,8 @@ class _PoolWalk:
     """One walk's chain, map and counts; the numbers the medium has shown are
     kept across walks (PoolMountOutcome top_fid, top_tag)."""
 
-    def __init__(self, read_block, run):
-        self.read, self.run = read_block, run
+    def __init__(self, read_block, run, bad_block):
+        self.read, self.run, self.bad = read_block, run, bad_block
         self.top_fid = self.top_tag = 0
         self.past, self.past_blocks = [], []
         self.Forget()
@@ -295,12 +300,15 @@ def _Refused(block):
 
 def _WalkOnce(w, plan, judge):
     """WalkOnce: None with the tail laid, _STOPPED for a judging walk that could
-    go no further, or the sentence of a walk that does not mount."""
+    go no further, or the sentence of a walk that does not mount. A sector the
+    medium cannot read is what the block holds (WalkBadSector): a block that is
+    not the pool's, judged by where it lies."""
     block, hops = plan["start"], 0
     while True:
         at_to = plan["sealed"] and block == plan["to_block"]
         if at_to and plan["torn"]:
-            if block < w.run and w.read(block) is None:     # WalkTornSpan reads it
+            # WalkTornSpan reads it; a bad sector names no span, and rolls back all the same
+            if block < w.run and w.read(block) is None and not w.bad(block):
                 return _Refused(block)
             w.chain.append(block)
             w.tail = (block, 0)
@@ -310,9 +318,11 @@ def _WalkOnce(w, plan, judge):
             why = "lies outside the volume's data run"
         else:
             raw = w.read(block)
-            if raw is None:
+            if raw is None and not w.bad(block):
                 return _Refused(block)
-            if U32(raw, 0) != MPOOL_MAGIC:
+            if raw is None:
+                why = "holds a sector the medium cannot read"
+            elif U32(raw, 0) != MPOOL_MAGIC:
                 why = "holds no metadata pool"
         _Judge(judge, block, None if why else raw, plan["to_block"])
         if why:
@@ -369,7 +379,7 @@ def _SealsDecide(tries):
     return "none", None, False, not other and n["verdict"] == "torn"
 
 
-def PoolMount(read_block, head, seals, run):
+def PoolMount(read_block, head, seals, run, bad_block=lambda _b: False):
     """PoolMount (meta_pool_mount.c) on the seals [s0, s1]: the walks it makes,
     and what the last of them stood on. A dict — stood ('seal' | 'torn' |
     'none'), seal (0 | 1 | None), fell_back, lied, verdicts, closed (each
@@ -381,7 +391,7 @@ def PoolMount(read_block, head, seals, run):
     unreadable, skipped [(block, at, bytes)], dropped (records whose extents
     are not followed), top_fid, top_tag, disagreed, tail, past (records no seal
     holds), past_blocks, refused."""
-    w = _PoolWalk(read_block, run)
+    w = _PoolWalk(read_block, run, bad_block)
     s0, s1 = seals
     out = {"stood": "none", "seal": None, "fell_back": False, "lied": False, "refused": None,
            "verdicts": [None, None], "closed": [False, False], "torn_block": None,
@@ -473,11 +483,13 @@ def HeadPrefix(read_block, head, first, chain, run):
 # ---------------------------------------------------------------------------
 
 
-def TableMount(read_block, first, sealed, run):
+def TableMount(read_block, first, sealed, run, bad_block=lambda _b: False):
     """file_table_init (file_table.c TableWalk) from the Deed's head. With no
     seal a block that is not the table refuses the mount; under one the chain
-    ends there — a block reached is kept as its last link, rowless. {links,
-    rows {fid: (meta_block, meta_offset)}, cut, refused}."""
+    ends there — a block reached is kept as its last link, rowless. A read the
+    medium refuses refuses the mount under a seal too; a sector it answers it
+    cannot read is what the block holds. {links, rows {fid: (meta_block,
+    meta_offset)}, cut, refused}."""
     out = {"links": [], "rows": {}, "cut": False, "refused": None}
     block, hops = first, 0
     while True:
@@ -487,10 +499,14 @@ def TableMount(read_block, first, sealed, run):
             out["cut"] = True
             return out
         raw = read_block(block)
+        if raw is None and not bad_block(block):
+            out["refused"] = ("the medium refused the read of block %u — a refusal says nothing "
+                              "of what the block holds" % block)
+            return out
         if raw is None or U32(raw, 0) != FILETBL_MAGIC:
             if not sealed:
-                out["refused"] = "block %u %s" % (block, "would not read" if raw is None
-                                                  else "holds no file table")
+                out["refused"] = "block %u %s" % (block, "holds a sector the medium cannot read"
+                                                  if raw is None else "holds no file table")
                 return out
             out["links"].append(block)
             out["cut"] = True
@@ -583,13 +599,15 @@ class MountModel:
     """MountReadVolume on one image. `layout` is the Deed's (as the mount takes
     it: after a growth it would make), `copies` the two Ledger copies as
     ondisk.ReadLedgerCopy reads them — with `use_chain_read` where the census
-    has read the chains they name — and `boot` the Deed's BOOT stamp or None.
+    has read the chains they name — `boot` the Deed's BOOT stamp or None, and
+    `bad_block` whether a block that would not read holds a sector the medium
+    answers it cannot read (a read refused, when not).
 
     `refusal` is (step, sentence) of the first refusal in the kernel's order
     (ledger, registry, pool, table), or None. Everything else is filled as far
     as the image can be read, refused or not, for the census to report."""
 
-    def __init__(self, read_block, layout, copies, boot=None):
+    def __init__(self, read_block, layout, copies, boot=None, bad_block=lambda _b: False):
         self.read_block, self.layout, self.copies = read_block, layout, copies
         self.run = D = layout["data_blocks"]
         self.refusal = None
@@ -606,7 +624,8 @@ class MountModel:
         self.registry = RegistryMount(read_block, self.head["tag_registry_block"], s0, s1, D)
         self.by_id, self.dropped = RegistryAdopt(self.registry["taken"])
 
-        self.pool = PoolMount(read_block, self.head["metadata_pool_block"], self.seals, D)
+        self.pool = PoolMount(read_block, self.head["metadata_pool_block"], self.seals, D,
+                              bad_block)
         self.sealed = self.pool["stood"] != "none"
         at = self.pool["seal"]
         self.stood = (self.newest if at is None else self.newest if at == 0 else self.other)
@@ -615,7 +634,8 @@ class MountModel:
         self.prefix = (HeadPrefix(read_block, self.head["metadata_pool_block"], first, chain, D)
                        if not self.pool["refused"] else [])
 
-        self.table = TableMount(read_block, self.head["file_table_block"], self.sealed, D)
+        self.table = TableMount(read_block, self.head["file_table_block"], self.sealed, D,
+                                bad_block)
 
         torn = ((self.pool["torn_block"], self.pool["torn_end"])
                 if self.pool["stood"] == "torn" else None)
