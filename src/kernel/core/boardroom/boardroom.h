@@ -251,7 +251,12 @@ uint8_t BoardroomSeatIndex(uint8_t seat);
  * them on 0, and on a refusal the commands before the refused one, with what
  * the refused one kept before the sector it failed at when the medium names
  * that sector. Ours do not yet, so a refused command counts none of its own;
- * BLOCKFAIL's refusal does name it (block_fail.h). */
+ * BLOCKFAIL's refusal does name it (block_fail.h).
+ *
+ * A read answers 0, (int)ERR_BAD_SECTOR when the device said a sector it
+ * reached cannot be read — UNC, MEDIUM ERROR: the medium's answer about what
+ * it holds, not a refusal, and no seat:ready is owed for it — or the driver's
+ * own code for any other refusal. */
 int BoardroomRead (uint8_t seat, uint64_t lba, uint32_t count, void* buffer);
 int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer,
                    uint32_t* landed);

@@ -113,7 +113,9 @@ typedef struct {
 /* The walk above, into the map of live files. OK; ERR_TAGFS_CORRUPTED — said —
  * for a chain that cannot be read as far as any seal or the Deed's head
  * needs; the read's own error when the medium refused one, which no seal is
- * judged on; and ERR_NO_MEMORY for records memory cannot hold: a map held in
+ * judged on — a sector it answered it cannot read is no refusal, and is
+ * judged by where it lies (meta_pool_mount.c WalkBadSector); and
+ * ERR_NO_MEMORY for records memory cannot hold: a map held in
  * part is a mount that lost files. `out->last_span` and `out->gone` are the
  * caller's to kfree. */
 error_t  PoolMount(const PoolMountAsk* ask, PoolMountOutcome* out);
@@ -190,9 +192,9 @@ void     PoolTakeBack(const RecordWhere* where, uint32_t len);
  * only when `dig_reserve` (a Quitclaim). */
 bool     PoolTailTurn(bool dig_reserve);
 
-/* The same turn for Glean, which may take its own share of the reserve
- * (SPARE_FOR_GLEAN) and leaves the deletes theirs. */
-bool     PoolTailTurnGlean(void);
+/* Whether a cycle's S0 could close the tail now (PoolSnapTake): a Spare held
+ * past the deletes' share. */
+bool     PoolTailMayClose(void);
 
 /* Whether a Spare may be had. */
 bool     PoolSpareAvailable(bool dig_reserve);
@@ -208,9 +210,11 @@ RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen);
 /* ‼ HOW MANY SPARES THE POOL KEEPS FOR A DELETE, DERIVED. One block of the tail
  * holds every Quitclaim a run of deletes needs until a cycle can close it —
  * POOL_QUITCLAIMS_PER_BLOCK of them, 97 — and one more is a Glean step's
- * (glean/): the live records of the oldest block, at most one block's payload.
- * A Quitclaim may take the whole reserve; Glean and a tail a cycle closes early
- * leave the deletes their SPARE_FOR_QUITCLAIMS, because the ground the deletes
+ * (glean/): the live records of the oldest block, at most one block's payload,
+ * lie in a closed block before the seal lets that block go, so the cycle they
+ * move in closes the tail onto it. A Quitclaim may take the whole reserve;
+ * Glean and a tail a cycle closes early leave the deletes their
+ * SPARE_FOR_QUITCLAIMS, because the ground the deletes
  * free comes back only once a block holding their Quitclaims is closed
  * (fallow.h) — a full volume whose last Spare an anchor spent could free
  * nothing again. A volume with no free block can still delete: the delete
@@ -302,7 +306,8 @@ typedef struct {
 
 /* S0, under the state lock. Every record up to Ink `close_upto` is to lie in a
  * closed block — the anchor's promise: what a cycle with a waiter settles lies
- * in a block never written again — so a tail holding one is closed onto a
+ * in a block never written again; and Glean's: a record it moved lies there
+ * before the seal lets its source go — so a tail holding one is closed onto a
  * Spare first; 0 closes nothing. The close leaves the deletes their
  * SPARE_FOR_QUITCLAIMS, but in the machine's last cycle (`dig_reserve`), whose
  * S0 gives every Spare back right after (PoolSparesGiveBack). `unclosed` says a

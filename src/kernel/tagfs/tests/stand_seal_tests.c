@@ -5,8 +5,15 @@
 #include "../file_table/file_table.h"
 #include "../metadata_pool/meta_pool.h"
 #include "../mount/mount.h"
+#include "../mount/away.h"
+#include "../ink/fallow.h"
 #include "../ledger/ledger.h"
 #include "../settle/settle.h"
+#include "amp.h"
+#include "atomics.h"
+#include "baton.h"
+#include "boardroom.h"
+#include "cpu_calibrate.h"
 #include "block_fail.h"
 #include "../../../lib/kernel/crypto.h"
 
@@ -341,7 +348,21 @@ static TestResult TestStandSealTornTableStands(void)
 
     TEST_ASSERT(FileTableWouldStand(head, true), "under a seal the torn table still mounts");
     TEST_ASSERT(!FileTableWouldStand(head, false), "with no seal it does not");
+
+    /* A read of the second block the medium refuses says nothing of what it
+     * holds, under a seal too; a sector of it the medium cannot read is what
+     * it holds. */
+    BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_READ, tagfs_block_to_sector(torn),
+                 TAGFS_BLOCK_SECTORS, 1);
+    TEST_ASSERT(!FileTableWouldStand(head, true),
+                "a read of it the medium refuses is no verdict: under a seal the walk is refused");
+    TEST_ASSERT(BlockFailFired(), "the read was refused");
+    BlockFailArmBadSectors(tagfs_get_seat(), tagfs_block_to_sector(torn), TAGFS_BLOCK_SECTORS);
+    TEST_ASSERT(FileTableWouldStand(head, true),
+                "a sector of it the medium cannot read is what it holds: under a seal it mounts");
+    TEST_ASSERT(BlockFailFired(), "the read met that sector");
 out:
+    BlockFailDisarm();
     if (torn)
         tagfs_free_blocks(torn, 1);
     if (head)
@@ -382,6 +403,214 @@ out:
 }
 
 // ============================================================================
+// A sector the medium cannot read, judged by where it lies (the owner,
+// 2026-10-07): the volume let go of, a BLOCKFAIL plan answering every read of
+// one block of its pool as a sector the medium cannot read, and its next
+// arrival attended — the mount itself, start to end.
+// ============================================================================
+
+#define STAND_SEAL_BARE_CYCLES  8u
+#define STAND_SEAL_MOUNT_MS     10000u
+
+static uint64_t StandSealResting(void)
+{
+    TagFSState* fs = tagfs_get_state();
+    TagFSLockTake(&fs->lock);
+    uint64_t resting = FallowBlocks();
+    TagFSLockDrop(&fs->lock);
+    return resting;
+}
+
+/*
+ * Cycles until nothing rests in Fallow, and one more, whose map says on the
+ * medium that the ground came back: a take-down drops what rests without a
+ * word, and the next mount would read it as ground nobody owns. A cycle that
+ * leaves nothing resting took nothing off the chain's front, and the one after
+ * it neither — nothing is inked between — so both copies' seals begin the
+ * chain at one block.
+ */
+static bool StandSealBare(void)
+{
+    for (uint32_t cycle = 0; cycle < STAND_SEAL_BARE_CYCLES; cycle++) {
+        if (TagFSSettle() != OK)
+            return false;
+        if (StandSealResting() == 0)
+            return TagFSSettle() == OK && StandSealResting() == 0;
+    }
+    return false;
+}
+
+/* The volume's medium arriving again, attended until the mount road has
+ * nothing left to do — mounted or refused — bounded. */
+static void StandSealArrive(void)
+{
+    uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_SEAL_MOUNT_MS);
+    TagFSAttendArrival();
+    while (!TagFSStandMountIdle() && rdtsc() < bound) {
+        BoardroomAttendIfPending();
+        TagFSServiceIfPending();
+        BatonPump(amp_get_core_index());
+        cpu_pause();
+    }
+}
+
+/* Whatever the test left: the plan down, the volume up again if it is not,
+ * and the runner counted back in. */
+static void StandSealMountClose(void)
+{
+    BlockFailDisarm();
+    if (!tagfs_get_state()->initialized)
+        StandSealArrive();
+    TagFSStandHoldAgain();
+}
+
+/* The block the file's record lies in, false when the map holds none. */
+static bool StandSealRecordBlock(uint32_t fid, uint32_t* block)
+{
+    TagFSState* fs = tagfs_get_state();
+    RecordWhere where;
+    FileRecord* rec = FileMapRecordHold(fs->files, fid, &where);
+    if (!rec)
+        return false;
+    FileRecordRelease(rec);
+    TagFSLockTake(&fs->lock);
+    bool on = PoolLinkBlock(where.link, block);
+    TagFSLockDrop(&fs->lock);
+    return on;
+}
+
+static bool StandSealHolds(uint32_t fid)
+{
+    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    if (rec)
+        FileRecordRelease(rec);
+    return rec != NULL;
+}
+
+/*
+ * A sector of the newest seal's open block the medium answers it cannot read
+ * — what a page torn as it was written reads as, until it is written again —
+ * is that tail torn: the mount rolls the block back to the last closed one
+ * (decision 5) and the volume MOUNTS, a file whose only record lay in it gone
+ * and a file in a closed block there; nothing waits for seat:ready, and the
+ * first cycle writes the block anew. Red before: the answer was taken for a
+ * refusal, the mount refused, and it waited for a seat:ready that a sector
+ * which stays bad never brings.
+ */
+static TestResult TestStandSealBadOpenBlockRollsBack(void)
+{
+    TestResult   verdict = TEST_PASS;
+    TagFSState*  fs      = tagfs_get_state();
+    uint8_t      seat    = tagfs_get_seat();
+    uint32_t     epoch   = tagfs_mount_epoch();
+    uint32_t     kept    = 0, lost = 0, kept_block = 0, lost_block = 0;
+    bool         let_go  = false, has_other = false, fell_back = true;
+    int          seal    = -1;
+    VolumeLedger newest, other;
+    const char*  aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xC1u);
+    TEST_ASSERT(StandMakeFile("bad_open_kept", g_test_buffer, TAGFS_BLOCK_SIZE, &kept),
+                "a file is made and written");
+    TEST_ASSERT(StandSealBare(), "and settled by cycles that close the tail, nothing left resting");
+    TEST_ASSERT_EQ(tagfs_create_file("bad_open_lost", NULL, 0, &lost), 0,
+                   "a second file is made, holding no block");
+    TEST_ASSERT_OK(TagFSSettleAsCadence(), "and settled by a cycle the cadence begins");
+    TEST_ASSERT(StandSealCopies(&newest, &other, &has_other) && StandSealOf(&newest),
+                "the newest copy of the Ledger carries a seal");
+    TEST_ASSERT(StandSealRecordBlock(kept, &kept_block) && kept_block != newest.mark.pool_to_block,
+                "the first file's record lies in a block the seal counts closed");
+    TEST_ASSERT(StandSealRecordBlock(lost, &lost_block) && lost_block == newest.mark.pool_to_block,
+                "the second's, its only one, in the seal's open block");
+    TEST_ASSERT_EQ(StandSealResting(), 0, "and nothing rests in Fallow");
+
+    let_go = true;
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    BlockFailArmBadSectors(seat, tagfs_block_to_sector(lost_block), TAGFS_BLOCK_SECTORS);
+    StandSealArrive();
+    TEST_ASSERT(BlockFailFired(), "the mount met a sector of the open block the medium cannot read");
+    TestEvidence("reads of the open block the medium answered so:", BlockFailSeen());
+    TEST_ASSERT_EQ(BlockFailSeen(), 2,
+                   "in the walk that held the seals, and in the one that rolled the block back");
+    TEST_ASSERT(fs->initialized, "and the volume is MOUNTED");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
+    TEST_ASSERT(!TagFSStandMountOwed(), "nothing waits for seat:ready");
+    TEST_ASSERT(StandSealHolds(kept), "the file in a closed block is there");
+    TEST_ASSERT(!StandSealHolds(lost), "the file whose only record lay in the torn block is gone");
+
+    TEST_ASSERT_OK(TagFSSettle(), "the first cycle settles");
+    BlockFailDisarm();
+    TEST_ASSERT(StandSealCopies(&newest, &other, &has_other), "the Ledger reads");
+    TEST_ASSERT_EQ(StandSealJudge(&newest, &other, has_other, &seal, &fell_back, NULL),
+                   POOL_STOOD_SEAL, "and the block it wrote anew bears its seal out");
+    TEST_ASSERT(seal == 0 && !fell_back, "the newest");
+out:
+    if (let_go)
+        StandSealMountClose();
+    if (kept && fs->initialized) {
+        (void)tagfs_delete_file(kept, INK_UNWARRANTED);
+        (void)TagFSSettle();
+    }
+    return verdict;
+}
+
+/*
+ * A sector of a block both seals count closed the medium answers it cannot
+ * read: no kernel with a seal writes a closed block again, so it is rot, and
+ * loud. Neither seal is borne out, the chain is read as a kernel before the
+ * seal reads it, meets the block again, and the mount is refused for what the
+ * volume holds — it waits for no seat:ready, since the medium answered every
+ * read; its next arrival is asked. Red before: the answer was taken for a
+ * refusal, and the mount waited for a seat:ready.
+ */
+static TestResult TestStandSealBadClosedBlockIsRot(void)
+{
+    TestResult   verdict = TEST_PASS;
+    TagFSState*  fs      = tagfs_get_state();
+    uint8_t      seat    = tagfs_get_seat();
+    uint32_t     epoch   = tagfs_mount_epoch();
+    uint32_t     bad     = 0;
+    bool         let_go  = false, has_other = false;
+    VolumeLedger newest, other;
+    const char*  aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT(StandSealBare(), "every change is on the medium, and nothing rests");
+    TEST_ASSERT(StandSealCopies(&newest, &other, &has_other) && has_other &&
+                StandSealOf(&newest) && StandSealOf(&other), "both copies of the Ledger carry a seal");
+    TEST_ASSERT_EQ(newest.mark.chain_first, other.mark.chain_first,
+                   "and both begin the chain at one block");
+    bad = newest.mark.chain_first;
+    TEST_ASSERT(bad != newest.mark.pool_to_block && bad != other.mark.pool_to_block,
+                "a block both seals count closed");
+
+    let_go = true;
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    BlockFailArmBadSectors(seat, tagfs_block_to_sector(bad), TAGFS_BLOCK_SECTORS);
+    StandSealArrive();
+    TEST_ASSERT(BlockFailFired(), "the mount met a sector of the closed block the medium cannot read");
+    TestEvidence("reads of the closed block the medium answered so:", BlockFailSeen());
+    TEST_ASSERT_EQ(BlockFailSeen(), 2,
+                   "in the walk that held the seals, and in the walk of a kernel before the seal");
+    TEST_ASSERT(!fs->initialized, "the volume is not mounted");
+    TEST_ASSERT(!TagFSStandMountOwed(), "and nothing waits for seat:ready: the medium answered");
+
+    BlockFailDisarm();
+    StandSealArrive();
+    TEST_ASSERT(fs->initialized, "the medium's next arrival, the sector readable, MOUNTS the volume");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
+out:
+    if (let_go)
+        StandSealMountClose();
+    return verdict;
+}
+
+// ============================================================================
 // The suite
 // ============================================================================
 
@@ -398,6 +627,15 @@ static const TestCase g_stand_seal_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_seal_fid_boundary_derived", .func = TestStandSealFidBoundaryDerived,
       .reach = TEST_READS_ONLY },
+    /* Last: each takes the volume down and mounts it again. */
+    { .name = "stand_seal_bad_open_block_rolls_back", .func = TestStandSealBadOpenBlockRollsBack,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a sector of the open block the medium cannot read refuses the mount, "
+                       "waiting for a seat:ready a bad sector never brings" },
+    { .name = "stand_seal_bad_closed_block_is_rot", .func = TestStandSealBadClosedBlockIsRot,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a sector of a closed block the medium cannot read is taken for a "
+                       "refusal, and the mount waits for a seat:ready" },
 };
 
 const TestSuite g_stand_seal_suite = {

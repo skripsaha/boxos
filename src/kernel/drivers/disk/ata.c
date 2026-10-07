@@ -822,6 +822,9 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
 
     for (uint16_t sec = 0; sec < count; sec++) {
         int rc = ata_wait_drq(drive_idx);
+        /* ERR with UNC is the drive's own word on the sector it reached. */
+        if (rc == ATA_ERR_DRIVE_FAULT && (ata_read_error(drive_idx) & ATA_ER_UNC))
+            rc = ATA_ERR_MEDIUM;
         if (rc != 0) {
             AtaChannelGive(drive_channel(drive_idx), held);
             return rc;
@@ -1134,14 +1137,18 @@ uint32_t ata_max_run_sectors(uint8_t drive_idx)
     return 128u;
 }
 
+/* A sector the drive said it could not read on every attempt is that, and no
+ * more: one attempt that ended any other way leaves the read a refusal. */
 int ata_read_sectors_retry(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* buffer) {
+    int unreadable = 0;
     for (int retry = 0; retry < CONFIG_ATA_MAX_RETRIES; retry++) {
         int rc = ata_read_sectors(drive_idx, lba, count, buffer);
         if (rc == 0) return 0;
         if (ata_retry_classify(rc)) return rc;
+        if (rc == ATA_ERR_MEDIUM) unreadable++;
         ata_retry_diag(drive_idx, retry);
     }
-    return ATA_ERR_MAX_RETRIES;
+    return unreadable == CONFIG_ATA_MAX_RETRIES ? ATA_ERR_MEDIUM : ATA_ERR_MAX_RETRIES;
 }
 
 int ata_write_sectors_retry(uint8_t drive_idx, uint64_t lba, uint16_t count, const uint8_t* buffer) {

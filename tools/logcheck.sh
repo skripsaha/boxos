@@ -7975,16 +7975,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 140 of the stand's own twenty-two suites: stand 26, stand_lock 4,
+# the 143 of the stand's own twenty-two suites: stand 26, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 6,
 # stand_plot 4, stand_index 5, stand_ink 5, stand_helm 7, stand_port 2,
-# stand_use 3, stand_use_chain 4, stand_seal 6, stand_settle 11, stand_glean 7,
+# stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 11, stand_glean 8,
 # stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 10,
 # stand_warrant 6, stand_room 6. Counted off the code, not a run (K9): a suite
 # that drops out of the walk is a test that stopped covering anything, and the
 # count is where that shows. How many of them pass and how many stand aside is
 # the road's — said, not pinned.
-STAND_RUN=162
+STAND_RUN=165
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -8111,6 +8111,9 @@ stand_orders() {
 #   stand_helm_write_refused_part_way                     1        1
 #   stand_port_write_refused_part_way                     0        1   no port on the legacy channel
 #   stand_seal_cut_keeps_the_seal                         2        2   its open block, then its Ledger
+#   stand_seal_torn_table_stands                          2        2   its torn block refused, then a bad sector in it
+#   stand_seal_bad_open_block_rolls_back                  2        2   a bad sector: the judging walk, the roll back
+#   stand_seal_bad_closed_block_is_rot                    2        2   a bad sector: the judging walk, the unsealed walk
 #   stand_run_refused_inside_a_run                        0        1   one block a command: a run has no inside
 #   stand_run_refused_inside_a_run_through_the_port       0        1   and no port either
 #   stand_medium_* (a flush answered with sense)          0        0   a USB seat's own
@@ -8121,7 +8124,7 @@ stand_orders() {
 #   stand_settle_refusal_waits_for_the_bell               1        1   its Ledger; then a plan that only counts
 #   stand_settle_ring_during_the_cycle                    1        1   its Ledger
 #   stand_settle_table_refusal_is_the_mediums             2        2   the block written alone, then by the cycle
-#   total                                                20       25
+#   total                                                26       31
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -8214,8 +8217,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 20 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 25 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 26 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 31 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
@@ -8362,7 +8365,7 @@ edits = {
  ],
  "shots": [
   ("src/kernel/core/boardroom/block_fail.c",
-   "        fire = n == plan.nth && !(s & 1u);\n",
+   "        fire = plan.bad ? n >= plan.nth : n == plan.nth && !(s & 1u);\n",
    "        fire = n >= plan.nth;   /* " + M + ": not single-shot — every command from the nth on is refused */\n"),
   ("src/lib/kernel/klib_mem.c",
    "    if (me != plan.core)\n        return false;               /* another core is not the code under test */\n",

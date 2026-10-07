@@ -24,6 +24,7 @@ typedef struct {
     uint8_t  seat;
     uint8_t  kind;
     uint8_t  sense[3];      /* a flush's SCSI answer; all zero: a medium error */
+    bool     bad;           /* a read's sectors the medium cannot read: every read from the nth */
     uint64_t first;
     uint64_t end;           /* 0: the whole seat */
     uint32_t nth;
@@ -84,6 +85,19 @@ void BlockFailArmFlushSense(uint8_t seat, uint8_t key, uint8_t asc, uint8_t ascq
     BlockFailStand(&plan);
 }
 
+void BlockFailArmBadSectors(uint8_t seat, uint64_t first_sector, uint64_t sectors)
+{
+    BlockFailPlan plan = {
+        .seat  = seat,
+        .kind  = (uint8_t)BLOCK_FAIL_READ,
+        .bad   = true,
+        .first = first_sector,
+        .end   = sectors ? first_sector + sectors : 0,
+        .nth   = 1u,
+    };
+    BlockFailStand(&plan);
+}
+
 uint32_t BlockFailSeen(void)
 {
     return (uint32_t)(__atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE) >> 1) &
@@ -126,7 +140,7 @@ static bool BlockFailStrikesUnder(uint8_t seat, BlockFailKind kind, uint64_t lba
         if ((s >> 32) != g)
             return false;       /* taken down, or armed again, since the plan was read */
         n    = (((uint32_t)(s >> 1) & BLOCK_FAIL_SEEN_MAX) + 1u) & BLOCK_FAIL_SEEN_MAX;
-        fire = n == plan.nth && !(s & 1u);
+        fire = plan.bad ? n >= plan.nth : n == plan.nth && !(s & 1u);
     } while (!__atomic_compare_exchange_n(&g_block_fail_state, &s,
                                           (s & ~(BLOCK_FAIL_GEN_ONE - 1u)) |
                                               ((uint64_t)n << 1) | (s & 1u) | fire,
@@ -140,6 +154,11 @@ static bool BlockFailStrikesUnder(uint8_t seat, BlockFailKind kind, uint64_t lba
         kprintf("[BLOCKFAIL] seat %u: the cache flush is answered as refused with sense key "
                 "0x%x, code 0x%02x/0x%02x — occurrence %u since arming, and it was never "
                 "issued to the medium\n", seat, plan.sense[0], plan.sense[1], plan.sense[2], n);
+    } else if (plan.bad) {
+        kprintf("[BLOCKFAIL] seat %u: the read of sectors %llu..%llu is answered as a sector "
+                "the medium cannot read (UNC, MEDIUM ERROR) — occurrence %u since arming, and "
+                "nothing of it was issued to the medium\n", seat, (unsigned long long)lba,
+                (unsigned long long)(lba + count - 1), n);
     } else if (kind == BLOCK_FAIL_FLUSH) {
         kprintf("[BLOCKFAIL] seat %u: the cache flush is refused as a medium "
                 "error — occurrence %u since arming, and it was never issued to "
@@ -169,6 +188,14 @@ bool BlockFailStrikes(uint8_t seat, BlockFailKind kind, uint64_t lba, uint32_t c
 {
     BlockFailPlan plan;
     return BlockFailStrikesUnder(seat, kind, lba, count, keep, &plan);
+}
+
+bool BlockFailReadStrikes(uint8_t seat, uint64_t lba, uint32_t count, bool* bad)
+{
+    BlockFailPlan plan;
+    bool          fired = BlockFailStrikesUnder(seat, BLOCK_FAIL_READ, lba, count, NULL, &plan);
+    *bad = fired && plan.bad;
+    return fired;
 }
 
 bool BlockFailFlushStrikes(uint8_t seat, uint8_t out_sense[3])

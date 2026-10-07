@@ -33,6 +33,14 @@ class Unreadable(Exception):
     candidate, no layout, or it ends inside what has to be read first."""
 
 
+class MediumError(IOError):
+    """A sector the medium answers it cannot read — UNC on ATA and AHCI,
+    MEDIUM ERROR on a USB disk: what the medium holds, not a refusal
+    (boardroom.c BoardReadAnswer), which the mount judges by where it lies.
+    Only an overlay a case plants one in raises it: the host hears an EIO,
+    which says neither, and is taken as a read refused."""
+
+
 class Medium:
     """The device, read in whole sectors and never written."""
 
@@ -70,6 +78,17 @@ class OverlayMedium:
         self.base = base
         self.path = base.path
         self.over = {}
+        self.bad, self.refusing = set(), set()
+
+    def Bad(self, lba, count):
+        """Sectors the medium answers it cannot read: a read that touches one
+        raises MediumError."""
+        self.bad.update(range(lba, lba + count))
+
+    def Refuse(self, lba, count):
+        """Sectors whose read the medium refuses — a dropped command, a link
+        gone: a read that touches one raises IOError."""
+        self.refusing.update(range(lba, lba + count))
 
     def Put(self, lba, data):
         """Lay whole sectors over the base, starting at `lba`."""
@@ -89,6 +108,10 @@ class OverlayMedium:
         self.Put(first, bytes(cur))
 
     def sectors(self, lba, count):
+        if self.bad and any((lba + i) in self.bad for i in range(count)):
+            raise MediumError("a sector of %u+%u cannot be read" % (lba, count))
+        if self.refusing and any((lba + i) in self.refusing for i in range(count)):
+            raise IOError("the read of %u+%u is refused" % (lba, count))
         if not any((lba + i) in self.over for i in range(count)):
             return self.base.sectors(lba, count)
         out = bytearray()
@@ -106,6 +129,9 @@ class OverlayMedium:
         then the overlay's sectors written into it, in order. `never` is
         [(path, what)] that out_path must not be; the base is always one.
         Returns True when the base was cloned rather than copied."""
+        if self.bad or self.refusing:
+            raise ValueError("an image file carries no sector the medium cannot read and no "
+                             "read it refuses — this overlay is the census's alone")
         for other, what in ((self.path, "the base"),) + tuple(never):
             if os.path.exists(out_path) and _SameFile(out_path, other):
                 raise ValueError("%s is %s; it would be written over" % (out_path, what))
@@ -636,6 +662,7 @@ class VolumeFacts:
         self.layout = dict(self.deed["layout"])
         self.geometry = self.deed["geometry"]
         self._cache = {}
+        self.bad = set()          # volume blocks a read met a sector the medium cannot read in
         self.region = self._ReadBitmapRegion()
         self.growth, self.growth_why = self._PredictGrowth()
         if self.growth:
@@ -654,6 +681,9 @@ class VolumeFacts:
     def vread(self, vblock, sectors=SECTORS_PER_BLOCK):
         try:
             return self.medium.sectors(self.base + vblock * SECTORS_PER_BLOCK, sectors)
+        except MediumError:
+            self.bad.add(vblock)
+            return None
         except IOError:
             return None
 
@@ -663,6 +693,12 @@ class VolumeFacts:
         if b not in self._cache:
             self._cache[b] = self.vread(self.layout["data_block"] + b)
         return self._cache[b]
+
+    def bad_block(self, b):
+        """Whether data-run block `b`, read already, would not read because
+        the medium answered a sector of it cannot be read — what it holds —
+        rather than refusing the read (meta_pool_mount.c WalkBadSector)."""
+        return self.layout["data_block"] + b in self.bad
 
     def _ReadBitmapRegion(self):
         lay = self.layout
@@ -775,7 +811,8 @@ class VolumeFacts:
         census reads off it: the chains as the mount walks them, the pool's
         span and the records in it, the table's rows, and the Ledger copy the
         volume stands on — carrying the next file id the mount derives."""
-        m = self.mount = MountModel(self.read_block, self.layout, self.ledgers, self.deed["boot"])
+        m = self.mount = MountModel(self.read_block, self.layout, self.ledgers, self.deed["boot"],
+                                    self.bad_block)
         self.refused = m.Refused()
         self.chains = {"registry": list(m.registry["blocks"]), "table": list(m.table["links"]),
                        "pool": list(m.pool["chain"])}

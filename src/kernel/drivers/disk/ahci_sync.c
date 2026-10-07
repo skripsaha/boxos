@@ -150,6 +150,7 @@ static int ahci_stand_over_io(uint8_t port, uint64_t lba, uint16_t sector_count,
     uint8_t     slot    = (uint8_t)drawn;
     AhciSlotEnd how     = AHCI_SLOT_GONE;
     int         aborted = 0;    /* attempts a task-file error with ABRT ended */
+    int         unread  = 0;    /* attempts of a read a task-file error with UNC ended */
 
     for (int attempt = 0; attempt < AHCI_MAX_RETRIES; attempt++) {
         if (ahci_build_io(port, slot, lba, sector_count, (void*)dma_phys, write) != OK) {
@@ -183,11 +184,15 @@ static int ahci_stand_over_io(uint8_t port, uint64_t lba, uint16_t sector_count,
             break;
         }
         /* The recovery has recorded the fault by now: was it this write's,
-         * aborted by the drive rather than failed on the medium? */
-        if (write && __atomic_load_n(&port_state->stats.tfes_count, __ATOMIC_ACQUIRE) != tfes_at_arm &&
-            ((__atomic_load_n(&port_state->stats.last_tfd, __ATOMIC_ACQUIRE) >> AHCI_PTFD_ERR_SHIFT) &
-             AHCI_PTFD_ERR_ABRT)) {
-            aborted++;
+         * aborted by the drive rather than failed on the medium — or this
+         * read's, a sector the drive reached and could not read? */
+        uint32_t error = (__atomic_load_n(&port_state->stats.last_tfd, __ATOMIC_ACQUIRE) >>
+                          AHCI_PTFD_ERR_SHIFT) & AHCI_PTFD_ERR_MASK;
+        if (__atomic_load_n(&port_state->stats.tfes_count, __ATOMIC_ACQUIRE) != tfes_at_arm) {
+            if (write && (error & AHCI_PTFD_ERR_ABRT))
+                aborted++;
+            if (!write && (error & AHCI_PTFD_ERR_UNC))
+                unread++;
         }
     }
 
@@ -204,6 +209,11 @@ static int ahci_stand_over_io(uint8_t port, uint64_t lba, uint16_t sector_count,
         kprintf("[AHCI] port %u: a %s of %u sector(s) at LBA %llu was not "
                 "completed — the port or its link is gone\n",
                 port, what, (unsigned)sector_count, (unsigned long long)lba);
+    } else if (unread == AHCI_MAX_RETRIES) {
+        kprintf("[AHCI] port %u: the drive could not read %u sector(s) at LBA %llu "
+                "(UNC, every one of %d attempts) — a sector it cannot read\n",
+                port, (unsigned)sector_count, (unsigned long long)lba, AHCI_MAX_RETRIES);
+        return AHCI_ERR_MEDIUM;
     } else {
         kprintf("[AHCI] port %u: a %s failed after %d attempts (%u sector(s) at "
                 "LBA %llu)\n", port, what, AHCI_MAX_RETRIES,

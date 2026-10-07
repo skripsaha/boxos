@@ -23,8 +23,8 @@
  * Once, and only the Nth: every matching command before and after it reaches
  * the medium, and the count goes on while the plan stands, so a test can prove
  * that the one it meant was the one refused. A transient error, not a bad
- * sector — a sector that keeps refusing is a different question, for the
- * driver-level stand (QEMU blkdebug).
+ * sector: a sector the medium says it cannot read keeps saying so, and is a
+ * plan of its own (BlockFailArmBadSectors).
  *
  * Chosen by seat and sectors, never by core: the command is refused wherever
  * it was issued from. Asked on the synchronous reads and writes, the flush,
@@ -94,6 +94,20 @@ void     BlockFailArmFlushSense(uint8_t seat, uint8_t key, uint8_t asc, uint8_t 
  * answers with in out_sense[key, asc, ascq] — all zero for a plan that
  * refuses it as a medium error. */
 bool     BlockFailFlushStrikes(uint8_t seat, uint8_t out_sense[3]);
+
+/* Sectors the medium cannot read, on `seat`: from now on every read that
+ * touches [first_sector, first_sector + sectors) is answered the way that
+ * seat's driver answers a sector the device says it cannot read — UNC on ATA
+ * and AHCI, MEDIUM ERROR on USB — and is never issued, until the plan comes
+ * down. Not a refusal that may pass: a sector that went bad stays bad until it
+ * is written over, and every read of it, a retry's included, is the medium's
+ * same answer (ERR_BAD_SECTOR at the Boardroom). Writes go through. Every
+ * refused read is said and counted. Replaces any plan that was standing. */
+void     BlockFailArmBadSectors(uint8_t seat, uint64_t first_sector, uint64_t sectors);
+
+/* The read's question: BlockFailStrikes for a read, and in *bad whether its
+ * plan answers it as sectors the medium cannot read. */
+bool     BlockFailReadStrikes(uint8_t seat, uint64_t lba, uint32_t count, bool* bad);
 
 /* A medium that takes no write, on `seat`: while it stands, every write is
  * refused the way the seat's driver refuses one, never issued, and the seat

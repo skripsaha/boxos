@@ -236,12 +236,27 @@ static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBloc
 
         /* ‼ Tested as `!= OK`, because tagfs_read_block returns an error_t
          * whose failures are POSITIVE and the `< 0` this used to ask was never
-         * once true. */
-        bool read  = tagfs_read_block(block, image) == OK;
-        bool table = read && image->magic == TAGFS_FILETBL_MAGIC;
+         * once true. And the medium refusing the read is told apart from its
+         * answer: a refusal says nothing of what the block holds — under the
+         * seal too, where judging it would cut a whole chain short — so the
+         * mount is refused as the read was (counted where the read met it,
+         * tagfs_read_block) and asked again when the seat answers. A sector the
+         * medium says it cannot read, or bytes that are not what was written
+         * to it, are what the block holds. */
+        error_t got = tagfs_read_block(block, image);
+        if (got != OK && got != ERR_BAD_SECTOR && got != ERR_CHECKSUM) {
+            if (take)
+                kprintf("[FileTable] the medium refused the read of block %u (error %d) — a "
+                        "refusal says nothing of what the block holds, so the table is not "
+                        "judged on it: the volume is not mounted\n", block, (int)got);
+            return -1;
+        }
+        bool table = got == OK && image->magic == TAGFS_FILETBL_MAGIC;
         if (!table) {
             if (!TableBlockRefused(sealed, true, take, block,
-                                   read ? "holds no file table" : "would not read"))
+                                   got == OK             ? "holds no file table"
+                                   : got == ERR_CHECKSUM ? "does not hold what was written to it"
+                                                         : "holds a sector the medium cannot read"))
                 return -1;
             if (take && !TableTakeLink(block, image, false))
                 return -1;

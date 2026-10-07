@@ -351,6 +351,18 @@ def PlantTornTail(t, over):
     t.PutBlock(over, block, raw)
 
 
+def PlantBadSector(t, over, block):
+    """The medium answers that a sector of data block `block` cannot be read
+    (UNC, MEDIUM ERROR) — what a page torn as it was written reads as."""
+    over.Bad(t.DLba(block), 1)
+
+
+def PlantRefusedRead(t, over, block):
+    """The medium refuses the read of data block `block`: a command dropped,
+    no answer."""
+    over.Refuse(t.DLba(block), 1)
+
+
 def PlantOlderClosed(t, over):
     """The owner's B3: the other copy's seal made the cycle before, whose open
     block was the chain's first block — closed since by the newest cycle,
@@ -885,6 +897,40 @@ def Cases(t):
                   lambda c: State(c, older.fid) == "live"),
                  ("and the %u file(s) of the torn open block are lost" % len(t.tail_files),
                   lambda c: K(c)["lost"] == len(t.tail_files) and K(c)["unsettled"] == 0)]),
+        # --- a sector the medium cannot read, judged by where it lies --------------
+        Case("S9 bad sector in the open block", lambda o: PlantBadSector(t, o, t.PoolTail[0]),
+             must={"ORPHAN", "FILE_LOST"}, checks=[
+                 ("a page torn as it was written: the newest seal's open block rolls back, and "
+                  "the volume mounts", lambda c: Stood("torn", tie_rule)(c) and c.kernel.refusal is None),
+                 Lied(True),
+                 ("the %u file(s) whose only record settled there are lost, said" % len(t.tail_files),
+                  lambda c: K(c)["lost"] == len(t.tail_files) and K(c)["unsettled"] == 0)]),
+        Case("S10 bad sector in a closed block", lambda o: PlantBadSector(t, o, pool0[0]),
+             must={"CHAIN_REFUSED"}, may={"BOOT_MISMATCH", "FILE_LOST", "ORPHAN"}, checks=[
+                 ("rot: no seal is borne out", lambda c: Seal(c)["verdicts"] == ["broken", "broken"]),
+                 ("and the walk of a kernel before the seal meets it again: the mount is refused at "
+                  "the pool, naming block %u" % pool0[0],
+                  lambda c: c.kernel.step == "pool" and
+                  c.f.refused.get("pool", "").startswith("block %u " % pool0[0]) and
+                  "holds a sector the medium cannot read" in c.f.refused["pool"])]),
+        Case("S11 read of the open block refused", lambda o: PlantRefusedRead(t, o, t.PoolTail[0]),
+             must={"CHAIN_REFUSED"}, may={"FILE_LOST", "ORPHAN"}, checks=[
+                 ("a refusal is no verdict on any seal: the mount is refused at the pool, nothing "
+                  "rolled back", lambda c: c.kernel.step == "pool" and
+                  c.f.refused.get("pool", "").startswith(
+                      "the medium refused the read of block %u " % t.PoolTail[0]) and
+                  Seal(c)["stood"] == "none" and "torn" not in Seal(c)["verdicts"])]),
+        Case("T1 bad sector in a table block, sealed", lambda o: PlantBadSector(t, o, table0[-1]),
+             checks=[
+                 ("under the seal the table ends at block %u, kept as its last link, and the volume "
+                  "mounts" % table0[-1],
+                  lambda c: c.kernel.refusal is None and c.f.chains["table"] == table0)]),
+        Case("T2 read of a table block refused, sealed", lambda o: PlantRefusedRead(t, o, table0[-1]),
+             must={"CHAIN_REFUSED"}, may={"ORPHAN"}, checks=[
+                 ("a refusal is no verdict under the seal either: the mount is refused at the table",
+                  lambda c: c.kernel.step == "table" and
+                  c.f.refused.get("table", "").startswith(
+                      "the medium refused the read of block %u " % table0[-1]))]),
         # --- Glean: the chain's first block moves ----------------------------------
         Case("GL1 Glean head", lambda o: PlantGlean(t, o), checks=[
             ("the chain begins at the seal's first block, %u" % F,

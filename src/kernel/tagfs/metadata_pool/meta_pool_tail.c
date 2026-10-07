@@ -12,7 +12,9 @@
  * place on format v1 is the open tail, a cycle at a time; a cycle with a
  * waiter closes it first (PoolSnapTake), so what an anchor settled lies in a
  * block no later write touches — and a cycle that finds no Spare it may close
- * onto says that its waiter's records stay in the open tail.
+ * onto says that its waiter's records stay in the open tail. A cycle whose
+ * Glean moved records closes it too (glean.h), onto the Spare Glean held for
+ * it.
  *
  * ‼ A CLOSED BLOCK'S LINK IS WRITTEN AFTER THE FLUSH THAT KEPT THE STAMP IT
  * NAMES. The Spare was stamped when it was made, and its need rides with the
@@ -176,9 +178,9 @@ bool PoolTailTurn(bool dig_reserve)
     return TailTurnKeeping(dig_reserve ? 0u : (uint32_t)SPARE_RESERVE);
 }
 
-bool PoolTailTurnGlean(void)
+bool PoolTailMayClose(void)
 {
-    return TailTurnKeeping((uint32_t)SPARE_FOR_QUITCLAIMS);
+    return g_pool_tail && s_spare_count > (uint32_t)SPARE_FOR_QUITCLAIMS;
 }
 
 RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen)

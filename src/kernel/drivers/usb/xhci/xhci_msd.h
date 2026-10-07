@@ -62,7 +62,12 @@ const char* xhci_msd_unit_name(uint8_t unit);
 
 /* Sector I/O. Counts are in 512-byte sectors; a request larger than the
  * bounce buffer is split, so there is no size a caller has to know about.
- * Returns 0 on success. */
+ * Returns 0 on success, -1 on a refusal — and a read the device itself
+ * refused with MEDIUM ERROR (sense key 3) answers XHCI_MSD_ERR_MEDIUM: its own
+ * word that the sector cannot be read, which the Boardroom names
+ * ERR_BAD_SECTOR. */
+#define XHCI_MSD_ERR_MEDIUM (-2)
+
 int xhci_msd_read (uint8_t unit, uint64_t lba, uint32_t count, void* buffer);
 int xhci_msd_write(uint8_t unit, uint64_t lba, uint32_t count, const void* buffer);
 

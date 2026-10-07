@@ -73,6 +73,10 @@ typedef enum {
 #define ATA_SR_IDX              0x02
 #define ATA_SR_ERR              0x01
 
+/* Error register: the drive could not read the data of a sector it reached
+ * (ATA8-ACS, READ SECTOR(S) error outputs, UNC). */
+#define ATA_ER_UNC              0x40
+
 /* Drive/Head register top nibbles for IDENTIFY (compat 28-bit decoded). */
 #define ATA_DRIVE_MASTER        0xA0
 #define ATA_DRIVE_SLAVE         0xB0
@@ -94,6 +98,11 @@ typedef enum {
  * verdict ata_read_sectors / ata_write_sectors act on permanently. Never
  * escapes the driver: both entry points consume it by taking the PIO path. */
 #define ATA_ERR_BUSY              -10
+/* A read the drive ended with UNC in its Error register: the drive answered,
+ * and its answer is that the sector cannot be read — what it holds, not the
+ * channel's trouble. ata_read_sectors_retry answers it only when every attempt
+ * ended so; the Boardroom names it ERR_BAD_SECTOR. */
+#define ATA_ERR_MEDIUM            -11
 
 /* A physical IDE channel (primary or secondary). Bases come from PCI: in
  * compatibility mode they are the ISA-fixed ports, in PCI-native mode

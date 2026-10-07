@@ -2,6 +2,7 @@
 #include "stand_tests.h"
 #include "../tagfs.h"
 #include "../metadata_pool/meta_pool.h"
+#include "../file_map/file_map.h"
 #include "../glean/glean.h"
 #include "../ink/fallow.h"
 #include "../ledger/ledger.h"
@@ -479,6 +480,144 @@ out:
     return verdict;
 }
 
+/* Where a file's record lay before a cycle. */
+typedef struct {
+    uint32_t fid;
+    uint32_t link;
+} StandGleanPlace;
+
+/* Every file the map holds a record of, and the link it lies in: into `out`,
+ * room for `room`; how many. */
+static uint32_t StandGleanPlaces(StandGleanPlace* out, uint32_t room)
+{
+    FileMap* files = tagfs_get_state()->files;
+    uint32_t batch[32], from = 1, got, n = 0;
+    while (n < room && (got = FileMapFiles(files, from, batch, ARRAY_SIZE(batch))) > 0) {
+        for (uint32_t i = 0; i < got && n < room; i++) {
+            RecordWhere where;
+            FileRecord* rec = FileMapRecordHold(files, batch[i], &where);
+            if (!rec)
+                continue;
+            FileRecordRelease(rec);
+            out[n].fid    = batch[i];
+            out[n].link   = where.link;
+            n++;
+        }
+        if (batch[got - 1] == 0xFFFFFFFFu)
+            break;
+        from = batch[got - 1] + 1;
+    }
+    return n;
+}
+
+/* The block a file's record lies in now: false when the map holds none, or its
+ * link is off the chain. */
+static bool StandGleanRecordBlock(uint32_t fid, uint32_t* link, uint32_t* block)
+{
+    TagFSState* fs = tagfs_get_state();
+    RecordWhere where;
+    FileRecord* rec = FileMapRecordHold(fs->files, fid, &where);
+    if (!rec)
+        return false;
+    FileRecordRelease(rec);
+    *link = where.link;
+    TagFSLockTake(&fs->lock);
+    bool on = PoolLinkBlock(where.link, block);
+    TagFSLockDrop(&fs->lock);
+    return on;
+}
+
+/*
+ * R12 (Z09-5 = Z13-1; PowerCut race d0). A cycle the cadence begins — nobody
+ * waits on it, so it closes the tail for no anchor — in which Glean moves the
+ * records of the chain's front into the tail and lets the front go. Every
+ * record it moved lies in a closed block the cycle's seal counts, not in the
+ * open tail the next cycles write again in place: a page of that tail torn by
+ * the power — emulated as every seal whose open block it is finding it not as
+ * it says — rolls back none of them, and the files nobody touched stay. Red
+ * before: the moved records sat in the open tail with their source off the
+ * chain, and the roll back took files written once, years before.
+ */
+static TestResult TestStandGleanMovedLiesClosed(void)
+{
+    TestResult       verdict  = TEST_PASS;
+    uint32_t         file_id  = 0, chain = 0, live = 0, count = 0, moved = 0, rolled = 0;
+    uint32_t         room     = 0;
+    StandGleanPlace* places   = NULL;
+    bool             gleaned  = false, has_other = false, fell_back = false, marked = false;
+    int              stood_on = -1;
+    SettleMark       seal, other;
+    GleanCounts      before, after;
+
+    TEST_ASSERT(StandGleanFile("glean_closed", &file_id), "a one-block file is made and settled");
+    room   = FileMapCount(tagfs_get_state()->files) + 16u;
+    places = kmalloc(sizeof(StandGleanPlace) * room);
+    TEST_ASSERT(places, "memory for where every file's record lies");
+
+    StandGleanChain(&chain, &live);
+    uint32_t bound = 2u * (GLEAN_SLACK * live + 1u) + chain + 8u;
+    for (uint32_t round = 0; round < bound && !gleaned; round++) {
+        StandGleanChain(&chain, &live);
+        TestFillAt(g_test_buffer, STAND_GLEAN_BYTES, file_id, round);
+        TEST_ASSERT_EQ(StandWriteAt(file_id, 0, g_test_buffer, STAND_GLEAN_BYTES),
+                       (int)STAND_GLEAN_BYTES, "the file is written again");
+        if (chain < GLEAN_SLACK * live + 1u) {
+            TEST_ASSERT_OK(TagFSSettle(), "a waiter's cycle closes the tail, and the chain grows");
+            continue;
+        }
+        count = StandGleanPlaces(places, room);
+        GleanCountsRead(&before);
+        TEST_ASSERT_OK(TagFSSettleAsCadence(), "a cycle the cadence begins settles");
+        GleanCountsRead(&after);
+        gleaned = after.moved_records > before.moved_records;
+    }
+    TEST_ASSERT(gleaned, "a cycle the cadence began moved records of the chain's front");
+    TEST_ASSERT(StandGleanSeals(&seal, &other, &has_other) && has_other,
+                "both copies of the Ledger carry a seal");
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t link = 0, block = 0;
+        if (places[i].fid == file_id)
+            continue;
+        TEST_ASSERT(StandGleanRecordBlock(places[i].fid, &link, &block),
+                    "every file's record lies on the chain");
+        if (link == places[i].link)
+            continue;
+        moved++;
+        TEST_ASSERT(block != seal.pool_to_block,
+                    "a record Glean moved lies in a closed block of the seal, not its open one");
+    }
+    TestEvidence("records the cadence's cycle moved:", after.moved_records - before.moved_records);
+    TEST_ASSERT_EQ(moved, after.moved_records - before.moved_records,
+                   "and they are the records of the files whose record moved");
+
+    /* A page of the open block torn: each seal whose open block it is finds it
+     * not as it says. */
+    SettleMark torn = seal, torn_other = other;
+    torn.tail_crc32 ^= 1u;
+    if (other.pool_to_block == seal.pool_to_block)
+        torn_other.tail_crc32 ^= 1u;
+    PoolMountAsk ask = {
+        .seal = { &torn, &torn_other },
+        .head = StandGleanHead(),
+    };
+    PoolStood stood = PoolSealsJudge(&ask, &stood_on, &fell_back, &marked);
+    TEST_ASSERT(stood == POOL_STOOD_TORN_TAIL && stood_on >= 0,
+                "the mount rolls the torn open block back under a seal");
+    rolled = (stood_on == 0 ? torn : torn_other).pool_to_block;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t link = 0, block = 0;
+        if (places[i].fid == file_id ||
+            !StandGleanRecordBlock(places[i].fid, &link, &block) || link == places[i].link)
+            continue;
+        TEST_ASSERT(block != rolled, "and no record Glean moved is in the block rolled back");
+    }
+out:
+    kfree(places);
+    StandGleanLetGo(file_id);
+    return verdict;
+}
+
 // ============================================================================
 // The suite
 // ============================================================================
@@ -496,6 +635,10 @@ static const TestCase g_stand_glean_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_glean_lie_falls_back",         .func = TestStandGleanLieFallsBack,
       .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_glean_moved_lies_closed",      .func = TestStandGleanMovedLiesClosed,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a cycle the cadence began moved records of untouched files into the open "
+                       "tail and let their block go, and a torn page of the tail loses the files" },
     { .name = "stand_glean_unnamed_left_free",      .func = TestStandGleanUnnamedLeftFree,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "the cycle that writes the head past a block taken off the chain sends a "

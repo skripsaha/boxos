@@ -500,8 +500,11 @@ static TestResult TestStandMapFallowKeepsWhatTheMapCannotWrite(void)
 
     BlockMapSectorAway(start);
     BlockMapGiveRoomRefused(true);
+    /* Freed by the cycle Fallow's lag before the next one: ripe at the next —
+     * one cycle after the last on a medium that keeps its flush, two on one
+     * marked as having lied (SETTLE_MEDIUM_LIED, which any roll back leaves). */
     TagFSLockTake(&fs->lock);
-    FallowAdd(node, SettledCycles());    /* freed by the last cycle: ripe at the next */
+    FallowAdd(node, SettledCycles() + 1u - FallowLag());
     TagFSLockDrop(&fs->lock);
     node    = NULL;
     held    = false;

@@ -3,6 +3,12 @@
 
 #include "ktypes.h"
 
+/* A read or a write stood over: 0, or -1 when it could not be done — and a
+ * read every attempt of which the drive ended with UNC in its error register
+ * answers AHCI_ERR_MEDIUM: the drive's own word that the sector cannot be
+ * read, which the Boardroom names ERR_BAD_SECTOR. */
+#define AHCI_ERR_MEDIUM (-2)
+
 int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
                            uint16_t sector_count, void* buffer);
 
