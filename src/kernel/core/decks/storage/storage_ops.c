@@ -49,8 +49,6 @@
 #include "plot.h"     /* PlotFind, PlotSource — the write's bytes where they are */
 #include "settle_ops.h"  /* anchor, obj.write.settled — the waits for the Settle */
 
-#define OBJ_WRITE_APPEND_FLAG (1u << 0)
-
 /* -------------------------------------------------------------------------
  * Crate I/O lives in crate_io.{h,c}: crate_read / crate_write move a fixed
  * payload between a user Crate and a kernel buffer, and crate_in_buf /
@@ -223,7 +221,7 @@ static int ObjRead(const ManifestOp *op,
 
 /* -------------------------------------------------------------------------
  * OBJ_WRITE — in_crate.size bytes into the file at offset, or at its size
- * with OBJ_WRITE_APPEND_FLAG. An offset past the size is refused
+ * with STORAGE_WRITE_APPEND. An offset past the size is refused
  * ERR_TAGFS_BEYOND_SIZE. The bytes are taken out of the program's pages a
  * block at a time as the write reaches them — a write is never copied whole
  * into the kernel heap, so its size is bounded by the volume, not the heap.
@@ -253,7 +251,7 @@ static int ObjWrite(const ManifestOp *op,
     ask.kind    = WRITE_JOB_WRITE;
     ask.file_id = param_u32(op, 0);
     ask.offset  = param_u64(op, 4);
-    ask.append  = (param_u32(op, 12) & OBJ_WRITE_APPEND_FLAG) != 0;
+    ask.append  = (param_u32(op, 12) & STORAGE_WRITE_APPEND) != 0;
     ask.warrant = StorageCallWarrant(ctx);
     /* Ф26e: optional trailing correlation waybill (box::ferry). Absent for a
      * synchronous write (param_size 16) → 0 → plain KCTX_GUIDE completion. */

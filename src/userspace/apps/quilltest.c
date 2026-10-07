@@ -717,6 +717,45 @@ static const QuillCase g_cases[] = {
       "for good, the TAGS new tags and the file ids spent; files NAMEg... wearing them, NAMEra "
       "and NAMEt; every earlier file of those names or NAMErb or NAMEc.tmp deleted; anchored",
       true },
+    { "writers", "COUNT ROUNDS", 2, 0, QuillWriters,
+      "do COUNT cabins at once, each writing and rewriting a file of its own ROUNDS times at a "
+      "new size each round, every round read back whole",
+      "files _qw00.bin.. as their last round left them; anchored", false },
+    { "writer", "INDEX ROUNDS", 2, 0, QuillWriter,
+      "for writers: one of its cabins, writing _qwINDEX.bin ROUNDS times",
+      "_qwINDEX.bin as its last round left it", false },
+    { "writersback", "COUNT ROUNDS", 2, 0, QuillWritersBack,
+      "after a reboot: is every writer's file there, once, as its last round left it",
+      "nothing", false },
+    { "append", "WRITERS RECORDS SPANNERS", 3, 0, QuillAppend,
+      "do WRITERS cabins appending RECORDS records each to one file — beside a cabin that grows "
+      "it by zeros when SPANNERS is 1 — lose no append and leave no byte that is not an append "
+      "or a span's zero",
+      "_qap.bin with every append and zero; anchored", false },
+    { "appender", "INDEX RECORDS", 2, 0, QuillAppender,
+      "for append: one of its appenders", "its RECORDS appends in _qap.bin", false },
+    { "spanner", "", 0, 0, QuillSpanner,
+      "for append: the file grown by zeros past the size it read, once an append is heard",
+      "its zeros in _qap.bin", false },
+    { "readdelete", "MIB ROUNDS", 2, 0, QuillReadDelete,
+      "does a file of MIB MiB, read in four windows while another cabin deletes it, runs the "
+      "cycles that give its ground back and writes a file of its size, answer each window with "
+      "its own bytes or a refusal, never another file's",
+      "nothing: _qrd.bin is deleted, the filler and the scratch too, and the volume anchored",
+      false },
+    { "deleter", "", 0, 0, QuillDeleter,
+      "for readdelete: the delete, the cycles and the filler, each round once readdelete aims",
+      "nothing of its own once readdelete ends", false },
+    { "defragdelete", "SLOTS ROUNDS", 2, 0, QuillDefragDelete,
+      "do SLOTS files, each deleted and made again ROUNDS times while two cabins defrag every "
+      "one of them over and over, end as their last gen, whole",
+      "files _qd00.bin.. of gen ROUNDS; anchored", false },
+    { "defragger", "INDEX", 1, 0, QuillDefragger,
+      "for defragdelete: one of its defraggers, round every slot until it says stop",
+      "nothing: a defrag moves a file's bytes and changes none", false },
+    { "defragback", "SLOTS ROUNDS", 2, 0, QuillDefragBack,
+      "after the power button and a reboot: does every slot hold one file, its gen ROUNDS, "
+      "whole, and none it deleted", "nothing", false },
     { "abbaworker", "NAME ROLE", 2, 0, QUILL_THROWAWAY(QuillAbbaWorker),
       "for abba: one of the three workers it starts — ROLE rename, create or tag — calling on "
       "NAME's files until abba says stop",

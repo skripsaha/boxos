@@ -59,6 +59,20 @@
 #   logcheck.sh abbamut   a block taken under the registry's lock at every flush,
 #                         its row's step lifted: abba's demand must say the
 #                         defect is back
+#   logcheck.sh writers   UEFI STRICT 16c: sixteen cabins each write and rewrite
+#                         a file of their own; halted and booted again, every
+#                         file is its last round byte for byte, on the medium
+#                         and through the kernel, and the volume is whole
+#   logcheck.sh appenders two cabins append to one file beside a spanner (16c
+#                         AHCI), and two on a USB stick: every append where its
+#                         answer put it, nothing else but the spans' zeros
+#   logcheck.sh readdelete a big file read in windows while another cabin
+#                         deletes it, cycles and writes a filler: the window
+#                         read across it all is the file's own bytes
+#   logcheck.sh defragdelete defrag and delete in a loop on 16c, the power
+#                         button, a reboot: nothing deleted comes back, every
+#                         slot whole, no block owned twice
+#   logcheck.sh cores     the four of them
 #   logcheck.sh both
 #
 # Every check is a grep against build/serial.log. No timing assertions.
@@ -10535,6 +10549,587 @@ run_turnsmut() {
     build   # leave the tree built from clean sources
 }
 
+# ===========================================================================
+# cores — the volume asked from every core at once, on UEFI STRICT 16c
+# ===========================================================================
+#
+# Four claims of the write core that carry into format v2, each asked by
+# quilltest (quilltest_cores.c, quilltest_ground.c) from many cabins at once,
+# each cabin's calls a K-Core's and each write going through the AHCI port, and
+# each judged three ways: what the guest read back through the kernel, what
+# the host reads off the medium once the machine is stopped (volume-read check
+# — no block owned twice, none used and owned by nobody — and the files' own
+# bytes), and the next boot's mount.
+#
+#   writers      16 cabins each write and rewrite a file of their own, 16
+#                rounds, a new size each — some grown by the write, some cut by
+#                a span first — every round read back; halted through bye; the
+#                host gets each file and holds it against its stream; a reboot
+#                reads them all back again (writersback). Every Ink of them
+#                lays its record in the pool's tail: two laid at one place is a
+#                file that comes back as an older round, or not at all.
+#   appenders    two cabins append records to one file — STORAGE_WRITE_APPEND,
+#                the asynchronous WriteJob — while a third grows it by zeros,
+#                STORAGE_SPAN_GROW, the synchronous one, all through one Helm;
+#                then two appenders and no spanner on a USB stick that is the
+#                volume. Every append must lie where its answer put it, whole,
+#                and nothing else be in the file but the spans' zeros: the size
+#                the appends and the zeros, to the byte. The host parses the
+#                file off the medium record by record as well.
+#   readdelete   a file of 64 MiB read in four windows of 16 MiB while another
+#                cabin deletes it in the second, runs four Settle cycles and
+#                writes a filler of the same size — the reads held to
+#                READDELETE_BPS by QEMU, so the window is still being read when
+#                all of that is done. The window must deliver the file's own
+#                bytes, every later one a refusal as a file not found; after a
+#                halt and a reboot the volume is whole.
+#   defragdelete 8 slots, each deleted and made again 10 times — written 4 KiB
+#                at a time beside its pair, so it lies in several runs — while
+#                two cabins defrag every slot over and over; then the power
+#                button, a reboot, and every slot holds its last gen, whole, one
+#                file of its name: nothing deleted came back.
+#
+# THE MUTATIONS THEY EXIST FOR, each put in by hand and the scenario run on it,
+# whole, on this tree (2026-10-07):
+#
+#   writers      PoolAppend (meta_pool_tail.c) without
+#                `g_pool_tail->used_bytes = (uint16_t)(pos + bytes);` — every
+#                record of the tail laid at one place. The running machine
+#                reads every round back (the mirror is in memory); the medium
+#                after the halt has lost the sixteen files. MEASURED: 7 passed,
+#                5 failed — check (16 damage, FILE_LOST), the host's get,
+#                writersback, the next mount's census, the second check. The
+#                literal D1 — TagFSInkPlot's lock around InkPlotLocked taken
+#                out — did NOT turn it in the one run it was given: every
+#                asynchronous write is inked on the one drain core, and the
+#                spans' Inks on the K-Cores met them too rarely to tear the tail.
+#   appenders    wjob_load (write_job_port.c) beginning an append at the size
+#                the job's open saw, `j->handle->file_size`, not the size of the
+#                record loaded under the Helm, `j->plot.size`. MEASURED: 8
+#                passed, 4 failed — the case's DEFECT and the host's parse, on
+#                AHCI and on the stick alike.
+#   readdelete   FallowRipen (fallow.c) without condition 3,
+#                `(n->kind == FALLOW_BY_RECORD && n->gen > HelmViewFloor(n->fid)) ||`
+#                — the deleted file's ground goes back after the cycles, the
+#                filler takes the lowest free run, where the file lay, and the
+#                window being read answers 9304382 of its bytes with the
+#                filler's. MEASURED: 7 passed, 1 failed (the case's DEFECT).
+#   defragdelete InkQuitclaimLocked (ink.c) without
+#                `if (fallow) FallowAdd(fallow, gen);` — a deleted file's ground
+#                never comes to rest, so it never goes back, and the medium
+#                keeps it taken with nothing owning it. MEASURED: 9 passed, 3
+#                failed — both checks (ORPHAN) and the next mount's census
+#                ("Bitmap mismatch: 6335 orphan"). Taking the defrag's own line
+#                out instead — PlotGatherLay's `PlotLetGoLater` of the old
+#                ground — leaks so fast that the volume fills and a defragger
+#                is refused ERR_TAGFS_NO_SPACE in the first round: red too, for
+#                a reason the scenario does not name, so it is not the one
+#                written here.
+# ---------------------------------------------------------------------------
+
+CORES_STAND=${CORES_STAND:-"UEFI=on STRICT=on CORES=16 MEM=8G"}
+CORES_WRITERS=16
+CORES_ROUNDS=16
+CORES_APPEND_RECORDS=60
+READDELETE_MIB=64
+READDELETE_ROUNDS=2
+READDELETE_BPS=2097152       # reads at 2 MiB/s: a window of 16 MiB is eight seconds
+READDELETE_GROW=2097152      # a gigabyte more ground: the file and its filler, twice over
+DEFRAG_SLOTS=8
+DEFRAG_ROUNDS=10
+CORES_VERDICT='^\[QUILL\] [a-z]+: (PASS|DEFECT|PENDING|FAIL) — '
+CORES_FAULT='KERNEL PANIC|\[EXCEPTION\]|^\[NIGHTWATCH\] VERDICT: .* a defect'
+
+# cores_keys — CORES_STAND into CORES_KEYS, its words.
+cores_keys() {
+    if ! eval "CORES_KEYS=($CORES_STAND)" 2>/dev/null; then
+        bad "cores: CORES_STAND does not read as shell words: $CORES_STAND"
+        return 1
+    fi
+}
+
+# cores_boot TAG WHAT KEYS... — the machine started and at its shell. 1, said,
+# when not, the log kept as serial.cores.TAG.log.
+cores_boot() {
+    local tag=$1 what=$2; shift 2
+    make run-stop >/dev/null 2>&1
+    if ! make run-bg "$@" >"$SCRATCH/runbg.cores.log" 2>&1 || [ ! -S build/qemu.mon ]; then
+        harness "$what: no machine was started — $(tail -1 "$SCRATCH/runbg.cores.log" | tr -d '\r')"
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    if ! wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"; then
+        make run-stop >/dev/null 2>&1
+        cp build/serial.log "$SCRATCH/serial.cores.$tag.log"
+        bad "$what: the machine never reached a shell ($*)"
+        return 1
+    fi
+    wait_for_quiet "$BOOT_BURST_QUIET_S"
+}
+
+# cores_case LINE [QUIET_S] — LINE typed (cores_type), its verdict waited for
+# — or a fault — and then the shell's prompt (cores_answer). Leaves CORES_SAID,
+# the verdict line (none when it never came), and CORES_MARK, the log's length
+# before the line was typed.
+cores_case() {
+    cores_type "$1" && cores_answer "$1" "${2:-$WAIT_QUIET_S}"
+}
+
+cores_type() {
+    CORES_SAID=""
+    CORES_MARK=$(wc -l < build/serial.log)
+    type_line "$1"
+}
+
+cores_answer() {
+    local line=$1 quiet=$2
+    wait_for_line -E build/serial.log "$CORES_VERDICT|$CORES_FAULT" "$quiet" $((CORES_MARK + 1)) || return 1
+    CORES_SAID=$(tail -n +$((CORES_MARK + 1)) build/serial.log | tr -d '\r' | grep -aE "$CORES_VERDICT" | tail -1)
+    [ -n "$CORES_SAID" ] || return 1
+    wait_until "$WAIT_QUIET_S" "the shell's prompt after $line" \
+        '[ "$(tail -n +$((CORES_MARK + 1)) build/serial.log | tr -d "\r" | grep -cE "^(\[[^]]*\] )?~ ")" -ge 2 ]'
+}
+
+# cores_halt TAG HOW — the machine stopped through `bye`, or the power button
+# (HOW button), and its log kept as serial.cores.TAG.log; 0 once the halt said
+# its sync wrote the volume and QEMU went away by itself.
+cores_halt() {
+    local tag=$1 how=$2 mark pid synced=1
+    mark=$(wc -l < build/serial.log)
+    pid=$(cat build/qemu.pid 2>/dev/null)
+    if [ "$how" = button ]; then
+        mon_raw system_powerdown
+    else
+        type_line bye
+    fi
+    if wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" $((mark + 1)) &&
+       tail -n +$((mark + 1)) build/serial.log | grep -aq '^\[HALT\] Storage sync complete' &&
+       wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 ${pid:-0} 2>/dev/null"; then
+        synced=0
+    fi
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.cores.$tag.log"
+    return $synced
+}
+
+# cores_said WHAT — the verdict CORES_SAID judged: PASS (or PENDING, where the
+# case's answer is read after a reboot) is a PASS; anything else a FAIL.
+cores_said() {
+    local what=$1 want=${2:-PASS}
+    case "$CORES_SAID" in
+        *": $want — "*) ok "$what — ${CORES_SAID#\[QUILL\] }" ;;
+        ?*)             bad "$what — ${CORES_SAID#\[QUILL\] }" ;;
+        *)              bad "$what — no verdict came (the last said: $(tr -d '\r' < build/serial.log | grep -aE '^\[QUILL\]|KERNEL PANIC' | tail -1 | cut -c1-200))" ;;
+    esac
+}
+
+# cores_faults LOG WHAT — no panic, no exception, no Nightwatch proof of
+# something owed and never served, anywhere in the boot.
+cores_faults() {
+    local fault
+    fault=$(tr -d '\r' < "$1" | grep -aE "$CORES_FAULT" | head -1 | cut -c1-200)
+    [ -z "$fault" ]
+    chk $? "$2 — no panic, no exception, nothing owed proved unserved${fault:+: $fault}"
+}
+
+# cores_check IMG WHAT — volume-read's census of the stopped volume: no block
+# owned twice, none used and owned by nobody, nothing the mount would lose.
+# Notes are said, not counted: a row the mount corrects is one.
+cores_check() {
+    local said
+    said=$(python3 tools/volume-read.py "$1" check 2>&1)
+    printf '%s\n' "$said" >"$SCRATCH/cores.check.log"
+    printf '%s\n' "$said" | grep -q '^check: consistent — 0 damage, 0 leak'
+    chk $? "$2 — volume-read check: $(printf '%s\n' "$said" | grep -E '^check: (consistent|inconsistent)' | tail -1 | sed 's/^check: //')$(printf '%s\n' "$said" | grep -E '^check: (damage|leak) ' | head -1 | cut -c1-200 | sed 's/^check: /; first: /')"
+}
+
+# cores_mounted LOG WHAT — the next mount's own census: no block named twice,
+# none orphaned or missing, no file lost. Table rows it corrects from the pool
+# are said, not counted: the pool is where a file's newest record is.
+CORES_FSCK_CORRECTED="^\[TagFS FSCK\] [0-9]+ file table entry\(s\) corrected from this volume's metadata pool, 0 file\(s\) lost$"
+cores_mounted() {
+    local fsck corrected
+    fsck=$(tr -d '\r' < "$1" | grep -aE '^\[TagFS FSCK\] ' | grep -avE "$CORES_FSCK_CORRECTED" | head -1 | cut -c1-200)
+    corrected=$(tr -d '\r' < "$1" | grep -aE "$CORES_FSCK_CORRECTED" | head -1 | sed -nE 's/^\[TagFS FSCK\] ([0-9]+) .*/\1/p')
+    grep -aqE 'MOUNTED — [0-9]+ file' "$1" && [ -z "$fsck" ]
+    chk $? "$2 — the volume mounted again and its census named no block twice, nothing orphaned or missing, no file lost (table rows corrected from the pool: ${corrected:-0})${fsck:+: $fsck}"
+}
+
+# cores_streams IMG FILES... — each NAME:SIZE:SEED got off the medium and held
+# against quilltest's stream (QuillWord): "ok N BYTES", or the first file that
+# is not its stream.
+cores_streams() {
+    local img=$1 f; shift
+    for f in "$@"; do
+        python3 tools/volume-read.py "$img" get "${f%%:*}" -o "$SCRATCH/cores.get.${f%%:*}" >/dev/null 2>&1 ||
+            rm -f "$SCRATCH/cores.get.${f%%:*}"
+    done
+    python3 - "$SCRATCH/cores.get." "$@" <<'CORES_STREAMS_EOF'
+import struct, sys
+M = (1 << 64) - 1
+def stream(seed, base, size):
+    out = bytearray()
+    for i in range((size + 7) // 8):
+        x = ((base + 8 * i) ^ ((seed & 0xFF) << 56)) & M
+        x = (x * 0x9E3779B97F4A7C15) & M
+        out += struct.pack("<Q", x ^ (x >> 29))
+    return bytes(out[:size])
+total = 0
+for f in sys.argv[2:]:
+    name, size, seed = f.split(":")
+    try:
+        got = open(sys.argv[1] + name, "rb").read()
+    except OSError:
+        print("%s is not on the medium" % name)
+        sys.exit(1)
+    want = stream(int(seed), 0, int(size))
+    if got != want:
+        at = next((i for i in range(min(len(got), len(want))) if got[i] != want[i]), min(len(got), len(want)))
+        print("%s holds %d bytes where %d of stream %s are due, the first wrong at byte %d" % (name, len(got), len(want), seed, at))
+        sys.exit(1)
+    total += len(got)
+print("ok %d %d" % (len(sys.argv) - 2, total))
+CORES_STREAMS_EOF
+}
+
+# ---------------------------------------------------------------------------
+# writers
+# ---------------------------------------------------------------------------
+
+# writers_files — NAME:SIZE:SEED of every writer's file as its last round
+# leaves it: quilltest_cores.c's QuillWriterSize and QuillWriterSeed, said
+# again. Worked out here rather than read off the writers' own lines: sixteen
+# cabins print at once, and one printf of one of them was measured split in
+# two by the console with another's line between the halves.
+writers_files() {
+    local i r=$((CORES_ROUNDS - 1))
+    for i in $(seq 0 $((CORES_WRITERS - 1))); do
+        printf '_qw%02d.bin:%d:%d\n' "$i" \
+            $(( (1 + (i + 3 * r) % 5) * 131072 + 4096 * ((i * 7 + r) % 9) + 8 * ((i * 131 + r * 17) % 500) + (i + r) % 8 )) \
+            $(( (i << 4) | r ))
+    done
+}
+
+run_writers() {
+    echo "== writers: $CORES_WRITERS cabins on $CORES_STAND each write and rewrite a file of their own, $CORES_ROUNDS rounds =="
+    local L1="$SCRATCH/serial.cores.writers1.log" L2="$SCRATCH/serial.cores.writers2.log"
+    local said
+    cores_keys || return
+    rm -f "$L1" "$L2"
+    make run-stop >/dev/null 2>&1
+    rm -f build/boxos.img
+    build "$(strict_key "${CORES_KEYS[@]}")"
+    mutate_product build/boxos.img
+
+    if cores_boot writers1 "writers" "${CORES_KEYS[@]}"; then
+        cores_case "quilltest writers $CORES_WRITERS $CORES_ROUNDS" "$WAIT_QUIET_SLOW_S"
+        cores_said "writers: the $CORES_WRITERS cabins"
+        cores_halt writers1 bye
+        chk $? "writers: the halt through bye said its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L1" | tr -d '\r' | tail -1 | cut -c1-100))"
+        cores_faults "$L1" "writers: boot 1"
+        cores_check build/boxos.img "writers: after the halt"
+        # shellcheck disable=SC2046
+        said=$(cores_streams build/boxos.img $(writers_files))
+        case "$said" in
+            "ok $CORES_WRITERS "*) ok "writers: the host got all $CORES_WRITERS files off the medium, ${said##* } bytes, each its last round's stream byte for byte" ;;
+            *)                     bad "writers: the medium does not hold the writers' files as they said them — ${said:-the host could not read them}" ;;
+        esac
+    fi
+
+    if cores_boot writers2 "writers: the reboot" "${CORES_KEYS[@]}"; then
+        cores_case "quilltest writersback $CORES_WRITERS $CORES_ROUNDS" "$WAIT_QUIET_SLOW_S"
+        cores_said "writers: after the reboot"
+        cores_halt writers2 bye
+        chk $? "writers: the second boot halted through bye and said its sync wrote the volume"
+        cores_mounted "$L2" "writers: the reboot"
+        cores_faults "$L2" "writers: boot 2"
+        cores_check build/boxos.img "writers: after the second halt"
+    fi
+    lockrank_judge "$L1 $L2" "writers"
+    make run-stop >/dev/null 2>&1
+    restore build/boxos.img
+}
+
+# ---------------------------------------------------------------------------
+# appenders
+# ---------------------------------------------------------------------------
+
+# cores_appended IMG WRITERS RECORDS — _qap.bin off the medium, parsed record
+# by record from its first byte: "ok RECORDS APPENDED ZEROS SIZE" when every
+# append of every writer is there once, its head and its stream whole, and
+# nothing lies between two but zeros; else the first thing that is not so.
+cores_appended() {
+    python3 tools/volume-read.py "$1" get _qap.bin -o "$SCRATCH/cores.get._qap.bin" >/dev/null 2>&1 ||
+        { echo "_qap.bin is not on the medium"; return; }
+    python3 - "$SCRATCH/cores.get._qap.bin" "$2" "$3" <<'CORES_APPENDED_EOF'
+import struct, sys
+M = (1 << 64) - 1
+MAGIC = struct.pack("<Q", 0x3143455250504151)
+def word(seed, off):
+    x = (off ^ ((seed & 0xFF) << 56)) & M
+    x = (x * 0x9E3779B97F4A7C15) & M
+    return x ^ (x >> 29)
+def check(w, k):
+    x = (((w << 32) | k) * 0x9E3779B97F4A7C15) & M
+    return (x ^ (x >> 29)) & 0xFFFFFFFF
+data = open(sys.argv[1], "rb").read()
+writers, records = int(sys.argv[2]), int(sys.argv[3])
+seen, pos, zeros, appended = set(), 0, 0, 0
+while pos < len(data):
+    if data[pos:pos + 8] == MAGIC and pos + 24 <= len(data):
+        _m, w, k, ln, c = struct.unpack_from("<QIIII", data, pos)
+        if w >= writers or k >= records or ln < 24 or (ln - 24) % 8 or pos + ln > len(data) or c != check(w, k):
+            print("byte %d begins a head that names no append of this run (writer %d, append %d, %d bytes)" % (pos, w, k, ln))
+            sys.exit(0)
+        if (w, k) in seen:
+            print("append %d of appender %d lies in the file twice, the second at byte %d" % (k, w, pos))
+            sys.exit(0)
+        want = b"".join(struct.pack("<Q", word(0xA0 + w, (k << 32) + 8 * j)) for j in range((ln - 24) // 8))
+        if data[pos + 24:pos + ln] != want:
+            print("append %d of appender %d at byte %d is not whole" % (k, w, pos))
+            sys.exit(0)
+        seen.add((w, k))
+        appended += ln
+        pos += ln
+    elif data[pos] == 0:
+        zeros += 1
+        pos += 1
+    else:
+        print("byte %d lies in no append and is not a span's zero" % pos)
+        sys.exit(0)
+lost = [(w, k) for w in range(writers) for k in range(records) if (w, k) not in seen]
+if lost:
+    print("%d append(s) are not in the file, the first append %d of appender %d" % (len(lost), lost[0][1], lost[0][0]))
+    sys.exit(0)
+print("ok %d %d %d %d" % (len(seen), appended, zeros, len(data)))
+CORES_APPENDED_EOF
+}
+
+# cores_appended_judge IMG WHAT WRITERS SPANS — the host's parse held to the
+# claim: every append there once, whole, and the size the appends and the
+# zeros — no zeros at all where no span ran.
+cores_appended_judge() {
+    local said n appended zeros size
+    said=$(cores_appended "$1" "$3" "$CORES_APPEND_RECORDS")
+    read -r _ok n appended zeros size <<CORES_APPENDED
+$said
+CORES_APPENDED
+    if [ "${said%% *}" = ok ] && [ "$n" = $(($3 * CORES_APPEND_RECORDS)) ] && [ $((appended + zeros)) = "$size" ] &&
+       { [ "$4" != 0 ] || [ "$zeros" = 0 ]; }; then
+        ok "$2 — the host parsed _qap.bin off the medium: all $n appends once each and whole, $appended bytes, and $zeros zeros between them; $size bytes in all"
+    else
+        bad "$2 — the host's parse of _qap.bin off the medium: $said"
+    fi
+}
+
+run_appenders() {
+    echo "== appenders: two cabins append to one file beside a spanner on $CORES_STAND, and two on a USB stick =="
+    local L1="$SCRATCH/serial.cores.append.log" L2="$SCRATCH/serial.cores.appendusb.log"
+    cores_keys || return
+    rm -f "$L1" "$L2"
+    make run-stop >/dev/null 2>&1
+    rm -f build/boxos.img
+    build "$(strict_key "${CORES_KEYS[@]}")"
+    mutate_product build/boxos.img
+    if cores_boot append "appenders" "${CORES_KEYS[@]}"; then
+        cores_case "quilltest append 2 $CORES_APPEND_RECORDS 1" "$WAIT_QUIET_SLOW_S"
+        cores_said "appenders: AHCI, two appenders and a spanner"
+        cores_halt append bye
+        chk $? "appenders: the halt through bye said its sync wrote the volume"
+        cores_faults "$L1" "appenders: AHCI"
+        cores_check build/boxos.img "appenders: AHCI, after the halt"
+        cores_appended_judge build/boxos.img "appenders: AHCI" 2 1
+    fi
+    make run-stop >/dev/null 2>&1
+    restore build/boxos.img
+
+    # The stick is the volume: the internal disk declared not this machine's
+    # (latearrival_on), the stick a copy of the image taken once the machine is
+    # up (stick_from_boot_image). BIOS, because that mutation stands on the
+    # legacy channel's seat kind — STRICT's q35 puts the disk behind AHCI.
+    latearrival_on
+    build
+    make run-stop >/dev/null 2>&1
+    if make run-bg USB=on CORES=16 MEM=8G >"$SCRATCH/runbg.cores.log" 2>&1 && stick_from_boot_image &&
+       wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" &&
+       mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" &&
+       mon_raw "device_add usb-storage,drive=stick,id=usbstick" &&
+       wait_for_line build/serial.log "hands over" "$WAIT_QUIET_SLOW_S" && wait_for_quiet "$BOOT_BURST_QUIET_S"; then
+        cores_case "quilltest append 2 $CORES_APPEND_RECORDS 0" "$WAIT_QUIET_SLOW_S"
+        cores_said "appenders: a USB stick, two appenders"
+        grep -aq "a medium arrived carrying a volume, and this machine had none" build/serial.log
+        chk $? "appenders: the stick is the volume the appends went to"
+        cores_halt appendusb bye
+        chk $? "appenders: the USB halt through bye said its sync wrote the volume"
+        cores_faults "$L2" "appenders: USB"
+        cores_check "$SCRATCH/stick.img" "appenders: the stick, after the halt"
+        cores_appended_judge "$SCRATCH/stick.img" "appenders: the stick" 2 0
+    else
+        make run-stop >/dev/null 2>&1
+        cp build/serial.log "$L2" 2>/dev/null
+        bad "appenders: the stick never became the volume at a shell ($(tr -d '\r' < "$L2" 2>/dev/null | grep -aE 'hands over|mass storage|KERNEL PANIC' | tail -1 | cut -c1-120))"
+    fi
+    latearrival_off
+    rm -f "$SCRATCH/stick.img"
+    lockrank_judge "$L1 $L2" "appenders"
+}
+
+# ---------------------------------------------------------------------------
+# readdelete
+# ---------------------------------------------------------------------------
+
+run_readdelete() {
+    echo "== readdelete: a file of $READDELETE_MIB MiB read on $CORES_STAND while another cabin deletes it, reads held to $READDELETE_BPS B/s =="
+    local L1="$SCRATCH/serial.cores.readdelete1.log" L2="$SCRATCH/serial.cores.readdelete2.log" grown start count stood
+    cores_keys || return
+    rm -f "$L1" "$L2"
+    make run-stop >/dev/null 2>&1
+    rm -f build/boxos.img
+    build "$(strict_key "${CORES_KEYS[@]}")"
+    mutate_product build/boxos.img
+    if ! grown=$(grow_stretch build/boxos.img "$READDELETE_GROW"); then
+        bad "readdelete: the image has no BoxOS partition to stretch"
+        restore build/boxos.img; return
+    fi
+    start=${grown% *}; count=${grown#* }
+
+    if cores_boot readdelete1 "readdelete" "${CORES_KEYS[@]}"; then
+        if stood=$(grow_stood_on build/serial.log "$start" "$count"); then
+            # ‼ THE GROWN VOLUME SAYS ITS INTEGRITY MAP STANDS AFTER THE PROMPT.
+            # The map is laid over the new ground once the shell is up, and
+            # its line lands after the `~ `: a line typed then echoes with no
+            # prompt before it, type_line does not see it taken and types it
+            # again — measured, the case ran twice. So the map's line is
+            # waited for, and a fresh prompt asked for, before the case.
+            wait_for_line build/serial.log '^\[Integrity\] the map stands' "$WAIT_QUIET_S"
+            wait_for_quiet "$BOOT_BURST_QUIET_S"
+            key_press ret
+            wait_for_quiet "$BOOT_BURST_QUIET_S"
+            # The reads are held once the line is taken: the case writes and
+            # anchors its file before its first read, and only the second
+            # window is aimed at.
+            if cores_type "quilltest readdelete $READDELETE_MIB $READDELETE_ROUNDS"; then
+                mon_raw "block_set_io_throttle ide0-hd0 0 $READDELETE_BPS 0 0 0 0"
+                cores_answer "quilltest readdelete" "$WAIT_QUIET_SLOW_S"
+                mon_raw "block_set_io_throttle ide0-hd0 0 0 0 0 0 0"
+            fi
+            cores_said "readdelete"
+            tail -n +$((CORES_MARK + 1)) build/serial.log | tr -d '\r' | grep -a '^\[QUILL\] readdelete: round ' |
+                sed 's/^\[QUILL\] /       /'
+            cores_halt readdelete1 bye
+            chk $? "readdelete: the halt through bye said its sync wrote the volume"
+            cores_faults "$L1" "readdelete: boot 1"
+            cores_check build/boxos.img "readdelete: after the halt"
+            if cores_boot readdelete2 "readdelete: the reboot" "${CORES_KEYS[@]}"; then
+                cores_halt readdelete2 bye
+                chk $? "readdelete: the reboot halted through bye and said its sync wrote the volume"
+                cores_mounted "$L2" "readdelete: the reboot"
+                cores_check build/boxos.img "readdelete: after the second halt"
+            fi
+        else
+            make run-stop >/dev/null 2>&1
+            harness "readdelete: the boot stood on $stood — not the stretched image, so it judges nothing"
+        fi
+    fi
+    lockrank_judge "$L1 $L2" "readdelete"
+    make run-stop >/dev/null 2>&1
+    restore build/boxos.img
+}
+
+# ---------------------------------------------------------------------------
+# defragdelete
+# ---------------------------------------------------------------------------
+
+# cores_slots IMG — every slot of defragdelete off the medium: one file of its
+# name, its gen DEFRAG_ROUNDS — its head, then its stream, whole.
+cores_slots() {
+    local s name
+    python3 tools/volume-read.py "$1" list >"$SCRATCH/cores.slots.list" 2>&1
+    for s in $(seq 0 $((DEFRAG_SLOTS - 1))); do
+        name=$(printf '_qd%02d.bin' "$s")
+        python3 tools/volume-read.py "$1" get "$name" -o "$SCRATCH/cores.get.$name" >/dev/null 2>&1 ||
+            rm -f "$SCRATCH/cores.get.$name"
+    done
+    python3 - "$SCRATCH/cores.slots.list" "$SCRATCH/cores.get." "$DEFRAG_SLOTS" "$DEFRAG_ROUNDS" <<'CORES_SLOTS_EOF'
+import re, struct, sys
+M = (1 << 64) - 1
+def stream(seed, base, size):
+    out = bytearray()
+    for i in range((size + 7) // 8):
+        x = ((base + 8 * i) ^ ((seed & 0xFF) << 56)) & M
+        x = (x * 0x9E3779B97F4A7C15) & M
+        out += struct.pack("<Q", x ^ (x >> 29))
+    return out[:size]
+listing = open(sys.argv[1]).read()
+slots, g = int(sys.argv[3]), int(sys.argv[4])
+total = 0
+for s in range(slots):
+    name = "_qd%02d.bin" % s
+    n = len(re.findall(r"^\s+%s\s" % re.escape(name), listing, re.M))
+    if n != 1:
+        print("the medium lists %d file(s) called %s, where one is due" % (n, name))
+        sys.exit(0)
+    size = (192 << 10) + 4096 * ((s * 37 + g * 11) % 64) + 8 * ((s + g) % 100) + s % 8
+    want = stream(0xD0 + s, g << 40, size)
+    want[0:32] = struct.pack("<QIIQQ", 0x3147415246454451, s, g, size, (((s << 32) | g) * 0x9E3779B97F4A7C15) & M)
+    try:
+        got = open(sys.argv[2] + name, "rb").read()
+    except OSError:
+        got = b""
+    if got != bytes(want):
+        head = struct.unpack_from("<QII", got, 0) if len(got) >= 16 else (0, 0, 0)
+        print("%s holds %d bytes, its head saying gen %d, where gen %d in %d bytes is due" % (name, len(got), head[2], g, size))
+        sys.exit(0)
+    total += size
+print("ok %d %d" % (slots, total))
+CORES_SLOTS_EOF
+}
+
+run_defragdelete() {
+    echo "== defragdelete: $DEFRAG_SLOTS slots deleted and made again $DEFRAG_ROUNDS times beside two defraggers on $CORES_STAND, then the power button =="
+    local L1="$SCRATCH/serial.cores.defrag1.log" L2="$SCRATCH/serial.cores.defrag2.log" said gathered gone
+    cores_keys || return
+    rm -f "$L1" "$L2"
+    make run-stop >/dev/null 2>&1
+    rm -f build/boxos.img
+    build "$(strict_key "${CORES_KEYS[@]}")"
+    mutate_product build/boxos.img
+
+    if cores_boot defrag1 "defragdelete" "${CORES_KEYS[@]}"; then
+        cores_case "quilltest defragdelete $DEFRAG_SLOTS $DEFRAG_ROUNDS" "$WAIT_QUIET_SLOW_S"
+        cores_said "defragdelete" PENDING
+        gathered=$(tail -n +$((CORES_MARK + 1)) build/serial.log | tr -d '\r' | grep -acE '^\[TagFS\] file [0-9]+: [0-9]+ extent\(s\) of it, [0-9]+ block\(s\), gathered into one run')
+        gone=$(printf '%s\n' "$CORES_SAID" | sed -nE 's/.* found the file deleted under them ([0-9]+) times.*/\1/p')
+        [ "${gathered:-0}" -gt 0 ] && [ "${gone:-0}" -gt 0 ]
+        chk $? "defragdelete: the defraggers gathered files the kernel named $gathered time(s) and found a file deleted under them ${gone:-no} time(s) — both are what the case asks"
+        cores_halt defrag1 button
+        chk $? "defragdelete: the power button's halt said its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L1" | tr -d '\r' | tail -1 | cut -c1-100))"
+        cores_faults "$L1" "defragdelete: boot 1"
+        cores_check build/boxos.img "defragdelete: after the power button"
+        said=$(cores_slots build/boxos.img)
+        case "$said" in
+            "ok $DEFRAG_SLOTS "*) ok "defragdelete: the host lists one file of each slot's name and got each off the medium as its gen $DEFRAG_ROUNDS, ${said##* } bytes in all — none of the $((DEFRAG_SLOTS * DEFRAG_ROUNDS)) files deleted came back" ;;
+            *)                    bad "defragdelete: off the medium after the power button — $said" ;;
+        esac
+    fi
+    if cores_boot defrag2 "defragdelete: the reboot" "${CORES_KEYS[@]}"; then
+        cores_case "quilltest defragback $DEFRAG_SLOTS $DEFRAG_ROUNDS" "$WAIT_QUIET_SLOW_S"
+        cores_said "defragdelete: after the reboot"
+        cores_halt defrag2 bye
+        chk $? "defragdelete: the reboot halted through bye and said its sync wrote the volume"
+        cores_mounted "$L2" "defragdelete: the reboot"
+        cores_faults "$L2" "defragdelete: boot 2"
+        cores_check build/boxos.img "defragdelete: after the second halt"
+    fi
+    lockrank_judge "$L1 $L2" "defragdelete"
+    make run-stop >/dev/null 2>&1
+    restore build/boxos.img
+}
+
+run_cores() {
+    run_writers; echo; run_appenders; echo; run_readdelete; echo; run_defragdelete
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -10634,9 +11229,14 @@ case "${1:-both}" in
     abbamut)  run_abbamut ;;
     turns)    run_turns ;;
     turnsmut) run_turnsmut ;;
+    writers)  run_writers ;;
+    appenders) run_appenders ;;
+    readdelete) run_readdelete ;;
+    defragdelete) run_defragdelete ;;
+    cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1
