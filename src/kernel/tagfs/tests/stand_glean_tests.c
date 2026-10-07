@@ -315,9 +315,11 @@ out:
 /*
  * A cycle that took blocks off the front, and a medium that lied about it: the
  * newest seal's chain begins at another block than the other copy's, and its
- * open block does not bear it out. The mount judges the other copy by a walk
- * from its own first block — the blocks taken off rest, whole — and falls back
- * onto it, where a walk from the newest first block alone would not reach it.
+ * closed blocks do not bear it out — an open block alone not borne out would
+ * roll back under the newest seal (meta_pool.h). The mount judges the other
+ * copy by a walk from its own first block — the blocks taken off rest, whole —
+ * and falls back onto it, where a walk from the newest first block alone would
+ * not reach it.
  */
 static TestResult TestStandGleanLieFallsBack(void)
 {
@@ -336,15 +338,17 @@ static TestResult TestStandGleanLieFallsBack(void)
                 "and their chains begin at different blocks");
 
     lied               = seal;
-    lied.pool_to_bytes = seal.pool_to_bytes + RECORD_HEADER_SIZE;
+    lied.closed_crc32 ^= 1u;
     PoolMountAsk ask = {
         .seal = { &lied, &other },
         .head = StandGleanHead(),
     };
-    PoolStood stood = PoolSealsJudge(&ask, &stood_on, &fell_back);
+    bool      marked = false;
+    PoolStood stood  = PoolSealsJudge(&ask, &stood_on, &fell_back, &marked);
     TEST_ASSERT_EQ(stood, POOL_STOOD_SEAL, "the mount would stand on a seal");
     TEST_ASSERT_EQ(stood_on, 1, "the other copy's, whose chain begins before the newest one's");
     TEST_ASSERT(fell_back, "and says it fell back");
+    TEST_ASSERT(marked, "marking the medium SETTLE_MEDIUM_LIED");
 out:
     StandGleanLetGo(file_id);
     return verdict;

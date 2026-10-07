@@ -152,17 +152,23 @@ static void table_release(void) {
  * the chain ends there: a block that was reached is kept as the chain's last,
  * owed whole to the medium, and anything its link named after it is ground the
  * census names. True: the walk stops and the mount goes on; false: refused.
+ * Said only by the mount (`take`): the stand's question of a chain it built
+ * aside is no word on the volume.
  */
-static bool TableBlockRefused(bool sealed, bool reached, uint32_t block, const char* what)
+static bool TableBlockRefused(bool sealed, bool reached, bool take, uint32_t block,
+                              const char* what)
 {
     if (!sealed) {
-        kprintf("[FileTable] block %u %s — this volume's file table cannot be walked, so it "
-                "is not mounted\n", block, what);
+        if (take)
+            kprintf("[FileTable] block %u %s — this volume's file table cannot be walked, so "
+                    "it is not mounted\n", block, what);
         return false;
     }
-    kprintf("[FileTable] block %u %s — under the volume's seal the table is derived from the "
-            "pool, so the volume mounts, and the next Settle cycle writes the table's chain "
-            "whole from %s\n", block, what, reached ? "that block on" : "its last good block");
+    if (take)
+        kprintf("[FileTable] block %u %s — under the volume's seal the table is derived from "
+                "the pool, so the volume mounts, and the next Settle cycle writes the table's "
+                "chain whole from %s\n", block, what,
+                reached ? "that block on" : "its last good block");
     return true;
 }
 
@@ -221,7 +227,8 @@ static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBloc
     bool     cut   = false;     /* the chain ends short of its last link: owed whole */
     for (uint32_t hops = 0; ; hops++) {
         if (block >= run) {
-            if (!TableBlockRefused(sealed, false, block, "lies outside the volume's data run"))
+            if (!TableBlockRefused(sealed, false, take, block,
+                                   "lies outside the volume's data run"))
                 return -1;
             cut = true;
             break;
@@ -233,7 +240,7 @@ static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBloc
         bool read  = tagfs_read_block(block, image) == OK;
         bool table = read && image->magic == TAGFS_FILETBL_MAGIC;
         if (!table) {
-            if (!TableBlockRefused(sealed, true, block,
+            if (!TableBlockRefused(sealed, true, take, block,
                                    read ? "holds no file table" : "would not read"))
                 return -1;
             if (take && !TableTakeLink(block, image, false))
@@ -246,7 +253,8 @@ static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBloc
         if (image->next_block == 0)
             break;
         if (hops + 1 >= run) {
-            if (!TableBlockRefused(sealed, false, block, "links a chain that goes round in a circle"))
+            if (!TableBlockRefused(sealed, false, take, block,
+                                   "links a chain that goes round in a circle"))
                 return -1;
             cut = true;
             break;

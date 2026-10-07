@@ -22,6 +22,7 @@ typedef struct {
     const SettleMark* mark;
     uint32_t          fold;        /* the mixes of the blocks met before its `to` */
     SealVerdict       verdict;
+    bool              closed;      /* its `to` met short of the walk's own: closed by the walk's seal */
 } SealTry;
 
 /* One walk. `sealed`: the chain is read up to `to` and past it only for the
@@ -45,6 +46,13 @@ typedef struct {
     bool              in_span;
     uint32_t          span_cap;
     bool              span_refused;
+    uint32_t          gone_cap;
+    uint32_t          skipped;       /* blocks whose records end short of the bytes read to */
+    uint32_t          skipped_bytes;
+    uint32_t          skipped_block; /* the first of them, and the byte its records end at */
+    uint32_t          skipped_at;
+    uint32_t          dropped;       /* records whose extents are not followed */
+    uint32_t          dropped_fid;   /* the first of them */
     PoolMountOutcome* out;
 } PoolWalk;
 
@@ -72,56 +80,68 @@ static bool WalkChainAppend(uint32_t block)
     return true;
 }
 
+/* `fid` added to the list `*ids` of `*count`, which has room for `*cap` and
+ * doubles when it has none left. False when there is no memory for it. */
+static bool WalkIdsAdd(uint32_t** ids, uint32_t* count, uint32_t* cap, uint32_t fid)
+{
+    if (*count == *cap) {
+        uint32_t  room = *cap ? *cap * 2u : 32u;
+        uint32_t* more = kmalloc(sizeof(uint32_t) * room);
+        if (!more)
+            return false;
+        if (*count)
+            memcpy(more, *ids, sizeof(uint32_t) * *count);
+        kfree(*ids);
+        *ids = more;
+        *cap = room;
+    }
+    (*ids)[(*count)++] = fid;
+    return true;
+}
+
 static void WalkNoteSpan(PoolWalk* w, uint32_t fid)
 {
     PoolMountOutcome* out = w->out;
     if (w->span_refused)
         return;
-    if (out->last_span_count == w->span_cap) {
-        uint32_t  cap  = w->span_cap ? w->span_cap * 2u : 32u;
-        uint32_t* more = kmalloc(sizeof(uint32_t) * cap);
-        if (!more) {
-            w->span_refused = true;
-            kprintf("[MetaPool] no memory to note the files the last cycle wrote — their "
-                    "digests are not set back to unknown on this unclean mount\n");
-            return;
-        }
-        if (out->last_span_count)
-            memcpy(more, out->last_span, sizeof(uint32_t) * out->last_span_count);
-        kfree(out->last_span);
-        out->last_span = more;
-        w->span_cap    = cap;
+    if (!WalkIdsAdd(&out->last_span, &out->last_span_count, &w->span_cap, fid)) {
+        w->span_refused = true;
+        kprintf("[MetaPool] no memory to note the files the last cycle wrote — their "
+                "digests are not set back to unknown on this unclean mount\n");
     }
-    out->last_span[out->last_span_count++] = fid;
 }
 
 /* The file ids the records of `blk` name from byte `from` on — records no seal
- * holds, whose ids the medium has seen all the same. */
+ * holds, whose ids the medium has seen all the same. Only a record that checks
+ * out names an id: a bit rotten in the id of one that does not would carry the
+ * next file id anywhere, and every create after it with it. */
 static void WalkFidsPast(PoolWalk* w, const MetaPoolBlock* blk, uint32_t from)
 {
     uint32_t used = blk->used_bytes <= TAGFS_MPOOL_DATA_SIZE ? blk->used_bytes
                                                              : TAGFS_MPOOL_DATA_SIZE;
     for (uint32_t pos = 0; pos + RECORD_HEADER_SIZE <= used; ) {
         uint16_t len;
-        uint32_t fid;
         memcpy(&len, blk->payload + pos, sizeof(len));
         if (len < RECORD_HEADER_SIZE || len > used - pos)
             return;
-        memcpy(&fid, blk->payload + pos + 2, sizeof(fid));
-        if (pos >= from && fid > w->out->top_fid)
+        uint32_t fid = pos >= from ? UnpackV1Fid(blk->payload + pos, len) : 0;
+        if (fid > w->out->top_fid)
             w->out->top_fid = fid;
         pos += len;
     }
 }
 
 /* One record into the map through the mirror's door: an ACTIVE record becomes
- * its file's, a Quitclaim takes the file out. */
+ * its file's, a Quitclaim takes the file out — and its row, once the table is
+ * read: the table is read after the pool, so the row is not there yet to take
+ * (mount.c). */
 static error_t WalkPut(PoolWalk* w, const uint8_t* at, uint32_t len, uint32_t fid,
                        uint32_t link, uint32_t pos)
 {
     TagFSMetadata meta;
+    bool          dropped = false;
     memset(&meta, 0, sizeof(meta));
-    error_t unpacked = UnpackV1(at, len, &meta);
+    error_t unpacked = UnpackV1(at, len, &meta, &dropped);
     if (unpacked == ERR_NO_MEMORY) {
         kprintf("[MetaPool] there is no memory to unpack file %u's record at mount — this "
                 "volume is not mounted\n", fid);
@@ -132,9 +152,14 @@ static error_t WalkPut(PoolWalk* w, const uint8_t* at, uint32_t len, uint32_t fi
         tagfs_metadata_free(&meta);
         return OK;
     }
+    /* Only a record that checks out says which ids the medium has seen. */
+    if (fid > w->out->top_fid)
+        w->out->top_fid = fid;
     for (uint32_t t = 0; t < meta.tag_count; t++)
         if (meta.tag_ids[t] > w->out->top_tag)
             w->out->top_tag = meta.tag_ids[t];
+    if (dropped && w->dropped++ == 0)
+        w->dropped_fid = fid;
 
     bool         active = (meta.flags & TAGFS_FILE_ACTIVE) != 0;
     FileRecord*  rec    = active ? FileRecordOf(&meta) : NULL;
@@ -148,6 +173,12 @@ static error_t WalkPut(PoolWalk* w, const uint8_t* at, uint32_t len, uint32_t fi
                 "mounted\n", fid);
         return ERR_NO_MEMORY;
     }
+    if (!active && !WalkIdsAdd(&w->out->gone, &w->out->gone_count, &w->gone_cap, fid)) {
+        kprintf("[MetaPool] there is no memory to note the files a Quitclaim took out — "
+                "their rows would come back from the file table as files lost, so this "
+                "volume is not mounted\n");
+        return ERR_NO_MEMORY;
+    }
     return OK;
 }
 
@@ -156,6 +187,7 @@ static error_t WalkPut(PoolWalk* w, const uint8_t* at, uint32_t len, uint32_t fi
  * in append order, so a file's last record put is its newest. A record past
  * `upto`, or one whose length does not fit, ends the block's records: a block
  * is packed from its start and nothing is read past a record that is not one.
+ * What is left unread of the block is counted, for the line PoolMount says.
  */
 static error_t WalkRecords(PoolWalk* w, const PoolPlan* plan, const MetaPoolBlock* blk,
                            uint32_t block, uint32_t link, uint32_t upto)
@@ -165,15 +197,14 @@ static error_t WalkRecords(PoolWalk* w, const PoolPlan* plan, const MetaPoolBloc
     if (from_here)
         w->in_span = true;
 
-    for (uint32_t pos = 0; pos + RECORD_HEADER_SIZE <= upto; ) {
+    uint32_t pos = 0;
+    while (pos + RECORD_HEADER_SIZE <= upto) {
         uint16_t len;
         uint32_t fid;
         memcpy(&len, blk->payload + pos, sizeof(len));
         if (len < RECORD_HEADER_SIZE || len > upto - pos)
             break;
         memcpy(&fid, blk->payload + pos + 2, sizeof(fid));
-        if (fid > w->out->top_fid)
-            w->out->top_fid = fid;
         if (fid) {
             error_t put = WalkPut(w, blk->payload + pos, len, fid, link, pos);
             if (put != OK)
@@ -183,12 +214,20 @@ static error_t WalkRecords(PoolWalk* w, const PoolPlan* plan, const MetaPoolBloc
         }
         pos += len;
     }
+    if (pos < upto) {
+        if (w->skipped++ == 0) {
+            w->skipped_block = block;
+            w->skipped_at    = MPOOL_BLOCK_HEADER + pos;
+        }
+        w->skipped_bytes += upto - pos;
+    }
     return OK;
 }
 
 /* The seals not yet met, held against the block the walk is at — NULL when it
- * would not read as a block of the pool. */
-static void WalkJudge(SealTry* judge, uint32_t block, const MetaPoolBlock* img)
+ * would not read as a block of the pool — on a walk whose own seal's open
+ * block is `own_to`. */
+static void WalkJudge(SealTry* judge, uint32_t block, const MetaPoolBlock* img, uint32_t own_to)
 {
     for (uint32_t i = 0; judge && i < VOLUME_LEDGER_COPIES; i++) {
         SealTry* t = &judge[i];
@@ -204,6 +243,7 @@ static void WalkJudge(SealTry* judge, uint32_t block, const MetaPoolBlock* img)
         uint32_t to   = t->mark->pool_to_bytes;
         bool     tail = img && to <= TAGFS_MPOOL_DATA_SIZE && img->used_bytes >= to &&
                         KCrc32(img->payload, to) == t->mark->tail_crc32;
+        t->closed  = block != own_to;
         t->verdict = t->fold != t->mark->closed_crc32 ? SEAL_CLOSED_BROKEN
                    : tail                             ? SEAL_BORNE
                                                       : SEAL_TAIL_TORN;
@@ -260,36 +300,103 @@ static void WalkTailAt(PoolWalk* w, const PoolPlan* plan, uint32_t block, uint32
     g_pool_tail_changed = owed;
 }
 
-/* Why the walk cannot read `block` as a block of the pool, or NULL. */
-static const char* WalkRead(PoolWalk* w, uint32_t block)
+/*
+ * ‼ A READ THE MEDIUM REFUSED IS NO VERDICT ON ANY SEAL.
+ *
+ * A flash drive that drops one command is not a pool torn or rotted: held
+ * against the seals as a block that is not the pool's, the refusal of the
+ * open block rolled settled records back — and the first cycle wrote the
+ * emptied block over the whole one — and the refusal of a closed block sent
+ * the mount down the road of a kernel before the seal. The refusal says
+ * nothing of what the block holds, so the mount is refused as the read was
+ * (counted where the read met it, tagfs_read_block), and asked again when the
+ * seat answers. Said; the read's own error.
+ */
+static error_t WalkRefused(uint32_t block, error_t read)
 {
+    kprintf("[MetaPool] the medium refused the read of block %u of this volume's metadata "
+            "chain (error %d) — a refusal says nothing of what the block holds, so no seal is "
+            "judged on it and nothing is rolled back: the volume is not mounted\n",
+            block, (int)read);
+    return read;
+}
+
+/* Why the walk cannot take `block` as a block of the pool, or NULL — what the
+ * block holds, and never the medium's refusal to read it, which is *refused:
+ * the read's error, OK when it read. */
+static const char* WalkRead(PoolWalk* w, uint32_t block, error_t* refused)
+{
+    *refused = OK;
     if (block >= w->run)
         return "lies outside the volume's data run";
-    if (tagfs_read_block(block, w->here) != OK)
+    *refused = tagfs_read_block(block, w->here);
+    if (*refused != OK)
         return "would not read";
     if (w->here->magic != TAGFS_MPOOL_MAGIC)
         return "holds no metadata pool";
     return NULL;
 }
 
+/*
+ * The open block a torn walk rolls back, read for one thing: which files the
+ * stood seal's own cycle wrote records of there, among the records that still
+ * check out. Their blocks' digests are set back like those of every other file
+ * that cycle wrote (RT-22, MountAfterDoor): a block it wrote in place whose
+ * digest did not land would otherwise read as rot. Nothing else of the block
+ * is taken, and a refused read is the mount's refusal.
+ */
+static error_t WalkTornSpan(PoolWalk* w, const PoolPlan* plan, uint32_t block)
+{
+    if (block >= w->run)
+        return OK;
+    error_t read = tagfs_read_block(block, w->here);
+    if (read != OK)
+        return WalkRefused(block, read);
+    if (w->here->magic != TAGFS_MPOOL_MAGIC)
+        return OK;
+
+    const MetaPoolBlock* blk  = w->here;
+    bool                 from = plan->has_from && block == plan->from_block;
+    uint32_t             used = blk->used_bytes <= TAGFS_MPOOL_DATA_SIZE ? blk->used_bytes
+                                                                         : TAGFS_MPOOL_DATA_SIZE;
+    uint32_t             upto = plan->to_bytes < used ? plan->to_bytes : used;
+    for (uint32_t pos = 0; pos + RECORD_HEADER_SIZE <= upto; ) {
+        uint16_t len;
+        memcpy(&len, blk->payload + pos, sizeof(len));
+        if (len < RECORD_HEADER_SIZE || len > upto - pos)
+            break;
+        uint32_t fid = UnpackV1Fid(blk->payload + pos, len);
+        if (fid && (w->in_span || (from && pos >= plan->from_bytes)))
+            WalkNoteSpan(w, fid);
+        pos += len;
+    }
+    return OK;
+}
+
 /* One walk by `plan`. OK with the tail laid; POOL_WALK_STOPPED when a first
- * walk met a block it cannot read or ran out of chain before its `to` — the
- * seals' verdicts say what comes next; ERR_TAGFS_CORRUPTED (said) or
- * ERR_NO_MEMORY otherwise. */
+ * walk met a block that is not the pool's or ran out of chain before its `to`
+ * — the seals' verdicts say what comes next; the read's error when the medium
+ * refused one; ERR_TAGFS_CORRUPTED (said) or ERR_NO_MEMORY otherwise. */
 static error_t WalkOnce(PoolWalk* w, const PoolPlan* plan)
 {
     uint32_t block = plan->start;
     for (uint32_t hops = 0; ; hops++) {
         bool at_to = plan->sealed && block == plan->to_block;
         if (at_to && plan->torn) {
+            error_t read = WalkTornSpan(w, plan, block);
+            if (read != OK)
+                return read;
             if (!WalkChainAppend(block))
                 return ERR_NO_MEMORY;
             WalkTailAt(w, plan, block, 0);
             return OK;
         }
 
-        const char* why = WalkRead(w, block);
-        WalkJudge(plan->judge, block, why ? NULL : w->here);
+        error_t     refused;
+        const char* why = WalkRead(w, block, &refused);
+        if (refused != OK)
+            return WalkRefused(block, refused);
+        WalkJudge(plan->judge, block, why ? NULL : w->here, plan->to_block);
         if (why) {
             if (plan->judge)
                 return POOL_WALK_STOPPED;
@@ -331,7 +438,7 @@ static error_t WalkOnce(PoolWalk* w, const PoolPlan* plan)
                          : hops + 1 >= w->run ? "goes round in a circle"
                                           : NULL;
         if (stop) {
-            WalkJudge(plan->judge, 0xFFFFFFFFu, NULL);
+            WalkJudge(plan->judge, 0xFFFFFFFFu, NULL, plan->to_block);
             if (plan->judge)
                 return POOL_WALK_STOPPED;
             if (plan->sealed)
@@ -365,13 +472,20 @@ static void WalkForget(PoolWalk* w)
 
     PoolMountOutcome* out = w->out;
     kfree(out->last_span);
+    kfree(out->gone);
     out->last_span       = NULL;
     out->last_span_count = 0;
+    out->gone            = NULL;
+    out->gone_count      = 0;
     out->unreadable      = 0;
     w->span_cap          = 0;
     w->span_refused      = false;
+    w->gone_cap          = 0;
     w->in_span           = false;
     w->disagreed         = 0;
+    w->skipped           = 0;
+    w->skipped_bytes     = 0;
+    w->dropped           = 0;
 }
 
 static void PlanOfSeal(PoolPlan* plan, const SettleMark* m, bool torn)
@@ -389,26 +503,54 @@ static void PlanOfSeal(PoolPlan* plan, const SettleMark* m, bool torn)
 
 /*
  * Which seal the pool stands on, once the walk has held each against the
- * medium (meta_pool.h, THE POOL IS WALKED ONCE): the newest borne out; else
- * the other borne out, which is falling back; else a seal whose closed blocks
- * are borne out and whose open block is not, the newest first, which is the
- * rolled-back tail of decision 5; else none. The seal's index, or -1.
+ * medium (meta_pool.h, THE POOL IS WALKED ONCE), `t[0]` the newest copy's and
+ * `t[1]` the other's (no mark: none):
+ *
+ *   the newest borne out;
+ *   the newest's closed blocks borne out and its open block not, while the
+ *     other's open block is one of the newest's closed blocks — the walk met
+ *     it short of the newest's own, and the newest cycle settled it: the
+ *     newest, its open block rolled back (decision 5, the owner's B3), which
+ *     keeps strictly more than falling back would, all of it behind the
+ *     newest cycle's flush;
+ *   else the other borne out, which is falling back — the newest's closed
+ *     part not borne out, or the two sharing one open block;
+ *   else a seal whose closed blocks are borne out and whose open block is not,
+ *     the newest first — but only beside a second seal: with none, nothing
+ *     says what the open block held before the newest cycle wrote it in place,
+ *     and a kernel before the seal, which left the other copy unsealed, kept
+ *     its records there — a roll back would take them with it;
+ *   else none.
+ *
+ * The seal's index, or -1; *lied when the newest cycle is rolled back, which
+ * format v1 cannot tell from a medium that lied about its flush.
  */
-static int SealsDecide(const SealTry* t, PoolStood* stood, bool* fell_back)
+static int SealsDecide(const SealTry* t, PoolStood* stood, bool* fell_back, bool* lied)
 {
+    const SealTry* n = &t[0];
+    const SealTry* o = &t[1];
+
     *fell_back = false;
+    *lied      = false;
     *stood     = POOL_STOOD_SEAL;
-    if (t[0].mark && t[0].verdict == SEAL_BORNE)
+    if (n->verdict == SEAL_BORNE)
         return 0;
-    if (t[1].mark && t[1].verdict == SEAL_BORNE) {
+    *lied  = true;
+    *stood = POOL_STOOD_TORN_TAIL;
+    if (n->verdict == SEAL_TAIL_TORN && o->mark && o->closed)
+        return 0;
+    *stood = POOL_STOOD_SEAL;
+    if (o->mark && o->verdict == SEAL_BORNE) {
         *fell_back = true;
         return 1;
     }
     *stood = POOL_STOOD_TORN_TAIL;
-    for (int i = 0; i < (int)VOLUME_LEDGER_COPIES; i++)
-        if (t[i].mark && t[i].verdict == SEAL_TAIL_TORN)
-            return i;
+    if (o->mark && n->verdict == SEAL_TAIL_TORN)
+        return 0;
+    if (o->mark && o->verdict == SEAL_TAIL_TORN)
+        return 1;
     *stood = POOL_STOOD_NO_SEAL;
+    *lied  = !o->mark && n->verdict == SEAL_TAIL_TORN;
     return -1;
 }
 
@@ -430,36 +572,49 @@ static void SayFellBack(const PoolMountAsk* ask, const SealTry* t)
 static void WalkChoose(const PoolMountAsk* ask, const SealTry* t, PoolPlan* plan,
                        PoolMountOutcome* out)
 {
-    const SettleMark* s1 = ask->seal[1];
-    PoolStood         stood;
-    bool              fell_back;
-    int               at = SealsDecide(t, &stood, &fell_back);
+    PoolStood stood;
+    bool      fell_back, lied;
+    int       at = SealsDecide(t, &stood, &fell_back, &lied);
     out->stood     = stood;
     out->seal      = at;
     out->fell_back = fell_back;
+    out->lied      = lied;
     if (stood == POOL_STOOD_SEAL) {
-        PlanOfSeal(plan, s1, false);
+        PlanOfSeal(plan, ask->seal[1], false);
         SayFellBack(ask, t);
         return;
     }
     if (stood == POOL_STOOD_TORN_TAIL) {
         const SettleMark* m = ask->seal[at];
         PlanOfSeal(plan, m, true);
-        out->torn_bytes = m->pool_to_bytes;
-        kprintf("[TagFS] the pool's open block %u does not hold what %s says — it was torn "
-                "as it was written again: its %u byte(s) of records are ROLLED BACK to the "
-                "last closed block. Every file whose newest record was there stands on the "
-                "record before it, a file with none before it is gone, and the volume mounts "
-                "writable\n", m->pool_to_block,
-                s1 ? "either copy's seal" : "the seal", m->pool_to_bytes);
+        out->torn_block = m->pool_to_block;
+        out->torn_end   = MPOOL_BLOCK_HEADER + m->pool_to_bytes;
+        kprintf("[TagFS] the pool's open block %u does not hold what the seal of cycle %llu "
+                "says — it was torn as it was written: its %u byte(s) of records are ROLLED "
+                "BACK to the last closed block%s. Every file whose newest record was there "
+                "stands on the record before it, a file with none before it is gone, the "
+                "volume mounts writable, and from now on a freed block rests one cycle longer "
+                "on this medium (SETTLE_MEDIUM_LIED)\n", m->pool_to_block,
+                (unsigned long long)m->settle, m->pool_to_bytes,
+                at == 0 && t[1].mark && t[1].closed
+                    ? ", which holds the other seal's open block whole" : "");
         return;
     }
     memset(plan, 0, sizeof(*plan));
     plan->start = ask->head;
-    kprintf("[TagFS] no copy's seal is borne out by the pool's closed blocks — a kernel "
-            "before the seal rewrote records in them in place, or they rotted — so the whole "
-            "chain is read as such a kernel reads it: the file table says which files "
-            "there are, and nothing is rolled back\n");
+    if (lied)
+        kprintf("[TagFS] the newest seal (cycle %llu) is the only one the Ledger holds, and "
+                "the pool's open block %u does not hold what it says — the block was written "
+                "in place over records a kernel before the seal may have kept there, so "
+                "nothing is rolled back: the whole chain is read as such a kernel reads it, "
+                "the file table says which files there are, and from now on a freed block "
+                "rests one cycle longer on this medium (SETTLE_MEDIUM_LIED)\n",
+                (unsigned long long)ask->seal[0]->settle, ask->seal[0]->pool_to_block);
+    else
+        kprintf("[TagFS] no copy's seal is borne out by the pool's closed blocks — a kernel "
+                "before the seal rewrote records in them in place, or they rotted — so the "
+                "whole chain is read as such a kernel reads it: the file table says which "
+                "files there are, and nothing is rolled back\n");
 }
 
 static bool WalkJudged(error_t rc)
@@ -481,8 +636,9 @@ static bool WalkAgain(PoolWalk* w)
  * different blocks — the newest cycle's Glean took blocks off the front — the
  * walk from the newest one's first block never met the other's first ones, so
  * the other is judged by a walk from its own, which is the walk that stands on
- * it when it is borne out: the blocks taken off rest in Fallow until both
- * copies of the Ledger have moved past them, so they are all there to read.
+ * it when the verdicts fall back to it: the blocks taken off rest in Fallow
+ * until both copies of the Ledger have moved past them, so they are all there
+ * to read.
  */
 static error_t WalkAfterNewest(PoolWalk* w, const PoolMountAsk* ask, SealTry* tries,
                                PoolPlan* plan, PoolMountOutcome* out, bool apart)
@@ -496,13 +652,18 @@ static error_t WalkAfterNewest(PoolWalk* w, const PoolMountAsk* ask, SealTry* tr
         PlanOfSeal(plan, ask->seal[1], false);
         plan->judge = own;
         error_t rc = WalkOnce(w, plan);
-        tries[1] = own[1];
+        own[1].closed = tries[1].closed;
+        tries[1]      = own[1];
         if (!WalkJudged(rc))
             return rc;
-        if (own[1].verdict == SEAL_BORNE) {
-            out->stood     = POOL_STOOD_SEAL;
+
+        PoolStood stood;
+        bool      fell_back, lied;
+        if (SealsDecide(tries, &stood, &fell_back, &lied) == 1 && stood == POOL_STOOD_SEAL) {
+            out->stood     = stood;
             out->seal      = 1;
-            out->fell_back = true;
+            out->fell_back = fell_back;
+            out->lied      = lied;
             SayFellBack(ask, tries);
             return OK;
         }
@@ -549,10 +710,11 @@ error_t PoolMount(const PoolMountAsk* ask, PoolMountOutcome* out)
         out->stood = POOL_STOOD_NO_SEAL;
         rc         = WalkOnce(&w, &plan);
     } else {
-        /* A seal whose chain begins elsewhere is judged by a walk of its own. */
+        /* A seal whose chain begins elsewhere is judged by a walk of its own;
+         * this one still says whether the newest closed its open block. */
         bool apart = s1 && s1->chain_first != s0->chain_first;
         tries[0].mark = s0;
-        tries[1].mark = apart ? NULL : s1;
+        tries[1].mark = s1;
         PlanOfSeal(&plan, s0, false);
         plan.judge = tries;
         rc = WalkOnce(&w, &plan);
@@ -570,8 +732,11 @@ error_t PoolMount(const PoolMountAsk* ask, PoolMountOutcome* out)
             kfree(w.here);
         meta_pool_shutdown();
         kfree(out->last_span);
+        kfree(out->gone);
         out->last_span       = NULL;
         out->last_span_count = 0;
+        out->gone            = NULL;
+        out->gone_count      = 0;
         return rc == POOL_WALK_STOPPED ? ERR_TAGFS_CORRUPTED : rc;
     }
 
@@ -588,6 +753,17 @@ error_t PoolMount(const PoolMountAsk* ask, PoolMountOutcome* out)
     if (out->unreadable)
         kprintf("[MetaPool] %u record(s) of this volume's pool do not check out — each file "
                 "they belong to keeps the newest of its records that does\n", out->unreadable);
+    if (w.skipped)
+        kprintf("[MetaPool] %u block(s) of this volume's pool end in %u byte(s) that do not "
+                "read as records — a record whose length does not fit stops its block, and "
+                "nothing after it is read: the first at block %u, byte %u. Each file whose "
+                "records lay there is judged by those read before them\n", w.skipped,
+                w.skipped_bytes, w.skipped_block, w.skipped_at);
+    if (w.dropped)
+        kprintf("[MetaPool] %u record(s) of this volume's pool name a block outside its data "
+                "run of %u blocks, or an extent of none — each is taken up naming no blocks, "
+                "and nothing is written over its file: the first is file %u's\n", w.dropped,
+                w.run, w.dropped_fid);
 
     out->from_block = g_pool_tail_block;
     out->from_bytes = g_pool_tail->used_bytes;
@@ -603,18 +779,19 @@ static void JudgeWalk(SealTry* tries, const SettleMark* mark, MetaPoolBlock* blk
     for (uint32_t hops = 0; hops < run; hops++) {
         bool ok = block < run && tagfs_read_block(block, blk) == OK &&
                   blk->magic == TAGFS_MPOOL_MAGIC;
-        WalkJudge(tries, block, ok ? blk : NULL);
+        WalkJudge(tries, block, ok ? blk : NULL, mark->pool_to_block);
         if (!ok || block == mark->pool_to_block)
             break;
         if (blk->next_block == 0) {
-            WalkJudge(tries, 0xFFFFFFFFu, NULL);
+            WalkJudge(tries, 0xFFFFFFFFu, NULL, mark->pool_to_block);
             break;
         }
         block = blk->next_block;
     }
 }
 
-PoolStood PoolSealsJudge(const PoolMountAsk* ask, int* out_seal, bool* out_fell_back)
+PoolStood PoolSealsJudge(const PoolMountAsk* ask, int* out_seal, bool* out_fell_back,
+                         bool* out_lied)
 {
     SealTry        tries[VOLUME_LEDGER_COPIES];
     MetaPoolBlock* blk = kmalloc(sizeof(MetaPoolBlock));
@@ -622,25 +799,27 @@ PoolStood PoolSealsJudge(const PoolMountAsk* ask, int* out_seal, bool* out_fell_
     memset(tries, 0, sizeof(tries));
     *out_seal      = -1;
     *out_fell_back = false;
+    *out_lied      = false;
     if (!blk || !ask->seal[0]) {
         kfree(blk);
         return POOL_STOOD_NO_SEAL;
     }
     bool apart    = ask->seal[1] && ask->seal[1]->chain_first != ask->seal[0]->chain_first;
     tries[0].mark = ask->seal[0];
-    tries[1].mark = apart ? NULL : ask->seal[1];
+    tries[1].mark = ask->seal[1];
     JudgeWalk(tries, ask->seal[0], blk, run);
     if (apart && tries[0].verdict != SEAL_BORNE) {
         SealTry own[VOLUME_LEDGER_COPIES];
         memset(own, 0, sizeof(own));
         own[1].mark = ask->seal[1];
         JudgeWalk(own, ask->seal[1], blk, run);
-        tries[1] = own[1];
+        own[1].closed = tries[1].closed;
+        tries[1]      = own[1];
     }
     kfree(blk);
 
     PoolStood stood;
-    *out_seal = SealsDecide(tries, &stood, out_fell_back);
+    *out_seal = SealsDecide(tries, &stood, out_fell_back, out_lied);
     return stood;
 }
 #endif

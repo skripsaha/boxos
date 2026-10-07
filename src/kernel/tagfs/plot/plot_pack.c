@@ -40,11 +40,12 @@ bool PlotFits(const TagFSMetadata *record, uint32_t *out_bytes)
 }
 
 /* Every extent names at least one block, none past a u32 block number, and —
- * once the volume is up — none outside the data run. */
+ * once the Deed has been read, which states the run before the mount reads a
+ * record — none outside the data run. */
 static bool PlotExtentsInRun(const FileExtent *extents, uint32_t count, uint32_t *out_bad)
 {
     TagFSState *fs    = tagfs_get_state();
-    uint64_t    total = (fs && fs->initialized) ? fs->layout.data_blocks : 0;
+    uint64_t    total = fs ? fs->layout.data_blocks : 0;
 
     for (uint32_t e = 0; e < count; e++) {
         uint64_t start = extents[e].start_block;
@@ -130,36 +131,60 @@ static uint16_t PlotRecordCrc(const uint8_t *rec, uint16_t record_len)
                           (uint32_t)record_len - RECORD_CRC_OFFSET - 2);
 }
 
-error_t UnpackV1(const uint8_t *rec, uint32_t room, TagFSMetadata *out)
+/* The record's three counts, which sit just before its CRC16 (the layout at
+ * the top of this file). */
+#define PLOT_V1_COUNTS_OFFSET (RECORD_CRC_OFFSET - 3u * sizeof(uint16_t))
+
+/* Whether the record at `rec` checks out — its length inside `room`, its
+ * CRC16, and what its counts say it carries inside its length — and its three
+ * counts when it does. Reads only. */
+static bool PlotRecordChecks(const uint8_t *rec, uint32_t room, uint16_t counts[3])
 {
-    uint16_t record_len, tags, extents, name, stored_crc;
+    uint16_t record_len, stored_crc;
 
     memcpy(&record_len, rec, 2);
     if (record_len < RECORD_HEADER_SIZE || record_len > room)
-        return ERR_METADATA_CORRUPTED;
+        return false;
 
     /* A stored zero is checked like any other sum: CRC-16/CCITT-FALSE makes
      * 0x0000 for real, and no volume this kernel mounts predates the sum. */
     memcpy(&stored_crc, rec + RECORD_CRC_OFFSET, 2);
     if (PlotRecordCrc(rec, record_len) != stored_crc)
+        return false;
+
+    /* What the counts say the record carries lies inside what its length
+     * says: a record whose counts reach past its own end is not followed. */
+    memcpy(counts, rec + PLOT_V1_COUNTS_OFFSET, 3u * sizeof(uint16_t));
+    return (uint32_t)RECORD_HEADER_SIZE + (uint32_t)counts[0] * sizeof(uint16_t) +
+           (uint32_t)counts[1] * sizeof(FileExtent) + counts[2] <= record_len;
+}
+
+uint32_t UnpackV1Fid(const uint8_t *rec, uint32_t room)
+{
+    uint16_t counts[3];
+    uint32_t fid = 0;
+    if (PlotRecordChecks(rec, room, counts))
+        memcpy(&fid, rec + 2, sizeof(fid));
+    return fid;
+}
+
+error_t UnpackV1(const uint8_t *rec, uint32_t room, TagFSMetadata *out, bool *out_dropped)
+{
+    uint16_t counts[3];
+
+    if (out_dropped)
+        *out_dropped = false;
+    if (!PlotRecordChecks(rec, room, counts))
         return ERR_METADATA_CORRUPTED;
+    uint16_t tags = counts[0], extents = counts[1], name = counts[2];
 
     uint32_t pos = 2;
     memcpy(&out->file_id,       rec + pos, 4);  pos += 4;
     memcpy(&out->flags,         rec + pos, 4);  pos += 4;
     memcpy(&out->size,          rec + pos, 8);  pos += 8;
     memcpy(&out->created_time,  rec + pos, 8);  pos += 8;
-    memcpy(&out->modified_time, rec + pos, 8);  pos += 8;
-    memcpy(&tags,               rec + pos, 2);  pos += 2;
-    memcpy(&extents,            rec + pos, 2);  pos += 2;
-    memcpy(&name,               rec + pos, 2);  pos += 2;
-    pos += 2;   /* the CRC16, checked above */
-
-    /* What the counts say the record carries lies inside what its length
-     * says: a record whose counts reach past its own end is not followed. */
-    if ((uint32_t)RECORD_HEADER_SIZE + (uint32_t)tags * sizeof(uint16_t) +
-        (uint32_t)extents * sizeof(FileExtent) + name > record_len)
-        return ERR_METADATA_CORRUPTED;
+    memcpy(&out->modified_time, rec + pos, 8);
+    pos = RECORD_HEADER_SIZE;   /* past the counts and the CRC16, checked above */
 
     out->tag_count    = tags;
     out->extent_count = extents;
@@ -186,12 +211,14 @@ error_t UnpackV1(const uint8_t *rec, uint32_t room, TagFSMetadata *out)
 
         /* An extent outside the data run is not a record to follow: the file
          * is handed out naming no blocks, and PlotLoad refuses to write over
-         * a file whose size its blocks do not reach. */
+         * a file whose size its blocks do not reach. The caller says so. */
         uint32_t bad = 0;
         if (!PlotExtentsInRun(out->extents, extents, &bad)) {
             kfree(out->extents);
             out->extents      = NULL;
             out->extent_count = 0;
+            if (out_dropped)
+                *out_dropped = true;
         }
     }
 

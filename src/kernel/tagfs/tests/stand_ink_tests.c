@@ -462,7 +462,7 @@ static bool StandInkNewestOnMedium(uint32_t fid, bool* active, bool* whole)
             if (id == fid) {
                 TagFSMetadata meta;
                 memset(&meta, 0, sizeof(meta));
-                if (UnpackV1(blk->payload + pos, len, &meta) == OK) {
+                if (UnpackV1(blk->payload + pos, len, &meta, NULL) == OK) {
                     found   = true;
                     *active = (meta.flags & TAGFS_FILE_ACTIVE) != 0;
                 }

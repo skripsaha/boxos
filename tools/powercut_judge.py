@@ -24,6 +24,12 @@ import sys
 
 from powercut import HARM, VOLUME_READ, Outside, Ranges, RecordBytes, Run
 
+# What volume-read says of a mount that does not stand on the newest seal
+# borne out (census.py _Seal): no harm on a cut before its sync's flush — a
+# cut there rolls the cycle back — and a record the seal says landed that the
+# medium does not hold on a state the flush stood behind.
+SEAL_NOT_STOOD = ("SEAL_FELL_BACK", "SEAL_TAIL_TORN", "SEAL_ALONE_TORN", "SEAL_UNBORNE")
+
 
 # ---------------------------------------------------------------------------
 # judge — every oracle, one verdict line each
@@ -193,23 +199,35 @@ class Judge:
         if not harm:
             self.Out("codes", "behaves", "every one of %d cuts is consistent" % sum(judged.values()))
 
+    def Behind(self, cid):
+        """What a state a sync's flush stood behind shows that it must not: a
+        damage or a leak code, and a mount that does not stand on the newest
+        seal borne out — each in the census's words. Empty when nothing."""
+        said = ["%s/%s" % x for x in self.run.Signature(cid)]
+        said += ["%s: %s" % (code, text) for code, _sev, text in
+                 self.run.results.get(cid, {}).get("findings", []) if code in SEAL_NOT_STOOD]
+        return " ".join(said)
+
     def Boundaries(self):
         """Every state a sync stood behind — an epoch its flush closed, holding the ledger HEAD's sync
-        writes last, all applied — is consistent; a WriteJob's flush of data promises nothing."""
+        writes last, all applied — is consistent and stands on the seal that sync wrote, borne
+        out; a WriteJob's flush of data promises nothing."""
         synced = {w["epoch"] for w in self.run.listing["writes"]
                   if any(t["kind"] == "ledger" for t in w["touches"])}
         ends = [(self.run.Canon("e%d-all" % e["epoch"]), e["flush_seq"])
                 for e in self.run.listing["epochs"] if e["flush_seq"] and e["epoch"] in synced]
         blind = ["%s (flush at entry %d)" % (c, f) for c, f in ends if not self.run.Judged(c)]
-        bad = ["%s (flush at entry %d): %s" % (c, f, " ".join("%s/%s" % s for s in self.run.Signature(c)))
-               for c, f in ends if self.run.Judged(c) and self.run.Signature(c)]
+        bad = ["%s (flush at entry %d): %s" % (c, f, self.Behind(c))
+               for c, f in ends if self.run.Judged(c) and self.Behind(c)]
         if blind:
             self.Out("boundaries", "harness", "volume-read could not judge %d of %d syncs' flushes: %s"
                      % (len(blind), len(ends), "; ".join(blind[:3])))
         elif ends:
             self.Out("boundaries", "fail" if bad else "behaves", "%d of %d syncs' flushes stand behind an "
-                     "inconsistent volume: %s" % (len(bad), len(ends), "; ".join(bad[:3])) if bad else
-                     "the volume is consistent at every one of %d syncs' flushes" % len(ends))
+                     "inconsistent volume, or one that does not stand on its newest seal: %s"
+                     % (len(bad), len(ends), "; ".join(bad[:3])) if bad else
+                     "the volume is consistent, and stands on its newest seal, at every one of %d "
+                     "syncs' flushes" % len(ends))
 
     def Boots(self):
         if not self.boots:

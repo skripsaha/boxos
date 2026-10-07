@@ -222,7 +222,13 @@ uint32_t PackV1(const TagFSMetadata *meta, uint8_t *out);
 void     PackV1Refile(uint8_t *rec, uint32_t fid);
 
 /* A packed record read back, whose room in its block is `room` bytes: OK,
- * ERR_METADATA_CORRUPTED when it does not check out, or ERR_NO_MEMORY. */
-error_t  UnpackV1(const uint8_t *rec, uint32_t room, TagFSMetadata *out);
+ * ERR_METADATA_CORRUPTED when it does not check out, or ERR_NO_MEMORY. One
+ * whose extents name a block outside the data run, or none at all, comes out
+ * naming no blocks, and *out_dropped says so (NULL: not asked). */
+error_t  UnpackV1(const uint8_t *rec, uint32_t room, TagFSMetadata *out, bool *out_dropped);
+
+/* The file id of a packed record that checks out as UnpackV1 takes it, or 0
+ * when it does not — reading only, taking no memory. */
+uint32_t UnpackV1Fid(const uint8_t *rec, uint32_t room);
 
 #endif /* TAGFS_PLOT_H */

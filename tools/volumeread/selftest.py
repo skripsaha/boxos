@@ -351,6 +351,37 @@ def PlantTornTail(t, over):
     t.PutBlock(over, block, raw)
 
 
+def PlantOlderClosed(t, over):
+    """The owner's B3: the other copy's seal made the cycle before, whose open
+    block was the chain's first block — closed since by the newest cycle,
+    which laid its last record there — and the newest cycle's open block torn
+    (PlantTornTail). The fid of that last record, which only the newest seal
+    holds."""
+    first = t.f.chains["pool"][0]
+    raw = t.Block(over, first)
+    k = LastRecord(t, first).at - ondisk.CHAIN_HEADER
+
+    def Before(mark, _raw):
+        mark.update(pool_to_block=first, pool_to_bytes=k, closed_crc32=0,
+                    tail_crc32=ondisk.Crc32(bytes(raw[ondisk.CHAIN_HEADER:ondisk.CHAIN_HEADER + k])))
+    other = 1 - t.c0.f.ledger["copy"]
+    Reseal(t, over, pool=False, registry=False, copies=(other,), edit=Before)
+    PlantTornTail(t, over)
+
+
+def LastRecord(t, block):
+    """The last record of a closed block of the pool, as the image holds it —
+    one a case may lose or break: never the BOOT file's."""
+    raw = t.Block(OverlayMedium(t.f.medium), block)
+    walk, _stop = ondisk.PoolRecords(raw, ondisk.PoolUsed(raw))
+    if len(t.f.chains["pool"]) < 2 or len(walk) < 2:
+        raise Unreadable("the pool has no closed block of two records for a case to aim at")
+    rec = ondisk.ParseRecord(raw, walk[-1][0], block)
+    if "fid %u '%s'" % (rec.fid, rec.name) == t.c0.boot_file:
+        raise Unreadable("the last record of pool block %u is the BOOT file's" % block)
+    return rec
+
+
 def PlantGlean(t, over, lie=False):
     """What Glean leaves: the records of the pool's blocks laid again in new
     blocks from F on, linked after the old open block, every row following its
@@ -577,6 +608,15 @@ def Cases(t):
         return ("the kernel loses %u file(s) and lets no row go unsaid" % n,
                 lambda c: K(c)["lost"] == n and K(c)["unsettled"] == 0)
 
+    def Lied(lied):
+        return ("the mount %s the medium SETTLE_MEDIUM_LIED" % ("marks" if lied else "does not mark"),
+                lambda c: Seal(c)["lied"] == lied)
+
+    older = LastRecord(t, pool0[0])
+    broken = LastRecord(t, t.Srec.block)
+    broken_tail = (ondisk.PoolUsed(t.Block(OverlayMedium(c0.f.medium), broken.block)) -
+                   (broken.at - ondisk.CHAIN_HEADER))
+
     return [
         # --- the ground every later case is measured from ---------------------
         Case("C0 pristine", lambda o: None, checks=[
@@ -733,17 +773,17 @@ def Cases(t):
              must={"ORPHAN"}, checks=[
                  ("%s is gone: its newest record is the Quitclaim" % t.Label(S),
                   lambda c: State(c, Sfid) == "quitclaim" and bool(Findings(c, "QUITCLAIM_PENDING"))),
-                 ("under the seal its row is let go unsaid",
-                  lambda c: K(c)["unsettled"] == 1 and K(c)["lost"] == 0),
+                 ("its row goes with the delete, neither a cycle that did not settle nor a loss",
+                  lambda c: K(c)["quitclaimed"] == 1 and K(c)["unsettled"] == 0 and K(c)["lost"] == 0),
                  ("the orphans are %s's blocks, named as a superseded record's" % t.Label(S),
                   lambda c: Runs(c, "ORPHAN") == t.Sruns and
                   any("superseded record" in x.text for x in Findings(c, "ORPHAN")))]),
         Case("C21b quitclaim, row left, no seal", lambda o: [PlantAppend(t, o, Quitclaim(Sfid)),
                                                              NoSeal(t, o)],
              must={"ORPHAN"}, checks=[
-                 ("with no seal the kernel counts the name among the lost, and the census "
-                  "knows it a delete", lambda c: K(c)["lost"] == 1 and State(c, Sfid) == "quitclaim" and
-                  not Findings(c, "FILE_LOST"))]),
+                 ("with no seal too the row goes with the delete, and nothing is lost",
+                  lambda c: K(c)["quitclaimed"] == 1 and K(c)["lost"] == 0 and
+                  State(c, Sfid) == "quitclaim" and not Findings(c, "FILE_LOST"))]),
         Case("C22 quitclaim landed", lambda o: PlantQuitclaimLanded(t, o), checks=[
             ("%s is no file at all" % t.Label(S), lambda c: Sfid not in c.files),
             ("and the kernel finds nothing to repair",
@@ -758,22 +798,49 @@ def Cases(t):
                  ("its block is the orphan, named as a record past the seal's",
                   lambda c: Runs(c, "ORPHAN") == [(F, 1)] and
                   any("past the seal's span" in x.text for x in Findings(c, "ORPHAN")))]),
+        Case("C24 rotten fid", lambda o: t.RecordPatch(
+                 o, t.Srec, 2, struct.pack("<I", Sfid | 0x40000000), False),
+             must={"RECORD_CRC", "FILE_LOST", "ORPHAN"}, checks=[
+                 ("no seal is borne out", Stood("none", tie_rule)),
+                 Lost(1),
+                 ("a record that does not check out names no id: the next file id is %u" % (maxfid + 1),
+                  lambda c: M(c).next_file_id == maxfid + 1)]),
+        Case("C25 extent past the run", lambda o: PlantRewritten(t, o, t.Srec, block=t.f.D + 5),
+             must={"EXTENT_OUTSIDE", "ORPHAN"}, checks=[
+                 ("%s is taken up naming no blocks" % t.Label(S),
+                  lambda c: State(c, Sfid) == "live" and not c.files[Sfid]["record"].extents_at_mount),
+                 ("the walk counts 1 record whose extents it does not follow",
+                  lambda c: K(c)["dropped"] == 1 and K(c)["dropped_first"] == Sfid),
+                 ("the orphans are %s's old blocks" % t.Label(S),
+                  lambda c: Runs(c, "ORPHAN") == t.Sruns)]),
+        Case("C26 record length rotten", lambda o: t.RecordPatch(
+                 o, broken, 0, struct.pack("<H", 0xFFF0), False),
+             must={"RECORD_SHAPE", "FILE_LOST", "ORPHAN"}, checks=[
+                 ("no seal is borne out", Stood("none", tie_rule)),
+                 ("the walk says the %u byte(s) of block %u from fid %u's record on are not read"
+                  % (broken_tail, broken.block, broken.fid),
+                  lambda c: K(c)["skipped"] == [1, broken_tail] and
+                  K(c)["skipped_first"] == [broken.block, broken.at]),
+                 Lost(1)]),
         # --- which seal the pool stands on -----------------------------------------
         Case("S1 fell back", lambda o: PlantFellBack(t, o), must={"ORPHAN"}, checks=[
             ("the newest seal is not borne out and the volume stands on the other",
              lambda c: Stood("seal", 1 - tie_rule, True)(c) and bool(Findings(c, "SEAL_FELL_BACK"))),
             ("its verdicts are torn and borne", lambda c: Seal(c)["verdicts"] == ["torn", "borne"]),
+            Lied(True),
             ("the new file's row is let go unsaid", lambda c: K(c)["unsettled"] == 1 and
              State(c, maxfid + 1) == "unsettled"),
             ("and its id is never given out again: the next file id is %u" % (maxfid + 2),
              lambda c: M(c).next_file_id == maxfid + 2),
             ("its block is the orphan", lambda c: K(c)["orphan_runs"] == [(F, 1)])]),
-        Case("S2 torn tail", lambda o: PlantTornTail(t, o), must={"ORPHAN"}, checks=[
+        Case("S2 torn tail", lambda o: PlantTornTail(t, o), must={"ORPHAN", "FILE_LOST"}, checks=[
             ("the newest seal's open block rolls back", lambda c: Stood("torn", tie_rule)(c) and
              bool(Findings(c, "SEAL_TAIL_TORN"))),
-            ("the %u file(s) whose only record was there go: their rows let go unsaid" % len(t.tail_files),
-             lambda c: K(c)["unsettled"] == len(t.tail_files) and K(c)["lost"] == 0 and
-             sorted(f for f in t.tail_files if State(c, f) == "unsettled") == t.tail_files),
+            Lied(True),
+            ("the %u file(s) whose only record settled there are lost, said, and no row is let go "
+             "as a cycle that did not settle" % len(t.tail_files),
+             lambda c: K(c)["lost"] == len(t.tail_files) and K(c)["unsettled"] == 0 and
+             sorted(f for f in t.tail_files if State(c, f) == "lost") == t.tail_files),
             ("the kernel says %u files" % (c0.kernel.says[2] - len(t.tail_files)),
              lambda c: c.kernel.says[2] == c0.kernel.says[2] - len(t.tail_files)),
             ("their blocks are the orphans", lambda c: K(c)["orphan_runs"] == tail_runs)]),
@@ -797,7 +864,27 @@ def Cases(t):
         Case("S6 seal names a block the chain never reaches", lambda o: Reseal(
                  t, o, registry=False, edit=lambda mark, raw: mark.update(pool_to_block=F)), checks=[
             ("both seals are broken and none is stood on",
-             lambda c: Stood("none", tie_rule)(c) and Seal(c)["verdicts"] == ["broken", "broken"])]),
+             lambda c: Stood("none", tie_rule)(c) and Seal(c)["verdicts"] == ["broken", "broken"]),
+            Lied(False)]),
+        Case("S7 the newest seal alone, its open block torn",
+             lambda o: [NoSeal(t, o, copies=(other,)), PlantTornTail(t, o)],
+             must={"RECORD_CRC", "FILE_LOST", "ORPHAN"}, checks=[
+                 ("nothing is rolled back: the whole chain is read, with no seal",
+                  lambda c: Stood("none", tie_rule)(c) and Seal(c)["alone"] and
+                  bool(Findings(c, "SEAL_ALONE_TORN"))),
+                 Lied(True),
+                 ("only the file whose record the tear reached is lost", lambda c: K(c)["lost"] == 1 and
+                  K(c)["unreadable"] == 1 and
+                  [f for f in t.tail_files if State(c, f) == "live"] == t.tail_files[:-1])]),
+        Case("S8 the other seal's open block closed by the newest",
+             lambda o: PlantOlderClosed(t, o), must={"FILE_LOST", "ORPHAN"}, checks=[
+                 ("the newest seal stands, its open block alone rolled back",
+                  lambda c: Stood("torn", tie_rule)(c) and Seal(c)["verdicts"][1] == "borne"),
+                 Lied(True),
+                 ("the record the newest cycle laid in the block it closed is kept",
+                  lambda c: State(c, older.fid) == "live"),
+                 ("and the %u file(s) of the torn open block are lost" % len(t.tail_files),
+                  lambda c: K(c)["lost"] == len(t.tail_files) and K(c)["unsettled"] == 0)]),
         # --- Glean: the chain's first block moves ----------------------------------
         Case("GL1 Glean head", lambda o: PlantGlean(t, o), checks=[
             ("the chain begins at the seal's first block, %u" % F,

@@ -15,9 +15,114 @@
 static uint64_t s_found_seq;    /* the newest Ledger the returned medium holds */
 static uint64_t s_left_seq;     /* the one a cycle this kernel settled on it */
 
-/* A volume found holding less than a settled cycle, for the rest of the boot. */
-static uint8_t  s_lied_uuid[16];
-static bool     s_lied_known;
+/*
+ * ‼ WHAT A BOOK GIVEN UP LEAVES KNOWN, ONE ENTRY A VOLUME, FOR THE REST OF THE
+ * BOOT.
+ *
+ * The programs live on when a book is given up, holding the file ids and tag
+ * ids the volume's memory gave them — a create no cycle settled among them —
+ * while the next mount reads its numbers off the medium alone, which never
+ * saw those ids. Given out again, one program's id named another's file. So
+ * the ids memory had reached are remembered by the volume's UUID, and its
+ * mounts give out nothing below them (AwayNumbersKnown); and a volume found
+ * holding less than a settled cycle is remembered the same way, every one of
+ * them, not only the last.
+ */
+typedef struct {
+    uint8_t  uuid[16];
+    uint32_t next_file_id;
+    uint32_t next_tag_id;
+    bool     lied;
+} AwayKnown;
+
+/* The entries, under their own leaf lock: a book is given up where the medium
+ * is attended to and where the machine stops, and a mount reads them. The
+ * array grows with no lock held and is swapped in under it. */
+static TagFSLock  s_known_lock = TAGFS_LOCK_INIT("away", LOCK_RANK_LEAF);
+static AwayKnown* s_known;
+static uint32_t   s_known_count;
+static uint32_t   s_known_cap;
+
+/* The entry of the volume `uuid`, or NULL. Under s_known_lock. */
+static AwayKnown* AwayKnownFind(const uint8_t uuid[16])
+{
+    for (uint32_t i = 0; i < s_known_count; i++)
+        if (memcmp(s_known[i].uuid, uuid, sizeof(s_known[i].uuid)) == 0)
+            return &s_known[i];
+    return NULL;
+}
+
+/* `next_file` and `next_tag` into the volume `uuid`'s entry, each where it is
+ * further, and `lied` with it; the entry made when there is none. False when
+ * there is no memory for it. A count an earlier kernel let wrap (0) is the
+ * medium's to keep refusing creates on: the mount keeps it, whatever is
+ * remembered here. */
+static bool AwayKnownRaise(const uint8_t uuid[16], uint32_t next_file, uint32_t next_tag,
+                           bool lied)
+{
+    for (;;) {
+        TagFSLockTake(&s_known_lock);
+        AwayKnown* k = AwayKnownFind(uuid);
+        if (!k && s_known_count < s_known_cap) {
+            k = &s_known[s_known_count++];
+            memset(k, 0, sizeof(*k));
+            memcpy(k->uuid, uuid, sizeof(k->uuid));
+        }
+        if (k) {
+            if (next_file > k->next_file_id)
+                k->next_file_id = next_file;
+            if (next_tag > k->next_tag_id)
+                k->next_tag_id = next_tag;
+            k->lied |= lied;
+            TagFSLockDrop(&s_known_lock);
+            return true;
+        }
+        uint32_t cap = s_known_cap;
+        TagFSLockDrop(&s_known_lock);
+
+        uint32_t   room = cap ? cap * 2u : 4u;
+        AwayKnown* more = kmalloc(sizeof(AwayKnown) * room);
+        AwayKnown* old  = NULL;
+        if (!more)
+            return false;
+        TagFSLockTake(&s_known_lock);
+        if (s_known_cap == cap) {
+            if (s_known_count)
+                memcpy(more, s_known, sizeof(AwayKnown) * s_known_count);
+            old         = s_known;
+            s_known     = more;
+            s_known_cap = room;
+            more        = NULL;
+        }
+        TagFSLockDrop(&s_known_lock);
+        kfree(more);
+        kfree(old);
+    }
+}
+
+/* The numbers the book's memory had reached, and whether the medium lied,
+ * remembered for its volume. */
+static void AwayRemember(bool lied)
+{
+    TagFSState* fs        = tagfs_get_state();
+    uint32_t    next_file;
+    uint32_t    next_tag  = 0;
+
+    TagFSLockTake(&fs->lock);
+    next_file = fs->ledger.next_file_id;
+    TagFSLockDrop(&fs->lock);
+    if (fs->registry) {
+        TagFSLockTake(&fs->registry->lock);
+        next_tag = fs->registry->next_id;
+        TagFSLockDrop(&fs->registry->lock);
+    }
+    if (!AwayKnownRaise(fs->uuid, next_file, next_tag, lied))
+        kprintf("[TagFS] there is no memory to remember the ids this kernel gave out on the "
+                "volume whose book is given up (file ids below %u, tag ids below %u)%s — its "
+                "next mount may give one of them again, to a program other than the one "
+                "holding it\n", next_file, next_tag,
+                lied ? ", nor that its medium lied" : "");
+}
 
 /* The changes the book holds: inked, and no cycle settled. */
 static uint64_t AwayUnsettled(void)
@@ -76,6 +181,7 @@ void AwayTakeUp(uint8_t seat)
 uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
 {
     uint64_t lost = AwayUnsettled();
+    AwayRemember(why == AWAY_OLDER);
     switch (why) {
     case AWAY_IN_DOUBT:
         kprintf("[TagFS] the volume came back in seat %u with its Ledger as this kernel left it "
@@ -89,8 +195,6 @@ uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
                 "said it kept, and its seals carry SETTLE_MEDIUM_LIED from its next mount on"
                 AWAY_LOST, seat, (unsigned long long)s_found_seq,
                 (unsigned long long)s_left_seq, (unsigned long long)lost);
-        memcpy(s_lied_uuid, tagfs_get_state()->uuid, sizeof(s_lied_uuid));
-        s_lied_known = true;
         break;
     case AWAY_OTHER:
         kprintf("[TagFS] the volume came back in seat %u with a Ledger or a Deed this kernel did "
@@ -106,9 +210,20 @@ uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
         kprintf("[TagFS] another volume sits in seat %u, where the book of the volume that left "
                 "it was held" AWAY_LOST, seat, (unsigned long long)lost);
         break;
-    default:        /* AWAY_HALT: a book as it was left is taken up, never given up */
+    case AWAY_HALT:
         kprintf("[TagFS] the machine is stopping while the volume's medium is away" AWAY_LOST,
                 (unsigned long long)lost);
+        break;
+    default:
+        /* A book as it was left is taken up (AwayTakeUp), never given up: a
+         * verdict that reaches here is a caller's defect, and the book is
+         * given up all the same, so no waiter waits for nothing. */
+#if CONFIG_STRICT
+        panic("[TagFS] DEFECT: a book was given up for verdict %d, which gives no book up",
+              (int)why);
+#endif
+        kprintf("[TagFS] DEFECT: a book was given up for verdict %d, which gives no book up"
+                AWAY_LOST, (int)why, (unsigned long long)lost);
         break;
     }
     HelmBookGivenUp(lost);
@@ -118,5 +233,18 @@ uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
 
 bool AwayLiedLearned(const uint8_t uuid[16])
 {
-    return s_lied_known && memcmp(s_lied_uuid, uuid, sizeof(s_lied_uuid)) == 0;
+    TagFSLockTake(&s_known_lock);
+    const AwayKnown* k    = AwayKnownFind(uuid);
+    bool             lied = k && k->lied;
+    TagFSLockDrop(&s_known_lock);
+    return lied;
+}
+
+void AwayNumbersKnown(const uint8_t uuid[16], uint32_t* next_file_id, uint32_t* next_tag_id)
+{
+    TagFSLockTake(&s_known_lock);
+    const AwayKnown* k = AwayKnownFind(uuid);
+    *next_file_id = k ? k->next_file_id : 0;
+    *next_tag_id  = k ? k->next_tag_id : 0;
+    TagFSLockDrop(&s_known_lock);
 }

@@ -163,11 +163,16 @@ class KernelView:
         missing = RunsSubtract(self.marked, f.used)
         self.union = RunsNormal(f.used + self.marked)
         self.free = D - RunsCount(self.union)
-        c = m.counts
+        c, p = m.counts, m.pool
         self.fsck = {"orphan": RunsCount(orphans), "missing": RunsCount(missing),
                      "corrected": c["corrected"], "lost": c["lost"], "derived": c["derived"],
                      "unsettled": c["unsettled"], "unnamed": c["unnamed"],
-                     "unreadable": len(m.pool["unreadable"]),
+                     "quitclaimed": c["quitclaimed"],
+                     "unreadable": len(p["unreadable"]),
+                     "skipped": [len(p["skipped"]), sum(b for _k, _a, b in p["skipped"])],
+                     "skipped_first": list(p["skipped"][0][:2]) if p["skipped"] else None,
+                     "dropped": len(p["dropped"]),
+                     "dropped_first": p["dropped"][0].fid if p["dropped"] else None,
                      "orphan_runs": orphans, "missing_runs": missing}
         self.says = (D, self.free, c["checked"])
 
@@ -175,14 +180,18 @@ class KernelView:
         """What the pool stood on: 'seal' (borne out), 'torn' (its open block
         rolled back) or 'none' (the whole chain, as a kernel before the seal
         reads it); the copy of the Ledger the volume stands on, its cycle and
-        the open block it names; the blocks the Deed's head names before the
-        chain's first (Glean); and the registry block the seal rolled back."""
+        the open block it names; whether the mount marks the medium
+        SETTLE_MEDIUM_LIED, and whether it stood on nothing because the newest
+        seal, the only one, was not borne out ('alone'); the blocks the Deed's
+        head names before the chain's first (Glean); and the registry block the
+        seal rolled back."""
         m = self.f.mount
-        at = m.pool["seal"]
-        return {"stood": m.pool["stood"], "copy": m.stood["copy"] if m.stood else None,
+        p, at = m.pool, m.pool["seal"]
+        return {"stood": p["stood"], "copy": m.stood["copy"] if m.stood else None,
                 "settle": m.seals[at]["settle"] if at is not None else None,
                 "to_block": m.seals[at]["pool_to_block"] if at is not None else None,
-                "fell_back": m.pool["fell_back"], "verdicts": m.pool["verdicts"],
+                "fell_back": p["fell_back"], "verdicts": p["verdicts"], "lied": p["lied"],
+                "alone": p["stood"] == "none" and p["lied"],
                 "newest_sealed": m.seals[0] is not None, "prefix": list(m.prefix),
                 "registry_rolled": m.registry["rolled"]}
 
@@ -354,6 +363,13 @@ class GroundCensus:
                      "kernel before the seal wrote it last, so the volume is read as that kernel "
                      "reads it — the file table says which files there are, the pool is read to "
                      "its end (mount.c MountSealsRead)" % (m.newest["copy"], m.newest["seq"]))
+        elif p["stood"] == "none" and not p["refused"] and p["lied"]:
+            self.Say("SEAL_ALONE_TORN", "note", "the newest seal (cycle %u) is the only one the "
+                     "Ledger holds, and the pool's open block %u does not hold what it says — "
+                     "written in place over records a kernel before the seal may have kept "
+                     "there, so nothing is rolled back: the whole chain is read as such a kernel "
+                     "reads it, and the medium is marked SETTLE_MEDIUM_LIED (meta_pool_mount.c "
+                     "WalkChoose)" % (s0["settle"], s0["pool_to_block"]))
         elif p["stood"] == "none" and not p["refused"]:
             self.Say("SEAL_UNBORNE", "note", "no copy's seal is borne out by the pool's closed "
                      "blocks (verdicts %s) — a kernel before the seal rewrote records in them in "
@@ -361,20 +377,26 @@ class GroundCensus:
                      "the file table says which files there are, and nothing is rolled back "
                      "(meta_pool_mount.c WalkChoose)" % "/".join(str(v) for v in p["verdicts"]))
         elif p["fell_back"]:
+            let_go = ["fid %u at block %u+%u" % (fid, v["row"][0], v["row"][1])
+                      for fid, v in sorted(m.files.items()) if v["state"] == "unsettled"]
             self.Say("SEAL_FELL_BACK", "note", "the newest seal (cycle %u) names pool records the "
                      "medium does not hold — its verdict %s — so the volume stands on cycle %u, "
                      "the one before it, and the medium is one that once held less than a seal "
-                     "(SETTLE_MEDIUM_LIED; meta_pool_mount.c SayFellBack)"
-                     % (s0["settle"], p["verdicts"][0], s1["settle"]))
+                     "(SETTLE_MEDIUM_LIED; meta_pool_mount.c SayFellBack); the rows that named "
+                     "records only the newest seal held go with its cycle: %s"
+                     % (s0["settle"], p["verdicts"][0], s1["settle"], ", ".join(let_go) or "none"))
         elif p["stood"] == "torn":
             mark = m.seals[p["seal"]]
-            gone = sorted(fid for fid, v in self.f.mount.files.items() if v["state"] != "mounted")
+            lost = sorted(fid for fid, v in m.files.items() if v["rolled"])
             self.Say("SEAL_TAIL_TORN", "note", "the pool's open block %u does not hold what the "
-                     "seal of cycle %u says — it was torn as it was written again: its %u byte(s) "
-                     "of records are rolled back to the last closed block, every file whose newest "
-                     "record was there stands on the one before it, and %u name(s) with none "
-                     "before it go (meta_pool_mount.c WalkChoose)"
-                     % (mark["pool_to_block"], mark["settle"], mark["pool_to_bytes"], len(gone)))
+                     "seal of cycle %u says — it was torn as it was written: its %u byte(s) of "
+                     "records are rolled back to the last closed block%s, every file whose newest "
+                     "record was there stands on the one before it, %u file(s) with none before "
+                     "it are lost (%s), and the medium is marked SETTLE_MEDIUM_LIED "
+                     "(meta_pool_mount.c WalkChoose)"
+                     % (mark["pool_to_block"], mark["settle"], mark["pool_to_bytes"],
+                        ", which holds the other seal's open block whole"
+                        if p["seal"] == 0 and p["closed"][1] else "", len(lost), ", ".join("fid %u" % f for f in lost) or "none"))
         r = m.registry
         if r["rolled"] is not None:
             self.Say("REGISTRY_ROLLED_BACK", "note", "block %u, the registry's last, does not hold "
@@ -495,7 +517,8 @@ class GroundCensus:
                 (bad if not r.crc_ok else shape).append(
                     "fid %u at block %u +%u%s" % (r.fid, r.block, r.at, "" if not r.crc_ok else
                                                   " (its counts reach past its length of %u)" % r.len))
-            elif r.fid != 0 and (not r.shape_ok or (r.extents and not r.extents_at_mount)):
+            elif r.fid != 0 and (not r.shape_ok or (r.extents and not r.extents_at_mount
+                                                     and not r.outside)):
                 shape.append("fid %u at block %u +%u (%s)" % (
                     r.fid, r.block, r.at, "length %u against a shape of %u" % (
                         r.len, RECORD_HEADER + 2 * r.tag_count + 6 * r.extent_count + r.name_len)
@@ -513,12 +536,12 @@ class GroundCensus:
         self.files[fid] = {"fid": fid, "state": state, "record": rec, "row": row}
 
     def _Owns(self, fid, rec):
-        runs = RunsNormal(rec.extents_at_mount)
-        outside = RunsSubtract(runs, [(0, self.f.D)])
-        if outside:
+        if rec.outside:
+            outside = RunsSubtract(RunsNormal([(s, c) for s, c in rec.extents if c]), [(0, self.f.D)])
             self.Say("EXTENT_OUTSIDE", "damage", "%s names block(s) %s past the data run's %u "
-                     "blocks — the mount keeps them and every later read drops the whole list "
-                     "(plot_pack.c PlotExtentsInRun)" % (Label(fid, rec), RunsText(outside), self.f.D))
+                     "blocks — the mount follows none of its extents: the file is taken up "
+                     "naming no blocks, and nothing is written over it (plot_pack.c "
+                     "PlotExtentsInRun)" % (Label(fid, rec), RunsText(outside), self.f.D))
         for tag in rec.tags:
             if tag not in self.by_id:
                 self.absent.setdefault(tag, []).append(Label(fid, rec))
@@ -526,10 +549,10 @@ class GroundCensus:
     def _Files(self):
         """Every id the mount's map holds, as MountFile judges it
         (mount.MountFiles): a file it takes up is live; a record no row names,
-        with no seal, is unnamed; a row with no record is a cycle that did not
-        settle under a seal and a file lost without one — or, where the newest
-        record the span holds of it is a Quitclaim, a delete whose row had not
-        yet gone."""
+        with no seal, is unnamed; a row whose newest record is a Quitclaim is a
+        delete whose row had not yet gone, and goes with it; a row with no
+        record is a cycle that did not settle under a seal, and a file lost
+        without one or in the open block a seal rolled back."""
         f, self.absent = self.f, {}
         unsettled = []
         for fid, v in sorted(f.mount.files.items()):
@@ -544,21 +567,20 @@ class GroundCensus:
                 self._Owns(fid, rec)
             elif state == "unnamed":
                 self._File(fid, "unnamed", rec, None)
-            elif newest is not None and not newest.flags & FILE_ACTIVE:
+            elif state == "quitclaim":
                 self.Say("QUITCLAIM_PENDING", "note", "%s is named at block %u+%u and its newest "
                          "record is a Quitclaim — the file was deleted and its row had not gone "
-                         "yet; the mount lets the name go and counts it %s (mount.c MountFile)"
-                         % (Label(fid, newest), row[0], row[1],
-                            "among the rows of a cycle that did not settle" if f.mount.sealed
-                            else "among the lost"))
+                         "yet; the mount lets the row go with it (mount.c MountQuitclaimedRows)"
+                         % (Label(fid, newest), row[0], row[1]))
                 self._File(fid, "quitclaim", newest, row)
             elif state == "unsettled":
                 unsettled.append("fid %u at block %u+%u" % (fid, row[0], row[1]))
                 self._File(fid, "unsettled", None, row)
             else:
                 self.Say("FILE_LOST", "damage", "fid %u is named at block %u+%u and the pool holds "
-                         "no record of it that reads — the mount deletes its name (mount.c "
-                         "MountFile)" % (fid, row[0], row[1]))
+                         "no record of it that reads%s — the mount deletes its name (mount.c "
+                         "MountFile)" % (fid, row[0], row[1], ", its only one settled in the open "
+                                         "block the mount rolled back" if v["rolled"] else ""))
                 self._File(fid, "lost", None, row)
         if unsettled:
             self.Say("ROW_UNSETTLED", "note", "%u table row(s) name files the sealed pool holds no "
