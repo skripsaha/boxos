@@ -81,14 +81,15 @@ include ../nameplate.mk
 %.elf: $(BOXLIB_START) %.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
 
-# Five objects, one program: the red tests of the Quill write core, the ones
+# Seven objects, one program: the red tests of the Quill write core, the ones
 # only a throwaway image may be asked, the modes the power-cut stand drives
 # (tools/powercut.sh), abba, the guard on the lock orders a growing chain
-# crosses (logcheck abba), and beside, a write among cabins that would keep
-# the kernel to themselves (logcheck turns), which together ran past the
-# thousand lines one file may hold.
+# crosses (logcheck abba), beside, a write among cabins that would keep the
+# kernel to themselves (logcheck turns), and the volume asked from many cabins
+# at once (logcheck cores), which together ran past the thousand lines one
+# file may hold.
 QUILLTEST_OBJS = quilltest.o quilltest_throwaway.o quilltest_powercut.o quilltest_locks.o \
-                 quilltest_turns.o
+                 quilltest_turns.o quilltest_cores.o quilltest_ground.o
 quilltest.elf: $(BOXLIB_START) $(QUILLTEST_OBJS) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $(QUILLTEST_OBJS) $(BOXLIB))
 

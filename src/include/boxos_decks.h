@@ -239,7 +239,16 @@
 #define STORAGE_TAG_SET             0x02
 #define STORAGE_TAG_UNSET           0x03
 #define STORAGE_OBJ_READ            0x05
+/* obj.write — params = [u32 file_id][u64 offset][u32 flags], and a ferry's
+ * [u64 waybill] after them when it carries one; in_crate = the bytes; an
+ * out_crate of 16 bytes = [u64 the bytes the file holds of the write][u64 the
+ * size it left], on every answer. STORAGE_WRITE_APPEND: the write begins at
+ * the file's size as it is when the write is let at the file — `offset` is not
+ * read — so writers appending to one file never lay their bytes over each
+ * other's, and each learns where its own begin: the size it left less what it
+ * wrote. */
 #define STORAGE_OBJ_WRITE           0x06
+#define STORAGE_WRITE_APPEND        (1u << 0)
 #define STORAGE_OBJ_CREATE          0x07
 #define STORAGE_OBJ_DELETE          0x08
 #define STORAGE_OBJ_RENAME          0x09

@@ -7,8 +7,11 @@
  * the power-cut stand drives (tools/powercut.sh); quilltest_locks.c abba, the
  * guard on the two lock orders a growing chain crosses, a throwaway image's
  * case too; quilltest_turns.c beside, a write and its anchor beside cabins that
- * would keep the kernel's time to themselves (logcheck turns). All say their
- * verdict in the same four words and ask the volume for files by name.
+ * would keep the kernel's time to themselves (logcheck turns); quilltest_cores.c
+ * and quilltest_ground.c the volume asked from many cabins at once — writers,
+ * appenders beside a spanner, a read beside a delete, defrag beside delete
+ * (logcheck cores). All say their verdict in the same four words and ask the
+ * volume for files by name.
  */
 #ifndef QUILLTEST_H
 #define QUILLTEST_H
@@ -62,5 +65,36 @@ QuillVerdict QuillCrowd(const char *const *args);
 /* The machine's turns, quilltest_turns.c. */
 QuillVerdict QuillFlood(const char *const *args);
 QuillVerdict QuillBeside(const char *const *args);
+
+/* A worker in a cabin of its own (quilltest_cores.c): started from its line,
+ * and its end waited for as a state — process_gone's answer, its exit in
+ * *code. */
+#define QUILL_LINE_CAP 48u               /* "quilltest", a case's name and two numbers */
+#define QUILL_NAME_CAP 16u               /* a stem of up to 9 bytes, two digits, ".bin" */
+typedef struct {
+    uint32_t pid;
+    uint32_t gen;
+} QuillCabin;
+int  QuillCabinStart(QuillCabin *c, const char *line);
+int  QuillCabinEnd(const QuillCabin *c, int32_t *code);
+/* "quilltest WORD A" and, with_b, " B". */
+void QuillCabinLine(char out[QUILL_LINE_CAP], const char *word, uint32_t a, uint32_t b,
+                    bool with_b);
+/* STEM, two digits of `index` and ".bin". */
+void QuillIndexedName(char out[QUILL_NAME_CAP], const char *stem, uint32_t index);
+
+/* The volume asked from many cabins at once, quilltest_cores.c and
+ * quilltest_ground.c. */
+QuillVerdict QuillWriters(const char *const *args);
+QuillVerdict QuillWriter(const char *const *args);
+QuillVerdict QuillWritersBack(const char *const *args);
+QuillVerdict QuillAppend(const char *const *args);
+QuillVerdict QuillAppender(const char *const *args);
+QuillVerdict QuillSpanner(const char *const *args);
+QuillVerdict QuillReadDelete(const char *const *args);
+QuillVerdict QuillDeleter(const char *const *args);
+QuillVerdict QuillDefragDelete(const char *const *args);
+QuillVerdict QuillDefragger(const char *const *args);
+QuillVerdict QuillDefragBack(const char *const *args);
 
 #endif /* QUILLTEST_H */
