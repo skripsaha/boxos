@@ -610,7 +610,7 @@ static error_t RegistryGrow(TagRegistry* reg, uint16_t from, uint16_t* out_end,
     uint16_t end = RegistryPack(reg, reg->spare_image, from);
     TagFSLockDrop(&reg->lock);
 
-    rc = tagfs_write_block(reg->spare_block, reg->spare_image);
+    rc = TagFSMetaBlockWrite(reg->spare_block, reg->spare_image);
     if (rc != OK) {
         ksnprintf(why, why_size, "block %u, the chain's next, would not take them", reg->spare_block);
         return rc;
@@ -648,7 +648,7 @@ static error_t RegistryWritePass(TagRegistry* reg, char* why, size_t why_size) {
         goto refused;
 
     if (tail->entry_count != was_count || tail->next_block != 0 || reg->tail_owed) {
-        error_t wrote = tagfs_write_block(reg->tail_block, tail);
+        error_t wrote = TagFSMetaBlockWrite(reg->tail_block, tail);
         if (wrote != OK) {
             ksnprintf(why, why_size, "block %u, the chain's last, would not take them", reg->tail_block);
             rc = wrote;

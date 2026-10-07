@@ -79,4 +79,16 @@ uint32_t IntegrityErrorCount(void);  // bit-rot detections this session
 // The mount's census: the map's own run, which no file names, claimed.
 void     IntegrityClaimGround(void);
 
+#ifdef CONFIG_VOLUME_TESTS
+// For the stand, with no TagFS lock held and no cycle running: a lay of the map
+// as it stands begun into a new run and every page carried (OK, ERR_BUSY when
+// a lay is up or no map stands, or why not); the new run's first block while it
+// is laid, else 0; and the lay let go of unnamed, its run given back. And the
+// deepest any core stood inside IntegrityUpdate since the last ask.
+error_t  IntegrityStandLayBegin(void);
+uint32_t IntegrityStandLayFirst(void);
+void     IntegrityStandLayEnd(void);
+uint32_t IntegrityStandUpdateDeepest(void);
+#endif
+
 #endif // TAGFS_INTEGRITY_H

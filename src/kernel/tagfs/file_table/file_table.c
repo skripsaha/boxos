@@ -214,7 +214,7 @@ static error_t TableTakeLink(uint32_t block, const FileTableBlock* image, bool r
  * of distinct blocks cannot be longer than the data run it lives in, so a walk
  * that takes that many hops has come back to a block it has been to; and a
  * next_block outside the run is refused before it is read — nothing under
- * tagfs_read_block bounds a block number.
+ * TagFSMetaBlockRead bounds a block number.
  */
 static error_t TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBlock* image)
 {
@@ -239,17 +239,16 @@ static error_t TableWalk(uint32_t first_block, bool sealed, bool take, FileTable
             break;
         }
 
-        /* ‼ Tested as `!= OK`, because tagfs_read_block returns an error_t
+        /* ‼ Tested as `!= OK`, because TagFSMetaBlockRead returns an error_t
          * whose failures are POSITIVE and the `< 0` this used to ask was never
          * once true. And the medium refusing the read is told apart from its
          * answer: a refusal says nothing of what the block holds — under the
          * seal too, where judging it would cut a whole chain short — so the
          * mount is refused as the read was (counted where the read met it,
-         * tagfs_read_block) and asked again when the seat answers. A sector the
-         * medium says it cannot read, or bytes that are not what was written
-         * to it, are what the block holds. */
-        error_t got = tagfs_read_block(block, image);
-        if (got != OK && got != ERR_BAD_SECTOR && got != ERR_CHECKSUM) {
+         * TagFSMetaBlockRead) and asked again when the seat answers. A sector
+         * the medium says it cannot read is what the block holds. */
+        error_t got = TagFSMetaBlockRead(block, image);
+        if (got != OK && got != ERR_BAD_SECTOR) {
             if (take)
                 kprintf("[FileTable] the medium refused the read of block %u (error %d) — a "
                         "refusal says nothing of what the block holds, so the table is not "
@@ -259,9 +258,8 @@ static error_t TableWalk(uint32_t first_block, bool sealed, bool take, FileTable
         bool table = got == OK && image->magic == TAGFS_FILETBL_MAGIC;
         if (!table) {
             if (!TableBlockRefused(sealed, true, take, block,
-                                   got == OK             ? "holds no file table"
-                                   : got == ERR_CHECKSUM ? "does not hold what was written to it"
-                                                         : "holds a sector the medium cannot read"))
+                                   got == OK ? "holds no file table"
+                                             : "holds a sector the medium cannot read"))
                 return ERR_FILE_TABLE_CORRUPT;
             if (take && (taken = TableTakeLink(block, image, false)) != OK)
                 return taken;
@@ -515,7 +513,7 @@ static error_t FileTableWriteLink(uint32_t* at, bool* wrote_one)
     TagFSLockDrop(table_lock());
 
     *at = i;
-    error_t wrote = tagfs_write_block(block, &g_image);
+    error_t wrote = TagFSMetaBlockWrite(block, &g_image);
     if (wrote != OK) {
         kprintf("[FileTable] block %u would not take the file table's rows "
                 "%u..%u (error %d) — they are written again by the next Settle cycle\n",

@@ -2,6 +2,7 @@
 #include "../ink/ink.h"
 #include "baton.h"      /* the Knock that wakes a service point for a ready waiter */
 #include "scheduler.h"   /* SchedulerHoldHere — a ready waiter's work is never switched away from */
+#include "system_halt.h" /* HaltStopIfOwedHere — and a halt stops the core only after it */
 
 // ----------------------------------------------------------------------------
 // The open-file table
@@ -398,6 +399,13 @@ void HelmBookTakenUp(void)
     HelmWalkBook(HELM_BOOK_HAND, 0);
 }
 
+/*
+ * Each waiter's work is a held span: a core an orderly halt asks to stop in
+ * the middle of it owes its stop (idt.c), runs the work to its end, and stops
+ * where the span is let go. Nothing after it would pay that debt — the core
+ * goes back to its loop or its idle, which hold no span — and the halt's roll
+ * call would wait for it for good.
+ */
 void HelmRunReady(void)
 {
     for (uint32_t listed = __atomic_load_n(&s_ready_count, __ATOMIC_ACQUIRE); listed > 0;
@@ -418,6 +426,7 @@ void HelmRunReady(void)
         SchedulerHoldHere();
         w->run(w);
         SchedulerLetGoHere();
+        HaltStopIfOwedHere("the Helm work it ran at a service point");
     }
 }
 

@@ -88,6 +88,10 @@
 //                        that needs a Spare, a create that grows the registry,
 //                        and writes on the core whose cycle stands between two
 //                        of its steps
+// stand_integrity_tests.c the stand_integrity suite: the integrity map covers
+//                        no block of the volume's own — a page pushed out into
+//                        a map being laid records nothing, and a pool block
+//                        whose digest went stale is read by Glean all the same
 //
 // Built only into a VOLUME_TESTS=on kernel, which is the only kernel that has
 // the faults these tests arm.

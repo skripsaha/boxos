@@ -25,9 +25,13 @@ static bool           g_no_room_said  = false;
 static BoxHashContext g_ctx;
 static uint32_t       g_errors        = 0;
 
+/* The map's own blocks — the run it stands on and the run being laid — take no
+ * digest and are checked against none (RT-22). Asked once with no lock, as a
+ * first look, and again under g_map_lock, which decides. */
 static inline bool in_map_region(uint32_t block) {
-    return g_map_first_block != 0 &&
-           block >= g_map_first_block && block < g_map_first_block + g_map_count;
+    return (g_map_first_block != 0 &&
+            block >= g_map_first_block && block < g_map_first_block + g_map_count) ||
+           MapLayRunHolds(block);
 }
 
 static inline void MapForget(uint32_t idx)
@@ -111,10 +115,12 @@ void MapTransferDone(MapSlot *m)
 /* The slot's entries as they stand go to the medium from its page buffer.
  * Digests recorded while the page travels land in the entries and mark them
  * dirty again, for the next page-out; a refused write leaves the page owed.
- * The map's own blocks record no digest (in_map_region), so the write never
- * comes back in here. Entered and left with g_map_lock held, taken again in the
- * name of `site` — the entry this runs for, which is what a LockRank line
- * about the map's lock names. */
+ * Both of its writes go through the meta door, which records no digest, so
+ * neither comes back in here — the one into a map being laid used to, and each
+ * time it pushed another dirty page out to make room, as deep as the map has
+ * slots. Entered and left with g_map_lock held, taken again in the name of
+ * `site` — the entry this runs for, which is what a LockRank line about the
+ * map's lock names. */
 static error_t MapPageOut(MapSlot *m, const char *site)
 {
     uint32_t s     = (uint32_t)(m - g_map_cache);
@@ -130,8 +136,8 @@ static error_t MapPageOut(MapSlot *m, const char *site)
     SchedulerHoldHere();
     TagFSLockDropAt(&g_map_lock, site);
 
-    error_t wrote = tagfs_write_block(at, g_map_page[s]);
-    error_t also  = (wrote == OK && carry) ? tagfs_write_block(carry, g_map_page[s]) : OK;
+    error_t wrote = TagFSMetaBlockWrite(at, g_map_page[s]);
+    error_t also  = (wrote == OK && carry) ? TagFSMetaBlockWrite(carry, g_map_page[s]) : OK;
 
     TagFSLockTakeAt(&g_map_lock, site);
     SchedulerLetGoHere();
@@ -157,7 +163,7 @@ bool MapPageIn(MapSlot *m, const char *site)
     SchedulerHoldHere();
     TagFSLockDropAt(&g_map_lock, site);
 
-    error_t got = tagfs_read_block(at, g_map_page[s]);
+    error_t got = TagFSMetaBlockRead(at, g_map_page[s]);
 
     TagFSLockTakeAt(&g_map_lock, site);
     SchedulerLetGoHere();
@@ -325,7 +331,7 @@ error_t IntegrityInit(void) {
     return OK;
 }
 
-void IntegrityUpdate(uint32_t block, const void *data) {
+static void IntegrityRecord(uint32_t block, const void *data) {
     if (!IntegrityIsInitialized() || !data || block >= g_map_entries || in_map_region(block))
         return;
     uint64_t h       = BoxHashIntegrity(data, TAGFS_BLOCK_SIZE, &g_ctx);
@@ -361,6 +367,35 @@ void IntegrityUpdate(uint32_t block, const void *data) {
         MapSayNoRoom(said);
     IntegrityRotForget(block, 1);
     HaltStopIfOwedHere("a page of the integrity map it carried");
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+/* How deep a core has stood inside IntegrityUpdate, and the deepest any core
+ * stood since the stand last asked: one, unless the map's own paging records
+ * a digest on its way to the medium. Each core's count is its own. */
+static uint32_t          s_update_depth[MAX_CORES];
+static volatile uint32_t s_update_deepest;
+
+uint32_t IntegrityStandUpdateDeepest(void)
+{
+    return __atomic_exchange_n(&s_update_deepest, 0u, __ATOMIC_ACQ_REL);
+}
+#endif
+
+void IntegrityUpdate(uint32_t block, const void *data) {
+#ifdef CONFIG_VOLUME_TESTS
+    uint8_t  core  = amp_get_core_index();
+    uint32_t depth = ++s_update_depth[core];
+    uint32_t seen  = __atomic_load_n(&s_update_deepest, __ATOMIC_RELAXED);
+    while (depth > seen &&
+           !__atomic_compare_exchange_n(&s_update_deepest, &seen, depth, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        ;
+    IntegrityRecord(block, data);
+    s_update_depth[core]--;
+#else
+    IntegrityRecord(block, data);
+#endif
 }
 
 /* ‼ A BLOCK THAT COMES TO REST TAKES NO DIGEST WITH IT (RT-22). Its digest is

@@ -135,7 +135,7 @@ error_t tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMa
                     "volume, so it is not mounted\n", block, run);
             return ERR_TAGFS_CORRUPTED;
         }
-        error_t read = tagfs_read_block(block, image);
+        error_t read = TagFSMetaBlockRead(block, image);
         if (read != OK) {
             kprintf("[TagRegistry] block %u of the tag registry would not read (error %d) — this "
                     "volume is not mounted\n", block, (int)read);

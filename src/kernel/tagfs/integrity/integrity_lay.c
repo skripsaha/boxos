@@ -50,6 +50,12 @@ uint32_t MapLayCarried(uint32_t idx)
     return (g_lay.first && idx < g_lay.carried) ? g_lay.first + idx : 0;
 }
 
+bool MapLayRunHolds(uint32_t block)
+{
+    uint32_t first = __atomic_load_n(&g_lay.first, __ATOMIC_ACQUIRE);
+    return first != 0 && block >= first && block - first < g_lay.count;
+}
+
 void MapLayCarryAgain(uint32_t idx)
 {
     if (g_lay.first && g_lay.carried > idx)
@@ -128,7 +134,7 @@ static error_t MapCarryPage(uint32_t idx)
         SchedulerHoldHere();
         TagFSLockDropAt(&g_map_lock, __func__);
 
-        error_t wrote = tagfs_write_block(g_lay.first + idx, g_map_page[s]);
+        error_t wrote = TagFSMetaBlockWrite(g_lay.first + idx, g_map_page[s]);
 
         TagFSLockTakeAt(&g_map_lock, __func__);
         SchedulerLetGoHere();
@@ -227,7 +233,7 @@ void IntegrityLayStep(uint64_t budget_us)
             rc = MapCarryPage(idx);
         } else if (!zeros && !(zeros = MapZeros())) {
             break;
-        } else if ((rc = tagfs_write_block(g_lay.first + idx, zeros)) == OK) {
+        } else if ((rc = TagFSMetaBlockWrite(g_lay.first + idx, zeros)) == OK) {
             TagFSLockTake(&g_map_lock);
             if (g_lay.carried == idx)
                 g_lay.carried = idx + 1u;
@@ -322,3 +328,42 @@ void MapLayLetGo(void)
     FallowNodeLetGo(gone.rest);
     kfree(gone.spent);
 }
+
+#ifdef CONFIG_VOLUME_TESTS
+error_t IntegrityStandLayBegin(void)
+{
+    TagFSLockTake(&g_map_lock);
+    uint32_t first   = g_map_first_block;
+    uint32_t count   = g_map_count;
+    uint32_t entries = g_map_entries;
+    TagFSLockDrop(&g_map_lock);
+    if (!IntegrityIsInitialized() || first == 0 || IntegrityLayOwed())
+        return ERR_BUSY;
+
+    error_t began = MapLayBegin(count, entries, first, count);
+    if (began != OK)
+        return began;
+    IntegrityLayStep(UINT64_MAX);
+    TagFSLockTake(&g_map_lock);
+    bool whole = g_lay.carried >= g_lay.count;
+    TagFSLockDrop(&g_map_lock);
+    return whole ? OK : ERR_WRITE_FAILED;
+}
+
+uint32_t IntegrityStandLayFirst(void)
+{
+    return IntegrityLayOwed() ? g_lay.first : 0;
+}
+
+void IntegrityStandLayEnd(void)
+{
+    TagFSLockTake(&g_map_lock);
+    uint32_t first = g_lay.named ? 0 : g_lay.first;
+    uint32_t count = g_lay.count;
+    TagFSLockDrop(&g_map_lock);
+    if (!first)
+        return;
+    MapLayLetGo();
+    tagfs_free_blocks(first, count);
+}
+#endif

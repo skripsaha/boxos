@@ -436,7 +436,7 @@ static bool StandInkNewestOnMedium(uint32_t fid, bool* active, bool* whole)
 
     *whole = true;
     for (uint32_t hops = 0; hops < fs->layout.data_blocks; hops++) {
-        if (tagfs_read_block(block, blk) != OK || blk->magic != TAGFS_MPOOL_MAGIC) {
+        if (TagFSMetaBlockRead(block, blk) != OK || blk->magic != TAGFS_MPOOL_MAGIC) {
             *whole = false;
             return found;
         }

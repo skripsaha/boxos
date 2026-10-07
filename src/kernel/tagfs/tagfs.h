@@ -873,6 +873,13 @@ uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps);
 error_t  tagfs_read_block(uint32_t block, void* buffer);
 error_t  tagfs_write_block(uint32_t block, const void* buffer);
 
+/* One block of the volume's own records — a chain's link, a stamp, the pool's
+ * head or a block of it, a page of the integrity map — through the same doors
+ * with the integrity map left out, which covers none of them (RT-22). The same
+ * refusals, but never ERR_CHECKSUM. */
+error_t  TagFSMetaBlockRead(uint32_t block, void* buffer);
+error_t  TagFSMetaBlockWrite(uint32_t block, const void* buffer);
+
 /* `count` blocks from `first` on, in as few commands as the seat takes and
  * checked against nothing: for a reader that checks each block where it hands
  * it out — the read-ahead's fetch, a defrag's copy. A volume assembled in a

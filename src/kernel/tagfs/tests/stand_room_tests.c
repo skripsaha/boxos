@@ -257,7 +257,7 @@ static bool StandRoomRegistryBrim(const char* stem)
 
     if (tag_registry_flush(fs->registry) != OK ||
         !StandChainOnMedium(fs->layout.tag_registry_block, TAGFS_REGISTRY_MAGIC, &chain) ||
-        chain.broken || tagfs_read_block(chain.last, g_test_output) != OK ||
+        chain.broken || TagFSMetaBlockRead(chain.last, g_test_output) != OK ||
         tail->used_bytes > TAGFS_REGISTRY_DATA_SIZE)
         return false;
 
@@ -273,7 +273,7 @@ static bool StandRoomRegistryBrim(const char* stem)
         s_room_text[head + room - least] = '\0';
         uint16_t id;
         if (tagfs_tag_intern(s_room_text, &id) != OK || tag_registry_flush(fs->registry) != OK ||
-            tagfs_read_block(chain.last, g_test_output) != OK)
+            TagFSMetaBlockRead(chain.last, g_test_output) != OK)
             return false;
         room = TAGFS_REGISTRY_DATA_SIZE - tail->used_bytes;
     }

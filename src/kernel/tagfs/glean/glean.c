@@ -192,7 +192,7 @@ static void GleanLookLocked(GleanLook* look)
  * too; the chain stays as it is. */
 static bool GleanReadFront(const PoolFront* f)
 {
-    error_t rc = tagfs_read_block(f->block, &s_front);
+    error_t rc = TagFSMetaBlockRead(f->block, &s_front);
     if (rc != OK || !PoolFrontReadsTrue(f, &s_front)) {
         if (!s_front_said)
             kprintf("[Glean] block %u of the pool %s — its records are not gathered, and it "
@@ -385,7 +385,7 @@ void GleanHeadStep(GleanHead* h, bool* done)
     if (!h->write)
         return;
     if (!s_head_held) {
-        error_t rc = tagfs_read_block(s_head, &s_head_img);
+        error_t rc = TagFSMetaBlockRead(s_head, &s_head_img);
         if (rc != OK || s_head_img.magic != TAGFS_MPOOL_MAGIC) {
             kprintf("[Glean] the pool's head, block %u, %s — it is written anew holding no "
                     "records, naming block %u, where the chain begins\n", s_head,
@@ -398,7 +398,7 @@ void GleanHeadStep(GleanHead* h, bool* done)
         return;
     }
     s_head_img.next_block = h->to;
-    error_t rc = tagfs_write_block(s_head, &s_head_img);
+    error_t rc = TagFSMetaBlockWrite(s_head, &s_head_img);
     if (rc != OK) {
         if (!s_head_said)
             kprintf("[Glean] the pool's head, block %u, would not be written to name block %u "
@@ -437,7 +437,7 @@ static const char* GleanPrefixRefuses(uint32_t b, uint32_t run)
         return "lies outside the data run";
     if (b == s_head || PoolChainHolds(b))
         return "is a block of the chain";
-    if (tagfs_read_block(b, &s_front) != OK)
+    if (TagFSMetaBlockRead(b, &s_front) != OK)
         return "would not read";
     if (s_front.magic != TAGFS_MPOOL_MAGIC)
         return "holds no block of the pool";
@@ -534,7 +534,7 @@ void GleanMount(uint32_t head, uint32_t first)
 
     /* The chain begins past the head: its next_block is what the medium says,
      * and the head is written to name `first` unless it does already. */
-    error_t rc = tagfs_read_block(head, &s_head_img);
+    error_t rc = TagFSMetaBlockRead(head, &s_head_img);
     if (rc != OK || s_head_img.magic != TAGFS_MPOOL_MAGIC) {
         kprintf("[Glean] the pool's head, block %u, %s — the chain begins at block %u by its "
                 "seal, and the head is written anew to name it\n", head,

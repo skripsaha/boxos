@@ -2001,11 +2001,21 @@ uint64_t tagfs_block_to_sector(uint32_t block)
 }
 
 /*
- * A single block's doors. They are the integrity map's own — it reads and
- * writes its pages through them, and they record and check every block's
- * digest through it — so they stay a block's, beside the state they read, and
- * light: that recursion is on the deepest way a request takes to the medium.
- * A run of blocks goes through run/run.c.
+ * A single block's doors, beside the state they read, and light: they are on
+ * the deepest way a request takes to the medium. A run of blocks goes through
+ * run/run.c.
+ *
+ * ‼ TWO PAIRS, AND THE INTEGRITY MAP IS IN ONE OF THEM ONLY (RT-22). A file's
+ * block has its digest recorded as it lands and checked as it is read back
+ * (tagfs_read_block, tagfs_write_block). A block of the volume's own records
+ * goes through the meta doors, which leave the map out: the map does not
+ * cover them. Its own pages are such blocks, and a page written into a map
+ * being laid used to record a digest of its own on the way — which pushed
+ * another page out, which recorded another, as deep as the map has slots.
+ * And the pool's blocks are written after the cycle wrote the map, so the
+ * digest of a block closed in the cycle reached the medium only with the next
+ * cycle's map: a stop before it left a stale digest under a block nobody
+ * writes again, and Glean read it as rot for good.
  *
  * Through the Braid the volume is assembled in, when it is (TagFSState.braid,
  * which a v1 mount never names) and it takes the block, else the volume's own
@@ -2025,7 +2035,7 @@ uint64_t tagfs_block_to_sector(uint32_t block)
  * mount's latches nothing — no volume is up to hold a book for — and is a
  * read the medium refused, which is what it is to the mount that met it.
  */
-error_t tagfs_read_block(uint32_t block, void *buffer)
+error_t TagFSMetaBlockRead(uint32_t block, void *buffer)
 {
     if (!buffer)
         return ERR_NULL_POINTER;
@@ -2047,10 +2057,10 @@ error_t tagfs_read_block(uint32_t block, void *buffer)
         TagFSNoteReadRefused();
         return volume_not_here() ? ERR_DEVICE_NOT_READY : ERR_READ_FAILED;
     }
-    return IntegrityVerify(block, buffer) ? OK : ERR_CHECKSUM;
+    return OK;
 }
 
-error_t tagfs_write_block(uint32_t block, const void *buffer)
+error_t TagFSMetaBlockWrite(uint32_t block, const void *buffer)
 {
     if (!buffer)
         return ERR_NULL_POINTER;
@@ -2064,6 +2074,22 @@ error_t tagfs_write_block(uint32_t block, const void *buffer)
         return volume_not_here() ? ERR_DEVICE_NOT_READY : ERR_WRITE_FAILED;
     VolumeWriteSeen();
     ReadAheadForgetBlock(block);
+    return OK;
+}
+
+error_t tagfs_read_block(uint32_t block, void *buffer)
+{
+    error_t got = TagFSMetaBlockRead(block, buffer);
+    if (got != OK)
+        return got;
+    return IntegrityVerify(block, buffer) ? OK : ERR_CHECKSUM;
+}
+
+error_t tagfs_write_block(uint32_t block, const void *buffer)
+{
+    error_t wrote = TagFSMetaBlockWrite(block, buffer);
+    if (wrote != OK)
+        return wrote;
     IntegrityUpdate(block, buffer);
     return OK;
 }

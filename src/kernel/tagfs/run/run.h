@@ -16,8 +16,8 @@
  * its own recorded when it lands (integrity/integrity.h).
  *
  * TagFSReadRun (tagfs.h) is this door's too. A single block's doors,
- * tagfs_read_block and tagfs_write_block, stay in tagfs.c: they are the
- * integrity map's own (tagfs.c says why).
+ * tagfs_read_block and tagfs_write_block, stay in tagfs.c beside the meta
+ * doors the integrity map pages through (tagfs.c says why).
  */
 
 /* The blocks the volume's seat takes in one command: its answer, not a number
