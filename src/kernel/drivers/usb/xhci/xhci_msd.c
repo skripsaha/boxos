@@ -2432,6 +2432,30 @@ int xhci_msd_flush(uint8_t unit)
     return result;
 }
 
+/* The class reset the driver runs when the two ends lose track of each other
+ * (msd_bot_reset), asked from outside: the turn taken for the whole device,
+ * as the cache commit takes it, so no command of anyone's is cut in half; and
+ * the device asked whether it is ready after it, through the state change a
+ * reset makes it report (msd_wait_ready). 0 when it is. */
+int XhciMsdUnitReset(uint8_t unit)
+{
+    XhciMsdUnit* u = msd_take(unit);
+    if (!u) {
+        return -1;
+    }
+
+    int result = -1;
+    msd_gate_enter(u, BERTH_WHOLE);
+    if (msd_device_is_there(u)) {
+        msd_bot_reset(u);
+        result = msd_wait_ready(u);
+    }
+    msd_gate_leave(u);
+    msd_give_back(u);
+    msd_stand_done("a transport reset it stood over on a USB disk");
+    return result;
+}
+
 #ifdef CONFIG_VOLUME_TESTS
 int xhci_msd_flush_answered(uint8_t unit, uint8_t key, uint8_t asc, uint8_t ascq)
 {

@@ -144,6 +144,20 @@ void AhciPortTroubled(uint8_t port_num, uint32_t seen_trouble)
     }
 }
 
+/* The port handed to its recovery as a command stood over and unanswered
+ * hands it — no fatal bit to restart the engine on, so the pass resets the
+ * link (AhciRecoverPass) — and waited for: true once the engine runs again,
+ * false when the reset retired the port. */
+bool AhciPortReset(uint8_t port_num)
+{
+    ahci_port_t* port = ahci_get_port_state(port_num);
+    if (!port) {
+        return false;
+    }
+    AhciPortTroubled(port_num, __atomic_load_n(&port->trouble, __ATOMIC_ACQUIRE));
+    return AhciAwaitEngine(port_num);
+}
+
 /* AHCI 1.3.1 §6.2.2.2, the recovery for a task-file error: PxCMD.ST down and
  * PxCMD.CR seen clear, PxSERR and PxIS cleared, and — unless the device is
  * still BSY or DRQ, which only a reset clears — PxCMD.ST up again. No COMRESET:

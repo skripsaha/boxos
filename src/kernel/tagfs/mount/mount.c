@@ -306,8 +306,9 @@ static void MountFidBoundary(uint32_t top_row, uint32_t top_record, uint32_t kno
 }
 
 /* The tag ids likewise: past every one a record of the pool wears, and every
- * one this kernel gave out before a book of the volume was given up. */
-static void MountTagBoundary(uint32_t top_tag, uint32_t known)
+ * one this kernel gave out before a book of the volume was given up. The
+ * registry's numbering moved past them, or ERR_NO_MEMORY — said. */
+static error_t MountTagBoundary(uint32_t top_tag, uint32_t known)
 {
     TagFSState* fs   = tagfs_get_state();
     uint32_t    next = top_tag + 1u;
@@ -317,7 +318,7 @@ static void MountTagBoundary(uint32_t top_tag, uint32_t known)
     if (known > next && known > held)
         kprintf("[TagFS] this kernel gave tag ids up to %u out on this volume before its book "
                 "was given up — none of them is given again\n", known - 1u);
-    TagRegistryNumbersFrom(fs->registry, known > next ? known : next);
+    return TagRegistryNumbersFrom(fs->registry, known > next ? known : next);
 }
 
 // ----------------------------------------------------------------------------
@@ -408,15 +409,25 @@ static error_t MountRegistry(const MountSeals* seals, const char** what)
     if (tag_registry_init(fs->registry) != OK) {
         kfree(fs->registry);
         fs->registry = NULL;
-        *what = "its tag registry would not be built";
-        return ERR_TAGFS_REGISTRY_FULL;
+        *what = "there is no memory to build its tag registry";
+        return ERR_NO_MEMORY;
     }
     /* A registry that would not read is not an empty registry: every tag id
      * on this volume is defined there, so a mount that continues without it
-     * renames nothing and mislabels everything. */
-    if (tag_registry_load(fs->registry, MountDataBlock(fs->layout.tag_registry_block),
-                          seals->has[0] ? &seals->mark[0] : NULL,
-                          seals->has[1] ? &seals->mark[1] : NULL) != OK) {
+     * renames nothing and mislabels everything. And a registry the machine had
+     * no memory for is not one that would not read: that mount is asked again
+     * when the memory comes back. */
+#ifdef CONFIG_VOLUME_TESTS
+    TagFSStandMountRegistryLoads();
+#endif
+    error_t rc = tag_registry_load(fs->registry, MountDataBlock(fs->layout.tag_registry_block),
+                                   seals->has[0] ? &seals->mark[0] : NULL,
+                                   seals->has[1] ? &seals->mark[1] : NULL);
+    if (rc == ERR_NO_MEMORY) {
+        *what = "there is no memory to hold its tag registry";
+        return rc;
+    }
+    if (rc != OK) {
         *what = "its tag registry would not read";
         return ERR_TAGFS_CORRUPTED;
     }
@@ -519,12 +530,16 @@ error_t MountReadVolume(const char** what)
         .torn_block = pool.torn_block,
         .torn_end   = pool.torn_end,
     };
-    bool table = file_table_init(MountDataBlock(fs->layout.file_table_block), files.sealed) == OK;
-    if (table)
+    rc = file_table_init(MountDataBlock(fs->layout.file_table_block), files.sealed);
+    if (rc == OK)
         MountQuitclaimedRows(&pool);
     kfree(pool.gone);
     pool.gone = NULL;
-    if (!table) {
+    if (rc == ERR_NO_MEMORY) {
+        *what = "there is no memory to hold its file table";
+        return rc;
+    }
+    if (rc != OK) {
         *what = "its file table would not read";
         return ERR_FILE_TABLE_CORRUPT;
     }
@@ -550,7 +565,11 @@ error_t MountReadVolume(const char** what)
     uint32_t known_file, known_tag;
     AwayNumbersKnown(fs->uuid, &known_file, &known_tag);
     MountFidBoundary(files.top_fid, pool.top_fid, known_file);
-    MountTagBoundary(pool.top_tag, known_tag);
+    rc = MountTagBoundary(pool.top_tag, known_tag);
+    if (rc != OK) {
+        *what = "there is no memory to number its tag registry past the ids its files wear";
+        return rc;
+    }
     return MountCensus(what);
 }
 

@@ -3,12 +3,12 @@
 #include "../tagfs.h"
 #include "../helm/helm.h"
 #include "../ink/ink.h"
-#include "../ink/fallow.h"
 #include "../settle/settle.h"
 #include "../scribe/scribe.h"
 #include "../ledger/ledger.h"
 #include "../mount/away.h"
 #include "../metadata_pool/meta_pool.h"
+#include "../tag_registry/tag_registry.h"
 #include "block_fail.h"   /* BLOCKFAIL — a flush answered with the sense a USB disk gives */
 #include "boardroom.h"
 #include "xhci_msd.h"     /* the USB disk's memory of its SYNCHRONIZE CACHE answer */
@@ -453,21 +453,9 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// The bell, and the road a mount takes when the medium does what a hand does
+// The bell — and the road a mount takes when the medium does what a hand does,
+// which stand_mount_tests.c holds and this suite runs last
 // ----------------------------------------------------------------------------
-
-/* A mount of the stand's volume, start to end, on a slow medium — the test's
- * own bound, which turns the defect it stands for into a failure instead of a
- * machine that stops. */
-#define STAND_MOUNT_BOUND_MS   10000u
-
-/* The block read of a mount the seat empties at: past the first, so the mount
- * is part way through reading the volume when its medium goes. */
-#define STAND_MOUNT_EMPTIES_AT 2u
-
-/* Cycles enough for everything at rest in Fallow to come back: its freer's
- * cycle and the lag after it, for any freer the tests left, and the spare. */
-#define STAND_BARE_CYCLES      8u
 
 /* seat:ready of one seat, as an ear on the tag hears it. */
 typedef struct {
@@ -558,280 +546,221 @@ out:
     return verdict;
 }
 
-/* The room's and the volume's service passes run here until the mount road
- * has nothing left to do, bounded — whichever core passes its own may do the
- * work first. */
-static bool StandMountSettles(void)
-{
-    uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_MOUNT_BOUND_MS);
-    uint8_t  me    = amp_get_core_index();
-    for (;;) {
-        BoardroomAttendIfPending();
-        TagFSServiceIfPending();
-        if (TagFSStandMountIdle())
-            return true;
-        if (rdtsc() >= bound)
-            return false;
-        BatonPump(me);
-        cpu_pause();
-    }
-}
-
 /*
- * The volume as the medium holds it, and nothing resting: cycles until Fallow
- * has given back all it held, and one more, whose map says on the medium that
- * the ground came back. A take-down drops what rests without a word
- * (tagfs_clear_the_ground), and the next mount reads ground the medium's map
- * still holds as taken and named by nobody — the orphans a census gives back,
- * once it does (B1). A test that takes the volume down leaves none behind.
+ * R9 (Z07-2). A book is given up — its waiter owed the answer that its change
+ * went with the medium — and before any service point runs the medium leaves
+ * again and comes back as it was left. The waiter has its answer from the
+ * give-up itself, and the book taken up after it hands that waiter nothing.
+ * Red before: the fate was one word walked at the next service point, the
+ * take-up's HAND wrote over the give-up's ANSWER, and the waiter was handed
+ * the Helm of a volume the give-up was letting go of.
  */
-static bool StandSettledBare(void)
-{
-    TagFSState* fs = tagfs_get_state();
-    for (uint32_t cycle = 0; cycle < STAND_BARE_CYCLES; cycle++) {
-        if (TagFSSettle() != OK)
-            return false;
-        TagFSLockTake(&fs->lock);
-        uint64_t resting = FallowBlocks();
-        TagFSLockDrop(&fs->lock);
-        if (resting == 0)
-            return TagFSSettle() == OK;
-    }
-    return false;
-}
-
-/* Whatever a mount test left: its turn taken down, BLOCKFAIL down, the volume
- * up again if it is not — the medium seated, and an arrival attended — and
- * the runner counted back in. */
-static void StandMountClose(uint8_t seat)
-{
-    TagFSStandMountTurn(STAND_MOUNT_AS_IS, 0);
-    BlockFailDisarm();
-    if (!tagfs_get_state()->initialized) {
-        if (!BoardroomSeatOccupied(seat))
-            (void)BoardroomInit();
-        TagFSAttendArrival();
-        (void)StandMountSettles();
-    }
-    TagFSStandHoldAgain();
-}
-
-/*
- * R5 (Z11-2, Z15-1). The medium leaves in the middle of a mount's reads, and
- * comes back. The departure is the mount's refusal and nothing more: no book
- * is opened for a volume that was never up, and nothing waits on seat:ready —
- * the return is an arrival, and the arrival mounts. And a book a volume gone
- * left standing is not the next mount's. Red before: the mount's block reads
- * latched the departure as a mounted volume's, nothing took the latch down,
- * and every later mount was refused at its first read until the machine was
- * switched off.
- */
-static TestResult TestStandMediumMountLosesItsSeat(void)
-{
-    TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    uint8_t     seat    = tagfs_get_seat();
-    BoardKind   kind    = BoardroomSeatKind(seat);
-    uint8_t     index   = BoardroomSeatIndex(seat);
-    uint32_t    epoch   = tagfs_mount_epoch();
-    bool        let_go  = false;
-    const char* aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
-    let_go = true;
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
-    BoardroomNoteDeparture(kind, index);
-    TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
-
-    TagFSStandMountTurn(STAND_MOUNT_SEAT_EMPTIES, STAND_MOUNT_EMPTIES_AT);
-    TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
-    TEST_ASSERT(StandMountSettles(), "and its arrival is attended");
-    TEST_ASSERT(TagFSStandMountTurnFired(),
-                "the seat emptied under the mount, in the middle of its reads");
-    TEST_ASSERT(!fs->initialized, "the mount that lost its medium mounted nothing");
-    TEST_ASSERT(!TagFSMediumLeft(), "and opened no book: no volume was up to hold one");
-    TEST_ASSERT(!TagFSStandMountOwed(),
-                "and nothing waits for seat:ready: the medium's return is the arrival that asks");
-    TagFSStandMountTurn(STAND_MOUNT_AS_IS, 0);
-
-    TagFSStandMediumLeaves();
-    TEST_ASSERT(TagFSMediumLeft(), "a book is left standing while no volume is up");
-    TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium arrives again");
-    TEST_ASSERT(StandMountSettles(), "and its arrival is attended");
-    TEST_ASSERT(fs->initialized, "and the volume is MOUNTED");
-    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
-    TEST_ASSERT(!TagFSMediumLeft(), "and holds no book a volume before it left standing");
-out:
-    if (let_go)
-        StandMountClose(seat);
-    return verdict;
-}
-
-/*
- * R4 (Z11-5, Z15-4). A read of the mount is refused, and the seat says
- * seat:ready in the same breath — before the mount has heard it was refused,
- * as a driver's recovery says it. That seat:ready is the one the mount is owed:
- * it is asked again at once, and the volume mounts with no other event. Red
- * before: the event came while nothing was owed yet, was dropped, and the
- * mount waited for a second one that never came.
- */
-static TestResult TestStandMediumMountHearsTheReadyItWasOwed(void)
-{
-    TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    uint8_t     seat    = tagfs_get_seat();
-    BoardKind   kind    = BoardroomSeatKind(seat);
-    uint8_t     index   = BoardroomSeatIndex(seat);
-    uint32_t    epoch   = tagfs_mount_epoch();
-    uint64_t    first   = tagfs_block_to_sector(0);
-    uint64_t    span    = (uint64_t)fs->layout.data_blocks * TAGFS_BLOCK_SECTORS;
-    bool        let_go  = false;
-    const char* aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
-    let_go = true;
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
-    BoardroomNoteDeparture(kind, index);
-    TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
-
-    BlockFailArm(seat, BLOCK_FAIL_READ, first, span, 1);
-    TagFSStandMountTurn(STAND_MOUNT_SEAT_RINGS, 0);
-    TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
-    TEST_ASSERT(StandMountSettles(), "and its arrival is attended, and what it owes");
-    TEST_ASSERT(BlockFailFired(), "the mount's first read of the volume's data was refused");
-    TEST_ASSERT(TagFSStandMountTurnFired(),
-                "and the seat said seat:ready before the mount had heard of it");
-    TEST_ASSERT(fs->initialized, "the mount was asked again on it, and the volume is MOUNTED");
-    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
-    TEST_ASSERT(!TagFSStandMountOwed(), "and nothing is owed any more");
-out:
-    if (let_go)
-        StandMountClose(seat);
-    return verdict;
-}
-
-/*
- * R5 (Z11-1). A read of the block that holds a file's only record is refused
- * while the mount walks the pool — a flash drive dropping one command. A
- * refusal is no verdict on any seal: the mount is refused as the read was,
- * asked again when the seat says it answers, and stands on the newest seal
- * with the file in it. Red before: the refused block was held against the
- * seals as one that is not the pool's — the mount went on to roll a block
- * back, fall back to the cycle before, or read the chain as a kernel before
- * the seal would, and was never refused at all.
- */
-static TestResult TestStandMediumMountRefusedReadIsNoVerdict(void)
+static TestResult TestStandMediumGivenUpFateStands(void)
 {
     TestResult   verdict = TEST_PASS;
-    TagFSState*  fs      = tagfs_get_state();
-    uint8_t      seat    = tagfs_get_seat();
-    BoardKind    kind    = BoardroomSeatKind(seat);
-    uint8_t      index   = BoardroomSeatIndex(seat);
-    uint32_t     epoch   = tagfs_mount_epoch();
-    uint32_t     file_id = 0, block = 0;
-    bool         let_go  = false;
-    RecordWhere  where;
-    FileRecord*  rec;
+    StandBook    b;
+    VolumeLedger found;
     const char*  aside   = StandStepsAsideFor();
 
     if (aside)
         return test_steps_aside(aside);
 
-    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB2u);
-    TEST_ASSERT(StandMakeFile("refused_mid_mount", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
-                "a file is made and written");
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
-    rec = FileMapRecordHold(fs->files, file_id, &where);
-    TEST_ASSERT(rec, "the file's record is held");
-    FileRecordRelease(rec);
-    TEST_ASSERT(PoolLinkBlock(where.link, &block), "and lies in a block of the pool");
-    let_go = true;
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
-    BoardroomNoteDeparture(kind, index);
-    TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
+    verdict = StandBookOpen(&b, "book_fate_stands");
+    if (verdict == TEST_PASS)
+        verdict = StandBookLeaves(&b);
+    if (verdict != TEST_PASS)
+        goto out;
 
-    BlockFailArm(seat, BLOCK_FAIL_READ, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, 1);
-    TagFSStandMountTurn(STAND_MOUNT_SEAT_RINGS, 0);
-    TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
-    TEST_ASSERT(StandMountSettles(), "and its arrival is attended, and what it owes");
-    TEST_ASSERT(BlockFailFired(), "the mount's read of the block holding the file's record was refused");
-    TEST_ASSERT(TagFSStandMountTurnFired(),
-                "the mount was refused as the read was, and the seat said seat:ready");
-    TEST_ASSERT(fs->initialized, "asked again, the volume is MOUNTED");
-    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
-    rec = FileMapRecordHold(fs->files, file_id, NULL);
-    TEST_ASSERT(rec, "and the file is there: nothing was rolled back");
-    FileRecordRelease(rec);
+    TEST_ASSERT(LedgerNewestOn(tagfs_get_seat(), tagfs_get_volume_base(), &found),
+                "the medium's newest Ledger is read");
+    found.mark.closed_crc32 ^= 1u;
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(&found), AWAY_OTHER,
+                   "the medium comes back another's, and the book is given up");
+    TEST_ASSERT_EQ(s_waiting.gone, 1,
+                   "the waiter is answered by the give-up itself, before any service point runs");
+
+    TagFSStandMediumLeaves();
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT,
+                   "the medium leaves again and comes back as it was left, and that book is taken up");
+    HelmRunReady();
+    TEST_ASSERT_EQ(s_waiting.handed, 0, "and hands nothing to the waiter the give-up answered");
+    TEST_ASSERT_EQ(s_waiting.gone, 1, "which was answered once");
+    TEST_ASSERT_EQ(s_waiting.lost, b.unsettled, "with the changes the given-up book held");
 out:
-    if (let_go)
-        StandMountClose(seat);
-    if (file_id && fs->initialized) {
-        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
-        (void)TagFSSettle();
-    }
+    StandBookClose(&b);
     return verdict;
 }
 
 /*
- * R9 (Z11-9). A book is given up while the volume's memory holds a create and
- * a tag no cycle settled — ids a program holds, which the medium never saw.
- * The volume is read again, and its next file id and next tag id are past
- * them: neither is given out again for the rest of the boot. Red before: the
- * mount read its numbers off the medium alone, and the next create was handed
- * the id the program still held.
+ * R9 (П0-K1, X3-5). The book is open. A writer asking for a file's Helm, free
+ * as it is, is answered at once that the medium is away, and a read of the
+ * volume is refused as the departure it is, before any of the work is begun.
+ * And the room is searched for the volume's return while the one medium
+ * carrying its identity was seated before the book opened — the volume's own
+ * here, standing for a copy of it in another seat that never left. That is no
+ * return, and it is not judged: the book stays open, and nothing is owed.
+ * Red before: a free Helm was handed out and the work went through the
+ * allocator and a cycle the medium refused, answered "no room" or "write
+ * failed"; and the first seat carrying the identity was judged, whatever sat
+ * in it all along — a replugged stick's book judged against the internal disk
+ * it was copied from, its Ledger found older, and the medium accused of lying.
  */
-static TestResult TestStandMediumGivenUpIdsNotGivenAgain(void)
+static TestResult TestStandMediumNeverLeftIsNoReturn(void)
 {
-    TestResult         verdict = TEST_PASS;
-    TagFSState*        fs      = tagfs_get_state();
-    uint8_t            seat    = tagfs_get_seat();
-    BoardKind          kind    = BoardroomSeatKind(seat);
-    uint8_t            index   = BoardroomSeatIndex(seat);
-    uint32_t           file_id = 0;
-    uint16_t           tag     = TAGFS_INVALID_TAG_ID;
-    bool               let_go  = false;
-    VolumeLedger       found;
-    const TagSpelling  spelling = TagSpellingOfKey("stand_given_up");
-    const char*        aside   = StandStepsAsideFor();
+    TestResult       verdict = TEST_PASS;
+    TagFSState*      fs      = tagfs_get_state();
+    uint32_t         epoch   = tagfs_mount_epoch();
+    uint32_t         file_id = 0;
+    TagFSFileHandle* handle  = NULL;
+    bool             mine    = false;
+    const char*      aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB4u);
+    TEST_ASSERT(StandMakeFile("never_left", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+                "a file is made and written");
+    TEST_ASSERT_OK(TagFSSettle(), "every change is on the medium");
+    handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
+    TEST_ASSERT(handle != NULL, "and the file is opened to be written");
+
+    TagFSStandMediumLeaves();
+    TEST_ASSERT(TagFSMediumLeft(), "the book opens, the medium carrying the volume still seated");
+    TEST_ASSERT_EQ(tagfs_volume_read(0, 1, g_test_output), ERR_DEVICE_NOT_READY,
+                   "a read of the volume is refused as the medium's departure, no medium's refusal");
+    StandBookTurnSet(&s_late);
+    mine = HelmAsk(handle->ofe, &s_late.waiter);
+    TEST_ASSERT(!mine, "the file's Helm, free, is not handed to a writer while the medium is away");
+    TEST_ASSERT_EQ(s_late.gone, 1, "the writer is answered at once that the medium is away");
+
+    TagFSAttendArrival();
+    TEST_ASSERT(StandMountSettles(), "the room is searched for its return");
+    TEST_ASSERT(TagFSMediumLeft(),
+                "and no medium seated before the book opened is judged as it: the book stays open");
+    TEST_ASSERT(!TagFSStandMountOwed(), "nothing is owed: no seat refused");
+    TEST_ASSERT(fs->initialized && tagfs_mount_epoch() == epoch,
+                "and the volume is the one up all along");
+out:
+    if (TagFSMediumLeft())
+        (void)TagFSStandMediumReturns(NULL);
+    if (mine)
+        HelmLetGo(handle->ofe, &s_late.waiter);
+    tagfs_close(handle);
+    if (file_id)
+        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
+    (void)TagFSSettle();
+    return verdict;
+}
+
+/*
+ * R9 (X3-3). The medium refused a write as protected — the volume read-only —
+ * then leaves and comes back as it was left, its switch turned off meanwhile.
+ * The book is taken up and the volume takes changes again: whether this
+ * seating refuses writes is its next refused write's to say. Red before: the
+ * latch was let go of only by a mount, so the book taken up held its changes,
+ * took none, and no cycle ever settled them.
+ */
+static TestResult TestStandMediumTakenUpTakesWrites(void)
+{
+    TestResult  verdict    = TEST_PASS;
+    uint8_t     seat       = tagfs_get_seat();
+    bool        protected_ = false;
+    const char* aside      = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT_OK(TagFSSettle(), "every change is on the medium");
+    BlockFailProtect(seat, true);
+    protected_ = true;
+    TagFSWriteRefused();
+    TEST_ASSERT(TagFSReadOnly(), "the medium refuses writes as protected, and the volume takes none");
+    BlockFailProtect(seat, false);
+    protected_ = false;
+
+    TagFSStandMediumLeaves();
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT,
+                   "it leaves, and comes back as this kernel left it");
+    TEST_ASSERT(!TagFSReadOnly(), "and its book taken up, the volume takes changes again");
+    TEST_ASSERT_OK(TagFSSettle(), "and a cycle settles on it");
+out:
+    if (protected_)
+        BlockFailProtect(seat, false);
+    if (TagFSMediumLeft())
+        (void)TagFSStandMediumReturns(NULL);
+    InkReadOnlyLift();
+    return verdict;
+}
+
+/*
+ * R32 (Z08-1). A mount numbers the registry past every tag id the pool's
+ * records wear — ids a rolled-back registry no longer names — and the id table
+ * under the numbers grows to cover them. Red before: the numbers moved past
+ * the table's end, every reader bounded by them read past it, and the
+ * take-down freed what nobody allocated.
+ */
+static TestResult TestStandMediumNumbersPastTheTable(void)
+{
+    TestResult   verdict = TEST_PASS;
+    TagRegistry* scratch = NULL;
+    bool         built   = false;
+    TagSpelling  spelled;
+
+    scratch = kmalloc(sizeof(TagRegistry));
+    TEST_ASSERT(scratch != NULL, "memory for a registry of the test's own");
+    TEST_ASSERT_EQ(tag_registry_init(scratch), 0, "a registry of the test's own is built");
+    built = true;
+
+    uint32_t next = scratch->by_id_capacity * 4u;
+    TEST_ASSERT_OK(TagRegistryNumbersFrom(scratch, next),
+                   "its numbers move past four id tables' worth of ids");
+    TEST_ASSERT_EQ(scratch->next_id, next, "to the first id past the ones the records wear");
+    TestEvidence("slots of the id table under numbers up to it", scratch->by_id_capacity);
+    TEST_ASSERT(scratch->by_id_capacity >= scratch->next_id,
+                "and the id table covers every one of them");
+    TEST_ASSERT(!TagRegistrySpelling(scratch, (uint16_t)(next - 1u), &spelled, NULL),
+                "an id past the table's old end spells nothing");
+out:
+    if (built)
+        tag_registry_destroy(scratch);
+    kfree(scratch);
+    return verdict;
+}
+
+static StandBookWait s_let_go_wait;
+
+/*
+ * R9 (F02-3). A waiter for a cycle is linked to a volume that is then let go
+ * of — as one linked after its book was given up is — and is answered when
+ * the volume goes, ERR_DEVICE_NOT_READY, not when a mount after it stands.
+ * Red before: waiters were answered by the book's give-up, which one linked
+ * after it never heard, and by the next mount that succeeded — a mount that
+ * failed left the program parked on its Chit for good.
+ */
+static TestResult TestStandMediumLetGoAnswersItsWaiters(void)
+{
+    TestResult  verdict = TEST_PASS;
+    uint8_t     seat    = tagfs_get_seat();
+    bool        linked  = false;
+    bool        let_go  = false;
+    const char* aside   = StandStepsAsideFor();
 
     if (aside)
         return test_steps_aside(aside);
 
     TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
-    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB3u);
-    TEST_ASSERT(StandMakeFile("given_up_ids", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
-                "a file is made and written");
-    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &spelling), "it wears a tag new to the volume");
-    tag = TagRegistryLookup(fs->registry, &spelling);
-    TEST_ASSERT(tag != TAGFS_INVALID_TAG_ID, "whose id the registry gave");
-    TEST_ASSERT(InkedGen() > SettledGen(), "and no cycle settled either");
-
-    TagFSStandMediumLeaves();
-    TEST_ASSERT(LedgerNewestOn(seat, tagfs_get_volume_base(), &found),
-                "the medium's newest Ledger is read");
-    found.mark.closed_crc32 ^= 1u;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(&found), AWAY_OTHER,
-                   "the medium comes back another's, and the book is given up");
+    memset(&s_let_go_wait, 0, sizeof(s_let_go_wait));
+    SettleWaitLink(&s_let_go_wait.w, InkedGen() + 1u, StandBookAnswered);
+    linked = true;
+    TEST_ASSERT(!s_let_go_wait.answered, "a waiter for a cycle of the volume waits");
     let_go = true;
     TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
-    BoardroomNoteDeparture(kind, index);
-    TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
-    TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
-    TEST_ASSERT(StandMountSettles(), "and its arrival is attended");
-    TEST_ASSERT(fs->initialized, "and the volume is MOUNTED");
-    TEST_ASSERT(tagfs_file_ceiling() > file_id,
-                "its next file id is past the one the given-up book's memory gave out");
-    TagFSLockTake(&fs->registry->lock);
-    uint16_t next_tag = fs->registry->next_id;
-    TagFSLockDrop(&fs->registry->lock);
-    TEST_ASSERT(next_tag > tag, "and its next tag id past the tag it gave out");
+    TEST_ASSERT(s_let_go_wait.answered, "and the waiter is answered as it goes, before any mount");
+    TEST_ASSERT_EQ(s_let_go_wait.rc, ERR_DEVICE_NOT_READY, "with ERR_DEVICE_NOT_READY");
 out:
+    if (linked && !s_let_go_wait.answered)
+        (void)SettleWaitUnlink(&s_let_go_wait.w);
     if (let_go)
         StandMountClose(seat);
     return verdict;
@@ -851,7 +780,16 @@ static const TestCase g_stand_medium_tests[] = {
       .func  = TestStandMediumIdleTakenUpAfterSpare, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_bell_rings_once",
       .func  = TestStandMediumBellRingsOnce, .reach = TEST_READS_ONLY },
-    /* Last, every one: each takes the volume down and mounts it again. */
+    { .name  = "stand_medium_given_up_fate_stands",
+      .func  = TestStandMediumGivenUpFateStands, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_never_left_is_no_return",
+      .func  = TestStandMediumNeverLeftIsNoReturn, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_numbers_past_the_table",
+      .func  = TestStandMediumNumbersPastTheTable, .reach = TEST_READS_ONLY },
+    { .name  = "stand_medium_taken_up_takes_writes",
+      .func  = TestStandMediumTakenUpTakesWrites, .reach = TEST_WRITES_TO_VOLUME },
+    /* Last, every one: each takes the volume down and mounts it again, or
+     * takes its medium out of the room and seats it again. */
     { .name  = "stand_medium_mount_loses_its_seat",
       .func  = TestStandMediumMountLosesItsSeat, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_mount_hears_the_ready_it_was_owed",
@@ -860,6 +798,14 @@ static const TestCase g_stand_medium_tests[] = {
       .func  = TestStandMediumMountRefusedReadIsNoVerdict, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_given_up_ids_not_given_again",
       .func  = TestStandMediumGivenUpIdsNotGivenAgain, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_return_refused_once",
+      .func  = TestStandMediumReturnRefusedOnce, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_mount_resets_the_seat",
+      .func  = TestStandMediumMountResetsTheSeat, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_mount_waits_for_memory",
+      .func  = TestStandMediumMountWaitsForMemory, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_let_go_answers_its_waiters",
+      .func  = TestStandMediumLetGoAnswersItsWaiters, .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_medium_suite = {

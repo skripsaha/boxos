@@ -135,6 +135,12 @@ void xhci_msd_watchdog(void);
  * has committed nothing, and is a refusal. */
 int xhci_msd_flush(uint8_t unit);
 
+/* The transport reset — the recovery this driver runs when the two ends have
+ * lost track of each other — for a seat the Boardroom asks to reset
+ * (BoardroomSeatReset), the device taken whole for it: 0 when the device is
+ * there and ready after it. */
+int XhciMsdUnitReset(uint8_t unit);
+
 #ifdef CONFIG_VOLUME_TESTS
 /* The cache commit answered as if the device had refused SYNCHRONIZE CACHE
  * with this sense — BLOCKFAIL's flush with a sense (block_fail.h): nothing is

@@ -915,6 +915,33 @@ void AtaChannelGive(uint8_t channel, uint64_t flags) {
     BmideIrqBack(flags);
 }
 
+/* The recovery ata_recover_worker runs on a wedge, asked from outside: the
+ * channel taken whole as a flush takes it, so no command of the engine's or
+ * of a PIO caller's finds it mid-reset; SRST; the drive's INTRQ unmasked again
+ * when the engine's IRQ path is what waits for it (SRST left nIEN=1). The
+ * drive is back when, selected again, it is neither absent, nor BSY, nor
+ * without DRDY. ATA_SRST_BSY_HELD_MS: the channel is held, interrupts off. */
+bool AtaDriveReset(uint8_t drive_idx) {
+    if (drive_idx >= ATA_DRIVE_COUNT || !g_ata_devices[drive_idx].exists ||
+        !drive_channel_ptr(drive_idx)->present)
+        return false;
+
+    uint8_t     ch_idx = drive_channel(drive_idx);
+    AtaAsyncCh *aa     = &g_ata_async[ch_idx];
+    uint64_t    held   = AtaChannelTake(ch_idx);
+
+    ata_channel_soft_reset(ch_idx, ATA_SRST_BSY_HELD_MS);
+    ata_select_drive(drive_idx);
+    uint8_t status = ata_read_status(drive_idx);
+    bool    back   = status != 0 && status != 0xFF && !(status & ATA_SR_BSY) &&
+                     (status & ATA_SR_DRDY);
+    if (aa->enabled && __atomic_load_n(&g_ata_irq_armed, __ATOMIC_ACQUIRE))
+        ata_set_nien(ch_idx, false);
+
+    AtaChannelGive(ch_idx, held);
+    return back;
+}
+
 /* ---------------------------------------------------------------------
  *  Sync wrapper — submit and wait for the drive's answer, polled fallback
  *  before the IRQ path is viable

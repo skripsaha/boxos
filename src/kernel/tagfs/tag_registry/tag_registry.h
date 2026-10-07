@@ -24,8 +24,10 @@ uint64_t     tag_registry_written_need(TagRegistry* reg);
 void         TagRegistryLanded(TagRegistry* reg, SettleMark* mark);
 
 /* The mount's J1: no id below `next` is given out again — the records of the
- * pool wear ids a registry rolled back no longer names. */
-void         TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next);
+ * pool wear ids a registry rolled back no longer names. The id table grown to
+ * cover them first; ERR_NO_MEMORY, said, and nothing moved, when it cannot
+ * be. */
+error_t      TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next);
 
 /* The mount's census: the blocks the load walked, claimed, and let go. */
 void         TagRegistryClaimGround(TagRegistry* reg);

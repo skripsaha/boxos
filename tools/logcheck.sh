@@ -207,17 +207,19 @@ stranger_off() {
 # apart into a guard that has quietly stopped guarding.
 LATEARRIVAL_MARK="logcheck mutation: the internal disk is not this machine's"
 
-# ‼ AND IT IS SAID IN BOTH PLACES THE KERNEL ASKS, NOT ONLY IN THE FIRST.
+# ‼ AND ONLY WHERE AN ARRIVAL ASKS: A RETURN NEEDS NO SAYING.
 #
 # The stick is a copy of the boot image, so the internal disk carries the very
 # same volume — the same sixteen bytes — for the whole run. tagfs_recognise is
-# where an ARRIVAL asks whose volume a medium carries; a RETURN asks somewhere
-# else: the open book looks for the volume that left in every seat of the room
-# (volume_ground_on), and the internal disk is seat 0. With the mutation in the
-# first place only, every return was judged against the internal disk — a
-# medium that never left — and measured so on 1.12: "the volume came back in
-# seat 0 with its Ledger as this kernel left it", the stick sitting in seat 1.
-# So the disk is not this machine's on both roads, which is what the words say.
+# where an ARRIVAL asks whose volume a medium carries, and the mutation stands
+# there. A RETURN asks somewhere else — the open book looks for the volume
+# that left (volume_ground_on) — and the mutation used to stand there too:
+# every return was judged against the internal disk, a medium that never left,
+# measured so on 1.12 ("the volume came back in seat 0 with its Ledger as this
+# kernel left it", the stick sitting in seat 1). The kernel now judges only a
+# seat taken after the book opened (tagfs.c, g_book_seatings), and the
+# internal disk was seated at boot, so that half of the mutation is gone: a
+# return judged against the disk is the kernel's defect again, and red.
 latearrival_on() {
     mutate src/kernel/tagfs/tagfs.c
     python3 - <<'EOF'
@@ -226,13 +228,9 @@ s = open(p).read()
 anchor = "static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])\n{\n"
 assert anchor in s, "late-arrival anchor missing"
 s = s.replace(anchor, anchor + "    if (BoardroomSeatKind(seat) == BOARD_ATA) return false;   /* logcheck mutation: the internal disk is not this machine's */\n", 1)
-back = ("static bool volume_ground_on(uint8_t seat, const uint8_t uuid[16], uint64_t *out_base,\n"
-        "                             bool *out_same)\n{\n")
-assert s.count(back) == 1, "late-arrival return anchor missing"
-s = s.replace(back, back + "    if (BoardroomSeatKind(seat) == BOARD_ATA) return false;   /* logcheck mutation: the internal disk is not this machine's */\n", 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/kernel/tagfs/tagfs.c "$LATEARRIVAL_MARK" 2
+    mut_done src/kernel/tagfs/tagfs.c "$LATEARRIVAL_MARK" 1
 }
 latearrival_off() {
     restore src/kernel/tagfs/tagfs.c
@@ -2834,23 +2832,22 @@ run_holdground() {
 #
 # ‼ AND IT IS ASKED AGAIN WHEN THE SEAT SAYS IT ANSWERS AGAIN, NOT ON A CLOCK.
 # The refusal is a read the medium refused, so the machine owes the mount until
-# `seat:ready` names its seat (tagfs.c, the note over g_mount_owed). QEMU's
-# stick never says that — it refuses nothing and recovers from nothing — so the
-# key says it for the stick's driver, out loud, two seconds after the refusal
-# (tagfs/mount/return_fail.c). A machine that asked again on its own, on a
-# clock or straight away, asks BEFORE that line; the order below says so.
+# `seat:ready` names its seat (tagfs.c, the note over g_mount_owed). A seat
+# rings that on the first command it answers after a refusal — and while the
+# mount is owed nobody sends it one. So the machine resets the seat ONCE, by
+# its driver's own recovery (tagfs.c, the note over g_reset_seating): here the
+# stick's transport reset, whose bell the mount is asked again on. A key that
+# said seat:ready for the stick two seconds after the refusal stood here until
+# the machine could make the event itself; it is gone. A machine that asked
+# again on its own, on a clock or straight away, asks BEFORE the reset; one
+# that resets in a loop resets more than once; the order and the counts below
+# say so.
 #
-# ‼ THE MUTATIONS IT EXISTS FOR, each measured on 1.12:
+# ‼ THE MUTATION IT EXISTS FOR, measured on P9:
 #
-#   take the line that lets seat:ready ask for the owed mount out of
-#      tagfs_on_seat_ready (tagfs.c: `if (g_mount_owed) g_mount_ready = 1`) —
-#      the seat says it answers again and nobody hears it: no asking, no
-#      mount, the machine volumeless with its stick in. MEASURED: 10 passed,
-#      5 failed;
-#   set g_mount_ready in mount_attempt beside g_mount_owed — the machine asks
-#      again at once, on its own, as the old retry did; it even mounts, and
-#      only the order says it asked before the seat answered. MEASURED: 14
-#      passed, 1 failed — exactly the order.
+#   take the reset out of mount_attempt (tagfs.c: attendance_reset) — the
+#      refusal is owed and nothing ever rings: no asking, no mount, the machine
+#      volumeless with its stick in. MEASURED: 9 passed, 8 failed.
 run_returnfail() {
     echo "== returnfail: a mount that did not finish is asked again =="
 
@@ -2931,28 +2928,34 @@ run_returnfail() {
     chk $? "the stick was plugged in exactly once after the pull ($arrivals)"
 
     # ── ‼ THE MACHINE ASKED AGAIN BY ITSELF, WHEN THE SEAT SAID SO ─────────
-    grep -q "\[TagFS RETURNFAIL\] seat 1: its driver says the medium answers again (seat:ready)" "$S"
-    chk $? "the seat said it answers again"
+    grep -q "seat 1 refused a read and nothing it answered since rang its bell — nobody else asks it anything, so its medium is reset once" "$S"
+    chk $? "nothing rang the refused seat, and the machine reset it once, by its driver's own recovery"
+    grep -qE "\[USB disk [0-9]+\] resetting the transport" "$S"
+    chk $? "the stick's transport was reset"
+    local resets
+    resets=$(grep -c "its medium is reset once" "$S")
+    [ "$resets" = 1 ]
+    chk $? "once, never again ($resets)"
     grep -q "seat 1 answers again — asking for the volume nobody has mounted" "$S"
     chk $? "the machine asked again for the volume nobody had mounted"
     grep -q "a medium arrived carrying a volume, and this machine had none — mounted from seat 1" "$S"
     chk $? "and the volume came up in the seat it sat in"
 
-    # In that order: given up, refused, the seat answering, the asking, the
-    # mount. An asking that comes before the seat answers is a machine asking
-    # on a clock, which is what this replaced.
-    local GIVEN_AT OWED_AT READY_AT ASK_AT UP_AT
+    # In that order: given up, refused, the seat reset, the asking, the mount.
+    # An asking that comes before the reset is a machine asking on a clock, or
+    # at once, which is what this replaced.
+    local GIVEN_AT OWED_AT RESET_AT ASK_AT UP_AT
     GIVEN_AT=$(grep -n "did not leave on it" "$S" | head -1 | cut -d: -f1)
     OWED_AT=$(grep -n "refused a read while its volume was being read" "$S" | head -1 | cut -d: -f1)
-    READY_AT=$(grep -n "\[TagFS RETURNFAIL\] seat 1: its driver says" "$S" | head -1 | cut -d: -f1)
+    RESET_AT=$(grep -n "its medium is reset once" "$S" | head -1 | cut -d: -f1)
     ASK_AT=$(grep -n "asking for the volume nobody has mounted" "$S" | head -1 | cut -d: -f1)
     UP_AT=$(grep -n "\[TagFS\] the volume on seat 1 is MOUNTED" "$S" | tail -1 | cut -d: -f1)
-    [ -n "$GIVEN_AT" ] && [ -n "$OWED_AT" ] && [ -n "$READY_AT" ] && [ -n "$ASK_AT" ] && \
-        [ -n "$UP_AT" ] && [ "$GIVEN_AT" -lt "$OWED_AT" ] && [ "$OWED_AT" -lt "$READY_AT" ] && \
-        [ "$READY_AT" -lt "$ASK_AT" ] && [ "$ASK_AT" -lt "$UP_AT" ]
-    chk $? "given up, refused, the seat answered, asked, mounted — in that order (${GIVEN_AT:-?}, ${OWED_AT:-?}, ${READY_AT:-?}, ${ASK_AT:-?}, ${UP_AT:-?})"
+    [ -n "$GIVEN_AT" ] && [ -n "$OWED_AT" ] && [ -n "$RESET_AT" ] && [ -n "$ASK_AT" ] && \
+        [ -n "$UP_AT" ] && [ "$GIVEN_AT" -lt "$OWED_AT" ] && [ "$OWED_AT" -lt "$RESET_AT" ] && \
+        [ "$RESET_AT" -lt "$ASK_AT" ] && [ "$ASK_AT" -lt "$UP_AT" ]
+    chk $? "given up, refused, the seat reset, asked, mounted — in that order (${GIVEN_AT:-?}, ${OWED_AT:-?}, ${RESET_AT:-?}, ${ASK_AT:-?}, ${UP_AT:-?})"
 
-    # One seat:ready, one asking: the mount owed is asked for once.
+    # One reset, one asking: the mount owed is asked for once.
     local asked
     asked=$(grep -c "asking for the volume nobody has mounted" "$S")
     [ "$asked" = 1 ]
@@ -7975,16 +7978,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 143 of the stand's own twenty-two suites: stand 26, stand_lock 4,
+# the 151 of the stand's own twenty-two suites: stand 26, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 6,
 # stand_plot 4, stand_index 5, stand_ink 5, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 11, stand_glean 8,
-# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 10,
+# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 18,
 # stand_warrant 6, stand_room 6. Counted off the code, not a run (K9): a suite
 # that drops out of the walk is a test that stopped covering anything, and the
 # count is where that shows. How many of them pass and how many stand aside is
 # the road's — said, not pinned.
-STAND_RUN=165
+STAND_RUN=173
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -8120,11 +8123,13 @@ stand_orders() {
 #   stand_medium_bell_rings_once                          1        1
 #   stand_medium_mount_hears_the_ready_it_was_owed        1        1   the mount's first read of the data
 #   stand_medium_mount_refused_read_is_no_verdict         1        1   the pool block a file's record lies in
+#   stand_medium_return_refused_once                      1        1   the newest Ledger copy, on the return
+#   stand_medium_mount_resets_the_seat                    1        1   the mount's first read of the data
 #   stand_roadstead_refusal_rings_once                    0        1   no asynchronous read on the legacy channel
 #   stand_settle_refusal_waits_for_the_bell               1        1   its Ledger; then a plan that only counts
 #   stand_settle_ring_during_the_cycle                    1        1   its Ledger
 #   stand_settle_table_refusal_is_the_mediums             2        2   the block written alone, then by the cycle
-#   total                                                26       31
+#   total                                                28       33
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -8144,6 +8149,11 @@ stand_judge() {
     got=$(grep -ac '^\[BLOCKFAIL\] seat [0-9]*: ' "$L")
     [ "$got" = "$want" ]
     chk $? "stand: $what — BLOCKFAIL refused $got command(s), as many as the tests that arm it refuse on this road ($want)"
+    got=$(grep -ac '^\[TagFS\] seat [0-9]* refused a read and nothing it answered since rang its bell' "$L")
+    [ "$got" = 2 ]
+    chk $? "stand: $what — a refused seat no bell answered was reset once by each of the two tests that leave one so, never again (stand_medium_return_refused_once, stand_medium_mount_resets_the_seat; reset $got time(s))"
+    ! grep -aq '^\[TagFS\] seat [0-9]* did not come back from its reset' "$L"
+    chk $? "stand: $what — and every seat reset came back from it"
     grep -aqE '^\[BLOCKFAIL\] seat [0-9]+: the read of sectors [0-9]+\.\.[0-9]+ is refused as a medium error — occurrence 2 since arming' "$L"
     chk $? "stand: $what — the read it refused was the second one at its block, not the first"
     grep -aqE '^\[BLOCKFAIL\] seat [0-9]+: the write of sectors [0-9]+\.\.[0-9]+ is refused as a medium error — occurrence 1 since arming, and nothing of it was issued' "$L"
@@ -8217,8 +8227,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 26 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 31 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 28 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 33 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"

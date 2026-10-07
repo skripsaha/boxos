@@ -47,15 +47,13 @@ bool TagFSReadOnly(void)
     return __atomic_load_n(&s_read_only, __ATOMIC_ACQUIRE) != 0;
 }
 
-#ifdef CONFIG_VOLUME_TESTS
 void InkReadOnlyLift(void)
 {
     __atomic_store_n(&s_read_only, 0u, __ATOMIC_RELEASE);
 }
-#endif
 
 /* Asked after any write the medium refused: a refusal the seat calls
- * protection is final for this mount, and said once. */
+ * protection is final for this seating of the medium, and said once. */
 void TagFSWriteRefused(void)
 {
     if (!BoardroomSeatRefusesWrites(tagfs_get_seat()))

@@ -70,7 +70,15 @@
 //                        the port
 // stand_medium_tests.c   the stand_medium suite: a USB disk's NO MEDIUM to a
 //                        flush refused and its ILLEGAL REQUEST remembered, and
-//                        the open book taken up and given up
+//                        the open book taken up and given up — its fate done
+//                        where it is decided, a medium that never left never
+//                        judged as its return, and the volume taking writes
+//                        again once its book is taken up
+// stand_mount_tests.c    the road a mount takes, run last by stand_medium: a
+//                        medium leaving mid-mount, a refused read the seat's
+//                        bell answers or a reset of the seat does, a mount
+//                        owed until memory comes back, and a return judged
+//                        only on reads the medium did not refuse
 // stand_warrant_tests.c  the stand_warrant suite: a file the system keeps
 //                        changed only with the warrant, the loader's blocks by
 //                        no call, never gathered, the warrant read off the
@@ -185,6 +193,23 @@ TestResult TestStandOpenHoldsWhatItNames(void);
 TestResult TestStandOpenRefusesUnreadMetadata(void);
 TestResult TestStandOpenJoinsTheWriters(void);
 TestResult TestStandFrozenBlockFreedTwice(void);
+
+/* The road a mount takes (stand_mount_tests.c), run last by stand_medium.
+ * StandMountSettles: the room's and the volume's service passes run until the
+ * mount road has nothing left to do, bounded. StandSettledBare: cycles until
+ * nothing rests in Fallow, and one more. StandMountClose: whatever a mount
+ * test left taken down — its turn, BLOCKFAIL, the volume up again, the runner
+ * counted back in. */
+bool       StandMountSettles(void);
+bool       StandSettledBare(void);
+void       StandMountClose(uint8_t seat);
+TestResult TestStandMediumMountLosesItsSeat(void);
+TestResult TestStandMediumMountHearsTheReadyItWasOwed(void);
+TestResult TestStandMediumMountRefusedReadIsNoVerdict(void);
+TestResult TestStandMediumGivenUpIdsNotGivenAgain(void);
+TestResult TestStandMediumReturnRefusedOnce(void);
+TestResult TestStandMediumMountResetsTheSeat(void);
+TestResult TestStandMediumMountWaitsForMemory(void);
 
 #endif /* CONFIG_VOLUME_TESTS */
 

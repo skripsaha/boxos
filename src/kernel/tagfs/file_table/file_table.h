@@ -12,8 +12,11 @@
  * There is no length parameter and there is not going to be one. The Deed used
  * to state file_table_blocks, mkfs wrote a 1 into it and nothing has ever
  * raised it, so the table came up 510 entries long on every volume regardless
- * of how many files were on it. The length is counted off the chain instead. */
-int  file_table_init(uint32_t first_block, bool sealed);
+ * of how many files were on it. The length is counted off the chain instead.
+ *
+ * OK; ERR_NO_MEMORY when the machine had no memory to take it, which the
+ * mount waits out; ERR_FILE_TABLE_CORRUPT when it is no table to stand on. */
+error_t file_table_init(uint32_t first_block, bool sealed);
 
 /* The mount's census: the chain's blocks, claimed. */
 void FileTableClaimGround(void);

@@ -7,6 +7,7 @@
 #include "ahci_sync.h"
 #include "ahci_async.h"
 #include "ata.h"
+#include "ata_async.h"     /* AtaDriveReset — the channel's software reset, asked by a seat */
 #include "xhci.h"
 #include "xhci_enumeration.h"
 #include "xhci_msd.h"
@@ -47,6 +48,7 @@ typedef struct BoardSeat {
     bool      occupied;         /* is there a medium in it at this moment */
     uint32_t  seating;          /* which taking of the room this occupant is */
     volatile uint32_t ready_gen;  /* seat:ready said of this chair, counted */
+    volatile uint32_t refusals;   /* commands this chair refused, counted */
     volatile uint8_t  refused;    /* a command refused since the last one answered */
     volatile uint8_t  bell;       /* seat:ready noted, the room's pass yet to say it */
     char      name[48];
@@ -103,6 +105,7 @@ static void BoardSeatAnswered(BoardSeat* s, uint32_t seating, bool answered)
     if (__atomic_load_n(&s->seating, __ATOMIC_ACQUIRE) != seating)
         return;
     if (!answered) {
+        __atomic_add_fetch(&s->refusals, 1u, __ATOMIC_SEQ_CST);
         __atomic_store_n(&s->refused, 1u, __ATOMIC_RELEASE);
         return;
     }
@@ -571,6 +574,12 @@ uint32_t BoardroomSeatReadyGen(uint8_t seat)
     return s ? __atomic_load_n(&s->ready_gen, __ATOMIC_SEQ_CST) : 0;
 }
 
+uint32_t BoardroomSeatRefusals(uint8_t seat)
+{
+    BoardSeat* s = seat_find(seat);
+    return s ? __atomic_load_n(&s->refusals, __ATOMIC_SEQ_CST) : 0;
+}
+
 /* Every bell the seats noted, said: one seat:ready per chair that rang, and
  * none for a chair that has emptied since — nobody could be waiting on it. A
  * bell noted while this walks is either seen by it or leaves the room's flag
@@ -982,6 +991,43 @@ bool BoardroomSeatRefusesWrites(uint8_t seat)
 bool BoardroomSeatAnnouncesReady(uint8_t seat)
 {
     return seat_taken(seat) != NULL;
+}
+
+/*
+ * ‼ A SEAT NOBODY WILL ASK AGAIN IS RESET — BY ITS DRIVER'S OWN RECOVERY.
+ *
+ * The bell rings on the first command a seat answers after a refusal, so a
+ * caller refused by a medium error no driver recovered from, with no command
+ * of its own left to send, waits for a bell nobody can ring: a mount owed on
+ * a seat the machine reads nothing else from waited for the rest of the boot.
+ * What that caller can ask for is what each driver already does when it finds
+ * its medium lost: an IDE channel's software reset, a USB disk's transport
+ * reset, an AHCI port's link reset — recovery, never the command again.
+ *
+ * A medium that comes back from it rings the bell here, whatever its driver
+ * said on the way. One that does not is a seat the room cannot reach — a USB
+ * disk that went with it, a port the reset retired, a channel with no drive
+ * answering — and the caller is told so.
+ */
+error_t BoardroomSeatReset(uint8_t seat)
+{
+    BoardSeat* s = seat_taken(seat);
+    if (!s) {
+        return ERR_DEVICE_NOT_READY;
+    }
+
+    bool back;
+    switch (s->kind) {
+    case BOARD_ATA:  back = AtaDriveReset(s->index);          break;
+    case BOARD_AHCI: back = AhciPortReset(s->index);          break;
+    case BOARD_USB:  back = XhciMsdUnitReset(s->index) == 0;  break;
+    default:         back = false;                            break;
+    }
+    if (!back) {
+        return ERR_DEVICE_NOT_READY;
+    }
+    BoardroomNoteSeatReady(s->kind, s->index);
+    return OK;
 }
 
 /* Whether the seat answers a command nobody stands over, read or write. */
