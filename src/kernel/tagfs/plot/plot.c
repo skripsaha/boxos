@@ -362,7 +362,9 @@ bool PlotRecordFits(const Plot *p)
 }
 
 /* The record fits, or its extents are gathered until it does, or the write is
- * refused — said, with the numbers. */
+ * refused — said, with the numbers. A gather's own refusal is the answer as it
+ * gave it: a run that waits for a Settle cycle (ERR_WOULD_BLOCK) is not a
+ * record full for good, nor a medium that refused the copy. */
 static error_t PlotFitOrGather(Plot *p)
 {
     if (PlotRecordFits(p))
@@ -380,9 +382,13 @@ static error_t PlotFitOrGather(Plot *p)
     error_t  rc     = PlotGather(p, runs - room, hint);
     if (rc == OK && PlotRecordFits(p))
         return OK;
-    kprintf("[TagFS] file %u: growing it would leave it %u extent(s) and its record holds %u "
-            "— refused, and nothing of it written\n", p->fid, runs, room);
-    return ERR_TAGFS_RECORD_FULL;
+    if (rc == OK)
+        rc = ERR_TAGFS_RECORD_FULL;
+    if (rc != ERR_WOULD_BLOCK)
+        kprintf("[TagFS] file %u: growing it would leave it %u extent(s) and its record holds %u "
+                "— refused (error %u), and nothing of it written\n", p->fid, runs, room,
+                (unsigned)rc);
+    return rc;
 }
 
 error_t PlotReserve(Plot *p, uint64_t end)
@@ -409,11 +415,15 @@ error_t PlotReserve(Plot *p, uint64_t end)
             hint = last->start_block + last->block_count;
         }
 
+        /* ERR_WOULD_BLOCK is room on its way, not a refusal: its caller waits
+         * for the cycle that brings it and asks again. */
         uint32_t start = 0, got = 0;
         error_t  rc    = AllotmentTake(p->fid, want, p->blocks, hint, &start, &got);
         if (rc != OK) {
-            kprintf("[TagFS] file %u: %llu more block(s) could not be had for it (error %u) — "
-                    "the write is refused\n", p->fid, (unsigned long long)left, (unsigned)rc);
+            if (rc != ERR_WOULD_BLOCK)
+                kprintf("[TagFS] file %u: %llu more block(s) could not be had for it (error %u) "
+                        "— the write is refused\n", p->fid, (unsigned long long)left,
+                        (unsigned)rc);
             return rc;
         }
         rc = PlotStake(p, start, got);

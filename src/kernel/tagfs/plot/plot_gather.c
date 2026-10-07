@@ -150,7 +150,7 @@ error_t PlotGather(Plot *p, uint32_t shed, uint32_t hint)
     }
 
     uint32_t start = 0;
-    error_t  rc    = BlockMapTake((uint32_t)blocks, hint, &start, __func__);
+    error_t  rc    = BlockMapTakeFor(p->fid, (uint32_t)blocks, hint, &start, __func__);
     if (rc != OK) {
         kprintf("[TagFS] file %u: gathering extents %u to %u of it needs one free run of %llu "
                 "block(s), and the volume has none that long\n", p->fid, first, last,

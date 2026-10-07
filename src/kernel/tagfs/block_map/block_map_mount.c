@@ -128,7 +128,7 @@ static bool MapCensusWindow(uint32_t w, uint8_t *sector, const uint8_t *owns)
         runs += missing && !was;
         was   = missing;
     }
-    if (runs && !MapDeltaRoom(runs))
+    if (runs && !MapDeltaRoom(runs, false, true))
         return false;
 
     uint32_t open = 0, open_at = 0;
@@ -250,6 +250,7 @@ void BlockMapUnmount(void)
     kfree(g_map.win);
     kfree(g_map.page);
     kfree(g_map.delta);
+    kfree(g_map.unsettled);
     memset(&g_map, 0, sizeof(g_map));
     g_map.work_lo = 1;
     g_map.work_hi = 0;

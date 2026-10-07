@@ -411,7 +411,7 @@ static error_t SettleStepRun(SettleSnap* snap, SettleStep* step)
         return OK;
     case SETTLE_STEP_MAP:
         SETTLE_CUT_AT(SETTLE_CUT_POINT_BITMAP);
-        rc          = BlockMapFlush();
+        rc          = BlockMapFlush(snap->target);
 #ifdef CONFIG_VOLUME_TESTS
         rc          = SettleStandRefusalHere(rc);
 #endif

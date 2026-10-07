@@ -449,8 +449,8 @@ def HeadPrefix(read_block, head, first, chain, run):
     """GleanMount + GleanWalkPrefix (glean.c): once the chain begins past the
     Deed's head, what the head still names before the chain's first block,
     followed from its next_block and no further than the first block, a block
-    outside the run, the head, a block of the chain, or one that does not read
-    as a block of the pool."""
+    outside the run, the head, a block of the chain, one the walk met already,
+    or one that does not read as a block of the pool."""
     if first == head:
         return []
     raw = read_block(head) if head < run else None
@@ -458,7 +458,7 @@ def HeadPrefix(read_block, head, first, chain, run):
         return []
     out, block, on_chain = [], U32(raw, 4), set(chain)
     for _hops in range(run):
-        if block in (first, 0) or block >= run or block == head or block in on_chain:
+        if block in (first, 0) or block >= run or block == head or block in on_chain or block in out:
             break
         raw = read_block(block)
         if raw is None or U32(raw, 0) != MPOOL_MAGIC:

@@ -1,12 +1,20 @@
 #include "tests.h"
 #include "stand_tests.h"
 #include "../tagfs.h"
+#include "../helm/helm.h"
+#include "../ink/ink.h"
+#include "../ink/fallow.h"
+#include "../plot/plot.h"
+#include "../settle/settle.h"
+#include "../glean/glean.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The block map — where a take goes, a give that comes twice, and the ground a
-// growing file keeps in hand
+// The block map — where a take goes, a give that comes twice, the ground a
+// growing file keeps in hand, a write's ground the medium hears of only with
+// its record, gives waiting for their sectors, and Fallow's gives the map has
+// no room to write down
 //
 // Each test takes its own ground through the allocator and gives back exactly
 // what it took: the runner's residue guard counts the volume's free blocks
@@ -272,6 +280,256 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// A write's ground reaches the medium with its record
+//
+// A cycle writes the map at S1 as memory has it, and memory holds a write's
+// new block taken from the moment it is taken — while the record that names
+// it is inked after that cycle's snapshot, or never: the cycle's seal stood
+// behind a map with ground nothing owned. Here a file grows by a block through
+// its Plot, under its Helm, and a cycle settles in the middle of the write:
+// the sector of the map that cycle sent calls the block free. The write is
+// inked, and the cycle whose snapshot holds the Ink calls it taken.
+// ----------------------------------------------------------------------------
+
+static HelmWaiter s_map_helm;
+
+static TestResult TestStandMapWriteInFlightLeftFree(void)
+{
+    TestResult       verdict = TEST_PASS;
+    uint32_t         file_id = 0;
+    TagFSFileHandle *handle  = NULL;
+    bool             holding = false;
+    bool             loaded  = false;
+    bool             taken   = false;
+    uint32_t         block   = 0;
+    uint64_t         at      = 0;
+    Plot             plot;
+    const uint32_t   B       = TAGFS_BLOCK_SIZE;
+    const char      *aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TestFillAt(g_test_buffer, 2 * B, 0x4D415031u, 0);
+    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, B, &file_id), "a one-block file is made");
+    TEST_ASSERT_OK(TagFSSettle(), "and settled");
+
+    handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
+    TEST_ASSERT(handle, "the writer's handle opens");
+    memset(&s_map_helm, 0, sizeof(s_map_helm));
+    TEST_ASSERT(HelmAsk(handle->ofe, &s_map_helm), "and it holds the file's Helm");
+    holding = true;
+    TEST_ASSERT_OK(PlotLoad(&plot, file_id, INK_UNWARRANTED), "the write loads the record");
+    loaded    = true;
+    plot.helm = &handle->ofe->helm;
+
+    TEST_ASSERT_OK(PlotBeginWrite(&plot, plot.size, false, B, &at), "and takes a block to grow by");
+    TEST_ASSERT(plot.stake_count > 0, "a Stake of the write's");
+    block = plot.stakes[plot.stake_count - 1].start;
+    TEST_ASSERT(StandBlockInUse(block), "memory holds its block taken");
+
+    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles in the middle of the write");
+    TEST_ASSERT(BlockMapMediumSays(block, &taken), "the map's sector is read off the medium");
+    TEST_ASSERT(!taken, "and calls the block free: no settled record names it");
+
+    PlotSource src  = { .kernel = g_test_buffer + B, .bytes = B };
+    uint64_t   done = 0;
+    InkReceipt inked;
+    TEST_ASSERT_OK(PlotWriteBlocks(&plot, at, &src, &done), "the write's block lands");
+    TEST_ASSERT_OK(PlotEndWrite(&plot, at, done), "and is made ready to be the file's");
+    TEST_ASSERT_OK(TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked), "the write is inked");
+    PlotRelease(&plot);
+    loaded = false;
+    HelmLetGo(handle->ofe, &s_map_helm);
+    holding = false;
+
+    TEST_ASSERT_OK(TagFSSettle(), "the cycle whose snapshot holds the Ink settles");
+    TEST_ASSERT(BlockMapMediumSays(block, &taken), "the map's sector is read off the medium again");
+    TEST_ASSERT(taken, "and calls the block taken: the record that names it is settled");
+out:
+    if (loaded)
+        PlotRelease(&plot);
+    if (holding)
+        HelmLetGo(handle->ofe, &s_map_helm);
+    tagfs_close(handle);
+    if (file_id)
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// Gives that wait for their sectors are room on its way
+//
+// A give whose sector is not in memory is written down as a delta: the block
+// is free, and no count holds it until the sector comes in — the way Fallow
+// gives back under the state lock at a cycle's end. A take under the lock that
+// found nothing else was told the volume had no room at all. It is told the
+// room is on its way (ERR_WOULD_BLOCK) — after the volume was brought to rest,
+// so neither Fallow nor Glean answers for it — and the cycle after lays the
+// give on: the block is free on the medium, and memory's again to hand out.
+// ----------------------------------------------------------------------------
+
+#define STAND_MAP_REST_ROUNDS 16u
+
+/* Cycles with a waiter — each closes the tail, so a delete's ground the tests
+ * before left rests from a closed block, and ripens — until nothing rests in
+ * Fallow and the pool's chain has no slack Glean could take off, the pass told
+ * the allocator is short as a take that met no room would tell it. True at
+ * rest. */
+static bool StandMapAtRest(void)
+{
+    TagFSState* fs = tagfs_get_state();
+
+    for (uint32_t round = 0; round < STAND_MAP_REST_ROUNDS; round++) {
+        if (TagFSSettle() != OK)
+            return false;
+        TagFSLockTake(&fs->lock);
+        bool slack = GleanMayFree();
+        bool rest  = FallowBlocks() == 0 && !slack;
+        TagFSLockDrop(&fs->lock);
+        if (rest)
+            return true;
+        if (slack)
+            GleanShort();
+    }
+    return false;
+}
+
+static TestResult TestStandMapGivesAwayAreRoomOnItsWay(void)
+{
+    TestResult   verdict = TEST_PASS;
+    TagFSState*  fs      = tagfs_get_state();
+    StandMapRuns runs    = { 0 };
+    uint32_t     block   = 0;
+    uint32_t     other   = 0;
+    bool         given   = false;
+    bool         took    = false;
+    bool         taken   = true;
+    const char*  aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT(StandMapAtRest(), "cycles bring the volume to rest: nothing in Fallow, no slack to glean");
+    TEST_ASSERT(StandMapTakeEverything(&runs) && runs.count > 0, "every run of the volume is taken");
+
+    block = runs.at[runs.count - 1] + runs.n[runs.count - 1] - 1;
+    BlockMapSectorAway(block);
+
+    TagFSLockTake(&fs->lock);
+    bool    rest  = FallowBlocks() == 0 && !GleanMayFree();
+    error_t gave  = BlockMapGiveLocked(block, 1);
+    error_t short_by = gave == OK ? BlockMapTakeLocked(1, 0, &other) : gave;
+    TagFSLockDrop(&fs->lock);
+    given = gave == OK;
+    took  = short_by == OK;
+    TEST_ASSERT(rest, "still at rest, with every block taken");
+    TEST_ASSERT_OK(gave, "the last block taken is given back with its sector away");
+    TEST_ASSERT_EQ(short_by, ERR_WOULD_BLOCK,
+                   "a take under the lock that finds nothing else hears the room is on its way");
+
+    TEST_ASSERT_OK(TagFSSettle(), "the cycle that lays the give on settles");
+    TEST_ASSERT(BlockMapMediumSays(block, &taken), "the map's sector is read off the medium");
+    TEST_ASSERT(!taken, "and calls the block free");
+out:
+    if (took)
+        tagfs_free_blocks(other, 1);
+    for (uint32_t i = 0; i < runs.count; i++) {
+        uint32_t n = runs.n[i] - (given && i == runs.count - 1 ? 1u : 0u);
+        if (n)
+            tagfs_free_blocks(runs.at[i], n);
+    }
+    kfree(runs.at);
+    kfree(runs.n);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// Fallow keeps what the map has no room to write down
+//
+// Fallow gives its ripe ground back under the state lock at a cycle's end,
+// and a give into a sector not in memory is a delta the map must have room
+// for. The room was asked of the heap there, under the lock; refused, the
+// node was let go of all the same and its blocks stayed taken for good. The
+// room is made before the lock now (FallowZeroDigests), and a run it does not
+// cover rests on. Here a node of one-block runs ripens with its sector away
+// while the heap refuses that room: what the room did not cover still rests,
+// and the next cycle gives back every block of it.
+// ----------------------------------------------------------------------------
+
+#define STAND_MAP_ROOM_RUNS 1024u    /* deltas past any the stand has made room for */
+
+static TestResult TestStandMapFallowKeepsWhatTheMapCannotWrite(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    FileExtent* runs    = NULL;
+    FallowNode* node    = NULL;
+    uint32_t    start   = 0, got = 0, still = 0;
+    bool        held    = false;
+    bool        resting = false;
+    bool        fired   = false;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT_OK(TagFSTakeRun(STAND_MAP_ROOM_RUNS, fs->layout.data_blocks / 2u, &start, &got),
+                   "a run is taken near the middle of the volume");
+    held = true;
+    TEST_ASSERT_EQ(got, STAND_MAP_ROOM_RUNS, "as long as asked");
+    TEST_ASSERT_OK(TagFSSettleAsCadence(), "a cycle writes the take");
+
+    runs = kmalloc(sizeof(FileExtent) * STAND_MAP_ROOM_RUNS);
+    TEST_ASSERT(runs, "room for the node's runs");
+    for (uint32_t i = 0; i < STAND_MAP_ROOM_RUNS; i++) {
+        runs[i].start_block = start + i;
+        runs[i].block_count = 1;
+    }
+    node = FallowNodeMake(runs, STAND_MAP_ROOM_RUNS, FALLOW_BY_LEDGER, 0);
+    TEST_ASSERT(node, "a node of one-block runs");
+
+    BlockMapSectorAway(start);
+    BlockMapGiveRoomRefused(true);
+    TagFSLockTake(&fs->lock);
+    FallowAdd(node, SettledCycles());    /* freed by the last cycle: ripe at the next */
+    TagFSLockDrop(&fs->lock);
+    node    = NULL;
+    held    = false;
+    resting = true;
+
+    TEST_ASSERT_OK(TagFSSettleAsCadence(), "the cycle it ripens in settles");
+    fired = HeapFailFired();
+    HeapFailDisarm();
+    BlockMapGiveRoomRefused(false);
+    TEST_ASSERT(fired, "and the room for its gives was refused by the heap");
+
+    for (uint32_t i = 0; i < STAND_MAP_ROOM_RUNS; i++)
+        still += StandBlockInUse(start + i);
+    TEST_ASSERT(still > 0, "what the room did not cover is still taken, resting");
+
+    for (uint32_t round = 0; round < STAND_MAP_REST_ROUNDS && still; round++) {
+        TEST_ASSERT_OK(TagFSSettleAsCadence(), "a cycle more settles");
+        still = 0;
+        for (uint32_t i = 0; i < STAND_MAP_ROOM_RUNS; i++)
+            still += StandBlockInUse(start + i);
+    }
+    TEST_ASSERT_EQ(still, 0, "and every block of the node comes back: none was let go of");
+    resting = false;
+out:
+    HeapFailDisarm();
+    BlockMapGiveRoomRefused(false);
+    FallowNodeLetGo(node);
+    kfree(runs);
+    if (held)
+        tagfs_free_blocks(start, got);
+    if (resting && still)
+        kprintf("[TESTS] %u block(s) of the test's node are left taken: they are the defect's\n",
+                still);
+    return verdict;
+}
+
 static const TestCase g_stand_map_tests[] = {
     { .name  = "stand_map_take_run_nearest_longest", .func = TestStandMapTakeRunNearestLongest,
       .reach = TEST_WRITES_TO_VOLUME,
@@ -285,6 +543,20 @@ static const TestCase g_stand_map_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a growing file's kept ground is not taken back before a take is refused "
                        "for want of room" },
+    { .name  = "stand_map_write_in_flight_left_free", .func = TestStandMapWriteInFlightLeftFree,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a cycle settled under a write in flight sends the medium a map with the "
+                       "write's block taken, and its seal stands behind ground nothing owns" },
+    { .name  = "stand_map_gives_away_are_room_on_its_way",
+      .func  = TestStandMapGivesAwayAreRoomOnItsWay,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a take under the state lock is told the volume has no room while gives "
+                       "wait for their sectors" },
+    { .name  = "stand_map_fallow_keeps_what_the_map_cannot_write",
+      .func  = TestStandMapFallowKeepsWhatTheMapCannotWrite,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "Fallow lets go of a node whose gives the map had no room to write down, "
+                       "and its blocks stay taken for good" },
 };
 
 const TestSuite g_stand_map_suite = {

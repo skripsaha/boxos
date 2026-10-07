@@ -313,6 +313,131 @@ out:
 }
 
 /*
+ * A block taken off the chain rests, taken in memory, and the cycle that writes
+ * the head past it settles a volume on which nothing names it: the map that
+ * cycle sent called it taken, and every seal stood behind ground nothing owned
+ * until the block came back a cycle later. After each cycle here, a block the
+ * medium's walk from the head still reaches may be taken; the first cycle
+ * after which the walk no longer reaches it sent a map calling it free.
+ */
+#define STAND_GLEAN_WALK 64u
+
+static TestResult TestStandGleanUnnamedLeftFree(void)
+{
+    TestResult verdict = TEST_PASS;
+    uint32_t   file_id = 0, gone = 0, first = 0, chain_len = 0, live = 0;
+    uint32_t   walked[STAND_GLEAN_WALK];
+    bool       unnamed = false, taken = true;
+    StandChain chain;
+
+    TEST_ASSERT(StandGleanFile("glean_unnamed", &file_id), "a one-block file is made and settled");
+    TEST_ASSERT(StandGleanUntilTaken(file_id, &gone, &first),
+                "overwrites, a cycle each, until a cycle took a block off the chain");
+
+    StandGleanChain(&chain_len, &live);
+    for (uint32_t more = 0; more <= chain_len + FallowLag() + 1u && !unnamed; more++) {
+        TEST_ASSERT_OK(TagFSSettle(), "a cycle with nothing inked settles");
+        memset(&chain, 0, sizeof(chain));
+        chain.blocks   = walked;
+        chain.capacity = ARRAY_SIZE(walked);
+        TEST_ASSERT(StandChainOnMedium(tagfs_get_state()->layout.metadata_pool_block,
+                                       TAGFS_MPOOL_MAGIC, &chain) && !chain.broken &&
+                    chain.links <= chain.capacity,
+                    "the pool is walked whole from the head on the medium");
+        unnamed = true;
+        for (uint32_t i = 0; i < chain.links; i++)
+            unnamed = unnamed && walked[i] != gone;
+    }
+    TEST_ASSERT(unnamed, "a cycle wrote the head past the block taken off");
+    TEST_ASSERT(BlockMapMediumSays(gone, &taken), "the map's sector is read off the medium");
+    TEST_ASSERT(!taken, "and the map that cycle sent calls the block free: nothing names it");
+out:
+    StandGleanLetGo(file_id);
+    return verdict;
+}
+
+/*
+ * Z13-3. A take short of room with nothing resting lowers Glean's slack, and a
+ * cycle with a waiter closes the tail Glean has just laid records in. Where
+ * the live records pack no tighter than they lie — a block's worth of small
+ * ones and more — the chain comes out of each such cycle as long as it went
+ * in, a block of slack is born again, and the lowered slack was chased for
+ * ever: the stand never came to rest, and a take short of room heard
+ * ERR_WOULD_BLOCK where the truth was that the volume had none. Here such
+ * cycles run over that many records, each told the allocator is short while
+ * Glean says it may free: within a few, nothing rests in Fallow and Glean
+ * says no slack is its to give. Then every one of those records is replaced
+ * by a newer one — a block's worth of records dies, which a pass can take
+ * off — and the slack is Glean's to try again, and comes to rest again.
+ */
+#define STAND_GLEAN_FRUITLESS_ROUNDS 16u
+#define STAND_GLEAN_DENSE            (POOL_QUITCLAIMS_PER_BLOCK + 2u)
+
+static uint32_t s_dense[STAND_GLEAN_DENSE];
+
+/* Waiter's cycles, each telling the allocator is short while Glean says it may
+ * free, until nothing rests and Glean says no slack is its: whether they came
+ * to that, and in *rounds after how many; *slack whether Glean said it may. */
+static bool StandGleanToRest(uint32_t* rounds, bool* slack)
+{
+    TagFSState* fs = tagfs_get_state();
+
+    *slack = false;
+    for (*rounds = 0; *rounds < STAND_GLEAN_FRUITLESS_ROUNDS; ) {
+        if (TagFSSettle() != OK)
+            return false;
+        (*rounds)++;
+        TagFSLockTake(&fs->lock);
+        bool may  = GleanMayFree();
+        bool rest = FallowBlocks() == 0 && !may;
+        TagFSLockDrop(&fs->lock);
+        if (rest)
+            return true;
+        if (may) {
+            *slack = true;
+            GleanShort();
+        }
+    }
+    return false;
+}
+
+static TestResult TestStandGleanFruitlessSlackLifted(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    uint32_t    rounds  = 0;
+    bool        slack   = false, rest = false, again = false;
+
+    memset(s_dense, 0, sizeof(s_dense));
+    for (uint32_t i = 0; i < STAND_GLEAN_DENSE; i++)
+        TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &s_dense[i]), 0,
+                       "files are made, a small record each, more than a block holds");
+
+    rest = StandGleanToRest(&rounds, &slack);
+    TestEvidence("waiter's cycles until nothing rested and Glean said no slack was its", rounds);
+    TEST_ASSERT(slack, "the chain had slack Glean said it may free");
+    TEST_ASSERT(rest, "and within a few cycles nothing rests and none is Glean's to give");
+
+    for (uint32_t i = 0; i < STAND_GLEAN_DENSE; i++)
+        TEST_ASSERT_EQ(tagfs_rename_file(s_dense[i], "test_file.r", INK_UNWARRANTED), 0,
+                       "each file is renamed: a newer record replaces its own");
+    TagFSLockTake(&fs->lock);
+    again = GleanMayFree();
+    TagFSLockDrop(&fs->lock);
+    TEST_ASSERT(again, "the records that died make the slack Glean's to try again");
+
+    rest = StandGleanToRest(&rounds, &slack);
+    TestEvidence("waiter's cycles until it came to rest again", rounds);
+    TEST_ASSERT(rest, "and it comes to rest again within a few cycles");
+out:
+    for (uint32_t i = 0; i < STAND_GLEAN_DENSE; i++)
+        if (s_dense[i])
+            (void)tagfs_delete_file(s_dense[i], INK_UNWARRANTED);
+    (void)TagFSSettle();
+    return verdict;
+}
+
+/*
  * A cycle that took blocks off the front, and a medium that lied about it: the
  * newest seal's chain begins at another block than the other copy's, and its
  * closed blocks do not bear it out — an open block alone not borne out would
@@ -371,6 +496,15 @@ static const TestCase g_stand_glean_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_glean_lie_falls_back",         .func = TestStandGleanLieFallsBack,
       .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_glean_unnamed_left_free",      .func = TestStandGleanUnnamedLeftFree,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "the cycle that writes the head past a block taken off the chain sends a "
+                       "map calling it taken, and its seal stands behind ground nothing owns" },
+    { .name = "stand_glean_fruitless_slack_lifted", .func = TestStandGleanFruitlessSlackLifted,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a lowered slack that gives nothing back is chased for ever, and a take "
+                       "short of room waits on cycles that never bring it; or, lifted, it is "
+                       "not tried again once records die" },
 };
 
 const TestSuite g_stand_glean_suite = {

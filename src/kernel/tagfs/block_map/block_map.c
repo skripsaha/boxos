@@ -1,4 +1,7 @@
 #include "block_map_internal.h"
+#ifdef CONFIG_VOLUME_TESTS
+#include "amp.h"           /* amp_get_core_index — the stand's HEAPFAIL on the holder's core */
+#endif
 
 /*
  * The windows, the edits and the deltas: everything the block map decides and
@@ -235,23 +238,100 @@ void MapOwedMark(uint32_t w)
     MapWorkAt(w);
 }
 
-bool MapDeltaRoom(uint32_t more)
-{
-    if (g_map.deltas + more <= g_map.delta_cap)
-        return true;
+#ifdef CONFIG_VOLUME_TESTS
+static volatile uint8_t s_stand_room_refused;
 
-    uint32_t cap = g_map.delta_cap ? g_map.delta_cap * 2 : 16;
-    while (cap < g_map.deltas + more)
-        cap *= 2;
-    BlockMapDelta *grown = kmalloc(sizeof(BlockMapDelta) * cap);
-    if (!grown)
-        return false;
+void BlockMapGiveRoomRefused(bool refused)
+{
+    __atomic_store_n(&s_stand_room_refused, (uint8_t)refused, __ATOMIC_RELEASE);
+}
+#endif
+
+/* The capacity the delta array grows to for `need` deltas; 0 for a need no
+ * array of deltas can be sized to. */
+static uint32_t MapDeltaCapFor(uint64_t need)
+{
+    uint64_t cap = g_map.delta_cap ? (uint64_t)g_map.delta_cap * 2u : 16u;
+    while (cap < need)
+        cap *= 2u;
+    return cap <= UINT32_MAX / sizeof(BlockMapDelta) ? (uint32_t)cap : 0u;
+}
+
+/* The deltas moved into `grown`, of `cap`: the array it replaces back. */
+static BlockMapDelta *MapDeltaSwap(BlockMapDelta *grown, uint32_t cap)
+{
+    BlockMapDelta *old = g_map.delta;
     if (g_map.deltas)
         memcpy(grown, g_map.delta, sizeof(BlockMapDelta) * g_map.deltas);
-    kfree(g_map.delta);
     g_map.delta     = grown;
     g_map.delta_cap = cap;
-    return true;
+    return old;
+}
+
+bool MapDeltaRoom(uint32_t more, bool give, bool heap)
+{
+    uint64_t bare = (uint64_t)g_map.deltas + more;
+    if (bare + g_map.delta_held <= g_map.delta_cap)
+        return true;
+
+    if (heap) {
+        uint32_t       cap   = MapDeltaCapFor(bare + g_map.delta_held);
+        BlockMapDelta *grown = cap ? kmalloc(sizeof(BlockMapDelta) * cap) : NULL;
+        if (grown) {
+            kfree(MapDeltaSwap(grown, cap));
+            return true;
+        }
+    }
+    /* A give the heap would not serve draws on the room held for Fallow's:
+     * what that leaves short rests on in Fallow a cycle more, where a give
+     * refused here would stay taken for good. A take never does. */
+    return give && bare <= g_map.delta_cap;
+}
+
+/* The room held is what the deltas leave of the array, at most. */
+static void MapDeltaHeldFits(void)
+{
+    if ((uint64_t)g_map.deltas + g_map.delta_held > g_map.delta_cap)
+        g_map.delta_held = g_map.delta_cap - g_map.deltas;
+}
+
+error_t BlockMapGiveRoomHold(uint32_t gives)
+{
+    TagFSLockTake(MapLock());
+    if (!g_map.up) {
+        TagFSLockDrop(MapLock());
+        return OK;
+    }
+    /* No more deltas than blocks: every one holds a block of its own. */
+    g_map.delta_held = gives < g_map.blocks ? gives : g_map.blocks;
+    uint64_t need = (uint64_t)g_map.deltas + g_map.delta_held;
+    if (need <= g_map.delta_cap) {
+        TagFSLockDrop(MapLock());
+        return OK;
+    }
+    uint32_t cap = MapDeltaCapFor(need);
+    TagFSLockDrop(MapLock());
+
+    BlockMapDelta *grown = NULL;
+    if (cap) {
+#ifdef CONFIG_VOLUME_TESTS
+        if (__atomic_exchange_n(&s_stand_room_refused, 0u, __ATOMIC_ACQ_REL))
+            HeapFailArm(amp_get_core_index(), 1);
+#endif
+        grown = kmalloc(sizeof(BlockMapDelta) * cap);
+    }
+
+    /* Deltas written down meanwhile may have outgrown it, or the heap gave
+     * nothing: the room held is then what there is, so a take is held to no
+     * room it was not held to before, and the gives draw on the rest. */
+    TagFSLockTake(MapLock());
+    if (grown && g_map.up && cap > g_map.delta_cap && g_map.deltas <= cap)
+        grown = MapDeltaSwap(grown, cap);
+    bool held = (uint64_t)g_map.deltas + g_map.delta_held <= g_map.delta_cap;
+    MapDeltaHeldFits();
+    TagFSLockDrop(MapLock());
+    kfree(grown);
+    return held ? OK : ERR_NO_MEMORY;
 }
 
 void MapDeltaAdd(uint32_t start, uint32_t count, bool take)
@@ -388,6 +468,138 @@ void MapDeltaApply(uint32_t w, BlockMapPage *p)
 }
 
 // ----------------------------------------------------------------------------
+// Runs no settled record names yet
+//
+// ‼ A WRITE'S GROUND REACHES THE MEDIUM WITH ITS RECORD, NOT BEFORE. A cycle
+// writes the map at S1 as memory has it, and memory has a write's run taken
+// from the moment of the take — while the record that names it may be inked
+// only after the cycle's snapshot, or never. A map that went out with the run
+// taken would leave the cycle's seal with ground that nothing owns. So the
+// run is left free in every image sent until the S1 of the cycle whose
+// snapshot holds the Ink that named it, which owes its sector and writes it
+// taken; a run given back meanwhile was never on the medium at all.
+// ----------------------------------------------------------------------------
+
+static bool MapUnsettledGrow(uint32_t need)
+{
+    if (need <= g_map.unsettled_cap)
+        return true;
+    uint32_t      cap   = g_map.unsettled_cap ? g_map.unsettled_cap * 2 : 16;
+    while (cap < need)
+        cap *= 2;
+    MapUnsettled *grown = kmalloc(sizeof(MapUnsettled) * cap);
+    if (!grown)
+        return false;
+    if (g_map.unsettled_count)
+        memcpy(grown, g_map.unsettled, sizeof(MapUnsettled) * g_map.unsettled_count);
+    kfree(g_map.unsettled);
+    g_map.unsettled     = grown;
+    g_map.unsettled_cap = cap;
+    return true;
+}
+
+bool MapUnsettledRoom(void)
+{
+    return MapUnsettledGrow(g_map.unsettled_count + 2u);
+}
+
+void MapUnsettledAdd(uint32_t fid, uint32_t start, uint32_t count)
+{
+    MapUnsettled *u = &g_map.unsettled[g_map.unsettled_count++];
+    u->start = start;
+    u->count = count;
+    u->fid   = fid;
+    u->gen   = 0;
+}
+
+static void MapUnsettledDrop(uint32_t i)
+{
+    g_map.unsettled[i] = g_map.unsettled[--g_map.unsettled_count];
+}
+
+/* [start, start + count) given back: no run holds it any more. A run the give
+ * cuts in two keeps both sides — held whole instead when there is no room for
+ * the second, or the give may not ask the heap (`heap`), which only leaves out
+ * of the image a block that is free. */
+static void MapUnsettledGiven(uint32_t start, uint32_t count, bool heap)
+{
+    uint64_t end = (uint64_t)start + count;
+
+    for (uint32_t i = 0; i < g_map.unsettled_count; ) {
+        MapUnsettled *u  = &g_map.unsettled[i];
+        uint64_t      ue = (uint64_t)u->start + u->count;
+        if (ue <= start || u->start >= end) {
+            i++;
+            continue;
+        }
+        if (u->start >= start && ue <= end) {
+            MapUnsettledDrop(i);
+            continue;
+        }
+        if (u->start < start && ue > end) {
+            if (g_map.unsettled_count == g_map.unsettled_cap &&
+                (!heap || !MapUnsettledGrow(g_map.unsettled_count + 1u))) {
+                i++;
+                continue;
+            }
+            u = &g_map.unsettled[i];
+            MapUnsettled *tail = &g_map.unsettled[g_map.unsettled_count++];
+            *tail        = *u;
+            tail->start  = (uint32_t)end;
+            tail->count  = (uint32_t)(ue - end);
+            u->count     = start - u->start;
+        } else if (u->start < start) {
+            u->count = start - u->start;
+        } else {
+            u->count = (uint32_t)(ue - end);
+            u->start = (uint32_t)end;
+        }
+        i++;
+    }
+}
+
+uint32_t MapUnsettledLeftOut(uint32_t first, uint32_t count, uint8_t *bits)
+{
+    uint64_t end  = (uint64_t)first + count;
+    uint32_t left = 0;
+
+    for (uint32_t i = 0; i < g_map.unsettled_count; i++) {
+        const MapUnsettled *u  = &g_map.unsettled[i];
+        uint64_t            a  = u->start > first ? u->start : first;
+        uint64_t            ue = (uint64_t)u->start + u->count;
+        uint64_t            b  = ue < end ? ue : end;
+        for (uint64_t k = a; k < b; k++) {
+            uint32_t off = (uint32_t)(k - first);
+            bits[off / 8] &= (uint8_t)~(1u << (off % 8));
+            left++;
+        }
+    }
+    return left;
+}
+
+void MapUnsettledSettled(uint64_t target)
+{
+    for (uint32_t i = 0; i < g_map.unsettled_count; ) {
+        const MapUnsettled *u = &g_map.unsettled[i];
+        if (u->gen == 0 || u->gen > target) {
+            i++;
+            continue;
+        }
+        uint32_t last = (u->start + u->count - 1u) / MAP_WINDOW_BLOCKS;
+        for (uint32_t w = u->start / MAP_WINDOW_BLOCKS; w <= last; w++)
+            MapOwedMark(w);
+        MapUnsettledDrop(i);
+    }
+}
+
+void BlockMapInkedLocked(uint32_t fid, uint64_t gen)
+{
+    for (uint32_t i = 0; i < g_map.unsettled_count; i++)
+        if (g_map.unsettled[i].fid == fid && g_map.unsettled[i].gen == 0)
+            g_map.unsettled[i].gen = gen;
+}
+
+// ----------------------------------------------------------------------------
 // Taking and giving back, in memory
 // ----------------------------------------------------------------------------
 
@@ -435,7 +647,7 @@ void MapTakeKept(uint32_t start, uint32_t count)
     MapTakeEach(start, count, true);
 }
 
-error_t BlockMapGiveLocked(uint32_t start, uint32_t count)
+static error_t MapGive(uint32_t start, uint32_t count, bool heap)
 {
     if (count == 0)
         return OK;
@@ -467,12 +679,14 @@ error_t BlockMapGiveLocked(uint32_t start, uint32_t count)
         }
         b += n;
     }
-    if (!MapDeltaRoom(away)) {
-        kprintf("[TagFS] block map: no memory to write down the give back of blocks "
-                "%u..%u — they stay taken, and the next mount's roll call finds them "
-                "owned by nothing\n", start, start + count - 1);
+    if (!MapDeltaRoom(away, true, heap)) {
+        if (heap)
+            kprintf("[TagFS] block map: no memory to write down the give back of blocks "
+                    "%u..%u — they stay taken, and the next mount's roll call finds them "
+                    "owned by nothing\n", start, start + count - 1);
         return ERR_NO_MEMORY;
     }
+    MapUnsettledGiven(start, count, heap);
 
     /* Where the sector is away the give is judged when it comes in. */
     for (uint32_t b = start, end = start + count; b < end; ) {
@@ -492,7 +706,18 @@ error_t BlockMapGiveLocked(uint32_t start, uint32_t count)
         }
         b += n;
     }
+    MapDeltaHeldFits();
     return OK;
+}
+
+error_t BlockMapGiveLocked(uint32_t start, uint32_t count)
+{
+    return MapGive(start, count, true);
+}
+
+error_t BlockMapGiveHeldLocked(uint32_t start, uint32_t count)
+{
+    return MapGive(start, count, false);
 }
 
 // ----------------------------------------------------------------------------

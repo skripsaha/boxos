@@ -24,11 +24,13 @@
  *
  * MapOwed: a take leaves the medium owed the sector its bit lives in, and the
  * Settle cycle pays it at S1 (BlockMapFlush), before any record, row or Ledger
- * naming the block reaches the medium — no door writes a sector for a take
- * (M4b). A name the cycle does not carry — a registry chain's link — can land
- * first; its block then reads free on the medium, and the next mount's census
- * takes it (a MISSING block). A give is never owed — a block the medium still
- * calls taken costs a block, never a file.
+ * naming the block reaches the medium — no take's door writes its sector
+ * (M4b). It may be paid earlier, never later: a give's door settles the map
+ * (BlockMapSettle), and a fetch that finds every slot owing writes the least
+ * lately used one whole. A name the cycle does not carry — a registry chain's
+ * link — can land first; its block then reads free on the medium, and the next
+ * mount's census takes it (a MISSING block). A give is never owed — a block
+ * the medium still calls taken costs a block, never a file.
  */
 
 /* Summary and cache for a data run of `data_blocks`, whose map begins at
@@ -73,24 +75,56 @@ void    BlockMapUnmount(void);
  * Take: `count` blocks in one run, the run nearest `hint` among those that
  * are long enough. OK and *start; when no run of `count` can be had without
  * reading the map, ERR_WOULD_BLOCK while Fallow rests blocks a Settle cycle
- * would give back, or ERR_TAGFS_NO_SPACE — said out loud, with the numbers —
- * when none rest; ERR_NO_MEMORY for no room to write the take down.
+ * would give back, or gives written down without their sectors wait for the
+ * next cycle to lay them on, or ERR_TAGFS_NO_SPACE — said out loud, with the
+ * numbers — when neither does; ERR_NO_MEMORY for no room to write the take
+ * down.
  *
  * Give: the run back. A run holding a block that is already free is refused
  * whole — ERR_TAGFS_EXTENT_ERROR, said with the block — and the map is left as
- * it is: freeing a free block is how one block comes to have two owners.
+ * it is: freeing a free block is how one block comes to have two owners. Whole
+ * as far as memory holds the run's sectors: a part whose sector is away is
+ * written down and judged when the sector comes in, and a free block there
+ * refuses that part alone, said then, after the give was answered OK
+ * (BlockMapFetchRun brings in the two sectors at a door's run's ends).
+ * BlockMapGiveHeldLocked is the same give asking the heap for nothing: the
+ * room its deltas need comes from what BlockMapGiveRoomHold made before the
+ * lock, and ERR_NO_MEMORY, unsaid, when that does not cover them — the caller
+ * keeps the run and says what becomes of it.
  */
 error_t BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start);
 error_t BlockMapGiveLocked(uint32_t start, uint32_t count);
+error_t BlockMapGiveHeldLocked(uint32_t start, uint32_t count);
+
+/* With no TagFS lock held: room made for `gives` deltas of gives and held for
+ * them — a take never uses it — until the next call says how much to hold.
+ * ERR_NO_MEMORY when the heap would not give it; the gives then draw on what
+ * room there is. */
+error_t BlockMapGiveRoomHold(uint32_t gives);
 
 /*
  * The same take, by a door with no TagFS lock held: the sectors it needs are
  * fetched first. Held under a TagFS lock it takes without reading instead.
  * `site` names the caller in a LockRank line about the state lock. When no
- * run of `count` is free, after every other file's Allotment was taken back:
- * ERR_WOULD_BLOCK while Fallow rests blocks, else ERR_TAGFS_NO_SPACE.
+ * run of `count` is free, after every other file's Allotment was taken back
+ * and every give written down was laid on: ERR_WOULD_BLOCK or
+ * ERR_TAGFS_NO_SPACE, as BlockMapTakeLocked answers them.
  */
 error_t BlockMapTake(uint32_t count, uint32_t hint, uint32_t *start, const char *site);
+
+/*
+ * A write's ground: the same take for file `fid` (AllotmentTake takes for a
+ * file as well). Its run is left free in every image of the map the medium
+ * is sent until the S1 of the cycle whose snapshot holds the Ink that names
+ * it (BlockMapInkedLocked) — or until it is given back, never to be named: a
+ * cycle settled under its write leaves no ground that nothing owns.
+ */
+error_t BlockMapTakeFor(uint32_t fid, uint32_t count, uint32_t hint, uint32_t *start,
+                        const char *site);
+
+/* Under the state lock, by the Ink `gen` of file `fid`'s record: every run
+ * taken for the file that no Ink named yet is named by this one. */
+void    BlockMapInkedLocked(uint32_t fid, uint64_t gen);
 
 /*
  * The sectors of the windows at a run's two ends fetched into memory, with no
@@ -108,19 +142,24 @@ void    BlockMapFetchRun(uint32_t start, uint32_t count, const char *site);
  */
 void    BlockMapSettle(void);
 
-/* The Settle cycle's S1: settled, and every sector memory changed written too. OK,
- * or the first refusal — each one said. */
-error_t BlockMapFlush(void);
+/* The Settle cycle's S1, for the cycle whose snapshot holds every Ink up to
+ * `target`: the runs those Inks named owed and written taken, settled, and
+ * every sector memory changed written too. OK, or the first refusal — each
+ * one said. */
+error_t BlockMapFlush(uint64_t target);
 
 /*
- * A sector goes out to the medium leaving free every block the pool holds that
- * no link names yet (PoolUnnamedLeftOut, meta_pool.h); memory keeps it taken.
- * A sector that left one out is let go of only once it was written whole, so
- * a sector read back in is always the medium's whole word. Under the state
- * lock, when `block` starts or stops being one no link names — a Spare put in
- * the stock, whose take a write may have carried already; a block whose link
- * the cycle at S0 is about to write — its sector is owed to the medium again,
- * and the next settle of the map writes it as it now must read.
+ * A sector goes out to the medium leaving free every block memory holds taken
+ * that nothing the medium holds names yet: a block of the pool no link names
+ * (PoolUnnamedLeftOut, meta_pool.h), a block the pool's head no longer names
+ * that rests in Fallow (FallowUnnamedLeftOut, fallow.h), and a write's run
+ * no settled record names (BlockMapTakeFor). A sector that left one out is
+ * let go of only once it was written whole, so a sector read back in is
+ * always the medium's whole word. Under the state lock, when `block` starts or
+ * stops being one nothing names — a Spare put in the stock, whose take a write
+ * may have carried already; a block whose link the cycle at S0 is about to
+ * write; a block the head is about to stop naming — its sector is owed to the
+ * medium again, and the next settle of the map writes it as it now must read.
  */
 void    BlockMapOweLocked(uint32_t block);
 
@@ -148,7 +187,8 @@ error_t TagFSTakeRun(uint32_t want, uint32_t hint, uint32_t *start, uint32_t *go
  * told there is none — and when the volume is let go.
  *
  * AllotmentTake: up to `want` blocks for file `fid`, whose size is
- * `file_blocks`, near `hint`; as TagFSTakeRun answers.
+ * `file_blocks`, near `hint`; as TagFSTakeRun answers. What it hands out is
+ * the file's write's, as BlockMapTakeFor's run is.
  * AllotmentRelease: the file's window, by a caller holding the state lock.
  */
 error_t AllotmentTake(uint32_t fid, uint32_t want, uint64_t file_blocks, uint32_t hint,
@@ -169,6 +209,16 @@ bool    BlockMapNextFree(uint32_t *block);
 /* Whether the medium's own sector of the map calls a block taken, read past
  * memory; false when the sector would not read. With no TagFS lock held. */
 bool    BlockMapMediumSays(uint32_t block, bool *taken);
+
+/* The sector of the window holding `block` out of memory — written whole
+ * first when it owes the medium anything — so the next edit of that window is
+ * written down without it. With no TagFS lock held. */
+void    BlockMapSectorAway(uint32_t block);
+
+/* The next room BlockMapGiveRoomHold must ask the heap for is asked of a heap
+ * that refuses it: HEAPFAIL armed on the holder's core right before it. false
+ * takes the plan down unspent. */
+void    BlockMapGiveRoomRefused(bool refused);
 #endif
 
 #endif /* TAGFS_BLOCK_MAP_H */

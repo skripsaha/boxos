@@ -308,11 +308,28 @@ error_t PoolSpareRefill(uint32_t want)
 
 MetaPoolPage* PoolSparesGiveBack(void)
 {
-    MetaPoolPage* given = s_spares;
-    for (MetaPoolPage* p = s_spares; p; p = p->next)
-        (void)BlockMapGiveLocked(p->block, 1);
-    s_spares      = NULL;
-    s_spare_count = 0;
+    MetaPoolPage* given = NULL;
+    MetaPoolPage* kept  = NULL;
+    uint32_t      left  = 0;
+
+    while (s_spares) {
+        MetaPoolPage* p = s_spares;
+        s_spares = p->next;
+        if (BlockMapGiveHeldLocked(p->block, 1) == ERR_NO_MEMORY) {
+            p->next = kept;
+            kept    = p;
+            left++;
+        } else {
+            p->next = given;
+            given   = p;
+        }
+    }
+    s_spares      = kept;
+    s_spare_count = left;
+    if (left)
+        kprintf("[MetaPool] %u Spare(s) of the last cycle stay in the stock — the block map had "
+                "no room to write their gives down; the map leaves them free on the medium, "
+                "and a later cycle gives them back\n", left);
     return given;
 }
 

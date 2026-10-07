@@ -64,6 +64,16 @@ typedef struct {
     uint32_t take;     /* 1 a take, 0 a give */
 } BlockMapDelta;
 
+/* A run a write took (BlockMapTakeFor, AllotmentTake) that no settled record
+ * names yet: left free in every image of the map the medium is sent, until
+ * the S1 of the cycle whose snapshot holds the Ink that named it. */
+typedef struct {
+    uint32_t start;
+    uint32_t count;
+    uint32_t fid;
+    uint64_t gen;      /* the Ink that named it; 0 while none has */
+} MapUnsettled;
+
 typedef struct {
     bool            up;
     uint32_t        blocks;       /* the data run */
@@ -75,7 +85,11 @@ typedef struct {
     BlockMapDelta  *delta;
     uint32_t        deltas;
     uint32_t        delta_cap;
+    uint32_t        delta_held;   /* of the room past `deltas`, what is held for gives */
     uint32_t        gives;        /* of the deltas, the gives */
+    MapUnsettled   *unsettled;
+    uint32_t        unsettled_count;
+    uint32_t        unsettled_cap;
     uint32_t        work_lo;      /* every window with a debt or a delta lies in */
     uint32_t        work_hi;      /* [work_lo, work_hi]; empty when lo > hi */
     uint32_t        lru_tick;
@@ -116,8 +130,11 @@ void          MapWorkAt(uint32_t w);
 /* MapOwed: window w carries a take the medium has not heard. */
 void          MapOwedMark(uint32_t w);
 
-/* Room for `more` deltas, got now: an edit is written down whole or not made. */
-bool          MapDeltaRoom(uint32_t more);
+/* Room for `more` deltas, got now: an edit is written down whole or not made.
+ * It leaves the room held for Fallow's gives (BlockMapGiveRoomHold) where it
+ * is, the heap asked for more when `heap` says so; a give the heap does not
+ * serve, or may not ask, draws on that room, a take never. */
+bool          MapDeltaRoom(uint32_t more, bool give, bool heap);
 
 /* An edit of [start, start + count), inside one window, written down to be laid
  * onto its sector; room was made first. */
@@ -135,6 +152,24 @@ uint32_t      MapUnreadWindows(uint32_t start, uint32_t count);
  * (MapDeltaRoom); the Ledger's free count and MapOwed follow. */
 void          MapTakeKnown(uint32_t start, uint32_t count);
 void          MapTakeKept(uint32_t start, uint32_t count);
+
+/* ---- runs no settled record names yet (block_map.c) -------------------- */
+
+/* Room for one run more, and for the split a give out of a run's middle
+ * makes: got now, under the state lock. */
+bool          MapUnsettledRoom(void);
+
+/* The run file `fid`'s write just took, under the lock that took it; room was
+ * made first. */
+void          MapUnsettledAdd(uint32_t fid, uint32_t start, uint32_t count);
+
+/* Every block of [first, first + count) such a run holds, cleared in `bits`
+ * (one bit per block from `first`): how many. */
+uint32_t      MapUnsettledLeftOut(uint32_t first, uint32_t count, uint8_t *bits);
+
+/* S1 of the cycle whose snapshot holds every Ink up to `target`: the runs
+ * they named are the map's own from here on, their sectors owed. */
+void          MapUnsettledSettled(uint64_t target);
 
 /* With no TagFS lock held: the window's sector fetched into the cache. OK;
  * ERR_WOULD_BLOCK when it is on its way on this very core, beneath the

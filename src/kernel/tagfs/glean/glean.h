@@ -67,7 +67,9 @@
  */
 #define GLEAN_SLACK  2u
 
-/* A cycle that gleans says so first — its pass begins (settle.c). */
+/* A cycle that gleans says so first — its pass begins (settle.c), and the pass
+ * before it, when it was one at the lowered slack, is judged by the chain it
+ * left. */
 void     GleanPassBegin(void);
 
 /* One step of the pass, with no TagFS lock held — at most one command to the
@@ -90,6 +92,8 @@ typedef struct {
     uint32_t to;          /* the chain's first block as the last settled seal named it */
 } GleanHead;
 
+/* A write owed leaves free in the map's images, from this cycle's S1 on, every
+ * resting block it names past (FallowUnlinkedUnnamed). */
 void     GleanHeadTake(GleanHead* h);
 void     GleanHeadStep(GleanHead* h, bool* done);
 
@@ -108,11 +112,14 @@ uint64_t GleanHintCovers(void);
 
 /* Under the state lock: whether the chain holds more blocks than its live
  * records and its open tail need — ground a pass at the lowered slack gives
- * back through Fallow. */
+ * back through Fallow — and the lowered slack is not lifted: a cycle at it
+ * that left the chain no shorter lifts it until a block's worth of records
+ * has died (GleanPassBegin), so a take short of room hears there is none
+ * rather than wait on cycles that give nothing back. */
 bool     GleanMayFree(void);
 
 /* The allocator is short with nothing resting: the next pass gleans at the
- * lowered slack. From any context. */
+ * lowered slack, unless it is lifted. From any context. */
 void     GleanShort(void);
 
 /*

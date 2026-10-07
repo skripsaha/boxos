@@ -7975,16 +7975,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 129 of the stand's own twenty-one suites: stand 26, stand_lock 4,
-# stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 3,
+# the 134 of the stand's own twenty-one suites: stand 26, stand_lock 4,
+# stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 6,
 # stand_plot 4, stand_index 5, stand_ink 5, stand_helm 7, stand_port 2,
-# stand_use 3, stand_use_chain 4, stand_seal 6, stand_settle 11, stand_glean 5,
+# stand_use 3, stand_use_chain 4, stand_seal 6, stand_settle 11, stand_glean 7,
 # stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 10,
 # stand_warrant 6. Counted off the code, not a run (K9): a suite that drops
 # out of the walk is a test that stopped covering anything, and the count is
 # where that shows. How many of them pass and how many stand aside is the
 # road's — said, not pinned.
-STAND_RUN=151
+STAND_RUN=156
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT

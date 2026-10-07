@@ -14,6 +14,7 @@ struct FallowNode {
     uint32_t    fid;        /* the file a record freer freed it from; 0 for the others */
     uint32_t    count;
     uint32_t    room;       /* the runs runs[] has room for */
+    bool        unnamed;    /* nothing on the medium names it: the map's images leave it free */
     FileExtent  runs[];
 };
 
@@ -21,6 +22,11 @@ struct FallowNode {
 static FallowNode* s_head;
 static FallowNode* s_tail;
 static uint64_t    s_blocks;
+static uint32_t    s_unnamed;        /* nodes nothing on the medium names */
+
+/* A cycle that could not give back all that ripened, for want of room for the
+ * map's deltas: said once, until a cycle gives back all of it. */
+static bool        s_held_said;
 
 static uint64_t NodeBlocks(const FallowNode* n)
 {
@@ -44,6 +50,7 @@ static FallowNode* NodeAlloc(uint32_t room, FallowKind kind, uint32_t fid)
     n->fid       = fid;
     n->count     = 0;
     n->room      = room;
+    n->unnamed   = false;
     return n;
 }
 
@@ -101,9 +108,36 @@ void FallowAdd(FallowNode* node, uint64_t gen)
     s_blocks += NodeBlocks(node);
 }
 
+/* Whether the node may go back at the end of cycle `cycle`, as far as its
+ * freer's cycle tells — the rest of FallowRipen's rule only holds it longer. A
+ * record freer not yet given its cycle is given one past `cycle` at the
+ * earliest. */
+static bool NodeMayRipen(const FallowNode* n, uint64_t cycle, uint64_t lag)
+{
+    uint64_t at = n->ripe_at;
+    if (at == 0 && n->kind != FALLOW_BY_RECORD && n->gen != 0)
+        at = n->gen + lag;
+    return at != 0 && at <= cycle;
+}
+
+/* The most deltas the map can need to write the node's gives down: one for
+ * every window each of its runs reaches into. */
+static uint64_t NodeWindows(const FallowNode* n)
+{
+    uint64_t windows = 0;
+    for (uint32_t i = 0; i < n->count; i++) {
+        uint32_t a = n->runs[i].start_block;
+        uint32_t z = a + n->runs[i].block_count - 1u;
+        windows += z / BLOCK_MAP_WINDOW_BLOCKS - a / BLOCK_MAP_WINDOW_BLOCKS + 1u;
+    }
+    return windows;
+}
+
 /* The walk reads nodes with the lock let go: a node is freed only by
  * FallowRipen, which the Settle's holder calls — this caller — and a node added
- * meanwhile hangs past `last`, where the walk stops. */
+ * meanwhile hangs past `last`, where the walk stops; nor can such a node go
+ * back at this cycle's end, which is why the room counted for the ones that
+ * may is all of it. */
 void FallowZeroDigests(uint64_t cycle)
 {
     TagFSLock* lock = &tagfs_get_state()->lock;
@@ -121,14 +155,21 @@ void FallowZeroDigests(uint64_t cycle)
             break;
     }
 
+    uint64_t lag   = FallowLag();
+    uint64_t gives = 0;
     TagFSLockTake(lock);
     for (FallowNode* n = first; n; n = n->next) {
         if (!n->zeroed_in)
             n->zeroed_in = cycle;
+        if (NodeMayRipen(n, cycle, lag))
+            gives += NodeWindows(n);
         if (n == last)
             break;
     }
     TagFSLockDrop(lock);
+
+    /* Refused, it is said by the gives it leaves resting (FallowRipen). */
+    (void)BlockMapGiveRoomHold(gives < UINT32_MAX ? (uint32_t)gives : UINT32_MAX);
 }
 
 void FallowLedgerTaken(uint64_t cycle)
@@ -145,12 +186,75 @@ void FallowRetag(uint64_t from, uint64_t to)
             n->gen = to;
 }
 
+void FallowUnlinkedUnnamed(uint64_t upto, FallowNode* also)
+{
+    for (FallowNode* n = s_head; n; n = n->next) {
+        if (n->unnamed || n->kind != FALLOW_BY_UNLINK ||
+            (n != also && (n->gen == 0 || n->gen > upto)))
+            continue;
+        n->unnamed = true;
+        s_unnamed++;
+        for (uint32_t i = 0; i < n->count; i++) {
+            uint64_t a = n->runs[i].start_block;
+            uint64_t z = a + n->runs[i].block_count;
+            for (uint64_t b = a; b < z; b = (b / BLOCK_MAP_WINDOW_BLOCKS + 1u) * BLOCK_MAP_WINDOW_BLOCKS)
+                BlockMapOweLocked((uint32_t)b);
+        }
+    }
+}
+
+uint32_t FallowUnnamedLeftOut(uint32_t first, uint32_t count, uint8_t* bits)
+{
+    uint64_t end  = (uint64_t)first + count;
+    uint32_t left = 0;
+
+    for (FallowNode* n = s_unnamed ? s_head : NULL; n; n = n->next) {
+        if (!n->unnamed)
+            continue;
+        for (uint32_t i = 0; i < n->count; i++) {
+            uint64_t a = n->runs[i].start_block;
+            uint64_t z = a + n->runs[i].block_count;
+            for (uint64_t b = a > first ? a : first; b < z && b < end; b++) {
+                uint32_t off = (uint32_t)(b - first);
+                bits[off / 8] &= (uint8_t)~(1u << (off % 8));
+                left++;
+            }
+        }
+    }
+    return left;
+}
+
+/*
+ * The node's runs back to the allocator, through the room for the map's
+ * deltas made before the lock (FallowZeroDigests): a run that room does not
+ * cover stays in the node, which rests on, and the next cycle gives it back.
+ * A run the map refuses for any other reason — a block of it already free, or
+ * past the data run — is said by the map, and no cycle could give it back: it
+ * leaves the node. The blocks given back.
+ */
+static uint64_t NodeGiveBack(FallowNode* n)
+{
+    uint64_t given = 0;
+    uint32_t kept  = 0;
+
+    for (uint32_t i = 0; i < n->count; i++) {
+        FileExtent run  = n->runs[i];
+        error_t    back = BlockMapGiveHeldLocked(run.start_block, run.block_count);
+        if (back == OK)
+            given += run.block_count;
+        else if (back == ERR_NO_MEMORY)
+            n->runs[kept++] = run;
+    }
+    n->count = kept;
+    return given;
+}
+
 uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
 {
-    uint64_t    given = 0;
-    FallowNode* prev  = NULL;
-
-    uint64_t    lag   = FallowLag();
+    uint64_t    given  = 0;
+    uint64_t    stayed = 0;          /* ripe, and resting on for want of the map's room */
+    FallowNode* prev   = NULL;
+    uint64_t    lag    = FallowLag();
 
     *spent = NULL;
     for (FallowNode* n = s_head; n; ) {
@@ -170,17 +274,15 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
             continue;
         }
 
-        for (uint32_t i = 0; i < n->count; i++) {
-            error_t back = BlockMapGiveLocked(n->runs[i].start_block, n->runs[i].block_count);
-            if (back != OK)
-                kprintf("[TagFS] Fallow: blocks %u..+%u rested their cycles and would not go "
-                        "back to the allocator (error %u) — they stay taken, for the mount's "
-                        "roll call to find\n", n->runs[i].start_block,
-                        (unsigned)n->runs[i].block_count, (unsigned)back);
-        }
         uint64_t blocks = NodeBlocks(n);
-        s_blocks -= blocks;
-        given    += blocks;
+        given    += NodeGiveBack(n);
+        s_blocks -= blocks - NodeBlocks(n);
+        if (n->count) {
+            stayed += NodeBlocks(n);
+            prev    = n;
+            n       = next;
+            continue;
+        }
 
         if (prev)
             prev->next = next;
@@ -188,10 +290,16 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
             s_head = next;
         if (s_tail == n)
             s_tail = prev;
+        s_unnamed -= n->unnamed;
         n->next = *spent;
         *spent  = n;
         n       = next;
     }
+    if (stayed && !s_held_said)
+        kprintf("[TagFS] Fallow: %llu block(s) rested their cycles and the block map had no "
+                "room to write their gives down — they rest on, and a later cycle gives them "
+                "back\n", (unsigned long long)stayed);
+    s_held_said = stayed != 0;
     return given;
 }
 
@@ -212,7 +320,9 @@ uint64_t FallowBlocks(void)
 void FallowDropAll(void)
 {
     FallowNodesFree(s_head);
-    s_head   = NULL;
-    s_tail   = NULL;
-    s_blocks = 0;
+    s_head      = NULL;
+    s_tail      = NULL;
+    s_blocks    = 0;
+    s_unnamed   = 0;
+    s_held_said = false;
 }
