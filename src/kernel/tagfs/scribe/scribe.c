@@ -368,7 +368,7 @@ error_t SpareStamp(uint32_t magic, void *image, uint32_t *out_block, uint64_t *o
 
     memset(image, 0, TAGFS_BLOCK_SIZE);
     memcpy(image, &magic, sizeof(magic));
-    error_t wrote = tagfs_write_block(block, image);
+    error_t wrote = TagFSMetaBlockWrite(block, image);
     if (wrote != OK) {
         tagfs_free_blocks(block, 1);
         return wrote;

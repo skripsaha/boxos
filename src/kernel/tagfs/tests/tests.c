@@ -209,7 +209,7 @@ static uint32_t VolumeChainLength(uint32_t head_volume_block, uint32_t magic)
     uint32_t links = 0;
 
     while (links < fs->layout.data_blocks) {
-        if (tagfs_read_block(block, g_chain_block) != OK)
+        if (TagFSMetaBlockRead(block, g_chain_block) != OK)
             break;
         uint32_t says_magic, next;
         memcpy(&says_magic, g_chain_block, sizeof(says_magic));

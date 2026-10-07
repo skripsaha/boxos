@@ -257,7 +257,7 @@ static void WalkPastSpan(PoolWalk* w, uint32_t next)
 {
     MetaPoolBlock* past = kmalloc(sizeof(MetaPoolBlock));
     for (uint32_t hops = 0; past && next != 0 && next < w->run && hops < w->run; hops++) {
-        if (tagfs_read_block(next, past) != OK || past->magic != TAGFS_MPOOL_MAGIC)
+        if (TagFSMetaBlockRead(next, past) != OK || past->magic != TAGFS_MPOOL_MAGIC)
             break;
         WalkFidsPast(w, past, 0);
         next = past->next_block;
@@ -309,7 +309,7 @@ static void WalkTailAt(PoolWalk* w, const PoolPlan* plan, uint32_t block, uint32
  * emptied block over the whole one — and the refusal of a closed block sent
  * the mount down the road of a kernel before the seal. The refusal says
  * nothing of what the block holds, so the mount is refused as the read was
- * (counted where the read met it, tagfs_read_block), and asked again when the
+ * (counted where the read met it, TagFSMetaBlockRead), and asked again when the
  * seat answers. Said; the read's own error.
  */
 static error_t WalkRefused(uint32_t block, error_t read)
@@ -329,7 +329,7 @@ static const char* WalkRead(PoolWalk* w, uint32_t block, error_t* refused)
     *refused = OK;
     if (block >= w->run)
         return "lies outside the volume's data run";
-    *refused = tagfs_read_block(block, w->here);
+    *refused = TagFSMetaBlockRead(block, w->here);
     if (*refused != OK)
         return "would not read";
     if (w->here->magic != TAGFS_MPOOL_MAGIC)
@@ -349,7 +349,7 @@ static error_t WalkTornSpan(PoolWalk* w, const PoolPlan* plan, uint32_t block)
 {
     if (block >= w->run)
         return OK;
-    error_t read = tagfs_read_block(block, w->here);
+    error_t read = TagFSMetaBlockRead(block, w->here);
     if (read != OK)
         return WalkRefused(block, read);
     if (w->here->magic != TAGFS_MPOOL_MAGIC)
@@ -777,7 +777,7 @@ static void JudgeWalk(SealTry* tries, const SettleMark* mark, MetaPoolBlock* blk
 {
     uint32_t block = mark->chain_first;
     for (uint32_t hops = 0; hops < run; hops++) {
-        bool ok = block < run && tagfs_read_block(block, blk) == OK &&
+        bool ok = block < run && TagFSMetaBlockRead(block, blk) == OK &&
                   blk->magic == TAGFS_MPOOL_MAGIC;
         WalkJudge(tries, block, ok ? blk : NULL, mark->pool_to_block);
         if (!ok || block == mark->pool_to_block)

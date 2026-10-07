@@ -186,20 +186,40 @@ void FallowRetag(uint64_t from, uint64_t to)
             n->gen = to;
 }
 
+/* The node left free in every image of the map from here on, every window it
+ * reaches owed to the medium now. Under the state lock. */
+static void NodeUnname(FallowNode* n)
+{
+    n->unnamed = true;
+    s_unnamed++;
+    for (uint32_t i = 0; i < n->count; i++) {
+        uint64_t a = n->runs[i].start_block;
+        uint64_t z = a + n->runs[i].block_count;
+        for (uint64_t b = a; b < z; b = (b / BLOCK_MAP_WINDOW_BLOCKS + 1u) * BLOCK_MAP_WINDOW_BLOCKS)
+            BlockMapOweLocked((uint32_t)b);
+    }
+}
+
 void FallowUnlinkedUnnamed(uint64_t upto, FallowNode* also)
 {
     for (FallowNode* n = s_head; n; n = n->next) {
         if (n->unnamed || n->kind != FALLOW_BY_UNLINK ||
             (n != also && (n->gen == 0 || n->gen > upto)))
             continue;
-        n->unnamed = true;
-        s_unnamed++;
-        for (uint32_t i = 0; i < n->count; i++) {
-            uint64_t a = n->runs[i].start_block;
-            uint64_t z = a + n->runs[i].block_count;
-            for (uint64_t b = a; b < z; b = (b / BLOCK_MAP_WINDOW_BLOCKS + 1u) * BLOCK_MAP_WINDOW_BLOCKS)
-                BlockMapOweLocked((uint32_t)b);
-        }
+        NodeUnname(n);
+    }
+}
+
+/* Ripe by the settled cycle `settled` — the S6 that would have given it back
+ * did not only for the view (FallowRipen) — and held by nothing else. */
+void FallowViewedUnnamed(uint64_t settled)
+{
+    for (FallowNode* n = s_head; n; n = n->next) {
+        if (n->unnamed || n->kind != FALLOW_BY_RECORD || n->ripe_at == 0 ||
+            n->ripe_at > settled || n->zeroed_in == 0 || n->zeroed_in > settled ||
+            n->gen <= HelmViewFloor(n->fid))
+            continue;
+        NodeUnname(n);
     }
 }
 
@@ -315,6 +335,15 @@ void FallowNodesFree(FallowNode* list)
 uint64_t FallowBlocks(void)
 {
     return s_blocks;
+}
+
+uint64_t FallowBlocksMapTaken(void)
+{
+    uint64_t left_out = 0;
+    for (FallowNode* n = s_unnamed ? s_head : NULL; n; n = n->next)
+        if (n->unnamed)
+            left_out += NodeBlocks(n);
+    return s_blocks - left_out;
 }
 
 void FallowDropAll(void)

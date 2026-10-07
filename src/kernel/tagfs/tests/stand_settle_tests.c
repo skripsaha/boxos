@@ -466,8 +466,8 @@ static TestResult TestStandSettleTableRefusalIsTheMediums(void)
 
     BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(row_block), TAGFS_BLOCK_SECTORS, 1);
     armed = true;
-    TEST_ASSERT_OK(tagfs_read_block(row_block, g_test_output), "the block is read as it stands");
-    error_t medium = tagfs_write_block(row_block, g_test_output);
+    TEST_ASSERT_OK(TagFSMetaBlockRead(row_block, g_test_output), "the block is read as it stands");
+    error_t medium = TagFSMetaBlockWrite(row_block, g_test_output);
     BlockFailDisarm();
     armed = false;
     TEST_ASSERT(medium != OK, "the medium's answer to a refused write of the block");
@@ -674,6 +674,68 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// A stopping machine's last cycles leave no ground at rest (RT-12)
+// ----------------------------------------------------------------------------
+
+/*
+ * Z09-4. A file deleted under a reader rests in Fallow for as long as the
+ * reader is open — and a machine stops with its programs' handles open. The
+ * halt's last cycles write that ground free in the map all the same, while
+ * memory keeps it taken, so the reader still reads it and no other file is
+ * handed it. Asked of the halt's own cycles (TagFSStandSettleForHalt), which
+ * stop nothing here. Red before: the cycles ended with the block taken on the
+ * medium and named by nothing, which the next mount's census keeps for good.
+ */
+static TestResult TestStandSettleHaltLeavesNoViewedGround(void)
+{
+    TestResult       verdict = TEST_PASS;
+    uint32_t         file_id = 0;
+    uint32_t         block   = 0;
+    TagFSFileHandle* reader  = NULL;
+    bool             taken   = true;
+    const char*      aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x4A17u, 0);
+    TEST_ASSERT(StandMakeFile("settle_halt_viewed", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+                "a one-block file is made");
+    TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
+    TEST_ASSERT_OK(TagFSSettle(), "and settled");
+    reader = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TEST_ASSERT(reader, "a reader opens it");
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "the file is deleted under it");
+    file_id = 0;
+
+    TEST_ASSERT_OK(TagFSStandSettleForHalt(), "a stopping machine's last cycles run");
+    TEST_ASSERT(BlockMapMediumSays(block, &taken), "the map's sector is read off the medium");
+    TEST_ASSERT(StandBlockInUse(block), "memory still keeps the reader's block taken");
+    TEST_ASSERT_EQ(TestHandleRead(reader, g_test_output, TAGFS_BLOCK_SIZE), (int)TAGFS_BLOCK_SIZE,
+                   "the reader reads the file it opened");
+    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
+                   TAGFS_BLOCK_SIZE, "byte for byte");
+
+    TestEvidence("blocks the halt's last cycles left taken on the medium for an open reader",
+                 taken ? 1u : 0u);
+    if (taken)
+        verdict = TEST_DEFECT;
+
+    /* Asked right after the cycle's last step: the next cycle makes the
+     * reserve the halt's cycles gave back again from the ground nearest the
+     * volume's start, which may be this very block. */
+    tagfs_close(reader);
+    reader = NULL;
+    TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the reader let go");
+    TEST_ASSERT(!StandBlockInUse(block), "and the block goes back with it");
+out:
+    tagfs_close(reader);
+    StandSettleLetGo(file_id);
+    (void)TagFSSettle();
+    return verdict;
+}
+
 /* The volume let go of and mounted again, with the runner's hold on its door
  * given back either way. True when it is up again. */
 #define STAND_SETTLE_MOUNT_MS  10000u
@@ -774,6 +836,10 @@ static const TestCase g_stand_settle_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_settle_reader_owes_no_leave", .func = TestStandSettleReaderOwesNoLeave,
       .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_settle_halt_leaves_no_viewed_ground",
+      .func = TestStandSettleHaltLeavesNoViewedGround, .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a clean shutdown with a reader open on a deleted file leaves its blocks "
+                       "taken on the medium and named by nothing, kept by the next mount for good" },
     /* Last: it takes the volume down and mounts it again. */
     { .name = "stand_settle_remount_owes_its_own", .func = TestStandSettleRemountOwesItsOwn,
       .reach = TEST_WRITES_TO_VOLUME },

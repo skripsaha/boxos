@@ -22,7 +22,9 @@
  *       more: the Ledger's other copy has moved past it too;
  *   (3) no open handle of the file views it as it was before — one opened
  *       before the freer (its view_gen below the freer's gen) keeps the ground
- *       until it is closed (helm.h), so a reader's blocks outlive a delete;
+ *       until it is closed (helm.h), so a reader's blocks outlive a delete —
+ *       in memory: a stopping machine's last cycles write such ground free on
+ *       the medium all the same (FallowViewedUnnamed);
  *   (4) no snapshot keeps it — a format-v1 volume takes none, and the ones an
  *       earlier kernel left keep the blocks their redirects moved away from,
  *       which no record names;
@@ -121,6 +123,19 @@ void        FallowRetag(uint64_t from, uint64_t to);
  */
 void        FallowUnlinkedUnnamed(uint64_t upto, FallowNode* also);
 
+/*
+ * Under the state lock, at S0 of one of a stopping machine's last cycles
+ * (TagFSSettleForHalt): every record freer's node that rested its cycles by
+ * the settled cycle `settled`, whose zeroed digests a settled cycle wrote, and
+ * which only an open handle's view from before its freer still holds (3) is
+ * left free in every image of the map from this cycle's S1 on, its sectors
+ * owed now, while memory keeps it at rest. The machine stops before that
+ * handle is closed: a node held for it would be a block taken on the medium
+ * that nothing names, for good, and a reader still running until the stop
+ * reads what it read, since no other file is handed the block.
+ */
+void        FallowViewedUnnamed(uint64_t settled);
+
 /* Under the state lock, as the block map sends a sector out: every resting
  * block of [first, first + count) nothing on the medium names, cleared in
  * `bits` (one bit per block from `first`); how many. */
@@ -141,8 +156,10 @@ uint64_t    FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
 /* Nodes FallowRipen spent, freed with no TagFS lock held. */
 void        FallowNodesFree(FallowNode* list);
 
-/* Under the state lock: how many blocks rest. */
+/* Under the state lock: how many blocks rest — and of them, how many every
+ * image of the map still writes taken (the rest are left out of it). */
 uint64_t    FallowBlocks(void);
+uint64_t    FallowBlocksMapTaken(void);
 
 /* The volume let go of: every node freed and nothing given back — what memory
  * held of the map is dropped with it. With the door shut. */

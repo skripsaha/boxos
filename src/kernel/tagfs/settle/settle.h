@@ -74,19 +74,24 @@ error_t  SettleForRoom(void);
  * before interrupts go off, right after the asynchronous writes drained — and
  * never after the cores are stopped, when a committer could be frozen in the
  * middle of the medium. They give back every Spare no link names, and every
- * block Fallow rests, as its rule allows once they settled — so no clean
- * shutdown leaves a block taken that nothing names. A committer whose core is
- * no longer running is an abandoned cycle: it is taken over and begun again
- * from S0. A volume whose medium is away runs no cycle: the stopping machine
- * is the event its open book waited for, and the book is given up — every
- * waiter answered (mount/away.h). The answer is kept for tagfs_shutdown.
+ * block Fallow rests, as its rule allows once they settled — or, held only by
+ * an open handle, write it free in the map — so no clean shutdown leaves a
+ * block taken that nothing names. From its first ask on, a cycle anybody
+ * begins is one of the halt's. A committer whose core is no longer running is
+ * an abandoned cycle: it is taken over and begun again from S0. A volume whose
+ * medium is away runs no cycle: the stopping machine is the event its open
+ * book waited for, and the book is given up — every waiter answered
+ * (mount/away.h). The answer is kept for tagfs_shutdown.
  */
 error_t  TagFSSettleForHalt(void);
 
 /* What the halt still owes the volume, read with no lock: Inks no cycle has
  * settled, and whether a cycle is running on another core that still runs —
- * nothing at all when no volume is mounted. */
+ * nothing at all when no volume is mounted. And the steps every cycle took
+ * this boot, on any core: one held by another core that still takes them is
+ * going on, however long it is. */
 void     SettleOwed(uint64_t* unsettled, bool* committer_busy);
+uint64_t SettleStepsTaken(void);
 
 /* What the halt's last cycle answered — ERR_TAGFS_METADATA_ERROR when none
  * ran — and how many Inks no cycle has settled now. */
@@ -125,6 +130,11 @@ void     TagFSStandSettleRefuses(error_t code);
 /* The demands standing for the next cycle (SettleDemandKind), read and left
  * as they are. For the stand. */
 uint32_t TagFSStandSettleDemands(void);
+
+/* The cycles TagFSSettleForHalt runs, run here without stopping anything —
+ * every later cycle is the stand's own again: OK once they settled, or the
+ * refusal. For the stand, inside the door. */
+error_t  TagFSStandSettleForHalt(void);
 #endif
 
 /* A mount's first word: nothing settled yet, and no waiter of the volume that
@@ -218,10 +228,12 @@ void     SettleWatchLook(uint64_t now_us);
 uint64_t SettleLullUs(void);
 uint64_t SettleLastDUs(void);
 
-/* The test runner's hold on the cadence: while it stands no cycle begins on
- * its own — a test meets only the cycles it drives, and a fault it arms on the
- * volume is met by its own cycle. Counted; a cycle in flight runs to its end.
- * The tests of the cadence itself let it go for their length. */
+/* A hold on the cadence: while it stands no cycle begins on its own. The test
+ * runner's — a test meets only the cycles it drives, and a fault it arms on
+ * the volume is met by its own cycle; the tests of the cadence itself let it
+ * go for their length — and a stopping machine's, for good, from the start of
+ * its drain: the halt runs the volume's last cycles itself. Counted; a cycle
+ * in flight runs to its end. */
 void     SettleCadenceHold(bool hold);
 
 // ============================================================================

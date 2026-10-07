@@ -255,7 +255,7 @@ uint64_t StandLedgerSeq(void)
 
 /* The file's row of the file table as the MEDIUM holds it: the table's chain
  * walked from its head, on the medium, to the block that carries the row —
- * tagfs_read_block reads it there: no read-ahead window serves it. False when
+ * TagFSMetaBlockRead reads it there: no read-ahead window serves it. False when
  * the chain does not reach it. */
 bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out, uint32_t* out_block)
 {
@@ -264,7 +264,7 @@ bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out, uint32_t* out_
     uint32_t        block = fs->layout.file_table_block - fs->layout.data_block;
 
     for (uint32_t k = file_id / TAGFS_FTABLE_PER_BLOCK; ; k--) {
-        if (tagfs_read_block(block, fb) != OK || fb->magic != TAGFS_FILETBL_MAGIC)
+        if (TagFSMetaBlockRead(block, fb) != OK || fb->magic != TAGFS_FILETBL_MAGIC)
             return false;
         if (k == 0)
             break;

@@ -97,7 +97,7 @@ static TestResult TestStandSealBorne(void)
 
     block = kmalloc(TAGFS_BLOCK_SIZE);
     TEST_ASSERT(block, "memory for the registry's block");
-    TEST_ASSERT_OK(tagfs_read_block(newest.mark.registry_block, block),
+    TEST_ASSERT_OK(TagFSMetaBlockRead(newest.mark.registry_block, block),
                    "the registry block the seal names reads");
     const TagRegistryBlock* reg = (const TagRegistryBlock*)block;
     TEST_ASSERT(newest.mark.registry_bytes <= reg->used_bytes, "and holds at least what it says");
@@ -273,7 +273,7 @@ static TestResult TestStandSealRollbackStandsOnTheNewest(void)
     TEST_ASSERT(StandSealOf(&real), "and is sealed");
     TEST_ASSERT(real.mark.chain_first != real.mark.pool_to_block,
                 "the sealed pool has a closed block before its open one");
-    TEST_ASSERT_OK(tagfs_read_block(real.mark.chain_first, first), "its first block reads");
+    TEST_ASSERT_OK(TagFSMetaBlockRead(real.mark.chain_first, first), "its first block reads");
     TEST_ASSERT(first->magic == TAGFS_MPOOL_MAGIC && first->used_bytes <= TAGFS_MPOOL_DATA_SIZE,
                 "as a block of the pool");
 
@@ -333,11 +333,11 @@ static TestResult TestStandSealTornTableStands(void)
     TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &torn), 0, "and one for its torn second block");
 
     memset(image, 0xA5, sizeof(*image));
-    TEST_ASSERT_OK(tagfs_write_block(torn, image), "the second block is garbage");
+    TEST_ASSERT_OK(TagFSMetaBlockWrite(torn, image), "the second block is garbage");
     memset(image, 0, sizeof(*image));
     image->magic      = TAGFS_FILETBL_MAGIC;
     image->next_block = torn;
-    TEST_ASSERT_OK(tagfs_write_block(head, image), "the head links it");
+    TEST_ASSERT_OK(TagFSMetaBlockWrite(head, image), "the head links it");
 
     TEST_ASSERT(FileTableWouldStand(head, true), "under a seal the torn table still mounts");
     TEST_ASSERT(!FileTableWouldStand(head, false), "with no seal it does not");

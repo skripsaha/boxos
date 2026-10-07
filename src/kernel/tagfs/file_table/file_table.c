@@ -210,7 +210,7 @@ static bool TableTakeLink(uint32_t block, const FileTableBlock* image, bool rows
  * of distinct blocks cannot be longer than the data run it lives in, so a walk
  * that takes that many hops has come back to a block it has been to; and a
  * next_block outside the run is refused before it is read — nothing under
- * tagfs_read_block bounds a block number.
+ * TagFSMetaBlockRead bounds a block number.
  */
 static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBlock* image)
 {
@@ -234,10 +234,10 @@ static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBloc
             break;
         }
 
-        /* ‼ Tested as `!= OK`, because tagfs_read_block returns an error_t
+        /* ‼ Tested as `!= OK`, because TagFSMetaBlockRead returns an error_t
          * whose failures are POSITIVE and the `< 0` this used to ask was never
          * once true. */
-        bool read  = tagfs_read_block(block, image) == OK;
+        bool read  = TagFSMetaBlockRead(block, image) == OK;
         bool table = read && image->magic == TAGFS_FILETBL_MAGIC;
         if (!table) {
             if (!TableBlockRefused(sealed, true, take, block,
@@ -494,7 +494,7 @@ static error_t FileTableWriteLink(uint32_t* at, bool* wrote_one)
     TagFSLockDrop(table_lock());
 
     *at = i;
-    error_t wrote = tagfs_write_block(block, &g_image);
+    error_t wrote = TagFSMetaBlockWrite(block, &g_image);
     if (wrote != OK) {
         kprintf("[FileTable] block %u would not take the file table's rows "
                 "%u..%u (error %d) — they are written again by the next Settle cycle\n",

@@ -105,7 +105,10 @@ static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
  *      controller when that command completes.
  *   3. The volume's changes no Settle cycle has settled yet (inked_gen −
  *      settled_gen), and whether another core holds the Settle — the halt
- *      runs the last cycle itself, once nothing else is owed (RT-12).
+ *      runs the last cycle itself, once nothing else is owed (RT-12). A
+ *      cycle on another core settles nothing until its last step, so the
+ *      steps it takes are counted beside the terms (Steps), not in them:
+ *      while it takes them the work is moving, however long the cycle is.
  *   4. The holders and waiters of every file's Helm: jobs that still owe a
  *      program its write, span or defrag. A waiter handed the Helm to run at a
  *      service point is run by the drain itself too.
@@ -123,6 +126,7 @@ typedef struct HaltWorkOwed {
     uint64_t Unsettled;   /* the volume's changes no Settle cycle has settled */
     uint64_t Committer;   /* 1 while another running core holds the Settle  */
     uint64_t Helm;        /* holders and waiters of the files' Helms        */
+    uint64_t Steps;       /* steps the Settle cycles took, on any core — not in Total */
     bool     AhciPresent; /* an AHCI controller was initialised at boot     */
 } HaltWorkOwed;
 
@@ -152,6 +156,7 @@ static void halt_async_work_owed(HaltWorkOwed *owed)
     SettleOwed(&owed->Unsettled, &busy);
     owed->Committer = busy ? 1u : 0u;
     owed->Helm      = HelmOwed();
+    owed->Steps     = SettleStepsTaken();
 
     owed->Total = owed->Baton + owed->Ahci + owed->Unsettled + owed->Committer + owed->Helm;
 }
@@ -188,6 +193,47 @@ static bool halt_deepest_baton(uint8_t *core_out, uint64_t *depth_out,
     return true;
 }
 
+/* The drain's glass ran out on work that stopped moving: said — how long, and
+ * WHICH core, HOW MANY and WHOSE work, the three things the old line could not
+ * say; a stuck queue names the continuation it is standing in, so the next
+ * reader starts at a function instead of at a number — and then, when the
+ * volume is still owed one, its last cycle run all the same. That cycle needs
+ * none of what stopped moving: what the programs were told is written goes to
+ * the medium before cli. A cycle another core holds is waited for to its end
+ * first, as the roll call would wait for it. */
+static void halt_drain_give_up(const HaltWorkOwed *owed, HourGlass *stall, uint64_t bound,
+                               bool owes_cycle)
+{
+    kprintf("[HALT] storage work has not moved for %lu us of %lu (%s) — "
+            "%lu unit(s) still owed\n",
+            HourGlassElapsedUs(stall), bound,
+            HourGlassSourceDied(stall) ? "ruler died" : HourGlassRulerName(stall),
+            owed->Total);
+
+    for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+        uint64_t depth = BatonDepth(i);
+        if (depth == 0) continue;
+
+        void (*handed_in)(void *ctx) = NULL;
+        void (*last_run)(void *ctx)  = NULL;
+        BatonLastSeen(i, &handed_in, &last_run);
+
+        NameplateName in_name, run_name;
+        kprintf("[HALT]   core %u holds %lu pass(es); last handed in "
+                "%s, last run %s\n",
+                i, depth,
+                halt_name_of(handed_in, &in_name),
+                halt_name_of(last_run, &run_name));
+    }
+
+    kprintf("[HALT] giving up; a pending write's commit may be lost\n");
+    if (owes_cycle) {
+        kprintf("[HALT] the volume's last Settle cycle runs without the work that "
+                "stopped moving\n");
+        (void)TagFSSettleForHalt();
+    }
+}
+
 /*
  * Drain in-flight async storage I/O before we kill cores — bounded by PROGRESS
  * rather than by a duration.
@@ -215,6 +261,15 @@ static bool halt_deepest_baton(uint8_t *core_out, uint64_t *depth_out,
  * completes) would satisfy "fell since last pass" forever and the loop would
  * never terminate. Against the running minimum it cannot.
  *
+ * ‼ A SETTLE CYCLE ON ANOTHER CORE MOVES WITHOUT LOWERING ANYTHING. It
+ * settles its changes in its last step, and a cycle that writes a pool of
+ * thousands of blocks to a cheap stick takes longer than any core's ceiling —
+ * judged by the measure alone, it was given up on mid-cycle, and the halt
+ * never ran a cycle of its own. So a step it takes puts the glass away as a
+ * new low does; only a cycle that stopped taking steps is judged. That ends
+ * too: no cycle begins on its own once the drain has begun — the cadence is
+ * held for good here — and a cycle has finitely many steps.
+ *
  * Other cores are still live here — cli has not run yet — so their guide loops
  * keep pumping continuations naturally.
  *
@@ -225,14 +280,23 @@ static bool halt_deepest_baton(uint8_t *core_out, uint64_t *depth_out,
  * be finished, and a halt after cli could wait on nobody. Programs still run
  * until the roll call, so what they ink meanwhile is owed again and asks for
  * another cycle; the running minimum ends that as it ends everything else, and
- * tagfs_shutdown says how many changes came after the last one.
+ * tagfs_shutdown says how many changes came after the last one. A drain that
+ * gives up on work that stopped moving still runs that cycle before it goes:
+ * the cycle needs none of the passes another core never pumped, and without
+ * it every change since the last cycle stays off the medium.
  */
 static void halt_drain_async_writes(void)
 {
     kprintf("[HALT] Draining async writes...\n");
 
+    /* From here the halt's own cycles are the volume's last: a cycle the
+     * cadence began after them would seal the volume unclean and stamp a
+     * Spare nothing names, and one begun meanwhile would hold the drain. */
+    SettleCadenceHold(true);
+
     uint8_t   me    = amp_get_core_index();
     uint64_t  best  = UINT64_MAX;   /* lowest work owed ever seen — the witness */
+    uint64_t  steps = UINT64_MAX;   /* the Settle steps taken at the last pass */
     uint64_t  bound = 0;            /* the deadline the stall glass was turned on */
     bool      stuck = false;        /* the last pass failed to beat `best`      */
     bool      ruled = false;        /* the stall glass turned on a real ruler   */
@@ -244,6 +308,7 @@ static void halt_drain_async_writes(void)
      * are at most two lines. */
     bool      told_ahci = false;
     bool      told_core = false;
+    bool      told_step = false;    /* a cycle on another core, said once */
     bool      settled   = false;    /* the halt's own Settle cycle has run once */
     bool      refused   = false;    /* ... and the last one was refused */
     HourGlass stall;
@@ -281,8 +346,16 @@ static void halt_drain_async_writes(void)
         if (owed.Total == 0)
             break;
 
-        if (owed.Total < best) {
-            best  = owed.Total;
+        bool going = owed.Committer && owed.Steps != steps;
+        steps = owed.Steps;
+        if (owed.Committer && !told_step) {
+            told_step = true;
+            kprintf("[HALT] a Settle cycle runs on another core — the drain waits for it as "
+                    "long as it takes steps\n");
+        }
+        if (owed.Total < best || going) {
+            if (owed.Total < best)
+                best = owed.Total;
             stuck = false;          /* progress — the clock goes back in the pocket */
         } else if (!stuck) {
             stuck = true;
@@ -340,34 +413,8 @@ static void halt_drain_async_writes(void)
                 said = true;
             }
         } else if (ruled && HourGlassRunOut(&stall)) {
-            kprintf("[HALT] storage work has not moved for %lu us of %lu (%s) — "
-                    "%lu unit(s) still owed\n",
-                    HourGlassElapsedUs(&stall), bound,
-                    HourGlassSourceDied(&stall) ? "ruler died"
-                                                : HourGlassRulerName(&stall),
-                    owed.Total);
-
-            /* WHICH core, HOW MANY, and WHOSE work — the three things the old
-             * line could not say. A stuck queue names the continuation it is
-             * standing in, so the next reader starts at a function instead of
-             * at a number. */
-            for (uint8_t i = 0; i < g_amp.total_cores; i++) {
-                uint64_t depth = BatonDepth(i);
-                if (depth == 0) continue;
-
-                void (*handed_in)(void *ctx) = NULL;
-                void (*last_run)(void *ctx)  = NULL;
-                BatonLastSeen(i, &handed_in, &last_run);
-
-                NameplateName in_name, run_name;
-                kprintf("[HALT]   core %u holds %lu pass(es); last handed in "
-                        "%s, last run %s\n",
-                        i, depth,
-                        halt_name_of(handed_in, &in_name),
-                        halt_name_of(last_run, &run_name));
-            }
-
-            kprintf("[HALT] giving up; a pending write's commit may be lost\n");
+            halt_drain_give_up(&owed, &stall, bound,
+                               !refused && (owed.Unsettled > 0 || !settled));
             return;                 /* do not claim a drain that did not happen */
         }
 

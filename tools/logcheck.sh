@@ -3181,6 +3181,99 @@ run_slowdisk() {
     chk $? "and the cable was never called unplugged"
 }
 
+# ---------------------------------------------------------------------------
+# haltslow: the power button while a slow disk keeps work in flight (R17)
+#
+# A Settle cycle on the committer settles nothing until its last step, and on a
+# slow medium it outlasts any core's ceiling: the halt's drain judged it by its
+# measure alone, gave up on it mid-cycle, and stopped the machine without a
+# cycle of its own — the volume's records never written. And a write goes a
+# window at a time, each window run at a service point as a held span: a core
+# the halt's IPI found inside one owed its stop, nothing after the window paid
+# it, and the roll call waited for that core for ever.
+#
+# Both are made on the plain BIOS machine with four cores — two K-Cores, so the
+# committer is not the core the power button's halt runs on — by holding the
+# disk's writes to a crawl (QEMU's block_set_io_throttle). The button goes once
+# the writes the case waits for have landed, counted off QEMU's own block
+# statistics, never off a clock: the anchor's data and the first write of the
+# cycle that settles it; a write's first windows.
+# ---------------------------------------------------------------------------
+
+HALTSLOW_CYCLE_BPS=2048    # two seconds a block: a cycle of a few blocks outlasts the core's five
+HALTSLOW_WINDOW_BPS=8192   # half a second a window: a window is what the halt's IPI meets
+
+haltslow_writes() {   # the boot disk's writes so far, as QEMU counts them
+    ./tools/qemu-input.sh raw "info blockstats" 2>/dev/null | tr -d '\r' |
+        grep -aoE '^ide0-hd0: .* wr_operations=[0-9]+' | sed 's/.*wr_operations=//'
+}
+
+# haltslow_boot TAG BPS CMD WRITES — a copy of the image booted, the disk's
+# writes held to BPS bytes a second, CMD typed, and the power button pressed
+# once WRITES more writes have landed; the log kept as serial.haltslow.TAG.log.
+# 0 when the machine switched itself off, 1 when it did not, 2 when the case
+# could not be put to it.
+haltslow_boot() {
+    local tag=$1 bps=$2 cmd=$3 want=$4 img="$SCRATCH/haltslow.$1.img" base pid off=1
+    make run-stop >/dev/null 2>&1
+    cp build/boxos.img "$img"
+    if ! make run-bg BOOTDISK="$img" CORES=4 MEM=4G >"$SCRATCH/runbg.haltslow.$tag.log" 2>&1; then
+        harness "haltslow: no machine was started for $tag — $(tail -1 "$SCRATCH/runbg.haltslow.$tag.log")"
+        rm -f "$img"
+        return 2
+    fi
+    pid=$(cat build/qemu.pid)
+    if wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+       base=$(haltslow_writes) && [ -n "$base" ] &&
+       mon_raw "block_set_io_throttle ide0-hd0 0 0 $bps 0 0 0" && type_line "$cmd" &&
+       wait_until "$WAIT_QUIET_SLOW_S" "$want writes of '$cmd' to land" \
+           '[ "$(haltslow_writes)" -ge $((base + want)) ]' &&
+       mon_raw system_powerdown; then
+        wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
+        off=$?
+    else
+        harness "haltslow: the $tag case could not be put to the machine (writes before it: ${base:-unread})"
+        off=2
+    fi
+    cp build/serial.log "$SCRATCH/serial.haltslow.$tag.log"
+    make run-stop >/dev/null 2>&1
+    rm -f "$img"
+    return $off
+}
+
+run_haltslow() {
+    echo "== haltslow: the power button while a slow disk has a cycle and a write's windows in flight =="
+    local L rc
+    build
+
+    haltslow_boot cycle "$HALTSLOW_CYCLE_BPS" anchor_test 2; rc=$?
+    L="$SCRATCH/serial.haltslow.cycle.log"
+    if [ "$rc" != 2 ]; then
+        if grep -aq '^\[HALT\] a Settle cycle runs on another core' "$L"; then
+            [ "$rc" = 0 ]
+            chk $? "a cycle on the committer when the button went: the machine switched itself off"
+            ! grep -aq '^\[HALT\] giving up' "$L"
+            chk $? "the drain waited for the cycle while it took steps, and gave up on nothing ($(grep -aE '^\[HALT\] (work owed|giving up)' "$L" | head -1 | cut -c1-100))"
+            grep -aq '^\[HALT\] Storage sync complete' "$L"
+            chk $? "and the halt's own cycle wrote the volume's records ($(grep -aE "$STAND_HALT_ENDS|DID NOT WRITE" "$L" | head -1 | cut -c1-100))"
+        else
+            harness "haltslow: no Settle cycle was running on another core when the button went, so the cycle case was not asked"
+        fi
+    fi
+
+    haltslow_boot window "$HALTSLOW_WINDOW_BPS" "quilltest coldwrite" 6; rc=$?
+    L="$SCRATCH/serial.haltslow.window.log"
+    if [ "$rc" != 2 ]; then
+        [ "$rc" = 0 ] && grep -aq '^\[HALT\] All AP cores stopped (roll call complete)' "$L"
+        rc=$?
+        chk $rc "a write's windows at the service points when the button went: every core answered the roll call and the machine switched itself off ($(grep -aE '^\[HALT\] (Stopping all|All AP|core [0-9]+ )' "$L" | tail -1 | cut -c1-100))"
+        if [ "$rc" = 0 ] &&
+           ! grep -aq '^\[HALT\] core [0-9]* stops after the Helm work it ran at a service point' "$L"; then
+            harness "haltslow: the halt found no core inside a window of the write, so the window case was not asked"
+        fi
+    fi
+}
+
 run_gpt() {
     echo "== gpt: the table is kept at both ends, and the far one is read =="
 
@@ -7975,16 +8068,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 140 of the stand's own twenty-two suites: stand 26, stand_lock 4,
+# the 143 of the stand's own twenty-three suites: stand 26, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 6,
 # stand_plot 4, stand_index 5, stand_ink 5, stand_helm 7, stand_port 2,
-# stand_use 3, stand_use_chain 4, stand_seal 6, stand_settle 11, stand_glean 7,
+# stand_use 3, stand_use_chain 4, stand_seal 6, stand_settle 12, stand_glean 7,
 # stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 10,
-# stand_warrant 6, stand_room 6. Counted off the code, not a run (K9): a suite
-# that drops out of the walk is a test that stopped covering anything, and the
-# count is where that shows. How many of them pass and how many stand aside is
-# the road's — said, not pinned.
-STAND_RUN=162
+# stand_warrant 6, stand_room 6, stand_integrity 2. Counted off the code, not a
+# run (K9): a suite that drops out of the walk is a test that stopped covering
+# anything, and the count is where that shows. How many of them pass and how
+# many stand aside is the road's — said, not pinned.
+STAND_RUN=165
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -8409,9 +8502,9 @@ edits = {
    "    int wrote = tagfs_volume_write(ledger_vlba(s_image.slot), 1, s_image.sector);\n"
    "    TagFSLockDrop(&g_ledger_lock);\n"),
   ("src/kernel/tagfs/integrity/integrity.c",
-   "    TagFSLockDropAt(&g_map_lock, site);\n\n    error_t got = tagfs_read_block(at, g_map_page[s]);\n\n    TagFSLockTakeAt(&g_map_lock, site);\n",
+   "    TagFSLockDropAt(&g_map_lock, site);\n\n    error_t got = TagFSMetaBlockRead(at, g_map_page[s]);\n\n    TagFSLockTakeAt(&g_map_lock, site);\n",
    "    (void)site;   /* " + M + ": the map's page comes in under its lock again */\n"
-   "    error_t got = tagfs_read_block(at, g_map_page[s]);\n\n"),
+   "    error_t got = TagFSMetaBlockRead(at, g_map_page[s]);\n\n"),
  ],
  "scribe": [
   ("src/kernel/tagfs/scribe/scribe.c",
@@ -8478,14 +8571,14 @@ edits = {
    "        rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);\n",
    "        rc = tagfs_alloc_blocks(1, &reg->spare_block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   /* " + M + ": the new block is taken and never stamped */\n"),
   ("src/kernel/tagfs/tag_registry/tag_registry.c",
-   "    rc = tagfs_write_block(reg->spare_block, reg->spare_image);\n",
+   "    rc = TagFSMetaBlockWrite(reg->spare_block, reg->spare_image);\n",
    "    reg->tail_image->next_block = reg->spare_block;   /* " + M + ": the link goes down before the block it names */\n"
-   "    tagfs_write_block(reg->tail_block, reg->tail_image);\n"
-   "    rc = tagfs_write_block(reg->spare_block, reg->spare_image);\n"),
+   "    TagFSMetaBlockWrite(reg->tail_block, reg->tail_image);\n"
+   "    rc = TagFSMetaBlockWrite(reg->spare_block, reg->spare_image);\n"),
   ("src/kernel/tagfs/tag_registry/tag_registry.c",
-   "        error_t wrote = tagfs_write_block(reg->tail_block, tail);\n",
+   "        error_t wrote = TagFSMetaBlockWrite(reg->tail_block, tail);\n",
    "        TagFSLockTake(&reg->lock);   /* " + M + ": the tail is written holding the registry's lock */\n"
-   "        error_t wrote = tagfs_write_block(reg->tail_block, tail);\n"
+   "        error_t wrote = TagFSMetaBlockWrite(reg->tail_block, tail);\n"
    "        TagFSLockDrop(&reg->lock);\n"),
   ("src/kernel/tagfs/tag_registry/tag_registry_load.c",
    "    /* The two blocks every flush of this registry is written through, and the\n",
@@ -10241,6 +10334,7 @@ case "${1:-both}" in
     mountfail) run_mountfail ;;
     yank)     run_yank ;;
     slowdisk) run_slowdisk ;;
+    haltslow) run_haltslow ;;
     gpt)      run_gpt ;;
     stillthere) run_stillthere ;;
     sleeps)     run_sleeps ;;
@@ -10324,7 +10418,7 @@ case "${1:-both}" in
     abba)     run_abba ;;
     abbamut)  run_abbamut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut ;;
     *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|stackguard|abba|abbamut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 

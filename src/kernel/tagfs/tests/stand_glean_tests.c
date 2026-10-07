@@ -85,7 +85,7 @@ static bool StandGleanSeals(SettleMark* newest, SettleMark* other, bool* has_oth
 static bool StandGleanHeadNext(uint32_t* next)
 {
     MetaPoolBlock* blk = (MetaPoolBlock*)g_test_output;
-    if (tagfs_read_block(StandGleanHead(), blk) != OK || blk->magic != TAGFS_MPOOL_MAGIC)
+    if (TagFSMetaBlockRead(StandGleanHead(), blk) != OK || blk->magic != TAGFS_MPOOL_MAGIC)
         return false;
     *next = blk->next_block;
     return true;

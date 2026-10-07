@@ -60,7 +60,7 @@ bool StandChainOnMedium(uint32_t head_volume_block, uint32_t magic, StandChain* 
             out->broken_at = block;
             return true;
         }
-        if (tagfs_read_block(block, s_link) != OK)
+        if (TagFSMetaBlockRead(block, s_link) != OK)
             return false;
         uint32_t says, next;
         memcpy(&says, s_link, sizeof(says));
@@ -95,7 +95,7 @@ void StandSayChainsLeft(void)
     if (!StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &table) ||
         table.broken ||
         !StandChainOnMedium(fs->layout.tag_registry_block, TAGFS_REGISTRY_MAGIC, &registry) ||
-        registry.broken || tagfs_read_block(registry.last, s_link) != OK) {
+        registry.broken || TagFSMetaBlockRead(registry.last, s_link) != OK) {
         kprintf("[TESTS] the chains the tests leave could not be walked on the medium\n");
         return;
     }
@@ -148,7 +148,7 @@ bool StandRegistryHoldsOnMedium(const char* key, const char* value)
     uint32_t                block = fs->layout.tag_registry_block - fs->layout.data_block;
 
     for (uint32_t hops = 0; hops < fs->layout.data_blocks; hops++) {
-        if (block >= fs->layout.data_blocks || tagfs_read_block(block, s_link) != OK ||
+        if (block >= fs->layout.data_blocks || TagFSMetaBlockRead(block, s_link) != OK ||
             rb->magic != TAGFS_REGISTRY_MAGIC)
             return false;
         if (StandRegistryBlockHolds(rb, key, value))
@@ -193,7 +193,7 @@ static bool StandRegistryOverfill(const StandChain* chain, uint32_t* out_first, 
 {
     const TagRegistryBlock* tail = (const TagRegistryBlock*)g_test_output;
 
-    if (tagfs_read_block(chain->last, g_test_output) != OK ||
+    if (TagFSMetaBlockRead(chain->last, g_test_output) != OK ||
         tail->used_bytes > TAGFS_REGISTRY_DATA_SIZE)
         return false;
     uint32_t count = (TAGFS_REGISTRY_DATA_SIZE - tail->used_bytes) / STAND_GROW_RECORD + 1;

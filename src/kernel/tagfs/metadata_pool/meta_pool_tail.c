@@ -438,7 +438,7 @@ error_t PoolSnapWriteNext(PoolSnap* snap, bool* done)
     *done = false;
     MetaPoolPage* p = snap->next;
     if (p) {
-        error_t wrote = tagfs_write_block(p->block, p->image);
+        error_t wrote = TagFSMetaBlockWrite(p->block, p->image);
         if (wrote != OK) {
             kprintf("[MetaPool] closed block %u of this volume's metadata would not be "
                     "written (error %u) — it stays in memory, and the next cycle writes it "
@@ -449,7 +449,7 @@ error_t PoolSnapWriteNext(PoolSnap* snap, bool* done)
         return OK;
     }
     if (snap->tail_write && !snap->tail_written) {
-        error_t wrote = tagfs_write_block(snap->tail_block, &s_settle_tail);
+        error_t wrote = TagFSMetaBlockWrite(snap->tail_block, &s_settle_tail);
         if (wrote != OK) {
             kprintf("[MetaPool] block %u, the tail of this volume's metadata, would not be "
                     "written (error %u) — the next cycle writes it again\n",

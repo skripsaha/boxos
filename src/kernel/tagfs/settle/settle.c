@@ -81,6 +81,14 @@ static uint64_t s_given_count;
 static bool     s_halt_ran;
 static error_t  s_halt_answer;
 
+/* The machine is stopping: from the halt's first ask on, every cycle begun is
+ * one of its last (SettleRunBegin). Raised once, never lowered. */
+static volatile bool s_halting;
+
+/* Steps any cycle took this boot — how the halt's drain sees a cycle on
+ * another core going on (SettleStepsTaken). */
+static volatile uint64_t s_steps;
+
 /* Where the last settled seal's pool span ended — the next seal's pool_from —
  * and whether this volume's seals say its medium once held less than a seal
  * did. The Settle's holder's, and the mount's with the door shut. */
@@ -176,6 +184,11 @@ void SettleOwed(uint64_t* unsettled, bool* committer_busy)
                        amp_core_online(&g_amp.cores[holder - 1u]);
 }
 
+uint64_t SettleStepsTaken(void)
+{
+    return __atomic_load_n(&s_steps, __ATOMIC_ACQUIRE);
+}
+
 error_t SettleHaltAnswer(uint64_t* unsettled)
 {
     uint64_t inked   = InkedGen();
@@ -202,7 +215,8 @@ error_t SettleHaltAnswer(uint64_t* unsettled)
  * A cycle somebody asked for and waits on closes the tail onto a Spare, and so
  * does one that must give Fallow's ground back; one the cadence began closes
  * it only as far as a waiter is owed. Each leaves the deletes their share of
- * the reserve, but the halt's, which gives every Spare back right after.
+ * the reserve, but the halt's, which gives every Spare back right after — and
+ * leaves out of the map the ground only an open handle still holds.
  */
 static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
 {
@@ -220,6 +234,7 @@ static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
     if (why == SETTLE_FOR_HALT) {
         snap->given = PoolSparesGiveBack();
         IntegrityLayDrop();
+        FallowViewedUnnamed(s_cycles);
     } else {
         (void)IntegrityLayName();
     }
@@ -529,9 +544,17 @@ static void SettleDone(SettleSnap* snap)
 
 /* A cycle the caller just took the Scribe for, begun: Glean's pass first — a
  * machine stopping gleans nothing, since ground it took off now would rest
- * past the last cycle — and then S0, each a step of its own. */
+ * past the last cycle — and then S0, each a step of its own.
+ *
+ * Once the halt has asked for its cycles, a cycle anybody else begins is one
+ * of them too. One the cadence had already decided on, or an asker for room
+ * on another core, can take the Scribe right after the halt's ask, and the
+ * halt's ask is then answered by that cycle: begun as itself, it would seal
+ * the volume unclean and stamp a Spare after the halt gave the last one back. */
 static void SettleRunBegin(SettleWhy why, uint64_t cover, bool door)
 {
+    if (__atomic_load_n(&s_halting, __ATOMIC_ACQUIRE))
+        why = SETTLE_FOR_HALT;
     memset(&s_run.snap, 0, sizeof(s_run.snap));
     s_run.why     = why;
     s_run.door    = door;
@@ -608,6 +631,7 @@ static bool SettleRunStep(error_t* answer)
     error_t rc = SettleStepRun(&s_run.snap, &s_run.step);
     s_run.in_step = false;
     s_run.busy_us += SettleNowUs() - t0;
+    __atomic_add_fetch(&s_steps, 1u, __ATOMIC_RELEASE);
 
     if (rc != OK || s_run.step == SETTLE_STEP_DONE) {
         *answer = rc;
@@ -778,21 +802,51 @@ error_t SettleForRoom(void)
     return ERR_TAGFS_NO_SPACE;
 }
 
-/* Whether the halt still owes the volume ground at rest: blocks Fallow holds,
- * or blocks the last cycle gave back that no cycle has written the map of. */
+/* Whether the halt still owes the volume ground at rest: blocks Fallow holds
+ * that the map still writes taken, or blocks the last cycle gave back that no
+ * cycle has written the map of. */
 static bool SettleHaltOwesGround(void)
 {
     TagFSState* fs = tagfs_get_state();
     TagFSLockTake(&fs->lock);
-    bool resting = FallowBlocks() > 0;
+    bool resting = FallowBlocksMapTaken() > 0;
     TagFSLockDrop(&fs->lock);
     return resting || s_given > 0;
 }
+
+/*
+ * ‼ NO CLEAN SHUTDOWN LEAVES GROUND AT REST. A block in Fallow is taken on the
+ * medium and named by nothing, and the next mount's roll call keeps such a
+ * block taken for good. So the last cycle is followed by the ones Fallow's
+ * rule asks for — each settles, so both copies of the Ledger move past the
+ * records that freed the ground — and by one more that writes the map giving
+ * it back. Ground only an open handle still holds is written free by that one
+ * too, and stays out of the allocator's hands while the handle reads it
+ * (FallowViewedUnnamed). A Ledger freer the last cycle itself made — the Use
+ * Context chain it replaced — is named by the next cycle's image and rests
+ * FallowLag() cycles from there: at most 1 + 1 + FallowLag() + 1, fewer when
+ * nothing rests.
+ */
+static error_t SettleHaltCycles(void)
+{
+    error_t rc = SettleAsked(SETTLE_FOR_HALT);
+    for (uint64_t more = 0; rc == OK && more <= FallowLag() + 1u && SettleHaltOwesGround(); more++)
+        rc = SettleAsked(SETTLE_FOR_HALT);
+    return rc;
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+error_t TagFSStandSettleForHalt(void)
+{
+    return SettleHaltCycles();
+}
+#endif
 
 error_t TagFSSettleForHalt(void)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
+    __atomic_store_n(&s_halting, true, __ATOMIC_RELEASE);
 
     /* A medium that is away takes no cycle, and the stopping machine is the
      * event its open book waited for. */
@@ -804,20 +858,7 @@ error_t TagFSSettleForHalt(void)
         return ERR_DEVICE_NOT_READY;
     }
 
-    /*
-     * ‼ NO CLEAN SHUTDOWN LEAVES GROUND AT REST. A block in Fallow is taken on
-     * the medium and named by nothing, and the next mount's roll call keeps
-     * such a block taken for good. So the last cycle is followed by the ones
-     * Fallow's rule asks for — each settles, so both copies of the Ledger move
-     * past the records that freed the ground — and by one more that writes the
-     * map giving it back. A Ledger freer the last cycle itself made — the Use
-     * Context chain it replaced — is named by the next cycle's image and rests
-     * FallowLag() cycles from there: at most 1 + 1 + FallowLag() + 1, fewer
-     * when nothing rests.
-     */
-    error_t rc = SettleAsked(SETTLE_FOR_HALT);
-    for (uint64_t more = 0; rc == OK && more <= FallowLag() + 1u && SettleHaltOwesGround(); more++)
-        rc = SettleAsked(SETTLE_FOR_HALT);
+    error_t rc    = SettleHaltCycles();
     s_halt_answer = rc;
     s_halt_ran    = true;
     tagfs_leave();

@@ -115,11 +115,14 @@ bool     MapSlotSettled(const void *ctx);
 
 /* The lay's (integrity_lay.c). Under g_map_lock: the new run's block that
  * holds page idx, when the page is carried already and every page-out of it
- * goes there too, else 0; and a page-out the new run missed, so the page is
- * carried again by a later step. With no TagFS lock held, from the mount: the
- * lay begun — OK, or why not, said. The lay let go of with the volume. */
+ * goes there too, else 0; a page-out the new run missed, so the page is
+ * carried again by a later step; and whether a block is one of the new run's,
+ * which are the map's own (in_map_region). With no TagFS lock held, from the
+ * mount: the lay begun — OK, or why not, said. The lay let go of with the
+ * volume. */
 uint32_t MapLayCarried(uint32_t idx);
 void     MapLayCarryAgain(uint32_t idx);
+bool     MapLayRunHolds(uint32_t block);
 error_t  MapLayBegin(uint32_t count, uint32_t entries, uint32_t old_first, uint32_t old_count);
 void     MapLayLetGo(void);
 
