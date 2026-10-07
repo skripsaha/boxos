@@ -52,9 +52,17 @@
  * stand over the medium, so an Ink with no Spare to close the tail onto answers
  * ERR_WOULD_BLOCK (INK_ASKS_SPARES) and the job stamps one through the port
  * like any block of its own (W_SPARE), hands it to the pool and inks again.
- * And a volume short of ground Fallow still rests turns the job synchronous:
- * a continuation cannot wait for the Settle cycle that gives it back, and a
- * service point can (HelmWriteWindow), from the last window inked.
+ *
+ * ‼ ROOM ON ITS WAY IS WAITED FOR, NEVER ANSWERED (R6). A volume short of
+ * ground a Settle cycle gives back answers ERR_WOULD_BLOCK, and nothing of
+ * the turn that met it is done — a window, a span, a defrag, or the Spare a
+ * window's record needs. A continuation cannot wait for a cycle: the job
+ * turns synchronous, from the last window inked. The synchronous job waits
+ * for the next cycle's end with its Helm held and its caller parked
+ * (SettleWaitLinkCycle), and takes the same turn again at a service point
+ * then; no cycle is run inside anybody's call for it. A caller in the kernel
+ * standing in its call waits for the cycles itself (HelmRoomCameBack). The
+ * word reaches no program as an answer (ChitAnswer).
  *
  * ‼ A USB DISK'S ANSWER IS NOT AN INTERRUPT'S. An AHCI port answers in its
  * completion interrupt, and the job's next step is the drain core's baton. A
@@ -100,6 +108,14 @@
  * ========================================================================= */
 
 static void wjob_defer(WriteJob *j, const OpContext *ctx);
+static bool wjob_answered_later(const WriteJob *j);
+
+/* Who a job's chit and its answer name. */
+static const char *const wjob_holder[] = {
+    [WRITE_JOB_WRITE]  = "storage.write",
+    [WRITE_JOB_SPAN]   = "storage.span",
+    [WRITE_JOB_DEFRAG] = "system.fs.defrag",
+};
 
 /* The write's next window, synchronously, under the Helm the job holds: from
  * the first byte no window inked yet, where the last one ended. */
@@ -113,23 +129,70 @@ static error_t wjob_window(WriteJob *j)
     return rc;
 }
 
-/* A synchronous job's turn under the Helm it holds: a span or a defrag whole,
- * a write one window. A write with windows left gives its core back — its
- * caller parked if it was not yet, the job listed for the next service point,
- * and the turn ends there; a caller in the kernel standing in its call has no
- * core to give back, and its windows run on. The handler's answer when the job
- * ended inside its caller's call, else ERR_WOULD_BLOCK: the answer is the
- * job's to push. */
+/* The job's work under the Helm it holds: a span or a defrag whole, a write
+ * one window. */
+static error_t wjob_work(WriteJob *j)
+{
+    switch (j->kind) {
+    case WRITE_JOB_SPAN:
+        return HelmSpan(j->handle, j->span_size, &j->span_was);
+    case WRITE_JOB_DEFRAG:
+        return HelmDefrag(j->handle);
+    default:
+        return wjob_window(j);
+    }
+}
+
+/* The cycle's end the job waited for — or, refused for good, the answer that
+ * ends it (a medium that left, one that takes no write): noted, and the job
+ * listed for a service point, which takes its turn. Run where the cycle's
+ * waiters are answered, with no TagFS lock held. */
+static void wjob_room_came(SettleWaiter *w, error_t rc)
+{
+    WriteJob *j = container_of(w, WriteJob, room);
+    j->room_came = rc;
+    HelmReady(&j->helm);
+}
+
+/* The volume is short of ground a Settle cycle gives back: its caller parked
+ * if it was not yet, the job waits for the next cycle's end, its Helm held.
+ * The wait is room asked for, as the allocator's refusal was — a cycle refused
+ * for want of room before it was linked waits for exactly that
+ * (SettleWaitersPark). A cycle on another core may answer it the moment it is
+ * linked: the job is not touched again here. */
+static void wjob_wait_for_room(WriteJob *j)
+{
+    if (!j->deferred)
+        wjob_defer(j, j->ctx);
+    SettleDemand(SETTLE_DEMAND_ROOM);
+    SettleWaitLinkCycle(&j->room, wjob_room_came);
+}
+
+/* A synchronous job's turn under the Helm it holds: its work, or — when the
+ * cycle it waited for was refused for good — that refusal. A write with
+ * windows left gives its core back — its caller parked if it was not yet, the
+ * job listed for the next service point, and the turn ends there; a caller in
+ * the kernel standing in its call has no core to give back, and its windows
+ * run on. Room on its way is waited for (wjob_wait_for_room), or, by a caller
+ * in the kernel, in its own call. The handler's answer when the job ended
+ * inside its caller's call, else ERR_WOULD_BLOCK: the answer is the job's to
+ * push. */
 static int wjob_turn(WriteJob *j)
 {
-    if (j->kind == WRITE_JOB_SPAN)
-        return wjob_finalize(j, HelmSpan(j->handle, j->span_size, &j->span_was));
-    if (j->kind == WRITE_JOB_DEFRAG)
-        return wjob_finalize(j, HelmDefrag(j->handle));
+    error_t came = j->room_came;
+    j->room_came = OK;
+    if (came != OK)
+        return wjob_finalize(j, came);
 
     for (;;) {
-        error_t rc = wjob_window(j);
-        if (rc != OK || j->bytes_inked >= j->source.bytes)
+        error_t rc = wjob_work(j);
+        if (rc == ERR_WOULD_BLOCK && wjob_answered_later(j)) {
+            wjob_wait_for_room(j);
+            return ERR_WOULD_BLOCK;
+        }
+        if (HelmRoomCameBack(&rc))
+            continue;
+        if (rc != OK || j->kind != WRITE_JOB_WRITE || j->bytes_inked >= j->source.bytes)
             return wjob_finalize(j, rc);
         if (!j->deferred) {
             if (!j->target)
@@ -358,6 +421,7 @@ static void wjob_tell_stand(WriteJobStandAnswer *a, error_t rc, uint64_t written
  * the volume lent. The handler's return when the job ran inside its call. */
 int wjob_finalize(WriteJob *j, error_t rc)
 {
+    rc = ChitAnswer(rc, j->target ? j->target->pid : 0, j->submit_cookie, wjob_holder[j->kind]);
     uint64_t written = j->bytes_inked;
     if (written == 0)
         j->final_size = j->loaded ? j->plot.size_before : j->handle->file_size;
@@ -503,15 +567,10 @@ static error_t wjob_make(const WriteJobAsk *ask, Crate *crates, const OpContext 
  * returns. */
 static void wjob_defer(WriteJob *j, const OpContext *ctx)
 {
-    static const char *const holder[] = {
-        [WRITE_JOB_WRITE]  = "storage.write",
-        [WRITE_JOB_SPAN]   = "storage.span",
-        [WRITE_JOB_DEFRAG] = "system.fs.defrag",
-    };
     j->deferred = true;
     j->ctx      = NULL;
     process_set_state(ctx->proc, PROC_WAITING);
-    ChitGive(ctx, holder[j->kind], j->file_id);
+    ChitGive(ctx, wjob_holder[j->kind], j->file_id);
 }
 
 int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)

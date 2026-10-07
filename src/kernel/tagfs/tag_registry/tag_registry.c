@@ -570,6 +570,9 @@ static uint16_t RegistryPack(TagRegistry* reg, TagRegistryBlock* image, uint16_t
  * and the tail's image links it — a link that reaches the medium only with the
  * tail, after all of this. Otherwise nothing names the Spare, and one the
  * medium has stamped stays in hand for the next flush; *why says what refused.
+ * No block taken at all is the allocator's answer as it is: ERR_TAGFS_NO_SPACE,
+ * or ERR_WOULD_BLOCK while a Settle cycle would give ground back — room on its
+ * way, which the caller waits for its own way (settle_ops.h).
  */
 static error_t RegistryGrow(TagRegistry* reg, uint16_t from, uint16_t* out_end,
                             char* why, size_t why_size) {
@@ -579,6 +582,11 @@ static error_t RegistryGrow(TagRegistry* reg, uint16_t from, uint16_t* out_end,
         rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);
         if (rc == ERR_TAGFS_NO_SPACE) {
             ksnprintf(why, why_size, "the volume has no free block to lengthen the chain with");
+            return rc;
+        }
+        if (rc == ERR_WOULD_BLOCK) {
+            ksnprintf(why, why_size, "the volume has no free block to lengthen the chain with "
+                                     "until a Settle cycle gives ground back");
             return rc;
         }
         if (rc != OK) {
@@ -617,7 +625,8 @@ static error_t RegistryGrow(TagRegistry* reg, uint16_t from, uint16_t* out_end,
  *
  * OK: every id below the new written_next is on the medium. ERR_TAGFS_NO_SPACE:
  * the volume has no block to grow by, and the tail took what fitted — a full
- * volume keeps the tags it has room for. Any other refusal moves nothing: the
+ * volume keeps the tags it has room for; ERR_WOULD_BLOCK the same, while a
+ * Settle cycle would give a block back. Any other refusal moves nothing: the
  * tail's image is put back, written_next stays, and the next pass packs the
  * same records at the same places and links the same Spare.
  */
@@ -633,7 +642,7 @@ static error_t RegistryWritePass(TagRegistry* reg, char* why, size_t why_size) {
 
     uint16_t end = upto;
     error_t  rc  = full ? RegistryGrow(reg, upto, &end, why, why_size) : OK;
-    if (rc != OK && rc != ERR_TAGFS_NO_SPACE)
+    if (rc != OK && rc != ERR_TAGFS_NO_SPACE && rc != ERR_WOULD_BLOCK)
         goto refused;
 
     if (tail->entry_count != was_count || tail->next_block != 0 || reg->tail_owed) {

@@ -9,6 +9,7 @@
 #include "process.h"
 #include "baton.h"      /* embedded never-drop MPSC node (cq_node) */
 #include "roadstead.h"  /* the job's own berth at the port */
+#include "settle.h"     /* the job's wait for a cycle's end, when room is on its way */
 
 /*
  * WriteJob — the one automaton every change of a file's extents a program asks
@@ -123,6 +124,9 @@ typedef struct WriteJob {
     /* ---- the file ---- */
     HelmWaiter        helm;              /* its place in the file's Helm */
     bool              holds_helm;
+    SettleWaiter      room;              /* its wait for a cycle's end, the volume short of
+                                          * ground a Settle cycle gives back */
+    error_t           room_came;         /* ... and what that cycle's end answered */
     Plot              plot;              /* the async write's, loaded under the Helm (W_ALLOC) */
     bool              loaded;            /* PlotLoad answered OK */
     uint64_t          final_size;        /* the size the job leaves */

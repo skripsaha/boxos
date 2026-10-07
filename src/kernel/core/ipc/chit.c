@@ -83,3 +83,18 @@ void ChitPeek(process_t *p, ChitView *out)
     *out = c->view;
     spin_unlock(&c->lock);
 }
+
+error_t ChitAnswer(error_t rc, uint32_t pid, uint32_t cookie, const char *holder)
+{
+    if (rc != ERR_WOULD_BLOCK)
+        return rc;
+#if CONFIG_STRICT
+    panic("[CHIT] DEFECT: %s answered pid %u's token 0x%06x ERR_WOULD_BLOCK — a word "
+          "boxlib drops, and the program would wait for ever",
+          holder ? holder : "?", pid, cookie);
+#endif
+    kprintf("[CHIT] DEFECT: %s answered pid %u's token 0x%06x ERR_WOULD_BLOCK — a word "
+            "boxlib drops; answered ERR_TAGFS_NO_SPACE instead\n",
+            holder ? holder : "?", pid, cookie);
+    return ERR_TAGFS_NO_SPACE;
+}

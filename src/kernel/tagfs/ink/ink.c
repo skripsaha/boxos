@@ -259,29 +259,18 @@ void InkGleanLocked(uint32_t fid, const RecordWhere* from, const uint8_t* packed
 // A Spare, when an Ink had none
 // ----------------------------------------------------------------------------
 
-/* One Spare made; and when the volume is short while Fallow rests blocks, a
- * caller that may wait has cycles run until Fallow gives them back, and tries
- * once more. */
-static error_t InkSpareFor(void)
-{
-    error_t rc = PoolSpareMake();
-    if (rc == ERR_WOULD_BLOCK) {
-        rc = SettleForRoom();
-        if (rc == OK)
-            rc = PoolSpareMake();
-    }
-    return rc;
-}
-
 /* What the loops below do with an answer that is not final: INK_AGAIN goes
- * round again; ERR_WOULD_BLOCK does too, once a Spare is made. */
+ * round again; ERR_WOULD_BLOCK does too, once a Spare is made. A Spare the
+ * volume has no ground for while a Settle cycle would give some back is the
+ * Ink's ERR_WOULD_BLOCK, nothing changed: its caller waits for the cycle its
+ * own way (helm.h, settle_ops.h) — no cycle is run beneath an Ink. */
 static bool InkGoesRound(error_t* rc, InkSpares spares)
 {
     if (*rc == INK_AGAIN)
         return true;
     if (*rc != ERR_WOULD_BLOCK || spares != INK_MAKES_SPARES)
         return false;
-    *rc = InkSpareFor();
+    *rc = PoolSpareMake();
     return *rc == OK;
 }
 

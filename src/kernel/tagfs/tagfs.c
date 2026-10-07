@@ -2701,7 +2701,9 @@ error_t tagfs_span_file(uint32_t file_id, uint64_t size)
         rc = ERR_BUSY;
         if (HelmTakeNow(handle, &here)) {
             uint64_t was = 0;
-            rc = HelmSpan(handle, size, &was);
+            do {
+                rc = HelmSpan(handle, size, &was);
+            } while (HelmRoomCameBack(&rc));
             HelmLetGo(handle->ofe, &here);
         }
         tagfs_close(handle);
@@ -2963,7 +2965,9 @@ error_t tagfs_defrag_file(uint32_t file_id)
     if (handle) {
         rc = ERR_BUSY;
         if (HelmTakeNow(handle, &here)) {
-            rc = HelmDefrag(handle);
+            do {
+                rc = HelmDefrag(handle);
+            } while (HelmRoomCameBack(&rc));
             HelmLetGo(handle->ofe, &here);
         }
         tagfs_close(handle);

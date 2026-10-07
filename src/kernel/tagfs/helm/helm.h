@@ -122,10 +122,12 @@ uint64_t HelmViewFloor(uint32_t file_id);
 
 /*
  * The work a Helm's holder does, synchronously (helm_work.c). Each loads the
- * file's record under the Helm, answers ERR_FILE_NOT_FOUND at once for a file
- * given up, and when the volume is short of ground Fallow still rests has
- * Settle cycles run and tries again — the holder holds no lock, so it may wait
- * for one.
+ * file's record under the Helm and answers ERR_FILE_NOT_FOUND at once for a
+ * file given up. ERR_WOULD_BLOCK from it is no answer: nothing of the call was
+ * done, the volume is short of ground a Settle cycle gives back, and the
+ * holder waits for the cycle its own way before it makes the call again — a
+ * program's job parked until the cycle's end (write_job.c), a caller in the
+ * kernel in its own call (HelmRoomCameBack). No cycle is run beneath the work.
  *
  * A write is inked a window at a time (RT-16): the run the medium takes in one
  * command, in whole blocks — HelmWindowBytes, the bytes of the window that
@@ -150,5 +152,11 @@ error_t  HelmWriteWindow(TagFSFileHandle* handle, const PlotSource* src, uint64_
 error_t  HelmWrite(TagFSFileHandle* handle, const PlotSource* src, uint64_t* out_written);
 error_t  HelmSpan(TagFSFileHandle* handle, uint64_t size, uint64_t* out_was);
 error_t  HelmDefrag(TagFSFileHandle* handle);
+
+/* A caller in the kernel standing in its call, whose call answered *rc: true
+ * when it was ERR_WOULD_BLOCK and Settle cycles brought ground back
+ * (SettleForRoom), so the call is made again; otherwise false, and *rc is the
+ * answer. HelmWrite waits this way between its windows. */
+bool     HelmRoomCameBack(error_t* rc);
 
 #endif /* TAGFS_HELM_H */

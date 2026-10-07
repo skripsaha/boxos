@@ -71,8 +71,11 @@ static bool     s_spares_short;
 static uint64_t s_registry_refused;
 
 /* Blocks the last settled cycle's S6 gave back: the map carries them to the
- * medium at the next cycle's S1. The Settle's holder's alone. */
+ * medium at the next cycle's S1. The Settle's holder's alone. And every block
+ * the S6 of a cycle ever gave back, counted under the state lock: what an
+ * asker for room judges a cycle by (SettleForRoom). */
 static uint64_t s_given;
+static uint64_t s_given_count;
 
 /* The halt's last cycle, for tagfs_shutdown. */
 static bool     s_halt_ran;
@@ -510,6 +513,7 @@ static void SettleDone(SettleSnap* snap)
     LedgerSettled();
     GleanHeadSettled(&snap->head, snap->cycle, snap->mark.chain_first);
     s_given = FallowRipen(closed, snap->cycle, &nodes);
+    s_given_count += s_given;
     bool map_stood = IntegrityLayStands();
     TagFSLockDrop(&fs->lock);
 
@@ -664,6 +668,11 @@ error_t TagFSSettleAsCadence(void)
 {
     return SettleRunBeginForCadence() ? SettleRunDrive() : ERR_BUSY;
 }
+
+bool TagFSStandSettleBegin(void)
+{
+    return SettleRunBeginForCadence();
+}
 #endif
 
 // ----------------------------------------------------------------------------
@@ -712,14 +721,27 @@ error_t TagFSSettle(void)
     return rc;
 }
 
+/*
+ * ‼ ROOM IS JUDGED BY WHAT CAME BACK (F01-3), never by what still rests:
+ * deletes beside the asker put ground in Fallow as fast as a cycle gives some
+ * back, and a cycle on another core may give all of it back between the
+ * allocator's refusal and the first look here. A cycle answers by the ground
+ * the S6 of the cycles gave back (s_given_count), or the allocator's free
+ * count risen. And nothing resting with no slack to glean is no refusal: the
+ * room may have come already, and the take asked again says the last word
+ * itself (MapShort).
+ */
 error_t SettleForRoom(void)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs  = tagfs_get_state();
+    bool        own = SettleRunBetweenStepsHere();
 
-    /* A caller under a TagFS lock or a Scribe, or a baton continuation, may
-     * not wait for a cycle: the room stays on its way, and the next cycle is
-     * asked for. */
-    if (LockRankAnyHeldHere() || ScribeAnyHeldHere() || BatonRunningHere()) {
+    /* A caller under a TagFS lock, a Scribe or a baton continuation may not
+     * wait for a cycle: the room stays on its way, and the next cycle is asked
+     * for. But the Settle's own holder, between two steps of its cycle, runs
+     * that cycle to its end first (SettleAsked) — waiting for it would be
+     * waiting for itself. */
+    if (LockRankAnyHeldHere() || BatonRunningHere() || (ScribeAnyHeldHere() && !own)) {
         SettleDemand(SETTLE_DEMAND_ROOM);
         return ERR_WOULD_BLOCK;
     }
@@ -730,9 +752,11 @@ error_t SettleForRoom(void)
         TagFSLockTake(&fs->lock);
         uint64_t resting = FallowBlocks();
         bool     glean   = resting == 0 && GleanMayFree();
+        uint64_t given   = s_given_count;
+        uint64_t had     = fs->ledger.free_blocks;
         TagFSLockDrop(&fs->lock);
         if (resting == 0 && !glean)
-            return round ? OK : ERR_TAGFS_NO_SPACE;
+            return OK;
         if (glean)
             GleanShort();
 
@@ -741,7 +765,7 @@ error_t SettleForRoom(void)
             return rc;
 
         TagFSLockTake(&fs->lock);
-        bool came_back = FallowBlocks() < resting;
+        bool came_back = s_given_count != given || fs->ledger.free_blocks > had;
         TagFSLockDrop(&fs->lock);
         if (came_back)
             return OK;
