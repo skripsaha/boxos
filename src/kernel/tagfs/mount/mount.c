@@ -91,11 +91,12 @@ typedef struct {
     bool     torn;           /* sealed, its open block rolled back: torn_block up to torn_end */
     uint32_t torn_block;
     uint32_t torn_end;
+    uint32_t issued_below;   /* sealed: the stood Ledger's next file id; 0, a count let wrap */
     uint32_t checked;
     uint32_t corrected;      /* a row naming another record than the newest */
     uint32_t derived;        /* sealed: a row the table lacked, set from the pool */
-    uint32_t unsettled;      /* sealed: a row with no record in the span */
-    uint32_t lost;           /* a row with no record that reads, or none left by a roll back */
+    uint32_t unsettled;      /* sealed: a row of an id the stood Ledger had not issued, no record */
+    uint32_t lost;           /* a row with no record that reads: no seal, or a file that settled */
     uint32_t unnamed;        /* no seal: a record no row names */
     uint32_t top_fid;
 } MountFileCount;
@@ -103,22 +104,31 @@ typedef struct {
 /*
  * A row with no record left, judged: true when it names a file lost — said,
  * and the name let go with it — false for a row of a cycle that did not
- * settle. Under a seal a row names its file where its first record was laid
- * (InkNew), so a row naming the rolled-back open block short of the bytes the
- * seal said it held named a file that had settled there: its loss is the
- * person's, said as one, never counted with the cycle that did not settle.
+ * settle.
+ *
+ * ‼ UNDER A SEAL, AN ID ITS LEDGER HAD ISSUED NAMES A FILE THAT SETTLED. An id
+ * is issued and the file's first record laid in one hold of the state lock
+ * (InkNew), and a cycle's S0 takes the Ledger's image under that lock: every
+ * id below the stood Ledger's next one had its first record in the seal's span
+ * — and each record after it lies further on, so the span held one of them.
+ * None left there is a file lost — rolled back with the open block, or gone
+ * with a block the chain no longer holds — and its loss is the person's, said
+ * as one, never counted with the cycle that did not settle: that cycle's rows
+ * name ids the Ledger had not issued yet. A row naming the rolled-back open
+ * block short of the bytes the seal said it held is said as such.
  */
 static bool MountRowLost(uint32_t fid, uint32_t mb, uint32_t mo, const MountFileCount* n)
 {
     bool rolled = n->torn && mb == n->torn_block && mo < n->torn_end;
-    if (n->sealed && !rolled)
+    bool issued = n->issued_below == 0 || fid < n->issued_below;
+    if (n->sealed && !issued)
         return false;
     /* Said with kprintf, so it survives into a shipped build: this line was
      * the silence that turned a lost file into a mystery. */
     kprintf("[TagFS FSCK] file %u is named at block %u+%u and this volume's pool holds no "
             "record of it that reads%s — the file is gone and its name goes with it\n",
             fid, mb, mo, rolled ? ", its only one settled in the open block the mount "
-            "rolled back" : "");
+            "rolled back" : n->sealed ? ", though the seal it stands on had settled it" : "");
     return true;
 }
 
@@ -525,10 +535,11 @@ error_t MountReadVolume(const char** what)
         return rc;
 
     MountFileCount files = {
-        .sealed     = pool.stood != POOL_STOOD_NO_SEAL,
-        .torn       = pool.stood == POOL_STOOD_TORN_TAIL,
-        .torn_block = pool.torn_block,
-        .torn_end   = pool.torn_end,
+        .sealed       = pool.stood != POOL_STOOD_NO_SEAL,
+        .torn         = pool.stood == POOL_STOOD_TORN_TAIL,
+        .torn_block   = pool.torn_block,
+        .torn_end     = pool.torn_end,
+        .issued_below = fs->ledger.next_file_id,
     };
     rc = file_table_init(MountDataBlock(fs->layout.file_table_block), files.sealed);
     if (rc == OK)

@@ -21,7 +21,9 @@
  *   the table      under a seal, derived from the pool's span — a file is the
  *                  newest record of its id, a row with no record in the span
  *                  is a cycle that did not settle and is let go, counted in one
- *                  line; with no seal, the table says which files there are;
+ *                  line, unless the seal's Ledger had issued its id: then a
+ *                  file lost, said; with no seal, the table says which files
+ *                  there are;
  *   the fid        the next file id is past every id the medium has shown —
  *                  the Ledger's, every row's, every record's, past the seal
  *                  too — so no id it ever saw is given out again;

@@ -43,6 +43,23 @@
  * every record the tail holds, so between a move and S0 either that Spare is
  * still there or the moved records are closed already.
  *
+ * ‼ A BLOCK LEAVES ONLY ONCE WHAT REPLACED ITS RECORDS LIES CLOSED. A block the
+ * map names nothing in holds records that newer ones replaced — and a newer
+ * one may lie in the open tail, which a torn page rolls back onto the record
+ * before it (decision 5): taken off under a seal whose open block holds what
+ * replaced its records, the block takes that record with it, and a file
+ * somebody merely changed is gone. So a link keeps the newest link a record
+ * that took the place of one of its own lies in — the file's next record, its
+ * Quitclaim, the record laid again (PoolFront.replaced_by) — and leaves only
+ * under a seal that counts that link closed: one before the tail, or the tail
+ * this cycle's S0 closes for a move. Otherwise it waits for the tail's next
+ * close — its turn, a waiter's cycle, a move — and the pass ends at it. No
+ * cycle closes the tail for it: a cycle the cadence began leaves the tail open
+ * for its records to fill a block, and a close bought for an emptied front
+ * costs a Spare and a block written near empty for the one given back. While
+ * the tail stays open the chain grows no longer, and the turn that lengthens
+ * it frees the front.
+ *
  * ‼ A QUITCLAIM IS LEFT BEHIND, ONCE NO OLDER COPY OF ITS FILE REMAINS — and at
  * the front none ever does. A file's records lie in the order they were
  * inked, a moved one included (it is its file's newest when it moves, and

@@ -150,12 +150,15 @@ void     tagfs_metadata_free(TagFSMetadata* meta);
  * out of the map, its row with it. OK, or ERR_NO_MEMORY when the stake did not
  * cover the insert and the heap refused, and then `rec` is let go. Every link
  * of the chain counts the bytes of the records the map names in it, and the
- * door keeps the count: what a record leaves, what one comes to. */
+ * door keeps the count: what a record leaves, what one comes to — and, for the
+ * link a record leaves, the newest link a record that took its place lies in,
+ * the Quitclaim's included (PoolFront.replaced_by). */
 error_t  PoolMirrorPut(uint32_t fid, FileRecord* rec, const RecordWhere* where,
                        FileMapStake* stake);
 
 /* The file out of the map — its record and its row there — through the same
- * door; the file table is the caller's to tell. */
+ * door, nothing taking its record's place; the file table is the caller's to
+ * tell. */
 void     PoolMirrorDrop(uint32_t fid);
 
 /* The file's record, where `from` says, laid again where `to` says (Glean):
@@ -373,13 +376,17 @@ bool     PoolChainHolds(uint32_t block);
 typedef struct {
     uint32_t block;
     uint32_t link;
-    uint32_t live;      /* the bytes of its records the map names */
-    uint32_t next;      /* the block after it — what its next_block says */
-    uint32_t mix;       /* its part in the seal's fold */
+    uint32_t live;          /* the bytes of its records the map names */
+    uint32_t next;          /* the block after it — what its next_block says */
+    uint32_t mix;           /* its part in the seal's fold */
+    uint32_t replaced_by;   /* the newest link a record that replaced one of its own lies in */
 } PoolFront;
 
 /* The i-th link from the chain's front, when Glean may take it. */
 bool     PoolFrontLink(uint32_t i, PoolFront* out);
+
+/* The open tail's link: every link before it is closed. */
+uint32_t PoolTailLink(void);
 
 /* Whether `img`, read off the medium, is the block the front link says it is:
  * its records sum to the link's mix. */

@@ -96,10 +96,11 @@ int PoolChainRoom(uint32_t want)
 void PoolChainAppend(uint32_t block)
 {
     uint32_t link = g_pool_chain_len ? g_pool_chain[g_pool_chain_len - 1].link + 1u : 0;
-    g_pool_chain[g_pool_chain_len].block = block;
-    g_pool_chain[g_pool_chain_len].link  = link;
-    g_pool_chain[g_pool_chain_len].mix   = 0;
-    g_pool_chain[g_pool_chain_len].live  = 0;
+    g_pool_chain[g_pool_chain_len].block       = block;
+    g_pool_chain[g_pool_chain_len].link        = link;
+    g_pool_chain[g_pool_chain_len].mix         = 0;
+    g_pool_chain[g_pool_chain_len].live        = 0;
+    g_pool_chain[g_pool_chain_len].replaced_by = link;
     g_pool_chain_len++;
 }
 
@@ -207,12 +208,37 @@ void tagfs_metadata_free(TagFSMetadata* meta)
 // The mirror
 // ---------------------------------------------------------------------------
 
+/* The record at `was` — none when its length is 0 — replaced by one laid in
+ * link `by`: its link leaves the chain only under a seal that counts `by`
+ * closed (glean.h). */
+static void PoolReplaced(const RecordWhere* was, uint32_t by)
+{
+    if (!was->len)
+        return;
+    uint32_t at = PoolChainAt(was->link);
+    if (at < g_pool_chain_len && g_pool_chain[at].replaced_by < by)
+        g_pool_chain[at].replaced_by = by;
+}
+
+/* The file out of the map, and its record's bytes out of its link's count;
+ * `by`, when a Quitclaim took its place, is where that lies, NULL when nothing
+ * did. */
+static void PoolMirrorLetGo(uint32_t fid, const RecordWhere* by)
+{
+    RecordWhere was;
+    FileMapDrop(PoolFiles(), fid, &was);
+    PoolLiveMove(&was, NULL);
+    if (by)
+        PoolReplaced(&was, by->link);
+    s_died_bytes += was.len;
+}
+
 error_t PoolMirrorPut(uint32_t fid, FileRecord* rec, const RecordWhere* where,
                       FileMapStake* stake)
 {
     if (!rec || !(rec->flags & TAGFS_FILE_ACTIVE)) {
         FileRecordRelease(rec);
-        PoolMirrorDrop(fid);
+        PoolMirrorLetGo(fid, where);
         file_table_delete(fid);
         return OK;
     }
@@ -220,6 +246,7 @@ error_t PoolMirrorPut(uint32_t fid, FileRecord* rec, const RecordWhere* where,
     error_t     rc = FileMapRecordPut(PoolFiles(), fid, rec, where, stake, &was);
     if (rc == OK) {
         PoolLiveMove(&was, where);
+        PoolReplaced(&was, where->link);
         s_died_bytes += was.len;
     }
     return rc;
@@ -227,10 +254,7 @@ error_t PoolMirrorPut(uint32_t fid, FileRecord* rec, const RecordWhere* where,
 
 void PoolMirrorDrop(uint32_t fid)
 {
-    RecordWhere was;
-    FileMapDrop(PoolFiles(), fid, &was);
-    PoolLiveMove(&was, NULL);
-    s_died_bytes += was.len;
+    PoolMirrorLetGo(fid, NULL);
 }
 
 bool PoolMirrorMove(uint32_t fid, const RecordWhere* from, const RecordWhere* to)
@@ -240,6 +264,7 @@ bool PoolMirrorMove(uint32_t fid, const RecordWhere* from, const RecordWhere* to
         !FileMapRecordRelink(PoolFiles(), fid, from, to, block))
         return false;
     PoolLiveMove(from, to);
+    PoolReplaced(from, to->link);
     return true;
 }
 
@@ -282,12 +307,18 @@ bool PoolFrontLink(uint32_t i, PoolFront* out)
     const MetaPoolLink* l = &g_pool_chain[i];
     if (PoolImageOf(l->link))
         return false;       /* closed, but no cycle has written it yet */
-    out->block = l->block;
-    out->link  = l->link;
-    out->live  = l->live;
-    out->next  = g_pool_chain[i + 1u].block;
-    out->mix   = l->mix;
+    out->block       = l->block;
+    out->link        = l->link;
+    out->live        = l->live;
+    out->next        = g_pool_chain[i + 1u].block;
+    out->mix         = l->mix;
+    out->replaced_by = l->replaced_by;
     return true;
+}
+
+uint32_t PoolTailLink(void)
+{
+    return g_pool_tail_link;
 }
 
 bool PoolFrontReadsTrue(const PoolFront* front, const MetaPoolBlock* img)

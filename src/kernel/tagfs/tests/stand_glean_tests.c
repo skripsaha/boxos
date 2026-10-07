@@ -7,6 +7,8 @@
 #include "../ink/fallow.h"
 #include "../ledger/ledger.h"
 #include "../settle/settle.h"
+#include "../mount/away.h"
+#include "block_fail.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -18,7 +20,8 @@
 // the mount walks all of it. Glean takes the dead blocks off the front and
 // moves the live records of a block it takes into the tail (glean/glean.h).
 // These drive the cycles themselves (the runner holds the cadence) and ask
-// the chain in memory, the seal and the head on the medium, and the map.
+// the chain in memory, the seal and the head on the medium, and the map; the
+// last takes the volume down and has the mount itself roll a torn tail back.
 // ============================================================================
 
 /* Overwrites of one file, each settled by a cycle of its own. */
@@ -618,6 +621,179 @@ out:
     return verdict;
 }
 
+/* Waiter's cycles a block emptied of live records is given to come to the
+ * chain's front, and cycles the cadence begins Fallow is given to hand back
+ * all it rests (its freer's cycle and the lag after it, and the spare). */
+#define STAND_GLEAN_FRONT_ROUNDS 8u
+#define STAND_GLEAN_BARE_ROUNDS  8u
+
+/* Every file but `keep` whose newest record lies in link `upto` or before it,
+ * laid again as it is — renamed to its own name, a record the same as the one
+ * it replaces — so no block up to that link holds a record the map names but
+ * `keep`'s. How many in *count; false when one was refused. */
+static bool StandGleanLayAgainUpTo(uint32_t upto, uint32_t keep, uint32_t* count)
+{
+    FileMap* files = tagfs_get_state()->files;
+    char*    name  = (char*)g_test_output;
+    uint32_t batch[32], from = 1, got;
+
+    *count = 0;
+    while ((got = FileMapFiles(files, from, batch, ARRAY_SIZE(batch))) > 0) {
+        for (uint32_t i = 0; i < got; i++) {
+            RecordWhere where;
+            FileRecord* rec = batch[i] == keep ? NULL : FileMapRecordHold(files, batch[i], &where);
+            if (!rec)
+                continue;
+            bool lay = where.link <= upto;
+            if (lay)
+                memcpy(name, rec->name, rec->name_len + 1u);
+            FileRecordRelease(rec);
+            if (!lay)
+                continue;
+            if (tagfs_rename_file(batch[i], name, INK_UNWARRANTED) != 0)
+                return false;
+            (*count)++;
+        }
+        if (batch[got - 1] == 0xFFFFFFFFu)
+            break;
+        from = batch[got - 1] + 1;
+    }
+    return true;
+}
+
+/* The link at the chain's front, once a cycle has written it (PoolFrontLink). */
+static bool StandGleanFront(PoolFront* front)
+{
+    TagFSState* fs = tagfs_get_state();
+    TagFSLockTake(&fs->lock);
+    bool has = PoolFrontLink(0, front);
+    TagFSLockDrop(&fs->lock);
+    return has;
+}
+
+static uint64_t StandGleanResting(void)
+{
+    TagFSState* fs = tagfs_get_state();
+    TagFSLockTake(&fs->lock);
+    uint64_t resting = FallowBlocks();
+    TagFSLockDrop(&fs->lock);
+    return resting;
+}
+
+/* Cycles the cadence begins — none closes the tail for a waiter — until
+ * nothing rests in Fallow, and one more, whose map says on the medium that the
+ * ground came back: a take-down drops what rests, and the next mount would
+ * read it as ground nobody owns (StandSettledBare, with no tail closed). */
+static bool StandGleanCadenceBare(void)
+{
+    for (uint32_t round = 0; round < STAND_GLEAN_BARE_ROUNDS; round++) {
+        if (TagFSSettleAsCadence() != OK)
+            return false;
+        if (StandGleanResting() == 0)
+            return TagFSSettleAsCadence() == OK && StandGleanResting() == 0;
+    }
+    return false;
+}
+
+static bool StandGleanHolds(uint32_t fid)
+{
+    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    if (rec)
+        FileRecordRelease(rec);
+    return rec != NULL;
+}
+
+/*
+ * W4 (package T, finding 3). A file changed — its newest record in the open
+ * tail — whose record before that is the only live one in the block at the
+ * chain's front. The block stays on the chain while the record that replaced
+ * its own lies in a block the next cycles write again in place: a page of that
+ * tail torn by the power — a sector of it the medium cannot read, at the next
+ * mount, which rolls the block back (decision 5) — leaves the file standing on
+ * the record before its change. Red before: a cycle the cadence began took the
+ * front off for nothing, its seal named the change in the open tail alone, the
+ * torn tail took it, and the file was gone, its row let go as a cycle that did
+ * not settle.
+ */
+static TestResult TestStandGleanReplacedWaitsForTheClose(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    uint8_t     seat    = tagfs_get_seat();
+    uint32_t    epoch   = tagfs_mount_epoch();
+    uint32_t    file_id = 0, link = 0, block = 0, laid = 0, now_link = 0, now_block = 0;
+    bool        reached = false, let_go = false, has_other = false;
+    bool        in_open = false, front_kept = false;
+    PoolFront   front;
+    RecordWhere where;
+    SettleMark  seal, other;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT_EQ(tagfs_create_file("glean_replaced", NULL, 0, &file_id), 0,
+                   "a file is made, a record and no block");
+    TEST_ASSERT_OK(TagFSSettle(), "and settled by a cycle that closes the tail it lies in");
+    TEST_ASSERT(StandGleanRecordBlock(file_id, &link, &block), "its record lies on the chain");
+    TEST_ASSERT(StandGleanLayAgainUpTo(link, file_id, &laid),
+                "every other file whose record lies in its block or before it is laid again as it is");
+    TestEvidence("files laid again past the file's block:", laid);
+
+    /* The blocks before the file's hold no live record now, and come off the
+     * chain once what replaced theirs is closed. */
+    for (uint32_t round = 0; round < STAND_GLEAN_FRONT_ROUNDS && !reached; round++) {
+        TEST_ASSERT_OK(TagFSSettle(), "a waiter's cycle closes the tail and Glean takes the emptied front");
+        reached = StandGleanFront(&front) && front.link == link;
+    }
+    TEST_ASSERT(reached, "the file's block comes to the chain's front");
+    FileRecord* rec = FileMapRecordHold(fs->files, file_id, &where);
+    TEST_ASSERT(rec, "the map holds the file");
+    FileRecordRelease(rec);
+    TEST_ASSERT_EQ(front.live, where.len, "and its only live record there is the file's");
+
+    TEST_ASSERT_EQ(tagfs_rename_file(file_id, "glean_replaces", INK_UNWARRANTED), 0,
+                   "the file is changed: its newest record lands in the open tail");
+    TEST_ASSERT(StandGleanFront(&front) && front.link == link && front.live == 0,
+                "and the front holds no live record any more");
+    TEST_ASSERT_OK(TagFSSettleAsCadence(),
+                   "a cycle the cadence begins settles the change, closing the tail for no waiter");
+    TEST_ASSERT(StandGleanSeals(&seal, &other, &has_other), "the newest Ledger carries a seal");
+    TEST_ASSERT(StandGleanRecordBlock(file_id, &now_link, &now_block), "the change lies on the chain");
+    in_open    = now_block == seal.pool_to_block;
+    front_kept = seal.chain_first == block;
+    TestEvidence("the block of the record before it begins the seal's chain (1), not on it (0):",
+                 front_kept);
+    TEST_ASSERT(in_open, "the change lies in the seal's open block, which a torn page rolls back");
+
+    TEST_ASSERT(StandGleanCadenceBare(),
+                "cycles the cadence begins give back all that rests, the change left where it lies");
+    TEST_ASSERT(StandGleanSeals(&seal, &other, &has_other), "the newest Ledger carries a seal");
+
+    let_go = true;
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    BlockFailArmBadSectors(seat, tagfs_block_to_sector(seal.pool_to_block), TAGFS_BLOCK_SECTORS);
+    TagFSAttendArrival();
+    TEST_ASSERT(StandMountSettles(), "the mount road comes to rest");
+    TEST_ASSERT(BlockFailFired(), "the mount met a sector of the open block the medium cannot read");
+    TEST_ASSERT_EQ(BlockFailSeen(), 2,
+                   "in the walk that held the seals, and in the one that rolled the block back");
+    TEST_ASSERT(fs->initialized, "and the volume is MOUNTED");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
+    TEST_ASSERT(StandGleanHolds(file_id),
+                "the file whose change the torn block held stands on the record before it");
+    TEST_ASSERT(front_kept,
+                "the block whose only record the open block replaced stayed on the seal's chain");
+out:
+    if (let_go)
+        StandMountClose(seat);
+    if (file_id && fs->initialized) {
+        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
+        (void)TagFSSettle();
+    }
+    return verdict;
+}
+
 // ============================================================================
 // The suite
 // ============================================================================
@@ -648,6 +824,12 @@ static const TestCase g_stand_glean_tests[] = {
       .caveat_defect = "a lowered slack that gives nothing back is chased for ever, and a take "
                        "short of room waits on cycles that never bring it; or, lifted, it is "
                        "not tried again once records die" },
+    /* Last: it takes the volume down and mounts it again. */
+    { .name = "stand_glean_replaced_waits_for_the_close",
+      .func = TestStandGleanReplacedWaitsForTheClose, .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a cycle the cadence began took the chain's front off while the record "
+                       "that replaced its only live one lay in the open tail, and a torn page of "
+                       "the tail loses the file" },
 };
 
 const TestSuite g_stand_glean_suite = {

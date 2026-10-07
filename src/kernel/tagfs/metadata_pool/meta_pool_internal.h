@@ -18,14 +18,18 @@
 
 /* One link of the chain: the block, the number it keeps whatever is unlinked
  * around it — the numbers only rise along the chain — once the block is
- * closed, its mix in the seal's fold (PoolBlockMix), 0 for the open tail; and
- * the bytes of its records the map of live files names — a file's newest —
- * which only the tail's ever grows (Glean, glean/). */
+ * closed, its mix in the seal's fold (PoolBlockMix), 0 for the open tail; the
+ * bytes of its records the map of live files names — a file's newest — which
+ * only the tail's ever grows (Glean, glean/); and the newest link holding a
+ * record that took the place of one of its records — a newer record of the
+ * file, its Quitclaim, or the record Glean laid again — its own while none
+ * has, and never down. */
 typedef struct {
     uint32_t block;
     uint32_t link;
     uint32_t mix;
     uint32_t live;
+    uint32_t replaced_by;
 } MetaPoolLink;
 
 extern MetaPoolLink* g_pool_chain;
