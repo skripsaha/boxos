@@ -57,6 +57,40 @@ static error_t MapMediumSaid(int said, error_t otherwise)
     return said > 0 ? (error_t)said : otherwise;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The window + 1 whose next write runs a settle of the map on its way, and
+ * that settle's answer — the stand's, to meet a write that carries a debt
+ * while it is on its way. */
+static volatile uint32_t s_stand_way;
+static volatile error_t  s_stand_way_said;
+static volatile uint8_t  s_stand_way_ran;
+
+static void MapStandOnItsWay(uint32_t w)
+{
+    uint32_t armed = w + 1u;
+    if (!__atomic_compare_exchange_n(&s_stand_way, &armed, 0u, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    s_stand_way_said = BlockMapFlush(0);
+    __atomic_store_n(&s_stand_way_ran, 1u, __ATOMIC_RELEASE);
+}
+
+void BlockMapStandFlushOnItsWay(uint32_t block)
+{
+    __atomic_store_n(&s_stand_way_ran, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_stand_way, block / MAP_WINDOW_BLOCKS + 1u, __ATOMIC_RELEASE);
+}
+
+bool BlockMapStandFlushedOnItsWay(error_t *said)
+{
+    __atomic_store_n(&s_stand_way, 0u, __ATOMIC_RELEASE);
+    if (!__atomic_load_n(&s_stand_way_ran, __ATOMIC_ACQUIRE))
+        return false;
+    *said = s_stand_way_said;
+    return true;
+}
+#endif
+
 /*
  * The slot a fetch takes: an empty one, else the clean one least lately used.
  * None clean: the least lately used one that owes the medium — a change, a
@@ -101,11 +135,13 @@ static uint32_t MapLeaveOut(uint32_t w, uint8_t *out)
  * The sector as memory has it, to the medium — `whole`, or leaving out what
  * nothing on the medium names yet (MapLeaveOut), from a copy: memory's bits
  * are never touched. Entered and left with the state lock held, taken again in
- * the name of `site`. MapOwed is cleared as the write begins, because the
- * write carries every take laid on the sector before it; a take made while it
- * travels is a delta, and owes again. A refused write owes again too, and is
- * said, and the medium may hold either copy, so a block left out stays
- * counted as one.
+ * the name of `site`. The write carries every take laid on the sector before
+ * it, so the window's flag of a debt comes off as it begins — a take made
+ * while it travels is a delta, and flags the debt again — and the debt itself
+ * is counted paid only when the write lands (BlockMapPage.paying): a settle
+ * that meets the write on its way waits for it. A refused write owes again
+ * too, and is said, and the medium may hold either copy, so a block left out
+ * stays counted as one.
  */
 static error_t MapWriteOut(BlockMapPage *p, bool whole, const char *site)
 {
@@ -124,13 +160,17 @@ static error_t MapWriteOut(BlockMapPage *p, bool whole, const char *site)
     }
     if (owed) {
         x->flags &= (uint8_t)~MAP_W_OWED;
-        g_map.owed--;
+        p->paying = 1;
     }
     p->dirty = 0;
+    p->sent  = ++g_map.sends;
     __atomic_store_n(&p->holder, MapCoreHere(), __ATOMIC_RELAXED);
     __atomic_store_n(&p->state, (uint8_t)MAP_PAGE_WRITING, __ATOMIC_RELEASE);
     TagFSLockDropAt(MapLock(), site);
 
+#ifdef CONFIG_VOLUME_TESTS
+    MapStandOnItsWay(w);
+#endif
     int said = tagfs_volume_write(g_map.map_vlba + w, 1, image);
     if (said != 0)
         kprintf("[TagFS] the medium would not take sector %u of this volume's block "
@@ -138,6 +178,13 @@ static error_t MapWriteOut(BlockMapPage *p, bool whole, const char *site)
                 "there\n", w);
 
     TagFSLockTakeAt(MapLock(), site);
+    error_t met = said == 0 ? OK : MapMediumSaid(said, ERR_WRITE_FAILED);
+    p->ended      = p->sent;
+    p->ended_with = met;
+    if (p->paying) {
+        p->paying = 0;
+        g_map.owed--;
+    }
     __atomic_store_n(&p->state, (uint8_t)MAP_PAGE_READY, __ATOMIC_RELEASE);
     __atomic_store_n(&p->holder, 0u, __ATOMIC_RELEASE);
     if (said != 0) {
@@ -152,7 +199,7 @@ static error_t MapWriteOut(BlockMapPage *p, bool whole, const char *site)
         MapDeltaApply(w, p);
         MapMeasure(w);
     }
-    return said == 0 ? OK : MapMediumSaid(said, ERR_WRITE_FAILED);
+    return met;
 }
 
 /* The sector read into slot `p`, which was taken for window w. Entered and
@@ -163,9 +210,11 @@ static error_t MapReadIn(BlockMapPage *p, uint32_t w, const char *site)
 
     if (p->state == MAP_PAGE_READY)
         g_map.win[p->window].slot = 0;
-    p->window = w;
-    p->dirty  = 0;
-    p->lru    = ++g_map.lru_tick;
+    p->window     = w;
+    p->dirty      = 0;
+    p->ended      = 0;
+    p->ended_with = OK;
+    p->lru        = ++g_map.lru_tick;
     __atomic_store_n(&p->holder, MapCoreHere(), __ATOMIC_RELAXED);
     __atomic_store_n(&p->state, (uint8_t)MAP_PAGE_READING, __ATOMIC_RELEASE);
     x->slot = (uint8_t)(p - g_map.page + 1);
@@ -273,25 +322,42 @@ static MapDue MapDueAt(uint32_t w, BlockMapPage **out)
 }
 
 /*
- * Every window from `first` to `last` brought to what the medium must hold:
- * deltas laid on, owed takes written, a write already on its way waited for —
- * since a take laid on a sector before another core began writing it is
- * carried by that write, and is on the medium only when the write ends. A few
- * turns a window at most: a window other cores keep taking from is theirs to
- * settle as well. Windows that owe nothing are passed MAP_SKIP_SPAN at a time
- * under the lock, which is let go between: the range may span the volume.
+ * Every window with work brought to what the medium must hold: deltas laid on,
+ * owed takes written, a write already on its way waited for — a take laid on
+ * a sector before another core began writing it is carried by that write, and
+ * is on the medium only when the write lands. A write the pass waited for
+ * that began after the pass did carried every debt the pass came for: the
+ * window is done with what it met, landed or refused. One that began before
+ * may not have, and the window is looked at again; so is one fetched in. A
+ * transfer whose core a halt stopped never ends: the window is refused
+ * ERR_DEVICE_NOT_READY. Windows the pass finds owing nothing lose their bit,
+ * MAP_SKIP_SPAN of them a hold, the lock let go between.
  */
 #define MAP_SKIP_SPAN 256u
 
-static error_t MapSettleWindows(uint32_t first, uint32_t last, const char *site)
+/* The write of window w the pass waited for, with the lock held again: true
+ * when it decides the window — it, or one after it, ended since the pass
+ * began — its refusal said into *failed. */
+static bool MapWaitedDecides(uint32_t w, const BlockMapPage *p, uint64_t waited, uint64_t begin,
+                             error_t *failed)
+{
+    if (!waited || waited <= begin || !p || p->window != w || p->ended < waited)
+        return false;
+    if (p->ended_with != OK && *failed == OK)
+        *failed = p->ended_with;
+    return true;
+}
+
+static error_t MapSettleWindows(const char *site)
 {
     TagFSLock *lock   = MapLock();
-    uint32_t   w      = first;
-    uint32_t   turns  = 0;
     error_t    failed = OK;
+    uint32_t   w      = 0;
+    uint64_t   waited = 0;      /* the write of window w this pass waited for; 0 none */
 
+    TagFSLockTakeAt(lock, site);
+    uint64_t begin = g_map.sends;
     for (;;) {
-        TagFSLockTakeAt(lock, site);
         if (!g_map.up) {
             TagFSLockDropAt(lock, site);
             return ERR_TAGFS_NOT_INITIALIZED;
@@ -299,67 +365,71 @@ static error_t MapSettleWindows(uint32_t first, uint32_t last, const char *site)
         BlockMapPage *p       = NULL;
         MapDue        due     = MAP_DUE_NOTHING;
         uint32_t      skipped = 0;
-        while (w <= last && w < g_map.windows && skipped < MAP_SKIP_SPAN &&
-               ((due = MapDueAt(w, &p)) == MAP_DUE_NOTHING || turns >= 4)) {
-            w++;
-            turns = 0;
-            skipped++;
+        for (;;) {
+            w = MapWorkNext(w);
+            if (w >= g_map.windows || (due = MapDueAt(w, &p)) != MAP_DUE_NOTHING)
+                break;
+            MapWorkDone(w++);
+            waited = 0;
+            if (++skipped == MAP_SKIP_SPAN)
+                break;
         }
-        if (w > last || w >= g_map.windows) {
+        if (w >= g_map.windows) {
             TagFSLockDropAt(lock, site);
             return failed;
         }
-        if (skipped == MAP_SKIP_SPAN) {
+        if (due == MAP_DUE_NOTHING || MapWaitedDecides(w, p, waited, begin, &failed)) {
+            if (due != MAP_DUE_NOTHING) {
+                w++;
+                waited = 0;
+            }
             TagFSLockDropAt(lock, site);
+            TagFSLockTakeAt(lock, site);
             continue;
         }
-        turns++;
+        waited = 0;
+
+        if (due == MAP_DUE_WRITE) {
+            error_t said = MapWriteOut(p, false, site);
+            if (said != OK && failed == OK)
+                failed = said;
+            w++;
+            continue;
+        }
+        if (due == MAP_DUE_WAIT && MapHolderStopped(p)) {
+            if (failed == OK)
+                failed = ERR_DEVICE_NOT_READY;
+            w++;
+            continue;
+        }
 
         error_t said = OK;
-        if (due == MAP_DUE_WRITE) {
-            said = MapWriteOut(p, false, site);
+        if (due == MAP_DUE_WAIT) {
+            uint64_t sent = p->state == MAP_PAGE_WRITING ? p->sent : 0;
             TagFSLockDropAt(lock, site);
+            if (MapWaitForPage(p))
+                waited = sent;
+            else
+                said = ERR_WOULD_BLOCK;     /* on its way beneath this very caller */
         } else {
             TagFSLockDropAt(lock, site);
-            if (due == MAP_DUE_WAIT)
-                said = MapWaitForPage(p) ? OK : ERR_WOULD_BLOCK;
-            else
-                said = MapFetch(w, site);
+            said = MapFetch(w, site);
         }
+        TagFSLockTakeAt(lock, site);
         if (said != OK) {
-            turns = 4;                  /* said where it failed; the debt stays for the next pass */
             if (failed == OK)
                 failed = said;
+            w++;
         }
-    }
-}
-
-/* The range of windows with work, emptied once none has any — before a pass,
- * and after it, so a range that work once spread across the volume does not
- * stay that wide while every window in it is paid. */
-static void MapWorkEmptied(void)
-{
-    if (!g_map.owed && !g_map.deltas) {
-        g_map.work_lo = 1;
-        g_map.work_hi = 0;
     }
 }
 
 static error_t MapSettleAll(const char *site)
 {
     TagFSLockTakeAt(MapLock(), site);
-    bool     work = g_map.owed || g_map.deltas;
-    uint32_t lo   = g_map.work_lo, hi = g_map.work_hi;
-    MapWorkEmptied();
+    bool work = g_map.owed || g_map.deltas;
     TagFSLockDropAt(MapLock(), site);
-    if (!work || lo > hi)
-        return OK;
-
-    error_t said = MapSettleWindows(lo, hi, site);
-    TagFSLockTakeAt(MapLock(), site);
-    MapWorkEmptied();
-    TagFSLockDropAt(MapLock(), site);
-    return said;
+    return work ? MapSettleWindows(site) : OK;
 }
 
 void BlockMapSettle(void)

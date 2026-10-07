@@ -474,12 +474,6 @@ void            tag_bitmap_destroy(TagBitmapIndex* idx);
 /* The file put under the tag: 0, or -1 — said once, with the index's numbers
  * — when the index had no memory for it, and then nothing changed. */
 int             tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
-/* The file out from under the tag: 0, or -1 when no file wears the tag. */
-int             tag_bitmap_clear(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
-/* The file out from under each of the `tag_count` tags it wore — its record's
- * — or, with no record to say (tag_ids NULL), from under every tag. */
-void            tag_bitmap_remove_file(TagBitmapIndex* idx, uint32_t file_id,
-                                       const uint16_t* tag_ids, uint32_t tag_count);
 bool            TagBitmapHas(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
 
 /* An add of `file_id` under each of `count` distinct tags, in two halves so the
@@ -501,10 +495,18 @@ void            TagBitmapAddCovered(TagBitmapIndex* idx, const uint16_t* tags, u
                                     uint32_t file_id);
 void            TagBitmapStakeLetGo(TagBitmapStake* stake);
 
-/* The file out from under the tag with nothing allocated — a window that falls
- * to where an array would be lighter stays a bitmap, which costs room and
- * nothing else — for a caller under the volume's state lock. */
+/* The file out from under the tag with nothing allocated, for a caller under
+ * the volume's state lock: a window that falls to where an array would be
+ * lighter stays a bitmap until TagBitmapShrink. */
 void            TagBitmapLeave(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
+/* After a TagBitmapLeave of `file_id` from each of the `count` tags, with no
+ * TagFS lock held: each window the file left that fell to where an array is
+ * lighter made one again — its storage taken with no lock held and put in
+ * under `state`, the volume's state lock, under which alone the index changes
+ * shape. One the heap gives nothing for stays a bitmap, which costs room and
+ * nothing else, until the next leave from it. */
+void            TagBitmapShrink(TagBitmapIndex* idx, TagFSLock* state, const uint16_t* tags,
+                                uint32_t count, uint32_t file_id);
 /* The kernel heap the index holds. */
 uint64_t        TagBitmapBytes(TagBitmapIndex* idx);
 /* The files from `from` on that wear every one of `tag_ids`, at least one
@@ -516,6 +518,13 @@ int             TagBitmapQueryPage(TagBitmapIndex* idx,
                     const uint16_t* unless, uint32_t unless_count,
                     uint32_t from, uint32_t* out, uint32_t room,
                     bool want_total, TagFSPage* page);
+#ifdef CONFIG_VOLUME_TESTS
+/* The most steps one hold of the index's lock gave a query, since it was last
+ * asked — which starts it again; and the most a hold may give one whose
+ * `unless_count` tags exclude. */
+uint32_t        TagBitmapQueryMost(TagBitmapIndex* idx);
+uint32_t        TagBitmapQueryHoldBound(uint32_t unless_count);
+#endif
 
 // ----------------------------------------------------------------------------
 // File Table API

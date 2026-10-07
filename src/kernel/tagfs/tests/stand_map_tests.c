@@ -541,6 +541,187 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// What the state lock is held for
+//
+// The state lock keeps interrupts off on its core and on every core that
+// waits for it. A take's plan, an edit of a window whose sector is away, and
+// a settle that meets a write of the map on its way each stood on work that
+// grew with the volume under it, or answered before the work was done.
+// ----------------------------------------------------------------------------
+
+#define STAND_MAP_SMALL_WINDOWS 4096u    /* 64 GiB */
+#define STAND_MAP_LARGE_WINDOWS 65536u   /* 1 TiB */
+#define STAND_MAP_APART_WHOLE   20u      /* SCATTERED: whole windows at the end */
+#define STAND_MAP_APART_RUN     15u      /* RUNS: whole windows in each run */
+#define STAND_MAP_EDITS         64u      /* gives written down in one window */
+
+/* One plan on a volume of `windows` windows in memory, judged: found where
+ * the shape says it must be, and no hold of it past the bound. */
+static TestResult StandMapPlanApart(uint32_t windows, BlockMapApartShape shape, bool best_fit,
+                                    BlockMapApartPlan* plan)
+{
+    TestResult verdict = TEST_PASS;
+    uint32_t   want    = PLOT_RUN_MOST;
+
+    TEST_ASSERT(BlockMapStandPlanApart(windows, shape, best_fit, want, plan),
+                "a volume of that many windows is laid out in memory");
+    TEST_ASSERT(plan->found, "and the plan finds a run");
+    if (shape == BLOCK_MAP_APART_SCATTERED) {
+        TEST_ASSERT_EQ(plan->got, want, "all of a run's width, from the whole windows at the end");
+        TEST_ASSERT(plan->at >= (windows - STAND_MAP_APART_WHOLE) * BLOCK_MAP_WINDOW_BLOCKS &&
+                    plan->at + plan->got <= windows * BLOCK_MAP_WINDOW_BLOCKS,
+                    "inside them");
+    } else {
+        TEST_ASSERT_EQ(plan->got, STAND_MAP_APART_RUN * BLOCK_MAP_WINDOW_BLOCKS,
+                       "the longest run the volume holds");
+        TEST_ASSERT_EQ(plan->at, 0, "the one nearest the hint");
+    }
+    TestEvidence("windows of the volume:", windows);
+    TestEvidence("holds of the lock the plan took:", plan->holds);
+    TestEvidence("steps of the dearest hold:", plan->hold_most);
+    TestEvidence("microseconds of the dearest hold:", plan->hold_most_us);
+    TEST_ASSERT(plan->hold_most <= BlockMapStandHoldBound(want),
+                "no hold took more than its budget and the one window that crossed it");
+out:
+    return verdict;
+}
+
+/*
+ * A take of one extent's width planned on a volume of 64 GiB and of 1 TiB,
+ * each scattered with short runs and whole windows only at its end, and each
+ * cut into runs of fifteen whole windows — by the best fit an Allotment asks
+ * and by the near rule. Every hold of the lock the plan takes stays within
+ * one hold's budget and the window that crosses it, on the large volume as on
+ * the small: a best fit walked every window of the volume, each with the run
+ * past it, in one hold.
+ */
+static TestResult TestStandMapPlanHoldBounded(void)
+{
+    static const uint32_t sizes[2] = { STAND_MAP_SMALL_WINDOWS, STAND_MAP_LARGE_WINDOWS };
+    TestResult            verdict  = TEST_PASS;
+    BlockMapApartPlan     plan;
+
+    for (uint32_t i = 0; i < 2; i++) {
+        for (uint32_t shape = 0; shape < 2; shape++) {
+            for (uint32_t fit = 0; fit < 2; fit++) {
+                verdict = StandMapPlanApart(sizes[i], (BlockMapApartShape)shape, fit != 0, &plan);
+                if (verdict != TEST_PASS)
+                    return verdict;
+            }
+        }
+    }
+    TEST_ASSERT(plan.holds > STAND_MAP_LARGE_WINDOWS / 1024u,
+                "and the walk of the large volume went on across many holds");
+out:
+    return verdict;
+}
+
+/*
+ * An edit of a window whose sector is away costs what that window holds. One
+ * window is given 64 blocks back one at a time under the state lock with its
+ * sector away, as Fallow gives back at a cycle's end — 64 gives written down —
+ * and then another window, its sector away too, is given back the one block
+ * taken from it: the give asks only whether it undoes that window's own newest
+ * take, and looks at none of the 64. Each window's gives are laid on as its
+ * sector comes in, and that looks at its own.
+ */
+static TestResult TestStandMapEditCostsItsWindow(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    uint32_t    run     = 0, other = 0, given = 0;
+    bool        took    = false, took_other = false;
+    uint32_t    windows = (fs->layout.data_blocks + BLOCK_MAP_WINDOW_BLOCKS - 1u) /
+                          BLOCK_MAP_WINDOW_BLOCKS;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT(windows >= 2, "the volume has two windows at least");
+    TEST_ASSERT_OK(BlockMapTake(2 * STAND_MAP_EDITS, (windows - 1u) * BLOCK_MAP_WINDOW_BLOCKS,
+                                &run, __func__), "a run of 128 blocks is taken in the last window");
+    took = true;
+    TEST_ASSERT_OK(BlockMapTake(1, (windows - 2u) * BLOCK_MAP_WINDOW_BLOCKS, &other, __func__),
+                   "and a block in the window before it");
+    took_other = true;
+    TEST_ASSERT(run / BLOCK_MAP_WINDOW_BLOCKS == (run + 2 * STAND_MAP_EDITS - 1) / BLOCK_MAP_WINDOW_BLOCKS &&
+                other / BLOCK_MAP_WINDOW_BLOCKS != run / BLOCK_MAP_WINDOW_BLOCKS,
+                "the run inside one window, the block in another");
+
+    BlockMapSectorAway(run);
+    BlockMapSectorAway(other);
+    TagFSLockTake(&fs->lock);
+    while (given < STAND_MAP_EDITS && BlockMapGiveLocked(run + 2 * given, 1) == OK)
+        given++;
+    bool unseen = BlockMapGivesUnseenLocked();
+    TagFSLockDrop(&fs->lock);
+    TEST_ASSERT_EQ(given, STAND_MAP_EDITS, "every other block of the run given back in one hold");
+    TEST_ASSERT(unseen, "written down, their sector away");
+
+    (void)BlockMapEditMost();
+    TagFSLockTake(&fs->lock);
+    error_t gave = BlockMapGiveLocked(other, 1);
+    TagFSLockDrop(&fs->lock);
+    took_other = gave != OK;
+    TEST_ASSERT_OK(gave, "the other window's block given back, its sector away too");
+    uint32_t give = BlockMapEditMost();
+    TestEvidence("deltas the other window's give looked at:", give);
+    TEST_ASSERT(give <= 1, "it looked at its own window's, not the 64 of the first");
+
+    BlockMapSettle();
+    uint32_t laid = BlockMapEditMost();
+    TestEvidence("deltas the dearest window laid on:", laid);
+    TEST_ASSERT(laid <= STAND_MAP_EDITS, "and each window laid on its own gives only");
+    TEST_ASSERT(!StandBlockInUse(run) && StandBlockInUse(run + 1) && !StandBlockInUse(other),
+                "the gives are on the sectors");
+out:
+    if (took) {
+        for (uint32_t i = 0; i < STAND_MAP_EDITS; i++)
+            tagfs_free_blocks(i < given ? run + 2 * i + 1 : run + 2 * i, i < given ? 1 : 2);
+    }
+    if (took_other)
+        tagfs_free_blocks(other, 1);
+    return verdict;
+}
+
+/*
+ * A settle meets a write of the map that pays a debt it came for, and waits
+ * for it to land. A block is taken, and its window owes the medium; a settle
+ * writes the window's sector, and on the write's way — the state lock let go,
+ * the medium not yet told — the Settle cycle's S1 is asked on this very core.
+ * The write it meets carries the debt, so S1 cannot answer OK before it lands,
+ * and on this core it never would: it refuses, where it answered OK the
+ * moment the write began, as if the medium already held the take.
+ */
+static TestResult TestStandMapFlushMeetsAWriteOnItsWay(void)
+{
+    TestResult  verdict = TEST_PASS;
+    uint32_t    block   = 0;
+    bool        took    = false;
+    error_t     said    = OK;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &block), 0, "a block is taken, and its window owes");
+    took = true;
+    BlockMapStandFlushOnItsWay(block);
+    BlockMapSettle();
+    TEST_ASSERT(BlockMapStandFlushedOnItsWay(&said), "the write of its sector ran S1 on its way");
+    TestEvidence("what S1 said on the write's way:", (uint64_t)said);
+    TEST_ASSERT_EQ(said, ERR_WOULD_BLOCK,
+                   "S1 met the write that pays its debt, still on its way, and did not answer OK");
+    TEST_ASSERT_OK(BlockMapFlush(0), "once it landed, S1 answers OK");
+out:
+    (void)BlockMapStandFlushedOnItsWay(&said);
+    if (took)
+        tagfs_free_blocks(block, 1);
+    return verdict;
+}
+
 static const TestCase g_stand_map_tests[] = {
     { .name  = "stand_map_take_run_nearest_longest", .func = TestStandMapTakeRunNearestLongest,
       .reach = TEST_WRITES_TO_VOLUME,
@@ -563,6 +744,21 @@ static const TestCase g_stand_map_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a take under the state lock is told the volume has no room while gives "
                        "wait for their sectors" },
+    { .name  = "stand_map_plan_hold_bounded", .func = TestStandMapPlanHoldBounded,
+      .reach = TEST_READS_ONLY,
+      .caveat_defect = "a take's plan walks every window of the volume, each with the run past "
+                       "it, in one hold of the state lock, with interrupts off for as long as the "
+                       "volume is large" },
+    { .name  = "stand_map_edit_costs_its_window", .func = TestStandMapEditCostsItsWindow,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "a give into a window whose sector is away looks at every edit written "
+                       "down for every window, and Fallow's gives under one hold cost their "
+                       "number squared" },
+    { .name  = "stand_map_flush_meets_a_write_on_its_way",
+      .func  = TestStandMapFlushMeetsAWriteOnItsWay,
+      .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "S1 answers OK while a write of the map that carries its debt is still "
+                       "on its way, and never hears that write refused" },
     { .name  = "stand_map_fallow_keeps_what_the_map_cannot_write",
       .func  = TestStandMapFallowKeepsWhatTheMapCannotWrite,
       .reach = TEST_WRITES_TO_VOLUME,

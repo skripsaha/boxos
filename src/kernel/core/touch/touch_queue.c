@@ -3,10 +3,12 @@
  *
  * An unsorted singly-linked list of nodes their armers own. TouchQueueTick
  * scans it each PIT tick — the depth is the number of timed waits and delayed
- * publishes in flight, small — and fires every node whose tick came, one at a
- * time: a WAKE or KNOCK node may be armed again the moment it leaves the list,
- * so what its fire needs is copied out under the lock and the node itself is
- * never held past it.
+ * publishes in flight — and takes every node whose tick came out in that one
+ * pass, under the lock, which keeps interrupts off: a tick's cost is the
+ * queue's depth, never the depth times the nodes that fire. A WAKE or KNOCK
+ * node may be armed again the moment it leaves the queue, so what its fire
+ * needs is copied into the node's own fire fields as it leaves, and the tick's
+ * list runs through a link no arm touches.
  */
 
 #include "touch_queue.h"
@@ -176,46 +178,75 @@ static void touch_queue_fire_wake(process_t *target, uint32_t owes_result, uint3
     }
 }
 
-/* One node whose tick came, out of the list with what its fire needs; false
- * when none is left. */
-static bool touch_queue_take_due(uint64_t now, TouchQueueNode *copy, TouchQueueNode **publish)
+static volatile uint8_t g_ticking;       /* a tick under way */
+
+#ifdef CONFIG_VOLUME_TESTS
+static volatile uint32_t g_tick_most;
+
+uint32_t TouchQueueTickMost(void)
 {
-    bool found = false;
+    return __atomic_exchange_n(&g_tick_most, 0u, __ATOMIC_ACQ_REL);
+}
+#endif
+
+/* Every node whose tick came, out of the queue in one pass: the tick's own
+ * list of them, oldest armed last. */
+static TouchQueueNode *touch_queue_take_due(uint64_t now)
+{
+    TouchQueueNode  *due    = NULL;
+    TouchQueueNode **tail   = &due;
+    uint32_t         looked = 0;
+
     spin_lock(&g_lock);
-    for (TouchQueueNode *n = g_head; n; n = n->next) {
-        if (now < n->fire_tick)
+    for (TouchQueueNode **cur = &g_head; *cur; looked++) {
+        TouchQueueNode *n = *cur;
+        if (now < n->fire_tick) {
+            cur = &n->next;
             continue;
-        *copy    = *n;
-        *publish = n->kind == TOUCH_QUEUE_PUBLISH ? n : NULL;
-        (void)touch_queue_unlink(n);
-        found = true;
-        break;
+        }
+        *cur          = n->next;
+        n->next       = NULL;
+        n->armed      = 0;
+        n->fired_kind = n->kind;
+        n->fired      = n->u;
+        n->fired_next = NULL;
+        *tail         = n;
+        tail          = &n->fired_next;
     }
     spin_unlock(&g_lock);
-    return found;
+#ifdef CONFIG_VOLUME_TESTS
+    if (looked > __atomic_load_n(&g_tick_most, __ATOMIC_RELAXED))
+        __atomic_store_n(&g_tick_most, looked, __ATOMIC_RELAXED);
+#endif
+    return due;
 }
 
 void TouchQueueTick(uint64_t now)
 {
-    TouchQueueNode  due;
-    TouchQueueNode *publish = NULL;
+    if (__atomic_exchange_n(&g_ticking, 1u, __ATOMIC_ACQUIRE))
+        return;
 
-    while (touch_queue_take_due(now, &due, &publish)) {
-        switch (due.kind) {
+    /* Each node's link is read before its fire: a WAKE's fire may drop the
+     * last reference to the process the node lives in, and a PUBLISH's frees
+     * the node. */
+    for (TouchQueueNode *n = touch_queue_take_due(now), *next; n; n = next) {
+        next = n->fired_next;
+        switch (n->fired_kind) {
         case TOUCH_QUEUE_WAKE:
-            touch_queue_fire_wake(due.u.wake.target, due.u.wake.owes_result,
-                                  due.u.wake.park_seq);
-            process_ref_dec(due.u.wake.target);
+            touch_queue_fire_wake(n->fired.wake.target, n->fired.wake.owes_result,
+                                  n->fired.wake.park_seq);
+            process_ref_dec(n->fired.wake.target);
             break;
         case TOUCH_QUEUE_KNOCK:
-            KnockOn(due.u.knock);
+            KnockOn(n->fired.knock);
             break;
         default:
-            TouchPublishId(publish->u.publish.tag_id, publish->u.publish.payload,
-                           publish->u.publish.plen, publish->u.publish.source_pid,
-                           publish->u.publish.flags);
-            kfree(publish);
+            TouchPublishId(n->fired.publish.tag_id, n->fired.publish.payload,
+                           n->fired.publish.plen, n->fired.publish.source_pid,
+                           n->fired.publish.flags);
+            kfree(n);
             break;
         }
     }
+    __atomic_store_n(&g_ticking, 0u, __ATOMIC_RELEASE);
 }

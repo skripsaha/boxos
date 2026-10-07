@@ -197,6 +197,8 @@ static error_t AllotmentTakeNew(uint32_t fid, uint32_t want, const MapPick *k,
     return OK;
 }
 
+/* No take hands out more than one extent's width: a growth past it — a span —
+ * comes as as many takes, each a run's worth of windows under the lock. */
 static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_blocks,
                                    uint32_t hint, uint32_t *start, uint32_t *got)
 {
@@ -205,8 +207,13 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
     bool       caught_up = false;
     uint32_t   rounds    = 0;
     uint64_t   fits      = file_blocks < PLOT_RUN_MOST ? file_blocks : PLOT_RUN_MOST;
-    uint32_t   size      = fits > want ? (uint32_t)fits : want;
+    uint32_t   size;
 
+    if (want > PLOT_RUN_MOST)
+        want = PLOT_RUN_MOST;
+    size = fits > want ? (uint32_t)fits : want;
+
+    MapPick k = { .want = size, .hint = hint, .best_fit = true };
     for (;;) {
         TagFSLockTake(lock);
         if (!g_map.up) {
@@ -217,8 +224,12 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
         uint32_t s = 0, n = 0;
         error_t  rc = OK;
         if (!AllotmentTakeOwn(fid, want, &s, &n, &rc)) {
-            MapPick k = { .want = size, .hint = hint, .best_fit = true };
-            MapPlan(&k, may_read && rounds < MAP_LOOK_ROUNDS);
+            MapPlan(&k, may_read && rounds < MAP_LOOK_ROUNDS, may_read);
+            if (k.paused) {
+                TagFSLockDrop(lock);
+                continue;
+            }
+            k.stage = MAP_PLAN_FRESH;
             if (k.looks) {
                 uint32_t look = k.look[0];
                 TagFSLockDrop(lock);
@@ -239,6 +250,10 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
                 TagFSLockDrop(lock);
                 caught_up = true;
                 BlockMapSettle();
+                continue;
+            }
+            if (k.spanned && !MapRunStillFree(k.at, k.got)) {
+                TagFSLockDrop(lock);
                 continue;
             }
             rc = AllotmentTakeNew(fid, want, &k, &s, &n);

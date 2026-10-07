@@ -35,26 +35,36 @@ typedef enum {
     TOUCH_QUEUE_KNOCK   = 2,
 } TouchQueueKind;
 
+/* What a node's fire does, by its kind. */
+typedef union {
+    struct {
+        uint16_t tag_id;
+        uint16_t flags;
+        uint32_t source_pid;
+        uint32_t plen;
+        uint8_t *payload;         /* inside the node's own allocation */
+    } publish;
+    struct {
+        struct process_t *target;
+        uint32_t          owes_result;
+        uint32_t          park_seq;
+    } wake;
+    struct Knock *knock;
+} TouchQueueFire;
+
+/* A tick takes every node whose tick came out of the queue in one pass, onto
+ * a list of its own (fired_next) with what each fire does as it stood then
+ * (fired_kind, fired): a WAKE or KNOCK node armed again before its fire runs
+ * changes only its queue fields, never the tick's. */
 typedef struct TouchQueueNode {
     struct TouchQueueNode *next;
+    struct TouchQueueNode *fired_next;
     uint64_t               fire_tick;
     uint8_t                kind;     /* TouchQueueKind */
     uint8_t                armed;    /* in the queue — under the queue's lock */
-    union {
-        struct {
-            uint16_t tag_id;
-            uint16_t flags;
-            uint32_t source_pid;
-            uint32_t plen;
-            uint8_t *payload;         /* inside the node's own allocation */
-        } publish;
-        struct {
-            struct process_t *target;
-            uint32_t          owes_result;
-            uint32_t          park_seq;
-        } wake;
-        struct Knock *knock;
-    } u;
+    uint8_t                fired_kind;
+    TouchQueueFire         u;
+    TouchQueueFire         fired;
 } TouchQueueNode;
 
 void TouchQueueInit(void);
@@ -91,6 +101,15 @@ void TouchQueueArmKnock(TouchQueueNode *n, struct Knock *k, uint64_t fire_tick);
  * armed. */
 void TouchQueueDisarm(TouchQueueNode *n);
 
+/* Every node whose tick came fired: taken out of the queue in one pass under
+ * its lock, fired with the lock let go. One tick at a time — PIT IRQ0 — and a
+ * tick that finds another under way leaves its nodes to the next. */
 void TouchQueueTick(uint64_t now);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The most nodes one tick looked at, since it was last asked — which starts
+ * it again. */
+uint32_t TouchQueueTickMost(void);
+#endif
 
 #endif /* TOUCH_QUEUE_H */
