@@ -47,6 +47,7 @@ static struct {
     bool     dig;              /* no Spare could be made: Glean moves on what the pool holds */
     bool     counted;
     uint64_t moved;            /* GleanMovedGen */
+    uint32_t moved_into;       /* the link that record lies in */
 } s_pass;
 
 /* The lowered slack, judged by what it did. `s_short_from`: the chain's length
@@ -166,21 +167,36 @@ static bool GleanWanted(uint32_t chain, uint32_t live)
     return chain >= GLEAN_SLACK * live + 1u;
 }
 
+/* Under the state lock: whether link `f` may leave the chain under the seal of
+ * the cycle in flight — every record that took the place of one of its own
+ * lies in a block that seal counts closed: a link before the tail, or the tail
+ * itself once it holds a record this pass laid again, which this cycle's S0
+ * closes (GleanMovedGen). Otherwise the link waits for the tail's next close
+ * (glean.h). */
+static bool GleanMayTakeLocked(const PoolFront* f)
+{
+    uint32_t tail = PoolTailLink();
+    return f->replaced_by < tail || (s_pass.moved && s_pass.moved_into == tail);
+}
+
 typedef struct {
-    uint32_t  empties;     /* the links at the front the map names nothing in */
+    uint32_t  empties;     /* the links at the front the map names nothing in, free to go */
     bool      move;        /* the link after them is to be read and moved */
     PoolFront front;       /* that link */
 } GleanLook;
 
-/* Under the state lock. A link the map names nothing in stays so: only the
- * tail takes new records, and Glean is the one who takes links off. */
+/* Under the state lock. A link the map names nothing in stays so — only the
+ * tail takes new records, and Glean is the one who takes links off — and so
+ * does the newest link holding what replaced its records: a close of the tail
+ * is all that makes it free to go. A front emptied and not yet free is neither
+ * taken nor moved: the pass ends at it. */
 static void GleanLookLocked(GleanLook* look)
 {
     PoolFront f;
     memset(look, 0, sizeof(*look));
-    while (PoolFrontLink(look->empties, &f) && f.live == 0)
+    while (PoolFrontLink(look->empties, &f) && f.live == 0 && GleanMayTakeLocked(&f))
         look->empties++;
-    if (PoolFrontLink(look->empties, &f) &&
+    if (PoolFrontLink(look->empties, &f) && f.live != 0 &&
         GleanWanted(PoolChainBlocks() - look->empties, PoolLiveBlocks())) {
         look->move  = true;
         look->front = f;
@@ -233,7 +249,8 @@ static bool GleanMoveLocked(const PoolFront* f)
                 return false;
             RecordWhere from = { .link = f->link, .offset = at, .len = len };
             InkGleanLocked(fid, &from, s_front.payload + pos);
-            s_pass.moved = InkedGen();
+            s_pass.moved      = InkedGen();
+            s_pass.moved_into = PoolTailLink();
             GLEAN_COUNT(moved_records, 1);
             GLEAN_COUNT(moved_bytes, len);
         }
@@ -243,15 +260,17 @@ static bool GleanMoveLocked(const PoolFront* f)
 }
 
 /* Under the state lock: up to `count` links off the chain's front — as long as
- * the map names nothing in them — their blocks into `node`, the head's
- * excepted: the head only says, from its close on, the block after it. The
- * links taken, and in *kept the blocks the node holds. */
+ * the map names nothing in them and they are free to go (GleanMayTakeLocked) —
+ * their blocks into `node`, the head's excepted: the head only says, from its
+ * close on, the block after it. The links taken, and in *kept the blocks the
+ * node holds. */
 static uint32_t GleanTakeLocked(uint32_t count, FallowNode* node, uint32_t* kept)
 {
     PoolFront f;
     uint32_t  taken = 0;
     *kept = 0;
-    for (; taken < count && PoolFrontLink(taken, &f) && f.live == 0; taken++) {
+    for (; taken < count && PoolFrontLink(taken, &f) && f.live == 0 && GleanMayTakeLocked(&f);
+         taken++) {
         if (f.block == s_head)
             s_head_next = f.next;
         else

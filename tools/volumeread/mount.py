@@ -534,16 +534,18 @@ def TableMount(read_block, first, sealed, run, bad_block=lambda _b: False):
 # ---------------------------------------------------------------------------
 
 
-def MountFiles(files, rows, sealed, torn=None, gone=()):
+def MountFiles(files, rows, sealed, torn=None, gone=(), issued_below=0):
     """MountQuitclaimedRows, then MountWalkFiles / MountFile (mount.c): the
     rows of the files a Quitclaim took out let go, then every id the map holds
     — a record, a row, or both — judged. ({fid: verdict}, counts, the highest
     id met). A verdict is {state, record, row, corrected, derived, rolled},
     state one of 'mounted', 'quitclaim' (a row let go with its delete),
-    'unsettled' (sealed, a row with no record), 'lost' (no seal, a row with no
-    record; or `torn`, (block, end), naming the rolled-back open block short of
-    where its settled records ended — `rolled`) and 'unnamed' (no seal, a
-    record no row names)."""
+    'unsettled' (sealed, a row with no record whose id the stood Ledger had not
+    issued — below `issued_below`, its next file id, every id was, and 0 is a
+    count let wrap), 'lost' (a row with no record: no seal, or an id the
+    Ledger had issued — a file that settled; `rolled` when it names `torn`,
+    (block, end), the rolled-back open block short of where its settled
+    records ended) and 'unnamed' (no seal, a record no row names)."""
     out, top = {}, 0
     n = dict(checked=0, corrected=0, derived=0, unsettled=0, lost=0, unnamed=0, quitclaimed=0)
     for fid in sorted(set(files) | set(rows)):
@@ -558,7 +560,8 @@ def MountFiles(files, rows, sealed, torn=None, gone=()):
         top = max(top, fid)
         if rec is None:
             v["rolled"] = torn is not None and row[0] == torn[0] and row[1] < torn[1]
-            v["state"] = "unsettled" if sealed and not v["rolled"] else "lost"
+            issued = issued_below == 0 or fid < issued_below
+            v["state"] = "unsettled" if sealed and not issued else "lost"
         elif row is None and not sealed:
             v["state"] = "unnamed"
         else:
@@ -639,9 +642,10 @@ class MountModel:
 
         torn = ((self.pool["torn_block"], self.pool["torn_end"])
                 if self.pool["stood"] == "torn" else None)
-        self.files, self.counts, top = MountFiles(self.pool["files"], self.table["rows"],
-                                                  self.sealed, torn, self.pool["gone"])
         ledger_next = self.stood["next_file_id"] if self.stood else 0
+        self.files, self.counts, top = MountFiles(self.pool["files"], self.table["rows"],
+                                                  self.sealed, torn, self.pool["gone"],
+                                                  ledger_next)
         self.next_file_id = NextFileId(ledger_next, top, self.pool["top_fid"])
         self.next_tag_id = NextTagId(self.by_id, self.pool["top_tag"])
 

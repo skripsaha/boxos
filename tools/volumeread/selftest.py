@@ -473,6 +473,16 @@ def PlantRotten(t, over, taken):
     Reseal(t, over, registry=False)
 
 
+def PlantRottenSettled(t, over):
+    """S's only record rotten inside the sealed span, and the seal made again
+    over the rotten bytes: the span is what the seal says, and holds no record
+    that reads of a file the stood Ledger had issued — a file that settled,
+    lost, as a block let go with its record still a file's leaves it."""
+    last = t.Srec.at + t.Srec.len - 1
+    t.RecordPatch(over, t.Srec, t.Srec.len - 1, bytes([t.Block(over, t.Srec.block)[last] ^ 1]), False)
+    Reseal(t, over, registry=False)
+
+
 def PlantBoot(t, over):
     lba = t.base
     raw = bytearray(over.sectors(lba, ondisk.DEED_SECTORS))
@@ -961,6 +971,18 @@ def Cases(t):
                       t.Label(S) in x.text and "fid %u " % Ufid in x.text for x in Findings(c, "DOUBLE_OWNER"))),
                  ("the orphans are %s's old block and the rotten record's" % t.Label(U),
                   lambda c: K(c)["orphan_runs"] == RunsNormal(t.Uruns + [(F, 1)]))]),
+        Case("R3 rotten only record, sealed", lambda o: PlantRottenSettled(t, o),
+             must={"RECORD_CRC", "FILE_LOST", "ORPHAN"}, checks=[
+                 ("the seal is borne out over the rotten record, and stood on",
+                  Stood("seal", tie_rule)),
+                 ("the walk passes 1 record over", lambda c: K(c)["unreadable"] == 1),
+                 Lost(1),
+                 ("%s, an id the stood Ledger had issued, is the file lost — said, not let go as "
+                  "a cycle that did not settle" % t.Label(S),
+                  lambda c: State(c, Sfid) == "lost" and
+                  any("fid %u " % Sfid in x.text and "had settled it" in x.text
+                      for x in Findings(c, "FILE_LOST"))),
+                 ("its blocks are the orphans", lambda c: K(c)["orphan_runs"] == t.Sruns)]),
         # --- the owners ------------------------------------------------------------
         Case("O1 manifest", lambda o: PlantManifest(t, o), checks=[
             ("the manifest the Ledger names is owned", lambda c: [x.runs for x in c.claims

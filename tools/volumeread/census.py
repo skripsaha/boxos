@@ -551,8 +551,10 @@ class GroundCensus:
         (mount.MountFiles): a file it takes up is live; a record no row names,
         with no seal, is unnamed; a row whose newest record is a Quitclaim is a
         delete whose row had not yet gone, and goes with it; a row with no
-        record is a cycle that did not settle under a seal, and a file lost
-        without one or in the open block a seal rolled back."""
+        record is a cycle that did not settle under a seal when the stood
+        Ledger had not issued its id, and a file lost otherwise — with no seal,
+        or a file that settled: in the open block a seal rolled back, or gone
+        with a block the chain no longer holds."""
         f, self.absent = self.f, {}
         unsettled = []
         for fid, v in sorted(f.mount.files.items()):
@@ -580,12 +582,14 @@ class GroundCensus:
                 self.Say("FILE_LOST", "damage", "fid %u is named at block %u+%u and the pool holds "
                          "no record of it that reads%s — the mount deletes its name (mount.c "
                          "MountFile)" % (fid, row[0], row[1], ", its only one settled in the open "
-                                         "block the mount rolled back" if v["rolled"] else ""))
+                                         "block the mount rolled back" if v["rolled"] else
+                                         ", though the seal it stands on had settled it"
+                                         if f.mount.sealed else ""))
                 self._File(fid, "lost", None, row)
         if unsettled:
             self.Say("ROW_UNSETTLED", "note", "%u table row(s) name files the sealed pool holds no "
-                     "record of — %s — rows of a cycle that did not settle, or of records the "
-                     "mount rolled back; they are let go (mount.c MountFile)"
+                     "record of — %s — rows of a cycle that did not settle, whose ids the stood "
+                     "Ledger had not issued; they are let go (mount.c MountFile)"
                      % (len(unsettled), ", ".join(unsettled)))
         for tag, holders in sorted(self.absent.items()):
             self.Say("TAG_ABSENT", "damage", "tag id %u is carried by %u file(s) and the registry does "
