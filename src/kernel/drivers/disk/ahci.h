@@ -810,6 +810,12 @@ bool AhciArmStanding(uint8_t port_num, uint8_t slot, bool queued,
  * hands and is not handed over twice. */
 void AhciPortTroubled(uint8_t port_num, uint32_t seen_trouble);
 
+/* The port's link reset by its own recovery, for a seat the Boardroom asks to
+ * reset (BoardroomSeatReset): true once its engine runs again, false when the
+ * port left the machine. Every command in flight on it is answered as the
+ * recovery answers a fault no fact names: failed. */
+bool AhciPortReset(uint8_t port_num);
+
 /* Where a caller standing over this port's engine waits for it to run again
  * after a fault: true once it runs, false when the port left the machine. */
 bool AhciAwaitEngine(uint8_t port_num);

@@ -140,11 +140,10 @@ uint64_t InkGenOf(uint32_t fid);
 /* A mount's first word: no Ink yet. With the door shut. */
 void     InkMountReset(void);
 
-#ifdef CONFIG_VOLUME_TESTS
-/* The stand's undo of a protected medium it armed itself (BlockFailProtect):
- * the volume takes changes again. */
+/* The volume takes changes again: its book taken up, the medium seated anew —
+ * whether it refuses writes is the next refused write's to ask — or the stand
+ * undoing a protected medium it armed itself (BlockFailProtect). */
 void     InkReadOnlyLift(void);
-#endif
 
 /* The stem of a name as a key, read in place: OK with out->key NULL for a
  * name with no stem, ERR_TAGFS_TAG_TOO_LONG for one longer than a key. */

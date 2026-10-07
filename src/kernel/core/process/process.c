@@ -2116,9 +2116,9 @@ void process_cleanup_deferred(void)
     if (cleaned > 0)
     {
         debug_printf("[PROCESS] Deferred cleanup: freed %u processes\n", cleaned);
-        /* Their memory is the machine's again — the event a Settle cycle
-         * refused for want of it waits for. */
-        TagFSHeapCameBack();
+        /* Their memory is the machine's again — the event a Settle cycle,
+         * and a mount, refused for want of it wait for. */
+        TagFSMemoryCameBack();
     }
 }
 

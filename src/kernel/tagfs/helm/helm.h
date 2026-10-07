@@ -56,28 +56,31 @@ bool           ofe_listed(const OpenFileEntry* ofe, uint32_t* out_refs);
 
 /* The Helm for `w`: true when it was free and is w's now; false when w waits
  * in the FIFO, and w->hand runs once it is w's — on the core that let go, with
- * no TagFS lock held — or when the medium left and the Helm is held or
- * parked: w->gone has answered it before this returns. Either way a false w is
- * not the caller's to touch again. */
+ * no TagFS lock held — or when the medium left, free Helm or not: w->gone has
+ * answered it before this returns. Either way a false w is not the caller's
+ * to touch again. */
 bool     HelmAsk(OpenFileEntry* ofe, HelmWaiter* w);
 
 /* The Helm for `w` only when it is free: false, and w not queued, when it is
- * held or parked. */
+ * held or parked, or the medium left. */
 bool     HelmTry(OpenFileEntry* ofe, HelmWaiter* w);
 
 /* The Helm for a caller in the kernel, only when it is free: such a caller
  * cannot be parked behind the holder the way a program is (write_job.c), and
- * it does not spin for it. `here` is made its place; held — said, and false. */
-bool     HelmTakeNow(TagFSFileHandle* handle, HelmWaiter* here);
+ * it does not spin for it. `here` is made its place. OK when it is held;
+ * ERR_BUSY — said — when another holds it; ERR_DEVICE_NOT_READY when the
+ * medium left. */
+error_t  HelmTakeNow(TagFSFileHandle* handle, HelmWaiter* here);
 
 /* `w` lets go; the first waiter, if any, is handed the Helm (HelmHand) — or,
  * once the medium left, none is: the Helm is parked with its FIFO. */
 void     HelmLetGo(OpenFileEntry* ofe, HelmWaiter* w);
 
-/* The fate of the open book, for every Helm's FIFO at the next service point
- * (HelmRunReady), the drain core knocked awake for it — nothing is done where
- * the fate is decided. Given up: every waiter answered (w->gone) with `lost`.
- * Taken up: every parked Helm handed to its first waiter. */
+/* The fate of the open book, done here for every Helm's FIFO, where the fate
+ * is decided — on the core attending the medium, with no TagFS lock held.
+ * Given up — the latch still standing, so nobody is queued meanwhile — every
+ * waiter answered (w->gone) with `lost`. Taken up — the latch let go of —
+ * every parked Helm handed to its first waiter. */
 void     HelmBookGivenUp(uint64_t lost);
 void     HelmBookTakenUp(void);
 
@@ -98,15 +101,15 @@ void     HelmVacate(uint32_t file_id);
  * The drain core is knocked awake for it. */
 void     HelmReady(HelmWaiter* w);
 
-/* The service point: what the open book's fate owes the FIFOs done, then
- * every waiter HelmReady had listed when it began run here, the scheduler held
- * off this core for each (SchedulerHoldHere). One listed meanwhile — a write
- * come back for its next window — waits for the next service point, so the
- * core goes round its loop between two windows. One load when none is. */
+/* The service point: every waiter HelmReady had listed when it began run here,
+ * the scheduler held off this core for each (SchedulerHoldHere). One listed
+ * meanwhile — a write come back for its next window — waits for the next
+ * service point, so the core goes round its loop between two windows. One
+ * load when none is. */
 void     HelmRunReady(void);
 
-/* Whether a service point has work: a waiter listed, or the FIFOs still owed
- * the open book's fate. An idle core does it before it sleeps. */
+/* Whether a service point has work: a waiter listed. An idle core does it
+ * before it sleeps. */
 bool     HelmReadyListed(void);
 
 /* Holders and waiters of every Helm: work the machine still owes a caller. */

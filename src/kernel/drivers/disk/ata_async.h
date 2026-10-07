@@ -86,6 +86,12 @@ int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
 uint64_t AtaChannelTake(uint8_t channel);
 void     AtaChannelGive(uint8_t channel, uint64_t flags);
 
+/* The drive's channel reset — SRST, the recovery the engine runs on a wedge —
+ * for a seat the Boardroom asks to reset (BoardroomSeatReset): true when the
+ * drive answers after it. Holds the channel whole, interrupts off, for the
+ * reset's own patience (ATA_SRST_BSY_HELD_MS). */
+bool     AtaDriveReset(uint8_t drive_idx);
+
 /* BMIDE completion watchdog — a safety BACKSTOP, not the delivery path. Glanced
  * at once per PIT tick on the BSP (idt.c), mutually exclusive with the BMIDE
  * IRQ handler (both need the channel's irqsave cmd_lock). Recovers, purely by

@@ -65,7 +65,7 @@ AwayVerdict AwayJudge(const VolumeLedger* found);
 
 /* The book taken up, the volume's medium in `seat` again and its latch let
  * go of by the caller: said, the refused cycle free to run from S0 and the
- * parked Helms handed on at the next service point. */
+ * parked Helms handed on, here. */
 void        AwayTakeUp(uint8_t seat);
 
 /* The book given up, for `why`: said — with `seat`, where the medium or the
@@ -109,19 +109,23 @@ AwayVerdict TagFSStandMediumReturns(const VolumeLedger* found);
  * mount's nth block read, as a medium pulled out in the middle of its reads;
  * SEAT_RINGS has the seat say seat:ready, and the room say it on the spot,
  * the moment a block read of the mount is refused — before the mount has heard
- * of the refusal. Fired: the turn happened. Idle: no arrival owed, nobody
+ * of the refusal; HEAP_REFUSES has the first allocation of the registry's load
+ * answered NULL, as an exhausted heap answers it (mount.c, which says when the
+ * load begins). Fired: the turn happened. Idle: no arrival owed, nobody
  * attending, and no owed mount waiting to be asked. Owed: a mount is owed
- * until a seat answers again.
+ * until a seat answers again, or the memory it was refused for comes back.
  */
 typedef enum {
     STAND_MOUNT_AS_IS = 0,
     STAND_MOUNT_SEAT_EMPTIES,
-    STAND_MOUNT_SEAT_RINGS
+    STAND_MOUNT_SEAT_RINGS,
+    STAND_MOUNT_HEAP_REFUSES
 } StandMountTurn;
 
 bool        TagFSStandLetGo(void);
 void        TagFSStandHoldAgain(void);
 void        TagFSStandMountTurn(StandMountTurn turn, uint32_t nth);
+void        TagFSStandMountRegistryLoads(void);
 bool        TagFSStandMountTurnFired(void);
 bool        TagFSStandMountIdle(void);
 bool        TagFSStandMountOwed(void);

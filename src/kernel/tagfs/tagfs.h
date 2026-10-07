@@ -452,12 +452,15 @@ error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len
 error_t      tag_registry_flush(TagRegistry* reg);
 
 /* The registry read off the medium from its head; the mount's, once. Refuses
- * — and says why — a chain it cannot walk or a registry it cannot hold whole.
- * Under a seal (`newest`, and the copy before it, `older`; both NULL for a
- * volume whose newest Ledger carries none) it is read as far as the seal
- * says, and a last block that does not bear the seal out is rolled back to
- * the blocks before it (tag_registry.c). */
-int          tag_registry_load(TagRegistry* reg, uint32_t first_block,
+ * — and says why — a chain it cannot walk or a registry it cannot hold whole,
+ * and the code tells which: ERR_NO_MEMORY when the machine had no memory to
+ * hold it, the read's own refusal when a block would not read, and
+ * ERR_TAGFS_CORRUPTED when what the medium holds is no registry. Under a seal
+ * (`newest`, and the copy before it, `older`; both NULL for a volume whose
+ * newest Ledger carries none) it is read as far as the seal says, and a last
+ * block that does not bear the seal out is rolled back to the blocks before it
+ * (tag_registry.c). */
+error_t      tag_registry_load(TagRegistry* reg, uint32_t first_block,
                                const SettleMark* newest, const SettleMark* older);
 
 // ----------------------------------------------------------------------------
@@ -518,7 +521,7 @@ int             TagBitmapQueryPage(TagBitmapIndex* idx,
 // File Table API
 // ----------------------------------------------------------------------------
 
-int  file_table_init(uint32_t first_block, bool sealed);
+error_t file_table_init(uint32_t first_block, bool sealed);
 void file_table_shutdown(void);
 int  file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
 int  file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset);
@@ -610,6 +613,11 @@ void     TagFSInkerLeaves(struct process_t* proc);
  * context. */
 void     TagFSHeapCameBack(void);
 
+/* The same event for everything on the volume's road that waits for it: the
+ * Settle's cycle (TagFSHeapCameBack), and a mount the machine had no memory
+ * for, whose service pass is knocked awake. From any context. */
+void     TagFSMemoryCameBack(void);
+
 /*
  * Where this volume's ground begins on that medium, in the medium's own
  * sectors. Zero when nothing is mounted.
@@ -667,7 +675,8 @@ bool     TagFSMediumGone(void);
 /* Whether the medium under the mounted volume takes no write (RT-18): a write
  * it refused as protected — DATA PROTECT on USB, an ATA abort on AHCI. From
  * then on no Ink changes the volume — ERR_TAGFS_READ_ONLY — and every waiter
- * for a cycle hears the same, until the volume is let go of. TagFSWriteRefused
+ * for a cycle hears the same, until the volume is let go of — or its book is
+ * taken up, the medium seated again and asked anew. TagFSWriteRefused
  * asks the seat after a write the medium refused, and latches it. */
 bool     TagFSReadOnly(void);
 void     TagFSWriteRefused(void);

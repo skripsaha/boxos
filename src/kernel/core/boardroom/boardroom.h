@@ -113,6 +113,27 @@ void BoardroomNoteSeatReady(BoardKind kind, uint8_t index);
  */
 uint32_t BoardroomSeatReadyGen(uint8_t seat);
 
+/*
+ * How many commands `seat` refused, counted for the chair and only ever
+ * forward. Taken before a caller's reads and compared after: a count that
+ * moved is a refusal among them — what the caller read is then no answer,
+ * whatever else it read. One seat's own: a reader elsewhere in the machine
+ * that was refused moves nothing here.
+ */
+uint32_t BoardroomSeatRefusals(uint8_t seat);
+
+/*
+ * The medium in `seat` reset by its driver's own recovery — an IDE channel's
+ * software reset, a USB disk's transport reset, an AHCI port's link reset —
+ * for a caller a refusal left with nothing to send, which would otherwise
+ * wait for a bell no command will ring. OK when the medium answers again: its
+ * bell is rung (the seat's count moves). ERR_DEVICE_NOT_READY when it does
+ * not, or nobody sits in the seat: the room cannot reach it. Stands over the
+ * medium — where waiting is allowed, no TagFS lock held — for as long as the
+ * driver's recovery takes; asked once by a caller, never in a loop.
+ */
+error_t  BoardroomSeatReset(uint8_t seat);
+
 /* The room's pass: seat:ready said for every seat that rang, and whatever
  * arrived seated. Cheap enough for the idle loop: two atomic loads when
  * nothing rang and nothing arrived, which is almost always. */

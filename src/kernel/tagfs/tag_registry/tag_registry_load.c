@@ -8,10 +8,10 @@
  */
 /* One block's records taken in, up to `bytes` of its data, walked the way
  * every reader walks them: entry_count records packed from the start of the
- * data, none past its end. How many were taken and where they end; false
- * when memory ran out. */
-static bool RegistryAdoptBlock(TagRegistry* reg, const TagRegistryBlock* image, uint32_t bytes,
-                               uint16_t* out_walked, uint32_t* out_end) {
+ * data, none past its end. How many were taken and where they end; the
+ * refusal of the record that could not be held (ERR_NO_MEMORY). */
+static error_t RegistryAdoptBlock(TagRegistry* reg, const TagRegistryBlock* image, uint32_t bytes,
+                                  uint16_t* out_walked, uint32_t* out_end) {
     error_t  held   = OK;
     uint16_t walked = 0;
     uint32_t end    = 0;
@@ -34,7 +34,7 @@ static bool RegistryAdoptBlock(TagRegistry* reg, const TagRegistryBlock* image, 
     TagFSLockDrop(&reg->lock);
     *out_walked = walked;
     *out_end    = end;
-    return held == OK;
+    return held;
 }
 
 /* The block a walk is at, kept for the census; false when memory ran out. */
@@ -77,9 +77,9 @@ static uint32_t RegistrySealedBytes(const TagRegistryBlock* image, const SettleM
     return 0;
 }
 
-int tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMark* newest,
-                      const SettleMark* older) {
-    if (!reg) return -1;
+error_t tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMark* newest,
+                          const SettleMark* older) {
+    if (!reg) return ERR_NULL_POINTER;
 
     /*
      * ‼ THE ONLY BOUND ON THIS WALK IS A TERMINATION PROOF, NOT A LENGTH: a
@@ -100,7 +100,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMark* 
         kprintf("[TagRegistry] this volume states a data run of no blocks at "
                 "all, so there is nowhere for a tag registry to be — it is not "
                 "mounted\n");
-        return -1;
+        return ERR_TAGFS_CORRUPTED;
     }
     if (!newest) {
         newest = older;
@@ -115,7 +115,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMark* 
     if (!reg->tail_image || !reg->spare_image) {
         kprintf("[TagRegistry] there is no memory for the two blocks this registry is read and "
                 "written through — this volume is not mounted\n");
-        return -1;
+        return ERR_NO_MEMORY;
     }
 
     /* Read with no lock held: nobody can see this registry yet — the mount
@@ -133,24 +133,24 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMark* 
             kprintf("[TagRegistry] the chain points at block %u and this "
                     "volume's data run is %u blocks — that is outside the "
                     "volume, so it is not mounted\n", block, run);
-            return -1;
+            return ERR_TAGFS_CORRUPTED;
         }
         error_t read = tagfs_read_block(block, image);
         if (read != OK) {
             kprintf("[TagRegistry] block %u of the tag registry would not read (error %d) — this "
                     "volume is not mounted\n", block, (int)read);
-            return -1;
+            return read;
         }
         if (!RegistryChainNote(reg, block, &cap)) {
             kprintf("[TagRegistry] there is no memory to note the registry's chain at %u "
                     "blocks — this volume is not mounted\n", reg->chain_count + 1);
-            return -1;
+            return ERR_NO_MEMORY;
         }
         bool sealed_here = newest && block == newest->registry_block;
         if (!sealed_here && image->magic != TAGFS_REGISTRY_MAGIC) {
             kprintf("[TagRegistry] block %u holds 0x%08x where the tag registry should be — this "
                     "volume is not mounted\n", block, image->magic);
-            return -1;
+            return ERR_TAGFS_CORRUPTED;
         }
 
         uint32_t bytes = sealed_here ? RegistrySealedBytes(image, newest, older, block)
@@ -159,11 +159,12 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMark* 
             memset(image, 0, TAGFS_BLOCK_SIZE);
             image->magic = TAGFS_REGISTRY_MAGIC;
         }
-        if (!RegistryAdoptBlock(reg, image, bytes, &walked, &end)) {
+        error_t held = RegistryAdoptBlock(reg, image, bytes, &walked, &end);
+        if (held != OK) {
             kprintf("[TagRegistry] there is no memory to hold the tags of block %u — a registry "
                     "held in part would give their numbers to new tags, so this volume is not "
                     "mounted\n", block);
-            return -1;
+            return held;
         }
         RegistryRehash(reg);
 
@@ -181,7 +182,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMark* 
             kprintf("[TagRegistry] this volume's tag registry chain has taken "
                     "%u hops in a data run of %u blocks, so it is going round "
                     "in a circle — it is not mounted\n", hops, run);
-            return -1;
+            return ERR_TAGFS_CORRUPTED;
         }
         block = image->next_block;
     }
@@ -205,7 +206,7 @@ int tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMark* 
     reg->landed_bytes = end;
     reg->landed_crc   = crc;
     TagFSLockDrop(&reg->lock);
-    return 0;
+    return OK;
 }
 
 void TagRegistryLanded(TagRegistry* reg, SettleMark* mark) {
@@ -216,15 +217,61 @@ void TagRegistryLanded(TagRegistry* reg, SettleMark* mark) {
     TagFSLockDrop(&reg->lock);
 }
 
-void TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next) {
-    TagFSLockTake(&reg->lock);
+/*
+ * ‼ THE ID TABLE COVERS EVERY NUMBER THE REGISTRY GIVES OUT FROM.
+ *
+ * next_id is what every reader of an id bounds itself by — a tag's spelling,
+ * the system stamp, the take-down's walk over the table — and the table under
+ * it grew only when a tag was entered. Moved past it here, by the records of
+ * the pool wearing ids a rolled-back registry no longer names, every one of
+ * them read past the table's end: a spelling out of the heap's next block, and
+ * a take-down that freed pointers nobody allocated (Z08-1). So the table grows
+ * to cover the numbers before they move — made with no lock held, swapped in
+ * under it — and with no memory for it the numbers do not move: the refusal is
+ * said, and the mount it belongs to is refused for want of memory.
+ */
+error_t TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next) {
     if (next > TAGFS_MAX_TAG_ID + 1u)
         next = TAGFS_MAX_TAG_ID + 1u;
-    if (next > reg->next_id) {
-        reg->next_id      = (uint16_t)next;
-        reg->written_next = (uint16_t)next;
+    for (;;) {
+        TagFSLockTake(&reg->lock);
+        if (next <= reg->next_id) {
+            TagFSLockDrop(&reg->lock);
+            return OK;
+        }
+        if (next <= reg->by_id_capacity) {
+            reg->next_id      = (uint16_t)next;
+            reg->written_next = (uint16_t)next;
+            TagFSLockDrop(&reg->lock);
+            return OK;
+        }
+        uint32_t cap = reg->by_id_capacity;
+        TagFSLockDrop(&reg->lock);
+
+        uint32_t room = cap ? cap : 1u;
+        while (room < next)
+            room *= 2u;
+        TagRegistryEntry** more = kmalloc(sizeof(TagRegistryEntry*) * room);
+        if (!more) {
+            kprintf("[TagRegistry] the volume's records wear tag ids up to %u, and there is no "
+                    "memory to number the registry that far — the volume is not mounted\n",
+                    next - 1u);
+            return ERR_NO_MEMORY;
+        }
+        TagRegistryEntry** old = NULL;
+        TagFSLockTake(&reg->lock);
+        if (reg->by_id_capacity == cap) {
+            memcpy(more, reg->by_id, sizeof(TagRegistryEntry*) * cap);
+            memset(more + cap, 0, sizeof(TagRegistryEntry*) * (room - cap));
+            old                 = reg->by_id;
+            reg->by_id          = more;
+            reg->by_id_capacity = room;
+            more                = NULL;
+        }
+        TagFSLockDrop(&reg->lock);
+        kfree(more);
+        kfree(old);
     }
-    TagFSLockDrop(&reg->lock);
 }
 
 void RegistryChainLetGo(TagRegistry* reg) {

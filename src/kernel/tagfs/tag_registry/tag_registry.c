@@ -394,7 +394,9 @@ void tag_registry_destroy(TagRegistry* reg) {
     kfree(reg->buckets);
     reg->buckets = NULL;
 
-    for (uint32_t i = 0; i < reg->next_id; i++) {
+    /* The table walked as far as it was made, never as far as the numbers say:
+     * an entry lives only in a slot the table holds. */
+    for (uint32_t i = 0; i < reg->by_id_capacity; i++) {
         TagRegistryEntry* entry = reg->by_id[i];
         if (entry) {
             kfree(entry->key);

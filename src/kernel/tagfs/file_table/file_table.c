@@ -174,13 +174,15 @@ static bool TableBlockRefused(bool sealed, bool reached, bool take, uint32_t blo
 
 /* One link taken into the chain, and its block's rows into the map of live
  * files. A table the map has no room for is not a table held in part: the rows
- * past the refusal would read as no files. False, said, when memory ran out. */
-static bool TableTakeLink(uint32_t block, const FileTableBlock* image, bool rows)
+ * past the refusal would read as no files. ERR_NO_MEMORY, said, when memory
+ * ran out — a refusal the mount waits out, not one it holds against the
+ * volume. */
+static error_t TableTakeLink(uint32_t block, const FileTableBlock* image, bool rows)
 {
     if (g_link_count == g_link_cap && LinksReserve(g_link_cap ? g_link_cap * 2 : 1) != OK) {
         kprintf("[FileTable] there is no memory to hold this volume's file table's chain at "
                 "%u blocks — it is not mounted\n", g_link_count + 1);
-        return false;
+        return ERR_NO_MEMORY;
     }
     uint32_t entry_offset = g_link_count * TAGFS_FTABLE_PER_BLOCK;
     g_links[g_link_count++] = (FileTableLink){ .block = block };
@@ -195,16 +197,18 @@ static bool TableTakeLink(uint32_t block, const FileTableBlock* image, bool rows
         if (FileMapRowSet(table_files(), entry_offset + r, row->meta_block, row->meta_offset) != OK) {
             kprintf("[FileTable] there is no memory to hold the row of file %u — this volume "
                     "is not mounted\n", entry_offset + r);
-            return false;
+            return ERR_NO_MEMORY;
         }
     }
-    return true;
+    return OK;
 }
 
 /*
  * The chain walked from `first_block` through `image`: taken into the table
  * when `take` (the mount), or only walked (the stand's question of whether a
- * mount would stand on it). 0, or -1 — said — when the volume is not mounted.
+ * mount would stand on it). OK, or — said — ERR_NO_MEMORY when the machine
+ * had no memory to take it, ERR_FILE_TABLE_CORRUPT when it is no table a mount
+ * stands on.
  *
  * ‼ THE ONLY BOUND ON THIS WALK IS A TERMINATION PROOF, NOT A LENGTH. A chain
  * of distinct blocks cannot be longer than the data run it lives in, so a walk
@@ -212,7 +216,7 @@ static bool TableTakeLink(uint32_t block, const FileTableBlock* image, bool rows
  * next_block outside the run is refused before it is read — nothing under
  * tagfs_read_block bounds a block number.
  */
-static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBlock* image)
+static error_t TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBlock* image)
 {
     TagFSState* fs    = tagfs_get_state();
     uint32_t    run   = fs ? fs->layout.data_blocks : 0;
@@ -220,16 +224,17 @@ static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBloc
         kprintf("[FileTable] this volume states a data run of no blocks at "
                 "all, so there is nowhere for a file table to be — it is not "
                 "mounted\n");
-        return -1;
+        return ERR_FILE_TABLE_CORRUPT;
     }
 
     uint32_t block = first_block;
     bool     cut   = false;     /* the chain ends short of its last link: owed whole */
+    error_t  taken = OK;
     for (uint32_t hops = 0; ; hops++) {
         if (block >= run) {
             if (!TableBlockRefused(sealed, false, take, block,
                                    "lies outside the volume's data run"))
-                return -1;
+                return ERR_FILE_TABLE_CORRUPT;
             cut = true;
             break;
         }
@@ -242,20 +247,20 @@ static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBloc
         if (!table) {
             if (!TableBlockRefused(sealed, true, take, block,
                                    read ? "holds no file table" : "would not read"))
-                return -1;
-            if (take && !TableTakeLink(block, image, false))
-                return -1;
+                return ERR_FILE_TABLE_CORRUPT;
+            if (take && (taken = TableTakeLink(block, image, false)) != OK)
+                return taken;
             cut = true;
             break;
         }
-        if (take && !TableTakeLink(block, image, true))
-            return -1;
+        if (take && (taken = TableTakeLink(block, image, true)) != OK)
+            return taken;
         if (image->next_block == 0)
             break;
         if (hops + 1 >= run) {
             if (!TableBlockRefused(sealed, false, take, block,
                                    "links a chain that goes round in a circle"))
-                return -1;
+                return ERR_FILE_TABLE_CORRUPT;
             cut = true;
             break;
         }
@@ -266,24 +271,25 @@ static int TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBloc
      * image names no next block, and its rows are the map's. */
     if (take && cut && g_link_count)
         g_links[g_link_count - 1].edited = ++g_gen;
-    return 0;
+    return OK;
 }
 
-int file_table_init(uint32_t first_block, bool sealed) {
+error_t file_table_init(uint32_t first_block, bool sealed) {
     table_release();
-    if (TableWalk(first_block, sealed, true, &g_image) != 0) {
+    error_t walked = TableWalk(first_block, sealed, true, &g_image);
+    if (walked != OK) {
         table_release();
-        return -1;
+        return walked;
     }
     g_links_wanted = g_link_count;
-    return 0;
+    return OK;
 }
 
 #ifdef CONFIG_VOLUME_TESTS
 bool FileTableWouldStand(uint32_t first_block, bool sealed)
 {
     FileTableBlock* image = kmalloc(sizeof(FileTableBlock));
-    bool            stand = image && TableWalk(first_block, sealed, false, image) == 0;
+    bool            stand = image && TableWalk(first_block, sealed, false, image) == OK;
     kfree(image);
     return stand;
 }

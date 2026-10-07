@@ -211,8 +211,11 @@ static void HelmAnswerGone(HelmWaiter *w, uint64_t lost)
  * before it was latched is held with the open book — handed on when the book
  * is taken up, answered by the walk that gives it up, which takes every
  * Helm's lock once the book's fate is set — and one that asks after it is
- * never queued: it is answered at once that the medium is away, nothing of
- * its own lost. A parked Helm is held: its FIFO goes first. */
+ * neither queued nor handed a free Helm: it is answered at once that the
+ * medium is away, nothing of its own lost, before any of its work is begun —
+ * a Helm handed out then took the work through the allocator and a cycle the
+ * medium refused, and answered it "no room" or "write failed" (RT-13). A
+ * parked Helm is held: its FIFO goes first. */
 bool HelmAsk(OpenFileEntry *ofe, HelmWaiter *w)
 {
     FileHelm *h = &ofe->helm;
@@ -220,8 +223,8 @@ bool HelmAsk(OpenFileEntry *ofe, HelmWaiter *w)
     __atomic_add_fetch(&s_helm_owed, 1u, __ATOMIC_ACQ_REL);
 
     TagFSLockTake(&h->lock);
-    bool mine = h->holder == NULL && !h->parked;
-    bool gone = !mine && TagFSMediumLeft();
+    bool gone = TagFSMediumLeft();
+    bool mine = !gone && h->holder == NULL && !h->parked;
     if (mine) {
         h->holder = w;
     } else if (!gone) {
@@ -243,7 +246,7 @@ bool HelmTry(OpenFileEntry *ofe, HelmWaiter *w)
     w->next = NULL;
 
     TagFSLockTake(&h->lock);
-    bool mine = h->holder == NULL && !h->parked;
+    bool mine = !TagFSMediumLeft() && h->holder == NULL && !h->parked;
     if (mine)
         h->holder = w;
     TagFSLockDrop(&h->lock);
@@ -281,14 +284,16 @@ void HelmLetGo(OpenFileEntry *ofe, HelmWaiter *w)
         HelmHand(next);
 }
 
-bool HelmTakeNow(TagFSFileHandle *handle, HelmWaiter *here)
+error_t HelmTakeNow(TagFSFileHandle *handle, HelmWaiter *here)
 {
     memset(here, 0, sizeof(*here));
     if (HelmTry(handle->ofe, here))
-        return true;
+        return OK;
+    if (TagFSMediumLeft())
+        return ERR_DEVICE_NOT_READY;    /* the departure said itself when it was latched */
     kprintf("[TagFS] file %u is being changed by the holder of its Helm — a caller in the "
             "kernel cannot be parked behind it, and is refused\n", handle->file_id);
-    return false;
+    return ERR_BUSY;
 }
 
 bool HelmVacated(const OpenFileEntry *ofe)
@@ -355,45 +360,46 @@ void HelmReady(HelmWaiter *w)
     KnockOn(&s_ready_knock);
 }
 
-/* What the open book's fate owes the FIFOs, walked at a service point. */
+/*
+ * ‼ THE OPEN BOOK'S FATE IS DONE WHERE IT IS DECIDED, NEVER LEFT IN A SLOT.
+ *
+ * It used to be one word, set where the fate was decided and walked at the
+ * next service point, the last one written winning. A fate written over
+ * another lost the first: a book given up — its waiters owed the answer that
+ * their changes were lost — then taken up before any service point walked it,
+ * and the HAND that replaced the ANSWER handed the Helm to waiters who went on
+ * to write into a volume the give-up was about to let go of (Z07-2). And a
+ * fate walked late reached waiters the book never had: an ANSWER walked after
+ * the volume was read again answered a writer of the NEW volume that its
+ * changes were lost (Z11-12). So the walk is made in the call that decides,
+ * on the core attending the medium — while a book given up is still latched,
+ * so nobody is queued behind its Helms meanwhile; after a book taken up is let
+ * go of, so the parked Helms are handed on to a volume that takes writes.
+ */
 typedef enum {
-    HELM_BOOK_NOTHING = 0,
-    HELM_BOOK_ANSWER,       /* given up: every waiter answered */
+    HELM_BOOK_ANSWER = 1,   /* given up: every waiter answered */
     HELM_BOOK_HAND,         /* taken up: every parked Helm handed on */
 } HelmBookOwed;
 
 static void HelmWalkBook(HelmBookOwed owed, uint64_t lost);
-static volatile uint32_t s_book_owed;   /* HelmBookOwed */
-static volatile uint64_t s_book_lost;
 
 bool HelmReadyListed(void)
 {
-    return __atomic_load_n(&s_ready_count, __ATOMIC_ACQUIRE) != 0 ||
-           __atomic_load_n(&s_book_owed, __ATOMIC_ACQUIRE) != HELM_BOOK_NOTHING;
+    return __atomic_load_n(&s_ready_count, __ATOMIC_ACQUIRE) != 0;
 }
 
 void HelmBookGivenUp(uint64_t lost)
 {
-    __atomic_store_n(&s_book_lost, lost, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_book_owed, (uint32_t)HELM_BOOK_ANSWER, __ATOMIC_RELEASE);
-    KnockOn(&s_ready_knock);
+    HelmWalkBook(HELM_BOOK_ANSWER, lost);
 }
 
 void HelmBookTakenUp(void)
 {
-    __atomic_store_n(&s_book_owed, (uint32_t)HELM_BOOK_HAND, __ATOMIC_RELEASE);
-    KnockOn(&s_ready_knock);
+    HelmWalkBook(HELM_BOOK_HAND, 0);
 }
 
 void HelmRunReady(void)
 {
-    if (__atomic_load_n(&s_book_owed, __ATOMIC_ACQUIRE) != HELM_BOOK_NOTHING) {
-        HelmBookOwed owed = (HelmBookOwed)__atomic_exchange_n(
-            &s_book_owed, (uint32_t)HELM_BOOK_NOTHING, __ATOMIC_ACQ_REL);
-        if (owed != HELM_BOOK_NOTHING)
-            HelmWalkBook(owed, __atomic_load_n(&s_book_lost, __ATOMIC_ACQUIRE));
-    }
-
     for (uint32_t listed = __atomic_load_n(&s_ready_count, __ATOMIC_ACQUIRE); listed > 0;
          listed--) {
         TagFSLockTake(&s_ready_lock);
