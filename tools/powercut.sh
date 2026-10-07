@@ -833,7 +833,11 @@ EOF
 # the file is whole without it and that claim is gone. What a file's
 # durability stands on now is its record in the pool, under the seal: the
 # cycle's S3 writes nothing of the pool, and the anchored file must not be
-# found whole after the flush its ack stands on.
+# found whole after the flush its ack stands on. And the state that flush
+# stood behind names what is wrong with it in volume-read's own code: the
+# newest seal names records the medium does not hold, and the mount falls
+# back from it (SEAL_FELL_BACK, with the rows it lets go) — where a cut before
+# the flush may leave the same, and is no defect.
 run_poolmut() {
     mut_on src/kernel/tagfs/settle/settle.c "logcheck mutation" <<'EOF'
 import sys
@@ -843,7 +847,11 @@ assert s.count(a) == 1
 open(p, "w").write(s.replace(a, "        rc          = OK;   /* logcheck mutation: the cycle writes nothing of the pool */\n"
                                 "        done        = true;\n"))
 EOF
-    mut_run poolmut nextfid "durable:_anchor_test@anchor_test" fail \
+    mut_run poolmut nextfid boundaries fail \
+        "the cycle writing nothing of the pool, the state its flush stood behind does not stand on its newest seal"
+    awk -F"$TAB" '$1 == "boundaries"' "$PC_DIR/verdicts.tsv" | grep -q 'SEAL_FELL_BACK: '
+    chk $? "poolmut: and names it SEAL_FELL_BACK, the rows it lets go with it"
+    pc_expect "durable:_anchor_test@anchor_test" fail \
         "the cycle writing nothing of the pool, the anchored file is not durable"
     restore src/kernel/tagfs/settle/settle.c
 }

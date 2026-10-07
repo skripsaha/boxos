@@ -7599,14 +7599,21 @@ run_footing() {
 #
 # The rest hold the seal's decisions to the same prediction: S1, a newest seal
 # the medium did not keep, fallen back from; S2, an open block torn under both
-# seals, rolled back with every file whose only record it held; GL1, a chain
-# whose first block Glean moved, the head's old blocks the pool's still; R2, a
-# file's newest record rotten in a sealed span, the file standing on the record
-# before it and that record's block another file's. Each boot is held to the
-# line the kernel says of the seal it stood on, of the rows it let go or set,
-# the records it passed over, the blocks before the chain's first, a registry
-# rolled back, the next file id and the blocks named twice — every one the
-# census's prediction.
+# seals, rolled back, every file whose only record settled there said lost;
+# S7, the newest seal alone, its open block torn — nothing rolled back; S8,
+# the other seal's open block a closed block of the newest, whose open block
+# alone rolls back (the owner's B3); GL1, a chain whose first block Glean
+# moved, the head's old blocks the pool's still; R2, a file's newest record
+# rotten in a sealed span, the file standing on the record before it and that
+# record's block another file's. And what the mount reads before it trusts:
+# C21b, a Quitclaim whose row was left, which goes with it; C24, a record's
+# file id rotten, which names no id; C25, an extent past the data run, which
+# is not followed; C26, a record's length rotten, the rest of its block said
+# unread. Each boot is held to the line the kernel says of the seal it stood
+# on, of the rows it let go or set, the records it passed over or did not
+# follow, the bytes of a block it did not read, the blocks before the chain's
+# first, a registry rolled back, the next file id and the blocks named twice —
+# every one the census's prediction.
 #
 # Host only, beside them: (A) a real blklogwrites log written by qemu-io, read
 # back by `cut` and replayed onto its base, byte for byte; and volume-read's
@@ -7775,14 +7782,18 @@ m_none = re.search(r"\[TagFS\] this volume's newest Ledger carries no seal", log
 m_fell = re.search(r"\[TagFS\] fell back: the newest seal \(cycle \d+\)[^\n]*so the volume stands on "
                    r"cycle (\d+)", log)
 m_torn = re.search(r"\[TagFS\] the pool's open block (\d+) does not hold what [^\n]*ROLLED BACK", log)
+m_alone = re.search(r"\[TagFS\] the newest seal \(cycle \d+\) is the only one the Ledger holds, and "
+                    r"the pool's open block (\d+) does not hold what it says", log)
 m_unborne = re.search(r"\[TagFS\] no copy's seal is borne out by the pool's closed blocks", log)
 have = ("no seal on the newest copy" if m_none else
         "the seal of cycle %s, fallen back to" % m_fell.group(1) if m_fell else
         "its open block %s rolled back" % m_torn.group(1) if m_torn else
+        "the newest seal alone, not borne out" if m_alone else
         "no seal borne out" if m_unborne else "the newest seal")
 want = ("no seal on the newest copy" if not seal["newest_sealed"] else
         "the seal of cycle %s, fallen back to" % seal["settle"] if seal["fell_back"] else
         "its open block %s rolled back" % seal["to_block"] if seal["stood"] == "torn" else
+        "the newest seal alone, not borne out" if seal["alone"] else
         "no seal borne out" if seal["stood"] == "none" else "the newest seal")
 say(have == want, "the kernel's pool stands on %s; the census predicted %s" % (have, want))
 
@@ -7802,6 +7813,19 @@ say(have == (fsck["unnamed"],), "the kernel took up no record of %u unnamed one(
 have = count(r"\[MetaPool\] (\d+) record\(s\) of this volume's pool do not check out")
 say(have == (fsck["unreadable"],), "the kernel passed %u record(s) over that do not check out; the "
     "census predicted %u" % (have + (fsck["unreadable"],)))
+have = count(r"\[TagFS\] (\d+) table row\(s\) named files whose newest record is a Quitclaim")
+say(have == (fsck["quitclaimed"],), "the kernel let %u row(s) go with the Quitclaim of their file; "
+    "the census predicted %u" % (have + (fsck["quitclaimed"],)))
+have = count(r"\[MetaPool\] (\d+) block\(s\) of this volume's pool end in (\d+) byte\(s\) that do "
+             r"not read as records [^\n]*the first at block (\d+), byte (\d+)", 4)
+want = tuple(fsck["skipped"]) + tuple(fsck["skipped_first"] or (0, 0))
+say(have == want, "the kernel left %u block(s) unread past a record that is not one, %u byte(s), the "
+    "first at block %u byte %u; the census predicted %u, %u, %u, %u" % (have + want))
+have = count(r"\[MetaPool\] (\d+) record\(s\) of this volume's pool name a block outside its data "
+             r"run of \d+ blocks[^\n]*the first is file (\d+)'s", 2)
+want = (fsck["dropped"], fsck["dropped_first"] or 0)
+say(have == want, "the kernel followed none of the extents of %u record(s), the first file %u's; the "
+    "census predicted %u, file %u's" % (have + want))
 have = count(r"\[Glean\] (\d+) block\(s\) the pool's head still names lie before the chain's first")
 say(have == (len(seal["prefix"]),), "the kernel rests %u block(s) the pool's head names before the "
     "chain; the census predicted %u (%s)" % (have + (len(seal["prefix"]), seal["prefix"])))
@@ -7832,7 +7856,7 @@ run_census() {
     local plant line
     census_qemu_io
     census_selftest
-    for plant in reconcile C17 S1 S2 GL1 R2; do
+    for plant in reconcile C17 S1 S2 S7 S8 GL1 R2 C21b C24 C25 C26; do
         census_boot "$plant" "$plant" || continue
         census_judge "$plant"
         while IFS= read -r line; do
@@ -7951,16 +7975,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 126 of the stand's own twenty-one suites: stand 26, stand_lock 4,
+# the 129 of the stand's own twenty-one suites: stand 26, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 3,
 # stand_plot 4, stand_index 5, stand_ink 5, stand_helm 7, stand_port 2,
-# stand_use 3, stand_use_chain 4, stand_seal 5, stand_settle 11, stand_glean 5,
-# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 8,
+# stand_use 3, stand_use_chain 4, stand_seal 6, stand_settle 11, stand_glean 5,
+# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 10,
 # stand_warrant 6. Counted off the code, not a run (K9): a suite that drops
 # out of the walk is a test that stopped covering anything, and the count is
 # where that shows. How many of them pass and how many stand aside is the
 # road's — said, not pinned.
-STAND_RUN=148
+STAND_RUN=151
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -8092,11 +8116,12 @@ stand_orders() {
 #   stand_medium_* (a flush answered with sense)          0        0   a USB seat's own
 #   stand_medium_bell_rings_once                          1        1
 #   stand_medium_mount_hears_the_ready_it_was_owed        1        1   the mount's first read of the data
+#   stand_medium_mount_refused_read_is_no_verdict         1        1   the pool block a file's record lies in
 #   stand_roadstead_refusal_rings_once                    0        1   no asynchronous read on the legacy channel
 #   stand_settle_refusal_waits_for_the_bell               1        1   its Ledger; then a plan that only counts
 #   stand_settle_ring_during_the_cycle                    1        1   its Ledger
 #   stand_settle_table_refusal_is_the_mediums             2        2   the block written alone, then by the cycle
-#   total                                                19       24
+#   total                                                20       25
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -8189,8 +8214,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 19 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 24 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 20 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 25 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"

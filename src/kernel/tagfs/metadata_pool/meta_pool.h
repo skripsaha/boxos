@@ -44,20 +44,40 @@
  *     and its open block's records to tail_crc32 — the pool is read up to its
  *     `to` and not a byte further: what lies past it is a cycle that did not
  *     settle. One walk, the common mount;
- *   not borne out, and the other copy's seal is — the newest cycle was cut
- *     before its flush, or the medium said a flush was kept that was not: the
- *     volume stands on the cycle before, the walk is made again up to its
- *     `to`, and the medium is marked as one that once held less than a seal
- *     (SETTLE_MEDIUM_LIED). A seal whose chain begins at another block — the
- *     newest cycle's Glean took blocks off the front — is judged by that walk
- *     from its own first block, since the first walk never met them;
+ *   its closed blocks borne out and its open block not, and the other copy's
+ *     open block is one of those closed blocks — the open block was torn as it
+ *     was written (decision 5, the owner's B3): the pool stands on the newest
+ *     seal and rolls back its open block alone, loudly, and mounts writable;
+ *     standing on the other seal would lose every closed block the newest
+ *     cycle settled;
+ *   not borne out, and the other copy's seal is — its closed part not borne
+ *     out, or both seals share one open block: the newest cycle was cut
+ *     before its flush, or the medium said a flush was kept that was not, and
+ *     the volume stands on the cycle before, the walk made again up to its
+ *     `to`. A seal whose chain begins at another block — the newest cycle's
+ *     Glean took blocks off the front — is judged by that walk from its own
+ *     first block, since the first walk never met them;
  *   neither, and a seal's closed part is borne out while its open block is not
- *     — the open block was torn as it was rewritten (decision 5): the pool
- *     rolls back to its last closed block, loudly, and mounts writable;
+ *     — both seals' open block torn: it rolls back as above;
+ *   the newest seal alone, its open block not borne out — the other copy was
+ *     written by a kernel before the seal, which wrote that block in place: the
+ *     chain is read whole as such a kernel reads it, since rolling the block
+ *     back would lose the records that kernel kept there;
  *   no seal's closed part borne out — a kernel before the seal retired records
  *     in closed blocks in place, or the blocks rotted: the chain is read whole
  *     as that kernel left it (no seal: the same), loudly, with nothing rolled
  *     back.
+ *
+ * A mount that rolls the newest cycle back — falling back, rolling an open
+ * block back, or the newest seal alone not borne out — marks the medium as one
+ * that once held less than a seal (SETTLE_MEDIUM_LIED): format v1 cannot tell
+ * a cut before the flush from a flush the medium said it kept and did not. A
+ * pool whose closed blocks no seal bears out is rot or a kernel before the
+ * seal, and marks nothing.
+ *
+ * A block the medium refuses to read is no verdict on any seal: a refusal says
+ * nothing of what the block holds, so the mount is refused as a read the
+ * medium refused, and asked again when the seat answers.
  *
  * Only a walk that is made again, after a cut or damage, reads a block twice.
  */
@@ -76,28 +96,36 @@ typedef struct {
     PoolStood stood;
     int       seal;            /* the seal stood on: an index into ask->seal, or -1 */
     bool      fell_back;       /* the newest copy's seal was not borne out, the other's was */
-    uint32_t  torn_bytes;      /* POOL_STOOD_TORN_TAIL: the records the torn open block held */
-    uint32_t  top_fid;         /* the highest file id any record walked names — past the seal too */
+    bool      lied;            /* the newest cycle rolled back: SETTLE_MEDIUM_LIED from now on */
+    uint32_t  torn_block;      /* POOL_STOOD_TORN_TAIL: the open block rolled back, and the */
+    uint32_t  torn_end;        /*   byte its rolled-back records ended at, its header counted */
+    uint32_t  top_fid;         /* the highest file id a record that checks out names — past the seal too */
     uint32_t  top_tag;         /* the highest tag id a record of the span wears */
     uint32_t  from_block;      /* where the records of the next seal's cycle begin */
     uint32_t  from_bytes;
     uint32_t  unreadable;      /* records of the span that do not check out */
     uint32_t* last_span;       /* the files the stood seal's own cycle wrote records of */
     uint32_t  last_span_count;
+    uint32_t* gone;            /* the files whose newest record is a Quitclaim: their rows go too */
+    uint32_t  gone_count;
 } PoolMountOutcome;
 
-/* The walk above, into the map of live files. OK; or ERR_TAGFS_CORRUPTED —
- * said — for a chain that cannot be read as far as any seal or the Deed's head
- * needs, and ERR_NO_MEMORY for records memory cannot hold: a map held in part
- * is a mount that lost files. `out->last_span` is the caller's to kfree. */
+/* The walk above, into the map of live files. OK; ERR_TAGFS_CORRUPTED — said —
+ * for a chain that cannot be read as far as any seal or the Deed's head
+ * needs; the read's own error when the medium refused one, which no seal is
+ * judged on; and ERR_NO_MEMORY for records memory cannot hold: a map held in
+ * part is a mount that lost files. `out->last_span` and `out->gone` are the
+ * caller's to kfree. */
 error_t  PoolMount(const PoolMountAsk* ask, PoolMountOutcome* out);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The seals held against the medium the way PoolMount holds them, reading
  * only: nothing the mounted volume holds in memory is touched. Which the mount
- * would stand on (POOL_STOOD_*), the seal's index in *out_seal (-1: none), and
- * whether it would say it fell back. For the stand. */
-PoolStood PoolSealsJudge(const PoolMountAsk* ask, int* out_seal, bool* out_fell_back);
+ * would stand on (POOL_STOOD_*), the seal's index in *out_seal (-1: none),
+ * whether it would say it fell back, and whether it would mark the medium
+ * SETTLE_MEDIUM_LIED. For the stand. */
+PoolStood PoolSealsJudge(const PoolMountAsk* ask, int* out_seal, bool* out_fell_back,
+                         bool* out_lied);
 #endif
 
 /* The mount's census: the chain's blocks — and the Deed's head, which the pool

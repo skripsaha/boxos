@@ -11,18 +11,25 @@ of what it calls, said once on the host, for `list`, `get` and `check` alike:
                      out rolls back (tag_registry_load.c) — whatever the pool
                      then stands on
     the pool         the walk that holds each seal against the chain, and the
-                     one it then stands on: the newest seal borne out, the
-                     other borne out (fell back), a seal whose closed blocks
-                     are borne out and open block is not (its open block rolls
-                     back), or none — the whole chain from the Deed's head
+                     one it then stands on: the newest seal borne out; the
+                     newest with its open block rolled back when the other's
+                     open block is one of its closed blocks (the owner's B3);
+                     the other borne out (fell back); a seal whose closed
+                     blocks are borne out and open block is not, beside a
+                     second seal (its open block rolls back); or none — the
+                     whole chain from the Deed's head. A read the medium
+                     refuses refuses the mount, whatever the seals; only a
+                     record that checks out names an id
                      (metadata_pool/meta_pool_mount.c PoolMount)
     the table        walked from the Deed's head: strictly with no seal, cut
                      short under one (file_table.c TableWalk)
     the files        a file is its newest readable record; its row is
-                     corrected to it, or derived under a seal; a row with no
-                     record is a cycle that did not settle under a seal and a
-                     file lost without one; a record no row names is not taken
-                     up without a seal (mount.c MountFile)
+                     corrected to it, or derived under a seal; the row of a
+                     file whose newest record is a Quitclaim goes with it; a
+                     row with no record is a cycle that did not settle under a
+                     seal, and a file lost without one or in the open block a
+                     seal rolled back; a record no row names is not taken up
+                     without a seal (mount.c MountFile, MountQuitclaimedRows)
     the numbers      the next file id past every id a row or a record shows,
                      the next tag id past every tag a record wears (mount.c
                      MountNextFileId, tag_registry_load.c TagRegistryNumbersFrom)
@@ -180,20 +187,25 @@ class _PoolWalk:
         self.Forget()
 
     def Forget(self):
-        """WalkForget: a walk made again starts from nothing."""
+        """WalkForget: a walk made again starts from nothing — the skipped
+        tails (block, at, bytes) and the records whose extents are not
+        followed among it."""
         self.chain, self.spans, self.records = [], [], []
         self.files, self.gone, self.unreadable = {}, set(), []
+        self.skipped, self.dropped = [], []
         self.disagreed, self.tail = 0, None
 
 
 def _Try(mark):
-    return {"mark": mark, "fold": 0, "verdict": "unmet"}
+    return {"mark": mark, "fold": 0, "verdict": "unmet", "closed": False}
 
 
-def _Judge(tries, block, raw):
+def _Judge(tries, block, raw, own_to):
     """WalkJudge: the seals not yet met, held against the block the walk is at
-    — raw None when it would not read as a block of the pool, block None when
-    the chain ran out before a seal's open block."""
+    — raw None when it is not a block of the pool, block None when the chain
+    ran out before a seal's open block — on a walk whose own seal's open block
+    is `own_to`: a seal whose open block is met short of it is one the walk's
+    seal closed ("closed")."""
     for t in tries or ():
         if t is None or t["mark"] is None or t["verdict"] != "unmet":
             continue
@@ -207,6 +219,7 @@ def _Judge(tries, block, raw):
         to = m["pool_to_bytes"]
         tail = (raw is not None and to <= MPOOL_DATA and U16(raw, 8) >= to and
                 Crc32(bytes(raw[CHAIN_HEADER:CHAIN_HEADER + to])) == m["tail_crc32"])
+        t["closed"] = block != own_to
         t["verdict"] = ("broken" if t["fold"] != m["closed_crc32"] else
                         "borne" if tail else "torn")
 
@@ -222,33 +235,41 @@ def _Records(w, raw, block, upto):
     """WalkRecords + WalkPut: the block's records up to `upto` into the map, in
     order. A record that does not unpack is passed over — the file keeps the
     newest of its records that does (the rule a rotten newest record meets
-    today); an ACTIVE one becomes its file's, a Quitclaim takes the file out."""
-    walk, _stop = ondisk.PoolRecords(raw, upto)
+    today) — and names no id; an ACTIVE one becomes its file's, a Quitclaim
+    takes the file out. What the walk leaves unread of the block is counted."""
+    walk, stop = ondisk.PoolRecords(raw, upto)
     for at, _len, fid in walk:
-        w.top_fid = max(w.top_fid, fid)
-        rec = ondisk.ParseRecord(raw, at, block)
+        rec = ondisk.ParseRecord(raw, at, block, w.run)
         w.records.append(rec)
         if not fid:
             continue
         if not rec.unpack_ok:
             w.unreadable.append(rec)
             continue
+        w.top_fid = max(w.top_fid, fid)
         w.top_tag = max([w.top_tag] + rec.tags)
+        if rec.extents and not rec.extents_at_mount:
+            w.dropped.append(rec)
         if rec.flags & FILE_ACTIVE:
             w.files[fid] = rec
             w.gone.discard(fid)
         else:
             w.files.pop(fid, None)
             w.gone.add(fid)
+    if stop < upto:
+        w.skipped.append((block, CHAIN_HEADER + stop, upto - stop))
 
 
 def _FidsPast(w, raw, block, start):
-    """WalkFidsPast: the ids of the records a seal does not hold."""
+    """WalkFidsPast: the ids of the records a seal does not hold — of those
+    that check out."""
     walk, _stop = ondisk.PoolRecords(raw, ondisk.PoolUsed(raw))
     for at, _len, fid in walk:
         if at - CHAIN_HEADER >= start:
-            w.top_fid = max(w.top_fid, fid)
-            w.past.append(ondisk.ParseRecord(raw, at, block))
+            rec = ondisk.ParseRecord(raw, at, block, w.run)
+            if rec.unpack_ok:
+                w.top_fid = max(w.top_fid, fid)
+            w.past.append(rec)
 
 
 def _PastSpan(w, nxt):
@@ -265,6 +286,13 @@ def _PastSpan(w, nxt):
         hops += 1
 
 
+def _Refused(block):
+    """WalkRefused: a read the medium refused is no verdict on any seal, and
+    refuses the mount."""
+    return ("the medium refused the read of block %u of this volume's metadata chain — a "
+            "refusal says nothing of what the block holds" % block)
+
+
 def _WalkOnce(w, plan, judge):
     """WalkOnce: None with the tail laid, _STOPPED for a judging walk that could
     go no further, or the sentence of a walk that does not mount."""
@@ -272,6 +300,8 @@ def _WalkOnce(w, plan, judge):
     while True:
         at_to = plan["sealed"] and block == plan["to_block"]
         if at_to and plan["torn"]:
+            if block < w.run and w.read(block) is None:     # WalkTornSpan reads it
+                return _Refused(block)
             w.chain.append(block)
             w.tail = (block, 0)
             return None
@@ -281,10 +311,10 @@ def _WalkOnce(w, plan, judge):
         else:
             raw = w.read(block)
             if raw is None:
-                why = "would not read"
-            elif U32(raw, 0) != MPOOL_MAGIC:
+                return _Refused(block)
+            if U32(raw, 0) != MPOOL_MAGIC:
                 why = "holds no metadata pool"
-        _Judge(judge, block, None if why else raw)
+        _Judge(judge, block, None if why else raw, plan["to_block"])
         if why:
             if judge is not None:
                 return _STOPPED
@@ -308,7 +338,7 @@ def _WalkOnce(w, plan, judge):
         stop = ("ends" if nxt == 0 else
                 "goes round in a circle" if hops + 1 >= w.run else None)
         if stop:
-            _Judge(judge, None, None)
+            _Judge(judge, None, None, plan["to_block"])
             if judge is not None:
                 return _STOPPED
             return ("this volume's metadata chain %s at block %u%s" %
@@ -319,30 +349,43 @@ def _WalkOnce(w, plan, judge):
 
 
 def _SealsDecide(tries):
-    """SealsDecide: (stood, index, fell_back)."""
-    t0, t1 = tries
-    if t0 and t0["mark"] and t0["verdict"] == "borne":
-        return "seal", 0, False
-    if t1 and t1["mark"] and t1["verdict"] == "borne":
-        return "seal", 1, True
-    for i, t in enumerate(tries):
-        if t and t["mark"] and t["verdict"] == "torn":
-            return "torn", i, False
-    return "none", None, False
+    """SealsDecide: (stood, index, fell_back, lied) — the newest borne out; the
+    newest's open block rolled back when the other's open block is one of its
+    closed blocks; the other borne out; a torn open block beside a second
+    seal, the newest first; else none. `lied` (SETTLE_MEDIUM_LIED) when the
+    newest cycle is rolled back, the newest seal alone not borne out among it."""
+    n, o = tries
+    other = o is not None and o["mark"] is not None
+    if n["verdict"] == "borne":
+        return "seal", 0, False, False
+    if n["verdict"] == "torn" and other and o["closed"]:
+        return "torn", 0, False, True
+    if other and o["verdict"] == "borne":
+        return "seal", 1, True, True
+    if other and n["verdict"] == "torn":
+        return "torn", 0, False, True
+    if other and o["verdict"] == "torn":
+        return "torn", 1, False, True
+    return "none", None, False, not other and n["verdict"] == "torn"
 
 
 def PoolMount(read_block, head, seals, run):
     """PoolMount (meta_pool_mount.c) on the seals [s0, s1]: the walks it makes,
     and what the last of them stood on. A dict — stood ('seal' | 'torn' |
-    'none'), seal (0 | 1 | None), fell_back, verdicts, chain, spans [(block,
-    raw, upto)], records (every record the standing walk met, in order), files
-    {fid: Record} (the map: the newest readable ACTIVE record of each), gone
-    (ids a Quitclaim took out), unreadable, top_fid, top_tag, disagreed, tail,
-    past (records no seal holds), past_blocks, refused."""
+    'none'), seal (0 | 1 | None), fell_back, lied, verdicts, closed (each
+    seal's open block met short of the newest's: one the newest closed),
+    torn_block and torn_end (where the rolled-back records ended, the block's
+    header counted), chain, spans [(block, raw, upto)], records (every record the
+    standing walk met, in order), files {fid: Record} (the map: the newest
+    readable ACTIVE record of each), gone (ids a Quitclaim took out),
+    unreadable, skipped [(block, at, bytes)], dropped (records whose extents
+    are not followed), top_fid, top_tag, disagreed, tail, past (records no seal
+    holds), past_blocks, refused."""
     w = _PoolWalk(read_block, run)
     s0, s1 = seals
-    out = {"stood": "none", "seal": None, "fell_back": False, "refused": None,
-           "verdicts": [None, None]}
+    out = {"stood": "none", "seal": None, "fell_back": False, "lied": False, "refused": None,
+           "verdicts": [None, None], "closed": [False, False], "torn_block": None,
+           "torn_end": None}
     if run == 0:
         out["refused"] = "this volume states a data run of no blocks at all"
         return _PoolOut(w, out)
@@ -350,7 +393,7 @@ def PoolMount(read_block, head, seals, run):
         rc = _WalkOnce(w, _Plan(head=head), None)
     else:
         apart = s1 is not None and s1["chain_first"] != s0["chain_first"]
-        tries = [_Try(s0), _Try(None if apart else s1)]
+        tries = [_Try(s0), _Try(s1)]
         rc = _WalkOnce(w, _Plan(s0), tries)
         judged = rc is None or rc is _STOPPED
         if judged and tries[0]["verdict"] == "borne":
@@ -359,6 +402,7 @@ def PoolMount(read_block, head, seals, run):
         elif judged:
             rc = _AfterNewest(w, head, s0, s1, tries, out, apart)
         out["verdicts"] = [t["verdict"] if t and t["mark"] else None for t in tries]
+        out["closed"] = [bool(t and t["mark"] and t["closed"]) for t in tries]
     if rc is _STOPPED:
         rc = "a walk that judges a seal could go no further"
     if rc is not None:
@@ -373,20 +417,22 @@ def _AfterNewest(w, head, s0, s1, tries, out, apart):
     if apart:
         own = [None, _Try(s1)]
         rc = _WalkOnce(w, _Plan(s1), own)
+        own[1]["closed"] = tries[1]["closed"]
         tries[1] = own[1]
         if not (rc is None or rc is _STOPPED):
             return rc
-        if own[1]["verdict"] == "borne":
-            out.update(stood="seal", seal=1, fell_back=True)
+        stood, at, fell_back, lied = _SealsDecide(tries)
+        if (stood, at) == ("seal", 1):
+            out.update(stood=stood, seal=1, fell_back=fell_back, lied=lied)
             return None
         w.Forget()
-    stood, at, fell_back = _SealsDecide(tries)
-    out.update(stood=stood, seal=at, fell_back=fell_back)
+    stood, at, fell_back, lied = _SealsDecide(tries)
+    out.update(stood=stood, seal=at, fell_back=fell_back, lied=lied)
     if stood == "seal":
         return _WalkOnce(w, _Plan(s1), None)
     if stood == "torn":
         mark = s0 if at == 0 else s1
-        out["torn_bytes"] = mark["pool_to_bytes"]
+        out.update(torn_block=mark["pool_to_block"], torn_end=CHAIN_HEADER + mark["pool_to_bytes"])
         return _WalkOnce(w, _Plan(mark, torn=True), None)
     return _WalkOnce(w, _Plan(head=head), None)
 
@@ -394,7 +440,8 @@ def _AfterNewest(w, head, s0, s1, tries, out, apart):
 def _PoolOut(w, out):
     out.update(chain=w.chain, spans=w.spans, records=w.records, files=w.files, gone=w.gone,
                unreadable=w.unreadable, top_fid=w.top_fid, top_tag=w.top_tag,
-               disagreed=w.disagreed, tail=w.tail, past=w.past, past_blocks=w.past_blocks)
+               disagreed=w.disagreed, tail=w.tail, past=w.past, past_blocks=w.past_blocks,
+               skipped=w.skipped, dropped=w.dropped)
     return out
 
 
@@ -471,20 +518,31 @@ def TableMount(read_block, first, sealed, run):
 # ---------------------------------------------------------------------------
 
 
-def MountFiles(files, rows, sealed):
-    """MountWalkFiles / MountFile (mount.c): every id the map holds — a record,
-    a row, or both — judged. ({fid: verdict}, counts, the highest id met). A
-    verdict is {state, record, row, corrected, derived}, state one of
-    'mounted', 'unsettled' (sealed, a row with no record), 'lost' (no seal, a
-    row with no record) and 'unnamed' (no seal, a record no row names)."""
+def MountFiles(files, rows, sealed, torn=None, gone=()):
+    """MountQuitclaimedRows, then MountWalkFiles / MountFile (mount.c): the
+    rows of the files a Quitclaim took out let go, then every id the map holds
+    — a record, a row, or both — judged. ({fid: verdict}, counts, the highest
+    id met). A verdict is {state, record, row, corrected, derived, rolled},
+    state one of 'mounted', 'quitclaim' (a row let go with its delete),
+    'unsettled' (sealed, a row with no record), 'lost' (no seal, a row with no
+    record; or `torn`, (block, end), naming the rolled-back open block short of
+    where its settled records ended — `rolled`) and 'unnamed' (no seal, a
+    record no row names)."""
     out, top = {}, 0
-    n = dict(checked=0, corrected=0, derived=0, unsettled=0, lost=0, unnamed=0)
+    n = dict(checked=0, corrected=0, derived=0, unsettled=0, lost=0, unnamed=0, quitclaimed=0)
     for fid in sorted(set(files) | set(rows)):
-        top = max(top, fid)
         rec, row = files.get(fid), rows.get(fid)
-        v = {"state": None, "record": rec, "row": row, "corrected": False, "derived": False}
+        v = {"state": None, "record": rec, "row": row, "corrected": False, "derived": False,
+             "rolled": False}
+        if rec is None and fid in gone:
+            v["state"] = "quitclaim"
+            n["quitclaimed"] += 1
+            out[fid] = v
+            continue
+        top = max(top, fid)
         if rec is None:
-            v["state"] = "unsettled" if sealed else "lost"
+            v["rolled"] = torn is not None and row[0] == torn[0] and row[1] < torn[1]
+            v["state"] = "unsettled" if sealed and not v["rolled"] else "lost"
         elif row is None and not sealed:
             v["state"] = "unnamed"
         else:
@@ -559,8 +617,10 @@ class MountModel:
 
         self.table = TableMount(read_block, self.head["file_table_block"], self.sealed, D)
 
+        torn = ((self.pool["torn_block"], self.pool["torn_end"])
+                if self.pool["stood"] == "torn" else None)
         self.files, self.counts, top = MountFiles(self.pool["files"], self.table["rows"],
-                                                  self.sealed)
+                                                  self.sealed, torn, self.pool["gone"])
         ledger_next = self.stood["next_file_id"] if self.stood else 0
         self.next_file_id = NextFileId(ledger_next, top, self.pool["top_fid"])
         self.next_tag_id = NextTagId(self.by_id, self.pool["top_tag"])

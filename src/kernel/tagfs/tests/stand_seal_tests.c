@@ -58,15 +58,20 @@ static uint32_t StandPoolHead(void)
 }
 
 /* The medium's pool against the newest seal, and the other copy's: what a
- * mount would stand on. */
+ * mount would stand on, and whether it would mark the medium
+ * SETTLE_MEDIUM_LIED (NULL: not asked). */
 static PoolStood StandSealJudge(const VolumeLedger* newest, const VolumeLedger* other,
-                                bool has_other, int* seal, bool* fell_back)
+                                bool has_other, int* seal, bool* fell_back, bool* lied)
 {
+    bool         said = false;
     PoolMountAsk ask = {
         .seal = { &newest->mark, has_other && StandSealOf(other) ? &other->mark : NULL },
         .head = StandPoolHead(),
     };
-    return PoolSealsJudge(&ask, seal, fell_back);
+    PoolStood stood = PoolSealsJudge(&ask, seal, fell_back, &said);
+    if (lied)
+        *lied = said;
+    return stood;
 }
 
 /* A settled cycle's seal names the pool and the registry as the medium holds
@@ -85,7 +90,7 @@ static TestResult TestStandSealBorne(void)
     TEST_ASSERT(newest.use_context_bytes == 0 && newest.use_context_offset == 0,
                 "and no text of a Use Context is laid in the Ledger's sector");
 
-    PoolStood stood = StandSealJudge(&newest, &other, has_other, &seal, &fell_back);
+    PoolStood stood = StandSealJudge(&newest, &other, has_other, &seal, &fell_back, NULL);
     TEST_ASSERT_EQ(stood, POOL_STOOD_SEAL, "the mount would stand on a seal");
     TEST_ASSERT_EQ(seal, 0, "the newest one");
     TEST_ASSERT(!fell_back, "without falling back");
@@ -145,7 +150,8 @@ static TestResult TestStandSealCutKeepsTheSeal(void)
     TEST_ASSERT(cut != OK, "and the cycle cut at its pool is refused");
     TEST_ASSERT(StandSealCopies(&after, &other, &has_other), "the Ledger reads");
     TEST_ASSERT_EQ(after.seq, before.seq, "no copy moved past the cut");
-    TEST_ASSERT_EQ(StandSealJudge(&after, &other, has_other, &seal, &fell_back), POOL_STOOD_SEAL,
+    TEST_ASSERT_EQ(StandSealJudge(&after, &other, has_other, &seal, &fell_back, NULL),
+                   POOL_STOOD_SEAL,
                    "the mount would stand on the seal the cut left");
     TEST_ASSERT(seal == 0 && !fell_back, "the newest, borne out");
 
@@ -156,7 +162,8 @@ static TestResult TestStandSealCutKeepsTheSeal(void)
     TEST_ASSERT(cut != OK, "and the cycle cut at its Ledger is refused");
     TEST_ASSERT(StandSealCopies(&after, &other, &has_other), "the Ledger reads");
     TEST_ASSERT_EQ(after.seq, before.seq, "no copy moved past the cut");
-    TEST_ASSERT_EQ(StandSealJudge(&after, &other, has_other, &seal, &fell_back), POOL_STOOD_SEAL,
+    TEST_ASSERT_EQ(StandSealJudge(&after, &other, has_other, &seal, &fell_back, NULL),
+                   POOL_STOOD_SEAL,
                    "the pool the cut cycle wrote past the seal still bears it out");
     TEST_ASSERT(seal == 0 && !fell_back, "the newest, borne out");
 
@@ -164,7 +171,8 @@ static TestResult TestStandSealCutKeepsTheSeal(void)
     TEST_ASSERT(StandSealCopies(&after, &other, &has_other), "the Ledger reads");
     TEST_ASSERT(after.seq > before.seq, "a newer copy landed");
     TEST_ASSERT(StandSealOf(&after), "sealed");
-    TEST_ASSERT_EQ(StandSealJudge(&after, &other, has_other, &seal, &fell_back), POOL_STOOD_SEAL,
+    TEST_ASSERT_EQ(StandSealJudge(&after, &other, has_other, &seal, &fell_back, NULL),
+                   POOL_STOOD_SEAL,
                    "and its seal is borne out");
     TEST_ASSERT(seal == 0 && !fell_back, "the newest");
 out:
@@ -179,16 +187,17 @@ out:
 /*
  * The medium said a flush was kept and was not: the newest seal names pool
  * records the medium does not hold. The mount falls back to the copy before
- * it (and marks the medium SETTLE_MEDIUM_LIED — PoolMount's fell_back); a seal
- * whose closed part is not borne out falls back the same way; an open block
- * neither seal bears out rolls back to the last closed block (decision 5);
- * and no closed part borne out is the road of a kernel before the seal.
+ * it (and marks the medium SETTLE_MEDIUM_LIED); a seal whose closed part is
+ * not borne out falls back the same way; an open block neither seal bears out
+ * rolls back to the last closed block (decision 5), marked the same; and no
+ * closed part borne out is the road of a kernel before the seal, or rot, which
+ * marks nothing.
  */
 static TestResult TestStandSealLieFallsBack(void)
 {
     TestResult   verdict = TEST_PASS;
     VolumeLedger real, other, lied, torn;
-    bool         has_other = false, fell_back = false;
+    bool         has_other = false, fell_back = false, marked = false;
     int          seal = -1;
 
     TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle settles");
@@ -200,19 +209,20 @@ static TestResult TestStandSealLieFallsBack(void)
     lied.seq++;
     lied.mark.settle        = lied.seq;
     lied.mark.pool_to_bytes = real.mark.pool_to_bytes + 42u;
-    TEST_ASSERT_EQ(StandSealJudge(&lied, &real, true, &seal, &fell_back), POOL_STOOD_SEAL,
+    TEST_ASSERT_EQ(StandSealJudge(&lied, &real, true, &seal, &fell_back, &marked), POOL_STOOD_SEAL,
                    "an open block short of the newest seal: the mount stands on a seal");
     TEST_ASSERT_EQ(seal, 1, "the one before it");
     TEST_ASSERT(fell_back, "and says it fell back");
+    TEST_ASSERT(marked, "marking the medium SETTLE_MEDIUM_LIED");
 
     /* Its closed blocks as the lie leaves them. */
     lied = real;
     lied.seq++;
     lied.mark.settle        = lied.seq;
     lied.mark.closed_crc32 ^= 1u;
-    TEST_ASSERT_EQ(StandSealJudge(&lied, &real, true, &seal, &fell_back), POOL_STOOD_SEAL,
+    TEST_ASSERT_EQ(StandSealJudge(&lied, &real, true, &seal, &fell_back, &marked), POOL_STOOD_SEAL,
                    "closed blocks the newest seal does not find: the mount stands on a seal");
-    TEST_ASSERT(seal == 1 && fell_back, "the one before it, falling back");
+    TEST_ASSERT(seal == 1 && fell_back && marked, "the one before it, falling back, marked");
 
     /* Neither seal's open block borne out, their closed blocks both: torn. */
     lied = real;
@@ -221,17 +231,83 @@ static TestResult TestStandSealLieFallsBack(void)
     lied.mark.tail_crc32 ^= 1u;
     torn = real;
     torn.mark.tail_crc32 ^= 2u;
-    TEST_ASSERT_EQ(StandSealJudge(&lied, &torn, true, &seal, &fell_back),
+    TEST_ASSERT_EQ(StandSealJudge(&lied, &torn, true, &seal, &fell_back, &marked),
                    POOL_STOOD_TORN_TAIL, "an open block neither seal finds rolls back");
     TEST_ASSERT(seal == 0 && !fell_back, "under the newest seal, without falling back");
+    TEST_ASSERT(marked, "and the roll back marks the medium as any other");
 
     /* No seal's closed part borne out: the road of a kernel before the seal. */
     lied.mark.closed_crc32 ^= 1u;
     torn.mark.closed_crc32 ^= 1u;
-    TEST_ASSERT_EQ(StandSealJudge(&lied, &torn, true, &seal, &fell_back),
+    TEST_ASSERT_EQ(StandSealJudge(&lied, &torn, true, &seal, &fell_back, &marked),
                    POOL_STOOD_NO_SEAL, "closed blocks no seal finds: the whole chain, unsealed");
     TEST_ASSERT_EQ(seal, -1, "on no seal");
+    TEST_ASSERT(!marked, "and rot, or a kernel before the seal, marks nothing");
 out:
+    return verdict;
+}
+
+/*
+ * R11 (Z11-3, the owner's B3). The newest cycle closed the other seal's open
+ * block and settled; then its own open block was torn. The mount stands on the
+ * newest seal and rolls back that open block alone: falling back to the other
+ * seal would lose every record the newest cycle laid in the block it closed,
+ * all of them behind its flush. Red before: the other seal, borne out, was
+ * fallen back to. And R11 (Z09-6): a newest seal alone — the other copy
+ * written by a kernel before the seal — whose open block is not borne out
+ * rolls nothing back, since that block may hold the records such a kernel kept
+ * there; the whole chain is read, the medium marked. Red before: the open
+ * block was rolled back on the one seal.
+ */
+static TestResult TestStandSealRollbackStandsOnTheNewest(void)
+{
+    TestResult     verdict = TEST_PASS;
+    VolumeLedger   real, other, torn, older;
+    bool           has_other = false, fell_back = true, marked = false;
+    int            seal = -1;
+    MetaPoolBlock* first = kmalloc(sizeof(MetaPoolBlock));
+
+    TEST_ASSERT(first, "memory for the pool's first block");
+    TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle settles");
+    TEST_ASSERT(StandSealCopies(&real, &other, &has_other), "the Ledger reads");
+    TEST_ASSERT(StandSealOf(&real), "and is sealed");
+    TEST_ASSERT(real.mark.chain_first != real.mark.pool_to_block,
+                "the sealed pool has a closed block before its open one");
+    TEST_ASSERT_OK(tagfs_read_block(real.mark.chain_first, first), "its first block reads");
+    TEST_ASSERT(first->magic == TAGFS_MPOOL_MAGIC && first->used_bytes <= TAGFS_MPOOL_DATA_SIZE,
+                "as a block of the pool");
+
+    /* The cycle before, whose open block was that first block as it is now. */
+    older = real;
+    older.seq--;
+    older.mark.settle        = older.seq;
+    older.mark.pool_to_block = real.mark.chain_first;
+    older.mark.pool_to_bytes = first->used_bytes;
+    older.mark.closed_crc32  = 0;
+    older.mark.tail_crc32    = KCrc32(first->payload, first->used_bytes);
+    torn = real;
+    torn.mark.tail_crc32 ^= 1u;
+    TEST_ASSERT_EQ(StandSealJudge(&older, &other, false, &seal, &fell_back, &marked),
+                   POOL_STOOD_SEAL, "that older seal is borne out on its own");
+    TEST_ASSERT_EQ(StandSealJudge(&torn, &older, true, &seal, &fell_back, &marked),
+                   POOL_STOOD_TORN_TAIL,
+                   "the newest torn beside it: its open block rolls back");
+    TEST_ASSERT(seal == 0 && !fell_back, "under the newest seal, without falling back");
+    TEST_ASSERT(marked, "marking the medium SETTLE_MEDIUM_LIED");
+
+    /* The newest seal alone. */
+    TEST_ASSERT_EQ(StandSealJudge(&torn, &older, false, &seal, &fell_back, &marked),
+                   POOL_STOOD_NO_SEAL,
+                   "the newest alone, its open block torn: the whole chain, nothing rolled back");
+    TEST_ASSERT(seal == -1 && !fell_back, "on no seal");
+    TEST_ASSERT(marked, "marking the medium SETTLE_MEDIUM_LIED");
+    torn = real;
+    torn.mark.closed_crc32 ^= 1u;
+    TEST_ASSERT_EQ(StandSealJudge(&torn, &older, false, &seal, &fell_back, &marked),
+                   POOL_STOOD_NO_SEAL, "the newest alone, its closed blocks not borne out");
+    TEST_ASSERT(!marked, "is rot or a kernel before the seal, and marks nothing");
+out:
+    kfree(first);
     return verdict;
 }
 
@@ -316,6 +392,8 @@ static const TestCase g_stand_seal_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_seal_lie_falls_back",      .func = TestStandSealLieFallsBack,
       .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_seal_rollback_stands_on_the_newest",
+      .func = TestStandSealRollbackStandsOnTheNewest, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_seal_torn_table_stands",   .func = TestStandSealTornTableStands,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_seal_fid_boundary_derived", .func = TestStandSealFidBoundaryDerived,

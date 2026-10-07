@@ -31,7 +31,10 @@
  *   So does another volume taking the seat the book was held for, and the
  *   machine stopping. A medium found holding an older Ledger than a cycle this
  *   kernel settled lost a cycle it said it kept: the volume's seals carry
- *   SETTLE_MEDIUM_LIED from the next mount on (AwayLiedLearned).
+ *   SETTLE_MEDIUM_LIED from the next mount on (AwayLiedLearned). And the
+ *   programs, which live on, hold the file ids and tag ids the book's memory
+ *   gave them, which the medium never saw: the volume's next mounts give out
+ *   none below them (AwayNumbersKnown).
  *
  * There is no declared eject in this kernel: the events above are every one
  * there is.
@@ -73,6 +76,12 @@ uint64_t    AwayGiveUp(AwayVerdict why, uint8_t seat);
 /* Whether a book given up found the volume `uuid` holding less than a cycle
  * this kernel settled: its mounts from then on seal SETTLE_MEDIUM_LIED. */
 bool        AwayLiedLearned(const uint8_t uuid[16]);
+
+/* The furthest next file id and next tag id memory had reached when a book of
+ * the volume `uuid` was given up — 0 for one never given up. Its mounts give
+ * out no id below them, for the rest of the boot. */
+void        AwayNumbersKnown(const uint8_t uuid[16], uint32_t* next_file_id,
+                             uint32_t* next_tag_id);
 
 #ifdef CONFIG_VOLUME_TESTS
 /*

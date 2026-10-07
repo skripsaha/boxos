@@ -591,17 +591,19 @@ class Record:
     42 + 2t + 6e + n — inside its length. `crc_ok` is the sum alone.
     `shape_ok` is what a writer produces (PackV1): the length is exactly
     42 + 2t + 6e + n. `extents_at_mount` is what the mount keeps: nothing at
-    all when one extent has a zero count or runs past 2^32-1 (PlotExtentsInRun;
-    the past-the-run test is off while mounting — the volume is not up yet).
+    all when one extent has a zero count, runs past 2^32-1, or ends past the
+    data run of `run` blocks — the Deed states it before the mount reads a
+    record (PlotExtentsInRun); `outside` says which of those it was.
     """
 
     __slots__ = ("block", "at", "header_ok", "len", "fid", "flags", "size",
                  "created", "modified", "tag_count", "extent_count", "name_len",
                  "crc_stored", "crc_ok", "shape_ok", "unpack_ok", "tags",
-                 "extents", "name", "extents_at_mount")
+                 "extents", "name", "extents_at_mount", "outside")
 
-    def __init__(self, raw, at, block=None):
+    def __init__(self, raw, at, block=None, run=None):
         self.block, self.at = block, at
+        self.outside = False
         self.header_ok = at + RECORD_HEADER <= len(raw)
         self.tags, self.extents, self.name = [], [], ""
         self.extents_at_mount = []
@@ -630,16 +632,18 @@ class Record:
             self.extents = [FILE_EXTENT.struct.unpack_from(raw, ext_at + FILE_EXTENT.size * e)
                             for e in range(self.extent_count)]
             self.name = bytes(raw[name_at:end]).decode("utf-8", "replace")
-            if all(c > 0 and s + c <= EXTENT_END_LIMIT for s, c in self.extents):
+            self.outside = run is not None and any(c > 0 and s + c > run for s, c in self.extents)
+            if all(c > 0 and s + c <= EXTENT_END_LIMIT for s, c in self.extents) and not self.outside:
                 self.extents_at_mount = list(self.extents)
 
     def Blocks(self):
         return sum(c for _s, c in self.extents_at_mount)
 
 
-def ParseRecord(raw, at, block=None):
-    """The record at byte `at` of `raw` (a block), as a Record."""
-    return Record(raw, at, block)
+def ParseRecord(raw, at, block=None, run=None):
+    """The record at byte `at` of `raw` (a block), as a Record — what the
+    mount keeps of its extents held to a data run of `run` blocks."""
+    return Record(raw, at, block, run)
 
 
 def ReadUseChainLink(raw):
