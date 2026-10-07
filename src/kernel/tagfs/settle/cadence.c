@@ -3,6 +3,7 @@
 #include "../ink/ink.h"
 #include "../metadata_pool/meta_pool.h"
 #include "../integrity/integrity.h"
+#include "../helm/helm.h"
 #include "amp.h"
 #include "baton.h"
 #include "kcore.h"
@@ -29,12 +30,6 @@ static volatile int32_t  s_held;           /* the test runner's holds */
 static volatile uint64_t s_room_asked;     /* SETTLE_DEMAND_ROOM, counted */
 static bool              s_binds_said;     /* the window binds the Lull: said once an episode */
 
-static void SettleKnocked(void* ctx);
-
-/* The one knock every Ink, every demand and the Lull's own node give. */
-static Knock g_quill_knock = { .baton = { .next = NULL, .run = SettleKnocked, .ctx = NULL,
-                                          .one_way = 0 },
-                               .raised = 0 };
 static TouchQueueNode s_lull_node;
 
 uint8_t SettleCommitterCore(void)
@@ -49,12 +44,22 @@ uint8_t SettleCommitterCore(void)
     return g_amp.bsp_index;
 }
 
-/* The knock is run by the drain core: the committer's own loop reaches its
- * service point after the batons, and another core's is woken to go round. */
-static void SettleKnocked(void* ctx)
+/*
+ * ‼ THE COMMITTER IS WOKEN WHERE THE WORK IS MADE, NEVER BY A BATON (RT-11).
+ *
+ * Every Ink, every demand, every look asked for and the Lull's own node wake
+ * the committer's core here, with an IPI when it sleeps in its gate — one load
+ * otherwise, and nothing at all for the committer itself, which goes round its
+ * loop after whatever it is in. It used to be a knock: a baton on the drain
+ * core whose continuation woke the committer. A drain core busy with work that
+ * pumps no baton — a span of gigabytes run whole at its service point, a seat
+ * seated — left the committer asleep in its gate past the window, the change
+ * the window promised unsettled, and the drain core was also where Nightwatch
+ * would have said so. On one core there is nobody to wake: idle is the debtor
+ * of the quantum (TagFSIdleOwed).
+ */
+static void CadenceWake(void)
 {
-    (void)ctx;
-    KnockOpen(&g_quill_knock);
     kcore_wake(SettleCommitterCore());
 }
 
@@ -139,7 +144,7 @@ void SettleInked(uint64_t gen, bool lazy)
                                             __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
             ;
     }
-    KnockOn(&g_quill_knock);
+    CadenceWake();
 }
 
 void SettleDemand(uint32_t kinds)
@@ -147,7 +152,7 @@ void SettleDemand(uint32_t kinds)
     if (kinds & SETTLE_DEMAND_ROOM)
         __atomic_add_fetch(&s_room_asked, 1u, __ATOMIC_ACQ_REL);
     __atomic_fetch_or(&s_demand, kinds, __ATOMIC_SEQ_CST);
-    KnockOn(&g_quill_knock);
+    CadenceWake();
 }
 
 uint64_t CadenceRoomAsked(void)
@@ -157,14 +162,14 @@ uint64_t CadenceRoomAsked(void)
 
 void SettleKnock(void)
 {
-    KnockOn(&g_quill_knock);
+    CadenceWake();
 }
 
 void SettleCadenceHold(bool hold)
 {
     __atomic_add_fetch(&s_held, hold ? 1 : -1, __ATOMIC_ACQ_REL);
     if (!hold)
-        KnockOn(&g_quill_knock);
+        CadenceWake();
 }
 
 uint32_t CadenceRunBegins(void)
@@ -203,7 +208,7 @@ void CadenceRunEnded(error_t rc, uint64_t busy_us, uint64_t s0_us, uint64_t targ
         if (InkedGen() > target)
             __atomic_store_n(&s_owed_since_us, s0_us, __ATOMIC_SEQ_CST);
     }
-    KnockOn(&g_quill_knock);
+    CadenceWake();
 }
 
 typedef enum {
@@ -212,9 +217,9 @@ typedef enum {
     CADENCE_LATER,          /* at *at_us: the Lull's permit, or the window's end */
 } CadenceVerdict;
 
-/* Whether a cycle is due. At a pocket's boundary only the window run out and a
- * demand start one; at the service point after the queue, Lull permits one for
- * an eager change as well. Lock-free. */
+/* Whether a cycle is due. While pockets wait (`boundary`) only the window run
+ * out and a demand start one; on an empty queue Lull permits one for an eager
+ * change as well. Lock-free. */
 static CadenceVerdict CadenceDue(bool boundary, uint64_t now, uint64_t* at_us)
 {
     uint64_t settled = SettledGen();
@@ -246,16 +251,32 @@ static CadenceVerdict CadenceDue(bool boundary, uint64_t now, uint64_t* at_us)
     return CADENCE_LATER;
 }
 
-/* The Lull's node, armed for the tick at or after `at_us`: when it fires it
- * knocks, and the committer looks again. */
-static void CadenceArmLull(uint64_t at_us, uint64_t now_us)
+/* The first tick at or after `at_us`. */
+static uint64_t CadenceLullTick(uint64_t at_us, uint64_t now_us)
 {
     uint64_t ticks = (at_us - now_us) * SCHEDULER_DEFAULT_TICK_HZ / 1000000ull + 1u;
-    uint64_t fire  = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED) + ticks;
+    return __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED) + ticks;
+}
+
+/* The Lull's node, armed for the tick at or after `at_us`: the tick that fires
+ * it wakes the committer (CadenceWake), and the committer looks again. */
+static void CadenceArmLull(uint64_t at_us, uint64_t now_us)
+{
+    uint64_t fire = CadenceLullTick(at_us, now_us);
     if (__atomic_load_n(&s_lull_fire, __ATOMIC_RELAXED) == fire)
         return;
     __atomic_store_n(&s_lull_fire, fire, __ATOMIC_RELAXED);
-    TouchQueueArmKnock(&s_lull_node, &g_quill_knock, fire);
+    TouchQueueArmCall(&s_lull_node, CadenceWake, fire);
+}
+
+/* Whether the Lull's node is still to fire, and fires by `at_us`: armed to wake
+ * the committer for the cycle owed then. One that fires earlier is harmless —
+ * the committer looks again and arms it anew. */
+static bool CadenceLullArmedFor(uint64_t at_us, uint64_t now_us)
+{
+    uint64_t fire = __atomic_load_n(&s_lull_fire, __ATOMIC_RELAXED);
+    return fire > __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED) &&
+           fire <= CadenceLullTick(at_us, now_us);
 }
 
 /* A volume a cycle can write: mounted, its medium here, and taking writes. */
@@ -264,7 +285,7 @@ static bool CadenceMounted(void)
     return tagfs_get_state()->initialized && !TagFSMediumLeft() && !TagFSReadOnly();
 }
 
-void SettleServiceIfPending(bool boundary)
+void SettleServiceIfPending(void)
 {
     /* A medium that takes no write answers every waiter for good — on
      * whichever core comes by first. One that left holds them with its open
@@ -282,8 +303,11 @@ void SettleServiceIfPending(bool boundary)
         return;
     SettleWaitersSweep();
 
-    uint64_t now = SettleNowUs();
-    uint64_t at  = 0;
+    /* Pockets waiting on this core's queue are work already handed in, and a
+     * cycle Lull merely permits stands back for them (settle.h). */
+    bool     boundary = kcore_queue_depth(amp_get_core_index()) != 0;
+    uint64_t now      = SettleNowUs();
+    uint64_t at       = 0;
     switch (CadenceDue(boundary, now, &at)) {
     case CADENCE_NOW:
         (void)SettleRunBeginForCadence();
@@ -302,11 +326,24 @@ bool SettleStepOwedHere(void)
         return SettleRunBetweenStepsHere();
     if (amp_get_core_index() != SettleCommitterCore())
         return false;
-    /* A cycle another asker runs knocks when it ends. */
+    /* A cycle another asker runs wakes the committer when it ends. */
     if (__atomic_load_n(&g_settle_scribe.holder, __ATOMIC_ACQUIRE) != 0 || !CadenceMounted())
         return false;
-    uint64_t at = 0;
-    return CadenceDue(false, SettleNowUs(), &at) == CADENCE_NOW;
+    uint64_t now = SettleNowUs();
+    uint64_t at  = 0;
+    switch (CadenceDue(false, now, &at)) {
+    case CADENCE_NOW:
+        return true;
+    case CADENCE_LATER:
+        /* Owed later, and the node that would wake this core for it is not
+         * armed: the service point arms it. An Ink made after this core's
+         * service point and before its gate — its wake finding the core not
+         * yet asleep — would otherwise be slept over with no Lull to bring
+         * the committer back, on a core whose own timer never runs. */
+        return !CadenceLullArmedFor(at, now);
+    default:
+        return false;
+    }
 }
 
 bool SettleIdleOwed(void)
@@ -321,19 +358,28 @@ bool SettleIdleOwed(void)
     return CadenceDue(true, SettleNowUs(), &at) == CADENCE_NOW;
 }
 
-void TagFSServiceAtBoundary(void)
-{
-    SettleServiceIfPending(true);
-}
-
+/* Helm work listed for a service point is any core's to run: one that went to
+ * sleep over it would leave a write between two windows until something else
+ * woke a core — and the knock that should have may have been run by a pump
+ * nested inside the very service point that looked at the list (Z07-8). */
 bool TagFSStepOwedHere(void)
 {
-    return SettleStepOwedHere();
+    return HelmReadyListed() || SettleStepOwedHere();
 }
 
+/* ‼ ON ONE CORE, HELM WORK MAKES IDLE THE DEBTOR OF THE QUANTUM, AS A CYCLE DOES.
+ * A write gives its core back between two windows, and its next one is run by
+ * a service point — on one core only the idle context's. Asked about the
+ * Settle alone, the scheduler gave idle the core beside a program that never
+ * parks only while a cycle was owed, and a write moved in bursts, a window's
+ * five seconds apart (X1-2). Listed Helm work owes idle the next quantum too,
+ * taken from whoever ran this one: the program has the core back after it, and
+ * the two share the core turn about. */
 bool TagFSIdleOwed(void)
 {
-    return SettleIdleOwed();
+    if (g_amp.total_cores != 1)
+        return false;
+    return HelmReadyListed() || SettleIdleOwed();
 }
 
 void TagFSWatchLook(void)

@@ -38,10 +38,11 @@
  *
  * ‼ THE CYCLE IS AN AUTOMATON OF STEPS. The committer runs one step — S1's
  * parts one at a time, S3 one block at a time — and goes back to its loop
- * between two: the batons, the next pocket, the halt's pass. It holds the
- * Scribe from S0 to S6, so every other asker still waits for, or is answered
- * by, the cycle in flight; one on the committer's own core, between two of its
- * steps, runs the rest of the cycle itself rather than wait for itself.
+ * between two: the next pocket, one (kcore.c), the batons and the halt's
+ * pass, the services and the volume's Helm work. It holds the Scribe from S0
+ * to S6, so every other asker still waits for, or is answered by, the cycle in
+ * flight; one on the committer's own core, between two of its steps, runs the
+ * rest of the cycle itself rather than wait for itself.
  *
  * A refusal anywhere from S1 on declares nothing settled: said once for the
  * episode, and every step is one the next cycle makes again the same way —
@@ -158,13 +159,15 @@ bool     SettleMediumLied(void);
 // Cadence — what starts a cycle (cadence.c)
 //
 // ‼ LULL PERMITS; AN EMPTY QUEUE, THE WINDOW RUN OUT, OR A DEMAND STARTS. Every
-// Ink knocks. The committer's core runs the cycle at its service point, which
-// its loop reaches only once its pockets are served — so a cycle never stands
-// before work already handed in. Lull is k·D, D the last cycle's own time on
-// the medium, measured, and k = 100/SETTLE_SHARE − 1: settling takes no more
-// than SETTLE_SHARE percent of the medium's time. It is a budget, never a
-// timeout — nothing is refused when it runs out, a cycle is only allowed.
-// Clamped to one PIT tick below and the window above.
+// Ink wakes the committer's core, right where it is made (cadence.c). That core
+// runs the cycle at its service point, which its loop reaches after every
+// pocket it serves (RT-11) — and a cycle Lull permits begins only once no
+// pocket waits on its queue, so it never stands before work already handed
+// in. Lull is k·D, D the last cycle's own time on the medium, measured, and
+// k = 100/SETTLE_SHARE − 1: settling takes no more than SETTLE_SHARE percent
+// of the medium's time. It is a budget, never a timeout — nothing is refused
+// when it runs out, a cycle is only allowed. Clamped to one PIT tick below and
+// the window above.
 //
 // The window is the promise — no change of the volume waits longer than
 // SETTLE_WINDOW_US for its cycle to begin, ext4's own five seconds: once the
@@ -189,25 +192,28 @@ typedef enum {
 } SettleDemandKind;
 
 /* An Ink was made (after its lock was dropped): the window's clock starts for
- * it, and the committer is knocked. `lazy`: a frequent small writer's, or its
+ * it, and the committer is woken. `lazy`: a frequent small writer's, or its
  * file wears settle:lazy — it does not start a cycle by Lull. */
 void     SettleInked(uint64_t gen, bool lazy);
 
-/* A demand: the next cycle begins at the next pocket's boundary. */
+/* A demand: the next cycle begins at the committer's next service point, with
+ * pockets waiting or not. */
 void     SettleDemand(uint32_t kinds);
 
-/* The committer knocked, to look again: a waiter linked, seat:ready, a medium
+/* The committer woken, to look again: a waiter linked, seat:ready, a medium
  * that turned out to take no write. From any context. */
 void     SettleKnock(void);
 
 /* The committer's service point: one step of the cycle this core runs, or the
- * start of one that is due, or the Lull's knock armed for when one will be.
- * `boundary`: between two pockets of the K-Core loop, where only the window run
- * out or a demand starts a cycle. Anywhere else, or on a core that is not the
- * committer's, it does nothing. */
-void     SettleServiceIfPending(bool boundary);
+ * start of one that is due, or the Lull's node armed for when one will be.
+ * While pockets wait on this core's queue, only the window run out or a demand
+ * starts a cycle. On a core that is not the committer's, and runs no cycle, it
+ * does nothing. */
+void     SettleServiceIfPending(void);
 
-/* Whether this core owes the Settle a turn of its loop before it sleeps. */
+/* Whether this core owes the Settle a turn of its loop before it sleeps: a step
+ * of the cycle it runs, a cycle due, or one owed later that no Lull is armed
+ * yet to wake it for. */
 bool     SettleStepOwedHere(void);
 
 /* On one core: the idle context is owed the next quantum — a cycle in flight,

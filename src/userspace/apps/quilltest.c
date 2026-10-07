@@ -703,6 +703,13 @@ static const QuillCase g_cases[] = {
       "one record to the tag registry and one row to the file table",
       "N files crowdNNNNNNNNNN numbered from FROM (0 when it is not given), anchored; a file "
       "already called one of those names is deleted first and made again", false },
+    { "beside", "KIND COUNT MIB", 3, 0, QuillBeside,
+      "are a write of MIB MiB and its anchor answered beside COUNT cabins of KIND — flood, "
+      "calls handed in without waiting, or hog, a core computed on — and do the floods go on",
+      "nothing: quillbeside.bin is deleted, the cabins ended and the volume anchored", false },
+    { "flood", "SLOT", 1, 0, QuillFlood,
+      "for beside: calls handed in without waiting for them, counted in SLOT of its board",
+      "nothing; never returns while beside's board is there", false },
     { "abba", "NAME TAGS EDGE", 3, 0, QUILL_THROWAWAY(QuillAbba),
       "does a machine of many cores come back while TAGS new tags and file ids past EDGE, where "
       "the file table takes its next block, grow the registry and the table, and three cabins of "

@@ -2928,7 +2928,7 @@ run_returnfail() {
     chk $? "the stick was plugged in exactly once after the pull ($arrivals)"
 
     # ── ‼ THE MACHINE ASKED AGAIN BY ITSELF, WHEN THE SEAT SAID SO ─────────
-    grep -q "seat 1 refused a read and nothing it answered since rang its bell — nobody else asks it anything, so its medium is reset once" "$S"
+    grep -q "seat 1 refused a read and no bell rang after the attempt that met it — nobody else asks it anything, so its medium is reset once" "$S"
     chk $? "nothing rang the refused seat, and the machine reset it once, by its driver's own recovery"
     grep -qE "\[USB disk [0-9]+\] resetting the transport" "$S"
     chk $? "the stick's transport was reset"
@@ -8071,16 +8071,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 159 of the stand's own twenty-three suites: stand 27, stand_lock 4,
+# the 160 of the stand's own twenty-three suites: stand 27, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 4, stand_index 6, stand_ink 5, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 12, stand_glean 8,
-# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 18,
+# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 19,
 # stand_warrant 6, stand_room 6, stand_integrity 2. Counted off the code, not a
 # run (K9): a suite that drops out of the walk is a test that stopped covering
 # anything, and the count is where that shows. How many of them pass and how
 # many stand aside is the road's — said, not pinned.
-STAND_RUN=181
+STAND_RUN=182
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -8214,7 +8214,8 @@ stand_orders() {
 #   stand_run_refused_inside_a_run_through_the_port       0        1   and no port either
 #   stand_medium_* (a flush answered with sense)          0        0   a USB seat's own
 #   stand_medium_bell_rings_once                          1        1
-#   stand_medium_mount_hears_the_ready_it_was_owed        1        1   the mount's first read of the data
+#   stand_medium_mount_rings_in_its_own_breath            1        1   the mount's first read of the data
+#   stand_medium_mount_bad_sector_waits                   4        4   both Ledger copies, in each of its two attempts
 #   stand_medium_mount_refused_read_is_no_verdict         1        1   the pool block a file's record lies in
 #   stand_medium_return_refused_once                      1        1   the newest Ledger copy, on the return
 #   stand_medium_mount_resets_the_seat                    1        1   the mount's first read of the data
@@ -8222,7 +8223,7 @@ stand_orders() {
 #   stand_settle_refusal_waits_for_the_bell               1        1   its Ledger; then a plan that only counts
 #   stand_settle_ring_during_the_cycle                    1        1   its Ledger
 #   stand_settle_table_refusal_is_the_mediums             2        2   the block written alone, then by the cycle
-#   total                                                28       33
+#   total                                                32       37
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -8242,9 +8243,9 @@ stand_judge() {
     got=$(grep -ac '^\[BLOCKFAIL\] seat [0-9]*: ' "$L")
     [ "$got" = "$want" ]
     chk $? "stand: $what — BLOCKFAIL refused $got command(s), as many as the tests that arm it refuse on this road ($want)"
-    got=$(grep -ac '^\[TagFS\] seat [0-9]* refused a read and nothing it answered since rang its bell' "$L")
-    [ "$got" = 2 ]
-    chk $? "stand: $what — a refused seat no bell answered was reset once by each of the two tests that leave one so, never again (stand_medium_return_refused_once, stand_medium_mount_resets_the_seat; reset $got time(s))"
+    got=$(grep -ac '^\[TagFS\] seat [0-9]* refused a read and no bell rang after the attempt that met it' "$L")
+    [ "$got" = 5 ]
+    chk $? "stand: $what — a refused seat no bell answered after its attempt was reset once by each of the five tests that leave one so — a bell rung inside the attempt answers nothing — never again (stand_medium_mount_rings_in_its_own_breath, stand_medium_mount_bad_sector_waits, stand_medium_mount_refused_read_is_no_verdict, stand_medium_return_refused_once, stand_medium_mount_resets_the_seat; reset $got time(s))"
     ! grep -aq '^\[TagFS\] seat [0-9]* did not come back from its reset' "$L"
     chk $? "stand: $what — and every seat reset came back from it"
     grep -aqE '^\[BLOCKFAIL\] seat [0-9]+: the read of sectors [0-9]+\.\.[0-9]+ is refused as a medium error — occurrence 2 since arming' "$L"
@@ -8320,8 +8321,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 28 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 33 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 32 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 37 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
@@ -10333,6 +10334,204 @@ run_abbamut() {
     buildkey_restore
 }
 
+# ---------------------------------------------------------------------------
+# turns — the boundary is the pocket, and on one core Helm work is owed the
+# quantum (RT-11)
+# ---------------------------------------------------------------------------
+#
+# A K-Core served one program's pocket ring until it was empty, and popped its
+# queue until IT was empty: a program that handed pockets in faster than they
+# were served kept its K-Core for good, and everything below the pop — the
+# batons, the services, the volume's Helm work and its Settle — waited behind
+# it. quilltest flood is that program: the cheapest call there is, handed in
+# without waiting for it. Measured on the tree before the fix: on UEFI 4c the
+# flood held K1, the committer, and the anchor beside it waited 571 s with
+# Nightwatch naming a pocket queued behind the flood; on three cores the one
+# K-Core is also the drain core, and the write beside it was never served at
+# all. And on one core the idle context — where a write's next window runs —
+# was owed the quantum beside a program that never parks only while a Settle
+# cycle was: 16 MiB that took 376 ms alone took 5387 ms beside quilltest hog,
+# its windows waiting out the Settle window (X1-2).
+#
+# quilltest beside writes TURNS_MIB of a file of its own and anchors it, alone
+# and then beside COUNT cabins of KIND, and says both times and how many calls
+# the floods had answered meanwhile — a flood that got nothing fails the case.
+# Three machines: UEFI 4c, one flood (AHCI, the committer a K-Core of its own,
+# which the flood lands on); BIOS 3c, two floods (the legacy channel, whose
+# windows are Helm work run at the service point of the one K-Core, and two
+# programs whose pockets keep that K-Core's queue from ever being empty — a
+# single flood empties it whenever its own notify outruns its push); and UEFI
+# 1c beside a hog. On each the write beside them may take no more than
+# TURNS_PACE times what it took alone, and a second: the machine's turns are
+# shared, and a write that waits for its turns — the K-Core's queue to empty
+# beside two floods, the Settle window beside a hog — takes many times that.
+# The wait ends at the case's verdict, a Nightwatch proof that something owed
+# went unserved, a panic, or a log gone quiet.
+# ---------------------------------------------------------------------------
+
+TURNS_MIB=16
+TURNS_PACE=4
+TURNS_VERDICT='^\[QUILL\] beside: (PASS|FAIL) — '
+TURNS_STOP='^\[QUILL\] beside: (PASS|FAIL) — |^\[NIGHTWATCH\] VERDICT: .* a defect|KERNEL PANIC'
+
+# turns_leg TAG KIND COUNT KEYS... — boot KEYS, type `quilltest beside KIND
+# COUNT TURNS_MIB`, wait as above and keep the log as serial.turns.TAG.log. Leaves
+# TURNS_LINE (the verdict, none when it never came), TURNS_FAULT (a panic, an
+# exception or a Nightwatch defect after the command), TURNS_ALONE and
+# TURNS_BESIDE (ms); answers 1, having said why, when there is no run to judge.
+turns_leg() {
+    local tag=$1 kind=$2 count=$3 mark L="$SCRATCH/serial.turns.$1.log"
+    shift 3
+    TURNS_LINE=""; TURNS_FAULT=""; TURNS_ALONE=""; TURNS_BESIDE=""
+    rm -f "$L"
+    make run-stop >/dev/null 2>&1
+    if ! make run-bg "$@" >"$SCRATCH/runbg.turns.$tag.log" 2>&1 ||
+       ! wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"; then
+        make run-stop >/dev/null 2>&1
+        cp build/serial.log "$L" 2>/dev/null
+        bad "turns: $tag ($*) never reached a shell"
+        return 1
+    fi
+    wait_for_quiet "$BOOT_BURST_QUIET_S"
+    mark=$(wc -l < build/serial.log)
+    if type_line "quilltest beside $kind $count $TURNS_MIB"; then
+        wait_for_line -E build/serial.log "$TURNS_STOP" "$WAIT_QUIET_S" $((mark + 1))
+    fi
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$L"
+    TURNS_LINE=$(tail -n +$((mark + 1)) "$L" | tr -d '\r' | grep -aE "$TURNS_VERDICT" | tail -1)
+    TURNS_FAULT=$(tail -n +$((mark + 1)) "$L" | tr -d '\r' |
+                  grep -aE 'KERNEL PANIC|\[EXCEPTION\]|^\[NIGHTWATCH\] VERDICT: .* a defect' |
+                  head -1 | cut -c1-200)
+    TURNS_ALONE=$(printf '%s\n' "$TURNS_LINE" | sed -nE 's/.* in ([0-9]+) ms alone and in [0-9]+ ms beside .*/\1/p')
+    TURNS_BESIDE=$(printf '%s\n' "$TURNS_LINE" | sed -nE 's/.* in [0-9]+ ms alone and in ([0-9]+) ms beside .*/\1/p')
+    return 0
+}
+
+# turns_paced — 0 when the write beside the cabins took no more than
+# TURNS_PACE times what it took alone, and a second.
+turns_paced() {
+    [ -n "$TURNS_ALONE" ] && [ -n "$TURNS_BESIDE" ] &&
+        [ "$TURNS_BESIDE" -le $((TURNS_PACE * TURNS_ALONE + 1000)) ]
+}
+
+# turns_judge TAG WHAT KIND — the leg just run.
+turns_judge() {
+    local what=$2 kind=$3
+    [ -z "$TURNS_FAULT" ]
+    chk $? "turns: $what — no panic, no exception, nothing owed proved unserved${TURNS_FAULT:+: $TURNS_FAULT}"
+    case "$TURNS_LINE" in
+        *"beside: PASS"*) ok "turns: $what — ${TURNS_LINE#\[QUILL\] beside: }" ;;
+        ?*)               bad "turns: $what — ${TURNS_LINE#\[QUILL\] beside: }" ;;
+        *)                bad "turns: $what — the write beside the ${kind}s was never answered (the last said: $(tr -d '\r' < "$SCRATCH/serial.turns.$1.log" | grep -a '^\[QUILL\]' | tail -1))" ;;
+    esac
+    if [ -n "$TURNS_LINE" ]; then
+        turns_paced
+        chk $? "turns: $what — beside the $kind cabin(s) the write took ${TURNS_BESIDE:-?} ms, no more than $TURNS_PACE × the ${TURNS_ALONE:-?} ms it took alone + 1000 ms: the machine's turns are shared with it"
+    fi
+}
+
+run_turns() {
+    echo "== turns: a write and its anchor beside floods of calls on UEFI 4c and BIOS 3c, beside a hog on UEFI 1c =="
+    build STRICT=on
+    turns_leg uefi4 flood 1 UEFI=on STRICT=on CORES=4 MEM=4G &&
+        turns_judge uefi4 "UEFI 4c, the flood on the committer's K-Core" flood
+    turns_leg uefi1 hog 1 UEFI=on STRICT=on CORES=1 MEM=2G &&
+        turns_judge uefi1 "UEFI 1c, beside a hog" hog
+    build
+    turns_leg bios3 flood 2 CORES=3 MEM=4G &&
+        turns_judge bios3 "BIOS 3c, the legacy channel and one K-Core" flood
+    lockrank_judge "$SCRATCH/serial.turns.uefi4.log $SCRATCH/serial.turns.uefi1.log $SCRATCH/serial.turns.bios3.log" "turns"
+}
+
+# ---------------------------------------------------------------------------
+# turnsmut — the old boundaries put back, and every leg must turn
+# ---------------------------------------------------------------------------
+#
+# Three mutants, each the line one of turns' legs guards: the guide serving a
+# program's ring until it is empty (F04-1) — the flood keeps the K-Core it
+# lands on, on UEFI 4c the committer's and on BIOS 3c the only one; the K-Core
+# popping its queue until it is empty (F04-2) — two floods, each pocket of one
+# queued behind the other's, keep BIOS 3c's one K-Core in its pop; and idle
+# owed the quantum on one core only for the Settle (X1-2) — beside the hog the
+# write waits out the Settle window. Each leg must then fail: no verdict, or one
+# slower than the pace allows.
+turnsmut_guide_on() {
+    mutate src/kernel/core/guide/guide.c
+    python3 - <<'EOF'
+p = "src/kernel/core/guide/guide.c"
+s = open(p).read()
+a = "    if (KPocketIsEmpty(proc))\n        return;\n    guide_process_pocket(proc);\n"
+assert s.count(a) == 1, "turnsmut guide anchor missing"
+s = s.replace(a, "    while (!KPocketIsEmpty(proc))   /* logcheck mutation: the ring served until it is empty */\n"
+                 "        guide_process_pocket(proc);\n", 1)
+open(p, "w").write(s)
+EOF
+    mut_done src/kernel/core/guide/guide.c "logcheck mutation" 1
+}
+
+turnsmut_loop_on() {
+    mutate src/kernel/arch/x86-64/amp/kcore.c
+    python3 - <<'EOF'
+p = "src/kernel/arch/x86-64/amp/kcore.c"
+s = open(p).read()
+a = "        struct process_t* proc = kcore_queue_pop(q);\n        if (proc)\n            kcore_process_entry(proc);\n"
+assert s.count(a) == 1, "turnsmut loop anchor missing"
+s = s.replace(a, "        struct process_t* proc;\n"
+                 "        while ((proc = kcore_queue_pop(q)) != NULL)   /* logcheck mutation: the queue popped until it is empty */\n"
+                 "            kcore_process_entry(proc);\n", 1)
+open(p, "w").write(s)
+EOF
+    mut_done src/kernel/arch/x86-64/amp/kcore.c "logcheck mutation" 1
+}
+
+turnsmut_idle_on() {
+    mutate src/kernel/tagfs/settle/cadence.c
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/settle/cadence.c"
+s = open(p).read()
+a = "    return HelmReadyListed() || SettleIdleOwed();\n"
+assert s.count(a) == 1, "turnsmut idle anchor missing"
+s = s.replace(a, "    return SettleIdleOwed();   /* logcheck mutation: idle owed the quantum for the Settle alone */\n", 1)
+open(p, "w").write(s)
+EOF
+    mut_done src/kernel/tagfs/settle/cadence.c "logcheck mutation" 1
+}
+
+# turnsmut_turned TAG WHAT KIND — the leg just run must have failed.
+turnsmut_turned() {
+    local said
+    if [ -z "$TURNS_LINE" ]; then
+        said="no verdict${TURNS_FAULT:+, and $TURNS_FAULT}"
+    elif ! turns_paced; then
+        said="beside the $3 cabin(s) ${TURNS_BESIDE} ms against ${TURNS_ALONE} ms alone, past $TURNS_PACE × + 1000 ms"
+    elif case "$TURNS_LINE" in *"beside: FAIL"*) true ;; *) false ;; esac; then
+        said=${TURNS_LINE#\[QUILL\] beside: }
+    fi
+    [ -n "$said" ]
+    chk $? "turnsmut: $2 — the leg turned: ${said:-it passed: ${TURNS_LINE#\[QUILL\] beside: }}"
+}
+
+run_turnsmut() {
+    echo "== turnsmut: the ring served whole, the queue popped whole, idle owed for the Settle alone — every turns leg must fail =="
+    turnsmut_guide_on; build STRICT=on
+    turns_leg mutguide4 flood 1 UEFI=on STRICT=on CORES=4 MEM=4G &&
+        turnsmut_turned mutguide4 "the ring served whole, UEFI 4c" flood
+    build
+    turns_leg mutguide3 flood 2 CORES=3 MEM=4G &&
+        turnsmut_turned mutguide3 "the ring served whole, BIOS 3c" flood
+    restore src/kernel/core/guide/guide.c
+    turnsmut_loop_on; build
+    turns_leg mutloop3 flood 2 CORES=3 MEM=4G &&
+        turnsmut_turned mutloop3 "the queue popped whole, BIOS 3c" flood
+    restore src/kernel/arch/x86-64/amp/kcore.c
+    turnsmut_idle_on; build STRICT=on
+    turns_leg mutidle1 hog 1 UEFI=on STRICT=on CORES=1 MEM=2G &&
+        turnsmut_turned mutidle1 "idle owed for the Settle alone, UEFI 1c" hog
+    restore src/kernel/tagfs/settle/cadence.c
+    build   # leave the tree built from clean sources
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -10430,9 +10629,11 @@ case "${1:-both}" in
     lockrankmut) run_lockrankmut ;;
     abba)     run_abba ;;
     abbamut)  run_abbamut ;;
+    turns)    run_turns ;;
+    turnsmut) run_turnsmut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|stackguard|abba|abbamut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

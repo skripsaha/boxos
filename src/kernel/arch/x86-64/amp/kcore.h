@@ -57,7 +57,9 @@ uint32_t kcore_queue_depth(uint8_t core_idx);
 bool kcore_is_serving(const struct process_t* proc);
 /* A K-Core asleep in its HLT gate woken to go round its loop again — for work
  * it finds at a service point rather than in its queue. The work is published
- * before the call; from any context. */
+ * before the call; from any context, an interrupt's included — it is one load
+ * and at most one IPI. Nothing for the calling core itself: whatever it is
+ * in the middle of, it goes round its loop after it. */
 void kcore_wake(uint8_t core_idx);
 
 #endif // KCORE_H

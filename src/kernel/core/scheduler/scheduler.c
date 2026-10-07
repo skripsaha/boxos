@@ -1050,12 +1050,14 @@ void schedule(void *frame_ptr)
         spin_unlock(&s->runqueue.lock);
     }
 
-    /* RT-10. On one core the volume's Settle runs only in the idle context,
-     * and a program that never parks would never let it: while a cycle is
-     * owed — its window ran out, or somebody demanded it — idle is owed the
+    /* RT-10. On one core the volume's service point runs only in the idle
+     * context, and a program that never parks would never let it: while a
+     * cycle is owed — its window ran out, or somebody demanded it — or a
+     * file's Helm work is listed — a write's next window — idle is owed the
      * next quantum, taken from whoever ran this one. A cycle it begins holds
-     * the core to its end (scribe.h), and then the program has the core back:
-     * the debt costs the program a turn, never the machine its promise. */
+     * the core to its end (scribe.h), a window its own, and then the program
+     * has the core back: the debt costs the program a turn, never the machine
+     * its promise, nor a write its pace. */
     process_t *next = (current && !process_is_idle(current) && TagFSIdleOwed())
                           ? idle_process_get()
                           : scheduler_select_next();

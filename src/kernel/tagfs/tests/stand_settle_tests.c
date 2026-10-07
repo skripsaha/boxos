@@ -27,12 +27,12 @@
 // SettleCadenceHold); these let it go where the cadence is what they ask about.
 // A test runs at boot on the boot core with its interrupts still off, however
 // many cores there are — and the boot core is the drain core, whose batons
-// carry the cadence's knock and whose tick fires the Lull's node. So a test
+// carry what its seat answers, and whose tick fires the Lull's node. So a test
 // that waits for the cadence stands in for its own core's loop: it knocks as
-// the tick would, runs the batons the knock leaves there, and calls the
-// service point. On one core the committer is this core, and the cycle runs
-// in that call; on more it is a K-Core, which the knock wakes to look again,
-// and its own loop runs the cycle.
+// the tick would, runs the batons left there, and calls the service point. On
+// one core the committer is this core, and the cycle runs in that call; on
+// more it is a K-Core, which the knock wakes to look again, and its own loop
+// runs the cycle.
 // ============================================================================
 
 static uint64_t StandNowUs(void)
@@ -69,7 +69,7 @@ static TestResult TestStandSettleWithoutAnchor(void)
     while (SettledGen() < gen && StandNowUs() - began < 2u * SETTLE_WINDOW_US) {
         SettleKnock();
         BatonPump(amp_get_core_index());
-        SettleServiceIfPending(false);
+        SettleServiceIfPending();
         cpu_pause();
     }
     uint64_t took = StandNowUs() - began;
@@ -120,7 +120,7 @@ static TestResult TestStandSettleAnchorThroughChit(void)
     TEST_ASSERT_EQ(SettleWaitNow(gen), ERR_WOULD_BLOCK, "its change waits for a cycle");
 
     SettleWaitLink(&waiter.w, gen, StandSettleAnswered);
-    SettleServiceIfPending(false);
+    SettleServiceIfPending();
     TEST_ASSERT(!waiter.answered, "no cycle ran, and nobody answered the waiter");
 
     uint64_t cycles = SettledCycles();
@@ -220,13 +220,13 @@ static void StandSettleArmLedger(uint32_t nth)
 }
 
 /* One turn of the machine, done by hand: the knock the tick would give, the
- * batons it leaves on this core, the service point — the committer's own on
- * one core; on more, a K-Core's, which the knock wakes to look again. */
+ * batons left on this core, the service point — the committer's own on one
+ * core; on more, a K-Core's, which the knock wakes to look again. */
 static void StandSettleTurn(void)
 {
     SettleKnock();
     BatonPump(amp_get_core_index());
-    SettleServiceIfPending(false);
+    SettleServiceIfPending();
     cpu_pause();
 }
 

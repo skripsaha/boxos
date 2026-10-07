@@ -275,7 +275,7 @@ static TestResult StandBookLeaves(StandBook* b)
     HelmLetGo(b->holder->ofe, &s_holder);
     b->holding = false;
     HelmRunReady();
-    SettleServiceIfPending(false);
+    SettleServiceIfPending();
     TEST_ASSERT(!s_waiting.handed && !s_waiting.gone,
                 "the holder let go and the waiter is neither handed the Helm nor answered");
     TEST_ASSERT(!s_anchor.answered, "and the anchor is not answered: both wait with the book");
@@ -792,8 +792,10 @@ static const TestCase g_stand_medium_tests[] = {
      * takes its medium out of the room and seats it again. */
     { .name  = "stand_medium_mount_loses_its_seat",
       .func  = TestStandMediumMountLosesItsSeat, .reach = TEST_WRITES_TO_VOLUME },
-    { .name  = "stand_medium_mount_hears_the_ready_it_was_owed",
-      .func  = TestStandMediumMountHearsTheReadyItWasOwed, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_mount_rings_in_its_own_breath",
+      .func  = TestStandMediumMountRingsInItsOwnBreath, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_medium_mount_bad_sector_waits",
+      .func  = TestStandMediumMountBadSectorWaits, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_mount_refused_read_is_no_verdict",
       .func  = TestStandMediumMountRefusedReadIsNoVerdict, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_given_up_ids_not_given_again",

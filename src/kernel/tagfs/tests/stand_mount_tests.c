@@ -23,11 +23,13 @@
 // stand_medium suite, which registers these last (stand_medium_tests.c)
 //
 // The medium pulled out in the middle of a mount's reads, a read of the mount
-// refused with the seat's bell rung before the mount heard of it, and one
-// refused with nothing to ring it — the seat reset once by its driver's own
-// recovery; a mount the machine had no memory for, owed until the memory comes
-// back; a book given up and the ids its memory gave out kept; and a return
-// one of whose Ledger reads was refused, judged only once the seat answers.
+// refused with the seat's bell rung inside the attempt — which asks nothing —
+// and one refused with nothing to ring it, the seat reset once by its driver's
+// own recovery either way; a medium error that stays, attempted twice and then
+// left waiting for an event; a mount the machine had no memory for, owed until
+// the memory comes back; a book given up and the ids its memory gave out kept;
+// and a return one of whose Ledger reads was refused, judged only once the
+// seat answers.
 // Each takes the volume down and mounts it again, or takes its medium out of
 // the room and seats it again, and leaves nothing at rest behind.
 // ============================================================================
@@ -157,15 +159,28 @@ out:
     return verdict;
 }
 
+/* The mount's attempts and the seats it reset since `attempts0` / `resets0`. */
+static void StandMountCountedSince(uint32_t attempts0, uint32_t resets0, uint32_t* attempts,
+                                   uint32_t* resets)
+{
+    TagFSStandMountCounts(attempts, resets);
+    *attempts -= attempts0;
+    *resets   -= resets0;
+}
+
 /*
- * R4 (Z11-5, Z15-4). A read of the mount is refused, and the seat says
- * seat:ready in the same breath — before the mount has heard it was refused,
- * as a driver's recovery says it. That seat:ready is the one the mount is owed:
- * it is asked again at once, and the volume mounts with no other event. Red
- * before: the event came while nothing was owed yet, was dropped, and the
- * mount waited for a second one that never came.
+ * R4 (Z11-5, Z15-4), and the bell's place (P14). A read of the mount is
+ * refused, and the seat says seat:ready in the same breath — before the
+ * attempt has ended, as a driver's recovery says it. That bell is the
+ * attempt's own and asks nothing; the seat, rung by nothing after the attempt,
+ * is reset once, and its bell asks the mount again: two attempts, one reset,
+ * and the volume mounts. Red before Z11-5: the bell came while nothing was
+ * owed yet, was dropped, and the mount waited for one that never came. Red
+ * before P14: the bell asked the mount again at once — with a medium error
+ * that stays, on every service pass for good (stand_medium_mount_bad_sector_
+ * waits).
  */
-TestResult TestStandMediumMountHearsTheReadyItWasOwed(void)
+TestResult TestStandMediumMountRingsInItsOwnBreath(void)
 {
     TestResult  verdict = TEST_PASS;
     TagFSState* fs      = tagfs_get_state();
@@ -175,6 +190,7 @@ TestResult TestStandMediumMountHearsTheReadyItWasOwed(void)
     uint32_t    epoch   = tagfs_mount_epoch();
     uint64_t    first   = tagfs_block_to_sector(0);
     uint64_t    span    = (uint64_t)fs->layout.data_blocks * TAGFS_BLOCK_SECTORS;
+    uint32_t    attempts0 = 0, resets0 = 0, attempts = 0, resets = 0;
     bool        let_go  = false;
     const char* aside   = StandStepsAsideFor();
 
@@ -187,14 +203,92 @@ TestResult TestStandMediumMountHearsTheReadyItWasOwed(void)
     BoardroomNoteDeparture(kind, index);
     TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
 
+    TagFSStandMountCounts(&attempts0, &resets0);
     BlockFailArm(seat, BLOCK_FAIL_READ, first, span, 1);
     TagFSStandMountTurn(STAND_MOUNT_SEAT_RINGS, 0);
     TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
     TEST_ASSERT(StandMountSettles(), "and its arrival is attended, and what it owes");
     TEST_ASSERT(BlockFailFired(), "the mount's first read of the volume's data was refused");
     TEST_ASSERT(TagFSStandMountTurnFired(),
-                "and the seat said seat:ready before the mount had heard of it");
-    TEST_ASSERT(fs->initialized, "the mount was asked again on it, and the volume is MOUNTED");
+                "and the seat said seat:ready before the attempt had ended");
+    StandMountCountedSince(attempts0, resets0, &attempts, &resets);
+    TEST_ASSERT_EQ(resets, 1u, "that bell asked nothing: the seat was reset once");
+    TEST_ASSERT_EQ(attempts, 2u, "and its bell asked the mount again, once");
+    TEST_ASSERT(fs->initialized, "the volume is MOUNTED");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
+    TEST_ASSERT(!TagFSStandMountOwed(), "and nothing is owed any more");
+out:
+    if (let_go)
+        StandMountClose(seat);
+    return verdict;
+}
+
+/* Service passes the test runs to see that no attempt comes without an event:
+ * each one a full turn of the room and the volume, many more than the one a
+ * bell left owed would need. */
+#define STAND_MOUNT_IDLE_TURNS 64u
+
+/*
+ * P14. The sectors of both of the Ledger's copies cannot be read, and stay so
+ * — a medium error under the metadata the mount reads first — and the seat's
+ * recovery says seat:ready each time it answers the refused command. The
+ * attempts are counted: the arrival's, refused; the seat reset once, its bell
+ * asking the second, refused; and none after that while nothing new happens,
+ * however many service passes go by. A bell after the attempt — a command of
+ * somebody else's answered — asks once more, and with the sectors whole again
+ * the volume mounts. Red before: the bell rung inside each attempt asked the
+ * next one, and the mount went again on every service pass for as long as the
+ * error stood.
+ */
+TestResult TestStandMediumMountBadSectorWaits(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    uint8_t     seat    = tagfs_get_seat();
+    BoardKind   kind    = BoardroomSeatKind(seat);
+    uint8_t     index   = BoardroomSeatIndex(seat);
+    uint32_t    epoch   = tagfs_mount_epoch();
+    uint64_t    ledger  = tagfs_get_volume_base() +
+                          (uint64_t)fs->layout.state_block * TAGFS_BLOCK_SECTORS;
+    uint32_t    attempts0 = 0, resets0 = 0, attempts = 0, resets = 0;
+    bool        let_go  = false;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
+    let_go = true;
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    BoardroomNoteDeparture(kind, index);
+    TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
+
+    TagFSStandMountCounts(&attempts0, &resets0);
+    BlockFailArmBadSectors(seat, ledger, (uint64_t)VOLUME_LEDGER_COPIES * TAGFS_BLOCK_SECTORS);
+    TagFSStandMountTurn(STAND_MOUNT_SEAT_RINGS, 0);
+    TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
+    TEST_ASSERT(StandMountSettles(),
+                "its arrival is attended, and the mount road comes to rest with the error standing");
+    TEST_ASSERT(TagFSStandMountTurnFired(), "the seat said seat:ready inside the attempts");
+    StandMountCountedSince(attempts0, resets0, &attempts, &resets);
+    TEST_ASSERT_EQ(resets, 1u, "the seat was reset once");
+    TEST_ASSERT_EQ(attempts, 2u, "two attempts: the arrival's, and the one the reset's bell asked");
+    TEST_ASSERT(!fs->initialized, "nothing is mounted");
+    TEST_ASSERT(TagFSStandMountOwed(), "and the mount is owed");
+
+    for (uint32_t turn = 0; turn < STAND_MOUNT_IDLE_TURNS; turn++)
+        TEST_ASSERT(StandMountSettles(), "every service pass after it comes to rest at once");
+    StandMountCountedSince(attempts0, resets0, &attempts, &resets);
+    TEST_ASSERT_EQ(attempts, 2u, "and no attempt comes without a new event");
+    TEST_ASSERT_EQ(resets, 1u, "nor a second reset");
+
+    BlockFailDisarm();
+    TagFSStandMountTurn(STAND_MOUNT_AS_IS, 0);
+    BoardroomNoteSeatReady(kind, index);
+    TEST_ASSERT(StandMountSettles(), "a bell after the attempt is attended");
+    StandMountCountedSince(attempts0, resets0, &attempts, &resets);
+    TEST_ASSERT_EQ(attempts, 3u, "it asked the mount once more");
+    TEST_ASSERT(fs->initialized, "and with the sectors whole, the volume is MOUNTED");
     TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
     TEST_ASSERT(!TagFSStandMountOwed(), "and nothing is owed any more");
 out:
