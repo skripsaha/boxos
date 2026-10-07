@@ -1,6 +1,7 @@
 #include "block_map_internal.h"
 #include "../scribe/scribe.h"
 #include "../metadata_pool/meta_pool.h"
+#include "../ink/fallow.h"
 #include "amp.h"
 #include "atomics.h"
 #include "baton.h"
@@ -18,8 +19,8 @@
  * writes it out first. Nothing here reads or writes the medium for a caller
  * that holds a TagFS lock: those never reach this file.
  *
- * ‼ THE MEDIUM'S COPY MAY LEAVE OUT WHAT NO LINK NAMES YET (BlockMapOweLocked),
- * and memory never does. A sector whose copy left a block out is never taken
+ * ‼ THE MEDIUM'S COPY MAY LEAVE OUT WHAT NOTHING ON THE MEDIUM NAMES YET
+ * (BlockMapOweLocked), and memory never does. A sector whose copy left a block out is never taken
  * for clean: it is let go of only after a write of it whole, so whatever is
  * read in is the medium's whole word and nothing has to be laid back on.
  */
@@ -86,14 +87,25 @@ static BlockMapPage *MapVictim(BlockMapPage **writeback)
     return clean;
 }
 
+/* Every block of window w that memory holds taken and nothing the medium
+ * holds names yet (BlockMapOweLocked), cleared in `out`: how many. */
+static uint32_t MapLeaveOut(uint32_t w, uint8_t *out)
+{
+    uint32_t first = w * MAP_WINDOW_BLOCKS;
+    return PoolUnnamedLeftOut(first, MAP_WINDOW_BLOCKS, out) +
+           FallowUnnamedLeftOut(first, MAP_WINDOW_BLOCKS, out) +
+           MapUnsettledLeftOut(first, MAP_WINDOW_BLOCKS, out);
+}
+
 /*
- * The sector as memory has it, to the medium — `whole`, or leaving out what no
- * link names yet (PoolUnnamedLeftOut), from a copy: memory's bits are never
- * touched. Entered and left with the state lock held, taken again in the name
- * of `site`. MapOwed is cleared as the write begins, because the write carries
- * every take laid on the sector before it; a take made while it travels is a
- * delta, and owes again. A refused write owes again too, and is said, and the
- * medium may hold either copy, so a block left out stays counted as one.
+ * The sector as memory has it, to the medium — `whole`, or leaving out what
+ * nothing on the medium names yet (MapLeaveOut), from a copy: memory's bits
+ * are never touched. Entered and left with the state lock held, taken again in
+ * the name of `site`. MapOwed is cleared as the write begins, because the
+ * write carries every take laid on the sector before it; a take made while it
+ * travels is a delta, and owes again. A refused write owes again too, and is
+ * said, and the medium may hold either copy, so a block left out stays
+ * counted as one.
  */
 static error_t MapWriteOut(BlockMapPage *p, bool whole, const char *site)
 {
@@ -106,7 +118,7 @@ static error_t MapWriteOut(BlockMapPage *p, bool whole, const char *site)
 
     if (!whole) {
         memcpy(out, p->bits, sizeof(out));
-        left = PoolUnnamedLeftOut(w * MAP_WINDOW_BLOCKS, MAP_WINDOW_BLOCKS, out);
+        left = MapLeaveOut(w, out);
         if (left)
             image = out;
     }
@@ -266,8 +278,11 @@ static MapDue MapDueAt(uint32_t w, BlockMapPage **out)
  * since a take laid on a sector before another core began writing it is
  * carried by that write, and is on the medium only when the write ends. A few
  * turns a window at most: a window other cores keep taking from is theirs to
- * settle as well.
+ * settle as well. Windows that owe nothing are passed MAP_SKIP_SPAN at a time
+ * under the lock, which is let go between: the range may span the volume.
  */
+#define MAP_SKIP_SPAN 256u
+
 static error_t MapSettleWindows(uint32_t first, uint32_t last, const char *site)
 {
     TagFSLock *lock   = MapLock();
@@ -281,16 +296,22 @@ static error_t MapSettleWindows(uint32_t first, uint32_t last, const char *site)
             TagFSLockDropAt(lock, site);
             return ERR_TAGFS_NOT_INITIALIZED;
         }
-        BlockMapPage *p   = NULL;
-        MapDue        due = MAP_DUE_NOTHING;
-        while (w <= last && w < g_map.windows &&
+        BlockMapPage *p       = NULL;
+        MapDue        due     = MAP_DUE_NOTHING;
+        uint32_t      skipped = 0;
+        while (w <= last && w < g_map.windows && skipped < MAP_SKIP_SPAN &&
                ((due = MapDueAt(w, &p)) == MAP_DUE_NOTHING || turns >= 4)) {
             w++;
             turns = 0;
+            skipped++;
         }
         if (w > last || w >= g_map.windows) {
             TagFSLockDropAt(lock, site);
             return failed;
+        }
+        if (skipped == MAP_SKIP_SPAN) {
+            TagFSLockDropAt(lock, site);
+            continue;
         }
         turns++;
 
@@ -313,18 +334,32 @@ static error_t MapSettleWindows(uint32_t first, uint32_t last, const char *site)
     }
 }
 
+/* The range of windows with work, emptied once none has any — before a pass,
+ * and after it, so a range that work once spread across the volume does not
+ * stay that wide while every window in it is paid. */
+static void MapWorkEmptied(void)
+{
+    if (!g_map.owed && !g_map.deltas) {
+        g_map.work_lo = 1;
+        g_map.work_hi = 0;
+    }
+}
+
 static error_t MapSettleAll(const char *site)
 {
     TagFSLockTakeAt(MapLock(), site);
     bool     work = g_map.owed || g_map.deltas;
     uint32_t lo   = g_map.work_lo, hi = g_map.work_hi;
-    if (!work) {
-        g_map.work_lo = 1;
-        g_map.work_hi = 0;
-    }
+    MapWorkEmptied();
     TagFSLockDropAt(MapLock(), site);
+    if (!work || lo > hi)
+        return OK;
 
-    return work && lo <= hi ? MapSettleWindows(lo, hi, site) : OK;
+    error_t said = MapSettleWindows(lo, hi, site);
+    TagFSLockTakeAt(MapLock(), site);
+    MapWorkEmptied();
+    TagFSLockDropAt(MapLock(), site);
+    return said;
 }
 
 void BlockMapSettle(void)
@@ -333,12 +368,16 @@ void BlockMapSettle(void)
         (void)MapSettleAll(__func__);
 }
 
-error_t BlockMapFlush(void)
+error_t BlockMapFlush(uint64_t target)
 {
     if (!g_map.up)
         return OK;
     if (LockRankAnyHeldHere())
         return ERR_WOULD_BLOCK;
+
+    TagFSLockTake(MapLock());
+    MapUnsettledSettled(target);
+    TagFSLockDrop(MapLock());
 
     error_t first = MapSettleAll(__func__);
     TagFSLockTake(MapLock());
@@ -378,5 +417,40 @@ bool BlockMapMediumSays(uint32_t block, bool *taken)
         *taken = MapBit(sector, off);
     kfree(sector);
     return read;
+}
+
+void BlockMapSectorAway(uint32_t block)
+{
+    if (!g_map.up || block >= g_map.blocks || LockRankAnyHeldHere())
+        return;
+    uint32_t w = block / MAP_WINDOW_BLOCKS;
+
+    for (;;) {
+        TagFSLockTake(MapLock());
+        BlockMapWindow *x = &g_map.win[w];
+        BlockMapPage   *p = x->slot ? &g_map.page[x->slot - 1] : NULL;
+        if (!p) {
+            TagFSLockDrop(MapLock());
+            return;
+        }
+        if (p->state != MAP_PAGE_READY) {
+            TagFSLockDrop(MapLock());
+            if (!MapWaitForPage(p))
+                return;
+            continue;
+        }
+        if (p->dirty || p->left_out || (x->flags & (MAP_W_OWED | MAP_W_DELTAS))) {
+            error_t wrote = MapWriteOut(p, true, __func__);
+            TagFSLockDrop(MapLock());
+            if (wrote != OK)
+                return;
+            continue;
+        }
+        x->slot   = 0;
+        p->window = MAP_NO_WINDOW;
+        __atomic_store_n(&p->state, (uint8_t)MAP_PAGE_EMPTY, __ATOMIC_RELEASE);
+        TagFSLockDrop(MapLock());
+        return;
+    }
 }
 #endif

@@ -4,6 +4,7 @@
 #include "../ink/ink.h"
 #include "../ink/fallow.h"
 #include "../mount/ground_census.h"
+#include "../settle/settle.h"
 
 /*
  * Glean (glean.h): the pass before each cycle's S0, the Deed's head written
@@ -46,9 +47,19 @@ static struct {
     bool     counted;
 } s_pass;
 
-/* The blocks the mount found the head naming before the chain's first. */
-static uint32_t* s_prefix;
-static uint32_t  s_prefix_count;
+/* The lowered slack, judged by what it did. `s_short_from`: the chain's length
+ * as the last pass at the lowered slack began, 0 once judged. Lifted — a cycle
+ * at the lowered slack left the chain no shorter — until a block's worth of
+ * records has died past `s_lifted_died` (PoolDiedBytes). */
+static uint32_t  s_short_from;
+static bool      s_lifted;
+static uint64_t  s_lifted_died;
+
+/* The blocks the mount found the head naming before the chain's first, and
+ * the node they rest in until the first write of the head names past them. */
+static uint32_t*   s_prefix;
+static uint32_t    s_prefix_count;
+static FallowNode* s_prefix_node;
 
 #ifdef CONFIG_VOLUME_TESTS
 static GleanCounts s_counts;
@@ -82,19 +93,62 @@ bool GleanHeadOffChain(void)
     return s_up && PoolChainBlocks() && PoolChainFirst() != s_head;
 }
 
+/* A lift holds until a block's worth of records has died since it came: till
+ * then a pass at the lowered slack would find what it found, records that pack
+ * no tighter than they lie. A cycle that closes the tail for a waiter grows
+ * the chain without a record dying, and does not undo it. */
+static bool GleanLiftedLocked(void)
+{
+    return s_lifted && PoolDiedBytes() - s_lifted_died < TAGFS_MPOOL_DATA_SIZE;
+}
+
 bool GleanMayFree(void)
 {
-    return s_up && PoolChainBlocks() > PoolLiveBlocks() + 1u;
+    return s_up && PoolChainBlocks() > PoolLiveBlocks() + 1u && !GleanLiftedLocked();
 }
 
 // ----------------------------------------------------------------------------
 // The pass
 // ----------------------------------------------------------------------------
 
+/*
+ * ‼ THE LOWERED SLACK IS JUDGED BY THE CHAIN IT LEFT. A pass at the lowered
+ * slack takes the front off and lays its live records at the tail, and the
+ * cycle it runs in may close the tail onto a Spare the allocator then makes
+ * again: when records do not pack into fewer blocks than they fill, or every
+ * cycle closes the tail for a waiter, the chain comes out of the cycle as long
+ * as it went in, and the ground the pass took off is the ground the Spare
+ * took. Such a chain's slack is not Glean's to give, and a take short of room
+ * must hear that there is none rather than wait on cycles that give nothing.
+ * So the cycle after each pass at the lowered slack asks whether the chain is
+ * shorter than when that pass began; no — the lowered slack is lifted, said
+ * once an episode, until a block's worth of records dies: deleted, or
+ * replaced by newer ones, which is what a pass could then take off.
+ */
 void GleanPassBegin(void)
 {
+    bool asked = __atomic_exchange_n(&s_short, 0u, __ATOMIC_ACQ_REL) != 0;
+
     memset(&s_pass, 0, sizeof(s_pass));
-    s_pass.short_room = __atomic_exchange_n(&s_short, 0u, __ATOMIC_ACQ_REL) != 0;
+    TagFSLockTake(GleanLock());
+    uint32_t chain = PoolChainBlocks();
+    if (s_short_from && chain >= s_short_from) {
+        if (!s_lifted)
+            kprintf("[Glean] a cycle at the lowered slack left the pool's chain no shorter (%u "
+                    "block(s), its live records fill %u) — the slack is not Glean's to give, and "
+                    "a take short of room hears there is none until records die\n", chain,
+                    PoolLiveBlocks());
+        s_lifted      = true;
+        s_lifted_died = PoolDiedBytes();
+    } else if (s_short_from) {
+        s_lifted = false;
+    }
+    s_short_from = 0;
+    if (asked && s_up && !GleanLiftedLocked()) {
+        s_pass.short_room = true;
+        s_short_from      = chain ? chain : 1u;
+    }
+    TagFSLockDrop(GleanLock());
 }
 
 /* Whether a chain of `chain` blocks is past its slack over `live`. */
@@ -279,11 +333,18 @@ void GleanStep(bool* done)
 // The Deed's head
 // ----------------------------------------------------------------------------
 
+/* What the write names past is named by nothing on the medium from this
+ * cycle's S1 on: the blocks taken off up to the last settled cycle, whose seal
+ * began the chain at `to`, and the ones the mount found the head naming. */
 void GleanHeadTake(GleanHead* h)
 {
     h->write   = s_up && s_settled_first != s_head && s_head_next != s_settled_first;
     h->written = false;
     h->to      = s_settled_first;
+    if (h->write) {
+        FallowUnlinkedUnnamed(SettledCycles(), s_prefix_node);
+        s_prefix_node = NULL;
+    }
 }
 
 /* Its records are left as they are: no seal has counted them since the chain
@@ -377,17 +438,34 @@ static bool GleanPrefixKeep(uint32_t b, uint32_t* cap)
     return true;
 }
 
+static bool GleanPrefixHolds(uint32_t b)
+{
+    for (uint32_t i = 0; i < s_prefix_count; i++)
+        if (s_prefix[i] == b)
+            return true;
+    return false;
+}
+
 /* What the head names, followed up to the chain's first block: blocks of the
  * pool no seal holds any more and the head still does. A block of the chain
  * met on the way is not one of them — a head naming past the chain's first
- * block is said, and the walk stops there. */
+ * block is said, and the walk stops there; so is a link that names no block,
+ * and one that names a block the walk met already, which would take it round
+ * for ever. Every block walked is a distinct block of the data run. */
 static void GleanWalkPrefix(uint32_t first)
 {
     uint32_t run = tagfs_get_state()->layout.data_blocks;
     uint32_t cap = 0;
     uint32_t b   = s_head_next;
-    for (uint32_t hops = 0; b != first && b != 0 && hops < run; hops++) {
-        const char* why = GleanPrefixRefuses(b, run);
+    while (b != first) {
+        if (b == 0) {
+            kprintf("[Glean] the pool's head names blocks before the chain's first, block %u, "
+                    "and the walk from it ends at a link that names no block, short of the "
+                    "chain — the head is written again to name the chain\n", first);
+            return;
+        }
+        const char* why = GleanPrefixHolds(b) ? "is met a second time: the walk goes round"
+                                              : GleanPrefixRefuses(b, run);
         if (why) {
             kprintf("[Glean] the pool's head names blocks before the chain's first, block %u, "
                     "and block %u of them %s — the head is written again to name the chain\n",
@@ -405,6 +483,9 @@ void GleanMount(uint32_t head, uint32_t first)
     kfree(s_prefix);
     s_prefix        = NULL;
     s_prefix_count  = 0;
+    s_prefix_node   = NULL;
+    s_short_from    = 0;
+    s_lifted        = false;
     s_up            = true;
     s_head          = head;
     s_head_next     = first;
@@ -451,6 +532,7 @@ void GleanClaimGround(void)
         for (uint32_t i = 0; i < count; i++)
             (void)FallowNodeKeep(node, s_prefix[i]);
         FallowAdd(node, 0);
+        s_prefix_node = node;
         TagFSLockDrop(GleanLock());
         kprintf("[Glean] %u block(s) the pool's head still names lie before the chain's first "
                 "— they rest until the head is written to name past them\n", count);
@@ -468,6 +550,7 @@ void GleanUnmount(void)
     kfree(s_prefix);
     s_prefix       = NULL;
     s_prefix_count = 0;
+    s_prefix_node  = NULL;
     s_up           = false;
     s_head_held    = false;
     s_front_held   = false;

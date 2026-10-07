@@ -337,6 +337,8 @@ static error_t InkPlotLocked(Plot* p, const RecordWhere* was, InkRecord* r, Fall
     InkRowFollows(p->fid, &where);
     if (fallow)
         FallowAdd(fallow, gen);
+    if (p->stake_count)
+        BlockMapInkedLocked(p->fid, gen);    /* its Stakes reach the medium with this record */
     if (p->claimed)
         p->helm->claimed_runs = 0;    /* the record names them now */
     if (p->data_need > s_data_need)

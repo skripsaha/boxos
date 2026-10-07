@@ -157,7 +157,7 @@ static bool AllotmentTakeOwn(uint32_t fid, uint32_t want, uint32_t *s, uint32_t 
 
     *s = s_allot[i].start;
     *n = want < s_allot[i].count ? want : s_allot[i].count;
-    if (!MapDeltaRoom(MapUnreadWindows(*s, *n))) {
+    if (!MapDeltaRoom(MapUnreadWindows(*s, *n), false, true) || !MapUnsettledRoom()) {
         *refusal = ERR_NO_MEMORY;
         return true;
     }
@@ -166,6 +166,7 @@ static bool AllotmentTakeOwn(uint32_t fid, uint32_t want, uint32_t *s, uint32_t 
     if (s_allot[i].count == 0)
         AllotmentRemove(i);
     MapTakeKept(*s, *n);
+    MapUnsettledAdd(fid, *s, *n);
     return true;
 }
 
@@ -176,7 +177,7 @@ static error_t AllotmentTakeNew(uint32_t fid, uint32_t want, const MapPick *k,
 {
     *s = k->at;
     *n = k->got < want ? k->got : want;
-    if (!MapDeltaRoom(MapUnreadWindows(*s, *n)))
+    if (!MapDeltaRoom(MapUnreadWindows(*s, *n), false, true) || !MapUnsettledRoom())
         return ERR_NO_MEMORY;
 
     uint32_t keep = k->got - *n;
@@ -192,6 +193,7 @@ static error_t AllotmentTakeNew(uint32_t fid, uint32_t want, const MapPick *k,
         }
     }
     MapTakeKnown(*s, *n);
+    MapUnsettledAdd(fid, *s, *n);
     return OK;
 }
 

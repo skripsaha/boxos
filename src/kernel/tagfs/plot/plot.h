@@ -135,9 +135,10 @@ bool     PlotFits(const TagFSMetadata *record, uint32_t *out_bytes);
 /* Ground under every block of [0, end) bytes: what the file lacks is taken
  * through its Allotment near its last block, each run a Stake. Then the
  * record must fit: an extent list too long is shortened by PlotGather, and
- * ERR_TAGFS_RECORD_FULL — said, with its numbers — when it cannot be; and the
- * room its extents need is claimed (InkRoomClaim). Nothing is written but what
- * a gather moves. */
+ * ERR_TAGFS_RECORD_FULL — said, with its numbers — when it cannot be, or the
+ * gather's own refusal as it gave it (ERR_WOULD_BLOCK while its run waits for
+ * a cycle); and the room its extents need is claimed (InkRoomClaim). Nothing
+ * is written but what a gather moves. */
 error_t  PlotReserve(Plot *p, uint64_t end);
 
 /* The growth rule, and the ground: where a write of `bytes` at `offset` begins

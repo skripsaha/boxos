@@ -29,6 +29,9 @@ uint32_t      g_pool_chain_cap   = 0;
 uint32_t      g_pool_closed_fold = 0;
 uint64_t      g_pool_live_bytes  = 0;
 
+/* PoolDiedBytes: only ever grows. */
+static uint64_t s_died_bytes;
+
 uint32_t PoolBlockMix(uint32_t block, const MetaPoolBlock* blk)
 {
     uint32_t used = blk->used_bytes <= TAGFS_MPOOL_DATA_SIZE ? blk->used_bytes
@@ -215,8 +218,10 @@ error_t PoolMirrorPut(uint32_t fid, FileRecord* rec, const RecordWhere* where,
     }
     RecordWhere was;
     error_t     rc = FileMapRecordPut(PoolFiles(), fid, rec, where, stake, &was);
-    if (rc == OK)
+    if (rc == OK) {
         PoolLiveMove(&was, where);
+        s_died_bytes += was.len;
+    }
     return rc;
 }
 
@@ -225,6 +230,7 @@ void PoolMirrorDrop(uint32_t fid)
     RecordWhere was;
     FileMapDrop(PoolFiles(), fid, &was);
     PoolLiveMove(&was, NULL);
+    s_died_bytes += was.len;
 }
 
 bool PoolMirrorMove(uint32_t fid, const RecordWhere* from, const RecordWhere* to)
@@ -249,6 +255,11 @@ uint32_t PoolChainBlocks(void)
 uint32_t PoolLiveBlocks(void)
 {
     return (uint32_t)((g_pool_live_bytes + TAGFS_MPOOL_DATA_SIZE - 1u) / TAGFS_MPOOL_DATA_SIZE);
+}
+
+uint64_t PoolDiedBytes(void)
+{
+    return s_died_bytes;
 }
 
 uint32_t PoolChainFirst(void)

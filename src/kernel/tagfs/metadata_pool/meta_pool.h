@@ -246,7 +246,10 @@ typedef struct MetaPoolPage MetaPoolPage;
 
 /* Under the state lock, in a volume's last cycle: every Spare no link names
  * given back to the allocator, so no clean shutdown leaves a stamped block
- * that nothing owns. Their pages come back, for PoolPagesFree after the lock. */
+ * that nothing owns. Their pages come back, for PoolPagesFree after the lock.
+ * One whose give the block map has no room held to write down stays in the
+ * stock, said — free on the medium all the same (PoolUnnamedLeftOut) — for
+ * the next of the last cycles to give back. */
 MetaPoolPage* PoolSparesGiveBack(void);
 
 // ----------------------------------------------------------------------------
@@ -322,6 +325,11 @@ uint64_t PoolBlocksHeld(void);
  * records the map of live files names would fill, packed. */
 uint32_t PoolChainBlocks(void);
 uint32_t PoolLiveBlocks(void);
+
+/* The bytes of every record that stopped being its file's newest — replaced
+ * by a newer one, or its file deleted — counted from boot and never down; a
+ * record Glean lays again is the same record, and is not counted. */
+uint64_t PoolDiedBytes(void);
 
 /* The block the chain begins at; and whether `block` is one of its links. */
 uint32_t PoolChainFirst(void);

@@ -233,12 +233,15 @@ void MapSayNoRoom(uint32_t want)
 }
 
 /* Short while Fallow rests blocks: a cycle gives them back, so one is demanded
- * now rather than when Lull allows it. Short with nothing resting while the
- * pool's chain holds more than its live records need: the next cycles glean it
- * down to them, and what comes off rests and comes back the same way. */
+ * now rather than when Lull allows it. Short while gives wait as deltas for
+ * sectors not in memory — Fallow's own, given back at a cycle's end under the
+ * lock: the ground is free already and only unseen, and the next cycle's S1
+ * lays them on. Short with neither while the pool's chain holds more than its
+ * live records need: the next cycles glean it down to them, and what comes off
+ * rests and comes back the same way. */
 error_t MapShort(uint32_t want)
 {
-    if (FallowBlocks() > 0) {
+    if (FallowBlocks() > 0 || g_map.gives != 0) {
         SettleDemand(SETTLE_DEMAND_ROOM);
         return ERR_WOULD_BLOCK;
     }
@@ -257,9 +260,10 @@ error_t MapShort(uint32_t want)
  * no TagFS lock held it fetches what decides better; held under one it reads
  * nothing. Neither writes the sector the take lands in (M4b): the take is owed
  * to the medium, and the Settle cycle pays it at S1 — before any record, row
- * or Ledger naming the block reaches the medium.
+ * or Ledger naming the block reaches the medium. A take for a file's write
+ * (`fid`) is one no settled record names until its Ink settles.
  */
-static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact,
+static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact, uint32_t fid,
                            uint32_t *start, uint32_t *got, const char *site)
 {
     if (want == 0 || !start || !got)
@@ -310,13 +314,16 @@ static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact,
         }
 
         uint32_t n = exact ? want : k.got;
-        if (!MapDeltaRoom(MapUnreadWindows(k.at, n))) {
+        if (!MapDeltaRoom(MapUnreadWindows(k.at, n), false, true) ||
+            (fid != MAP_NO_FID && !MapUnsettledRoom())) {
             TagFSLockDropAt(lock, site);
             kprintf("[TagFS] block map: no memory to write down a take of %u block(s) at "
                     "%u — nothing is taken\n", n, k.at);
             return ERR_NO_MEMORY;
         }
         MapTakeKnown(k.at, n);
+        if (fid != MAP_NO_FID)
+            MapUnsettledAdd(fid, k.at, n);
         TagFSLockDropAt(lock, site);
 
         *start = k.at;
@@ -328,7 +335,14 @@ static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact,
 error_t BlockMapTake(uint32_t count, uint32_t hint, uint32_t *start, const char *site)
 {
     uint32_t got = 0;
-    return MapTakeDoor(count, hint, true, start, &got, site);
+    return MapTakeDoor(count, hint, true, MAP_NO_FID, start, &got, site);
+}
+
+error_t BlockMapTakeFor(uint32_t fid, uint32_t count, uint32_t hint, uint32_t *start,
+                        const char *site)
+{
+    uint32_t got = 0;
+    return MapTakeDoor(count, hint, true, fid, start, &got, site);
 }
 
 error_t BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start)
@@ -342,7 +356,7 @@ error_t BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start)
         MapPick k = { .want = count, .hint = hint };
         MapPlan(&k, false);
         if (k.found && k.got == count) {
-            if (!MapDeltaRoom(MapUnreadWindows(k.at, count))) {
+            if (!MapDeltaRoom(MapUnreadWindows(k.at, count), false, true)) {
                 kprintf("[TagFS] block map: no memory to write down a take of %u block(s) "
                         "at %u — nothing is taken\n", count, k.at);
                 return ERR_NO_MEMORY;
@@ -361,7 +375,7 @@ error_t TagFSTakeRun(uint32_t want, uint32_t hint, uint32_t *start, uint32_t *go
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = MapTakeDoor(want, hint, false, start, got, __func__);
+    error_t rc = MapTakeDoor(want, hint, false, MAP_NO_FID, start, got, __func__);
     tagfs_leave();
     return rc;
 }
