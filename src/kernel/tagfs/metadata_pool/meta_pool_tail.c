@@ -119,13 +119,13 @@ void PoolTakeBack(const RecordWhere* where, uint32_t len)
     }
 }
 
-bool PoolSpareAvailable(bool dig_reserve)
+uint32_t PoolSparesOwed(void)
 {
-    return s_spare_count > (dig_reserve ? 0u : (uint32_t)SPARE_RESERVE);
+    return g_pool_tail && s_spare_count < (uint32_t)SPARE_RESERVE
+               ? (uint32_t)SPARE_RESERVE - s_spare_count : 0u;
 }
 
-/* The turn, leaving the pool at least `keep` Spares. */
-static bool TailTurnKeeping(uint32_t keep)
+bool PoolTailTurn(uint32_t keep)
 {
     if (!g_pool_tail || s_spare_count <= keep || g_pool_chain_len >= g_pool_chain_cap)
         return false;
@@ -171,16 +171,6 @@ static bool TailTurnKeeping(uint32_t keep)
     g_pool_tail_changed = false;     /* the Spare's stamp is what the medium holds */
     s_tail_edits++;
     return true;
-}
-
-bool PoolTailTurn(bool dig_reserve)
-{
-    return TailTurnKeeping(dig_reserve ? 0u : (uint32_t)SPARE_RESERVE);
-}
-
-bool PoolTailMayClose(void)
-{
-    return g_pool_tail && s_spare_count > (uint32_t)SPARE_FOR_QUITCLAIMS;
 }
 
 RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen)
@@ -376,26 +366,25 @@ void PoolPagesFree(MetaPoolPage* list)
 // The Settle cycle
 // ---------------------------------------------------------------------------
 
-/* The tail closed early for a waiter, onto a Spare the deletes may spare:
+/* The tail closed early, onto a Spare past the `keep` it leaves the pool:
  * otherwise it stays open, is written as it stands, and that is said once. */
-static void TailCloseEarly(PoolSnap* snap, bool dig_reserve)
+static void TailCloseEarly(PoolSnap* snap, uint32_t keep)
 {
-    if (TailTurnKeeping(dig_reserve ? 0u : (uint32_t)SPARE_FOR_QUITCLAIMS)) {
+    if (PoolTailTurn(keep)) {
         s_unclosed_said = false;
         return;
     }
     snap->unclosed = true;
     if (!s_unclosed_said)
-        kprintf("[MetaPool] a cycle owes a waiter a closed block and the pool holds %u "
-                "Spare(s), the last %u of them the deletes' — the tail stays open, and "
-                "what the waiter is answered for lies in a block the next cycle writes "
-                "again in place, where a flash page torn by the power can take it, until "
-                "a Spare can be made\n",
-                s_spare_count, (unsigned)SPARE_FOR_QUITCLAIMS);
+        kprintf("[MetaPool] a cycle owes a closed block and the pool holds %u Spare(s), none "
+                "past the %u this close must leave it — the tail stays open, and what the "
+                "waiter is answered for lies in a block the next cycle writes again in place, "
+                "where a flash page torn by the power can take it, until a Spare can be "
+                "made\n", s_spare_count, keep);
     s_unclosed_said = true;
 }
 
-void PoolSnapTake(PoolSnap* snap, uint64_t close_upto, bool dig_reserve)
+void PoolSnapTake(PoolSnap* snap, uint64_t close_upto, uint32_t keep)
 {
     memset(snap, 0, sizeof(*snap));
     if (!g_pool_tail)
@@ -405,7 +394,7 @@ void PoolSnapTake(PoolSnap* snap, uint64_t close_upto, bool dig_reserve)
      * owed a closed block is in the tail exactly when it is newer than the
      * newest record ever closed. */
     if (close_upto > s_closed_gen_max && g_pool_tail->used_bytes > 0)
-        TailCloseEarly(snap, dig_reserve);
+        TailCloseEarly(snap, keep);
 
     /* Every closed block is in this snapshot, so every link turned so far is
      * written at its S3: the blocks they name are the map's again at its S1. */

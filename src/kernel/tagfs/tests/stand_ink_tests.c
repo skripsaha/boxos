@@ -19,8 +19,9 @@
 // Every change of a file is one Ink: its record laid in the pool's tail under
 // the volume's state lock, the record of the same file no cycle has taken yet
 // taken back and the ones after it moved down, a delete a Quitclaim appended
-// like any record, and a tail with no room closed onto a Spare — the last two
-// Spares a delete's alone. These tests ask the pool's bookkeeping what the
+// like any record, and a tail with no room closed onto a Spare — the reserve's
+// two shares, the deletes' and Glean's, kept from every change that frees
+// nothing (meta_pool.h). These tests ask the pool's bookkeeping what the
 // medium and the next mount will be told: where each file's record sits, what
 // the newest record of a deleted file is, whether a volume with no free block
 // can still give a file up, and whether a Spare no link names yet is free on
@@ -33,7 +34,11 @@
 #define STAND_INK_DELETES  (POOL_QUITCLAIMS_PER_BLOCK + 2u)   /* one more than a tail holds */
 #define STAND_INK_REST_ROUNDS 16u  /* cycles a volume gets to bring Fallow and Glean to rest */
 
-static uint32_t s_ink_fids[STAND_INK_DELETES];
+/* More files than the fullest tail and the deletes' share of the reserve hold
+ * Quitclaims of: a tail's room is a block's at most. */
+#define STAND_INK_MOST     ((1u + SPARE_FOR_QUITCLAIMS) * POOL_QUITCLAIMS_PER_BLOCK + 1u)
+
+static uint32_t s_ink_fids[STAND_INK_MOST];
 
 /* Files made for a test, all called test_file, and given up on the way out. */
 static bool StandInkMake(uint32_t count)
@@ -248,37 +253,46 @@ void StandInkGiveBack(StandInkGround* g)
     memset(g, 0, sizeof(*g));
 }
 
-/* A volume with no free block, and a pool's tail that fills: one more file is
- * given up than an empty tail holds Quitclaims, so the tail must close onto a
- * Spare, and there is no block to make one from. The last Spares are a
- * delete's (SPARE_RESERVE): without them the delete that fills the tail waits
- * for a block no cycle can give back, and a full volume can free nothing.
- * Nothing rests in Fallow first and the pool's chain has no slack Glean could
- * take off, so no cycle could hand a Spare's block back either: the deletes
- * stand on the reserve alone, and not one write reaches the data run while
- * they run — no Spare stamped, no cycle run for room. */
+/* A volume with no free block, and a pool's tail its deletes fill: more files
+ * are given up than the tail's room and the deletes' share of the reserve —
+ * one block past the tail (meta_pool.h) — hold Quitclaims of, and the files
+ * hold no ground, so nothing their deletes free makes a Spare. Every delete
+ * those hold stands on them alone: none is refused, and not one write reaches
+ * the data run while they run — no Spare stamped, no cycle run for room. The
+ * delete past them is not refused either, nor written: Glean's share is left
+ * whole for the step that makes the room, and the delete waits for it —
+ * ERR_WOULD_BLOCK, the word for room on its way (glean.h, the sweep). Red
+ * before: a Quitclaim took the whole reserve, Glean had no Spare to take a
+ * block off with, and every delete after the 98th was refused for good. */
 static TestResult TestStandInkFullVolumeStillDeletes(void)
 {
     TestResult     verdict = TEST_PASS;
     TagFSState*    fs      = tagfs_get_state();
     StandInkGround ground  = { NULL, NULL, 0, 0 };
-    uint32_t       refused = 0, first_error = 0, writes = 0;
+    uint32_t       refused = 0, first_error = 0, writes = 0, spares = 0, holds = 0;
+    int            past    = 0;
     bool           armed   = false;
     const char*    aside   = StandStepsAsideFor();
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT(StandInkMake(STAND_INK_DELETES), "one file more than a tail holds Quitclaims is made");
+    TEST_ASSERT(StandInkMake(STAND_INK_MOST),
+                "more files are made than a tail and the deletes' share hold Quitclaims of");
     TEST_ASSERT(StandInkAtRest(),
                 "cycles settle them, and nothing rests or waits to be gleaned");
     TEST_ASSERT_EQ(StandInkTakeAll(&ground), ERR_TAGFS_NO_SPACE,
                    "every free block of the volume is taken, and it says it has none");
+    TagFSLockTake(&fs->lock);
+    holds  = PoolTailRoom() / RECORD_HEADER_SIZE + SPARE_FOR_QUITCLAIMS * POOL_QUITCLAIMS_PER_BLOCK;
+    spares = PoolSparesHeld(NULL, 0);
+    TagFSLockDrop(&fs->lock);
+    TEST_ASSERT_EQ(spares, SPARE_RESERVE, "the pool holds the whole reserve");
 
     BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_WRITE, tagfs_block_to_sector(0),
                  (uint64_t)fs->layout.data_blocks * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
     armed = true;
-    for (uint32_t i = 0; i < STAND_INK_DELETES; i++) {
+    for (uint32_t i = 0; i < holds; i++) {
         int gone = tagfs_delete_file(s_ink_fids[i], INK_UNWARRANTED);
         if (gone == 0) {
             s_ink_fids[i] = 0;
@@ -288,34 +302,42 @@ static TestResult TestStandInkFullVolumeStillDeletes(void)
             refused++;
         }
     }
+    past   = tagfs_delete_file(s_ink_fids[holds], INK_UNWARRANTED);
     writes = BlockFailSeen();
     BlockFailDisarm();
-    armed = false;
+    armed  = false;
+    spares = StandInkSpares(NULL, 0);
     StandInkGiveBack(&ground);
 
     TestEvidence("deletes refused, and writes to the data run made for them, on a volume with "
                  "no free block", (uint64_t)refused + writes);
-    if (refused || writes) {
-        kprintf("[TESTS] %u delete(s) refused, the first answering error %u; %u write(s) to "
-                "the data run while they ran\n", refused, first_error, writes);
+    TestEvidence("the delete past the deletes' share, answered ERR_WOULD_BLOCK (1)",
+                 past == -(int)ERR_WOULD_BLOCK);
+    if (refused || writes || past != -(int)ERR_WOULD_BLOCK || spares != SPARE_FOR_GLEAN) {
+        kprintf("[TESTS] %u of %u delete(s) refused, the first answering error %u; %u write(s) "
+                "to the data run while they ran; the delete past them answered %d, and the pool "
+                "was left %u Spare(s), where Glean's share is %u\n", refused, holds, first_error,
+                writes, past, spares, (unsigned)SPARE_FOR_GLEAN);
         verdict = TEST_DEFECT;
     }
 out:
     if (armed)
         BlockFailDisarm();
     StandInkGiveBack(&ground);
-    StandInkLetGo(STAND_INK_DELETES);
+    StandInkLetGo(STAND_INK_MOST);
     return verdict;
 }
 
 /*
- * A tail a cycle closes early for a waiter leaves the deletes their last
- * Spare. On a volume with no free block and nothing at rest the reserve cannot
- * be made again: the first anchored change closes the tail onto one Spare, the
- * next finds only the deletes' and keeps its tail open — said once — and the
- * Spare is still there for the delete that fills the tail. An early close that
- * took it would leave the deletes' Quitclaims in a tail nothing can close, and
- * the ground they free resting for good (Z09-1).
+ * A tail a cycle closes early for a waiter leaves Glean its share of the
+ * reserve. On a volume with no free block and nothing at rest the reserve
+ * cannot be made again: the first anchored change closes the tail onto the
+ * deletes' Spare, the next finds only Glean's and keeps its tail open — said
+ * once — and Glean's share is whole for the step that takes a block off. An
+ * early close that took it would leave a volume whose deletes free no ground
+ * with nothing to make room by, and every delete after refused (E1); one that
+ * took the last would leave the deletes' Quitclaims in a tail nothing can
+ * close, and the ground they free resting for good (Z09-1).
  */
 static TestResult TestStandInkEarlyCloseSparesTheLast(void)
 {
@@ -341,8 +363,8 @@ static TestResult TestStandInkEarlyCloseSparesTheLast(void)
     uint64_t first = InkedGen();
     TEST_ASSERT_OK(TagFSSettle(), "a cycle with a waiter settles it");
     TEST_ASSERT(PoolClosedSettledGen() >= first, "in a closed block: the tail closed onto a Spare");
-    TEST_ASSERT_EQ(StandInkSpares(NULL, 0), SPARE_FOR_QUITCLAIMS,
-                   "and no Spare could be made again: the deletes' share is what is left");
+    TEST_ASSERT_EQ(StandInkSpares(NULL, 0), SPARE_FOR_GLEAN,
+                   "and no Spare could be made again: Glean's share is what is left");
 
     TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &key, INK_UNWARRANTED),
                    "stand_ink goes on again, a tag the medium already holds — a second change");
@@ -350,8 +372,8 @@ static TestResult TestStandInkEarlyCloseSparesTheLast(void)
     TEST_ASSERT_OK(TagFSSettle(), "the next cycle with a waiter settles it too");
     TEST_ASSERT(PoolClosedSettledGen() < second, "but not in a closed block");
     TEST_ASSERT(PoolTailGen() >= second, "it lies in the tail the cycle kept open");
-    TEST_ASSERT_EQ(StandInkSpares(NULL, 0), SPARE_FOR_QUITCLAIMS,
-                   "and the deletes' last Spare was not taken");
+    TEST_ASSERT_EQ(StandInkSpares(NULL, 0), SPARE_FOR_GLEAN,
+                   "and not one Spare of Glean's share was taken");
 out:
     StandInkGiveBack(&ground);
     if (file_id)

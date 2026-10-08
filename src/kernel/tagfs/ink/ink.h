@@ -31,13 +31,17 @@
  * and the new one laid after the rest.
  *
  * ‼ NO SPARE IS WAITED FOR. A tail with no room needs a Spare to close onto,
- * and the last SPARE_RESERVE of them are a delete's. An Ink that has none it
- * may take makes one itself, with no state lock held (PoolSpareMake) — or,
- * where it cannot (an asynchronous write's continuation), answers
- * ERR_WOULD_BLOCK and the caller makes one its own way. It never waits for a
- * cycle to make one for it: a volume with no ground for one while a Settle
- * cycle would give some back answers ERR_WOULD_BLOCK as well, nothing
- * changed, and the caller waits for that cycle its own way.
+ * and each change leaves the pool its floor of the reserve (meta_pool.h) —
+ * the whole of it while the volume has a free block; with none, a record that
+ * frees nothing still the whole of it, a Quitclaim of a file with no ground
+ * Glean's share, a change that frees ground the close its ground needs — and
+ * below Glean's share none takes room the close or Glean's next step needs. An
+ * Ink that has no Spare it may take makes one itself, with no state lock held
+ * (PoolSpareMake) — or, where it cannot (an asynchronous write's
+ * continuation), answers ERR_WOULD_BLOCK and the caller makes one its own way.
+ * It never waits for a cycle to make one for it: a volume with no ground for
+ * one while a Settle cycle would give some back answers ERR_WOULD_BLOCK as
+ * well, nothing changed, and the caller waits for that cycle its own way.
  *
  * ‼ A FILE THE SYSTEM KEEPS IS CHANGED ONLY WITH THE WARRANT, AND WHAT THE
  * LOADER READS BY ITS BLOCKS BY NOBODY (RT-09); THIS IS THE ONE PLACE THAT
@@ -118,7 +122,10 @@ error_t InkNew(const char* name, const uint16_t* tags, uint32_t count, uint32_t*
 
 /* The file given up: a Quitclaim laid for it, its extents to Fallow, and it
  * leaves the map, the table and the tag index. OK, or the refusal — the guard's
- * among them, asked with `warrant`. */
+ * among them, asked with `warrant` — and ERR_WOULD_BLOCK, nothing changed,
+ * while the room for its Quitclaim is on its way: ground a cycle gives back,
+ * or a sweep of Glean's (glean.h), which a volume with no block to make a
+ * Spare from waits for rather than refuse the delete. */
 error_t InkQuitclaim(uint32_t fid, InkWarrant warrant, InkReceipt* out);
 
 /*

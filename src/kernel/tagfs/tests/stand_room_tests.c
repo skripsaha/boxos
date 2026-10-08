@@ -517,6 +517,142 @@ out:
 }
 
 // ----------------------------------------------------------------------------
+// Deletes on a full volume: files that hold no ground, then one that holds some
+//
+// E1. Every free block taken, and a run of empty files given up — more than
+// the tail and the whole reserve hold Quitclaims of — through the storage
+// deck, asked from the kernel, where nobody is parked. Their records lie
+// behind blocks of files that stay, so the room their deletes free comes back
+// only once Glean has moved those off the chain's front. A delete the
+// deletes' share does not hold frees no ground a cycle could give back: it
+// waits in its call for the cycles of Glean's sweep (glean.h), and is
+// answered OK. Then the file that holds ground is given up, and answered OK.
+// Red before: every delete past the 98th was refused ERR_TAGFS_NO_SPACE, the
+// one whose ground would have been the room among them, and the volume could
+// free nothing again; and red with Glean's share open to the deletes, which
+// spend it and leave Glean no step to move the files that stay with.
+// ----------------------------------------------------------------------------
+
+#define STAND_ROOM_STAY  (2u * POOL_QUITCLAIMS_PER_BLOCK)
+#define STAND_ROOM_BARE_ROUNDS 16u   /* cycles the ground at rest gets to come back in */
+#define STAND_ROOM_MANY  ((2u + SPARE_RESERVE) * POOL_QUITCLAIMS_PER_BLOCK)
+
+static uint32_t s_room_stay[STAND_ROOM_STAY];
+static uint32_t s_room_many[STAND_ROOM_MANY];
+
+/* The storage deck's delete of `file_id`, asked from the kernel with no
+ * program: the handler's answer. */
+static int StandRoomDelete(uint32_t file_id)
+{
+    const OpRegistration* reg = OpRegistryLookup(OP_KIND(DECK_STORAGE, STORAGE_OBJ_DELETE));
+    ManifestOp*           op  = (ManifestOp*)s_room_op;
+
+    if (!reg)
+        return ERR_NOT_INITIALIZED;
+    memset(s_room_op, 0, sizeof(s_room_op));
+    op->op_kind    = OP_KIND(DECK_STORAGE, STORAGE_OBJ_DELETE);
+    op->param_size = sizeof(file_id);
+    op->in_crate   = CRATE_INDEX_NONE;
+    op->out_crate  = CRATE_INDEX_NONE;
+    memcpy(op->params, &file_id, sizeof(file_id));
+    return reg->handler(op, NULL, 0, NULL);
+}
+
+/* `count` empty files called `name`, their ids into `ids`: false at the first
+ * that is not made. */
+static bool StandRoomMakeMany(const char* name, uint32_t* ids, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++)
+        if (tagfs_create_file(name, NULL, 0, &ids[i]) != 0)
+            return false;
+    return true;
+}
+
+/* Cycles until nothing rests in Fallow — the ground the tests before freed
+ * back with the allocator before every block of the volume is taken — and one
+ * more, which makes the reserve whole from it: true once at rest. */
+static bool StandRoomBare(void)
+{
+    for (uint32_t round = 0; round < STAND_ROOM_BARE_ROUNDS; round++) {
+        bool bare = StandRoomResting() == 0;
+        if (TagFSSettle() != OK)
+            return false;
+        if (bare)
+            return true;
+    }
+    return false;
+}
+
+static void StandRoomLetGoMany(uint32_t* ids, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++)
+        StandRoomLetGo(&ids[i]);
+}
+
+static TestResult TestStandRoomEmptyDeletesOnAFullVolume(void)
+{
+    TestResult     verdict = TEST_PASS;
+    StandInkGround ground  = { NULL, NULL, 0, 0 };
+    uint32_t       big     = 0, refused = 0, first_error = 0;
+    const char*    aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    memset(s_room_stay, 0, sizeof(s_room_stay));
+    memset(s_room_many, 0, sizeof(s_room_many));
+    fill_pattern(g_test_buffer, sizeof(g_test_buffer), 0x77u);
+    TEST_ASSERT(StandRoomMakeMany("room_stay", s_room_stay, STAND_ROOM_STAY),
+                "files that stay are made, blocks of records before the ones given up");
+    TEST_ASSERT(StandRoomMakeMany("room_many", s_room_many, STAND_ROOM_MANY),
+                "files with nothing in them are made, more than the tail and the whole "
+                "reserve hold Quitclaims of");
+    TEST_ASSERT(StandMakeFile("room_big", g_test_buffer, sizeof(g_test_buffer), &big),
+                "a file that holds ground is made");
+    TEST_ASSERT_OK(TagFSSettle(), "a cycle with a waiter settles them");
+    TEST_ASSERT(StandRoomBare(), "cycles give back all that earlier changes left resting");
+    error_t taken = StandInkTakeAll(&ground);
+    TEST_ASSERT(taken == ERR_TAGFS_NO_SPACE || taken == ERR_WOULD_BLOCK,
+                "every free block of the volume is taken, and nothing rests to come back: "
+                "what room the deletes meet is Glean's to make");
+
+    uint64_t cycles = SettledCycles();
+    for (uint32_t i = 0; i < STAND_ROOM_MANY; i++) {
+        int gone = StandRoomDelete(s_room_many[i]);
+        if (gone == OK) {
+            s_room_many[i] = 0;
+        } else {
+            if (!refused)
+                first_error = (uint32_t)gone;
+            refused++;
+        }
+    }
+    int dropped = StandRoomDelete(big);
+    if (dropped == OK)
+        big = 0;
+    uint64_t waited = SettledCycles() - cycles;
+
+    TestEvidence("deletes refused on a volume with no free block, the one of ground among them",
+                 (uint64_t)refused + (dropped != OK));
+    TestEvidence("cycles the deletes waited for in their calls", waited);
+    if (refused || dropped != OK) {
+        kprintf("[TESTS] %u of %u empty file(s) not given up on a full volume, the first "
+                "answering error %u; the file that holds ground answered %d\n", refused,
+                (unsigned)STAND_ROOM_MANY, first_error, dropped);
+        verdict = TEST_DEFECT;
+        goto out;
+    }
+    TEST_ASSERT(waited > 0, "past the deletes' share they waited for cycles: room on its way");
+out:
+    StandInkGiveBack(&ground);
+    StandRoomLetGoMany(s_room_many, STAND_ROOM_MANY);
+    StandRoomLetGoMany(s_room_stay, STAND_ROOM_STAY);
+    StandRoomLetGo(&big);
+    (void)TagFSSettle();
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
 // The border every answer passes
 //
 // R6. Whatever answers a program's submit passes one border (ChitAnswer): an
@@ -564,6 +700,11 @@ static const TestCase g_stand_room_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_room_kernel_write_between_the_steps",
       .func  = TestStandRoomKernelWriteBetweenTheSteps, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_room_empty_deletes_on_a_full_volume",
+      .func  = TestStandRoomEmptyDeletesOnAFullVolume, .reach = TEST_WRITES_TO_VOLUME,
+      .caveat_defect = "on a volume with no free block, every delete past the 98th of files that "
+                       "hold no ground is refused ERR_TAGFS_NO_SPACE, the delete of a file that "
+                       "holds ground among them, and nothing on it can be deleted again" },
     { .name  = "stand_room_never_an_answer", .func = TestStandRoomNeverAnAnswer,
       .reach = TEST_READS_ONLY,
       .caveat_defect = "an answer of ERR_WOULD_BLOCK reaches a program, whose boxlib drops it, "

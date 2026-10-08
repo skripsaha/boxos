@@ -190,17 +190,10 @@ bool     PoolTailHolds(const RecordWhere* where, uint32_t fid, uint32_t* out_len
  * map told where each now sits. Only after PoolTailHolds said yes. */
 void     PoolTakeBack(const RecordWhere* where, uint32_t len);
 
-/* The tail closed onto a Spare, and the Spare the new tail: false — nothing
- * changed — when no Spare may be had. The last SPARE_RESERVE Spares are had
- * only when `dig_reserve` (a Quitclaim). */
-bool     PoolTailTurn(bool dig_reserve);
-
-/* Whether a cycle's S0 could close the tail now (PoolSnapTake): a Spare held
- * past the deletes' share. */
-bool     PoolTailMayClose(void);
-
-/* Whether a Spare may be had. */
-bool     PoolSpareAvailable(bool dig_reserve);
+/* The tail closed onto a Spare, and the Spare the new tail, leaving the pool
+ * at least `keep` Spares (the reserve below): false — nothing changed — when
+ * no Spare may be had. */
+bool     PoolTailTurn(uint32_t keep);
 
 /* A record packed for the medium (PackV1) appended to the tail, written by
  * Ink `gen`; where it now sits. The room was checked. */
@@ -210,29 +203,64 @@ RecordWhere PoolAppend(const uint8_t* packed, uint32_t bytes, uint64_t gen);
 // Spares
 // ----------------------------------------------------------------------------
 
-/* ‼ HOW MANY SPARES THE POOL KEEPS FOR A DELETE, DERIVED. One block of the tail
- * holds every Quitclaim a run of deletes needs until a cycle can close it —
- * POOL_QUITCLAIMS_PER_BLOCK of them, 97 — and one more is a Glean step's
- * (glean/): the live records of the oldest block, at most one block's payload,
- * lie in a closed block before the seal lets that block go, so the cycle they
- * move in closes the tail onto it. A Quitclaim may take the whole reserve;
- * Glean and a tail a cycle closes early leave the deletes their
- * SPARE_FOR_QUITCLAIMS, because the ground the deletes
- * free comes back only once a block holding their Quitclaims is closed
- * (fallow.h) — a full volume whose last Spare an anchor spent could free
- * nothing again. A volume with no free block can still delete: the delete
- * that fills the tail closes it onto the deletes' own Spare, a delete that
- * leaves the tail room has its Quitclaim closed onto it by the cycle its
- * ground is asked of (PoolSnapTake), and the delete after the next tail fills
- * waits for a Spare the Fallow gives back. */
+/*
+ * ‼ HOW MANY SPARES THE POOL KEEPS, AND WHO MAY TAKE WHICH, DERIVED. The
+ * reserve is two shares, Glean's beneath the deletes':
+ *
+ *   Glean's, SPARE_FOR_GLEAN — what one step of Glean (glean/) needs from the
+ *     worst tail anything leaves it, one a run of deletes filled: the live
+ *     records a step moves cannot land there, so the step turns it (1); the
+ *     front may be the Deed's head, whose live records — a block's payload at
+ *     most — fill a block that gives nothing back, the head staying the
+ *     pool's (RT-08) (1); and the next front's, a block's payload at most,
+ *     land in a block the cycle closes before its seal lets their source go
+ *     (1). Three, and the step gives a block back;
+ *   the deletes', SPARE_FOR_QUITCLAIMS — one block of the tail holds every
+ *     Quitclaim a run of deletes needs until a cycle can close it,
+ *     POOL_QUITCLAIMS_PER_BLOCK of them, 97.
+ *
+ * Every taker leaves the pool a floor. While the volume has a free block it is
+ * the whole reserve, and a change makes a Spare of its own past it. With none,
+ * a record that frees nothing — a write's, a name's, a tag's, a new file's —
+ * still turns the tail only onto a Spare past the whole reserve; a Quitclaim
+ * that frees nothing, and a tail a cycle closes early for a waiter, onto one
+ * past Glean's share; a change that frees ground — a delete of a file that
+ * holds some, a write that lets blocks go — leaves the one Spare the close at
+ * S0 its ground needs before it can rest (fallow.h): that ground is what makes
+ * the reserve whole again. Glean's own step in a sweep for the deletes, the
+ * close a cycle makes for ground resting on the open tail, and the halt's last
+ * cycle dig to the bottom; Glean at any other pass takes only Spares it made
+ * past the reserve, which is not for room a write is short of.
+ *
+ * ‼ NOTHING LEAVES THE CLOSE OR GLEAN'S NEXT STEP SHORT. On a volume with no
+ * free block, a delete that frees no ground — an empty file's, whose Quitclaim
+ * only fills the tail — has its room made by Glean alone, which takes dead
+ * blocks off the chain's front. So below Glean's share no change takes the
+ * tail's room while the pool would be left without the Spare of the close
+ * that lets what the tail holds go, and none that frees nothing while what is
+ * left would not cover the step Glean takes next (GleanStepNeedLocked): it
+ * waits instead. Below Glean's share, Glean or a close for ground spent part
+ * of it, and what they let go rests in Fallow on its way back.
+ *
+ * ‼ THE RESERVE IS MADE WHOLE FIRST FROM WHAT COMES BACK. Ground a cycle
+ * gives back on a full volume would go straight to a write waiting for room,
+ * and a reserve made only at a cycle's steps would never be whole again. So
+ * while the pool holds less than SPARE_RESERVE, a take that is not the pool's
+ * own Spare leaves free the blocks the reserve still lacks (PoolSparesOwed).
+ */
 #define POOL_QUITCLAIMS_PER_BLOCK  (TAGFS_MPOOL_DATA_SIZE / RECORD_HEADER_SIZE)
 #define SPARE_FOR_QUITCLAIMS       ((POOL_QUITCLAIMS_PER_BLOCK * RECORD_HEADER_SIZE + \
                                      TAGFS_MPOOL_DATA_SIZE - 1) / TAGFS_MPOOL_DATA_SIZE)
-#define SPARE_FOR_GLEAN            ((TAGFS_MPOOL_DATA_SIZE + TAGFS_MPOOL_DATA_SIZE - 1) / \
-                                    TAGFS_MPOOL_DATA_SIZE)
+#define SPARE_FOR_GLEAN            (1 + 2 * ((TAGFS_MPOOL_DATA_SIZE + TAGFS_MPOOL_DATA_SIZE - 1) / \
+                                             TAGFS_MPOOL_DATA_SIZE))
 #define SPARE_RESERVE              (SPARE_FOR_QUITCLAIMS + SPARE_FOR_GLEAN)
 
-/* One Spare made: a block taken, stamped empty, the stamp's need noted, and
+/* Under the state lock: the Spares the reserve lacks — the blocks a take that
+ * is not the pool's own Spare leaves free for it; none while no pool is up. */
+uint32_t PoolSparesOwed(void);
+
+/* One Spare made: a block taken — the ground every other take leaves for the
+ * reserve among what it may have — stamped empty, the stamp's need noted, and
  * handed to the pool with the room its link will take. With no TagFS lock
  * held — a file's Helm may be. OK, or the refusal: ERR_TAGFS_NO_SPACE, ERR_WOULD_BLOCK
  * when Fallow rests blocks a cycle would give back, ERR_NO_MEMORY, or the
@@ -267,7 +295,8 @@ uint32_t PoolUnnamedLeftOut(uint32_t first, uint32_t count, uint8_t* bits);
 /*
  * A Spare made by a maker that may not stand over the medium — an
  * asynchronous write's continuation — in three steps. PoolSpareBegin takes a
- * block on what memory knows of the map and lays its empty stamp in an image
+ * block on what memory knows of the map, as PoolSpareMake's take may have it,
+ * and lays its empty stamp in an image
  * of its own: OK, the allocator's refusal as it is (ERR_WOULD_BLOCK while
  * Fallow rests blocks, ERR_TAGFS_NO_SPACE), or ERR_NO_MEMORY. The maker writes
  * the image to the block its own way; once the write completed it hands both
@@ -311,20 +340,20 @@ typedef struct {
 
 /* S0, under the state lock. Every record up to Ink `close_upto` is to lie in a
  * closed block — the anchor's promise: what a cycle with a waiter settles lies
- * in a block never written again; and Glean's: a record it moved lies there
- * before the seal lets its source go — so a tail holding one is closed onto a
- * Spare first; 0 closes nothing. The close leaves the deletes their
- * SPARE_FOR_QUITCLAIMS, but where it may dig it (`dig_reserve`): in the
- * machine's last cycle, whose S0 gives every Spare back right after
- * (PoolSparesGiveBack), and in a cycle asked for ground a record in the open
+ * in a block never written again; and Glean's: a record it moved, or the
+ * record that replaced a front's last live one, lies there before the seal
+ * lets its source go — so a tail holding one is closed onto a Spare first; 0
+ * closes nothing. The close leaves the pool `keep` Spares: Glean's share for
+ * a waiter's close; none for Glean's own, which its step held the Spare for,
+ * for the machine's last cycle, whose S0 gives every Spare back right after
+ * (PoolSparesGiveBack), and for a cycle asked for ground a record in the open
  * tail freed — ground that comes back only once a block holding that record
- * is closed (fallow.h), the very close the deletes' Spare is kept for, and
- * one no other close makes while the tail has room. `unclosed` says a
- * close was owed and no Spare could be had: the waiter is answered once its
- * records settled in the open tail, and that is said once until a close is
- * made again. The links this snapshot writes stop leaving the blocks they name
- * out of the map (PoolUnnamedLeftOut). */
-void     PoolSnapTake(PoolSnap* snap, uint64_t close_upto, bool dig_reserve);
+ * is closed (fallow.h), and one no other close makes while the tail has room.
+ * `unclosed` says a close was owed and no Spare could be had: the waiter is
+ * answered once its records settled in the open tail, and that is said once
+ * until a close is made again. The links this snapshot writes stop leaving
+ * the blocks they name out of the map (PoolUnnamedLeftOut). */
+void     PoolSnapTake(PoolSnap* snap, uint64_t close_upto, uint32_t keep);
 
 /* S3, with no TagFS lock held, one command at a time: the next closed block in
  * chain order, then the tail. OK with *done once nothing of the snapshot is
@@ -395,6 +424,10 @@ typedef struct {
 /* The i-th link from the chain's front, when Glean may take it. */
 bool     PoolFrontLink(uint32_t i, PoolFront* out);
 
+/* The i-th link from the chain's front, closed — written by a cycle or not
+ * yet: what Glean will meet there once it may (GleanStepNeedLocked). */
+bool     PoolChainLink(uint32_t i, PoolFront* out);
+
 /* The open tail's link: every link before it is closed. */
 uint32_t PoolTailLink(void);
 
@@ -407,7 +440,8 @@ bool     PoolFrontReadsTrue(const PoolFront* front, const MetaPoolBlock* img);
 void     PoolUnlinkFront(uint32_t count);
 
 /* Under the state lock: the gen of the newest record the tail holds; 0 when
- * it holds none. For the stand. */
+ * it holds none — what a close a sweep buys is owed up to (glean.h), and the
+ * stand's. */
 uint64_t PoolTailGen(void);
 
 #endif // META_POOL_H

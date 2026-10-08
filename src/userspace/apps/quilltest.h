@@ -11,9 +11,10 @@
  * and quilltest_ground.c the volume asked from many cabins at once — writers,
  * appenders beside a spanner, a read beside a delete, defrag beside delete
  * (logcheck cores); quilltest_away.c away, writers queued behind a write when
- * its medium leaves (logcheck replugwrite); quilltest_room.c roomback and
- * emptyfull, a full volume (logcheck fullvolume). All say their verdict in the
- * same four words and ask the volume for files by name.
+ * its medium leaves (logcheck replugwrite); quilltest_room.c roomback,
+ * emptyfull and its halves either side of a reboot, emptyfill and emptyback,
+ * a full volume (logcheck fullvolume). All say their verdict in the same four
+ * words and ask the volume for files by name.
  */
 #ifndef QUILLTEST_H
 #define QUILLTEST_H
@@ -108,5 +109,7 @@ QuillVerdict QuillAwayCheck(const char *const *args);
 /* A full volume, quilltest_room.c. */
 QuillVerdict QuillRoomBack(const char *const *args);
 QuillVerdict QuillEmptyFull(const char *const *args);
+QuillVerdict QuillEmptyFillOnly(const char *const *args);
+QuillVerdict QuillEmptyBack(const char *const *args);
 
 #endif /* QUILLTEST_H */

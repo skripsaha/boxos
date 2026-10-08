@@ -221,23 +221,29 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
             return ERR_TAGFS_NOT_INITIALIZED;
         }
 
+        /* Its own window as much as a new one: what the pool's reserve still
+         * lacks is left free for it (block_map.h). */
         uint32_t s = 0, n = 0;
-        error_t  rc = OK;
-        if (!AllotmentTakeOwn(fid, want, &s, &n, &rc)) {
-            MapPlan(&k, may_read && rounds < MAP_LOOK_ROUNDS, may_read);
-            if (k.paused) {
-                TagFSLockDrop(lock);
-                continue;
+        error_t  rc  = OK;
+        uint64_t may = MapMayHaveLocked();
+        uint32_t ask = may < want ? (uint32_t)may : want;
+        if (!ask || !AllotmentTakeOwn(fid, ask, &s, &n, &rc)) {
+            if (ask) {
+                MapPlan(&k, may_read && rounds < MAP_LOOK_ROUNDS, may_read);
+                if (k.paused) {
+                    TagFSLockDrop(lock);
+                    continue;
+                }
             }
             k.stage = MAP_PLAN_FRESH;
-            if (k.looks) {
+            if (ask && k.looks) {
                 uint32_t look = k.look[0];
                 TagFSLockDrop(lock);
                 rounds++;
                 (void)MapFetch(look, __func__);
                 continue;
             }
-            if (!k.found) {
+            if (!ask || !k.found) {
                 if (AllotmentTakeBackLocked(fid)) {
                     TagFSLockDrop(lock);
                     continue;
@@ -256,7 +262,7 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
                 TagFSLockDrop(lock);
                 continue;
             }
-            rc = AllotmentTakeNew(fid, want, &k, &s, &n);
+            rc = AllotmentTakeNew(fid, ask, &k, &s, &n);
         }
         TagFSLockDrop(lock);
 

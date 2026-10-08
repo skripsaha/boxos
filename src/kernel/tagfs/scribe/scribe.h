@@ -220,8 +220,11 @@ ScribeTurn ScribeWaitFor(const volatile uint32_t *holder, bool (*settled)(const 
  * stamped on the medium and *out_need is the need its link must wait for. The
  * allocator's refusal as it is — ERR_TAGFS_NO_SPACE, or ERR_WOULD_BLOCK while
  * Fallow rests blocks a cycle would give back — and a refused write gives the
- * block back. Called inside the door with no TagFS lock held: under the
- * consumer's Scribe, or by an Ink's caller, whose file's Helm may be held.
+ * block back. A Spare of the pool's (TAGFS_MPOOL_MAGIC) is taken by the door
+ * that may have the ground every other take leaves free for the pool's
+ * reserve (BlockMapTakeSpare). Called inside the door with no TagFS lock held:
+ * under the consumer's Scribe, or by an Ink's caller, whose file's Helm may be
+ * held.
  */
 error_t SpareStamp(uint32_t magic, void *image, uint32_t *out_block, uint64_t *out_need);
 

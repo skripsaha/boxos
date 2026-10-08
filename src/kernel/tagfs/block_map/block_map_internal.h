@@ -283,6 +283,11 @@ void          MapSayNoRoom(uint32_t want);
  * is coming, not gone — and ERR_TAGFS_NO_SPACE, said, when none rest. */
 error_t       MapShort(uint32_t want);
 
+/* Under the state lock: how many blocks a take that is not the pool's own
+ * Spare may have — the free ones but those the pool's reserve still lacks
+ * (meta_pool.h, PoolSparesOwed). */
+uint64_t      MapMayHaveLocked(void);
+
 /* ---- what growing files keep in hand (allotment.c) --------------------- */
 
 void          AllotmentOverlay(uint32_t w, uint8_t *view);
