@@ -323,6 +323,14 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
     return given;
 }
 
+bool FallowRestsOnTail(uint64_t closed_gen)
+{
+    for (FallowNode* n = s_head; n; n = n->next)
+        if (n->kind == FALLOW_BY_RECORD && n->ripe_at == 0 && n->gen > closed_gen)
+            return true;
+    return false;
+}
+
 void FallowNodesFree(FallowNode* list)
 {
     while (list) {

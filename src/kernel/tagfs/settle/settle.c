@@ -218,11 +218,16 @@ error_t SettleHaltAnswer(uint64_t* unsettled)
  * again — a moved record lies in a closed block under the seal that lets its
  * source go (glean.h). Each leaves the deletes their share of the reserve, but
  * the halt's, which gives every Spare back right after — and leaves out of the
- * map the ground only an open handle still holds.
+ * map the ground only an open handle still holds — and one asked for room
+ * while Fallow's ground rests on a record in the open tail: that ground comes
+ * back only once the tail is closed, and the deletes' Spare is kept for that
+ * close (meta_pool.h). Left to a tail that never fills, it would rest for ever
+ * and the asker would wait through every cycle after.
  */
 static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
 {
-    bool     closes     = why != SETTLE_FOR_CADENCE || (demands & SETTLE_DEMAND_ROOM);
+    bool     room       = why == SETTLE_FOR_ROOM || (demands & SETTLE_DEMAND_ROOM);
+    bool     closes     = why != SETTLE_FOR_CADENCE || room;
     uint64_t owed_close = closes ? 0 : SettleWaitersCloseUpto();
 
     TagFSState* fs = tagfs_get_state();
@@ -234,7 +239,8 @@ static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
                                  : (owed_close < snap->target ? owed_close : snap->target);
     if (!closes && GleanMovedGen() > close_upto)
         close_upto = GleanMovedGen();
-    PoolSnapTake(&snap->pool, close_upto, why == SETTLE_FOR_HALT);
+    bool dig = why == SETTLE_FOR_HALT || (room && FallowRestsOnTail(PoolClosedGenMax()));
+    PoolSnapTake(&snap->pool, close_upto, dig);
     if (why == SETTLE_FOR_HALT) {
         snap->given = PoolSparesGiveBack();
         IntegrityLayDrop();
