@@ -63,10 +63,10 @@ typedef struct {
  * ERR_METADATA_CORRUPTED (the record names fewer blocks than its size needs),
  * the refusal of the one guard of a change (InkMayChange: ERR_PERMISSION_DENIED
  * for a file the system keeps and a call with no warrant, and for the kernel
- * the loader reads by its blocks; ERR_DEVICE_NOT_READY once the medium left,
- * ERR_TAGFS_READ_ONLY) — asked here, before a byte of the call moves — or
- * ERR_NO_MEMORY. A holder of the file's Helm sets `helm` after the load, so the
- * record's room is claimed for it (PlotReserve). */
+ * the loader reads by its blocks; ERR_DEVICE_NOT_READY once the medium left or
+ * the halt shut the volume, ERR_TAGFS_READ_ONLY) — asked here, before a byte of
+ * the call moves — or ERR_NO_MEMORY. A holder of the file's Helm sets `helm`
+ * after the load, so the record's room is claimed for it (PlotReserve). */
 error_t  PlotLoad(Plot *p, uint32_t fid, InkWarrant warrant);
 
 /* Everything the Plot holds let go; every Stake still standing is given back

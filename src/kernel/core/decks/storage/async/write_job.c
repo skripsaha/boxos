@@ -109,6 +109,7 @@
 #include "boxos_crate.h"
 #include "touch.h"
 #include "ink.h"         /* TagFSInkPlot — the one way the file changes */
+#include "settle.h"      /* SettleHalting — a stopping machine begins no job */
 #include "run.h"         /* TagFSRunBlocks, TagFSDataCostWrite */
 
 /* =========================================================================
@@ -629,8 +630,11 @@ int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
                    : (int)ERR_TAGFS_NOT_INITIALIZED;
     }
 
+    /* A stopping machine's halt shut the volume to changes not begun
+     * (TagFSShutForHalt): refused before a Helm is asked for, so the jobs the
+     * halt waits for are only ever the ones begun before it. */
     WriteJob *j  = NULL;
-    error_t   rc = wjob_make(ask, crates, ctx, &j);
+    error_t   rc = SettleHalting() ? ERR_DEVICE_NOT_READY : wjob_make(ask, crates, ctx, &j);
     if (rc != OK) {
         tagfs_leave();
         return (ask->waybill && ctx) ? storage_sync_ferry_finalize(ctx, crates, rc, 0, ask->waybill)

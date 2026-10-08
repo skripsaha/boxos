@@ -78,21 +78,41 @@ error_t  SettleForRoom(void);
  * middle of the medium. They give back every Spare no link names, and every
  * block Fallow rests, as its rule allows once they settled — or, held only by
  * an open handle, write it free in the map — so no clean shutdown leaves a
- * block taken that nothing names. From its first ask on, a cycle anybody
+ * block taken that nothing names. From the halt's shut on, a cycle anybody
  * begins is one of the halt's. A committer whose core is no longer running is
  * an abandoned cycle: it is taken over and begun again from S0. A volume whose
  * medium is away runs no cycle: the stopping machine is the event its open
  * book waited for, and the book is given up — every waiter answered
- * (mount/away.h). The answer is kept for tagfs_shutdown.
+ * (mount/away.h). The answer is kept for tagfs_shutdown. They seal the volume
+ * clean only when no change is in flight: none holds or waits for a file's
+ * Helm — a write's bytes in place may land after the seal, and its digest with
+ * them or not, and a clean seal is the next mount's word that every digest on
+ * the medium stands (RT-22, mount.c MountAfterDoor).
  */
 error_t  TagFSSettleForHalt(void);
 
+/*
+ * The machine is stopping (RT-12), said by the halt before its drain begins:
+ * from here every cycle begun is one of the halt's, and the volume takes no
+ * change that has not begun — a write, a span, a defrag, a create, a rename, a
+ * tag, a delete is refused ERR_DEVICE_NOT_READY before anything of it is done
+ * (SettleHalting, asked by the first half of every change). One begun before
+ * runs to its end, a window at most, and the halt's cycles settle it. A change
+ * begun after the halt's last cycle took its snapshot would be on nobody's
+ * books: a write in place lands with the digest of the bytes before it under a
+ * clean seal, and reads as rot on the next mount; and changes nobody stops keep
+ * the drain going for ever. Raised once, never lowered.
+ */
+void     TagFSShutForHalt(void);
+bool     SettleHalting(void);
+
 /* What the halt still owes the volume, read with no lock: Inks no cycle has
- * settled, and whether a cycle is running on another core that still runs —
- * nothing at all when no volume is mounted. And the steps every cycle took
- * this boot, on any core: one held by another core that still takes them is
- * going on, however long it is. */
-void     SettleOwed(uint64_t* unsettled, bool* committer_busy);
+ * settled, whether a cycle is running on another core that still runs, and
+ * whether the last cycle that settled sealed the volume clean — nothing at all
+ * when no volume is mounted. And the steps every cycle took this boot, on any
+ * core, the halt's own too: a cycle that still takes them is going on,
+ * however long it is. */
+void     SettleOwed(uint64_t* unsettled, bool* committer_busy, bool* sealed_clean);
 uint64_t SettleStepsTaken(void);
 
 /* What the halt's last cycle answered — ERR_TAGFS_METADATA_ERROR when none
@@ -137,6 +157,10 @@ uint32_t TagFSStandSettleDemands(void);
  * every later cycle is the stand's own again: OK once they settled, or the
  * refusal. For the stand, inside the door. */
 error_t  TagFSStandSettleForHalt(void);
+
+/* The volume shut for a halt as TagFSShutForHalt shuts it — said nowhere —
+ * and, for the stand alone, opened again (`shut` false). */
+void     TagFSStandShutForHalt(bool shut);
 #endif
 
 /* A mount's first word: nothing settled yet, and no waiter of the volume that
