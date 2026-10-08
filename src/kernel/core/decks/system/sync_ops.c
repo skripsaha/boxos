@@ -443,8 +443,8 @@ void SyncTimeoutDeliver(void *ctx)
  *   never issued  — the generation is ahead of everything that pid slot has
  *                   ever handed out. A real error: saying "finished" about a
  *                   process that never ran reads exactly like success.
- *   departed      — the slot has moved on, or holds this generation and is
- *                   free. Answered immediately, no park.
+ *   departed      — the slot has moved on, or holds this generation and its
+ *                   record has left the table. Answered immediately, no park.
  *   live          — park, and let the one place a life ends deliver.
  *
  * The park is armed against the death's own commit point, not against a
@@ -477,14 +477,18 @@ static int SysProcessGone(const ManifestOp *op, Crate *crates,
         switch (pid_life(pid, want_gen)) {
         case PID_LIFE_DEPARTED: return OK;
         case PID_LIFE_LIVE:
-            /* The number is issued to exactly this generation, yet the record
-             * is not in the table: the only window where that holds is inside
-             * process_create, between pid_alloc and the hash insert — and a
-             * caller cannot be in it, because the pid is not handed out until
-             * creation has finished. Reported as BUSY rather than WOULD_BLOCK
-             * on purpose: boxlib filters WOULD_BLOCK out of the reply stream
-             * (it is the async-park ack), so returning it here would leave the
-             * caller waiting on an answer that was thrown away. */
+            /* The number is issued to exactly this generation and the record
+             * has never left the table — process_destroy marks the number
+             * departed in the same hold of process_lock that takes the record
+             * out, and the lookup above took that lock — yet the record is not
+             * there. That is a birth: process_create and strand_spawn issue
+             * the number before they list the record, and nobody is handed
+             * the number until it is listed, so only a caller naming an
+             * incarnation it was never given lands here. Reported as BUSY
+             * rather than WOULD_BLOCK on purpose: boxlib filters WOULD_BLOCK
+             * out of the reply stream (it is the async-park ack), so returning
+             * it here would leave the caller waiting on an answer that was
+             * thrown away. */
             return ERR_BUSY;
         default:                return ERR_PROCESS_NOT_FOUND;
         }
