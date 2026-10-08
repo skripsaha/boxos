@@ -830,6 +830,8 @@ static const TestCase g_stand_tests[] = {
       .reach = TEST_READS_ONLY,
       .caveat_defect = "a tick walks the touch queue from its head again for every node it "
                        "fires, with interrupts off for their number times the queue's depth" },
+    { .name  = "stand_gone_through_the_teardown", .func = TestStandGoneThroughTheTeardown,
+      .reach = TEST_READS_ONLY },
 
     { .name  = "stand_rmw_read_refused", .func = TestStandRmwReadRefused,
       .reach = TEST_WRITES_TO_VOLUME,

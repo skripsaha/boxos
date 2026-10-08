@@ -18,6 +18,15 @@ bool pid_validate(uint32_t pid);
 uint32_t pid_generation(uint32_t pid);  /* generation[pid-1] under allocator-lock; 0 if invalid */
 uint32_t pid_allocated_count(void);
 
+/* The incarnation holding `pid` has left the process table. pid_life answers
+ * DEPARTED for it from here on, while the number itself stays taken — issued
+ * to nobody else — until pid_free gives it up once the last holder of the
+ * record lets go. process_destroy calls it under process_lock, in the same
+ * hold that takes the record out of the table, so a lookup never sees the
+ * record gone and the incarnation still live. The allocator's lock is a leaf:
+ * it is taken inside process_lock and takes nothing itself. */
+void pid_depart(uint32_t pid);
+
 /* What became of one named incarnation.
  *
  * A slot's generation only ever counts UP — pid_alloc bumps it, pid_free
@@ -29,13 +38,13 @@ uint32_t pid_allocated_count(void);
  * missed death used to mean waiting forever. */
 typedef enum {
     PID_LIFE_NEVER    = 0,  /* generation ahead of the slot — never issued */
-    PID_LIFE_LIVE     = 1,  /* this exact incarnation holds the slot right now */
-    PID_LIFE_DEPARTED = 2,  /* this incarnation ran and is finished */
+    PID_LIFE_LIVE     = 1,  /* this exact incarnation holds the slot, its record in the table */
+    PID_LIFE_DEPARTED = 2,  /* this incarnation has left the table, or the slot moved on */
 } PidLife;
 
-/* Bitmap AND generation read under ONE acquisition of the allocator lock:
- * sampled separately they can straddle a free+realloc and answer about two
- * different lives. */
+/* Bitmap, departure AND generation read under ONE acquisition of the
+ * allocator lock: sampled separately they can straddle a free+realloc and
+ * answer about two different lives. */
 PidLife pid_life(uint32_t pid, uint32_t generation);
 
 #endif // PID_ALLOCATOR_H

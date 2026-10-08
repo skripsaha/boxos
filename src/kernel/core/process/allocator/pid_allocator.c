@@ -12,6 +12,7 @@ _Static_assert((PID_MAX_COUNT % 64) == 0,
 typedef struct
 {
     uint64_t bitmap[PID_BITMAP_QWORDS];  // 1 bit per PID, packed
+    uint64_t departed[PID_BITMAP_QWORDS]; // its incarnation's record has left the process table
     uint32_t generation[PID_MAX_COUNT];  // generation counters (tracked but not exposed)
     uint32_t allocated_count;
     spinlock_t lock;
@@ -84,6 +85,7 @@ uint32_t pid_alloc(void)
     }
 
     bitmap_set(g_allocator.bitmap, index);
+    bitmap_clear(g_allocator.departed, index);
     g_allocator.generation[index]++;
 
     // Wrap generation within 16-bit range (skip 0 which is reserved for PID_INVALID)
@@ -149,6 +151,20 @@ void pid_free(uint32_t pid)
     debug_printf("[PID] Freed PID %u (idx=%u, gen=%u, remaining=%u/%u)\n",
                  pid, index, g_allocator.generation[index],
                  g_allocator.allocated_count, PID_MAX_COUNT);
+}
+
+void pid_depart(uint32_t pid)
+{
+    if (pid == PID_INVALID)
+        return;
+
+    uint32_t index = pid - 1;
+    if (index >= PID_MAX_COUNT)
+        return;
+
+    spin_lock(&g_allocator.lock);
+    bitmap_set(g_allocator.departed, index);
+    spin_unlock(&g_allocator.lock);
 }
 
 bool pid_validate(uint32_t pid)
@@ -220,6 +236,7 @@ PidLife pid_life(uint32_t pid, uint32_t generation)
     spin_lock(&g_allocator.lock);
     uint32_t slot_gen  = g_allocator.generation[index];
     bool     allocated = bitmap_test(g_allocator.bitmap, index);
+    bool     departed  = bitmap_test(g_allocator.departed, index);
     spin_unlock(&g_allocator.lock);
 
     /* Newer than anything this slot has ever issued: no such incarnation.
@@ -231,8 +248,11 @@ PidLife pid_life(uint32_t pid, uint32_t generation)
      * which cannot happen while the earlier tenant still holds it. */
     if (generation < slot_gen) return PID_LIFE_DEPARTED;
 
-    /* The slot's current incarnation — the bitmap says whether it still
-     * holds the number. Freed means finished; the generation is not bumped
-     * again until the number is re-issued, so this stays true afterwards. */
-    return allocated ? PID_LIFE_LIVE : PID_LIFE_DEPARTED;
+    /* The slot's current incarnation. It is live while it holds the number
+     * AND its record is still in the process table: the record leaves the
+     * table (pid_depart) a whole teardown, and the last holder's letting go,
+     * before the number is given up (pid_free), and a record out of the table
+     * never runs again. Departed or freed, the generation is not bumped again
+     * until the number is re-issued, so the answer stays true afterwards. */
+    return allocated && !departed ? PID_LIFE_LIVE : PID_LIFE_DEPARTED;
 }

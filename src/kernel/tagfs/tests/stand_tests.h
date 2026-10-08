@@ -24,6 +24,8 @@
 // stand_heap_tests.c     the kernel heap growing by regions, its large pieces,
 //                        and a class of cabins refused while the reserve serves
 // stand_touch_tests.c    the touch queue's tick firing its nodes in one pass
+// stand_gone_tests.c     process.gone asked of a child the reaper takes down,
+//                        through every stage of its teardown
 // stand_map_tests.c      the stand_map suite: where a take goes, a give that
 //                        comes twice, and the ground a growing file keeps
 // stand_plot_tests.c     the stand_plot suite: where a write may begin, what a
@@ -201,6 +203,9 @@ TestResult TestStandHeapClassRefusedReserveServes(void);
 
 /* The touch queue's tick (stand_touch_tests.c). */
 TestResult TestStandTouchQueueTickOnePass(void);
+
+/* A death asked about through its teardown (stand_gone_tests.c). */
+TestResult TestStandGoneThroughTheTeardown(void);
 
 /* The caveated tests (stand_caveat_tests.c). */
 TestResult TestStandRmwReadRefused(void);

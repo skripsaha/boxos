@@ -795,7 +795,13 @@ void process_destroy(process_t *proc)
 
     spin_lock(&process_lock);
 
+    /* Out of the table and departed in one hold of process_lock. A lookup
+     * takes this lock too, so whoever no longer finds the record reads its
+     * incarnation as departed (pid_life) — not as live with no record to wait
+     * on, which is what the number alone says until pid_free, a whole
+     * teardown and the record's last holder away from here. */
     process_hash_remove(proc);
+    pid_depart(proc->pid);
 
     if (proc->prev) proc->prev->next = proc->next;
     else            process_list_head = proc->next;
