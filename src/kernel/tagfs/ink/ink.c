@@ -134,6 +134,17 @@ static error_t InkVolumeTakes(void)
     return OK;
 }
 
+/* Whether the volume takes a change not begun yet: none once a stopping
+ * machine's halt shut it (TagFSShutForHalt). Asked in the first half alone — a
+ * change begun before the shut is the halt's to settle, and a write's bytes may
+ * already stand in place. */
+static error_t InkVolumeBegins(void)
+{
+    if (SettleHalting())
+        return ERR_DEVICE_NOT_READY;
+    return InkVolumeTakes();
+}
+
 /* The guard with the ground a change lets go of asked too: a Plot's freed runs
  * are the kernel's no more than its runs may be. The kernel's blocks are
  * refused to every call; a file the system keeps, to a call with no warrant. */
@@ -160,6 +171,9 @@ static error_t InkGuard(uint32_t fid, const uint16_t* tags, uint32_t tag_count,
 error_t InkMayChange(uint32_t fid, const uint16_t* tags, uint32_t tag_count,
                      const FileExtent* runs, uint32_t run_count, InkWarrant warrant)
 {
+    error_t rc = InkVolumeBegins();
+    if (rc != OK)
+        return rc;
     return InkGuard(fid, tags, tag_count, runs, run_count, NULL, 0, warrant);
 }
 
@@ -627,7 +641,7 @@ static error_t InkFieldsOnce(uint32_t fid, const char* name, uint16_t add, uint1
     InkFieldsPlan   f;
     InkRecord       r     = { 0 };
     TagBitmapStake* stake = NULL;
-    error_t         rc    = InkVolumeTakes();
+    error_t         rc    = InkVolumeBegins();
     if (!InkFieldsTags(cur, name, add, drop, &f)) {
         FileRecordRelease(cur);
         return ERR_NO_MEMORY;
@@ -755,7 +769,7 @@ error_t InkNew(const char* name, const uint16_t* tags, uint32_t count, uint32_t*
         .tag_count     = count,
     };
 
-    error_t rc = InkVolumeTakes();
+    error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
     InkRecord r;

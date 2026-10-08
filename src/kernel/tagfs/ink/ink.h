@@ -170,7 +170,8 @@ uint16_t InkNameTagLookup(const char* name);
 
 /* The one guard of a change to a file (see above), asked with the tags the file
  * wears, the runs it names and the caller's warrant: OK, ERR_DEVICE_NOT_READY
- * once the medium left, ERR_TAGFS_READ_ONLY once it refused a write as
+ * once the medium left or a stopping machine's halt shut the volume to changes
+ * not begun (TagFSShutForHalt), ERR_TAGFS_READ_ONLY once it refused a write as
  * protected, or ERR_PERMISSION_DENIED — said — for a file the system keeps and
  * a caller with no warrant, and for the kernel the loader reads by its blocks
  * and any caller. */

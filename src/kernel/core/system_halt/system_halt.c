@@ -9,6 +9,7 @@
 #include "scheduler.h"
 #include "tagfs.h"
 #include "settle.h"      /* the volume's last Settle cycle, run here before cli */
+#include "scribe.h"      /* VolumeWritesAnswered — the medium still answering the work owed */
 #include "helm.h"        /* the Helm work still owed, and run by the drain */
 #include "boardroom.h"    /* the seat, so a lost commit can be named */
 #include "ata.h"
@@ -106,14 +107,18 @@ static const char *halt_name_of(void (*run)(void *ctx), NameplateName *scratch)
  *   3. The volume's changes no Settle cycle has settled yet (inked_gen −
  *      settled_gen), and whether another core holds the Settle — the halt
  *      runs the last cycle itself, once nothing else is owed (RT-12). A
- *      cycle on another core settles nothing until its last step, so the
- *      steps it takes are counted beside the terms (Steps), not in them:
- *      while it takes them the work is moving, however long the cycle is.
+ *      cycle settles nothing until its last step, so the steps the cycles
+ *      take are counted beside the terms (Steps), not in them: while they
+ *      are taken the work is moving, however long the cycle is.
  *   4. The holders and waiters of every file's Helm: jobs that still owe a
  *      program its write, span or defrag. A waiter handed the Helm to run at a
- *      service point is run by the drain itself too.
+ *      service point is run by the drain itself too. A job lowers the term
+ *      only when it ends, so the writes of the volume the medium answers are
+ *      counted beside the terms too (Writes): a window's, as a step's.
  * Every term is non-negative and falls as the machine finishes work — which is
  * exactly what lets the drain below run without a deadline while they fall.
+ * And whether the newest settled cycle sealed the volume clean (Clean): the
+ * halt owes the medium that seal once no change is in flight.
  *
  * AhciPresent is asked separately from Ahci because the two answer different
  * questions and the console line says which one it is looking at: a controller
@@ -127,6 +132,8 @@ typedef struct HaltWorkOwed {
     uint64_t Committer;   /* 1 while another running core holds the Settle  */
     uint64_t Helm;        /* holders and waiters of the files' Helms        */
     uint64_t Steps;       /* steps the Settle cycles took, on any core — not in Total */
+    uint64_t Writes;      /* writes of the volume the medium answered — not in Total */
+    bool     Clean;       /* the newest settled cycle sealed the volume clean */
     bool     AhciPresent; /* an AHCI controller was initialised at boot     */
 } HaltWorkOwed;
 
@@ -153,10 +160,11 @@ static void halt_async_work_owed(HaltWorkOwed *owed)
     }
 
     bool busy = false;
-    SettleOwed(&owed->Unsettled, &busy);
+    SettleOwed(&owed->Unsettled, &busy, &owed->Clean);
     owed->Committer = busy ? 1u : 0u;
     owed->Helm      = HelmOwed();
     owed->Steps     = SettleStepsTaken();
+    owed->Writes    = VolumeWritesAnswered();
 
     owed->Total = owed->Baton + owed->Ahci + owed->Unsettled + owed->Committer + owed->Helm;
 }
@@ -234,6 +242,97 @@ static void halt_drain_give_up(const HaltWorkOwed *owed, HourGlass *stall, uint6
     }
 }
 
+bool HaltDrainMoved(HaltDrainSeen *seen, uint64_t owed, uint64_t steps, uint64_t writes)
+{
+    bool moved = owed < seen->Best || steps != seen->Steps || writes != seen->Writes;
+    if (owed < seen->Best)
+        seen->Best = owed;
+    seen->Steps  = steps;
+    seen->Writes = writes;
+    return moved;
+}
+
+/* Whether the halt owes the volume a cycle of its own: changes no cycle
+ * settled, its first cycle not run yet, or — once no change is in flight — a
+ * seal that is not clean, the halt's last word on the medium. Never after a
+ * cycle the medium refused: nothing the halt can do then is a cycle. */
+static bool halt_owes_cycle(const HaltWorkOwed *owed, bool settled, bool refused)
+{
+    return !refused && (owed->Unsettled > 0 || !settled || (owed->Helm == 0 && !owed->Clean));
+}
+
+/* A stall of the drain: the glass, the deadline it was turned on, and what
+ * has been said of it. Each bound announces itself once. A stall episode
+ * begins every time a pass that moved is followed by one that did not, and on
+ * a queue of a thousand passes that can happen a thousand times — one line per
+ * episode would bury the log it exists to clarify. There are two bounds, so
+ * there are at most two lines. */
+typedef struct HaltDrainStall {
+    HourGlass Glass;
+    uint64_t  Bound;      /* the deadline the glass was turned on */
+    bool      Stuck;      /* the last pass did not move           */
+    bool      Ruled;      /* the glass turned on a real ruler     */
+    bool      Said;       /* the no-ruler line, said exactly once */
+    bool      ToldAhci;
+    bool      ToldCore;
+} HaltDrainStall;
+
+/* The first pass that did not move: the glass turned on the deadline of
+ * whatever holds the work, and that said. When both a port and a queue hold
+ * work, the LONGER of the two applies: the passes may be the completions that
+ * command is going to hand on, and cutting them off at the core's ceiling
+ * would abandon a disk that is still answering within its own. */
+static void halt_drain_stall_begins(HaltDrainStall *s, const HaltWorkOwed *owed)
+{
+    bool by_ahci = (owed->Ahci > 0) &&
+                   (owed->Baton == 0 || HALT_STALLED_AHCI_US >= HALT_STALLED_CORE_US);
+    s->Stuck = true;
+    s->Bound = by_ahci ? HALT_STALLED_AHCI_US : HALT_STALLED_CORE_US;
+
+    if (by_ahci && !s->ToldAhci) {
+        s->ToldAhci = true;
+        kprintf("[HALT] work owed stopped falling at %lu (%lu pass(es), "
+                "%lu AHCI command(s) still issued) — judged by the AHCI "
+                "command deadline, %lu us, because a controller that is "
+                "here owes them\n",
+                owed->Total, owed->Baton, owed->Ahci, s->Bound);
+    } else if (!by_ahci && !s->ToldCore) {
+        s->ToldCore = true;
+        kprintf("[HALT] work owed stopped falling at %lu (%lu pass(es), "
+                "%lu unsettled change(s), %lu Helm job(s), %s, %s) — judged "
+                "by the core deadline, %lu us: a baton queue falls only when "
+                "its own core pumps it\n",
+                owed->Total, owed->Baton, owed->Unsettled, owed->Helm,
+                owed->Committer ? "a Settle cycle running on another core"
+                                : "no Settle cycle running elsewhere",
+                owed->AhciPresent ? "no AHCI command issued"
+                                  : "no AHCI controller on this machine",
+                s->Bound);
+
+        uint8_t  core  = 0;
+        uint64_t depth = 0;
+        void (*handed_in)(void *ctx) = NULL;
+        if (halt_deepest_baton(&core, &depth, &handed_in)) {
+            NameplateName in_name;
+            kprintf("[HALT]   waiting on core %u: %lu pass(es), last "
+                    "handed in %s\n",
+                    core, depth, halt_name_of(handed_in, &in_name));
+        }
+    }
+
+    s->Ruled = HourGlassTurn(&s->Glass, s->Bound);
+    if (!s->Ruled && !s->Said) {
+        /* No ruler on this machine at this point in boot. A missing ruler
+         * never becomes an invented one: we wait on the fact itself — the
+         * queues and the port registers going quiet — and never on a guessed
+         * spin count. A genuine wedge here is what Nightwatch convicts, by
+         * facts, without a clock. */
+        kprintf("[HALT] no time ruler — draining against the queues "
+                "themselves, unbounded\n");
+        s->Said = true;
+    }
+}
+
 /*
  * Drain in-flight async storage I/O before we kill cores — bounded by PROGRESS
  * rather than by a duration.
@@ -261,14 +360,21 @@ static void halt_drain_give_up(const HaltWorkOwed *owed, HourGlass *stall, uint6
  * completes) would satisfy "fell since last pass" forever and the loop would
  * never terminate. Against the running minimum it cannot.
  *
- * ‼ A SETTLE CYCLE ON ANOTHER CORE MOVES WITHOUT LOWERING ANYTHING. It
- * settles its changes in its last step, and a cycle that writes a pool of
- * thousands of blocks to a cheap stick takes longer than any core's ceiling —
- * judged by the measure alone, it was given up on mid-cycle, and the halt
- * never ran a cycle of its own. So a step it takes puts the glass away as a
- * new low does; only a cycle that stopped taking steps is judged. That ends
- * too: no cycle begins on its own once the drain has begun — the cadence is
- * held for good here — and a cycle has finitely many steps.
+ * ‼ A SETTLE CYCLE AND A WRITE MOVE WITHOUT LOWERING ANYTHING. A cycle
+ * settles its changes in its last step, and one that writes a pool of
+ * thousands of blocks to a cheap stick takes longer than any core's ceiling;
+ * a job that holds a file's Helm lowers its term only when it ends, its
+ * window a command or two the medium answers in its own time. Judged by the
+ * measure alone, both were given up on in the middle — on four cores,
+ * measured: the glass turned as the committer's cycle ended ran on through
+ * the halt's own two cycles, three seconds of steps nobody counted, and ran
+ * out while a writer's window was taking the medium's answers. So a step any
+ * cycle takes, the halt's own too, and a write of the volume the medium
+ * answers put the glass away as a new low does (HaltDrainMoved); only work
+ * that stopped taking either is judged. That ends too: no cycle begins on its
+ * own once the drain has begun — the cadence is held for good here — no change
+ * begins either (TagFSShutForHalt), and a cycle has finitely many steps, a
+ * change begun finitely many writes.
  *
  * Other cores are still live here — cli has not run yet — so their guide loops
  * keep pumping continuations naturally.
@@ -278,12 +384,16 @@ static void halt_drain_give_up(const HaltWorkOwed *owed, HourGlass *stall, uint6
  * inked and no cycle settled is settled by this core — before cli, before any
  * core is stopped: a committer frozen in the middle of the medium could never
  * be finished, and a halt after cli could wait on nobody. Programs still run
- * until the roll call, so what they ink meanwhile is owed again and asks for
- * another cycle; the running minimum ends that as it ends everything else, and
- * tagfs_shutdown says how many changes came after the last one. A drain that
- * gives up on work that stopped moving still runs that cycle before it goes:
- * the cycle needs none of the passes another core never pumped, and without
- * it every change since the last cycle stays off the medium.
+ * until the roll call, but from here the volume takes no change they have not
+ * begun: one begun runs to its end and asks for another cycle, and the cycle
+ * after the last of them — the first no change is in flight under — seals the
+ * volume clean. A change begun after the last cycle was on nobody's books, and
+ * a write in place among them landed under the clean seal with the digest of
+ * the bytes before it — rot on the next mount, measured on four cores. A drain
+ * that gives up on work that stopped moving still runs a cycle before it
+ * goes, unclean while a change is in flight: the cycle needs none of the
+ * passes another core never pumped, and without it every change since the
+ * last cycle stays off the medium.
  */
 static void halt_drain_async_writes(void)
 {
@@ -291,27 +401,17 @@ static void halt_drain_async_writes(void)
 
     /* From here the halt's own cycles are the volume's last: a cycle the
      * cadence began after them would seal the volume unclean and stamp a
-     * Spare nothing names, and one begun meanwhile would hold the drain. */
+     * Spare nothing names, and one begun meanwhile would hold the drain. And
+     * no change begins: the work owed is what was begun before this line. */
     SettleCadenceHold(true);
+    TagFSShutForHalt();
 
-    uint8_t   me    = amp_get_core_index();
-    uint64_t  best  = UINT64_MAX;   /* lowest work owed ever seen — the witness */
-    uint64_t  steps = UINT64_MAX;   /* the Settle steps taken at the last pass */
-    uint64_t  bound = 0;            /* the deadline the stall glass was turned on */
-    bool      stuck = false;        /* the last pass failed to beat `best`      */
-    bool      ruled = false;        /* the stall glass turned on a real ruler   */
-    bool      said  = false;        /* the no-ruler line is said exactly once   */
-    /* Each bound announces itself once. A stall episode begins every time a new
-     * low is followed by a pass that does not beat it, and on a queue of a
-     * thousand passes that can happen a thousand times — one line per episode
-     * would bury the log it exists to clarify. There are two bounds, so there
-     * are at most two lines. */
-    bool      told_ahci = false;
-    bool      told_core = false;
-    bool      told_step = false;    /* a cycle on another core, said once */
-    bool      settled   = false;    /* the halt's own Settle cycle has run once */
-    bool      refused   = false;    /* ... and the last one was refused */
-    HourGlass stall;
+    uint8_t        me        = amp_get_core_index();
+    HaltDrainSeen  seen      = { .Best = UINT64_MAX, .Steps = UINT64_MAX, .Writes = UINT64_MAX };
+    HaltDrainStall stall     = { .Stuck = false };
+    bool           told_step = false;    /* a cycle on another core, said once */
+    bool           settled   = false;    /* the halt's own Settle cycle has run once */
+    bool           refused   = false;    /* ... and the last one was refused */
 
     for (;;) {
         /* Pump THIS core's own queues before measuring. system_halt runs in
@@ -333,8 +433,8 @@ static void halt_drain_async_writes(void)
 
         HaltWorkOwed owed;
         halt_async_work_owed(&owed);
-        if (owed.Baton == 0 && owed.Ahci == 0 && owed.Committer == 0 && !refused &&
-            (owed.Unsettled > 0 || !settled)) {
+        if (owed.Baton == 0 && owed.Ahci == 0 && owed.Committer == 0 &&
+            halt_owes_cycle(&owed, settled, refused)) {
             refused = TagFSSettleForHalt() != OK;
             settled = true;
             halt_async_work_owed(&owed);
@@ -343,78 +443,21 @@ static void halt_drain_async_writes(void)
          * it did not settle: tagfs_shutdown says how much that is. */
         if (refused)
             owed.Total -= owed.Unsettled;
-        if (owed.Total == 0)
+        if (owed.Total == 0 && !halt_owes_cycle(&owed, settled, refused))
             break;
 
-        bool going = owed.Committer && owed.Steps != steps;
-        steps = owed.Steps;
         if (owed.Committer && !told_step) {
             told_step = true;
             kprintf("[HALT] a Settle cycle runs on another core — the drain waits for it as "
                     "long as it takes steps\n");
         }
-        if (owed.Total < best || going) {
-            if (owed.Total < best)
-                best = owed.Total;
-            stuck = false;          /* progress — the clock goes back in the pocket */
-        } else if (!stuck) {
-            stuck = true;
-
-            /* Whose deadline this stall is judged by. When both a port and a
-             * queue hold work, the LONGER of the two applies: the passes may be
-             * the completions that command is going to hand on, and cutting
-             * them off at the core's ceiling would abandon a disk that is still
-             * answering within its own. */
-            bool by_ahci = (owed.Ahci > 0) &&
-                           (owed.Baton == 0 ||
-                            HALT_STALLED_AHCI_US >= HALT_STALLED_CORE_US);
-            bound = by_ahci ? HALT_STALLED_AHCI_US : HALT_STALLED_CORE_US;
-
-            if (by_ahci && !told_ahci) {
-                told_ahci = true;
-                kprintf("[HALT] work owed stopped falling at %lu (%lu pass(es), "
-                        "%lu AHCI command(s) still issued) — judged by the AHCI "
-                        "command deadline, %lu us, because a controller that is "
-                        "here owes them\n",
-                        owed.Total, owed.Baton, owed.Ahci, bound);
-            } else if (!by_ahci && !told_core) {
-                told_core = true;
-                kprintf("[HALT] work owed stopped falling at %lu (%lu pass(es), "
-                        "%lu unsettled change(s), %lu Helm job(s), %s, %s) — judged "
-                        "by the core deadline, %lu us: a baton queue falls only when "
-                        "its own core pumps it\n",
-                        owed.Total, owed.Baton, owed.Unsettled, owed.Helm,
-                        owed.Committer ? "a Settle cycle running on another core"
-                                       : "no Settle cycle running elsewhere",
-                        owed.AhciPresent ? "no AHCI command issued"
-                                         : "no AHCI controller on this machine",
-                        bound);
-
-                uint8_t  core  = 0;
-                uint64_t depth = 0;
-                void (*handed_in)(void *ctx) = NULL;
-                if (halt_deepest_baton(&core, &depth, &handed_in)) {
-                    NameplateName in_name;
-                    kprintf("[HALT]   waiting on core %u: %lu pass(es), last "
-                            "handed in %s\n",
-                            core, depth, halt_name_of(handed_in, &in_name));
-                }
-            }
-
-            ruled = HourGlassTurn(&stall, bound);
-            if (!ruled && !said) {
-                /* No ruler on this machine at this point in boot. A missing
-                 * ruler never becomes an invented one: we wait on the fact
-                 * itself — the queues and the port registers going quiet — and
-                 * never on a guessed spin count. A genuine wedge here is what
-                 * Nightwatch convicts, by facts, without a clock. */
-                kprintf("[HALT] no time ruler — draining against the queues "
-                        "themselves, unbounded\n");
-                said = true;
-            }
-        } else if (ruled && HourGlassRunOut(&stall)) {
-            halt_drain_give_up(&owed, &stall, bound,
-                               !refused && (owed.Unsettled > 0 || !settled));
+        if (HaltDrainMoved(&seen, owed.Total, owed.Steps, owed.Writes)) {
+            stall.Stuck = false;    /* progress — the clock goes back in the pocket */
+        } else if (!stall.Stuck) {
+            halt_drain_stall_begins(&stall, &owed);
+        } else if (stall.Ruled && HourGlassRunOut(&stall.Glass)) {
+            halt_drain_give_up(&owed, &stall.Glass, stall.Bound,
+                               halt_owes_cycle(&owed, settled, refused));
             return;                 /* do not claim a drain that did not happen */
         }
 

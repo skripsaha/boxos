@@ -2687,9 +2687,10 @@ static bool tagfs_abandon(void)
  * off (TagFSSettleForHalt, system_halt.c): after that a committer could be a
  * core the halt has stopped, and nothing may stand over the medium then. What
  * is left here is to shut the door and to say what the last cycle answered —
- * and how many changes no cycle settled, inked after it by programs still
- * running while the halt began or left by a cycle that was refused, which the
- * medium was not given. Nothing is freed: freeing at
+ * and how many changes no cycle settled, inked after it by a change begun
+ * before the halt shut the volume (TagFSShutForHalt) that a drain giving up
+ * did not wait for, or left by a cycle that was refused, which the medium was
+ * not given. Nothing is freed: freeing at
  * a halt was never for the machine's benefit, and memory somebody is still
  * reading must not go back to an allocator nobody will ask again.
  */

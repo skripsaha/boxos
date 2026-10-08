@@ -8,6 +8,9 @@
 #include "../metadata_pool/meta_pool.h"
 #include "../mount/away.h"
 #include "../settle/settle.h"
+#include "../helm/helm.h"
+#include "../ledger/ledger.h"
+#include "system_halt.h"
 #include "amp.h"
 #include "baton.h"
 #include "atomics.h"
@@ -736,6 +739,131 @@ out:
     return verdict;
 }
 
+/* Whether the newest copy of the Ledger the medium holds is sealed clean: the
+ * word the next mount takes (mount.c). False when no copy reads. */
+static bool StandSealedClean(bool* clean)
+{
+    VolumeLedger* led    = kmalloc(sizeof(VolumeLedger));
+    uint64_t      newest = 0;
+    bool          read   = false;
+    if (!led)
+        return false;
+    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
+        if (!tagfs_ledger_peek(c, led, NULL) || (read && led->seq <= newest))
+            continue;
+        newest = led->seq;
+        *clean = (led->mark.flags & SETTLE_CLEAN) != 0;
+        read   = true;
+    }
+    kfree(led);
+    return read;
+}
+
+/*
+ * H1 (logcheck haltcycle; RT-12, RT-22). A write in place lays a block's new
+ * bytes on the medium before the cycle after it writes their digest, and a
+ * clean seal is the next mount's word that every digest on the medium stands.
+ * So once the halt has shut the volume no change begins, and the halt's cycles
+ * seal clean only with no change in flight — asked of those cycles
+ * (TagFSStandSettleForHalt) with the volume shut as the halt shuts it
+ * (TagFSStandShutForHalt), and a file's Helm held as a write in flight holds
+ * it. Red before, measured on four cores: a program's write in place, begun
+ * while the halt's cycles ran, landed after the last of them sealed the volume
+ * clean, and the next mount refused the anchored file's block as rot
+ * (ERR_CHECKSUM); and a cycle with a write in flight sealed clean.
+ */
+static TestResult TestStandSettleHaltSealsWhatStands(void)
+{
+    TestResult       verdict = TEST_PASS;
+    uint32_t         file_id = 0;
+    uint32_t         block   = 0;
+    TagFSFileHandle* handle  = NULL;
+    HelmWaiter       helm;
+    PlotSource       source;
+    uint64_t         written = 0;
+    bool             held    = false;
+    bool             clean   = false;
+    const char*      aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x61u);
+    TEST_ASSERT(StandMakeFile("settle_halt_seal", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+                "a one-block file is made");
+    TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
+    TEST_ASSERT_OK(TagFSSettle(), "and settled");
+    handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    TEST_ASSERT(handle, "a writer opens it");
+
+    TagFSStandShutForHalt(true);
+    TEST_ASSERT_OK(HelmTakeNow(handle, &helm), "the writer holds its Helm, a write in flight");
+    held = true;
+    TestEvidence("changes in flight while the halt's cycles run", HelmOwed());
+    TEST_ASSERT_OK(TagFSStandSettleForHalt(), "the halt's cycles run");
+    TEST_ASSERT(StandSealedClean(&clean), "the newest copy of the Ledger reads");
+    TEST_ASSERT(!clean, "and is not sealed clean while a change is in flight");
+
+    HelmLetGo(handle->ofe, &helm);
+    held = false;
+    TEST_ASSERT_OK(TagFSStandSettleForHalt(), "the halt's cycles run again, nothing in flight");
+    TEST_ASSERT(StandSealedClean(&clean) && clean, "and seal the volume clean");
+
+    fill_pattern(g_test_output, 16, 0x62u);
+    memset(&source, 0, sizeof(source));
+    source.kernel  = g_test_output;
+    source.bytes   = 16;
+    handle->offset = 0;
+    error_t rc = tagfs_write(handle, &source, &written);
+    TestEvidence("bytes a write in place laid after the clean seal", written);
+    TEST_ASSERT_EQ(rc, ERR_DEVICE_NOT_READY, "a write begun after the shut is refused");
+    TEST_ASSERT_OK(tagfs_read_block(block, g_test_output), "the block reads against its digest");
+    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
+                   TAGFS_BLOCK_SIZE, "and holds what the clean seal's digest covers, byte for byte");
+out:
+    if (held)
+        HelmLetGo(handle->ofe, &helm);
+    TagFSStandShutForHalt(false);
+    tagfs_close(handle);
+    StandSettleLetGo(file_id);
+    return verdict;
+}
+
+/*
+ * H1 (logcheck haltcycle). The drain's measure, fed what the drain saw on four
+ * cores when it gave up on work that was moving: the committer's cycle ended,
+ * the halt's own cycles took their steps with the work owed standing still,
+ * and a writer's window took the medium's answers while it held its file's
+ * Helm. Each of these moves the work as a new low does; a look at which none
+ * of them happened does not. Red before: the halt's own steps counted for
+ * nothing, nor did a write the medium answered, and the glass turned as the
+ * committer's cycle ended ran out on the writer's window.
+ */
+static TestResult TestStandHaltDrainCountsWhatMoves(void)
+{
+    TestResult    verdict = TEST_PASS;
+    HaltDrainSeen seen    = { .Best = UINT64_MAX, .Steps = UINT64_MAX, .Writes = UINT64_MAX };
+    uint64_t      steps   = 4837;
+    uint64_t      writes  = 900;
+
+    TEST_ASSERT(HaltDrainMoved(&seen, 13, steps, writes), "the first look moves");
+    TEST_ASSERT(!HaltDrainMoved(&seen, 13, steps, writes), "a look at which nothing moved does not");
+    TEST_ASSERT(HaltDrainMoved(&seen, 12, steps, writes), "a new low moves");
+    TEST_ASSERT(HaltDrainMoved(&seen, 12, steps + 1, writes),
+                "a step of the committer's cycle moves, the work owed standing still");
+    TEST_ASSERT(HaltDrainMoved(&seen, 1, steps + 4, writes + 2), "its cycle's end moves");
+    TEST_ASSERT(!HaltDrainMoved(&seen, 1, steps + 4, writes + 2), "and then nothing moves");
+    TEST_ASSERT(HaltDrainMoved(&seen, 1, steps + 30, writes + 2),
+                "the steps of the halt's own cycles move, the work owed standing still");
+    TEST_ASSERT(HaltDrainMoved(&seen, 2, steps + 30, writes + 3),
+                "a write of the volume the medium answered moves, a window of a job that "
+                "holds its file's Helm, the work owed above its low");
+    TEST_ASSERT(!HaltDrainMoved(&seen, 2, steps + 30, writes + 3), "and then nothing moves");
+    TEST_ASSERT(HaltDrainMoved(&seen, 0, steps + 30, writes + 3), "the job's end is a new low");
+out:
+    return verdict;
+}
+
 /* The volume let go of and mounted again, with the runner's hold on its door
  * given back either way. True when it is up again. */
 #define STAND_SETTLE_MOUNT_MS  10000u
@@ -840,6 +968,10 @@ static const TestCase g_stand_settle_tests[] = {
       .func = TestStandSettleHaltLeavesNoViewedGround, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a clean shutdown with a reader open on a deleted file leaves its blocks "
                        "taken on the medium and named by nothing, kept by the next mount for good" },
+    { .name = "stand_settle_halt_seals_what_stands",
+      .func = TestStandSettleHaltSealsWhatStands, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_halt_drain_counts_what_moves",
+      .func = TestStandHaltDrainCountsWhatMoves, .reach = TEST_READS_ONLY },
     /* Last: it takes the volume down and mounts it again. */
     { .name = "stand_settle_remount_owes_its_own", .func = TestStandSettleRemountOwesItsOwn,
       .reach = TEST_WRITES_TO_VOLUME },

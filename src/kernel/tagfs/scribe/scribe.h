@@ -85,10 +85,13 @@ error_t  VolumeFlushFor(uint64_t need);
  * A medium that leaves and comes back is taken up as it was held only when
  * the answer is yes (mount/away.h). VolumeWriteSeen: after the completion of
  * a write of the volume, on either road; VolumeWritesKept: whether every write
- * seen so far is covered.
+ * seen so far is covered. VolumeWritesAnswered: how many were seen this boot —
+ * a stopping machine's drain sees by it that a step of a Settle cycle or a
+ * window of a write still takes the medium's answers (system_halt.c).
  */
 void     VolumeWriteSeen(void);
 bool     VolumeWritesKept(void);
+uint64_t VolumeWritesAnswered(void);
 
 // ============================================================================
 // Scribe — one writer of a structure at a time, and a caller who waited sees

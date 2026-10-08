@@ -3583,6 +3583,16 @@ run_slowdisk() {
 # the writes the case waits for have landed, counted off QEMU's own block
 # statistics, never off a clock: the anchor's data and the first write of the
 # cycle that settles it; a write's first windows.
+#
+# ‼ THE WINDOW CASE IS NOT ASKED SINCE H1 (check #1), measured: the halt's IPI
+# met a core inside a window only because the drain gave up on a write that was
+# moving — its windows' answers counted for nothing (haltcycle's root). Now
+# they move the work, and no window begins after the halt shuts the volume
+# (TagFSShutForHalt), so an orderly halt sends its IPI with no window in
+# flight, and the leg says "the window case was not asked". Only a drain that
+# gives up on a window that stopped answering on another core meets one now;
+# at 512 bytes a second the drain gave up on the committer's cycle step
+# instead, and the case was not asked either. Asking it again is open.
 # ---------------------------------------------------------------------------
 
 HALTSLOW_CYCLE_BPS=2048    # two seconds a block: a cycle of a few blocks outlasts the core's five
@@ -3691,19 +3701,32 @@ run_haltslow() {
 # when none of them asked the case is it the harness's failure — never a
 # verdict, and never a leg judged on a case it did not ask.
 #
-# ‼ THE MUTATION IT EXISTS FOR, MEASURED: take the halt's own last cycle out of
-# the drain (halt_drain_async_writes: `refused = TagFSSettleForHalt() != OK;`
-# made `refused = false;`) — the committer still settles the anchors it is
-# asked for, the drain still empties, and the halt never writes the volume's
-# last records: "[HALT] the medium on seat 0 took what it was given, and the
-# volume's own records were not part of it", 13 passed, 2 failed, one a leg.
-# Two others were measured and do NOT turn it, said so it is not believed of
-# them: the halt's cycle begun while the committer's still runs (`owed.Committer
-# == 0` taken out) waits for it at the Settle's Scribe all the same
-# (ScribeWaitTakingOver), 15 passed; and the drain judging a cycle by its
-# measure alone (`going` false) gives up only on a cycle whose rest outlasts
-# the core's five seconds, which an anchor's cycle on AHCI here does not —
-# haltslow, on the legacy channel, is that line's guard.
+# ‼ THE MUTATION IT EXISTS FOR, MEASURED when it was written (P4): take the
+# halt's own last cycle out of the drain (halt_drain_async_writes: `refused =
+# TagFSSettleForHalt() != OK;` made `refused = false;`) — the committer still
+# settles the anchors it is asked for, the drain still empties, and the halt
+# never writes the volume's last records: "[HALT] the medium on seat 0 took
+# what it was given, and the volume's own records were not part of it", 13
+# passed, 2 failed, one a leg. The halt's cycle begun while the committer's
+# still runs (`owed.Committer == 0` taken out) did NOT turn it: it waits for
+# that cycle at the Settle's Scribe all the same (ScribeWaitTakingOver), 15
+# passed.
+#
+# ‼ AND WHAT IT CAUGHT (H1, check #1): on the tree it was written for, the drain
+# gave up 3 boots in 4 on four cores and 1 in 4 on sixteen, and the anchored
+# record read back as rot ("a read of 16 answered -19", ERR_CHECKSUM) on a
+# volume volume-read found consistent. Measured on four cores, two roots. The
+# glass turned as the committer's cycle ended ran on through the halt's own two
+# cycles — their steps counted only when another core took them — and ran out
+# while a writer's window was taking the medium's answers, which counted not
+# at all: both move the work now (HaltDrainMoved; stand_halt_drain_counts_
+# what_moves). And that window was a write in place the keeper began while the
+# halt's cycles ran: it landed after the last of them sealed the volume clean,
+# the digest of the bytes before it on the medium, and a clean seal is the
+# next mount's word that every digest stands — now the halt shuts the volume
+# to changes not begun before its drain, and seals clean only with none in
+# flight (TagFSShutForHalt; stand_settle_halt_seals_what_stands). The keeper's
+# write after the shut is answered -203 (ERR_DEVICE_NOT_READY), said by it.
 # ---------------------------------------------------------------------------
 
 HALTCYCLE_BPS=2048       # two seconds a block, as haltslow's: every step well inside the core's five
@@ -8944,16 +8967,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 169 of the stand's own twenty-three suites: stand 27, stand_lock 4,
+# the 171 of the stand's own twenty-three suites: stand 27, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 5, stand_helm 7, stand_port 2,
-# stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 12, stand_glean 9,
+# stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
 # stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 19,
 # stand_warrant 7, stand_room 7, stand_integrity 2. Counted off the code, not a
 # run (K9): a suite that drops out of the walk is a test that stopped covering
 # anything, and the count is where that shows. How many of them pass and how
 # many stand aside is the road's — said, not pinned.
-STAND_RUN=191
+STAND_RUN=193
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT

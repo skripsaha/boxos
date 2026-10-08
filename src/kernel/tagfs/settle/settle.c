@@ -11,6 +11,7 @@
 #include "../use_memory/use_memory.h"
 #include "../glean/glean.h"
 #include "../mount/away.h"
+#include "../helm/helm.h"          /* HelmOwed — a change in flight, which no clean seal outruns */
 #include "amp.h"
 #include "baton.h"
 #include "kheap.h"
@@ -81,9 +82,14 @@ static uint64_t s_given_count;
 static bool     s_halt_ran;
 static error_t  s_halt_answer;
 
-/* The machine is stopping: from the halt's first ask on, every cycle begun is
- * one of its last (SettleRunBegin). Raised once, never lowered. */
+/* The machine is stopping: from the halt's shut on, every cycle begun is one
+ * of its last (SettleRunBegin), and no change begins (TagFSShutForHalt).
+ * Raised once, never lowered. */
 static volatile bool s_halting;
+
+/* Whether the newest settled cycle sealed the volume clean: the halt's last
+ * word on the medium, asked by its drain (SettleOwed). */
+static volatile bool s_sealed_clean;
 
 /* Steps any cycle took this boot — how the halt's drain sees a cycle on
  * another core going on (SettleStepsTaken). */
@@ -152,6 +158,7 @@ void SettleMountReset(void)
     s_spares_short     = false;
     s_registry_refused = 0;
     s_halt_ran         = false;
+    __atomic_store_n(&s_sealed_clean, false, __ATOMIC_RELEASE);
 }
 
 void SettleMountStand(uint32_t from_block, uint32_t from_bytes, bool medium_lied)
@@ -166,13 +173,15 @@ bool SettleMediumLied(void)
     return __atomic_load_n(&s_medium_lied, __ATOMIC_ACQUIRE);
 }
 
-void SettleOwed(uint64_t* unsettled, bool* committer_busy)
+void SettleOwed(uint64_t* unsettled, bool* committer_busy, bool* sealed_clean)
 {
     if (!tagfs_get_state()->initialized) {
         *unsettled      = 0;
         *committer_busy = false;
+        *sealed_clean   = true;
         return;
     }
+    *sealed_clean = __atomic_load_n(&s_sealed_clean, __ATOMIC_ACQUIRE);
     uint64_t inked   = InkedGen();
     uint64_t settled = SettledGen();
     uint32_t holder  = __atomic_load_n(&g_settle_scribe.holder, __ATOMIC_ACQUIRE);
@@ -210,7 +219,12 @@ error_t SettleHaltAnswer(uint64_t* unsettled)
  * snapshot wears was on the medium before the record was inked
  * (TagRegistryFlushFor), so a registry the cycle's own S1 lengthens is past
  * the seal and names nothing the seal holds. The halt's cycles seal clean:
- * the machine stops after them.
+ * the machine stops after them — each one no change is in flight under. A
+ * change that holds or waits for a file's Helm may still lay a write's bytes
+ * in place after this snapshot, their digest with them or not, and the next
+ * mount takes a clean seal's word that every digest stands (RT-22). No change
+ * begins once the halt has shut the volume (TagFSShutForHalt), so the cycle
+ * after the last of them seals clean.
  *
  * A cycle somebody asked for and waits on closes the tail onto a Spare, and so
  * does one that must give Fallow's ground back; one the cadence began closes
@@ -256,7 +270,7 @@ static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
     TagRegistryLanded(fs->registry, &snap->mark);
     snap->mark.pool_from_block = s_sealed_block;
     snap->mark.pool_from_bytes = s_sealed_bytes;
-    snap->mark.flags           = (why == SETTLE_FOR_HALT ? SETTLE_CLEAN : 0u) |
+    snap->mark.flags           = (why == SETTLE_FOR_HALT && HelmOwed() == 0 ? SETTLE_CLEAN : 0u) |
                                  (s_medium_lied ? SETTLE_MEDIUM_LIED : 0u);
     LedgerImageTake();
     UseMemoryTake();
@@ -535,6 +549,7 @@ static void SettleDone(SettleSnap* snap)
     uint64_t closed = PoolSnapSettled(&snap->pool, &spent);
     __atomic_store_n(&s_settled_gen, snap->target, __ATOMIC_RELEASE);
     __atomic_store_n(&s_cycles, snap->cycle, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_sealed_clean, (snap->mark.flags & SETTLE_CLEAN) != 0, __ATOMIC_RELEASE);
     s_sealed_block = snap->mark.pool_to_block;
     s_sealed_bytes = snap->mark.pool_to_bytes;
     UseMemorySettled();
@@ -559,11 +574,11 @@ static void SettleDone(SettleSnap* snap)
  * machine stopping gleans nothing, since ground it took off now would rest
  * past the last cycle — and then S0, each a step of its own.
  *
- * Once the halt has asked for its cycles, a cycle anybody else begins is one
- * of them too. One the cadence had already decided on, or an asker for room
- * on another core, can take the Scribe right after the halt's ask, and the
- * halt's ask is then answered by that cycle: begun as itself, it would seal
- * the volume unclean and stamp a Spare after the halt gave the last one back. */
+ * Once the halt has shut the volume, a cycle anybody else begins is one of its
+ * cycles too. One the cadence had already decided on, or an asker for room on
+ * another core, can take the Scribe right after the halt's ask, and the halt's
+ * ask is then answered by that cycle: begun as itself, it would seal the
+ * volume unclean and stamp a Spare after the halt gave the last one back. */
 static void SettleRunBegin(SettleWhy why, uint64_t cover, bool door)
 {
     if (__atomic_load_n(&s_halting, __ATOMIC_ACQUIRE))
@@ -856,13 +871,36 @@ error_t TagFSStandSettleForHalt(void)
 {
     return SettleHaltCycles();
 }
+
+void TagFSStandShutForHalt(bool shut)
+{
+    __atomic_store_n(&s_halting, shut, __ATOMIC_SEQ_CST);
+}
 #endif
+
+/* Each side looks only after it has said: a write counts itself among the
+ * Helms' before its guard asks here (PlotLoad), and the halt's cycle counts the
+ * Helms after the shut — so either the write sees the shut, or the cycle sees
+ * the write in flight and seals nothing clean. */
+void TagFSShutForHalt(void)
+{
+    if (__atomic_exchange_n(&s_halting, true, __ATOMIC_SEQ_CST))
+        return;
+    if (tagfs_get_state()->initialized)
+        kprintf("[TagFS] the machine is stopping: the volume takes no change from here — the "
+                "ones already begun run to their end, and the halt's cycles settle them\n");
+}
+
+bool SettleHalting(void)
+{
+    return __atomic_load_n(&s_halting, __ATOMIC_SEQ_CST);
+}
 
 error_t TagFSSettleForHalt(void)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    __atomic_store_n(&s_halting, true, __ATOMIC_RELEASE);
+    TagFSShutForHalt();
 
     /* A medium that is away takes no cycle, and the stopping machine is the
      * event its open book waited for. */

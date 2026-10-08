@@ -52,9 +52,11 @@ error_t VolumeFlushFor(uint64_t need)
 }
 
 static volatile uint64_t g_write_need;    /* the highest need a seen write named */
+static volatile uint64_t g_writes_seen;   /* every write seen, this boot */
 
 void VolumeWriteSeen(void)
 {
+    __atomic_add_fetch(&g_writes_seen, 1u, __ATOMIC_RELEASE);
     uint64_t need = VolumeFlushNeed();
     uint64_t cur  = __atomic_load_n(&g_write_need, __ATOMIC_RELAXED);
     while (cur < need &&
@@ -66,6 +68,11 @@ void VolumeWriteSeen(void)
 bool VolumeWritesKept(void)
 {
     return VolumeFlushKept(__atomic_load_n(&g_write_need, __ATOMIC_ACQUIRE));
+}
+
+uint64_t VolumeWritesAnswered(void)
+{
+    return __atomic_load_n(&g_writes_seen, __ATOMIC_ACQUIRE);
 }
 
 // ----------------------------------------------------------------------------

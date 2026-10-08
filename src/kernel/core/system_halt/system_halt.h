@@ -48,4 +48,21 @@ void HaltFreezeHere(void) __attribute__((noreturn));
 // stops here, saying after what. Returns otherwise. Called holding no lock.
 void HaltStopIfOwedHere(const char* after);
 
+// What the halt's drain saw of the work the machine owes at its last look: the
+// lowest the work owed ever was, the steps the Settle cycles had taken, and the
+// writes of the volume the medium had answered. Begun with every field at
+// UINT64_MAX, so the first look moves.
+typedef struct HaltDrainSeen {
+    uint64_t Best;
+    uint64_t Steps;
+    uint64_t Writes;
+} HaltDrainSeen;
+
+// Whether the work owed moved since the last look, the look noted: a new low,
+// a step of any Settle cycle — the halt's own as well as another core's — or a
+// write of the volume the medium answered, a step's or a window's of a job
+// that holds a file's Helm, neither of which lowers the work owed until it
+// ends. The drain's measure (system_halt.c), and the stand's to ask.
+bool HaltDrainMoved(HaltDrainSeen* seen, uint64_t owed, uint64_t steps, uint64_t writes);
+
 #endif // SYSTEM_HALT_H
