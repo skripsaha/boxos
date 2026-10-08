@@ -87,9 +87,9 @@ include ../nameplate.mk
 # crosses (logcheck abba), beside, a write among cabins that would keep the
 # kernel to themselves (logcheck turns), the volume asked from many cabins at
 # once (logcheck cores), away, writers queued behind a write when its medium
-# leaves (logcheck replugwrite), and roomback and emptyfull, a full volume
-# (logcheck fullvolume), which together ran past the thousand lines one file
-# may hold.
+# leaves (logcheck replugwrite), and roomback, emptyfull and its halves either
+# side of a reboot, a full volume (logcheck fullvolume), which together ran
+# past the thousand lines one file may hold.
 QUILLTEST_OBJS = quilltest.o quilltest_throwaway.o quilltest_powercut.o quilltest_locks.o \
                  quilltest_turns.o quilltest_cores.o quilltest_ground.o quilltest_away.o \
                  quilltest_room.o

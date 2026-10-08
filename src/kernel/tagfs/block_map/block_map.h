@@ -78,7 +78,9 @@ void    BlockMapUnmount(void);
  * would give back, or gives written down without their sectors wait for the
  * next cycle to lay them on, or ERR_TAGFS_NO_SPACE — said out loud, with the
  * numbers — when neither does; ERR_NO_MEMORY for no room to write the take
- * down.
+ * down. Its one taker is the pool's own Spare (PoolSpareBegin), and like
+ * BlockMapTakeSpare it may have the blocks every other take leaves free for
+ * the pool's reserve.
  *
  * Give: the run back. A run holding a block that is already free is refused
  * whole — ERR_TAGFS_EXTENT_ERROR, said with the block — and the map is left as
@@ -115,8 +117,17 @@ bool    BlockMapGivesUnseenLocked(void);
  * run of `count` is free, after every other file's Allotment was taken back
  * and every give written down was laid on: ERR_WOULD_BLOCK or
  * ERR_TAGFS_NO_SPACE, as BlockMapTakeLocked answers them.
+ *
+ * ‼ THE POOL'S RESERVE IS MADE WHOLE FIRST (meta_pool.h). While the pool holds
+ * fewer Spares than its reserve, this take and every one below leave free the
+ * blocks the reserve lacks: a take that would eat into them is shorter for
+ * them, or short as above. One door is not held to it — BlockMapTakeSpare, a
+ * block for one of the pool's own Spares — so ground a cycle gives back on a
+ * full volume goes to the Spares a delete and Glean stand on before any write
+ * waiting for room can have it.
  */
 error_t BlockMapTake(uint32_t count, uint32_t hint, uint32_t *start, const char *site);
+error_t BlockMapTakeSpare(uint32_t *start, const char *site);
 
 /*
  * A write's ground: the same take for file `fid` (AllotmentTake takes for a

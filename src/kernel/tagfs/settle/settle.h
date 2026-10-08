@@ -63,7 +63,8 @@ error_t  TagFSSettle(void);
  * 2 + FallowLag() of them — for a caller in the kernel standing in its call; a
  * program's call never runs one (helm.h, settle_ops.h). OK when the cycles gave
  * ground back, or when nothing rests and the chain has no slack — the take
- * asked again then says the last word itself; ERR_TAGFS_NO_SPACE when none came
+ * asked again then says the last word itself — or after one cycle of a sweep
+ * of Glean's a delete waits on (glean.h); ERR_TAGFS_NO_SPACE when none came
  * back; or a cycle's refusal. ERR_WOULD_BLOCK at once for a caller that may not
  * wait for a cycle — under a TagFS lock, a Scribe or a baton continuation —
  * but the Settle's own holder between two steps of its cycle, which runs that

@@ -215,14 +215,16 @@ error_t SettleHaltAnswer(uint64_t* unsettled)
  * A cycle somebody asked for and waits on closes the tail onto a Spare, and so
  * does one that must give Fallow's ground back; one the cadence began closes
  * it only as far as a waiter is owed, or as far as its Glean laid records
- * again — a moved record lies in a closed block under the seal that lets its
- * source go (glean.h). Each leaves the deletes their share of the reserve, but
- * the halt's, which gives every Spare back right after — and leaves out of the
- * map the ground only an open handle still holds — and one asked for room
- * while Fallow's ground rests on a record in the open tail: that ground comes
- * back only once the tail is closed, and the deletes' Spare is kept for that
- * close (meta_pool.h). Left to a tail that never fills, it would rest for ever
- * and the asker would wait through every cycle after.
+ * again or bought the close an emptied front waits for — a moved record lies
+ * in a closed block under the seal that lets its source go (glean.h). A close
+ * for a waiter leaves Glean its share of the reserve (meta_pool.h). Glean's
+ * own close digs to the bottom: its step held that Spare. So do the halt's,
+ * which gives every Spare back right after — and leaves out of the map the
+ * ground only an open handle still holds — and one asked for room while
+ * Fallow's ground rests on a record in the open tail: that ground comes back
+ * only once the tail is closed, and it is what makes the reserve whole again.
+ * Left to a tail that never fills, it would rest for ever and the asker would
+ * wait through every cycle after.
  */
 static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
 {
@@ -239,8 +241,9 @@ static void SettleTake(SettleSnap* snap, SettleWhy why, uint32_t demands)
                                  : (owed_close < snap->target ? owed_close : snap->target);
     if (!closes && GleanMovedGen() > close_upto)
         close_upto = GleanMovedGen();
-    bool dig = why == SETTLE_FOR_HALT || (room && FallowRestsOnTail(PoolClosedGenMax()));
-    PoolSnapTake(&snap->pool, close_upto, dig);
+    bool dig = why == SETTLE_FOR_HALT || GleanMovedGen() > PoolClosedGenMax() ||
+               (room && FallowRestsOnTail(PoolClosedGenMax()));
+    PoolSnapTake(&snap->pool, close_upto, dig ? 0u : (uint32_t)SPARE_FOR_GLEAN);
     if (why == SETTLE_FOR_HALT) {
         snap->given = PoolSparesGiveBack();
         IntegrityLayDrop();
@@ -313,8 +316,8 @@ static void SettleSparesMake(void)
         uint64_t cycle   = s_cycles + 1;
         TagFSLockDrop(&fs->lock);
         kprintf("[Settle] cycle %llu could make the pool only %u of the %u Spare(s) a delete "
-                "stands on (error %u; %llu block(s) free, %llu resting in Fallow) — a delete "
-                "past the tail's room waits for one, and every cycle tries again\n",
+                "and Glean stand on (error %u; %llu block(s) free, %llu resting in Fallow) — "
+                "a delete past the tail's room waits for one, and every cycle tries again\n",
                 (unsigned long long)cycle, held, (unsigned)SPARE_RESERVE, (unsigned)rc,
                 (unsigned long long)room, (unsigned long long)resting);
     }
@@ -766,7 +769,9 @@ error_t TagFSSettle(void)
  * cycle whose S1 lays them on lets the next take see them — answering at once
  * would send that take round again for ever. And with nothing resting, no
  * give unseen and no slack to glean there is no refusal: the room may have
- * come already, and the take asked again says the last word itself.
+ * come already, and the take asked again says the last word itself. A sweep
+ * of Glean's a delete waits on (glean.h) is answered after each cycle: the
+ * delete asked again keeps it going, and hears the sweep's own judgment.
  */
 error_t SettleForRoom(void)
 {
@@ -790,10 +795,11 @@ error_t SettleForRoom(void)
         uint64_t resting = FallowBlocks();
         bool     unseen  = BlockMapGivesUnseenLocked();
         bool     glean   = resting == 0 && !unseen && GleanMayFree();
+        bool     sweep   = GleanSweepingLocked();
         uint64_t given   = s_given_count;
         uint64_t had     = fs->ledger.free_blocks;
         TagFSLockDrop(&fs->lock);
-        if (resting == 0 && !unseen && !glean)
+        if (resting == 0 && !unseen && !glean && !sweep)
             return OK;
         if (glean)
             GleanShort();
@@ -806,7 +812,7 @@ error_t SettleForRoom(void)
         bool came_back = s_given_count != given || fs->ledger.free_blocks > had ||
                          (unseen && !BlockMapGivesUnseenLocked());
         TagFSLockDrop(&fs->lock);
-        if (came_back)
+        if (came_back || sweep)
             return OK;
     }
     return ERR_TAGFS_NO_SPACE;

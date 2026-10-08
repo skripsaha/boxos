@@ -20,11 +20,16 @@
  * A delete gives up a file with a Quitclaim, a record in the pool; on a
  * volume with no free block the pool's tail is closed onto a Spare the
  * reserve keeps for exactly that, and Glean gives the pool's dead records
- * back (the design, decision 29). emptyfull makes COUNT empty files — one
- * name, so one tag — fills the volume with _qrf.bin until it answers
- * ERR_TAGFS_NO_SPACE, anchors, and deletes the COUNT files one after another
- * and then _qrf.bin, the file that filled it: every delete must be answered,
- * and answered OK, however long the room for the Quitclaims takes to come.
+ * back (the design, decision 29): an empty file frees no ground, so a delete
+ * past the deletes' share of the reserve waits for Glean's sweep, never is
+ * refused (glean.h). emptyfull makes COUNT empty files — one name, so one
+ * tag — fills the volume with _qrf.bin until it answers ERR_TAGFS_NO_SPACE,
+ * anchors, and deletes the COUNT files one after another and then _qrf.bin,
+ * the file that filled it: every delete must be answered, and answered OK,
+ * however long the room for the Quitclaims takes to come. emptyfill and
+ * emptyback are the same case with a reboot between its halves: the volume a
+ * machine left full of empty files is mounted again, and its reserve made
+ * again from the ground the halt gave back, before the deletes.
  *
  * Both say what they measured in quilltest's four words and leave their files
  * for the host to read off the medium. The bytes they write come out of a Bay,
@@ -192,11 +197,12 @@ QuillVerdict QuillRoomBack(const char *const *args)
 }
 
 /* =========================================================================
- *  emptyfull — COUNT empty files deleted on a full volume
+ *  emptyfull — COUNT empty files deleted on a full volume; emptyfill and
+ *  emptyback — the same, a reboot between the fill and the deletes
  * ========================================================================= */
 
 /* COUNT empty files of one name: how many were made, their ids in `ids`. */
-static uint32_t QuillRoomEmpties(uint32_t *ids, uint32_t count, int *refusal)
+static uint32_t QuillRoomEmpties(const char *mode, uint32_t *ids, uint32_t count, int *refusal)
 {
     *refusal = QuillCreate("_qre.bin");
     if (*refusal <= 0)
@@ -211,43 +217,56 @@ static uint32_t QuillRoomEmpties(uint32_t *ids, uint32_t count, int *refusal)
         }
         ids[i] = (uint32_t)fid;
         if ((i + 1) % QUILL_ROOM_PROGRESS == 0)
-            printf("[QUILL] emptyfull: %u of %u empty files made\n", i + 1, count);
+            printf("[QUILL] %s: %u of %u empty files made\n", mode, i + 1, count);
     }
     return count;
 }
 
-QuillVerdict QuillEmptyFull(const char *const *args)
+/* COUNT from the case's word, and room for that many file ids: NULL, said
+ * under `mode`, when either is not there. */
+static uint32_t *QuillRoomIds(const char *mode, const char *word, uint32_t *count)
 {
-    uint32_t  count = 0;
+    if (!QuillNumber(word, count) || *count == 0 || *count > QUILL_ROOM_COUNT_MAX) {
+        printf("[QUILL] %s: FAIL — COUNT is 1 to %u; given '%s'\n", mode, QUILL_ROOM_COUNT_MAX,
+               word);
+        return NULL;
+    }
+    uint32_t *ids = malloc((size_t)*count * sizeof(uint32_t));
+    if (!ids)
+        printf("[QUILL] %s: FAIL — no room for %u file ids\n", mode, *count);
+    return ids;
+}
+
+/* The case set: COUNT empty files made, then _qrf.bin grown until the volume
+ * answers ERR_TAGFS_NO_SPACE, and anchored. True with _qrf.bin's id in *ffid;
+ * false, said under `mode`, when the case could not be set. */
+static bool QuillEmptyFill(const char *mode, uint32_t *ids, uint32_t count, int *ffid)
+{
     QuillRoom room;
-    if (!QuillNumber(args[0], &count) || count == 0 || count > QUILL_ROOM_COUNT_MAX) {
-        printf("[QUILL] emptyfull: FAIL — COUNT is 1 to %u; given '%s'\n", QUILL_ROOM_COUNT_MAX,
-               args[0]);
-        return QUILL_FAIL;
-    }
-    uint32_t *ids = malloc((size_t)count * sizeof(uint32_t));
-    if (!ids || !QuillRoomOpen(&room, "emptyfull")) {
-        printf("[QUILL] emptyfull: FAIL — no room for %u file ids\n", count);
-        free(ids);
-        return QUILL_FAIL;
-    }
-
-    int      made_end = 0;
-    uint32_t made     = QuillRoomEmpties(ids, count, &made_end);
-    int      ffid = 0, fend = 0;
-    uint64_t f    = made == count ? QuillRoomFill(&room, "_qrf.bin", QUILL_SEED_ROOMF, &ffid, &fend) : 0;
+    if (!QuillRoomOpen(&room, mode))
+        return false;
+    int      made_end = 0, fend = 0;
+    uint32_t made     = QuillRoomEmpties(mode, ids, count, &made_end);
+    uint64_t f        = made == count ? QuillRoomFill(&room, "_qrf.bin", QUILL_SEED_ROOMF, ffid,
+                                                      &fend) : 0;
     bay_release(room.buf);
-    int      arc  = made == count ? anchor(0) : -1;
+    int arc = made == count ? anchor(0) : -1;
     if (made != count || fend != -(int)ERR_TAGFS_NO_SPACE || arc != 0) {
-        printf("[QUILL] emptyfull: FAIL — %u of %u empty files made (refusal %d), _qrf.bin filled "
+        printf("[QUILL] %s: FAIL — %u of %u empty files made (refusal %d), _qrf.bin filled "
                "%llu bytes and ended on %d where the volume's no-space was due (anchor %d)\n",
-               made, count, made_end, (unsigned long long)f, fend, arc);
-        free(ids);
-        return QUILL_FAIL;
+               mode, made, count, made_end, (unsigned long long)f, fend, arc);
+        return false;
     }
-    printf("[QUILL] emptyfull: the volume is full — %u empty files, _qrf.bin %llu bytes, the next "
-           "block refused no-space; anchored\n", count, (unsigned long long)f);
+    printf("[QUILL] %s: the volume is full — %u empty files, _qrf.bin %llu bytes, the next "
+           "block refused no-space; anchored\n", mode, count, (unsigned long long)f);
+    return true;
+}
 
+/* The COUNT empty files in `ids` deleted one after another, then _qrf.bin:
+ * every delete answered, and answered OK; judged under `mode`. */
+static QuillVerdict QuillEmptyDrop(const char *mode, const uint32_t *ids, uint32_t count,
+                                   int ffid)
+{
     uint32_t answered = 0, refused = 0, first_refused = 0;
     int      first_code = 0;
     uint64_t t0 = 0, t1 = 0;
@@ -261,25 +280,77 @@ QuillVerdict QuillEmptyFull(const char *const *args)
         }
         if ((i + 1) % QUILL_ROOM_PROGRESS == 0) {
             time_uptime_ms(&t1);
-            printf("[QUILL] emptyfull: %u of %u deletes answered, %u refused, %llu ms\n", i + 1,
+            printf("[QUILL] %s: %u of %u deletes answered, %u refused, %llu ms\n", mode, i + 1,
                    count, refused, (unsigned long long)(t1 - t0));
         }
     }
     time_uptime_ms(&t1);
-    free(ids);
     int      frc   = delete((uint32_t)ffid);
     uint32_t left[2];
     int      still = QuillFindEverywhere("_qre.bin", left, 2);
-    arc = anchor(0);
+    int      arc   = anchor(0);
     if (answered == count && refused == 0 && frc == 0 && still == 0 && arc == 0) {
-        printf("[QUILL] emptyfull: PASS — all %u deletes on the full volume answered OK in %llu ms, "
-               "and _qrf.bin's after them; no _qre.bin is left; anchored\n", count,
+        printf("[QUILL] %s: PASS — all %u deletes on the full volume answered OK in %llu ms, "
+               "and _qrf.bin's after them; no _qre.bin is left; anchored\n", mode, count,
                (unsigned long long)(t1 - t0));
         return QUILL_PASS;
     }
-    printf("[QUILL] emptyfull: FAIL — %u of %u deletes answered in %llu ms, %u refused (the first, "
+    printf("[QUILL] %s: FAIL — %u of %u deletes answered in %llu ms, %u refused (the first, "
            "index %u, with %d), and _qrf.bin's after them answered %d; %d _qre.bin left "
-           "(anchor %d)\n", answered, count, (unsigned long long)(t1 - t0), refused,
+           "(anchor %d)\n", mode, answered, count, (unsigned long long)(t1 - t0), refused,
            first_refused, first_code, frc, still, arc);
     return QUILL_FAIL;
+}
+
+QuillVerdict QuillEmptyFull(const char *const *args)
+{
+    uint32_t  count = 0;
+    int       ffid  = 0;
+    uint32_t *ids   = QuillRoomIds("emptyfull", args[0], &count);
+    if (!ids)
+        return QUILL_FAIL;
+    QuillVerdict verdict = QuillEmptyFill("emptyfull", ids, count, &ffid)
+                               ? QuillEmptyDrop("emptyfull", ids, count, ffid) : QUILL_FAIL;
+    free(ids);
+    return verdict;
+}
+
+QuillVerdict QuillEmptyFillOnly(const char *const *args)
+{
+    uint32_t  count = 0;
+    int       ffid  = 0;
+    uint32_t *ids   = QuillRoomIds("emptyfill", args[0], &count);
+    if (!ids)
+        return QUILL_FAIL;
+    bool set = QuillEmptyFill("emptyfill", ids, count, &ffid);
+    free(ids);
+    if (!set)
+        return QUILL_FAIL;
+    printf("[QUILL] emptyfill: PASS — %u empty files and _qrf.bin fill the volume, anchored, for "
+           "emptyback to give up after a reboot\n", count);
+    return QUILL_PASS;
+}
+
+/* After a reboot: the files emptyfill left, found by name — COUNT of _qre.bin
+ * and one _qrf.bin — and given up as emptyfull gives them up. */
+QuillVerdict QuillEmptyBack(const char *const *args)
+{
+    uint32_t  count = 0;
+    uint32_t  qrf[2];
+    uint32_t *ids   = QuillRoomIds("emptyback", args[0], &count);
+    if (!ids)
+        return QUILL_FAIL;
+    int found = QuillFindEverywhere("_qre.bin", ids, (int)count);
+    int fills = QuillFindEverywhere("_qrf.bin", qrf, 2);
+    if (found != (int)count || fills != 1) {
+        printf("[QUILL] emptyback: FAIL — the volume mounted again holds %d _qre.bin of the %u "
+               "emptyfill made, and %d _qrf.bin where one was due\n", found, count, fills);
+        free(ids);
+        return QUILL_FAIL;
+    }
+    printf("[QUILL] emptyback: the volume mounted again holds all %u empty files and _qrf.bin\n",
+           count);
+    QuillVerdict verdict = QuillEmptyDrop("emptyback", ids, count, (int)qrf[0]);
+    free(ids);
+    return verdict;
 }

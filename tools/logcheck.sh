@@ -3839,7 +3839,7 @@ run_haltcycle() {
 # fullvolume: a volume with no block left gives a write the ground a delete
 # frees, and answers every delete (RT-06/07)
 #
-# Two legs, each on its own copy of the image, UEFI on q35, four cores:
+# Three legs, each on its own copy of the image, UEFI on q35, four cores:
 #
 #   roomback   the copy's partition stretched by FULLVOLUME_STRETCH sectors, a
 #              GiB, and `quilltest roomback FULLVOLUME_MIB`: _qra.bin of a GiB
@@ -3857,8 +3857,17 @@ run_haltcycle() {
 #              anchored, and every one of them deleted, then the file that
 #              filled the volume — each delete answered, and answered OK (the
 #              design: on a full volume the delete past the tail's room waits
-#              for a Spare, it is not refused); the machine halts through bye
-#              and volume-read finds the volume consistent with neither on it.
+#              for a Spare, it is not refused; one that frees no ground waits
+#              for Glean's sweep, glean.h); the machine halts through bye and
+#              volume-read finds the volume consistent with neither on it.
+#   emptyback  the same case on one copy booted twice, the machine halted
+#              through bye between its halves: `quilltest emptyfill
+#              FULLVOLUME_EMPTIES` makes the files and fills the volume, and
+#              after the reboot `quilltest emptyback FULLVOLUME_EMPTIES` finds
+#              every one of them and deletes them, then the file that filled
+#              the volume — the volume a machine left full of empty files is
+#              mounted again, its reserve made again from the ground the halt
+#              gave back (meta_pool.h), and not one delete is refused.
 #
 # The guest says a line each time a file passes 128 MiB and each 10000 files
 # (quilltest_room.c), so a machine at work talks and one that hangs goes quiet:
@@ -3879,14 +3888,25 @@ run_haltcycle() {
 # holds 1 Spare(s), the last 1 of them the deletes' …)". Left alone, that
 # machine wrote 8.3 million 512-byte Ledger sectors, each with its flush, in
 # twenty-five minutes, and the write never came back. With the line the write
-# lands in ten seconds.
+# lands in ten seconds. (The line is now `bool dig = why == SETTLE_FOR_HALT ||
+# GleanMovedGen() > PoolClosedGenMax() || (room && FallowRestsOnTail(...))`:
+# the mutation is the last term cut, as it was then.)
 #
-# ‼ EMPTYFULL IS RED ON THIS TREE, AND THAT IS THE DEFECT, NOT THE SCENARIO:
-# the deletes of empty files free no ground, so once the tail and the deletes'
-# Spare are full of their Quitclaims no Spare can be made, Glean may not move
-# a block's records without a Spare held past the deletes' share, and every
-# delete after is refused ERR_TAGFS_NO_SPACE (852) — the delete of the file
-# that filled the volume among them: nothing on it can be deleted again.
+# ‼ AND THE ONE EMPTYFULL EXISTS FOR (E1), MEASURED. The deletes of empty
+# files free no ground, so once the tail and the deletes' share of the reserve
+# hold their Quitclaims, the room for the next is Glean's to make (glean.h):
+# on the tree before the fix every delete past the 194th was refused
+# ERR_TAGFS_NO_SPACE (852), the delete of the file that filled the volume
+# among them — "100000 of 100000 deletes answered in 1268 ms, 99806 refused
+# (the first, index 194, with -852), and _qrf.bin's after them answered -852".
+# The sweep a delete waits on taken out — ink.c InkQuitclaim's
+# `if (rc == ERR_TAGFS_NO_SPACE && GleanSweepAsk())` made `&& false` — and
+# emptyfull is red again: "100000 of 100000 deletes answered in 1253 ms, 99903
+# refused (the first, index 97, with -852), and _qrf.bin's after them
+# answered 0" — the delete that frees ground still goes, past the close its
+# ground needs. (stand_room_empty_deletes_on_a_full_volume turns red on the
+# same mutation; stand_ink_full_volume_still_deletes on a Quitclaim of an
+# empty file let into Glean's share.)
 # ---------------------------------------------------------------------------
 
 FULLVOLUME_MIB=1024
@@ -3908,21 +3928,27 @@ fullvolume_type() {
         wait_for_line -E build/serial.log "^(~ )?$1" "$TYPE_ECHO_QUIET_S" $((from + 1))
 }
 
-# fullvolume_leg TAG STRETCH COMMAND MODE — a copy of the image, its ground
-# stretched by STRETCH sectors when not 0, booted; COMMAND typed and MODE's
-# verdict waited for, then bye and the machine left to switch itself off; the
-# copy judged by volume-read. Leaves serial.fullvolume.TAG.log,
+# fullvolume_leg TAG STRETCH COMMAND MODE [ON] — a copy of the image, its
+# ground stretched by STRETCH sectors when not 0, booted — or, with ON, the
+# copy leg ON left, booted again as the halt left it; COMMAND typed and
+# MODE's verdict waited for, then bye and the machine left to switch itself
+# off; the copy judged by volume-read. Leaves serial.fullvolume.TAG.log,
 # fullvolume.TAG.check.json, fullvolume.TAG.list, FULLVOLUME_OFF (0 when the
 # machine switched itself off) and FULLVOLUME_SILENT (what never came: the
 # verdict, or nothing). 1 when there is no run to judge, said as the
 # harness's failure.
 fullvolume_leg() {
-    local tag=$1 stretch=$2 cmd=$3 mode=$4 img="$SCRATCH/fullvolume.$1.img" L="$SCRATCH/serial.fullvolume.$1.log" pid from
+    local tag=$1 stretch=$2 cmd=$3 mode=$4 on=${5:-} L="$SCRATCH/serial.fullvolume.$1.log" img pid from
+    img="$SCRATCH/fullvolume.${on:-$tag}.img"
     FULLVOLUME_OFF=1
     FULLVOLUME_SILENT=""
     rm -f "$L" "$SCRATCH/fullvolume.$tag.check.json" "$SCRATCH/fullvolume.$tag.list"
     make run-stop >/dev/null 2>&1
-    cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
+    if [ -n "$on" ] && [ ! -f "$img" ]; then
+        harness "fullvolume: $tag has no copy left by $on to boot again"
+        return 1
+    fi
+    [ -n "$on" ] || cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
     if [ "$stretch" != 0 ] && ! grow_stretch "$img" "$stretch" >/dev/null; then
         harness "fullvolume: the $tag copy has no BoxOS partition to stretch"
         rm -f "$img"
@@ -3977,11 +4003,12 @@ print("%s, %d note(s)" % (d.get("verdict"), len(d.get("findings", []))))
     chk $? "fullvolume: $1 — volume-read finds the volume the halt left consistent ($(printf '%s' "$said" | cut -c1-300))"
 }
 
-# fullvolume_halted TAG — the machine halted through bye, its sync wrote the
-# volume, and nothing went wrong on the way.
+# fullvolume_halted TAG [OFF] — the machine halted through bye, its sync wrote
+# the volume, and nothing went wrong on the way; OFF is the leg's
+# FULLVOLUME_OFF, the last leg's when not given.
 fullvolume_halted() {
-    local L="$SCRATCH/serial.fullvolume.$1.log" fault
-    [ "$FULLVOLUME_OFF" = 0 ] && grep -aq '^\[HALT\] Storage sync complete' "$L"
+    local L="$SCRATCH/serial.fullvolume.$1.log" off=${2:-$FULLVOLUME_OFF} fault
+    [ "$off" = 0 ] && grep -aq '^\[HALT\] Storage sync complete' "$L"
     chk $? "fullvolume: $1 — the machine halted through bye and its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | tail -1 | cut -c1-100))"
     fault=$(grep -aE 'KERNEL PANIC|\[EXCEPTION\]|^\[NIGHTWATCH\] VERDICT: .* a defect' "$L" | tr -d '\r' | head -1 | cut -c1-160)
     [ -z "$fault" ]
@@ -4069,15 +4096,55 @@ fullvolume_judge_emptyfull() {
     chk $? "fullvolume: emptyfull — volume-read finds $left _qre.bin on the medium, and $(grep -cE '^ +_qrf\.bin ' "$SCRATCH/fullvolume.empty.list") _qrf.bin"
 }
 
+# fullvolume_judge_emptyback — the fill's boot left the volume full and
+# halted cleanly; the reboot mounted it with every file there and gave all of
+# them up, each delete answered OK; neither is on the medium after.
+fullvolume_judge_emptyback() {
+    local F="$SCRATCH/serial.fullvolume.fill.log" L="$SCRATCH/serial.fullvolume.back.log" full found verdict last left
+    full=$(tr -d '\r' < "$F" | grep -aoE '\[QUILL\] emptyfill: the volume is full — .*' | tail -1)
+    if [ -z "$full" ] || ! grep -aq '^\[QUILL\] emptyfill: PASS' "$F"; then
+        harness "fullvolume: emptyfill never made its files and filled the volume, so emptyback was not asked ($(tr -d '\r' < "$F" | grep -aoE '\[QUILL\] emptyfill: (PASS|FAIL) — .*' | tail -1 | cut -c1-160))"
+        return
+    fi
+    ok "fullvolume: emptyfill made its empty files and filled the volume to its no-space — ${full#*— }"
+    fullvolume_halted fill "$FULLVOLUME_FILL_OFF"
+    found=$(tr -d '\r' < "$L" | grep -aoE '\[QUILL\] emptyback: the volume mounted again holds .*' | tail -1)
+    verdict=$(tr -d '\r' < "$L" | grep -aoE '\[QUILL\] emptyback: (PASS|FAIL) — .*' | tail -1)
+    [ -n "$found" ]
+    chk $? "fullvolume: emptyback — the volume the halt left full is mounted again with every file emptyfill made (${found:-${verdict:-no word from emptyback}})"
+    if [ -n "$FULLVOLUME_SILENT" ]; then
+        last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Settle|MetaPool|Glean)\]' | tail -1 | cut -c1-160)
+        bad "fullvolume: emptyback — the machine went quiet without $FULLVOLUME_SILENT: a delete never answered (last: $last)"
+        return
+    fi
+    grep -aq '^\[QUILL\] emptyback: PASS' "$L"
+    chk $? "fullvolume: emptyback — after the reboot all $FULLVOLUME_EMPTIES deletes of empty files on the full volume answered OK, and the delete of the file that filled it after them (${verdict#*— })"
+    fullvolume_halted back
+    fullvolume_census back
+    left=$(grep -cE '^ +_qre\.bin ' "$SCRATCH/fullvolume.back.list")
+    [ "$left" = 0 ] && ! grep -qE '^ +_qrf\.bin ' "$SCRATCH/fullvolume.back.list"
+    chk $? "fullvolume: emptyback — volume-read finds $left _qre.bin on the medium, and $(grep -cE '^ +_qrf\.bin ' "$SCRATCH/fullvolume.back.list") _qrf.bin"
+}
+
 run_fullvolume() {
-    echo "== fullvolume: a full volume gives a GiB deleted to the GiB written after it, and answers every delete of an empty file =="
+    echo "== fullvolume: a full volume gives a GiB deleted to the GiB written after it, and answers every delete of an empty file, before a reboot and after one =="
     build STRICT=on
     fullvolume_leg room "$FULLVOLUME_STRETCH" "quilltest roomback $FULLVOLUME_MIB" roomback &&
         fullvolume_judge_roomback
     fullvolume_leg empty 0 "quilltest emptyfull $FULLVOLUME_EMPTIES" emptyfull &&
         fullvolume_judge_emptyfull
-    lockrank_judge "$SCRATCH/serial.fullvolume.room.log $SCRATCH/serial.fullvolume.empty.log" "fullvolume"
-    rm -f "$SCRATCH/fullvolume.room.img" "$SCRATCH/fullvolume.empty.img"
+    FULLVOLUME_FILL_OFF=1
+    if fullvolume_leg fill 0 "quilltest emptyfill $FULLVOLUME_EMPTIES" emptyfill; then
+        FULLVOLUME_FILL_OFF=$FULLVOLUME_OFF
+        if grep -aq '^\[QUILL\] emptyfill: PASS' "$SCRATCH/serial.fullvolume.fill.log"; then
+            fullvolume_leg back 0 "quilltest emptyback $FULLVOLUME_EMPTIES" emptyback fill
+        else
+            : >"$SCRATCH/serial.fullvolume.back.log"
+        fi
+        fullvolume_judge_emptyback
+    fi
+    lockrank_judge "$SCRATCH/serial.fullvolume.room.log $SCRATCH/serial.fullvolume.empty.log $SCRATCH/serial.fullvolume.fill.log $SCRATCH/serial.fullvolume.back.log" "fullvolume"
+    rm -f "$SCRATCH/fullvolume.room.img" "$SCRATCH/fullvolume.empty.img" "$SCRATCH/fullvolume.fill.img"
     build   # leave the tree built plain, as every scenario here does
 }
 
@@ -8877,16 +8944,16 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 168 of the stand's own twenty-three suites: stand 27, stand_lock 4,
+# the 169 of the stand's own twenty-three suites: stand 27, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 5, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 12, stand_glean 9,
 # stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 19,
-# stand_warrant 7, stand_room 6, stand_integrity 2. Counted off the code, not a
+# stand_warrant 7, stand_room 7, stand_integrity 2. Counted off the code, not a
 # run (K9): a suite that drops out of the walk is a test that stopped covering
 # anything, and the count is where that shows. How many of them pass and how
 # many stand aside is the road's — said, not pinned.
-STAND_RUN=190
+STAND_RUN=191
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT

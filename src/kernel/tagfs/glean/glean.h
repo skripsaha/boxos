@@ -2,6 +2,7 @@
 #define TAGFS_GLEAN_H
 
 #include "../tagfs.h"
+#include "../file_map/file_map.h"     /* RecordWhere — a record a change kills */
 
 /*
  * Glean — the pool's live records gathered into its tail, and the blocks they
@@ -36,12 +37,14 @@
  * touched for years into the one block a cut may take. The cycle a pass moved
  * records in therefore closes the tail at its S0 (GleanMovedGen, PoolSnapTake),
  * and they lie in a block no later cycle writes, counted by the seal that lets
- * their source go. That close is Glean's share of the reserve
- * (SPARE_FOR_GLEAN): a pass moves a block only while a Spare is held for it
- * past the deletes' share, and a turn of the tail inside a move leaves the
- * reserve whole. A Spare leaves the stock only by a turn, and a turn closes
- * every record the tail holds, so between a move and S0 either that Spare is
- * still there or the moved records are closed already.
+ * their source go. That close, and the turns a move needs on the way, are
+ * Glean's share of the reserve (SPARE_FOR_GLEAN, meta_pool.h): a step is
+ * taken only while the pool holds the Spares it needs (GleanStepNeedLocked) —
+ * made first from free ground past the reserve, and taken from the reserve
+ * only by a sweep for the deletes when the volume has none — and a turn
+ * inside a move leaves the close its Spare. A Spare leaves the stock only by a turn, and a turn closes every
+ * record the tail holds, so between a move and S0 either that Spare is still
+ * there or the moved records are closed already.
  *
  * ‼ A BLOCK LEAVES ONLY ONCE WHAT REPLACED ITS RECORDS LIES CLOSED. A block the
  * map names nothing in holds records that newer ones replaced — and a newer
@@ -53,12 +56,27 @@
  * Quitclaim, the record laid again (PoolFront.replaced_by) — and leaves only
  * under a seal that counts that link closed: one before the tail, or the tail
  * this cycle's S0 closes for a move. Otherwise it waits for the tail's next
- * close — its turn, a waiter's cycle, a move — and the pass ends at it. No
- * cycle closes the tail for it: a cycle the cadence began leaves the tail open
- * for its records to fill a block, and a close bought for an emptied front
- * costs a Spare and a block written near empty for the one given back. While
- * the tail stays open the chain grows no longer, and the turn that lengthens
- * it frees the front.
+ * close — its turn, a waiter's cycle, a move — and the pass ends at it. A
+ * cycle the cadence began does not close the tail for it: it leaves the tail
+ * open for its records to fill a block, and a close bought for an emptied
+ * front costs a Spare and a block written near empty for the one given back.
+ * While the tail stays open the chain grows no longer, and the turn that
+ * lengthens it frees the front. A sweep for the deletes buys that close (below).
+ *
+ * ‼ A DELETE THAT FREES NOTHING WAITS FOR A SWEEP, NEVER FOR NOTHING. On a
+ * volume with no free block, an empty file's Quitclaim only fills the tail,
+ * and the room the next one needs is Glean's to make: the records a run of
+ * deletes killed come back as blocks once they reach the front. A delete that
+ * meets no room and no Spare to be made asks for a sweep (GleanSweepAsk), and
+ * every pass while it waits runs at the lowered slack — whatever a lift said
+ * to the allocator — and buys the close an emptied front waits for: that
+ * close is the room. A sweep is judged by what it did, never by one pass: once
+ * every link the chain held when it began is off, a chain no shorter is a
+ * sweep that found nothing to give; two passes in a row that took nothing off
+ * and owed no close, with nothing resting, are one that can do nothing — a
+ * link closed in one cycle is written by its S3, so the pass after it may
+ * take it. Either is said once, and the delete hears ERR_TAGFS_NO_SPACE until
+ * a block's worth of records dies: the one honest no.
  *
  * ‼ A QUITCLAIM IS LEFT BEHIND, ONCE NO OLDER COPY OF ITS FILE REMAINS — and at
  * the front none ever does. A file's records lie in the order they were
@@ -159,6 +177,30 @@ bool     GleanMayFree(void);
 /* The allocator is short with nothing resting: the next pass gleans at the
  * lowered slack, unless it is lifted. From any context. */
 void     GleanShort(void);
+
+/*
+ * Under the state lock: the Spares Glean's next step would take — the turns
+ * its moves need and the close they owe — were the tail to have `room` bytes
+ * and the record at `killed` (NULL: none) no longer be its file's newest. The
+ * front is walked as a pass meets it: a link taken off for nothing ends the
+ * step needing nothing more; an emptied one waiting for the tail's close needs
+ * that close; a live one needs the close of the block its records land in and
+ * a turn when they do not fit what is left. The Deed's head gives nothing
+ * back (RT-08), so a step that moves it goes on to the link after it. 0 when
+ * nothing stands before the tail. At most SPARE_FOR_GLEAN (meta_pool.h).
+ */
+uint32_t GleanStepNeedLocked(uint32_t room, const RecordWhere* killed);
+
+/* A delete that met no room and no Spare to be made, with no TagFS lock held:
+ * true — a sweep begun or going on, the next cycle demanded for room — while
+ * the chain holds more blocks than its live records and the open tail need,
+ * and no sweep since a block's worth of records last died found nothing to
+ * give; false is the delete's ERR_TAGFS_NO_SPACE. */
+bool     GleanSweepAsk(void);
+
+/* Under the state lock: whether a sweep is going on — what a caller in the
+ * kernel waiting for room runs a cycle for (SettleForRoom). */
+bool     GleanSweepingLocked(void);
 
 /*
  * The mount, with the door shut, once the pool is walked: `head` the Deed's

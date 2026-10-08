@@ -362,7 +362,8 @@ bool ScribeAnyHeldHere(void)
 error_t SpareStamp(uint32_t magic, void *image, uint32_t *out_block, uint64_t *out_need)
 {
     uint32_t block = 0;
-    error_t  took  = BlockMapTake(1, 0, &block, __func__);
+    error_t  took  = magic == TAGFS_MPOOL_MAGIC ? BlockMapTakeSpare(&block, __func__)
+                                                : BlockMapTake(1, 0, &block, __func__);
     if (took != OK)
         return took;
 

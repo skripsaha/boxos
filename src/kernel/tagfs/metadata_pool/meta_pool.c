@@ -302,11 +302,16 @@ bool PoolChainHolds(uint32_t block)
 
 bool PoolFrontLink(uint32_t i, PoolFront* out)
 {
+    if (!PoolChainLink(i, out))
+        return false;
+    return !PoolImageOf(out->link);     /* closed, but no cycle has written it yet */
+}
+
+bool PoolChainLink(uint32_t i, PoolFront* out)
+{
     if (i + 1u >= g_pool_chain_len)
         return false;       /* past the closed links: the tail is never gleaned */
     const MetaPoolLink* l = &g_pool_chain[i];
-    if (PoolImageOf(l->link))
-        return false;       /* closed, but no cycle has written it yet */
     out->block       = l->block;
     out->link        = l->link;
     out->live        = l->live;

@@ -5,6 +5,7 @@
 #include "../ink/fallow.h"
 #include "../mount/ground_census.h"
 #include "../settle/settle.h"
+#include "../block_map/block_map.h"   /* BlockMapGivesUnseenLocked — ground on its way */
 
 /*
  * Glean (glean.h): the pass before each cycle's S0, the Deed's head written
@@ -40,15 +41,33 @@ static bool          s_drift_said;
 static bool          s_unclosed_said;    /* a move with no Spare to close onto, said once an episode */
 
 static volatile uint8_t s_short;
+static volatile uint8_t s_sweep_asked;   /* a delete waits on the sweep: the next pass is one */
 
 /* The pass of the cycle in flight. */
 static struct {
     bool     short_room;       /* the allocator was short with nothing resting */
+    bool     sweep;            /* a pass of the deletes' sweep */
     bool     dig;              /* no Spare could be made: Glean moves on what the pool holds */
     bool     counted;
-    uint64_t moved;            /* GleanMovedGen */
+    uint64_t moved;            /* GleanMovedGen: a record laid again, or a close bought */
     uint32_t moved_into;       /* the link that record lies in */
 } s_pass;
+
+/* The deletes' sweep (glean.h), under the state lock. `mark` is the tail's
+ * link as it began — once the chain begins past it, every link it found is
+ * off — and `from` the chain's blocks then; `idle` the passes in a row that
+ * took nothing off and owed no close, `moved` whether the one in flight did.
+ * Found to give nothing, it stays so until a block's worth of records has
+ * died past `died` (PoolDiedBytes). */
+static struct {
+    bool     on;
+    bool     moved;
+    bool     fruitless;
+    uint32_t mark;
+    uint32_t from;
+    uint32_t idle;
+    uint64_t died;
+} s_sweep;
 
 /* The lowered slack, judged by what it did. `s_short_from`: the chain's length
  * as the last pass at the lowered slack began, 0 once judged. Lifted — a cycle
@@ -115,9 +134,113 @@ bool GleanMayFree(void)
     return s_up && PoolChainBlocks() > PoolLiveBlocks() + 1u && !GleanLiftedLocked();
 }
 
+uint32_t GleanStepNeedLocked(uint32_t room, const RecordWhere* killed)
+{
+    uint32_t  tail = PoolTailLink();
+    uint32_t  need = 0;
+    PoolFront f;
+
+    if (!s_up)
+        return 0;
+    for (uint32_t i = 0; PoolChainLink(i, &f); i++) {
+        uint32_t live  = f.live;
+        bool     gives = f.block != s_head;
+        if (killed && killed->len && killed->link == f.link)
+            live = live > killed->len ? live - killed->len : 0;
+        if (live == 0 && f.replaced_by < tail) {
+            if (gives)
+                return need;        /* taken off for nothing, and its block comes back */
+            continue;
+        }
+        if (need == 0)
+            need = 1;               /* the close: of the block the moved records land in, or the
+                                     * one the record that emptied the front waits for */
+        if (live > room) {
+            need++;                 /* the turn they need first */
+            room = TAGFS_MPOOL_DATA_SIZE;
+        }
+        room -= live;
+        if (gives)
+            return need;
+    }
+    return need;
+}
+
+bool GleanSweepAsk(void)
+{
+    TagFSLockTake(GleanLock());
+    bool may = s_up && PoolChainBlocks() > PoolLiveBlocks() + 1u &&
+               !(s_sweep.fruitless && PoolDiedBytes() - s_sweep.died < TAGFS_MPOOL_DATA_SIZE);
+    if (may) {
+        s_sweep.fruitless = false;
+        if (!s_sweep.on) {
+            s_sweep.on    = true;
+            s_sweep.moved = false;
+            s_sweep.idle  = 0;
+            s_sweep.mark  = PoolTailLink();
+            s_sweep.from  = PoolChainBlocks();
+        }
+        __atomic_store_n(&s_sweep_asked, 1u, __ATOMIC_RELEASE);
+    }
+    TagFSLockDrop(GleanLock());
+    if (may)
+        SettleDemand(SETTLE_DEMAND_ROOM);
+    return may;
+}
+
+bool GleanSweepingLocked(void)
+{
+    return s_sweep.on;
+}
+
 // ----------------------------------------------------------------------------
 // The pass
 // ----------------------------------------------------------------------------
+
+/*
+ * The sweep judged at the pass after each of its own (glean.h), under the
+ * state lock. It ends once the reserve is whole — the room its deletes waited
+ * for came back, and a later stall begins one of its own — or once every link
+ * the chain held when it began is off: a chain shorter then gave room, one no
+ * shorter gave nothing. And it can do nothing when its passes in a row took
+ * nothing off and owed no close while no ground rests, waits unseen or lies
+ * free for a Spare: a link closed in one cycle is written by its S3 and may
+ * be taken by the next, so two such passes are the judgment.
+ */
+static void GleanSweepJudgeLocked(bool swept)
+{
+    if (!s_sweep.on)
+        return;
+    if (swept)
+        s_sweep.idle = s_sweep.moved ? 0u : s_sweep.idle + 1u;
+    s_sweep.moved = false;
+
+    PoolFront f;
+    uint32_t  first  = PoolChainLink(0, &f) ? f.link : PoolTailLink();
+    uint32_t  chain  = PoolChainBlocks();
+    bool      around = first > s_sweep.mark;
+    bool      stuck  = s_sweep.idle >= 2u && FallowBlocks() == 0 &&
+                       !BlockMapGivesUnseenLocked() && tagfs_get_state()->ledger.free_blocks == 0;
+    if (PoolSparesHeld(NULL, 0) >= (uint32_t)SPARE_RESERVE || (around && chain < s_sweep.from)) {
+        s_sweep.on = false;
+        return;
+    }
+    if (!around && !stuck)
+        return;
+    if (around)
+        kprintf("[Glean] a sweep for the deletes took every block the pool's chain held off "
+                "once and left it no shorter (%u block(s), its live records fill %u) — no room "
+                "is Glean's to give, and a delete that frees no ground is refused until "
+                "records die\n", chain, PoolLiveBlocks());
+    else
+        kprintf("[Glean] a sweep for the deletes can take no block off — the pool holds %u "
+                "Spare(s), its next step needs %u, and no ground rests or lies free to make "
+                "more — a delete that frees no ground is refused until records die\n",
+                PoolSparesHeld(NULL, 0), GleanStepNeedLocked(PoolTailRoom(), NULL));
+    s_sweep.on        = false;
+    s_sweep.fruitless = true;
+    s_sweep.died      = PoolDiedBytes();
+}
 
 /*
  * ‼ THE LOWERED SLACK IS JUDGED BY THE CHAIN IT LEFT. A pass at the lowered
@@ -136,9 +259,13 @@ bool GleanMayFree(void)
 void GleanPassBegin(void)
 {
     bool asked = __atomic_exchange_n(&s_short, 0u, __ATOMIC_ACQ_REL) != 0;
+    bool sweep = __atomic_exchange_n(&s_sweep_asked, 0u, __ATOMIC_ACQ_REL) != 0;
+    bool swept = s_pass.sweep;
 
     memset(&s_pass, 0, sizeof(s_pass));
     TagFSLockTake(GleanLock());
+    GleanSweepJudgeLocked(swept);
+    s_pass.sweep = sweep && s_sweep.on;
     uint32_t chain = PoolChainBlocks();
     if (s_short_from && chain >= s_short_from) {
         if (!s_lifted)
@@ -156,6 +283,8 @@ void GleanPassBegin(void)
         s_pass.short_room = true;
         s_short_from      = chain ? chain : 1u;
     }
+    if (s_pass.sweep)
+        s_pass.short_room = true;     /* whatever a lift said to the allocator (glean.h) */
     TagFSLockDrop(GleanLock());
 }
 
@@ -182,6 +311,8 @@ static bool GleanMayTakeLocked(const PoolFront* f)
 typedef struct {
     uint32_t  empties;     /* the links at the front the map names nothing in, free to go */
     bool      move;        /* the link after them is to be read and moved */
+    bool      close;       /* ... or, emptied, it waits for the tail's close, which a sweep buys */
+    uint32_t  need;        /* the Spares that step takes (GleanStepNeedLocked) */
     PoolFront front;       /* that link */
 } GleanLook;
 
@@ -189,18 +320,21 @@ typedef struct {
  * tail takes new records, and Glean is the one who takes links off — and so
  * does the newest link holding what replaced its records: a close of the tail
  * is all that makes it free to go. A front emptied and not yet free is neither
- * taken nor moved: the pass ends at it. */
+ * taken nor moved, and the pass ends at it — but a sweep's, which buys the
+ * close (glean.h). */
 static void GleanLookLocked(GleanLook* look)
 {
     PoolFront f;
     memset(look, 0, sizeof(*look));
     while (PoolFrontLink(look->empties, &f) && f.live == 0 && GleanMayTakeLocked(&f))
         look->empties++;
-    if (PoolFrontLink(look->empties, &f) && f.live != 0 &&
-        GleanWanted(PoolChainBlocks() - look->empties, PoolLiveBlocks())) {
-        look->move  = true;
-        look->front = f;
-    }
+    if (!PoolFrontLink(look->empties, &f))
+        return;
+    look->move  = f.live != 0 && GleanWanted(PoolChainBlocks() - look->empties, PoolLiveBlocks());
+    look->close = f.live == 0 && s_pass.sweep;
+    look->front = f;
+    if (look->move || look->close)
+        look->need = GleanStepNeedLocked(PoolTailRoom(), NULL);
 }
 
 /* The front block read into s_front: false, said once an episode, when it does
@@ -225,12 +359,21 @@ static bool GleanReadFront(const PoolFront* f)
     return true;
 }
 
-/* Under the state lock, with a Spare held for the cycle's close
- * (PoolTailMayClose): the records of the front block that are still their
- * files' newest, laid again at the tail's end. A turn the tail needs on the way
- * leaves the reserve whole — Glean's share of it is that close. False when the
- * turn could not be had: what moved stands moved, and is closed at S0 like the
- * rest; the block stays on the chain. */
+/* The Spares a step of this pass leaves the pool: the reserve while free ground
+ * could make Spares past it, none once the volume has none to give and the
+ * pass is a sweep for the deletes — the reserve is theirs and Glean's to make
+ * their room with (meta_pool.h), never to spend on a chain merely past its
+ * slack, nor on room for a write, which the reserve is not for. */
+static uint32_t GleanFloor(void)
+{
+    return s_pass.dig && s_pass.sweep ? 0u : (uint32_t)SPARE_RESERVE;
+}
+
+/* Under the state lock, with the Spares the step needs held (GleanMayStepLocked):
+ * the records of the front block that are still their files' newest, laid
+ * again at the tail's end. A turn the tail needs on the way leaves the close
+ * its Spare. False when the turn could not be had: what moved stands moved,
+ * and is closed at S0 like the rest; the block stays on the chain. */
 static bool GleanMoveLocked(const PoolFront* f)
 {
     FileMap* files = tagfs_get_state()->files;
@@ -245,7 +388,7 @@ static bool GleanMoveLocked(const PoolFront* f)
         memcpy(&fid, s_front.payload + pos + 2, sizeof(fid));
         uint16_t at = (uint16_t)(GLEAN_RECORDS_AT + pos);
         if (fid && FileMapRecordAt(files, fid, f->link, at)) {
-            if (PoolTailRoom() < len && !PoolTailTurn(false))
+            if (PoolTailRoom() < len && !PoolTailTurn(GleanFloor() + 1u))
                 return false;
             RecordWhere from = { .link = f->link, .offset = at, .len = len };
             InkGleanLocked(fid, &from, s_front.payload + pos);
@@ -280,19 +423,18 @@ static uint32_t GleanTakeLocked(uint32_t count, FallowNode* node, uint32_t* kept
     return taken;
 }
 
-/* A move wants the Spare the cycle's close takes held past the deletes' share,
- * and one that will turn the tail a Spare past the reserve: made here with no
- * lock held — the step's one command. When the volume has none to give, the
- * move stands on what the pool holds. True when a command was made. */
-static bool GleanSpareFor(const PoolFront* f)
+/* A step wants the Spares it takes held past the reserve: one made here with
+ * no lock held — the step's one command. When the volume has no ground to
+ * give, the step stands on what the pool holds, Glean's share among it. True
+ * when a command was made. */
+static bool GleanSpareFor(uint32_t need)
 {
     if (s_pass.dig)
         return false;
     TagFSLockTake(GleanLock());
-    bool need = !PoolTailMayClose() ||
-                (PoolTailRoom() < f->live && !PoolSpareAvailable(false));
+    bool short_of = PoolSparesHeld(NULL, 0) < GleanFloor() + need;
     TagFSLockDrop(GleanLock());
-    if (!need)
+    if (!short_of)
         return false;
     if (PoolSpareMake() != OK) {
         s_pass.dig = true;
@@ -301,20 +443,40 @@ static bool GleanSpareFor(const PoolFront* f)
     return true;
 }
 
-/* Under the state lock: whether the front may be moved now — a Spare is held
- * for the close its records owe (glean.h); said once an episode when not. */
-static bool GleanMayMoveLocked(const PoolFront* f)
+/* Under the state lock: whether the step at the front may be taken now — the
+ * Spares it needs are held (glean.h); said once an episode when not. The
+ * episode is the volume's with no ground to make Spares from: a step it
+ * affords now and then between two it does not is not its end. */
+static bool GleanMayStepLocked(const PoolFront* f, uint32_t need)
 {
-    if (PoolTailMayClose()) {
-        s_unclosed_said = false;
+    uint32_t held = PoolSparesHeld(NULL, 0);
+    if (held >= GleanFloor() + need) {
+        if (!s_pass.dig)
+            s_unclosed_said = false;
         return true;
     }
     if (!s_unclosed_said)
-        kprintf("[Glean] block %u of the pool is not gathered: no Spare could be made for the "
-                "closed block its records would owe, and the deletes' is theirs — it stays on "
-                "the chain until a Spare can be had\n", f->block);
+        kprintf("[Glean] block %u of the pool is not gathered: its step needs %u Spare(s) past "
+                "the %u this pass leaves the pool, which holds %u and could make no more — it "
+                "stays on the chain until ground comes back\n", f->block, need, GleanFloor(),
+                held);
     s_unclosed_said = true;
     return false;
+}
+
+/* A sweep's step at an emptied front: the close the record that emptied it
+ * waits for, bought — this cycle's S0 closes the tail (GleanMovedGen) — so
+ * the front is free to go in this very pass. False when its Spare is not
+ * held, or the tail holds nothing a close would keep. */
+static bool GleanBuyCloseLocked(const GleanLook* look)
+{
+    uint64_t newest = PoolTailGen();
+    if (!newest || !GleanMayStepLocked(&look->front, look->need))
+        return false;
+    s_pass.moved      = newest;
+    s_pass.moved_into = PoolTailLink();
+    s_sweep.moved     = true;
+    return true;
 }
 
 void GleanStep(bool* done)
@@ -327,18 +489,25 @@ void GleanStep(bool* done)
     TagFSLockTake(GleanLock());
     GleanLookLocked(&look);
     TagFSLockDrop(GleanLock());
-    if (!look.empties && !look.move)
+    if (!look.empties && !look.move && !look.close)
         return;
 
     /* The links the map names nothing in go first, in a step of their own;
      * a block to move is read by the step before the one that moves it. */
-    bool moving = look.move && look.empties == 0;
+    bool moving  = look.move && look.empties == 0;
+    bool closing = look.close && look.empties == 0;
     if (moving && !(s_front_held && s_front_link == look.front.link)) {
         *done = !GleanReadFront(&look.front);
         return;
     }
-    if (moving && GleanSpareFor(&look.front)) {
+    if ((moving || closing) && GleanSpareFor(look.need)) {
         *done = false;
+        return;
+    }
+    if (closing) {
+        TagFSLockTake(GleanLock());
+        *done = !GleanBuyCloseLocked(&look);
+        TagFSLockDrop(GleanLock());
         return;
     }
 
@@ -349,10 +518,12 @@ void GleanStep(bool* done)
 
     uint32_t kept = 0, taken = 0;
     TagFSLockTake(GleanLock());
-    bool may   = !moving || GleanMayMoveLocked(&look.front);
+    bool may   = !moving || GleanMayStepLocked(&look.front, look.need);
     bool moved = may && (!moving || GleanMoveLocked(&look.front));
     if (moved)
         taken = GleanTakeLocked(want, node, &kept);
+    if (taken)
+        s_sweep.moved = true;
     if (kept)
         FallowAdd(node, 0);
     TagFSLockDrop(GleanLock());
@@ -544,7 +715,9 @@ void GleanMount(uint32_t head, uint32_t first)
     s_front_said    = false;
     s_drift_said    = false;
     s_unclosed_said = false;
+    memset(&s_sweep, 0, sizeof(s_sweep));
     __atomic_store_n(&s_short, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_sweep_asked, 0u, __ATOMIC_RELEASE);
 #ifdef CONFIG_VOLUME_TESTS
     memset(&s_counts, 0, sizeof(s_counts));
 #endif
@@ -602,4 +775,6 @@ void GleanUnmount(void)
     s_up           = false;
     s_head_held    = false;
     s_front_held   = false;
+    memset(&s_sweep, 0, sizeof(s_sweep));
+    __atomic_store_n(&s_sweep_asked, 0u, __ATOMIC_RELEASE);
 }

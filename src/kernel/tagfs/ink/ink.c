@@ -6,6 +6,7 @@
 #include "../tag_registry/tag_registry.h"
 #include "../settle/settle.h"
 #include "../helm/helm.h"
+#include "../glean/glean.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 #include "boardroom.h"
 #include "atomics.h"
@@ -205,32 +206,60 @@ static error_t InkRecordMake(const TagFSMetadata* meta, bool keep, InkRecord* r)
 // The tail, under the lock
 // ----------------------------------------------------------------------------
 
+/* What a change may take of the pool's room (meta_pool.h, the reserve). */
+typedef enum {
+    INK_FREES_NOTHING = 0,     /* a record: a turn past the whole reserve */
+    INK_GIVES_UP_NOTHING,      /* a Quitclaim of a file with no ground: past Glean's share */
+    INK_FREES_GROUND,          /* a change that lets ground go: past the close it needs */
+} InkFrees;
+
 typedef struct {
     bool     back;          /* the file's record in the tail is taken back first */
     uint32_t back_len;
+    uint32_t keep;          /* the Spares a turn leaves the pool */
 } InkPlan;
 
-/* Room for `bytes`, planned and nothing changed: ERR_WOULD_BLOCK when the tail
- * has too little and no Spare may be had. */
-static error_t InkPlanFor(uint32_t fid, const RecordWhere* was, uint32_t bytes, bool dig,
+/*
+ * Room for `bytes`, planned and nothing changed: ERR_WOULD_BLOCK when the tail
+ * has too little and no Spare past the change's floor may be had, or room the
+ * change may not take. While the volume has a free block, the floor is the
+ * whole reserve — the caller makes a Spare of its own from it; with none, the
+ * change's own (meta_pool.h). And below Glean's share no change takes the
+ * tail's room unless what it leaves covers what comes after it: the Spare of
+ * the close that lets what the tail holds go, at least, and for a change that
+ * frees nothing the step Glean takes next (GleanStepNeedLocked), `was` being
+ * the record it kills — on a volume with no free block, the room is Glean's to
+ * make.
+ */
+static error_t InkPlanFor(uint32_t fid, const RecordWhere* was, uint32_t bytes, InkFrees frees,
                           InkPlan* plan)
 {
-    plan->back     = was && PoolTailHolds(was, fid, &plan->back_len);
-    uint32_t room  = PoolTailRoom() + (plan->back ? plan->back_len : 0);
-    return room >= bytes || PoolSpareAvailable(dig) ? OK : ERR_WOULD_BLOCK;
+    uint32_t floor  = frees == INK_FREES_NOTHING    ? (uint32_t)SPARE_RESERVE
+                    : frees == INK_GIVES_UP_NOTHING ? (uint32_t)SPARE_FOR_GLEAN
+                                                    : 1u;   /* the close its ground needs */
+    plan->back      = was && PoolTailHolds(was, fid, &plan->back_len);
+    plan->keep      = InkState()->ledger.free_blocks ? (uint32_t)SPARE_RESERVE : floor;
+    uint32_t room   = PoolTailRoom() + (plan->back ? plan->back_len : 0);
+    uint32_t spares = PoolSparesHeld(NULL, 0);
+    if (room < bytes)
+        return spares > plan->keep ? OK : ERR_WOULD_BLOCK;
+    if (spares >= (uint32_t)SPARE_FOR_GLEAN)
+        return OK;
+    uint32_t need = frees == INK_FREES_GROUND ? 0u : GleanStepNeedLocked(room - bytes, was);
+    return spares >= (need > 1u ? need : 1u) ? OK : ERR_WOULD_BLOCK;
 }
 
 /* The plan carried out and the record laid: where it sits. From here nothing
  * refuses. What the replaced record had freed is freed by this Ink now. */
 static RecordWhere InkLayDown(const RecordWhere* was, const InkPlan* plan, const InkRecord* r,
-                              bool dig, uint64_t gen)
+                              uint64_t gen)
 {
     if (plan->back) {
         PoolTakeBack(was, plan->back_len);
         FallowRetag(was->gen, gen);
     }
     if (PoolTailRoom() < r->bytes)
-        (void)PoolTailTurn(dig);
+        (void)PoolTailTurn(plan->keep);
     return PoolAppend(r->packed, r->bytes, gen);
 }
 
@@ -311,12 +340,13 @@ static error_t InkPlotLocked(Plot* p, const RecordWhere* was, InkRecord* r, Fall
         return INK_AGAIN;
 
     InkPlan plan;
-    rc = InkPlanFor(p->fid, &now, r->bytes, false, &plan);
+    rc = InkPlanFor(p->fid, &now, r->bytes, fallow ? INK_FREES_GROUND : INK_FREES_NOTHING,
+                    &plan);
     if (rc != OK)
         return rc;
 
     uint64_t    gen   = s_inked_gen + 1;
-    RecordWhere where = InkLayDown(&now, &plan, r, false, gen);
+    RecordWhere where = InkLayDown(&now, &plan, r, gen);
     where.shape = gen;
     FileMapStake none = { .count = 0 };
     (void)PoolMirrorPut(p->fid, r->rec, &where, &none);
@@ -564,12 +594,12 @@ static error_t InkFieldsLocked(uint32_t fid, const RecordWhere* was, const InkFi
         return ERR_TAGFS_RECORD_FULL;
 
     InkPlan plan;
-    rc = InkPlanFor(fid, &now, r->bytes, false, &plan);
+    rc = InkPlanFor(fid, &now, r->bytes, INK_FREES_NOTHING, &plan);
     if (rc != OK)
         return rc;
 
     uint64_t    gen   = s_inked_gen + 1;
-    RecordWhere where = InkLayDown(&now, &plan, r, false, gen);
+    RecordWhere where = InkLayDown(&now, &plan, r, gen);
     where.shape = now.shape;
     FileMapStake none = { .count = 0 };
     (void)PoolMirrorPut(fid, r->rec, &where, &none);
@@ -685,7 +715,7 @@ static error_t InkNewLocked(const uint16_t* tags, uint32_t count, InkRecord* r,
     /* The id is issued as the last of the checks: a refused one finds nothing
      * changed, and an issued one is the id the stakes were taken for. */
     InkPlan plan;
-    rc = InkPlanFor(fid, NULL, r->bytes, false, &plan);
+    rc = InkPlanFor(fid, NULL, r->bytes, INK_FREES_NOTHING, &plan);
     if (rc == OK)
         rc = LedgerIssueFileId(&fs->ledger, &fid);
     if (rc != OK)
@@ -695,7 +725,7 @@ static error_t InkNewLocked(const uint16_t* tags, uint32_t count, InkRecord* r,
     r->rec->file_id = fid;
 
     uint64_t    gen   = s_inked_gen + 1;
-    RecordWhere where = InkLayDown(NULL, &plan, r, false, gen);
+    RecordWhere where = InkLayDown(NULL, &plan, r, gen);
     where.shape = gen;
     (void)PoolMirrorPut(fid, r->rec, &where, &st->map);
     r->rec = NULL;
@@ -781,12 +811,13 @@ static error_t InkQuitclaimLocked(uint32_t fid, const RecordWhere* was, const Fi
         return INK_AGAIN;
 
     InkPlan plan;
-    rc = InkPlanFor(fid, &now, r->bytes, true, &plan);
+    rc = InkPlanFor(fid, &now, r->bytes, fallow ? INK_FREES_GROUND : INK_GIVES_UP_NOTHING,
+                    &plan);
     if (rc != OK)
         return rc;
 
     uint64_t    gen   = s_inked_gen + 1;
-    RecordWhere where = InkLayDown(&now, &plan, r, true, gen);
+    RecordWhere where = InkLayDown(&now, &plan, r, gen);
     FileMapStake none = { .count = 0 };
     (void)PoolMirrorPut(fid, NULL, &where, &none);
     for (uint32_t i = 0; i < cur->tag_count; i++)
@@ -843,13 +874,17 @@ static error_t InkQuitclaimOnce(uint32_t fid, InkWarrant warrant, InkReceipt* ou
 }
 
 /* A holder of the file's Helm is not waited for: the file is vacated, and the
- * holder answers ERR_FILE_NOT_FOUND at its own Ink, its Stakes given back. */
+ * holder answers ERR_FILE_NOT_FOUND at its own Ink, its Stakes given back. A
+ * volume with no block to make a Spare from is no answer while Glean can make
+ * the room: the delete waits for its sweep (glean.h). */
 error_t InkQuitclaim(uint32_t fid, InkWarrant warrant, InkReceipt* out)
 {
     error_t rc;
     do {
         rc = InkQuitclaimOnce(fid, warrant, out);
     } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
+    if (rc == ERR_TAGFS_NO_SPACE && GleanSweepAsk())
+        rc = ERR_WOULD_BLOCK;
     if (rc == OK)
         HelmVacate(fid);
     return rc;

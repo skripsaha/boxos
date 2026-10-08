@@ -736,6 +736,13 @@ static const QuillCase g_cases[] = {
       "are COUNT deletes of empty files, made on a volume with no block left, and the delete of "
       "the file that filled it after them, each answered OK",
       "DESTRUCTIVE: the volume full — _qrf.bin fills it; COUNT file ids spent for good", false },
+    { "emptyfill", "COUNT", 1, 0, QuillEmptyFillOnly,
+      "for emptyback: COUNT empty files made and the volume filled to its no-space, anchored",
+      "DESTRUCTIVE: COUNT _qre.bin and _qrf.bin, which leaves the volume no block", false },
+    { "emptyback", "COUNT", 1, 0, QuillEmptyBack,
+      "after a reboot: are the COUNT empty files emptyfill made, deleted on the volume it left "
+      "full, and the file that filled it after them, each answered OK",
+      "nothing of emptyfill's files; COUNT file ids spent for good", false },
     { "abba", "NAME TAGS EDGE", 3, 0, QUILL_THROWAWAY(QuillAbba),
       "does a machine of many cores come back while TAGS new tags and file ids past EDGE, where "
       "the file table takes its next block, grow the registry and the table, and three cabins of "

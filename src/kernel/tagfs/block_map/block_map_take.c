@@ -2,6 +2,7 @@
 #include "../ink/fallow.h"
 #include "../settle/settle.h"
 #include "../glean/glean.h"
+#include "../metadata_pool/meta_pool.h"
 
 /*
  * Where a take goes.
@@ -401,7 +402,12 @@ void MapSayNoRoom(uint32_t want)
     while (list && !g_map.fit[list - 1u])
         list--;
     uint64_t free = tagfs_get_state()->ledger.free_blocks;
-    if (list == 0)
+    if (free && free <= PoolSparesOwed())
+        kprintf("[TagFS] block map: no run of %u block(s) can be had — the %llu free "
+                "block(s) of the volume are what the pool's reserve still lacks, the Spares "
+                "a delete and Glean stand on, and they are its first\n",
+                want, (unsigned long long)free);
+    else if (list == 0)
         kprintf("[TagFS] block map: no run of %u block(s) can be had — %llu block(s) of the "
                 "volume are free and not one of them is a block a take may have\n",
                 want, (unsigned long long)free);
@@ -439,6 +445,13 @@ error_t MapShort(uint32_t want)
     return ERR_TAGFS_NO_SPACE;
 }
 
+uint64_t MapMayHaveLocked(void)
+{
+    uint64_t free = tagfs_get_state()->ledger.free_blocks;
+    uint64_t owed = PoolSparesOwed();
+    return free > owed ? free - owed : 0;
+}
+
 /*
  * The door every take outside an Allotment goes through. `exact` asks for a
  * run of exactly `want` or nothing; otherwise the longest up to `want`. With
@@ -446,9 +459,11 @@ error_t MapShort(uint32_t want)
  * nothing. Neither writes the sector the take lands in (M4b): the take is owed
  * to the medium, and the Settle cycle pays it at S1 — before any record, row
  * or Ledger naming the block reaches the medium. A take for a file's write
- * (`fid`) is one no settled record names until its Ink settles.
+ * (`fid`) is one no settled record names until its Ink settles. A take that is
+ * not a `spare` of the pool's leaves free the blocks the pool's reserve still
+ * lacks (MapMayHaveLocked): it is shorter for them, or short.
  */
-static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact, uint32_t fid,
+static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact, uint32_t fid, bool spare,
                            uint32_t *start, uint32_t *got, const char *site)
 {
     if (want == 0 || !start || !got)
@@ -483,7 +498,8 @@ static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact, uint32_t fi
             continue;
         }
 
-        if (!k.found || (exact && k.got < want)) {
+        uint64_t may = spare ? UINT32_MAX : MapMayHaveLocked();
+        if (!k.found || (exact && k.got < want) || may < (exact ? want : 1u)) {
             /* Before anybody is told there is no room, every growing file's
              * window is taken back, and every give written down without its
              * sector is laid on. */
@@ -503,7 +519,7 @@ static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact, uint32_t fi
             continue;
         }
 
-        uint32_t n = exact ? want : k.got;
+        uint32_t n = exact ? want : (k.got < may ? k.got : (uint32_t)may);
         if (k.spanned && !MapRunStillFree(k.at, n)) {
             TagFSLockDropAt(lock, site);
             continue;
@@ -529,14 +545,20 @@ static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact, uint32_t fi
 error_t BlockMapTake(uint32_t count, uint32_t hint, uint32_t *start, const char *site)
 {
     uint32_t got = 0;
-    return MapTakeDoor(count, hint, true, MAP_NO_FID, start, &got, site);
+    return MapTakeDoor(count, hint, true, MAP_NO_FID, false, start, &got, site);
+}
+
+error_t BlockMapTakeSpare(uint32_t *start, const char *site)
+{
+    uint32_t got = 0;
+    return MapTakeDoor(1, 0, true, MAP_NO_FID, true, start, &got, site);
 }
 
 error_t BlockMapTakeFor(uint32_t fid, uint32_t count, uint32_t hint, uint32_t *start,
                         const char *site)
 {
     uint32_t got = 0;
-    return MapTakeDoor(count, hint, true, fid, start, &got, site);
+    return MapTakeDoor(count, hint, true, fid, false, start, &got, site);
 }
 
 error_t BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start)
@@ -572,7 +594,7 @@ error_t TagFSTakeRun(uint32_t want, uint32_t hint, uint32_t *start, uint32_t *go
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
     error_t rc = MapTakeDoor(want < PLOT_RUN_MOST ? want : PLOT_RUN_MOST, hint, false,
-                             MAP_NO_FID, start, got, __func__);
+                             MAP_NO_FID, false, start, got, __func__);
     tagfs_leave();
     return rc;
 }

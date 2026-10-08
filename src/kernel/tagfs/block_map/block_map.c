@@ -756,7 +756,12 @@ static void MapTakeEach(uint32_t start, uint32_t count, bool kept)
                 count, (unsigned long long)fs->ledger.free_blocks);
         fs->ledger.free_blocks = 0;
     }
-    g_map.no_room_said = false;
+    /* A run of refusals ends when a take leaves the volume room past what the
+     * pool's reserve still lacks: on a full volume the blocks a cycle gives
+     * back one by one go to the reserve's Spares, and each refusal between
+     * them is the same run, said once (MapSayNoRoom). */
+    if (MapMayHaveLocked() > 0)
+        g_map.no_room_said = false;
 }
 
 void MapTakeKnown(uint32_t start, uint32_t count)
