@@ -99,7 +99,7 @@ void UseNamedOnly(uint32_t c, uint32_t first)
         n->first[n->count++] = first;
 }
 
-bool UseMemoryNames(uint32_t first)
+bool UseMemoryNames(uint64_t first)
 {
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++)
         for (uint32_t i = 0; i < g_use_memory.named[c].count; i++)
@@ -114,7 +114,7 @@ uint64_t UseMemoryBlocksHeld(void)
     uint64_t        blocks = 0;
     for (uint32_t i = 0; i < ARRAY_SIZE(held); i++)
         for (uint32_t r = 0; r < held[i]->run_count; r++)
-            blocks += held[i]->runs[r].block_count;
+            blocks += held[i]->runs[r].count;
     return blocks;
 }
 
@@ -124,9 +124,9 @@ bool UseChainRest(const UseChain *chain, const char *what)
         return true;
     FallowNode *node = FallowNodeMake(chain->runs, chain->run_count, FALLOW_BY_USE_CHAIN, 0);
     if (!node) {
-        kprintf("[TagFS] no memory to let %s — %u run(s) from data block %u — rest until no "
+        kprintf("[TagFS] no memory to let %s — %u run(s) from data block %llu — rest until no "
                 "copy of the Ledger names it: it stays taken\n", what, chain->run_count,
-                chain->runs[0].start_block);
+                (unsigned long long)chain->runs[0].start);
         return false;
     }
     TagFSLockTake(UseMemoryLock());
@@ -265,7 +265,9 @@ static void UseStakeChain(uint64_t ticket)
     }
     s_cycle.kind            = USE_CYCLE_CHAIN;
     s_cycle.fresh           = true;
-    s_cycle.chain.ref.first = s_cycle.chain.runs[0].start_block;
+    /* The Ledger names the chain in format v1's u32: its blocks are that
+     * format's data run's (block_map.h, BlockMapMount). */
+    s_cycle.chain.ref.first = (uint32_t)s_cycle.chain.runs[0].start;
     s_cycle.chain.ref.bytes = s_cycle.text->bytes;
     s_cycle.chain.ref.crc32 = UseTextCrc32(s_cycle.text);
 }

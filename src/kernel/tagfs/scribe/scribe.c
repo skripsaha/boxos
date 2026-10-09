@@ -368,7 +368,7 @@ bool ScribeAnyHeldHere(void)
 
 error_t SpareStamp(uint32_t magic, void *image, uint32_t *out_block, uint64_t *out_need)
 {
-    uint32_t block = 0;
+    uint64_t block = 0;
     error_t  took  = magic == TAGFS_MPOOL_MAGIC ? BlockMapTakeSpare(&block, __func__)
                                                 : BlockMapTake(1, 0, &block, __func__);
     if (took != OK)
@@ -382,7 +382,7 @@ error_t SpareStamp(uint32_t magic, void *image, uint32_t *out_block, uint64_t *o
         return wrote;
     }
 
-    *out_block = block;
+    *out_block = (uint32_t)block;    /* a Spare is a link of a format v1 chain: a u32 block */
     *out_need  = VolumeFlushNeed();
     return OK;
 }

@@ -121,19 +121,19 @@ void        StandPortTurn(uint8_t seat);
 /* A file of `bytes` bytes of `data`, created and written through the handle
  * API, named `name` and carrying no tag but its name's. False — with nothing
  * left behind — when either step did not answer in full. */
-bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint32_t* out_file_id);
+bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id);
 
 /* The data-run block that holds the k-th block of the file, read off its
  * record — never off the block itself, which would put it in the read-ahead
  * cache a read fault must not be answered from. */
-bool StandBlockOf(uint32_t file_id, uint32_t k, uint32_t* out_block);
+bool StandBlockOf(uint64_t file_id, uint64_t k, uint64_t* out_block);
 
 /* Write `bytes` at `offset` through a fresh handle; tagfs_write's answer, or
  * -1 when the file would not open. */
-int  StandWriteAt(uint32_t file_id, uint64_t offset, const void* data, uint32_t bytes);
+int  StandWriteAt(uint64_t file_id, uint64_t offset, const void* data, uint32_t bytes);
 
 /* Whether the block map calls a data-run block taken. */
-bool StandBlockInUse(uint32_t block);
+bool StandBlockInUse(uint64_t block);
 
 /* One storage-deck op asked as `ctx` asks it — NULL for a caller in the
  * kernel, which carries no warrant: the params after the op's head, `in` the
@@ -152,7 +152,7 @@ uint64_t StandLedgerSeq(void);
 /* The file's row of the file table as the MEDIUM holds it, and the data-run
  * block that carries it (out_block may be NULL). False when the chain on the
  * medium does not reach the row. */
-bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out, uint32_t* out_block);
+bool StandTableRowOnMedium(uint64_t file_id, FileTableEntry* out, uint32_t* out_block);
 
 /*
  * One metadata chain — the registry's, the file table's or the pool's — as
@@ -184,7 +184,7 @@ bool StandRegistryHoldsOnMedium(const char* key, const char* value);
 /* The volume's free ground taken whole and given back (stand_ink_tests.c),
  * for the tests that ask what a volume with no free block does. */
 typedef struct {
-    uint32_t* at;
+    uint64_t* at;
     uint32_t* n;
     uint32_t  count;
     uint32_t  cap;

@@ -74,7 +74,7 @@ typedef struct FallowNode FallowNode;
 
 /* A node for `count` runs of file `fid` (0 for a Ledger freer's), taken with
  * no TagFS lock held: NULL when there is no memory. */
-FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind kind, uint32_t fid);
+FallowNode* FallowNodeMake(const Strip* runs, uint32_t count, FallowKind kind, uint64_t fid);
 
 /* A node with room for `blocks` blocks and none in it yet, for a freer that
  * learns its ground under the state lock (Glean): NULL when there is no
@@ -82,7 +82,7 @@ FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind ki
  * before it is added — a block beside the last joins its run; the count of
  * blocks it holds. */
 FallowNode* FallowNodeRoom(uint32_t blocks, FallowKind kind);
-uint32_t    FallowNodeKeep(FallowNode* node, uint32_t block);
+uint32_t    FallowNodeKeep(FallowNode* node, uint64_t block);
 
 /* A node that was never added, let go. */
 void        FallowNodeLetGo(FallowNode* node);
@@ -139,7 +139,7 @@ void        FallowViewedUnnamed(uint64_t settled);
 /* Under the state lock, as the block map sends a sector out: every resting
  * block of [first, first + count) nothing on the medium names, cleared in
  * `bits` (one bit per block from `first`); how many. */
-uint32_t    FallowUnnamedLeftOut(uint32_t first, uint32_t count, uint8_t* bits);
+uint32_t    FallowUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits);
 
 /* Under the state lock, at the end of cycle number `cycle`: every node whose
  * freer now lies in a settled closed block (gen <= closed_gen) is given the

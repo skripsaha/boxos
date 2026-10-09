@@ -230,7 +230,7 @@ error_t UseMemoryLoad(void)
 static void UseClaim(const UseChain *chain)
 {
     for (uint32_t r = 0; r < chain->run_count; r++)
-        GroundClaim(GROUND_USE_CHAIN, chain->runs[r].start_block, chain->runs[r].block_count, 0);
+        GroundClaim(GROUND_USE_CHAIN, chain->runs[r].start, chain->runs[r].count, 0);
 }
 
 void UseRollCall(void)
@@ -245,7 +245,7 @@ bool UseMemoryWantsOrphans(void)
     return g_use_memory.search || g_use_memory.carry_known;
 }
 
-void UseMemoryOrphanRun(uint32_t start, uint32_t count, void *ctx)
+void UseMemoryOrphanRun(uint64_t start, uint32_t count, void *ctx)
 {
     UseMemoryState *g = &g_use_memory;
     (void)ctx;

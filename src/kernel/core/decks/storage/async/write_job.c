@@ -90,6 +90,7 @@
  */
 
 #include "write_job_internal.h"
+#include "storage_deck.h" /* StorageFileIdOut — an id as a program is handed it */
 #include "chit.h"        /* ChitGive / ChitDue — an answer put off is an answer promised */
 #include "boardroom.h"
 #include "baton.h"
@@ -305,7 +306,9 @@ static void wjob_publish(const WriteJob *j)
     default:
         return;
     }
-    if (!TouchHasAnyListeners())
+    /* The event names the file as programs hold an id (StorageFileIdOut). */
+    uint32_t file_id = 0;
+    if (!TouchHasAnyListeners() || StorageFileIdOut(j->file_id, &file_id) != OK)
         return;
 
     TagFSMetadata meta;
@@ -320,7 +323,7 @@ static void wjob_publish(const WriteJob *j)
         uint64_t bytes;
         uint64_t final_size;
     } __attribute__((packed)) ev = {
-        .file_id    = j->file_id,
+        .file_id    = file_id,
         .op         = op,
         .offset     = offset,
         .bytes      = bytes,
@@ -422,20 +425,20 @@ static void wjob_say_refused(const WriteJob *j, error_t rc)
     if (rc == OK)
         return;
     if (j->medium_left && j->lost)
-        kprintf("[Storage] file %u: the medium left while this %s waited for the file's Helm — "
+        kprintf("[Storage] file %llu: the medium left while this %s waited for the file's Helm — "
                 "nothing of it was done, and %llu change(s) no cycle settled left with the "
                 "medium\n", j->file_id, what[j->kind], (unsigned long long)j->lost);
     else if (j->medium_left)
-        kprintf("[Storage] file %u: the medium the volume lives on is away, and this %s was "
+        kprintf("[Storage] file %llu: the medium the volume lives on is away, and this %s was "
                 "never handed the file's Helm — nothing of it was done\n", j->file_id,
                 what[j->kind]);
     else if (j->kind == WRITE_JOB_WRITE)
-        kprintf("[Storage] write to file %u refused (error %u): %llu of its %llu byte(s) are the "
+        kprintf("[Storage] write to file %llu refused (error %u): %llu of its %llu byte(s) are the "
                 "file's, and the file is %llu bytes\n", j->file_id, (unsigned)rc,
                 (unsigned long long)j->bytes_inked, (unsigned long long)j->source.bytes,
                 (unsigned long long)j->final_size);
     else if (j->kind == WRITE_JOB_SPAN && wjob_span_changed(j))
-        kprintf("[Storage] span of file %u to %llu bytes refused part way (error %u): the "
+        kprintf("[Storage] span of file %llu to %llu bytes refused part way (error %u): the "
                 "windows inked before it are the file's, and it is %llu bytes, %llu when the "
                 "span began\n", j->file_id, (unsigned long long)j->span_size, (unsigned)rc,
                 (unsigned long long)j->final_size, (unsigned long long)j->span_was);
@@ -647,7 +650,7 @@ int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
         return wjob_turn(j);
     }
     if (!wjob_answered_later(j)) {
-        kprintf("[Storage] file %u is being changed by the holder of its Helm, and a caller "
+        kprintf("[Storage] file %llu is being changed by the holder of its Helm, and a caller "
                 "with no program to park cannot wait behind it — refused\n", j->file_id);
         return wjob_finalize(j, ERR_BUSY);
     }

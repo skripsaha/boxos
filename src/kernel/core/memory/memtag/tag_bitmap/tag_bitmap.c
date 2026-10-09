@@ -6,7 +6,7 @@
  * query cache invalidated by generation counter.
  *
  * Mirrors TagFS tag_bitmap.c with these adaptations:
- *   - region_id is uint32_t (vs TagFS uint32_t file_id) — same width
+ *   - region_id is uint32_t (TagFS file_id is uint64_t)
  *   - no file_to_tags shadow (MemRegion.tag_ids[] already serves that role)
  *   - inline FNV-1a cache hash (matches TagFS convention)
  */

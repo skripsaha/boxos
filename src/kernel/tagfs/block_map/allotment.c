@@ -18,8 +18,8 @@
  */
 
 typedef struct {
-    uint32_t fid;
-    uint32_t start;
+    uint64_t fid;
+    uint64_t start;
     uint32_t count;
 } Allotment;
 
@@ -29,7 +29,7 @@ static uint32_t   s_allot_len;
 static uint32_t   s_allot_cap;
 static bool       s_no_memory_said;
 
-static uint32_t AllotmentFind(uint32_t fid)
+static uint32_t AllotmentFind(uint64_t fid)
 {
     for (uint32_t i = 0; i < s_allot_len; i++)
         if (s_allot[i].fid == fid)
@@ -43,7 +43,7 @@ static uint32_t AllotmentFirstEndingAfter(uint64_t block)
     uint32_t lo = 0, hi = s_allot_len;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
-        if ((uint64_t)s_allot[mid].start + s_allot[mid].count <= block)
+        if (s_allot[mid].start + s_allot[mid].count <= block)
             lo = mid + 1;
         else
             hi = mid;
@@ -59,7 +59,7 @@ void AllotmentOverlay(uint32_t w, uint8_t *view)
     for (uint32_t i = AllotmentFirstEndingAfter(base);
          i < s_allot_len && s_allot[i].start < end; i++) {
         uint64_t a = s_allot[i].start > base ? s_allot[i].start : base;
-        uint64_t b = (uint64_t)s_allot[i].start + s_allot[i].count;
+        uint64_t b = s_allot[i].start + s_allot[i].count;
         if (b > end)
             b = end;
         for (uint32_t off = (uint32_t)(a - base); off < (uint32_t)(b - base); off++)
@@ -67,7 +67,7 @@ void AllotmentOverlay(uint32_t w, uint8_t *view)
     }
 }
 
-static bool AllotmentAdd(uint32_t fid, uint32_t start, uint32_t count)
+static bool AllotmentAdd(uint64_t fid, uint64_t start, uint32_t count)
 {
     if (s_allot_len == s_allot_cap) {
         uint32_t   cap   = s_allot_cap ? s_allot_cap * 2 : 16;
@@ -95,7 +95,7 @@ static void AllotmentRemove(uint32_t i)
     s_allot_len--;
 }
 
-bool AllotmentTakeBackLocked(uint32_t keep_fid)
+bool AllotmentTakeBackLocked(uint64_t keep_fid)
 {
     uint32_t files  = 0;
     uint64_t blocks = 0;
@@ -103,7 +103,8 @@ bool AllotmentTakeBackLocked(uint32_t keep_fid)
     for (uint32_t i = s_allot_len; i-- > 0; ) {
         if (s_allot[i].fid == keep_fid)
             continue;
-        uint32_t start = s_allot[i].start, count = s_allot[i].count;
+        uint64_t start = s_allot[i].start;
+        uint32_t count = s_allot[i].count;
         AllotmentRemove(i);
         MapAvailabilityChanged(start, count, false);
         files++;
@@ -133,14 +134,15 @@ void AllotmentDropAll(void)
     s_no_memory_said = false;
 }
 
-void AllotmentRelease(uint32_t fid)
+void AllotmentRelease(uint64_t fid)
 {
     if (!g_map.up)
         return;
     uint32_t i = AllotmentFind(fid);
     if (i == s_allot_len)
         return;
-    uint32_t start = s_allot[i].start, count = s_allot[i].count;
+    uint64_t start = s_allot[i].start;
+    uint32_t count = s_allot[i].count;
     AllotmentRemove(i);
     MapAvailabilityChanged(start, count, false);
 }
@@ -148,7 +150,7 @@ void AllotmentRelease(uint32_t fid)
 /* The front of the file's own window: *n blocks from *s, the window shortened
  * by them. False when the file keeps none, or when the take cannot be written
  * down. */
-static bool AllotmentTakeOwn(uint32_t fid, uint32_t want, uint32_t *s, uint32_t *n,
+static bool AllotmentTakeOwn(uint64_t fid, uint32_t want, uint64_t *s, uint32_t *n,
                              error_t *refusal)
 {
     uint32_t i = AllotmentFind(fid);
@@ -172,8 +174,8 @@ static bool AllotmentTakeOwn(uint32_t fid, uint32_t want, uint32_t *s, uint32_t 
 
 /* A new window for the file, best-fit, and the growth taken from its front;
  * what is left of the window is kept. The pick is already made. */
-static error_t AllotmentTakeNew(uint32_t fid, uint32_t want, const MapPick *k,
-                                uint32_t *s, uint32_t *n)
+static error_t AllotmentTakeNew(uint64_t fid, uint32_t want, const MapPick *k,
+                                uint64_t *s, uint32_t *n)
 {
     *s = k->at;
     *n = k->got < want ? k->got : want;
@@ -188,7 +190,7 @@ static error_t AllotmentTakeNew(uint32_t fid, uint32_t want, const MapPick *k,
         } else if (!s_no_memory_said) {
             s_no_memory_said = true;
             kprintf("[TagFS] block map: no memory to keep a window of %u block(s) in hand "
-                    "for file %u — it grows without one, and its extents may be shorter\n",
+                    "for file %llu — it grows without one, and its extents may be shorter\n",
                     keep, fid);
         }
     }
@@ -197,20 +199,21 @@ static error_t AllotmentTakeNew(uint32_t fid, uint32_t want, const MapPick *k,
     return OK;
 }
 
-/* No take hands out more than one extent's width: a growth past it — a span —
+/* No take hands out more than BLOCK_MAP_TAKE_MOST: a growth past it — a span —
  * comes as as many takes, each a run's worth of windows under the lock. */
-static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_blocks,
-                                   uint32_t hint, uint32_t *start, uint32_t *got)
+static error_t AllotmentTakeInside(uint64_t fid, uint32_t want, uint64_t file_blocks,
+                                   uint64_t hint, uint64_t *start, uint32_t *got)
 {
     TagFSLock *lock      = MapLock();
     bool       may_read  = !LockRankAnyHeldHere();
     bool       caught_up = false;
     uint32_t   rounds    = 0;
-    uint64_t   fits      = file_blocks < PLOT_RUN_MOST ? file_blocks : PLOT_RUN_MOST;
+    uint64_t   fits      = file_blocks < BLOCK_MAP_TAKE_MOST ? file_blocks
+                                                             : BLOCK_MAP_TAKE_MOST;
     uint32_t   size;
 
-    if (want > PLOT_RUN_MOST)
-        want = PLOT_RUN_MOST;
+    if (want > BLOCK_MAP_TAKE_MOST)
+        want = BLOCK_MAP_TAKE_MOST;
     size = fits > want ? (uint32_t)fits : want;
 
     MapPick k = { .want = size, .hint = hint, .best_fit = true };
@@ -223,7 +226,8 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
 
         /* Its own window as much as a new one: what the pool's reserve still
          * lacks is left free for it (block_map.h). */
-        uint32_t s = 0, n = 0;
+        uint64_t s = 0;
+        uint32_t n = 0;
         error_t  rc  = OK;
         uint64_t may = MapMayHaveLocked();
         uint32_t ask = may < want ? (uint32_t)may : want;
@@ -268,7 +272,7 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
 
         if (rc != OK) {
             kprintf("[TagFS] block map: no memory to write down a take of %u block(s) for "
-                    "file %u — nothing is taken\n", want, fid);
+                    "file %llu — nothing is taken\n", want, fid);
             return rc;
         }
         *start = s;
@@ -277,8 +281,8 @@ static error_t AllotmentTakeInside(uint32_t fid, uint32_t want, uint64_t file_bl
     }
 }
 
-error_t AllotmentTake(uint32_t fid, uint32_t want, uint64_t file_blocks, uint32_t hint,
-                      uint32_t *start, uint32_t *got)
+error_t AllotmentTake(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint,
+                      uint64_t *start, uint32_t *got)
 {
     if (want == 0 || fid == 0 || !start || !got)
         return ERR_INVALID_ARGUMENT;
@@ -290,7 +294,7 @@ error_t AllotmentTake(uint32_t fid, uint32_t want, uint64_t file_blocks, uint32_
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-bool AllotmentHeld(uint32_t fid, uint32_t *start, uint32_t *count)
+bool AllotmentHeld(uint64_t fid, uint64_t *start, uint32_t *count)
 {
     TagFSLockTake(MapLock());
     uint32_t i    = AllotmentFind(fid);

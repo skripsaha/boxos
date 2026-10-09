@@ -44,7 +44,7 @@ static uint64_t StandNowUs(void)
 }
 
 /* The file a test changes, given up and settled on the way out. */
-static void StandSettleLetGo(uint32_t file_id)
+static void StandSettleLetGo(uint64_t file_id)
 {
     if (file_id) {
         (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
@@ -61,7 +61,7 @@ static void StandSettleLetGo(uint32_t file_id)
 static TestResult TestStandSettleWithoutAnchor(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0;
+    uint64_t   file_id = 0;
 
     SettleCadenceHold(false);
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5Au);
@@ -112,7 +112,7 @@ static void StandSettleAnswered(SettleWaiter* w, error_t rc)
 static TestResult TestStandSettleAnchorThroughChit(void)
 {
     TestResult               verdict = TEST_PASS;
-    uint32_t                 file_id = 0;
+    uint64_t                 file_id = 0;
     static StandSettleWaiter waiter;
 
     memset(&waiter, 0, sizeof(waiter));
@@ -174,7 +174,7 @@ out:
 static TestResult TestStandSettleWriteProtected(void)
 {
     TestResult               verdict   = TEST_PASS;
-    uint32_t                 file_id   = 0;
+    uint64_t                 file_id   = 0;
     uint8_t                  seat      = tagfs_get_seat();
     bool                     protected_ = false;
     InkReceipt               receipt;
@@ -250,7 +250,7 @@ static TestResult TestStandSettleRefusalWaitsForTheBell(void)
 {
     TestResult               verdict = TEST_PASS;
     uint8_t                  seat    = tagfs_get_seat();
-    uint32_t                 file_id = 0;
+    uint64_t                 file_id = 0;
     bool                     armed   = false;
     bool                     let_go  = false;
     static StandSettleWaiter waiter;
@@ -336,7 +336,7 @@ static TestResult TestStandSettleRingDuringTheCycle(void)
 {
     TestResult               verdict = TEST_PASS;
     uint8_t                  seat    = tagfs_get_seat();
-    uint32_t                 file_id = 0;
+    uint64_t                 file_id = 0;
     bool                     armed   = false;
     static StandSettleWaiter waiter;
     const char*              aside   = StandStepsAsideFor();
@@ -394,7 +394,7 @@ static TestResult TestStandSettleRefusalWaitsForItsOwnEvent(void)
 {
     TestResult               verdict = TEST_PASS;
     uint8_t                  seat    = tagfs_get_seat();
-    uint32_t                 file_id = 0;
+    uint64_t                 file_id = 0;
     void*                    pages   = NULL;
     static StandSettleWaiter waiter;
 
@@ -452,7 +452,7 @@ static TestResult TestStandSettleTableRefusalIsTheMediums(void)
 {
     TestResult     verdict   = TEST_PASS;
     uint8_t        seat      = tagfs_get_seat();
-    uint32_t       file_id   = 0;
+    uint64_t       file_id   = 0;
     uint32_t       row_block = 0;
     FileTableEntry row       = { 0, 0 };
     bool           armed     = false;
@@ -522,7 +522,7 @@ static bool StandSettleRested(void)
 /* Every free run of the volume, taken into a list that grows as it must, and
  * given back. */
 typedef struct {
-    uint32_t* at;
+    uint64_t* at;
     uint32_t* n;
     uint32_t  count;
     uint32_t  cap;
@@ -531,11 +531,12 @@ typedef struct {
 static bool StandSettleTakeAll(StandSettleRuns* runs)
 {
     uint32_t all   = tagfs_get_state()->layout.data_blocks;
-    uint32_t start = 0, got = 0;
+    uint64_t start = 0;
+    uint32_t got   = 0;
     while (TagFSTakeRun(all, 0, &start, &got) == OK) {
         if (runs->count == runs->cap) {
             uint32_t  cap = runs->cap ? runs->cap * 2u : 64u;
-            uint32_t* at  = kmalloc(sizeof(uint32_t) * cap);
+            uint64_t* at  = kmalloc(sizeof(uint64_t) * cap);
             uint32_t* n   = kmalloc(sizeof(uint32_t) * cap);
             if (!at || !n) {
                 kfree(at);
@@ -544,7 +545,7 @@ static bool StandSettleTakeAll(StandSettleRuns* runs)
                 return false;
             }
             if (runs->count) {
-                memcpy(at, runs->at, sizeof(uint32_t) * runs->count);
+                memcpy(at, runs->at, sizeof(uint64_t) * runs->count);
                 memcpy(n, runs->n, sizeof(uint32_t) * runs->count);
             }
             kfree(runs->at);
@@ -645,7 +646,7 @@ static process_t s_stand_writer;
 static TestResult TestStandSettleReaderOwesNoLeave(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0;
+    uint64_t   file_id = 0;
 
     memset(&s_stand_reader, 0, sizeof(s_stand_reader));
     memset(&s_stand_writer, 0, sizeof(s_stand_writer));
@@ -693,8 +694,8 @@ out:
 static TestResult TestStandSettleHaltLeavesNoViewedGround(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
-    uint32_t         block   = 0;
+    uint64_t         file_id = 0;
+    uint64_t         block   = 0;
     TagFSFileHandle* reader  = NULL;
     bool             taken   = true;
     const char*      aside   = StandStepsAsideFor();
@@ -775,8 +776,8 @@ static bool StandSealedClean(bool* clean)
 static TestResult TestStandSettleHaltSealsWhatStands(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
-    uint32_t         block   = 0;
+    uint64_t         file_id = 0;
+    uint64_t         block   = 0;
     TagFSFileHandle* handle  = NULL;
     HelmWaiter       helm;
     PlotSource       source;
@@ -898,7 +899,7 @@ static bool StandSettleRemount(void)
 static TestResult TestStandSettleRemountOwesItsOwn(void)
 {
     TestResult  verdict = TEST_PASS;
-    uint32_t    file_id = 0;
+    uint64_t    file_id = 0;
     uint32_t    epoch   = tagfs_mount_epoch();
     bool        let_go  = false;
     const char* aside   = StandStepsAsideFor();

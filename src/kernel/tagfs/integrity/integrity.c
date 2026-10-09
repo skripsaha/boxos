@@ -11,7 +11,7 @@
 
 volatile bool         g_map_initialized  = false;
 TagFSLock             g_map_lock         = TAGFS_LOCK_INIT("integrity", LOCK_RANK_LEAF);
-uint32_t              g_map_entries      = 0;       // == total_blocks (bounds check)
+uint64_t              g_map_entries      = 0;       // == total_blocks (bounds check)
 uint32_t              g_map_first_block  = 0;
 uint32_t              g_map_count        = 0;       // map blocks on disk
 MapSlot               g_map_cache[MAP_CACHE_SLOTS]; // ~65 KB static, fixed
@@ -28,7 +28,7 @@ static uint32_t       g_errors        = 0;
 /* The map's own blocks — the run it stands on and the run being laid — take no
  * digest and are checked against none (RT-22). Asked once with no lock, as a
  * first look, and again under g_map_lock, which decides. */
-static inline bool in_map_region(uint32_t block) {
+static inline bool in_map_region(uint64_t block) {
     return (g_map_first_block != 0 &&
             block >= g_map_first_block && block < g_map_first_block + g_map_count) ||
            MapLayRunHolds(block);
@@ -331,12 +331,12 @@ error_t IntegrityInit(void) {
     return OK;
 }
 
-static void IntegrityRecord(uint32_t block, const void *data) {
+static void IntegrityRecord(uint64_t block, const void *data) {
     if (!IntegrityIsInitialized() || !data || block >= g_map_entries || in_map_region(block))
         return;
     uint64_t h       = BoxHashIntegrity(data, TAGFS_BLOCK_SIZE, &g_ctx);
-    uint32_t idx     = block / ENTRIES_PER_BLOCK;
-    uint32_t off     = block % ENTRIES_PER_BLOCK;
+    uint32_t idx     = (uint32_t)(block / ENTRIES_PER_BLOCK);   /* below g_map_entries: a page of the map */
+    uint32_t off     = (uint32_t)(block % ENTRIES_PER_BLOCK);
     bool     mine    = false;
     bool     no_room = false;
     bool     said    = false;
@@ -382,7 +382,7 @@ uint32_t IntegrityStandUpdateDeepest(void)
 }
 #endif
 
-void IntegrityUpdate(uint32_t block, const void *data) {
+void IntegrityUpdate(uint64_t block, const void *data) {
 #ifdef CONFIG_VOLUME_TESTS
     uint8_t  core  = amp_get_core_index();
     uint32_t depth = ++s_update_depth[core];
@@ -404,8 +404,8 @@ void IntegrityUpdate(uint32_t block, const void *data) {
  * and whose digest does not, when the power goes, is read as unknown rather
  * than as rot. A page at a time, paged in as a write's digest would be: the
  * Settle's holder calls it, with no TagFS lock held. */
-void IntegrityForget(uint32_t start, uint32_t count) {
-    uint64_t end = (uint64_t)start + count;
+void IntegrityForget(uint64_t start, uint32_t count) {
+    uint64_t end = start + count;
 
     IntegrityRotForget(start, count);
 
@@ -423,7 +423,7 @@ void IntegrityForget(uint32_t start, uint32_t count) {
             uint32_t epoch = g_map_epoch;
             MapSlot *m     = MapSlotFor(idx, epoch, __func__, &mine, &no_room);
             for (uint64_t k = b; m && k < stop && k < g_map_entries; k++) {
-                if (in_map_region((uint32_t)k))
+                if (in_map_region(k))
                     continue;
                 uint32_t off = (uint32_t)(k % ENTRIES_PER_BLOCK);
                 if (m->io == MAP_IO_READ)
@@ -446,11 +446,11 @@ void IntegrityForget(uint32_t start, uint32_t count) {
     HaltStopIfOwedHere("a page of the integrity map it carried");
 }
 
-bool IntegrityVerify(uint32_t block, const void *data) {
+bool IntegrityVerify(uint64_t block, const void *data) {
     if (!IntegrityIsInitialized() || !data || block >= g_map_entries || in_map_region(block))
         return true;
-    uint32_t idx     = block / ENTRIES_PER_BLOCK;
-    uint32_t off     = block % ENTRIES_PER_BLOCK;
+    uint32_t idx     = (uint32_t)(block / ENTRIES_PER_BLOCK);   /* below g_map_entries: a page of the map */
+    uint32_t off     = (uint32_t)(block % ENTRIES_PER_BLOCK);
     uint64_t stored  = 0;
     bool     mine    = false;
     bool     no_room = false;

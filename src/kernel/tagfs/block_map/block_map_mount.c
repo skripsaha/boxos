@@ -15,15 +15,16 @@
 
 /* The runs of one kind the roll call names: the first MAP_NAMED_RUNS, lowest
  * block first, and the rest as one count — the owner's bound (09-27). A run
- * may cross windows; it is closed where it ends, not where a window does. */
+ * may cross windows; it is closed where it ends, not where a window does, or
+ * where it grows past the u32 a run is counted in. */
 typedef struct {
-    uint32_t start[MAP_NAMED_RUNS];
+    uint64_t start[MAP_NAMED_RUNS];
     uint32_t len[MAP_NAMED_RUNS];
     uint32_t named;
-    uint32_t more_runs;
-    uint32_t more_blocks;
-    uint32_t blocks;
-    uint32_t open_at;
+    uint64_t more_runs;
+    uint64_t more_blocks;
+    uint64_t blocks;
+    uint64_t open_at;
     uint32_t open_len;
 } MapRunTally;
 
@@ -52,12 +53,12 @@ static void MapTallyClose(MapRunTally *t)
     t->open_len = 0;
 }
 
-static void MapTallyBlock(MapRunTally *t, uint32_t block, bool in)
+static void MapTallyBlock(MapRunTally *t, uint64_t block, bool in)
 {
-    if (!in) {
+    if (!in || t->open_len == UINT32_MAX)
         MapTallyClose(t);
+    if (!in)
         return;
-    }
     if (!t->open_len)
         t->open_at = block;
     t->open_len++;
@@ -69,19 +70,28 @@ static void MapTallyBlock(MapRunTally *t, uint32_t block, bool in)
 static void MapTallySay(const MapRunTally *t, const char *kind)
 {
     for (uint32_t i = 0; i < t->named; i++)
-        kprintf("[TagFS FSCK] %s run at data block %u, %u block(s)\n",
-                kind, t->start[i], t->len[i]);
+        kprintf("[TagFS FSCK] %s run at data block %llu, %u block(s)\n",
+                kind, (unsigned long long)t->start[i], t->len[i]);
     if (t->more_runs)
-        kprintf("[TagFS FSCK] and %u more %s run(s), %u block(s) — "
+        kprintf("[TagFS FSCK] and %llu more %s run(s), %llu block(s) — "
                 "tools/volume-read.py names every one\n",
-                t->more_runs, kind, t->more_blocks);
+                (unsigned long long)t->more_runs, kind, (unsigned long long)t->more_blocks);
 }
 
-error_t BlockMapMount(uint32_t data_blocks, uint64_t map_vlba)
+error_t BlockMapMount(uint64_t data_blocks, uint64_t map_vlba)
 {
     BlockMapUnmount();
 
-    uint32_t windows    = (data_blocks + MAP_WINDOW_BLOCKS - 1) / MAP_WINDOW_BLOCKS;
+    /* A window is numbered in u32, and the summary's lists name one as its
+     * number + 1: a run of more windows than that holds is refused whole. */
+    uint64_t wide = (data_blocks + MAP_WINDOW_BLOCKS - 1) / MAP_WINDOW_BLOCKS;
+    if (wide >= MAP_NO_WINDOW) {
+        kprintf("[TagFS] the block map of %llu blocks would have %llu windows, more than its "
+                "summary numbers (%u) — the volume is not taken up\n",
+                (unsigned long long)data_blocks, (unsigned long long)wide, MAP_NO_WINDOW - 1u);
+        return ERR_OUT_OF_RANGE;
+    }
+    uint32_t windows    = (uint32_t)wide;
     uint32_t work_words = (windows + 63u) / 64u;
     size_t   win_bytes  = (size_t)windows * sizeof(BlockMapWindow) +
                           ((size_t)work_words + (work_words + 63u) / 64u) * sizeof(uint64_t);
@@ -92,9 +102,9 @@ error_t BlockMapMount(uint32_t data_blocks, uint64_t map_vlba)
     g_map.work_words = kmalloc((size_t)((work_words + 63u) / 64u) * sizeof(uint64_t));
     g_map.page       = kmalloc(page_bytes);
     if (!g_map.win || !g_map.work || !g_map.work_words || !g_map.page) {
-        kprintf("[TagFS] the block map of %u blocks keeps a summary of %u window(s) in "
+        kprintf("[TagFS] the block map of %llu blocks keeps a summary of %u window(s) in "
                 "%llu bytes and a cache of %u of its sectors in %llu more, and the kernel "
-                "heap would not give them\n", data_blocks, windows,
+                "heap would not give them\n", (unsigned long long)data_blocks, windows,
                 (unsigned long long)win_bytes, MAP_PAGE_SLOTS,
                 (unsigned long long)page_bytes);
         BlockMapUnmount();
@@ -123,9 +133,9 @@ error_t BlockMapMount(uint32_t data_blocks, uint64_t map_vlba)
  */
 static bool MapCensusWindow(uint32_t w, uint8_t *sector, const uint8_t *owns)
 {
-    uint32_t base = w * MAP_WINDOW_BLOCKS;
-    uint32_t in   = g_map.blocks - base < MAP_WINDOW_BLOCKS ? g_map.blocks - base
-                                                            : MAP_WINDOW_BLOCKS;
+    uint64_t base = (uint64_t)w * MAP_WINDOW_BLOCKS;
+    uint32_t in   = (uint32_t)(g_map.blocks - base < MAP_WINDOW_BLOCKS ? g_map.blocks - base
+                                                                       : MAP_WINDOW_BLOCKS);
 
     uint32_t runs = 0;
     bool     was  = false;
@@ -236,8 +246,8 @@ error_t BlockMapCensus(BlockMapOwnsFn owns, BlockMapOrphanFn orphan, void *ctx,
          * block the medium calls taken: a census that missed an owner costs a
          * block, never a file (owner decision 3: orphans are reported, and
          * given back only once the census agrees with the host's). */
-        kprintf("[TagFS FSCK] Bitmap mismatch: %u orphan, %u missing - additive repair\n",
-                s_orphans.blocks, s_missing.blocks);
+        kprintf("[TagFS FSCK] Bitmap mismatch: %llu orphan, %llu missing - additive repair\n",
+                (unsigned long long)s_orphans.blocks, (unsigned long long)s_missing.blocks);
         MapTallySay(&s_orphans, "orphan");
         MapTallySay(&s_missing, "missing");
     }

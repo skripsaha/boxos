@@ -17,11 +17,11 @@ error_t ReadSinkPush(const ReadSink *sink, uint64_t at, const void *src, uint32_
     return vmm_user_buf_commit_out(sink->vmm, sink->user + (uintptr_t)at, src, bytes);
 }
 
-error_t ReadLocate(const TagFSFileHandle *h, uint64_t k, uint32_t *block, uint32_t *left)
+error_t ReadLocate(const TagFSFileHandle *h, uint64_t k, uint64_t *block, uint32_t *left)
 {
     if (PlotFind(h->extents, h->extent_count, k, block, left))
         return OK;
-    kprintf("[TagFS] file %u: no extent covers block %llu of its %llu bytes — the record "
+    kprintf("[TagFS] file %llu: no extent covers block %llu of its %llu bytes — the record "
             "describes more file than there are blocks, and the read stops there\n",
             h->file_id, (unsigned long long)k, (unsigned long long)h->file_size);
     return ERR_METADATA_CORRUPTED;
@@ -33,7 +33,7 @@ error_t ReadLocate(const TagFSFileHandle *h, uint64_t k, uint32_t *block, uint32
  * `*buf`, made at the first such read. Its bytes are checked against the
  * digest recorded when it was written either way: a block out of the window
  * came off the medium in a run nothing checked (CW-D8). */
-static error_t ReadStreamBlock(TagFSFileHandle *h, uint32_t block, uint32_t run, uint8_t **buf,
+static error_t ReadStreamBlock(TagFSFileHandle *h, uint64_t block, uint32_t run, uint8_t **buf,
                                const uint8_t **out)
 {
     const uint8_t *held = ReadAheadServe(h, block);
@@ -73,7 +73,8 @@ error_t TagFSReadStream(TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_
 
     uint8_t *buf  = NULL;
     uint64_t done = 0;
-    uint32_t block = 0, left = 0;
+    uint64_t block = 0;
+    uint32_t left = 0;
     error_t  rc   = OK;
 
     while (done < size) {
@@ -99,9 +100,9 @@ error_t TagFSReadStream(TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_
         if (rc == OK)
             rc = ReadSinkPush(sink, done, from + offset, chunk);
         if (rc != OK) {
-            kprintf("[TagFS] file %u: block %u answered %u — %llu of %llu bytes had landed "
-                    "before it\n", h->file_id, block, (unsigned)rc, (unsigned long long)done,
-                    (unsigned long long)size);
+            kprintf("[TagFS] file %llu: block %llu answered %u — %llu of %llu bytes had landed "
+                    "before it\n", h->file_id, (unsigned long long)block, (unsigned)rc,
+                    (unsigned long long)done, (unsigned long long)size);
             break;
         }
         done += chunk;

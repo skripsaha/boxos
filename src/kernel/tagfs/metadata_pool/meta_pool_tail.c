@@ -77,7 +77,7 @@ uint32_t PoolTailRoom(void)
     return g_pool_tail ? TAGFS_MPOOL_DATA_SIZE - g_pool_tail->used_bytes : 0;
 }
 
-bool PoolTailHolds(const RecordWhere* where, uint32_t fid, uint32_t* out_len)
+bool PoolTailHolds(const RecordWhere* where, uint64_t fid, uint32_t* out_len)
 {
     if (!g_pool_tail || where->link != g_pool_tail_link ||
         where->offset < MPOOL_BLOCK_HEADER + g_pool_tail_frozen ||
@@ -255,13 +255,15 @@ error_t PoolSpareBegin(uint32_t* out_block, MetaPoolBlock** out_image)
     if (!image)
         return ERR_NO_MEMORY;
 
+    uint64_t block = 0;
     TagFSLockTake(TailLock());
-    error_t took = BlockMapTakeLocked(1, 0, out_block);
+    error_t took = BlockMapTakeLocked(1, 0, &block);
     TagFSLockDrop(TailLock());
     if (took != OK) {
         kfree(image);
         return took;
     }
+    *out_block = (uint32_t)block;    /* the pool's chain is format v1's, a block in u32 */
     memset(image, 0, sizeof(*image));
     image->magic = TAGFS_MPOOL_MAGIC;
     *out_image   = image;
@@ -333,16 +335,16 @@ uint32_t PoolSparesHeld(uint32_t* out, uint32_t cap)
     return s_spare_count;
 }
 
-static uint32_t LeaveOut(uint32_t block, uint32_t first, uint32_t count, uint8_t* bits)
+static uint32_t LeaveOut(uint32_t block, uint64_t first, uint32_t count, uint8_t* bits)
 {
     if (block < first || block - first >= count)
         return 0;
-    uint32_t off = block - first;
+    uint32_t off = (uint32_t)(block - first);
     bits[off / 8] &= (uint8_t)~(1u << (off % 8));
     return 1;
 }
 
-uint32_t PoolUnnamedLeftOut(uint32_t first, uint32_t count, uint8_t* bits)
+uint32_t PoolUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits)
 {
     uint32_t left = 0;
     for (MetaPoolPage* p = s_spares; p; p = p->next)

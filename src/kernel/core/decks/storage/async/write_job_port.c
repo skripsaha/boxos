@@ -161,7 +161,7 @@ static bool w_locate(WriteJob *j)
 
     uint64_t pos = j->start_offset + j->bytes_done;
     if (!PlotStretchAt(&j->plot, pos, j->window_end - j->bytes_done, j->dma_blocks, &j->st)) {
-        kprintf("[Storage] write to file %u: no extent of its plot holds block %llu, which the "
+        kprintf("[Storage] write to file %llu: no extent of its plot holds block %llu, which the "
                 "write reserved — the write stops at byte %llu\n", j->file_id,
                 (unsigned long long)(pos / TAGFS_BLOCK_SIZE), (unsigned long long)pos);
         return wjob_stop(j, ERR_TAGFS_EXTENT_ERROR);
@@ -194,7 +194,7 @@ static bool w_locate(WriteJob *j)
  * returns; an error here means the seat is not there, or the request is
  * malformed — or the volume's medium is away, and its seat is not the
  * volume's to be written through. */
-static error_t wjob_submit(WriteJob *j, bool write, uint32_t block, uint32_t blocks,
+static error_t wjob_submit(WriteJob *j, bool write, uint64_t block, uint32_t blocks,
                            uint32_t page, RoadsteadAnswered answered)
 {
     if (TagFSMediumGone())
@@ -230,17 +230,18 @@ static bool w_read_old(WriteJob *j)
 static bool w_read_done(WriteJob *j)
 {
     uint32_t i     = j->st_reading;
-    uint32_t block = j->st.block + i;
+    uint64_t block = j->st.block + i;
     error_t  why   = j->if_status;
     if (why == OK && !IntegrityVerify(block, wjob_page(j, i)))
         why = ERR_CHECKSUM;
 
     j->st_reads &= (uint8_t)~(i == 0 ? WJOB_READ_FIRST : WJOB_READ_LAST);
     if (why != OK) {
-        kprintf("[Storage] write to file %u: block %u %s (error %u), so the byte(s) meant for "
+        kprintf("[Storage] write to file %llu: block %llu %s (error %u), so the byte(s) meant for "
                 "it are not laid over the rest of it — the write stops there\n", j->file_id,
-                block, why == ERR_CHECKSUM ? "does not hold what was written to it"
-                                           : "would not read", (unsigned)why);
+                (unsigned long long)block,
+                why == ERR_CHECKSUM ? "does not hold what was written to it" : "would not read",
+                (unsigned)why);
         j->st_staged = i;
         j->st_stop   = why;
         j->st_reads  = 0;
@@ -261,7 +262,7 @@ static bool w_dma_fill(WriteJob *j)
         error_t  rc    = PlotSourcePull(&j->source, j->bytes_done + at, wjob_page(j, i) + off,
                                         chunk);
         if (rc != OK) {
-            kprintf("[Storage] write to file %u: the bytes from %llu on could not be taken from "
+            kprintf("[Storage] write to file %llu: the bytes from %llu on could not be taken from "
                     "the pages they are in (error %u) — the write stops there\n", j->file_id,
                     (unsigned long long)(j->bytes_done + at), (unsigned)rc);
             j->st_staged = i;
@@ -310,11 +311,11 @@ static bool w_block_done(WriteJob *j)
     j->bytes_done   += PlotStretchBytes(&j->st, landed);
 
     if (j->if_status != OK) {
-        kprintf("[Storage] write to file %u: blocks %u..%u would not be written (error %u) — "
+        kprintf("[Storage] write to file %llu: blocks %llu..%llu would not be written (error %u) — "
                 "%u of them had landed before the medium stopped answering, %llu of %llu "
-                "bytes\n", j->file_id, j->st.block, j->st.block + staged - 1,
-                (unsigned)j->if_status, landed, (unsigned long long)j->bytes_done,
-                (unsigned long long)j->source.bytes);
+                "bytes\n", j->file_id, (unsigned long long)j->st.block,
+                (unsigned long long)(j->st.block + staged - 1), (unsigned)j->if_status, landed,
+                (unsigned long long)j->bytes_done, (unsigned long long)j->source.bytes);
         return wjob_stop(j, j->if_status);
     }
     if (j->st_stop != OK)
@@ -380,7 +381,7 @@ static bool w_spare(WriteJob *j)
         return false;
     }
     if (rc != OK) {
-        kprintf("[Storage] write to file %u: the pool has no Spare to take its record and "
+        kprintf("[Storage] write to file %llu: the pool has no Spare to take its record and "
                 "none could be made (error %u) — the write is refused, the file as it was\n",
                 j->file_id, (unsigned)rc);
         wjob_finalize(j, rc);
@@ -403,7 +404,7 @@ static bool w_spare_done(WriteJob *j)
     MetaPoolBlock *image = j->spare_image;
     j->spare_image = NULL;
     if (j->if_status != OK) {
-        kprintf("[Storage] write to file %u: block %u would not take the stamp of a Spare "
+        kprintf("[Storage] write to file %llu: block %u would not take the stamp of a Spare "
                 "for the pool (error %u) — the write is refused, the file as it was\n",
                 j->file_id, j->spare_block, (unsigned)j->if_status);
         PoolSpareDrop(j->spare_block, image);

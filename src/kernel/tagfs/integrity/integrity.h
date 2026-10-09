@@ -53,18 +53,18 @@ uint32_t IntegrityLayBlocks(void);
 // Never waits: it is called under the locks of whoever wrote the block. A
 // page of the map it needs moves to or from the medium with the map's own
 // lock let go.
-void     IntegrityUpdate(uint32_t block, const void *data);
+void     IntegrityUpdate(uint64_t block, const void *data);
 
 // The digests of the run zeroed — the blocks came to rest (Fallow) — a page at
 // a time, paged in as a write's digest would be. With no TagFS lock held.
-void     IntegrityForget(uint32_t start, uint32_t count);
+void     IntegrityForget(uint64_t start, uint32_t count);
 
 // Re-check a block just read from disk. Returns true if OK or unknown; on a
 // mismatch it counts the rot, names the block — one line and one Touch on the
 // "integrity" tag, once until the block is written again — and returns false,
 // which the read answers ERR_CHECKSUM. Never waits for the map, as above;
 // called with no TagFS lock held.
-bool     IntegrityVerify(uint32_t block, const void *data);
+bool     IntegrityVerify(uint64_t block, const void *data);
 
 // Persist the dirty map pages, waiting for a page another core has out, after
 // laying again as zeros every page whose digests went unrecorded.

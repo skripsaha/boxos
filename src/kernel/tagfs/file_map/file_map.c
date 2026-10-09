@@ -21,7 +21,7 @@ struct FileMapNode {
     uint16_t     count;
     bool         leaf;
     FileMapNode* next;       /* a leaf's right neighbour; a let-go node's successor */
-    uint32_t     key[FILE_MAP_ORDER];
+    uint64_t     key[FILE_MAP_ORDER];
     union {
         FileMapEntry entry[FILE_MAP_ORDER];
         FileMapNode* kid[FILE_MAP_ORDER + 1];
@@ -59,8 +59,8 @@ FileRecord* FileRecordOf(const TagFSMetadata* meta)
     uint32_t tags     = meta->tag_ids ? meta->tag_count : 0;
     uint32_t extents  = meta->extents ? meta->extent_count : 0;
     uint32_t name_len = meta->filename ? (uint32_t)strlen(meta->filename) : 0;
-    size_t   bytes    = sizeof(FileRecord) + (size_t)tags * sizeof(uint16_t) +
-                        (size_t)extents * sizeof(FileExtent) + name_len + 1;
+    size_t   bytes    = sizeof(FileRecord) + (size_t)extents * sizeof(Strip) +
+                        (size_t)tags * sizeof(uint16_t) + name_len + 1;
 
     FileRecord* rec = kmalloc(bytes);
     if (!rec)
@@ -79,15 +79,16 @@ FileRecord* FileRecordOf(const TagFSMetadata* meta)
     rec->extent_count  = extents;
     rec->name_len      = name_len;
 
+    /* The runs first, where the record's own alignment is theirs. */
+    rec->extents = (const Strip*)at;
+    if (extents)
+        memcpy(at, meta->extents, (size_t)extents * sizeof(Strip));
+    at += (size_t)extents * sizeof(Strip);
+
     rec->tags = (const uint16_t*)at;
     if (tags)
         memcpy(at, meta->tag_ids, (size_t)tags * sizeof(uint16_t));
     at += (size_t)tags * sizeof(uint16_t);
-
-    rec->extents = (const FileExtent*)at;
-    if (extents)
-        memcpy(at, meta->extents, (size_t)extents * sizeof(FileExtent));
-    at += (size_t)extents * sizeof(FileExtent);
 
     rec->name = (const char*)at;
     if (name_len)
@@ -119,10 +120,10 @@ int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
         out->tag_count = rec->tag_count;
     }
     if (rec->extent_count) {
-        out->extents = kmalloc(sizeof(FileExtent) * rec->extent_count);
+        out->extents = kmalloc(sizeof(Strip) * rec->extent_count);
         if (!out->extents)
             goto refused;
-        memcpy(out->extents, rec->extents, sizeof(FileExtent) * rec->extent_count);
+        memcpy(out->extents, rec->extents, sizeof(Strip) * rec->extent_count);
         out->extent_count = rec->extent_count;
     }
     out->filename = kmalloc(rec->name_len + 1u);
@@ -143,7 +144,7 @@ refused:
 // ----------------------------------------------------------------------------
 
 /* The first key at or past `key`. */
-static uint32_t LowerBound(const FileMapNode* n, uint32_t key)
+static uint32_t LowerBound(const FileMapNode* n, uint64_t key)
 {
     uint32_t lo = 0, hi = n->count;
     while (lo < hi) {
@@ -157,7 +158,7 @@ static uint32_t LowerBound(const FileMapNode* n, uint32_t key)
 }
 
 /* The kid of an inner node that holds `key`: past every key at or under it. */
-static uint32_t KidFor(const FileMapNode* n, uint32_t key)
+static uint32_t KidFor(const FileMapNode* n, uint64_t key)
 {
     uint32_t lo = 0, hi = n->count;
     while (lo < hi) {
@@ -171,7 +172,7 @@ static uint32_t KidFor(const FileMapNode* n, uint32_t key)
 }
 
 /* The leaf that holds `key`, or would, and the way down to it. */
-static FileMapNode* MapDescend(const FileMap* m, uint32_t key, FileMapPath* path)
+static FileMapNode* MapDescend(const FileMap* m, uint64_t key, FileMapPath* path)
 {
     FileMapNode* n = m->root;
     path->depth = 0;
@@ -185,7 +186,7 @@ static FileMapNode* MapDescend(const FileMap* m, uint32_t key, FileMapPath* path
     return n;
 }
 
-static FileMapEntry* MapFind(const FileMap* m, uint32_t key)
+static FileMapEntry* MapFind(const FileMap* m, uint64_t key)
 {
     FileMapPath  path;
     FileMapNode* leaf = MapDescend(m, key, &path);
@@ -196,7 +197,7 @@ static FileMapEntry* MapFind(const FileMap* m, uint32_t key)
 }
 
 /* The first entry at or past `key`: its leaf and place, or a NULL leaf. */
-static FileMapNode* MapFrom(const FileMap* m, uint32_t key, uint32_t* out_pos)
+static FileMapNode* MapFrom(const FileMap* m, uint64_t key, uint32_t* out_pos)
 {
     FileMapPath  path;
     FileMapNode* leaf = MapDescend(m, key, &path);
@@ -213,7 +214,7 @@ static FileMapNode* MapFrom(const FileMap* m, uint32_t key, uint32_t* out_pos)
 
 /* How many nodes adding `key` would take now: one per level that splits, and
  * one more for a new root when every level does. */
-static uint32_t MapNodesToInsert(const FileMap* m, uint32_t key)
+static uint32_t MapNodesToInsert(const FileMap* m, uint64_t key)
 {
     if (!m->root)
         return 1;
@@ -246,9 +247,9 @@ static void MapLetGoNode(FileMap* m, FileMapNode* n, FileMapLeftover* left)
     left->nodes = n;
 }
 
-static void LeafOpen(FileMapNode* n, uint32_t pos, uint32_t key)
+static void LeafOpen(FileMapNode* n, uint32_t pos, uint64_t key)
 {
-    memmove(&n->key[pos + 1], &n->key[pos], sizeof(uint32_t) * (n->count - pos));
+    memmove(&n->key[pos + 1], &n->key[pos], sizeof(uint64_t) * (n->count - pos));
     memmove(&n->u.entry[pos + 1], &n->u.entry[pos], sizeof(FileMapEntry) * (n->count - pos));
     n->key[pos] = key;
     memset(&n->u.entry[pos], 0, sizeof(FileMapEntry));
@@ -258,14 +259,14 @@ static void LeafOpen(FileMapNode* n, uint32_t pos, uint32_t key)
 static void LeafClose(FileMapNode* n, uint32_t pos)
 {
     n->count--;
-    memmove(&n->key[pos], &n->key[pos + 1], sizeof(uint32_t) * (n->count - pos));
+    memmove(&n->key[pos], &n->key[pos + 1], sizeof(uint64_t) * (n->count - pos));
     memmove(&n->u.entry[pos], &n->u.entry[pos + 1], sizeof(FileMapEntry) * (n->count - pos));
 }
 
 /* Take key[k] and kid[k + 1] out of an inner node. */
 static void InnerClose(FileMapNode* n, uint32_t k)
 {
-    memmove(&n->key[k], &n->key[k + 1], sizeof(uint32_t) * (n->count - k - 1));
+    memmove(&n->key[k], &n->key[k + 1], sizeof(uint64_t) * (n->count - k - 1));
     memmove(&n->u.kid[k + 1], &n->u.kid[k + 2], sizeof(FileMapNode*) * (n->count - k - 1));
     n->count--;
 }
@@ -273,7 +274,7 @@ static void InnerClose(FileMapNode* n, uint32_t k)
 /* A split below handed up `sep` and the new node `right` beside the kid the
  * path went down: each level takes them, or splits in turn and hands its own
  * middle key up, and a root that splits gets a new root above it. */
-static void MapLift(FileMap* m, const FileMapPath* path, uint32_t sep, FileMapNode* right,
+static void MapLift(FileMap* m, const FileMapPath* path, uint64_t sep, FileMapNode* right,
                     FileMapStake* s)
 {
     for (uint32_t d = path->depth; d-- > 0;) {
@@ -281,7 +282,7 @@ static void MapLift(FileMap* m, const FileMapPath* path, uint32_t sep, FileMapNo
         uint32_t     i = path->slot[d];
 
         if (p->count < FILE_MAP_ORDER) {
-            memmove(&p->key[i + 1], &p->key[i], sizeof(uint32_t) * (p->count - i));
+            memmove(&p->key[i + 1], &p->key[i], sizeof(uint64_t) * (p->count - i));
             memmove(&p->u.kid[i + 2], &p->u.kid[i + 1], sizeof(FileMapNode*) * (p->count - i));
             p->key[i]       = sep;
             p->u.kid[i + 1] = right;
@@ -289,21 +290,21 @@ static void MapLift(FileMap* m, const FileMapPath* path, uint32_t sep, FileMapNo
             return;
         }
 
-        uint32_t     keys[FILE_MAP_ORDER + 1];
+        uint64_t     keys[FILE_MAP_ORDER + 1];
         FileMapNode* kids[FILE_MAP_ORDER + 2];
-        memcpy(keys, p->key, sizeof(uint32_t) * i);
+        memcpy(keys, p->key, sizeof(uint64_t) * i);
         keys[i] = sep;
-        memcpy(&keys[i + 1], &p->key[i], sizeof(uint32_t) * (FILE_MAP_ORDER - i));
+        memcpy(&keys[i + 1], &p->key[i], sizeof(uint64_t) * (FILE_MAP_ORDER - i));
         memcpy(kids, p->u.kid, sizeof(FileMapNode*) * (i + 1));
         kids[i + 1] = right;
         memcpy(&kids[i + 2], &p->u.kid[i + 1], sizeof(FileMapNode*) * (FILE_MAP_ORDER - i));
 
         FileMapNode* q = MapTake(m, s, false);
         p->count = FILE_MAP_LEAST;
-        memcpy(p->key, keys, sizeof(uint32_t) * FILE_MAP_LEAST);
+        memcpy(p->key, keys, sizeof(uint64_t) * FILE_MAP_LEAST);
         memcpy(p->u.kid, kids, sizeof(FileMapNode*) * (FILE_MAP_LEAST + 1));
         q->count = FILE_MAP_ORDER - FILE_MAP_LEAST;
-        memcpy(q->key, &keys[FILE_MAP_LEAST + 1], sizeof(uint32_t) * q->count);
+        memcpy(q->key, &keys[FILE_MAP_LEAST + 1], sizeof(uint64_t) * q->count);
         memcpy(q->u.kid, &kids[FILE_MAP_LEAST + 1], sizeof(FileMapNode*) * (q->count + 1));
 
         sep   = keys[FILE_MAP_LEAST];
@@ -321,7 +322,7 @@ static void MapLift(FileMap* m, const FileMapPath* path, uint32_t sep, FileMapNo
 
 /* A zeroed entry for `key`, which the map does not hold, the nodes it splits
  * taken from the stake — which holds at least MapNodesToInsert of them. */
-static FileMapEntry* MapInsert(FileMap* m, uint32_t key, FileMapStake* s)
+static FileMapEntry* MapInsert(FileMap* m, uint64_t key, FileMapStake* s)
 {
     m->files++;
     if (!m->root) {
@@ -343,7 +344,7 @@ static FileMapEntry* MapInsert(FileMap* m, uint32_t key, FileMapStake* s)
     FileMapNode* right = MapTake(m, s, true);
     uint32_t     keep  = pos <= FILE_MAP_LEAST ? FILE_MAP_LEAST : FILE_MAP_LEAST + 1;
     right->count = (uint16_t)(FILE_MAP_ORDER - keep);
-    memcpy(right->key, &leaf->key[keep], sizeof(uint32_t) * right->count);
+    memcpy(right->key, &leaf->key[keep], sizeof(uint64_t) * right->count);
     memcpy(right->u.entry, &leaf->u.entry[keep], sizeof(FileMapEntry) * right->count);
     leaf->count = (uint16_t)keep;
     right->next = leaf->next;
@@ -385,7 +386,7 @@ static void LeafMend(FileMap* m, FileMapNode* p, uint32_t i, FileMapLeftover* le
         return;
     }
     if (l) {
-        memcpy(&l->key[l->count], n->key, sizeof(uint32_t) * n->count);
+        memcpy(&l->key[l->count], n->key, sizeof(uint64_t) * n->count);
         memcpy(&l->u.entry[l->count], n->u.entry, sizeof(FileMapEntry) * n->count);
         l->count += n->count;
         l->next = n->next;
@@ -393,7 +394,7 @@ static void LeafMend(FileMap* m, FileMapNode* p, uint32_t i, FileMapLeftover* le
         MapLetGoNode(m, n, left);
         return;
     }
-    memcpy(&n->key[n->count], r->key, sizeof(uint32_t) * r->count);
+    memcpy(&n->key[n->count], r->key, sizeof(uint64_t) * r->count);
     memcpy(&n->u.entry[n->count], r->u.entry, sizeof(FileMapEntry) * r->count);
     n->count += r->count;
     n->next = r->next;
@@ -410,7 +411,7 @@ static void InnerMend(FileMap* m, FileMapNode* p, uint32_t i, FileMapLeftover* l
     FileMapNode* r = i < p->count ? p->u.kid[i + 1] : NULL;
 
     if (l && l->count > FILE_MAP_LEAST) {
-        memmove(&n->key[1], &n->key[0], sizeof(uint32_t) * n->count);
+        memmove(&n->key[1], &n->key[0], sizeof(uint64_t) * n->count);
         memmove(&n->u.kid[1], &n->u.kid[0], sizeof(FileMapNode*) * (n->count + 1));
         n->key[0]   = p->key[i - 1];
         n->u.kid[0] = l->u.kid[l->count];
@@ -424,14 +425,14 @@ static void InnerMend(FileMap* m, FileMapNode* p, uint32_t i, FileMapLeftover* l
         n->u.kid[n->count + 1] = r->u.kid[0];
         n->count++;
         p->key[i] = r->key[0];
-        memmove(&r->key[0], &r->key[1], sizeof(uint32_t) * (r->count - 1));
+        memmove(&r->key[0], &r->key[1], sizeof(uint64_t) * (r->count - 1));
         memmove(&r->u.kid[0], &r->u.kid[1], sizeof(FileMapNode*) * r->count);
         r->count--;
         return;
     }
     if (l) {
         l->key[l->count] = p->key[i - 1];
-        memcpy(&l->key[l->count + 1], n->key, sizeof(uint32_t) * n->count);
+        memcpy(&l->key[l->count + 1], n->key, sizeof(uint64_t) * n->count);
         memcpy(&l->u.kid[l->count + 1], n->u.kid, sizeof(FileMapNode*) * (n->count + 1));
         l->count += 1 + n->count;
         InnerClose(p, i - 1);
@@ -439,7 +440,7 @@ static void InnerMend(FileMap* m, FileMapNode* p, uint32_t i, FileMapLeftover* l
         return;
     }
     n->key[n->count] = p->key[i];
-    memcpy(&n->key[n->count + 1], r->key, sizeof(uint32_t) * r->count);
+    memcpy(&n->key[n->count + 1], r->key, sizeof(uint64_t) * r->count);
     memcpy(&n->u.kid[n->count + 1], r->u.kid, sizeof(FileMapNode*) * (r->count + 1));
     n->count += 1 + r->count;
     InnerClose(p, i);
@@ -448,7 +449,7 @@ static void InnerMend(FileMap* m, FileMapNode* p, uint32_t i, FileMapLeftover* l
 
 /* `key` out of the tree, and every level it left short mended on the way up;
  * nodes a merge emptied go to `left`. The entry's record is the caller's. */
-static void MapRemove(FileMap* m, uint32_t key, FileMapLeftover* left)
+static void MapRemove(FileMap* m, uint64_t key, FileMapLeftover* left)
 {
     FileMapPath  path;
     FileMapNode* node = MapDescend(m, key, &path);
@@ -480,7 +481,7 @@ static void MapRemove(FileMap* m, uint32_t key, FileMapLeftover* left)
     }
 }
 
-static void MapLetGoEntry(FileMap* m, uint32_t key, FileMapEntry* e, FileMapLeftover* left)
+static void MapLetGoEntry(FileMap* m, uint64_t key, FileMapEntry* e, FileMapLeftover* left)
 {
     if (e->record) {
         m->record_bytes -= e->record->bytes;
@@ -507,7 +508,7 @@ static void LeftoverFree(FileMapLeftover* left)
 /* ‼ A SHORTAGE IS SAID WITH THE MAP'S NUMBERS, once until the heap gives
  * again: which file could not be held, what was asked, and what the map
  * already holds — the heap's own refusal names the class it charged. */
-static void MapSayShort(FileMap* m, uint32_t fid, uint32_t need)
+static void MapSayShort(FileMap* m, uint64_t fid, uint32_t need)
 {
     TagFSLockTake(&m->lock);
     bool     said  = m->said_short;
@@ -516,12 +517,12 @@ static void MapSayShort(FileMap* m, uint32_t fid, uint32_t need)
     m->said_short  = true;
     TagFSLockDrop(&m->lock);
     if (!said)
-        kprintf("[TagFS] the index of live files could not take file %u: %u node(s) of %u "
+        kprintf("[TagFS] the index of live files could not take file %llu: %u node(s) of %u "
                 "bytes were refused, and it holds %u file(s) in %zu bytes of kernel heap\n",
                 fid, need, (unsigned)sizeof(FileMapNode), files, held);
 }
 
-static error_t StakeGrow(FileMap* m, FileMapStake* s, uint32_t fid, uint32_t need)
+static error_t StakeGrow(FileMap* m, FileMapStake* s, uint64_t fid, uint32_t need)
 {
     if (need > FILE_MAP_STAKE_MOST)
         need = FILE_MAP_STAKE_MOST;
@@ -541,7 +542,7 @@ static error_t StakeGrow(FileMap* m, FileMapStake* s, uint32_t fid, uint32_t nee
     return OK;
 }
 
-error_t FileMapStakeFor(FileMap* map, uint32_t fid, FileMapStake* stake)
+error_t FileMapStakeFor(FileMap* map, uint64_t fid, FileMapStake* stake)
 {
     stake->count = 0;
     TagFSLockTake(&map->lock);
@@ -559,7 +560,7 @@ void FileMapStakeLetGo(FileMapStake* stake)
 /* The file's entry under the map's lock, added from the stake when it is not
  * there; the lock is let go and refused with ERR_NO_MEMORY when the stake
  * could not be made to cover the insert. */
-static error_t MapEntryHeld(FileMap* m, uint32_t fid, FileMapStake* s, FileMapEntry** out)
+static error_t MapEntryHeld(FileMap* m, uint64_t fid, FileMapStake* s, FileMapEntry** out)
 {
     for (;;) {
         TagFSLockTake(&m->lock);
@@ -614,7 +615,7 @@ void FileMapDestroy(FileMap* map)
     kfree(map);
 }
 
-error_t FileMapRecordPut(FileMap* map, uint32_t fid, FileRecord* rec,
+error_t FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
                          const RecordWhere* where, FileMapStake* stake, RecordWhere* was)
 {
     FileMapEntry* e;
@@ -636,7 +637,7 @@ error_t FileMapRecordPut(FileMap* map, uint32_t fid, FileRecord* rec,
     return OK;
 }
 
-uint32_t FileMapNodesToAdd(FileMap* map, uint32_t fid)
+uint32_t FileMapNodesToAdd(FileMap* map, uint64_t fid)
 {
     TagFSLockTake(&map->lock);
     uint32_t need = MapFind(map, fid) ? 0 : MapNodesToInsert(map, fid);
@@ -644,7 +645,7 @@ uint32_t FileMapNodesToAdd(FileMap* map, uint32_t fid)
     return need;
 }
 
-FileRecord* FileMapRecordHold(FileMap* map, uint32_t fid, RecordWhere* out)
+FileRecord* FileMapRecordHold(FileMap* map, uint64_t fid, RecordWhere* out)
 {
     TagFSLockTake(&map->lock);
     FileMapEntry* e   = MapFind(map, fid);
@@ -658,7 +659,7 @@ FileRecord* FileMapRecordHold(FileMap* map, uint32_t fid, RecordWhere* out)
     return rec;
 }
 
-void FileMapRecordMoved(FileMap* map, uint32_t fid, uint32_t link, uint32_t block,
+void FileMapRecordMoved(FileMap* map, uint64_t fid, uint32_t link, uint32_t block,
                         uint32_t from, uint32_t to)
 {
     TagFSLockTake(&map->lock);
@@ -671,7 +672,7 @@ void FileMapRecordMoved(FileMap* map, uint32_t fid, uint32_t link, uint32_t bloc
     TagFSLockDrop(&map->lock);
 }
 
-bool FileMapRecordAt(FileMap* map, uint32_t fid, uint32_t link, uint32_t offset)
+bool FileMapRecordAt(FileMap* map, uint64_t fid, uint32_t link, uint32_t offset)
 {
     TagFSLockTake(&map->lock);
     FileMapEntry* e  = MapFind(map, fid);
@@ -680,7 +681,7 @@ bool FileMapRecordAt(FileMap* map, uint32_t fid, uint32_t link, uint32_t offset)
     return at;
 }
 
-bool FileMapRecordRelink(FileMap* map, uint32_t fid, const RecordWhere* from,
+bool FileMapRecordRelink(FileMap* map, uint64_t fid, const RecordWhere* from,
                          const RecordWhere* to, uint32_t to_block)
 {
     TagFSLockTake(&map->lock);
@@ -700,7 +701,7 @@ bool FileMapRecordRelink(FileMap* map, uint32_t fid, const RecordWhere* from,
     return moved;
 }
 
-error_t FileMapRowSet(FileMap* map, uint32_t fid, uint32_t block, uint32_t offset)
+error_t FileMapRowSet(FileMap* map, uint64_t fid, uint32_t block, uint32_t offset)
 {
     if (block == 0) {
         FileMapRowClear(map, fid);
@@ -718,7 +719,7 @@ error_t FileMapRowSet(FileMap* map, uint32_t fid, uint32_t block, uint32_t offse
     return rc;
 }
 
-bool FileMapRowGet(FileMap* map, uint32_t fid, uint32_t* out_block, uint32_t* out_offset)
+bool FileMapRowGet(FileMap* map, uint64_t fid, uint32_t* out_block, uint32_t* out_offset)
 {
     TagFSLockTake(&map->lock);
     FileMapEntry* e   = MapFind(map, fid);
@@ -731,7 +732,7 @@ bool FileMapRowGet(FileMap* map, uint32_t fid, uint32_t* out_block, uint32_t* ou
     return row;
 }
 
-void FileMapRowClear(FileMap* map, uint32_t fid)
+void FileMapRowClear(FileMap* map, uint64_t fid)
 {
     FileMapLeftover left = { NULL, NULL };
     TagFSLockTake(&map->lock);
@@ -746,7 +747,7 @@ void FileMapRowClear(FileMap* map, uint32_t fid)
     LeftoverFree(&left);
 }
 
-void FileMapDrop(FileMap* map, uint32_t fid, RecordWhere* was)
+void FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was)
 {
     FileMapLeftover left = { NULL, NULL };
     if (was)
@@ -761,7 +762,7 @@ void FileMapDrop(FileMap* map, uint32_t fid, RecordWhere* was)
     LeftoverFree(&left);
 }
 
-uint32_t FileMapRows(FileMap* map, uint32_t from, uint32_t* out, uint32_t room)
+uint32_t FileMapRows(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
 {
     uint32_t n = 0, pos = 0;
     TagFSLockTake(&map->lock);
@@ -775,7 +776,7 @@ uint32_t FileMapRows(FileMap* map, uint32_t from, uint32_t* out, uint32_t room)
     return n;
 }
 
-uint32_t FileMapFiles(FileMap* map, uint32_t from, uint32_t* out, uint32_t room)
+uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
 {
     uint32_t n = 0, pos = 0;
     TagFSLockTake(&map->lock);
@@ -786,14 +787,14 @@ uint32_t FileMapFiles(FileMap* map, uint32_t from, uint32_t* out, uint32_t room)
     return n;
 }
 
-void FileMapRowsInto(FileMap* map, uint32_t first, uint32_t count, FileTableEntry* out)
+void FileMapRowsInto(FileMap* map, uint64_t first, uint32_t count, FileTableEntry* out)
 {
     uint32_t pos = 0;
     memset(out, 0, sizeof(FileTableEntry) * count);
     TagFSLockTake(&map->lock);
     for (FileMapNode* leaf = MapFrom(map, first, &pos); leaf; leaf = leaf->next, pos = 0) {
         for (; pos < leaf->count; pos++) {
-            uint32_t k = leaf->key[pos] - first;
+            uint64_t k = leaf->key[pos] - first;
             if (k >= count)
                 goto done;
             out[k].meta_block  = leaf->u.entry[pos].row_block;

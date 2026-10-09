@@ -8,9 +8,9 @@
  */
 
 typedef struct {
-    uint32_t start;
+    uint64_t start;
+    uint64_t who;
     uint32_t count;
-    uint32_t who;
     uint32_t owner;
 } GroundRun;
 
@@ -43,13 +43,13 @@ void GroundCensusBegin(void)
     GroundCensusEnd();
 }
 
-void GroundClaim(GroundOwner owner, uint32_t start, uint32_t count, uint32_t who)
+void GroundClaim(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who)
 {
-    uint32_t run = tagfs_get_state()->layout.data_blocks;
+    uint64_t run = tagfs_get_state()->layout.data_blocks;
     if (s_refused || count == 0 || start >= run || owner >= GROUND_OWNER_KINDS)
         return;
     if (count > run - start)
-        count = run - start;
+        count = (uint32_t)(run - start);
 
     if (s_count == s_cap) {
         uint32_t   cap  = s_cap ? s_cap * 2u : 64u;
@@ -67,7 +67,7 @@ void GroundClaim(GroundOwner owner, uint32_t start, uint32_t count, uint32_t who
         s_runs = more;
         s_cap  = cap;
     }
-    s_runs[s_count++] = (GroundRun){ start, count, who, (uint32_t)owner };
+    s_runs[s_count++] = (GroundRun){ start, who, count, (uint32_t)owner };
 }
 
 /* Heapsort by start: in place, and no deeper than one frame whatever the
@@ -104,7 +104,7 @@ static void RunsSort(void)
 static void RunSay(const GroundRun* r, char* out, size_t room)
 {
     if (r->owner == GROUND_FILE)
-        ksnprintf(out, room, "file %u", r->who);
+        ksnprintf(out, room, "file %llu", (unsigned long long)r->who);
     else
         ksnprintf(out, room, "the %s", g_owner_name[r->owner]);
 }
@@ -116,7 +116,8 @@ static void RunSay(const GroundRun* r, char* out, size_t room)
  */
 static void RunsSayDoubles(void)
 {
-    uint32_t reach = 0, reach_run = 0, named = 0, more = 0;
+    uint64_t reach = 0;
+    uint32_t reach_run = 0, named = 0, more = 0;
     bool     have  = false;
     char     a[32], b[32];
 
@@ -128,10 +129,10 @@ static void RunsSayDoubles(void)
             if (named < 32u) {
                 RunSay(&s_runs[reach_run], a, sizeof(a));
                 RunSay(r, b, sizeof(b));
-                kprintf("[TagFS FSCK] data block %u is named by %s and %s at once — the "
+                kprintf("[TagFS FSCK] data block %llu is named by %s and %s at once — the "
                         "medium kept less than a settled cycle said, deeper than the rest "
                         "a freed block takes covers, or a writer gave one block twice\n",
-                        r->start, a, b);
+                        (unsigned long long)r->start, a, b);
                 named++;
             } else {
                 more++;
@@ -165,14 +166,14 @@ static void BitsSet(uint8_t* bits, uint32_t from, uint32_t to)
 }
 
 /* One run laid into window [base, base + W); true when it reaches past it. */
-static bool RunLay(const GroundRun* r, uint32_t base, uint8_t* bits)
+static bool RunLay(const GroundRun* r, uint64_t base, uint8_t* bits)
 {
-    uint32_t end  = r->start + r->count;
-    uint32_t stop = base + BLOCK_MAP_WINDOW_BLOCKS;
-    uint32_t from = r->start > base ? r->start : base;
-    uint32_t to   = end < stop ? end : stop;
+    uint64_t end  = r->start + r->count;
+    uint64_t stop = base + BLOCK_MAP_WINDOW_BLOCKS;
+    uint64_t from = r->start > base ? r->start : base;
+    uint64_t to   = end < stop ? end : stop;
     if (from < to)
-        BitsSet(bits, from - base, to - base);
+        BitsSet(bits, (uint32_t)(from - base), (uint32_t)(to - base));
     return end > stop;
 }
 
@@ -181,8 +182,8 @@ static bool RunLay(const GroundRun* r, uint32_t base, uint8_t* bits)
 static void GroundOwns(uint32_t window, uint8_t* bits, void* ctx)
 {
     (void)ctx;
-    uint32_t base = window * BLOCK_MAP_WINDOW_BLOCKS;
-    uint32_t stop = base + BLOCK_MAP_WINDOW_BLOCKS;
+    uint64_t base = (uint64_t)window * BLOCK_MAP_WINDOW_BLOCKS;
+    uint64_t stop = base + BLOCK_MAP_WINDOW_BLOCKS;
     memset(bits, 0, BLOCK_MAP_WINDOW_BLOCKS / 8u);
 
     uint32_t kept = 0;
@@ -220,7 +221,7 @@ error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out)
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-GroundOwner GroundClaimOf(uint32_t block)
+GroundOwner GroundClaimOf(uint64_t block)
 {
     for (uint32_t i = 0; i < s_count; i++)
         if (block >= s_runs[i].start && block - s_runs[i].start < s_runs[i].count)

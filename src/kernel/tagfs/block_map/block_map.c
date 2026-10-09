@@ -249,12 +249,13 @@ static void MapGrow(uint32_t w, uint32_t off, uint32_t n)
     MapFitMoved(w, was);
 }
 
-void MapAvailabilityChanged(uint32_t start, uint32_t count, bool lost)
+void MapAvailabilityChanged(uint64_t start, uint32_t count, bool lost)
 {
-    for (uint32_t b = start, end = start + count; b < end; ) {
-        uint32_t w   = b / MAP_WINDOW_BLOCKS;
-        uint32_t off = b % MAP_WINDOW_BLOCKS;
-        uint32_t n   = end - b < MAP_WINDOW_BLOCKS - off ? end - b : MAP_WINDOW_BLOCKS - off;
+    for (uint64_t b = start, end = start + count; b < end; ) {
+        uint32_t w   = (uint32_t)(b / MAP_WINDOW_BLOCKS);
+        uint32_t off = (uint32_t)(b % MAP_WINDOW_BLOCKS);
+        uint32_t n   = (uint32_t)(end - b < MAP_WINDOW_BLOCKS - off ? end - b
+                                                                   : MAP_WINDOW_BLOCKS - off);
 
         if (MapReady(w))
             MapMeasure(w);
@@ -266,10 +267,11 @@ void MapAvailabilityChanged(uint32_t start, uint32_t count, bool lost)
     }
 }
 
-uint32_t MapUnreadWindows(uint32_t start, uint32_t count)
+uint32_t MapUnreadWindows(uint64_t start, uint32_t count)
 {
     uint32_t unread = 0;
-    for (uint32_t w = start / MAP_WINDOW_BLOCKS; w <= (start + count - 1) / MAP_WINDOW_BLOCKS; w++)
+    uint32_t last   = (uint32_t)((start + count - 1) / MAP_WINDOW_BLOCKS);
+    for (uint32_t w = (uint32_t)(start / MAP_WINDOW_BLOCKS); w <= last; w++)
         unread += MapReady(w) == NULL;
     return unread;
 }
@@ -388,7 +390,7 @@ error_t BlockMapGiveRoomHold(uint32_t gives)
         return OK;
     }
     /* No more deltas than blocks: every one holds a block of its own. */
-    g_map.delta_held = gives < g_map.blocks ? gives : g_map.blocks;
+    g_map.delta_held = gives < g_map.blocks ? gives : (uint32_t)g_map.blocks;
     uint64_t need = (uint64_t)g_map.deltas + g_map.delta_held;
     if (need <= g_map.delta_cap) {
         TagFSLockDrop(MapLock());
@@ -448,9 +450,9 @@ static uint32_t MapDeltaSlot(void)
     return g_map.delta_high++;
 }
 
-void MapDeltaAdd(uint32_t start, uint32_t count, bool take)
+void MapDeltaAdd(uint64_t start, uint32_t count, bool take)
 {
-    uint32_t        w = start / MAP_WINDOW_BLOCKS;
+    uint32_t        w = (uint32_t)(start / MAP_WINDOW_BLOCKS);
     BlockMapWindow *x = &g_map.win[w];
     uint32_t        i = MapDeltaSlot();
 
@@ -480,7 +482,7 @@ static void MapDeltaLetGo(uint32_t i)
  * that take undone, not a second edit: the run was never taken on any sector.
  * Only the window's newest delta can be that take — a later edit of the window
  * would stand between. */
-static bool MapDeltaUndoTake(uint32_t start, uint32_t count)
+static bool MapDeltaUndoTake(uint64_t start, uint32_t count)
 {
     BlockMapWindow *x = &g_map.win[start / MAP_WINDOW_BLOCKS];
     if (!x->delta_last)
@@ -503,8 +505,9 @@ static bool MapDeltaUndoTake(uint32_t start, uint32_t count)
  * free count, which counted it twice, is put right. */
 static void MapLayTake(BlockMapPage *p, uint32_t off, uint32_t n)
 {
-    uint32_t base  = p->window * MAP_WINDOW_BLOCKS;
-    uint32_t taken = 0, first = 0;
+    uint64_t base  = (uint64_t)p->window * MAP_WINDOW_BLOCKS;
+    uint32_t taken = 0;
+    uint64_t first = 0;
 
     for (uint32_t i = off; i < off + n; i++) {
         uint8_t bit = (uint8_t)(1u << (i % 8));
@@ -517,10 +520,10 @@ static void MapLayTake(BlockMapPage *p, uint32_t off, uint32_t n)
     p->dirty = 1;
     if (taken) {
         tagfs_get_state()->ledger.free_blocks += taken;
-        kprintf("[TagFS] block map: a take of blocks %u..%u met %u of them already taken "
-                "on the medium, the first block %u — memory had counted them free, so "
-                "they may have two owners now\n",
-                base + off, base + off + n - 1, taken, first);
+        kprintf("[TagFS] block map: a take of blocks %llu..%llu met %u of them already taken "
+                "on the medium, the first block %llu — memory had counted them free, so "
+                "they may have two owners now\n", (unsigned long long)(base + off),
+                (unsigned long long)(base + off + n - 1), taken, (unsigned long long)first);
     }
 }
 
@@ -534,19 +537,20 @@ static uint32_t MapFirstClear(const BlockMapPage *p, uint32_t off, uint32_t n)
     return off + n;
 }
 
-static void MapSayFreeTwice(uint32_t start, uint32_t count, uint32_t block)
+static void MapSayFreeTwice(uint64_t start, uint32_t count, uint64_t block)
 {
-    kprintf("[TagFS] block map: blocks %u..%u are given back and block %u among them "
+    kprintf("[TagFS] block map: blocks %llu..%llu are given back and block %llu among them "
             "is already free — the give is refused whole and the map is left as it "
             "is, because a block freed twice is a block handed to two owners\n",
-            start, start + count - 1, block);
+            (unsigned long long)start, (unsigned long long)(start + count - 1),
+            (unsigned long long)block);
 }
 
 /* Clear [off, off + n) on the sector, or refuse it whole when a block of it
  * is already clear. */
 static bool MapLayGive(BlockMapPage *p, uint32_t off, uint32_t n)
 {
-    uint32_t base  = p->window * MAP_WINDOW_BLOCKS;
+    uint64_t base  = (uint64_t)p->window * MAP_WINDOW_BLOCKS;
     uint32_t clear = MapFirstClear(p, off, n);
 
     if (clear < off + n) {
@@ -579,14 +583,14 @@ void MapDeltaApply(uint32_t w, BlockMapPage *p)
     x->delta_last = 0;
     x->flags     &= (uint8_t)~MAP_W_DELTAS;
 
-    uint32_t base = w * MAP_WINDOW_BLOCKS;
+    uint64_t base = (uint64_t)w * MAP_WINDOW_BLOCKS;
     for (uint32_t at = oldest; at; ) {
         BlockMapDelta d = g_map.delta[at - 1u];
         MapDeltaLetGo(at - 1u);
         if (d.take)
-            MapLayTake(p, d.start - base, d.count);
+            MapLayTake(p, (uint32_t)(d.start - base), d.count);
         else
-            MapLayGive(p, d.start - base, d.count);
+            MapLayGive(p, (uint32_t)(d.start - base), d.count);
         at = d.older;
     }
 }
@@ -627,7 +631,7 @@ bool MapUnsettledRoom(void)
     return MapUnsettledGrow(g_map.unsettled_count + 2u);
 }
 
-void MapUnsettledAdd(uint32_t fid, uint32_t start, uint32_t count)
+void MapUnsettledAdd(uint64_t fid, uint64_t start, uint32_t count)
 {
     MapUnsettled *u = &g_map.unsettled[g_map.unsettled_count++];
     u->start = start;
@@ -645,13 +649,13 @@ static void MapUnsettledDrop(uint32_t i)
  * cuts in two keeps both sides — held whole instead when there is no room for
  * the second, or the give may not ask the heap (`heap`), which only leaves out
  * of the image a block that is free. */
-static void MapUnsettledGiven(uint32_t start, uint32_t count, bool heap)
+static void MapUnsettledGiven(uint64_t start, uint32_t count, bool heap)
 {
-    uint64_t end = (uint64_t)start + count;
+    uint64_t end = start + count;
 
     for (uint32_t i = 0; i < g_map.unsettled_count; ) {
         MapUnsettled *u  = &g_map.unsettled[i];
-        uint64_t      ue = (uint64_t)u->start + u->count;
+        uint64_t      ue = u->start + u->count;
         if (ue <= start || u->start >= end) {
             i++;
             continue;
@@ -669,28 +673,28 @@ static void MapUnsettledGiven(uint32_t start, uint32_t count, bool heap)
             u = &g_map.unsettled[i];
             MapUnsettled *tail = &g_map.unsettled[g_map.unsettled_count++];
             *tail        = *u;
-            tail->start  = (uint32_t)end;
+            tail->start  = end;
             tail->count  = (uint32_t)(ue - end);
-            u->count     = start - u->start;
+            u->count     = (uint32_t)(start - u->start);
         } else if (u->start < start) {
-            u->count = start - u->start;
+            u->count = (uint32_t)(start - u->start);
         } else {
             u->count = (uint32_t)(ue - end);
-            u->start = (uint32_t)end;
+            u->start = end;
         }
         i++;
     }
 }
 
-uint32_t MapUnsettledLeftOut(uint32_t first, uint32_t count, uint8_t *bits)
+uint32_t MapUnsettledLeftOut(uint64_t first, uint32_t count, uint8_t *bits)
 {
-    uint64_t end  = (uint64_t)first + count;
+    uint64_t end  = first + count;
     uint32_t left = 0;
 
     for (uint32_t i = 0; i < g_map.unsettled_count; i++) {
         const MapUnsettled *u  = &g_map.unsettled[i];
         uint64_t            a  = u->start > first ? u->start : first;
-        uint64_t            ue = (uint64_t)u->start + u->count;
+        uint64_t            ue = u->start + u->count;
         uint64_t            b  = ue < end ? ue : end;
         for (uint64_t k = a; k < b; k++) {
             uint32_t off = (uint32_t)(k - first);
@@ -709,14 +713,14 @@ void MapUnsettledSettled(uint64_t target)
             i++;
             continue;
         }
-        uint32_t last = (u->start + u->count - 1u) / MAP_WINDOW_BLOCKS;
-        for (uint32_t w = u->start / MAP_WINDOW_BLOCKS; w <= last; w++)
+        uint32_t last = (uint32_t)((u->start + u->count - 1u) / MAP_WINDOW_BLOCKS);
+        for (uint32_t w = (uint32_t)(u->start / MAP_WINDOW_BLOCKS); w <= last; w++)
             MapOwedMark(w);
         MapUnsettledDrop(i);
     }
 }
 
-void BlockMapInkedLocked(uint32_t fid, uint64_t gen)
+void BlockMapInkedLocked(uint64_t fid, uint64_t gen)
 {
     for (uint32_t i = 0; i < g_map.unsettled_count; i++)
         if (g_map.unsettled[i].fid == fid && g_map.unsettled[i].gen == 0)
@@ -727,12 +731,13 @@ void BlockMapInkedLocked(uint32_t fid, uint64_t gen)
 // Taking and giving back, in memory
 // ----------------------------------------------------------------------------
 
-static void MapTakeEach(uint32_t start, uint32_t count, bool kept)
+static void MapTakeEach(uint64_t start, uint32_t count, bool kept)
 {
-    for (uint32_t b = start, end = start + count; b < end; ) {
-        uint32_t      w   = b / MAP_WINDOW_BLOCKS;
-        uint32_t      off = b % MAP_WINDOW_BLOCKS;
-        uint32_t      n   = end - b < MAP_WINDOW_BLOCKS - off ? end - b : MAP_WINDOW_BLOCKS - off;
+    for (uint64_t b = start, end = start + count; b < end; ) {
+        uint32_t      w   = (uint32_t)(b / MAP_WINDOW_BLOCKS);
+        uint32_t      off = (uint32_t)(b % MAP_WINDOW_BLOCKS);
+        uint32_t      n   = (uint32_t)(end - b < MAP_WINDOW_BLOCKS - off ? end - b
+                                                                         : MAP_WINDOW_BLOCKS - off);
         BlockMapPage *p   = MapReady(w);
 
         if (p) {
@@ -764,43 +769,45 @@ static void MapTakeEach(uint32_t start, uint32_t count, bool kept)
         g_map.no_room_said = false;
 }
 
-void MapTakeKnown(uint32_t start, uint32_t count)
+void MapTakeKnown(uint64_t start, uint32_t count)
 {
     MapTakeEach(start, count, false);
 }
 
 /* An Allotment's own blocks were never ones a take may have, so taking them
  * changes no summary of a window whose sector is away. */
-void MapTakeKept(uint32_t start, uint32_t count)
+void MapTakeKept(uint64_t start, uint32_t count)
 {
     MapTakeEach(start, count, true);
 }
 
-static error_t MapGive(uint32_t start, uint32_t count, bool heap)
+static error_t MapGive(uint64_t start, uint32_t count, bool heap)
 {
     if (count == 0)
         return OK;
     if (!g_map.up)
         return ERR_TAGFS_NOT_INITIALIZED;
     if (start >= g_map.blocks || count > g_map.blocks - start) {
-        kprintf("[TagFS] block map: blocks %u..+%u are given back and the data run ends "
-                "at %u — nothing is changed\n", start, count, g_map.blocks);
+        kprintf("[TagFS] block map: blocks %llu..+%u are given back and the data run ends "
+                "at %llu — nothing is changed\n", (unsigned long long)start, count,
+                (unsigned long long)g_map.blocks);
         return ERR_INVALID_ARGUMENT;
     }
 
     /* Judged whole first, wherever the sector is in memory: a give that meets
      * a block already free changes nothing anywhere. */
     uint32_t away = 0;
-    for (uint32_t b = start, end = start + count; b < end; ) {
-        uint32_t      w   = b / MAP_WINDOW_BLOCKS;
-        uint32_t      off = b % MAP_WINDOW_BLOCKS;
-        uint32_t      n   = end - b < MAP_WINDOW_BLOCKS - off ? end - b : MAP_WINDOW_BLOCKS - off;
+    for (uint64_t b = start, end = start + count; b < end; ) {
+        uint32_t      w   = (uint32_t)(b / MAP_WINDOW_BLOCKS);
+        uint32_t      off = (uint32_t)(b % MAP_WINDOW_BLOCKS);
+        uint32_t      n   = (uint32_t)(end - b < MAP_WINDOW_BLOCKS - off ? end - b
+                                                                         : MAP_WINDOW_BLOCKS - off);
         BlockMapPage *p   = MapReady(w);
 
         if (p) {
             uint32_t clear = MapFirstClear(p, off, n);
             if (clear < off + n) {
-                MapSayFreeTwice(start, count, w * MAP_WINDOW_BLOCKS + clear);
+                MapSayFreeTwice(start, count, (uint64_t)w * MAP_WINDOW_BLOCKS + clear);
                 return ERR_TAGFS_EXTENT_ERROR;
             }
         } else {
@@ -811,17 +818,19 @@ static error_t MapGive(uint32_t start, uint32_t count, bool heap)
     if (!MapDeltaRoom(away, true, heap)) {
         if (heap)
             kprintf("[TagFS] block map: no memory to write down the give back of blocks "
-                    "%u..%u — they stay taken, and the next mount's roll call finds them "
-                    "owned by nothing\n", start, start + count - 1);
+                    "%llu..%llu — they stay taken, and the next mount's roll call finds them "
+                    "owned by nothing\n", (unsigned long long)start,
+                    (unsigned long long)(start + count - 1));
         return ERR_NO_MEMORY;
     }
     MapUnsettledGiven(start, count, heap);
 
     /* Where the sector is away the give is judged when it comes in. */
-    for (uint32_t b = start, end = start + count; b < end; ) {
-        uint32_t      w   = b / MAP_WINDOW_BLOCKS;
-        uint32_t      off = b % MAP_WINDOW_BLOCKS;
-        uint32_t      n   = end - b < MAP_WINDOW_BLOCKS - off ? end - b : MAP_WINDOW_BLOCKS - off;
+    for (uint64_t b = start, end = start + count; b < end; ) {
+        uint32_t      w   = (uint32_t)(b / MAP_WINDOW_BLOCKS);
+        uint32_t      off = (uint32_t)(b % MAP_WINDOW_BLOCKS);
+        uint32_t      n   = (uint32_t)(end - b < MAP_WINDOW_BLOCKS - off ? end - b
+                                                                         : MAP_WINDOW_BLOCKS - off);
         BlockMapPage *p   = MapReady(w);
 
         if (p) {
@@ -839,12 +848,12 @@ static error_t MapGive(uint32_t start, uint32_t count, bool heap)
     return OK;
 }
 
-error_t BlockMapGiveLocked(uint32_t start, uint32_t count)
+error_t BlockMapGiveLocked(uint64_t start, uint32_t count)
 {
     return MapGive(start, count, true);
 }
 
-error_t BlockMapGiveHeldLocked(uint32_t start, uint32_t count)
+error_t BlockMapGiveHeldLocked(uint64_t start, uint32_t count)
 {
     return MapGive(start, count, false);
 }
@@ -854,12 +863,12 @@ error_t BlockMapGiveHeldLocked(uint32_t start, uint32_t count)
 // ----------------------------------------------------------------------------
 
 #ifdef CONFIG_VOLUME_TESTS
-bool BlockMapIsTaken(uint32_t block)
+bool BlockMapIsTaken(uint64_t block)
 {
     if (!g_map.up || block >= g_map.blocks)
         return false;
 
-    uint32_t w = block / MAP_WINDOW_BLOCKS;
+    uint32_t w = (uint32_t)(block / MAP_WINDOW_BLOCKS);
     (void)MapFetch(w, __func__);
 
     TagFSLockTake(MapLock());

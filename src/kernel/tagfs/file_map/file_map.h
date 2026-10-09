@@ -35,7 +35,7 @@
 typedef struct FileRecord {
     volatile uint32_t  refs;
     uint32_t           bytes;        /* the whole allocation, for the map's count */
-    uint32_t           file_id;
+    uint64_t           file_id;
     uint32_t           flags;
     uint64_t           size;
     uint64_t           created_time;
@@ -49,7 +49,7 @@ typedef struct FileRecord {
     uint32_t           extent_count;
     uint32_t           name_len;
     const uint16_t*    tags;         /* these three point into the allocation */
-    const FileExtent*  extents;
+    const Strip*       extents;
     const char*        name;         /* NUL-terminated */
 } FileRecord;
 
@@ -76,9 +76,11 @@ typedef struct {
     uint64_t shape;
 } RecordWhere;
 
-/* The deepest the tree can be for 32-bit file ids, and so the most nodes one
- * insert can split (every level, and a new root). */
-#define FILE_MAP_HEIGHT_MOST 9u
+/* The deepest the tree can be for 64-bit file ids — every node but the root
+ * holds at least 16, so h levels hold at least 2 * 16^(h-1) ids, and 2^64 of
+ * them fit in 17 — and so the most nodes one insert can split (every level,
+ * and a new root). */
+#define FILE_MAP_HEIGHT_MOST 17u
 #define FILE_MAP_STAKE_MOST  (FILE_MAP_HEIGHT_MOST + 1u)
 
 /* The nodes one insert may need, taken with no lock held. */
@@ -94,7 +96,7 @@ void     FileMapDestroy(FileMap* map);
 /* Room staked for an insert of `fid`: none when the file is in the map, else
  * as many nodes as the insert would split at this moment. ERR_NO_MEMORY, said
  * once with the map's numbers, when the heap refused one. */
-error_t  FileMapStakeFor(FileMap* map, uint32_t fid, FileMapStake* stake);
+error_t  FileMapStakeFor(FileMap* map, uint64_t fid, FileMapStake* stake);
 /* What an insert did not spend, given back. */
 void     FileMapStakeLetGo(FileMapStake* stake);
 
@@ -108,59 +110,59 @@ void     FileMapStakeLetGo(FileMapStake* stake);
  * holds the volume's state lock checks FileMapNodesToAdd against its stake
  * first, so the put never reaches the heap under that lock.
  */
-error_t  FileMapRecordPut(FileMap* map, uint32_t fid, FileRecord* rec,
+error_t  FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
                           const RecordWhere* where, FileMapStake* stake, RecordWhere* was);
 
 /* How many nodes adding `fid` would take now; 0 when the file is in the map. */
-uint32_t FileMapNodesToAdd(FileMap* map, uint32_t fid);
+uint32_t FileMapNodesToAdd(FileMap* map, uint64_t fid);
 
 /* The file's record with a reference the caller lets go (FileRecordRelease),
  * and where it sits (out may be NULL); NULL when the map holds none. */
-FileRecord* FileMapRecordHold(FileMap* map, uint32_t fid, RecordWhere* out);
+FileRecord* FileMapRecordHold(FileMap* map, uint64_t fid, RecordWhere* out);
 
 /* The file's record moved inside its block, from byte `from` to byte `to` of
  * link `link`, block `block` — the pool closed a gap in its tail — and the
  * file's row with it when the row named the record there. Nothing changes
  * when the map has the file's record anywhere else. */
-void     FileMapRecordMoved(FileMap* map, uint32_t fid, uint32_t link, uint32_t block,
+void     FileMapRecordMoved(FileMap* map, uint64_t fid, uint32_t link, uint32_t block,
                             uint32_t from, uint32_t to);
 
 /* Whether the file's record is the one at byte `offset` of link `link`. */
-bool     FileMapRecordAt(FileMap* map, uint32_t fid, uint32_t link, uint32_t offset);
+bool     FileMapRecordAt(FileMap* map, uint64_t fid, uint32_t link, uint32_t offset);
 
 /* The file's record, found where `from` says, laid again where `to` says — in
  * block `to_block`, by Glean — the same record under a new place and Ink, its
  * shape kept; and the file's row with it. False, and nothing changed, when the
  * map has the file's record anywhere else. */
-bool     FileMapRecordRelink(FileMap* map, uint32_t fid, const RecordWhere* from,
+bool     FileMapRecordRelink(FileMap* map, uint64_t fid, const RecordWhere* from,
                              const RecordWhere* to, uint32_t to_block);
 
 /* The file table's row of a file. Set adds the file when it is not in the
  * map (ERR_NO_MEMORY, said, when there is no room); Get answers false for a
  * file with no row; Clear takes the row away, and the file with it when it has
  * no record either. */
-error_t  FileMapRowSet(FileMap* map, uint32_t fid, uint32_t block, uint32_t offset);
-bool     FileMapRowGet(FileMap* map, uint32_t fid, uint32_t* out_block, uint32_t* out_offset);
-void     FileMapRowClear(FileMap* map, uint32_t fid);
+error_t  FileMapRowSet(FileMap* map, uint64_t fid, uint32_t block, uint32_t offset);
+bool     FileMapRowGet(FileMap* map, uint64_t fid, uint32_t* out_block, uint32_t* out_offset);
+void     FileMapRowClear(FileMap* map, uint64_t fid);
 
 /* The file out of the map, row and record both; where its record sat in *was
  * (may be NULL), a `len` of 0 when it had none. */
-void     FileMapDrop(FileMap* map, uint32_t fid, RecordWhere* was);
+void     FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was);
 
 /* Up to `room` file ids from `from` on that have a row — the live files — in
  * id order: how many were written. A walk of them all asks again from one
  * past the last id it was given, so no lock is held across the walk and what
  * it does with each file may change the map. */
-uint32_t FileMapRows(FileMap* map, uint32_t from, uint32_t* out, uint32_t room);
+uint32_t FileMapRows(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
 
 /* Up to `room` file ids from `from` on that the map holds at all — a row, a
  * record or both — in id order: the mount's walk, which decides what each of
  * them is, asks this way. */
-uint32_t FileMapFiles(FileMap* map, uint32_t from, uint32_t* out, uint32_t room);
+uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
 
 /* The rows of file ids first .. first+count-1 into `out`, a row of zeros for
  * an id with none — one block of the file table, as the medium holds it. */
-void     FileMapRowsInto(FileMap* map, uint32_t first, uint32_t count, FileTableEntry* out);
+void     FileMapRowsInto(FileMap* map, uint64_t first, uint32_t count, FileTableEntry* out);
 
 /* The files in the map, and the bytes of kernel heap it holds for them: its
  * nodes and its records. */

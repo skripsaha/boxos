@@ -124,6 +124,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_room)) \
     VOLUME_TESTS_ONLY(SUITE(stand_integrity)) \
     VOLUME_TESTS_ONLY(SUITE(frame)) \
+    VOLUME_TESTS_ONLY(SUITE(width)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;
@@ -202,7 +203,7 @@ TestResult test_steps_aside(const char* why);
 /* Bytes that say where they are: each depends on the stream it belongs to and
  * on its absolute offset, so two streams never hold the same block and a block
  * read back from the wrong place never matches. */
-void TestFillAt(void* buffer, uint32_t size, uint32_t stream, uint64_t offset);
+void TestFillAt(void* buffer, uint32_t size, uint64_t stream, uint64_t offset);
 
 /* The offset of the first byte where a and b differ, or n when they agree. */
 uint32_t TestFirstDifference(const void* a, const void* b, uint32_t n);
@@ -216,8 +217,8 @@ int TestHandleRead(TagFSFileHandle* handle, void* buffer, uint32_t capacity);
 /* A whole file written in one call through a fresh handle, and read back the
  * same way: as TestHandleWrite / TestHandleRead answer, or -1 when the file
  * would not open. The handle is closed on every path. */
-int TestFileWrite(uint32_t file_id, const void* data, uint32_t bytes);
-int TestFileRead(uint32_t file_id, void* buffer, uint32_t capacity);
+int TestFileWrite(uint64_t file_id, const void* data, uint32_t bytes);
+int TestFileRead(uint64_t file_id, void* buffer, uint32_t capacity);
 
 void fill_random(void* buffer, uint32_t size);
 void fill_pattern(void* buffer, uint32_t size, uint8_t pattern);

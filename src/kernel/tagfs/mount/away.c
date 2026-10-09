@@ -30,7 +30,7 @@ static uint64_t s_left_seq;     /* the one a cycle this kernel settled on it */
  */
 typedef struct {
     uint8_t  uuid[16];
-    uint32_t next_file_id;
+    uint64_t next_file_id;
     uint32_t next_tag_id;
     bool     lied;
 } AwayKnown;
@@ -57,7 +57,7 @@ static AwayKnown* AwayKnownFind(const uint8_t uuid[16])
  * there is no memory for it. A count an earlier kernel let wrap (0) is the
  * medium's to keep refusing creates on: the mount keeps it, whatever is
  * remembered here. */
-static bool AwayKnownRaise(const uint8_t uuid[16], uint32_t next_file, uint32_t next_tag,
+static bool AwayKnownRaise(const uint8_t uuid[16], uint64_t next_file, uint32_t next_tag,
                            bool lied)
 {
     for (;;) {
@@ -105,7 +105,7 @@ static bool AwayKnownRaise(const uint8_t uuid[16], uint32_t next_file, uint32_t 
 static void AwayRemember(bool lied)
 {
     TagFSState* fs        = tagfs_get_state();
-    uint32_t    next_file;
+    uint64_t    next_file;
     uint32_t    next_tag  = 0;
 
     TagFSLockTake(&fs->lock);
@@ -118,9 +118,9 @@ static void AwayRemember(bool lied)
     }
     if (!AwayKnownRaise(fs->uuid, next_file, next_tag, lied))
         kprintf("[TagFS] there is no memory to remember the ids this kernel gave out on the "
-                "volume whose book is given up (file ids below %u, tag ids below %u)%s — its "
+                "volume whose book is given up (file ids below %llu, tag ids below %u)%s — its "
                 "next mount may give one of them again, to a program other than the one "
-                "holding it\n", next_file, next_tag,
+                "holding it\n", (unsigned long long)next_file, next_tag,
                 lied ? ", nor that its medium lied" : "");
 }
 
@@ -240,7 +240,7 @@ bool AwayLiedLearned(const uint8_t uuid[16])
     return lied;
 }
 
-void AwayNumbersKnown(const uint8_t uuid[16], uint32_t* next_file_id, uint32_t* next_tag_id)
+void AwayNumbersKnown(const uint8_t uuid[16], uint64_t* next_file_id, uint32_t* next_tag_id)
 {
     TagFSLockTake(&s_known_lock);
     const AwayKnown* k = AwayKnownFind(uuid);

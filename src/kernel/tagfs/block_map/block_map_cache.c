@@ -75,10 +75,10 @@ static void MapStandOnItsWay(uint32_t w)
     __atomic_store_n(&s_stand_way_ran, 1u, __ATOMIC_RELEASE);
 }
 
-void BlockMapStandFlushOnItsWay(uint32_t block)
+void BlockMapStandFlushOnItsWay(uint64_t block)
 {
     __atomic_store_n(&s_stand_way_ran, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_stand_way, block / MAP_WINDOW_BLOCKS + 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_stand_way, (uint32_t)(block / MAP_WINDOW_BLOCKS) + 1u, __ATOMIC_RELEASE);
 }
 
 bool BlockMapStandFlushedOnItsWay(error_t *said)
@@ -125,7 +125,7 @@ static BlockMapPage *MapVictim(BlockMapPage **writeback)
  * holds names yet (BlockMapOweLocked), cleared in `out`: how many. */
 static uint32_t MapLeaveOut(uint32_t w, uint8_t *out)
 {
-    uint32_t first = w * MAP_WINDOW_BLOCKS;
+    uint64_t first = (uint64_t)w * MAP_WINDOW_BLOCKS;
     return PoolUnnamedLeftOut(first, MAP_WINDOW_BLOCKS, out) +
            FallowUnnamedLeftOut(first, MAP_WINDOW_BLOCKS, out) +
            MapUnsettledLeftOut(first, MAP_WINDOW_BLOCKS, out);
@@ -288,14 +288,14 @@ error_t MapFetch(uint32_t w, const char *site)
     }
 }
 
-void BlockMapFetchRun(uint32_t start, uint32_t count, const char *site)
+void BlockMapFetchRun(uint64_t start, uint32_t count, const char *site)
 {
     if (!g_map.up || count == 0 || start >= g_map.blocks || LockRankAnyHeldHere())
         return;
-    uint32_t last = start + count - 1 < g_map.blocks ? start + count - 1 : g_map.blocks - 1;
-    (void)MapFetch(start / MAP_WINDOW_BLOCKS, site);
+    uint64_t last = start + count - 1 < g_map.blocks ? start + count - 1 : g_map.blocks - 1;
+    (void)MapFetch((uint32_t)(start / MAP_WINDOW_BLOCKS), site);
     if (last / MAP_WINDOW_BLOCKS != start / MAP_WINDOW_BLOCKS)
-        (void)MapFetch(last / MAP_WINDOW_BLOCKS, site);
+        (void)MapFetch((uint32_t)(last / MAP_WINDOW_BLOCKS), site);
 }
 
 // ----------------------------------------------------------------------------
@@ -463,10 +463,10 @@ error_t BlockMapFlush(uint64_t target)
     return first;
 }
 
-void BlockMapOweLocked(uint32_t block)
+void BlockMapOweLocked(uint64_t block)
 {
     if (g_map.up && block < g_map.blocks)
-        MapOwedMark(block / MAP_WINDOW_BLOCKS);
+        MapOwedMark((uint32_t)(block / MAP_WINDOW_BLOCKS));
 }
 
 // ----------------------------------------------------------------------------
@@ -474,14 +474,14 @@ void BlockMapOweLocked(uint32_t block)
 // ----------------------------------------------------------------------------
 
 #ifdef CONFIG_VOLUME_TESTS
-bool BlockMapMediumSays(uint32_t block, bool *taken)
+bool BlockMapMediumSays(uint64_t block, bool *taken)
 {
     if (!g_map.up || block >= g_map.blocks)
         return false;
     uint8_t *sector = kmalloc(TAGFS_SECTOR_SIZE);
     if (!sector)
         return false;
-    uint32_t off  = block % MAP_WINDOW_BLOCKS;
+    uint32_t off  = (uint32_t)(block % MAP_WINDOW_BLOCKS);
     bool     read = tagfs_volume_read(g_map.map_vlba + block / MAP_WINDOW_BLOCKS, 1, sector) == 0;
     if (read)
         *taken = MapBit(sector, off);
@@ -489,11 +489,11 @@ bool BlockMapMediumSays(uint32_t block, bool *taken)
     return read;
 }
 
-void BlockMapSectorAway(uint32_t block)
+void BlockMapSectorAway(uint64_t block)
 {
     if (!g_map.up || block >= g_map.blocks || LockRankAnyHeldHere())
         return;
-    uint32_t w = block / MAP_WINDOW_BLOCKS;
+    uint32_t w = (uint32_t)(block / MAP_WINDOW_BLOCKS);
 
     for (;;) {
         TagFSLockTake(MapLock());

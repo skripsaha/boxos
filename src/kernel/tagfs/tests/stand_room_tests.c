@@ -42,11 +42,11 @@
  * rather than stopping the machine. */
 #define STAND_ROOM_BOUND_MS 20000u
 
-static uint32_t            s_room_empties[STAND_ROOM_EMPTIES];
+static uint64_t            s_room_empties[STAND_ROOM_EMPTIES];
 static WriteJobStandAnswer s_room_answer;
 static uint8_t             s_room_op[sizeof(ManifestOp) + 40] __attribute__((aligned(8)));
 static Crate               s_room_crate;
-static uint32_t            s_room_fid;
+static uint64_t            s_room_fid;
 static char                s_room_text[TAG_TEXT_WIDTH + 1];
 
 static uint32_t StandRoomTail(void)
@@ -69,7 +69,7 @@ static uint64_t StandRoomResting(void)
 
 /* One block of the file's at `offset`, written through a fresh handle as a
  * caller in the kernel writes it: tagfs_write's answer itself. */
-static error_t StandRoomWrite(uint32_t file_id, uint64_t offset)
+static error_t StandRoomWrite(uint64_t file_id, uint64_t offset)
 {
     TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     if (!handle)
@@ -84,7 +84,7 @@ static error_t StandRoomWrite(uint32_t file_id, uint64_t offset)
 
 /* A write of one block of the file's, as a program's is made — a WriteJob,
  * the road its seat takes — answered to the stand's record. */
-static bool StandRoomSubmit(uint32_t file_id, uint64_t offset, bool append)
+static bool StandRoomSubmit(uint64_t file_id, uint64_t offset, bool append)
 {
     WriteJobAsk ask;
     memset(&ask, 0, sizeof(ask));
@@ -141,7 +141,7 @@ static bool StandRoomMakeEmpties(void)
     return true;
 }
 
-static void StandRoomLetGo(uint32_t* file_id)
+static void StandRoomLetGo(uint64_t* file_id)
 {
     if (*file_id)
         (void)tagfs_delete_file(*file_id, INK_UNWARRANTED);
@@ -158,7 +158,7 @@ static void StandRoomLetGoEmpties(void)
  * its block rests in Fallow, and the volume is short with room on its way.
  * The take ends on the allocator's refusal — ERR_WOULD_BLOCK as well, when the
  * pool's chain keeps slack Glean may take off. */
-static error_t StandRoomShort(StandInkGround* g, uint32_t* ground)
+static error_t StandRoomShort(StandInkGround* g, uint64_t* ground)
 {
     error_t rc = StandInkTakeAll(g);
     if (rc != ERR_TAGFS_NO_SPACE && rc != ERR_WOULD_BLOCK)
@@ -185,7 +185,8 @@ static TestResult TestStandRoomSpareThroughThePort(void)
     TestResult     verdict = TEST_PASS;
     uint8_t        seat    = tagfs_get_seat();
     StandInkGround ground  = { NULL, NULL, 0, 0 };
-    uint32_t       file_id = 0, rests = 0;
+    uint64_t       file_id = 0;
+    uint64_t       rests = 0;
     bool           asked   = false;
     const char*    aside   = StandPortAside(seat);
 
@@ -307,7 +308,7 @@ static TestResult TestStandRoomCreateGrowsTheRegistry(void)
 {
     TestResult     verdict = TEST_PASS;
     StandInkGround ground  = { NULL, NULL, 0, 0 };
-    uint32_t       rests   = 0;
+    uint64_t       rests   = 0;
     char           name[32];
     const char*    aside   = StandStepsAsideFor();
 
@@ -354,7 +355,7 @@ static TestResult TestStandRoomCreateParked(void)
     TestResult                 verdict = TEST_PASS;
     uint8_t                    seat    = tagfs_get_seat();
     StandInkGround             ground  = { NULL, NULL, 0, 0 };
-    uint32_t                   rests   = 0;
+    uint64_t                   rests   = 0;
     bool                       parked  = false;
     char                       name[32];
     static SettleOpStandAnswer answer;
@@ -419,7 +420,7 @@ out:
 /* The volume's ground given back, every change settled with the reserve made
  * whole, and taken again: the deletes have their Spares, and the file `rests`
  * given up rests in Fallow. */
-static error_t StandRoomShortAgain(StandInkGround* g, uint32_t* rests)
+static error_t StandRoomShortAgain(StandInkGround* g, uint64_t* rests)
 {
     StandInkGiveBack(g);
     error_t settled = TagFSSettle();
@@ -431,7 +432,8 @@ static TestResult TestStandRoomJobBetweenTheSteps(void)
     TestResult     verdict = TEST_PASS;
     uint8_t        seat    = tagfs_get_seat();
     StandInkGround ground  = { NULL, NULL, 0, 0 };
-    uint32_t       file_id = 0, rests = 0;
+    uint64_t       file_id = 0;
+    uint64_t       rests = 0;
     bool           began   = false;
     bool           asked   = false;
     const char*    aside   = StandStepsAsideFor();
@@ -479,7 +481,8 @@ static TestResult TestStandRoomKernelWriteBetweenTheSteps(void)
 {
     TestResult     verdict = TEST_PASS;
     StandInkGround ground  = { NULL, NULL, 0, 0 };
-    uint32_t       file_id = 0, rests = 0;
+    uint64_t       file_id = 0;
+    uint64_t       rests = 0;
     bool           began   = false;
     const char*    aside   = StandStepsAsideFor();
 
@@ -537,30 +540,31 @@ out:
 #define STAND_ROOM_BARE_ROUNDS 16u   /* cycles the ground at rest gets to come back in */
 #define STAND_ROOM_MANY  ((2u + SPARE_RESERVE) * POOL_QUITCLAIMS_PER_BLOCK)
 
-static uint32_t s_room_stay[STAND_ROOM_STAY];
-static uint32_t s_room_many[STAND_ROOM_MANY];
+static uint64_t s_room_stay[STAND_ROOM_STAY];
+static uint64_t s_room_many[STAND_ROOM_MANY];
 
 /* The storage deck's delete of `file_id`, asked from the kernel with no
  * program: the handler's answer. */
-static int StandRoomDelete(uint32_t file_id)
+static int StandRoomDelete(uint64_t file_id)
 {
     const OpRegistration* reg = OpRegistryLookup(OP_KIND(DECK_STORAGE, STORAGE_OBJ_DELETE));
     ManifestOp*           op  = (ManifestOp*)s_room_op;
 
+    uint32_t id = (uint32_t)file_id;    /* a program's file_id_t: the stand's ids are v1's */
     if (!reg)
         return ERR_NOT_INITIALIZED;
     memset(s_room_op, 0, sizeof(s_room_op));
     op->op_kind    = OP_KIND(DECK_STORAGE, STORAGE_OBJ_DELETE);
-    op->param_size = sizeof(file_id);
+    op->param_size = sizeof(id);
     op->in_crate   = CRATE_INDEX_NONE;
     op->out_crate  = CRATE_INDEX_NONE;
-    memcpy(op->params, &file_id, sizeof(file_id));
+    memcpy(op->params, &id, sizeof(id));
     return reg->handler(op, NULL, 0, NULL);
 }
 
 /* `count` empty files called `name`, their ids into `ids`: false at the first
  * that is not made. */
-static bool StandRoomMakeMany(const char* name, uint32_t* ids, uint32_t count)
+static bool StandRoomMakeMany(const char* name, uint64_t* ids, uint32_t count)
 {
     for (uint32_t i = 0; i < count; i++)
         if (tagfs_create_file(name, NULL, 0, &ids[i]) != 0)
@@ -583,7 +587,7 @@ static bool StandRoomBare(void)
     return false;
 }
 
-static void StandRoomLetGoMany(uint32_t* ids, uint32_t count)
+static void StandRoomLetGoMany(uint64_t* ids, uint32_t count)
 {
     for (uint32_t i = 0; i < count; i++)
         StandRoomLetGo(&ids[i]);
@@ -593,7 +597,8 @@ static TestResult TestStandRoomEmptyDeletesOnAFullVolume(void)
 {
     TestResult     verdict = TEST_PASS;
     StandInkGround ground  = { NULL, NULL, 0, 0 };
-    uint32_t       big     = 0, refused = 0, first_error = 0;
+    uint32_t       refused = 0, first_error = 0;
+    uint64_t       big     = 0;
     const char*    aside   = StandStepsAsideFor();
 
     if (aside)

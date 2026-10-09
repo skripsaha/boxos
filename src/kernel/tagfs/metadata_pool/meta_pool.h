@@ -153,24 +153,24 @@ void     tagfs_metadata_free(TagFSMetadata* meta);
  * door keeps the count: what a record leaves, what one comes to — and, for the
  * link a record leaves, the newest link a record that took its place lies in,
  * the Quitclaim's included (PoolFront.replaced_by). */
-error_t  PoolMirrorPut(uint32_t fid, FileRecord* rec, const RecordWhere* where,
+error_t  PoolMirrorPut(uint64_t fid, FileRecord* rec, const RecordWhere* where,
                        FileMapStake* stake);
 
 /* The file out of the map — its record and its row there — through the same
  * door, nothing taking its record's place; the file table is the caller's to
  * tell. */
-void     PoolMirrorDrop(uint32_t fid);
+void     PoolMirrorDrop(uint64_t fid);
 
 /* The file's record, where `from` says, laid again where `to` says (Glean):
  * the map, the file's row and the links' counts follow. False, and nothing
  * changed, when the file's record is not the one at `from`. */
-bool     PoolMirrorMove(uint32_t fid, const RecordWhere* from, const RecordWhere* to);
+bool     PoolMirrorMove(uint64_t fid, const RecordWhere* from, const RecordWhere* to);
 
 /* Whether `where` can name a record of `fid` (MP-D9): its link is on the chain
  * and its offset inside the block's records — and where the block is in memory
  * (the tail, a closed block not yet written), a whole record of that file
  * begins exactly there. */
-bool     RecordWhereValid(const RecordWhere* where, uint32_t fid);
+bool     RecordWhereValid(const RecordWhere* where, uint64_t fid);
 
 /* The block of link `link`: false when the link is not on the chain. */
 bool     PoolLinkBlock(uint32_t link, uint32_t* out_block);
@@ -184,7 +184,7 @@ uint32_t PoolTailRoom(void);
 
 /* Whether `where` names a record of `fid` in the tail that no cycle has taken
  * yet — neither settled nor in flight — and may be replaced; its length. */
-bool     PoolTailHolds(const RecordWhere* where, uint32_t fid, uint32_t* out_len);
+bool     PoolTailHolds(const RecordWhere* where, uint64_t fid, uint32_t* out_len);
 
 /* That record taken out of the tail, the records after it moved down and the
  * map told where each now sits. Only after PoolTailHolds said yes. */
@@ -290,7 +290,7 @@ uint32_t PoolSparesHeld(uint32_t* out, uint32_t cap);
  * the tails turned onto one since the last S0 — cleared in `bits`, which
  * covers exactly that run. How many were cleared.
  */
-uint32_t PoolUnnamedLeftOut(uint32_t first, uint32_t count, uint8_t* bits);
+uint32_t PoolUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits);
 
 /*
  * A Spare made by a maker that may not stand over the medium — an

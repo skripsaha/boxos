@@ -31,7 +31,7 @@ void    GroundCensusBegin(void);
 /* `count` blocks from `start` are `owner`'s — `who` names which one of its
  * kind (a file id; 0 where the kind has one). Runs past the data run are cut
  * to it. Memory refused is remembered: the census then decides nothing. */
-void    GroundClaim(GroundOwner owner, uint32_t start, uint32_t count, uint32_t who);
+void    GroundClaim(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who);
 
 /* The claims against the medium's map, a window at a time: the orphans and the
  * missing named — every orphan run handed to `orphan` when it is given — the
@@ -49,7 +49,7 @@ void    GroundCensusEnd(void);
 /* The owner of the first claim made on `block` since Begin, or
  * GROUND_OWNER_KINDS when none names it: the stand asks what one owner
  * claims, between a Begin and an End of its own, with no mount running. */
-GroundOwner GroundClaimOf(uint32_t block);
+GroundOwner GroundClaimOf(uint64_t block);
 #endif
 
 #endif /* TAGFS_GROUND_CENSUS_H */

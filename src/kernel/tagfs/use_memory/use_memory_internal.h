@@ -20,7 +20,7 @@ typedef struct {
 
 /* A run of the census's orphans. */
 typedef struct {
-    uint32_t start;
+    uint64_t start;
     uint32_t count;
 } UseOrphanRun;
 

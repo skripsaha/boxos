@@ -319,7 +319,7 @@ void file_table_shutdown(void) {
     debug_printf("[FileTable] shutdown\n");
 }
 
-int file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset) {
+int file_table_lookup(uint64_t file_id, uint32_t* out_block, uint32_t* out_offset) {
     FileMap* files = table_files();
     return files && FileMapRowGet(files, file_id, out_block, out_offset) ? 0 : -1;
 }
@@ -327,9 +327,10 @@ int file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offse
 /* The link that carries a row marked owed, after the row changed in the map.
  * A row past the chain marks no link: the link that will carry it is attached
  * by the flush already owed to the medium (FileTableGrow). Under the state
- * lock, or with the door shut. */
-static void table_mark(uint32_t file_id, bool named) {
-    uint32_t link = file_id / TAGFS_FTABLE_PER_BLOCK;
+ * lock, or with the door shut. A row's id is format v1's u32 — no record of
+ * that format carries another (PackV1) — so its link is one too. */
+static void table_mark(uint64_t file_id, bool named) {
+    uint32_t link = (uint32_t)(file_id / TAGFS_FTABLE_PER_BLOCK);
     g_gen++;
     if (link < g_link_count)
         g_links[link].edited = g_gen;
@@ -337,19 +338,19 @@ static void table_mark(uint32_t file_id, bool named) {
         g_links_wanted = link + 1;
 }
 
-int file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset) {
+int file_table_update(uint64_t file_id, uint32_t meta_block, uint32_t meta_offset) {
     FileMap* files = table_files();
     if (!files || FileMapRowSet(files, file_id, meta_block, meta_offset) != OK) {
-        kprintf("[FileTable] there is no memory to hold a row for file id %u "
+        kprintf("[FileTable] there is no memory to hold a row for file id %llu "
                 "— the row is not kept, and the change that named it is "
-                "refused\n", file_id);
+                "refused\n", (unsigned long long)file_id);
         return -1;
     }
     table_mark(file_id, true);
     return 0;
 }
 
-int file_table_delete(uint32_t file_id) {
+int file_table_delete(uint64_t file_id) {
     FileMap* files = table_files();
     if (!files)
         return -1;

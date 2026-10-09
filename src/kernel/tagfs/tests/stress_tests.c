@@ -15,7 +15,7 @@
 #define STRESS_FILE_COUNT  10
 #define STRESS_LARGE_BYTES (64u * 1024u)      /* sixteen blocks */
 
-static uint32_t s_stress_ids[STRESS_FILE_COUNT];
+static uint64_t s_stress_ids[STRESS_FILE_COUNT];
 
 /* Ten files, each written with bytes no other file holds, and each read back
  * whole. It used to ignore every open, write and read result, and wrote the
@@ -64,7 +64,7 @@ out:
 static TestResult test_stress_large_file(void)
 {
     TestResult       verdict    = TEST_PASS;
-    uint32_t         file_id    = 0;
+    uint64_t         file_id    = 0;
     uint16_t         tag_ids[1] = {1};
     TagFSFileHandle* handle     = NULL;
     bool             have_meta  = false;
@@ -87,7 +87,7 @@ static TestResult test_stress_large_file(void)
     have_meta = true;
     uint32_t blocks = 0;
     for (uint32_t e = 0; e < meta.extent_count && meta.extents; e++)
-        blocks += meta.extents[e].block_count;
+        blocks += meta.extents[e].count;
     TEST_ASSERT_EQ(meta.size, STRESS_LARGE_BYTES, "the file is as long as what was written");
     TEST_ASSERT_EQ(blocks, STRESS_LARGE_BYTES / TAGFS_BLOCK_SIZE,
                    "and holds a block for every 4 KiB of it");

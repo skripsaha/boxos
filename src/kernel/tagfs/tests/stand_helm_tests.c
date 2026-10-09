@@ -164,7 +164,7 @@ static bool StandTurnDrained(bool holding_first, TagFSFileHandle *first_handle, 
 static TestResult TestStandHelmWritersTakeTurns(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
+    uint64_t         file_id = 0;
     TagFSFileHandle *first   = NULL;
     TagFSFileHandle *second  = NULL;
     bool             holding = false;
@@ -240,8 +240,8 @@ out:
 static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
-    uint32_t         block   = 0;
+    uint64_t         file_id = 0;
+    uint64_t         block   = 0;
     TagFSFileHandle *reader  = NULL;
     const char      *aside   = StandStepsAsideFor();
 
@@ -300,7 +300,7 @@ out:
 // the Helm handed on.
 // ----------------------------------------------------------------------------
 
-static bool StandFileIsGone(uint32_t file_id)
+static bool StandFileIsGone(uint64_t file_id)
 {
     TagFSMetadata meta;
     memset(&meta, 0, sizeof(meta));
@@ -316,9 +316,9 @@ static bool StandFileIsGone(uint32_t file_id)
 static TestResult TestStandHelmDefragBesideDelete(void)
 {
     TestResult       verdict  = TEST_PASS;
-    uint32_t         file_id  = 0;
-    uint32_t         filler   = 0;
-    uint32_t         queued   = 0;
+    uint64_t         file_id  = 0;
+    uint64_t         filler   = 0;
+    uint64_t         queued   = 0;
     TagFSFileHandle *handle   = NULL;
     TagFSFileHandle *waiting  = NULL;
     bool             holding  = false;
@@ -419,7 +419,7 @@ out:
 static TestResult TestStandHelmWriteYieldsBetweenWindows(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
+    uint64_t         file_id = 0;
     TagFSFileHandle *writer  = NULL;
     uint8_t         *data    = NULL;
     uint8_t         *back    = NULL;
@@ -485,8 +485,8 @@ out:
 static TestResult TestStandHelmWriteRefusedPartWay(void)
 {
     TestResult     verdict = TEST_PASS;
-    uint32_t       file_id = 0;
-    uint32_t       block   = 0;
+    uint64_t       file_id = 0;
+    uint64_t       block   = 0;
     uint8_t       *old     = NULL;
     uint8_t       *data    = NULL;
     uint8_t       *back    = NULL;
@@ -570,8 +570,8 @@ out:
 static TestResult TestStandHelmRecordRoomClaimed(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
-    uint32_t         filler  = 0;
+    uint64_t         file_id = 0;
+    uint64_t         filler  = 0;
     TagFSFileHandle *handle  = NULL;
     bool             holding = false;
     bool             loaded  = false;
@@ -599,25 +599,27 @@ static TestResult TestStandHelmRecordRoomClaimed(void)
     uint64_t at = 0;
     TEST_ASSERT_OK(PlotBeginWrite(&plot, plot.size, false, B, &at),
                    "and reserves a block to grow by, claiming the record's room");
-    if (plot.run_count <= plot.runs_before) {
+    uint64_t extents = PackV1Extents(plot.runs, plot.run_count);
+    if (extents <= plot.runs_before) {
         verdict = test_steps_aside("the volume laid the block next to the file's, so its record "
                                    "names no more extents and nothing is claimed");
         goto out;
     }
     TestEvidence("extents the write in flight claimed room for", plot.claimed);
-    TEST_ASSERT_EQ(HelmClaimedRuns(file_id), plot.run_count, "the claim is its Helm's");
+    TEST_ASSERT_EQ(HelmClaimedRuns(file_id), extents, "the claim is its Helm's");
 
     /* A name with no stem wears no tag, so the record is its name and its
      * extents: this one leaves room for exactly the extents it names now. */
     uint32_t name_bytes = TAGFS_MPOOL_DATA_SIZE - RECORD_HEADER_SIZE -
-                          plot.runs_before * (uint32_t)sizeof(FileExtent);
+                          (uint32_t)plot.runs_before * (uint32_t)sizeof(FileExtent);
     name = kmalloc(name_bytes + 1);
     TEST_ASSERT(name, "room for the long name");
     memset(name, 'q', name_bytes);
     name[0]          = '.';
     name[name_bytes] = '\0';
-    TagFSMetadata now = { .filename = name, .extent_count = plot.runs_before };
-    TEST_ASSERT(PlotFits(&now, NULL), "the name fits beside the extents the record names now");
+    TagFSMetadata now = { .filename = name };
+    TEST_ASSERT(PlotRunRoom(&now) >= plot.runs_before,
+                "the name fits beside the extents the record names now");
 
     TEST_ASSERT_EQ(tagfs_rename_file(file_id, name, INK_UNWARRANTED), -(int)ERR_TAGFS_RECORD_FULL,
                    "and is refused: it would take the room the write in flight claimed");
@@ -669,8 +671,8 @@ out:
 static TestResult TestStandHelmGuardedFileRefused(void)
 {
     TestResult  verdict  = TEST_PASS;
-    uint32_t    file_id  = 0;
-    uint32_t    block    = 0;
+    uint64_t    file_id  = 0;
+    uint64_t    block    = 0;
     bool        armed    = false;
     TagSpelling system   = TagSpellingOfKey("system");
     uint64_t    stats[2] = { UINT64_MAX, UINT64_MAX };

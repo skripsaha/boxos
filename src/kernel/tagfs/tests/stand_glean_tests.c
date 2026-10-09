@@ -57,7 +57,7 @@ static uint32_t StandGleanHead(void)
 }
 
 /* The file written again at its start, and a cycle settling it. */
-static bool StandGleanOverwrite(uint32_t file_id, uint32_t round)
+static bool StandGleanOverwrite(uint64_t file_id, uint32_t round)
 {
     TestFillAt(g_test_buffer, STAND_GLEAN_BYTES, file_id, round);
     return StandWriteAt(file_id, 0, g_test_buffer, STAND_GLEAN_BYTES) == (int)STAND_GLEAN_BYTES &&
@@ -101,7 +101,7 @@ static bool StandGleanHeadNext(uint32_t* next)
  * block in *first. False — nothing gleaned — after as many cycles as the chain
  * may be long past its slack, twice over.
  */
-static bool StandGleanUntilTaken(uint32_t file_id, uint32_t* gone, uint32_t* first)
+static bool StandGleanUntilTaken(uint64_t file_id, uint32_t* gone, uint32_t* first)
 {
     uint32_t chain, live;
     StandGleanChain(&chain, &live);
@@ -121,13 +121,13 @@ static bool StandGleanUntilTaken(uint32_t file_id, uint32_t* gone, uint32_t* fir
 }
 
 /* The file a test writes, made and settled. */
-static bool StandGleanFile(const char* name, uint32_t* file_id)
+static bool StandGleanFile(const char* name, uint64_t* file_id)
 {
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x61, 0);
     return StandMakeFile(name, g_test_buffer, TAGFS_BLOCK_SIZE, file_id) && TagFSSettle() == OK;
 }
 
-static void StandGleanLetGo(uint32_t file_id)
+static void StandGleanLetGo(uint64_t file_id)
 {
     if (file_id) {
         (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
@@ -145,7 +145,8 @@ static void StandGleanLetGo(uint32_t file_id)
 static TestResult TestStandGleanBoundsTheChain(void)
 {
     TestResult  verdict = TEST_PASS;
-    uint32_t    file_id = 0, chain = 0, live = 0, most = 0, most_live = 0;
+    uint64_t    file_id = 0;
+    uint32_t    chain = 0, live = 0, most = 0, most_live = 0;
     GleanCounts before, after;
 
     TEST_ASSERT(StandGleanFile("glean_overwrites", &file_id), "a one-block file is made and settled");
@@ -179,7 +180,7 @@ out:
 #define STAND_GLEAN_SPREAD      64u
 #define STAND_GLEAN_ROUNDS      50u
 
-static uint32_t s_spread[STAND_GLEAN_SPREAD];
+static uint64_t s_spread[STAND_GLEAN_SPREAD];
 
 static void StandGleanSpreadLetGo(void)
 {
@@ -250,7 +251,8 @@ out:
 static TestResult TestStandGleanHeadStaysLinked(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0, gone = 0, first = 0, next = 0, chain_len = 0, live = 0;
+    uint64_t   file_id = 0;
+    uint32_t   gone = 0, first = 0, next = 0, chain_len = 0, live = 0;
     uint32_t   head    = StandGleanHead();
     uint32_t   walked[2];
     SettleMark seal, other;
@@ -298,7 +300,8 @@ out:
 static TestResult TestStandGleanTakenRestsUntilPast(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0, gone = 0, first = 0, next = 0;
+    uint64_t   file_id = 0;
+    uint32_t   gone = 0, first = 0, next = 0;
 
     TEST_ASSERT(StandGleanFile("glean_rests", &file_id), "a one-block file is made and settled");
     TEST_ASSERT(StandGleanUntilTaken(file_id, &gone, &first),
@@ -329,7 +332,8 @@ out:
 static TestResult TestStandGleanUnnamedLeftFree(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0, gone = 0, first = 0, chain_len = 0, live = 0;
+    uint64_t   file_id = 0;
+    uint32_t   gone = 0, first = 0, chain_len = 0, live = 0;
     uint32_t   walked[STAND_GLEAN_WALK];
     bool       unnamed = false, taken = true;
     StandChain chain;
@@ -377,7 +381,7 @@ out:
 #define STAND_GLEAN_FRUITLESS_ROUNDS 16u
 #define STAND_GLEAN_DENSE            (POOL_QUITCLAIMS_PER_BLOCK + 2u)
 
-static uint32_t s_dense[STAND_GLEAN_DENSE];
+static uint64_t s_dense[STAND_GLEAN_DENSE];
 
 /* Waiter's cycles, each telling the allocator is short while Glean says it may
  * free, until nothing rests and Glean says no slack is its: whether they came
@@ -453,7 +457,8 @@ out:
 static TestResult TestStandGleanLieFallsBack(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0, gone = 0, first = 0;
+    uint64_t   file_id = 0;
+    uint32_t   gone = 0, first = 0;
     SettleMark seal, other, lied;
     bool       has_other = false, fell_back = false;
     int        stood_on  = -1;
@@ -485,7 +490,7 @@ out:
 
 /* Where a file's record lay before a cycle. */
 typedef struct {
-    uint32_t fid;
+    uint64_t fid;
     uint32_t link;
 } StandGleanPlace;
 
@@ -494,7 +499,9 @@ typedef struct {
 static uint32_t StandGleanPlaces(StandGleanPlace* out, uint32_t room)
 {
     FileMap* files = tagfs_get_state()->files;
-    uint32_t batch[32], from = 1, got, n = 0;
+    uint64_t from = 1;
+    uint32_t got, n = 0;
+    uint64_t batch[32];
     while (n < room && (got = FileMapFiles(files, from, batch, ARRAY_SIZE(batch))) > 0) {
         for (uint32_t i = 0; i < got && n < room; i++) {
             RecordWhere where;
@@ -506,7 +513,7 @@ static uint32_t StandGleanPlaces(StandGleanPlace* out, uint32_t room)
             out[n].link   = where.link;
             n++;
         }
-        if (batch[got - 1] == 0xFFFFFFFFu)
+        if (batch[got - 1] == UINT64_MAX)
             break;
         from = batch[got - 1] + 1;
     }
@@ -515,7 +522,7 @@ static uint32_t StandGleanPlaces(StandGleanPlace* out, uint32_t room)
 
 /* The block a file's record lies in now: false when the map holds none, or its
  * link is off the chain. */
-static bool StandGleanRecordBlock(uint32_t fid, uint32_t* link, uint32_t* block)
+static bool StandGleanRecordBlock(uint64_t fid, uint32_t* link, uint32_t* block)
 {
     TagFSState* fs = tagfs_get_state();
     RecordWhere where;
@@ -544,7 +551,8 @@ static bool StandGleanRecordBlock(uint32_t fid, uint32_t* link, uint32_t* block)
 static TestResult TestStandGleanMovedLiesClosed(void)
 {
     TestResult       verdict  = TEST_PASS;
-    uint32_t         file_id  = 0, chain = 0, live = 0, count = 0, moved = 0, rolled = 0;
+    uint64_t         file_id  = 0;
+    uint32_t         chain = 0, live = 0, count = 0, moved = 0, rolled = 0;
     uint32_t         room     = 0;
     StandGleanPlace* places   = NULL;
     bool             gleaned  = false, has_other = false, fell_back = false, marked = false;
@@ -631,11 +639,13 @@ out:
  * laid again as it is — renamed to its own name, a record the same as the one
  * it replaces — so no block up to that link holds a record the map names but
  * `keep`'s. How many in *count; false when one was refused. */
-static bool StandGleanLayAgainUpTo(uint32_t upto, uint32_t keep, uint32_t* count)
+static bool StandGleanLayAgainUpTo(uint32_t upto, uint64_t keep, uint32_t* count)
 {
     FileMap* files = tagfs_get_state()->files;
     char*    name  = (char*)g_test_output;
-    uint32_t batch[32], from = 1, got;
+    uint64_t from  = 1;
+    uint32_t got;
+    uint64_t batch[32];
 
     *count = 0;
     while ((got = FileMapFiles(files, from, batch, ARRAY_SIZE(batch))) > 0) {
@@ -654,7 +664,7 @@ static bool StandGleanLayAgainUpTo(uint32_t upto, uint32_t keep, uint32_t* count
                 return false;
             (*count)++;
         }
-        if (batch[got - 1] == 0xFFFFFFFFu)
+        if (batch[got - 1] == UINT64_MAX)
             break;
         from = batch[got - 1] + 1;
     }
@@ -695,7 +705,7 @@ static bool StandGleanCadenceBare(void)
     return false;
 }
 
-static bool StandGleanHolds(uint32_t fid)
+static bool StandGleanHolds(uint64_t fid)
 {
     FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
     if (rec)
@@ -721,7 +731,8 @@ static TestResult TestStandGleanReplacedWaitsForTheClose(void)
     TagFSState* fs      = tagfs_get_state();
     uint8_t     seat    = tagfs_get_seat();
     uint32_t    epoch   = tagfs_mount_epoch();
-    uint32_t    file_id = 0, link = 0, block = 0, laid = 0, now_link = 0, now_block = 0;
+    uint64_t    file_id = 0;
+    uint32_t    link = 0, block = 0, laid = 0, now_link = 0, now_block = 0;
     bool        reached = false, let_go = false, has_other = false;
     bool        in_open = false, front_kept = false;
     PoolFront   front;

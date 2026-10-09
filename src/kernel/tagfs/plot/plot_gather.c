@@ -9,13 +9,13 @@
  * PlotGather — a record out of room for extents gets it back by moving the
  * fewest blocks that give it (plot.h).
  *
- * ‼ CONSECUTIVE EXTENTS, BECAUSE AN EXTENT IS A PLACE IN THE FILE. Gathering
- * extents that are not neighbours in the file into one run on the medium saves
+ * ‼ CONSECUTIVE RUNS, BECAUSE A RUN IS A PLACE IN THE FILE. Gathering runs
+ * that are not neighbours in the file into one run on the medium saves
  * nothing: each still begins where the file's order puts it, so the record
- * still needs one extent for each. Only a window of neighbours laid in one run
- * becomes one extent — or as many as its length needs at PLOT_RUN_MOST blocks
- * an extent — and among the windows that shed enough, the one with the fewest
- * blocks is the cheapest to copy.
+ * still needs an extent for each. Only a window of neighbours laid in one run
+ * becomes one Strip — as many extents as PackV1 cuts its length into — and
+ * among the windows that shed enough, the one with the fewest blocks is the
+ * cheapest to copy.
  *
  * The new run is a Stake like any ground the call takes, so a write that goes
  * no further gives it back; the ground it leaves is the record's until a
@@ -28,10 +28,12 @@
  * last window is copied and made durable, so the move is one Ink, as before.
  */
 
-/* How many extents `blocks` in one run take. */
-static uint32_t PlotPieces(uint64_t blocks)
+/* How many extents of the record one run of `blocks` blocks takes — no more
+ * blocks than a Strip counts. */
+static uint64_t PlotRunExtents(uint64_t blocks)
 {
-    return (uint32_t)((blocks + PLOT_RUN_MOST - 1) / PLOT_RUN_MOST);
+    Strip one = { .count = (uint32_t)blocks, .kind = STRIP_DATA };
+    return PackV1Extents(&one, 1);
 }
 
 /* B10, whatever the warrant: a warrant lets a call change a file the system
@@ -41,15 +43,16 @@ static error_t PlotGatherKept(const Plot *p, const uint16_t *tags, uint32_t coun
 {
     if (!InkWearsGuarded(tags, count) && !InkTouchesBoot(p->runs, p->run_count))
         return OK;
-    kprintf("[TagFS] file %u is one the system keeps — it wears system, boot or god, or "
+    kprintf("[TagFS] file %llu is one the system keeps — it wears system, boot or god, or "
             "holds the kernel the Deed points the loader at — and its blocks are not "
             "moved\n", p->fid);
     return ERR_PERMISSION_DENIED;
 }
 
-/* The window [*first, *last] of extents the loaded record named that sheds at
- * least `shed` extents with the fewest blocks; `shed` 0 wants every extent. */
-static bool PlotChooseWindow(const Plot *p, uint32_t shed, uint32_t *first, uint32_t *last,
+/* The window [*first, *last] of runs the loaded record named that sheds at
+ * least `shed` extents with the fewest blocks — no more than one Strip counts;
+ * `shed` 0 wants every run. */
+static bool PlotChooseWindow(const Plot *p, uint64_t shed, uint32_t *first, uint32_t *last,
                              uint64_t *blocks)
 {
     uint64_t best = UINT64_MAX;
@@ -58,8 +61,8 @@ static bool PlotChooseWindow(const Plot *p, uint32_t shed, uint32_t *first, uint
     if (shed == 0) {
         uint64_t all = 0;
         for (uint32_t i = 0; i < p->run_count; i++)
-            all += p->runs[i].block_count;
-        if (all > p->blocks_before || p->run_count == 0)
+            all += p->runs[i].count;
+        if (all > p->blocks_before || all > UINT32_MAX || p->run_count == 0)
             return false;
         *first  = 0;
         *last   = p->run_count - 1;
@@ -67,16 +70,17 @@ static bool PlotChooseWindow(const Plot *p, uint32_t shed, uint32_t *first, uint
         return true;
     }
 
-    for (uint32_t i = 0; i < p->run_count; base += p->runs[i].block_count, i++) {
-        uint64_t sum = 0, end = base;
+    for (uint32_t i = 0; i < p->run_count; base += p->runs[i].count, i++) {
+        uint64_t sum = 0, end = base, extents = 0;
         for (uint32_t j = i; j < p->run_count; j++) {
-            end += p->runs[j].block_count;
+            end += p->runs[j].count;
             if (end > p->blocks_before)
                 break;                          /* only ground the record named moves */
-            sum += p->runs[j].block_count;
-            if (sum >= best)
-                break;
-            if ((j - i + 1) >= PlotPieces(sum) + shed) {
+            sum += p->runs[j].count;
+            if (sum >= best || sum > UINT32_MAX)
+                break;                          /* ... into one run, as long as a Strip counts */
+            extents += PackV1Extents(&p->runs[j], 1);
+            if (extents >= PlotRunExtents(sum) + shed) {
                 best   = sum;
                 *first = i;
                 *last  = j;
@@ -89,19 +93,19 @@ static bool PlotChooseWindow(const Plot *p, uint32_t shed, uint32_t *first, uint
 }
 
 /* The runs with [first, last] replaced by the run [start, start + blocks). */
-static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint32_t start, uint32_t blocks)
+static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint64_t start, uint32_t blocks)
 {
-    uint64_t    room = (uint64_t)p->run_count + PlotPieces(blocks) + 2;
-    FileExtent *runs = room <= UINT32_MAX ? kmalloc(sizeof(FileExtent) * room) : NULL;
+    uint64_t room = (uint64_t)p->run_count + 1;
+    Strip   *runs = room <= UINT32_MAX ? kmalloc(sizeof(Strip) * room) : NULL;
     if (!runs)
         return ERR_NO_MEMORY;
 
     uint32_t n = 0;
     for (uint32_t i = 0; i < first; i++)
-        PlotRunsPut(runs, &n, p->runs[i].start_block, p->runs[i].block_count);
+        PlotRunsPut(runs, &n, p->runs[i].start, p->runs[i].count);
     PlotRunsPut(runs, &n, start, blocks);
     for (uint32_t i = last + 1; i < p->run_count; i++)
-        PlotRunsPut(runs, &n, p->runs[i].start_block, p->runs[i].block_count);
+        PlotRunsPut(runs, &n, p->runs[i].start, p->runs[i].count);
 
     kfree(p->runs);
     p->runs      = runs;
@@ -110,7 +114,7 @@ static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint32_t start
     return OK;
 }
 
-error_t PlotGatherBegin(Plot *p, uint32_t shed, uint32_t hint, PlotGathering *g)
+error_t PlotGatherBegin(Plot *p, uint64_t shed, uint64_t hint, PlotGathering *g)
 {
     memset(g, 0, sizeof(*g));
     error_t rc = PlotGatherKept(p, p->meta.tag_ids, p->meta.tag_count);
@@ -120,15 +124,15 @@ error_t PlotGatherBegin(Plot *p, uint32_t shed, uint32_t hint, PlotGathering *g)
     uint32_t first = 0, last = 0;
     uint64_t blocks = 0;
     if (!PlotChooseWindow(p, shed, &first, &last, &blocks)) {
-        kprintf("[TagFS] file %u: no run of its %u extent(s) can be gathered to shed %u of them\n",
-                p->fid, p->run_count, shed);
+        kprintf("[TagFS] file %llu: no run of its %u extent(s) can be gathered to shed %llu of "
+                "them\n", p->fid, p->run_count, (unsigned long long)shed);
         return ERR_TAGFS_RECORD_FULL;
     }
 
-    uint32_t start = 0;
+    uint64_t start = 0;
     rc = BlockMapTakeFor(p->fid, (uint32_t)blocks, hint, &start, __func__);
     if (rc != OK) {
-        kprintf("[TagFS] file %u: gathering extents %u to %u of it needs one free run of %llu "
+        kprintf("[TagFS] file %llu: gathering extents %u to %u of it needs one free run of %llu "
                 "block(s), and the volume has none that long\n", p->fid, first, last,
                 (unsigned long long)blocks);
         return rc;
@@ -148,22 +152,22 @@ error_t PlotGatherBegin(Plot *p, uint32_t shed, uint32_t hint, PlotGathering *g)
 
 /* `n` blocks from `from` read into `buf`, each checked against its digest on
  * the way through: OK, or why they would not move to `to` — said. */
-static error_t PlotGatherRead(const Plot *p, uint32_t from, uint32_t n, uint8_t *buf, uint32_t to)
+static error_t PlotGatherRead(const Plot *p, uint64_t from, uint32_t n, uint8_t *buf, uint64_t to)
 {
     error_t rc = TagFSReadRun(from, n, buf);
     for (uint32_t j = 0; j < n && rc == OK; j++)
         if (!IntegrityVerify(from + j, buf + (size_t)j * TAGFS_BLOCK_SIZE))
             rc = ERR_CHECKSUM;
     if (rc != OK)
-        kprintf("[TagFS] file %u: blocks %u..%u would not move to %u (error %u) — its "
-                "extents are left where they are\n", p->fid, from, from + n - 1, to,
-                (unsigned)rc);
+        kprintf("[TagFS] file %llu: blocks %llu..%llu would not move to %llu (error %u) — its "
+                "extents are left where they are\n", p->fid, (unsigned long long)from,
+                (unsigned long long)(from + n - 1), (unsigned long long)to, (unsigned)rc);
     return rc;
 }
 
 /* The next window of the gather: the blocks after the last one copied, from
- * as many extents as it reaches, read one extent's piece at a time and laid
- * into the run in one command. */
+ * as many runs as it reaches, read one run's piece at a time and laid into
+ * the run in one command. */
 static error_t PlotGatherWindow(const Plot *p, PlotGathering *g)
 {
     uint32_t most = TagFSRunBlocks();
@@ -171,13 +175,13 @@ static error_t PlotGatherWindow(const Plot *p, PlotGathering *g)
     if (!buf)
         return ERR_NO_MEMORY;
 
-    uint32_t to     = g->to + (uint32_t)g->copied;
+    uint64_t to     = g->to + g->copied;
     uint32_t filled = 0;
     error_t  rc     = OK;
     while (rc == OK && filled < most && g->extent <= g->last) {
-        const FileExtent *e    = &p->runs[g->extent];
-        uint32_t          from = e->start_block + g->within;
-        uint32_t          n    = e->block_count - g->within;
+        const Strip *e    = &p->runs[g->extent];
+        uint64_t     from = e->start + g->within;
+        uint32_t     n    = e->count - g->within;
         if (n > most - filled)
             n = most - filled;
         rc = PlotGatherRead(p, from, n, buf + (size_t)filled * TAGFS_BLOCK_SIZE, to + filled);
@@ -185,7 +189,7 @@ static error_t PlotGatherWindow(const Plot *p, PlotGathering *g)
             break;
         filled    += n;
         g->within += n;
-        if (g->within == e->block_count) {
+        if (g->within == e->count) {
             g->extent++;
             g->within = 0;
         }
@@ -194,9 +198,9 @@ static error_t PlotGatherWindow(const Plot *p, PlotGathering *g)
         uint32_t landed = 0;
         rc = TagFSWriteRun(to, filled, buf, &landed);
         if (rc != OK)
-            kprintf("[TagFS] file %u: the gathered blocks would not be laid at %u..%u (error "
-                    "%u) — its extents are left where they are\n", p->fid, to,
-                    to + filled - 1, (unsigned)rc);
+            kprintf("[TagFS] file %llu: the gathered blocks would not be laid at %llu..%llu (error "
+                    "%u) — its extents are left where they are\n", p->fid,
+                    (unsigned long long)to, (unsigned long long)(to + filled - 1), (unsigned)rc);
     }
     kfree(buf);
     if (rc == OK)
@@ -229,7 +233,7 @@ static error_t PlotGatherLay(Plot *p, PlotGathering *g)
     uint32_t noted = p->freed_count;
     uint32_t count = g->last - g->first + 1;
     for (uint32_t i = g->first; i <= g->last && rc == OK; i++)
-        rc = PlotLetGoLater(p, p->runs[i].start_block, p->runs[i].block_count);
+        rc = PlotLetGoLater(p, p->runs[i].start, p->runs[i].count);
     if (rc == OK)
         rc = PlotSplice(p, g->first, g->last, g->to, (uint32_t)g->blocks);
     if (rc != OK) {
@@ -237,8 +241,9 @@ static error_t PlotGatherLay(Plot *p, PlotGathering *g)
         return rc;
     }
     g->laid = true;
-    kprintf("[TagFS] file %u: %u extent(s) of it, %llu block(s), gathered into one run at %u — "
-            "it now has %u\n", p->fid, count, (unsigned long long)g->blocks, g->to, p->run_count);
+    kprintf("[TagFS] file %llu: %u extent(s) of it, %llu block(s), gathered into one run at %llu "
+            "— it now has %u\n", p->fid, count, (unsigned long long)g->blocks,
+            (unsigned long long)g->to, p->run_count);
     return OK;
 }
 
@@ -254,7 +259,7 @@ error_t PlotGatherStep(Plot *p, PlotGathering *g, bool *out_laid)
     return rc;
 }
 
-error_t PlotGather(Plot *p, uint32_t shed, uint32_t hint)
+error_t PlotGather(Plot *p, uint64_t shed, uint64_t hint)
 {
     PlotGathering g;
     bool          laid = false;

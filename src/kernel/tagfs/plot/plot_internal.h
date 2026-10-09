@@ -9,20 +9,17 @@
  * together). Nothing outside plot/ calls these.
  */
 
-/* [start, start + count) after runs[*n - 1], merged into it when it begins
- * where that one ends and cut into extents of at most PLOT_RUN_MOST blocks.
- * The array has room for count / PLOT_RUN_MOST + 2 more. */
-void     PlotRunsPut(FileExtent *runs, uint32_t *n, uint32_t start, uint32_t count);
+/* [start, start + count) of ground after runs[*n - 1]: merged into it when it
+ * begins where that one ends and the two together are no longer than a Strip
+ * counts, else a Strip of its own. The array has room for one more. */
+void     PlotRunsPut(Strip *runs, uint32_t *n, uint64_t start, uint32_t count);
 
 /* A run this call took, recorded as a Stake: OK or ERR_NO_MEMORY. */
-error_t  PlotStake(Plot *p, uint32_t start, uint32_t count);
+error_t  PlotStake(Plot *p, uint64_t start, uint32_t count);
 
 /* Ground a record named, come to rest in Fallow once a record that no longer
  * names it is inked (TagFSInkPlot): OK or ERR_NO_MEMORY. */
-error_t  PlotLetGoLater(Plot *p, uint32_t start, uint32_t count);
-
-/* How many extents the record has room for beside its tags and its name. */
-uint32_t PlotRunRoom(const Plot *p);
+error_t  PlotLetGoLater(Plot *p, uint64_t start, uint32_t count);
 
 /* Whether the record the Plot would ink fits format v1. */
 bool     PlotRecordFits(const Plot *p);

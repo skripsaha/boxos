@@ -1138,7 +1138,7 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
                             const TagSpelling *name,
                             const uint8_t *luggage, uint32_t luggage_len);
 static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                            uint32_t found_id, const char *child_tags,
+                            uint64_t found_id, const char *child_tags,
                             const uint8_t *luggage, uint32_t luggage_len);
 
 /* SYSTEM_OP_PROC_EXEC
@@ -1188,7 +1188,7 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
 /* Whether the file is a program — ACTIVE, and wearing app or utility — and
  * then its keys, whole (NULL in *out_tags when there was no memory for them). */
-static bool SysExecCandidate(uint32_t file_id, char **out_tags)
+static bool SysExecCandidate(uint64_t file_id, char **out_tags)
 {
     TagFSMetadata meta;
     if (tagfs_get_metadata(file_id, &meta) != 0) return false;
@@ -1220,10 +1220,10 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
      * program. What stood here first was a scan of the first 256 files of the
      * volume, so the 257th program was "not found" — and nothing said so; and
      * then one array as long as every id the volume had ever issued. */
-    uint32_t  page_ids[32];
+    uint64_t  page_ids[32];
     TagFSPage page;
-    uint32_t  from       = 1;
-    uint32_t  found_id   = 0;
+    uint64_t  from       = 1;
+    uint64_t  found_id   = 0;
     char     *found_tags = NULL;
     do {
         error_t asked = TagFSQueryPage(name, 1, from, page_ids, ARRAY_SIZE(page_ids), false, &page);
@@ -1254,7 +1254,7 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
 /* The found program read in, made a process wearing `child_tags`, given its
  * Luggage and started. */
 static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                            uint32_t found_id, const char *child_tags,
+                            uint64_t found_id, const char *child_tags,
                             const uint8_t *luggage, uint32_t luggage_len)
 {
     TagFSMetadata exec_meta;
@@ -1282,7 +1282,7 @@ static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext
     error_t  rd  = tagfs_read(fh, virt, file_size, &got);
     tagfs_close(fh);
     if (rd != OK || got != file_size) {
-        kprintf("[Spawn] not starting file %u: %llu of %llu bytes came back (error %u)\n",
+        kprintf("[Spawn] not starting file %llu: %llu of %llu bytes came back (error %u)\n",
                 found_id, (unsigned long long)got, (unsigned long long)file_size,
                 (unsigned)rd);
         pmm_free(phys, pages);
@@ -1750,10 +1750,12 @@ static int SysDefragFile(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
 
     WriteJobAsk ask;
+    uint32_t    file_id;    /* the program's file_id_t */
+    memcpy(&file_id, op->params, sizeof(file_id));
     memset(&ask, 0, sizeof(ask));
     ask.kind    = WRITE_JOB_DEFRAG;
     ask.warrant = StorageCallWarrant(ctx);
-    memcpy(&ask.file_id, op->params, sizeof(uint32_t));
+    ask.file_id = file_id;
     if (op->out_crate != CRATE_INDEX_NONE)
         ask.out_crate = &crates[op->out_crate];
     return WriteJobSubmit(&ask, crates, ctx);

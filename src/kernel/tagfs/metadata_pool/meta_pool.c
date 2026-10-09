@@ -223,7 +223,7 @@ static void PoolReplaced(const RecordWhere* was, uint32_t by)
 /* The file out of the map, and its record's bytes out of its link's count;
  * `by`, when a Quitclaim took its place, is where that lies, NULL when nothing
  * did. */
-static void PoolMirrorLetGo(uint32_t fid, const RecordWhere* by)
+static void PoolMirrorLetGo(uint64_t fid, const RecordWhere* by)
 {
     RecordWhere was;
     FileMapDrop(PoolFiles(), fid, &was);
@@ -233,7 +233,7 @@ static void PoolMirrorLetGo(uint32_t fid, const RecordWhere* by)
     s_died_bytes += was.len;
 }
 
-error_t PoolMirrorPut(uint32_t fid, FileRecord* rec, const RecordWhere* where,
+error_t PoolMirrorPut(uint64_t fid, FileRecord* rec, const RecordWhere* where,
                       FileMapStake* stake)
 {
     if (!rec || !(rec->flags & TAGFS_FILE_ACTIVE)) {
@@ -252,12 +252,12 @@ error_t PoolMirrorPut(uint32_t fid, FileRecord* rec, const RecordWhere* where,
     return rc;
 }
 
-void PoolMirrorDrop(uint32_t fid)
+void PoolMirrorDrop(uint64_t fid)
 {
     PoolMirrorLetGo(fid, NULL);
 }
 
-bool PoolMirrorMove(uint32_t fid, const RecordWhere* from, const RecordWhere* to)
+bool PoolMirrorMove(uint64_t fid, const RecordWhere* from, const RecordWhere* to)
 {
     uint32_t block = 0;
     if (!PoolLinkBlock(to->link, &block) ||
@@ -348,7 +348,7 @@ void PoolUnlinkFront(uint32_t count)
 // Where a record sits
 // ---------------------------------------------------------------------------
 
-bool RecordWhereValid(const RecordWhere* where, uint32_t fid)
+bool RecordWhereValid(const RecordWhere* where, uint64_t fid)
 {
     if (PoolChainAt(where->link) == g_pool_chain_len)
         return false;

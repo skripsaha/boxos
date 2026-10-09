@@ -232,10 +232,10 @@ error_t HelmSpan(TagFSFileHandle *handle, uint64_t size, uint64_t *out_was)
 
 /* Whether the runs are one run on the medium, each beginning where the one
  * before it ends. */
-static bool HelmRunsAreOne(const FileExtent *runs, uint32_t count)
+static bool HelmRunsAreOne(const Strip *runs, uint32_t count)
 {
     for (uint32_t i = 1; i < count; i++)
-        if (runs[i].start_block != runs[i - 1].start_block + runs[i - 1].block_count)
+        if (runs[i].start != runs[i - 1].start + runs[i - 1].count)
             return false;
     return true;
 }
@@ -263,7 +263,7 @@ static error_t HelmDefragBegin(TagFSFileHandle *handle, HelmDefragging *d, bool 
             rc = TagFSInkPlot(plot, INK_MAKES_SPARES, &inked);
         *out_ended = rc == OK;
     } else if (rc == OK) {
-        rc = PlotGatherBegin(plot, 0, plot->runs[0].start_block, &d->gather);
+        rc = PlotGatherBegin(plot, 0, plot->runs[0].start, &d->gather);
     }
     if (rc == ERR_WOULD_BLOCK)
         HelmDefragLetGo(d);

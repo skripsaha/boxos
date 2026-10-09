@@ -21,7 +21,7 @@ uint32_t TagFSRunBlocks(void)
  * at a time: a run through it is its blocks one by one, each off the volume's
  * own medium when the Braid would not give it. A refusal the medium's
  * departure explains is ERR_DEVICE_NOT_READY, as at a block's doors. */
-error_t TagFSReadRun(uint32_t first, uint32_t count, void *buffer)
+error_t TagFSReadRun(uint64_t first, uint32_t count, void *buffer)
 {
     if (TagFSMediumGone())
         return ERR_DEVICE_NOT_READY;
@@ -47,7 +47,7 @@ error_t TagFSReadRun(uint32_t first, uint32_t count, void *buffer)
     return OK;
 }
 
-error_t TagFSWriteRun(uint32_t first, uint32_t count, const void *buffer, uint32_t *out_landed)
+error_t TagFSWriteRun(uint64_t first, uint32_t count, const void *buffer, uint32_t *out_landed)
 {
     const uint8_t *in     = (const uint8_t *)buffer;
     uint32_t       landed = 0;

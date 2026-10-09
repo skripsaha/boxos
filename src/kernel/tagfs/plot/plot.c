@@ -40,7 +40,7 @@ static bool PlotRoom(void **array, uint32_t *room, uint32_t have, uint64_t need,
     return true;
 }
 
-error_t PlotLoad(Plot *p, uint32_t fid, InkWarrant warrant)
+error_t PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant)
 {
     memset(p, 0, sizeof(*p));
     p->fid         = fid;
@@ -64,16 +64,16 @@ error_t PlotLoad(Plot *p, uint32_t fid, InkWarrant warrant)
     p->meta.extents      = NULL;
     p->meta.extent_count = 0;
     for (uint32_t i = 0; i < p->run_count; i++)
-        p->blocks += p->runs[i].block_count;
+        p->blocks += p->runs[i].count;
     p->blocks_before = p->blocks;
-    p->runs_before   = p->run_count;
+    p->runs_before   = PackV1Extents(p->runs, p->run_count);
     p->size_before   = p->meta.size;
     p->size          = p->meta.size;
 
     /* A record whose blocks do not reach its size is not a file to write
      * over: the write would lay a fresh file over bytes it cannot see. */
     if (PlotBlocksFor(p->size) > p->blocks) {
-        kprintf("[TagFS] file %u: its record says %llu bytes and names %llu block(s), fewer "
+        kprintf("[TagFS] file %llu: its record says %llu bytes and names %llu block(s), fewer "
                 "than that needs — nothing is written over it\n", fid,
                 (unsigned long long)p->size, (unsigned long long)p->blocks);
         return ERR_METADATA_CORRUPTED;
@@ -88,7 +88,7 @@ error_t PlotLoad(Plot *p, uint32_t fid, InkWarrant warrant)
 void PlotPullStakes(Plot *p)
 {
     if (p->stake_count && p->mount_epoch != tagfs_mount_epoch()) {
-        kprintf("[TagFS] file %u: the volume was mounted again while %u run(s) were staked "
+        kprintf("[TagFS] file %llu: the volume was mounted again while %u run(s) were staked "
                 "for it — they are not given back to a mounting they were never taken from\n",
                 p->fid, p->stake_count);
         p->stake_count = 0;
@@ -97,9 +97,9 @@ void PlotPullStakes(Plot *p)
     for (uint32_t i = 0; i < p->stake_count; i++) {
         int given = tagfs_free_blocks(p->stakes[i].start, p->stakes[i].count);
         if (given != 0)
-            kprintf("[TagFS] file %u: %u block(s) at %u were taken for it and named by no "
+            kprintf("[TagFS] file %llu: %u block(s) at %llu were taken for it and named by no "
                     "record, and would not go back (error %d)\n", p->fid,
-                    p->stakes[i].count, p->stakes[i].start, -given);
+                    p->stakes[i].count, (unsigned long long)p->stakes[i].start, -given);
     }
     p->stake_count = 0;
 }
@@ -115,15 +115,15 @@ void PlotRelease(Plot *p)
     memset(p, 0, sizeof(*p));
 }
 
-bool PlotFind(const FileExtent *runs, uint32_t count, uint64_t k,
-              uint32_t *out_block, uint32_t *out_left)
+bool PlotFind(const Strip *runs, uint32_t count, uint64_t k,
+              uint64_t *out_block, uint32_t *out_left)
 {
     uint64_t base = 0;
     for (uint32_t i = 0; i < count; i++) {
-        uint64_t n = runs[i].block_count;
+        uint64_t n = runs[i].count;
         if (k < base + n) {
             uint32_t at = (uint32_t)(k - base);
-            *out_block = runs[i].start_block + at;
+            *out_block = runs[i].start + at;
             if (out_left)
                 *out_left = (uint32_t)(n - at - 1);
             return true;
@@ -156,7 +156,8 @@ uint64_t PlotStretchBytes(const PlotStretch *s, uint32_t blocks)
 bool PlotStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t most, PlotStretch *out)
 {
     uint64_t k     = pos / PLOT_BLOCK;
-    uint32_t block = 0, after = 0;
+    uint64_t block = 0;
+    uint32_t after = 0;
     if (left == 0 || most == 0 || !PlotFind(p->runs, p->run_count, k, &block, &after))
         return false;
 
@@ -182,50 +183,35 @@ bool PlotStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t most, Pl
     return true;
 }
 
-/* How many more extents [start, start + count) can take when appended. */
-static uint64_t PlotPiecesFor(uint32_t count)
+void PlotRunsPut(Strip *runs, uint32_t *n, uint64_t start, uint32_t count)
 {
-    return (uint64_t)count / PLOT_RUN_MOST + 2;
-}
-
-void PlotRunsPut(FileExtent *runs, uint32_t *n, uint32_t start, uint32_t count)
-{
-    while (count > 0) {
-        if (*n > 0) {
-            FileExtent *last = &runs[*n - 1];
-            if ((uint64_t)last->start_block + last->block_count == start &&
-                last->block_count < PLOT_RUN_MOST) {
-                uint32_t add = PLOT_RUN_MOST - last->block_count;
-                if (add > count)
-                    add = count;
-                last->block_count = (uint16_t)(last->block_count + add);
-                start += add;
-                count -= add;
-                continue;
-            }
+    if (count == 0)
+        return;
+    if (*n > 0) {
+        Strip *last = &runs[*n - 1];
+        if (last->kind == STRIP_DATA && last->start + last->count == start &&
+            (uint64_t)last->count + count <= UINT32_MAX) {
+            last->count += count;
+            return;
         }
-        uint32_t take = count < PLOT_RUN_MOST ? count : PLOT_RUN_MOST;
-        runs[*n].start_block = start;
-        runs[*n].block_count = (uint16_t)take;
-        (*n)++;
-        start += take;
-        count -= take;
     }
+    runs[*n] = (Strip){ .start = start, .count = count, .kind = STRIP_DATA };
+    (*n)++;
 }
 
-error_t PlotAppendRun(Plot *p, uint32_t start, uint32_t count)
+error_t PlotAppendRun(Plot *p, uint64_t start, uint32_t count)
 {
     if (count == 0)
         return OK;
     if (!PlotRoom((void **)&p->runs, &p->run_room, p->run_count,
-                  (uint64_t)p->run_count + PlotPiecesFor(count), sizeof(FileExtent)))
+                  (uint64_t)p->run_count + 1, sizeof(Strip)))
         return ERR_NO_MEMORY;
     PlotRunsPut(p->runs, &p->run_count, start, count);
     p->blocks += count;
     return OK;
 }
 
-error_t PlotStake(Plot *p, uint32_t start, uint32_t count)
+error_t PlotStake(Plot *p, uint64_t start, uint32_t count)
 {
     if (!PlotRoom((void **)&p->stakes, &p->stake_room, p->stake_count,
                   (uint64_t)p->stake_count + 1, sizeof(Stake)))
@@ -236,24 +222,19 @@ error_t PlotStake(Plot *p, uint32_t start, uint32_t count)
     return OK;
 }
 
-error_t PlotLetGoLater(Plot *p, uint32_t start, uint32_t count)
+error_t PlotLetGoLater(Plot *p, uint64_t start, uint32_t count)
 {
-    while (count > 0) {
-        uint32_t n = count < PLOT_RUN_MOST ? count : PLOT_RUN_MOST;
-        if (!PlotRoom((void **)&p->freed, &p->freed_room, p->freed_count,
-                      (uint64_t)p->freed_count + 1, sizeof(FileExtent)))
-            return ERR_NO_MEMORY;
-        p->freed[p->freed_count].start_block = start;
-        p->freed[p->freed_count].block_count = (uint16_t)n;
-        p->freed_count++;
-        start += n;
-        count -= n;
-    }
+    if (count == 0)
+        return OK;
+    if (!PlotRoom((void **)&p->freed, &p->freed_room, p->freed_count,
+                  (uint64_t)p->freed_count + 1, sizeof(Strip)))
+        return ERR_NO_MEMORY;
+    p->freed[p->freed_count++] = (Strip){ .start = start, .count = count, .kind = STRIP_DATA };
     return OK;
 }
 
 /* The Stake holding `block`, or stake_count when no Stake does. */
-static uint32_t PlotStakeHolding(const Plot *p, uint32_t block)
+static uint32_t PlotStakeHolding(const Plot *p, uint64_t block)
 {
     for (uint32_t i = 0; i < p->stake_count; i++)
         if (block >= p->stakes[i].start && block - p->stakes[i].start < p->stakes[i].count)
@@ -266,7 +247,7 @@ static uint32_t PlotStakeHolding(const Plot *p, uint32_t block)
  * goes back now — no record ever named it; what a record named comes to rest
  * in Fallow once a record that no longer names it is inked.
  */
-static error_t PlotLetGo(Plot *p, uint32_t start, uint32_t count)
+static error_t PlotLetGo(Plot *p, uint64_t start, uint32_t count)
 {
     while (count > 0) {
         uint32_t i = PlotStakeHolding(p, start);
@@ -275,7 +256,7 @@ static error_t PlotLetGo(Plot *p, uint32_t start, uint32_t count)
             uint32_t n = count;
             for (uint32_t s = 0; s < p->stake_count; s++)
                 if (p->stakes[s].start > start && p->stakes[s].start - start < n)
-                    n = p->stakes[s].start - start;
+                    n = (uint32_t)(p->stakes[s].start - start);
             error_t rc = PlotLetGoLater(p, start, n);
             if (rc != OK)
                 return rc;
@@ -285,17 +266,17 @@ static error_t PlotLetGo(Plot *p, uint32_t start, uint32_t count)
         }
 
         Stake    *s   = &p->stakes[i];
-        uint64_t  end = (uint64_t)s->start + s->count;
+        uint64_t  end = s->start + s->count;
         uint32_t  n   = (uint32_t)(end - start < count ? end - start : count);
-        if (start != s->start && start + (uint64_t)n != end) {
+        if (start != s->start && start + n != end) {
             /* Out of its middle: the Stake becomes two. */
-            uint32_t tail_start = start + n;
+            uint64_t tail_start = start + n;
             uint32_t tail_count = (uint32_t)(end - tail_start);
             error_t  rc         = PlotStake(p, tail_start, tail_count);
             if (rc != OK)
                 return rc;
             s = &p->stakes[i];
-            s->count = start - s->start;
+            s->count = (uint32_t)(start - s->start);
         } else if (start == s->start) {
             s->start += n;
             s->count -= n;
@@ -307,8 +288,8 @@ static error_t PlotLetGo(Plot *p, uint32_t start, uint32_t count)
 
         int given = tagfs_free_blocks(start, n);
         if (given != 0)
-            kprintf("[TagFS] file %u: %u block(s) at %u it took and no longer needs would not "
-                    "go back (error %d)\n", p->fid, n, start, -given);
+            kprintf("[TagFS] file %llu: %u block(s) at %llu it took and no longer needs would not "
+                    "go back (error %d)\n", p->fid, n, (unsigned long long)start, -given);
         start += n;
         count -= n;
     }
@@ -318,17 +299,17 @@ static error_t PlotLetGo(Plot *p, uint32_t start, uint32_t count)
 error_t PlotTrimTo(Plot *p, uint64_t keep_blocks)
 {
     while (p->blocks > keep_blocks && p->run_count > 0) {
-        FileExtent *last = &p->runs[p->run_count - 1];
-        uint64_t    over = p->blocks - keep_blocks;
-        uint32_t    cut  = last->block_count < over ? last->block_count : (uint32_t)over;
-        uint32_t    from = last->start_block + last->block_count - cut;
-        error_t     rc   = PlotLetGo(p, from, cut);
+        Strip   *last = &p->runs[p->run_count - 1];
+        uint64_t over = p->blocks - keep_blocks;
+        uint32_t cut  = last->count < over ? last->count : (uint32_t)over;
+        uint64_t from = last->start + last->count - cut;
+        error_t  rc   = PlotLetGo(p, from, cut);
         if (rc != OK)
             return rc;
         last = &p->runs[p->run_count - 1];
-        last->block_count = (uint16_t)(last->block_count - cut);
-        p->blocks -= cut;
-        if (last->block_count == 0)
+        last->count -= cut;
+        p->blocks   -= cut;
+        if (last->count == 0)
             p->run_count--;
     }
     return OK;
@@ -345,23 +326,13 @@ static TagFSMetadata PlotRecord(const Plot *p)
     return record;
 }
 
-/* How many extents the record has room for beside its tags and name. */
-uint32_t PlotRunRoom(const Plot *p)
-{
-    uint64_t fixed = (uint64_t)RECORD_HEADER_SIZE + (uint64_t)p->meta.tag_count * sizeof(uint16_t)
-                   + (p->meta.filename ? strlen(p->meta.filename) : 0);
-    if (fixed >= TAGFS_MPOOL_DATA_SIZE)
-        return 0;
-    return (uint32_t)((TAGFS_MPOOL_DATA_SIZE - fixed) / sizeof(FileExtent));
-}
-
 bool PlotRecordFits(const Plot *p)
 {
     TagFSMetadata record = PlotRecord(p);
     return PlotFits(&record, NULL);
 }
 
-/* The record fits, or its extents are gathered until it does, or the write is
+/* The record fits, or its runs are gathered until it does, or the write is
  * refused — said, with the numbers. A gather's own refusal is the answer as it
  * gave it: a run that waits for a Settle cycle (ERR_WOULD_BLOCK) is not a
  * record full for good, nor a medium that refused the copy. */
@@ -370,38 +341,38 @@ static error_t PlotFitOrGather(Plot *p)
     if (PlotRecordFits(p))
         return OK;
 
-    uint32_t room = PlotRunRoom(p);
-    if (p->run_count <= room) {
-        kprintf("[TagFS] file %u: its %u tag(s) and its name leave its record no room it "
+    uint32_t room    = PlotRunRoom(&p->meta);
+    uint64_t extents = PackV1Extents(p->runs, p->run_count);
+    if (extents <= room) {
+        kprintf("[TagFS] file %llu: its %u tag(s) and its name leave its record no room it "
                 "needs — refused\n", p->fid, p->meta.tag_count);
         return ERR_TAGFS_RECORD_FULL;
     }
 
-    uint32_t runs   = p->run_count;
-    uint32_t hint   = p->run_count ? p->runs[0].start_block : 0;
-    error_t  rc     = PlotGather(p, runs - room, hint);
+    uint64_t hint = p->run_count ? p->runs[0].start : 0;
+    error_t  rc   = PlotGather(p, extents - room, hint);
     if (rc == OK && PlotRecordFits(p))
         return OK;
     if (rc == OK)
         rc = ERR_TAGFS_RECORD_FULL;
     if (rc != ERR_WOULD_BLOCK)
-        kprintf("[TagFS] file %u: growing it would leave it %u extent(s) and its record holds %u "
-                "— refused (error %u), and nothing of it written\n", p->fid, runs, room,
-                (unsigned)rc);
+        kprintf("[TagFS] file %llu: growing it would leave it %llu extent(s) and its record holds "
+                "%u — refused (error %u), and nothing of it written\n", p->fid,
+                (unsigned long long)extents, room, (unsigned)rc);
     return rc;
 }
 
 error_t PlotReserve(Plot *p, uint64_t end)
 {
     uint64_t need = PlotBlocksFor(end);
-    uint32_t room = PlotRunRoom(p);
+    uint32_t room = PlotRunRoom(&p->meta);
 
     while (p->blocks < need) {
         /* The new ground alone already takes more extents than the record
          * holds: gathering moves only what the record named, so no gather
          * could make room, and nothing more is taken. */
-        if ((uint64_t)p->run_count > (uint64_t)room + p->runs_before) {
-            kprintf("[TagFS] file %u: the free ground it would grow into lies in more runs "
+        if (PackV1Extents(p->runs, p->run_count) > (uint64_t)room + p->runs_before) {
+            kprintf("[TagFS] file %llu: the free ground it would grow into lies in more runs "
                     "than its record holds extents (%u) — refused, and nothing of it "
                     "written\n", p->fid, room);
             return ERR_TAGFS_RECORD_FULL;
@@ -409,19 +380,20 @@ error_t PlotReserve(Plot *p, uint64_t end)
 
         uint64_t left = need - p->blocks;
         uint32_t want = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
-        uint32_t hint = 0;
+        uint64_t hint = 0;
         if (p->run_count) {
-            const FileExtent *last = &p->runs[p->run_count - 1];
-            hint = last->start_block + last->block_count;
+            const Strip *last = &p->runs[p->run_count - 1];
+            hint = last->start + last->count;
         }
 
         /* ERR_WOULD_BLOCK is room on its way, not a refusal: its caller waits
          * for the cycle that brings it and asks again. */
-        uint32_t start = 0, got = 0;
+        uint64_t start = 0;
+        uint32_t got   = 0;
         error_t  rc    = AllotmentTake(p->fid, want, p->blocks, hint, &start, &got);
         if (rc != OK) {
             if (rc != ERR_WOULD_BLOCK)
-                kprintf("[TagFS] file %u: %llu more block(s) could not be had for it (error %u) "
+                kprintf("[TagFS] file %llu: %llu more block(s) could not be had for it (error %u) "
                         "— the write is refused\n", p->fid, (unsigned long long)left,
                         (unsigned)rc);
             return rc;

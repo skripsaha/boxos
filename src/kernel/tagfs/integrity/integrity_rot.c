@@ -24,7 +24,7 @@
  * from inside a read, and naming it holds no page of the map.
  */
 static TagFSLock g_rot_lock  = TAGFS_LOCK_INIT("rot", LOCK_RANK_LEAF);
-static uint32_t* g_rot_set;
+static uint64_t* g_rot_set;
 static uint32_t  g_rot_slots;      /* a power of two, or 0 */
 static uint32_t  g_rot_named;      /* blocks in the set */
 static uint32_t  g_rot_more;       /* rot found that the set had no room to name */
@@ -37,17 +37,17 @@ typedef enum {
     ROT_NO_ROOM   /* the set could not grow to hold it */
 } RotNaming;
 
-static uint32_t RotSlotOf(uint32_t block, uint32_t slots)
+static uint32_t RotSlotOf(uint64_t block, uint32_t slots)
 {
-    return (block * 2654435761u) & (slots - 1u);
+    return (uint32_t)((block * 2654435761u) & (slots - 1u));
 }
 
 /* Under g_rot_lock: the set holds `block`, or it is put in when there is room. */
-static bool RotSetFind(uint32_t block, bool put)
+static bool RotSetFind(uint64_t block, bool put)
 {
     if (g_rot_slots == 0)
         return false;
-    uint32_t key = block + 1u;
+    uint64_t key = block + 1u;
     for (uint32_t i = RotSlotOf(block, g_rot_slots); ; i = (i + 1u) & (g_rot_slots - 1u)) {
         if (g_rot_set[i] == key)
             return true;
@@ -63,12 +63,12 @@ static bool RotSetFind(uint32_t block, bool put)
 
 /* Under g_rot_lock: `block` out of the set, the entries after it in its probe
  * run shifted back over the hole, so every one is still found from its home. */
-static void RotSetDrop(uint32_t block)
+static void RotSetDrop(uint64_t block)
 {
     if (g_rot_slots == 0)
         return;
     uint32_t mask = g_rot_slots - 1u;
-    uint32_t key  = block + 1u;
+    uint64_t key  = block + 1u;
     uint32_t hole = RotSlotOf(block, g_rot_slots);
     while (g_rot_set[hole] != key) {
         if (g_rot_set[hole] == 0)
@@ -91,9 +91,9 @@ static void RotSetDrop(uint32_t block)
 
 /* The set's slots once more as many, the old table handed back to be freed
  * with the lock let go. Under g_rot_lock. */
-static uint32_t* RotSetTakeBigger(uint32_t* bigger, uint32_t slots)
+static uint64_t* RotSetTakeBigger(uint64_t* bigger, uint32_t slots)
 {
-    uint32_t* old       = g_rot_set;
+    uint64_t* old       = g_rot_set;
     uint32_t  old_slots = g_rot_slots;
     g_rot_set   = bigger;
     g_rot_slots = slots;
@@ -105,7 +105,7 @@ static uint32_t* RotSetTakeBigger(uint32_t* bigger, uint32_t slots)
     return old;
 }
 
-static RotNaming RotRemember(uint32_t block)
+static RotNaming RotRemember(uint64_t block)
 {
     for (;;) {
         TagFSLockTake(&g_rot_lock);
@@ -123,7 +123,7 @@ static RotNaming RotRemember(uint32_t block)
         TagFSLockDrop(&g_rot_lock);
 
         uint32_t  want   = slots ? slots * 2u : 64u;
-        uint32_t* bigger = want > slots ? kmalloc((size_t)want * sizeof(uint32_t)) : NULL;
+        uint64_t* bigger = want > slots ? kmalloc((size_t)want * sizeof(uint64_t)) : NULL;
         if (!bigger) {
             TagFSLockTake(&g_rot_lock);
             g_rot_more++;
@@ -137,9 +137,9 @@ static RotNaming RotRemember(uint32_t block)
                         "the volume is let go\n", slots / 2u);
             return ROT_NO_ROOM;
         }
-        memset(bigger, 0, (size_t)want * sizeof(uint32_t));
+        memset(bigger, 0, (size_t)want * sizeof(uint64_t));
 
-        uint32_t* old = NULL;
+        uint64_t* old = NULL;
         TagFSLockTake(&g_rot_lock);
         if (g_rot_slots == slots)
             old = RotSetTakeBigger(bigger, want);
@@ -153,7 +153,7 @@ static RotNaming RotRemember(uint32_t block)
 void IntegrityRotBegin(uint16_t tag)
 {
     TagFSLockTake(&g_rot_lock);
-    uint32_t* old   = g_rot_set;
+    uint64_t* old   = g_rot_set;
     g_rot_set       = NULL;
     g_rot_slots     = 0;
     g_rot_named     = 0;
@@ -164,19 +164,22 @@ void IntegrityRotBegin(uint16_t tag)
     kfree(old);
 }
 
-void IntegrityRotName(uint32_t block, uint64_t stored, uint64_t read)
+void IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read)
 {
     RotNaming naming = RotRemember(block);
     if (naming == ROT_KNOWN)
         return;
 
+    /* The event carries the u32 block its readers are built for (box/touch.h —
+     * the programs' side widens with wave 3): a block past one is never
+     * published cut to another block's number; the line below names it whole. */
     uint16_t tag = __atomic_load_n(&g_rot_tag, __ATOMIC_RELAXED);
-    if (tag != TAGFS_INVALID_TAG_ID) {
+    if (tag != TAGFS_INVALID_TAG_ID && block <= UINT32_MAX) {
         struct __attribute__((packed)) {
             uint32_t block;
             uint8_t  op;        /* 3: a block that does not hold what was written to it */
             uint8_t  _pad[3];
-        } ev = { block, 3, { 0, 0, 0 } };
+        } ev = { (uint32_t)block, 3, { 0, 0, 0 } };
         TouchPublishId(tag, &ev, sizeof(ev), 0, TOUCH_FLAG_TAGFS);
     }
     if (naming != ROT_NEW)
@@ -184,32 +187,32 @@ void IntegrityRotName(uint32_t block, uint64_t stored, uint64_t read)
 
     uint64_t cycle = 0;
     if (MountStopWasClean(&cycle))
-        kprintf("[Integrity] block %u does not hold what was written to it (digest %016llx, "
+        kprintf("[Integrity] block %llu does not hold what was written to it (digest %016llx, "
                 "read %016llx) — rot; a read of it is refused ERR_CHECKSUM, and it is "
-                "published on the integrity tag\n", block,
+                "published on the integrity tag\n", (unsigned long long)block,
                 (unsigned long long)stored, (unsigned long long)read);
     else
-        kprintf("[Integrity] block %u does not match its digest (digest %016llx, read %016llx), "
+        kprintf("[Integrity] block %llu does not match its digest (digest %016llx, read %016llx), "
                 "on a volume whose last stop is not known to have been clean (seal of cycle "
                 "%llu) — rot, or a write in place before that stop that did not land: format "
                 "v1 cannot tell which; a read of it is refused ERR_CHECKSUM, and it is "
-                "published on the integrity tag\n", block, (unsigned long long)stored,
-                (unsigned long long)read, (unsigned long long)cycle);
+                "published on the integrity tag\n", (unsigned long long)block,
+                (unsigned long long)stored, (unsigned long long)read, (unsigned long long)cycle);
 }
 
 /* A block written again, or given back: what it holds now has a digest of its
  * own, and rot found in it later is new rot, named again. Nothing to look up
  * while the set is empty — the common case, and it costs one load; a long run
  * is looked up 64 blocks to a hold of the lock. */
-void IntegrityRotForget(uint32_t start, uint32_t count)
+void IntegrityRotForget(uint64_t start, uint32_t count)
 {
-    uint64_t end   = (uint64_t)start + count;
+    uint64_t end   = start + count;
     bool     named = __atomic_load_n(&g_rot_named, __ATOMIC_RELAXED) != 0;
 
     for (uint64_t b = start; b < end && named; ) {
         TagFSLockTake(&g_rot_lock);
         for (uint32_t n = 0; n < 64u && b < end && g_rot_named > 0; n++, b++)
-            RotSetDrop((uint32_t)b);
+            RotSetDrop(b);
         named = g_rot_named > 0;
         TagFSLockDrop(&g_rot_lock);
     }
@@ -218,7 +221,7 @@ void IntegrityRotForget(uint32_t start, uint32_t count)
 void IntegrityRotEnd(void)
 {
     TagFSLockTake(&g_rot_lock);
-    uint32_t* old   = g_rot_set;
+    uint64_t* old   = g_rot_set;
     uint32_t  named = g_rot_named;
     uint32_t  more  = g_rot_more;
     g_rot_set       = NULL;

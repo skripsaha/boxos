@@ -16,12 +16,12 @@ static uint8_t s_cow_block[TAGFS_BLOCK_SIZE];
 
 /* The data-run block that holds the k-th block of a file's record, or 0 when
  * the record does not reach that far. */
-static uint32_t CowBlockOf(const TagFSMetadata* meta, uint32_t k)
+static uint64_t CowBlockOf(const TagFSMetadata* meta, uint32_t k)
 {
     for (uint32_t e = 0; e < meta->extent_count && meta->extents; e++) {
-        if (k < meta->extents[e].block_count)
-            return meta->extents[e].start_block + k;
-        k -= meta->extents[e].block_count;
+        if (k < meta->extents[e].count)
+            return meta->extents[e].start + k;
+        k -= meta->extents[e].count;
     }
     return 0;
 }
@@ -45,17 +45,17 @@ static uint32_t CowBlockOf(const TagFSMetadata* meta, uint32_t k)
 static TestResult TestCowMovesOnlyTheBlockWritten(void)
 {
     TestResult    verdict   = TEST_PASS;
-    uint32_t      file_id   = 0;
-    uint32_t      start     = 0;
+    uint64_t      file_id   = 0;
+    uint64_t      start     = 0;
     bool          have_meta = false;
     uint8_t*      was       = g_test_buffer;                                /* 3 blocks */
     uint8_t*      now       = g_test_buffer + COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE;
     TagFSMetadata meta;
 
     TEST_ASSERT_EQ(tagfs_create_file("cow-test", NULL, 0, &file_id), 0, "a file is created");
-    TestFillAt(g_test_output, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, 0xC1DE0000u | file_id, 0);
-    TestFillAt(was, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, 0xC2DE0000u | file_id, 0);
-    TestFillAt(now, TAGFS_BLOCK_SIZE, 0xC3DE0000u | file_id, 0);
+    TestFillAt(g_test_output, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, 0xC1DE0000u | (uint32_t)file_id, 0);
+    TestFillAt(was, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, 0xC2DE0000u | (uint32_t)file_id, 0);
+    TestFillAt(now, TAGFS_BLOCK_SIZE, 0xC3DE0000u | (uint32_t)file_id, 0);
     TEST_ASSERT_EQ(TestFileWrite(file_id, g_test_output, COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE),
                    COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, "three blocks are written");
     TEST_ASSERT_EQ(tagfs_defrag_file(file_id), 0, "and gathered into one extent");
@@ -65,8 +65,8 @@ static TestResult TestCowMovesOnlyTheBlockWritten(void)
     TEST_ASSERT_EQ(tagfs_get_metadata(file_id, &meta), 0, "the file's metadata reads");
     have_meta = true;
     TEST_ASSERT_EQ(meta.extent_count, 1, "the file is one extent, written over in place");
-    TEST_ASSERT_EQ(meta.extents[0].block_count, COW_SPAN_BLOCKS, "three blocks long");
-    start = meta.extents[0].start_block;
+    TEST_ASSERT_EQ(meta.extents[0].count, COW_SPAN_BLOCKS, "three blocks long");
+    start = meta.extents[0].start;
     tagfs_metadata_free(&meta);
     have_meta = false;
 

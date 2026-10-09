@@ -110,13 +110,13 @@ void fill_pattern(void* buffer, uint32_t size, uint8_t pattern)
  * with it are indistinguishable and a block swap reads back as a pass. Here
  * every group of four bytes is mixed from its absolute offset and the stream,
  * so no two blocks — of one file or of two — hold the same bytes. */
-void TestFillAt(void* buffer, uint32_t size, uint32_t stream, uint64_t offset)
+void TestFillAt(void* buffer, uint32_t size, uint64_t stream, uint64_t offset)
 {
     uint8_t* buf = (uint8_t*)buffer;
     for (uint32_t i = 0; i < size; i++) {
         uint64_t at = offset + i;
         uint64_t x  = ((at >> 2) + 1) * 0x9E3779B97F4A7C15ull;
-        x ^= ((uint64_t)stream + 1) * 0xC2B2AE3D27D4EB4Full;
+        x ^= (stream + 1) * 0xC2B2AE3D27D4EB4Full;
         x ^= x >> 29;
         buf[i] = (uint8_t)(x >> ((at & 3) * 8));
     }
@@ -149,7 +149,7 @@ int TestHandleRead(TagFSFileHandle* handle, void* buffer, uint32_t capacity)
     return tagfs_read(handle, buffer, capacity, &got) == OK ? (int)got : -1;
 }
 
-int TestFileWrite(uint32_t file_id, const void* data, uint32_t bytes)
+int TestFileWrite(uint64_t file_id, const void* data, uint32_t bytes)
 {
     TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     if (!handle)
@@ -159,7 +159,7 @@ int TestFileWrite(uint32_t file_id, const void* data, uint32_t bytes)
     return written;
 }
 
-int TestFileRead(uint32_t file_id, void* buffer, uint32_t capacity)
+int TestFileRead(uint64_t file_id, void* buffer, uint32_t capacity)
 {
     TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     if (!handle)

@@ -39,7 +39,7 @@ struct OpContext;
  */
 
 typedef struct ReadJobAsk {
-    uint32_t  file_id;
+    uint64_t  file_id;
     ReadSink  sink;         /* where the bytes land, and how many at most */
     Crate    *out_crate;    /* its size <- the bytes that landed; or NULL */
     uint64_t  waybill;      /* box::ferry correlation token, 0 for none */

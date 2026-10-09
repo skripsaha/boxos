@@ -58,15 +58,15 @@ void TagFSHoldGroundOpenFile(void)
     if (g_hold_handle) {
         return;
     }
-    uint32_t  ids[1];
+    uint64_t  ids[1];
     TagFSPage page;
     if (TagFSListPage(1, ids, 1, false, &page) != OK || page.delivered == 0) {
         kprintf("[TagFS HOLDGROUND] this volume has no file to hold open\n");
         return;
     }
     g_hold_handle = tagfs_open(ids[0], 0);
-    kprintf("[TagFS HOLDGROUND] holding file %u open across whatever happens "
-            "to the medium\n", ids[0]);
+    kprintf("[TagFS HOLDGROUND] holding file %llu open across whatever happens "
+            "to the medium\n", (unsigned long long)ids[0]);
 }
 
 /* And a caller inside the volume at the moment its medium is noticed gone. */

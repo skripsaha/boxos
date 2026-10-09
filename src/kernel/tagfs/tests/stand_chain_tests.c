@@ -161,10 +161,14 @@ bool StandRegistryHoldsOnMedium(const char* key, const char* value)
 }
 
 /* The block the allocator hands out next: the lowest free one, which a take
- * of one block with no hint is given (block_map.h). */
+ * of one block with no hint is given (block_map.h) — a block of format v1's
+ * data run, which the registry's chain names in u32. */
 static bool StandNextBlock(uint32_t* out_block)
 {
-    return BlockMapNextFree(out_block);
+    uint64_t block = 0;
+    bool     found = BlockMapNextFree(&block);
+    *out_block = (uint32_t)block;
+    return found;
 }
 
 // ----------------------------------------------------------------------------
@@ -375,7 +379,8 @@ static TestResult TestStandTableGrowsOntoAStamp(void)
     TagFSState*    fs      = tagfs_get_state();
     StandChain     before  = { 0 };
     StandChain     after   = { 0 };
-    uint32_t       file_id = 0, block = 0;
+    uint64_t       file_id = 0;
+    uint32_t       block = 0;
     uint64_t       cover   = 0;
     error_t        said    = OK;
     bool           armed   = false;
@@ -390,7 +395,7 @@ static TestResult TestStandTableGrowsOntoAStamp(void)
     uint32_t edge = before.links * TAGFS_FTABLE_PER_BLOCK;
     TEST_ASSERT(tagfs_file_ceiling() <= edge, "no file id has been issued past the table's chain");
     while (tagfs_file_ceiling() < edge) {
-        uint32_t spent = 0;
+        uint64_t spent = 0;
         TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &spent), 0,
                        "a file id is spent on the way to the chain's end");
         TEST_ASSERT_EQ(tagfs_delete_file(spent, INK_UNWARRANTED), 0, "and its file deleted");
@@ -597,7 +602,7 @@ static TestResult TestStandRegistryScratchLeavesTheVolumeAlone(void)
     TestResult   verdict = TEST_PASS;
     TagRegistry* scratch = NULL;
     bool         built   = false;
-    uint32_t     file_id = 0;
+    uint64_t     file_id = 0;
     StandChain   before  = { 0 };
     StandChain   after   = { 0 };
 

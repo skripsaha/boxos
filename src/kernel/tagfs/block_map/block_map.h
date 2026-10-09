@@ -35,8 +35,12 @@
 
 /* Summary and cache for a data run of `data_blocks`, whose map begins at
  * volume sector `map_vlba`. ERR_NO_MEMORY, said with the numbers, when the
- * heap will not hold them. */
-error_t BlockMapMount(uint32_t data_blocks, uint64_t map_vlba);
+ * heap will not hold them; ERR_OUT_OF_RANGE, said, for a run of more windows
+ * than the summary numbers. Every block it hands out is below `data_blocks` —
+ * on a format v1 volume the layout's u32 count, so the structures of that
+ * format that name a block in 32 bits (its chains, rows and Ledger) are never
+ * handed one past them. */
+error_t BlockMapMount(uint64_t data_blocks, uint64_t map_vlba);
 
 /*
  * The mount's one pass over the medium's map. Every window is read once, the
@@ -51,15 +55,24 @@ error_t BlockMapMount(uint32_t data_blocks, uint64_t map_vlba);
  * alone. Nothing is written.
  */
 typedef struct {
-    uint32_t orphan;         /* blocks */
-    uint32_t missing;        /* blocks */
+    uint64_t orphan;         /* blocks */
+    uint64_t missing;        /* blocks */
     uint64_t free;           /* free on the map once the repair is in */
 } BlockMapCensusCount;
 
 /* The blocks one window of the map covers, and its owners' bits. */
 #define BLOCK_MAP_WINDOW_BLOCKS  (TAGFS_SECTOR_SIZE * 8u)
+
+/* The most blocks one take hands out: sixteen windows. A take's plan measures
+ * runs a window past what it wants, and a best fit weighs a few windows of a
+ * list with such a run beside each, so the length of a take is what its hold
+ * of the state lock spends beyond a hold's budget (BlockMapStandHoldBound) —
+ * sixteen windows keep that hold within twice the budget. Nothing in memory
+ * is the shorter for it: a caller after more takes again from where the run
+ * ended, and a file's runs that meet join into one Strip (strip.h). */
+#define BLOCK_MAP_TAKE_MOST      (16u * BLOCK_MAP_WINDOW_BLOCKS)
 typedef void (*BlockMapOwnsFn)(uint32_t window, uint8_t *bits, void *ctx);
-typedef void (*BlockMapOrphanFn)(uint32_t start, uint32_t count, void *ctx);
+typedef void (*BlockMapOrphanFn)(uint64_t start, uint32_t count, void *ctx);
 
 error_t BlockMapCensus(BlockMapOwnsFn owns, BlockMapOrphanFn orphan, void *ctx,
                        BlockMapCensusCount *out);
@@ -94,9 +107,9 @@ void    BlockMapUnmount(void);
  * lock, and ERR_NO_MEMORY, unsaid, when that does not cover them — the caller
  * keeps the run and says what becomes of it.
  */
-error_t BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start);
-error_t BlockMapGiveLocked(uint32_t start, uint32_t count);
-error_t BlockMapGiveHeldLocked(uint32_t start, uint32_t count);
+error_t BlockMapTakeLocked(uint32_t count, uint64_t hint, uint64_t *start);
+error_t BlockMapGiveLocked(uint64_t start, uint32_t count);
+error_t BlockMapGiveHeldLocked(uint64_t start, uint32_t count);
 
 /* With no TagFS lock held: room made for `gives` deltas of gives and held for
  * them — a take never uses it — until the next call says how much to hold.
@@ -126,8 +139,8 @@ bool    BlockMapGivesUnseenLocked(void);
  * full volume goes to the Spares a delete and Glean stand on before any write
  * waiting for room can have it.
  */
-error_t BlockMapTake(uint32_t count, uint32_t hint, uint32_t *start, const char *site);
-error_t BlockMapTakeSpare(uint32_t *start, const char *site);
+error_t BlockMapTake(uint32_t count, uint64_t hint, uint64_t *start, const char *site);
+error_t BlockMapTakeSpare(uint64_t *start, const char *site);
 
 /*
  * A write's ground: the same take for file `fid` (AllotmentTake takes for a
@@ -136,12 +149,12 @@ error_t BlockMapTakeSpare(uint32_t *start, const char *site);
  * it (BlockMapInkedLocked) — or until it is given back, never to be named: a
  * cycle settled under its write leaves no ground that nothing owns.
  */
-error_t BlockMapTakeFor(uint32_t fid, uint32_t count, uint32_t hint, uint32_t *start,
+error_t BlockMapTakeFor(uint64_t fid, uint32_t count, uint64_t hint, uint64_t *start,
                         const char *site);
 
 /* Under the state lock, by the Ink `gen` of file `fid`'s record: every run
  * taken for the file that no Ink named yet is named by this one. */
-void    BlockMapInkedLocked(uint32_t fid, uint64_t gen);
+void    BlockMapInkedLocked(uint64_t fid, uint64_t gen);
 
 /*
  * The sectors of the windows at a run's two ends fetched into memory, with no
@@ -149,7 +162,7 @@ void    BlockMapInkedLocked(uint32_t fid, uint64_t gen);
  * them there and is judged at once. A caller holding a TagFS lock fetches
  * nothing; its give is judged when the sectors next come in.
  */
-void    BlockMapFetchRun(uint32_t start, uint32_t count, const char *site);
+void    BlockMapFetchRun(uint64_t start, uint32_t count, const char *site);
 
 /*
  * Pay what the map owes the medium: every edit made without its sector is laid
@@ -181,62 +194,63 @@ error_t BlockMapFlush(uint64_t target);
  * write; a block the head is about to stop naming — its sector is owed to the
  * medium again, and the next settle of the map writes it as it now must read.
  */
-void    BlockMapOweLocked(uint32_t block);
+void    BlockMapOweLocked(uint64_t block);
 
 /*
  * TagFSTakeRun — the longest run of free blocks up to `want`, as near `hint`
  * as a run that long lies: *got is `want` wherever a run of `want` exists, and
  * otherwise the longest the volume has. Where the hint itself is free and the
  * run from it is long enough, the take starts exactly there — a file that
- * grows grows in place. No take is longer than one extent (PLOT_RUN_MOST): a
- * caller after more takes again from where the run ended. When nothing is
- * free, after every Allotment was taken back: ERR_WOULD_BLOCK while Fallow
- * rests blocks, else ERR_TAGFS_NO_SPACE.
+ * grows grows in place. No take is longer than BLOCK_MAP_TAKE_MOST: a caller
+ * after more takes again from where the run ended, and its runs join in
+ * memory. When nothing is free, after every Allotment was taken back:
+ * ERR_WOULD_BLOCK while Fallow rests blocks, else ERR_TAGFS_NO_SPACE.
  */
-error_t TagFSTakeRun(uint32_t want, uint32_t hint, uint32_t *start, uint32_t *got);
+error_t TagFSTakeRun(uint32_t want, uint64_t hint, uint64_t *start, uint32_t *got);
 
 /*
  * Allotment — ground a growing file keeps in hand, in memory only.
  *
  * A file that grows takes a window of free blocks sized to it — its own size
- * up to one extent's width, and never less than the growth asked for — chosen
- * best-fit, and uses the front of it; the rest is kept for its next growth, so
- * two files growing side by side do not deal each other alternate blocks. The
- * window outlives the handle, which lives one operation. It is never named on
- * the medium: its blocks read free there, and a volume cut in the middle finds
- * no orphan. It is given back when the file is deleted, when the volume is
+ * up to the most one take hands out (BLOCK_MAP_TAKE_MOST), and never less than
+ * the growth asked for — chosen best-fit, and uses the front of it; the rest is
+ * kept for its next growth, so two files growing side by side do not deal each
+ * other alternate blocks. The window outlives the handle, which lives one
+ * operation. It is never named on the medium: its blocks read free there, and
+ * a volume cut in the middle finds no orphan. It is given back when the file
+ * is deleted, when the volume is
  * short of room — every other file's window is taken back before anybody is
  * told there is none — and when the volume is let go.
  *
  * AllotmentTake: up to `want` blocks for file `fid`, whose size is
- * `file_blocks`, near `hint` — never more than one extent at a time; as
- * TagFSTakeRun answers. What it hands out is the file's write's, as
+ * `file_blocks`, near `hint` — never more than one take hands out at a time;
+ * as TagFSTakeRun answers. What it hands out is the file's write's, as
  * BlockMapTakeFor's run is.
  * AllotmentRelease: the file's window, by a caller holding the state lock.
  */
-error_t AllotmentTake(uint32_t fid, uint32_t want, uint64_t file_blocks, uint32_t hint,
-                      uint32_t *start, uint32_t *got);
-void    AllotmentRelease(uint32_t fid);
+error_t AllotmentTake(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint,
+                      uint64_t *start, uint32_t *got);
+void    AllotmentRelease(uint64_t fid);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The window file `fid` keeps in hand: false when it keeps none. */
-bool    AllotmentHeld(uint32_t fid, uint32_t *start, uint32_t *count);
+bool    AllotmentHeld(uint64_t fid, uint64_t *start, uint32_t *count);
 #endif
 
 #ifdef CONFIG_VOLUME_TESTS
 /* Whether a block is taken on the map, and the block a take of one block with
  * no hint is handed next — for the startup tests that predict a block. */
-bool    BlockMapIsTaken(uint32_t block);
-bool    BlockMapNextFree(uint32_t *block);
+bool    BlockMapIsTaken(uint64_t block);
+bool    BlockMapNextFree(uint64_t *block);
 
 /* Whether the medium's own sector of the map calls a block taken, read past
  * memory; false when the sector would not read. With no TagFS lock held. */
-bool    BlockMapMediumSays(uint32_t block, bool *taken);
+bool    BlockMapMediumSays(uint64_t block, bool *taken);
 
 /* The sector of the window holding `block` out of memory — written whole
  * first when it owes the medium anything — so the next edit of that window is
  * written down without it. With no TagFS lock held. */
-void    BlockMapSectorAway(uint32_t block);
+void    BlockMapSectorAway(uint64_t block);
 
 /* The next room BlockMapGiveRoomHold must ask the heap for is asked of a heap
  * that refuses it: HEAPFAIL armed on the holder's core right before it. false
@@ -253,7 +267,7 @@ uint32_t BlockMapEditMost(void);
  * Settle's S1 of the map (BlockMapFlush) on its way — with the lock let go,
  * right before the medium hears it — and keeps S1's answer, which
  * BlockMapStandFlushedOnItsWay hands back: false while no write ran it. */
-void    BlockMapStandFlushOnItsWay(uint32_t block);
+void    BlockMapStandFlushOnItsWay(uint64_t block);
 bool    BlockMapStandFlushedOnItsWay(error_t *said);
 
 /*
@@ -275,7 +289,7 @@ typedef struct {
     uint64_t hold_most_us;   /* the longest of them, in microseconds */
     uint32_t steps;
     bool     found;
-    uint32_t at;
+    uint64_t at;
     uint32_t got;
 } BlockMapApartPlan;
 

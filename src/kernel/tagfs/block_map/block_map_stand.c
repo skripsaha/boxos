@@ -89,7 +89,7 @@ bool BlockMapStandPlanApart(uint32_t windows, BlockMapApartShape shape, bool bes
                             uint32_t want, BlockMapApartPlan *out)
 {
     memset(out, 0, sizeof(*out));
-    if (windows == 0 || windows > UINT32_MAX / MAP_WINDOW_BLOCKS)
+    if (windows == 0 || windows >= MAP_NO_WINDOW)
         return false;
     BlockMapWindow *win = kmalloc(sizeof(BlockMapWindow) * windows);
     if (!win)
@@ -104,7 +104,7 @@ bool BlockMapStandPlanApart(uint32_t windows, BlockMapApartShape shape, bool bes
     }
     BlockMapWindow *own_win     = g_map.win;
     uint32_t        own_windows = g_map.windows;
-    uint32_t        own_blocks  = g_map.blocks;
+    uint64_t        own_blocks  = g_map.blocks;
     uint32_t        own_room    = g_map.first_room;
     uint32_t        own_most    = g_map.hold_most;
     uint32_t        own_fit[MAP_FIT_LISTS];
@@ -112,7 +112,7 @@ bool BlockMapStandPlanApart(uint32_t windows, BlockMapApartShape shape, bool bes
 
     g_map.win        = win;
     g_map.windows    = windows;
-    g_map.blocks     = windows * MAP_WINDOW_BLOCKS;
+    g_map.blocks     = (uint64_t)windows * MAP_WINDOW_BLOCKS;
     g_map.first_room = 0;
     memset(g_map.fit, 0, sizeof(g_map.fit));
     for (uint32_t w = 0; w < windows; w++)

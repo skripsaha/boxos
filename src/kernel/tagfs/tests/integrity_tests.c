@@ -17,7 +17,7 @@
 static TestResult test_integrity_detects_mismatch(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   blk     = 0;
+    uint64_t   blk     = 0;
 
     if (!IntegrityIsInitialized())
         return test_steps_aside("verify-on-read is not armed on this volume, so "
@@ -53,7 +53,7 @@ out:
 static TestResult test_integrity_persist_reload(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   blk     = 0;
+    uint64_t   blk     = 0;
     bool       down    = false;
 
     if (!IntegrityIsInitialized())
@@ -107,7 +107,7 @@ out:
 #define ROT_WITNESS_BLOCKS 65u
 
 typedef struct {
-    uint32_t first;
+    uint64_t first;
     uint64_t heard[2];      /* bit i: a report for block first + i arrived */
     uint32_t reports;       /* reports for the test's blocks, however many per block */
 } RotWitness;
@@ -128,7 +128,7 @@ static void RotWitnessHeard(TouchTag tag_id, const void* payload, uint32_t plen,
     memcpy(&block, payload, sizeof(block));
     if (block < witness->first || block - witness->first >= ROT_WITNESS_BLOCKS)
         return;
-    uint32_t i = block - witness->first;
+    uint32_t i = (uint32_t)(block - witness->first);
     __atomic_or_fetch(&witness->heard[i / 64], 1ull << (i % 64), __ATOMIC_RELAXED);
     __atomic_add_fetch(&witness->reports, 1u, __ATOMIC_RELAXED);
 }
@@ -136,7 +136,7 @@ static void RotWitnessHeard(TouchTag tag_id, const void* payload, uint32_t plen,
 static TestResult TestIntegrityReportsEveryRot(void)
 {
     TestResult  verdict     = TEST_PASS;
-    uint32_t    first       = 0;
+    uint64_t    first       = 0;
     bool        have_blocks = false;
     TouchWatch* ear         = NULL;
 

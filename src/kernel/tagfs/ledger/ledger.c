@@ -518,10 +518,11 @@ void LedgerLetGo(void)
  * 0xFFFFFFFF would leave the counter at 0, and every walk bounded by it would
  * see no file at all. So a counter at 0xFFFFFFFF says every id has been
  * issued, and a counter at 0 is a Ledger an earlier kernel let wrap; both are
- * refused out loud and the counter does not move. Format v2 carries 64-bit
- * ids (Quill design §2.3).
+ * refused out loud and the counter does not move. The kernel holds an id in
+ * 64 bits; this counter is format v1's, so no id it issues is past a u32 —
+ * format v2 carries 64-bit ids (Quill design §2.3).
  */
-error_t LedgerIssueFileId(VolumeLedger *led, uint32_t *out_fid)
+error_t LedgerIssueFileId(VolumeLedger *led, uint64_t *out_fid)
 {
     uint32_t next = led->next_file_id;
     if (next == 0 || next == UINT32_MAX) {

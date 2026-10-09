@@ -42,7 +42,7 @@ static bool       s_boot_moved;
 
 /* A write, a span or a defrag of the file, asked as the deck asks it, with
  * `warrant`, by a caller in the kernel: the job's answer. */
-static int StandWarrantJob(WriteJobKind kind, uint32_t file_id, InkWarrant warrant,
+static int StandWarrantJob(WriteJobKind kind, uint64_t file_id, InkWarrant warrant,
                            const void* data, uint32_t bytes, uint64_t size)
 {
     WriteJobAsk ask;
@@ -57,14 +57,14 @@ static int StandWarrantJob(WriteJobKind kind, uint32_t file_id, InkWarrant warra
 }
 
 /* Whether the file wears the tag `text` spells. */
-static bool StandWears(uint32_t file_id, const char* text)
+static bool StandWears(uint64_t file_id, const char* text)
 {
     uint16_t id = tagfs_tag_lookup(text);
     return id != TAGFS_INVALID_TAG_ID && tagfs_has_tag(file_id, id);
 }
 
 /* The tag `text` spells put on the file, with `warrant`. */
-static error_t StandPutOn(uint32_t file_id, const char* text, InkWarrant warrant)
+static error_t StandPutOn(uint64_t file_id, const char* text, InkWarrant warrant)
 {
     TagSpelling tag;
     error_t     rc = TagSpell(text, strlen(text), &tag);
@@ -72,7 +72,7 @@ static error_t StandPutOn(uint32_t file_id, const char* text, InkWarrant warrant
 }
 
 /* The tag `text` spells taken off the file, with `warrant`: 0 or -ERR_*. */
-static int StandTakeOff(uint32_t file_id, const char* text, InkWarrant warrant)
+static int StandTakeOff(uint64_t file_id, const char* text, InkWarrant warrant)
 {
     TagSpelling tag;
     error_t     rc = TagSpell(text, strlen(text), &tag);
@@ -81,7 +81,7 @@ static int StandTakeOff(uint32_t file_id, const char* text, InkWarrant warrant)
 
 /* The file's size, how many extents its record names, and where its first one
  * begins. False when the record does not read. */
-static bool StandShape(uint32_t file_id, uint64_t* size, uint32_t* extents, uint32_t* first)
+static bool StandShape(uint64_t file_id, uint64_t* size, uint32_t* extents, uint64_t* first)
 {
     TagFSMetadata meta;
     memset(&meta, 0, sizeof(meta));
@@ -89,20 +89,20 @@ static bool StandShape(uint32_t file_id, uint64_t* size, uint32_t* extents, uint
         return false;
     *size    = meta.size;
     *extents = meta.extent_count;
-    *first   = meta.extent_count ? meta.extents[0].start_block : 0;
+    *first   = meta.extent_count ? meta.extents[0].start : 0;
     tagfs_metadata_free(&meta);
     return true;
 }
 
 /* The Deed's word on the kernel's blocks pointed at one block of the data run,
- * and put back. */
-static void StandBootOnto(uint32_t block)
+ * and put back — a block of the volume in the u32 the BOOT stamp carries. */
+static void StandBootOnto(uint64_t block)
 {
     TagFSState* fs = tagfs_get_state();
     if (!s_boot_moved)
         s_boot_kept = fs->boot;
     s_boot_moved           = true;
-    fs->boot.kernel_block  = fs->layout.data_block + block;
+    fs->boot.kernel_block  = (uint32_t)(fs->layout.data_block + block);
     fs->boot.kernel_blocks = 1;
 }
 
@@ -125,12 +125,12 @@ static void StandBootBack(void)
 static TestResult TestStandWarrantUntagAnswersItsReason(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0;
+    uint64_t   file_id = 0;
 
     TEST_ASSERT(StandMakeFile("stand_warrant_u", NULL, 0, &file_id), "a file of the test's own");
     TEST_ASSERT_OK(StandPutOn(file_id, "system", INK_WARRANTED), "it wears system");
-    uint32_t fid  = file_id;
-    uint32_t gone = tagfs_file_ceiling();
+    uint32_t fid  = (uint32_t)file_id;   /* a program's file_id_t */
+    uint32_t gone = (uint32_t)tagfs_file_ceiling();   /* the next id, as a program names it */
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, &fid, sizeof(fid), "standnone", 9, NULL),
                    ERR_TAGFS_TAG_NOT_FOUND, "unset of a tag the file does not wear says so");
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, &gone, sizeof(gone), "standnone", 9, NULL),
@@ -152,9 +152,9 @@ out:
 static TestResult TestStandWarrantWriteAndSpan(void)
 {
     TestResult     verdict = TEST_PASS;
-    uint32_t       file_id = 0;
-    uint64_t       size    = 0;
-    uint32_t       extents = 0, first = 0;
+    uint64_t       file_id = 0;
+    uint64_t       size    = 0, first = 0;
+    uint32_t       extents = 0;
     const uint32_t B       = TAGFS_BLOCK_SIZE;
     const char*    aside   = StandStepsAsideFor();
 
@@ -209,7 +209,7 @@ out:
 static TestResult TestStandWarrantDeleteUntagRename(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0;
+    uint64_t   file_id = 0;
 
     TEST_ASSERT(StandMakeFile("system.standw", NULL, 0, &file_id), "a file named system.standw");
     TEST_ASSERT(StandWears(file_id, "system"), "its name's tag is system");
@@ -255,7 +255,7 @@ out:
 // before is refused too (B10).
 // ----------------------------------------------------------------------------
 
-static TestResult StandWarrantBootAsked(uint32_t file_id, InkWarrant warrant)
+static TestResult StandWarrantBootAsked(uint64_t file_id, InkWarrant warrant)
 {
     TestResult verdict = TEST_PASS;
     TEST_ASSERT_EQ(StandWarrantJob(WRITE_JOB_WRITE, file_id, warrant, g_test_output,
@@ -272,9 +272,9 @@ out:
 static TestResult TestStandWarrantBootRunRefusedToBoth(void)
 {
     TestResult  verdict = TEST_PASS;
-    uint32_t    kernel  = 0, file_id = 0, block = 0;
-    uint64_t    size    = 0;
-    uint32_t    extents = 0, first = 0;
+    uint64_t    kernel  = 0, file_id = 0;
+    uint64_t    size    = 0, block = 0, first = 0;
+    uint32_t    extents = 0;
     bool        armed   = false, loaded = false;
     Plot        plot;
     TagSpelling key     = TagSpellingOfKey("kernel");
@@ -350,10 +350,11 @@ out:
 static TestResult TestStandWarrantKeptFileNotGathered(void)
 {
     TestResult     verdict = TEST_PASS;
-    uint32_t       file_id = 0, wall = 0, block = 0;
+    uint64_t       file_id = 0;
+    uint64_t       wall    = 0, block = 0;
     bool           walled  = false;
-    uint64_t       size    = 0;
-    uint32_t       extents = 0, first = 0;
+    uint64_t       size    = 0, first = 0;
+    uint32_t       extents = 0;
     const uint32_t B       = TAGFS_BLOCK_SIZE;
     const char*    aside   = StandStepsAsideFor();
 
@@ -419,7 +420,7 @@ static TestResult TestStandWarrantDeckReadsTheCabin(void)
         { AUTH_TAG_SYSTEM | AUTH_TAG_UTILITY,  INK_WARRANTED   },
     };
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0;
+    uint64_t   file_id = 0;
     OpContext  ctx;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -438,7 +439,7 @@ static TestResult TestStandWarrantDeckReadsTheCabin(void)
 
     TEST_ASSERT(StandMakeFile("stand_warrant_d", NULL, 0, &file_id), "a file of the test's own");
     TEST_ASSERT_OK(StandPutOn(file_id, "system", INK_WARRANTED), "it wears system");
-    uint32_t fid = file_id;
+    uint32_t fid = (uint32_t)file_id;    /* a program's file_id_t */
     s_deck_cabin.auth_bits = AUTH_TAG_UTILITY | AUTH_TAG_APP;
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_OBJ_DELETE, &fid, sizeof(fid), NULL, 0, &ctx),
                    ERR_PERMISSION_DENIED, "the deck's delete for a utility's cabin is refused");
@@ -470,11 +471,11 @@ static TestResult TestStandWarrantGuardedTagPutOn(void)
 {
     static const char* const guarded[] = { "system", "boot:standwarrant", "god:standwarrant" };
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0;
+    uint64_t   file_id = 0;
     const char kept[]  = STAND_WARRANT_KEPT;
 
     TEST_ASSERT(StandMakeFile("stand_warrant_t", NULL, 0, &file_id), "a file of the test's own");
-    uint32_t fid = file_id;
+    uint32_t fid = (uint32_t)file_id;    /* a program's file_id_t */
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_SET, &fid, sizeof(fid), kept, sizeof(kept) - 1, NULL),
                    ERR_PERMISSION_DENIED,
                    "the deck's tag set of system:standwarrant, by a caller with no warrant, is refused");
