@@ -878,13 +878,18 @@ $(BUILDDIR):
 # platform rebuild is handled by prerequisites, not an in-body guard.
 TAGFS_OS_SIGNATURE = $(BUILDDIR)/.tagfs_host_os.$(UNAME_S).$(UNAME_M)
 
-# Prerequisites — the .c source, the shared reserved-vocabulary header, and the
-# OS signature — decide WHEN this recipe runs, so the compile is unconditional.
+# Prerequisites — the .c source, every shared header it includes, and the OS
+# signature — decide WHEN this recipe runs, so the compile is unconditional.
 # No in-body skip guard: that previously kept a stale tool after a
 # create_tagfs.c / tagfs_reserved.h edit, which silently formats a divergent
 # on-disk tag-id layout (the new kernel then panics: reserved vocab not 0..11).
+# The pen and the plate are on the list for the same reason: a Deed stamp or a
+# verdict changed in its header without `make clean` left the old tool writing
+# the old bytes.
 $(TAGFS_TOOL): tools/create_tagfs.c $(SRCDIR)/include/tagfs_reserved.h \
                $(SRCDIR)/include/volume_deed.h $(SRCDIR)/include/volume_ledger.h \
+               $(SRCDIR)/include/deed_pen.h $(SRCDIR)/include/buildplate_format.h \
+               $(SRCDIR)/include/boxos_magic.h \
                $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
 	@echo "Compiling TagFS tool for $(UNAME_S) ($(UNAME_M))..."
 	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $< -Wall -Wextra
@@ -1384,7 +1389,7 @@ $(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
 	@echo "Assembling TagBoot jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(TAGBOOT_EFI): $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h src/include/volume_ledger.h | $(BUILDDIR)
+$(TAGBOOT_EFI): $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h src/include/volume_deed.h src/include/volume_ledger.h | $(BUILDDIR)
 	@echo "Building TagBoot UEFI (clang/lld → PE32+)..."
 	@clang $(UEFI_CFLAGS_CLANG) \
 		-Wl,-entry:TagBootMain \
@@ -1400,7 +1405,7 @@ $(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
 	@echo "Assembling TagBoot jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(TAGBOOT_OBJ): $(TAGBOOT_SRC) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h src/include/volume_ledger.h | $(BUILDDIR)
+$(TAGBOOT_OBJ): $(TAGBOOT_SRC) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h src/include/volume_deed.h src/include/volume_ledger.h | $(BUILDDIR)
 	@echo "Building TagBoot UEFI object (gcc ELF)..."
 	@$(UEFI_CC) $(UEFI_CFLAGS_GCC) -c $< -o $@
 

@@ -1024,26 +1024,27 @@ type_line() {
 }
 
 # The sixteen bytes themselves, read off a raw image, so a claim about which
-# volume something is stops being an assumption. The Deed sits at the head of
-# the volume's ground; the ground is MBR entry 0, which is the one the image
-# rule writes first (`make_mbr.py $@ $$START,$$GROUND,7f,boot ...`); and the
-# uuid is at offset 16 of the Deed — the offset src/kernel/tagfs/deed/deed.h
-# pins with a STATIC_ASSERT and stage2 reads by hand. Says nothing and fails
-# when there is no readable Deed there, which is the honest answer for a copy
-# that came out short or torn.
+# volume something is stops being an assumption — read by the format's own
+# reader on the host (tools/volumeread): the ground the partition table names
+# and whose first sector is a Deed, the Deed checked whole against its own
+# checksum, and its identity. Of either format: the prologue is the same in
+# both. Says nothing and fails when there is no readable Deed there, which is
+# the honest answer for a copy that came out short or torn.
 deed_uuid() {
     python3 - "$1" <<'PY'
 import sys
-with open(sys.argv[1], "rb") as f:
-    f.seek(446 + 8)                      # MBR entry 0, its first LBA
-    lba = int.from_bytes(f.read(4), "little")
-    if lba == 0:
-        sys.exit(1)
-    f.seek(lba * 512)
-    deed = f.read(32)
-if len(deed) < 32 or deed[:8] != b"BOXDEED\0":
+sys.dont_write_bytecode = True
+sys.path.insert(0, "tools")
+from volumeread import medium, ondisk
+try:
+    m = medium.Medium(sys.argv[1])
+    ground, _how = medium.find_ground(m, None)
+    deed = ondisk.ReadDeed(m.sectors(ground, ondisk.DEED_SECTORS))
+except (ValueError, IOError):
     sys.exit(1)
-print(deed[16:32].hex())
+if not deed["ok"] or deed["role"] != ondisk.DEED_ROLE_HEAD:
+    sys.exit(1)
+print(deed["uuid"].hex())
 PY
 }
 

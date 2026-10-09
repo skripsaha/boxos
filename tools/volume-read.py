@@ -54,9 +54,11 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from volumeread import ondisk                                   # noqa: E402
 from volumeread.mount import Volume                             # noqa: E402
-from volumeread.medium import (Medium, Unreadable, find_ground,  # noqa: E402
-                               find_the_stick, permission_advice, read_deed)
+from volumeread.medium import (FormatVerdict, Medium, Unreadable,  # noqa: E402
+                               find_ground, find_the_stick, permission_advice,
+                               read_deed)
 
 
 def OpenDevice(device):
@@ -82,16 +84,30 @@ def CmdFiles(args, medium):
 
     if args.command == "deed":
         uuid = deed["uuid"].hex()
-        lay = deed["layout"]
+        lay, frame = deed["layout"], deed["frame"]
         print(f"ground      : sector {ground} ({how})")
         print(f"volume      : {uuid}")
         print(f"sectors     : {deed['sectors']}")
         print(f"role        : {deed['role']} (1=head, 2=tail)")
-        print(f"blocks      : {lay['total_blocks']}")
-        print(f"metadata at : block {lay['metadata_pool_block']}")
-        print(f"data run    : block {lay['data_block']}, "
-              f"{lay['data_blocks']} block(s)")
+        print(f"format      : {deed['format']} (v1 = LAYOUT, v2 = FRAME)")
+        if lay:
+            print(f"blocks      : {lay['total_blocks']}")
+            print(f"metadata at : block {lay['metadata_pool_block']}")
+            print(f"data run    : block {lay['data_block']}, "
+                  f"{lay['data_blocks']} block(s)")
+        if frame:
+            print(f"spine       : {frame['spine_slots']} slot(s) from block "
+                  f"{frame['spine_block']}, {frame['spine_stride']} block(s) apart")
+            print(f"data run    : block {frame['data_block']} to the far copy at block "
+                  f"{deed['tail_sector'] // ondisk.SECTORS_PER_BLOCK}")
+        verdict = FormatVerdict(deed)
+        if verdict:
+            print(f"verdict     : {verdict}")
         return 0
+
+    verdict = FormatVerdict(deed)
+    if verdict:
+        sys.exit(verdict)
 
     vol = Volume(medium, ground, deed)
     if vol.ledger() is None:

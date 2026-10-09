@@ -365,6 +365,8 @@ class Classifier:
         if vb == 0 or v // SECTORS_PER_BLOCK == st.deed["tail_sector"] // SECTORS_PER_BLOCK:
             what = "head deed" if vb == 0 else "far copy of the deed"
             return "deed", what, ("deed", vb)
+        if st.format == "v2":
+            return self._FrameSector(vb)
         if lay["state_block"] <= vb < lay["state_block"] + lay["state_blocks"]:
             c = vb - lay["state_block"]
             if v % SECTORS_PER_BLOCK:
@@ -397,6 +399,21 @@ class Classifier:
             return kind, what, ("data", kind, what) if kind in ("file", "integrity", "unowned") \
                 else ("data", kind, what, b)
         return "unowned", "volume block %u, in no region of the deed" % vb, ("gap", vb)
+
+    def _FrameSector(self, vb):
+        """A block of a format-v2 volume, named by where it sits in the FRAME:
+        no book is read here, so nothing says who owns it, and it is unowned.
+        A volume without LAYOUT is placed by its FRAME and never by a v1 rule."""
+        f = self.stand.deed["frame"]
+        if f is None:
+            return "unowned", "volume block %u of a format-v2 volume whose FRAME is short" % vb, ("v2", vb)
+        k = vb - f["spine_block"]
+        if f["spine_stride"] and k >= 0 and k % f["spine_stride"] == 0 and \
+                k // f["spine_stride"] < f["spine_slots"]:
+            return "unowned", "Spine slot %u (format v2)" % (k // f["spine_stride"]), ("v2", "slot", vb)
+        if vb < f["data_block"]:
+            return "unowned", "front matter block %u (format v2)" % vb, ("v2", "front")
+        return "unowned", "data run block %u (format v2: no book names its owner)" % vb, ("v2", "data")
 
     def _DataBlock(self, w, i, b, census):
         v_first = (self.lay["data_block"] + b) * SECTORS_PER_BLOCK + self.stand.start

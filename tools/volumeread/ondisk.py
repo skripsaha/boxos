@@ -1,4 +1,4 @@
-"""ondisk — the TagFS v1 format as the medium carries it, said once on the host.
+"""ondisk — the TagFS format as the medium carries it, said once on the host.
 
 Every number here is copied out of a C header or a C routine, and every one
 names where it came from: a header by file and line, a routine by its name —
@@ -26,8 +26,8 @@ import zlib
 # ---------------------------------------------------------------------------
 
 SECTOR = 512                            # volume_deed.h:112 VOLUME_DEED_SECTOR_BYTES
-BLOCK = 4096                            # tagfs.h:31 TAGFS_BLOCK_SIZE
-SECTORS_PER_BLOCK = BLOCK // SECTOR     # tagfs_constants.h:12 TAGFS_BLOCK_SECTORS
+BLOCK = 4096                            # volume_deed.h:130 VOLUME_BLOCK_BYTES
+SECTORS_PER_BLOCK = 8                   # volume_deed.h:131 VOLUME_BLOCK_SECTORS
 
 # ---------------------------------------------------------------------------
 # A packed C struct: its format and the names of its fields, in order
@@ -79,26 +79,30 @@ class Fields:
 DEED_MAGIC = b"BOXDEED\0"               # volume_deed.h:95-102
 DEED_SECTORS = 8                        # deed_pen.h:62 DEED_PEN_SECTORS
 DEED_ROLE_HEAD, DEED_ROLE_TAIL = 1, 2   # volume_deed.h:106-107
-DEED_CRC_AT = 12                        # volume_deed.h:127 VolumeDeed.crc32
-STAMP_GEOMETRY, STAMP_LAYOUT, STAMP_BORN, STAMP_BOOT, STAMP_PACKED = 1, 2, 3, 4, 5  # volume_deed.h:149-153
-STAMP_HEADER = 4                        # volume_deed.h:142-145 VolumeStamp
+DEED_CRC_AT = 12                        # volume_deed.h:146 VolumeDeed.crc32
+STAMP_GEOMETRY, STAMP_LAYOUT, STAMP_BORN, STAMP_BOOT, STAMP_PACKED = 1, 2, 3, 4, 5  # volume_deed.h:168-172
+STAMP_FRAME = 6                         # volume_deed.h:173 VOLUME_STAMP_FRAME
+STAMP_HEADER = 4                        # volume_deed.h:161-164 VolumeStamp
 
-VOLUME_DEED = Fields("<8sHHI16sQQI",    # volume_deed.h:123-132
+VOLUME_DEED = Fields("<8sHHI16sQQI",    # volume_deed.h:142-151
                      "magic prologue_bytes stamp_bytes crc32 uuid sectors tail_sector role")
-VOLUME_GEOMETRY = Fields("<IIII",       # volume_deed.h:176-181
+VOLUME_GEOMETRY = Fields("<IIII",       # volume_deed.h:196-201
                          "logical_bytes physical_bytes grain_bytes block_bytes")
-VOLUME_LAYOUT = Fields("<QIIIIIIIIIIIIII",   # volume_deed.h:198-214
+VOLUME_LAYOUT = Fields("<QIIIIIIIIIIIIII",   # volume_deed.h:222-238 — format v1 only
                        "total_blocks state_block state_blocks tag_registry_block "
                        "tag_registry_blocks file_table_block file_table_blocks "
                        "metadata_pool_block metadata_pool_blocks block_bitmap_block "
                        "block_bitmap_blocks disk_book_block disk_book_blocks "
                        "data_block data_blocks")
-VOLUME_BOOT = Fields("<IIII",           # volume_deed.h:230-235
+VOLUME_BOOT = Fields("<IIII",           # volume_deed.h:254-259
                      "kernel_block kernel_blocks kernel_bytes reserved")
-VOLUME_BORN = Fields("<Q16s",           # volume_deed.h:239-242
+VOLUME_BORN = Fields("<Q16s",           # volume_deed.h:263-266
                      "created_unix maker")
-VOLUME_PACKED = Fields("<QQQII",        # volume_deed.h:267-273
+VOLUME_PACKED = Fields("<QQQII",        # volume_deed.h:291-297
                        "packed_unix shipment tree file_count verdict")
+VOLUME_FRAME = Fields("<QQII",          # volume_deed.h:329-334 — format v2
+                      "data_block spine_block spine_slots spine_stride")
+FRAME_SPINE_SLOTS = 3                   # volume_deed.h:338 VOLUME_FRAME_SPINE_SLOTS
 
 # ---------------------------------------------------------------------------
 # The Ledger
@@ -133,23 +137,23 @@ SETTLE_MEDIUM_LIED = 1 << 1
 # The three chains and the metadata record
 # ---------------------------------------------------------------------------
 
-REGISTRY_MAGIC = 0x54524547             # boxos_magic.h:13 TAGFS_REGISTRY_MAGIC "TREG"
-FILETBL_MAGIC = 0x54465442              # boxos_magic.h:14 TAGFS_FILETBL_MAGIC  "TFTB"
-MPOOL_MAGIC = 0x544D504C                # boxos_magic.h:15 TAGFS_MPOOL_MAGIC    "TMPL"
-REGISTRY_DATA = 4080                    # tagfs.h:72 TAGFS_REGISTRY_DATA_SIZE
+REGISTRY_MAGIC = 0x54524547             # boxos_magic.h:12 TAGFS_REGISTRY_MAGIC "TREG"
+FILETBL_MAGIC = 0x54465442              # boxos_magic.h:13 TAGFS_FILETBL_MAGIC  "TFTB"
+MPOOL_MAGIC = 0x544D504C                # boxos_magic.h:14 TAGFS_MPOOL_MAGIC    "TMPL"
+REGISTRY_DATA = 4080                    # tagfs_constants.h:57 TAGFS_REGISTRY_DATA_SIZE
 MPOOL_DATA = 4080                       # plot/plot_width.h TAGFS_MPOOL_DATA_SIZE
-FTABLE_PER_BLOCK = 510                  # tagfs.h:74 TAGFS_FTABLE_PER_BLOCK
-CHAIN_HEADER = 16                       # tagfs.h:80, 102, 113 — every chain header is 16 bytes
+FTABLE_PER_BLOCK = 510                  # tagfs_constants.h:61 TAGFS_FTABLE_PER_BLOCK
+CHAIN_HEADER = 16                       # tagfs.h:48, 70, 81 — every chain header is 16 bytes
 
-REGISTRY_BLOCK = Fields("<IIHH4x",      # tagfs.h:84-91 TagRegistryBlock header
+REGISTRY_BLOCK = Fields("<IIHH4x",      # tagfs.h:52-59 TagRegistryBlock header
                         "magic next_block entry_count used_bytes")
-REGISTRY_RECORD = Fields("<HBBH",       # tagfs.h:81-83; tag_registry.c RegistryPack
+REGISTRY_RECORD = Fields("<HBBH",       # tagfs.h:49-51; tag_registry.c RegistryPack
                          "tag_id flags key_len value_len")
-FILE_TABLE_BLOCK = Fields("<IIII",      # tagfs.h:103-109 FileTableBlock header
+FILE_TABLE_BLOCK = Fields("<IIII",      # tagfs.h:71-77 FileTableBlock header
                           "magic next_block entry_count reserved")
-FILE_TABLE_ENTRY = Fields("<II",        # tagfs.h:95-98 FileTableEntry
+FILE_TABLE_ENTRY = Fields("<II",        # tagfs.h:63-66 FileTableEntry
                           "meta_block meta_offset")
-META_POOL_BLOCK = Fields("<IIHHH2x",    # tagfs.h:137-145 MetaPoolBlock header
+META_POOL_BLOCK = Fields("<IIHHH2x",    # tagfs.h:100-108 MetaPoolBlock header
                          "magic next_block used_bytes record_count kept")
 FILE_EXTENT = Fields("<IH",             # plot/plot_width.h FileExtent
                      "start_block block_count")
@@ -161,9 +165,9 @@ META_RECORD = Fields("<HIIQQQHHHH",     # tagfs_boot.h:53-67; plot/plot_pack.c P
                      "record_len file_id flags size created_time modified_time "
                      "tag_count extent_count name_len crc16")
 
-FILE_ACTIVE, FILE_TRASHED, FILE_HIDDEN = 1, 2, 4   # tagfs.h:60-62; bit 3 is spent (tagfs.h:63)
-MAX_TAG_ID = 0x7FFE                     # tagfs.h:57 TAGFS_MAX_TAG_ID
-TAG_FLAG_HAS_VALUE, TAG_FLAG_SYSTEM = 1, 2   # tagfs_constants.h:36-37
+FILE_ACTIVE, FILE_TRASHED, FILE_HIDDEN = 1, 2, 4   # tagfs_constants.h:44-46; bit 3 is spent (:47)
+MAX_TAG_ID = 0x7FFE                     # tagfs_constants.h:34 TAGFS_MAX_TAG_ID
+TAG_FLAG_HAS_VALUE, TAG_FLAG_SYSTEM = 1, 2   # tagfs_constants.h:40-41
 EXTENT_END_LIMIT = 0xFFFFFFFF           # plot/plot_pack.c PlotExtentsInRun: start + count past 2^32-1 is an overflow
 
 # ---------------------------------------------------------------------------
@@ -179,7 +183,7 @@ DISKBOOK_CAPACITY = 512                 # disk_book.h:30
 DISKBOOK_TYPE_REDIRECT = 1              # disk_book.h:33
 DISKBOOK_HEAD_CRC_AT = 32               # disk_book.h:43 DiskBookSuperblock.crc32
 DISKBOOK_ENTRY_CRC_AT = 32              # disk_book.h:62 DiskBookEntry.record_crc32
-# Head, its copy, then the records (create_tagfs.c:634-635, disk_book.c DiskBookPartAt).
+# Head, its copy, then the records (create_tagfs.c compute_layout, disk_book.c DiskBookPartAt).
 DISKBOOK_BLOCKS = 2 + DISKBOOK_CAPACITY * DISKBOOK_SECTORS_PER_ENTRY // SECTORS_PER_BLOCK
 DISKBOOK_SUPERBLOCK = Fields("<IIQIIIII16s",   # disk_book.h:35-46
                              "magic version start_sector capacity count "
@@ -283,7 +287,7 @@ def ReadDeed(raw):
     where the copy sits, not about the copy."""
     d = {"ok": False, "why": None, "crc_ok": False, "stamps": {},
          "walk_error": None, "layout": None, "geometry": None,
-         "boot": None, "born": None, "packed": None}
+         "boot": None, "born": None, "packed": None, "frame": None}
     if len(raw) < VOLUME_DEED.size or raw[:8] != DEED_MAGIC:
         d["why"] = "carries no deed"
         return d
@@ -321,7 +325,8 @@ def ReadDeed(raw):
                               ("geometry", STAMP_GEOMETRY, VOLUME_GEOMETRY),
                               ("boot", STAMP_BOOT, VOLUME_BOOT),
                               ("born", STAMP_BORN, VOLUME_BORN),
-                              ("packed", STAMP_PACKED, VOLUME_PACKED)):
+                              ("packed", STAMP_PACKED, VOLUME_PACKED),
+                              ("frame", STAMP_FRAME, VOLUME_FRAME)):
         payload = d["stamps"].get(kind)
         # Each is used only when the stamp is at least as long as the struct
         # this build knows (tagfs.c volume_take_ground; deed.c:296-329).
@@ -329,6 +334,49 @@ def ReadDeed(raw):
             d[key] = fields.Unpack(payload)
     d["ok"] = True
     return d
+
+
+def DeedFormatOf(d):
+    """DeedFormatOf (deed.c): which format a Deed's book is in, by the stamps
+    it carries — "v1" (LAYOUT), "v2" (FRAME), "both", or "none"."""
+    layout, frame = STAMP_LAYOUT in d["stamps"], STAMP_FRAME in d["stamps"]
+    return "both" if layout and frame else "v2" if frame else "v1" if layout else "none"
+
+
+def VolumeFrameCheck(d):
+    """VolumeFrameCheck (deed.c), the one rule in the kernel's words: (why, note)
+    for the FRAME a Deed carries — `why` None when it holds, `note` what a
+    FRAME that holds still has to say (a longer one, a ring of fewer slots)."""
+    payload = d["stamps"].get(STAMP_FRAME)
+    if payload is None or len(payload) < VOLUME_FRAME.size:
+        return "it is shorter than a FRAME", None
+    f = VOLUME_FRAME.Unpack(payload)
+    if f["spine_slots"] < 2:
+        return "its Spine ring has fewer than two slots, which is no ring", None
+    if f["spine_stride"] == 0:
+        return "its Spine slots are all one block — a ring with no stride", None
+    if f["spine_block"] == 0:
+        return "its Spine begins on block 0, which is the Deed's own", None
+    last = f["spine_block"] + (f["spine_slots"] - 1) * f["spine_stride"]
+    if last > 0xFFFFFFFFFFFFFFFF:
+        return ("its Spine ring runs past the last block number there is and comes "
+                "round onto the blocks before it"), None
+    if last >= f["data_block"]:
+        return "its Spine ring runs into the data run", None
+    if f["data_block"] >= d["tail_sector"] // SECTORS_PER_BLOCK:
+        return ("its data run starts at or past the volume's last block, where the far "
+                "copy of the Deed sits"), None
+    longer = len(payload) > VOLUME_FRAME.size
+    fewer = f["spine_slots"] < FRAME_SPINE_SLOTS
+    if longer and fewer:
+        return None, ("it is longer than the FRAME this kernel knows and its ring keeps "
+                      "fewer slots than this format lays down — written by a kernel that "
+                      "knows more, or by another maker")
+    if longer:
+        return None, "it is longer than the FRAME this kernel knows — written by a kernel that knows more"
+    if fewer:
+        return None, "its ring keeps fewer slots than this format lays down — a volume made by another maker"
+    return None, None
 
 
 def DeedSeal(raw):
@@ -486,7 +534,7 @@ def ReadManifest(raw):
 
 
 def ReadRegistryBlock(raw, upto=REGISTRY_DATA):
-    """A tag registry block (tagfs.h:84-91) and its records, walked exactly as
+    """A tag registry block (tagfs.h:52-59) and its records, walked exactly as
     tag_registry_load's RegistryAdoptBlock walks them: entry_count records
     packed from the start of the data, and none past `upto` — the whole data,
     or the bytes a seal names of the block it names."""
@@ -516,7 +564,7 @@ def ReadRegistryBlock(raw, upto=REGISTRY_DATA):
 
 
 def ReadTableBlock(raw):
-    """A file table block (tagfs.h:103-109). Only the first entry_count rows are
+    """A file table block (tagfs.h:71-77). Only the first entry_count rows are
     loaded, clamped to 510 (file_table.c:152-158); the rest read as empty. A
     row is a file when meta_block != 0 (file_table.c:191)."""
     d = FILE_TABLE_BLOCK.Unpack(raw)
@@ -551,7 +599,7 @@ def PoolRecords(raw, upto):
 
 
 def ReadPoolBlock(raw, upto=None):
-    """A metadata pool block (tagfs.h:137-145) and its records.
+    """A metadata pool block (tagfs.h:100-108) and its records.
 
     `mirror_walk` is the walk of its records over used_bytes. `walk_stop` is
     (at, record_len) where the mount's walk stopped short of `upto` — the bytes

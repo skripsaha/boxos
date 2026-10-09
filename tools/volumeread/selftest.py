@@ -504,6 +504,73 @@ def PlantNoDeed(t, over):
     over.Put(t.base + t.f.deed["tail_sector"], bytes(ondisk.DEED_SECTORS * SECTOR))
 
 
+def PlantFrame(t, over, frame_bytes=ondisk.VOLUME_FRAME.size, keep_layout=False, **edit):
+    """The head Deed made again with a FRAME — the one a maker of format v2
+    lays down, with `edit`'s fields changed, `frame_bytes` long — in place of
+    its LAYOUT, or beside it when `keep_layout`: a Deed claiming both formats."""
+    raw = bytearray(over.sectors(t.base, ondisk.DEED_SECTORS))
+    d = ondisk.ReadDeed(bytes(raw))
+    grain = 256
+    frame = dict(data_block=grain * (1 + ondisk.FRAME_SPINE_SLOTS), spine_block=grain,
+                 spine_slots=ondisk.FRAME_SPINE_SLOTS, spine_stride=grain)
+    frame.update(edit)
+    payload = ondisk.VOLUME_FRAME.struct.pack(*(frame[k] for k in ondisk.VOLUME_FRAME.names))
+    stamps = b""
+    for kind, body in list(d["stamps"].items()) + [(ondisk.STAMP_FRAME, payload.ljust(frame_bytes, b"\0"))]:
+        if kind == ondisk.STAMP_LAYOUT and not keep_layout:
+            continue
+        stamps += struct.pack("<HH", kind, len(body)) + body
+        stamps = stamps.ljust((len(stamps) + 3) & ~3, b"\0")
+    pb = d["prologue_bytes"]
+    raw[pb:] = stamps.ljust(len(raw) - pb, b"\0")
+    struct.pack_into("<H", raw, 10, len(stamps))
+    over.Put(t.base, ondisk.DeedSeal(raw))
+
+
+def FrameCases(t, medium):
+    """(name, ok, said) for each Deed whose format a reader of v1 must not
+    take for its own: each is unreadable to the census, and says the reason
+    the kernel says at its format check (deed.c, DeedFormatRefused)."""
+    out = []
+    for name, plant, words in (
+            ("F1 both formats", lambda o: PlantFrame(t, o, keep_layout=True),
+             ("claims both formats",)),
+            ("F2 FRAME with overlapping slots", lambda o: PlantFrame(t, o, spine_stride=0),
+             ("format v2", "does not hold", "all one block")),
+            ("F3 FRAME longer than 24", lambda o: PlantFrame(t, o, frame_bytes=32),
+             ("format v2", "no book is written", "knows more"))):
+        over = OverlayMedium(medium)
+        plant(over)
+        try:
+            GroundCensus(over)
+            out.append((name, False, "the census read it as a volume of format v1"))
+        except Unreadable as e:
+            out.append((name, all(w in str(e) for w in words), "unreadable: %s" % e))
+
+    # A cut of a volume with no LAYOUT: the classifier places each write by
+    # the FRAME — the Deed, a Spine slot, the front matter, the data run — and
+    # one outside the ground stays outside, where reading v1's regions off a
+    # Deed that has none fell over on the first write into the ground.
+    over = OverlayMedium(medium)
+    PlantFrame(t, over)
+    grain = 256
+    entries = [(t.VLba(0), 0, over.sectors(t.VLba(0), SECTORS_PER_BLOCK)),
+               (t.VLba(2 * grain), 0, b"\x11" * BLOCK),
+               (t.VLba(grain + 1), 0, b"\x22" * BLOCK),
+               (t.VLba((1 + ondisk.FRAME_SPINE_SLOTS) * grain + 7), 0, b"\x33" * BLOCK),
+               (1, 0, b"\x44" * SECTOR)]
+    log = blklog.BlkLog(SyntheticLog(entries, len(entries)), over.SizeSectors())
+    named = [[(x.kind, x.what) for x in blklog.Classifier(log, over).Classify(w)]
+             for w in log.Writes()]
+    want = [("deed", "head deed"), ("unowned", "Spine slot 1"), ("unowned", "front matter"),
+            ("unowned", "data run block"), ("outside", "boot code")]
+    ok = len(named) == len(want) and all(
+        len(n) == 1 and n[0][0] == kind and what in n[0][1] for n, (kind, what) in zip(named, want))
+    out.append(("F4 a cut of a format-v2 volume", ok,
+                "; ".join("%s %s" % n[0] if n else "nothing" for n in named)))
+    return out
+
+
 def PlantMbrEntry(t, over, kind=None, extra=0):
     """MBR entry 0, the volume's ground: its type byte, or its sector count
     `extra` sectors longer."""
@@ -1185,10 +1252,13 @@ def _Value(text, defines):
     return defines.get(text)
 
 
-def Defines(text):
+def Defines(text, known=None):
+    """Every #define in `text` whose value can be read: a number, a char, a
+    shift, a product, or the name of one defined above it here or in `known`
+    — the headers read before it, so an alias resolves to its owner."""
     out = {}
     for name, value in _DEFINE.findall(text):
-        v = _Value(value, out)
+        v = _Value(value, dict(known or {}, **out))
         if v is not None:
             out[name] = v
     return out
@@ -1216,22 +1286,32 @@ def Structs(text, defines):
 
 
 def ConstantsCheck(src):
+    """The format's numbers held against the headers.
+
+    ‼ THE KERNEL'S HEADERS ARE READ LAST, so theirs is the word ondisk.py is
+    held to. The UEFI loader keeps copies of some of the same numbers
+    (tagfs_boot.h), and when it was read last its copy was what got checked —
+    a loader that agreed with ondisk.py hid a kernel that did not. Now the
+    loader is read first, and each number it shares with the kernel is held to
+    the kernel's on its own line."""
     inc, fs = os.path.join(src, "include"), os.path.join(src, "kernel", "tagfs")
-    paths = {"magic": os.path.join(inc, "boxos_magic.h"), "deed": os.path.join(inc, "volume_deed.h"),
+    paths = {"boot": os.path.join(src, "boot", "uefi", "tagfs_boot.h"),
+             "magic": os.path.join(inc, "boxos_magic.h"), "deed": os.path.join(inc, "volume_deed.h"),
              "ledger": os.path.join(inc, "volume_ledger.h"), "pen": os.path.join(inc, "deed_pen.h"),
              "tagfs": os.path.join(fs, "tagfs.h"), "consts": os.path.join(fs, "tagfs_constants.h"),
              "cow": os.path.join(fs, "cow", "cow.h"), "book": os.path.join(fs, "disk_book", "disk_book.h"),
              "pool": os.path.join(fs, "metadata_pool", "meta_pool_internal.h"),
              "plot": os.path.join(fs, "plot", "plot_width.h"),
-             "boot": os.path.join(src, "boot", "uefi", "tagfs_boot.h"),
              "ground": os.path.join(src, "kernel", "core", "boardroom", "ground.c"),
              "groundh": os.path.join(src, "kernel", "core", "boardroom", "ground.h")}
     if not all(os.path.exists(p) for p in paths.values()):
         return None, "self-test needs the source tree beside the tool (src/ next to tools/)"
     text = {k: open(p, encoding="utf-8", errors="replace").read() for k, p in paths.items()}
-    d = {}
+    loader, kernel = Defines(text["boot"]), {}
     for k in text:
-        d.update(Defines(text[k]))
+        if k != "boot":
+            kernel.update(Defines(text[k], kernel))
+    d = dict(loader, **kernel)
     wrong, n = [], 0
 
     def Eq(name, have, want):
@@ -1240,6 +1320,12 @@ def ConstantsCheck(src):
         if have != want:
             wrong.append("%s: the header says %r and ondisk.py %r" % (name, want, have))
 
+    for name in sorted(set(loader) & set(kernel)):
+        n += 1
+        if loader[name] != kernel[name]:
+            wrong.append("%s: tagfs_boot.h says %r and the kernel's headers %r"
+                         % (name, loader[name], kernel[name]))
+
     magic = lambda p: bytes(d["%s_MAGIC_%u" % (p, i)] for i in range(8))
     Eq("VOLUME_DEED_MAGIC", ondisk.DEED_MAGIC, magic("VOLUME_DEED"))
     Eq("VOLUME_LEDGER_MAGIC", ondisk.LEDGER_MAGIC, magic("VOLUME_LEDGER"))
@@ -1247,9 +1333,11 @@ def ConstantsCheck(src):
                   ("DEED_ROLE_TAIL", "VOLUME_DEED_ROLE_TAIL"), ("STAMP_GEOMETRY", "VOLUME_STAMP_GEOMETRY"),
                   ("STAMP_LAYOUT", "VOLUME_STAMP_LAYOUT"), ("STAMP_BORN", "VOLUME_STAMP_BORN"),
                   ("STAMP_BOOT", "VOLUME_STAMP_BOOT"), ("STAMP_PACKED", "VOLUME_STAMP_PACKED"),
+                  ("STAMP_FRAME", "VOLUME_STAMP_FRAME"), ("FRAME_SPINE_SLOTS", "VOLUME_FRAME_SPINE_SLOTS"),
+                  ("SECTORS_PER_BLOCK", "VOLUME_BLOCK_SECTORS"), ("BLOCK", "TAGFS_BLOCK_SIZE"),
                   ("DEED_SECTORS", "DEED_PEN_SECTORS"), ("LEDGER_COPIES", "VOLUME_LEDGER_COPIES"),
                   ("REGISTRY_MAGIC", "TAGFS_REGISTRY_MAGIC"), ("FILETBL_MAGIC", "TAGFS_FILETBL_MAGIC"),
-                  ("MPOOL_MAGIC", "TAGFS_MPOOL_MAGIC"), ("BLOCK", "TAGFS_BLOCK_SIZE"),
+                  ("MPOOL_MAGIC", "TAGFS_MPOOL_MAGIC"), ("BLOCK", "VOLUME_BLOCK_BYTES"),
                   ("REGISTRY_DATA", "TAGFS_REGISTRY_DATA_SIZE"), ("MPOOL_DATA", "TAGFS_MPOOL_DATA_SIZE"),
                   ("FTABLE_PER_BLOCK", "TAGFS_FTABLE_PER_BLOCK"), ("MAX_TAG_ID", "TAGFS_MAX_TAG_ID"),
                   ("FILE_ACTIVE", "TAGFS_FILE_ACTIVE"), ("FILE_TRASHED", "TAGFS_FILE_TRASHED"),
@@ -1284,6 +1372,7 @@ def ConstantsCheck(src):
     for cname, fields in (("VolumeDeed", ondisk.VOLUME_DEED), ("VolumeGeometry", ondisk.VOLUME_GEOMETRY),
                           ("VolumeLayout", ondisk.VOLUME_LAYOUT), ("VolumeBoot", ondisk.VOLUME_BOOT),
                           ("VolumeBorn", ondisk.VOLUME_BORN), ("VolumePacked", ondisk.VOLUME_PACKED),
+                          ("VolumeFrame", ondisk.VOLUME_FRAME),
                           ("VolumeLedger", ondisk.VOLUME_LEDGER), ("TagRegistryBlock", ondisk.REGISTRY_BLOCK),
                           ("FileTableBlock", ondisk.FILE_TABLE_BLOCK), ("FileTableEntry", ondisk.FILE_TABLE_ENTRY),
                           ("MetaPoolBlock", ondisk.META_POOL_BLOCK), ("FileExtent", ondisk.FILE_EXTENT),
@@ -1373,6 +1462,10 @@ def Run(medium, src):
     total += 1
     passed += ok
     print("self-test: C16 no deed — %s — %s" % (said, "as expected" if ok else "expected unreadable"))
+    for name, ok, said in FrameCases(t, medium):
+        total += 1
+        passed += ok
+        print("self-test: %s — %s — %s" % (name, said, "as expected" if ok else "NOT so"))
     for name, ok, said in LogCases(t, medium):
         total += 1
         passed += ok

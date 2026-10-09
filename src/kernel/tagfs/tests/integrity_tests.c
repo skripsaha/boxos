@@ -27,7 +27,7 @@ static TestResult test_integrity_detects_mismatch(void)
         return test_steps_aside("the volume would not hand out a block to record "
                                 "a digest over");
 
-    for (int i = 0; i < TAGFS_BLOCK_SIZE; i++) g_test_buffer[i] = (uint8_t)(i * 7 + 1);
+    for (uint32_t i = 0; i < TAGFS_BLOCK_SIZE; i++) g_test_buffer[i] = (uint8_t)(i * 7 + 1);
     TEST_ASSERT_OK(tagfs_write_block(blk, g_test_buffer),
                    "the block takes its content, and the map its digest");
     TEST_ASSERT(IntegrityVerify(blk, g_test_buffer), "verify matches the recorded digest");
@@ -64,7 +64,7 @@ static TestResult test_integrity_persist_reload(void)
         return test_steps_aside("the volume would not hand out a block to record "
                                 "a digest over");
 
-    for (int i = 0; i < TAGFS_BLOCK_SIZE; i++) g_test_buffer[i] = (uint8_t)(i * 11 + 3);
+    for (uint32_t i = 0; i < TAGFS_BLOCK_SIZE; i++) g_test_buffer[i] = (uint8_t)(i * 11 + 3);
     TEST_ASSERT_OK(tagfs_write_block(blk, g_test_buffer),
                    "the block takes its content, and the map its digest");
     TEST_ASSERT_OK(IntegrityFlush(), "the map is persisted to disk");

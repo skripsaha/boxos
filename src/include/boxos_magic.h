@@ -9,12 +9,9 @@
 #define BROOK_HEADER_MAGIC     0x42524B48  // "BRKH" — Brook SPSC stream header
 
 // TagFS
-#define TAGFS_MAGIC            0x54414746  // "TAGF"
 #define TAGFS_REGISTRY_MAGIC   0x54524547  // "TREG"
 #define TAGFS_FILETBL_MAGIC    0x54465442  // "TFTB"
 #define TAGFS_MPOOL_MAGIC      0x544D504C  // "TMPL"
-#define JOURNAL_MAGIC          0x4A4F5552  // "JOUR"
-#define JOURNAL_ENTRY_MAGIC    0x4A454E54  // "JENT"
 
 // Process
 #define PROCESS_MAGIC          0x50524F43  // "PROC"

@@ -496,7 +496,9 @@ def find_ground(medium, forced_start):
 
 
 def read_deed(medium, ground):
-    """The Deed at the head of the ground: identity, extent, and the layout.
+    """The Deed at the head of the ground: identity, extent, its format, and
+    the stamps that say where things are — `layout` for format v1, `frame` for
+    v2, None where the Deed carries none.
 
     Deliberately forgiving: it is what `list`, `get` and `deed` read a volume
     through, and those exist to get evidence off volumes that may not mount.
@@ -508,17 +510,43 @@ def read_deed(medium, ground):
             f"(first eight bytes: {raw[0:8]!r})")
     deed = ondisk.VOLUME_DEED.Unpack(raw)
     parsed = ondisk.ReadDeed(raw)
-    layout = parsed["layout"]
-    if layout is None and parsed["why"] is not None:
+    if parsed["why"] is not None:
         # A Deed whose checksum is off still says where things are: read its
         # stamps without the checksum, which is what this reader always did.
-        resealed = ondisk.ReadDeed(ondisk.DeedSeal(raw))
-        layout = resealed["layout"]
-    if layout is None:
-        raise ValueError("the Deed carries no layout stamp — nothing here can "
-                         "say where the files are")
-    deed["layout"] = layout
+        parsed = ondisk.ReadDeed(ondisk.DeedSeal(raw))
+    for key in ("layout", "frame", "geometry", "stamps"):
+        deed[key] = parsed[key]
+    deed["format"] = ondisk.DeedFormatOf(parsed)
     return deed
+
+
+def FormatVerdict(deed):
+    """What a reader of format v1 can make of this Deed's book: None for format
+    v1, or the sentence that says why there is nothing here for it to read —
+    the same answers the kernel gives at the same point (deed.c,
+    DeedFormatRefused). `deed` is a ReadDeed or read_deed result."""
+    fmt = ondisk.DeedFormatOf(deed)
+    if fmt == "v1":
+        return None
+    if fmt == "both":
+        return "the deed claims both formats — it carries a LAYOUT and a FRAME"
+    if fmt == "none":
+        return "the deed carries neither a LAYOUT nor a FRAME — nothing here can say where anything is"
+    geo = deed["geometry"]
+    if not geo or geo["block_bytes"] != ondisk.BLOCK:
+        return ("format v2, laid out in %u-byte blocks — a kernel speaks %u"
+                % (geo["block_bytes"] if geo else 0, ondisk.BLOCK))
+    why, note = ondisk.VolumeFrameCheck(deed)
+    if why:
+        return "format v2, and its FRAME does not hold: %s" % why
+    f = deed["frame"]
+    return ("format v2: its deed bears FRAME (a Spine ring of %u slots %u blocks apart from "
+            "block %u, the data run from block %u)%s, and no book is written on it yet — "
+            "there are no files to list and nothing to count. A kernel before format v2 "
+            "refuses it for carrying no layout it understands; one that knows FRAME and "
+            "cannot read the book refuses it as format v2"
+            % (f["spine_slots"], f["spine_stride"], f["spine_block"], f["data_block"],
+               "; %s" % note if note else ""))
 
 
 def _ReadCopy(medium, lba):
@@ -567,7 +595,7 @@ class Stand:
     is why not, in its words."""
 
     __slots__ = ("start", "sectors", "how", "kernels", "kernel_why", "head_why",
-                 "stood_on", "deed", "tail", "tail_why", "far_end")
+                 "stood_on", "deed", "tail", "tail_why", "far_end", "format")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -608,10 +636,15 @@ def StandOnDeed(medium, forced_start):
                 continue
             stand = Stand(start=start, sectors=sectors, how=how, kernels=kernels,
                           kernel_why=why, head_why=head_why, stood_on="tail", deed=tail)
-        if stand.deed["layout"] is None:
-            raise Unreadable("the deed at sector %u carries no layout stamp this "
-                             "tool understands — nothing can say where anything is"
-                             % start)
+        # The format is the kernel's first question too (tagfs.c, at the same
+        # point): a Deed that claims both, or neither, is no ground to stand on.
+        # A format-v2 one is — its prologue says where it runs — and what a
+        # reader of v1 can make of it is said by VolumeFacts, FormatVerdict.
+        stand.format = ondisk.DeedFormatOf(stand.deed)
+        if stand.format in ("both", "none") or (stand.format == "v1" and
+                                                 stand.deed["layout"] is None):
+            raise Unreadable("the deed at sector %u: %s" % (start, FormatVerdict(stand.deed)
+                             or "its LAYOUT is shorter than this tool reads"))
         _ReadFarCopies(medium, stand)
         return stand
 
@@ -657,6 +690,8 @@ class VolumeFacts:
     def __init__(self, medium, forced_start):
         self.medium = medium
         self.stand = StandOnDeed(medium, forced_start)
+        if self.stand.format != "v1":
+            raise Unreadable(FormatVerdict(self.stand.deed))
         self.base = self.stand.start
         self.deed = self.stand.deed
         self.layout = dict(self.deed["layout"])

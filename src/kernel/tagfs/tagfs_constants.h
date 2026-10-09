@@ -3,13 +3,20 @@
 
 // ============================================================================
 // TagFS Production Constants
-// All TagFS modules include this file - no circular dependencies
+// All TagFS modules include this file - no circular dependencies. Each fact
+// here has this one home in the kernel; tagfs.h includes it and repeats none.
 // ============================================================================
 
-#define TAGFS_VERSION               1
-#define TAGFS_BLOCK_SIZE            4096
-#define TAGFS_SECTOR_SIZE           512
-#define TAGFS_BLOCK_SECTORS         (TAGFS_BLOCK_SIZE / TAGFS_SECTOR_SIZE)
+#include "../../lib/kernel/ktypes.h"     /* volume_deed.h takes its types from the includer */
+#include "../../include/volume_deed.h"
+
+/* The volume's block and its sectors are the format's, owned by the Deed's
+ * header; these are the names the kernel has always used for them. There is
+ * no version number: what a volume's book is written in is said by which
+ * stamp its Deed carries (LAYOUT for format v1, FRAME for v2). */
+#define TAGFS_BLOCK_SIZE            VOLUME_BLOCK_BYTES
+#define TAGFS_SECTOR_SIZE           VOLUME_DEED_SECTOR_BYTES
+#define TAGFS_BLOCK_SECTORS         VOLUME_BLOCK_SECTORS
 
 /* No disk layout here any more. Where each part of a volume sits is stated by
  * that volume's own Deed, in blocks counted from its own start, and read at
@@ -37,10 +44,12 @@
 #define TAGFS_FILE_ACTIVE           (1 << 0)
 #define TAGFS_FILE_TRASHED          (1 << 1)
 #define TAGFS_FILE_HIDDEN           (1 << 2)
+/* Bit 3 is spent on v1: kernels before Quill step 1.1 took it for copy-on-write, so it is never set and never trusted. */
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)
 #define TAGFS_HANDLE_WRITE          (1 << 1)
+#define TAGFS_HANDLE_APPEND         (1 << 2)   /* every write lands at the file's size */
 
 // Registry constants
 #define TAGFS_REG_BUCKETS           512

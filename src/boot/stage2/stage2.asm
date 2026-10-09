@@ -183,12 +183,11 @@ KERNEL_HDR_MAGIC        equ 0x4E52454B  ; "KERN" little-endian
 KERNEL_HDR_MAGIC_HI     equ 0x4C45      ; "EL" little-endian
 KERNEL_HDR_VERSION      equ 1           ; must match kernel_entry.asm dd at offset +8
 
-; TagFS layout constants — mirror src/boot/uefi/tagfs_boot.h and
-; src/kernel/tagfs/tagfs_constants.h. NASM can't include C headers, so we
-; redefine here. Compile-time check via the assert at the bottom of this
-; file would be ideal, but NASM lacks _Static_assert; if any of these
-; change in C, also update here. KERNEL_MAX_BLOCKS is derived to keep the
-; bound consistent with KERNEL_MAX_SIZE.
+; The volume's block and the sectors in it — owned by src/include/volume_deed.h
+; (VOLUME_BLOCK_BYTES, VOLUME_BLOCK_SECTORS). NASM can't include C headers, so
+; they are spelled here, and src/kernel/tagfs/deed/deed.h holds the owner to
+; these spellings with static asserts, as it does the Deed's offsets above.
+; KERNEL_MAX_BLOCKS is derived to keep the bound consistent with KERNEL_MAX_SIZE.
 TAGFS_BLOCK_SIZE              equ 4096
 TAGFS_SECTOR_SIZE             equ 512
 TAGFS_SECTORS_PER_BLOCK       equ TAGFS_BLOCK_SIZE / TAGFS_SECTOR_SIZE   ; 8
