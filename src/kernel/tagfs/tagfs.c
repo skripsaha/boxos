@@ -922,6 +922,23 @@ static void volume_take_more_ground(uint8_t seat, uint64_t ground_sectors,
 }
 
 /*
+ * ‼ A VOLUME TURNED AWAY IS NOT A VOLUME STOOD ON. Every refusal after a Deed
+ * was read lets go of the seat and base the search and the ground named. Kept,
+ * the boot survey passed the refused ground over as "the volume this machine
+ * is standing on" (DeedSurveyAll), and the write door — which with no volume
+ * up asks only whether the seat is occupied (volume_not_here) — let a write
+ * through to it. Let go of, the room refuses a seat that is not there.
+ */
+static error_t VolumeGroundRefused(DeedCopy *head, error_t why)
+{
+    DeedRelease(head);
+    g_tagfs_seat    = BOARDROOM_NO_SEAT;
+    g_tagfs_seating = 0;
+    g_volume_base   = 0;
+    return why;
+}
+
+/*
  * Stand the volume on its ground.
  *
  * Everything the filesystem knows about where things are comes from here: the
@@ -1004,16 +1021,16 @@ static error_t volume_take_ground(uint8_t seat)
 
     DeedDescribe(seat, &head);
 
+    /* ‼ WHICH FORMAT ITS BOOK IS IN — asked before the mount's first write
+     * (volume_take_more_ground, below): a book this kernel cannot read is
+     * refused without a byte of the volume written. */
+    error_t format = DeedFormatRefused(seat, &head, DeedFormatOf(&head));
+    if (format != OK)
+        return VolumeGroundRefused(&head, format);
+
     uint16_t bytes = 0;
-    const VolumeLayout *layout =
-        (const VolumeLayout *)DeedStamp(&head, VOLUME_STAMP_LAYOUT, &bytes);
-    if (!layout || bytes < sizeof(VolumeLayout)) {
-        kprintf("[TagFS] the deed on seat %u does not say where anything is — "
-                "it carries no layout this kernel understands\n", seat);
-        DeedRelease(&head);
-        return ERR_TAGFS_CORRUPTED;
-    }
-    memcpy(&g_state.layout, layout, sizeof(g_state.layout));
+    memcpy(&g_state.layout, DeedStamp(&head, VOLUME_STAMP_LAYOUT, &bytes),
+           sizeof(g_state.layout));
 
     /* Cleared first, as the boot run below is: a volume whose Deed carries no
      * grid is judged by what it says, never by the grid of a volume mounted
@@ -1054,8 +1071,7 @@ static error_t volume_take_ground(uint8_t seat)
                 "inside a volume of %llu — that does not fit\n",
                 seat, g_state.layout.data_blocks, g_state.layout.data_block,
                 (unsigned long long)blocks_in_volume);
-        DeedRelease(&head);
-        return ERR_TAGFS_CORRUPTED;
+        return VolumeGroundRefused(&head, ERR_TAGFS_CORRUPTED);
     }
 
     /*
@@ -1098,8 +1114,7 @@ static error_t volume_take_ground(uint8_t seat)
         kprintf("[TagFS] the volume on seat %u was laid out in %u-byte blocks "
                 "and this kernel speaks %u\n",
                 seat, g_state.geometry.block_bytes, TAGFS_BLOCK_SIZE);
-        DeedRelease(&head);
-        return ERR_TAGFS_CORRUPTED;
+        return VolumeGroundRefused(&head, ERR_TAGFS_CORRUPTED);
     }
 
     /*
@@ -1202,6 +1217,13 @@ error_t tagfs_flush_cache(void)
      * would be taken up over a cache nobody committed. */
     if (volume_not_here())
         return ERR_DEVICE_NOT_READY;
+
+    /* No volume named — none found, one refused at its Deed, one let go of
+     * when its medium left: no cache holds anything of a volume, and seat 255
+     * is a chair that is not there, whose refusal came back as a durability
+     * alarm about a volume this machine never wrote. */
+    if (g_tagfs_seat == BOARDROOM_NO_SEAT)
+        return OK;
 
     /* The one place a flush ticket is taken and answered (scribe.h): taken
      * before the medium is asked, so the flush it stands for was issued after

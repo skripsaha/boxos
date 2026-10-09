@@ -56,8 +56,8 @@
  *
  * ‼ src/boot/stage2/stage2.asm spells this number for itself (DEED_SECTORS
  * equ 8), because an assembler cannot ask a C header. That is the same
- * arrangement the prologue offsets have, and deed.h checks those with static
- * asserts; this one is checked by the fact that stage2 stops booting.
+ * arrangement the prologue offsets have, and deed.h holds this one to it with
+ * a static assert beside theirs.
  */
 #define DEED_PEN_SECTORS  8u
 #define DEED_PEN_BYTES    (DEED_PEN_SECTORS * VOLUME_DEED_SECTOR_BYTES)

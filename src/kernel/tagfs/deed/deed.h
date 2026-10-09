@@ -4,6 +4,7 @@
 #include "ktypes.h"
 #include "error.h"
 #include "volume_deed.h"
+#include "deed_pen.h"
 #include "ground.h"
 
 /*
@@ -39,6 +40,17 @@ STATIC_ASSERT(sizeof(VolumeDeed)                             == 52, "stage2 DEED
 STATIC_ASSERT(__builtin_offsetof(VolumeBoot, kernel_block)  == 0, "stage2 BOOT_KERNEL_BLOCK");
 STATIC_ASSERT(__builtin_offsetof(VolumeBoot, kernel_blocks) == 4, "stage2 BOOT_KERNEL_BLOCKS");
 STATIC_ASSERT(__builtin_offsetof(VolumeBoot, kernel_bytes)  == 8, "stage2 BOOT_KERNEL_BYTES");
+
+/* And the units stage2 turns those numbers into sectors with, which it spells
+ * for itself too: TAGFS_BLOCK_SIZE equ 4096, TAGFS_SECTORS_PER_BLOCK_LOG2 equ 3
+ * — a shift, because that is how sixteen-bit code multiplies by eight — and
+ * DEED_SECTORS equ 8, how much of the ground a Deed takes. One owner each
+ * (volume_deed.h, deed_pen.h), and these hold the assembler's copies to them. */
+STATIC_ASSERT(VOLUME_BLOCK_BYTES == 4096u,                     "stage2 TAGFS_BLOCK_SIZE");
+STATIC_ASSERT(VOLUME_BLOCK_SECTORS == (1u << 3),               "stage2 TAGFS_SECTORS_PER_BLOCK_LOG2");
+STATIC_ASSERT(VOLUME_BLOCK_SECTORS * VOLUME_DEED_SECTOR_BYTES == VOLUME_BLOCK_BYTES,
+              "a volume block is a whole number of the Deed's sectors");
+STATIC_ASSERT(DEED_PEN_SECTORS == 8u,                          "stage2 DEED_SECTORS");
 
 /* What a read produced. The head and tail are both full Deeds; `stamps` points
  * into `raw` and is walked by DeedStamp. */
@@ -101,6 +113,48 @@ const void *DeedStamp(const DeedCopy *copy, uint16_t kind, uint16_t *out_bytes);
 
 /* Say what a Deed holds, in the log. Used when a volume is first met. */
 void DeedDescribe(uint8_t seat, const DeedCopy *copy);
+
+/*
+ * ‼ WHICH FORMAT A VOLUME'S BOOK IS WRITTEN IN — said by the stamp its Deed
+ * carries, because there is no version number to read and never will be: a
+ * format is a new stamp (volume_deed.h). LAYOUT is format v1, FRAME format v2.
+ * A Deed with both claims two formats at once; one with neither says where
+ * nothing is. Asked before anything else of the volume is read or written.
+ */
+typedef enum {
+    DEED_FORMAT_NONE = 0,       /* neither stamp */
+    DEED_FORMAT_V1,             /* LAYOUT */
+    DEED_FORMAT_V2,             /* FRAME */
+    DEED_FORMAT_BOTH            /* LAYOUT and FRAME */
+} DeedFormat;
+
+DeedFormat DeedFormatOf(const DeedCopy *copy);
+
+/*
+ * Does a FRAME hold — the one rule every reader of one keeps (the host's
+ * volume-read keeps it in the same words). `frame` and `bytes` are the stamp
+ * as DeedStamp found it; `tail_sector` is the prologue's, the far copy's place,
+ * whose block is the volume's last. NULL when it holds, or the sentence that
+ * says why it does not.
+ *
+ * A FRAME that holds can still be worth a line, and `note` gets it: one
+ * longer than this kernel's VolumeFrame was written by a kernel that knows
+ * more than this one, and a ring of fewer slots than this format lays down
+ * (VOLUME_FRAME_SPINE_SLOTS) is a volume made by another maker. NULL when
+ * there is nothing to say.
+ */
+const char *VolumeFrameCheck(const void *frame, uint16_t bytes,
+                             uint64_t tail_sector, const char **note);
+
+/*
+ * The mount's answer to a Deed of `format`, said out loud: OK for format v1
+ * whose LAYOUT this kernel reads whole; for anything else the refusal, before
+ * the volume is touched — ERR_UNSUPPORTED for a format-v2 volume that holds
+ * (its book is one this kernel cannot read), ERR_TAGFS_CORRUPTED for a FRAME
+ * that does not hold or a block this kernel does not speak, a Deed claiming
+ * both formats, or one that says where nothing is.
+ */
+error_t DeedFormatRefused(uint8_t seat, const DeedCopy *copy, DeedFormat format);
 
 /*
  * Walk every seated medium, survey its ground, and read whatever Deeds are on

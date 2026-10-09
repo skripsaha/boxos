@@ -112,6 +112,25 @@
 #define VOLUME_DEED_SECTOR_BYTES  512u
 
 /*
+ * The volume's own block: the unit every block number in a Deed is counted in
+ * — LAYOUT's, BOOT's and FRAME's alike — and the unit the volume is read and
+ * written in.
+ *
+ * ‼ ONE OWNER. It used to be spelled 4096 in five places: twice in the
+ * kernel's headers, once in the UEFI loader's, once in the host tool and once
+ * in stage2, held together by comments. The kernel's TAGFS_BLOCK_SIZE, the
+ * loader's and the tool's are now these names under their old ones, and
+ * stage2 — which cannot include a C header — is held to them by the static
+ * assertions beside the prologue's (src/kernel/tagfs/deed/deed.h).
+ *
+ * GEOMETRY still states the block the volume was laid out in, because a Deed
+ * is read by kernels not yet written: one that meets a volume of another block
+ * says so and does not mount it.
+ */
+#define VOLUME_BLOCK_BYTES    4096u
+#define VOLUME_BLOCK_SECTORS  8u        /* VOLUME_BLOCK_BYTES / VOLUME_DEED_SECTOR_BYTES */
+
+/*
  * The prologue: the only part of a Deed at a known offset, and the only part
  * an assembler has to be told about. Kept small, and kept forever.
  *
@@ -151,6 +170,7 @@ typedef struct __attribute__((packed)) {
 #define VOLUME_STAMP_BORN      3    /* VolumeBorn     */
 #define VOLUME_STAMP_BOOT      4    /* VolumeBoot     */
 #define VOLUME_STAMP_PACKED    5    /* VolumePacked   */
+#define VOLUME_STAMP_FRAME     6    /* VolumeFrame — the volume's book is format v2 */
 
 /*
  * What the volume was laid out for — as opposed to what it is sitting on.
@@ -194,6 +214,10 @@ typedef struct __attribute__((packed)) {
  * there are. Everything the filesystem allocates is counted inside that run,
  * so a block number in a file's metadata means the same thing forever, no
  * matter what is added in front of the data or left spare behind it.
+ *
+ * ‼ FORMAT v1 ONLY. A volume whose book is format v2 carries FRAME instead and
+ * never this; a Deed that carries both claims two formats at once and is
+ * refused before anything of it is read further.
  */
 typedef struct __attribute__((packed)) {
     uint64_t total_blocks;      /* the whole volume, Deed and all */
@@ -271,5 +295,46 @@ typedef struct __attribute__((packed)) {
     uint32_t file_count;        /* how many files `shipment` spans */
     uint32_t verdict;           /* BUILDPLATE_VERDICT_* */
 } VolumePacked;
+
+/*
+ * WHERE A FORMAT-v2 BOOK BEGINS — the stamp that says this volume's book is
+ * format v2, and the two places a reader starts from.
+ *
+ * `spine_block` is slot 0 of the Spine ring: the slots are single blocks at
+ * spine_block + i * spine_stride, i < spine_slots, each the book's own root as
+ * of one Tally. A ring rather than one place: the slot being written is the
+ * one a power cut tears, and the slot before it can be lost with it — rotten,
+ * or torn under a flush the medium lied about. One being written, one under
+ * the blow, one that survives both: three, which a maker lays a grain apart,
+ * the step the whole volume is aligned to. A reader takes two as the least
+ * that is still a ring, and names fewer than three as a volume made by
+ * another maker.
+ *
+ * `data_block` is the first block the allocator may hand out. Every block
+ * number the book or a file names is a block OF THE VOLUME — not of a data
+ * run, as LAYOUT's are — so turning one into a sector is block * 8, once.
+ *
+ * ‼ WHY THERE IS NO LENGTH HERE. Where the volume ends is already in the
+ * prologue: the far copy of this Deed sits in its last block, so the data run
+ * ends at tail_sector / VOLUME_BLOCK_SECTORS. A volume that takes the ground
+ * behind it moves `sectors` and `tail_sector` (DeedPenSetGround) and nothing
+ * here — the bitmap LAYOUT had to be laid down for, and the u32 it was counted
+ * in, have no counterpart: in format v2 the map of the blocks is derived from
+ * the book and kept nowhere.
+ *
+ * Everything else a book needs — where its ribbon runs, how big its quires
+ * are, the atom it writes in — is a property of the medium and the allocator,
+ * read at mount, and not of the volume.
+ */
+typedef struct __attribute__((packed)) {
+    uint64_t data_block;        /* first block of the data run, in volume blocks */
+    uint64_t spine_block;       /* Spine slot 0, in volume blocks                */
+    uint32_t spine_slots;       /* how many slots the ring has                   */
+    uint32_t spine_stride;      /* blocks from one slot to the next              */
+} VolumeFrame;
+_Static_assert(sizeof(VolumeFrame) == 24, "VolumeFrame is 24 bytes on the medium");
+
+/* The ring as a maker of this format lays it down (above). */
+#define VOLUME_FRAME_SPINE_SLOTS  3u
 
 #endif /* VOLUME_DEED_H */

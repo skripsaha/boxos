@@ -616,7 +616,7 @@ class GroundCensus:
         if why:
             self.Say("BOOT_MISMATCH", "damage", "the head deed's BOOT run, volume block %u for %u "
                      "blocks and %u bytes, is not the kernel file: %s — the loaders read it "
-                     "(volume_deed.h:216-235, create_tagfs.c:1503-1518)"
+                     "(volume_deed.h VolumeBoot, create_tagfs.c main's BOOT)"
                      % (boot["kernel_block"], boot["kernel_blocks"], boot["kernel_bytes"], why))
             return
         self.boot_file = Label(holders[0]["fid"], holders[0]["record"])

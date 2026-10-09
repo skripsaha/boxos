@@ -21,15 +21,12 @@
 #include "ledger/ledger.h"
 #include "block_map/block_map.h"
 
-// ============================================================================
-// TagFS Constants — Production Configuration
-// ============================================================================
-
-#define TAGFS_VERSION               1
-#define TAGFS_BLOCK_SIZE            4096
-
 /*
- * Where the volume is, and what it is made of, is no longer written here.
+ * Every constant of the volume is in tagfs_constants.h, once — this header
+ * used to repeat a dozen of them beside it, so a change to one copy left the
+ * other standing.
+ *
+ * Where the volume is, and what it is made of, is not written here either.
  *
  * It was: a superblock at absolute sector 1034, its backup at 1035, the
  * DiskBook's head at 1036 — three numbers spelled out in this header, in
@@ -43,33 +40,6 @@
  * number in both is counted from the start of the volume, so the volume can
  * be anywhere and can be moved.
  */
-
-// Tag constants
-#define TAGFS_INVALID_TAG_ID        0xFFFF
-/* Volume tag ids stop one short of bit 15. Bit 15 belongs to the kernel's
- * Logbook (core/touch/logbook.h) — the vocabulary of occurrences, which must
- * exist on a machine that never mounted a volume. Capping here is what makes
- * the split an invariant instead of a convention: the volume cannot issue an
- * id that collides with an occurrence even in principle. 32766 distinct tags
- * per volume; the largest volume seen carries ~120. */
-#define TAGFS_MAX_TAG_ID            0x7FFE
-
-// File flags
-#define TAGFS_FILE_ACTIVE           (1 << 0)
-#define TAGFS_FILE_TRASHED          (1 << 1)
-#define TAGFS_FILE_HIDDEN           (1 << 2)
-/* Bit 3 is spent on v1: kernels before Quill step 1.1 took it for copy-on-write, so it is never set and never trusted. */
-
-// Handle flags
-#define TAGFS_HANDLE_READ           (1 << 0)
-#define TAGFS_HANDLE_WRITE          (1 << 1)
-#define TAGFS_HANDLE_APPEND         (1 << 2)   /* every write lands at the file's size */
-
-// Registry constants
-#define TAGFS_REG_BUCKETS           512
-#define TAGFS_KEY_BUCKETS           128
-#define TAGFS_REGISTRY_DATA_SIZE    4080
-#define TAGFS_FTABLE_PER_BLOCK      510
 
 // ============================================================================
 // On-Disk Structures

@@ -19,15 +19,15 @@
  * Constants (must match tagfs.h / create_tagfs.c)
  * ========================================================================= */
 
-#define TAGFS_MAGIC              0x54414746U   /* "TAGF" */
 #define TAGFS_REGISTRY_MAGIC     0x54524547U   /* "TREG" */
 #define TAGFS_FILETBL_MAGIC      0x54465442U   /* "TFTB" */
 #define TAGFS_MPOOL_MAGIC        0x544D504CU   /* "TMPL" */
 
-#define TAGFS_VERSION            1
-#define TAGFS_BLOCK_SIZE         4096
-#define TAGFS_SECTOR_SIZE        512
-#define TAGFS_SECTORS_PER_BLOCK  (TAGFS_BLOCK_SIZE / TAGFS_SECTOR_SIZE)  /* 8 */
+/* The volume's block and its sectors are the Deed header's (volume_deed.h),
+ * under the names this loader has always used for them. */
+#define TAGFS_BLOCK_SIZE         VOLUME_BLOCK_BYTES
+#define TAGFS_SECTOR_SIZE        VOLUME_DEED_SECTOR_BYTES
+#define TAGFS_SECTORS_PER_BLOCK  VOLUME_BLOCK_SECTORS
 
 /* No superblock sector here any more: this loader reads the medium's partition
  * table to find the volume's ground, and the Deed at the head of that ground

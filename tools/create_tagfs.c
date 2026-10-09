@@ -28,6 +28,8 @@
  * three inside sectors 1032..1039, one failed erase away from going together.
  *
  * Usage: create_tagfs <disk_image> [<file> <tags>] ...
+ *        create_tagfs --ground [<file> <tags>] ...
+ *        create_tagfs --frame-only <disk_image> [<file> <tags>] ...
  */
 
 #include <stdio.h>
@@ -43,21 +45,22 @@
 #include "volume_ledger.h"   /* and what is true of the volume today           */
 
 /* ====================================================================
- * Constants — must match kernel's tagfs.h and boxos_magic.h
+ * Constants
+ *
+ * The format's own come from the headers the kernel reads it with: the
+ * block and its sectors from volume_deed.h, the chains' magics from
+ * boxos_magic.h. The rest below are copies of the kernel's
+ * tagfs_constants.h and disk_book.h, which a host tool cannot include —
+ * they take the kernel's integer types — and must match them.
  * ==================================================================== */
 
-#define TAGFS_MAGIC            0x54414746  /* "TAGF" */
-#define TAGFS_REGISTRY_MAGIC   0x54524547  /* "TREG" */
-#define TAGFS_FILETBL_MAGIC    0x54465442  /* "TFTB" */
-#define TAGFS_MPOOL_MAGIC      0x544D504C  /* "TMPL" */
-#define JOURNAL_MAGIC          0x4A4F5552  /* "JOUR" */
+#include "boxos_magic.h"     /* TAGFS_REGISTRY_MAGIC, TAGFS_FILETBL_MAGIC, TAGFS_MPOOL_MAGIC */
 
-#define TAGFS_VERSION          1
-#define TAGFS_BLOCK_SIZE       4096
+#define TAGFS_BLOCK_SIZE       VOLUME_BLOCK_BYTES
+#define TAGFS_SECTOR_BYTES     VOLUME_DEED_SECTOR_BYTES
+#define TAGFS_BLOCK_SECTORS    VOLUME_BLOCK_SECTORS
+
 #define TAGFS_FILE_ACTIVE      (1 << 0)
-
-#define TAGFS_SECTOR_BYTES     512
-#define TAGFS_BLOCK_SECTORS    (TAGFS_BLOCK_SIZE / TAGFS_SECTOR_BYTES)   /* 8 */
 
 /* The DiskBook's on-disk geometry, from the kernel's disk_book.h. Its head and
  * the copy of its head get a block each — they were one sector apart, which on
@@ -279,6 +282,37 @@ static void kernel_plate(const char* path, uint64_t* tree, uint32_t* verdict) {
     free(img);
 }
 
+/*
+ * The shipment's own half of the pedigree, computed once and written into
+ * both copies of the Deed. The kernel's verdict rides along, copied out of the
+ * plate in the kernel file itself — so a volume packed over a harness
+ * injection says UNDER TEST at mount even if the kernel it carries never gets
+ * far enough to say it. `kernel_path` is NULL for a volume with no kernel.
+ */
+static VolumePacked PackedStamp(int file_count, char* argv[], int first,
+                                const char* kernel_path) {
+    VolumePacked packed;
+    memset(&packed, 0, sizeof(packed));
+    packed.packed_unix = (uint64_t)time(NULL);
+    packed.shipment    = shipment_fingerprint(file_count, argv, first);
+    packed.file_count  = (uint32_t)file_count;
+    /* Through locals, because VolumePacked is packed and the address of a
+     * packed member is not necessarily aligned — the compiler is right to say
+     * so, and this tree builds with no warnings. */
+    uint64_t plate_tree = 0;
+    uint32_t plate_verdict = BUILDPLATE_VERDICT_UNSTAMPED;
+    kernel_plate(kernel_path, &plate_tree, &plate_verdict);
+    packed.tree    = plate_tree;
+    packed.verdict = plate_verdict;
+    printf("  Pedigree:      shipment %016llx over %d file(s), tree %016llx, %s\n",
+           (unsigned long long)packed.shipment, file_count,
+           (unsigned long long)packed.tree,
+           packed.verdict == BUILDPLATE_VERDICT_CLEAN      ? "clean" :
+           packed.verdict == BUILDPLATE_VERDICT_UNDER_TEST ? "UNDER TEST" :
+                                                            "the kernel carries no plate");
+    return packed;
+}
+
 /* Extract filename stem: "kernel.bin" → "kernel", "files.elf" → "files" */
 static void extract_stem(const char* filename, char* stem, size_t stem_size) {
     const char* base = strrchr(filename, '/');
@@ -289,6 +323,16 @@ static void extract_stem(const char* filename, char* stem, size_t stem_size) {
     if (len >= stem_size) len = stem_size - 1;
     memcpy(stem, base, len);
     stem[len] = '\0';
+}
+
+/* Whether a file wears the label `kernel` — its name stems to it, or it was
+ * given it — which is the file the Deed's BOOT stamp points a loader at. */
+static int KernelTagged(const uint16_t* ids, uint16_t count) {
+    for (uint16_t t = 0; t < count; t++) {
+        if (g_tags[ids[t]].value == NULL && strcmp(g_tags[ids[t]].key, "kernel") == 0)
+            return 1;
+    }
+    return 0;
 }
 
 /* Check if tag_id already in array */
@@ -625,10 +669,18 @@ typedef struct {
 #define GROWTH_CEILING_BITMAP_BLOCKS \
     ((GROWTH_CEILING_BLOCKS + BITMAP_BLOCK_COVERS - 1) / BITMAP_BLOCK_COVERS)
 
-/* 0, or -1 when the ground is too small to lay a volume on at all. */
+/* 0; -1 when the ground is too small to lay a volume on at all; -2 when it is
+ * longer than a format-v1 volume can count.
+ *
+ * ‼ THE SECOND IS A REFUSAL, AND IT USED TO BE A CUT. A format-v1 volume counts
+ * its blocks in 32 bits — LAYOUT, the bitmap, every extent — so it reaches
+ * 16 TiB and no further, and a longer ground was cut to the low 32 bits of its
+ * block count right here, in silence: the volume was laid out over whatever
+ * that remainder came to, and the rest of the ground was never spoken of. */
 static int compute_layout(uint64_t ground_sectors, VolumeShape* out) {
     memset(out, 0, sizeof(*out));
 
+    if (ground_sectors / TAGFS_BLOCK_SECTORS > UINT32_MAX) return -2;
     out->volume_blocks    = (uint32_t)(ground_sectors / TAGFS_BLOCK_SECTORS);
     out->deed_block       = 0;
     out->ledger_block     = DEED_BLOCKS;
@@ -691,14 +743,8 @@ static int compute_layout(uint64_t ground_sectors, VolumeShape* out) {
  * be is then a misdirected read that says so, instead of a valid-looking Deed.
  * ==================================================================== */
 
-static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
-                      const uint8_t uuid[16], const VolumeShape* shape,
-                      const VolumeBoot* boot, uint32_t mpool_blocks,
-                      uint32_t ftable_blocks, uint32_t registry_blocks,
-                      const VolumePacked* packed) {
-    uint8_t block[TAGFS_BLOCK_SIZE];
-    memset(block, 0, sizeof(block));
-
+/* The GEOMETRY stamp, the same for every volume this tool makes. */
+static VolumeGeometry DeedGeometry(void) {
     VolumeGeometry geo;
     memset(&geo, 0, sizeof(geo));
     geo.logical_bytes  = TAGFS_SECTOR_BYTES;
@@ -709,6 +755,18 @@ static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
     geo.physical_bytes = TAGFS_BLOCK_SIZE;
     geo.grain_bytes    = 1024u * 1024u;      /* the volume starts on a 1 MiB step */
     geo.block_bytes    = TAGFS_BLOCK_SIZE;
+    return geo;
+}
+
+static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
+                      const uint8_t uuid[16], const VolumeShape* shape,
+                      const VolumeBoot* boot, uint32_t mpool_blocks,
+                      uint32_t ftable_blocks, uint32_t registry_blocks,
+                      const VolumePacked* packed) {
+    uint8_t block[TAGFS_BLOCK_SIZE];
+    memset(block, 0, sizeof(block));
+
+    VolumeGeometry geo = DeedGeometry();
 
     VolumeLayout layout;
     memset(&layout, 0, sizeof(layout));
@@ -1061,10 +1119,24 @@ static uint32_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
  * UUID generation
  * ==================================================================== */
 
-static void generate_uuid(uint8_t uuid[16]) {
-    for (int i = 0; i < 16; i++) uuid[i] = rand() & 0xFF;
+/* ‼ FROM THE SYSTEM'S ENTROPY, NOT FROM THE CLOCK. It was rand() seeded with
+ * the second the volume was made, so two volumes made in the same second came
+ * out as the same volume — and the identity is what the loader writes on the
+ * boarding pass and the kernel picks its volume by, out of every medium in the
+ * machine. A tool that cannot read /dev/urandom refuses rather than invent
+ * one. 0, or -1 having said why. */
+static int generate_uuid(uint8_t uuid[16]) {
+    FILE*  r   = fopen("/dev/urandom", "rb");
+    size_t got = r ? fread(uuid, 1, 16, r) : 0;
+    if (r) fclose(r);
+    if (got != 16) {
+        fprintf(stderr, "Cannot read sixteen bytes from /dev/urandom — a volume's "
+                        "identity is not made up out of the time of day\n");
+        return -1;
+    }
     uuid[6] = (uuid[6] & 0x0F) | 0x40;
     uuid[8] = (uuid[8] & 0x3F) | 0x80;
+    return 0;
 }
 
 /* ====================================================================
@@ -1174,13 +1246,222 @@ static int say_the_ground(int pair_count, char* argv[], int first) {
 
     for (;;) {
         VolumeShape shape;
-        if (compute_layout(ground, &shape) == 0 && shape.data_blocks >= data_blocks)
+        int laid = compute_layout(ground, &shape);
+        if (laid == 0 && shape.data_blocks >= data_blocks)
             break;
+        if (laid == -2) {
+            fprintf(stderr, "create_tagfs --ground: these files need more than the "
+                            "16 TiB a format-v1 volume can count\n");
+            return 1;
+        }
         ground += GROUND_GRAIN_SECTORS;
     }
 
     printf("%llu\n", (unsigned long long)ground);
     return 0;
+}
+
+/* The image opened for writing and the ground somebody claimed on it found —
+ * or NULL, having said why. Both kinds of volume are made on exactly this. */
+static FILE* GroundOpen(const char* disk_path) {
+    FILE* disk = fopen(disk_path, "r+b");
+    if (!disk) { perror("Failed to open disk image"); return NULL; }
+
+    fseek(disk, 0, SEEK_END);
+    long disk_size = ftell(disk);
+
+    printf("[create_tagfs] Making a BoxOS volume on %s (%lu bytes)\n",
+           disk_path, disk_size);
+
+    if (survey_ground(disk) != 0) { fclose(disk); return NULL; }
+
+    if ((long)((g_ground_start + g_ground_sectors) * TAGFS_SECTOR_BYTES) > disk_size) {
+        fprintf(stderr, "The BoxOS partition runs to sector %llu and the image "
+                        "ends at %llu — it was copied short\n",
+                (unsigned long long)(g_ground_start + g_ground_sectors),
+                (unsigned long long)(disk_size / TAGFS_SECTOR_BYTES));
+        fclose(disk);
+        return NULL;
+    }
+    return disk;
+}
+
+/* ====================================================================
+ *  --frame-only: a format-v2 Deed over files in a row, and no book
+ *
+ * ‼ A STAND, NOT A FORMAT WRITER. Format v2 keeps what it knows about its
+ * files in a book, and nothing writes a book yet. What this lays down is what
+ * a kernel meets when a format-v2 volume is put in front of it before it can
+ * read one: a Deed bearing FRAME instead of LAYOUT, the Spine ring's slots
+ * empty, and the files in a row from the data run's first block with the
+ * kernel first — so a loader boots it by BOOT exactly as it boots any volume.
+ * That kernel must turn the volume away without writing a byte of it, and
+ * this is how that is put to the test (tools/logcheck.sh framerefuse).
+ *
+ * The frame is derived from the grain the ground is aligned to, the way the
+ * format lays one down: the Deed's grain, a grain to each Spine slot, and the
+ * data run from the grain after the last of them.
+ * ==================================================================== */
+
+/* GEOMETRY · FRAME · BORN · BOOT · PACKED — and no LAYOUT, which is what says
+ * this volume's book is not format v1. */
+static int FrameOnlyDeed(FILE* disk, uint32_t role, uint64_t vsector,
+                         const uint8_t uuid[16], const VolumeFrame* frame,
+                         uint64_t volume_blocks, uint64_t made_at,
+                         const VolumeBoot* boot, const VolumePacked* packed) {
+    uint8_t        block[TAGFS_BLOCK_SIZE];
+    VolumeGeometry geo = DeedGeometry();
+    VolumeBorn     born;
+    memset(&born, 0, sizeof(born));
+    born.created_unix = made_at;
+    memcpy(born.maker, "create_tagfs", 12);
+
+    DeedPen pen;
+    DeedPenOpen(&pen, block, sizeof(block));
+    if (DeedPenSay(&pen, VOLUME_STAMP_GEOMETRY, &geo,   sizeof(geo))     != 0 ||
+        DeedPenSay(&pen, VOLUME_STAMP_FRAME,    frame,  sizeof(*frame))  != 0 ||
+        DeedPenSay(&pen, VOLUME_STAMP_BORN,     &born,  sizeof(born))    != 0 ||
+        DeedPenSay(&pen, VOLUME_STAMP_BOOT,     boot,   sizeof(*boot))   != 0 ||
+        DeedPenSay(&pen, VOLUME_STAMP_PACKED,   packed, sizeof(*packed)) != 0) {
+        fprintf(stderr, "The stamps of this Deed do not fit the block it lives in\n");
+        return -1;
+    }
+    DeedPenSetUuid(&pen, uuid);
+    DeedPenSetGround(&pen, volume_blocks * TAGFS_BLOCK_SECTORS,
+                     (volume_blocks - 1) * TAGFS_BLOCK_SECTORS);
+    DeedPenSetRole(&pen, role);
+    DeedPenSeal(&pen);
+    return write_at_sector(disk, vsector, block, sizeof(block));
+}
+
+/* Each file's size and blocks, and where it goes: from `from`, in a row, the
+ * kernel first. The index of the kernel, or -1 when none is tagged; the first
+ * block past the last file in *end. 0, or -1 having said why. */
+static int FrameOnlyPlace(FileInfo* files, int file_count, char* argv[], int first,
+                          uint64_t from, int* kernel, uint64_t* end) {
+    seed_reserved_tags();
+    *kernel = -1;
+    for (int i = 0; i < file_count; i++) {
+        FILE* f = fopen(argv[first + i * 2], "rb");
+        if (!f) {
+            fprintf(stderr, "Failed to open: %s\n", argv[first + i * 2]);
+            return -1;
+        }
+        fseek(f, 0, SEEK_END);
+        files[i].filepath    = argv[first + i * 2];
+        files[i].file_size   = (uint64_t)ftell(f);
+        files[i].block_count = (uint32_t)((files[i].file_size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE);
+        if (files[i].block_count == 0) files[i].block_count = 1;
+        fclose(f);
+
+        const char* base = strrchr(files[i].filepath, '/');
+        parse_tags(argv[first + i * 2 + 1], base ? base + 1 : files[i].filepath,
+                   &files[i].tag_ids, &files[i].tag_count);
+        if (KernelTagged(files[i].tag_ids, files[i].tag_count)) *kernel = i;
+    }
+
+    uint64_t next = from;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < file_count; i++) {
+            if ((pass == 0) != (i == *kernel)) continue;
+            if (next + files[i].block_count > UINT32_MAX) {
+                fprintf(stderr, "The files run past block %u, the last a loader can be "
+                                "pointed at\n", UINT32_MAX);
+                return -1;
+            }
+            files[i].start_block = (uint32_t)next;
+            next += files[i].block_count;
+        }
+    }
+    *end = next;
+    return 0;
+}
+
+static int FrameOnlyMake(const char* disk_path, int file_count, char* argv[], int first) {
+    FILE* disk = GroundOpen(disk_path);
+    if (!disk) return 1;
+
+    const uint32_t grain = GROUND_GRAIN_SECTORS / TAGFS_BLOCK_SECTORS;
+    VolumeFrame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.spine_block  = grain;
+    frame.spine_stride = grain;
+    frame.spine_slots  = VOLUME_FRAME_SPINE_SLOTS;
+    frame.data_block   = (uint64_t)grain * (1u + VOLUME_FRAME_SPINE_SLOTS);
+
+    uint64_t  volume_blocks = g_ground_sectors / TAGFS_BLOCK_SECTORS;
+    FileInfo* files  = calloc(file_count > 0 ? (size_t)file_count : 1, sizeof(FileInfo));
+    int       kernel = -1;
+    uint64_t  end    = 0;
+    int       rc     = 1;
+    if (!files) { fprintf(stderr, "calloc failed\n"); fclose(disk); return 1; }
+    if (FrameOnlyPlace(files, file_count, argv, first, frame.data_block, &kernel, &end) != 0)
+        goto out;
+    if (volume_blocks < 2 || end > volume_blocks - 1) {
+        fprintf(stderr, "The ground claimed for BoxOS is %llu blocks, and the files "
+                        "laid from block %llu need it to run to block %llu and one "
+                        "more for the far copy of the Deed\n",
+                (unsigned long long)volume_blocks, (unsigned long long)frame.data_block,
+                (unsigned long long)end);
+        goto out;
+    }
+
+    /* The front matter, blank: the Deed's grain past the Deed and the Spine's
+     * three, slots and all — a ring with no book in it reads as empty. */
+    static const uint8_t blank[TAGFS_BLOCK_SIZE];
+    for (uint64_t b = 1; b < frame.data_block; b++) {
+        if (write_at_sector(disk, b * TAGFS_BLOCK_SECTORS, blank, sizeof(blank)) != 0) {
+            fprintf(stderr, "Failed to blank block %llu\n", (unsigned long long)b);
+            goto out;
+        }
+    }
+    for (int i = 0; i < file_count; i++) {
+        FILE* f = fopen(files[i].filepath, "rb");
+        int wrote = f ? write_file_data(disk, 0, files[i].start_block, f,
+                                        files[i].file_size, files[i].block_count) : -1;
+        if (f) fclose(f);
+        if (wrote != 0) { fprintf(stderr, "Failed to write %s\n", files[i].filepath); goto out; }
+        printf("  File %2d: %-40s blocks %u-%u\n", i + 1, files[i].filepath,
+               files[i].start_block, files[i].start_block + files[i].block_count - 1);
+    }
+
+    VolumeBoot boot;
+    memset(&boot, 0, sizeof(boot));
+    if (kernel >= 0) {
+        boot.kernel_block  = files[kernel].start_block;
+        boot.kernel_blocks = files[kernel].block_count;
+        boot.kernel_bytes  = (uint32_t)files[kernel].file_size;
+    } else {
+        printf("  WARNING: nothing here is tagged 'kernel' — this volume carries "
+               "no kernel and no loader will boot from it\n");
+    }
+    VolumePacked packed = PackedStamp(file_count, argv, first,
+                                      kernel >= 0 ? files[kernel].filepath : NULL);
+
+    uint8_t  uuid[16];
+    uint64_t made_at = (uint64_t)time(NULL);
+    uint64_t tail    = (volume_blocks - 1) * TAGFS_BLOCK_SECTORS;
+    if (generate_uuid(uuid) != 0 ||
+        FrameOnlyDeed(disk, VOLUME_DEED_ROLE_HEAD, 0, uuid, &frame, volume_blocks,
+                      made_at, &boot, &packed) != 0 ||
+        FrameOnlyDeed(disk, VOLUME_DEED_ROLE_TAIL, tail, uuid, &frame, volume_blocks,
+                      made_at, &boot, &packed) != 0) {
+        fprintf(stderr, "Failed to write the Deed\n");
+        goto out;
+    }
+    printf("  Deed:          format v2 — FRAME, no LAYOUT; far copy at sector %llu\n"
+           "  Spine ring:    %u slots %u blocks apart from block %llu, empty: no book\n"
+           "  Data run:      from block %llu, the kernel first%s\n",
+           (unsigned long long)tail, frame.spine_slots, frame.spine_stride,
+           (unsigned long long)frame.spine_block, (unsigned long long)frame.data_block,
+           kernel >= 0 ? "" : " (there is none)");
+    printf("\n[create_tagfs] The volume is made: format v2, its book not yet written.\n");
+    rc = 0;
+out:
+    for (int i = 0; i < file_count; i++) free(files[i].tag_ids);
+    free(files);
+    fclose(disk);
+    return rc;
 }
 
 int main(int argc, char* argv[]) {
@@ -1193,9 +1474,19 @@ int main(int argc, char* argv[]) {
         return say_the_ground((argc - 2) / 2, argv, 2);
     }
 
+    /* --frame-only lays a format-v2 Deed over files and writes no book. */
+    if (argc >= 2 && strcmp(argv[1], "--frame-only") == 0) {
+        if (argc < 3 || (argc - 3) % 2 != 0) {
+            fprintf(stderr, "Usage: %s --frame-only <disk_image> [<file> <tags>] ...\n", argv[0]);
+            return 1;
+        }
+        return FrameOnlyMake(argv[2], (argc - 3) / 2, argv, 3);
+    }
+
     if (argc < 2 || (argc > 2 && (argc - 2) % 2 != 0)) {
         fprintf(stderr, "Usage: %s <disk_image> [<file> <tags>] ...\n", argv[0]);
         fprintf(stderr, "       %s --ground [<file> <tags>] ...\n", argv[0]);
+        fprintf(stderr, "       %s --frame-only <disk_image> [<file> <tags>] ...\n", argv[0]);
         fprintf(stderr, "\n");
         fprintf(stderr, "Makes a BoxOS volume on the run of this image claimed for\n");
         fprintf(stderr, "BoxOS by its partition table (MBR type 0x7F, or the BoxOS\n");
@@ -1205,33 +1496,23 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    const char* disk_path = argv[1];
     int file_count = (argc - 2) / 2;
-
-    /* ---- Open disk ---- */
-    FILE* disk = fopen(disk_path, "r+b");
-    if (!disk) { perror("Failed to open disk image"); return 1; }
-
-    fseek(disk, 0, SEEK_END);
-    long disk_size = ftell(disk);
-
-    printf("[create_tagfs] Making a BoxOS volume on %s (%lu bytes)\n",
-           disk_path, disk_size);
-
-    /* ---- Find the ground somebody claimed for us ---- */
-    if (survey_ground(disk) != 0) { fclose(disk); return 1; }
-
-    if ((long)((g_ground_start + g_ground_sectors) * TAGFS_SECTOR_BYTES) > disk_size) {
-        fprintf(stderr, "The BoxOS partition runs to sector %llu and the image "
-                        "ends at %llu — it was copied short\n",
-                (unsigned long long)(g_ground_start + g_ground_sectors),
-                (unsigned long long)(disk_size / TAGFS_SECTOR_BYTES));
-        fclose(disk); return 1;
-    }
+    FILE* disk = GroundOpen(argv[1]);
+    if (!disk) return 1;
 
     /* ---- Compute layout, in the volume's own blocks ---- */
     VolumeShape shape;
-    if (compute_layout(g_ground_sectors, &shape) != 0) {
+    int laid = compute_layout(g_ground_sectors, &shape);
+    if (laid == -2) {
+        fprintf(stderr,
+                "The ground claimed for BoxOS is %llu sectors — more than the "
+                "16 TiB a format-v1 volume counts its blocks in. It is refused "
+                "rather than laid out over a part of it.\n",
+                (unsigned long long)g_ground_sectors);
+        fclose(disk);
+        return 1;
+    }
+    if (laid != 0) {
         fprintf(stderr,
                 "The ground claimed for BoxOS is %llu sectors, and a volume's "
                 "front matter alone needs more than that\n",
@@ -1294,14 +1575,7 @@ int main(int argc, char* argv[]) {
 
         parse_tags(tags_str, files[i].filename, &files[i].tag_ids, &files[i].tag_count);
 
-        /* Check if this file has a "kernel" tag → use for boot hints */
-        for (uint16_t t = 0; t < files[i].tag_count; t++) {
-            if (g_tags[files[i].tag_ids[t]].value == NULL &&
-                strcmp(g_tags[files[i].tag_ids[t]].key, "kernel") == 0) {
-                kernel_file_index = i;
-                break;
-            }
-        }
+        if (KernelTagged(files[i].tag_ids, files[i].tag_count)) kernel_file_index = i;
 
         if (next_block + files[i].block_count > total_blocks) {
             fprintf(stderr, "Not enough blocks: need %u more, only %u total\n",
@@ -1569,10 +1843,9 @@ int main(int argc, char* argv[]) {
     uint32_t free_blocks = total_blocks - used_blocks;
 
     uint64_t made_at = (uint64_t)time(NULL);
-    srand((unsigned int)made_at);
 
     uint8_t volume_uuid[16];
-    generate_uuid(volume_uuid);
+    if (generate_uuid(volume_uuid) != 0) { fclose(disk); return 1; }
 
     VolumeLedger led;
     memset(&led, 0, sizeof(led));
@@ -1614,31 +1887,8 @@ int main(int argc, char* argv[]) {
                "no kernel and no loader will boot from it\n");
     }
 
-    /* The shipment's own half of the pedigree, computed once and written into
-     * both copies of the Deed. The kernel's verdict rides along, copied out of
-     * the plate in the kernel file itself — so a volume packed over a harness
-     * injection says UNDER TEST at mount even if the kernel it carries never
-     * gets far enough to say it. */
-    VolumePacked packed;
-    memset(&packed, 0, sizeof(packed));
-    packed.packed_unix = (uint64_t)time(NULL);
-    packed.shipment    = shipment_fingerprint(file_count, argv, 2);
-    packed.file_count  = (uint32_t)file_count;
-    /* Through locals, because VolumePacked is packed and the address of a
-     * packed member is not necessarily aligned — the compiler is right to say
-     * so, and this tree builds with no warnings. */
-    uint64_t plate_tree = 0;
-    uint32_t plate_verdict = BUILDPLATE_VERDICT_UNSTAMPED;
-    kernel_plate(kernel_file_index >= 0 ? files[kernel_file_index].filepath : NULL,
-                 &plate_tree, &plate_verdict);
-    packed.tree    = plate_tree;
-    packed.verdict = plate_verdict;
-    printf("  Pedigree:      shipment %016llx over %d file(s), tree %016llx, %s\n",
-           (unsigned long long)packed.shipment, file_count,
-           (unsigned long long)packed.tree,
-           packed.verdict == BUILDPLATE_VERDICT_CLEAN      ? "clean" :
-           packed.verdict == BUILDPLATE_VERDICT_UNDER_TEST ? "UNDER TEST" :
-                                                            "the kernel carries no plate");
+    VolumePacked packed = PackedStamp(file_count, argv, 2,
+                                      kernel_file_index >= 0 ? files[kernel_file_index].filepath : NULL);
 
     if (write_deed(disk, VOLUME_DEED_ROLE_HEAD, 0,
                    volume_uuid, &shape, &boot, mpool_block_count,

@@ -299,6 +299,22 @@ void DeedDescribe(uint8_t seat, const DeedCopy *copy)
                 seat, geo->block_bytes, geo->physical_bytes, geo->grain_bytes);
     }
 
+    /* Where a format-v2 book begins. Said here because this is the line a
+     * person reads to learn what is on a medium, and a volume this kernel
+     * refuses is still a volume somebody wants to know about. */
+    const VolumeFrame *frame =
+        (const VolumeFrame *)DeedStamp(copy, VOLUME_STAMP_FRAME, &bytes);
+    if (frame && bytes >= sizeof(*frame)) {
+        kprintf("[Deed] seat %u: format v2 — a Spine ring of %u slot(s) %u "
+                "block(s) apart from block %llu, and its data run from block "
+                "%llu\n", seat, frame->spine_slots, frame->spine_stride,
+                (unsigned long long)frame->spine_block,
+                (unsigned long long)frame->data_block);
+    } else if (frame) {
+        kprintf("[Deed] seat %u: a FRAME of %u byte(s), shorter than one\n",
+                seat, bytes);
+    }
+
     const VolumeBorn *born =
         (const VolumeBorn *)DeedStamp(copy, VOLUME_STAMP_BORN, &bytes);
     if (born && bytes >= sizeof(*born)) {
@@ -340,6 +356,128 @@ void DeedDescribe(uint8_t seat, const DeedCopy *copy)
         kprintf("[Deed] seat %u: no pedigree stamp — this volume was packed "
                 "before the medium could say what it carries\n", seat);
     }
+}
+
+DeedFormat DeedFormatOf(const DeedCopy *copy)
+{
+    bool layout = DeedStamp(copy, VOLUME_STAMP_LAYOUT, NULL) != NULL;
+    bool frame  = DeedStamp(copy, VOLUME_STAMP_FRAME, NULL) != NULL;
+
+    if (layout && frame) return DEED_FORMAT_BOTH;
+    if (frame)           return DEED_FORMAT_V2;
+    if (layout)          return DEED_FORMAT_V1;
+    return DEED_FORMAT_NONE;
+}
+
+/*
+ * The ring's slots are single blocks at spine_block + i * spine_stride. With
+ * a stride of at least one they are distinct by construction — unless the
+ * ring runs past the last block number and comes round, which is the one way
+ * left for two of them to land together or on the Deed, and the one sum here
+ * that can overflow. The product cannot: two u32 make less than 2^64.
+ */
+const char *VolumeFrameCheck(const void *frame, uint16_t bytes,
+                             uint64_t tail_sector, const char **note)
+{
+    if (note) *note = NULL;
+    if (!frame || bytes < sizeof(VolumeFrame))
+        return "it is shorter than a FRAME";
+
+    VolumeFrame f;
+    memcpy(&f, frame, sizeof(f));
+
+    if (f.spine_slots < 2)
+        return "its Spine ring has fewer than two slots, which is no ring";
+    if (f.spine_stride == 0)
+        return "its Spine slots are all one block — a ring with no stride";
+    if (f.spine_block == 0)
+        return "its Spine begins on block 0, which is the Deed's own";
+
+    uint64_t reach = (uint64_t)(f.spine_slots - 1u) * f.spine_stride;
+    if (f.spine_block > UINT64_MAX - reach)
+        return "its Spine ring runs past the last block number there is and "
+               "comes round onto the blocks before it";
+    if (f.spine_block + reach >= f.data_block)
+        return "its Spine ring runs into the data run";
+    if (f.data_block >= tail_sector / VOLUME_BLOCK_SECTORS)
+        return "its data run starts at or past the volume's last block, where "
+               "the far copy of the Deed sits";
+
+    if (note) {
+        bool longer = bytes > sizeof(VolumeFrame);
+        bool fewer  = f.spine_slots < VOLUME_FRAME_SPINE_SLOTS;
+        if (longer && fewer)
+            *note = "it is longer than the FRAME this kernel knows and its ring "
+                    "keeps fewer slots than this format lays down — written by a "
+                    "kernel that knows more, or by another maker";
+        else if (longer)
+            *note = "it is longer than the FRAME this kernel knows — written by "
+                    "a kernel that knows more";
+        else if (fewer)
+            *note = "its ring keeps fewer slots than this format lays down — a "
+                    "volume made by another maker";
+    }
+    return NULL;
+}
+
+/*
+ * ‼ SAID IN THE MOUNT'S VOICE, [TagFS], because it is the mount's refusal: the
+ * Deed itself is whole — it passed its checksum to get here — and what is
+ * refused is what this kernel can make of it.
+ *
+ * The line a format-v2 volume gets names no step of any plan: it is read by
+ * whoever is at the machine, for as long as a kernel this old is in use, and
+ * all it can truthfully say is that a newer kernel is needed.
+ */
+error_t DeedFormatRefused(uint8_t seat, const DeedCopy *copy, DeedFormat format)
+{
+    uint16_t bytes = 0;
+
+    if (format == DEED_FORMAT_BOTH) {
+        kprintf("[TagFS] the deed on seat %u claims both formats — it carries a "
+                "LAYOUT and a FRAME, and a volume's book is written in one\n", seat);
+        return ERR_TAGFS_CORRUPTED;
+    }
+
+    /* A LAYOUT shorter than this kernel's says less than it reads, which is a
+     * Deed that does not say where everything is — the same line as none. */
+    if (format == DEED_FORMAT_V1)
+        (void)DeedStamp(copy, VOLUME_STAMP_LAYOUT, &bytes);
+    if (format == DEED_FORMAT_NONE ||
+        (format == DEED_FORMAT_V1 && bytes < sizeof(VolumeLayout))) {
+        kprintf("[TagFS] the deed on seat %u does not say where anything is — "
+                "it carries no layout this kernel understands\n", seat);
+        return ERR_TAGFS_CORRUPTED;
+    }
+    if (format == DEED_FORMAT_V1)
+        return OK;
+
+    /* The block a book is counted in is the one rule both formats share, and
+     * a Deed without GEOMETRY states none — the way the v1 mount judges it. */
+    const VolumeGeometry *geo =
+        (const VolumeGeometry *)DeedStamp(copy, VOLUME_STAMP_GEOMETRY, &bytes);
+    uint32_t block_bytes = (geo && bytes >= sizeof(*geo)) ? geo->block_bytes : 0;
+    if (block_bytes != VOLUME_BLOCK_BYTES) {
+        kprintf("[TagFS] the format-v2 volume on seat %u was laid out in %u-byte "
+                "blocks and this kernel speaks %u\n", seat, block_bytes,
+                VOLUME_BLOCK_BYTES);
+        return ERR_TAGFS_CORRUPTED;
+    }
+
+    const void *frame = DeedStamp(copy, VOLUME_STAMP_FRAME, &bytes);
+    const char *note  = NULL;
+    const char *why   = VolumeFrameCheck(frame, bytes, copy->head.tail_sector, &note);
+    if (why) {
+        kprintf("[TagFS] the deed on seat %u bears a FRAME that does not hold: "
+                "%s\n", seat, why);
+        return ERR_TAGFS_CORRUPTED;
+    }
+    if (note)
+        kprintf("[TagFS] the FRAME in the deed on seat %u is %u bytes: %s\n",
+                seat, bytes, note);
+    kprintf("[TagFS] seat %u carries a format-v2 volume (its deed bears FRAME); "
+            "this kernel cannot read a format-v2 book — boot a newer kernel\n", seat);
+    return ERR_UNSUPPORTED;
 }
 
 void DeedSurveyAll(uint8_t standing_seat, uint64_t standing_start)

@@ -353,7 +353,7 @@ bool RecordWhereValid(const RecordWhere* where, uint32_t fid)
     if (PoolChainAt(where->link) == g_pool_chain_len)
         return false;
     if (where->offset < MPOOL_BLOCK_HEADER ||
-        where->offset + RECORD_HEADER_SIZE > TAGFS_BLOCK_SIZE)
+        (uint32_t)where->offset + RECORD_HEADER_SIZE > TAGFS_BLOCK_SIZE)
         return false;
 
     const MetaPoolBlock* img = PoolImageOf(where->link);
