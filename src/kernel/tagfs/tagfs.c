@@ -1219,11 +1219,12 @@ error_t tagfs_flush_cache(void)
         return ERR_DEVICE_NOT_READY;
 
     /* No volume named — none found, one refused at its Deed, one let go of
-     * when its medium left: no cache holds anything of a volume, and seat 255
-     * is a chair that is not there, whose refusal came back as a durability
-     * alarm about a volume this machine never wrote. */
+     * when its medium left. There is no medium to commit, and that is said as
+     * what it is: a caller asking for its writes to be made durable is never
+     * told they were when the volume they went to is gone. Seat 255 is not
+     * asked — it is a chair that is not there. */
     if (g_tagfs_seat == BOARDROOM_NO_SEAT)
-        return OK;
+        return ERR_DEVICE_NOT_READY;
 
     /* The one place a flush ticket is taken and answered (scribe.h): taken
      * before the medium is asked, so the flush it stands for was issued after

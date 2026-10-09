@@ -1623,6 +1623,8 @@ run_framerefuse() {
     chk $? "framerefuse: the boot survey does not take the refused volume for the one the machine stands on"
     ! grep -qE "would not flush its write cache|WAS NOT MADE DURABLE" "$L"
     chk $? "framerefuse: the halt raises no durability alarm over a volume it never mounted"
+    grep -aq '^\[HALT\] no volume is named on this machine — there is no medium to make durable' "$L"
+    chk $? "framerefuse: and says instead that there is no medium to make durable"
 }
 
 run_novolume() {

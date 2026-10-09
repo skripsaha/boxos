@@ -853,6 +853,17 @@ static void halt_sync_storage(void)
                 (unsigned)recorded);
     }
 
+    /* No volume named — none was found, the one found was refused at its
+     * Deed, or the one mounted was let go of when its medium left (and its
+     * waiters were told then). There is no medium here to commit, and asking
+     * the flush anyway answered with the alarm for a volume this machine never
+     * wrote. */
+    if (tagfs_get_seat() == BOARDROOM_NO_SEAT) {
+        kprintf("[HALT] no volume is named on this machine — there is no "
+                "medium to make durable\n");
+        return;
+    }
+
     kprintf("[HALT] Flushing disk cache...\n");
 
     error_t flushed = tagfs_flush_cache();
