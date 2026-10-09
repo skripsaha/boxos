@@ -49,16 +49,16 @@ static error_t PlotStage(Plot *p, const PlotStretch *s, uint32_t i, const PlotSo
     } else if (fill == PLOT_FILL_READ) {
         error_t rc = tagfs_read_block(s->block + i, into);
         if (rc != OK) {
-            kprintf("[TagFS] file %u: block %u answered %u to its read, so the %u byte(s) meant "
+            kprintf("[TagFS] file %llu: block %llu answered %u to its read, so the %u byte(s) meant "
                     "for it are not laid over the rest of it — the write stops there\n",
-                    p->fid, s->block + i, (unsigned)rc, chunk);
+                    p->fid, (unsigned long long)(s->block + i), (unsigned)rc, chunk);
             return rc;
         }
     }
 
     error_t rc = PlotSourcePull(src, from + at, into + off, chunk);
     if (rc != OK)
-        kprintf("[TagFS] file %u: the bytes to write from %llu on could not be taken from the "
+        kprintf("[TagFS] file %llu: the bytes to write from %llu on could not be taken from the "
                 "pages they are in (error %u) — the write stops there\n", p->fid,
                 (unsigned long long)(from + at), (unsigned)rc);
     return rc;
@@ -90,9 +90,10 @@ static error_t PlotLayStretch(Plot *p, const PlotStretch *s, const PlotSource *s
         if (sent)
             TagFSDataCostLaid(staged);
         if (rc != OK)
-            kprintf("[TagFS] file %u: blocks %u..%u would not be written (error %u) — %u of "
-                    "them had landed before the medium stopped answering\n", p->fid, s->block,
-                    s->block + staged - 1, (unsigned)rc, landed);
+            kprintf("[TagFS] file %llu: blocks %llu..%llu would not be written (error %u) — %u of "
+                    "them had landed before the medium stopped answering\n", p->fid,
+                    (unsigned long long)s->block, (unsigned long long)(s->block + staged - 1),
+                    (unsigned)rc, landed);
     }
     *out_laid = PlotStretchBytes(s, landed);
     return rc != OK ? rc : stop;
@@ -112,7 +113,7 @@ error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *o
     while (done < src->bytes && rc == OK) {
         PlotStretch s;
         if (!PlotStretchAt(p, at + done, src->bytes - done, most, &s)) {
-            kprintf("[TagFS] file %u: no extent of its plot holds block %llu, which the write "
+            kprintf("[TagFS] file %llu: no extent of its plot holds block %llu, which the write "
                     "reserved — the write stops at byte %llu\n", p->fid,
                     (unsigned long long)((at + done) / TAGFS_BLOCK_SIZE),
                     (unsigned long long)(at + done));
@@ -124,7 +125,7 @@ error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *o
         done += laid;
     }
     if (rc != OK)
-        kprintf("[TagFS] file %u: %llu of %llu byte(s) of the write landed\n", p->fid,
+        kprintf("[TagFS] file %llu: %llu of %llu byte(s) of the write landed\n", p->fid,
                 (unsigned long long)done, (unsigned long long)src->bytes);
 
     kfree(buf);
@@ -143,7 +144,8 @@ static error_t PlotLayZeros(Plot *p, uint64_t k, uint64_t end, uint8_t *buf, uin
                             uint32_t kept)
 {
     while (k < end) {
-        uint32_t block = 0, after = 0;
+        uint64_t block = 0;
+        uint32_t after = 0;
         if (!PlotFind(p->runs, p->run_count, k, &block, &after))
             return ERR_TAGFS_EXTENT_ERROR;
         uint64_t n = end - k;
@@ -155,9 +157,9 @@ static error_t PlotLayZeros(Plot *p, uint64_t k, uint64_t end, uint8_t *buf, uin
         uint32_t landed = 0;
         error_t  rc     = TagFSWriteRun(block, (uint32_t)n, buf, &landed);
         if (rc != OK) {
-            kprintf("[TagFS] file %u: blocks %u..%u would not take their zeros (error %u), so "
-                    "the file is not grown\n", p->fid, block, block + (uint32_t)n - 1,
-                    (unsigned)rc);
+            kprintf("[TagFS] file %llu: blocks %llu..%llu would not take their zeros (error %u), "
+                    "so the file is not grown\n", p->fid, (unsigned long long)block,
+                    (unsigned long long)(block + n - 1), (unsigned)rc);
             return rc;
         }
         memset(buf, 0, kept);   /* the old last block's bytes went out with the first run */
@@ -192,16 +194,16 @@ error_t PlotExtendZero(Plot *p, uint64_t size)
      * It is read, zeroed from the old size on, and goes out with the zeros
      * after it. */
     if (tail) {
-        uint32_t block = 0;
+        uint64_t block = 0;
         if (!PlotFind(p->runs, p->run_count, k, &block, NULL)) {
             rc = ERR_TAGFS_EXTENT_ERROR;
             goto out;
         }
         rc = tagfs_read_block(block, buf);
         if (rc != OK) {
-            kprintf("[TagFS] file %u: its last block %u answered %u to its read, so it is not "
-                    "grown past its %llu bytes\n", p->fid, block, (unsigned)rc,
-                    (unsigned long long)from);
+            kprintf("[TagFS] file %llu: its last block %llu answered %u to its read, so it is not "
+                    "grown past its %llu bytes\n", p->fid, (unsigned long long)block,
+                    (unsigned)rc, (unsigned long long)from);
             goto out;
         }
         memset(buf + tail, 0, TAGFS_BLOCK_SIZE - tail);
@@ -233,7 +235,7 @@ error_t PlotRoomFor(const Plot *p, uint64_t end)
 
     if (need <= free + resting + slack)
         return OK;
-    kprintf("[TagFS] file %u: growing it to %llu bytes needs %llu more block(s), and the volume "
+    kprintf("[TagFS] file %llu: growing it to %llu bytes needs %llu more block(s), and the volume "
             "could give it %llu at most — %llu free, %llu resting in Fallow, %llu in the pool's "
             "slack — refused, the file %llu bytes long\n", p->fid, (unsigned long long)end,
             (unsigned long long)need, (unsigned long long)(free + resting + slack),

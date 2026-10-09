@@ -9,7 +9,7 @@
  * of blocks never named.
  */
 
-static uint64_t UseBlockVlba(uint32_t block)
+static uint64_t UseBlockVlba(uint64_t block)
 {
     return ((uint64_t)tagfs_get_state()->layout.data_block + block) * TAGFS_BLOCK_SECTORS;
 }
@@ -75,29 +75,27 @@ void UseChainForget(UseChain *chain)
 
 /* `block` after the chain's blocks so far: onto its last run when it follows
  * it, else a run of its own. False with no memory to grow the runs. */
-static bool UseRunsAppend(UseChain *chain, uint32_t *cap, uint32_t block, uint32_t count)
+static bool UseRunsAppend(UseChain *chain, uint32_t *cap, uint64_t block, uint32_t count)
 {
     if (chain->run_count) {
-        FileExtent *last = &chain->runs[chain->run_count - 1];
-        if (last->start_block + last->block_count == block &&
-            (uint32_t)last->block_count + count <= 0xFFFFu) {
-            last->block_count = (uint16_t)(last->block_count + count);
+        Strip *last = &chain->runs[chain->run_count - 1];
+        if (last->start + last->count == block && (uint64_t)last->count + count <= UINT32_MAX) {
+            last->count += count;
             return true;
         }
     }
     if (chain->run_count == *cap) {
-        uint32_t    grown = *cap ? *cap * 2u : 4u;
-        FileExtent *more  = kmalloc(sizeof(FileExtent) * grown);
+        uint32_t grown = *cap ? *cap * 2u : 4u;
+        Strip   *more  = kmalloc(sizeof(Strip) * grown);
         if (!more)
             return false;
         if (chain->run_count)
-            memcpy(more, chain->runs, sizeof(FileExtent) * chain->run_count);
+            memcpy(more, chain->runs, sizeof(Strip) * chain->run_count);
         kfree(chain->runs);
         chain->runs = more;
         *cap        = grown;
     }
-    chain->runs[chain->run_count].start_block = block;
-    chain->runs[chain->run_count].block_count = (uint16_t)count;
+    chain->runs[chain->run_count] = (Strip){ .start = block, .count = count, .kind = STRIP_DATA };
     chain->run_count++;
     return true;
 }
@@ -192,14 +190,15 @@ UseChainState UseChainRead(const UseChainRef *ref, UseText **text, UseChain *out
 error_t UseChainStake(uint64_t n, UseChain *out, uint64_t *got)
 {
     uint32_t cap  = 0;
-    uint32_t hint = 0;
+    uint64_t hint = 0;
 
     memset(out, 0, sizeof(*out));
     *got = 0;
     while (*got < n) {
         uint64_t left  = n - *got;
-        uint32_t want  = left > 0xFFFFu ? 0xFFFFu : (uint32_t)left;
-        uint32_t start = 0, took = 0;
+        uint32_t want  = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
+        uint64_t start = 0;
+        uint32_t took  = 0;
         error_t  rc    = TagFSTakeRun(want, hint, &start, &took);
         if (rc == OK && !UseRunsAppend(out, &cap, start, took)) {
             TagFSLockTake(UseMemoryLock());
@@ -221,11 +220,11 @@ void UseChainUnstake(UseChain *chain)
 {
     TagFSLockTake(UseMemoryLock());
     for (uint32_t r = 0; r < chain->run_count; r++) {
-        error_t back = BlockMapGiveLocked(chain->runs[r].start_block, chain->runs[r].block_count);
+        error_t back = BlockMapGiveLocked(chain->runs[r].start, chain->runs[r].count);
         if (back != OK)
-            kprintf("[TagFS] blocks %u..+%u staked for the Use Context's chain and never named "
+            kprintf("[TagFS] blocks %llu..+%u staked for the Use Context's chain and never named "
                     "would not go back to the allocator (error %u) — they stay taken\n",
-                    chain->runs[r].start_block, (unsigned)chain->runs[r].block_count,
+                    (unsigned long long)chain->runs[r].start, chain->runs[r].count,
                     (unsigned)back);
     }
     TagFSLockDrop(UseMemoryLock());
@@ -234,7 +233,7 @@ void UseChainUnstake(UseChain *chain)
 
 /* Link `index` of `links`, carrying its piece of `text`, into `link`. */
 static void UseLinkBuild(UseChainLink *link, const UseChainRef *ref, const UseText *text,
-                         uint64_t index, uint64_t links, uint32_t next)
+                         uint64_t index, uint64_t links, uint64_t next)
 {
     uint64_t from = index * USE_CHAIN_TEXT;
     uint64_t left = text->bytes - from;
@@ -242,7 +241,7 @@ static void UseLinkBuild(UseChainLink *link, const UseChainRef *ref, const UseTe
 
     memset(link, 0, sizeof(*link));
     link->magic       = USE_CHAIN_MAGIC;
-    link->next        = next;
+    link->next        = (uint32_t)next;    /* a block of format v1's data run (block_map.h) */
     link->seq         = ref->seq;
     link->attempt     = ref->attempt;
     link->index       = (uint32_t)index;
@@ -255,12 +254,12 @@ static void UseLinkBuild(UseChainLink *link, const UseChainRef *ref, const UseTe
 
 /* The block of the link after the one at `k` of run `r`: the run's next
  * block, the next run's first, or 0 after the last. */
-static uint32_t UseLinkNext(const UseChain *chain, uint32_t r, uint32_t k)
+static uint64_t UseLinkNext(const UseChain *chain, uint32_t r, uint32_t k)
 {
-    const FileExtent *run = &chain->runs[r];
-    if (k + 1u < run->block_count)
-        return run->start_block + k + 1u;
-    return r + 1u < chain->run_count ? chain->runs[r + 1u].start_block : VOLUME_LEDGER_NO_BLOCK;
+    const Strip *run = &chain->runs[r];
+    if (k + 1u < run->count)
+        return run->start + k + 1u;
+    return r + 1u < chain->run_count ? chain->runs[r + 1u].start : VOLUME_LEDGER_NO_BLOCK;
 }
 
 error_t UseChainWrite(const UseChain *chain, const UseText *text)
@@ -277,24 +276,24 @@ error_t UseChainWrite(const UseChain *chain, const UseText *text)
     uint64_t index = 0;
     error_t  rc    = OK;
     for (uint32_t r = 0; r < chain->run_count && rc == OK; r++) {
-        const FileExtent *run = &chain->runs[r];
-        for (uint32_t k = 0; k < run->block_count && rc == OK; ) {
-            uint32_t piece = run->block_count - k;
+        const Strip *run = &chain->runs[r];
+        for (uint32_t k = 0; k < run->count && rc == OK; ) {
+            uint32_t piece = run->count - k;
             if (piece > window)
                 piece = window;
             for (uint32_t j = 0; j < piece; j++, index++)
                 UseLinkBuild((UseChainLink *)(buf + (size_t)j * TAGFS_BLOCK_SIZE), &chain->ref,
                              text, index, links, UseLinkNext(chain, r, k + j));
-            if (tagfs_volume_write(UseBlockVlba(run->start_block + k),
+            if (tagfs_volume_write(UseBlockVlba(run->start + k),
                                    piece * TAGFS_BLOCK_SECTORS, buf) != 0) {
                 kprintf("[TagFS] the medium would not take links %llu..%llu of the Use "
-                        "Context's chain at data block %u\n",
+                        "Context's chain at data block %llu\n",
                         (unsigned long long)(index - piece), (unsigned long long)(index - 1u),
-                        run->start_block + k);
+                        (unsigned long long)(run->start + k));
                 rc = ERR_TAGFS_METADATA_ERROR;
             }
             for (uint32_t j = 0; j < piece; j++)
-                tagfs_readahead_invalidate(run->start_block + k + j);
+                tagfs_readahead_invalidate(run->start + k + j);
             k += piece;
         }
     }
@@ -312,7 +311,8 @@ error_t UseChainWrite(const UseChain *chain, const UseText *text)
 static bool UseChainAllOrphan(const UseChain *chain, const UseOrphanRun *runs, uint32_t count)
 {
     for (uint32_t r = 0; r < chain->run_count; r++) {
-        uint32_t lo = 0, hi = count, from = chain->runs[r].start_block;
+        uint32_t lo = 0, hi = count;
+        uint64_t from = chain->runs[r].start;
         while (lo < hi) {
             uint32_t mid = lo + (hi - lo) / 2u;
             if (runs[mid].start + runs[mid].count <= from)
@@ -321,7 +321,7 @@ static bool UseChainAllOrphan(const UseChain *chain, const UseOrphanRun *runs, u
                 hi = mid;
         }
         if (lo == count || runs[lo].start > from ||
-            from + chain->runs[r].block_count > runs[lo].start + runs[lo].count)
+            from + chain->runs[r].count > runs[lo].start + runs[lo].count)
             return false;
     }
     return true;
@@ -349,7 +349,7 @@ static UseChainRef *UseOrphanHeads(const UseOrphanRun *runs, uint32_t count, uin
     for (uint32_t i = 0; i < count; i++) {
         for (uint32_t k = 0; k < runs[i].count; ) {
             uint32_t piece = runs[i].count - k < window ? runs[i].count - k : window;
-            uint32_t at    = runs[i].start + k;
+            uint64_t at    = runs[i].start + k;
             k += piece;
             if (tagfs_volume_read(UseBlockVlba(at), piece * TAGFS_BLOCK_SECTORS, buf) != 0) {
                 TagFSNoteReadRefused();
@@ -372,7 +372,8 @@ static UseChainRef *UseOrphanHeads(const UseOrphanRun *runs, uint32_t count, uin
                     heads = more;
                     cap   = grown;
                 }
-                heads[(*found)++] = (UseChainRef){ .first = at + j, .attempt = link->attempt,
+                heads[(*found)++] = (UseChainRef){ .first = (uint32_t)(at + j),   /* v1's run */
+                                                   .attempt = link->attempt,
                                                    .seq = link->seq, .bytes = link->total_bytes,
                                                    .crc32 = link->text_crc32 };
             }

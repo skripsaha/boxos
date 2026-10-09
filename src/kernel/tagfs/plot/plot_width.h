@@ -13,16 +13,21 @@
  * first block and a u16 count, so no extent names more than 0xFFFF blocks, and
  * T, E and N are u16 on the medium too.
  *
- * Memory counts in u32 (tagfs.h); what reaches the medium is judged against
- * these by PlotFits and PackV1 (plot.h), which refuse a record that would not
- * fit rather than cut it. Format v2 changes these widths here and in the
- * packer, and nowhere else.
+ * Memory knows none of these widths: a file's runs are Strips (strip.h), a
+ * u64 first block and a u32 count, and its counts are u32 (tagfs.h). What
+ * reaches the medium is judged against these by PlotFits and PackV1 (plot.h)
+ * alone: PackV1 cuts a Strip longer than an extent into extents of at most
+ * PLOT_RUN_MOST blocks — PlotFits counts the record's extents after that cut —
+ * and refuses, before anything is written, a record that would not fit, a
+ * block past a u32 or a file id past one, rather than cut it.
  */
 
 #define TAGFS_MPOOL_DATA_SIZE   4080    /* a record's ceiling: one pool block's payload */
 #define RECORD_HEADER_SIZE      42      /* the record's fields (40) and its CRC16 (2) */
 #define RECORD_CRC_OFFSET       40      /* where that CRC16 sits in the record */
 
+/* An extent of a record on the medium — PackV1's and UnpackV1's, and nothing
+ * in memory's. */
 typedef struct __packed {
     uint32_t start_block;
     uint16_t block_count;

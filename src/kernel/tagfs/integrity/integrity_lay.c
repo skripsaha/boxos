@@ -50,7 +50,7 @@ uint32_t MapLayCarried(uint32_t idx)
     return (g_lay.first && idx < g_lay.carried) ? g_lay.first + idx : 0;
 }
 
-bool MapLayRunHolds(uint32_t block)
+bool MapLayRunHolds(uint64_t block)
 {
     uint32_t first = __atomic_load_n(&g_lay.first, __ATOMIC_ACQUIRE);
     return first != 0 && block >= first && block - first < g_lay.count;
@@ -82,20 +82,10 @@ static uint8_t *MapZeros(void)
  * rests in Fallow, freed by the next cycle's Ledger, and goes back once both
  * copies moved past it.
  */
-static FallowNode *MapRunRest(uint32_t start, uint32_t count)
+static FallowNode *MapRunRest(uint64_t start, uint32_t count)
 {
-    uint32_t    pieces = (count + 0xFFFFu - 1u) / 0xFFFFu;
-    FileExtent *runs   = kmalloc(sizeof(FileExtent) * pieces);
-    FallowNode *node   = NULL;
-    for (uint32_t i = 0; runs && i < pieces; i++) {
-        uint32_t left = count - i * 0xFFFFu;
-        runs[i].start_block = start + i * 0xFFFFu;
-        runs[i].block_count = (uint16_t)(left < 0xFFFFu ? left : 0xFFFFu);
-    }
-    if (runs)
-        node = FallowNodeMake(runs, pieces, FALLOW_BY_LEDGER, 0);
-    kfree(runs);
-    return node;
+    Strip run = { .start = start, .count = count, .kind = STRIP_DATA };
+    return FallowNodeMake(&run, 1, FALLOW_BY_LEDGER, 0);
 }
 
 /* Page idx of the old map carried into the new run: its entries as memory holds
@@ -158,7 +148,7 @@ error_t MapLayBegin(uint32_t count, uint32_t entries, uint32_t old_first,
     size_t      words  = ((size_t)count + 63u) / 64u;
     uint64_t   *forgot = kmalloc(words * sizeof(uint64_t));
     FallowNode *rest   = old_count ? MapRunRest(old_first, old_count) : NULL;
-    uint32_t    start  = 0;
+    uint64_t    start  = 0;
 
     if (!forgot || (old_count && !rest)) {
         kprintf("[Integrity] no memory to begin laying a %u-block map, so %s this boot\n",
@@ -178,9 +168,11 @@ error_t MapLayBegin(uint32_t count, uint32_t entries, uint32_t old_first,
     }
     memset(forgot, 0, words * sizeof(uint64_t));
 
+    /* The map and its Ledger fields are format v1's, a block in u32: the
+     * allocator hands out no block past that format's data run (block_map.h). */
     TagFSLockTake(&g_map_lock);
     memset(&g_lay, 0, sizeof(g_lay));
-    g_lay.first     = start;
+    g_lay.first     = (uint32_t)start;
     g_lay.count     = count;
     g_lay.entries   = entries;
     g_lay.old_first = old_first;
@@ -189,8 +181,8 @@ error_t MapLayBegin(uint32_t count, uint32_t entries, uint32_t old_first,
     g_lay.rest      = rest;
     TagFSLockDrop(&g_map_lock);
 
-    kprintf("[Integrity] a %u-block map is laid at %u a page at a time by the Settle cycles — "
-            "%s until it stands\n", count, start,
+    kprintf("[Integrity] a %u-block map is laid at %llu a page at a time by the Settle cycles — "
+            "%s until it stands\n", count, (unsigned long long)start,
             old_count ? "the map it replaces checks what it covers"
                       : "nothing on this volume is checked for bit rot");
     SettleKnock();
@@ -335,7 +327,7 @@ error_t IntegrityStandLayBegin(void)
     TagFSLockTake(&g_map_lock);
     uint32_t first   = g_map_first_block;
     uint32_t count   = g_map_count;
-    uint32_t entries = g_map_entries;
+    uint32_t entries = (uint32_t)g_map_entries;   /* a v1 map covers a u32 data run */
     TagFSLockDrop(&g_map_lock);
     if (!IntegrityIsInitialized() || first == 0 || IntegrityLayOwed())
         return ERR_BUSY;

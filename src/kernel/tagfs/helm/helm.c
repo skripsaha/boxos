@@ -47,7 +47,7 @@ static uint32_t        g_open_regrown = 0;   /* bumped each time the entries mov
 static TagFSLock g_open_table_lock = TAGFS_LOCK_INIT("openfiles", LOCK_RANK_LEAF);
 
 /* The file's entry, under g_open_table_lock; NULL when it is not open. */
-static OpenFileEntry *ofe_find(uint32_t file_id)
+static OpenFileEntry *ofe_find(uint64_t file_id)
 {
     for (OpenFileEntry *e = g_open_files[file_id % g_open_buckets]; e; e = e->next)
         if (e->file_id == file_id)
@@ -95,7 +95,7 @@ static void ofe_grow(void)
         kfree(old);
 }
 
-OpenFileEntry *ofe_acquire(uint32_t file_id)
+OpenFileEntry *ofe_acquire(uint64_t file_id)
 {
     TagFSLockTake(&g_open_table_lock);
     OpenFileEntry *e = ofe_find(file_id);
@@ -121,7 +121,7 @@ OpenFileEntry *ofe_acquire(uint32_t file_id)
     if (e) {
         e->ref_count++;
     } else {
-        uint32_t bucket = file_id % g_open_buckets;
+        uint32_t bucket = (uint32_t)(file_id % g_open_buckets);
         made->next = g_open_files[bucket];
         g_open_files[bucket] = made;
         g_open_count++;
@@ -145,7 +145,7 @@ void ofe_release(OpenFileEntry *ofe)
 
     TagFSLockTake(&g_open_table_lock);
     if (ofe->ref_count == 0) {
-        uint32_t fid = ofe->file_id;
+        uint64_t fid = ofe->file_id;
         TagFSLockDrop(&g_open_table_lock);
         panic("[TagFS] ofe_release: ref_count already zero for file_id=%u — double-release or corruption", fid);
     }
@@ -263,7 +263,7 @@ void HelmLetGo(OpenFileEntry *ofe, HelmWaiter *w)
     TagFSLockTake(&h->lock);
     if (h->holder != w) {
         TagFSLockDrop(&h->lock);
-        kprintf("[TagFS] file %u: its Helm was let go of by a caller that does not hold it — "
+        kprintf("[TagFS] file %llu: its Helm was let go of by a caller that does not hold it — "
                 "the holder keeps it\n", ofe->file_id);
         return;
     }
@@ -292,7 +292,7 @@ error_t HelmTakeNow(TagFSFileHandle *handle, HelmWaiter *here)
         return OK;
     if (TagFSMediumLeft())
         return ERR_DEVICE_NOT_READY;    /* the departure said itself when it was latched */
-    kprintf("[TagFS] file %u is being changed by the holder of its Helm — a caller in the "
+    kprintf("[TagFS] file %llu is being changed by the holder of its Helm — a caller in the "
             "kernel cannot be parked behind it, and is refused\n", handle->file_id);
     return ERR_BUSY;
 }
@@ -302,7 +302,7 @@ bool HelmVacated(const OpenFileEntry *ofe)
     return __atomic_load_n(&ofe->helm.vacated, __ATOMIC_ACQUIRE);
 }
 
-void HelmVacate(uint32_t file_id)
+void HelmVacate(uint64_t file_id)
 {
     TagFSLockTake(&g_open_table_lock);
     OpenFileEntry *e = ofe_find(file_id);
@@ -316,7 +316,7 @@ uint64_t HelmOwed(void)
     return __atomic_load_n(&s_helm_owed, __ATOMIC_ACQUIRE);
 }
 
-uint32_t HelmClaimedRuns(uint32_t file_id)
+uint32_t HelmClaimedRuns(uint64_t file_id)
 {
     TagFSLockTake(&g_open_table_lock);
     OpenFileEntry *e       = ofe_find(file_id);
@@ -555,7 +555,7 @@ void HelmViewLetGo(TagFSFileHandle *handle)
 
 /* A handle of an earlier mounting views a volume that is gone, and gens that
  * began again at the mount: it holds nothing of this one. */
-uint64_t HelmViewFloor(uint32_t file_id)
+uint64_t HelmViewFloor(uint64_t file_id)
 {
     uint64_t floor = UINT64_MAX;
     uint32_t epoch = tagfs_mount_epoch();

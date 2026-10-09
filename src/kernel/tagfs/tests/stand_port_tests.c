@@ -93,7 +93,7 @@ static bool StandPortAnswered(uint8_t seat, uint32_t bound_ms)
 
 /* The job for a write of `bytes` from `data` into the file, at `offset` or
  * appended, answered to the stand's record. */
-static int StandPortSubmit(uint32_t file_id, const uint8_t* data, uint32_t bytes,
+static int StandPortSubmit(uint64_t file_id, const uint8_t* data, uint32_t bytes,
                            uint64_t offset, bool append)
 {
     WriteJobAsk ask;
@@ -134,7 +134,7 @@ static TestResult TestStandPortWriteGoesThroughThePort(void)
 {
     TestResult     verdict = TEST_PASS;
     uint8_t        seat    = tagfs_get_seat();
-    uint32_t       file_id = 0;
+    uint64_t       file_id = 0;
     uint8_t*       data    = NULL;
     uint8_t*       expect  = NULL;
     uint8_t*       back    = NULL;
@@ -202,8 +202,8 @@ static TestResult TestStandPortWriteRefusedPartWay(void)
 {
     TestResult     verdict = TEST_PASS;
     uint8_t        seat    = tagfs_get_seat();
-    uint32_t       file_id = 0;
-    uint32_t       block   = 0;
+    uint64_t       file_id = 0;
+    uint64_t       block   = 0;
     uint8_t*       old     = NULL;
     uint8_t*       data    = NULL;
     uint8_t*       back    = NULL;

@@ -54,8 +54,8 @@ TestResult TestStandRmwReadRefused(void)
 {
     TestResult  verdict = TEST_PASS;
     uint8_t     seat    = tagfs_get_seat();
-    uint32_t    file_id = 0;
-    uint32_t    block   = 0;
+    uint64_t    file_id = 0;
+    uint64_t    block   = 0;
     bool        armed   = false;
     const char* aside   = StandStepsAsideFor();
 
@@ -112,12 +112,12 @@ out:
 /* Does the tag index count this file id among the name's? Asked of the index
  * itself, so neither a Use Context nor the hidden/trashed filter can stand
  * between the question and the answer. */
-static bool StandNameFinds(uint16_t stem, uint32_t file_id)
+static bool StandNameFinds(uint16_t stem, uint64_t file_id)
 {
     return TagBitmapHas(tagfs_get_state()->bitmap_index, stem, file_id);
 }
 
-static bool StandVolumeNames(uint32_t file_id)
+static bool StandVolumeNames(uint64_t file_id)
 {
     TagFSMetadata meta;
 
@@ -130,7 +130,7 @@ static bool StandVolumeNames(uint32_t file_id)
 
 /* The file's id out from under the name's tag, the way an Ink takes it out:
  * under the volume's state lock, under which alone the index changes shape. */
-static void StandNameLetGo(uint16_t stem, uint32_t id)
+static void StandNameLetGo(uint16_t stem, uint64_t id)
 {
     TagFSState* fs = tagfs_get_state();
     TagFSLockTake(&fs->lock);
@@ -151,9 +151,9 @@ static void StandNameLetGo(uint16_t stem, uint32_t id)
 static TestResult StandCreateOnce(uint32_t n, uint16_t stem, bool* fired, bool* whole)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   id      = tagfs_file_ceiling();      /* the id this create takes */
-    uint32_t   made    = 0;
-    uint32_t   owned   = 0;                         /* made, until it is deleted */
+    uint64_t   id      = tagfs_file_ceiling();      /* the id this create takes */
+    uint64_t   made    = 0;
+    uint64_t   owned   = 0;                         /* made, until it is deleted */
     bool       armed   = false;
 
     HeapFailArm(amp_get_core_index(), n);
@@ -192,7 +192,7 @@ out:
 TestResult TestStandCreateAllOrNothing(void)
 {
     TestResult verdict   = TEST_PASS;
-    uint32_t   file_id   = 0;
+    uint64_t   file_id   = 0;
     uint32_t   refused   = 0;
     uint32_t   broken_at = 0;
     bool       swept     = false;
@@ -267,13 +267,13 @@ uint64_t StandLedgerSeq(void)
  * walked from its head, on the medium, to the block that carries the row —
  * TagFSMetaBlockRead reads it there: no read-ahead window serves it. False when
  * the chain does not reach it. */
-bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out, uint32_t* out_block)
+bool StandTableRowOnMedium(uint64_t file_id, FileTableEntry* out, uint32_t* out_block)
 {
     TagFSState*     fs    = tagfs_get_state();
     FileTableBlock* fb    = (FileTableBlock*)g_test_output;
     uint32_t        block = fs->layout.file_table_block - fs->layout.data_block;
 
-    for (uint32_t k = file_id / TAGFS_FTABLE_PER_BLOCK; ; k--) {
+    for (uint64_t k = file_id / TAGFS_FTABLE_PER_BLOCK; ; k--) {
         if (TagFSMetaBlockRead(block, fb) != OK || fb->magic != TAGFS_FILETBL_MAGIC)
             return false;
         if (k == 0)
@@ -282,7 +282,7 @@ bool StandTableRowOnMedium(uint32_t file_id, FileTableEntry* out, uint32_t* out_
             return false;
         block = fb->next_block;
     }
-    uint32_t row = file_id % TAGFS_FTABLE_PER_BLOCK;
+    uint32_t row = (uint32_t)(file_id % TAGFS_FTABLE_PER_BLOCK);
     if (row >= fb->entry_count)
         return false;
     *out = fb->entries[row];
@@ -309,7 +309,7 @@ TestResult TestStandSyncOwnsARefusedWrite(void)
 {
     TestResult     verdict   = TEST_PASS;
     uint8_t        seat      = tagfs_get_seat();
-    uint32_t       file_id   = 0;
+    uint64_t       file_id   = 0;
     uint32_t       row_block = 0;
     FileTableEntry row       = { 0, 0 };
     bool           armed     = false;
@@ -423,7 +423,7 @@ typedef struct {
 static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
+    uint64_t         file_id = 0;
     TagFSFileHandle* handle  = NULL;
     bool             armed   = false;
     VolumeTally      before;
@@ -540,7 +540,7 @@ static TestResult StandOpenSweepRun(StandOpenSweep* sweep)
 {
     TestResult  verdict = TEST_PASS;
     uint8_t     me      = amp_get_core_index();
-    uint32_t    file_id = 0;
+    uint64_t    file_id = 0;
     bool        armed   = false;
     bool        swept   = false;
     const char* aside   = StandStepsAsideFor();
@@ -659,9 +659,9 @@ TestResult TestStandOpenJoinsTheWriters(void)
 TestResult TestStandFrozenBlockFreedTwice(void)
 {
     TestResult  verdict = TEST_PASS;
-    uint32_t    file_id = 0;
-    uint32_t    kept    = 0;
-    uint32_t    now     = 0;
+    uint64_t    file_id = 0;
+    uint64_t    kept    = 0;
+    uint64_t    now     = 0;
     const char* aside   = StandStepsAsideFor();
 
     if (aside)

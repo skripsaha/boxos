@@ -315,7 +315,8 @@ TestResult TestStandMediumMountRefusedReadIsNoVerdict(void)
     BoardKind    kind    = BoardroomSeatKind(seat);
     uint8_t      index   = BoardroomSeatIndex(seat);
     uint32_t     epoch   = tagfs_mount_epoch();
-    uint32_t     file_id = 0, block = 0;
+    uint64_t     file_id = 0;
+    uint32_t     block = 0;
     bool         let_go  = false;
     RecordWhere  where;
     FileRecord*  rec;
@@ -374,7 +375,7 @@ TestResult TestStandMediumGivenUpIdsNotGivenAgain(void)
     uint8_t            seat    = tagfs_get_seat();
     BoardKind          kind    = BoardroomSeatKind(seat);
     uint8_t            index   = BoardroomSeatIndex(seat);
-    uint32_t           file_id = 0;
+    uint64_t           file_id = 0;
     uint16_t           tag     = TAGFS_INVALID_TAG_ID;
     bool               let_go  = false;
     VolumeLedger       found;

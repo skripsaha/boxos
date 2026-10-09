@@ -61,7 +61,7 @@ static bool StandReadAnswered(uint8_t seat)
 /* A read of `bytes` from `offset` of the open handle through the port, into
  * g_test_output, answered to the stand's record. The job owns the handle from
  * a taken submit on, and closes it; a submit not taken leaves it the caller's. */
-static int StandReadSubmit(TagFSFileHandle* handle, uint32_t file_id, uint64_t offset,
+static int StandReadSubmit(TagFSFileHandle* handle, uint64_t file_id, uint64_t offset,
                            uint32_t bytes)
 {
     ReadJobAsk ask;
@@ -76,8 +76,8 @@ static int StandReadSubmit(TagFSFileHandle* handle, uint32_t file_id, uint64_t o
 }
 
 /* A file of `blocks` blocks of stream `stream` in one run on the medium. */
-static bool StandReadMakeRun(uint32_t blocks, uint32_t stream, uint32_t* file_id,
-                             uint32_t* first)
+static bool StandReadMakeRun(uint32_t blocks, uint32_t stream, uint64_t* file_id,
+                             uint64_t* first)
 {
     TestFillAt(g_test_buffer, blocks * TAGFS_BLOCK_SIZE, stream, 0);
     if (!StandMakeFile("test_file", g_test_buffer, blocks * TAGFS_BLOCK_SIZE, file_id))
@@ -85,7 +85,7 @@ static bool StandReadMakeRun(uint32_t blocks, uint32_t stream, uint32_t* file_id
     if (blocks > 1 && tagfs_defrag_file(*file_id) != OK)
         return false;
     for (uint32_t k = 0; k < blocks; k++) {
-        uint32_t b = 0;
+        uint64_t b = 0;
         if (!StandBlockOf(*file_id, k, &b))
             return false;
         if (k == 0)
@@ -98,7 +98,7 @@ static bool StandReadMakeRun(uint32_t blocks, uint32_t stream, uint32_t* file_id
 
 /* Block `block` rots on the medium behind the map's back: `was` with one byte
  * flipped. */
-static bool StandReadRot(uint32_t block, const uint8_t* was)
+static bool StandReadRot(uint64_t block, const uint8_t* was)
 {
     uint8_t* rot = g_test_buffer + 3 * TAGFS_BLOCK_SIZE;
     memcpy(rot, was, TAGFS_BLOCK_SIZE);
@@ -114,7 +114,8 @@ static bool StandReadRot(uint32_t block, const uint8_t* was)
 static TestResult TestStandReadHoleRefused(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0, first = 0;
+    uint64_t         file_id = 0;
+    uint64_t         first   = 0;
     TagFSFileHandle* handle  = NULL;
     const char*      aside   = StandStepsAsideFor();
     uint64_t         got     = 0;
@@ -144,7 +145,8 @@ static TestResult TestStandReadHoleRefusedThroughPort(void)
 {
     TestResult       verdict = TEST_PASS;
     uint8_t          seat    = tagfs_get_seat();
-    uint32_t         file_id = 0, first = 0;
+    uint64_t         file_id = 0;
+    uint64_t         first   = 0;
     TagFSFileHandle* handle  = NULL;
     const char*      aside   = StandReadPortAside(seat);
 
@@ -178,7 +180,8 @@ out:
 static TestResult TestStandReadAheadForgetsAWrite(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0, first = 0, again = 0;
+    uint64_t         file_id = 0;
+    uint64_t         first   = 0, again = 0;
     TagFSFileHandle* handle  = NULL;
     const char*      aside   = StandStepsAsideFor();
     uint8_t*         newer   = g_test_buffer + STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE;
@@ -266,7 +269,8 @@ static void StandRotHeard(TouchTag tag_id, const void* payload, uint32_t plen,
 static TestResult TestStandReadAheadHitIsVerified(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0, first = 0;
+    uint64_t         file_id = 0;
+    uint64_t         first   = 0;
     TagFSFileHandle* handle  = NULL;
     TouchWatch*      ear     = NULL;
     bool             rotten  = false;
@@ -289,7 +293,7 @@ static TestResult TestStandReadAheadHitIsVerified(void)
                 "its middle block rots on the medium, behind the map's back");
     rotten = true;
     memset(&s_rot_ear, 0, sizeof(s_rot_ear));
-    s_rot_ear.block = first + 1;
+    s_rot_ear.block = (uint32_t)(first + 1);   /* the event names it in u32 */
     ear = TouchWatchSet(tag, StandRotHeard, &s_rot_ear);
     TEST_ASSERT(ear != NULL, "an ear on the integrity tag");
 
@@ -324,7 +328,8 @@ static TestResult TestStandReadRotThroughPort(void)
 {
     TestResult       verdict = TEST_PASS;
     uint8_t          seat    = tagfs_get_seat();
-    uint32_t         file_id = 0, first = 0;
+    uint64_t         file_id = 0;
+    uint64_t         first   = 0;
     TagFSFileHandle* handle  = NULL;
     bool             rotten  = false;
     uint8_t*         was     = g_test_buffer;
@@ -370,7 +375,8 @@ out:
 static TestResult TestStandReadRmwRefusesRot(void)
 {
     TestResult  verdict = TEST_PASS;
-    uint32_t    file_id = 0, first = 0;
+    uint64_t    file_id = 0;
+    uint64_t    first   = 0;
     bool        rotten  = false;
     uint8_t*    was     = g_test_buffer;
     uint8_t*    whole   = g_test_buffer + TAGFS_BLOCK_SIZE;

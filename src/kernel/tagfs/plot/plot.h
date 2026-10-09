@@ -15,11 +15,14 @@
  * a block is a Stake from the moment it is taken until an inked record names
  * it, and a Stake nobody named goes back.
  *
- * The widths of format v1 are known here and in plot/plot_width.h only: the
- * record's 42 + 2T + 6E + N <= 4080 (PlotFits) and an extent's 0xFFFF blocks
- * (PlotAppendRun cuts a run at it). Every count in memory is u32; PackV1 is
- * where a record meets the medium's widths, and it refuses one that would not
- * fit rather than cut it.
+ * A file's runs in memory are Strips (strip.h) of any length a u32 counts,
+ * from any block a u64 names: nothing in the algebra below cuts a run to the
+ * width a format gives it on the medium. The widths of format v1 are known in
+ * plot/plot_width.h and plot_pack.c only — the record's 42 + 2T + 6E + N <=
+ * 4080 (PlotFits), and an extent's u32 first block and 0xFFFF blocks, which
+ * PackV1 cuts a long Strip to (PackV1Extents counts what that cut makes).
+ * PackV1 is where a record meets the medium's widths, and it refuses one that
+ * would not fit rather than cut it.
  *
  * A write grows a file at its end or not at all (PlotBeginWrite): an offset
  * past the size is refused ERR_TAGFS_BEYOND_SIZE. A gap is made only by span,
@@ -28,12 +31,12 @@
 
 /* A run of blocks this call took and no committed record names yet. */
 typedef struct {
-    uint32_t start;
+    uint64_t start;
     uint32_t count;
 } Stake;
 
 typedef struct {
-    uint32_t      fid;
+    uint64_t      fid;
     uint32_t      mount_epoch;    /* the mounting the Plot's block numbers are of */
     TagFSMetadata meta;           /* the record as loaded: name, tags, flags, times */
     uint64_t      shape;          /* the Ink that gave the loaded record its size and extents */
@@ -41,16 +44,16 @@ typedef struct {
     uint64_t      data_us;        /* the medium's time on this call's data, measured, since its last Ink */
     uint64_t      size_before;    /* the size the call found; what existed is below it */
     uint64_t      size;           /* the size the call leaves */
-    FileExtent   *runs;           /* the working extents, in file order */
+    Strip        *runs;           /* the working runs, in file order */
     uint32_t      run_count;
     uint32_t      run_room;
     uint64_t      blocks;         /* how many blocks the runs name */
     uint64_t      blocks_before;  /* ... and how many the loaded record named */
-    uint32_t      runs_before;    /* ... in how many extents */
+    uint64_t      runs_before;    /* ... in how many extents of format v1 (PackV1Extents) */
     Stake        *stakes;
     uint32_t      stake_count;
     uint32_t      stake_room;
-    FileExtent   *freed;          /* ground the record stops naming, to Fallow once it is inked */
+    Strip        *freed;          /* ground the record stops naming, to Fallow once it is inked */
     uint32_t      freed_count;
     uint32_t      freed_room;
     FileHelm     *helm;           /* the Helm its holder loaded it under; NULL for none */
@@ -67,7 +70,7 @@ typedef struct {
  * the halt shut the volume, ERR_TAGFS_READ_ONLY) — asked here, before a byte of
  * the call moves — or ERR_NO_MEMORY. A holder of the file's Helm sets `helm`
  * after the load, so the record's room is claimed for it (PlotReserve). */
-error_t  PlotLoad(Plot *p, uint32_t fid, InkWarrant warrant);
+error_t  PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant);
 
 /* Everything the Plot holds let go; every Stake still standing is given back
  * first (PlotPullStakes), and the room it claimed (InkRoomLetGo). Safe on a
@@ -82,8 +85,8 @@ void     PlotPullStakes(Plot *p);
 
 /* Where block k of a file lies: true, *out_block, and in *out_left how many
  * of the run's blocks follow it. False when the runs do not reach block k. */
-bool     PlotFind(const FileExtent *runs, uint32_t count, uint64_t k,
-                  uint32_t *out_block, uint32_t *out_left);
+bool     PlotFind(const Strip *runs, uint32_t count, uint64_t k,
+                  uint64_t *out_block, uint32_t *out_left);
 
 /* Whether block k held the file's bytes before this call: k < ceil(size/4096)
  * of the size the call found. A block the file names past that holds nothing
@@ -107,7 +110,7 @@ PlotFill PlotFillFor(const Plot *p, uint64_t k, uint32_t offset, uint32_t bytes)
  * between them the write covers whole.
  */
 typedef struct {
-    uint32_t block;    /* its first block on the medium */
+    uint64_t block;    /* its first block on the medium */
     uint32_t count;    /* its blocks, in one run */
     uint32_t head;     /* where the write begins inside the first block */
     uint64_t bytes;    /* the write's bytes it carries */
@@ -125,12 +128,21 @@ bool     PlotStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t most
 uint64_t PlotStretchBytes(const PlotStretch *s, uint32_t blocks);
 
 /* The run [start, start + count) after the Plot's last one: merged into it
- * when it begins where that one ends, and cut into extents of at most 0xFFFF
- * blocks. OK or ERR_NO_MEMORY, the runs unchanged. */
-error_t  PlotAppendRun(Plot *p, uint32_t start, uint32_t count);
+ * when it begins where that one ends and is no longer than a Strip counts.
+ * OK or ERR_NO_MEMORY, the runs unchanged. */
+error_t  PlotAppendRun(Plot *p, uint64_t start, uint32_t count);
 
-/* Whether a record fits format v1: its length in *out_bytes when it does. */
+/* Whether a record fits format v1, its Strips counted as the extents PackV1
+ * cuts them into: its length in *out_bytes when it does. */
 bool     PlotFits(const TagFSMetadata *record, uint32_t *out_bytes);
+
+/* How many extents of format v1 a record has room for beside its tags and its
+ * name: 0 when they leave it none. */
+uint32_t PlotRunRoom(const TagFSMetadata *record);
+
+/* How many extents format v1 cuts `count` Strips into: one for each 0xFFFF
+ * blocks of a Strip, and one for what is left of it. */
+uint64_t PackV1Extents(const Strip *strips, uint32_t count);
 
 /* Ground under every block of [0, end) bytes: what the file lacks is taken
  * through its Allotment near its last block, each run a Stake. Then the
@@ -173,12 +185,12 @@ error_t  PlotExtendZero(Plot *p, uint64_t size);
 /*
  * PlotGather — extents made fewer by moving the fewest blocks.
  *
- * The consecutive extents whose blocks, laid in one run, shed at least `shed`
- * extents from the record, the window with the fewest blocks of all such: one
- * run of exactly that many is taken near `hint`, the blocks are copied into it
- * and flushed, and the Plot names the run instead. The ground left comes to
- * rest once a record that no longer names it is inked. `shed` 0 asks for
- * every extent of the file in one run (defrag).
+ * The consecutive runs whose blocks, laid in one run, shed at least `shed`
+ * extents from the record (PackV1Extents), the window with the fewest blocks
+ * of all such: one run of exactly that many is taken near `hint`, the blocks
+ * are copied into it and flushed, and the Plot names the run instead. The
+ * ground left comes to rest once a record that no longer names it is inked.
+ * `shed` 0 asks for every run of the file in one (defrag).
  *
  * Only ground the loaded record named is moved, never a Stake — and never a
  * block of a file the system keeps (B10): one wearing system, boot or god, or
@@ -198,18 +210,18 @@ error_t  PlotExtendZero(Plot *p, uint64_t size);
  * PlotGather is all of it in one call.
  */
 typedef struct {
-    uint32_t first;     /* the extents gathered, in the file's order ... */
+    uint32_t first;     /* the runs gathered, in the file's order ... */
     uint32_t last;
     uint64_t blocks;    /* ... the blocks they hold, which the run taken for them holds */
-    uint32_t to;        /* where that run begins */
+    uint64_t to;        /* where that run begins */
     uint64_t copied;    /* how many of them are copied into it */
-    uint32_t extent;    /* where the copy goes on: the extent, */
+    uint32_t extent;    /* where the copy goes on: the run, */
     uint32_t within;    /* ... and its block */
     bool     laid;      /* the Plot names the run */
 } PlotGathering;
 
-error_t  PlotGather(Plot *p, uint32_t shed, uint32_t hint);
-error_t  PlotGatherBegin(Plot *p, uint32_t shed, uint32_t hint, PlotGathering *g);
+error_t  PlotGather(Plot *p, uint64_t shed, uint64_t hint);
+error_t  PlotGatherBegin(Plot *p, uint64_t shed, uint64_t hint, PlotGathering *g);
 error_t  PlotGatherStep(Plot *p, PlotGathering *g, bool *out_laid);
 
 /*
@@ -245,21 +257,34 @@ error_t  PlotSourcePull(const PlotSource *src, uint64_t at, void *dst, uint32_t 
  * landed before it: the blocks of a stretch before a refused one are laid. */
 error_t  PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
 
-/* A record packed for the medium: its length, or 0 — said — when it is wider
- * than format v1 carries or names a block outside the data run. */
-uint32_t PackV1(const TagFSMetadata *meta, uint8_t *out);
+/* A record packed for the medium into `out` — room for the length PlotFits
+ * gives — each Strip cut into extents of at most PLOT_RUN_MOST blocks: OK and
+ * its length in *out_bytes. `run_blocks` is the volume's data run, which every
+ * run must lie inside (0 before a Deed has said it: none judged). Refused,
+ * said, before a byte of `out` is written:
+ * ERR_TAGFS_FID_EXHAUSTED for a file id past the u32 a record carries,
+ * ERR_TAGFS_RECORD_FULL for a run past what one carries — a block past a u32,
+ * a run that owns no ground (STRIP_HOLE) — or a record wider than one holds
+ * (its tags, its extents after the cut, its name), and ERR_TAGFS_METADATA_ERROR
+ * for a run of no blocks or one outside the data run. */
+error_t  PackV1(const TagFSMetadata *meta, uint64_t run_blocks, uint8_t *out, uint32_t *out_bytes);
 
-/* A packed record given the file id `fid`, and summed again. */
-void     PackV1Refile(uint8_t *rec, uint32_t fid);
+/* A packed record given the file id `fid`, and summed again: OK, or
+ * ERR_TAGFS_FID_EXHAUSTED — said, the record untouched — for an id past the
+ * u32 a record carries. */
+error_t  PackV1Refile(uint8_t *rec, uint64_t fid);
 
-/* A packed record read back, whose room in its block is `room` bytes: OK,
+/* A packed record read back, whose room in its block is `room` bytes, its
+ * extents as Strips — neighbours on the medium joined into one: OK,
  * ERR_METADATA_CORRUPTED when it does not check out, or ERR_NO_MEMORY. One
- * whose extents name a block outside the data run, or none at all, comes out
- * naming no blocks, and *out_dropped says so (NULL: not asked). */
-error_t  UnpackV1(const uint8_t *rec, uint32_t room, TagFSMetadata *out, bool *out_dropped);
+ * whose extents name a block outside the data run of `run_blocks` blocks (as
+ * PackV1 judges it), or none at all, comes out naming no blocks, and
+ * *out_dropped says so (NULL: not asked). */
+error_t  UnpackV1(const uint8_t *rec, uint32_t room, uint64_t run_blocks, TagFSMetadata *out,
+                  bool *out_dropped);
 
 /* The file id of a packed record that checks out as UnpackV1 takes it, or 0
  * when it does not — reading only, taking no memory. */
-uint32_t UnpackV1Fid(const uint8_t *rec, uint32_t room);
+uint64_t UnpackV1Fid(const uint8_t *rec, uint32_t room);
 
 #endif /* TAGFS_PLOT_H */

@@ -135,7 +135,7 @@ static TestResult TestStandSealCutKeepsTheSeal(void)
     VolumeLedger before, after, other;
     bool         has_other = false, fell_back = true;
     int          seal = -1;
-    uint32_t     file_id = 0;
+    uint64_t     file_id = 0;
     TagFSState*  fs = tagfs_get_state();
     const char*  aside = StandStepsAsideFor();
 
@@ -327,7 +327,7 @@ out:
 static TestResult TestStandSealTornTableStands(void)
 {
     TestResult      verdict = TEST_PASS;
-    uint32_t        head = 0, torn = 0;
+    uint64_t        head = 0, torn = 0;
     FileTableBlock* image = kmalloc(sizeof(FileTableBlock));
     const char*     aside = StandStepsAsideFor();
 
@@ -343,22 +343,22 @@ static TestResult TestStandSealTornTableStands(void)
     TEST_ASSERT_OK(TagFSMetaBlockWrite(torn, image), "the second block is garbage");
     memset(image, 0, sizeof(*image));
     image->magic      = TAGFS_FILETBL_MAGIC;
-    image->next_block = torn;
+    image->next_block = (uint32_t)torn;    /* the table's chain is format v1's */
     TEST_ASSERT_OK(TagFSMetaBlockWrite(head, image), "the head links it");
 
-    TEST_ASSERT(FileTableWouldStand(head, true), "under a seal the torn table still mounts");
-    TEST_ASSERT(!FileTableWouldStand(head, false), "with no seal it does not");
+    TEST_ASSERT(FileTableWouldStand((uint32_t)head, true), "under a seal the torn table still mounts");
+    TEST_ASSERT(!FileTableWouldStand((uint32_t)head, false), "with no seal it does not");
 
     /* A read of the second block the medium refuses says nothing of what it
      * holds, under a seal too; a sector of it the medium cannot read is what
      * it holds. */
     BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_READ, tagfs_block_to_sector(torn),
                  TAGFS_BLOCK_SECTORS, 1);
-    TEST_ASSERT(!FileTableWouldStand(head, true),
+    TEST_ASSERT(!FileTableWouldStand((uint32_t)head, true),
                 "a read of it the medium refuses is no verdict: under a seal the walk is refused");
     TEST_ASSERT(BlockFailFired(), "the read was refused");
     BlockFailArmBadSectors(tagfs_get_seat(), tagfs_block_to_sector(torn), TAGFS_BLOCK_SECTORS);
-    TEST_ASSERT(FileTableWouldStand(head, true),
+    TEST_ASSERT(FileTableWouldStand((uint32_t)head, true),
                 "a sector of it the medium cannot read is what it holds: under a seal it mounts");
     TEST_ASSERT(BlockFailFired(), "the read met that sector");
 out:
@@ -379,8 +379,9 @@ out:
 static TestResult TestStandSealFidBoundaryDerived(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   batch[64];
-    uint32_t   from = 1, n, ceiling;
+    uint64_t   batch[64];
+    uint64_t   from = 1, ceiling;
+    uint32_t   n;
 
     TEST_ASSERT_EQ(MountNextFileId(10, 15, 3), 16, "a row past the Ledger's count moves it");
     TEST_ASSERT_EQ(MountNextFileId(10, 5, 20), 21, "a record past it does too");
@@ -394,7 +395,7 @@ static TestResult TestStandSealFidBoundaryDerived(void)
     while ((n = FileMapRows(tagfs_get_state()->files, from, batch, ARRAY_SIZE(batch))) > 0) {
         for (uint32_t i = 0; i < n; i++)
             TEST_ASSERT(batch[i] < ceiling, "every live file's id is below the next one");
-        if (batch[n - 1] == 0xFFFFFFFFu)
+        if (batch[n - 1] == UINT64_MAX)
             break;
         from = batch[n - 1] + 1;
     }
@@ -465,7 +466,7 @@ static void StandSealMountClose(void)
 }
 
 /* The block the file's record lies in, false when the map holds none. */
-static bool StandSealRecordBlock(uint32_t fid, uint32_t* block)
+static bool StandSealRecordBlock(uint64_t fid, uint32_t* block)
 {
     TagFSState* fs = tagfs_get_state();
     RecordWhere where;
@@ -479,7 +480,7 @@ static bool StandSealRecordBlock(uint32_t fid, uint32_t* block)
     return on;
 }
 
-static bool StandSealHolds(uint32_t fid)
+static bool StandSealHolds(uint64_t fid)
 {
     FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
     if (rec)
@@ -503,7 +504,8 @@ static TestResult TestStandSealBadOpenBlockRollsBack(void)
     TagFSState*  fs      = tagfs_get_state();
     uint8_t      seat    = tagfs_get_seat();
     uint32_t     epoch   = tagfs_mount_epoch();
-    uint32_t     kept    = 0, lost = 0, kept_block = 0, lost_block = 0;
+    uint32_t     kept_block = 0, lost_block = 0;
+    uint64_t     kept    = 0, lost = 0;
     bool         let_go  = false, has_other = false, fell_back = true;
     int          seal    = -1;
     VolumeLedger newest, other;

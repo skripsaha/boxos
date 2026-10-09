@@ -36,7 +36,7 @@ static WriteJobStandAnswer s_plot_answer;
 
 /* One write of `bytes` of the test buffer at `offset`, through a fresh handle:
  * the write's answer, and in *out_wrote the bytes it counted. */
-static error_t StandPlotWriteAt(uint32_t file_id, uint64_t offset, uint32_t bytes,
+static error_t StandPlotWriteAt(uint64_t file_id, uint64_t offset, uint32_t bytes,
                                 uint64_t* out_wrote)
 {
     TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
@@ -55,7 +55,7 @@ static error_t StandPlotWriteAt(uint32_t file_id, uint64_t offset, uint32_t byte
 }
 
 /* The file's size and the blocks its record names. */
-static bool StandPlotShape(uint32_t file_id, uint64_t* out_size, uint64_t* out_blocks,
+static bool StandPlotShape(uint64_t file_id, uint64_t* out_size, uint64_t* out_blocks,
                            uint32_t* out_extents)
 {
     TagFSMetadata meta;
@@ -65,7 +65,7 @@ static bool StandPlotShape(uint32_t file_id, uint64_t* out_size, uint64_t* out_b
         return false;
     uint64_t blocks = 0;
     for (uint32_t e = 0; e < meta.extent_count && meta.extents; e++)
-        blocks += meta.extents[e].block_count;
+        blocks += meta.extents[e].count;
     *out_size   = meta.size;
     *out_blocks = blocks;
     if (out_extents)
@@ -98,7 +98,7 @@ static TestResult TestStandPlotBeyondSizeRefused(void)
     };
 
     TestResult  verdict = TEST_PASS;
-    uint32_t    file_id = 0;
+    uint64_t    file_id = 0;
     uint32_t    taken   = 0;
     VolumeTally before;
     VolumeTally after;
@@ -164,7 +164,7 @@ static uint32_t StandPlotExtentCeiling(uint64_t blocks)
 static TestResult TestStandPlotRunMerges(void)
 {
     TestResult       verdict  = TEST_PASS;
-    uint32_t         file_id  = 0;
+    uint64_t         file_id  = 0;
     TagFSFileHandle* handle   = NULL;
     uint64_t         accepted = 0;
     uint64_t         size     = 0;
@@ -231,8 +231,9 @@ out:
 static TestResult TestStandPlotGapReadsZeros(void)
 {
     TestResult     verdict = TEST_PASS;
-    uint32_t       file_id = 0;
-    uint32_t       start   = 0, count = 0, landed = 0;
+    uint64_t       file_id = 0;
+    uint64_t       start   = 0;
+    uint32_t       count   = 0, landed = 0;
     uint32_t       leaked  = 0;
     uint8_t*       data    = NULL;
     uint8_t*       back    = NULL;
@@ -262,7 +263,7 @@ static TestResult TestStandPlotGapReadsZeros(void)
 
     TEST_ASSERT_OK(tagfs_span_file(file_id, span), "the file is spanned across four more blocks");
     for (uint32_t i = 0; i < STAND_PLOT_GAP_BLOCKS; i++) {
-        uint32_t block = 0;
+        uint64_t block = 0;
         TEST_ASSERT(StandBlockOf(file_id, grown + i, &block) && block == start + i,
                     "the span grew onto the ground the bytes lie on, from the front of the window");
     }
@@ -294,7 +295,7 @@ out:
 static TestResult TestStandPlotSpanGrowsAndShrinks(void)
 {
     TestResult  verdict = TEST_PASS;
-    uint32_t    file_id = 0;
+    uint64_t    file_id = 0;
     uint64_t    size    = 0;
     uint64_t    blocks  = 0;
     uint64_t    grown   = 3u * TAGFS_BLOCK_SIZE + STAND_PLOT_SPAN_TAIL;
@@ -369,7 +370,7 @@ static uint64_t StandPlotBlocksFor(uint64_t bytes)
 /* A span or a defrag of the file asked as a program's call asks it: answered
  * to the stand's record, the job giving its core back between two windows as
  * a program's does. The submit's answer. */
-static int StandPlotJob(WriteJobKind kind, uint32_t file_id, uint64_t size)
+static int StandPlotJob(WriteJobKind kind, uint64_t file_id, uint64_t size)
 {
     WriteJobAsk ask;
     memset(&ask, 0, sizeof(ask));
@@ -384,10 +385,11 @@ static int StandPlotJob(WriteJobKind kind, uint32_t file_id, uint64_t size)
 /* The deck's span of the file to `size` with `flags`, its params as a
  * program's file_span lays them, asked by a caller in the kernel standing in
  * its call. The handler's answer. */
-static int StandPlotDeckSpan(uint32_t file_id, uint64_t size, uint32_t flags)
+static int StandPlotDeckSpan(uint64_t file_id, uint64_t size, uint32_t flags)
 {
-    uint8_t params[16];
-    memcpy(params, &file_id, 4);
+    uint8_t  params[16];
+    uint32_t id = (uint32_t)file_id;    /* a program's file_id_t: the stand's ids are v1's */
+    memcpy(params, &id, 4);
     memcpy(params + 4, &size, 8);
     memcpy(params + 12, &flags, 4);
     return StandDeckAsk(STORAGE_OBJ_SPAN, params, sizeof(params), NULL, 0, NULL);
@@ -413,8 +415,8 @@ static bool StandPlotAnswered(void)
  * taken by the test, so the next run cannot follow on. The blocks taken go in
  * walls[], counted in *out_walled, for the caller to give back. False when a
  * step did not answer; what it made is the caller's to give back then too. */
-static bool StandPlotScatter(const uint8_t* data, uint32_t blocks, uint32_t* out_file_id,
-                             uint32_t walls[STAND_PLOT_SCATTER_RUNS - 1], uint32_t* out_walled)
+static bool StandPlotScatter(const uint8_t* data, uint32_t blocks, uint64_t* out_file_id,
+                             uint64_t walls[STAND_PLOT_SCATTER_RUNS - 1], uint32_t* out_walled)
 {
     const uint32_t bytes = blocks * TAGFS_BLOCK_SIZE;
 
@@ -422,7 +424,7 @@ static bool StandPlotScatter(const uint8_t* data, uint32_t blocks, uint32_t* out
     if (!StandMakeFile("test_file", data, bytes, out_file_id))
         return false;
     for (uint32_t r = 1; r < STAND_PLOT_SCATTER_RUNS; r++) {
-        uint32_t last = 0;
+        uint64_t last = 0;
         if (!StandBlockOf(*out_file_id, r * blocks - 1, &last) ||
             BlockMapTake(1, last + 1, &walls[r - 1], __func__) != OK)
             return false;
@@ -434,7 +436,7 @@ static bool StandPlotScatter(const uint8_t* data, uint32_t blocks, uint32_t* out
     return true;
 }
 
-static void StandPlotWallsDown(const uint32_t* walls, uint32_t walled)
+static void StandPlotWallsDown(const uint64_t* walls, uint32_t walled)
 {
     for (uint32_t i = 0; i < walled; i++)
         (void)tagfs_free_blocks(walls[i], 1);
@@ -451,7 +453,7 @@ static void StandPlotWallsDown(const uint32_t* walls, uint32_t walled)
 static TestResult TestStandPlotSpanByWindows(void)
 {
     TestResult       verdict  = TEST_PASS;
-    uint32_t         file_id  = 0;
+    uint64_t         file_id  = 0;
     TagFSFileHandle* handle   = NULL;
     HelmWaiter       here;
     bool             holding  = false;
@@ -529,8 +531,8 @@ out:
 static TestResult TestStandPlotDefragByWindows(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
-    uint32_t         walls[STAND_PLOT_SCATTER_RUNS - 1];
+    uint64_t         file_id = 0;
+    uint64_t         walls[STAND_PLOT_SCATTER_RUNS - 1];
     uint32_t         walled  = 0;
     TagFSFileHandle* handle  = NULL;
     HelmWaiter       here;
@@ -543,7 +545,8 @@ static TestResult TestStandPlotDefragByWindows(void)
     uint32_t         early   = 0;
     uint64_t         staked  = 0;
     uint64_t         size    = 0, blocks = 0;
-    uint32_t         extents = 0, first = 0;
+    uint32_t         extents = 0;
+    uint64_t         first   = 0;
     error_t          rc      = OK;
     VolumeTally      base;
     VolumeTally      now;
@@ -565,7 +568,8 @@ static TestResult TestStandPlotDefragByWindows(void)
     TEST_ASSERT(StandPlotShape(file_id, &size, &blocks, &extents) && extents > 1,
                 "it lies in more than one run");
     TEST_ASSERT(StandBlockOf(file_id, 0, &first), "its first block is found");
-    const uint32_t extents_before = extents, first_before = first;
+    const uint32_t extents_before = extents;
+    const uint64_t first_before   = first;
     TEST_ASSERT(VolumeTallyTake(&base), "the volume is counted");
 
     handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
@@ -623,8 +627,8 @@ out:
 static TestResult TestStandPlotDefragGivenUpBetweenWindows(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
-    uint32_t         walls[STAND_PLOT_SCATTER_RUNS - 1];
+    uint64_t         file_id = 0;
+    uint64_t         walls[STAND_PLOT_SCATTER_RUNS - 1];
     uint32_t         walled  = 0;
     TagFSFileHandle* handle  = NULL;
     HelmWaiter       here;
@@ -689,8 +693,8 @@ out:
 static TestResult TestStandPlotJobsGiveTheCoreBack(void)
 {
     TestResult     verdict = TEST_PASS;
-    uint32_t       spanned = 0, file_id = 0;
-    uint32_t       walls[STAND_PLOT_SCATTER_RUNS - 1];
+    uint64_t       spanned = 0, file_id = 0;
+    uint64_t       walls[STAND_PLOT_SCATTER_RUNS - 1];
     uint32_t       walled  = 0;
     bool           pending = false;
     uint8_t*       data    = NULL;
@@ -758,7 +762,7 @@ out:
 static TestResult TestStandPlotSpanPastTheVolume(void)
 {
     TestResult     verdict = TEST_PASS;
-    uint32_t       file_id = 0;
+    uint64_t       file_id = 0;
     uint64_t       size    = 0, blocks = 0;
     uint64_t       took    = 0;
     VolumeTally    base;
@@ -806,7 +810,7 @@ out:
 static TestResult TestStandPlotSpanGrowsOnly(void)
 {
     TestResult     verdict = TEST_PASS;
-    uint32_t       file_id = 0;
+    uint64_t       file_id = 0;
     uint64_t       wrote   = 0, size = 0, blocks = 0;
     uint64_t       cut     = 0;
     uint8_t*       expect  = NULL;

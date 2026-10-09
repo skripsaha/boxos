@@ -39,15 +39,15 @@
 
 #define MAP_NO_FID      0u       /* a file id no file has: every Allotment is another's */
 
-static void MapConsider(MapPick *k, uint32_t start, uint32_t len)
+static void MapConsider(MapPick *k, uint64_t start, uint32_t len)
 {
     if (len == 0)
         return;
 
     uint32_t got  = len < k->want ? len : k->want;
-    uint32_t last = start + len - got;                 /* the latest the take may start */
-    uint32_t at   = k->hint < start ? start : (k->hint > last ? last : k->hint);
-    uint32_t far  = at >= k->hint ? at - k->hint : k->hint - at;
+    uint64_t last = start + len - got;                 /* the latest the take may start */
+    uint64_t at   = k->hint < start ? start : (k->hint > last ? last : k->hint);
+    uint64_t far  = at >= k->hint ? at - k->hint : k->hint - at;
     bool     better;
 
     if (!k->found)
@@ -133,7 +133,7 @@ static void MapLook(MapPick *k, uint32_t w)
 /* Every run of a window whose sector is in memory, as a take sees it. */
 static void MapConsiderRuns(MapPick *k, uint32_t w, const uint8_t *view)
 {
-    uint32_t base = w * MAP_WINDOW_BLOCKS;
+    uint64_t base = (uint64_t)w * MAP_WINDOW_BLOCKS;
 
     for (uint32_t b = 0; b < MAP_WINDOW_BLOCKS; ) {
         if ((b % 8) == 0 && view[b / 8] == 0xFF) {
@@ -175,7 +175,7 @@ static void MapConsiderWindow(MapPick *k, uint32_t w, bool may_read)
         return;
     }
 
-    uint32_t base = w * MAP_WINDOW_BLOCKS;
+    uint64_t base = (uint64_t)w * MAP_WINDOW_BLOCKS;
     bool     ends = x->longest && x->at + x->longest == MAP_WINDOW_BLOCKS;
     if (x->longest)
         MapConsider(k, base + x->at, ends ? MapRunOn(k, w, x->longest) : x->longest);
@@ -295,7 +295,7 @@ static void MapPlanHint(MapPick *k, bool may_read)
 {
     if (k->hint >= g_map.blocks)
         k->hint = g_map.blocks - 1;
-    uint32_t h = k->hint / MAP_WINDOW_BLOCKS;
+    uint32_t h = (uint32_t)(k->hint / MAP_WINDOW_BLOCKS);
     if (h >= k->lo)
         MapConsiderWindow(k, h, may_read && !k->best_fit);
     if (k->best_fit) {
@@ -332,10 +332,10 @@ static void MapPlanGo(MapPick *k, bool may_read, bool may_pause)
 
     /* A best fit fetches only the hint's sector: growth in place is the one
      * place nearness decides. */
-    uint32_t h = k->hint / MAP_WINDOW_BLOCKS;
-    if (k->best_fit && may_read && k->want && h >= k->lo && h < g_map.windows && !MapReady(h) &&
-        g_map.win[h].free && !(k->found && k->far == 0))
-        MapLook(k, h);
+    uint64_t h = k->hint / MAP_WINDOW_BLOCKS;
+    if (k->best_fit && may_read && k->want && h >= k->lo && h < g_map.windows &&
+        !MapReady((uint32_t)h) && g_map.win[h].free && !(k->found && k->far == 0))
+        MapLook(k, (uint32_t)h);
 }
 
 void MapPlan(MapPick *k, bool may_read, bool may_pause)
@@ -369,12 +369,13 @@ static bool MapSpanKnownFree(const BlockMapWindow *x, uint32_t off, uint32_t n)
            (off >= x->at && end <= (uint32_t)x->at + x->longest);
 }
 
-bool MapRunStillFree(uint32_t start, uint32_t count)
+bool MapRunStillFree(uint64_t start, uint32_t count)
 {
-    for (uint32_t b = start, end = start + count; b < end; ) {
-        uint32_t      w   = b / MAP_WINDOW_BLOCKS;
-        uint32_t      off = b % MAP_WINDOW_BLOCKS;
-        uint32_t      n   = end - b < MAP_WINDOW_BLOCKS - off ? end - b : MAP_WINDOW_BLOCKS - off;
+    for (uint64_t b = start, end = start + count; b < end; ) {
+        uint32_t      w   = (uint32_t)(b / MAP_WINDOW_BLOCKS);
+        uint32_t      off = (uint32_t)(b % MAP_WINDOW_BLOCKS);
+        uint32_t      n   = (uint32_t)(end - b < MAP_WINDOW_BLOCKS - off ? end - b
+                                                                         : MAP_WINDOW_BLOCKS - off);
         BlockMapPage *p   = MapReady(w);
 
         if (p) {
@@ -463,8 +464,8 @@ uint64_t MapMayHaveLocked(void)
  * not a `spare` of the pool's leaves free the blocks the pool's reserve still
  * lacks (MapMayHaveLocked): it is shorter for them, or short.
  */
-static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact, uint32_t fid, bool spare,
-                           uint32_t *start, uint32_t *got, const char *site)
+static error_t MapTakeDoor(uint32_t want, uint64_t hint, bool exact, uint64_t fid, bool spare,
+                           uint64_t *start, uint32_t *got, const char *site)
 {
     if (want == 0 || !start || !got)
         return ERR_INVALID_ARGUMENT;
@@ -528,7 +529,7 @@ static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact, uint32_t fi
             (fid != MAP_NO_FID && !MapUnsettledRoom())) {
             TagFSLockDropAt(lock, site);
             kprintf("[TagFS] block map: no memory to write down a take of %u block(s) at "
-                    "%u — nothing is taken\n", n, k.at);
+                    "%llu — nothing is taken\n", n, (unsigned long long)k.at);
             return ERR_NO_MEMORY;
         }
         MapTakeKnown(k.at, n);
@@ -542,26 +543,26 @@ static error_t MapTakeDoor(uint32_t want, uint32_t hint, bool exact, uint32_t fi
     }
 }
 
-error_t BlockMapTake(uint32_t count, uint32_t hint, uint32_t *start, const char *site)
+error_t BlockMapTake(uint32_t count, uint64_t hint, uint64_t *start, const char *site)
 {
     uint32_t got = 0;
     return MapTakeDoor(count, hint, true, MAP_NO_FID, false, start, &got, site);
 }
 
-error_t BlockMapTakeSpare(uint32_t *start, const char *site)
+error_t BlockMapTakeSpare(uint64_t *start, const char *site)
 {
     uint32_t got = 0;
     return MapTakeDoor(1, 0, true, MAP_NO_FID, true, start, &got, site);
 }
 
-error_t BlockMapTakeFor(uint32_t fid, uint32_t count, uint32_t hint, uint32_t *start,
+error_t BlockMapTakeFor(uint64_t fid, uint32_t count, uint64_t hint, uint64_t *start,
                         const char *site)
 {
     uint32_t got = 0;
     return MapTakeDoor(count, hint, true, fid, false, start, &got, site);
 }
 
-error_t BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start)
+error_t BlockMapTakeLocked(uint32_t count, uint64_t hint, uint64_t *start)
 {
     if (!g_map.up)
         return ERR_TAGFS_NOT_INITIALIZED;
@@ -574,7 +575,7 @@ error_t BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start)
         if (k.found && k.got == count) {
             if (!MapDeltaRoom(MapUnreadWindows(k.at, count), false, true)) {
                 kprintf("[TagFS] block map: no memory to write down a take of %u block(s) "
-                        "at %u — nothing is taken\n", count, k.at);
+                        "at %llu — nothing is taken\n", count, (unsigned long long)k.at);
                 return ERR_NO_MEMORY;
             }
             MapTakeKnown(k.at, count);
@@ -587,14 +588,14 @@ error_t BlockMapTakeLocked(uint32_t count, uint32_t hint, uint32_t *start)
     return MapShort(count);
 }
 
-/* No longer than one extent: a run past it is taken by as many takes, each a
- * run's worth of windows under the lock. */
-error_t TagFSTakeRun(uint32_t want, uint32_t hint, uint32_t *start, uint32_t *got)
+/* No longer than one take hands out: a run past it is taken by as many takes,
+ * each a run's worth of windows under the lock. */
+error_t TagFSTakeRun(uint32_t want, uint64_t hint, uint64_t *start, uint32_t *got)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = MapTakeDoor(want < PLOT_RUN_MOST ? want : PLOT_RUN_MOST, hint, false,
-                             MAP_NO_FID, false, start, got, __func__);
+    error_t rc = MapTakeDoor(want < BLOCK_MAP_TAKE_MOST ? want : BLOCK_MAP_TAKE_MOST, hint,
+                             false, MAP_NO_FID, false, start, got, __func__);
     tagfs_leave();
     return rc;
 }
@@ -602,7 +603,7 @@ error_t TagFSTakeRun(uint32_t want, uint32_t hint, uint32_t *start, uint32_t *go
 #ifdef CONFIG_VOLUME_TESTS
 /* The block BlockMapTake(1, 0) would be handed now: the same plan, with the
  * same sectors fetched to decide it. */
-bool BlockMapNextFree(uint32_t *block)
+bool BlockMapNextFree(uint64_t *block)
 {
     for (uint32_t rounds = 0; ; rounds++) {
         TagFSLockTake(MapLock());

@@ -22,8 +22,8 @@
 
 /* One match onto the page: into the room while there is room, and the first
  * past it noted as where the rest begin. False once nothing more is wanted. */
-static bool PageTake(TagFSPage* page, uint32_t* out, uint32_t room, bool want_total,
-                     uint32_t fid)
+static bool PageTake(TagFSPage* page, uint64_t* out, uint32_t room, bool want_total,
+                     uint64_t fid)
 {
     if (page->delivered < room) {
         out[page->delivered++] = fid;
@@ -72,14 +72,14 @@ static uint32_t QueryHides(const uint16_t* tag_ids, uint32_t tag_count,
  * create takes: the mount derives that id past every row and record the
  * medium holds (mount/mount.c), so no row names an id the volume never
  * issued. */
-static void ListPageInside(uint32_t from, uint32_t* out, uint32_t room, bool want_total,
+static void ListPageInside(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                            TagFSPage* page)
 {
     TagFSState* fs = tagfs_get_state();
     uint16_t    hide[2];
     uint32_t    hides = QueryHides(NULL, 0, NULL, 0, hide);
-    uint32_t    batch[QUERY_BATCH];
-    uint32_t    at = from ? from : 1;
+    uint64_t    batch[QUERY_BATCH];
+    uint64_t    at = from ? from : 1;
     uint32_t    n;
 
     while ((n = FileMapRows(fs->files, at, batch, QUERY_BATCH)) > 0) {
@@ -90,13 +90,13 @@ static void ListPageInside(uint32_t from, uint32_t* out, uint32_t room, bool wan
             if (!hidden && !PageTake(page, out, room, want_total, batch[i]))
                 return;
         }
-        if (batch[n - 1] == 0xFFFFFFFFu)
+        if (batch[n - 1] == UINT64_MAX)
             return;
         at = batch[n - 1] + 1;
     }
 }
 
-error_t TagFSListPage(uint32_t from, uint32_t* out, uint32_t room, bool want_total,
+error_t TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                       TagFSPage* page)
 {
     memset(page, 0, sizeof(*page));
@@ -113,8 +113,8 @@ error_t TagFSListPage(uint32_t from, uint32_t* out, uint32_t room, bool want_tot
 // The files that wear every tag asked
 // ----------------------------------------------------------------------------
 
-static error_t QueryPageInside(const TagSpelling* tags, uint32_t count, uint32_t from,
-                               uint32_t* out, uint32_t room, bool want_total, TagFSPage* page)
+static error_t QueryPageInside(const TagSpelling* tags, uint32_t count, uint64_t from,
+                               uint64_t* out, uint32_t room, bool want_total, TagFSPage* page)
 {
     TagFSState* fs          = tagfs_get_state();
     uint32_t    tag_count   = 0;
@@ -162,8 +162,8 @@ out:
     return rc;
 }
 
-error_t TagFSQueryPage(const TagSpelling* tags, uint32_t count, uint32_t from,
-                       uint32_t* out, uint32_t room, bool want_total, TagFSPage* page)
+error_t TagFSQueryPage(const TagSpelling* tags, uint32_t count, uint64_t from,
+                       uint64_t* out, uint32_t room, bool want_total, TagFSPage* page)
 {
     if (count == 0)
         return TagFSListPage(from, out, room, want_total, page);
@@ -184,18 +184,18 @@ error_t TagFSQueryPage(const TagSpelling* tags, uint32_t count, uint32_t from,
 typedef struct {
     uint32_t files;
     uint32_t gaps;
-    uint32_t steps;
+    uint64_t steps;
 } FragCount;
 
-static void FragAdd(FragCount* frag, uint32_t flags, const FileExtent* extents, uint32_t count)
+static void FragAdd(FragCount* frag, uint32_t flags, const Strip* extents, uint32_t count)
 {
     if (!(flags & TAGFS_FILE_ACTIVE))
         return;
-    uint32_t blocks = 0;
+    uint64_t blocks = 0;
     for (uint32_t e = 0; extents && e < count; e++) {
-        if (e > 0 && extents[e].start_block != extents[e - 1].start_block + extents[e - 1].block_count)
+        if (e > 0 && extents[e].start != extents[e - 1].start + extents[e - 1].count)
             frag->gaps++;
-        blocks += extents[e].block_count;
+        blocks += extents[e].count;
     }
     if (blocks > 1)
         frag->steps += blocks - 1;
@@ -203,7 +203,7 @@ static void FragAdd(FragCount* frag, uint32_t flags, const FileExtent* extents, 
 }
 
 /* One file's record, out of the map of live files: every live file has one. */
-static void FragOfFile(FragCount* frag, uint32_t fid)
+static void FragOfFile(FragCount* frag, uint64_t fid)
 {
     FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
     if (!rec)
@@ -234,13 +234,13 @@ uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps)
     if (!tagfs_enter())
         return 0;
 
-    uint32_t batch[QUERY_BATCH];
-    uint32_t at = 1;
+    uint64_t batch[QUERY_BATCH];
+    uint64_t at = 1;
     uint32_t n;
     while ((n = FileMapRows(tagfs_get_state()->files, at, batch, QUERY_BATCH)) > 0) {
         for (uint32_t i = 0; i < n; i++)
             FragOfFile(&frag, batch[i]);
-        if (batch[n - 1] == 0xFFFFFFFFu)
+        if (batch[n - 1] == UINT64_MAX)
             break;
         at = batch[n - 1] + 1;
     }

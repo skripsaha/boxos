@@ -122,7 +122,7 @@ static TestResult TestStandIntegrityPagesOutsideItsLock(void)
 {
     TestResult  verdict = TEST_PASS;
     uint32_t    span    = (STAND_MAP_PAGES - 1) * STAND_MAP_PAGE_BLOCKS + 1;
-    uint32_t    first   = 0;
+    uint64_t    first   = 0;
     bool        taken   = false;
     error_t     wrote   = OK;
     const char* aside   = StandStepsAsideFor();

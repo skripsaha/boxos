@@ -485,7 +485,7 @@ static int ObjGetInfo(const ManifestOp *op,
             if (md.tag_ids[i] == wk->hidden)  flags |= TAGFS_FILE_HIDDEN;
         }
 
-        memcpy(kp + pos, &md.file_id, 4); pos += 4;
+        memcpy(kp + pos, &file_id,    4); pos += 4;   /* the id asked: the record's own */
         memcpy(kp + pos, &flags,      4); pos += 4;
         memcpy(kp + pos, &md.size,    8); pos += 8;
         memcpy(kp + pos, &tag_count,  2); pos += 2;
@@ -616,11 +616,13 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
 {
     uint64_t room_ids = (out->capacity - 8) / sizeof(uint32_t);
     uint32_t most     = room_ids > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)room_ids;
-    uint32_t *piece   = kmalloc(STORAGE_QUERY_PIECE * sizeof(uint32_t));
+    /* The index's ids, and the same ids as the crate carries them. */
+    uint64_t *piece   = kmalloc(STORAGE_QUERY_PIECE * (sizeof(uint64_t) + sizeof(uint32_t)));
     if (!piece) return ERR_NO_MEMORY;
+    uint32_t *ids     = (uint32_t *)(piece + STORAGE_QUERY_PIECE);
 
     error_t  rc    = OK;
-    uint32_t from  = 1;
+    uint64_t from  = 1;
     bool     first = true;
     for (;;) {
         uint32_t  room = most - hdr[0] < STORAGE_QUERY_PIECE ? most - hdr[0] : STORAGE_QUERY_PIECE;
@@ -629,16 +631,21 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
         if (rc != OK) break;
         if (first) hdr[1] = page.total;
         first = false;
-        if (page.delivered > 0) {
+        uint32_t carried = 0;
+        while (carried < page.delivered && rc == OK) {
+            rc = StorageFileIdOut(piece[carried], &ids[carried]);
+            carried += rc == OK;
+        }
+        if (carried > 0) {
             int wrc = crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint32_t),
-                                          piece, (uint64_t)page.delivered * sizeof(uint32_t));
+                                          ids, (uint64_t)carried * sizeof(uint32_t));
             if (wrc != OK) {
                 rc = (error_t)wrc;
                 break;
             }
-            hdr[0] += page.delivered;
+            hdr[0] += carried;
         }
-        if (page.next == 0 || hdr[0] == most) break;
+        if (rc != OK || page.next == 0 || hdr[0] == most) break;
         from = page.next;
     }
     kfree(piece);
@@ -873,8 +880,8 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         return rc;
     }
 
-    uint32_t file_id = 0;
-    int made = tagfs_create_file(filename, tag_ids, total, &file_id);
+    uint64_t made_id = 0;
+    int made = tagfs_create_file(filename, tag_ids, total, &made_id);
     kfree(filename);
     kfree(tag_ids);
     if (-made == ERR_WOULD_BLOCK)
@@ -882,7 +889,11 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (made != 0) return (int)(error_t)(-made);
 
     if (op->out_crate != CRATE_INDEX_NONE) {
-        Crate *out = &crates[op->out_crate];
+        Crate   *out     = &crates[op->out_crate];
+        uint32_t file_id = 0;
+        error_t  handed  = StorageFileIdOut(made_id, &file_id);
+        if (handed != OK)
+            return handed;
         if (out->capacity >= sizeof(uint32_t)) {
             (void)crate_write(out, ctx, &file_id, sizeof(uint32_t));
         }

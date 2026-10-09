@@ -46,7 +46,7 @@ error_t MountReadVolume(const char** what);
  * every record the medium showed, and never short of the Ledger's own count;
  * a Ledger counting 0 — one an earlier kernel let wrap — stays as it is, for
  * LedgerIssueFileId to refuse; past 0xFFFFFFFE it is every id issued. */
-uint32_t MountNextFileId(uint32_t ledger_next, uint32_t top_row, uint32_t top_record);
+uint32_t MountNextFileId(uint32_t ledger_next, uint64_t top_row, uint64_t top_record);
 
 /* After the door has opened and the integrity map is up (RT-22): on a mount
  * whose seal was not written by a machine stopping cleanly, the digests of

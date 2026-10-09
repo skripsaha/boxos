@@ -55,9 +55,9 @@ static const char *StandRunAside(bool port)
 
 /* A file of a megabyte of zeros, laid by one span — one reservation, so the
  * volume gives it one run when it has one that long. */
-static bool StandRunMake(uint32_t *out_file_id)
+static bool StandRunMake(uint64_t *out_file_id)
 {
-    uint32_t file_id = 0;
+    uint64_t file_id = 0;
 
     *out_file_id = 0;
     if (tagfs_create_file("test_file", NULL, 0, &file_id) != 0)
@@ -73,11 +73,11 @@ static bool StandRunMake(uint32_t *out_file_id)
 /* Whether the file's megabyte lies in one run on the medium, read off its
  * record — never off the blocks, which would put them in a read-ahead window:
  * *out_first is the run's first block. */
-static bool StandRunLiesInOneRun(uint32_t file_id, uint32_t *out_first)
+static bool StandRunLiesInOneRun(uint64_t file_id, uint64_t *out_first)
 {
     TagFSMetadata meta;
     uint32_t      got = 0;
-    uint32_t      end = 0;
+    uint64_t      end = 0;
     bool          one = true;
 
     memset(&meta, 0, sizeof(meta));
@@ -85,8 +85,8 @@ static bool StandRunLiesInOneRun(uint32_t file_id, uint32_t *out_first)
         return false;
     for (uint32_t e = 0; meta.extents && e < meta.extent_count && got < STAND_RUN_BLOCKS && one;
          e++) {
-        uint32_t start = meta.extents[e].start_block;
-        uint32_t count = meta.extents[e].block_count;
+        uint64_t start = meta.extents[e].start;
+        uint32_t count = meta.extents[e].count;
         if (got == 0)
             *out_first = start;
         else
@@ -103,7 +103,7 @@ static bool StandRunLiesInOneRun(uint32_t file_id, uint32_t *out_first)
  * record in place of the program it would park — and whether it answered.
  * *out_running: the job is still out, and still holds the file and takes its
  * bytes from `data`. */
-static bool StandRunWrite(bool port, uint32_t file_id, const uint8_t *data, uint32_t bytes,
+static bool StandRunWrite(bool port, uint64_t file_id, const uint8_t *data, uint32_t bytes,
                           StandRunAnswer *out, bool *out_running)
 {
     uint64_t    stats[2] = { UINT64_MAX, UINT64_MAX };
@@ -175,8 +175,8 @@ static TestResult StandRunMegabyte(bool port)
 {
     TestResult     verdict = TEST_PASS;
     uint8_t        seat    = tagfs_get_seat();
-    uint32_t       file_id = 0;
-    uint32_t       first   = 0;
+    uint64_t       file_id = 0;
+    uint64_t       first   = 0;
     uint8_t       *data    = NULL;
     uint8_t       *back    = NULL;
     bool           armed   = false;
@@ -260,8 +260,8 @@ static TestResult StandRunRefusedInside(bool port)
 {
     TestResult     verdict = TEST_PASS;
     uint8_t        seat    = tagfs_get_seat();
-    uint32_t       file_id = 0;
-    uint32_t       first   = 0;
+    uint64_t       file_id = 0;
+    uint64_t       first   = 0;
     uint8_t       *data    = NULL;
     uint8_t       *back    = NULL;
     bool           armed   = false;

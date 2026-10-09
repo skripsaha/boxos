@@ -80,7 +80,7 @@ bool        AwayLiedLearned(const uint8_t uuid[16]);
 /* The furthest next file id and next tag id memory had reached when a book of
  * the volume `uuid` was given up — 0 for one never given up. Its mounts give
  * out no id below them, for the rest of the boot. */
-void        AwayNumbersKnown(const uint8_t uuid[16], uint32_t* next_file_id,
+void        AwayNumbersKnown(const uint8_t uuid[16], uint64_t* next_file_id,
                              uint32_t* next_tag_id);
 
 #ifdef CONFIG_VOLUME_TESTS

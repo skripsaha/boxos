@@ -11,9 +11,9 @@
 struct ReadAheadWindow {
     uint8_t                *data;          /* `room` blocks, from the heap */
     uint32_t                room;
-    uint32_t                first;         /* the first block held */
+    uint64_t                first;         /* the first block held */
     uint32_t                held;          /* blocks held from `first` on */
-    uint32_t                coming_first;  /* the run on its way in ... */
+    uint64_t                coming_first;  /* the run on its way in ... */
     uint32_t                coming;        /* ... and its blocks; 0 for none */
     uint64_t                gen;           /* moves when a write lands on the run coming; never 0 */
     struct ReadAheadWindow *prev;
@@ -23,7 +23,7 @@ struct ReadAheadWindow {
 static struct ReadAheadWindow *g_windows;
 static TagFSLock               g_windows_lock = TAGFS_LOCK_INIT("readahead", LOCK_RANK_LEAF);
 
-static bool WindowHolds(uint32_t first, uint32_t count, uint32_t block)
+static bool WindowHolds(uint64_t first, uint32_t count, uint64_t block)
 {
     return count > 0 && block >= first && block - first < count;
 }
@@ -58,19 +58,19 @@ static struct ReadAheadWindow *WindowOf(TagFSFileHandle *h)
     return w;
 }
 
-const uint8_t *ReadAheadServe(TagFSFileHandle *h, uint32_t block)
+const uint8_t *ReadAheadServe(TagFSFileHandle *h, uint64_t block)
 {
     struct ReadAheadWindow *w = h->ahead;
     if (!w)
         return NULL;
     TagFSLockTake(&g_windows_lock);
     bool     held  = WindowHolds(w->first, w->held, block);
-    uint32_t index = block - w->first;
+    uint64_t index = block - w->first;
     TagFSLockDrop(&g_windows_lock);
     return held ? w->data + (size_t)index * TAGFS_BLOCK_SIZE : NULL;
 }
 
-uint64_t ReadAheadBegin(TagFSFileHandle *h, uint32_t first, uint32_t *count)
+uint64_t ReadAheadBegin(TagFSFileHandle *h, uint64_t first, uint32_t *count)
 {
     struct ReadAheadWindow *w = WindowOf(h);
     if (!w)
@@ -108,7 +108,7 @@ bool ReadAheadLand(TagFSFileHandle *h, uint64_t gen, uint32_t fetched)
     return kept;
 }
 
-void ReadAheadFetch(TagFSFileHandle *h, uint32_t first, uint32_t count)
+void ReadAheadFetch(TagFSFileHandle *h, uint64_t first, uint32_t count)
 {
     uint64_t gen = ReadAheadBegin(h, first, &count);
     if (gen == 0 || count == 0)
@@ -140,12 +140,12 @@ void ReadAheadLetGo(TagFSFileHandle *h)
 /* The blocks a window holds before the written one are as they were; the
  * written one and those after it are let go of. A fetch on its way over it
  * read the medium before the write landed, and is dropped when it lands. */
-void ReadAheadForgetBlock(uint32_t block)
+void ReadAheadForgetBlock(uint64_t block)
 {
     TagFSLockTake(&g_windows_lock);
     for (struct ReadAheadWindow *w = g_windows; w; w = w->next) {
         if (WindowHolds(w->first, w->held, block))
-            w->held = block - w->first;
+            w->held = (uint32_t)(block - w->first);
         if (WindowHolds(w->coming_first, w->coming, block))
             w->gen++;
     }

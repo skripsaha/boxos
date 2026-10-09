@@ -206,7 +206,7 @@ static bool StandBookTurnSettled(const StandBookTurn* t)
  * cycle settled — the tag dropped, which writes nothing — with an anchor's
  * waiter for it. */
 typedef struct {
-    uint32_t         file_id;
+    uint64_t         file_id;
     uint16_t         tag;
     TagFSFileHandle* holder;
     TagFSFileHandle* waiting;
@@ -419,7 +419,7 @@ static TestResult TestStandMediumIdleTakenUpAfterSpare(void)
 {
     TestResult  verdict = TEST_PASS;
     TagFSState* fs      = tagfs_get_state();
-    uint32_t    file_id = 0;
+    uint64_t    file_id = 0;
     const char* aside   = StandStepsAsideFor();
 
     if (aside)
@@ -611,7 +611,7 @@ static TestResult TestStandMediumNeverLeftIsNoReturn(void)
     TestResult       verdict = TEST_PASS;
     TagFSState*      fs      = tagfs_get_state();
     uint32_t         epoch   = tagfs_mount_epoch();
-    uint32_t         file_id = 0;
+    uint64_t         file_id = 0;
     TagFSFileHandle* handle  = NULL;
     bool             mine    = false;
     const char*      aside   = StandStepsAsideFor();

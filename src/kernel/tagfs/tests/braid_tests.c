@@ -88,7 +88,7 @@ out:
 static TestResult test_braid_writes_and_reads(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   blk     = 0;
+    uint64_t   blk     = 0;
     uint8_t    seat    = tagfs_get_seat();
     uint8_t*   wrote   = g_test_buffer;
     uint8_t*   got     = g_test_output;

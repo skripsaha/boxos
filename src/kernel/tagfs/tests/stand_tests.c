@@ -44,9 +44,9 @@ const char* StandStepsAsideFor(void)
     return NULL;
 }
 
-bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint32_t* out_file_id)
+bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id)
 {
-    uint32_t file_id = 0;
+    uint64_t file_id = 0;
 
     *out_file_id = 0;
     if (tagfs_create_file(name, NULL, 0, &file_id) != 0)
@@ -59,7 +59,7 @@ bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint32_t*
     return true;
 }
 
-bool StandBlockOf(uint32_t file_id, uint32_t k, uint32_t* out_block)
+bool StandBlockOf(uint64_t file_id, uint64_t k, uint64_t* out_block)
 {
     TagFSMetadata meta;
     bool          found = false;
@@ -68,18 +68,18 @@ bool StandBlockOf(uint32_t file_id, uint32_t k, uint32_t* out_block)
     if (tagfs_get_metadata(file_id, &meta) != 0)
         return false;
     for (uint32_t e = 0; e < meta.extent_count && meta.extents; e++) {
-        if (k < meta.extents[e].block_count) {
-            *out_block = meta.extents[e].start_block + k;
+        if (k < meta.extents[e].count) {
+            *out_block = meta.extents[e].start + k;
             found = true;
             break;
         }
-        k -= meta.extents[e].block_count;
+        k -= meta.extents[e].count;
     }
     tagfs_metadata_free(&meta);
     return found;
 }
 
-int StandWriteAt(uint32_t file_id, uint64_t offset, const void* data, uint32_t bytes)
+int StandWriteAt(uint64_t file_id, uint64_t offset, const void* data, uint32_t bytes)
 {
     TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     if (!handle)
@@ -90,7 +90,7 @@ int StandWriteAt(uint32_t file_id, uint64_t offset, const void* data, uint32_t b
     return written;
 }
 
-bool StandBlockInUse(uint32_t block)
+bool StandBlockInUse(uint64_t block)
 {
     return BlockMapIsTaken(block);
 }
@@ -135,9 +135,9 @@ static TestResult TestStandBlockFailReadsTheNth(void)
 {
     TestResult  verdict = TEST_PASS;
     uint8_t     seat    = tagfs_get_seat();
-    uint32_t    file_id = 0;
-    uint32_t    first   = 0;
-    uint32_t    middle  = 0;
+    uint64_t    file_id = 0;
+    uint64_t    first   = 0;
+    uint64_t    middle  = 0;
     bool        armed   = false;
     const char* aside   = StandStepsAsideFor();
 
@@ -198,8 +198,8 @@ static TestResult TestStandBlockFailWriteNeverLands(void)
 {
     TestResult  verdict = TEST_PASS;
     uint8_t     seat    = tagfs_get_seat();
-    uint32_t    file_id = 0;
-    uint32_t    block   = 0;
+    uint64_t    file_id = 0;
+    uint64_t    block   = 0;
     bool        armed   = false;
     const char* aside   = StandStepsAsideFor();
 
@@ -282,8 +282,8 @@ static TestResult TestStandBlockFailAsyncRead(void)
 {
     TestResult  verdict = TEST_PASS;
     uint8_t     seat    = tagfs_get_seat();
-    uint32_t    file_id = 0;
-    uint32_t    block   = 0;
+    uint64_t    file_id = 0;
+    uint64_t    block   = 0;
     void*       dma     = NULL;
     bool        armed   = false;
     bool        issued  = false;
@@ -430,7 +430,7 @@ static TestResult TestStandTagRowRefusesWhatItCannotWiden(void)
     bool            armed   = false;
 
     TEST_ASSERT(idx != NULL, "an index of the test's own");
-    for (uint32_t fid = 7; fid <= 10; fid++)
+    for (uint64_t fid = 7; fid <= 10; fid++)
         TEST_ASSERT_EQ(tag_bitmap_set(idx, 1, fid), 0,
                        "files 7 to 10 fill the first array of the tag's window");
 
@@ -445,7 +445,7 @@ static TestResult TestStandTagRowRefusesWhatItCannotWiden(void)
     TEST_ASSERT_EQ(set, -1, "a row that could not widen refuses the set instead of "
                             "writing past its end");
     TEST_ASSERT(!TagBitmapHas(idx, 1, 11), "and the file it refused is not the tag's");
-    for (uint32_t fid = 7; fid <= 10; fid++)
+    for (uint64_t fid = 7; fid <= 10; fid++)
         TEST_ASSERT(TagBitmapHas(idx, 1, fid), "every member before it still is");
 out:
     if (armed)

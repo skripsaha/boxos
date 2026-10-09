@@ -89,8 +89,8 @@ static uint64_t StandChainTaken(const UseChain* chain)
 {
     uint64_t taken = 0;
     for (uint32_t r = 0; r < chain->run_count; r++)
-        for (uint32_t k = 0; k < chain->runs[r].block_count; k++)
-            taken += BlockMapIsTaken(chain->runs[r].start_block + k);
+        for (uint32_t k = 0; k < chain->runs[r].count; k++)
+            taken += BlockMapIsTaken(chain->runs[r].start + k);
     return taken;
 }
 
@@ -98,17 +98,17 @@ static uint64_t StandChainBlocks(const UseChain* chain)
 {
     uint64_t blocks = 0;
     for (uint32_t r = 0; r < chain->run_count; r++)
-        blocks += chain->runs[r].block_count;
+        blocks += chain->runs[r].count;
     return blocks;
 }
 
 /* Whether the medium's own map calls `block` taken: read off the medium. */
-static bool StandChainTakenOnMedium(uint32_t block, bool* taken)
+static bool StandChainTakenOnMedium(uint64_t block, bool* taken)
 {
     TagFSState* fs   = tagfs_get_state();
     uint64_t    vlba = (uint64_t)fs->layout.block_bitmap_block * TAGFS_BLOCK_SECTORS +
                        block / BLOCK_MAP_WINDOW_BLOCKS;
-    uint32_t    bit  = block % BLOCK_MAP_WINDOW_BLOCKS;
+    uint32_t    bit  = (uint32_t)(block % BLOCK_MAP_WINDOW_BLOCKS);
     if (tagfs_volume_read(vlba, 1, g_test_output) != 0)
         return false;
     *taken = (g_test_output[bit / 8u] >> (bit % 8u)) & 1u;
@@ -121,9 +121,9 @@ static bool StandChainTakenOnMediumCount(const UseChain* chain, uint64_t* taken)
 {
     *taken = 0;
     for (uint32_t r = 0; r < chain->run_count; r++)
-        for (uint32_t k = 0; k < chain->runs[r].block_count; k++) {
+        for (uint32_t k = 0; k < chain->runs[r].count; k++) {
             bool on = false;
-            if (!StandChainTakenOnMedium(chain->runs[r].start_block + k, &on))
+            if (!StandChainTakenOnMedium(chain->runs[r].start + k, &on))
                 return false;
             *taken += on;
         }
@@ -343,7 +343,7 @@ static void StandChainJudge(UseMemoryVerdict* v)
     UseMemoryJudge(rec, newest < 0 ? 0u : (uint32_t)newest, none, v);
 }
 
-static int StandChainBlockIo(uint32_t block, void* buf, bool write)
+static int StandChainBlockIo(uint64_t block, void* buf, bool write)
 {
     uint64_t vlba = ((uint64_t)tagfs_get_state()->layout.data_block + block) * TAGFS_BLOCK_SECTORS;
     return write ? tagfs_volume_write(vlba, TAGFS_BLOCK_SECTORS, buf)
@@ -367,7 +367,7 @@ static TestResult TestStandUseChainRotRollsBack(void)
     UseChain         chain;
     UseMemoryVerdict v;
     bool             changed = false, kept = false, broken = false;
-    uint32_t         link0 = 0, link1 = 0;
+    uint64_t         link0 = 0, link1 = 0;
     uint8_t*         saved = g_test_buffer;
     uint8_t*         work  = g_test_buffer + TAGFS_BLOCK_SIZE;
     uint8_t*         saved0 = g_test_buffer + 2u * TAGFS_BLOCK_SIZE;
@@ -383,8 +383,8 @@ static TestResult TestStandUseChainRotRollsBack(void)
     TEST_ASSERT(kept && StandChainNewest(&chain), "and remembered in a chain of its own");
     TEST_ASSERT(StandChainBlocks(&chain) == 2, "two links");
 
-    link0 = chain.runs[0].start_block;
-    link1 = chain.runs[0].block_count > 1 ? link0 + 1u : chain.runs[1].start_block;
+    link0 = chain.runs[0].start;
+    link1 = chain.runs[0].count > 1 ? link0 + 1u : chain.runs[1].start;
     TEST_ASSERT(StandChainBlockIo(link1, saved, false) == 0, "the second link reads");
     TEST_ASSERT(StandChainBlockIo(link0, saved0, false) == 0, "the first link reads");
 

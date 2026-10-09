@@ -16,8 +16,8 @@
 
 /* Kept off the stack: two answers of 256 file ids and a tag's text would make
  * a 2.7 KiB frame, and the stack guard refuses anything over 1 KiB. */
-static uint32_t    s_inside[256];
-static uint32_t    s_everywhere[256];
+static uint64_t    s_inside[256];
+static uint64_t    s_everywhere[256];
 static char        s_tag_text[512];
 static TagSpelling s_spelled[8];
 
@@ -133,7 +133,7 @@ static TestResult test_use_context_walls(void)
     UseList*   now     = NULL;
     cabin_t*   cabin   = NULL;
     process_t* proc    = NULL;
-    uint32_t   ids[8];
+    uint64_t   ids[8];
     TagFSPage  page;
 
     TEST_ASSERT_OK(UseContextSet(said, sizeof(said) - 1),
@@ -169,7 +169,7 @@ static TestResult test_use_context_narrows(void)
     cabin_t*      cabin     = NULL;
     process_t*    proc      = NULL;
     bool          have_meta = false;
-    uint32_t      first[1];
+    uint64_t      first[1];
     TagFSPage     page;
     TagFSMetadata meta;
 

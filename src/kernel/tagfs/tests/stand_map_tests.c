@@ -41,15 +41,15 @@ static void StandMapOwn(uint32_t first, uint32_t count, bool owned)
  * and otherwise kept in `far` to be given back — a take the test did not
  * expect outside the region is still the test's to return. */
 typedef struct {
-    uint32_t at[4];
+    uint64_t at[4];
     uint32_t n[4];
     uint32_t count;
 } StandMapFar;
 
-static void StandMapTook(uint32_t region, uint32_t start, uint32_t got, StandMapFar* far)
+static void StandMapTook(uint64_t region, uint64_t start, uint32_t got, StandMapFar* far)
 {
     if (start >= region && start + got <= region + STAND_MAP_REGION) {
-        StandMapOwn(start - region, got, true);
+        StandMapOwn((uint32_t)(start - region), got, true);
     } else if (far->count < 4) {
         far->at[far->count] = start;
         far->n[far->count]  = got;
@@ -58,7 +58,7 @@ static void StandMapTook(uint32_t region, uint32_t start, uint32_t got, StandMap
 }
 
 /* Every run of the region the test still holds, given back. */
-static void StandMapGiveOwned(uint32_t region)
+static void StandMapGiveOwned(uint64_t region)
 {
     for (uint32_t b = 0; b < STAND_MAP_REGION; ) {
         if (!(s_owned[b / 8] & (1u << (b % 8)))) {
@@ -88,7 +88,8 @@ static void StandMapGiveOwned(uint32_t region)
 static TestResult TestStandMapTakeRunNearestLongest(void)
 {
     TestResult  verdict = TEST_PASS;
-    uint32_t    region  = 0, start = 0, got = 0;
+    uint64_t    region  = 0, start = 0;
+    uint32_t    got     = 0;
     StandMapFar far     = { .count = 0 };
     const char* aside   = StandStepsAsideFor();
 
@@ -142,7 +143,7 @@ static TestResult TestStandMapGiveBackTwiceRefused(void)
 {
     TestResult  verdict = TEST_PASS;
     TagFSState* fs      = tagfs_get_state();
-    uint32_t    run     = 0;
+    uint64_t    run     = 0;
     bool        held    = false;
     const char* aside   = StandStepsAsideFor();
 
@@ -183,7 +184,7 @@ out:
 
 /* Every run of the volume taken, longest first, into a growing list. */
 typedef struct {
-    uint32_t* at;
+    uint64_t* at;
     uint32_t* n;
     uint32_t  count;
     uint32_t  cap;
@@ -191,13 +192,14 @@ typedef struct {
 
 static bool StandMapTakeEverything(StandMapRuns* runs)
 {
-    uint32_t start = 0, got = 0;
+    uint64_t start = 0;
+    uint32_t got   = 0;
     uint32_t all   = tagfs_get_state()->layout.data_blocks;
 
     while (TagFSTakeRun(all, 0, &start, &got) == OK) {
         if (runs->count == runs->cap) {
             uint32_t  cap = runs->cap ? runs->cap * 2 : 64;
-            uint32_t* at  = kmalloc(sizeof(uint32_t) * cap);
+            uint64_t* at  = kmalloc(sizeof(uint64_t) * cap);
             uint32_t* n   = kmalloc(sizeof(uint32_t) * cap);
             if (!at || !n) {
                 kfree(at);
@@ -206,7 +208,7 @@ static bool StandMapTakeEverything(StandMapRuns* runs)
                 return false;
             }
             if (runs->count) {
-                memcpy(at, runs->at, sizeof(uint32_t) * runs->count);
+                memcpy(at, runs->at, sizeof(uint64_t) * runs->count);
                 memcpy(n, runs->n, sizeof(uint32_t) * runs->count);
             }
             kfree(runs->at);
@@ -234,8 +236,8 @@ static TestResult TestStandMapAllotmentTakenBack(void)
 {
     TestResult   verdict = TEST_PASS;
     StandMapRuns runs    = { 0 };
-    uint32_t     own_at  = 0, own_n = 0, kept_at = 0, kept_n = 0;
-    uint32_t     other   = 0, other_n = 0;
+    uint64_t     own_at  = 0, kept_at = 0, other = 0;
+    uint32_t     own_n   = 0, kept_n = 0, other_n = 0;
     uint32_t     freed   = 0;
     const char*  aside   = StandStepsAsideFor();
 
@@ -297,12 +299,12 @@ static HelmWaiter s_map_helm;
 static TestResult TestStandMapWriteInFlightLeftFree(void)
 {
     TestResult       verdict = TEST_PASS;
-    uint32_t         file_id = 0;
+    uint64_t         file_id = 0;
     TagFSFileHandle *handle  = NULL;
     bool             holding = false;
     bool             loaded  = false;
     bool             taken   = false;
-    uint32_t         block   = 0;
+    uint64_t         block   = 0;
     uint64_t         at      = 0;
     Plot             plot;
     const uint32_t   B       = TAGFS_BLOCK_SIZE;
@@ -404,8 +406,8 @@ static TestResult TestStandMapGivesAwayAreRoomOnItsWay(void)
     TestResult   verdict = TEST_PASS;
     TagFSState*  fs      = tagfs_get_state();
     StandMapRuns runs    = { 0 };
-    uint32_t     block   = 0;
-    uint32_t     other   = 0;
+    uint64_t     block   = 0;
+    uint64_t     other   = 0;
     bool         given   = false;
     bool         took    = false;
     bool         taken   = true;
@@ -472,9 +474,10 @@ static TestResult TestStandMapFallowKeepsWhatTheMapCannotWrite(void)
 {
     TestResult  verdict = TEST_PASS;
     TagFSState* fs      = tagfs_get_state();
-    FileExtent* runs    = NULL;
+    Strip*      runs    = NULL;
     FallowNode* node    = NULL;
-    uint32_t    start   = 0, got = 0, still = 0;
+    uint64_t    start   = 0;
+    uint32_t    got     = 0, still = 0;
     bool        held    = false;
     bool        resting = false;
     bool        fired   = false;
@@ -489,12 +492,10 @@ static TestResult TestStandMapFallowKeepsWhatTheMapCannotWrite(void)
     TEST_ASSERT_EQ(got, STAND_MAP_ROOM_RUNS, "as long as asked");
     TEST_ASSERT_OK(TagFSSettleAsCadence(), "a cycle writes the take");
 
-    runs = kmalloc(sizeof(FileExtent) * STAND_MAP_ROOM_RUNS);
+    runs = kmalloc(sizeof(Strip) * STAND_MAP_ROOM_RUNS);
     TEST_ASSERT(runs, "room for the node's runs");
-    for (uint32_t i = 0; i < STAND_MAP_ROOM_RUNS; i++) {
-        runs[i].start_block = start + i;
-        runs[i].block_count = 1;
-    }
+    for (uint32_t i = 0; i < STAND_MAP_ROOM_RUNS; i++)
+        runs[i] = (Strip){ .start = start + i, .count = 1, .kind = STRIP_DATA };
     node = FallowNodeMake(runs, STAND_MAP_ROOM_RUNS, FALLOW_BY_LEDGER, 0);
     TEST_ASSERT(node, "a node of one-block runs");
 
@@ -562,7 +563,7 @@ static TestResult StandMapPlanApart(uint32_t windows, BlockMapApartShape shape, 
                                     BlockMapApartPlan* plan)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   want    = PLOT_RUN_MOST;
+    uint32_t   want    = BLOCK_MAP_TAKE_MOST;
 
     TEST_ASSERT(BlockMapStandPlanApart(windows, shape, best_fit, want, plan),
                 "a volume of that many windows is laid out in memory");
@@ -588,7 +589,7 @@ out:
 }
 
 /*
- * A take of one extent's width planned on a volume of 64 GiB and of 1 TiB,
+ * The longest take there is planned on a volume of 64 GiB and of 1 TiB,
  * each scattered with short runs and whole windows only at its end, and each
  * cut into runs of fifteen whole windows — by the best fit an Allotment asks
  * and by the near rule. Every hold of the lock the plan takes stays within
@@ -630,9 +631,10 @@ static TestResult TestStandMapEditCostsItsWindow(void)
 {
     TestResult  verdict = TEST_PASS;
     TagFSState* fs      = tagfs_get_state();
-    uint32_t    run     = 0, other = 0, given = 0;
+    uint64_t    run     = 0, other = 0;
+    uint32_t    given   = 0;
     bool        took    = false, took_other = false;
-    uint32_t    windows = (fs->layout.data_blocks + BLOCK_MAP_WINDOW_BLOCKS - 1u) /
+    uint64_t    windows = ((uint64_t)fs->layout.data_blocks + BLOCK_MAP_WINDOW_BLOCKS - 1u) /
                           BLOCK_MAP_WINDOW_BLOCKS;
     const char* aside   = StandStepsAsideFor();
 
@@ -698,7 +700,7 @@ out:
 static TestResult TestStandMapFlushMeetsAWriteOnItsWay(void)
 {
     TestResult  verdict = TEST_PASS;
-    uint32_t    block   = 0;
+    uint64_t    block   = 0;
     bool        took    = false;
     error_t     said    = OK;
     const char* aside   = StandStepsAsideFor();

@@ -62,7 +62,7 @@ typedef enum {
 /* What a caller asks of a job. */
 typedef struct {
     WriteJobKind kind;
-    uint32_t     file_id;
+    uint64_t     file_id;
     PlotSource   source;        /* WRITE: the bytes, their pages brought in (PlotSourceBringIn) */
     uint64_t     offset;        /* WRITE: where the write begins ... */
     bool         append;        /* ... or at the file's size */
@@ -105,7 +105,7 @@ typedef struct WriteJob {
     bool              deferred;          /* the caller is parked: the answer is pushed */
     process_t        *target;            /* pinned for the job's life; NULL for a kernel caller */
     const struct OpContext *ctx;         /* the caller's call, while the job runs inside it */
-    uint32_t          file_id;
+    uint64_t          file_id;
     TagFSFileHandle  *handle;
     Crate            *out_crate;
 

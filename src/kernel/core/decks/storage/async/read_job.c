@@ -43,7 +43,7 @@ typedef struct ReadJob {
     uint64_t         start;           /* the file offset it reads from */
     uint64_t         total;           /* the bytes it reads: the sink's room, or up to the size */
     uint64_t         landed;          /* bytes that reached the sink */
-    uint32_t         block;           /* the run on its way in: its first block ... */
+    uint64_t         block;           /* the run on its way in: its first block ... */
     uint32_t         count;           /* ... its blocks ... */
     uint32_t         head;            /* ... and where the read begins in the first */
     volatile error_t status;          /* the seat's answer, stashed where it came */
@@ -64,7 +64,7 @@ typedef struct ReadJob {
     uint16_t         crate_count;
     uint64_t         waybill;
     uint32_t         submit_cookie;
-    uint32_t         file_id;
+    uint64_t         file_id;
 #ifdef CONFIG_VOLUME_TESTS
     ReadJobStandAnswer *stand;
 #endif
@@ -84,7 +84,7 @@ static void rjob_answer(ReadJob *j, error_t rc)
 {
     rc = ChitAnswer(rc, j->target ? j->target->pid : 0, j->submit_cookie, "storage.read");
     if (rc != OK)
-        kprintf("[Storage] read of file %u from byte %llu answered %u — %llu of %llu bytes "
+        kprintf("[Storage] read of file %llu from byte %llu answered %u — %llu of %llu bytes "
                 "had landed\n", j->file_id, (unsigned long long)j->start, (unsigned)rc,
                 (unsigned long long)j->landed, (unsigned long long)j->total);
 

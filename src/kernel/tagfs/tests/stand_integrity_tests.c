@@ -26,7 +26,7 @@
 #define STAND_MAP_PAGES       17u     /* one page more than the map keeps in memory */
 #define STAND_STALE_BYTES     64u     /* an overwrite that leaves a dead record behind */
 
-static uint32_t StandIntegrityPageOf(uint32_t block)
+static uint64_t StandIntegrityPageOf(uint64_t block)
 {
     return block / STAND_MAP_PAGE_BLOCKS;
 }
@@ -46,7 +46,7 @@ static TestResult TestStandIntegrityLayPagesTakeNoDigest(void)
     TestResult  verdict = TEST_PASS;
     uint32_t    span    = (STAND_MAP_PAGES - 1u) * STAND_MAP_PAGE_BLOCKS + 1u;
     uint32_t    run     = tagfs_get_state()->layout.data_blocks;
-    uint32_t    first   = 0;
+    uint64_t    first   = 0;
     bool        laying  = false;
     bool        taken   = false;
     error_t     wrote   = OK;
@@ -144,8 +144,8 @@ static bool StandIntegrityChainHolds(uint32_t block, uint32_t* chain, uint32_t* 
 static TestResult TestStandIntegrityPoolBlockReadsPastAStaleDigest(void)
 {
     TestResult  verdict = TEST_PASS;
-    uint32_t    cold    = 0;
-    uint32_t    writer  = 0;
+    uint64_t    cold    = 0;
+    uint64_t    writer  = 0;
     uint32_t    rounds  = 0;
     PoolFront   front;
     const char* aside   = StandStepsAsideFor();

@@ -257,20 +257,21 @@ static bool StandHighTag(char* text, size_t text_size, uint16_t* out_id)
 
 /* Whether a query of `count` spellings lists `file_id`: its page from that id
  * on begins with it. */
-static bool StandListed(const TagSpelling* tags, uint32_t count, uint32_t file_id)
+static bool StandListed(const TagSpelling* tags, uint32_t count, uint64_t file_id)
 {
     TagFSPage page;
-    uint32_t  first = 0;
+    uint64_t  first = 0;
     return TagFSQueryPage(tags, count, file_id, &first, 1, false, &page) == OK &&
            page.delivered == 1 && first == file_id;
 }
 
 /* The flags storage.getinfo gives a file, 0 when it would not answer. */
-static uint32_t StandInfoFlags(uint32_t file_id)
+static uint32_t StandInfoFlags(uint64_t file_id)
 {
     uint64_t said  = 0;
     uint32_t flags = 0;
-    if (StandStorageOp(STORAGE_OBJ_GET_INFO, &file_id, sizeof(file_id), NULL, 0,
+    uint32_t id    = (uint32_t)file_id;   /* a program's file_id_t: the stand's ids are v1's */
+    if (StandStorageOp(STORAGE_OBJ_GET_INFO, &id, sizeof(id), NULL, 0,
                        s_info, sizeof(s_info), &said) != OK || said < 8)
         return 0;
     memcpy(&flags, s_info + 4, sizeof(flags));
@@ -288,7 +289,7 @@ static TestResult TestStandWellKnownPastTag63(void)
     WellKnownTags* wk       = tagfs_get_well_known_tags();
     WellKnownTags  saved    = *wk;
     bool           swapped  = false;
-    uint32_t       files[2] = { 0, 0 };
+    uint64_t       files[2] = { 0, 0 };
     uint16_t       ids[2]   = { TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID };
     static const char* const names[2] = { "stand_well_t", "stand_well_h" };
 
@@ -337,7 +338,7 @@ static TestResult TestStandCreateRefusesWhatItCannotTag(void)
 {
     TestResult  verdict = TEST_PASS;
     VolumeTally before, after;
-    uint32_t    file_id = 0;
+    uint64_t    file_id = 0;
     uint64_t    said    = 0;
 
     TEST_ASSERT(VolumeTallyTake(&before), "the volume's files are counted");
@@ -375,12 +376,13 @@ out:
  * value, each at its own length. The record is [u32 id][u32 flags][u64 size]
  * [u16 tags][u16 name_len][name], then per tag [u16 key_len][u16 val_len]
  * [u8 type][key][val]. */
-static bool StandInfoHasWhole(uint32_t file_id, const char* text)
+static bool StandInfoHasWhole(uint64_t file_id, const char* text)
 {
     TagSpelling tag;
     uint64_t    said = 0;
+    uint32_t    id   = (uint32_t)file_id;   /* a program's file_id_t: the stand's ids are v1's */
     if (TagSpell(text, strlen(text), &tag) != OK ||
-        StandStorageOp(STORAGE_OBJ_GET_INFO, &file_id, sizeof(file_id), NULL, 0,
+        StandStorageOp(STORAGE_OBJ_GET_INFO, &id, sizeof(id), NULL, 0,
                        s_info, sizeof(s_info), &said) != OK || said < 20)
         return false;
 
@@ -407,13 +409,13 @@ static bool StandInfoHasWhole(uint32_t file_id, const char* text)
 static TestResult TestStandTagSetWearsWhatItWasGiven(void)
 {
     TestResult verdict = TEST_PASS;
-    uint32_t   file_id = 0;
+    uint64_t   file_id = 0;
     uint64_t   said    = 0;
     TagSpelling spelled;
 
     TEST_ASSERT(StandMakeFile("stand_spell_s", NULL, 0, &file_id), "a file of the test's own");
     size_t   len  = StandTagText("stand_spell", 's', STAND_SET_VALUE);
-    uint32_t fid  = file_id;
+    uint32_t fid  = (uint32_t)file_id;   /* a program's file_id_t */
     int      set  = StandStorageOp(STORAGE_TAG_SET, &fid, sizeof(fid), s_text, len, NULL, 0, &said);
     uint16_t want = tagfs_tag_lookup(s_text);
     bool     worn = want != TAGFS_INVALID_TAG_ID && tagfs_has_tag(file_id, want);

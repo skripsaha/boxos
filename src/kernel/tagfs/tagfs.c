@@ -340,7 +340,7 @@ static bool handle_belongs_here(const TagFSFileHandle *handle, const char *what)
     if (!handle) {
         return false;               /* not a stale handle — no handle at all */
     }
-    kprintf("[TagFS] %s refused: file %u was opened on an earlier mounting of "
+    kprintf("[TagFS] %s refused: file %llu was opened on an earlier mounting of "
             "this volume, and the volume has been read again since\n",
             what, handle ? handle->file_id : 0);
     return false;
@@ -2032,7 +2032,7 @@ void TagFSAttendArrival(void)
     attending_done();
 }
 
-void tagfs_readahead_invalidate(uint32_t block)
+void tagfs_readahead_invalidate(uint64_t block)
 {
     ReadAheadForgetBlock(block);
 }
@@ -2048,7 +2048,7 @@ void tagfs_readahead_invalidate(uint32_t block)
  * a run's (run/run.c), the storage ops nobody stands over, and Braid, which
  * addresses other media that have no ground of their own.
  */
-uint64_t tagfs_block_to_sector(uint32_t block)
+uint64_t tagfs_block_to_sector(uint64_t block)
 {
     return g_volume_base + ((uint64_t)g_state.layout.data_block + block) * TAGFS_BLOCK_SECTORS;
 }
@@ -2088,7 +2088,7 @@ uint64_t tagfs_block_to_sector(uint32_t block)
  * mount's latches nothing — no volume is up to hold a book for — and is a
  * read the medium refused, which is what it is to the mount that met it.
  */
-error_t TagFSMetaBlockRead(uint32_t block, void *buffer)
+error_t TagFSMetaBlockRead(uint64_t block, void *buffer)
 {
     if (!buffer)
         return ERR_NULL_POINTER;
@@ -2113,7 +2113,7 @@ error_t TagFSMetaBlockRead(uint32_t block, void *buffer)
     return OK;
 }
 
-error_t TagFSMetaBlockWrite(uint32_t block, const void *buffer)
+error_t TagFSMetaBlockWrite(uint64_t block, const void *buffer)
 {
     if (!buffer)
         return ERR_NULL_POINTER;
@@ -2130,7 +2130,7 @@ error_t TagFSMetaBlockWrite(uint32_t block, const void *buffer)
     return OK;
 }
 
-error_t tagfs_read_block(uint32_t block, void *buffer)
+error_t tagfs_read_block(uint64_t block, void *buffer)
 {
     error_t got = TagFSMetaBlockRead(block, buffer);
     if (got != OK)
@@ -2138,7 +2138,7 @@ error_t tagfs_read_block(uint32_t block, void *buffer)
     return IntegrityVerify(block, buffer) ? OK : ERR_CHECKSUM;
 }
 
-error_t tagfs_write_block(uint32_t block, const void *buffer)
+error_t tagfs_write_block(uint64_t block, const void *buffer)
 {
     error_t wrote = TagFSMetaBlockWrite(block, buffer);
     if (wrote != OK)
@@ -2848,7 +2848,7 @@ void TagFSServiceIfPending(void)
 // The next file id — the questions of which files there are live in query/
 // ----------------------------------------------------------------------------
 
-uint32_t tagfs_file_ceiling(void)
+uint64_t tagfs_file_ceiling(void)
 {
     if (!tagfs_enter())
         return 0;
@@ -2856,7 +2856,7 @@ uint32_t tagfs_file_ceiling(void)
      * read can see the value from before a create that has already returned
      * to its caller. */
     TagFSLockTake(&g_state.lock);
-    uint32_t ceiling = g_state.ledger.next_file_id;
+    uint64_t ceiling = g_state.ledger.next_file_id;
     TagFSLockDrop(&g_state.lock);
     tagfs_leave();
     return ceiling;
@@ -2866,9 +2866,9 @@ uint32_t tagfs_file_ceiling(void)
 // File I/O (open / close / read / write)
 // ----------------------------------------------------------------------------
 
-static TagFSFileHandle *tagfs_open_inside(uint32_t file_id, uint32_t flags);
+static TagFSFileHandle *tagfs_open_inside(uint64_t file_id, uint32_t flags);
 
-TagFSFileHandle *tagfs_open(uint32_t file_id, uint32_t flags)
+TagFSFileHandle *tagfs_open(uint64_t file_id, uint32_t flags)
 {
     if (!tagfs_enter())
         return NULL;
@@ -2877,12 +2877,12 @@ TagFSFileHandle *tagfs_open(uint32_t file_id, uint32_t flags)
     return rc;
 }
 
-static TagFSFileHandle *tagfs_open_inside(uint32_t file_id, uint32_t flags)
+static TagFSFileHandle *tagfs_open_inside(uint64_t file_id, uint32_t flags)
 {
     uint32_t meta_block, meta_offset;
     if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
     {
-        debug_printf("[TagFS] open: file_id=%u not found\n", file_id);
+        debug_printf("[TagFS] open: file_id=%llu not found\n", file_id);
         return NULL;
     }
 
@@ -2922,11 +2922,11 @@ static TagFSFileHandle *tagfs_open_inside(uint32_t file_id, uint32_t flags)
     bool        held  = rec != NULL;
     if (held && reads && rec->extent_count > 0)
     {
-        handle->extents = kmalloc(sizeof(FileExtent) * rec->extent_count);
+        handle->extents = kmalloc(sizeof(Strip) * rec->extent_count);
         held = handle->extents != NULL;
         if (held)
         {
-            memcpy(handle->extents, rec->extents, sizeof(FileExtent) * rec->extent_count);
+            memcpy(handle->extents, rec->extents, sizeof(Strip) * rec->extent_count);
             handle->extent_count = rec->extent_count;
         }
     }
@@ -3002,7 +3002,7 @@ error_t tagfs_write(TagFSFileHandle *handle, const PlotSource *src, uint64_t *ou
     return rc;
 }
 
-error_t tagfs_span_file(uint32_t file_id, uint64_t size)
+error_t tagfs_span_file(uint64_t file_id, uint64_t size)
 {
     if (file_id == 0)
         return ERR_INVALID_ARGUMENT;
@@ -3030,9 +3030,9 @@ error_t tagfs_span_file(uint32_t file_id, uint64_t size)
 // Block allocator — the doors into the block map (block_map/)
 // ----------------------------------------------------------------------------
 
-static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block);
+static int tagfs_alloc_blocks_inside(uint32_t count, uint64_t *out_start_block);
 
-int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
+int tagfs_alloc_blocks(uint32_t count, uint64_t *out_start_block)
 {
     if (!tagfs_enter())
         return -1;
@@ -3047,7 +3047,7 @@ int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
  * Settle cycle's S1 writes its sector, which comes before the name that cycle
  * carries. A crash between the two leaves a block nobody claims, never a block
  * two owners claim (block_map.h, MapOwed). */
-static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block)
+static int tagfs_alloc_blocks_inside(uint32_t count, uint64_t *out_start_block)
 {
     if (count == 0 || !out_start_block)
         return -1;
@@ -3055,9 +3055,9 @@ static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block)
 }
 
 // Public version - acquires g_state.lock
-static int tagfs_free_blocks_inside(uint32_t start_block, uint32_t count);
+static int tagfs_free_blocks_inside(uint64_t start_block, uint32_t count);
 
-int tagfs_free_blocks(uint32_t start_block, uint32_t count)
+int tagfs_free_blocks(uint64_t start_block, uint32_t count)
 {
     if (!tagfs_enter())
         return -1;
@@ -3069,7 +3069,7 @@ int tagfs_free_blocks(uint32_t start_block, uint32_t count)
 /* The sectors of the run are brought in first, with no lock held, so the give
  * under the lock is judged at once and its caller hears the answer; the edits
  * the lock made without a sector are laid on before this returns. */
-static int tagfs_free_blocks_inside(uint32_t start_block, uint32_t count)
+static int tagfs_free_blocks_inside(uint64_t start_block, uint32_t count)
 {
     if (count == 0)
         return 0;
@@ -3086,9 +3086,9 @@ static int tagfs_free_blocks_inside(uint32_t start_block, uint32_t count)
 // Helpers
 // ----------------------------------------------------------------------------
 
-static int tagfs_get_metadata_inside(uint32_t file_id, TagFSMetadata *out);
+static int tagfs_get_metadata_inside(uint64_t file_id, TagFSMetadata *out);
 
-int tagfs_get_metadata(uint32_t file_id, TagFSMetadata *out)
+int tagfs_get_metadata(uint64_t file_id, TagFSMetadata *out)
 {
     if (!tagfs_enter())
         return -1;
@@ -3100,7 +3100,7 @@ int tagfs_get_metadata(uint32_t file_id, TagFSMetadata *out)
 /* The file's record, out of the map of live files — the authority every read
  * stands on, holding every live file's newest record, so no road leads to the
  * medium. -1 for a file the map does not hold, or no memory for the copy. */
-static int tagfs_get_metadata_inside(uint32_t file_id, TagFSMetadata *out)
+static int tagfs_get_metadata_inside(uint64_t file_id, TagFSMetadata *out)
 {
     if (!out)
         return -1;
@@ -3269,7 +3269,7 @@ char *TagFSKeyList(const uint16_t *tag_ids, uint32_t count)
 // Defrag
 // ----------------------------------------------------------------------------
 
-error_t tagfs_defrag_file(uint32_t file_id)
+error_t tagfs_defrag_file(uint64_t file_id)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;

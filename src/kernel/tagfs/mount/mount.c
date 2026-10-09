@@ -98,7 +98,7 @@ typedef struct {
     uint32_t unsettled;      /* sealed: a row of an id the stood Ledger had not issued, no record */
     uint32_t lost;           /* a row with no record that reads: no seal, or a file that settled */
     uint32_t unnamed;        /* no seal: a record no row names */
-    uint32_t top_fid;
+    uint64_t top_fid;
 } MountFileCount;
 
 /*
@@ -117,7 +117,7 @@ typedef struct {
  * name ids the Ledger had not issued yet. A row naming the rolled-back open
  * block short of the bytes the seal said it held is said as such.
  */
-static bool MountRowLost(uint32_t fid, uint32_t mb, uint32_t mo, const MountFileCount* n)
+static bool MountRowLost(uint64_t fid, uint32_t mb, uint32_t mo, const MountFileCount* n)
 {
     bool rolled = n->torn && mb == n->torn_block && mo < n->torn_end;
     bool issued = n->issued_below == 0 || fid < n->issued_below;
@@ -125,7 +125,7 @@ static bool MountRowLost(uint32_t fid, uint32_t mb, uint32_t mo, const MountFile
         return false;
     /* Said with kprintf, so it survives into a shipped build: this line was
      * the silence that turned a lost file into a mystery. */
-    kprintf("[TagFS FSCK] file %u is named at block %u+%u and this volume's pool holds no "
+    kprintf("[TagFS FSCK] file %llu is named at block %u+%u and this volume's pool holds no "
             "record of it that reads%s — the file is gone and its name goes with it\n",
             fid, mb, mo, rolled ? ", its only one settled in the open block the mount "
             "rolled back" : n->sealed ? ", though the seal it stands on had settled it" : "");
@@ -142,7 +142,7 @@ static bool MountRowLost(uint32_t fid, uint32_t mb, uint32_t mo, const MountFile
  * one of the file the walk reached. A row naming somewhere else is corrected
  * to it, in memory now and on the medium by the next cycle.
  */
-static error_t MountFile(uint32_t fid, MountFileCount* n)
+static error_t MountFile(uint64_t fid, MountFileCount* n)
 {
     TagFSState* fs = tagfs_get_state();
     RecordWhere where;
@@ -178,14 +178,14 @@ static error_t MountFile(uint32_t fid, MountFileCount* n)
             n->derived++;
     }
     for (uint32_t e = 0; e < rec->extent_count; e++)
-        GroundClaim(GROUND_FILE, rec->extents[e].start_block, rec->extents[e].block_count, fid);
+        GroundClaim(GROUND_FILE, rec->extents[e].start, rec->extents[e].count, fid);
 
     /* A file its tags do not find is a file lost to every query until the
      * next mount, and a trashed one shows as live: the mount refuses whole,
      * as the registry's and the pool's do when memory runs out. */
     for (uint32_t t = 0; t < rec->tag_count; t++) {
         if (tag_bitmap_set(fs->bitmap_index, rec->tags[t], fid) != 0) {
-            kprintf("[TagFS] there is no memory to put file %u under tag %u in the tag index — "
+            kprintf("[TagFS] there is no memory to put file %llu under tag %u in the tag index — "
                     "%u of this volume's files were indexed before it, and a file its tags do "
                     "not find is lost to every query, so the volume is not mounted\n",
                     fid, rec->tags[t], n->checked);
@@ -203,8 +203,8 @@ static error_t MountFile(uint32_t fid, MountFileCount* n)
 static error_t MountWalkFiles(MountFileCount* n)
 {
     TagFSState* fs = tagfs_get_state();
-    uint32_t    batch[64];
-    uint32_t    from = 1;
+    uint64_t    batch[64];
+    uint64_t    from = 1;
     uint32_t    got;
     while ((got = FileMapFiles(fs->files, from, batch, ARRAY_SIZE(batch))) > 0) {
         for (uint32_t i = 0; i < got; i++) {
@@ -212,7 +212,7 @@ static error_t MountWalkFiles(MountFileCount* n)
             if (rc != OK)
                 return rc;
         }
-        if (batch[got - 1] == 0xFFFFFFFFu)
+        if (batch[got - 1] == UINT64_MAX)
             break;
         from = batch[got - 1] + 1;
     }
@@ -280,9 +280,10 @@ static void MountQuitclaimedRows(const PoolMountOutcome* pool)
  * again — its row written over the other's (nextfid). So the boundary is the
  * highest id of every row, of every record the walk met — past the seal too,
  * a cycle that did not settle — and the Ledger's own count, whichever is
- * furthest. An id past 0xFFFFFFFE is every id issued (LedgerIssueFileId).
+ * furthest. An id past 0xFFFFFFFE is every id issued (LedgerIssueFileId): the
+ * counter is format v1's, a u32, whatever width memory holds the ids in.
  */
-uint32_t MountNextFileId(uint32_t ledger_next, uint32_t top_row, uint32_t top_record)
+uint32_t MountNextFileId(uint32_t ledger_next, uint64_t top_row, uint64_t top_record)
 {
     uint64_t top  = top_row > top_record ? top_row : top_record;
     uint64_t next = top + 1u;
@@ -296,22 +297,24 @@ uint32_t MountNextFileId(uint32_t ledger_next, uint32_t top_row, uint32_t top_re
  * given up (away.h): the programs that hold them live on, and the medium never
  * saw them. A count an earlier kernel let wrap stays the medium's.
  */
-static void MountFidBoundary(uint32_t top_row, uint32_t top_record, uint32_t known)
+static void MountFidBoundary(uint64_t top_row, uint64_t top_record, uint64_t known)
 {
     VolumeLedger* led  = &tagfs_get_state()->ledger;
     uint32_t      next = MountNextFileId(led->next_file_id, top_row, top_record);
     if (next != led->next_file_id) {
-        kprintf("[TagFS] the Ledger's next file id is %u and the medium names file id %u — "
+        kprintf("[TagFS] the Ledger's next file id is %u and the medium names file id %llu — "
                 "the ids from %u on were seen by a cycle the Ledger did not count, so the next "
                 "file is given %u, and none of them again\n", led->next_file_id,
-                top_row > top_record ? top_row : top_record, led->next_file_id, next);
+                (unsigned long long)(top_row > top_record ? top_row : top_record),
+                led->next_file_id, next);
         led->next_file_id = next;
     }
     if (led->next_file_id != 0 && known > led->next_file_id) {
-        kprintf("[TagFS] this kernel gave file ids up to %u out on this volume before its book "
+        kprintf("[TagFS] this kernel gave file ids up to %llu out on this volume before its book "
                 "was given up, and the programs holding them live on — the next file is given "
-                "%u, and none of them again\n", known - 1u, known);
-        led->next_file_id = known;
+                "%llu, and none of them again\n", (unsigned long long)(known - 1u),
+                (unsigned long long)known);
+        led->next_file_id = (uint32_t)known;   /* format v1: kept from this Ledger's own count */
     }
 }
 
@@ -573,7 +576,8 @@ error_t MountReadVolume(const char** what)
     }
     fs->ledger.total_files = files.checked;
 
-    uint32_t known_file, known_tag;
+    uint64_t known_file;
+    uint32_t known_tag;
     AwayNumbersKnown(fs->uuid, &known_file, &known_tag);
     MountFidBoundary(files.top_fid, pool.top_fid, known_file);
     rc = MountTagBoundary(pool.top_tag, known_tag);
@@ -600,7 +604,7 @@ void MountAfterDoor(void)
         if (!rec)
             continue;
         for (uint32_t e = 0; e < rec->extent_count; e++)
-            IntegrityForget(rec->extents[e].start_block, rec->extents[e].block_count);
+            IntegrityForget(rec->extents[e].start, rec->extents[e].count);
         FileRecordRelease(rec);
         reset++;
     }

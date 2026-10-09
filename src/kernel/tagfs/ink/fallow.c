@@ -11,11 +11,11 @@ struct FallowNode {
     uint64_t    ripe_at;    /* the cycle it goes back at; 0 while its freer is unsettled */
     uint64_t    zeroed_in;  /* the cycle that zeroed its digests; 0 while none has */
     FallowKind  kind;
-    uint32_t    fid;        /* the file a record freer freed it from; 0 for the others */
+    uint64_t    fid;        /* the file a record freer freed it from; 0 for the others */
     uint32_t    count;
     uint32_t    room;       /* the runs runs[] has room for */
     bool        unnamed;    /* nothing on the medium names it: the map's images leave it free */
-    FileExtent  runs[];
+    Strip       runs[];
 };
 
 /* Oldest first: nodes are added in the order their freers were made. */
@@ -32,14 +32,14 @@ static uint64_t NodeBlocks(const FallowNode* n)
 {
     uint64_t blocks = 0;
     for (uint32_t i = 0; i < n->count; i++)
-        blocks += n->runs[i].block_count;
+        blocks += n->runs[i].count;
     return blocks;
 }
 
 /* A node with room for `room` runs, none of them in it yet. */
-static FallowNode* NodeAlloc(uint32_t room, FallowKind kind, uint32_t fid)
+static FallowNode* NodeAlloc(uint32_t room, FallowKind kind, uint64_t fid)
 {
-    FallowNode* n = kmalloc(sizeof(FallowNode) + sizeof(FileExtent) * room);
+    FallowNode* n = kmalloc(sizeof(FallowNode) + sizeof(Strip) * room);
     if (!n)
         return NULL;
     n->next      = NULL;
@@ -54,11 +54,11 @@ static FallowNode* NodeAlloc(uint32_t room, FallowKind kind, uint32_t fid)
     return n;
 }
 
-FallowNode* FallowNodeMake(const FileExtent* runs, uint32_t count, FallowKind kind, uint32_t fid)
+FallowNode* FallowNodeMake(const Strip* runs, uint32_t count, FallowKind kind, uint64_t fid)
 {
     FallowNode* n = NodeAlloc(count, kind, fid);
     if (n && count) {
-        memcpy(n->runs, runs, sizeof(FileExtent) * count);
+        memcpy(n->runs, runs, sizeof(Strip) * count);
         n->count = count;
     }
     return n;
@@ -69,15 +69,15 @@ FallowNode* FallowNodeRoom(uint32_t blocks, FallowKind kind)
     return NodeAlloc(blocks, kind, 0);
 }
 
-uint32_t FallowNodeKeep(FallowNode* node, uint32_t block)
+/* At most `room` blocks are kept, each one block: the count fits the u32 it
+ * is handed back in. */
+uint32_t FallowNodeKeep(FallowNode* node, uint64_t block)
 {
-    FileExtent* last = node->count ? &node->runs[node->count - 1u] : NULL;
-    if (last && last->start_block + last->block_count == block &&
-        last->block_count < PLOT_RUN_MOST) {
-        last->block_count++;
+    Strip* last = node->count ? &node->runs[node->count - 1u] : NULL;
+    if (last && last->start + last->count == block && last->count < UINT32_MAX) {
+        last->count++;
     } else if (node->count < node->room) {
-        node->runs[node->count].start_block = block;
-        node->runs[node->count].block_count = 1;
+        node->runs[node->count] = (Strip){ .start = block, .count = 1, .kind = STRIP_DATA };
         node->count++;
     }
     return (uint32_t)NodeBlocks(node);
@@ -126,8 +126,8 @@ static uint64_t NodeWindows(const FallowNode* n)
 {
     uint64_t windows = 0;
     for (uint32_t i = 0; i < n->count; i++) {
-        uint32_t a = n->runs[i].start_block;
-        uint32_t z = a + n->runs[i].block_count - 1u;
+        uint64_t a = n->runs[i].start;
+        uint64_t z = a + n->runs[i].count - 1u;
         windows += z / BLOCK_MAP_WINDOW_BLOCKS - a / BLOCK_MAP_WINDOW_BLOCKS + 1u;
     }
     return windows;
@@ -150,7 +150,7 @@ void FallowZeroDigests(uint64_t cycle)
     for (FallowNode* n = first; n; n = __atomic_load_n(&n->next, __ATOMIC_ACQUIRE)) {
         if (!n->zeroed_in)
             for (uint32_t i = 0; i < n->count; i++)
-                IntegrityForget(n->runs[i].start_block, n->runs[i].block_count);
+                IntegrityForget(n->runs[i].start, n->runs[i].count);
         if (n == last)
             break;
     }
@@ -193,10 +193,10 @@ static void NodeUnname(FallowNode* n)
     n->unnamed = true;
     s_unnamed++;
     for (uint32_t i = 0; i < n->count; i++) {
-        uint64_t a = n->runs[i].start_block;
-        uint64_t z = a + n->runs[i].block_count;
+        uint64_t a = n->runs[i].start;
+        uint64_t z = a + n->runs[i].count;
         for (uint64_t b = a; b < z; b = (b / BLOCK_MAP_WINDOW_BLOCKS + 1u) * BLOCK_MAP_WINDOW_BLOCKS)
-            BlockMapOweLocked((uint32_t)b);
+            BlockMapOweLocked(b);
     }
 }
 
@@ -223,17 +223,17 @@ void FallowViewedUnnamed(uint64_t settled)
     }
 }
 
-uint32_t FallowUnnamedLeftOut(uint32_t first, uint32_t count, uint8_t* bits)
+uint32_t FallowUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits)
 {
-    uint64_t end  = (uint64_t)first + count;
+    uint64_t end  = first + count;
     uint32_t left = 0;
 
     for (FallowNode* n = s_unnamed ? s_head : NULL; n; n = n->next) {
         if (!n->unnamed)
             continue;
         for (uint32_t i = 0; i < n->count; i++) {
-            uint64_t a = n->runs[i].start_block;
-            uint64_t z = a + n->runs[i].block_count;
+            uint64_t a = n->runs[i].start;
+            uint64_t z = a + n->runs[i].count;
             for (uint64_t b = a > first ? a : first; b < z && b < end; b++) {
                 uint32_t off = (uint32_t)(b - first);
                 bits[off / 8] &= (uint8_t)~(1u << (off % 8));
@@ -258,10 +258,10 @@ static uint64_t NodeGiveBack(FallowNode* n)
     uint32_t kept  = 0;
 
     for (uint32_t i = 0; i < n->count; i++) {
-        FileExtent run  = n->runs[i];
-        error_t    back = BlockMapGiveHeldLocked(run.start_block, run.block_count);
+        Strip   run  = n->runs[i];
+        error_t back = BlockMapGiveHeldLocked(run.start, run.count);
         if (back == OK)
-            given += run.block_count;
+            given += run.count;
         else if (back == ERR_NO_MEMORY)
             n->runs[kept++] = run;
     }
@@ -287,7 +287,7 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
         }
         if (n->ripe_at == 0 || cycle < n->ripe_at || n->zeroed_in == 0 || n->zeroed_in > cycle ||
             (n->kind == FALLOW_BY_RECORD && n->gen > HelmViewFloor(n->fid)) ||
-            (n->kind == FALLOW_BY_USE_CHAIN && UseMemoryNames(n->runs[0].start_block)) ||
+            (n->kind == FALLOW_BY_USE_CHAIN && UseMemoryNames(n->runs[0].start)) ||
             (n->kind == FALLOW_BY_UNLINK && n->gen > GleanHintCovers())) {
             prev = n;
             n    = next;

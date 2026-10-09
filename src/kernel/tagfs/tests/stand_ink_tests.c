@@ -38,7 +38,7 @@
  * Quitclaims of: a tail's room is a block's at most. */
 #define STAND_INK_MOST     ((1u + SPARE_FOR_QUITCLAIMS) * POOL_QUITCLAIMS_PER_BLOCK + 1u)
 
-static uint32_t s_ink_fids[STAND_INK_MOST];
+static uint64_t s_ink_fids[STAND_INK_MOST];
 
 /* Files made for a test, all called test_file, and given up on the way out. */
 static bool StandInkMake(uint32_t count)
@@ -72,8 +72,9 @@ static uint64_t* StandInkPlaces(uint32_t* out_count, uint32_t* out_invalid)
     TagFSState* fs    = tagfs_get_state();
     uint32_t    total = FileMapCount(fs->files);
     uint64_t*   place = kmalloc(sizeof(uint64_t) * (total ? total : 1u));
-    uint32_t    fids[64];
-    uint32_t    n = 0, invalid = 0, from = 0;
+    uint64_t    fids[64];
+    uint64_t    from = 0;
+    uint32_t    n = 0, invalid = 0;
 
     if (!place)
         return NULL;
@@ -175,14 +176,15 @@ out:
 
 error_t StandInkTakeAll(StandInkGround* g)
 {
-    uint32_t start = 0, got = 0;
+    uint64_t start = 0;
+    uint32_t got   = 0;
     uint32_t all   = tagfs_get_state()->layout.data_blocks;
     error_t  rc;
 
     while ((rc = TagFSTakeRun(all, 0, &start, &got)) == OK) {
         if (g->count == g->cap) {
             uint32_t  cap = g->cap ? g->cap * 2u : 64u;
-            uint32_t* at  = kmalloc(sizeof(uint32_t) * cap);
+            uint64_t* at  = kmalloc(sizeof(uint64_t) * cap);
             uint32_t* n   = kmalloc(sizeof(uint32_t) * cap);
             if (!at || !n) {
                 kfree(at);
@@ -191,7 +193,7 @@ error_t StandInkTakeAll(StandInkGround* g)
                 return ERR_NO_MEMORY;
             }
             if (g->count) {
-                memcpy(at, g->at, sizeof(uint32_t) * g->count);
+                memcpy(at, g->at, sizeof(uint64_t) * g->count);
                 memcpy(n, g->n, sizeof(uint32_t) * g->count);
             }
             kfree(g->at);
@@ -343,7 +345,7 @@ static TestResult TestStandInkEarlyCloseSparesTheLast(void)
 {
     TestResult     verdict = TEST_PASS;
     StandInkGround ground  = { NULL, NULL, 0, 0 };
-    uint32_t       file_id = 0;
+    uint64_t       file_id = 0;
     const char*    aside   = StandStepsAsideFor();
     TagSpelling    key     = TagSpellingOfKey("stand_ink");
 
@@ -449,7 +451,7 @@ out:
  * the head the Deed names the way a reader that knows no seal walks it: false
  * when the medium holds none; *active whether it is an ACTIVE record rather
  * than a Quitclaim. */
-static bool StandInkNewestOnMedium(uint32_t fid, bool* active, bool* whole)
+static bool StandInkNewestOnMedium(uint64_t fid, bool* active, bool* whole)
 {
     TagFSState*    fs    = tagfs_get_state();
     MetaPoolBlock* blk   = (MetaPoolBlock*)g_test_output;
@@ -474,7 +476,8 @@ static bool StandInkNewestOnMedium(uint32_t fid, bool* active, bool* whole)
             if (id == fid) {
                 TagFSMetadata meta;
                 memset(&meta, 0, sizeof(meta));
-                if (UnpackV1(blk->payload + pos, len, &meta, NULL) == OK) {
+                if (UnpackV1(blk->payload + pos, len, tagfs_get_state()->layout.data_blocks,
+                             &meta, NULL) == OK) {
                     found   = true;
                     *active = (meta.flags & TAGFS_FILE_ACTIVE) != 0;
                 }
@@ -500,7 +503,8 @@ static bool StandInkNewestOnMedium(uint32_t fid, bool* active, bool* whole)
 static TestResult TestStandInkQuitclaimIsTheNewestRecord(void)
 {
     TestResult     verdict = TEST_PASS;
-    uint32_t       file_id = 0, block = 0;
+    uint64_t       file_id = 0;
+    uint64_t       block   = 0;
     bool           active  = true, whole = true;
     FileTableEntry row     = { 0, 0 };
     const char*    aside   = StandStepsAsideFor();
@@ -515,7 +519,7 @@ static TestResult TestStandInkQuitclaimIsTheNewestRecord(void)
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
     TEST_ASSERT_EQ(StandWriteAt(file_id, 0, g_test_buffer, 64), 64, "it is written again");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "and given up");
-    uint32_t gone = file_id;
+    uint64_t gone = file_id;
     file_id = 0;
     TEST_ASSERT_OK(TagFSSettle(), "the delete is settled");
 

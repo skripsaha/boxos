@@ -70,7 +70,7 @@ static bool autostart_wanted(const TagFSMetadata *meta)
  * process, or NULL with the reason already printed — every refusal here names
  * the file it refused, because a machine that silently starts three of four
  * programs is worse than one that starts none. */
-static process_t *autostart_launch_one(uint32_t file_id, TagFSMetadata *meta,
+static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
                                        const char *tags)
 {
     uint64_t file_size = meta->size;
@@ -139,7 +139,7 @@ static process_t *autostart_launch_one(uint32_t file_id, TagFSMetadata *meta,
 
 /* One file of the volume started when it asks to be: the process, or NULL
  * when it does not ask or could not be started (said by the launch). */
-static process_t *autostart_consider(uint32_t file_id, bool scheduler_live)
+static process_t *autostart_consider(uint64_t file_id, bool scheduler_live)
 {
     TagFSMetadata meta;
     if (tagfs_get_metadata(file_id, &meta) != 0) return NULL;
@@ -191,9 +191,9 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
     /* Every live file, a page at a time: what stood here was one array as
      * long as the Ledger's count of files — or 1024 when it said none — and
      * the files past it were never asked whether they start. */
-    uint32_t  file_ids[32];
+    uint64_t  file_ids[32];
     TagFSPage page;
-    uint32_t  from     = 1;
+    uint64_t  from     = 1;
     int       launched = 0;
     do {
         if (TagFSListPage(from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK) break;

@@ -45,7 +45,7 @@
 
 /* The file's entry, made when it is not open yet: NULL when there is no
  * memory for one — an open without one is refused. */
-OpenFileEntry* ofe_acquire(uint32_t file_id);
+OpenFileEntry* ofe_acquire(uint64_t file_id);
 void           ofe_release(OpenFileEntry* ofe);
 
 #if CONFIG_TAGFS_HOLD_GROUND
@@ -87,13 +87,13 @@ void     HelmBookTakenUp(void);
 /* The extents the holder of the file's Helm claimed room for in its record
  * (RT-19, InkRoomClaim): 0 when the file is not open or nothing is claimed.
  * Under the volume's state lock, which the claim is made under. */
-uint32_t HelmClaimedRuns(uint32_t file_id);
+uint32_t HelmClaimedRuns(uint64_t file_id);
 
 /* Whether a Quitclaim gave the file up since it was opened. */
 bool     HelmVacated(const OpenFileEntry* ofe);
 
 /* The file was given up: its Helm, when it is open, is vacated. */
-void     HelmVacate(uint32_t file_id);
+void     HelmVacate(uint64_t file_id);
 
 /* A waiter handed the Helm that does its work synchronously: listed, and run
  * by the next service point (TagFSServiceIfPending) — never in the hand, which
@@ -121,7 +121,7 @@ uint64_t HelmOwed(void);
  * handles of this mounting — UINT64_MAX when none is open. */
 void     HelmViewTake(TagFSFileHandle* handle);
 void     HelmViewLetGo(TagFSFileHandle* handle);
-uint64_t HelmViewFloor(uint32_t file_id);
+uint64_t HelmViewFloor(uint64_t file_id);
 
 /*
  * The work a Helm's holder does, synchronously (helm_work.c). Each loads the

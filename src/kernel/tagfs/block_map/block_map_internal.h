@@ -3,7 +3,6 @@
 
 #include "block_map.h"
 #include "../tagfs.h"
-#include "../plot/plot_width.h"
 
 /*
  * The block map's own parts, shared by block_map.c (the windows, the cache,
@@ -79,7 +78,7 @@ typedef struct {
  * pool; a window's are chained from its delta_last, each to the one made
  * before it, and a slot let go is chained into the pool's free ones. */
 typedef struct {
-    uint32_t start;
+    uint64_t start;
     uint32_t count;
     uint32_t take;     /* 1 a take, 0 a give */
     uint32_t older;    /* the window's delta made before it, + 1 — or, let go, the next free slot */
@@ -89,15 +88,15 @@ typedef struct {
  * names yet: left free in every image of the map the medium is sent, until
  * the S1 of the cycle whose snapshot holds the Ink that named it. */
 typedef struct {
-    uint32_t start;
+    uint64_t start;
     uint32_t count;
-    uint32_t fid;
+    uint64_t fid;
     uint64_t gen;      /* the Ink that named it; 0 while none has */
 } MapUnsettled;
 
 typedef struct {
     bool            up;
-    uint32_t        blocks;       /* the data run */
+    uint64_t        blocks;       /* the data run */
     uint32_t        windows;
     uint64_t        map_vlba;     /* the map's first sector, in volume sectors */
     BlockMapWindow *win;
@@ -155,7 +154,7 @@ static inline bool MapBit(const uint8_t *bits, uint32_t off)
 /* The blocks [start, start + count) stop, or start, being ones a take may
  * have — an Allotment kept or given back — with the summaries told: measured
  * again where the sector is in memory, bounds kept honest where it is not. */
-void          MapAvailabilityChanged(uint32_t start, uint32_t count, bool lost);
+void          MapAvailabilityChanged(uint64_t start, uint32_t count, bool lost);
 
 /* The window has a debt or a delta: its bit is set for the settle to find.
  * MapWorkNext answers the first window at or past w whose bit is set
@@ -176,20 +175,20 @@ bool          MapDeltaRoom(uint32_t more, bool give, bool heap);
 
 /* An edit of [start, start + count), inside one window, written down to be laid
  * onto its sector; room was made first. */
-void          MapDeltaAdd(uint32_t start, uint32_t count, bool take);
+void          MapDeltaAdd(uint64_t start, uint32_t count, bool take);
 
 /* Every delta of window w laid onto its sector `p`, in the order made — as the
  * sector comes in, or as a write of it ends. */
 void          MapDeltaApply(uint32_t w, BlockMapPage *p);
 
 /* How many windows of the run have no sector in memory. */
-uint32_t      MapUnreadWindows(uint32_t start, uint32_t count);
+uint32_t      MapUnreadWindows(uint64_t start, uint32_t count);
 
 /* Take a run a take may have (MapTakeKnown), or one an Allotment kept for the
  * taker (MapTakeKept). The deltas the run needs are made room for first
  * (MapDeltaRoom); the Ledger's free count and MapOwed follow. */
-void          MapTakeKnown(uint32_t start, uint32_t count);
-void          MapTakeKept(uint32_t start, uint32_t count);
+void          MapTakeKnown(uint64_t start, uint32_t count);
+void          MapTakeKept(uint64_t start, uint32_t count);
 
 /* ---- runs no settled record names yet (block_map.c) -------------------- */
 
@@ -199,11 +198,11 @@ bool          MapUnsettledRoom(void);
 
 /* The run file `fid`'s write just took, under the lock that took it; room was
  * made first. */
-void          MapUnsettledAdd(uint32_t fid, uint32_t start, uint32_t count);
+void          MapUnsettledAdd(uint64_t fid, uint64_t start, uint32_t count);
 
 /* Every block of [first, first + count) such a run holds, cleared in `bits`
  * (one bit per block from `first`): how many. */
-uint32_t      MapUnsettledLeftOut(uint32_t first, uint32_t count, uint8_t *bits);
+uint32_t      MapUnsettledLeftOut(uint64_t first, uint32_t count, uint8_t *bits);
 
 /* S1 of the cycle whose snapshot holds every Ink up to `target`: the runs
  * they named are the map's own from here on, their sectors owed. */
@@ -231,14 +230,14 @@ enum { MAP_PLAN_FRESH = 0, MAP_PLAN_ROOM, MAP_PLAN_HINT, MAP_PLAN_FIT, MAP_PLAN_
 
 typedef struct {
     uint32_t want;
-    uint32_t hint;
+    uint64_t hint;
     bool     best_fit;   /* the smallest run of `want`, else the near rule */
     bool     found;
-    uint32_t start;      /* the run the take comes from, as known */
+    uint64_t start;      /* the run the take comes from, as known */
     uint32_t len;
-    uint32_t at;         /* where the take starts in it */
+    uint64_t at;         /* where the take starts in it */
     uint32_t got;        /* and how much of `want` it gives */
-    uint32_t far;        /* |at - hint| */
+    uint64_t far;        /* |at - hint| */
     uint32_t look[MAP_LOOKS];   /* windows whose sectors would decide better */
     uint32_t looks;
     /* How far the plan has come, across the holds it spans. */
@@ -269,7 +268,7 @@ void          MapPlan(MapPick *k, bool may_read, bool may_pause);
 
 /* Whether every block of the run is still one a take may have, as memory
  * knows it now: asked of a plan that spanned holds, right before its take. */
-bool          MapRunStillFree(uint32_t start, uint32_t count);
+bool          MapRunStillFree(uint64_t start, uint32_t count);
 
 /* A door stops fetching sectors to decide better after this many rounds. */
 #define MAP_LOOK_ROUNDS 16u
@@ -291,7 +290,7 @@ uint64_t      MapMayHaveLocked(void);
 /* ---- what growing files keep in hand (allotment.c) --------------------- */
 
 void          AllotmentOverlay(uint32_t w, uint8_t *view);
-bool          AllotmentTakeBackLocked(uint32_t keep_fid);
+bool          AllotmentTakeBackLocked(uint64_t keep_fid);
 uint64_t      AllotmentKeptLocked(void);
 void          AllotmentDropAll(void);
 

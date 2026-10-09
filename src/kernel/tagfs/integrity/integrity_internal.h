@@ -86,7 +86,7 @@ typedef struct {
 
 extern volatile bool  g_map_initialized;
 extern TagFSLock      g_map_lock;
-extern uint32_t       g_map_entries;       /* the blocks the map covers */
+extern uint64_t       g_map_entries;       /* the blocks the map covers */
 extern uint32_t       g_map_first_block;
 extern uint32_t       g_map_count;         /* its blocks on the medium */
 extern MapSlot        g_map_cache[MAP_CACHE_SLOTS];
@@ -122,7 +122,7 @@ bool     MapSlotSettled(const void *ctx);
  * volume. */
 uint32_t MapLayCarried(uint32_t idx);
 void     MapLayCarryAgain(uint32_t idx);
-bool     MapLayRunHolds(uint32_t block);
+bool     MapLayRunHolds(uint64_t block);
 error_t  MapLayBegin(uint32_t count, uint32_t entries, uint32_t old_first, uint32_t old_count);
 void     MapLayLetGo(void);
 
@@ -134,8 +134,8 @@ void     MapLayLetGo(void);
  * forgotten (IntegrityUpdate, IntegrityForget): rot in what it holds next is
  * named again. Name and Forget are called with no TagFS lock held. */
 void     IntegrityRotBegin(uint16_t tag);
-void     IntegrityRotName(uint32_t block, uint64_t stored, uint64_t read);
-void     IntegrityRotForget(uint32_t start, uint32_t count);
+void     IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read);
+void     IntegrityRotForget(uint64_t start, uint32_t count);
 void     IntegrityRotEnd(void);
 
 #endif /* TAGFS_INTEGRITY_INTERNAL_H */

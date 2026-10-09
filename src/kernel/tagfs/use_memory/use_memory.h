@@ -5,7 +5,7 @@
 #include "../../../include/volume_ledger.h"
 #include "../../core/error/error.h"
 #include "../../core/use_context/use_context.h"
-#include "../plot/plot_width.h"
+#include "../plot/strip.h"
 
 /*
  * The volume's memory of the Use Context — what its person was doing when
@@ -52,7 +52,7 @@ typedef struct {
  * — only the blocks read back as this chain's own links, when it was read. */
 typedef struct {
     UseChainRef ref;
-    FileExtent *runs;
+    Strip      *runs;
     uint32_t    run_count;
 } UseChain;
 
@@ -139,7 +139,7 @@ void     UseMemoryCycleOver(error_t rc);
 
 /* Under the state lock (Fallow's release): whether a copy of the Ledger may
  * name the chain whose first link is `first`. */
-bool     UseMemoryNames(uint32_t first);
+bool     UseMemoryNames(uint64_t first);
 
 /* Under the state lock: the blocks the volume's memory holds — the chain it
  * names, and one a refused cycle kept for its demand. */
@@ -170,7 +170,7 @@ void     UseRollCall(void);
 /* Whether the census's orphans are wanted (the newest copy is an older
  * kernel's with no chain), and the census's sink for them. */
 bool     UseMemoryWantsOrphans(void);
-void     UseMemoryOrphanRun(uint32_t start, uint32_t count, void *ctx);
+void     UseMemoryOrphanRun(uint64_t start, uint32_t count, void *ctx);
 
 /* After the census: a whole chain among the orphans taken up, or given to
  * Fallow; the chains no copy's memory stands on given to Fallow. */

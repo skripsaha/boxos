@@ -32,9 +32,9 @@
 #define STAND_INDEX_KEY_FIRST 10u      /* the first tag id of them */
 
 static char     s_index_name[] = "stand_index";
-static uint32_t s_rows[STAND_INDEX_FILES + 1];
-static uint32_t s_made[STAND_INDEX_MANY];
-static uint32_t s_page[STAND_INDEX_PAGE];
+static uint64_t s_rows[STAND_INDEX_FILES + 1];
+static uint64_t s_made[STAND_INDEX_MANY];
+static uint64_t s_page[STAND_INDEX_PAGE];
 static uint32_t s_crate[2 + STAND_INDEX_CRATE];
 static uint8_t  s_query_op[sizeof(ManifestOp) + 8] __attribute__((aligned(8)));
 static Crate    s_query_crates[2];
@@ -45,7 +45,7 @@ static bool StandIndexFill(FileMap* map, uint32_t step)
 {
     uint16_t tag = 1;
     for (uint32_t k = 0; k < STAND_INDEX_FILES; k++) {
-        uint32_t      fid  = 1 + k * step;
+        uint64_t      fid  = 1 + k * step;
         TagFSMetadata meta = { .file_id = fid, .flags = TAGFS_FILE_ACTIVE,
                                .filename = s_index_name, .tag_ids = &tag, .tag_count = 1 };
         FileRecord*   rec   = FileRecordOf(&meta);
@@ -122,7 +122,7 @@ static bool StandIndexPage(TagBitmapIndex* idx, const uint16_t* tags, uint32_t c
 
 /* `fid` out from under `tag` the way an Ink takes it out: under the volume's
  * state lock, which the index changes shape under alone. */
-static void StandIndexLeave(TagBitmapIndex* idx, uint16_t tag, uint32_t fid)
+static void StandIndexLeave(TagBitmapIndex* idx, uint16_t tag, uint64_t fid)
 {
     TagFSLockTake(&tagfs_get_state()->lock);
     TagBitmapLeave(idx, tag, fid);
@@ -312,7 +312,7 @@ static int StandIndexDeckQuery(const char* text, uint32_t room, uint64_t* out_si
 static bool StandIndexWalkQuery(const TagSpelling* name, uint32_t made, uint32_t* out_seen)
 {
     TagFSPage page;
-    uint32_t  from = 1;
+    uint64_t  from = 1;
     uint32_t  seen = 0;
     do {
         if (TagFSQueryPage(name, 1, from, s_page, STAND_INDEX_PAGE, seen == 0, &page) != OK)
@@ -334,9 +334,9 @@ static bool StandIndexWalkQuery(const TagSpelling* name, uint32_t made, uint32_t
 static bool StandIndexWalkList(uint32_t made, uint32_t* out_found)
 {
     TagFSPage page;
-    uint32_t  from  = 1;
+    uint64_t  from  = 1;
     uint32_t  found = 0;
-    uint32_t  last  = 0;
+    uint64_t  last  = 0;
     do {
         if (TagFSListPage(from, s_page, STAND_INDEX_PAGE, false, &page) != OK)
             return false;
@@ -414,8 +414,10 @@ static TestResult TestStandIndexFidExhausted(void)
     TestResult   verdict = TEST_PASS;
     TagFSState*  fs      = tagfs_get_state();
     VolumeLedger copy;
-    uint32_t     issued  = 0, refused = 0, never = 0, last = 0, fid = 0;
-    uint32_t     saved   = 0, left_at = 0, made = 0;
+    uint32_t     issued  = 0, refused = 0, never = 0;
+    uint64_t     fid = 0, last = 0;
+    uint32_t     saved   = 0, left_at = 0;
+    uint64_t     made = 0;
     bool         moved   = false;
     int          rc      = -1;
     VolumeTally  before;

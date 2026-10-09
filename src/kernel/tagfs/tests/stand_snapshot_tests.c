@@ -105,14 +105,14 @@ static int StandSnapBookLay(const uint32_t* frozen, uint32_t live, bool head_who
 
 /* The manifest as the older kernel left it: one snapshot of the file, one of
  * the whole volume. */
-static int StandSnapManifestLay(uint32_t block, uint32_t file_id)
+static int StandSnapManifestLay(uint32_t block, uint64_t file_id)
 {
     CowManifest* m = (CowManifest*)g_test_output;
     memset(m, 0, sizeof(*m));
     m->magic                     = COW_MANIFEST_MAGIC;
     m->count                     = 2;
     m->entries[0].snapshot_id    = STAND_SNAP_OF_FILE;
-    m->entries[0].parent_file_id = file_id;
+    m->entries[0].parent_file_id = (uint32_t)file_id;   /* format v1: the manifest's u32 */
     memcpy(m->entries[0].name, "auto-snap-41", 12);
     m->entries[1].snapshot_id    = STAND_SNAP_OF_ALL;
     memcpy(m->entries[1].name, "nightly", 7);
@@ -161,7 +161,9 @@ static TestResult TestStandOldSnapshotsHeld(void)
 {
     TestResult verdict = TEST_PASS;
     CowReading reading;
-    uint32_t   run = 0, file_id = 0, live = 0;
+    uint32_t   run = 0, live = 0;
+    uint64_t   file_id = 0;
+    uint64_t   taken = 0, block = 0;
     uint32_t   frozen[STAND_SNAP_FROZEN];
     uint8_t    file_bytes[64];
     bool       saved = false, census = false;
@@ -175,9 +177,12 @@ static TestResult TestStandOldSnapshotsHeld(void)
     fill_pattern(file_bytes, sizeof(file_bytes), 0x5A);
     TEST_ASSERT(StandMakeFile("snapold", file_bytes, sizeof(file_bytes), &file_id),
                 "the file a snapshot was taken of is made");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &live), "and its block is known");
-    TEST_ASSERT_EQ(tagfs_alloc_blocks(1u + STAND_SNAP_FROZEN, &run), 0,
+    TEST_ASSERT(StandBlockOf(file_id, 0, &block), "and its block is known");
+    TEST_ASSERT_EQ(tagfs_alloc_blocks(1u + STAND_SNAP_FROZEN, &taken), 0,
                    "blocks for the manifest and the frozen blocks are taken");
+    /* The book and the manifest are format v1's, and name blocks in u32. */
+    live = (uint32_t)block;
+    run  = (uint32_t)taken;
     for (uint32_t i = 0; i < STAND_SNAP_FROZEN; i++)
         frozen[i] = run + 1u + i;
 

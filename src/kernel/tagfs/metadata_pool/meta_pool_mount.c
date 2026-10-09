@@ -126,7 +126,7 @@ static void WalkFidsPast(PoolWalk* w, const MetaPoolBlock* blk, uint32_t from)
         memcpy(&len, blk->payload + pos, sizeof(len));
         if (len < RECORD_HEADER_SIZE || len > used - pos)
             return;
-        uint32_t fid = pos >= from ? UnpackV1Fid(blk->payload + pos, len) : 0;
+        uint32_t fid = pos >= from ? (uint32_t)UnpackV1Fid(blk->payload + pos, len) : 0;
         if (fid > w->out->top_fid)
             w->out->top_fid = fid;
         pos += len;
@@ -143,7 +143,7 @@ static error_t WalkPut(PoolWalk* w, const uint8_t* at, uint32_t len, uint32_t fi
     TagFSMetadata meta;
     bool          dropped = false;
     memset(&meta, 0, sizeof(meta));
-    error_t unpacked = UnpackV1(at, len, &meta, &dropped);
+    error_t unpacked = UnpackV1(at, len, tagfs_get_state()->layout.data_blocks, &meta, &dropped);
     if (unpacked == ERR_NO_MEMORY) {
         kprintf("[MetaPool] there is no memory to unpack file %u's record at mount — this "
                 "volume is not mounted\n", fid);
@@ -406,7 +406,7 @@ static error_t WalkTornSpan(PoolWalk* w, const PoolPlan* plan, uint32_t block)
         memcpy(&len, blk->payload + pos, sizeof(len));
         if (len < RECORD_HEADER_SIZE || len > upto - pos)
             break;
-        uint32_t fid = UnpackV1Fid(blk->payload + pos, len);
+        uint32_t fid = (uint32_t)UnpackV1Fid(blk->payload + pos, len);   /* a v1 record's u32 */
         if (fid && (w->in_span || (from && pos >= plan->from_bytes)))
             WalkNoteSpan(w, fid);
         pos += len;

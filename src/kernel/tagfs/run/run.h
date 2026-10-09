@@ -32,7 +32,7 @@ uint32_t TagFSRunBlocks(void);
  * what the medium says the refused one kept (BoardroomWrite) — and every block
  * that landed has its digest recorded and no read-ahead window hands out what
  * it held. A volume assembled in a Braid takes its blocks one at a time. */
-error_t  TagFSWriteRun(uint32_t first, uint32_t count, const void *buffer, uint32_t *out_landed);
+error_t  TagFSWriteRun(uint64_t first, uint32_t count, const void *buffer, uint32_t *out_landed);
 
 /*
  * What the files' own bytes cost the medium since the machine started, for

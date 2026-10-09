@@ -5,6 +5,7 @@
 #include "../../lib/kernel/klib.h"
 #include "tagfs_constants.h"
 #include "plot/plot_width.h"
+#include "plot/strip.h"
 #include "../../include/boxos_magic.h"
 #include "../../include/boxos_limits.h"
 #include "../../include/volume_deed.h"
@@ -220,7 +221,7 @@ typedef struct {
     uint32_t delivered;   /* ids written into the caller's room */
     uint32_t total;       /* every match from the page's first id on — counted
                            * only when the caller asked for it, 0 otherwise */
-    uint32_t next;        /* the first match past the room: ask again from it;
+    uint64_t next;        /* the first match past the room: ask again from it;
                            * 0 when there is none */
 } TagFSPage;
 
@@ -277,7 +278,7 @@ typedef enum {
 /* A file some handle has open: its Helm, and every open handle's view of it,
  * under the open-file table's lock (helm/helm.c). */
 typedef struct OpenFileEntry {
-    uint32_t                file_id;
+    uint64_t                file_id;
     uint32_t                ref_count;
     FileHelm                helm;
     struct TagFSFileHandle* views;
@@ -293,12 +294,12 @@ typedef struct OpenFileEntry {
  * closed (helm.h). `warrant` is the caller's (InkWarrant): what the handle's
  * work may change, set by whoever opened it for a program, none from the open. */
 typedef struct TagFSFileHandle {
-    uint32_t    file_id;
+    uint64_t    file_id;
     uint32_t    flags;
     InkWarrant  warrant;
     uint64_t    offset;
     uint64_t    file_size;
-    FileExtent* extents;
+    Strip*      extents;
     uint32_t    extent_count;
     OpenFileEntry* ofe;
 
@@ -322,7 +323,7 @@ typedef struct TagFSFileHandle {
 } TagFSFileHandle;
 
 typedef struct {
-    uint32_t    file_id;
+    uint64_t    file_id;
     uint32_t    flags;
     uint64_t    size;
     uint64_t    created_time;
@@ -330,7 +331,7 @@ typedef struct {
     char*       filename;
     uint16_t*   tag_ids;
     uint32_t    tag_count;
-    FileExtent* extents;
+    Strip*      extents;
     uint32_t    extent_count;
 } TagFSMetadata;
 
@@ -443,8 +444,8 @@ TagBitmapIndex* tag_bitmap_create(uint32_t initial_tag_cap);
 void            tag_bitmap_destroy(TagBitmapIndex* idx);
 /* The file put under the tag: 0, or -1 — said once, with the index's numbers
  * — when the index had no memory for it, and then nothing changed. */
-int             tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
-bool            TagBitmapHas(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
+int             tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint64_t file_id);
+bool            TagBitmapHas(TagBitmapIndex* idx, uint16_t tag_id, uint64_t file_id);
 
 /* An add of `file_id` under each of `count` distinct tags, in two halves so the
  * volume's state lock never waits on the heap. TagBitmapStakeFor takes, with
@@ -458,17 +459,17 @@ bool            TagBitmapHas(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file
  * the lock. */
 typedef struct TagBitmapStake TagBitmapStake;
 error_t         TagBitmapStakeFor(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
-                                  uint32_t file_id, TagBitmapStake** out);
+                                  uint64_t file_id, TagBitmapStake** out);
 bool            TagBitmapStakeCovers(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
-                                     uint32_t file_id, TagBitmapStake* stake);
+                                     uint64_t file_id, TagBitmapStake* stake);
 void            TagBitmapAddCovered(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
-                                    uint32_t file_id);
+                                    uint64_t file_id);
 void            TagBitmapStakeLetGo(TagBitmapStake* stake);
 
 /* The file out from under the tag with nothing allocated, for a caller under
  * the volume's state lock: a window that falls to where an array would be
  * lighter stays a bitmap until TagBitmapShrink. */
-void            TagBitmapLeave(TagBitmapIndex* idx, uint16_t tag_id, uint32_t file_id);
+void            TagBitmapLeave(TagBitmapIndex* idx, uint16_t tag_id, uint64_t file_id);
 /* After a TagBitmapLeave of `file_id` from each of the `count` tags, with no
  * TagFS lock held: each window the file left that fell to where an array is
  * lighter made one again — its storage taken with no lock held and put in
@@ -476,7 +477,7 @@ void            TagBitmapLeave(TagBitmapIndex* idx, uint16_t tag_id, uint32_t fi
  * shape. One the heap gives nothing for stays a bitmap, which costs room and
  * nothing else, until the next leave from it. */
 void            TagBitmapShrink(TagBitmapIndex* idx, TagFSLock* state, const uint16_t* tags,
-                                uint32_t count, uint32_t file_id);
+                                uint32_t count, uint64_t file_id);
 /* The kernel heap the index holds. */
 uint64_t        TagBitmapBytes(TagBitmapIndex* idx);
 /* The files from `from` on that wear every one of `tag_ids`, at least one
@@ -486,7 +487,7 @@ int             TagBitmapQueryPage(TagBitmapIndex* idx,
                     const uint16_t* tag_ids, uint32_t tag_count,
                     const TagIdList* groups, uint32_t group_count,
                     const uint16_t* unless, uint32_t unless_count,
-                    uint32_t from, uint32_t* out, uint32_t room,
+                    uint64_t from, uint64_t* out, uint32_t room,
                     bool want_total, TagFSPage* page);
 #ifdef CONFIG_VOLUME_TESTS
 /* The most steps one hold of the index's lock gave a query, since it was last
@@ -502,9 +503,9 @@ uint32_t        TagBitmapQueryHoldBound(uint32_t unless_count);
 
 error_t file_table_init(uint32_t first_block, bool sealed);
 void file_table_shutdown(void);
-int  file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
-int  file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset);
-int  file_table_delete(uint32_t file_id);
+int  file_table_lookup(uint64_t file_id, uint32_t* out_block, uint32_t* out_offset);
+int  file_table_update(uint64_t file_id, uint32_t meta_block, uint32_t meta_offset);
+int  file_table_delete(uint64_t file_id);
 error_t file_table_flush(void);
 
 /* What tagfs_get_metadata filled in, let go. The pool itself is
@@ -675,7 +676,7 @@ error_t  tagfs_flush_cache(void);
  * Used by the storage deck's reads and writes nobody stands over, which reach
  * the seat (BoardroomReadAsync, BoardroomWriteAsync) outside the block
  * helpers. */
-uint64_t tagfs_block_to_sector(uint32_t block);
+uint64_t tagfs_block_to_sector(uint64_t block);
 
 /* There is no tagfs_format() here. A volume is made by the tool that lays it
  * out on ground it read from a partition table (tools/create_tagfs.c), and by
@@ -696,7 +697,7 @@ uint64_t tagfs_block_to_sector(uint32_t block);
  * is refused ERR_TAGFS_RECORD_FULL, and a volume that has issued every file id
  * it can is refused ERR_TAGFS_FID_EXHAUSTED (LedgerIssueFileId). */
 int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint32_t tag_count,
-                       uint32_t* out_file_id);
+                       uint64_t* out_file_id);
 
 /* Whether a file named `filename` wearing `tags` — each counted once, its
  * name's own tag with them — has a record format v1 can hold: OK, or
@@ -712,8 +713,8 @@ error_t TagFSCreateFits(const char* filename, const TagSpelling* tags, uint32_t 
  * warrant, and so is a tag of key system, boot or god its rename would take
  * off or put on (-ERR_PERMISSION_DENIED); the file holding the kernel the Deed
  * points the loader at is given up by nobody. */
-int  tagfs_delete_file(uint32_t file_id, InkWarrant warrant);
-int  tagfs_rename_file(uint32_t file_id, const char* new_filename, InkWarrant warrant);
+int  tagfs_delete_file(uint64_t file_id, InkWarrant warrant);
+int  tagfs_rename_file(uint64_t file_id, const char* new_filename, InkWarrant warrant);
 
 /*
  * The three changes of a file's extents — a write, span and defrag — are made
@@ -733,13 +734,13 @@ int  tagfs_rename_file(uint32_t file_id, const char* new_filename, InkWarrant wa
  * the first window changes nothing of the file, one part way keeps the windows
  * inked before it; a growth past every block the volume could give is refused
  * ERR_TAGFS_NO_SPACE before it takes one. */
-error_t tagfs_span_file(uint32_t file_id, uint64_t size);
+error_t tagfs_span_file(uint64_t file_id, uint64_t size);
 
 /* A tag put on a file, or taken off: 0, or the Ink's refusal as -ERR_*. A tag
  * of key system, boot or god goes on or comes off only with the warrant. */
-int  tagfs_add_tag(uint32_t file_id, uint16_t tag_id, InkWarrant warrant);
-int  tagfs_remove_tag(uint32_t file_id, uint16_t tag_id, InkWarrant warrant);
-bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id);
+int  tagfs_add_tag(uint64_t file_id, uint16_t tag_id, InkWarrant warrant);
+int  tagfs_remove_tag(uint64_t file_id, uint16_t tag_id, InkWarrant warrant);
+bool tagfs_has_tag(uint64_t file_id, uint16_t tag_id);
 
 /* The tag a spelling names, interned and put on the file, both inside one
  * mounting of the volume: OK, or the real refusal — the registry's (the tag
@@ -747,7 +748,7 @@ bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id);
  * ERR_PERMISSION_DENIED for a tag of key system, boot or god without the
  * warrant, ERR_TAGFS_RECORD_FULL, ERR_DEVICE_NOT_READY, ERR_TAGFS_READ_ONLY,
  * ERR_NO_MEMORY, a Spare's refusal; ERR_TAGFS_NOT_INITIALIZED with no volume. */
-error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling* tag, InkWarrant warrant);
+error_t tagfs_add_tag_string(uint64_t file_id, const TagSpelling* tag, InkWarrant warrant);
 /* What the spelling names comes off the file: that tag when it has a value,
  * every tag of its key when it is bare. 0 once one of them came off, or a
  * negative -ERR_*: -ERR_TAGFS_TAG_NOT_FOUND when the file wore none of them,
@@ -755,7 +756,7 @@ error_t tagfs_add_tag_string(uint32_t file_id, const TagSpelling* tag, InkWarran
  * taking one off — -ERR_PERMISSION_DENIED for a tag of key system, boot or god
  * without the warrant, -ERR_DEVICE_NOT_READY, -ERR_TAGFS_READ_ONLY,
  * -ERR_NO_MEMORY, or a Spare's refusal. */
-int  tagfs_remove_tag_string(uint32_t file_id, const TagSpelling* tag, InkWarrant warrant);
+int  tagfs_remove_tag_string(uint64_t file_id, const TagSpelling* tag, InkWarrant warrant);
 
 bool tagfs_key_is_reserved(const char *key, size_t key_len);
 
@@ -769,18 +770,18 @@ bool tagfs_key_is_reserved(const char *key, size_t key_len);
  * ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY when the question
  * could not be put to the index.
  */
-error_t  TagFSQueryPage(const TagSpelling* tags, uint32_t count, uint32_t from,
-                        uint32_t* out, uint32_t room, bool want_total, TagFSPage* page);
-error_t  TagFSListPage(uint32_t from, uint32_t* out, uint32_t room, bool want_total,
+error_t  TagFSQueryPage(const TagSpelling* tags, uint32_t count, uint64_t from,
+                        uint64_t* out, uint32_t room, bool want_total, TagFSPage* page);
+error_t  TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
 /* The file id the next create takes — no id of this volume has reached it.
  * 0 when no volume is mounted. */
-uint32_t tagfs_file_ceiling(void);
+uint64_t tagfs_file_ceiling(void);
 
 /* The file opened for one operation: NULL when it is not there, or when the
  * handle, its extents or its place among the file's open handles could not
  * be had. */
-TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags);
+TagFSFileHandle* tagfs_open(uint64_t file_id, uint32_t flags);
 void             tagfs_close(TagFSFileHandle* handle);
 
 /* Up to `size` bytes from the handle's offset into the kernel's `buffer`: OK
@@ -812,11 +813,11 @@ error_t          tagfs_write(TagFSFileHandle* handle, const struct PlotSource* s
 
 /* One run of exactly `count` blocks, the lowest that is free: 0, or -1 when
  * there is none (block_map.h, BlockMapTake). */
-int      tagfs_alloc_blocks(uint32_t count, uint32_t* out_start_block);
+int      tagfs_alloc_blocks(uint32_t count, uint64_t* out_start_block);
 /* The run back: 0, or a negative -ERR_*. A run holding a block that is already
  * free is refused whole (-ERR_TAGFS_EXTENT_ERROR), said, and the map is left
  * as it is. */
-int      tagfs_free_blocks(uint32_t start_block, uint32_t count);
+int      tagfs_free_blocks(uint64_t start_block, uint32_t count);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The free count derived again from the block map, as a mount derives it;
@@ -825,7 +826,7 @@ int      tagfs_free_blocks(uint32_t start_block, uint32_t count);
 int64_t  TagFSAllocatorRederive(void);
 #endif
 
-int         tagfs_get_metadata(uint32_t file_id, TagFSMetadata* out);
+int         tagfs_get_metadata(uint64_t file_id, TagFSMetadata* out);
 TagFSState* tagfs_get_state(void);
 
 /* The file laid in one run, taken near where it begins, its record naming the
@@ -833,7 +834,7 @@ TagFSState* tagfs_get_state(void);
  * is left where it was. A file the system keeps — wearing system, boot or god,
  * or holding the kernel the Deed points at — is not moved, warrant or none
  * (plot.h, PlotGather): ERR_PERMISSION_DENIED. */
-error_t  tagfs_defrag_file(uint32_t file_id);
+error_t  tagfs_defrag_file(uint64_t file_id);
 /* How fragmented the volume's files are: the share, in percent, of the steps
  * from one of a file's blocks to its next that are a gap — the next run not
  * beginning where the one before it ends — rounded up, so one gap never reads
@@ -852,28 +853,28 @@ uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps);
  * what it gave does not match the digest recorded when the block was written
  * (integrity/integrity.h, which names the block and publishes it); a write
  * ERR_DEVICE_NOT_READY or ERR_WRITE_FAILED, its digest recorded once it lands. */
-error_t  tagfs_read_block(uint32_t block, void* buffer);
-error_t  tagfs_write_block(uint32_t block, const void* buffer);
+error_t  tagfs_read_block(uint64_t block, void* buffer);
+error_t  tagfs_write_block(uint64_t block, const void* buffer);
 
 /* One block of the volume's own records — a chain's link, a stamp, the pool's
  * head or a block of it, a page of the integrity map — through the same doors
  * with the integrity map left out, which covers none of them (RT-22). The same
  * refusals, but never ERR_CHECKSUM. */
-error_t  TagFSMetaBlockRead(uint32_t block, void* buffer);
-error_t  TagFSMetaBlockWrite(uint32_t block, const void* buffer);
+error_t  TagFSMetaBlockRead(uint64_t block, void* buffer);
+error_t  TagFSMetaBlockWrite(uint64_t block, const void* buffer);
 
 /* `count` blocks from `first` on, in as few commands as the seat takes and
  * checked against nothing: for a reader that checks each block where it hands
  * it out — the read-ahead's fetch, a defrag's copy. A volume assembled in a
  * Braid gives them a block at a time. OK, ERR_DEVICE_NOT_READY or
  * ERR_READ_FAILED. */
-error_t  TagFSReadRun(uint32_t first, uint32_t count, void* buffer);
+error_t  TagFSReadRun(uint64_t first, uint32_t count, void* buffer);
 
 /* A write landed on `block`: no read-ahead window hands out what it held
  * before (read-after-write). tagfs_write_block says so itself; a writer that
  * goes to the medium another way — the asynchronous WriteJob, the Use
  * Context's chain — says so after each block. */
-void     tagfs_readahead_invalidate(uint32_t block);
+void     tagfs_readahead_invalidate(uint64_t block);
 
 /*
  * Read one sector run of the mounted volume, counted from the start of its
