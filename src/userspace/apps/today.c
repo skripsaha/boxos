@@ -1,5 +1,5 @@
 #include "box/print.h"
-#include "box/time.h"
+#include "box/clock.h"
 #include "box/system.h"
 
 static const char *weekday_name(uint8_t wd)
@@ -28,19 +28,21 @@ static const char *weekday_name(uint8_t wd)
 int main(void)
 {
     BoxTime now;
-    int rc = time_get(&now);
+    int rc = clock_boxtime_local(&now);
     if (rc != 0)
     {
-        println("today: failed to read RTC");
+        println("today: failed to read local time");
         exit(1);
     }
 
     char buf[20];
     time_format(&now, buf, sizeof(buf));
 
-    printf("%color%s%color  %s\n",
-           COLOR_CYAN,   buf,
-           COLOR_YELLOW, weekday_name(now.weekday));
+    set_color(COLOR_CYAN);
+    print(buf);
+    set_color(COLOR_YELLOW);
+    print("  ");
+    println(weekday_name(now.weekday));
     set_color(COLOR_DEFAULT);
 
     exit(0);

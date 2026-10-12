@@ -1052,6 +1052,12 @@ static error_t volume_take_ground(uint8_t seat)
     }
 
     memcpy(g_state.uuid, head.head.uuid, 16);
+    memset(g_state.volume_name, 0, sizeof(g_state.volume_name));
+    const VolumeBorn *born =
+        (const VolumeBorn *)DeedStamp(&head, VOLUME_STAMP_BORN, &bytes);
+    if (born && bytes >= sizeof(*born))
+        memcpy(g_state.volume_name, born->maker, sizeof(g_state.volume_name));
+    g_state.volume_bytes = head.head.sectors * VOLUME_DEED_SECTOR_BYTES;
 
     /*
      * The layout has to fit inside the volume that states it. Everything below
@@ -2633,6 +2639,9 @@ static void tagfs_clear_the_ground(void)
     IntegrityShutdown();
     TagFS_TestsShutdown();
 
+    memset(g_state.uuid, 0, sizeof(g_state.uuid));
+    memset(g_state.volume_name, 0, sizeof(g_state.volume_name));
+    g_state.volume_bytes = 0;
     g_state.initialized = false;
 }
 

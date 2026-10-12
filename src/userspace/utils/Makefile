@@ -64,7 +64,7 @@ BOXLIB_START = ../build/boxlib_start.o
 UTILS = help create show files tag untag name trash erase \
         me info say reboot bye defrag fsck ipc_test memtag hw \
         timezone logsave lastsaid rgbtest usetest luggagetest rollcall handset headcount \
-        draft playtime lavalamp finish
+        draft playtime lavalamp finish taskcenter
 
 .PHONY: all clean
 
@@ -111,6 +111,10 @@ timezone.elf: $(BOXLIB_START) timezone.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.
 	@# address-to-name table, so .symtab and .debug_* would be a second copy of
 	@# what the image can already tell you at runtime — and this one costs half
 	@# a megabyte of a 24 MB image.
+	@x86_64-elf-objcopy --strip-all $@
+
+taskcenter.elf: $(BOXLIB_START) taskcenter.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) taskcenter.o $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.

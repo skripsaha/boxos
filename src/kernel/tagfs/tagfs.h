@@ -358,6 +358,8 @@ typedef struct {
  */
 typedef struct {
     uint8_t          uuid[16];      /* which volume this is */
+    char             volume_name[16]; /* Deed's short maker/name, NUL-padded */
+    uint64_t         volume_bytes;  /* whole mounted volume capacity */
     VolumeLayout     layout;        /* where its parts are, in volume blocks */
     VolumeGeometry   geometry;      /* what it was laid out for */
     VolumeBoot       boot;          /* where the loader finds the kernel; zero when the Deed says nothing */

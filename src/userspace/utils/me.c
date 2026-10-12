@@ -2,6 +2,9 @@
 #include "box/system.h"
 #include "box/convert.h"
 #include "box/time.h"
+#include "box/clock.h"
+#include "box/string.h"
+#include "box/sync.h"
 
 /* Format a byte count as "X.YY MB" or "X.YY GB" — two decimals, truncated
  * rather than rounded, without floats. Always emits a trailing NUL into buf
@@ -30,7 +33,7 @@ static void fmt_bytes(uint64_t bytes, char *buf, size_t buf_size)
         unit      = "B";
     }
     char tmp[24];
-    uint_to_str((unsigned)whole, tmp, sizeof(tmp));
+    uint64_to_str(whole, tmp, sizeof(tmp));
     size_t pos = 0;
     for (size_t i = 0; tmp[i] && pos < buf_size - 6; i++) buf[pos++] = tmp[i];
     if (frac_x100 > 0 && pos < buf_size - 6) {
@@ -44,6 +47,17 @@ static void fmt_bytes(uint64_t bytes, char *buf, size_t buf_size)
         if (unit[1]) buf[pos++] = unit[1];
     }
     buf[pos] = '\0';
+}
+
+static void wait_for_sample_window(uint32_t milliseconds)
+{
+    volatile uint64_t wait_word __attribute__((aligned(8))) = 0;
+    error_t rc = addr_park(&wait_word, 0, milliseconds);
+    if (rc == OK || rc == ERR_TIMEOUT) return;
+
+    uint64_t started_ms = clock_uptime_ms();
+    while (clock_uptime_ms() - started_ms < milliseconds)
+        yield();
 }
 
 int main(void) {
@@ -80,6 +94,44 @@ int main(void) {
            info.cpu_total, info.cpu_total == 1 ? "" : "s",
            info.cpu_k_cores, info.cpu_app_cores,
            info.cpu_app_cores == 1 ? "" : "s");
+
+    system_resources_t resources_before;
+    system_resources_t resources_after;
+    int resources_rc = system_resources(&resources_before);
+    int usage_rc = resources_rc;
+    if (resources_rc == 0) {
+        wait_for_sample_window(100);
+        usage_rc = system_resources(&resources_after);
+    }
+    if (resources_rc == 0 && resources_before.volume_present) {
+        char disk_free[24];
+        fmt_bytes(resources_before.volume_free_bytes, disk_free, sizeof(disk_free));
+        char disk_name[17];
+        memcpy(disk_name, resources_before.volume_name, 16);
+        disk_name[16] = '\0';
+        printf("  Disk:      %s — %s free\n",
+               disk_name[0] ? disk_name : "unnamed volume", disk_free);
+    } else {
+        printf("  Disk:      unavailable\n");
+    }
+    if (usage_rc == 0) {
+        uint64_t busy = resources_after.cpu_busy_tsc >= resources_before.cpu_busy_tsc
+                      ? resources_after.cpu_busy_tsc - resources_before.cpu_busy_tsc : 0;
+        uint64_t total_cpu = resources_after.cpu_total_tsc >= resources_before.cpu_total_tsc
+                           ? resources_after.cpu_total_tsc - resources_before.cpu_total_tsc : 0;
+        unsigned load = 0;
+        if (total_cpu != 0) {
+            if (busy >= total_cpu) {
+                load = 100;
+            } else {
+                load = (unsigned)((busy * 100ULL) / total_cpu);
+            }
+        }
+        if (load > 100) load = 100;
+        printf("  Load:      %u%% CPU\n", load);
+    } else {
+        printf("  Load:      unavailable\n");
+    }
     /* Inverted UX: silent when the TSC invariant CPUID bit is set
      * (the production-correct state), loud when it isn't (timing may
      * drift with P-states). Previous "(invariant)" tag confused users

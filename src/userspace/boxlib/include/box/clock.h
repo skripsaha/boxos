@@ -54,8 +54,8 @@ uint64_t clock_unix_now(void);
  * backing for std::chrono::system_clock::now(). */
 uint64_t clock_unix_now_ns(void);
 
-/* Calendar form. Computed in userspace from boot_unix_secs + uptime_us — the
- * kernel does NOT do calendar arithmetic in the IRQ.
+/* Calendar form in UTC. Computed in userspace from boot_unix_secs + uptime_us
+ * — the kernel does NOT do calendar arithmetic in the IRQ.
  *
  * This used to be declared against `struct time_t_`, a type that was forward-
  * declared here and DEFINED NOWHERE; clock.c cast through it into the real
@@ -63,6 +63,14 @@ uint64_t clock_unix_now_ns(void);
  * time_t, a name <ctime> needs for an arithmetic type. Ф41-e gave it the name
  * the rest of the tree had always used for it, and the phantom went with it. */
 int clock_boxtime(BoxTime *out);
+
+/* Convert a UTC BoxTime to the machine's configured civil timezone. The
+ * seconds/nanosec fields remain the absolute UTC instant; only the calendar
+ * fields become local. These helpers are provided by boxcxx because the IANA
+ * timezone database lives in the C++ runtime. C callers must link libboxcxx
+ * when using them. */
+int clock_boxtime_to_local(const BoxTime *utc, BoxTime *out);
+int clock_boxtime_local(BoxTime *out);
 
 /* Convert a TSC delta to nanoseconds using the calibrated frequency
  * cached on the ClockBoard. ns = (tsc * 1_000_000) / freq_khz. */

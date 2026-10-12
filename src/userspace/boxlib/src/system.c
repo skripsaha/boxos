@@ -448,6 +448,49 @@ int sysinfo(system_info_t *info)
     return 0;
 }
 
+int system_resources(system_resources_t *out)
+{
+    if (!out) return -ERR_INVALID_ARGUMENT;
+    uint8_t blob[80] = {0};
+    uint32_t got = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_RESOURCES,
+                     NULL, 0, NULL, 0,
+                     blob, sizeof(blob), &got, BOX_ANSWER_GUARANTEED, NULL);
+    if (rc != 0) return box_fail(rc);
+    if (got < sizeof(blob)) return -ERR_INTERNAL;
+
+    memcpy(out->volume_name, blob + 0, 16);
+    memcpy(&out->volume_free_bytes, blob + 16, 8);
+    out->volume_present = blob[24];
+    memset(out->_volume_pad, 0, sizeof(out->_volume_pad));
+    memcpy(&out->cpu_busy_tsc,      blob + 32, 8);
+    memcpy(&out->cpu_total_tsc,     blob + 40, 8);
+    memcpy(out->volume_uuid, blob + 48, 16);
+    memcpy(&out->volume_total_bytes, blob + 64, 8);
+    memcpy(&out->volume_used_bytes,  blob + 72, 8);
+    return 0;
+}
+
+int system_core_usage(uint32_t core_index, system_core_usage_t *out)
+{
+    if (!out) return -ERR_INVALID_ARGUMENT;
+
+    uint8_t blob[24] = {0};
+    uint32_t got = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_CORE_USAGE,
+                     &core_index, sizeof(core_index),
+                     NULL, 0, blob, sizeof(blob), &got,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    if (rc != 0) return box_fail(rc);
+    if (got < sizeof(blob)) return -ERR_INTERNAL;
+
+    memcpy(&out->cpu_busy_tsc, blob + 0, 8);
+    memcpy(&out->cpu_total_tsc, blob + 8, 8);
+    out->parked = blob[16];
+    memset(out->_pad, 0, sizeof(out->_pad));
+    return 0;
+}
+
 /* =========================================================================
  *  Filesystem maintenance / telemetry
  * ========================================================================= */

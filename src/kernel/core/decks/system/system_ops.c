@@ -44,6 +44,7 @@
 #include "run.h"            /* TagFSDataCostSay — what the files' bytes cost the medium */
 #include "kernel_config.h"
 #include "amp.h"
+#include "scheduler.h"
 #include "guide.h"   /* guide_dispatch_stats — enclosed/addressed split for perf.dump */
 #include "atomics.h"        /* rdtsc — system.proc.cputime's in-flight term */
 
@@ -1783,6 +1784,93 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return OK;
 }
 
+/* SYSTEM_OP_RESOURCES out_crate:
+ * [16 bytes volume name][u64 free bytes][u8 volume present][7 bytes padding]
+ * [u64 busy TSC ticks][u64 total TSC ticks][16 bytes volume UUID]
+ * [u64 total bytes][u64 used bytes].
+ * The name and free count come from the mounted volume's existing Deed and
+ * Ledger. The UUID and capacity come from the mounted TagFS state. CPU
+ * counters are cumulative, monotonic snapshots; userspace derives a
+ * utilization percentage from two snapshots. */
+#define SYSRES_BLOB_SIZE 80
+
+static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                        const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < SYSRES_BLOB_SIZE) return ERR_BUFFER_TOO_SMALL;
+
+    uint8_t blob[SYSRES_BLOB_SIZE];
+    memset(blob, 0, sizeof(blob));
+
+    bool volume_present = false;
+    if (tagfs_enter()) {
+        TagFSState *fs = tagfs_get_state();
+        uint64_t free_bytes = fs->ledger.free_blocks * (uint64_t)VOLUME_BLOCK_BYTES;
+        uint64_t total_bytes = fs->volume_bytes;
+        if (free_bytes > total_bytes) free_bytes = total_bytes;
+        uint64_t used_bytes = total_bytes - free_bytes;
+        memcpy(blob + 0,  fs->volume_name, sizeof(fs->volume_name));
+        memcpy(blob + 16, &free_bytes, sizeof(free_bytes));
+        volume_present = total_bytes != 0;
+        memcpy(blob + 48, fs->uuid, sizeof(fs->uuid));
+        memcpy(blob + 64, &total_bytes, sizeof(total_bytes));
+        memcpy(blob + 72, &used_bytes, sizeof(used_bytes));
+        tagfs_leave();
+    }
+    blob[24] = volume_present ? 1 : 0;
+
+    uint64_t busy_tsc = 0;
+    uint64_t total_tsc = 0;
+    scheduler_cpu_usage(&busy_tsc, &total_tsc);
+    memcpy(blob + 32, &busy_tsc,  sizeof(busy_tsc));
+    memcpy(blob + 40, &total_tsc, sizeof(total_tsc));
+
+    if (crate_write(out, ctx, blob, sizeof(blob)) != OK) return ERR_INVALID_ADDRESS;
+    return OK;
+}
+
+/* SYSTEM_OP_CORE_USAGE params:[u32 core index] out_crate:
+ * [u64 busy TSC ticks][u64 total TSC ticks][u8 parked][7 bytes padding].
+ * The counters are cumulative; userspace compares two snapshots to obtain
+ * utilization over its display interval. */
+#define SYSCORE_USAGE_BLOB_SIZE 24
+
+static int SysCoreUsage(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                        const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || op->param_size < sizeof(uint32_t) ||
+        op->out_crate == CRATE_INDEX_NONE)
+        return ERR_INVALID_ARGUMENT;
+
+    uint32_t core_index = 0;
+    memcpy(&core_index, op->params, sizeof(core_index));
+    if (core_index >= g_amp.total_cores)
+        return ERR_INVALID_ARGUMENT;
+
+    uint64_t busy_tsc = 0;
+    uint64_t total_tsc = 0;
+    bool parked = false;
+    if (!scheduler_core_cpu_usage((uint8_t)core_index, &busy_tsc, &total_tsc,
+                                  &parked))
+        return ERR_INTERNAL;
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < SYSCORE_USAGE_BLOB_SIZE)
+        return ERR_BUFFER_TOO_SMALL;
+
+    uint8_t blob[SYSCORE_USAGE_BLOB_SIZE] = {0};
+    memcpy(blob + 0, &busy_tsc, sizeof(busy_tsc));
+    memcpy(blob + 8, &total_tsc, sizeof(total_tsc));
+    blob[16] = parked ? 1 : 0;
+    if (crate_write(out, ctx, blob, sizeof(blob)) != OK)
+        return ERR_INVALID_ADDRESS;
+    return OK;
+}
+
 /* =========================================================================
  *  System info — real-time snapshot (no hardcoded values)
  *
@@ -2204,6 +2292,8 @@ error_t SystemDeckRegister(void)
         /* FS maintenance: utility+. */
         { SYSTEM_OP_DEFRAG_FILE,  SysDefragFile,  OP_AUTH_UTILITY,"system.fs.defrag"  },
         { SYSTEM_OP_FRAG_SCORE,   SysFragScore,   OP_AUTH_NONE,   "system.fs.score"   },
+        { SYSTEM_OP_RESOURCES,     SysResources,   OP_AUTH_NONE,   "system.resources"  },
+        { SYSTEM_OP_CORE_USAGE,    SysCoreUsage,   OP_AUTH_NONE,   "system.core.usage" },
         /* Telemetry: admin only. */
         { SYSTEM_OP_PERF_DUMP,    SysPerfDump,    OP_AUTH_SYSTEM, "system.perf.dump"  },
 

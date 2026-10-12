@@ -75,9 +75,11 @@
  * chunk. Params: [u64 va_base][u64 size]. */
 #define SYSTEM_OP_HEAP_PREFAULT     0x14
 
-/* ─── TagFS defrag (0x18 – 0x19) ───────────────────────────────────── */
+/* ─── System telemetry (0x18 – 0x1B) ───────────────────────────────── */
 #define SYSTEM_OP_DEFRAG_FILE       0x18
 #define SYSTEM_OP_FRAG_SCORE        0x19
+#define SYSTEM_OP_RESOURCES         0x1A
+#define SYSTEM_OP_CORE_USAGE        0x1B
 
 /* ─── Process tags (0x20 – 0x22) ───────────────────────────────────── */
 #define SYSTEM_OP_TAG_ADD           0x20

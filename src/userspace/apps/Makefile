@@ -64,7 +64,7 @@ BOXLIB_START = ../build/boxlib_start.o
 
 .PHONY: all clean
 
-all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf current_test.elf htest.elf cxxtest.elf strandtest.elf brookstrand.elf brookexec.elf currentexec.elf strandpark.elf childspin.elf print_stress.elf quietprint.elf exitpaths.elf quilltest.elf
+all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf current_test.elf htest.elf cxxtest.elf strandtest.elf brookstrand.elf brookexec.elf currentexec.elf strandpark.elf childspin.elf print_stress.elf quietprint.elf exitpaths.elf quilltest.elf clock.elf calendar.elf bonsai.elf bigclock.elf snake.elf hacker.elf pipes.elf wordle.elf
 
 # Included AFTER `all`, never before: the fragment's first rule is the tool,
 # and whatever rule make reads first becomes the default goal — an include at
@@ -80,6 +80,9 @@ include ../nameplate.mk
 # override this one).
 %.elf: $(BOXLIB_START) %.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
+
+today.elf: $(BOXLIB_START) today.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) today.o $(BOXCXX) $(BOXLIB) -lgcc)
 
 # Seven objects, one program: the red tests of the Quill write core, the ones
 # only a throwaway image may be asked, the modes the power-cut stand drives
@@ -115,6 +118,30 @@ brookexec.elf: $(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/use
 
 currentexec.elf: $(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) -lgcc)
+
+clock.elf: $(BOXLIB_START) clock.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) clock.o $(BOXCXX) $(BOXLIB) -lgcc)
+
+calendar.elf: $(BOXLIB_START) calendar.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) calendar.o $(BOXCXX) $(BOXLIB) -lgcc)
+
+bonsai.elf: $(BOXLIB_START) bonsai/bonsai.o bonsai/tree.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) bonsai/bonsai.o bonsai/tree.o $(BOXCXX) $(BOXLIB) -lgcc)
+
+bigclock.elf: $(BOXLIB_START) bigclock.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) bigclock.o $(BOXCXX) $(BOXLIB) -lgcc)
+
+snake.elf: $(BOXLIB_START) snake.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) snake.o $(BOXCXX) $(BOXLIB) -lgcc)
+
+hacker.elf: $(BOXLIB_START) hacker.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) hacker.o $(BOXCXX) $(BOXLIB) -lgcc)
+
+pipes.elf: $(BOXLIB_START) pipes.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) pipes.o $(BOXCXX) $(BOXLIB) -lgcc)
+
+wordle.elf: $(BOXLIB_START) wordle.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) wordle.o $(BOXCXX) $(BOXLIB) -lgcc)
 
 # Phase203's child: the only witness to whether teardown runs on a given exit
 # path is a process that took it. Stripped like cxxtest — it needs no debug

@@ -40,6 +40,29 @@ typedef struct {
     uint8_t  tick_source;        /* which part produces that tick   */
 } system_info_t;
 
+/* Read-only machine resources snapshot. CPU counters are cumulative TSC
+ * counters; compare two snapshots to obtain utilization over that interval. */
+typedef struct {
+    char     volume_name[16];
+    uint64_t volume_free_bytes;
+    uint8_t  volume_present;
+    uint8_t  _volume_pad[7];
+    uint64_t cpu_busy_tsc;
+    uint64_t cpu_total_tsc;
+    uint8_t  volume_uuid[16];
+    uint64_t volume_total_bytes;
+    uint64_t volume_used_bytes;
+} system_resources_t;
+
+/* Per-core cumulative CPU accounting. Compare two snapshots for the
+ * utilization of one core over that interval. */
+typedef struct {
+    uint64_t cpu_busy_tsc;
+    uint64_t cpu_total_tsc;
+    uint8_t  parked;
+    uint8_t  _pad[7];
+} system_core_usage_t;
+
 /* Which part is actually producing the system tick. Read it before reporting
  * tick_freq_hz: the frequency alone used to be labelled "PIT", and on every
  * board where the HPET takes IRQ0 through LegacyReplacement that named a chip
@@ -152,6 +175,8 @@ int proc_tag_check(const char* tag, bool* has_tag);
 int reboot(void);
 int shutdown(void);
 int sysinfo(system_info_t* info);
+int system_resources(system_resources_t *out);
+int system_core_usage(uint32_t core_index, system_core_usage_t *out);
 
 /* The file laid in one run, where the volume chooses — near where it begins.
  * The volume's fragmentation score after it (>= 0, as fragmentation()

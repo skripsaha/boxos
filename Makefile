@@ -730,6 +730,14 @@ STRANDTEST_BIN   = $(APPS_DIR)/strandtest.elf
 BROOKSTRAND_BIN  = $(APPS_DIR)/brookstrand.elf
 BROOKEXEC_BIN    = $(APPS_DIR)/brookexec.elf
 CURRENTEXEC_BIN  = $(APPS_DIR)/currentexec.elf
+CLOCK_BIN        = $(APPS_DIR)/clock.elf
+CALENDAR_BIN     = $(APPS_DIR)/calendar.elf
+BONSAI_BIN       = $(APPS_DIR)/bonsai.elf
+BIGCLOCK_BIN     = $(APPS_DIR)/bigclock.elf
+SNAKE_BIN        = $(APPS_DIR)/snake.elf
+HACKER_BIN       = $(APPS_DIR)/hacker.elf
+PIPES_BIN        = $(APPS_DIR)/pipes.elf
+WORDLE_BIN       = $(APPS_DIR)/wordle.elf
 STRANDPARK_BIN   = $(APPS_DIR)/strandpark.elf
 CHILDSPIN_BIN    = $(APPS_DIR)/childspin.elf
 PRINT_STRESS_BIN = $(APPS_DIR)/print_stress.elf
@@ -746,7 +754,7 @@ UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase \
              me info say reboot bye defrag fsck ipc_test memtag hw \
              timezone logsave lastsaid rgbtest usetest luggagetest headcount \
-             draft playtime lavalamp finish
+             draft playtime lavalamp finish taskcenter
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1077,11 +1085,12 @@ $(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 # every binary simply waits for it. The stamp is distrusted whenever any of the
 # binaries it claims to have built is missing, so deleting one by hand heals
 # itself at the next parse instead of silently doing nothing.
-APP_ELFS := $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN)
+APP_ELFS := $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN)
 
 APPS_STAMP  := $(APPS_DIR)/.apps.stamp
 APPS_INPUTS := $(wildcard $(APPS_DIR)/*.c) $(wildcard $(APPS_DIR)/*.cpp) \
-               $(wildcard $(APPS_DIR)/*.h) $(APPS_DIR)/Makefile
+               $(wildcard $(APPS_DIR)/*.h) $(wildcard $(APPS_DIR)/bonsai/*) \
+               $(APPS_DIR)/Makefile
 
 ifneq ($(words $(wildcard $(APP_ELFS))),$(words $(APP_ELFS)))
 $(shell rm -f $(APPS_STAMP))
@@ -1294,6 +1303,14 @@ VOLUME_CONTENT = \
 	$(BROOKSTRAND_BIN)   "app,utility,test" \
 	$(BROOKEXEC_BIN)     "app,utility,test,cxx" \
 	$(CURRENTEXEC_BIN)   "app,utility,test,cxx" \
+	$(CLOCK_BIN)         "app,utility,display,clock,autostart" \
+	$(CALENDAR_BIN)      "app,utility,display,calendar" \
+	$(BONSAI_BIN)        "app,utility,display" \
+	$(BIGCLOCK_BIN)      "app,utility,display,clock" \
+	$(SNAKE_BIN)         "app,utility,game,display" \
+	$(HACKER_BIN)        "app,utility,display" \
+	$(PIPES_BIN)         "app,utility,display" \
+	$(WORDLE_BIN)        "app,utility,display,game" \
 	$(STRANDPARK_BIN)    "app,utility,test" \
 	$(CHILDSPIN_BIN)     "app,utility,test" \
 	$(PRINT_STRESS_BIN)  "app,utility,test" \
@@ -1334,9 +1351,10 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/draft.elf    "utility,storage" \
 	$(UTILS_DIR)/playtime.elf "utility,display" \
 	$(UTILS_DIR)/lavalamp.elf "utility,display" \
-	$(UTILS_DIR)/finish.elf   "utility,system"
+	$(UTILS_DIR)/finish.elf   "utility,system" \
+	$(UTILS_DIR)/taskcenter.elf "utility,display"
 
-$(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL)
+$(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL)
 	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_CONTENT)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \

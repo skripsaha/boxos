@@ -34,6 +34,7 @@ SRCS = src/runtime/cxa_runtime.cpp \
        src/runtime/clocale.cpp \
        src/runtime/cuchar.cpp \
        src/runtime/ctime.cpp \
+       src/runtime/box_time.cpp \
        src/runtime/tzdb.cpp \
        src/runtime/tzdb_text.cpp \
        src/runtime/cstdio.cpp \

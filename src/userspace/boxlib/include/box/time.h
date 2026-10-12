@@ -8,6 +8,11 @@ extern "C" {
 #include "box/types.h"
 #include "box/error.h"
 
+/* A BoxTime is an absolute POSIX/Unix-epoch instant plus its UTC calendar
+ * projection. The calendar fields are deliberately UTC here; callers that
+ * need the machine's civil timezone use clock_boxtime_to_local() from
+ * box/clock.h. Keeping the absolute and civil forms together preserves the
+ * original BoxOS API without making stored timestamps timezone-dependent. */
 typedef struct PACKED {
     uint64_t seconds;
     uint32_t nanosec;

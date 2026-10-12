@@ -52,6 +52,8 @@ volatile uint64_t g_global_tick = 0;
 static scheduler_state_t *g_core_sched;
 static uint32_t g_sched_core_count;
 
+static void scheduler_account_current(scheduler_state_t *s, uint64_t now);
+
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
@@ -71,6 +73,7 @@ static void sched_init_one(scheduler_state_t *s)
     s->last_steal_tick = 0;
     s->is_parked = false;
     s->idle_tick_count = 0;
+    s->accounting_last_tsc = rdtsc();
     runqueue_init(&s->runqueue);
 }
 
@@ -261,6 +264,50 @@ bool scheduler_is_core_parked(uint8_t core_idx)
 scheduler_stats_t scheduler_get_stats(void)
 {
     return g_sched_stats;
+}
+
+static void scheduler_account_current(scheduler_state_t *s, uint64_t now)
+{
+    uint64_t last = s->accounting_last_tsc;
+    if (last != 0 && now > last) {
+        uint64_t delta = now - last;
+        __atomic_fetch_add(&s->accounting_total_tsc, delta, __ATOMIC_RELAXED);
+        process_t *current = __atomic_load_n(&s->current_process, __ATOMIC_ACQUIRE);
+        if (current && !process_is_idle(current))
+            __atomic_fetch_add(&s->accounting_busy_tsc, delta, __ATOMIC_RELAXED);
+    }
+    s->accounting_last_tsc = now;
+}
+
+void scheduler_cpu_usage(uint64_t *busy_tsc, uint64_t *total_tsc)
+{
+    uint64_t busy = 0;
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < g_sched_core_count; i++) {
+        scheduler_state_t *s = &g_core_sched[i];
+        uint64_t core_total = __atomic_load_n(&s->accounting_total_tsc, __ATOMIC_RELAXED);
+        uint64_t core_busy = __atomic_load_n(&s->accounting_busy_tsc, __ATOMIC_RELAXED);
+        total += core_total;
+        busy += core_busy;
+    }
+    if (busy_tsc) *busy_tsc = busy;
+    if (total_tsc) *total_tsc = total;
+}
+
+bool scheduler_core_cpu_usage(uint8_t core_idx, uint64_t *busy_tsc,
+                              uint64_t *total_tsc, bool *parked)
+{
+    if (!g_core_sched || core_idx >= g_sched_core_count)
+        return false;
+
+    scheduler_state_t *s = &g_core_sched[core_idx];
+    if (busy_tsc)
+        *busy_tsc = __atomic_load_n(&s->accounting_busy_tsc, __ATOMIC_RELAXED);
+    if (total_tsc)
+        *total_tsc = __atomic_load_n(&s->accounting_total_tsc, __ATOMIC_RELAXED);
+    if (parked)
+        *parked = __atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -965,6 +1012,8 @@ void schedule(void *frame_ptr)
     if (!s) {
         return;
     }
+
+    scheduler_account_current(s, rdtsc());
 
     /* Quiescence tick — bumped on EVERY schedule entry, BEFORE the parked
      * early-return (a parked-but-still-ticking core must advance it too;

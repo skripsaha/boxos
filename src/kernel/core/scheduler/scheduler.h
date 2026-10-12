@@ -73,6 +73,11 @@ typedef struct {
      * Written only by the core itself, with its interrupts off; read by its
      * own interrupts. */
     volatile uint32_t held;
+    /* TSC accounting for system-wide CPU utilization. Each core updates its
+     * own counters at scheduler entry; readers take an atomic snapshot. */
+    volatile uint64_t accounting_last_tsc;
+    volatile uint64_t accounting_busy_tsc;
+    volatile uint64_t accounting_total_tsc;
 } scheduler_state_t;
 
 // ============================================================================
@@ -112,6 +117,9 @@ bool scheduler_is_core_parked(uint8_t core_idx);
 
 // Statistics
 scheduler_stats_t scheduler_get_stats(void);
+void scheduler_cpu_usage(uint64_t *busy_tsc, uint64_t *total_tsc);
+bool scheduler_core_cpu_usage(uint8_t core_idx, uint64_t *busy_tsc,
+                              uint64_t *total_tsc, bool *parked);
 
 int sched_determine_priority(process_t *proc);
 error_t sched_enqueue(process_t *proc);
