@@ -9674,7 +9674,9 @@ edits = {
  "table": [
   ("src/kernel/tagfs/file_table/file_table.c",
    "        error_t  got     = SpareStamp(TAGFS_FILETBL_MAGIC, &g_image, &block, &stamped);\n",
-   "        error_t  got     = tagfs_alloc_blocks(1, &block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   /* " + M + ": the new block is linked with no stamp */\n"),
+   "        uint64_t taken   = 0;   /* " + M + ": the new block is linked with no stamp */\n"
+   "        error_t  got     = tagfs_alloc_blocks(1, &taken) == 0 ? OK : ERR_TAGFS_NO_SPACE;\n"
+   "        block = (uint32_t)taken;   /* format v1: the table's link is a u32 block */\n"),
   ("src/kernel/tagfs/file_table/file_table.c",
    "    error_t ready = VolumeFlushFor(need);\n",
    "    error_t ready = OK;   /* " + M + ": and no flush stands between it and its link */\n    (void)need;\n"),
@@ -9693,7 +9695,9 @@ edits = {
  "registry": [
   ("src/kernel/tagfs/tag_registry/tag_registry.c",
    "        rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);\n",
-   "        rc = tagfs_alloc_blocks(1, &reg->spare_block) == 0 ? OK : ERR_TAGFS_NO_SPACE;   /* " + M + ": the new block is taken and never stamped */\n"),
+   "        uint64_t taken = 0;   /* " + M + ": the new block is taken and never stamped */\n"
+   "        rc = tagfs_alloc_blocks(1, &taken) == 0 ? OK : ERR_TAGFS_NO_SPACE;\n"
+   "        reg->spare_block = (uint32_t)taken;   /* format v1: the registry's link is a u32 block */\n"),
   ("src/kernel/tagfs/tag_registry/tag_registry.c",
    "    rc = TagFSMetaBlockWrite(reg->spare_block, reg->spare_image);\n",
    "    reg->tail_image->next_block = reg->spare_block;   /* " + M + ": the link goes down before the block it names */\n"
@@ -9796,7 +9800,7 @@ a = "    TagFSMetadata meta;\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"cow-test\
 assert s.count(a) == 1, "stand leak anchor missing"
 open(p, "w").write(s.replace(a,
     "    TagFSMetadata meta;\n"
-    "    uint32_t      leaked;   /* logcheck mutation: a block taken and never given back */\n"
+    "    uint64_t      leaked;   /* logcheck mutation: a block taken and never given back */\n"
     "\n"
     "    TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &leaked), 0, \"a block is taken\");\n"
     "    TEST_ASSERT_EQ(tagfs_create_file(\"cow-test\", NULL, 0, &file_id), 0, \"a file is created\");\n", 1))
@@ -11385,7 +11389,7 @@ s = open(p).read()
 a = "    TagFSLockTake(&reg->lock);\n    bool owed = reg->written_next < reg->next_id || reg->tail_owed;\n"
 assert s.count(a) == 1, "abbamut registry-flush anchor missing"
 s = s.replace(a, "    TagFSLockTake(&reg->lock);\n"
-                 "    uint32_t logcheck_taken;   /* logcheck mutation: a block taken under the registry's lock at every flush */\n"
+                 "    uint64_t logcheck_taken;   /* logcheck mutation: a block taken under the registry's lock at every flush */\n"
                  "    if (tagfs_alloc_blocks(1, &logcheck_taken) == 0)\n"
                  "        tagfs_free_blocks(logcheck_taken, 1);\n"
                  "    bool owed = reg->written_next < reg->next_id || reg->tail_owed;\n", 1)
