@@ -48,6 +48,11 @@ error_t MountReadVolume(const char** what);
  * LedgerIssueFileId to refuse; past 0xFFFFFFFE it is every id issued. */
 uint32_t MountNextFileId(uint32_t ledger_next, uint64_t top_row, uint64_t top_record);
 
+/* The census's claim of one file's ground (ground_census.h, GROUND_FILE, as
+ * `fid`'s): the blocks the DATA Strips of its record name — a hole names none
+ * (file_record.h, StripWalkNextGround). Between GroundCensusBegin and End. */
+void    MountClaimRuns(const struct FileRecord* rec, uint64_t fid);
+
 /* After the door has opened and the integrity map is up (RT-22): on a mount
  * whose seal was not written by a machine stopping cleanly, the digests of
  * the blocks the last cycle's records name are set back to unknown — a block

@@ -1,6 +1,7 @@
 #include "tests.h"
 #include "stand_tests.h"
 #include "../tagfs.h"
+#include "../file_map/file_map.h"
 #include "block_fail.h"
 #include "boardroom.h"
 #include "amp.h"
@@ -61,21 +62,15 @@ bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t*
 
 bool StandBlockOf(uint64_t file_id, uint64_t k, uint64_t* out_block)
 {
-    TagFSMetadata meta;
-    bool          found = false;
-
-    memset(&meta, 0, sizeof(meta));
-    if (tagfs_get_metadata(file_id, &meta) != 0)
+    FileSpot spot;
+    if (!tagfs_enter())
         return false;
-    for (uint32_t e = 0; e < meta.extent_count && meta.extents; e++) {
-        if (k < meta.extents[e].count) {
-            *out_block = meta.extents[e].start + k;
-            found = true;
-            break;
-        }
-        k -= meta.extents[e].count;
-    }
-    tagfs_metadata_free(&meta);
+    FileRecord* rec   = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    bool        found = rec && FileRecordFind(rec, k, &spot) && spot.kind == STRIP_DATA;
+    if (found)
+        *out_block = spot.block;
+    FileRecordRelease(rec);
+    tagfs_leave();
     return found;
 }
 

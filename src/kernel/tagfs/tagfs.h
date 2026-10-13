@@ -292,11 +292,12 @@ typedef struct OpenFileEntry {
     struct OpenFileEntry*   next;
 } OpenFileEntry;
 
-/* A file opened for one operation. A handle opened to read carries the record
- * as the open found it — `extents` and `file_size` — and only a read walks
- * them; one opened only to write carries no extents: its work loads the record
- * under the file's Helm (plot.h, PlotLoad) and leaves here only where it ended
- * — `offset`, and the size it left. `view_gen` is the newest Ink when the open
+/* A file opened for one operation. A handle opened to read holds the record
+ * as the open found it — a reference on it (file_map/file_record.h), never a
+ * copy of its runs — and its `file_size`, and only a read walks them; one
+ * opened only to write holds no record (NULL): its work loads the record under
+ * the file's Helm (plot.h, PlotLoad) and leaves here only where it ended —
+ * `offset`, and the size it left. `view_gen` is the newest Ink when the open
  * looked: ground an Ink after it frees from the file rests until the handle is
  * closed (helm.h). `warrant` is the caller's (InkWarrant): what the handle's
  * work may change, set by whoever opened it for a program, none from the open. */
@@ -306,11 +307,10 @@ typedef struct TagFSFileHandle {
     InkWarrant  warrant;
     uint64_t    offset;
     uint64_t    file_size;
-    Strip*      extents;
-    uint32_t    extent_count;
+    struct FileRecord* rec;
     OpenFileEntry* ofe;
 
-    /* Which mounting of the volume the extents above were copied out of.
+    /* Which mounting of the volume the record above was taken from.
      *
      * A medium that leaves and comes back is READ AGAIN, so the block numbers
      * a handle is carrying describe the volume as it was before it left. On
@@ -787,9 +787,10 @@ error_t  TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_to
  * 0 when no volume is mounted. */
 uint64_t tagfs_file_ceiling(void);
 
-/* The file opened for one operation: NULL when it is not there, or when the
- * handle, its extents or its place among the file's open handles could not
- * be had. */
+/* The file opened for one operation: NULL when it is not there, when it has
+ * no record in memory, or when the handle or its place among the file's open
+ * handles could not be had. A handle opened to read holds the record by
+ * reference; one opened only to write holds none (TagFSFileHandle). */
 TagFSFileHandle* tagfs_open(uint64_t file_id, uint32_t flags);
 void             tagfs_close(TagFSFileHandle* handle);
 
@@ -850,6 +851,13 @@ error_t  tagfs_defrag_file(uint64_t file_id);
  * as none. The live files counted and the gaps found are said through
  * out_files and out_gaps when they are not NULL. */
 uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps);
+#ifdef CONFIG_VOLUME_TESTS
+/* One record's share of that score, as the walk of the live files counts it:
+ * the gaps a read of it seeks across, and the steps between its blocks of
+ * ground — for the stand, whose records with holes no volume of format v1
+ * holds. */
+void     TagFSFragOfRecord(const struct FileRecord* rec, uint32_t* gaps, uint64_t* steps);
+#endif
 
 // ----------------------------------------------------------------------------
 // Block I/O (for subsystem use) — a run of blocks in as few commands as the

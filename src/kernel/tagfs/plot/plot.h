@@ -2,6 +2,7 @@
 #define TAGFS_PLOT_H
 
 #include "../tagfs.h"
+#include "../file_map/file_record.h"
 #include "vmm.h"
 
 /*
@@ -136,6 +137,12 @@ error_t  PlotAppendRun(Plot *p, uint64_t start, uint32_t count);
  * cuts them into: its length in *out_bytes when it does. */
 bool     PlotFits(const TagFSMetadata *record, uint32_t *out_bytes);
 
+/* The same, the record's runs given as the count of extents PackV1 would cut
+ * them into (`record`'s own runs not asked): for a record whose runs memory
+ * holds in a Tract — counted where they lie (PackV1RecordExtents) and judged
+ * before they are laid flat for the packer. */
+bool     PlotFitsExtents(const TagFSMetadata *record, uint64_t extents, uint32_t *out_bytes);
+
 /* How many extents of format v1 a record has room for beside its tags and its
  * name: 0 when they leave it none. */
 uint32_t PlotRunRoom(const TagFSMetadata *record);
@@ -143,6 +150,9 @@ uint32_t PlotRunRoom(const TagFSMetadata *record);
 /* How many extents format v1 cuts `count` Strips into: one for each 0xFFFF
  * blocks of a Strip, and one for what is left of it. */
 uint64_t PackV1Extents(const Strip *strips, uint32_t count);
+
+/* The same count of a record's Strips, walked where the record holds them. */
+uint64_t PackV1RecordExtents(const FileRecord *rec);
 
 /* Ground under every block of [0, end) bytes: what the file lacks is taken
  * through its Allotment near its last block, each run a Stake. Then the
@@ -256,6 +266,34 @@ error_t  PlotSourcePull(const PlotSource *src, uint64_t at, void *dst, uint32_t 
  * file's order — a read, the source's pages, a write — and *out_done is what
  * landed before it: the blocks of a stretch before a refused one are laid. */
 error_t  PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
+
+/*
+ * PlotConveyance — what the Plot did to the runs it was loaded with, as the
+ * splices of the record `cur` it loaded them from (file_record.h, BookSplice):
+ * a new array the caller frees, *count splices — none when the runs are as
+ * they were — each putting in Strips of the Plot's own runs, so the Plot is
+ * not changed while they are used. Applied to `cur` (FileRecordSplice) they
+ * make a record whose Strips are the Plot's, Strip for Strip, and give the
+ * ground it let go. Asked by the Ink once it holds the record the Plot was
+ * loaded from — the same shape (TagFSInkPlot). OK or ERR_NO_MEMORY.
+ */
+error_t  PlotConveyance(const Plot *p, const FileRecord *cur, BookSplice **out, uint64_t *count);
+
+#if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
+/* After every Ink of format v1 (plot_conveyance.c): whether memory's record
+ * `rec` is the record format v1 packed (`packed`, `bytes` long) — its header
+ * field by field, its blocks where its Strips lay them. True when it is; said
+ * — and in a STRICT kernel stopped at — when not. */
+bool     PackV1Agrees(const FileRecord *rec, const uint8_t *packed, uint32_t bytes);
+
+/* After a Plot's Ink, the record `rec` that `sp` (nsp splices, PlotConveyance)
+ * built from `cur` held to all three copies of what the Ink lays: it is the
+ * record v1 packed (PackV1Agrees), its Strips are the Plot's runs Strip for
+ * Strip, and the ground the splices free is the ground the Plot let go. */
+bool     PlotConveyanceAgrees(const Plot *p, const FileRecord *cur, const BookSplice *sp,
+                              uint64_t nsp, const FileRecord *rec, const uint8_t *packed,
+                              uint32_t bytes);
+#endif
 
 /* A record packed for the medium into `out` — room for the length PlotFits
  * gives — each Strip cut into extents of at most PLOT_RUN_MOST blocks: OK and

@@ -234,7 +234,7 @@ static void PoolMirrorLetGo(uint64_t fid, const RecordWhere* by)
 }
 
 error_t PoolMirrorPut(uint64_t fid, FileRecord* rec, const RecordWhere* where,
-                      FileMapStake* stake)
+                      uint32_t row_block, FileMapStake* stake)
 {
     if (!rec || !(rec->flags & TAGFS_FILE_ACTIVE)) {
         FileRecordRelease(rec);
@@ -243,7 +243,7 @@ error_t PoolMirrorPut(uint64_t fid, FileRecord* rec, const RecordWhere* where,
         return OK;
     }
     RecordWhere was;
-    error_t     rc = FileMapRecordPut(PoolFiles(), fid, rec, where, stake, &was);
+    error_t     rc = FileMapRecordPut(PoolFiles(), fid, rec, where, row_block, stake, &was);
     if (rc == OK) {
         PoolLiveMove(&was, where);
         PoolReplaced(&was, where->link);

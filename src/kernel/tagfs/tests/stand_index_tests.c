@@ -48,7 +48,7 @@ static bool StandIndexFill(FileMap* map, uint32_t step)
         uint64_t      fid  = 1 + k * step;
         TagFSMetadata meta = { .file_id = fid, .flags = TAGFS_FILE_ACTIVE,
                                .filename = s_index_name, .tag_ids = &tag, .tag_count = 1 };
-        FileRecord*   rec   = FileRecordOf(&meta);
+        FileRecord*   rec   = FileRecordBuild(&meta);
         FileMapStake  stake = { .count = 0 };
         if (!rec || FileMapStakeFor(map, fid, &stake) != OK) {
             FileRecordRelease(rec);
@@ -56,7 +56,7 @@ static bool StandIndexFill(FileMap* map, uint32_t step)
         }
         RecordWhere   where = { .link = 0, .offset = (uint16_t)(16 + k), .gen = 0, .shape = 0 };
         RecordWhere   was;
-        error_t       put = FileMapRecordPut(map, fid, rec, &where, &stake, &was);
+        error_t       put = FileMapRecordPut(map, fid, rec, &where, 0, &stake, &was);
         FileMapStakeLetGo(&stake);
         if (put != OK || FileMapRowSet(map, fid, 3, 16 + k) != OK)
             return false;

@@ -2912,41 +2912,35 @@ static TagFSFileHandle *tagfs_open_inside(uint64_t file_id, uint32_t flags)
     handle->file_id = file_id;
     handle->flags   = flags;
     handle->ofe     = ofe;
-    /* Which mounting of the volume these extents were copied out of. A handle
-     * is refused after the volume has been read again, because the blocks it
-     * names then belong to whatever the volume keeps there now. */
+    /* Which mounting of the volume the record it holds was taken from. A
+     * handle is refused after the volume has been read again, because the
+     * blocks it names then belong to whatever the volume keeps there now. */
     handle->mount_epoch = tagfs_mount_epoch();
     HelmViewTake(handle);
 
     /*
      * ‼ AN OPEN HOLDS WHAT IT NAMES, OR IS REFUSED (MP-D16). The record is the
      * map's — the authority every read stands on, read with no I/O — and a
-     * file whose record is not there, or whose extents cannot be copied, is
-     * not handed out as an empty file. A handle opened only to write copies no
-     * extents at all (W-STALE): its work loads the record under the file's
-     * Helm, and a copy from before the Helm was its own would be stale.
+     * file whose record is not there is not handed out as an empty file. A
+     * handle opened to read holds the record itself, a reference and never a
+     * copy of its runs: a record is never changed once built — a change
+     * builds the next — so what the handle walks stays as the open found it.
+     * A handle opened only to write holds none at all (W-STALE): its work
+     * loads the record under the file's Helm, and one from before the Helm was
+     * its own would be stale.
      */
     bool        reads = (flags & TAGFS_HANDLE_READ) || !(flags & TAGFS_HANDLE_WRITE);
     FileRecord *rec   = FileMapRecordHold(g_state.files, file_id, NULL);
-    bool        held  = rec != NULL;
-    if (held && reads && rec->extent_count > 0)
-    {
-        handle->extents = kmalloc(sizeof(Strip) * rec->extent_count);
-        held = handle->extents != NULL;
-        if (held)
-        {
-            memcpy(handle->extents, rec->extents, sizeof(Strip) * rec->extent_count);
-            handle->extent_count = rec->extent_count;
-        }
-    }
-    if (held)
-        handle->file_size = rec->size;
-    FileRecordRelease(rec);
-    if (!held)
+    if (!rec)
     {
         tagfs_close(handle);
         return NULL;
     }
+    handle->file_size = rec->size;
+    if (reads)
+        handle->rec = rec;
+    else
+        FileRecordRelease(rec);
     return handle;
 }
 
@@ -2957,7 +2951,7 @@ void tagfs_close(TagFSFileHandle *handle)
     HelmViewLetGo(handle);
     ofe_release(handle->ofe);
     ReadAheadLetGo(handle);
-    kfree(handle->extents);
+    FileRecordRelease(handle->rec);
     kfree(handle);
 }
 
@@ -3108,7 +3102,10 @@ int tagfs_get_metadata(uint64_t file_id, TagFSMetadata *out)
 
 /* The file's record, out of the map of live files — the authority every read
  * stands on, holding every live file's newest record, so no road leads to the
- * medium. -1 for a file the map does not hold, or no memory for the copy. */
+ * medium. Its header — name, tags, flags, size, times — and none of its runs:
+ * no caller of this reads them, and a file's runs are walked in its record
+ * (file_map/file_record.h), never copied out. -1 for a file the map does not
+ * hold, or no memory for the copy. */
 static int tagfs_get_metadata_inside(uint64_t file_id, TagFSMetadata *out)
 {
     if (!out)

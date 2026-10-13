@@ -2,6 +2,8 @@
 #include "stand_tests.h"
 #include "../tagfs.h"
 #include "../plot/plot.h"
+#include "../ink/ink.h"
+#include "../file_map/file_map.h"
 #include "../block_map/block_map.h"
 #include "write_job.h"   /* WriteJobSubmit, StorageCallWarrant — the deck's road and its warrant */
 #include "block_fail.h"  /* BLOCKFAIL that refuses nothing — a count of the writes to a block */
@@ -10,6 +12,7 @@
 #include "process.h"
 #include "cabin.h"
 #include "auth_tags.h"   /* the fixed authority bits a cabin's warrant is read from */
+#include "amp.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -83,15 +86,19 @@ static int StandTakeOff(uint64_t file_id, const char* text, InkWarrant warrant)
  * begins. False when the record does not read. */
 static bool StandShape(uint64_t file_id, uint64_t* size, uint32_t* extents, uint64_t* first)
 {
-    TagFSMetadata meta;
-    memset(&meta, 0, sizeof(meta));
-    if (tagfs_get_metadata(file_id, &meta) != 0)
+    FileSpot spot;
+    if (!tagfs_enter())
         return false;
-    *size    = meta.size;
-    *extents = meta.extent_count;
-    *first   = meta.extent_count ? meta.extents[0].start : 0;
-    tagfs_metadata_free(&meta);
-    return true;
+    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    if (rec) {
+        *size    = rec->size;
+        *extents = (uint32_t)rec->strip_count;
+        *first   = FileRecordFind(rec, 0, &spot) ? spot.block : 0;
+    }
+    bool held = rec != NULL;
+    FileRecordRelease(rec);
+    tagfs_leave();
+    return held;
 }
 
 /* The Deed's word on the kernel's blocks pointed at one block of the data run,
@@ -337,6 +344,69 @@ out:
 }
 
 // ----------------------------------------------------------------------------
+// The guard's refusal asks the heap nothing
+//
+// A delete is guarded on what the file's record holds — the tags it wears and
+// the blocks its Strips lie on — read in place, so the refusal of a file the
+// system keeps to a call with no warrant, and of the kernel's file to any
+// call, comes before the first allocation of the delete: a heap with nothing
+// left never turns either into ERR_NO_MEMORY. HEAPFAIL armed on the first
+// allocation of the call never fires.
+// ----------------------------------------------------------------------------
+
+/* The file given up with `warrant`, the first allocation of the call refused:
+ * the answer, and whether any allocation was asked. */
+static error_t StandWarrantQuitclaimBare(uint64_t file_id, InkWarrant warrant, bool* asked)
+{
+    InkReceipt receipt;
+    HeapFailArm(amp_get_core_index(), 1);
+    error_t rc = InkQuitclaim(file_id, warrant, &receipt);
+    *asked = HeapFailFired();
+    HeapFailDisarm();
+    return rc;
+}
+
+static TestResult TestStandWarrantRefusedBeforeMemory(void)
+{
+    TestResult  verdict = TEST_PASS;
+    uint64_t    file_id = 0;
+    uint64_t    size    = 0, first = 0;
+    uint32_t    extents = 0;
+    bool        asked   = false;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    TestFillAt(g_test_output, TAGFS_BLOCK_SIZE, 0x3A770500u, 0);
+    TEST_ASSERT(StandMakeFile("stand_warrant_m", g_test_output, TAGFS_BLOCK_SIZE, &file_id),
+                "a one-block file of the test's own");
+    TEST_ASSERT_OK(StandPutOn(file_id, STAND_WARRANT_KEPT, INK_WARRANTED),
+                   "it wears a tag of key system");
+    TEST_ASSERT_EQ(StandWarrantQuitclaimBare(file_id, INK_UNWARRANTED, &asked),
+                   ERR_PERMISSION_DENIED, "its delete with no warrant, the heap refusing, is "
+                   "refused for what it wears");
+    TEST_ASSERT(!asked, "before an allocation was asked");
+
+    TEST_ASSERT_EQ(StandTakeOff(file_id, STAND_WARRANT_KEPT, INK_WARRANTED), 0,
+                   "the tag is taken off with the warrant");
+    TEST_ASSERT(StandShape(file_id, &size, &extents, &first) && extents == 1,
+                "the file lies in one run");
+    StandBootOnto(first);
+    TEST_ASSERT_EQ(StandWarrantQuitclaimBare(file_id, INK_WARRANTED, &asked), ERR_PERMISSION_DENIED,
+                   "with the Deed pointed at it, its delete with the warrant, the heap refusing, is "
+                   "refused for the blocks it lies on");
+    TEST_ASSERT(!asked, "before an allocation was asked");
+    StandBootBack();
+out:
+    HeapFailDisarm();
+    StandBootBack();
+    if (file_id)
+        tagfs_delete_file(file_id, INK_WARRANTED);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
 // A file the system keeps is not gathered, warrant or none (B10)
 //
 // The file is given two extents for certain: after its first block, the block
@@ -518,6 +588,8 @@ static const TestCase g_stand_warrant_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_warrant_boot_run_refused_to_both",
       .func  = TestStandWarrantBootRunRefusedToBoth, .reach = TEST_WRITES_TO_VOLUME },
+    { .name  = "stand_warrant_refused_before_memory",
+      .func  = TestStandWarrantRefusedBeforeMemory, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_warrant_kept_file_not_gathered",
       .func  = TestStandWarrantKeptFileNotGathered, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_warrant_deck_reads_the_cabin", .func = TestStandWarrantDeckReadsTheCabin,

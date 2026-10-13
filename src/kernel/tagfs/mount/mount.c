@@ -132,6 +132,17 @@ static bool MountRowLost(uint64_t fid, uint32_t mb, uint32_t mo, const MountFile
     return true;
 }
 
+/* Out of line: the walk's path down the record's Tract would stand on the
+ * mount's own frame, which the batch of ids it walks by nearly fills. */
+__attribute__((noinline)) void MountClaimRuns(const FileRecord* rec, uint64_t fid)
+{
+    StripWalk walk;
+    Strip     run;
+    StripWalkBegin(rec, &walk);
+    while (StripWalkNextGround(&walk, &run))
+        GroundClaim(GROUND_FILE, run.start, run.count, fid);
+}
+
 /*
  * One file the map holds — a row, a record, or both — judged by the rules the
  * volume stands on, and put into the tag index and the census. OK, or
@@ -177,8 +188,7 @@ static error_t MountFile(uint64_t fid, MountFileCount* n)
         else
             n->derived++;
     }
-    for (uint32_t e = 0; e < rec->extent_count; e++)
-        GroundClaim(GROUND_FILE, rec->extents[e].start, rec->extents[e].count, fid);
+    MountClaimRuns(rec, fid);
 
     /* A file its tags do not find is a file lost to every query until the
      * next mount, and a trashed one shows as live: the mount refuses whole,
@@ -596,10 +606,13 @@ void MountAfterDoor(void)
     uint32_t    reset = 0;
     for (uint32_t i = 0; i < count && IntegrityIsInitialized(); i++) {
         FileRecord* rec = FileMapRecordHold(fs->files, fids[i], NULL);
+        StripWalk   walk;
+        Strip       run;
         if (!rec)
             continue;
-        for (uint32_t e = 0; e < rec->extent_count; e++)
-            IntegrityForget(rec->extents[e].start, rec->extents[e].count);
+        StripWalkBegin(rec, &walk);
+        while (StripWalkNextGround(&walk, &run))
+            IntegrityForget(run.start, run.count);
         FileRecordRelease(rec);
         reset++;
     }

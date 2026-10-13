@@ -152,9 +152,11 @@ void     tagfs_metadata_free(TagFSMetadata* meta);
  * of the chain counts the bytes of the records the map names in it, and the
  * door keeps the count: what a record leaves, what one comes to — and, for the
  * link a record leaves, the newest link a record that took its place lies in,
- * the Quitclaim's included (PoolFront.replaced_by). */
+ * the Quitclaim's included (PoolFront.replaced_by). `row_block`, when it is not
+ * 0, is the block of the file table's row naming the record — set with it, in
+ * one hold of the map (FileMapRecordPut): a new file's. */
 error_t  PoolMirrorPut(uint64_t fid, FileRecord* rec, const RecordWhere* where,
-                       FileMapStake* stake);
+                       uint32_t row_block, FileMapStake* stake);
 
 /* The file out of the map — its record and its row there — through the same
  * door, nothing taking its record's place; the file table is the caller's to

@@ -68,10 +68,10 @@ static uint32_t QueryHides(const uint32_t* tag_ids, uint32_t tag_count,
 // Every file
 // ----------------------------------------------------------------------------
 
-/* The files are the map's that have a row. Every one is below the id the next
- * create takes: the mount derives that id past every row and record the
- * medium holds (mount/mount.c), so no row names an id the volume never
- * issued. */
+/* The files are the map's that have a record (FileMapRows). Every one is below
+ * the id the next create takes: the mount derives that id past every row and
+ * record the medium holds (mount/mount.c), so no live file has an id the
+ * volume never issued. */
 static void ListPageInside(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                            TagFSPage* page)
 {
@@ -187,20 +187,37 @@ typedef struct {
     uint64_t steps;
 } FragCount;
 
-static void FragAdd(FragCount* frag, uint32_t flags, const Strip* extents, uint32_t count)
+/* A file's ground, Strip by Strip in its order: a gap is a DATA Strip that does
+ * not begin where the DATA Strip before it ended — a hole lies on no ground, so
+ * the walk of ground passes over it, and a read crosses it with no seek. */
+static void FragAdd(FragCount* frag, const FileRecord* rec)
 {
-    if (!(flags & TAGFS_FILE_ACTIVE))
+    if (!(rec->flags & TAGFS_FILE_ACTIVE))
         return;
-    uint64_t blocks = 0;
-    for (uint32_t e = 0; extents && e < count; e++) {
-        if (e > 0 && extents[e].start != extents[e - 1].start + extents[e - 1].count)
+    StripWalk walk;
+    Strip     run;
+    uint64_t  blocks = 0, end = 0;
+    StripWalkBegin(rec, &walk);
+    while (StripWalkNextGround(&walk, &run)) {
+        if (blocks > 0 && run.start != end)
             frag->gaps++;
-        blocks += extents[e].count;
+        blocks += run.count;
+        end     = run.start + run.count;
     }
     if (blocks > 1)
         frag->steps += blocks - 1;
     frag->files++;
 }
+
+#ifdef CONFIG_VOLUME_TESTS
+void TagFSFragOfRecord(const FileRecord* rec, uint32_t* gaps, uint64_t* steps)
+{
+    FragCount frag = { 0, 0, 0 };
+    FragAdd(&frag, rec);
+    *gaps  = frag.gaps;
+    *steps = frag.steps;
+}
+#endif
 
 /* One file's record, out of the map of live files: every live file has one. */
 static void FragOfFile(FragCount* frag, uint64_t fid)
@@ -208,7 +225,7 @@ static void FragOfFile(FragCount* frag, uint64_t fid)
     FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
     if (!rec)
         return;
-    FragAdd(frag, rec->flags, rec->extents, rec->extent_count);
+    FragAdd(frag, rec);
     FileRecordRelease(rec);
 }
 

@@ -185,4 +185,9 @@ error_t  InkMayChange(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
 bool     InkWearsGuarded(const uint32_t* tags, uint32_t count);
 bool     InkTouchesBoot(const Strip* runs, uint32_t count);
 
+/* The second question asked of a file's record where it holds its runs —
+ * walked, never laid flat, so a guard asks the heap nothing: whether any of
+ * its DATA Strips holds a block of the kernel the Deed points the loader at. */
+bool     InkRecordTouchesBoot(const FileRecord* rec);
+
 #endif /* TAGFS_INK_H */
