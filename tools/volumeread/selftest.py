@@ -40,7 +40,10 @@ class Targets:
         not the BOOT file, and whose record lies in a closed block of the pool:
         a file whose loss nothing else stands in for, and whose record changed
         in place is a closed block the seal no longer bears out.
-    U — the next such file of one block: the file a block S let go is taken by.
+    U — the next file of one block that meets the same terms except where its
+        record lies: the file a block S let go is taken by. Its case writes U
+        again over S's old block and reseals, so U's own record may stand in
+        the open tail, where an image's last records fall as it grows.
     L — the live file with the most blocks, lowest fid first.
     F — the lowest data block starting four free ones (`reconcile` sits a
         registry block at F+3)."""
@@ -54,14 +57,15 @@ class Targets:
         counts = {}
         for r in f.records:
             counts[r.fid] = counts.get(r.fid, 0) + 1
-        ok = [e for e in live if e["record"].Blocks() >= 1 and counts.get(e["fid"]) == 1 and
-              e["record"].tags and e["record"].name and e["record"].block != tail_block and
-              ondisk.RECORD_HEADER <= e["record"].len and
-              "fid %u '%s'" % (e["fid"], e["record"].name) != c0.boot_file]
+        aimed = [e for e in live if e["record"].Blocks() >= 1 and counts.get(e["fid"]) == 1 and
+                 e["record"].tags and e["record"].name and
+                 ondisk.RECORD_HEADER <= e["record"].len and
+                 "fid %u '%s'" % (e["fid"], e["record"].name) != c0.boot_file]
+        ok = [e for e in aimed if e["record"].block != tail_block]
         if not ok or len(live) < 2:
             raise Unreadable("the image has no live file a case can aim at")
         self.S = min(ok, key=lambda e: (e["record"].Blocks(), e["fid"]))
-        ones = [e for e in ok if e is not self.S and e["record"].Blocks() == 1]
+        ones = [e for e in aimed if e is not self.S and e["record"].Blocks() == 1]
         if not ones:
             raise Unreadable("the image has no second one-block file a case can aim at")
         self.U = min(ones, key=lambda e: e["fid"])
