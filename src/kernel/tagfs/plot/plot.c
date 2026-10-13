@@ -51,18 +51,17 @@ error_t PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant)
     FileRecord *rec = FileMapRecordHold(tagfs_get_state()->files, fid, &where);
     if (!rec)
         return ERR_FILE_NOT_FOUND;
-    int copied = FileRecordCopyOut(rec, &p->meta);
+    /* The record's header is the Plot's own copy, and its runs laid flat are
+     * the Plot's runs from here on — the one copy of them a call of format v1
+     * works on and packs (PackV1); the record itself is never changed, and the
+     * Ink conveys what the Plot did to it (PlotConveyance). */
+    int     copied = FileRecordCopyOut(rec, &p->meta);
+    error_t flat   = copied == 0 ? FileRecordFlatten(rec, &p->runs, &p->run_count) : ERR_NO_MEMORY;
     FileRecordRelease(rec);
-    if (copied != 0)
+    if (flat != OK)
         return ERR_NO_MEMORY;
-    p->shape = where.shape;
-
-    /* The record's extents are the Plot's runs from here on. */
-    p->runs      = p->meta.extents;
-    p->run_count = p->meta.extent_count;
-    p->run_room  = p->meta.extent_count;
-    p->meta.extents      = NULL;
-    p->meta.extent_count = 0;
+    p->shape    = where.shape;
+    p->run_room = p->run_count;
     for (uint32_t i = 0; i < p->run_count; i++)
         p->blocks += p->runs[i].count;
     p->blocks_before = p->blocks;

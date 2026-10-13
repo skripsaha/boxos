@@ -1,5 +1,4 @@
 #include "read.h"
-#include "../plot/plot.h"
 #include "../integrity/integrity.h"
 
 error_t ReadSinkPush(const ReadSink *sink, uint64_t at, const void *src, uint32_t bytes)
@@ -17,9 +16,32 @@ error_t ReadSinkPush(const ReadSink *sink, uint64_t at, const void *src, uint32_
     return vmm_user_buf_commit_out(sink->vmm, sink->user + (uintptr_t)at, src, bytes);
 }
 
-error_t ReadLocate(const TagFSFileHandle *h, uint64_t k, uint64_t *block, uint32_t *left)
+/* What a hole pushes into a sink that is a program's pages: a block of zeros
+ * at a time, never a buffer made for it. */
+static const uint8_t s_hole[TAGFS_BLOCK_SIZE];
+
+error_t ReadSinkZeros(const ReadSink *sink, uint64_t at, uint64_t bytes)
 {
-    if (PlotFind(h->extents, h->extent_count, k, block, left))
+    if (at > sink->bytes || bytes > sink->bytes - at)
+        return ERR_INVALID_ARGUMENT;
+    if (sink->kernel) {
+        memset(sink->kernel + at, 0, bytes);
+        return OK;
+    }
+    while (bytes > 0) {
+        uint32_t n  = bytes < sizeof(s_hole) ? (uint32_t)bytes : (uint32_t)sizeof(s_hole);
+        error_t  rc = ReadSinkPush(sink, at, s_hole, n);
+        if (rc != OK)
+            return rc;
+        at    += n;
+        bytes -= n;
+    }
+    return OK;
+}
+
+error_t ReadLocate(const TagFSFileHandle *h, uint64_t k, FileSpot *out)
+{
+    if (h->rec && FileRecordFind(h->rec, k, out))
         return OK;
     kprintf("[TagFS] file %llu: no extent covers block %llu of its %llu bytes — the record "
             "describes more file than there are blocks, and the read stops there\n",
@@ -73,10 +95,13 @@ error_t TagFSReadStream(TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_
 
     uint8_t *buf  = NULL;
     uint64_t done = 0;
-    uint64_t block = 0;
-    uint32_t left = 0;
+    FileSpot spot = { 0 };
     error_t  rc   = OK;
 
+    /* Block by block, each found in the record once per Strip: the next block
+     * of the same Strip is the one after it, and only a Strip's end asks the
+     * record again — so a read of n Strips is n finds of O(log n) each, never a
+     * walk from the first run at every Strip's end. */
     while (done < size) {
         uint64_t pos    = h->offset + done;
         uint32_t offset = (uint32_t)(pos % TAGFS_BLOCK_SIZE);
@@ -84,24 +109,37 @@ error_t TagFSReadStream(TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_
         if (chunk > size - done)
             chunk = (uint32_t)(size - done);
 
-        if (done > 0 && left > 0) {
-            block++;
-            left--;
-        } else if ((rc = ReadLocate(h, pos / TAGFS_BLOCK_SIZE, &block, &left)) != OK) {
+        if (done > 0 && spot.left > 0) {
+            spot.block += spot.kind == STRIP_DATA ? 1u : 0u;
+            spot.left--;
+        } else if ((rc = ReadLocate(h, pos / TAGFS_BLOCK_SIZE, &spot)) != OK) {
             break;
+        }
+
+        if (spot.kind == STRIP_HOLE) {
+            rc = ReadSinkZeros(sink, done, chunk);
+            if (rc != OK) {
+                kprintf("[TagFS] file %llu: the hole at its block %llu answered %u — %llu of %llu "
+                        "bytes had landed before it\n", h->file_id,
+                        (unsigned long long)(pos / TAGFS_BLOCK_SIZE), (unsigned)rc,
+                        (unsigned long long)done, (unsigned long long)size);
+                break;
+            }
+            done += chunk;
+            continue;
         }
 
         /* The blocks of this run the read still needs, from this one on. */
         uint64_t need = (offset + (size - done) + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE;
-        uint32_t run  = need > (uint64_t)left + 1 ? left + 1 : (uint32_t)need;
+        uint32_t run  = need > (uint64_t)spot.left + 1 ? spot.left + 1 : (uint32_t)need;
 
         const uint8_t *from = NULL;
-        rc = ReadStreamBlock(h, block, run, &buf, &from);
+        rc = ReadStreamBlock(h, spot.block, run, &buf, &from);
         if (rc == OK)
             rc = ReadSinkPush(sink, done, from + offset, chunk);
         if (rc != OK) {
             kprintf("[TagFS] file %llu: block %llu answered %u — %llu of %llu bytes had landed "
-                    "before it\n", h->file_id, (unsigned long long)block, (unsigned)rc,
+                    "before it\n", h->file_id, (unsigned long long)spot.block, (unsigned)rc,
                     (unsigned long long)done, (unsigned long long)size);
             break;
         }

@@ -2,6 +2,7 @@
 #define TAGFS_READ_H
 
 #include "../tagfs.h"
+#include "../file_map/file_record.h"
 #include "vmm.h"
 
 /*
@@ -30,12 +31,18 @@ typedef struct ReadSink {
  * ERR_NO_MEMORY). */
 error_t ReadSinkPush(const ReadSink *sink, uint64_t at, const void *src, uint32_t bytes);
 
-/* Block k of the handle's file on the medium, and how many of the file's next
- * blocks follow it in the same run. A block inside the file's size that no
- * extent covers is not a hole to be read as zeros: it is a record that
- * describes more file than there are blocks, said with the numbers and
- * answered ERR_METADATA_CORRUPTED (S2). */
-error_t ReadLocate(const TagFSFileHandle *h, uint64_t k, uint64_t *block, uint32_t *left);
+/* `bytes` zeros into the sink from `at` on — what a hole of a file reads as —
+ * answered as ReadSinkPush answers. */
+error_t ReadSinkZeros(const ReadSink *sink, uint64_t at, uint64_t bytes);
+
+/* Block k of the handle's file — found in the record it holds, down its Tract
+ * (file_map/file_record.h), never by walking every run from the first — and
+ * how many of the file's next blocks follow it in the same Strip. A hole is a
+ * Strip the record names (STRIP_HOLE): it reads as zeros, and no block of the
+ * medium is asked. A block inside the file's size that no Strip covers is not
+ * a hole: it is a record that describes more file than there are blocks, said
+ * with the numbers and answered ERR_METADATA_CORRUPTED (S2). */
+error_t ReadLocate(const TagFSFileHandle *h, uint64_t k, FileSpot *out);
 
 /*
  * A handle's read-ahead window: as many blocks as the medium hands over in one

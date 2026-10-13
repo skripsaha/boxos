@@ -39,10 +39,25 @@ uint64_t PackV1Extents(const Strip *strips, uint32_t count)
     return extents;
 }
 
+uint64_t PackV1RecordExtents(const FileRecord *rec)
+{
+    StripWalk walk;
+    Strip     run;
+    uint64_t  extents = 0;
+    StripWalkBegin(rec, &walk);
+    while (StripWalkNext(&walk, &run))
+        extents += ((uint64_t)run.count + PLOT_RUN_MOST - 1u) / PLOT_RUN_MOST;
+    return extents;
+}
+
 bool PlotFits(const TagFSMetadata *record, uint32_t *out_bytes)
 {
-    uint32_t name    = PlotNameBytes(record);
-    uint64_t extents = PackV1Extents(record->extents, record->extent_count);
+    return PlotFitsExtents(record, PackV1Extents(record->extents, record->extent_count), out_bytes);
+}
+
+bool PlotFitsExtents(const TagFSMetadata *record, uint64_t extents, uint32_t *out_bytes)
+{
+    uint32_t name = PlotNameBytes(record);
     if (record->tag_count > PLOT_V1_COUNT_MOST || extents > PLOT_V1_COUNT_MOST ||
         name > PLOT_V1_COUNT_MOST)
         return false;

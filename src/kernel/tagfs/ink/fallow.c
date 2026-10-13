@@ -4,6 +4,7 @@
 #include "../settle/settle.h"
 #include "../use_memory/use_memory.h"
 #include "../glean/glean.h"
+#include "../file_map/file_record.h"
 
 struct FallowNode {
     FallowNode* next;
@@ -54,14 +55,46 @@ static FallowNode* NodeAlloc(uint32_t room, FallowKind kind, uint64_t fid)
     return n;
 }
 
+/* Only ground comes to rest: a hole (STRIP_HOLE) names no block, and a node
+ * that kept one would give the allocator whatever its start reads as. */
 FallowNode* FallowNodeMake(const Strip* runs, uint32_t count, FallowKind kind, uint64_t fid)
 {
-    FallowNode* n = NodeAlloc(count, kind, fid);
-    if (n && count) {
-        memcpy(n->runs, runs, sizeof(Strip) * count);
-        n->count = count;
-    }
+    uint32_t ground = 0;
+    for (uint32_t i = 0; i < count; i++)
+        ground += runs[i].kind == STRIP_DATA;
+    FallowNode* n = NodeAlloc(ground, kind, fid);
+    for (uint32_t i = 0; n && i < count; i++)
+        if (runs[i].kind == STRIP_DATA)
+            n->runs[n->count++] = runs[i];
     return n;
+}
+
+error_t FallowNodeOfRecord(const FileRecord* rec, FallowKind kind, FallowNode** out)
+{
+    StripWalk   walk;
+    Strip       run;
+    uint64_t    ground = 0;
+    FallowNode* n      = NULL;
+
+    *out = NULL;
+    StripWalkBegin(rec, &walk);
+    while (StripWalkNextGround(&walk, &run))
+        ground++;
+    if (ground == 0)
+        return OK;
+    if (ground > UINT32_MAX) {
+        kprintf("[TagFS] file %llu: its %llu runs of ground are more than a node of Fallow "
+                "counts — the change that gives them up is refused\n", rec->file_id,
+                (unsigned long long)ground);
+        return ERR_NO_MEMORY;
+    }
+    if (!(n = NodeAlloc((uint32_t)ground, kind, rec->file_id)))
+        return ERR_NO_MEMORY;
+    StripWalkBegin(rec, &walk);
+    while (n->count < n->room && StripWalkNextGround(&walk, &run))
+        n->runs[n->count++] = run;
+    *out = n;
+    return OK;
 }
 
 FallowNode* FallowNodeRoom(uint32_t blocks, FallowKind kind)

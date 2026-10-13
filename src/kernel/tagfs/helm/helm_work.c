@@ -2,6 +2,7 @@
 #include "../ink/ink.h"
 #include "../settle/settle.h"
 #include "../run/run.h"  /* TagFSRunBlocks — how much the medium takes in one command */
+#include "../file_map/file_record.h"
 
 /*
  * The work a Helm's holder does, synchronously (helm.h). The holder is the only
@@ -26,19 +27,19 @@ bool HelmRoomCameBack(error_t *rc)
 }
 
 /* The file's record for this call's Plot: ERR_FILE_NOT_FOUND at once for a
- * file a Quitclaim gave up, with nothing loaded. A handle that carries no copy
- * of the record views the file from this load on, not from its open: what a
- * holder before it freed is not this one's to keep resting. The Plot is the
- * Helm's holder's, guarded with the warrant the handle carries, and the room
- * its extents need in the record is claimed for that Helm (RT-19,
- * PlotReserve). */
+ * file a Quitclaim gave up, with nothing loaded. A handle that holds no runs of
+ * the record — opened only to write, or onto a file of none — views the file
+ * from this load on, not from its open: what a holder before it freed is not
+ * this one's to keep resting. The Plot is the Helm's holder's, guarded with the
+ * warrant the handle carries, and the room its extents need in the record is
+ * claimed for that Helm (RT-19, PlotReserve). */
 static error_t HelmPlotLoad(TagFSFileHandle *handle, Plot *plot)
 {
     if (HelmVacated(handle->ofe)) {
         memset(plot, 0, sizeof(*plot));
         return ERR_FILE_NOT_FOUND;
     }
-    if (!handle->extents)
+    if (!handle->rec || handle->rec->strip_count == 0)
         HelmViewTake(handle);
     error_t rc = PlotLoad(plot, handle->file_id, handle->warrant);
     if (rc == OK)

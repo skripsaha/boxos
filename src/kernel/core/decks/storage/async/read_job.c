@@ -143,39 +143,59 @@ static void rjob_answered(uint8_t port, uint8_t slot, error_t status, void *ctx)
         BatonPass(&j->cq_node);
 }
 
+/* The blocks of the file's hole at `spot` the read still needs, from file
+ * byte `pos` on, landed as zeros — no block of the medium asked. */
+static error_t rjob_hole(ReadJob *j, uint64_t pos, const FileSpot *spot)
+{
+    uint64_t end   = (pos / TAGFS_BLOCK_SIZE + (uint64_t)spot->left + 1u) * TAGFS_BLOCK_SIZE;
+    uint64_t bytes = end - pos;
+    if (bytes > j->total - j->landed)
+        bytes = j->total - j->landed;
+    error_t rc = ReadSinkZeros(&j->sink, j->landed, bytes);
+    if (rc == OK)
+        j->landed += bytes;
+    return rc;
+}
+
 /* The next run submitted, or the answer when the read is done or refused
- * before a block of it moves. */
+ * before a block of it moves. The file's holes on the way land as zeros here,
+ * one Strip at a time, and the step goes on to what follows them. */
 static void rjob_step(ReadJob *j)
 {
-    if (j->landed >= j->total) {
-        rjob_answer(j, OK);
-        return;
+    FileSpot spot;
+    for (;;) {
+        if (j->landed >= j->total) {
+            rjob_answer(j, OK);
+            return;
+        }
+        if (TagFSMediumGone()) {
+            rjob_answer(j, ERR_DEVICE_NOT_READY);
+            return;
+        }
+        uint64_t pos = j->start + j->landed;
+        error_t  rc  = ReadLocate(j->handle, pos / TAGFS_BLOCK_SIZE, &spot);
+        if (rc == OK && spot.kind == STRIP_HOLE && (rc = rjob_hole(j, pos, &spot)) == OK)
+            continue;
+        if (rc != OK) {
+            rjob_answer(j, rc);
+            return;
+        }
+        j->block = spot.block;
+        j->head  = (uint32_t)(pos % TAGFS_BLOCK_SIZE);
+        break;
     }
-    if (TagFSMediumGone()) {
-        rjob_answer(j, ERR_DEVICE_NOT_READY);
-        return;
-    }
-
-    uint64_t pos   = j->start + j->landed;
-    uint32_t after = 0;
-    error_t  rc    = ReadLocate(j->handle, pos / TAGFS_BLOCK_SIZE, &j->block, &after);
-    if (rc != OK) {
-        rjob_answer(j, rc);
-        return;
-    }
-    j->head = (uint32_t)(pos % TAGFS_BLOCK_SIZE);
     uint64_t need = (j->head + (j->total - j->landed) + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE;
-    if (need > (uint64_t)after + 1)
-        need = (uint64_t)after + 1;
+    if (need > (uint64_t)spot.left + 1)
+        need = (uint64_t)spot.left + 1;
     if (need > j->dma_blocks)
         need = j->dma_blocks;
     j->count = (uint32_t)need;
 
     /* A seat emptied between the look above and the submit refuses it as a
      * seat that is not there: the medium left, and that is the answer. */
-    rc = BoardroomReadAsync(tagfs_get_seat(), tagfs_block_to_sector(j->block),
-                            j->count * TAGFS_BLOCK_SECTORS, j->dma_phys, rjob_answered, j,
-                            &j->berth);
+    error_t rc = BoardroomReadAsync(tagfs_get_seat(), tagfs_block_to_sector(j->block),
+                                    j->count * TAGFS_BLOCK_SECTORS, j->dma_phys, rjob_answered,
+                                    j, &j->berth);
     if (rc != OK)
         rjob_answer(j, TagFSMediumGone() ? ERR_DEVICE_NOT_READY : rc);
 }

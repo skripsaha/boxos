@@ -8941,16 +8941,27 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 30 (healthy says how) and
-# the 181 of the stand's own twenty-five suites: stand 28, stand_lock 4,
+# the 199 of the stand's own twenty-seven suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
-# stand_plot 10, stand_index 6, stand_ink 5, stand_helm 7, stand_port 2,
+# stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
-# stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 19,
-# stand_warrant 7, stand_room 7, stand_integrity 2, frame 2, width 7. Counted off the code, not a
+# stand_snapshot 1, stand_read 8, stand_run 4, stand_medium 19,
+# stand_warrant 8, stand_room 7, stand_integrity 2, frame 2, width 7,
+# parcel 13, tract 1. Counted off the code, not a
 # run (K9): a suite that drops out of the walk is a test that stopped covering
 # anything, and the count is where that shows. How many of them pass and how
 # many stand aside is the road's — said, not pinned.
-STAND_RUN=211
+STAND_RUN=229
+
+# What a VOLUME_TESTS kernel says of a record memory holds that is not the
+# file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
+# PlotConveyanceAgrees), of a live file the map holds a row and no record of,
+# or the other way round (file_map.c, FileMapRows), of a record that names a
+# run of no blocks (file_record.c, FileRecordBuild), and of a Tract about to
+# stand taller than its fill allows (tract.c, TractTooTall): a STRICT kernel
+# stops at each, and on a road that is not STRICT the line itself is the
+# failure.
+STAND_MIRROR_DEFECT='\[TagFS\] DEFECT: (the record memory holds of file|[0-9]+ file\(s\) of the map of live files|file [0-9]+.s record names a run of no blocks|a Tract of [0-9]+ levels was about to be built)'
 
 # stand_boot TAG KEYS... — boot the image that is on the disk (or the one
 # BOOTDISK names) under VOLUME_TESTS=on and KEYS (the machine), wait for the
@@ -9102,6 +9113,8 @@ stand_judge() {
     chk $? "stand: $what — no caveat was lifted early"
     ! grep -aq 'KERNEL PANIC' "$L"
     chk $? "stand: $what — no panic"
+    ! grep -aqE "$STAND_MIRROR_DEFECT" "$L"
+    chk $? "stand: $what — every record memory held was the file its Ink packed, and every live file had its row"
     grep -aqE "^\[TESTS\] the tests that write go through seat [0-9]+ \($seat\), on the synchronous path" "$L"
     chk $? "stand: $what — the writes' road is said: $(grep -aoE 'go through seat [0-9]+ \([^)]*\)' "$L" | head -1)"
     stand_held "$L" "$what" "$road"
@@ -9147,6 +9160,8 @@ stand_again() {
     chk $? "stand: $what, second boot — the $STAND_RUN ran again, nothing failed and the same $count caveats are held (${said:-no summary})"
     ! grep -aq 'KERNEL PANIC' "$L"
     chk $? "stand: $what, second boot — no panic"
+    ! grep -aqE "$STAND_MIRROR_DEFECT" "$L"
+    chk $? "stand: $what, second boot — every record memory held was the file its Ink packed, and every live file had its row"
     stand_held "$L" "$what, second boot" "$road"
     stand_orders "$L" "$what, second boot"
 }
@@ -9310,8 +9325,12 @@ run_standusb() {
 # call, a caller in the kernel answered the word, an op waited for answered
 # without being asked again — and, on a STRICT kernel through the port, a
 # W_SPARE that answers the allocator's word, which the border stops the
-# machine on. Mutations whose tests do not meet each other's share a boot;
-# each is judged by its own test's own line, number and all.
+# machine on. And the mirror's check after every Ink of format v1 — memory's
+# record held to the one v1 packed — broken three ways, one per kind of Ink:
+# a Plot's last splice not conveyed, a rename's record saying another time, a
+# new file's carrying a flag the packed one does not. Mutations whose tests do
+# not meet each other's share a boot; each is judged by its own test's own
+# line, number and all.
 #
 # And the runner is only worth believing if it cannot be made to pass what it
 # should fail. A failed assertion must say where, and what it saw — shown by
@@ -9377,6 +9396,7 @@ stand_mech_on() {
         registrykeep) marks="src/kernel/tagfs/tag_registry/tag_registry.c:1" ;;
         room)     marks="src/kernel/core/ipc/chit.c:1 src/kernel/tagfs/settle/settle.c:1 src/kernel/core/decks/storage/async/write_job.c:1 src/kernel/core/decks/storage/settle_ops.c:2" ;;
         roomport) marks="src/kernel/core/decks/storage/async/write_job_port.c:1" ;;
+        mirror)   marks="src/kernel/tagfs/plot/plot_conveyance.c:1 src/kernel/tagfs/file_map/file_record.c:1 src/kernel/tagfs/ink/ink.c:1" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
@@ -9588,6 +9608,21 @@ edits = {
    "    error_t rc = PoolSpareBegin(&j->spare_block, &j->spare_image);\n    if (rc == ERR_WOULD_BLOCK) {\n",
    "    error_t rc = PoolSpareBegin(&j->spare_block, &j->spare_image);\n    if (rc == ERR_WOULD_BLOCK && !j) {   /* " + M + ": W_SPARE answers the allocator's word */\n"),
  ],
+ "mirror": [
+  ("src/kernel/tagfs/plot/plot_conveyance.c",
+   "    ConveyanceSplices(cur, p->runs, p->run_count, *out);\n    return OK;\n",
+   "    ConveyanceSplices(cur, p->runs, p->run_count, *out);\n"
+   "    (*count)--;   /* " + M + ": the last splice a Plot made is not conveyed */\n    return OK;\n"),
+  ("src/kernel/tagfs/file_map/file_record.c",
+   "    rec->modified_time = old->modified_time;\n    TractHold(old->tract);\n",
+   "    rec->modified_time = old->modified_time + 1u;   /* " + M + ": a rename's record says another time */\n"
+   "    TractHold(old->tract);\n"),
+  ("src/kernel/tagfs/ink/ink.c",
+   "    rc = InkRecordMake(&meta, &r);\n    if (rc == OK && !(r.rec = FileRecordBuild(&meta))) {\n",
+   "    rc = InkRecordMake(&meta, &r);\n"
+   "    meta.flags |= 0x80000000u;   /* " + M + ": a new file's record carries a flag the packed one does not */\n"
+   "    if (rc == OK && !(r.rec = FileRecordBuild(&meta))) {\n"),
+ ],
  "blind": [
   ("src/kernel/tagfs/tests/tests.c",
    "    kprintf(\"[TESTS] %s failed at %s:%d: %s (%lld, %lld)\\n\",\n",
@@ -9617,7 +9652,9 @@ stand_mech_off() {
              src/kernel/tagfs/tag_registry/tag_registry_load.c src/kernel/core/ipc/chit.c \
              src/kernel/tagfs/settle/settle.c src/kernel/core/decks/storage/async/write_job.c \
              src/kernel/core/decks/storage/settle_ops.c \
-             src/kernel/core/decks/storage/async/write_job_port.c; do
+             src/kernel/core/decks/storage/async/write_job_port.c \
+             src/kernel/tagfs/plot/plot_conveyance.c src/kernel/tagfs/file_map/file_record.c \
+             src/kernel/tagfs/ink/ink.c; do
         restore "$f"
     done
 }
@@ -9630,10 +9667,10 @@ stand_leak_on() {
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tests/snapshot_tests.c"
 s = open(p).read()
-a = "    TagFSMetadata meta;\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"cow-test\", NULL, 0, &file_id), 0, \"a file is created\");\n"
+a = "    uint8_t*      now       = g_test_buffer + COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE;\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"cow-test\", NULL, 0, &file_id), 0, \"a file is created\");\n"
 assert s.count(a) == 1, "stand leak anchor missing"
 open(p, "w").write(s.replace(a,
-    "    TagFSMetadata meta;\n"
+    "    uint8_t*      now       = g_test_buffer + COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE;\n"
     "    uint64_t      leaked;   /* logcheck mutation: a block taken and never given back */\n"
     "\n"
     "    TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &leaked), 0, \"a block is taken\");\n"
@@ -9884,6 +9921,22 @@ STAND_HELD_EOF
     if stand_mut_boot standmut_roomport UEFI=on STRICT=on CORES=4 MEM=4G; then
         stand_red standmut_roomport "a W_SPARE that answers the allocator's word stops a STRICT kernel at the border" \
             'KERNEL PANIC:.*\[CHIT\] DEFECT: storage\.write answered pid 0.s token 0x000000 ERR_WOULD_BLOCK'
+    fi
+    stand_mech_off
+
+    # The mirror's own check (spec_v2 §16.1 p.1) is only worth its silence if a
+    # record memory holds, broken, is said: one per kind of Ink — a Plot whose
+    # last splice is not conveyed, a rename whose record says another time, a
+    # new file whose record carries a flag the packed one does not. Not STRICT,
+    # so each is said by its own line and none stops the machine first.
+    stand_mech_on mirror
+    if stand_mut_boot standmut_mirror CORES=4 MEM=4G; then
+        stand_red standmut_mirror "a Plot's last splice not conveyed leaves memory a record that is not the Plot's" \
+            '\[TagFS\] DEFECT: the record memory holds of file [0-9]+ does not say what its Plot did — its Strips are not the Plot.s runs'
+        stand_red standmut_mirror "a rename's record that says another time is not the one format v1 packed" \
+            '\[TagFS\] DEFECT: the record memory holds of file [0-9]+ is not the one format v1 packed — its times'
+        stand_red standmut_mirror "a new file's record that carries a flag the packed one does not is not it" \
+            '\[TagFS\] DEFECT: the record memory holds of file [0-9]+ is not the one format v1 packed — its flags'
     fi
     stand_mech_off
 

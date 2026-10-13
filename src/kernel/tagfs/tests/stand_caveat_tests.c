@@ -524,14 +524,15 @@ TestResult TestStandWriteAllOrRefusal(void)
 // ----------------------------------------------------------------------------
 // An open with one of its allocations refused
 //
-// Never read through the handle: one that counts extents and holds none takes
-// the kernel down on the first read (tagfs.c, tagfs_read_inside), so each
-// handle is looked at and closed.
+// Never read through the handle: one opened to read that holds no record of
+// its file — it used to count extents and hold none, and took the kernel down
+// on the first read — would read a file of nothing, so each handle is looked
+// at and closed.
 // ----------------------------------------------------------------------------
 
 typedef struct {
     uint32_t refused;
-    uint32_t hollow_at;     /* the first handle that counted extents and held none */
+    uint32_t hollow_at;     /* the first handle opened to read that held no record */
     uint32_t emptied_at;    /* the first that called a one-block file empty */
     uint32_t alone_at;      /* the first with no open-file entry */
 } StandOpenSweep;
@@ -561,7 +562,7 @@ static TestResult StandOpenSweepRun(StandOpenSweep* sweep)
         HeapFailDisarm();
         armed = false;
 
-        bool hollow  = handle && handle->extent_count > 0 && !handle->extents;
+        bool hollow  = handle && !handle->rec;
         bool emptied = handle && handle->file_size != TAGFS_BLOCK_SIZE;
         bool alone   = handle && !handle->ofe;
         tagfs_close(handle);
@@ -597,7 +598,7 @@ TestResult TestStandOpenHoldsWhatItNames(void)
     if (swept != TEST_PASS)
         return swept;
     if (sweep.hollow_at) {
-        TestEvidence("handle counting extents it did not hold at refused allocation",
+        TestEvidence("handle opened to read holding no record at refused allocation",
                      sweep.hollow_at);
         return TEST_DEFECT;
     }

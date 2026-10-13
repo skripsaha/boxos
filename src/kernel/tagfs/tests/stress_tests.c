@@ -1,5 +1,6 @@
 #include "tests.h"
 #include "../tagfs.h"
+#include "../file_map/file_map.h"
 
 // ============================================================================
 // Stress — many files, one large file
@@ -67,8 +68,7 @@ static TestResult test_stress_large_file(void)
     uint64_t         file_id    = 0;
     uint32_t         tag_ids[1] = {1};
     TagFSFileHandle* handle     = NULL;
-    bool             have_meta  = false;
-    TagFSMetadata    meta;
+    FileRecord*      rec        = NULL;
 
     TEST_ASSERT_EQ(tagfs_create_file("large_file", tag_ids, 1, &file_id), 0,
                    "tagfs_create_file should succeed");
@@ -83,14 +83,13 @@ static TestResult test_stress_large_file(void)
     tagfs_close(handle);
     handle = NULL;
 
-    TEST_ASSERT_EQ(tagfs_get_metadata(file_id, &meta), 0, "the file's metadata reads");
-    have_meta = true;
-    uint32_t blocks = 0;
-    for (uint32_t e = 0; e < meta.extent_count && meta.extents; e++)
-        blocks += meta.extents[e].count;
-    TEST_ASSERT_EQ(meta.size, STRESS_LARGE_BYTES, "the file is as long as what was written");
-    TEST_ASSERT_EQ(blocks, STRESS_LARGE_BYTES / TAGFS_BLOCK_SIZE,
+    rec = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    TEST_ASSERT(rec != NULL, "the file's record is held");
+    TEST_ASSERT_EQ(rec->size, STRESS_LARGE_BYTES, "the file is as long as what was written");
+    TEST_ASSERT_EQ(rec->blocks, STRESS_LARGE_BYTES / TAGFS_BLOCK_SIZE,
                    "and holds a block for every 4 KiB of it");
+    FileRecordRelease(rec);
+    rec = NULL;
 
     handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL, "tagfs_open for read should succeed");
@@ -105,8 +104,7 @@ static TestResult test_stress_large_file(void)
     TEST_ASSERT_EQ(TestHandleRead(handle, g_test_output, TAGFS_BLOCK_SIZE), 0,
                    "and the file ends where the writing ended");
 out:
-    if (have_meta)
-        tagfs_metadata_free(&meta);
+    FileRecordRelease(rec);
     if (handle)
         tagfs_close(handle);
     if (file_id)

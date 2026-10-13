@@ -2,6 +2,7 @@
 #include "stand_tests.h"
 #include "../tagfs.h"
 #include "../plot/plot.h"
+#include "../file_map/file_map.h"    /* the file's record, its blocks counted in it */
 #include "../helm/helm.h"            /* a span's and a defrag's windows, one call each */
 #include "../ink/ink.h"              /* InkedGen — one Ink a window */
 #include "../run/run.h"              /* TagFSRunBlocks, and a previous owner's bytes laid */
@@ -58,20 +59,19 @@ static error_t StandPlotWriteAt(uint64_t file_id, uint64_t offset, uint32_t byte
 static bool StandPlotShape(uint64_t file_id, uint64_t* out_size, uint64_t* out_blocks,
                            uint32_t* out_extents)
 {
-    TagFSMetadata meta;
-
-    memset(&meta, 0, sizeof(meta));
-    if (tagfs_get_metadata(file_id, &meta) != 0)
+    if (!tagfs_enter())
         return false;
-    uint64_t blocks = 0;
-    for (uint32_t e = 0; e < meta.extent_count && meta.extents; e++)
-        blocks += meta.extents[e].count;
-    *out_size   = meta.size;
-    *out_blocks = blocks;
-    if (out_extents)
-        *out_extents = meta.extent_count;
-    tagfs_metadata_free(&meta);
-    return true;
+    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    if (rec) {
+        *out_size   = rec->size;
+        *out_blocks = rec->blocks;
+        if (out_extents)
+            *out_extents = (uint32_t)rec->strip_count;
+    }
+    bool held = rec != NULL;
+    FileRecordRelease(rec);
+    tagfs_leave();
+    return held;
 }
 
 /* How many of `n` bytes are not zero. */

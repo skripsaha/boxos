@@ -14,6 +14,64 @@ static TagRegistry* OpsRegistry(void)
     return tagfs_get_state()->registry;
 }
 
+// ----------------------------------------------------------------------------
+// The name is a tag
+//
+// Every file carries the stem of its name — up to the last dot — as its first
+// tag, so "who is called kernel" is a question for the index, not a walk of the
+// volume. create puts the tag there and rename moves it, both through this one
+// rule. The stem is a key, spelled by the one spelling (tag_spelling.h) but
+// never split at ':', and it is read in place: a name is never cut to fit a
+// buffer, so it never wears a shorter tag than itself.
+// ----------------------------------------------------------------------------
+
+/* The stem of a name as a key. OK with out->key NULL when the name has no
+ * stem — ".profile", or nothing but blanks before the dot — and so no tag;
+ * ERR_TAGFS_TAG_TOO_LONG for a stem longer than a key may be. */
+error_t InkNameStem(const char* name, TagSpelling* out)
+{
+    size_t len  = strlen(name);
+    size_t stem = len;
+    for (size_t i = len; i > 0; i--) {
+        if (name[i - 1] == '.') {
+            stem = i - 1;
+            break;
+        }
+    }
+    error_t rc = TagSpellKey(name, stem, out);
+    if (rc == ERR_TAGFS_INVALID_TAG) {
+        out->key = NULL;
+        return OK;
+    }
+    return rc;
+}
+
+error_t InkNameTagIntern(const char* name, uint32_t* out_tag)
+{
+    TagSpelling stem;
+    *out_tag = TAGFS_INVALID_TAG_ID;
+    error_t rc = InkNameStem(name, &stem);
+    if (rc != OK || !stem.key)
+        return rc;
+    rc = TagRegistryIntern(OpsRegistry(), &stem, out_tag);
+    if (rc != OK)
+        return rc;
+    UseContextBindTag(&stem, *out_tag);
+    return TagRegistryFlushFor(OpsRegistry(), *out_tag);
+}
+
+uint32_t InkNameTagLookup(const char* name)
+{
+    TagSpelling stem;
+    if (!name || InkNameStem(name, &stem) != OK || !stem.key)
+        return TAGFS_INVALID_TAG_ID;
+    return TagRegistryLookup(OpsRegistry(), &stem);
+}
+
+// ----------------------------------------------------------------------------
+// The operations
+// ----------------------------------------------------------------------------
+
 /* The tags a new file wears: its name's first, then the caller's, none twice,
  * none invalid, each on the medium before the file wears it. *out is the
  * caller's to kfree. */

@@ -2,6 +2,7 @@
 #include "stand_tests.h"
 #include "../tagfs.h"
 #include "../run/run.h"     /* TagFSRunBlocks, TagFSDataCost — the seat's run, and the trace */
+#include "../file_map/file_map.h"  /* the file's record, its runs walked in it */
 #include "write_job.h"      /* WriteJobSubmit, and the stand's own answer record */
 #include "block_fail.h"     /* BLOCKFAIL — the commands counted at the door, and one refused */
 #include "atomics.h"
@@ -75,26 +76,28 @@ static bool StandRunMake(uint64_t *out_file_id)
  * *out_first is the run's first block. */
 static bool StandRunLiesInOneRun(uint64_t file_id, uint64_t *out_first)
 {
-    TagFSMetadata meta;
-    uint32_t      got = 0;
-    uint64_t      end = 0;
-    bool          one = true;
+    uint32_t  got = 0;
+    uint64_t  end = 0;
+    bool      one = true;
+    StripWalk walk;
+    Strip     run;
 
-    memset(&meta, 0, sizeof(meta));
-    if (tagfs_get_metadata(file_id, &meta) != 0)
+    if (!tagfs_enter())
         return false;
-    for (uint32_t e = 0; meta.extents && e < meta.extent_count && got < STAND_RUN_BLOCKS && one;
-         e++) {
-        uint64_t start = meta.extents[e].start;
-        uint32_t count = meta.extents[e].count;
-        if (got == 0)
-            *out_first = start;
-        else
-            one = start == end;
-        end  = start + count;
-        got += count;
+    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    if (rec) {
+        StripWalkBegin(rec, &walk);
+        while (got < STAND_RUN_BLOCKS && one && StripWalkNext(&walk, &run)) {
+            if (got == 0)
+                *out_first = run.start;
+            else
+                one = run.start == end;
+            end  = run.start + run.count;
+            got += run.count;
+        }
     }
-    tagfs_metadata_free(&meta);
+    FileRecordRelease(rec);
+    tagfs_leave();
     return one && got >= STAND_RUN_BLOCKS;
 }
 

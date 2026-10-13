@@ -251,7 +251,7 @@ static TestResult TestWidthTagPast16Bits(void)
     meta.tag_ids   = tags;
     meta.tag_count = 1;
     TEST_ASSERT(idx != NULL, "an index of the test's own");
-    rec = FileRecordOf(&meta);
+    rec = FileRecordBuild(&meta);
     TEST_ASSERT(rec != NULL && rec->tag_count == 1, "a record in memory wears the tag");
     TEST_ASSERT_EQ(rec->tags[0], WIDTH_TAG_PAST_16, "whole, past 16 bits");
 

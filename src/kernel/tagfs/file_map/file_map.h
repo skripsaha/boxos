@@ -2,6 +2,7 @@
 #define TAGFS_FILE_MAP_H
 
 #include "../tagfs.h"
+#include "file_record.h"
 
 /*
  * The files a mounted volume holds, by file id — and nothing at all for an id
@@ -27,39 +28,6 @@
  * are taken before the lock (a FileMapStake), and nodes and records let go are
  * given back after it.
  */
-
-/* The pool's newest record of a file, as memory keeps it: one allocation,
- * never changed once built, shared by reference and freed with its last one.
- * A reader holds a reference while it reads, so a writer that replaces the
- * record never frees it under the reader. */
-typedef struct FileRecord {
-    volatile uint32_t  refs;
-    uint32_t           bytes;        /* the whole allocation, for the map's count */
-    uint64_t           file_id;
-    uint32_t           flags;
-    uint64_t           size;
-    uint64_t           created_time;
-    uint64_t           modified_time;
-    /* When the Ink that made this record was a small append — its data cost
-     * the medium less than a Settle cycle does — in the cadence's
-     * microseconds; 0 for any other change. Memory only: the cadence asks it
-     * of the next append (settle.h, a frequent small writer). */
-    uint64_t           small_append_us;
-    uint32_t           tag_count;
-    uint32_t           extent_count;
-    uint32_t           name_len;
-    const uint32_t*    tags;         /* these three point into the allocation */
-    const Strip*       extents;
-    const char*        name;         /* NUL-terminated */
-} FileRecord;
-
-/* A record built from `meta`, with one reference: NULL when there is no memory. */
-FileRecord* FileRecordOf(const TagFSMetadata* meta);
-void        FileRecordRelease(FileRecord* rec);
-
-/* A TagFSMetadata of the caller's own made from a record: 0, or -1 with `out`
- * left empty when there is no memory. */
-int         FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out);
 
 /* Where a file's newest record sits in the metadata pool, and which Ink put
  * it there: `link` is the pool chain's link, counted from the chain's head,
@@ -109,9 +77,15 @@ void     FileMapStakeLetGo(FileMapStake* stake);
  * difference, and then `rec` is let go and the map is as it was. A caller that
  * holds the volume's state lock checks FileMapNodesToAdd against its stake
  * first, so the put never reaches the heap under that lock.
+ *
+ * `row_block`, when it is not 0, is the block of the file table's row that
+ * names the record, at the record's own offset: the row is set in the same
+ * hold of the map's lock, so no walk of the live files (FileMapRows) ever
+ * sees the file with a record and no row. 0 leaves the row as it is.
  */
 error_t  FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
-                          const RecordWhere* where, FileMapStake* stake, RecordWhere* was);
+                          const RecordWhere* where, uint32_t row_block, FileMapStake* stake,
+                          RecordWhere* was);
 
 /* How many nodes adding `fid` would take now; 0 when the file is in the map. */
 uint32_t FileMapNodesToAdd(FileMap* map, uint64_t fid);
@@ -149,10 +123,16 @@ void     FileMapRowClear(FileMap* map, uint64_t fid);
  * (may be NULL), a `len` of 0 when it had none. */
 void     FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was);
 
-/* Up to `room` file ids from `from` on that have a row — the live files — in
- * id order: how many were written. A walk of them all asks again from one
+/* Up to `room` file ids from `from` on that have a record — the live files —
+ * in id order: how many were written. A walk of them all asks again from one
  * past the last id it was given, so no lock is held across the walk and what
- * it does with each file may change the map. */
+ * it does with each file may change the map.
+ *
+ * A live file is one memory holds a record of, whatever format the volume is
+ * in. A volume of format v1 — every volume this kernel mounts until it reads
+ * format v2's book — also names each live file in its table, so there a row
+ * with no record, or a record with no row, is a defect of the map: said, and
+ * stopped at in a STRICT kernel. */
 uint32_t FileMapRows(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
 
 /* Up to `room` file ids from `from` on that the map holds at all — a row, a

@@ -164,12 +164,12 @@ static error_t WalkPut(PoolWalk* w, const uint8_t* at, uint32_t len, uint32_t fi
         w->dropped_fid = fid;
 
     bool         active = (meta.flags & TAGFS_FILE_ACTIVE) != 0;
-    FileRecord*  rec    = active ? FileRecordOf(&meta) : NULL;
+    FileRecord*  rec    = active ? FileRecordBuild(&meta) : NULL;
     FileMapStake stake  = { .count = 0 };
     RecordWhere  where  = { .link = link, .offset = (uint16_t)(MPOOL_BLOCK_HEADER + pos),
                             .len = (uint16_t)len, .gen = 0, .shape = 0 };
     tagfs_metadata_free(&meta);
-    if ((active && !rec) || PoolMirrorPut(fid, rec, &where, &stake) != OK) {
+    if ((active && !rec) || PoolMirrorPut(fid, rec, &where, 0, &stake) != OK) {
         kprintf("[MetaPool] there is no memory to hold file %u's record — the map of live "
                 "files is what every read and write of this volume stands on, so it is not "
                 "mounted\n", fid);

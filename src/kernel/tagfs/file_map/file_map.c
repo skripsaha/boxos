@@ -51,95 +51,6 @@ typedef struct {
 } FileMapLeftover;
 
 // ----------------------------------------------------------------------------
-// Records
-// ----------------------------------------------------------------------------
-
-FileRecord* FileRecordOf(const TagFSMetadata* meta)
-{
-    uint32_t tags     = meta->tag_ids ? meta->tag_count : 0;
-    uint32_t extents  = meta->extents ? meta->extent_count : 0;
-    uint32_t name_len = meta->filename ? (uint32_t)strlen(meta->filename) : 0;
-    size_t   bytes    = sizeof(FileRecord) + (size_t)extents * sizeof(Strip) +
-                        (size_t)tags * sizeof(uint32_t) + name_len + 1;
-
-    FileRecord* rec = kmalloc(bytes);
-    if (!rec)
-        return NULL;
-
-    uint8_t* at = (uint8_t*)(rec + 1);
-    rec->refs          = 1;
-    rec->bytes         = (uint32_t)bytes;
-    rec->file_id       = meta->file_id;
-    rec->flags         = meta->flags;
-    rec->size          = meta->size;
-    rec->created_time  = meta->created_time;
-    rec->modified_time = meta->modified_time;
-    rec->small_append_us = 0;
-    rec->tag_count     = tags;
-    rec->extent_count  = extents;
-    rec->name_len      = name_len;
-
-    /* The runs first, where the record's own alignment is theirs. */
-    rec->extents = (const Strip*)at;
-    if (extents)
-        memcpy(at, meta->extents, (size_t)extents * sizeof(Strip));
-    at += (size_t)extents * sizeof(Strip);
-
-    rec->tags = (const uint32_t*)at;
-    if (tags)
-        memcpy(at, meta->tag_ids, (size_t)tags * sizeof(uint32_t));
-    at += (size_t)tags * sizeof(uint32_t);
-
-    rec->name = (const char*)at;
-    if (name_len)
-        memcpy(at, meta->filename, name_len);
-    at[name_len] = '\0';
-    return rec;
-}
-
-void FileRecordRelease(FileRecord* rec)
-{
-    if (rec && __atomic_sub_fetch(&rec->refs, 1, __ATOMIC_ACQ_REL) == 0)
-        kfree(rec);
-}
-
-int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
-{
-    memset(out, 0, sizeof(*out));
-    out->file_id       = rec->file_id;
-    out->flags         = rec->flags;
-    out->size          = rec->size;
-    out->created_time  = rec->created_time;
-    out->modified_time = rec->modified_time;
-
-    if (rec->tag_count) {
-        out->tag_ids = kmalloc(sizeof(uint32_t) * rec->tag_count);
-        if (!out->tag_ids)
-            goto refused;
-        memcpy(out->tag_ids, rec->tags, sizeof(uint32_t) * rec->tag_count);
-        out->tag_count = rec->tag_count;
-    }
-    if (rec->extent_count) {
-        out->extents = kmalloc(sizeof(Strip) * rec->extent_count);
-        if (!out->extents)
-            goto refused;
-        memcpy(out->extents, rec->extents, sizeof(Strip) * rec->extent_count);
-        out->extent_count = rec->extent_count;
-    }
-    out->filename = kmalloc(rec->name_len + 1u);
-    if (!out->filename)
-        goto refused;
-    memcpy(out->filename, rec->name, rec->name_len + 1u);
-    return 0;
-
-refused:
-    kfree(out->tag_ids);
-    kfree(out->extents);
-    memset(out, 0, sizeof(*out));
-    return -1;
-}
-
-// ----------------------------------------------------------------------------
 // The tree, under the map's lock
 // ----------------------------------------------------------------------------
 
@@ -616,7 +527,8 @@ void FileMapDestroy(FileMap* map)
 }
 
 error_t FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
-                         const RecordWhere* where, FileMapStake* stake, RecordWhere* was)
+                         const RecordWhere* where, uint32_t row_block, FileMapStake* stake,
+                         RecordWhere* was)
 {
     FileMapEntry* e;
     memset(was, 0, sizeof(*was));
@@ -632,6 +544,10 @@ error_t FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
     map->record_bytes += rec->bytes;
     e->record = rec;
     e->where  = *where;
+    if (row_block) {
+        e->row_block  = row_block;
+        e->row_offset = where->offset;
+    }
     TagFSLockDrop(&map->lock);
     LeftoverFree(&left);
     return OK;
@@ -762,17 +678,38 @@ void FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was)
     LeftoverFree(&left);
 }
 
+/* ‼ A ROW AND A RECORD DISAGREEING ON A FILE OF FORMAT V1 IS A DEFECT OF THE
+ * MAP, said with the first such file — never taken as one of the live files or
+ * passed over in silence: the two predicates of a live file were one until
+ * the map stopped asking the row (file_map.h, FileMapRows). */
+static void MapRowsDisagree(uint32_t odd, uint64_t fid)
+{
+#if CONFIG_STRICT
+    panic("[TagFS] DEFECT: %u file(s) of the map of live files have a row and no record, or a "
+          "record and no row — file %llu the first", odd, fid);
+#endif
+    kprintf("[TagFS] DEFECT: %u file(s) of the map of live files have a row and no record, or a "
+            "record and no row — file %llu the first; a file with a record is the one taken as "
+            "live\n", odd, fid);
+}
+
 uint32_t FileMapRows(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
 {
-    uint32_t n = 0, pos = 0;
+    uint32_t n = 0, pos = 0, odd = 0;
+    uint64_t odd_fid = 0;
     TagFSLockTake(&map->lock);
     for (FileMapNode* leaf = MapFrom(map, from, &pos); leaf && n < room; leaf = leaf->next, pos = 0) {
         for (; pos < leaf->count && n < room; pos++) {
-            if (leaf->u.entry[pos].row_block)
+            const FileMapEntry* e = &leaf->u.entry[pos];
+            if ((e->record != NULL) != (e->row_block != 0) && odd++ == 0)
+                odd_fid = leaf->key[pos];
+            if (e->record)
                 out[n++] = leaf->key[pos];
         }
     }
     TagFSLockDrop(&map->lock);
+    if (odd)
+        MapRowsDisagree(odd, odd_fid);
     return n;
 }
 

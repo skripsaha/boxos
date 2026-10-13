@@ -10,6 +10,7 @@
 #include "../plot/plot.h"
 #include "../settle/settle.h"
 #include "block_fail.h"   /* BLOCKFAIL that refuses nothing — a count of the writes to the data run */
+#include "amp.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -548,6 +549,62 @@ out:
     return verdict;
 }
 
+/* Whether the file's record, as memory holds it, is called `name`. */
+static bool StandInkCalled(uint64_t file_id, const char* name)
+{
+    if (!tagfs_enter())
+        return false;
+    FileRecord* rec    = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    bool        called = rec && strcmp(rec->name, name) == 0;
+    FileRecordRelease(rec);
+    tagfs_leave();
+    return called;
+}
+
+/* A name wider than a record of format v1 holds, given to a one-block file:
+ * the answer is the record's lack of room, as format v1 always gave it —
+ * judged on the extents the record names before its runs are laid flat for
+ * the packer — so the one allocation before it is the list of tags the file
+ * would wear. HEAPFAIL armed on the call's second allocation never fires, and
+ * the file keeps its name. */
+static TestResult TestStandInkNoRoomBeforeMemory(void)
+{
+    TestResult  verdict = TEST_PASS;
+    uint64_t    file_id = 0;
+    bool        asked   = false;
+    char*       name    = NULL;
+    InkReceipt  receipt;
+    const char* aside   = StandStepsAsideFor();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    name = kmalloc(TAGFS_MPOOL_DATA_SIZE + 1u);
+    TEST_ASSERT(name != NULL, "room for the name");
+    memset(name, 'q', TAGFS_MPOOL_DATA_SIZE);
+    name[0]                     = '.';    /* no stem: the name wears no tag */
+    name[TAGFS_MPOOL_DATA_SIZE] = '\0';
+    TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x72, 0);
+    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+                "a one-block file is made");
+
+    HeapFailArm(amp_get_core_index(), 2);
+    error_t rc = InkFields(file_id, name, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID,
+                           INK_UNWARRANTED, &receipt);
+    asked = HeapFailFired();
+    HeapFailDisarm();
+    TEST_ASSERT_EQ(rc, ERR_TAGFS_RECORD_FULL, "a name wider than a record holds, the heap "
+                   "refusing the second allocation, is refused for the record's room");
+    TEST_ASSERT(!asked, "before more than the list of its tags was allocated");
+    TEST_ASSERT(StandInkCalled(file_id, "test_file"), "and the file keeps its name");
+out:
+    HeapFailDisarm();
+    kfree(name);
+    if (file_id)
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
+    return verdict;
+}
+
 // ============================================================================
 // The suite
 // ============================================================================
@@ -569,6 +626,8 @@ static const TestCase g_stand_ink_tests[] = {
       .func  = TestStandInkQuitclaimIsTheNewestRecord, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a file written and then deleted is named again by the next mount, its "
                        "write's record newer on the medium than its delete" },
+    { .name  = "stand_ink_no_room_before_memory",
+      .func  = TestStandInkNoRoomBeforeMemory, .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_ink_suite = {

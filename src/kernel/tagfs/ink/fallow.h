@@ -76,6 +76,13 @@ typedef struct FallowNode FallowNode;
  * no TagFS lock held: NULL when there is no memory. */
 FallowNode* FallowNodeMake(const Strip* runs, uint32_t count, FallowKind kind, uint64_t fid);
 
+/* A node for the ground the record `rec` names, of its file — every DATA
+ * Strip, walked where the record holds them (file_record.h,
+ * StripWalkNextGround), never laid flat — taken with no TagFS lock held: OK,
+ * with *out NULL for a record that names no ground; ERR_NO_MEMORY, nothing
+ * made. */
+error_t     FallowNodeOfRecord(const struct FileRecord* rec, FallowKind kind, FallowNode** out);
+
 /* A node with room for `blocks` blocks and none in it yet, for a freer that
  * learns its ground under the state lock (Glean): NULL when there is no
  * memory. FallowNodeKeep puts one block in it, under the state lock and

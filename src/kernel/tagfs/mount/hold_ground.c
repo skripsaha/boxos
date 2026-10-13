@@ -19,8 +19,9 @@
  * caller steps out then.
  *
  * It also holds a file open ACROSS the departure, which is the other half:
- * a handle carries its own copy of the file's extents, and the table of open
- * files used to be emptied out from under it by the next mount.
+ * a handle holds the record of the mounting it was opened on — whose blocks
+ * the next mounting may give to another file — and the table of open files
+ * used to be emptied out from under it by the next mount.
  *
  * Three facts come out of a book given up, and each is the failure of a
  * different line:

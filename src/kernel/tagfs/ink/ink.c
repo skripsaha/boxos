@@ -99,18 +99,42 @@ static bool InkTagGuarded(uint32_t tag_id)
            TagSpanIs("god", tag.key, tag.key_len);
 }
 
-bool InkTouchesBoot(const Strip* runs, uint32_t count)
+/* The kernel's blocks among the data run's — [*first, *end) — or false when the
+ * Deed points the loader at none of them. */
+static bool InkBootSpan(uint64_t* first, uint64_t* end)
 {
     TagFSState* fs = InkState();
     if (!fs->boot.kernel_blocks || fs->boot.kernel_block < fs->layout.data_block)
         return false;
-    uint64_t first = fs->boot.kernel_block - fs->layout.data_block;
-    uint64_t end   = first + fs->boot.kernel_blocks;
+    *first = fs->boot.kernel_block - fs->layout.data_block;
+    *end   = *first + fs->boot.kernel_blocks;
+    return true;
+}
+
+bool InkTouchesBoot(const Strip* runs, uint32_t count)
+{
+    uint64_t first = 0, end = 0;
+    if (!InkBootSpan(&first, &end))
+        return false;
     for (uint32_t i = 0; i < count; i++) {
         uint64_t a = runs[i].start, b = a + runs[i].count;
-        if (a < end && b > first)
+        if (runs[i].kind == STRIP_DATA && a < end && b > first)    /* a hole lies on no block */
             return true;
     }
+    return false;
+}
+
+bool InkRecordTouchesBoot(const FileRecord* rec)
+{
+    uint64_t  first = 0, end = 0;
+    StripWalk walk;
+    Strip     run;
+    if (!InkBootSpan(&first, &end))
+        return false;
+    StripWalkBegin(rec, &walk);
+    while (StripWalkNextGround(&walk, &run))
+        if (run.start < end && run.start + run.count > first)
+            return true;
     return false;
 }
 
@@ -145,17 +169,15 @@ static error_t InkVolumeBegins(void)
     return InkVolumeTakes();
 }
 
-/* The guard with the ground a change lets go of asked too: a Plot's freed runs
- * are the kernel's no more than its runs may be. The kernel's blocks are
- * refused to every call; a file the system keeps, to a call with no warrant. */
-static error_t InkGuard(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
-                        const Strip* runs, uint32_t run_count,
-                        const Strip* freed, uint32_t freed_count, InkWarrant warrant)
+/* The guard's answer, `boot` the answer to whether the change touches the
+ * kernel's blocks: those are refused to every call; a file the system keeps,
+ * to a call with no warrant. */
+static error_t InkGuardSays(uint64_t fid, bool boot, const uint32_t* tags, uint32_t tag_count,
+                            InkWarrant warrant)
 {
     error_t rc = InkVolumeTakes();
     if (rc != OK)
         return rc;
-    bool boot = InkTouchesBoot(runs, run_count) || InkTouchesBoot(freed, freed_count);
     if (boot || (warrant != INK_WARRANTED && InkWearsGuarded(tags, tag_count))) {
         if (boot)
             kprintf("[TagFS] file %llu holds the kernel the Deed points the loader at — it is "
@@ -166,6 +188,16 @@ static error_t InkGuard(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
         return ERR_PERMISSION_DENIED;
     }
     return OK;
+}
+
+/* The guard with the ground a change lets go of asked too: a Plot's freed runs
+ * are the kernel's no more than its runs may be. */
+static error_t InkGuard(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
+                        const Strip* runs, uint32_t run_count,
+                        const Strip* freed, uint32_t freed_count, InkWarrant warrant)
+{
+    bool boot = InkTouchesBoot(runs, run_count) || InkTouchesBoot(freed, freed_count);
+    return InkGuardSays(fid, boot, tags, tag_count, warrant);
 }
 
 error_t InkMayChange(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
@@ -195,10 +227,11 @@ static void InkRecordLetGo(InkRecord* r)
     r->packed = NULL;
 }
 
-/* `meta` built into both copies of the record: OK, ERR_TAGFS_RECORD_FULL for
- * a record wider than format v1 holds, PackV1's refusal of what one cannot
- * carry, ERR_NO_MEMORY. */
-static error_t InkRecordMake(const TagFSMetadata* meta, bool keep, InkRecord* r)
+/* `meta` packed into the medium's copy of the record — memory's is the
+ * caller's to build beside it (FileRecordBuild, Relabel, Splice): OK,
+ * ERR_TAGFS_RECORD_FULL for a record wider than format v1 holds, PackV1's
+ * refusal of what one cannot carry, ERR_NO_MEMORY. */
+static error_t InkRecordMake(const TagFSMetadata* meta, InkRecord* r)
 {
     memset(r, 0, sizeof(*r));
     if (!PlotFits(meta, &r->bytes))
@@ -207,15 +240,9 @@ static error_t InkRecordMake(const TagFSMetadata* meta, bool keep, InkRecord* r)
     if (!r->packed)
         return ERR_NO_MEMORY;
     error_t packed = PackV1(meta, tagfs_get_state()->layout.data_blocks, r->packed, &r->bytes);
-    if (packed != OK) {
+    if (packed != OK)
         InkRecordLetGo(r);
-        return packed;
-    }
-    if (keep && !(r->rec = FileRecordOf(meta))) {
-        InkRecordLetGo(r);
-        return ERR_NO_MEMORY;
-    }
-    return OK;
+    return packed;
 }
 
 // ----------------------------------------------------------------------------
@@ -321,8 +348,14 @@ static bool InkGoesRound(error_t* rc, InkSpares spares)
 // A Plot's size and extents
 // ----------------------------------------------------------------------------
 
-/* The record the Plot commits: the file's fields as `cur` has them, the Plot's
- * size and runs, and the time it was written. */
+/* The record the Plot commits — the file's fields as `cur` has them, the
+ * Plot's size and runs, and the time it was written — in both copies: the
+ * medium's packed from the Plot's runs, as format v1 always packed them, and
+ * memory's `cur` with what the Plot did to its runs spliced in, every Parcel
+ * the Plot did not touch shared with `cur` (PlotConveyance). The ground the
+ * splices free is not asked of them: Fallow is fed the Plot's own, as format
+ * v1 always fed it (TagFSInkPlot). A STRICT or VOLUME_TESTS kernel holds the
+ * two copies to each other, and the ground the splices free to the Plot's. */
 static error_t InkPlotRecord(const Plot* p, const FileRecord* cur, uint64_t now, InkRecord* r)
 {
     TagFSMetadata meta = {
@@ -337,7 +370,21 @@ static error_t InkPlotRecord(const Plot* p, const FileRecord* cur, uint64_t now,
         .extents       = p->runs,
         .extent_count  = p->run_count,
     };
-    return InkRecordMake(&meta, true, r);
+    BookSplice* sp  = NULL;
+    uint64_t    nsp = 0;
+    error_t     rc  = InkRecordMake(&meta, r);
+    if (rc == OK)
+        rc = PlotConveyance(p, cur, &sp, &nsp);
+    if (rc == OK)
+        rc = FileRecordSplice(cur, sp, nsp, p->size, now, &r->rec, NULL, NULL);
+#if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
+    if (rc == OK)
+        (void)PlotConveyanceAgrees(p, cur, sp, nsp, r->rec, r->packed, r->bytes);
+#endif
+    kfree(sp);
+    if (rc != OK)
+        InkRecordLetGo(r);
+    return rc;
 }
 
 /* The second half, under the lock. */
@@ -365,7 +412,7 @@ static error_t InkPlotLocked(Plot* p, const RecordWhere* was, InkRecord* r, Fall
     RecordWhere where = InkLayDown(&now, &plan, r, gen);
     where.shape = gen;
     FileMapStake none = { .count = 0 };
-    (void)PoolMirrorPut(p->fid, r->rec, &where, &none);
+    (void)PoolMirrorPut(p->fid, r->rec, &where, 0, &none);
     r->rec = NULL;
     InkRowFollows(p->fid, &where);
     if (fallow)
@@ -451,14 +498,17 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
         lazy = InkPlotLazy(p, cur, now_us, &small);
         InkRecord r;
         rc = InkPlotRecord(p, cur, now, &r);
+        if (rc == OK) {
+            r.rec->small_append_us = small ? now_us : 0;
+            TagFSLockTake(&InkState()->lock);
+            rc = InkPlotLocked(p, &was, &r, fallow, out);
+            TagFSLockDrop(&InkState()->lock);
+        }
+        /* The record this Ink replaced goes here, after the lock: `cur` holds
+         * it — the map's record while `was` is the map's place for it — so
+         * the map lets go of it under the lock without freeing a byte, and
+         * what only it named is freed now, with no lock held. */
         FileRecordRelease(cur);
-        if (rc != OK)
-            break;
-        r.rec->small_append_us = small ? now_us : 0;
-
-        TagFSLockTake(&InkState()->lock);
-        rc = InkPlotLocked(p, &was, &r, fallow, out);
-        TagFSLockDrop(&InkState()->lock);
         InkRecordLetGo(&r);
         if (rc == OK) {
             fallow = NULL;
@@ -618,7 +668,7 @@ static error_t InkFieldsLocked(uint64_t fid, const RecordWhere* was, const InkFi
     RecordWhere where = InkLayDown(&now, &plan, r, gen);
     where.shape = now.shape;
     FileMapStake none = { .count = 0 };
-    (void)PoolMirrorPut(fid, r->rec, &where, &none);
+    (void)PoolMirrorPut(fid, r->rec, &where, 0, &none);
     r->rec = NULL;
     InkRowFollows(fid, &where);
     if (f->adds)
@@ -643,6 +693,8 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
     InkFieldsPlan   f;
     InkRecord       r     = { 0 };
     TagBitmapStake* stake = NULL;
+    Strip*          runs  = NULL;
+    uint32_t        nruns = 0;
     error_t         rc    = InkVolumeBegins();
     if (!InkFieldsTags(cur, name, add, drop, &f)) {
         FileRecordRelease(cur);
@@ -657,8 +709,6 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
         .filename      = (char*)(name ? name : cur->name),
         .tag_ids       = f.tags,
         .tag_count     = f.count,
-        .extents       = (Strip*)cur->extents,
-        .extent_count  = cur->extent_count,
     };
     for (uint32_t i = 0; i < f.drops && i < 2 && rc == OK; i++)
         if (warrant != INK_WARRANTED && InkTagGuarded(f.dropped[i]))
@@ -670,8 +720,23 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
         out->gen = was.gen;
         goto out;
     }
+    /* The room format v1 judges first, on the extents the record names, as it
+     * always did before it allocated more than the tags' list: counted where
+     * the record holds its runs. Only a record that fits is laid flat for the
+     * packer; memory's new one shares every run with `cur`. */
+    if (rc == OK && !PlotFitsExtents(&meta, PackV1RecordExtents(cur), NULL))
+        rc = ERR_TAGFS_RECORD_FULL;
+    if (rc == OK && (rc = FileRecordFlatten(cur, &runs, &nruns)) == OK) {
+        meta.extents      = runs;
+        meta.extent_count = nruns;
+        rc = InkRecordMake(&meta, &r);
+    }
+    if (rc == OK && !(r.rec = FileRecordRelabel(cur, meta.filename, f.tags, f.count, cur->flags)))
+        rc = ERR_NO_MEMORY;
+#if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
     if (rc == OK)
-        rc = InkRecordMake(&meta, true, &r);
+        (void)PackV1Agrees(r.rec, r.packed, r.bytes);
+#endif
     if (rc == OK && f.adds)
         rc = TagBitmapStakeFor(fs->bitmap_index, &add, 1, fid, &stake);
     if (rc == OK) {
@@ -693,6 +758,7 @@ out:
     TagBitmapStakeLetGo(stake);
     InkRecordLetGo(&r);
     kfree(f.tags);
+    kfree(runs);
     FileRecordRelease(cur);
     return rc;
 }
@@ -743,11 +809,11 @@ static error_t InkNewLocked(const uint32_t* tags, uint32_t count, InkRecord* r,
 
     uint64_t    gen   = s_inked_gen + 1;
     RecordWhere where = InkLayDown(NULL, &plan, r, gen);
+    uint32_t    block = 0;
     where.shape = gen;
-    (void)PoolMirrorPut(fid, r->rec, &where, &st->map);
-    r->rec = NULL;
-    uint32_t block = 0;
     (void)PoolLinkBlock(where.link, &block);
+    (void)PoolMirrorPut(fid, r->rec, &where, block, &st->map);   /* the row with the record */
+    r->rec = NULL;
     (void)file_table_update(fid, block, where.offset);
     TagBitmapAddCovered(fs->bitmap_index, tags, count, fid);
     fs->ledger.total_files++;
@@ -776,7 +842,15 @@ error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t*
     if (rc != OK)
         return rc;
     InkRecord r;
-    rc = InkRecordMake(&meta, true, &r);
+    rc = InkRecordMake(&meta, &r);
+    if (rc == OK && !(r.rec = FileRecordBuild(&meta))) {
+        InkRecordLetGo(&r);
+        rc = ERR_NO_MEMORY;
+    }
+#if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
+    if (rc == OK)
+        (void)PackV1Agrees(r.rec, r.packed, r.bytes);
+#endif
     if (rc == ERR_TAGFS_RECORD_FULL)
         kprintf("[TagFS] create of '%s': %u tag(s) and its name make a record wider than this "
                 "volume holds (%u bytes) — no file is made\n", name, count, TAGFS_MPOOL_DATA_SIZE);
@@ -836,7 +910,7 @@ static error_t InkQuitclaimLocked(uint64_t fid, const RecordWhere* was, const Fi
     uint64_t    gen   = s_inked_gen + 1;
     RecordWhere where = InkLayDown(&now, &plan, r, gen);
     FileMapStake none = { .count = 0 };
-    (void)PoolMirrorPut(fid, NULL, &where, &none);
+    (void)PoolMirrorPut(fid, NULL, &where, 0, &none);
     for (uint32_t i = 0; i < cur->tag_count; i++)
         TagBitmapLeave(fs->bitmap_index, cur->tags[i], fid);
     if (fallow)
@@ -858,13 +932,17 @@ static error_t InkQuitclaimOnce(uint64_t fid, InkWarrant warrant, InkReceipt* ou
     if (!cur)
         return ERR_FILE_NOT_FOUND;
 
+    /* Guarded on the record where it holds its runs, with no allocation:
+     * format v1 refused a file the system keeps, or the kernel's, before it
+     * asked the heap for anything, and a heap with nothing left turns neither
+     * refusal into another. The ground let go is walked the same way. */
     FallowNode* fallow = NULL;
     InkRecord   r      = { 0 };
-    error_t     rc     = InkMayChange(fid, cur->tags, cur->tag_count, cur->extents,
-                                      cur->extent_count, warrant);
-    if (rc == OK && cur->extent_count &&
-        !(fallow = FallowNodeMake(cur->extents, cur->extent_count, FALLOW_BY_RECORD, fid)))
-        rc = ERR_NO_MEMORY;
+    error_t     rc     = InkVolumeBegins();
+    if (rc == OK)
+        rc = InkGuardSays(fid, InkRecordTouchesBoot(cur), cur->tags, cur->tag_count, warrant);
+    if (rc == OK)
+        rc = FallowNodeOfRecord(cur, FALLOW_BY_RECORD, &fallow);
     if (rc == OK) {
         TagFSMetadata quitclaim = {
             .file_id       = fid,
@@ -872,7 +950,7 @@ static error_t InkQuitclaimOnce(uint64_t fid, InkWarrant warrant, InkReceipt* ou
             .created_time  = cur->created_time,
             .modified_time = rtc_get_unix64(),
         };
-        rc = InkRecordMake(&quitclaim, false, &r);
+        rc = InkRecordMake(&quitclaim, &r);
     }
     if (rc == OK) {
         TagFSLockTake(&fs->lock);
@@ -905,58 +983,4 @@ error_t InkQuitclaim(uint64_t fid, InkWarrant warrant, InkReceipt* out)
     if (rc == OK)
         HelmVacate(fid);
     return rc;
-}
-
-// ----------------------------------------------------------------------------
-// The name is a tag
-//
-// Every file carries the stem of its name — up to the last dot — as its first
-// tag, so "who is called kernel" is a question for the index, not a walk of the
-// volume. create puts the tag there and rename moves it, both through this one
-// rule. The stem is a key, spelled by the one spelling (tag_spelling.h) but
-// never split at ':', and it is read in place: a name is never cut to fit a
-// buffer, so it never wears a shorter tag than itself.
-// ----------------------------------------------------------------------------
-
-/* The stem of a name as a key. OK with out->key NULL when the name has no
- * stem — ".profile", or nothing but blanks before the dot — and so no tag;
- * ERR_TAGFS_TAG_TOO_LONG for a stem longer than a key may be. */
-error_t InkNameStem(const char* name, TagSpelling* out)
-{
-    size_t len  = strlen(name);
-    size_t stem = len;
-    for (size_t i = len; i > 0; i--) {
-        if (name[i - 1] == '.') {
-            stem = i - 1;
-            break;
-        }
-    }
-    error_t rc = TagSpellKey(name, stem, out);
-    if (rc == ERR_TAGFS_INVALID_TAG) {
-        out->key = NULL;
-        return OK;
-    }
-    return rc;
-}
-
-error_t InkNameTagIntern(const char* name, uint32_t* out_tag)
-{
-    TagSpelling stem;
-    *out_tag = TAGFS_INVALID_TAG_ID;
-    error_t rc = InkNameStem(name, &stem);
-    if (rc != OK || !stem.key)
-        return rc;
-    rc = TagRegistryIntern(InkState()->registry, &stem, out_tag);
-    if (rc != OK)
-        return rc;
-    UseContextBindTag(&stem, *out_tag);
-    return TagRegistryFlushFor(InkState()->registry, *out_tag);
-}
-
-uint32_t InkNameTagLookup(const char* name)
-{
-    TagSpelling stem;
-    if (!name || InkNameStem(name, &stem) != OK || !stem.key)
-        return TAGFS_INVALID_TAG_ID;
-    return TagRegistryLookup(InkState()->registry, &stem);
 }
