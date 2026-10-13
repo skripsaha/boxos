@@ -139,6 +139,143 @@ def Unzigzag(z):
     return (z >> 1) ^ -(z & 1)
 
 
+def IdsPut(ids):
+    """A rising list as every list of ids in the book is written (§2.8 Born's
+    tags, Labeled, Undone; §2.9 a header's tags): its count, the first id
+    whole, and each next one as its distance from the last less one."""
+    out, last = [VarintPut(len(ids))], None
+    for i in ids:
+        out.append(VarintPut(i if last is None else i - last - 1))
+        last = i
+    return b"".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Units, their streams and their records (volume_book.h:264-360)
+# ---------------------------------------------------------------------------
+
+
+def EntryNext(stream, at, end=None):
+    """volume_book.h BookEntryNext, one step of the walk from `at`: (1, tag,
+    body, len, next) for a record; (0, ...) at PAD or the stream's end; (-1,
+    ...) broken — a number refused, or a length past the end, seen before the
+    body is looked at."""
+    end = len(stream) if end is None else end
+    if at >= end:
+        return 0, 0, at, 0, at
+    r = VarintGet(stream, at, end)
+    if r is None:
+        return -1, 0, at, 0, at
+    if r[0] == 0:
+        return 0, 0, at, 0, at
+    tag, p = r
+    r = VarintGet(stream, p, end)
+    if r is None or r[0] > end - r[1]:
+        return -1, 0, at, 0, at
+    return 1, tag, r[1], r[0], r[1] + r[0]
+
+
+def EntryPut(kind, body, ignorable=False):
+    """A record: tag (kind << 1 | ignorable), the body's length, the body."""
+    return VarintPut(kind << 1 | (1 if ignorable else 0)) + VarintPut(len(body)) + bytes(body)
+
+
+def Leads(starts, of):
+    """The `lead` of each of `of` sectors of a unit (§2.1): where in the
+    sector the first of `starts` (the stream offsets its records begin at —
+    a record, a NodeHead or an element, never PAD) that begins in it begins,
+    counted from the sector's first byte; 0 when none does."""
+    starts, out, i = sorted(starts), [], 0
+    for k in range(of):
+        lo, hi = k * PAYLOAD_BYTES, (k + 1) * PAYLOAD_BYTES
+        while i < len(starts) and starts[i] < lo:
+            i += 1
+        out.append(HEAD_BYTES + starts[i] - lo if i < len(starts) and starts[i] < hi else 0)
+    return out
+
+
+def LeadsWrong(starts, leads):
+    """[(sector, its lead, the lead its records give it)] where a unit read
+    whole names a lead its own records do not (§2.1) — what a reader takes a
+    stream up by when a sector before is lost."""
+    return [(k, have, want) for k, (have, want) in enumerate(zip(leads, Leads(starts, len(leads))))
+            if have != want]
+
+
+def UnitSeal(stream, starts, kind, seq, vlbas, uuid):
+    """The sectors of one unit, each sealed at its own vlba: `stream` padded
+    with zeros to len(vlbas) * 488 bytes and cut into the sectors' payloads,
+    each sector's head naming its kind, place and seq, and its lead (Leads)."""
+    of = len(vlbas)
+    data = bytes(stream).ljust(of * PAYLOAD_BYTES, b"\0")
+    if len(data) != of * PAYLOAD_BYTES:
+        raise ValueError("a stream of %u bytes does not fit %u sectors" % (len(stream), of))
+    out = []
+    for k, lead in enumerate(Leads(starts, of)):
+        head = SECTOR_HEAD.struct.pack(0, lead, kind, k, of, seq)
+        out.append(SectorSeal(head + data[k * PAYLOAD_BYTES:(k + 1) * PAYLOAD_BYTES], uuid, vlbas[k]))
+    return out
+
+
+class Short(Exception):
+    """A body that ends before its fields do, or holds a number written in a
+    way the book never writes one."""
+
+
+class Cursor:
+    """A walk along one record's body, field by field: every read refused
+    raises Short, so a decoder says only what a body holds."""
+
+    __slots__ = ("buf", "at", "end")
+
+    def __init__(self, buf, at=0, end=None):
+        self.buf, self.at = buf, at
+        self.end = len(buf) if end is None else end
+
+    def V(self):
+        r = VarintGet(self.buf, self.at, self.end)
+        if r is None:
+            raise Short("a number at byte %u will not read" % self.at)
+        self.at = r[1]
+        return r[0]
+
+    def Z(self):
+        return Unzigzag(self.V())
+
+    def Fixed(self, fmt):
+        n = struct.calcsize(fmt)
+        if self.end - self.at < n:
+            raise Short("%u bytes wanted at byte %u, %u left" % (n, self.at, self.end - self.at))
+        v = struct.unpack_from(fmt, self.buf, self.at)[0]
+        self.at += n
+        return v
+
+    def Take(self, n):
+        if n > self.end - self.at:
+            raise Short("%u bytes wanted at byte %u, %u left" % (n, self.at, self.end - self.at))
+        self.at += n
+        return bytes(self.buf[self.at - n:self.at])
+
+    def Ids(self):
+        """IdsPut's list read back; a list past u64 is refused."""
+        ids = []
+        for _ in range(self.V()):
+            ids.append(self.V() if not ids else ids[-1] + 1 + self.V())
+            if ids[-1] > U64:
+                raise Short("a list of ids runs past 2^64")
+        return ids
+
+    def Ptr(self):
+        p = PtrGet(self.buf, self.at, self.end)
+        if p is None:
+            raise Short("a pointer at byte %u will not read" % self.at)
+        self.at = p["end"]
+        return p
+
+    def Left(self):
+        return self.end - self.at
+
+
 # ---------------------------------------------------------------------------
 # The self-checking pointer (volume_book.h:367-439)
 # ---------------------------------------------------------------------------

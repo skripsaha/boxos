@@ -23,12 +23,14 @@ be able to damage it. The only files it writes are the ones it is told to
     tools/volume-read.py IMAGE  self-test [--emit CASE --out IMG]
 
 `list` and `get` show the files the mounted kernel would show: each at the
-newest record its pool holds, CRC-checked, the way the mount resolves it.
+newest record its pool holds, CRC-checked, the way the mount resolves it — or,
+on a volume of format v2, as its book holds them once its ribbon is replayed.
 `check` is the GroundCensus: every owner of every block against the bitmap,
 and a simulation of what the next mount decides (exit 0 consistent, 1 not,
-2 unreadable). `cut` reads a QEMU blklogwrites log of this DEVICE and builds
-any crash state out of it. `self-test` plants every rule's damage into an
-overlay over IMAGE and checks that each is caught.
+2 unreadable) — on format v2 the book's census (bookcensus.py), every owner
+derived from the names that take a block. `cut` reads a QEMU blklogwrites log
+of this DEVICE and builds any crash state out of it. `self-test` plants every
+rule's damage into an overlay over IMAGE and checks that each is caught.
 
 DEVICE is a raw device or an image file:
 
@@ -38,9 +40,10 @@ DEVICE is a raw device or an image file:
 On macOS use /dev/rdiskN rather than /dev/diskN — the raw node reads without
 the buffer cache, and diskN refuses unaligned reads.
 
-The format itself is said once, in tools/volumeread/ondisk.py, with the C line
-every number is copied from; `self-test` holds those numbers against the
-headers in src/. This file is only the command line.
+The format itself is said once, in tools/volumeread/ondisk.py (and the book of
+format v2 in bookread.py, tally.py and stitch.py), with the C line every number
+is copied from; `self-test` holds those numbers against the headers in src/.
+This file is only the command line.
 """
 
 import argparse
@@ -100,11 +103,15 @@ def CmdFiles(args, medium):
                   f"{frame['spine_block']}, {frame['spine_stride']} block(s) apart")
             print(f"data run    : block {frame['data_block']} to the far copy at block "
                   f"{deed['tail_sector'] // ondisk.SECTORS_PER_BLOCK}")
+        if deed["format"] == "v2":
+            return BookDeed(medium, args.start)
         verdict = FormatVerdict(deed)
         if verdict:
             print(f"verdict     : {verdict}")
         return 0
 
+    if deed["format"] == "v2":
+        return BookFiles(args, medium, ground, how)
     verdict = FormatVerdict(deed)
     if verdict:
         sys.exit(verdict)
@@ -146,6 +153,84 @@ def CmdFiles(args, medium):
     return 0
 
 
+def BookDeed(medium, start):
+    """What the Spine of a format-v2 volume says, slot by slot, and whether
+    its book mounts — or, when the volume cannot be stood on at all (neither
+    copy of the Deed answers as the strict reader asks), why, beside what the
+    forgiving read of the Deed above already said."""
+    from volumeread import tally
+    from volumeread.bookmount import BookMount
+    from volumeread.bookground import BookGround
+    try:
+        m = BookMount(BookGround(medium, start))
+    except (Unreadable, IOError) as e:
+        print(f"book        : not read — {e}")
+        return 0
+    for s in m.slots:
+        said = s.state if s.state != "valid" else (
+            f"seq {s.seq} — Tally {s.tally_seq} ("
+            + ", ".join(tally.TREE_NAMES.get(k, str(k)) for k in sorted(s.roots))
+            + f"), ribbon from block {s.ribbon['at']}, stitch {s.stitch_seq}")
+        print(f"slot {s.index}      : block {s.block}, {said}{' — ' + s.why if s.why else ''}")
+    print("book        : " + (f"does not mount — {m.refusal}" if m.refusal else
+                              f"mounts on slot {m.slot.index}, {len(m.files)} file(s)"
+                              + (", read only" if m.glass else "")))
+    return 0
+
+
+def BookFiles(args, medium, ground, how):
+    """`list` and `get` of a format-v2 volume: the files its book holds once
+    its ribbon is replayed, each read through its runs and Slips."""
+    from volumeread.bookcensus import BookCensus
+    try:
+        census = BookCensus(medium, args.start)
+    except (Unreadable, IOError) as e:
+        sys.exit(f"{e}")
+    m = census.mount
+    if m.refusal:
+        sys.exit(f"the book does not mount: {m.refusal}")
+    named = {fs.name.decode("utf-8", "replace"): fid for fid, fs in m.files.items()}
+    if args.command == "list":
+        print(f"ground sector {ground} ({how}), volume {census.g.uuid.hex()[:16]}… — format v2")
+        if not named:
+            print("no active files")
+            return 0
+        width = max(len(n) for n in named)
+        for name in sorted(named):
+            fs = m.files[named[name]]
+            print(f"  {name:<{width}}  {fs.size:>10} bytes  {len(fs.runs)} run(s), {fs.Blocks()} block(s)"
+                  + (f", {len(fs.slips)} Slip(s)" if fs.slips else ""))
+        return 0
+    if args.name not in named:
+        have = ", ".join(sorted(named)) or "(none)"
+        sys.exit(f"no active file named {args.name!r} on this volume.\nwhat is here: {have}")
+    data = census.Content(named[args.name])
+    if data is None:
+        sys.exit(f"{args.name} names a block the medium will not give")
+    bad = [x.text for x in census.findings if x.code == "DIGEST_MISMATCH" and
+           x.text.startswith(census.Label(named[args.name]))]
+    for text in bad:
+        print(f"[volume-read] {text}", file=sys.stderr)
+    if args.out:
+        with open(args.out, "wb") as fh:
+            fh.write(data)
+        print(f"{len(data)} byte(s) of {args.name} written to {args.out}", file=sys.stderr)
+    else:
+        sys.stdout.buffer.write(data)
+    return 0
+
+
+def AnyCensus(medium, start):
+    """The census of the volume's own format: the book's for format v2,
+    GroundCensus for v1 (which refuses every other Deed as it always has)."""
+    from volumeread.bookcensus import BookCensus
+    from volumeread.census import GroundCensus
+    from volumeread.medium import StandOnDeed
+    if StandOnDeed(medium, start).format == "v2":
+        return BookCensus(medium, start)
+    return GroundCensus(medium, start)
+
+
 def SayCensus(census, as_json):
     if as_json:
         print(json.dumps(census.Json(), sort_keys=True))
@@ -156,9 +241,8 @@ def SayCensus(census, as_json):
 
 
 def CmdCheck(args, medium):
-    from volumeread.census import GroundCensus
     try:
-        census = GroundCensus(medium, args.start)
+        census = AnyCensus(medium, args.start)
     except (Unreadable, IOError) as e:
         print(f"check: unreadable — {e}")
         return 2
@@ -167,7 +251,6 @@ def CmdCheck(args, medium):
 
 def CmdCut(args, medium):
     from volumeread import blklog
-    from volumeread.census import GroundCensus
     try:
         log = blklog.BlkLog(args.log, medium.SizeSectors())
         if args.against:
@@ -198,7 +281,7 @@ def CmdCut(args, medium):
                   f"{'a clone' if cloned else 'a copy'} of the base in {args.out}")
             return 0
         try:
-            return SayCensus(GroundCensus(over, args.start), args.json)
+            return SayCensus(AnyCensus(over, args.start), args.json)
         except (Unreadable, IOError) as e:
             print(f"check: unreadable — {e}")
             return 2
