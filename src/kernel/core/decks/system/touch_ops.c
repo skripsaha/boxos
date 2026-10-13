@@ -23,18 +23,18 @@
 /* ────────────────────────────────────────────────────────────────────────
  * Handle-based Touch syscalls (real-HW audit 2026-05-30).
  *
- * All hot ops take a TouchTag (uint16_t) directly — no string parsing on
+ * All hot ops take a TouchTag (uint32_t) directly — no string parsing on
  * the hot path. The single string-form op is SYSTEM_OP_TOUCH_INTERN, which
  * userspace calls ONCE per tag at process init to obtain the handle.
  * ──────────────────────────────────────────────────────────────────────── */
 
 /* SYSTEM_OP_TOUCH_INTERN
  *   in_crate:  tag string
- *   out_crate: 4 bytes — [u16 full_id][u16 bare_id]
+ *   out_crate: 8 bytes — [u32 full_id][u32 bare_id]
  *
  * Resolves the tag string via TagFS registry, interning if necessary.
  * Called once per tag at process init. The returned handles are then
- * passed to CLAIM/RELEASE/SEND/AWAIT/REGISTER/ACK in their u16 params. */
+ * passed to CLAIM/RELEASE/SEND/AWAIT/REGISTER/ACK in their u32 params. */
 static int SysTouchIntern(const ManifestOp *op, Crate *crates,
                           uint16_t crate_count, const OpContext *ctx)
 {
@@ -44,7 +44,7 @@ static int SysTouchIntern(const ManifestOp *op, Crate *crates,
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
 
     Crate *out = &crates[op->out_crate];
-    if (out->capacity < 4) return ERR_INVALID_ARGUMENT;
+    if (out->capacity < 8) return ERR_INVALID_ARGUMENT;
 
     /* The tag whole, spelled in place in the crate's copy: its width is
      * judged on the crate's size before anything is copied, and a name is
@@ -60,50 +60,50 @@ static int SysTouchIntern(const ManifestOp *op, Crate *crates,
     crate_buf_free(tag);
     if (rc != OK) return rc;
 
-    /* Page-walked write of the two handle ids; crate_write sets out->size = 4
+    /* Page-walked write of the two handle ids; crate_write sets out->size = 8
      * on success and fails closed (ERR_INVALID_ADDRESS) on a bad address. */
-    uint16_t blob[2] = { full, bare };
+    uint32_t blob[2] = { full, bare };
     return crate_write(out, ctx, blob, sizeof(blob));
 }
 
-/* Pull a TouchTag from params[0..1]. */
+/* Pull a TouchTag from params[0..3]. */
 static inline TouchTag params_tag(const ManifestOp *op)
 {
-    if (op->param_size < 2) return TOUCH_TAG_INVALID;
-    uint16_t v;
-    memcpy(&v, op->params, sizeof(uint16_t));
-    return (TouchTag)v;
+    if (op->param_size < sizeof(TouchTag)) return TOUCH_TAG_INVALID;
+    TouchTag v;
+    memcpy(&v, op->params, sizeof(TouchTag));
+    return v;
 }
 
 /* SYSTEM_OP_TOUCH_CLAIM
- *   params: [u16 tag_id][u8 mode][... mode-specific ...]
- *     REST      total 3 bytes  : tag + mode
- *     REACT     total 11 bytes : tag + mode + [u64 manifest_handle]
- *     INTERRUPT total 19 bytes : tag + mode + [u64 handler_addr][u64 stack_top]
+ *   params: [u32 tag_id][u8 mode][... mode-specific ...]
+ *     REST      total 5 bytes  : tag + mode
+ *     REACT     total 13 bytes : tag + mode + [u64 manifest_handle]
+ *     INTERRUPT total 21 bytes : tag + mode + [u64 handler_addr][u64 stack_top]
  */
 static int SysTouchClaim(const ManifestOp *op, Crate *crates,
                          uint16_t crate_count, const OpContext *ctx)
 {
     (void)crates; (void)crate_count;
     if (!ctx || !ctx->proc)  return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 3)  return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 5)  return ERR_INVALID_ARGUMENT;
 
     TouchTag tag = params_tag(op);
     if (tag == TOUCH_TAG_INVALID) return ERR_INVALID_ARGUMENT;
 
-    uint8_t mode = op->params[2];
+    uint8_t mode = op->params[4];
     if (mode > TOUCH_INTERRUPT) return ERR_INVALID_ARGUMENT;
 
     ManifestHandle manifest = MANIFEST_HANDLE_INVALID;
     uint64_t handler_addr = 0, stack_top = 0;
 
     if (mode == TOUCH_REACT) {
-        if (op->param_size < 11) return ERR_INVALID_ARGUMENT;
-        memcpy(&manifest, op->params + 3, sizeof(uint64_t));
+        if (op->param_size < 13) return ERR_INVALID_ARGUMENT;
+        memcpy(&manifest, op->params + 5, sizeof(uint64_t));
     } else if (mode == TOUCH_INTERRUPT) {
-        if (op->param_size < 19) return ERR_INVALID_ARGUMENT;
-        memcpy(&handler_addr, op->params + 3,  sizeof(uint64_t));
-        memcpy(&stack_top,    op->params + 11, sizeof(uint64_t));
+        if (op->param_size < 21) return ERR_INVALID_ARGUMENT;
+        memcpy(&handler_addr, op->params + 5,  sizeof(uint64_t));
+        memcpy(&stack_top,    op->params + 13, sizeof(uint64_t));
     }
 
     return TouchClaimSet(ctx->proc, tag, (TouchMode)mode,
@@ -111,7 +111,7 @@ static int SysTouchClaim(const ManifestOp *op, Crate *crates,
 }
 
 /* SYSTEM_OP_TOUCH_RELEASE
- *   params: [u16 tag_id]
+ *   params: [u32 tag_id]
  */
 static int SysTouchRelease(const ManifestOp *op, Crate *crates,
                            uint16_t crate_count, const OpContext *ctx)
@@ -126,7 +126,7 @@ static int SysTouchRelease(const ManifestOp *op, Crate *crates,
 
 /* SYSTEM_OP_TOUCH_SEND
  *   in_crate:  payload (optional, NONE = no payload)
- *   params:    [u16 full_id][u16 bare_id][u32 after_ms]  (8 bytes)
+ *   params:    [u32 full_id][u32 bare_id][u32 after_ms]  (12 bytes)
  *   out_crate (optional, 4 bytes): u32 — how many subscribers were handed
  *              the event (0 for a delayed send: nobody has heard it yet).
  *
@@ -138,13 +138,13 @@ static int SysTouchSend(const ManifestOp *op, Crate *crates,
 {
     (void)crate_count;
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 12) return ERR_INVALID_ARGUMENT;
 
     TouchTag full_id, bare_id;
     uint32_t after_ms;
-    memcpy(&full_id,  op->params,     sizeof(uint16_t));
-    memcpy(&bare_id,  op->params + 2, sizeof(uint16_t));
-    memcpy(&after_ms, op->params + 4, sizeof(uint32_t));
+    memcpy(&full_id,  op->params,     sizeof(TouchTag));
+    memcpy(&bare_id,  op->params + 4, sizeof(TouchTag));
+    memcpy(&after_ms, op->params + 8, sizeof(uint32_t));
 
     if (full_id == TOUCH_TAG_INVALID && bare_id == TOUCH_TAG_INVALID)
         return ERR_INVALID_ARGUMENT;
@@ -225,7 +225,7 @@ static int SysTouchSend(const ManifestOp *op, Crate *crates,
 }
 
 /* SYSTEM_OP_TOUCH_AWAIT
- *   params: [u16 tag_id][u16 _pad][u32 timeout_ms] (8 bytes)
+ *   params: [u32 tag_id][u32 timeout_ms] (8 bytes)
  *
  * Ensures a REST claim on tag_id, applies LEVEL synthetic-touch sync,
  * arms a TouchQueueArmWake timeout, parks the caller (PROC_WAITING).
@@ -240,7 +240,7 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
 
     TouchTag tag;
     uint32_t timeout_ms;
-    memcpy(&tag,        op->params,     sizeof(uint16_t));
+    memcpy(&tag,        op->params,     sizeof(TouchTag));
     memcpy(&timeout_ms, op->params + 4, sizeof(uint32_t));
     if (tag == TOUCH_TAG_INVALID) return ERR_INVALID_ARGUMENT;
 
@@ -391,24 +391,24 @@ static int SysTouchIrqReturn(const ManifestOp *op, Crate *crates,
 }
 
 /* SYSTEM_OP_TOUCH_REGISTER
- *   params: [u16 tag_id][u8 policy][u8 capability]  (4 bytes)
+ *   params: [u32 tag_id][u8 policy][u8 capability]  (6 bytes)
  */
 static int SysTouchRegister(const ManifestOp *op, Crate *crates,
                             uint16_t crate_count, const OpContext *ctx)
 {
     (void)crates; (void)crate_count;
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 6) return ERR_INVALID_ARGUMENT;
 
     TouchTag tag = params_tag(op);
     if (tag == TOUCH_TAG_INVALID) return ERR_INVALID_ARGUMENT;
-    TouchPolicy     policy = (TouchPolicy)op->params[2];
-    TouchCapability cap    = (TouchCapability)op->params[3];
+    TouchPolicy     policy = (TouchPolicy)op->params[4];
+    TouchCapability cap    = (TouchCapability)op->params[5];
     return TouchPolicySet(tag, policy, cap);
 }
 
 /* SYSTEM_OP_TOUCH_ACK
- *   params: [u16 tag_id]
+ *   params: [u32 tag_id]
  */
 static int SysTouchAck(const ManifestOp *op, Crate *crates,
                        uint16_t crate_count, const OpContext *ctx)

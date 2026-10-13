@@ -13,21 +13,6 @@
 #include "klib.h"
 #include "touch.h"
 
-static bool s_wide_fid_said;
-
-error_t StorageFileIdOut(uint64_t fid, uint32_t *out)
-{
-    if (fid <= UINT32_MAX) {
-        *out = (uint32_t)fid;
-        return OK;
-    }
-    if (!__atomic_exchange_n(&s_wide_fid_said, true, __ATOMIC_ACQ_REL))
-        kprintf("[Storage Deck] file %llu: its id is past the 32 bits a program is handed one "
-                "in (box/types.h, file_id_t) — the answer is refused, never cut to another "
-                "file's number\n", (unsigned long long)fid);
-    return ERR_TAGFS_FID_EXHAUSTED;
-}
-
 void storage_deck_init(void)
 {
     kprintf("[Storage Deck] Initializing...\n");

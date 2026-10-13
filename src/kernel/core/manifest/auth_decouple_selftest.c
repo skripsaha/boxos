@@ -9,7 +9,7 @@
 
 /* Drive the gate over a registry where "god" interns past id 63: the id range
  * where the old (1ULL<<id) auth mask silently became 0. */
-static error_t intern_god_high(uint16_t *out_god_id)
+static error_t intern_god_high(uint32_t *out_god_id)
 {
     TagRegistry reg;
     if (tag_registry_init(&reg) != 0) {
@@ -21,7 +21,7 @@ static error_t intern_god_high(uint16_t *out_god_id)
         char filler[24];
         ksnprintf(filler, sizeof(filler), "authdec.filler.%u", i);
         TagSpelling filler_tag = TagSpellingOfKey(filler);
-        uint16_t    filler_id;
+        uint32_t    filler_id;
         if (TagRegistryIntern(&reg, &filler_tag, &filler_id) != OK) {
             kprintf("[AUTHDEC] FAIL: filler intern %u\n", i);
             tag_registry_destroy(&reg);
@@ -30,7 +30,7 @@ static error_t intern_god_high(uint16_t *out_god_id)
     }
 
     TagSpelling god    = TagSpellingOfKey("god");
-    uint16_t    god_id = TAGFS_INVALID_TAG_ID;
+    uint32_t    god_id = TAGFS_INVALID_TAG_ID;
     error_t     named  = TagRegistryIntern(&reg, &god, &god_id);
     tag_registry_destroy(&reg);
 
@@ -50,7 +50,7 @@ static error_t intern_god_high(uint16_t *out_god_id)
 
 error_t AuthDecoupleSelfTest(void)
 {
-    uint16_t god_id = 0;
+    uint32_t god_id = 0;
     error_t rc = intern_god_high(&god_id);
     if (rc != OK)
         return rc;

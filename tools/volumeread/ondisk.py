@@ -166,7 +166,7 @@ META_RECORD = Fields("<HIIQQQHHHH",     # tagfs_boot.h:53-67; plot/plot_pack.c P
                      "tag_count extent_count name_len crc16")
 
 FILE_ACTIVE, FILE_TRASHED, FILE_HIDDEN = 1, 2, 4   # tagfs_constants.h:44-46; bit 3 is spent (:47)
-MAX_TAG_ID = 0x7FFE                     # tagfs_constants.h:34 TAGFS_MAX_TAG_ID
+MAX_TAG_ID = 0x7FFE                     # plot_width.h TAGFS_V1_TAG_ID_MOST: format v1's last id
 TAG_FLAG_HAS_VALUE, TAG_FLAG_SYSTEM = 1, 2   # tagfs_constants.h:40-41
 EXTENT_END_LIMIT = 0xFFFFFFFF           # plot/plot_pack.c PlotExtentsInRun: start + count past 2^32-1 is an overflow
 

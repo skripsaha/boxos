@@ -41,8 +41,10 @@
  * the console-stream epic). 160 -> 168 when the console's order became the
  * STRAND's claim rather than one pointer shared by the cabin: a Bay claim
  * belongs to the strand that opened it, so a shared pointer is unmapped under
- * every sibling the moment that strand exits. */
-#define STRAND_PRINT_BYTES     168u
+ * every sibling the moment that strand exits. 168 -> 176 when a Touch tag
+ * became 32 bits wide: the ear and the keyboard tag held in 16 cut both, and
+ * TOUCH_TAG_INVALID with them. */
+#define STRAND_PRINT_BYTES     176u
 
 typedef struct StrandInfo {
     uint64_t tcb_self;        /* @0  — System V variant-2 TCB self-pointer (fs:0) */

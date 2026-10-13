@@ -2157,10 +2157,10 @@ error_t tagfs_write_block(uint64_t block, const void *buffer)
 // tagfs_init_well_known_tags
 // ----------------------------------------------------------------------------
 
-static uint16_t register_well_known(TagRegistry *reg, const char *key)
+static uint32_t register_well_known(TagRegistry *reg, const char *key)
 {
     TagSpelling tag = TagSpellingOfKey(key);
-    uint16_t    tid;
+    uint32_t    tid;
     return TagRegistryIntern(reg, &tag, &tid) == OK ? tid : TAGFS_INVALID_TAG_ID;
 }
 
@@ -2223,7 +2223,7 @@ void tagfs_init_well_known_tags(void)
     // dirty flag, so this re-derivation never forces a write.
     for (size_t i = 0; i < sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]); i++) {
         TagSpelling reserved = TagSpellingOfKey(TagFsReservedKeys[i]);
-        uint16_t    tid      = TagRegistryLookup(reg, &reserved);
+        uint32_t    tid      = TagRegistryLookup(reg, &reserved);
         if (tid != TAGFS_INVALID_TAG_ID)
             tag_registry_mark_system(reg, tid);
     }
@@ -3146,16 +3146,16 @@ TagFSState *tagfs_get_state(void)
  * a copy of a name in the caller's own buffer — or spans into the registry for
  * a caller that holds the door itself (TagFSTagSpelling).
  */
-uint16_t TagFSLookupSpelling(const TagSpelling *tag)
+uint32_t TagFSLookupSpelling(const TagSpelling *tag)
 {
     if (!tagfs_enter())
         return TAGFS_INVALID_TAG_ID;
-    uint16_t id = TagRegistryLookup(g_state.registry, tag);
+    uint32_t id = TagRegistryLookup(g_state.registry, tag);
     tagfs_leave();
     return id;
 }
 
-error_t TagFSInternSpelling(const TagSpelling *tag, uint16_t *out_id)
+error_t TagFSInternSpelling(const TagSpelling *tag, uint32_t *out_id)
 {
     *out_id = TAGFS_INVALID_TAG_ID;
     if (!tagfs_enter())
@@ -3169,7 +3169,7 @@ error_t TagFSInternSpelling(const TagSpelling *tag, uint16_t *out_id)
 
 /* The id this volume has for a tag's text, or TAGFS_INVALID_TAG_ID when it has
  * none — including when the text is no tag, and when there is no volume. */
-uint16_t tagfs_tag_lookup(const char *tag)
+uint32_t tagfs_tag_lookup(const char *tag)
 {
     TagSpelling spelled;
     if (!tag || TagSpell(tag, strlen(tag), &spelled) != OK)
@@ -3178,7 +3178,7 @@ uint16_t tagfs_tag_lookup(const char *tag)
 }
 
 /* The same, and the volume issues an id if it does not have one yet. */
-error_t tagfs_tag_intern(const char *tag, uint16_t *out_id)
+error_t tagfs_tag_intern(const char *tag, uint32_t *out_id)
 {
     TagSpelling spelled;
     *out_id = TAGFS_INVALID_TAG_ID;
@@ -3190,12 +3190,12 @@ error_t tagfs_tag_intern(const char *tag, uint16_t *out_id)
     return TagFSInternSpelling(&spelled, out_id);
 }
 
-bool TagFSTagSpelling(uint16_t tag_id, TagSpelling *out, bool *is_system)
+bool TagFSTagSpelling(uint32_t tag_id, TagSpelling *out, bool *is_system)
 {
     return g_state.registry && TagRegistrySpelling(g_state.registry, tag_id, out, is_system);
 }
 
-bool tagfs_tag_key(uint16_t tag_id, char *out, size_t out_size)
+bool tagfs_tag_key(uint32_t tag_id, char *out, size_t out_size)
 {
     if (!out || out_size == 0)
         return false;
@@ -3213,7 +3213,7 @@ bool tagfs_tag_key(uint16_t tag_id, char *out, size_t out_size)
     return said;
 }
 
-size_t tagfs_tag_text(uint16_t tag_id, char *out, size_t out_size)
+size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
 {
     if (out && out_size)
         out[0] = '\0';
@@ -3231,7 +3231,7 @@ size_t tagfs_tag_text(uint16_t tag_id, char *out, size_t out_size)
     return len;
 }
 
-bool TagFSTagMatches(uint16_t tag_id, const TagSpelling *pattern)
+bool TagFSTagMatches(uint32_t tag_id, const TagSpelling *pattern)
 {
     if (!tagfs_enter())
         return false;
@@ -3241,7 +3241,7 @@ bool TagFSTagMatches(uint16_t tag_id, const TagSpelling *pattern)
     return matches;
 }
 
-char *TagFSKeyList(const uint16_t *tag_ids, uint32_t count)
+char *TagFSKeyList(const uint32_t *tag_ids, uint32_t count)
 {
     if (!tagfs_enter())
         return NULL;

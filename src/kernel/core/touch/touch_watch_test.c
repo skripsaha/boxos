@@ -69,7 +69,7 @@ void TouchWatchSelfTest(void)
         kprintf("[TOUCH WATCH TEST] FAILED: the Logbook would not name the tag\n");
         return;
     }
-    WATCH_CHECK((full & 0x8000u) && (bare & 0x8000u),
+    WATCH_CHECK(TouchTagIsKernel(full) && TouchTagIsKernel(bare),
                 "a name from the Logbook carries the kernel bit");
 
     /* --- one ear hears one publish, with its payload intact --- */

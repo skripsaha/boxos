@@ -270,7 +270,7 @@ public:
         // creates on demand cannot afterwards tell us whether it created the
         // file or adopted one that was already there.
         if (p.exclusive) {
-            uint32_t    ids[1];
+            file_id_t   ids[1];
             file_info_t infos[1];
             if (::find_file_by_name(s, ids, infos, 1) > 0) return nullptr;
         }

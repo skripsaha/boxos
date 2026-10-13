@@ -319,9 +319,8 @@ static void MountFidBoundary(uint64_t top_row, uint64_t top_record, uint64_t kno
 }
 
 /* The tag ids likewise: past every one a record of the pool wears, and every
- * one this kernel gave out before a book of the volume was given up. The
- * registry's numbering moved past them, or ERR_NO_MEMORY — said. */
-static error_t MountTagBoundary(uint32_t top_tag, uint32_t known)
+ * one this kernel gave out before a book of the volume was given up. */
+static void MountTagBoundary(uint32_t top_tag, uint32_t known)
 {
     TagFSState* fs   = tagfs_get_state();
     uint32_t    next = top_tag + 1u;
@@ -331,7 +330,7 @@ static error_t MountTagBoundary(uint32_t top_tag, uint32_t known)
     if (known > next && known > held)
         kprintf("[TagFS] this kernel gave tag ids up to %u out on this volume before its book "
                 "was given up — none of them is given again\n", known - 1u);
-    return TagRegistryNumbersFrom(fs->registry, known > next ? known : next);
+    TagRegistryNumbersFrom(fs->registry, known > next ? known : next);
 }
 
 // ----------------------------------------------------------------------------
@@ -558,7 +557,7 @@ error_t MountReadVolume(const char** what)
         return ERR_FILE_TABLE_CORRUPT;
     }
 
-    fs->bitmap_index = tag_bitmap_create(TAGFS_BITMAP_INITIAL_TAG_CAP);
+    fs->bitmap_index = tag_bitmap_create();
     if (!fs->bitmap_index) {
         *what = "there is no memory for its tag index";
         return ERR_NO_MEMORY;
@@ -580,11 +579,7 @@ error_t MountReadVolume(const char** what)
     uint32_t known_tag;
     AwayNumbersKnown(fs->uuid, &known_file, &known_tag);
     MountFidBoundary(files.top_fid, pool.top_fid, known_file);
-    rc = MountTagBoundary(pool.top_tag, known_tag);
-    if (rc != OK) {
-        *what = "there is no memory to number its tag registry past the ids its files wear";
-        return rc;
-    }
+    MountTagBoundary(pool.top_tag, known_tag);
     return MountCensus(what);
 }
 

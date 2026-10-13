@@ -91,14 +91,14 @@ static uint64_t QuillAwayWord(uint32_t seed, uint64_t off)
 /* `bytes` from `buf` written at the file's size, as the storage deck's append:
  * the answer's code, and in *written the bytes of the write the file holds —
  * the one contract every write answers (write_job.h, W-ERR). */
-static int QuillAwayAppend(uint32_t fid, const void *buf, uint32_t bytes, uint64_t *written)
+static int QuillAwayAppend(file_id_t fid, const void *buf, uint32_t bytes, uint64_t *written)
 {
-    uint8_t  params[16];
+    uint8_t  params[20];
     uint64_t at    = 0;
     uint32_t flags = QUILL_WRITE_APPEND;
-    memcpy(params, &fid, 4);
-    memcpy(params + 4, &at, 8);
-    memcpy(params + 12, &flags, 4);
+    memcpy(params, &fid, 8);
+    memcpy(params + 8, &at, 8);
+    memcpy(params + 16, &flags, 4);
     uint8_t  out[16] = { 0 };
     uint32_t got     = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_WRITE, params, sizeof(params), buf, bytes,
@@ -124,7 +124,7 @@ QuillVerdict QuillAwayWriter(const char *const *args)
 {
     const char *name = args[0];
     uint32_t    seed = 0, slot = QUILL_AWAY_MAX;
-    uint32_t    ids[2];
+    file_id_t   ids[2];
     int         n     = QuillFindEverywhere(name, ids, 2);
     bool        asked = QuillNumber(args[1], &seed) && QuillNumber(args[2], &slot) &&
                         slot < QUILL_AWAY_MAX;
@@ -139,7 +139,7 @@ QuillVerdict QuillAwayWriter(const char *const *args)
         return QUILL_FAIL;
     }
     QuillFill(buf, seed, 0, QUILL_AWAY_BYTES);
-    printf("[QUILL] awaywriter: %s fid=%u seed %u pid %u appends %llu bytes\n", name, ids[0],
+    printf("[QUILL] awaywriter: %s fid=%lu seed %u pid %u appends %llu bytes\n", name, ids[0],
            seed, cabin_info()->pid, (unsigned long long)QUILL_AWAY_BYTES);
 
     uint64_t written = 0;
@@ -187,18 +187,18 @@ QuillVerdict QuillAway(const char *const *args)
     static uint64_t base[QUILL_AWAY_BASE / 8];
     QuillFill(base, first, 0, sizeof(base));
     QuillAwayBoard *board = bay_open(QUILL_AWAY_BOARD, sizeof(QuillAwayBoard), BAY_CREATE);
-    int     fid = board ? QuillCreate(name) : 0;
-    int64_t w   = fid > 0 ? fwrite((uint32_t)fid, 0, base, sizeof(base)) : 0;
+    int64_t fid = board ? QuillCreate(name) : 0;
+    int64_t w   = fid > 0 ? fwrite((file_id_t)fid, 0, base, sizeof(base)) : 0;
     int     arc = w == (int64_t)sizeof(base) ? anchor(0) : -1;
     if (!board || fid <= 0 || w != (int64_t)sizeof(base) || arc != 0) {
-        printf("[QUILL] away: FAIL — %s could not be laid down (board %s, create %d, write %lld, "
+        printf("[QUILL] away: FAIL — %s could not be laid down (board %s, create %ld, write %lld, "
                "anchor %d)\n", name, board ? "open" : "refused", fid, (long long)w, arc);
         if (board)
             bay_release(board);
         return QUILL_FAIL;
     }
     memset((void *)board, 0, sizeof(*board));
-    printf("[QUILL] away: %s fid=%d laid down and anchored; %u writer(s) of %llu bytes each start, "
+    printf("[QUILL] away: %s fid=%ld laid down and anchored; %u writer(s) of %llu bytes each start, "
            "seeds %u to %u\n", name, fid, count, (unsigned long long)QUILL_AWAY_BYTES, first + 1,
            first + count);
 
@@ -211,7 +211,7 @@ QuillVerdict QuillAway(const char *const *args)
     }
     bay_release(board);
     bool whole = started == count && answered == count;
-    printf("[QUILL] away: %s — %s fid=%d: %u of %u writer(s) started and %u answered\n",
+    printf("[QUILL] away: %s — %s fid=%ld: %u of %u writer(s) started and %u answered\n",
            whole ? "PASS" : "FAIL", name, fid, started, count, answered);
     return whole ? QUILL_PASS : QUILL_FAIL;
 }
@@ -270,7 +270,7 @@ static bool QuillAwayStep(QuillAwayWalk *walk, uint32_t first, uint32_t count, u
     return true;
 }
 
-static void QuillAwayRead(uint32_t fid, uint32_t first, uint32_t count, QuillAwayWalk *walk)
+static void QuillAwayRead(file_id_t fid, uint32_t first, uint32_t count, QuillAwayWalk *walk)
 {
     file_info_t info;
     memset(walk, 0, sizeof(*walk));
@@ -308,7 +308,7 @@ QuillVerdict QuillAwayCheck(const char *const *args)
 {
     const char *name  = args[0];
     uint32_t    count = 0, first = 0;
-    uint32_t    ids[2];
+    file_id_t   ids[2];
     if (!QuillAwayWords("awaycheck", args, &count, &first))
         return QUILL_FAIL;
     int n = QuillFindEverywhere(name, ids, 2);
@@ -335,7 +335,7 @@ QuillVerdict QuillAwayCheck(const char *const *args)
     }
     bool whole = walk.refused == 0 && walk.stray == walk.size && walk.count > 0 &&
                  walk.chunks[0].seed == first && walk.chunks[0].bytes == QUILL_AWAY_BASE;
-    printf("[QUILL] awaycheck: %s — %s fid=%u holds %llu bytes: %s (the first byte no chunk's "
+    printf("[QUILL] awaycheck: %s — %s fid=%lu holds %llu bytes: %s (the first byte no chunk's "
            "%llu, read %lld)\n", whole ? "PASS" : "FAIL", name, ids[0],
            (unsigned long long)walk.size, walk.count ? chunks : "no chunk",
            (unsigned long long)walk.stray, (long long)walk.refused);

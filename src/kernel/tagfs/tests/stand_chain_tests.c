@@ -205,7 +205,7 @@ static bool StandRegistryOverfill(const StandChain* chain, uint32_t* out_first, 
     while (tagfs_tag_lookup(StandGrowTag(first)) != TAGFS_INVALID_TAG_ID)
         first++;
     for (uint32_t i = 0; i < count; i++) {
-        uint16_t id;
+        uint32_t id;
         if (tagfs_tag_intern(StandGrowTag(first + i), &id) != OK)
             return false;
     }
@@ -617,7 +617,7 @@ static TestResult TestStandRegistryScratchLeavesTheVolumeAlone(void)
     TEST_ASSERT_EQ(tag_registry_load(scratch, before.blocks[0], NULL, NULL), 0,
                    "it reads the volume's registry off the medium");
     TagSpelling own = TagSpellingOfKey("stand_scratch");
-    uint16_t    own_id;
+    uint32_t    own_id;
     TEST_ASSERT_OK(TagRegistryIntern(scratch, &own, &own_id), "and takes a name of its own");
     tag_registry_destroy(scratch);
     built = false;
@@ -712,7 +712,7 @@ out:
 
 static char     s_group_key[24];
 static char     s_group_tag[40];
-static uint16_t s_group_ids[2 * STAND_GROUP_FIRST];
+static uint32_t s_group_ids[2 * STAND_GROUP_FIRST];
 
 /* "stand_group<k>:<v>"; its key, "stand_group<k>", is left in s_group_key. */
 static const char* StandGroupTag(uint32_t k, uint32_t v)
@@ -747,7 +747,7 @@ static TestResult TestStandRegistryKeyIdsAreCopies(void)
     TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &copy),
                    "the key's ids are asked for");
     TEST_ASSERT_EQ(copy.count, STAND_GROUP_FIRST, "and all of them come back");
-    TEST_ASSERT(memcmp(copy.ids, s_group_ids, sizeof(uint16_t) * STAND_GROUP_FIRST) == 0,
+    TEST_ASSERT(memcmp(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) == 0,
                 "in the order they were interned");
 
     for (uint32_t v = 0; v < STAND_GROUP_FIRST; v++)
@@ -755,30 +755,30 @@ static TestResult TestStandRegistryKeyIdsAreCopies(void)
     TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &again),
                    "the key's ids are asked for again");
     bool shared = again.count != STAND_GROUP_FIRST ||
-                  memcmp(again.ids, s_group_ids, sizeof(uint16_t) * STAND_GROUP_FIRST) != 0;
+                  memcmp(again.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) != 0;
     TestEvidence("copies of a key's tag ids that were the registry's own array", shared);
     if (shared) {
         /* What the test wrote over was the registry's: put back, and freed by
          * nobody but the registry. */
-        memcpy(copy.ids, s_group_ids, sizeof(uint16_t) * STAND_GROUP_FIRST);
+        memcpy(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST);
         ours    = false;
         verdict = TEST_DEFECT;
         goto out;
     }
 
-    memcpy(copy.ids, s_group_ids, sizeof(uint16_t) * STAND_GROUP_FIRST);
+    memcpy(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST);
     kfree(again.ids);
     again.ids = NULL;
     for (uint32_t v = STAND_GROUP_FIRST; v < 2 * STAND_GROUP_FIRST; v++)
         TEST_ASSERT_OK(tagfs_tag_intern(StandGroupTag(k, v), &s_group_ids[v]),
                        "the key grows by nine more");
     TEST_ASSERT(copy.count == STAND_GROUP_FIRST &&
-                memcmp(copy.ids, s_group_ids, sizeof(uint16_t) * STAND_GROUP_FIRST) == 0,
+                memcmp(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) == 0,
                 "and the copy taken before says what it said");
     TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &again),
                    "a copy taken now");
     TEST_ASSERT(again.count == 2 * STAND_GROUP_FIRST &&
-                memcmp(again.ids, s_group_ids, sizeof(uint16_t) * 2 * STAND_GROUP_FIRST) == 0,
+                memcmp(again.ids, s_group_ids, sizeof(uint32_t) * 2 * STAND_GROUP_FIRST) == 0,
                 "holds all eighteen, in order");
 out:
     if (ours) {

@@ -57,7 +57,7 @@ static bool touch_queue_unlink(TouchQueueNode *n)
     return false;
 }
 
-TouchQueueNode *TouchQueuePublishNode(uint16_t tag_id, const void *payload, uint32_t plen,
+TouchQueueNode *TouchQueuePublishNode(uint32_t tag_id, const void *payload, uint32_t plen,
                                       uint32_t source_pid, uint16_t flags)
 {
     uint32_t        carried = (payload && plen) ? plen : 0;

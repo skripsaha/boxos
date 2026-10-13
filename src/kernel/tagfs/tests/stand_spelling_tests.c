@@ -103,8 +103,8 @@ static TestResult TestStandLongQueryRefused(void)
     uint64_t   said    = 0;
 
     TEST_ASSERT_OK(StandQuery(NULL, 0, &said), "a query for every file is answered");
-    TEST_ASSERT_EQ(said, 8 + (uint64_t)s_answer[0] * sizeof(uint32_t),
-                   "with its two counts and an id for each file it delivered");
+    TEST_ASSERT_EQ(said, 8 + (uint64_t)s_answer[0] * sizeof(uint64_t),
+                   "with its two counts and a u64 id for each file it delivered");
     TEST_ASSERT(s_answer[1] >= s_answer[0], "of every file there is");
     uint32_t every = s_answer[1];
 
@@ -146,7 +146,7 @@ static TestResult TestStandLongKeyRefusedBeforeAllocation(void)
     TagRegistry* scratch = NULL;
     bool         built   = false;
     bool         armed   = false;
-    uint16_t     id      = TAGFS_INVALID_TAG_ID;
+    uint32_t     id      = TAGFS_INVALID_TAG_ID;
 
     memset(s_long, 'k', STAND_LONG_BYTES);
     s_long[STAND_LONG_BYTES] = '\0';
@@ -206,13 +206,13 @@ static TestResult TestStandFullRegistryRefusesLoudly(void)
     TestResult   verdict = TEST_PASS;
     TagRegistry* scratch = NULL;
     bool         built   = false;
-    uint16_t     id      = 0;
+    uint32_t     id      = 0;
 
     scratch = kmalloc(sizeof(TagRegistry));
     TEST_ASSERT(scratch != NULL, "memory for a registry of the test's own");
     TEST_ASSERT_EQ(tag_registry_init(scratch), 0, "a registry of the test's own is built");
     built = true;
-    scratch->next_id = TAGFS_MAX_TAG_ID + 1;
+    scratch->next_id = scratch->id_most + 1u;
 
     TagSpelling tag = TagSpellingOfKey("stand_full");
     error_t     rc  = TagRegistryIntern(scratch, &tag, &id);
@@ -241,7 +241,7 @@ out:
 
 /* A fresh "stand_well:<k>" numbered past 63, its text left in `text`. A tag
  * is interned for good, so a stand volume carries a few more of them. */
-static bool StandHighTag(char* text, size_t text_size, uint16_t* out_id)
+static bool StandHighTag(char* text, size_t text_size, uint32_t* out_id)
 {
     for (uint32_t k = 0; k < 2u * (TAGFS_MAX_TAG_ID + 1u); k++) {
         ksnprintf(text, text_size, "stand_well:%u", k);
@@ -270,11 +270,11 @@ static uint32_t StandInfoFlags(uint64_t file_id)
 {
     uint64_t said  = 0;
     uint32_t flags = 0;
-    uint32_t id    = (uint32_t)file_id;   /* a program's file_id_t: the stand's ids are v1's */
+    uint64_t id    = file_id;   /* a program's file_id_t */
     if (StandStorageOp(STORAGE_OBJ_GET_INFO, &id, sizeof(id), NULL, 0,
-                       s_info, sizeof(s_info), &said) != OK || said < 8)
+                       s_info, sizeof(s_info), &said) != OK || said < 12)
         return 0;
-    memcpy(&flags, s_info + 4, sizeof(flags));
+    memcpy(&flags, s_info + 8, sizeof(flags));
     return flags;
 }
 
@@ -290,7 +290,7 @@ static TestResult TestStandWellKnownPastTag63(void)
     WellKnownTags  saved    = *wk;
     bool           swapped  = false;
     uint64_t       files[2] = { 0, 0 };
-    uint16_t       ids[2]   = { TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID };
+    uint32_t       ids[2]   = { TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID };
     static const char* const names[2] = { "stand_well_t", "stand_well_h" };
 
     for (uint32_t i = 0; i < 2; i++) {
@@ -353,7 +353,7 @@ static TestResult TestStandCreateRefusesWhatItCannotTag(void)
     memset(s_long, 'k', STAND_LONG_BYTES);
     s_long[STAND_LONG_BYTES] = '\0';
     size_t len = (size_t)ksnprintf(s_text, sizeof(s_text), "stand_spell,%s", s_long);
-    uint32_t created = 0;
+    uint64_t created = 0;
     int deck = StandStorageOp(STORAGE_OBJ_CREATE, params, sizeof(params), s_text, len,
                               &created, sizeof(created), &said);
 
@@ -373,23 +373,23 @@ out:
 }
 
 /* Whether storage.getinfo gives back the tag `text` spells whole: its key and
- * value, each at its own length. The record is [u32 id][u32 flags][u64 size]
+ * value, each at its own length. The record is [u64 id][u32 flags][u64 size]
  * [u16 tags][u16 name_len][name], then per tag [u16 key_len][u16 val_len]
  * [u8 type][key][val]. */
 static bool StandInfoHasWhole(uint64_t file_id, const char* text)
 {
     TagSpelling tag;
     uint64_t    said = 0;
-    uint32_t    id   = (uint32_t)file_id;   /* a program's file_id_t: the stand's ids are v1's */
+    uint64_t    id   = file_id;   /* a program's file_id_t */
     if (TagSpell(text, strlen(text), &tag) != OK ||
         StandStorageOp(STORAGE_OBJ_GET_INFO, &id, sizeof(id), NULL, 0,
-                       s_info, sizeof(s_info), &said) != OK || said < 20)
+                       s_info, sizeof(s_info), &said) != OK || said < 24)
         return false;
 
     uint16_t tags, name_len;
-    memcpy(&tags, s_info + 16, 2);
-    memcpy(&name_len, s_info + 18, 2);
-    for (uint64_t at = 20u + name_len, t = 0; t < tags && at + 5 <= said; t++) {
+    memcpy(&tags, s_info + 20, 2);
+    memcpy(&name_len, s_info + 22, 2);
+    for (uint64_t at = 24u + name_len, t = 0; t < tags && at + 5 <= said; t++) {
         uint16_t kl, vl;
         memcpy(&kl, s_info + at, 2);
         memcpy(&vl, s_info + at + 2, 2);
@@ -415,9 +415,9 @@ static TestResult TestStandTagSetWearsWhatItWasGiven(void)
 
     TEST_ASSERT(StandMakeFile("stand_spell_s", NULL, 0, &file_id), "a file of the test's own");
     size_t   len  = StandTagText("stand_spell", 's', STAND_SET_VALUE);
-    uint32_t fid  = (uint32_t)file_id;   /* a program's file_id_t */
+    uint64_t fid  = file_id;   /* a program's file_id_t */
     int      set  = StandStorageOp(STORAGE_TAG_SET, &fid, sizeof(fid), s_text, len, NULL, 0, &said);
-    uint16_t want = tagfs_tag_lookup(s_text);
+    uint32_t want = tagfs_tag_lookup(s_text);
     bool     worn = want != TAGFS_INVALID_TAG_ID && tagfs_has_tag(file_id, want);
     TestEvidence("tag adds of a 100-byte value that put some other tag on the file", set == OK && !worn);
     if (set == OK && !worn) {

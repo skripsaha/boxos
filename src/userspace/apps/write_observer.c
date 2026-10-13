@@ -25,20 +25,20 @@
 
 static int child_role(void)
 {
-    int fid = create(WO_NAME, WO_TAG);
+    int64_t fid = create(WO_NAME, WO_TAG);
     if (fid < 0) {
-        kdbg_print("[WO child] create rc=%d", fid);
+        kdbg_print("[WO child] create rc=%ld", fid);
         return 1;
     }
     char buf[WO_BYTES];
     for (uint32_t i = 0; i < WO_BYTES; i++) buf[i] = (char)(i & 0xFF);
-    int wrc = fwrite((uint32_t)fid, 0, buf, WO_BYTES);
+    int wrc = fwrite((file_id_t)fid, 0, buf, WO_BYTES);
     if (wrc != WO_BYTES) {
         kdbg_print("[WO child] fwrite rc=%d", wrc);
-        delete((uint32_t)fid);
+        delete((file_id_t)fid);
         return 1;
     }
-    delete((uint32_t)fid);
+    delete((file_id_t)fid);
     kdbg_print("[WO child] wrote %d bytes & exited", WO_BYTES);
     return 0;
 }
@@ -79,20 +79,20 @@ int main(void)
     }
 
     const uint8_t *p = t.payload;
-    if (t.payload_len < 12) {
+    if (t.payload_len < 16) {
         kdbg_print("[WO] FAIL: payload too small (%u)", (unsigned)t.payload_len);
         return 1;
     }
-    uint32_t got_fid = 0;
-    uint8_t  got_op  = 0;
-    uint64_t got_bytes = 0;
-    memcpy(&got_fid,   p + 0, 4);
-    memcpy(&got_op,    p + 4, 1);
-    if (t.payload_len >= 24) {
-        memcpy(&got_bytes, p + 16, 8);
+    file_id_t got_fid = 0;
+    uint8_t   got_op  = 0;
+    uint64_t  got_bytes = 0;
+    memcpy(&got_fid,   p + 0, 8);
+    memcpy(&got_op,    p + 8, 1);
+    if (t.payload_len >= 32) {
+        memcpy(&got_bytes, p + 24, 8);
     }
 
-    kdbg_print("[WO] received WROTE fid=%u op=%u bytes=%lu",
+    kdbg_print("[WO] received WROTE fid=%lu op=%u bytes=%lu",
                got_fid, got_op, (unsigned long)got_bytes);
 
     if (got_op != 1) {

@@ -48,7 +48,7 @@ typedef struct FileRecord {
     uint32_t           tag_count;
     uint32_t           extent_count;
     uint32_t           name_len;
-    const uint16_t*    tags;         /* these three point into the allocation */
+    const uint32_t*    tags;         /* these three point into the allocation */
     const Strip*       extents;
     const char*        name;         /* NUL-terminated */
 } FileRecord;

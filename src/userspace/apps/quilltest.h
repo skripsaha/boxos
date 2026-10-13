@@ -30,17 +30,17 @@ typedef enum { QUILL_PASS, QUILL_DEFECT, QUILL_PENDING, QUILL_FAIL } QuillVerdic
 void     QuillFill(uint64_t *dst, uint32_t seed, uint64_t base, uint64_t len);
 /* [0, size) of `fid` read back against that stream: the offset of the first
  * byte that is not it (`size` when all are), the read that stopped it in *err. */
-uint64_t QuillReadBack(uint32_t fid, uint32_t seed, uint64_t size, int64_t *err);
+uint64_t QuillReadBack(file_id_t fid, uint32_t seed, uint64_t size, int64_t *err);
 /* The name up to its last dot: the tag TagFS stamps on every file. */
 void     QuillStem(const char *name, char *out, size_t cap);
 /* Every file called `name`, whatever Use Context is set: how many there are
  * (the first `max` in ids), or a negative -error_t. */
-int      QuillFindEverywhere(const char *name, uint32_t *ids, int max);
+int      QuillFindEverywhere(const char *name, file_id_t *ids, int max);
 /* A fresh, empty `name` on the whole volume — every earlier one deleted —
  * and its file id, or <= 0. */
-int      QuillCreate(const char *name);
+int64_t  QuillCreate(const char *name);
 /* The size file_info reports, 0 when it will not answer. */
-uint64_t QuillSize(uint32_t fid);
+uint64_t QuillSize(file_id_t fid);
 /* A count or a number as the shell gave it — digits only, at most ten, no
  * more than a uint32_t holds — in *out; false for anything else. */
 bool     QuillNumber(const char *word, uint32_t *out);

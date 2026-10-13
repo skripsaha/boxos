@@ -73,7 +73,7 @@ static bool QuillRecordIsWhole(const QuillRecord *rec)
 }
 
 /* The seq of the record `fid` holds now, or 0 when it holds no whole one. */
-static uint32_t QuillReadSeq(uint32_t fid)
+static uint32_t QuillReadSeq(file_id_t fid)
 {
     QuillRecord rec;
     memset(&rec, 0, sizeof(rec));
@@ -113,17 +113,17 @@ QuillVerdict QuillSettle(const char *const *args)
     time_uptime_ms(&ms);
     uint32_t    seq = (uint32_t)ms ? (uint32_t)ms : 1u;
     QuillRecord rec = QuillRecordOf(seq);
-    int     fid = QuillCreate(name);
-    int64_t w   = fid > 0 ? fwrite((uint32_t)fid, 0, &rec, sizeof(rec)) : 0;
+    int64_t fid = QuillCreate(name);
+    int64_t w   = fid > 0 ? fwrite((file_id_t)fid, 0, &rec, sizeof(rec)) : 0;
     if (fid <= 0 || w != (int64_t)sizeof(rec)) {
         int krc = proc_finish((uint32_t)hog, gen);
-        printf("[QUILL] settle: FAIL — %s could not be written beside hog pid %d (create %d, "
+        printf("[QUILL] settle: FAIL — %s could not be written beside hog pid %d (create %ld, "
                "write %lld; the hog ended: %d)\n", name, hog, fid, (long long)w, krc);
         return QUILL_FAIL;
     }
-    printf("[QUILL] settle: PENDING — wrote %s fid=%u seq=%u bytes=%u beside hog pid %d, "
+    printf("[QUILL] settle: PENDING — wrote %s fid=%lu seq=%u bytes=%u beside hog pid %d, "
            "not anchored; parked on the hog until the power goes, then quilltest verify %s\n",
-           name, (uint32_t)fid, seq, (uint32_t)sizeof(rec), hog, name);
+           name, (file_id_t)fid, seq, (uint32_t)sizeof(rec), hog, name);
 
     int32_t code = 0;
     int     grc  = process_gone((uint32_t)hog, gen, &code);
@@ -179,7 +179,7 @@ QuillVerdict QuillHogged(const char *const *args)
 QuillVerdict QuillVerify(const char *const *args)
 {
     const char *name = args[0];
-    uint32_t ids[4];
+    file_id_t ids[4];
     int n = QuillFindEverywhere(name, ids, 4);
     if (n != 1) {
         printf("[QUILL] verify: FAIL — the volume has %d file(s) called %s where one was "
@@ -191,12 +191,12 @@ QuillVerdict QuillVerify(const char *const *args)
     uint64_t size = QuillSize(ids[0]);
     int64_t  r    = fread(ids[0], 0, &rec, sizeof(rec));
     if (r == (int64_t)sizeof(rec) && size == sizeof(rec) && QuillRecordIsWhole(&rec)) {
-        printf("[QUILL] verify: PASS — %s fid=%u seq=%u bytes=%llu: magic 0x%x and checksum "
+        printf("[QUILL] verify: PASS — %s fid=%lu seq=%u bytes=%llu: magic 0x%x and checksum "
                "0x%x read back as written\n", name, ids[0], rec.seq,
                (unsigned long long)size, rec.magic, rec.checksum);
         return QUILL_PASS;
     }
-    printf("[QUILL] verify: FAIL — %s fid=%u holds %llu bytes and a read of %u answered %lld: "
+    printf("[QUILL] verify: FAIL — %s fid=%lu holds %llu bytes and a read of %u answered %lld: "
            "magic 0x%x seq=%u checksum 0x%x where 0x%x was due\n", name, ids[0],
            (unsigned long long)size, (uint32_t)sizeof(rec), (long long)r, rec.magic, rec.seq,
            rec.checksum, QuillChecksum(rec.magic, rec.seq));
@@ -206,25 +206,25 @@ QuillVerdict QuillVerify(const char *const *args)
 /* NAME carried on — the file of that name, and the seq after the record it
  * holds — or laid down, at seq 1: its file id, or <= 0 with `mode`'s FAIL
  * said. */
-static int QuillCarryOn(const char *mode, const char *name, uint32_t *seq)
+static int64_t QuillCarryOn(const char *mode, const char *name, uint32_t *seq)
 {
-    uint32_t ids[1];
+    file_id_t ids[1];
     int n = QuillFindEverywhere(name, ids, 1);
     if (n < 0) {
         printf("[QUILL] %s: FAIL — could not look for %s (answer %d), so there is no telling "
                "whether to carry a file on or lay one down\n", mode, name, n);
         return n;
     }
-    int fid;
+    int64_t fid;
     *seq = 1;
     if (n > 0) {
-        fid  = (int)ids[0];
+        fid  = (int64_t)ids[0];
         *seq = QuillReadSeq(ids[0]) + 1;
     } else {
         fid = create_everywhere(name, NULL);
     }
     if (fid <= 0)
-        printf("[QUILL] %s: FAIL — %s could not be found or created (answers %d, %d)\n",
+        printf("[QUILL] %s: FAIL — %s could not be found or created (answers %d, %ld)\n",
                mode, name, n, fid);
     return fid;
 }
@@ -236,21 +236,21 @@ QuillVerdict QuillChurn(const char *const *args)
 {
     const char *name = args[0];
     uint32_t    seq  = 1;
-    int         fid  = QuillCarryOn("churn", name, &seq);
+    int64_t     fid  = QuillCarryOn("churn", name, &seq);
     if (fid <= 0)
         return QUILL_FAIL;
-    printf("[QUILL] churn: %s fid=%u starts at seq=%u — it writes until the machine stops\n",
-           name, (uint32_t)fid, seq);
+    printf("[QUILL] churn: %s fid=%lu starts at seq=%u — it writes until the machine stops\n",
+           name, (file_id_t)fid, seq);
     for (;; seq++) {
         QuillRecord rec = QuillRecordOf(seq);
-        int64_t     w   = fwrite((uint32_t)fid, 0, &rec, sizeof(rec));
+        int64_t     w   = fwrite((file_id_t)fid, 0, &rec, sizeof(rec));
         if (w != (int64_t)sizeof(rec)) {
-            printf("[QUILL] churn: FAIL — writing seq=%u of %s fid=%u answered %lld\n",
-                   seq, name, (uint32_t)fid, (long long)w);
+            printf("[QUILL] churn: FAIL — writing seq=%u of %s fid=%lu answered %lld\n",
+                   seq, name, (file_id_t)fid, (long long)w);
             return QUILL_FAIL;
         }
         if (seq % QUILL_CHURN_PROGRESS == 0)
-            printf("[QUILL] churn: %s fid=%u wrote seq=%u\n", name, (uint32_t)fid, seq);
+            printf("[QUILL] churn: %s fid=%lu wrote seq=%u\n", name, (file_id_t)fid, seq);
     }
 }
 
@@ -264,21 +264,21 @@ QuillVerdict QuillKeeper(const char *const *args)
 {
     const char *name = args[0];
     uint32_t    seq  = 1;
-    int         fid  = QuillCarryOn("keeper", name, &seq);
+    int64_t     fid  = QuillCarryOn("keeper", name, &seq);
     if (fid <= 0)
         return QUILL_FAIL;
-    printf("[QUILL] keeper: %s fid=%u starts at seq=%u — it writes and anchors until the "
-           "machine stops\n", name, (uint32_t)fid, seq);
+    printf("[QUILL] keeper: %s fid=%lu starts at seq=%u — it writes and anchors until the "
+           "machine stops\n", name, (file_id_t)fid, seq);
     for (;; seq++) {
         QuillRecord rec = QuillRecordOf(seq);
-        int64_t     w   = fwrite((uint32_t)fid, 0, &rec, sizeof(rec));
-        int         arc = w == (int64_t)sizeof(rec) ? anchor((uint32_t)fid) : 0;
+        int64_t     w   = fwrite((file_id_t)fid, 0, &rec, sizeof(rec));
+        int         arc = w == (int64_t)sizeof(rec) ? anchor((file_id_t)fid) : 0;
         if (w != (int64_t)sizeof(rec) || arc != 0) {
-            printf("[QUILL] keeper: FAIL — seq=%u of %s fid=%u: the write answered %lld, the "
-                   "anchor %d\n", seq, name, (uint32_t)fid, (long long)w, arc);
+            printf("[QUILL] keeper: FAIL — seq=%u of %s fid=%lu: the write answered %lld, the "
+                   "anchor %d\n", seq, name, (file_id_t)fid, (long long)w, arc);
             return QUILL_FAIL;
         }
-        printf("[QUILL] keeper: %s fid=%u anchored seq=%u\n", name, (uint32_t)fid, seq);
+        printf("[QUILL] keeper: %s fid=%lu anchored seq=%u\n", name, (file_id_t)fid, seq);
     }
 }
 
@@ -357,15 +357,15 @@ QuillVerdict QuillRace(const char *const *args)
     memcpy(line + 17 + nl, "\"", 2);
 
     QuillRecord rec = QuillRecordOf(1);
-    int     fid = QuillCreate(name);
-    int64_t w   = fid > 0 ? fwrite((uint32_t)fid, 0, &rec, sizeof(rec)) : 0;
+    int64_t fid = QuillCreate(name);
+    int64_t w   = fid > 0 ? fwrite((file_id_t)fid, 0, &rec, sizeof(rec)) : 0;
     char    stem[64];
     QuillStem(name, stem, sizeof(stem));
     TouchTagPair pair = touch_intern(stem);
     TouchTag     tag  = touch_pair_choose(pair);
     if (fid <= 0 || w != (int64_t)sizeof(rec) || tag == TOUCH_TAG_INVALID ||
         touch_claim(tag, TOUCH_REST, 0, 0) != 0) {
-        printf("[QUILL] race: FAIL — %s could not be laid down and listened to (create %d, "
+        printf("[QUILL] race: FAIL — %s could not be laid down and listened to (create %ld, "
                "write %lld, tag %u); 0 anchors run\n", name, fid, (long long)w, (uint32_t)tag);
         return QUILL_FAIL;
     }
@@ -421,12 +421,12 @@ QuillVerdict QuillRace(const char *const *args)
     touch_release(tag);
     if (anchored == rounds && landed > 0) {
         printf("[QUILL] race: PASS — anchored %u of %u while churn pid %d landed %u write(s) "
-               "on %s fid=%u\n", anchored, rounds, churn, landed, name, (uint32_t)fid);
+               "on %s fid=%lu\n", anchored, rounds, churn, landed, name, (file_id_t)fid);
         return QUILL_PASS;
     }
     printf("[QUILL] race: FAIL — anchored %u of %u (anchor %u answered %d) while churn pid %d "
-           "landed %u write(s) on %s fid=%u\n", anchored, rounds, first_bad, bad_rc, churn,
-           landed, name, (uint32_t)fid);
+           "landed %u write(s) on %s fid=%lu\n", anchored, rounds, first_bad, bad_rc, churn,
+           landed, name, (file_id_t)fid);
     return QUILL_FAIL;
 }
 
@@ -476,9 +476,9 @@ static void QuillCrowdName(uint32_t number, char out[QUILL_CROWD_NAME])
  * wears it, *deleted counting the files of the name that went; 1 with *other
  * the id of a file of another name that wears it; or the answer of the query,
  * file_info or delete that stopped it. */
-static int QuillCrowdClear(const char *name, uint32_t *deleted, uint32_t *other)
+static int QuillCrowdClear(const char *name, uint32_t *deleted, file_id_t *other)
 {
-    uint32_t *ids = NULL;
+    file_id_t *ids = NULL;
     int n  = query_all_everywhere(name, &ids);
     int rc = n < 0 ? n : 0;
     for (int i = 0; i < n && rc == 0; i++) {
@@ -514,44 +514,46 @@ QuillVerdict QuillCrowd(const char *const *args)
     }
 
     char     name[QUILL_CROWD_NAME], first[QUILL_CROWD_NAME];
-    uint32_t first_fid = 0, last_fid = 0, again = 0;
+    file_id_t first_fid = 0, last_fid = 0;
+    uint32_t  again = 0;
     uint64_t t0 = 0, t1 = 0;
     time_uptime_ms(&t0);
     for (uint32_t i = 0; i < count; i++) {
-        uint32_t deleted = 0, other = 0;
+        uint32_t  deleted = 0;
+        file_id_t other   = 0;
         QuillCrowdName(from + i, name);
         int crc = QuillCrowdClear(name, &deleted, &other);
-        int fid = crc == 0 ? create_everywhere(name, NULL) : 0;
+        int64_t fid = crc == 0 ? create_everywhere(name, NULL) : 0;
         if (fid <= 0) {
             int arc = anchor(0);
             if (crc == 1)
-                printf("[QUILL] crowd: FAIL — at index %u of %u, %s: fid %u wears its tag under "
+                printf("[QUILL] crowd: FAIL — at index %u of %u, %s: fid %lu wears its tag under "
                        "another name, so the tag would not be the new file's own; %u made before "
                        "it (anchor %d)\n", i, count, name, other, i, arc);
             else
                 printf("[QUILL] crowd: FAIL — at index %u of %u, %s could not be made (%s "
                        "answered %d); %u made before it (anchor %d)\n", i, count, name,
-                       crc ? "clearing its name" : "create", crc ? crc : fid, i, arc);
+                       crc ? "clearing its name" : "create", crc ? crc : (int)fid, i, arc);
             return QUILL_FAIL;
         }
         again += deleted > 0;
         if (i == 0) {
             memcpy(first, name, sizeof(first));
-            first_fid = (uint32_t)fid;
+            first_fid = (file_id_t)fid;
         }
-        last_fid = (uint32_t)fid;
+        last_fid = (file_id_t)fid;
         if ((i + 1) % QUILL_CROWD_PROGRESS == 0 && i + 1 < count)
-            printf("[QUILL] crowd: %u of %u made, the last %s fid=%u\n", i + 1, count, name,
+            printf("[QUILL] crowd: %u of %u made, the last %s fid=%lu\n", i + 1, count, name,
                    last_fid);
     }
     int arc = anchor(0);
     time_uptime_ms(&t1);
     if (arc != 0) {
-        printf("[QUILL] crowd: FAIL — %u files %s..%s were made (fids %u..%u) and the anchor "
+        printf("[QUILL] crowd: FAIL — %u files %s..%s were made (fids %lu..%lu) and the anchor "
                "after them answered %d\n", count, first, name, first_fid, last_fid, arc);
         return QUILL_FAIL;
     }
-    printf("[QUILL] crowd: PASS — made %u files %s..%s, fids %u..%u, each wearing a tag no other "
+    printf("[QUILL] crowd: PASS — made %u files %s..%s, fids %lu..%lu, each wearing a tag no other "
            "file wears (its name); %u of the names made again over a file of their own; "
            "anchored, %llu ms in all\n", count, first, name, first_fid, last_fid, again,
            (unsigned long long)(t1 - t0));

@@ -107,6 +107,11 @@ error_t tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMa
         older  = NULL;
     }
 
+    /* The book read here is format v1's: its records hold a tag id in a u16,
+     * so this registry issues none past what v1 carries — the records it reads
+     * past it are dropped, as they always were (RegistryAdopt). */
+    reg->id_most = TAGFS_V1_TAG_ID_MOST;
+
     /* The two blocks every flush of this registry is written through, and the
      * one every block of the chain is read into on the way: the heap's, not
      * the stack's. The walk ends with the tail in tail_image. */
@@ -218,60 +223,25 @@ void TagRegistryLanded(TagRegistry* reg, SettleMark* mark) {
 }
 
 /*
- * ‼ THE ID TABLE COVERS EVERY NUMBER THE REGISTRY GIVES OUT FROM.
+ * ‼ THE NUMBERS MOVE, AND NOTHING IS SIZED BY THEM.
  *
- * next_id is what every reader of an id bounds itself by — a tag's spelling,
- * the system stamp, the take-down's walk over the table — and the table under
- * it grew only when a tag was entered. Moved past it here, by the records of
- * the pool wearing ids a rolled-back registry no longer names, every one of
- * them read past the table's end: a spelling out of the heap's next block, and
- * a take-down that freed pointers nobody allocated (Z08-1). So the table grows
- * to cover the numbers before they move — made with no lock held, swapped in
- * under it — and with no memory for it the numbers do not move: the refusal is
- * said, and the mount it belongs to is refused for want of memory.
+ * next_id moves past the ids the records of the pool wear that a rolled-back
+ * registry no longer names. It used to bound a table indexed by id, which had
+ * to grow to cover the numbers before they moved, or every reader of an id
+ * past its end read the heap's next block (Z08-1). The id's hash holds only
+ * the entries there are, so an id no tag has is found absent at any height,
+ * and moving the numbers takes nothing. Never past what the registry's book
+ * can carry (reg->id_most).
  */
-error_t TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next) {
-    if (next > TAGFS_MAX_TAG_ID + 1u)
-        next = TAGFS_MAX_TAG_ID + 1u;
-    for (;;) {
-        TagFSLockTake(&reg->lock);
-        if (next <= reg->next_id) {
-            TagFSLockDrop(&reg->lock);
-            return OK;
-        }
-        if (next <= reg->by_id_capacity) {
-            reg->next_id      = (uint16_t)next;
-            reg->written_next = (uint16_t)next;
-            TagFSLockDrop(&reg->lock);
-            return OK;
-        }
-        uint32_t cap = reg->by_id_capacity;
-        TagFSLockDrop(&reg->lock);
-
-        uint32_t room = cap ? cap : 1u;
-        while (room < next)
-            room *= 2u;
-        TagRegistryEntry** more = kmalloc(sizeof(TagRegistryEntry*) * room);
-        if (!more) {
-            kprintf("[TagRegistry] the volume's records wear tag ids up to %u, and there is no "
-                    "memory to number the registry that far — the volume is not mounted\n",
-                    next - 1u);
-            return ERR_NO_MEMORY;
-        }
-        TagRegistryEntry** old = NULL;
-        TagFSLockTake(&reg->lock);
-        if (reg->by_id_capacity == cap) {
-            memcpy(more, reg->by_id, sizeof(TagRegistryEntry*) * cap);
-            memset(more + cap, 0, sizeof(TagRegistryEntry*) * (room - cap));
-            old                 = reg->by_id;
-            reg->by_id          = more;
-            reg->by_id_capacity = room;
-            more                = NULL;
-        }
-        TagFSLockDrop(&reg->lock);
-        kfree(more);
-        kfree(old);
+void TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next) {
+    TagFSLockTake(&reg->lock);
+    if (next > reg->id_most + 1u)
+        next = reg->id_most + 1u;
+    if (next > reg->next_id) {
+        reg->next_id      = next;
+        reg->written_next = next;
     }
+    TagFSLockDrop(&reg->lock);
 }
 
 void RegistryChainLetGo(TagRegistry* reg) {

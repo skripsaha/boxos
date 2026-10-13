@@ -56,7 +56,7 @@ typedef struct {
     volatile uint32_t mib;
     volatile uint32_t round;       /* from 1 */
     volatile uint32_t aimed;       /* the round whose aimed window is being read */
-    volatile uint32_t fid;
+    volatile file_id_t fid;
     volatile uint32_t in_read;     /* the window being read, from 1; 0 while none is */
     volatile uint32_t done;        /* the rounds the deleter finished */
     volatile int32_t  deleted;     /* the delete's answer */
@@ -82,7 +82,7 @@ static void QuillRdWait(TouchTag heard, volatile uint32_t *word, uint32_t want)
 
 /* A change the next anchor has to settle — the scratch rewritten — and the
  * anchor: one Settle cycle. 0, or the first refusal. */
-static int QuillRdCycle(uint32_t scratch, const void *block)
+static int QuillRdCycle(file_id_t scratch, const void *block)
 {
     int64_t put = fwrite(scratch, 0, block, 4096);
     if (put != 4096)
@@ -106,7 +106,7 @@ QuillVerdict QuillDeleter(const char *const *args)
     uint64_t     bytes   = (uint64_t)board->mib << 20;
     uint64_t    *fill    = crc == 0 ? bay_open("quilltest:readdelete:fill", bytes, BAY_CREATE) : NULL;
     static uint64_t block[512];
-    int          scratch = fill ? QuillCreate(QUILL_RD_SCRATCH) : 0;
+    int64_t      scratch = fill ? QuillCreate(QUILL_RD_SCRATCH) : 0;
     bool         up      = scratch > 0;
     __atomic_store_n(&board->ready, up ? 1u : 2u, __ATOMIC_RELEASE);
     touch_send(reader, &crc, sizeof(crc), 0);
@@ -118,22 +118,22 @@ QuillVerdict QuillDeleter(const char *const *args)
             break;
         uint32_t r = board->aimed;
         /* One cycle first: the window's read is well in hand before the delete. */
-        int cycled = QuillRdCycle((uint32_t)scratch, block);
+        int cycled = QuillRdCycle((file_id_t)scratch, block);
         board->deleted   = delete(board->fid);
         board->at_delete = __atomic_load_n(&board->in_read, __ATOMIC_ACQUIRE);
         for (uint32_t c = 0; c < QUILL_RD_CYCLES && cycled == 0; c++)
-            cycled = QuillRdCycle((uint32_t)scratch, block);
+            cycled = QuillRdCycle((file_id_t)scratch, block);
         board->cycled = cycled;
-        int filler = QuillCreate(QUILL_RD_FILLER);
+        int64_t filler = QuillCreate(QUILL_RD_FILLER);
         QuillFill(fill, 0xF0u + r, 0, bytes);
-        board->filled = filler > 0 ? fwrite((uint32_t)filler, 0, fill, bytes) : filler;
+        board->filled = filler > 0 ? fwrite((file_id_t)filler, 0, fill, bytes) : filler;
         board->at_end = __atomic_load_n(&board->in_read, __ATOMIC_ACQUIRE);
         rounds = r;
         __atomic_store_n(&board->done, r, __ATOMIC_RELEASE);
         touch_send(reader, &r, sizeof(r), 0);
     }
     if (scratch > 0)
-        delete((uint32_t)scratch);
+        delete((file_id_t)scratch);
     if (fill)
         bay_release(fill);
     if (crc == 0)
@@ -141,7 +141,7 @@ QuillVerdict QuillDeleter(const char *const *args)
     bay_release(board);
     if (!up) {
         printf("[QUILL] deleter: FAIL — its tag answered the claim %d, its filler buffer of %llu "
-               "bytes %s, and %s answered %d (nothing was deleted)\n", crc,
+               "bytes %s, and %s answered %ld (nothing was deleted)\n", crc,
                (unsigned long long)bytes, fill ? "was had" : "was not had", QUILL_RD_SCRATCH,
                scratch);
         return QUILL_FAIL;
@@ -181,17 +181,17 @@ static int QuillRdRoundRun(QuillRdBoard *board, TouchTagPair deleter, TouchTag h
     uint64_t bytes  = (uint64_t)board->mib << 20;
     uint64_t window = bytes / QUILL_RD_WINDOWS;
     uint32_t seed   = 0x60u + r;
-    int      fid    = QuillCreate(QUILL_RD_NAME);
+    int64_t  fid    = QuillCreate(QUILL_RD_NAME);
     if (fid <= 0)
-        return fid ? fid : -1;
+        return fid ? (int)fid : -1;
     QuillFill(buf, seed, 0, bytes);
-    int64_t put = fwrite((uint32_t)fid, 0, buf, bytes);
-    int     arc = put == (int64_t)bytes ? anchor((uint32_t)fid) : -1;
+    int64_t put = fwrite((file_id_t)fid, 0, buf, bytes);
+    int     arc = put == (int64_t)bytes ? anchor((file_id_t)fid) : -1;
     if (arc != 0)
         return put != (int64_t)bytes ? (put < 0 ? (int)put : -1) : arc;
 
     memset(o, 0, sizeof(*o));
-    board->fid = (uint32_t)fid;
+    board->fid = (file_id_t)fid;
     __atomic_store_n(&board->round, r + 1, __ATOMIC_RELEASE);
     for (uint32_t k = 0; k < QUILL_RD_WINDOWS; k++) {
         uint8_t *at = (uint8_t *)buf + k * window;
@@ -200,7 +200,7 @@ static int QuillRdRoundRun(QuillRdBoard *board, TouchTagPair deleter, TouchTag h
             __atomic_store_n(&board->aimed, r + 1, __ATOMIC_RELEASE);
             touch_send(deleter, &r, sizeof(r), 0);
         }
-        o->got[k] = fread((uint32_t)fid, k * window, at, window);
+        o->got[k] = fread((file_id_t)fid, k * window, at, window);
         __atomic_store_n(&board->in_read, 0u, __ATOMIC_RELEASE);
         o->wrong[k] = QuillRdWrong(at, o->got[k], seed, k * window, want, &o->first[k]);
     }
@@ -250,7 +250,7 @@ static void QuillRdRoundSay(const QuillRdBoard *b, const QuillRdRound *o, uint32
  * one's did. */
 static void QuillRdDropFiller(void)
 {
-    uint32_t ids[4];
+    file_id_t ids[4];
     int      n = QuillFindEverywhere(QUILL_RD_FILLER, ids, 4);
     for (int i = 0; i < n && i < 4; i++)
         delete(ids[i]);
@@ -383,7 +383,7 @@ typedef struct __attribute__((packed)) {
 typedef struct {
     volatile uint32_t stop;
     volatile uint32_t slots;
-    volatile uint32_t fid[QUILL_DF_SLOTS];
+    volatile file_id_t fid[QUILL_DF_SLOTS];
     volatile uint32_t passes[QUILL_DF_DEFRAGGERS];
     volatile uint32_t moved[QUILL_DF_DEFRAGGERS];   /* defrags answered with a score */
     volatile uint32_t gone[QUILL_DF_DEFRAGGERS];    /* ... with a file not found: deleted under it */
@@ -407,7 +407,7 @@ static void QuillDfMake(uint64_t *buf, uint32_t s, uint32_t g)
 /* The file `fid` read whole and held against slot `s`'s file of gen `g`: the
  * gen its head names (UINT32_MAX when it names none of this slot's) in *found,
  * and true when it is that file, byte for byte. */
-static bool QuillDfIs(uint32_t fid, uint32_t s, uint32_t g, uint64_t *have, uint64_t *want,
+static bool QuillDfIs(file_id_t fid, uint32_t s, uint32_t g, uint64_t *have, uint64_t *want,
                       uint32_t *found, uint64_t *size)
 {
     *size  = QuillSize(fid);
@@ -439,7 +439,7 @@ QuillVerdict QuillDefragger(const char *const *args)
     int rc = 0;
     while (rc == 0 && !__atomic_load_n(&board->stop, __ATOMIC_ACQUIRE)) {
         for (uint32_t s = 0; s < board->slots && rc == 0; s++) {
-            uint32_t fid = __atomic_load_n(&board->fid[s], __ATOMIC_ACQUIRE);
+            file_id_t fid = __atomic_load_n(&board->fid[s], __ATOMIC_ACQUIRE);
             if (fid == 0)
                 continue;
             int d = defrag(fid);
@@ -469,17 +469,17 @@ QuillVerdict QuillDefragger(const char *const *args)
  * each published to the defraggers the moment it is made. 0, or the refusal. */
 static int QuillDfMakePair(QuillDfBoard *b, uint32_t s, uint32_t g, uint64_t *bufs[2])
 {
-    uint32_t fids[2];
+    file_id_t fids[2];
     uint64_t sizes[2];
     for (uint32_t j = 0; j < 2; j++) {
         char name[QUILL_NAME_CAP];
         QuillIndexedName(name, QUILL_DF_STEM, s + j);
         QuillDfMake(bufs[j], s + j, g);
         sizes[j] = QuillDfSize(s + j, g);
-        int fid  = QuillCreate(name);
+        int64_t fid  = QuillCreate(name);
         if (fid <= 0)
-            return fid ? fid : -1;
-        fids[j] = (uint32_t)fid;
+            return fid ? (int)fid : -1;
+        fids[j] = (file_id_t)fid;
         __atomic_store_n(&b->fid[s + j], fids[j], __ATOMIC_RELEASE);
     }
     for (uint64_t off = 0; off < sizes[0] || off < sizes[1]; off += QUILL_DF_PIECE)
@@ -498,7 +498,7 @@ static int QuillDfMakePair(QuillDfBoard *b, uint32_t s, uint32_t g, uint64_t *bu
 static int QuillDfDeletePair(QuillDfBoard *b, uint32_t s)
 {
     for (uint32_t j = 0; j < 2; j++) {
-        uint32_t fid = __atomic_exchange_n(&b->fid[s + j], 0u, __ATOMIC_ACQ_REL);
+        file_id_t fid = __atomic_exchange_n(&b->fid[s + j], 0u, __ATOMIC_ACQ_REL);
         int      rc  = fid ? delete(fid) : -1;
         if (rc != 0)
             return rc;
@@ -625,7 +625,7 @@ QuillVerdict QuillDefragBack(const char *const *args)
     }
     for (uint32_t s = 0; s < slots; s++) {
         char     name[QUILL_NAME_CAP];
-        uint32_t ids[4];
+        file_id_t ids[4];
         QuillIndexedName(name, QUILL_DF_STEM, s);
         int      n     = QuillFindEverywhere(name, ids, 4);
         uint32_t found = UINT32_MAX, other = UINT32_MAX;

@@ -35,17 +35,17 @@
  *      it took were the ids the volume's own tags wanted. That is what made
  *      a file tagged `display` come back tagged `mce`.
  *
- * The split is structural, not conventional. Bit 15 of a TouchTag says which
+ * The split is structural, not conventional. Bit 31 of a TouchTag says which
  * book the id came from:
  *
- *      0x0000..0x7FFE   the volume's registry — properties of stored things
- *      0x8000..0xFFFE   this Logbook          — occurrences the kernel saw
- *      0xFFFF           TOUCH_TAG_INVALID
+ *      0x00000000..0x7FFFFFFE   the volume's registry — properties of stored things
+ *      0x80000000..0xFFFFFFFE   this Logbook          — occurrences the kernel saw
+ *      0xFFFFFFFF               TOUCH_TAG_INVALID
  *
- * TAGFS_MAX_TAG_ID caps the volume side at 0x7FFE, so the volume cannot
- * reach into the kernel half even in principle. Touch's bucket table is
- * already two-level over the whole 16-bit space, so the kernel half costs
- * one lazily-allocated leaf and nothing else.
+ * TAGFS_MAX_TAG_ID caps the volume side at 0x7FFFFFFE, so the volume cannot
+ * reach into the kernel half even in principle. Touch's bucket table is a
+ * radix over the whole 32-bit space, so the kernel half costs one
+ * lazily-allocated path of it and nothing else.
  *
  * WHO WRITES: the kernel, and only the kernel. TouchLogbookResolve /
  * TouchLogbookIntern create entries; they are reached from kernel publishers
@@ -66,11 +66,11 @@
  * cached ids to TouchPublishIrqPair, which is IRQ-safe.
  */
 
-/* Bit 15 marks an id issued by this Logbook. */
-#define TOUCH_TAG_KERNEL_BIT   ((TouchTag)0x8000u)
+/* Bit 31 marks an id issued by this Logbook. */
+#define TOUCH_TAG_KERNEL_BIT   ((TouchTag)0x80000000u)
 
-/* Highest index this Logbook can issue: id 0xFFFF is TOUCH_TAG_INVALID. */
-#define TOUCH_LOGBOOK_MAX_INDEX 0x7FFEu
+/* Highest index this Logbook can issue: id 0xFFFFFFFF is TOUCH_TAG_INVALID. */
+#define TOUCH_LOGBOOK_MAX_INDEX 0x7FFFFFFEu
 
 static inline bool TouchTagIsKernel(TouchTag tag_id)
 {

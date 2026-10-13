@@ -294,7 +294,7 @@ FILE *fopen(const char *filename, const char *mode) noexcept
         if (*p == '+') { read = write = true; }
         else if (*p != 'b' && *p != 'x') return nullptr;
         else if (*p == 'x') {
-            uint32_t    ids[1];
+            file_id_t   ids[1];
             file_info_t infos[1];
             if (::find_file_by_name(filename, ids, infos, 1) > 0) return nullptr;
         }
@@ -654,7 +654,7 @@ void perror(const char *s) noexcept
 int remove(const char *filename) noexcept
 {
     if (!filename) return -1;
-    uint32_t    ids[1];
+    file_id_t   ids[1];
     file_info_t infos[1];
     if (::find_file_by_name(filename, ids, infos, 1) <= 0) return -1;
     return ::file_delete(ids[0]) == 0 ? 0 : -1;
@@ -663,7 +663,7 @@ int remove(const char *filename) noexcept
 int rename(const char *old_p, const char *new_p) noexcept
 {
     if (!old_p || !new_p) return -1;
-    uint32_t    ids[1];
+    file_id_t   ids[1];
     file_info_t infos[1];
     if (::find_file_by_name(old_p, ids, infos, 1) <= 0) return -1;
     return ::file_rename(ids[0], new_p) == 0 ? 0 : -1;
@@ -689,7 +689,7 @@ char *tmpnam(char *s) noexcept
         do { digits[nd++] = static_cast<char>('0' + id % 10); id /= 10; } while (id);
         while (nd) *p++ = digits[--nd];
         *p = '\0';
-        uint32_t    ids[1];
+        file_id_t   ids[1];
         file_info_t infos[1];
         if (::find_file_by_name(out, ids, infos, 1) <= 0) return out;
     }

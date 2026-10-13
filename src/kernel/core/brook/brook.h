@@ -307,7 +307,7 @@ _Static_assert(__builtin_offsetof(BrookHeader, writer_bell) < 64,
 struct BrookObject {
     BrookObject  *bucket_next;         /* hash-bucket collision chain */
 
-    uint16_t      tag_id;              /* TagFS-interned id */
+    uint32_t      tag_id;              /* TagFS-interned id */
     uint16_t      slot_page_class;     /* 12 (4 KiB) or 21 (2 MiB) */
     uint32_t      flags;               /* sticky creation flags */
     uint32_t      frame_size;          /* immutable */
@@ -499,7 +499,7 @@ void BrookStatsSnapshot(uint64_t out[4]);
  *
  * Reports the first such brook read by `reader_pid`, or false if there is none.
  * Takes bucket locks, so it must not be called from interrupt context. */
-bool BrookBellUnrung(uint32_t reader_pid, uint16_t *out_tag_id,
+bool BrookBellUnrung(uint32_t reader_pid, uint32_t *out_tag_id,
                      uint64_t *out_head, uint64_t *out_tail);
 
 #endif /* BROOK_H */

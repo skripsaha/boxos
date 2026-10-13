@@ -25,6 +25,9 @@
 
 #define OFFSETOF(type, member) __builtin_offsetof(type, member)
 
-typedef uint32_t file_id_t;
+/* A file's id, as the volume issues it: 64 bits, the width the kernel holds
+ * it in. A volume never issues one twice, nor 0 — 0 is "no file", and where a
+ * call takes 0 it says what 0 means there (anchor: the whole volume). */
+typedef uint64_t file_id_t;
 
 #endif // BOX_TYPES_H

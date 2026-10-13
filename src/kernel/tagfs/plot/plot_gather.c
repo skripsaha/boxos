@@ -39,7 +39,7 @@ static uint64_t PlotRunExtents(uint64_t blocks)
 /* B10, whatever the warrant: a warrant lets a call change a file the system
  * keeps, and never moves that file's blocks. Asked with the tags the file
  * wears and the runs the Plot names. */
-static error_t PlotGatherKept(const Plot *p, const uint16_t *tags, uint32_t count)
+static error_t PlotGatherKept(const Plot *p, const uint32_t *tags, uint32_t count)
 {
     if (!InkWearsGuarded(tags, count) && !InkTouchesBoot(p->runs, p->run_count))
         return OK;

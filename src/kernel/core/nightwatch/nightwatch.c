@@ -594,7 +594,7 @@ static void nightwatch_verdict(void)
          * peer takes the bell before it rings, so a lost ring leaves the header
          * looking clean. See BrookBellUnrung. */
         bool     bell_unrung = false;
-        uint16_t bell_tag    = 0;
+        uint32_t bell_tag    = 0;
         uint64_t bk_head = 0, bk_tail = 0;
         if (e->state == (uint8_t)PROC_WAITING)
             bell_unrung = BrookBellUnrung(e->pid, &bell_tag, &bk_head, &bk_tail);

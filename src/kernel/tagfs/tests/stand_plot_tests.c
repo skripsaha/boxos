@@ -387,11 +387,10 @@ static int StandPlotJob(WriteJobKind kind, uint64_t file_id, uint64_t size)
  * its call. The handler's answer. */
 static int StandPlotDeckSpan(uint64_t file_id, uint64_t size, uint32_t flags)
 {
-    uint8_t  params[16];
-    uint32_t id = (uint32_t)file_id;    /* a program's file_id_t: the stand's ids are v1's */
-    memcpy(params, &id, 4);
-    memcpy(params + 4, &size, 8);
-    memcpy(params + 12, &flags, 4);
+    uint8_t params[20];
+    memcpy(params, &file_id, 8);
+    memcpy(params + 8, &size, 8);
+    memcpy(params + 16, &flags, 4);
     return StandDeckAsk(STORAGE_OBJ_SPAN, params, sizeof(params), NULL, 0, NULL);
 }
 

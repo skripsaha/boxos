@@ -799,7 +799,7 @@ void vmm_tme_ap_probe(void) { vmm_tme_probe_inner("AP"); }
  * locks — touch.h:230 forbids from IRQ context). Exposed via getter
  * so idt.c stays IRQ-safe. */
 static TouchTag g_vmm_tag_cet_cp_fault = TOUCH_TAG_INVALID;
-uint16_t vmm_get_cet_cp_tag(void) { return (uint16_t)g_vmm_tag_cet_cp_fault; }
+uint32_t vmm_get_cet_cp_tag(void) { return g_vmm_tag_cet_cp_fault; }
 
 static void vmm_cet_probe_inner(const char *who) {
     if (!g_cpu_caps.has_shstk && !g_cpu_caps.has_ibt) {

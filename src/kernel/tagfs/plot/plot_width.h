@@ -4,7 +4,8 @@
 #include "../../../lib/kernel/ktypes.h"
 
 /*
- * The widths format v1 gives a file's record, owned here and nowhere else.
+ * The widths format v1 gives a file's record and a tag id, owned here and
+ * nowhere else.
  *
  * A record is one packed run of bytes in a metadata pool block: a 42-byte head
  * (40 bytes of fields, then a CRC16), two bytes a tag, six bytes an extent and
@@ -37,5 +38,12 @@ STATIC_ASSERT(sizeof(FileExtent) == 6, "FileExtent must be 6 bytes");
 
 /* The most blocks one extent names: its u16 count. */
 #define PLOT_RUN_MOST           0xFFFFu
+
+/* The highest tag id format v1 carries. A record's tags and the registry's
+ * records hold a tag id in a u16, and a kernel from before tag ids were u32
+ * read bit 15 as its Logbook's and dropped any id past this one — so a v1
+ * volume's registry issues none past it, and the volume stays readable to
+ * every kernel that mounts it. */
+#define TAGFS_V1_TAG_ID_MOST    0x7FFEu
 
 #endif /* TAGFS_PLOT_WIDTH_H */

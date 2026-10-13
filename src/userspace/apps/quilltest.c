@@ -137,7 +137,7 @@ void QuillFill(uint64_t *dst, uint32_t seed, uint64_t base, uint64_t len)
  * may land in pages a program has not touched yet is coldread's question,
  * and quillmut takes the kernel's answer to it away to see coldread notice —
  * without the cases beside it noticing too. */
-uint64_t QuillReadBack(uint32_t fid, uint32_t seed, uint64_t size, int64_t *err)
+uint64_t QuillReadBack(file_id_t fid, uint32_t seed, uint64_t size, int64_t *err)
 {
     *err = 0;
     if (!g_window) {
@@ -189,12 +189,12 @@ void QuillStem(const char *name, char *out, size_t cap)
 
 /* Every file called `name`, whatever Use Context is set. Returns how many
  * there are (the first `max` of them in ids) or a negative -error_t. */
-int QuillFindEverywhere(const char *name, uint32_t *ids, int max)
+int QuillFindEverywhere(const char *name, file_id_t *ids, int max)
 {
     char stem[64];
     QuillStem(name, stem, sizeof(stem));
 
-    uint32_t *all = NULL;
+    file_id_t *all = NULL;
     int n = query_all_everywhere(stem, &all);
     if (n < 0)
         return n;
@@ -216,7 +216,7 @@ int QuillFindEverywhere(const char *name, uint32_t *ids, int max)
  * system or boot: a previous run's leftovers, or whatever the operator named. */
 static int QuillForget(const char *name)
 {
-    uint32_t ids[8];
+    file_id_t ids[8];
     for (;;) {
         int n = QuillFindEverywhere(name, ids, 8);
         if (n <= 0)
@@ -230,7 +230,7 @@ static int QuillForget(const char *name)
 }
 
 /* A fresh, empty `name` on the whole volume: its file id, or <= 0. */
-int QuillCreate(const char *name)
+int64_t QuillCreate(const char *name)
 {
     int rc = QuillForget(name);
     if (rc < 0)
@@ -238,7 +238,7 @@ int QuillCreate(const char *name)
     return create_everywhere(name, NULL);
 }
 
-uint64_t QuillSize(uint32_t fid)
+uint64_t QuillSize(file_id_t fid)
 {
     file_info_t info;
     return file_info(fid, &info) == 0 ? info.size : 0;
@@ -257,7 +257,7 @@ static QuillVerdict QuillLongQuery(const char *const *args)
 {
     (void)args;
     static char tag[QUILL_LONG_TAG_BYTES + 1];
-    uint32_t   *ids = NULL;
+    file_id_t  *ids = NULL;
 
     int all = query_all_everywhere(NULL, &ids);
     free(ids);
@@ -307,10 +307,10 @@ static QuillVerdict QuillLongQuery(const char *const *args)
 static QuillVerdict QuillBigWrite(const char *const *args)
 {
     (void)args;
-    int fid = QuillCreate("quillbig.bin");
+    int64_t fid = QuillCreate("quillbig.bin");
     if (fid <= 0) {
         int arc = anchor(0);
-        printf("[QUILL] bigwrite: FAIL — quillbig.bin could not be created (answer %d, anchor %d)\n",
+        printf("[QUILL] bigwrite: FAIL — quillbig.bin could not be created (answer %ld, anchor %d)\n",
                fid, arc);
         return QUILL_FAIL;
     }
@@ -320,7 +320,7 @@ static QuillVerdict QuillBigWrite(const char *const *args)
      * one window. */
     uint64_t *buf = bay_open("quilltest:bigwrite", QUILL_BIG_BYTES, BAY_CREATE);
     if (!buf) {
-        delete((uint32_t)fid);
+        delete((file_id_t)fid);
         int arc = anchor(0);
         printf("[QUILL] bigwrite: FAIL — a Bay of %u bytes could not be opened, so no write "
                "of that size could be asked for (anchor %d)\n", QUILL_BIG_BYTES, arc);
@@ -330,15 +330,15 @@ static QuillVerdict QuillBigWrite(const char *const *args)
 
     uint64_t t0 = 0, t1 = 0;
     time_uptime_ms(&t0);
-    int64_t wrote = fwrite((uint32_t)fid, 0, buf, QUILL_BIG_BYTES);
+    int64_t wrote = fwrite((file_id_t)fid, 0, buf, QUILL_BIG_BYTES);
     time_uptime_ms(&t1);
     bay_release(buf);
 
-    uint64_t size = QuillSize((uint32_t)fid);
+    uint64_t size = QuillSize((file_id_t)fid);
     int64_t  rerr = 0;
     uint64_t good = (wrote == (int64_t)QUILL_BIG_BYTES && size == QUILL_BIG_BYTES)
-                        ? QuillReadBack((uint32_t)fid, QUILL_SEED_BIG, size, &rerr) : 0;
-    delete((uint32_t)fid);
+                        ? QuillReadBack((file_id_t)fid, QUILL_SEED_BIG, size, &rerr) : 0;
+    delete((file_id_t)fid);
     int arc = anchor(0);
 
     if (arc == 0 && wrote == (int64_t)QUILL_BIG_BYTES && size == QUILL_BIG_BYTES &&
@@ -551,18 +551,18 @@ static QuillVerdict QuillColdRead(const char *const *args)
     uint64_t *warm, *cold;
     if (!QuillColdPair("coldread", &warm, &cold))
         return QUILL_FAIL;
-    int fid = QuillCreate("quillcold.bin");
+    int64_t fid = QuillCreate("quillcold.bin");
     if (fid <= 0) {
         int arc = anchor(0);
-        printf("[QUILL] coldread: FAIL — quillcold.bin could not be created (answer %d, anchor %d)\n",
+        printf("[QUILL] coldread: FAIL — quillcold.bin could not be created (answer %ld, anchor %d)\n",
                fid, arc);
         return QUILL_FAIL;
     }
 
     QuillFill(warm, QUILL_SEED_COLD, 0, QUILL_COLD_BYTES);
-    int64_t wrote = fwrite((uint32_t)fid, 0, warm, QUILL_COLD_BYTES);
+    int64_t wrote = fwrite((file_id_t)fid, 0, warm, QUILL_COLD_BYTES);
     int64_t got   = wrote == (int64_t)QUILL_COLD_BYTES
-                        ? fread((uint32_t)fid, 0, cold, QUILL_COLD_BYTES) : 0;
+                        ? fread((file_id_t)fid, 0, cold, QUILL_COLD_BYTES) : 0;
 
     /* Only now is `cold` looked at, and the look is a first touch of its
      * own: a page the read did not fill comes in as zeros. */
@@ -570,7 +570,7 @@ static QuillVerdict QuillColdRead(const char *const *args)
     uint64_t wrong = got > 0 ? QuillColdWrong(cold, (uint64_t)got, QUILL_SEED_COLD, &first) : 0;
     for (uint64_t w = first / 8; wrong && w < (uint64_t)got / 8; w++)
         zero += cold[w] == 0 && QuillWord(QUILL_SEED_COLD, w * 8) != 0 ? 8 : 0;
-    delete((uint32_t)fid);
+    delete((file_id_t)fid);
     int arc = anchor(0);
 
     if (wrote != (int64_t)QUILL_COLD_BYTES) {
@@ -604,24 +604,24 @@ static QuillVerdict QuillColdWrite(const char *const *args)
     uint64_t *warm, *cold;
     if (!QuillColdPair("coldwrite", &warm, &cold))
         return QUILL_FAIL;
-    int fid = QuillCreate("quillcold.bin");
+    int64_t fid = QuillCreate("quillcold.bin");
     if (fid <= 0) {
         int arc = anchor(0);
-        printf("[QUILL] coldwrite: FAIL — quillcold.bin could not be created (answer %d, anchor %d)\n",
+        printf("[QUILL] coldwrite: FAIL — quillcold.bin could not be created (answer %ld, anchor %d)\n",
                fid, arc);
         return QUILL_FAIL;
     }
 
-    int64_t  wrote = fwrite((uint32_t)fid, 0, cold, QUILL_COLD_BYTES);
-    uint64_t size  = QuillSize((uint32_t)fid);
+    int64_t  wrote = fwrite((file_id_t)fid, 0, cold, QUILL_COLD_BYTES);
+    uint64_t size  = QuillSize((file_id_t)fid);
 
     /* Read back into `warm`, filled first with bytes that are not zero, so a
      * read that left any of it alone cannot pass for one that read zeros. */
     memset(warm, 0xA5, QUILL_COLD_BYTES);
-    int64_t  got   = size > 0 && size <= QUILL_COLD_BYTES ? fread((uint32_t)fid, 0, warm, size) : 0;
+    int64_t  got   = size > 0 && size <= QUILL_COLD_BYTES ? fread((file_id_t)fid, 0, warm, size) : 0;
     uint64_t first = 0;
     uint64_t wrong = got > 0 ? QuillColdWrong(warm, (uint64_t)got, 0, &first) : 0;
-    delete((uint32_t)fid);
+    delete((file_id_t)fid);
     int arc = anchor(0);
 
     bool whole = arc == 0 && wrote == (int64_t)QUILL_COLD_BYTES && size == QUILL_COLD_BYTES &&

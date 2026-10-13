@@ -24,7 +24,7 @@
 #define PROBE_INSIDE "use_probe_in"
 #define PROBE_OUT    "use_probe_out"
 
-static bool has_id(const uint32_t *ids, int count, uint32_t id)
+static bool has_id(const file_id_t *ids, int count, file_id_t id)
 {
     for (int i = 0; i < count; i++)
         if (ids[i] == id) return true;
@@ -54,7 +54,7 @@ int main(void)
 
     int verdict = 0;
     int rc;
-    int inside_id = 0, out_id = 0;
+    int64_t inside_id = 0, out_id = 0;
 
     bool remembered = false;
     rc = use_set(PROBE_TAG, &remembered);
@@ -66,23 +66,23 @@ int main(void)
     if (rc != 1 || strcmp(got, PROBE_TAG) != 0) { verdict = fail("use_get does not echo the context", rc < 0 ? rc : 0); goto restore; }
 
     inside_id = create(PROBE_INSIDE, NULL);
-    if (inside_id <= 0) { verdict = fail("create inside the context", inside_id); goto restore; }
+    if (inside_id <= 0) { verdict = fail("create inside the context", (int)inside_id); goto restore; }
     out_id = create_everywhere(PROBE_OUT, NULL);
-    if (out_id <= 0) { verdict = fail("create everywhere", out_id); goto restore; }
+    if (out_id <= 0) { verdict = fail("create everywhere", (int)out_id); goto restore; }
 
-    uint32_t ids[256];
+    file_id_t ids[256];
     int n;
 
     /* Inside: the stamped file is visible, the unstamped one is behind the walls. */
     n = query(NULL, ids, 256);
     if (n < 0) { verdict = fail("query inside", n); goto restore; }
-    if (!has_id(ids, n, (uint32_t)inside_id)) { verdict = fail("a file created inside is not seen inside", 0); goto restore; }
-    if (has_id(ids, n, (uint32_t)out_id))      { verdict = fail("a file created everywhere is seen inside", 0); goto restore; }
+    if (!has_id(ids, n, (file_id_t)inside_id)) { verdict = fail("a file created inside is not seen inside", 0); goto restore; }
+    if (has_id(ids, n, (file_id_t)out_id))      { verdict = fail("a file created everywhere is seen inside", 0); goto restore; }
 
     /* Everywhere: both. */
     n = query_everywhere(NULL, ids, 256);
     if (n < 0) { verdict = fail("query everywhere", n); goto restore; }
-    if (!has_id(ids, n, (uint32_t)inside_id) || !has_id(ids, n, (uint32_t)out_id)) {
+    if (!has_id(ids, n, (file_id_t)inside_id) || !has_id(ids, n, (file_id_t)out_id)) {
         verdict = fail("query everywhere does not see both files", 0);
         goto restore;
     }
@@ -90,7 +90,7 @@ int main(void)
     /* The stamp is a real tag: asked for by name, everywhere, only the stamped file answers. */
     n = query_everywhere(PROBE_TAG, ids, 256);
     if (n < 0) { verdict = fail("query everywhere by the context tag", n); goto restore; }
-    if (!has_id(ids, n, (uint32_t)inside_id) || has_id(ids, n, (uint32_t)out_id)) {
+    if (!has_id(ids, n, (file_id_t)inside_id) || has_id(ids, n, (file_id_t)out_id)) {
         verdict = fail("the context tag was not stamped on exactly the inside file", 0);
         goto restore;
     }
@@ -101,14 +101,14 @@ int main(void)
     if (rc < 0) { verdict = fail("use_clear", rc); goto restore; }
     n = query(NULL, ids, 256);
     if (n < 0) { verdict = fail("query after clear", n); goto restore; }
-    if (!has_id(ids, n, (uint32_t)inside_id) || !has_id(ids, n, (uint32_t)out_id)) {
+    if (!has_id(ids, n, (file_id_t)inside_id) || !has_id(ids, n, (file_id_t)out_id)) {
         verdict = fail("after use_clear both files should be visible", 0);
         goto restore;
     }
 
 restore:
-    if (inside_id > 0) delete((uint32_t)inside_id);
-    if (out_id > 0)    delete((uint32_t)out_id);
+    if (inside_id > 0) delete((file_id_t)inside_id);
+    if (out_id > 0)    delete((file_id_t)out_id);
     if (saved) {
         use_set(saved, NULL);
         free(saved);

@@ -36,13 +36,13 @@
 static uint64_t g_chunk[QUILL_CHUNK / 8];
 
 /* One QUILL_CHUNK of the stream at `off`, written; fwrite's answer. */
-static int64_t QuillWriteChunk(uint32_t fid, uint32_t seed, uint64_t off)
+static int64_t QuillWriteChunk(file_id_t fid, uint32_t seed, uint64_t off)
 {
     QuillFill(g_chunk, seed, off, QUILL_CHUNK);
     return fwrite(fid, off, g_chunk, QUILL_CHUNK);
 }
 
-static bool QuillWears(uint32_t fid, const char *key)
+static bool QuillWears(file_id_t fid, const char *key)
 {
     file_info_t info;
     if (file_info(fid, &info) != 0)
@@ -58,7 +58,7 @@ static bool QuillWears(uint32_t fid, const char *key)
  * bytes of a pool block's data (plot/plot_width.h RECORD_HEADER_SIZE and
  * TAGFS_MPOOL_DATA_SIZE, PlotFits). 2748416, 671 extents, for
  * a 10-byte name wearing its stem alone. 0 when the file will not say. */
-static uint64_t QuillWidthLimit(uint32_t fid)
+static uint64_t QuillWidthLimit(file_id_t fid)
 {
     file_info_t info;
     if (file_info(fid, &info) != 0)
@@ -82,10 +82,10 @@ static uint64_t QuillWidthLimit(uint32_t fid)
 QuillVerdict QuillSequential(const char *const *args)
 {
     (void)args;
-    int fid = QuillCreate("quillS.bin");
+    int64_t fid = QuillCreate("quillS.bin");
     if (fid <= 0) {
         int arc = anchor(0);
-        printf("[QUILL] sequential: FAIL — quillS.bin could not be created (answer %d, anchor %d)\n",
+        printf("[QUILL] sequential: FAIL — quillS.bin could not be created (answer %ld, anchor %d)\n",
                fid, arc);
         return QUILL_FAIL;
     }
@@ -94,15 +94,15 @@ QuillVerdict QuillSequential(const char *const *args)
     uint32_t done    = 0;
     int64_t  refusal = QUILL_CHUNK;
     for (; done < writes; done++) {
-        refusal = QuillWriteChunk((uint32_t)fid, QUILL_SEED_S, (uint64_t)done * QUILL_CHUNK);
+        refusal = QuillWriteChunk((file_id_t)fid, QUILL_SEED_S, (uint64_t)done * QUILL_CHUNK);
         if (refusal != (int64_t)QUILL_CHUNK)
             break;
     }
     uint64_t acked = (uint64_t)done * QUILL_CHUNK;
-    uint64_t size  = QuillSize((uint32_t)fid);
-    uint64_t limit = QuillWidthLimit((uint32_t)fid);
+    uint64_t size  = QuillSize((file_id_t)fid);
+    uint64_t limit = QuillWidthLimit((file_id_t)fid);
     int64_t  rerr  = 0;
-    uint64_t good  = QuillReadBack((uint32_t)fid, QUILL_SEED_S, size, &rerr);
+    uint64_t good  = QuillReadBack((file_id_t)fid, QUILL_SEED_S, size, &rerr);
     int      arc   = anchor(0);
     bool     whole = arc == 0 && size == acked && good == size;
 
@@ -144,13 +144,13 @@ QuillVerdict QuillInterleave(const char *const *args)
     (void)args;
     static const char    *names[2] = { "quillA.bin", "quillB.bin" };
     static const uint32_t seeds[2] = { QUILL_SEED_A, QUILL_SEED_B };
-    int fids[2];
+    int64_t fids[2];
     for (int f = 0; f < 2; f++) {
         fids[f] = QuillCreate(names[f]);
         if (fids[f] <= 0) {
-            int drc = f == 1 ? delete((uint32_t)fids[0]) : 0;
+            int drc = f == 1 ? delete((file_id_t)fids[0]) : 0;
             int arc = anchor(0);
-            printf("[QUILL] interleave: FAIL — %s could not be created (answer %d)%s (anchor %d)\n",
+            printf("[QUILL] interleave: FAIL — %s could not be created (answer %ld)%s (anchor %d)\n",
                    names[f], fids[f], f == 1 ? (drc == 0 ? "; quillA.bin is deleted again"
                                                          : "; quillA.bin would not be deleted") : "",
                    arc);
@@ -166,7 +166,7 @@ QuillVerdict QuillInterleave(const char *const *args)
     for (uint32_t r = 0; r < rounds && stopped < 0; r++) {
         for (int f = 0; f < 2; f++) {
             uint64_t off = (uint64_t)r * QUILL_CHUNK;
-            int64_t  w   = QuillWriteChunk((uint32_t)fids[f], seeds[f], off);
+            int64_t  w   = QuillWriteChunk((file_id_t)fids[f], seeds[f], off);
             if (w != (int64_t)QUILL_CHUNK) {
                 stopped = f;
                 refusal = w;
@@ -180,10 +180,10 @@ QuillVerdict QuillInterleave(const char *const *args)
     uint64_t size[2], good[2];
     int64_t  rerr[2];
     for (int f = 0; f < 2; f++) {
-        size[f] = QuillSize((uint32_t)fids[f]);
-        good[f] = QuillReadBack((uint32_t)fids[f], seeds[f], size[f], &rerr[f]);
+        size[f] = QuillSize((file_id_t)fids[f]);
+        good[f] = QuillReadBack((file_id_t)fids[f], seeds[f], size[f], &rerr[f]);
     }
-    uint64_t limit = QuillWidthLimit((uint32_t)fids[0]);
+    uint64_t limit = QuillWidthLimit((file_id_t)fids[0]);
     int  arc   = anchor(0);
     bool whole = arc == 0 && good[0] == size[0] && good[1] == size[1] &&
                  size[0] + size[1] == (uint64_t)done * QUILL_CHUNK;
@@ -225,7 +225,7 @@ QuillVerdict QuillInterleave(const char *const *args)
 QuillVerdict QuillFidHistory(const char *const *args)
 {
     (void)args;
-    uint32_t *ids = NULL;
+    file_id_t *ids = NULL;
     int before = query_all_everywhere(NULL, &ids);
     free(ids);
     if (before < 0) {
@@ -233,25 +233,26 @@ QuillVerdict QuillFidHistory(const char *const *args)
         return QUILL_FAIL;
     }
 
-    uint32_t first = 0, last = 0, spent = 0;
+    file_id_t first = 0, last = 0;
+    uint32_t  spent = 0;
     int broke = 0;
     for (uint32_t i = 0; i < QUILL_FID_CYCLES; i++) {
-        int fid = create_everywhere("quillfid.tmp", NULL);
-        if (fid <= 0 || (uint32_t)fid <= last) {
-            broke = fid <= 0 ? fid : -1;
+        int64_t fid = create_everywhere("quillfid.tmp", NULL);
+        if (fid <= 0 || (file_id_t)fid <= last) {
+            broke = fid <= 0 ? (int)fid : -1;
             break;
         }
-        int drc = delete((uint32_t)fid);
+        int drc = delete((file_id_t)fid);
         if (!first)
-            first = (uint32_t)fid;
-        last = (uint32_t)fid;
+            first = (file_id_t)fid;
+        last = (file_id_t)fid;
         spent++;
         if (drc != 0) {
             broke = drc;
             break;
         }
         if (spent % QUILL_FID_PROGRESS == 0)
-            printf("[QUILL] fidhistory: %u of %u file ids spent (last %u)\n",
+            printf("[QUILL] fidhistory: %u of %u file ids spent (last %lu)\n",
                    spent, QUILL_FID_CYCLES, last);
     }
     int arc = anchor(0);
@@ -259,12 +260,12 @@ QuillVerdict QuillFidHistory(const char *const *args)
     free(ids);
 
     if (broke != 0 || arc != 0 || after != before) {
-        printf("[QUILL] fidhistory: FAIL — %u file ids spent, %u to %u, the last cycle "
+        printf("[QUILL] fidhistory: FAIL — %u file ids spent, %lu to %lu, the last cycle "
                "answered %d; %d files were live before and %d after (anchor %d)\n",
                spent, first, last, broke, before, after, arc);
         return QUILL_FAIL;
     }
-    printf("[QUILL] fidhistory: PENDING — spent %u file ids, %u to %u, with %d live files "
+    printf("[QUILL] fidhistory: PENDING — spent %u file ids, %lu to %lu, with %d live files "
            "before and after; anchored — the next mount says what they cost\n",
            spent, first, last, before);
     return QUILL_PENDING;
@@ -296,16 +297,16 @@ static int QuillRunProgram(const char *line, int32_t *code)
 QuillVerdict QuillSystemTag(const char *const *args)
 {
     (void)args;
-    uint32_t ids[4];
+    file_id_t ids[4];
     int n = QuillFindEverywhere("kernel.bin", ids, 4);
     if (n != 1) {
         printf("[QUILL] systemtag: FAIL — the volume has %d file(s) called kernel.bin; this "
                "case asks about exactly one\n", n);
         return QUILL_FAIL;
     }
-    uint32_t kid = ids[0];
+    file_id_t kid = ids[0];
     if (!QuillWears(kid, "system")) {
-        printf("[QUILL] systemtag: FAIL — kernel.bin (file %u) does not wear the system tag, "
+        printf("[QUILL] systemtag: FAIL — kernel.bin (file %lu) does not wear the system tag, "
                "so there is nothing to take off\n", kid);
         return QUILL_FAIL;
     }
@@ -325,20 +326,20 @@ QuillVerdict QuillSystemTag(const char *const *args)
 
     if (ran && arc == 0 && out == 0 && ucode != 0 && tcode == 0 && ecode == 0 && present &&
         wears) {
-        printf("[QUILL] systemtag: PASS — kernel.bin (file %u) kept its system tag against "
+        printf("[QUILL] systemtag: PASS — kernel.bin (file %lu) kept its system tag against "
                "untag (exit %d), and its place against erase trashed with it in the trash "
                "(trash and erase exit 0), programs that do not wear system; it is still on the "
                "volume, out of the trash again\n", kid, ucode);
         return QUILL_PASS;
     }
     if (ran && arc == 0 && ucode == 0 && tcode == 0 && ecode == 0 && !present) {
-        printf("[QUILL] systemtag: DEFECT — kernel.bin (file %u) gave up its system tag to "
+        printf("[QUILL] systemtag: DEFECT — kernel.bin (file %lu) gave up its system tag to "
                "untag and was then deleted by erase trashed, programs that do not wear system "
                "(exit 0 each); asked about it now, the volume answers error %u — the kernel "
                "this volume boots is gone\n", kid, box_errno_of(irc));
         return QUILL_DEFECT;
     }
-    printf("[QUILL] systemtag: FAIL — kernel.bin (file %u): untag answered %d (exit %d), trash "
+    printf("[QUILL] systemtag: FAIL — kernel.bin (file %lu): untag answered %d (exit %d), trash "
            "%d (exit %d), erase %d (exit %d); it is %s the volume%s (out of the trash: %d, "
            "system put back: %d, anchor %d)\n", kid, urc, ucode, trc, tcode, erc, ecode,
            present ? "still on" : "gone from",

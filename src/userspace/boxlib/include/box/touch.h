@@ -12,7 +12,7 @@ extern "C" {
  * Touch — tag-multicast event API (handle-based ABI, real-HW audit 2026-05-30).
  *
  * The legacy string-form syscalls were removed. Every call now takes a
- * TouchTag (uint16_t handle) returned by touch_intern. Cache the handle in
+ * TouchTag (uint32_t handle) returned by touch_intern. Cache the handle in
  * a static so hot loops never round-trip the registry.
  *
  *   TouchTagPair T_KB = touch_intern("keyboard");
@@ -25,8 +25,8 @@ extern "C" {
  * (`key:...`) can subscribe to the bare_id alone.
  */
 
-typedef uint16_t TouchTag;
-#define TOUCH_TAG_INVALID  ((TouchTag)0xFFFF)
+typedef uint32_t TouchTag;
+#define TOUCH_TAG_INVALID  ((TouchTag)0xFFFFFFFFu)
 
 /* Canonical Touch tag names. Convention is `key:value` (TagFS bucket
  * format) — pass these to TOUCH_TAG_PAIR(...) / TOUCH_TAG_ID(...) so the
@@ -93,7 +93,7 @@ typedef enum {
  * Layout (2026-06-01 TouchRing migration, payload_addr removed for
  * production safety — see "Why no payload_addr" below):
  *
- *   tag_id, flags, source_pid, payload_len, _reserved, timestamp_tsc,
+ *   tag_id, flags, _reserved, source_pid, payload_len, timestamp_tsc,
  *   payload[BOXOS_TOUCH_PAYLOAD_MAX]
  *
  * Total 120 bytes; payload is inline, accessible as `t.payload[]` or via
@@ -116,11 +116,11 @@ typedef enum {
 #define BOXOS_TOUCH_PAYLOAD_MAX  96u
 
 typedef struct __attribute__((packed)) {
-    uint16_t tag_id;
+    TouchTag tag_id;
     uint16_t flags;
+    uint16_t _reserved;                      /* alignment + future use */
     uint32_t source_pid;
     uint32_t payload_len;                    /* bytes valid in payload[] */
-    uint32_t _reserved;                      /* alignment + future use */
     uint64_t timestamp_tsc;
     uint8_t  payload[BOXOS_TOUCH_PAYLOAD_MAX];
 } Touch;

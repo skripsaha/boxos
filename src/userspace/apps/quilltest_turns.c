@@ -104,7 +104,7 @@ typedef struct {
 } QuillTurnsWrite;
 
 /* The whole buffer written over the file from its first byte, and anchored. */
-static QuillTurnsWrite QuillTurnsWriteOnce(uint32_t fid, const uint64_t *buf, uint64_t bytes)
+static QuillTurnsWrite QuillTurnsWriteOnce(file_id_t fid, const uint64_t *buf, uint64_t bytes)
 {
     QuillTurnsWrite w = { 0, -1, 0 };
     uint64_t t0 = 0, t1 = 0;
@@ -186,10 +186,10 @@ QuillVerdict QuillBeside(const char *const *args)
     uint64_t         bytes = (uint64_t)mib << 20;
     QuillTurnsBoard *board = bay_open(QUILL_TURNS_BOARD, sizeof(QuillTurnsBoard), BAY_CREATE);
     uint64_t        *buf   = bay_open("quilltest:beside", bytes, BAY_CREATE);
-    int              fid   = (board && buf) ? QuillCreate("quillbeside.bin") : 0;
+    int64_t          fid   = (board && buf) ? QuillCreate("quillbeside.bin") : 0;
     if (fid <= 0) {
         printf("[QUILL] beside: FAIL — its board %s, its buffer of %u MiB %s, and "
-               "quillbeside.bin answered %d\n", board ? "opened" : "would not open", mib,
+               "quillbeside.bin answered %ld\n", board ? "opened" : "would not open", mib,
                buf ? "opened" : "would not open", fid);
         if (buf)
             bay_release(buf);
@@ -200,7 +200,7 @@ QuillVerdict QuillBeside(const char *const *args)
     memset((void *)board, 0, sizeof(*board));
     QuillFill(buf, QUILL_TURNS_SEED, 0, bytes);
 
-    QuillTurnsWrite alone = QuillTurnsWriteOnce((uint32_t)fid, buf, bytes);
+    QuillTurnsWrite alone = QuillTurnsWriteOnce((file_id_t)fid, buf, bytes);
 
     QuillTurnsCabins cabins;
     uint64_t         before[QUILL_TURNS_MAX] = { 0 };
@@ -209,16 +209,16 @@ QuillVerdict QuillBeside(const char *const *args)
         before[i] = __atomic_load_n(&board->answered[i], __ATOMIC_ACQUIRE);
     printf("[QUILL] beside: %u %s cabin(s) of %u started; the write goes again beside them\n",
            cabins.started, args[0], count);
-    QuillTurnsWrite beside = QuillTurnsWriteOnce((uint32_t)fid, buf, bytes);
+    QuillTurnsWrite beside = QuillTurnsWriteOnce((file_id_t)fid, buf, bytes);
     uint64_t        least  = flood ? QuillTurnsLeast(board, before, cabins.started) : 0;
     uint32_t        stuck  = QuillTurnsFinish(&cabins);
     bay_release(buf);
     bay_release(board);
 
-    uint64_t size = QuillSize((uint32_t)fid);
+    uint64_t size = QuillSize((file_id_t)fid);
     int64_t  rerr = 0;
-    uint64_t good = size == bytes ? QuillReadBack((uint32_t)fid, QUILL_TURNS_SEED, size, &rerr) : 0;
-    delete((uint32_t)fid);
+    uint64_t good = size == bytes ? QuillReadBack((file_id_t)fid, QUILL_TURNS_SEED, size, &rerr) : 0;
+    delete((file_id_t)fid);
     int arc = anchor(0);
 
     bool whole = cabins.started == count && stuck == 0 && QuillTurnsWhole(&alone, bytes) &&

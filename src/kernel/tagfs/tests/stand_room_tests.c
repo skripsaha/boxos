@@ -272,7 +272,7 @@ static bool StandRoomRegistryBrim(const char* stem)
     if (room >= least) {
         memset(s_room_text + head, 'r', room - least);
         s_room_text[head + room - least] = '\0';
-        uint16_t id;
+        uint32_t id;
         if (tagfs_tag_intern(s_room_text, &id) != OK || tag_registry_flush(fs->registry) != OK ||
             TagFSMetaBlockRead(chain.last, g_test_output) != OK)
             return false;
@@ -550,15 +550,14 @@ static int StandRoomDelete(uint64_t file_id)
     const OpRegistration* reg = OpRegistryLookup(OP_KIND(DECK_STORAGE, STORAGE_OBJ_DELETE));
     ManifestOp*           op  = (ManifestOp*)s_room_op;
 
-    uint32_t id = (uint32_t)file_id;    /* a program's file_id_t: the stand's ids are v1's */
     if (!reg)
         return ERR_NOT_INITIALIZED;
     memset(s_room_op, 0, sizeof(s_room_op));
     op->op_kind    = OP_KIND(DECK_STORAGE, STORAGE_OBJ_DELETE);
-    op->param_size = sizeof(id);
+    op->param_size = sizeof(file_id);
     op->in_crate   = CRATE_INDEX_NONE;
     op->out_crate  = CRATE_INDEX_NONE;
-    memcpy(op->params, &id, sizeof(id));
+    memcpy(op->params, &file_id, sizeof(file_id));
     return reg->handler(op, NULL, 0, NULL);
 }
 

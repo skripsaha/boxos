@@ -20,15 +20,15 @@ TouchTagPair touch_intern(const char *tag)
     TouchTagPair pair = { TOUCH_TAG_INVALID, TOUCH_TAG_INVALID };
     if (!tag) return pair;
 
-    uint16_t out[2] = { TOUCH_TAG_INVALID, TOUCH_TAG_INVALID };
+    TouchTag out[2] = { TOUCH_TAG_INVALID, TOUCH_TAG_INVALID };
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_INTERN,
                      NULL, 0,
                      tag, (uint32_t)(strlen(tag) + 1),
                      out, sizeof(out), NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return pair;
-    pair.full = (TouchTag)out[0];
-    pair.bare = (TouchTag)out[1];
+    pair.full = out[0];
+    pair.bare = out[1];
     return pair;
 }
 
@@ -37,21 +37,21 @@ int touch_claim(TouchTag tag, TouchMode mode, uint64_t manifest_or_handler,
 {
     if (tag == TOUCH_TAG_INVALID) return -ERR_INVALID_ARGS;
 
-    /* params: [u16 tag][u8 mode][mode-specific] */
-    uint8_t  params[19];
+    /* params: [u32 tag][u8 mode][mode-specific] */
+    uint8_t  params[21];
     uint16_t param_size;
-    memcpy(params, &tag, sizeof(uint16_t));
-    params[2] = (uint8_t)mode;
+    memcpy(params, &tag, sizeof(TouchTag));
+    params[4] = (uint8_t)mode;
 
     if (mode == TOUCH_REACT) {
-        memcpy(params + 3, &manifest_or_handler, sizeof(uint64_t));
-        param_size = 11;
+        memcpy(params + 5, &manifest_or_handler, sizeof(uint64_t));
+        param_size = 13;
     } else if (mode == TOUCH_INTERRUPT) {
-        memcpy(params + 3,  &manifest_or_handler, sizeof(uint64_t));
-        memcpy(params + 11, &stack_top,           sizeof(uint64_t));
-        param_size = 19;
+        memcpy(params + 5,  &manifest_or_handler, sizeof(uint64_t));
+        memcpy(params + 13, &stack_top,           sizeof(uint64_t));
+        param_size = 21;
     } else {
-        param_size = 3;
+        param_size = 5;
     }
 
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_CLAIM,
@@ -63,10 +63,10 @@ int touch_claim(TouchTag tag, TouchMode mode, uint64_t manifest_or_handler,
 int touch_release(TouchTag tag)
 {
     if (tag == TOUCH_TAG_INVALID) return -ERR_INVALID_ARGS;
-    uint8_t params[2];
-    memcpy(params, &tag, sizeof(uint16_t));
+    uint8_t params[4];
+    memcpy(params, &tag, sizeof(TouchTag));
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_RELEASE,
-                   params, 2,
+                   params, 4,
                    NULL, 0, NULL, 0, NULL,
                    BOX_ANSWER_GUARANTEED, NULL);
 }
@@ -93,14 +93,14 @@ int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
     CrateSetOutput(&crates[cc], &handed, sizeof(handed));
     uint16_t handed_idx = cc++;
 
-    /* params: [u16 full][u16 bare][u32 after_ms] */
-    uint8_t params[8];
-    memcpy(params,     &pair.full, sizeof(uint16_t));
-    memcpy(params + 2, &pair.bare, sizeof(uint16_t));
-    memcpy(params + 4, &after_ms,  sizeof(uint32_t));
+    /* params: [u32 full][u32 bare][u32 after_ms] */
+    uint8_t params[12];
+    memcpy(params,     &pair.full, sizeof(TouchTag));
+    memcpy(params + 4, &pair.bare, sizeof(TouchTag));
+    memcpy(params + 8, &after_ms,  sizeof(uint32_t));
 
     if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, 0,
-                             payload_idx, handed_idx, params, 8) != 0)
+                             payload_idx, handed_idx, params, 12) != 0)
         return -ERR_INVALID_ARGS;
     if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INVALID_ARGS;
 
@@ -488,15 +488,14 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
     ManifestBuilder mb;
     if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return -ERR_INVALID_ARGS;
 
-    /* params: [u16 tag][u16 _pad][u32 timeout_ms]. Zero goes through as zero:
+    /* params: [u32 tag][u32 timeout_ms]. Zero goes through as zero:
      * the kernel arms no timer for it (SysTouchAwait) and the park lasts until
      * an event is published. It used to be turned into 30 s here, so a strand
      * that asked to wait forever was woken every half minute for nothing — and
      * a lost wakeup was blanketed instead of being seen, which Nightwatch does
      * now (TOUCH UNDELIVERED). */
     uint8_t params[8];
-    memset(params, 0, sizeof(params));
-    memcpy(params,     &tag,        sizeof(uint16_t));
+    memcpy(params,     &tag,        sizeof(TouchTag));
     memcpy(params + 4, &timeout_ms, sizeof(uint32_t));
 
     if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_TOUCH_AWAIT, 0,
@@ -561,12 +560,12 @@ int touch_irq_return(void)
 int touch_register(TouchTag tag, TouchPolicy policy, TouchCapability capability)
 {
     if (tag == TOUCH_TAG_INVALID) return -ERR_INVALID_ARGS;
-    uint8_t params[4];
-    memcpy(params, &tag, sizeof(uint16_t));
-    params[2] = (uint8_t)policy;
-    params[3] = (uint8_t)capability;
+    uint8_t params[6];
+    memcpy(params, &tag, sizeof(TouchTag));
+    params[4] = (uint8_t)policy;
+    params[5] = (uint8_t)capability;
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_REGISTER,
-                   params, 4,
+                   params, 6,
                    NULL, 0, NULL, 0, NULL,
                    BOX_ANSWER_GUARANTEED, NULL);
 }
@@ -574,10 +573,10 @@ int touch_register(TouchTag tag, TouchPolicy policy, TouchCapability capability)
 int touch_ack(TouchTag tag)
 {
     if (tag == TOUCH_TAG_INVALID) return -ERR_INVALID_ARGS;
-    uint8_t params[2];
-    memcpy(params, &tag, sizeof(uint16_t));
+    uint8_t params[4];
+    memcpy(params, &tag, sizeof(TouchTag));
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_ACK,
-                   params, 2,
+                   params, 4,
                    NULL, 0, NULL, 0, NULL,
                    BOX_ANSWER_GUARANTEED, NULL);
 }

@@ -89,7 +89,7 @@ uint64_t InkGenOf(uint64_t fid)
 
 /* Whether a tag's key is one the system keeps: system, boot, god — by the key,
  * so system:foo is the system's as much as system is. */
-static bool InkTagGuarded(uint16_t tag_id)
+static bool InkTagGuarded(uint32_t tag_id)
 {
     TagSpelling tag = { 0 };
     if (tag_id == TAGFS_INVALID_TAG_ID ||
@@ -114,7 +114,7 @@ bool InkTouchesBoot(const Strip* runs, uint32_t count)
     return false;
 }
 
-bool InkWearsGuarded(const uint16_t* tags, uint32_t count)
+bool InkWearsGuarded(const uint32_t* tags, uint32_t count)
 {
     for (uint32_t i = 0; i < count; i++)
         if (InkTagGuarded(tags[i]))
@@ -148,7 +148,7 @@ static error_t InkVolumeBegins(void)
 /* The guard with the ground a change lets go of asked too: a Plot's freed runs
  * are the kernel's no more than its runs may be. The kernel's blocks are
  * refused to every call; a file the system keeps, to a call with no warrant. */
-static error_t InkGuard(uint64_t fid, const uint16_t* tags, uint32_t tag_count,
+static error_t InkGuard(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
                         const Strip* runs, uint32_t run_count,
                         const Strip* freed, uint32_t freed_count, InkWarrant warrant)
 {
@@ -168,7 +168,7 @@ static error_t InkGuard(uint64_t fid, const uint16_t* tags, uint32_t tag_count,
     return OK;
 }
 
-error_t InkMayChange(uint64_t fid, const uint16_t* tags, uint32_t tag_count,
+error_t InkMayChange(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
                      const Strip* runs, uint32_t run_count, InkWarrant warrant)
 {
     error_t rc = InkVolumeBegins();
@@ -332,7 +332,7 @@ static error_t InkPlotRecord(const Plot* p, const FileRecord* cur, uint64_t now,
         .created_time  = cur->created_time,
         .modified_time = now,
         .filename      = (char*)cur->name,
-        .tag_ids       = (uint16_t*)cur->tags,
+        .tag_ids       = (uint32_t*)cur->tags,
         .tag_count     = cur->tag_count,
         .extents       = p->runs,
         .extent_count  = p->run_count,
@@ -386,7 +386,7 @@ static error_t InkPlotLocked(Plot* p, const RecordWhere* was, InkRecord* r, Fall
 static bool InkWearsLazy(const FileRecord* cur)
 {
     TagSpelling lazy = { .key = "settle", .key_len = 6, .value = "lazy", .value_len = 4 };
-    uint16_t    id   = TagRegistryLookup(InkState()->registry, &lazy);
+    uint32_t    id   = TagRegistryLookup(InkState()->registry, &lazy);
     if (id == TAGFS_INVALID_TAG_ID)
         return false;
     for (uint32_t i = 0; i < cur->tag_count; i++)
@@ -502,7 +502,7 @@ error_t InkRoomClaim(Plot* p)
     } else {
         TagFSMetadata record = {
             .filename     = (char*)cur->name,
-            .tag_ids      = (uint16_t*)cur->tags,
+            .tag_ids      = (uint32_t*)cur->tags,
             .tag_count    = cur->tag_count,
             .extents      = p->runs,
             .extent_count = p->run_count,
@@ -539,21 +539,21 @@ void InkRoomLetGo(Plot* p)
 // ----------------------------------------------------------------------------
 
 typedef struct {
-    uint16_t* tags;
+    uint32_t* tags;
     uint32_t  count;
-    uint16_t  dropped[2];   /* the tags that come off the index */
+    uint32_t  dropped[2];   /* the tags that come off the index */
     uint32_t  drops;
     bool      adds;         /* `add` goes onto the index */
 } InkFieldsPlan;
 
 /* The tags the file wears after the change, into a list of its own; false
  * for no memory. */
-static bool InkFieldsTags(const FileRecord* cur, const char* name, uint16_t add, uint16_t drop,
+static bool InkFieldsTags(const FileRecord* cur, const char* name, uint32_t add, uint32_t drop,
                           InkFieldsPlan* f)
 {
-    uint16_t old_name = name ? InkNameTagLookup(cur->name) : TAGFS_INVALID_TAG_ID;
+    uint32_t old_name = name ? InkNameTagLookup(cur->name) : TAGFS_INVALID_TAG_ID;
     memset(f, 0, sizeof(*f));
-    f->tags = kmalloc(sizeof(uint16_t) * (cur->tag_count + 1u));
+    f->tags = kmalloc(sizeof(uint32_t) * (cur->tag_count + 1u));
     if (!f->tags)
         return false;
 
@@ -561,7 +561,7 @@ static bool InkFieldsTags(const FileRecord* cur, const char* name, uint16_t add,
     if (name && add != TAGFS_INVALID_TAG_ID)
         f->tags[f->count++] = add;
     for (uint32_t i = 0; i < cur->tag_count; i++) {
-        uint16_t t = cur->tags[i];
+        uint32_t t = cur->tags[i];
         if (t == add) {
             worn = true;
             if (name)
@@ -590,7 +590,7 @@ static bool InkFieldsLeaveRoom(uint64_t fid, const TagFSMetadata* meta)
 }
 
 static error_t InkFieldsLocked(uint64_t fid, const RecordWhere* was, const InkFieldsPlan* f,
-                               const TagFSMetadata* meta, uint16_t add, InkRecord* r,
+                               const TagFSMetadata* meta, uint32_t add, InkRecord* r,
                                TagBitmapStake* stake, InkReceipt* out)
 {
     TagFSState* fs = InkState();
@@ -631,7 +631,7 @@ static error_t InkFieldsLocked(uint64_t fid, const RecordWhere* was, const InkFi
 }
 
 /* One round of InkFields: OK, a final refusal, or INK_AGAIN / ERR_WOULD_BLOCK. */
-static error_t InkFieldsOnce(uint64_t fid, const char* name, uint16_t add, uint16_t drop,
+static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint32_t drop,
                              InkWarrant warrant, InkReceipt* out)
 {
     TagFSState* fs = InkState();
@@ -697,7 +697,7 @@ out:
     return rc;
 }
 
-error_t InkFields(uint64_t fid, const char* name, uint16_t add, uint16_t drop, InkWarrant warrant,
+error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
                   InkReceipt* out)
 {
     error_t rc;
@@ -716,7 +716,7 @@ typedef struct {
     TagBitmapStake* index;
 } InkNewStakes;
 
-static error_t InkNewLocked(const uint16_t* tags, uint32_t count, InkRecord* r,
+static error_t InkNewLocked(const uint32_t* tags, uint32_t count, InkRecord* r,
                             InkNewStakes* st, uint64_t* out_fid, InkReceipt* out)
 {
     TagFSState* fs  = InkState();
@@ -757,7 +757,7 @@ static error_t InkNewLocked(const uint16_t* tags, uint32_t count, InkRecord* r,
     return OK;
 }
 
-error_t InkNew(const char* name, const uint16_t* tags, uint32_t count, uint64_t* out_fid,
+error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t* out_fid,
                InkReceipt* out)
 {
     TagFSState* fs  = InkState();
@@ -768,7 +768,7 @@ error_t InkNew(const char* name, const uint16_t* tags, uint32_t count, uint64_t*
         .created_time  = now,
         .modified_time = now,
         .filename      = (char*)name,
-        .tag_ids       = (uint16_t*)tags,
+        .tag_ids       = (uint32_t*)tags,
         .tag_count     = count,
     };
 
@@ -939,7 +939,7 @@ error_t InkNameStem(const char* name, TagSpelling* out)
     return rc;
 }
 
-error_t InkNameTagIntern(const char* name, uint16_t* out_tag)
+error_t InkNameTagIntern(const char* name, uint32_t* out_tag)
 {
     TagSpelling stem;
     *out_tag = TAGFS_INVALID_TAG_ID;
@@ -953,7 +953,7 @@ error_t InkNameTagIntern(const char* name, uint16_t* out_tag)
     return TagRegistryFlushFor(InkState()->registry, *out_tag);
 }
 
-uint16_t InkNameTagLookup(const char* name)
+uint32_t InkNameTagLookup(const char* name)
 {
     TagSpelling stem;
     if (!name || InkNameStem(name, &stem) != OK || !stem.key)

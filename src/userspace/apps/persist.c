@@ -56,7 +56,7 @@ static int do_write(uint32_t sequence)
      * loses the write cannot bring an earlier file back in its place. On
      * PowerCut's settled base there is none: nothing is deleted, nothing
      * anchored, and the record holds the write under test alone. */
-    uint32_t earlier[8];
+    file_id_t earlier[8];
     int      gone = 0;
     for (;;) {
         int found = find_file_by_name(PERSIST_NAME, earlier, NULL, 8);
@@ -70,7 +70,7 @@ static int do_write(uint32_t sequence)
         for (int i = 0; i < found && i < 8; i++, gone++) {
             int drc = delete(earlier[i]);
             if (drc != 0) {
-                kdbg_print("[PERSIST] FAIL: the earlier '%s' fid=%u would not be deleted (rc=%d)",
+                kdbg_print("[PERSIST] FAIL: the earlier '%s' fid=%lu would not be deleted (rc=%d)",
                            PERSIST_NAME, earlier[i], drc);
                 return 1;
             }
@@ -87,9 +87,9 @@ static int do_write(uint32_t sequence)
                    gone, PERSIST_NAME);
     }
 
-    int fid = create(PERSIST_NAME, "persist");
+    int64_t fid = create(PERSIST_NAME, "persist");
     if (fid < 0) {
-        kdbg_print("[PERSIST] create failed rc=%d", fid);
+        kdbg_print("[PERSIST] create failed rc=%ld", fid);
         return 1;
     }
 
@@ -99,13 +99,13 @@ static int do_write(uint32_t sequence)
     rec.checksum  = fold_checksum(PERSIST_MAGIC, sequence);
     rec._reserved = 0;
 
-    int wrc = fwrite((uint32_t)fid, 0, &rec, sizeof(rec));
+    int wrc = fwrite((file_id_t)fid, 0, &rec, sizeof(rec));
     if (wrc < 0) {
         kdbg_print("[PERSIST] fwrite failed rc=%d", wrc);
         return 1;
     }
 
-    kdbg_print("[PERSIST] WROTE fid=%d seq=%u magic=0x%x checksum=0x%x",
+    kdbg_print("[PERSIST] WROTE fid=%ld seq=%u magic=0x%x checksum=0x%x",
                fid, rec.sequence, rec.magic, rec.checksum);
     kdbg_print("[PERSIST] now run: bye, then start BoxOS again, then: persist verify");
     return 0;
@@ -113,7 +113,7 @@ static int do_write(uint32_t sequence)
 
 static int do_verify(void)
 {
-    uint32_t   fids[8];
+    file_id_t  fids[8];
     file_info_t infos[8];
     int found = find_file_by_name(PERSIST_NAME, fids, infos, 8);
     if (found < 0) {
@@ -132,14 +132,14 @@ static int do_verify(void)
     }
 
     file_info_t info0 = infos[0];
-    kdbg_print("[PERSIST] found fid=%u found_count=%d info_size=%lu",
+    kdbg_print("[PERSIST] found fid=%lu found_count=%d info_size=%lu",
                fids[0], found, (unsigned long)info0.size);
 
     PersistRecord rec;
     memset(&rec, 0, sizeof(rec));
     int rrc = fread(fids[0], 0, &rec, sizeof(rec));
     if (rrc < 0) {
-        kdbg_print("[PERSIST] FAIL: fread fid=%u rc=%d", fids[0], rrc);
+        kdbg_print("[PERSIST] FAIL: fread fid=%lu rc=%d", fids[0], rrc);
         return 1;
     }
 
@@ -147,7 +147,7 @@ static int do_verify(void)
     bool magic_ok = (rec.magic == PERSIST_MAGIC);
     bool cs_ok    = (rec.checksum == want_cs);
 
-    kdbg_print("[PERSIST] READ  fid=%u rrc=%d seq=%u magic=0x%x checksum=0x%x (want 0x%x)",
+    kdbg_print("[PERSIST] READ  fid=%lu rrc=%d seq=%u magic=0x%x checksum=0x%x (want 0x%x)",
                fids[0], rrc, rec.sequence, rec.magic, rec.checksum, want_cs);
 
     if (magic_ok && cs_ok) {

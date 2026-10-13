@@ -17,17 +17,17 @@ static TagRegistry* OpsRegistry(void)
 /* The tags a new file wears: its name's first, then the caller's, none twice,
  * none invalid, each on the medium before the file wears it. *out is the
  * caller's to kfree. */
-static error_t CreateTags(uint16_t name_tag, const uint16_t* tag_ids, uint32_t tag_count,
-                          uint16_t** out, uint32_t* out_count)
+static error_t CreateTags(uint32_t name_tag, const uint32_t* tag_ids, uint32_t tag_count,
+                          uint32_t** out, uint32_t* out_count)
 {
-    uint16_t* tags = kmalloc(sizeof(uint16_t) * ((uint64_t)tag_count + 1u));
+    uint32_t* tags = kmalloc(sizeof(uint32_t) * ((uint64_t)tag_count + 1u));
     uint32_t  n    = 0;
     if (!tags)
         return ERR_NO_MEMORY;
     if (name_tag != TAGFS_INVALID_TAG_ID)
         tags[n++] = name_tag;
     for (uint32_t i = 0; tag_ids && i < tag_count; i++) {
-        uint16_t tid = tag_ids[i];
+        uint32_t tid = tag_ids[i];
         bool     dup = tid == TAGFS_INVALID_TAG_ID;
         for (uint32_t j = 0; j < n && !dup; j++)
             dup = tags[j] == tid;
@@ -45,15 +45,15 @@ static error_t CreateTags(uint16_t name_tag, const uint16_t* tag_ids, uint32_t t
     return OK;
 }
 
-static error_t CreateInside(const char* filename, const uint16_t* tag_ids, uint32_t tag_count,
+static error_t CreateInside(const char* filename, const uint32_t* tag_ids, uint32_t tag_count,
                             uint64_t* out_file_id)
 {
-    uint16_t name_tag = TAGFS_INVALID_TAG_ID;
+    uint32_t name_tag = TAGFS_INVALID_TAG_ID;
     error_t  rc       = InkNameTagIntern(filename, &name_tag);
     if (rc != OK)
         return rc;
 
-    uint16_t*  tags  = NULL;
+    uint32_t*  tags  = NULL;
     uint32_t   count = 0;
     InkReceipt receipt;
     rc = CreateTags(name_tag, tag_ids, tag_count, &tags, &count);
@@ -107,7 +107,7 @@ error_t TagFSCreateFits(const char* filename, const TagSpelling* tags, uint32_t 
     return PlotFits(&record, NULL) ? OK : ERR_TAGFS_RECORD_FULL;
 }
 
-int tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint32_t tag_count,
+int tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count,
                       uint64_t* out_file_id)
 {
     if (!filename || !out_file_id)
@@ -139,7 +139,7 @@ int tagfs_rename_file(uint64_t file_id, const char* new_filename, InkWarrant war
         return -(int)ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
-    uint16_t   name_tag = TAGFS_INVALID_TAG_ID;
+    uint32_t   name_tag = TAGFS_INVALID_TAG_ID;
     InkReceipt receipt;
     error_t    rc = InkNameTagIntern(new_filename, &name_tag);
     if (rc == OK)
@@ -150,7 +150,7 @@ int tagfs_rename_file(uint64_t file_id, const char* new_filename, InkWarrant war
 
 /* A tag put on takes none off; one of key system, boot or god makes the file
  * one the system keeps, and asks the warrant as taking it off does. */
-int tagfs_add_tag(uint64_t file_id, uint16_t tag_id, InkWarrant warrant)
+int tagfs_add_tag(uint64_t file_id, uint32_t tag_id, InkWarrant warrant)
 {
     if (!tagfs_enter())
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
@@ -163,7 +163,7 @@ int tagfs_add_tag(uint64_t file_id, uint16_t tag_id, InkWarrant warrant)
     return rc == OK ? 0 : -(int)rc;
 }
 
-int tagfs_remove_tag(uint64_t file_id, uint16_t tag_id, InkWarrant warrant)
+int tagfs_remove_tag(uint64_t file_id, uint32_t tag_id, InkWarrant warrant)
 {
     if (!tagfs_enter())
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
@@ -173,7 +173,7 @@ int tagfs_remove_tag(uint64_t file_id, uint16_t tag_id, InkWarrant warrant)
     return rc == OK ? 0 : -(int)rc;
 }
 
-bool tagfs_has_tag(uint64_t file_id, uint16_t tag_id)
+bool tagfs_has_tag(uint64_t file_id, uint32_t tag_id)
 {
     if (!tagfs_enter())
         return false;
@@ -189,7 +189,7 @@ error_t tagfs_add_tag_string(uint64_t file_id, const TagSpelling* tag, InkWarran
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    uint16_t tag_id;
+    uint32_t tag_id;
     error_t  rc = TagRegistryIntern(OpsRegistry(), tag, &tag_id);
     if (rc == OK) {
         UseContextBindTag(tag, tag_id);
@@ -202,7 +202,7 @@ error_t tagfs_add_tag_string(uint64_t file_id, const TagSpelling* tag, InkWarran
 
 /* Whether the file's tag `tag_id` is what `tag` names: that exact tag when it
  * has a value, and any tag of its key when it is bare. */
-static bool TagNamedBy(uint16_t tag_id, const TagSpelling* tag)
+static bool TagNamedBy(uint32_t tag_id, const TagSpelling* tag)
 {
     TagSpelling worn;
     if (!TagRegistrySpelling(OpsRegistry(), tag_id, &worn, NULL))

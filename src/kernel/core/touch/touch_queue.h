@@ -40,7 +40,7 @@ typedef enum {
 /* What a node's fire does, by its kind. */
 typedef union {
     struct {
-        uint16_t tag_id;
+        uint32_t tag_id;
         uint16_t flags;
         uint32_t source_pid;
         uint32_t plen;
@@ -73,7 +73,7 @@ void TouchQueueInit(void);
 
 /* A delayed publish's node, its payload copied into it: NULL when there is no
  * memory, which the sender says to its caller. Armed, it is the queue's. */
-TouchQueueNode *TouchQueuePublishNode(uint16_t tag_id, const void *payload, uint32_t plen,
+TouchQueueNode *TouchQueuePublishNode(uint32_t tag_id, const void *payload, uint32_t plen,
                                       uint32_t source_pid, uint16_t flags);
 
 /* A PUBLISH node from TouchQueuePublishNode, fired at `fire_tick`. */

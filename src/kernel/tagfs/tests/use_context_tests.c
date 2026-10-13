@@ -44,7 +44,7 @@ static void use_snapshot_restore(UseList* saved)
 }
 
 /* A strand that wears exactly one tag, for UseContextMatches. */
-static process_t* use_test_strand(uint16_t tag_id, cabin_t** out_cabin)
+static process_t* use_test_strand(uint32_t tag_id, cabin_t** out_cabin)
 {
     cabin_t*   cabin = kmalloc(sizeof(cabin_t));
     process_t* proc  = kmalloc(sizeof(process_t));
@@ -58,7 +58,7 @@ static process_t* use_test_strand(uint16_t tag_id, cabin_t** out_cabin)
     if (tag_id < 64) {
         cabin->tag_bits = (uint64_t)1 << tag_id;
     } else {
-        cabin->tag_overflow_ids = kmalloc(sizeof(uint16_t));
+        cabin->tag_overflow_ids = kmalloc(sizeof(uint32_t));
         if (!cabin->tag_overflow_ids) {
             kfree(cabin);
             kfree(proc);
@@ -183,7 +183,7 @@ static TestResult test_use_context_narrows(void)
                                    "nothing here to narrow by");
         goto out;
     }
-    uint16_t tag_id = meta.tag_ids[0];
+    uint32_t tag_id = meta.tag_ids[0];
     tagfs_metadata_free(&meta);
     have_meta = false;
 

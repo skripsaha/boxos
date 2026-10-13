@@ -112,7 +112,7 @@ out:
 /* Does the tag index count this file id among the name's? Asked of the index
  * itself, so neither a Use Context nor the hidden/trashed filter can stand
  * between the question and the answer. */
-static bool StandNameFinds(uint16_t stem, uint64_t file_id)
+static bool StandNameFinds(uint32_t stem, uint64_t file_id)
 {
     return TagBitmapHas(tagfs_get_state()->bitmap_index, stem, file_id);
 }
@@ -130,7 +130,7 @@ static bool StandVolumeNames(uint64_t file_id)
 
 /* The file's id out from under the name's tag, the way an Ink takes it out:
  * under the volume's state lock, under which alone the index changes shape. */
-static void StandNameLetGo(uint16_t stem, uint64_t id)
+static void StandNameLetGo(uint32_t stem, uint64_t id)
 {
     TagFSState* fs = tagfs_get_state();
     TagFSLockTake(&fs->lock);
@@ -148,7 +148,7 @@ static void StandNameLetGo(uint16_t stem, uint64_t id)
  * The file a create made is deleted on every path out, and by the id the
  * create answered — `id` is only the one it should have taken, and may be
  * another creator's. A refused create that left a record behind is failed. */
-static TestResult StandCreateOnce(uint32_t n, uint16_t stem, bool* fired, bool* whole)
+static TestResult StandCreateOnce(uint32_t n, uint32_t stem, bool* fired, bool* whole)
 {
     TestResult verdict = TEST_PASS;
     uint64_t   id      = tagfs_file_ceiling();      /* the id this create takes */
@@ -208,7 +208,7 @@ TestResult TestStandCreateAllOrNothing(void)
                    "a create before the sweep interns the name");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "and its file is deleted");
     file_id = 0;
-    uint16_t stem = tagfs_tag_lookup("test_file");
+    uint32_t stem = tagfs_tag_lookup("test_file");
     TEST_ASSERT(stem != TAGFS_INVALID_TAG_ID, "the name has a tag");
 
     for (uint32_t n = 1; n <= STAND_SWEEP_MAX; n++) {

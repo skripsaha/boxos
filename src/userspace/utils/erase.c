@@ -18,7 +18,7 @@ int main(void) {
         /* Ask for the trashed files by their tag — a plain listing leaves
          * them out on purpose, so it was the one list that could never hold
          * what this command deletes. */
-        uint32_t *trashed = NULL;
+        file_id_t *trashed = NULL;
         int total = query_all("trashed", &trashed);
 
         if (total < 0) { println("Error: Failed to query files"); exit(1); return 1; }
@@ -39,12 +39,12 @@ int main(void) {
      * it never found a trashed file, and the file it did find was refused as
      * not trashed yet: `erase NAME` could delete nothing at all. */
     const char *name = luggage_word(1);
-    uint32_t *trashed = NULL;
+    file_id_t *trashed = NULL;
     int total = query_all("trashed", &trashed);
 
     if (total < 0) { println("Error: Failed to query files"); exit(1); return 1; }
 
-    uint32_t file_id = 0;
+    file_id_t file_id = 0;
     int count = 0;
     for (int i = 0; i < total; i++) {
         file_info_t info;
@@ -74,7 +74,7 @@ int main(void) {
         return 1;
     }
 
-    printf("File deleted: %s (file %u)\n", name, file_id);
+    printf("File deleted: %s (file %lu)\n", name, file_id);
     exit(0);
     return 0;
 }

@@ -95,8 +95,8 @@
 
 /* ─── Touch handle-based ABI (0x51 – 0x58) ─────────────────────────── */
 /* Userspace resolves a tag string ONCE via TOUCH_INTERN, caches the
- * uint16_t TouchTag locally, and passes it to all subsequent ops. The
- * hot syscall path takes the tag_id as a u16 in params — no string
+ * uint32_t TouchTag locally, and passes it to all subsequent ops. The
+ * hot syscall path takes the tag_id as a u32 in params — no string
  * parsing, no registry lookup. */
 #define SYSTEM_OP_TOUCH_CLAIM       0x51
 #define SYSTEM_OP_TOUCH_RELEASE     0x52
@@ -233,7 +233,7 @@
  * ============================================================================ */
 /* tag.query — every file carrying the asked tags. params = [u8 scope] (see
  * STORAGE_SCOPE_* below), in_crate = comma-separated tags (absent = all).
- * out_crate = [u32 delivered][u32 total][u32 file_ids[delivered]]: `total` is
+ * out_crate = [u32 delivered][u32 total][u64 file_ids[delivered]]: `total` is
  * how many files match, `delivered` how many of them fit the crate — so a
  * caller with too small a crate learns the true count and can ask again with
  * room for it, instead of being handed the smaller number as the answer. */
@@ -241,7 +241,7 @@
 #define STORAGE_TAG_SET             0x02
 #define STORAGE_TAG_UNSET           0x03
 #define STORAGE_OBJ_READ            0x05
-/* obj.write — params = [u32 file_id][u64 offset][u32 flags], and a ferry's
+/* obj.write — params = [u64 file_id][u64 offset][u32 flags], and a ferry's
  * [u64 waybill] after them when it carries one; in_crate = the bytes; an
  * out_crate of 16 bytes = [u64 the bytes the file holds of the write][u64 the
  * size it left], on every answer. STORAGE_WRITE_APPEND: the write begins at
@@ -256,7 +256,7 @@
 #define STORAGE_OBJ_RENAME          0x09
 #define STORAGE_OBJ_GET_INFO        0x0A
 /* obj.span — a file made exactly `size` bytes long. params =
- * [u32 file_id][u64 size][u32 flags], the flags word optional (0). Shorter:
+ * [u64 file_id][u64 size][u32 flags], the flags word optional (0). Shorter:
  * the tail is cut and its blocks given back. Longer: the bytes from the old
  * size to the new one read as zeros, written to blocks taken for them — never
  * a previous owner's bytes. A write grows a file only at its end, and is
@@ -273,7 +273,7 @@
 #define STORAGE_SNAP_CREATE         0x20
 #define STORAGE_SNAP_DELETE         0x21
 #define STORAGE_SNAP_LIST           0x22
-/* anchor — durability + tag-event fan-out. params = [u32 file_id].
+/* anchor — durability + tag-event fan-out. params = [u64 file_id].
  * Answered once every change made before it is settled and lies in a block
  * the volume never writes again; the caller waits behind its Chit, never
  * inside the kernel. file_id == 0 publishes a generic "anchor" Touch event.
@@ -283,7 +283,7 @@
  * side-channel. */
 #define STORAGE_OBJ_ANCHOR          0x23
 /* obj.write.settled — the wait for a file's changes to reach the medium on
- * their own: params = [u32 file_id]; 0 = every change of the volume so far.
+ * their own: params = [u64 file_id]; 0 = every change of the volume so far.
  * Answered, with nothing published, once the file's newest change is settled
  * and lies in a block the volume never writes again — or at once, when it is.
  * A demand: the cycle it waits for does not wait for Lull. The medium's
@@ -291,7 +291,7 @@
  * ERR_DEVICE_NOT_READY). */
 #define STORAGE_OBJ_WRITE_SETTLED   0x25
 /* snap.info — structured per-snapshot record by id. params = [u32 snap_id].
- * out_crate = [u32 id][u32 parent_file_id][u64 created_time][u32 file_count]
+ * out_crate = [u32 id][u64 parent_file_id][u64 created_time][u32 file_count]
  *             [u64 total_size][u8 flags][char name[32]]. Gives the name-by-id
  * lookup SNAP_LIST (ids only) lacks, enabling deterministic snapshot cleanup. */
 #define STORAGE_SNAP_INFO           0x24

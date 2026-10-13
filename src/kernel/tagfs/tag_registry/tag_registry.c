@@ -45,7 +45,7 @@
 
 struct TagKeyGroup {
     char*               key;
-    uint16_t*           tag_ids;
+    uint32_t*           tag_ids;
     uint32_t            count;
     uint32_t            capacity;
     struct TagKeyGroup* next;
@@ -54,6 +54,16 @@ struct TagKeyGroup {
 static uint32_t key_hash(const char* key, size_t key_len, uint32_t bucket_count) {
     TagSpelling bare = { key, NULL, key_len, 0 };
     return TagSpellingHash(&bare) % bucket_count;
+}
+
+/* The entry of `id` in an id's hash of `buckets` buckets; NULL when no tag
+ * has it. */
+static TagRegistryEntry* RegistryById(TagRegistryEntry* const* by_id, uint32_t buckets,
+                                      uint32_t id) {
+    TagRegistryEntry* entry = by_id[id % buckets];
+    while (entry && entry->tag_id != id)
+        entry = entry->id_next;
+    return entry;
 }
 
 /* Whether an entry is the tag spelled: the same key, and the same value or
@@ -68,15 +78,15 @@ static bool entry_is(const TagRegistryEntry* entry, const TagSpelling* tag) {
 }
 
 /* False when the group had to grow and there was no memory for it. */
-static bool add_to_key_group(TagKeyGroup* group, uint16_t tag_id) {
+static bool add_to_key_group(TagKeyGroup* group, uint32_t tag_id) {
     if (group->count >= group->capacity) {
         uint32_t new_cap = group->capacity * 2;
-        uint16_t* new_ids = kmalloc(sizeof(uint16_t) * new_cap);
+        uint32_t* new_ids = kmalloc(sizeof(uint32_t) * new_cap);
         if (!new_ids) {
             debug_printf("[TagRegistry] add_to_key_group: grow alloc failed\n");
             return false;
         }
-        memcpy(new_ids, group->tag_ids, sizeof(uint16_t) * group->count);
+        memcpy(new_ids, group->tag_ids, sizeof(uint32_t) * group->count);
         kfree(group->tag_ids);
         group->tag_ids = new_ids;
         group->capacity = new_cap;
@@ -107,7 +117,7 @@ static TagKeyGroup* find_or_create_key_group(TagRegistry* reg, const char* key, 
         return NULL;
     }
 
-    new_group->tag_ids = kmalloc(sizeof(uint16_t) * 8);
+    new_group->tag_ids = kmalloc(sizeof(uint32_t) * 8);
     if (!new_group->tag_ids) {
         kfree(new_group->key);
         kfree(new_group);
@@ -125,7 +135,7 @@ static TagKeyGroup* find_or_create_key_group(TagRegistry* reg, const char* key, 
 }
 
 /*
- * ‼ THE TWO HASHES GROW WITH THE TAGS.
+ * ‼ THE HASHES GROW WITH THE TAGS.
  *
  * They were a fixed TAGFS_REG_BUCKETS and TAGFS_KEY_BUCKETS, so a registry of
  * thirty thousand tags walked chains sixty long on every lookup — under a lock
@@ -133,7 +143,8 @@ static TagKeyGroup* find_or_create_key_group(TagRegistry* reg, const char* key, 
  * once it holds more than it has buckets: the new table is taken with no lock
  * held, filled and put in place under the lock, and the old one given back
  * after it. A table the heap will not give keeps the chains longer until the
- * next tag asks again, and nothing else is lost.
+ * next tag asks again, and nothing else is lost. The text's hash and the id's
+ * grow together — both or neither — since they share their size.
  */
 /* Whether either hash holds more than it has buckets. Under reg->lock. */
 static bool RegistryCrowded(const TagRegistry* reg) {
@@ -151,16 +162,30 @@ void RegistryRehash(TagRegistry* reg) {
     TagFSLockDrop(&reg->lock);
     if (want == buckets && key_want == key_buckets) return;
 
-    TagRegistryNode** table     = want != buckets ? kmalloc(sizeof(TagRegistryNode*) * want) : NULL;
-    TagKeyGroup**     key_table = key_want != key_buckets ? kmalloc(sizeof(TagKeyGroup*) * key_want) : NULL;
+    TagRegistryNode**  table     = want != buckets ? kmalloc(sizeof(TagRegistryNode*) * want) : NULL;
+    TagRegistryEntry** id_table  = table ? kmalloc(sizeof(TagRegistryEntry*) * want) : NULL;
+    TagKeyGroup**      key_table = key_want != key_buckets ? kmalloc(sizeof(TagKeyGroup*) * key_want) : NULL;
+    if (!id_table) {
+        kfree(table);
+        table = NULL;
+    }
     if (table) memset(table, 0, sizeof(TagRegistryNode*) * want);
+    if (id_table) memset(id_table, 0, sizeof(TagRegistryEntry*) * want);
     if (key_table) memset(key_table, 0, sizeof(TagKeyGroup*) * key_want);
 
     TagFSLockTake(&reg->lock);
     if (table && reg->bucket_count == buckets) {
         for (uint32_t b = 0; b < buckets; b++) {
+            for (TagRegistryEntry* entry = reg->by_id[b], *next; entry; entry = next) {
+                uint32_t at    = entry->tag_id % want;
+                next           = entry->id_next;
+                entry->id_next = id_table[at];
+                id_table[at]   = entry;
+            }
+        }
+        for (uint32_t b = 0; b < buckets; b++) {
             for (TagRegistryNode* node = reg->buckets[b], *next; node; node = next) {
-                const TagRegistryEntry* entry = reg->by_id[node->tag_id];
+                const TagRegistryEntry* entry = RegistryById(id_table, want, node->tag_id);
                 TagSpelling spelled = { entry->key, entry->value, entry->key_len, entry->value_len };
                 uint32_t    at      = TagSpellingHash(&spelled) % want;
                 next       = node->next;
@@ -168,10 +193,13 @@ void RegistryRehash(TagRegistry* reg) {
                 table[at]  = node;
             }
         }
-        TagRegistryNode** old = reg->buckets;
+        TagRegistryNode**  old    = reg->buckets;
+        TagRegistryEntry** old_id = reg->by_id;
         reg->buckets      = table;
+        reg->by_id        = id_table;
         reg->bucket_count = want;
         table             = old;
+        id_table          = old_id;
     }
     if (key_table && reg->key_bucket_count == key_buckets) {
         for (uint32_t b = 0; b < key_buckets; b++) {
@@ -189,15 +217,16 @@ void RegistryRehash(TagRegistry* reg) {
     }
     TagFSLockDrop(&reg->lock);
     kfree(table);
+    kfree(id_table);
     kfree(key_table);
 }
 
-static uint16_t lookup_unlocked(TagRegistry* reg, const TagSpelling* tag) {
+static uint32_t lookup_unlocked(TagRegistry* reg, const TagSpelling* tag) {
     uint32_t bucket = TagSpellingHash(tag) % reg->bucket_count;
     TagRegistryNode* node = reg->buckets[bucket];
 
     while (node) {
-        if (entry_is(reg->by_id[node->tag_id], tag)) {
+        if (entry_is(RegistryById(reg->by_id, reg->bucket_count, node->tag_id), tag)) {
             return node->tag_id;
         }
         node = node->next;
@@ -206,32 +235,12 @@ static uint16_t lookup_unlocked(TagRegistry* reg, const TagSpelling* tag) {
     return TAGFS_INVALID_TAG_ID;
 }
 
-// Grow by_id array to accommodate at least `needed_id`
-static int ensure_by_id_capacity(TagRegistry* reg, uint16_t needed_id) {
-    while (needed_id >= reg->by_id_capacity) {
-        uint32_t new_cap = reg->by_id_capacity * 2;
-        TagRegistryEntry** new_by_id = kmalloc(sizeof(TagRegistryEntry*) * new_cap);
-        if (!new_by_id) {
-            debug_printf("[TagRegistry] ensure_by_id_capacity: alloc failed\n");
-            return -1;
-        }
-        memcpy(new_by_id, reg->by_id, sizeof(TagRegistryEntry*) * reg->by_id_capacity);
-        memset(new_by_id + reg->by_id_capacity, 0,
-               sizeof(TagRegistryEntry*) * (new_cap - reg->by_id_capacity));
-        kfree(reg->by_id);
-        reg->by_id = new_by_id;
-        reg->by_id_capacity = new_cap;
-    }
-    return 0;
-}
-
 /*
- * The entry for a tag under `tag_id`, linked into every index: the hash, the
- * id table (grown already) and the key's group. Everything is allocated before
- * anything is linked, so ERR_NO_MEMORY leaves the registry as it was. Under
- * reg->lock.
+ * The entry for a tag under `tag_id`, linked into every index: the text's
+ * hash, the id's and the key's group. Everything is allocated before anything
+ * is linked, so ERR_NO_MEMORY leaves the registry as it was. Under reg->lock.
  */
-static error_t RegistryEnter(TagRegistry* reg, const TagSpelling* tag, uint16_t tag_id,
+static error_t RegistryEnter(TagRegistry* reg, const TagSpelling* tag, uint32_t tag_id,
                              uint8_t flags) {
     TagRegistryEntry* entry = kmalloc(sizeof(TagRegistryEntry));
     TagRegistryNode*  node  = kmalloc(sizeof(TagRegistryNode));
@@ -260,7 +269,8 @@ static error_t RegistryEnter(TagRegistry* reg, const TagSpelling* tag, uint16_t 
     node->tag_id = tag_id;
     node->next   = reg->buckets[bucket];
     reg->buckets[bucket] = node;
-    reg->by_id[tag_id]   = entry;
+    entry->id_next = reg->by_id[tag_id % reg->bucket_count];
+    reg->by_id[tag_id % reg->bucket_count] = entry;
 
     if (tag_id >= reg->next_id) reg->next_id = tag_id + 1;
     reg->total_tags++;
@@ -272,27 +282,25 @@ static error_t RegistryEnter(TagRegistry* reg, const TagSpelling* tag, uint16_t 
  * the id every file wearing the tag carries, so it is never renumbered. The
  * rules are the loader's, in its order: an exact (key, value) the registry
  * already holds keeps its id and takes the medium's flags; an id past
- * TAGFS_MAX_TAG_ID, or one another tag already holds, is dropped. A record's
+ * reg->id_most, or one another tag already holds, is dropped. A record's
  * key and value lie in its block as they will lie in memory, so they are
  * compared there and copied only when kept. Under reg->lock. ERR_NO_MEMORY
  * only when memory ran out.
  */
-error_t RegistryAdopt(TagRegistry* reg, uint16_t tag_id, uint8_t flags,
+error_t RegistryAdopt(TagRegistry* reg, uint32_t tag_id, uint8_t flags,
                       const uint8_t* key_at, uint8_t key_len,
                       const uint8_t* value_at, uint16_t value_len) {
     TagSpelling tag = { (const char*)key_at, value_len ? (const char*)value_at : NULL,
                         key_len, value_len };
 
-    uint16_t held = lookup_unlocked(reg, &tag);
+    uint32_t held = lookup_unlocked(reg, &tag);
     if (held != TAGFS_INVALID_TAG_ID) {
-        reg->by_id[held]->flags = flags;
+        RegistryById(reg->by_id, reg->bucket_count, held)->flags = flags;
         return OK;
     }
-    if (tag_id > TAGFS_MAX_TAG_ID)
+    if (tag_id > reg->id_most)
         return OK;
-    if (ensure_by_id_capacity(reg, tag_id) != 0)
-        return ERR_NO_MEMORY;
-    if (reg->by_id[tag_id]) {
+    if (RegistryById(reg->by_id, reg->bucket_count, tag_id)) {
         debug_printf("[TagRegistry] load: slot %u already used\n", tag_id);
         return OK;
     }
@@ -301,18 +309,16 @@ error_t RegistryAdopt(TagRegistry* reg, uint16_t tag_id, uint8_t flags,
 
 /* The tag's id, a new one under next_id when the registry has none. Under
  * reg->lock; the caller has judged the widths. */
-static error_t intern_unlocked(TagRegistry* reg, const TagSpelling* tag, uint16_t* out_id) {
-    uint16_t existing = lookup_unlocked(reg, tag);
+static error_t intern_unlocked(TagRegistry* reg, const TagSpelling* tag, uint32_t* out_id) {
+    uint32_t existing = lookup_unlocked(reg, tag);
     if (existing != TAGFS_INVALID_TAG_ID) {
         *out_id = existing;
         return OK;
     }
-    if (reg->next_id > TAGFS_MAX_TAG_ID)
+    if (reg->next_id > reg->id_most)
         return ERR_TAGFS_REGISTRY_FULL;
-    if (ensure_by_id_capacity(reg, reg->next_id) != 0)
-        return ERR_NO_MEMORY;
 
-    uint16_t id = reg->next_id;
+    uint32_t id = reg->next_id;
     error_t  rc = RegistryEnter(reg, tag, id, tag->value ? TAGFS_TAG_FLAG_HAS_VALUE : 0);
     if (rc == OK)
         *out_id = id;
@@ -331,13 +337,13 @@ int tag_registry_init(TagRegistry* reg) {
     }
     memset(reg->buckets, 0, sizeof(TagRegistryNode*) * TAGFS_REG_BUCKETS);
 
-    reg->by_id = kmalloc(sizeof(TagRegistryEntry*) * 64);
+    reg->by_id = kmalloc(sizeof(TagRegistryEntry*) * TAGFS_REG_BUCKETS);
     if (!reg->by_id) {
         kfree(reg->buckets);
         debug_printf("[TagRegistry] init: by_id alloc failed\n");
         return -1;
     }
-    memset(reg->by_id, 0, sizeof(TagRegistryEntry*) * 64);
+    memset(reg->by_id, 0, sizeof(TagRegistryEntry*) * TAGFS_REG_BUCKETS);
 
     reg->key_buckets = kmalloc(sizeof(TagKeyGroup*) * TAGFS_KEY_BUCKETS);
     if (!reg->key_buckets) {
@@ -351,9 +357,9 @@ int tag_registry_init(TagRegistry* reg) {
     reg->bucket_count     = TAGFS_REG_BUCKETS;
     reg->key_bucket_count = TAGFS_KEY_BUCKETS;
     reg->key_groups       = 0;
-    reg->by_id_capacity   = 64;
     reg->total_tags       = 0;
     reg->next_id          = 0;
+    reg->id_most          = TAGFS_MAX_TAG_ID;
 
     TagFSLockInit(&reg->lock, "registry", LOCK_RANK_LEAF);
 
@@ -391,19 +397,20 @@ void tag_registry_destroy(TagRegistry* reg) {
             node = next;
         }
     }
-    kfree(reg->buckets);
-    reg->buckets = NULL;
-
-    /* The table walked as far as it was made, never as far as the numbers say:
-     * an entry lives only in a slot the table holds. */
-    for (uint32_t i = 0; i < reg->by_id_capacity; i++) {
+    /* Every entry is in exactly one bucket of the id's hash, which has as many
+     * buckets as the text's. */
+    for (uint32_t i = 0; i < reg->bucket_count; i++) {
         TagRegistryEntry* entry = reg->by_id[i];
-        if (entry) {
+        while (entry) {
+            TagRegistryEntry* next = entry->id_next;
             kfree(entry->key);
             if (entry->value) kfree(entry->value);
             kfree(entry);
+            entry = next;
         }
     }
+    kfree(reg->buckets);
+    reg->buckets = NULL;
     kfree(reg->by_id);
     reg->by_id = NULL;
 
@@ -429,7 +436,7 @@ void tag_registry_destroy(TagRegistry* reg) {
     debug_printf("[TagRegistry] destroyed\n");
 }
 
-error_t TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint16_t* out_id) {
+error_t TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint32_t* out_id) {
     if (!out_id) return ERR_NULL_POINTER;
     *out_id = TAGFS_INVALID_TAG_ID;
     if (!reg || !tag || !tag->key) return ERR_NULL_POINTER;
@@ -448,28 +455,28 @@ error_t TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint16_t* ou
     if (crowded)
         RegistryRehash(reg);
 
-    /* Said once for the registry: the ids of a v1 volume are never given back,
+    /* Said once for the registry: the ids of a volume are never given back,
      * so a registry that is full stays full, and every later refusal is the
      * same fact. */
     if (rc == ERR_TAGFS_REGISTRY_FULL && !__atomic_exchange_n(&reg->said_full, true, __ATOMIC_ACQ_REL))
-        kprintf("[TagRegistry] this volume has given out all %u of its tag numbers, and a new "
-                "tag cannot have one — every tag not yet known to it is refused from now on "
-                "(error %d)\n", TAGFS_MAX_TAG_ID + 1u, (int)rc);
+        kprintf("[TagRegistry] this volume has given out all %u of the tag numbers its book can "
+                "carry, and a new tag cannot have one — every tag not yet known to it is refused "
+                "from now on (error %d)\n", reg->id_most + 1u, (int)rc);
     return rc;
 }
 
-uint16_t TagRegistryLookup(TagRegistry* reg, const TagSpelling* tag) {
+uint32_t TagRegistryLookup(TagRegistry* reg, const TagSpelling* tag) {
     if (!reg || !tag || !tag->key) return TAGFS_INVALID_TAG_ID;
     TagFSLockTake(&reg->lock);
-    uint16_t id = lookup_unlocked(reg, tag);
+    uint32_t id = lookup_unlocked(reg, tag);
     TagFSLockDrop(&reg->lock);
     return id;
 }
 
-bool TagRegistrySpelling(TagRegistry* reg, uint16_t tag_id, TagSpelling* out, bool* is_system) {
+bool TagRegistrySpelling(TagRegistry* reg, uint32_t tag_id, TagSpelling* out, bool* is_system) {
     if (!reg || !out) return false;
     TagFSLockTake(&reg->lock);
-    const TagRegistryEntry* entry = tag_id < reg->next_id ? reg->by_id[tag_id] : NULL;
+    const TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, tag_id);
     if (entry) {
         out->key       = entry->key;
         out->key_len   = entry->key_len;
@@ -491,7 +498,7 @@ error_t TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, Tag
 
     /* Sized and copied under the lock the next tag of the key takes to free
      * the group's array: the copy is whole and the array is never seen after
-     * the lock goes. A group holds at most TAGFS_MAX_TAG_ID + 1 ids, which a
+     * the lock goes. A group holds at most reg->id_most + 1 ids, which a
      * TagIdList counts. */
     error_t rc = OK;
     TagFSLockTake(&reg->lock);
@@ -499,11 +506,11 @@ error_t TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, Tag
     while (group && !TagSpanIs(group->key, key, key_len))
         group = group->next;
     if (group && group->count > 0) {
-        out->ids = kmalloc(sizeof(uint16_t) * group->count);
+        out->ids = kmalloc(sizeof(uint32_t) * group->count);
         if (out->ids) {
-            memcpy(out->ids, group->tag_ids, sizeof(uint16_t) * group->count);
-            out->count    = (uint16_t)group->count;
-            out->capacity = (uint16_t)group->count;
+            memcpy(out->ids, group->tag_ids, sizeof(uint32_t) * group->count);
+            out->count    = group->count;
+            out->capacity = group->count;
         } else {
             rc = ERR_NO_MEMORY;
         }
@@ -516,11 +523,12 @@ error_t TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, Tag
 // SYSTEM bit; it never makes the registry owe the medium anything — the bit
 // is re-derived from TagFsReservedKeys at every mount, so it must never be
 // the reason for a write.
-void tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id) {
+void tag_registry_mark_system(TagRegistry* reg, uint32_t tag_id) {
     if (!reg || tag_id == TAGFS_INVALID_TAG_ID) return;
     TagFSLockTake(&reg->lock);
-    if (tag_id < reg->next_id && reg->by_id[tag_id])
-        reg->by_id[tag_id]->flags |= TAGFS_TAG_FLAG_SYSTEM;
+    TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, tag_id);
+    if (entry)
+        entry->flags |= TAGFS_TAG_FLAG_SYSTEM;
     TagFSLockDrop(&reg->lock);
 }
 
@@ -534,12 +542,16 @@ void tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id) {
  * wrote, so an append lands exactly where a rewrite would have. An id no tag
  * holds (one the medium did not have) is passed over. Answers the first id it
  * did not take: next_id when every one fitted. Under reg->lock.
+ *
+ * The record is format v1's, its id a u16: only a registry read off a v1
+ * volume has a tail to write (tag_registry_load), and it issues no id past
+ * TAGFS_V1_TAG_ID_MOST (reg->id_most), so every id here fits.
  */
-static uint16_t RegistryPack(TagRegistry* reg, TagRegistryBlock* image, uint16_t from) {
-    uint16_t id = from;
+static uint32_t RegistryPack(TagRegistry* reg, TagRegistryBlock* image, uint32_t from) {
+    uint32_t id = from;
 
     for (; id < reg->next_id; id++) {
-        const TagRegistryEntry* entry = reg->by_id[id];
+        const TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, id);
         if (!entry)
             continue;
 
@@ -549,8 +561,9 @@ static uint16_t RegistryPack(TagRegistry* reg, TagRegistryBlock* image, uint16_t
         if (image->used_bytes + size > TAGFS_REGISTRY_DATA_SIZE)
             break;
 
-        uint8_t* p = image->data + image->used_bytes;
-        memcpy(p, &id, sizeof(id));
+        uint8_t* p       = image->data + image->used_bytes;
+        uint16_t disk_id = (uint16_t)id;
+        memcpy(p, &disk_id, sizeof(disk_id));
         p[2] = entry->flags;
         p[3] = key_len;
         memcpy(p + 4, &value_len, sizeof(value_len));
@@ -576,7 +589,7 @@ static uint16_t RegistryPack(TagRegistry* reg, TagRegistryBlock* image, uint16_t
  * or ERR_WOULD_BLOCK while a Settle cycle would give ground back — room on its
  * way, which the caller waits for its own way (settle_ops.h).
  */
-static error_t RegistryGrow(TagRegistry* reg, uint16_t from, uint16_t* out_end,
+static error_t RegistryGrow(TagRegistry* reg, uint32_t from, uint32_t* out_end,
                             char* why, size_t why_size) {
     error_t rc = OK;
 
@@ -607,7 +620,7 @@ static error_t RegistryGrow(TagRegistry* reg, uint16_t from, uint16_t* out_end,
     memset(reg->spare_image, 0, TAGFS_BLOCK_SIZE);
     reg->spare_image->magic = TAGFS_REGISTRY_MAGIC;
     TagFSLockTake(&reg->lock);
-    uint16_t end = RegistryPack(reg, reg->spare_image, from);
+    uint32_t end = RegistryPack(reg, reg->spare_image, from);
     TagFSLockDrop(&reg->lock);
 
     rc = TagFSMetaBlockWrite(reg->spare_block, reg->spare_image);
@@ -638,11 +651,11 @@ static error_t RegistryWritePass(TagRegistry* reg, char* why, size_t why_size) {
     uint16_t          was_count = tail->entry_count;
 
     TagFSLockTake(&reg->lock);
-    uint16_t upto = RegistryPack(reg, tail, reg->written_next);
+    uint32_t upto = RegistryPack(reg, tail, reg->written_next);
     bool     full = upto < reg->next_id;
     TagFSLockDrop(&reg->lock);
 
-    uint16_t end = upto;
+    uint32_t end = upto;
     error_t  rc  = full ? RegistryGrow(reg, upto, &end, why, why_size) : OK;
     if (rc != OK && rc != ERR_TAGFS_NO_SPACE && rc != ERR_WOULD_BLOCK)
         goto refused;
@@ -711,7 +724,7 @@ error_t tag_registry_flush(TagRegistry* reg) {
         char why[112];
 
         TagFSLockTake(&reg->lock);
-        uint16_t target = reg->next_id;
+        uint32_t target = reg->next_id;
         TagFSLockDrop(&reg->lock);
         /* written_next and tail_owed move only in the hands of this Scribe's
          * holder. */
@@ -723,7 +736,7 @@ error_t tag_registry_flush(TagRegistry* reg) {
         } else if (!reg->said_failing) {
             reg->said_failing = true;
             TagFSLockTake(&reg->lock);
-            uint32_t unwritten = (uint32_t)(reg->next_id - reg->written_next);
+            uint32_t unwritten = reg->next_id - reg->written_next;
             TagFSLockDrop(&reg->lock);
             kprintf("[TagRegistry] %u tag id(s) this volume issued are not on its medium yet — %s "
                     "(error %d) — they stay in memory, and the next flush writes them\n",
@@ -758,7 +771,7 @@ uint64_t tag_registry_written_need(TagRegistry* reg) {
  * wear the id can refuse instead, and no record on the medium ever wears an id
  * the registry on the medium does not define. Called with no TagFS lock held.
  */
-error_t TagRegistryFlushFor(TagRegistry* reg, uint16_t id) {
+error_t TagRegistryFlushFor(TagRegistry* reg, uint32_t id) {
     if (!reg) return ERR_NULL_POINTER;
 
     TagFSLockTake(&reg->lock);

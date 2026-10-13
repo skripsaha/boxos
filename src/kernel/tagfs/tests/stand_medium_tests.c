@@ -207,7 +207,7 @@ static bool StandBookTurnSettled(const StandBookTurn* t)
  * waiter for it. */
 typedef struct {
     uint64_t         file_id;
-    uint16_t         tag;
+    uint32_t         tag;
     TagFSFileHandle* holder;
     TagFSFileHandle* waiting;
     bool             holding;
@@ -696,10 +696,11 @@ out:
 
 /*
  * R32 (Z08-1). A mount numbers the registry past every tag id the pool's
- * records wear — ids a rolled-back registry no longer names — and the id table
- * under the numbers grows to cover them. Red before: the numbers moved past
- * the table's end, every reader bounded by them read past it, and the
- * take-down freed what nobody allocated.
+ * records wear — ids a rolled-back registry no longer names — and nothing
+ * under the numbers is sized by them: an id no tag has spells nothing at any
+ * height, and the next tag takes the number past them. Red before: the
+ * numbers moved past the end of a table indexed by id, every reader bounded
+ * by them read past it, and the take-down freed what nobody allocated.
  */
 static TestResult TestStandMediumNumbersPastTheTable(void)
 {
@@ -713,15 +714,22 @@ static TestResult TestStandMediumNumbersPastTheTable(void)
     TEST_ASSERT_EQ(tag_registry_init(scratch), 0, "a registry of the test's own is built");
     built = true;
 
-    uint32_t next = scratch->by_id_capacity * 4u;
-    TEST_ASSERT_OK(TagRegistryNumbersFrom(scratch, next),
-                   "its numbers move past four id tables' worth of ids");
-    TEST_ASSERT_EQ(scratch->next_id, next, "to the first id past the ones the records wear");
-    TestEvidence("slots of the id table under numbers up to it", scratch->by_id_capacity);
-    TEST_ASSERT(scratch->by_id_capacity >= scratch->next_id,
-                "and the id table covers every one of them");
-    TEST_ASSERT(!TagRegistrySpelling(scratch, (uint16_t)(next - 1u), &spelled, NULL),
-                "an id past the table's old end spells nothing");
+    uint32_t next = 100000u;
+    TagRegistryNumbersFrom(scratch, next);
+    TEST_ASSERT_EQ(scratch->next_id, next, "its numbers move to the first id past the ones the records wear");
+    TEST_ASSERT(!TagRegistrySpelling(scratch, next - 1u, &spelled, NULL),
+                "an id under the numbers that no tag has spells nothing");
+    TEST_ASSERT(!TagRegistrySpelling(scratch, TAGFS_MAX_TAG_ID, &spelled, NULL),
+                "nor does the highest id there is");
+
+    TagSpelling fresh = TagSpellingOfKey("stand.numbers.past");
+    uint32_t    id    = TAGFS_INVALID_TAG_ID;
+    TEST_ASSERT_OK(TagRegistryIntern(scratch, &fresh, &id), "a new tag is interned past them");
+    TestEvidence("the id it is given", id);
+    TEST_ASSERT_EQ(id, next, "with the first number past them — wider than 16 bits");
+    TEST_ASSERT(TagRegistrySpelling(scratch, id, &spelled, NULL) &&
+                TagSpanIs("stand.numbers.past", spelled.key, spelled.key_len),
+                "and spells itself by that number");
 out:
     if (built)
         tag_registry_destroy(scratch);

@@ -24,14 +24,15 @@
  * is why a volume could only ever exist in one place. */
 
 // Tag constants
-#define TAGFS_INVALID_TAG_ID        0xFFFF
-/* Volume tag ids stop one short of bit 15. Bit 15 belongs to the kernel's
+#define TAGFS_INVALID_TAG_ID        0xFFFFFFFFu
+/* Volume tag ids stop one short of bit 31. Bit 31 belongs to the kernel's
  * Logbook (core/touch/logbook.h) — the vocabulary of occurrences, which must
  * exist on a machine that never mounted a volume. Capping here is what makes
  * the split an invariant instead of a convention: the volume cannot issue an
- * id that collides with an occurrence even in principle. 32766 distinct tags
- * per volume; the largest volume seen carries ~120. */
-#define TAGFS_MAX_TAG_ID            0x7FFE
+ * id that collides with an occurrence even in principle. What a volume's own
+ * book can carry may be less (TAGFS_V1_TAG_ID_MOST), and its registry issues
+ * no id past that. */
+#define TAGFS_MAX_TAG_ID            0x7FFFFFFEu
 
 // TagRegistryEntry.flags bits.
 //   HAS_VALUE — entry carries a value (bit 0; persisted, value-presence).
@@ -59,8 +60,5 @@
  * A record never crosses a block, so a tag is at most what one block holds. */
 #define TAGFS_REGISTRY_RECORD_HEAD  6
 #define TAGFS_FTABLE_PER_BLOCK      510
-
-// The tag index's table of tags before it first grows
-#define TAGFS_BITMAP_INITIAL_TAG_CAP    64
 
 #endif // TAGFS_CONSTANTS_H

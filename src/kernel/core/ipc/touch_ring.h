@@ -118,11 +118,11 @@ _Static_assert(__builtin_offsetof(TouchRingHeader, owed) == 72,
  * at BOXOS_TOUCH_PAYLOAD_MAX (96 B) — see cabin_layout.h for sizing
  * rationale and the "use Pocket IPC for bulk data" guidance. */
 typedef struct __packed {
-    uint16_t tag_id;                                  /* TouchTag (matches uint16_t typedef in touch.h) */
+    uint32_t tag_id;                                  /* TouchTag (matches the uint32_t typedef in touch.h) */
     uint16_t flags;                                   /* TOUCH_FLAG_KERNEL/USER/TAGFS */
+    uint16_t _reserved;                               /* alignment + future use */
     uint32_t source_pid;                              /* 0 = kernel publisher, else originating pid */
     uint32_t payload_len;                             /* bytes valid in payload[] (≤ BOXOS_TOUCH_PAYLOAD_MAX) */
-    uint32_t _reserved;                               /* alignment + future use */
     uint64_t timestamp_tsc;                           /* TSC at publish, monotonic per core */
     uint8_t  payload[BOXOS_TOUCH_PAYLOAD_MAX];        /* inline payload — Vyukov-gated alongside metadata */
     uint64_t seq;                                     /* Vyukov generation counter (see file header) */
@@ -201,7 +201,7 @@ void KTouchRingInitAt(TouchRing *hdr, uint64_t slots_base, uint32_t slot_count_m
  * silently at BOXOS_TOUCH_PAYLOAD_MAX bytes (caller has already been
  * advised by the API contract to keep events small). */
 bool KTouchPush(process_t *target,
-                uint16_t tag_id, uint16_t flags, uint32_t source_pid,
+                uint32_t tag_id, uint16_t flags, uint32_t source_pid,
                 const void *payload, uint32_t payload_len);
 
 /* True when the slot at the ring's head is published and unconsumed. Turn In

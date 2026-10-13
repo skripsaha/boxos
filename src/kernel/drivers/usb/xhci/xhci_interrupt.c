@@ -31,16 +31,16 @@
  * A comment here used to claim the full id came back invalid for these; it
  * does not, and a subscriber measured on all four distinct ids. Publishing
  * carries both, and TouchPublishIrqPair skips whichever side is invalid. */
-static volatile uint16_t g_xhci_touch_connect_full    = TOUCH_TAG_INVALID;
-static volatile uint16_t g_xhci_touch_connect_bare    = TOUCH_TAG_INVALID;
-static volatile uint16_t g_xhci_touch_disconnect_full = TOUCH_TAG_INVALID;
-static volatile uint16_t g_xhci_touch_disconnect_bare = TOUCH_TAG_INVALID;
+static volatile TouchTag g_xhci_touch_connect_full    = TOUCH_TAG_INVALID;
+static volatile TouchTag g_xhci_touch_connect_bare    = TOUCH_TAG_INVALID;
+static volatile TouchTag g_xhci_touch_disconnect_full = TOUCH_TAG_INVALID;
+static volatile TouchTag g_xhci_touch_disconnect_bare = TOUCH_TAG_INVALID;
 
 /* And two more for the device, as opposed to the socket it is in. */
-static volatile uint16_t g_xhci_touch_arrived_full = TOUCH_TAG_INVALID;
-static volatile uint16_t g_xhci_touch_arrived_bare = TOUCH_TAG_INVALID;
-static volatile uint16_t g_xhci_touch_left_full    = TOUCH_TAG_INVALID;
-static volatile uint16_t g_xhci_touch_left_bare    = TOUCH_TAG_INVALID;
+static volatile TouchTag g_xhci_touch_arrived_full = TOUCH_TAG_INVALID;
+static volatile TouchTag g_xhci_touch_arrived_bare = TOUCH_TAG_INVALID;
+static volatile TouchTag g_xhci_touch_left_full    = TOUCH_TAG_INVALID;
+static volatile TouchTag g_xhci_touch_left_bare    = TOUCH_TAG_INVALID;
 
 /* What an arrival or a departure carries. Sixteen bytes, well inside the
  * bounded payload an IRQ-side publish is allowed, and enough that nothing
@@ -312,8 +312,8 @@ static void xhci_scan_ports(xhci_controller_t* ctrl)
 }
 
 static void xhci_publish_device(const xhci_device_slot_t* slot,
-                                volatile uint16_t* full_cache,
-                                volatile uint16_t* bare_cache)
+                                volatile TouchTag* full_cache,
+                                volatile TouchTag* bare_cache)
 {
     if (!slot) {
         return;

@@ -25,15 +25,16 @@
 #include "op_registry.h"
 
 /* ────────────────────────────────────────────────────────────────────────
- * Two-level bucket index over the 16-bit tag_id space.
- * L1 is always-resident pointer table (256 × 8 = 2 KiB).
- * L2 leaves are lazily kmalloc'd 256-bucket slabs (256 × 64 = 16 KiB ea).
+ * Four-level bucket radix over the 32-bit tag_id space, a byte a level.
+ * The root is an always-resident pointer table (256 × 8 = 2 KiB); every
+ * level below it is lazily kmalloc'd — two levels of 256 pointers, then a
+ * leaf of 256 buckets — and kept once made.
  *
- * Lookup is one ACQUIRE load + offset; lazy alloc uses CAS-install with
- * loser-frees so concurrent first-claims on different ids in the same leaf
- * cooperate without locking the whole index.
+ * Lookup is at most four ACQUIRE loads + offset; lazy alloc uses CAS-install
+ * with loser-frees, a level at a time, so concurrent first-claims on
+ * different ids under the same path cooperate without locking the index.
  * ──────────────────────────────────────────────────────────────────────── */
-static TouchBucket *g_bucket_l1[TOUCH_BUCKET_L1_ENTRIES];
+static void *g_bucket_root[TOUCH_BUCKET_FANOUT];
 
 /* Global subscriber count — coarse gate used by hot publisher pre-checks
  * (storage_ops, write_job) so they skip per-tag snapshot work when no one
@@ -69,53 +70,73 @@ void TouchStatsSnapshot(uint64_t out[5])
 
 void TouchInit(void)
 {
-    memset(g_bucket_l1, 0, sizeof(g_bucket_l1));
+    memset(g_bucket_root, 0, sizeof(g_bucket_root));
     TouchQueueInit();
-    debug_printf("[TOUCH] inverted-index subsystem initialized (L1=%u slots)\n",
-                 TOUCH_BUCKET_L1_ENTRIES);
+    debug_printf("[TOUCH] inverted-index subsystem initialized (root=%u slots)\n",
+                 TOUCH_BUCKET_FANOUT);
 }
 
-/* O(1) lookup; returns NULL when the L2 leaf for this id range has never
- * been allocated (no one has ever subscribed to anything in this 256-id
- * window). Publisher uses this to short-circuit. */
+/* The byte of `tag_id` that picks its entry at `level` (0 = the root). */
+static inline uint32_t touch_bucket_digit(TouchTag tag_id, uint32_t level)
+{
+    return (tag_id >> (24u - 8u * level)) & 0xFFu;
+}
+
+/* O(1) lookup; returns NULL when the path to this id's leaf has never been
+ * made (no one has ever subscribed to anything in its 256-id window).
+ * Publisher uses this to short-circuit. */
 static inline TouchBucket *touch_bucket_lookup(TouchTag tag_id)
 {
     if (tag_id == TOUCH_TAG_INVALID) return NULL;
-    TouchBucket *leaf = __atomic_load_n(&g_bucket_l1[tag_id >> 8],
-                                        __ATOMIC_ACQUIRE);
-    if (!leaf) return NULL;
-    return &leaf[tag_id & 0xFF];
+    void **table = g_bucket_root;
+    for (uint32_t level = 0; level < 3u; level++) {
+        table = __atomic_load_n(&table[touch_bucket_digit(tag_id, level)],
+                                __ATOMIC_ACQUIRE);
+        if (!table) return NULL;
+    }
+    return &((TouchBucket *)table)[tag_id & 0xFFu];
 }
 
-/* Subscribe/register path: allocate the L2 leaf if missing. */
+/* The entry of `table` at `digit`, made when missing: a level of 256 NULL
+ * pointers, or — `leaf` — 256 buckets of the ids under `base`, each with its
+ * lock and its id set before anyone can see it. NULL when there is no memory. */
+static void *touch_bucket_level(void **table, uint32_t digit, bool leaf, TouchTag base)
+{
+    void *next = __atomic_load_n(&table[digit], __ATOMIC_ACQUIRE);
+    if (next) return next;
+
+    size_t bytes = leaf ? sizeof(TouchBucket) * TOUCH_BUCKET_FANOUT
+                        : sizeof(void *) * TOUCH_BUCKET_FANOUT;
+    void *fresh = kmalloc(bytes);
+    if (!fresh) return NULL;
+    memset(fresh, 0, bytes);
+    if (leaf) {
+        TouchBucket *b = fresh;
+        for (uint32_t i = 0; i < TOUCH_BUCKET_FANOUT; i++) {
+            spinlock_init(&b[i].lock);
+            b[i].tag_id = base | i;
+        }
+    }
+    void *expected = NULL;
+    if (!__atomic_compare_exchange_n(&table[digit], &expected, fresh, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        kfree(fresh);
+        return expected;
+    }
+    return fresh;
+}
+
+/* Subscribe/register path: make the path to the id's leaf if missing. */
 static TouchBucket *touch_bucket_get_or_create(TouchTag tag_id)
 {
     if (tag_id == TOUCH_TAG_INVALID) return NULL;
-    uint16_t hi = tag_id >> 8;
-    uint16_t lo = tag_id & 0xFF;
-    TouchBucket *leaf = __atomic_load_n(&g_bucket_l1[hi], __ATOMIC_ACQUIRE);
-    if (!leaf) {
-        TouchBucket *fresh = (TouchBucket *)kmalloc(sizeof(TouchBucket) *
-                                                    TOUCH_BUCKET_L2_ENTRIES);
-        if (!fresh) return NULL;
-        memset(fresh, 0, sizeof(TouchBucket) * TOUCH_BUCKET_L2_ENTRIES);
-        /* Initialize per-bucket lock + record tag_id mirror up-front so the
-         * publish path never sees a half-built bucket. */
-        for (uint32_t i = 0; i < TOUCH_BUCKET_L2_ENTRIES; i++) {
-            spinlock_init(&fresh[i].lock);
-            fresh[i].tag_id = (uint16_t)((hi << 8) | i);
-        }
-        TouchBucket *expected = NULL;
-        if (!__atomic_compare_exchange_n(&g_bucket_l1[hi], &expected, fresh,
-                                         false, __ATOMIC_ACQ_REL,
-                                         __ATOMIC_ACQUIRE)) {
-            kfree(fresh);
-            leaf = expected;
-        } else {
-            leaf = fresh;
-        }
+    void **table = g_bucket_root;
+    for (uint32_t level = 0; level < 3u; level++) {
+        table = touch_bucket_level(table, touch_bucket_digit(tag_id, level),
+                                   level == 2u, tag_id & ~0xFFu);
+        if (!table) return NULL;
     }
-    return &leaf[lo];
+    return &((TouchBucket *)table)[tag_id & 0xFFu];
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -145,7 +166,7 @@ error_t TouchTagResolve(const char *tag, size_t len, TouchTag *out_full, TouchTa
      * underneath it. A name the volume refuses is refused here, by its code:
      * a subscriber must not be handed an id for a shorter or other name. */
     TagSpelling bare = { spelled.key, NULL, spelled.key_len, 0 };
-    uint16_t    id;
+    uint32_t    id;
     rc = TagFSInternSpelling(&bare, &id);
     if (rc != OK) return rc;
     *out_bare = (TouchTag)id;
@@ -329,7 +350,7 @@ static uint64_t touch_emit_payload(process_t *target, TouchTag tag_id,
 
 typedef struct TouchOwed {
     struct TouchOwed *next;
-    uint16_t tag_id;
+    TouchTag tag_id;
     uint16_t flags;
     uint32_t source_pid;
     uint32_t plen;

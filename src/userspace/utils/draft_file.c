@@ -17,7 +17,7 @@
  * The volume — resolving a name, reading it, writing it back.
  * ------------------------------------------------------------------------- */
 
-void tagline_from(uint32_t fid)
+void tagline_from(file_id_t fid)
 {
     file_info_t info;
     s_tagline[0] = '\0';
@@ -55,14 +55,14 @@ char *join_with_commas(const char *const *words, uint32_t count)
  * mean" — and the answers are then held to the filename exactly, because a
  * stem is shared by every extension of it. Returns the count and hands back a
  * malloc'd list the caller frees, or a negative -error_t. */
-int matches_by_name(const char *name, const char *tags, uint32_t **out_ids)
+int matches_by_name(const char *name, const char *tags, file_id_t **out_ids)
 {
     *out_ids = NULL;
 
     if (!tags) {
         int n = find_file_by_name(name, NULL, NULL, 0);
         if (n <= 0) return n;
-        uint32_t *ids = malloc((size_t)n * sizeof(uint32_t));
+        file_id_t *ids = malloc((size_t)n * sizeof(file_id_t));
         if (!ids) return -ERR_NO_MEMORY;
         n = find_file_by_name(name, ids, NULL, (size_t)n);
         if (n <= 0) { free(ids); return n; }
@@ -85,8 +85,8 @@ int matches_by_name(const char *name, const char *tags, uint32_t **out_ids)
     }
     say_str(list, cut + strlen(tags) + 2, tags);
 
-    uint32_t *ids = NULL;
-    int       n   = query_all(list, &ids);
+    file_id_t *ids = NULL;
+    int        n   = query_all(list, &ids);
     free(list);
     if (n <= 0) { free(ids); return n; }
 
@@ -133,16 +133,16 @@ void save_book(void)
     if (!bytes) { no_memory("the gathered draft"); return; }
 
     if (g_fid == 0) {
-        int made = create(s_name, g_tags);
+        int64_t made = create(s_name, g_tags);
         if (made < 0) {
             msg_begin();
             msg_add(s_name);
             msg_add(" could not be created");
-            say_err(s_msg, sizeof(s_msg), made);
+            say_err(s_msg, sizeof(s_msg), (int)made);
             free(bytes);
             return;
         }
-        g_fid = (uint32_t)made;
+        g_fid = (file_id_t)made;
         tagline_from(g_fid);
     }
 

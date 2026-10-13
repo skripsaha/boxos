@@ -4638,6 +4638,16 @@ void Phase18()
     Check(f.has_tag("cxx") && f.has_tag("kind"), "phase18 file.has_tag(key)");
     Check(f.tags().size() >= 2, "phase18 file.tags() lists the tags");
 
+    // ── a file id rides the wire in 64 bits, never cut to 32 ─────────────
+    {
+        file wide((file_id_t{1} << 32) | f.id());
+        box::result<file_info_t> wi = wide.info();
+        Check(!wi.has_value() && wi.error().code() == box::errc::file_not_found,
+              "phase18 the id 2^32 past this file names no file — not this one, cut to 32 bits");
+        char one = 0;
+        Check(!wide.read_at(0, &one, 1).has_value(), "phase18 and reads as no file either");
+    }
+
     // ── random-access byte I/O bound to this file_id (result<size_t>) ───
     const char msg[] = "hello tagfs stream";
     box::result<std::size_t> wrote = f.write_at(0, msg, sizeof(msg));
@@ -4756,7 +4766,7 @@ void Phase19()
 {
     using box::tagfs::file;
 
-    auto results_have = [](const std::vector<file> &v, std::uint32_t id) {
+    auto results_have = [](const std::vector<file> &v, file_id_t id) {
         for (const file &f : v)
             if (f.id() == id) return true;
         return false;
@@ -4962,7 +4972,7 @@ void Phase20()
 // ── Ф16b: box::manifest / box::crate / compiled_manifest / mf_call1 ───────────
 // Exercised against a read-only storage query (DECK_STORAGE, TAG_QUERY 0x01):
 // in == none lists every file; the kernel writes [u32 delivered][u32 total]
-// [u32 ids...] into the output crate. The image always holds files, so this
+// [u64 ids...] into the output crate. The image always holds files, so this
 // is deterministic.
 void Phase21()
 {
@@ -10488,7 +10498,7 @@ void Phase55()
                "— record / typed-tag / anchor_all checks skipped\n",
                static_cast<int>(why.size()), why.data());
     } else {
-        std::uint32_t A = made->id();
+        file_id_t A = made->id();
 
         // (1) record — a metadata snapshot that does NOT re-read the kernel ──
         box::result<record> r = box::tagfs::find("p55:recA");
@@ -10644,13 +10654,13 @@ void Phase56()
 // in every send (the after_ms>0 PIT path is a separate deferred hazard).
 void Phase57()
 {
-    // SYSTEM_OP_TOUCH_SEND params for a forward to `to`: [u16 full][u16 bare][u32 after=0].
-    auto send_params = [](const box::tag &to, std::byte p[8]) {
-        std::uint16_t f = to.pair().full, b = to.pair().bare;
+    // SYSTEM_OP_TOUCH_SEND params for a forward to `to`: [u32 full][u32 bare][u32 after=0].
+    auto send_params = [](const box::tag &to, std::byte p[12]) {
+        TouchTag      f = to.pair().full, b = to.pair().bare;
         std::uint32_t after = 0;
-        __builtin_memcpy(p + 0, &f, 2);
-        __builtin_memcpy(p + 2, &b, 2);
-        __builtin_memcpy(p + 4, &after, 4);
+        __builtin_memcpy(p + 0, &f, 4);
+        __builtin_memcpy(p + 4, &b, 4);
+        __builtin_memcpy(p + 8, &after, 4);
     };
 
     // ── step6 — A(REACT) forwards to B(REST): the non-Unix proof ──────────────
@@ -10664,10 +10674,10 @@ void Phase57()
               "phase57 step6 tags interned");
 
         box::manifest<> prog;
-        std::byte pB[8];
+        std::byte pB[12];
         send_params(B, pB);
         prog.op(DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, box::no_crate, box::no_crate,
-                std::span<const std::byte>(pB, 8));
+                std::span<const std::byte>(pB, 12));
         box::compiled_manifest card(prog);
         Check((bool)card, "phase57 step6 manifest compiled");
 
@@ -10706,13 +10716,13 @@ void Phase57()
               "phase57 step7 tags interned");
 
         box::manifest<> prog;
-        std::byte pB[8], pA[8];
+        std::byte pB[12], pA[12];
         send_params(B, pB);  // op0 — observable forward to B
         send_params(A, pA);  // op1 — self re-trigger of A
         prog.op(DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, box::no_crate, box::no_crate,
-                std::span<const std::byte>(pB, 8));
+                std::span<const std::byte>(pB, 12));
         prog.op(DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, box::no_crate, box::no_crate,
-                std::span<const std::byte>(pA, 8));
+                std::span<const std::byte>(pA, 12));
         box::compiled_manifest card(prog);
         Check((bool)card, "phase57 step7 cyclic manifest compiled");
 
@@ -10767,10 +10777,10 @@ void Phase57()
 
             for (int k = 0; k < 256; ++k) {
                 box::manifest<> c;
-                std::byte ps[8];
+                std::byte ps[12];
                 send_params(sink, ps);
                 c.op(DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, box::no_crate, box::no_crate,
-                     std::span<const std::byte>(ps, 8));
+                     std::span<const std::byte>(ps, 12));
                 box::compiled_manifest cm(c);
                 box::reflex rx(A, std::move(cm));  // ctor claim / dtor release race
                 if (rx) ++bound;
@@ -42549,7 +42559,7 @@ void Phase185()
 
 void P36Erase(const char *name)
 {
-    uint32_t    ids[4];
+    file_id_t   ids[4];
     file_info_t infos[4];
     int n = ::find_file_by_name(name, ids, infos, 4);
     if (n > 4) n = 4;
@@ -42558,7 +42568,7 @@ void P36Erase(const char *name)
 
 long long P36Size(const char *name)
 {
-    uint32_t    ids[1];
+    file_id_t   ids[1];
     file_info_t infos[1];
     if (::find_file_by_name(name, ids, infos, 1) <= 0) return -1;
     return (long long)infos[0].size;
@@ -42566,7 +42576,7 @@ long long P36Size(const char *name)
 
 std::string P36Read(const char *name)
 {
-    uint32_t    ids[1];
+    file_id_t   ids[1];
     file_info_t infos[1];
     if (::find_file_by_name(name, ids, infos, 1) <= 0) return std::string();
     std::string s;
@@ -42578,8 +42588,8 @@ std::string P36Read(const char *name)
 void P36Put(const char *name, std::string_view bytes)
 {
     P36Erase(name);
-    int fid = ::create(name, "");
-    if (fid > 0 && !bytes.empty()) ::fwrite((uint32_t)fid, 0, bytes.data(), bytes.size());
+    std::int64_t fid = ::create(name, "");
+    if (fid > 0 && !bytes.empty()) ::fwrite((file_id_t)fid, 0, bytes.data(), bytes.size());
 }
 
 // One filebuf::open attempt, reported as a bool. Used for the rows Table 122
@@ -48174,7 +48184,7 @@ void Phase211()
         }
         // The same file, seen through the TagFS name it was created under —
         // the whole point of fopen mapping to a "file:" Current.
-        std::uint32_t ids[1];
+        file_id_t     ids[1];
         file_info_t   infos[1];
         Check(::find_file_by_name("cstdio-probe", ids, infos, 1) > 0,
               "phase211 the file fopen made is a TagFS file the system can see");

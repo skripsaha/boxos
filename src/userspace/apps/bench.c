@@ -517,19 +517,19 @@ static int b_file_cycle(uint32_t i, void *ctx)
         name[p++] = rev[--rl];
     name[p] = '\0';
 
-    int file_id = create(name, "");
+    int64_t file_id = create(name, "");
     if (file_id < 0)
-        return file_id;
+        return (int)file_id;
 
     static const uint8_t payload[64] = {0};
-    int wrc = fwrite((uint32_t)file_id, 0, payload, sizeof(payload));
+    int wrc = fwrite((file_id_t)file_id, 0, payload, sizeof(payload));
     if (wrc < 0)
     {
-        delete((uint32_t)file_id);
+        delete((file_id_t)file_id);
         return wrc;
     }
 
-    int drc = delete((uint32_t)file_id);
+    int drc = delete((file_id_t)file_id);
     if (drc < 0)
         return drc;
     return 0;

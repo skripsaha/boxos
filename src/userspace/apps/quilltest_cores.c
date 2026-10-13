@@ -144,9 +144,9 @@ QuillVerdict QuillWriter(const char *const *args)
     uint64_t  least = 0;
     uint64_t  most  = QuillWriterMost(rounds, &least);
     uint64_t *buf   = malloc((most + 7) & ~7ull);
-    int       fid   = buf ? QuillCreate(name) : 0;
+    int64_t   fid   = buf ? QuillCreate(name) : 0;
     if (fid <= 0) {
-        printf("[QUILL] writer: FAIL — %s: a buffer of %llu bytes %s, and the file answered %d\n",
+        printf("[QUILL] writer: FAIL — %s: a buffer of %llu bytes %s, and the file answered %ld\n",
                name, (unsigned long long)most, buf ? "was had" : "was not had", fid);
         return QUILL_FAIL;
     }
@@ -155,15 +155,15 @@ QuillVerdict QuillWriter(const char *const *args)
         uint64_t size = QuillWriterSize(i, r);
         uint32_t seed = QuillWriterSeed(i, r);
         QuillFill(buf, seed, 0, (size + 7) & ~7ull);
-        uint64_t was  = QuillSize((uint32_t)fid);
-        int      cut  = size < was ? file_span((uint32_t)fid, size, 0) : 0;
-        int64_t  put  = cut == 0 ? fwrite((uint32_t)fid, 0, buf, size) : 0;
-        uint64_t now  = QuillSize((uint32_t)fid);
+        uint64_t was  = QuillSize((file_id_t)fid);
+        int      cut  = size < was ? file_span((file_id_t)fid, size, 0) : 0;
+        int64_t  put  = cut == 0 ? fwrite((file_id_t)fid, 0, buf, size) : 0;
+        uint64_t now  = QuillSize((file_id_t)fid);
         int64_t  rerr = 0;
         uint64_t good = put == (int64_t)size && now == size
-                            ? QuillReadBack((uint32_t)fid, seed, size, &rerr) : 0;
+                            ? QuillReadBack((file_id_t)fid, seed, size, &rerr) : 0;
         if (good != size) {
-            printf("[QUILL] writer: FAIL — %s (fid %d) round %u: %llu bytes over %llu, the cut "
+            printf("[QUILL] writer: FAIL — %s (fid %ld) round %u: %llu bytes over %llu, the cut "
                    "answered %d and the write %lld; the file holds %llu bytes, read back good to "
                    "byte %llu (read answer %lld)\n", name, fid, r, (unsigned long long)size,
                    (unsigned long long)was, cut, (long long)put, (unsigned long long)now,
@@ -172,7 +172,7 @@ QuillVerdict QuillWriter(const char *const *args)
         }
     }
     uint32_t last = rounds - 1;
-    printf("[QUILL] writer: PASS — %s (fid %d) holds %llu bytes of stream %u after %u rounds, "
+    printf("[QUILL] writer: PASS — %s (fid %ld) holds %llu bytes of stream %u after %u rounds, "
            "each read back whole\n", name, fid, (unsigned long long)QuillWriterSize(i, last),
            QuillWriterSeed(i, last), rounds);
     return QUILL_PASS;
@@ -231,7 +231,7 @@ QuillVerdict QuillWritersBack(const char *const *args)
     uint64_t total = 0;
     for (uint32_t i = 0; i < count; i++) {
         char     name[QUILL_NAME_CAP];
-        uint32_t ids[4];
+        file_id_t ids[4];
         QuillIndexedName(name, QUILL_WRITERS_STEM, i);
         int      n    = QuillFindEverywhere(name, ids, 4);
         uint64_t size = QuillWriterSize(i, rounds - 1);
@@ -288,7 +288,7 @@ typedef struct {
 
 typedef struct {
     volatile uint32_t  stop;
-    volatile uint32_t  fid;
+    volatile file_id_t fid;
     volatile uint32_t  made[QUILL_APPEND_WRITERS];
     volatile int32_t   refusal[QUILL_APPEND_WRITERS];
     volatile uint32_t  spans;
@@ -324,14 +324,14 @@ static void QuillAppendMake(uint64_t *buf, uint32_t w, uint32_t k, uint32_t len)
 
 /* One write at the file's size (STORAGE_WRITE_APPEND): the bytes the file
  * holds of it, or a refusal; *size the size it left. */
-static int64_t QuillAppendOnce(uint32_t fid, const void *buf, uint32_t len, uint64_t *size)
+static int64_t QuillAppendOnce(file_id_t fid, const void *buf, uint32_t len, uint64_t *size)
 {
-    uint8_t  params[16];
+    uint8_t  params[20];
     uint64_t offset = 0;
     uint32_t flags  = STORAGE_WRITE_APPEND;
-    memcpy(params, &fid, 4);
-    memcpy(params + 4, &offset, 8);
-    memcpy(params + 12, &flags, 4);
+    memcpy(params, &fid, 8);
+    memcpy(params + 8, &offset, 8);
+    memcpy(params + 16, &flags, 4);
     uint8_t  out[16] = { 0 };
     uint32_t got     = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_WRITE, params, sizeof(params), buf, len, out,
@@ -373,7 +373,7 @@ QuillVerdict QuillAppender(const char *const *args)
         return QUILL_FAIL;
     }
     TouchTagPair pair = touch_intern(QUILL_APPEND_BOARD);
-    uint32_t     fid  = board->fid;
+    file_id_t    fid  = board->fid;
     int64_t      got  = 0;
     uint64_t     size = 0;
     uint32_t     k    = 0;
@@ -398,7 +398,7 @@ QuillVerdict QuillAppender(const char *const *args)
                (long long)got, (unsigned long long)size, k);
         return QUILL_FAIL;
     }
-    printf("[QUILL] appender: PASS — appender %u made %u appends to fid %u, each answered whole "
+    printf("[QUILL] appender: PASS — appender %u made %u appends to fid %lu, each answered whole "
            "with where it landed\n", w, records, fid);
     return QUILL_PASS;
 }
@@ -415,7 +415,7 @@ QuillVerdict QuillSpanner(const char *const *args)
     TouchTagPair pair  = touch_intern(QUILL_APPEND_BOARD);
     TouchTag     heard = touch_pair_choose(pair);
     int          crc   = heard != TOUCH_TAG_INVALID ? touch_claim(heard, TOUCH_REST, 0, 0) : -1;
-    uint32_t     fid   = board->fid;
+    file_id_t    fid   = board->fid;
     int          rc    = 0;
     while (crc == 0 && !__atomic_load_n(&board->stop, __ATOMIC_ACQUIRE)) {
         Touch said;
@@ -440,7 +440,7 @@ QuillVerdict QuillSpanner(const char *const *args)
                "%d\n", crc, spans + 1, rc);
         return QUILL_FAIL;
     }
-    printf("[QUILL] spanner: PASS — %u spans of fid %u, each answered\n", spans, fid);
+    printf("[QUILL] spanner: PASS — %u spans of fid %lu, each answered\n", spans, fid);
     return QUILL_PASS;
 }
 
@@ -568,26 +568,26 @@ QuillVerdict QuillAppend(const char *const *args)
     if (!QuillAppendArgs(args, &writers, &records, &spanners))
         return QUILL_FAIL;
     QuillAppendBoard *board = bay_open(QUILL_APPEND_BOARD, sizeof(QuillAppendBoard), BAY_CREATE);
-    int               fid   = board ? QuillCreate(QUILL_APPEND_NAME) : 0;
+    int64_t           fid   = board ? QuillCreate(QUILL_APPEND_NAME) : 0;
     if (fid <= 0) {
-        printf("[QUILL] append: FAIL — its board %s, and %s answered %d\n",
+        printf("[QUILL] append: FAIL — its board %s, and %s answered %ld\n",
                board ? "opened" : "would not open", QUILL_APPEND_NAME, fid);
         if (board)
             bay_release(board);
         return QUILL_FAIL;
     }
     memset((void *)board, 0, sizeof(*board));
-    board->fid = (uint32_t)fid;
+    board->fid = (file_id_t)fid;
     TouchTagPair pair = touch_intern(QUILL_APPEND_BOARD);
 
     uint32_t failed  = 0;
     uint32_t started = QuillAppendRun(board, pair, writers, records, spanners, &failed);
-    uint64_t size    = QuillSize((uint32_t)fid);
+    uint64_t size    = QuillSize((file_id_t)fid);
     uint8_t *file    = size ? bay_open("quilltest:append:read", size, BAY_CREATE) : NULL;
     int64_t  rerr    = 0;
     for (uint64_t at = 0; file && at < size && rerr >= 0; at += (1u << 20)) {
         uint64_t n = size - at < (1u << 20) ? size - at : (1u << 20);
-        rerr = fread((uint32_t)fid, at, file + at, n);
+        rerr = fread((file_id_t)fid, at, file + at, n);
         if (rerr >= 0 && (uint64_t)rerr != n)
             rerr = -1;
     }

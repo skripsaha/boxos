@@ -60,7 +60,7 @@ FileRecord* FileRecordOf(const TagFSMetadata* meta)
     uint32_t extents  = meta->extents ? meta->extent_count : 0;
     uint32_t name_len = meta->filename ? (uint32_t)strlen(meta->filename) : 0;
     size_t   bytes    = sizeof(FileRecord) + (size_t)extents * sizeof(Strip) +
-                        (size_t)tags * sizeof(uint16_t) + name_len + 1;
+                        (size_t)tags * sizeof(uint32_t) + name_len + 1;
 
     FileRecord* rec = kmalloc(bytes);
     if (!rec)
@@ -85,10 +85,10 @@ FileRecord* FileRecordOf(const TagFSMetadata* meta)
         memcpy(at, meta->extents, (size_t)extents * sizeof(Strip));
     at += (size_t)extents * sizeof(Strip);
 
-    rec->tags = (const uint16_t*)at;
+    rec->tags = (const uint32_t*)at;
     if (tags)
-        memcpy(at, meta->tag_ids, (size_t)tags * sizeof(uint16_t));
-    at += (size_t)tags * sizeof(uint16_t);
+        memcpy(at, meta->tag_ids, (size_t)tags * sizeof(uint32_t));
+    at += (size_t)tags * sizeof(uint32_t);
 
     rec->name = (const char*)at;
     if (name_len)
@@ -113,10 +113,10 @@ int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
     out->modified_time = rec->modified_time;
 
     if (rec->tag_count) {
-        out->tag_ids = kmalloc(sizeof(uint16_t) * rec->tag_count);
+        out->tag_ids = kmalloc(sizeof(uint32_t) * rec->tag_count);
         if (!out->tag_ids)
             goto refused;
-        memcpy(out->tag_ids, rec->tags, sizeof(uint16_t) * rec->tag_count);
+        memcpy(out->tag_ids, rec->tags, sizeof(uint32_t) * rec->tag_count);
         out->tag_count = rec->tag_count;
     }
     if (rec->extent_count) {

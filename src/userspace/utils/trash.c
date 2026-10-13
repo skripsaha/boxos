@@ -13,7 +13,7 @@ int main(void) {
         return 1;
     }
 
-    uint32_t matches[16];
+    file_id_t matches[16];
     int count = find_file_by_name(luggage_word(1), matches, NULL, 16);
 
     if (count <= 0) { println("Error: File not found"); exit(1); return 1; }

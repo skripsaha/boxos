@@ -53,7 +53,7 @@ struct Current {
     bool           closed;      /* writer announced close                        */
 
     /* file (TagFS) backing */
-    uint32_t       file_id;
+    file_id_t      file_id;
     uint64_t       file_pos;
 
     /* log (kernel ring) backing, reader end */
@@ -231,15 +231,15 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
 
     case CurFile: {
         if (!name || name[0] == '\0') { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
-        uint32_t    ids[4];
+        file_id_t   ids[4];
         file_info_t infos[4];
         int n = find_file_by_name(name, ids, infos, 4);
         if (n > 0) {
             c->file_id = ids[0];
         } else if ((role & CURRENT_WRITE) && (flags & CURRENT_CREATE)) {
-            int fid = create(name, "");
-            if (fid < 0) { free(c); CUR_FAIL(box_errno_of(fid)); }
-            c->file_id = (uint32_t)fid;
+            int64_t fid = create(name, "");
+            if (fid < 0) { free(c); CUR_FAIL(box_errno_of((int)fid)); }
+            c->file_id = (file_id_t)fid;
         } else {
             /* read of a missing file, or write w/o CREATE */
             free(c); CUR_FAIL(ERR_FILE_NOT_FOUND);

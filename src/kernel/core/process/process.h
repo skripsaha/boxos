@@ -508,7 +508,7 @@ void process_test(void);
 void process_start_initial(process_t *proc);
 
 bool process_has_tag(process_t *proc, const char *tag);
-bool process_has_tag_id(process_t *proc, uint16_t tag_id);
+bool process_has_tag_id(process_t *proc, uint32_t tag_id);
 /* OK, or why the process does not wear the tag: a text that does not spell
  * (tag_spelling.h), the volume's refusal of a number, no volume for an
  * ordinary tag, or ERR_TAG_OVERFLOW_FAILED. */

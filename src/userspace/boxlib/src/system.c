@@ -495,7 +495,7 @@ int system_core_usage(uint32_t core_index, system_core_usage_t *out)
  *  Filesystem maintenance / telemetry
  * ========================================================================= */
 
-int defrag(uint32_t file_id)
+int defrag(file_id_t file_id)
 {
     uint32_t score = 0;
     int rc = MfCall1(DECK_SYSTEM, SYS_DEFRAG,

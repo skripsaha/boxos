@@ -93,8 +93,8 @@ static bool StandUseOnMedium(UseText** out_text)
  * the numbers are the volume's to give to what wears a tag, and a context
  * wears nothing. Counted tag by tag rather than off the registry's next
  * number, which any program's intern may move while this runs. It used to
- * intern every tag, so a person's `use` spent the volume's 32766 lifetime
- * numbers and wrote each into its book. */
+ * intern every tag, so a person's `use` spent the volume's lifetime numbers
+ * and wrote each into its book. */
 static TestResult TestStandUseLooksUpOnly(void)
 {
     TestResult verdict = TEST_PASS;
@@ -198,11 +198,11 @@ out:
 // ----------------------------------------------------------------------------
 
 /* A strand whose cabin wears exactly one tag, known to no process table. */
-static process_t* StandUseStrand(uint16_t tag_id, cabin_t** out_cabin)
+static process_t* StandUseStrand(uint32_t tag_id, cabin_t** out_cabin)
 {
     cabin_t*   cabin = kmalloc(sizeof(cabin_t));
     process_t* proc  = kmalloc(sizeof(process_t));
-    uint16_t*  over  = tag_id < 64 ? NULL : kmalloc(sizeof(uint16_t));
+    uint32_t*  over  = tag_id < 64 ? NULL : kmalloc(sizeof(uint32_t));
     if (!cabin || !proc || (tag_id >= 64 && !over)) {
         kfree(cabin);
         kfree(proc);
@@ -225,7 +225,7 @@ static process_t* StandUseStrand(uint16_t tag_id, cabin_t** out_cabin)
 }
 
 /* The strand's cabin made to wear its one tag, or nothing. */
-static void StandUseWear(cabin_t* cabin, uint16_t tag_id, bool wear)
+static void StandUseWear(cabin_t* cabin, uint32_t tag_id, bool wear)
 {
     if (tag_id < 64) cabin->tag_bits = wear ? (uint64_t)1 << tag_id : 0;
     else             cabin->tag_overflow_count = wear ? 1u : 0u;
@@ -259,7 +259,7 @@ static TestResult TestStandUseVerdictIsOneCompare(void)
     size_t      len     = 0;
     bool        answer  = false;
     TagSpelling system  = TagSpellingOfKey("system");
-    uint16_t    id      = TagFSLookupSpelling(&system);
+    uint32_t    id      = TagFSLookupSpelling(&system);
 
     TEST_ASSERT(id != TAGFS_INVALID_TAG_ID, "the volume knows the system tag");
     proc = StandUseStrand(id, &cabin);

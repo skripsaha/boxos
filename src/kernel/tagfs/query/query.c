@@ -40,8 +40,8 @@ static bool PageTake(TagFSPage* page, uint64_t* out, uint32_t room, bool want_to
 /* The trashed and the hidden are left out of an answer unless the question
  * names them — plainly, or through a wildcard of their key: the tags to leave
  * out, and how many. */
-static uint32_t QueryHides(const uint16_t* tag_ids, uint32_t tag_count,
-                           const TagIdList* groups, uint32_t group_count, uint16_t hide[2])
+static uint32_t QueryHides(const uint32_t* tag_ids, uint32_t tag_count,
+                           const TagIdList* groups, uint32_t group_count, uint32_t hide[2])
 {
     const WellKnownTags* wk      = tagfs_get_well_known_tags();
     bool                 trashed = false;
@@ -76,7 +76,7 @@ static void ListPageInside(uint64_t from, uint64_t* out, uint32_t room, bool wan
                            TagFSPage* page)
 {
     TagFSState* fs = tagfs_get_state();
-    uint16_t    hide[2];
+    uint32_t    hide[2];
     uint32_t    hides = QueryHides(NULL, 0, NULL, 0, hide);
     uint64_t    batch[QUERY_BATCH];
     uint64_t    at = from ? from : 1;
@@ -124,7 +124,7 @@ static error_t QueryPageInside(const TagSpelling* tags, uint32_t count, uint64_t
     /* A wildcard's ids are copies (TagRegistryKeyIds): the registry frees its
      * own array of a key when the key's next tag outgrows it, and that can
      * happen on another core while this query reads. */
-    uint16_t*  tag_ids = kmalloc(sizeof(uint16_t) * count);
+    uint32_t*  tag_ids = kmalloc(sizeof(uint32_t) * count);
     TagIdList* groups  = kmalloc(sizeof(TagIdList) * count);
     if (!tag_ids || !groups) {
         rc = ERR_NO_MEMORY;
@@ -142,14 +142,14 @@ static error_t QueryPageInside(const TagSpelling* tags, uint32_t count, uint64_t
                 goto out;               /* a key no tag has: no file wears one */
             group_count++;
         } else {
-            uint16_t tid = TagRegistryLookup(fs->registry, &tags[i]);
+            uint32_t tid = TagRegistryLookup(fs->registry, &tags[i]);
             if (tid == TAGFS_INVALID_TAG_ID)
                 goto out;               /* a tag the registry has not: no file wears it */
             tag_ids[tag_count++] = tid;
         }
     }
 
-    uint16_t hide[2];
+    uint32_t hide[2];
     uint32_t hides = QueryHides(tag_ids, tag_count, groups, group_count, hide);
     if (TagBitmapQueryPage(fs->bitmap_index, tag_ids, tag_count, groups, group_count,
                            hide, hides, from, out, room, want_total, page) != 0)

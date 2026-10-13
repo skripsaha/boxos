@@ -138,14 +138,14 @@ static bool test_sys_tag_check_negative(void)
 
 static bool test_storage_query(void)
 {
-    uint32_t ids[64];
+    file_id_t ids[64];
     int n = query(NULL, ids, 64);
     return n > 0 && n <= 64;
 }
 
 static bool test_storage_getinfo(void)
 {
-    uint32_t ids[64];
+    file_id_t ids[64];
     int n = query(NULL, ids, 64);
     if (n <= 0) return false;
     /* Just take the first id and check we can pull metadata. */

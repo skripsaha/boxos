@@ -279,7 +279,7 @@ error_t IntegrityInit(void) {
 
     /* Rot is named from here on, each block once for this mount, on the tag
      * its watchers listen to (integrity_rot.c). */
-    uint16_t tag = TAGFS_INVALID_TAG_ID;
+    uint32_t tag = TAGFS_INVALID_TAG_ID;
     if (fs->registry) {
         TagSpelling integrity = TagSpellingOfKey("integrity");
         if (TagRegistryIntern(fs->registry, &integrity, &tag) != OK)

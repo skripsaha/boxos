@@ -111,13 +111,13 @@ void    InkRoomLetGo(Plot* p);
  * off (TAGFS_INVALID_TAG_ID for neither). A tag of key system, boot or god
  * goes on — a name's tag too — or comes off only with the warrant. OK — a
  * change that changes nothing is OK with no Ink — or the refusal. */
-error_t InkFields(uint64_t fid, const char* name, uint16_t add, uint16_t drop, InkWarrant warrant,
+error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
                   InkReceipt* out);
 
 /* A new file named `name`, wearing the `count` tags in `tags` (the name's
  * first, no two alike). OK and its id, or the refusal with no file made and no
  * trace of one — the id it would have taken is taken by the next. */
-error_t InkNew(const char* name, const uint16_t* tags, uint32_t count, uint64_t* out_fid,
+error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t* out_fid,
                InkReceipt* out);
 
 /* The file given up: a Quitclaim laid for it, its extents to Fallow, and it
@@ -163,10 +163,10 @@ error_t InkNameStem(const char* name, TagSpelling* out);
  * interned, and on the medium before any file wears it: OK and the id
  * (TAGFS_INVALID_TAG_ID for a name with no stem), or the registry's refusal.
  * With no TagFS lock held: a new tag is written to the medium. */
-error_t InkNameTagIntern(const char* name, uint16_t* out_tag);
+error_t InkNameTagIntern(const char* name, uint32_t* out_tag);
 
 /* The tag a name gives, when the registry already has it; else invalid. */
-uint16_t InkNameTagLookup(const char* name);
+uint32_t InkNameTagLookup(const char* name);
 
 /* The one guard of a change to a file (see above), asked with the tags the file
  * wears, the runs it names and the caller's warrant: OK, ERR_DEVICE_NOT_READY
@@ -175,14 +175,14 @@ uint16_t InkNameTagLookup(const char* name);
  * protected, or ERR_PERMISSION_DENIED — said — for a file the system keeps and
  * a caller with no warrant, and for the kernel the loader reads by its blocks
  * and any caller. */
-error_t  InkMayChange(uint64_t fid, const uint16_t* tags, uint32_t tag_count,
+error_t  InkMayChange(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
                       const Strip* runs, uint32_t run_count, InkWarrant warrant);
 
 /* The guard's two questions on their own, for a mover of blocks that asks them
  * whatever the warrant (PlotGather): whether any of the tags has the key
  * system, boot or god, and whether any of the runs holds a block of the kernel
  * the Deed points the loader at. */
-bool     InkWearsGuarded(const uint16_t* tags, uint32_t count);
+bool     InkWearsGuarded(const uint32_t* tags, uint32_t count);
 bool     InkTouchesBoot(const Strip* runs, uint32_t count);
 
 #endif /* TAGFS_INK_H */

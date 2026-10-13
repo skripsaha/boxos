@@ -37,8 +37,8 @@ static keyboard_state_t kb_state = {0};
  * Until keyboard_init has run, both handles read as TOUCH_TAG_INVALID and
  * TouchPublishIrqPair becomes a no-op — early-boot IRQ fires (if any) are
  * silently discarded rather than touching the registry from IRQ context. */
-static volatile uint16_t g_kbd_touch_full = TOUCH_TAG_INVALID;
-static volatile uint16_t g_kbd_touch_bare = TOUCH_TAG_INVALID;
+static volatile TouchTag g_kbd_touch_full = TOUCH_TAG_INVALID;
+static volatile TouchTag g_kbd_touch_bare = TOUCH_TAG_INVALID;
 
 /* ─── Prefix state (0xE0 extended, 0xE1 Pause) — ONE SLOT PER CORE ────────
  *
