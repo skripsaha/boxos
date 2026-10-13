@@ -3,7 +3,7 @@
 
 /*
  * TagFS on-disk structures needed at boot time.
- * Must match kernel's tagfs.h and create_tagfs.c exactly.
+ * Must match kernel's tagfs.h and create_tagfs_v1.h exactly.
  * No kernel headers included — standalone for UEFI environment.
  */
 
@@ -16,7 +16,7 @@
 #include "volume_ledger.h"
 
 /* =========================================================================
- * Constants (must match tagfs.h / create_tagfs.c)
+ * Constants (must match tagfs.h / create_tagfs_v1.h)
  * ========================================================================= */
 
 #define TAGFS_REGISTRY_MAGIC     0x54524547U   /* "TREG" */
@@ -53,7 +53,7 @@
 #define TAGFS_TAG_FLAG_HAS_VALUE  0x01U
 #define TAGFS_TAG_FLAG_SYSTEM     0x02U
 
-/* Metadata record header layout (must match pack_metadata_record in create_tagfs.c):
+/* Metadata record header layout (must match pack_metadata_record in create_tagfs_v1.c):
  *   uint16_t record_len     +0
  *   uint32_t file_id        +2
  *   uint32_t flags          +6

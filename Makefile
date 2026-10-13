@@ -886,21 +886,27 @@ $(BUILDDIR):
 # platform rebuild is handled by prerequisites, not an in-body guard.
 TAGFS_OS_SIGNATURE = $(BUILDDIR)/.tagfs_host_os.$(UNAME_S).$(UNAME_M)
 
-# Prerequisites — the .c source, every shared header it includes, and the OS
-# signature — decide WHEN this recipe runs, so the compile is unconditional.
-# No in-body skip guard: that previously kept a stale tool after a
-# create_tagfs.c / tagfs_reserved.h edit, which silently formats a divergent
-# on-disk tag-id layout (the new kernel then panics: reserved vocab not 0..11).
-# The pen and the plate are on the list for the same reason: a Deed stamp or a
-# verdict changed in its header without `make clean` left the old tool writing
-# the old bytes.
-$(TAGFS_TOOL): tools/create_tagfs.c $(SRCDIR)/include/tagfs_reserved.h \
+# Prerequisites — every .c the tool is made of, every header they include, its
+# own and the shared ones, and the OS signature — decide WHEN this recipe runs,
+# so the compile is unconditional. No in-body skip guard: that previously kept
+# a stale tool after an edit of its sources or tagfs_reserved.h, which silently
+# formats a divergent on-disk tag-id layout (the new kernel then panics:
+# reserved vocab not 0..11). The pen and the plate are on the list for the same
+# reason: a Deed stamp or a verdict changed in its header without `make clean`
+# left the old tool writing the old bytes. A part of the tool left off this
+# list is the same trap again, so the compile takes its sources FROM the list
+# ($(filter %.c,$^)): a .c that is not here is not in the tool either, and the
+# link says so instead of a stale part going on writing.
+$(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tagfs_cargo.c \
+               tools/create_tagfs_v1.c tools/create_tagfs_v1_pack.c tools/create_tagfs_v2.c \
+               tools/create_tagfs.h tools/create_tagfs_v1.h \
+               $(SRCDIR)/include/tagfs_reserved.h \
                $(SRCDIR)/include/volume_deed.h $(SRCDIR)/include/volume_ledger.h \
                $(SRCDIR)/include/deed_pen.h $(SRCDIR)/include/buildplate_format.h \
                $(SRCDIR)/include/boxos_magic.h \
                $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
 	@echo "Compiling TagFS tool for $(UNAME_S) ($(UNAME_M))..."
-	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $< -Wall -Wextra
+	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $(filter %.c,$^) -Wall -Wextra
 	@echo "TagFS tool built: $@"
 
 # Create OS signature file on first build
@@ -1374,6 +1380,32 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 	    $(ESP_START_SECTOR),$$ESP,ef
 	@echo "  Making the volume on it..."
 	@$(TAGFS_TOOL) $@ $(VOLUME_CONTENT)
+	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.
+	@#
+	@# volume-read is the format's second reader, written apart from the tool
+	@# that writes it. The volume just made goes through its census here, and a
+	@# volume with any finding at all stops the build with the census's own
+	@# words — instead of being found by the first machine that mounts it. The
+	@# failed image does not stay behind to be booted by mistake:
+	@# .DELETE_ON_ERROR takes it.
+	@#
+	@# ‼ A NOTE COUNTS TOO. check's exit status is 0 for "consistent", and
+	@# consistent means no damage and no leak (census.py Verdict): a note is
+	@# what a mount forgives on a volume that has lived — a torn ledger copy, a
+	@# drifted count it corrects (POOL_KEPT_DRIFT, LEDGER_FREE_DRIFT). A volume
+	@# that has not lived has nothing to forgive, so on one mkfs has just made
+	@# every note is the writer's mistake: a mkfs that forgets a pool block's
+	@# kept count is a note and exit 0. The bar is the census's own last line
+	@# with all three counts zero; a line that reads otherwise — a finding, or
+	@# the census saying it in other words — fails the build and is shown.
+	@VERDICT=$$(python3 tools/volume-read.py $@ check 2>&1); RC=$$?; \
+	LAST=$$(printf '%s\n' "$$VERDICT" | tail -1); \
+	if [ $$RC -ne 0 ] || [ "$$LAST" != "check: consistent — 0 damage, 0 leak, 0 note" ]; then \
+		printf '%s\n' "$$VERDICT"; \
+		echo "ERROR: tools/volume-read.py check finds the volume create_tagfs just made on $@ not clean (exit $$RC) — a volume nothing has mounted yet carries no finding of any severity"; \
+		exit 1; \
+	fi; \
+	printf '  %s\n' "$$LAST"
 	@echo "Disk image created: $(IMAGE)"
 
 # There is no floppy image and no ISO here any more.

@@ -3,8 +3,8 @@
 /* Single source of the reserved tag vocabulary. List ORDER is the on-disk ID
  * contract: the Nth key formats to tag_id N (0-based). Consumed by the kernel
  * (tagfs.c format-seed + TagFsReservedKeys[]) and the host mkfs tool
- * (tools/create_tagfs.c). Pure preprocessor + string literals — no kernel
- * headers, host-compilable. Keys 0..6 are the auth-privilege tags (see
+ * (tools/create_tagfs_cargo.c). Pure preprocessor + string literals — no
+ * kernel headers, host-compilable. Keys 0..6 are the auth-privilege tags (see
  * TAGFS_AUTH_KEYS below); their op-authority is now a FIXED bit (auth_tags.h),
  * INDEPENDENT of the registry id, so they no longer need to land below id 64. */
 #define TAGFS_RESERVED_KEYS(X) \
