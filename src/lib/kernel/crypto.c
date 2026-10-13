@@ -1,5 +1,7 @@
 #include "crypto.h"
 #include "klib.h"
+#include "cpuid.h"
+#include "volume_book.h"
 
 // ============================================================================
 // CRC32 (ISO 3309 polynomial)
@@ -28,6 +30,52 @@ uint32_t KCrc32Continue(uint32_t crc, const uint8_t *data, uint32_t len)
     }
 
     return ~crc;
+}
+
+// ============================================================================
+// CRC32C (Castagnoli)
+// Used for: every sector of a format-v2 volume's book (volume_book.h)
+// ============================================================================
+
+uint32_t KCrc32c(const uint8_t *data, uint32_t len)
+{
+    return KCrc32cContinue(0, data, len);
+}
+
+/*
+ * The crc32 instruction is spelled here, in asm on general registers, and
+ * nowhere is the compiler told -mcrc32. The kernel is built -mno-sse and does
+ * not ask for SSE4.2 (klib.h, CountSetBits): a compiler allowed crc32 may put
+ * it anywhere, and GCC 15 at -Os does look for bitwise CRC loops to replace
+ * (-foptimize-crc) — every one of them would then #UD on a processor without
+ * it, and qemu64, the desk's plain machine, is one. So the instruction runs
+ * only behind has_sse42, which every core has lowered for itself before it
+ * runs anything (per_core.c, cpu_intersect_features_ap); without it the sum is
+ * the book's table, the one definition there is.
+ *
+ * Each word is taken with __builtin_memcpy: the kernel is built -ffreestanding,
+ * which carries -fno-builtin, so a plain memcpy here stays a call into klib —
+ * its feature checks and its byte loop, once every eight bytes, where the
+ * whole point is one load and one crc32q a cycle. The builtin of a constant
+ * eight is one unaligned mov.
+ */
+uint32_t KCrc32cContinue(uint32_t crc, const uint8_t *data, uint32_t len)
+{
+    uint32_t state = ~crc;
+
+    if (!g_cpu_caps.has_sse42)
+        return ~BookCrc32cOn(state, data, len);
+
+    uint64_t wide = state;
+    for (; len >= 8u; data += 8, len -= 8u) {
+        uint64_t word;
+        __builtin_memcpy(&word, data, sizeof(word));
+        __asm__ ("crc32q %1, %0" : "+r"(wide) : "rm"(word));
+    }
+    state = (uint32_t)wide;
+    for (; len > 0; data++, len--)
+        __asm__ ("crc32b %1, %0" : "+r"(state) : "rm"(*data));
+    return ~state;
 }
 
 // ============================================================================

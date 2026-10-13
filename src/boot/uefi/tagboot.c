@@ -29,8 +29,7 @@
  * and two real boards panicked inside SetVirtualAddressMap with err=0x9.
  */
 
-#include "uefi.h"
-#include "tagfs_boot.h"
+#include "tagboot.h"
 
 /* =========================================================================
  * Boot constants — must match kernel contract
@@ -208,7 +207,7 @@ static void MemZero(void *dst, size_t n)
     while (n--) *p++ = 0;
 }
 
-static void MemCopy(void *dst, const void *src, size_t n)
+void MemCopy(void *dst, const void *src, size_t n)
 {
     uint8_t       *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
@@ -297,7 +296,7 @@ static void Com1Str(const char *s)
  * Buffer is on stack so re-entrant from any context; sized for the
  * longest line we emit (~96 chars after rounding up). Strings longer
  * than the buffer are chunked. */
-static void Print(const char *msg)
+void Print(const char *msg)
 {
     if (!g_st || !g_st->con_out || !msg) return;
 
@@ -330,7 +329,7 @@ static void PrintHex64(uint64_t v)
     Print(buf);
 }
 
-static void PrintDec(uint64_t v)
+void PrintDec(uint64_t v)
 {
     if (v == 0) { Print("0"); return; }
     char buf[21];
@@ -417,12 +416,6 @@ static EFI_BLOCK_IO_PROTOCOL *g_block_io = NULL;
  * Every ReadSectors below is counted from it. */
 static uint64_t g_ground_start   = 0;
 static uint64_t g_ground_sectors = 0;
-
-/* What the Deed said. Filled by DeedRead once the device is chosen. */
-static VolumeLayout g_layout;
-static VolumeBoot   g_boot;
-static uint8_t      g_volume_uuid[16];
-static int          g_have_boot = 0;
 
 #define MBR_TABLE_OFFSET     446U
 #define MBR_ENTRY_BYTES      16U
@@ -557,31 +550,6 @@ static int DeedAt(EFI_BLOCK_IO_PROTOCOL *bio, uint64_t lba, uint32_t want_role,
 
     if (deed.role != want_role) return 0;
     return 1;
-}
-
-/* Walk the stamps for one kind. Returns a pointer into `raw`, or NULL. */
-static const void *DeedStampOf(const uint8_t *raw, uint16_t kind, uint16_t *out_bytes)
-{
-    VolumeDeed deed;
-    MemCopy(&deed, raw, sizeof(deed));
-
-    uint32_t left = deed.stamp_bytes;
-    const uint8_t *p = raw + deed.prologue_bytes;
-
-    while (left >= sizeof(VolumeStamp)) {
-        VolumeStamp st;
-        MemCopy(&st, p, sizeof(st));
-        if (st.bytes > left - sizeof(VolumeStamp)) return NULL;
-
-        if (st.kind == kind) {
-            if (out_bytes) *out_bytes = st.bytes;
-            return p + sizeof(VolumeStamp);
-        }
-        uint32_t step = (sizeof(VolumeStamp) + st.bytes + 3U) & ~3U;
-        if (step > left) return NULL;
-        p += step; left -= step;
-    }
-    return NULL;
 }
 
 /*
@@ -810,43 +778,6 @@ static EFI_STATUS ReadDataBlock(uint32_t block, void *buf)
 {
     uint64_t vlba = ((uint64_t)g_layout.data_block + block) * TAGFS_SECTORS_PER_BLOCK;
     return ReadSectors(vlba, TAGFS_SECTORS_PER_BLOCK, buf);
-}
-
-/* =========================================================================
- * TagFS: what the Deed said
- * ========================================================================= */
-
-/* Take the layout, the identity and (if it carries one) the kernel's position
- * out of the Deed this loader already read while choosing the device. */
-static EFI_STATUS DeedTakeUp(void)
-{
-    VolumeDeed deed;
-    MemCopy(&deed, g_deed_block, sizeof(deed));
-    MemCopy(g_volume_uuid, deed.uuid, 16);
-
-    uint16_t bytes = 0;
-    const VolumeLayout *layout =
-        (const VolumeLayout *)DeedStampOf(g_deed_block, VOLUME_STAMP_LAYOUT, &bytes);
-    if (!layout || bytes < sizeof(VolumeLayout)) {
-        Print("TagBoot: this deed does not say where anything is\r\n");
-        return EFI_UNSUPPORTED;
-    }
-    MemCopy(&g_layout, layout, sizeof(g_layout));
-
-    uint64_t blocks_in_volume = deed.sectors / TAGFS_SECTORS_PER_BLOCK;
-    if (g_layout.data_block == 0 || g_layout.data_blocks == 0 ||
-        (uint64_t)g_layout.data_block + g_layout.data_blocks > blocks_in_volume) {
-        Print("TagBoot: this deed lays out a data run that does not fit inside it\r\n");
-        return EFI_UNSUPPORTED;
-    }
-
-    const VolumeBoot *boot =
-        (const VolumeBoot *)DeedStampOf(g_deed_block, VOLUME_STAMP_BOOT, &bytes);
-    if (boot && bytes >= sizeof(VolumeBoot)) {
-        MemCopy(&g_boot, boot, sizeof(g_boot));
-        g_have_boot = (g_boot.kernel_block != 0 && g_boot.kernel_blocks != 0);
-    }
-    return EFI_SUCCESS;
 }
 
 /* =========================================================================
@@ -3003,13 +2934,8 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     Print("\r\n");
 
     /* ----- 2. Take up the deed the probe already read ----- */
-    status = DeedTakeUp();
+    status = DeedTakeUp(g_deed_block, g_ground_start);
     if (EFI_ERROR(status)) Panic("the volume's deed cannot be read by this loader");
-    Print("TagBoot: volume on ground at sector ");
-    PrintDec(g_ground_start);
-    Print(", data run of ");
-    PrintDec(g_layout.data_blocks);
-    Print(" blocks\r\n");
 
     /* ----- 3. Find kernel file ----- */
 
@@ -3024,10 +2950,13 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
      *
      * So the exact answer is asked for first, and the search is what happens
      * when a volume's Deed carries no boot stamp — an older volume, or one
-     * made by something that did not know to write one.
+     * made by something that did not know to write one — of format v1 only:
+     * the search reads LAYOUT's registry and pool (tagboot.h, g_have_frame).
      */
     if (TagFsBootStamp(&g_kernel_place)) {
         Print("TagBoot: the deed names the kernel\r\n");
+    } else if (g_have_frame) {
+        Panic("this volume's deed names no kernel");
     } else if (!TagFsFindKernelByTags(&g_kernel_place)) {
         Panic("kernel not found — this deed names none and no file carries a boot tag");
     }

@@ -1,6 +1,7 @@
 #include "tests.h"
 #include "../tagfs.h"
 #include "../box_hash/box_hash.h"
+#include "volume_digest.h"
 
 // ============================================================================
 // BoxHash v2 — deterministic integrity and content hashing
@@ -107,12 +108,32 @@ out:
     return verdict;
 }
 
+/* The block digest's known answer (volume_digest.h, VOLUME_DIGEST_GOLDEN_4096):
+ * the golden block under the golden volume's lane 0. volume-read's self-test
+ * holds its own WyHash64 to the same number, so a digest the kernel checks and
+ * a digest a host tool writes are one function, not two that happen to agree. */
+static TestResult test_boxhash_golden(void)
+{
+    TestResult     verdict = TEST_PASS;
+    uint8_t        uuid[16];
+    BoxHashContext c;
+
+    for (int i = 0; i < 16; i++) uuid[i] = (uint8_t)i;
+    BoxHashInit(&c, uuid, 16);
+    for (int i = 0; i < 4096; i++) g_test_buffer[i] = (uint8_t)(i * 13 + 5);
+    TEST_ASSERT_EQ(BoxHashIntegrity(g_test_buffer, 4096, &c), VOLUME_DIGEST_GOLDEN_4096,
+                   "the golden block's digest");
+out:
+    return verdict;
+}
+
 static const TestCase g_boxhash_tests[] = {
     { .name = "boxhash_determinism",     .func = test_boxhash_determinism,     .reach = TEST_READS_ONLY },
     { .name = "boxhash_seed_separation", .func = test_boxhash_seed_separation, .reach = TEST_READS_ONLY },
     { .name = "boxhash_avalanche",       .func = test_boxhash_avalanche,       .reach = TEST_READS_ONLY },
     { .name = "boxhash_sha256_kat",      .func = test_boxhash_sha256_kat,      .reach = TEST_READS_ONLY },
     { .name = "boxhash_sizes",           .func = test_boxhash_sizes,           .reach = TEST_READS_ONLY },
+    { .name = "boxhash_golden",          .func = test_boxhash_golden,          .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_boxhash_suite = {

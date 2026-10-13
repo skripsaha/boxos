@@ -31,6 +31,9 @@ typedef struct {
     bool has_invariant_tsc;     // Invariant TSC
     bool has_xsave;             // XSAVE/XRSTOR support (CPUID.1:ECX[26])
     bool has_avx;               // AVX support (CPUID.1:ECX[28])
+    bool has_sse42;             // SSE4.2 (CPUID.1:ECX[20]) — the crc32 instruction, on general
+                                // registers, that KCrc32c sums the book with. Not required:
+                                // without it KCrc32c takes the table (volume_book.h).
     bool has_avx512;            // AVX-512 Foundation (CPUID.7.0:EBX[16])
     bool has_smep;              // Supervisor Mode Execution Prevention (CPUID.7.0:EBX[7])
     bool has_smap;              // Supervisor Mode Access Prevention (CPUID.7.0:EBX[20])

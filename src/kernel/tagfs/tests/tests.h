@@ -98,6 +98,7 @@ typedef struct {
     SUITE(braid)           \
     SUITE(cow)             \
     SUITE(boxhash)         \
+    SUITE(book)            \
     SUITE(integrity)       \
     SUITE(use_context)     \
     VOLUME_TESTS_ONLY(SUITE(stand)) \

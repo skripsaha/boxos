@@ -344,9 +344,10 @@ def DeedFormatOf(d):
 
 
 def VolumeFrameCheck(d):
-    """VolumeFrameCheck (deed.c), the one rule in the kernel's words: (why, note)
-    for the FRAME a Deed carries — `why` None when it holds, `note` what a
-    FRAME that holds still has to say (a longer one, a ring of fewer slots)."""
+    """VolumeFrameCheck (volume_deed.h), the one rule every reader of a FRAME
+    keeps, in its words: (why, note) for the FRAME a Deed carries — `why` None
+    when it holds, `note` what a FRAME that holds still has to say (a longer
+    one, a ring other than the one this format lays down)."""
     payload = d["stamps"].get(STAMP_FRAME)
     if payload is None or len(payload) < VOLUME_FRAME.size:
         return "it is shorter than a FRAME", None
@@ -367,15 +368,15 @@ def VolumeFrameCheck(d):
         return ("its data run starts at or past the volume's last block, where the far "
                 "copy of the Deed sits"), None
     longer = len(payload) > VOLUME_FRAME.size
-    fewer = f["spine_slots"] < FRAME_SPINE_SLOTS
-    if longer and fewer:
-        return None, ("it is longer than the FRAME this kernel knows and its ring keeps "
-                      "fewer slots than this format lays down — written by a kernel that "
-                      "knows more, or by another maker")
+    other = f["spine_slots"] != FRAME_SPINE_SLOTS
+    if longer and other:
+        return None, ("it is longer than the FRAME this reader knows and its Spine ring is not "
+                      "the one this format lays down — written by a kernel that knows more, "
+                      "or by another maker")
     if longer:
-        return None, "it is longer than the FRAME this kernel knows — written by a kernel that knows more"
-    if fewer:
-        return None, "its ring keeps fewer slots than this format lays down — a volume made by another maker"
+        return None, "it is longer than the FRAME this reader knows — written by a kernel that knows more"
+    if other:
+        return None, "its Spine ring is not the one this format lays down — a volume made by another maker"
     return None, None
 
 

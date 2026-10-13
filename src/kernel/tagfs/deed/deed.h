@@ -131,22 +131,6 @@ typedef enum {
 DeedFormat DeedFormatOf(const DeedCopy *copy);
 
 /*
- * Does a FRAME hold — the one rule every reader of one keeps (the host's
- * volume-read keeps it in the same words). `frame` and `bytes` are the stamp
- * as DeedStamp found it; `tail_sector` is the prologue's, the far copy's place,
- * whose block is the volume's last. NULL when it holds, or the sentence that
- * says why it does not.
- *
- * A FRAME that holds can still be worth a line, and `note` gets it: one
- * longer than this kernel's VolumeFrame was written by a kernel that knows
- * more than this one, and a ring of fewer slots than this format lays down
- * (VOLUME_FRAME_SPINE_SLOTS) is a volume made by another maker. NULL when
- * there is nothing to say.
- */
-const char *VolumeFrameCheck(const void *frame, uint16_t bytes,
-                             uint64_t tail_sector, const char **note);
-
-/*
  * The mount's answer to a Deed of `format`, said out loud: OK for format v1
  * whose LAYOUT this kernel reads whole; for anything else the refusal, before
  * the volume is touched — ERR_UNSUPPORTED for a format-v2 volume that holds
