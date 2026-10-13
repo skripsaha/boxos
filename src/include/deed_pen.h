@@ -12,7 +12,7 @@
  *
  * ‼ WHY THIS EXISTS AT ALL
  *
- * Until now a Deed was built in exactly one place, tools/create_tagfs.c, and
+ * Until now a Deed was built in exactly one place, tools/create_tagfs, and
  * the kernel only ever read one. The moment a volume can GROW, the kernel has
  * to write one too — and a format with two writers in two languages of care is
  * a format that will disagree with itself on the day one of them is changed.

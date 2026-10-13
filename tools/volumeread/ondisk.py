@@ -183,7 +183,7 @@ DISKBOOK_CAPACITY = 512                 # disk_book.h:30
 DISKBOOK_TYPE_REDIRECT = 1              # disk_book.h:33
 DISKBOOK_HEAD_CRC_AT = 32               # disk_book.h:43 DiskBookSuperblock.crc32
 DISKBOOK_ENTRY_CRC_AT = 32              # disk_book.h:62 DiskBookEntry.record_crc32
-# Head, its copy, then the records (create_tagfs.c compute_layout, disk_book.c DiskBookPartAt).
+# Head, its copy, then the records (create_tagfs_v1.c compute_layout, disk_book.c DiskBookPartAt).
 DISKBOOK_BLOCKS = 2 + DISKBOOK_CAPACITY * DISKBOOK_SECTORS_PER_ENTRY // SECTORS_PER_BLOCK
 DISKBOOK_SUPERBLOCK = Fields("<IIQIIIII16s",   # disk_book.h:35-46
                              "magic version start_sector capacity count "

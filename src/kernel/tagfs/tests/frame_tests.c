@@ -16,7 +16,7 @@
 // medium.
 // ============================================================================
 
-/* What mkfs lays down (tools/create_tagfs.c, --frame-only): the ring a grain
+/* What mkfs lays down (tools/create_tagfs_v2.c, --frame-only): the ring a grain
  * apart from the grain after the Deed's, the data run from the grain after the
  * ring's last slot — in 4 KiB blocks of a 1 MiB grain. */
 #define FRAME_GRAIN_BLOCKS  256u

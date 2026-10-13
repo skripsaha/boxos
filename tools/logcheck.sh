@@ -258,7 +258,7 @@ latearrival_off() {
 # ‼ TAKEN AFTER `make run-bg`, NEVER BEFORE IT, AND THAT IS THE WHOLE POINT.
 #
 # create_tagfs stamps a FRESH identity into every volume it lays down
-# (tools/create_tagfs.c, generate_uuid), so laying the same content down twice
+# (tools/create_tagfs_ground.c, generate_uuid), so laying the same content down twice
 # makes two DIFFERENT volumes. Take the stick off an image that is about to be
 # laid down again and the copy is a volume that exists nowhere: the loader
 # reads the new one and stamps THAT on the boarding pass, the Boardroom looks
@@ -9111,12 +9111,6 @@ STAND_HELD="
 # anything, and the count is where that shows. How many of them pass and how
 # many stand aside is the road's — said, not pinned.
 STAND_RUN=203
-
-# The last thing a halt says about the volume, whichever way its sync went
-# (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
-# WRITE ITS RECORDS", which comes BEFORE the flush, and a machine stopped
-# there is stopped in the middle of it.
-STAND_HALT_ENDS='^\[HALT\] (Storage sync complete|the medium on seat [0-9]+ took|‼ THE VOLUME ON SEAT [0-9]+ .* WAS NOT MADE DURABLE)'
 
 # stand_boot TAG KEYS... — boot the image that is on the disk (or the one
 # BOOTDISK names) under VOLUME_TESTS=on and KEYS (the machine), wait for the

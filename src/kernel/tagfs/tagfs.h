@@ -688,10 +688,10 @@ error_t  tagfs_flush_cache(void);
 uint64_t tagfs_block_to_sector(uint64_t block);
 
 /* There is no tagfs_format() here. A volume is made by the tool that lays it
- * out on ground it read from a partition table (tools/create_tagfs.c), and by
- * nothing else. The kernel used to carry a second formatter that nothing
- * called — so nothing ever ran it, nothing ever checked it, and it went on
- * writing the layout the rest of the kernel had already left behind. */
+ * out on ground it read from a partition table (tools/create_tagfs_ground.c),
+ * and by nothing else. The kernel used to carry a second formatter that
+ * nothing called — so nothing ever ran it, nothing ever checked it, and it
+ * went on writing the layout the rest of the kernel had already left behind. */
 
 /* Each change of a file below answers -ERR_WOULD_BLOCK, nothing of it done —
  * an untag by text, nothing of what its text still names — while the volume

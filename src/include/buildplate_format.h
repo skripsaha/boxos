@@ -48,7 +48,7 @@
  * Three consumers share this one definition:
  *   tools/buildplate.c            computes, stamps and verifies, on the host
  *   kernel core/buildplate        says it, in the first line of the log
- *   tools/create_tagfs.c          carries the same VERDICT into the volume's
+ *   tools/create_tagfs_cargo.c    carries the same VERDICT into the volume's
  *                                 own Deed stamp, for the half of the
  *                                 shipment the kernel does not contain
  *

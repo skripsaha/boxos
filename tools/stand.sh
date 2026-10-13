@@ -538,8 +538,8 @@ fi
 # tools/ is asked as well as src/: an oracle that proves a host tool edits
 # that tool exactly as one that proves the kernel edits the kernel, and an
 # edit left behind there is a tool that judges every later run with its
-# defect put back. Four files in tools/ carry the two phrases as TEXT and are
-# passed over by name: the two harnesses that write them into their mutations,
+# defect put back. Five files in tools/ carry the two phrases as TEXT and are
+# passed over by name: the three harnesses that write them into their mutations,
 # this library that insists on them, and the plate that reads them. A harness
 # added to tools/ is added to this list, and until it is this refuses to run
 # and names it — the safe way to be wrong. -I because every mutation is an
@@ -547,7 +547,8 @@ fi
 # plate's own compiled search for them.
 MUT_LEFTOVER=$( { grep -rl -e "logcheck mutation" -e "logcheck injection" src
                   grep -rlI -e "logcheck mutation" -e "logcheck injection" \
-                       --exclude=logcheck.sh --exclude=powercut.sh --exclude=stand.sh \
+                       --exclude=logcheck.sh --exclude=powercut.sh --exclude=bindery.sh \
+                       --exclude=stand.sh \
                        --exclude=buildplate.c tools
                 } 2>/dev/null || true)
 if [ -n "$MUT_LEFTOVER" ]; then
@@ -583,7 +584,7 @@ fi
 # that declares it.
 python3 - "$0" "$STAND_NAME" <<'ANCHOR_EOF' || exit 1
 import ast, os, re, sys
-HARNESSES = {"logcheck.sh", "powercut.sh", "stand.sh"}
+HARNESSES = {"logcheck.sh", "powercut.sh", "bindery.sh", "stand.sh"}
 SOURCES = (".c", ".h", ".cpp", ".hpp", ".S", ".asm", ".ld", ".py", ".sh", ".txt", ".mk")
 CACHE = {}
 
@@ -758,6 +759,11 @@ WAIT_QUIET_S=${WAIT_QUIET_S:-60}
 WAIT_QUIET_SLOW_S=${WAIT_QUIET_SLOW_S:-240}
 WAIT_RUNAWAY_S=${WAIT_RUNAWAY_S:-900}
 WAIT_LOG=build/serial.log
+# The last thing a halt says about the volume, whichever way its sync went
+# (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
+# WRITE ITS RECORDS", which comes BEFORE the flush, and a machine stopped
+# there is stopped in the middle of it.
+STAND_HALT_ENDS='^\[HALT\] (Storage sync complete|the medium on seat [0-9]+ took|‼ THE VOLUME ON SEAT [0-9]+ .* WAS NOT MADE DURABLE)'
 # How long a burst of console output may pause and still be the same burst.
 # This is the other kind of number: not "how long does the machine take", which
 # is unbounded, but "how big a gap inside one program's output still counts as
