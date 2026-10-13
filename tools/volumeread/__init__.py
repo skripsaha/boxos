@@ -10,6 +10,8 @@
     census    GroundCensus (the account) and KernelView (the mount), held
               against each other
     blklog    QEMU blklogwrites logs: epochs, what each write touched, cuts
+    bookread  format v2's alphabet — the book sector and its CRC32C, varints,
+              the self-checking pointer — and the block digest (WyHash64)
     selftest  every census rule planted and caught, the cut logic on a
               synthetic log, and the constants held against the headers
 

@@ -370,57 +370,6 @@ DeedFormat DeedFormatOf(const DeedCopy *copy)
 }
 
 /*
- * The ring's slots are single blocks at spine_block + i * spine_stride. With
- * a stride of at least one they are distinct by construction — unless the
- * ring runs past the last block number and comes round, which is the one way
- * left for two of them to land together or on the Deed, and the one sum here
- * that can overflow. The product cannot: two u32 make less than 2^64.
- */
-const char *VolumeFrameCheck(const void *frame, uint16_t bytes,
-                             uint64_t tail_sector, const char **note)
-{
-    if (note) *note = NULL;
-    if (!frame || bytes < sizeof(VolumeFrame))
-        return "it is shorter than a FRAME";
-
-    VolumeFrame f;
-    memcpy(&f, frame, sizeof(f));
-
-    if (f.spine_slots < 2)
-        return "its Spine ring has fewer than two slots, which is no ring";
-    if (f.spine_stride == 0)
-        return "its Spine slots are all one block — a ring with no stride";
-    if (f.spine_block == 0)
-        return "its Spine begins on block 0, which is the Deed's own";
-
-    uint64_t reach = (uint64_t)(f.spine_slots - 1u) * f.spine_stride;
-    if (f.spine_block > UINT64_MAX - reach)
-        return "its Spine ring runs past the last block number there is and "
-               "comes round onto the blocks before it";
-    if (f.spine_block + reach >= f.data_block)
-        return "its Spine ring runs into the data run";
-    if (f.data_block >= tail_sector / VOLUME_BLOCK_SECTORS)
-        return "its data run starts at or past the volume's last block, where "
-               "the far copy of the Deed sits";
-
-    if (note) {
-        bool longer = bytes > sizeof(VolumeFrame);
-        bool fewer  = f.spine_slots < VOLUME_FRAME_SPINE_SLOTS;
-        if (longer && fewer)
-            *note = "it is longer than the FRAME this kernel knows and its ring "
-                    "keeps fewer slots than this format lays down — written by a "
-                    "kernel that knows more, or by another maker";
-        else if (longer)
-            *note = "it is longer than the FRAME this kernel knows — written by "
-                    "a kernel that knows more";
-        else if (fewer)
-            *note = "its ring keeps fewer slots than this format lays down — a "
-                    "volume made by another maker";
-    }
-    return NULL;
-}
-
-/*
  * ‼ SAID IN THE MOUNT'S VOICE, [TagFS], because it is the mount's refusal: the
  * Deed itself is whole — it passed its checksum to get here — and what is
  * refused is what this kernel can make of it.

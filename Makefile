@@ -778,12 +778,16 @@ UEFI_ESP_IMG = $(BUILDDIR)/esp.img
 VBOX_VDI     = $(BUILDDIR)/boxos.vdi
 
 # ==== UEFI BOOTLOADER ====
-TAGBOOT_SRC    = src/boot/uefi/tagboot.c
+# The loader's files, and every header any of them reads: a change to one is a
+# change to the loader.
+TAGBOOT_SRC    = src/boot/uefi/tagboot.c src/boot/uefi/tagboot_deed.c
+TAGBOOT_HDRS   = src/boot/uefi/tagboot.h src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h \
+                 src/include/volume_deed.h src/include/volume_ledger.h
 TAGBOOT_JUMP   = src/boot/uefi/tagboot_jump.asm
 TAGBOOT_LD     = src/boot/uefi/tagboot.ld
 TAGBOOT_EFI    = $(BUILDDIR)/BOOTX64.EFI
 TAGBOOT_SO     = $(BUILDDIR)/tagboot.so
-TAGBOOT_OBJ    = $(BUILDDIR)/tagboot.o
+TAGBOOT_OBJ    = $(patsubst src/boot/uefi/%.c,$(BUILDDIR)/%.o,$(TAGBOOT_SRC))
 TAGBOOT_JUMP_OBJ = $(BUILDDIR)/tagboot_jump.o
 
 # UEFI compile/link flags
@@ -1407,13 +1411,13 @@ $(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
 	@echo "Assembling TagBoot jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(TAGBOOT_EFI): $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h src/include/volume_deed.h src/include/volume_ledger.h | $(BUILDDIR)
+$(TAGBOOT_EFI): $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) $(TAGBOOT_HDRS) | $(BUILDDIR)
 	@echo "Building TagBoot UEFI (clang/lld → PE32+)..."
 	@clang $(UEFI_CFLAGS_CLANG) \
 		-Wl,-entry:TagBootMain \
 		-Wl,-subsystem:efi_application \
 		-Wl,-nodefaultlib \
-		-o $@ $< $(TAGBOOT_JUMP_OBJ)
+		-o $@ $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ)
 	@echo "TagBoot EFI: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 else
@@ -1423,8 +1427,8 @@ $(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
 	@echo "Assembling TagBoot jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(TAGBOOT_OBJ): $(TAGBOOT_SRC) src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h src/include/volume_deed.h src/include/volume_ledger.h | $(BUILDDIR)
-	@echo "Building TagBoot UEFI object (gcc ELF)..."
+$(TAGBOOT_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(TAGBOOT_HDRS) | $(BUILDDIR)
+	@echo "Building TagBoot UEFI object $@ (gcc ELF)..."
 	@$(UEFI_CC) $(UEFI_CFLAGS_GCC) -c $< -o $@
 
 $(TAGBOOT_SO): $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) | $(BUILDDIR)

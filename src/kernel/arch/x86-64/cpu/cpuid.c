@@ -77,6 +77,7 @@ void cpu_detect_features(void) {
         g_cpu_caps.has_monitor = (ecx & (1 << 3)) != 0;
         g_cpu_caps.has_xsave = (ecx & (1 << 26)) != 0;
         g_cpu_caps.has_avx = (ecx & (1 << 28)) != 0;
+        g_cpu_caps.has_sse42 = (ecx & (1 << 20)) != 0;
         g_cpu_caps.has_pcid = (ecx & (1 << 17)) != 0;
         // PAT (CPUID.1:EDX[16]) — Intel SDM Vol 3A §11.12.2.
         g_cpu_caps.has_pat  = (edx & (1 << 16)) != 0;
@@ -536,6 +537,7 @@ void cpu_intersect_features_ap(void) {
     bool bsp_mwait_c1     = g_cpu_caps.has_mwait_c1;
     bool bsp_xsave        = g_cpu_caps.has_xsave;
     bool bsp_avx          = g_cpu_caps.has_avx;
+    bool bsp_sse42        = g_cpu_caps.has_sse42;
     bool bsp_pcid         = g_cpu_caps.has_pcid;
     bool bsp_pat          = g_cpu_caps.has_pat;
     bool bsp_avx512       = g_cpu_caps.has_avx512;
@@ -569,6 +571,11 @@ void cpu_intersect_features_ap(void) {
         g_cpu_caps.has_monitor &= ((ecx & (1 << 3)) != 0);
         g_cpu_caps.has_xsave   &= ((ecx & (1 << 26)) != 0);
         g_cpu_caps.has_avx     &= ((ecx & (1 << 28)) != 0);
+        /* KCrc32c reads this on whichever core it runs: it may only say
+         * "crc32" if every core has it. Only ever lowered, and both of
+         * KCrc32c's ways give the same sum, so a core that reads it while
+         * it is being lowered sums right either way. */
+        g_cpu_caps.has_sse42   &= ((ecx & (1 << 20)) != 0);
         g_cpu_caps.has_pcid    &= ((ecx & (1 << 17)) != 0);
         g_cpu_caps.has_pat     &= ((edx & (1 << 16)) != 0);
         /* has_hypervisor is package-wide — the host either runs us
@@ -710,6 +717,7 @@ void cpu_intersect_features_ap(void) {
     _LOG_DROP(mwait_c1,     bsp_mwait_c1);
     _LOG_DROP(xsave,        bsp_xsave);
     _LOG_DROP(avx,          bsp_avx);
+    _LOG_DROP(sse42,        bsp_sse42);
     _LOG_DROP(pcid,         bsp_pcid);
     _LOG_DROP(pat,          bsp_pat);
     _LOG_DROP(avx512,       bsp_avx512);

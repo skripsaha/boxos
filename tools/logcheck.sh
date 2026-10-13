@@ -8,8 +8,9 @@
 #                         failure reproduced on the desk. The kernel's
 #                         vocabulary must survive having no medium at all.
 #   logcheck.sh framerefuse a format-v2 volume (create_tagfs --frame-only) on
-#                         BIOS q35 with every write recorded: refused in so
-#                         many words, and not one write lands in its ground
+#                         BIOS q35 and through UEFI, every write recorded:
+#                         refused in so many words, and not one write lands
+#                         in its ground
 #   logcheck.sh yank      the stick is pulled WHILE the volume is being read.
 #                         The medium is throttled so the window exists at all
 #   logcheck.sh twoctrl   two host controllers, stick on the SECOND — the shape
@@ -85,6 +86,8 @@ STAND_NAME=logcheck
 # ROOT, SCRATCH, the verdict counters, the mutation manifest and its
 # preflights, the way out, the waits and the typer: tools/stand.sh.
 . "$(dirname "$0")/stand.sh"
+# The framerefuse scenario: tools/logcheck_framerefuse.sh.
+. "$(dirname "$0")/logcheck_framerefuse.sh"
 
 # Waits for the SHELL BANNER, not for "userspace is starting".
 #
@@ -1252,18 +1255,19 @@ run_healthy() {
 
     # (6) TagFS itself still healthy — and every test it counts is one this
     # tree registers. The numbers are the code's, not a run's (K9): a build
-    # without VOLUME_TESTS walks the seven suites of tests.h TEST_SUITES not
-    # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 5,
-    # integrity 3, use_context 5 TestCases, 22 run; the 11 whose reach is
-    # TEST_WRITES_TO_VOLUME are skipped (tests.c, g_volume_tests_allowed),
-    # and the 11 that only read pass — none of them stands aside on this
-    # stand's fresh image, whose first file wears a tag (use_context_narrows).
-    # A test added or taken out moves this line in the same commit.
+    # without VOLUME_TESTS walks the eight suites of tests.h TEST_SUITES not
+    # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
+    # book 7, integrity 3, use_context 5 TestCases, 30 run; the 11 whose
+    # reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
+    # g_volume_tests_allowed), and the 19 that only read pass — none of them
+    # stands aside on this stand's fresh image, whose first file wears a tag
+    # (use_context_narrows). A test added or taken out moves this line in the
+    # same commit.
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
     local said
     said=$(stand_summary "$L")
-    [ "$said" = "TagFS: 22 run, 11 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
-    chk $? "TagFS startup tests: the 22 this tree registers ran, 11 reads passed and 11 writes stood down (${said:-no summary})"
+    [ "$said" = "TagFS: 30 run, 19 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
+    chk $? "TagFS startup tests: the 30 this tree registers ran, 19 reads passed and 11 writes stood down (${said:-no summary})"
     lockrank_judge "$L" "healthy 1c"
 
     # (7) the kernel's ear works — mutation-proven harness, see commit
@@ -1461,170 +1465,6 @@ run_badpool() {
 
     typed_ok "$L"
     chk $? "and answers a keystroke"
-}
-
-# ---------------------------------------------------------------------------
-# framerefuse: a format-v2 volume, met by a kernel that cannot read its book,
-# is turned away whole — not a byte of its ground written (step 2.1)
-#
-# A Deed says what its book is written in by the stamp it carries: LAYOUT for
-# format v1, FRAME for v2 (volume_deed.h). A kernel that meets a book it
-# cannot read has one thing to do, at its format check (tagfs.c,
-# volume_take_ground): refuse the volume before the mount's first write, and
-# say so in words a person at the machine can act on.
-#
-# The image is this tree's, its volume made again by `create_tagfs
-# --frame-only`: GEOMETRY · FRAME · BORN · BOOT · PACKED, the Spine's slots
-# blank, the kernel at the data run's first block where BOOT names it — listed
-# after the shell, so the image also shows the kernel is put first anyway —
-# and stage2 boots it the way it boots any volume. It is booted on BIOS, q35
-# (STRICT), every write it makes on the record (POWERCUT=on), typed at, and
-# switched off by its power button, so the halt meets the refused volume too.
-# The record is then read against the image as it stood before the boot:
-# base + record must BE the image the machine left (cut --against), so the
-# record holds every write; and not one of them may land in the volume's
-# ground — counted by where each write lands, and again by what the
-# classifier names it (cut --list), which has to be standing on the volume as
-# format v2 to name anything at all.
-#
-# ‼ THE KERNEL BEFORE FORMAT v2 IS ASKED THE SAME, ONCE. FRAMEREFUSE_KERNEL=
-# <kernel.bin> puts that kernel in the same image instead, booted the same
-# way, and holds it to the refusal kernels before format v2 give ("carries no
-# layout this kernel understands") and to the same silence on the medium. A
-# receipt of step 2.1 taken by hand, not a gate: a tree of another day, built
-# on the desk of this one, goes stale with the tools that build it.
-# ---------------------------------------------------------------------------
-
-FRAMEREFUSE_V2_SAYS="carries a format-v2 volume (its deed bears FRAME); this kernel cannot read a format-v2 book — boot a newer kernel"
-FRAMEREFUSE_V1_SAYS="carries no layout this kernel understands"
-
-# framerefuse_judge BEFORE RECORD FINAL — what the record says the machine
-# wrote, against the image before the boot; one line, FRAMEREFUSE k=v ...
-framerefuse_judge() {
-    local list="$SCRATCH/framerefuse.list.json" against
-    against=$(python3 tools/volume-read.py "$1" cut "$2" --against "$3" 2>&1)
-    echo "  (cut --against: ${against#cut: })"
-    case "$against" in "cut: base + "*) ;; *) echo "FRAMEREFUSE record=incomplete"; return ;; esac
-    if ! python3 tools/volume-read.py "$1" cut "$2" --list --json >"$list" 2>"$list.err"; then
-        echo "FRAMEREFUSE record=unreadable $(tail -1 "$list.err")"; return
-    fi
-    python3 - "$1" "$list" <<'PY'
-import json, sys
-sys.dont_write_bytecode = True
-sys.path.insert(0, "tools")
-from volumeread import medium
-
-stand = medium.StandOnDeed(medium.Medium(sys.argv[1]), None)
-lo, hi = stand.start, stand.start + stand.deed["sectors"]
-writes = json.load(open(sys.argv[2]))["writes"]
-inside = [w for w in writes if w["lba"] < hi and w["lba"] + w["sectors"] > lo]
-named = [(w, t) for w in writes for t in w["touches"] if t["kind"] != "outside"]
-for w in inside[:5]:
-    print("  write %u.%u, LBA %u+%u, lands in the volume's ground %u..%u"
-          % (w["epoch"], w["index"], w["lba"], w["sectors"], lo, hi - 1))
-for w, t in named[:5]:
-    print("  write %u.%u is named %s: %s" % (w["epoch"], w["index"], t["kind"], t["what"]))
-print("FRAMEREFUSE record=whole format=%s writes=%u inside=%u named=%u"
-      % (stand.format, len(writes), len(inside), len(named)))
-PY
-}
-
-# framerefuse_leg KERNEL SAYS — the image made around KERNEL, booted, switched
-# off, and judged: SAYS is the refusal its log must carry.
-framerefuse_leg() {
-    local kernel=$1 says=$2 img="$SCRATCH/framerefuse.img" before="$SCRATCH/framerefuse.before.img"
-    local rec="$SCRATCH/framerefuse.record" L="$SCRATCH/serial.framerefuse.log" pid verdict uuid
-    rm -f "$img" "$before" "$rec" "$L"
-    cp build/boxos.img "$img" || { harness "framerefuse: could not copy build/boxos.img"; return; }
-    if ! tools/create_tagfs --frame-only "$img" src/userspace/shell/shell.bin "utility,system" \
-            "$kernel" "system" >"$SCRATCH/framerefuse.mkfs.log" 2>&1; then
-        bad "framerefuse: create_tagfs --frame-only would not make the image: $(tail -1 "$SCRATCH/framerefuse.mkfs.log")"
-        return
-    fi
-    python3 tools/volume-read.py "$img" deed >"$SCRATCH/framerefuse.deed" 2>&1
-    grep -q "^format      : v2" "$SCRATCH/framerefuse.deed"
-    chk $? "framerefuse: the image's Deed is format v2 ($(grep '^spine' "$SCRATCH/framerefuse.deed"))"
-    python3 - "$img" <<'PY'
-import sys
-sys.dont_write_bytecode = True
-sys.path.insert(0, "tools")
-from volumeread import medium, ondisk
-m = medium.Medium(sys.argv[1])
-ground, _how = medium.find_ground(m, None)
-d = ondisk.ReadDeed(m.sectors(ground, ondisk.DEED_SECTORS))
-sys.exit(0 if d["ok"] and d["frame"] and d["boot"] and
-         d["boot"]["kernel_block"] == d["frame"]["data_block"] else 1)
-PY
-    chk $? "framerefuse: the kernel sits at the data run's first block, where BOOT names it, though listed second"
-    cp "$img" "$before" || { harness "framerefuse: could not keep the image as it stood"; return; }
-
-    make run-stop >/dev/null 2>&1
-    if ! make run-bg BOOTDISK="$img" POWERCUT=on POWERCUT_LOG="$rec" STRICT=on \
-            >"$SCRATCH/framerefuse.run-bg" 2>&1; then
-        harness "framerefuse: run-bg would not start the image: $(tail -1 "$SCRATCH/framerefuse.run-bg")"
-        return
-    fi
-    pid=$(cat build/qemu.pid 2>/dev/null)
-    case "$(ps -o command= -p "$pid" 2>/dev/null)" in
-        *"filename=$img,"*"filename=$rec,"*) ;;
-        *) harness "framerefuse: the machine (pid $pid) was not started on $img with its record at $rec"
-           make run-stop >/dev/null 2>&1
-           return ;;
-    esac
-    if wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"; then
-        sleep 2
-        type_cmd "help"
-        sleep 1
-        key_press ret
-        sleep 2
-    fi
-    mon_raw system_powerdown
-    wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
-    make run-stop >/dev/null 2>&1
-    cp build/serial.log "$L"
-
-    uuid=$(deed_uuid "$before") || uuid=""
-    [ -n "$uuid" ] && grep -aqE "^\[Deed\] seat [0-9]+: volume $uuid, " "$L"
-    chk $? "framerefuse: the machine read the Deed of this very image (volume ${uuid:-unreadable})"
-    grep -qF "$says" "$L"
-    chk $? "framerefuse: the volume is refused in so many words — $(grep -oF "$says" "$L" | head -1)"
-    ! grep -qE "MOUNTED — [0-9]+ file" "$L"
-    chk $? "framerefuse: nothing is mounted off it"
-    grep -q "BoxOS Shell" "$L" && typed_ok "$L"
-    chk $? "framerefuse: the machine still reaches a shell, and answers a keystroke"
-    ! grep -qE "PANIC|\[EXCEPTION\]" "$L"
-    chk $? "framerefuse: no panic, no fault"
-
-    verdict=$(framerefuse_judge "$before" "$rec" "$img")
-    echo "$verdict" | grep -v "^FRAMEREFUSE "
-    verdict=$(echo "$verdict" | grep "^FRAMEREFUSE ")
-    echo "$verdict" | grep -q "record=whole"
-    chk $? "framerefuse: base + the record is the image the machine left — every write it made is on the record (${verdict:-no verdict})"
-    echo "$verdict" | grep -q "format=v2 .* inside=0 named=0$"
-    chk $? "framerefuse: not one write lands in the volume's ground, by place and by name ($verdict)"
-    rm -f "$img" "$before"
-}
-
-run_framerefuse() {
-    echo "== framerefuse: a format-v2 volume is refused whole by a kernel that cannot read its book =="
-    build STRICT=on
-    if [ -n "${FRAMEREFUSE_KERNEL:-}" ]; then
-        echo "  (the A/B receipt: $FRAMEREFUSE_KERNEL — $(tools/buildplate say "$FRAMEREFUSE_KERNEL" 2>&1 | head -1))"
-        framerefuse_leg "$FRAMEREFUSE_KERNEL" "$FRAMEREFUSE_V1_SAYS"
-        return
-    fi
-    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_V2_SAYS"
-    local L="$SCRATCH/serial.framerefuse.log"
-    ! grep -qF "$FRAMEREFUSE_V1_SAYS" "$L"
-    chk $? "framerefuse: and not as a volume that says where nothing is"
-    grep -qE "^\[Deed\] seat [0-9]+: format v2 — a Spine ring of 3 slot\(s\) 256 block\(s\) apart from block 256, and its data run from block 1024" "$L"
-    chk $? "framerefuse: the deed is described with its FRAME"
-    ! grep -q "carries the volume this machine is standing on" "$L"
-    chk $? "framerefuse: the boot survey does not take the refused volume for the one the machine stands on"
-    ! grep -qE "would not flush its write cache|WAS NOT MADE DURABLE" "$L"
-    chk $? "framerefuse: the halt raises no durability alarm over a volume it never mounted"
-    grep -aq '^\[HALT\] no volume is named on this machine — there is no medium to make durable' "$L"
-    chk $? "framerefuse: and says instead that there is no medium to make durable"
 }
 
 run_novolume() {
@@ -9100,8 +8940,8 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 22 (healthy says how) and
-# the 177 of the stand's own twenty-five suites: stand 28, stand_lock 4,
+# suite in tests.h TEST_SUITES — the plain build's 30 (healthy says how) and
+# the 181 of the stand's own twenty-five suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 5, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
@@ -9110,7 +8950,7 @@ STAND_HELD="
 # run (K9): a suite that drops out of the walk is a test that stopped covering
 # anything, and the count is where that shows. How many of them pass and how
 # many stand aside is the road's — said, not pinned.
-STAND_RUN=203
+STAND_RUN=211
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT

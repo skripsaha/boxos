@@ -167,6 +167,11 @@ static TestResult TestFrameCheck(void)
     TEST_ASSERT(!FrameHolds(&f, sizeof(f), &noted),
                 "a slot on the data run's first block is refused");
 
+    f = FrameAsMade(); f.spine_slots = VOLUME_FRAME_SPINE_SLOTS + 1u;
+    f.data_block += FRAME_GRAIN_BLOCKS;
+    TEST_ASSERT(FrameHolds(&f, sizeof(f), &noted) && noted,
+                "a ring of four, clear of the data run, holds, and is named as another maker's");
+
     /* The one way left for slots to land together: a ring that runs past the
      * last block number and comes round onto the blocks before it. */
     f = FrameAsMade(); f.spine_block = UINT64_MAX - FRAME_GRAIN_BLOCKS + 1u;

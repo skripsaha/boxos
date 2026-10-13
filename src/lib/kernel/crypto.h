@@ -18,6 +18,18 @@ uint32_t KCrc32(const uint8_t *data, uint32_t len);
 // a time.
 uint32_t KCrc32Continue(uint32_t crc, const uint8_t *data, uint32_t len);
 
+// CRC32C (Castagnoli)
+// Used for: every sector of a format-v2 volume's book (src/include/volume_book.h)
+// By the crc32 instruction where every core has SSE4.2, by the book's own table
+// where one has not — the same sum either way.
+uint32_t KCrc32c(const uint8_t *data, uint32_t len);
+
+// The same CRC32C carried on, as KCrc32Continue carries CRC32: KCrc32c(a ++ b)
+// is KCrc32cContinue(KCrc32c(a), b), and KCrc32cContinue(0, x) is KCrc32c(x).
+// A book sector is summed in three pieces — the volume's uuid, the sector's
+// address, its bytes — with no copy into one buffer.
+uint32_t KCrc32cContinue(uint32_t crc, const uint8_t *data, uint32_t len);
+
 // CRC16 (CCITT-FALSE)
 // Used for: metadata pool record integrity
 uint16_t KCrc16(const uint8_t *data, uint32_t len);

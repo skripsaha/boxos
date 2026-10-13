@@ -337,4 +337,74 @@ _Static_assert(sizeof(VolumeFrame) == 24, "VolumeFrame is 24 bytes on the medium
 /* The ring as a maker of this format lays it down (above). */
 #define VOLUME_FRAME_SPINE_SLOTS  3u
 
+/*
+ * Does a FRAME hold — the one rule every reader of one keeps: the kernel at
+ * its format check (tagfs/deed/deed.c, DeedFormatRefused), the UEFI loader
+ * before it takes the kernel BOOT names (tagboot_deed.c), and volume-read on
+ * the host in the same words (tools/volumeread/ondisk.py, VolumeFrameCheck).
+ * Here, so the three cannot hold a FRAME to three rules. `frame` and `bytes`
+ * are the stamp as the reader's stamp walk found it; `tail_sector` is the
+ * prologue's, the far copy's place, whose block is the volume's last. NULL
+ * when it holds, or the sentence that says why it does not.
+ *
+ * A FRAME that holds can still be worth a line, and `note` gets it: one
+ * longer than this struct was written by a kernel that knows more than the
+ * reader, and a ring of other than VOLUME_FRAME_SPINE_SLOTS slots is a volume
+ * made by another maker. NULL when there is nothing to say.
+ *
+ * The ring's slots are single blocks at spine_block + i * spine_stride. With
+ * a stride of at least one they are distinct by construction — unless the
+ * ring runs past the last block number and comes round, which is the one way
+ * left for two of them to land together or on the Deed, and the one sum here
+ * that can overflow. The product cannot: two u32 make less than 2^64.
+ *
+ * The stamp is read field by field through the packed struct, which every
+ * compiler of the three builds reads at any alignment; no library is called.
+ */
+static inline const char *VolumeFrameCheck(const void *frame, uint16_t bytes,
+                                           uint64_t tail_sector, const char **note)
+{
+    const VolumeFrame *f = (const VolumeFrame *)frame;
+
+    if (note) *note = 0;
+    if (!frame || bytes < sizeof(VolumeFrame))
+        return "it is shorter than a FRAME";
+
+    uint64_t spine  = f->spine_block, data = f->data_block;
+    uint32_t slots  = f->spine_slots, stride = f->spine_stride;
+
+    if (slots < 2u)
+        return "its Spine ring has fewer than two slots, which is no ring";
+    if (stride == 0u)
+        return "its Spine slots are all one block — a ring with no stride";
+    if (spine == 0u)
+        return "its Spine begins on block 0, which is the Deed's own";
+
+    uint64_t reach = (uint64_t)(slots - 1u) * stride;
+    if (spine > ~(uint64_t)0 - reach)
+        return "its Spine ring runs past the last block number there is and "
+               "comes round onto the blocks before it";
+    if (spine + reach >= data)
+        return "its Spine ring runs into the data run";
+    if (data >= tail_sector / VOLUME_BLOCK_SECTORS)
+        return "its data run starts at or past the volume's last block, where "
+               "the far copy of the Deed sits";
+
+    if (note) {
+        int longer = bytes > sizeof(VolumeFrame);
+        int other  = slots != VOLUME_FRAME_SPINE_SLOTS;
+        if (longer && other)
+            *note = "it is longer than the FRAME this reader knows and its Spine "
+                    "ring is not the one this format lays down — written by a "
+                    "kernel that knows more, or by another maker";
+        else if (longer)
+            *note = "it is longer than the FRAME this reader knows — written by "
+                    "a kernel that knows more";
+        else if (other)
+            *note = "its Spine ring is not the one this format lays down — a "
+                    "volume made by another maker";
+    }
+    return 0;
+}
+
 #endif /* VOLUME_DEED_H */

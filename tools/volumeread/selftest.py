@@ -30,6 +30,7 @@ from .census import GroundCensus
 from .ondisk import RunsNormal, RunsSubtract
 from .ground_owners import GROUND_OWNERS
 from . import blklog
+from . import bookread
 
 
 class Targets:
@@ -542,7 +543,9 @@ def FrameCases(t, medium):
             ("F2 FRAME with overlapping slots", lambda o: PlantFrame(t, o, spine_stride=0),
              ("format v2", "does not hold", "all one block")),
             ("F3 FRAME longer than 24", lambda o: PlantFrame(t, o, frame_bytes=32),
-             ("format v2", "no book is written", "knows more"))):
+             ("format v2", "no book is written", "knows more")),
+            ("F4 FRAME with a ring of four", lambda o: PlantFrame(t, o, spine_slots=4, data_block=256 * 5),
+             ("format v2", "no book is written", "another maker"))):
         over = OverlayMedium(medium)
         plant(over)
         try:
@@ -570,7 +573,7 @@ def FrameCases(t, medium):
             ("unowned", "data run block"), ("outside", "boot code")]
     ok = len(named) == len(want) and all(
         len(n) == 1 and n[0][0] == kind and what in n[0][1] for n, (kind, what) in zip(named, want))
-    out.append(("F4 a cut of a format-v2 volume", ok,
+    out.append(("F5 a cut of a format-v2 volume", ok,
                 "; ".join("%s %s" % n[0] if n else "nothing" for n in named)))
     return out
 
@@ -1250,6 +1253,10 @@ def _Value(text, defines):
     m = re.fullmatch(r"\(\s*(\d+)[uU]?\s*\*\s*(\d+)[uU]?\s*\)", text)
     if m:
         return int(m.group(1)) * int(m.group(2))
+    m = re.fullmatch(r"\(\s*(\w+)\s*-\s*(\w+)\s*\)", text)
+    if m:
+        a, b = _Value(m.group(1), defines), _Value(m.group(2), defines)
+        return None if a is None or b is None else a - b
     m = re.fullmatch(r"(0[xX][0-9a-fA-F]+|\d+)[uUlL]*", text)
     if m:
         return int(m.group(1), 0)
@@ -1258,8 +1265,9 @@ def _Value(text, defines):
 
 def Defines(text, known=None):
     """Every #define in `text` whose value can be read: a number, a char, a
-    shift, a product, or the name of one defined above it here or in `known`
-    — the headers read before it, so an alias resolves to its owner."""
+    shift, a product, a difference, or the name of one defined above it here
+    or in `known` — the headers read before it, so an alias resolves to its
+    owner."""
     out = {}
     for name, value in _DEFINE.findall(text):
         v = _Value(value, dict(known or {}, **out))
@@ -1420,6 +1428,24 @@ def OwnersCheck(src, heard):
 
 
 # ---------------------------------------------------------------------------
+# X3: the book's alphabet and the block digest, held against the headers
+# ---------------------------------------------------------------------------
+
+
+def AlphabetCheck(src):
+    """What is wrong with bookread.py against volume_book.h and volume_digest.h,
+    read the way X1 reads its headers, and how many things were held."""
+    inc = os.path.join(src, "include")
+    paths = [os.path.join(inc, n) for n in ("volume_deed.h", "volume_book.h", "volume_digest.h")]
+    if not all(os.path.exists(p) for p in paths):
+        return None, "self-test needs the source tree beside the tool (src/ next to tools/)"
+    text, d = [open(p, encoding="utf-8", errors="replace").read() for p in paths], {}
+    for t in text:
+        d.update(Defines(t, d))
+    return bookread.AlphabetCheck(d, Structs(text[1], d), text[1])
+
+
+# ---------------------------------------------------------------------------
 # Running
 # ---------------------------------------------------------------------------
 
@@ -1488,6 +1514,14 @@ def Run(medium, src):
     print("self-test: X2 ground owners — the %u owners ground_owners.py lists are the header's, and "
           "each is heard in a case — %s" % (len(GROUND_OWNERS), "as expected" if not wrong
                                            else "; ".join(wrong)))
+    wrong, n = AlphabetCheck(src)
+    if wrong is None:
+        print("self-test: X3 alphabet — %s" % n)
+        return 2
+    total += 1
+    passed += not wrong
+    print("self-test: X3 alphabet — %u numbers, layouts and known answers held against volume_book.h "
+          "and volume_digest.h — %s" % (n, "as expected" if not wrong else "; ".join(wrong)))
     print("self-test: %u of %u cases answered as expected" % (passed, total))
     return 0 if passed == total else 1
 
