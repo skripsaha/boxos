@@ -36,7 +36,7 @@ int main(void) {
         tags[pos] = '\0';
     }
 
-    int file_id = create(luggage_word(1), tags);
+    int64_t file_id = create(luggage_word(1), tags);
     free(tags);
 
     if (file_id < 0) {

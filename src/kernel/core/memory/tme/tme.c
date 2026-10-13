@@ -34,8 +34,8 @@ static spinlock_t g_tme_zero_lock;
 static bool       g_tme_initialized = false;
 
 /* Pre-resolved Touch tag IDs — intern once on init to avoid hitting
- * the tag registry from off-hot paths. TouchTag = uint16_t with
- * TOUCH_TAG_INVALID = 0xFFFF. */
+ * the tag registry from off-hot paths. TouchTag = uint32_t with
+ * TOUCH_TAG_INVALID = 0xFFFFFFFF. */
 static TouchTag   g_tme_tag_pool_ready    = TOUCH_TAG_INVALID;
 static TouchTag   g_tme_tag_rekey_failed  = TOUCH_TAG_INVALID;
 

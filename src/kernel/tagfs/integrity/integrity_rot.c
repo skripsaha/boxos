@@ -29,7 +29,7 @@ static uint32_t  g_rot_slots;      /* a power of two, or 0 */
 static uint32_t  g_rot_named;      /* blocks in the set */
 static uint32_t  g_rot_more;       /* rot found that the set had no room to name */
 static bool      g_rot_room_said;  /* the set's want of room said for this run of misses */
-static uint16_t  g_rot_tag = TAGFS_INVALID_TAG_ID;
+static uint32_t  g_rot_tag = TAGFS_INVALID_TAG_ID;
 
 typedef enum {
     ROT_NEW,      /* named now, for the first time this mount */
@@ -150,7 +150,7 @@ static RotNaming RotRemember(uint64_t block)
     }
 }
 
-void IntegrityRotBegin(uint16_t tag)
+void IntegrityRotBegin(uint32_t tag)
 {
     TagFSLockTake(&g_rot_lock);
     uint64_t* old   = g_rot_set;
@@ -173,7 +173,7 @@ void IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read)
     /* The event carries the u32 block its readers are built for (box/touch.h —
      * the programs' side widens with wave 3): a block past one is never
      * published cut to another block's number; the line below names it whole. */
-    uint16_t tag = __atomic_load_n(&g_rot_tag, __ATOMIC_RELAXED);
+    uint32_t tag = __atomic_load_n(&g_rot_tag, __ATOMIC_RELAXED);
     if (tag != TAGFS_INVALID_TAG_ID && block <= UINT32_MAX) {
         struct __attribute__((packed)) {
             uint32_t block;

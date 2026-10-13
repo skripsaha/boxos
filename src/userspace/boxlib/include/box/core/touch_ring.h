@@ -64,11 +64,11 @@ STATIC_ASSERT(OFFSETOF(TouchRingHeader, owed) == 72,
  * everything in one memcpy to caller-owned storage, then release-stores
  * the next-round seq value. */
 typedef struct PACKED {
-    uint16_t tag_id;
+    uint32_t tag_id;
     uint16_t flags;
+    uint16_t _reserved;
     uint32_t source_pid;
     uint32_t payload_len;
-    uint32_t _reserved;
     uint64_t timestamp_tsc;
     uint8_t  payload[BOXOS_TOUCH_PAYLOAD_MAX];
     uint64_t seq;

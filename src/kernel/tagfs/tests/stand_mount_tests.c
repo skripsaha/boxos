@@ -376,7 +376,7 @@ TestResult TestStandMediumGivenUpIdsNotGivenAgain(void)
     BoardKind          kind    = BoardroomSeatKind(seat);
     uint8_t            index   = BoardroomSeatIndex(seat);
     uint64_t           file_id = 0;
-    uint16_t           tag     = TAGFS_INVALID_TAG_ID;
+    uint32_t           tag     = TAGFS_INVALID_TAG_ID;
     bool               let_go  = false;
     VolumeLedger       found;
     const TagSpelling  spelling = TagSpellingOfKey("stand_given_up");
@@ -411,7 +411,7 @@ TestResult TestStandMediumGivenUpIdsNotGivenAgain(void)
     TEST_ASSERT(tagfs_file_ceiling() > file_id,
                 "its next file id is past the one the given-up book's memory gave out");
     TagFSLockTake(&fs->registry->lock);
-    uint16_t next_tag = fs->registry->next_id;
+    uint32_t next_tag = fs->registry->next_id;
     TagFSLockDrop(&fs->registry->lock);
     TEST_ASSERT(next_tag > tag, "and its next tag id past the tag it gave out");
 out:

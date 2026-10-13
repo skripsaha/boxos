@@ -90,7 +90,6 @@
  */
 
 #include "write_job_internal.h"
-#include "storage_deck.h" /* StorageFileIdOut — an id as a program is handed it */
 #include "chit.h"        /* ChitGive / ChitDue — an answer put off is an answer promised */
 #include "boardroom.h"
 #include "baton.h"
@@ -278,7 +277,7 @@ static bool wjob_span_changed(const WriteJob *j)
     return j->span_was != UINT64_MAX && j->final_size != j->span_was;
 }
 
-/* A change to a file's bytes, said on every tag it wears — one 32-byte shape
+/* A change to a file's bytes, said on every tag it wears — one 40-byte shape
  * for every road that changes them, so one listener reads them all: op 1 a
  * write (the bytes written at offset), op 3 a span (the bytes cut or added
  * from offset, the old or the new size, whichever is less — the size it left,
@@ -306,9 +305,7 @@ static void wjob_publish(const WriteJob *j)
     default:
         return;
     }
-    /* The event names the file as programs hold an id (StorageFileIdOut). */
-    uint32_t file_id = 0;
-    if (!TouchHasAnyListeners() || StorageFileIdOut(j->file_id, &file_id) != OK)
+    if (!TouchHasAnyListeners())
         return;
 
     TagFSMetadata meta;
@@ -316,14 +313,14 @@ static void wjob_publish(const WriteJob *j)
     if (tagfs_get_metadata(j->file_id, &meta) != OK)
         return;
     struct {
-        uint32_t file_id;
+        uint64_t file_id;
         uint8_t  op;
-        uint8_t  _pad[3];
+        uint8_t  _pad[7];
         uint64_t offset;
         uint64_t bytes;
         uint64_t final_size;
     } __attribute__((packed)) ev = {
-        .file_id    = file_id,
+        .file_id    = j->file_id,
         .op         = op,
         .offset     = offset,
         .bytes      = bytes,

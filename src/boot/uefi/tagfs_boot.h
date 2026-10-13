@@ -41,7 +41,9 @@
 #define TAGFS_REGISTRY_DATA_SIZE  4080
 #define TAGFS_MPOOL_DATA_SIZE     4080
 #define TAGFS_FTABLE_PER_BLOCK    510
-#define TAGFS_INVALID_TAG_ID      0xFFFFU
+/* No tag: the kernel's in-memory sentinel. A tag id is held in 32 bits here as
+ * in the kernel; a format v1 record carries one in 16, read into the 32. */
+#define TAGFS_INVALID_TAG_ID      0xFFFFFFFFU
 
 /* Registry record flags, from the kernel's tagfs_constants.h. Bit 0 is set on
  * a tag that carries a value; bit 1 is set by the kernel on its own reserved

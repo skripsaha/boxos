@@ -93,12 +93,12 @@ static volatile uint64_t g_stat_claims;
 static volatile uint64_t g_stat_pages;
 static volatile uint64_t g_stat_releases;
 
-static inline uint32_t bay_bucket_index(uint16_t tag_id)
+static inline uint32_t bay_bucket_index(uint32_t tag_id)
 {
-    /* tag_id is 16 bits and TagFS interns roughly densely from 0 up,
-     * so a low-order mask gives good spread. xor-fold the high half so
-     * any hot 256-id range still distributes. */
-    return ((uint32_t)tag_id ^ ((uint32_t)tag_id >> 4)) & BAY_BUCKET_MASK;
+    /* TagFS interns roughly densely from 0 up, so a low-order mask gives
+     * good spread. xor-fold the high half so any hot 256-id range still
+     * distributes. */
+    return (tag_id ^ (tag_id >> 4)) & BAY_BUCKET_MASK;
 }
 
 void BayInit(void)
@@ -117,10 +117,10 @@ void BayInit(void)
  * concrete (key:value) blob). If no value present, the bare key is
  * used; bay_open("video", ...) is a valid tag.
  * ───────────────────────────────────────────────────────────────────── */
-static uint16_t bay_resolve_tag(const char *tag, bool intern_if_missing)
+static uint32_t bay_resolve_tag(const char *tag, bool intern_if_missing)
 {
     if (!intern_if_missing) return tagfs_tag_lookup(tag);
-    uint16_t id;
+    uint32_t id;
     return tagfs_tag_intern(tag, &id) == OK ? id : TAGFS_INVALID_TAG_ID;
 }
 
@@ -470,7 +470,7 @@ static BayClaim *bay_find_claim_by_va(cabin_t *cabin, uint64_t user_va)
 /* ─────────────────────────────────────────────────────────────────────
  * Bucket lookup — caller must hold bucket->lock. Returns BayObject or NULL.
  * ───────────────────────────────────────────────────────────────────── */
-static BayObject *bay_bucket_find_locked(BayBucket *b, uint16_t tag_id)
+static BayObject *bay_bucket_find_locked(BayBucket *b, uint32_t tag_id)
 {
     for (BayObject *o = b->head; o; o = o->bucket_next) {
         if (o->tag_id == tag_id) return o;
@@ -574,7 +574,7 @@ error_t BayOpenInternal(struct process_t *proc,
     if (flags & ~BAY_FLAGS_MASK) return ERR_INVALID_ARGUMENT;
 
     bool wants_create = (flags & BAY_CREATE) != 0;
-    uint16_t tag_id = bay_resolve_tag(tag, wants_create);
+    uint32_t tag_id = bay_resolve_tag(tag, wants_create);
     if (tag_id == TAGFS_INVALID_TAG_ID) return ERR_TAG_NOT_FOUND;
 
     BayBucket *b = &g_bay_buckets[bay_bucket_index(tag_id)];

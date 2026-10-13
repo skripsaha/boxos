@@ -38,7 +38,7 @@ typedef struct DraftBook {
 
 /* The state every part reads. Defined in draft.c. */
 extern DraftBook g_book;
-extern uint32_t  g_fid;        /* 0 until the volume has this draft */
+extern file_id_t g_fid;        /* 0 until the volume has this draft */
 extern char     *g_tags;       /* comma list create() stamps, NULL when none */
 extern uint32_t  g_line;       /* the cursor's line */
 extern uint32_t  g_byte;       /* the cursor's byte inside that line */
@@ -90,9 +90,9 @@ void move_page(int down);
 void paint(void);
 
 /* draft_file.c */
-void  tagline_from(uint32_t fid);
+void  tagline_from(file_id_t fid);
 char *join_with_commas(const char *const *words, uint32_t count);
-int   matches_by_name(const char *name, const char *tags, uint32_t **out_ids);
+int   matches_by_name(const char *name, const char *tags, file_id_t **out_ids);
 int   load_content(void);
 void  save_book(void);
 

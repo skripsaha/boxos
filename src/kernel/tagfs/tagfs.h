@@ -116,17 +116,18 @@ STATIC_ASSERT(sizeof(MetaPoolBlock) == 4096, "MetaPoolBlock must be 4096 bytes")
 
 /* key and value are NUL-terminated copies, their lengths kept beside them so
  * a record is packed from what was measured once, never cut by a cast. */
-typedef struct {
-    char*    key;
-    char*    value;
-    uint16_t value_len;
-    uint8_t  key_len;
-    uint8_t  flags;
-    uint16_t tag_id;
+typedef struct TagRegistryEntry {
+    char*                    key;
+    char*                    value;
+    struct TagRegistryEntry* id_next;    /* the next entry in its bucket of `by_id` */
+    uint16_t                 value_len;
+    uint8_t                  key_len;
+    uint8_t                  flags;
+    uint32_t                 tag_id;
 } TagRegistryEntry;
 
 typedef struct TagRegistryNode {
-    uint16_t                tag_id;
+    uint32_t                tag_id;
     struct TagRegistryNode* next;
 } TagRegistryNode;
 
@@ -135,18 +136,24 @@ typedef struct TagRegistryNode {
  * lock may hold a pointer into one (MP-D11) — TagRegistryKeyIds copies. */
 typedef struct TagKeyGroup TagKeyGroup;
 
-/* The two hashes — tags by their text, and a key's every tag — start at
- * TAGFS_REG_BUCKETS and TAGFS_KEY_BUCKETS buckets and double as they fill:
- * a new table is built outside the lock and swapped in under it. */
+/* The three hashes — tags by their text, tags by their id, and a key's every
+ * tag — start at TAGFS_REG_BUCKETS and TAGFS_KEY_BUCKETS buckets and double as
+ * they fill: a new table is built outside the lock and swapped in under it.
+ * The id's hash holds the entries that exist and nothing for an id no tag has,
+ * so it costs what the registry holds, never the highest id it ever gave; it
+ * has as many buckets as the text's, both holding every tag. */
 typedef struct {
     TagRegistryNode** buckets;
     uint32_t          bucket_count;
 
     TagRegistryEntry** by_id;
-    uint32_t           by_id_capacity;
 
     uint32_t total_tags;
-    uint16_t next_id;
+    uint32_t next_id;
+    /* The highest id the book this registry is written to can name: the
+     * kernel's TAGFS_MAX_TAG_ID, or format v1's TAGFS_V1_TAG_ID_MOST for one
+     * read off a v1 volume (tag_registry_load). No id past it is issued. */
+    uint32_t id_most;
 
     TagKeyGroup** key_buckets;
     uint32_t      key_bucket_count;
@@ -169,7 +176,7 @@ typedef struct {
      * that failed until a link names it. 0 is none — block 0 is the chain's
      * head and never a Spare. spare_image is the buffer it is written from.
      */
-    uint16_t          written_next;
+    uint32_t          written_next;
     uint32_t          tail_block;
     TagRegistryBlock* tail_image;
     uint32_t          spare_block;
@@ -203,7 +210,7 @@ typedef struct {
 // ----------------------------------------------------------------------------
 
 typedef struct {
-    uint16_t* ids;
+    uint32_t* ids;
     uint32_t  count;
     uint32_t  capacity;
 } TagIdList;
@@ -329,7 +336,7 @@ typedef struct {
     uint64_t    created_time;
     uint64_t    modified_time;
     char*       filename;
-    uint16_t*   tag_ids;
+    uint32_t*   tag_ids;
     uint32_t    tag_count;
     Strip*      extents;
     uint32_t    extent_count;
@@ -384,8 +391,8 @@ typedef struct {
  * cabin_t.auth_bits (auth_tags.h). They were kept as 1ULL << id, which is 0
  * for every id past 63 — a volume that interned trashed late had no trash. */
 typedef struct {
-    uint16_t trashed;
-    uint16_t hidden;
+    uint32_t trashed;
+    uint32_t hidden;
 } WellKnownTags;
 
 // Accessor functions (no extern needed)
@@ -402,14 +409,14 @@ void         tag_registry_destroy(TagRegistry* reg);
  * judged before anything is allocated (ERR_TAGFS_TAG_TOO_LONG); a registry
  * that has issued every id refuses with ERR_TAGFS_REGISTRY_FULL and says so
  * once; ERR_NO_MEMORY when memory ran out. */
-error_t      TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint16_t* out_id);
-uint16_t     TagRegistryLookup(TagRegistry* reg, const TagSpelling* tag);
-void         tag_registry_mark_system(TagRegistry* reg, uint16_t tag_id);
+error_t      TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint32_t* out_id);
+uint32_t     TagRegistryLookup(TagRegistry* reg, const TagSpelling* tag);
+void         tag_registry_mark_system(TagRegistry* reg, uint32_t tag_id);
 
 /* A tag's key and value as spans into the registry's own copies, and whether
  * the volume calls it its own. A tag's text never changes and is freed only
  * with the registry, so the spans hold for as long as the registry does. */
-bool         TagRegistrySpelling(TagRegistry* reg, uint16_t tag_id, TagSpelling* out,
+bool         TagRegistrySpelling(TagRegistry* reg, uint32_t tag_id, TagSpelling* out,
                                  bool* is_system);
 
 /* The id of every tag whose key is the key_len bytes at `key`, COPIED:
@@ -440,14 +447,13 @@ error_t      tag_registry_load(TagRegistry* reg, uint32_t first_block,
 // Bitmap Index API
 // ----------------------------------------------------------------------------
 
-/* An index with room for `initial_tag_cap` tags before its table of them
- * first grows; NULL when there is no memory. */
-TagBitmapIndex* tag_bitmap_create(uint32_t initial_tag_cap);
+/* An empty index; NULL when there is no memory. */
+TagBitmapIndex* tag_bitmap_create(void);
 void            tag_bitmap_destroy(TagBitmapIndex* idx);
 /* The file put under the tag: 0, or -1 — said once, with the index's numbers
  * — when the index had no memory for it, and then nothing changed. */
-int             tag_bitmap_set(TagBitmapIndex* idx, uint16_t tag_id, uint64_t file_id);
-bool            TagBitmapHas(TagBitmapIndex* idx, uint16_t tag_id, uint64_t file_id);
+int             tag_bitmap_set(TagBitmapIndex* idx, uint32_t tag_id, uint64_t file_id);
+bool            TagBitmapHas(TagBitmapIndex* idx, uint32_t tag_id, uint64_t file_id);
 
 /* An add of `file_id` under each of `count` distinct tags, in two halves so the
  * volume's state lock never waits on the heap. TagBitmapStakeFor takes, with
@@ -460,25 +466,26 @@ bool            TagBitmapHas(TagBitmapIndex* idx, uint16_t tag_id, uint64_t file
  * not spent, and what the pieces replaced, go with TagBitmapStakeLetGo, after
  * the lock. */
 typedef struct TagBitmapStake TagBitmapStake;
-error_t         TagBitmapStakeFor(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
+error_t         TagBitmapStakeFor(TagBitmapIndex* idx, const uint32_t* tags, uint32_t count,
                                   uint64_t file_id, TagBitmapStake** out);
-bool            TagBitmapStakeCovers(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
+bool            TagBitmapStakeCovers(TagBitmapIndex* idx, const uint32_t* tags, uint32_t count,
                                      uint64_t file_id, TagBitmapStake* stake);
-void            TagBitmapAddCovered(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
+void            TagBitmapAddCovered(TagBitmapIndex* idx, const uint32_t* tags, uint32_t count,
                                     uint64_t file_id);
 void            TagBitmapStakeLetGo(TagBitmapStake* stake);
 
 /* The file out from under the tag with nothing allocated, for a caller under
  * the volume's state lock: a window that falls to where an array would be
  * lighter stays a bitmap until TagBitmapShrink. */
-void            TagBitmapLeave(TagBitmapIndex* idx, uint16_t tag_id, uint64_t file_id);
+void            TagBitmapLeave(TagBitmapIndex* idx, uint32_t tag_id, uint64_t file_id);
 /* After a TagBitmapLeave of `file_id` from each of the `count` tags, with no
  * TagFS lock held: each window the file left that fell to where an array is
- * lighter made one again — its storage taken with no lock held and put in
- * under `state`, the volume's state lock, under which alone the index changes
- * shape. One the heap gives nothing for stays a bitmap, which costs room and
- * nothing else, until the next leave from it. */
-void            TagBitmapShrink(TagBitmapIndex* idx, TagFSLock* state, const uint16_t* tags,
+ * lighter made one again, and the table of tags made smaller when the tags
+ * with members left fill too little of it — the storage taken with no lock
+ * held and put in under `state`, the volume's state lock, under which alone
+ * the index changes shape. What the heap gives nothing for stays as it was,
+ * which costs room and nothing else, until the next leave. */
+void            TagBitmapShrink(TagBitmapIndex* idx, TagFSLock* state, const uint32_t* tags,
                                 uint32_t count, uint64_t file_id);
 /* The kernel heap the index holds. */
 uint64_t        TagBitmapBytes(TagBitmapIndex* idx);
@@ -486,9 +493,9 @@ uint64_t        TagBitmapBytes(TagBitmapIndex* idx);
  * tag of each of `groups`, and none of `unless`, in id order: up to `room`
  * into `out`, and the page says the rest (TagFSPage). 0, or -1 for no index. */
 int             TagBitmapQueryPage(TagBitmapIndex* idx,
-                    const uint16_t* tag_ids, uint32_t tag_count,
+                    const uint32_t* tag_ids, uint32_t tag_count,
                     const TagIdList* groups, uint32_t group_count,
-                    const uint16_t* unless, uint32_t unless_count,
+                    const uint32_t* unless, uint32_t unless_count,
                     uint64_t from, uint64_t* out, uint32_t room,
                     bool want_total, TagFSPage* page);
 #ifdef CONFIG_VOLUME_TESTS
@@ -698,7 +705,7 @@ uint64_t tagfs_block_to_sector(uint64_t block);
  * without the tag its name gives it, a record wider than format v1 carries
  * is refused ERR_TAGFS_RECORD_FULL, and a volume that has issued every file id
  * it can is refused ERR_TAGFS_FID_EXHAUSTED (LedgerIssueFileId). */
-int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint32_t tag_count,
+int  tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count,
                        uint64_t* out_file_id);
 
 /* Whether a file named `filename` wearing `tags` — each counted once, its
@@ -740,9 +747,9 @@ error_t tagfs_span_file(uint64_t file_id, uint64_t size);
 
 /* A tag put on a file, or taken off: 0, or the Ink's refusal as -ERR_*. A tag
  * of key system, boot or god goes on or comes off only with the warrant. */
-int  tagfs_add_tag(uint64_t file_id, uint16_t tag_id, InkWarrant warrant);
-int  tagfs_remove_tag(uint64_t file_id, uint16_t tag_id, InkWarrant warrant);
-bool tagfs_has_tag(uint64_t file_id, uint16_t tag_id);
+int  tagfs_add_tag(uint64_t file_id, uint32_t tag_id, InkWarrant warrant);
+int  tagfs_remove_tag(uint64_t file_id, uint32_t tag_id, InkWarrant warrant);
+bool tagfs_has_tag(uint64_t file_id, uint32_t tag_id);
 
 /* The tag a spelling names, interned and put on the file, both inside one
  * mounting of the volume: OK, or the real refusal — the registry's (the tag
@@ -902,41 +909,41 @@ int      tagfs_volume_write(uint64_t vlba, uint32_t count, const void* buffer);
  * it goes. TAGFS_INVALID_TAG_ID / false is the answer when there is no volume.
  * A tag's text is read by the one spelling (tag_spelling.h).
  */
-uint16_t tagfs_tag_lookup(const char* tag);
-uint16_t TagFSLookupSpelling(const TagSpelling* tag);
+uint32_t tagfs_tag_lookup(const char* tag);
+uint32_t TagFSLookupSpelling(const TagSpelling* tag);
 
 /* The id, issued when the volume has none: OK, the spelling's or the
  * registry's refusal, or ERR_TAGFS_NOT_INITIALIZED when there is no volume. */
-error_t  tagfs_tag_intern(const char* tag, uint16_t* out_id);
-error_t  TagFSInternSpelling(const TagSpelling* tag, uint16_t* out_id);
+error_t  tagfs_tag_intern(const char* tag, uint32_t* out_id);
+error_t  TagFSInternSpelling(const TagSpelling* tag, uint32_t* out_id);
 
 /* The key of a tag id — "app" out of "app:editor" — copied whole into `out`,
  * or not at all: false when the volume has no such tag or the key would not
  * fit, never a shorter key. */
-bool     tagfs_tag_key (uint16_t tag_id, char* out, size_t out_size);
+bool     tagfs_tag_key (uint32_t tag_id, char* out, size_t out_size);
 
 /* The whole text of a tag id — "app:editor" — and its length. It is written
  * into `out` only when it fits whole, NUL and all, and `out` is left empty
  * otherwise, so a caller is never handed a shorter tag than the one it asked
  * for: a caller that must have it measures first (out NULL, size 0). 0 when
  * the volume has no such tag, or there is no volume. */
-size_t   tagfs_tag_text(uint16_t tag_id, char* out, size_t out_size);
+size_t   tagfs_tag_text(uint32_t tag_id, char* out, size_t out_size);
 
 /* Whether tag `tag_id` is one a pattern names (TagPatternMatches), read in
  * place in the volume's registry. */
-bool     TagFSTagMatches(uint16_t tag_id, const TagSpelling* pattern);
+bool     TagFSTagMatches(uint32_t tag_id, const TagSpelling* pattern);
 
 /* The keys of `count` tags, comma-joined in a heap string the caller kfree's,
  * whole however long — what a process started from a file wears (it is given
  * the keys, as it always was). An id the volume does not know is passed over.
  * NULL when there is no memory, or no volume. */
-char*    TagFSKeyList(const uint16_t* tag_ids, uint32_t count);
+char*    TagFSKeyList(const uint32_t* tag_ids, uint32_t count);
 
 /* A tag's key and value as spans into the volume's registry, and whether the
  * volume calls the tag its own — no copy, for a caller that is INSIDE THE
  * DOOR (tagfs_enter) and reads them before it leaves: the registry is freed
  * only once the last caller is out. */
-bool     TagFSTagSpelling(uint16_t tag_id, TagSpelling* out, bool* is_system);
+bool     TagFSTagSpelling(uint32_t tag_id, TagSpelling* out, bool* is_system);
 
 // Snapshots: a format-v1 volume answers every request for one ERR_UNSUPPORTED
 // (TagFS_SnapshotRefused, tagfs/cow/cow.h); they arrive with format v2.

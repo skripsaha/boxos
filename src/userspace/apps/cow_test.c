@@ -36,7 +36,7 @@ static bool refused(const char *what, int rc)
     return false;
 }
 
-static bool snapshots_refused(uint32_t fid)
+static bool snapshots_refused(file_id_t fid)
 {
     uint32_t    snap_id = 0;
     uint32_t    ids[4];
@@ -68,41 +68,41 @@ int main(void)
         buf_b[i] = (char)('Z' - (i % 26));
     }
 
-    int fid = create(COW_NAME, COW_TAG);
+    int64_t fid = create(COW_NAME, COW_TAG);
     if (fid < 0) {
-        kdbg_print("[COW] create rc=%d", fid);
+        kdbg_print("[COW] create rc=%ld", fid);
         return 1;
     }
 
-    if (fwrite((uint32_t)fid, 0, buf_a, COW_BYTES) != COW_BYTES) {
+    if (fwrite((file_id_t)fid, 0, buf_a, COW_BYTES) != COW_BYTES) {
         kdbg_print("[COW] initial write FAIL");
-        delete((uint32_t)fid);
+        delete((file_id_t)fid);
         return 1;
     }
 
-    if (!snapshots_refused((uint32_t)fid)) {
-        delete((uint32_t)fid);
+    if (!snapshots_refused((file_id_t)fid)) {
+        delete((file_id_t)fid);
         return 1;
     }
     kdbg_print("[COW] every snapshot request is refused (ERR_UNSUPPORTED) on format v1");
 
-    if (fwrite((uint32_t)fid, 0, buf_b, COW_BYTES) != COW_BYTES) {
+    if (fwrite((file_id_t)fid, 0, buf_b, COW_BYTES) != COW_BYTES) {
         kdbg_print("[COW] overwrite FAIL");
-        delete((uint32_t)fid);
+        delete((file_id_t)fid);
         return 1;
     }
-    if (fread((uint32_t)fid, 0, rbuf, COW_BYTES) != COW_BYTES) {
+    if (fread((file_id_t)fid, 0, rbuf, COW_BYTES) != COW_BYTES) {
         kdbg_print("[COW] read after overwrite FAIL");
-        delete((uint32_t)fid);
+        delete((file_id_t)fid);
         return 1;
     }
     if (memcmp(rbuf, buf_b, COW_BYTES) != 0) {
         kdbg_print("[COW] FAIL: live read != pattern B");
-        delete((uint32_t)fid);
+        delete((file_id_t)fid);
         return 1;
     }
 
-    delete((uint32_t)fid);
+    delete((file_id_t)fid);
     kdbg_print("[COW] PASS — snapshots refused on format v1, the write lands in place");
     return 0;
 }

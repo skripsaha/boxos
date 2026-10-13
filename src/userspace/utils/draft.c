@@ -44,7 +44,7 @@
 #include "draft.h"
 
 DraftBook g_book;
-uint32_t  g_fid;        /* 0 until the volume has this draft */
+file_id_t g_fid;        /* 0 until the volume has this draft */
 char     *g_tags;       /* comma list create() stamps, NULL when none */
 uint32_t  g_line;       /* the cursor's line */
 uint32_t  g_byte;       /* the cursor's byte inside that line */
@@ -357,15 +357,15 @@ static const char *open_the_draft(int argc)
         if (!g_tags) return "There is no memory for the tag list.";
     }
 
-    uint32_t *ids = NULL;
-    int       n   = matches_by_name(s_name, g_tags, &ids);
+    file_id_t *ids = NULL;
+    int        n   = matches_by_name(s_name, g_tags, &ids);
     if (n < 0) return "The volume could not be asked which files are called that.";
     if (n > 1) {
         println("Several files are called that:");
         for (int i = 0; i < n; i++) {
             file_info_t info;
             if (file_info(ids[i], &info) == 0)
-                printf("  %s [file_id=%u]\n", info.filename, ids[i]);
+                printf("  %s [file_id=%lu]\n", info.filename, ids[i]);
         }
         free(ids);
         return "Name a tag that tells them apart, after the filename.";

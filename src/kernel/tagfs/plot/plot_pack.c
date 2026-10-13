@@ -19,8 +19,9 @@
  * and the record's room is judged on what that cut makes (PackV1Extents,
  * PlotFits) — never on the Strips — so a record that fits in memory fits on
  * the medium. What the cut cannot carry — a block past a u32, a run that owns
- * no ground, a file id past a u32 — is refused, said, before a byte is written.
- * Reading back, neighbouring extents join into one Strip again.
+ * no ground, a file id past a u32, a tag id past TAGFS_V1_TAG_ID_MOST — is
+ * refused, said, before a byte is written. Reading back, neighbouring extents
+ * join into one Strip again, and each u16 tag id is a u32 in memory.
  */
 
 #define PLOT_V1_COUNT_MOST 0xFFFFu    /* the u16 counts of the record head */
@@ -138,10 +139,27 @@ static error_t PlotFidCarried(uint64_t fid)
     return ERR_TAGFS_FID_EXHAUSTED;
 }
 
+/* Every tag id the record wears inside what format v1 carries: OK, or
+ * ERR_TAGFS_RECORD_FULL — said — for one past it, which no v1 registry issues. */
+static error_t PlotTagsCarried(const TagFSMetadata *meta)
+{
+    for (uint32_t i = 0; meta->tag_ids && i < meta->tag_count; i++) {
+        if (meta->tag_ids[i] <= TAGFS_V1_TAG_ID_MOST)
+            continue;
+        kprintf("[TagFS] file %llu: tag %u of its record is id %u, past the %u a record of this "
+                "volume carries — the record is not written\n",
+                (unsigned long long)meta->file_id, i, meta->tag_ids[i], TAGFS_V1_TAG_ID_MOST);
+        return ERR_TAGFS_RECORD_FULL;
+    }
+    return OK;
+}
+
 error_t PackV1(const TagFSMetadata *meta, uint64_t run_blocks, uint8_t *out, uint32_t *out_bytes)
 {
     uint64_t fid     = meta->file_id;
     error_t  carried = PlotFidCarried(fid);
+    if (carried == OK)
+        carried = PlotTagsCarried(meta);
     if (carried != OK)
         return carried;
     uint32_t bad = 0;
@@ -190,9 +208,10 @@ error_t PackV1(const TagFSMetadata *meta, uint64_t run_blocks, uint8_t *out, uin
     memcpy(out + pos, &extent_n,            2);  pos += 2;
     memcpy(out + pos, &name,                2);  pos += 2;
     memcpy(out + pos, &crc,                 2);  pos += 2;
-    if (tags) {
-        memcpy(out + pos, meta->tag_ids, (uint32_t)tags * sizeof(uint16_t));
-        pos += (uint32_t)tags * sizeof(uint16_t);
+    for (uint32_t i = 0; i < tags; i++) {
+        uint16_t tag = (uint16_t)meta->tag_ids[i];
+        memcpy(out + pos, &tag, sizeof(tag));
+        pos += sizeof(tag);
     }
     pos += PlotLayExtents(meta->extents, meta->extent_count, out + pos);
     if (name)
@@ -297,11 +316,15 @@ error_t UnpackV1(const uint8_t *rec, uint32_t room, uint64_t run_blocks, TagFSMe
     out->filename     = NULL;
 
     if (tags) {
-        out->tag_ids = kmalloc(sizeof(uint16_t) * tags);
+        out->tag_ids = kmalloc(sizeof(uint32_t) * tags);
         if (!out->tag_ids)
             return ERR_NO_MEMORY;
-        memcpy(out->tag_ids, rec + pos, sizeof(uint16_t) * tags);
-        pos += (uint32_t)tags * sizeof(uint16_t);
+        for (uint32_t i = 0; i < tags; i++) {
+            uint16_t tag;
+            memcpy(&tag, rec + pos, sizeof(tag));
+            out->tag_ids[i] = tag;
+            pos += sizeof(tag);
+        }
     }
 
     /* An extent outside the data run is not a record to follow: the file is

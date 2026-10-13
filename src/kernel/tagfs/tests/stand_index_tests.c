@@ -35,7 +35,7 @@ static char     s_index_name[] = "stand_index";
 static uint64_t s_rows[STAND_INDEX_FILES + 1];
 static uint64_t s_made[STAND_INDEX_MANY];
 static uint64_t s_page[STAND_INDEX_PAGE];
-static uint32_t s_crate[2 + STAND_INDEX_CRATE];
+static uint64_t s_crate[1 + STAND_INDEX_CRATE];   /* [u32 delivered][u32 total], the ids */
 static uint8_t  s_query_op[sizeof(ManifestOp) + 8] __attribute__((aligned(8)));
 static Crate    s_query_crates[2];
 
@@ -43,7 +43,7 @@ static Crate    s_query_crates[2];
  * apart from 1 on, each with a record of one tag and a row. */
 static bool StandIndexFill(FileMap* map, uint32_t step)
 {
-    uint16_t tag = 1;
+    uint32_t tag = 1;
     for (uint32_t k = 0; k < STAND_INDEX_FILES; k++) {
         uint64_t      fid  = 1 + k * step;
         TagFSMetadata meta = { .file_id = fid, .flags = TAGFS_FILE_ACTIVE,
@@ -69,7 +69,7 @@ static TestResult TestStandIndexMapCostsTheLive(void)
     TestResult      verdict = TEST_PASS;
     FileMap*        near    = FileMapCreate();
     FileMap*        far     = FileMapCreate();
-    TagBitmapIndex* idx     = tag_bitmap_create(4);
+    TagBitmapIndex* idx     = tag_bitmap_create();
     uint32_t        step    = (STAND_INDEX_SPREAD - 1) / (STAND_INDEX_FILES - 1);
 
     TEST_ASSERT(near && far && idx, "two maps and an index of the test's own");
@@ -113,7 +113,7 @@ out:
 static const uint32_t s_edge[] = { 1, 65535, 65536, 65537, 131071, 131072 };
 
 /* The members of `tags` (all of them worn) from `from` on, `room` at most. */
-static bool StandIndexPage(TagBitmapIndex* idx, const uint16_t* tags, uint32_t count,
+static bool StandIndexPage(TagBitmapIndex* idx, const uint32_t* tags, uint32_t count,
                            uint32_t from, uint32_t room, TagFSPage* page)
 {
     return TagBitmapQueryPage(idx, tags, count, NULL, 0, NULL, 0, from, s_page, room,
@@ -122,7 +122,7 @@ static bool StandIndexPage(TagBitmapIndex* idx, const uint16_t* tags, uint32_t c
 
 /* `fid` out from under `tag` the way an Ink takes it out: under the volume's
  * state lock, which the index changes shape under alone. */
-static void StandIndexLeave(TagBitmapIndex* idx, uint16_t tag, uint64_t fid)
+static void StandIndexLeave(TagBitmapIndex* idx, uint32_t tag, uint64_t fid)
 {
     TagFSLockTake(&tagfs_get_state()->lock);
     TagBitmapLeave(idx, tag, fid);
@@ -132,9 +132,9 @@ static void StandIndexLeave(TagBitmapIndex* idx, uint16_t tag, uint64_t fid)
 static TestResult TestStandIndexWindowEdge(void)
 {
     TestResult      verdict = TEST_PASS;
-    TagBitmapIndex* idx     = tag_bitmap_create(4);
-    uint16_t        tag     = 3;
-    uint16_t        both[2] = { 3, 4 };
+    TagBitmapIndex* idx     = tag_bitmap_create();
+    uint32_t        tag     = 3;
+    uint32_t        both[2] = { 3, 4 };
     TagFSPage       page;
 
     TEST_ASSERT(idx != NULL, "an index of the test's own");
@@ -200,13 +200,13 @@ out:
 static TestResult TestStandIndexQueryHoldBounded(void)
 {
     TestResult      verdict = TEST_PASS;
-    TagBitmapIndex* idx     = tag_bitmap_create(4);
-    uint16_t*       ids     = kmalloc(sizeof(uint16_t) * STAND_INDEX_KEY_TAGS);
+    TagBitmapIndex* idx     = tag_bitmap_create();
+    uint32_t*       ids     = kmalloc(sizeof(uint32_t) * STAND_INDEX_KEY_TAGS);
     TagFSPage       page;
 
     TEST_ASSERT(idx && ids, "an index and a key of the test's own");
     for (uint32_t i = 0; i < STAND_INDEX_KEY_TAGS; i++) {
-        ids[i] = (uint16_t)(STAND_INDEX_KEY_FIRST + i);
+        ids[i] = (uint32_t)(STAND_INDEX_KEY_FIRST + i);
         TEST_ASSERT_EQ(tag_bitmap_set(idx, ids[i], 1 + 3 * i), 0,
                        "each value of the key worn by a file of its own");
     }
@@ -247,7 +247,7 @@ static TestResult TestStandIndexRegistryRehash(void)
     built = true;
 
     for (uint32_t i = 0; i < STAND_INDEX_TAGS; i++) {
-        uint16_t    id;
+        uint32_t    id;
         TagSpelling one;
         ksnprintf(text, sizeof(text), "many:%u", i);
         TEST_ASSERT_OK(TagSpell(text, strlen(text), &one), "a tag of the key many");
@@ -302,7 +302,7 @@ static int StandIndexDeckQuery(const char* text, uint32_t room, uint64_t* out_si
     s_query_crates[0] = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)text,
                                  .size = strlen(text), .capacity = strlen(text) };
     s_query_crates[1] = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)s_crate,
-                                 .capacity = 8 + (uint64_t)room * sizeof(uint32_t) };
+                                 .capacity = 8 + (uint64_t)room * sizeof(uint64_t) };
     int rc = reg->handler(op, s_query_crates, 2, NULL);
     *out_size = s_query_crates[1].size;
     return rc;
@@ -359,6 +359,7 @@ static TestResult TestStandIndexCursorPast1024(void)
     uint32_t    made    = 0;
     uint32_t    seen    = 0;
     uint64_t    said    = 0;
+    uint32_t    head[2] = { 0, 0 };   /* the answer's delivered and total */
     const char* name    = "stand_index_many";
     TagSpelling spelled;
 
@@ -375,14 +376,16 @@ static TestResult TestStandIndexCursorPast1024(void)
     TEST_ASSERT_EQ(seen, STAND_INDEX_MANY, "and carry every one of the 1100");
 
     TEST_ASSERT_OK(StandIndexDeckQuery(name, 16, &said), "storage.query with room for 16");
-    TEST_ASSERT(s_crate[0] == 16 && s_crate[1] == STAND_INDEX_MANY,
+    memcpy(head, s_crate, sizeof(head));
+    TEST_ASSERT(head[0] == 16 && head[1] == STAND_INDEX_MANY,
                 "fills its room and says the whole count");
-    TEST_ASSERT_EQ(said, 8 + 16 * sizeof(uint32_t), "the crate holds what it says it holds");
+    TEST_ASSERT_EQ(said, 8 + 16 * sizeof(uint64_t), "the crate holds what it says it holds");
     TEST_ASSERT_OK(StandIndexDeckQuery(name, STAND_INDEX_CRATE, &said), "storage.query with room for all");
-    TEST_ASSERT(s_crate[0] == STAND_INDEX_MANY && s_crate[1] == STAND_INDEX_MANY,
+    memcpy(head, s_crate, sizeof(head));
+    TEST_ASSERT(head[0] == STAND_INDEX_MANY && head[1] == STAND_INDEX_MANY,
                 "delivers every file of the name");
     for (uint32_t k = 0; k < STAND_INDEX_MANY; k++)
-        TEST_ASSERT_EQ(s_crate[2 + k], s_made[k], "each in id order, across the pieces it is written in");
+        TEST_ASSERT_EQ(s_crate[1 + k], s_made[k], "each in id order, across the pieces it is written in");
 out:
     for (uint32_t k = 0; k < made; k++)
         tagfs_delete_file(s_made[k], INK_UNWARRANTED);

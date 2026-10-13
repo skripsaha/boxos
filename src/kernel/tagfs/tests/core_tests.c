@@ -34,7 +34,7 @@ static TestResult test_tagfs_create_file(void)
 {
     TestResult verdict = TEST_PASS;
     uint64_t   file_id = 0;
-    uint16_t   tag_ids[2] = {1, 2};
+    uint32_t   tag_ids[2] = {1, 2};
 
     TEST_ASSERT_EQ(tagfs_create_file("test_file", tag_ids, 2, &file_id), 0,
                    "tagfs_create_file should succeed");
@@ -49,7 +49,7 @@ static TestResult test_tagfs_write_read(void)
 {
     TestResult verdict = TEST_PASS;
     uint64_t   file_id = 0;
-    uint16_t   tag_ids[1] = {1};
+    uint32_t   tag_ids[1] = {1};
 
     TEST_ASSERT_EQ(tagfs_create_file("test_rw", tag_ids, 1, &file_id), 0,
                    "tagfs_create_file should succeed");

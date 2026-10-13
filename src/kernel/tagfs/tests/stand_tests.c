@@ -95,7 +95,8 @@ bool StandBlockInUse(uint64_t block)
     return BlockMapIsTaken(block);
 }
 
-static uint8_t s_deck_op[sizeof(ManifestOp) + 16] __attribute__((aligned(8)));
+/* Room for the widest params a program lays: a write's, a ferry's waybill after it. */
+static uint8_t s_deck_op[sizeof(ManifestOp) + 28] __attribute__((aligned(8)));
 static Crate   s_deck_crate;
 
 int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const void* in,
@@ -426,7 +427,7 @@ out:
 static TestResult TestStandTagRowRefusesWhatItCannotWiden(void)
 {
     TestResult      verdict = TEST_PASS;
-    TagBitmapIndex* idx     = tag_bitmap_create(4);
+    TagBitmapIndex* idx     = tag_bitmap_create();
     bool            armed   = false;
 
     TEST_ASSERT(idx != NULL, "an index of the test's own");

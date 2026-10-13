@@ -161,7 +161,7 @@ void    UseContextUnbind(void);
  * the number. Said inside the volume's door, with no TagFS lock held; one load
  * when the context waits for no number, which is almost always.
  */
-void    UseContextBindTag(const TagSpelling *tag, uint16_t tag_id);
+void    UseContextBindTag(const TagSpelling *tag, uint32_t tag_id);
 
 void    UseContextInit(void);
 void    UseContextShutdown(void);

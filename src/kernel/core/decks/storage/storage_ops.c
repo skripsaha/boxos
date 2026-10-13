@@ -7,13 +7,14 @@
  * primitives, so a payload that straddles a page boundary is copied across
  * every backing frame. A 1-MiB read fits in one syscall.
  *
- * Param layouts (little-endian, packed):
- *   OBJ_READ      params: [u32 file_id][u64 offset]
- *   OBJ_WRITE     params: [u32 file_id][u64 offset][u32 flags]
- *   OBJ_SPAN      params: [u32 file_id][u64 size][u32 flags]
- *   OBJ_DELETE    params: [u32 file_id]
- *   OBJ_RENAME    params: [u32 file_id][u16 new_name_len][char new_name[]]
- *   OBJ_GET_INFO  params: [u32 file_id]
+ * Param layouts (little-endian, packed); a file id is a u64 on the wire, as
+ * it is in the kernel:
+ *   OBJ_READ      params: [u64 file_id][u64 offset]
+ *   OBJ_WRITE     params: [u64 file_id][u64 offset][u32 flags]
+ *   OBJ_SPAN      params: [u64 file_id][u64 size][u32 flags]
+ *   OBJ_DELETE    params: [u64 file_id]
+ *   OBJ_RENAME    params: [u64 file_id][u16 new_name_len][char new_name[]]
+ *   OBJ_GET_INFO  params: [u64 file_id]
  *
  *   OBJ_READ.out_crate     : payload destination, written a block at a time
  *                            as the read reaches it; size <- the bytes that
@@ -171,13 +172,13 @@ static int ObjRead(const ManifestOp *op,
 {
     (void)crate_count;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 12)               return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 16)               return ERR_INVALID_ARGUMENT;
 
-    uint32_t file_id = param_u32(op, 0);
-    uint64_t offset  = param_u64(op, 4);
+    uint64_t file_id = param_u64(op, 0);
+    uint64_t offset  = param_u64(op, 8);
     /* Ф26e: optional trailing correlation waybill (box::ferry). Absent for a
-     * synchronous read (param_size 12) → 0 → plain KCTX_GUIDE completion. */
-    uint64_t waybill = (op->param_size >= 20) ? param_u64(op, 12) : 0;
+     * synchronous read (param_size 16) → 0 → plain KCTX_GUIDE completion. */
+    uint64_t waybill = (op->param_size >= 24) ? param_u64(op, 16) : 0;
     Crate   *out     = &crates[op->out_crate];
     if (out->capacity == 0)
         return storage_op_fail(ctx, crates, ERR_BUFFER_TOO_SMALL, waybill);
@@ -244,18 +245,18 @@ static int ObjWrite(const ManifestOp *op,
 {
     (void)crate_count;
     if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 16)              return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 20)              return ERR_INVALID_ARGUMENT;
 
     WriteJobAsk ask;
     memset(&ask, 0, sizeof(ask));
     ask.kind    = WRITE_JOB_WRITE;
-    ask.file_id = param_u32(op, 0);
-    ask.offset  = param_u64(op, 4);
-    ask.append  = (param_u32(op, 12) & STORAGE_WRITE_APPEND) != 0;
+    ask.file_id = param_u64(op, 0);
+    ask.offset  = param_u64(op, 8);
+    ask.append  = (param_u32(op, 16) & STORAGE_WRITE_APPEND) != 0;
     ask.warrant = StorageCallWarrant(ctx);
     /* Ф26e: optional trailing correlation waybill (box::ferry). Absent for a
-     * synchronous write (param_size 16) → 0 → plain KCTX_GUIDE completion. */
-    ask.waybill = (op->param_size >= 24) ? param_u64(op, 16) : 0;
+     * synchronous write (param_size 20) → 0 → plain KCTX_GUIDE completion. */
+    ask.waybill = (op->param_size >= 28) ? param_u64(op, 20) : 0;
 
     Crate *src = &crates[op->in_crate];
     if (src->size == 0 || src->size > src->capacity)
@@ -302,16 +303,16 @@ static int ObjDelete(const ManifestOp *op,
                      uint16_t          crate_count,
                      const OpContext  *ctx)
 {
-    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
 
-    int rc = tagfs_delete_file(param_u32(op, 0), StorageCallWarrant(ctx));
+    int rc = tagfs_delete_file(param_u64(op, 0), StorageCallWarrant(ctx));
     if (-rc == ERR_WOULD_BLOCK)
-        return SettleOpForRoom(op, crates, crate_count, ctx, param_u32(op, 0));
+        return SettleOpForRoom(op, crates, crate_count, ctx, param_u64(op, 0));
     return rc == 0 ? OK : -rc;
 }
 
 /* -------------------------------------------------------------------------
- * OBJ_SPAN — params = [u32 file_id][u64 size][u32 flags]: the file made
+ * OBJ_SPAN — params = [u64 file_id][u64 size][u32 flags]: the file made
  * exactly `size` bytes long (HelmSpanWindow). Shorter cuts the tail; longer
  * reads as zeros from the old size on, grown a window at a time. With
  * STORAGE_SPAN_GROW the file is grown to `size` only if it is shorter, decided
@@ -337,15 +338,15 @@ static int ObjSpan(const ManifestOp *op,
                    const OpContext  *ctx)
 {
     (void)crate_count;
-    if (op->param_size < 12) return ERR_INVALID_ARGUMENT;
-    uint32_t flags = op->param_size >= 16 ? param_u32(op, 12) : 0;
+    if (op->param_size < 16) return ERR_INVALID_ARGUMENT;
+    uint32_t flags = op->param_size >= 20 ? param_u32(op, 16) : 0;
     if (flags & ~STORAGE_SPAN_GROW) return ERR_INVALID_ARGUMENT;
 
     WriteJobAsk ask;
     memset(&ask, 0, sizeof(ask));
     ask.kind      = WRITE_JOB_SPAN;
-    ask.file_id   = param_u32(op, 0);
-    ask.size      = param_u64(op, 4);
+    ask.file_id   = param_u64(op, 0);
+    ask.size      = param_u64(op, 8);
     ask.grow_only = (flags & STORAGE_SPAN_GROW) != 0;
     ask.warrant   = StorageCallWarrant(ctx);
     return WriteJobSubmit(&ask, crates, ctx);
@@ -362,16 +363,16 @@ static int ObjRename(const ManifestOp *op,
                      uint16_t          crate_count,
                      const OpContext  *ctx)
 {
-    if (op->param_size < 6) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 10) return ERR_INVALID_ARGUMENT;
 
-    uint32_t file_id      = param_u32(op, 0);
-    uint16_t new_name_len = param_u16(op, 4);
-    if (new_name_len == 0)                          return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 6u + (uint32_t)new_name_len) return ERR_INVALID_ARGUMENT;
+    uint64_t file_id      = param_u64(op, 0);
+    uint16_t new_name_len = param_u16(op, 8);
+    if (new_name_len == 0)                           return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 10u + (uint32_t)new_name_len) return ERR_INVALID_ARGUMENT;
 
     char name[64];
     if (new_name_len >= sizeof(name)) return ERR_BUFFER_TOO_SMALL;
-    memcpy(name, op->params + 6, new_name_len);
+    memcpy(name, op->params + 10, new_name_len);
     name[new_name_len] = '\0';
 
     /* The volume's own answer: ERR_TAGFS_RECORD_FULL for a name that would
@@ -391,7 +392,7 @@ static int ObjRename(const ManifestOp *op,
  * straight out of the volume's registry into the answer.
  *
  * Layout written into out_crate (little-endian):
- *   [u32 file_id]
+ *   [u64 file_id]
  *   [u32 flags]
  *   [u64 size]
  *   [u16 tag_count]
@@ -406,7 +407,7 @@ static int ObjRename(const ManifestOp *op,
  * ------------------------------------------------------------------------- */
 
 /* One tag's record: [u16 key_len][u16 val_len][u8 type][key][val]. */
-static uint64_t info_tag_record(uint8_t *kp, uint64_t pos, uint16_t tag_id)
+static uint64_t info_tag_record(uint8_t *kp, uint64_t pos, uint32_t tag_id)
 {
     TagSpelling tag       = { 0 };
     bool        is_system = false;
@@ -433,9 +434,9 @@ static int ObjGetInfo(const ManifestOp *op,
 {
     (void)crate_count;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 4)                return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 8)                return ERR_INVALID_ARGUMENT;
 
-    uint32_t file_id = param_u32(op, 0);
+    uint64_t file_id = param_u64(op, 0);
     Crate   *out     = &crates[op->out_crate];
 
     TagFSMetadata md;
@@ -461,7 +462,7 @@ static int ObjGetInfo(const ManifestOp *op,
 
     /* The answer's tag count is u16 on the wire; a record holds no more. */
     uint16_t tag_count = (uint16_t)md.tag_count;
-    uint64_t need = 4u + 4u + 8u + 2u + 2u + filename_len;
+    uint64_t need = 8u + 4u + 8u + 2u + 2u + filename_len;
     for (uint32_t i = 0; i < tag_count; i++)
         need = info_tag_record(NULL, need, md.tag_ids[i]);
 
@@ -485,7 +486,7 @@ static int ObjGetInfo(const ManifestOp *op,
             if (md.tag_ids[i] == wk->hidden)  flags |= TAGFS_FILE_HIDDEN;
         }
 
-        memcpy(kp + pos, &file_id,    4); pos += 4;   /* the id asked: the record's own */
+        memcpy(kp + pos, &file_id,    8); pos += 8;   /* the id asked: the record's own */
         memcpy(kp + pos, &flags,      4); pos += 4;
         memcpy(kp + pos, &md.size,    8); pos += 8;
         memcpy(kp + pos, &tag_count,  2); pos += 2;
@@ -607,19 +608,18 @@ static error_t storage_crate_text(const ManifestOp *op, Crate *crates, const OpC
  * The files `tags` match (every file, for none), written into the out crate
  * after its 8-byte header a piece at a time, straight from the index's pages:
  * the kernel holds one piece and never the whole answer, and the crate is
- * given as many ids as it has room for. hdr[0] is how many went in, hdr[1]
- * how many match — counted by the first page, and never less than what went
- * in, since a file made while the pages are taken is delivered too.
+ * given as many ids as it has room for, each the u64 the index holds. hdr[0]
+ * is how many went in, hdr[1] how many match — counted by the first page, and
+ * never less than what went in, since a file made while the pages are taken
+ * is delivered too.
  */
 static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const Crate *out,
                                   const OpContext *ctx, uint32_t hdr[2])
 {
-    uint64_t room_ids = (out->capacity - 8) / sizeof(uint32_t);
+    uint64_t room_ids = (out->capacity - 8) / sizeof(uint64_t);
     uint32_t most     = room_ids > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)room_ids;
-    /* The index's ids, and the same ids as the crate carries them. */
-    uint64_t *piece   = kmalloc(STORAGE_QUERY_PIECE * (sizeof(uint64_t) + sizeof(uint32_t)));
+    uint64_t *piece   = kmalloc(STORAGE_QUERY_PIECE * sizeof(uint64_t));
     if (!piece) return ERR_NO_MEMORY;
-    uint32_t *ids     = (uint32_t *)(piece + STORAGE_QUERY_PIECE);
 
     error_t  rc    = OK;
     uint64_t from  = 1;
@@ -631,21 +631,16 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
         if (rc != OK) break;
         if (first) hdr[1] = page.total;
         first = false;
-        uint32_t carried = 0;
-        while (carried < page.delivered && rc == OK) {
-            rc = StorageFileIdOut(piece[carried], &ids[carried]);
-            carried += rc == OK;
-        }
-        if (carried > 0) {
-            int wrc = crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint32_t),
-                                          ids, (uint64_t)carried * sizeof(uint32_t));
+        if (page.delivered > 0) {
+            int wrc = crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint64_t),
+                                          piece, (uint64_t)page.delivered * sizeof(uint64_t));
             if (wrc != OK) {
                 rc = (error_t)wrc;
                 break;
             }
-            hdr[0] += carried;
+            hdr[0] += page.delivered;
         }
-        if (rc != OK || page.next == 0 || hdr[0] == most) break;
+        if (page.next == 0 || hdr[0] == most) break;
         from = page.next;
     }
     kfree(piece);
@@ -656,7 +651,7 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
 /* STORAGE_TAG_QUERY  params (optional): [u8 scope] — inside the Use Context
  *                    (absent, STORAGE_SCOPE_USE) or STORAGE_SCOPE_EVERYWHERE
  *                    in_crate (optional): comma-separated tag string
- *                    out_crate: [u32 delivered][u32 total][u32 file_ids[delivered]]
+ *                    out_crate: [u32 delivered][u32 total][u64 file_ids[delivered]]
  *                    `total` is how many files match; `delivered` is how many
  *                    of them the crate had room for. A caller whose crate was
  *                    too small is told the true count and can ask again with
@@ -708,7 +703,7 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     /* The header last: a crate whose ids did not all go in says nothing. */
     int crc = crate_out_commit_at(out, ctx, 0, hdr, sizeof(hdr));
     if (crc != OK) return crc;   /* fail closed: leave out->size unset */
-    out->size = sizeof(hdr) + (uint64_t)hdr[0] * sizeof(uint32_t);
+    out->size = sizeof(hdr) + (uint64_t)hdr[0] * sizeof(uint64_t);
     return OK;
 }
 
@@ -737,7 +732,7 @@ static error_t storage_one_tag(const ManifestOp *op, Crate *crates, const OpCont
     return OK;
 }
 
-/* STORAGE_TAG_SET  params:[u32 file_id]  in_crate: "key" or "key:value" —
+/* STORAGE_TAG_SET  params:[u64 file_id]  in_crate: "key" or "key:value" —
  * the file wears exactly that tag, or the call is refused. A tag of key
  * system, boot or god goes on any file only for a cabin with the warrant
  * (ERR_PERMISSION_DENIED otherwise): it makes the file one the system keeps,
@@ -747,20 +742,20 @@ static error_t storage_one_tag(const ManifestOp *op, Crate *crates, const OpCont
 static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
-    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
 
     char       *text = NULL;
     TagSpelling tag;
     error_t     rc = storage_one_tag(op, crates, ctx, &text, &tag);
     if (rc != OK) return rc;
-    rc = tagfs_add_tag_string(param_u32(op, 0), &tag, StorageCallWarrant(ctx));
+    rc = tagfs_add_tag_string(param_u64(op, 0), &tag, StorageCallWarrant(ctx));
     crate_buf_free(text);
     if (rc == ERR_WOULD_BLOCK)
-        return SettleOpForRoom(op, crates, crate_count, ctx, param_u32(op, 0));
+        return SettleOpForRoom(op, crates, crate_count, ctx, param_u64(op, 0));
     return rc;
 }
 
-/* STORAGE_TAG_UNSET  params:[u32 file_id]  in_crate: "key" — every tag of the
+/* STORAGE_TAG_UNSET  params:[u64 file_id]  in_crate: "key" — every tag of the
  * key — or "key:value" — that tag alone. The answer is the volume's own: a
  * tag the file does not wear (ERR_TAGFS_TAG_NOT_FOUND), a file that is not
  * there, a tag of key system, boot or god and a cabin with no warrant
@@ -769,27 +764,27 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
-    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
 
     char       *text = NULL;
     TagSpelling tag;
     error_t     rc = storage_one_tag(op, crates, ctx, &text, &tag);
     if (rc != OK) return rc;
-    int removed = tagfs_remove_tag_string(param_u32(op, 0), &tag, StorageCallWarrant(ctx));
+    int removed = tagfs_remove_tag_string(param_u64(op, 0), &tag, StorageCallWarrant(ctx));
     crate_buf_free(text);
     if (-removed == ERR_WOULD_BLOCK)
-        return SettleOpForRoom(op, crates, crate_count, ctx, param_u32(op, 0));
+        return SettleOpForRoom(op, crates, crate_count, ctx, param_u64(op, 0));
     return removed == 0 ? OK : -removed;
 }
 
 /* The ids of the tags a file is created with, each interned; the first
  * refusal ends it. *out_ids is the caller's to kfree. */
-static error_t storage_intern_all(const TagSpelling *tags, uint32_t count, uint16_t **out_ids)
+static error_t storage_intern_all(const TagSpelling *tags, uint32_t count, uint32_t **out_ids)
 {
     *out_ids = NULL;
     if (count == 0)
         return OK;
-    uint16_t *ids = kmalloc(sizeof(uint16_t) * count);
+    uint32_t *ids = kmalloc(sizeof(uint32_t) * count);
     if (!ids)
         return ERR_NO_MEMORY;
     for (uint32_t i = 0; i < count; i++) {
@@ -824,7 +819,7 @@ static error_t storage_create_fits(const char *filename, const TagSpelling *tags
  *                            [u8 scope] (optional) — inside the Use Context
  *                            (absent, STORAGE_SCOPE_USE) or EVERYWHERE
  *                     in_crate (optional): tag string
- *                     out_crate (optional): u32 file_id
+ *                     out_crate (optional): u64 file_id
  *                     Inside the context the new file is stamped with the
  *                     user's tags as well as its own. Every tag is spelled,
  *                     and the record they make judged, before any is
@@ -865,7 +860,7 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     UseList     *use     = NULL;
     uint32_t     own     = 0;
     uint32_t     total   = 0;
-    uint16_t    *tag_ids = NULL;
+    uint32_t    *tag_ids = NULL;
     rc = storage_tags_spelled(scope, text, tlen, &tags, &use, &own, &total);
     if (rc == OK)
         rc = storage_create_fits(filename, tags, own, total);
@@ -889,14 +884,9 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (made != 0) return (int)(error_t)(-made);
 
     if (op->out_crate != CRATE_INDEX_NONE) {
-        Crate   *out     = &crates[op->out_crate];
-        uint32_t file_id = 0;
-        error_t  handed  = StorageFileIdOut(made_id, &file_id);
-        if (handed != OK)
-            return handed;
-        if (out->capacity >= sizeof(uint32_t)) {
-            (void)crate_write(out, ctx, &file_id, sizeof(uint32_t));
-        }
+        Crate *out = &crates[op->out_crate];
+        if (out->capacity >= sizeof(made_id))
+            (void)crate_write(out, ctx, &made_id, sizeof(made_id));
     }
     return OK;
 }

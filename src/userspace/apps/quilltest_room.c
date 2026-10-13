@@ -69,7 +69,7 @@ typedef struct {
  * minutes, and the host tells a machine at work from a wedged one by its log.
  * *room's refusal is the answer that stopped it: a short count is followed by
  * the call from there, which meets the refusal itself (box/file.h). */
-static uint64_t QuillRoomWrite(QuillRoom *room, uint32_t fid, const char *name, uint32_t seed,
+static uint64_t QuillRoomWrite(QuillRoom *room, file_id_t fid, const char *name, uint32_t seed,
                                uint64_t at, uint64_t bytes)
 {
     uint64_t took = 0, t0 = 0, t1 = 0;
@@ -100,7 +100,7 @@ static uint64_t QuillRoomWrite(QuillRoom *room, uint32_t fid, const char *name, 
 /* The volume filled: `name` grown a piece at a time, the piece halved at
  * every refusal down to one block, until a block is refused. The bytes it
  * holds, and in *refusal the answer that ended it. */
-static uint64_t QuillRoomFill(QuillRoom *room, const char *name, uint32_t seed, int *fid,
+static uint64_t QuillRoomFill(QuillRoom *room, const char *name, uint32_t seed, int64_t *fid,
                               int *refusal)
 {
     uint64_t size  = 0;
@@ -108,11 +108,11 @@ static uint64_t QuillRoomFill(QuillRoom *room, const char *name, uint32_t seed, 
     *refusal = 0;
     *fid = QuillCreate(name);
     if (*fid <= 0) {
-        *refusal = *fid;
+        *refusal = (int)*fid;
         return 0;
     }
     for (;;) {
-        size += QuillRoomWrite(room, (uint32_t)*fid, name, seed, size, piece);
+        size += QuillRoomWrite(room, (file_id_t)*fid, name, seed, size, piece);
         if (room->refusal == 0)
             continue;
         if (room->refusal != -(int)ERR_TAGFS_NO_SPACE || piece == QUILL_ROOM_SMALLEST) {
@@ -150,17 +150,18 @@ QuillVerdict QuillRoomBack(const char *const *args)
         return QUILL_FAIL;
     uint64_t bytes = (uint64_t)mib << 20;
 
-    int      afid = QuillCreate("_qra.bin");
-    uint64_t a    = afid > 0 ? QuillRoomWrite(&room, (uint32_t)afid, "_qra.bin", QUILL_SEED_ROOMA,
+    int64_t  afid = QuillCreate("_qra.bin");
+    uint64_t a    = afid > 0 ? QuillRoomWrite(&room, (file_id_t)afid, "_qra.bin", QUILL_SEED_ROOMA,
                                               0, bytes + (1u << 20)) : 0;
     if (afid <= 0 || a != bytes + (1u << 20)) {
-        printf("[QUILL] roomback: FAIL — _qra.bin took %llu of %llu bytes (create %d, refusal %d): "
+        printf("[QUILL] roomback: FAIL — _qra.bin took %llu of %llu bytes (create %ld, refusal %d): "
                "the volume has no room for the case\n", (unsigned long long)a,
                (unsigned long long)(bytes + (1u << 20)), afid, room.refusal);
         bay_release(room.buf);
         return QUILL_FAIL;
     }
-    int      bfid = 0, bend = 0;
+    int64_t  bfid = 0;
+    int      bend = 0;
     uint64_t b    = QuillRoomFill(&room, "_qrb.bin", QUILL_SEED_ROOMB, &bfid, &bend);
     int      arc  = anchor(0);
     if (bend != -(int)ERR_TAGFS_NO_SPACE || arc != 0) {
@@ -172,15 +173,15 @@ QuillVerdict QuillRoomBack(const char *const *args)
     printf("[QUILL] roomback: the volume is full — _qra.bin %llu bytes, _qrb.bin %llu bytes, the "
            "next block refused no-space; anchored\n", (unsigned long long)a, (unsigned long long)b);
 
-    int      drc  = delete((uint32_t)afid);
-    int      cfid = drc == 0 ? QuillCreate("_qrc.bin") : 0;
-    uint64_t c    = cfid > 0 ? QuillRoomWrite(&room, (uint32_t)cfid, "_qrc.bin", QUILL_SEED_ROOMC, 0,
+    int      drc  = delete((file_id_t)afid);
+    int64_t  cfid = drc == 0 ? QuillCreate("_qrc.bin") : 0;
+    uint64_t c    = cfid > 0 ? QuillRoomWrite(&room, (file_id_t)cfid, "_qrc.bin", QUILL_SEED_ROOMC, 0,
                                               bytes) : 0;
     uint64_t ms   = room.ms;
     int      cend = room.refusal;
     bay_release(room.buf);
     int64_t  rerr = 0;
-    uint64_t good = c == bytes ? QuillReadBack((uint32_t)cfid, QUILL_SEED_ROOMC, bytes, &rerr) : 0;
+    uint64_t good = c == bytes ? QuillReadBack((file_id_t)cfid, QUILL_SEED_ROOMC, bytes, &rerr) : 0;
     arc = anchor(0);
 
     if (drc == 0 && cfid > 0 && c == bytes && good == bytes && arc == 0) {
@@ -189,7 +190,7 @@ QuillVerdict QuillRoomBack(const char *const *args)
                (unsigned long long)ms);
         return QUILL_PASS;
     }
-    printf("[QUILL] roomback: FAIL — _qra.bin deleted (%d), _qrc.bin (create %d) took %llu of %llu "
+    printf("[QUILL] roomback: FAIL — _qra.bin deleted (%d), _qrc.bin (create %ld) took %llu of %llu "
            "bytes in %llu ms and was refused %d; read back good to byte %llu (read %lld, anchor %d)\n",
            drc, cfid, (unsigned long long)c, (unsigned long long)bytes, (unsigned long long)ms,
            cend, (unsigned long long)good, (long long)rerr, arc);
@@ -202,20 +203,20 @@ QuillVerdict QuillRoomBack(const char *const *args)
  * ========================================================================= */
 
 /* COUNT empty files of one name: how many were made, their ids in `ids`. */
-static uint32_t QuillRoomEmpties(const char *mode, uint32_t *ids, uint32_t count, int *refusal)
+static uint32_t QuillRoomEmpties(const char *mode, file_id_t *ids, uint32_t count, int *refusal)
 {
-    *refusal = QuillCreate("_qre.bin");
-    if (*refusal <= 0)
+    int64_t first = QuillCreate("_qre.bin");
+    *refusal = first > 0 ? 0 : (int)first;
+    if (first <= 0)
         return 0;
-    ids[0] = (uint32_t)*refusal;
-    *refusal = 0;
+    ids[0] = (file_id_t)first;
     for (uint32_t i = 1; i < count; i++) {
-        int fid = create_everywhere("_qre.bin", NULL);
+        int64_t fid = create_everywhere("_qre.bin", NULL);
         if (fid <= 0) {
-            *refusal = fid;
+            *refusal = (int)fid;
             return i;
         }
-        ids[i] = (uint32_t)fid;
+        ids[i] = (file_id_t)fid;
         if ((i + 1) % QUILL_ROOM_PROGRESS == 0)
             printf("[QUILL] %s: %u of %u empty files made\n", mode, i + 1, count);
     }
@@ -224,14 +225,14 @@ static uint32_t QuillRoomEmpties(const char *mode, uint32_t *ids, uint32_t count
 
 /* COUNT from the case's word, and room for that many file ids: NULL, said
  * under `mode`, when either is not there. */
-static uint32_t *QuillRoomIds(const char *mode, const char *word, uint32_t *count)
+static file_id_t *QuillRoomIds(const char *mode, const char *word, uint32_t *count)
 {
     if (!QuillNumber(word, count) || *count == 0 || *count > QUILL_ROOM_COUNT_MAX) {
         printf("[QUILL] %s: FAIL — COUNT is 1 to %u; given '%s'\n", mode, QUILL_ROOM_COUNT_MAX,
                word);
         return NULL;
     }
-    uint32_t *ids = malloc((size_t)*count * sizeof(uint32_t));
+    file_id_t *ids = malloc((size_t)*count * sizeof(file_id_t));
     if (!ids)
         printf("[QUILL] %s: FAIL — no room for %u file ids\n", mode, *count);
     return ids;
@@ -240,7 +241,7 @@ static uint32_t *QuillRoomIds(const char *mode, const char *word, uint32_t *coun
 /* The case set: COUNT empty files made, then _qrf.bin grown until the volume
  * answers ERR_TAGFS_NO_SPACE, and anchored. True with _qrf.bin's id in *ffid;
  * false, said under `mode`, when the case could not be set. */
-static bool QuillEmptyFill(const char *mode, uint32_t *ids, uint32_t count, int *ffid)
+static bool QuillEmptyFill(const char *mode, file_id_t *ids, uint32_t count, int64_t *ffid)
 {
     QuillRoom room;
     if (!QuillRoomOpen(&room, mode))
@@ -264,8 +265,8 @@ static bool QuillEmptyFill(const char *mode, uint32_t *ids, uint32_t count, int 
 
 /* The COUNT empty files in `ids` deleted one after another, then _qrf.bin:
  * every delete answered, and answered OK; judged under `mode`. */
-static QuillVerdict QuillEmptyDrop(const char *mode, const uint32_t *ids, uint32_t count,
-                                   int ffid)
+static QuillVerdict QuillEmptyDrop(const char *mode, const file_id_t *ids, uint32_t count,
+                                   int64_t ffid)
 {
     uint32_t answered = 0, refused = 0, first_refused = 0;
     int      first_code = 0;
@@ -285,8 +286,8 @@ static QuillVerdict QuillEmptyDrop(const char *mode, const uint32_t *ids, uint32
         }
     }
     time_uptime_ms(&t1);
-    int      frc   = delete((uint32_t)ffid);
-    uint32_t left[2];
+    int      frc   = delete((file_id_t)ffid);
+    file_id_t left[2];
     int      still = QuillFindEverywhere("_qre.bin", left, 2);
     int      arc   = anchor(0);
     if (answered == count && refused == 0 && frc == 0 && still == 0 && arc == 0) {
@@ -305,8 +306,8 @@ static QuillVerdict QuillEmptyDrop(const char *mode, const uint32_t *ids, uint32
 QuillVerdict QuillEmptyFull(const char *const *args)
 {
     uint32_t  count = 0;
-    int       ffid  = 0;
-    uint32_t *ids   = QuillRoomIds("emptyfull", args[0], &count);
+    int64_t   ffid  = 0;
+    file_id_t *ids   = QuillRoomIds("emptyfull", args[0], &count);
     if (!ids)
         return QUILL_FAIL;
     QuillVerdict verdict = QuillEmptyFill("emptyfull", ids, count, &ffid)
@@ -318,8 +319,8 @@ QuillVerdict QuillEmptyFull(const char *const *args)
 QuillVerdict QuillEmptyFillOnly(const char *const *args)
 {
     uint32_t  count = 0;
-    int       ffid  = 0;
-    uint32_t *ids   = QuillRoomIds("emptyfill", args[0], &count);
+    int64_t   ffid  = 0;
+    file_id_t *ids   = QuillRoomIds("emptyfill", args[0], &count);
     if (!ids)
         return QUILL_FAIL;
     bool set = QuillEmptyFill("emptyfill", ids, count, &ffid);
@@ -336,8 +337,8 @@ QuillVerdict QuillEmptyFillOnly(const char *const *args)
 QuillVerdict QuillEmptyBack(const char *const *args)
 {
     uint32_t  count = 0;
-    uint32_t  qrf[2];
-    uint32_t *ids   = QuillRoomIds("emptyback", args[0], &count);
+    file_id_t qrf[2];
+    file_id_t *ids   = QuillRoomIds("emptyback", args[0], &count);
     if (!ids)
         return QUILL_FAIL;
     int found = QuillFindEverywhere("_qre.bin", ids, (int)count);
@@ -350,7 +351,7 @@ QuillVerdict QuillEmptyBack(const char *const *args)
     }
     printf("[QUILL] emptyback: the volume mounted again holds all %u empty files and _qrf.bin\n",
            count);
-    QuillVerdict verdict = QuillEmptyDrop("emptyback", ids, count, (int)qrf[0]);
+    QuillVerdict verdict = QuillEmptyDrop("emptyback", ids, count, (int64_t)qrf[0]);
     free(ids);
     return verdict;
 }

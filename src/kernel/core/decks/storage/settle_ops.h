@@ -35,7 +35,7 @@ int SettleUseRemembered(UseText *said, uint64_t saying, const OpContext *ctx, Cr
  * made, or the kernel caller's answer.
  */
 int SettleOpForRoom(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                    const OpContext *ctx, uint32_t file_id);
+                    const OpContext *ctx, uint64_t file_id);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's caller of an op that waits for room: a caller in the kernel has

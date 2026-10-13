@@ -65,8 +65,8 @@ typedef struct StrandPrintState {
     uint32_t   last_bg;
     uint32_t   color_fg;    /* current colours (may hold sentinels) */
     uint32_t   color_bg;
-    uint16_t   ear;         /* the lane's tag as a Touch tag (valid with EAR_CLAIMED) */
-    uint16_t   kb;          /* "keyboard" tag (valid with KB_CLAIMED) */
+    TouchTag   ear;         /* the lane's tag as a Touch tag (valid with EAR_CLAIMED) */
+    TouchTag   kb;          /* "keyboard" tag (valid with KB_CLAIMED) */
     uint8_t    lane_state;  /* LANE_* */
     uint8_t    last_set;    /* last_fg/last_bg carry a sent pair */
     uint8_t    initialized;

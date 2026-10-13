@@ -108,9 +108,9 @@ static volatile uint64_t g_stat_claims;
 static volatile uint64_t g_stat_pages;
 static volatile uint64_t g_stat_releases;
 
-static inline uint32_t brook_bucket_index(uint16_t tag_id)
+static inline uint32_t brook_bucket_index(uint32_t tag_id)
 {
-    return ((uint32_t)tag_id ^ ((uint32_t)tag_id >> 4)) & BROOK_BUCKET_MASK;
+    return (tag_id ^ (tag_id >> 4)) & BROOK_BUCKET_MASK;
 }
 
 void BrookInit(void)
@@ -183,10 +183,10 @@ void BrookInit(void)
 /* ─────────────────────────────────────────────────────────────────────
  * Tag resolution. Same pattern as Bay/Touch.
  * ───────────────────────────────────────────────────────────────────── */
-static uint16_t brook_resolve_tag(const char *tag, bool intern_if_missing)
+static uint32_t brook_resolve_tag(const char *tag, bool intern_if_missing)
 {
     if (!intern_if_missing) return tagfs_tag_lookup(tag);
-    uint16_t id;
+    uint32_t id;
     return tagfs_tag_intern(tag, &id) == OK ? id : TAGFS_INVALID_TAG_ID;
 }
 
@@ -602,7 +602,7 @@ static BrookClaim *brook_unlink_claim_by_va(cabin_t *cabin,
 /* ─────────────────────────────────────────────────────────────────────
  * Bucket helpers — caller must hold bucket->lock.
  * ───────────────────────────────────────────────────────────────────── */
-static BrookObject *brook_bucket_find_locked(BrookBucket *b, uint16_t tag_id)
+static BrookObject *brook_bucket_find_locked(BrookBucket *b, uint32_t tag_id)
 {
     for (BrookObject *o = b->head; o; o = o->bucket_next) {
         if (o->tag_id == tag_id) return o;
@@ -782,7 +782,7 @@ error_t BrookOpenInternal(struct process_t *proc,
             return ERR_INVALID_ARGUMENT;
     }
 
-    uint16_t tag_id = brook_resolve_tag(tag, wants_create);
+    uint32_t tag_id = brook_resolve_tag(tag, wants_create);
     if (tag_id == TAGFS_INVALID_TAG_ID) return ERR_TAG_NOT_FOUND;
 
     BrookBucket *b = &g_brook_buckets[brook_bucket_index(tag_id)];
@@ -1373,14 +1373,14 @@ void BrookCleanupCabin(struct cabin_t *cabin)
  * and a writer waiting for a slot are the same defect wearing different hats,
  * and the writer's is the console jam that used to be visible only as a line
  * of print sixty seconds later. */
-bool BrookBellUnrung(uint32_t strand_pid, uint16_t *out_tag_id,
+bool BrookBellUnrung(uint32_t strand_pid, uint32_t *out_tag_id,
                      uint64_t *out_head, uint64_t *out_tail)
 {
     if (strand_pid == 0) return false;
 
     bool     hung   = false;
     bool     served = false;
-    uint16_t tag    = 0;
+    uint32_t tag    = 0;
     uint64_t shead = 0, stail = 0;
 
     for (uint32_t i = 0; i < BROOK_BUCKETS; i++) {

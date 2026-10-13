@@ -72,14 +72,14 @@ static int child_role(uint32_t my_pid)
     }
     uint64_t offset = (uint64_t)slice_idx * PAGE_SIZE;
 
-    uint32_t   fids[4];
+    file_id_t  fids[4];
     file_info_t infos[4];
     int found = find_file_by_name(WC_NAME, fids, infos, 4);
     if (found <= 0) {
         kdbg_print("[WC child %u] file not found", my_pid);
         return 1;
     }
-    uint32_t fid = fids[0];
+    file_id_t fid = fids[0];
 
     /* Pattern: byte j = (my_pid + j) & 0xFF — unique per writer. */
     for (uint32_t i = 0; i < PAGE_SIZE; i++) {
@@ -115,9 +115,9 @@ int main(void)
 
     /* Parent. Pre-create the file with N×PAGE_SIZE bytes by writing once
      * to each slice — guarantees extents exist before children race. */
-    int fid = create(WC_NAME, WC_TAG);
+    int64_t fid = create(WC_NAME, WC_TAG);
     if (fid < 0) {
-        kdbg_print("[WC] create rc=%d", fid);
+        kdbg_print("[WC] create rc=%ld", fid);
         return 1;
     }
 

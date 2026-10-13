@@ -568,9 +568,9 @@ void vmm_cet_ap_probe(void);
 /* Returns the pre-resolved Touch tag handle for cet:fault:cp events.
  * Used by idt.c #CP handler to publish via TouchPublishIrqPair (the
  * only IRQ-safe Touch publisher per touch.h:208). TOUCH_TAG_INVALID
- * (0xFFFF) before vmm_cet_probe has run. Returns uint16_t (TouchTag
+ * (0xFFFFFFFF) before vmm_cet_probe has run. Returns uint32_t (TouchTag
  * underlying type) to avoid pulling touch.h into vmm.h. */
-uint16_t vmm_get_cet_cp_tag(void);
+uint32_t vmm_get_cet_cp_tag(void);
 
 /* ─── Shadow-stack pages ───────────────────────────────────────────
  *

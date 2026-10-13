@@ -27,7 +27,7 @@
  * memory is negligible. */
 typedef struct TagOverflowRetired
 {
-    uint16_t                  *buf;
+    uint32_t                  *buf;
     struct TagOverflowRetired *next;
 } TagOverflowRetired;
 
@@ -55,7 +55,7 @@ typedef struct cabin_t
      * the manifest gate, the spawn gate and the Ink guard's warrant. */
     uint32_t auth_bits;
 
-    uint16_t *tag_overflow_ids;
+    uint32_t *tag_overflow_ids;
     uint32_t  tag_overflow_count;      /* u32: a u16 capacity doubled past 32768 is 0 */
     uint32_t  tag_overflow_capacity;
     TagOverflowRetired *tag_overflow_retired;  /* old buffers, freed at cabin_destroy */

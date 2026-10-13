@@ -133,7 +133,7 @@ void     MapLayLetGo(void);
  * more the set had no room for. A block written again or given back is
  * forgotten (IntegrityUpdate, IntegrityForget): rot in what it holds next is
  * named again. Name and Forget are called with no TagFS lock held. */
-void     IntegrityRotBegin(uint16_t tag);
+void     IntegrityRotBegin(uint32_t tag);
 void     IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read);
 void     IntegrityRotForget(uint64_t start, uint32_t count);
 void     IntegrityRotEnd(void);

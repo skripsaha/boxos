@@ -107,7 +107,8 @@ typedef struct {
 /* What the driver made, and when it began, by the machine's clock. */
 typedef struct {
     uint64_t t0;
-    uint32_t made, anchors, first_fid, last_fid, edge;
+    uint32_t  made, anchors, edge;
+    file_id_t first_fid, last_fid;
     int      refusal;              /* the answer that stopped it, 0 when none did */
     const char *refused;           /* what stopped it: "create", "anchor", "names", or NULL */
     char     name[QUILL_ABBA_NAME_CAP];
@@ -150,8 +151,9 @@ static void QuillAbbaName(char out[QUILL_ABBA_NAME_CAP], const char *name, const
  * be, so each is the biggest registry record a name makes (6 bytes and 31)
  * and the host counts how many fill a block. The run's number is the file id
  * of its rename file, which no earlier run was given, so every run's tags are
- * new. False once the index no longer fits. */
-static bool QuillAbbaGrowName(char out[QUILL_ABBA_NAME_CAP], const char *name, uint32_t run,
+ * new — ten digits carry every id below 10^10, past every 32-bit id a format v1
+ * volume issues. False once the index no longer fits. */
+static bool QuillAbbaGrowName(char out[QUILL_ABBA_NAME_CAP], const char *name, file_id_t run,
                               uint32_t index)
 {
     size_t n = strlen(name);
@@ -187,7 +189,7 @@ static void QuillAbbaTell(TouchTagPair pair, uint32_t role)
 /* One pair of calls of ROLE on the worker's file — one call, and the one that
  * undoes it, so the file is as it was between two pairs. 0, or the answer of
  * the call that was not as due, *which saying which of the two it was. */
-static int QuillAbbaPair(QuillAbbaRole role, uint32_t fid, const char *a, const char *b,
+static int QuillAbbaPair(QuillAbbaRole role, file_id_t fid, const char *a, const char *b,
                          uint32_t *which)
 {
     int rc;
@@ -200,9 +202,9 @@ static int QuillAbbaPair(QuillAbbaRole role, uint32_t fid, const char *a, const 
         *which = 1;
         return file_rename(fid, a);
     case QUILL_ABBA_CREATE: {
-        int made = create_everywhere(a, NULL);
+        int64_t made = create_everywhere(a, NULL);
         if (made <= 0)
-            return made ? made : -1;
+            return made ? (int)made : -1;
         *which = 1;
         return delete((uint32_t)made);
     }
@@ -222,7 +224,7 @@ static int QuillAbbaPair(QuillAbbaRole role, uint32_t fid, const char *a, const 
  * it off. The driver laid all of them down and put every stem and the tag in
  * the registry first, so no call of a worker's adds a record to it. */
 static int QuillAbbaWorkerFile(QuillAbbaRole role, const char *name, char a[QUILL_ABBA_NAME_CAP],
-                               char b[QUILL_ABBA_NAME_CAP], uint32_t *fid)
+                               char b[QUILL_ABBA_NAME_CAP], file_id_t *fid)
 {
     static const char *const tails[QUILL_ABBA_ROLES][2] = {
         { "ra", "rb" }, { "c.tmp", "" }, { "t", "tk" },
@@ -261,7 +263,8 @@ QuillVerdict QuillAbbaWorker(const char *const *args)
     QuillAbbaCount *count = &board->counts[role];
     TouchTagPair    pair  = touch_intern(tag);
     char a[QUILL_ABBA_NAME_CAP], b[QUILL_ABBA_NAME_CAP];
-    uint32_t fid = 0, which = 0;
+    file_id_t fid   = 0;
+    uint32_t  which = 0;
     int n = QuillAbbaWorkerFile((QuillAbbaRole)role, name, a, b, &fid);
     bool heard = touch_pair_choose(pair) != TOUCH_TAG_INVALID;
     int  rc = !heard ? -1 : n == 1 ? 0 : (n < 0 ? n : -1);
@@ -335,17 +338,19 @@ static void QuillAbbaBoardDown(QuillAbbaBoard *board, TouchTag heard)
  * the registry. Returns the run's number — the rename file's id, which no
  * earlier run was given — and in *highest the last file id this gave out; 0
  * with *what saying which name would not be laid down, *rc its answer. */
-static uint32_t QuillAbbaLayDown(const char *name, uint32_t *highest, char what[QUILL_ABBA_NAME_CAP],
+static file_id_t QuillAbbaLayDown(const char *name, file_id_t *highest, char what[QUILL_ABBA_NAME_CAP],
                                  int *rc)
 {
     static const char *const made[] = { "rb", "c.tmp", "ra", "t" };
-    uint32_t fids[4] = { 0, 0, 0, 0 };
+    file_id_t fids[4] = { 0, 0, 0, 0 };
     for (uint32_t i = 0; i < 4; i++) {
         QuillAbbaName(what, name, made[i]);
-        *rc = QuillCreate(what);
-        if (*rc <= 0)
+        int64_t fid = QuillCreate(what);
+        if (fid <= 0) {
+            *rc = (int)fid;
             return 0;
-        fids[i] = (uint32_t)*rc;
+        }
+        fids[i] = (file_id_t)fid;
     }
     /* NAMErb and NAMEc.tmp only had to put their stems in the registry. */
     for (uint32_t i = 0; i < 2; i++) {
@@ -468,7 +473,7 @@ static uint64_t QuillAbbaSince(const QuillAbbaGrowth *g)
 
 static void QuillAbbaProgress(const QuillAbbaBoard *board, const QuillAbbaGrowth *g, uint32_t tags)
 {
-    printf("[QUILL] abba: %u of %u new tags made at %llu ms, the last at fid %u (the table's edge "
+    printf("[QUILL] abba: %u of %u new tags made at %llu ms, the last at fid %lu (the table's edge "
            "at fid %u), %u anchor(s); rename %u, create %u, tag %u calls\n", g->made, tags,
            (unsigned long long)QuillAbbaSince(g), g->last_fid, g->edge, g->anchors,
            board->counts[QUILL_ABBA_RENAME].calls, board->counts[QUILL_ABBA_CREATE].calls,
@@ -480,7 +485,7 @@ static void QuillAbbaProgress(const QuillAbbaBoard *board, const QuillAbbaGrowth
  * more once they are all made, while the workers still run — the sync that
  * grows the table if no earlier one has. Stops at the first refusal, of its
  * own or a worker's. */
-static void QuillAbbaGrow(QuillAbbaBoard *board, const char *name, uint32_t run, uint32_t tags,
+static void QuillAbbaGrow(QuillAbbaBoard *board, const char *name, file_id_t run, uint32_t tags,
                           QuillAbbaGrowth *g)
 {
     while (g->made < tags || g->last_fid < g->edge) {
@@ -488,15 +493,15 @@ static void QuillAbbaGrow(QuillAbbaBoard *board, const char *name, uint32_t run,
             g->refused = "names";
             return;
         }
-        int fid = create_everywhere(g->name, NULL);
+        int64_t fid = create_everywhere(g->name, NULL);
         if (fid <= 0) {
-            g->refusal = fid ? fid : -1;
+            g->refusal = fid ? (int)fid : -1;
             g->refused = "create";
             return;
         }
         g->made++;
-        g->first_fid = g->first_fid ? g->first_fid : (uint32_t)fid;
-        g->last_fid = (uint32_t)fid;
+        g->first_fid = g->first_fid ? g->first_fid : (file_id_t)fid;
+        g->last_fid = (file_id_t)fid;
         if (g->made % QUILL_ABBA_ANCHOR_EVERY == 0) {
             if ((g->refusal = anchor(0)) != 0) {
                 g->refused = "anchor";
@@ -525,7 +530,7 @@ static QuillVerdict QuillAbbaSay(const QuillAbbaBoard *board, const QuillAbbaGro
     const QuillAbbaCount *c = board->counts;
     int bad = QuillAbbaFailed(board, QUILL_ABBA_ROLES, true);
     if (!g->refused && bad < 0 && final == 0) {
-        printf("[QUILL] abba: PASS — made %u new tags, fids %u..%u, the last at or past the table's "
+        printf("[QUILL] abba: PASS — made %u new tags, fids %lu..%lu, the last at or past the table's "
                "edge at fid %u, and %u anchors while rename answered %u calls, create %u and tag "
                "%u, each in a cabin of its own and each as due; anchored, %llu ms in all\n", g->made,
                g->first_fid, g->last_fid, g->edge, g->anchors, c[QUILL_ABBA_RENAME].calls,
@@ -533,7 +538,7 @@ static QuillVerdict QuillAbbaSay(const QuillAbbaBoard *board, const QuillAbbaGro
         return QUILL_PASS;
     }
     if (g->refused && strcmp(g->refused, "names") == 0)
-        printf("[QUILL] abba: FAIL — new tag %u has no name of 31 bytes left, and fid %u was still "
+        printf("[QUILL] abba: FAIL — new tag %u has no name of 31 bytes left, and fid %lu was still "
                "short of the table's edge at fid %u; rename %u calls, create %u, tag %u (anchor "
                "after %d)\n", g->made + 1, g->last_fid, g->edge, c[QUILL_ABBA_RENAME].calls,
                c[QUILL_ABBA_CREATE].calls, c[QUILL_ABBA_TAG].calls, final);
@@ -576,9 +581,9 @@ QuillVerdict QuillAbba(const char *const *args)
     QuillAbbaGrowth g;
     memset(&g, 0, sizeof(g));
     time_uptime_ms(&g.t0);
-    uint32_t highest = 0;
-    int      rc = 0;
-    uint32_t run = QuillAbbaLayDown(name, &highest, g.name, &rc);
+    file_id_t highest = 0;
+    int       rc = 0;
+    file_id_t run = QuillAbbaLayDown(name, &highest, g.name, &rc);
     if (!run) {
         int arc = anchor(0);
         QuillAbbaBoardDown(board, heard);
@@ -606,7 +611,7 @@ QuillVerdict QuillAbba(const char *const *args)
         return QUILL_FAIL;
     }
     printf("[QUILL] abba: workers rename pid %u, create pid %u, tag pid %u have each answered "
-           "their first calls at %llu ms; %u new tags to make from fid %u, the table's edge at fid "
+           "their first calls at %llu ms; %u new tags to make from fid %lu, the table's edge at fid "
            "%u\n", g_abba_watch[QUILL_ABBA_RENAME].pid, g_abba_watch[QUILL_ABBA_CREATE].pid,
            g_abba_watch[QUILL_ABBA_TAG].pid, (unsigned long long)QuillAbbaSince(&g), tags,
            highest + 1, g.edge);

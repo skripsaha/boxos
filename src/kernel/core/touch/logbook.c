@@ -31,7 +31,7 @@ static uint32_t g_muster_misses = 0;
 static struct {
     LogbookEntry **buckets;
     uint32_t       bucket_count;
-    LogbookEntry **by_index;      /* index n -> entry; id = 0x8000 | n */
+    LogbookEntry **by_index;      /* index n -> entry; id = 0x80000000 | n */
     uint32_t       index_capacity;
     uint32_t       count;
     spinlock_t     lock;          /* statically zeroed == unlocked */

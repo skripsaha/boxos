@@ -61,7 +61,7 @@ static volatile uint32_t g_appcore_rr_counter = 0;
  * Lock-free read protocol (overflow_ids) is identical to the old process.c
  * version — atomic store-release on publish, atomic load-acquire by readers.
  */
-static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
+static int process_set_tag_bit(process_t *proc, uint32_t tag_id)
 {
     cabin_t *cabin = proc->cabin;
 
@@ -80,13 +80,13 @@ static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
     if (cabin->tag_overflow_count >= cabin->tag_overflow_capacity)
     {
         uint32_t new_cap = cabin->tag_overflow_capacity == 0 ? 8 : cabin->tag_overflow_capacity * 2;
-        uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_cap);
+        uint32_t *new_ids = kmalloc(sizeof(uint32_t) * new_cap);
         if (!new_ids)
             return -1;
 
-        uint16_t *old_ids = cabin->tag_overflow_ids;
+        uint32_t *old_ids = cabin->tag_overflow_ids;
         if (old_ids)
-            memcpy(new_ids, old_ids, sizeof(uint16_t) * cabin->tag_overflow_count);
+            memcpy(new_ids, old_ids, sizeof(uint32_t) * cabin->tag_overflow_count);
 
         __atomic_store_n(&cabin->tag_overflow_ids, new_ids, __ATOMIC_RELEASE);
         __atomic_store_n(&cabin->tag_overflow_capacity, new_cap, __ATOMIC_RELEASE);
@@ -117,7 +117,7 @@ static int process_set_tag_bit(process_t *proc, uint16_t tag_id)
     return 0;
 }
 
-static int process_clear_tag_bit(process_t *proc, uint16_t tag_id)
+static int process_clear_tag_bit(process_t *proc, uint32_t tag_id)
 {
     cabin_t *cabin = proc->cabin;
 
@@ -1588,7 +1588,7 @@ void process_test(void)
 }
 #endif // CONFIG_KERNEL_TESTS
 
-bool process_has_tag_id(process_t *proc, uint16_t tag_id)
+bool process_has_tag_id(process_t *proc, uint32_t tag_id)
 {
     if (!proc || !proc->cabin)
         return false;
@@ -1603,7 +1603,7 @@ bool process_has_tag_id(process_t *proc, uint16_t tag_id)
      * read out of bounds.  Old buffers are retired (not freed), so the
      * pointer always references live memory. */
     uint32_t  n   = __atomic_load_n(&proc->cabin->tag_overflow_count, __ATOMIC_ACQUIRE);
-    uint16_t *ids = __atomic_load_n(&proc->cabin->tag_overflow_ids,   __ATOMIC_ACQUIRE);
+    uint32_t *ids = __atomic_load_n(&proc->cabin->tag_overflow_ids,   __ATOMIC_ACQUIRE);
     for (uint32_t i = 0; ids && i < n; i++)
     {
         if (ids[i] == tag_id)
@@ -1716,7 +1716,7 @@ bool process_has_tag(process_t *proc, const char *tag)
         return false;
     if (!TagSpellingIsPattern(&spelled))
     {
-        uint16_t tid = TagFSLookupSpelling(&spelled);
+        uint32_t tid = TagFSLookupSpelling(&spelled);
         if (tid == TAGFS_INVALID_TAG_ID)
             return false;
         return process_has_tag_id(proc, tid);
@@ -1798,7 +1798,7 @@ error_t process_add_tag(process_t *proc, const char *tag)
     /* The intern tells the user's context the number, if the context names
      * this tag and had none for it yet — so a strand tagged after `use` still
      * lands in the context tier. */
-    uint16_t tid;
+    uint32_t tid;
     rc = TagFSInternSpelling(&spelled, &tid);
     if (rc != OK)
     {
@@ -1836,7 +1836,7 @@ int process_remove_tag(process_t *proc, const char *tag)
     if (TagSpell(tag, strlen(tag), &spelled) != OK)
         return -1;
 
-    uint16_t tid = TagFSLookupSpelling(&spelled);
+    uint32_t tid = TagFSLookupSpelling(&spelled);
     if (tid == TAGFS_INVALID_TAG_ID)
         return 0;
 
@@ -1925,7 +1925,7 @@ void process_start_initial(process_t *proc)
  * what follows it fits — so a list that ran out of room ended in a comma.
  */
 static bool snapshot_append_tag(char *buffer, size_t buffer_size, size_t *pos,
-                                bool *first, uint16_t tag_id)
+                                bool *first, uint32_t tag_id)
 {
     size_t sep = *first ? 0u : 1u;
     if (*pos + sep >= buffer_size)

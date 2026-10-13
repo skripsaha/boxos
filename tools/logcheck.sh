@@ -7869,9 +7869,9 @@ byname_mut_on() {
     python3 - <<'EOF2'
 p = "src/kernel/tagfs/ink/ink.c"
 s = open(p).read()
-anchor = "    uint16_t old_name = name ? InkNameTagLookup(cur->name) : TAGFS_INVALID_TAG_ID;\n"
+anchor = "    uint32_t old_name = name ? InkNameTagLookup(cur->name) : TAGFS_INVALID_TAG_ID;\n"
 assert s.count(anchor) == 1, "byname mutation anchor missing"
-s = s.replace(anchor, "    uint16_t old_name = TAGFS_INVALID_TAG_ID;   /* logcheck mutation: the tag stays behind */\n    if (name)\n        add = TAGFS_INVALID_TAG_ID;\n", 1)
+s = s.replace(anchor, "    uint32_t old_name = TAGFS_INVALID_TAG_ID;   /* logcheck mutation: the tag stays behind */\n    if (name)\n        add = TAGFS_INVALID_TAG_ID;\n", 1)
 open(p, "w").write(s)
 EOF2
     mut_done src/kernel/tagfs/ink/ink.c "logcheck mutation"
@@ -9106,11 +9106,11 @@ STAND_HELD="
 # stand_plot 10, stand_index 6, stand_ink 5, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
 # stand_snapshot 1, stand_read 6, stand_run 4, stand_medium 19,
-# stand_warrant 7, stand_room 7, stand_integrity 2, frame 2, width 3. Counted off the code, not a
+# stand_warrant 7, stand_room 7, stand_integrity 2, frame 2, width 7. Counted off the code, not a
 # run (K9): a suite that drops out of the walk is a test that stopped covering
 # anything, and the count is where that shows. How many of them pass and how
 # many stand aside is the road's — said, not pinned.
-STAND_RUN=199
+STAND_RUN=203
 
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -9719,9 +9719,9 @@ edits = {
    "            held = OK;\n"
    "        end += size;\n        walked++;\n"),
   ("src/kernel/tagfs/tag_registry/tag_registry.c",
-   "        out->ids = kmalloc(sizeof(uint16_t) * group->count);\n"
+   "        out->ids = kmalloc(sizeof(uint32_t) * group->count);\n"
    "        if (out->ids) {\n"
-   "            memcpy(out->ids, group->tag_ids, sizeof(uint16_t) * group->count);\n",
+   "            memcpy(out->ids, group->tag_ids, sizeof(uint32_t) * group->count);\n",
    "        out->ids = group->tag_ids;   /* " + M + ": the registry's own array is handed out */\n"
    "        if (out->ids) {\n"),
  ],
@@ -10592,8 +10592,8 @@ for p, a, b in (
     ("src/kernel/tagfs/use_memory/use_memory.c",
      "    error_t rc   = UseChainStake(s_cycle.need, &s_cycle.chain, &s_cycle.got);\n",
      "    error_t rc   = ERR_TAGFS_NO_SPACE;   /* logcheck mutation: no chain is staked, a Use Context rides on nothing */\n"),
-    ("src/userspace/apps/quilltest_throwaway.c", "        int drc = delete((uint32_t)fid);\n",
-     "        int drc = (i % 1000u == 999u) ? 0 : delete((uint32_t)fid);   /* logcheck mutation: one in a thousand stays */\n"),
+    ("src/userspace/apps/quilltest_throwaway.c", "        int drc = delete((file_id_t)fid);\n",
+     "        int drc = (i % 1000u == 999u) ? 0 : delete((file_id_t)fid);   /* logcheck mutation: one in a thousand stays */\n"),
 ):
     s = open(p).read()
     assert s.count(a) == 1, "quillmut anchor missing in %s: %s" % (p, a.strip().splitlines()[0])

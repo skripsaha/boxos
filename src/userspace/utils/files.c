@@ -36,7 +36,7 @@ int main(void)
 
     /* Every file that answers, however many: the kernel says how many there
      * are and the list is sized to that. */
-    uint32_t *s_file_ids = NULL;
+    file_id_t *s_file_ids = NULL;
     int count = query_all(query_tags, &s_file_ids);
     free(query_tags);
 
@@ -75,7 +75,7 @@ int main(void)
     for (int i = 1; i < count; i++)
     {
         file_info_t key_info = s_file_infos[i];
-        uint32_t    key_id   = s_file_ids[i];
+        file_id_t   key_id   = s_file_ids[i];
         const char *key_name = key_info.filename;
         int j = i - 1;
         while (j >= 0 &&

@@ -9,9 +9,9 @@
  */
 
 /* A record read off the medium entered at its own id — dropped when its
- * spelling is already held, its id is past TAGFS_MAX_TAG_ID or taken. Under
+ * spelling is already held, its id is past reg->id_most or taken. Under
  * reg->lock; ERR_NO_MEMORY only when memory ran out. */
-error_t RegistryAdopt(TagRegistry* reg, uint16_t tag_id, uint8_t flags,
+error_t RegistryAdopt(TagRegistry* reg, uint32_t tag_id, uint8_t flags,
                       const uint8_t* key_at, uint8_t key_len,
                       const uint8_t* value_at, uint16_t value_len);
 

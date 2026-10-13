@@ -19,7 +19,7 @@
  * bitfield or overflow array.  Mirrors the former process_set_tag_bit logic.
  * Caller must hold whatever lock guards tag mutation (process_lock in P1).
  */
-static int cabin_set_tag_bit(cabin_t *cabin, uint16_t tag_id)
+static int cabin_set_tag_bit(cabin_t *cabin, uint32_t tag_id)
 {
     if (tag_id < 64)
     {
@@ -36,13 +36,13 @@ static int cabin_set_tag_bit(cabin_t *cabin, uint16_t tag_id)
     if (cabin->tag_overflow_count >= cabin->tag_overflow_capacity)
     {
         uint32_t new_cap = cabin->tag_overflow_capacity == 0 ? 8 : cabin->tag_overflow_capacity * 2;
-        uint16_t *new_ids = kmalloc(sizeof(uint16_t) * new_cap);
+        uint32_t *new_ids = kmalloc(sizeof(uint32_t) * new_cap);
         if (!new_ids)
             return -1;
 
-        uint16_t *old_ids = cabin->tag_overflow_ids;
+        uint32_t *old_ids = cabin->tag_overflow_ids;
         if (old_ids)
-            memcpy(new_ids, old_ids, sizeof(uint16_t) * cabin->tag_overflow_count);
+            memcpy(new_ids, old_ids, sizeof(uint32_t) * cabin->tag_overflow_count);
 
         __atomic_store_n(&cabin->tag_overflow_ids, new_ids, __ATOMIC_RELEASE);
         __atomic_store_n(&cabin->tag_overflow_capacity, new_cap, __ATOMIC_RELEASE);
@@ -80,7 +80,7 @@ static error_t cabin_wear_tags(cabin_t *cabin, const char *tags)
 
         /* The intern tells the user's context the number, if the context
          * names this tag and had none for it yet. */
-        uint16_t tid;
+        uint32_t tid;
         rc = TagFSInternSpelling(&tag, &tid);
         if (rc == ERR_TAGFS_NOT_INITIALIZED)
             continue;

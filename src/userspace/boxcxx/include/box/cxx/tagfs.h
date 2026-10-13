@@ -138,13 +138,13 @@ inline box::result<tag> tag_from_info(const file_info_t &i, const char *key)
 }  // namespace _detail
 
 class file {
-    std::uint32_t id_ = 0;
+    file_id_t id_ = 0;
 
 public:
     file() noexcept = default;
-    explicit file(std::uint32_t id) noexcept : id_(id) {}
+    explicit file(file_id_t id) noexcept : id_(id) {}
 
-    std::uint32_t id() const noexcept { return id_; }
+    file_id_t id() const noexcept { return id_; }
     explicit operator bool() const noexcept { return id_ != 0; }
 
     // Full metadata snapshot (one syscall). On success the descriptor; the error
@@ -361,14 +361,14 @@ public:
 // find_all do). It is a plain trivially-copyable value; mutate or re-read fresh
 // through live(), and re-capture the snapshot through reread().
 class record {
-    std::uint32_t id_ = 0;
-    file_info_t   info_{};
+    file_id_t   id_ = 0;
+    file_info_t info_{};
 
 public:
     record() noexcept = default;
-    record(std::uint32_t id, const file_info_t &i) noexcept : id_(id), info_(i) {}
+    record(file_id_t id, const file_info_t &i) noexcept : id_(id), info_(i) {}
 
-    std::uint32_t id() const noexcept { return id_; }
+    file_id_t id() const noexcept { return id_; }
     explicit operator bool() const noexcept { return id_ != 0; }
 
     // A live handle on the same file — for mutations or an always-fresh read.
@@ -436,8 +436,8 @@ inline box::result<tag> record::tag_named(const char *key) const
 // comma separator the TagFS create expects. On success a live file; the error
 // arm carries the recovered cause — invalid_argument for an empty/over-long
 // name (boxlib create() validates it), or the kernel error_t (e.g.
-// already_exists). The boxlib create returns a positive file_id, box_fail(rc)
-// < 0 on failure; id == 0 cannot happen → internal.
+// already_exists). The boxlib create returns a positive file_id in an int64,
+// box_fail(rc) < 0 on failure; id == 0 cannot happen → internal.
 inline box::result<file> create(const char *name, std::initializer_list<const char *> tags)
 {
     std::string spec;
@@ -445,17 +445,17 @@ inline box::result<file> create(const char *name, std::initializer_list<const ch
         if (!spec.empty()) spec.push_back(',');
         spec += t;
     }
-    int id = ::create(name, spec.c_str());
-    if (id > 0) return file(static_cast<std::uint32_t>(id));
-    return std::unexpected(
-        box::error{id < 0 ? box_errno_of(id) : static_cast<::error_t>(ERR_INTERNAL)});
+    std::int64_t id = ::create(name, spec.c_str());
+    if (id > 0) return file(static_cast<file_id_t>(id));
+    return std::unexpected(box::error{
+        id < 0 ? box_errno_of(static_cast<int>(id)) : static_cast<::error_t>(ERR_INTERNAL)});
 }
 inline box::result<file> create(const char *name, const char *tagspec = "")
 {
-    int id = ::create(name, tagspec);
-    if (id > 0) return file(static_cast<std::uint32_t>(id));
-    return std::unexpected(
-        box::error{id < 0 ? box_errno_of(id) : static_cast<::error_t>(ERR_INTERNAL)});
+    std::int64_t id = ::create(name, tagspec);
+    if (id > 0) return file(static_cast<file_id_t>(id));
+    return std::unexpected(box::error{
+        id < 0 ? box_errno_of(static_cast<int>(id)) : static_cast<::error_t>(ERR_INTERNAL)});
 }
 
 // ── tag query → range of files ──────────────────────────────────────────
@@ -464,7 +464,7 @@ inline box::result<file> create(const char *name, const char *tagspec = "")
 // there are and boxlib sizes the list to that (query_all), so no file is
 // past the end of the answer.
 namespace _detail {
-inline std::vector<file> files_of(int n, std::uint32_t *ids)
+inline std::vector<file> files_of(int n, file_id_t *ids)
 {
     std::vector<file> out;
     if (n > 0) {
@@ -477,8 +477,8 @@ inline std::vector<file> files_of(int n, std::uint32_t *ids)
 } // namespace _detail
 inline std::vector<file> query(const char *tagspec)
 {
-    std::uint32_t *ids = nullptr;
-    int            n   = ::query_all(tagspec, &ids);
+    file_id_t *ids = nullptr;
+    int        n   = ::query_all(tagspec, &ids);
     return _detail::files_of(n, ids);
 }
 inline std::vector<file> all() { return query(nullptr); }
@@ -488,8 +488,8 @@ inline std::vector<file> all() { return query(nullptr); }
 // same question of everything on the volume. See box/cxx/use.h.
 inline std::vector<file> query_everywhere(const char *tagspec)
 {
-    std::uint32_t *ids = nullptr;
-    int            n   = ::query_all_everywhere(tagspec, &ids);
+    file_id_t *ids = nullptr;
+    int        n   = ::query_all_everywhere(tagspec, &ids);
     return _detail::files_of(n, ids);
 }
 inline std::vector<file> all_everywhere() { return query_everywhere(nullptr); }
@@ -501,17 +501,17 @@ inline box::result<file> create_everywhere(const char *name, std::initializer_li
         if (!spec.empty()) spec.push_back(',');
         spec += t;
     }
-    int id = ::create_everywhere(name, spec.c_str());
-    if (id > 0) return file(static_cast<std::uint32_t>(id));
-    return std::unexpected(
-        box::error{id < 0 ? box_errno_of(id) : static_cast<::error_t>(ERR_INTERNAL)});
+    std::int64_t id = ::create_everywhere(name, spec.c_str());
+    if (id > 0) return file(static_cast<file_id_t>(id));
+    return std::unexpected(box::error{
+        id < 0 ? box_errno_of(static_cast<int>(id)) : static_cast<::error_t>(ERR_INTERNAL)});
 }
 inline box::result<file> create_everywhere(const char *name, const char *tagspec = "")
 {
-    int id = ::create_everywhere(name, tagspec);
-    if (id > 0) return file(static_cast<std::uint32_t>(id));
-    return std::unexpected(
-        box::error{id < 0 ? box_errno_of(id) : static_cast<::error_t>(ERR_INTERNAL)});
+    std::int64_t id = ::create_everywhere(name, tagspec);
+    if (id > 0) return file(static_cast<file_id_t>(id));
+    return std::unexpected(box::error{
+        id < 0 ? box_errno_of(static_cast<int>(id)) : static_cast<::error_t>(ERR_INTERNAL)});
 }
 
 // ── lookup by name (TagFS names are not unique; find returns the first) ──
@@ -524,9 +524,9 @@ inline box::result<file> create_everywhere(const char *name, const char *tagspec
 // than a transport error. (For every same-named match use find_all.)
 inline box::result<record> find(const char *name)
 {
-    std::uint32_t ids[1];
-    file_info_t   infos[1];
-    int           n = ::find_file_by_name(name, ids, infos, 1);
+    file_id_t   ids[1];
+    file_info_t infos[1];
+    int         n = ::find_file_by_name(name, ids, infos, 1);
     if (n > 0) return record(ids[0], infos[0]);
     if (n < 0) return std::unexpected(box::error{box_errno_of(n)});
     return std::unexpected(box::error{box::errc::file_not_found});
@@ -542,8 +542,8 @@ inline std::vector<record> find_all(const char *name)
     std::vector<record> out;
     int n = ::find_file_by_name(name, nullptr, nullptr, 0);
     while (n > 0) {
-        std::vector<std::uint32_t> ids(static_cast<std::size_t>(n));
-        std::vector<file_info_t>   infos(static_cast<std::size_t>(n));
+        std::vector<file_id_t>   ids(static_cast<std::size_t>(n));
+        std::vector<file_info_t> infos(static_cast<std::size_t>(n));
         int got = ::find_file_by_name(name, ids.data(), infos.data(), ids.size());
         if (got <= n) {
             for (int i = 0; i < got; ++i) out.emplace_back(ids[i], infos[i]);
@@ -567,20 +567,20 @@ inline box::status anchor_all() { return box::_detail::from_status(::anchor(0));
 
 // The payload anchor() publishes — must match the kernel's ObjAnchor record.
 struct anchor_payload {
-    std::uint32_t file_id;  // 0 == whole-filesystem anchor
+    file_id_t     file_id;  // 0 == whole-filesystem anchor
     std::uint8_t  op;       // 2 == ANCHOR (1 == WRITE, on the same file tags)
-    std::uint8_t  _pad[3];
+    std::uint8_t  _pad[7];
     std::uint64_t now_us;
 };
-static_assert(sizeof(anchor_payload) == 16, "anchor_payload must match kernel layout");
+static_assert(sizeof(anchor_payload) == 24, "anchor_payload must match kernel layout");
 static_assert(offsetof(anchor_payload, file_id) == 0, "anchor_payload.file_id offset");
-static_assert(offsetof(anchor_payload, op) == 4, "anchor_payload.op offset");
-static_assert(offsetof(anchor_payload, now_us) == 8, "anchor_payload.now_us offset");
+static_assert(offsetof(anchor_payload, op) == 8, "anchor_payload.op offset");
+static_assert(offsetof(anchor_payload, now_us) == 16, "anchor_payload.now_us offset");
 
 // A typed view over a box::touch delivered on the "anchor" tag (or a file tag).
 // Decodes once; file tags also carry WRITE events (op 1), so check is_anchor().
 class anchor_event {
-    std::uint32_t file_id_ = 0;
+    file_id_t     file_id_ = 0;
     std::uint8_t  op_      = 0;
     bool          valid_   = false;
 
@@ -595,7 +595,7 @@ public:
         }
     }
 
-    std::uint32_t file_id() const noexcept { return file_id_; }
+    file_id_t     file_id() const noexcept { return file_id_; }
     std::uint8_t  op() const noexcept { return op_; }
     bool whole_fs() const noexcept { return valid_ && file_id_ == 0; }
     bool is_anchor() const noexcept { return valid_ && op_ == 2; }

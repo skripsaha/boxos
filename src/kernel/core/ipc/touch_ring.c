@@ -167,7 +167,7 @@ void KTouchPushStats(uint64_t out[7])
  * ------------------------------------------------------------------------ */
 
 bool KTouchPush(process_t *target,
-                uint16_t tag_id, uint16_t flags, uint32_t source_pid,
+                uint32_t tag_id, uint16_t flags, uint32_t source_pid,
                 const void *payload, uint32_t payload_len)
 {
     if (!target) {

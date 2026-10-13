@@ -78,9 +78,10 @@ namespace _detail {
 // bytes plus its single Crate descriptor. The station owns one per in-flight op
 // and frees it when the op's completion routes (the kernel is done with it then).
 // Heap-allocated and never moved, so the Pocket's captured manifest/crate
-// pointers stay valid for the whole op.
+// pointers stay valid for the whole op. Its params are a write's, the wider of
+// the two: [u64 file_id][u64 offset][u32 flags][u64 waybill], 28 bytes.
 struct ferry_submission {
-    std::uint8_t manifest[sizeof(Manifest) + sizeof(ManifestOp) + 24];
+    std::uint8_t manifest[sizeof(Manifest) + sizeof(ManifestOp) + 28];
     Crate        crates[1];
 };
 
@@ -290,7 +291,7 @@ private:
     // its submission block with the station, and submit without blocking. A
     // failure (out-of-memory or a full pocket ring) yields a ready ferry whose
     // await_resume reports the cause.
-    static ferry _make(std::uint32_t file_id, std::uint64_t offset,
+    static ferry _make(file_id_t file_id, std::uint64_t offset,
                        const void *buf, std::size_t n, bool is_write) noexcept
     {
         _detail::ferry_station &st = _detail::ferry();
@@ -308,23 +309,23 @@ private:
 
         int rc;
         if (is_write) {
-            std::uint8_t params[24];
+            std::uint8_t params[28];
             std::uint32_t flags = 0;
-            __builtin_memcpy(params + 0,  &file_id, 4);
-            __builtin_memcpy(params + 4,  &offset,  8);
-            __builtin_memcpy(params + 12, &flags,   4);
-            __builtin_memcpy(params + 16, &w,       8);
+            __builtin_memcpy(params + 0,  &file_id, 8);
+            __builtin_memcpy(params + 8,  &offset,  8);
+            __builtin_memcpy(params + 16, &flags,   4);
+            __builtin_memcpy(params + 20, &w,       8);
             CrateSetInput(&sub->crates[0], const_cast<void *>(buf), n);
             rc = ManifestBuilderAddOp(&mb, DECK_STORAGE, STORAGE_OBJ_WRITE,
-                                      0, /*in*/0, /*out*/CRATE_INDEX_NONE, params, 24);
+                                      0, /*in*/0, /*out*/CRATE_INDEX_NONE, params, 28);
         } else {
-            std::uint8_t params[20];
-            __builtin_memcpy(params + 0,  &file_id, 4);
-            __builtin_memcpy(params + 4,  &offset,  8);
-            __builtin_memcpy(params + 12, &w,       8);
+            std::uint8_t params[24];
+            __builtin_memcpy(params + 0,  &file_id, 8);
+            __builtin_memcpy(params + 8,  &offset,  8);
+            __builtin_memcpy(params + 16, &w,       8);
             CrateSetOutput(&sub->crates[0], const_cast<void *>(buf), n);
             rc = ManifestBuilderAddOp(&mb, DECK_STORAGE, STORAGE_OBJ_READ,
-                                      0, /*in*/CRATE_INDEX_NONE, /*out*/0, params, 20);
+                                      0, /*in*/CRATE_INDEX_NONE, /*out*/0, params, 24);
         }
         if (rc != 0 || ManifestBuilderFinalize(&mb) != 0) {
             free(sub);

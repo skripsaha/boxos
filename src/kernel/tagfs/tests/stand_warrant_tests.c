@@ -59,7 +59,7 @@ static int StandWarrantJob(WriteJobKind kind, uint64_t file_id, InkWarrant warra
 /* Whether the file wears the tag `text` spells. */
 static bool StandWears(uint64_t file_id, const char* text)
 {
-    uint16_t id = tagfs_tag_lookup(text);
+    uint32_t id = tagfs_tag_lookup(text);
     return id != TAGFS_INVALID_TAG_ID && tagfs_has_tag(file_id, id);
 }
 
@@ -129,8 +129,8 @@ static TestResult TestStandWarrantUntagAnswersItsReason(void)
 
     TEST_ASSERT(StandMakeFile("stand_warrant_u", NULL, 0, &file_id), "a file of the test's own");
     TEST_ASSERT_OK(StandPutOn(file_id, "system", INK_WARRANTED), "it wears system");
-    uint32_t fid  = (uint32_t)file_id;   /* a program's file_id_t */
-    uint32_t gone = (uint32_t)tagfs_file_ceiling();   /* the next id, as a program names it */
+    uint64_t fid  = file_id;                 /* a program's file_id_t */
+    uint64_t gone = tagfs_file_ceiling();    /* the next id, as a program names it */
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, &fid, sizeof(fid), "standnone", 9, NULL),
                    ERR_TAGFS_TAG_NOT_FOUND, "unset of a tag the file does not wear says so");
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, &gone, sizeof(gone), "standnone", 9, NULL),
@@ -439,7 +439,7 @@ static TestResult TestStandWarrantDeckReadsTheCabin(void)
 
     TEST_ASSERT(StandMakeFile("stand_warrant_d", NULL, 0, &file_id), "a file of the test's own");
     TEST_ASSERT_OK(StandPutOn(file_id, "system", INK_WARRANTED), "it wears system");
-    uint32_t fid = (uint32_t)file_id;    /* a program's file_id_t */
+    uint64_t fid = file_id;    /* a program's file_id_t */
     s_deck_cabin.auth_bits = AUTH_TAG_UTILITY | AUTH_TAG_APP;
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_OBJ_DELETE, &fid, sizeof(fid), NULL, 0, &ctx),
                    ERR_PERMISSION_DENIED, "the deck's delete for a utility's cabin is refused");
@@ -475,7 +475,7 @@ static TestResult TestStandWarrantGuardedTagPutOn(void)
     const char kept[]  = STAND_WARRANT_KEPT;
 
     TEST_ASSERT(StandMakeFile("stand_warrant_t", NULL, 0, &file_id), "a file of the test's own");
-    uint32_t fid = (uint32_t)file_id;    /* a program's file_id_t */
+    uint64_t fid = file_id;    /* a program's file_id_t */
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_SET, &fid, sizeof(fid), kept, sizeof(kept) - 1, NULL),
                    ERR_PERMISSION_DENIED,
                    "the deck's tag set of system:standwarrant, by a caller with no warrant, is refused");

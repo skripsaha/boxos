@@ -229,7 +229,7 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     /* Resolve the tag to its registry id once, outside the process-list
      * lock — sys_proc_has_tag's string/wildcard path would re-acquire
      * process_lock through process_snapshot_tags and self-deadlock. */
-    uint16_t tid = TagFSLookupSpelling(&tag);
+    uint32_t tid = TagFSLookupSpelling(&tag);
     if (tid == TAGFS_INVALID_TAG_ID) return ERR_ROUTE_NO_SUBSCRIBERS;
 
     /* Phase 1: snapshot matching pids under process_list_lock so the
@@ -979,7 +979,7 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
      * re-enters process_lock through process_snapshot_tags and would
      * self-deadlock (the same rule SysBroadcast keeps). An unknown tag is
      * nobody wearing it, not a failure — the answer is an honest zero. */
-    uint16_t tid = TagFSLookupSpelling(&tag);
+    uint32_t tid = TagFSLookupSpelling(&tag);
     if (tid != TAGFS_INVALID_TAG_ID) {
         /* Phase 1: the pids, under the list lock, counted then made room for
          * then filled — never a fixed tray that silently drops the last one. */
@@ -1737,7 +1737,7 @@ static int SysTagCheck(const ManifestOp *op, Crate *crates, uint16_t crate_count
  *  Filesystem maintenance
  * ========================================================================= */
 
-/* SYSTEM_OP_DEFRAG_FILE  params:[u32 file_id]
+/* SYSTEM_OP_DEFRAG_FILE  params:[u64 file_id]
  *                        out_crate (optional): u32 frag_score
  * A WriteJob (write_job.h): the file's Helm is held for the whole gather, and
  * a caller whose file another holds is parked until it is handed on. Where the
@@ -1748,10 +1748,10 @@ static int SysDefragFile(const ManifestOp *op, Crate *crates, uint16_t crate_cou
                          const OpContext *ctx)
 {
     (void)crate_count;
-    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
 
     WriteJobAsk ask;
-    uint32_t    file_id;    /* the program's file_id_t */
+    uint64_t    file_id;    /* the program's file_id_t */
     memcpy(&file_id, op->params, sizeof(file_id));
     memset(&ask, 0, sizeof(ask));
     ask.kind    = WRITE_JOB_DEFRAG;

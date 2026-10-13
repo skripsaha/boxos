@@ -24,7 +24,7 @@ static uint64_t s_stress_ids[STRESS_FILE_COUNT];
 static TestResult test_stress_many_files(void)
 {
     TestResult verdict    = TEST_PASS;
-    uint16_t   tag_ids[2] = {1, 2};
+    uint32_t   tag_ids[2] = {1, 2};
     char       name[32];
 
     memset(s_stress_ids, 0, sizeof(s_stress_ids));
@@ -65,7 +65,7 @@ static TestResult test_stress_large_file(void)
 {
     TestResult       verdict    = TEST_PASS;
     uint64_t         file_id    = 0;
-    uint16_t         tag_ids[1] = {1};
+    uint32_t         tag_ids[1] = {1};
     TagFSFileHandle* handle     = NULL;
     bool             have_meta  = false;
     TagFSMetadata    meta;

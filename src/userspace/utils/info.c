@@ -31,7 +31,7 @@ int main(void) {
         return 0;
     }
 
-    uint32_t matches[4];
+    file_id_t matches[4];
     file_info_t infos[4];
     int count = find_file_by_name(luggage_word(1), matches, infos, 4);
 
@@ -42,7 +42,7 @@ int main(void) {
 
     println("File Info:");
     printf("  Filename: %s\n", info.filename);
-    printf("  File ID: %u\n", matches[0]);
+    printf("  File ID: %lu\n", matches[0]);
     printf("  Size: %u bytes\n", (unsigned)info.size);
     printf("  Flags: 0x%x\n", info.flags);
 

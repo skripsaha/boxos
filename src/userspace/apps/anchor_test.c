@@ -35,15 +35,15 @@ static uint32_t mix(uint32_t a, uint32_t b)
 
 int main(void)
 {
-    uint32_t   fids[4];
+    file_id_t  fids[4];
     file_info_t infos[4];
     int found = find_file_by_name(AT_NAME, fids, infos, 4);
 
     if (found <= 0) {
         /* Phase A — write, anchor, exit (no bye). */
-        int fid = create(AT_NAME, AT_TAG);
+        int64_t fid = create(AT_NAME, AT_TAG);
         if (fid < 0) {
-            kdbg_print("[ANCHOR] create rc=%d", fid);
+            kdbg_print("[ANCHOR] create rc=%ld", fid);
             return 1;
         }
         AnchorRecord rec;
@@ -52,20 +52,20 @@ int main(void)
         rec.seq      = 1;
         rec.checksum = mix(rec.magic, rec.seq);
 
-        int wrc = fwrite((uint32_t)fid, 0, &rec, sizeof(rec));
+        int wrc = fwrite((file_id_t)fid, 0, &rec, sizeof(rec));
         if (wrc != sizeof(rec)) {
             kdbg_print("[ANCHOR] fwrite rc=%d", wrc);
             return 1;
         }
 
         /* The whole point: durable BEFORE caller exits. */
-        int arc = anchor((uint32_t)fid);
+        int arc = anchor((file_id_t)fid);
         if (arc != 0) {
             kdbg_print("[ANCHOR] anchor rc=%d", arc);
             return 1;
         }
 
-        kdbg_print("[ANCHOR] WROTE+ANCHORED fid=%d. Now kill QEMU and re-run.",
+        kdbg_print("[ANCHOR] WROTE+ANCHORED fid=%ld. Now kill QEMU and re-run.",
                    fid);
         return 0;
     }

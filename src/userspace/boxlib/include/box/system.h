@@ -181,7 +181,7 @@ int system_core_usage(uint32_t core_index, system_core_usage_t *out);
 /* The file laid in one run, where the volume chooses — near where it begins.
  * The volume's fragmentation score after it (>= 0, as fragmentation()
  * answers), or the refusal: a file the system keeps is not moved. */
-int defrag(uint32_t file_id);
+int defrag(file_id_t file_id);
 /* The volume's fragmentation in percent: of every step from one of a file's
  * blocks to its next, the share that is a gap — the next run not beginning
  * where the one before it ends. defrag answers the same figure after it. */

@@ -354,7 +354,7 @@ static TestResult TestStandInkEarlyCloseSparesTheLast(void)
 
     TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0, "a file is made");
     TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &key, INK_UNWARRANTED), "it wears stand_ink");
-    uint16_t tag = TagRegistryLookup(tagfs_get_state()->registry, &key);
+    uint32_t tag = TagRegistryLookup(tagfs_get_state()->registry, &key);
     TEST_ASSERT(StandInkAtRest(), "cycles settle it, and nothing rests or waits to be gleaned");
     TEST_ASSERT_EQ(StandInkSpares(NULL, 0), SPARE_RESERVE, "the pool holds the whole reserve");
     TEST_ASSERT_EQ(StandInkTakeAll(&ground), ERR_TAGFS_NO_SPACE,

@@ -117,7 +117,7 @@ inline result<int> fragmentation() noexcept { return _detail::from_ret<int>(::fr
 // surfaced as the value here; the error arm carries the cause. (A nonzero
 // score is a SUCCESS, not a failure: the old `== 0` bool form wrongly read any
 // nonzero score as failure.)
-inline result<int> defrag(std::uint32_t file_id) noexcept
+inline result<int> defrag(file_id_t file_id) noexcept
 {
     return _detail::from_ret<int>(::defrag(file_id));
 }

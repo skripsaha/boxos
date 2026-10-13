@@ -28,7 +28,7 @@ struct UseList {
     UseText  *said;      /* the canonical text, in the order the person said it */
     UseSpan  *spans;     /* count of them, in that order */
     uint32_t *sorted;    /* the indices of `spans` in TagSpellingCompare order */
-    uint16_t *ids;
+    uint32_t *ids;
 };
 
 /*
@@ -44,7 +44,7 @@ typedef struct UseSnapshot {
     bool     whole;
     uint64_t bits;
     uint32_t over_count;
-    uint16_t over[];
+    uint32_t over[];
 } UseSnapshot;
 
 /*
@@ -130,7 +130,7 @@ bool UseTextSame(const UseText *a, const UseText *b)
 
 static UseList *UseListMake(uint32_t count, UseText *said)
 {
-    size_t   each = sizeof(UseSpan) + sizeof(uint32_t) + sizeof(uint16_t);
+    size_t   each = sizeof(UseSpan) + sizeof(uint32_t) + sizeof(uint32_t);
     UseList *l    = kmalloc(sizeof(UseList) + (size_t)count * each);
     if (!l) return NULL;
     l->refs    = 1;
@@ -139,7 +139,7 @@ static UseList *UseListMake(uint32_t count, UseText *said)
     l->said    = said;
     l->spans   = (UseSpan *)(l + 1);
     l->sorted  = (uint32_t *)(l->spans + count);
-    l->ids     = (uint16_t *)(l->sorted + count);
+    l->ids     = (uint32_t *)(l->sorted + count);
     for (uint32_t i = 0; i < count; i++)
         l->ids[i] = TAGFS_INVALID_TAG_ID;
     return l;
@@ -352,9 +352,9 @@ static bool UseContextInstall(UseList *l, bool only_over, uint64_t looked)
 }
 
 /* A slot given its number, once. The last one bound stops BindTag looking. */
-static bool UseSlotBind(UseList *l, uint32_t index, uint16_t id)
+static bool UseSlotBind(UseList *l, uint32_t index, uint32_t id)
 {
-    uint16_t none = TAGFS_INVALID_TAG_ID;
+    uint32_t none = TAGFS_INVALID_TAG_ID;
     if (!__atomic_compare_exchange_n(&l->ids[index], &none, id, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
         return false;
@@ -382,7 +382,7 @@ static void UseListBind(UseList *l)
     for (uint32_t i = 0; i < l->count; i++) {
         if (__atomic_load_n(&l->ids[i], __ATOMIC_ACQUIRE) != TAGFS_INVALID_TAG_ID) continue;
         TagSpelling tag = UseListTag(l, i);
-        uint16_t    id  = TagFSLookupSpelling(&tag);
+        uint32_t    id  = TagFSLookupSpelling(&tag);
         if (id != TAGFS_INVALID_TAG_ID && UseSlotBind(l, i, id)) bound++;
     }
     tagfs_leave();
@@ -409,7 +409,7 @@ void UseContextClear(void)
     UseContextInstall(NULL, false, 0);
 }
 
-void UseContextBindTag(const TagSpelling *tag, uint16_t tag_id)
+void UseContextBindTag(const TagSpelling *tag, uint32_t tag_id)
 {
     if (!tag || tag_id == TAGFS_INVALID_TAG_ID) return;
     if (!__atomic_load_n(&g_use_waiting, __ATOMIC_SEQ_CST)) return;
@@ -426,7 +426,7 @@ void UseContextUnbind(void)
     UseList *l = UseContextHold();
     if (!l) return;
     for (uint32_t i = 0; i < l->count; i++)
-        __atomic_store_n(&l->ids[i], (uint16_t)TAGFS_INVALID_TAG_ID, __ATOMIC_RELAXED);
+        __atomic_store_n(&l->ids[i], (uint32_t)TAGFS_INVALID_TAG_ID, __ATOMIC_RELAXED);
     __atomic_store_n(&l->unbound, l->count, __ATOMIC_RELEASE);
     spin_lock(&g_use.lock);
     if (g_use.list == l)
@@ -449,8 +449,8 @@ static void UseSnapshotDrop(UseSnapshot *s)
 static int UseIdOrder(const void *a, const void *b, void *ctx)
 {
     (void)ctx;
-    uint16_t x = *(const uint16_t *)a;
-    uint16_t y = *(const uint16_t *)b;
+    uint32_t x = *(const uint32_t *)a;
+    uint32_t y = *(const uint32_t *)b;
     return (x > y) - (x < y);
 }
 
@@ -460,7 +460,7 @@ static int UseIdOrder(const void *a, const void *b, void *ctx)
 static UseSnapshot *UseSnapshotBuild(const UseList *l, uint64_t shape)
 {
     uint32_t     room = l ? l->count : 0;
-    UseSnapshot *s    = kmalloc(sizeof(UseSnapshot) + (size_t)room * sizeof(uint16_t));
+    UseSnapshot *s    = kmalloc(sizeof(UseSnapshot) + (size_t)room * sizeof(uint32_t));
     if (!s) return NULL;
     s->refs       = 1;
     s->shape      = shape;
@@ -468,7 +468,7 @@ static UseSnapshot *UseSnapshotBuild(const UseList *l, uint64_t shape)
     s->bits       = 0;
     s->over_count = 0;
     for (uint32_t i = 0; i < room && s->whole; i++) {
-        uint16_t id = __atomic_load_n(&l->ids[i], __ATOMIC_ACQUIRE);
+        uint32_t id = __atomic_load_n(&l->ids[i], __ATOMIC_ACQUIRE);
         if (id == TAGFS_INVALID_TAG_ID) s->whole = false;
         else if (id < 64)               s->bits |= (uint64_t)1 << id;
         else                            s->over[s->over_count++] = id;
@@ -477,7 +477,7 @@ static UseSnapshot *UseSnapshotBuild(const UseList *l, uint64_t shape)
         s->over_count = 0;
         return s;
     }
-    KSort(s->over, s->over_count, sizeof(uint16_t), UseIdOrder, NULL);
+    KSort(s->over, s->over_count, sizeof(uint32_t), UseIdOrder, NULL);
     uint32_t distinct = 0;
     for (uint32_t i = 0; i < s->over_count; i++)
         if (distinct == 0 || s->over[distinct - 1] != s->over[i])
@@ -517,7 +517,7 @@ static UseSnapshot *UseSnapshotHold(void)
     return s;
 }
 
-static bool UseSnapshotHas(const UseSnapshot *s, uint16_t id)
+static bool UseSnapshotHas(const UseSnapshot *s, uint32_t id)
 {
     uint32_t lo = 0, hi = s->over_count;
     while (lo < hi) {
@@ -546,7 +546,7 @@ static bool UseSnapshotWornBy(const UseSnapshot *s, const cabin_t *cabin)
     if (s->over_count == 0) return true;
 
     uint32_t        n   = __atomic_load_n(&cabin->tag_overflow_count, __ATOMIC_ACQUIRE);
-    const uint16_t *ids = __atomic_load_n(&cabin->tag_overflow_ids, __ATOMIC_ACQUIRE);
+    const uint32_t *ids = __atomic_load_n(&cabin->tag_overflow_ids, __ATOMIC_ACQUIRE);
     if (!ids || n < s->over_count) return false;
     uint32_t hits = 0;
     for (uint32_t i = 0; i < n; i++)

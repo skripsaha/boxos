@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "box/defs.h"
+#include "box/types.h"
 
 #define FILE_FLAG_TRASHED  (1 << 1)
 
@@ -16,7 +17,7 @@ typedef struct {
 } tag_t;
 
 typedef struct {
-    uint32_t file_id;
+    file_id_t file_id;
     uint32_t flags;
     uint64_t size;
     uint8_t tag_count;
@@ -30,34 +31,37 @@ typedef struct {
  * create() stamps the new file code and cpp along with the tags it was given.
  * The _everywhere spellings ask the same of the whole volume, the user's
  * context left out. See box/use.h.
+ *
+ * create answers the new file's id (> 0), or a negative -error_t — one int64
+ * the way fread answers a count, so a whole 64-bit id is never cut to an int.
  */
-int create(const char* filename, const char* tags);
-int create_everywhere(const char* filename, const char* tags);
+int64_t create(const char* filename, const char* tags);
+int64_t create_everywhere(const char* filename, const char* tags);
 /* query writes up to max_files ids and returns how many it wrote. A caller
  * that wants every match asks query_all: it learns the count from the kernel,
  * hands back a malloc'd list of that many ids (NULL when there are none) and
  * returns the count; the caller frees the list. */
-int query(const char* tags, uint32_t* file_ids, size_t max_files);
-int query_everywhere(const char* tags, uint32_t* file_ids, size_t max_files);
-int query_all(const char* tags, uint32_t** out_ids);
-int query_all_everywhere(const char* tags, uint32_t** out_ids);
-int file_info(uint32_t file_id, file_info_t* info);
+int query(const char* tags, file_id_t* file_ids, size_t max_files);
+int query_everywhere(const char* tags, file_id_t* file_ids, size_t max_files);
+int query_all(const char* tags, file_id_t** out_ids);
+int query_all_everywhere(const char* tags, file_id_t** out_ids);
+int file_info(file_id_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
  * is capped to one syscall — loop for more), or a negative -error_t on failure.
  * fwrite writes at `offset` no further than the file's size: past it the
  * write is refused -ERR_TAGFS_BEYOND_SIZE (file_span makes a gap). A write
  * the volume refused part way answers the bytes the file holds of it — a
  * short count; the refusal is the answer of the next call, from there. */
-int64_t fread(uint32_t file_id, uint64_t offset, void* buffer, size_t size);
-int64_t fwrite(uint32_t file_id, uint64_t offset, const void* buffer, size_t size);
+int64_t fread(file_id_t file_id, uint64_t offset, void* buffer, size_t size);
+int64_t fwrite(file_id_t file_id, uint64_t offset, const void* buffer, size_t size);
 /* `delete` is a C++ keyword — C++ callers use file_delete(), bound to the
  * same ELF symbol via asm label. C keeps the original name unchanged. */
 #ifdef __cplusplus
-int file_delete(uint32_t file_id) asm("delete");
+int file_delete(file_id_t file_id) asm("delete");
 #else
-int delete(uint32_t file_id);
+int delete(file_id_t file_id);
 #endif
-int file_rename(uint32_t file_id, const char* new_filename);
+int file_rename(file_id_t file_id, const char* new_filename);
 
 /* The file made exactly `size` bytes long. Shorter: the tail is cut and its
  * blocks given back. Longer: the bytes from the old size on read as zeros —
@@ -70,31 +74,31 @@ int file_rename(uint32_t file_id, const char* new_filename);
  * growth past every block the volume could give, -ERR_TAGFS_NO_SPACE.
  * Returns 0 or a negative -error_t.
  *
- * Publishes the change on every tag of the file — the same 32-byte payload
+ * Publishes the change on every tag of the file — the same 40-byte payload
  * shape as a write, with op = 3, offset = where the file changed (the smaller
  * of the old and the new size), bytes = how many were cut or added. */
-int file_span(uint32_t file_id, uint64_t size, uint32_t flags);
+int file_span(file_id_t file_id, uint64_t size, uint32_t flags);
 
-int tag_add(uint32_t file_id, const char* tag);
-int tag_remove(uint32_t file_id, const char* key);
+int tag_add(file_id_t file_id, const char* tag);
+int tag_remove(file_id_t file_id, const char* key);
 
 /* Every file called `filename`, inside the Use Context. Returns how many
  * there are; the first `max` of them are written to file_ids (and out_infos,
  * when given). Asked with max == 0 it only counts. */
-int find_file_by_name(const char* filename, uint32_t* file_ids, file_info_t* out_infos, size_t max);
+int find_file_by_name(const char* filename, file_id_t* file_ids, file_info_t* out_infos, size_t max);
 
 /* Snapshots. On a format-v1 volume every one of these four answers
  * -ERR_UNSUPPORTED and fills in nothing: a snapshot there could be taken and
  * never read, and snapshots arrive with format v2. The kernel says so once a
  * boot, naming the request. */
-int snap_create(const char *name, uint32_t file_id, uint32_t *out_snap_id);
+int snap_create(const char *name, file_id_t file_id, uint32_t *out_snap_id);
 int snap_delete(uint32_t snap_id);
 int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count);
 
 /* A snapshot's record, as snap_info would fill it. */
 typedef struct {
     uint32_t id;
-    uint32_t parent_file_id;
+    file_id_t parent_file_id;
     uint64_t created_time;
     uint32_t file_count;
     uint64_t total_size;
@@ -122,7 +126,7 @@ int snap_info(uint32_t snap_id, snap_info_t *out);
  * file_id == 0 anchors the whole filesystem and publishes only the
  * generic "anchor" event (no per-tag fan-out).
  */
-int anchor(uint32_t file_id);
+int anchor(file_id_t file_id);
 
 /*
  * write_settled() — waits, without asking for anything to be published, until
@@ -132,7 +136,7 @@ int anchor(uint32_t file_id);
  * ERR_TAGFS_READ_ONLY for a medium that takes no write, ERR_DEVICE_NOT_READY
  * for one that left.
  */
-int write_settled(uint32_t file_id);
+int write_settled(file_id_t file_id);
 
 #ifdef __cplusplus
 }

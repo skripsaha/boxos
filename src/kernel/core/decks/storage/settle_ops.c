@@ -2,8 +2,8 @@
  * The waits for the volume's Settle a program asks for — and the one it does
  * not ask for, but meets: room on its way.
  *
- *   OBJ_ANCHOR          params: [u32 file_id]
- *   OBJ_WRITE_SETTLED   params: [u32 file_id]
+ *   OBJ_ANCHOR          params: [u64 file_id]
+ *   OBJ_WRITE_SETTLED   params: [u64 file_id]
  *   use (system deck)   the Use Context remembered by the volume
  *   room                an operation of the deck the volume answered
  *                       ERR_WOULD_BLOCK, asked again after the cycle's end
@@ -61,7 +61,7 @@ typedef struct {
     process_t*   target;         /* pinned until the answer; NULL for the stand's */
     const char*  holder;         /* who owes the answer: the op's registered name */
     uint32_t     submit_cookie;
-    uint32_t     file_id;
+    uint64_t     file_id;
     uint8_t      kind;           /* SettleOpKind */
     uint64_t     ticket;         /* USE: the demand the word is (UseMemorySay) */
     UseText*     said;           /* USE: the word, held until the answer */
@@ -78,9 +78,9 @@ typedef struct {
 #endif
 } SettleOpWait;
 
-static uint32_t op_file_id(const ManifestOp *op)
+static uint64_t op_file_id(const ManifestOp *op)
 {
-    uint32_t file_id = 0;
+    uint64_t file_id = 0;
     if ((size_t)op->param_size >= sizeof(file_id))
         memcpy(&file_id, op->params, sizeof(file_id));
     return file_id;
@@ -90,14 +90,14 @@ static uint32_t op_file_id(const ManifestOp *op)
  * that generic listeners hold — resolved by the reader door, never named into
  * the Logbook, so publisher and subscriber meet on the same id whoever spoke
  * first (box::tagfs::on_anchor subscribes by name). */
-static void AnchorPublish(uint32_t file_id, uint32_t pid)
+static void AnchorPublish(uint64_t file_id, uint32_t pid)
 {
     struct __attribute__((packed)) {
-        uint32_t file_id;
+        uint64_t file_id;
         uint8_t  op;          /* 2 = ANCHOR */
-        uint8_t  _pad[3];
+        uint8_t  _pad[7];
         uint64_t now_us;
-    } ev = { file_id, 2, {0, 0, 0}, 0 };
+    } ev = { file_id, 2, {0}, 0 };
 
     if (file_id != 0 && tagfs_enter()) {
         TagFSMetadata meta;
@@ -116,15 +116,16 @@ static void AnchorPublish(uint32_t file_id, uint32_t pid)
 
 /* What an anchor or a settled-wait answered said out loud: a refusal, and an
  * anchor's event on OK. */
-static void SettleOpSay(uint8_t kind, uint32_t file_id, uint32_t pid, error_t rc)
+static void SettleOpSay(uint8_t kind, uint64_t file_id, uint32_t pid, error_t rc)
 {
     if (rc == OK) {
         if (kind == SETTLE_OP_ANCHOR)
             AnchorPublish(file_id, pid);
         return;
     }
-    kprintf("[Storage] %s of file %u: the volume's changes were not settled (error %u) — %s\n",
-            kind == SETTLE_OP_ANCHOR ? "anchor" : "the wait for the write settled", file_id,
+    kprintf("[Storage] %s of file %llu: the volume's changes were not settled (error %u) — %s\n",
+            kind == SETTLE_OP_ANCHOR ? "anchor" : "the wait for the write settled",
+            (unsigned long long)file_id,
             (unsigned)rc, kind == SETTLE_OP_ANCHOR ? "no anchor event is published"
                                                    : "the caller is told");
 }
@@ -177,7 +178,7 @@ static void SettleOpAnswered(SettleWaiter* w, error_t rc)
 /* The program parked behind its Chit and the wait made ready for its waiter —
  * or NULL, and nothing parked, when there is no memory or no program. */
 static SettleOpWait* SettleOpPark(const OpContext *ctx, Crate *crates, uint8_t kind,
-                                  uint32_t file_id, const char *holder)
+                                  uint64_t file_id, const char *holder)
 {
     SettleOpWait* s = kmalloc(sizeof(SettleOpWait));
     if (!s)
@@ -205,7 +206,7 @@ static SettleOpWait* SettleOpPark(const OpContext *ctx, Crate *crates, uint8_t k
 
 /* The wait for Ink `gen`: its answer now, or ERR_WOULD_BLOCK with the program
  * parked and the waiter linked. Inside the door. */
-static int SettleOpWaitFor(const OpContext *ctx, Crate *crates, uint32_t file_id, uint64_t gen,
+static int SettleOpWaitFor(const OpContext *ctx, Crate *crates, uint64_t file_id, uint64_t gen,
                            uint8_t kind, const char *holder)
 {
     uint32_t pid = ctx && ctx->proc ? ctx->proc->pid : 0;
@@ -233,7 +234,7 @@ static int SettleOpWaitFor(const OpContext *ctx, Crate *crates, uint32_t file_id
 int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
 {
     (void)crate_count;
-    uint32_t file_id = op_file_id(op);
+    uint64_t file_id = op_file_id(op);
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
     int rc = SettleOpWaitFor(ctx, crates, file_id, InkedGen(), SETTLE_OP_ANCHOR,
@@ -246,7 +247,7 @@ int ObjWriteSettled(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                     const OpContext *ctx)
 {
     (void)crate_count;
-    uint32_t file_id = op_file_id(op);
+    uint64_t file_id = op_file_id(op);
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
     uint64_t gen = file_id ? InkGenOf(file_id) : InkedGen();
@@ -412,7 +413,7 @@ static void SettleOpRoomAgain(HelmWaiter *service)
 }
 
 int SettleOpForRoom(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                    const OpContext *ctx, uint32_t file_id)
+                    const OpContext *ctx, uint64_t file_id)
 {
     bool* again = s_asked_again[amp_get_core_index()];
     if (again) {

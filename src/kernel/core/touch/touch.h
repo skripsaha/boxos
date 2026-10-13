@@ -20,16 +20,17 @@
  * Subscribe / unsubscribe are O(1): link/unlink a TouchSub on the bucket
  * list (and on the per-process list owned by proc).
  *
- * Buckets are addressed by a two-level table over the 16-bit tag_id space:
- *   g_bucket_l1[tag_id >> 8] → leaf[256]    (leaf lazily kmalloc'd)
- *   leaf[tag_id & 0xff]      → TouchBucket  (in-place, not pointer)
- * Always-resident root is 2 KiB; each populated leaf is 8 KiB. Cold tag_id
- * ranges keep their L2 pointer NULL → publish to those ids is one ACQUIRE
- * load + early-return.
+ * Buckets are addressed by a four-level radix over the 32-bit tag_id space,
+ * a byte of the id a level:
+ *   root[id >> 24] → [(id >> 16) & 0xff] → [(id >> 8) & 0xff] → leaf[256]
+ *   leaf[id & 0xff] → TouchBucket  (in-place, not pointer)
+ * Every level past the always-resident 2 KiB root is lazily kmalloc'd and
+ * kept: a cold tag_id range stops at the first NULL → publish to those ids
+ * is at most four ACQUIRE loads + early-return.
  */
 
-typedef uint16_t TouchTag;
-#define TOUCH_TAG_INVALID  ((TouchTag)0xFFFF)
+typedef uint32_t TouchTag;
+#define TOUCH_TAG_INVALID  ((TouchTag)0xFFFFFFFFu)
 
 typedef enum {
     TOUCH_REST      = 0,
@@ -54,13 +55,13 @@ typedef enum {
 #define TOUCH_FLAG_TAGFS   0x0004u
 
 typedef struct __packed {
-    uint16_t tag_id;
+    uint32_t tag_id;
     uint16_t flags;
+    uint16_t reserved;
     uint32_t source_pid;
-    uint64_t payload_addr;
     uint32_t payload_len;
+    uint64_t payload_addr;
     uint64_t timestamp_tsc;
-    uint32_t reserved;
 } Touch;
 _Static_assert(sizeof(Touch) == 32, "Touch must be 32 bytes");
 
@@ -71,7 +72,7 @@ struct TouchBucket;
  * IRQ handler, additional touches are queued here and replayed on
  * TouchIrqReturn. */
 typedef struct TouchPending {
-    uint16_t            tag_id;
+    TouchTag            tag_id;
     uint16_t            flags;
     uint32_t            source_pid;
     uint8_t             payload[64];
@@ -103,7 +104,7 @@ typedef struct TouchSub {
      * proc-list membership, +1 per in-flight publisher snapshot. Freed by
      * touch_sub_release when it reaches 0. */
     atomic_u32_t ref;
-    uint16_t   tag_id;
+    TouchTag   tag_id;
     uint8_t    mode;          /* TouchMode */
     uint8_t    has_pending;   /* LATCHED: 1 = pending slot occupied */
     union {
@@ -133,7 +134,7 @@ typedef struct TouchBucket {
     uint8_t          capability;   /* TouchCapability */
     uint8_t          level_state;  /* LEVEL: current state byte */
     uint8_t          flags;        /* bit 0: registered (policy/cap set) */
-    uint16_t         tag_id;       /* mirror for diagnostics; == leaf index */
+    TouchTag         tag_id;       /* mirror for diagnostics; == leaf index */
     uint16_t         latched_plen; /* LATCHED on-claim sync: byte count, 0 = no active latch */
     /* Kernel-side listeners on this tag (TouchWatch below). Counted
      * separately from sub_count because they are a different kind of
@@ -153,9 +154,8 @@ _Static_assert(sizeof(TouchBucket) <= 64, "TouchBucket must fit one cache line p
 
 #define TOUCH_BUCKET_FLAG_REGISTERED  0x01u
 
-/* Number of distinct 256-id leaves in the two-level table. */
-#define TOUCH_BUCKET_L1_ENTRIES  256u
-#define TOUCH_BUCKET_L2_ENTRIES  256u
+/* Every level of the radix, root to leaf, is 256 entries: a byte of the id. */
+#define TOUCH_BUCKET_FANOUT  256u
 
 bool TouchHasAnyListenersForTag(TouchTag tag_id);
 

@@ -945,7 +945,7 @@ static int ChainMayRead(const char *chain, uint32_t block, uint32_t walked)
 
 /* Read tag registry block chain; return tag_id for (key, NULL) label tag.
  * Returns TAGFS_INVALID_TAG_ID if not found. */
-static uint16_t TagRegistryFindLabel(const char *key)
+static uint32_t TagRegistryFindLabel(const char *key)
 {
     /* The Deed states the registry in blocks of the whole volume; the chain
      * inside it runs in blocks of the data run, which is what a block number
@@ -975,7 +975,7 @@ static uint16_t TagRegistryFindLabel(const char *key)
             if (pos + 6 > used) break;
 
             uint8_t  *p         = reg_blk.data + pos;
-            uint16_t  tag_id;
+            uint32_t  tag_id = 0;
             uint8_t   flags;
             uint8_t   this_key_len;
             uint16_t  this_val_len;
@@ -1059,7 +1059,7 @@ static int PoolRecordWhole(const uint8_t *r, uint32_t room)
 /* Which of the boot tags a whole record says its file wears: bit i for
  * ids[i]. None for a Quitclaim, a trashed file, or one naming no block — its
  * newest record says there is nothing there to boot. */
-static uint32_t PoolRecordCarries(const uint8_t *r, const uint16_t ids[BOOT_TAG_COUNT])
+static uint32_t PoolRecordCarries(const uint8_t *r, const uint32_t ids[BOOT_TAG_COUNT])
 {
     uint32_t flags;
     uint16_t tags, extents;
@@ -1071,7 +1071,7 @@ static uint32_t PoolRecordCarries(const uint8_t *r, const uint16_t ids[BOOT_TAG_
 
     uint32_t carries = 0;
     for (uint16_t t = 0; t < tags; t++) {
-        uint16_t tid;
+        uint32_t tid = 0;
         MemCopy(&tid, r + META_RECORD_VARDATA_OFF + (uint32_t)t * 2U, 2);
         for (uint32_t i = 0; i < BOOT_TAG_COUNT; i++)
             if (ids[i] != TAGFS_INVALID_TAG_ID && tid == ids[i]) carries |= 1U << i;
@@ -1218,7 +1218,7 @@ static uint32_t LedgerSeals(SettleMark seals[VOLUME_LEDGER_COPIES])
  * could not be read to its end — then which record of a file is its newest is
  * not known, and no kernel is taken from it.
  */
-static int PoolWalkForBootFiles(const uint16_t ids[BOOT_TAG_COUNT], const PoolSpan *span,
+static int PoolWalkForBootFiles(const uint32_t ids[BOOT_TAG_COUNT], const PoolSpan *span,
                                 BootCandidates *set)
 {
     uint32_t block_idx = span->first;
@@ -1290,7 +1290,7 @@ static int PoolWalkForBootFiles(const uint16_t ids[BOOT_TAG_COUNT], const PoolSp
 /* The walks in the order the kernel's mount would stand on them: the newest
  * seal, the one before it, the whole chain. 1 once one of them was read to its
  * end. */
-static int PoolWalkBySeals(const uint16_t ids[BOOT_TAG_COUNT], BootCandidates *set)
+static int PoolWalkBySeals(const uint32_t ids[BOOT_TAG_COUNT], BootCandidates *set)
 {
     SettleMark seals[VOLUME_LEDGER_COPIES];
     uint32_t   n = LedgerSeals(seals);
@@ -1359,7 +1359,7 @@ static int KernelPlaceFromRecord(const BootCandidate *c, KernelPlace *out)
 /* Try each tag in priority order; return 1 on success. */
 static int TagFsFindKernelByTags(KernelPlace *out)
 {
-    uint16_t ids[BOOT_TAG_COUNT];
+    uint32_t ids[BOOT_TAG_COUNT];
     int      named = 0;
 
     for (uint32_t i = 0; i < BOOT_TAG_COUNT; i++) {

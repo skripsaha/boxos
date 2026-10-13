@@ -17,7 +17,7 @@ int main(void) {
     println("Utilities:");
 
     /* Every utility on the volume, however many there are. */
-    uint32_t    *s_file_ids = NULL;
+    file_id_t   *s_file_ids = NULL;
     file_info_t *s_infos    = NULL;
     int count = query_all("utility", &s_file_ids);
     if (count > 0) s_infos = malloc((size_t)count * sizeof(file_info_t));

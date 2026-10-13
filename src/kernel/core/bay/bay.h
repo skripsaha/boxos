@@ -117,7 +117,7 @@ struct cabin_t;
 
 /* BayObject — one per-tag physical-memory region.
  *
- * Identified by tag_id (TagFS-interned uint16_t). Hash table keys
+ * Identified by tag_id (TagFS-interned uint32_t). Hash table keys
  * BayObject by tag_id so cross-cabin open is O(1) modulo bucket-chain
  * length. All cabins claiming the same tag share this single record.
  *
@@ -132,7 +132,7 @@ struct cabin_t;
  */
 struct BayObject {
     BayObject  *bucket_next;        /* hash-bucket collision chain */
-    uint16_t    tag_id;             /* TagFS-interned id */
+    uint32_t    tag_id;             /* TagFS-interned id */
     uint16_t    page_class;         /* 12 = 4 KiB, 21 = 2 MiB */
     /* TME-MK KeyID. Zero when not encrypted — every cabin opening this
      * Bay maps with KeyID 0 (platform-default encryption, identical to
@@ -141,7 +141,6 @@ struct BayObject {
      * specified at creation; every cross-cabin mapping uses this same
      * KeyID so reads decrypt correctly. */
     uint16_t    tme_keyid;
-    uint16_t    _pad0;              /* keep `total_size` 8-byte-aligned */
     uint64_t    total_size;         /* PHYSICAL mapped bytes = chunk_count*chunk_size (VA reserve + unmap) */
     uint64_t    user_size;          /* LOGICAL bytes the creator requested — what bay_size() reports */
     uint64_t    chunk_size;         /* PMM_PAGE_SIZE or BAY_HUGE_SIZE */

@@ -205,10 +205,10 @@ typedef enum {
     ERR_TAGFS_BEYOND_SIZE = 867,
     /* A file's record would be wider than format v1 carries (plot/plot_width.h). */
     ERR_TAGFS_RECORD_FULL = 868,
-    /* A file id past the 32 bits format v1 and the programs' file_id_t carry:
-     * every one of them has been issued — a volume never issues one twice, nor
-     * id 0 (ledger.h, LedgerIssueFileId) — or an id the kernel holds would have
-     * to be cut to be carried (PackV1, StorageFileIdOut), and is refused. */
+    /* A file id past the 32 bits format v1 carries: every one of them has been
+     * issued — a volume never issues one twice, nor id 0 (ledger.h,
+     * LedgerIssueFileId) — or an id the kernel holds would have to be cut to
+     * be carried (PackV1), and is refused. */
     ERR_TAGFS_FID_EXHAUSTED = 869,
 
     // TagFS Module Errors (1000-1099)

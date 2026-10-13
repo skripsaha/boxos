@@ -15,7 +15,7 @@ int main(void)
         return 1;
     }
 
-    uint32_t matches[16];
+    file_id_t matches[16];
     int count = find_file_by_name(luggage_word(1), matches, NULL, 16);
 
     if (count < 0)
@@ -40,7 +40,7 @@ int main(void)
             file_info_t info;
             if (file_info(matches[i], &info) == 0)
             {
-                printf("  %s [file_id=%u]\n", info.filename, matches[i]);
+                printf("  %s [file_id=%lu]\n", info.filename, matches[i]);
             }
         }
         println("Error: Ambiguous name (use file_id)");
@@ -48,7 +48,7 @@ int main(void)
         return 1;
     }
 
-    uint32_t file_id = matches[0];
+    file_id_t file_id = matches[0];
     file_info_t info;
     if (file_info(file_id, &info) != 0)
     {

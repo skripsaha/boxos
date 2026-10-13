@@ -11,7 +11,7 @@
 // is delivered to YOU); box::reflex is the PUSH side (the kernel acts for you).
 //
 //   box::manifest<> m;                              // forward the touch on to B
-//   std::byte p[8]; /* [u16 full][u16 bare][u32 after_ms=0] — SYSTEM_OP_TOUCH_SEND */
+//   std::byte p[12]; /* [u32 full][u32 bare][u32 after_ms=0] — SYSTEM_OP_TOUCH_SEND */
 //   m.op(DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, box::no_crate, box::no_crate, p);
 //   box::compiled_manifest card(m);
 //   box::reflex rx("sensor:spike"_tag, std::move(card));   // kernel now reacts
