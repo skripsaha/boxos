@@ -25,6 +25,9 @@
 # and stage2 boots it the way it boots any volume. It is booted on BIOS, q35
 # (STRICT), every write it makes on the record (POWERCUT=on), typed at, and
 # switched off by its power button, so the halt meets the refused volume too.
+# Then the same once more on a volume with its book whole (`create_tagfs
+# --v2`, its census clean before the boot): a kernel that cannot read a book
+# turns a real one away exactly as it turns away an empty ring.
 # Then the same again through UEFI (OVMF and TagBoot): the loader has to take
 # the kernel where the BOOT stamp of a deed bearing FRAME names it — it used to
 # stop at that deed, finding no layout in it (tagboot_deed.c, DeedTakeUp) — and
@@ -84,24 +87,30 @@ print("FRAMEREFUSE record=whole format=%s writes=%u inside=%u named=%u"
 PY
 }
 
-# framerefuse_leg KERNEL SAYS LEG [KEYS...] — the image made around KERNEL,
+# framerefuse_leg KERNEL SAYS LEG MODE [KEYS...] — the image made around
+# KERNEL by `create_tagfs MODE` (--frame-only: no book; --v2: a whole book),
 # booted with KEYS (the leg's firmware), switched off, and judged: SAYS is the
 # refusal its log must carry. LEG names the leg in every line and file.
 framerefuse_leg() {
-    local kernel=$1 says=$2 leg=$3
-    shift 3
+    local kernel=$1 says=$2 leg=$3 mode=$4
+    shift 4
     local img="$SCRATCH/framerefuse.$leg.img" before="$SCRATCH/framerefuse.$leg.before.img"
     local rec="$SCRATCH/framerefuse.$leg.record" L="$SCRATCH/serial.framerefuse.$leg.log" pid verdict uuid
     rm -f "$img" "$before" "$rec" "$L"
     cp build/boxos.img "$img" || { harness "framerefuse ($leg): could not copy build/boxos.img"; return; }
-    if ! tools/create_tagfs --frame-only "$img" src/userspace/shell/shell.bin "utility,system" \
+    if ! tools/create_tagfs "$mode" "$img" src/userspace/shell/shell.bin "utility,system" \
             "$kernel" "system" >"$SCRATCH/framerefuse.$leg.mkfs.log" 2>&1; then
-        bad "framerefuse ($leg): create_tagfs --frame-only would not make the image: $(tail -1 "$SCRATCH/framerefuse.$leg.mkfs.log")"
+        bad "framerefuse ($leg): create_tagfs $mode would not make the image: $(tail -1 "$SCRATCH/framerefuse.$leg.mkfs.log")"
         return
     fi
     python3 tools/volume-read.py "$img" deed >"$SCRATCH/framerefuse.$leg.deed" 2>&1
     grep -q "^format      : v2" "$SCRATCH/framerefuse.$leg.deed"
     chk $? "framerefuse ($leg): the image's Deed is format v2 ($(grep '^spine' "$SCRATCH/framerefuse.$leg.deed"))"
+    if [ "$mode" = "--v2" ]; then
+        python3 tools/volume-read.py "$img" check >"$SCRATCH/framerefuse.$leg.check" 2>&1
+        [ "$(tail -1 "$SCRATCH/framerefuse.$leg.check")" = "check: consistent — 0 damage, 0 leak, 0 note" ]
+        chk $? "framerefuse ($leg): its book is whole before the boot — $(tail -1 "$SCRATCH/framerefuse.$leg.check")"
+    fi
     python3 - "$img" <<'PY'
 import sys
 sys.dont_write_bytecode = True
@@ -320,12 +329,14 @@ run_framerefuse() {
     build STRICT=on
     if [ -n "${FRAMEREFUSE_KERNEL:-}" ]; then
         echo "  (the A/B receipt: $FRAMEREFUSE_KERNEL — $(tools/buildplate say "$FRAMEREFUSE_KERNEL" 2>&1 | head -1))"
-        framerefuse_leg "$FRAMEREFUSE_KERNEL" "$FRAMEREFUSE_V1_SAYS" bios
+        framerefuse_leg "$FRAMEREFUSE_KERNEL" "$FRAMEREFUSE_V1_SAYS" bios --frame-only
         return
     fi
-    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_V2_SAYS" bios
+    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_V2_SAYS" bios --frame-only
     framerefuse_after bios
-    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_V2_SAYS" uefi UEFI=on
+    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_V2_SAYS" book --v2
+    framerefuse_after book
+    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_V2_SAYS" uefi --frame-only UEFI=on
     local L="$SCRATCH/serial.framerefuse.uefi.log"
     grep -aqE "^TagBoot: volume on ground at sector [0-9]+, a format-v2 book with its data run from block 1024" "$L"
     chk $? "framerefuse (uefi): TagBoot reads the deed's FRAME, not a layout ($(grep -a '^TagBoot: volume on ground' "$L" | tr -d '\r' | head -1))"

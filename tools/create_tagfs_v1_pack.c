@@ -79,7 +79,7 @@ static int V1PackPlace(V1Pack* p, char* argv[], int first) {
 
     /* Claim ids 0..11 for the reserved vocabulary BEFORE any file tag is
      * interned, so the kernel's privilege masks are representable on mount. */
-    seed_reserved_tags();
+    seed_reserved_tags(TAGFS_V1_TAG_ID_MOST);
 
     p->next_block = 3;  /* blocks 0,1,2 reserved */
 
@@ -105,7 +105,17 @@ static int V1PackPlace(V1Pack* p, char* argv[], int first) {
         if (fi->block_count == 0) fi->block_count = 1;
         fi->start_block = p->next_block;
 
-        parse_tags(tags_str, fi->filename, &fi->tag_ids, &fi->tag_count);
+        if (parse_tags(tags_str, fi->filename, &fi->tag_ids, &fi->tag_count) != 0) return -1;
+        /* Judged here, before the volume's first write: a record that no pool
+         * block holds was refused only once the registry and the data were
+         * already on the medium. */
+        if (V1RecordBytes(fi) > TAGFS_MPOOL_DATA_SIZE) {
+            fprintf(stderr, "%s: its record would be %llu bytes — %u tag(s), %u block(s) and a name of "
+                            "%zu — and format v1 keeps a file's record in one pool block of %u\n",
+                    filepath, (unsigned long long)V1RecordBytes(fi), fi->tag_count, fi->block_count,
+                    strlen(fi->filename), TAGFS_MPOOL_DATA_SIZE);
+            return -1;
+        }
 
         if (KernelTagged(fi->tag_ids, fi->tag_count)) p->kernel_file_index = i;
 
@@ -225,11 +235,11 @@ static int V1PackPool(V1Pack* p) {
 
     for (int i = 0; i < p->file_count; i++) {
         uint8_t record_buf[4096];
-        uint32_t record_size = pack_metadata_record(record_buf, &p->files[i]);
+        uint64_t record_size = pack_metadata_record(record_buf, &p->files[i]);
 
         if (record_size > TAGFS_MPOOL_DATA_SIZE) {
-            fprintf(stderr, "Metadata record too large for %s (%u bytes)\n",
-                    p->files[i].filename, record_size);
+            fprintf(stderr, "Metadata record too large for %s (%llu bytes)\n",
+                    p->files[i].filename, (unsigned long long)record_size);
             return -1;
         }
 

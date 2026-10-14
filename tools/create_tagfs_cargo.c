@@ -14,33 +14,57 @@
 TagEntry* g_tags       = NULL;
 uint32_t  g_tag_count  = 0;
 static uint32_t  g_tag_cap    = 0;
+static uint32_t  g_tag_id_most = 0;   /* the last id the volume's format carries */
 
 /* ====================================================================
  * Tag interning
+ *
+ * ‼ AN ID IS A u32, AND THE FORMAT SAYS HOW FAR IT GOES. It was a u16 cast
+ * of the count: the 65537th tag was given id 0 again, and every one after
+ * it the id of a tag interned long before — the reserved keys among them, so
+ * a file's header named god, bypass or network for tags it was never given,
+ * and no census could tell (the ids were whole; only their meaning was
+ * wrong). Now the count is the id, whole, and the format part that seeds
+ * the vocabulary says the last id its volume carries: format v1's registry
+ * and records hold an id in a u16 and stop at TAGFS_V1_TAG_ID_MOST, format
+ * v2 writes a varint and stops where the kernel's ids do (§6.4). The tag
+ * that would pass it is refused, not given another's number.
  * ==================================================================== */
 
-static uint16_t intern_tag(const char* key, const char* value) {
-    /* Check for existing */
+/* The id of `key` (with `value`, or none), interned when it is new — `whose`
+ * names the file it is for, in a refusal. 0, or -1 having said why. */
+static int intern_tag(const char* key, const char* value, const char* whose, uint32_t* id) {
     for (uint32_t i = 0; i < g_tag_count; i++) {
         if (strcmp(g_tags[i].key, key) != 0) continue;
-        if (value == NULL && g_tags[i].value == NULL) return g_tags[i].tag_id;
-        if (value && g_tags[i].value && strcmp(g_tags[i].value, value) == 0)
-            return g_tags[i].tag_id;
+        if ((value == NULL && g_tags[i].value == NULL) ||
+            (value && g_tags[i].value && strcmp(g_tags[i].value, value) == 0)) {
+            *id = g_tags[i].tag_id;
+            return 0;
+        }
     }
 
-    /* Add new */
+    size_t key_len = strlen(key), value_len = value ? strlen(value) : 0;
+    if (key_len > TAG_KEY_WIDTH || key_len + value_len > TAG_TEXT_ROOM) {
+        fprintf(stderr, "%s: the tag '%.40s%s' has a key of %zu bytes and a value of %zu: the kernel holds "
+                        "a tag's key in %u bytes and its key and value together in %u (tag_spelling.h)\n",
+                whose, key, key_len > 40 ? "..." : "", key_len, value_len, TAG_KEY_WIDTH, TAG_TEXT_ROOM);
+        return -1;
+    }
+    if (g_tag_count > g_tag_id_most) {
+        fprintf(stderr, "%s: the tag '%.40s%s' would be the volume's tag id %u, and its format carries "
+                        "none past %u\n", whose, key, key_len > 40 ? "..." : "", g_tag_count, g_tag_id_most);
+        return -1;
+    }
     if (g_tag_count >= g_tag_cap) {
         g_tag_cap = g_tag_cap == 0 ? 32 : g_tag_cap * 2;
         g_tags = realloc(g_tags, sizeof(TagEntry) * g_tag_cap);
         if (!g_tags) { fprintf(stderr, "realloc failed\n"); exit(1); }
     }
-
-    uint16_t id = (uint16_t)g_tag_count;
     g_tags[g_tag_count].key    = strdup(key);
     g_tags[g_tag_count].value  = value ? strdup(value) : NULL;
-    g_tags[g_tag_count].tag_id = id;
-    g_tag_count++;
-    return id;
+    g_tags[g_tag_count].tag_id = g_tag_count;
+    *id = g_tag_count++;
+    return 0;
 }
 
 /* Intern the reserved vocabulary first so it claims tag_ids 0..11 — the same
@@ -48,9 +72,13 @@ static uint16_t intern_tag(const char* key, const char* value) {
  * each tag at its stored id (tag_registry.c RegistryAdopt), so the
  * auth-privilege keys (god/stopped/bypass/network) land at ids < 64 and their
  * (1ULL<<id) masks are non-zero. Reserved keys that a file also carries dedup
- * back onto these low ids; genuinely new file tags start at id 12. */
-void seed_reserved_tags(void) {
-#define X(k) (void)intern_tag(k, NULL);
+ * back onto these low ids; genuinely new file tags start at id 12. `id_most`
+ * is the last id the volume's format carries; the twelve are under it in
+ * either format, so none of them is ever refused. */
+void seed_reserved_tags(uint32_t id_most) {
+    uint32_t id;
+    g_tag_id_most = id_most;
+#define X(k) (void)intern_tag(k, NULL, "the reserved vocabulary", &id);
     TAGFS_RESERVED_KEYS(X)
 #undef X
 }
@@ -163,76 +191,91 @@ VolumePacked PackedStamp(int file_count, char* argv[], int first,
     return packed;
 }
 
-/* Extract filename stem: "kernel.bin" → "kernel", "files.elf" → "files" */
-static void extract_stem(const char* filename, char* stem, size_t stem_size) {
+/* A file name's stem — "kernel.bin" is "kernel", "files.elf" "files" — in
+ * a string of its own; NULL when there is no memory for it. */
+static char* StemOf(const char* filename) {
     const char* base = strrchr(filename, '/');
     base = base ? base + 1 : filename;
-
     const char* dot = strrchr(base, '.');
     size_t len = dot ? (size_t)(dot - base) : strlen(base);
-    if (len >= stem_size) len = stem_size - 1;
-    memcpy(stem, base, len);
-    stem[len] = '\0';
+    char* stem = malloc(len + 1);
+    if (stem) {
+        memcpy(stem, base, len);
+        stem[len] = '\0';
+    }
+    return stem;
 }
 
 /* Whether a file wears the label `kernel` — its name stems to it, or it was
  * given it — which is the file the Deed's BOOT stamp points a loader at. */
-int KernelTagged(const uint16_t* ids, uint16_t count) {
-    for (uint16_t t = 0; t < count; t++) {
+int KernelTagged(const uint32_t* ids, uint32_t count) {
+    for (uint32_t t = 0; t < count; t++) {
         if (g_tags[ids[t]].value == NULL && strcmp(g_tags[ids[t]].key, "kernel") == 0)
             return 1;
     }
     return 0;
 }
 
-/* Check if tag_id already in array */
-static int has_tag_id(const uint16_t* ids, uint16_t count, uint16_t id) {
-    for (uint16_t i = 0; i < count; i++) {
+static int has_tag_id(const uint32_t* ids, uint32_t count, uint32_t id) {
+    for (uint32_t i = 0; i < count; i++) {
         if (ids[i] == id) return 1;
     }
     return 0;
 }
 
-/* Parse comma-separated tag string like "system,type:elf,utility" */
-void parse_tags(const char* tag_string, const char* filename,
-                uint16_t** out_ids, uint16_t* out_count) {
-    uint16_t  ids[256];
-    uint16_t  count = 0;
+/* One tag of a list, "key" or "key:value", interned and added to `ids` once. */
+static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* count) {
+    uint32_t id;
+    char*    colon = strchr(token, ':');
+    if (colon) *colon = '\0';
+    if (intern_tag(token, colon ? colon + 1 : NULL, whose, &id) != 0) return -1;
+    if (!has_tag_id(ids, *count, id)) ids[(*count)++] = id;
+    return 0;
+}
 
-    /* Auto-label tag from filename stem (always first) */
-    char stem[256];
-    extract_stem(filename, stem, sizeof(stem));
-    if (stem[0] != '\0') {
-        ids[count++] = intern_tag(stem, NULL);
+/*
+ * A file's tags: its name's stem first, then a comma-separated list like
+ * "system,type:elf,utility", each once. 0, or -1 having said why.
+ *
+ * ‼ THE LIST IS TAKEN WHOLE. It was copied into 4096 bytes and the rest cut
+ * off, its tags counted into 256 and the rest dropped, the stem cut at 255 —
+ * each without a word, and the volume made of what was left. Now every tag
+ * given is interned or the volume is refused: how many a file can carry is
+ * its format's to judge (format v1's record in one pool block, V1PackPlace;
+ * format v2 has no such width), and how wide one can be the kernel's
+ * (TAG_KEY_WIDTH, TAG_TEXT_ROOM).
+ */
+int parse_tags(const char* tag_string, const char* filename, uint32_t** out_ids, uint32_t* out_count) {
+    uint32_t  room  = 2;   /* the stem, and one more tag than there are commas */
+    uint32_t  count = 0;
+    for (const char* c = tag_string; *c; c++) room += *c == ',';
+    char*     stem  = StemOf(filename);
+    char*     list  = strdup(tag_string);
+    uint32_t* ids   = malloc(sizeof(uint32_t) * room);
+    int       taken = stem && list && ids;
+    if (!taken) fprintf(stderr, "%s: no memory for its tags\n", filename);
+
+    /* The stem is a key whole, never split at ':' (tag_spelling.h, TagSpellKey). */
+    if (taken && stem[0] != '\0') {
+        taken = intern_tag(stem, NULL, filename, &ids[0]) == 0;
+        count = taken ? 1u : 0u;
     }
-
-    char buf[4096];
-    strncpy(buf, tag_string, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-
-    char* token = strtok(buf, ",");
-    while (token && count < 256) {
+    for (char* token = taken ? strtok(list, ",") : NULL; token; token = strtok(NULL, ",")) {
         while (*token == ' ') token++;
-
-        uint16_t id;
-        char* colon = strchr(token, ':');
-        if (colon) {
-            *colon = '\0';
-            id = intern_tag(token, colon + 1);
-        } else {
-            id = intern_tag(token, NULL);
+        if (TagTake(token, filename, ids, &count) != 0) {
+            taken = 0;
+            break;
         }
-
-        /* Deduplicate: skip if already in the array */
-        if (!has_tag_id(ids, count, id)) {
-            ids[count++] = id;
-        }
-        token = strtok(NULL, ",");
     }
-
+    free(stem);
+    free(list);
+    if (!taken) {
+        free(ids);
+        return -1;
+    }
+    *out_ids   = ids;
     *out_count = count;
-    *out_ids = malloc(sizeof(uint16_t) * count);
-    memcpy(*out_ids, ids, sizeof(uint16_t) * count);
+    return 0;
 }
 
 /* The vocabulary interned for this volume, given back. */

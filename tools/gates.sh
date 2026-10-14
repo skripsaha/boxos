@@ -12,10 +12,12 @@
 #     TREE=DIR    the checkout the gates run in, judged by its OWN harnesses.
 #                 Unset, the checkout this file is in.
 #
-# Thirty-three gates — twenty-one of logcheck's and twelve of PowerCut's — then
+# Thirty-four gates — twenty-two of logcheck's and twelve of PowerCut's — then
 # framerefuse, the stand, and volume-read's self-test over the image a plain
-# `make` lays down. The list is here, in the tree it judges, and not beside a
-# session: a list kept out of the tree can lose a gate without a diff saying so.
+# `make` lays down (logcheck's mkfs runs it over the one `make VOLUME_FORMAT=v2`
+# lays, whose book mkfs bound). The list is here, in the tree it judges, and
+# not beside a session: a list kept out of the tree can lose a gate without a
+# diff saying so.
 #
 # ‼ ONE AFTER ANOTHER, NEVER TWO AT ONCE ON ONE TREE. The mutation scenarios
 # edit the checkout in place and build it; a gate running beside one of them
@@ -33,7 +35,7 @@ set -u
 
 GATES_LOGCHECK="healthy unattended byname quill quillmut census censusmut lockrankmut
                 replug holdground returnfail standmut abba abbamut turns turnsmut cores
-                replugwrite haltcycle fullvolume standusb"
+                replugwrite haltcycle fullvolume standusb mkfs"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid nextfidmut hog settlecut chaingrow
                 poolmut flushmut halt race"
 

@@ -903,9 +903,12 @@ TAGFS_OS_SIGNATURE = $(BUILDDIR)/.tagfs_host_os.$(UNAME_S).$(UNAME_M)
 # link says so instead of a stale part going on writing.
 $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tagfs_cargo.c \
                tools/create_tagfs_v1.c tools/create_tagfs_v1_pack.c tools/create_tagfs_v2.c \
-               tools/create_tagfs.h tools/create_tagfs_v1.h \
+               tools/create_tagfs_bind.c \
+               tools/create_tagfs.h tools/create_tagfs_v1.h tools/create_tagfs_bind.h \
                $(SRCDIR)/include/tagfs_reserved.h \
                $(SRCDIR)/include/volume_deed.h $(SRCDIR)/include/volume_ledger.h \
+               $(SRCDIR)/include/volume_book.h $(SRCDIR)/include/volume_tally.h \
+               $(SRCDIR)/include/volume_digest.h \
                $(SRCDIR)/include/deed_pen.h $(SRCDIR)/include/buildplate_format.h \
                $(SRCDIR)/include/boxos_magic.h \
                $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
@@ -1276,6 +1279,27 @@ $(TESTBIN_EMPTY):
 	@mkdir -p $(@D)
 	@: > $@
 
+# ‼ THE FORMAT THE IMAGE'S VOLUME IS MADE IN — a key of the medium, not of the
+# kernel. `make VOLUME_FORMAT=v2` lays the volume with its book bound
+# (create_tagfs --v2, spec_v2 §9.3); v1, the default, lays it as it always
+# has. The kernel is the same either way — it reads the Deed and finds out —
+# so the key is not among BUILD_KEY_MARKS and recompiles nothing. But it does
+# change the image, so it has a marker of its own, on the image alone: the
+# marker's NAME carries the format, a switch names a file that is not there,
+# and the image is made again — without it, `make VOLUME_FORMAT=v2` on a built
+# tree would say nothing and leave a v1 image behind, and `make` after it a
+# v2 one.
+VOLUME_FORMAT ?= v1
+ifeq ($(filter v1 v2,$(VOLUME_FORMAT)),)
+$(error VOLUME_FORMAT=$(VOLUME_FORMAT): a volume is made in format v1 or format v2)
+endif
+VOLUME_FORMAT_MARK = $(BUILDDIR)/.volume_format.$(VOLUME_FORMAT)
+VOLUME_FORMAT_FLAG = $(if $(filter v2,$(VOLUME_FORMAT)),--v2)
+
+$(VOLUME_FORMAT_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.volume_format.*
+	@touch $@
+
 # ‼ WHAT GOES ON THE VOLUME — named once, and asked about twice.
 #
 # The image rule asks create_tagfs --ground how far the ground must run to
@@ -1364,8 +1388,8 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/finish.elf   "utility,system" \
 	$(UTILS_DIR)/taskcenter.elf "utility,display"
 
-$(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL)
-	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_CONTENT)); \
+$(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
+	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) $(VOLUME_CONTENT)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
 	START=$$(( $(ESP_START_SECTOR) + $$ESP )); \
@@ -1382,8 +1406,8 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 	python3 tools/make_mbr.py $@ \
 	    $$START,$$GROUND,7f,boot \
 	    $(ESP_START_SECTOR),$$ESP,ef
-	@echo "  Making the volume on it..."
-	@$(TAGFS_TOOL) $@ $(VOLUME_CONTENT)
+	@echo "  Making the volume on it, format $(VOLUME_FORMAT)..."
+	@$(TAGFS_TOOL) $(VOLUME_FORMAT_FLAG) $@ $(VOLUME_CONTENT)
 	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.
 	@#
 	@# volume-read is the format's second reader, written apart from the tool
@@ -1402,6 +1426,11 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 	@# kept count is a note and exit 0. The bar is the census's own last line
 	@# with all three counts zero; a line that reads otherwise — a finding, or
 	@# the census saying it in other words — fails the build and is shown.
+	@#
+	@# A clean volume may still be one the kernel built beside it turns away —
+	@# a format this tree writes before its kernel reads it. The census says
+	@# so in a line of its own, and the build says it after the verdict, so
+	@# that `make ... run` is not the first to tell.
 	@VERDICT=$$(python3 tools/volume-read.py $@ check 2>&1); RC=$$?; \
 	LAST=$$(printf '%s\n' "$$VERDICT" | tail -1); \
 	if [ $$RC -ne 0 ] || [ "$$LAST" != "check: consistent — 0 damage, 0 leak, 0 note" ]; then \
@@ -1409,7 +1438,8 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 		echo "ERROR: tools/volume-read.py check finds the volume create_tagfs just made on $@ not clean (exit $$RC) — a volume nothing has mounted yet carries no finding of any severity"; \
 		exit 1; \
 	fi; \
-	printf '  %s\n' "$$LAST"
+	printf '  %s\n' "$$LAST"; \
+	printf '%s\n' "$$VERDICT" | sed -n 's/^check: \(the kernel in this tree would NOT mount this volume: .*\)/  WARNING: \1/p'
 	@echo "Disk image created: $(IMAGE)"
 
 # There is no floppy image and no ISO here any more.
@@ -2148,6 +2178,10 @@ info:
 	@echo "Emulator selection:"
 	@echo "  EMU=qemu      — (default) QEMU"
 	@echo "  EMU=bochs     — Bochs (per-instruction tracing, internal debugger)"
+	@echo ""
+	@echo "Image key:"
+	@echo "  VOLUME_FORMAT=v1|v2 — the format build/boxos.img's volume is made in (v1 by default);"
+	@echo "                        the build says when this tree's kernel would not mount it"
 	@echo ""
 	@echo "Run flags (shared):"
 	@echo "  DEBUG=on      — enable debug output (rebuilds with CONFIG_DEBUG_ENABLED=1)"

@@ -23,7 +23,7 @@ BookGround) or lays sectors over one (an OverlayMedium).
 
 from .bookread import (Cursor, EntryNext, EntryPut, IdsPut, LeadsWrong, PtrGet, Short, UnitSeal, VarintPut,
                        Zigzag, PAYLOAD_BYTES, UNIT_SHEET, UNIT_SLOT)
-from . import ondisk
+from . import bookread, ondisk
 from .ondisk import BLOCK, SECTOR, SECTORS_PER_BLOCK
 
 # The trees (§2.9) and how their keys are written
@@ -430,7 +430,9 @@ def RunsGet(c, n, birth_of, form_tally, cursor=0):
     distance from the end of the record's DATA run before it (`cursor`, §2.8);
     in the Tally's form it carries birth_delta, the distance of its birth
     below `birth_of` (the node's seq), in the ribbon's its birth is
-    `birth_of`, the stitch's."""
+    `birth_of`, the stitch's. Refused as the kernel's codec refuses it
+    (volume_tally.h TallyRunGet): a run of no blocks, one that starts below
+    block 0 or runs past block 2^64 - 1, one born before seq 0."""
     runs = []
     for _ in range(n):
         head = c.V()
@@ -442,9 +444,13 @@ def RunsGet(c, n, birth_of, form_tally, cursor=0):
             start = cursor + c.Z()
             if start < 0:
                 raise Short("a run starts before block 0")
+            if start + count > bookread.U64:
+                raise Short("a run runs past block 2^64 - 1")
             cursor = start + count
             if form_tally:
                 birth = birth_of - c.V()
+                if birth < 0:
+                    raise Short("a run is born before seq 0")
         runs.append(Run(hole, start, count, birth, c.Take(c.V()) if ext else None))
     return runs, cursor
 
@@ -773,5 +779,76 @@ class Tally:
 
     def Nodes(self):
         return [n for t in self.trees.values() for n in t.nodes]
+
+
+# ---------------------------------------------------------------------------
+# X3: the Tally's numbers, and its golden node and slot, against the header
+# ---------------------------------------------------------------------------
+
+
+class _GoldenGround:
+    """Where volume_tally.h seals its golden node and slot: the volume
+    00 01 .. 0F, its Spine ring from block 256, 256 blocks apart."""
+    uuid = bookread.GOLDEN_UUID
+    frame = {"spine_block": 256, "spine_stride": 256}
+
+
+def GoldenNode():
+    """volume_tally.h's golden node, by tally.py's own encoders: a FILES leaf
+    of seq 1 at block 0x2000, one Sheet — three files, two of them with a
+    Parcel, the last run of which was born at 0 and carries an extension."""
+    ext = bytes([0x02, 0x01, 0x07])
+    items = [((1, 0), FileHeadEncode(FileState(1, 1, ondisk.FILE_ACTIVE, 5000, 1700000000000000000,
+                                               1700000000000000007, b"golden", [3, 5, 300], []))),
+             ((1, 1), ParcelEncode([Run(False, 1024, 2, 1)], 1)),
+             ((2, 0), FileHeadEncode(FileState(2, 9, ondisk.FILE_ACTIVE | ondisk.FILE_HIDDEN, 0, 1, 0, b"", [],
+                                               []))),
+             ((3, 0), FileHeadEncode(FileState(3, 1, ondisk.FILE_ACTIVE, 9000, 2, 2, b"three", [0], []))),
+             ((3, 1), ParcelEncode([Run(True, 0, 1, 1), Run(False, 4096, 1, 1), Run(False, 10, 1, 0, ext)], 1))]
+    stream, starts = NodeStream(FILES, 0, items)
+    return b"".join(NodeSectors(_GoldenGround, 1, 0x2000, 1, stream, starts))
+
+
+def GoldenSlot():
+    """volume_tally.h's golden slot, by tally.py's own slot writer: slot 0 at
+    seq 2, every kind of record a slot carries, MEDIUM_LIED among them."""
+    slot = Slot(0, None)
+    slot.tally_seq, slot.stitch_seq, slot.stitch_clasp = 5, 9, 0xC0FFEE11
+    slot.made_ns = 1700000000123456789
+    slot.roots = {FILES: Root(0, 1, 70, bookread.PtrPut(5, 1, [2048, 2304])),
+                  TAGS: Root(0, 0, 40, bookread.PtrPut(5, 1, [2049, 2305])),
+                  DIGESTS: Root(0, 1, 15000, bookread.PtrPut(3, 2, [1500, 1756]))}
+    slot.ribbon = dict(at=2600, quire_block=2560, quire_blocks=256, next_block=2816, next_blocks=256)
+    slot.counts = dict(next_fid=71, next_tag=52, next_bookmark=1)
+    slot.flags = SPINE_MEDIUM_LIED
+    return b"".join(SlotSectors(_GoldenGround, 0, 2, slot))
+
+
+def TallyCheck(defines):
+    """What is wrong here against volume_tally.h — its numbers read out of it
+    (`defines`) — and how many things were held: every kind and bit this
+    module writes and reads by, and the sums of the golden node and slot
+    reached by this module's own encoders, as the kernel's book suite
+    reaches them by the header's."""
+    wrong, n = [], 0
+    for py, c in ((FILES, "TALLY_FILES"), (TAGS, "TALLY_TAGS"), (USE, "TALLY_USE"),
+                  (BOOKMARKS, "TALLY_BOOKMARKS"), (LIEN, "TALLY_LIEN"), (DIGESTS, "TALLY_DIGESTS"),
+                  (MAP, "TALLY_MAP"), (SHARED, "TALLY_SHARED"), (ROOT_DERIVED, "TALLY_ROOT_DERIVED"),
+                  (SPINE_HEAD, "SPINE_HEAD"), (SPINE_ROOT, "SPINE_ROOT"), (SPINE_RIBBON, "SPINE_RIBBON"),
+                  (SPINE_COUNTS, "SPINE_COUNTS"), (SPINE_FLAGS, "SPINE_FLAGS"),
+                  (SPINE_MEDIUM_LIED, "SPINE_MEDIUM_LIED"), (NODE_HEAD, "NODE_HEAD"), (RUN_HOLE, "RUN_HOLE"),
+                  (RUN_EXT, "RUN_EXT"), (TAG_HAS_VALUE, "TALLY_TAG_HAS_VALUE"), (TAG_RETIRED, "TALLY_TAG_RETIRED"),
+                  (ondisk.FILE_ACTIVE, "TALLY_FILE_ACTIVE"), (SHEET_PAYLOAD, "TALLY_SHEET_PAYLOAD")):
+        n += 1
+        if defines.get(c) != py:
+            wrong.append("%s: volume_tally.h says %r and tally.py %r" % (c, defines.get(c), py))
+    for name, sectors, c in (("the golden node", GoldenNode(), "TALLY_GOLDEN_NODE_CRC"),
+                             ("the golden slot", GoldenSlot(), "TALLY_GOLDEN_SLOT_CRC")):
+        n += 1
+        have = bookread.Crc32c(sectors)
+        if have != defines.get(c):
+            wrong.append("%s's sum: 0x%08X where %s is %s" % (
+                name, have, c, "0x%08X" % defines[c] if defines.get(c) is not None else "missing"))
+    return wrong, n
 
 

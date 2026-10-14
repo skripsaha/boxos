@@ -369,7 +369,7 @@ def RibbonBranchCases(bt):
     """Whose a unit past the end of the chain is (§2.2, §2.7, §3.9): a
     closed, damaged stitch of another history, one the next does not name, a
     dead branch of two, a retry whose refused try landed whole, a retry that
-    names another Quire it came from."""
+    names another Quire it came from, a stitch naming one before the end."""
     f1, f2, f3, f4 = bt.fid, bt.fid + 1, bt.fid + 2, bt.fid + 3
     flushed = stitch.DATA_FLUSHED
 
@@ -400,6 +400,15 @@ def RibbonBranchCases(bt):
         pen.Sew([Born(bt.F + 1, f3, d[1:2], b"again")], flags=flushed)
         pen.Sew([Born(bt.F + 2, f4, d[2:], b"after")], flags=flushed)
 
+    def Fork(o):
+        """3 and 4 sewn on; 5, whole, names 3 by its Clasp and lies right
+        after 4 — two stitches name one, and 5 is not where the ribbon goes."""
+        d = bt.Fresh(o, 0, 3, 11)
+        pen = bt.Pen(o)
+        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"base")], flags=flushed)
+        pen.Sew([Born(bt.F + 1, f2, d[1:2], b"one")], flags=flushed)
+        pen.Sew([Born(bt.F + 2, f3, d[2:], b"other")], flags=flushed, names=s3)
+
     chain = lambda c: [s.seq for s in c.mount.ribbon.stitches]
     return [
         Case("B19c a closed, damaged stitch of another history", lambda o: Chain(o, foreign=True, rot="one"),
@@ -419,18 +428,29 @@ def RibbonBranchCases(bt):
                  ("seq 4 and seq 5, which names it, are one branch of another history — no lie",
                   lambda c: Found(c, "CLASP_STRANGER", "4, 5") and not c.mount.ribbon.lied and chain(c) == [3])]),
         Case("B29b a retry after a write refused and kept", Kept, must={"DEAD_BRANCH"}, checks=[
-            ("rule (а) takes 4; the retry 5 and 6 after it are a branch from 3, said loud, no lie",
-             lambda c: chain(c) == [3, 4] and Found(c, "DEAD_BRANCH", "forks at stitch 3", "5, 6") and
-             not c.mount.ribbon.lied),
-            ("%u and %u stand, %u and %u are not taken" % (f1, f2, f3, f4),
-             lambda c: f1 in c.mount.files and f2 in c.mount.files and f3 not in c.mount.files and
-             f4 not in c.mount.files)]),
+            ("rules (а) and (б) both give a whole stitch naming 3 by its Clasp: the larger seq, the retry 5, is "
+             "taken, and 6 after it (§16.3 п.11)",
+             lambda c: chain(c) == [3, 5, 6] and not c.mount.ribbon.lied),
+            ("the refused try 4 is said as the pieces of a retry — a note, no damage, no lie",
+             lambda c: Found(c, "DEAD_BRANCH", "pieces of a retry", "seq 4") and
+             all(x.severity == "note" for x in c.findings)),
+            ("%u, %u and %u stand, %u — the try the retry stands for — is not taken" % (f1, f3, f4, f2),
+             lambda c: f1 in c.mount.files and f3 in c.mount.files and f4 in c.mount.files and
+             f2 not in c.mount.files)]),
         Case("B29c a retry that does not name the Quire it came from", lambda o: Kept(o, came=False),
              must={"DEAD_BRANCH"}, checks=[
                  ("rule (б) refuses it (§4.5 п.5): the ribbon ends on stitch 3",
                   lambda c: chain(c) == [3] and f3 not in c.mount.files),
                  ("seq 5 names the end of the ribbon from where it does not go on",
                   lambda c: Found(c, "DEAD_BRANCH", "seq 5", "does not go on"))]),
+        Case("B29d a stitch naming one before the end of the ribbon", Fork, must={"DEAD_BRANCH"}, checks=[
+            ("the ribbon is 3 and 4; seq 5, which names 3 by its Clasp as 4 does, is not taken",
+             lambda c: chain(c) == [3, 4] and f2 in c.mount.files and f3 not in c.mount.files),
+            ("said loud as the ribbon forking at 3 (§16.3 п.10) — no lie, no retry",
+             lambda c: Found(c, "DEAD_BRANCH", "forks at stitch 3", "seq 5", "§16.3 п.10") and
+             not any("M-6" in x.text for x in c.findings) and
+             all(x.severity == "damage" for x in c.findings if x.code == "DEAD_BRANCH") and
+             not c.mount.ribbon.lied)]),
     ]
 
 
