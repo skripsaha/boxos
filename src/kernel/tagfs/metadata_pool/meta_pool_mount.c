@@ -143,7 +143,7 @@ static error_t WalkPut(PoolWalk* w, const uint8_t* at, uint32_t len, uint32_t fi
     TagFSMetadata meta;
     bool          dropped = false;
     memset(&meta, 0, sizeof(meta));
-    error_t unpacked = UnpackV1(at, len, tagfs_get_state()->layout.data_blocks, &meta, &dropped);
+    error_t unpacked = UnpackV1(at, len, TagFSLayout()->data_blocks, &meta, &dropped);
     if (unpacked == ERR_NO_MEMORY) {
         kprintf("[MetaPool] there is no memory to unpack file %u's record at mount — this "
                 "volume is not mounted\n", fid);
@@ -724,7 +724,7 @@ error_t PoolMount(const PoolMountAsk* ask, PoolMountOutcome* out)
     PoolWalk w;
     memset(&w, 0, sizeof(w));
     w.out = out;
-    w.run = tagfs_get_state()->layout.data_blocks;
+    w.run = TagFSLayout()->data_blocks;
     if (w.run == 0) {
         kprintf("[MetaPool] this volume states a data run of no blocks at all, so there is "
                 "nowhere for a metadata pool to be — it is not mounted\n");
@@ -836,7 +836,7 @@ PoolStood PoolSealsJudge(const PoolMountAsk* ask, int* out_seal, bool* out_fell_
 {
     SealTry        tries[VOLUME_LEDGER_COPIES];
     MetaPoolBlock* blk = kmalloc(sizeof(MetaPoolBlock));
-    uint32_t       run = tagfs_get_state()->layout.data_blocks;
+    uint32_t       run = TagFSLayout()->data_blocks;
     memset(tries, 0, sizeof(tries));
     *out_seal      = -1;
     *out_fell_back = false;

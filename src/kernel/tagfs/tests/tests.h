@@ -52,6 +52,12 @@ typedef enum {
  * the caveat_step line in the commit of that step — caveat_defect stays, so a
  * defect that comes back after the lift is named in the line that fails it,
  * and the test itself does not change.
+ *
+ * format: the book the test is written for — DEED_FORMAT_V1 or
+ * DEED_FORMAT_V2 — or DEED_FORMAT_NONE, left out, for any. A test stands
+ * aside, counted and said by the runner, on a volume of the other format; and
+ * on a format-v2 volume, which this kernel does not write, every test written
+ * for any format that writes to the volume stands aside too.
  */
 typedef struct {
     const char* name;
@@ -59,6 +65,7 @@ typedef struct {
     TestReach   reach;
     const char* caveat_step;
     const char* caveat_defect;
+    DeedFormat  format;
 } TestCase;
 
 /* A suite: `const TestSuite g_<name>_suite`, defined in a file under tests/ (a
@@ -128,6 +135,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(width)) \
     VOLUME_TESTS_ONLY(SUITE(parcel)) \
     VOLUME_TESTS_ONLY(SUITE(tract)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_tally)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;

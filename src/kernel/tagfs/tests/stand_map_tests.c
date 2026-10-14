@@ -747,7 +747,7 @@ static const TestCase g_stand_map_tests[] = {
       .caveat_defect = "a take under the state lock is told the volume has no room while gives "
                        "wait for their sectors" },
     { .name  = "stand_map_plan_hold_bounded", .func = TestStandMapPlanHoldBounded,
-      .reach = TEST_READS_ONLY,
+      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V1,
       .caveat_defect = "a take's plan walks every window of the volume, each with the run past "
                        "it, in one hold of the state lock, with interrupts off for as long as the "
                        "volume is large" },

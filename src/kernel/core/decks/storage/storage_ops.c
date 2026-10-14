@@ -37,6 +37,7 @@
 #include "boxos_crate.h"
 #include "storage_deck.h"
 #include "tagfs.h"
+#include "book_mount.h"   /* a file its book holds locked */
 #include "use_context.h"   /* the user's tags — folded into query and create */
 #include "vmm.h"
 #include "process.h"
@@ -183,9 +184,12 @@ static int ObjRead(const ManifestOp *op,
     if (out->capacity == 0)
         return storage_op_fail(ctx, crates, ERR_BUFFER_TOO_SMALL, waybill);
 
+    /* A file its book holds locked is not a file that is not there: it lies
+     * in a rotten range of the Tally, or against the book's own shape. */
     TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
     if (!handle)
-        return storage_op_fail(ctx, crates, ERR_FILE_NOT_FOUND, waybill);
+        return storage_op_fail(ctx, crates, TagFSFileLocked(file_id) ? ERR_TAGFS_CORRUPTED
+                                                                      : ERR_FILE_NOT_FOUND, waybill);
     handle->offset = offset;
 
     /* Where the bytes land: the program's pages, or — for a kernel caller

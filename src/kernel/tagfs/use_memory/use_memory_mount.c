@@ -392,3 +392,18 @@ void UseMemoryLetGo(void)
     kfree(g->orphans);
     memset(g, 0, sizeof(*g));
 }
+
+error_t UseMemoryRecall(const uint8_t *text, uint64_t len)
+{
+    UseMemoryState *g    = &g_use_memory;
+    UseText        *said = len ? UseTextMake((const char *)text, (size_t)len) : NULL;
+    if (len && !said)
+        return ERR_NO_MEMORY;
+    TagFSLockTake(UseMemoryLock());
+    UseText *gone = g->memory;
+    g->memory     = said;
+    g->landed     = true;
+    TagFSLockDrop(UseMemoryLock());
+    UseTextDrop(gone);
+    return OK;
+}

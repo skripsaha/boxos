@@ -225,7 +225,14 @@ class BookMount:
             if s.state != "valid" or s is self.slot:
                 continue
             for tree, root in s.roots.items():
-                self.older_nodes.extend(tally.TreeRead(self.g, tree, root, [], leaves=False).Blocks())
+                t = tally.TreeRead(self.g, tree, root, [], leaves=False)
+                self.older_nodes.extend(t.Blocks())
+                # A node neither copy of holds is still its slot's: its parent
+                # — or the slot, for a root — names its blocks, as the rotten
+                # nodes of the slot stood on are (bookcensus.py, the Tally's
+                # claim).
+                ptrs = [r.ptr for r in t.rotten if r.ptr] + ([root.Pointer()] if t.refused else [])
+                self.older_nodes.extend((b, p["sheets"]) for p in ptrs if p for b in p["blocks"])
             self.older_quires.extend(stitch.Ribbon(self.g, s, scan=False).quires)
 
     # --- п.5-6 ----------------------------------------------------------------
@@ -507,7 +514,8 @@ class BookMount:
         """What the replay leaves the mount to decide: a file rolled back by
         the rule of rot whose blocks another holds is locked (§3.9); a file
         naming ground outside the data run is locked; runs carried with an
-        extension, and Slips, are what this kernel cannot carry on."""
+        extension, Slips, and flags past 32 bits are what this kernel cannot
+        carry on."""
         g = self.g
         for fid in sorted(self.files):
             fs = self.files[fid]
@@ -528,6 +536,9 @@ class BookMount:
             if fs.slips:
                 self.Glass("fid %u's last block carries a Slip — this kernel cannot fold a Slip into a "
                            "block (§16.1 п.2)" % fs.fid)
+            if fs.flags >> 32:
+                self.Glass("fid %u carries flags past the 32 bits this kernel holds — written by a kernel "
+                           "that knows more" % fs.fid)
         owned = RunsNormal([r for fs in self.files.values() for r in fs.Ground()])
         self.fallow = ondisk.RunsSubtract(RunsNormal(self.fallow), owned)
 

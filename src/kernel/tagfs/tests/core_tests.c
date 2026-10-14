@@ -72,7 +72,8 @@ out:
 }
 
 static const TestCase g_core_tests[] = {
-    { .name = "tagfs_deed",        .func = test_tagfs_deed,        .reach = TEST_READS_ONLY },
+    { .name = "tagfs_deed",        .func = test_tagfs_deed,        .reach = TEST_READS_ONLY,
+      .format = DEED_FORMAT_V1 },
     { .name = "tagfs_create_file", .func = test_tagfs_create_file, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "tagfs_write_read",  .func = test_tagfs_write_read,  .reach = TEST_WRITES_TO_VOLUME },
 };

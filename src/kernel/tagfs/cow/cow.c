@@ -152,7 +152,7 @@ void CowNameStanding(void)
     TagFSState *fs = tagfs_get_state();
     CowReading  reading;
 
-    CowReadStanding(fs->ledger.cow_manifest_block, fs->layout.disk_book_block, &reading);
+    CowReadStanding(fs->ledger.cow_manifest_block, TagFSLayout()->disk_book_block, &reading);
     if (reading.count)
         CowSayStanding(&reading);
     CowReadingDrop(&reading);

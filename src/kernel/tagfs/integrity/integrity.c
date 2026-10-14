@@ -3,6 +3,7 @@
 #include "../box_hash/box_hash.h"
 #include "../scribe/scribe.h"
 #include "../mount/ground_census.h"
+#include "../mount/tally_read.h"
 #include "../../lib/kernel/klib.h"
 #include "amp.h"
 #include "scheduler.h"    /* a page's transfer is a held span */
@@ -257,7 +258,7 @@ error_t IntegrityInit(void) {
         return ERR_ALREADY_INITIALIZED;
 
     TagFSState *fs = tagfs_get_state();
-    if (!fs || fs->layout.data_blocks == 0)
+    if (!fs || TagFSLayout()->data_blocks == 0)
         return ERR_NOT_INITIALIZED;
 
     /* Every slot empty, and its turn moved on. `io` and `owner` are left as
@@ -273,7 +274,7 @@ error_t IntegrityInit(void) {
     g_lru_tick = 0;
     TagFSLockDrop(&g_map_lock);
 
-    uint32_t entries = fs->layout.data_blocks;
+    uint32_t entries = TagFSLayout()->data_blocks;
     uint32_t count   = (entries + ENTRIES_PER_BLOCK - 1) / ENTRIES_PER_BLOCK;
     BoxHashInit(&g_ctx, fs->uuid, 16);
 
@@ -327,7 +328,7 @@ error_t IntegrityInit(void) {
     if (grows && MapLayBegin(want, want_entries, first, stored) != OK)
         kprintf("[Integrity] the map covers %u block(s) and the volume now has %u — a bigger "
                 "one could not be begun, so verify-on-read covers the first %u and says "
-                "nothing about the rest\n", entries, fs->layout.data_blocks, entries);
+                "nothing about the rest\n", entries, TagFSLayout()->data_blocks, entries);
     return OK;
 }
 
@@ -446,7 +447,60 @@ void IntegrityForget(uint64_t start, uint32_t count) {
     HaltStopIfOwedHere("a page of the integrity map it carried");
 }
 
+/*
+ * ‼ A FORMAT-v2 VOLUME'S DIGESTS ARE ITS TALLY'S, AND THEY ARE ASKED FIRST.
+ * Such a volume has no integrity map — IntegrityInit is format v1's and is
+ * never called for it — so the question "is the map up?" below answers no
+ * on every read of it, and every block would read unchecked, in silence. So
+ * the format is asked before the map is: the digest a block was written with
+ * is the one the Tally's DIGESTS names (tally_read.h, TallyDigestFind — a
+ * leaf read off the medium when it is not held, with no lock held here), the
+ * same function seeded with the same volume (spec_v2 §8.1).
+ *
+ * Every block of format v2 is written with its digest (§2.8: a Born or a
+ * Shaped carries them; SHARED ground puts the volume under glass), and 0 is
+ * a digest like any other — "not known" is format v1's word, not this one's.
+ * So a block no element names is refused as one whose digest does not match
+ * (volume-read's census says the same of it: bookcensus.py _Digests); only
+ * a block whose DIGESTS leaf rots reads unchecked, as §4.5 п.3 has it, said
+ * once for the leaf. A leaf that cannot be read now — no memory, a medium
+ * that would not answer — is said, and the block refused rather than given
+ * unchecked.
+ */
+static bool IntegrityVerifyBook(uint64_t block, const void *data)
+{
+    uint64_t       stored  = 0;
+    error_t        refused = OK;
+    BoxHashContext ctx;
+
+    switch (TallyDigestFind(block, &stored, &refused)) {
+    case TALLY_DIGEST_ROTTEN:
+        return true;
+    case TALLY_DIGEST_UNNAMED:
+        __atomic_fetch_add(&g_errors, 1, __ATOMIC_RELAXED);
+        IntegrityUndigestedName(block);
+        return false;
+    case TALLY_DIGEST_UNREAD:
+        kprintf("[Integrity] block %llu cannot be held to its digest now: %s the DIGESTS leaf that names "
+                "it — a read of it is refused ERR_CHECKSUM rather than answered unchecked\n",
+                (unsigned long long)block, refused == ERR_NO_MEMORY ? "there is no memory to read"
+                                                                    : "the medium would not give up");
+        return false;
+    case TALLY_DIGEST_NAMED:
+        break;
+    }
+    BoxHashInit(&ctx, tagfs_get_state()->uuid, 16);
+    uint64_t h = BoxHashIntegrity(data, TAGFS_BLOCK_SIZE, &ctx);
+    if (h == stored)
+        return true;
+    __atomic_fetch_add(&g_errors, 1, __ATOMIC_RELAXED);
+    IntegrityRotName(block, stored, h);
+    return false;
+}
+
 bool IntegrityVerify(uint64_t block, const void *data) {
+    if (data && tagfs_get_state()->format == DEED_FORMAT_V2)
+        return IntegrityVerifyBook(block, data);
     if (!IntegrityIsInitialized() || !data || block >= g_map_entries || in_map_region(block))
         return true;
     uint32_t idx     = (uint32_t)(block / ENTRIES_PER_BLOCK);   /* below g_map_entries: a page of the map */

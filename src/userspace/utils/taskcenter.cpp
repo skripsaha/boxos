@@ -283,13 +283,23 @@ private:
     return left_width_ > 2 ? static_cast<std::uint8_t>(left_width_ - 2) : 1;
   }
 
+  // The disk's use as a share — or that the kernel does not count this
+  // volume's free ground (a format-v2 book: box/system.h, volume_free_counted).
+  std::string disk_used() const {
+    if (machine_.resources_ok && machine_.resources.volume_present &&
+        !machine_.resources.volume_free_counted)
+      return "free not counted";
+    return std::to_string(machine_.disk_percent) + "%";
+  }
+
   void read_machine(MachineSnapshot &snapshot) {
     snapshot.info_ok = sysinfo(&snapshot.info) == 0;
     snapshot.resources_ok = system_resources(&snapshot.resources) == 0;
     if (snapshot.info_ok)
       snapshot.ram_percent =
           percent(snapshot.info.used_memory, snapshot.info.total_memory);
-    if (snapshot.resources_ok && snapshot.resources.volume_present)
+    if (snapshot.resources_ok && snapshot.resources.volume_present &&
+        snapshot.resources.volume_free_counted)
       snapshot.disk_percent = percent(snapshot.resources.volume_used_bytes,
                                       snapshot.resources.volume_total_bytes);
 
@@ -503,7 +513,7 @@ private:
     if (height < 11) {
       text(static_cast<std::uint8_t>(top + 2), 2,
            "RAM " + std::to_string(machine_.ram_percent) + "%  Disk " +
-               std::to_string(machine_.disk_percent) + "%",
+               disk_used(),
            kText, content, kPanel);
       return;
     }
@@ -521,12 +531,14 @@ private:
                        bounded_length(machine_.resources.volume_name, 16));
       text(static_cast<std::uint8_t>(top + 6), 2,
            "Disk: " + (name.empty() ? std::string("unnamed") : name) + "  " +
-               std::to_string(machine_.disk_percent) + "%",
+               disk_used(),
            kText, content, kPanel);
       bar(static_cast<std::uint8_t>(top + 7), 2, content, machine_.disk_percent,
           kBrightGreen);
       text(static_cast<std::uint8_t>(top + 8), 2,
-           bytes(machine_.resources.volume_free_bytes) + " free / " +
+           (machine_.resources.volume_free_counted
+                ? bytes(machine_.resources.volume_free_bytes) + " free / "
+                : std::string("free not counted / ")) +
                bytes(machine_.resources.volume_total_bytes),
            kMuted, content, kPanel);
     } else {

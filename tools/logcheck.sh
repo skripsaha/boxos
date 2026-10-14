@@ -94,6 +94,8 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_framerefuse.sh"
 # The mkfs scenario: tools/logcheck_mkfs.sh.
 . "$(dirname "$0")/logcheck_mkfs.sh"
+# The book's census and the stand's road on a book: tools/logcheck_book.sh.
+. "$(dirname "$0")/logcheck_book.sh"
 
 # Waits for the SHELL BANNER, not for "userspace is starting".
 #
@@ -1263,17 +1265,17 @@ run_healthy() {
     # tree registers. The numbers are the code's, not a run's (K9): a build
     # without VOLUME_TESTS walks the eight suites of tests.h TEST_SUITES not
     # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
-    # book 14, integrity 3, use_context 5 TestCases, 37 run; the 11 whose
+    # book 15, integrity 3, use_context 5 TestCases, 38 run; the 11 whose
     # reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
-    # g_volume_tests_allowed), and the 26 that only read pass — none of them
+    # g_volume_tests_allowed), and the 27 that only read pass — none of them
     # stands aside on this stand's fresh image, whose first file wears a tag
     # (use_context_narrows). A test added or taken out moves this line in the
     # same commit.
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
     local said
     said=$(stand_summary "$L")
-    [ "$said" = "TagFS: 37 run, 26 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
-    chk $? "TagFS startup tests: the 37 this tree registers ran, 26 reads passed and 11 writes stood down (${said:-no summary})"
+    [ "$said" = "TagFS: 38 run, 27 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
+    chk $? "TagFS startup tests: the 38 this tree registers ran, 27 reads passed and 11 writes stood down (${said:-no summary})"
     lockrank_judge "$L" "healthy 1c"
 
     # (7) the kernel's ear works — mutation-proven harness, see commit
@@ -8839,6 +8841,7 @@ run_census() {
         done < "$SCRATCH/census.$plant.verdict"
         lockrank_judge "$SCRATCH/serial.$plant.log" "census $plant"
     done
+    census_book
 }
 
 # The two halves of the reconcile must each be able to go red. The kernel's:
@@ -8851,7 +8854,7 @@ census_poolblind_on() {
     python3 - <<'EOF2'
 p = "src/kernel/tagfs/mount/mount.c"
 s = open(p).read()
-anchor = "    PoolClaimGround(MountDataBlock(fs->layout.metadata_pool_block));\n"
+anchor = "    PoolClaimGround(MountDataBlock(TagFSLayout()->metadata_pool_block));\n"
 assert s.count(anchor) == 1, "census pool-chain anchor missing"
 s = s.replace(anchor, "    /* logcheck mutation: the pool chain is not claimed */\n", 1)
 open(p, "w").write(s)
@@ -8946,18 +8949,18 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 37 (healthy says how) and
-# the 199 of the stand's own twenty-seven suites: stand 28, stand_lock 4,
+# suite in tests.h TEST_SUITES — the plain build's 38 (healthy says how) and
+# the 211 of the stand's own twenty-eight suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
 # stand_snapshot 1, stand_read 8, stand_run 4, stand_medium 19,
 # stand_warrant 8, stand_room 7, stand_integrity 2, frame 2, width 7,
-# parcel 13, tract 1. Counted off the code, not a
+# parcel 13, tract 1, stand_tally 12. Counted off the code, not a
 # run (K9): a suite that drops out of the walk is a test that stopped covering
 # anything, and the count is where that shows. How many of them pass and how
 # many stand aside is the road's — said, not pinned.
-STAND_RUN=236
+STAND_RUN=249
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -9106,7 +9109,8 @@ stand_orders() {
 #   stand_settle_refusal_waits_for_the_bell            1        1        1   its Ledger; then a plan that only counts
 #   stand_settle_ring_during_the_cycle                 1        1        1   its Ledger
 #   stand_settle_table_refusal_is_the_mediums          2        2        2   the block written alone, then by the cycle
-#   total                                             34       39       42
+#   stand_blockfail_two_ranges                         2        2        2   a read in each of its plan's two runs
+#   total                                             36       41       44
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -9208,13 +9212,14 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 34 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 39 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 36 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 41 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
     done
     lockrank_judge "$logs" "stand, both roads"
+    stand_book
     buildkey_restore
 }
 
@@ -9248,7 +9253,7 @@ run_stand() {
 # red on that line.
 # ---------------------------------------------------------------------------
 
-STANDUSB_BLOCKFAILS=42   # stand_judge's table, its USB column
+STANDUSB_BLOCKFAILS=44   # stand_judge's table, its USB column
 STANDUSB_SEAT="usb[0-9]+ [^)]*"
 
 run_standusb() {
@@ -9416,7 +9421,7 @@ forced = ("src/kernel/tagfs/tests/core_tests.c",
 edits = {
  "range": [
   ("src/kernel/core/boardroom/block_fail.c",
-   "    if (kind != BLOCK_FAIL_FLUSH && plan.end != 0 &&\n        (lba + count <= plan.first || lba >= plan.end))\n        return false;\n",
+   "    if (kind != BLOCK_FAIL_FLUSH && plan.end != 0 && !BlockFailMeets(&plan, lba, count))\n        return false;\n",
    "    /* " + M + ": no range check — every sector of the seat is the plan's */\n"),
   ("src/lib/kernel/klib_mem.c",
    "    if (HeapFailStrikes(size))\n        return NULL;\n#endif\n\n    KHeapScope who = KHeapScopeHere();\n",

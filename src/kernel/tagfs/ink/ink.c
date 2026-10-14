@@ -45,7 +45,7 @@ void InkMountReset(void)
 
 bool TagFSReadOnly(void)
 {
-    return __atomic_load_n(&s_read_only, __ATOMIC_ACQUIRE) != 0;
+    return __atomic_load_n(&s_read_only, __ATOMIC_ACQUIRE) != 0 || TagFSIsUnderGlass();
 }
 
 void InkReadOnlyLift(void)
@@ -99,14 +99,14 @@ static bool InkTagGuarded(uint32_t tag_id)
            TagSpanIs("god", tag.key, tag.key_len);
 }
 
-/* The kernel's blocks among the data run's — [*first, *end) — or false when the
- * Deed points the loader at none of them. */
+/* The kernel's blocks as a record names them — [*first, *end) — or false when
+ * the Deed points the loader at none of them. */
 static bool InkBootSpan(uint64_t* first, uint64_t* end)
 {
     TagFSState* fs = InkState();
-    if (!fs->boot.kernel_blocks || fs->boot.kernel_block < fs->layout.data_block)
+    if (!fs->boot.kernel_blocks || fs->boot.kernel_block < fs->block_base)
         return false;
-    *first = fs->boot.kernel_block - fs->layout.data_block;
+    *first = fs->boot.kernel_block - fs->block_base;
     *end   = *first + fs->boot.kernel_blocks;
     return true;
 }
@@ -239,7 +239,7 @@ static error_t InkRecordMake(const TagFSMetadata* meta, InkRecord* r)
     r->packed = kmalloc(r->bytes);
     if (!r->packed)
         return ERR_NO_MEMORY;
-    error_t packed = PackV1(meta, tagfs_get_state()->layout.data_blocks, r->packed, &r->bytes);
+    error_t packed = PackV1(meta, TagFSLayout()->data_blocks, r->packed, &r->bytes);
     if (packed != OK)
         InkRecordLetGo(r);
     return packed;

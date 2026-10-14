@@ -844,6 +844,7 @@ static void halt_sync_storage(void)
      * another ("did what was written reach the platter?"). A machine that
      * failed the first and passed the second is not a machine that synced.
      */
+    bool    glass    = TagFSIsUnderGlass();
     error_t recorded = tagfs_shutdown();
     if (recorded != OK) {
         kprintf("[HALT] ‼ THE VOLUME ON SEAT %u (%s) DID NOT WRITE ITS RECORDS "
@@ -861,6 +862,11 @@ static void halt_sync_storage(void)
     if (tagfs_get_seat() == BOARDROOM_NO_SEAT) {
         kprintf("[HALT] no volume is named on this machine — there is no "
                 "medium to make durable\n");
+        return;
+    }
+
+    if (glass && recorded == OK) {
+        TagFSGlassHaltSaid(tagfs_get_seat());
         return;
     }
 

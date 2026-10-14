@@ -1823,6 +1823,20 @@ uint32_t xhci_msd_unit_physical_bytes(uint8_t unit)
     return bytes;
 }
 
+/* The first sector of the room's 512 that begins one of the unit's physical
+ * blocks: READ CAPACITY(16)'s LOWEST ALIGNED LOGICAL BLOCK ADDRESS, counted
+ * in the unit's own logical blocks, turned into 512-byte sectors (spec_v2
+ * §16.2 п.19). Zero when the device would not say. */
+uint64_t xhci_msd_unit_first_aligned(uint8_t unit)
+{
+    if (!g_units_lock_ready) return 0;
+    spin_lock(&g_units_lock);
+    XhciMsdUnit* u = msd_find_locked(unit);
+    uint64_t first = (u && u->ready) ? (uint64_t)u->lowest_aligned_lba * u->per_sector : 0;
+    spin_unlock(&g_units_lock);
+    return first;
+}
+
 bool xhci_msd_unit_write_protected(uint8_t unit)
 {
     if (!g_units_lock_ready) return false;

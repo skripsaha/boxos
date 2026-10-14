@@ -28,6 +28,9 @@ typedef struct {
     uint64_t first;
     uint64_t end;           /* 0: the whole seat */
     uint32_t nth;
+    uint32_t more;          /* a bad-sector plan's ranges past the first */
+    uint64_t more_first[BLOCK_FAIL_BAD_RANGES - 1u];
+    uint64_t more_end[BLOCK_FAIL_BAD_RANGES - 1u];
 } BlockFailPlan;
 
 #define BLOCK_FAIL_GEN_ONE  ((uint64_t)1 << 32)
@@ -98,6 +101,31 @@ void BlockFailArmBadSectors(uint8_t seat, uint64_t first_sector, uint64_t sector
     BlockFailStand(&plan);
 }
 
+bool BlockFailAddBadSectors(uint8_t seat, uint64_t first_sector, uint64_t sectors)
+{
+    uint64_t s = __atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE);
+    BlockFailPlan plan = g_block_fail;
+    if (!((s >> 32) & 1u) || !plan.bad || plan.seat != seat || plan.end == 0 || sectors == 0 ||
+        plan.more == BLOCK_FAIL_BAD_RANGES - 1u)
+        return false;
+    plan.more_first[plan.more] = first_sector;
+    plan.more_end[plan.more]   = first_sector + sectors;
+    plan.more++;
+    BlockFailStand(&plan);
+    return true;
+}
+
+/* Whether [lba, lba + count) meets a range of the plan. */
+static bool BlockFailMeets(const BlockFailPlan* plan, uint64_t lba, uint32_t count)
+{
+    if (lba + count > plan->first && lba < plan->end)
+        return true;
+    for (uint32_t i = 0; i < plan->more; i++)
+        if (lba + count > plan->more_first[i] && lba < plan->more_end[i])
+            return true;
+    return false;
+}
+
 uint32_t BlockFailSeen(void)
 {
     return (uint32_t)(__atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE) >> 1) &
@@ -128,8 +156,7 @@ static bool BlockFailStrikesUnder(uint8_t seat, BlockFailKind kind, uint64_t lba
 
     if (plan.seat != seat || plan.kind != (uint8_t)kind)
         return false;
-    if (kind != BLOCK_FAIL_FLUSH && plan.end != 0 &&
-        (lba + count <= plan.first || lba >= plan.end))
+    if (kind != BLOCK_FAIL_FLUSH && plan.end != 0 && !BlockFailMeets(&plan, lba, count))
         return false;
 
     /* Counted, and chosen or not, in one swap under the generation the plan

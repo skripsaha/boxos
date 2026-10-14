@@ -147,6 +147,9 @@ uint64_t SettleNowUs(void)
     return cpu_tsc_to_us(rdtsc());
 }
 
+/* The refusal of a cycle on a volume under glass, said once a mount. */
+static volatile uint8_t s_glass_said;
+
 void SettleMountReset(void)
 {
     SettleWaitersMountReset();
@@ -159,6 +162,7 @@ void SettleMountReset(void)
     s_registry_refused = 0;
     s_halt_ran         = false;
     __atomic_store_n(&s_sealed_clean, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_glass_said, 0u, __ATOMIC_RELEASE);
 }
 
 void SettleMountStand(uint32_t from_block, uint32_t from_bytes, bool medium_lied)
@@ -181,7 +185,9 @@ void SettleOwed(uint64_t* unsettled, bool* committer_busy, bool* sealed_clean)
         *sealed_clean   = true;
         return;
     }
-    *sealed_clean = __atomic_load_n(&s_sealed_clean, __ATOMIC_ACQUIRE);
+    /* A volume under glass is on the medium as it was read: no cycle owes it
+     * a seal, and the halt asks for none (TagFSSettleForHalt). */
+    *sealed_clean = __atomic_load_n(&s_sealed_clean, __ATOMIC_ACQUIRE) || TagFSIsUnderGlass();
     uint64_t inked   = InkedGen();
     uint64_t settled = SettledGen();
     uint32_t holder  = __atomic_load_n(&g_settle_scribe.holder, __ATOMIC_ACQUIRE);
@@ -698,6 +704,33 @@ void SettleRunStepHere(void)
         (void)SettleRunStep(&answer);
 }
 
+/*
+ * ‼ NO CYCLE RUNS ON A VOLUME UNDER GLASS, AND NONE OF FORMAT v1 ON A BOOK.
+ * Every cycle here is format v1's — the Ledger, the pool, the table, the
+ * bitmap — and a volume under glass takes no write at all (tagfs.h): each
+ * road that would begin one is refused here, before the Scribe is asked, so
+ * nothing waits for a turn that would write. A format-v2 volume is under glass
+ * on this kernel by its mount; one reaching here without it is a defect of
+ * that mount, stopped at in a STRICT kernel and refused all the same.
+ */
+static error_t SettleMayRun(void)
+{
+    if (TagFSIsUnderGlass()) {
+        if (!__atomic_exchange_n(&s_glass_said, 1u, __ATOMIC_ACQ_REL))
+            kprintf("[Settle] no cycle runs: the volume may only be read (said at its mount) — every "
+                    "cycle asked of it is refused before the Scribe, ERR_TAGFS_READ_ONLY\n");
+        return ERR_TAGFS_READ_ONLY;
+    }
+    if (tagfs_get_state()->format != DEED_FORMAT_V2)
+        return OK;
+#if CONFIG_STRICT
+    panic("[Settle] DEFECT: a cycle of format v1 was asked of a format-v2 volume not under glass");
+#endif
+    kprintf("[Settle] DEFECT: a cycle of format v1 was asked of a format-v2 volume not under glass — "
+            "refused, nothing written\n");
+    return ERR_TAGFS_READ_ONLY;
+}
+
 /* A cycle the cadence begins holds the volume's door from S0 to its end: the
  * volume it writes is the one mounted until it is done, whoever else leaves. */
 bool SettleRunBeginForCadence(void)
@@ -706,6 +739,10 @@ bool SettleRunBeginForCadence(void)
     error_t  refused = OK;
     if (!tagfs_enter())
         return false;
+    if (SettleMayRun() != OK) {
+        tagfs_leave();
+        return false;
+    }
     uint64_t ticket = ScribeAsk(&g_settle_scribe);
     if (ScribeTry(&g_settle_scribe, ticket, &cover, &refused) != SCRIBE_MINE) {
         tagfs_leave();
@@ -737,6 +774,9 @@ bool TagFSStandSettleBegin(void)
  * and then the ask is put again: that cycle took its snapshot before it. */
 static error_t SettleAsked(SettleWhy why)
 {
+    error_t may = SettleMayRun();
+    if (may != OK)
+        return may;
     uint64_t ticket = ScribeAsk(&g_settle_scribe);
     for (;;) {
         uint64_t   cover = 0;
@@ -792,6 +832,9 @@ error_t SettleForRoom(void)
 {
     TagFSState* fs  = tagfs_get_state();
     bool        own = SettleRunBetweenStepsHere();
+    error_t     may = SettleMayRun();
+    if (may != OK)
+        return may;
 
     /* A caller under a TagFS lock, a Scribe or a baton continuation may not
      * wait for a cycle: the room stays on its way, and the next cycle is asked
@@ -910,6 +953,17 @@ error_t TagFSSettleForHalt(void)
         s_halt_ran    = true;
         tagfs_leave();
         return ERR_DEVICE_NOT_READY;
+    }
+
+    /* A volume under glass was given nothing this boot: there is nothing for
+     * a cycle to settle, and none is asked for (halt_sync_storage says so). */
+    if (TagFSIsUnderGlass()) {
+        kprintf("[TagFS] the machine is stopping and the volume is under glass: there is nothing to "
+                "settle\n");
+        s_halt_answer = OK;
+        s_halt_ran    = true;
+        tagfs_leave();
+        return OK;
     }
 
     error_t rc    = SettleHaltCycles();

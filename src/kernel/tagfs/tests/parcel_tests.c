@@ -608,10 +608,10 @@ static TestResult TestParcelHoleOwnsNothing(void)
     TEST_ASSERT(none == NULL, "gives back no ground");
 
     fs->boot.kernel_blocks = 1;
-    fs->boot.kernel_block  = (uint32_t)(fs->layout.data_block + 200u);
+    fs->boot.kernel_block  = (uint32_t)(fs->block_base + 200u);
     TEST_ASSERT(!InkRecordTouchesBoot(rec), "the Deed at the hole's start finds no kernel in it");
     TEST_ASSERT(!InkTouchesBoot(&s_parcel_holed[1], 1), "nor in the hole laid flat, as a Plot's runs are");
-    fs->boot.kernel_block  = (uint32_t)(fs->layout.data_block + 107u);
+    fs->boot.kernel_block  = (uint32_t)(fs->block_base + 107u);
     TEST_ASSERT(InkRecordTouchesBoot(rec), "at a block of its ground, the kernel");
     TEST_ASSERT(InkTouchesBoot(&s_parcel_holed[2], 1), "and in that ground laid flat");
     fs->boot = boot;

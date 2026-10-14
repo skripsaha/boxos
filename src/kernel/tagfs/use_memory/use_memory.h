@@ -163,6 +163,11 @@ uint64_t UseMemoryBlocksHeld(void);
  */
 error_t  UseMemoryLoad(void);
 
+/* A format-v2 book's Use Context, as its Tally holds it (spec_v2 §7 Recall):
+ * `len` bytes of `text`, or none. It is the medium's memory, landed — a
+ * format-v2 volume keeps no chain for it. OK, or ERR_NO_MEMORY. */
+error_t  UseMemoryRecall(const uint8_t *text, uint64_t len);
+
 /* UseRollCall — GroundOwner GROUND_USE_CHAIN: every link read back of the
  * chains the copies name. Before the census. */
 void     UseRollCall(void);

@@ -57,6 +57,8 @@ error_t TagFSWriteRun(uint64_t first, uint32_t count, const void *buffer, uint32
         return ERR_NULL_POINTER;
     if (TagFSMediumGone())
         return ERR_DEVICE_NOT_READY;
+    if (TagFSIsUnderGlass())
+        return TagFSGlassRefused("the data run door");
 
     if (tagfs_get_state()->braid) {
         /* A Braid addresses a block at a time, each recorded as it lands. */

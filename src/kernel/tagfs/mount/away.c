@@ -196,6 +196,11 @@ uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
                 AWAY_LOST, seat, (unsigned long long)s_found_seq,
                 (unsigned long long)s_left_seq, (unsigned long long)lost);
         break;
+    case AWAY_REREAD:
+        kprintf("[TagFS] the format-v2 volume came back in seat %u: this kernel reads such a volume "
+                "again from its book whenever its medium comes back, and takes up no open book of it"
+                AWAY_LOST, seat, (unsigned long long)lost);
+        break;
     case AWAY_OTHER:
         kprintf("[TagFS] the volume came back in seat %u with a Ledger or a Deed this kernel did "
                 "not leave on it — a BoxOS kernel changed it meanwhile" AWAY_LOST,

@@ -219,7 +219,7 @@ static error_t TableTakeLink(uint32_t block, const FileTableBlock* image, bool r
 static error_t TableWalk(uint32_t first_block, bool sealed, bool take, FileTableBlock* image)
 {
     TagFSState* fs    = tagfs_get_state();
-    uint32_t    run   = fs ? fs->layout.data_blocks : 0;
+    uint32_t    run   = fs ? TagFSLayout()->data_blocks : 0;
     if (run == 0 || (take && !table_files())) {
         kprintf("[FileTable] this volume states a data run of no blocks at "
                 "all, so there is nowhere for a file table to be — it is not "

@@ -95,7 +95,7 @@ error_t tag_registry_load(TagRegistry* reg, uint32_t first_block, const SettleMa
      * blocks before it. Either way the next flush writes the block whole.
      */
     TagFSState* fs  = tagfs_get_state();
-    uint32_t    run = fs ? fs->layout.data_blocks : 0;
+    uint32_t    run = fs ? TagFSLayout()->data_blocks : 0;
     if (run == 0) {
         kprintf("[TagRegistry] this volume states a data run of no blocks at "
                 "all, so there is nowhere for a tag registry to be — it is not "

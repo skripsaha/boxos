@@ -14,11 +14,13 @@ is no third state, so there is no orphan to find.
 
 And beside the account: every finding of the mount, each data block of a
 live file held to its digest, and what the kernel of this tree makes of the
-volume — which, until it reads a book, is a refusal (deed.c
-DeedFormatRefused).
+volume (KernelBook) — it reads the Spine and the Tally and writes nothing, so
+every volume it mounts stands under glass, and a book with anything sewn past
+its Tally it refuses, for it does not read the ribbon yet. The census
+scenario boots a landing and holds the kernel's own lines to that.
 
-The owners are this module's until the kernel's own list names them
-(src/include/ground_owner.h, the mount that reads a book): BOOK_OWNERS.
+The owners are the kernel's own list (src/include/ground_owner.h), generated
+into ground_owners.py: BOOK_OWNERS, those of format v2.
 """
 
 import hashlib
@@ -27,12 +29,8 @@ from . import bookread, tally
 from .bookmount import BookMount
 from .census import SEVERITY, Finding, GroundClaim, Sweep
 from .bookground import BookGround
-from .ondisk import BLOCK, RunsCount, RunsIntersect, RunsNormal, RunsSubtract, RunsText
-
-# (name, owns alone), in the order of the account above
-BOOK_OWNERS = (("front", True), ("spine", True), ("tally", True), ("ribbon", True), ("file", True),
-               ("boot", False), ("far_deed", True), ("held", True), ("fallow", True))
-BOOK_OWNER_ALONE = dict(BOOK_OWNERS)
+from .ground_owners import BOOK_OWNERS, BOOK_OWNER_ALONE
+from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsCount, RunsIntersect, RunsNormal, RunsSubtract, RunsText
 
 # A block's digest by its bytes: the check is the same, the WyHash of a block
 # met before is not taken again (every landing of the self-test reads the
@@ -48,16 +46,59 @@ def BlockDigest(raw, lanes):
     return got
 
 
-def KernelRefusal(g):
-    """What the kernel of this tree says of a format-v2 volume at its format
-    check (deed.c DeedFormatRefused): it reads no book yet."""
+def KernelRibbonEmpty(g, slot):
+    """Is nothing sewn past the Tally of `slot`, as the kernel of this tree
+    looks (mount/book_mount.c): every sector from the slot's `at` to the end
+    of its Quire, and all of the next_quire it names inside the data run,
+    read — and not one of them holds as a stitch of a seq past the stitch
+    the Tally took in. A slot that puts the ribbon outside its own Quire
+    names no ribbon to look at."""
+    r = slot.ribbon
+    end = r["quire_block"] + r["quire_blocks"]
+    if not r["quire_blocks"] or not r["quire_block"] <= r["at"] < end:
+        return True
+    looks = [(r["at"], end - r["at"])]
+    nxt = (r["next_block"], r["next_blocks"])
+    if nxt[1] and nxt != (r["quire_block"], r["quire_blocks"]) and g.data_block <= nxt[0] and \
+            nxt[0] + nxt[1] <= g.data_end:
+        looks.append(nxt)
+    for block, blocks in looks:
+        for _raw, h in g.Run(block * SECTORS_PER_BLOCK, blocks * SECTORS_PER_BLOCK):
+            if h is not None and h["kind"] == bookread.UNIT_STITCH and h["seq"] > slot.stitch_seq:
+                return False
+    return True
+
+
+def KernelBook(g, m, held):
+    """What the kernel of this tree makes of a format-v2 volume, in the
+    numbers its own lines carry (mount/book_mount.c): refused — and in which
+    words — or mounted under glass, standing on which slot, with how many
+    files live, which locked by fid, what ranges rotten, which copies read
+    in the other's place, how many blocks held, how many shapes said, and the
+    numbers it gives next. It reads no DIGESTS leaf at the mount unless a
+    FILES range rots (§16.3 п.12): a DIGESTS range is said rotten only then."""
     if g.block_bytes != BLOCK:
-        return ("the format-v2 volume was laid out in %u-byte blocks and this kernel speaks %u"
-                % (g.block_bytes, BLOCK))
+        return {"mounts": False, "refusal": "laid out in %u-byte blocks" % g.block_bytes}
     if g.frame_why:
-        return "the deed bears a FRAME that does not hold: %s" % g.frame_why
-    return ("format v2 — its deed bears FRAME; this kernel cannot read a format-v2 book — boot a newer "
-            "kernel (deed.c DeedFormatRefused)")
+        return {"mounts": False, "refusal": "bears a FRAME that does not hold"}
+    if m.refusal is not None:
+        return {"mounts": False, "refusal": ("none of the %u slots of its Spine holds" % len(m.slots)
+                                             if m.tally is None and not any(s.state == "valid" for s in m.slots)
+                                             else "no slot that holds names a Tally that reads")}
+    if not KernelRibbonEmpty(g, m.slot):
+        return {"mounts": False, "refusal": "the ribbon past its Tally is not empty"}
+    t, rot = m.tally, m.FilesRot()
+    said = [x for x in m.said]
+    return {"mounts": True, "refusal": None, "slot": m.slot.index, "files": len(m.files),
+            "locked": sorted(m.locked), "glass": len(m.glass) + 1,
+            "rotten": [{"tree": tally.TREE_NAMES[r.tree], "count": r.count} for r in t.rotten
+                       if r.tree != tally.DIGESTS or rot],
+            "mended": len(t.mended), "held": RunsCount(held),
+            "shape": sum(1 for code, _s, _t in said if code == "RECORD_SHAPE"),
+            "torn_slots": sum(1 for code, _s, _t in said if code == "SLOT_TORN"),
+            "fell_back": sum(1 for code, _s, _t in said if code == "SLOT_FELL_BACK"),
+            "next_fid": m.counts["next_fid"], "next_tag": m.counts["next_tag"],
+            "next_bookmark": m.counts["next_bookmark"]}
 
 
 class BookCensus:
@@ -68,7 +109,6 @@ class BookCensus:
         self.medium = medium
         self.g = g = BookGround(medium, forced_start)
         self.findings, self.claims, self.held, self.boot_fid = [], [], [], None
-        self.kernel = {"mounts": False, "refusal": KernelRefusal(g)}
         self._Deed()
         self.mount = m = BookMount(g)
         for code, severity, text in m.said:
@@ -83,6 +123,8 @@ class BookCensus:
             self._Digests()
         self.free_runs = RunsSubtract([(g.data_block, g.data_end - g.data_block)],
                                       RunsNormal([r for c in self.claims for r in c.runs]))
+        self.kernel = KernelBook(g, m, self.held)
+        self.kernel["double"] = sorted(s for x in self.findings if x.code == "DOUBLE_OWNER" for s, _n in x.runs)
 
     def Say(self, code, severity, text, runs=()):
         self.findings.append(Finding(code, severity, text, runs))
@@ -288,7 +330,11 @@ class BookCensus:
             out.append("the book does NOT mount: %s" % m.refusal)
         else:
             out.append("the book mounts%s" % (" — read only" if m.glass else ""))
-        out.append("the kernel in this tree would NOT mount this volume: %s" % self.kernel["refusal"])
+        k = self.kernel
+        out.append("the kernel in this tree would NOT mount this volume: %s" % k["refusal"] if not k["mounts"] else
+                   "the kernel in this tree mounts it under glass on slot %u: %u file(s), %u locked, %u rotten "
+                   "range(s), %u block(s) held" % (k["slot"], k["files"], len(k["locked"]), len(k["rotten"]),
+                                                    k["held"]))
         for x in self.Sorted():
             out.append("%s %s: %s" % (x.severity, x.code, x.text))
         c = self.Counts()

@@ -1,6 +1,7 @@
 # logcheck_framerefuse — the framerefuse scenario of tools/logcheck.sh: a
-# format-v2 volume met by a kernel that cannot read its book, through either
-# loader, and TagBoot alone on Deeds made again one way at a time.
+# format-v2 volume met by this kernel, through either loader — a Deed with no
+# book turned away whole, a book mounted under glass and not written — and
+# TagBoot alone on Deeds made again one way at a time.
 #
 # SOURCED, NEVER RUN — by logcheck.sh, which dispatches `framerefuse` to
 # run_framerefuse here; everything it calls (build, chk, bad, harness, the
@@ -9,28 +10,30 @@
 # every step of format v2 should not grow it further.
 
 # ---------------------------------------------------------------------------
-# framerefuse: a format-v2 volume, met by a kernel that cannot read its book,
-# is turned away whole — not a byte of its ground written (step 2.1)
+# framerefuse: a format-v2 volume this kernel reads — and writes not a byte of
 #
 # A Deed says what its book is written in by the stamp it carries: LAYOUT for
-# format v1, FRAME for v2 (volume_deed.h). A kernel that meets a book it
-# cannot read has one thing to do, at its format check (tagfs.c,
-# volume_take_ground): refuse the volume before the mount's first write, and
-# say so in words a person at the machine can act on.
+# format v1, FRAME for v2 (volume_deed.h). This kernel reads a format-v2 book
+# — the Spine's slots and the Tally the newest one names (mount/book_mount.c)
+# — and writes none of it: every such volume it mounts stands under glass,
+# every road that would write refused before a byte.
 #
 # The image is this tree's, its volume made again by `create_tagfs
 # --frame-only`: GEOMETRY · FRAME · BORN · BOOT · PACKED, the Spine's slots
 # blank, the kernel at the data run's first block where BOOT names it — listed
 # after the shell, so the image also shows the kernel is put first anyway —
-# and stage2 boots it the way it boots any volume. It is booted on BIOS, q35
-# (STRICT), every write it makes on the record (POWERCUT=on), typed at, and
-# switched off by its power button, so the halt meets the refused volume too.
-# Then the same once more on a volume with its book whole (`create_tagfs
-# --v2`, its census clean before the boot): a kernel that cannot read a book
-# turns a real one away exactly as it turns away an empty ring.
-# Then the same again through UEFI (OVMF and TagBoot): the loader has to take
-# the kernel where the BOOT stamp of a deed bearing FRAME names it — it used to
-# stop at that deed, finding no layout in it (tagboot_deed.c, DeedTakeUp) — and
+# and stage2 boots it the way it boots any volume. A ring of blank slots names
+# no book, so the kernel turns the volume away before the mount's first write,
+# saying so (§16.2 п.25). It is booted on BIOS, q35 (STRICT), every write it
+# makes on the record (POWERCUT=on), typed at, and switched off by its power
+# button, so the halt meets the refused volume too.
+# Then the same on a volume with its book whole (`create_tagfs --v2`, its
+# census clean before the boot): mounted under glass, the machine's Use
+# Context set to what the volume does not remember, `anchor_test` asked to
+# write and anchor a file, and the power button pressed — and not one write
+# lands in the volume's ground, by place or by name.
+# Then the blank ring again through UEFI (OVMF and TagBoot): the loader has to
+# take the kernel where the BOOT stamp of a deed bearing FRAME names it, and
 # the kernel it loads has to turn the volume away in the same words. Then
 # TagBoot alone, on that image with its Deed made again one way at a time
 # (framerefuse_deed): no BOOT, a LAYOUT beside the FRAME, a ring of one slot,
@@ -45,16 +48,20 @@
 # classifier names it (cut --list), which has to be standing on the volume as
 # format v2 to name anything at all.
 #
-# ‼ THE KERNEL BEFORE FORMAT v2 IS ASKED THE SAME, ONCE. FRAMEREFUSE_KERNEL=
+# ‼ A KERNEL BEFORE THIS ONE IS ASKED THE SAME, ONCE. FRAMEREFUSE_KERNEL=
 # <kernel.bin> puts that kernel in the same image instead, booted the same
 # way, and holds it to the refusal kernels before format v2 give ("carries no
-# layout this kernel understands") and to the same silence on the medium. A
-# receipt of step 2.1 taken by hand, not a gate: a tree of another day, built
-# on the desk of this one, goes stale with the tools that build it.
+# layout this kernel understands") and to the same silence on the medium. The
+# kernels that knew format v2 and read no book of it said
+# FRAMEREFUSE_V2_SAYS, which the receipt of a newer volume on them awaits. A
+# receipt taken by hand, not a gate: a tree of another day, built on the desk
+# of this one, goes stale with the tools that build it.
 # ---------------------------------------------------------------------------
 
 FRAMEREFUSE_V2_SAYS="carries a format-v2 volume (its deed bears FRAME); this kernel cannot read a format-v2 book — boot a newer kernel"
 FRAMEREFUSE_V1_SAYS="carries no layout this kernel understands"
+FRAMEREFUSE_BLANK_SAYS="this volume is NOT mounted: none of the 3 slots of its Spine holds"
+FRAMEREFUSE_GLASS_SAYS="the volume may only be read: this kernel reads format-v2 books and writes none of them"
 
 # framerefuse_judge BEFORE RECORD FINAL — what the record says the machine
 # wrote, against the image before the boot; one line, FRAMEREFUSE k=v ...
@@ -90,15 +97,23 @@ PY
 # framerefuse_leg KERNEL SAYS LEG MODE [KEYS...] — the image made around
 # KERNEL by `create_tagfs MODE` (--frame-only: no book; --v2: a whole book),
 # booted with KEYS (the leg's firmware), switched off, and judged: SAYS is the
-# refusal its log must carry. LEG names the leg in every line and file.
+# line its log must carry — the refusal, or, for FRAMEREFUSE_GLASS_SAYS, the
+# glass a mounted book stands under, which the leg then asks to change (a Use
+# Context the volume does not remember, a file written and anchored). LEG
+# names the leg in every line and file.
 framerefuse_leg() {
-    local kernel=$1 says=$2 leg=$3 mode=$4
+    local kernel=$1 says=$2 leg=$3 mode=$4 mounts=""
     shift 4
+    [ "$says" = "$FRAMEREFUSE_GLASS_SAYS" ] && mounts=yes
     local img="$SCRATCH/framerefuse.$leg.img" before="$SCRATCH/framerefuse.$leg.before.img"
     local rec="$SCRATCH/framerefuse.$leg.record" L="$SCRATCH/serial.framerefuse.$leg.log" pid verdict uuid
+    local anchor=""
+    # A book the machine mounts carries the program that asks it to anchor.
+    [ -n "$mounts" ] && anchor="src/userspace/apps/anchor_test.elf app,utility,test"
     rm -f "$img" "$before" "$rec" "$L"
     cp build/boxos.img "$img" || { harness "framerefuse ($leg): could not copy build/boxos.img"; return; }
-    if ! tools/create_tagfs "$mode" "$img" src/userspace/shell/shell.bin "utility,system" \
+    # shellcheck disable=SC2086
+    if ! tools/create_tagfs "$mode" "$img" src/userspace/shell/shell.bin "utility,system" $anchor \
             "$kernel" "system" >"$SCRATCH/framerefuse.$leg.mkfs.log" 2>&1; then
         bad "framerefuse ($leg): create_tagfs $mode would not make the image: $(tail -1 "$SCRATCH/framerefuse.$leg.mkfs.log")"
         return
@@ -144,6 +159,10 @@ PY
         sleep 1
         key_press ret
         sleep 2
+        if [ -n "$mounts" ]; then
+            type_cmd "use framerefuse"; sleep 1; key_press ret; sleep 2
+            type_cmd "anchor_test"; sleep 1; key_press ret; sleep 3
+        fi
     fi
     mon_raw system_powerdown
     wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
@@ -154,9 +173,20 @@ PY
     [ -n "$uuid" ] && grep -aqE "^\[Deed\] seat [0-9]+: volume $uuid, " "$L"
     chk $? "framerefuse ($leg): the machine read the Deed of this very image (volume ${uuid:-unreadable})"
     grep -qF "$says" "$L"
-    chk $? "framerefuse ($leg): the volume is refused in so many words — $(grep -oF "$says" "$L" | head -1)"
-    ! grep -qE "MOUNTED — [0-9]+ file" "$L"
-    chk $? "framerefuse ($leg): nothing is mounted off it"
+    chk $? "framerefuse ($leg): the volume is said so in so many words — $(grep -oF "$says" "$L" | head -1)"
+    if [ -n "$mounts" ]; then
+        grep -qE "MOUNTED — [0-9]+ file" "$L"
+        chk $? "framerefuse ($leg): the book is mounted ($(grep -oE 'MOUNTED — [0-9]+ file\(s\)' "$L" | head -1))"
+        grep -aqF "Context set; this volume will not remember it" "$L"
+        chk $? "framerefuse ($leg): the new Use Context is answered as one the volume will not remember — its cycle refused"
+        grep -aqE "\[ANCHOR\] create rc=-856" "$L"
+        chk $? "framerefuse ($leg): and the file anchor_test would write and anchor is refused first, ERR_TAGFS_READ_ONLY ($(grep -a '\[ANCHOR\]' "$L" | tail -1 | tr -d '\r'))"
+        grep -aq "^\[TagFS\] the machine is stopping and the volume is under glass: there is nothing to settle" "$L"
+        chk $? "framerefuse ($leg): and the halt has nothing to settle"
+    else
+        ! grep -qE "MOUNTED — [0-9]+ file" "$L"
+        chk $? "framerefuse ($leg): nothing is mounted off it"
+    fi
     grep -q "BoxOS Shell" "$L" && typed_ok "$L"
     chk $? "framerefuse ($leg): the machine still reaches a shell, and answers a keystroke"
     ! grep -qE "PANIC|\[EXCEPTION\]|\[TAGBOOT FATAL\]" "$L"
@@ -325,18 +355,17 @@ PY
 }
 
 run_framerefuse() {
-    echo "== framerefuse: a format-v2 volume is refused whole by a kernel that cannot read its book, through either loader =="
+    echo "== framerefuse: a format-v2 volume read and never written — a blank Spine turned away whole, a book under glass, through either loader =="
     build STRICT=on
     if [ -n "${FRAMEREFUSE_KERNEL:-}" ]; then
         echo "  (the A/B receipt: $FRAMEREFUSE_KERNEL — $(tools/buildplate say "$FRAMEREFUSE_KERNEL" 2>&1 | head -1))"
         framerefuse_leg "$FRAMEREFUSE_KERNEL" "$FRAMEREFUSE_V1_SAYS" bios --frame-only
         return
     fi
-    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_V2_SAYS" bios --frame-only
+    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_BLANK_SAYS" bios --frame-only
     framerefuse_after bios
-    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_V2_SAYS" book --v2
-    framerefuse_after book
-    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_V2_SAYS" uefi --frame-only UEFI=on
+    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_GLASS_SAYS" book --v2
+    framerefuse_leg build/kernel.bin "$FRAMEREFUSE_BLANK_SAYS" uefi --frame-only UEFI=on
     local L="$SCRATCH/serial.framerefuse.uefi.log"
     grep -aqE "^TagBoot: volume on ground at sector [0-9]+, a format-v2 book with its data run from block 1024" "$L"
     chk $? "framerefuse (uefi): TagBoot reads the deed's FRAME, not a layout ($(grep -a '^TagBoot: volume on ground' "$L" | tr -d '\r' | head -1))"

@@ -70,6 +70,10 @@ static inline TagFSLock *UseMemoryLock(void)
  * neither. Under the state lock. */
 static inline bool UseMemoryChained(void)
 {
+    /* A format-v2 book keeps the text in its Tally and no chain beside it:
+     * what memory holds is what the book holds (UseMemoryRecall). */
+    if (tagfs_get_state()->format == DEED_FORMAT_V2)
+        return true;
     return g_use_memory.memory ? g_use_memory.settled.ref.first != VOLUME_LEDGER_NO_BLOCK
                                : g_use_memory.settled.ref.first == VOLUME_LEDGER_NO_BLOCK;
 }

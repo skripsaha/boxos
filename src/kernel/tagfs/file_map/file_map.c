@@ -697,11 +697,14 @@ uint32_t FileMapRows(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
 {
     uint32_t n = 0, pos = 0, odd = 0;
     uint64_t odd_fid = 0;
+    /* A row is format v1's alone: a format-v2 book names its files in its
+     * Tally and keeps no table, so there a record with no row is every file. */
+    bool     rows = tagfs_get_state()->format == DEED_FORMAT_V1;
     TagFSLockTake(&map->lock);
     for (FileMapNode* leaf = MapFrom(map, from, &pos); leaf && n < room; leaf = leaf->next, pos = 0) {
         for (; pos < leaf->count && n < room; pos++) {
             const FileMapEntry* e = &leaf->u.entry[pos];
-            if ((e->record != NULL) != (e->row_block != 0) && odd++ == 0)
+            if (rows && (e->record != NULL) != (e->row_block != 0) && odd++ == 0)
                 odd_fid = leaf->key[pos];
             if (e->record)
                 out[n++] = leaf->key[pos];

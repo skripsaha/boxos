@@ -11,7 +11,7 @@
 
 static uint64_t UseBlockVlba(uint64_t block)
 {
-    return ((uint64_t)tagfs_get_state()->layout.data_block + block) * TAGFS_BLOCK_SECTORS;
+    return ((uint64_t)TagFSLayout()->data_block + block) * TAGFS_BLOCK_SECTORS;
 }
 
 /* The blocks the medium takes in one command — its answer, not a number
@@ -117,7 +117,7 @@ static bool UseRunsAppend(UseChain *chain, uint32_t *cap, uint64_t block, uint32
  */
 UseChainState UseChainRead(const UseChainRef *ref, UseText **text, UseChain *out)
 {
-    uint32_t data_blocks = tagfs_get_state()->layout.data_blocks;
+    uint32_t data_blocks = TagFSLayout()->data_blocks;
     uint64_t links       = UseChainLinksFor(ref->bytes);
     uint32_t cap         = 0;
 

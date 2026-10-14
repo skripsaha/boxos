@@ -672,7 +672,7 @@ static bool GleanPrefixHolds(uint32_t b)
  * for ever. Every block walked is a distinct block of the data run. */
 static void GleanWalkPrefix(uint32_t first)
 {
-    uint32_t run = tagfs_get_state()->layout.data_blocks;
+    uint32_t run = TagFSLayout()->data_blocks;
     uint32_t cap = 0;
     uint32_t b   = s_head_next;
     while (b != first) {

@@ -1,3 +1,4 @@
+#include "ata_identify.h"
 #include "ata.h"
 #include "ata_async.h"
 #include "klib.h"
@@ -582,6 +583,7 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
             device->physical_sector_size = logical << exponent;
         }
     }
+    device->first_aligned = AtaIdentifyFirstAligned(id, logical, device->physical_sector_size);
 
     /* How big the medium is, asked of the words the standard says are worth
      * reading and of no others.
