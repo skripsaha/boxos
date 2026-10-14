@@ -70,7 +70,7 @@ bool    BookFileLocked(uint64_t file_id);
 typedef struct {
     uint32_t slot;          /* the Spine slot it stands on */
     uint32_t mended;        /* copies of nodes that did not hold, the next read in their place */
-    uint32_t rotten;        /* ranges of keys neither copy of whose node holds */
+    uint32_t rotten;        /* ranges of keys no copy of whose node holds */
     uint64_t locked;        /* files locked by name */
     uint64_t held;          /* blocks held for what rotted */
     uint32_t shapes;        /* things written against the format's own shape */
@@ -85,7 +85,7 @@ void    MountBookStandSaid(MountBookSaid* out);
 // tally_leaves.c (the leaves into memory), book_ground.c (the census)
 // ----------------------------------------------------------------------------
 
-/* A range of FILES keys neither copy of whose node holds — [lo, hi), to the
+/* A range of FILES keys no copy of whose node holds — [lo, hi), to the
  * end of the tree without hi — and the files its parent counts under it. */
 typedef struct {
     TallyKey lo;
@@ -125,6 +125,7 @@ typedef struct {
     uint32_t       nlocked;
     uint32_t       caplocked;
     bool           files_rot;    /* a FILES range rots: every digested block no name owns is held */
+    bool           bookmarked;   /* a Tally of a slot that holds names a bookmark: no map, free not counted */
     uint64_t       files;        /* live files */
     uint64_t       next_fid;     /* past every fid the Tally names */
     uint64_t       next_tag;     /* past every tag id TAGS names and a live file wears */
@@ -144,12 +145,15 @@ error_t BookFileClose(void);
 error_t BookRangeRots(const TallyPlace* at, const char* why);
 
 /* The census of the book (book_ground.c): every owner's claim the walk did not
- * make as it went, what rotted held, two owners of one block said. OK, or the
- * refusal — memory's, or the medium's for a Tally it must see — with what
- * the mount's line says in *what. */
+ * make as it went, what rotted held, two owners of one block said, and the
+ * volume's block map derived from the claims (block_map_derived.h) — none
+ * where a Tally names a bookmark, whose ground it does not see. OK, or
+ * the refusal — memory's, the map's, or the medium's for a Tally it must see
+ * — with what the mount's line says in *what. */
 error_t BookGroundCensus(const char** what);
 
-/* Every node of a Tally a walk reaches, both copies, claimed for the census
+/* Every node of the Tally the mount stands on a walk reaches, every copy its
+ * pointer names, claimed for the census as that slot names it
  * (book_ground.c) — a TallySink's `node`. */
 error_t BookGroundNode(void* ctx, const TallyPlace* at);
 

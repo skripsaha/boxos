@@ -13,7 +13,7 @@
  *
  * A copy that does not hold is said, with why, and the next copy read — the
  * first part of Self-Heal, which the next Tally's writer finishes by writing
- * the node again (§2.5). A node neither copy of which holds is the end of the
+ * the node again (§2.5). A node no copy of which holds is the end of the
  * walk below it: a ROOT that does not read refuses the slot (the mount reads
  * the next, §1.4); a node BELOW a root is a rotten range of keys, handed to
  * the reader with the count its parent carries — never the volume refused
@@ -34,16 +34,28 @@
  * medium.
  */
 
-/* A node by its pointer, held as numbers: its copies' blocks in the order
- * they are tried — the writer writes two (§2.5) — its Sheets and its seq. */
-#define TALLY_COPIES_TRIED  4u
+/*
+ * A node by its pointer, held as numbers: its Sheets, its seq, and every copy
+ * the pointer names, in the order they are tried (§16.2 п.17) — each one
+ * read when the ones before it do not hold, and every one claimed as the
+ * Tally's ground: a copy left out would read as nobody's, and be handed out
+ * under the node it is. The two a writer writes (§2.5) lie in the place
+ * itself; a pointer naming more keeps the rest in the mount's own list, which
+ * lives as long as the volume's mount (TallyDigestsLetGo).
+ */
+#define TALLY_COPIES_HELD  2u
 
 typedef struct {
     uint64_t seq;
     uint64_t sheets;
-    uint32_t copies;                     /* the pointer's own count */
-    uint64_t block[TALLY_COPIES_TRIED];
+    uint32_t copies;                     /* the pointer's own count, every one tried */
+    uint32_t more;                       /* where the copies past TALLY_COPIES_HELD begin
+                                          * in the mount's list */
+    uint64_t block[TALLY_COPIES_HELD];
 } TallyPtr;
+
+/* The block copy `k` of a pointer lies at, k < p->copies. */
+uint64_t TallyPtrBlock(const TallyPtr* p, uint32_t k);
 
 /* Where a node lies in its tree: its pointer, its level, the count its parent
  * carries for it (its slot's SpineRoot, for a root), and the keys its parent's
@@ -76,8 +88,9 @@ typedef struct {
     uint32_t* shapes;  /* when `said`: counts each shape said against the format */
 } TallySink;
 
-/* The place of a tree's root, out of its slot's SpineRoot. */
-void    TallyRootPlace(const SpineRoot* root, TallyPlace* out);
+/* The place of a tree's root, out of its slot's SpineRoot. OK, or
+ * ERR_NO_MEMORY for no room for the copies past the two a place holds. */
+error_t TallyRootPlace(const SpineRoot* root, TallyPlace* out);
 
 /* Whether the root of `tree` reads in some copy, as a node of that tree and
  * of the level its slot names: OK, or ERR_TAGFS_CORRUPTED with why in `why`
@@ -96,7 +109,7 @@ const char* TallyTreeName(uint64_t tree);
 /* --- DIGESTS ------------------------------------------------------------ */
 
 /* A DIGESTS leaf the mount's walk named, kept by place for the reads to come
- * — or, `rotten`, a range of the tree neither copy of whose node reads, whose
+ * — or, `rotten`, a range of the tree no copy of whose node reads, whose
  * blocks read unchecked (TallyRead's callbacks over DIGESTS). OK or
  * ERR_NO_MEMORY. */
 error_t TallyDigestsKeep(const TallyPlace* leaf, bool rotten);
@@ -114,7 +127,7 @@ error_t TallyDigestsEach(void (*run)(void* ctx, uint64_t start, uint64_t count),
 typedef enum {
     TALLY_DIGEST_NAMED,     /* an element names the block: its digest given */
     TALLY_DIGEST_UNNAMED,   /* the leaf that would name it reads, and no element of it does */
-    TALLY_DIGEST_ROTTEN,    /* that leaf, or its element, reads in neither copy — said once for
+    TALLY_DIGEST_ROTTEN,    /* that leaf, or its element, reads in no copy — said once for
                              * the leaf: its blocks read unchecked (§4.5 п.3) */
     TALLY_DIGEST_UNREAD,    /* that leaf could not be read now: *refused says why — memory, or
                              * the medium */
@@ -123,7 +136,8 @@ typedef enum {
 /* The digest the Tally holds for `block`, in *digest when it is NAMED. */
 TallyDigestSays TallyDigestFind(uint64_t block, uint64_t* digest, error_t* refused);
 
-/* The kept leaves and the leaves read, let go — the volume's let go of. */
+/* The kept leaves, the leaves read and the copies of pointers past the two a
+ * place holds, let go — the volume's let go of. */
 void    TallyDigestsLetGo(void);
 
 #ifdef CONFIG_VOLUME_TESTS

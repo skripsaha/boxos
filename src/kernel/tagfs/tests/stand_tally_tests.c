@@ -6,6 +6,7 @@
 #include "../mount/book_mount.h"
 #include "../mount/tally_read.h"
 #include "../mount/book_unit.h"
+#include "../block_map/block_map_derived.h"
 #include "../settle/settle.h"
 #include "../read/read.h"
 #include "../integrity/integrity.h"
@@ -38,7 +39,9 @@
 // takes, and a block with no digest as one that does not match; a medium that
 // leaves and comes back has its book read again, with nothing read to judge
 // it; and the live files are the records, with no table to agree with. And BLOCKFAIL's plan of bad sectors in
-// two places at once, which C19 asks of it, for any format.
+// two places at once, which C19 asks of it, for any format. And the block map derived from the owners'
+// names: it holds to them, names a claim on a taken block and a release of a free one, and refuses the
+// mount out loud when the heap will not hold its pages.
 //
 // What a test does to the medium it does by the Boardroom's own doors, beside
 // TagFS: the volume takes no write, and the stand's hand is the medium's rot.
@@ -692,6 +695,189 @@ out:
 }
 
 // ----------------------------------------------------------------------------
+// The block map, derived from the owners' names (§4.6): it holds to them, a
+// claim on a taken block and a release of a free one are named, and a heap
+// that will not hold its pages refuses the mount out loud
+// ----------------------------------------------------------------------------
+
+/* The volume's windows: the map covers [0, the far Deed's block). */
+static uint32_t StandTallyWindows(void)
+{
+    return (uint32_t)((tagfs_get_state()->block_end + BLOCK_MAP_WINDOW_BLOCKS - 1u) / BLOCK_MAP_WINDOW_BLOCKS);
+}
+
+/* Every block a live file names reads taken on the map; *blocks how many. */
+static bool StandTallyFilesTaken(uint64_t* blocks)
+{
+    TagFSState* fs   = tagfs_get_state();
+    uint64_t    from = 0, ids[16];
+    uint32_t    n;
+    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+        for (uint32_t i = 0; i < n; i++) {
+            FileRecord* rec   = FileMapRecordHold(fs->files, ids[i], NULL);
+            bool        taken = rec != NULL;
+            StripWalk   walk;
+            Strip       run;
+            if (rec) {
+                StripWalkBegin(rec, &walk);
+                while (taken && StripWalkNextGround(&walk, &run))
+                    for (uint64_t k = 0; taken && k < run.count; k++, (*blocks)++)
+                        taken = !BlockMapDerivedIsFree(run.start + k);
+                FileRecordRelease(rec);
+            }
+            if (!taken)
+                return false;
+        }
+        from = ids[n - 1] + 1;
+    }
+    return true;
+}
+
+/* The longest run window w holds, as BlockMapDerivedRunIn finds it: the most
+ * `want` it answers, and where that run starts. */
+static uint32_t StandTallyLongest(uint32_t w, uint64_t* start)
+{
+    uint32_t lo = 0, hi = BLOCK_MAP_WINDOW_BLOCKS;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo + 1u) / 2u;
+        if (BlockMapDerivedRunIn(w, mid, start))
+            lo = mid;
+        else
+            hi = mid - 1u;
+    }
+    if (lo)
+        BlockMapDerivedRunIn(w, lo, start);
+    return lo;
+}
+
+static TestResult TestStandTallyMapHolds(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    const char* aside   = StandTallyAside();
+    uint64_t    free = 0, blocks = 0, start = 0, base;
+    uint32_t    mixed = 0, w, longest;
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(BlockMapDerivedUp(), "the book's block map is up, derived from its owners at the mount");
+    TEST_ASSERT(BlockMapDerivedStandHolds(&free, &mixed),
+                "every window's summary holds to its page, and their sum to the volume's free count");
+    TEST_ASSERT(free > 0 && mixed > 0, "the data run has free ground, and a window both free and taken");
+    TEST_ASSERT(StandTallyFilesTaken(&blocks), "every block a live file names reads taken");
+    TEST_ASSERT(blocks > 0, "and the files name blocks");
+    TEST_ASSERT(!BlockMapDerivedIsFree(0), "the Deed's block reads taken: the front's");
+    TEST_ASSERT(!BlockMapDerivedIsFree(fs->block_end), "and the far Deed's, past the map, is no free block");
+    for (w = 0; w < StandTallyWindows() && !BlockMapDerivedRunIn(w, 1, &start); w++)
+        ;
+    TEST_ASSERT(w < StandTallyWindows(), "a window gives a free block");
+    base = (uint64_t)w * BLOCK_MAP_WINDOW_BLOCKS;
+    TEST_ASSERT(BlockMapDerivedIsFree(start), "the block it gives is free");
+    TEST_ASSERT(start == base || !BlockMapDerivedIsFree(start - 1u), "and the first free one of its window");
+    longest = StandTallyLongest(w, &start);
+    TEST_ASSERT(longest > 0 && !BlockMapDerivedRunIn(w, longest + 1u, &start) &&
+                BlockMapDerivedRunIn(w, longest, &start), "its longest run is the most a run in it is asked for");
+    for (uint32_t k = 0; k < longest; k++)
+        TEST_ASSERT(BlockMapDerivedIsFree(start + k), "every block of that run is free");
+    TEST_ASSERT(start == base || !BlockMapDerivedIsFree(start - 1u), "and the block before it is not");
+    TEST_ASSERT(start + longest == base + BLOCK_MAP_WINDOW_BLOCKS || !BlockMapDerivedIsFree(start + longest),
+                "nor the block after it");
+out:
+    return verdict;
+}
+
+/* A file no live file is, whose claim the stand makes and lets go. */
+#define STAND_TALLY_MAP_FID   0xFFFFFFF0u
+#define STAND_TALLY_MAP_PAST  40u   /* releases of a free block: past the 32 the map names one by one */
+
+static TestResult TestStandTallyMapClaimNamed(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    const char* aside   = StandTallyAside();
+    uint64_t    before  = fs->ledger.free_blocks, start = 0, met = 0, free = 0;
+    uint32_t    mixed = 0, w, k;
+    bool        claimed = false;
+
+    if (aside)
+        return test_steps_aside(aside);
+    /* The map is the mount's, and nothing changes it while the volume stands
+     * under glass: the stand claims on it from one core, and lets go of all
+     * it claimed. */
+    for (w = 0; w < StandTallyWindows() && !BlockMapDerivedRunIn(w, 3, &start); w++)
+        ;
+    TEST_ASSERT(w < StandTallyWindows(), "a window holds three free blocks in a row");
+    TEST_ASSERT_OK(BlockMapDerivedClaim(GROUND_FILE, STAND_TALLY_MAP_FID, start, 2, &met),
+                   "two of them are claimed for a file");
+    claimed = true;
+    TEST_ASSERT_EQ(met, 0, "none of them was taken");
+    TEST_ASSERT(!BlockMapDerivedIsFree(start) && !BlockMapDerivedIsFree(start + 1u) &&
+                BlockMapDerivedIsFree(start + 2u), "the two read taken, the third free");
+    TEST_ASSERT_EQ(fs->ledger.free_blocks, before - 2u, "and the volume's free count is two less");
+    TEST_ASSERT_OK(BlockMapDerivedClaim(GROUND_TALLY, 1, start, 3, &met), "all three are claimed for a node");
+    TEST_ASSERT_EQ(met, 2, "and the two the file names are met taken — two owners, named on the insertion");
+    TEST_ASSERT_OK(BlockMapDerivedRelease(GROUND_TALLY, 1, start, 3, &met), "the three are let go");
+    claimed = false;
+    TEST_ASSERT_EQ(met, 0, "none of them was free");
+    TEST_ASSERT_OK(BlockMapDerivedRelease(GROUND_FILE, STAND_TALLY_MAP_FID, start, 1, &met),
+                   "the first is let go again");
+    TEST_ASSERT_EQ(met, 1, "and is met free already, named");
+    /* Past the bound a list said at mount keeps, the rest are counted — and
+     * the first of them says so then, not only when the map is let go (the
+     * stand's judge holds the line said once, and the count at the remount). */
+    for (k = 0; k < STAND_TALLY_MAP_PAST; k++) {
+        TEST_ASSERT_OK(BlockMapDerivedRelease(GROUND_FILE, STAND_TALLY_MAP_FID, start + 2u, 1, &met),
+                       "the third, free, is let go once more");
+        TEST_ASSERT_EQ(met, 1, "and is met free already");
+    }
+    TEST_ASSERT_EQ(fs->ledger.free_blocks, before, "the volume's free count is what it was");
+    TEST_ASSERT(BlockMapDerivedStandHolds(&free, &mixed), "and every window's summary holds to its page");
+out:
+    if (claimed)
+        BlockMapDerivedRelease(GROUND_TALLY, 1, start, 3, &met);
+    return verdict;
+}
+
+static TestResult TestStandTallyMapShortOfMemory(void)
+{
+    TestResult  verdict = TEST_PASS;
+    const char* aside   = StandTallyAside();
+    uint64_t    free = 0, again = 0;
+    uint32_t    mixed = 0, mixed_again = 0;
+    bool        down = false;
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(BlockMapDerivedStandHolds(&free, &mixed) && mixed > 0,
+                "the map holds a mixed window, whose page the heap may refuse");
+    BlockMapDerivedStandRefuse(true);
+    down = TagFSStandLetGo();
+    TEST_ASSERT(down, "the volume is let go of");
+    StandTallyArrive();
+    HeapFailDisarm();
+    TEST_ASSERT(!tagfs_get_state()->initialized,
+                "and its mount, the heap refusing the map its first page, refuses the volume out loud");
+    TEST_ASSERT(!BlockMapDerivedUp(), "leaving no map half made");
+    TEST_ASSERT_EQ(BlockMapDerivedStandShort(), mixed, "the refusal names every mixed window the map wants");
+    StandTallyArrive();
+    TEST_ASSERT(tagfs_get_state()->initialized, "asked again, the volume is mounted");
+    TagFSStandHoldAgain();
+    down = false;
+    TEST_ASSERT(BlockMapDerivedStandHolds(&again, &mixed_again), "its map holds");
+    TEST_ASSERT_EQ(again, free, "with the free count it had");
+    TEST_ASSERT_EQ(mixed_again, mixed, "and its mixed windows");
+out:
+    BlockMapDerivedStandRefuse(false);
+    HeapFailDisarm();
+    if (down)
+        StandTallyArrive();
+    else
+        TagFSStandLetGo();
+    StandTallyClose();
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
 // BLOCKFAIL: sectors that will not read, in two places at once
 // ----------------------------------------------------------------------------
 
@@ -743,6 +929,12 @@ static const TestCase g_stand_tally_tests[] = {
     { .name = "stand_tally_medium_returns", .func = TestStandTallyMediumReturns,
       .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
     { .name = "stand_tally_live_without_rows", .func = TestStandTallyLiveWithoutRows,
+      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+    { .name = "stand_tally_map_holds", .func = TestStandTallyMapHolds,
+      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+    { .name = "stand_tally_map_claim_named", .func = TestStandTallyMapClaimNamed,
+      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+    { .name = "stand_tally_map_short_of_memory", .func = TestStandTallyMapShortOfMemory,
       .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
     { .name = "stand_blockfail_two_ranges", .func = TestStandBlockFailTwoRanges,
       .reach = TEST_READS_ONLY },

@@ -192,19 +192,19 @@ class BookMount:
         name = tally.TREE_NAMES[r.tree]
         span = "[%s, %s)" % (r.lo, "the end" if r.hi is None else r.hi)
         if r.tree == tally.FILES:
-            return ("the FILES range %s rots in both copies (%s): %u file(s) locked by its parent's count "
+            return ("the FILES range %s rots in every copy (%s): %u file(s) locked by its parent's count "
                     "— none opens, its ids are not given again, its blocks are held (§4.5 п.3)"
                     % (span, r.why, r.count))
         if r.tree == tally.TAGS:
-            return ("the TAGS range %s rots in both copies (%s): the names of %u tag id(s) are lost — the "
+            return ("the TAGS range %s rots in every copy (%s): the names of %u tag id(s) are lost — the "
                     "files keep the ids, nameless" % (span, r.why, r.count))
         if r.tree == tally.DIGESTS:
-            return ("the DIGESTS range of blocks %s rots in both copies (%s): those blocks read unchecked%s"
+            return ("the DIGESTS range of blocks %s rots in every copy (%s): those blocks read unchecked%s"
                     % (span, r.why, ", and every one of them no living file names is held, for a FILES range "
                        "rots too (§16.1 п.5)" if self.FilesRot() else " — a mount reads DIGESTS leaves when "
                        "a block is read and learns it there; no FILES range rots, so every owner is known "
                        "and nothing is held (§4.5 п.3, §16.1 п.5)"))
-        return "the %s range %s rots in both copies (%s)" % (name, span, r.why)
+        return "the %s range %s rots in every copy (%s)" % (name, span, r.why)
 
     def FilesRot(self):
         """Does a FILES range of the Tally stood on rot? Only then is a block
@@ -220,25 +220,34 @@ class BookMount:
 
     def _Older(self):
         """п.4: the slots not stood on hold their Tallies' nodes and their
-        ribbons' Quires — read for the ground, leaves not opened."""
+        ribbons' Quires — read for the ground, leaves not opened. Each named
+        as the census takes a slot's name (bookcensus.py Named): a node's
+        copy as (block, Sheets, the node's seq, the slot), a Quire as
+        (block, blocks, 0, the slot)."""
         for s in self.slots:
             if s.state != "valid" or s is self.slot:
                 continue
             for tree, root in s.roots.items():
                 t = tally.TreeRead(self.g, tree, root, [], leaves=False)
-                self.older_nodes.extend(t.Blocks())
+                self.older_nodes.extend((b, n.sheets, n.seq, s.index) for n in t.nodes for b in n.blocks)
                 # A node neither copy of holds is still its slot's: its parent
                 # — or the slot, for a root — names its blocks, as the rotten
                 # nodes of the slot stood on are (bookcensus.py, the Tally's
                 # claim).
                 ptrs = [r.ptr for r in t.rotten if r.ptr] + ([root.Pointer()] if t.refused else [])
-                self.older_nodes.extend((b, p["sheets"]) for p in ptrs if p for b in p["blocks"])
-            self.older_quires.extend(stitch.Ribbon(self.g, s, scan=False).quires)
+                self.older_nodes.extend((b, p["sheets"], p["seq"], s.index) for p in ptrs if p for b in p["blocks"])
+            self.older_quires.extend((q[0], q[1], 0, s.index) for q in stitch.Ribbon(self.g, s, scan=False).quires)
 
     # --- п.5-6 ----------------------------------------------------------------
 
     def _Ribbon(self):
+        # The book's ground a next_quire may not name is the Tally's as the
+        # census claims it: every copy of every node, a rotten one's too — its
+        # parent names those blocks (bookcensus.py, the Tally's claim), and so
+        # does the kernel's census when it weighs the next_quire
+        # (book_ground.c BookGroundRibbon).
         taken = [(b, n.sheets) for n in self.tally.Nodes() for b in n.blocks]
+        taken += [(b, r.ptr["sheets"]) for r in self.tally.rotten if r.ptr for b in r.ptr["blocks"]]
         taken += [r for fs in self.files.values() for r in fs.Ground()]
         self.ribbon = stitch.Ribbon(self.g, self.slot, taken)
         self.said.extend(self.ribbon.said)

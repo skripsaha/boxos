@@ -283,8 +283,9 @@ private:
     return left_width_ > 2 ? static_cast<std::uint8_t>(left_width_ - 2) : 1;
   }
 
-  // The disk's use as a share — or that the kernel does not count this
-  // volume's free ground (a format-v2 book: box/system.h, volume_free_counted).
+  // The disk's use as a share — or that the kernel holds no count of this
+  // volume's free ground (a book that names a bookmark: box/system.h,
+  // volume_free_counted).
   std::string disk_used() const {
     if (machine_.resources_ok && machine_.resources.volume_present &&
         !machine_.resources.volume_free_counted)

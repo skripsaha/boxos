@@ -19,29 +19,74 @@ const char* TallyTreeName(uint64_t tree)
     return tree >= 1 && tree <= TALLY_SHARED ? g_tree_name[tree] : "unknown";
 }
 
-/* A pointer as numbers, its copies taken in their order (volume_book.h). A
- * pointer naming more copies than are tried is said: the ones past them are
- * never read. */
-static void TallyPtrOf(const BookPtr* p, TallyPtr* out)
+/* The copies of pointers past the two a place holds (tally_read.h), in the
+ * order met: written only by the mount's reads of the Tally, with the door
+ * shut, and read by any reader of a leaf afterwards. */
+static uint64_t* s_copies;
+static uint32_t  s_copies_count;
+static uint32_t  s_copies_cap;
+
+uint64_t TallyPtrBlock(const TallyPtr* p, uint32_t k)
 {
-    uint32_t at = 0;
-    out->seq    = p->seq;
-    out->sheets = p->sheets;
-    out->copies = p->copies > TALLY_COPIES_TRIED ? TALLY_COPIES_TRIED : (uint32_t)p->copies;
-    for (uint32_t k = 0; k < out->copies; k++)
-        at += BookVarintGet(p->blocks + at, p->blocks_bytes - at, &out->block[k]);
-    if (p->copies > TALLY_COPIES_TRIED)
-        kprintf("[TagFS] a node of seq %llu names %llu copies of itself, and this kernel tries the "
-                "first %u\n", (unsigned long long)p->seq, (unsigned long long)p->copies,
-                TALLY_COPIES_TRIED);
+    return k < TALLY_COPIES_HELD ? p->block[k] : s_copies[p->more + (k - TALLY_COPIES_HELD)];
 }
 
-void TallyRootPlace(const SpineRoot* root, TallyPlace* out)
+/* Room in the list for `n` copies more: false when the heap will not give it. */
+static bool TallyCopiesRoom(uint64_t n)
+{
+    if (s_copies_count + n <= s_copies_cap)
+        return true;
+    if (n > UINT32_MAX - s_copies_count)
+        return false;
+    uint64_t  want = s_copies_count + n;
+    uint64_t  cap  = s_copies_cap ? s_copies_cap : 8u;
+    while (cap < want)
+        cap *= 2u;
+    if (cap > UINT32_MAX)
+        cap = want;
+    uint64_t* more = kmalloc(sizeof(uint64_t) * cap);
+    if (!more)
+        return false;
+    if (s_copies_count)
+        memcpy(more, s_copies, sizeof(uint64_t) * s_copies_count);
+    kfree(s_copies);
+    s_copies     = more;
+    s_copies_cap = (uint32_t)cap;
+    return true;
+}
+
+/* A pointer as numbers, every copy taken in its order (volume_book.h): the
+ * first two into the place, the rest into the list. ERR_NO_MEMORY when the
+ * list has no room for them. */
+static error_t TallyPtrOf(const BookPtr* p, TallyPtr* out)
+{
+    uint32_t at = 0;
+    memset(out, 0, sizeof(*out));
+    out->seq    = p->seq;
+    out->sheets = p->sheets;
+    out->copies = (uint32_t)p->copies;        /* BookPtrGet: no more than the bytes they take */
+    if (p->copies > TALLY_COPIES_HELD) {
+        if (!TallyCopiesRoom(p->copies - TALLY_COPIES_HELD))
+            return ERR_NO_MEMORY;
+        out->more = s_copies_count;
+    }
+    for (uint32_t k = 0; k < out->copies; k++) {
+        uint64_t block = 0;
+        at += BookVarintGet(p->blocks + at, p->blocks_bytes - at, &block);
+        if (k < TALLY_COPIES_HELD)
+            out->block[k] = block;
+        else
+            s_copies[s_copies_count++] = block;
+    }
+    return OK;
+}
+
+error_t TallyRootPlace(const SpineRoot* root, TallyPlace* out)
 {
     memset(out, 0, sizeof(*out));
-    TallyPtrOf(&root->ptr, &out->ptr);
     out->level = root->level;
     out->count = root->items;
+    return TallyPtrOf(&root->ptr, &out->ptr);
 }
 
 static int TallyKeyCmp(TallyKey a, TallyKey b)
@@ -158,12 +203,24 @@ static error_t TallyNodeParse(const TallyPlace* p, TallyNode* n, char* why, size
     return OK;
 }
 
-/* What the copies of a node that did not hold said, each in its own words,
- * for the line that names them and for the refusal of a root. */
+/* What the copies of a node that did not hold said, each of the first
+ * TALLY_COPIES_SAID in its own words, for the lines that name them and for
+ * the refusal of a root — a pointer may name any number of copies (§16.2
+ * п.17), so the ones past them are said by their count alone: a line a copy
+ * would be a line for every byte a damaged or foreign pointer spends, said at
+ * every mount, past the owner's bound for a list said at mount (09-27). */
+#define TALLY_COPIES_SAID  4u
+
 typedef struct {
     uint32_t failed;
-    char     why[TALLY_COPIES_TRIED][112];
+    char     why[TALLY_COPIES_SAID + 1u][112];   /* the last, where each copy past them is judged */
 } TallyCopiesSaid;
+
+/* How many of the copies that did not hold are named one by one. */
+static uint32_t TallyCopiesNamed(const TallyCopiesSaid* said)
+{
+    return said->failed < TALLY_COPIES_SAID ? said->failed : TALLY_COPIES_SAID;
+}
 
 /*
  * The node at place `p` from the first of its copies that holds — a whole
@@ -177,13 +234,14 @@ static error_t TallyNodeRead(const TallyPlace* p, TallyNode* n, TallyCopiesSaid*
     uint64_t end = tagfs_get_state()->block_end;
     memset(said, 0, sizeof(*said));
     for (uint32_t k = 0; k < p->ptr.copies; k++) {
-        char*   why = said->why[said->failed];
-        error_t rc  = OK;
+        char*    why   = said->why[said->failed < TALLY_COPIES_SAID ? said->failed : TALLY_COPIES_SAID];
+        uint64_t block = TallyPtrBlock(&p->ptr, k);
+        error_t  rc    = OK;
         memset(n, 0, sizeof(*n));
-        if (p->ptr.block[k] >= end || p->ptr.sheets > end - p->ptr.block[k]) {
+        if (block >= end || p->ptr.sheets > end - block) {
             ksnprintf(why, sizeof(said->why[0]), "it names blocks past the volume's end");
         } else {
-            rc = BookUnitRead(p->ptr.block[k] * VOLUME_BLOCK_SECTORS,
+            rc = BookUnitRead(block * VOLUME_BLOCK_SECTORS,
                               (uint32_t)(p->ptr.sheets * VOLUME_BLOCK_SECTORS), BOOK_UNIT_SHEET,
                               p->ptr.seq, &n->unit);
             if (rc == OK && !n->unit.whole)
@@ -199,13 +257,17 @@ static error_t TallyNodeRead(const TallyPlace* p, TallyNode* n, TallyCopiesSaid*
     return OK;
 }
 
-/* "copy 1: why; copy 2: why", as a refusal names a root that will not read. */
+/* "copy 1: why; copy 2: why", as a refusal names a root that will not read —
+ * and the copies past the ones named, by their count. */
 static void TallyCopiesWords(const TallyCopiesSaid* said, char* out, size_t room)
 {
-    size_t at = 0;
+    uint32_t named = TallyCopiesNamed(said);
+    size_t   at    = 0;
     out[0] = '\0';
-    for (uint32_t k = 0; k < said->failed && at + 1u < room; k++)
+    for (uint32_t k = 0; k < named && at + 1u < room; k++)
         at += ksnprintf(out + at, room - at, "%scopy %u: %s", k ? "; " : "", k + 1u, said->why[k]);
+    if (said->failed > named && at + 1u < room)
+        ksnprintf(out + at, room - at, "; and %u more copies", said->failed - named);
 }
 
 /* The blocks of a node's copies, "a/b", as its lines name it. */
@@ -214,7 +276,7 @@ static void TallyBlocksSay(const TallyPtr* p, char* out, size_t room)
     size_t at = 0;
     out[0] = '\0';
     for (uint32_t k = 0; k < p->copies && at + 1u < room; k++)
-        at += ksnprintf(out + at, room - at, "%s%llu", k ? "/" : "", (unsigned long long)p->block[k]);
+        at += ksnprintf(out + at, room - at, "%s%llu", k ? "/" : "", (unsigned long long)TallyPtrBlock(p, k));
 }
 
 /* A node in hand and what its copies said, in the heap: a walk reads them on
@@ -223,7 +285,7 @@ static void TallyBlocksSay(const TallyPtr* p, char* out, size_t room)
 typedef struct {
     TallyNode       node;
     TallyCopiesSaid said;
-    char            words[TALLY_COPIES_TRIED * 120u];   /* a line about the node, made here */
+    char            words[TALLY_COPIES_SAID * 120u];   /* a line about the node, made here */
 } TallyReading;
 
 error_t TallyRootReads(uint64_t tree, const SpineRoot* root, char* why, size_t room)
@@ -232,8 +294,10 @@ error_t TallyRootReads(uint64_t tree, const SpineRoot* root, char* why, size_t r
     TallyReading* r = kmalloc(sizeof(TallyReading));
     if (!r)
         return ERR_NO_MEMORY;
-    TallyRootPlace(root, &p);
-    error_t rc = TallyNodeRead(&p, &r->node, &r->said);
+    memset(&r->node, 0, sizeof(r->node));
+    error_t rc = TallyRootPlace(root, &p);
+    if (rc == OK)
+        rc = TallyNodeRead(&p, &r->node, &r->said);
     if (rc == OK && !r->node.unit.whole) {
         TallyCopiesWords(&r->said, why, room);
         rc = ERR_TAGFS_CORRUPTED;
@@ -344,10 +408,15 @@ static void TallyNodeSaid(const TallySink* sink, uint64_t tree, const TallyPlace
 {
     char words[224], blocks[96];
     TallyBlocksSay(&p->ptr, blocks, sizeof(blocks));
-    for (uint32_t k = 0; k < r->said.failed; k++)
+    uint32_t one_by_one = TallyCopiesNamed(&r->said);
+    for (uint32_t k = 0; k < one_by_one; k++)
         kprintf("[TagFS] the %s node of level %llu at blocks %s: copy %u does not hold — %s; copy %u is "
                 "read, and the next Tally writes the node again\n", TallyTreeName(tree),
                 (unsigned long long)p->level, blocks, k + 1u, r->said.why[k], r->said.failed + 1u);
+    if (r->said.failed > one_by_one)
+        kprintf("[TagFS] the %s node of level %llu at blocks %s: and %u more of its copies do not hold; copy %u "
+                "is read, and the next Tally writes the node again\n", TallyTreeName(tree),
+                (unsigned long long)p->level, blocks, r->said.failed - one_by_one, r->said.failed + 1u);
     if (sink->mended)
         *sink->mended += r->said.failed;
     if (r->node.head_longer) {
@@ -389,9 +458,10 @@ static error_t TallyLeafItems(uint64_t tree, const TallyPlace* p, const TallyRea
 /* An inner item's child, at the range [its separator, the parent's end) —
  * the next separator closes it once it is read. A pointer that does not read
  * leaves the child with no copies: a rotten range the walk hands on when it
- * comes to it, in its turn among the keys. True when the pointer read. */
-static bool TallyKid(uint64_t tree, const TallyPlace* p, TallyKey key, const uint8_t* b, uint32_t len,
-                     const TallySink* sink, TallyPlace* kid)
+ * comes to it, in its turn among the keys. OK with *read when the pointer
+ * read; ERR_NO_MEMORY for no room for its copies past two. */
+static error_t TallyKid(uint64_t tree, const TallyPlace* p, TallyKey key, const uint8_t* b, uint32_t len,
+                        const TallySink* sink, TallyPlace* kid, bool* read)
 {
     BookPtr  ptr;
     uint64_t count = 0;
@@ -403,8 +473,9 @@ static bool TallyKid(uint64_t tree, const TallyPlace* p, TallyKey key, const uin
     kid->has_lo = true;
     kid->hi     = p->hi;
     kid->has_hi = p->has_hi;
-    if (got == TALLY_BODY_BROKEN)
-        return false;
+    *read       = got != TALLY_BODY_BROKEN;
+    if (!*read)
+        return OK;
     if (got == TALLY_BODY_LONGER && sink->said) {
         char     words[160];
         BookPtr  again;
@@ -414,9 +485,8 @@ static bool TallyKid(uint64_t tree, const TallyPlace* p, TallyKey key, const uin
                   "written by a kernel that knows more", TallyTreeName(tree), len - known);
         TagFSUnderGlass(words);
     }
-    TallyPtrOf(&ptr, &kid->ptr);
     kid->count = count;
-    return true;
+    return TallyPtrOf(&ptr, &kid->ptr);
 }
 
 /*
@@ -443,7 +513,10 @@ static error_t TallyInnerKids(uint64_t tree, const TallyPlace* p, const TallyRea
             st->at[st->n - 1u].hi     = key;
             st->at[st->n - 1u].has_hi = true;
         }
-        if (TallyKid(tree, p, key, s + body, len, sink, &kid))
+        bool read = false;
+        if (TallyKid(tree, p, key, s + body, len, sink, &kid, &read) != OK)
+            return ERR_NO_MEMORY;
+        if (read)
             under += kid.count;
         else
             all = false;
@@ -503,7 +576,8 @@ error_t TallyRead(uint64_t tree, const SpineRoot* root, bool leaves, const Tally
     TallyReading* r  = kmalloc(sizeof(TallyReading));
     error_t       rc = r ? OK : ERR_NO_MEMORY;
 
-    TallyRootPlace(root, &p);
+    if (rc == OK)
+        rc = TallyRootPlace(root, &p);
     if (rc == OK && !TallyPush(&st, &p))
         rc = ERR_NO_MEMORY;
     while (rc == OK && st.n > 0) {
@@ -632,13 +706,13 @@ static void TallyDigestRotSay(uint32_t leaf, const char* why)
     const TallyPlace* p = &s_leaves[leaf].place;
     if (__atomic_exchange_n(&s_leaf_said[leaf], 1u, __ATOMIC_ACQ_REL))
         return;
-    kprintf("[TagFS] the DIGESTS range of blocks [%llu, %s%llu) rots in both copies (%s): those blocks "
+    kprintf("[TagFS] the DIGESTS range of blocks [%llu, %s%llu) rots in every copy (%s): those blocks "
             "read unchecked\n", (unsigned long long)(p->has_lo ? p->lo.k1 : 0), p->has_hi ? "" : "the end, ",
             (unsigned long long)(p->has_hi ? p->hi.k1 : tagfs_get_state()->block_end), why);
 }
 
 /* Leaf `leaf` read off the medium: OK with its stream in *stream — NULL when
- * it does not read in either copy, said — or the refusal: memory's, or the
+ * it does not read in any copy, said — or the refusal: memory's, or the
  * medium's. */
 static error_t TallyDigestLeafRead(uint32_t leaf, uint8_t** stream, uint32_t* room)
 {
@@ -801,6 +875,9 @@ void TallyDigestsLetGo(void)
     s_leaves     = NULL;
     s_leaf_said  = NULL;
     s_leaf_count = s_leaf_cap = 0;
+    kfree(s_copies);
+    s_copies       = NULL;
+    s_copies_count = s_copies_cap = 0;
 #ifdef CONFIG_VOLUME_TESTS
     kfree(s_stand_nodes);
     s_stand_nodes = NULL;

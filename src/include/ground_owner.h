@@ -25,12 +25,15 @@
  * named again in the Deed for the loader.
  *
  * Format v2's: the front of the volume before its data run that no slot
- * takes, the Spine's slots, every node of every Tally a slot names (both
- * copies), the ribbon's Quires, the far copy of the Deed, the blocks held for
- * what rotted (a rotten range's files, locked — their own class, never an
- * orphan, given to no one until an explicit act lets them go), and the ground
- * the ribbon let go, lying fallow until the Quire it was let go in is left
- * behind (M-1).
+ * takes, the Spine's slots, every node of every Tally a slot names (every
+ * copy its pointer names), the ribbon's Quires, the far copy of the Deed, the
+ * blocks held for what rotted (a rotten range's files, locked — their own
+ * class, never an orphan, given to no one until an explicit act lets them
+ * go), and the ground the ribbon let go, lying fallow until the Quire it was
+ * let go in is left behind (M-1). A bookmark's ground (§4.6: the nodes of its
+ * trees, the runs under its Lien) is no owner's here: this kernel does not
+ * read it, so a book whose Tally names a bookmark has its free blocks not
+ * counted at all (book_ground.c).
  *
  * What a snapshot an earlier kernel took kept is no owner's: nothing reads a
  * format-v1 snapshot, so those blocks are orphans (cow.h).
@@ -58,5 +61,17 @@ typedef enum {
 #undef GROUND_OWNER_ID
     GROUND_OWNER_KINDS
 } GroundOwner;
+
+/* An owner by the name its lines say — the census's, and the block map's of
+ * format v2 when a claim meets a block taken already. */
+static inline const char *GroundOwnerName(GroundOwner owner)
+{
+    static const char *const said[GROUND_OWNER_KINDS] = {
+#define GROUND_OWNER_SAID(id, name, exclusive, formats) [id] = name,
+        GROUND_OWNERS(GROUND_OWNER_SAID)
+#undef GROUND_OWNER_SAID
+    };
+    return owner < GROUND_OWNER_KINDS ? said[owner] : "unknown owner";
+}
 
 #endif /* GROUND_OWNER_H */

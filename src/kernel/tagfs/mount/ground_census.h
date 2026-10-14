@@ -33,6 +33,11 @@ void    GroundCensusBegin(void);
  * to it. Memory refused is remembered: the census then decides nothing. */
 void    GroundClaim(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who);
 
+/* The same claim, made by a slot of a format-v2 volume's Spine — a node of the
+ * Tally it names (`who` the node's seq), a Quire its ribbon goes on in (0):
+ * one name two slots give alike is one owner (GroundCensusBook). */
+void    GroundClaimBySlot(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t slot);
+
 /* The claims against the medium's map, a window at a time: the orphans and the
  * missing named — every orphan run handed to `orphan` when it is given — the
  * missing taken again in memory for the next cycle to write, the free count
@@ -48,9 +53,23 @@ error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out);
  * finding is a block two owners name — said where they meet, as above. The
  * GROUND_HELD claims are what may be held for what rotted; held is what of
  * them no other owner names — BOOT, which lies over a file by design, aside
- * — and *held their blocks. OK, or ERR_NO_MEMORY with nothing held.
+ * — and *held their blocks.
+ *
+ * A claim is a name — its owner, its `who`, its run, and the slot that gives
+ * it. One name two slots give alike is one owner: an unchanged node two
+ * Tallies name (§2.9), a Quire two ribbons go on in — as many times over as
+ * the slot that gives it most. Any other two that meet are two owners: two
+ * nodes of one Tally on one block, two runs of one file, of two files, a
+ * node and a file (volume-read's census keeps the same rule, bookcensus.py
+ * Named).
+ *
+ * Then, `derive`, every claim is laid into the volume's block map, derived
+ * from them (block_map_derived.h): what none names is free. Not `derive`, no
+ * map is made — the claims are not every owner's, and a map of them would
+ * read free what an owner the census does not see holds. OK; ERR_NO_MEMORY
+ * with nothing held, or the map's refusal — *what says which.
  */
-error_t GroundCensusBook(uint64_t* held);
+error_t GroundCensusBook(uint64_t* held, bool derive, const char** what);
 
 /* Whether a block of [start, start + count) is claimed already by `owner`. */
 bool    GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count);

@@ -2,6 +2,7 @@
 #include "book_unit.h"
 #include "away.h"
 #include "ground_census.h"
+#include "../block_map/block_map_derived.h"
 #include "../file_map/file_map.h"
 #include "../tag_registry/tag_registry.h"
 #include "../use_memory/use_memory.h"
@@ -64,7 +65,8 @@ error_t MountBookGround(uint8_t seat, const DeedCopy* head)
     MountBookLetGo();
     memset(&fs->layout, 0, sizeof(fs->layout));      /* format v1's alone: never filled here */
     memset(&fs->ledger, 0, sizeof(fs->ledger));      /* and its Ledger: only the numbers given next
-                                                      * are kept in it (BookBounds) — never a count
+                                                      * (BookBounds) and the free count its block
+                                                      * map derives are kept in it — never a count
                                                       * of a volume mounted before */
     memcpy(&g_book.frame, frame, sizeof(VolumeFrame));
     g_book.data_end = head->head.tail_sector / VOLUME_BLOCK_SECTORS;
@@ -396,8 +398,14 @@ error_t MountReadBook(const char** what)
     if (rc != OK)
         return rc;
     BookBounds();
-    kprintf("[TagFS] %llu block(s) to the far Deed, %llu files — free ground is not yet counted on a "
-            "book\n", (unsigned long long)g_book.data_end, (unsigned long long)g_book.files);
+    if (g_book.bookmarked)
+        kprintf("[TagFS] %llu data blocks, free not counted, %llu files — a Tally of the book names a bookmark, "
+                "whose ground this kernel does not read: no block is counted free, and none is given\n",
+                (unsigned long long)(g_book.data_end - g_book.frame.data_block), (unsigned long long)g_book.files);
+    else
+        kprintf("[TagFS] %llu data blocks, %llu free, %llu files\n",
+                (unsigned long long)(g_book.data_end - g_book.frame.data_block),
+                (unsigned long long)tagfs_get_state()->ledger.free_blocks, (unsigned long long)g_book.files);
     return OK;
 }
 
@@ -448,6 +456,7 @@ void MountBookLetGo(void)
     kfree(g_book.rot);
     kfree(g_book.locked);
     TallyDigestsLetGo();
+    BlockMapDerivedLetGo();
     memset(&g_book, 0, sizeof(g_book));
 }
 

@@ -18,18 +18,23 @@
 # apart from the kernel's — says in numbers what the kernel's lines must say:
 # refused and in which words, or mounted on which slot with how many files,
 # which locked by fid, which ranges rotten, which copies read in the other's
-# place, how many blocks held, how many shapes and verdicts said, which block
-# two owners name, and the numbers given next.
+# place — the first few of a node one by one, the rest by their count — how
+# many blocks held, how many shapes and verdicts said, which runs two owners
+# name and how long, the numbers given next, and how many blocks of its data
+# run its block map derives free, or that it counts none where a Tally names a
+# bookmark, whose ground neither reader derives.
 # ---------------------------------------------------------------------------
 
 # Every landing of volume-read's book self-test that plants something in the
 # Spine or the Tally the kernel reads — its slots, its trees' nodes and their
-# copies, a file's header and its Parcels, the FRAME — and two that hold the
-# Spine's other slots to the census; the landings of the ribbon past the Tally
+# copies (five of them, twelve, and three), a rotten node's ground under the
+# ribbon's next Quire whole and in part, a file's header and its Parcels, two
+# owners of one kind on one block, the FRAME — and two that hold the Spine's other
+# slots to the census; the landings of the ribbon past the Tally
 # need only one here (B23): this kernel turns every such book away in the same
 # words.
 CENSUS_BOOK_LANDINGS="B0 B1 B2 B3 B4 B4p B5 B6 B6b B7 B7b B7c B8 B9 B9b B12 B13 B25 B34 B35 B36 B37 B38 B38b
-B39 B40 B41 B42 B42b B23"
+B38c B39 B40 B41 B42 B42b B43 B43b B43c B44 B45 B23"
 
 # census_book_judge NAME — the prediction against the kernel's own lines, one
 # "ok|bad <sentence>" line per assertion into $SCRATCH/census.NAME.verdict.
@@ -66,7 +71,7 @@ say(glass == k["glass"], "it gives %u reason(s) the volume may only be read; the
 locked = sorted(int(f) for f in re.findall(r"^\[TagFS\] fid (\d+) is locked: ", log, re.M))
 say(locked == k["locked"], "it locks fid(s) %s by name; the census predicted %s" % (locked, k["locked"]))
 rotten = re.findall(r"^\[TagFS\] (?:rotten range fid \[[^)]*\): (\d+) file\(s\) locked — the FILES|the (\w+) range)"
-                    r"[^\n]*rots in both copies", log, re.M)
+                    r"[^\n]*rots in every copy", log, re.M)
 have = [("FILES" if n else tree) for n, tree in rotten]
 say(have == [r["tree"] for r in k["rotten"]], "it says rotten range(s) of %s; the census predicted %s"
     % (have or "none", [r["tree"] for r in k["rotten"]] or "none"))
@@ -74,8 +79,13 @@ files = [int(n) for n, tree in rotten if n]
 say(files == [r["count"] for r in k["rotten"] if r["tree"] == "FILES"],
     "a rotten FILES range locks %s file(s) by its parent's count; the census predicted %s"
     % (files, [r["count"] for r in k["rotten"] if r["tree"] == "FILES"]))
-mended = count(r"^\[TagFS\] the \w+ node of level \d+ at blocks [0-9/]+: copy \d does not hold")
-say(mended == k["mended"], "it reads %u node(s) off their second copy; the census predicted %u" % (mended, k["mended"]))
+said = count(r"^\[TagFS\] the \w+ node of level \d+ at blocks [0-9/]+: copy \d+ does not hold")
+more = sum(int(n) for n in re.findall(r"^\[TagFS\] the \w+ node of level \d+ at blocks [0-9/]+: and (\d+) more "
+                                      r"of its copies do not hold", log, re.M))
+say(said + more == k["mended"], "it reads past %u copy(ies) that do not hold; the census predicted %u"
+    % (said + more, k["mended"]))
+say(said == k["mended_said"], "it names %u of them one by one, the rest by their count; the census predicted %u"
+    % (said, k["mended_said"]))
 m = re.search(r"^\[TagFS\] (\d+) block\(s\) are held: ", log, re.M)
 held = int(m.group(1)) if m else 0
 say(held == k["held"], "it holds %u block(s); the census predicted %u" % (held, k["held"]))
@@ -85,13 +95,18 @@ torn = count(r"^\[TagFS\] Spine slot \d+ at block \d+ does not hold: ")
 say(torn == k["torn_slots"], "it says %u torn slot(s); the census predicted %u" % (torn, k["torn_slots"]))
 fell = count(r"^\[TagFS\] slot \d+ \(seq \d+\) names a Tally that does not read")
 say(fell == k["fell_back"], "it falls back %u slot(s); the census predicted %u" % (fell, k["fell_back"]))
-double = sorted(int(b) for b in re.findall(r"\[TagFS FSCK\] data block (\d+) is named by [^\n]* at once", log))
-say(double == sorted(k["double"]), "it names block(s) %s twice owned; the census predicted %s"
+double = sorted([int(b), int(n)] for b, n in
+                re.findall(r"\[TagFS FSCK\] data block (\d+) is named by [^\n]* at once, (\d+) block\(s\) from it", log))
+say(double == sorted(k["double"]), "it names run(s) %s [start, blocks] twice owned; the census predicted %s"
     % (double or "none", sorted(k["double"]) or "none"))
 m = re.search(r"^\[TagFS\] the next file id (\d+), tag id (\d+), bookmark (\d+)", log, re.M)
 have = tuple(int(x) for x in m.groups()) if m else None
 want = (k["next_fid"], k["next_tag"], k["next_bookmark"])
 say(have == want, "it gives next file id, tag id and bookmark %s; the census predicted %s" % (have, want))
+m = re.search(r"^\[TagFS\] (\d+) data blocks, (?:(\d+) free|free not counted), (\d+) files", log, re.M)
+have = tuple(None if x is None else int(x) for x in m.groups()) if m else None
+want = (k["data_blocks"], k["free"], k["files"])
+say(have == want, "its block map derives data blocks, free and files %s; the census predicted %s" % (have, want))
 CENSUS_BOOK_EOF
     local rc=$?
     [ $rc = 0 ] && [ -s "$SCRATCH/census.$1.verdict" ] && return 0
@@ -143,8 +158,14 @@ census_book() {
 # book's medium coming back read again; no panic, no mirror defect and no
 # defect of TagFS or Settle said — a door below the glass reached by a road
 # nobody shut, code of format v1 asking for a LAYOUT; BLOCKFAIL refusing as
-# many reads as the tests that arm it refuse on each boot; and the halt
-# saying there was nothing to make durable.
+# many reads as the tests that arm it refuse on each boot; the halt saying
+# there was nothing to make durable; and the block map derived from the
+# owners: a heap refusing it a page refuses the mount once, the mixed windows
+# named, a claim on taken blocks and a release of a free one named as they
+# are inserted — past the bound, counted, said once when the counting begins
+# and the count when the map is let go — and the boot's mount saying the data
+# blocks, free and files volume-read's census predicts of the image booted,
+# every mount after it the same free.
 #
 #   test                                        image   padded   uefi
 #   stand_blockfail_flush_refused                  1        1       1   the flush it asks for
@@ -164,15 +185,22 @@ STAND_BOOK_TESTS="stand_tally_files_read_whole stand_tally_mount_writes_nothing 
 stand_tally_rotten_leaf_locked stand_tally_writes_refused stand_tally_rot_three_paths
 stand_tally_undigested_refused stand_tally_length_asked stand_tally_lower_doors_refused
 stand_tally_medium_returns
-stand_tally_live_without_rows stand_blockfail_two_ranges"
+stand_tally_live_without_rows stand_tally_map_holds stand_tally_map_claim_named
+stand_tally_map_short_of_memory stand_blockfail_two_ranges"
 STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_tally_rot_three_paths: the port.s road stands aside — '
 STAND_BOOK_DEFECT='\[(TagFS|Settle)\] DEFECT'
+STAND_BOOK_MAP_SHORT='^\[TagFS\] this volume is NOT mounted: its block map is short of memory: [1-9][0-9]* mixed window'
+STAND_BOOK_MAP_MET='^\[TagFS FSCK\] the run of 3 block\(s\) from data block [0-9]+ that the tally claims meets 2 taken already'
+STAND_BOOK_MAP_FREED='^\[TagFS FSCK\] the run of 1 block\(s\) from data block [0-9]+ that file [0-9]+ lets go meets 1 free already'
+STAND_BOOK_MAP_PAST='^\[TagFS FSCK\] more claims and releases on the block map meet blocks so already than are named one by one \(32\)'
+STAND_BOOK_MAP_COUNT='^\[TagFS FSCK\] and 10 more claim\(s\) and release\(s\) on the block map met blocks so already'
 
-# stand_book_judge TAG WHAT BLOCKFAILS ASIDE PORT — one boot of a book: ASIDE
-# the one stand_tally test that may stand down there, or empty; PORT "taken"
-# where the seat's reads go through the port, "aside" where they cannot.
+# stand_book_judge TAG WHAT BLOCKFAILS ASIDE PORT IMG — one boot of a book:
+# ASIDE the one stand_tally test that may stand down there, or empty; PORT
+# "taken" where the seat's reads go through the port, "aside" where they
+# cannot; IMG the image booted, whose census volume-read predicts.
 stand_book_judge() {
-    local L="$SCRATCH/serial.$1.log" what=$2 want=$3 aside=$4 port=$5 said got t
+    local L="$SCRATCH/serial.$1.log" what=$2 want=$3 aside=$4 port=$5 img=$6 said got t
     said=$(stand_summary "$L")
     echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed, [0-9]+ skipped, 0 held under a caveat"
     chk $? "stand: $what — the $STAND_RUN tests this tree registers ran on the book, nothing failed (${said:-no summary})"
@@ -214,6 +242,22 @@ stand_book_judge() {
     chk $? "stand: $what — BLOCKFAIL refused $got read(s), as many as the tests that arm it refuse here ($want)"
     grep -aqE "$STAND_BOOK_HALT" "$L"
     chk $? "stand: $what — the halt through bye says the volume was given nothing to make durable"
+    got=$(grep -acE "$STAND_BOOK_MAP_SHORT" "$L")
+    [ "$got" = 1 ]
+    chk $? "stand: $what — a heap refusing the block map its page refuses the mount once, naming the mixed windows ($got: $(grep -aoE 'its block map is short of memory: [^—]*' "$L" | head -1))"
+    grep -aqE "$STAND_BOOK_MAP_MET" "$L" && grep -aqE "$STAND_BOOK_MAP_FREED" "$L"
+    chk $? "stand: $what — a claim on taken blocks and a release of a free one are named on the map's insertion"
+    got=$(grep -acE "$STAND_BOOK_MAP_PAST" "$L")
+    [ "$got" = 1 ] && grep -aqE "$STAND_BOOK_MAP_COUNT" "$L"
+    chk $? "stand: $what — past the 32 named, the rest are said to be counted once, when they begin ($got), and their count (the stand's 2 + 40 less 32) when the map is let go"
+    want=$(python3 tools/volume-read.py "$img" check --json 2>/dev/null | python3 -c 'import json, sys
+k = json.load(sys.stdin)["kernel"]
+print("%s %s %s" % (k["data_blocks"], k["free"], k["files"]))' 2>/dev/null)
+    got=$(grep -aE '^\[TagFS\] [0-9]+ data blocks, [0-9]+ free, [0-9]+ files' "$L" |
+          sed -E 's/^\[TagFS\] ([0-9]+) data blocks, ([0-9]+) free, ([0-9]+) files.*/\1 \2 \3/')
+    [ -n "$want" ] && [ "$(echo "$got" | head -1)" = "$want" ] &&
+        [ "$(echo "$got" | cut -d' ' -f1-2 | sort -u)" = "${want% *}" ]
+    chk $? "stand: $what — the boot's mount derives the data blocks, free and files volume-read's census predicts of the image, and every mount after it the same free — a leaf a test rots locks files, and holds their blocks ($(echo "$got" | sort | uniq -c | tr -s ' \n' ' '); predicted ${want:-nothing})"
 }
 
 # stand_book — the book's three boots (above).
@@ -230,12 +274,12 @@ stand_book() {
     fi
     stand_boot stand_book CORES=4 MEM=4G
     [ $? = 2 ] || stand_book_judge stand_book "the book, BIOS 4c" "$STAND_BOOK_BLOCKFAILS" \
-        stand_tally_rotten_leaf_locked aside
+        stand_tally_rotten_leaf_locked aside build/boxos.img
     if python3 tools/volume-read.py build/boxos.img self-test --emit B4p --out "$img" \
             >"$SCRATCH/stand.book_padded.emit" 2>&1; then
         stand_boot stand_book_padded BOOTDISK="$img" CORES=4 MEM=4G
         [ $? = 2 ] || stand_book_judge stand_book_padded "the padded book, BIOS 4c" \
-            "$STAND_BOOK_PADDED_BLOCKFAILS" "" aside
+            "$STAND_BOOK_PADDED_BLOCKFAILS" "" aside "$img"
     else
         bad "stand: the padded book could not be planted — $(tail -1 "$SCRATCH/stand.book_padded.emit")"
     fi
@@ -243,7 +287,7 @@ stand_book() {
     if build_with_key VOLUME_TESTS=on STRICT=on; then
         stand_boot stand_book_uefi UEFI=on STRICT=on CORES=4 MEM=4G
         [ $? = 2 ] || stand_book_judge stand_book_uefi "the book, UEFI 4c on an AHCI port, STRICT" \
-            "$STAND_BOOK_UEFI_BLOCKFAILS" stand_tally_rotten_leaf_locked taken
+            "$STAND_BOOK_UEFI_BLOCKFAILS" stand_tally_rotten_leaf_locked taken build/boxos.img
     else
         echo "BUILD FAILED (VOLUME_TESTS=on STRICT=on VOLUME_FORMAT=v2) — tail:"; tail -25 "$SCRATCH/build.log"
         bad "stand: the book — VOLUME_TESTS=on STRICT=on VOLUME_FORMAT=v2 does not build"
