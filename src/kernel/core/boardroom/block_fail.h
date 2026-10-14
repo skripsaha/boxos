@@ -105,6 +105,14 @@ bool     BlockFailFlushStrikes(uint8_t seat, uint8_t out_sense[3]);
  * refused read is said and counted. Replaces any plan that was standing. */
 void     BlockFailArmBadSectors(uint8_t seat, uint64_t first_sector, uint64_t sectors);
 
+/* One more run of sectors the medium cannot read, in the bad-sector plan that
+ * stands on `seat` — rot in two places at once, two copies of one node (C19).
+ * The plan is stood again with it, its count from zero. False, and nothing
+ * changed, when no such plan stands for the seat or it holds
+ * BLOCK_FAIL_BAD_RANGES runs already. */
+#define BLOCK_FAIL_BAD_RANGES  4u
+bool     BlockFailAddBadSectors(uint8_t seat, uint64_t first_sector, uint64_t sectors);
+
 /* The read's question: BlockFailStrikes for a read, and in *bad whether its
  * plan answers it as sectors the medium cannot read. */
 bool     BlockFailReadStrikes(uint8_t seat, uint64_t lba, uint32_t count, bool* bad);

@@ -1,3 +1,4 @@
+#include "ata_identify.h"
 #include "klib.h"
 #include "ahci.h"
 #include "ata.h"        /* AtaWriteCacheSaid — the same IDENTIFY words on either road */
@@ -1291,6 +1292,7 @@ static int ahci_port_init(uint8_t port_num) {
             port->physical_sector_size = logical << exponent;
         }
     }
+    port->first_aligned = AtaIdentifyFirstAligned(id, logical, port->physical_sector_size);
 
     port->lba48 = (id[83] & (1u << 10)) != 0;
     if (port->lba48) {

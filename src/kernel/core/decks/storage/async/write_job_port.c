@@ -199,6 +199,8 @@ static error_t wjob_submit(WriteJob *j, bool write, uint64_t block, uint32_t blo
 {
     if (TagFSMediumGone())
         return ERR_DEVICE_NOT_READY;
+    if (write && TagFSIsUnderGlass())
+        return TagFSGlassRefused("the port's write");
 
     uint8_t  seat    = tagfs_get_seat();
     uint64_t lba     = tagfs_block_to_sector(block);
@@ -480,3 +482,25 @@ static void wjob_spare_complete(uint8_t port, uint8_t slot, error_t status, void
     (void)port; (void)slot;
     wjob_answered((WriteJob *)ctx, status, W_SPARE_DONE);
 }
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's knock answered: there is no job behind it to go on. */
+static void wjob_stand_door_answered(uint8_t index, uint8_t slot, error_t status, void *ctx)
+{
+    (void)index;
+    (void)slot;
+    (void)status;
+    (void)ctx;
+}
+
+error_t WriteJobStandWriteDoor(uint64_t block)
+{
+    WriteJob *j = kmalloc(sizeof(WriteJob));
+    if (!j)
+        return ERR_NO_MEMORY;
+    memset(j, 0, sizeof(*j));
+    error_t rc = wjob_submit(j, true, block, 1, 0, wjob_stand_door_answered);
+    kfree(j);
+    return rc;
+}
+#endif

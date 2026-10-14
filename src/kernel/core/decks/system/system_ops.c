@@ -1785,13 +1785,18 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 }
 
 /* SYSTEM_OP_RESOURCES out_crate:
- * [16 bytes volume name][u64 free bytes][u8 volume present][7 bytes padding]
- * [u64 busy TSC ticks][u64 total TSC ticks][16 bytes volume UUID]
- * [u64 total bytes][u64 used bytes].
+ * [16 bytes volume name][u64 free bytes][u8 volume present][u8 free counted]
+ * [6 bytes padding][u64 busy TSC ticks][u64 total TSC ticks][16 bytes volume
+ * UUID][u64 total bytes][u64 used bytes].
  * The name and free count come from the mounted volume's existing Deed and
  * Ledger. The UUID and capacity come from the mounted TagFS state. CPU
  * counters are cumulative, monotonic snapshots; userspace derives a
- * utilization percentage from two snapshots. */
+ * utilization percentage from two snapshots.
+ *
+ * A format-v2 volume keeps no Ledger, and this kernel does not yet count the
+ * free ground of a book (book_mount.c says so at its mount): "free counted"
+ * is 0 and the free and used bytes are 0 — not a number that would read as a
+ * full volume, or as the free count of a volume mounted before it. */
 #define SYSRES_BLOB_SIZE 80
 
 static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -1808,12 +1813,14 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     bool volume_present = false;
     if (tagfs_enter()) {
         TagFSState *fs = tagfs_get_state();
-        uint64_t free_bytes = fs->ledger.free_blocks * (uint64_t)VOLUME_BLOCK_BYTES;
+        bool counted = fs->format != DEED_FORMAT_V2;
+        uint64_t free_bytes = counted ? fs->ledger.free_blocks * (uint64_t)VOLUME_BLOCK_BYTES : 0;
         uint64_t total_bytes = fs->volume_bytes;
         if (free_bytes > total_bytes) free_bytes = total_bytes;
-        uint64_t used_bytes = total_bytes - free_bytes;
+        uint64_t used_bytes = counted ? total_bytes - free_bytes : 0;
         memcpy(blob + 0,  fs->volume_name, sizeof(fs->volume_name));
         memcpy(blob + 16, &free_bytes, sizeof(free_bytes));
+        blob[25] = counted ? 1 : 0;
         volume_present = total_bytes != 0;
         memcpy(blob + 48, fs->uuid, sizeof(fs->uuid));
         memcpy(blob + 64, &total_bytes, sizeof(total_bytes));

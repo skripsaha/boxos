@@ -172,11 +172,14 @@ static inline uint32_t BookSectorSeed(const uint8_t uuid[16], uint64_t vlba)
 }
 
 /*
- * Does this sector hold, at `vlba` of the volume `uuid`? Its sum agrees, and
- * its head is one a writer writes: a known kind, its place inside its unit,
- * a seq above zero, and a lead that is either none or a byte of the payload.
+ * Is this sector's head one a writer writes: a known kind, its place inside
+ * its unit, a seq above zero, and a lead that is either none or a byte of the
+ * payload? The head goes to *head (when it is asked for). Half of whether the
+ * sector holds — its sum is the other half (BookSectorCheck) — asked apart, so
+ * a reader that sums by an instruction of its own holds the head to this one
+ * rule all the same: the kernel's crc32 (crypto.c, KCrc32c).
  */
-static inline int BookSectorCheck(const uint8_t *sector, const uint8_t uuid[16], uint64_t vlba)
+static inline int BookSectorHeadHolds(const uint8_t *sector, BookSectorHead *head)
 {
     BookSectorHead h;
     uint8_t       *to = (uint8_t *)&h;
@@ -185,6 +188,16 @@ static inline int BookSectorCheck(const uint8_t *sector, const uint8_t uuid[16],
     if (h.kind < BOOK_UNIT_STITCH || h.kind > BOOK_UNIT_SLOT) return 0;
     if (h.at >= h.of || h.seq == 0) return 0;
     if (h.lead != 0 && (h.lead < BOOK_HEAD_BYTES || h.lead >= BOOK_SECTOR_BYTES)) return 0;
+    if (head) *head = h;
+    return 1;
+}
+
+/* Does this sector hold, at `vlba` of the volume `uuid`? Its head holds, and
+ * its sum agrees. */
+static inline int BookSectorCheck(const uint8_t *sector, const uint8_t uuid[16], uint64_t vlba)
+{
+    BookSectorHead h;
+    if (!BookSectorHeadHolds(sector, &h)) return 0;
     return h.crc32c == ~BookCrc32cOn(BookSectorSeed(uuid, vlba), sector + 4, BOOK_SECTOR_BYTES - 4u);
 }
 
@@ -277,8 +290,24 @@ static inline int64_t BookUnzigzag(uint64_t z)
  * before it reads one (spec_v2 §2.4: the widths of memory are the kernel's,
  * not the format's) — not this check's, which takes what it is given.
  */
+static inline int BookUnitHeadsAgree(const uint8_t *sectors, uint32_t count, BookSectorHead *head);
+
 static inline int BookUnitCheck(const uint8_t *sectors, uint32_t count, const uint8_t uuid[16],
                                 uint64_t vlba, BookSectorHead *head)
+{
+    if (count == 0) return 0;
+    for (uint32_t at = 0; at < count; at++)
+        if (!BookSectorCheck(sectors + (uint64_t)at * BOOK_SECTOR_BYTES, uuid, vlba + at)) return 0;
+    return BookUnitHeadsAgree(sectors, count, head);
+}
+
+/*
+ * BookUnitCheck's second half, for sectors already found to hold one by one:
+ * do their heads make one unit — of one kind and one seq, an `of` of exactly
+ * `count`, each at its own `at`? The first sector's head to *head (when it is
+ * asked for).
+ */
+static inline int BookUnitHeadsAgree(const uint8_t *sectors, uint32_t count, BookSectorHead *head)
 {
     BookSectorHead first, h;
     uint8_t       *to = (uint8_t *)&h, *keep = (uint8_t *)&first;
@@ -286,7 +315,6 @@ static inline int BookUnitCheck(const uint8_t *sectors, uint32_t count, const ui
     if (count == 0) return 0;
     for (uint32_t at = 0; at < count; at++) {
         const uint8_t *s = sectors + (uint64_t)at * BOOK_SECTOR_BYTES;
-        if (!BookSectorCheck(s, uuid, vlba + at)) return 0;
         for (uint32_t i = 0; i < BOOK_HEAD_BYTES; i++) to[i] = s[i];
         if (at == 0)
             for (uint32_t i = 0; i < BOOK_HEAD_BYTES; i++) keep[i] = to[i];

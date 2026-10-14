@@ -135,6 +135,9 @@ void     MapLayLetGo(void);
  * named again. Name and Forget are called with no TagFS lock held. */
 void     IntegrityRotBegin(uint32_t tag);
 void     IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read);
+/* A block of a format-v2 volume no DIGESTS element names, named as rot is:
+ * said and published once (IntegrityVerify's road on such a volume). */
+void     IntegrityUndigestedName(uint64_t block);
 void     IntegrityRotForget(uint64_t start, uint32_t count);
 void     IntegrityRotEnd(void);
 

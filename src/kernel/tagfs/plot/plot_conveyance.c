@@ -181,7 +181,7 @@ bool PackV1Agrees(const FileRecord *rec, const uint8_t *packed, uint32_t bytes)
     TagFSMetadata v1;
 
     memset(&v1, 0, sizeof(v1));
-    error_t unpacked = UnpackV1(packed, bytes, tagfs_get_state()->layout.data_blocks, &v1, NULL);
+    error_t unpacked = UnpackV1(packed, bytes, TagFSLayout()->data_blocks, &v1, NULL);
     if (unpacked != OK && unpacked != ERR_NO_MEMORY)
         what = "a record format v1 packed that does not read back";
     else if (unpacked != OK || FileRecordFlatten(rec, &flat, &n) != OK)

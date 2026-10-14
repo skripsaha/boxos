@@ -42,6 +42,19 @@ void    GroundClaim(GroundOwner owner, uint64_t start, uint32_t count, uint64_t 
  * taken again, and no orphan is named. */
 error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out);
 
+/*
+ * A format-v2 volume's census, which keeps no bitmap to hold the claims
+ * against (spec_v2 §4.6): every block an owner names is taken, and the only
+ * finding is a block two owners name — said where they meet, as above. The
+ * GROUND_HELD claims are what may be held for what rotted; held is what of
+ * them no other owner names — BOOT, which lies over a file by design, aside
+ * — and *held their blocks. OK, or ERR_NO_MEMORY with nothing held.
+ */
+error_t GroundCensusBook(uint64_t* held);
+
+/* Whether a block of [start, start + count) is claimed already by `owner`. */
+bool    GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count);
+
 /* The claims let go. */
 void    GroundCensusEnd(void);
 

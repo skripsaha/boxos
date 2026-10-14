@@ -487,8 +487,10 @@ error_t TagFS_RunAllTests(TestStats* stats)
         return ERR_NOT_INITIALIZED;
 
     memset(stats, 0, sizeof(*stats));
-    uint32_t skipped_writers = 0;
-    bool     path_said       = false;
+    uint32_t   skipped_writers = 0;
+    uint32_t   aside_format    = 0;
+    bool       path_said       = false;
+    DeedFormat volume          = tagfs_get_state()->format;
 
     /* No cycle begins on its own while the tests run: each meets the cycles
      * it drives, and a fault it arms is met by one of them (settle.h). */
@@ -498,6 +500,16 @@ error_t TagFS_RunAllTests(TestStats* stats)
         for (uint32_t i = 0; i < suite->count; i++) {
             const TestCase* test = &suite->tests[i];
             stats->total_tests++;
+
+            /* A test written for the other format, or one that writes on a
+             * book this kernel does not write, stands aside — counted. */
+            if ((test->format != DEED_FORMAT_NONE && test->format != volume) ||
+                (volume == DEED_FORMAT_V2 && test->format == DEED_FORMAT_NONE &&
+                 test->reach == TEST_WRITES_TO_VOLUME)) {
+                aside_format++;
+                stats->total_skipped++;
+                continue;
+            }
 
             /*
              * A test that writes goes nowhere near a volume somebody is using.
@@ -526,6 +538,12 @@ error_t TagFS_RunAllTests(TestStats* stats)
 
     /* Said with kprintf: "37 run, 35 passed" tells nobody which 37, and a
      * suite that quietly shrank is how a test stops covering anything. */
+    if (aside_format > 0)
+        kprintf("[TESTS] %u test(s) stood aside: this volume is format %s — %s\n", aside_format,
+                volume == DEED_FORMAT_V2 ? "v2" : "v1",
+                volume == DEED_FORMAT_V2 ? "they are written for format v1's records, or write to the "
+                                           "volume, and this kernel reads a book and writes none of it"
+                                         : "they are written for a format-v2 book");
     if (skipped_writers > 0) {
         kprintf("[TESTS] %u test(s) that write to the volume were not run — "
                 "this volume belongs to whoever is using this machine (build "

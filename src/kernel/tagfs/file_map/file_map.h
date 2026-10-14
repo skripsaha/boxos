@@ -129,10 +129,10 @@ void     FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was);
  * it does with each file may change the map.
  *
  * A live file is one memory holds a record of, whatever format the volume is
- * in. A volume of format v1 — every volume this kernel mounts until it reads
- * format v2's book — also names each live file in its table, so there a row
- * with no record, or a record with no row, is a defect of the map: said, and
- * stopped at in a STRICT kernel. */
+ * in. A volume of format v1 also names each live file in its table, so there
+ * a row with no record, or a record with no row, is a defect of the map:
+ * said, and stopped at in a STRICT kernel. A format-v2 book keeps no table,
+ * and its files have records and no rows. */
 uint32_t FileMapRows(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
 
 /* Up to `room` file ids from `from` on that the map holds at all — a row, a

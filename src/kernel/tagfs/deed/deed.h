@@ -132,11 +132,12 @@ DeedFormat DeedFormatOf(const DeedCopy *copy);
 
 /*
  * The mount's answer to a Deed of `format`, said out loud: OK for format v1
- * whose LAYOUT this kernel reads whole; for anything else the refusal, before
- * the volume is touched — ERR_UNSUPPORTED for a format-v2 volume that holds
- * (its book is one this kernel cannot read), ERR_TAGFS_CORRUPTED for a FRAME
- * that does not hold or a block this kernel does not speak, a Deed claiming
- * both formats, or one that says where nothing is.
+ * whose LAYOUT this kernel reads whole, and for format v2 whose FRAME holds
+ * (a FRAME longer than this kernel's, or a ring of other than three slots,
+ * a line); for anything else the refusal, before the volume is touched —
+ * ERR_TAGFS_CORRUPTED for a FRAME that does not hold or a block this kernel
+ * does not speak, a Deed claiming both formats, or one that says where
+ * nothing is.
  */
 error_t DeedFormatRefused(uint8_t seat, const DeedCopy *copy, DeedFormat format);
 

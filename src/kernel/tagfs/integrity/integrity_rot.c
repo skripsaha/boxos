@@ -164,15 +164,12 @@ void IntegrityRotBegin(uint32_t tag)
     kfree(old);
 }
 
-void IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read)
+/* A block whose read is refused, published on the integrity tag. The event
+ * carries the u32 block its readers are built for (box/touch.h — the
+ * programs' side widens with wave 3): a block past one is never published cut
+ * to another block's number; the line names it whole. */
+static void RotPublish(uint64_t block)
 {
-    RotNaming naming = RotRemember(block);
-    if (naming == ROT_KNOWN)
-        return;
-
-    /* The event carries the u32 block its readers are built for (box/touch.h —
-     * the programs' side widens with wave 3): a block past one is never
-     * published cut to another block's number; the line below names it whole. */
     uint32_t tag = __atomic_load_n(&g_rot_tag, __ATOMIC_RELAXED);
     if (tag != TAGFS_INVALID_TAG_ID && block <= UINT32_MAX) {
         struct __attribute__((packed)) {
@@ -182,11 +179,21 @@ void IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read)
         } ev = { (uint32_t)block, 3, { 0, 0, 0 } };
         TouchPublishId(tag, &ev, sizeof(ev), 0, TOUCH_FLAG_TAGFS);
     }
+}
+
+void IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read)
+{
+    RotNaming naming = RotRemember(block);
+    if (naming == ROT_KNOWN)
+        return;
+    RotPublish(block);
     if (naming != ROT_NEW)
         return;
 
+    /* Format v2 writes no block in place (spec_v2 §8.1): a closed block that
+     * does not match is rot, whatever the last stop was. */
     uint64_t cycle = 0;
-    if (MountStopWasClean(&cycle))
+    if (tagfs_get_state()->format == DEED_FORMAT_V2 || MountStopWasClean(&cycle))
         kprintf("[Integrity] block %llu does not hold what was written to it (digest %016llx, "
                 "read %016llx) — rot; a read of it is refused ERR_CHECKSUM, and it is "
                 "published on the integrity tag\n", (unsigned long long)block,
@@ -198,6 +205,18 @@ void IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read)
                 "v1 cannot tell which; a read of it is refused ERR_CHECKSUM, and it is "
                 "published on the integrity tag\n", (unsigned long long)block,
                 (unsigned long long)stored, (unsigned long long)read, (unsigned long long)cycle);
+}
+
+void IntegrityUndigestedName(uint64_t block)
+{
+    RotNaming naming = RotRemember(block);
+    if (naming == ROT_KNOWN)
+        return;
+    RotPublish(block);
+    if (naming == ROT_NEW)
+        kprintf("[Integrity] block %llu carries no digest in its volume's Tally, and every block of "
+                "format v2 is written with one — a read of it is refused ERR_CHECKSUM, and it is "
+                "published on the integrity tag\n", (unsigned long long)block);
 }
 
 /* A block written again, or given back: what it holds now has a digest of its

@@ -307,6 +307,29 @@ error_t RegistryAdopt(TagRegistry* reg, uint32_t tag_id, uint8_t flags,
     return RegistryEnter(reg, &tag, tag_id, flags);
 }
 
+/*
+ * ‼ A FORMAT-v2 BOOK'S TAG IS TAKEN WITH A VERDICT, NEVER DROPPED. The v1 load
+ * above lets a record whose text or id another already holds go without a
+ * word — its chain is the registry, and a later record is the newer word. A
+ * book's TAGS name each id once and each text once; one whose text is
+ * another id's, or whose id another text holds, is a book this kernel cannot
+ * hold as it is, and the caller is told so (ERR_ALREADY_EXISTS), so the volume
+ * stands under glass with the reason rather than with one of the two names
+ * quietly lost. The width is the caller's to have judged (tag_spelling.h).
+ */
+error_t RegistryCoin(TagRegistry* reg, uint32_t tag_id, uint8_t flags, const uint8_t* key_at,
+                     uint8_t key_len, const uint8_t* value_at, uint16_t value_len)
+{
+    TagSpelling tag = { (const char*)key_at, (flags & TAGFS_TAG_FLAG_HAS_VALUE) ? (const char*)value_at : NULL,
+                        key_len, value_len };
+    if (tag_id > reg->id_most)
+        return ERR_INVALID_ARGUMENT;
+    if (lookup_unlocked(reg, &tag) != TAGFS_INVALID_TAG_ID ||
+        RegistryById(reg->by_id, reg->bucket_count, tag_id))
+        return ERR_ALREADY_EXISTS;
+    return RegistryEnter(reg, &tag, tag_id, flags);
+}
+
 /* The tag's id, a new one under next_id when the registry has none. Under
  * reg->lock; the caller has judged the widths. */
 static error_t intern_unlocked(TagRegistry* reg, const TagSpelling* tag, uint32_t* out_id) {
@@ -773,6 +796,9 @@ uint64_t tag_registry_written_need(TagRegistry* reg) {
  */
 error_t TagRegistryFlushFor(TagRegistry* reg, uint32_t id) {
     if (!reg) return ERR_NULL_POINTER;
+    /* The registry's tail is format v1's, and a volume under glass takes no
+     * write: a tag it does not hold yet is one no record of it may wear. */
+    if (TagFSIsUnderGlass()) return ERR_TAGFS_READ_ONLY;
 
     TagFSLockTake(&reg->lock);
     bool held = id < reg->written_next;

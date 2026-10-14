@@ -462,6 +462,7 @@ int system_resources(system_resources_t *out)
     memcpy(out->volume_name, blob + 0, 16);
     memcpy(&out->volume_free_bytes, blob + 16, 8);
     out->volume_present = blob[24];
+    out->volume_free_counted = blob[25];
     memset(out->_volume_pad, 0, sizeof(out->_volume_pad));
     memcpy(&out->cpu_busy_tsc,      blob + 32, 8);
     memcpy(&out->cpu_total_tsc,     blob + 40, 8);

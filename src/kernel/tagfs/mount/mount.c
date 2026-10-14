@@ -12,6 +12,7 @@
 #include "../cow/cow.h"
 #include "../use_memory/use_memory.h"
 #include "../glean/glean.h"
+#include "../scribe/scribe.h"
 
 /*
  * The mount's read of the volume (mount.h). Everything here runs with the
@@ -44,7 +45,7 @@ bool MountStopWasClean(uint64_t* out_cycle)
  * the medium is counted. This is the seam. */
 static uint32_t MountDataBlock(uint32_t volume_block)
 {
-    return volume_block - tagfs_get_state()->layout.data_block;
+    return volume_block - TagFSLayout()->data_block;
 }
 
 // ----------------------------------------------------------------------------
@@ -354,7 +355,7 @@ static void MountClaimBoot(void)
 {
     TagFSState*       fs   = tagfs_get_state();
     const VolumeBoot* boot = &fs->boot;
-    if (boot->kernel_blocks && boot->kernel_block >= fs->layout.data_block)
+    if (boot->kernel_blocks && boot->kernel_block >= TagFSLayout()->data_block)
         GroundClaim(GROUND_BOOT, MountDataBlock(boot->kernel_block), boot->kernel_blocks, 0);
 }
 
@@ -376,7 +377,7 @@ static error_t MountCensus(const char** what)
 
     TagRegistryClaimGround(fs->registry);
     FileTableClaimGround();
-    PoolClaimGround(MountDataBlock(fs->layout.metadata_pool_block));
+    PoolClaimGround(MountDataBlock(TagFSLayout()->metadata_pool_block));
     GleanClaimGround();
     IntegrityClaimGround();
     CowClaimGround(fs->ledger.cow_manifest_block);
@@ -442,7 +443,7 @@ static error_t MountRegistry(const MountSeals* seals, const char** what)
 #ifdef CONFIG_VOLUME_TESTS
     TagFSStandMountRegistryLoads();
 #endif
-    error_t rc = tag_registry_load(fs->registry, MountDataBlock(fs->layout.tag_registry_block),
+    error_t rc = tag_registry_load(fs->registry, MountDataBlock(TagFSLayout()->tag_registry_block),
                                    seals->has[0] ? &seals->mark[0] : NULL,
                                    seals->has[1] ? &seals->mark[1] : NULL);
     if (rc == ERR_NO_MEMORY) {
@@ -462,7 +463,7 @@ static error_t MountPool(const MountSeals* seals, PoolMountOutcome* pool, const 
     TagFSState*  fs  = tagfs_get_state();
     PoolMountAsk ask = {
         .seal = { seals->has[0] ? &seals->mark[0] : NULL, seals->has[1] ? &seals->mark[1] : NULL },
-        .head = MountDataBlock(fs->layout.metadata_pool_block),
+        .head = MountDataBlock(TagFSLayout()->metadata_pool_block),
     };
     error_t rc = PoolMount(&ask, pool);
     if (rc != OK) {
@@ -505,16 +506,15 @@ static error_t MountPool(const MountSeals* seals, PoolMountOutcome* pool, const 
  * small for a bit per data block was never made by mkfs — a damaged Deed. */
 static error_t MountBlockMap(const char** what)
 {
-    TagFSState* fs      = tagfs_get_state();
-    uint32_t    region  = fs->layout.block_bitmap_blocks * TAGFS_BLOCK_SECTORS;
-    uint32_t    sectors = (fs->layout.data_blocks + TAGFS_SECTOR_SIZE * 8 - 1) / (TAGFS_SECTOR_SIZE * 8);
+    uint32_t    region  = TagFSLayout()->block_bitmap_blocks * TAGFS_BLOCK_SECTORS;
+    uint32_t    sectors = (TagFSLayout()->data_blocks + TAGFS_SECTOR_SIZE * 8 - 1) / (TAGFS_SECTOR_SIZE * 8);
     if (sectors > region) {
         *what = "its block bitmap region is too small to hold a bit for every block of its "
                 "data run";
         return ERR_TAGFS_CORRUPTED;
     }
-    if (BlockMapMount(fs->layout.data_blocks,
-                      (uint64_t)fs->layout.block_bitmap_block * TAGFS_BLOCK_SECTORS) != OK) {
+    if (BlockMapMount(TagFSLayout()->data_blocks,
+                      (uint64_t)TagFSLayout()->block_bitmap_block * TAGFS_BLOCK_SECTORS) != OK) {
         *what = "there is no memory for its block map";
         return ERR_NO_MEMORY;
     }
@@ -553,7 +553,7 @@ error_t MountReadVolume(const char** what)
         .torn_end     = pool.torn_end,
         .issued_below = fs->ledger.next_file_id,
     };
-    rc = file_table_init(MountDataBlock(fs->layout.file_table_block), files.sealed);
+    rc = file_table_init(MountDataBlock(TagFSLayout()->file_table_block), files.sealed);
     if (rc == OK)
         MountQuitclaimedRows(&pool);
     kfree(pool.gone);
@@ -590,11 +590,31 @@ error_t MountReadVolume(const char** what)
     AwayNumbersKnown(fs->uuid, &known_file, &known_tag);
     MountFidBoundary(files.top_fid, pool.top_fid, known_file);
     MountTagBoundary(pool.top_tag, known_tag);
-    return MountCensus(what);
+    rc = MountCensus(what);
+    if (rc != OK)
+        return rc;
+
+    /* Said HERE and not beside the Ledger, because until the bitmap has been
+     * read there is nothing to say: the Ledger's own claim is a number the
+     * mount is about to check. */
+    kprintf("[TagFS] %u data blocks, %llu free, %llu files\n", TagFSLayout()->data_blocks,
+            (unsigned long long)fs->ledger.free_blocks, (unsigned long long)fs->ledger.total_files);
+    return OK;
 }
 
 void MountAfterDoor(void)
 {
+    if (tagfs_get_state()->format != DEED_FORMAT_V1)
+        return;
+
+    // Data-block integrity map (verify-on-read). After initialized=true so a
+    // map laid by the cycles can take its run from the block allocator.
+    error_t integrity = IntegrityInit();
+    if (integrity == OK)
+        kprintf("[TagFS] data-integrity verify-on-read active\n");
+    else if (integrity != ERR_WOULD_BLOCK)
+        kprintf("[TagFS] integrity map unavailable - continuing without verify-on-read\n");
+
     uint32_t* fids  = s_last_span;
     uint32_t  count = s_last_span_count;
     s_last_span       = NULL;
@@ -623,4 +643,51 @@ void MountAfterDoor(void)
                 "one of them wrote in place after it may have landed without its digest, or "
                 "its digest without it, and neither is rot\n",
                 (unsigned long long)s_unclean_cycle, reset);
+}
+
+void MountPromise(void)
+{
+    /*
+     * A format-v2 volume is under glass on this kernel (book_mount.h): it is
+     * read and nothing of it is written, so it promises only that — and that
+     * a medium that leaves and comes back is read again from its book.
+     */
+    if (tagfs_get_state()->format == DEED_FORMAT_V2) {
+        kprintf("[TagFS] what this volume promises: it is read as its book holds it and nothing of it is "
+                "written — a change is refused (ERR_TAGFS_READ_ONLY); a medium that leaves and comes back "
+                "is read again from its book\n");
+        return;
+    }
+
+    /*
+     * ‼ AND WHAT THAT MOUNT PROMISES, SAID ONCE, IN PLAIN WORDS — the difference
+     * between before and after an anchor included (RT-06/07): until then a
+     * change lives in the last cycle's open tail, which the next cycle writes
+     * again in place, and a flash page torn by the power can take it; an
+     * anchored change lies in a closed block nothing writes again. A promise
+     * nobody is told is not a promise, and the document is not on the screen
+     * when the power goes.
+     */
+    kprintf("[TagFS] what this volume promises: a file's content reaches the medium as it "
+            "is written, and its name, size and extents follow on their own within %llu ms "
+            "(a Settle cycle, settle.h); until `anchor` a change stands as the last cycle "
+            "left it, but for a flash page torn by the power; after `anchor`, for good\n",
+            (unsigned long long)(SETTLE_WINDOW_US / 1000u));
+
+    /* The Spares a delete stands on, laid by now so a volume with no free
+     * block left can still give a file up (meta_pool.h, SPARE_RESERVE). A
+     * volume with no room for them says so, and deletes while its tail lasts.
+     * Their stamps are writes, and a write no flush kept leaves the book of a
+     * volume nobody has written to in doubt (mount/away.h): one flush keeps
+     * them, and every write the mount made before them. */
+    error_t spared = PoolSpareRefill(SPARE_RESERVE);
+    if (spared != OK)
+        kprintf("[TagFS] the Spares a delete stands on could not all be laid (error %u) — "
+                "a full volume deletes only while its pool's tail has room\n",
+                (unsigned)spared);
+    error_t kept = VolumeFlushFor(VolumeFlushNeed());
+    if (kept != OK)
+        kprintf("[TagFS] the flush after the mount's own writes was refused (error %u) — "
+                "until a Settle cycle's flush is kept, a medium that leaves and comes "
+                "back is not taken up as it was left\n", (unsigned)kept);
 }

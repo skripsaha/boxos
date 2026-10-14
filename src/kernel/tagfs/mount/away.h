@@ -48,6 +48,7 @@ typedef enum {
     AWAY_UNREAD,        /* no copy of its Ledger reads intact */
     AWAY_SEAT_TAKEN,    /* another volume sits in the seat the book was held for */
     AWAY_HALT,          /* the machine is stopping */
+    AWAY_REREAD,        /* a format-v2 volume: a medium that leaves and comes back is read again */
 } AwayVerdict;
 
 /* The medium left, just now latched (TagFSMediumLeft): said once, with the

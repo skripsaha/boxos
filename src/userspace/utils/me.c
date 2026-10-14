@@ -109,8 +109,12 @@ int main(void) {
         char disk_name[17];
         memcpy(disk_name, resources_before.volume_name, 16);
         disk_name[16] = '\0';
-        printf("  Disk:      %s — %s free\n",
-               disk_name[0] ? disk_name : "unnamed volume", disk_free);
+        if (resources_before.volume_free_counted)
+            printf("  Disk:      %s — %s free\n",
+                   disk_name[0] ? disk_name : "unnamed volume", disk_free);
+        else
+            printf("  Disk:      %s — its free ground is not counted\n",
+                   disk_name[0] ? disk_name : "unnamed volume");
     } else {
         printf("  Disk:      unavailable\n");
     }

@@ -555,6 +555,10 @@ typedef struct {
      * and a rewrite for every write that does not cover a whole physical
      * block. Zero when the drive would not say. */
     uint32_t  physical_sector_size;
+    /* The first logical sector that begins a physical block — IDENTIFY word
+     * 209 turned the right way round (ata_identify.h); 0 when the drive does
+     * not say, or is built of blocks no larger than its sectors. */
+    uint32_t  first_aligned;
     uint64_t  total_sectors;           // device capacity in logical sectors
     bool      ncq;                     // HBA SNCQ && device IDENTIFY word 76 bit 8
     bool      lba48;                   // 48-bit LBA addressing supported

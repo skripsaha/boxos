@@ -3,6 +3,7 @@
 #include "volume_tally.h"
 #include "crypto.h"
 #include "cpuid.h"
+#include "ata_identify.h"
 
 // ============================================================================
 // The book's alphabet (volume_book.h) held to known answers — its sum, its
@@ -858,6 +859,38 @@ out:
     return verdict;
 }
 
+/*
+ * Where an ATA drive's physical blocks begin, out of IDENTIFY word 209
+ * (ata_identify.h): the offset of sector 0 inside the first physical block,
+ * turned into the first sector that begins one — the L0 a ground is held to.
+ * The "XP jumper" drive, 0x4001 on 4 KiB blocks of 512, begins its next block
+ * at 7; taken as it stands, 1, it would call the ground at 63 skewed.
+ */
+static TestResult TestAtaFirstAligned(void)
+{
+    TestResult verdict = TEST_PASS;
+    uint16_t  *id      = (uint16_t *)g_test_buffer;
+
+    memset(id, 0, 512);
+    TEST_ASSERT_EQ(AtaIdentifyFirstAligned(id, 512, 4096), 0, "a word left unset says sector 0");
+    id[209] = 0x4001;
+    TEST_ASSERT_EQ(AtaIdentifyFirstAligned(id, 512, 4096), 7, "offset 1 of eight: the next block at 7");
+    TEST_ASSERT(BookGroundOnAtom(63, AtaIdentifyFirstAligned(id, 512, 4096), 4096),
+                "and a ground at 63 is on it");
+    id[209] = 0x4003;
+    TEST_ASSERT_EQ(AtaIdentifyFirstAligned(id, 512, 8192), 13, "offset 3 of sixteen: 13");
+    id[209] = 0x4000;
+    TEST_ASSERT_EQ(AtaIdentifyFirstAligned(id, 512, 4096), 0, "offset 0: aligned at 0");
+    id[209] = 0x8001;
+    TEST_ASSERT_EQ(AtaIdentifyFirstAligned(id, 512, 4096), 0, "bits 15:14 not 01b: the word says nothing");
+    id[209] = 0x4008;
+    TEST_ASSERT_EQ(AtaIdentifyFirstAligned(id, 512, 4096), 0, "an offset past its block says nothing");
+    id[209] = 0x4001;
+    TEST_ASSERT_EQ(AtaIdentifyFirstAligned(id, 512, 512), 0, "a drive of 512 blocks of 512 is aligned at 0");
+out:
+    return verdict;
+}
+
 static const TestCase g_book_tests[] = {
     { .name = "crc32c_vectors", .func = TestCrc32cVectors, .reach = TEST_READS_ONLY },
     { .name = "varint_edges",   .func = TestVarintEdges,   .reach = TEST_READS_ONLY },
@@ -873,6 +906,7 @@ static const TestCase g_book_tests[] = {
     { .name = "digest_item_most", .func = TestDigestItemMost, .reach = TEST_READS_ONLY },
     { .name = "golden_slot",    .func = TestGoldenSlot,    .reach = TEST_READS_ONLY },
     { .name = "spine_circle",   .func = TestSpineCircle,   .reach = TEST_READS_ONLY },
+    { .name = "ata_first_aligned", .func = TestAtaFirstAligned, .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_book_suite = {

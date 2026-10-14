@@ -219,6 +219,11 @@ typedef struct WriteJobStandAnswer {
     uint64_t          size;          /* the size the job left the file */
     bool              through_port;  /* the job went through the port to its end */
 } WriteJobStandAnswer;
+
+/* The port's own write door knocked at by the stand, with no job behind it: a
+ * volume under glass answers it before the job is looked at (write_job_port.c,
+ * the door every write of a job's blocks goes through). */
+error_t WriteJobStandWriteDoor(uint64_t block);
 #endif
 
 /* A storage op that ran synchronously answered on the ferry channel its

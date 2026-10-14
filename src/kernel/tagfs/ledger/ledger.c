@@ -57,7 +57,7 @@ static struct {
 
 static uint64_t ledger_vlba(uint32_t copy)
 {
-    return ((uint64_t)tagfs_get_state()->layout.state_block + copy) * TAGFS_BLOCK_SECTORS;
+    return ((uint64_t)TagFSLayout()->state_block + copy) * TAGFS_BLOCK_SECTORS;
 }
 
 /*

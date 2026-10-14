@@ -133,6 +133,9 @@ typedef struct {
      * the drive would not say; equal to the logical size when it says one
      * physical block is one logical sector. */
     uint32_t physical_sector_size;
+    /* The first logical sector that begins a physical block — see the same
+     * field in ahci.h. */
+    uint32_t first_aligned;
     uint64_t total_sectors;
     uint64_t size_mb;
     char     model[41];

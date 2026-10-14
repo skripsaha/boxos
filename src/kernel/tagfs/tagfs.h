@@ -21,6 +21,8 @@
 
 #include "ledger/ledger.h"
 #include "block_map/block_map.h"
+#include "deed/deed.h"
+#include "mount/under_glass.h"
 
 /*
  * Every constant of the volume is in tagfs_constants.h, once — this header
@@ -349,25 +351,35 @@ typedef struct {
 /*
  * What the mounted volume is, split the way the medium splits it.
  *
- * `layout` and `geometry` come out of the Deed and never change while the
- * volume is mounted; `ledger` is the part that does, and is written back to
- * the medium in two alternating copies (volume_ledger.h).
+ * `format` is the book its Deed says it is written in (deed.h, DeedFormatOf):
+ * format v1's LAYOUT, Ledger and chains, or format v2's FRAME, Spine and
+ * Tally. `geometry` comes out of the Deed and never changes while the volume
+ * is mounted; on format v1 so does `layout`, and `ledger` is the part that
+ * does, written back to the medium in two alternating copies
+ * (volume_ledger.h). A format-v2 volume has neither: its LAYOUT is never
+ * filled, and code of format v1 that asks for it on such a volume is a
+ * defect, stopped at in a STRICT kernel (TagFSLayout).
  *
- * ‼ TWO COUNTS OF BLOCKS LIVE HERE AND THEY ARE NOT THE SAME
+ * ‼ WHERE A BLOCK NUMBER POINTS IS TWO NUMBERS, WHATEVER THE FORMAT
  *
- * Everything in `layout` is counted in blocks of the WHOLE VOLUME, because
- * that is what a Deed states and what makes a volume movable. Everything
- * TagFS itself allocates — file extents, the bitmap, the registry, the file
- * table, the metadata pool — is counted in blocks of the DATA RUN, from zero,
- * because that is what a file's metadata carries on disk and what the bitmap
- * indexes. `layout.data_block` is the one number that converts between them,
- * and tagfs_block_to_sector() is the one place that applies it.
+ * A block number a file's record or the volume's book carries is counted
+ * from `block_base`, in blocks of the volume, and runs up to `block_end`. On
+ * format v1 that is its DATA RUN — `block_base` is LAYOUT's data_block and
+ * `block_end` its data_blocks: everything TagFS v1 allocates is counted from
+ * zero in it, because that is what its records carry and its bitmap indexes.
+ * On format v2 every number the book or a file names is a block of the
+ * VOLUME (volume_deed.h, VolumeFrame) — `block_base` is 0 and `block_end` is
+ * where the volume's far Deed sits, the end of what a file may name. One
+ * conversion applies them, and only one: tagfs_block_to_sector().
  */
 typedef struct {
     uint8_t          uuid[16];      /* which volume this is */
     char             volume_name[16]; /* Deed's short maker/name, NUL-padded */
     uint64_t         volume_bytes;  /* whole mounted volume capacity */
-    VolumeLayout     layout;        /* where its parts are, in volume blocks */
+    DeedFormat       format;        /* the book the mounted volume is written in */
+    uint64_t         block_base;    /* the volume block a record's block 0 is */
+    uint64_t         block_end;     /* the first block, so counted, no record may name */
+    VolumeLayout     layout;        /* format v1: where its parts are, in volume blocks */
     VolumeGeometry   geometry;      /* what it was laid out for */
     VolumeBoot       boot;          /* where the loader finds the kernel; zero when the Deed says nothing */
     VolumeLedger     ledger;        /* what is true of it today */
@@ -660,12 +672,14 @@ void     TagFSNoteMediumGone(void);
 bool     TagFSMediumLeft(void);
 bool     TagFSMediumGone(void);
 
-/* Whether the medium under the mounted volume takes no write (RT-18): a write
- * it refused as protected — DATA PROTECT on USB, an ATA abort on AHCI. From
- * then on no Ink changes the volume — ERR_TAGFS_READ_ONLY — and every waiter
- * for a cycle hears the same, until the volume is let go of — or its book is
- * taken up, the medium seated again and asked anew. TagFSWriteRefused
- * asks the seat after a write the medium refused, and latches it. */
+/* Whether the mounted volume takes no write: its medium refused one as
+ * protected (RT-18) — DATA PROTECT on USB, an ATA abort on AHCI — or the
+ * volume stands under glass (TagFSIsUnderGlass). From then on no Ink changes
+ * the volume — ERR_TAGFS_READ_ONLY — and every waiter for a cycle hears the
+ * same. A protection lasts until the volume is let go of, or its book is
+ * taken up, the medium seated again and asked anew: TagFSWriteRefused asks
+ * the seat after a write the medium refused, and latches it. Glass lasts
+ * for the whole mount. */
 bool     TagFSReadOnly(void);
 void     TagFSWriteRefused(void);
 
@@ -788,9 +802,10 @@ error_t  TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_to
 uint64_t tagfs_file_ceiling(void);
 
 /* The file opened for one operation: NULL when it is not there, when it has
- * no record in memory, or when the handle or its place among the file's open
- * handles could not be had. A handle opened to read holds the record by
- * reference; one opened only to write holds none (TagFSFileHandle). */
+ * no record in memory, when it is locked (book_mount.h, TagFSFileLocked), or when the handle
+ * or its place among the file's open handles could not be had. A handle
+ * opened to read holds the record by reference; one opened only to write
+ * holds none (TagFSFileHandle). */
 TagFSFileHandle* tagfs_open(uint64_t file_id, uint32_t flags);
 void             tagfs_close(TagFSFileHandle* handle);
 
@@ -838,6 +853,12 @@ int64_t  TagFSAllocatorRederive(void);
 
 int         tagfs_get_metadata(uint64_t file_id, TagFSMetadata* out);
 TagFSState* tagfs_get_state(void);
+
+/* The mounted volume's LAYOUT, for the code of format v1 that walks what it
+ * names. A volume of format v2 has none — its LAYOUT is never filled — and
+ * code of format v1 asking for it there is a defect: said once a mount, and
+ * stopped at in a STRICT kernel. */
+VolumeLayout* TagFSLayout(void);
 
 /* The file laid in one run, taken near where it begins, its record naming the
  * run in as few extents as a record can say it. OK, or the refusal: the file

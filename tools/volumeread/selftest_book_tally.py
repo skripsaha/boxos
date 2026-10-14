@@ -30,8 +30,10 @@ def Pristine(bt):
         ("the next file id %u, tag id %u, bookmark 1, seq 3" % (bt.fid, bt.tag),
          lambda c: c.mount.counts == {"next_fid": bt.fid, "next_tag": bt.tag, "next_bookmark": 1,
                                       "next_seq": 3}),
-        ("the kernel in this tree reads no book and refuses the volume as format v2",
-         lambda c: c.kernel["mounts"] is False and "format v2" in c.kernel["refusal"]),
+        ("the kernel of this tree mounts it under glass, on slot 0 — it reads the book and writes none "
+         "of it, and nothing else holds it to glass",
+         lambda c: c.kernel["mounts"] is True and c.kernel["slot"] == 0 and c.kernel["glass"] == 1 and
+         c.kernel["files"] == len(c.mount.files) and not c.kernel["locked"] and not c.kernel["rotten"]),
         ("the front, the Spine, the Tally, the ribbon, the files, BOOT and the far Deed are heard",
          lambda c: {"front", "spine", "tally", "ribbon", "file", "boot", "far_deed"} <= c.Kinds())])]
 
@@ -219,6 +221,13 @@ def RangeCases(bt):
         return not ondisk.RunsSubtract(ondisk.RunsSubtract([(lo, end - lo)], c.Owned()), c.held)
 
     return [
+        Case("B4p a FILES of two leaves, whole", Lay, checks=[
+            ("not one finding", lambda c: not c.findings),
+            ("its FILES tree is a root over two leaves or more",
+             lambda c: sum(1 for n in c.mount.tally.trees[tally.FILES].nodes if n.level == 0) >= 2 and
+             any(n.level >= 1 for n in c.mount.tally.trees[tally.FILES].nodes)),
+            ("and the kernel of this tree mounts it under glass with every file",
+             lambda c: c.kernel["mounts"] is True and c.kernel["files"] == len(content.files))]),
         Case("B4 a FILES leaf rotten in both copies", RotFiles,
              must={"RANGE_ROTTEN", "HELD_BLOCKS"}, checks=[
                  ("the files of the range are locked, %u by the parent's count" % len(whole),
@@ -229,7 +238,10 @@ def RangeCases(bt):
                  ("every other file reads", lambda c: set(c.mount.files) == set(content.files) - set(locked)),
                  ("their blocks are held, %s" % ondisk.RunsText(held), lambda c: c.held == held),
                  ("their ids are never given again: the next file id stays %u" % content.next_fid,
-                  lambda c: c.mount.counts["next_fid"] == content.next_fid)]),
+                  lambda c: c.mount.counts["next_fid"] == content.next_fid),
+                 ("and the kernel of this tree mounts it with the range rotten and the blocks held",
+                  lambda c: c.kernel["mounts"] is True and [r["tree"] for r in c.kernel["rotten"]] == ["FILES"] and
+                  c.kernel["held"] == ondisk.RunsCount(held))]),
         Case("B4b the ribbon names a file of the rotten range, and bears a new one", Named,
              must={"RANGE_ROTTEN", "HELD_BLOCKS"}, checks=[
                  ("fid %u's record stays with its locked range: no mismatch, no roll-back" % whole[0],
@@ -289,8 +301,53 @@ def TreeShapeCases(bt):
             items.append((k, tally.InnerEncode(c.V() + 7, body[c.at:])))
         binder.NodeWrite(o, g, plan.seq, inner.blocks, inner.sheets, inner.tree, inner.level, items)
 
+    def Oversheet(o):
+        """The inner FILES root again, its last child's pointer naming as many
+        Sheets as lie from the farther of its copies to the far Deed — a
+        length the medium could hold and no node of this book has: each copy
+        is a unit of one Sheet, so neither is the node the pointer names."""
+        Lay(o)
+        last, items = leaves[-1], []
+        for k, body in inner.items:
+            c = bookread.Cursor(body)
+            n, p = c.V(), c.Ptr()
+            if list(p["blocks"]) == list(last.blocks):
+                body = tally.InnerEncode(n, bookread.PtrPut(p["seq"], g.data_end - max(last.blocks), p["blocks"]))
+            items.append((k, body))
+        binder.NodeWrite(o, g, plan.seq, inner.blocks, inner.sheets, inner.tree, inner.level, items)
+
+    def SlotOver(o, index, seq, files_root=None):
+        """The slot the padded book was bound with, sealed again as slot
+        `index` at `seq` — its FILES root, when given, a pointer elsewhere."""
+        slot = tally.SlotRead(BookGround(o), 0)
+        if files_root is not None:
+            root = slot.roots[tally.FILES]
+            slot.roots[tally.FILES] = tally.Root(root.flags, root.level, root.items, files_root)
+        o.Put(g.base + tally.SlotBlock(g, index) * SECTORS_PER_BLOCK,
+              b"".join(tally.SlotSectors(g, index, seq, slot)))
+
+    def NewerUnread(o):
+        """Slot 1 at seq 3, whose FILES root — an inner node — names a Sheet
+        no node was written to: the mount falls back to slot 0, and slot 1
+        is walked for its ground, the root that does not read with it."""
+        Lay(o)
+        SlotOver(o, 1, 3, bookread.PtrPut(plan.seq, inner.sheets, plan.FreeSheet()))
+
+    def OlderCut(o):
+        """Slot 1 at seq 3 is the book as bound; slot 0 names, for FILES, the
+        inner root written again at a free Sheet with its second child's
+        pointer cut off after its count — a slot not stood on, walked for
+        its ground past a pointer that does not read."""
+        Lay(o)
+        SlotOver(o, 1, 3)
+        free, items = plan.FreeSheet(), list(inner.items)
+        items[1] = (items[1][0], tally.InnerEncode(bookread.Cursor(items[1][1]).V(), b""))
+        binder.NodeWrite(o, g, plan.seq, free, inner.sheets, tally.FILES, inner.level, items)
+        SlotOver(o, 0, 2, bookread.PtrPut(plan.seq, inner.sheets, free))
+
     leaf = bt.Node(tally.FILES)
     births = lambda c: {r.birth for fs in c.mount.files.values() for r in fs.runs if not r.hole}
+    padded = lambda c: set(c.mount.files) == set(content.files)
     return [
         Case("B36 a newer Tally that keeps an older one's nodes", Kept, checks=[
             ("the book stands on slot 1, Tally seq 3", lambda c: c.mount.slot.index == 1 and c.mount.tally.seq == 3),
@@ -306,6 +363,14 @@ def TreeShapeCases(bt):
             ("the counts are said not to be what is under them",
              lambda c: Found(c, "RECORD_SHAPE", "FILES", "count")),
             ("and every file stays", lambda c: set(c.mount.files) == set(content.files))]),
+        Case("B38b a FILES leaf's pointer names Sheets to the far Deed", Oversheet,
+             must={"RANGE_ROTTEN", "HELD_BLOCKS", "DOUBLE_OWNER"}, checks=[
+                 ("the leaf is a rotten range: neither copy is a unit that long",
+                  lambda c: Found(c, "RANGE_ROTTEN", "FILES")),
+                 ("and the ground its parent names for it — every block to the far Deed — is the Tally's, "
+                  "said where a file names it too", lambda c: Found(c, "DOUBLE_OWNER", "the Tallies' nodes")),
+                 ("and the kernel of this tree mounts it with the range's files locked",
+                  lambda c: c.kernel["mounts"] is True and c.kernel["rotten"] != [])]),
         Case("B39 a FILES leaf whose lead lies", lambda o: [bt.BumpLead(o, b * SECTORS_PER_BLOCK)
                                                             for b in leaf.blocks],
              must={"RECORD_SHAPE"}, checks=[
@@ -316,6 +381,21 @@ def TreeShapeCases(bt):
              must={"RECORD_SHAPE"}, checks=[
                  ("its sector 0 names a lead its records do not give it",
                   lambda c: Found(c, "RECORD_SHAPE", "slot 0", "lead") and c.mount.slot.index == 0)]),
+        Case("B42 the newest slot's inner FILES root does not read", NewerUnread, must={"SLOT_FELL_BACK"},
+             checks=[
+                 ("slot 1's FILES root holds in neither copy, and slot 0 is stood on",
+                  lambda c: Found(c, "SLOT_FELL_BACK", "slot 1", "FILES") and c.mount.slot.index == 0),
+                 ("every file reads", padded),
+                 ("and the kernel of this tree mounts it on slot 0 with every file",
+                  lambda c: c.kernel["mounts"] is True and c.kernel["slot"] == 0 and
+                  c.kernel["files"] == len(content.files))]),
+        Case("B42b a slot not stood on names a child by a pointer cut short", OlderCut, checks=[
+            ("the newest slot, 1 at seq 3, is stood on, and nothing is said",
+             lambda c: c.mount.slot.index == 1 and not c.findings),
+            ("every file reads", padded),
+            ("and the kernel of this tree mounts it on slot 1 with every file",
+             lambda c: c.kernel["mounts"] is True and c.kernel["slot"] == 1 and
+             c.kernel["files"] == len(content.files))]),
     ]
 
 
@@ -331,6 +411,12 @@ def ElementCases(bt):
 
     def Longer(o):
         bt.Reitem(o, sleaf, lambda items: [(k, b + b"\0") if k == (S.fid, 0) else (k, b) for k, b in items])
+
+    def Wide(o):
+        wide = S.Copy()
+        wide.flags |= 1 << 40
+        bt.Reitem(o, sleaf, lambda items: [(k, tally.FileHeadEncode(wide)) if k == (S.fid, 0) else (k, b)
+                                           for k, b in items])
 
     shared = tally.Run(False, run.start, run.count, run.birth, ext=bookread.EntryPut(tally.EXT_SHARED, b""))
     return [
@@ -357,6 +443,10 @@ def ElementCases(bt):
         Case("B9 a FILES header one byte longer than known", Longer, must={"UNDER_GLASS"}, checks=[
             ("the volume is read only: written by a kernel that knows more",
              lambda c: Glass(c, "knows more", "FILES")),
+            ("and every file still reads", lambda c: set(c.mount.files) == set(bt.content.files))]),
+        Case("B9b a FILES header whose flags reach past 32 bits", Wide, must={"UNDER_GLASS"}, checks=[
+            ("the volume is read only: %s carries flags this kernel cannot hold" % Label(S),
+             lambda c: Glass(c, "fid %u" % S.fid, "flags past the 32 bits")),
             ("and every file still reads", lambda c: set(c.mount.files) == set(bt.content.files))]),
         Case("B31 a block of a file rotten", lambda o: bt.Rot(o, run.start * SECTORS_PER_BLOCK + 3),
              must={"DIGEST_MISMATCH"}, checks=[
@@ -421,5 +511,8 @@ def SlotRootCases(bt):
              must={"SPINE_NONE"}, checks=[
                  ("the book does not mount: none of the slots holds",
                   lambda c: c.mount.refusal is not None and "none of the 3 slots" in c.mount.refusal),
-                 ("and no file is listed", lambda c: not c.mount.files)]),
+                 ("and no file is listed", lambda c: not c.mount.files),
+                 ("and the kernel of this tree refuses it in the same words",
+                  lambda c: c.kernel["mounts"] is False and
+                  c.kernel["refusal"] == "none of the 3 slots of its Spine holds")]),
     ]

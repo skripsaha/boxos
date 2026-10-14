@@ -374,9 +374,8 @@ DeedFormat DeedFormatOf(const DeedCopy *copy)
  * Deed itself is whole — it passed its checksum to get here — and what is
  * refused is what this kernel can make of it.
  *
- * The line a format-v2 volume gets names no step of any plan: it is read by
- * whoever is at the machine, for as long as a kernel this old is in use, and
- * all it can truthfully say is that a newer kernel is needed.
+ * A FRAME that holds is a book this kernel reads (mount/book_mount.h): what
+ * of it the kernel may not write is the book's to say, not the Deed's.
  */
 error_t DeedFormatRefused(uint8_t seat, const DeedCopy *copy, DeedFormat format)
 {
@@ -424,9 +423,7 @@ error_t DeedFormatRefused(uint8_t seat, const DeedCopy *copy, DeedFormat format)
     if (note)
         kprintf("[TagFS] the FRAME in the deed on seat %u is %u bytes: %s\n",
                 seat, bytes, note);
-    kprintf("[TagFS] seat %u carries a format-v2 volume (its deed bears FRAME); "
-            "this kernel cannot read a format-v2 book — boot a newer kernel\n", seat);
-    return ERR_UNSUPPORTED;
+    return OK;
 }
 
 void DeedSurveyAll(uint8_t standing_seat, uint64_t standing_start)

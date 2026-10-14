@@ -55,6 +55,7 @@ uint32_t    xhci_msd_unit_max_run(uint8_t unit);
 
 uint64_t    xhci_msd_unit_sectors(uint8_t unit);
 uint32_t    xhci_msd_unit_physical_bytes(uint8_t unit);
+uint64_t    xhci_msd_unit_first_aligned(uint8_t unit);
 /* Whether the unit refused a write with DATA PROTECT (sense key 7): it takes
  * no write for as long as it is seated. */
 bool        xhci_msd_unit_write_protected(uint8_t unit);

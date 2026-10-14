@@ -106,6 +106,10 @@ static error_t CreateTags(uint32_t name_tag, const uint32_t* tag_ids, uint32_t t
 static error_t CreateInside(const char* filename, const uint32_t* tag_ids, uint32_t tag_count,
                             uint64_t* out_file_id)
 {
+    /* A volume under glass makes no file, and no name of one is interned for
+     * it: the refusal comes before anything is given out (tagfs.h). */
+    if (TagFSIsUnderGlass())
+        return ERR_TAGFS_READ_ONLY;
     uint32_t name_tag = TAGFS_INVALID_TAG_ID;
     error_t  rc       = InkNameTagIntern(filename, &name_tag);
     if (rc != OK)

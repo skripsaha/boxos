@@ -27,6 +27,13 @@ void         TagRegistryLanded(TagRegistry* reg, SettleMark* mark);
  * pool wear ids a registry rolled back no longer names. */
 void         TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next);
 
+/* A tag a format-v2 book's TAGS names, taken into the registry as the mount
+ * reads it: OK; ERR_ALREADY_EXISTS when its text is another id's or its id
+ * another text's; ERR_INVALID_ARGUMENT for an id past the registry's last;
+ * ERR_NO_MEMORY. With the door shut, as the v1 load. */
+error_t      RegistryCoin(TagRegistry* reg, uint32_t tag_id, uint8_t flags, const uint8_t* key_at,
+                          uint8_t key_len, const uint8_t* value_at, uint16_t value_len);
+
 /* The mount's census: the blocks the load walked, claimed, and let go. */
 void         TagRegistryClaimGround(TagRegistry* reg);
 

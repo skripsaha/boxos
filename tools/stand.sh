@@ -75,12 +75,18 @@ chk()  { if [ "$1" = 0 ]; then ok "$2"; else bad "$2"; fi }
 # here is stamped exactly as `make` alone would stamp it. The verdict comes from
 # what the tree CONTAINS, never from this key. And it waits for the last
 # mutation stamp to pass first (mut_bump, below says why).
+#
+# STAND_FORMAT (v1 or v2) is the format of the volume every image is made in,
+# handed to make as its key (VOLUME_FORMAT, Makefile) by this one wrapper for
+# the same reason: a build and the run-bg after it that disagree about it pack
+# the image again between them. Unset, the Makefile's own default; a word on
+# the command line says otherwise for that one call.
 make() {
     mut_stamp_passed
     case " $* " in
         *" run-bg "*) strict_agrees "$@" || return 1 ;;
     esac
-    command make HARNESS=on "$@"
+    command make HARNESS=on ${STAND_FORMAT:+VOLUME_FORMAT=$STAND_FORMAT} "$@"
 }
 
 # ===========================================================================
@@ -763,7 +769,7 @@ WAIT_LOG=build/serial.log
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
 # WRITE ITS RECORDS", which comes BEFORE the flush, and a machine stopped
 # there is stopped in the middle of it.
-STAND_HALT_ENDS='^\[HALT\] (Storage sync complete|the medium on seat [0-9]+ took|‼ THE VOLUME ON SEAT [0-9]+ .* WAS NOT MADE DURABLE)'
+STAND_HALT_ENDS='^\[HALT\] (Storage sync complete|the medium on seat [0-9]+ took|‼ THE VOLUME ON SEAT [0-9]+ .* WAS NOT MADE DURABLE|the volume on seat [0-9]+ stands under glass)'
 # How long a burst of console output may pause and still be the same burst.
 # This is the other kind of number: not "how long does the machine take", which
 # is unbounded, but "how big a gap inside one program's output still counts as

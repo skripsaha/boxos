@@ -46,7 +46,10 @@ typedef struct {
     char     volume_name[16];
     uint64_t volume_free_bytes;
     uint8_t  volume_present;
-    uint8_t  _volume_pad[7];
+    uint8_t  volume_free_counted; /* 0: the kernel does not count this volume's free
+                                   * ground (a format-v2 book), and the free and used
+                                   * bytes say nothing                 */
+    uint8_t  _volume_pad[6];
     uint64_t cpu_busy_tsc;
     uint64_t cpu_total_tsc;
     uint8_t  volume_uuid[16];

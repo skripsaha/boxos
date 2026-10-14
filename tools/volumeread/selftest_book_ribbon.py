@@ -64,7 +64,10 @@ def RecordCases(bt):
         Case("B23 a stitch with no record", One([]), checks=[
             ("the stitch is taken, seq 3", lambda c: [s.seq for s in c.mount.ribbon.stitches] == [3]),
             ("the next seq is 4, and nothing is said",
-             lambda c: c.mount.counts["next_seq"] == 4 and not c.findings)]),
+             lambda c: c.mount.counts["next_seq"] == 4 and not c.findings),
+            ("and the kernel of this tree refuses it: it reads no stitch past the Tally yet",
+             lambda c: c.kernel["mounts"] is False and
+             c.kernel["refusal"] == "the ribbon past its Tally is not empty")]),
         Case("B26 the newest stitch's data never landed", lambda o: Unlanded(o, False),
              must={"NOT_LANDED", "UNDER_GLASS"}, checks=[
                  ("%u is rolled back by its splice, and the roll-back cannot be written by this kernel"

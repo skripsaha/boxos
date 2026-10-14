@@ -42,6 +42,19 @@
  * refusal says (mount_refused), which also takes down what came up. */
 error_t MountReadVolume(const char** what);
 
+/* What the mount promises the volume's files, said once in plain words — and,
+ * on format v1, the Spares a delete stands on laid and the mount's own writes
+ * flushed. After the door, the volume MOUNTED. */
+void    MountPromise(void);
+
+/* A format-v1 volume standing on the Deed `head`, of ground the partition
+ * table runs `ground_sectors` long, takes the ground behind it: its far Deed
+ * and then its head written for the longer volume, the new ground first
+ * proven blank by the bitmap — said either way, and nothing written unless
+ * all of it can be (ground_v1.c). The mount's one write before the Ledger,
+ * made before the far copy is checked, which it moves. */
+void    volume_take_more_ground(uint8_t seat, uint64_t ground_sectors, DeedCopy *head);
+
 /* The next file id a mount derives: past the highest id of every row and of
  * every record the medium showed, and never short of the Ledger's own count;
  * a Ledger counting 0 — one an earlier kernel let wrap — stays as it is, for
@@ -53,11 +66,14 @@ uint32_t MountNextFileId(uint32_t ledger_next, uint64_t top_row, uint64_t top_re
  * (file_record.h, StripWalkNextGround). Between GroundCensusBegin and End. */
 void    MountClaimRuns(const struct FileRecord* rec, uint64_t fid);
 
-/* After the door has opened and the integrity map is up (RT-22): on a mount
- * whose seal was not written by a machine stopping cleanly, the digests of
- * the blocks the last cycle's records name are set back to unknown — a block
- * such a file wrote in place after that cycle may have landed without its
- * digest, or its digest without it, and neither is rot. */
+/* After the door has opened, on format v1: the integrity map brought up —
+ * after `initialized`, so a map laid by the cycles can take its run from the
+ * block allocator — and then RT-22: on a mount whose seal was not written by
+ * a machine stopping cleanly, the digests of the blocks the last cycle's
+ * records name are set back to unknown — a block such a file wrote in place
+ * after that cycle may have landed without its digest, or its digest without
+ * it, and neither is rot. A format-v2 volume's digests are its Tally's
+ * (tally_read.h): nothing here is asked of it. */
 void    MountAfterDoor(void);
 
 /* Whether the volume's last stop is known to have been clean: the seal the
