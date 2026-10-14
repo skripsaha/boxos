@@ -42,6 +42,7 @@
 #include "settle_ops.h"   /* SettleUseRemembered — `use` waits through its Chit */
 #include "perf_trace.h"
 #include "run.h"            /* TagFSDataCostSay — what the files' bytes cost the medium */
+#include "block_map_derived.h"   /* a book's free count is its derived block map's */
 #include "kernel_config.h"
 #include "amp.h"
 #include "scheduler.h"
@@ -1793,10 +1794,13 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  * counters are cumulative, monotonic snapshots; userspace derives a
  * utilization percentage from two snapshots.
  *
- * A format-v2 volume keeps no Ledger, and this kernel does not yet count the
- * free ground of a book (book_mount.c says so at its mount): "free counted"
- * is 0 and the free and used bytes are 0 — not a number that would read as a
- * full volume, or as the free count of a volume mounted before it. */
+ * A format-v2 volume keeps no Ledger: its free count is what its block map,
+ * derived from the owners' names at the mount, counts (block_map_derived.h),
+ * kept where format v1's map keeps its own. "free counted" says the count is
+ * there. A book whose Tally names a bookmark has no map — this kernel does not
+ * read the ground a bookmark holds (book_ground.c) — and carries 0, and free
+ * and used bytes of 0: not a number that would read as a full volume, or as
+ * the free count of a volume mounted before it. */
 #define SYSRES_BLOB_SIZE 80
 
 static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -1813,7 +1817,7 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     bool volume_present = false;
     if (tagfs_enter()) {
         TagFSState *fs = tagfs_get_state();
-        bool counted = fs->format != DEED_FORMAT_V2;
+        bool counted = fs->format != DEED_FORMAT_V2 || BlockMapDerivedUp();
         uint64_t free_bytes = counted ? fs->ledger.free_blocks * (uint64_t)VOLUME_BLOCK_BYTES : 0;
         uint64_t total_bytes = fs->volume_bytes;
         if (free_bytes > total_bytes) free_bytes = total_bytes;

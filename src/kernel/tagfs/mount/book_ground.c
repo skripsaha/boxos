@@ -10,8 +10,9 @@
  *
  *   front     the volume before its data run, the Spine's slots aside
  *   spine     every slot of the ring, whatever it holds
- *   tally     every node of every Tally a slot that holds names, both copies —
- *             a rotten one too: its parent names those blocks
+ *   tally     every node of every Tally a slot that holds names, every copy
+ *             its pointer names — a rotten one too: its parent names those
+ *             blocks
  *   ribbon    the Quire the ribbon goes on in from each such slot, and the
  *             next_quire it names where one may be named
  *   file      every DATA run of every live file (tally_leaves.c)
@@ -20,28 +21,60 @@
  *   held      what a rotten range or a locked file may own and no name that
  *             reads does — given to no one until an explicit act lets it go
  *
- * The only finding is a block two exclusive owners name (GroundCensusBook).
- * The ground the ribbon let go, lying fallow, is a ribbon's to name — this
- * kernel mounts no book with anything sewn past its Tally, so none lies so.
+ * The only finding is a block two exclusive owners name (GroundCensusBook) —
+ * a node and a Quire named by the slot that names them, so that one name two
+ * slots give alike is one owner. What none names is free: the census lays
+ * every claim into the volume's block map (block_map_derived.h). The ground
+ * the ribbon let go, lying fallow, is a ribbon's to name — this kernel mounts
+ * no book with anything sewn past its Tally, so none lies so.
+ *
+ * One owner of §4.6 this census does not see: a bookmark — the nodes of the
+ * trees its element names and the runs under its Lien. This kernel reads no
+ * bookmark (such a book stands under glass, book_mount.c BookTree), so where a
+ * Tally of a slot that holds names one, the census names its two owners and
+ * derives no map: a map of the rest would read free what the bookmark holds,
+ * and the mount says the free count is not counted rather than give it high.
  */
 
 /* Ground of the volume `count` blocks long from `start`, claimed by `owner` in
- * runs a claim counts. */
-static void BookClaim(GroundOwner owner, uint64_t start, uint64_t count, uint64_t who)
+ * runs a claim counts — given by Spine slot `slot`, or by none (UINT32_MAX). */
+static void BookClaimBy(GroundOwner owner, uint64_t start, uint64_t count, uint64_t who, uint32_t slot)
 {
     while (count) {
         uint32_t n = count > UINT32_MAX ? UINT32_MAX : (uint32_t)count;
-        GroundClaim(owner, start, n, who);
+        if (slot == UINT32_MAX)
+            GroundClaim(owner, start, n, who);
+        else
+            GroundClaimBySlot(owner, start, n, who, slot);
         start += n;
         count -= n;
     }
 }
 
+static void BookClaim(GroundOwner owner, uint64_t start, uint64_t count, uint64_t who)
+{
+    BookClaimBy(owner, start, count, who, UINT32_MAX);
+}
+
+/* Every copy a node's pointer names (§16.2 п.17), as slot `slot` names it: a
+ * node by its seq. */
+static void BookGroundNodeOf(const TallyPlace* at, uint32_t slot)
+{
+    for (uint32_t k = 0; k < at->ptr.copies; k++)
+        BookClaimBy(GROUND_TALLY, TallyPtrBlock(&at->ptr, k), at->ptr.sheets, at->ptr.seq, slot);
+}
+
 error_t BookGroundNode(void* ctx, const TallyPlace* at)
 {
     (void)ctx;
-    for (uint32_t k = 0; k < at->ptr.copies && k < TALLY_COPIES_TRIED; k++)
-        BookClaim(GROUND_TALLY, at->ptr.block[k], at->ptr.sheets, 0);
+    BookGroundNodeOf(at, g_book.stood->index);
+    return OK;
+}
+
+/* A node of a slot not stood on, `ctx` the slot. */
+static error_t BookGroundOlderNode(void* ctx, const TallyPlace* at)
+{
+    BookGroundNodeOf(at, ((const SpineSlot*)ctx)->index);
     return OK;
 }
 
@@ -67,7 +100,7 @@ static void BookGroundRibbon(const SpineSlot* s, bool taken)
     uint64_t           grid = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
     if (!r->quire_blocks || r->at < r->quire_block || r->at - r->quire_block >= r->quire_blocks)
         return;
-    BookClaim(GROUND_RIBBON, r->quire_block, r->quire_blocks, 0);
+    BookClaimBy(GROUND_RIBBON, r->quire_block, r->quire_blocks, 0, s->index);
     if (!r->next_blocks || (r->next_block == r->quire_block && r->next_blocks == r->quire_blocks))
         return;
     if (r->next_block < g_book.frame.data_block || r->next_block + r->next_blocks > g_book.data_end ||
@@ -76,13 +109,13 @@ static void BookGroundRibbon(const SpineSlot* s, bool taken)
     if (taken && (GroundClaimedBy(GROUND_TALLY, r->next_block, r->next_blocks) ||
                   GroundClaimedBy(GROUND_FILE, r->next_block, r->next_blocks)))
         return;
-    BookClaim(GROUND_RIBBON, r->next_block, r->next_blocks, 0);
+    BookClaimBy(GROUND_RIBBON, r->next_block, r->next_blocks, 0, s->index);
 }
 
 /* A node of a slot not stood on that neither copy of holds — the root a slot
  * passed over was refused for, or one below a root of any older slot, or a
  * child whose pointer does not read. Its blocks are claimed already, by name
- * (BookGroundNode, before the read): the slot names them. What lies under it
+ * (BookGroundOlderNode, before the read): the slot names them. What lies under it
  * no name that reads gives, and such a slot is read for its ground alone
  * (§4.5 п.4) — its rot is not the mount's to say, nor to lock anything by
  * (bookmount.py _Older). */
@@ -100,10 +133,10 @@ static error_t BookGroundOlderRot(void* ctx, const TallyPlace* at, const char* w
  * could not see would read as no one's. */
 static error_t BookGroundOlder(const char** what)
 {
-    TallySink sink = { .ctx = NULL, .item = NULL, .rotten = BookGroundOlderRot, .node = BookGroundNode,
-                       .said = false };
     for (uint32_t i = 0; i < g_book.nslots; i++) {
-        const SpineSlot* s = &g_book.slots[i];
+        const SpineSlot* s    = &g_book.slots[i];
+        TallySink        sink = { .ctx = (void*)s, .item = NULL, .rotten = BookGroundOlderRot,
+                                  .node = BookGroundOlderNode, .said = false };
         if (s == g_book.stood)
             continue;
         for (uint32_t r = 0; r < s->roots; r++) {
@@ -163,6 +196,20 @@ static void BookHeldRotten(void* ctx, uint64_t start, uint64_t count, bool to_en
     BookGroundHoldRun(start, to_end ? (start < g_book.data_end ? g_book.data_end - start : 0) : count);
 }
 
+/* Whether the Tally of a slot that holds names a bookmark: a BOOKMARKS or a
+ * LIEN tree that is not empty (volume-read's census asks the same,
+ * bookcensus.py BookmarksNamed). */
+static bool BookBookmarked(void)
+{
+    for (uint32_t i = 0; i < g_book.nslots; i++)
+        for (uint32_t r = 0; r < g_book.slots[i].roots; r++) {
+            const SpineRoot* root = &g_book.slots[i].root[r];
+            if ((root->tree == TALLY_BOOKMARKS || root->tree == TALLY_LIEN) && root->items)
+                return true;
+        }
+    return false;
+}
+
 error_t BookGroundCensus(const char** what)
 {
     BookGroundRibbon(g_book.stood, true);
@@ -176,12 +223,11 @@ error_t BookGroundCensus(const char** what)
                                     : "its medium would not give up the DIGESTS a rotten FILES range is held by";
         return rc;
     }
-    rc = GroundCensusBook(&g_book.said.held);
+    g_book.bookmarked = BookBookmarked();
+    rc = GroundCensusBook(&g_book.said.held, !g_book.bookmarked, what);
     GroundCensusEnd();
-    if (rc != OK) {
-        *what = "there is no memory to hold its census";
+    if (rc != OK)
         return rc;
-    }
     if (g_book.said.held)
         kprintf("[TagFS] %llu block(s) are held: no name that reads owns them, and a rotten range or a "
                 "locked file may — they are given to no one until an explicit act lets them go\n",

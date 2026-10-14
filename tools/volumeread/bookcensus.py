@@ -4,13 +4,16 @@ owner of every block, set against the book's mount (bookmount.py).
 A format-v2 volume keeps no bitmap: which blocks are taken is derived from
 the names that take them. So the census here is the derivation itself — the
 front of the volume before its data run, the Spine's slots, every node of the
-Tally of every slot that holds (both copies), the ribbon's Quires from the
+Tally of every slot that holds (every copy), the ribbon's Quires from the
 earliest slot's `at` to the Quire the ribbon ends in and its next_quire, every
 DATA run of every live file, BOOT beside the kernel file it is, the far copy
 of the Deed, the blocks held for a rotten range (their own class: held, never
 an orphan) and the ground the ribbon let go, lying fallow (M-1). Two owners on
 one block are named where they meet. What none of them names is free; there
-is no third state, so there is no orphan to find.
+is no third state, so there is no orphan to find. A bookmark is the one owner
+left out: the nodes of its trees and the runs under its Lien (§4.6) neither
+this census nor the kernel's derives, so where a Tally names one, what is
+free is not counted at all (BookmarksNamed) rather than counted too high.
 
 And beside the account: every finding of the mount, each data block of a
 live file held to its digest, and what the kernel of this tree makes of the
@@ -69,14 +72,40 @@ def KernelRibbonEmpty(g, slot):
     return True
 
 
-def KernelBook(g, m, held):
+# The copies of a node that did not hold the kernel names one line each before
+# it says the rest by their count (mount/tally_read.c TALLY_COPIES_SAID).
+KERNEL_COPIES_SAID = 4
+
+
+def BookmarksNamed(m):
+    """Does the Tally of a slot that holds name a bookmark — a BOOKMARKS or a
+    LIEN tree not empty? The ground a bookmark holds (§4.6: the nodes of its
+    trees, the runs under its Lien) neither this census nor the kernel's
+    derives, so neither counts what is free (book_ground.c)."""
+    return any(s.state == "valid" and any(tree in (tally.BOOKMARKS, tally.LIEN) and root.items
+                                          for tree, root in s.roots.items()) for s in m.slots)
+
+
+def KernelMendedSaid(t):
+    """The lines the kernel says of the copies that did not hold: one each
+    for the first KERNEL_COPIES_SAID of a node, the rest in one line."""
+    failed = {}
+    for node, _k, _why in t.mended:
+        failed[id(node)] = failed.get(id(node), 0) + 1
+    return sum(min(n, KERNEL_COPIES_SAID) for n in failed.values())
+
+
+def KernelBook(g, m, held, free):
     """What the kernel of this tree makes of a format-v2 volume, in the
     numbers its own lines carry (mount/book_mount.c): refused — and in which
     words — or mounted under glass, standing on which slot, with how many
     files live, which locked by fid, what ranges rotten, which copies read
-    in the other's place, how many blocks held, how many shapes said, and the
-    numbers it gives next. It reads no DIGESTS leaf at the mount unless a
-    FILES range rots (§16.3 п.12): a DIGESTS range is said rotten only then."""
+    in the other's place, how many blocks held, how many shapes said, the
+    numbers it gives next, and its data run with the blocks of it its block
+    map derives free (block_map_derived.c) — `free`, the census's own, None
+    where neither counts it (BookmarksNamed). It reads no DIGESTS leaf at the
+    mount unless a FILES range rots (§16.3 п.12): a DIGESTS range is said
+    rotten only then."""
     if g.block_bytes != BLOCK:
         return {"mounts": False, "refusal": "laid out in %u-byte blocks" % g.block_bytes}
     if g.frame_why:
@@ -93,12 +122,13 @@ def KernelBook(g, m, held):
             "locked": sorted(m.locked), "glass": len(m.glass) + 1,
             "rotten": [{"tree": tally.TREE_NAMES[r.tree], "count": r.count} for r in t.rotten
                        if r.tree != tally.DIGESTS or rot],
-            "mended": len(t.mended), "held": RunsCount(held),
+            "mended": len(t.mended), "mended_said": KernelMendedSaid(t), "held": RunsCount(held),
             "shape": sum(1 for code, _s, _t in said if code == "RECORD_SHAPE"),
             "torn_slots": sum(1 for code, _s, _t in said if code == "SLOT_TORN"),
             "fell_back": sum(1 for code, _s, _t in said if code == "SLOT_FELL_BACK"),
             "next_fid": m.counts["next_fid"], "next_tag": m.counts["next_tag"],
-            "next_bookmark": m.counts["next_bookmark"]}
+            "next_bookmark": m.counts["next_bookmark"], "data_blocks": g.data_end - g.data_block,
+            "free": None if free is None else RunsCount(free)}
 
 
 class BookCensus:
@@ -123,8 +153,9 @@ class BookCensus:
             self._Digests()
         self.free_runs = RunsSubtract([(g.data_block, g.data_end - g.data_block)],
                                       RunsNormal([r for c in self.claims for r in c.runs]))
-        self.kernel = KernelBook(g, m, self.held)
-        self.kernel["double"] = sorted(s for x in self.findings if x.code == "DOUBLE_OWNER" for s, _n in x.runs)
+        self.counted = m.tally is None or not BookmarksNamed(m)
+        self.kernel = KernelBook(g, m, self.held, self.free_runs if self.counted else None)
+        self.kernel["double"] = sorted([s, n] for x in self.findings if x.code == "DOUBLE_OWNER" for s, n in x.runs)
 
     def Say(self, code, severity, text, runs=()):
         self.findings.append(Finding(code, severity, text, runs))
@@ -135,6 +166,36 @@ class BookCensus:
         if c.runs:
             self.claims.append(c)
         return c
+
+    def Named(self, kind, label, names):
+        """One owner's claim made of its names, (start, count, who, slot): a
+        node's copy by the node's seq and the slot whose Tally names it, a
+        Quire by the slot whose ribbon goes on in it, a run of a file by its
+        fid and no slot (None). One name given alike by two slots is one
+        owner — an unchanged node two Tallies name (§2.9), a Quire two
+        ribbons go on in — as many times over as the slot that gives it most;
+        any other two names that meet on a block are two owners of it, said:
+        two nodes of one Tally on one block, two runs of one file, two Quires
+        apart. The kernel's census keeps the same rule (ground_census.c
+        RunsOneName), and two owners of one kind are found nowhere else: the
+        claim merges its runs."""
+        groups = {}
+        for start, count, who, slot in names:
+            groups.setdefault((start, count, who), []).append(slot)
+        kept = []
+        for (start, count, _who), slots in groups.items():
+            most = max([slots.count(x) for x in set(slots) if x is not None], default=0)
+            kept += [(start, count)] * (slots.count(None) + most)
+        doubles, reach = [], None
+        for start, count in sorted(kept):
+            if reach is not None and start < reach:
+                doubles.append((start, min(start + count, reach) - start))
+            reach = start + count if reach is None else max(reach, start + count)
+        doubles = RunsIntersect(RunsNormal(doubles), [(0, self.g.data_end + 1)])
+        if doubles:
+            self.Say("DOUBLE_OWNER", "damage", "block(s) %s are claimed by %s and %s at once"
+                     % (RunsText(doubles), label, label), doubles)
+        return self.Claim(kind, label, kept)
 
     # --- the ground -------------------------------------------------------
 
@@ -164,15 +225,16 @@ class BookCensus:
         if m.tally is None:
             return
         # A rotten node's blocks are still its Tally's: its parent names them,
-        # and what lies there is no one else's to be given.
-        nodes = [(b, n.sheets) for n in m.tally.Nodes() for b in n.blocks] + m.older_nodes + \
-            [(b, r.ptr["sheets"]) for r in m.tally.rotten if r.ptr for b in r.ptr["blocks"]]
-        self.Claim("tally", "the Tallies' nodes", nodes)
-        quires = (m.ribbon.quires if m.ribbon else []) + m.older_quires
-        self.Claim("ribbon", "the ribbon's Quires", quires)
+        # and what lies there is no one else's to be given. Every copy a
+        # pointer names, however many (§16.2 п.17).
+        stood = m.slot.index
+        nodes = [(b, n.sheets, n.seq, stood) for n in m.tally.Nodes() for b in n.blocks] + m.older_nodes + \
+            [(b, r.ptr["sheets"], r.ptr["seq"], stood) for r in m.tally.rotten if r.ptr for b in r.ptr["blocks"]]
+        self.Named("tally", "the Tallies' nodes", nodes)
+        quires = [(q[0], q[1], 0, stood) for q in (m.ribbon.quires if m.ribbon else [])] + m.older_quires
+        self.Named("ribbon", "the ribbon's Quires", quires)
         for fid in sorted(m.files):
-            fs = m.files[fid]
-            self.Claim("file", self.Label(fid), fs.Ground())
+            self.Named("file", self.Label(fid), [(s, n, fid, None) for s, n in m.files[fid].Ground()])
         owned = RunsNormal([r for c in self.claims for r in c.runs])
         self.Claim("fallow", "the ground the ribbon let go (M-1)", RunsSubtract(m.fallow, owned))
 
@@ -231,6 +293,9 @@ class BookCensus:
             self.Say("BOOT_MISMATCH", "damage", "the head deed's BOOT run, block %u for %u blocks and %u "
                      "bytes, is not one live file's whole ground (%u files fit it) — the loaders read it"
                      % (run[0], run[1], boot["kernel_bytes"], len(holders)))
+            # Its blocks are kept from being given all the same, as the
+            # kernel's census keeps them (book_ground.c BookGroundBoot).
+            self.Claim("boot", "BOOT", [run])
             return
         self.boot_fid = holders[0]
         self.Claim("boot", "BOOT", [run], partner=self.Label(holders[0]))
@@ -321,9 +386,11 @@ class BookCensus:
                 if r.stitches else "", RunsText(RunsNormal(r.quires))))
             used = RunsCount(RunsIntersect(RunsNormal([x for c in self.claims for x in c.runs]),
                                            [(g.data_block, g.data_end - g.data_block)]))
-            out.append("data run %u blocks from block %u — %u owned, %u free; %u live file(s), %u locked"
-                       % (g.data_end - g.data_block, g.data_block, used, g.data_end - g.data_block - used,
-                          len(m.files), len(m.locked)))
+            out.append("data run %u blocks from block %u — %u owned, %s; %u live file(s), %u locked"
+                       % (g.data_end - g.data_block, g.data_block, used,
+                          "%u free" % (g.data_end - g.data_block - used) if self.counted else
+                          "free not counted: a Tally of it names a bookmark, whose ground this census does not "
+                          "derive", len(m.files), len(m.locked)))
             out.append("the next file id %(next_fid)u, tag id %(next_tag)u, bookmark %(next_bookmark)u, "
                        "seq %(next_seq)u" % m.counts)
         if m.refusal is not None:
@@ -361,7 +428,7 @@ class BookCensus:
                      "far_end_sectors": st.far_end["sectors"] if st.far_end else None},
             "files": files,
             "census": {"data_block": g.data_block, "data_end": g.data_end,
-                       "free": RunsCount(self.free_runs),
+                       "free": RunsCount(self.free_runs) if self.counted else None,
                        "claims": [{"kind": c.kind, "label": c.label, "runs": [list(r) for r in c.runs]}
                                   for c in self.claims],
                        "held": [list(r) for r in self.held],

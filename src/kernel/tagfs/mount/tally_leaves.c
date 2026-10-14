@@ -392,7 +392,7 @@ error_t BookRangeRots(const TallyPlace* at, const char* why)
     g_book.said.rotten++;
     BookKeySay(&at->lo, at->has_lo, lo, sizeof(lo));
     BookKeySay(&at->hi, at->has_hi, hi, sizeof(hi));
-    kprintf("[TagFS] rotten range fid [%s, %s): %llu file(s) locked — the FILES range rots in both copies "
+    kprintf("[TagFS] rotten range fid [%s, %s): %llu file(s) locked — the FILES range rots in every copy "
             "(%s): none of them opens, their ids are not given again, their blocks are held\n", lo, hi,
             (unsigned long long)at->count, why);
     return OK;
@@ -525,10 +525,10 @@ static error_t LeavesRot(void* ctx, const TallyPlace* at, const char* why)
     else
         ksnprintf(hi, sizeof(hi), "the end");
     if (tree == TALLY_TAGS)
-        kprintf("[TagFS] the TAGS range [%s, %s) rots in both copies (%s): the names of %llu tag id(s) are "
+        kprintf("[TagFS] the TAGS range [%s, %s) rots in every copy (%s): the names of %llu tag id(s) are "
                 "lost — the files keep the ids, nameless\n", lo, hi, why, (unsigned long long)at->count);
     else
-        kprintf("[TagFS] the %s range [%s, %s) rots in both copies (%s)\n", TallyTreeName(tree), lo, hi, why);
+        kprintf("[TagFS] the %s range [%s, %s) rots in every copy (%s)\n", TallyTreeName(tree), lo, hi, why);
     return OK;
 }
 
