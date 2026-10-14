@@ -625,23 +625,41 @@ class Ribbon:
     def _Sew(self):
         """Rules (а)-(г) of §4.5 п.5, until none takes the next unit; a seq
         that rises at every stitch bounds the walk, and the data run's length
-        bounds it again (`hops ≥ data_blocks`, meta_pool_mount.c)."""
+        bounds it again (`hops ≥ data_blocks`, meta_pool_mount.c). When rule
+        (а) and rule (б) both give a whole stitch that names the last one by
+        its Clasp, the one of the larger seq is taken (§16.3 п.11, M-6): a
+        retry always takes a new, larger seq and carries the same records of
+        its cycle, and the waiters were answered by it — the other is the
+        pieces of a retry, said, and not applied."""
         hops = 0
         while self.end is not None and hops <= self.g.data_end:
             hops += 1
             u = FindUnit(self.g, self.end, self.next, self.seq)
-            if u is not None and u.Sound() and self._Follows(u, False):
-                self._Take(u)
-                continue
+            here = u if u is not None and u.Sound() and self._Follows(u, False) else None
             v = None
             if self.next and self.end.quire != self.next:
                 v = FindUnit(self.g, Place(self.next, 0), None, self.seq)
-                if v is not None and v.Sound() and self._Follows(v, True):
-                    self._Take(v)
-                    continue
+            there = v if v is not None and v.Sound() and self._Follows(v, True) else None
+            if here is not None or there is not None:
+                self._Take(self._Retried(here, there))
+                continue
             if not any(self._Closed(c, c is v) for c in (u, v)
                        if c is not None and not c.Sound() and not c.bad):
                 return
+
+    def _Retried(self, here, there):
+        """The stitch rule (а) gives (`here`) or rule (б) gives (`there`);
+        when both do, the one of the larger seq, the other said as the
+        pieces of a retry (§16.3 п.11) — no lie: the medium kept a write it
+        refused, and the cycle was written again."""
+        if here is None or there is None or here.seq == there.seq:
+            return here if here is not None else there
+        take, left = (here, there) if here.seq > there.seq else (there, here)
+        self.Say("DEAD_BRANCH", "note", "stitch seq %u at the end of the ribbon and seq %u at the start of its "
+                 "next_quire are both whole and both name stitch %u by its Clasp — a write the medium refused "
+                 "and kept, and its retry (M-6): seq %u, the larger, is taken; seq %u is the pieces of a retry "
+                 "and is not applied (§16.3 п.11)" % (here.seq, there.seq, self.seq, take.seq, left.seq))
+        return take
 
     def _Closed(self, u, at_next):
         """Rule (в): `u` closed and damaged when its StitchHead, if it reads,
@@ -746,10 +764,13 @@ class Ribbon:
                      "of its next_quire naming its Quire (§4.5 п.5): seq %s, settled, are not taken"
                      % (r.seq, L, seqs))
         else:
+            # A whole root naming a stitch of the chain before its end, by
+            # that stitch's own Clasp: two stitches name one, and the ribbon
+            # goes on by the one it holds — said loud, no lie shown (§16.3
+            # п.10). A retry is not this: it names the end (п.11).
             self.Say("DEAD_BRANCH", "damage", "the ribbon forks at stitch %u: seq %u names it by its Clasp, as "
-                     "seq %u, sewn on by rule (а), does — a retry after a write the medium refused and kept "
-                     "(M-6); seq %s, settled, are not taken" % (
-                         n, r.seq, next(u.seq for u in self.stitches if u.seq > n), seqs))
+                     "seq %u of the ribbon does, and lies past the ribbon's end — seq %s, settled, are not "
+                     "taken (§16.3 п.10)" % (n, r.seq, next(u.seq for u in self.stitches if u.seq > n), seqs))
 
     def _Lost(self, r, members, lost, seqs):
         """A branch some unit of which names one that settled — for it

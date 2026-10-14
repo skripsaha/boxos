@@ -198,8 +198,8 @@ def Headers(src, heard, count):
     if wrong is None:
         print("self-test: X3 alphabet — %s" % n)
         return False
-    count.Say(not wrong, "X3 alphabet — %u numbers, layouts and known answers held against volume_book.h "
-              "and volume_digest.h — %s" % (n, "as expected" if not wrong else "; ".join(wrong)))
+    count.Say(not wrong, "X3 alphabet — %u numbers, layouts and known answers held against volume_book.h, "
+              "volume_digest.h and volume_tally.h — %s" % (n, "as expected" if not wrong else "; ".join(wrong)))
     return True
 
 

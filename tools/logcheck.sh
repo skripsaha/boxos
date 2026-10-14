@@ -11,6 +11,10 @@
 #                         BIOS q35 and through UEFI, every write recorded:
 #                         refused in so many words, and not one write lands
 #                         in its ground
+#   logcheck.sh mkfs      no boot: the image `make VOLUME_FORMAT=v2` lays held to
+#                         volume-read — its self-test over mkfs's own book, its
+#                         files, its ground — and create_tagfs on grounds past
+#                         16 TiB, too small, and at the cargo's widths
 #   logcheck.sh yank      the stick is pulled WHILE the volume is being read.
 #                         The medium is throttled so the window exists at all
 #   logcheck.sh twoctrl   two host controllers, stick on the SECOND — the shape
@@ -88,6 +92,8 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/stand.sh"
 # The framerefuse scenario: tools/logcheck_framerefuse.sh.
 . "$(dirname "$0")/logcheck_framerefuse.sh"
+# The mkfs scenario: tools/logcheck_mkfs.sh.
+. "$(dirname "$0")/logcheck_mkfs.sh"
 
 # Waits for the SHELL BANNER, not for "userspace is starting".
 #
@@ -1257,17 +1263,17 @@ run_healthy() {
     # tree registers. The numbers are the code's, not a run's (K9): a build
     # without VOLUME_TESTS walks the eight suites of tests.h TEST_SUITES not
     # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
-    # book 7, integrity 3, use_context 5 TestCases, 30 run; the 11 whose
+    # book 14, integrity 3, use_context 5 TestCases, 37 run; the 11 whose
     # reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
-    # g_volume_tests_allowed), and the 19 that only read pass — none of them
+    # g_volume_tests_allowed), and the 26 that only read pass — none of them
     # stands aside on this stand's fresh image, whose first file wears a tag
     # (use_context_narrows). A test added or taken out moves this line in the
     # same commit.
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
     local said
     said=$(stand_summary "$L")
-    [ "$said" = "TagFS: 30 run, 19 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
-    chk $? "TagFS startup tests: the 30 this tree registers ran, 19 reads passed and 11 writes stood down (${said:-no summary})"
+    [ "$said" = "TagFS: 37 run, 26 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
+    chk $? "TagFS startup tests: the 37 this tree registers ran, 26 reads passed and 11 writes stood down (${said:-no summary})"
     lockrank_judge "$L" "healthy 1c"
 
     # (7) the kernel's ear works — mutation-proven harness, see commit
@@ -8940,7 +8946,7 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 30 (healthy says how) and
+# suite in tests.h TEST_SUITES — the plain build's 37 (healthy says how) and
 # the 199 of the stand's own twenty-seven suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
@@ -8951,7 +8957,7 @@ STAND_HELD="
 # run (K9): a suite that drops out of the walk is a test that stopped covering
 # anything, and the count is where that shows. How many of them pass and how
 # many stand aside is the road's — said, not pinned.
-STAND_RUN=229
+STAND_RUN=236
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -12119,6 +12125,7 @@ case "${1:-both}" in
     novolume) run_novolume ;;
     badpool)  run_badpool ;;
     framerefuse) run_framerefuse ;;
+    mkfs)     run_mkfs ;;
     uefi)     run_uefi ;;
     footing)  run_footing ;;
     stranger) run_stranger ;;
@@ -12225,7 +12232,7 @@ case "${1:-both}" in
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
     all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|nofsgsbase|badpool|framerefuse|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

@@ -342,8 +342,10 @@ int write_registry_chain(FILE* disk, uint32_t data_start_block,
 
         /* tag_id (uint16_t) — the kernel RESTORES the tag at this exact id on
          * load (tag_registry.c RegistryAdopt), so the intern order
-         * above IS the on-disk ID contract, not a throwaway field. */
-        memcpy(p, &g_tags[i].tag_id, 2); p += 2;
+         * above IS the on-disk ID contract, not a throwaway field. The cargo
+         * gives none past TAGFS_V1_TAG_ID_MOST, and no key past the u8. */
+        uint16_t tag_id = (uint16_t)g_tags[i].tag_id;
+        memcpy(p, &tag_id, 2); p += 2;
         /* flags (uint8_t) */
         *p++ = flags;
         /* key_len (uint8_t) */
@@ -406,19 +408,30 @@ static uint16_t meta_crc16(const uint8_t* data, uint32_t len) {
  */
 #define EXTENT_MAX_BLOCKS 0xFFFFu
 
-uint32_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
+static uint32_t V1Extents(const FileInfo* fi) {
+    return (fi->block_count + EXTENT_MAX_BLOCKS - 1) / EXTENT_MAX_BLOCKS;
+}
+
+/* The bytes a file's record takes: its head, two a tag, six an extent and
+ * its name — one expression, for the record packed below and for the one
+ * judged before the volume's first write (V1PackPlace), so the two cannot
+ * come to disagree. */
+uint64_t V1RecordBytes(const FileInfo* fi) {
+    return RECORD_HEADER_SIZE + 2u * (uint64_t)fi->tag_count +
+           (uint64_t)V1Extents(fi) * sizeof(FileExtent) + strlen(fi->filename);
+}
+
+uint64_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
     const char* fname = fi->filename;
     uint16_t name_len = (uint16_t)strlen(fname);
-    uint32_t extents  = (fi->block_count + EXTENT_MAX_BLOCKS - 1) / EXTENT_MAX_BLOCKS;
+    uint32_t extents  = V1Extents(fi);
 
-    uint32_t record_size = RECORD_HEADER_SIZE
-                         + fi->tag_count * (uint32_t)sizeof(uint16_t)
-                         + extents * (uint32_t)sizeof(FileExtent)
-                         + name_len;
+    uint64_t record_size = V1RecordBytes(fi);
     if (record_size > TAGFS_MPOOL_DATA_SIZE)
         return record_size;
     uint16_t record_len   = (uint16_t)record_size;
     uint16_t extent_count = (uint16_t)extents;
+    uint16_t tag_count    = (uint16_t)fi->tag_count;
 
     uint32_t pos = 0;
 
@@ -437,7 +450,7 @@ uint32_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
     /* modified_time */
     memcpy(buf + pos, &now, 8);                   pos += 8;
     /* tag_count */
-    memcpy(buf + pos, &fi->tag_count, 2);         pos += 2;
+    memcpy(buf + pos, &tag_count, 2);             pos += 2;
     /* extent_count */
     memcpy(buf + pos, &extent_count, 2);          pos += 2;
     /* name_len */
@@ -446,10 +459,10 @@ uint32_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
     uint16_t zero_crc = 0;
     memcpy(buf + pos, &zero_crc, 2);              pos += 2;
 
-    /* tag_ids[] */
-    if (fi->tag_count > 0) {
-        memcpy(buf + pos, fi->tag_ids, fi->tag_count * 2);
-        pos += fi->tag_count * 2;
+    /* tag_ids[] — each a u16: the cargo gives none past TAGFS_V1_TAG_ID_MOST */
+    for (uint32_t t = 0; t < fi->tag_count; t++) {
+        uint16_t tag_id = (uint16_t)fi->tag_ids[t];
+        memcpy(buf + pos, &tag_id, 2);            pos += 2;
     }
 
     /* extents[] — the file's one run, cut at the width of an extent */
@@ -470,7 +483,7 @@ uint32_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
     uint16_t crc = meta_crc16(buf, (uint32_t)record_len);
     memcpy(buf + RECORD_CRC_OFFSET, &crc, 2);
 
-    return (uint32_t)record_len;
+    return record_len;
 }
 
 /* ====================================================================
@@ -534,11 +547,11 @@ int say_the_ground(int pair_count, char* argv[], int first) {
      * would be a second thing to keep true. A record is never split, so a
      * block is closed as soon as the next record will not fit, and that is
      * counted here exactly as write_registry_chain counts it. */
-    seed_reserved_tags();
+    seed_reserved_tags(TAGFS_V1_TAG_ID_MOST);
     for (int i = 0; i < pair_count; i++) {
-        uint16_t* ids   = NULL;
-        uint16_t  count = 0;
-        parse_tags(argv[first + i * 2 + 1], argv[first + i * 2], &ids, &count);
+        uint32_t* ids   = NULL;
+        uint32_t  count = 0;
+        if (parse_tags(argv[first + i * 2 + 1], argv[first + i * 2], &ids, &count) != 0) return 1;
         free(ids);
     }
     {

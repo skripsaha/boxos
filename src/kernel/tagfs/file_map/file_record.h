@@ -2,6 +2,7 @@
 #define TAGFS_FILE_RECORD_H
 
 #include "../tagfs.h"
+#include "volume_tally.h"   /* PARCEL_STRIPS_MOST: the cut every writer of a Tally keeps alike */
 
 /*
  * FileRecord — what memory knows of one live file: a header (name, tags,
@@ -26,20 +27,19 @@
  * A reader holds a reference on the record for as long as it reads, so a
  * writer that replaces the record never frees what the reader walks.
  *
- * Why 128: a DATA run in the book's own form takes at most 5 + 10 + 10 bytes
- * (§2.8, head, zigzag start, birth_delta), so at most ~155 fit the useful part
- * of a Sheet whatever the numbers grow to (§2.9 :625): a Parcel of memory is
- * one Parcel of the medium, and the book never has to cut one.
+ * Why 128 is the format's to say (volume_tally.h, PARCEL_STRIPS_MOST): a
+ * Parcel of memory is one Parcel of the medium, cut the same way by every
+ * writer of a Tally, and the book never has to cut one.
  *
  * A record keeps the Strips exactly as its writer gave them — two Strips that
  * meet on the medium stay two: format v1's packer counts extents off them
  * (PackV1), and the record a v1 Ink packs must be the one it always packed.
  */
 
-/* The most Strips a Parcel holds; a Parcel of a file of more than one holds
- * at least PARCEL_STRIPS_LEAST — fewer is joined to a neighbour by the splice
- * that leaves it so (the boundary is the writer's to choose, §2.9 :651-652). */
-#define PARCEL_STRIPS_MOST   128u
+/* A Parcel holds at most PARCEL_STRIPS_MOST Strips; a Parcel of a file of
+ * more than one holds at least PARCEL_STRIPS_LEAST — fewer is joined to a
+ * neighbour by the splice that leaves it so (the boundary is the writer's to
+ * choose, §2.9 :651-652). */
 #define PARCEL_STRIPS_LEAST  32u
 
 /* A Tract node names at most TRACT_KIDS_MOST, and every node but the root at

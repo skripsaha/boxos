@@ -36,8 +36,26 @@ def Pristine(bt):
          lambda c: {"front", "spine", "tally", "ribbon", "file", "boot", "far_deed"} <= c.Kinds())])]
 
 
+def LaidAfter(bt, c):
+    """Where a binder lays the book of what the base's mount read from
+    scratch, against where it lies (§16.3 п.5): Tally-Quire A at the first
+    grain at or past the end of the files — past the landings' room too, on
+    a base laid over a format-v1 image — B as many grains on, the ribbon's
+    Quire and its next_quire the two grains after B. [] when they agree."""
+    files = c.mount.tally.content.files.values()
+    after = bt.plan.after
+    if after is None:
+        after = max([c.g.data_block] + [r.start + r.count for fs in files for r in fs.runs if not r.hole])
+    fresh = binder.Bind(c.mount.tally.content, c.g, after=after)
+    want = (fresh.a, fresh.b, tuple(fresh.ribbon), tuple(fresh.next))
+    have = (bt.plan.a, bt.plan.b, tuple(bt.plan.ribbon), tuple(bt.plan.next))
+    return [] if want == have else ["laid from block %u: A %u, B %u, ribbon %s, next %s; it lies at A %u, B %u, "
+                                    "ribbon %s, next %s" % ((after,) + want + have)]
+
+
 def Circles(bt):
-    """B0b, B0c: what is read back and written again is the same bytes."""
+    """B0b, B0c, B0d: what is read back and written again is the same bytes,
+    and the book lies where a binder lays it."""
     S, L = bt.S, bt.L
     gone = max(fid for fid in bt.content.files if fid not in (S.fid, L.fid, bt.c0.boot_fid))
     n = S.Blocks()
@@ -67,6 +85,11 @@ def Circles(bt):
         Case("B0b the tally read back is bound again byte for byte", lambda o: None,
              checks=[("every node, both copies, and slot 0 come out the same",
                       lambda c: binder.Circle(c.medium, c.mount) == [])]),
+        Case("B0d the book lies where a binder lays it", lambda o: None, checks=[
+            ("Tally-Quire A at the first grain past the files, B k grains on, the ribbon and its next_quire "
+             "the grains after (§16.3 п.5)", lambda c: LaidAfter(bt, c) == []),
+            ("slot 0 was made at the Deed's BORN, in nanoseconds",
+             lambda c: c.mount.slot.made_ns == c.g.deed["born"]["created_unix"] * 10 ** 9)]),
         Case("B0c every record sewn, read back and sewn again is byte for byte",
              lambda o: sewn.setdefault("s", StitchCircle(o)), must={"UNDER_GLASS"}, checks=[
                  ("both stitches are taken whole and each record decodes to what was sewn",
@@ -316,6 +339,16 @@ def ElementCases(bt):
                  ("%s is locked: its Parcels do not cover block 0" % Label(S),
                   lambda c: S.fid in c.mount.locked and Found(c, "PARCEL_GAP", "fid %u" % S.fid)),
                  ("the blocks it names are held", lambda c: c.held == [(run.start, run.count)])]),
+        Case("B7b a run born before seq 0", lambda o: Parcel(o, [tally.Run(False, run.start, run.count, -1)]),
+             must={"PARCEL_GAP"}, checks=[
+                 ("%s is locked: its Parcel does not read, as the kernel's codec refuses it (TallyRunGet)" % Label(S),
+                  lambda c: S.fid in c.mount.locked and Found(c, "PARCEL_GAP", "fid %u" % S.fid, "before seq 0"))]),
+        Case("B7c a run past block 2^64 - 1",
+             lambda o: Parcel(o, [tally.Run(False, 1 << 62, (1 << 62) - 1, run.birth),
+                                  tally.Run(False, bookread.U64 - 1, 3, run.birth)]),
+             must={"PARCEL_GAP"}, checks=[
+                 ("%s is locked: its Parcel does not read, as the kernel's codec refuses it (TallyRunGet)" % Label(S),
+                  lambda c: S.fid in c.mount.locked and Found(c, "PARCEL_GAP", "fid %u" % S.fid, "2^64 - 1"))]),
         Case("B8 two files name one block",
              lambda o: Parcel(o, [tally.Run(False, L.runs[0].start, S.Blocks(), run.birth)]),
              must={"DOUBLE_OWNER"}, checks=[

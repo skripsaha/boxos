@@ -5,7 +5,7 @@ import importlib.util
 import os
 import re
 
-from . import binder, bookread, ondisk
+from . import binder, bookread, ondisk, tally
 from .ground_owners import GROUND_OWNERS
 
 # ---------------------------------------------------------------------------
@@ -213,19 +213,22 @@ def OwnersCheck(src, heard):
 
 def AlphabetCheck(src):
     """What is wrong with bookread.py against volume_book.h and volume_digest.h,
-    read the way X1 reads its headers, and how many things were held — and
-    the binder's cut of a file into Parcels against the kernel's
-    (file_map/file_record.h PARCEL_STRIPS_MOST, §16.1 п.7)."""
+    and with tally.py against volume_tally.h, read the way X1 reads its
+    headers, and how many things were held — and the binder's two rules of
+    writing every writer keeps alike (volume_tally.h: the cut of a file into
+    Parcels, §16.1 п.7, and the most digests an element carries, §16.3 п.1)."""
     inc = os.path.join(src, "include")
-    paths = [os.path.join(inc, n) for n in ("volume_deed.h", "volume_book.h", "volume_digest.h")] + \
-        [os.path.join(src, "kernel", "tagfs", "file_map", "file_record.h")]
+    paths = [os.path.join(inc, n) for n in ("volume_deed.h", "volume_book.h", "volume_digest.h",
+                                            "volume_tally.h")]
     if not all(os.path.exists(p) for p in paths):
         return None, "self-test needs the source tree beside the tool (src/ next to tools/)"
     text, d = [open(p, encoding="utf-8", errors="replace").read() for p in paths], {}
     for t in text:
         d.update(Defines(t, d))
     wrong, n = bookread.AlphabetCheck(d, Structs(text[1], d), text[1])
-    if binder.PARCEL_STRIPS_MOST != d.get("PARCEL_STRIPS_MOST"):
-        wrong.append("PARCEL_STRIPS_MOST: file_record.h says %r and binder.py %r"
-                     % (d.get("PARCEL_STRIPS_MOST"), binder.PARCEL_STRIPS_MOST))
-    return wrong, n + 1
+    more, m = tally.TallyCheck(d)
+    wrong += more
+    for py, c in ((binder.PARCEL_STRIPS_MOST, "PARCEL_STRIPS_MOST"), (binder.DIGEST_ITEM_MOST, "DIGEST_ITEM_MOST")):
+        if py != d.get(c):
+            wrong.append("%s: volume_tally.h says %r and binder.py %r" % (c, d.get(c), py))
+    return wrong, n + m + 2

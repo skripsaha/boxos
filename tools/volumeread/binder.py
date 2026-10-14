@@ -22,7 +22,7 @@ from .tally import (DIGESTS, FILES, NODE_HEAD, SHEET_PAYLOAD, TAGS, TREE_NAMES, 
                     DigestsEncode, FileHeadEncode, InnerEncode, ItemBytes, KeyFull, NodeSectors, NodeStream,
                     ParcelEncode, SlotBlock, SlotSectors, TagEncode)
 
-PARCEL_STRIPS_MOST = 128             # file_map/file_record.h:42 PARCEL_STRIPS_MOST
+PARCEL_STRIPS_MOST = 128             # volume_tally.h PARCEL_STRIPS_MOST
 
 # The most digests one DIGESTS element carries: the largest n for which a
 # NodeHead and one element fit one Sheet whatever the numbers are. NodeHead
@@ -30,7 +30,7 @@ PARCEL_STRIPS_MOST = 128             # file_map/file_record.h:42 PARCEL_STRIPS_M
 # first key 10 = 15 bytes. The element: len 2 + key 1 (the first element's
 # key is written as its distance from the NodeHead's, 0) + n 2 + 8n. 15 + 5 +
 # 8n <= 3904 holds to n = 485 (3900 bytes) and not at 486 (3908).
-DIGEST_ITEM_MOST = 485
+DIGEST_ITEM_MOST = 485               # volume_tally.h DIGEST_ITEM_MOST
 
 
 def NodeWrite(over, g, seq, blocks, sheets, tree, level, items):

@@ -62,6 +62,12 @@
 #define TAGFS_MPOOL_DATA_SIZE      4080
 #define TAGFS_FTABLE_PER_BLOCK     510
 
+/* The highest tag id format v1 carries (plot_width.h): a record's tags and
+ * the registry's records hold an id in a u16, and a kernel from before tag
+ * ids were u32 read bit 15 as its Logbook's. The cargo interns none past it
+ * (seed_reserved_tags). */
+#define TAGFS_V1_TAG_ID_MOST  0x7FFEu
+
 #define RECORD_HEADER_SIZE    42   /* metadata pool record header (40 fields + 2 CRC16) */
 #define RECORD_CRC_OFFSET     40   /* CRC16 stored at bytes [40..41] of packed record */
 #define MPOOL_BLOCK_HEADER    16   /* MetaPoolBlock header before payload */
@@ -146,6 +152,7 @@ int      write_integrity_map(FILE* disk, uint32_t data_start_block, uint32_t fir
 int      write_registry_chain(FILE* disk, uint32_t data_start_block,
                               uint32_t* next_free, uint32_t total_blocks,
                               uint32_t* out_blocks, SettleMark* mark);
-uint32_t pack_metadata_record(uint8_t* buf, const FileInfo* fi);
+uint64_t V1RecordBytes(const FileInfo* fi);
+uint64_t pack_metadata_record(uint8_t* buf, const FileInfo* fi);
 
 #endif /* CREATE_TAGFS_V1_H */

@@ -477,4 +477,25 @@ static inline int BookGroundOnAtom(uint64_t start, uint64_t l0, uint32_t atom)
     return (start >= l0 ? start - l0 : l0 - start) % grid == 0;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Sealing: the writer's side of BookSectorCheck                             */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Seal a sector a writer has filled: `head` (its crc32c left aside) is put in
+ * its first 24 bytes, then the sum of all of it at `vlba` of the volume
+ * `uuid`, little-endian as every number of the book. The payload, bytes
+ * 24..511, is the caller's and is not touched. A writer of the book seals with
+ * this and nothing of its own, so what it writes the readers above hold by the
+ * one rule.
+ */
+static inline void BookSectorSeal(uint8_t *sector, const uint8_t uuid[16], uint64_t vlba,
+                                  const BookSectorHead *head)
+{
+    const uint8_t *from = (const uint8_t *)head;
+    for (uint32_t i = 0; i < BOOK_HEAD_BYTES; i++) sector[i] = from[i];
+    uint32_t sum = ~BookCrc32cOn(BookSectorSeed(uuid, vlba), sector + 4, BOOK_SECTOR_BYTES - 4u);
+    for (uint32_t i = 0; i < 4u; i++) sector[i] = (uint8_t)(sum >> (8u * i));
+}
+
 #endif /* VOLUME_BOOK_H */

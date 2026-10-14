@@ -6,8 +6,9 @@
  * packed with (create_tagfs_cargo.c), the format-v1 writer
  * (create_tagfs_v1.h, create_tagfs_v1.c, create_tagfs_v1_pack.c), and format
  * v2's part (create_tagfs_v2.c) — --frame-only, a format-v2 Deed with no book
- * behind it, because nothing writes a book yet. The format parts share
- * nothing with each other; everything they both stand on is named here, once.
+ * behind it, and --v2, a format-v2 volume with its book bound by
+ * create_tagfs_bind.c (create_tagfs_bind.h). The format parts share nothing
+ * with each other; everything they both stand on is named here, once.
  */
 
 #ifndef CREATE_TAGFS_H
@@ -37,7 +38,7 @@
 typedef struct {
     char*    key;
     char*    value;   /* NULL for label tags */
-    uint16_t tag_id;
+    uint32_t tag_id;
 } TagEntry;
 
 extern TagEntry* g_tags;
@@ -50,8 +51,8 @@ typedef struct {
     uint64_t    file_size;
     uint32_t    start_block;
     uint32_t    block_count;
-    uint16_t*   tag_ids;
-    uint16_t    tag_count;
+    uint32_t*   tag_ids;
+    uint32_t    tag_count;
 } FileInfo;
 
 /* ====================================================================
@@ -71,12 +72,23 @@ VolumeGeometry DeedGeometry(void);
 
 /* ====================================================================
  * The cargo (create_tagfs_cargo.c)
+ *
+ * A tag the kernel can hold, whichever format its volume is in — the
+ * widths of tag_spelling.h, which a host tool cannot include: a key of at
+ * most TAG_KEY_WIDTH bytes, and a key and value together of at most
+ * TAG_TEXT_ROOM, one registry record's room past its six bytes of head (the
+ * ':' between them is not stored). A tag wider than these is refused by
+ * the cargo, before the first write: format v1 would cut it (a u8 key_len),
+ * and a format-v2 volume carrying it could only be read (tally.py TagGlass).
  * ==================================================================== */
 
-void         seed_reserved_tags(void);
-void         parse_tags(const char* tag_string, const char* filename,
-                        uint16_t** out_ids, uint16_t* out_count);
-int          KernelTagged(const uint16_t* ids, uint16_t count);
+#define TAG_KEY_WIDTH   255u
+#define TAG_TEXT_ROOM   4074u
+
+void         seed_reserved_tags(uint32_t id_most);
+int          parse_tags(const char* tag_string, const char* filename,
+                        uint32_t** out_ids, uint32_t* out_count);
+int          KernelTagged(const uint32_t* ids, uint32_t count);
 VolumePacked PackedStamp(int file_count, char* argv[], int first,
                          const char* kernel_path);
 void         CargoRelease(void);
@@ -89,7 +101,9 @@ void         CargoRelease(void);
 int say_the_ground(int pair_count, char* argv[], int first);
 int V1PackMake(const char* disk_path, int file_count, char* argv[], int first);
 
-/* create_tagfs_v2.c */
+/* create_tagfs_v2.c — --frame-only, --v2 and --ground --v2 */
 int FrameOnlyMake(const char* disk_path, int file_count, char* argv[], int first);
+int V2BindMake(const char* disk_path, int file_count, char* argv[], int first);
+int V2GroundSay(int file_count, char* argv[], int first);
 
 #endif /* CREATE_TAGFS_H */
