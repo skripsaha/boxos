@@ -13,8 +13,8 @@
 #
 # The kernel reads the Spine's slots, the Tally of the newest one that reads
 # and the ribbon sewn past it (mount/book_mount.c, ribbon_collate.c,
-# ribbon_transcribe.c), and writes nothing: every book it mounts stands under
-# glass. For every landing below, volume-read's census — the second reader,
+# ribbon_transcribe.c), and the mount writes nothing — a boot that stops
+# without a halt writes nothing either. For every landing below, volume-read's census — the second reader,
 # written apart from the kernel's — says in numbers what the kernel's lines
 # must say: refused and in which words, or mounted on which slot with how many
 # files, which locked by fid, which ranges rotten, which copies read in the
@@ -119,6 +119,33 @@ say(have == want, "its block map derives data blocks, free and files %s; the cen
 m = re.search(r"^\[TagFS\] the next file id \d+, tag id \d+, bookmark \d+, seq (\d+)", log, re.M)
 have = int(m.group(1)) if m else None
 say(have == k["next_seq"], "it gives the next seq %s; the census predicted %u" % (have, k["next_seq"]))
+CENSUS_BOOK_EOF
+    local rc=$?
+    [ $rc = 0 ] && census_book_judge_ribbon "$1" && [ -s "$SCRATCH/census.$1.verdict" ] && return 0
+    echo "bad the judge could not read $SCRATCH/census.$1.json against $SCRATCH/serial.$1.log: $(tail -1 "$SCRATCH/census.$1.verdict")" \
+        > "$SCRATCH/census.$1.verdict"
+}
+
+# census_book_judge_ribbon NAME — the second half of the judge (above): what
+# the kernel says of the ribbon it walked and of the book as memory holds it —
+# codes, stitches sewn on, MEDIUM_LIED, CLEAN, the price of the check on a
+# medium that lied, the fallow ground, the print — appended to the verdict.
+census_book_judge_ribbon() {
+    python3 - "$SCRATCH/census.$1.json" "$SCRATCH/serial.$1.log" \
+        >>"$SCRATCH/census.$1.verdict" 2>&1 <<'CENSUS_BOOK_EOF'
+import json, re, sys
+pred = json.load(open(sys.argv[1]))
+log = open(sys.argv[2], errors="replace").read()
+k = pred["kernel"]
+
+def say(held, text):
+    print(("ok " if held else "bad ") + text)
+
+def count(pattern):
+    return len(re.findall(pattern, log, re.M))
+
+if not k["mounts"]:
+    sys.exit(0)
 ribbon = {}
 for code in re.findall(r"^\[TagFS\] ribbon ([A-Z_]+): ", log, re.M):
     ribbon[code] = ribbon.get(code, 0) + 1
@@ -131,6 +158,15 @@ want = (k["sewn"], k["last"], k["applied"])
 say(have == want, "it sews on, ends on and applies %s stitch(es); the census predicted %s" % (have, want))
 lied = re.search(r"^\[TagFS\] MEDIUM_LIED: ", log, re.M) is not None
 say(lied == k["lied"], "it says MEDIUM_LIED: %s; the census predicted %s" % (lied, k["lied"]))
+clean = re.search(r"^\[TagFS\] the last stitch of the ribbon says CLEAN", log, re.M) is not None
+say(clean == k.get("clean", False), "it reads the last stitch CLEAN: %s; the census predicted %s"
+    % (clean, k.get("clean", False)))
+m = re.search(r"^\[TagFS\] the medium lied: (\d+) fresh block\(s\) of the newest (\d+) stitch\(es\) are read ", log, re.M)
+have = (int(m.group(1)), int(m.group(2))) if m else None
+want = tuple(k["lied_check"]) if k.get("lied_check") else None
+say(have == want, "on a medium that lied it says the price of the check before a block is read — %s; the census "
+    "predicted %s" % ("%u block(s) of %u stitch(es)" % have if have else "no line",
+                      "%u block(s) of %u stitch(es)" % want if want else "no line"))
 m = re.search(r"^\[TagFS\] (\d+) block\(s\) the ribbon let go lie fallow", log, re.M)
 have = int(m.group(1)) if m else 0
 say(have == k["fallow"], "it lets %u block(s) lie fallow; the census predicted %u" % (have, k["fallow"]))
@@ -142,10 +178,6 @@ say(have == want, "memory holds the files — names, sizes, tags, runs — and t
     "%s; the census predicted %s" % ("files 0x%08X, use %u byte(s) 0x%08X" % have if have else "no print line",
                                      "files 0x%08X, use %u byte(s) 0x%08X" % want))
 CENSUS_BOOK_EOF
-    local rc=$?
-    [ $rc = 0 ] && [ -s "$SCRATCH/census.$1.verdict" ] && return 0
-    echo "bad the judge could not read $SCRATCH/census.$1.json against $SCRATCH/serial.$1.log: $(tail -1 "$SCRATCH/census.$1.verdict")" \
-        > "$SCRATCH/census.$1.verdict"
 }
 
 # census_book_slipped NAME — the landing booted again from its planted image,
@@ -220,28 +252,31 @@ census_book() {
 # whose reads go through the port, parked on each answer, so the rotten block
 # is refused on the port's road too (stand_tally_rot_three_paths), and every
 # door below the glass is knocked at in a kernel that stops at a defect. On a
-# book the kernel writes nothing, so every test that writes through TagFS —
-# every test written for any format — stands aside, counted (K9): the
-# stand_tally suite is what runs, and the suites written for any format that
-# only read.
+# book the kernel writes stitches of names and memory and no change to a
+# file, so every test that writes through TagFS written for any format stands
+# aside, counted (K9): the stand_tally, stand_ribbon and stand_stitch suites
+# are what runs, and the suites written for any format that only read.
 #
 # Judged: the STAND_RUN tests this tree registers walked, nothing failed,
-# nothing held; every stand_tally test ran — none stood down but the leaf on
-# an image whose FILES is one leaf; the port's road of the rotten block taken
+# nothing held; every book test ran — none stood down but the leaf on an
+# image whose FILES is one leaf; the port's road of the rotten block taken
 # on the AHCI port and said to stand aside on the ATA disk, never skipped in
-# silence; the line that says the volume stands under glass; a block with no
-# digest named; the four doors below the glass knocked at and refused; the
-# book's medium coming back read again; no panic, no mirror defect and no
-# defect of TagFS or Settle said — a door below the glass reached by a road
-# nobody shut, code of format v1 asking for a LAYOUT; BLOCKFAIL refusing as
-# many reads as the tests that arm it refuse on each boot; the halt saying
-# there was nothing to make durable; and the block map derived from the
+# silence; the lines that say what the volume promises and that no Tally is
+# written, and the one refusal of a change to a file; a block with no digest
+# named; the four doors below the glass knocked at and refused; the book's
+# medium coming back read again; no panic, no mirror defect and no defect of
+# TagFS or Settle said — a door below the glass reached by a road nobody
+# shut, code of format v1 asking for a LAYOUT; BLOCKFAIL refusing as many
+# commands as the tests that arm it refuse on each boot — the refusals of the
+# tests whose book then takes no write as many as their lines say; the halt
+# laying its stitch and syncing the volume; and the block map derived from the
 # owners: a heap refusing it a page refuses the mount once, the mixed windows
 # named, a claim on taken blocks and a release of a free one named as they
 # are inserted — past the bound, counted, said once when the counting begins
 # and the count when the map is let go — and the boot's mount saying the data
 # blocks, free and files volume-read's census predicts of the image booted,
-# every mount after it the same free.
+# every mount after it the same free — but those a test of the ribbon makes
+# while its own stitches lie on the medium.
 #
 #   test                                        image   padded   uefi
 #   stand_blockfail_flush_refused                  1        1       1   the flush it asks for
@@ -250,13 +285,23 @@ census_book() {
 #   stand_blockfail_two_ranges                     2        2       2   a read in each range
 #   stand_roadstead_refusal_rings_once             0        0       1   an AHCI port's alone
 #   stand_tally_rotten_leaf_locked                 0       18       0   copy 1 then copy 2: the run, then each sector
-#   total                                          5       23       6
+#   stand_stitch_retry_atom                        1        1       1   the stitch's first atom
+#   stand_stitch_retry_flush                       1        1       1   the flush after the stitch
+#   stand_blockfail_refused_writes                 4        4       4   two writes into each range
+#   total                                         11       29      12
+#   stand_stitch_refused_everywhere                N        N       N   every attempt, as many as its line says
+#   stand_stitch_retry_quire_entered               N        N       N   the first stitch of a Quire: its line, 1
+#   stand_stitch_retry_refused_twice               N        N       N   a stitch and its retry: its line, 2
 # ---------------------------------------------------------------------------
 
-STAND_BOOK_BLOCKFAILS=5
-STAND_BOOK_PADDED_BLOCKFAILS=23
-STAND_BOOK_UEFI_BLOCKFAILS=6
-STAND_BOOK_HALT='^\[HALT\] the volume on seat [0-9]+ stands under glass: this kernel wrote nothing to it'
+STAND_BOOK_BLOCKFAILS=11
+STAND_BOOK_PADDED_BLOCKFAILS=29
+STAND_BOOK_UEFI_BLOCKFAILS=12
+STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
+STAND_BOOK_REFUSED='^\[TagFS\] the book takes no write: ([0-9]+) refusal\(s\) in a row'
+STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes the names of tags and the memory of its Use Context'
+STAND_BOOK_NO_TALLY='^\[TagFS\] no Tally is written by this kernel: the ribbon is read whole at every mount'
+STAND_BOOK_FILES_REFUSED='^\[TagFS\] this kernel writes the names of tags and the volume.s memory into a format-v2 book, and not yet a change to a file'
 STAND_BOOK_TESTS="stand_tally_files_read_whole stand_tally_mount_writes_nothing stand_tally_copy_one_rotten
 stand_tally_rotten_leaf_locked stand_tally_writes_refused stand_tally_rot_three_paths
 stand_tally_undigested_refused stand_tally_length_asked stand_tally_lower_doors_refused
@@ -264,10 +309,17 @@ stand_tally_medium_returns
 stand_tally_live_without_rows stand_tally_map_holds stand_tally_map_claim_named
 stand_tally_map_short_of_memory stand_blockfail_two_ranges
 stand_ribbon_slip_three_roads stand_ribbon_torn_tail stand_ribbon_next_quire stand_ribbon_closed_damaged
-stand_ribbon_dead_branch stand_ribbon_undone"
+stand_ribbon_dead_branch stand_ribbon_undone
+stand_stitch_answers_after_flush stand_stitch_use_context stand_stitch_coined stand_stitch_halt_clean
+stand_stitch_retry_atom stand_stitch_retry_flush stand_stitch_refused_everywhere stand_stitch_ribbon_runs_out
+stand_stitch_tally_cost stand_stitch_medium_lied stand_stitch_replug_loses stand_blockfail_refused_writes
+stand_stitch_retry_quire_entered stand_stitch_retry_refused_twice stand_stitch_runs_on_leaves
+stand_stitch_tally_cost_long stand_stitch_refused_names_nothing stand_registry_counts_from_nothing"
 STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_(tally_rot_three_paths|ribbon_slip_three_roads): the port.s road stands aside — '
 STAND_BOOK_RIBBON_LAID='[TESTS] stand_ribbon: stitches laid past the Tally'
 STAND_BOOK_RIBBON_BACK='[TESTS] stand_ribbon: what the test laid is put back'
+STAND_BOOK_STITCH_LAID='[TESTS] stand_stitch: the ribbon is sewn past where it stood'
+STAND_BOOK_STITCH_BACK='[TESTS] stand_stitch: the ribbon is put back as it was found'
 STAND_BOOK_DEFECT='\[(TagFS|Settle)\] DEFECT'
 STAND_BOOK_MAP_SHORT='^\[TagFS\] this volume is NOT mounted: its block map is short of memory: [1-9][0-9]* mixed window'
 STAND_BOOK_MAP_MET='^\[TagFS FSCK\] the run of 3 block\(s\) from data block [0-9]+ that the tally claims meets 2 taken already'
@@ -303,8 +355,13 @@ stand_book_judge() {
         [ "$got" = 2 ]
         chk $? "stand: $what — the port's road of the rotten block and of the Slips stands aside, said ($got: $(grep -aoE 'the port.s road stands aside — [^.]*' "$L" | head -1))"
     fi
-    grep -aqF "[TagFS] the volume may only be read: this kernel reads format-v2 books and writes none of them" "$L"
-    chk $? "stand: $what — the book stands under glass, said"
+    grep -aqE "$STAND_BOOK_PROMISE" "$L" && grep -aqE "$STAND_BOOK_NO_TALLY" "$L"
+    chk $? "stand: $what — the mount says what the book takes and that no Tally is written"
+    got=$(grep -acE "$STAND_BOOK_FILES_REFUSED" "$L")
+    [ "$got" -ge 1 ]
+    chk $? "stand: $what — a change to a file is refused in so many words ($got)"
+    ! grep -aqF "[TagFS] the volume may only be read: this kernel reads format-v2 books" "$L"
+    chk $? "stand: $what — no book stands under glass for being a book"
     grep -aqE '^\[Integrity\] block [0-9]+ carries no digest in its volume.s Tally' "$L"
     chk $? "stand: $what — a block with no digest is named, its read refused"
     got=$(grep -acE '^\[TESTS\] .*, knocked at by the stand under glass, refused before a byte' "$L")
@@ -319,10 +376,11 @@ stand_book_judge() {
     ! grep -aqE "$STAND_BOOK_DEFECT" "$L"
     chk $? "stand: $what — no defect of TagFS said: no door below the glass reached by a road nobody shut, no code of format v1 asked for a LAYOUT, no cycle asked ($(grep -aE "$STAND_BOOK_DEFECT" "$L" | head -1 | cut -c1-120))"
     got=$(grep -ac '^\[BLOCKFAIL\] seat [0-9]*: ' "$L")
-    [ "$got" = "$want" ]
-    chk $? "stand: $what — BLOCKFAIL refused $got read(s), as many as the tests that arm it refuse here ($want)"
+    t=$(grep -aoE "$STAND_BOOK_REFUSED" "$L" | sed -E "s/$STAND_BOOK_REFUSED/\1/" | awk '{ n += $1 } END { print n + 0 }')
+    [ "$got" = "$((want + t))" ] && [ "$t" -gt 0 ]
+    chk $? "stand: $what — BLOCKFAIL refused $got command(s), as many as the tests that arm it refuse here ($want, and $t of the tests whose book then takes no write, as their lines say)"
     grep -aqE "$STAND_BOOK_HALT" "$L"
-    chk $? "stand: $what — the halt through bye says the volume was given nothing to make durable"
+    chk $? "stand: $what — the halt through bye lays its stitch and syncs the volume"
     got=$(grep -acE "$STAND_BOOK_MAP_SHORT" "$L")
     [ "$got" = 1 ]
     chk $? "stand: $what — a heap refusing the block map its page refuses the mount once, naming the mixed windows ($got: $(grep -aoE 'its block map is short of memory: [^—]*' "$L" | head -1))"
@@ -335,7 +393,9 @@ stand_book_judge() {
 k = json.load(sys.stdin)["kernel"]
 print("%s %s %s" % (k["data_blocks"], k["free"], k["files"]))' 2>/dev/null)
     got=$(awk -v laid="$STAND_BOOK_RIBBON_LAID" -v back="$STAND_BOOK_RIBBON_BACK" \
-              'index($0, laid) == 1 { sewn = 1 } index($0, back) == 1 { sewn = 0 } !sewn' "$L" |
+              -v sewing="$STAND_BOOK_STITCH_LAID" -v sewn_back="$STAND_BOOK_STITCH_BACK" \
+              'index($0, laid) == 1 || index($0, sewing) == 1 { sewn = 1 }
+               index($0, back) == 1 || index($0, sewn_back) == 1 { sewn = 0 } !sewn' "$L" |
           grep -aE '^\[TagFS\] [0-9]+ data blocks, [0-9]+ free, [0-9]+ files' |
           sed -E 's/^\[TagFS\] ([0-9]+) data blocks, ([0-9]+) free, ([0-9]+) files.*/\1 \2 \3/')
     [ -n "$want" ] && [ "$(echo "$got" | head -1)" = "$want" ] &&
@@ -378,4 +438,90 @@ stand_book() {
     STAND_FORMAT=$keep
     lockrank_judge "$SCRATCH/serial.stand_book.log $SCRATCH/serial.stand_book_padded.log $SCRATCH/serial.stand_book_uefi.log" \
         "stand, the book"
+}
+
+# ---------------------------------------------------------------------------
+# book_circle: the book the kernel writes, read back by both readers
+#
+# What the kernel lays on a book is read again by the kernel's own reader and
+# by volume-read's, written apart from it (settle/sewing.c against
+# stitch.py / bookmount.py). A plain image of format v2 is booted; in the guest
+# the person says a Use Context (`use circle sewn`) — a stitch with its
+# UseContext, the tags the boot gave ids in Coineds — and stops the machine
+# (`bye`), whose halt lays its last stitch CLEAN. The image the machine left is
+# then held: volume-read finds it consistent; its census says what the next
+# mount must — the stitches sewn on and the last, the Use Context as said,
+# CLEAN on the last — and the next boot of the same image says exactly that in
+# its own lines (census_book_judge), the print of what memory holds included.
+# ---------------------------------------------------------------------------
+
+BOOK_CIRCLE_USE="circle,sewn"
+
+book_circle() {
+    local name=book_circle img="$SCRATCH/circle.img" json="$SCRATCH/census.book_circle.json" line rc
+    echo "== book circle: what the kernel writes on a book, read back by both readers =="
+    rm -f build/boxos.img "$img" "$SCRATCH/serial.book_circle_write.log" "$SCRATCH/serial.$name.log"
+    if ! build_with_key VOLUME_FORMAT=v2; then
+        bad "circle: make VOLUME_FORMAT=v2 does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+        return
+    fi
+    cp build/boxos.img "$img"
+    make run-stop >/dev/null 2>&1
+    if ! make run-bg BOOTDISK="$img" >"$SCRATCH/circle.run-bg" 2>&1; then
+        harness "circle: run-bg would not start the book's image: $(tail -1 "$SCRATCH/circle.run-bg")"
+        return
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+        type_line "use circle sewn" && wait_for_prompt && type_line "bye" &&
+        wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
+    rc=$?
+    sleep 1
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.book_circle_write.log"
+    [ $rc = 0 ] && grep -aq '^\[HALT\] Storage sync complete' "$SCRATCH/serial.book_circle_write.log"
+    chk $? "circle: the guest says a Use Context and stops, the halt syncing the volume ($(grep -aE '^\[HALT\] (Storage sync complete|.*NOT MADE DURABLE|.*DID NOT WRITE)' "$SCRATCH/serial.book_circle_write.log" | head -1 | cut -c1-100))"
+    python3 tools/volume-read.py "$img" check --json >"$json" 2>"$SCRATCH/circle.check.err"
+    chk $? "circle: volume-read finds the book the kernel wrote consistent ($(python3 -c 'import json, sys
+print(json.load(open(sys.argv[1])).get("verdict", "no verdict"))' "$json" 2>/dev/null))"
+    python3 - "$json" "$BOOK_CIRCLE_USE" >"$SCRATCH/circle.verdict" 2>&1 <<'CIRCLE_EOF'
+import json, sys
+sys.path.insert(0, "tools")
+from volumeread import bookread
+k = json.load(open(sys.argv[1]))["kernel"]
+said = sys.argv[2].encode()
+def say(held, text):
+    print(("ok " if held else "bad ") + text)
+say(k["mounts"] and k["glass"] == 0, "the book mounts, with no reason to be only read — %s" % (k.get("refusal") or "%u reason(s)" % k["glass"]))
+say(k["use_bytes"] == len(said) and k["use_print"] == bookread.Crc32c(said),
+    "its census replays the Use Context the guest said, %u byte(s) print 0x%08X — wants %u, 0x%08X"
+    % (k["use_bytes"], k["use_print"], len(said), bookread.Crc32c(said)))
+say(k["sewn"] >= 2 and k["applied"] == k["sewn"] and not k["ribbon"] and not k["lied"],
+    "the ribbon carries the kernel's stitches whole: %u sewn on, %u applied, %s said, lied %s"
+    % (k["sewn"], k["applied"], sorted(k["ribbon"].items()) or "nothing", k["lied"]))
+CIRCLE_EOF
+    while IFS= read -r line; do
+        case "$line" in
+            "ok "*)  ok  "circle: ${line#ok }" ;;
+            *)       bad "circle: ${line#bad }" ;;
+        esac
+    done < "$SCRATCH/circle.verdict"
+    if ! make run-bg BOOTDISK="$img" >"$SCRATCH/circle.again.run-bg" 2>&1; then
+        harness "circle: run-bg would not start the written book again: $(tail -1 "$SCRATCH/circle.again.run-bg")"
+        return
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    rc=$?
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$name.log"
+    [ $rc = 0 ] || bad "circle: the written book never reached a shell"
+    census_book_judge "$name"
+    while IFS= read -r line; do
+        case "$line" in
+            "ok "*)  ok  "circle, the next mount: ${line#ok }" ;;
+            "bad "*) bad "circle, the next mount: ${line#bad }" ;;
+        esac
+    done < "$SCRATCH/census.$name.verdict"
+    grep -aq '^\[TagFS\] the last stitch of the ribbon says CLEAN' "$SCRATCH/serial.$name.log"
+    chk $? "circle, the next mount: it reads the halt's last stitch CLEAN"
+    rm -f "$img"
 }

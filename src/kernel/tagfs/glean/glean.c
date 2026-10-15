@@ -258,6 +258,8 @@ static void GleanSweepJudgeLocked(bool swept)
  */
 void GleanPassBegin(void)
 {
+    if (SettleV1OnBook("Glean's pass"))
+        return;
     bool asked = __atomic_exchange_n(&s_short, 0u, __ATOMIC_ACQ_REL) != 0;
     bool sweep = __atomic_exchange_n(&s_sweep_asked, 0u, __ATOMIC_ACQ_REL) != 0;
     bool swept = s_pass.sweep;
@@ -483,6 +485,8 @@ void GleanStep(bool* done)
 {
     GleanLook look;
     *done = true;
+    if (SettleV1OnBook("Glean's step"))
+        return;
     if (!s_up || TagFSMediumLeft() || TagFSReadOnly())
         return;
 

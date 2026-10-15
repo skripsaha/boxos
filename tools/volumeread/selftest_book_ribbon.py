@@ -66,7 +66,7 @@ def RecordCases(bt):
             ("the stitch is taken, seq 3", lambda c: [s.seq for s in c.mount.ribbon.stitches] == [3]),
             ("the next seq is 4, and nothing is said",
              lambda c: c.mount.counts["next_seq"] == 4 and not c.findings),
-            ("and the kernel of this tree mounts it under glass, the stitch sewn on and applied, seq 4 next",
+            ("and the kernel of this tree mounts it, the stitch sewn on and applied, seq 4 next",
              lambda c: c.kernel["mounts"] is True and (c.kernel["sewn"], c.kernel["last"], c.kernel["applied"],
                                                         c.kernel["next_seq"]) == (1, 3, 1, 4))]),
         Case("B26 the newest stitch's data never landed", lambda o: Unlanded(o, False),

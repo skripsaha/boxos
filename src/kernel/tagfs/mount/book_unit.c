@@ -234,6 +234,14 @@ uint64_t BookSeqSeen(void)
     return __atomic_load_n(&s_seq_seen, __ATOMIC_RELAXED);
 }
 
+void BookSeqGiven(uint64_t seq)
+{
+    uint64_t seen = __atomic_load_n(&s_seq_seen, __ATOMIC_RELAXED);
+    while (seq > seen &&
+           !__atomic_compare_exchange_n(&s_seq_seen, &seen, seq, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        ;
+}
+
 void BookSeqSeenForget(void)
 {
     __atomic_store_n(&s_seq_seen, 0, __ATOMIC_RELAXED);

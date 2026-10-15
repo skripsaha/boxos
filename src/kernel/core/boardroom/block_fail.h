@@ -105,9 +105,20 @@ bool     BlockFailFlushStrikes(uint8_t seat, uint8_t out_sense[3]);
  * refused read is said and counted. Replaces any plan that was standing. */
 void     BlockFailArmBadSectors(uint8_t seat, uint64_t first_sector, uint64_t sectors);
 
-/* One more run of sectors the medium cannot read, in the bad-sector plan that
- * stands on `seat` — rot in two places at once, two copies of one node (C19).
- * The plan is stood again with it, its count from zero. False, and nothing
+/* Sectors the medium will not write, on `seat`: from now on every write that
+ * touches [first_sector, first_sector + sectors) is refused as a medium error,
+ * from the first sector of the plan's ranges it reaches — the sectors before it
+ * land, as a medium that names the sector it failed at keeps them — and never
+ * issued past it, until the plan comes down. Not once but for good: a block of
+ * flash that will not take a write, or a medium whose every write fails, which
+ * a writer meets again however often it tries (M-6, C25). Reads go through.
+ * Every refused write is said and counted. Replaces any plan that was standing. */
+void     BlockFailArmRefusedWrites(uint8_t seat, uint64_t first_sector, uint64_t sectors);
+
+/* One more run of sectors the medium cannot read — or will not write — in the
+ * plan of bad sectors or of refused writes that stands on `seat`: rot in two
+ * places at once, two copies of one node (C19); a writer's every Quire. The
+ * plan is stood again with it, its count from zero. False, and nothing
  * changed, when no such plan stands for the seat or it holds
  * BLOCK_FAIL_BAD_RANGES runs already. */
 #define BLOCK_FAIL_BAD_RANGES  4u

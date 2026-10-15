@@ -39,6 +39,7 @@
 #include "tagfs.h"
 #include "book_mount.h"   /* a file its book holds locked */
 #include "use_context.h"   /* the user's tags — folded into query and create */
+#include "ink.h"           /* InkBookRefuses — a book's file is not made by this kernel */
 #include "vmm.h"
 #include "process.h"
 #include "kring.h"
@@ -802,6 +803,17 @@ static error_t storage_intern_all(const TagSpelling *tags, uint32_t count, uint3
     return OK;
 }
 
+/* A create a book refuses interns none of its tags (InkBookRefuses): the
+ * next stitch would lay them down for a file that never was. */
+static error_t storage_create_taken(void)
+{
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+    error_t rc = InkBookRefuses();
+    tagfs_leave();
+    return rc;
+}
+
 /* The record a file named `filename` wearing `tags` would have, judged before
  * any tag is interned: a create refused for its width spends none of the
  * volume's numbers. When the caller's own tags fit and the Use Context's do
@@ -868,6 +880,8 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     rc = storage_tags_spelled(scope, text, tlen, &tags, &use, &own, &total);
     if (rc == OK)
         rc = storage_create_fits(filename, tags, own, total);
+    if (rc == OK)
+        rc = storage_create_taken();
     if (rc == OK)
         rc = storage_intern_all(tags, total, &tag_ids);
     kfree(tags);

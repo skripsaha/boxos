@@ -8842,6 +8842,7 @@ run_census() {
         lockrank_judge "$SCRATCH/serial.$plant.log" "census $plant"
     done
     census_book
+    book_circle
 }
 
 # The two halves of the reconcile must each be able to go red. The kernel's:
@@ -8950,17 +8951,18 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 43 (healthy says how) and
-# the 220 of the stand's own twenty-nine suites: stand 28, stand_lock 4,
+# the 238 of the stand's own thirty-one suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
 # stand_snapshot 1, stand_read 8, stand_run 4, stand_medium 19,
 # stand_warrant 8, stand_room 7, stand_integrity 2, frame 2, width 7,
-# parcel 13, tract 1, stand_tally 15, stand_ribbon 6. Counted off the code,
+# parcel 13, tract 1, stand_tally 15, stand_ribbon 6, stand_stitch 12,
+# stand_stitch_edge 6. Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=263
+STAND_RUN=281
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -9110,7 +9112,8 @@ stand_orders() {
 #   stand_settle_ring_during_the_cycle                 1        1        1   its Ledger
 #   stand_settle_table_refusal_is_the_mediums          2        2        2   the block written alone, then by the cycle
 #   stand_blockfail_two_ranges                         2        2        2   a read in each of its plan's two runs
-#   total                                             36       41       44
+#   stand_blockfail_refused_writes                     4        4        4   two writes into each of its two runs
+#   total                                             40       45       48
 stand_judge() {
     local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
     count=$(stand_held_count "$road")
@@ -9212,8 +9215,8 @@ run_stand() {
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
           "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 36 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 41 UEFI=on STRICT=on CORES=4 MEM=4G
+    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 40 CORES=4 MEM=4G
+    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 45 UEFI=on STRICT=on CORES=4 MEM=4G
     for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
              "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
         [ -f "$f" ] && logs="$logs $f"
@@ -9253,7 +9256,7 @@ run_stand() {
 # red on that line.
 # ---------------------------------------------------------------------------
 
-STANDUSB_BLOCKFAILS=44   # stand_judge's table, its USB column
+STANDUSB_BLOCKFAILS=48   # stand_judge's table, its USB column
 STANDUSB_SEAT="usb[0-9]+ [^)]*"
 
 run_standusb() {
@@ -9421,8 +9424,8 @@ forced = ("src/kernel/tagfs/tests/core_tests.c",
 edits = {
  "range": [
   ("src/kernel/core/boardroom/block_fail.c",
-   "    if (kind != BLOCK_FAIL_FLUSH && plan.end != 0 && !BlockFailMeets(&plan, lba, count))\n        return false;\n",
-   "    /* " + M + ": no range check — every sector of the seat is the plan's */\n"),
+   "    uint64_t ahead = 0;\n    if (kind != BLOCK_FAIL_FLUSH && plan.end != 0 && !BlockFailMeets(&plan, lba, count, &ahead))\n        return false;\n",
+   "    uint64_t ahead = 0;   /* " + M + ": no range check — every sector of the seat is the plan's */\n"),
   ("src/lib/kernel/klib_mem.c",
    "    if (HeapFailStrikes(size))\n        return NULL;\n#endif\n\n    KHeapScope who = KHeapScopeHere();\n",
    "#endif\n\n    KHeapScope who = KHeapScopeHere();\n"),
@@ -9460,7 +9463,7 @@ edits = {
  ],
  "inside": [
   ("src/kernel/core/boardroom/block_fail.c",
-   "    uint32_t before = (keep && kind != BLOCK_FAIL_FLUSH && plan.first > lba)\n                          ? (uint32_t)(plan.first - lba) : 0;\n",
+   "    uint32_t before = keep && kind != BLOCK_FAIL_FLUSH ? (uint32_t)ahead : 0;\n",
    "    uint32_t before = 0;   /* " + M + ": nothing before the refused sector reaches the medium */\n"),
  ],
  "lands": [

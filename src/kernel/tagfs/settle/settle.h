@@ -267,6 +267,23 @@ uint64_t SettleLastDUs(void);
  * in flight runs to its end. */
 void     SettleCadenceHold(bool hold);
 
+/*
+ * Format v2's writer (settle/sewing.c). StitchBookRefused: no Quire took a
+ * stitch's write — the volume may only be read until it is mounted again, part
+ * of what TagFSReadOnly answers (M-6). StitchFilesRefused: a change to a file
+ * is one this kernel does not yet lay into a book — said once a mount, and
+ * ERR_TAGFS_READ_ONLY; Ink's first half asks it of a book (ink.c).
+ */
+bool     StitchBookRefused(void);
+error_t  StitchFilesRefused(void);
+
+/* A part of format v1's cycle — the pool's Spares, Glean, the Ledger's write —
+ * reached on a book: a defect of the road there, which the cycle's dispatch by
+ * format shuts (settle.c). Said once a mount and stopped at in a STRICT
+ * kernel; true then, and the caller does nothing. False on format v1. With no
+ * TagFS lock held. */
+bool     SettleV1OnBook(const char* what);
+
 // ============================================================================
 // Waiting for a cycle through a Chit (settle_wait.c)
 //

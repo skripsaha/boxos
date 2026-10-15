@@ -7,6 +7,7 @@
 #include "../file_map/file_map.h"
 #include "../tag_registry/tag_registry.h"
 #include "../use_memory/use_memory.h"
+#include "../settle/sewing.h"
 #include "boardroom.h"
 #include "crypto.h"
 
@@ -158,10 +159,13 @@ static void BookSlotSaid(const SpineSlot* s)
 // ----------------------------------------------------------------------------
 
 /* The ribbon from the stood slot's `at`: pass 1, the data of its newest
- * stitch, pass 2 — and what the mount says of it in numbers. */
+ * stitch, pass 2 — and what the mount says of it in numbers; then the writer's
+ * cursor laid where the walk ended (settle/sewing.h), or the reason no writer
+ * goes on from there, under glass. */
 static error_t BookRibbon(const char** what)
 {
-    error_t rc = RibbonCollate(g_book.stood, &g_book.ribbon);
+    const char* glass = NULL;
+    error_t     rc    = RibbonCollate(g_book.stood, &g_book.ribbon);
     if (rc != OK) {
         *what = rc == ERR_NO_MEMORY ? "there is no memory to read the ribbon past its Tally"
                                     : "its medium would not give up the ribbon past its Tally";
@@ -171,15 +175,22 @@ static error_t BookRibbon(const char** what)
     rc = RibbonTranscribe(w, what);
     if (rc != OK)
         return rc;
-    g_book.said.sewn = w->nstitch;
-    g_book.said.last = w->nstitch ? w->stitch[w->nstitch - 1u]->seq : g_book.stood->head.stitch_seq;
-    g_book.said.lied = w->lied;
+    g_book.said.sewn  = w->nstitch;
+    g_book.said.last  = w->nstitch ? w->stitch[w->nstitch - 1u]->seq : g_book.stood->head.stitch_seq;
+    g_book.said.lied  = w->lied;
+    g_book.said.flags = w->nstitch && w->stitch[w->nstitch - 1u]->head_read ? w->stitch[w->nstitch - 1u]->head.flags
+                                                                           : 0;
     kprintf("[TagFS] the ribbon past the Tally: %u stitch(es) sewn on, the last seq %llu, %u applied\n",
             w->nstitch, (unsigned long long)g_book.said.last, g_book.said.applied);
+    if (g_book.said.flags & STITCH_CLEAN)
+        kprintf("[TagFS] the last stitch of the ribbon says CLEAN: the machine that sewed it stopped with no change "
+                "in flight\n");
     if (w->lied)
         kprintf("[TagFS] MEDIUM_LIED: this volume's medium has not kept what it confirmed — a Fallow lags two "
-                "stitches on it, and the newest two are held to their data at a mount (§3.9); this kernel keeps "
-                "the verdict in memory and writes it nowhere\n");
+                "stitches on it, and the newest two are held to their data at a mount (§3.9); every stitch this "
+                "kernel sews on it says so\n");
+    if (RibbonCursorMount(w, &glass) != OK)
+        TagFSUnderGlass(glass);
     if (w->seen_fid > g_book.next_fid)
         g_book.next_fid = w->seen_fid;
     if (w->seen_tag > g_book.next_tag)
@@ -363,7 +374,6 @@ error_t MountReadBook(const char** what)
     if (rc != OK)
         return rc;
 
-    TagFSUnderGlass("this kernel reads format-v2 books and writes none of them");
     BookSlotSaid(g_book.stood);
     GroundCensusBegin();
     rc = BookWalk(what);
@@ -378,6 +388,9 @@ error_t MountReadBook(const char** what)
     GroundCensusEnd();
     if (rc != OK)
         return rc;
+    if (g_book.bookmarked)
+        TagFSUnderGlass("a Tally of its book names a bookmark, whose ground this kernel does not derive — its "
+                        "writer takes no ground without the map of it");
     BookBounds();
     kprintf("[TagFS] the book as memory holds it: its files print 0x%08X, its Use Context %llu byte(s) print "
             "0x%08X\n", g_book.files_print, (unsigned long long)g_book.use_bytes, g_book.use_print);
@@ -506,6 +519,7 @@ void MountBookLetGo(void)
         kfree(g_book.aside[i].text);
     kfree(g_book.aside);
     RibbonWalkLetGo(g_book.ribbon);
+    RibbonCursorLetGo();
     GlossLetGo();
     TallyDigestsLetGo();
     BlockMapDerivedLetGo();

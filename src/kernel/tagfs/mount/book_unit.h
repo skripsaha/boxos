@@ -73,6 +73,10 @@ error_t  BookUnitRefused(int rc);
 uint64_t BookSeqSeen(void);
 void     BookSeqSeenForget(void);
 
+/* A seq the book's writer gave a unit (settle/ribbon.c), folded into the ones
+ * seen: no reader or writer of the volume gives it again this mount. */
+void     BookSeqGiven(uint64_t seq);
+
 /* Whether every byte of the run is zero — a slot never written. */
 bool     BookUnitBlank(const BookUnit* u);
 

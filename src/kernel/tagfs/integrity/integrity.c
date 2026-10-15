@@ -2,6 +2,7 @@
 #include "../tagfs.h"
 #include "../box_hash/box_hash.h"
 #include "../scribe/scribe.h"
+#include "../settle/settle.h"
 #include "../mount/ground_census.h"
 #include "../mount/tally_read.h"
 #include "gloss.h"
@@ -255,6 +256,8 @@ bool MapSlotSettled(const void *ctx)
 }
 
 error_t IntegrityInit(void) {
+    if (SettleV1OnBook("the integrity map's laying"))
+        return ERR_UNSUPPORTED;
     if (IntegrityIsInitialized())
         return ERR_ALREADY_INITIALIZED;
 

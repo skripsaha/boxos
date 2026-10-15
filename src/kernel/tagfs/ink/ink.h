@@ -155,6 +155,13 @@ void     InkMountReset(void);
  * undoing a protected medium it armed itself (BlockFailProtect). */
 void     InkReadOnlyLift(void);
 
+/* A change to a file on a book is refused by this kernel's Ink (ink.c,
+ * StitchFilesRefused): asked before the change's names and tags are interned,
+ * so the next stitch lays down no Coined for a change that never was — OK on
+ * format v1, which interns first as it always has; on a book, the answer the
+ * change's own Ink would give. */
+error_t InkBookRefuses(void);
+
 /* The stem of a name as a key, read in place: OK with out->key NULL for a
  * name with no stem, ERR_TAGFS_TAG_TOO_LONG for one longer than a key. */
 error_t InkNameStem(const char* name, TagSpelling* out);

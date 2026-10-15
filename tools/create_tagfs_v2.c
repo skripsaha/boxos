@@ -604,7 +604,10 @@ int V2BindMake(const char* disk_path, int file_count, char* argv[], int first) {
  * ribbon's Quire and its next_quire, and R past them: the reserve the
  * kernel's allocator keeps so that a turn of the ribbon and one whole Tally
  * are always possible, one ribbon Quire and two Tally-Quires' worth
- * (§16.2 п.6) — then the block of the far Deed, all of it to the grain.
+ * (§16.2 п.6) — the room a running machine works in past that, as a volume of
+ * format v1 is given it (GROUND_WORKING_ROOM_BLOCKS), so a book takes the
+ * writes of the same machine — then the block of the far Deed, all of it to
+ * the grain.
  *
  * The digests' values are not known before the volume has a uuid and do not
  * change how much room they take; the times are seconds of today in either
@@ -618,7 +621,7 @@ int V2GroundSay(int file_count, char* argv[], int first) {
     int said = V2Lay(&v, argv, first, UINT64_MAX, 0) == 0;
     if (said) {
         uint64_t grain = v.leaves.grain;
-        uint64_t end   = v.plan.next + grain + (1u + 2u * v.plan.k) * grain + 1u;
+        uint64_t end   = v.plan.next + grain + (1u + 2u * v.plan.k) * grain + GROUND_WORKING_ROOM_BLOCKS + 1u;
         printf("%llu\n", (unsigned long long)((end + grain - 1u) / grain * grain * TAGFS_BLOCK_SECTORS));
     }
     V2Release(&v);

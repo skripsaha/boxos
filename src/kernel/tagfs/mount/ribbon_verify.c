@@ -162,6 +162,21 @@ static bool RibbonChecked(const RibbonWalk* w, const RibbonUnit* u)
     return RibbonFreshNamed(u, &named) && named == u->clasp.fresh;
 }
 
+/* On a medium shown to lie before a block is read, the price of the check is
+ * said first (§16.4 п.1): the fresh blocks the newest stitches name — every
+ * one of them is read — counted from their Clasps, which bound them. Said in
+ * the words volume-read predicts (bookmount.py _Verify, lied_check). */
+static void RibbonVerifyPriceSaid(const RibbonWalk* w, uint32_t n)
+{
+    uint64_t blocks = 0;
+    for (uint32_t s = w->nstitch - n; s < w->nstitch; s++)
+        if (RibbonChecked(w, w->stitch[s]))
+            blocks += w->stitch[s]->clasp.fresh;
+    kprintf("[TagFS] the medium lied: %llu fresh block(s) of the newest %u stitch(es) are read and held to "
+            "their digests before the ribbon is replayed — every one, however long that takes (§16.4)\n",
+            (unsigned long long)blocks, n);
+}
+
 error_t RibbonVerify(RibbonWalk* w, RibbonSkipSet* undone)
 {
     uint32_t    n = w->nstitch < (w->lied ? 2u : 1u) ? w->nstitch : (w->lied ? 2u : 1u);
@@ -171,6 +186,8 @@ error_t RibbonVerify(RibbonWalk* w, RibbonSkipSet* undone)
         kfree(h);
         return ERR_NO_MEMORY;
     }
+    if (w->lied)
+        RibbonVerifyPriceSaid(w, n);
     BoxHashInit(&h->ctx, tagfs_get_state()->uuid, 16);
     for (uint32_t s = w->nstitch - n; rc == OK && s < w->nstitch; s++) {
         const RibbonUnit* u       = w->stitch[s];

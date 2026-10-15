@@ -31,6 +31,11 @@
  * records and every flash translation layer is built around. */
 #define GROUND_GRAIN_SECTORS         2048u
 
+/* The room a running machine works in, past what a volume is made to hold —
+ * the same in either format (create_tagfs_v1.c says why it is a policy and
+ * not a guess): sixty-four mebibytes, in the volume's own blocks. */
+#define GROUND_WORKING_ROOM_BLOCKS   ((64u * 1024u * 1024u) / TAGFS_BLOCK_SIZE)
+
 /* ====================================================================
  * In-memory tracking
  * ==================================================================== */

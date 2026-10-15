@@ -24,8 +24,19 @@ uint64_t     tag_registry_written_need(TagRegistry* reg);
 void         TagRegistryLanded(TagRegistry* reg, SettleMark* mark);
 
 /* The mount's J1: no id below `next` is given out again — the records of the
- * pool wear ids a registry rolled back no longer names. */
+ * pool wear ids a registry rolled back no longer names. On format v2 every id
+ * below the next one given is the book's: none is laid down as a Coined. */
 void         TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next);
+
+/* Format v2 (settle/sewing.c): the ids a stitch lays down as Coineds — every
+ * id given since the last one a stitch that settled laid down, [*lo, *hi) —
+ * and, its stitch settled, every id below `hi` the book's. */
+void         TagRegistryCoinedRange(TagRegistry* reg, uint32_t* lo, uint32_t* hi);
+void         TagRegistryCoinedUpTo(TagRegistry* reg, uint32_t hi);
+
+/* The tags the registry holds and the bytes of their keys and values — what
+ * a whole Tally's TAGS is measured by (settle/endpaper.c). */
+void         TagRegistryTextBytes(TagRegistry* reg, uint64_t* tags, uint64_t* bytes);
 
 /* A tag a format-v2 book's TAGS names, taken into the registry as the mount
  * reads it: OK; ERR_ALREADY_EXISTS when its text is another id's or its id

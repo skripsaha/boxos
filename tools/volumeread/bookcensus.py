@@ -18,8 +18,9 @@ free is not counted at all (BookmarksNamed) rather than counted too high.
 And beside the account: every finding of the mount, each data block of a
 live file held to its digest, and what the kernel of this tree makes of the
 volume (KernelBook) — it reads the Spine, the Tally and the ribbon sewn past
-it and writes nothing, so every volume it mounts stands under glass. The
-census scenario boots a landing and holds the kernel's own lines to that.
+it, and sews its own stitches past them where the book holds nothing its
+writer could not carry on. The census scenario boots a landing and holds the
+kernel's own lines to that.
 
 The owners are the kernel's own list (src/include/ground_owner.h), generated
 into ground_owners.py: BOOK_OWNERS, those of format v2.
@@ -28,7 +29,7 @@ into ground_owners.py: BOOK_OWNERS, those of format v2.
 import hashlib
 import struct
 
-from . import bookread, tally
+from . import bookread, stitch, tally
 from .bookmount import BookMount
 from .census import SEVERITY, Finding, GroundClaim, Sweep
 from .bookground import BookGround
@@ -104,7 +105,10 @@ def MirrorPrint(files):
 def KernelBook(g, m, held, free, fallow):
     """What the kernel of this tree makes of a format-v2 volume, in the
     numbers its own lines carry (mount/book_mount.c): refused — and in which
-    words — or mounted under glass, standing on which slot, with how many
+    words — or mounted, for how many reasons only to be read (the book's own,
+    and a Tally that names a bookmark, whose ground no writer of this kernel
+    takes without its map; or a ribbon whose end the walk does not know, which
+    no writer goes on from), standing on which slot, with how many
     files live, which locked by fid, what ranges rotten, which copies read
     in the other's place, how many blocks held, how many shapes said, the
     numbers it gives next, and its data run with the blocks of it its block
@@ -118,7 +122,10 @@ def KernelBook(g, m, held, free, fallow):
     census code — the kernel says each as `ribbon CODE:` — the stitches sewn
     on, the last of them and how many applied, whether the medium is shown to
     have lied, the blocks the ribbon let go lying fallow (`fallow`, the
-    census's claim), and the next seq past every sector of the book read;
+    census's claim), whether the last stitch says CLEAN — a halt's — the
+    next seq past every sector of the book read, and on
+    a medium that lied the fresh blocks of the newest stitches it reads
+    before the ribbon is replayed, and how many stitches (`lied_check`);
     and what its mirror holds when the mount is done — the print of its live
     files (MirrorPrint) and of its Use Context, and the bytes of the latter."""
     if g.block_bytes != BLOCK:
@@ -134,7 +141,8 @@ def KernelBook(g, m, held, free, fallow):
     for code, _s, _t in m.said[m.ribbon_said:]:
         ribbon[code] = ribbon.get(code, 0) + 1
     return {"mounts": True, "refusal": None, "slot": m.slot.index, "files": len(m.files),
-            "locked": sorted(m.locked), "glass": len(m.glass) + 1,
+            "locked": sorted(m.locked),
+            "glass": len(m.glass) + (free is None) + (r is not None and r.end is None),
             "rotten": [{"tree": tally.TREE_NAMES[x.tree], "count": x.count} for x in t.rotten
                        if x.tree != tally.DIGESTS or rot],
             "mended": len(t.mended), "mended_said": KernelMendedSaid(t), "held": RunsCount(held),
@@ -147,7 +155,8 @@ def KernelBook(g, m, held, free, fallow):
             "free": None if free is None else RunsCount(free),
             "ribbon": ribbon, "sewn": len(r.stitches),
             "last": r.stitches[-1].seq if r.stitches else m.slot.stitch_seq,
-            "applied": len(m.applied), "lied": r.lied, "fallow": RunsCount(fallow),
+            "applied": len(m.applied), "lied": r.lied, "lied_check": m.lied_check, "fallow": RunsCount(fallow),
+            "clean": bool(r.stitches and r.stitches[-1].head and r.stitches[-1].head.flags & stitch.CLEAN),
             "files_print": MirrorPrint(m.files), "use_print": bookread.Crc32c(m.use or b""),
             "use_bytes": len(m.use or b"")}
 
@@ -427,9 +436,10 @@ class BookCensus:
             out.append("the book mounts%s" % (" — read only" if m.glass else ""))
         k = self.kernel
         out.append("the kernel in this tree would NOT mount this volume: %s" % k["refusal"] if not k["mounts"] else
-                   "the kernel in this tree mounts it under glass on slot %u: %u file(s), %u locked, %u rotten "
-                   "range(s), %u block(s) held" % (k["slot"], k["files"], len(k["locked"]), len(k["rotten"]),
-                                                    k["held"]))
+                   "the kernel in this tree mounts it%s on slot %u: %u file(s), %u locked, %u rotten "
+                   "range(s), %u block(s) held" % (" under glass" if k["glass"] else ", its writer going on where "
+                                                    "the ribbon ends", k["slot"], k["files"], len(k["locked"]),
+                                                    len(k["rotten"]), k["held"]))
         for x in self.Sorted():
             out.append("%s %s: %s" % (x.severity, x.code, x.text))
         c = self.Counts()

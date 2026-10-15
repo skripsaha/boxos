@@ -225,6 +225,37 @@ UseText *tagfs_recall_use_context(uint64_t *out_saying)
 }
 
 // ----------------------------------------------------------------------------
+// Format v2's cycle: the word whole in the stitch
+// ----------------------------------------------------------------------------
+
+bool UseMemoryStitchTake(UseText **said, uint64_t *ticket)
+{
+    UseMemoryState *g = &g_use_memory;
+    *said   = NULL;
+    *ticket = 0;
+    if (!g->owed)
+        return false;
+    *said   = UseTextHold(g->said);
+    *ticket = g->ticket;
+    return true;
+}
+
+UseText *UseMemoryStitchSettled(UseText *said, uint64_t ticket)
+{
+    UseMemoryState *g    = &g_use_memory;
+    UseText        *gone = g->memory;
+    g->memory = said;
+    g->landed = true;
+    if (g->ticket == ticket) {
+        g->owed  = false;
+        g->carry = false;
+    }
+    if (ticket > g->answered)
+        g->answered = ticket;
+    return gone;
+}
+
+// ----------------------------------------------------------------------------
 // The Settle cycle's part
 // ----------------------------------------------------------------------------
 

@@ -14,18 +14,18 @@
  * Context — with every owner of every block claimed (§4.6) and the numbers
  * the volume gives next past everything it showed.
  *
- * ‼ THIS KERNEL READS A BOOK AND WRITES NONE: every format-v2 volume it
- * mounts stands under glass (tagfs.h, UnderGlass) — "this kernel reads
- * format-v2 books and writes none of them" — beside whatever the book itself
- * carries that no writer of this kernel could carry on. It reads the Tally
- * and the ribbon of stitches sewn past it (§4.5 п.5, ribbon.h): the state it
- * mounts is the Tally's with every stitch after it replayed, the verdicts the
- * ribbon asks for — a roll-back, a Slip to fold — said and left to the
- * writer that can lay them down (§16.1 п.2).
+ * It reads the Tally and the ribbon of stitches sewn past it (§4.5 п.5,
+ * ribbon.h): the state it mounts is the Tally's with every stitch after it
+ * replayed, the verdicts the ribbon asks for — a roll-back, a Slip to fold —
+ * said and left to the writer that can lay them down (§16.1 п.2): the volume
+ * stands under glass (tagfs.h, UnderGlass) for whatever the book carries that
+ * no writer of this kernel could carry on. Otherwise this kernel's writer goes
+ * on where the ribbon ends (settle/sewing.h): stitches of names and memory; a
+ * change to a file it does not yet lay into a book, and it writes no Tally.
  *
- * ‼ NOT A BYTE IS WRITTEN, before the door or after it: no growth (a book
- * grows only by a mount that writes it, §16.1 п.4), no Ledger, no Spare, no
- * flush. Two mounts of one volume are one state (C12).
+ * ‼ NOT A BYTE IS WRITTEN BY THE MOUNT, before the door or after it: no growth
+ * (a book grows only by a mount that writes it, §16.1 п.4), no Ledger, no
+ * Spare, no flush. Two mounts of one volume are one state (C12).
  *
  * The two readers of a book — this one and volume-read's (tools/volumeread/
  * bookmount.py, bookcensus.py KernelBook) — name the same things in the same
@@ -79,6 +79,7 @@ typedef struct {
     uint32_t sewn;          /* stitches the ribbon sews on past the Tally */
     uint32_t applied;       /* of them, replayed */
     uint64_t last;          /* the seq the chain ends on: the last stitch sewn, or the Tally's */
+    uint64_t flags;         /* the StitchHead flags of the last stitch sewn on; 0 when none is */
     bool     lied;          /* the medium is shown not to have kept what it confirmed */
     uint64_t fallow;        /* blocks the ribbon let go, lying fallow */
     uint32_t ribbon[RIBBON_CODES];  /* the ribbon's lines, by code */

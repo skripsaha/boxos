@@ -137,6 +137,16 @@ void     UseMemorySettled(void);
  * freed, and what the volume forgot is said. */
 void     UseMemoryCycleOver(error_t rc);
 
+/* Format v2's cycle (settle/sewing.c), whose stitch carries the word whole as
+ * a UseContext (spec_v2 §7) — no chain, no Ledger. Take, at S0 under the
+ * state lock: whether a word is owed the medium, and then the word — held, the
+ * caller's to drop; NULL says none — and its demand's number. Settled, at DONE
+ * under the state lock: the volume holds `said` (the reference is the
+ * volume's from here), the demand `ticket` is answered, and the word it held
+ * before is handed back to be dropped once the lock is let go. */
+bool     UseMemoryStitchTake(UseText **said, uint64_t *ticket);
+UseText *UseMemoryStitchSettled(UseText *said, uint64_t ticket);
+
 /* Under the state lock (Fallow's release): whether a copy of the Ledger may
  * name the chain whose first link is `first`. */
 bool     UseMemoryNames(uint64_t first);

@@ -30,9 +30,9 @@ def Pristine(bt):
         ("the next file id %u, tag id %u, bookmark 1, seq 3" % (bt.fid, bt.tag),
          lambda c: c.mount.counts == {"next_fid": bt.fid, "next_tag": bt.tag, "next_bookmark": 1,
                                       "next_seq": 3}),
-        ("the kernel of this tree mounts it under glass, on slot 0 — it reads the book and writes none "
-         "of it, and nothing else holds it to glass",
-         lambda c: c.kernel["mounts"] is True and c.kernel["slot"] == 0 and c.kernel["glass"] == 1 and
+        ("the kernel of this tree mounts it on slot 0, and nothing holds it to glass: its writer goes on where "
+         "the ribbon ends",
+         lambda c: c.kernel["mounts"] is True and c.kernel["slot"] == 0 and c.kernel["glass"] == 0 and
          c.kernel["files"] == len(c.mount.files) and not c.kernel["locked"] and not c.kernel["rotten"]),
         ("the front, the Spine, the Tally, the ribbon, the files, BOOT and the far Deed are heard",
          lambda c: {"front", "spine", "tally", "ribbon", "file", "boot", "far_deed"} <= c.Kinds())])]
@@ -226,7 +226,7 @@ def RangeCases(bt):
             ("its FILES tree is a root over two leaves or more",
              lambda c: sum(1 for n in c.mount.tally.trees[tally.FILES].nodes if n.level == 0) >= 2 and
              any(n.level >= 1 for n in c.mount.tally.trees[tally.FILES].nodes)),
-            ("and the kernel of this tree mounts it under glass with every file",
+            ("and the kernel of this tree mounts it with every file",
              lambda c: c.kernel["mounts"] is True and c.kernel["files"] == len(content.files))]),
         Case("B4 a FILES leaf rotten in both copies", RotFiles,
              must={"RANGE_ROTTEN", "HELD_BLOCKS"}, checks=[

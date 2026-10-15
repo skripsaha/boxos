@@ -45,7 +45,7 @@ void InkMountReset(void)
 
 bool TagFSReadOnly(void)
 {
-    return __atomic_load_n(&s_read_only, __ATOMIC_ACQUIRE) != 0 || TagFSIsUnderGlass();
+    return __atomic_load_n(&s_read_only, __ATOMIC_ACQUIRE) != 0 || TagFSIsUnderGlass() || StitchBookRefused();
 }
 
 void InkReadOnlyLift(void)
@@ -148,12 +148,13 @@ bool InkWearsGuarded(const uint32_t* tags, uint32_t count)
 
 /* Whether the volume takes a change at all: asked in the first half, and again
  * under the state lock where the Ink is laid, so an Ink built while the medium
- * left or refused a write as protected is not laid after it (RT-13). */
+ * left or refused a write as protected is not laid after it (RT-13). A book
+ * takes no change to a file from this kernel's Ink (StitchFilesRefused). */
 static error_t InkVolumeTakes(void)
 {
     if (TagFSMediumLeft())
         return ERR_DEVICE_NOT_READY;
-    if (TagFSReadOnly())
+    if (TagFSReadOnly() || InkState()->format == DEED_FORMAT_V2)
         return ERR_TAGFS_READ_ONLY;
     return OK;
 }
@@ -166,7 +167,13 @@ static error_t InkVolumeBegins(void)
 {
     if (SettleHalting())
         return ERR_DEVICE_NOT_READY;
-    return InkVolumeTakes();
+    error_t rc = InkVolumeTakes();
+    return rc == ERR_TAGFS_READ_ONLY && !TagFSReadOnly() ? StitchFilesRefused() : rc;
+}
+
+error_t InkBookRefuses(void)
+{
+    return InkState()->format == DEED_FORMAT_V2 ? InkVolumeBegins() : OK;
 }
 
 /* The guard's answer, `boot` the answer to whether the change touches the

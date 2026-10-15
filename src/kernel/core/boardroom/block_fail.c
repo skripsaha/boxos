@@ -24,7 +24,8 @@ typedef struct {
     uint8_t  seat;
     uint8_t  kind;
     uint8_t  sense[3];      /* a flush's SCSI answer; all zero: a medium error */
-    bool     bad;           /* a read's sectors the medium cannot read: every read from the nth */
+    bool     bad;           /* every command of its kind from the nth: sectors the medium cannot read,
+                             * or will not write */
     uint64_t first;
     uint64_t end;           /* 0: the whole seat */
     uint32_t nth;
@@ -101,6 +102,19 @@ void BlockFailArmBadSectors(uint8_t seat, uint64_t first_sector, uint64_t sector
     BlockFailStand(&plan);
 }
 
+void BlockFailArmRefusedWrites(uint8_t seat, uint64_t first_sector, uint64_t sectors)
+{
+    BlockFailPlan plan = {
+        .seat  = seat,
+        .kind  = (uint8_t)BLOCK_FAIL_WRITE,
+        .bad   = true,
+        .first = first_sector,
+        .end   = sectors ? first_sector + sectors : 0,
+        .nth   = 1u,
+    };
+    BlockFailStand(&plan);
+}
+
 bool BlockFailAddBadSectors(uint8_t seat, uint64_t first_sector, uint64_t sectors)
 {
     uint64_t s = __atomic_load_n(&g_block_fail_state, __ATOMIC_ACQUIRE);
@@ -115,15 +129,25 @@ bool BlockFailAddBadSectors(uint8_t seat, uint64_t first_sector, uint64_t sector
     return true;
 }
 
-/* Whether [lba, lba + count) meets a range of the plan. */
-static bool BlockFailMeets(const BlockFailPlan* plan, uint64_t lba, uint32_t count)
+/* Whether [lba, lba + count) meets a range of the plan; and in *before the
+ * sectors of it before the first sector of the plan it reaches — 0 when it
+ * begins inside a range. */
+static bool BlockFailMeets(const BlockFailPlan* plan, uint64_t lba, uint32_t count, uint64_t* before)
 {
-    if (lba + count > plan->first && lba < plan->end)
-        return true;
-    for (uint32_t i = 0; i < plan->more; i++)
-        if (lba + count > plan->more_first[i] && lba < plan->more_end[i])
-            return true;
-    return false;
+    bool met = false;
+    *before = count;
+    for (uint32_t i = 0; i <= plan->more; i++) {
+        uint64_t first = i ? plan->more_first[i - 1u] : plan->first;
+        uint64_t end   = i ? plan->more_end[i - 1u] : plan->end;
+        if (lba + count <= first || lba >= end)
+            continue;
+        met = true;
+        if (first <= lba)
+            *before = 0;
+        else if (first - lba < *before)
+            *before = first - lba;
+    }
+    return met;
 }
 
 uint32_t BlockFailSeen(void)
@@ -156,7 +180,8 @@ static bool BlockFailStrikesUnder(uint8_t seat, BlockFailKind kind, uint64_t lba
 
     if (plan.seat != seat || plan.kind != (uint8_t)kind)
         return false;
-    if (kind != BLOCK_FAIL_FLUSH && plan.end != 0 && !BlockFailMeets(&plan, lba, count))
+    uint64_t ahead = 0;
+    if (kind != BLOCK_FAIL_FLUSH && plan.end != 0 && !BlockFailMeets(&plan, lba, count, &ahead))
         return false;
 
     /* Counted, and chosen or not, in one swap under the generation the plan
@@ -175,12 +200,19 @@ static bool BlockFailStrikesUnder(uint8_t seat, BlockFailKind kind, uint64_t lba
     if (!fire)
         return false;
 
-    uint32_t before = (keep && kind != BLOCK_FAIL_FLUSH && plan.first > lba)
-                          ? (uint32_t)(plan.first - lba) : 0;
+    uint32_t before = keep && kind != BLOCK_FAIL_FLUSH ? (uint32_t)ahead : 0;
     if (kind == BLOCK_FAIL_FLUSH && (plan.sense[0] | plan.sense[1] | plan.sense[2])) {
         kprintf("[BLOCKFAIL] seat %u: the cache flush is answered as refused with sense key "
                 "0x%x, code 0x%02x/0x%02x — occurrence %u since arming, and it was never "
                 "issued to the medium\n", seat, plan.sense[0], plan.sense[1], plan.sense[2], n);
+    } else if (plan.bad && kind == BLOCK_FAIL_WRITE) {
+        if (keep)
+            *keep = before;
+        kprintf("[BLOCKFAIL] seat %u: the write of sectors %llu..%llu is refused as a medium error "
+                "from sector %llu on, as every write there is — occurrence %u since arming: the %u "
+                "sector(s) before it reach the medium, and nothing from it on is issued\n", seat,
+                (unsigned long long)lba, (unsigned long long)(lba + count - 1),
+                (unsigned long long)(lba + before), n, before);
     } else if (plan.bad) {
         kprintf("[BLOCKFAIL] seat %u: the read of sectors %llu..%llu is answered as a sector "
                 "the medium cannot read (UNC, MEDIUM ERROR) — occurrence %u since arming, and "
@@ -198,7 +230,7 @@ static bool BlockFailStrikesUnder(uint8_t seat, BlockFailKind kind, uint64_t lba
                 "on is issued\n", seat,
                 kind == BLOCK_FAIL_READ ? "read" : "write",
                 (unsigned long long)lba, (unsigned long long)(lba + count - 1),
-                (unsigned long long)plan.first, n, before);
+                (unsigned long long)(lba + before), n, before);
     } else {
         kprintf("[BLOCKFAIL] seat %u: the %s of sectors %llu..%llu is refused as "
                 "a medium error — occurrence %u since arming, and nothing of it "

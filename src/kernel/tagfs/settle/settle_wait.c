@@ -135,9 +135,23 @@ bool SettleWaitersOwed(void)
     return __atomic_load_n(&s_count, __ATOMIC_ACQUIRE) != 0;
 }
 
+/*
+ * ‼ A BOOK'S WAITER IS ANSWERED BY A FLUSH OF ITS OWN MOUNT (X2-3, spec_v2
+ * §3.5). What a mount read may have come from the medium's cache, after a warm
+ * restart that took no power away: a book's waiter right after its mount —
+ * `anchor` with nothing inked yet — is answered only once a stitch of this
+ * mount settled under its kept flush, and the cadence runs that one, empty if
+ * need be, at once (a waiter is a demand). A volume of format v1 answers by
+ * the tail its mount found sealed, as it always has.
+ */
+static bool SettleMountKept(void)
+{
+    return tagfs_get_state()->format != DEED_FORMAT_V2 || SettledCycles() > 0;
+}
+
 error_t SettleWaitNow(uint64_t gen)
 {
-    if (gen <= __atomic_load_n(&s_answered_upto, __ATOMIC_ACQUIRE))
+    if (gen <= __atomic_load_n(&s_answered_upto, __ATOMIC_ACQUIRE) && SettleMountKept())
         return OK;
     if (TagFSMediumLeft())
         return ERR_DEVICE_NOT_READY;
@@ -209,7 +223,7 @@ bool SettleWaitUnlink(SettleWaiter* w)
 /* Whether a waiter is answered OK already. */
 static bool SettleWaiterAnswered(const SettleWaiter* w, uint64_t upto)
 {
-    return w->cycle ? SettledCycles() >= w->cycle : w->gen <= upto;
+    return w->cycle ? SettledCycles() >= w->cycle : w->gen <= upto && SettleMountKept();
 }
 
 uint64_t SettleWaitersCloseUpto(void)
@@ -306,7 +320,11 @@ void SettleWaitersMountReset(void)
  *   - a step the machine had no memory for waits for its pages to come back;
  *   - a step with no ground waits for room to be asked for — by a write the
  *     allocator sent away, which is when Fallow has ground for the cycle to
- *     give back;
+ *     give back; but a book whose stitch has no room gets none back from this
+ *     kernel, which writes no Tally and gives no ground back, and nothing on a
+ *     book asks for room: its waiters are told so (SettleWaitersRunEnded),
+ *     nothing parks, and the next waiter's cycle is refused the same, in so
+ *     many words, rather than held for good;
  *   - any other refusal is the medium's: the seat that refused rings
  *     seat:ready on the first command it answers after, whatever kind of
  *     medium sits in it (boardroom.h) — and a seat:ready that came while this
@@ -336,6 +354,11 @@ void SettleWaitersPark(error_t rc)
         SettlePark(SETTLE_PARK_HEAP, SettleHeapNow());
         break;
     case ERR_TAGFS_NO_SPACE:
+        if (tagfs_get_state()->format == DEED_FORMAT_V2)
+            __atomic_store_n(&s_park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
+        else
+            SettlePark(SETTLE_PARK_ROOM, CadenceRoomAsked());
+        break;
     case ERR_WOULD_BLOCK:
         SettlePark(SETTLE_PARK_ROOM, CadenceRoomAsked());
         break;
@@ -350,9 +373,17 @@ void SettleWaitersRunEnded(error_t rc, uint64_t target, bool unclosed)
     if (rc != OK) {
         if (TagFSReadOnly() && !TagFSMediumLeft())
             SettleWaitersAnswerAll(ERR_TAGFS_READ_ONLY);
+        /* A book whose ribbon has no room for the cycle's stitch gets none
+         * back in this kernel, which writes no Tally (settle/ribbon.c): its
+         * waiters hear so rather than wait for room that does not come. */
+        else if (rc == ERR_TAGFS_NO_SPACE && tagfs_get_state()->format == DEED_FORMAT_V2)
+            SettleWaitersAnswerAll(ERR_TAGFS_NO_SPACE);
         return;
     }
-    uint64_t upto = PoolClosedSettledGen();
+    /* A book's stitch is never written again once it settled: everything up
+     * to its target is answered. Format v1's record is answered once it lies
+     * in a closed block, or in the tail when no Spare was there to close it. */
+    uint64_t upto = tagfs_get_state()->format == DEED_FORMAT_V2 ? target : PoolClosedSettledGen();
     if (unclosed && target > upto)
         upto = target;
     uint64_t seen = __atomic_load_n(&s_answered_upto, __ATOMIC_RELAXED);

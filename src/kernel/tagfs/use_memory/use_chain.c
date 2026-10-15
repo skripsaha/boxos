@@ -1,5 +1,6 @@
 #include "use_memory_internal.h"
 #include "../../../lib/kernel/crypto.h"
+#include "../settle/settle.h"
 #include "boardroom.h"   /* BoardroomSeatRun — how much the medium takes in one command */
 
 /*
@@ -264,6 +265,8 @@ static uint64_t UseLinkNext(const UseChain *chain, uint32_t r, uint32_t k)
 
 error_t UseChainWrite(const UseChain *chain, const UseText *text)
 {
+    if (SettleV1OnBook("the Use Context chain's write"))
+        return ERR_UNSUPPORTED;
     uint64_t links  = UseChainLinksFor(text->bytes);
     uint32_t window = UseWindowBlocks(links);
     uint8_t *buf    = UseWindowBuffer(&window);

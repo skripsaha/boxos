@@ -10,7 +10,7 @@
 /* The Makefile hands the point over as SETTLE_CUT_POINT_<VALUE>; a value that
  * names no point is an undeclared identifier and never gets this far. */
 _Static_assert(CONFIG_TAGFS_SETTLE_CUT_POINT >= SETTLE_CUT_POINT_REGISTRY &&
-               CONFIG_TAGFS_SETTLE_CUT_POINT <= SETTLE_CUT_POINT_USECHAIN,
+               CONFIG_TAGFS_SETTLE_CUT_POINT <= SETTLE_CUT_POINT_STITCH,
                "SETTLECUT names no point of the Settle cycle");
 
 static const char *const SettleCutWhere[] = {
@@ -23,6 +23,7 @@ static const char *const SettleCutWhere[] = {
     [SETTLE_CUT_POINT_FLUSH]     = "before the medium's cache is flushed",
     [SETTLE_CUT_POINT_DONE]      = "after the cache flush, with the whole cycle on the medium",
     [SETTLE_CUT_POINT_USECHAIN]  = "before the Use Context's chain is written",
+    [SETTLE_CUT_POINT_STITCH]    = "before the stitch's last atom is written",
 };
 
 static volatile uint32_t g_settle_cycles;       /* cycles that took their snapshot */
@@ -37,7 +38,7 @@ void SettleCutSayArmed(void)
             "change of the first anchor after this line in its snapshot stops this "
             "machine there\n",
             (unsigned)CONFIG_TAGFS_SETTLE_CUT_POINT,
-            (unsigned)SETTLE_CUT_POINT_USECHAIN,
+            (unsigned)SETTLE_CUT_POINT_STITCH,
             SettleCutWhere[CONFIG_TAGFS_SETTLE_CUT_POINT]);
 }
 
@@ -107,7 +108,7 @@ void SettleCutAt(SettleCutPoint here)
             "this boot, whose snapshot reaches Ink %llu of the anchor's %llu, on "
             "core %u — %u of the %u other core(s) answered the roll call and run "
             "no more, and nothing after this point was issued to the medium\n",
-            (unsigned)here, (unsigned)SETTLE_CUT_POINT_USECHAIN,
+            (unsigned)here, (unsigned)SETTLE_CUT_POINT_STITCH,
             SettleCutWhere[here], cycle, (unsigned long long)target,
             (unsigned long long)anchor, (unsigned)me, answered,
             (unsigned)(g_amp.total_cores ? g_amp.total_cores - 1u : 0u));
