@@ -1,4 +1,5 @@
 #include "tract.h"
+#include "tail_slip.h"
 
 /*
  * A file's record (file_record.h): its header — one allocation with its tags
@@ -83,6 +84,8 @@ FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uin
     rec->size          = old->size;
     rec->created_time  = old->created_time;
     rec->modified_time = old->modified_time;
+    rec->gen           = old->gen;
+    rec->slip          = TailSlipHold(old->slip);
     TractHold(old->tract);
     RecordRuns(rec, old->tract);
     return rec;
@@ -249,6 +252,8 @@ error_t FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t c
     rec->size          = size;
     rec->created_time  = old->created_time;
     rec->modified_time = mtime;
+    rec->gen           = old->gen;
+    rec->slip          = TailSlipHold(old->slip);
     RecordRuns(rec, root);
     *out = rec;
     return OK;
@@ -372,6 +377,7 @@ void FileRecordRelease(FileRecord* rec)
 {
     if (rec && __atomic_sub_fetch(&rec->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         TractLetGo(rec->tract);
+        TailSlipLetGo(rec->slip);
         kfree(rec);
     }
 }

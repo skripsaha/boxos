@@ -1,5 +1,6 @@
 #include "read.h"
 #include "../integrity/integrity.h"
+#include "../file_map/tail_slip.h"
 
 error_t ReadSinkPush(const ReadSink *sink, uint64_t at, const void *src, uint32_t bytes)
 {
@@ -37,6 +38,37 @@ error_t ReadSinkZeros(const ReadSink *sink, uint64_t at, uint64_t bytes)
         bytes -= n;
     }
     return OK;
+}
+
+error_t ReadSinkBlock(const ReadSink *sink, uint64_t at, const FileRecord *rec, uint64_t k,
+                      const uint8_t *base, uint32_t off, uint32_t chunk)
+{
+    if (!TailSlipOn(rec, k))
+        return base ? ReadSinkPush(sink, at, base + off, chunk) : ReadSinkZeros(sink, at, chunk);
+    uint8_t *block = kmalloc(TAGFS_BLOCK_SIZE);
+    if (!block)
+        return ERR_NO_MEMORY;
+    if (base)
+        memcpy(block, base, TAGFS_BLOCK_SIZE);
+    else
+        memset(block, 0, TAGFS_BLOCK_SIZE);
+    TailSlipOver(rec, k, block);
+    error_t rc = ReadSinkPush(sink, at, block + off, chunk);
+    kfree(block);
+    return rc;
+}
+
+error_t ReadSinkHole(const ReadSink *sink, uint64_t at, const FileRecord *rec, uint64_t pos, uint64_t bytes)
+{
+    uint64_t last = rec && rec->slip && rec->size ? (rec->size - 1u) / TAGFS_BLOCK_SIZE * TAGFS_BLOCK_SIZE : 0;
+    if (bytes == 0 || !TailSlipOn(rec, (pos + bytes - 1u) / TAGFS_BLOCK_SIZE))
+        return ReadSinkZeros(sink, at, bytes);
+    uint64_t plain = last > pos ? last - pos : 0;
+    error_t  rc    = plain ? ReadSinkZeros(sink, at, plain) : OK;
+    if (rc != OK)
+        return rc;
+    return ReadSinkBlock(sink, at + plain, rec, last / TAGFS_BLOCK_SIZE, NULL,
+                         (uint32_t)(pos + plain - last), (uint32_t)(bytes - plain));
 }
 
 error_t ReadLocate(const TagFSFileHandle *h, uint64_t k, FileSpot *out)
@@ -117,7 +149,7 @@ error_t TagFSReadStream(TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_
         }
 
         if (spot.kind == STRIP_HOLE) {
-            rc = ReadSinkZeros(sink, done, chunk);
+            rc = ReadSinkHole(sink, done, h->rec, pos, chunk);
             if (rc != OK) {
                 kprintf("[TagFS] file %llu: the hole at its block %llu answered %u — %llu of %llu "
                         "bytes had landed before it\n", h->file_id,
@@ -136,7 +168,7 @@ error_t TagFSReadStream(TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_
         const uint8_t *from = NULL;
         rc = ReadStreamBlock(h, spot.block, run, &buf, &from);
         if (rc == OK)
-            rc = ReadSinkPush(sink, done, from + offset, chunk);
+            rc = ReadSinkBlock(sink, done, h->rec, pos / TAGFS_BLOCK_SIZE, from, offset, chunk);
         if (rc != OK) {
             kprintf("[TagFS] file %llu: block %llu answered %u — %llu of %llu bytes had landed "
                     "before it\n", h->file_id, (unsigned long long)spot.block, (unsigned)rc,

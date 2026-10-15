@@ -151,7 +151,7 @@ static error_t rjob_hole(ReadJob *j, uint64_t pos, const FileSpot *spot)
     uint64_t bytes = end - pos;
     if (bytes > j->total - j->landed)
         bytes = j->total - j->landed;
-    error_t rc = ReadSinkZeros(&j->sink, j->landed, bytes);
+    error_t rc = ReadSinkHole(&j->sink, j->landed, j->handle->rec, pos, bytes);
     if (rc == OK)
         j->landed += bytes;
     return rc;
@@ -218,9 +218,10 @@ static void rjob_pump(void *job_)
         uint32_t       chunk = TAGFS_BLOCK_SIZE - off;
         if ((uint64_t)chunk > j->total - j->landed)
             chunk = (uint32_t)(j->total - j->landed);
+        uint64_t       k     = (j->start + j->landed) / TAGFS_BLOCK_SIZE;
         if (!IntegrityVerify(j->block + i, data))
             rc = ERR_CHECKSUM;
-        else if ((rc = ReadSinkPush(&j->sink, j->landed, data + off, chunk)) == OK)
+        else if ((rc = ReadSinkBlock(&j->sink, j->landed, j->handle->rec, k, data, off, chunk)) == OK)
             j->landed += chunk;
     }
     if (rc != OK) {

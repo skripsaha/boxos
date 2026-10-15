@@ -3,10 +3,12 @@
 #include "away.h"
 #include "ground_census.h"
 #include "../block_map/block_map_derived.h"
+#include "../integrity/gloss.h"
 #include "../file_map/file_map.h"
 #include "../tag_registry/tag_registry.h"
 #include "../use_memory/use_memory.h"
 #include "boardroom.h"
+#include "crypto.h"
 
 /*
  * A format-v2 volume's mount (book_mount.h): the ground, the Spine, the slot
@@ -152,66 +154,38 @@ static void BookSlotSaid(const SpineSlot* s)
 }
 
 // ----------------------------------------------------------------------------
-// Nothing sewn past the Tally (§4.5 п.5 is a newer kernel's)
+// The ribbon past the Tally (§4.5 пп.5–6)
 // ----------------------------------------------------------------------------
 
-#define BOOK_LOOK_SECTORS  256u
-
-/* Whether a sector of [block, block + blocks) holds as a stitch of a seq past
- * `past`: OK with *sewn, or the medium's or memory's refusal. */
-static error_t BookRibbonLook(uint64_t block, uint64_t blocks, uint64_t past, bool* sewn)
+/* The ribbon from the stood slot's `at`: pass 1, the data of its newest
+ * stitch, pass 2 — and what the mount says of it in numbers. */
+static error_t BookRibbon(const char** what)
 {
-    uint64_t at = block * TAGFS_BLOCK_SECTORS, end = (block + blocks) * TAGFS_BLOCK_SECTORS;
-    while (at < end && !*sewn) {
-        BookUnit u;
-        uint32_t n  = end - at > BOOK_LOOK_SECTORS ? BOOK_LOOK_SECTORS : (uint32_t)(end - at);
-        error_t  rc = BookUnitRead(at, n, 0, 0, &u);
-        for (uint32_t k = 0; rc == OK && k < n; k++) {
-            BookSectorHead h;
-            memcpy(&h, u.sectors + (uint64_t)k * BOOK_SECTOR_BYTES, sizeof(h));
-            if (u.state[k] == BOOK_SECTOR_HOLDS && h.kind == BOOK_UNIT_STITCH && h.seq > past)
-                *sewn = true;
-        }
-        BookUnitLetGo(&u);
-        if (rc != OK)
-            return rc;
-        at += n;
-    }
-    return OK;
-}
-
-/* The ribbon from the stood slot's `at` to the end of its Quire, and all of
- * the next_quire it names inside the data run: nothing there may hold as a
- * stitch past the one the Tally took in (bookcensus.py KernelRibbonEmpty). A
- * slot that puts the ribbon outside its own Quire names none to look at — said
- * in volume-read's words (stitch.py Ribbon, RIBBON_TORN). */
-static error_t BookRibbonEmpty(const char** what)
-{
-    const SpineRibbon* r    = &g_book.stood->ribbon;
-    uint64_t           past = g_book.stood->head.stitch_seq;
-    bool               sewn = false;
-    error_t            rc   = OK;
-    if (!r->quire_blocks || r->at < r->quire_block || r->at - r->quire_block >= r->quire_blocks) {
-        kprintf("[TagFS] slot %u puts the ribbon on at block %llu, outside the Quire %llu+%llu it names — "
-                "no stitch past its Tally is read\n", g_book.stood->index, (unsigned long long)r->at,
-                (unsigned long long)r->quire_block, (unsigned long long)r->quire_blocks);
-        return OK;
-    }
-    rc = BookRibbonLook(r->at, r->quire_block + r->quire_blocks - r->at, past, &sewn);
-    if (rc == OK && !sewn && r->next_blocks &&
-        !(r->next_block == r->quire_block && r->next_blocks == r->quire_blocks) &&
-        r->next_block >= g_book.frame.data_block && r->next_block + r->next_blocks <= g_book.data_end)
-        rc = BookRibbonLook(r->next_block, r->next_blocks, past, &sewn);
+    error_t rc = RibbonCollate(g_book.stood, &g_book.ribbon);
     if (rc != OK) {
-        *what = rc == ERR_NO_MEMORY ? "there is no memory to look past its Tally"
+        *what = rc == ERR_NO_MEMORY ? "there is no memory to read the ribbon past its Tally"
                                     : "its medium would not give up the ribbon past its Tally";
         return rc;
     }
-    if (!sewn)
-        return OK;
-    *what = "the ribbon past its Tally is not empty — this kernel reads a book's Tally, and not yet the "
-            "stitches sewn past it (ERR_UNSUPPORTED)";
-    return ERR_UNSUPPORTED;
+    RibbonWalk* w = g_book.ribbon;
+    rc = RibbonTranscribe(w, what);
+    if (rc != OK)
+        return rc;
+    g_book.said.sewn = w->nstitch;
+    g_book.said.last = w->nstitch ? w->stitch[w->nstitch - 1u]->seq : g_book.stood->head.stitch_seq;
+    g_book.said.lied = w->lied;
+    kprintf("[TagFS] the ribbon past the Tally: %u stitch(es) sewn on, the last seq %llu, %u applied\n",
+            w->nstitch, (unsigned long long)g_book.said.last, g_book.said.applied);
+    if (w->lied)
+        kprintf("[TagFS] MEDIUM_LIED: this volume's medium has not kept what it confirmed — a Fallow lags two "
+                "stitches on it, and the newest two are held to their data at a mount (§3.9); this kernel keeps "
+                "the verdict in memory and writes it nowhere\n");
+    if (w->seen_fid > g_book.next_fid)
+        g_book.next_fid = w->seen_fid;
+    if (w->seen_tag > g_book.next_tag)
+        g_book.next_tag = w->seen_tag;
+    g_book.next_bookmark = w->seen_bookmark;
+    return OK;
 }
 
 // ----------------------------------------------------------------------------
@@ -295,7 +269,7 @@ static error_t BookWalk(const char** what)
         rc   = BookTree(next);
     }
     if (rc == OK && !use)
-        rc = UseMemoryRecall(NULL, 0);
+        rc = BookUseRecalled(NULL, 0);
     if (rc != OK)
         *what = rc == ERR_NO_MEMORY ? "there is no memory to hold what its Tally names"
                                     : "its medium would not give up its Tally";
@@ -320,8 +294,10 @@ static void BookBounds(void)
         fid = known_file;
     if (known_tag > tag)
         tag = known_tag;
-    kprintf("[TagFS] the next file id %llu, tag id %llu, bookmark %llu — past every one the book names\n",
-            (unsigned long long)fid, (unsigned long long)tag, (unsigned long long)c->next_bookmark);
+    uint64_t bookmark = g_book.next_bookmark > c->next_bookmark ? g_book.next_bookmark : c->next_bookmark;
+    kprintf("[TagFS] the next file id %llu, tag id %llu, bookmark %llu, seq %llu — past every one the book "
+            "names\n", (unsigned long long)fid, (unsigned long long)tag, (unsigned long long)bookmark,
+            (unsigned long long)(BookSeqSeen() + 1u));
     if (fid > UINT32_MAX)
         kprintf("[TagFS] file ids past %u are this book's, and this kernel counts the ids it gives in 32 "
                 "bits — it gives none on this volume\n", UINT32_MAX);
@@ -378,13 +354,12 @@ static error_t BookSpine(const char** what)
 
 error_t MountReadBook(const char** what)
 {
+    BookSeqSeenForget();
     error_t rc = BookMemory(what);
     if (rc == OK)
         rc = BookSpine(what);
     if (rc == OK)
         rc = BookStand(what);
-    if (rc == OK)
-        rc = BookRibbonEmpty(what);
     if (rc != OK)
         return rc;
 
@@ -393,11 +368,19 @@ error_t MountReadBook(const char** what)
     GroundCensusBegin();
     rc = BookWalk(what);
     if (rc == OK)
+        rc = BookRibbon(what);
+    if (rc == OK) {
+        BookFilesLaid();
         rc = BookGroundCensus(what);
+    }
+    RibbonWalkLetGo(g_book.ribbon);
+    g_book.ribbon = NULL;
     GroundCensusEnd();
     if (rc != OK)
         return rc;
     BookBounds();
+    kprintf("[TagFS] the book as memory holds it: its files print 0x%08X, its Use Context %llu byte(s) print "
+            "0x%08X\n", g_book.files_print, (unsigned long long)g_book.use_bytes, g_book.use_print);
     if (g_book.bookmarked)
         kprintf("[TagFS] %llu data blocks, free not counted, %llu files — a Tally of the book names a bookmark, "
                 "whose ground this kernel does not read: no block is counted free, and none is given\n",
@@ -427,14 +410,76 @@ bool BookFileLocked(uint64_t fid)
         else
             hi = mid;
     }
+    FileRecord* live = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecordRelease(live);
+    return !live && BookRotLocks(fid);
+}
+
+/* Whether a rotten range of FILES holds `fid`. */
+static bool BookInRot(uint64_t fid)
+{
     for (uint32_t i = 0; i < g_book.nrot; i++) {
         const BookRotten* r = &g_book.rot[i];
-        bool after_lo = fid > r->lo.k1 || (fid == r->lo.k1);
-        bool before_hi = !r->has_hi || fid < r->hi.k1 || (fid == r->hi.k1 && r->hi.k2 > 0);
-        if (after_lo && before_hi)
+        if (fid >= r->lo.k1 && (!r->has_hi || fid < r->hi.k1 || (fid == r->hi.k1 && r->hi.k2 > 0)))
             return true;
     }
     return false;
+}
+
+bool BookRotLocks(uint64_t fid)
+{
+    uint32_t lo = 0, hi = g_book.nborn;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        if (g_book.born[mid] == fid)
+            return false;
+        if (g_book.born[mid] < fid)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return BookInRot(fid);
+}
+
+error_t BookBornNoted(uint64_t fid)
+{
+    uint32_t lo = 0, hi = g_book.nborn;
+    if (!BookInRot(fid))
+        return OK;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        if (g_book.born[mid] < fid)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    if (lo < g_book.nborn && g_book.born[lo] == fid)
+        return OK;
+    if (g_book.nborn == g_book.capborn) {
+        uint32_t  cap  = g_book.capborn ? g_book.capborn * 2u : 16u;
+        uint64_t* more = kmalloc(sizeof(uint64_t) * cap);
+        if (!more)
+            return ERR_NO_MEMORY;
+        if (g_book.nborn)
+            memcpy(more, g_book.born, sizeof(uint64_t) * g_book.nborn);
+        kfree(g_book.born);
+        g_book.born    = more;
+        g_book.capborn = cap;
+    }
+    memmove(&g_book.born[lo + 1u], &g_book.born[lo], sizeof(uint64_t) * (g_book.nborn - lo));
+    g_book.born[lo] = fid;
+    g_book.nborn++;
+    return OK;
+}
+
+error_t BookUseRecalled(const uint8_t* text, uint64_t len)
+{
+    error_t rc = UseMemoryRecall(text, len);
+    if (rc == OK) {
+        g_book.use_print = len ? KCrc32c(text, (uint32_t)len) : 0;
+        g_book.use_bytes = len;
+    }
+    return rc;
 }
 
 bool TagFSFileLocked(uint64_t fid)
@@ -455,6 +500,13 @@ void MountBookLetGo(void)
     SpineLetGo(g_book.slots, g_book.nslots);
     kfree(g_book.rot);
     kfree(g_book.locked);
+    kfree(g_book.fallow);
+    kfree(g_book.born);
+    for (uint32_t i = 0; i < g_book.naside; i++)
+        kfree(g_book.aside[i].text);
+    kfree(g_book.aside);
+    RibbonWalkLetGo(g_book.ribbon);
+    GlossLetGo();
     TallyDigestsLetGo();
     BlockMapDerivedLetGo();
     memset(&g_book, 0, sizeof(g_book));

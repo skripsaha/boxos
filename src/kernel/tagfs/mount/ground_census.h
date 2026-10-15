@@ -51,9 +51,11 @@ error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out);
  * A format-v2 volume's census, which keeps no bitmap to hold the claims
  * against (spec_v2 §4.6): every block an owner names is taken, and the only
  * finding is a block two owners name — said where they meet, as above. The
+ * GROUND_FALLOW claims are the ground the ribbon let go (M-1); fallow is what
+ * of them no other owner but the held names, *fallow their blocks. The
  * GROUND_HELD claims are what may be held for what rotted; held is what of
- * them no other owner names — BOOT, which lies over a file by design, aside
- * — and *held their blocks.
+ * them no other owner names — the fallow among them, BOOT, which lies over a
+ * file by design, aside — and *held their blocks.
  *
  * A claim is a name — its owner, its `who`, its run, and the slot that gives
  * it. One name two slots give alike is one owner: an unchanged node two
@@ -69,7 +71,7 @@ error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out);
  * read free what an owner the census does not see holds. OK; ERR_NO_MEMORY
  * with nothing held, or the map's refusal — *what says which.
  */
-error_t GroundCensusBook(uint64_t* held, bool derive, const char** what);
+error_t GroundCensusBook(uint64_t* held, uint64_t* fallow, bool derive, const char** what);
 
 /* Whether a block of [start, start + count) is claimed already by `owner`. */
 bool    GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count);

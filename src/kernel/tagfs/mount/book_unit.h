@@ -60,6 +60,19 @@ typedef struct {
 error_t  BookUnitRead(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, BookUnit* out);
 void     BookUnitLetGo(BookUnit* u);
 
+/* A refusal of the medium — tagfs_volume_read's `rc`, not ERR_BAD_SECTOR —
+ * counted for the mount's road back (tagfs.c), and answered as what it is:
+ * ERR_DEVICE_NOT_READY, or ERR_READ_FAILED. For a reader of the volume's
+ * ground that reads it as no unit of the book (ribbon_verify.c). */
+error_t  BookUnitRefused(int rc);
+
+/* The largest seq a sector read through BookUnitRead held at since the mount
+ * forgot it — what the next seq is given past (spec_v2 §2.2, §4.5 п.8). Read
+ * by the mount, with its door shut; raised by every reader of the book on any
+ * core, the mount's and the DIGESTS leaves a read of a block opens after it. */
+uint64_t BookSeqSeen(void);
+void     BookSeqSeenForget(void);
+
 /* Whether every byte of the run is zero — a slot never written. */
 bool     BookUnitBlank(const BookUnit* u);
 

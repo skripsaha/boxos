@@ -34,7 +34,7 @@ from .selftest_book import BookTargets
 from .selftest_book_tally import (Pristine, Circles, SpineCases, RangeCases, TreeShapeCases, ElementCases,
                                   SlotRootCases)
 from .selftest_book_ribbon import (RecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases,
-                                   RibbonLossCases, RibbonCases, RibbonShapeCases)
+                                   RibbonLossCases, RibbonCases, RibbonShapeCases, RibbonBoundCases)
 
 # ---------------------------------------------------------------------------
 # Running
@@ -47,7 +47,7 @@ def BookCases(bt):
     cases, refused = [], []
     for group in (Pristine, Circles, SpineCases, RangeCases, TreeShapeCases, ElementCases, SlotRootCases,
                   RecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases, RibbonLossCases, RibbonCases,
-                  RibbonShapeCases):
+                  RibbonShapeCases, RibbonBoundCases):
         try:
             cases += group(bt)
         except Unreadable as e:
@@ -199,7 +199,7 @@ def Headers(src, heard, count):
         print("self-test: X3 alphabet — %s" % n)
         return False
     count.Say(not wrong, "X3 alphabet — %u numbers, layouts and known answers held against volume_book.h, "
-              "volume_digest.h and volume_tally.h — %s" % (n, "as expected" if not wrong else "; ".join(wrong)))
+              "volume_digest.h, volume_tally.h and volume_ribbon.h — %s" % (n, "as expected" if not wrong else "; ".join(wrong)))
     return True
 
 

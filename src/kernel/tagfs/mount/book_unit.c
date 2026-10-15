@@ -69,9 +69,30 @@ static uint8_t BookSectorJudged(const uint8_t* s, const uint8_t uuid[16], uint64
     return sum == h.crc32c ? BOOK_SECTOR_HOLDS : BOOK_SECTOR_LOOSE;
 }
 
-/* A refusal of the medium, counted for the mount's road back (tagfs.c), and
- * answered as what it is. */
-static error_t BookUnitRefused(int rc)
+/* The largest seq a sector of the book read held at (spec_v2 §2.2, §4.5
+ * п.8): the next seq is past everything the mount saw hold, the torn tail and
+ * the direct scan among it — every reader of a book reads through here, so
+ * nothing read is left out. The mount reads it with its door shut; but the
+ * DIGESTS leaves a read of a block opens after the mount (TallyDigestFind)
+ * read through here too, on any core at once — so it only ever rises, by an
+ * atomic max, and no fold is lost to another. */
+static uint64_t s_seq_seen;
+
+static void BookSeqFold(const BookUnit* u)
+{
+    for (uint32_t k = 0; k < u->count; k++) {
+        BookSectorHead h;
+        if (u->state[k] != BOOK_SECTOR_HOLDS)
+            continue;
+        memcpy(&h, u->sectors + (uint64_t)k * BOOK_SECTOR_BYTES, sizeof(h));
+        uint64_t seen = __atomic_load_n(&s_seq_seen, __ATOMIC_RELAXED);
+        while (h.seq > seen &&
+               !__atomic_compare_exchange_n(&s_seq_seen, &seen, h.seq, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            ;
+    }
+}
+
+error_t BookUnitRefused(int rc)
 {
     TagFSNoteReadRefused();
     return rc == (int)ERR_DEVICE_NOT_READY ? ERR_DEVICE_NOT_READY : ERR_READ_FAILED;
@@ -204,7 +225,18 @@ error_t BookUnitRead(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq,
             out->state[k] = BookSectorJudged(out->sectors + (uint64_t)k * BOOK_SECTOR_BYTES, uuid,
                                              vlba + k);
     }
+    BookSeqFold(out);
     return BookUnitWholeOf(out, kind, seq);
+}
+
+uint64_t BookSeqSeen(void)
+{
+    return __atomic_load_n(&s_seq_seen, __ATOMIC_RELAXED);
+}
+
+void BookSeqSeenForget(void)
+{
+    __atomic_store_n(&s_seq_seen, 0, __ATOMIC_RELAXED);
 }
 
 void BookUnitLetGo(BookUnit* u)

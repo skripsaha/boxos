@@ -15,7 +15,7 @@ held as raw records; bookmount.py replays them (pass 2) through the rules of
 from .bookread import (Crc32c, Cursor, EntryNext, EntryPut, IdsPut, Short, UnitSeal, VarintPut, Zigzag,
                        HEAD_BYTES, PAYLOAD_BYTES, SECTOR_HEAD, UNIT_STITCH)
 from .ondisk import SECTORS_PER_BLOCK
-from . import bookread, tally
+from . import bookread, ondisk, tally
 from .tally import Run, RunsGet, RunsPut, TagDecode, TagEncode, TagState, TAG_HAS_VALUE, TAG_RETIRED
 
 # The kinds of a stitch's records (§2.7, §2.8)
@@ -30,6 +30,10 @@ DATA_FLUSHED, CLEAN, MEDIUM_LIED = 1, 2, 4
 
 # Labeled.what (§2.8)
 LABEL_NAME, LABEL_FLAGS, LABEL_TAGS = 1, 2, 4
+
+# The longest stream of a stitch a reader holds: its offsets are 32 bits
+# (volume_ribbon.h RIBBON_STREAM_MOST).
+STREAM_MOST = 0xFFFFFFFF
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +427,10 @@ def Misshapen(start, of, hop):
     atom; on into the next Quire and no further) — None when it is one. The
     atom held to is a block's: no writer's is smaller, and a reader takes the
     next unit where the last one ends by its writer's atom, not by its own
-    (§16.2 п.11), so one larger than a block is not asked of it."""
+    (§16.2 п.11), so one larger than a block is not asked of it. Nor is a
+    stream past 2^32 - 1 bytes read: a reader's offsets in it are 32 bits
+    (volume_ribbon.h RibbonShape) — no writer's stitch, of two Quires at the
+    most, comes near it."""
     room = start.Left() + (hop[1] * SECTORS_PER_BLOCK if hop else 0)
     if of < SECTORS_PER_BLOCK or of % SECTORS_PER_BLOCK:
         return "%u sector(s) long — no whole number of atoms of %u" % (of, SECTORS_PER_BLOCK)
@@ -431,7 +438,20 @@ def Misshapen(start, of, hop):
         return "begun at sector %u of its Quire, off a block's boundary" % start.off
     if of > room:
         return "%u sectors long, more than its Quire and the next hold (%u)" % (of, room)
+    if of * PAYLOAD_BYTES > STREAM_MOST:
+        return "%u sectors long — a stream of more than %u bytes, past what a reader holds a stitch in" % (
+            of, STREAM_MOST)
     return None
+
+
+def Lies(g, quire):
+    """Does `quire` lie where a Quire of the ribbon may — in the data run,
+    begun on an atom (§3.7's table)? A Quire a slot or a unit's own
+    StitchHead names is read only then: no word of the medium sends a reader
+    past the volume's ground."""
+    grid = max(1, g.atom // 4096)
+    return bool(quire[1]) and g.data_block <= quire[0] and quire[0] + quire[1] <= g.data_end and \
+        not quire[0] % grid
 
 
 class Unit:
@@ -496,7 +516,8 @@ class Unit:
 
 def Peek(g, place):
     """The next_quire the StitchHead in the sector at `place` names, when one
-    reads there (a unit's own word on where it runs on to)."""
+    reads there and the Quire lies where one may (a unit's own word on where
+    it runs on to)."""
     raw, h = g.Sector(place.Vlba())
     if h is None or h["at"] != 0:
         return None
@@ -505,7 +526,7 @@ def Peek(g, place):
         p.Head(raw[HEAD_BYTES:])
     except Short:
         return None
-    return p.next if p.next[1] else None
+    return p.next if Lies(g, p.next) else None
 
 
 def FindUnit(g, place, hop, after):
@@ -557,9 +578,10 @@ class Ribbon:
         self.seq, self.clasp = slot.stitch_seq, slot.stitch_clasp
         self.quire = (r["quire_block"], r["quire_blocks"])
         self.next = None
-        if not r["quire_blocks"] or not r["quire_block"] <= r["at"] < sum(self.quire):
-            self.Say("RIBBON_TORN", "damage", "slot %u puts the ribbon on at block %u, outside the Quire "
-                     "%u+%u it names — no stitch past its Tally is read" % (slot.index, r["at"], *self.quire))
+        if not Lies(g, self.quire) or not r["quire_block"] <= r["at"] < sum(self.quire):
+            self.Say("RIBBON_TORN", "damage", "slot %u puts the ribbon on at block %u of the Quire %u+%u, "
+                     "which does not hold it or lies outside the data run or off an atom — no stitch past "
+                     "its Tally is read" % (slot.index, r["at"], *self.quire))
             self.end = None
             return
         self.end = Place(self.quire, (r["at"] - r["quire_block"]) * SECTORS_PER_BLOCK)
@@ -578,9 +600,7 @@ class Ribbon:
         the files) — said when it may not."""
         if not quire[1] or quire == self.quire:
             return
-        g, grid = self.g, max(1, self.g.atom // 4096)
-        if (quire[0] < g.data_block or quire[0] + quire[1] > g.data_end or quire[0] % grid or
-                any(s < quire[0] + quire[1] and quire[0] < s + n for s, n in self.taken)):
+        if not Lies(self.g, quire) or any(s < quire[0] + quire[1] and quire[0] < s + n for s, n in self.taken):
             self.Say("RIBBON_TORN", "damage", "%s names Quire %u+%u as the ribbon's next, which lies "
                      "outside the data run, off an atom, or on the book or a file — the ribbon is not "
                      "taken past it there" % (who, quire[0], quire[1]))
@@ -668,7 +688,7 @@ class Ribbon:
         where its Clasp reads, that Clasp."""
         if not self._Follows(u, at_next):
             return False
-        hop = (u.head.next if u.head is not None and u.head.next[1] else None) or self.next
+        hop = (u.head.next if u.head is not None and Lies(self.g, u.head.next) else None) or self.next
         f = FindUnit(self.g, u.end, hop, u.seq)
         if f is None or not f.Sound() or f.Names() != u.seq or \
                 (u.clasp is not None and f.parsed.prev_clasp != u.clasp):
@@ -908,3 +928,57 @@ def Circle(ribbon, sewn):
             if kind in KIND_NAMES and RecordAgain(kind, RecordDecode(kind, body, u.seq)).body != body:
                 wrong.append("stitch %u's %s is written again as other bytes" % (s.seq, KIND_NAMES[kind]))
     return wrong
+
+
+# ---------------------------------------------------------------------------
+# X3: the ribbon's numbers, and its golden stitch, against the header
+# ---------------------------------------------------------------------------
+
+
+def GoldenStitch():
+    """volume_ribbon.h's golden stitch, by this module's own encoders: seq 7 at
+    sector 0x4000 of the volume 00 01 .. 0F, one block, a record of every kind
+    a stitch carries and one of a kind no reader knows, to step over."""
+    head = HeadPut(DATA_FLUSHED, 2, 0xC0FFEE11, 4, 1700000000123456789, (3000, 256), (2560, 256))
+    records = [Undone(1, 1, [5, 6]),
+               Coined(42, b"key", b"val"),
+               Born(5, ondisk.FILE_ACTIVE, 5000, 1700000000000000000, 1700000000000000007, b"golden",
+                    [3, 5, 300], [Data(1024, 1), Hole(1)], [0x1122334455667788], (100, b"tail")),
+               Shaped(6, 1, 9000, 2, [(1, 1, [Data(4096, 1)]), (0, 0, [Hole(1)])], [0x99AABBCCDDEEFF00]),
+               Labeled(7, 2, name=b"renamed", flags=(4, 2), add=[9], drop=[3]),
+               Quitclaim(8, 3),
+               UseContext(b"work,play"),
+               Frozen(1, 1, [2, 3], b"snap"),
+               Thawed(1),
+               Unknown(31, 1, b"\x07")]
+    stream, starts, _clasp = StitchStream(head, records)
+    vlbas = list(range(0x4000, 0x4000 + SECTORS_PER_BLOCK))
+    return b"".join(UnitSeal(stream, starts, UNIT_STITCH, 7, vlbas, bookread.GOLDEN_UUID))
+
+
+# The numbers of the ribbon's alphabet (volume_ribbon.h): the kinds, the
+# flags and bits this module writes and reads by.
+RIBBON_NUMBERS = (
+    ("RIBBON_STITCH_HEAD", STITCH_HEAD), ("RIBBON_CLASP", CLASP), ("RIBBON_UNDONE", UNDONE), ("RIBBON_BORN", BORN),
+    ("RIBBON_SHAPED", SHAPED), ("RIBBON_LABELED", LABELED), ("RIBBON_QUITCLAIM", QUITCLAIM),
+    ("RIBBON_COINED", COINED), ("RIBBON_USE_CONTEXT", USE_CONTEXT), ("RIBBON_FROZEN", FROZEN),
+    ("RIBBON_THAWED", THAWED), ("RIBBON_KINDS_KNOWN", max(KIND_NAMES)), ("STITCH_DATA_FLUSHED", DATA_FLUSHED),
+    ("STITCH_CLEAN", CLEAN), ("STITCH_MEDIUM_LIED", MEDIUM_LIED), ("LABEL_NAME", LABEL_NAME),
+    ("LABEL_FLAGS", LABEL_FLAGS), ("LABEL_TAGS", LABEL_TAGS), ("RUN_EXT_CODEC", tally.EXT_CODEC),
+    ("RUN_EXT_SHARED", tally.EXT_SHARED), ("RUN_EXT_COPY", tally.EXT_COPY), ("UNDONE_NOT_LANDED", 1),
+    ("UNDONE_ROT", 2), ("RIBBON_STREAM_MOST", STREAM_MOST))
+
+
+def RibbonCheck(defines):
+    """What is wrong here against volume_ribbon.h — its numbers read out of it
+    (`defines`) — and how many things were held: every kind and bit of the
+    ribbon (why 1 and 2 of an Undone are bookmount.py's UNDONE_WHY), and the
+    sum of the golden stitch reached by this module's own encoders, as the
+    kernel's ribbon suite reaches it by the header's."""
+    wrong = ["%s: volume_ribbon.h says %r and stitch.py %r" % (c, defines.get(c), py)
+             for c, py in RIBBON_NUMBERS if defines.get(c) != py]
+    have, c = bookread.Crc32c(GoldenStitch()), "RIBBON_GOLDEN_STITCH_CRC"
+    if have != defines.get(c):
+        wrong.append("the golden stitch's sum: 0x%08X where %s is %s" % (
+            have, c, "0x%08X" % defines[c] if defines.get(c) is not None else "missing"))
+    return wrong, len(RIBBON_NUMBERS) + 1

@@ -35,6 +35,21 @@ error_t ReadSinkPush(const ReadSink *sink, uint64_t at, const void *src, uint32_
  * answered as ReadSinkPush answers. */
 error_t ReadSinkZeros(const ReadSink *sink, uint64_t at, uint64_t bytes);
 
+/*
+ * ‼ THE LAST BLOCK OF A FILE IS ITS BASE AND ITS SLIPS. Bytes [off, off + chunk)
+ * of file block `k` into the sink at `at`: from `base` — the block's bytes, or
+ * NULL for a hole's zeros — and, on the record's last block, the Slips of the
+ * ribbon laid over them (file_map/tail_slip.h, spec_v2 §2.8). Every road a
+ * read takes pushes a file's blocks through here, so none of them gives the
+ * base without its tail. ERR_NO_MEMORY for a block of its own to lay them in.
+ */
+error_t ReadSinkBlock(const ReadSink *sink, uint64_t at, const FileRecord *rec, uint64_t k,
+                      const uint8_t *base, uint32_t off, uint32_t chunk);
+
+/* `bytes` of a hole from file byte `pos` into the sink at `at`: zeros, and the
+ * Slips over them where the hole is the file's last block. */
+error_t ReadSinkHole(const ReadSink *sink, uint64_t at, const FileRecord *rec, uint64_t pos, uint64_t bytes);
+
 /* Block k of the handle's file — found in the record it holds, down its Tract
  * (file_map/file_record.h), never by walking every run from the first — and
  * how many of the file's next blocks follow it in the same Strip. A hole is a

@@ -99,6 +99,7 @@ static error_t BookFileHead(BookFile* f, const uint8_t* body, uint32_t len)
         f->meta.tag_ids[f->meta.tag_count++] = (uint32_t)id;
     }
     f->meta.file_id       = f->fid;
+    f->gen                = h.gen;
     f->meta.flags         = (uint32_t)h.flags;
     f->wide               = h.flags > UINT32_MAX;
     f->meta.size          = h.size;
@@ -260,9 +261,9 @@ static const char* BookFileJudged(BookFile* f, char* words, size_t room)
     return NULL;
 }
 
-/* A file the book holds and cannot read: said, kept by name for every open of
- * it to be refused, and what of its ground it is known to name held. */
-static error_t BookFileLock(BookFile* f, const char* why)
+/* `fid` kept by name among the locked, in their order, and said: no open of
+ * it is given, its id is not given again. ERR_NO_MEMORY. */
+static error_t BookLockedByName(uint64_t fid, const char* why)
 {
     if (g_book.nlocked == g_book.caplocked) {
         uint32_t  cap  = g_book.caplocked ? g_book.caplocked * 2u : 16u;
@@ -275,14 +276,50 @@ static error_t BookFileLock(BookFile* f, const char* why)
         g_book.locked    = more;
         g_book.caplocked = cap;
     }
-    g_book.locked[g_book.nlocked++] = f->fid;
+    uint32_t at = g_book.nlocked++;
+    while (at > 0 && g_book.locked[at - 1u] > fid) {
+        g_book.locked[at] = g_book.locked[at - 1u];
+        at--;
+    }
+    g_book.locked[at] = fid;
     g_book.said.locked++;
     kprintf("[TagFS] fid %llu is locked: %s — no open of it is given, its id is not given again, and "
-            "the blocks it names are held\n", (unsigned long long)f->fid, why);
-    for (uint32_t i = 0; i < f->nstrips; i++)
+            "the blocks it names are held\n", (unsigned long long)fid, why);
+    return OK;
+}
+
+/* A file the book holds and cannot read: said, kept by name for every open of
+ * it to be refused, and what of its ground it is known to name held. */
+static error_t BookFileLock(BookFile* f, const char* why)
+{
+    error_t rc = BookLockedByName(f->fid, why);
+    for (uint32_t i = 0; rc == OK && i < f->nstrips; i++)
         if (f->strips[i].kind == STRIP_DATA)
             BookGroundHoldRun(f->strips[i].start, f->strips[i].count);
-    return OK;
+    return rc;
+}
+
+error_t BookFileLockLive(uint64_t fid, const char* why)
+{
+    TagFSState* fs  = tagfs_get_state();
+    RecordWhere was;
+    FileRecord* rec = FileMapRecordHold(fs->files, fid, NULL);
+    StripWalk   walk;
+    Strip       run;
+    if (!rec)
+        return OK;
+    error_t rc = BookLockedByName(fid, why);
+    StripWalkBegin(rec, &walk);
+    while (rc == OK && StripWalkNextGround(&walk, &run))
+        BookGroundHoldRun(run.start, run.count);
+    for (uint32_t t = 0; rc == OK && t < rec->tag_count; t++)
+        TagBitmapLeave(fs->bitmap_index, rec->tags[t], fid);
+    FileRecordRelease(rec);
+    if (rc == OK) {
+        FileMapDrop(fs->files, fid, &was);
+        g_book.files--;
+    }
+    return rc;
 }
 
 /* A file that stands, into the map of live files, its tags into the index,
@@ -295,6 +332,7 @@ static error_t BookFileLive(BookFile* f)
     FileRecord* rec = FileRecordBuild(&f->meta);
     if (!rec)
         return ERR_NO_MEMORY;
+    rec->gen = f->gen;
     RecordWhere  where, was;
     FileMapStake stake = { .count = 0 };
     memset(&where, 0, sizeof(where));
@@ -302,15 +340,9 @@ static error_t BookFileLive(BookFile* f)
     FileMapStakeLetGo(&stake);
     if (rc != OK)
         return rc;
-    for (uint32_t t = 0; t < f->meta.tag_count; t++) {
+    for (uint32_t t = 0; t < f->meta.tag_count; t++)
         if (tag_bitmap_set(fs->bitmap_index, f->meta.tag_ids[t], f->fid) != 0)
             return ERR_NO_MEMORY;
-        if ((uint64_t)f->meta.tag_ids[t] + 1u > g_book.next_tag)
-            g_book.next_tag = (uint64_t)f->meta.tag_ids[t] + 1u;
-    }
-    for (uint32_t i = 0; i < f->nstrips; i++)
-        if (f->strips[i].kind == STRIP_DATA)
-            GroundClaim(GROUND_FILE, f->strips[i].start, f->strips[i].count, f->fid);
     char words[160];
     if (f->ext) {
         ksnprintf(words, sizeof(words), "a run of fid %llu carries an extension this kernel cannot carry "
@@ -408,9 +440,7 @@ typedef struct {
     bool     use_seen;
 } LeavesWalk;
 
-/* What of a tag this kernel cannot carry on (§16.1 п.2, §6.4): true when it
- * can be held. */
-static bool LeavesTagHeld(uint64_t tid, const TallyTag* t)
+bool BookTagHeld(uint64_t tid, const TallyTag* t)
 {
     char words[192];
     bool held = true;
@@ -434,6 +464,53 @@ static bool LeavesTagHeld(uint64_t tid, const TallyTag* t)
         held = false;
     }
     return held;
+}
+
+/* Where tag `tid` lies among those set aside, or would. */
+static uint32_t BookTagAsideAt(uint64_t tid)
+{
+    uint32_t lo = 0, hi = g_book.naside;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        if (g_book.aside[mid].id < tid)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+const TallyTag* BookTagAsideOf(uint64_t tid)
+{
+    uint32_t at = BookTagAsideAt(tid);
+    return at < g_book.naside && g_book.aside[at].id == tid ? &g_book.aside[at].tag : NULL;
+}
+
+error_t BookTagAsideNoted(uint64_t tid, const TallyTag* t)
+{
+    uint32_t at   = BookTagAsideAt(tid);
+    bool     has  = at < g_book.naside && g_book.aside[at].id == tid;
+    uint64_t cap  = g_book.capaside;
+    uint8_t* text = kmalloc(t->key_len + t->value_len + 1u);
+    if (!text || (!has && !RibbonGrow((void**)&g_book.aside, g_book.naside, &cap, sizeof(BookTagAside)))) {
+        kfree(text);
+        return ERR_NO_MEMORY;
+    }
+    g_book.capaside = (uint32_t)cap;
+    if (has) {
+        kfree(g_book.aside[at].text);
+    } else {
+        memmove(&g_book.aside[at + 1u], &g_book.aside[at], sizeof(BookTagAside) * (g_book.naside - at));
+        g_book.naside++;
+    }
+    if (t->key_len)
+        memcpy(text, t->key, t->key_len);
+    if (t->value_len)
+        memcpy(text + t->key_len, t->value, t->value_len);
+    g_book.aside[at] = (BookTagAside){ .id = tid, .tag = *t, .text = text };
+    g_book.aside[at].tag.key   = text;
+    g_book.aside[at].tag.value = text + t->key_len;
+    return OK;
 }
 
 /* The bytes of a TAGS body this reader knows. */
@@ -465,8 +542,8 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
         LeavesLonger(words, len - LeavesTagKnown(&t));
     if (key.k1 + 1u > g_book.next_tag)
         g_book.next_tag = key.k1 + 1u;
-    if (!LeavesTagHeld(key.k1, &t))
-        return OK;
+    if (!BookTagHeld(key.k1, &t))
+        return BookTagAsideNoted(key.k1, &t);
     error_t rc = RegistryCoin(tagfs_get_state()->registry, (uint32_t)key.k1,
                               (t.flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0, t.key,
                               (uint8_t)t.key_len, t.value, (uint16_t)t.value_len);
@@ -497,7 +574,7 @@ static error_t LeavesUse(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
     }
     if (got == TALLY_BODY_LONGER)
         LeavesLonger("the USE element", len - (TallyVarintBytes(n) + (uint32_t)n));
-    return UseMemoryRecall(text, n);
+    return BookUseRecalled(text, n);
 }
 
 static error_t LeavesNone(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
@@ -550,6 +627,6 @@ error_t TallyLeaves(uint64_t tree, const SpineRoot* root)
     if (rc == OK && tree == TALLY_FILES)
         rc = BookFileClose();
     if (rc == OK && tree == TALLY_USE && !walk.use_seen)
-        rc = UseMemoryRecall(NULL, 0);
+        rc = BookUseRecalled(NULL, 0);
     return rc;
 }

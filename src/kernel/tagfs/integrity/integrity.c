@@ -4,6 +4,7 @@
 #include "../scribe/scribe.h"
 #include "../mount/ground_census.h"
 #include "../mount/tally_read.h"
+#include "gloss.h"
 #include "../../lib/kernel/klib.h"
 #include "amp.h"
 #include "scheduler.h"    /* a page's transfer is a held span */
@@ -457,6 +458,10 @@ void IntegrityForget(uint64_t start, uint32_t count) {
  * leaf read off the medium when it is not held, with no lock held here), the
  * same function seeded with the same volume (spec_v2 §8.1).
  *
+ * A block a record of the ribbon put in is held to the digest that record
+ * carries (gloss.h) before the Tally is asked: the Tally learns it only at
+ * the next Tally, and a later write of the block stands over the Tally's.
+ *
  * Every block of format v2 is written with its digest (§2.8: a Born or a
  * Shaped carries them; SHARED ground puts the volume under glass), and 0 is
  * a digest like any other — "not known" is format v1's word, not this one's.
@@ -473,6 +478,8 @@ static bool IntegrityVerifyBook(uint64_t block, const void *data)
     error_t        refused = OK;
     BoxHashContext ctx;
 
+    if (GlossFind(block, &stored))
+        goto named;
     switch (TallyDigestFind(block, &stored, &refused)) {
     case TALLY_DIGEST_ROTTEN:
         return true;
@@ -489,6 +496,7 @@ static bool IntegrityVerifyBook(uint64_t block, const void *data)
     case TALLY_DIGEST_NAMED:
         break;
     }
+named:
     BoxHashInit(&ctx, tagfs_get_state()->uuid, 16);
     uint64_t h = BoxHashIntegrity(data, TAGFS_BLOCK_SIZE, &ctx);
     if (h == stored)
