@@ -1,5 +1,7 @@
 #include "book_mount.h"
 #include "ground_census.h"
+#include "../file_map/file_map.h"
+#include "crypto.h"
 
 /*
  * The census of a format-v2 volume (book_mount.h; spec_v2 §4.6): no bitmap
@@ -13,20 +15,24 @@
  *   tally     every node of every Tally a slot that holds names, every copy
  *             its pointer names — a rotten one too: its parent names those
  *             blocks
- *   ribbon    the Quire the ribbon goes on in from each such slot, and the
- *             next_quire it names where one may be named
- *   file      every DATA run of every live file (tally_leaves.c)
+ *   ribbon    the Quires the ribbon of each such slot runs through, and
+ *             the next_quire it names where one may be named (ribbon.h)
+ *   file      every DATA run of every live file, as the Tally and the
+ *             ribbon after it leave it (BookFilesLaid)
  *   boot      the BOOT run, beside the kernel file it is (not exclusive)
  *   far_deed  the far copy of the Deed, the volume's last block
  *   held      what a rotten range or a locked file may own and no name that
  *             reads does — given to no one until an explicit act lets it go
+ *   fallow    what the ribbon let go and no other owner names (M-1)
  *
  * The only finding is a block two exclusive owners name (GroundCensusBook) —
  * a node and a Quire named by the slot that names them, so that one name two
  * slots give alike is one owner. What none names is free: the census lays
  * every claim into the volume's block map (block_map_derived.h). The ground
- * the ribbon let go, lying fallow, is a ribbon's to name — this kernel mounts
- * no book with anything sewn past its Tally, so none lies so.
+ * the ribbon let go lies fallow (M-1): neither a file's nor free, given to no
+ * one until a writer's stitch settles past it — a block a mount reads as let
+ * go may have come out of the medium's cache, and its owner's bytes may be
+ * what a warm reboot still finds there.
  *
  * One owner of §4.6 this census does not see: a bookmark — the nodes of the
  * trees its element names and the runs under its Lien. This kernel reads no
@@ -90,26 +96,14 @@ void BookGroundHoldRun(uint64_t start, uint64_t count)
         BookClaim(GROUND_HELD, start, end - start, 0);
 }
 
-/* The Quires a slot's ribbon goes on in (stitch.py Ribbon): its Quire when its
- * `at` lies in it, and the next_quire it names when that lies in the data
- * run, on an atom and — for the slot stood on, `taken` — clear of the book
- * and the files. */
-static void BookGroundRibbon(const SpineSlot* s, bool taken)
+/* The Quires a slot's ribbon runs through (ribbon.h — RibbonCollate for the
+ * slot stood on, RibbonQuiresOf for another): its Quire when its `at` lies in
+ * it, every Quire its stitches go on into, and the next_quire it names where
+ * one may be named — as that slot names them. */
+static void BookGroundRibbon(const SpineSlot* s, const RibbonWalk* w)
 {
-    const SpineRibbon* r    = &s->ribbon;
-    uint64_t           grid = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
-    if (!r->quire_blocks || r->at < r->quire_block || r->at - r->quire_block >= r->quire_blocks)
-        return;
-    BookClaimBy(GROUND_RIBBON, r->quire_block, r->quire_blocks, 0, s->index);
-    if (!r->next_blocks || (r->next_block == r->quire_block && r->next_blocks == r->quire_blocks))
-        return;
-    if (r->next_block < g_book.frame.data_block || r->next_block + r->next_blocks > g_book.data_end ||
-        r->next_block % grid)
-        return;
-    if (taken && (GroundClaimedBy(GROUND_TALLY, r->next_block, r->next_blocks) ||
-                  GroundClaimedBy(GROUND_FILE, r->next_block, r->next_blocks)))
-        return;
-    BookClaimBy(GROUND_RIBBON, r->next_block, r->next_blocks, 0, s->index);
+    for (uint32_t i = 0; i < w->nquires; i++)
+        BookClaimBy(GROUND_RIBBON, w->quires[i].block, w->quires[i].blocks, 0, s->index);
 }
 
 /* A node of a slot not stood on that neither copy of holds — the root a slot
@@ -128,29 +122,120 @@ static error_t BookGroundOlderRot(void* ctx, const TallyPlace* at, const char* w
 }
 
 /* The slots not stood on: their Tallies' nodes, read for the ground, leaves
- * not opened, nothing said; and their ribbons' Quires. Any refusal — the
- * medium's, memory's — ends the census: ground a slot names and the census
- * could not see would read as no one's. */
+ * not opened, nothing said; and their ribbons' Quires, walked by their
+ * StitchHeads alone (§16.2 п.12, ribbon_heads.c — volume-read walks them
+ * whole, §16.3 п.13, and the census holds the two to one answer). Any
+ * refusal — the medium's, memory's — ends the census: ground a slot names
+ * and the census could not see would read as no one's. */
 static error_t BookGroundOlder(const char** what)
 {
     for (uint32_t i = 0; i < g_book.nslots; i++) {
         const SpineSlot* s    = &g_book.slots[i];
+        RibbonWalk*      w    = NULL;
         TallySink        sink = { .ctx = (void*)s, .item = NULL, .rotten = BookGroundOlderRot,
                                   .node = BookGroundOlderNode, .said = false };
+        error_t          rc   = OK;
         if (s == g_book.stood)
             continue;
-        for (uint32_t r = 0; r < s->roots; r++) {
-            error_t rc = TallyRead(s->root[r].tree, &s->root[r], false, &sink);
-            if (rc != OK) {
-                *what = rc == ERR_NO_MEMORY ? "there is no memory to read the Tally of a slot not stood on"
-                                            : "its medium would not give up the Tally of a slot not stood on, "
-                                              "whose ground the census must see";
-                return rc;
-            }
+        for (uint32_t r = 0; r < s->roots && rc == OK; r++)
+            rc = TallyRead(s->root[r].tree, &s->root[r], false, &sink);
+        if (rc == OK && (rc = RibbonQuiresOf(s, &w)) == OK)
+            BookGroundRibbon(s, w);
+        RibbonWalkLetGo(w);
+        if (rc != OK) {
+            *what = rc == ERR_NO_MEMORY ? "there is no memory to read the Tally or the ribbon of a slot not stood on"
+                                        : "its medium would not give up the Tally or the ribbon of a slot not stood "
+                                          "on, whose ground the census must see";
+            return rc;
         }
-        BookGroundRibbon(s, false);
     }
     return OK;
+}
+
+/* The ground the ribbon let go, fallow (M-1): neither a file's nor free —
+ * what of it no other owner names is the census's to cut (GroundCensusBook). */
+static void BookGroundFallow(void)
+{
+    for (uint64_t i = 0; i < g_book.nfallow; i++) {
+        uint64_t start = g_book.fallow[i].start, end = start + g_book.fallow[i].count;
+        if (end > g_book.data_end + 1u)
+            end = g_book.data_end + 1u;
+        if (start < end)
+            BookClaim(GROUND_FALLOW, start, end - start, 0);
+    }
+}
+
+/* A run of the print (MirrorRuns): a hole, or DATA from `start`, `blocks`
+ * long — the Strips that go on from one another are one. */
+typedef struct __attribute__((packed)) {
+    uint8_t  hole;
+    uint64_t start;
+    uint64_t blocks;
+} BookPrintRun;
+
+/*
+ * One live file into the print of what memory holds (tools/volumeread/
+ * bookcensus.py MirrorPrint): le64 fid · le64 size · le32 name bytes · the
+ * name · le32 tags · le32 each tag, rising · each run as u8 hole · le64 start
+ * · le64 blocks, the Strips that go on from one another one run · le32 runs.
+ */
+static uint32_t BookFilePrinted(uint32_t crc, const FileRecord* rec)
+{
+    struct __attribute__((packed)) {
+        uint64_t fid;
+        uint64_t size;
+        uint32_t name;
+    } head = { rec->file_id, rec->size, rec->name_len };
+    uint32_t     ntags = rec->tag_count, nruns = 0;
+    BookPrintRun run   = { 0, 0, 0 };
+    StripWalk    walk;
+    Strip        s;
+    crc = KCrc32cContinue(crc, (const uint8_t*)&head, sizeof(head));
+    crc = KCrc32cContinue(crc, (const uint8_t*)rec->name, rec->name_len);
+    crc = KCrc32cContinue(crc, (const uint8_t*)&ntags, sizeof(ntags));
+    crc = KCrc32cContinue(crc, (const uint8_t*)rec->tags, sizeof(uint32_t) * ntags);
+    StripWalkBegin(rec, &walk);
+    for (bool more = StripWalkNext(&walk, &s);; more = StripWalkNext(&walk, &s)) {
+        uint8_t hole = more && s.kind == STRIP_HOLE;
+        if (more && run.blocks && run.hole == hole && (hole || run.start + run.blocks == s.start)) {
+            run.blocks += s.count;
+            continue;
+        }
+        if (run.blocks) {
+            crc = KCrc32cContinue(crc, (const uint8_t*)&run, sizeof(run));
+            nruns++;
+        }
+        if (!more)
+            break;
+        run = (BookPrintRun){ hole, hole ? 0 : s.start, s.count };
+    }
+    return KCrc32cContinue(crc, (const uint8_t*)&nruns, sizeof(nruns));
+}
+
+void BookFilesLaid(void)
+{
+    TagFSState* fs   = tagfs_get_state();
+    uint64_t    from = 0, ids[32];
+    uint32_t    n, crc = 0;
+    while ((n = FileMapRows(fs->files, from, ids, 32)) > 0) {
+        for (uint32_t i = 0; i < n; i++) {
+            FileRecord* rec = FileMapRecordHold(fs->files, ids[i], NULL);
+            StripWalk   walk;
+            Strip       run;
+            if (!rec)
+                continue;
+            StripWalkBegin(rec, &walk);
+            while (StripWalkNextGround(&walk, &run))
+                GroundClaim(GROUND_FILE, run.start, run.count, ids[i]);
+            for (uint32_t t = 0; t < rec->tag_count; t++)
+                if ((uint64_t)rec->tags[t] + 1u > g_book.next_tag)
+                    g_book.next_tag = (uint64_t)rec->tags[t] + 1u;
+            crc = BookFilePrinted(crc, rec);
+            FileRecordRelease(rec);
+        }
+        from = ids[n - 1] + 1;
+    }
+    g_book.files_print = crc;
 }
 
 /* The front of the volume, less the Spine's slots, and the slots themselves. */
@@ -212,7 +297,8 @@ static bool BookBookmarked(void)
 
 error_t BookGroundCensus(const char** what)
 {
-    BookGroundRibbon(g_book.stood, true);
+    BookGroundRibbon(g_book.stood, g_book.ribbon);
+    BookGroundFallow();
     error_t rc = BookGroundOlder(what);
     if (rc != OK)
         return rc;
@@ -224,10 +310,14 @@ error_t BookGroundCensus(const char** what)
         return rc;
     }
     g_book.bookmarked = BookBookmarked();
-    rc = GroundCensusBook(&g_book.said.held, !g_book.bookmarked, what);
+    rc = GroundCensusBook(&g_book.said.held, &g_book.said.fallow, !g_book.bookmarked, what);
     GroundCensusEnd();
     if (rc != OK)
         return rc;
+    if (g_book.said.fallow)
+        kprintf("[TagFS] %llu block(s) the ribbon let go lie fallow: neither a file's nor free — given to no one "
+                "until a stitch of this volume's writer settles past them (M-1, §3.4)\n",
+                (unsigned long long)g_book.said.fallow);
     if (g_book.said.held)
         kprintf("[TagFS] %llu block(s) are held: no name that reads owns them, and a rotten range or a "
                 "locked file may — they are given to no one until an explicit act lets them go\n",

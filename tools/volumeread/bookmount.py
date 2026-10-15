@@ -101,6 +101,7 @@ class BookMount:
         self.files, self.locked, self.locked_runs, self.tags, self.use = {}, {}, {}, {}, b""
         self.overlay, self.fallow, self.undone, self.mismatched, self.born = {}, [], {}, set(), set()
         self.older_nodes, self.older_quires = [], []
+        self.ribbon_said, self.applied = 0, []
         self.seen_fid = self.seen_tag = self.seen_bookmark = 0
         self.counts = {}
         if self._Frame() and self._Spine() and self._Tally():
@@ -249,6 +250,7 @@ class BookMount:
         taken = [(b, n.sheets) for n in self.tally.Nodes() for b in n.blocks]
         taken += [(b, r.ptr["sheets"]) for r in self.tally.rotten if r.ptr for b in r.ptr["blocks"]]
         taken += [r for fs in self.files.values() for r in fs.Ground()]
+        self.ribbon_said = len(self.said)
         self.ribbon = stitch.Ribbon(self.g, self.slot, taken)
         self.said.extend(self.ribbon.said)
         sewn = [(r[0], r[2], u.seq) for u in self.ribbon.stitches for r in u.records]
@@ -307,37 +309,56 @@ class BookMount:
         it was sewn without DATA_FLUSHED, and the newest two on a medium that
         lied (M-2). A file whose block did not land is rolled back by its
         splice (§3.9): its records of that stitch are passed over, as an
-        Undone of the next session will say — which this kernel cannot write."""
+        Undone of the next session will say — which this kernel cannot write.
+        Clasp.fresh bounds the read before a block of it is read (§2.7): a
+        stitch whose records name other fresh blocks than its Clasp is one
+        pass 2 does not apply (_Fresh), and none of its data is read. A block
+        past the volume's last is one the medium does not give."""
         lanes = bookread.SeedLanes(self.g.uuid)
         check = self.ribbon.stitches[-2:] if self.ribbon.lied else self.ribbon.stitches[-1:]
         for u in check:
             if not u.Sound() or (u.head.flags & DATA_FLUSHED and not self.ribbon.lied):
                 continue
+            if self._FreshNamed(u) != u.parsed.fresh:
+                continue
             for kind, _ign, body, _at in u.records:
-                if kind not in (BORN, SHAPED):
-                    continue
-                try:
-                    d = stitch.RecordDecode(kind, body, u.seq)
-                except Short:
-                    continue
-                runs = d["runs"] if kind == BORN else [r for _a, _m, rs in d["splices"] for r in rs]
-                blocks = [r.start + i for r in runs if not r.hole and tally.EXT_SHARED not in
-                          stitch.Extensions(r.ext) for i in range(r.count)]
-                bad = [b for b, dg in zip(blocks, d["digests"])
-                       if bookread.Integrity(self.g.Block(b) or b"", lanes) != dg]
-                if bad:
-                    self.undone.setdefault(u.seq, set()).add(d["fid"])
-                    torn = self.ribbon.torn is not None
-                    self.ribbon.lied = self.ribbon.lied or torn
-                    self.Say("NOT_LANDED", "note", "fid %u's data in stitch %u did not land (block %u of "
-                             "%u checked does not match its digest): its record is rolled back by its "
-                             "splice — ERR_TAGFS_NOT_LANDED%s" % (
-                                 d["fid"], u.seq, bad[0], len(blocks),
-                                 "; a torn stitch lies after it, so the medium did not keep what it "
-                                 "confirmed: a flush that lied, or what was written spoilt by the next "
-                                 "write (M-2) — MEDIUM_LIED" if torn else ""))
-                    self.Glass("fid %u is rolled back by its splice, and a roll-back is a verdict an Undone "
-                               "carries, which this kernel does not write" % d["fid"])
+                if kind in (BORN, SHAPED):
+                    self._Landed(u, kind, body, lanes)
+
+    def _Landed(self, u, kind, body, lanes):
+        """One Born or Shaped of the stitch held to its data, its blocks read
+        in order against its digests until one does not match or the digests
+        end."""
+        try:
+            d = stitch.RecordDecode(kind, body, u.seq)
+        except Short:
+            return
+        runs = d["runs"] if kind == BORN else [r for _a, _m, rs in d["splices"] for r in rs]
+        fresh = [r for r in runs if not r.hole and tally.EXT_SHARED not in stitch.Extensions(r.ext)]
+        bad, k, digests = None, 0, d["digests"]
+        for r in fresh:
+            for i in range(min(r.count, len(digests) - k)):
+                b = r.start + i
+                raw = self.g.Block(b) if b <= self.g.data_end else None
+                if bookread.Integrity(raw or b"", lanes) != digests[k + i]:
+                    bad = b
+                    break
+            if bad is not None or k + r.count >= len(digests):
+                break
+            k += r.count
+        if bad is None:
+            return
+        self.undone.setdefault(u.seq, set()).add(d["fid"])
+        torn = self.ribbon.torn is not None
+        self.ribbon.lied = self.ribbon.lied or torn
+        self.Say("NOT_LANDED", "note", "fid %u's data in stitch %u did not land (block %u of %u checked does "
+                 "not match its digest): its record is rolled back by its splice — ERR_TAGFS_NOT_LANDED%s" % (
+                     d["fid"], u.seq, bad, sum(r.count for r in fresh),
+                     "; a torn stitch lies after it, so the medium did not keep what it confirmed: a flush "
+                     "that lied, or what was written spoilt by the next write (M-2) — MEDIUM_LIED"
+                     if torn else ""))
+        self.Glass("fid %u is rolled back by its splice, and a roll-back is a verdict an Undone carries, "
+                   "which this kernel does not write" % d["fid"])
 
     def _Replay(self):
         """Pass 2: every stitch sewn on, in order, each record through the
@@ -361,15 +382,28 @@ class BookMount:
                 continue
             self.files, self.tags, self.use = files, tags, use
             self.fallow.extend(fallow)
+            self.applied.append(u.seq)
 
     @staticmethod
-    def _Fresh(u):
+    def _FreshNamed(u):
+        """The fresh blocks the stitch's Borns and Shapeds name (§2.7) — one
+        that does not read names none (ribbon_records.c RibbonFreshNamed)."""
+        n = 0
+        for kind, _i, body, _a in u.records:
+            try:
+                n += stitch.Fresh([stitch.Record(kind, body)]) if kind in (BORN, SHAPED) else 0
+            except Short:
+                continue
+        return n
+
+    @classmethod
+    def _Fresh(cls, u):
         """Clasp.fresh held to the fresh blocks the stitch's records name
         (§2.7): the bound a mount sees before it reads any data, so a Clasp
         that says other than its records is a stitch that may not be applied."""
         if not u.Sound():
             return
-        named = stitch.Fresh([stitch.Record(k, b) for k, _i, b, _a in u.records if k in (BORN, SHAPED)])
+        named = cls._FreshNamed(u)
         if named != u.parsed.fresh:
             raise Refused("its Clasp names %u fresh block(s) and its records %u (§2.7)" % (u.parsed.fresh, named))
 

@@ -5,7 +5,7 @@ import importlib.util
 import os
 import re
 
-from . import binder, bookread, ondisk, tally
+from . import binder, bookread, ondisk, stitch, tally
 from .ground_owners import GROUND_OWNERS
 
 # ---------------------------------------------------------------------------
@@ -219,7 +219,7 @@ def AlphabetCheck(src):
     Parcels, §16.1 п.7, and the most digests an element carries, §16.3 п.1)."""
     inc = os.path.join(src, "include")
     paths = [os.path.join(inc, n) for n in ("volume_deed.h", "volume_book.h", "volume_digest.h",
-                                            "volume_tally.h")]
+                                            "volume_tally.h", "volume_ribbon.h")]
     if not all(os.path.exists(p) for p in paths):
         return None, "self-test needs the source tree beside the tool (src/ next to tools/)"
     text, d = [open(p, encoding="utf-8", errors="replace").read() for p in paths], {}
@@ -231,4 +231,5 @@ def AlphabetCheck(src):
     for py, c in ((binder.PARCEL_STRIPS_MOST, "PARCEL_STRIPS_MOST"), (binder.DIGEST_ITEM_MOST, "DIGEST_ITEM_MOST")):
         if py != d.get(c):
             wrong.append("%s: volume_tally.h says %r and binder.py %r" % (c, d.get(c), py))
-    return wrong, n + m + 2
+    ribbon, k = stitch.RibbonCheck(d)
+    return wrong + ribbon, n + m + 2 + k

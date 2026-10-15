@@ -4,6 +4,7 @@
 #include "../tagfs.h"
 #include "spine_read.h"
 #include "tally_read.h"
+#include "ribbon.h"
 
 /*
  * MountReadBook — a format-v2 volume's mount: its book read the way the spec
@@ -16,10 +17,11 @@
  * ‼ THIS KERNEL READS A BOOK AND WRITES NONE: every format-v2 volume it
  * mounts stands under glass (tagfs.h, UnderGlass) — "this kernel reads
  * format-v2 books and writes none of them" — beside whatever the book itself
- * carries that no writer of this kernel could carry on. And it reads the
- * Tally, not yet the ribbon of stitches sewn past it: a book with anything
- * sewn past its Tally is turned away, in so many words, rather than mounted
- * as the Tally was (§4.5 п.5 is a newer kernel's).
+ * carries that no writer of this kernel could carry on. It reads the Tally
+ * and the ribbon of stitches sewn past it (§4.5 п.5, ribbon.h): the state it
+ * mounts is the Tally's with every stitch after it replayed, the verdicts the
+ * ribbon asks for — a roll-back, a Slip to fold — said and left to the
+ * writer that can lay them down (§16.1 п.2).
  *
  * ‼ NOT A BYTE IS WRITTEN, before the door or after it: no growth (a book
  * grows only by a mount that writes it, §16.1 п.4), no Ledger, no Spare, no
@@ -74,6 +76,12 @@ typedef struct {
     uint64_t locked;        /* files locked by name */
     uint64_t held;          /* blocks held for what rotted */
     uint32_t shapes;        /* things written against the format's own shape */
+    uint32_t sewn;          /* stitches the ribbon sews on past the Tally */
+    uint32_t applied;       /* of them, replayed */
+    uint64_t last;          /* the seq the chain ends on: the last stitch sewn, or the Tally's */
+    bool     lied;          /* the medium is shown not to have kept what it confirmed */
+    uint64_t fallow;        /* blocks the ribbon let go, lying fallow */
+    uint32_t ribbon[RIBBON_CODES];  /* the ribbon's lines, by code */
 } MountBookSaid;
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -108,7 +116,17 @@ typedef struct {
     uint32_t       nstrips;
     uint32_t       cap;
     uint64_t       covered;   /* the blocks its Parcels covered, in a row from block 0 */
+    uint64_t       gen;       /* the seq of the stitch that last changed it (§2.8) */
 } BookFile;
+
+/* A tag the book names that the registry cannot hold (BookTagHeld): its id
+ * and its text, kept so a record that wears it finds it known — volume-read
+ * keeps every tag TAGS or a Coined names (bookmount.py). */
+typedef struct {
+    uint64_t id;
+    TallyTag tag;        /* key and value point into `text` */
+    uint8_t* text;
+} BookTagAside;
 
 typedef struct {
     VolumeFrame    frame;
@@ -127,9 +145,23 @@ typedef struct {
     bool           files_rot;    /* a FILES range rots: every digested block no name owns is held */
     bool           bookmarked;   /* a Tally of a slot that holds names a bookmark: no map, free not counted */
     uint64_t       files;        /* live files */
-    uint64_t       next_fid;     /* past every fid the Tally names */
-    uint64_t       next_tag;     /* past every tag id TAGS names and a live file wears */
+    uint64_t       next_fid;     /* past every fid the Tally and the ribbon name */
+    uint64_t       next_tag;     /* past every tag id TAGS and the ribbon name and a live file wears */
+    uint64_t       next_bookmark;/* past every bookmark the ribbon names */
     BookFile       file;
+    RibbonWalk*    ribbon;       /* the ribbon past the Tally stood on, until the census has its Quires */
+    Strip*         fallow;       /* DATA ground the ribbon let go (M-1): neither a file's nor free */
+    uint64_t       nfallow;
+    uint64_t       capfallow;
+    uint64_t*      born;         /* fids in a rotten FILES range the ribbon gave birth to, rising */
+    uint32_t       nborn;
+    uint32_t       capborn;
+    BookTagAside*  aside;        /* tags the registry cannot hold, rising by id */
+    uint32_t       naside;
+    uint32_t       capaside;
+    uint32_t       files_print;  /* the print of the live files, the mount done (BookFilesLaid) */
+    uint32_t       use_print;    /* the print of the Use Context memory holds, and its bytes */
+    uint64_t       use_bytes;
 } BookMount;
 
 extern BookMount g_book;
@@ -159,5 +191,36 @@ error_t BookGroundNode(void* ctx, const TallyPlace* at);
 
 /* A run of ground a locked file is known to name: held unless another owns it. */
 void    BookGroundHoldRun(uint64_t start, uint64_t count);
+
+/* Every live file's ground claimed for the census and the tags it wears
+ * counted into the numbers given next — after the ribbon is replayed, the
+ * map of live files is what the volume holds (book_ground.c). */
+void    BookFilesLaid(void);
+
+/* What of tag `tid` this kernel cannot carry on, said (§16.1 п.2, §6.4): true
+ * when the registry can hold it (tally_leaves.c). */
+bool    BookTagHeld(uint64_t tid, const TallyTag* t);
+
+/* A tag the registry cannot hold, set aside — its text copied, one it replaces
+ * let go — and the tag set aside as `tid`, or NULL (tally_leaves.c). OK or
+ * ERR_NO_MEMORY. */
+error_t         BookTagAsideNoted(uint64_t tid, const TallyTag* t);
+const TallyTag* BookTagAsideOf(uint64_t tid);
+
+/* The Use Context recalled into memory (UseMemoryRecall), its print kept for
+ * the line the mount gives of what memory holds (book_mount.c). */
+error_t BookUseRecalled(const uint8_t* text, uint64_t len);
+
+/* Whether `fid` lies in a rotten range of FILES — its header lost with the
+ * range — and no stitch gave birth to it anew (§4.5 п.3 (б)); and a fid a
+ * stitch gave birth to, kept when such a range holds it — no other is asked
+ * after (OK or ERR_NO_MEMORY). */
+bool    BookRotLocks(uint64_t fid);
+error_t BookBornNoted(uint64_t fid);
+
+/* A file of the map locked: said with `why`, out of the map and its tags, its
+ * id never given again, its DATA ground held (tally_leaves.c). OK or
+ * ERR_NO_MEMORY. */
+error_t BookFileLockLive(uint64_t fid, const char* why);
 
 #endif /* TAGFS_MOUNT_BOOK_MOUNT_H */

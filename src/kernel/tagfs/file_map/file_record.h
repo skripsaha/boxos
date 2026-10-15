@@ -52,8 +52,9 @@
 #define TRACT_KIDS_LEAST     32u
 #define TRACT_HEIGHT_MOST    13u
 
-typedef struct Parcel Parcel;
-typedef struct Tract  Tract;
+typedef struct Parcel   Parcel;
+typedef struct Tract    Tract;
+typedef struct TailSlip TailSlip;
 
 /* One allocation for the header, its tags and its name; the runs are the
  * Tract's. Never changed once it is in the map: shared by reference and freed
@@ -76,6 +77,14 @@ typedef struct FileRecord {
     uint64_t           strip_count;  /* the Strips of its runs, in the file's order */
     uint64_t           blocks;       /* the file's blocks they cover */
     const Tract*       tract;        /* the runs; NULL for a record that names none */
+    /* Format v2 alone. `gen` is the seq of the stitch that last changed the
+     * file (spec_v2 §2.8) — a record of the ribbon applies only over the gen
+     * its base names — not the Ink number of RecordWhere.gen (§16.2 п.14);
+     * 0 on format v1. `slip` is the bytes the Slips of the ribbon lay over
+     * the file's last block (tail_slip.h), shared by every record that keeps
+     * them; NULL for none. */
+    uint64_t           gen;
+    const TailSlip*    slip;
     const uint32_t*    tags;         /* these two point into the header's allocation */
     const char*        name;         /* NUL-terminated */
 #ifdef CONFIG_VOLUME_TESTS

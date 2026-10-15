@@ -11,30 +11,39 @@
 # census_book: a book planted with one kind of damage, booted, and the kernel
 # held to what volume-read predicts it makes of it (bookcensus.py KernelBook)
 #
-# The kernel reads the Spine's slots and the Tally of the newest one that
-# reads (mount/book_mount.c), and writes nothing: every book it mounts stands
-# under glass, and one with anything sewn past its Tally it turns away. For
-# every landing below, volume-read's census — the second reader, written
-# apart from the kernel's — says in numbers what the kernel's lines must say:
-# refused and in which words, or mounted on which slot with how many files,
-# which locked by fid, which ranges rotten, which copies read in the other's
-# place — the first few of a node one by one, the rest by their count — how
-# many blocks held, how many shapes and verdicts said, which runs two owners
-# name and how long, the numbers given next, and how many blocks of its data
-# run its block map derives free, or that it counts none where a Tally names a
-# bookmark, whose ground neither reader derives.
+# The kernel reads the Spine's slots, the Tally of the newest one that reads
+# and the ribbon sewn past it (mount/book_mount.c, ribbon_collate.c,
+# ribbon_transcribe.c), and writes nothing: every book it mounts stands under
+# glass. For every landing below, volume-read's census — the second reader,
+# written apart from the kernel's — says in numbers what the kernel's lines
+# must say: refused and in which words, or mounted on which slot with how many
+# files, which locked by fid, which ranges rotten, which copies read in the
+# other's place — the first few of a node one by one, the rest by their count
+# — how many blocks held, how many shapes and verdicts said, which runs two
+# owners name and how long, the numbers given next, and how many blocks of its
+# data run its block map derives free, or that it counts none where a Tally
+# names a bookmark, whose ground neither reader derives; and of the ribbon,
+# every line by its census code, the stitches sewn on, the last and how many
+# applied, whether the medium lied, and the blocks it let go lying fallow; and
+# what memory holds when the mount is done — every live file's name, size,
+# tags and runs, and the Use Context — by the print the kernel gives of it.
 # ---------------------------------------------------------------------------
 
 # Every landing of volume-read's book self-test that plants something in the
 # Spine or the Tally the kernel reads — its slots, its trees' nodes and their
 # copies (five of them, twelve, and three), a rotten node's ground under the
 # ribbon's next Quire whole and in part, a file's header and its Parcels, two
-# owners of one kind on one block, the FRAME — and two that hold the Spine's other
-# slots to the census; the landings of the ribbon past the Tally
-# need only one here (B23): this kernel turns every such book away in the same
-# words.
+# owners of one kind on one block, the FRAME — two that hold the Spine's other
+# slots to the census, and every landing of the ribbon past the Tally: each
+# kind of record and the rule it is replayed by, how the ribbon ends, goes on
+# and branches, what a torn or rotten stitch costs, and the shapes no stitch
+# may take; and what the medium may say that no writer does, each held to a
+# bound before it is trusted (selftest_book_ribbon.py).
 CENSUS_BOOK_LANDINGS="B0 B1 B2 B3 B4 B4p B5 B6 B6b B7 B7b B7c B8 B9 B9b B12 B13 B25 B34 B35 B36 B37 B38 B38b
-B38c B39 B40 B41 B42 B42b B43 B43b B43c B44 B45 B23"
+B38c B39 B40 B41 B42 B42b B43 B43b B43c B44 B45
+B4b B10 B11 B11b B14 B15 B15b B15c B16 B16b B17 B17b B18 B19 B19b B19c B19d B19e B20 B20b B21 B21b B21c B22 B22b
+B23 B23b B23c B23d B23e B24 B24b B26 B26b B26c B27 B27b B27c B27d B28 B28b B29 B29b B29c B29d B30 B30b B32 B33
+B46 B46b B47 B47b B48 B48b B49 B49b B50 B51 B52 B53 B54"
 
 # census_book_judge NAME — the prediction against the kernel's own lines, one
 # "ok|bad <sentence>" line per assertion into $SCRATCH/census.NAME.verdict.
@@ -107,11 +116,77 @@ m = re.search(r"^\[TagFS\] (\d+) data blocks, (?:(\d+) free|free not counted), (
 have = tuple(None if x is None else int(x) for x in m.groups()) if m else None
 want = (k["data_blocks"], k["free"], k["files"])
 say(have == want, "its block map derives data blocks, free and files %s; the census predicted %s" % (have, want))
+m = re.search(r"^\[TagFS\] the next file id \d+, tag id \d+, bookmark \d+, seq (\d+)", log, re.M)
+have = int(m.group(1)) if m else None
+say(have == k["next_seq"], "it gives the next seq %s; the census predicted %u" % (have, k["next_seq"]))
+ribbon = {}
+for code in re.findall(r"^\[TagFS\] ribbon ([A-Z_]+): ", log, re.M):
+    ribbon[code] = ribbon.get(code, 0) + 1
+say(ribbon == k["ribbon"], "it says of the ribbon %s by code; the census predicted %s"
+    % (sorted(ribbon.items()) or "nothing", sorted(k["ribbon"].items()) or "nothing"))
+m = re.search(r"^\[TagFS\] the ribbon past the Tally: (\d+) stitch\(es\) sewn on, the last seq (\d+), "
+              r"(\d+) applied", log, re.M)
+have = tuple(int(x) for x in m.groups()) if m else None
+want = (k["sewn"], k["last"], k["applied"])
+say(have == want, "it sews on, ends on and applies %s stitch(es); the census predicted %s" % (have, want))
+lied = re.search(r"^\[TagFS\] MEDIUM_LIED: ", log, re.M) is not None
+say(lied == k["lied"], "it says MEDIUM_LIED: %s; the census predicted %s" % (lied, k["lied"]))
+m = re.search(r"^\[TagFS\] (\d+) block\(s\) the ribbon let go lie fallow", log, re.M)
+have = int(m.group(1)) if m else 0
+say(have == k["fallow"], "it lets %u block(s) lie fallow; the census predicted %u" % (have, k["fallow"]))
+m = re.search(r"^\[TagFS\] the book as memory holds it: its files print 0x([0-9A-Fa-f]{8}), its Use Context "
+              r"(\d+) byte\(s\) print 0x([0-9A-Fa-f]{8})", log, re.M)
+have = (int(m.group(1), 16), int(m.group(2)), int(m.group(3), 16)) if m else None
+want = (k["files_print"], k["use_bytes"], k["use_print"])
+say(have == want, "memory holds the files — names, sizes, tags, runs — and the Use Context the census replays: "
+    "%s; the census predicted %s" % ("files 0x%08X, use %u byte(s) 0x%08X" % have if have else "no print line",
+                                     "files 0x%08X, use %u byte(s) 0x%08X" % want))
 CENSUS_BOOK_EOF
     local rc=$?
     [ $rc = 0 ] && [ -s "$SCRATCH/census.$1.verdict" ] && return 0
     echo "bad the judge could not read $SCRATCH/census.$1.json against $SCRATCH/serial.$1.log: $(tail -1 "$SCRATCH/census.$1.verdict")" \
         > "$SCRATCH/census.$1.verdict"
+}
+
+# census_book_slipped NAME — the landing booted again from its planted image,
+# and every live file whose last block carries Slips (bookcensus.py KernelBook
+# "slipped") read in the guest by `show`: its bytes, the Slips laid over its
+# base, held byte for byte to volume-read's own read of the file (Content) —
+# escaped as `show` escapes what does not print.
+census_book_slipped() {
+    local img="$SCRATCH/census.$1.img" json="$SCRATCH/census.$1.json" names n line
+    names=$(python3 -c 'import json, sys
+print(" ".join(f["name"] for f in json.load(open(sys.argv[1]))["kernel"].get("slipped", [])))' "$json" 2>/dev/null)
+    [ -n "$names" ] || return 0
+    make run-stop >/dev/null 2>&1
+    if ! make run-bg BOOTDISK="$img" >"$SCRATCH/census.$1.slipped.run-bg" 2>&1; then
+        harness "census: run-bg would not start $1 again to read its Slips"
+        return
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt
+    for n in $names; do
+        type_line "show $n" && wait_for_prompt
+    done
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$1.slipped.log"
+    python3 - "$json" "$SCRATCH/serial.$1.slipped.log" >"$SCRATCH/census.$1.slipped.verdict" 2>&1 <<'SLIPPED_EOF'
+import json, sys
+k = json.load(open(sys.argv[1]))["kernel"]
+log = open(sys.argv[2], errors="replace").read()
+for f in k.get("slipped", []):
+    want = "".join(c if 32 <= ord(c) < 127 or c in "\n\r\t" else "\\x%02x" % ord(c) for c in f["content"][:4096])
+    at = log.find("~ show %s" % f["name"])
+    got = log[at:].split("\n", 1)[1] if at >= 0 and "\n" in log[at:] else ""
+    held = got.startswith(want)
+    print("%s %s reads in the guest as volume-read reads it, its Slips over its last block (%u bytes)%s"
+          % ("ok" if held else "bad", f["name"], len(f["content"]), "" if held else ": got %r" % got[:80]))
+SLIPPED_EOF
+    while IFS= read -r line; do
+        case "$line" in
+            "ok "*)  ok  "census $1: ${line#ok }" ;;
+            *)       bad "census $1: ${line#bad }" ;;
+        esac
+    done < "$SCRATCH/census.$1.slipped.verdict"
 }
 
 # census_book — every landing of CENSUS_BOOK_LANDINGS planted on a fresh image,
@@ -121,6 +196,7 @@ census_book() {
     for plant in $CENSUS_BOOK_LANDINGS; do
         census_boot "book_$plant" "$plant" || continue
         census_book_judge "book_$plant"
+        census_book_slipped "book_$plant"
         while IFS= read -r line; do
             case "$line" in
                 "ok "*)  ok  "census $plant: ${line#ok }" ;;
@@ -186,8 +262,12 @@ stand_tally_rotten_leaf_locked stand_tally_writes_refused stand_tally_rot_three_
 stand_tally_undigested_refused stand_tally_length_asked stand_tally_lower_doors_refused
 stand_tally_medium_returns
 stand_tally_live_without_rows stand_tally_map_holds stand_tally_map_claim_named
-stand_tally_map_short_of_memory stand_blockfail_two_ranges"
-STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_tally_rot_three_paths: the port.s road stands aside — '
+stand_tally_map_short_of_memory stand_blockfail_two_ranges
+stand_ribbon_slip_three_roads stand_ribbon_torn_tail stand_ribbon_next_quire stand_ribbon_closed_damaged
+stand_ribbon_dead_branch stand_ribbon_undone"
+STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_(tally_rot_three_paths|ribbon_slip_three_roads): the port.s road stands aside — '
+STAND_BOOK_RIBBON_LAID='[TESTS] stand_ribbon: stitches laid past the Tally'
+STAND_BOOK_RIBBON_BACK='[TESTS] stand_ribbon: what the test laid is put back'
 STAND_BOOK_DEFECT='\[(TagFS|Settle)\] DEFECT'
 STAND_BOOK_MAP_SHORT='^\[TagFS\] this volume is NOT mounted: its block map is short of memory: [1-9][0-9]* mixed window'
 STAND_BOOK_MAP_MET='^\[TagFS FSCK\] the run of 3 block\(s\) from data block [0-9]+ that the tally claims meets 2 taken already'
@@ -215,12 +295,13 @@ stand_book_judge() {
             chk $? "stand: $what — $t ran"
         fi
     done
+    got=$(grep -acE "$STAND_BOOK_PORT_ASIDE" "$L")
     if [ "$port" = taken ]; then
-        ! grep -aqE "$STAND_BOOK_PORT_ASIDE" "$L"
-        chk $? "stand: $what — the rotten block is refused on the port's road too"
+        [ "$got" = 0 ]
+        chk $? "stand: $what — the rotten block is refused, and the Slips are read, on the port's road too"
     else
-        grep -aqE "$STAND_BOOK_PORT_ASIDE" "$L"
-        chk $? "stand: $what — the port's road of the rotten block stands aside, said ($(grep -aoE 'the port.s road stands aside — [^.]*' "$L" | head -1))"
+        [ "$got" = 2 ]
+        chk $? "stand: $what — the port's road of the rotten block and of the Slips stands aside, said ($got: $(grep -aoE 'the port.s road stands aside — [^.]*' "$L" | head -1))"
     fi
     grep -aqF "[TagFS] the volume may only be read: this kernel reads format-v2 books and writes none of them" "$L"
     chk $? "stand: $what — the book stands under glass, said"
@@ -253,7 +334,9 @@ stand_book_judge() {
     want=$(python3 tools/volume-read.py "$img" check --json 2>/dev/null | python3 -c 'import json, sys
 k = json.load(sys.stdin)["kernel"]
 print("%s %s %s" % (k["data_blocks"], k["free"], k["files"]))' 2>/dev/null)
-    got=$(grep -aE '^\[TagFS\] [0-9]+ data blocks, [0-9]+ free, [0-9]+ files' "$L" |
+    got=$(awk -v laid="$STAND_BOOK_RIBBON_LAID" -v back="$STAND_BOOK_RIBBON_BACK" \
+              'index($0, laid) == 1 { sewn = 1 } index($0, back) == 1 { sewn = 0 } !sewn' "$L" |
+          grep -aE '^\[TagFS\] [0-9]+ data blocks, [0-9]+ free, [0-9]+ files' |
           sed -E 's/^\[TagFS\] ([0-9]+) data blocks, ([0-9]+) free, ([0-9]+) files.*/\1 \2 \3/')
     [ -n "$want" ] && [ "$(echo "$got" | head -1)" = "$want" ] &&
         [ "$(echo "$got" | cut -d' ' -f1-2 | sort -u)" = "${want% *}" ]

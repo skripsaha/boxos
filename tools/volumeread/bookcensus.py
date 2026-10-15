@@ -17,16 +17,16 @@ free is not counted at all (BookmarksNamed) rather than counted too high.
 
 And beside the account: every finding of the mount, each data block of a
 live file held to its digest, and what the kernel of this tree makes of the
-volume (KernelBook) — it reads the Spine and the Tally and writes nothing, so
-every volume it mounts stands under glass, and a book with anything sewn past
-its Tally it refuses, for it does not read the ribbon yet. The census
-scenario boots a landing and holds the kernel's own lines to that.
+volume (KernelBook) — it reads the Spine, the Tally and the ribbon sewn past
+it and writes nothing, so every volume it mounts stands under glass. The
+census scenario boots a landing and holds the kernel's own lines to that.
 
 The owners are the kernel's own list (src/include/ground_owner.h), generated
 into ground_owners.py: BOOK_OWNERS, those of format v2.
 """
 
 import hashlib
+import struct
 
 from . import bookread, tally
 from .bookmount import BookMount
@@ -47,29 +47,6 @@ def BlockDigest(raw, lanes):
     if got is None:
         got = _DIGESTS[key] = bookread.Integrity(raw, lanes)
     return got
-
-
-def KernelRibbonEmpty(g, slot):
-    """Is nothing sewn past the Tally of `slot`, as the kernel of this tree
-    looks (mount/book_mount.c): every sector from the slot's `at` to the end
-    of its Quire, and all of the next_quire it names inside the data run,
-    read — and not one of them holds as a stitch of a seq past the stitch
-    the Tally took in. A slot that puts the ribbon outside its own Quire
-    names no ribbon to look at."""
-    r = slot.ribbon
-    end = r["quire_block"] + r["quire_blocks"]
-    if not r["quire_blocks"] or not r["quire_block"] <= r["at"] < end:
-        return True
-    looks = [(r["at"], end - r["at"])]
-    nxt = (r["next_block"], r["next_blocks"])
-    if nxt[1] and nxt != (r["quire_block"], r["quire_blocks"]) and g.data_block <= nxt[0] and \
-            nxt[0] + nxt[1] <= g.data_end:
-        looks.append(nxt)
-    for block, blocks in looks:
-        for _raw, h in g.Run(block * SECTORS_PER_BLOCK, blocks * SECTORS_PER_BLOCK):
-            if h is not None and h["kind"] == bookread.UNIT_STITCH and h["seq"] > slot.stitch_seq:
-                return False
-    return True
 
 
 # The copies of a node that did not hold the kernel names one line each before
@@ -95,7 +72,36 @@ def KernelMendedSaid(t):
     return sum(min(n, KERNEL_COPIES_SAID) for n in failed.values())
 
 
-def KernelBook(g, m, held, free):
+def MirrorRuns(runs):
+    """A file's runs as the print names them: each run that goes on from the
+    one before it — two holes, or DATA where the last ended — one with it."""
+    out = []
+    for r in runs:
+        if out and out[-1][0] == r.hole and (r.hole or out[-1][1] + out[-1][2] == r.start):
+            out[-1][2] += r.count
+        else:
+            out.append([r.hole, 0 if r.hole else r.start, r.count])
+    return out
+
+
+def MirrorPrint(files):
+    """The print a mount gives of the live files it holds (book_mount.c
+    BookMirrorPrint) — CRC32C over each in the order of its fid: le64 fid ·
+    le64 size · le32 name bytes · the name · le32 tags · le32 each tag id
+    the kernel holds (to TAGFS_MAX_TAG_ID), rising · each run (MirrorRuns)
+    as u8 hole · le64 start · le64 blocks · le32 runs."""
+    out = bytearray()
+    for fid in sorted(files):
+        fs = files[fid]
+        tags = sorted(t for t in set(fs.tags) if t < tally.KERNEL_TAG_END - 1)
+        runs = MirrorRuns(fs.runs)
+        out += struct.pack("<QQI", fid, fs.size, len(fs.name)) + fs.name
+        out += struct.pack("<I", len(tags)) + b"".join(struct.pack("<I", t) for t in tags)
+        out += b"".join(struct.pack("<BQQ", h, st, n) for h, st, n in runs) + struct.pack("<I", len(runs))
+    return bookread.Crc32c(bytes(out))
+
+
+def KernelBook(g, m, held, free, fallow):
     """What the kernel of this tree makes of a format-v2 volume, in the
     numbers its own lines carry (mount/book_mount.c): refused — and in which
     words — or mounted under glass, standing on which slot, with how many
@@ -105,7 +111,16 @@ def KernelBook(g, m, held, free):
     map derives free (block_map_derived.c) — `free`, the census's own, None
     where neither counts it (BookmarksNamed). It reads no DIGESTS leaf at the
     mount unless a FILES range rots (§16.3 п.12): a DIGESTS range is said
-    rotten only then."""
+    rotten only then.
+
+    And the ribbon past the Tally (mount/ribbon_collate.c, ribbon_transcribe.c,
+    ribbon_verify.c): every line the mount says of it from the walk on, by its
+    census code — the kernel says each as `ribbon CODE:` — the stitches sewn
+    on, the last of them and how many applied, whether the medium is shown to
+    have lied, the blocks the ribbon let go lying fallow (`fallow`, the
+    census's claim), and the next seq past every sector of the book read;
+    and what its mirror holds when the mount is done — the print of its live
+    files (MirrorPrint) and of its Use Context, and the bytes of the latter."""
     if g.block_bytes != BLOCK:
         return {"mounts": False, "refusal": "laid out in %u-byte blocks" % g.block_bytes}
     if g.frame_why:
@@ -114,21 +129,27 @@ def KernelBook(g, m, held, free):
         return {"mounts": False, "refusal": ("none of the %u slots of its Spine holds" % len(m.slots)
                                              if m.tally is None and not any(s.state == "valid" for s in m.slots)
                                              else "no slot that holds names a Tally that reads")}
-    if not KernelRibbonEmpty(g, m.slot):
-        return {"mounts": False, "refusal": "the ribbon past its Tally is not empty"}
-    t, rot = m.tally, m.FilesRot()
-    said = [x for x in m.said]
+    t, rot, r = m.tally, m.FilesRot(), m.ribbon
+    said, ribbon = m.said[:m.ribbon_said], {}
+    for code, _s, _t in m.said[m.ribbon_said:]:
+        ribbon[code] = ribbon.get(code, 0) + 1
     return {"mounts": True, "refusal": None, "slot": m.slot.index, "files": len(m.files),
             "locked": sorted(m.locked), "glass": len(m.glass) + 1,
-            "rotten": [{"tree": tally.TREE_NAMES[r.tree], "count": r.count} for r in t.rotten
-                       if r.tree != tally.DIGESTS or rot],
+            "rotten": [{"tree": tally.TREE_NAMES[x.tree], "count": x.count} for x in t.rotten
+                       if x.tree != tally.DIGESTS or rot],
             "mended": len(t.mended), "mended_said": KernelMendedSaid(t), "held": RunsCount(held),
             "shape": sum(1 for code, _s, _t in said if code == "RECORD_SHAPE"),
             "torn_slots": sum(1 for code, _s, _t in said if code == "SLOT_TORN"),
             "fell_back": sum(1 for code, _s, _t in said if code == "SLOT_FELL_BACK"),
             "next_fid": m.counts["next_fid"], "next_tag": m.counts["next_tag"],
-            "next_bookmark": m.counts["next_bookmark"], "data_blocks": g.data_end - g.data_block,
-            "free": None if free is None else RunsCount(free)}
+            "next_bookmark": m.counts["next_bookmark"], "next_seq": m.counts["next_seq"],
+            "data_blocks": g.data_end - g.data_block,
+            "free": None if free is None else RunsCount(free),
+            "ribbon": ribbon, "sewn": len(r.stitches),
+            "last": r.stitches[-1].seq if r.stitches else m.slot.stitch_seq,
+            "applied": len(m.applied), "lied": r.lied, "fallow": RunsCount(fallow),
+            "files_print": MirrorPrint(m.files), "use_print": bookread.Crc32c(m.use or b""),
+            "use_bytes": len(m.use or b"")}
 
 
 class BookCensus:
@@ -154,7 +175,11 @@ class BookCensus:
         self.free_runs = RunsSubtract([(g.data_block, g.data_end - g.data_block)],
                                       RunsNormal([r for c in self.claims for r in c.runs]))
         self.counted = m.tally is None or not BookmarksNamed(m)
-        self.kernel = KernelBook(g, m, self.held, self.free_runs if self.counted else None)
+        fallow = [r for c in self.claims if c.kind == "fallow" for r in c.runs]
+        self.kernel = KernelBook(g, m, self.held, self.free_runs if self.counted else None, fallow)
+        self.kernel["slipped"] = [{"fid": fid, "name": fs.name.decode("utf-8", "replace"),
+                                   "content": self.Content(fid).decode("latin-1")}
+                                  for fid, fs in sorted(m.files.items()) if fs.slips and self.Content(fid) is not None]
         self.kernel["double"] = sorted([s, n] for x in self.findings if x.code == "DOUBLE_OWNER" for s, n in x.runs)
 
     def Say(self, code, severity, text, runs=()):
@@ -235,7 +260,10 @@ class BookCensus:
         self.Named("ribbon", "the ribbon's Quires", quires)
         for fid in sorted(m.files):
             self.Named("file", self.Label(fid), [(s, n, fid, None) for s, n in m.files[fid].Ground()])
-        owned = RunsNormal([r for c in self.claims for r in c.runs])
+        # What lies past the volume's last block is no one's to hold: a run a
+        # record named there is cut at the volume's end (book_ground.c
+        # BookGroundFallow).
+        owned = RunsNormal([r for c in self.claims for r in c.runs] + [(self.g.data_end + 1, 1 << 64)])
         self.Claim("fallow", "the ground the ribbon let go (M-1)", RunsSubtract(m.fallow, owned))
 
     def Label(self, fid):

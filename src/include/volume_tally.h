@@ -466,19 +466,22 @@ typedef struct {
 } TallyRun;
 
 /*
- * A run in the Tally's form, in a node of `seq`: head = count << 2 | HOLE |
- * EXT; a DATA run's start as zigzag(start - *cursor) — *cursor the end of the
- * DATA run before it in this Parcel, 0 at its first — then birth_delta =
- * seq - birth, counted from the node's seq and not the file's gen: a later
- * Tally names an unchanged node as it lies (§2.9); then the extensions.
+ * A run in one of its two forms (§2.8): head = count << 2 | HOLE | EXT; a DATA
+ * run's start as zigzag(start - *cursor) — *cursor the end of the DATA run
+ * before it in the same Parcel or record, 0 at its first — then, in the
+ * Tally's form (`tally` set), birth_delta = seq - birth, counted from the
+ * node's seq and not the file's gen: a later Tally names an unchanged node as
+ * it lies (§2.9); then the extensions. The ribbon's form carries no birth: a
+ * run is born at the seq of the stitch that put it in (volume_ribbon.h).
  */
-static inline uint32_t TallyRunPut(uint8_t *out, const TallyRun *r, uint64_t *cursor, uint64_t seq)
+static inline uint32_t BookRunPut(uint8_t *out, const TallyRun *r, uint64_t *cursor, uint64_t seq, int tally)
 {
     uint32_t at = BookVarintPut(out, r->count << 2 | (r->hole ? RUN_HOLE : 0u) | (r->ext ? RUN_EXT : 0u));
     if (!r->hole) {
         at += BookVarintPut(out + at, BookZigzag((int64_t)(r->start - *cursor)));
         *cursor = r->start + r->count;
-        at += BookVarintPut(out + at, seq - r->birth);
+        if (tally)
+            at += BookVarintPut(out + at, seq - r->birth);
     }
     if (r->ext) {
         at += BookVarintPut(out + at, r->ext_len);
@@ -487,13 +490,14 @@ static inline uint32_t TallyRunPut(uint8_t *out, const TallyRun *r, uint64_t *cu
     return at;
 }
 
-/* TallyRunPut read back, from *at of a body of `end` bytes: 0 for a run of no
+/* BookRunPut read back, from *at of a body of `end` bytes: 0 for a run of no
  * blocks, a start before block 0 or past 2^64 - 1, or a birth_delta past the
- * node's seq. A hole is born with the node. */
-static inline int TallyRunGet(const uint8_t *b, uint32_t end, uint32_t *at, uint64_t *cursor, uint64_t seq,
-                              TallyRun *r)
+ * node's seq. A hole is born with its node or stitch, and so is every run of
+ * the ribbon's form. */
+static inline int BookRunGet(const uint8_t *b, uint32_t end, uint32_t *at, uint64_t *cursor, uint64_t seq,
+                             int tally, TallyRun *r)
 {
-    uint64_t head, z, delta, n;
+    uint64_t head, z, delta = 0, n;
     if (!TallyTake(b, end, at, &head) || (r->count = head >> 2) == 0) return 0;
     r->hole    = (uint32_t)(head & RUN_HOLE);
     r->start   = 0;
@@ -505,7 +509,8 @@ static inline int TallyRunGet(const uint8_t *b, uint32_t end, uint32_t *at, uint
         uint64_t far = z & 1u ? (z >> 1) + 1u : z >> 1;    /* |start - cursor| */
         if (z & 1u ? far > *cursor : far > ~*cursor) return 0;
         r->start = z & 1u ? *cursor - far : *cursor + far;
-        if (r->count > ~r->start || !TallyTake(b, end, at, &delta) || delta > seq) return 0;
+        if (r->count > ~r->start) return 0;
+        if (tally && (!TallyTake(b, end, at, &delta) || delta > seq)) return 0;
         *cursor  = r->start + r->count;
         r->birth = seq - delta;
     }
@@ -514,6 +519,18 @@ static inline int TallyRunGet(const uint8_t *b, uint32_t end, uint32_t *at, uint
         r->ext_len = (uint32_t)n;
     }
     return 1;
+}
+
+/* A run in the Tally's form, in a node of `seq`. */
+static inline uint32_t TallyRunPut(uint8_t *out, const TallyRun *r, uint64_t *cursor, uint64_t seq)
+{
+    return BookRunPut(out, r, cursor, seq, 1);
+}
+
+static inline int TallyRunGet(const uint8_t *b, uint32_t end, uint32_t *at, uint64_t *cursor, uint64_t seq,
+                              TallyRun *r)
+{
+    return BookRunGet(b, end, at, cursor, seq, 1, r);
 }
 
 /* A Parcel's body: nruns, then its runs, the cursor from 0 — each Parcel

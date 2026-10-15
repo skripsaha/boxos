@@ -407,12 +407,12 @@ error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out)
     return rc;
 }
 
-/* The held claims (`held`), or every other exclusive one, sorted — the
- * claims are — and laid end to end with no two overlapping, into a new array
- * (*n of them): a run that meets the one before is joined to it while the
- * join still counts in a u32, and one that overlaps begins where it ends.
- * NULL with no memory. */
-static GroundRun* RunsMerged(bool held, uint32_t* n)
+/* The claims of `want` — or, for GROUND_OWNER_KINDS, every exclusive one but
+ * the held and `apart` — sorted, as the claims are, and laid end to end with
+ * no two overlapping, into a new array (*n of them): a run that meets the one
+ * before is joined to it while the join still counts in a u32, and one that
+ * overlaps begins where it ends. NULL with no memory. */
+static GroundRun* RunsMerged(GroundOwner want, GroundOwner apart, uint32_t* n)
 {
     GroundRun* out = kmalloc(sizeof(GroundRun) * (s_count ? s_count : 1u));
     *n = 0;
@@ -421,7 +421,9 @@ static GroundRun* RunsMerged(bool held, uint32_t* n)
     for (uint32_t i = 0; i < s_count; i++) {
         const GroundRun* r    = &s_runs[i];
         uint64_t         from = r->start, end = r->start + r->count;
-        if ((r->owner == GROUND_HELD) != held || (!held && !g_owner_alone[r->owner]))
+        if (want != GROUND_OWNER_KINDS ? r->owner != (uint32_t)want
+                                       : (r->owner == GROUND_HELD || r->owner == (uint32_t)apart ||
+                                          !g_owner_alone[r->owner]))
             continue;
         GroundRun* last = *n ? &out[*n - 1u] : NULL;
         if (last) {
@@ -435,19 +437,20 @@ static GroundRun* RunsMerged(bool held, uint32_t* n)
                 continue;
             }
         }
-        out[(*n)++] = (GroundRun){ from, 0, (uint32_t)(end - from), (uint32_t)GROUND_HELD, 0 };
+        out[(*n)++] = (GroundRun){ from, 0, (uint32_t)(end - from), (uint32_t)want, 0 };
     }
     return out;
 }
 
-/* The held runs less every block an owner names, laid back into the claims in
- * place of the held runs they were: the blocks held. */
-static uint64_t RunsHoldLess(const GroundRun* want, uint32_t nwant, const GroundRun* own, uint32_t nown)
+/* The claims of `owner` less every block an owner in `own` names, laid back
+ * into the claims in place of the runs they were: the blocks left. */
+static uint64_t RunsLess(GroundOwner owner, const GroundRun* want, uint32_t nwant, const GroundRun* own,
+                         uint32_t nown)
 {
     uint32_t kept = 0, o = 0;
-    uint64_t held = 0;
+    uint64_t left = 0;
     for (uint32_t i = 0; i < s_count; i++)
-        if (s_runs[i].owner != GROUND_HELD)
+        if (s_runs[i].owner != (uint32_t)owner)
             s_runs[kept++] = s_runs[i];
     s_count = kept;
     for (uint32_t w = 0; w < nwant; w++) {
@@ -457,15 +460,50 @@ static uint64_t RunsHoldLess(const GroundRun* want, uint32_t nwant, const Ground
         for (uint32_t k = o; at < end; k++) {
             uint64_t stop = k < nown && own[k].start < end ? own[k].start : end;
             if (stop > at) {
-                s_runs[s_count++] = (GroundRun){ at, 0, (uint32_t)(stop - at), (uint32_t)GROUND_HELD, 0 };
-                held += stop - at;
+                s_runs[s_count++] = (GroundRun){ at, 0, (uint32_t)(stop - at), (uint32_t)owner, 0 };
+                left += stop - at;
             }
             if (k >= nown || own[k].start >= end)
                 break;
             at = own[k].start + own[k].count > at ? own[k].start + own[k].count : at;
         }
     }
-    return held;
+    return left;
+}
+
+/* The claims of `owner` — what may be someone's and is given to no one —
+ * cut to the blocks no other owner names: those of every exclusive owner but
+ * the held and `apart`. How many blocks are left in *left. ERR_NO_MEMORY. */
+static error_t RunsOwnerLess(GroundOwner owner, GroundOwner apart, uint64_t* left)
+{
+    uint32_t   nwant = 0, nown = 0;
+    GroundRun* want;
+    GroundRun* own;
+    RunsSort(false);
+    want = RunsMerged(owner, apart, &nwant);
+    own  = RunsMerged(GROUND_OWNER_KINDS, apart, &nown);
+    /* A run left is cut at most once by each owned run, so the claims never
+     * grow past the room they had: the runs out, their pieces in. */
+    if (want && own && s_count + nown > s_cap) {
+        GroundRun* more = kmalloc(sizeof(GroundRun) * (s_count + nown));
+        if (more) {
+            memcpy(more, s_runs, sizeof(GroundRun) * s_count);
+            kfree(s_runs);
+            s_runs = more;
+            s_cap  = s_count + nown;
+        }
+    }
+    if (!want || !own || s_count + nown > s_cap) {
+        kfree(want);
+        kfree(own);
+        kprintf("[TagFS FSCK] no memory to hold %u owner run(s) against each other — a book is not "
+                "mounted on a census it could not take\n", s_count);
+        return ERR_NO_MEMORY;
+    }
+    *left = RunsLess(owner, want, nwant, own, nown);
+    kfree(want);
+    kfree(own);
+    return OK;
 }
 
 bool GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count)
@@ -529,40 +567,21 @@ static error_t RunsDerive(const char** what)
     return rc;
 }
 
-error_t GroundCensusBook(uint64_t* held, bool derive, const char** what)
+error_t GroundCensusBook(uint64_t* held, uint64_t* fallow, bool derive, const char** what)
 {
-    *held = 0;
-    *what = "there is no memory to hold its census";
+    *held   = 0;
+    *fallow = 0;
+    *what   = "there is no memory to hold its census";
     if (s_refused)
         return ERR_NO_MEMORY;
-    RunsSort(false);
-    uint32_t   nwant = 0, nown = 0;
-    GroundRun* want  = RunsMerged(true, &nwant);
-    GroundRun* own   = RunsMerged(false, &nown);
-    if (!want || !own) {
-        kfree(want);
-        kfree(own);
-        kprintf("[TagFS FSCK] no memory to hold %u owner run(s) against each other — a book is not "
-                "mounted on a census it could not take\n", s_count);
-        return ERR_NO_MEMORY;
-    }
-    /* A held run is cut at most once by each owned run, so the claims never
-     * grow past the room they had: the held runs out, their pieces in. */
-    if (s_count + nown > s_cap) {
-        GroundRun* more = kmalloc(sizeof(GroundRun) * (s_count + nown));
-        if (!more) {
-            kfree(want);
-            kfree(own);
-            return ERR_NO_MEMORY;
-        }
-        memcpy(more, s_runs, sizeof(GroundRun) * s_count);
-        kfree(s_runs);
-        s_runs = more;
-        s_cap  = s_count + nown;
-    }
-    *held = RunsHoldLess(want, nwant, own, nown);
-    kfree(want);
-    kfree(own);
+    /* The ground the ribbon let go is a name's only where no living owner is
+     * (M-1), and what is held for a rot only where no owner at all is — the
+     * fallow ground among them (bookcensus.py _Claims, Owned). */
+    error_t rc = RunsOwnerLess(GROUND_FALLOW, GROUND_FALLOW, fallow);
+    if (rc == OK)
+        rc = RunsOwnerLess(GROUND_HELD, GROUND_HELD, held);
+    if (rc != OK)
+        return rc;
     RunsSort(true);
     RunsOneName();
     RunsSayDoublesBook();

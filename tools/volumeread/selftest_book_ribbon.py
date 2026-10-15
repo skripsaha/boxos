@@ -5,7 +5,8 @@ history, what settled lost, an Undone, a Slip, a Quire run into its next, a
 retry at the start of the next. Each a fork of the base selftest_book.py
 lays; what the book's census must say of it."""
 
-from . import bookread, ondisk, stitch
+from . import bookread, ondisk, stitch, tally
+from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal
 from .selftest_book import Born, Found, Glass, Label
@@ -65,9 +66,9 @@ def RecordCases(bt):
             ("the stitch is taken, seq 3", lambda c: [s.seq for s in c.mount.ribbon.stitches] == [3]),
             ("the next seq is 4, and nothing is said",
              lambda c: c.mount.counts["next_seq"] == 4 and not c.findings),
-            ("and the kernel of this tree refuses it: it reads no stitch past the Tally yet",
-             lambda c: c.kernel["mounts"] is False and
-             c.kernel["refusal"] == "the ribbon past its Tally is not empty")]),
+            ("and the kernel of this tree mounts it under glass, the stitch sewn on and applied, seq 4 next",
+             lambda c: c.kernel["mounts"] is True and (c.kernel["sewn"], c.kernel["last"], c.kernel["applied"],
+                                                        c.kernel["next_seq"]) == (1, 3, 1, 4))]),
         Case("B26 the newest stitch's data never landed", lambda o: Unlanded(o, False),
              must={"NOT_LANDED", "UNDER_GLASS"}, checks=[
                  ("%u is rolled back by its splice, and the roll-back cannot be written by this kernel"
@@ -204,9 +205,13 @@ def RibbonCases(bt):
         pen.Sew([stitch.Undone(seq_back=1, why=1, fids=[f1])], flags=stitch.DATA_FLUSHED)
 
     def Slip(o):
+        """A file of 100 bytes born a hole and a Slip, and 50 more by a second
+        Slip — its stem coined and worn as every file of the volume wears its
+        own, so the guest finds it by name."""
         pen = bt.Pen(o)
-        pen.Sew([stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
-                             name=b"slip", tags=(), runs=[stitch.Hole(1)], digests=[],
+        pen.Sew([stitch.Coined(bt.tag, b"slip"),
+                 stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
+                             name=b"slip", tags=(bt.tag,), runs=[stitch.Hole(1)], digests=[],
                              slip=(0, b"a" * 100))], flags=stitch.DATA_FLUSHED)
         pen.Sew([stitch.Shaped(fid=f1, base=1, size=150, mtime_ns=2, splices=[], digests=[],
                                slip=(100, b"b" * 50))], flags=stitch.DATA_FLUSHED)
@@ -248,8 +253,31 @@ def RibbonCases(bt):
         pen.next = (bt.plan.a, bt.ground.grain)
         pen.Sew([Born(bt.F, f1, d, b"named")], flags=stitch.DATA_FLUSHED)
 
+    def Fallen(o):
+        """Stitch 3 born f1; slot 1 at seq 4, a Tally that took stitch 3 in —
+        its `at` past it — whose FILES root names a Sheet no node was written
+        to: the mount falls back to slot 0, whose ribbon is longer by stitch
+        3, and replays it (§4.5 п.5: the older ribbon is whole while a slot
+        names it)."""
+        d = bt.Fresh(o, 0, 1, 12)
+        s3 = bt.Pen(o).Sew([Born(bt.F, f1, d, b"fallen")], flags=stitch.DATA_FLUSHED)
+        g = BookGround(o)
+        slot = tally.SlotRead(g, 0)
+        slot.stitch_seq, slot.stitch_clasp = s3.seq, s3.clasp
+        slot.ribbon = dict(slot.ribbon, at=s3.vlbas[-1] // SECTORS_PER_BLOCK + 1)
+        root = slot.roots[tally.FILES]
+        slot.roots[tally.FILES] = tally.Root(root.flags, root.level, root.items,
+                                             bookread.PtrPut(bt.plan.seq, 1, bt.plan.FreeSheet()))
+        o.Put(g.base + tally.SlotBlock(g, 1) * SECTORS_PER_BLOCK, b"".join(tally.SlotSectors(g, 1, s3.seq + 1, slot)))
+
     ribbon, nxt = tuple(bt.plan.ribbon), tuple(bt.plan.next)
     return [
+        Case("B21c a newer slot that does not read, over a stitch it took in", Fallen, must={"SLOT_FELL_BACK"},
+             checks=[("the book stands on slot 0, and its longer ribbon bears %u" % f1,
+                      lambda c: c.mount.slot.index == 0 and [s.seq for s in c.mount.ribbon.stitches] == [3] and
+                      f1 in c.mount.files),
+                     ("and the kernel of this tree mounts it so", lambda c: c.kernel["mounts"] and
+                      c.kernel["slot"] == 0 and c.kernel["fell_back"] == 1 and c.kernel["sewn"] == 1)]),
         Case("B21 Undone", Undone, checks=[
             ("stitch 3's record of %u is passed over and %u stands" % (f1, f2),
              lambda c: f1 not in c.mount.files and f2 in c.mount.files),
@@ -550,4 +578,184 @@ def RibbonShapeCases(bt):
             ("its sector 0 names a lead its records do not give it, said loud",
              lambda c: Found(c, "RECORD_SHAPE", "stitch 3", "lead")),
             ("and the stitch, whole, is applied: %u is born" % f1, lambda c: f1 in c.mount.files)]),
+    ]
+
+
+def RibbonBoundCases(bt):
+    """What the medium may say that no writer does, held to a bound before a
+    byte of it is trusted: a StitchHead naming a seq past its own, two units
+    naming each other, a unit whose own StitchHead names a Quire past the
+    volume, a slot whose ribbon lies past the volume, a CODEC run of 2^62
+    blocks in the stitch the mount checks, a Clasp counting other fresh blocks
+    than its records over data that did not land, a hole of 2^62 blocks born
+    and put in, a tag the kernel cannot hold worn by a file born after it is
+    coined, a block of the newest stitch past the volume's end; an older
+    slot's ribbon run on through a Quire only its StitchHeads name (§16.2
+    п.12); and two that hold what memory is left with to the print a mount
+    gives of it: a ribbon of two thousand files born, in fids that fall, and a
+    file renamed and given a tag coined beside it."""
+    f1, g, S = bt.fid, bt.ground, bt.S
+    flushed = stitch.DATA_FLUSHED
+    huge = (1 << 62) - 1      # the longest run a record can name: its count is shifted by 2 in a u64
+
+    def Raw(o, pen, seq, prev, prev_clasp, records=(), nxt=(0, 0), of=SECTORS_PER_BLOCK):
+        """One whole unit at the pen's place whose StitchHead says what no
+        pen would: `prev`, `prev_clasp`, `nxt`; sealed at `of` sectors, only
+        the first of them written when it is longer than one block."""
+        head = stitch.HeadPut(flushed, prev, prev_clasp, seq - pen.tally_seq, 0, nxt, (0, 0))
+        stream, starts, clasp = stitch.StitchStream(head, list(records))
+        vlbas = [pen.place.On(k, pen.next).Vlba() for k in range(min(of, SECTORS_PER_BLOCK))]
+        sectors = bookread.UnitSeal(stream, starts, bookread.UNIT_STITCH, seq, vlbas, g.uuid)
+        if of != len(vlbas):
+            raw = bytearray(sectors[0])
+            raw[12:16] = of.to_bytes(4, "little")
+            sectors = [bookread.SectorSeal(bytes(raw), g.uuid, vlbas[0])]
+        for v, s in zip(vlbas, sectors):
+            o.Put(g.base + v, s)
+        pen.place = pen.place.On(len(vlbas), pen.next)
+        return seq, clasp
+
+    def Above(o):
+        pen = bt.Pen(o)
+        Raw(o, pen, pen.next_seq, pen.next_seq + 5, 0xDEADBEEF)
+
+    def Each(o):
+        pen = bt.Pen(o)
+        a = pen.next_seq
+        _s, ca = Raw(o, pen, a, (1 << 64) - 1, 0xDEADBEEF)
+        Raw(o, pen, a + 1, 1, ca)
+
+    def Vast(o):
+        pen = bt.Pen(o)
+        Raw(o, pen, pen.next_seq, 0, 0, nxt=(g.data_block, 1 << 40), of=8801168)
+
+    def Beyond(o):
+        s = tally.SlotRead(g, 0)
+        q = -(-(g.data_end + 1) // 256) * 256
+        s.ribbon = dict(s.ribbon, quire_block=q, quire_blocks=256, at=q)
+        o.Put(g.base + tally.SlotBlock(g, 1) * SECTORS_PER_BLOCK,
+              b"".join(tally.SlotSectors(g, 1, bt.Pen(o).next_seq, s)))
+
+    def Coded(o):
+        d = bt.Fresh(o, 0, 1, 21)
+        codec = bookread.EntryPut(tally.EXT_CODEC, bookread.VarintPut(1) + bookread.VarintPut(1))
+        bt.Pen(o).Sew([stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1,
+                                   name=b"coded", tags=(), runs=[stitch.Data(bt.F, huge, codec)], digests=d)])
+
+    def Miscounted(o):
+        bt.Fresh(o, 0, 1, 22)
+        bt.Pen(o).Sew([Born(bt.F, f1, [0x1234], b"miscounted")], fresh=9)
+
+    def Gap(q, d):
+        return [stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1, name=b"gap",
+                            tags=(), runs=[stitch.Hole(huge)], digests=[])]
+
+    def Widened(q, d):
+        return [stitch.Shaped(fid=S.fid, base=q - S.gen, size=S.size, mtime_ns=1,
+                              splices=[(S.Blocks(), 0, [stitch.Hole(huge)])], digests=[])]
+
+    def Sewn(records, flags=flushed):
+        def Plant(o):
+            d = bt.Fresh(o, 0, 1, 23)
+            pen = bt.Pen(o)
+            pen.Sew(records(pen.next_seq, d), flags=flags)
+        return Plant
+
+    wide = 1 << 31
+    worn = lambda q, d: [stitch.Coined(wide, b"wide"),
+                         stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1,
+                                     name=b"worn", tags=(wide,), runs=[stitch.Data(bt.F, 1)], digests=d)]
+    past = g.data_end + 1
+    gone = lambda q, d: [Born(past, f1, d, b"past")]
+
+    grain = bt.ground.grain
+    q1, q2 = tuple(bt.plan.ribbon), tuple(bt.plan.next)
+    q3, q4 = (q2[0] + grain, grain), (q2[0] + 2 * grain, grain)
+
+    def Older(o):
+        """Slot 0's ribbon run from its Quire into its next_quire and on into a
+        third its stitches name; slot 1, newer, puts its ribbon on in a fourth.
+        The third is slot 0's by its StitchHeads alone — the slot names it
+        nowhere, and slot 1's ribbon does not run through it."""
+        if ondisk.RunsSubtract([q3, q4], bt.c0.free_runs):
+            raise Unreadable("the two grains past the ribbon's next_quire are not free")
+        pen = bt.Pen(o)
+        for nxt in (q2, q3):
+            room = pen.Room() - SECTORS_PER_BLOCK
+            pen.Sew([stitch.UseContext(b"f" * (room * bookread.PAYLOAD_BYTES - 100))], flags=flushed)
+            cross = pen.Sew([stitch.UseContext(b"c" * 6000)], flags=flushed)
+            pen.next = q3 if nxt == q2 else None
+        g2 = BookGround(o)
+        slot = tally.SlotRead(g2, 0)
+        slot.stitch_seq, slot.stitch_clasp = cross.seq, cross.clasp
+        slot.ribbon = dict(slot.ribbon, quire_block=q4[0], quire_blocks=q4[1], at=q4[0], next_block=0,
+                           next_blocks=0)
+        o.Put(g2.base + tally.SlotBlock(g2, 1) * SECTORS_PER_BLOCK,
+              b"".join(tally.SlotSectors(g2, 1, cross.seq + 1, slot)))
+
+    renamed = lambda q, d: [stitch.Coined(bt.tag, b"renamed-tag"),
+                            stitch.Labeled(fid=S.fid, base=q - S.gen, name=b"renamed", add=[bt.tag])]
+
+    def Many(o):
+        """Forty stitches of fifty Borns, each stitch's fids falling, the last
+        renaming the last file it bore — found among the stitch's own."""
+        pen = bt.Pen(o)
+        for s in range(40):
+            pen.Sew([stitch.Born(fid=f1 + 1999 - (s * 50 + i), flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1,
+                                 modified_ns=1, name=b"m%04u" % (s * 50 + i), tags=(), runs=[stitch.Hole(1)],
+                                 digests=[]) for i in range(50)] +
+                    ([stitch.Labeled(fid=f1, base=0, name=b"relabeled")] if s == 39 else []), flags=flushed)
+
+    return [
+        Case("B46 a unit past the end naming a seq past its own", Above, must={"CLASP_STRANGER"}, checks=[
+            ("its StitchHead names no stitch this ribbon holds: a stranger, and no lie",
+             lambda c: Found(c, "CLASP_STRANGER", "does not hold") and not c.mount.ribbon.lied)]),
+        Case("B46b two units past the end naming each other", Each, must={"CLASP_STRANGER"}, checks=[
+            ("one branch of two, a stranger — the walk to its root ends",
+             lambda c: Found(c, "CLASP_STRANGER", "seq %u, %u" % (c.mount.ribbon.past[0].seq,
+                                                                 c.mount.ribbon.past[1].seq))
+             and not c.mount.ribbon.lied)]),
+        Case("B47 a unit of 8801168 sectors whose StitchHead names a Quire past the volume", Vast,
+             must={"RECORD_SHAPE"}, checks=[
+                 ("the Quire its own StitchHead names is not one: the unit is longer than its Quire and the next",
+                  lambda c: Found(c, "RECORD_SHAPE", "8801168 sectors long, more than") and
+                  not c.mount.ribbon.stitches)]),
+        Case("B47b a slot whose ribbon lies past the volume", Beyond, must={"RIBBON_TORN"}, checks=[
+            ("no stitch past its Tally is read", lambda c: Found(c, "RIBBON_TORN", "outside the data run") and
+             c.mount.slot.index == 1 and not c.mount.ribbon.quires)]),
+        Case("B48 a CODEC run of 2^62 blocks in the stitch the mount checks", Coded,
+             must={"BASE_MISMATCH", "UNDER_GLASS"}, checks=[
+                 ("one block is checked against its one digest; the record does not cover its size",
+                  lambda c: not Found(c, "NOT_LANDED") and Found(c, "BASE_MISMATCH", "fid %u" % f1, "runs cover")
+                  and f1 not in c.mount.files)]),
+        Case("B48b a Clasp counting other fresh blocks over data that did not land", Miscounted,
+             must={"UNDER_GLASS"}, checks=[
+                 ("its data is not read: the stitch is not applied for its Clasp, and nothing is said not landed",
+                  lambda c: not Found(c, "NOT_LANDED") and Glass(c, "fresh") and f1 not in c.mount.files)]),
+        Case("B49 a Born of a hole of 2^62 blocks", Sewn(Gap), must={"BASE_MISMATCH", "UNDER_GLASS"}, checks=[
+            ("its runs do not cover its size", lambda c: Found(c, "BASE_MISMATCH", "fid %u" % f1, "runs cover"))]),
+        Case("B49b a Shaped putting in a hole of 2^62 blocks", Sewn(Widened), must={"BASE_MISMATCH", "UNDER_GLASS"},
+             checks=[("%s does not match: its runs do not cover its size" % Label(S),
+                      lambda c: Found(c, "BASE_MISMATCH", "fid %u" % S.fid, "runs cover") and
+                      c.mount.files[S.fid].runs == S.runs)]),
+        Case("B50 a file born wearing a tag of id 2^31 coined before it", Sewn(worn), must={"UNDER_GLASS"},
+             checks=[("the tag is known — coined — and the file born; the kernel cannot hold the id, said",
+                      lambda c: f1 in c.mount.files and Glass(c, "past 2^31") and
+                      not Found(c, "BASE_MISMATCH"))]),
+        Case("B51 the newest stitch's data past the volume's end", Sewn(gone, flags=0),
+             must={"NOT_LANDED", "UNDER_GLASS"}, checks=[
+                 ("a block the medium does not give did not land: %u is rolled back" % f1,
+                  lambda c: Found(c, "NOT_LANDED", "fid %u" % f1, "block %u" % past) and f1 not in c.mount.files)]),
+        Case("B52 two thousand files born in forty stitches, their fids falling", Many, checks=[
+            ("every one is born, and nothing is said",
+             lambda c: all(f in c.mount.files for f in range(f1, f1 + 2000)) and not c.findings and
+             len(c.mount.applied) == 40 and c.mount.files[f1].name == b"relabeled")]),
+        Case("B54 an older slot whose ribbon runs on through a Quire it does not name", Older, checks=[
+            ("the mount stands on slot 1; the third Quire is the ribbon's by slot 0's StitchHeads",
+             lambda c: c.mount.slot.index == 1 and
+             [x.runs for x in c.claims if x.kind == "ribbon"] == [RunsNormal([q1, q2, q3, q4])])]),
+        Case("B53 a file renamed and given a tag coined beside it", Sewn(renamed), checks=[
+            ("%s is 'renamed' and wears tag %u, and nothing is said" % (Label(S), bt.tag),
+             lambda c: c.mount.files[S.fid].name == b"renamed" and bt.tag in c.mount.files[S.fid].tags and
+             not c.findings)]),
     ]
