@@ -28,6 +28,11 @@
  *   7 flush      before the medium's cache is flushed            (S5)
  *   8 done       after the flush, with the whole cycle on the medium (S6)
  *   9 usechain   before the Use Context's chain is written         (S1)
+ *  10 stitch     before a format-v2 stitch's last atom is written —
+ *                a stitch of one atom not begun, one of more torn  (STITCH)
+ *
+ * A format-v2 cycle passes `flush` and `done` as format v1's does, around its
+ * own last flush; `stitch` is its alone.
  *
  * This list is the only list of the names: the Makefile turns the value it is
  * given into SETTLE_CUT_POINT_<VALUE>, and a value that is none of these does
@@ -62,7 +67,8 @@ typedef enum {
     SETTLE_CUT_POINT_LEDGER,
     SETTLE_CUT_POINT_FLUSH,
     SETTLE_CUT_POINT_DONE,
-    SETTLE_CUT_POINT_USECHAIN
+    SETTLE_CUT_POINT_USECHAIN,
+    SETTLE_CUT_POINT_STITCH
 } SettleCutPoint;
 
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT

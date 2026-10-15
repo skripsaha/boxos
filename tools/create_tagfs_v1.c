@@ -509,9 +509,6 @@ uint64_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
  * being generous is sixty-four mebibytes on a medium that has gigabytes.
  * ==================================================================== */
 
-/* Sixty-four mebibytes of room, in the volume's own blocks. */
-#define GROUND_WORKING_ROOM_BLOCKS   ((64u * 1024u * 1024u) / TAGFS_BLOCK_SIZE)
-
 /* The metadata pool chains into the data run as records outgrow one block. The
  * image's own record count settles in two blocks today; eight is the room for
  * that to double twice without anybody noticing it had a bound. */

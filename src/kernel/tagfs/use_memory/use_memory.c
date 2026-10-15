@@ -187,6 +187,14 @@ UseSaid UseMemorySay(UseText *said, uint64_t saying, uint64_t *ticket)
     return same ? USE_SAID_LANDED : USE_SAID_OWED;
 }
 
+bool UseMemoryRefused(uint64_t ticket)
+{
+    TagFSLockTake(UseMemoryLock());
+    bool refused = ticket && g_use_memory.refused == ticket;
+    TagFSLockDrop(UseMemoryLock());
+    return refused;
+}
+
 bool UseMemoryKept(uint64_t ticket, const UseText *said)
 {
     UseMemoryState *g = &g_use_memory;
@@ -208,8 +216,12 @@ error_t tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembe
         return OK;
     }
 
-    /* A demand on the one writer: a cycle that began after it carries it. */
+    /* A demand on the one writer: a cycle that began after it carries it —
+     * or, on a book whose ribbon has no room for it, lays its stitch without
+     * it and refuses it (settle/sewing.c). */
     error_t rc = TagFSSettle();
+    if (rc == OK && UseMemoryRefused(ticket))
+        rc = ERR_TAGFS_NO_SPACE;
     if (remembered) *remembered = rc == OK && UseMemoryKept(ticket, said);
     return rc;
 }
@@ -222,6 +234,49 @@ UseText *tagfs_recall_use_context(uint64_t *out_saying)
     TagFSLockDrop(UseMemoryLock());
     if (out_saying) *out_saying = saying;
     return memory;
+}
+
+// ----------------------------------------------------------------------------
+// Format v2's cycle: the word whole in the stitch
+// ----------------------------------------------------------------------------
+
+bool UseMemoryStitchTake(UseText **said, uint64_t *ticket)
+{
+    UseMemoryState *g = &g_use_memory;
+    *said   = NULL;
+    *ticket = 0;
+    if (!g->owed)
+        return false;
+    *said   = UseTextHold(g->said);
+    *ticket = g->ticket;
+    return true;
+}
+
+void UseMemoryStitchRefused(uint64_t ticket)
+{
+    UseMemoryState *g = &g_use_memory;
+    if (g->ticket == ticket) {
+        g->owed  = false;
+        g->carry = false;
+    }
+    if (ticket > g->answered)
+        g->answered = ticket;
+    g->refused = ticket;
+}
+
+UseText *UseMemoryStitchSettled(UseText *said, uint64_t ticket)
+{
+    UseMemoryState *g    = &g_use_memory;
+    UseText        *gone = g->memory;
+    g->memory = said;
+    g->landed = true;
+    if (g->ticket == ticket) {
+        g->owed  = false;
+        g->carry = false;
+    }
+    if (ticket > g->answered)
+        g->answered = ticket;
+    return gone;
 }
 
 // ----------------------------------------------------------------------------

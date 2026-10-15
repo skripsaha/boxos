@@ -1,8 +1,8 @@
 """stitch — the ribbon (spec_v2 §2.7, §2.8, §3.9, §4.5 п.5): the records a
 Settle cycle sews, read and written; the ribbon walked from the slot a mount
 stands on — the three classes of a unit, the direct scan, what lies past the
-end; and a pen that sews stitches the way a kernel does, for the self-test's
-landings.
+end. The pen that sews stitches the way a kernel does, for the self-test's
+landings, is stitch_pen.py.
 
 A stitch is one unit of kind STITCH: StitchHead, the cycle's records, Clasp,
 then PAD to the end of its last atom. It is sewn on only when it names the
@@ -650,32 +650,104 @@ class Ribbon:
         its Clasp, the one of the larger seq is taken (§16.3 п.11, M-6): a
         retry always takes a new, larger seq and carries the same records of
         its cycle, and the waiters were answered by it — the other is the
-        pieces of a retry, said, and not applied."""
-        hops = 0
+        pieces of a retry, said, and not applied.
+
+        Rules (б) and (б′) are weighed only where rule (а) gives no whole
+        stitch, or gives one that nothing past it names (_Kept): a writer
+        lays nothing that names a try the medium refused (settle/ribbon.c
+        RibbonRetry), so a stitch named after it was kept, and no retry of
+        the one before it lies anywhere. The unit read to tell is the next
+        step's rule (а): every unit of the chain is read once."""
+        hops, ahead = 0, None
         while self.end is not None and hops <= self.g.data_end:
             hops += 1
-            u = FindUnit(self.g, self.end, self.next, self.seq)
+            key = (self.end.quire, self.end.off, self.next, self.seq)
+            u = ahead[1] if ahead is not None and ahead[0] == key else FindUnit(self.g, self.end, self.next, self.seq)
             here = u if u is not None and u.Sound() and self._Follows(u, False) else None
-            v = None
-            if self.next and self.end.quire != self.next:
-                v = FindUnit(self.g, Place(self.next, 0), None, self.seq)
-            there = v if v is not None and v.Sound() and self._Follows(v, True) else None
+            kept, ahead = (self._Kept(here) if here is not None and self.next else (False, None))
+            v = there = None
+            if self.next and not kept:
+                there, blank = self._Further()
+                if here is None and there is None and not blank and self.end.quire != self.next:
+                    v = FindUnit(self.g, Place(self.next, 0), None, self.seq)
             if here is not None or there is not None:
-                self._Take(self._Retried(here, there))
+                take = self._Retried(here, there)
+                self._Take(take)
+                if take is not here:
+                    ahead = None
                 continue
             if not any(self._Closed(c, c is v) for c in (u, v)
                        if c is not None and not c.Sound() and not c.bad):
                 return
 
+    def _Kept(self, s):
+        """Does a unit past `s` name it — its StitchHead, read, naming its seq
+        and its Clasp — at its end or at the start of the next_quire it names?
+        Then the writer was told `s` was kept. [that, and (the key the unit at
+        its end was read by, that unit) for the next step]."""
+        hop = s.head.next if Lies(self.g, s.head.next) else (self.next if s.places[-1].quire == self.quire else None)
+        f = FindUnit(self.g, s.end, hop, s.seq)
+        names = lambda x: x is not None and x.head is not None and x.Names() == s.seq and x.head.prev_clasp == s.clasp
+        kept = names(f) or (bool(hop) and s.end.quire != hop and names(FindUnit(self.g, Place(hop, 0), None, s.seq)))
+        return kept, ((s.end.quire, s.end.off, hop, s.seq), f)
+
+    def _Further(self):
+        """Rules (б) and (б′) (§4.5 п.5, §16.4 п.4): the stitch the ribbon
+        goes on with in the next_quire — the whole one at its start naming the
+        last stitch taken by its Clasp and the Quire it ended in as the one it
+        came from, or, where none lies there, the first such further in: a
+        unit holding a sector there stepped over to its end, a sector holding
+        none of a seq past the last one stepped over alone — a retry is
+        written on the atom past the try refused before it, never over it.
+        While a whole stitch naming the last one so, with a larger seq, lies
+        right after the one found — a try refused that landed, and the retry
+        after it (§16.3 п.11) — that one is taken in its place. What was
+        walked over is said as the pieces of a retry: no lie. The walk ends at
+        the next_quire's end. [the stitch, None when nothing there goes on;
+        whether no sector there holds a seq past the last one]."""
+        n = self.next
+        total = n[1] * SECTORS_PER_BLOCK
+        self.g.Run(n[0] * SECTORS_PER_BLOCK, total)
+        pos, passed, take, blank = 0, [], None, True
+        while pos < total and take is None:
+            p = Place(n, pos)
+            _raw, h = self.g.Sector(p.Vlba())
+            if h is None or h["kind"] != UNIT_STITCH or h["seq"] <= self.seq:
+                pos += 1
+                continue
+            blank = False
+            if h["at"] == 0:
+                u = Unit(self.g, p, h["of"], h["seq"], Peek(self.g, p))
+                if u.Sound() and self._Follows(u, True):
+                    take = u
+                    break
+            if h["seq"] not in passed:
+                passed.append(h["seq"])
+            pos = pos - h["at"] + h["of"] if h["at"] < h["of"] else pos + 1
+        while take is not None:
+            hop = take.head.next if Lies(self.g, take.head.next) else None
+            f = FindUnit(self.g, take.end, hop, take.seq)
+            if f is None or not f.Sound() or not self._Follows(f, True):
+                break
+            passed.append(take.seq)
+            take = f
+        if take is not None and (take.start.quire != n or take.start.off):
+            self.Say("DEAD_BRANCH", "note", "no whole stitch at the start of the next_quire %u+%u names stitch %u "
+                     "and goes on from there: seq %s walked over to seq %u at its sector %u, which names it and the "
+                     "Quire the first try came from — the pieces of a retry, not applied (§16.4 п.4)"
+                     % (n[0], n[1], self.seq, ", ".join(map(str, passed)) if passed else "none that reads",
+                        take.seq, take.start.off))
+        return take, blank
+
     def _Retried(self, here, there):
-        """The stitch rule (а) gives (`here`) or rule (б) gives (`there`);
-        when both do, the one of the larger seq, the other said as the
-        pieces of a retry (§16.3 п.11) — no lie: the medium kept a write it
-        refused, and the cycle was written again."""
+        """The stitch rule (а) gives (`here`) or rules (б), (б′) give
+        (`there`); when both do, the one of the larger seq, the other said as
+        the pieces of a retry (§16.3 п.11) — no lie: the medium kept a write
+        it refused, and the cycle was written again."""
         if here is None or there is None or here.seq == there.seq:
             return here if here is not None else there
         take, left = (here, there) if here.seq > there.seq else (there, here)
-        self.Say("DEAD_BRANCH", "note", "stitch seq %u at the end of the ribbon and seq %u at the start of its "
+        self.Say("DEAD_BRANCH", "note", "stitch seq %u at the end of the ribbon and seq %u in its "
                  "next_quire are both whole and both name stitch %u by its Clasp — a write the medium refused "
                  "and kept, and its retry (M-6): seq %u, the larger, is taken; seq %u is the pieces of a retry "
                  "and is not applied (§16.3 п.11)" % (here.seq, there.seq, self.seq, take.seq, left.seq))
@@ -825,109 +897,6 @@ class Ribbon:
         the torn tail and what lies past — for the numbers it gave, which are
         never given again (§4.5 п.8)."""
         return [(r[0], r[2], u.seq) for u in ([self.torn] if self.torn else []) + self.past for r in u.records]
-
-
-# ---------------------------------------------------------------------------
-# A pen: stitches sewn the way a kernel sews them
-# ---------------------------------------------------------------------------
-
-
-class Sewn:
-    __slots__ = ("seq", "of", "vlbas", "stream", "starts", "clasp", "sectors")
-
-    def __init__(self, seq, of, vlbas, stream, starts, clasp, sectors):
-        self.seq, self.of, self.vlbas, self.stream, self.starts = seq, of, vlbas, stream, starts
-        self.clasp, self.sectors = clasp, sectors
-
-    def LostAt(self, k):
-        """The bytes a reader loses when sector k alone does not read: from
-        where the entry the sector cuts begins to the first entry begun past
-        it — said from what the pen laid down, not from the reader's walk."""
-        lo, hi = k * PAYLOAD_BYTES, (k + 1) * PAYLOAD_BYTES
-        spans = list(zip(self.starts, self.starts[1:] + [len(self.stream)]))
-        first = min(s for s, e in spans if s < hi and e > lo)
-        return min([s for s, _e in spans if s >= hi] + [len(self.stream)]) - first
-
-
-class StitchPen:
-    """Sews stitches on the ribbon of the newest slot that holds, from its
-    `at`: each from the first atom after the last, in whole atoms, on into the
-    next_quire past a Quire's end, its StitchHead naming the last one's seq
-    and Clasp (or what it is told to)."""
-
-    def __init__(self, over, g):
-        slots = [tally.SlotRead(g, i) for i in range(g.frame["spine_slots"])]
-        slot = max((s for s in slots if s.state == "valid"), key=lambda s: s.seq)
-        r = slot.ribbon
-        self.over, self.g, self.came = over, g, None
-        self.place = Place((r["quire_block"], r["quire_blocks"]),
-                           (r["at"] - r["quire_block"]) * SECTORS_PER_BLOCK)
-        self.next = (r["next_block"], r["next_blocks"]) if r["next_blocks"] else None
-        self.last, self.clasp, self.tally_seq = slot.stitch_seq, slot.stitch_clasp, slot.tally_seq
-        self.next_seq = max([g.top_seq] + [s.seq for s in slots]) + 1
-
-    def Room(self):
-        return self.place.Left()
-
-    def Hop(self, back_to=None):
-        """On to the start of the next_quire, as a cycle whose stitch the
-        medium refused goes on (M-6): `back_to` the last stitch that landed,
-        which the next one names."""
-        if not self.next:
-            raise ValueError("the ribbon names no next_quire to go on in")
-        self.came, self.place, self.next = self.place.quire, Place(self.next, 0), None
-        if back_to is not None:
-            self.last, self.clasp = back_to.seq, back_to.clasp
-
-    def Sew(self, records, flags=0, seq=None, prev_clasp=None, made_ns=0, write=True, names=None,
-            fresh=None, of=None):
-        """One stitch of `records`; `write` False leaves the medium as it was
-        — a stitch that never landed — and goes on as though it had. What a
-        landing may make a stitch say that a kernel's would not: `names` (a
-        Sewn) the stitch before it, `prev_clasp` that one's Clasp, `fresh`
-        its Clasp's count of fresh blocks, `of` its sectors."""
-        seq = seq or self.next_seq
-        last, clasp = (names.seq, names.clasp) if names is not None else (self.last, self.clasp)
-        came = self.came if self.place.off == 0 and self.came else (0, 0)
-        head = HeadPut(flags, seq - last if last else 0, clasp if prev_clasp is None else prev_clasp,
-                       seq - self.tally_seq, made_ns, self.next or (0, 0), came)
-        stream, starts, clasp = StitchStream(head, records, fresh)
-        grid = self.g.atom // 512
-        if of is None:
-            of = -(-len(stream) // PAYLOAD_BYTES)
-            of = -(-of // grid) * grid
-        places = [self.place.On(k, self.next) for k in range(of)]
-        if None in places:
-            raise ValueError("the ribbon has no room for a stitch of %u sectors" % of)
-        vlbas = [p.Vlba() for p in places]
-        sectors = UnitSeal(stream, starts, UNIT_STITCH, seq, vlbas, self.g.uuid)
-        if write:
-            for v, sector in zip(vlbas, sectors):
-                self.over.Put(self.g.base + v, sector)
-        end = self.place.On(of, self.next)
-        if end is None or end.quire != self.place.quire:
-            self.came, self.next = self.place.quire, None
-        self.place = end
-        self.last, self.clasp, self.next_seq = seq, clasp, max(self.next_seq, seq + 1)
-        return Sewn(seq, of, vlbas, stream, starts, clasp, sectors)
-
-
-def Circle(ribbon, sewn):
-    """[what differs] between stitches the pen sewed and the ribbon read back:
-    each sewn on whole, its stream the pen's, and each record of it decoded
-    and written again the same bytes (§2.4: one value, one spelling)."""
-    wrong, by_seq = [], {u.seq: u for u in ribbon.stitches}
-    for s in sewn:
-        u = by_seq.get(s.seq)
-        if u is None or not u.Sound():
-            wrong.append("stitch %u is not sewn on whole" % s.seq)
-            continue
-        if u.stream[:len(s.stream)] != s.stream:
-            wrong.append("stitch %u reads back other bytes" % s.seq)
-        for kind, _ign, body, _at in u.records:
-            if kind in KIND_NAMES and RecordAgain(kind, RecordDecode(kind, body, u.seq)).body != body:
-                wrong.append("stitch %u's %s is written again as other bytes" % (s.seq, KIND_NAMES[kind]))
-    return wrong
 
 
 # ---------------------------------------------------------------------------

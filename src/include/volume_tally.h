@@ -790,22 +790,33 @@ static inline int SpineFlagsGet(const uint8_t *b, uint32_t len, uint64_t *flags)
  * each record of a slot; never PAD. Each sector is sealed at its own address,
  * vlba + at, so a sector put down in the wrong place does not hold there.
  */
+/* Sector `k` of `of` of a unit laid at `sector` and sealed at `vlba` — the one
+ * rule of TallyUnitSeal below, for a writer whose unit does not lie in one run
+ * of sectors (a stitch that runs on into its next_quire, volume_ribbon.h).
+ * *s is the first of `starts` not yet passed, carried from one sector to the
+ * next in order. */
+static inline void TallySectorLay(uint8_t *sector, const uint8_t *stream, uint64_t len, const uint32_t *starts,
+                                  uint32_t nstarts, uint32_t *s, uint16_t kind, uint64_t seq, uint32_t k,
+                                  uint32_t of, uint64_t vlba, const uint8_t uuid[16])
+{
+    uint64_t       lo = (uint64_t)k * BOOK_PAYLOAD_BYTES;
+    BookSectorHead h  = { .crc32c = 0, .lead = 0, .kind = kind, .at = k, .of = of, .seq = seq };
+    for (uint32_t i = 0; i < BOOK_PAYLOAD_BYTES; i++)
+        sector[BOOK_HEAD_BYTES + i] = lo + i < len ? stream[lo + i] : 0u;
+    while (*s < nstarts && starts[*s] < lo) (*s)++;
+    if (*s < nstarts && starts[*s] < lo + BOOK_PAYLOAD_BYTES)
+        h.lead = (uint16_t)(BOOK_HEAD_BYTES + (starts[*s] - lo));
+    BookSectorSeal(sector, uuid, vlba, &h);
+}
+
 static inline void TallyUnitSeal(uint8_t *out, const uint8_t *stream, uint64_t len, const uint32_t *starts,
                                  uint32_t nstarts, uint16_t kind, uint64_t seq, uint64_t vlba, uint32_t of,
                                  const uint8_t uuid[16])
 {
     uint32_t s = 0;
-    for (uint32_t k = 0; k < of; k++) {
-        uint8_t       *sector = out + (uint64_t)k * BOOK_SECTOR_BYTES;
-        uint64_t       lo     = (uint64_t)k * BOOK_PAYLOAD_BYTES;
-        BookSectorHead h      = { .crc32c = 0, .lead = 0, .kind = kind, .at = k, .of = of, .seq = seq };
-        for (uint32_t i = 0; i < BOOK_PAYLOAD_BYTES; i++)
-            sector[BOOK_HEAD_BYTES + i] = lo + i < len ? stream[lo + i] : 0u;
-        while (s < nstarts && starts[s] < lo) s++;
-        if (s < nstarts && starts[s] < lo + BOOK_PAYLOAD_BYTES)
-            h.lead = (uint16_t)(BOOK_HEAD_BYTES + (starts[s] - lo));
-        BookSectorSeal(sector, uuid, vlba + k, &h);
-    }
+    for (uint32_t k = 0; k < of; k++)
+        TallySectorLay(out + (uint64_t)k * BOOK_SECTOR_BYTES, stream, len, starts, nstarts, &s, kind, seq, k, of,
+                       vlba + k, uuid);
 }
 
 #endif /* VOLUME_TALLY_H */

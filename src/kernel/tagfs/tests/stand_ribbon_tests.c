@@ -10,6 +10,7 @@
 #include "../integrity/gloss.h"
 #include "../box_hash/box_hash.h"
 #include "../block_map/block_map_derived.h"
+#include "../settle/sewing.h"
 #include "read_job.h"
 #include "amp.h"
 #include "baton.h"
@@ -25,17 +26,18 @@
 // The stand_ribbon suite: stitches sewn past the Tally of the volume the
 // machine stands on, and the mount that reads them
 //
-// Each test lays stitches with the ribbon's own codec (volume_ribbon.h) at
-// the `at` of the slot the book stands on — past TagFS, by the Boardroom's
-// doors, as the stand's hand — mounts the volume again and holds what the
+// Each test lays stitches with the ribbon's own codec (volume_ribbon.h) where
+// the ribbon goes on — past the last stitch the slot's Tally took in, or the
+// kernel's own writer sewed since (settle/sewing.h) — past TagFS, by the
+// Boardroom's doors, as the stand's hand; mounts the volume again and holds what the
 // mount made of them to the rule (spec_v2 §4.5 п.5): the chain sewn on by the
 // Clasp each stitch names, a retry taken at the start of the next_quire, a
 // stitch closed and damaged read by `lead`, a branch of another history left
 // out, a torn tail said, an Undone passed over, a Slip laid on the last block
 // and a fresh block held to the digest its record carries (Gloss) on every
 // road a read takes. Then every sector it laid is put back and the volume is
-// mounted again as it was. The volume takes no write from TagFS: it stands
-// under glass throughout.
+// mounted again as it was. No cycle runs while a test's stitches lie on the
+// medium: the runner holds the cadence, and these tests ask for none.
 // ============================================================================
 
 #define STAND_RIBBON_MOUNT_MS  10000u
@@ -89,7 +91,7 @@ static StandRibbonRecords* StandRibbonFresh(uint32_t k)
 
 /* The volume's medium arriving again, attended until the mount road has
  * nothing left to do — mounted or refused — bounded. */
-static void StandRibbonArrive(void)
+void StandRibbonArrive(void)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_RIBBON_MOUNT_MS);
     TagFSAttendArrival();
@@ -104,31 +106,34 @@ static void StandRibbonArrive(void)
 /* The volume, let go of while the test laid its stitches, mounted again on
  * what the medium holds now and the runner counted back in: true when it
  * came up. */
-static bool StandRibbonUp(void)
+bool StandRibbonUp(void)
 {
     StandRibbonArrive();
     TagFSStandHoldAgain();
     return tagfs_get_state()->initialized;
 }
 
-/* The ribbon the mount stands on, and two free blocks of the data run. */
+/* Where the ribbon goes on past its last stitch — the writer's cursor, which
+ * stands past every stitch the kernel itself sewed since the Tally — and two
+ * free blocks of the data run. */
 static bool StandRibbonWhere(StandRibbon* w)
 {
-    const SpineSlot* s = g_book.stood;
+    RibbonCursor c;
     memset(w, 0, sizeof(*w));
-    if (!s)
+    RibbonCursorStand(&c);
+    if (!g_book.stood || !c.up || c.off % TAGFS_BLOCK_SECTORS || (c.came.blocks && c.off == 0))
         return false;
     w->seat         = tagfs_get_seat();
     w->base         = tagfs_get_volume_base();
     memcpy(w->uuid, tagfs_get_state()->uuid, 16);
-    w->quire        = s->ribbon.quire_block;
-    w->quire_blocks = s->ribbon.quire_blocks;
-    w->next         = s->ribbon.next_block;
-    w->next_blocks  = s->ribbon.next_blocks;
-    w->at           = s->ribbon.at;
-    w->seq          = s->head.stitch_seq;
-    w->clasp        = s->head.stitch_clasp;
-    w->top          = BookSeqSeen();
+    w->quire        = c.quire.block;
+    w->quire_blocks = c.quire.blocks;
+    w->next         = c.next.block;
+    w->next_blocks  = c.next.blocks;
+    w->at           = c.quire.block + c.off / TAGFS_BLOCK_SECTORS;
+    w->seq          = c.last;
+    w->clasp        = c.clasp;
+    w->top          = c.given;
     w->fid          = tagfs_get_state()->ledger.next_file_id;
     uint32_t windows = (uint32_t)((tagfs_get_state()->block_end + BLOCK_MAP_WINDOW_BLOCKS - 1u) /
                                   BLOCK_MAP_WINDOW_BLOCKS);
@@ -267,7 +272,7 @@ static const char* StandRibbonAside(StandRibbon* w)
     if (aside)
         return aside;
     if (!StandRibbonWhere(w))
-        return "the book names no ribbon Quire with room past `at`, a next_quire and two free blocks";
+        return "the ribbon has no Quire with room past its end on a block, a next_quire and two free blocks";
     return NULL;
 }
 

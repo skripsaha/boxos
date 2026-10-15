@@ -1,5 +1,6 @@
 #include "tag_registry_internal.h"
 #include "../../../lib/kernel/crypto.h"
+#include "../settle/settle.h"
 
 /*
  * ‼ THE MEDIUM HOLDS THE RECORD OF EVERY ID BELOW written_next, AND ONLY EVER
@@ -274,6 +275,7 @@ static error_t RegistryEnter(TagRegistry* reg, const TagSpelling* tag, uint32_t 
 
     if (tag_id >= reg->next_id) reg->next_id = tag_id + 1;
     reg->total_tags++;
+    reg->text_bytes += (uint64_t)entry->key_len + entry->value_len;
     return OK;
 }
 
@@ -343,8 +345,11 @@ static error_t intern_unlocked(TagRegistry* reg, const TagSpelling* tag, uint32_
 
     uint32_t id = reg->next_id;
     error_t  rc = RegistryEnter(reg, tag, id, tag->value ? TAGFS_TAG_FLAG_HAS_VALUE : 0);
-    if (rc == OK)
+    if (rc == OK) {
         *out_id = id;
+        if (id >= reg->coined_next)
+            reg->coined_text += (uint64_t)tag->key_len + tag->value_len;
+    }
     return rc;
 }
 
@@ -381,7 +386,10 @@ int tag_registry_init(TagRegistry* reg) {
     reg->key_bucket_count = TAGFS_KEY_BUCKETS;
     reg->key_groups       = 0;
     reg->total_tags       = 0;
+    reg->text_bytes       = 0;
     reg->next_id          = 0;
+    reg->coined_next      = 0;
+    reg->coined_text      = 0;
     reg->id_most          = TAGFS_MAX_TAG_ID;
 
     TagFSLockInit(&reg->lock, "registry", LOCK_RANK_LEAF);
@@ -726,6 +734,7 @@ refused:
 
 error_t tag_registry_flush(TagRegistry* reg) {
     if (!reg) return ERR_NULL_POINTER;
+    if (SettleV1OnBook("the registry's chain write")) return ERR_UNSUPPORTED;
 
     TagFSLockTake(&reg->lock);
     bool owed = reg->written_next < reg->next_id || reg->tail_owed;
@@ -799,6 +808,16 @@ error_t TagRegistryFlushFor(TagRegistry* reg, uint32_t id) {
     /* The registry's tail is format v1's, and a volume under glass takes no
      * write: a tag it does not hold yet is one no record of it may wear. */
     if (TagFSIsUnderGlass()) return ERR_TAGFS_READ_ONLY;
+    /* A book's tag lies in the stitch of the cycle that settles the record
+     * wearing it, as a Coined ahead of the record (spec_v2 §2.8): the cycle
+     * takes every id given before the record's Ink (TagRegistryCoinedRange).
+     * Nothing is written here. */
+    if (tagfs_get_state()->format == DEED_FORMAT_V2) {
+        TagFSLockTake(&reg->lock);
+        bool given = id < reg->next_id;
+        TagFSLockDrop(&reg->lock);
+        return given ? OK : ERR_TAGFS_METADATA_ERROR;
+    }
 
     TagFSLockTake(&reg->lock);
     bool held = id < reg->written_next;
@@ -814,4 +833,37 @@ error_t TagRegistryFlushFor(TagRegistry* reg, uint32_t id) {
     if (held)
         return OK;
     return rc != OK ? rc : ERR_TAGFS_METADATA_ERROR;
+}
+
+void TagRegistryCoinedRange(TagRegistry* reg, uint32_t* lo, uint32_t* hi) {
+    TagFSLockTake(&reg->lock);
+    *lo = reg->coined_next;
+    *hi = reg->next_id;
+    TagFSLockDrop(&reg->lock);
+}
+
+void TagRegistryCoinedUpTo(TagRegistry* reg, uint32_t hi) {
+    TagFSLockTake(&reg->lock);
+    for (uint32_t id = reg->coined_next; id < hi && id < reg->next_id; id++) {
+        const TagRegistryEntry* e = RegistryById(reg->by_id, reg->bucket_count, id);
+        uint64_t                text = e ? (uint64_t)e->key_len + e->value_len : 0;
+        reg->coined_text = reg->coined_text > text ? reg->coined_text - text : 0;
+    }
+    if (hi > reg->coined_next)
+        reg->coined_next = hi;
+    TagFSLockDrop(&reg->lock);
+}
+
+void TagRegistryCoinedHeld(TagRegistry* reg, uint32_t* count, uint64_t* text) {
+    TagFSLockTake(&reg->lock);
+    *count = reg->next_id > reg->coined_next ? reg->next_id - reg->coined_next : 0;
+    *text  = reg->coined_text;
+    TagFSLockDrop(&reg->lock);
+}
+
+void TagRegistryTextBytes(TagRegistry* reg, uint64_t* tags, uint64_t* bytes) {
+    TagFSLockTake(&reg->lock);
+    *tags  = reg->total_tags;
+    *bytes = reg->text_bytes;
+    TagFSLockDrop(&reg->lock);
 }

@@ -44,6 +44,7 @@ typedef struct {
     uint64_t     pending_ticket;
 
     uint64_t     answered;   /* the last demand a cycle answered */
+    uint64_t     refused;    /* the last demand a stitch had no room for: refused, not remembered */
     UseNamed     named[VOLUME_LEDGER_COPIES];
     uint32_t     attempt;    /* the last attempt a chain was written as */
 

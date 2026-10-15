@@ -542,7 +542,8 @@ error_t TagFS_RunAllTests(TestStats* stats)
         kprintf("[TESTS] %u test(s) stood aside: this volume is format %s — %s\n", aside_format,
                 volume == DEED_FORMAT_V2 ? "v2" : "v1",
                 volume == DEED_FORMAT_V2 ? "they are written for format v1's records, or write to the "
-                                           "volume, and this kernel reads a book and writes none of it"
+                                           "volume as format v1's cycle does; a book is written only by the "
+                                           "tests written for it"
                                          : "they are written for a format-v2 book");
     if (skipped_writers > 0) {
         kprintf("[TESTS] %u test(s) that write to the volume were not run — "

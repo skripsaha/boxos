@@ -200,13 +200,20 @@ static void CadenceSayBinds(uint64_t d_us)
  */
 void CadenceRunEnded(error_t rc, uint64_t busy_us, uint64_t s0_us, uint64_t target)
 {
-    __atomic_store_n(&s_last_end_us, SettleNowUs(), __ATOMIC_RELEASE);
+    uint64_t now = SettleNowUs();
+    __atomic_store_n(&s_last_end_us, now, __ATOMIC_RELEASE);
     if (rc == OK) {
         __atomic_store_n(&s_d_us, busy_us, __ATOMIC_RELAXED);
         CadenceSayBinds(busy_us);
         __atomic_store_n(&s_owed_since_us, 0, __ATOMIC_SEQ_CST);
         if (InkedGen() > target)
             __atomic_store_n(&s_owed_since_us, s0_us, __ATOMIC_SEQ_CST);
+    } else if (rc == ERR_TAGFS_NO_SPACE && tagfs_get_state()->format == DEED_FORMAT_V2) {
+        /* A book's ribbon refused what the cycle carried, and no park waits
+         * on an event for it (settle_wait.c: nothing on a book asks for
+         * room): the window starts again from here, so the cadence tries it
+         * a window on — a waiter or a demand at once — and never in a loop. */
+        __atomic_store_n(&s_owed_since_us, now, __ATOMIC_SEQ_CST);
     }
     CadenceWake();
 }

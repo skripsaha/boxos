@@ -23,19 +23,19 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_tally suite: a format-v2 volume read off its book, and nothing
-// written to it
+// The stand_tally suite: a format-v2 volume read off its book
 //
 // This kernel reads a format-v2 volume's book — the Spine's slots and the
-// Tally of the newest one that reads — and writes none of it: the volume is
-// under glass (book_mount.h). So these are asked of the volume the machine
-// stands on, every one written for format v2 and standing aside on any other:
-// every file it holds reads whole, each block held to its digest; a mount
-// writes nothing, and two mounts are one state (C12); a node whose first copy
-// rotted reads off its second, said (§2.5); a FILES leaf neither copy of which
-// reads is a rotten range — mounted, its files locked, its blocks held (C19);
-// every road that would write is refused before a byte, and every door below
-// those roads too; a rotten data block is refused on the three roads a read
+// Tally of the newest one that reads — and writes into it only stitches
+// (settle/sewing.h): a change to a file's data it refuses. So these
+// are asked of the volume the machine stands on, every one written for format
+// v2 and standing aside on any other: every file it holds reads whole, each
+// block held to its digest; a mount writes nothing, and two mounts are one
+// state (C12); a node whose first copy rotted reads off its second, said
+// (§2.5); a FILES leaf neither copy of which reads is a rotten range —
+// mounted, its files locked, its blocks held (C19); every road that would
+// change a file is refused before a byte, and every door below the glass of a
+// volume under it; a rotten data block is refused on the three roads a read
 // takes, and a block with no digest as one that does not match; a medium that
 // leaves and comes back has its book read again, with nothing read to judge
 // it; and the live files are the records, with no table to agree with. And BLOCKFAIL's plan of bad sectors in
@@ -44,7 +44,7 @@
 // mount out loud when the heap will not hold its pages.
 //
 // What a test does to the medium it does by the Boardroom's own doors, beside
-// TagFS: the volume takes no write, and the stand's hand is the medium's rot.
+// TagFS: no cycle runs while it does, and the stand's hand is the medium's rot.
 // Every sector it changes it puts back, and mounts again on it.
 // ============================================================================
 
@@ -224,7 +224,7 @@ static TestResult TestStandTallyMountWritesNothing(void)
         StandTallyStateTake(m ? &twice : &once);
     }
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "and not one write reached the medium across two mounts");
-    TEST_ASSERT(TagFSIsUnderGlass(), "and the volume stands under glass");
+    TEST_ASSERT(!TagFSIsUnderGlass(), "and the book is one this kernel's writer goes on: no glass over it");
     TEST_ASSERT_EQ(once.files, before.files, "the first mount holds the files the boot's did");
     TEST_ASSERT_EQ(once.sum, before.sum, "the same files, by id, size and name");
     TEST_ASSERT_EQ(twice.files, once.files, "and the second the same");
@@ -357,7 +357,6 @@ static TestResult TestStandTallyRottenLeafLocked(void)
     TEST_ASSERT(TagFSFileLocked(fid), "the leaf's first file among them");
     TEST_ASSERT(tagfs_open(fid, TAGFS_HANDLE_READ) == NULL, "and no open of it is handed out");
     TEST_ASSERT(said.held > 0, "and the blocks they named are held");
-    TEST_ASSERT(TagFSIsUnderGlass(), "the volume stands under glass");
 out:
     BlockFailDisarm();
     if (!down && tagfs_get_state()->initialized)
@@ -372,7 +371,8 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// Every road that would write is refused before a byte
+// A file's data is refused before a byte; a change of a file writes nothing
+// until a stitch takes it
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandTallyWritesRefused(void)
@@ -380,28 +380,18 @@ static TestResult TestStandTallyWritesRefused(void)
     TestResult  verdict = TEST_PASS;
     uint8_t     seat    = tagfs_get_seat();
     const char* aside   = StandTallyAside();
-    uint64_t    fid     = 0, ids[1];
+    uint64_t    ids[1];
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(FileMapRows(tagfs_get_state()->files, 0, ids, 1) == 1, "a live file to change");
     BlockFailArm(seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
-
-    TEST_ASSERT_EQ(tagfs_create_file("refused", NULL, 0, &fid), -(int)ERR_TAGFS_READ_ONLY,
-                   "a file is not made");
-    TEST_ASSERT_EQ(tagfs_rename_file(ids[0], "refused", INK_UNWARRANTED), -(int)ERR_TAGFS_READ_ONLY,
-                   "a file is not renamed");
-    TEST_ASSERT_EQ(tagfs_delete_file(ids[0], INK_UNWARRANTED), -(int)ERR_TAGFS_READ_ONLY,
-                   "a file is not given up");
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x3C);
     TEST_ASSERT_EQ(TestFileWrite(ids[0], g_test_buffer, TAGFS_BLOCK_SIZE), -1,
                    "a file's bytes are not written");
-    TEST_ASSERT_EQ(TagFSSettle(), ERR_TAGFS_READ_ONLY, "no Settle cycle runs");
-    TEST_ASSERT_EQ(SettleForRoom(), ERR_TAGFS_READ_ONLY, "no cycle runs for room either");
-
-
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "and not one write reached the medium");
-    TEST_ASSERT(TagFSReadOnly(), "the volume takes no change, as a protected medium takes none");
+    TEST_ASSERT(!TagFSReadOnly(), "the volume is not read-only: its book takes files, names and memory "
+                "(stand_docket, stand_stitch)");
 out:
     BlockFailDisarm();
     return verdict;
@@ -588,7 +578,8 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// Every door below the glass refuses, though no road above lets a change by
+// Every door below the glass refuses, though no road above lets a change by:
+// the stand stands the volume under glass for the knock, and mounts it again
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandTallyLowerDoorsRefused(void)
@@ -598,10 +589,16 @@ static TestResult TestStandTallyLowerDoorsRefused(void)
     const char* aside   = StandTallyAside();
     uint64_t    block   = g_book.data_end - 1u;
     uint32_t    landed  = 0, knocks = TagFSGlassKnocks();
+    bool        glassed = false;
 
     if (aside)
         return test_steps_aside(aside);
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x6B);
+    if (!TagFSIsUnderGlass()) {
+        TagFSUnderGlass("the stand stands the volume under glass to knock at the doors below it, until it is "
+                        "mounted again");
+        glassed = true;
+    }
     BlockFailArm(seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
     TagFSGlassKnocking(true);
     TEST_ASSERT_EQ(tagfs_volume_write(block * TAGFS_BLOCK_SECTORS, 1, g_test_buffer), (int)ERR_TAGFS_READ_ONLY,
@@ -618,6 +615,10 @@ static TestResult TestStandTallyLowerDoorsRefused(void)
 out:
     TagFSGlassKnocking(false);
     BlockFailDisarm();
+    if (glassed) {
+        TagFSStandLetGo();
+        StandTallyClose();
+    }
     return verdict;
 }
 
@@ -646,7 +647,6 @@ static TestResult TestStandTallyMediumReturns(void)
     TEST_ASSERT_EQ(back, AWAY_REREAD, "its return is judged by its format: a book is read again");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "with not a sector read to judge it — a book keeps no Ledger");
     BlockFailDisarm();
-    TEST_ASSERT(TagFSIsUnderGlass(), "and the glass stands over it meanwhile");
     down = TagFSStandLetGo();
     TEST_ASSERT(down, "the volume is let go of, as a book read again is");
     StandTallyArrive();
@@ -654,7 +654,7 @@ static TestResult TestStandTallyMediumReturns(void)
     down = false;
     TEST_ASSERT(tagfs_get_state()->initialized && tagfs_get_state()->format == DEED_FORMAT_V2,
                 "and mounted again off its book");
-    TEST_ASSERT(TagFSIsUnderGlass(), "under glass again");
+    TEST_ASSERT(!TagFSIsUnderGlass(), "a book its writer goes on, as it was");
     StandTallyStateTake(&after);
     TEST_ASSERT_EQ(after.files, before.files, "with the files it held");
     TEST_ASSERT_EQ(after.sum, before.sum, "the same, by id, size and name");

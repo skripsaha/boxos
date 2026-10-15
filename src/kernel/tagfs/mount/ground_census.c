@@ -515,6 +515,19 @@ bool GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count)
     return false;
 }
 
+uint64_t GroundClaimsOf(GroundOwner owner, Strip* out, uint64_t room)
+{
+    uint64_t n = 0;
+    for (uint32_t i = 0; i < s_count; i++) {
+        if (s_runs[i].owner != (uint32_t)owner)
+            continue;
+        if (n < room)
+            out[n] = (Strip){ .start = s_runs[i].start, .count = s_runs[i].count, .kind = STRIP_DATA };
+        n++;
+    }
+    return n;
+}
+
 /* [from, end) laid into the block map under run `by`'s name. */
 static error_t RunsLay(const GroundRun* by, uint64_t from, uint64_t end)
 {

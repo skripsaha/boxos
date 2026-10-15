@@ -363,6 +363,33 @@ static inline int ClaspGet(const uint8_t *b, uint32_t len, Clasp *c, uint32_t *u
 
 #define RIBBON_STREAM_MOST   0xFFFFFFFFu
 
+/* The sectors a stitch of a `len`-byte stream takes when it is written in
+ * whole atoms of `atom` sectors (§1.5, §2.2): one atom at the least, its tail
+ * PAD. */
+static inline uint64_t RibbonStitchSectors(uint64_t len, uint32_t atom)
+{
+    uint64_t of = (len + BOOK_PAYLOAD_BYTES - 1u) / BOOK_PAYLOAD_BYTES;
+    of = (of + atom - 1u) / atom * atom;
+    return of ? of : atom;
+}
+
+/*
+ * A stitch's stream of `len` bytes laid on its `of` sectors at `out`, sealed
+ * where each lies: the first `left` at `vlba` on — the rest of its Quire — and
+ * the others from `hop_vlba`, the first sector of the next_quire it runs on
+ * into (§2.7). `starts` are its records' offsets in the stream, StitchHead's
+ * and Clasp's among them, rising: each sector's lead. TallySectorLay's one rule.
+ */
+static inline void RibbonStitchSeal(uint8_t *out, const uint8_t *stream, uint64_t len, const uint32_t *starts,
+                                    uint32_t nstarts, uint64_t seq, uint64_t vlba, uint64_t left,
+                                    uint64_t hop_vlba, uint32_t of, const uint8_t uuid[16])
+{
+    uint32_t s = 0;
+    for (uint32_t k = 0; k < of; k++)
+        TallySectorLay(out + (uint64_t)k * BOOK_SECTOR_BYTES, stream, len, starts, nstarts, &s, BOOK_UNIT_STITCH,
+                       seq, k, of, k < left ? vlba + k : hop_vlba + (k - left), uuid);
+}
+
 static inline int RibbonShape(uint64_t off, uint64_t left, uint64_t hop, uint64_t of)
 {
     if (of < VOLUME_BLOCK_SECTORS || of % VOLUME_BLOCK_SECTORS) return RIBBON_SHAPE_ATOMS;

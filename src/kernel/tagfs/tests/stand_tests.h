@@ -237,6 +237,14 @@ TestResult TestStandMediumReturnRefusedOnce(void);
 TestResult TestStandMediumMountResetsTheSeat(void);
 TestResult TestStandMediumMountWaitsForMemory(void);
 
+/* stand_ribbon_tests.c: the volume's medium arriving again, attended until the
+ * mount road has nothing left to do — mounted or refused — bounded; and the
+ * volume, let go of, mounted again on what the medium holds now and the
+ * runner counted back in: true when it came up. A book's suites share them
+ * (stand_stitch). */
+void       StandRibbonArrive(void);
+bool       StandRibbonUp(void);
+
 #endif /* CONFIG_VOLUME_TESTS */
 
 #endif /* TAGFS_STAND_TESTS_H */

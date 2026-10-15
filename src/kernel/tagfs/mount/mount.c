@@ -648,14 +648,30 @@ void MountAfterDoor(void)
 void MountPromise(void)
 {
     /*
-     * A format-v2 volume is under glass on this kernel (book_mount.h): it is
-     * read and nothing of it is written, so it promises only that — and that
-     * a medium that leaves and comes back is read again from its book.
+     * A format-v2 volume (book_mount.h): under glass it is read and nothing of
+     * it is written, and promises only that. Otherwise this kernel's writer
+     * lays stitches of files, names and memory on its ribbon (settle/sewing.h)
+     * — no file's data — and no Tally: the next mount reads the ribbon whole;
+     * and a medium that leaves and comes back is read again from its book:
+     * what no stitch settled is lost, which is what `anchor` is for (§16.2
+     * п.28).
      */
-    if (tagfs_get_state()->format == DEED_FORMAT_V2) {
+    if (tagfs_get_state()->format == DEED_FORMAT_V2 && TagFSIsUnderGlass()) {
         kprintf("[TagFS] what this volume promises: it is read as its book holds it and nothing of it is "
                 "written — a change is refused (ERR_TAGFS_READ_ONLY); a medium that leaves and comes back "
                 "is read again from its book\n");
+        return;
+    }
+    if (tagfs_get_state()->format == DEED_FORMAT_V2) {
+        kprintf("[TagFS] what this volume promises: its book takes files made, named, tagged and given up, "
+                "the names of tags and the memory of its Use Context, a stitch on its ribbon a Settle cycle — a "
+                "change is a stitch kept by its cycle's flush within %llu ms, and a name given goes with the next "
+                "stitch sewn; an `anchor` is answered once a stitch of this mount carrying what it waits for is "
+                "kept; a change to a file's data this kernel refuses (ERR_TAGFS_READ_ONLY); a medium that leaves "
+                "and comes back is read again from its book, and what no stitch settled before an `anchor` is "
+                "lost\n",
+                (unsigned long long)(SETTLE_WINDOW_US / 1000u));
+        kprintf("[TagFS] no Tally is written by this kernel: the ribbon is read whole at every mount\n");
         return;
     }
 

@@ -277,11 +277,24 @@ static error_t RibbonUnitFilled(RibbonUnit* u)
     return rc != OK ? rc : RibbonPieces(u);
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The units read since boot: what the stand holds a walk's cost to. */
+static uint64_t s_units_read;
+
+uint64_t RibbonUnitsReadStand(void)
+{
+    return __atomic_load_n(&s_units_read, __ATOMIC_RELAXED);
+}
+#endif
+
 error_t RibbonUnitRead(const RibbonPlace* start, uint32_t of, uint64_t seq, const RibbonQuire* hop,
                        RibbonUnit** out)
 {
     RibbonUnit* u = kmalloc(sizeof(RibbonUnit));
     *out = NULL;
+#ifdef CONFIG_VOLUME_TESTS
+    __atomic_add_fetch(&s_units_read, 1u, __ATOMIC_RELAXED);
+#endif
     if (!u)
         return ERR_NO_MEMORY;
     memset(u, 0, sizeof(*u));
@@ -367,6 +380,25 @@ error_t RibbonUnitFind(const RibbonPlace* place, const RibbonQuire* hop, uint64_
     if (rc == OK && found && head.at == j) {
         bool peeked = j == 0 && RibbonPeek(first, &own);
         rc = RibbonUnitRead(place, head.of, head.seq, peeked ? &own : hop, out);
+    }
+    kfree(first);
+    return rc;
+}
+
+error_t RibbonUnitAhead(const RibbonPlace* place, uint64_t after, uint64_t* j, BookSectorHead* head, bool* found,
+                        RibbonUnit** out)
+{
+    RibbonQuire own;
+    uint8_t*    first = kmalloc(BOOK_SECTOR_BYTES);
+    *out   = NULL;
+    *found = false;
+    if (!first)
+        return ERR_NO_MEMORY;
+    error_t rc = RibbonLook(place, NULL, after, j, head, first, found);
+    if (rc == OK && *found && head->at == 0) {
+        RibbonPlace at     = { place->quire, place->off + *j };
+        bool        peeked = RibbonPeek(first, &own);
+        rc = RibbonUnitRead(&at, head->of, head->seq, peeked ? &own : NULL, out);
     }
     kfree(first);
     return rc;

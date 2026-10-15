@@ -458,6 +458,8 @@ void LedgerImageUseChain(const UseChainRef *ref)
  */
 error_t LedgerImageWrite(const SettleMark *mark)
 {
+    if (SettleV1OnBook("the Ledger's write"))
+        return ERR_UNSUPPORTED;
     SettleMark sealed = *mark;
     uint32_t   bytes;
     sealed.settle = s_image.seq;

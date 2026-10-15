@@ -84,7 +84,7 @@ FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uin
     rec->size          = old->size;
     rec->created_time  = old->created_time;
     rec->modified_time = old->modified_time;
-    rec->gen           = old->gen;
+    rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);
     rec->slip          = TailSlipHold(old->slip);
     TractHold(old->tract);
     RecordRuns(rec, old->tract);

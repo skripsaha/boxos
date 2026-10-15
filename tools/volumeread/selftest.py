@@ -34,7 +34,8 @@ from .selftest_book import BookTargets
 from .selftest_book_tally import (Pristine, Circles, SpineCases, RangeCases, TreeShapeCases, ElementCases,
                                   SlotRootCases)
 from .selftest_book_ribbon import (RecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases,
-                                   RibbonLossCases, RibbonCases, RibbonShapeCases, RibbonBoundCases)
+                                   RibbonFurtherCases, RibbonLossCases, RibbonCases, RibbonShapeCases,
+                                   RibbonBoundCases)
 
 # ---------------------------------------------------------------------------
 # Running
@@ -46,8 +47,8 @@ def BookCases(bt):
     to aim at — each a red line, never a landing left out in silence."""
     cases, refused = [], []
     for group in (Pristine, Circles, SpineCases, RangeCases, TreeShapeCases, ElementCases, SlotRootCases,
-                  RecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases, RibbonLossCases, RibbonCases,
-                  RibbonShapeCases, RibbonBoundCases):
+                  RecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases, RibbonFurtherCases,
+                  RibbonLossCases, RibbonCases, RibbonShapeCases, RibbonBoundCases):
         try:
             cases += group(bt)
         except Unreadable as e:

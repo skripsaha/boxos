@@ -107,11 +107,20 @@ static error_t CreateInside(const char* filename, const uint32_t* tag_ids, uint3
                             uint64_t* out_file_id)
 {
     /* A volume under glass makes no file, and no name of one is interned for
-     * it: the refusal comes before anything is given out (tagfs.h). */
+     * it: the refusal comes before anything is given out (tagfs.h) — and so
+     * on a book whose ribbon has no room for the name's Coined
+     * (InkBookRefuses). */
     if (TagFSIsUnderGlass())
         return ERR_TAGFS_READ_ONLY;
-    uint32_t name_tag = TAGFS_INVALID_TAG_ID;
-    error_t  rc       = InkNameTagIntern(filename, &name_tag);
+    uint32_t    name_tag = TAGFS_INVALID_TAG_ID;
+    uint64_t    held     = 0;
+    TagSpelling stem;
+    error_t     rc = InkNameStem(filename, &stem);
+    if (rc == OK)
+        rc = InkBookRefuses(&stem, stem.key ? 1u : 0u, &held);
+    if (rc == OK)
+        rc = InkNameTagIntern(filename, &name_tag);
+    InkBookHeldLetGo(held);
     if (rc != OK)
         return rc;
 
@@ -201,9 +210,16 @@ int tagfs_rename_file(uint64_t file_id, const char* new_filename, InkWarrant war
         return -(int)ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
-    uint32_t   name_tag = TAGFS_INVALID_TAG_ID;
-    InkReceipt receipt;
-    error_t    rc = InkNameTagIntern(new_filename, &name_tag);
+    uint32_t    name_tag = TAGFS_INVALID_TAG_ID;
+    uint64_t    held     = 0;
+    InkReceipt  receipt;
+    TagSpelling stem;
+    error_t     rc = InkNameStem(new_filename, &stem);
+    if (rc == OK)
+        rc = InkBookRefuses(&stem, stem.key ? 1u : 0u, &held);
+    if (rc == OK)
+        rc = InkNameTagIntern(new_filename, &name_tag);
+    InkBookHeldLetGo(held);
     if (rc == OK)
         rc = InkFields(file_id, new_filename, name_tag, TAGFS_INVALID_TAG_ID, warrant, &receipt);
     tagfs_leave();
@@ -252,7 +268,11 @@ error_t tagfs_add_tag_string(uint64_t file_id, const TagSpelling* tag, InkWarran
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
     uint32_t tag_id;
-    error_t  rc = TagRegistryIntern(OpsRegistry(), tag, &tag_id);
+    uint64_t held = 0;
+    error_t  rc   = InkBookRefuses(tag, 1, &held);
+    if (rc == OK)
+        rc = TagRegistryIntern(OpsRegistry(), tag, &tag_id);
+    InkBookHeldLetGo(held);
     if (rc == OK) {
         UseContextBindTag(tag, tag_id);
         int added = tagfs_add_tag(file_id, tag_id, warrant);

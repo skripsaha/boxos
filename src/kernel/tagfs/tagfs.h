@@ -151,6 +151,7 @@ typedef struct {
     TagRegistryEntry** by_id;
 
     uint32_t total_tags;
+    uint64_t text_bytes;     /* the keys' and values' bytes of every tag held */
     uint32_t next_id;
     /* The highest id the book this registry is written to can name: the
      * kernel's TAGFS_MAX_TAG_ID, or format v1's TAGFS_V1_TAG_ID_MOST for one
@@ -187,6 +188,10 @@ typedef struct {
     uint64_t          written_need;   /* the flush need of the records last written: a cycle's
                                        * first flush covers it before any record names them */
     bool              said_failing;   /* a refusal is said once, until a flush succeeds */
+    /* Format v2: every id below coined_next is in the book — its Tally's TAGS or a settled stitch's Coined —
+     * and a cycle lays the ones above down as Coineds (settle/sewing.c), coined_text bytes. Under `lock`. */
+    uint32_t          coined_next;
+    uint64_t          coined_text;    /* what the ribbon's room holds for them (settle/ribbon.c, RibbonHeld) */
     bool              said_full;      /* every id issued: said once, the first time a tag is refused */
     Scribe            scribe;
 

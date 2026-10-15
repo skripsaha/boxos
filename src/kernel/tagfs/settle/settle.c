@@ -1,4 +1,5 @@
 #include "settle_internal.h"
+#include "sewing.h"
 #include "../scribe/scribe.h"
 #include "../ink/ink.h"
 #include "../ink/fallow.h"
@@ -29,13 +30,6 @@
  * does: the heap's reserve is the steps' alone.
  */
 Scribe g_settle_scribe = SCRIBE_INIT(SCRIBE_RANK_SETTLE, "the volume's Settle");
-
-typedef enum {
-    SETTLE_FOR_WAITER = 1,   /* a kernel path asks and waits for what it settles */
-    SETTLE_FOR_ROOM,         /* the volume is short while Fallow rests blocks */
-    SETTLE_FOR_HALT,         /* the machine is stopping: the last cycle */
-    SETTLE_FOR_CADENCE,      /* Lull permitted, or the window ran out, or a demand */
-} SettleWhy;
 
 typedef enum {
     SETTLE_STEP_GLEAN = 0,       /* before S0: Glean's pass (glean.h) */
@@ -78,15 +72,6 @@ static uint64_t s_registry_refused;
 static uint64_t s_given;
 static uint64_t s_given_count;
 
-/* The halt's last cycle, for tagfs_shutdown. */
-static bool     s_halt_ran;
-static error_t  s_halt_answer;
-
-/* The machine is stopping: from the halt's shut on, every cycle begun is one
- * of its last (SettleRunBegin), and no change begins (TagFSShutForHalt).
- * Raised once, never lowered. */
-static volatile bool s_halting;
-
 /* Whether the newest settled cycle sealed the volume clean: the halt's last
  * word on the medium, asked by its drain (SettleOwed). */
 static volatile bool s_sealed_clean;
@@ -121,6 +106,7 @@ typedef struct {
     volatile uint8_t core;
     bool             in_step;
     bool             door;       /* the cycle holds the volume's door itself */
+    DeedFormat       format;     /* the book it writes, fixed as it begins: format v1's steps or v2's */
     SettleWhy        why;
     SettleStep       step;
     error_t          answer;     /* how the last cycle ended */
@@ -147,8 +133,9 @@ uint64_t SettleNowUs(void)
     return cpu_tsc_to_us(rdtsc());
 }
 
-/* The refusal of a cycle on a volume under glass, said once a mount. */
-static volatile uint8_t s_glass_said;
+/* The refusal of a cycle on a volume that takes no write — under glass, or a
+ * book no Quire took a write of — said once a mount. */
+static volatile uint8_t s_refusal_said;
 
 void SettleMountReset(void)
 {
@@ -160,9 +147,10 @@ void SettleMountReset(void)
     s_failing          = false;
     s_spares_short     = false;
     s_registry_refused = 0;
-    s_halt_ran         = false;
+    SettleHaltMountReset();
+    StitchMountReset();
     __atomic_store_n(&s_sealed_clean, false, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_glass_said, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_refusal_said, 0u, __ATOMIC_RELEASE);
 }
 
 void SettleMountStand(uint32_t from_block, uint32_t from_bytes, bool medium_lied)
@@ -204,12 +192,22 @@ uint64_t SettleStepsTaken(void)
     return __atomic_load_n(&s_steps, __ATOMIC_ACQUIRE);
 }
 
-error_t SettleHaltAnswer(uint64_t* unsettled)
+void SettleSettledLocked(uint64_t target, uint64_t cycle, bool clean)
 {
-    uint64_t inked   = InkedGen();
-    uint64_t settled = SettledGen();
-    *unsettled       = inked > settled ? inked - settled : 0;
-    return s_halt_ran ? s_halt_answer : ERR_TAGFS_METADATA_ERROR;
+    __atomic_store_n(&s_settled_gen, target, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_cycles, cycle, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_sealed_clean, clean, __ATOMIC_RELEASE);
+}
+
+uint64_t SettleGivenLast(void)
+{
+    return s_given;
+}
+
+void SettleGivenLocked(uint64_t given)
+{
+    s_given        = given;
+    s_given_count += given;
 }
 
 // ----------------------------------------------------------------------------
@@ -553,16 +551,13 @@ static void SettleDone(SettleSnap* snap)
 
     TagFSLockTake(&fs->lock);
     uint64_t closed = PoolSnapSettled(&snap->pool, &spent);
-    __atomic_store_n(&s_settled_gen, snap->target, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_cycles, snap->cycle, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_sealed_clean, (snap->mark.flags & SETTLE_CLEAN) != 0, __ATOMIC_RELEASE);
+    SettleSettledLocked(snap->target, snap->cycle, (snap->mark.flags & SETTLE_CLEAN) != 0);
     s_sealed_block = snap->mark.pool_to_block;
     s_sealed_bytes = snap->mark.pool_to_bytes;
     UseMemorySettled();
     LedgerSettled();
     GleanHeadSettled(&snap->head, snap->cycle, snap->mark.chain_first);
-    s_given = FallowRipen(closed, snap->cycle, &nodes);
-    s_given_count += s_given;
+    SettleGivenLocked(FallowRipen(closed, snap->cycle, &nodes));
     bool map_stood = IntegrityLayStands();
     TagFSLockDrop(&fs->lock);
 
@@ -576,9 +571,11 @@ static void SettleDone(SettleSnap* snap)
 // The cycle in flight
 // ----------------------------------------------------------------------------
 
-/* A cycle the caller just took the Scribe for, begun: Glean's pass first — a
- * machine stopping gleans nothing, since ground it took off now would rest
- * past the last cycle — and then S0, each a step of its own.
+/* A cycle the caller just took the Scribe for, begun in the format of the book
+ * it writes, which it keeps to its end: format v1's with Glean's pass first —
+ * a machine stopping gleans nothing, since ground it took off now would rest
+ * past the last cycle — and then S0, each a step of its own; format v2's at
+ * its TAKE (sewing.c).
  *
  * Once the halt has shut the volume, a cycle anybody else begins is one of its
  * cycles too. One the cadence had already decided on, or an asker for room on
@@ -587,9 +584,10 @@ static void SettleDone(SettleSnap* snap)
  * volume unclean and stamp a Spare after the halt gave the last one back. */
 static void SettleRunBegin(SettleWhy why, uint64_t cover, bool door)
 {
-    if (__atomic_load_n(&s_halting, __ATOMIC_ACQUIRE))
+    if (SettleHalting())
         why = SETTLE_FOR_HALT;
     memset(&s_run.snap, 0, sizeof(s_run.snap));
+    s_run.format  = tagfs_get_state()->format;
     s_run.why     = why;
     s_run.door    = door;
     s_run.cover   = cover;
@@ -600,7 +598,9 @@ static void SettleRunBegin(SettleWhy why, uint64_t cover, bool door)
     s_run.in_step = false;
     __atomic_store_n(&s_run.core, amp_get_core_index(), __ATOMIC_RELEASE);
     __atomic_store_n(&s_run.active, 1u, __ATOMIC_RELEASE);
-    if (why != SETTLE_FOR_HALT)
+    if (s_run.format == DEED_FORMAT_V2)
+        StitchRunBegin(why);
+    else if (why != SETTLE_FOR_HALT)
         GleanPassBegin();
 
     /* The Scribe's MINE opened the heap's reserve for the pass; between the
@@ -619,8 +619,9 @@ static void SettleRunBegin(SettleWhy why, uint64_t cover, bool door)
 static void SettleRunEnd(error_t rc)
 {
     SettleSnap* snap     = &s_run.snap;
+    bool        book     = s_run.format == DEED_FORMAT_V2;
     bool        door     = s_run.door;
-    uint64_t    target   = snap->target;
+    uint64_t    target   = book ? StitchRunTarget() : snap->target;
     bool        unclosed = snap->pool.unclosed;
     uint64_t    busy_us  = s_run.busy_us;
     uint64_t    s0_us    = s_run.s0_us;
@@ -632,14 +633,22 @@ static void SettleRunEnd(error_t rc)
             kprintf("[Settle] the cycle that would have settled %llu change(s) was refused at "
                     "%s (error %u) — nothing of it is declared settled, and the next cycle "
                     "writes it all again\n",
-                    (unsigned long long)(target - SettledGen()), snap->stage, (unsigned)rc);
+                    (unsigned long long)(target - SettledGen()), book ? StitchRunStage() : snap->stage,
+                    (unsigned)rc);
         s_failing = true;
-        UseMemoryCycleOver(rc);
+        if (book)
+            StitchRunEnd(rc);
+        else
+            UseMemoryCycleOver(rc);
         TagFSWriteRefused();
     } else {
         SETTLE_CUT_AT(SETTLE_CUT_POINT_DONE);
-        SettleDone(snap);
-        UseMemoryCycleOver(OK);
+        if (book) {
+            StitchRunEnd(OK);
+        } else {
+            SettleDone(snap);
+            UseMemoryCycleOver(OK);
+        }
         s_failing = false;
     }
 
@@ -655,19 +664,37 @@ static void SettleRunEnd(error_t rc)
         tagfs_leave();
 }
 
+/* One step of the cycle in flight in the format it began in, or of the other:
+ * a volume's format is fixed by its mount, and a cycle is held to it from its
+ * first step to its last — the book it writes is the one it began on. */
+static error_t SettleStepOf(bool* done)
+{
+#if CONFIG_STRICT
+    if (tagfs_get_state()->format != s_run.format)
+        panic("[Settle] DEFECT: a cycle begun on a volume of format %u stepped on one of format %u",
+              (unsigned)s_run.format, (unsigned)tagfs_get_state()->format);
+#endif
+    if (s_run.format == DEED_FORMAT_V2)
+        return StitchRunStep(done);
+    error_t rc = SettleStepRun(&s_run.snap, &s_run.step);
+    *done = s_run.step == SETTLE_STEP_DONE;
+    return rc;
+}
+
 /* One step of the cycle in flight on this core, with the heap's reserve open
  * for it alone: true, and *answer, when that was its last. */
 static bool SettleRunStep(error_t* answer)
 {
-    uint64_t t0 = SettleNowUs();
+    uint64_t t0   = SettleNowUs();
+    bool     done = false;
     KHeapReserveOpen();
     s_run.in_step = true;
-    error_t rc = SettleStepRun(&s_run.snap, &s_run.step);
+    error_t rc = SettleStepOf(&done);
     s_run.in_step = false;
     s_run.busy_us += SettleNowUs() - t0;
     __atomic_add_fetch(&s_steps, 1u, __ATOMIC_RELEASE);
 
-    if (rc != OK || s_run.step == SETTLE_STEP_DONE) {
+    if (rc != OK || done) {
         *answer = rc;
         SettleRunEnd(rc);           /* its Give closes the reserve this step opened */
         return true;
@@ -705,29 +732,25 @@ void SettleRunStepHere(void)
 }
 
 /*
- * ‼ NO CYCLE RUNS ON A VOLUME UNDER GLASS, AND NONE OF FORMAT v1 ON A BOOK.
- * Every cycle here is format v1's — the Ledger, the pool, the table, the
- * bitmap — and a volume under glass takes no write at all (tagfs.h): each
- * road that would begin one is refused here, before the Scribe is asked, so
- * nothing waits for a turn that would write. A format-v2 volume is under glass
- * on this kernel by its mount; one reaching here without it is a defect of
- * that mount, stopped at in a STRICT kernel and refused all the same.
+ * ‼ NO CYCLE RUNS ON A VOLUME UNDER GLASS, NOR ON A BOOK THAT TAKES NO WRITE.
+ * A volume under glass takes no write at all (tagfs.h), and a book whose
+ * refused write no reader would take up again is said to be only read from
+ * there (sewing.c, StitchRefused): each road that would begin a cycle — the
+ * cadence's, an asker's, the halt's — is refused here, before the Scribe is
+ * asked, so nothing waits for a turn that would write, and nothing is written
+ * where the kernel said nothing would be. Every other volume's cycle is its
+ * format's: format v1's Ledger, pool, table and bitmap, or a book's stitch
+ * (sewing.c) — chosen as the cycle begins.
  */
 static error_t SettleMayRun(void)
 {
-    if (TagFSIsUnderGlass()) {
-        if (!__atomic_exchange_n(&s_glass_said, 1u, __ATOMIC_ACQ_REL))
-            kprintf("[Settle] no cycle runs: the volume may only be read (said at its mount) — every "
-                    "cycle asked of it is refused before the Scribe, ERR_TAGFS_READ_ONLY\n");
-        return ERR_TAGFS_READ_ONLY;
-    }
-    if (tagfs_get_state()->format != DEED_FORMAT_V2)
+    bool book = StitchBookRefused();
+    if (!book && !TagFSIsUnderGlass())
         return OK;
-#if CONFIG_STRICT
-    panic("[Settle] DEFECT: a cycle of format v1 was asked of a format-v2 volume not under glass");
-#endif
-    kprintf("[Settle] DEFECT: a cycle of format v1 was asked of a format-v2 volume not under glass — "
-            "refused, nothing written\n");
+    if (!__atomic_exchange_n(&s_refusal_said, 1u, __ATOMIC_ACQ_REL))
+        kprintf("[Settle] no cycle runs: %s — every cycle asked of it is refused before the Scribe, "
+                "ERR_TAGFS_READ_ONLY\n", book ? "the book takes no write (said when its last refusal could not be "
+                "taken again)" : "the volume may only be read (said at its mount)");
     return ERR_TAGFS_READ_ONLY;
 }
 
@@ -772,7 +795,7 @@ bool TagFSStandSettleBegin(void)
  * already making. A cycle this very core holds between two of its steps is
  * run to its end here first — waiting for it would be waiting for ourselves —
  * and then the ask is put again: that cycle took its snapshot before it. */
-static error_t SettleAsked(SettleWhy why)
+error_t SettleAskedFor(SettleWhy why)
 {
     error_t may = SettleMayRun();
     if (may != OK)
@@ -808,9 +831,43 @@ error_t TagFSSettle(void)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = SettleAsked(SETTLE_FOR_WAITER);
+    error_t rc = SettleAskedFor(SETTLE_FOR_WAITER);
     tagfs_leave();
     return rc;
+}
+
+/*
+ * A book's room (§3.4, §3.6, В1): ground a stitch gave up comes back once the
+ * ribbon left the Quire the stitch lies in and the lag's stitches settled past
+ * it. A cycle asked for room closes that Quire early when Fallow waits for it
+ * (sewing.c, StitchTake) — its stitch goes on at the start of the next_quire
+ * the last stitch names — and the lag's cycles after it give the ground back:
+ * as many rounds as that takes, judged as format v1's by what came back. Room
+ * on the ribbon is a cycle's to make even with nothing resting — the claims in
+ * flight settled, a next_quire asked for (settle/ribbon.c, RibbonClaim) — so
+ * one cycle is always run before the take is asked again, which says the last
+ * word itself: a book has no pool slack to glean and no map sector a give
+ * waits for.
+ */
+static error_t SettleForRoomBook(void)
+{
+    TagFSState* fs = tagfs_get_state();
+    for (uint64_t round = 0; round <= FallowLag() + 1u; round++) {
+        TagFSLockTake(&fs->lock);
+        uint64_t resting = FallowBlocks();
+        uint64_t given   = s_given_count;
+        uint64_t had     = fs->ledger.free_blocks;
+        TagFSLockDrop(&fs->lock);
+        error_t rc = SettleAskedFor(SETTLE_FOR_ROOM);
+        if (rc != OK)
+            return rc;
+        TagFSLockTake(&fs->lock);
+        bool came_back = s_given_count != given || fs->ledger.free_blocks > had;
+        TagFSLockDrop(&fs->lock);
+        if (came_back || resting == 0)
+            return OK;
+    }
+    return ERR_TAGFS_NO_SPACE;
 }
 
 /*
@@ -839,12 +896,14 @@ error_t SettleForRoom(void)
     /* A caller under a TagFS lock, a Scribe or a baton continuation may not
      * wait for a cycle: the room stays on its way, and the next cycle is asked
      * for. But the Settle's own holder, between two steps of its cycle, runs
-     * that cycle to its end first (SettleAsked) — waiting for it would be
+     * that cycle to its end first (SettleAskedFor) — waiting for it would be
      * waiting for itself. */
     if (LockRankAnyHeldHere() || BatonRunningHere() || (ScribeAnyHeldHere() && !own)) {
         SettleDemand(SETTLE_DEMAND_ROOM);
         return ERR_WOULD_BLOCK;
     }
+    if (fs->format == DEED_FORMAT_V2)
+        return SettleForRoomBook();
 
     /* With nothing resting, one cycle more lets Glean take the pool's slack off
      * its chain, at the lowered slack; what it takes rests like the rest. */
@@ -862,7 +921,7 @@ error_t SettleForRoom(void)
         if (glean)
             GleanShort();
 
-        error_t rc = SettleAsked(SETTLE_FOR_ROOM);
+        error_t rc = SettleAskedFor(SETTLE_FOR_ROOM);
         if (rc != OK)
             return rc;
 
@@ -874,101 +933,4 @@ error_t SettleForRoom(void)
             return OK;
     }
     return ERR_TAGFS_NO_SPACE;
-}
-
-/* Whether the halt still owes the volume ground at rest: blocks Fallow holds
- * that the map still writes taken, or blocks the last cycle gave back that no
- * cycle has written the map of. */
-static bool SettleHaltOwesGround(void)
-{
-    TagFSState* fs = tagfs_get_state();
-    TagFSLockTake(&fs->lock);
-    bool resting = FallowBlocksMapTaken() > 0;
-    TagFSLockDrop(&fs->lock);
-    return resting || s_given > 0;
-}
-
-/*
- * ‼ NO CLEAN SHUTDOWN LEAVES GROUND AT REST. A block in Fallow is taken on the
- * medium and named by nothing, and the next mount's roll call keeps such a
- * block taken for good. So the last cycle is followed by the ones Fallow's
- * rule asks for — each settles, so both copies of the Ledger move past the
- * records that freed the ground — and by one more that writes the map giving
- * it back. Ground only an open handle still holds is written free by that one
- * too, and stays out of the allocator's hands while the handle reads it
- * (FallowViewedUnnamed). A Ledger freer the last cycle itself made — the Use
- * Context chain it replaced — is named by the next cycle's image and rests
- * FallowLag() cycles from there: at most 1 + 1 + FallowLag() + 1, fewer when
- * nothing rests.
- */
-static error_t SettleHaltCycles(void)
-{
-    error_t rc = SettleAsked(SETTLE_FOR_HALT);
-    for (uint64_t more = 0; rc == OK && more <= FallowLag() + 1u && SettleHaltOwesGround(); more++)
-        rc = SettleAsked(SETTLE_FOR_HALT);
-    return rc;
-}
-
-#ifdef CONFIG_VOLUME_TESTS
-error_t TagFSStandSettleForHalt(void)
-{
-    return SettleHaltCycles();
-}
-
-void TagFSStandShutForHalt(bool shut)
-{
-    __atomic_store_n(&s_halting, shut, __ATOMIC_SEQ_CST);
-}
-#endif
-
-/* Each side looks only after it has said: a write counts itself among the
- * Helms' before its guard asks here (PlotLoad), and the halt's cycle counts the
- * Helms after the shut — so either the write sees the shut, or the cycle sees
- * the write in flight and seals nothing clean. */
-void TagFSShutForHalt(void)
-{
-    if (__atomic_exchange_n(&s_halting, true, __ATOMIC_SEQ_CST))
-        return;
-    if (tagfs_get_state()->initialized)
-        kprintf("[TagFS] the machine is stopping: the volume takes no change from here — the "
-                "ones already begun run to their end, and the halt's cycles settle them\n");
-}
-
-bool SettleHalting(void)
-{
-    return __atomic_load_n(&s_halting, __ATOMIC_SEQ_CST);
-}
-
-error_t TagFSSettleForHalt(void)
-{
-    if (!tagfs_enter())
-        return ERR_TAGFS_NOT_INITIALIZED;
-    TagFSShutForHalt();
-
-    /* A medium that is away takes no cycle, and the stopping machine is the
-     * event its open book waited for. */
-    if (TagFSMediumLeft()) {
-        AwayGiveUp(AWAY_HALT, tagfs_get_seat());
-        s_halt_answer = ERR_DEVICE_NOT_READY;
-        s_halt_ran    = true;
-        tagfs_leave();
-        return ERR_DEVICE_NOT_READY;
-    }
-
-    /* A volume under glass was given nothing this boot: there is nothing for
-     * a cycle to settle, and none is asked for (halt_sync_storage says so). */
-    if (TagFSIsUnderGlass()) {
-        kprintf("[TagFS] the machine is stopping and the volume is under glass: there is nothing to "
-                "settle\n");
-        s_halt_answer = OK;
-        s_halt_ran    = true;
-        tagfs_leave();
-        return OK;
-    }
-
-    error_t rc    = SettleHaltCycles();
-    s_halt_answer = rc;
-    s_halt_ran    = true;
-    tagfs_leave();
-    return rc;
 }

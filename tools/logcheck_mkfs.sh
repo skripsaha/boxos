@@ -18,7 +18,8 @@
 # lays — all its files, for the landings that fork a tree need items enough in
 # it (on a volume of a few files two of them answer NOT so) — and every file on
 # it is held to the same file on the v1 image of the same tree, and its ground
-# to the formula --ground --v2 answers by (§16.2 п.23).
+# to the formula --ground --v2 answers by (§16.2 п.23), the working room a v1
+# volume is given included.
 #
 # Then what no image of the build can show, each on a sparse ground of its own:
 # a ground past 16 TiB, which --v2 takes and format v1 refuses; a ground the
@@ -177,7 +178,8 @@ def Leg(leg, a):
         c = BookCensus(medium.Medium(a[0]))
         p, g = binder.ReadPlan(c.mount.tally), c.g
         k = (p.b - p.a) // g.grain
-        end = p.next[0] + p.next[1] + (1 + 2 * k) * g.grain + 1
+        room = 64 * 1024 * 1024 // ondisk.BLOCK          # create_tagfs.h GROUND_WORKING_ROOM_BLOCKS
+        end = p.next[0] + p.next[1] + (1 + 2 * k) * g.grain + room + 1
         print("MKFS formula=%u ground=%u k=%u" % (-(-end // g.grain) * g.grain * ondisk.SECTORS_PER_BLOCK,
                                                   g.stand.deed["sectors"], k))
     elif leg == "wide":

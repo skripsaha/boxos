@@ -1,6 +1,7 @@
 #include "meta_pool_internal.h"
 #include "../scribe/scribe.h"
 #include "../glean/glean.h"
+#include "../settle/settle.h"
 #include "../../../lib/kernel/crypto.h"
 
 /*
@@ -288,6 +289,8 @@ error_t PoolSpareMake(void)
 
 error_t PoolSpareRefill(uint32_t want)
 {
+    if (SettleV1OnBook("the pool's Spares"))
+        return ERR_UNSUPPORTED;
     for (;;) {
         TagFSLockTake(TailLock());
         bool enough = s_spare_count >= want;

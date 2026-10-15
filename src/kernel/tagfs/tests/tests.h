@@ -138,6 +138,9 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(tract)) \
     VOLUME_TESTS_ONLY(SUITE(stand_tally)) \
     VOLUME_TESTS_ONLY(SUITE(stand_ribbon)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_stitch)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_stitch_edge)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_docket)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;

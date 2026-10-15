@@ -2,9 +2,11 @@
 #include "../integrity/integrity.h"
 #include "../helm/helm.h"
 #include "../settle/settle.h"
+#include "../settle/sewing.h"
 #include "../use_memory/use_memory.h"
 #include "../glean/glean.h"
 #include "../file_map/file_record.h"
+#include "../block_map/block_map_derived.h"
 
 struct FallowNode {
     FallowNode* next;
@@ -16,6 +18,8 @@ struct FallowNode {
     uint32_t    count;
     uint32_t    room;       /* the runs runs[] has room for */
     bool        unnamed;    /* nothing on the medium names it: the map's images leave it free */
+    uint64_t    stitch;     /* a book's: the seq of the stitch that names its freer, once it settled */
+    bool        left;       /* a book's: the ribbon has left the Quire that stitch lies in */
     Strip       runs[];
 };
 
@@ -52,6 +56,8 @@ static FallowNode* NodeAlloc(uint32_t room, FallowKind kind, uint64_t fid)
     n->count     = 0;
     n->room      = room;
     n->unnamed   = false;
+    n->stitch    = 0;
+    n->left      = false;
     return n;
 }
 
@@ -124,9 +130,13 @@ void FallowNodeLetGo(FallowNode* node)
 STATIC_ASSERT(FALLOW_LIED_LAG > VOLUME_LEDGER_COPIES - 1u,
               "a medium that lied waits longer than one that keeps its FLUSH");
 
+/* A book's medium is shown to lie by its ribbon (RibbonCursorLied, §16.2
+ * п.10), format v1's by its seals (SettleMediumLied): each format asks its own,
+ * so a book never lags by a word a format-v1 volume mounted before it left. */
 uint64_t FallowLag(void)
 {
-    return SettleMediumLied() ? FALLOW_LIED_LAG : (uint64_t)VOLUME_LEDGER_COPIES - 1u;
+    bool lied = tagfs_get_state()->format == DEED_FORMAT_V2 ? RibbonCursorLied() : SettleMediumLied();
+    return lied ? FALLOW_LIED_LAG : (uint64_t)VOLUME_LEDGER_COPIES - 1u;
 }
 
 void FallowAdd(FallowNode* node, uint64_t gen)
@@ -279,27 +289,57 @@ uint32_t FallowUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits)
 
 /*
  * The node's runs back to the allocator, through the room for the map's
- * deltas made before the lock (FallowZeroDigests): a run that room does not
- * cover stays in the node, which rests on, and the next cycle gives it back.
- * A run the map refuses for any other reason — a block of it already free, or
- * past the data run — is said by the map, and no cycle could give it back: it
- * leaves the node. The blocks given back.
+ * deltas made before the lock (FallowZeroDigests) — on a book, through the
+ * pages held for the derived map (FallowGiveRoomHold): a run that room does
+ * not cover stays in the node, which rests on, and the next cycle gives it
+ * back. A run the map refuses for any other reason — a block of it already
+ * free, or past the data run — is said by the map, and no cycle could give it
+ * back: it leaves the node. The blocks given back.
  */
-static uint64_t NodeGiveBack(FallowNode* n)
+static uint64_t NodeGiveBack(FallowNode* n, bool book)
 {
     uint64_t given = 0;
     uint32_t kept  = 0;
 
     for (uint32_t i = 0; i < n->count; i++) {
-        Strip   run  = n->runs[i];
-        error_t back = BlockMapGiveHeldLocked(run.start, run.count);
+        Strip    run  = n->runs[i];
+        uint64_t met  = 0;
+        error_t  back = book ? BlockMapDerivedRelease(n->fid ? GROUND_FILE : GROUND_FALLOW, n->fid, run.start,
+                                                      run.count, &met)
+                             : BlockMapGiveHeldLocked(run.start, run.count);
         if (back == OK)
-            given += run.count;
+            given += run.count - met;
         else if (back == ERR_NO_MEMORY)
             n->runs[kept++] = run;
     }
     n->count = kept;
     return given;
+}
+
+/* Whether format v1's rule holds the node at the end of cycle `cycle` — its
+ * freer's cycle given first, once the freer lies in a closed block. */
+static bool NodeHeld(FallowNode* n, uint64_t closed_gen, uint64_t cycle, uint64_t lag)
+{
+    if (n->ripe_at == 0) {
+        if (n->kind != FALLOW_BY_RECORD && n->gen != 0)
+            n->ripe_at = n->gen + lag;
+        else if (n->kind == FALLOW_BY_RECORD && n->gen <= closed_gen)
+            n->ripe_at = cycle + lag;
+    }
+    return n->ripe_at == 0 || cycle < n->ripe_at || n->zeroed_in == 0 || n->zeroed_in > cycle ||
+           (n->kind == FALLOW_BY_RECORD && n->gen > HelmViewFloor(n->fid)) ||
+           (n->kind == FALLOW_BY_USE_CHAIN && UseMemoryNames(n->runs[0].start)) ||
+           (n->kind == FALLOW_BY_UNLINK && n->gen > GleanHintCovers());
+}
+
+/* Whether a book's rule holds it at the end of its `cycle`-th settled stitch
+ * (§3.4): until a stitch named its freer, until the ribbon left the Quire that
+ * stitch lies in, until FallowLag() stitches settled after it, and while an
+ * open handle views the file as it was before (3). No digest is zeroed for it:
+ * the digest lives in the record, and a block's next owner brings its own (5). */
+static bool NodeHeldOnBook(const FallowNode* n, uint64_t cycle)
+{
+    return n->ripe_at == 0 || !n->left || cycle < n->ripe_at || n->gen > HelmViewFloor(n->fid);
 }
 
 uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
@@ -308,27 +348,19 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
     uint64_t    stayed = 0;          /* ripe, and resting on for want of the map's room */
     FallowNode* prev   = NULL;
     uint64_t    lag    = FallowLag();
+    bool        book   = tagfs_get_state()->format == DEED_FORMAT_V2;
 
     *spent = NULL;
     for (FallowNode* n = s_head; n; ) {
         FallowNode* next = n->next;
-        if (n->ripe_at == 0) {
-            if (n->kind != FALLOW_BY_RECORD && n->gen != 0)
-                n->ripe_at = n->gen + lag;
-            else if (n->kind == FALLOW_BY_RECORD && n->gen <= closed_gen)
-                n->ripe_at = cycle + lag;
-        }
-        if (n->ripe_at == 0 || cycle < n->ripe_at || n->zeroed_in == 0 || n->zeroed_in > cycle ||
-            (n->kind == FALLOW_BY_RECORD && n->gen > HelmViewFloor(n->fid)) ||
-            (n->kind == FALLOW_BY_USE_CHAIN && UseMemoryNames(n->runs[0].start)) ||
-            (n->kind == FALLOW_BY_UNLINK && n->gen > GleanHintCovers())) {
+        if (book ? NodeHeldOnBook(n, cycle) : NodeHeld(n, closed_gen, cycle, lag)) {
             prev = n;
             n    = next;
             continue;
         }
 
         uint64_t blocks = NodeBlocks(n);
-        given    += NodeGiveBack(n);
+        given    += NodeGiveBack(n, book);
         s_blocks -= blocks - NodeBlocks(n);
         if (n->count) {
             stayed += NodeBlocks(n);
@@ -354,6 +386,75 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
                 "back\n", (unsigned long long)stayed);
     s_held_said = stayed != 0;
     return given;
+}
+
+// ----------------------------------------------------------------------------
+// A book's freers: the stitch that names them, and the Quire it lies in
+// ----------------------------------------------------------------------------
+
+void FallowStitchSettled(uint64_t target, uint64_t seq, uint64_t cycle)
+{
+    uint64_t lag = FallowLag();
+    for (FallowNode* n = s_head; n; n = n->next) {
+        if (n->ripe_at == 0 && n->gen <= target) {
+            n->stitch  = seq;
+            n->ripe_at = cycle + lag;
+        }
+    }
+}
+
+void FallowQuireLeft(uint64_t seq)
+{
+    for (FallowNode* n = s_head; n; n = n->next)
+        if (n->ripe_at != 0 && n->stitch < seq)
+            n->left = true;
+}
+
+bool FallowAwaitsQuire(void)
+{
+    for (FallowNode* n = s_head; n; n = n->next)
+        if (n->ripe_at != 0 && !n->left)
+            return true;
+    return false;
+}
+
+uint64_t FallowLeftBlocks(void)
+{
+    uint64_t blocks = 0;
+    for (FallowNode* n = s_head; n; n = n->next)
+        if (n->left && n->gen <= HelmViewFloor(n->fid))
+            blocks += NodeBlocks(n);
+    return blocks;
+}
+
+/* A run leaves a window mixed at its two ends at the most: a page for each,
+ * where it reaches into two windows or more. */
+static uint64_t NodeEdges(const FallowNode* n)
+{
+    uint64_t edges = 0;
+    for (uint32_t i = 0; i < n->count; i++) {
+        uint64_t a = n->runs[i].start / BLOCK_MAP_WINDOW_BLOCKS;
+        uint64_t z = (n->runs[i].start + n->runs[i].count - 1u) / BLOCK_MAP_WINDOW_BLOCKS;
+        edges += a == z ? 1u : 2u;
+    }
+    return edges;
+}
+
+/* A node a stitch named that may go back at this cycle's end is one whose lag
+ * this cycle's stitch completes — its Quire left before, or left by this very
+ * stitch, which TAKE does not know yet: both are held for. */
+void FallowGiveRoomHold(uint64_t cycle)
+{
+    TagFSLock* lock  = &tagfs_get_state()->lock;
+    uint64_t   pages = 0;
+
+    TagFSLockTake(lock);
+    for (FallowNode* n = s_head; n; n = n->next)
+        if (n->ripe_at != 0 && n->ripe_at <= cycle)
+            pages += NodeEdges(n);
+    TagFSLockDrop(lock);
+    /* Refused, it is said by the gives it leaves resting (FallowRipen). */
+    (void)BlockMapDerivedHold(pages < UINT32_MAX ? (uint32_t)pages : UINT32_MAX);
 }
 
 bool FallowRestsOnTail(uint64_t closed_gen)

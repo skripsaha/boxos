@@ -102,6 +102,7 @@ class BookMount:
         self.overlay, self.fallow, self.undone, self.mismatched, self.born = {}, [], {}, set(), set()
         self.older_nodes, self.older_quires = [], []
         self.ribbon_said, self.applied = 0, []
+        self.lied_check = None
         self.seen_fid = self.seen_tag = self.seen_bookmark = 0
         self.counts = {}
         if self._Frame() and self._Spine() and self._Tally():
@@ -316,11 +317,13 @@ class BookMount:
         past the volume's last is one the medium does not give."""
         lanes = bookread.SeedLanes(self.g.uuid)
         check = self.ribbon.stitches[-2:] if self.ribbon.lied else self.ribbon.stitches[-1:]
-        for u in check:
-            if not u.Sound() or (u.head.flags & DATA_FLUSHED and not self.ribbon.lied):
-                continue
-            if self._FreshNamed(u) != u.parsed.fresh:
-                continue
+        held = [u for u in check if u.Sound() and not (u.head.flags & DATA_FLUSHED and not self.ribbon.lied)
+                and self._FreshNamed(u) == u.parsed.fresh]
+        if self.ribbon.lied:
+            # The price of the check, said before a block is read (§16.4 п.1):
+            # the kernel's line names the fresh blocks and the stitches.
+            self.lied_check = (sum(u.parsed.fresh for u in held), len(check))
+        for u in held:
             for kind, _ign, body, _at in u.records:
                 if kind in (BORN, SHAPED):
                     self._Landed(u, kind, body, lanes)

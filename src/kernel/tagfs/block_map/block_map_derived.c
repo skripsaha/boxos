@@ -14,6 +14,7 @@
 #define DERIVED_WORDS  (BLOCK_MAP_WINDOW_BLOCKS / 64u)
 #define DERIVED_NAMED  32u   /* claims and releases that meet a block in the wrong state, named one
                               * by one — the owner's bound for a list said (09-27) */
+#define DERIVED_STOCK  2u    /* pages one run can want: the windows at its two ends */
 
 typedef struct {
     uint32_t  free;          /* of the window's blocks the volume has, the ones no owner names */
@@ -32,6 +33,12 @@ static struct {
     DerivedWindow* win;
     uint32_t       named;
     uint64_t       unnamed;
+    uint64_t*      stock[DERIVED_STOCK];   /* pages made before the state lock, for a change of the live map */
+    uint64_t*      loose;                  /* pages a change of the live map let go of, past a full stock:
+                                            * chained through their first word, freed after the lock */
+    uint64_t*      held;                   /* pages held for Fallow's gives (BlockMapDerivedHold), chained
+                                            * alike: drawn on once the stock is spent */
+    uint32_t       nheld;
 } s_map;
 
 static char s_words[224];
@@ -100,16 +107,78 @@ static uint32_t BitsPut(uint64_t* bits, uint32_t from, uint32_t to, bool take)
     return already;
 }
 
+/* A page for the map: the heap's while it is built, with the door shut and no
+ * lock held; once it is up, the stock's — made before the state lock its
+ * changes are taken under (BlockMapDerivedStock), which no allocation may be
+ * asked under (model A). NULL when there is none. */
+static uint64_t* PageTaken(void)
+{
+    if (s_map.building)
+        return kmalloc(DERIVED_WORDS * sizeof(uint64_t));
+    for (uint32_t i = 0; i < DERIVED_STOCK; i++) {
+        uint64_t* page = s_map.stock[i];
+        if (page) {
+            s_map.stock[i] = NULL;
+            return page;
+        }
+    }
+    uint64_t* page = s_map.held;
+    if (page) {
+        s_map.held = (uint64_t*)(uintptr_t)page[0];
+        s_map.nheld--;
+    }
+    return page;
+}
+
+/* A page the map no longer wants: the heap's again while it is built, with no
+ * lock held; once it is up — under the state lock, which nothing is given back
+ * to the heap under (model A; fallow.h, block_map.c alike) — the stock's when
+ * it has room, else chained loose for the change's maker to free once the
+ * lock is dropped (PagesLoose). */
+static void PageGiven(uint64_t* page)
+{
+    if (s_map.building) {
+        kfree(page);
+        return;
+    }
+    for (uint32_t i = 0; i < DERIVED_STOCK; i++) {
+        if (!s_map.stock[i]) {
+            s_map.stock[i] = page;
+            return;
+        }
+    }
+    page[0]     = (uint64_t)(uintptr_t)s_map.loose;
+    s_map.loose = page;
+}
+
+/* The pages a change of the live map let go of, taken under the state lock. */
+static uint64_t* PagesLooseTaken(void)
+{
+    uint64_t* loose = s_map.loose;
+    s_map.loose     = NULL;
+    return loose;
+}
+
+/* ...and freed once it is dropped. */
+static void PagesLoose(uint64_t* page)
+{
+    while (page) {
+        uint64_t* next = (uint64_t*)(uintptr_t)page[0];
+        kfree(page);
+        page = next;
+    }
+}
+
 /* A page for window w as its summary says it is — every block clear when it
  * is whole free, every one set when whole taken — and the blocks past the
- * map's end set: no take may have them. NULL when the heap refuses. */
+ * map's end set: no take may have them. NULL when there is no page to make it. */
 static uint64_t* PageMade(uint32_t w)
 {
 #ifdef CONFIG_VOLUME_TESTS
     if (s_map.building && __atomic_exchange_n(&s_stand_refuse, 0u, __ATOMIC_ACQ_REL))
         HeapFailArm(amp_get_core_index(), 1);
 #endif
-    uint64_t* bits = kmalloc(DERIVED_WORDS * sizeof(uint64_t));
+    uint64_t* bits = PageTaken();
     if (!bits)
         return NULL;
     memset(bits, s_map.win[w].free ? 0x00 : 0xFF, DERIVED_WORDS * sizeof(uint64_t));
@@ -126,7 +195,7 @@ static void WindowSettle(uint32_t w)
 {
     DerivedWindow* win = &s_map.win[w];
     if (win->bits && (win->free == 0 || win->free == WindowBlocks(w))) {
-        kfree(win->bits);
+        PageGiven(win->bits);
         win->bits = NULL;
     }
     if (!win->bits)
@@ -203,7 +272,7 @@ static error_t RunPut(uint64_t start, uint64_t end, bool take, uint64_t* met)
             continue;
         }
         if (made0) {
-            kfree(s_map.win[w0].bits);
+            PageGiven(s_map.win[w0].bits);
             s_map.win[w0].bits = NULL;
         }
         if (!s_map.building)
@@ -369,6 +438,157 @@ bool BlockMapDerivedRunIn(uint32_t window, uint32_t want, uint64_t* start)
     return false;
 }
 
+// ----------------------------------------------------------------------------
+// The live map: its stock of pages, and the ribbon's Quire
+// ----------------------------------------------------------------------------
+
+error_t BlockMapDerivedStock(void)
+{
+    TagFSLock* lock = &tagfs_get_state()->lock;
+    for (uint32_t i = 0; i < DERIVED_STOCK; i++) {
+        TagFSLockTake(lock);
+        bool full = s_map.stock[i] != NULL;
+        TagFSLockDrop(lock);
+        if (full)
+            continue;
+        uint64_t* page = kmalloc(DERIVED_WORDS * sizeof(uint64_t));
+        if (!page)
+            return ERR_NO_MEMORY;
+        TagFSLockTake(lock);
+        if (!s_map.stock[i]) {
+            s_map.stock[i] = page;
+            page           = NULL;
+        }
+        TagFSLockDrop(lock);
+        kfree(page);
+    }
+    return OK;
+}
+
+/*
+ * ‼ THE PAGES FALLOW'S GIVES MAY WANT ARE HELD BEFORE THE LOCK THEY ARE GIVEN
+ * UNDER (model A, §16.2 п.16). A cycle's DONE gives back every node that
+ * ripened, under the state lock, where the heap is asked for nothing; a run it
+ * gives back leaves a window mixed only at its two ends. So the cycle's TAKE
+ * holds what its gives may want — the windows each run of a node that may
+ * ripen reaches (FallowGiveRoomHold) — as pages chained apart from the stock,
+ * drawn on once the stock is spent: the held made `pages` exactly, those past
+ * it let go, and with them the pages earlier changes let go loose under the
+ * lock. A give a page is still short for leaves its run resting (fallow.c,
+ * NodeGiveBack), and the next cycle gives it.
+ */
+error_t BlockMapDerivedHold(uint32_t pages)
+{
+    TagFSLock* lock  = &tagfs_get_state()->lock;
+    uint64_t*  spare = NULL;
+    TagFSLockTake(lock);
+    if (!s_map.up)
+        pages = 0;
+    if (pages > s_map.windows)
+        pages = s_map.windows;      /* a window is made mixed once */
+    while (s_map.nheld > pages) {
+        uint64_t* page = s_map.held;
+        s_map.held = (uint64_t*)(uintptr_t)page[0];
+        s_map.nheld--;
+        page[0] = (uint64_t)(uintptr_t)spare;
+        spare   = page;
+    }
+    uint64_t* loose = PagesLooseTaken();
+    uint32_t  have  = s_map.nheld;
+    TagFSLockDrop(lock);
+    PagesLoose(spare);
+    PagesLoose(loose);
+    while (have < pages) {
+        uint64_t* page = kmalloc(DERIVED_WORDS * sizeof(uint64_t));
+        if (!page)
+            return ERR_NO_MEMORY;
+        TagFSLockTake(lock);
+        page[0]    = (uint64_t)(uintptr_t)s_map.held;
+        s_map.held = page;
+        have       = ++s_map.nheld;
+        TagFSLockDrop(lock);
+    }
+    return OK;
+}
+
+/* The run so far, `run` free blocks from `at`, grown by the free block or
+ * blocks [b, b + n): a run begins only on `align`. Whether it reaches `want`. */
+static bool RunGrows(uint64_t b, uint64_t n, uint32_t align, uint64_t want, uint64_t* at, uint64_t* run)
+{
+    if (*run == 0) {
+        uint64_t first = (b + align - 1u) / align * align;
+        if (first >= b + n)
+            return false;
+        *at  = first;
+        *run = b + n - first;
+    } else {
+        *run += n;
+    }
+    return *run >= want;
+}
+
+/* The first run of `want` free blocks beginning on `align` inside [lo, hi):
+ * *start. A window whole free or whole taken is passed by its summary. */
+static bool RunAlignedIn(uint64_t lo, uint64_t hi, uint64_t want, uint32_t align, uint64_t* start)
+{
+    uint64_t run = 0, at = 0;
+    for (uint64_t b = lo; b < hi;) {
+        uint32_t             w    = (uint32_t)(b / BLOCK_MAP_WINDOW_BLOCKS);
+        uint64_t             base = (uint64_t)w * BLOCK_MAP_WINDOW_BLOCKS;
+        uint64_t             end  = base + WindowBlocks(w) < hi ? base + WindowBlocks(w) : hi;
+        const DerivedWindow* win  = &s_map.win[w];
+        if (!win->bits) {
+            if (win->free == 0)
+                run = 0;
+            else if (RunGrows(b, end - b, align, want, &at, &run))
+                break;
+            b = end;
+            continue;
+        }
+        for (; b < end; b++) {
+            uint32_t off = (uint32_t)(b - base);
+            if (win->bits[off / 64u] & (1ull << (off % 64u)))
+                run = 0;
+            else if (RunGrows(b, 1, align, want, &at, &run))
+                break;
+        }
+        if (run >= want)
+            break;
+    }
+    if (run < want || at + want > hi)
+        return false;
+    *start = at;
+    return true;
+}
+
+error_t BlockMapTakeQuire(uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first, uint64_t from,
+                          uint64_t* start)
+{
+    TagFSLock* lock = &tagfs_get_state()->lock;
+    uint64_t   met  = 0;
+    error_t    rc   = BlockMapDerivedStock();
+    if (rc != OK)
+        return rc;
+    TagFSLockTake(lock);
+    uint64_t hi = s_map.end;
+    if (!s_map.up) {
+        rc = ERR_NOT_INITIALIZED;
+    } else if (blocks == 0 || s_map.free < blocks || s_map.free - blocks < keep) {
+        rc = ERR_TAGFS_NO_SPACE;
+    } else {
+        from = from < first || from >= hi ? first : from;
+        if (!RunAlignedIn(from, hi, blocks, align ? align : 1u, start) &&
+            !RunAlignedIn(first, from + blocks < hi ? from + blocks : hi, blocks, align ? align : 1u, start))
+            rc = ERR_TAGFS_NO_SPACE;
+        else
+            rc = MapPut(GROUND_RIBBON, 0, *start, blocks, true, &met);
+    }
+    uint64_t* loose = PagesLooseTaken();
+    TagFSLockDrop(lock);
+    PagesLoose(loose);
+    return rc;
+}
+
 void BlockMapDerivedLetGo(void)
 {
     if (s_map.unnamed)
@@ -376,6 +596,10 @@ void BlockMapDerivedLetGo(void)
                 (unsigned long long)s_map.unnamed);
     for (uint32_t w = 0; s_map.win && w < s_map.windows; w++)
         kfree(s_map.win[w].bits);
+    for (uint32_t i = 0; i < DERIVED_STOCK; i++)
+        kfree(s_map.stock[i]);
+    PagesLoose(s_map.loose);
+    PagesLoose(s_map.held);
     kfree(s_map.win);
     memset(&s_map, 0, sizeof(s_map));
 }
@@ -406,6 +630,80 @@ static bool PageHolds(uint32_t w)
             return false;
     return BLOCK_MAP_WINDOW_BLOCKS - ones == win->free && win->free > 0 && win->free < n &&
            BitsLongest(win->bits) == win->longest;
+}
+
+/* The runs the stand holds to make the volume small, to let go of again. */
+static Strip*   s_stand_held;
+static uint32_t s_stand_nheld;
+static uint32_t s_stand_capheld;
+
+/* The run [start, start + count) put for the stand, its pages stocked first and
+ * the state lock taken as every change of the live map takes it. */
+static error_t StandPut(uint64_t start, uint64_t count, bool take)
+{
+    uint64_t met = 0;
+    error_t  rc  = BlockMapDerivedStock();
+    if (rc != OK)
+        return rc;
+    TagFSLockTake(&tagfs_get_state()->lock);
+    rc              = MapPut(GROUND_HELD, 0, start, count, take, &met);
+    uint64_t* loose = PagesLooseTaken();
+    TagFSLockDrop(&tagfs_get_state()->lock);
+    PagesLoose(loose);
+    return rc;
+}
+
+/* The last run of free blocks of the map, at most `most` of them. */
+static bool StandLastFree(uint64_t most, uint64_t* start, uint64_t* count)
+{
+    uint64_t end = 0;
+    for (uint64_t b = s_map.end; b-- > 0 && (!end || b + most >= end);) {
+        bool free = BlockMapDerivedIsFree(b);
+        if (!end && free)
+            end = b + 1u;
+        else if (end && !free)
+            break;
+        *start = b;
+    }
+    *count = end ? end - *start : 0;
+    if (*count > most) {
+        *start += *count - most;
+        *count  = most;
+    }
+    return end != 0;
+}
+
+bool BlockMapDerivedStandShrink(uint64_t leave)
+{
+    uint64_t start = 0, count = 0;
+    while (s_map.up && s_map.free > leave && StandLastFree(s_map.free - leave, &start, &count)) {
+        if (s_stand_nheld == s_stand_capheld) {
+            uint32_t cap  = s_stand_capheld ? s_stand_capheld * 2u : 16u;
+            Strip*   more = kmalloc(sizeof(Strip) * cap);
+            if (!more)
+                return false;
+            if (s_stand_nheld)
+                memcpy(more, s_stand_held, sizeof(Strip) * s_stand_nheld);
+            kfree(s_stand_held);
+            s_stand_held    = more;
+            s_stand_capheld = cap;
+        }
+        if (StandPut(start, count, true) != OK)
+            return false;
+        s_stand_held[s_stand_nheld++] = (Strip){ .start = start, .count = (uint32_t)count, .kind = STRIP_DATA };
+    }
+    return s_map.free == leave;
+}
+
+void BlockMapDerivedStandGrow(void)
+{
+    while (s_stand_nheld) {
+        Strip* r = &s_stand_held[--s_stand_nheld];
+        (void)StandPut(r->start, r->count, false);
+    }
+    kfree(s_stand_held);
+    s_stand_held    = NULL;
+    s_stand_capheld = 0;
 }
 
 bool BlockMapDerivedStandHolds(uint64_t* free, uint32_t* mixed)

@@ -1,6 +1,7 @@
 #include "scribe.h"
 #include "../tagfs.h"
 #include "../lock_rank/lock_rank.h"
+#include "../settle/settle.h"
 #include "amp.h"
 #include "atomics.h"
 #include "baton.h"
@@ -368,6 +369,8 @@ bool ScribeAnyHeldHere(void)
 
 error_t SpareStamp(uint32_t magic, void *image, uint32_t *out_block, uint64_t *out_need)
 {
+    if (SettleV1OnBook("a Spare's stamp"))
+        return ERR_UNSUPPORTED;
     uint64_t block = 0;
     error_t  took  = magic == TAGFS_MPOOL_MAGIC ? BlockMapTakeSpare(&block, __func__)
                                                 : BlockMapTake(1, 0, &block, __func__);
