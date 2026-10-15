@@ -47,11 +47,12 @@ static error_t PlotStage(Plot *p, const PlotStretch *s, uint32_t i, const PlotSo
     if (fill == PLOT_FILL_FRESH) {
         memset(into, 0, TAGFS_BLOCK_SIZE);
     } else if (fill == PLOT_FILL_READ) {
-        error_t rc = tagfs_read_block(s->block + i, into);
+        uint64_t old = i == 0 ? s->from_first : s->from_last;
+        error_t  rc  = tagfs_read_block(old, into);
         if (rc != OK) {
             kprintf("[TagFS] file %llu: block %llu answered %u to its read, so the %u byte(s) meant "
                     "for it are not laid over the rest of it — the write stops there\n",
-                    p->fid, (unsigned long long)(s->block + i), (unsigned)rc, chunk);
+                    p->fid, (unsigned long long)old, (unsigned)rc, chunk);
             return rc;
         }
     }
@@ -89,6 +90,11 @@ static error_t PlotLayStretch(Plot *p, const PlotStretch *s, const PlotSource *s
         p->data_us += cpu_tsc_to_us(rdtsc() - began);
         if (sent)
             TagFSDataCostLaid(staged);
+        error_t noted = PlotWindowLanded(p, s->block, buf, landed);
+        if (rc == OK && noted != OK) {
+            landed = 0;      /* a block whose digest is not held is no block of the file's */
+            rc     = noted;
+        }
         if (rc != OK)
             kprintf("[TagFS] file %llu: blocks %llu..%llu would not be written (error %u) — %u of "
                     "them had landed before the medium stopped answering\n", p->fid,
@@ -173,6 +179,8 @@ error_t PlotExtendZero(Plot *p, uint64_t size)
 {
     if (size <= p->size)
         return OK;
+    if (p->book)
+        return PlotWindowGrow(p, size);
 
     uint64_t from = p->size;
     error_t  rc   = PlotReserve(p, size);
@@ -221,6 +229,8 @@ out:
 
 error_t PlotRoomFor(const Plot *p, uint64_t end)
 {
+    if (p->book)
+        return PlotWindowRoomFor(p, end);
     uint64_t need = end / TAGFS_BLOCK_SIZE + (end % TAGFS_BLOCK_SIZE != 0);
     if (need <= p->blocks)
         return OK;

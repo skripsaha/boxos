@@ -650,8 +650,9 @@ void MountPromise(void)
     /*
      * A format-v2 volume (book_mount.h): under glass it is read and nothing of
      * it is written, and promises only that. Otherwise this kernel's writer
-     * lays stitches of files, names and memory on its ribbon (settle/sewing.h)
-     * — no file's data — and no Tally: the next mount reads the ribbon whole;
+     * lays stitches of files, their data on fresh ground, names and memory on
+     * its ribbon (settle/sewing.h), and no Tally: the next mount reads the
+     * ribbon whole;
      * and a medium that leaves and comes back is read again from its book:
      * what no stitch settled is lost, which is what `anchor` is for (§16.2
      * п.28).
@@ -663,13 +664,13 @@ void MountPromise(void)
         return;
     }
     if (tagfs_get_state()->format == DEED_FORMAT_V2) {
-        kprintf("[TagFS] what this volume promises: its book takes files made, named, tagged and given up, "
-                "the names of tags and the memory of its Use Context, a stitch on its ribbon a Settle cycle — a "
+        kprintf("[TagFS] what this volume promises: its book takes files made, written, named, tagged and given "
+                "up, the names of tags and the memory of its Use Context, a stitch on its ribbon a Settle cycle — a "
                 "change is a stitch kept by its cycle's flush within %llu ms, and a name given goes with the next "
-                "stitch sewn; an `anchor` is answered once a stitch of this mount carrying what it waits for is "
-                "kept; a change to a file's data this kernel refuses (ERR_TAGFS_READ_ONLY); a medium that leaves "
-                "and comes back is read again from its book, and what no stitch settled before an `anchor` is "
-                "lost\n",
+                "stitch sewn; a file's bytes go on fresh ground, flushed before the stitch that names them, so a "
+                "block written over reads its old bytes or its new ones, never a mix; an `anchor` is answered once "
+                "a stitch of this mount carrying what it waits for is kept; a medium that leaves and comes back is "
+                "read again from its book, and what no stitch settled before an `anchor` is lost\n",
                 (unsigned long long)(SETTLE_WINDOW_US / 1000u));
         kprintf("[TagFS] no Tally is written by this kernel: the ribbon is read whole at every mount\n");
         return;

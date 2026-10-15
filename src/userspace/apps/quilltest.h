@@ -119,5 +119,7 @@ QuillVerdict QuillBookNames(const char *const *args);
 QuillVerdict QuillBookNameCut(const char *const *args);
 QuillVerdict QuillBookNameCheck(const char *const *args);
 QuillVerdict QuillBookGround(const char *const *args);
+QuillVerdict QuillBookData(const char *const *args);
+QuillVerdict QuillBookBig(const char *const *args);
 
 #endif /* QUILLTEST_H */

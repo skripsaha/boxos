@@ -232,6 +232,32 @@ error_t AllotmentTake(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_
                       uint64_t *start, uint32_t *got);
 void    AllotmentRelease(uint64_t fid);
 
+/*
+ * A book's data (spec_v2 §3.1): its map is derived from the names that own its
+ * ground (block_map_derived.h), and a window lies on it as free ground no other
+ * file's take may have, nor the ribbon's Quire while another run is free.
+ *
+ * AllotmentTakeBook: up to `want` blocks for file `fid`, never leaving fewer
+ * than `keep` free — the book's reserve (endpaper.c), which data never takes
+ * (§3.6) — in one run: the block `hint` names, exact, when it is free
+ * (Allotment 1: the version that fills a block continues the file's run);
+ * else the front of the file's window; else a new window sized to the file,
+ * the first run that long from `hint` on (Allotment 2: blocks written over in
+ * one call land in one run). A take `aside` — a block that will not be full
+ * — lies away from the blocks the file goes on into after `hint`, so they
+ * stay free for the versions that fill them. As
+ * TagFSTakeRun answers when nothing can be had: ERR_WOULD_BLOCK while Fallow
+ * rests ground, the room asked of the cycle, else ERR_TAGFS_NO_SPACE, said.
+ * AllotmentOthersIn, under the state lock: whether [start, start + count)
+ * meets the window of a file other than `fid` (0: any file's) — *past where
+ * the first such ends. AllotmentBookTaken: the blocks a book's data was
+ * handed since the volume came up.
+ */
+error_t  AllotmentTakeBook(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
+                           uint64_t keep, uint64_t *start, uint32_t *got);
+bool     AllotmentOthersIn(uint64_t fid, uint64_t start, uint64_t count, uint64_t *past);
+uint64_t AllotmentBookTaken(void);
+
 #ifdef CONFIG_VOLUME_TESTS
 /* The window file `fid` keeps in hand: false when it keeps none. */
 bool    AllotmentHeld(uint64_t fid, uint64_t *start, uint32_t *count);

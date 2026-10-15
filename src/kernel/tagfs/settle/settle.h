@@ -270,12 +270,9 @@ void     SettleCadenceHold(bool hold);
 /*
  * Format v2's writer (settle/sewing.c). StitchBookRefused: no Quire took a
  * stitch's write — the volume may only be read until it is mounted again, part
- * of what TagFSReadOnly answers (M-6). StitchFilesRefused: a change to a
- * file's data is one this kernel does not yet lay into a book — said once a
- * mount, and ERR_TAGFS_READ_ONLY; a write's load asks it of a book (ink.c).
+ * of what TagFSReadOnly answers (M-6).
  */
 bool     StitchBookRefused(void);
-error_t  StitchFilesRefused(void);
 
 /* A part of format v1's cycle — the pool's Spares, Glean, the Ledger's write —
  * reached on a book: a defect of the road there, which the cycle's dispatch by

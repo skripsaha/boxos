@@ -759,6 +759,14 @@ static const QuillCase g_cases[] = {
       "the ribbon run past the Quitclaim's Quire",
       "DESTRUCTIVE: FILE given up; NAME-x.n made and given up, every earlier file of that name or NAME-y.n "
       "given up first", false },
+    { "data", "NAME", 1, 0, QuillBookData,
+      "on a book: is NAME-d.d written, appended, written over whole and in part, cut, grown across a hole and "
+      "written inside it, each round anchored, the bytes the rounds wrote",
+      "NAME-d.d, every earlier file of that name given up first", false },
+    { "big", "NAME [MIB]", 2, 1, QuillBookBig,
+      "on a book: with MIB, is NAME-b.d of MIB mebibytes written in ONE write and anchored, every byte read "
+      "back; without, is NAME-b.d found and every byte of it the one written",
+      "with MIB: NAME-b.d, every earlier file of that name given up first; without, nothing", false },
     { "abba", "NAME TAGS EDGE", 3, 0, QUILL_THROWAWAY(QuillAbba),
       "does a machine of many cores come back while TAGS new tags and file ids past EDGE, where "
       "the file table takes its next block, grow the registry and the table, and three cabins of "

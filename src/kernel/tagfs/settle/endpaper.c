@@ -4,6 +4,7 @@
 #include "../use_memory/use_memory.h"
 #include "../mount/book_mount.h"
 #include "../tag_spelling/tag_spelling.h"
+#include "../block_map/block_map.h"
 
 /*
  * The book's reserve (sewing.h): what a whole Tally of the volume as memory
@@ -156,10 +157,84 @@ uint64_t TallyCostBlocks(void)
            TallyTreeBlocks(&digests, atom);
 }
 
+/*
+ * ‼ THE RESERVE A WRITE OF DATA LEAVES IS KEPT, NOT MEASURED A WRITE (§3.6). A
+ * measure walks every live file of the mirror — too much for every window a
+ * write takes — so each measure is kept, with the blocks a book's data had been
+ * handed when the measure before it began (AllotmentBookTaken): a block handed
+ * since may be in no record the measure walked yet, a Stake of a write still
+ * in flight among them. Every such block is counted as the most it can add to
+ * a Tally — a run of its own in FILES, in a Parcel of its own, and an element
+ * of its own in DIGESTS with its digest — so what the kept measure says is
+ * never less than a measure taken now. The ribbon measures afresh each time it
+ * is given a Quire, and a write that finds no room asks a fresh measure
+ * before it is refused (EndpaperDataKeeps).
+ */
+#define TALLY_DATA_FILES_MOST   (TALLY_RUN_MOST + TALLY_ITEM_HEAD_MOST + TALLY_PARCEL_HEAD_MOST)
+#define TALLY_DATA_DIGESTS_MOST (8u + 2u * (TALLY_ITEM_HEAD_MOST + TALLY_DIGEST_HEAD_MOST))
+
+static volatile uint64_t s_kept_cost;      /* the last measure, in blocks */
+static volatile uint64_t s_kept_from;      /* the data handed when the measure before it began */
+static volatile uint64_t s_kept_began;     /* ... and when this one began */
+static volatile uint32_t s_kept_epoch;     /* the mounting they are of; 0 for none */
+static volatile uint32_t s_kept_turn;      /* odd while a measure is being kept */
+
+/*
+ * ‼ A KEPT MEASURE IS ONE PAIR, NEVER TWO HALVES. The ribbon measures when it is
+ * given a Quire and a data writer measures afresh, with no lock between them:
+ * a cost kept beside the `from` of another measure — one begun later — would
+ * leave out the blocks handed between the two, and the reserve kept for the
+ * data be short by their Tally. So one measure is kept at a time — one that
+ * finds another being kept keeps nothing, and the next is the more careful for
+ * it — and a reader takes the pair whole, or measures afresh. A measure is kept
+ * with the data handed when the one kept before it began, or when it began
+ * itself, whichever came first.
+ */
 uint64_t EndpaperKeeps(uint64_t quire_blocks)
 {
     if (quire_blocks == 0)
         return 0;
-    uint64_t cost = TallyCostBlocks();
+    uint32_t epoch = tagfs_mount_epoch();
+    uint64_t began = AllotmentBookTaken();
+    uint64_t cost  = TallyCostBlocks();
+    uint32_t turn  = __atomic_load_n(&s_kept_turn, __ATOMIC_ACQUIRE);
+    if (!(turn & 1u) &&
+        __atomic_compare_exchange_n(&s_kept_turn, &turn, turn + 1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        uint64_t before = s_kept_epoch == epoch ? s_kept_began : began;
+        s_kept_cost  = cost;
+        s_kept_from  = before < began ? before : began;
+        s_kept_began = before > began ? before : began;
+        s_kept_epoch = epoch;
+        __atomic_store_n(&s_kept_turn, turn + 2u, __ATOMIC_RELEASE);
+    }
     return 2u * ((cost + quire_blocks - 1u) / quire_blocks) * quire_blocks;
+}
+
+/* The kept measure of this mounting, whole: false when there is none, or one
+ * was being kept as it was read. */
+static bool EndpaperKept(uint64_t* cost, uint64_t* from)
+{
+    uint32_t turn = __atomic_load_n(&s_kept_turn, __ATOMIC_ACQUIRE);
+    if (turn & 1u)
+        return false;
+    bool ours = s_kept_epoch == tagfs_mount_epoch();
+    *cost     = s_kept_cost;
+    *from     = s_kept_from;
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    return ours && __atomic_load_n(&s_kept_turn, __ATOMIC_RELAXED) == turn;
+}
+
+uint64_t EndpaperDataKeeps(bool afresh)
+{
+    uint64_t q = RibbonCursorNow()->quire_blocks;
+    if (q == 0)
+        return 0;
+    uint64_t cost = 0, from = 0;
+    if (afresh || !EndpaperKept(&cost, &from))
+        return EndpaperKeeps(q) + q;
+    uint64_t      since = AllotmentBookTaken() - from;
+    uint64_t      atom  = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
+    TallyTreeCost files = { since * TALLY_DATA_FILES_MOST, 0 }, digests = { since * TALLY_DATA_DIGESTS_MOST, 0 };
+    cost += TallyTreeBlocks(&files, atom) + TallyTreeBlocks(&digests, atom);
+    return 2u * ((cost + q - 1u) / q) * q + q;
 }

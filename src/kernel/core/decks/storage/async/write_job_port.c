@@ -211,14 +211,21 @@ static error_t wjob_submit(WriteJob *j, bool write, uint64_t block, uint32_t blo
                  : BoardroomReadAsync(seat, lba, sectors, dma, answered, j, &j->berth);
 }
 
+/* The block the rest of the stretch's first or last block is read from — the
+ * block itself on format v1, the old block it lay on on fresh ground (format
+ * v2, plot_window.c). */
+static uint64_t WriteJobReadFrom(const WriteJob *j)
+{
+    return j->st_reading == 0 ? j->st.from_first : j->st.from_last;
+}
+
 /* W_READ_OLD — the stretch's first block, then its last, read into its own
  * page, so the write's bytes fold over what the block holds. Its answer moves
  * the state to W_READ_DONE (wjob_read_old_complete). */
 static bool w_read_old(WriteJob *j)
 {
     j->st_reading = (j->st_reads & WJOB_READ_FIRST) ? 0 : j->st.count - 1;
-    error_t err = wjob_submit(j, false, j->st.block + j->st_reading, 1, j->st_reading,
-                              wjob_read_old_complete);
+    error_t err = wjob_submit(j, false, WriteJobReadFrom(j), 1, j->st_reading, wjob_read_old_complete);
     if (err != OK)
         return wjob_stop(j, err);
     return false;  /* parked until the answer */
@@ -233,7 +240,7 @@ static bool w_read_old(WriteJob *j)
 static bool w_read_done(WriteJob *j)
 {
     uint32_t i     = j->st_reading;
-    uint64_t block = j->st.block + i;
+    uint64_t block = WriteJobReadFrom(j);
     error_t  why   = j->if_status;
     if (why == OK && !IntegrityVerify(block, wjob_page(j, i)))
         why = ERR_CHECKSUM;
@@ -307,6 +314,12 @@ static bool w_block_done(WriteJob *j)
     for (uint32_t i = 0; i < landed; i++) {
         tagfs_readahead_invalidate(j->st.block + i);
         IntegrityUpdate(j->st.block + i, wjob_page(j, i));
+        if (PlotWindowLanded(&j->plot, j->st.block + i, wjob_page(j, i), 1) != OK) {
+            landed = i;      /* a block whose digest is not kept is no block of the file's */
+            if (j->if_status == OK)
+                j->if_status = ERR_NO_MEMORY;
+            break;
+        }
     }
     if (landed)
         VolumeWriteSeen();
@@ -352,6 +365,10 @@ static bool w_ink(WriteJob *j)
 {
     InkReceipt inked;
     error_t    rc = TagFSInkPlot(&j->plot, INK_ASKS_SPARES, &inked);
+    if (rc == ERR_WOULD_BLOCK && j->plot.book) {
+        wjob_to_service(j);      /* a book has no Spare: the room on its way is the cycle's */
+        return false;
+    }
     if (rc == ERR_WOULD_BLOCK) {
         wjob_to(j, W_SPARE);
         return true;

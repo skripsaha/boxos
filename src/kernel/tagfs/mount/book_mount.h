@@ -163,6 +163,7 @@ typedef struct {
     uint32_t       naside;
     uint32_t       capaside;
     uint32_t       files_print;  /* the print of the live files, the mount done (BookFilesLaid) */
+    uint64_t       boot_fid;     /* the file whose blocks the loader reads the kernel by; 0 for none (ink.c) */
     uint32_t       use_print;    /* the print of the Use Context memory holds, and its bytes */
     uint64_t       use_bytes;
 } BookMount;

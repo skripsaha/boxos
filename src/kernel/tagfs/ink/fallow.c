@@ -7,6 +7,7 @@
 #include "../glean/glean.h"
 #include "../file_map/file_record.h"
 #include "../block_map/block_map_derived.h"
+#include "../integrity/gloss.h"
 
 struct FallowNode {
     FallowNode* next;
@@ -294,7 +295,8 @@ uint32_t FallowUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits)
  * not cover stays in the node, which rests on, and the next cycle gives it
  * back. A run the map refuses for any other reason — a block of it already
  * free, or past the data run — is said by the map, and no cycle could give it
- * back: it leaves the node. The blocks given back.
+ * back: it leaves the node. On a book, a run given back takes the digests the
+ * Gloss holds for it out with it (§8.1). The blocks given back.
  */
 static uint64_t NodeGiveBack(FallowNode* n, bool book)
 {
@@ -307,6 +309,8 @@ static uint64_t NodeGiveBack(FallowNode* n, bool book)
         error_t  back = book ? BlockMapDerivedRelease(n->fid ? GROUND_FILE : GROUND_FALLOW, n->fid, run.start,
                                                       run.count, &met)
                              : BlockMapGiveHeldLocked(run.start, run.count);
+        if (back == OK && book)
+            GlossForget(run.start, run.count);    /* its next owner is held to its own digest */
         if (back == OK)
             given += run.count - met;
         else if (back == ERR_NO_MEMORY)

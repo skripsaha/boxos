@@ -645,7 +645,6 @@ error_t RibbonTranscribe(RibbonWalk* w, const char** what)
         rc = BookUseRecalled(rp->use, rp->use_len);
     if (rc == OK)
         rc = RibbonSettled(rp);
-    GlossSealed();
     if (rp)
         RibbonReplayLetGo(rp);
     if (rc == ERR_NO_MEMORY)

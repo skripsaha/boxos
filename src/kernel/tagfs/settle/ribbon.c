@@ -34,8 +34,9 @@ static volatile uint64_t s_room_frees;
 static volatile uint8_t  s_room_grows;
 static volatile uint64_t s_refused_free;
 
-/* The bytes claimed by changes no stitch has taken, and those held for tags
- * about to be given ids (RibbonReserve): under the state lock. */
+/* The bytes claimed by changes no stitch has taken, and those held for changes
+ * in the making — a tag about to be given an id, a write's record while its
+ * data moves (RibbonReserve): under the state lock. */
 static uint64_t          s_claimed;
 static uint64_t          s_reserved;
 
@@ -183,6 +184,15 @@ const RibbonCursor* RibbonCursorNow(void)
 void RibbonCursorStand(RibbonCursor* out)
 {
     *out = s_cursor;
+}
+
+void RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved)
+{
+    TagFSState* fs = tagfs_get_state();
+    TagFSLockTake(&fs->lock);
+    *claimed  = s_claimed;
+    *reserved = s_reserved;
+    TagFSLockDrop(&fs->lock);
 }
 #endif
 
@@ -430,7 +440,9 @@ static uint64_t RibbonHeld(void)
  * stitch takes every change inked before it, so a change is refused that would
  * leave the next stitch more than the ribbon holds; it waits — ERR_WOULD_BLOCK,
  * and a Chit on the cycle's end — while claims or a stitch are in flight whose
- * settling frees what they held at the most, while a next_quire may still be
+ * settling frees what they held at the most (a hold is a claim in the making:
+ * its change claims no more than it, and the cycle after takes that), while a
+ * next_quire may still be
  * given, the ground having grown since the last ask was refused, or while
  * ground rests in a Quire the ribbon has left for no more than its lag. Else
  * nothing a cycle does makes room: ERR_TAGFS_NO_SPACE, at once.
@@ -442,7 +454,7 @@ static error_t RibbonRoomFor(uint64_t bytes, bool frees)
     uint64_t held = RibbonHeld();
     if (room >= want && held <= room - want)
         return OK;
-    if (s_claimed || __atomic_load_n(&s_flight, __ATOMIC_ACQUIRE) ||
+    if (s_claimed || s_reserved || __atomic_load_n(&s_flight, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&s_room_grows, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE) >
             __atomic_load_n(&s_refused_free, __ATOMIC_ACQUIRE) ||
@@ -470,6 +482,18 @@ error_t RibbonReserve(uint64_t bytes)
 void RibbonReserveLetGo(uint64_t bytes)
 {
     s_reserved = s_reserved > bytes ? s_reserved - bytes : 0;
+}
+
+error_t RibbonClaimHeld(uint64_t held, uint64_t bytes)
+{
+    if (bytes > held) {
+        error_t rc = RibbonRoomFor(bytes - held, false);
+        if (rc != OK)
+            return rc;
+    }
+    s_reserved = s_reserved > held ? s_reserved - held : 0;
+    s_claimed += bytes;
+    return OK;
 }
 
 uint64_t RibbonClaimTaken(void)

@@ -166,6 +166,14 @@ error_t     FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64
                              uint64_t size, uint64_t mtime, FileRecord** out,
                              Strip** freed, uint64_t* nfreed);
 
+/* The splices that make `was` into `now` (file_record_splices.c): applied to
+ * `was` by FileRecordSplice they build `now`, Strip for Strip. OK, *count of
+ * them in a new array *out and the Strips they put in in *strips — both the
+ * caller's to free, NULL for none — or ERR_NO_MEMORY. A Parcel the two share
+ * at one place in the file is passed over whole. */
+error_t     FileRecordSplices(const FileRecord* was, const FileRecord* now, BookSplice** out, uint64_t* count,
+                              Strip** strips);
+
 /* Block k of the file, found down the Tract and inside its Parcel by halving:
  * O(log Parcels + log 128). False when the runs do not reach block k. */
 bool        FileRecordFind(const FileRecord* rec, uint64_t k, FileSpot* out);
@@ -175,6 +183,11 @@ bool        FileRecordFind(const FileRecord* rec, uint64_t k, FileSpot* out);
  * false once there is none. The record is held by the caller for the walk. */
 void        StripWalkBegin(const FileRecord* rec, StripWalk* w);
 bool        StripWalkNext(StripWalk* w, Strip* out);
+
+/* The walk set at the Strip that holds block k — the Strip its next Next
+ * gives — found down the Tract by halving, with *begins the block that Strip
+ * begins at: false, the walk over, past the runs' end. */
+bool        StripWalkAt(const FileRecord* rec, uint64_t k, StripWalk* w, uint64_t* begins);
 
 /* ‼ THE ONE WALK OF A RECORD'S GROUND. The next Strip of the walk that lies on
  * ground — STRIP_DATA; every hole on the way passed over, for a hole owns no

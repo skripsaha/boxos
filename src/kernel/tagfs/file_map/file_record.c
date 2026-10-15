@@ -314,6 +314,11 @@ void StripWalkBegin(const FileRecord* rec, StripWalk* w)
         WalkDown(w, rec->tract);
 }
 
+bool StripWalkAt(const FileRecord* rec, uint64_t k, StripWalk* w, uint64_t* begins)
+{
+    return TractWalkAt(rec->tract, k, w, begins);
+}
+
 bool StripWalkNext(StripWalk* w, Strip* out)
 {
     while (w->depth) {

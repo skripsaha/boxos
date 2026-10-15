@@ -85,6 +85,11 @@ error_t TractSplice(const Tract* root, const BookSplice* sp, const Tract** out, 
 bool    TractFind(const Tract* root, uint64_t k, const Parcel** out, uint64_t* k_in,
                   uint64_t* steps);
 
+/* The walk `w` set at the Strip holding block k under `root` — the Strip its
+ * next StripWalkNext gives — and in *begins the block that Strip begins at:
+ * false past the runs' end. */
+bool    TractWalkAt(const Tract* root, uint64_t k, StripWalk* w, uint64_t* begins);
+
 void    TractHold(const Tract* t);
 void    TractLetGo(const Tract* t);
 

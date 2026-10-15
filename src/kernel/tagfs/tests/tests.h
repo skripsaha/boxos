@@ -136,11 +136,15 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(width)) \
     VOLUME_TESTS_ONLY(SUITE(parcel)) \
     VOLUME_TESTS_ONLY(SUITE(tract)) \
+    VOLUME_TESTS_ONLY(SUITE(record_splices)) \
     VOLUME_TESTS_ONLY(SUITE(stand_tally)) \
     VOLUME_TESTS_ONLY(SUITE(stand_ribbon)) \
     VOLUME_TESTS_ONLY(SUITE(stand_stitch)) \
     VOLUME_TESTS_ONLY(SUITE(stand_stitch_edge)) \
     VOLUME_TESTS_ONLY(SUITE(stand_docket)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_fresh)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_fresh_ground)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_fresh_change)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;

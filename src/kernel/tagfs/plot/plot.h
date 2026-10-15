@@ -36,6 +36,12 @@ typedef struct {
     uint32_t count;
 } Stake;
 
+/* A block this call wrote, and the digest of what it holds (format v2). */
+typedef struct {
+    uint64_t block;
+    uint64_t digest;
+} PlotDigest;
+
 typedef struct {
     uint64_t      fid;
     uint32_t      mount_epoch;    /* the mounting the Plot's block numbers are of */
@@ -60,6 +66,29 @@ typedef struct {
     FileHelm     *helm;           /* the Helm its holder loaded it under; NULL for none */
     uint32_t      claimed;        /* the extents it claimed room for in the record (RT-19) */
     InkWarrant    warrant;        /* the call's, asked by the guard at the load and at the Ink */
+    /* The volume's book is format v2: chosen once, by PlotLoad, and every
+     * branch between the two formats reads it here. */
+    bool          book;
+    /* Format v2 alone (plot_window.c, PlotWindow): the record the Plot was
+     * loaded from, held — its runs are found and walked where the record holds
+     * them, never copied — and `runs` only the window of them a change works
+     * on, whole Strips from block `window_at`; on format v1 the window is the
+     * file, window_at 0 and `rec` NULL. A book's Plot whose file was given up
+     * holds none, and every change of it is refused ERR_FILE_NOT_FOUND. */
+    FileRecord   *rec;
+    uint64_t      window_at;      /* the file's block runs[0] begins at */
+    uint64_t      window_was;     /* the blocks of `rec` the window took in: what its splice takes out */
+    bool          windowed;       /* the window is open */
+    Strip        *fresh;          /* ground taken for blocks written over, from file block fresh_at on */
+    uint32_t      fresh_count;
+    uint32_t      fresh_room;
+    uint64_t      fresh_at;
+    uint64_t      fresh_blocks;
+    PlotDigest   *digests;        /* every block this call wrote, with its digest */
+    uint32_t      digest_count;
+    uint32_t      digest_room;
+    uint64_t      ribbon_held;    /* the ribbon's room held for its record from before its data to its
+                                   * Ink (RibbonReserve), of the mounting `mount_epoch` names */
 } Plot;
 
 /* The file's record, out of the map of live files afresh — never a handle's
@@ -117,6 +146,9 @@ typedef struct {
     uint64_t bytes;    /* the write's bytes it carries */
     PlotFill first;    /* what the first block does with the rest of it */
     PlotFill last;     /* ... and the last — the first's own when it is one block */
+    uint64_t from_first;  /* the block the rest of the first is read from: `block` itself on format
+                           * v1, the file's old block on fresh ground (format v2, §3.1) */
+    uint64_t from_last;   /* ... and of the last */
 } PlotStretch;
 
 /* The stretch a write reaches at file byte `pos` with `left` of its bytes
@@ -278,6 +310,23 @@ error_t  PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *
  * loaded from — the same shape (TagFSInkPlot). OK or ERR_NO_MEMORY.
  */
 error_t  PlotConveyance(const Plot *p, const FileRecord *cur, BookSplice **out, uint64_t *count);
+
+/* A book's Plot (plot_window.c): its window made the whole file — for a
+ * change that moves every run (a defrag) — OK, or ERR_NO_MEMORY; nothing on
+ * format v1, whose Plot holds the file. And `count` blocks this call wrote
+ * from `block` on, `data` what they hold: each one's digest kept, for the
+ * Gloss and the stitch that names it (§2.8, §8.1) — nothing on format v1,
+ * whose writes record their digests as they land. OK or ERR_NO_MEMORY. */
+error_t  PlotWindowWhole(Plot *p);
+error_t  PlotWindowLanded(Plot *p, uint64_t block, const uint8_t *data, uint32_t count);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's measure that a write copies only the Strips around its change
+ * (§2.9, H-5): from PlotWindowMeasure(fid) on, the most Strips one window of
+ * the file `fid` copied out of its record — 0 for no file. */
+void     PlotWindowMeasure(uint64_t fid);
+uint64_t PlotWindowMeasured(void);
+#endif
 
 #if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
 /* After every Ink of format v1 (plot_conveyance.c): whether memory's record

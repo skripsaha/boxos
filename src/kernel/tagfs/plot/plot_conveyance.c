@@ -32,22 +32,31 @@ static bool StripSame(const Strip *a, const Strip *b)
  * last one puts in as many blocks as it takes out, and its `at` is the same
  * in the file before and after.
  */
-static uint64_t ConveyanceSplices(const FileRecord *cur, const Strip *runs, uint32_t n,
-                                  BookSplice *out)
+/* The next of the record's Strips the walk gives, while the window took it
+ * in: *taken counts its blocks against `took`. */
+static bool ConveyanceNext(StripWalk *w, Strip *o, uint64_t *taken, uint64_t took)
+{
+    if (*taken >= took || !StripWalkNext(w, o))
+        return false;
+    *taken += o->count;
+    return true;
+}
+
+static uint64_t ConveyanceSplices(const FileRecord *cur, uint64_t from, uint64_t took, const Strip *runs,
+                                  uint32_t n, BookSplice *out)
 {
     StripWalk w;
     Strip     o;
-    uint64_t  po = 0, pn = 0, count = 0;
+    uint64_t  po = from, pn = from, count = 0, taken = 0, begins = 0;
     uint32_t  j = 0;
-    StripWalkBegin(cur, &w);
-    bool has = StripWalkNext(&w, &o);
+    bool      has = StripWalkAt(cur, from, &w, &begins) && ConveyanceNext(&w, &o, &taken, took);
 
     while (has || j < n) {
         if (has && j < n && po == pn && StripSame(&o, &runs[j])) {
             po += o.count;
             pn += runs[j].count;
             j++;
-            has = StripWalkNext(&w, &o);
+            has = ConveyanceNext(&w, &o, &taken, took);
             continue;
         }
         uint64_t at = pn, from = po;
@@ -57,7 +66,7 @@ static uint64_t ConveyanceSplices(const FileRecord *cur, const Strip *runs, uint
             bool new_behind = j < n && (!has || pn <= po);
             if (old_behind) {
                 po += o.count;
-                has = StripWalkNext(&w, &o);
+                has = ConveyanceNext(&w, &o, &taken, took);
             }
             if (new_behind)
                 pn += runs[j++].count;
@@ -72,10 +81,14 @@ static uint64_t ConveyanceSplices(const FileRecord *cur, const Strip *runs, uint
     return count;
 }
 
+/* A book's Plot conveys its window, from block window_at, of the
+ * window_was blocks of the record it took in; format v1's the whole file. */
 error_t PlotConveyance(const Plot *p, const FileRecord *cur, BookSplice **out, uint64_t *count)
 {
+    uint64_t from = p->book ? p->window_at : 0;
+    uint64_t took = p->book ? p->window_was : cur->blocks;
     *out   = NULL;
-    *count = ConveyanceSplices(cur, p->runs, p->run_count, NULL);
+    *count = ConveyanceSplices(cur, from, took, p->runs, p->run_count, NULL);
     if (*count == 0)
         return OK;
     *out = kmalloc(sizeof(BookSplice) * *count);
@@ -83,7 +96,7 @@ error_t PlotConveyance(const Plot *p, const FileRecord *cur, BookSplice **out, u
         *count = 0;
         return ERR_NO_MEMORY;
     }
-    ConveyanceSplices(cur, p->runs, p->run_count, *out);
+    ConveyanceSplices(cur, from, took, p->runs, p->run_count, *out);
     return OK;
 }
 

@@ -294,22 +294,23 @@ census_book() {
 #   stand_stitch_retry_quire_entered               1        1       1   the first atom of the Quire entered
 #   stand_stitch_retry_refused_twice               2        2       2   a stitch and its retry at the next's start
 #   stand_docket_closed_damaged                    4        4       4   the stitch's unit, then its sector, read twice
-#   total                                         18       36      19
+#   stand_fresh_refused_names_nothing              1        1       1   the first command of a file's write
+#   stand_fresh_flushes_first                      1        1       1   the flush of the data before the stitch
+#   total                                         20       38      21
 #   stand_stitch_refused_everywhere                N        N       N   every attempt, as many as its line says
 #   stand_stitch_retry_runs_out                    N        N       N   a stitch and every atom of the next: its line
 # ---------------------------------------------------------------------------
 
-STAND_BOOK_BLOCKFAILS=18
-STAND_BOOK_PADDED_BLOCKFAILS=36
-STAND_BOOK_UEFI_BLOCKFAILS=19
+STAND_BOOK_BLOCKFAILS=20
+STAND_BOOK_PADDED_BLOCKFAILS=38
+STAND_BOOK_UEFI_BLOCKFAILS=21
 STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
 # C13 (stand_docket_closed_damaged): sector 1 of a stitch the kernel sewed will
 # not read at the next mount — the line names it and the record bytes it took.
 STAND_BOOK_C13='^\[TagFS\] ribbon STITCH_TORN: stitch [0-9]+ is closed and damaged: sector\(s\) 1 of its [0-9]+ will not read, and [1-9][0-9]* byte\(s\) of its records with them'
 STAND_BOOK_REFUSED='^\[TagFS\] the book takes no write: ([0-9]+) refusal\(s\) in a row'
-STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes files made, named, tagged and given up, the names of tags and the memory of its Use Context'
+STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes files made, written, named, tagged and given up, the names of tags and the memory of its Use Context'
 STAND_BOOK_NO_TALLY='^\[TagFS\] no Tally is written by this kernel: the ribbon is read whole at every mount'
-STAND_BOOK_FILES_REFUSED='^\[TagFS\] this kernel writes files, their names, their tags and their giving up into a format-v2 book, and not yet the data of a file'
 STAND_BOOK_TESTS="stand_tally_files_read_whole stand_tally_mount_writes_nothing stand_tally_copy_one_rotten
 stand_tally_rotten_leaf_locked stand_tally_writes_refused stand_tally_rot_three_paths
 stand_tally_undigested_refused stand_tally_length_asked stand_tally_lower_doors_refused
@@ -369,9 +370,6 @@ stand_book_judge() {
     fi
     grep -aqE "$STAND_BOOK_PROMISE" "$L" && grep -aqE "$STAND_BOOK_NO_TALLY" "$L"
     chk $? "stand: $what — the mount says what the book takes and that no Tally is written"
-    got=$(grep -acE "$STAND_BOOK_FILES_REFUSED" "$L")
-    [ "$got" -ge 1 ]
-    chk $? "stand: $what — a change to a file is refused in so many words ($got)"
     ! grep -aqF "[TagFS] the volume may only be read: this kernel reads format-v2 books" "$L"
     chk $? "stand: $what — no book stands under glass for being a book"
     grep -aqE '^\[Integrity\] block [0-9]+ carries no digest in its volume.s Tally' "$L"
@@ -466,14 +464,21 @@ stand_book() {
 # names circle`: Borns, Labeleds and a Quitclaim, each round a stitch), gives
 # up a file the maker laid with blocks of its own (BOOK_CIRCLE_GROUND) and runs
 # the ribbon past that Quitclaim's Quire with anchored renames (`quilltest
-# ground circle`), and the machine stops (`bye`), whose halt lays its last
-# stitch CLEAN. The image the machine left is then held: volume-read finds it
-# consistent; its census says what the next mount must — the stitches sewn on
-# and the last, the Use Context as said, CLEAN on the last, the given-up file's
-# ground let go by the ribbon and lying fallow (M-1), the free count — and the
-# next boot of the same image says exactly that in its own lines
-# (census_book_judge), the print of what memory holds — the files the program
-# left, by name and tags — included.
+# ground circle`), writes a file in rounds on fresh ground — written,
+# appended, written over whole and in part, cut, grown across a hole and
+# written inside it, each round anchored (`quilltest data circle`, its size
+# and the FNV-1a of its bytes said) — and the machine stops (`bye`), whose
+# halt lays its last stitch CLEAN. That boot's disk is recorded (POWERCUT=on),
+# and the order it finished the writes in is held to §3.3: the data, a flush,
+# the stitch that names it, a flush (book_circle_order). The image the machine
+# left is then held:
+# volume-read finds it consistent and reads the written file back byte for
+# byte as the guest read it; its census says what the next mount must — the
+# stitches sewn on and the last, the Use Context as said, CLEAN on the last,
+# the given-up file's ground let go by the ribbon and lying fallow (M-1), the
+# free count — and the next boot of the same image says exactly that in its
+# own lines (census_book_judge), the print of what memory holds — the files
+# the program left, by name, tags and runs — included.
 # ---------------------------------------------------------------------------
 
 BOOK_CIRCLE_USE="circle,sewn"
@@ -481,15 +486,17 @@ BOOK_CIRCLE_GROUND="proca.elf"
 
 book_circle() {
     local name=book_circle img="$SCRATCH/circle.img" json="$SCRATCH/census.book_circle.json" line rc
+    local base="$SCRATCH/circle.base.img" record="$SCRATCH/circle.record"
     echo "== book circle: what the kernel writes on a book, read back by both readers =="
-    rm -f build/boxos.img "$img" "$SCRATCH/serial.book_circle_write.log" "$SCRATCH/serial.$name.log"
+    rm -f build/boxos.img "$img" "$base" "$record" "$SCRATCH/serial.book_circle_write.log" "$SCRATCH/serial.$name.log"
     if ! build_with_key VOLUME_FORMAT=v2; then
         bad "circle: make VOLUME_FORMAT=v2 does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
         return
     fi
     cp build/boxos.img "$img"
+    cp -c "$img" "$base" 2>/dev/null || cp "$img" "$base"
     make run-stop >/dev/null 2>&1
-    if ! make run-bg BOOTDISK="$img" >"$SCRATCH/circle.run-bg" 2>&1; then
+    if ! make run-bg BOOTDISK="$img" POWERCUT=on POWERCUT_LOG="$record" >"$SCRATCH/circle.run-bg" 2>&1; then
         harness "circle: run-bg would not start the book's image: $(tail -1 "$SCRATCH/circle.run-bg")"
         return
     fi
@@ -498,6 +505,8 @@ book_circle() {
         wait_for_line -E build/serial.log '\[QUILL\] names: ' "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest ground circle $BOOK_CIRCLE_GROUND" &&
         wait_for_line -E build/serial.log '\[QUILL\] ground: ' "$WAIT_QUIET_S" && wait_for_prompt &&
+        type_line "quilltest data circle" &&
+        wait_for_line -E build/serial.log '\[QUILL\] data: ' "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
     rc=$?
     sleep 1
@@ -507,6 +516,8 @@ book_circle() {
     chk $? "circle: the guest makes, tags, renames, untags and gives up files in three anchored rounds ($(grep -aoE '\[QUILL\] names: [A-Z]+ — [^,]*' "$SCRATCH/serial.book_circle_write.log" | head -1))"
     grep -aqE '\[QUILL\] ground: PASS' "$SCRATCH/serial.book_circle_write.log"
     chk $? "circle: the guest gives up $BOOK_CIRCLE_GROUND, blocks and all, and runs the ribbon past its Quitclaim's Quire ($(grep -aoE '\[QUILL\] ground: [A-Z]+ — [^,]*' "$SCRATCH/serial.book_circle_write.log" | head -1))"
+    grep -aqE '\[QUILL\] data: PASS' "$SCRATCH/serial.book_circle_write.log"
+    chk $? "circle: the guest writes a file in anchored rounds on fresh ground and reads back the bytes they wrote ($(grep -aoE '\[QUILL\] data: [A-Z]+ — [^,]*' "$SCRATCH/serial.book_circle_write.log" | head -1))"
     [ $rc = 0 ] && grep -aq '^\[HALT\] Storage sync complete' "$SCRATCH/serial.book_circle_write.log"
     chk $? "circle: the guest says a Use Context and stops, the halt syncing the volume ($(grep -aE '^\[HALT\] (Storage sync complete|.*NOT MADE DURABLE|.*DID NOT WRITE)' "$SCRATCH/serial.book_circle_write.log" | head -1 | cut -c1-100))"
     python3 tools/volume-read.py "$img" check --json >"$json" 2>"$SCRATCH/circle.check.err"
@@ -536,6 +547,9 @@ CIRCLE_EOF
             *)       bad "circle: ${line#bad }" ;;
         esac
     done < "$SCRATCH/circle.verdict"
+    book_circle_data "$img" "$SCRATCH/serial.book_circle_write.log"
+    book_circle_order "$base" "$record" "$img"
+    rm -f "$base" "$record"
     if ! make run-bg BOOTDISK="$img" >"$SCRATCH/circle.again.run-bg" 2>&1; then
         harness "circle: run-bg would not start the written book again: $(tail -1 "$SCRATCH/circle.again.run-bg")"
         return
@@ -554,6 +568,272 @@ CIRCLE_EOF
     done < "$SCRATCH/census.$name.verdict"
     grep -aq '^\[TagFS\] the last stitch of the ribbon says CLEAN' "$SCRATCH/serial.$name.log"
     chk $? "circle, the next mount: it reads the halt's last stitch CLEAN"
+    rm -f "$img"
+}
+
+# book_circle_data IMG LOG — the file the guest wrote in rounds (LOG's
+# `[QUILL] data: PASS` line: its name, its size and the FNV-1a of its bytes)
+# read back from IMG by volume-read: every byte the kernel wrote on fresh
+# ground, under the runs and digests its stitches name, as the guest read it.
+book_circle_data() {
+    local img=$1 log=$2 said name size print got
+    said=$(grep -aoE '\[QUILL\] data: PASS — [^ ]+ \(fid [0-9]+\).*: [0-9]+ bytes, print 0x[0-9A-F]+' "$log" | head -1)
+    name=$(printf '%s\n' "$said" | sed -E 's/.*PASS — ([^ ]+) .*/\1/')
+    size=$(printf '%s\n' "$said" | sed -E 's/.*: ([0-9]+) bytes, print .*/\1/')
+    print=$(printf '%s\n' "$said" | sed -E 's/.*print (0x[0-9A-F]+).*/\1/')
+    got=$(python3 tools/volume-read.py "$img" get "$name" 2>"$SCRATCH/circle.get.err" | python3 -c 'import sys
+b = sys.stdin.buffer.read()
+h = 0xCBF29CE484222325
+for x in b:
+    h = ((h ^ x) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+print("%u 0x%016X" % (len(b), h))' 2>/dev/null)
+    [ -n "$said" ] && [ "$got" = "$size $print" ]
+    chk $? "circle: volume-read reads ${name:-the written file} back as the guest read it — $got (the guest: $size $print)"
+}
+
+# book_circle_order BASE RECORD IMG — the order the disk finished the writes
+# of the boot that turned BASE into IMG, from the record blklogwrites kept of
+# it (POWERCUT=on), held to §3.3 as §16.2 п.7 puts it for this kernel: data →
+# FLUSH#1 → the stitch's atoms → FLUSH. Every stitch the ribbon of IMG carries
+# is read by volume-read's own reader (bookmount.py); the boot's are those
+# whose sectors the record wrote. The last write of every block of fresh data
+# their Born and Shaped records name, made before the stitch's first atom,
+# stands behind a flush the atom does not; the last atom of a stitch stands
+# behind a flush the next stitch's first does not; and every stitch the boot
+# sewed says DATA_FLUSHED. The record is first held to account for IMG, byte
+# for byte, or nothing it says means anything.
+book_circle_order() {
+    local base=$1 record=$2 img=$3 said line
+    said=$(python3 tools/volume-read.py "$base" cut "$record" --against "$img" 2>&1)
+    if [ $? != 0 ]; then
+        harness "circle: the record of the write boot does not account for the image it left — ${said:-no answer}"
+        return
+    fi
+    python3 - "$img" "$record" >"$SCRATCH/circle.order" 2>&1 <<'ORDER_EOF'
+import bisect, sys
+sys.path.insert(0, "tools")
+from volumeread import blklog, stitch, tally
+from volumeread.bookground import BookGround
+from volumeread.bookmount import BookMount
+from volumeread.medium import Medium
+from volumeread.ondisk import SECTORS_PER_BLOCK
+
+def say(held, text):
+    print(("ok " if held else "bad ") + text)
+
+def Fresh(u):
+    """The blocks of fresh data a stitch names: its Born and Shaped records'
+    DATA runs but SHARED ones (§2.7, stitch.Fresh)."""
+    out = []
+    for kind, _ign, body, _at in u.records:
+        if kind not in (stitch.BORN, stitch.SHAPED):
+            continue
+        d = stitch.RecordDecode(kind, body, u.seq)
+        runs = d["runs"] if kind == stitch.BORN else [x for _a, _m, rs in d["splices"] for x in rs]
+        for x in runs:
+            if not x.hole and tally.EXT_SHARED not in stitch.Extensions(x.ext):
+                out.extend(range(x.start, x.start + x.count))
+    return out
+
+medium = Medium(sys.argv[1])
+log = blklog.BlkLog(sys.argv[2], medium.SizeSectors())
+writes = [w for w in log.Writes() if not w.discard]
+touched = {}
+for i, w in enumerate(writes):
+    for s in range(w.lba, w.lba + w.sectors):
+        touched.setdefault(s, []).append(i)
+g = BookGround(medium)
+m = BookMount(g)
+if m.refusal or m.ribbon is None:
+    say(False, "the book the boot left does not mount: %s" % (m.refusal or "no ribbon"))
+    sys.exit(0)
+sewn = older = with_data = blocks = 0
+torn, unflagged, unwritten, unflushed, crossed = [], [], [], [], []
+before = None
+for u in m.ribbon.stitches:
+    at = [touched[g.base + p.Vlba()][-1] for p in u.places if g.base + p.Vlba() in touched]
+    if not at:
+        older += 1
+        before = None
+        continue
+    if not u.Sound() or len(at) != len(u.places):
+        torn.append(u.seq)
+        continue
+    sewn += 1
+    first, last = min(at), max(at)
+    if not u.head.flags & stitch.DATA_FLUSHED:
+        unflagged.append(u.seq)
+    if before is not None and writes[before[1]].epoch >= writes[first].epoch:
+        crossed.append((before[0], u.seq))
+    before = (u.seq, last)
+    fresh = Fresh(u)
+    with_data += bool(fresh)
+    blocks += len(fresh)
+    for b in fresh:
+        lasts = []
+        for k in range(SECTORS_PER_BLOCK):
+            seen = touched.get(g.base + b * SECTORS_PER_BLOCK + k, [])
+            j = bisect.bisect_left(seen, first)
+            lasts.append(seen[j - 1] if j else None)
+        if None in lasts:
+            unwritten.append((u.seq, b))
+        elif writes[max(lasts)].epoch >= writes[first].epoch:
+            unflushed.append((u.seq, b))
+tail = before is not None and writes[before[1]].epoch < len(log.epochs) - 1
+say(sewn > 0 and with_data > 0 and not torn,
+    "the record holds every sector of %u stitch(es) the boot sewed, %u naming %u block(s) of fresh data "
+    "(%u laid before it; %s not whole) over %u write(s) and %u flush(es)"
+    % (sewn, with_data, blocks, older, torn or "none", len(writes), len(log.flush_seqs)))
+say(not unwritten, "every block of fresh data a stitch names was written before the stitch's first atom "
+    "(%u not: %s)" % (len(unwritten), unwritten[:4]))
+say(not unflushed, "and stands behind a flush that atom does not — data, then FLUSH#1, then the stitch "
+    "(%u block(s) not: %s)" % (len(unflushed), unflushed[:4]))
+say(not crossed and tail, "the atoms of every stitch stand behind a flush the next stitch's first does not, "
+    "and the last stitch's behind one (%u crossed: %s; the last behind a flush: %s)" % (len(crossed), crossed[:4], tail))
+say(not unflagged, "every stitch the boot sewed says DATA_FLUSHED (%u do not: %s)" % (len(unflagged), unflagged[:4]))
+ORDER_EOF
+    while IFS= read -r line; do
+        case "$line" in
+            "ok "*)  ok  "circle, the order: ${line#ok }" ;;
+            *)       bad "circle, the order: ${line#bad }" ;;
+        esac
+    done < "$SCRATCH/circle.order"
+}
+
+# ---------------------------------------------------------------------------
+# book_big: a file larger than the room a machine is given, in one write
+#
+# The image this tree makes gives a running machine 64 MiB to work in
+# (create_tagfs.h GROUND_WORKING_ROOM_BLOCKS), so a file past that needs ground
+# the build does not lay: the image is copied, its volume's partition grown by
+# BOOK_BIG_GROW_MIB at its end — the volume is last on the medium (Makefile) —
+# and a book made on it again by create_tagfs --v2 with the shell, quilltest,
+# bye and the kernel. In the guest `quilltest big big BOOK_BIG_MIB` writes the file
+# in ONE write — the windows the Helm cuts it into each inked, the Docket
+# merging them into the one Born a stitch lays, its digests alone 8 bytes a
+# block — anchors it, reads every byte back and says the FNV-1a print, and the
+# machine stops. volume-read finds the image consistent and reads the file
+# back byte for byte; the next boot mounts what the census predicts
+# (census_book_judge, kernel = volume-read), and `quilltest big big` reads the
+# file once more, every block held to the digest the ribbon carries. The
+# guest says nothing while the one write and the read back run, so both are
+# waited for by the quiet a long medium transfer is allowed (WAIT_QUIET_SLOW_S).
+# ---------------------------------------------------------------------------
+
+BOOK_BIG_MIB=72
+BOOK_BIG_GROW_MIB=128
+BOOK_BIG_SAID='\[QUILL\] big: PASS — [^ ]+ \(fid [0-9]+\)[^:]*: [0-9]+ bytes, print 0x[0-9A-F]+'
+
+# book_big_said LOG — "SIZE PRINT" of LOG's PASS line, empty for none.
+book_big_said() {
+    grep -aoE "$BOOK_BIG_SAID" "$1" | head -1 | sed -E 's/.*: ([0-9]+) bytes, print (0x[0-9A-F]+)$/\1 \2/'
+}
+
+book_big() {
+    local name=book_big img="$SCRATCH/big.img" json="$SCRATCH/census.book_big.json"
+    local w="$SCRATCH/serial.book_big_write.log" parts said again got line rc
+    echo "== book big: a file past the room a machine is given, in one write, read back by both readers =="
+    rm -f "$img" "$w" "$SCRATCH/serial.$name.log"
+    if ! build_with_key VOLUME_FORMAT=v2; then
+        bad "big: make VOLUME_FORMAT=v2 does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+        return
+    fi
+    cp build/boxos.img "$img" || { harness "big: could not copy build/boxos.img"; return; }
+    # The volume's partition and the ESP's, the volume's grown in the file and
+    # the table written again with it.
+    parts=$(python3 - "$img" "$BOOK_BIG_GROW_MIB" 2>&1 <<'BIG_EOF'
+import os, struct, sys
+with open(sys.argv[1], "rb") as f:
+    mbr = f.read(512)
+found = {}
+for i in range(4):
+    e = mbr[446 + 16 * i:462 + 16 * i]
+    found[e[4]] = struct.unpack_from("<II", e, 8)
+if 0x7F not in found or 0xEF not in found:
+    sys.exit("the image's partition table names no volume (7f) or no ESP (ef)")
+start, ground = found[0x7F]
+ground += int(sys.argv[2]) * 2048
+os.truncate(sys.argv[1], (start + ground) * 512)
+# The table read, emptied for make_mbr.py to write it again: it writes only
+# into an empty one, so as never to take boot code grown into it.
+with open(sys.argv[1], "r+b") as f:
+    f.seek(446)
+    f.write(bytes(64))
+print(start, ground, *found[0xEF])
+BIG_EOF
+)
+    # shellcheck disable=SC2086
+    set -- $parts
+    if [ $# != 4 ] || ! python3 tools/make_mbr.py "$img" "$1,$2,7f,boot" "$3,$4,ef" >"$SCRATCH/big.mbr" 2>&1 ||
+       ! tools/create_tagfs --v2 "$img" src/userspace/shell/shell.bin "utility,system" \
+            src/userspace/apps/quilltest.elf "app,utility,test,system" src/userspace/utils/bye.elf "utility,system" \
+            build/kernel.bin "system" \
+            >"$SCRATCH/big.mkfs" 2>&1; then
+        harness "big: the grown image could not be made — ${parts:-no partitions} $(tail -1 "$SCRATCH/big.mkfs" 2>/dev/null)"
+        rm -f "$img"
+        return
+    fi
+    python3 tools/volume-read.py "$img" check >"$SCRATCH/big.before" 2>&1
+    [ "$(tail -1 "$SCRATCH/big.before")" = "check: consistent — 0 damage, 0 leak, 0 note" ]
+    chk $? "big: a book made on $(( $2 / 2048 )) MiB of ground, whole before the boot — $(tail -1 "$SCRATCH/big.before")"
+    make run-stop >/dev/null 2>&1
+    if ! make run-bg BOOTDISK="$img" MEM=2G >"$SCRATCH/big.run-bg" 2>&1; then
+        harness "big: run-bg would not start the grown book: $(tail -1 "$SCRATCH/big.run-bg")"
+        rm -f "$img"
+        return
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+        type_line "quilltest big big $BOOK_BIG_MIB" &&
+        wait_for_line -E build/serial.log '\[QUILL\] big: ' "$WAIT_QUIET_SLOW_S" && wait_for_prompt &&
+        type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
+    rc=$?
+    sleep 1
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$w"
+    said=$(book_big_said "$w")
+    [ -n "$said" ] && [ "${said% *}" = $((BOOK_BIG_MIB * 1048576)) ]
+    chk $? "big: the guest writes $BOOK_BIG_MIB MiB in one write, anchors it and reads every byte back ($(grep -aoE '\[QUILL\] big: [A-Z]+ — [^,]*' "$w" | head -1))"
+    [ $rc = 0 ] && grep -aq '^\[HALT\] Storage sync complete' "$w"
+    chk $? "big: the machine stops, the halt syncing the volume ($(grep -aE '^\[HALT\] (Storage sync complete|.*NOT MADE DURABLE|.*DID NOT WRITE)' "$w" | head -1 | cut -c1-100))"
+    python3 tools/volume-read.py "$img" check --json >"$json" 2>"$SCRATCH/big.check.err"
+    chk $? "big: volume-read finds the book consistent ($(python3 -c 'import json, sys
+print(json.load(open(sys.argv[1])).get("verdict", "no verdict"))' "$json" 2>/dev/null))"
+    got=$(python3 tools/volume-read.py "$img" get big-b.d 2>"$SCRATCH/big.get.err" | python3 -c 'import sys
+h = 0xCBF29CE484222325
+n = 0
+while True:
+    b = sys.stdin.buffer.read(1 << 20)
+    if not b:
+        break
+    n += len(b)
+    for x in b:
+        h = ((h ^ x) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+print("%u 0x%016X" % (n, h))' 2>/dev/null)
+    [ -n "$said" ] && [ "$got" = "$said" ]
+    chk $? "big: volume-read reads big-b.d back as the guest wrote it — ${got:-nothing} (the guest: ${said:-nothing})"
+    if ! make run-bg BOOTDISK="$img" MEM=2G >"$SCRATCH/big.again.run-bg" 2>&1; then
+        harness "big: run-bg would not start the written book again: $(tail -1 "$SCRATCH/big.again.run-bg")"
+        rm -f "$img"
+        return
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+        type_line "quilltest big big" && wait_for_line -E build/serial.log '\[QUILL\] big: ' "$WAIT_QUIET_SLOW_S"
+    rc=$?
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$name.log"
+    [ $rc = 0 ] || bad "big: the written book never reached a shell, or quilltest never answered"
+    census_book_judge "$name"
+    while IFS= read -r line; do
+        case "$line" in
+            "ok "*)  ok  "big, the next mount: ${line#ok }" ;;
+            "bad "*) bad "big, the next mount: ${line#bad }" ;;
+        esac
+    done < "$SCRATCH/census.$name.verdict"
+    again=$(book_big_said "$SCRATCH/serial.$name.log")
+    [ -n "$said" ] && [ "$again" = "$said" ]
+    chk $? "big, the next mount: the guest reads big-b.d back whole, every block held to its digest — ${again:-no PASS} (written: ${said:-nothing})"
+    ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]' "$w" "$SCRATCH/serial.$name.log"
+    chk $? "big: no panic, no fault"
     rm -f "$img"
 }
 

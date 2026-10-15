@@ -2,6 +2,7 @@
 #include "volume_digest.h"
 #include "volume_ribbon.h"
 #include "../settle/sewing.h"
+#include "../integrity/gloss.h"
 
 /*
  * The Docket (docket.h): the Jots waiting for the next stitch, in a list by fid
@@ -17,6 +18,7 @@
 
 static Jot*     s_head[JOT_LEVELS];
 static uint64_t s_count;
+static uint64_t s_takes;     /* the TAKEs the Docket has had, and the drops */
 
 /* The levels a Jot of `fid` stands in: one, and one more for each pair of
  * low bits of its hash that are both 0 — a quarter of the Jots of a level. */
@@ -50,12 +52,23 @@ Jot* JotMake(JotKind kind, uint64_t fid, FileRecord* was, FileRecord* now)
     return j;
 }
 
+/* The splices a BUILD found for the Jot let go of. */
+static void JotSplicesLetGo(Jot* j)
+{
+    kfree(j->splices);
+    kfree(j->inserted);
+    j->splices  = NULL;
+    j->inserted = NULL;
+    j->nsplices = 0;
+}
+
 void JotsLetGo(Jot* list)
 {
     while (list) {
         Jot* next = list->next[0];
         FileRecordRelease(list->was);
         FileRecordRelease(list->now);
+        JotSplicesLetGo(list);
         kfree(list);
         list = next;
     }
@@ -135,6 +148,7 @@ void DocketTakeLocked(DocketTaken* out)
     out->count = s_count;
     memset(s_head, 0, sizeof(s_head));
     s_count = 0;
+    s_takes++;
 }
 
 void DocketBackLocked(DocketTaken* t, Jot** spent)
@@ -175,16 +189,43 @@ void DocketDropAll(void)
     JotsLetGo(s_head[0]);
     memset(s_head, 0, sizeof(s_head));
     s_count = 0;
+    s_takes++;
+}
+
+bool DocketBaseLacks(uint64_t fid, uint64_t k, uint64_t block)
+{
+    Jot*     before[JOT_LEVELS];
+    Jot*     j = DocketFind(fid, before);
+    FileSpot spot;
+    if (!j)
+        return false;
+    if (!j->was)
+        return j->kind == JOT_BORN;
+    return !FileRecordFind(j->was, k, &spot) || spot.kind != STRIP_DATA || spot.block != block;
+}
+
+uint64_t DocketTakes(void)
+{
+    return s_takes;
 }
 
 // ----------------------------------------------------------------------------
 // The records a stitch carries of its Jots (§2.8)
 // ----------------------------------------------------------------------------
 
-/* The bytes a varint and a tag id take at the most (a record's tag and length
- * take STITCH_RECORD_HEAD_MOST, sewing.h). */
+/* The bytes a varint, a tag id and a run of the ribbon's form take at the most
+ * (a record's tag and length take STITCH_RECORD_HEAD_MOST, sewing.h). */
 #define JOT_VARINT_MOST       10u
 #define JOT_ID_MOST           5u
+#define JOT_RUN_MOST          15u    /* head 5, start 10: no extension is written here */
+
+/* The body of a Born of `now` at the most: its fields, its runs, a digest a
+ * block of them, and the empty Slip. */
+static uint64_t JotBornMost(const FileRecord* now)
+{
+    return 8u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * (uint64_t)now->tag_count +
+           JOT_RUN_MOST * now->strip_count + 8u * now->blocks + 2u;
+}
 
 /* The body of the record a change of `kind` from `was` to `now` becomes, at
  * the most: 0 for none. */
@@ -192,19 +233,15 @@ static uint64_t JotBodyMostOf(JotKind kind, const FileRecord* was, const FileRec
 {
     switch (kind) {
     case JOT_BORN:
-        return 7u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * (uint64_t)now->tag_count + 2u;
+        return JotBornMost(now);
     case JOT_LABELED:
+    case JOT_SHAPED:
         return 6u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * ((uint64_t)now->tag_count + was->tag_count);
     case JOT_QUITCLAIM:
         return 2u * JOT_VARINT_MOST;
     default:
         return 0;
     }
-}
-
-static uint64_t JotBodyMost(const Jot* j)
-{
-    return JotBodyMostOf(j->kind, j->was, j->now);
 }
 
 /* A change's claims add up past what the records they merge into take: a Born
@@ -218,20 +255,66 @@ uint64_t DocketClaimOf(JotKind kind, const FileRecord* was, const FileRecord* no
     return STITCH_RECORD_HEAD_MOST + JotBodyMostOf(kind, was, now);
 }
 
-void DocketMeasure(const DocketTaken* t, uint64_t* records, uint64_t* bytes, uint64_t* body, uint32_t* tags)
+/* A Shaped's fields — fid, base, size, mtime, its count of splices — a
+ * splice's at, remove and count, and a digest a block of fresh data. */
+uint64_t DocketClaimOfShaped(uint64_t runs, uint64_t nsplice, uint64_t fresh)
+{
+    return STITCH_RECORD_HEAD_MOST + 5u * JOT_VARINT_MOST + 2u + nsplice * (3u * JOT_VARINT_MOST + 2u * JOT_RUN_MOST) +
+           runs * JOT_RUN_MOST + 8u * fresh;
+}
+
+/* Whether the file's data changed between the two: its size, its time, or
+ * its runs — the splices the BUILD found. */
+static bool JotShapes(const Jot* j)
+{
+    return j->was && j->now && (j->nsplices || j->was->size != j->now->size ||
+                                j->was->modified_time != j->now->modified_time);
+}
+
+/* The Shaped's body at the most, its splices found. */
+static uint64_t JotShapedMost(const Jot* j)
+{
+    uint64_t runs = 0, fresh = 0;
+    for (uint64_t i = 0; i < j->nsplices; i++) {
+        runs += j->splices[i].ninsert;
+        for (uint64_t k = 0; k < j->splices[i].ninsert; k++)
+            fresh += j->splices[i].insert[k].kind == STRIP_DATA ? j->splices[i].insert[k].count : 0u;
+    }
+    return DocketClaimOfShaped(runs, j->nsplices, fresh) - 2u * JOT_RUN_MOST * j->nsplices - STITCH_RECORD_HEAD_MOST;
+}
+
+/* The records `j` becomes at the most into the measure: how many, the bytes,
+ * the longest body. */
+static void JotMeasured(const Jot* j, uint64_t* records, uint64_t* bytes, uint64_t* body)
+{
+    uint64_t most[2] = { JotBodyMostOf(j->kind, j->was, j->now), 0 };
+    if ((j->kind == JOT_LABELED || j->kind == JOT_SHAPED) && JotShapes(j))
+        most[1] = JotShapedMost(j);
+    for (uint32_t k = 0; k < 2u; k++) {
+        if (!most[k])
+            continue;
+        (*records)++;
+        *bytes += STITCH_RECORD_HEAD_MOST + most[k];
+        *body   = most[k] > *body ? most[k] : *body;
+    }
+}
+
+error_t DocketMeasure(DocketTaken* t, uint64_t* records, uint64_t* bytes, uint64_t* body, uint32_t* tags)
 {
     *records = *bytes = *body = 0;
-    *tags  = 0;
-    for (const Jot* j = t->first; j; j = j->next[0]) {
-        uint64_t most = JotBodyMost(j);
-        if (!most)
-            continue;
+    *tags = 0;
+    for (Jot* j = t->first; j; j = j->next[0]) {
+        JotSplicesLetGo(j);
+        if ((j->kind == JOT_LABELED || j->kind == JOT_SHAPED) && j->was && j->now) {
+            error_t rc = FileRecordSplices(j->was, j->now, &j->splices, &j->nsplices, &j->inserted);
+            if (rc != OK)
+                return rc;
+        }
         uint32_t worn = (j->now ? j->now->tag_count : 0u) + (j->was ? j->was->tag_count : 0u);
-        (*records)++;
-        *bytes += STITCH_RECORD_HEAD_MOST + most;
-        *body   = most > *body ? most : *body;
-        *tags   = worn > *tags ? worn : *tags;
+        JotMeasured(j, records, bytes, body);
+        *tags = worn > *tags ? worn : *tags;
     }
+    return OK;
 }
 
 static int JotIdOrder(const void* a, const void* b, void* ctx)
@@ -262,24 +345,85 @@ static uint32_t JotTagsLess(const uint32_t* a, uint32_t na, const uint32_t* b, u
     return n;
 }
 
-/* A Born of the file as `now` holds it: no runs and no Slip — a file this
- * kernel makes on a book is born empty, and no change to its data is taken
- * (ink.c, StitchFilesRefused). */
-static uint32_t JotBornPut(const Jot* j, uint8_t* body, uint32_t* scratch, uint8_t* ids)
+/* What a record lays apart from its body before the body is put together: the
+ * runs it carries, of the ribbon's form, and their digests. */
+typedef struct {
+    uint8_t* runs;
+    uint32_t runs_bytes;
+    uint8_t* digests;
+    uint64_t ndigests;
+    uint64_t cursor;     /* the end of the last DATA run laid, as the ribbon's form counts from it */
+} JotApart;
+
+/* `s` laid as a run of the ribbon's form, and the digests the Gloss holds for
+ * its blocks after the ones laid — a block the Gloss does not name is a
+ * defect of the writer, said, and laid as no digest a block of data has. */
+static void JotRunPut(JotApart* a, const Strip* s, uint64_t fid)
+{
+    TallyRun r = { .start = s->start, .count = s->count, .birth = 0, .hole = s->kind == STRIP_HOLE };
+    a->runs_bytes += RibbonRunPut(a->runs + a->runs_bytes, &r, &a->cursor);
+    if (r.hole)
+        return;
+    if (!GlossCopy(s->start, s->count, a->digests + a->ndigests * 8u)) {
+#if CONFIG_STRICT
+        panic("[TagFS] DEFECT: file %llu puts in blocks %llu..%llu whose digests the Gloss does not hold",
+              (unsigned long long)fid, (unsigned long long)s->start, (unsigned long long)(s->start + s->count - 1u));
+#endif
+        kprintf("[TagFS] DEFECT: file %llu puts in blocks %llu..%llu whose digests the Gloss does not hold — "
+                "the stitch names them with none, and a read of them is refused ERR_CHECKSUM\n",
+                (unsigned long long)fid, (unsigned long long)s->start, (unsigned long long)(s->start + s->count - 1u));
+        memset(a->digests + a->ndigests * 8u, 0, (size_t)s->count * 8u);
+    }
+    a->ndigests += s->count;
+}
+
+/* A Born of the file as `now` holds it: its runs, the digest of every block of
+ * them, and no Slip — this kernel lays a file's tail as a block (§2.8). */
+static uint32_t JotBornPut(const Jot* j, uint8_t* body, uint32_t* scratch, uint8_t* ids, JotApart* a)
 {
     const FileRecord* f = j->now;
     uint32_t          n = JotTagsRising(f, scratch);
-    RibbonBorn        b = {
+    StripWalk         w;
+    Strip             s;
+    StripWalkBegin(f, &w);
+    while (StripWalkNext(&w, &s))
+        JotRunPut(a, &s, j->fid);
+    RibbonBorn b = {
         .fid = j->fid, .flags = f->flags, .size = f->size, .created_ns = f->created_time,
         .modified_ns = f->modified_time, .name = (const uint8_t*)f->name, .name_len = f->name_len,
-        .ntags = n, .tags = ids, .tags_bytes = TallyIdsPut(ids, scratch, n),
+        .ntags = n, .tags = ids, .tags_bytes = TallyIdsPut(ids, scratch, n), .nruns = f->strip_count,
+        .runs = a->runs, .runs_bytes = a->runs_bytes, .ndigests = a->ndigests, .digests = a->digests,
     };
     return RibbonBornBodyPut(body, &b);
 }
 
+/* A Shaped of how the file's data changed between `was` and `now`: its
+ * splices, each `at` from the end of the one before in the file as it stands
+ * after it (§2.8), the digests of the blocks they put in, and no Slip. */
+static uint32_t JotShapedPut(const Jot* j, uint64_t seq, uint8_t* body, JotApart* a)
+{
+    uint64_t end = 0;
+    for (uint64_t i = 0; i < j->nsplices; i++) {
+        const BookSplice* sp = &j->splices[i];
+        a->runs_bytes += BookVarintPut(a->runs + a->runs_bytes, sp->at - end);
+        a->runs_bytes += BookVarintPut(a->runs + a->runs_bytes, sp->remove);
+        a->runs_bytes += BookVarintPut(a->runs + a->runs_bytes, sp->ninsert);
+        end = sp->at;
+        for (uint64_t k = 0; k < sp->ninsert; k++) {
+            JotRunPut(a, &sp->insert[k], j->fid);
+            end += sp->insert[k].count;
+        }
+    }
+    RibbonShaped sh = { .fid = j->fid, .base = seq - j->was->gen, .size = j->now->size,
+                        .mtime_ns = j->now->modified_time, .nsplice = j->nsplices, .splices = a->runs,
+                        .splices_bytes = a->runs_bytes, .ndigests = a->ndigests, .digests = a->digests };
+    return RibbonShapedBodyPut(body, &sh);
+}
+
 /* A Labeled of what differs between `was` and `now` — the name, the flags set
- * and cleared, the tags put on and taken off — or 0 when nothing does. */
-static uint32_t JotLabeledPut(const Jot* j, uint64_t seq, uint8_t* body, uint32_t* scratch, uint8_t* ids)
+ * and cleared, the tags put on and taken off — over the file at `base`, or 0
+ * when nothing does. */
+static uint32_t JotLabeledPut(const Jot* j, uint64_t base, uint8_t* body, uint32_t* scratch, uint8_t* ids)
 {
     const FileRecord* was = j->was;
     const FileRecord* now = j->now;
@@ -290,7 +434,7 @@ static uint32_t JotLabeledPut(const Jot* j, uint64_t seq, uint8_t* body, uint32_
     uint32_t          na  = JotTagsLess(n, nn, w, nw, add);
     uint32_t*         drop = add + na;
     uint32_t          nd  = JotTagsLess(w, nw, n, nn, drop);
-    RibbonLabeled     l   = { .fid = j->fid, .base = seq - was->gen };
+    RibbonLabeled     l   = { .fid = j->fid, .base = base };
     if (was->name_len != now->name_len || memcmp(was->name, now->name, now->name_len) != 0) {
         l.what    |= LABEL_NAME;
         l.name     = (const uint8_t*)now->name;
@@ -312,32 +456,64 @@ static uint32_t JotLabeledPut(const Jot* j, uint64_t seq, uint8_t* body, uint32_
     return l.what ? RibbonLabeledBodyPut(body, &l) : 0u;
 }
 
-error_t DocketLay(DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uint32_t* at, uint8_t* body,
-                  uint32_t* starts, uint32_t* n)
+/* One record into the stream at *at, its offset into starts[(*n)++]. */
+static void JotRecordPut(uint8_t* out, uint32_t* at, uint32_t* starts, uint32_t* n, uint32_t kind,
+                         const uint8_t* body, uint32_t len)
 {
+    starts[(*n)++] = *at;
+    *at           += RibbonRecordPut(out + *at, kind, 0, body, len);
+}
+
+/* The records of a changed file: a Shaped of its data, then a Labeled of its
+ * fields over the gen the Shaped gave it — the stitch's own seq (§3.7). */
+static void JotChangedPut(Jot* j, uint64_t seq, uint8_t* out, uint32_t* at, uint8_t* body, uint32_t* scratch,
+                          uint8_t* ids, JotApart* a, uint32_t* starts, uint32_t* n)
+{
+    uint64_t base = seq - j->was->gen;
+    if (JotShapes(j)) {
+        JotRecordPut(out, at, starts, n, RIBBON_SHAPED, body, JotShapedPut(j, seq, body, a));
+        j->carried = true;
+        base       = 0;
+    }
+    uint32_t len = JotLabeledPut(j, base, body, scratch, ids);
+    if (len) {
+        JotRecordPut(out, at, starts, n, RIBBON_LABELED, body, len);
+        j->carried = true;
+    }
+}
+
+error_t DocketLay(DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uint32_t* at, uint8_t* body,
+                  uint32_t* starts, uint32_t* n, uint64_t* fresh)
+{
+    uint64_t  room    = 0;
+    for (const Jot* j = t->first; j; j = j->next[0])
+        room = JotBodyMostOf(j->kind, j->was, j->now) > room ? JotBodyMostOf(j->kind, j->was, j->now) : room;
+    for (const Jot* j = t->first; j; j = j->next[0])
+        room = j->nsplices && JotShapedMost(j) > room ? JotShapedMost(j) : room;
     uint32_t* scratch = kmalloc(sizeof(uint32_t) * 2u * ((uint64_t)tags + 1u));
     uint8_t*  ids     = kmalloc((uint64_t)JOT_ID_MOST * tags + 1u);
-    error_t   rc      = scratch && ids ? OK : ERR_NO_MEMORY;
+    JotApart  a       = { .runs = kmalloc(room + 1u), .digests = kmalloc(room + 1u) };
+    error_t   rc      = scratch && ids && a.runs && a.digests ? OK : ERR_NO_MEMORY;
     for (Jot* j = t->first; rc == OK && j; j = j->next[0]) {
-        uint32_t len = 0, kind = 0;
-        j->carried = false;
+        a.runs_bytes = 0;
+        a.ndigests   = 0;
+        a.cursor     = 0;
+        j->carried   = false;
         if (j->kind == JOT_BORN) {
-            kind = RIBBON_BORN;
-            len  = JotBornPut(j, body, scratch, ids);
-        } else if (j->kind == JOT_LABELED) {
-            kind = RIBBON_LABELED;
-            len  = JotLabeledPut(j, seq, body, scratch, ids);
+            JotRecordPut(out, at, starts, n, RIBBON_BORN, body, JotBornPut(j, body, scratch, ids, &a));
+            j->carried = true;
+        } else if (j->kind == JOT_LABELED || j->kind == JOT_SHAPED) {
+            JotChangedPut(j, seq, out, at, body, scratch, ids, &a, starts, n);
         } else if (j->kind == JOT_QUITCLAIM) {
-            kind = RIBBON_QUITCLAIM;
-            len  = RibbonQuitclaimBodyPut(body, j->fid, seq - j->was->gen);
+            JotRecordPut(out, at, starts, n, RIBBON_QUITCLAIM, body,
+                         RibbonQuitclaimBodyPut(body, j->fid, seq - j->was->gen));
+            j->carried = true;
         }
-        if (!len)
-            continue;
-        j->carried    = true;
-        starts[(*n)++] = *at;
-        *at          += RibbonRecordPut(out + *at, kind, 0, body, len);
+        *fresh += a.ndigests;
     }
     kfree(scratch);
     kfree(ids);
+    kfree(a.runs);
+    kfree(a.digests);
     return rc;
 }

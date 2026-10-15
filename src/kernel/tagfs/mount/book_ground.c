@@ -1,6 +1,7 @@
 #include "book_mount.h"
 #include "ground_census.h"
 #include "../file_map/file_map.h"
+#include "../ink/ink.h"
 #include "crypto.h"
 
 /*
@@ -212,6 +213,9 @@ static uint32_t BookFilePrinted(uint32_t crc, const FileRecord* rec)
     return KCrc32cContinue(crc, (const uint8_t*)&nruns, sizeof(nruns));
 }
 
+/* Every live file's ground claimed, the print of them taken, and the file the
+ * loader reads the kernel by named once, so a change of a book's file asks
+ * the guard of its id and not of every run it has (ink.c, InkMayChange). */
 void BookFilesLaid(void)
 {
     TagFSState* fs   = tagfs_get_state();
@@ -225,8 +229,11 @@ void BookFilesLaid(void)
             if (!rec)
                 continue;
             StripWalkBegin(rec, &walk);
-            while (StripWalkNextGround(&walk, &run))
+            while (StripWalkNextGround(&walk, &run)) {
                 GroundClaim(GROUND_FILE, run.start, run.count, ids[i]);
+                if (!g_book.boot_fid && InkTouchesBoot(&run, 1))
+                    g_book.boot_fid = ids[i];
+            }
             for (uint32_t t = 0; t < rec->tag_count; t++)
                 if ((uint64_t)rec->tags[t] + 1u > g_book.next_tag)
                     g_book.next_tag = (uint64_t)rec->tags[t] + 1u;

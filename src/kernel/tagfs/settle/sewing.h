@@ -8,10 +8,11 @@
  * The Settle cycle of a format-v2 volume: a stitch on its ribbon a cycle
  * (spec_v2 §2.7, §3.2).
  *
- *   sewing.c    the cycle's steps — TAKE, BUILD, STITCH, LAST_FLUSH, DONE —
- *               and the stitch they lay: a StitchHead naming the last stitch
- *               by its seq and its Clasp, the records the cycle carries, a
- *               Clasp summing them, PAD to the end of its last atom
+ *   sewing.c    the cycle's steps — TAKE, BUILD, FIRST_FLUSH, STITCH,
+ *               LAST_FLUSH, DONE — and the stitch they lay: a StitchHead
+ *               naming the last stitch by its seq and its Clasp, the records
+ *               the cycle carries, a Clasp summing them, PAD to the end of its
+ *               last atom
  *   ribbon.c    where the ribbon goes on: the cursor past its last stitch,
  *               the next_quire given ahead of need, the Quire a refused write
  *               goes on in where the mount's reader takes it up (M-6), and
@@ -29,12 +30,13 @@
  *
  * What a stitch carries here: the tags given ids since the last stitch that
  * settled (Coined), the volume's Use Context when the person's word changed
- * (UseContext), a record of each file made, named, tagged or given up since
- * (Born, Labeled, Quitclaim — the Docket's, ink/docket.h), or nothing — an
- * empty stitch is the answer to a waiter, the halt's last word, the first
- * FLUSH of a mount (§3.5) and the stitch that closes a Quire early for room
- * (В1). A change to a file's data this kernel does not yet write into a book
- * (ink.h).
+ * (UseContext), a record of each file made, written, named, tagged or given up
+ * since (Born, Shaped, Labeled, Quitclaim — the Docket's, ink/docket.h), the
+ * blocks of fresh data they put in named with their digests and flushed
+ * before the stitch (FIRST_FLUSH), or nothing — an empty stitch is the answer
+ * to a waiter, the halt's last word, the first FLUSH of a mount (§3.5) and the
+ * stitch that closes a Quire early for room (В1). A tail shorter than a block
+ * goes as a block on fresh ground: this kernel lays no Slip (§2.8).
  */
 
 /* The bytes a record's tag and length take at the most, a StitchHead's whole
@@ -58,8 +60,8 @@ void        StitchRunEnd(error_t rc);
 uint64_t    StitchRunTarget(void);
 const char* StitchRunStage(void);
 
-/* A mount's first word for the writer: the book takes writes again, and the
- * refusal of a change to a file is said anew (settle.c, SettleMountReset). */
+/* A mount's first word for the writer: the book takes writes again
+ * (settle.c, SettleMountReset). */
 void        StitchMountReset(void);
 
 /*
@@ -180,16 +182,23 @@ bool     RibbonCloseEarly(void);
  *                     that only gives ground up (a Quitclaim), which the rest
  *                     of a Quire with no next_quire is kept for. With `bytes`
  *                     0, whether a record could be claimed now, nothing claimed
- *   RibbonReserve     under the state lock, before a tag a change brings is
- *                     given an id: `bytes` of its Coined held as a claim is, so
- *                     two changes do not both take the room one has; once the
- *                     tag holds its id the registry counts the Coined, and
- *                     RibbonReserveLetGo lets the hold go
+ *   RibbonReserve     under the state lock, before a change is made: `bytes`
+ *                     held as a claim is, so two changes do not both take the
+ *                     room one has — a tag's Coined before the tag is given an
+ *                     id (once it holds the id the registry counts the Coined,
+ *                     and RibbonReserveLetGo lets the hold go), and a write's
+ *                     record at its most before a byte of its data moves
+ *   RibbonClaimHeld   under the state lock, by the Ink of a change that held
+ *                     `held` bytes (RibbonReserve): the hold let go and `bytes`
+ *                     claimed in its place — judged only for what is past it,
+ *                     so a change refused before its data is never refused
+ *                     after it for what it held (P21); refused as RibbonClaim,
+ *                     the hold kept
  *   RibbonClaimTaken  under the state lock, at TAKE: every byte claimed so far,
  *                     taken by the stitch — every claim is an Ink's up to the
  *                     target, and the stitch carries its record
- *   RibbonClaimBack   under the state lock: claims given back — a cycle refused
- *                     gives back what it took, and a reservation is let go
+ *   RibbonClaimBack   under the state lock: claims given back to the next
+ *                     stitch — a cycle refused gives back what it took
  *   RibbonClaimSay    with no lock: a claim refused ERR_TAGFS_NO_SPACE said,
  *                     once a mount, as the ribbon run out
  *   RibbonFlightBegins under the state lock, at TAKE: the stitch in flight takes
@@ -204,6 +213,7 @@ bool     RibbonCloseEarly(void);
 error_t  RibbonClaim(uint64_t bytes, bool frees);
 error_t  RibbonReserve(uint64_t bytes);
 void     RibbonReserveLetGo(uint64_t bytes);
+error_t  RibbonClaimHeld(uint64_t held, uint64_t bytes);
 uint64_t RibbonClaimTaken(void);
 void     RibbonClaimBack(uint64_t bytes);
 void     RibbonClaimSay(error_t rc);
@@ -214,6 +224,9 @@ void     RibbonRoomOf(const RibbonCursor* c, uint64_t flight, uint64_t* any, uin
 #ifdef CONFIG_VOLUME_TESTS
 /* The cursor as it stands, for the stand between two cycles. */
 void     RibbonCursorStand(RibbonCursor* out);
+/* The bytes claimed by changes no stitch has taken, and those held for changes
+ * in the making (RibbonReserve), as they stand — for the stand. */
+void     RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved);
 #endif
 
 /*
@@ -226,5 +239,11 @@ void     RibbonCursorStand(RibbonCursor* out);
  */
 uint64_t TallyCostBlocks(void);
 uint64_t EndpaperKeeps(uint64_t quire_blocks);
+
+/* The free blocks a write of a file's data must leave (§3.6, §16.2 п.6): the
+ * Tally's two copies and a Quire of ribbon, by the last measure and what data
+ * was handed since — measured afresh when `afresh`. With no TagFS lock held;
+ * 0 before the ribbon's cursor is up. */
+uint64_t EndpaperDataKeeps(bool afresh);
 
 #endif /* TAGFS_SETTLE_SEWING_H */

@@ -346,6 +346,40 @@ bool TractFind(const Tract* root, uint64_t k, const Parcel** out, uint64_t* k_in
     }
 }
 
+bool TractWalkAt(const Tract* root, uint64_t k, StripWalk* w, uint64_t* begins)
+{
+    uint64_t steps = 0, at = k;
+    w->depth  = 0;
+    w->parcel = NULL;
+    w->strip  = 0;
+    if (!root || k >= TractBlocks(root))
+        return false;
+    for (const Tract* t = root;;) {
+        uint32_t i = KidAt(t, at, &steps);
+        at -= KidStart(t, i);
+        w->node[w->depth] = t;
+        w->slot[w->depth] = i;
+        w->depth++;
+        if (t->level == 0) {
+            const Parcel*   p   = t->kid[i].node;
+            const uint64_t* end = ParcelEnds(p);
+            uint32_t        lo = 0, hi = p->count;
+            while (lo < hi) {
+                uint32_t mid = lo + (hi - lo) / 2u;
+                if (end[mid] > at)
+                    hi = mid;
+                else
+                    lo = mid + 1u;
+            }
+            w->parcel = p;
+            w->strip  = lo;
+            *begins   = k - (at - (lo ? end[lo - 1u] : 0));
+            return true;
+        }
+        t = t->kid[i].node;
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Spliced
 // ----------------------------------------------------------------------------
