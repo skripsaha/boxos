@@ -743,6 +743,22 @@ static const QuillCase g_cases[] = {
       "after a reboot: are the COUNT empty files emptyfill made, deleted on the volume it left "
       "full, and the file that filled it after them, each answered OK",
       "nothing of emptyfill's files; COUNT file ids spent for good", false },
+    { "names", "NAME", 1, 0, QuillBookNames,
+      "on a book: are files made, tagged, renamed, untagged and given up in three anchored rounds what the "
+      "volume holds",
+      "NAME-kept.n, every earlier file of that name given up first", false },
+    { "namecut", "NAME", 1, 0, QuillBookNameCut,
+      "for SETTLECUT=stitch on a book: NAME<r>.n with two tags of 3000 bytes, anchored, round after round "
+      "until the machine stops",
+      "the files of the rounds whose stitches settled; never returns where the cut stops the machine", false },
+    { "namecheck", "NAME", 1, 0, QuillBookNameCheck,
+      "after namecut: which rounds' files are present, and the fid a file made now takes",
+      "NAME-after.n, not anchored", false },
+    { "ground", "NAME FILE", 2, 0, QuillBookGround,
+      "on a book: FILE, a file with bytes, given up and anchored, then NAME-x.n renamed and anchored 300 times, "
+      "the ribbon run past the Quitclaim's Quire",
+      "DESTRUCTIVE: FILE given up; NAME-x.n made and given up, every earlier file of that name or NAME-y.n "
+      "given up first", false },
     { "abba", "NAME TAGS EDGE", 3, 0, QUILL_THROWAWAY(QuillAbba),
       "does a machine of many cores come back while TAGS new tags and file ids past EDGE, where "
       "the file table takes its next block, grow the registry and the table, and three cabins of "

@@ -39,7 +39,7 @@
 #include "tagfs.h"
 #include "book_mount.h"   /* a file its book holds locked */
 #include "use_context.h"   /* the user's tags — folded into query and create */
-#include "ink.h"           /* InkBookRefuses — a book's file is not made by this kernel */
+#include "ink.h"           /* InkBookRefuses — a create a book refuses interns nothing */
 #include "vmm.h"
 #include "process.h"
 #include "kring.h"
@@ -804,12 +804,20 @@ static error_t storage_intern_all(const TagSpelling *tags, uint32_t count, uint3
 }
 
 /* A create a book refuses interns none of its tags (InkBookRefuses): the
- * next stitch would lay them down for a file that never was. */
-static error_t storage_create_taken(void)
+ * next stitch would lay them down for a file that never was. The room their
+ * Coineds take is held while they are interned, in one stay behind the door —
+ * the mount the hold was taken on is the one it is let go on. Room on the
+ * ribbon on its way is waited for like any room (SettleOpForRoom). */
+static error_t StorageCreateInterned(const TagSpelling *tags, uint32_t count, uint32_t **out_ids)
 {
+    uint64_t held = 0;
+    *out_ids = NULL;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = InkBookRefuses();
+    error_t rc = InkBookRefuses(tags, count, &held);
+    if (rc == OK)
+        rc = storage_intern_all(tags, count, out_ids);
+    InkBookHeldLetGo(held);
     tagfs_leave();
     return rc;
 }
@@ -881,15 +889,15 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (rc == OK)
         rc = storage_create_fits(filename, tags, own, total);
     if (rc == OK)
-        rc = storage_create_taken();
-    if (rc == OK)
-        rc = storage_intern_all(tags, total, &tag_ids);
+        rc = StorageCreateInterned(tags, total, &tag_ids);
     kfree(tags);
     UseListDrop(use);
     crate_buf_free(text);
     if (rc != OK) {
         kfree(tag_ids);
         kfree(filename);
+        if (rc == ERR_WOULD_BLOCK)
+            return SettleOpForRoom(op, crates, crate_count, ctx, 0);
         return rc;
     }
 

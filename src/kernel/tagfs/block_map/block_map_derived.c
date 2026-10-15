@@ -36,6 +36,9 @@ static struct {
     uint64_t*      stock[DERIVED_STOCK];   /* pages made before the state lock, for a change of the live map */
     uint64_t*      loose;                  /* pages a change of the live map let go of, past a full stock:
                                             * chained through their first word, freed after the lock */
+    uint64_t*      held;                   /* pages held for Fallow's gives (BlockMapDerivedHold), chained
+                                            * alike: drawn on once the stock is spent */
+    uint32_t       nheld;
 } s_map;
 
 static char s_words[224];
@@ -119,7 +122,12 @@ static uint64_t* PageTaken(void)
             return page;
         }
     }
-    return NULL;
+    uint64_t* page = s_map.held;
+    if (page) {
+        s_map.held = (uint64_t*)(uintptr_t)page[0];
+        s_map.nheld--;
+    }
+    return page;
 }
 
 /* A page the map no longer wants: the heap's again while it is built, with no
@@ -457,6 +465,52 @@ error_t BlockMapDerivedStock(void)
     return OK;
 }
 
+/*
+ * ‼ THE PAGES FALLOW'S GIVES MAY WANT ARE HELD BEFORE THE LOCK THEY ARE GIVEN
+ * UNDER (model A, §16.2 п.16). A cycle's DONE gives back every node that
+ * ripened, under the state lock, where the heap is asked for nothing; a run it
+ * gives back leaves a window mixed only at its two ends. So the cycle's TAKE
+ * holds what its gives may want — the windows each run of a node that may
+ * ripen reaches (FallowGiveRoomHold) — as pages chained apart from the stock,
+ * drawn on once the stock is spent: the held made `pages` exactly, those past
+ * it let go, and with them the pages earlier changes let go loose under the
+ * lock. A give a page is still short for leaves its run resting (fallow.c,
+ * NodeGiveBack), and the next cycle gives it.
+ */
+error_t BlockMapDerivedHold(uint32_t pages)
+{
+    TagFSLock* lock  = &tagfs_get_state()->lock;
+    uint64_t*  spare = NULL;
+    TagFSLockTake(lock);
+    if (!s_map.up)
+        pages = 0;
+    if (pages > s_map.windows)
+        pages = s_map.windows;      /* a window is made mixed once */
+    while (s_map.nheld > pages) {
+        uint64_t* page = s_map.held;
+        s_map.held = (uint64_t*)(uintptr_t)page[0];
+        s_map.nheld--;
+        page[0] = (uint64_t)(uintptr_t)spare;
+        spare   = page;
+    }
+    uint64_t* loose = PagesLooseTaken();
+    uint32_t  have  = s_map.nheld;
+    TagFSLockDrop(lock);
+    PagesLoose(spare);
+    PagesLoose(loose);
+    while (have < pages) {
+        uint64_t* page = kmalloc(DERIVED_WORDS * sizeof(uint64_t));
+        if (!page)
+            return ERR_NO_MEMORY;
+        TagFSLockTake(lock);
+        page[0]    = (uint64_t)(uintptr_t)s_map.held;
+        s_map.held = page;
+        have       = ++s_map.nheld;
+        TagFSLockDrop(lock);
+    }
+    return OK;
+}
+
 /* The run so far, `run` free blocks from `at`, grown by the free block or
  * blocks [b, b + n): a run begins only on `align`. Whether it reaches `want`. */
 static bool RunGrows(uint64_t b, uint64_t n, uint32_t align, uint64_t want, uint64_t* at, uint64_t* run)
@@ -545,6 +599,7 @@ void BlockMapDerivedLetGo(void)
     for (uint32_t i = 0; i < DERIVED_STOCK; i++)
         kfree(s_map.stock[i]);
     PagesLoose(s_map.loose);
+    PagesLoose(s_map.held);
     kfree(s_map.win);
     memset(&s_map, 0, sizeof(s_map));
 }

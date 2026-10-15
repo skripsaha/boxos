@@ -204,6 +204,12 @@ uint64_t SettleGivenLast(void)
     return s_given;
 }
 
+void SettleGivenLocked(uint64_t given)
+{
+    s_given        = given;
+    s_given_count += given;
+}
+
 // ----------------------------------------------------------------------------
 // The steps
 // ----------------------------------------------------------------------------
@@ -551,8 +557,7 @@ static void SettleDone(SettleSnap* snap)
     UseMemorySettled();
     LedgerSettled();
     GleanHeadSettled(&snap->head, snap->cycle, snap->mark.chain_first);
-    s_given = FallowRipen(closed, snap->cycle, &nodes);
-    s_given_count += s_given;
+    SettleGivenLocked(FallowRipen(closed, snap->cycle, &nodes));
     bool map_stood = IntegrityLayStands();
     TagFSLockDrop(&fs->lock);
 
@@ -832,6 +837,40 @@ error_t TagFSSettle(void)
 }
 
 /*
+ * A book's room (§3.4, §3.6, В1): ground a stitch gave up comes back once the
+ * ribbon left the Quire the stitch lies in and the lag's stitches settled past
+ * it. A cycle asked for room closes that Quire early when Fallow waits for it
+ * (sewing.c, StitchTake) — its stitch goes on at the start of the next_quire
+ * the last stitch names — and the lag's cycles after it give the ground back:
+ * as many rounds as that takes, judged as format v1's by what came back. Room
+ * on the ribbon is a cycle's to make even with nothing resting — the claims in
+ * flight settled, a next_quire asked for (settle/ribbon.c, RibbonClaim) — so
+ * one cycle is always run before the take is asked again, which says the last
+ * word itself: a book has no pool slack to glean and no map sector a give
+ * waits for.
+ */
+static error_t SettleForRoomBook(void)
+{
+    TagFSState* fs = tagfs_get_state();
+    for (uint64_t round = 0; round <= FallowLag() + 1u; round++) {
+        TagFSLockTake(&fs->lock);
+        uint64_t resting = FallowBlocks();
+        uint64_t given   = s_given_count;
+        uint64_t had     = fs->ledger.free_blocks;
+        TagFSLockDrop(&fs->lock);
+        error_t rc = SettleAskedFor(SETTLE_FOR_ROOM);
+        if (rc != OK)
+            return rc;
+        TagFSLockTake(&fs->lock);
+        bool came_back = s_given_count != given || fs->ledger.free_blocks > had;
+        TagFSLockDrop(&fs->lock);
+        if (came_back || resting == 0)
+            return OK;
+    }
+    return ERR_TAGFS_NO_SPACE;
+}
+
+/*
  * ‼ ROOM IS JUDGED BY WHAT CAME BACK (F01-3), never by what still rests:
  * deletes beside the asker put ground in Fallow as fast as a cycle gives some
  * back, and a cycle on another core may give all of it back between the
@@ -863,6 +902,8 @@ error_t SettleForRoom(void)
         SettleDemand(SETTLE_DEMAND_ROOM);
         return ERR_WOULD_BLOCK;
     }
+    if (fs->format == DEED_FORMAT_V2)
+        return SettleForRoomBook();
 
     /* With nothing resting, one cycle more lets Glean take the pool's slack off
      * its chain, at the lowered slack; what it takes rests like the rest. */

@@ -152,7 +152,7 @@ def RibbonEndCases(bt):
         for s in out[1:3]:
             bt.Zero(o, s.vlbas[4], s.of - 4)
 
-    return [
+    return [*CutCases(bt),
         Case("B17 a torn stitch", lambda o: Two(o, tear=True), must={"RIBBON_TORN"}, checks=[
             ("the ribbon ends on stitch 3, %u born and %u not" % (f1, f2),
              lambda c: [s.seq for s in c.mount.ribbon.stitches] == [3] and f1 in c.mount.files and
@@ -189,6 +189,48 @@ def RibbonEndCases(bt):
             ("no number seen past the end is given again",
              lambda c: c.mount.counts["next_seq"] == 7 and c.mount.counts["next_fid"] == bt.fid + 4)]),
     ]
+
+
+CUT_SECTORS = (1, 2, 3, 4, 7)
+
+
+def CutCases(bt):
+    """C2, a sector at a time: stitch 3 — two Coineds and the Born of a file
+    born empty wearing their tags, a kernel's stitch of a create — torn at its
+    sector k, the sectors from k on never landed. The ribbon ends before it
+    (m-1) whatever k, and every number the sectors that landed name — its seq,
+    each record's that lies whole in them — is never given again; a record cut
+    by the tear names nothing."""
+    t1, t2, fid = bt.tag, bt.tag + 1, bt.fid
+    sewn = {}
+
+    def Cut(o, k):
+        pen = bt.Pen(o)
+        s3 = pen.Sew([stitch.Coined(t1, b"c2key", b"v" * 600), stitch.Coined(t2, b"c2kin", b"w" * 600),
+                      stitch.Born(fid=fid, flags=ondisk.FILE_ACTIVE, size=0, created_ns=1, modified_ns=1,
+                                  name=b"c2.n", tags=(t1, t2), runs=[], digests=[])],
+                     flags=stitch.DATA_FLUSHED)
+        bt.Zero(o, s3.vlbas[k], s3.of - k)
+        sewn[k] = s3
+
+    def Whole(k, i):
+        """Whether record i of the torn stitch lies whole in its first k sectors."""
+        s3 = sewn[k]
+        return s3.starts[i + 1] <= k * bookread.PAYLOAD_BYTES
+
+    def Numbers(c, k):
+        want_fid = fid + 1 if Whole(k, 3) else fid
+        want_tag = t2 + 1 if Whole(k, 2) else t1 + 1 if Whole(k, 1) else t1
+        return (c.mount.counts["next_seq"] == 4 and c.mount.counts["next_fid"] == want_fid and
+                c.mount.counts["next_tag"] == want_tag)
+
+    return [Case("B55%s a create's stitch torn at its sector %u" % ("abcde"[n], k),
+                 lambda o, k=k: Cut(o, k), must={"RIBBON_TORN"}, checks=[
+                     ("the ribbon ends before it: no stitch sewn on, %u not born" % fid,
+                      lambda c: not c.mount.ribbon.stitches and fid not in c.mount.files),
+                     ("seq 3 and every number a record wholly landed names are never given again, and none a "
+                      "record cut by the tear names", lambda c, k=k: Numbers(c, k))])
+            for n, k in enumerate(CUT_SECTORS)]
 
 
 def RibbonCases(bt):
@@ -482,6 +524,126 @@ def RibbonBranchCases(bt):
              not any("M-6" in x.text for x in c.findings) and
              all(x.severity == "damage" for x in c.findings if x.code == "DEAD_BRANCH") and
              not c.mount.ribbon.lied)]),
+    ]
+
+
+def RibbonFurtherCases(bt):
+    """Rule (б′) (§16.4 п.4): a retry refused inside the next_quire and taken
+    further in it, a try refused that landed whole and the retry past it, the
+    next_quire run out by tries."""
+    f1, f2, f3 = bt.fid, bt.fid + 1, bt.fid + 2
+    flushed = stitch.DATA_FLUSHED
+
+    def Further(o, tries, landed=False):
+        """3; 4 refused in its Quire (and, `landed`, kept by the medium
+        whole); the cycle again at the start of the next_quire and on past
+        each try refused there (§16.4 п.4) — `tries` says how each landed:
+        "none", "whole" or "first" (its first sector alone) — then the retry
+        that lands, naming 3, and 2 more after it."""
+        d = bt.Fresh(o, 0, 3, 13)
+        pen = bt.Pen(o)
+        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"before")], flags=flushed)
+        pen.Sew([Born(bt.F + 1, f2, d[1:2], b"again")], flags=flushed, write=landed)
+        pen.Hop(back_to=s3)
+        for landed in tries:
+            t = pen.Sew([Born(bt.F + 1, f2, d[1:2], b"again")], flags=flushed, write=landed != "none")
+            if landed == "first":
+                bt.Zero(o, t.vlbas[1], t.of - 1)
+            pen.Again(back_to=s3)
+        pen.Sew([Born(bt.F + 1, f2, d[1:2], b"again")], flags=flushed)
+        pen.Sew([Born(bt.F + 2, f3, d[2:], b"after")], flags=flushed)
+
+    def RunOut(o):
+        """3; 4 refused in its Quire; every try after it refused in the
+        next_quire to its last atom, where the last one landed its first
+        sector alone: the next_quire has run out."""
+        d = bt.Fresh(o, 0, 2, 15)
+        pen = bt.Pen(o)
+        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"before")], flags=flushed)
+        pen.Sew([Born(bt.F + 1, f2, d[1:], b"again")], flags=flushed, write=False)
+        pen.Hop(back_to=s3)
+        while True:
+            last = pen.place.Left() <= SECTORS_PER_BLOCK
+            t = pen.Sew([Born(bt.F + 1, f2, d[1:], b"again")], flags=flushed, write=last)
+            if last:
+                bt.Zero(o, t.vlbas[1], t.of - 1)
+                return
+            pen.Again(back_to=s3)
+
+    def Long(o):
+        """A stitch an atom long on every atom of the Quire, and 40 more on
+        into the next_quire: a Quire's worth of stitches before it, and the
+        next_quire well into its own."""
+        pen = bt.Pen(o)
+        grid = pen.g.atom // bookread.SECTOR_BYTES
+        while pen.Room() > 2 * grid:
+            pen.Sew([stitch.UseContext(b"q")], flags=flushed)
+        for k in range(41):
+            pen.Sew([stitch.UseContext(b"n%u" % k)], flags=flushed)
+
+    def UnitsRead(c):
+        """How many units a walk of the ribbon the census read builds, its
+        direct scan past the end with it (stitch.Unit counted)."""
+        r, built, real = c.mount.ribbon, [0], stitch.Unit
+
+        class Counted(real):
+            __slots__ = ()
+
+            def __init__(self, *a):
+                built[0] += 1
+                real.__init__(self, *a)
+        stitch.Unit = Counted
+        try:
+            stitch.Ribbon(r.g, r.slot, r.taken)
+        finally:
+            stitch.Unit = real
+        return built[0]
+
+    chain = lambda c: [s.seq for s in c.mount.ribbon.stitches]
+    walked = lambda c, seqs: Found(c, "DEAD_BRANCH", "walked over", seqs) and \
+        all(x.severity == "note" for x in c.findings) and not c.mount.ribbon.lied
+    return [
+        Case("B29e a retry refused at the start of the next_quire and taken further in it",
+             lambda o: Further(o, ["none"]), must={"DEAD_BRANCH"}, checks=[
+                 ("rule (б′): the ribbon is 3, then 6 — on the atom past the try refused at the start of the "
+                  "next_quire, naming 3 and the Quire the first try came from — and 7 (§16.4 п.4)",
+                  lambda c: chain(c) == [3, 6, 7] and c.mount.ribbon.stitches[1].start.off == SECTORS_PER_BLOCK),
+                 ("%u, %u and %u stand" % (f1, f2, f3),
+                  lambda c: all(f in c.mount.files for f in (f1, f2, f3))),
+                 ("what was walked over is said as the pieces of a retry, none of it read — a note, no lie",
+                  lambda c: walked(c, "none that reads"))]),
+        Case("B29f two retries refused in a row inside the next_quire, the second landing a sector",
+             lambda o: Further(o, ["none", "first"]), must={"DEAD_BRANCH"}, checks=[
+                 ("the ribbon is 3, then 7, on the atom past 6's, and 8",
+                  lambda c: chain(c) == [3, 7, 8] and c.mount.ribbon.stitches[1].start.off == 2 * SECTORS_PER_BLOCK),
+                 ("6, a unit whose first sector alone holds, is stepped over by its `of` and said walked over",
+                  lambda c: walked(c, "seq 6") and f2 in c.mount.files and f3 in c.mount.files)]),
+        Case("B29g a retry refused at the start of the next_quire that landed whole, and the one after it",
+             lambda o: Further(o, ["whole"]), must={"DEAD_BRANCH"}, checks=[
+                 ("5, whole and naming 3, is passed over for 6 after it, which names 3 with the larger seq "
+                  "(§16.3 п.11, §16.4 п.4): the ribbon is 3, 6, 7",
+                  lambda c: chain(c) == [3, 6, 7] and f2 in c.mount.files and f3 in c.mount.files),
+                 ("5 is said walked over as the pieces of a retry — a note, no lie", lambda c: walked(c, "seq 5"))]),
+        Case("B29i a try refused that landed whole in its Quire, its retry refused at the start of the "
+             "next_quire, and the one past it", lambda o: Further(o, ["none"], landed=True),
+             must={"DEAD_BRANCH"}, checks=[
+                 ("nothing past 4 names it, so rule (б′) is weighed: 6, past the try at the next_quire's start, "
+                  "names 3 with the larger seq and is taken, then 7 (§16.3 п.11, §16.4 п.4)",
+                  lambda c: chain(c) == [3, 6, 7] and f2 in c.mount.files and f3 in c.mount.files),
+                 ("4 is said as the pieces of a retry, and the start of the next_quire walked over — notes, no lie",
+                  lambda c: Found(c, "DEAD_BRANCH", "pieces of a retry", "seq 4") and walked(c, "none that reads"))]),
+        Case("B29j a Quire full of stitches and the next_quire well into its own", Long, must=set(), checks=[
+            ("every stitch is sewn on: the Quire's, and the 41 past it", lambda c: len(chain(c)) > 41 and
+             c.mount.ribbon.stitches[-1].start.quire != c.mount.ribbon.stitches[0].start.quire),
+            ("each unit of the chain is read once — rule (б′) is weighed for no stitch a later one names "
+             "(§16.4 п.4: its cost only after a refusal)",
+             lambda c: UnitsRead(c) <= len(chain(c)) + 8)]),
+        Case("B29h the next_quire run out by retries refused", RunOut, must={"DEAD_BRANCH"}, checks=[
+            ("no stitch past 3 is taken: the walk ends at the next_quire's end", lambda c: chain(c) == [3] and
+             f2 not in c.mount.files),
+            ("the last try, cut, is said as the pieces of a retry — a note, no lie",
+             lambda c: Found(c, "DEAD_BRANCH", "pieces of", "cut while it was written") and
+             all(x.severity == "note" for x in c.findings) and not c.mount.ribbon.lied)]),
     ]
 
 

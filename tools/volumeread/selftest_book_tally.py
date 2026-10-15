@@ -5,7 +5,7 @@ file, a run SHARED, BOOKMARKS not empty, a FRAME longer than known, a slot
 whose Tally does not read, no slot at all. Each a fork of the base
 selftest_book.py lays; what the book's census must say of it."""
 
-from . import binder, bookread, ondisk, stitch, tally
+from . import binder, bookread, ondisk, stitch, stitch_pen, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal
@@ -95,7 +95,7 @@ def Circles(bt):
         Case("B0c every record sewn, read back and sewn again is byte for byte",
              lambda o: sewn.setdefault("s", StitchCircle(o)), must={"UNDER_GLASS"}, checks=[
                  ("both stitches are taken whole and each record decodes to what was sewn",
-                  lambda c: stitch.Circle(c.mount.ribbon, sewn["s"]) == []),
+                  lambda c: stitch_pen.Circle(c.mount.ribbon, sewn["s"]) == []),
                  ("they apply: %s renamed, fid %u gone, fid %u undone" % (Label(L), gone, bt.fid),
                   lambda c: c.mount.files[L.fid].name == b"renamed" and gone not in c.mount.files and
                   bt.fid not in c.mount.files and bt.tag in c.mount.files[L.fid].tags),
@@ -322,6 +322,13 @@ def TreeShapeCases(bt):
     nxt = tuple(plan.next)
     if not nxt[1] or nxt[0] <= max(leaves[-1].blocks):
         raise Unreadable("the padded book's next Quire %u+%u does not lie past its last FILES leaf" % nxt)
+    # The blocks a rotten range holds are its files' that no one else claims:
+    # a pointer that reaches to the far Deed lays the Tally's claim over every
+    # block past the leaf, so the range holds blocks only where a file of the
+    # last leaf names ground short of it — which the layout of the image's own
+    # files decides, not the landing.
+    short = any(s < min(leaves[-1].blocks) for k, _b in leaves[-1].items for s, _n in content.files[k[0]].Ground())
+    far = {"RANGE_ROTTEN", "DOUBLE_OWNER", "RIBBON_TORN"} | ({"HELD_BLOCKS"} if short else set())
     nxt_rest = lambda c: all(any(s <= b < s + n for s, n in c.free_runs) for b in range(nxt[0] + 1, sum(nxt)))
 
     def SlotOver(o, index, seq, files_root=None):
@@ -372,7 +379,7 @@ def TreeShapeCases(bt):
              lambda c: Found(c, "RECORD_SHAPE", "FILES", "count")),
             ("and every file stays", lambda c: set(c.mount.files) == set(content.files))]),
         Case("B38b a FILES leaf's pointer names Sheets to the far Deed", lambda o: Oversheet(o, g.data_end),
-             must={"RANGE_ROTTEN", "HELD_BLOCKS", "DOUBLE_OWNER", "RIBBON_TORN"}, checks=[
+             must=far, checks=[
                  ("the leaf is a rotten range: neither copy is a unit that long",
                   lambda c: Found(c, "RANGE_ROTTEN", "FILES")),
                  ("and the ground its parent names for it — every block to the far Deed — is the Tally's, "

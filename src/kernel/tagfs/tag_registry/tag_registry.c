@@ -345,8 +345,11 @@ static error_t intern_unlocked(TagRegistry* reg, const TagSpelling* tag, uint32_
 
     uint32_t id = reg->next_id;
     error_t  rc = RegistryEnter(reg, tag, id, tag->value ? TAGFS_TAG_FLAG_HAS_VALUE : 0);
-    if (rc == OK)
+    if (rc == OK) {
         *out_id = id;
+        if (id >= reg->coined_next)
+            reg->coined_text += (uint64_t)tag->key_len + tag->value_len;
+    }
     return rc;
 }
 
@@ -386,6 +389,7 @@ int tag_registry_init(TagRegistry* reg) {
     reg->text_bytes       = 0;
     reg->next_id          = 0;
     reg->coined_next      = 0;
+    reg->coined_text      = 0;
     reg->id_most          = TAGFS_MAX_TAG_ID;
 
     TagFSLockInit(&reg->lock, "registry", LOCK_RANK_LEAF);
@@ -840,8 +844,20 @@ void TagRegistryCoinedRange(TagRegistry* reg, uint32_t* lo, uint32_t* hi) {
 
 void TagRegistryCoinedUpTo(TagRegistry* reg, uint32_t hi) {
     TagFSLockTake(&reg->lock);
+    for (uint32_t id = reg->coined_next; id < hi && id < reg->next_id; id++) {
+        const TagRegistryEntry* e = RegistryById(reg->by_id, reg->bucket_count, id);
+        uint64_t                text = e ? (uint64_t)e->key_len + e->value_len : 0;
+        reg->coined_text = reg->coined_text > text ? reg->coined_text - text : 0;
+    }
     if (hi > reg->coined_next)
         reg->coined_next = hi;
+    TagFSLockDrop(&reg->lock);
+}
+
+void TagRegistryCoinedHeld(TagRegistry* reg, uint32_t* count, uint64_t* text) {
+    TagFSLockTake(&reg->lock);
+    *count = reg->next_id > reg->coined_next ? reg->next_id - reg->coined_next : 0;
+    *text  = reg->coined_text;
     TagFSLockDrop(&reg->lock);
 }
 

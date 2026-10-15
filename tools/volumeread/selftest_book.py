@@ -27,7 +27,7 @@ prediction, as the census scenario holds the v1 mount.
 
 import struct
 
-from . import binder, bookread, ondisk, stitch, tally
+from . import binder, bookread, ondisk, stitch, stitch_pen, tally
 from .bookcensus import BookCensus
 from .bookground import BookGround
 from .medium import OverlayMedium, Unreadable
@@ -186,7 +186,7 @@ class BookTargets:
         return o
 
     def Pen(self, o):
-        return stitch.StitchPen(o, BookGround(o))
+        return stitch_pen.StitchPen(o, BookGround(o))
 
     def PutBlock(self, o, b, data):
         o.Put(self.ground.base + b * SECTORS_PER_BLOCK, bytes(data).ljust(BLOCK, b"\0"))

@@ -188,10 +188,10 @@ typedef struct {
     uint64_t          written_need;   /* the flush need of the records last written: a cycle's
                                        * first flush covers it before any record names them */
     bool              said_failing;   /* a refusal is said once, until a flush succeeds */
-    /* Format v2: every id below coined_next is in the book — its Tally's TAGS
-     * or a Coined of a stitch that settled — and a cycle lays the ones above
-     * down as Coineds (settle/sewing.c). Under `lock`. */
+    /* Format v2: every id below coined_next is in the book — its Tally's TAGS or a settled stitch's Coined —
+     * and a cycle lays the ones above down as Coineds (settle/sewing.c), coined_text bytes. Under `lock`. */
     uint32_t          coined_next;
+    uint64_t          coined_text;    /* what the ribbon's room holds for them (settle/ribbon.c, RibbonHeld) */
     bool              said_full;      /* every id issued: said once, the first time a tag is refused */
     Scribe            scribe;
 

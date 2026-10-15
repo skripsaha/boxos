@@ -242,6 +242,7 @@ void TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next) {
         reg->written_next = next;
     }
     reg->coined_next = reg->next_id;
+    reg->coined_text = 0;
     TagFSLockDrop(&reg->lock);
 }
 

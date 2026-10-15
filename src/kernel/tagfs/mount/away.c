@@ -1,4 +1,5 @@
 #include "away.h"
+#include "book_mount.h"
 #include "../ledger/ledger.h"
 #include "../scribe/scribe.h"
 #include "../settle/settle.h"
@@ -109,7 +110,7 @@ static void AwayRemember(bool lied)
     uint32_t    next_tag  = 0;
 
     TagFSLockTake(&fs->lock);
-    next_file = fs->ledger.next_file_id;
+    next_file = fs->format == DEED_FORMAT_V2 ? g_book.next_fid : fs->ledger.next_file_id;
     TagFSLockDrop(&fs->lock);
     if (fs->registry) {
         TagFSLockTake(&fs->registry->lock);

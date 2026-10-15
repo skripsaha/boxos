@@ -129,6 +129,8 @@ typedef struct {
     RibbonPlace      end;         /* where the next unit begins */
     bool             lied;
     RibbonUnit*      torn;        /* the stitch of this history torn right after the end */
+    RibbonUnit*      ahead;       /* the unit at the end of the stitch last taken, read to weigh it */
+    bool             ahead_read;  /* ... and read: NULL then is none there (ribbon_collate.c RibbonKept) */
     RibbonUnit**     past;        /* every unit past the end the direct scan found, by seq */
     uint32_t         npast;
     uint64_t         seen_fid;    /* past every number a record read gives, applied or not */
@@ -174,10 +176,25 @@ static inline bool RibbonQuireSame(const RibbonQuire* a, const RibbonQuire* b)
 error_t RibbonUnitRead(const RibbonPlace* start, uint32_t of, uint64_t seq, const RibbonQuire* hop,
                        RibbonUnit** out);
 
+#ifdef CONFIG_VOLUME_TESTS
+/* How many units RibbonUnitRead has read since boot (the stand's measure of
+ * what a walk of the ribbon costs). */
+uint64_t RibbonUnitsReadStand(void);
+#endif
+
 /* The unit of seq past `after` that begins at `place`, by the first sector
  * from there on through `hop` holding one (stitch.py FindUnit): *out NULL
  * when that sector belongs to a unit begun elsewhere, or there is none. */
 error_t RibbonUnitFind(const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, RibbonUnit** out);
+
+/* The first sector from `place` to the end of its Quire holding a stitch of
+ * seq past `after` (rule (б′), stitch.py Ribbon._Further): *found, its offset
+ * from `place` in *j and its head in *head — and, when it is the first sector
+ * of its unit, that unit read in *out, running on into the next_quire its own
+ * StitchHead names where that lies where one may. OK, or the medium's or
+ * memory's refusal. */
+error_t RibbonUnitAhead(const RibbonPlace* place, uint64_t after, uint64_t* j, BookSectorHead* head, bool* found,
+                        RibbonUnit** out);
 
 /* The StitchHead of the stitch whose first sector lies at `place`, that one
  * sector alone read: *found when it holds as the first sector of a stitch of
@@ -207,6 +224,15 @@ bool    RibbonUnitWhole(const RibbonUnit* u);
  * (RibbonWalkLetGo), ERR_NO_MEMORY, or the medium's refusal. */
 error_t RibbonCollate(const SpineSlot* slot, RibbonWalk** out);
 void    RibbonWalkLetGo(RibbonWalk* w);
+
+/* ribbon_scan.c ------------------------------------------------------------ */
+
+/* The direct scan (§2.2) past the end of the walk's chain: every unit there,
+ * the torn tail, and what each branch is, said. OK, ERR_NO_MEMORY, or the
+ * medium's refusal. */
+error_t RibbonScan(RibbonWalk* w);
+
+/* ribbon_collate.c, the walk ------------------------------------------------ */
 
 /* A walk begun at a slot's `at` — the slot stood on (`stood`: its lines said)
  * or another — its Quire and the next_quire it names weighed; *out the walk

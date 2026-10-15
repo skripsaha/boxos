@@ -8,9 +8,10 @@
 
 /*
  * The kit a book's writer is tested with (stand_stitch_tests.c), shared by the
- * suites that sew on a format-v2 volume's ribbon: stand_stitch, and
+ * suites that sew on a format-v2 volume's ribbon: stand_stitch,
  * stand_stitch_edge (stand_stitch_edge_tests.c) — the edges of a Quire, a
- * refusal there, and the measure of the Tally's reserve.
+ * refusal there, and the measure of the Tally's reserve — and stand_docket
+ * (stand_docket_tests.c), the files a book's Ink changes.
  *
  *   StandStitchAside    why a test written for a book's writer stands aside
  *                       here, or NULL — and where the ribbon stood, kept in *s
@@ -22,7 +23,12 @@
  *                       `k`-th word past any it said, settled by the cycle the
  *                       word demands: its answer, *kept whether the volume holds it
  *   StandStitchSayLong  the same, a word of `bytes` bytes of one letter
+ *   StandStitchSayFilling the same, a word whose stitch takes `sectors` sectors
+ *   StandStitchLayEmpty a stitch of no records laid by hand at the ribbon's end,
+ *                       its `flags`, naming the last: its Clasp (0 refused)
  *   StandStitchAnswered a waiter of the stand's own answered, as an anchor's is
+ *   StandStitchRead     the last stitch this mount sewed, read back whole with
+ *                       the mount's own reader (*out the caller's to let go)
  */
 
 /* Where the ribbon stood when the test began, on what seat and base, and
@@ -48,6 +54,13 @@ bool        StandStitchRemount(void);
 bool        StandStitchPutBack(const StandStitch* s);
 error_t     StandStitchSay(const char* text, size_t bytes, uint64_t k, bool* kept);
 error_t     StandStitchSayLong(uint64_t bytes, char letter, uint64_t k, bool* kept);
+error_t     StandStitchSayFilling(uint64_t sectors, char letter, uint64_t k, bool* kept);
+uint32_t    StandStitchLayEmpty(const StandStitch* s, uint64_t flags);
+
+/* The bytes a stitch's head, its UseContext's tag and length and its Clasp
+ * take, and more. */
+#define STAND_STITCH_SLACK  200u
+bool        StandStitchRead(RibbonUnit** out);
 
 #define STAND_STITCH_PUT_BACK(s)                                                                       \
     do {                                                                                               \

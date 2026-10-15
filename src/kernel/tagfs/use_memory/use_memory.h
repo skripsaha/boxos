@@ -102,8 +102,10 @@ UseSaid  UseMemorySay(UseText *said, uint64_t saying, uint64_t *ticket);
 
 /* remember's second half, once a cycle that began after demand `ticket` has
  * settled: whether the volume now holds exactly `said` — false when it had no
- * ground for it, or a later word stands. With no TagFS lock held. */
+ * ground for it, or a later word stands; and whether demand `ticket` was the
+ * last a book's stitch had no room for, and refused. With no TagFS lock held. */
 bool     UseMemoryKept(uint64_t ticket, const UseText *said);
+bool     UseMemoryRefused(uint64_t ticket);
 
 // ----------------------------------------------------------------------------
 // The Settle cycle's part (settle.h), by the Settle's holder
@@ -143,9 +145,13 @@ void     UseMemoryCycleOver(error_t rc);
  * caller's to drop; NULL says none — and its demand's number. Settled, at DONE
  * under the state lock: the volume holds `said` (the reference is the
  * volume's from here), the demand `ticket` is answered, and the word it held
- * before is handed back to be dropped once the lock is let go. */
+ * before is handed back to be dropped once the lock is let go. Refused, at
+ * DONE under the state lock, when the stitch had no room for the word and was
+ * laid without it: the demand is answered as refused, the word no longer owed
+ * where no later one stands, and the volume keeps the word it holds. */
 bool     UseMemoryStitchTake(UseText **said, uint64_t *ticket);
 UseText *UseMemoryStitchSettled(UseText *said, uint64_t ticket);
+void     UseMemoryStitchRefused(uint64_t ticket);
 
 /* Under the state lock (Fallow's release): whether a copy of the Ledger may
  * name the chain whose first link is `first`. */

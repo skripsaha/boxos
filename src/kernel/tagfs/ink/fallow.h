@@ -48,11 +48,31 @@
  * and is held besides while the Deed's head may still name it on the medium
  * (glean.h, GleanHintCovers): a reader that knows no seal walks from there.
  *
+ * ‼ ON A BOOK, THE CLOSED GRAIN IS A QUIRE THE RIBBON HAS LEFT (spec_v2 §3.4,
+ * H-3, В1). A format-v2 volume's freer is a record of a stitch, and its node
+ * is named by the stitch that carries it once that stitch settled
+ * (FallowStitchSettled): (1) holds once the ribbon has left the Quire the
+ * stitch lies in — the first stitch begun past it settled (FallowQuireLeft); a
+ * stitch that runs on into its next_quire lies in the later one — never the
+ * atom it lies on, which the medium's page may tear with the next write; (2)
+ * counts settled stitches of this mount past the one that named it; (3) is
+ * format v1's; (5) is no rule on a book — a block's digest lives in the record
+ * that names it, and its next owner brings its own — and FallowZeroDigests is
+ * not asked. Its gives go to the block map derived from the owners' names
+ * (block_map_derived.h), through pages held at the cycle's TAKE
+ * (FallowGiveRoomHold). The ground a mount found the ribbon let go rests the
+ * same way (M-1): named by the last stitch the mount read, held until a stitch
+ * of this mount leaves its Quire and the lag's stitches of this mount settled
+ * past it — what the mount read may have come out of the medium's cache.
+ * Neither a Ledger nor a Use Context chain nor the pool's chain frees anything
+ * on a book.
+ *
  * Everything here is changed under the volume's state lock and nothing is
  * allocated under it: a node is made before the lock and freed after it.
  */
 
-/* The cycles more a freer's cycle waits for. For a medium that keeps its
+/* The cycles more a freer's cycle waits for — on a book, the settled stitches
+ * more a freer's stitch waits for. For a medium that keeps its
  * FLUSH, VOLUME_LEDGER_COPIES − 1 — derived: the newest copy of the Ledger a
  * cycle wrote can tear, and then the mount stands on the copy before it, one
  * cycle back and never two. Once the medium lied — a volume whose seals say it
@@ -148,7 +168,8 @@ void        FallowViewedUnnamed(uint64_t settled);
  * `bits` (one bit per block from `first`); how many. */
 uint32_t    FallowUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits);
 
-/* Under the state lock, at the end of cycle number `cycle`: every node whose
+/* Under the state lock, at the end of cycle number `cycle` — on a book, by
+ * the rule above, `closed_gen` unread: every node whose
  * freer now lies in a settled closed block (gen <= closed_gen) is given the
  * cycle it may go back at, and every node whose cycle has come, whose digests
  * a settled cycle zeroed, whose file no open handle views as it was before,
@@ -159,6 +180,33 @@ uint32_t    FallowUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits);
  * all that ripened. Answers the blocks given back; the nodes spent come back
  * in *spent, for FallowNodesFree after the lock. */
 uint64_t    FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent);
+
+/* Under the state lock, at the DONE of a book's stitch `seq`, the `cycle`-th
+ * of this mount to settle, every Ink up to `target` in it: every record freer
+ * up to `target` no stitch named yet is named by this one, and may go back
+ * once FallowLag() stitches more settled — and the ribbon left its Quire. The
+ * mount's nodes are named so by the last stitch it read, as cycle 0. */
+void        FallowStitchSettled(uint64_t target, uint64_t seq, uint64_t cycle);
+
+/* Under the state lock: the ribbon left the Quire the stitches before `seq`
+ * lie in — `seq` is the first stitch begun past it, and it settled — so every
+ * node a stitch before it named waits for its lag alone from here. */
+void        FallowQuireLeft(uint64_t seq);
+
+/* Under the state lock: whether ground rests that a stitch named and only the
+ * ribbon's leaving its Quire holds — what closing that Quire early gives back
+ * (В1); and the blocks resting in a Quire the ribbon has left, which come back
+ * with their lag and nothing more — not those an open handle still views as
+ * they were, which no cycle gives back before the handle closes (RibbonClaim
+ * waits for room only where cycles bring it). */
+bool        FallowAwaitsQuire(void);
+uint64_t    FallowLeftBlocks(void);
+
+/* By a book's Settle holder, with no TagFS lock held, at the TAKE of cycle
+ * `cycle`: the pages the derived block map may want for the gives of every
+ * node that may go back at the cycle's end, held (BlockMapDerivedHold), so
+ * FallowRipen asks the heap for nothing. */
+void        FallowGiveRoomHold(uint64_t cycle);
 
 /* Under the state lock: whether ground rests on a record newer than
  * `closed_gen` — one in the pool's open tail, whose ground no cycle gives back

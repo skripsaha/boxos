@@ -76,6 +76,11 @@ error_t GroundCensusBook(uint64_t* held, uint64_t* fallow, bool derive, const ch
 /* Whether a block of [start, start + count) is claimed already by `owner`. */
 bool    GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count);
 
+/* The claims of `owner` as they stand — after GroundCensusBook, the fallow and
+ * the held cut to what it leaves them — into `out` as DATA Strips, `room` of
+ * them at the most: how many there are. */
+uint64_t GroundClaimsOf(GroundOwner owner, Strip* out, uint64_t room);
+
 /* The claims let go. */
 void    GroundCensusEnd(void);
 

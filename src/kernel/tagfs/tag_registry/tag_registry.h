@@ -30,9 +30,12 @@ void         TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next);
 
 /* Format v2 (settle/sewing.c): the ids a stitch lays down as Coineds — every
  * id given since the last one a stitch that settled laid down, [*lo, *hi) —
- * and, its stitch settled, every id below `hi` the book's. */
+ * and, its stitch settled, every id below `hi` the book's; and how many such
+ * ids there are now, with the bytes of their keys and values (the ribbon's
+ * room holds for them, settle/ribbon.c RibbonClaim). */
 void         TagRegistryCoinedRange(TagRegistry* reg, uint32_t* lo, uint32_t* hi);
 void         TagRegistryCoinedUpTo(TagRegistry* reg, uint32_t hi);
+void         TagRegistryCoinedHeld(TagRegistry* reg, uint32_t* count, uint64_t* text);
 
 /* The tags the registry holds and the bytes of their keys and values — what
  * a whole Tally's TAGS is measured by (settle/endpaper.c). */

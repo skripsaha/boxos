@@ -8843,6 +8843,7 @@ run_census() {
     done
     census_book
     book_circle
+    book_stitchcut
 }
 
 # The two halves of the reconcile must each be able to go red. The kernel's:
@@ -8951,18 +8952,18 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 43 (healthy says how) and
-# the 238 of the stand's own thirty-one suites: stand 28, stand_lock 4,
+# the 254 of the stand's own thirty-two suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
 # stand_snapshot 1, stand_read 8, stand_run 4, stand_medium 19,
 # stand_warrant 8, stand_room 7, stand_integrity 2, frame 2, width 7,
 # parcel 13, tract 1, stand_tally 15, stand_ribbon 6, stand_stitch 12,
-# stand_stitch_edge 6. Counted off the code,
+# stand_stitch_edge 7, stand_docket 15. Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=281
+STAND_RUN=297
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -9628,9 +9629,9 @@ edits = {
    "    ConveyanceSplices(cur, p->runs, p->run_count, *out);\n"
    "    (*count)--;   /* " + M + ": the last splice a Plot made is not conveyed */\n    return OK;\n"),
   ("src/kernel/tagfs/file_map/file_record.c",
-   "    rec->modified_time = old->modified_time;\n    rec->gen           = old->gen;\n",
+   "    rec->modified_time = old->modified_time;\n    rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);\n",
    "    rec->modified_time = old->modified_time + 1u;   /* " + M + ": a rename's record says another time */\n"
-   "    rec->gen           = old->gen;\n"),
+   "    rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);\n"),
   ("src/kernel/tagfs/ink/ink.c",
    "    rc = InkRecordMake(&meta, &r);\n    if (rc == OK && !(r.rec = FileRecordBuild(&meta))) {\n",
    "    rc = InkRecordMake(&meta, &r);\n"

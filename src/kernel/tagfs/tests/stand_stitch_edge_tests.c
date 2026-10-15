@@ -4,7 +4,7 @@
 #include "../mount/book_mount.h"
 #include "../mount/tally_read.h"
 #include "../tag_registry/tag_registry.h"
-#include "../file_map/file_map.h"
+#include "../ink/ink.h"
 #include "block_fail.h"
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -15,75 +15,77 @@
 // п.5, §16.2 п.24)
 //
 // A write the medium refuses is taken again only where the mount's reader
-// takes a retry up — at the start of the next_quire the last stitch sewn
-// names, past the Quire it ends in — and nowhere else: a refusal of the first
-// stitch of a Quire the ribbon entered, or of a retry, leaves the volume only
-// to be read, with nothing more written. A stitch that runs on into its
-// next_quire leaves two atoms of it, for a stitch that takes nothing and the
-// one that gives the next. And the reserve's measure of a whole Tally holds
-// above the Tally every writer lays — tags longer than a Sheet, each alone in
-// a node of two, between short ones.
+// takes a retry up — in the next_quire the last stitch sewn names, at its
+// start or on the atom past an attempt refused there, never over it (§16.4
+// п.4) — and nowhere else: refusals that run that Quire to its end leave the
+// volume only to be read, with nothing more written. A stitch that runs on
+// into its next_quire leaves two atoms of it, for a stitch that takes nothing
+// and the one that gives the next. The mount's reader reads each unit of the
+// chain once, a next_quire well into its stitches or not. And the reserve's
+// measure of a whole Tally holds above the Tally every writer lays — tags
+// longer than a Sheet, each alone in a node of two, between short ones.
 //
 // Every test puts the ribbon back as it found it (stand_stitch.h).
 // ============================================================================
 
-#define STAND_EDGE_SLACK  200u    /* bytes a stitch's head, its UseContext's and its Clasp take, and more */
 #define STAND_EDGE_PAIRS  100u    /* long tags, each with a short one after it */
 #define STAND_EDGE_LONG   4000u   /* a long tag's text: longer than a Sheet's room for one item */
 
 static char s_edge_text[STAND_EDGE_LONG + 1u];
 
-/* A word whose stitch takes exactly `sectors` sectors — a whole number of
- * atoms — said to the volume as its `k`-th: a stitch's stream fills
- * BOOK_PAYLOAD_BYTES a sector, and its head, its UseContext's tag and length
- * and its Clasp take fewer than STAND_EDGE_SLACK bytes and more than none. */
-static error_t StandEdgeSayFilling(uint64_t sectors, char letter, uint64_t k, bool* kept)
-{
-    return StandStitchSayLong(sectors * BOOK_PAYLOAD_BYTES - STAND_EDGE_SLACK, letter, k, kept);
-}
-
 /* The volume mounted again on what its medium holds: its ribbon ends on
- * `last`, nothing torn, no branch, no lie. */
-static bool StandEdgeEndsOn(uint64_t last)
+ * `last`, nothing torn, no lie, and `walked` lines for what the walk of a
+ * next_quire passed over to a retry (§16.4 п.4) — no other branch. */
+static bool StandEdgeEndsOn(uint64_t last, uint32_t walked)
 {
     MountBookSaid said;
     if (!StandStitchRemount())
         return false;
     MountBookStandSaid(&said);
     return said.last == last && !said.lied && said.ribbon[RIBBON_CODE_RIBBON_TORN] == 0 &&
-           said.ribbon[RIBBON_CODE_DEAD_BRANCH] == 0 && !TagFSIsUnderGlass();
+           said.ribbon[RIBBON_CODE_DEAD_BRANCH] == walked && !TagFSIsUnderGlass();
 }
 
 // ----------------------------------------------------------------------------
-// M-6 where no reader takes a retry up: the volume is only read (§4.5 п.5)
+// M-6 inside the next_quire: a retry on the atom past a refused attempt, until
+// the Quire runs out (§16.4 п.4)
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandStitchRetryQuireEntered(void)
 {
-    TestResult   verdict = TEST_PASS;
-    StandStitch  s;
-    RibbonCursor l;
-    bool         kept  = false;
-    const char*  aside = StandStitchAside(&s);
+    TestResult               verdict = TEST_PASS;
+    StandStitch              s;
+    RibbonCursor             l, now;
+    static StandStitchWaiter waiter;
+    bool                     kept  = false;
+    const char*              aside = StandStitchAside(&s);
 
     if (aside)
         return test_steps_aside(aside);
+    memset(&waiter, 0, sizeof(waiter));
     uint64_t left = s.at.quire.blocks * TAGFS_BLOCK_SECTORS - s.at.off;
-    TEST_ASSERT_OK(StandEdgeSayFilling(left, 'e', 1, &kept), "a word whose stitch fills the rest of its Quire is laid down");
+    TEST_ASSERT_OK(StandStitchSayFilling(left, 'e', 1, &kept), "a word whose stitch fills the rest of its Quire is laid down");
     RibbonCursorStand(&l);
     TEST_ASSERT(kept && l.off == 0 && l.quire.blocks && !RibbonQuireSame(&l.quire, &s.at.quire),
                 "the ribbon stands at the first sector of the Quire the stitch named next");
+    TEST_ASSERT(StandStitchRemount(), "the volume is mounted again: a waiter waits for a stitch of this mount");
+    RibbonCursorStand(&l);
+    TEST_ASSERT(l.off == 0 && !RibbonQuireSame(&l.quire, &s.at.quire), "and the ribbon stands there still");
     BlockFailArmRefusedWrites(s.seat, s.base + l.quire.block * TAGFS_BLOCK_SECTORS, l.atom);
-    TEST_ASSERT_EQ(StandStitchSay("f", 1, 2, &kept), ERR_TAGFS_READ_ONLY,
-                   "the next stitch, refused there, is taken again nowhere: the last stitch sewn names no Quire "
-                   "past the one it begins in, where a reader takes a retry up — the volume may only be read");
+    SettleWaitLink(&waiter.w, InkedGen(), StandStitchAnswered);
+    TEST_ASSERT_OK(TagFSSettle(), "the cycle the waiter asks, refused at the Quire's first atom, settles");
     TEST_ASSERT_EQ(BlockFailSeen(), 1, "after the one refusal");
-    BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
-    TEST_ASSERT_EQ(TagFSSettle(), ERR_TAGFS_READ_ONLY, "a cycle asked after it is refused");
-    TEST_ASSERT_EQ(BlockFailSeen(), 0, "and nothing more is written");
+    TEST_ASSERT(waiter.answered && waiter.rc == OK, "and the waiter is answered OK");
+    RibbonCursorStand(&now);
+    TEST_ASSERT(RibbonQuireSame(&now.sewn.quire, &l.quire) && now.sewn.off == l.atom && now.last > l.given + 1u,
+                "by a stitch of a new seq on the atom past the refused one, never over it");
+    TEST_ASSERT_EQ(now.refused, 0, "and the refusals in a row are none once it settled");
     BlockFailDisarm();
-    TEST_ASSERT(StandEdgeEndsOn(l.last), "mounted again, its ribbon ends on the stitch that filled the Quire");
+    TEST_ASSERT(StandEdgeEndsOn(now.last, 1),
+                "mounted again, its ribbon goes on past the Quire's first atom to the retry, the walk said");
 out:
+    if (!waiter.answered)
+        (void)SettleWaitUnlink(&waiter.w);
     BlockFailDisarm();
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -105,18 +107,60 @@ static TestResult TestStandStitchRetryRefusedTwice(void)
     BlockFailArmRefusedWrites(s.seat, s.base + l.quire.block * TAGFS_BLOCK_SECTORS + l.off, l.atom);
     TEST_ASSERT(BlockFailAddBadSectors(s.seat, s.base + l.next.block * TAGFS_BLOCK_SECTORS, l.atom),
                 "the medium refuses a write where the ribbon stands, and at the start of the next_quire");
-    TEST_ASSERT_EQ(StandStitchSay("h", 1, 2, &kept), ERR_TAGFS_READ_ONLY,
-                   "a stitch refused, and its retry at the next_quire refused, go no further: the volume may only "
-                   "be read");
+    TEST_ASSERT_OK(StandStitchSay("h", 1, 2, &kept),
+                   "a stitch refused, and its retry at the next_quire's start refused, settle by the retry after");
     TEST_ASSERT_EQ(BlockFailSeen(), 2, "after two refusals");
     RibbonCursorStand(&now);
-    TEST_ASSERT_EQ(now.refused, 2, "counted in a row");
+    TEST_ASSERT(kept && RibbonQuireSame(&now.sewn.quire, &l.next) && now.sewn.off == l.atom,
+                "laid in the next_quire on the atom past the refused retry");
+    BlockFailDisarm();
+    TEST_ASSERT(StandEdgeEndsOn(now.last, 1), "mounted again, its ribbon ends on it, the walk said");
+out:
+    BlockFailDisarm();
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+static TestResult TestStandStitchRetryRunsOut(void)
+{
+    TestResult               verdict = TEST_PASS;
+    StandStitch              s;
+    RibbonCursor             l, now;
+    static StandStitchWaiter waiter;
+    bool                     kept  = false;
+    const char*              aside = StandStitchAside(&s);
+
+    if (aside)
+        return test_steps_aside(aside);
+    memset(&waiter, 0, sizeof(waiter));
+    TEST_ASSERT_OK(StandStitchSay("n", 1, 1, &kept), "a word is laid down");
+    TEST_ASSERT(kept && StandStitchRemount(), "the volume is mounted again: a waiter waits for a stitch of this mount");
+    RibbonCursorStand(&l);
+    TEST_ASSERT(l.off && l.next.blocks, "inside its Quire, the stitch naming the next_quire");
+    BlockFailArmRefusedWrites(s.seat, s.base + l.quire.block * TAGFS_BLOCK_SECTORS + l.off, l.atom);
+    TEST_ASSERT(BlockFailAddBadSectors(s.seat, s.base + l.next.block * TAGFS_BLOCK_SECTORS,
+                                       l.next.blocks * TAGFS_BLOCK_SECTORS),
+                "the medium refuses a write where the ribbon stands, and every one in the next_quire");
+    SettleWaitLink(&waiter.w, InkedGen(), StandStitchAnswered);
+    TEST_ASSERT_EQ(TagFSSettle(), ERR_TAGFS_READ_ONLY,
+                   "retries on atom after atom of the next_quire, refused to its end, go no further: the volume "
+                   "may only be read");
+    RibbonCursorStand(&now);
+    /* The last atom of the next_quire takes a retry only when a Quire past it
+     * was given for the retry to name: with none, the atom is kept and the
+     * retry is not begun there. */
+    TEST_ASSERT_EQ(now.refused, l.next.blocks * TAGFS_BLOCK_SECTORS / l.atom + (now.next.blocks ? 1u : 0u),
+                   "a refusal where it stood and one on every atom of the next_quire a retry took, in a row");
+    TEST_ASSERT_EQ(BlockFailSeen(), now.refused, "each a write the medium refused");
+    TEST_ASSERT(waiter.answered && waiter.rc == ERR_TAGFS_READ_ONLY, "and the waiter is told so, not answered OK");
     BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
     TEST_ASSERT_EQ(TagFSStandSettleForHalt(), ERR_TAGFS_READ_ONLY, "the halt's cycles are refused too");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "and write nothing");
     BlockFailDisarm();
-    TEST_ASSERT(StandEdgeEndsOn(l.last), "mounted again, its ribbon ends on the last stitch sewn");
+    TEST_ASSERT(StandEdgeEndsOn(l.last, 0), "mounted again, its ribbon ends on the last stitch sewn");
 out:
+    if (!waiter.answered)
+        (void)SettleWaitUnlink(&waiter.w);
     BlockFailDisarm();
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -140,23 +184,61 @@ static TestResult TestStandStitchRunsOnLeaves(void)
     RibbonCursorStand(&l);
     TEST_ASSERT(kept && l.next.blocks, "the ribbon names its next_quire");
     uint64_t room = l.quire.blocks * TAGFS_BLOCK_SECTORS - l.off + l.next.blocks * TAGFS_BLOCK_SECTORS;
-    BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
-    TEST_ASSERT_EQ(StandEdgeSayFilling(room, 'j', 2, &kept), ERR_TAGFS_NO_SPACE,
-                   "a stitch that would fill the rest of its Quire and all of the next is not begun: no reader "
+    TEST_ASSERT_EQ(StandStitchSayFilling(room, 'j', 2, &kept), ERR_TAGFS_NO_SPACE,
+                   "a word whose stitch would fill the rest of its Quire and all of the next is refused: no reader "
                    "could say where the ribbon goes on past it");
-    TEST_ASSERT_EQ(StandEdgeSayFilling(room - l.atom, 'k', 3, &kept), ERR_TAGFS_NO_SPACE,
-                   "nor one that leaves one atom of the next: two are kept, for a stitch that takes nothing and "
-                   "the one that gives its next_quire");
-    TEST_ASSERT_EQ(BlockFailSeen(), 0, "with not one write");
-    BlockFailDisarm();
-    TEST_ASSERT_OK(StandEdgeSayFilling(room - 2u * l.atom, 'm', 4, &kept), "one that leaves two atoms is laid down");
+    TEST_ASSERT_EQ(StandStitchSayFilling(room - l.atom, 'k', 3, &kept), ERR_TAGFS_NO_SPACE,
+                   "nor one whose stitch leaves one atom of the next: two are kept, for a stitch that takes "
+                   "nothing and the one that gives its next_quire");
+    RibbonCursorStand(&now);
+    TEST_ASSERT(!kept && RibbonQuireSame(&now.quire, &l.quire) && now.off == l.off + 2u * l.atom,
+                "each cycle laid its stitch without the word — an atom each — and the volume keeps the word it "
+                "holds");
+    room -= 2u * l.atom;
+    TEST_ASSERT_OK(StandStitchSayFilling(room - 2u * l.atom, 'm', 4, &kept), "one that leaves two atoms is laid down");
     RibbonCursorStand(&now);
     TEST_ASSERT(kept && RibbonQuireSame(&now.quire, &l.next) &&
                 now.off == l.next.blocks * TAGFS_BLOCK_SECTORS - 2u * l.atom,
                 "and the ribbon stands two atoms from the end of the Quire it ran on into");
-    TEST_ASSERT(StandEdgeEndsOn(now.last), "mounted again, its ribbon ends on that stitch");
+    TEST_ASSERT(StandEdgeEndsOn(now.last, 0), "mounted again, its ribbon ends on that stitch");
 out:
-    BlockFailDisarm();
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// The mount's reader reads each unit of the chain once (§16.4 п.4)
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandStitchWalkReadsOnce(void)
+{
+    TestResult    verdict = TEST_PASS;
+    StandStitch   s;
+    RibbonCursor  now;
+    MountBookSaid said;
+    bool          kept  = false;
+    uint64_t      k     = 40, word = 8u * TALLY_SHEET_PAYLOAD;
+    const char*   aside = StandStitchAside(&s);
+
+    if (aside)
+        return test_steps_aside(aside);
+    RibbonCursorStand(&now);
+    for (; RibbonQuireSame(&now.quire, &s.at.quire) && k < 40u + 4096u; k++) {
+        TEST_ASSERT_OK(StandStitchSayLong(word, (char)('a' + k % 26u), k, &kept), "a long word is laid down");
+        RibbonCursorStand(&now);
+    }
+    TEST_ASSERT(RibbonQuireSame(&now.quire, &s.at.next), "word after word, until the ribbon stands in its next_quire");
+    for (uint64_t more = k + 8u; k < more; k++)
+        TEST_ASSERT_OK(StandStitchSayLong(word, (char)('a' + k % 26u), k, &kept), "and eight more are laid down there");
+    uint64_t before = RibbonUnitsReadStand();
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    uint64_t read = RibbonUnitsReadStand() - before;
+    MountBookStandSaid(&said);
+    TEST_ASSERT(said.sewn >= k - 40u, "with every stitch sewn on");
+    TEST_ASSERT(read <= (uint64_t)said.sewn + 8u,
+                "each unit of the chain read once: rules (б) and (б′) are weighed for no stitch a later one names, "
+                "and the next_quire is not walked for every stitch of the Quire before it (§16.4 п.4)");
+out:
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -250,35 +332,6 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// A change to a file a book refuses interns no name: no Coined for it (§2.8)
-// ----------------------------------------------------------------------------
-
-static TestResult TestStandStitchRefusedNamesNothing(void)
-{
-    TestResult   verdict = TEST_PASS;
-    StandStitch  s;
-    TagRegistry* reg = tagfs_get_state()->registry;
-    TagSpelling  tag;
-    uint64_t     fid = 0, made = 0;
-    const char*  aside = StandStitchAside(&s);
-
-    if (aside)
-        return test_steps_aside(aside);
-    uint32_t next = reg->next_id;
-    TEST_ASSERT(FileMapFiles(tagfs_get_state()->files, 0, &fid, 1) == 1, "the book holds a file");
-    TEST_ASSERT_EQ(tagfs_create_file("edge-refused.bin", NULL, 0, &made), -(int)ERR_TAGFS_READ_ONLY,
-                   "a file is not made on a book");
-    TEST_ASSERT_EQ(tagfs_rename_file(fid, "edge-renamed.bin", INK_WARRANTED), -(int)ERR_TAGFS_READ_ONLY,
-                   "nor named anew");
-    TEST_ASSERT(TagSpell("edge:refused", 12u, &tag) == OK, "a tag is spelled");
-    TEST_ASSERT_EQ(tagfs_add_tag_string(fid, &tag, INK_WARRANTED), ERR_TAGFS_READ_ONLY, "nor tagged");
-    TEST_ASSERT_EQ(reg->next_id, next, "and not one of the names and tags those changes carried is given an id");
-out:
-    STAND_STITCH_PUT_BACK(&s);
-    return verdict;
-}
-
-// ----------------------------------------------------------------------------
 // The registry counts its text from nothing: the measure is built on it
 // ----------------------------------------------------------------------------
 
@@ -317,11 +370,13 @@ static const TestCase g_stand_stitch_edge_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_stitch_retry_refused_twice", .func = TestStandStitchRetryRefusedTwice,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_stitch_retry_runs_out", .func = TestStandStitchRetryRunsOut,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_stitch_runs_on_leaves", .func = TestStandStitchRunsOnLeaves,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
-    { .name = "stand_stitch_tally_cost_long", .func = TestStandStitchTallyCostLong,
+    { .name = "stand_stitch_walk_reads_once", .func = TestStandStitchWalkReadsOnce,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
-    { .name = "stand_stitch_refused_names_nothing", .func = TestStandStitchRefusedNamesNothing,
+    { .name = "stand_stitch_tally_cost_long", .func = TestStandStitchTallyCostLong,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_registry_counts_from_nothing", .func = TestStandRegistryCountsFromNothing,
       .reach = TEST_READS_ONLY },

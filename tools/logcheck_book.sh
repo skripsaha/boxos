@@ -42,7 +42,9 @@
 CENSUS_BOOK_LANDINGS="B0 B1 B2 B3 B4 B4p B5 B6 B6b B7 B7b B7c B8 B9 B9b B12 B13 B25 B34 B35 B36 B37 B38 B38b
 B38c B39 B40 B41 B42 B42b B43 B43b B43c B44 B45
 B4b B10 B11 B11b B14 B15 B15b B15c B16 B16b B17 B17b B18 B19 B19b B19c B19d B19e B20 B20b B21 B21b B21c B22 B22b
-B23 B23b B23c B23d B23e B24 B24b B26 B26b B26c B27 B27b B27c B27d B28 B28b B29 B29b B29c B29d B30 B30b B32 B33
+B23 B23b B23c B23d B23e B24 B24b B26 B26b B26c B27 B27b B27c B27d B28 B28b B29 B29b B29c B29d B29e B29f B29g B29h B29i B29j B30 B30b B32
+B33
+B55a B55b B55c B55d B55e
 B46 B46b B47 B47b B48 B48b B49 B49b B50 B51 B52 B53 B54"
 
 # census_book_judge NAME — the prediction against the kernel's own lines, one
@@ -252,10 +254,11 @@ census_book() {
 # whose reads go through the port, parked on each answer, so the rotten block
 # is refused on the port's road too (stand_tally_rot_three_paths), and every
 # door below the glass is knocked at in a kernel that stops at a defect. On a
-# book the kernel writes stitches of names and memory and no change to a
-# file, so every test that writes through TagFS written for any format stands
-# aside, counted (K9): the stand_tally, stand_ribbon and stand_stitch suites
-# are what runs, and the suites written for any format that only read.
+# book the kernel writes stitches — files made, named, tagged and given up,
+# tags, the Use Context — and no byte of a file's data, so every test that
+# writes through TagFS written for format v1 stands aside, counted (K9): the
+# stand_tally, stand_ribbon, stand_stitch, stand_stitch_edge and stand_docket
+# suites are what runs, and the suites written for any format that only read.
 #
 # Judged: the STAND_RUN tests this tree registers walked, nothing failed,
 # nothing held; every book test ran — none stood down but the leaf on an
@@ -288,20 +291,25 @@ census_book() {
 #   stand_stitch_retry_atom                        1        1       1   the stitch's first atom
 #   stand_stitch_retry_flush                       1        1       1   the flush after the stitch
 #   stand_blockfail_refused_writes                 4        4       4   two writes into each range
-#   total                                         11       29      12
+#   stand_stitch_retry_quire_entered               1        1       1   the first atom of the Quire entered
+#   stand_stitch_retry_refused_twice               2        2       2   a stitch and its retry at the next's start
+#   stand_docket_closed_damaged                    4        4       4   the stitch's unit, then its sector, read twice
+#   total                                         18       36      19
 #   stand_stitch_refused_everywhere                N        N       N   every attempt, as many as its line says
-#   stand_stitch_retry_quire_entered               N        N       N   the first stitch of a Quire: its line, 1
-#   stand_stitch_retry_refused_twice               N        N       N   a stitch and its retry: its line, 2
+#   stand_stitch_retry_runs_out                    N        N       N   a stitch and every atom of the next: its line
 # ---------------------------------------------------------------------------
 
-STAND_BOOK_BLOCKFAILS=11
-STAND_BOOK_PADDED_BLOCKFAILS=29
-STAND_BOOK_UEFI_BLOCKFAILS=12
+STAND_BOOK_BLOCKFAILS=18
+STAND_BOOK_PADDED_BLOCKFAILS=36
+STAND_BOOK_UEFI_BLOCKFAILS=19
 STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
+# C13 (stand_docket_closed_damaged): sector 1 of a stitch the kernel sewed will
+# not read at the next mount — the line names it and the record bytes it took.
+STAND_BOOK_C13='^\[TagFS\] ribbon STITCH_TORN: stitch [0-9]+ is closed and damaged: sector\(s\) 1 of its [0-9]+ will not read, and [1-9][0-9]* byte\(s\) of its records with them'
 STAND_BOOK_REFUSED='^\[TagFS\] the book takes no write: ([0-9]+) refusal\(s\) in a row'
-STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes the names of tags and the memory of its Use Context'
+STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes files made, named, tagged and given up, the names of tags and the memory of its Use Context'
 STAND_BOOK_NO_TALLY='^\[TagFS\] no Tally is written by this kernel: the ribbon is read whole at every mount'
-STAND_BOOK_FILES_REFUSED='^\[TagFS\] this kernel writes the names of tags and the volume.s memory into a format-v2 book, and not yet a change to a file'
+STAND_BOOK_FILES_REFUSED='^\[TagFS\] this kernel writes files, their names, their tags and their giving up into a format-v2 book, and not yet the data of a file'
 STAND_BOOK_TESTS="stand_tally_files_read_whole stand_tally_mount_writes_nothing stand_tally_copy_one_rotten
 stand_tally_rotten_leaf_locked stand_tally_writes_refused stand_tally_rot_three_paths
 stand_tally_undigested_refused stand_tally_length_asked stand_tally_lower_doors_refused
@@ -313,8 +321,12 @@ stand_ribbon_dead_branch stand_ribbon_undone
 stand_stitch_answers_after_flush stand_stitch_use_context stand_stitch_coined stand_stitch_halt_clean
 stand_stitch_retry_atom stand_stitch_retry_flush stand_stitch_refused_everywhere stand_stitch_ribbon_runs_out
 stand_stitch_tally_cost stand_stitch_medium_lied stand_stitch_replug_loses stand_blockfail_refused_writes
-stand_stitch_retry_quire_entered stand_stitch_retry_refused_twice stand_stitch_runs_on_leaves
-stand_stitch_tally_cost_long stand_stitch_refused_names_nothing stand_registry_counts_from_nothing"
+stand_stitch_retry_quire_entered stand_stitch_retry_refused_twice stand_stitch_retry_runs_out
+stand_stitch_runs_on_leaves
+stand_stitch_tally_cost_long stand_registry_counts_from_nothing
+stand_docket_each_change_mounts_again stand_docket_merges stand_docket_data_refused stand_docket_ground_rests
+stand_docket_mount_ground_rests stand_docket_claim_refused stand_docket_closed_damaged stand_docket_replug_loses
+stand_docket_warrant"
 STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_(tally_rot_three_paths|ribbon_slip_three_roads): the port.s road stands aside — '
 STAND_BOOK_RIBBON_LAID='[TESTS] stand_ribbon: stitches laid past the Tally'
 STAND_BOOK_RIBBON_BACK='[TESTS] stand_ribbon: what the test laid is put back'
@@ -379,6 +391,8 @@ stand_book_judge() {
     t=$(grep -aoE "$STAND_BOOK_REFUSED" "$L" | sed -E "s/$STAND_BOOK_REFUSED/\1/" | awk '{ n += $1 } END { print n + 0 }')
     [ "$got" = "$((want + t))" ] && [ "$t" -gt 0 ]
     chk $? "stand: $what — BLOCKFAIL refused $got command(s), as many as the tests that arm it refuse here ($want, and $t of the tests whose book then takes no write, as their lines say)"
+    grep -aqE "$STAND_BOOK_C13" "$L"
+    chk $? "stand: $what — the stitch the kernel sewed, its sector 1 unreadable, is said closed and damaged with the bytes of its records lost (C13: $(grep -aoE "$STAND_BOOK_C13" "$L" | head -1 | cut -c1-120))"
     grep -aqE "$STAND_BOOK_HALT" "$L"
     chk $? "stand: $what — the halt through bye lays its stitch and syncs the volume"
     got=$(grep -acE "$STAND_BOOK_MAP_SHORT" "$L")
@@ -447,15 +461,23 @@ stand_book() {
 # by volume-read's, written apart from it (settle/sewing.c against
 # stitch.py / bookmount.py). A plain image of format v2 is booted; in the guest
 # the person says a Use Context (`use circle sewn`) — a stitch with its
-# UseContext, the tags the boot gave ids in Coineds — and stops the machine
-# (`bye`), whose halt lays its last stitch CLEAN. The image the machine left is
-# then held: volume-read finds it consistent; its census says what the next
-# mount must — the stitches sewn on and the last, the Use Context as said,
-# CLEAN on the last — and the next boot of the same image says exactly that in
-# its own lines (census_book_judge), the print of what memory holds included.
+# UseContext, the tags the boot gave ids in Coineds — a program makes, tags,
+# renames, untags and gives up files in three anchored rounds (`quilltest
+# names circle`: Borns, Labeleds and a Quitclaim, each round a stitch), gives
+# up a file the maker laid with blocks of its own (BOOK_CIRCLE_GROUND) and runs
+# the ribbon past that Quitclaim's Quire with anchored renames (`quilltest
+# ground circle`), and the machine stops (`bye`), whose halt lays its last
+# stitch CLEAN. The image the machine left is then held: volume-read finds it
+# consistent; its census says what the next mount must — the stitches sewn on
+# and the last, the Use Context as said, CLEAN on the last, the given-up file's
+# ground let go by the ribbon and lying fallow (M-1), the free count — and the
+# next boot of the same image says exactly that in its own lines
+# (census_book_judge), the print of what memory holds — the files the program
+# left, by name and tags — included.
 # ---------------------------------------------------------------------------
 
 BOOK_CIRCLE_USE="circle,sewn"
+BOOK_CIRCLE_GROUND="proca.elf"
 
 book_circle() {
     local name=book_circle img="$SCRATCH/circle.img" json="$SCRATCH/census.book_circle.json" line rc
@@ -472,12 +494,19 @@ book_circle() {
         return
     fi
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
-        type_line "use circle sewn" && wait_for_prompt && type_line "bye" &&
-        wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
+        type_line "use circle sewn" && wait_for_prompt && type_line "quilltest names circle" &&
+        wait_for_line -E build/serial.log '\[QUILL\] names: ' "$WAIT_QUIET_S" && wait_for_prompt &&
+        type_line "quilltest ground circle $BOOK_CIRCLE_GROUND" &&
+        wait_for_line -E build/serial.log '\[QUILL\] ground: ' "$WAIT_QUIET_S" && wait_for_prompt &&
+        type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
     rc=$?
     sleep 1
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.book_circle_write.log"
+    grep -aqE '\[QUILL\] names: PASS' "$SCRATCH/serial.book_circle_write.log"
+    chk $? "circle: the guest makes, tags, renames, untags and gives up files in three anchored rounds ($(grep -aoE '\[QUILL\] names: [A-Z]+ — [^,]*' "$SCRATCH/serial.book_circle_write.log" | head -1))"
+    grep -aqE '\[QUILL\] ground: PASS' "$SCRATCH/serial.book_circle_write.log"
+    chk $? "circle: the guest gives up $BOOK_CIRCLE_GROUND, blocks and all, and runs the ribbon past its Quitclaim's Quire ($(grep -aoE '\[QUILL\] ground: [A-Z]+ — [^,]*' "$SCRATCH/serial.book_circle_write.log" | head -1))"
     [ $rc = 0 ] && grep -aq '^\[HALT\] Storage sync complete' "$SCRATCH/serial.book_circle_write.log"
     chk $? "circle: the guest says a Use Context and stops, the halt syncing the volume ($(grep -aE '^\[HALT\] (Storage sync complete|.*NOT MADE DURABLE|.*DID NOT WRITE)' "$SCRATCH/serial.book_circle_write.log" | head -1 | cut -c1-100))"
     python3 tools/volume-read.py "$img" check --json >"$json" 2>"$SCRATCH/circle.check.err"
@@ -495,9 +524,11 @@ say(k["mounts"] and k["glass"] == 0, "the book mounts, with no reason to be only
 say(k["use_bytes"] == len(said) and k["use_print"] == bookread.Crc32c(said),
     "its census replays the Use Context the guest said, %u byte(s) print 0x%08X — wants %u, 0x%08X"
     % (k["use_bytes"], k["use_print"], len(said), bookread.Crc32c(said)))
-say(k["sewn"] >= 2 and k["applied"] == k["sewn"] and not k["ribbon"] and not k["lied"],
-    "the ribbon carries the kernel's stitches whole: %u sewn on, %u applied, %s said, lied %s"
+say(k["sewn"] >= 300 and k["applied"] == k["sewn"] and not k["ribbon"] and not k["lied"],
+    "the ribbon carries the kernel's stitches whole, past a Quire of them: %u sewn on, %u applied, %s said, lied %s"
     % (k["sewn"], k["applied"], sorted(k["ribbon"].items()) or "nothing", k["lied"]))
+say(k["fallow"] > 0, "the ground of the file the guest gave up, blocks and all, is let go by the ribbon and lies "
+    "fallow at the next mount (M-1): %u block(s)" % k["fallow"])
 CIRCLE_EOF
     while IFS= read -r line; do
         case "$line" in
@@ -524,4 +555,105 @@ CIRCLE_EOF
     grep -aq '^\[TagFS\] the last stitch of the ribbon says CLEAN' "$SCRATCH/serial.$name.log"
     chk $? "circle, the next mount: it reads the halt's last stitch CLEAN"
     rm -f "$img"
+}
+
+# ---------------------------------------------------------------------------
+# book_stitchcut: the power goes before a stitch's last atom (C2, §3.9)
+#
+# A kernel built SETTLECUT=stitch stops the machine before the last atom of
+# the stitch that settles the first anchor a program waited for — the one
+# window of a stitch written as a write of its own (settle/sewing.c,
+# StitchWindow), so what lands is a stitch torn short. A plain image of format
+# v2 is booted with that kernel; in the guest `quilltest namecut cut` makes
+# cut<r>.n with two tags of 3000 bytes — its Coineds take the stitch past one
+# atom — and anchors it, round after round until the machine stops: the last
+# round said is the file of the torn stitch. The image is held: volume-read
+# finds it consistent and its census says the ribbon ends at the stitch before
+# the torn one, the torn tail said; the next boot of the same image says the
+# same in its own lines (census_book_judge, kernel = volume-read), and in the
+# guest `quilltest namecheck cut` finds that round's file absent and a file
+# made now given the fid the census gives next — the torn round's own: its
+# Born lay in the atom never written, so no sector that landed names it.
+# ---------------------------------------------------------------------------
+
+BOOK_STITCHCUT_CUT='\[SETTLECUT\] the power went at point [0-9]+ of [0-9]+'
+
+book_stitchcut() {
+    local name=book_stitchcut img="$SCRATCH/stitchcut.img" json="$SCRATCH/census.book_stitchcut.json" rc line
+    local w="$SCRATCH/serial.book_stitchcut_write.log" round fid after next=""
+    echo "== book stitchcut: the power goes before a stitch's last atom, and both readers stop at the one before =="
+    rm -f build/boxos.img "$img" "$w" "$SCRATCH/serial.$name.log"
+    if ! build_with_key VOLUME_FORMAT=v2 SETTLECUT=stitch; then
+        bad "stitchcut: make VOLUME_FORMAT=v2 SETTLECUT=stitch does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+        return
+    fi
+    cp build/boxos.img "$img"
+    make run-stop >/dev/null 2>&1
+    if ! make run-bg BOOTDISK="$img" >"$SCRATCH/stitchcut.run-bg" 2>&1; then
+        harness "stitchcut: run-bg would not start the book's image: $(tail -1 "$SCRATCH/stitchcut.run-bg")"
+        return
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+        type_line "quilltest namecut cut" && wait_for_line -E build/serial.log "$BOOK_STITCHCUT_CUT" "$WAIT_QUIET_S"
+    rc=$?
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$w"
+    [ $rc = 0 ]
+    chk $? "stitchcut: the machine stops inside the anchor's stitch ($(grep -aoE "$BOOK_STITCHCUT_CUT[^,]*" "$w" | head -1))"
+    line=$(grep -aoE '\[QUILL\] namecut: round [0-9]+, cut[0-9]+\.n fid [0-9]+' "$w" | tail -1)
+    round=$(echo "$line" | sed -E 's/.*round ([0-9]+),.*/\1/')
+    fid=$(echo "$line" | sed -E 's/.* fid ([0-9]+)$/\1/')
+    [ -n "$fid" ]
+    chk $? "stitchcut: the round the stitch was torn in is said — ${line:-none}"
+    python3 tools/volume-read.py "$img" check --json >"$json" 2>"$SCRATCH/stitchcut.check.err"
+    chk $? "stitchcut: volume-read finds the book the cut left consistent ($(python3 -c 'import json, sys
+print(json.load(open(sys.argv[1])).get("verdict", "no verdict"))' "$json" 2>/dev/null))"
+    python3 - "$json" "${fid:-0}" >"$SCRATCH/stitchcut.verdict" 2>&1 <<'STITCHCUT_EOF'
+import json, sys
+k = json.load(open(sys.argv[1]))["kernel"]
+fid = int(sys.argv[2])
+def say(held, text):
+    print(("ok " if held else "bad ") + text)
+say(k["mounts"] and k["glass"] == 0, "the book mounts, with no reason to be only read — %s" % (k.get("refusal") or "%u reason(s)" % k["glass"]))
+say(k["ribbon"].get("RIBBON_TORN", 0) == 1 and not k["lied"],
+    "its census ends the ribbon at the stitch before the torn one, the torn tail said once: %s, lied %s"
+    % (sorted(k["ribbon"].items()) or "nothing said", k["lied"]))
+say(k["next_fid"] == fid, "and gives the next file id %u — the torn round's own, %u: its Born lay past the "
+    "Coineds that took the stitch's first atom, in the atom never written, so no sector that landed names it and "
+    "the id is given again (§4.5 п.8)" % (k["next_fid"], fid))
+print("next %u" % k["next_fid"])
+STITCHCUT_EOF
+    while IFS= read -r line; do
+        case "$line" in
+            "ok "*)   ok  "stitchcut: ${line#ok }" ;;
+            "next "*) next=${line#next } ;;
+            *)        bad "stitchcut: ${line#bad }" ;;
+        esac
+    done < "$SCRATCH/stitchcut.verdict"
+    if ! make run-bg BOOTDISK="$img" >"$SCRATCH/stitchcut.again.run-bg" 2>&1; then
+        harness "stitchcut: run-bg would not start the cut book again: $(tail -1 "$SCRATCH/stitchcut.again.run-bg")"
+        return
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+        type_line "quilltest namecheck cut" && wait_for_line -E build/serial.log '\[QUILL\] namecheck: ' "$WAIT_QUIET_S"
+    rc=$?
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$name.log"
+    [ $rc = 0 ] || bad "stitchcut: the cut book never reached a shell, or namecheck never answered"
+    census_book_judge "$name"
+    while IFS= read -r line; do
+        case "$line" in
+            "ok "*)  ok  "stitchcut, the next mount: ${line#ok }" ;;
+            "bad "*) bad "stitchcut, the next mount: ${line#bad }" ;;
+        esac
+    done < "$SCRATCH/census.$name.verdict"
+    line=$(grep -aoE '\[QUILL\] namecheck: PASS — rounds present: [^;]*; a file made now takes fid [0-9]+' "$SCRATCH/serial.$name.log" | head -1)
+    after=$(echo "$line" | sed -E 's/.* fid ([0-9]+)$/\1/')
+    ! echo "$line" | sed -E 's/.*present: ([^;]*);.*/\1/' | tr ',' '\n' | grep -qx "${round:-x}" &&
+        [ -n "$after" ] && [ -n "$next" ] && [ "$after" = "$next" ]
+    chk $? "stitchcut, the next mount: the torn round's file is absent, and a file made now takes the fid the census gives next (${line:-no namecheck line}; torn round ${round:-?}, fid ${fid:-?}, next ${next:-?})"
+    ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]' "$w" "$SCRATCH/serial.$name.log"
+    chk $? "stitchcut: no panic, no fault"
+    rm -f "$img"
+    buildkey_restore
 }

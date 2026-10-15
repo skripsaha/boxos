@@ -80,7 +80,16 @@ typedef struct FileRecord {
     /* Format v2 alone. `gen` is the seq of the stitch that last changed the
      * file (spec_v2 §2.8) — a record of the ribbon applies only over the gen
      * its base names — not the Ink number of RecordWhere.gen (§16.2 п.14);
-     * 0 on format v1. `slip` is the bytes the Slips of the ribbon lay over
+     * 0 on format v1. The one field of a header written after it is built:
+     * a record Ink makes on a book holds what it was made from — 0 for a
+     * file born — until the stitch that carries it settles, and then that
+     * stitch's seq — or its base's, when
+     * the stitch carried nothing for the file — written once by the Settle's
+     * holder (ink/docket.h, DocketSettled), whose next stitch's BUILD is the
+     * one reader that trusts it. An Ink on another core copies it into the
+     * record it makes of this one (FileRecordRelabel) while that write may
+     * land, so both are atomic; the copy is written over the same way before
+     * any BUILD reads it. `slip` is the bytes the Slips of the ribbon lay over
      * the file's last block (tail_slip.h), shared by every record that keeps
      * them; NULL for none. */
     uint64_t           gen;

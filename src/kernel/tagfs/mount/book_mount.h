@@ -20,8 +20,9 @@
  * said and left to the writer that can lay them down (§16.1 п.2): the volume
  * stands under glass (tagfs.h, UnderGlass) for whatever the book carries that
  * no writer of this kernel could carry on. Otherwise this kernel's writer goes
- * on where the ribbon ends (settle/sewing.h): stitches of names and memory; a
- * change to a file it does not yet lay into a book, and it writes no Tally.
+ * on where the ribbon ends (settle/sewing.h): stitches of files made, named,
+ * tagged and given up, of tags and of the Use Context; the data of a file it
+ * does not yet lay into a book, and it writes no Tally.
  *
  * ‼ NOT A BYTE IS WRITTEN BY THE MOUNT, before the door or after it: no growth
  * (a book grows only by a mount that writes it, §16.1 п.4), no Ledger, no
@@ -146,12 +147,13 @@ typedef struct {
     bool           files_rot;    /* a FILES range rots: every digested block no name owns is held */
     bool           bookmarked;   /* a Tally of a slot that holds names a bookmark: no map, free not counted */
     uint64_t       files;        /* live files */
-    uint64_t       next_fid;     /* past every fid the Tally and the ribbon name */
+    uint64_t       next_fid;     /* past every fid the book names; then the next one Ink gives (ink_book.c) */
     uint64_t       next_tag;     /* past every tag id TAGS and the ribbon name and a live file wears */
     uint64_t       next_bookmark;/* past every bookmark the ribbon names */
     BookFile       file;
     RibbonWalk*    ribbon;       /* the ribbon past the Tally stood on, until the census has its Quires */
-    Strip*         fallow;       /* DATA ground the ribbon let go (M-1): neither a file's nor free */
+    Strip*         fallow;       /* DATA ground the ribbon let go (M-1): neither a file's nor free — once the
+                                  * census ran, what of it no other owner names, for the mount's Fallow */
     uint64_t       nfallow;
     uint64_t       capfallow;
     uint64_t*      born;         /* fids in a rotten FILES range the ribbon gave birth to, rising */

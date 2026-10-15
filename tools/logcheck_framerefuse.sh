@@ -16,8 +16,9 @@
 # A Deed says what its book is written in by the stamp it carries: LAYOUT for
 # format v1, FRAME for v2 (volume_deed.h). This kernel reads a format-v2 book
 # — the Spine's slots and the Tally the newest one names (mount/book_mount.c)
-# — and writes into it only stitches of names and memory on its ribbon
-# (settle/sewing.h): a change to a file is refused before a byte.
+# — and writes into it only stitches on its ribbon (settle/sewing.h): files
+# made, named, tagged and given up, and no byte of a file's data, which is
+# refused before a byte.
 #
 # The image is this tree's, its volume made again by `create_tagfs
 # --frame-only`: GEOMETRY · FRAME · BORN · BOOT · PACKED, the Spine's slots
@@ -65,7 +66,7 @@
 FRAMEREFUSE_V2_SAYS="carries a format-v2 volume (its deed bears FRAME); this kernel cannot read a format-v2 book — boot a newer kernel"
 FRAMEREFUSE_V1_SAYS="carries no layout this kernel understands"
 FRAMEREFUSE_BLANK_SAYS="this volume is NOT mounted: none of the 3 slots of its Spine holds"
-FRAMEREFUSE_BOOK_SAYS="what this volume promises: its book takes the names of tags and the memory of its Use Context"
+FRAMEREFUSE_BOOK_SAYS="what this volume promises: its book takes files made, named, tagged and given up, the names of tags and the memory of its Use Context"
 
 # framerefuse_judge BEFORE RECORD FINAL — what the record says the machine
 # wrote, against the image before the boot; one line, FRAMEREFUSE k=v ... —
@@ -115,17 +116,18 @@ PY
 
 # framerefuse_book_said LEG L — what the log of a leg whose book the machine
 # mounts carries: the mount, the Use Context the person said remembered by a
-# stitch of its cycle, the file anchor_test would write and anchor refused
-# first and said so, and the halt laying its stitch and syncing the volume.
+# stitch of its cycle, the file anchor_test makes made and its write refused
+# first and said so — a file's data this kernel does not lay into a book — and
+# the halt laying its stitch and syncing the volume.
 framerefuse_book_said() {
     local leg=$1 L=$2
     grep -qE "MOUNTED — [0-9]+ file" "$L"
     chk $? "framerefuse ($leg): the book is mounted ($(grep -oE 'MOUNTED — [0-9]+ file\(s\)' "$L" | head -1))"
     grep -aqE "^Context set\r?$" "$L"
     chk $? "framerefuse ($leg): the new Use Context is remembered by the volume — a stitch of its cycle"
-    grep -aqE "\[ANCHOR\] create rc=-856" "$L"
-    chk $? "framerefuse ($leg): and the file anchor_test would write and anchor is refused first, ERR_TAGFS_READ_ONLY ($(grep -a '\[ANCHOR\]' "$L" | tail -1 | tr -d '\r'))"
-    grep -aq "^\[TagFS\] this kernel writes the names of tags and the volume's memory into a format-v2 book, and not yet a change to a file" "$L"
+    grep -aqE "\[ANCHOR\] fwrite rc=-856" "$L"
+    chk $? "framerefuse ($leg): and the file anchor_test makes is made, its write refused first, ERR_TAGFS_READ_ONLY ($(grep -a '\[ANCHOR\]' "$L" | tail -1 | tr -d '\r'))"
+    grep -aq "^\[TagFS\] this kernel writes files, their names, their tags and their giving up into a format-v2 book, and not yet the data of a file" "$L"
     chk $? "framerefuse ($leg): said in so many words"
     grep -aq '^\[HALT\] Storage sync complete' "$L"
     chk $? "framerefuse ($leg): and the halt lays its stitch and syncs the volume"

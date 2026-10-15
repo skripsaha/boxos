@@ -146,7 +146,7 @@ bool StandStitchPutBack(const StandStitch* s)
 
 /* The last stitch this mount sewed, read back off the medium with the
  * mount's own reader: *out the caller's to let go. */
-static bool StandStitchRead(RibbonUnit** out)
+bool StandStitchRead(RibbonUnit** out)
 {
     RibbonCursor c;
     RibbonCursorStand(&c);
@@ -449,6 +449,15 @@ error_t StandStitchSayLong(uint64_t bytes, char letter, uint64_t k, bool* kept)
     return rc;
 }
 
+/* A word whose stitch takes exactly `sectors` sectors — a whole number of
+ * atoms — said to the volume as its `k`-th: a stitch's stream fills
+ * BOOK_PAYLOAD_BYTES a sector, and its head, its UseContext's tag and length
+ * and its Clasp take fewer than STAND_STITCH_SLACK bytes and more than none. */
+error_t StandStitchSayFilling(uint64_t sectors, char letter, uint64_t k, bool* kept)
+{
+    return StandStitchSayLong(sectors * BOOK_PAYLOAD_BYTES - STAND_STITCH_SLACK, letter, k, kept);
+}
+
 static TestResult TestStandStitchRefusedEverywhere(void)
 {
     TestResult               verdict = TEST_PASS;
@@ -526,19 +535,21 @@ static TestResult TestStandStitchRibbonRunsOut(void)
     RibbonCursorStand(&now);
     TEST_ASSERT(now.out, "and said aloud");
     TEST_ASSERT(!SettleParked(), "and the cadence is not parked for room nothing on a book asks for");
-    uint64_t saying = 0;
+    uint64_t saying = 0, ticket = 0;
     UseTextDrop(tagfs_recall_use_context(&saying));
-    TEST_ASSERT_EQ(UseMemorySay(NULL, saying + 1u, NULL), USE_SAID_OWED,
+    TEST_ASSERT_EQ(UseMemorySay(NULL, saying + 1u, &ticket), USE_SAID_OWED,
                    "a word the volume does not hold is said, as a process's `use` says it");
     SettleWaitLinkCycle(&waiter.w, StandStitchAnswered);
-    TEST_ASSERT_EQ(TagFSSettleAsCadence(), ERR_TAGFS_NO_SPACE, "the cycle the cadence runs for its waiter is refused");
-    TEST_ASSERT(waiter.answered && waiter.rc == ERR_TAGFS_NO_SPACE, "and the waiter is told the ribbon has no room");
+    TEST_ASSERT_OK(TagFSSettleAsCadence(), "the cycle the cadence runs for its waiter lays its stitch without the "
+                   "word, in the rest kept");
+    TEST_ASSERT(waiter.answered && waiter.rc == OK, "and the waiter is answered");
+    TEST_ASSERT(UseMemoryRefused(ticket), "the word is refused: no claim held room for it, and none comes");
     TEST_ASSERT(!now.next.blocks, "the ribbon names no next_quire");
     TEST_ASSERT(fs->ledger.free_blocks >= keep, "and the ground a Tally needs is left free");
     UseText* memory = tagfs_recall_use_context(NULL);
     rc = StandStitchSay(memory ? memory->text : NULL, memory ? memory->bytes : 0, k + 1u, &kept);
     UseTextDrop(memory);
-    TEST_ASSERT_OK(rc, "the word the volume holds, said again, lays an empty stitch in the rest kept");
+    TEST_ASSERT_OK(rc, "the word the volume holds, said again, is answered: it is what the volume holds");
     TEST_ASSERT(kept && !TagFSReadOnly(), "and the volume holds it, still taking what its rest holds");
 out:
     if (!waiter.answered)
@@ -603,9 +614,7 @@ out:
 // MEDIUM_LIED: every stitch after the verdict says it (§16.2 п.10)
 // ----------------------------------------------------------------------------
 
-/* One stitch of no records laid by hand at the ribbon's end — `flags`, the
- * seq past every one, naming the last by its seq and Clasp: its Clasp. */
-static uint32_t StandStitchLayEmpty(const StandStitch* s, uint64_t flags)
+uint32_t StandStitchLayEmpty(const StandStitch* s, uint64_t flags)
 {
     uint8_t    body[96];
     uint32_t   starts[2];

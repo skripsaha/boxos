@@ -2311,7 +2311,7 @@ static void tagfs_clear_the_ground(void)
 
     file_table_shutdown();
     meta_pool_shutdown();
-    FallowDropAll();
+    InkDropAll();
     FileMapDestroy(g_state.files);
     g_state.files = NULL;
 

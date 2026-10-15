@@ -61,6 +61,10 @@ uint64_t SettleNowUs(void);
  * state lock, at the cycle's S6. */
 void     SettleSettledLocked(uint64_t target, uint64_t cycle, bool clean);
 
+/* settle.c: the blocks a settled cycle's S6 gave back from Fallow, under the
+ * state lock — what an asker for room judges a cycle by (SettleForRoom). */
+void     SettleGivenLocked(uint64_t given);
+
 /* settle.c: a cycle asked for and waited through — this call's own, or one
  * another core was making — for `why`; its answer (settle_halt.c). The ground
  * the last settled cycle's S6 gave back, and a mount's first word for the halt. */

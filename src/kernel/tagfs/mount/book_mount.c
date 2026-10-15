@@ -309,9 +309,7 @@ static void BookBounds(void)
     kprintf("[TagFS] the next file id %llu, tag id %llu, bookmark %llu, seq %llu — past every one the book "
             "names\n", (unsigned long long)fid, (unsigned long long)tag, (unsigned long long)bookmark,
             (unsigned long long)(BookSeqSeen() + 1u));
-    if (fid > UINT32_MAX)
-        kprintf("[TagFS] file ids past %u are this book's, and this kernel counts the ids it gives in 32 "
-                "bits — it gives none on this volume\n", UINT32_MAX);
+    g_book.next_fid         = fid;
     fs->ledger.next_file_id = fid > UINT32_MAX ? UINT32_MAX : (uint32_t)fid;
     fs->ledger.total_files  = g_book.files;
     TagRegistryNumbersFrom(fs->registry, tag > (uint64_t)TAGFS_MAX_TAG_ID + 1u ? TAGFS_MAX_TAG_ID + 1u

@@ -43,6 +43,7 @@
 #include "scribe.h"      /* VolumeFlushNeed, VolumeWriteSeen — what the landed blocks wait for */
 #include "integrity.h"
 #include "run.h"         /* TagFSDataCostLaid — what a file's bytes cost the medium */
+#include "settle.h"      /* SettleV1OnBook — no Spare is stamped for a book */
 #include "cpu_calibrate.h"  /* a stretch's time on the medium, for the cadence */
 #include "klib.h"
 
@@ -377,6 +378,10 @@ static bool w_ink(WriteJob *j)
  * inked, and the ground the write took goes back. */
 static bool w_spare(WriteJob *j)
 {
+    if (SettleV1OnBook("a Spare stamped for an asynchronous write")) {
+        wjob_finalize(j, ERR_TAGFS_READ_ONLY);
+        return false;
+    }
     error_t rc = PoolSpareBegin(&j->spare_block, &j->spare_image);
     if (rc == ERR_WOULD_BLOCK) {
         wjob_to_service(j);

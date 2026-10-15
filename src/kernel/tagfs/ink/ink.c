@@ -1,13 +1,6 @@
-#include "ink.h"
-#include "fallow.h"
-#include "../metadata_pool/meta_pool.h"
-#include "../file_map/file_map.h"
-#include "../file_table/file_table.h"
-#include "../tag_registry/tag_registry.h"
-#include "../settle/settle.h"
-#include "../helm/helm.h"
-#include "../glean/glean.h"
-#include "../../../kernel/drivers/timer/rtc.h"
+#include "ink_internal.h"
+#include "../mount/book_mount.h"
+#include "../settle/sewing.h"
 #include "boardroom.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
@@ -22,10 +15,6 @@ static uint64_t s_inked_gen;     /* the newest Ink's */
 static uint64_t s_data_need;     /* the flush need the newest data an Ink named holds */
 static volatile uint8_t s_read_only;   /* the medium refused a write as protected */
 
-/* A retry of the first half: the file changed between the halves, or a stake
- * no longer covers. Never an answer. */
-#define INK_AGAIN ((error_t)0xFFFFFFFFu)
-
 uint64_t InkedGen(void)
 {
     return __atomic_load_n(&s_inked_gen, __ATOMIC_ACQUIRE);
@@ -36,11 +25,71 @@ uint64_t InkDataNeed(void)
     return s_data_need;
 }
 
+uint64_t InkGenNextLocked(void)
+{
+    return s_inked_gen + 1u;
+}
+
+void InkGenLaidLocked(uint64_t gen)
+{
+    __atomic_store_n(&s_inked_gen, gen, __ATOMIC_RELEASE);
+}
+
+void InkDataNeedRaiseLocked(uint64_t need)
+{
+    if (need > s_data_need)
+        s_data_need = need;
+}
+
+/*
+ * ‼ WHAT THE RIBBON LET GO RESTS AT A MOUNT, NAMED BY THE LAST STITCH READ
+ * (M-1, §3.4, §16.2 п.16). The ground a book's records gave up, as the census
+ * left it — what no other owner names (book_ground.c) — is neither a file's
+ * nor free: what the mount read may have come out of the medium's cache after
+ * a warm reboot, and on a USB disk with no SYNC CACHE nothing else closes that
+ * window. So it comes to rest as one record freer's ground, named by the last
+ * stitch the ribbon holds as this mount's cycle 0 — it goes back once a stitch
+ * of this mount leaves the Quire the ribbon stands in and the lag's stitches
+ * of this mount settled. With no memory to hold it, it stays out of the
+ * allocator until the next mount, said.
+ */
+static void InkMountFallow(void)
+{
+    const RibbonCursor* c    = RibbonCursorNow();
+    uint64_t            left = g_book.nfallow;
+    if (!c->up)
+        return;
+    for (const Strip* runs = g_book.fallow; left;) {
+        uint32_t    n    = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
+        FallowNode* node = FallowNodeMake(runs, n, FALLOW_BY_RECORD, 0);
+        if (!node) {
+            kprintf("[TagFS] there is no memory to rest the ground the ribbon let go in Fallow: %llu run(s) of it "
+                    "stay out of the allocator until the volume is mounted again\n", (unsigned long long)left);
+            return;
+        }
+        TagFSLockTake(&InkState()->lock);
+        FallowAdd(node, 0);
+        FallowStitchSettled(0, c->last, 0);
+        TagFSLockDrop(&InkState()->lock);
+        runs += n;
+        left -= n;
+    }
+}
+
 void InkMountReset(void)
 {
     __atomic_store_n(&s_inked_gen, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_read_only, 0u, __ATOMIC_RELEASE);
     s_data_need = 0;
+    DocketDropAll();
+    if (InkState()->format == DEED_FORMAT_V2 && !TagFSIsUnderGlass())
+        InkMountFallow();
+}
+
+void InkDropAll(void)
+{
+    FallowDropAll();
+    DocketDropAll();
 }
 
 bool TagFSReadOnly(void)
@@ -66,11 +115,6 @@ void TagFSWriteRefused(void)
             "settled stay unwritten\n",
             (unsigned long long)(InkedGen() - SettledGen()));
     SettleKnock();
-}
-
-static TagFSState* InkState(void)
-{
-    return tagfs_get_state();
 }
 
 uint64_t InkGenOf(uint64_t fid)
@@ -148,13 +192,12 @@ bool InkWearsGuarded(const uint32_t* tags, uint32_t count)
 
 /* Whether the volume takes a change at all: asked in the first half, and again
  * under the state lock where the Ink is laid, so an Ink built while the medium
- * left or refused a write as protected is not laid after it (RT-13). A book
- * takes no change to a file from this kernel's Ink (StitchFilesRefused). */
-static error_t InkVolumeTakes(void)
+ * left or refused a write as protected is not laid after it (RT-13). */
+error_t InkVolumeTakes(void)
 {
     if (TagFSMediumLeft())
         return ERR_DEVICE_NOT_READY;
-    if (TagFSReadOnly() || InkState()->format == DEED_FORMAT_V2)
+    if (TagFSReadOnly())
         return ERR_TAGFS_READ_ONLY;
     return OK;
 }
@@ -163,24 +206,65 @@ static error_t InkVolumeTakes(void)
  * machine's halt shut it (TagFSShutForHalt). Asked in the first half alone — a
  * change begun before the shut is the halt's to settle, and a write's bytes may
  * already stand in place. */
-static error_t InkVolumeBegins(void)
+error_t InkVolumeBegins(void)
 {
     if (SettleHalting())
         return ERR_DEVICE_NOT_READY;
-    error_t rc = InkVolumeTakes();
-    return rc == ERR_TAGFS_READ_ONLY && !TagFSReadOnly() ? StitchFilesRefused() : rc;
+    return InkVolumeTakes();
 }
 
-error_t InkBookRefuses(void)
+/* On a book, the ribbon is asked too whether the Coineds of the tags a change
+ * brings find room on it now, and they are held there (RibbonReserve) — or,
+ * bringing none new, whether a record would (RibbonClaim, nothing claimed): a
+ * create, a name or a tag refused there interns nothing for the next stitch to
+ * lay down as a Coined, and every tag interned has its Coined's room. */
+error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held)
 {
-    return InkState()->format == DEED_FORMAT_V2 ? InkVolumeBegins() : OK;
+    TagFSState* fs    = InkState();
+    uint64_t    bytes = 0;
+    *held = 0;
+    if (fs->format != DEED_FORMAT_V2)
+        return OK;
+    error_t rc = InkVolumeBegins();
+    if (rc != OK)
+        return rc;
+    for (uint32_t i = 0; i < count; i++)
+        if (tags[i].key && TagRegistryLookup(fs->registry, &tags[i]) == TAGFS_INVALID_TAG_ID)
+            bytes += STITCH_COINED_MOST + tags[i].key_len + tags[i].value_len;
+    TagFSLockTake(&fs->lock);
+    rc = bytes ? RibbonReserve(bytes) : RibbonClaim(0, false);
+    TagFSLockDrop(&fs->lock);
+    RibbonClaimSay(rc);
+    if (rc == OK)
+        *held = bytes;
+    return rc;
+}
+
+void InkBookHeldLetGo(uint64_t held)
+{
+    if (!held)
+        return;
+    TagFSLockTake(&InkState()->lock);
+    RibbonReserveLetGo(held);
+    TagFSLockDrop(&InkState()->lock);
+}
+
+/* A change to a file's data on a book — a write, a span, a defrag — is one
+ * this kernel does not lay into a book yet (StitchFilesRefused): refused when
+ * it is loaded, before a byte of it moves. */
+static error_t InkDataTakes(void)
+{
+    error_t rc = InkVolumeBegins();
+    if (rc == OK && InkState()->format == DEED_FORMAT_V2)
+        rc = StitchFilesRefused();
+    return rc;
 }
 
 /* The guard's answer, `boot` the answer to whether the change touches the
  * kernel's blocks: those are refused to every call; a file the system keeps,
  * to a call with no warrant. */
-static error_t InkGuardSays(uint64_t fid, bool boot, const uint32_t* tags, uint32_t tag_count,
-                            InkWarrant warrant)
+error_t InkGuardSays(uint64_t fid, bool boot, const uint32_t* tags, uint32_t tag_count,
+                     InkWarrant warrant)
 {
     error_t rc = InkVolumeTakes();
     if (rc != OK)
@@ -210,230 +294,15 @@ static error_t InkGuard(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
 error_t InkMayChange(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
                      const Strip* runs, uint32_t run_count, InkWarrant warrant)
 {
-    error_t rc = InkVolumeBegins();
+    error_t rc = InkDataTakes();
     if (rc != OK)
         return rc;
     return InkGuard(fid, tags, tag_count, runs, run_count, NULL, 0, warrant);
 }
 
 // ----------------------------------------------------------------------------
-// The record, built before the lock
-// ----------------------------------------------------------------------------
-
-typedef struct {
-    FileRecord* rec;        /* memory's copy; NULL for a Quitclaim */
-    uint8_t*    packed;     /* the medium's */
-    uint32_t    bytes;
-} InkRecord;
-
-static void InkRecordLetGo(InkRecord* r)
-{
-    FileRecordRelease(r->rec);
-    kfree(r->packed);
-    r->rec    = NULL;
-    r->packed = NULL;
-}
-
-/* `meta` packed into the medium's copy of the record — memory's is the
- * caller's to build beside it (FileRecordBuild, Relabel, Splice): OK,
- * ERR_TAGFS_RECORD_FULL for a record wider than format v1 holds, PackV1's
- * refusal of what one cannot carry, ERR_NO_MEMORY. */
-static error_t InkRecordMake(const TagFSMetadata* meta, InkRecord* r)
-{
-    memset(r, 0, sizeof(*r));
-    if (!PlotFits(meta, &r->bytes))
-        return ERR_TAGFS_RECORD_FULL;
-    r->packed = kmalloc(r->bytes);
-    if (!r->packed)
-        return ERR_NO_MEMORY;
-    error_t packed = PackV1(meta, TagFSLayout()->data_blocks, r->packed, &r->bytes);
-    if (packed != OK)
-        InkRecordLetGo(r);
-    return packed;
-}
-
-// ----------------------------------------------------------------------------
-// The tail, under the lock
-// ----------------------------------------------------------------------------
-
-/* What a change may take of the pool's room (meta_pool.h, the reserve). */
-typedef enum {
-    INK_FREES_NOTHING = 0,     /* a record: a turn past the whole reserve */
-    INK_GIVES_UP_NOTHING,      /* a Quitclaim of a file with no ground: past Glean's share */
-    INK_FREES_GROUND,          /* a change that lets ground go: past the close it needs */
-} InkFrees;
-
-typedef struct {
-    bool     back;          /* the file's record in the tail is taken back first */
-    uint32_t back_len;
-    uint32_t keep;          /* the Spares a turn leaves the pool */
-} InkPlan;
-
-/*
- * Room for `bytes`, planned and nothing changed: ERR_WOULD_BLOCK when the tail
- * has too little and no Spare past the change's floor may be had, or room the
- * change may not take. While the volume has a free block, the floor is the
- * whole reserve — the caller makes a Spare of its own from it; with none, the
- * change's own (meta_pool.h). And below Glean's share no change takes the
- * tail's room unless what it leaves covers what comes after it: the Spare of
- * the close that lets what the tail holds go, at least, and for a change that
- * frees nothing the step Glean takes next (GleanStepNeedLocked), `was` being
- * the record it kills — on a volume with no free block, the room is Glean's to
- * make.
- */
-static error_t InkPlanFor(uint64_t fid, const RecordWhere* was, uint32_t bytes, InkFrees frees,
-                          InkPlan* plan)
-{
-    uint32_t floor  = frees == INK_FREES_NOTHING    ? (uint32_t)SPARE_RESERVE
-                    : frees == INK_GIVES_UP_NOTHING ? (uint32_t)SPARE_FOR_GLEAN
-                                                    : 1u;   /* the close its ground needs */
-    plan->back      = was && PoolTailHolds(was, fid, &plan->back_len);
-    plan->keep      = InkState()->ledger.free_blocks ? (uint32_t)SPARE_RESERVE : floor;
-    uint32_t room   = PoolTailRoom() + (plan->back ? plan->back_len : 0);
-    uint32_t spares = PoolSparesHeld(NULL, 0);
-    if (room < bytes)
-        return spares > plan->keep ? OK : ERR_WOULD_BLOCK;
-    if (spares >= (uint32_t)SPARE_FOR_GLEAN)
-        return OK;
-    uint32_t need = frees == INK_FREES_GROUND ? 0u : GleanStepNeedLocked(room - bytes, was);
-    return spares >= (need > 1u ? need : 1u) ? OK : ERR_WOULD_BLOCK;
-}
-
-/* The plan carried out and the record laid: where it sits. From here nothing
- * refuses. What the replaced record had freed is freed by this Ink now. */
-static RecordWhere InkLayDown(const RecordWhere* was, const InkPlan* plan, const InkRecord* r,
-                              uint64_t gen)
-{
-    if (plan->back) {
-        PoolTakeBack(was, plan->back_len);
-        FallowRetag(was->gen, gen);
-    }
-    if (PoolTailRoom() < r->bytes)
-        (void)PoolTailTurn(plan->keep);
-    return PoolAppend(r->packed, r->bytes, gen);
-}
-
-/* The file's row follows its record: where the table will name it the next
- * time a cycle writes its block. */
-static void InkRowFollows(uint64_t fid, const RecordWhere* where)
-{
-    uint32_t block = 0;
-    if (PoolLinkBlock(where->link, &block))
-        (void)FileMapRowSet(InkState()->files, fid, block, where->offset);
-}
-
-/* The same laying and the same door as every Ink: a moved record is its
- * file's newest, and lands past every record there is. */
-void InkGleanLocked(uint64_t fid, const RecordWhere* from, const uint8_t* packed)
-{
-    uint64_t    gen = s_inked_gen + 1;
-    RecordWhere to  = PoolAppend(packed, from->len, gen);
-    (void)PoolMirrorMove(fid, from, &to);
-    __atomic_store_n(&s_inked_gen, gen, __ATOMIC_RELEASE);
-}
-
-// ----------------------------------------------------------------------------
-// A Spare, when an Ink had none
-// ----------------------------------------------------------------------------
-
-/* What the loops below do with an answer that is not final: INK_AGAIN goes
- * round again; ERR_WOULD_BLOCK does too, once a Spare is made. A Spare the
- * volume has no ground for while a Settle cycle would give some back is the
- * Ink's ERR_WOULD_BLOCK, nothing changed: its caller waits for the cycle its
- * own way (helm.h, settle_ops.h) — no cycle is run beneath an Ink. */
-static bool InkGoesRound(error_t* rc, InkSpares spares)
-{
-    if (*rc == INK_AGAIN)
-        return true;
-    if (*rc != ERR_WOULD_BLOCK || spares != INK_MAKES_SPARES)
-        return false;
-    *rc = PoolSpareMake();
-    return *rc == OK;
-}
-
-// ----------------------------------------------------------------------------
 // A Plot's size and extents
 // ----------------------------------------------------------------------------
-
-/* The record the Plot commits — the file's fields as `cur` has them, the
- * Plot's size and runs, and the time it was written — in both copies: the
- * medium's packed from the Plot's runs, as format v1 always packed them, and
- * memory's `cur` with what the Plot did to its runs spliced in, every Parcel
- * the Plot did not touch shared with `cur` (PlotConveyance). The ground the
- * splices free is not asked of them: Fallow is fed the Plot's own, as format
- * v1 always fed it (TagFSInkPlot). A STRICT or VOLUME_TESTS kernel holds the
- * two copies to each other, and the ground the splices free to the Plot's. */
-static error_t InkPlotRecord(const Plot* p, const FileRecord* cur, uint64_t now, InkRecord* r)
-{
-    TagFSMetadata meta = {
-        .file_id       = p->fid,
-        .flags         = cur->flags,
-        .size          = p->size,
-        .created_time  = cur->created_time,
-        .modified_time = now,
-        .filename      = (char*)cur->name,
-        .tag_ids       = (uint32_t*)cur->tags,
-        .tag_count     = cur->tag_count,
-        .extents       = p->runs,
-        .extent_count  = p->run_count,
-    };
-    BookSplice* sp  = NULL;
-    uint64_t    nsp = 0;
-    error_t     rc  = InkRecordMake(&meta, r);
-    if (rc == OK)
-        rc = PlotConveyance(p, cur, &sp, &nsp);
-    if (rc == OK)
-        rc = FileRecordSplice(cur, sp, nsp, p->size, now, &r->rec, NULL, NULL);
-#if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
-    if (rc == OK)
-        (void)PlotConveyanceAgrees(p, cur, sp, nsp, r->rec, r->packed, r->bytes);
-#endif
-    kfree(sp);
-    if (rc != OK)
-        InkRecordLetGo(r);
-    return rc;
-}
-
-/* The second half, under the lock. */
-static error_t InkPlotLocked(Plot* p, const RecordWhere* was, InkRecord* r, FallowNode* fallow,
-                             InkReceipt* out)
-{
-    error_t rc = InkVolumeTakes();
-    if (rc != OK)
-        return rc;
-    RecordWhere now;
-    FileRecord* still = FileMapRecordHold(InkState()->files, p->fid, &now);
-    if (!still)
-        return ERR_FILE_NOT_FOUND;
-    FileRecordRelease(still);
-    if (now.gen != was->gen)
-        return INK_AGAIN;
-
-    InkPlan plan;
-    rc = InkPlanFor(p->fid, &now, r->bytes, fallow ? INK_FREES_GROUND : INK_FREES_NOTHING,
-                    &plan);
-    if (rc != OK)
-        return rc;
-
-    uint64_t    gen   = s_inked_gen + 1;
-    RecordWhere where = InkLayDown(&now, &plan, r, gen);
-    where.shape = gen;
-    FileMapStake none = { .count = 0 };
-    (void)PoolMirrorPut(p->fid, r->rec, &where, 0, &none);
-    r->rec = NULL;
-    InkRowFollows(p->fid, &where);
-    if (fallow)
-        FallowAdd(fallow, gen);
-    if (p->stake_count)
-        BlockMapInkedLocked(p->fid, gen);    /* its Stakes reach the medium with this record */
-    if (p->claimed)
-        p->helm->claimed_runs = 0;    /* the record names them now */
-    if (p->data_need > s_data_need)
-        s_data_need = p->data_need;
-    __atomic_store_n(&s_inked_gen, gen, __ATOMIC_RELEASE);
-    out->gen = gen;
-    return OK;
-}
 
 /* Whether the file wears settle:lazy — its program's own word that its changes
  * wait for the window. */
@@ -473,8 +342,10 @@ static bool InkPlotLazy(const Plot* p, const FileRecord* cur, uint64_t now_us, b
  * size, not its bytes. */
 error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
 {
-    error_t rc = InkGuard(p->fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count,
-                          p->freed, p->freed_count, p->warrant);
+    error_t rc = InkState()->format == DEED_FORMAT_V2 ? InkDataTakes() : OK;
+    if (rc == OK)
+        rc = InkGuard(p->fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count,
+                      p->freed, p->freed_count, p->warrant);
     if (rc != OK)
         return rc;
 
@@ -541,67 +412,9 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
     return OK;
 }
 
-/* Under the state lock, so a name or a tag inked for the file either came
- * before — and the record as it is now is the one checked here — or comes
- * after, and finds the room claimed. */
-error_t InkRoomClaim(Plot* p)
-{
-    uint64_t extents = PackV1Extents(p->runs, p->run_count);
-    if (!p->helm || extents <= p->runs_before)
-        return OK;
-
-    TagFSState* fs = InkState();
-    error_t     rc = OK;
-    TagFSLockTake(&fs->lock);
-    FileRecord* cur = FileMapRecordHold(fs->files, p->fid, NULL);
-    if (!cur) {
-        rc = ERR_FILE_NOT_FOUND;
-    } else {
-        TagFSMetadata record = {
-            .filename     = (char*)cur->name,
-            .tag_ids      = (uint32_t*)cur->tags,
-            .tag_count    = cur->tag_count,
-            .extents      = p->runs,
-            .extent_count = p->run_count,
-        };
-        if (PlotFits(&record, NULL)) {
-            /* A record that fits carries at most a u16 of extents. */
-            p->helm->claimed_runs = (uint32_t)extents;
-            p->claimed            = (uint32_t)extents;
-        } else {
-            rc = ERR_TAGFS_RECORD_FULL;
-        }
-        FileRecordRelease(cur);
-    }
-    TagFSLockDrop(&fs->lock);
-    if (rc == ERR_TAGFS_RECORD_FULL)
-        kprintf("[TagFS] file %llu: its name and tags as they are now leave its record no room "
-                "for the %llu extent(s) this call would name — refused, and nothing of it "
-                "written\n", p->fid, (unsigned long long)extents);
-    return rc;
-}
-
-void InkRoomLetGo(Plot* p)
-{
-    if (!p->claimed)
-        return;
-    TagFSLockTake(&InkState()->lock);
-    p->helm->claimed_runs = 0;
-    TagFSLockDrop(&InkState()->lock);
-    p->claimed = 0;
-}
-
 // ----------------------------------------------------------------------------
 // A file's name and tags
 // ----------------------------------------------------------------------------
-
-typedef struct {
-    uint32_t* tags;
-    uint32_t  count;
-    uint32_t  dropped[2];   /* the tags that come off the index */
-    uint32_t  drops;
-    bool      adds;         /* `add` goes onto the index */
-} InkFieldsPlan;
 
 /* The tags the file wears after the change, into a list of its own; false
  * for no memory. */
@@ -634,57 +447,6 @@ static bool InkFieldsTags(const FileRecord* cur, const char* name, uint32_t add,
         f->tags[f->count++] = add;
     f->adds = add != TAGFS_INVALID_TAG_ID && !worn;
     return true;
-}
-
-/* The record `meta` describes must also leave the room a write in flight
- * claimed (RT-19): the extents that write will ink, where they are more than
- * the record names now. */
-static bool InkFieldsLeaveRoom(uint64_t fid, const TagFSMetadata* meta)
-{
-    uint32_t claimed = HelmClaimedRuns(fid);
-    return claimed <= PackV1Extents(meta->extents, meta->extent_count) ||
-           claimed <= PlotRunRoom(meta);
-}
-
-static error_t InkFieldsLocked(uint64_t fid, const RecordWhere* was, const InkFieldsPlan* f,
-                               const TagFSMetadata* meta, uint32_t add, InkRecord* r,
-                               TagBitmapStake* stake, InkReceipt* out)
-{
-    TagFSState* fs = InkState();
-    error_t     rc = InkVolumeTakes();
-    if (rc != OK)
-        return rc;
-    RecordWhere now;
-    FileRecord* still = FileMapRecordHold(fs->files, fid, &now);
-    if (!still)
-        return ERR_FILE_NOT_FOUND;
-    FileRecordRelease(still);
-    if (now.gen != was->gen)
-        return INK_AGAIN;
-    if (f->adds && !TagBitmapStakeCovers(fs->bitmap_index, &add, 1, fid, stake))
-        return INK_AGAIN;
-    if (!InkFieldsLeaveRoom(fid, meta))
-        return ERR_TAGFS_RECORD_FULL;
-
-    InkPlan plan;
-    rc = InkPlanFor(fid, &now, r->bytes, INK_FREES_NOTHING, &plan);
-    if (rc != OK)
-        return rc;
-
-    uint64_t    gen   = s_inked_gen + 1;
-    RecordWhere where = InkLayDown(&now, &plan, r, gen);
-    where.shape = now.shape;
-    FileMapStake none = { .count = 0 };
-    (void)PoolMirrorPut(fid, r->rec, &where, 0, &none);
-    r->rec = NULL;
-    InkRowFollows(fid, &where);
-    if (f->adds)
-        TagBitmapAddCovered(fs->bitmap_index, &add, 1, fid);
-    for (uint32_t i = 0; i < f->drops && i < 2; i++)
-        TagBitmapLeave(fs->bitmap_index, f->dropped[i], fid);
-    __atomic_store_n(&s_inked_gen, gen, __ATOMIC_RELEASE);
-    out->gen = gen;
-    return OK;
 }
 
 /* One round of InkFields: OK, a final refusal, or INK_AGAIN / ERR_WOULD_BLOCK. */
@@ -725,6 +487,10 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
     if (rc == OK && !name && !f.adds && f.drops == 0) {
         rc      = drop != TAGFS_INVALID_TAG_ID ? ERR_TAGFS_TAG_NOT_FOUND : OK;
         out->gen = was.gen;
+        goto out;
+    }
+    if (rc == OK && fs->format == DEED_FORMAT_V2) {
+        rc = InkBookFields(fid, cur, &was, &f, meta.filename, add, out);
         goto out;
     }
     /* The room format v1 judges first, on the extents the record names, as it
@@ -784,52 +550,6 @@ error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, I
 // A new file
 // ----------------------------------------------------------------------------
 
-typedef struct {
-    FileMapStake    map;
-    TagBitmapStake* index;
-} InkNewStakes;
-
-static error_t InkNewLocked(const uint32_t* tags, uint32_t count, InkRecord* r,
-                            InkNewStakes* st, uint64_t* out_fid, InkReceipt* out)
-{
-    TagFSState* fs  = InkState();
-    uint64_t    fid = fs->ledger.next_file_id;
-    error_t     rc  = InkVolumeTakes();
-    if (rc != OK)
-        return rc;
-
-    if (FileMapNodesToAdd(fs->files, fid) > st->map.count ||
-        !TagBitmapStakeCovers(fs->bitmap_index, tags, count, fid, st->index))
-        return INK_AGAIN;
-    /* The id is issued as the last of the checks: a refused one finds nothing
-     * changed, and an issued one is the id the stakes were taken for. */
-    InkPlan plan;
-    rc = InkPlanFor(fid, NULL, r->bytes, INK_FREES_NOTHING, &plan);
-    if (rc == OK)
-        rc = PackV1Refile(r->packed, fid);    /* the id the issue gives, as the record carries it */
-    if (rc == OK)
-        rc = LedgerIssueFileId(&fs->ledger, &fid);
-    if (rc != OK)
-        return rc;
-
-    r->rec->file_id = fid;
-
-    uint64_t    gen   = s_inked_gen + 1;
-    RecordWhere where = InkLayDown(NULL, &plan, r, gen);
-    uint32_t    block = 0;
-    where.shape = gen;
-    (void)PoolLinkBlock(where.link, &block);
-    (void)PoolMirrorPut(fid, r->rec, &where, block, &st->map);   /* the row with the record */
-    r->rec = NULL;
-    (void)file_table_update(fid, block, where.offset);
-    TagBitmapAddCovered(fs->bitmap_index, tags, count, fid);
-    fs->ledger.total_files++;
-    __atomic_store_n(&s_inked_gen, gen, __ATOMIC_RELEASE);
-    *out_fid = fid;
-    out->gen = gen;
-    return OK;
-}
-
 error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t* out_fid,
                InkReceipt* out)
 {
@@ -848,6 +568,8 @@ error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t*
     error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
+    if (fs->format == DEED_FORMAT_V2)
+        return InkBookNew(name, tags, count, out_fid, out);
     InkRecord r;
     rc = InkRecordMake(&meta, &r);
     if (rc == OK && !(r.rec = FileRecordBuild(&meta))) {
@@ -893,43 +615,6 @@ error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t*
 // A file given up
 // ----------------------------------------------------------------------------
 
-static error_t InkQuitclaimLocked(uint64_t fid, const RecordWhere* was, const FileRecord* cur,
-                                  InkRecord* r, FallowNode* fallow, InkReceipt* out)
-{
-    TagFSState* fs = InkState();
-    error_t     rc = InkVolumeTakes();
-    if (rc != OK)
-        return rc;
-    RecordWhere now;
-    FileRecord* still = FileMapRecordHold(fs->files, fid, &now);
-    if (!still)
-        return ERR_FILE_NOT_FOUND;
-    FileRecordRelease(still);
-    if (now.gen != was->gen)
-        return INK_AGAIN;
-
-    InkPlan plan;
-    rc = InkPlanFor(fid, &now, r->bytes, fallow ? INK_FREES_GROUND : INK_GIVES_UP_NOTHING,
-                    &plan);
-    if (rc != OK)
-        return rc;
-
-    uint64_t    gen   = s_inked_gen + 1;
-    RecordWhere where = InkLayDown(&now, &plan, r, gen);
-    FileMapStake none = { .count = 0 };
-    (void)PoolMirrorPut(fid, NULL, &where, 0, &none);
-    for (uint32_t i = 0; i < cur->tag_count; i++)
-        TagBitmapLeave(fs->bitmap_index, cur->tags[i], fid);
-    if (fallow)
-        FallowAdd(fallow, gen);
-    AllotmentRelease(fid);
-    if (fs->ledger.total_files > 0)
-        fs->ledger.total_files--;
-    __atomic_store_n(&s_inked_gen, gen, __ATOMIC_RELEASE);
-    out->gen = gen;
-    return OK;
-}
-
 /* One round of InkQuitclaim. */
 static error_t InkQuitclaimOnce(uint64_t fid, InkWarrant warrant, InkReceipt* out)
 {
@@ -950,6 +635,11 @@ static error_t InkQuitclaimOnce(uint64_t fid, InkWarrant warrant, InkReceipt* ou
         rc = InkGuardSays(fid, InkRecordTouchesBoot(cur), cur->tags, cur->tag_count, warrant);
     if (rc == OK)
         rc = FallowNodeOfRecord(cur, FALLOW_BY_RECORD, &fallow);
+    if (rc == OK && fs->format == DEED_FORMAT_V2) {
+        rc = InkBookQuitclaim(fid, &was, cur, fallow, out);
+        FileRecordRelease(cur);
+        return rc;
+    }
     if (rc == OK) {
         TagFSMetadata quitclaim = {
             .file_id       = fid,
@@ -985,7 +675,7 @@ error_t InkQuitclaim(uint64_t fid, InkWarrant warrant, InkReceipt* out)
     do {
         rc = InkQuitclaimOnce(fid, warrant, out);
     } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
-    if (rc == ERR_TAGFS_NO_SPACE && GleanSweepAsk())
+    if (rc == ERR_TAGFS_NO_SPACE && InkState()->format != DEED_FORMAT_V2 && GleanSweepAsk())
         rc = ERR_WOULD_BLOCK;
     if (rc == OK)
         HelmVacate(fid);

@@ -295,6 +295,26 @@ static bool BookBookmarked(void)
     return false;
 }
 
+/* The ground the ribbon let go, as the census leaves it — what of it no other
+ * owner names — kept for the mount's Fallow (ink.c, InkMountReset): a block of
+ * it another owner names is that owner's, and never given back for the
+ * ribbon's word. ERR_NO_MEMORY. */
+static error_t BookFallowCut(const char** what)
+{
+    uint64_t n    = GroundClaimsOf(GROUND_FALLOW, NULL, 0);
+    Strip*   runs = n ? kmalloc(sizeof(Strip) * n) : NULL;
+    if (n && !runs) {
+        *what = "there is no memory to keep the ground its ribbon let go";
+        return ERR_NO_MEMORY;
+    }
+    (void)GroundClaimsOf(GROUND_FALLOW, runs, n);
+    kfree(g_book.fallow);
+    g_book.fallow    = runs;
+    g_book.nfallow   = n;
+    g_book.capfallow = n;
+    return OK;
+}
+
 error_t BookGroundCensus(const char** what)
 {
     BookGroundRibbon(g_book.stood, g_book.ribbon);
@@ -311,6 +331,8 @@ error_t BookGroundCensus(const char** what)
     }
     g_book.bookmarked = BookBookmarked();
     rc = GroundCensusBook(&g_book.said.held, &g_book.said.fallow, !g_book.bookmarked, what);
+    if (rc == OK)
+        rc = BookFallowCut(what);
     GroundCensusEnd();
     if (rc != OK)
         return rc;

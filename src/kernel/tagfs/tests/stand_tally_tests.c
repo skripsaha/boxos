@@ -26,8 +26,8 @@
 // The stand_tally suite: a format-v2 volume read off its book
 //
 // This kernel reads a format-v2 volume's book — the Spine's slots and the
-// Tally of the newest one that reads — and writes into it only stitches of
-// names and memory (settle/sewing.h): a change to a file it refuses. So these
+// Tally of the newest one that reads — and writes into it only stitches
+// (settle/sewing.h): a change to a file's data it refuses. So these
 // are asked of the volume the machine stands on, every one written for format
 // v2 and standing aside on any other: every file it holds reads whole, each
 // block held to its digest; a mount writes nothing, and two mounts are one
@@ -371,7 +371,8 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// Every road that would change a file is refused before a byte
+// A file's data is refused before a byte; a change of a file writes nothing
+// until a stitch takes it
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandTallyWritesRefused(void)
@@ -379,24 +380,18 @@ static TestResult TestStandTallyWritesRefused(void)
     TestResult  verdict = TEST_PASS;
     uint8_t     seat    = tagfs_get_seat();
     const char* aside   = StandTallyAside();
-    uint64_t    fid     = 0, ids[1];
+    uint64_t    ids[1];
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(FileMapRows(tagfs_get_state()->files, 0, ids, 1) == 1, "a live file to change");
     BlockFailArm(seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
-
-    TEST_ASSERT_EQ(tagfs_create_file("refused", NULL, 0, &fid), -(int)ERR_TAGFS_READ_ONLY,
-                   "a file is not made");
-    TEST_ASSERT_EQ(tagfs_rename_file(ids[0], "refused", INK_UNWARRANTED), -(int)ERR_TAGFS_READ_ONLY,
-                   "a file is not renamed");
-    TEST_ASSERT_EQ(tagfs_delete_file(ids[0], INK_UNWARRANTED), -(int)ERR_TAGFS_READ_ONLY,
-                   "a file is not given up");
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x3C);
     TEST_ASSERT_EQ(TestFileWrite(ids[0], g_test_buffer, TAGFS_BLOCK_SIZE), -1,
                    "a file's bytes are not written");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "and not one write reached the medium");
-    TEST_ASSERT(!TagFSReadOnly(), "the volume is not read-only: its book takes names and memory (stand_stitch)");
+    TEST_ASSERT(!TagFSReadOnly(), "the volume is not read-only: its book takes files, names and memory "
+                "(stand_docket, stand_stitch)");
 out:
     BlockFailDisarm();
     return verdict;

@@ -147,20 +147,35 @@ uint64_t InkDataNeed(void);
  * Quitclaim is among them. With no lock; inside the door. */
 uint64_t InkGenOf(uint64_t fid);
 
-/* A mount's first word: no Ink yet. With the door shut. */
+/* A mount's first word: no Ink yet, and no change waiting for a stitch of a
+ * book read before it (docket.h) — and on a book, the ground its ribbon let go
+ * laid to rest in Fallow (M-1). With the door shut. */
 void     InkMountReset(void);
+
+/* The volume let go of: what Ink keeps of it — Fallow's ground at rest and
+ * the Docket's changes no stitch took — let go, nothing given back. With the
+ * door shut. */
+void     InkDropAll(void);
 
 /* The volume takes changes again: its book taken up, the medium seated anew —
  * whether it refuses writes is the next refused write's to ask — or the stand
  * undoing a protected medium it armed itself (BlockFailProtect). */
 void     InkReadOnlyLift(void);
 
-/* A change to a file on a book is refused by this kernel's Ink (ink.c,
- * StitchFilesRefused): asked before the change's names and tags are interned,
- * so the next stitch lays down no Coined for a change that never was — OK on
- * format v1, which interns first as it always has; on a book, the answer the
- * change's own Ink would give. */
-error_t InkBookRefuses(void);
+/* Whether a book takes the change about to be made, asked before the `count`
+ * tags it brings are interned: refused by a volume that takes no change (read
+ * only, its medium gone, the halt begun), or where its ribbon has no room for
+ * the Coineds of the ones the registry does not hold yet — ERR_WOULD_BLOCK
+ * while room can come, ERR_TAGFS_NO_SPACE when none can (settle/sewing.h) —
+ * so a refused change interns nothing, and two do not both take the room one
+ * has: OK holds those Coineds' bytes on the ribbon (*held) until the tags hold
+ * their ids and the registry counts them, InkBookHeldLetGo letting the hold go
+ * after the interning, inside the same stay behind the door. OK on format
+ * v1, which interns first as it always has. A change to a file's data a book
+ * refuses when it is loaded, before a byte moves (InkMayChange,
+ * StitchFilesRefused). */
+error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held);
+void    InkBookHeldLetGo(uint64_t held);
 
 /* The stem of a name as a key, read in place: OK with out->key NULL for a
  * name with no stem, ERR_TAGFS_TAG_TOO_LONG for one longer than a key. */

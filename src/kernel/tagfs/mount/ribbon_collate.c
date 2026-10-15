@@ -9,8 +9,9 @@
  * slot, the stitches sewn on, one after another, by the Clasp each names
  * (H-2) — rules (а)–(г) — and the Quires the chain runs through; then, for the
  * slot the mount stands on, the direct scan of what lies past the end of the
- * chain (§2.2) and what each branch there is (§3.9, §16.3 пп.10–11). Nothing
- * is applied here: pass 2 replays what pass 1 sewed on (ribbon_transcribe.c).
+ * chain (§2.2) and what each branch there is (§3.9, §16.3 пп.10–11), made by
+ * ribbon_scan.c. Nothing is applied here: pass 2 replays what pass 1 sewed on
+ * (ribbon_transcribe.c).
  *
  * ‼ THE CHAIN IS SEWN BY IDENTITY, NOT BY SEQ. A stitch is taken only when its
  * StitchHead names the last one taken by its seq AND its Clasp: a dead branch
@@ -74,6 +75,7 @@ void RibbonWalkLetGo(RibbonWalk* w)
     for (uint32_t i = 0; i < w->npast; i++)
         RibbonUnitLetGo(w->past[i]);
     RibbonUnitLetGo(w->torn);
+    RibbonUnitLetGo(w->ahead);
     kfree(w->ground);
     kfree(w->stitch);
     kfree(w->past);
@@ -298,11 +300,11 @@ static bool RibbonFollows(const RibbonWalk* w, const RibbonUnit* u, bool at_next
 // Rules (а)–(г)
 // ----------------------------------------------------------------------------
 
-/* Rule (а) gives `here`, rule (б) `there`; when both do, the one of the larger
- * seq is taken — a retry always takes a new, larger seq and carries the same
- * records of its cycle (§16.3 п.11, M-6) — and the other said as the pieces of
- * a retry: no lie, the medium kept a write it refused. The one not taken is
- * let go. */
+/* Rule (а) gives `here`, rules (б) and (б′) `there`; when both do, the one of
+ * the larger seq is taken — a retry always takes a new, larger seq and
+ * carries the same records of its cycle (§16.3 п.11, M-6) — and the other
+ * said as the pieces of a retry: no lie, the medium kept a write it refused.
+ * The one not taken is let go. */
 static RibbonUnit* RibbonRetried(RibbonWalk* w, RibbonUnit* here, RibbonUnit* there)
 {
     if (!here || !there || here->seq == there->seq) {
@@ -312,7 +314,7 @@ static RibbonUnit* RibbonRetried(RibbonWalk* w, RibbonUnit* here, RibbonUnit* th
     }
     RibbonUnit* take = here->seq > there->seq ? here : there;
     RibbonUnit* left = take == here ? there : here;
-    RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "stitch seq %llu at the end of the ribbon and seq %llu at the start of its "
+    RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "stitch seq %llu at the end of the ribbon and seq %llu in its "
               "next_quire are both whole and both name stitch %llu by its Clasp — a write the medium refused and "
               "kept, and its retry (M-6): seq %llu, the larger, is taken; seq %llu is the pieces of a retry and is "
               "not applied (§16.3, amendment 11)", (unsigned long long)here->seq, (unsigned long long)there->seq,
@@ -389,27 +391,204 @@ static error_t RibbonClosed(RibbonWalk* w, RibbonUnit* u, bool at_next, bool* cl
     return RibbonTake(w, f) ? OK : ERR_NO_MEMORY;
 }
 
+/* `seq` into the list of what a walk passed over, once in a row. */
+static void RibbonPassedAdd(char* out, size_t room, size_t* at, uint64_t* last, uint64_t seq)
+{
+    if (seq == *last || *at + 24u >= room)
+        return;
+    *at  += (size_t)ksnprintf(out + *at, room - *at, *at ? ", %llu" : "%llu", (unsigned long long)seq);
+    *last = seq;
+}
+
+/* Past the stitch `take` found in the next_quire, while a whole stitch naming
+ * the last one taken, with a larger seq, lies right after it — a try refused
+ * that landed, and the retry after it (§16.3 п.11) — that one in its place,
+ * the one it replaces into the list passed. */
+static error_t RibbonFurtherOn(RibbonWalk* w, RibbonUnit** take, char* passed, size_t room, size_t* at,
+                               uint64_t* last)
+{
+    while (*take && (*take)->has_end) {
+        RibbonUnit* f   = NULL;
+        RibbonQuire own = { (*take)->head.next_block, (*take)->head.next_blocks };
+        error_t     rc  = RibbonUnitFind(&(*take)->end, RibbonQuireLies(&own) ? &own : NULL, (*take)->seq, &f);
+        if (rc != OK || !f || !f->sound || !RibbonFollows(w, f, true)) {
+            RibbonUnitLetGo(f);
+            return rc;
+        }
+        RibbonPassedAdd(passed, room, at, last, (*take)->seq);
+        RibbonUnitLetGo(*take);
+        *take = f;
+    }
+    return OK;
+}
+
+/*
+ * Rules (б) and (б′) (§4.5 п.5, §16.4 п.4): the stitch the ribbon goes on
+ * with in the next_quire — the whole one at its start naming the last stitch
+ * taken by its Clasp and the Quire it ended in as the one it came from, or,
+ * where none lies there, the first such further in: a unit holding a sector
+ * there stepped over to its end, a sector holding none of a seq past the last
+ * one stepped over alone — a retry is written on the atom past the try refused
+ * before it, never over it (settle/ribbon.c, RibbonRetry). What was walked
+ * over is said as the pieces of a retry: no lie. The walk ends at the
+ * next_quire's end. *out NULL when nothing goes on; *blank when no sector
+ * there holds a stitch of a seq past the last one — then no unit begins at its
+ * start either, and rule (в) need not look for one.
+ */
+static error_t RibbonFurther(RibbonWalk* w, RibbonUnit** out, bool* blank)
+{
+    RibbonQuire n     = w->next;
+    uint64_t    total = n.blocks * VOLUME_BLOCK_SECTORS, pos = 0, last = 0;
+    char        passed[96];
+    size_t      at = 0;
+    error_t     rc = OK;
+    passed[0] = '\0';
+    *out      = NULL;
+    *blank    = true;
+    while (rc == OK && pos < total && !*out) {
+        RibbonPlace    p = { n, pos };
+        BookSectorHead h;
+        RibbonUnit*    u = NULL;
+        uint64_t       j = 0;
+        bool           found = false;
+        rc = RibbonUnitAhead(&p, w->seq, &j, &h, &found, &u);
+        if (rc != OK || !found)
+            break;
+        *blank = false;
+        if (u && u->sound && RibbonFollows(w, u, true)) {
+            *out = u;
+            break;
+        }
+        RibbonUnitLetGo(u);
+        RibbonPassedAdd(passed, sizeof(passed), &at, &last, h.seq);
+        pos += j + (h.at < h.of ? (uint64_t)h.of - h.at : 1u);
+    }
+    if (rc == OK)
+        rc = RibbonFurtherOn(w, out, passed, sizeof(passed), &at, &last);
+    if (rc != OK) {
+        RibbonUnitLetGo(*out);
+        *out = NULL;
+        return rc;
+    }
+    if (*out && (!RibbonQuireSame(&(*out)->start.quire, &n) || (*out)->start.off))
+        RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "no whole stitch at the start of the next_quire %llu+%llu names stitch "
+                  "%llu and goes on from there: seq %s walked over to seq %llu at its sector %llu, which names it "
+                  "and the Quire the first try came from — the pieces of a retry, not applied (§16.4 п.4)",
+                  (unsigned long long)n.block, (unsigned long long)n.blocks, (unsigned long long)w->seq,
+                  at ? passed : "none that reads", (unsigned long long)(*out)->seq,
+                  (unsigned long long)(*out)->start.off);
+    return OK;
+}
+
+/* Whether `u`'s StitchHead, read, names stitch `s` by its seq and its Clasp. */
+static bool RibbonNamesStitch(const RibbonUnit* u, const RibbonUnit* s)
+{
+    uint64_t names = 0;
+    return u && RibbonUnitNames(u, &names) && names == s->seq && s->clasp_read && u->head.prev_clasp == s->clasp.crc;
+}
+
+/*
+ * ‼ RULES (б) AND (б′) ARE WEIGHED ONLY WHERE NOTHING SAYS THE STITCH RULE (а)
+ * GIVES WAS KEPT (§16.4 п.4). A writer lays nothing that names a try the
+ * medium refused — a retry names the stitch before it (settle/ribbon.c,
+ * RibbonRetry) — so a unit past `s` whose StitchHead names it, at its end or
+ * at the start of the next_quire it names, says the writer was told `s` was
+ * kept, and no retry of the stitch before it lies anywhere. Without this, the
+ * next_quire would be walked unit by unit for every stitch of the Quire before
+ * it, where only the last one can have a retry. *kept so; the unit at its end
+ * into *ahead, read through *hop — the next step's rule (а) when the walk
+ * takes `s` on through that Quire: every unit of the chain is read once
+ * (stitch.py Ribbon._Kept).
+ */
+static error_t RibbonKept(const RibbonWalk* w, const RibbonUnit* s, bool* kept, RibbonUnit** ahead, RibbonQuire* hop)
+{
+    RibbonQuire own  = { s->head.next_block, s->head.next_blocks };
+    RibbonQuire none = { 0, 0 };
+    RibbonPlace last;
+    RibbonUnit* v    = NULL;
+    error_t     rc   = OK;
+    *kept  = false;
+    *ahead = NULL;
+    *hop   = none;
+    if (!s->has_end)
+        return OK;
+    (void)RibbonPlaceOn(&s->start, s->of - 1u, &s->hop, &last);
+    *hop = RibbonQuireLies(&own) ? own : RibbonQuireSame(&last.quire, &w->quire) ? w->next : none;
+    rc    = RibbonUnitFind(&s->end, hop, s->seq, ahead);
+    *kept = rc == OK && RibbonNamesStitch(*ahead, s);
+    if (rc == OK && !*kept && hop->blocks && !RibbonQuireSame(&s->end.quire, hop)) {
+        RibbonPlace head = { *hop, 0 };
+        rc    = RibbonUnitFind(&head, NULL, s->seq, &v);
+        *kept = rc == OK && RibbonNamesStitch(v, s);
+        RibbonUnitLetGo(v);
+    }
+    return rc;
+}
+
+/* The unit rule (а) weighs: the one read at the end of the stitch last taken
+ * while it was weighed, else looked for there now. */
+static error_t RibbonAt(RibbonWalk* w, RibbonUnit** u)
+{
+    if (!w->ahead_read)
+        return RibbonUnitFind(&w->end, &w->next, w->seq, u);
+    *u            = w->ahead;
+    w->ahead      = NULL;
+    w->ahead_read = false;
+    return OK;
+}
+
+/* `take` sewn on, and what was read past it kept for the next step when the
+ * walk goes on through the Quire it was read through. */
+static error_t RibbonTakeOn(RibbonWalk* w, RibbonUnit* take, RibbonUnit* ahead, const RibbonQuire* hop, bool read)
+{
+    if (!RibbonTake(w, take)) {
+        RibbonUnitLetGo(ahead);
+        return ERR_NO_MEMORY;
+    }
+    if (read && RibbonQuireSame(hop, &w->next)) {
+        w->ahead      = ahead;
+        w->ahead_read = true;
+    } else {
+        RibbonUnitLetGo(ahead);
+    }
+    return OK;
+}
+
 /* One step of rules (а)–(в): *took whether a stitch was sewn on. */
 static error_t RibbonSewOne(RibbonWalk* w, bool* took)
 {
-    RibbonUnit *u = NULL, *v = NULL, *here = NULL, *there = NULL;
-    RibbonPlace head = { w->next, 0 };
-    error_t     rc   = RibbonUnitFind(&w->end, &w->next, w->seq, &u);
-    if (rc == OK && w->next.blocks && !RibbonQuireSame(&w->end.quire, &w->next))
-        rc = RibbonUnitFind(&head, NULL, w->seq, &v);
+    RibbonUnit *u = NULL, *v = NULL, *here = NULL, *there = NULL, *ahead = NULL;
+    RibbonQuire hop  = { 0, 0 };
+    bool        kept = false, read = false, blank = true;
+    error_t     rc   = RibbonAt(w, &u);
     *took = false;
-    if (rc == OK) {
-        here  = u && u->sound && RibbonFollows(w, u, false) ? u : NULL;
-        there = v && v->sound && RibbonFollows(w, v, true) ? v : NULL;
+    if (rc == OK)
+        here = u && u->sound && RibbonFollows(w, u, false) ? u : NULL;
+    if (rc == OK && here && w->next.blocks) {
+        rc   = RibbonKept(w, here, &kept, &ahead, &hop);
+        read = rc == OK && here->has_end;
     }
-    if (here || there) {
+    if (rc == OK && w->next.blocks && !kept)
+        rc = RibbonFurther(w, &there, &blank);
+    if (rc == OK && !here && !there && !blank && !RibbonQuireSame(&w->end.quire, &w->next)) {
+        RibbonPlace head = { w->next, 0 };
+        rc = RibbonUnitFind(&head, NULL, w->seq, &v);
+    }
+    if (rc == OK && (here || there)) {
         RibbonUnit* take = RibbonRetried(w, here, there);
-        if (u != here && u != there)
+        if (u != here)
             RibbonUnitLetGo(u);
-        if (v != here && v != there)
-            RibbonUnitLetGo(v);
         *took = true;
-        return RibbonTake(w, take) ? OK : ERR_NO_MEMORY;
+        return RibbonTakeOn(w, take, ahead, &hop, read && take == here);
+    }
+    RibbonUnitLetGo(ahead);
+    if (rc != OK) {
+        if (u != here)
+            RibbonUnitLetGo(u);
+        RibbonUnitLetGo(here);
+        RibbonUnitLetGo(there);
+        RibbonUnitLetGo(v);
+        return rc;
     }
     RibbonUnit* tried[2] = { u, v };
     for (uint32_t i = 0; rc == OK && i < 2 && !*took; i++) {
@@ -436,347 +615,10 @@ static error_t RibbonSew(RibbonWalk* w)
         hops++;
         rc = RibbonSewOne(w, &took);
     }
+    RibbonUnitLetGo(w->ahead);
+    w->ahead      = NULL;
+    w->ahead_read = false;
     return rc;
-}
-
-// ----------------------------------------------------------------------------
-// The direct scan past the end, and what each branch there is (§2.2, §3.9)
-// ----------------------------------------------------------------------------
-
-/* The unit of seq `seq` past the end, or NULL. */
-static RibbonUnit* RibbonPastOf(const RibbonWalk* w, uint64_t seq)
-{
-    uint32_t lo = 0, hi = w->npast;
-    while (lo < hi) {
-        uint32_t mid = lo + (hi - lo) / 2u;
-        if (w->past[mid]->seq == seq)
-            return w->past[mid];
-        if (w->past[mid]->seq < seq)
-            lo = mid + 1u;
-        else
-            hi = mid;
-    }
-    return NULL;
-}
-
-/* A unit past the end into the walk's list, kept in the order of its seq.
- * False with no memory (the unit let go). */
-static bool RibbonPastAdd(RibbonWalk* w, RibbonUnit* u, uint32_t* cap)
-{
-    if (w->npast == *cap) {
-        uint32_t     more = *cap ? *cap * 2u : 8u;
-        RibbonUnit** to   = kmalloc(sizeof(RibbonUnit*) * more);
-        if (!to) {
-            RibbonUnitLetGo(u);
-            return false;
-        }
-        if (w->npast)
-            memcpy(to, w->past, sizeof(RibbonUnit*) * w->npast);
-        kfree(w->past);
-        w->past = to;
-        *cap    = more;
-    }
-    uint32_t at = w->npast;
-    while (at > 0 && w->past[at - 1u]->seq > u->seq) {
-        w->past[at] = w->past[at - 1u];
-        at--;
-    }
-    w->past[at] = u;
-    w->npast++;
-    return true;
-}
-
-/* Why a unit is no stitch the format allows (§16.3 п.8), in stitch.py's
- * words (Misshapen). */
-static void RibbonShapeSaid(const RibbonUnit* u, char* out, size_t room)
-{
-    uint64_t space = RibbonPlaceLeft(&u->start) + u->hop.blocks * VOLUME_BLOCK_SECTORS;
-    if (u->shape == RIBBON_SHAPE_ATOMS)
-        ksnprintf(out, room, "%u sector(s) long — no whole number of atoms of %u", u->of, VOLUME_BLOCK_SECTORS);
-    else if (u->shape == RIBBON_SHAPE_OFF)
-        ksnprintf(out, room, "begun at sector %llu of its Quire, off a block's boundary",
-                  (unsigned long long)u->start.off);
-    else if (u->shape == RIBBON_SHAPE_LONG)
-        ksnprintf(out, room, "%u sectors long, more than its Quire and the next hold (%llu)", u->of,
-                  (unsigned long long)space);
-    else
-        ksnprintf(out, room, "%u sectors long — a stream of more than %u bytes, past what a reader holds a "
-                  "stitch in", u->of, RIBBON_STREAM_MOST);
-}
-
-/* Every sector of the rest of the Quire the chain ends in and all of its
- * next_quire: each unit of a seq past the chain's that begins there, read
- * whole — the first sector of a seq that lies at or past its own `at` from
- * the end names where it begins. */
-static error_t RibbonScanUnits(RibbonWalk* w, uint32_t* cap)
-{
-    uint64_t room = RibbonPlaceLeft(&w->end) + w->next.blocks * VOLUME_BLOCK_SECTORS;
-    for (uint64_t i = 0; i < room;) {
-        RibbonPlace p;
-        BookUnit    run;
-        if (!RibbonPlaceOn(&w->end, i, &w->next, &p))
-            break;
-        uint64_t n  = RibbonPlaceLeft(&p) < 256u ? RibbonPlaceLeft(&p) : 256u;
-        error_t  rc = BookUnitRead(RibbonPlaceVlba(&p), (uint32_t)n, 0, 0, &run);
-        for (uint32_t k = 0; rc == OK && k < n; k++) {
-            BookSectorHead h;
-            RibbonPlace    at;
-            RibbonUnit*    u = NULL;
-            memcpy(&h, run.sectors + (uint64_t)k * BOOK_SECTOR_BYTES, sizeof(h));
-            if (run.state[k] != BOOK_SECTOR_HOLDS || h.kind != BOOK_UNIT_STITCH || h.seq <= w->seq ||
-                i + k < h.at || RibbonPastOf(w, h.seq))
-                continue;
-            RibbonPlaceOn(&w->end, i + k - h.at, &w->next, &at);
-            rc = RibbonUnitRead(&at, h.of, h.seq, &w->next, &u);
-            if (rc == OK && !RibbonPastAdd(w, u, cap))
-                rc = ERR_NO_MEMORY;
-        }
-        BookUnitLetGo(&run);
-        if (rc != OK)
-            return rc;
-        i += n;
-    }
-    return OK;
-}
-
-/* The units past the end no stitch is shaped like: said, and out of the
- * list — the ribbon is not taken past one, and its records are not read. */
-static void RibbonScanShapes(RibbonWalk* w)
-{
-    uint32_t kept = 0;
-    char     why[96];
-    for (uint32_t i = 0; i < w->npast; i++) {
-        RibbonUnit* u = w->past[i];
-        if (u->shape == RIBBON_SHAPE_KEPT) {
-            w->past[kept++] = u;
-            continue;
-        }
-        RibbonShapeSaid(u, why, sizeof(why));
-        RibbonSay(w, RIBBON_CODE_RECORD_SHAPE, "a unit of the ribbon at sector %llu, seq %llu, is %s: no stitch is "
-                  "so shaped (§1.5, §2.2) — the ribbon is not taken past it, and its records are not read",
-                  (unsigned long long)RibbonPlaceVlba(&u->start), (unsigned long long)u->seq, why);
-        RibbonUnitLetGo(u);
-    }
-    w->npast = kept;
-}
-
-/* What the chain holds of stitch `seq` — one sewn on, or the one the Tally
- * took in: true, its Clasp in *clasp and whether it reads in *known. */
-static bool RibbonSewn(const RibbonWalk* w, uint64_t seq, uint32_t* clasp, bool* known)
-{
-    if (seq == w->slot->head.stitch_seq) {
-        *clasp = w->slot->head.stitch_clasp;
-        *known = true;
-        return true;
-    }
-    for (uint32_t i = 0; i < w->nstitch; i++) {
-        if (w->stitch[i]->seq == seq) {
-            *clasp = w->stitch[i]->clasp.crc;
-            *known = w->stitch[i]->clasp_read;
-            return true;
-        }
-    }
-    return false;
-}
-
-/* Whether a member of a branch names `seq` past the chain's end that is not
- * on the medium whole — what settled and is lost. */
-static bool RibbonLostNamed(const RibbonWalk* w, uint64_t seq)
-{
-    RibbonUnit* there = RibbonPastOf(w, seq);
-    return seq > w->seq && (!there || !there->sound);
-}
-
-/* The first member of a branch, in the order of its seq, that names what
- * settled and is lost: NULL when none does. */
-static RibbonUnit* RibbonLostNamer(const RibbonWalk* w, RibbonUnit* const* m, uint32_t nm)
-{
-    for (uint32_t i = 0; i < nm; i++) {
-        uint64_t x = 0;
-        if (RibbonUnitNames(m[i], &x) && RibbonLostNamed(w, x))
-            return m[i];
-    }
-    return NULL;
-}
-
-/* A branch some unit of which (`namer`, the first) names one that settled —
- * for it began only after that one's flush — and is not on the medium whole
- * (H-3); and when its root, whole, names one the medium does not hold at all,
- * the lie is proven (FAST'13, H-2). Both lie: MEDIUM_LIED. */
-static void RibbonLost(RibbonWalk* w, const RibbonUnit* r, const RibbonUnit* namer, const char* seqs)
-{
-    uint64_t named = 0, x = 0;
-    if (r->sound && RibbonUnitNames(r, &named) && named > w->seq && !RibbonPastOf(w, named)) {
-        RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "the lie is proven: stitch seq %llu lies past the end of the ribbon "
-                  "and names seq %llu, which the medium does not hold — a flush that lied, the cycles after it "
-                  "written over a hole (FAST'13, H-2); seq %s are not applied — MEDIUM_LIED",
-                  (unsigned long long)r->seq, (unsigned long long)named, seqs);
-        return;
-    }
-    RibbonUnitNames(namer, &x);
-    RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "what settled is lost: seq %s past the end of the ribbon — stitch seq %llu "
-              "names %llu, begun only after %llu had settled, and %llu %s (H-3) — MEDIUM_LIED", seqs,
-              (unsigned long long)namer->seq, (unsigned long long)x, (unsigned long long)x, (unsigned long long)x,
-              RibbonPastOf(w, x) ? "does not read whole" : "is not on the medium");
-}
-
-/* The stitch right after the end, torn, and nothing past it naming it: a cut
- * while it was written — or, every sector of it there and some sum or its
- * Clasp not holding, a cut or rot, said loud (M-4). */
-static void RibbonTornSaid(RibbonWalk* w, const RibbonUnit* t)
-{
-    uint32_t held = 0;
-    for (uint32_t k = 0; k < t->of; k++)
-        held += t->valid[k] ? 1u : 0u;
-    if (RibbonUnitWhole(t))
-        RibbonSay(w, RIBBON_CODE_RIBBON_TORN, "the last cycle does not read whole: stitch seq %llu has all %u "
-                  "sectors and its stream or its Clasp does not hold — a cut or rot (M-4)",
-                  (unsigned long long)t->seq, t->of);
-    else
-        RibbonSay(w, RIBBON_CODE_RIBBON_TORN, "the ribbon ends on stitch %llu; seq %llu past it is torn — %u of "
-                  "its %u sectors hold, a cut while it was written; its numbers are not given again",
-                  (unsigned long long)w->seq, (unsigned long long)t->seq, held, t->of);
-}
-
-/* A whole root past the end, naming a stitch of the chain by that stitch's
- * own Clasp: the end itself from where the ribbon does not go on, or one
- * before it — the ribbon forks (§16.3 п.10). Settled, not taken, no lie. */
-static void RibbonNamesChain(RibbonWalk* w, const RibbonUnit* r, uint64_t n, const char* seqs)
-{
-    if (n == w->seq) {
-        RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "stitch seq %llu names the end of the ribbon, seq %llu, by its Clasp, "
-                  "and lies where the ribbon does not go on — not the first atom after it, nor the start of its "
-                  "next_quire naming its Quire (§4.5, step 5): seq %s, settled, are not taken",
-                  (unsigned long long)r->seq, (unsigned long long)w->seq, seqs);
-        return;
-    }
-    uint64_t after = n;
-    for (uint32_t i = 0; i < w->nstitch; i++) {
-        if (w->stitch[i]->seq > n) {
-            after = w->stitch[i]->seq;
-            break;
-        }
-    }
-    RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "the ribbon forks at stitch %llu: seq %llu names it by its Clasp, as seq "
-              "%llu of the ribbon does, and lies past the ribbon's end — seq %s, settled, are not taken (§16.3, "
-              "amendment 10)",
-              (unsigned long long)n, (unsigned long long)r->seq, (unsigned long long)after, seqs);
-}
-
-/* A root naming a stitch of the chain by a Clasp not its own, a seq the
- * chain does not hold at or before its end, or — by a prev past its own seq —
- * no stitch at all: a dead branch of another history (H-2) — said, not sewn
- * on, no lie. */
-static void RibbonStranger(RibbonWalk* w, const RibbonUnit* r, uint64_t n, bool sewn, uint32_t clasp,
-                           const char* seqs)
-{
-    char how[64];
-    if (r->head.prev > r->seq) {
-        RibbonSay(w, RIBBON_CODE_CLASP_STRANGER, "seq %s past the end of the ribbon: a dead branch of another "
-                  "history — stitch seq %llu names, by a prev of %llu past its own seq, no stitch this ribbon "
-                  "does hold; it is not sewn on", seqs, (unsigned long long)r->seq,
-                  (unsigned long long)r->head.prev);
-        return;
-    }
-    if (sewn)
-        ksnprintf(how, sizeof(how), "a Clasp that is not its own (0x%08X, not 0x%08X)", r->head.prev_clasp, clasp);
-    else
-        ksnprintf(how, sizeof(how), "which this ribbon does not hold");
-    RibbonSay(w, RIBBON_CODE_CLASP_STRANGER, "seq %s past the end of the ribbon: a dead branch of another history — "
-              "stitch seq %llu names stitch %llu with %s; it is not sewn on", seqs, (unsigned long long)r->seq,
-              (unsigned long long)n, how);
-}
-
-/* What one branch past the end is (§3.9's table, §16.3 п.10), said once, by
- * what its first unit `r` names and what its units name of each other. */
-static void RibbonBranch(RibbonWalk* w, RibbonUnit* r, RibbonUnit* const* m, uint32_t nm)
-{
-    char        seqs[160];
-    uint64_t    n     = 0;
-    uint32_t    clasp = 0;
-    bool        known = false, has = RibbonUnitNames(r, &n), tail = w->torn && r->seq == w->torn->seq;
-    bool        sewn  = has && RibbonSewn(w, n, &clasp, &known);
-    bool        ours  = sewn && (!known || r->head.prev_clasp == clasp);
-    RibbonUnit* namer = RibbonLostNamer(w, m, nm);
-    bool        below = r->head_read && r->head.prev > r->seq;
-    RibbonSeqsSaid(m, nm, seqs, sizeof(seqs));
-    if (below || (has && !ours && (sewn || n <= w->seq))) {
-        if (tail) {
-            RibbonUnitLetGo(w->torn);
-            w->torn = NULL;
-        }
-        RibbonStranger(w, r, n, sewn, clasp, seqs);
-    } else if (namer) {
-        w->lied = true;
-        RibbonLost(w, r, namer, seqs);
-    } else if (tail && (!has || n == w->seq)) {
-        RibbonTornSaid(w, w->torn);
-    } else if (!has) {
-        RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "past the end of the ribbon lie pieces of seq %s whose StitchHead does "
-                  "not read: a retry, or nothing known — no loss of what settled is shown", seqs);
-    } else if (!r->sound) {
-        RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "past the end of the ribbon lie pieces of seq %s naming stitch %llu of "
-                  "it: a retry cut while it was written — no loss of what settled is shown", seqs,
-                  (unsigned long long)n);
-    } else {
-        RibbonNamesChain(w, r, n, seqs);
-    }
-}
-
-/* The units past the end joined into branches, each to the unit its
- * StitchHead names when that one lies past the end too (RibbonUnitNames names
- * only a seq below the namer's, so the join ends), and each branch judged by
- * its root in the order of its seq. */
-static error_t RibbonBranches(RibbonWalk* w)
-{
-    uint32_t     n       = w->npast ? w->npast : 1u;
-    RibbonUnit** root    = kmalloc(sizeof(RibbonUnit*) * n);
-    RibbonUnit** members = kmalloc(sizeof(RibbonUnit*) * n);
-    if (!root || !members) {
-        kfree(root);
-        kfree(members);
-        return ERR_NO_MEMORY;
-    }
-    for (uint32_t i = 0; i < w->npast; i++) {
-        RibbonUnit* r = w->past[i];
-        uint64_t    named;
-        while (RibbonUnitNames(r, &named) && RibbonPastOf(w, named))
-            r = RibbonPastOf(w, named);
-        root[i] = r;
-    }
-    for (uint32_t r = 0; r < w->npast; r++) {
-        uint32_t nm = 0;
-        for (uint32_t i = 0; i < w->npast; i++)
-            if (root[i] == w->past[r])
-                members[nm++] = w->past[i];
-        if (nm)
-            RibbonBranch(w, w->past[r], members, nm);
-    }
-    kfree(root);
-    kfree(members);
-    return OK;
-}
-
-/* The direct scan (§2.2): every unit past the chain's end, the torn tail,
- * and what each branch there is. */
-static error_t RibbonScan(RibbonWalk* w)
-{
-    RibbonUnit* tail = NULL;
-    uint32_t    cap  = 0;
-    if (!w->has_end)
-        return OK;
-    error_t rc = RibbonScanUnits(w, &cap);
-    if (rc != OK)
-        return rc;
-    RibbonScanShapes(w);
-    rc = RibbonUnitFind(&w->end, &w->next, w->seq, &tail);
-    if (rc != OK)
-        return rc;
-    if (tail && !tail->sound && tail->shape == RIBBON_SHAPE_KEPT)
-        w->torn = tail;
-    else
-        RibbonUnitLetGo(tail);
-    return RibbonBranches(w);
 }
 
 // ----------------------------------------------------------------------------

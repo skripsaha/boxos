@@ -29,10 +29,11 @@
  *
  * Built by the mount with the door shut; read inside the door. Changed, once
  * it is up, under the volume's state lock — the lock format v1's map is changed
- * under (MapLock) — and by the ribbon's door alone in this kernel
- * (BlockMapTakeQuire): the page a change may need for a window it leaves mixed
- * is made before the lock (BlockMapDerivedStock), and under it only put in
- * place. Never while the volume stands under glass.
+ * under (MapLock) — by the ribbon's door (BlockMapTakeQuire) and by Fallow's
+ * gives at a cycle's DONE (fallow.c) alone in this kernel: the page a change may
+ * need for a window it leaves mixed is made before the lock
+ * (BlockMapDerivedStock, BlockMapDerivedHold), and under it only put in place.
+ * Never while the volume stands under glass.
  */
 
 /* The map begun for [0, end): every window free, no page made. ERR_NO_MEMORY
@@ -66,6 +67,12 @@ error_t  BlockMapDerivedRelease(GroundOwner owner, uint64_t who, uint64_t start,
  * each of its ends — made and kept for a change of the live map under the
  * state lock. OK, or ERR_NO_MEMORY. */
 error_t  BlockMapDerivedStock(void);
+
+/* With no TagFS lock held, at a cycle's TAKE: `pages` pages held for the gives
+ * Fallow makes at its DONE — those past it let go, and so are the pages earlier
+ * changes let go under the lock — drawn on once the stock is spent. OK, or
+ * ERR_NO_MEMORY with what the heap gave held. Nothing while the map is down. */
+error_t  BlockMapDerivedHold(uint32_t pages);
 
 /*
  * A whole Quire for the ribbon (spec_v2 §3.6), its next_quire given ahead of
