@@ -58,3 +58,7 @@ osdev_other/
 .claude/hook-log.txt
 .claude/design-context.json
 boardlogs/
+
+# Python bytecode
+__pycache__/
+*.pyc
