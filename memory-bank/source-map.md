@@ -37,3 +37,12 @@ Quill design and current v2 plan:
 The full session transcripts are the `*.jsonl` files beside the memory
 directory. They are valuable historical evidence but must not be injected in
 full into every task.
+
+## Imported Codex layer
+
+- `.codex/config.toml` — project-scoped MCP definitions imported from Claude.
+- `.codex/agents/` — project-scoped architect, debugger, and developer agents.
+- `~/.codex/AGENTS.md` — imported global user instructions.
+- `~/.codex/hooks.json` — imported machine-level Cortex hooks; keep outside Git.
+- `~/.codex/external_agent_session_imports.json` — hashes and source paths for
+  the fourteen imported Claude sessions.

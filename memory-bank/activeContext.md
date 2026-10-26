@@ -31,6 +31,22 @@
 - Git reflog and unreachable WIP objects contain historical intermediate
   commits. Do not prune them.
 
+## Codex migration — 2026-10-26
+
+- Claude import completed: 14 sessions, 6 agents, 3 hooks, 5 MCP servers, and
+  the global user instructions imported; 9 Claude plugins failed to import and
+  produced no project plugin files.
+- Project `.codex/config.toml` contains the five imported MCP definitions.
+  Project `.codex/agents/` contains the imported architect, debugger, and
+  developer agents. These are project configuration and are safe to review in
+  Git.
+- Global `~/.codex/hooks.json` contains Cortex hooks. They remain outside the
+  repository because they are machine-level behavior and write generated state
+  under `~/.cortex`.
+- Imported chat transcripts are recorded by
+  `~/.codex/external_agent_session_imports.json`; the Claude source JSONL is
+  unchanged.
+
 ## Next bounded action
 
 Read the j2 notes and the actual diff from `boxmetal` to `s23-j`. Reconstruct
