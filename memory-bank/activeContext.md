@@ -46,6 +46,11 @@
 - Imported chat transcripts are recorded by
   `~/.codex/external_agent_session_imports.json`; the Claude source JSONL is
   unchanged.
+- The nine project skills under `.agents/skills/` were audited. Three were
+  adapted for Codex availability and the current BoxOS naming/event rules;
+  the remaining six matched the preserved Claude versions. Historical reports
+  directly under `.agents/` remain untracked and are not part of the Codex
+  skill layer.
 
 ## Next bounded action
 
