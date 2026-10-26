@@ -2,11 +2,13 @@
 
 ## Live tree
 
-- Main checkout: branch `boxmetal`, HEAD `55269ab832fa88fcbec6269fdcd70915dbedfc75`.
+- Main checkout: branch `boxmetal`; the TagFS v2.3i base is `55269ab8` and
+  the current HEAD may include the separate context-only Codex commits above
+  it.
 - The main checkout has a pre-existing user modification in
   `src/userspace/boxcxx/src/runtime/box_time.cpp`. Preserve it.
-- The main checkout also contains the untracked Codex migration files being
-  introduced in this setup.
+- The pre-existing `.agents/skills/` migration directory remains untracked;
+  its skills need a separate audit before they are committed or cleaned.
 
 ## TagFS v2 continuation
 
