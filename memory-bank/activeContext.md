@@ -7,8 +7,9 @@
   it.
 - The main checkout has a pre-existing user modification in
   `src/userspace/boxcxx/src/runtime/box_time.cpp`. Preserve it.
-- The pre-existing `.agents/skills/` migration directory remains untracked;
-  its skills need a separate audit before they are committed or cleaned.
+- The project `.agents/skills/` migration directory is tracked in
+  `38d26b1d`; its nine skills were audited and adapted where Codex-specific
+  tool references or current BoxOS naming/event rules required it.
 
 ## TagFS v2 continuation
 
@@ -51,6 +52,19 @@
   the remaining six matched the preserved Claude versions. Historical reports
   directly under `.agents/` remain untracked and are not part of the Codex
   skill layer.
+
+## Full Claude memory reconciliation — 2026-10-26
+
+- Read and cataloged all 330 Markdown files in Claude's project memory:
+  7,251,758 bytes and 55,172 lines.
+- 229 files were linked from `MEMORY.md`; 101 were not linked there. The full
+  inventory, hashes, headings, markers, and source metadata are now recorded
+  in `memory-bank/source-map.md`.
+- All 330 content hashes were unique. No Claude memory files were deleted,
+  rewritten, or moved.
+- Older memory claims remain historical evidence. Live Git and current
+  verification take precedence, followed by this tracked memory-bank, as
+  documented in `source-map.md`.
 
 ## Next bounded action
 

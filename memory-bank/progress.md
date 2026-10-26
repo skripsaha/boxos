@@ -22,6 +22,15 @@ The entries above distinguish merged commits from worktree state. Historical
 Claude reports may describe a planned or intermediate result; the live Git
 branch and targeted verification output take precedence.
 
+## Codex migration evidence — 2026-10-26
+
+- Claude memory reconciliation read all 330 Markdown files under the preserved
+  project memory root (7,251,758 bytes; 55,172 lines).
+- The catalog is stored in `memory-bank/source-map.md`; it covers 229 files
+  indexed by `MEMORY.md` and 101 files that were previously unindexed.
+- SHA-256 content comparison found no duplicate files. The original Claude
+  memory tree remains untouched.
+
 ## Next milestone
 
 Finish and review j2, then complete the v2.3k matrix and receipts. Only after
