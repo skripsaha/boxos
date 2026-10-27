@@ -1,14 +1,13 @@
-#include "mount.h"
-#include "boardroom.h"
-#include "deed_pen.h"
+#include "ground_grow.h"
 
 /*
  * A format-v1 volume taking the ground behind it (volume_take_more_ground):
  * its Deed grown at the far end and then at the head, the new ground first
  * proven blank by its bitmap. Moved here out of tagfs.c whole — format v1's
  * growth stands on its LAYOUT and its bitmap, which a format-v2 volume has
- * neither of; a book grows by its prologue alone, after it is read (spec_v2
- * §16.1 п.4), and is not grown by this kernel, which writes no book.
+ * neither of; what the two formats share, the medium's questions and the
+ * order of the Deed's two copies, is ground_grow.c's, and a book grows by its
+ * prologue alone, after it is read (book_grow.c, spec_v2 §16.1 п.4).
  */
 
 /* A Deed occupies one block wherever it sits — the pen says how many sectors
@@ -94,40 +93,8 @@ static bool GroundV1Measured(uint8_t seat, uint64_t ground_sectors, const DeedCo
 {
     uint64_t have = head->head.sectors;
 
-    /* Not a byte of room, or not a whole block of it: nothing to take, and it
-     * is said, because "checked and there is nothing" and "never checked" have
-     * to be tellable apart from a screen. */
-    if (ground_sectors <= have + TAGFS_BLOCK_SECTORS) {
-        kprintf("[TagFS] seat %u: the volume fills the ground it was given — "
-                "%llu sectors, all of it\n", seat, (unsigned long long)have);
+    if (!GroundGrowRoom(seat, ground_sectors, have))
         return false;
-    }
-
-    /*
-     * ‼ THE MEDIUM HAS TO SAY HOW FAR IT RUNS, OR NOTHING IS TAKEN.
-     *
-     * A partition entry is bounded against the medium's own length only when
-     * the medium answered (ground.c). A medium that will not say leaves the
-     * entry unchecked — and reading past the end of a device is recoverable,
-     * while writing a Deed that permanently claims ground which does not exist
-     * is not: the volume then fails its own extent check on every boot after,
-     * bricked by its own commit.
-     */
-    uint64_t medium = BoardroomSeatSectors(seat);
-    if (medium == 0) {
-        kprintf("[TagFS] seat %u: there is ground behind this volume and the "
-                "medium will not say how far it runs — nothing is taken, "
-                "because a partition table is the only thing claiming that "
-                "ground is there\n", seat);
-        return false;
-    }
-    if (tagfs_get_volume_base() + ground_sectors > medium) {
-        kprintf("[TagFS] seat %u: the ground behind this volume ends at sector "
-                "%llu and the medium ends at %llu — nothing is taken\n", seat,
-                (unsigned long long)(tagfs_get_volume_base() + ground_sectors),
-                (unsigned long long)medium);
-        return false;
-    }
 
     uint32_t data_block  = TagFSLayout()->data_block;
     uint32_t data_now    = TagFSLayout()->data_blocks;
@@ -185,9 +152,10 @@ static bool GroundV1Measured(uint8_t seat, uint64_t ground_sectors, const DeedCo
     return true;
 }
 
-/* Steps 2 and 3 below: the Deed amended into *grown, its far copy written at
- * the new end and read back, then its head — the commit. False, the Deed in
- * `head` put back as it was and why said, when either did not take. */
+/* Steps 2 and 3 below: the Deed amended into *grown — its LAYOUT here, its
+ * prologue and its two copies by ground_grow.c — the far copy written at the
+ * new end and read back, then its head, the commit. False, the Deed in `head`
+ * put back as it was and why said, when either did not take. */
 static bool GroundV1DeedsWritten(uint8_t seat, DeedCopy *head, const GroundV1Take *t,
                                  VolumeLayout *grown)
 {
@@ -227,96 +195,9 @@ static bool GroundV1DeedsWritten(uint8_t seat, DeedCopy *head, const GroundV1Tak
      * whatever a later mkfs put after them. */
     memcpy(live, grown, sizeof(*grown));
 
-    DeedPenSetGround(&pen, t->new_sectors, t->new_tail);
-
-    /* --- The far copy first, and it must read back ---------------------- */
-    DeedPenSetRole(&pen, VOLUME_DEED_ROLE_TAIL);
-    DeedPenSeal(&pen);
-
-    bool far_end_took_it =
-        tagfs_volume_write(t->new_tail, DEED_PEN_SECTORS, head->raw) == 0 &&
-        BoardroomFlush(seat) == 0;
-
-    if (far_end_took_it) {
-        /* Read it back off the medium. This is the one live proof that the
-         * ground the partition table claims really is there and answers — a
-         * table can lie, a device that returns the bytes cannot. */
-        MediumGround grown_ground = { .start_sector = tagfs_get_volume_base(),
-                                      .sectors      = t->new_sectors,
-                                      .origin       = GROUND_FROM_MBR,
-                                      .entry        = 0 };
-        DeedCopy proof;
-        DeedCopy asif = *head;
-        asif.head.sectors     = t->new_sectors;
-        asif.head.tail_sector = t->new_tail;
-        if (DeedReadTail(seat, &grown_ground, &asif, &proof) == OK) {
-            DeedRelease(&proof);
-        } else {
-            far_end_took_it = false;
-        }
-    }
-
-    if (!far_end_took_it) {
-        memcpy(head->raw, keep, head->raw_bytes);
-        kfree(keep);
-        kprintf("[TagFS] seat %u: the new far end at sector %llu would not take "
-                "its deed and give it back — the volume is left exactly as it "
-                "was\n", seat, (unsigned long long)t->new_tail);
-        return false;
-    }
-
-    /* --- 3. The head. Before this line the volume is old; after it, new. -- */
-    DeedPenSetRole(&pen, VOLUME_DEED_ROLE_HEAD);
-    DeedPenSeal(&pen);
-
-    if (tagfs_volume_write(0, DEED_PEN_SECTORS, head->raw) != 0 ||
-        BoardroomFlush(seat) != 0) {
-        memcpy(head->raw, keep, head->raw_bytes);
-        kfree(keep);
-        kprintf("[TagFS] seat %u: the deed at the head would not be written — "
-                "the volume stands at its old size and will try again on the "
-                "next mount\n", seat);
-        return false;
-    }
+    bool written = GroundGrowDeedsWritten(seat, head, &pen, keep, t->new_sectors, t->new_tail);
     kfree(keep);
-    return true;
-}
-
-/* The far copy the growth left behind, inside the data run now. */
-static void GroundV1OldTailErased(uint8_t seat, uint64_t old_tail)
-{
-    /*
-     * ‼ THE OLD FAR COPY IS ERASED, AND THAT IS SAFETY AND NOT TIDINESS.
-     *
-     * The block the old tail sat in is inside the data run now and marked
-     * free, so it will be written over by the first file that lands on it.
-     * Until then it is a checksum-valid Deed that states the OLD length and
-     * the OLD layout — and DeedReadTailAlone finds a tail by reading the last
-     * block of the ground it is given. Image this volume onto a partition that
-     * happens to end there, lose the head, and the machine mounts on a stale
-     * deed believing an old data run: block numbers handed out over files.
-     */
-    uint8_t *blank = (uint8_t *)kmalloc(DEED_PEN_BYTES);
-    if (blank) {
-        memset(blank, 0, DEED_PEN_BYTES);
-        if (tagfs_volume_write(old_tail, DEED_PEN_SECTORS, blank) == 0) {
-            kprintf("[TagFS] seat %u: the deed that used to sit at sector %llu "
-                    "is inside the data run now and has been erased\n",
-                    seat, (unsigned long long)old_tail);
-        } else {
-            kprintf("[TagFS] seat %u: the deed that used to sit at sector %llu "
-                    "is inside the data run now and would not erase — it will "
-                    "be written over by the first file that lands there\n",
-                    seat, (unsigned long long)old_tail);
-        }
-        kfree(blank);
-    }
-    /* The one flush on this path whose answer is deliberately dropped, and it
-     * stays dropped. The volume was committed at the head-deed write above;
-     * everything since is bookkeeping whose own failure has already been said
-     * out loud two lines up, and which the next file to land on that block
-     * undoes anyway. There is no claim here for a refused flush to falsify. */
-    (void)BoardroomFlush(seat);
+    return written;
 }
 
 /*
@@ -403,5 +284,7 @@ void volume_take_more_ground(uint8_t seat, uint64_t ground_sectors,
             TagFSLayout()->data_blocks, (uint32_t)(t.data_want - t.data_now),
             (unsigned long long)t.new_tail);
 
-    GroundV1OldTailErased(seat, old_tail);
+    uint8_t *blank = (uint8_t *)kmalloc(DEED_PEN_BYTES);
+    GroundGrowOldTailErased(seat, old_tail, blank);
+    kfree(blank);
 }

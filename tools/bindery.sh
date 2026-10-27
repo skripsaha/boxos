@@ -1,7 +1,8 @@
 #!/bin/bash
 # bindery — receipts across kernels: a volume one kernel wrote, read by the next.
 #
-#     HEIRLOOM_FROM=<commit> tools/bindery.sh heirloom
+#     HEIRLOOM_FROM=<commit> [HEIRLOOM_FORMAT=v2] tools/bindery.sh heirloom
+#     HEIRLOOM_FROM=<commit> tools/bindery.sh refusal
 #
 # A machine outlives its builds. The machines on the desk and the sticks beside
 # them carry volumes written by whichever kernel they last ran, and the next
@@ -38,6 +39,19 @@
 # The programs run on the heirloom are the heirloom's, so kernel N+1 runs
 # commit N's userspace: the receipt is the system-call surface's as well as the
 # format's.
+#
+# HEIRLOOM_FORMAT=v2 makes the heirloom a book: commit N's volume laid down
+# with VOLUME_FORMAT=v2 and this tree's disk too — kernel N's book read and
+# written by kernel N+1, and back (receipt (а) of step 2.3: the kernel of 2.3j
+# and the next). Unset, format v1: commit b9962f55's volume, the last kernel's
+# before the book, is receipt (в) — the frozen path read on.
+#
+# `refusal` is the receipt the other way round, (б): a book THIS tree laid
+# down and its kernel wrote, handed to kernel N — one from before the book
+# (commit b9962f55, step 2.2b) — whose boarding pass names it. N must refuse it
+# in the words step 2.1 gave it ("carries a format-v2 volume ... cannot read a
+# format-v2 book") and leave every byte of it as it found it: its sha256 is
+# held to the one this tree's halt left.
 
 set -u
 STAND_NAME=bindery
@@ -65,10 +79,12 @@ heirloom_tree() {
     stand_exit_hook
     git -C "$ROOT" worktree add --detach "$HEIRLOOM_TREE" "$1" >"$SCRATCH/heirloom.tree.log" 2>&1 \
         || { cat "$SCRATCH/heirloom.tree.log"; return 1; }
-    # Not this file's make(): commit N is not mutated and is not this tree, so
-    # nothing about it is asked for on its behalf.
-    command make -C "$HEIRLOOM_TREE" >"$SCRATCH/heirloom.build.log" 2>&1 \
-        || { tail -25 "$SCRATCH/heirloom.build.log"; return 1; }
+    # Not this file's make(): commit N is not this tree, so nothing about it is
+    # asked for on its behalf but the format its volume is laid down in and,
+    # for `refusal`, the pass it carries (heirloom_old_pass, UUID given).
+    [ -z "${2:-}" ] || heirloom_old_pass "$2" || return 1
+    command make -C "$HEIRLOOM_TREE" ${HEIRLOOM_FORMAT:+VOLUME_FORMAT=$HEIRLOOM_FORMAT} \
+        >"$SCRATCH/heirloom.build.log" 2>&1 || { tail -25 "$SCRATCH/heirloom.build.log"; return 1; }
 }
 
 # The pass names the heirloom: BoardingPassVolume answers the heirloom's
@@ -104,6 +120,22 @@ heirloom_pass_off() {
     restore src/kernel/core/boarding/boarding.c
 }
 
+# heirloom_old_pass UUID — commit N's tree, checked out for this run alone,
+# given the one change heirloom_pass_on gives this tree: the pass names UUID.
+# Not under the manifest — the tree is the run's and goes with it.
+heirloom_old_pass() {
+    python3 - "$HEIRLOOM_TREE/src/kernel/core/boarding/boarding.c" "$1" "$HEIRLOOM_MARK" <<'PASS_EOF'
+import sys
+p, uuid, mark = sys.argv[1], bytes.fromhex(sys.argv[2]), sys.argv[3]
+s = open(p).read()
+anchor = "        memcpy(out_uuid, v->uuid, 16);\n"
+assert s.count(anchor) == 1 and len(uuid) == 16, "heirloom anchor missing in commit N"
+words = ", ".join("0x%02x" % b for b in uuid)
+open(p, "w").write(s.replace(anchor, "        static const uint8_t heirloom[16] = { " + words + " };   /* " +
+                             mark + " */\n        memcpy(out_uuid, heirloom, 16);\n", 1))
+PASS_EOF
+}
+
 # heirloom_census IMG NAME — volume-read's census of IMG: its exit status;
 # heirloom.NAME.files, every file the next mount would show — its name, its
 # file id and its sha256; heirloom.NAME.count, how many files the census says
@@ -121,7 +153,8 @@ with open(sys.argv[2] + ".files", "w") as out:
     for f in sorted(d.get("files", []), key=lambda f: f["name"]):
         if f.get("visible"):
             out.write("%s %s %s\n" % (f["name"], f["fid"], f.get("sha256")))
-says = ((d.get("kernel") or {}).get("says") or {}).get("files")
+k = d.get("kernel") or {}
+says = (k.get("says") or {}).get("files") if d.get("format") != "v2" else k.get("files")
 with open(sys.argv[2] + ".count", "w") as out:
     out.write("%s\n" % ("" if says is None else says))
 PY
@@ -267,7 +300,7 @@ heirloom_handed() {
     local L="$SCRATCH/serial.heirloom_n1.log" rc count tree seat own kept found handed
     echo "-- kernel N+1: this tree, its boarding pass naming the heirloom $HEIRLOOM_UUID --"
     heirloom_pass_on "$HEIRLOOM_UUID"
-    build
+    STAND_FORMAT=${HEIRLOOM_FORMAT:-} build
     if ! cp build/boxos.img "$HEIRLOOM_BOOT"; then
         harness "heirloom: this tree's image could not be copied to $HEIRLOOM_BOOT"
         heirloom_pass_off
@@ -278,7 +311,7 @@ heirloom_handed() {
 
     heirloom_untouched "the host, between the machines,"
     handed=$(heirloom_sha)
-    heirloom_machine n1 "$HEIRLOOM_BOOT" "$HEIRLOOM_IMG" "persist verify" "persist write"; rc=$?
+    STAND_FORMAT=${HEIRLOOM_FORMAT:-} heirloom_machine n1 "$HEIRLOOM_BOOT" "$HEIRLOOM_IMG" "persist verify" "persist write"; rc=$?
     heirloom_pass_off
     [ $rc = 2 ] && return 1
     heirloom_let_go "kernel N+1"
@@ -341,6 +374,85 @@ heirloom_back() {
     heirloom_untouched "the host's census after $HEIRLOOM_LEFT_BY"
 }
 
+# --- refusal: a book this tree wrote, handed to a kernel from before the book --
+
+# Step 2.1's refusal of a book (deed.c, DeedFormatRefused), as kernel N says it.
+REFUSAL_SAID='carries a format-v2 volume \(its deed bears FRAME\); this kernel cannot read a format-v2 book'
+
+# The book laid down by this tree and written by its kernel: `persist write`,
+# halted through `bye`.
+refusal_written() {
+    local L="$SCRATCH/serial.heirloom_k.log" rc
+    echo "-- this tree: a book laid down (VOLUME_FORMAT=v2) and written by its kernel --"
+    rm -f build/boxos.img
+    if ! STAND_FORMAT=v2 build_with_key VOLUME_FORMAT=v2 || ! cp build/boxos.img "$HEIRLOOM_IMG"; then
+        harness "refusal: this tree would not build a book ($SCRATCH/build.log)"
+        return 1
+    fi
+    HEIRLOOM_UUID=$(deed_uuid "$HEIRLOOM_IMG") || HEIRLOOM_UUID=""
+    [ -n "$HEIRLOOM_UUID" ] || { harness "refusal: the book's Deed would not read"; return 1; }
+    STAND_FORMAT=v2 heirloom_machine k "$HEIRLOOM_IMG" "" "persist write"; rc=$?
+    [ $rc = 2 ] && return 1
+    heirloom_let_go "this tree's kernel"
+    [ -n "$(heirloom_fid "$L" WROTE)" ] && [ $rc = 0 ]
+    chk $? "refusal: this tree's kernel wrote on its book and halted, its sync writing it ($(grep -aoE '\[PERSIST\] WROTE fid=[0-9]+' "$L" | head -1))"
+    heirloom_census "$HEIRLOOM_IMG" k
+    chk $? "refusal: volume-read finds the book this tree's kernel left consistent"
+    heirloom_untouched "the host's census after $HEIRLOOM_LEFT_BY"
+}
+
+# refusal_machine DISK STICK — DISK booted with STICK on USB until a volume is
+# mounted or refused or the kernel panics, then stopped without a halt: a
+# kernel that refuses its volume has no shell to say `bye` to. The log is kept
+# as serial.heirloom_old.log; 2 when no machine was started.
+refusal_machine() {
+    local extra="-drive if=none,id=stick,file=$2,format=raw -device usb-storage,bus=xhci1.0,drive=stick,id=usbstick"
+    make run-stop >/dev/null 2>&1
+    rm -f build/serial.log
+    if ! make run-bg BOOTDISK="$1" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra" \
+            >"$SCRATCH/runbg.heirloom_old.log" 2>&1 || [ ! -S build/qemu.mon ]; then
+        harness "refusal: no machine was started for kernel N — $(tail -1 "$SCRATCH/runbg.heirloom_old.log" | tr -d '\r')"
+        make run-stop >/dev/null 2>&1
+        return 2
+    fi
+    wait_for_line -E build/serial.log "$REFUSAL_SAID|is MOUNTED — [0-9]+ file|KERNEL PANIC" "$WAIT_QUIET_S"
+    sleep 3       # what the kernel says after the refusal, what it stands on instead
+    make run-stop >/dev/null 2>&1
+    tr -d '\r' < build/serial.log > "$SCRATCH/serial.heirloom_old.log"
+}
+
+run_refusal() {
+    echo "== refusal: a book this tree wrote, handed to kernel N, is refused in step 2.1's words and not touched =="
+    local from=${HEIRLOOM_FROM:-} L="$SCRATCH/serial.heirloom_old.log" seat old
+    if [ -z "$from" ] || ! git -C "$ROOT" rev-parse -q --verify "$from^{commit}" >/dev/null; then
+        harness "refusal: HEIRLOOM_FROM names no commit ('$from') — it says which kernel from before the book refuses it"
+        return
+    fi
+    build
+    refusal_written || { buildkey_restore; return; }
+    echo "-- kernel N: commit $from, its boarding pass naming this tree's book $HEIRLOOM_UUID --"
+    if ! HEIRLOOM_FORMAT="" heirloom_tree "$from" "$HEIRLOOM_UUID" ||
+       ! cp "$HEIRLOOM_TREE/build/boxos.img" "$HEIRLOOM_BOOT"; then
+        harness "refusal: commit $from would not check out and build ($SCRATCH/heirloom.build.log)"
+        buildkey_restore; return
+    fi
+    heirloom_untouched "the host, between the machines,"
+    refusal_machine "$HEIRLOOM_BOOT" "$HEIRLOOM_IMG"
+    [ $? = 2 ] && { buildkey_restore; return; }
+    old=$(heirloom_kernel "$L" "$HEIRLOOM_BOOT")
+    [ -n "$old" ]
+    chk $? "refusal: the machine ran kernel N, commit $from's (tree ${old:-unread})"
+    seat=$(grep -aoE "^\[Deed\] seat [0-9]+: volume $HEIRLOOM_UUID, " "$L" | head -1 | grep -oE '[0-9]+' | head -1)
+    [ -n "$seat" ] && grep -aqE "^\[TagFS\] seat $seat $REFUSAL_SAID" "$L"
+    chk $? "refusal: kernel N found the book on seat ${seat:-none} and refused it in step 2.1's words ($(grep -aoE "seat [0-9]+ $REFUSAL_SAID" "$L" | head -1 | cut -c1-90))"
+    ! grep -aqE "^\[TagFS\] the volume on seat ${seat:-x} is MOUNTED" "$L"
+    chk $? "refusal: and did not mount it"
+    heirloom_clean "$L"
+    chk $? "refusal: kernel N — no panic, no fault"
+    heirloom_untouched "kernel N"
+    buildkey_restore
+}
+
 run_heirloom() {
     echo "== heirloom: the volume kernel N wrote, mounted and read by kernel N+1 — and back =="
     local from=${HEIRLOOM_FROM:-}
@@ -355,7 +467,9 @@ run_heirloom() {
 
 case "${1:-}" in
     heirloom) run_heirloom ;;
-    *) echo "usage: HEIRLOOM_FROM=<commit> $0 heirloom"; exit 2 ;;
+    refusal)  run_refusal ;;
+    *) echo "usage: HEIRLOOM_FROM=<commit> [HEIRLOOM_FORMAT=v2] $0 heirloom"
+       echo "       HEIRLOOM_FROM=<commit> $0 refusal"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

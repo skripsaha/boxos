@@ -481,6 +481,14 @@ def ElementCases(bt):
              must={"PARCEL_GAP"}, checks=[
                  ("%s is locked: its Parcel does not read, as the kernel's codec refuses it (TallyRunGet)" % Label(S),
                   lambda c: S.fid in c.mount.locked and Found(c, "PARCEL_GAP", "fid %u" % S.fid, "2^64 - 1"))]),
+        Case("B57 a run past the far Deed",
+             lambda o: Parcel(o, [tally.Run(False, bt.ground.data_end + 1, S.Blocks(), run.birth)]),
+             must={"EXTENT_OUTSIDE"}, checks=[
+                 ("%s is locked by the Tally for the ground past the far Deed it names" % Label(S),
+                  lambda c: c.mount.locked.get(S.fid) == tally.OUTSIDE and
+                  Found(c, "EXTENT_OUTSIDE", "fid %u" % S.fid, "%u+%u" % (bt.ground.data_end + 1, S.Blocks()))),
+                 ("and the volume is not put under glass for it, as the kernel's Tally does not",
+                  lambda c: not c.mount.glass)]),
         Case("B8 two files name one block",
              lambda o: Parcel(o, [tally.Run(False, L.runs[0].start, S.Blocks(), run.birth)]),
              must={"DOUBLE_OWNER"}, checks=[

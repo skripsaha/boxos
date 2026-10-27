@@ -917,6 +917,9 @@ $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tag
 	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $(filter %.c,$^) -Wall -Wextra
 	@echo "TagFS tool built: $@"
 
+# parcel-host: tools/parcel_host.mk (a host test, its own file).
+include tools/parcel_host.mk
+
 # Create OS signature file on first build
 $(TAGFS_OS_SIGNATURE): | $(BUILDDIR)
 	@echo "$(UNAME_S):$(UNAME_M)" > $@

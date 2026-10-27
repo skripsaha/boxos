@@ -59,7 +59,7 @@ static void BookGroundAtom(uint8_t seat)
     TagFSUnderGlass(words);
 }
 
-error_t MountBookGround(uint8_t seat, const DeedCopy* head)
+error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sectors)
 {
     TagFSState* fs    = tagfs_get_state();
     uint16_t    bytes = 0;
@@ -74,6 +74,8 @@ error_t MountBookGround(uint8_t seat, const DeedCopy* head)
                                                       * of a volume mounted before */
     memcpy(&g_book.frame, frame, sizeof(VolumeFrame));
     g_book.data_end = head->head.tail_sector / VOLUME_BLOCK_SECTORS;
+    g_book.ground   = ground_sectors;
+    g_book.on_head  = head->head.role == VOLUME_DEED_ROLE_HEAD;
     fs->block_base  = 0;
     fs->block_end   = g_book.data_end;
     if (bytes > sizeof(VolumeFrame)) {
@@ -419,6 +421,7 @@ error_t MountReadBook(const char** what)
         TagFSUnderGlass("a Tally of its book names a bookmark, whose ground this kernel does not derive — its "
                         "writer takes no ground without the map of it");
     BookBounds();
+    MountBookGrow(tagfs_get_seat());
     BinderMountStood(g_book.stood->index, g_book.tally_blocks, g_book.ribbon_useful, g_book.next_fid,
                      g_book.next_tag, g_book.next_bookmark);
     EndpaperStood(&g_book.laid, g_book.stood->head.tally_seq, g_book.stood->counts.next_fid);

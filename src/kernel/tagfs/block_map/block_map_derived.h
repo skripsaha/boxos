@@ -32,8 +32,9 @@
  * under (MapLock) — by the ribbon's door (BlockMapTakeQuire) and by Fallow's
  * gives at a cycle's DONE (fallow.c) alone in this kernel: the page a change may
  * need for a window it leaves mixed is made before the lock
- * (BlockMapDerivedStock, BlockMapDerivedHold), and under it only put in place.
- * Never while the volume stands under glass.
+ * (BlockMapDerivedStock, BlockMapDerivedHold), and under it only put in place;
+ * and widened, before the door, by a mount whose volume took the ground behind
+ * it (BlockMapDerivedWidenMake). Never while the volume stands under glass.
  */
 
 /* The map begun for [0, end): every window free, no page made. ERR_NO_MEMORY
@@ -131,6 +132,32 @@ bool     BlockMapDerivedIsFree(uint64_t block);
 /* The first run of at least `want` free blocks inside window `window`: true and
  * *start, or false when the window holds none. */
 bool     BlockMapDerivedRunIn(uint32_t window, uint32_t want, uint64_t* start);
+
+/*
+ * The map widened to [0, end) for a volume that took the ground behind it
+ * (mount/book_grow.c): every block past its old end free. In two steps, so
+ * that nothing changes unless all of it can — and nothing is written to the
+ * volume until the memory it needs is in hand:
+ *
+ *   BlockMapDerivedWidenMake  with no TagFS lock held: the wider summary made,
+ *                             and the page its old last window may want — one
+ *                             whole taken and mixed once widened. OK; or
+ *                             ERR_NO_MEMORY, ERR_OUT_OF_RANGE past the windows
+ *                             the map counts, ERR_INVALID_ARGUMENT for a map
+ *                             not up or no wider — *what saying which
+ *   BlockMapDerivedWidenPut   put in place under the state lock: it cannot
+ *                             fail, and the free count is the volume's again
+ *   BlockMapDerivedWidenDrop  let go unused: the growth did not commit
+ */
+typedef struct {
+    uint64_t  end;
+    void*     win;     /* the wider summary */
+    uint64_t* page;    /* the old last window's page, where it may want one */
+} BlockMapWidening;
+
+error_t  BlockMapDerivedWidenMake(uint64_t end, BlockMapWidening* w, const char** what);
+void     BlockMapDerivedWidenPut(BlockMapWidening* w);
+void     BlockMapDerivedWidenDrop(BlockMapWidening* w);
 
 /* Everything the map holds let go. */
 void     BlockMapDerivedLetGo(void);

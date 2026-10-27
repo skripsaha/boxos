@@ -133,8 +133,12 @@ def SelfTest(pc):
     Want(run.AckFlush(run.steps[0]) is None, "a data writer's flush before the step's ledger stands behind "
          "nothing of the step's (%s)" % run.AckFlush(run.steps[0]))
     run = Recorded([[1], [1]], 0, 3)
-    Want(not run.LedgerWrites(run.steps[0]) and run.AckFlush(run.steps[0]) is None,
+    Want(not run.CommitWrites(run.steps[0]) and run.AckFlush(run.steps[0]) is None,
          "a step that wrote no ledger has no flush of its own")
+    sewn = (1, None, "stitch")
+    run = Recorded([[1, sewn], [1]], 0, 4)
+    Want(run.AckFlush(run.steps[0]) == 3, "on a book the flush behind a step is the first after its "
+         "stitch, the unit a cycle of format v2 commits by (%s)" % run.AckFlush(run.steps[0]))
     Want(Recorded([[1, 1], [1]], 0, 3).Exhaustive() and not Recorded([[1] * 14], 0, 0).Exhaustive()
          and not Recorded([[40]], 0, 0).Exhaustive(),
          "a record is enumerated whole only with no subset and no torn prefix left out")
@@ -189,5 +193,24 @@ def SelfTest(pc):
     rc, said = Crowd(508, 4053, names=10)
     Want(rc == 0 and said == ["more", "0", "1"],
          "one row short with the registry at its edge: one name made again (%s %s)" % (rc, said))
+    # A book's `check --json` (bookcensus.py Json): its kernel has no fsck, and
+    # a locked file is its fid, state and why alone — the shape volume-read
+    # gives landing B4's fid 87.
+    live = {"fid": 1, "state": "live", "name": "a", "size": 3, "sha256": "ab" * 32, "visible": True}
+    book = {"format": "v2", "verdict": "clean", "findings": [],
+            "kernel": {"mounts": True, "refusal": None, "data_blocks": 9, "free": 5, "files": 1,
+                       "slot": 0, "locked": [87]},
+            "book": {"slot": 0, "slots": [{"index": 0, "counts": {"next_fid": 120}}],
+                     "counts": {"next_fid": 120}, "tally": {"seq": 4}, "under_glass": [],
+                     "ribbon": {"stitches": [{}], "torn": [], "lied": False}},
+            "files": [live, {"fid": 87, "state": "locked", "why": "w", "visible": False}]}
+    try:
+        got = pc.Compact("c0", 0, json.dumps(book), "", {pc.FileKey(live): live}, {(1, "a")})
+    except KeyError as e:
+        got = {"error": "KeyError %s" % e}
+    Want(got.get("new_files") == [[87, None, "locked", False, None, None]] and not got["base_changed"]
+         and "fsck" not in got and (got["next_file_id"], got["ledger_next"]) == (120, 120),
+         "a book's check, a locked file in it, compacts: no fsck, the locked fid new and nameless, "
+         "the next fid against its slot's (%s)" % {x: got.get(x) for x in ("error", "new_files", "fsck")})
     print("selftest: %d failed" % len(fails))
     return 1 if fails else 0

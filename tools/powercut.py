@@ -130,6 +130,11 @@ def LoadLines(path):
         return [json.loads(line) for line in fh if line.strip()]
 
 
+# The writes that commit a step: format v1's Ledger, a book's stitch and slot
+# (blklog_book.py names them by their sectors' heads).
+COMMIT_KINDS = ("ledger", "stitch", "slot")
+
+
 def Outside(w):
     return bool(w["touches"]) and all(t["kind"] == "outside" for t in w["touches"])
 
@@ -261,7 +266,9 @@ def CmdPlan(a):
 
 
 def FileKey(f):
-    return (f["fid"], f["name"], f["size"], f["sha256"])
+    """A file as the judge compares it. A book's locked file is its fid, state
+    and why alone (bookcensus.py Json): no name, size or digest to compare."""
+    return (f["fid"], f.get("name"), f.get("size"), f.get("sha256"))
 
 
 def Compact(cid, rc, out, err, base_files, base_names):
@@ -274,7 +281,7 @@ def Compact(cid, rc, out, err, base_files, base_names):
     except ValueError:
         return {"id": cid, "rc": rc, "error": ((out.strip() or err.strip() or "no output")
                                                .splitlines()[-1])}
-    k, fsck = d["kernel"], d["kernel"]["fsck"] or {}
+    k = d["kernel"]
     files = {f["fid"]: f for f in d["files"]}
     changed = []
     for key, bf in base_files.items():
@@ -283,19 +290,46 @@ def Compact(cid, rc, out, err, base_files, base_names):
             changed.append("fid %d %s %s" % (bf["fid"], bf["name"], "gone" if f is None else
                            "not visible (%s)" % f["state"] if not f["visible"] else
                            "is %s bytes, sha256 %s" % (f["size"], (f["sha256"] or "none")[:12])))
-    led = d["ledger"]
-    stood = next((c for c in led["copies"] if c.get("copy") == led["standing_on"]), None)
-    return {"id": cid, "rc": rc, "verdict": d["verdict"], "mounts": k["mounts"],
-            "refusal": k["refusal"], "says": k["says"],
-            "next_file_id": led.get("next_file_id"),
-            "ledger_next": stood.get("next_file_id") if stood else None,
-            "refused": d["chains"]["refused"] or {},
-            "chains": {x: len(d["chains"][x]) for x in ("registry", "table", "pool")},
-            "fsck": {x: fsck.get(x) for x in ("orphan", "missing", "corrected", "lost")},
+    out = {"id": cid, "rc": rc, "verdict": d["verdict"], "mounts": k["mounts"],
+           "refusal": k["refusal"], "format": d.get("format", "v1")}
+    out.update(CompactBook(d) if out["format"] == "v2" else CompactLedger(d))
+    out.update({
             "findings": [[x["code"], x["severity"], x["text"]] for x in d["findings"]],
             "base_changed": changed,
-            "new_files": [[f["fid"], f["name"], f["state"], f["visible"], f["size"], f["sha256"]]
-                          for f in d["files"] if (f["fid"], f["name"]) not in base_names]}
+            "new_files": [[f["fid"], f.get("name"), f["state"], f["visible"], f.get("size"), f.get("sha256")]
+                          for f in d["files"] if (f["fid"], f.get("name")) not in base_names]})
+    return out
+
+
+def CompactLedger(d):
+    """Format v1's part: the next file id the mount derives against the one the
+    Ledger it stands on counts, the chains — which are refused, how long — and
+    what the kernel's fsck will say (a book has no fsck: bookcensus.py KernelBook)."""
+    led, fsck = d["ledger"], d["kernel"]["fsck"] or {}
+    stood = next((c for c in led["copies"] if c.get("copy") == led["standing_on"]), None)
+    return {"says": d["kernel"]["says"], "next_file_id": led.get("next_file_id"),
+            "fsck": {x: fsck.get(x) for x in ("orphan", "missing", "corrected", "lost")},
+            "ledger_next": stood.get("next_file_id") if stood else None,
+            "refused": d["chains"]["refused"] or {},
+            "chains": {x: len(d["chains"][x]) for x in ("registry", "table", "pool")}}
+
+
+def CompactBook(d):
+    """A book's part (bookcensus.py Json, `book`): the next file id the mount
+    derives against the one the slot it stands on counts — the Ledger's place
+    in format v2 (SpineCounts) — the kernel's count line, and the ribbon: how
+    many stitches it sews on, the last, how many torn, whether the medium is
+    shown to have lied. A book has no chains."""
+    k, b = d["kernel"], d["book"]
+    slot = next((x for x in b["slots"] if x["index"] == b["slot"]), None)
+    r = b["ribbon"]
+    return {"says": {"data_blocks": k.get("data_blocks"), "free": k.get("free"), "files": k.get("files")},
+            "next_file_id": b["counts"].get("next_fid"),
+            "ledger_next": (slot["counts"] or {}).get("next_fid") if slot else None,
+            "refused": {}, "chains": {},
+            "book": {"slot": b["slot"], "tally": (b["tally"] or {}).get("seq"),
+                     "stitches": len(r["stitches"]), "torn": len(r["torn"]), "lied": r["lied"],
+                     "glass": list(b["under_glass"])}}
 
 
 def CmdChecks(a):
@@ -304,7 +338,7 @@ def CmdChecks(a):
     with open(a.basecheck) as fh:
         base = json.load(fh)
     base_files = {FileKey(f): f for f in base["files"] if f["visible"]}
-    base_names = {(f["fid"], f["name"]) for f in base["files"]}
+    base_names = {(f["fid"], f.get("name")) for f in base["files"]}
     todo = [c for c in plan["cuts"] if c["same"] is None]
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
 
@@ -395,16 +429,19 @@ class Run:
         return "epoch %d, entries %s kept (%s)%s" % (c["epoch"], kept, ", ".join(kinds) or "nothing",
                                                       tear)
 
-    def LedgerWrites(self, step):
-        """The step's own writes that touch the ledger: entries in (before, ack]."""
+    def CommitWrites(self, step):
+        """The step's own writes that commit what it changed: entries in (before,
+        ack] that touch format v1's Ledger, or a book's stitch — the unit a
+        Settle cycle of format v2 commits by (spec_v2 §3.2), a slot the one a
+        Tally does (COMMIT_KINDS)."""
         return [w["seq"] for w in self.listing["writes"] if step["before"] < w["seq"] <= step["ack"]
-                and any(t["kind"] == "ledger" for t in w["touches"])]
+                and any(t["kind"] in COMMIT_KINDS for t in w["touches"])]
 
     def AckFlush(self, step):
         """The flush behind the step's acknowledgement: the first after its last
-        ledger write, and no later than the ack was read. None when the step
-        wrote no ledger, or no flush followed its last one in time."""
-        led = self.LedgerWrites(step)
+        commit write, and no later than the ack was read. None when the step
+        committed nothing, or no flush followed its last commit in time."""
+        led = self.CommitWrites(step)
         f = next((s for s in self.flushes if led and s > led[-1]), None)
         return f if f is not None and f <= step["ack"] else None
 

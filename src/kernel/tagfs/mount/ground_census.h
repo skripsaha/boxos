@@ -81,6 +81,18 @@ bool    GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count);
  * them at the most: how many there are. */
 uint64_t GroundClaimsOf(GroundOwner owner, Strip* out, uint64_t room);
 
+/* A run an owner names that its caller cuts to the data run before it
+ * claims what is left — a locked file's run outside it, a held or fallow run
+ * past it: counted in the reach as it is named, and claimed by no one. */
+void    GroundCensusNamed(uint64_t start, uint64_t count);
+
+/* Past the farthest block any owner but the far Deed named since Begin — as
+ * it named it, a claim before it is cut to the volume and a run told by
+ * GroundCensusNamed alike — 0 when none did: on a book, the proof that the
+ * ground behind the volume is no one's before it is taken
+ * (mount/book_grow.c), as a format-v1 volume's bitmap past its data run is. */
+uint64_t GroundCensusReach(void);
+
 /* The claims let go. */
 void    GroundCensusEnd(void);
 
