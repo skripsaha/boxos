@@ -513,3 +513,77 @@ QuillVerdict QuillBookBig(const char *const *args)
            (long long)fid, mib ? "written in one write and anchored" : "found", (unsigned long long)size, print);
     return QUILL_PASS;
 }
+
+// ----------------------------------------------------------------------------
+// log — a logger: a line a stitch, anchored
+// ----------------------------------------------------------------------------
+
+#define QUILL_LOG_LINE   48u
+#define QUILL_LOG_MOST   20000u
+
+/* Line n of the log, QUILL_LOG_LINE bytes ending in a newline. */
+static void QuillLogLine(uint8_t *out, uint32_t n)
+{
+    static const char digits[] = "0123456789";
+    memset(out, '.', QUILL_LOG_LINE);
+    for (int d = 7; d >= 0; d--, n /= 10u)
+        out[d] = (uint8_t)digits[n % 10u];
+    out[QUILL_LOG_LINE - 1u] = '\n';
+}
+
+/* The number LINES says, or 0 when it is none in [1, QUILL_LOG_MOST]. */
+static uint32_t QuillLogLines(const char *word)
+{
+    uint32_t n = 0;
+    for (const char *c = word; *c; c++) {
+        if (*c < '0' || *c > '9' || n > QUILL_LOG_MOST)
+            return 0;
+        n = n * 10u + (uint32_t)(*c - '0');
+    }
+    return n <= QUILL_LOG_MOST ? n : 0;
+}
+
+QuillVerdict QuillBookLog(const char *const *args)
+{
+    const char *name  = args[0];
+    uint32_t    lines = QuillLogLines(args[1]);
+    char        file[QUILL_BOOK_CAP], hex[17];
+    uint8_t     line[QUILL_LOG_LINE];
+    uint64_t    h = QUILL_FNV_BASIS;
+    if (!QuillBookNameFits("log", name))
+        return QUILL_FAIL;
+    if (!lines) {
+        printf("[QUILL] log: FAIL — LINES is a number from 1 to %u\n", QUILL_LOG_MOST);
+        return QUILL_FAIL;
+    }
+    QuillBookName(file, name, false, 0, "-l.log");
+    int64_t fid = QuillCreate(file), rc = fid > 0 ? 0 : fid;
+    for (uint32_t n = 0; rc >= 0 && n < lines; n++) {
+        QuillLogLine(line, n);
+        h      = QuillFnv(h, line, QUILL_LOG_LINE);
+        int64_t wrote = fwrite((file_id_t)fid, (uint64_t)n * QUILL_LOG_LINE, line, QUILL_LOG_LINE);
+        rc     = wrote == (int64_t)QUILL_LOG_LINE ? anchor(0) : (wrote < 0 ? wrote : -1);
+    }
+    if (rc < 0) {
+        printf("[QUILL] log: FAIL — an append answered %lld (error %u)\n", (long long)rc,
+               (unsigned)box_errno_of((int)rc));
+        return QUILL_FAIL;
+    }
+    uint64_t back = QUILL_FNV_BASIS, size = (uint64_t)lines * QUILL_LOG_LINE;
+    for (uint64_t at = 0; at < size; at += sizeof(s_data_back)) {
+        uint64_t n = size - at < sizeof(s_data_back) ? size - at : sizeof(s_data_back);
+        if (fread((file_id_t)fid, at, s_data_back, n) != (int64_t)n) {
+            printf("[QUILL] log: FAIL — %s would not be read back at byte %llu\n", file, (unsigned long long)at);
+            return QUILL_FAIL;
+        }
+        back = QuillFnv(back, s_data_back, n);
+    }
+    QuillHex(h, hex);
+    if (back != h) {
+        printf("[QUILL] log: FAIL — %s reads back other bytes than the lines appended\n", file);
+        return QUILL_FAIL;
+    }
+    printf("[QUILL] log: PASS — %s (fid %lld): %u lines appended and anchored one by one, %llu bytes, print 0x%s\n",
+           file, (long long)fid, lines, (unsigned long long)size, hex);
+    return QUILL_PASS;
+}

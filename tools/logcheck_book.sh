@@ -41,7 +41,7 @@
 # bound before it is trusted (selftest_book_ribbon.py).
 CENSUS_BOOK_LANDINGS="B0 B1 B2 B3 B4 B4p B5 B6 B6b B7 B7b B7c B8 B9 B9b B12 B13 B25 B34 B35 B36 B37 B38 B38b
 B38c B39 B40 B41 B42 B42b B43 B43b B43c B44 B45
-B4b B10 B11 B11b B14 B15 B15b B15c B16 B16b B17 B17b B18 B19 B19b B19c B19d B19e B20 B20b B21 B21b B21c B22 B22b
+B4b B6c B10 B11 B11b B14 B15 B15b B15c B16 B16b B17 B17b B18 B19 B19b B19c B19d B19e B20 B20b B21 B21b B21c B22 B22b
 B23 B23b B23c B23d B23e B24 B24b B26 B26b B26c B27 B27b B27c B27d B28 B28b B29 B29b B29c B29d B29e B29f B29g B29h B29i B29j B30 B30b B32
 B33
 B55a B55b B55c B55d B55e
@@ -293,24 +293,27 @@ census_book() {
 #   stand_blockfail_refused_writes                 4        4       4   two writes into each range
 #   stand_stitch_retry_quire_entered               1        1       1   the first atom of the Quire entered
 #   stand_stitch_retry_refused_twice               2        2       2   a stitch and its retry at the next's start
+#   stand_stitch_retry_head_landed                 2        2       2   a stitch past its head, and its retry at the next's start
 #   stand_docket_closed_damaged                    4        4       4   the stitch's unit, then its sector, read twice
 #   stand_fresh_refused_names_nothing              1        1       1   the first command of a file's write
 #   stand_fresh_flushes_first                      1        1       1   the flush of the data before the stitch
-#   total                                         20       38      21
+#   stand_binder_node_refused                      1        1       1   the Tally's first node
+#   stand_binder_slot_flush_refused                1        1       1   the flush of the Tally's slot
+#   total                                         24       42      25
 #   stand_stitch_refused_everywhere                N        N       N   every attempt, as many as its line says
 #   stand_stitch_retry_runs_out                    N        N       N   a stitch and every atom of the next: its line
 # ---------------------------------------------------------------------------
 
-STAND_BOOK_BLOCKFAILS=20
-STAND_BOOK_PADDED_BLOCKFAILS=38
-STAND_BOOK_UEFI_BLOCKFAILS=21
+STAND_BOOK_BLOCKFAILS=24
+STAND_BOOK_PADDED_BLOCKFAILS=42
+STAND_BOOK_UEFI_BLOCKFAILS=25
 STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
 # C13 (stand_docket_closed_damaged): sector 1 of a stitch the kernel sewed will
 # not read at the next mount — the line names it and the record bytes it took.
 STAND_BOOK_C13='^\[TagFS\] ribbon STITCH_TORN: stitch [0-9]+ is closed and damaged: sector\(s\) 1 of its [0-9]+ will not read, and [1-9][0-9]* byte\(s\) of its records with them'
 STAND_BOOK_REFUSED='^\[TagFS\] the book takes no write: ([0-9]+) refusal\(s\) in a row'
 STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes files made, written, named, tagged and given up, the names of tags and the memory of its Use Context'
-STAND_BOOK_NO_TALLY='^\[TagFS\] no Tally is written by this kernel: the ribbon is read whole at every mount'
+STAND_BOOK_TALLY='^\[TagFS\] a whole Tally of the book is written once the ribbon past the newest slot holds as many useful bytes as one costs'
 STAND_BOOK_TESTS="stand_tally_files_read_whole stand_tally_mount_writes_nothing stand_tally_copy_one_rotten
 stand_tally_rotten_leaf_locked stand_tally_writes_refused stand_tally_rot_three_paths
 stand_tally_undigested_refused stand_tally_length_asked stand_tally_lower_doors_refused
@@ -322,12 +325,16 @@ stand_ribbon_dead_branch stand_ribbon_undone
 stand_stitch_answers_after_flush stand_stitch_use_context stand_stitch_coined stand_stitch_halt_clean
 stand_stitch_retry_atom stand_stitch_retry_flush stand_stitch_refused_everywhere stand_stitch_ribbon_runs_out
 stand_stitch_tally_cost stand_stitch_medium_lied stand_stitch_replug_loses stand_blockfail_refused_writes
-stand_stitch_retry_quire_entered stand_stitch_retry_refused_twice stand_stitch_retry_runs_out
+stand_stitch_retry_quire_entered stand_stitch_retry_refused_twice stand_stitch_retry_head_landed
+stand_stitch_retry_runs_out
 stand_stitch_runs_on_leaves
 stand_stitch_tally_cost_long stand_registry_counts_from_nothing
 stand_docket_each_change_mounts_again stand_docket_merges stand_docket_data_refused stand_docket_ground_rests
 stand_docket_mount_ground_rests stand_docket_claim_refused stand_docket_closed_damaged stand_docket_replug_loses
-stand_docket_warrant"
+stand_docket_warrant
+stand_binder_whole stand_binder_node_refused stand_binder_unslotted stand_binder_slot_torn
+stand_binder_slot_flush_refused stand_binder_slot_unsure stand_binder_parcels stand_binder_heals stand_binder_rotten_named
+stand_binder_slack stand_binder_ground_back stand_binder_full_back stand_binder_standing_end"
 STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_(tally_rot_three_paths|ribbon_slip_three_roads): the port.s road stands aside — '
 STAND_BOOK_RIBBON_LAID='[TESTS] stand_ribbon: stitches laid past the Tally'
 STAND_BOOK_RIBBON_BACK='[TESTS] stand_ribbon: what the test laid is put back'
@@ -368,8 +375,8 @@ stand_book_judge() {
         [ "$got" = 2 ]
         chk $? "stand: $what — the port's road of the rotten block and of the Slips stands aside, said ($got: $(grep -aoE 'the port.s road stands aside — [^.]*' "$L" | head -1))"
     fi
-    grep -aqE "$STAND_BOOK_PROMISE" "$L" && grep -aqE "$STAND_BOOK_NO_TALLY" "$L"
-    chk $? "stand: $what — the mount says what the book takes and that no Tally is written"
+    grep -aqE "$STAND_BOOK_PROMISE" "$L" && grep -aqE "$STAND_BOOK_TALLY" "$L"
+    chk $? "stand: $what — the mount says what the book takes and when a Tally is written"
     ! grep -aqF "[TagFS] the volume may only be read: this kernel reads format-v2 books" "$L"
     chk $? "stand: $what — no book stands under glass for being a book"
     grep -aqE '^\[Integrity\] block [0-9]+ carries no digest in its volume.s Tally' "$L"
@@ -713,7 +720,11 @@ ORDER_EOF
 # merging them into the one Born a stitch lays, its digests alone 8 bytes a
 # block — anchors it, reads every byte back and says the FNV-1a print, and the
 # machine stops. volume-read finds the image consistent and reads the file
-# back byte for byte; the next boot mounts what the census predicts
+# back byte for byte; the Born's digests alone are more useful bytes than the
+# Tally the maker laid costs, so the kernel binds the state in a Tally of its
+# own (TALLY_SLACK), and `bound` binds it again where it lies byte for byte
+# and holds its state to the slot before it and its ribbon (logcheck_bind.sh
+# book_bind); the next boot mounts what the census predicts
 # (census_book_judge, kernel = volume-read), and `quilltest big big` reads the
 # file once more, every block held to the digest the ribbon carries. The
 # guest says nothing while the one write and the read back run, so both are
@@ -811,6 +822,10 @@ while True:
 print("%u 0x%016X" % (n, h))' 2>/dev/null)
     [ -n "$said" ] && [ "$got" = "$said" ]
     chk $? "big: volume-read reads big-b.d back as the guest wrote it — ${got:-nothing} (the guest: ${said:-nothing})"
+    grep -aqE "$BOOK_BIND_TALLY" "$w"
+    chk $? "big: the kernel binds the state the one write left in a Tally its Born's digests owe by TALLY_SLACK ($(grep -aoE "$BOOK_BIND_TALLY" "$w" | tail -1 | cut -c8-))"
+    python3 tools/volume-read.py "$img" bound >"$SCRATCH/big.bound" 2>&1 && grep -q '^bound: HELD$' "$SCRATCH/big.bound"
+    chk $? "big: that Tally is bound again where it lies byte for byte, and its state is the slot before it and its ribbon's — $(grep -v '^bound: the newest' "$SCRATCH/big.bound" | head -3 | tr '\n' ' ' | cut -c1-300)"
     if ! make run-bg BOOTDISK="$img" MEM=2G >"$SCRATCH/big.again.run-bg" 2>&1; then
         harness "big: run-bg would not start the written book again: $(tail -1 "$SCRATCH/big.again.run-bg")"
         rm -f "$img"

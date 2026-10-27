@@ -428,9 +428,12 @@ def RecordRuleCases(bt):
                       lambda c: Glass(c, "takes ACTIVE off") and c.mount.files[S.fid].flags & ondisk.FILE_ACTIVE)]),
         Case("B28b a Born on the front of the volume", Sewn(lambda q, d: [
             stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1, name=b"front",
-                        tags=(), runs=[stitch.Data(front, 1)], digests=d[:1])]), must={"EXTENT_OUTSIDE"}, checks=[
+                        tags=(), runs=[stitch.Data(front, 1)], digests=d[:1])]), must={"EXTENT_OUTSIDE", "UNDER_GLASS"},
+             checks=[
             ("%u names block %u, before the data run, and is locked" % (f1, front),
-             lambda c: Found(c, "EXTENT_OUTSIDE", "fid %u" % f1) and f1 in c.mount.locked)]),
+             lambda c: Found(c, "EXTENT_OUTSIDE", "fid %u" % f1) and f1 in c.mount.locked),
+            ("and the volume is under glass: no Tally names it as it lay",
+             lambda c: Glass(c, "locked by the replay of the ribbon"))]),
         Case("B23e a Clasp that counts fresh blocks its records do not name",
              Sewn(lambda q, d: [Born(bt.F, f1, d[:1], b"fresh")], fresh=9), must={"UNDER_GLASS"}, checks=[
                  ("the stitch is not applied: its Clasp names 9 fresh blocks and its records 1",

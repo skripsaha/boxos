@@ -189,6 +189,13 @@ bool        StripWalkNext(StripWalk* w, Strip* out);
  * begins at: false, the walk over, past the runs' end. */
 bool        StripWalkAt(const FileRecord* rec, uint64_t k, StripWalk* w, uint64_t* begins);
 
+/* The rest of the Parcel the walk stands in, whole — its Strips from where
+ * the walk stands in it, *count of them, the walk past them: false once there
+ * is none. A walk begun at a record's first Strip and moved by this alone
+ * hands each Parcel of the record whole, in order: memory's Parcels are the
+ * Tally's, one to one (§16.1 п.7). */
+bool        StripWalkParcel(StripWalk* w, const Strip** strips, uint32_t* count);
+
 /* ‼ THE ONE WALK OF A RECORD'S GROUND. The next Strip of the walk that lies on
  * ground — STRIP_DATA; every hole on the way passed over, for a hole owns no
  * block whatever its start reads as — and false once there is none. Every walk

@@ -577,8 +577,8 @@ static bool RunAlignedFree(uint64_t lo, uint64_t hi, uint64_t want, uint32_t ali
     return false;
 }
 
-error_t BlockMapTakeQuire(uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first, uint64_t from,
-                          uint64_t* start)
+error_t BlockMapTakeQuire(GroundOwner owner, uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first,
+                          uint64_t from, uint64_t* start)
 {
     TagFSLock* lock = &tagfs_get_state()->lock;
     uint64_t   met  = 0;
@@ -593,8 +593,8 @@ error_t BlockMapTakeQuire(uint64_t blocks, uint32_t align, uint64_t keep, uint64
     } else if (blocks == 0 || s_map.free < blocks || s_map.free - blocks < keep) {
         rc = ERR_TAGFS_NO_SPACE;
     } else {
-        /* A file's window is given back before the ribbon is refused a Quire:
-         * the ribbon's ground is the book's, and a window only a hint. */
+        /* A file's window is given back before the book is refused a run:
+         * the book's ground is the book's, and a window only a hint. */
         from = from < first || from >= hi ? first : from;
         bool found = false;
         for (uint32_t round = 0; round < 2u && !found; round++) {
@@ -603,7 +603,7 @@ error_t BlockMapTakeQuire(uint64_t blocks, uint32_t align, uint64_t keep, uint64
             if (!found && (round || !AllotmentTakeBackLocked(0)))
                 break;
         }
-        rc = found ? MapPut(GROUND_RIBBON, 0, *start, blocks, true, &met) : ERR_TAGFS_NO_SPACE;
+        rc = found ? MapPut(owner, 0, *start, blocks, true, &met) : ERR_TAGFS_NO_SPACE;
     }
     uint64_t* loose = PagesLooseTaken();
     TagFSLockDrop(lock);
@@ -674,13 +674,18 @@ error_t BlockMapDerivedTakeLocked(uint64_t fid, uint64_t start, uint64_t count)
 
 error_t BlockMapDerivedGive(uint64_t fid, uint64_t start, uint64_t count)
 {
+    return BlockMapDerivedGiveAs(GROUND_FILE, fid, start, count);
+}
+
+error_t BlockMapDerivedGiveAs(GroundOwner owner, uint64_t who, uint64_t start, uint64_t count)
+{
     TagFSLock* lock = &tagfs_get_state()->lock;
     uint64_t   met  = 0;
     error_t    rc   = BlockMapDerivedStock();
     if (rc != OK)
         return rc;
     TagFSLockTake(lock);
-    rc              = s_map.up ? MapPut(GROUND_FILE, fid, start, count, false, &met) : ERR_NOT_INITIALIZED;
+    rc              = s_map.up ? MapPut(owner, who, start, count, false, &met) : ERR_NOT_INITIALIZED;
     uint64_t* loose = PagesLooseTaken();
     TagFSLockDrop(lock);
     PagesLoose(loose);

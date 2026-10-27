@@ -767,6 +767,10 @@ static const QuillCase g_cases[] = {
       "on a book: with MIB, is NAME-b.d of MIB mebibytes written in ONE write and anchored, every byte read "
       "back; without, is NAME-b.d found and every byte of it the one written",
       "with MIB: NAME-b.d, every earlier file of that name given up first; without, nothing", false },
+    { "log", "NAME LINES", 2, 0, QuillBookLog,
+      "on a book: are LINES lines appended to NAME-l.log one at a time, each anchored — a logger, whose stitches "
+      "the Tallies TALLY_SLACK owes take in — and every byte read back",
+      "NAME-l.log, every earlier file of that name given up first", false },
     { "abba", "NAME TAGS EDGE", 3, 0, QUILL_THROWAWAY(QuillAbba),
       "does a machine of many cores come back while TAGS new tags and file ids past EDGE, where "
       "the file table takes its next block, grow the registry and the table, and three cabins of "

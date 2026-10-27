@@ -1,4 +1,5 @@
 #include "sewing.h"
+#include "binder.h"
 #include "../mount/book_mount.h"
 #include "../mount/book_unit.h"
 #include "../block_map/block_map_derived.h"
@@ -210,10 +211,10 @@ uint64_t RibbonSeqNext(void)
  * asks again while none was given — so that a Quire's end, an early close or
  * a refused write always has somewhere to go on, named in every StitchHead
  * from then on (M-5). It is a whole Quire on an atom of the data run, looked
- * for past the Quire the ribbon stands in, and never one the ground a whole
- * Tally needs would go to (EndpaperKeeps): with no Tally written by this
- * kernel, a Quire of the ribbon never comes back, and the reserve is what is
- * left to the writer of one.
+ * for past the Quire the ribbon stands in, and never one the ground the
+ * Tallies need would go to (EndpaperKeeps — a whole Tally, and what the ring's
+ * slots lack of one): a Quire of the ribbon comes back only once the slots stop
+ * naming it, which only a Tally written over one of them does.
  */
 void RibbonNextGiven(void)
 {
@@ -221,15 +222,24 @@ void RibbonNextGiven(void)
     uint64_t      start = 0;
     if (!c->up || c->next.blocks)
         return;
-    c->taken = BlockMapTakeQuire(c->quire_blocks, c->atom / TAGFS_BLOCK_SECTORS ? c->atom / TAGFS_BLOCK_SECTORS : 1u,
+    c->taken = BlockMapTakeQuire(GROUND_RIBBON, c->quire_blocks,
+                                 c->atom / TAGFS_BLOCK_SECTORS ? c->atom / TAGFS_BLOCK_SECTORS : 1u,
                                  EndpaperKeeps(c->quire_blocks), g_book.frame.data_block,
                                  c->quire.block + c->quire.blocks, &start);
-    if (c->taken == OK)
+    if (c->taken == OK) {
         c->next = (RibbonQuire){ start, c->quire_blocks };
-    else if (c->taken == ERR_TAGFS_NO_SPACE)
+        BinderRibbonGiven(&c->next);
+    } else if (c->taken == ERR_TAGFS_NO_SPACE) {
+        SettleDemand(SETTLE_DEMAND_TALLY);
         __atomic_store_n(&s_refused_free, __atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE),
                          __ATOMIC_RELEASE);
+    }
     RibbonRoomPublish();
+}
+
+void RibbonTallied(uint64_t tally)
+{
+    s_cursor.tally = tally;
 }
 
 /* The ribbon run out, said once a mount — by the Settle's holder or by the
@@ -237,15 +247,19 @@ void RibbonNextGiven(void)
 static void RibbonOutSaid(void)
 {
     RibbonCursor* c = &s_cursor;
+    const char*   none = BinderNoTallies();
     if (__atomic_exchange_n(&c->out, true, __ATOMIC_ACQ_REL))
         return;
-    kprintf("[TagFS] the ribbon has run out with no Tally to take it in: %llu Quire(s) taken for it, %llu "
-            "block(s) free and %llu kept for a whole Tally — this kernel writes no Tally, so no Quire of the "
-            "ribbon comes back; files, names, tags and words are refused from here (ERR_TAGFS_NO_SPACE), and "
-            "the rest of its Quire is kept for what was claimed before and what gives ground up\n",
+    kprintf("[TagFS] the ribbon has run out: %llu Quire(s) taken for it, %llu block(s) free and %llu kept for "
+            "the Tallies — %s%s; until then files, names, tags and words are refused (ERR_TAGFS_NO_SPACE), "
+            "and the rest of its Quire is kept for what was claimed before and what gives ground up\n",
             (unsigned long long)__atomic_load_n(&c->quires, __ATOMIC_RELAXED),
             (unsigned long long)__atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE),
-            (unsigned long long)EndpaperKeeps(c->quire_blocks));
+            (unsigned long long)EndpaperKeeps(c->quire_blocks),
+            none ? "no Tally is written by this mount, so none of its Quires comes back before the volume is "
+                   "mounted again: " : "a Tally is asked for to take its end in, and its Quires come back only once "
+                   "the slots stop naming them",
+            none ? none : "");
 }
 
 /*

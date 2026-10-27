@@ -214,6 +214,8 @@ typedef enum {
     SETTLE_DEMAND_ROOM  = 1u << 0,  /* the allocator is short while Fallow rests blocks,
                                        or while Glean may take the pool's slack off */
     SETTLE_DEMAND_LEAVE = 1u << 1,  /* a program left with changes no cycle settled */
+    SETTLE_DEMAND_TALLY = 1u << 2,  /* a book's ribbon wants a Tally to take it in: no next_quire
+                                       could be given — a Tally's work, not a cycle's (binder.h) */
 } SettleDemandKind;
 
 /* An Ink was made (after its lock was dropped): the window's clock starts for

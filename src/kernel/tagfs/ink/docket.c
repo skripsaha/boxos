@@ -1,4 +1,5 @@
 #include "docket.h"
+#include "../settle/binder.h"
 #include "volume_digest.h"
 #include "volume_ribbon.h"
 #include "../settle/sewing.h"
@@ -207,6 +208,44 @@ bool DocketBaseLacks(uint64_t fid, uint64_t k, uint64_t block)
 uint64_t DocketTakes(void)
 {
     return s_takes;
+}
+
+bool DocketWasFrom(uint64_t fid, uint64_t* at, FileRecord** was)
+{
+    Jot* before[JOT_LEVELS];
+    (void)DocketFind(fid, before);
+    Jot* j = before[0] ? before[0]->next[0] : s_head[0];
+    if (!j)
+        return false;
+    *at  = j->fid;
+    *was = j->was;
+    if (j->was)
+        __atomic_add_fetch(&j->was->refs, 1, __ATOMIC_ACQ_REL);
+    return true;
+}
+
+error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
+{
+    error_t rc = OK;
+    for (const Jot* j = t->first; j && rc == OK; j = j->next[0]) {
+        if (!j->carried)
+            continue;
+        if (j->fid > *fid_most)
+            *fid_most = j->fid;
+        if (j->kind == JOT_BORN && j->now) {
+            StripWalk w;
+            Strip     s;
+            StripWalkBegin(j->now, &w);
+            while (rc == OK && StripWalkNextGround(&w, &s))
+                rc = BirthsNoted(&s, 1, seq);
+        } else if (j->kind == JOT_SHAPED) {
+            uint64_t n = 0;
+            for (uint64_t i = 0; i < j->nsplices; i++)
+                n += j->splices[i].ninsert;
+            rc = BirthsNoted(j->inserted, n, seq);
+        }
+    }
+    return rc;
 }
 
 // ----------------------------------------------------------------------------

@@ -342,6 +342,27 @@ def CutList(log, facts, classifier, as_json):
     return 0
 
 
+def CmdBound(args, medium):
+    """A format-v2 book's newest Tally held to what a writer of one lays
+    (binder.BindCheck): bound again where it lies, and the state it is of
+    read off the slot before it and its ribbon."""
+    from volumeread import binder
+    from volumeread.bookground import BookGround
+    from volumeread.bookmount import BookMount
+    wrong = binder.BindCheck(medium, args.start)
+    m = BookMount(BookGround(medium, args.start))
+    if m.refusal is None:
+        blocks, cost, useful = binder.BindSaid(m)
+        print("bound: the newest slot %u (seq %u) names Tally %u, after stitch %u: %u block(s) a copy, the next "
+              "reckoned at %u byte(s); %u useful byte(s) of ribbon past its at, %u stitch(es)"
+              % (m.slot.index, m.slot.seq, m.slot.tally_seq, m.slot.stitch_seq, blocks, cost, useful,
+                 len(m.ribbon.stitches)))
+    for w in wrong:
+        print("bound: %s" % w)
+    print("bound: %s" % ("HELD" if not wrong else "%u difference(s)" % len(wrong)))
+    return 0 if not wrong else 1
+
+
 def CmdSelfTest(args, medium):
     from volumeread import selftest
     if args.emit:
@@ -385,6 +406,7 @@ def Main():
     cut.add_argument("--out", metavar="IMG")
     cut.add_argument("--check", action="store_true")
     cut.add_argument("--json", action="store_true")
+    sub.add_parser("bound", parents=[start], help="the newest Tally held to the one rule of binding")
     st = sub.add_parser("self-test", parents=[start], help="every census rule, planted and caught")
     st.add_argument("--emit", metavar="CASE")
     st.add_argument("--out", metavar="IMG")
@@ -407,6 +429,8 @@ def Main():
         return CmdCheck(args, medium)
     if args.command == "cut":
         return CmdCut(args, medium)
+    if args.command == "bound":
+        return CmdBound(args, medium)
     return CmdSelfTest(args, medium)
 
 

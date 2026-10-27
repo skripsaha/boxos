@@ -108,6 +108,20 @@ void  DocketBackLocked(DocketTaken* t, Jot** spent);
 bool     DocketBaseLacks(uint64_t fid, uint64_t k, uint64_t block);
 uint64_t DocketTakes(void);
 
+/* Under the state lock: the first Jot at or past `fid` — its fid in *at, and
+ * in *was the file as the last stitch that named it left it, with a reference
+ * the caller lets go (NULL for a file born since: no settled stitch names
+ * it). False when there is none. Between two cycles this and the map's record
+ * of every other file are the state after the last stitch that settled — what
+ * a whole Tally is written of (settle/binder.c). */
+bool  DocketWasFrom(uint64_t fid, uint64_t* at, FileRecord** was);
+
+/* By the Settle's holder with no lock, at the S6 of stitch `seq` built of *t,
+ * before DocketSettled: the ground its records put in named as born at `seq`
+ * (settle/births.c) — every run of a Born, the runs a Shaped put in — and the
+ * highest file id it named raised into *fid_most. ERR_NO_MEMORY. */
+error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most);
+
 /* By the Settle's holder with no lock, once the stitch of seq `seq` built of
  * *t settled: each file's record as the stitch leaves it given that seq — or,
  * the stitch carrying nothing for it, the seq its base had — and the Jots let

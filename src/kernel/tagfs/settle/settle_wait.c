@@ -320,11 +320,11 @@ void SettleWaitersMountReset(void)
  *   - a step the machine had no memory for waits for its pages to come back;
  *   - a step with no ground waits for room to be asked for — by a write the
  *     allocator sent away, which is when Fallow has ground for the cycle to
- *     give back; but a book whose stitch has no room gets none back from this
- *     kernel, which writes no Tally and gives no ground back, and nothing on a
- *     book asks for room: its waiters are told so (SettleWaitersRunEnded),
- *     nothing parks, and the next waiter's cycle is refused the same, in so
- *     many words, rather than held for good;
+ *     give back; but a book whose stitch has no room gets it back only once a
+ *     Tally takes the ribbon's end in and the slots let its Quires go — work
+ *     no waiter's park can name an event of: its waiters are told so
+ *     (SettleWaitersRunEnded), nothing parks, and the next waiter's cycle is
+ *     refused the same, in so many words, until the room came back;
  *   - any other refusal is the medium's: the seat that refused rings
  *     seat:ready on the first command it answers after, whatever kind of
  *     medium sits in it (boardroom.h) — and a seat:ready that came while this
@@ -373,9 +373,10 @@ void SettleWaitersRunEnded(error_t rc, uint64_t target, bool unclosed)
     if (rc != OK) {
         if (TagFSReadOnly() && !TagFSMediumLeft())
             SettleWaitersAnswerAll(ERR_TAGFS_READ_ONLY);
-        /* A book whose ribbon has no room for the cycle's stitch gets none
-         * back in this kernel, which writes no Tally (settle/ribbon.c): its
-         * waiters hear so rather than wait for room that does not come. */
+        /* A book whose ribbon has no room for the cycle's stitch gets it
+         * back only through a Tally and the lag of the slots it lets go of
+         * (settle/binder.h): its waiters hear so rather than wait on an event
+         * no park can name. */
         else if (rc == ERR_TAGFS_NO_SPACE && tagfs_get_state()->format == DEED_FORMAT_V2)
             SettleWaitersAnswerAll(ERR_TAGFS_NO_SPACE);
         return;

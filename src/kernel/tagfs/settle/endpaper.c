@@ -1,4 +1,5 @@
 #include "sewing.h"
+#include "binder.h"
 #include "../file_map/file_map.h"
 #include "../tag_registry/tag_registry.h"
 #include "../use_memory/use_memory.h"
@@ -207,7 +208,8 @@ uint64_t EndpaperKeeps(uint64_t quire_blocks)
         s_kept_epoch = epoch;
         __atomic_store_n(&s_kept_turn, turn + 2u, __ATOMIC_RELEASE);
     }
-    return 2u * ((cost + quire_blocks - 1u) / quire_blocks) * quire_blocks;
+    uint64_t tally = 2u * ((cost + quire_blocks - 1u) / quire_blocks) * quire_blocks;
+    return tally + BinderRingShort(tally, quire_blocks);
 }
 
 /* The kept measure of this mounting, whole: false when there is none, or one
@@ -236,5 +238,6 @@ uint64_t EndpaperDataKeeps(bool afresh)
     uint64_t      atom  = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
     TallyTreeCost files = { since * TALLY_DATA_FILES_MOST, 0 }, digests = { since * TALLY_DATA_DIGESTS_MOST, 0 };
     cost += TallyTreeBlocks(&files, atom) + TallyTreeBlocks(&digests, atom);
-    return 2u * ((cost + q - 1u) / q) * q + q;
+    uint64_t tally = 2u * ((cost + q - 1u) / q) * q;
+    return tally + BinderRingShort(tally, q) + q;
 }

@@ -287,10 +287,11 @@ class Parsed:
     that holds (§2.7)."""
 
     __slots__ = ("why", "flags", "prev", "prev_clasp", "tally", "made_ns", "next", "came", "records",
-                 "count", "fresh", "clasp", "clasp_at", "longer")
+                 "count", "fresh", "clasp", "clasp_at", "longer", "end")
 
     def __init__(self, stream):
         self.why, self.records, self.clasp, self.clasp_at, self.longer = None, [], None, None, 0
+        self.end = 0      # the stream's useful bytes: its records to the Clasp's end (§4.2)
         self.flags = self.prev = self.prev_clasp = self.tally = self.made_ns = self.count = self.fresh = 0
         self.next = self.came = (0, 0)
         try:
@@ -319,6 +320,7 @@ class Parsed:
                 if at < len(stream) and stream[at] != 0:
                     raise Short("a record follows its Clasp")
                 self.clasp_at = start
+                self.end      = at
                 return
             self.records.append((tag >> 1, bool(tag & 1), stream[body:body + n], start))
 

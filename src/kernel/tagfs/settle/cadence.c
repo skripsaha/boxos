@@ -1,4 +1,5 @@
 #include "settle_internal.h"
+#include "binder.h"
 #include "../scribe/scribe.h"
 #include "../ink/ink.h"
 #include "../metadata_pool/meta_pool.h"
@@ -111,12 +112,23 @@ uint64_t TagFSInkedHere(void)
     return __atomic_load_n(&s_inked_here[amp_get_core_index()], __ATOMIC_RELAXED);
 }
 
+/*
+ * ‼ A TALLY GOES A STEP A TURN, BETWEEN THE CYCLES (binder.h, §4.3). Its step
+ * is the committer's work too: taken when no cycle is due, and — so a stream
+ * of cycles never starves it — the next turn after each cycle ends while one
+ * is under way. A waiter's cycle waits for one step at most: a node laid or
+ * measured, a DIGESTS leaf read, a flush, the slot — or the slice, which is
+ * memory alone, as long as a walk of every live file's runs takes (binder.c).
+ */
+static volatile uint8_t s_binder_turn;
+
 /* A mount's first word, with the door shut: no Ink of the volume before it is
  * owed here, and what its medium cost — the Lull, the binding window, the
  * Lull's armed tick — is measured again by this one's first cycle: another
  * medium may sit in the seat. */
 void CadenceMountReset(void)
 {
+    __atomic_store_n(&s_binder_turn, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&s_owed_since_us, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&s_eager_gen, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_demand, 0u, __ATOMIC_RELEASE);
@@ -149,6 +161,13 @@ void SettleInked(uint64_t gen, bool lazy)
 
 void SettleDemand(uint32_t kinds)
 {
+    if (kinds & SETTLE_DEMAND_TALLY)
+        BinderDemanded();
+    kinds &= ~(uint32_t)SETTLE_DEMAND_TALLY;
+    if (!kinds) {
+        CadenceWake();
+        return;
+    }
     if (kinds & SETTLE_DEMAND_ROOM)
         __atomic_add_fetch(&s_room_asked, 1u, __ATOMIC_ACQ_REL);
     __atomic_fetch_or(&s_demand, kinds, __ATOMIC_SEQ_CST);
@@ -201,6 +220,8 @@ static void CadenceSayBinds(uint64_t d_us)
 void CadenceRunEnded(error_t rc, uint64_t busy_us, uint64_t s0_us, uint64_t target)
 {
     uint64_t now = SettleNowUs();
+    if (BinderOwed())
+        __atomic_store_n(&s_binder_turn, 1u, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_end_us, now, __ATOMIC_RELEASE);
     if (rc == OK) {
         __atomic_store_n(&s_d_us, busy_us, __ATOMIC_RELAXED);
@@ -258,6 +279,14 @@ static CadenceVerdict CadenceDue(bool boundary, uint64_t now, uint64_t* at_us)
     return CADENCE_LATER;
 }
 
+/* A step of a Tally owed the committer: not while the cadence is held — the
+ * stand's tests meet only the work they drive, and a stopping machine's halt
+ * runs the last cycles itself — nor while a refused cycle's park stands. */
+static bool CadenceBinderOwed(void)
+{
+    return __atomic_load_n(&s_held, __ATOMIC_ACQUIRE) == 0 && !SettleParked() && BinderOwed();
+}
+
 /* The first tick at or after `at_us`. */
 static uint64_t CadenceLullTick(uint64_t at_us, uint64_t now_us)
 {
@@ -306,16 +335,31 @@ void SettleServiceIfPending(void)
         SettleRunStepHere();        /* nothing unless the cycle is this core's */
         return;
     }
-    if (amp_get_core_index() != SettleCommitterCore() || !CadenceMounted())
+    if (amp_get_core_index() != SettleCommitterCore())
         return;
+    if (!CadenceMounted()) {
+        /* A Tally under way on a volume that stopped taking writes — a data
+         * write refused as protected, say — is ended by its next turn, which
+         * writes nothing (binder.h, BinderStopped): its ground goes back. */
+        if (BinderHoldsGround())
+            (void)BinderTurn();
+        return;
+    }
     SettleWaitersSweep();
 
     /* Pockets waiting on this core's queue are work already handed in, and a
      * cycle Lull merely permits stands back for them (settle.h). */
-    bool     boundary = kcore_queue_depth(amp_get_core_index()) != 0;
-    uint64_t now      = SettleNowUs();
-    uint64_t at       = 0;
-    switch (CadenceDue(boundary, now, &at)) {
+    bool           boundary = kcore_queue_depth(amp_get_core_index()) != 0;
+    uint64_t       now      = SettleNowUs();
+    uint64_t       at       = 0;
+    CadenceVerdict due      = CadenceDue(boundary, now, &at);
+    if (CadenceBinderOwed() && (due != CADENCE_NOW || __atomic_load_n(&s_binder_turn, __ATOMIC_ACQUIRE))) {
+        if (BinderTurn())
+            __atomic_store_n(&s_binder_turn, 0u, __ATOMIC_RELEASE);
+        CadenceWake();
+        return;
+    }
+    switch (due) {
     case CADENCE_NOW:
         (void)SettleRunBeginForCadence();
         return;
@@ -336,6 +380,8 @@ bool SettleStepOwedHere(void)
     /* A cycle another asker runs wakes the committer when it ends. */
     if (__atomic_load_n(&g_settle_scribe.holder, __ATOMIC_ACQUIRE) != 0 || !CadenceMounted())
         return false;
+    if (CadenceBinderOwed())
+        return true;
     uint64_t now = SettleNowUs();
     uint64_t at  = 0;
     switch (CadenceDue(false, now, &at)) {
@@ -362,7 +408,7 @@ bool SettleIdleOwed(void)
     if (!CadenceMounted())
         return false;
     uint64_t at = 0;
-    return CadenceDue(true, SettleNowUs(), &at) == CADENCE_NOW;
+    return CadenceBinderOwed() || CadenceDue(true, SettleNowUs(), &at) == CADENCE_NOW;
 }
 
 /* Helm work listed for a service point is any core's to run: one that went to

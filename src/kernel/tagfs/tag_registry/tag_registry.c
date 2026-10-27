@@ -520,6 +520,68 @@ bool TagRegistrySpelling(TagRegistry* reg, uint32_t tag_id, TagSpelling* out, bo
     return entry != NULL;
 }
 
+/* The ids are given one after another and never taken back, so the walk is
+ * the ids themselves: a span of them a hold of the leaf lock. A span that
+ * finds none is a hole in the numbers — a Coined of another writer may name an
+ * id far past the rest — and the least id past it is looked for among the
+ * tags held instead, never walked to id by id. */
+#define TAG_ROLL_SPAN  256u
+
+/* The least id in [from, hi) a tag has, UINT32_MAX for none: every bucket of
+ * the id's hash looked through, a span of them a hold of the lock — and from
+ * the first again when the table grew meanwhile. */
+static uint32_t TagRollLeast(TagRegistry* reg, uint32_t from, uint32_t hi)
+{
+    uint32_t best = UINT32_MAX, buckets = 0, b = 0;
+    for (bool done = false; !done;) {
+        TagFSLockTake(&reg->lock);
+        if (buckets != reg->bucket_count) {
+            buckets = reg->bucket_count;
+            b       = 0;
+            best    = UINT32_MAX;
+        }
+        uint32_t end = buckets - b > TAG_ROLL_SPAN ? b + TAG_ROLL_SPAN : buckets;
+        for (; b < end; b++)
+            for (const TagRegistryEntry* e = reg->by_id[b]; e; e = e->id_next)
+                if (e->tag_id >= from && e->tag_id < hi && e->tag_id < best)
+                    best = e->tag_id;
+        done = b == buckets;
+        TagFSLockDrop(&reg->lock);
+    }
+    return best;
+}
+
+/* The tag of `t`, when one has it, into *id and *out. */
+static bool TagRollAt(TagRegistry* reg, uint32_t t, uint32_t* id, TagSpelling* out)
+{
+    const TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, t);
+    if (!entry)
+        return false;
+    *id            = t;
+    out->key       = entry->key;
+    out->key_len   = entry->key_len;
+    out->value     = entry->value;
+    out->value_len = entry->value_len;
+    return true;
+}
+
+bool TagRoll(TagRegistry* reg, uint32_t from, uint32_t hi, uint32_t* id, TagSpelling* out) {
+    if (!reg || !out || from >= hi) return false;
+    uint32_t end   = hi - from > TAG_ROLL_SPAN ? from + TAG_ROLL_SPAN : hi;
+    bool     found = false;
+    TagFSLockTake(&reg->lock);
+    for (uint32_t t = from; t < end && !found; t++)
+        found = TagRollAt(reg, t, id, out);
+    TagFSLockDrop(&reg->lock);
+    if (found || end == hi) return found;
+    uint32_t least = TagRollLeast(reg, end, hi);
+    if (least == UINT32_MAX) return false;
+    TagFSLockTake(&reg->lock);
+    found = TagRollAt(reg, least, id, out);
+    TagFSLockDrop(&reg->lock);
+    return found;
+}
+
 error_t TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, TagIdList* out) {
     if (!out) return ERR_NULL_POINTER;
     out->ids      = NULL;

@@ -95,6 +95,7 @@ typedef struct {
     bool          clasp_read;
     Clasp         clasp;      /* its fields when sound; the crc alone when read in pieces */
     uint32_t      clasp_at;
+    uint32_t      useful;     /* the bytes of its records, StitchHead to the Clasp's end, when sound (§4.2) */
     RibbonRecord* records;
     uint32_t      nrecords;
     uint64_t      lost;       /* bytes of its records its lost sectors took with them */

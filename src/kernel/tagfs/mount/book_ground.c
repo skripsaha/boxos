@@ -3,6 +3,7 @@
 #include "../file_map/file_map.h"
 #include "../ink/ink.h"
 #include "crypto.h"
+#include "../settle/binder.h"
 
 /*
  * The census of a format-v2 volume (book_mount.h; spec_v2 §4.6): no bitmap
@@ -67,8 +68,13 @@ static void BookClaim(GroundOwner owner, uint64_t start, uint64_t count, uint64_
  * node by its seq. */
 static void BookGroundNodeOf(const TallyPlace* at, uint32_t slot)
 {
-    for (uint32_t k = 0; k < at->ptr.copies; k++)
+    for (uint32_t k = 0; k < at->ptr.copies; k++) {
         BookClaimBy(GROUND_TALLY, TallyPtrBlock(&at->ptr, k), at->ptr.sheets, at->ptr.seq, slot);
+        if (BinderSlotNode(slot, TallyPtrBlock(&at->ptr, k), at->ptr.sheets, at->ptr.seq) != OK)
+            g_book.binder_short = true;
+    }
+    if (g_book.stood && slot == g_book.stood->index)
+        g_book.tally_blocks += at->ptr.sheets;
 }
 
 error_t BookGroundNode(void* ctx, const TallyPlace* at)
@@ -103,8 +109,11 @@ void BookGroundHoldRun(uint64_t start, uint64_t count)
  * one may be named — as that slot names them. */
 static void BookGroundRibbon(const SpineSlot* s, const RibbonWalk* w)
 {
-    for (uint32_t i = 0; i < w->nquires; i++)
+    for (uint32_t i = 0; i < w->nquires; i++) {
         BookClaimBy(GROUND_RIBBON, w->quires[i].block, w->quires[i].blocks, 0, s->index);
+        if (BinderSlotRibbon(s->index, &w->quires[i]) != OK)
+            g_book.binder_short = true;
+    }
 }
 
 /* A node of a slot not stood on that neither copy of holds — the root a slot
@@ -322,6 +331,24 @@ static error_t BookFallowCut(const char** what)
     return OK;
 }
 
+/* The ground the census holds — what a rotten range or a locked file may own
+ * and no name that reads does — kept for the writer of a Tally, whose DIGESTS
+ * names its digests again so it stays held (settle/binder.h). */
+static void BookHeldKept(void)
+{
+    uint64_t n    = GroundClaimsOf(GROUND_HELD, NULL, 0);
+    Strip*   runs = n ? kmalloc(sizeof(Strip) * n) : NULL;
+    if (n && !runs) {
+        g_book.binder_short = true;
+        return;
+    }
+    (void)GroundClaimsOf(GROUND_HELD, runs, n);
+    for (uint64_t i = 0; i < n; i++)
+        if (BinderHeldRun(runs[i].start, runs[i].count) != OK)
+            g_book.binder_short = true;
+    kfree(runs);
+}
+
 error_t BookGroundCensus(const char** what)
 {
     BookGroundRibbon(g_book.stood, g_book.ribbon);
@@ -340,6 +367,8 @@ error_t BookGroundCensus(const char** what)
     rc = GroundCensusBook(&g_book.said.held, &g_book.said.fallow, !g_book.bookmarked, what);
     if (rc == OK)
         rc = BookFallowCut(what);
+    if (rc == OK)
+        BookHeldKept();
     GroundCensusEnd();
     if (rc != OK)
         return rc;

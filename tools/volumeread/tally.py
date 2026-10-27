@@ -113,6 +113,9 @@ class Content:
 
     def __init__(self, made_ns=0):
         self.files, self.tags, self.digests = {}, {}, {}
+        # A file locked by name, as what of it read lay: {fid: (header FileState
+        # or None, [(file block, runs)])} — a Tally names it again so (§16.4 п.5).
+        self.kept = {}
         self.use = b""
         self.next_fid = self.next_tag = 0
         self.next_bookmark = 1
@@ -124,6 +127,7 @@ class Content:
         out.files = {fid: fs.Copy() for fid, fs in c.files.items()}
         out.tags = dict(c.tags)
         out.digests = dict(c.digests)
+        out.kept = dict(c.kept)
         out.use, out.next_fid, out.next_tag, out.next_bookmark = c.use, c.next_fid, c.next_tag, c.next_bookmark
         return out
 
@@ -720,6 +724,7 @@ class Tally:
                     self.gaps.append((fid, why))
             if why:
                 self.locked[fid], self.locked_runs[fid] = why, known
+                self.content.kept[fid] = (files.get(fid), sorted(parts.get(fid, []), key=lambda p: p[0]))
             else:
                 self.content.files[fid] = files[fid]
 

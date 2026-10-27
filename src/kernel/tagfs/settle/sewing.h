@@ -164,6 +164,10 @@ uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, 
 const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of);
 bool     RibbonCloseEarly(void);
 
+/* A Tally of seq `tally` was written over the slot of the least seq (binder.c):
+ * every stitch from here is replayed over it. By the Settle's holder. */
+void     RibbonTallied(uint64_t tally);
+
 /*
  * ‼ A CHANGE OF A BOOK CLAIMS ITS ROOM ON THE RIBBON BEFORE IT IS MADE (§3.6,
  * §16.2 п.8, P21). A stitch carries every change inked before its TAKE, and is
@@ -234,16 +238,18 @@ void     RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved);
  * whole Tally of the volume as memory holds it takes — an upper bound by the
  * rules every writer of a Tally keeps (§16.2 п.24, §16.3 пп.1, 5), never less
  * than the Tally a writer lays of it. EndpaperKeeps: the ground the ribbon
- * leaves free for that Tally, both copies, in whole Quires of `quire_blocks`.
- * With no TagFS lock held.
+ * leaves free for the Tallies — one whole Tally, both copies, in whole Quires
+ * of `quire_blocks`, and what the ring's slots lack of one (binder.h,
+ * BinderRingShort): the Tallies that fill the ring give nothing back. With no
+ * TagFS lock held.
  */
 uint64_t TallyCostBlocks(void);
 uint64_t EndpaperKeeps(uint64_t quire_blocks);
 
 /* The free blocks a write of a file's data must leave (§3.6, §16.2 п.6): the
- * Tally's two copies and a Quire of ribbon, by the last measure and what data
- * was handed since — measured afresh when `afresh`. With no TagFS lock held;
- * 0 before the ribbon's cursor is up. */
+ * Tally's two copies, what the ring lacks of it, and a Quire of ribbon, by the
+ * last measure and what data was handed since — measured afresh when
+ * `afresh`. With no TagFS lock held; 0 before the ribbon's cursor is up. */
 uint64_t EndpaperDataKeeps(bool afresh);
 
 #endif /* TAGFS_SETTLE_SEWING_H */

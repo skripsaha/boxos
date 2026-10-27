@@ -30,9 +30,15 @@
  *   9 usechain   before the Use Context's chain is written         (S1)
  *  10 stitch     before a format-v2 stitch's last atom is written —
  *                a stitch of one atom not begun, one of more torn  (STITCH)
+ *  11 tally      before a format-v2 Tally's flush, its nodes written
+ *                and no slot naming them                         (TALLY_FLUSH)
+ *  12 slot       before the second half of a Tally's slot is written —
+ *                the slot torn                                    (TALLY_SLOT)
  *
  * A format-v2 cycle passes `flush` and `done` as format v1's does, around its
- * own last flush; `stitch` is its alone.
+ * own last flush; `stitch` is its alone. `tally` and `slot` are passed by the
+ * Tally that covers the anchor — the state after a stitch that carries it
+ * (settle/binder.c), a work of the same Scribe between the cycles.
  *
  * This list is the only list of the names: the Makefile turns the value it is
  * given into SETTLE_CUT_POINT_<VALUE>, and a value that is none of these does
@@ -68,7 +74,9 @@ typedef enum {
     SETTLE_CUT_POINT_FLUSH,
     SETTLE_CUT_POINT_DONE,
     SETTLE_CUT_POINT_USECHAIN,
-    SETTLE_CUT_POINT_STITCH
+    SETTLE_CUT_POINT_STITCH,
+    SETTLE_CUT_POINT_TALLY,
+    SETTLE_CUT_POINT_SLOT
 } SettleCutPoint;
 
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT

@@ -1,4 +1,5 @@
 #include "sewing.h"
+#include "binder.h"
 #include "../ink/ink.h"
 #include "../ink/docket.h"
 #include "../ink/fallow.h"
@@ -99,6 +100,7 @@ typedef struct {
     uint32_t    clasp;
     uint8_t*    sectors;      /* the attempt sealed: `of` sectors */
     uint32_t    of;
+    uint32_t    useful;       /* the bytes of its records, StitchHead to Clasp (§4.2) */
     RibbonPlace at;           /* where it lies, and the Quire it runs on into */
     RibbonQuire hop;
     uint32_t    written;      /* its sectors on the medium so far */
@@ -337,7 +339,8 @@ static error_t StitchLay(StitchSnap* s, bool* word)
         rc     = StitchStream(s, &l, stream, body, starts, &nstarts, &s->clasp, &len);
     }
     if (rc == OK) {
-        s->of = (uint32_t)RibbonStitchSectors(len, RibbonCursorNow()->atom);
+        s->useful = len;
+        s->of     = (uint32_t)RibbonStitchSectors(len, RibbonCursorNow()->atom);
         rc    = RibbonRoom(s->of, !l.use_written, &s->at, &s->hop);
     }
     if (rc == OK && !(s->sectors = kmalloc((uint64_t)s->of * BOOK_SECTOR_BYTES)))
@@ -547,6 +550,10 @@ void StitchRunEnd(error_t rc)
         RibbonClaimBack(s->claimed);
         TagFSLockDrop(&fs->lock);
         JotsLetGo(spent);
+        /* A volume that takes no write from here ends the Tally under way:
+         * nothing of it is written past the refusal, its ground goes back. */
+        if (TagFSReadOnly() || TagFSMediumLeft())
+            BinderStopped(rc);
     } else {
         uint64_t left = RibbonSewn(&s->at, &s->hop, s->of, s->seq, s->clasp, s->flags);
         TagFSLockTake(&fs->lock);
@@ -559,11 +566,15 @@ void StitchRunEnd(error_t rc)
         }
         FallowStitchSettled(s->target, s->seq, s->cycle);
         FallowQuireLeft(left);
-        SettleGivenLocked(FallowRipen(0, s->cycle, &nodes));
+        SettleGivenLocked(BinderHoldsGround() ? 0 : FallowRipen(0, s->cycle, &nodes));
         TagFSLockDrop(&fs->lock);
         FallowNodesFree(nodes);
         GlossTrim();
+        BirthsTrim();
         TagRegistryCoinedUpTo(fs->registry, s->coined_hi);
+        uint64_t fid_most = 0;
+        error_t  births   = DocketBirths(&s->jots, s->seq, &fid_most);
+        BinderStitchSettled(s->seq, s->useful, fid_most, births);
         DocketSettled(&s->jots, s->seq);
         RibbonNextGiven();
     }

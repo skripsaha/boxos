@@ -10,6 +10,15 @@ boundary of an atom, copy 1 from Tally-Quire A and copy 2 at the same offset
 from Tally-Quire B; the ribbon's Quire and its next_quire the grains after —
 and refused aloud when that does not fit the data run.
 
+And a node no copy of which reads, named as it lies (§16.4 п.5, the kernel's
+settle/binder_nodes.c alike): a rotten node of level L is an element of level
+L+1 — its lower separator (the least key for a tree's first node), its old
+count, its old pointer — and no node of level L or below holds keys on both
+sides of it, the node being filled closed before its first key; an element
+whose key lies inside its range is left out (none of FILES may — a file born
+since has an id past every one the Tally knew — and DIGESTS is cut at it), and
+a range with no end of its own ends at the next element's key.
+
 And the circle: a Tally read back, bound again where it lies, held byte for
 byte against the medium.
 """
@@ -18,8 +27,9 @@ from .bookground import BookGround
 from .bookread import EntryPut, PtrPut, VarintPut
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK
-from .tally import (DIGESTS, FILES, NODE_HEAD, SHEET_PAYLOAD, TAGS, TREE_NAMES, USE, Node, Root, Slot,
-                    DigestsEncode, FileHeadEncode, InnerEncode, ItemBytes, KeyFull, NodeSectors, NodeStream,
+from .stitch import MEDIUM_LIED
+from .tally import (DIGESTS, FILES, NODE_HEAD, SHEET_PAYLOAD, SPINE_MEDIUM_LIED, TAGS, TREE_NAMES, USE, Node,
+                    Root, Slot, DigestsEncode, FileHeadEncode, InnerEncode, ItemBytes, KeyFull, NodeSectors, NodeStream,
                     ParcelEncode, SlotBlock, SlotSectors, TagEncode)
 
 PARCEL_STRIPS_MOST = 128             # volume_tally.h PARCEL_STRIPS_MOST
@@ -82,13 +92,37 @@ def Parcels(fs):
     return out
 
 
-def DigestItems(digests):
+def RefLo(r):
+    """The key a rotten node is named by: its lower separator, or the least
+    key for a tree's first node."""
+    if r.lo is not None:
+        return r.lo
+    return (0, 0) if r.tree == FILES else 0
+
+
+def RefCovers(r, key):
+    """Whether `key` lies inside rotten node r's range: from its lower
+    separator up to its upper one — or, with none, at the lower one alone."""
+    if r.lo is not None and key < r.lo:
+        return False
+    if r.hi is not None:
+        return key < r.hi
+    return r.lo is not None and key == r.lo
+
+
+def DigestItems(digests, refs=()):
     """[(first block, body)]: the blocks with a digest, a run of them inside
     one window of DIGEST_ITEM_MOST to an element (§16.2 п.24) — so a change
-    to one block rewrites one element, wherever it lies."""
+    to one block rewrites one element, wherever it lies; none inside a rotten
+    range named as it lies, an element cut before one."""
+    refs = [r for r in refs if r.tree == DIGESTS]
+    los = sorted(r.lo for r in refs if r.lo is not None)
     out, cur = [], []
     for b in sorted(digests):
-        if cur and (b != cur[-1] + 1 or b // DIGEST_ITEM_MOST != cur[0] // DIGEST_ITEM_MOST):
+        if any(RefCovers(r, b) for r in refs):
+            continue
+        if cur and (b != cur[-1] + 1 or b // DIGEST_ITEM_MOST != cur[0] // DIGEST_ITEM_MOST or
+                    any(cur[-1] < lo <= b for lo in los)):
             out.append((cur[0], DigestsEncode([digests[x] for x in cur])))
             cur = []
         cur.append(b)
@@ -97,10 +131,20 @@ def DigestItems(digests):
     return out
 
 
-def Elements(content, seq):
-    """{tree: [(key, body)]} in key order — the leaves' items."""
+def Elements(content, seq, refs=()):
+    """{tree: [(key, body)]} in key order — the leaves' items; and a tree that
+    holds nothing but rotten nodes named as they lie, there with none."""
     files = []
-    for fid in sorted(content.files):
+    kept = getattr(content, "kept", {})
+    for fid in sorted(set(content.files) | set(kept)):
+        if fid in kept:
+            # A file locked by name, named again as what of it read lay — each
+            # run with the birth it had (§16.4 п.5, settle/binder_nodes.c).
+            head, parts = kept[fid]
+            if head is not None:
+                files.append(((fid, 0), FileHeadEncode(head)))
+            files.extend(((fid, 1 + b), ParcelEncode(runs, seq)) for b, runs in parts)
+            continue
         fs = content.files[fid]
         files.append(((fid, 0), FileHeadEncode(fs)))
         at = 0
@@ -109,15 +153,21 @@ def Elements(content, seq):
             at += sum(r.count for r in runs)
     out = {FILES: files, TAGS: [(tid, TagEncode(content.tags[tid])) for tid in sorted(content.tags)],
            USE: [(0, VarintPut(len(content.use)) + content.use)] if content.use else [],
-           DIGESTS: DigestItems(content.digests)}
-    return {tree: items for tree, items in out.items() if items}
+           DIGESTS: DigestItems(content.digests, refs)}
+    for tree, items in out.items():
+        for key, _b in items:
+            if tree == FILES and any(r.tree == FILES and RefCovers(r, key) for r in refs):
+                raise ValueError("the FILES element %r lies inside a rotten range named as it lies" % (key,))
+    return {tree: items for tree, items in out.items() if items or any(r.tree == tree for r in refs)}
 
 
-def Pack(tree, level, items, counts):
+def Pack(tree, level, items, counts, bars=()):
     """Nodes of `level` filled greedily in key order: an item that would not
     fit the Sheet of the node being filled begins the next; an item longer
     than a Sheet alone is the only one of its node, of as many Sheets as it
-    takes (§2.9, §16.2 п.24)."""
+    takes (§2.9, §16.2 п.24) — and a node is closed before the first key `bars`
+    names that it would hold keys on both sides of (a rotten node of this
+    level or above, named as it lies)."""
     nodes, cur, size, first = [], [], 0, None
 
     def Head(n):
@@ -129,6 +179,9 @@ def Pack(tree, level, items, counts):
                           max(1, -(-size // SHEET_PAYLOAD))))
 
     for it, n in zip(items, counts):
+        if cur and any(cur[-1][0][0] < lo <= it[0] for lo in bars):
+            Close()
+            cur = []
         if cur:
             grown = size + len(ItemBytes(tree, it, cur[-1][0][0])) + Head(len(cur) + 1) - Head(len(cur))
             if grown <= SHEET_PAYLOAD:
@@ -167,43 +220,63 @@ class BindPlan:
         return [self.a + self.Used(), self.b + self.Used()]
 
 
-def _Lay(elements, seq, a, b, grid):
+def _Inner(tree, seq, layer, refs, level):
+    """The elements of `level` + 1: each node of `layer`, and each rotten node
+    of `level` named as it lies, in key order — with their counts."""
+    named = [(n.FirstKey(), InnerEncode(n.count, PtrPut(seq, n.sheets, n.blocks)), n.count) for n in layer]
+    named += [(RefLo(r), InnerEncode(r.count, PtrPut(r.ptr["seq"], r.ptr["sheets"], r.ptr["blocks"])), r.count)
+              for r in refs if r.tree == tree and r.level == level]
+    named.sort(key=lambda e: e[0])
+    return [(k, body) for k, body, _c in named], [c for _k, _b, c in named]
+
+
+def _Lay(elements, seq, a, b, grid, refs=()):
     """The nodes in their order of writing, with the copies at a and b, each
-    begun on an atom of `grid` blocks (L-9)."""
+    begun on an atom of `grid` blocks (L-9); rotten nodes named as they lie."""
     nodes, roots, off = [], {}, 0
+    refs = [r for r in refs if r.ptr]
     for tree in sorted(elements):
         items = elements[tree]
         counts = [1 if tree != FILES else int(key[1] == 0) for key, _b in items]
-        level, layer = 0, Pack(tree, 0, items, counts)
+        mine = [r for r in refs if r.tree == tree]
+
+        def Bars(level):
+            return [r.lo for r in mine if r.level >= level and r.lo is not None]
+
+        level, layer = 0, Pack(tree, 0, items, counts, Bars(0))
         while True:
             for n in layer:
                 off = -(-off // grid) * grid
                 n.off, n.blocks = off, [a + off, b + off]
                 off += n.sheets
                 nodes.append(n)
-            if len(layer) == 1:
+            above = any(r.level >= level for r in mine)
+            if len(layer) == 1 and not above:
                 roots[tree] = layer[0]
                 break
+            if not layer and not above:
+                break
+            items, counts = _Inner(tree, seq, layer, mine, level)
             level += 1
-            items = [(n.FirstKey(), InnerEncode(n.count, PtrPut(seq, n.sheets, n.blocks))) for n in layer]
-            layer = Pack(tree, level, items, [n.count for n in layer])
+            layer = Pack(tree, level, items, counts, Bars(level))
     return nodes, roots, off
 
 
-def Bind(content, g, after=None, a=None, b=None, ribbon=None, nxt=None, seq=1, slot_seq=2):
+def Bind(content, g, after=None, a=None, b=None, ribbon=None, nxt=None, seq=1, slot_seq=2, refs=()):
     """The plan of the Tally of `content` (§9.3, §16.2 п.23): from the first
     grain at or past block `after` (or from block `a`), Tally-Quire A of as
     many grains as the nodes take, Tally-Quire B as long right after it, then
     one grain of ribbon and one of its next_quire — refused (ValueError)
     when they would run past the data run; or at `a`, `b`, `ribbon` and `nxt`
     all given, to bind again what was read (Circle)."""
-    elements = Elements(content, seq)
+    refs = [r for r in refs if r.ptr]
+    elements = Elements(content, seq, refs)
     grain, grid = g.grain, max(1, g.atom // BLOCK)
     if b is None:
         a = -(-after // grain) * grain if a is None else a
         grains = 1
         while True:
-            nodes, roots, used = _Lay(elements, seq, a, a + grains * grain, grid)
+            nodes, roots, used = _Lay(elements, seq, a, a + grains * grain, grid, refs)
             if used <= grains * grain:
                 break
             grains = -(-used // grain)
@@ -215,7 +288,7 @@ def Bind(content, g, after=None, a=None, b=None, ribbon=None, nxt=None, seq=1, s
                              "and next_quire run to block %u, past the data run's end at block %u (a writer "
                              "refuses so; mkfs as well)" % (a, nxt[0] + nxt[1], g.data_end))
     else:
-        nodes, roots, _used = _Lay(elements, seq, a, b, grid)
+        nodes, roots, _used = _Lay(elements, seq, a, b, grid, refs)
     return BindPlan(content, seq, slot_seq, a, b, ribbon, nxt, nodes, roots, after)
 
 
@@ -250,15 +323,16 @@ def Circle(medium, mount):
     """Bind again what the mount read of its slot's Tally, where it lies, and
     hold every sector against the medium: [what differs] — empty when the
     read and the binder agree byte for byte (§2.4: one value, one spelling)."""
-    g, slot, tally = BookGround(medium), mount.slot, mount.tally
+    g, slot, tally = mount.g, mount.slot, mount.tally
     nodes = tally.Nodes()
     if not nodes:
         return ["the Tally has no node to bind again"]
     a = min(n.blocks[0] for n in nodes)
     b = min(n.blocks[1] for n in nodes if len(n.blocks) > 1)
     r = slot.ribbon
+    refs = [x for x in tally.rotten if x.ptr]
     plan = Bind(tally.content, g, a=a, b=b, ribbon=(r["quire_block"], r["quire_blocks"]),
-                nxt=(r["next_block"], r["next_blocks"]), seq=slot.tally_seq, slot_seq=slot.seq)
+                nxt=(r["next_block"], r["next_blocks"]), seq=slot.tally_seq, slot_seq=slot.seq, refs=refs)
     wrong = []
     for n in plan.nodes:
         stream, starts = NodeStream(n.tree, n.level, n.items)
@@ -277,3 +351,166 @@ def Circle(medium, mount):
     if len(plan.nodes) != len(nodes):
         wrong.append("%u nodes bound against %u read" % (len(plan.nodes), len(nodes)))
     return wrong
+
+
+def _RunsKey(fs):
+    """A file's runs as the book says them, whatever Parcels they were cut
+    into: a hole's length, or ground from its start with its birth — runs
+    that go on one another of one kind and one birth taken as one."""
+    out = []
+    for r in fs.runs:
+        birth = 0 if r.hole else r.birth
+        if out and out[-1][0] == r.hole and out[-1][3] == birth and (r.hole or out[-1][1] + out[-1][2] == r.start):
+            out[-1][2] += r.count
+            continue
+        out.append([r.hole, 0 if r.hole else r.start, r.count, birth])
+    return out
+
+
+def _FilesDiffer(have, want):
+    wrong = []
+    for fid in sorted(set(have) | set(want)):
+        a, b = have.get(fid), want.get(fid)
+        if a is None or b is None:
+            wrong.append("fid %u is %s the Tally and %s the state it is of" % (fid, "in" if a else "not in",
+                                                                               "in" if b else "not in"))
+            continue
+        ha = (a.gen, a.flags, a.size, a.created_ns, a.modified_ns, a.name, sorted(a.tags))
+        hb = (b.gen, b.flags, b.size, b.created_ns, b.modified_ns, b.name, sorted(b.tags))
+        if ha != hb:
+            wrong.append("fid %u's header is %r in the Tally and %r in the state it is of" % (fid, ha, hb))
+        if _RunsKey(a) != _RunsKey(b):
+            wrong.append("fid %u's runs are %r in the Tally and %r in the state it is of" % (fid, _RunsKey(a)[:6],
+                                                                                           _RunsKey(b)[:6]))
+    return wrong
+
+
+def _DigestsWanted(p):
+    """The digests a Tally of the state `p` mounted carries (the kernel's
+    settle/binder.c GroundTake): of every block of every live file, of every
+    block a locked file is known to name — the census holds those whatever
+    locked it (bookcensus.py _Held) — and, a FILES range rotten, of every
+    block the Tally before named a digest of and none of its living files
+    owns. What is held keeps its digest, and stays held."""
+    old, fresh = p.tally.content.digests, p.overlay
+    blocks = {b for fs in p.files.values() for s, n in fs.Ground() for b in range(s, s + n)}
+    blocks |= {r.start + i for runs in p.locked_runs.values() for r in runs if not r.hole for i in range(r.count)}
+    if p.FilesRot():
+        owned = {b for fs in p.tally.content.files.values() for s, n in fs.Ground() for b in range(s, s + n)}
+        blocks |= set(old) - owned
+    out = {}
+    for b in blocks:
+        d = fresh.get(b, old.get(b))
+        if d is not None:
+            out[b] = d
+    return out
+
+
+def _RibbonPast(p, s0, k):
+    """Past stitch k, as the walk from the older slot `s0` keeps it (stitch.py
+    Ribbon._Take): k itself, the Quire the ribbon stands in where it goes on,
+    the next_quire named there — (0, 0) for none — and whether the medium was
+    known to lie by then: the older slot's word or a stitch's up to k."""
+    r = s0.ribbon
+    quire, nxt = (r["quire_block"], r["quire_blocks"]), (r["next_block"], r["next_blocks"])
+    lied = bool(s0.flags & SPINE_MEDIUM_LIED)
+    for u in p.ribbon.stitches:
+        if u.places[-1].quire != quire:
+            quire, nxt = u.places[-1].quire, (0, 0)
+        if u.head is not None:
+            nxt = u.head.next if u.head.next[1] else nxt
+            lied = lied or bool(u.head.flags & MEDIUM_LIED)
+        if u.seq == k:
+            return u, (u.end.quire if u.end is not None else quire), nxt, lied
+    return None, None, None, lied
+
+
+def _SlotPast(s1, p, s0, k):
+    """[what differs] between the newest slot's SpineHead and SpineRibbon and
+    the ribbon past stitch k: its Clasp, the Quire `at` lies in and the
+    next_quire named there; and MEDIUM_LIED, which a slot never leaves off
+    once the medium was known to lie (a later lie may set it besides)."""
+    u, quire, nxt, lied = _RibbonPast(p, s0, k)
+    if u is None:
+        return []
+    wrong, r = [], s1.ribbon
+    if u.clasp != s1.stitch_clasp:
+        wrong.append("the slot names stitch %u's Clasp 0x%08x, and the stitch carries 0x%08x" %
+                     (k, s1.stitch_clasp, u.clasp or 0))
+    if (r["quire_block"], r["quire_blocks"]) != tuple(quire) or (r["next_block"], r["next_blocks"]) != tuple(nxt):
+        wrong.append("the slot's SpineRibbon names Quire %u+%u and next %u+%u, and the ribbon past stitch %u "
+                     "stands in %u+%u with next %u+%u" % (r["quire_block"], r["quire_blocks"], r["next_block"],
+                                                          r["next_blocks"], k, quire[0], quire[1], nxt[0], nxt[1]))
+    if lied and not s1.flags & SPINE_MEDIUM_LIED:
+        wrong.append("the medium was known to lie by stitch %u, and the slot leaves MEDIUM_LIED off" % k)
+    return wrong
+
+
+def _AtOf(p, k):
+    """The block the ribbon goes on at past stitch k, as the walk reads it."""
+    for u in p.ribbon.stitches:
+        if u.seq == k and u.end is not None and u.end.off < u.end.quire[1] * SECTORS_PER_BLOCK:
+            return u.end.quire[0] + u.end.off // SECTORS_PER_BLOCK
+    return None
+
+
+def Useful(u):
+    """The useful bytes of stitch u (§4.2): its records from its StitchHead to
+    its Clasp's end — not the sectors' heads, not the PAD."""
+    return u.parsed.end if u.parsed and u.parsed.why is None else 0
+
+
+def BindSaid(m):
+    """What a reader of the newest slot says of its Tally against TALLY_SLACK:
+    (the blocks its Tally takes a copy, the bytes the next is reckoned to cost,
+    the useful bytes of the ribbon past its `at`)."""
+    blocks = sum(n.sheets for n in m.tally.Nodes())
+    return blocks, (2 * blocks + 1) * BLOCK, sum(Useful(u) for u in m.ribbon.stitches)
+
+
+def BindCheck(medium, start=None):
+    """[what differs], empty when the newest slot's Tally is what a writer of
+    one lays (§16.1 п.7): bound again where it lies, byte for byte (Circle);
+    and, for its state, the state an older slot's Tally and its ribbon replayed
+    to the stitch the newest slot names hold — files, their runs and births,
+    tags, the Use Context, the digests, the numbers given next and where the
+    ribbon goes on."""
+    from .bookmount import BookMount
+    g = BookGround(medium, start)
+    m = BookMount(g)
+    if m.refusal is not None:
+        return ["the book does not mount: %s" % m.refusal]
+    wrong = Circle(medium, m)
+    s1, k = m.slot, m.slot.stitch_seq
+    for s0 in sorted((s for s in m.slots if s.state == "valid" and s.seq < s1.seq), key=lambda s: -s.seq):
+        p = BookMount(g, stand=s0.index, upto=k)
+        if p.refusal is not None or p.tally is None or (k != s0.stitch_seq and k not in p.applied):
+            continue
+        t = m.tally.content
+        wrong += _FilesDiffer(t.files, p.files)
+        if set(m.tally.locked) != set(p.locked):
+            wrong.append("the Tally locks fids %s and the state it is of %s" % (sorted(m.tally.locked)[:8],
+                                                                               sorted(p.locked)[:8]))
+        tags = {i: (x.flags, x.key, x.value) for i, x in t.tags.items()}
+        want = {i: (x.flags, x.key, x.value) for i, x in p.tags.items()}
+        if tags != want:
+            wrong.append("the Tally's tags %s and the state's %s differ" % (
+                sorted(set(tags) ^ set(want))[:8], [i for i in tags if i in want and tags[i] != want[i]][:8]))
+        if t.use != p.use:
+            wrong.append("the Tally's Use Context is %u byte(s), the state's %u" % (len(t.use), len(p.use)))
+        dw = _DigestsWanted(p)
+        if t.digests != dw:
+            odd = sorted(b for b in set(t.digests) | set(dw) if t.digests.get(b) != dw.get(b))
+            wrong.append("the Tally's DIGESTS and the state's differ at %u block(s), first %s" % (len(odd), odd[:6]))
+        counts = {x: s1.counts[x] for x in ("next_fid", "next_tag", "next_bookmark")}
+        mine = {x: p.counts[x] for x in ("next_fid", "next_tag", "next_bookmark")}
+        if counts != mine:
+            wrong.append("the slot's counts %r and the state's %r differ" % (counts, mine))
+        at = _AtOf(p, k) if k != s0.stitch_seq else None
+        if at is not None and at != s1.ribbon["at"]:
+            wrong.append("the slot puts the ribbon on at block %u, and stitch %u ends at %u" % (s1.ribbon["at"], k, at))
+        if k != s0.stitch_seq:
+            wrong += _SlotPast(s1, p, s0, k)
+        return wrong
+    return wrong + ["no older slot's ribbon carries stitch %u, the one the newest slot's Tally is the state "
+                    "after" % k]
