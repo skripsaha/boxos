@@ -180,6 +180,9 @@ right order:
 5. Create the destination through `create`, passing the inherited source tags
    plus explicit output tags. `create` also applies the current Use Context and
    the filename stem, with kernel-side deduplication.
+   The final tag set must contain `app` or `utility`, because the existing
+   `SYSTEM_OP_PROC_EXEC` candidate check refuses every active file without one
+   of those keys.
 6. Set the exact size with `file_span`, write all bytes with checked short-write
    handling, then call `anchor` so the new artifact is durable.
 7. On a storage failure after creation, attempt `delete` of that exact id and

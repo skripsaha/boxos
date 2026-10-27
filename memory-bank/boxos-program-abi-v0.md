@@ -278,6 +278,13 @@ adapter must grow its output buffer until the complete self-describing answer
 arrives, preserve every tag spelling, and expose an explicit ownership/free
 contract. This is a BoxLib userspace addition; it does not change TagFS.
 
+The current process loader also has a real execution gate: `SYSTEM_OP_PROC_EXEC`
+accepts only an active file wearing the `app` or `utility` tag. The assembler
+must make this visible in its contract. The simple command may supply `app` as
+the default output execution tag, or an explicit tag list may choose `utility`,
+but a successful build must never create an artifact that looks complete and
+then cannot be launched because it lacks both gates.
+
 The raw Manifest/Crate surface can be added to the same assembler after the
 minimal runtime path is proven.
 
