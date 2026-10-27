@@ -5,6 +5,7 @@
 #include "spine_read.h"
 #include "tally_read.h"
 #include "ribbon.h"
+#include "../settle/endpaper_fact.h"
 
 /*
  * MountReadBook — a format-v2 volume's mount: its book read the way the spec
@@ -199,6 +200,8 @@ typedef struct {
     uint64_t       tally_blocks; /* the Tally stood on, one copy: what the next is reckoned to cost (binder.h) */
     uint64_t       ribbon_useful;/* the useful bytes of the stitches replayed past it (§4.2) */
     bool           binder_short; /* memory would not hold what the slots hold for the writer of a Tally */
+    EndpaperLaid   laid;         /* what the Tally stood on laid of FILES, TAGS and DIGESTS (endpaper_fact.h) */
+    uint64_t       laid_tree;    /* the tree of it being walked */
 } BookMount;
 
 extern BookMount g_book;

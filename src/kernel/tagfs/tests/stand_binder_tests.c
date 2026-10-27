@@ -1,4 +1,4 @@
-#include "stand_stitch.h"
+#include "stand_binder.h"
 #include "stand_fresh.h"
 #include "../ink/fallow.h"
 #include "../plot/plot.h"
@@ -37,37 +37,18 @@
 // the Spine and the ribbon back as it found them.
 // ============================================================================
 
-#define STAND_BINDER_SLOTS_MOST  8u
-#define STAND_BINDER_GROUND_MOST 64u     /* runs of the slots' ground a test keeps as found */
-
-/* The ring as the test found it, raw, and the ribbon (stand_stitch.h); and
- * the ground its slots hold, which the Tallies a test writes may give back
- * and hand on — kept as found too. */
-typedef struct {
-    StandStitch s;
-    uint8_t*    ring;
-    uint32_t    slots;
-    uint64_t    spine;
-    uint64_t    stride;
-    uint64_t    kept_block;    /* one more block the test changed by hand, kept as found; 0 for none */
-    uint8_t*    kept;
-    Strip       ground[STAND_BINDER_GROUND_MOST];   /* what the slots held as found, and its bytes */
-    uint8_t*    held[STAND_BINDER_GROUND_MOST];
-    uint32_t    nground;
-} StandBinder;
-
-static bool StandBinderRead(const StandBinder* b, uint64_t block, uint8_t* out)
+bool StandBinderRead(const StandBinder* b, uint64_t block, uint8_t* out)
 {
     return BoardroomRead(b->s.seat, b->s.base + block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS, out) == 0;
 }
 
-static bool StandBinderWrite(const StandBinder* b, uint64_t block, const uint8_t* in)
+bool StandBinderWrite(const StandBinder* b, uint64_t block, const uint8_t* in)
 {
     return BoardroomWrite(b->s.seat, b->s.base + block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS, in, NULL) == 0;
 }
 
 /* Why the test stands aside here, or NULL — the ring kept as found. */
-static const char* StandBinderAside(StandBinder* b)
+const char* StandBinderAside(StandBinder* b)
 {
     memset(b, 0, sizeof(*b));
     const char* aside = StandStitchAside(&b->s);
@@ -99,7 +80,7 @@ static const char* StandBinderAside(StandBinder* b)
 }
 
 /* A block the test changes by hand, kept as found for the put-back. */
-static bool StandBinderKeep(StandBinder* b, uint64_t block)
+bool StandBinderKeep(StandBinder* b, uint64_t block)
 {
     if (b->kept || !(b->kept = kmalloc(TAGFS_BLOCK_SIZE)))
         return false;
@@ -125,7 +106,7 @@ static bool StandBinderGivenZeroed(const StandBinder* b)
 
 /* The volume let go of, the ring and the kept block written back as found,
  * the ribbon put back (StandStitchPutBack) and the volume mounted on it. */
-static bool StandBinderPutBack(StandBinder* b)
+bool StandBinderPutBack(StandBinder* b)
 {
     bool ok = true;
     if (tagfs_get_state()->initialized)
@@ -147,13 +128,6 @@ static bool StandBinderPutBack(StandBinder* b)
     b->ring = b->kept = NULL;
     return StandStitchPutBack(&b->s) && ok;
 }
-
-#define STAND_BINDER_PUT_BACK(b)                                                                           \
-    do {                                                                                                   \
-        if (!StandBinderPutBack(b))                                                                        \
-            verdict = TestFailedAt(__FILE__, __LINE__, "the Spine and the ribbon would not be put back "  \
-                                   "as they were found (last, 0)", (int64_t)(b)->s.at.last, 0);            \
-    } while (0)
 
 /* Whether `n` bytes are all zero. */
 static bool StandBinderZeros(const uint8_t* p, uint64_t n)
@@ -263,7 +237,7 @@ static bool StandBinderSow(StandFreshModel* m, uint64_t* data_fid)
 
 /* `n` Tallies in a row, the lag's stitches settled past each: OK, or the
  * first refusal. */
-static error_t StandBinderTallies(uint32_t n)
+error_t StandBinderTallies(uint32_t n)
 {
     error_t rc = OK;
     for (uint32_t t = 0; rc == OK && t < n; t++) {
@@ -780,16 +754,30 @@ out:
 // Tally always possible, and emptied, its ground back (§16.2 п.6)
 // ----------------------------------------------------------------------------
 
-/* Files of one long name with no stem — a tag is never given back (§4.4), a
- * header is: so many headers take FILES past two Quires of a Tally, 17 or so
- * to a leaf, and the reserve that keeps the Tallies of a ring not yet filled
- * (BinderRingShort, by the measure from above of each) still fits the
- * stand's volume beside them. */
-#define STAND_BINDER_BIG_FILES  10000u
-#define STAND_BINDER_BIG_BATCH  2000u
-#define STAND_BINDER_BIG_NAME   200u
+/* Files of one name — a tag is never given back (§4.4), a header is: so many
+ * headers take FILES past two Quires of a Tally, 128 or so to a leaf. Half of
+ * them are made after a Tally, so the Tally of the full volume is twice the
+ * one before it: a reserve that kept the last Tally's size alone, its growth
+ * since left out, would let the data take the ground it needs (§16.4 п.7). */
+#define STAND_BINDER_BIG_FILES  72000u
+#define STAND_BINDER_BIG_BATCH  4000u
 
-static char s_binder_big_name[STAND_BINDER_BIG_NAME + 1u];
+/* `n` files of the one name made, a batch settled at a time: the first id
+ * into *first unless it holds one. */
+static TestResult StandBinderMake(uint32_t n, uint64_t* first)
+{
+    TestResult verdict = TEST_PASS;
+    uint64_t   fid     = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        TEST_ASSERT_EQ(tagfs_create_file("bind-big.n", NULL, 0, &fid), 0, "a file is made");
+        *first = *first ? *first : fid;
+        if (i % STAND_BINDER_BIG_BATCH == STAND_BINDER_BIG_BATCH - 1u)
+            TEST_ASSERT_OK(TagFSSettle(), "the files settle a batch at a time");
+    }
+    TEST_ASSERT_OK(TagFSSettle(), "every file settled");
+out:
+    return verdict;
+}
 
 /* One file written until the volume refuses it: the refusal. */
 static error_t StandBinderFill(uint64_t fid)
@@ -811,7 +799,7 @@ static TestResult TestStandBinderFullBack(void)
     TestResult      verdict = TEST_PASS;
     static StandBinder b;
     BinderStandSaid said;
-    uint64_t        free0 = 0, first = 0, fid = 0, fill = 0, big = 0;
+    uint64_t        free0 = 0, first = 0, fill = 0, big = 0, half = 0;
     const char*     aside = StandBinderAside(&b);
 
     if (aside)
@@ -819,14 +807,11 @@ static TestResult TestStandBinderFullBack(void)
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
     uint64_t q = RibbonCursorNow()->quire_blocks;
     free0 = tagfs_get_state()->ledger.free_blocks;
-    memset(s_binder_big_name, 'b', STAND_BINDER_BIG_NAME);
-    s_binder_big_name[0] = '.';
-    for (uint32_t i = 0; i < STAND_BINDER_BIG_FILES; i++) {
-        TEST_ASSERT_EQ(tagfs_create_file(s_binder_big_name, NULL, 0, &fid), 0, "a file is made");
-        first = i ? first : fid;
-        if (i % STAND_BINDER_BIG_BATCH == STAND_BINDER_BIG_BATCH - 1u)
-            TEST_ASSERT_OK(TagFSSettle(), "the files settle a batch at a time");
-    }
+    TEST_ASSERT(StandBinderMake(STAND_BINDER_BIG_FILES / 2u, &first) == TEST_PASS, "half the files are made");
+    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally of them is written");
+    BinderStand(&said);
+    half = said.tally_blocks;
+    TEST_ASSERT(StandBinderMake(STAND_BINDER_BIG_FILES / 2u, &first) == TEST_PASS, "and as many again after it");
     TEST_ASSERT_EQ(tagfs_create_file("bind-fill.bin", NULL, 0, &fill), 0, "a file to fill the volume is made");
     TEST_ASSERT_EQ(StandBinderFill(fill), ERR_TAGFS_NO_SPACE, "and written until the volume refuses it");
     TEST_ASSERT_OK(TagFSSettle(), "every file and every byte settled");
@@ -835,8 +820,10 @@ static TestResult TestStandBinderFullBack(void)
                    "two slots that held nothing and the one that held the Tally the volume was made with");
     BinderStand(&said);
     big = said.tally_blocks;
+    TestEvidence("blocks a copy of the Tally of half the files took", half);
     TestEvidence("blocks a copy of the Tally of the full volume takes", big);
-    TEST_ASSERT(big > 2u * q, "a Tally past two Quires");
+    TEST_ASSERT(big > 2u * q && big >= half + half / 2u, "a Tally past two Quires, grown by half and more since the "
+                "one of half the files");
     TEST_ASSERT_EQ(tagfs_delete_file(fill, INK_UNWARRANTED), 0, "the data is given up");
     for (uint64_t f = first; f < first + STAND_BINDER_BIG_FILES; f++) {
         TEST_ASSERT_EQ(tagfs_delete_file(f, INK_UNWARRANTED), 0, "a file is given up");

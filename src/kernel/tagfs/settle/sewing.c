@@ -575,6 +575,7 @@ void StitchRunEnd(error_t rc)
         uint64_t fid_most = 0;
         error_t  births   = DocketBirths(&s->jots, s->seq, &fid_most);
         BinderStitchSettled(s->seq, s->useful, fid_most, births);
+        EndpaperGrew(&s->jots, s->seq);
         DocketSettled(&s->jots, s->seq);
         RibbonNextGiven();
     }

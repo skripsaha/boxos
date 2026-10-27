@@ -218,6 +218,8 @@ static error_t BookDigestRot(void* ctx, const TallyPlace* at, const char* why)
 {
     (void)ctx;
     (void)why;
+    if (at->level > 0)
+        EndpaperLaidNode(&g_book.laid, TALLY_DIGESTS, at->level, 0, 1u, at->has_lo ? at->lo.k1 : 0);
     return TallyDigestsKeep(at, true);
 }
 
@@ -236,6 +238,8 @@ static error_t BookTree(const SpineRoot* root)
     TallySink sink = { .ctx = NULL, .item = NULL, .node = BookGroundNode, .said = true,
                        .mended = &g_book.said.mended, .shapes = &g_book.said.shapes };
     bool derived = root->tree == TALLY_MAP || root->tree == TALLY_SHARED || (root->flags & TALLY_ROOT_DERIVED);
+
+    g_book.laid_tree = root->tree;
 
     if (!derived && !BookTreeAuthoritative(root)) {
         ksnprintf(words, sizeof(words), "slot %u names a tree of kind %llu this reader does not know, and "
@@ -417,6 +421,7 @@ error_t MountReadBook(const char** what)
     BookBounds();
     BinderMountStood(g_book.stood->index, g_book.tally_blocks, g_book.ribbon_useful, g_book.next_fid,
                      g_book.next_tag, g_book.next_bookmark);
+    EndpaperStood(&g_book.laid, g_book.stood->head.tally_seq, g_book.stood->counts.next_fid);
     kprintf("[TagFS] the book as memory holds it: its files print 0x%08X, its Use Context %llu byte(s) print "
             "0x%08X\n", g_book.files_print, (unsigned long long)g_book.use_bytes, g_book.use_print);
     if (g_book.bookmarked)

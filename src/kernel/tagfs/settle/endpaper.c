@@ -6,6 +6,7 @@
 #include "../mount/book_mount.h"
 #include "../tag_spelling/tag_spelling.h"
 #include "../block_map/block_map.h"
+#include "endpaper_fact.h"
 
 /*
  * The book's reserve (sewing.h): what a whole Tally of the volume as memory
@@ -30,8 +31,10 @@
  * it early and leaves the one after it short: a measure of the leaves by the
  * short items' bytes alone, the long ones' nodes added after, is less than
  * what a writer lays. Each level above is counted the same, at twice what its
- * pointers fill. The writer of the whole Tally (the next step) lays it to the
- * byte, and this measure becomes that: one function, the Tally's own.
+ * pointers fill (EndpaperInnerBlocks). The reserve takes FILES, TAGS and
+ * DIGESTS by this measure only where the one by the last Tally laid and the
+ * growth since (endpaper_fact.c) is not known or is more; USE — one item, its
+ * length now what the next Tally lays — always.
  *
  * Why from above: the reserve is what lets the ribbon go on and a Tally be
  * written on a full volume (§3.6). Measured too small, a Tally would be begun
@@ -39,24 +42,9 @@
  * Quires sooner than it must.
  */
 
-#define TALLY_NODE_HEAD_MOST  44u    /* NodeHead: tag, length, tree, level, items, a pair key — each at its widest */
-#define TALLY_ITEM_HEAD_MOST  25u    /* an item's length (5) and a pair key (10 + 10) */
 #define TALLY_FILE_HEAD_MOST  60u    /* gen, flags, size, created, mtime_z (10 each), name and tag counts (5 each) */
 #define TALLY_TAG_MOST         5u    /* a tag id, written as its distance from the one before */
-#define TALLY_RUN_MOST        25u    /* a run of the Tally's form: head 5, start 10, birth_delta 10 (§2.9) */
-#define TALLY_PARCEL_HEAD_MOST 5u    /* a Parcel's count of runs */
-#define TALLY_TAG_BODY_MOST   20u    /* a tag's flags, key length and value length */
 #define TALLY_USE_BODY_MOST   10u    /* the Use Context's length */
-#define TALLY_DIGEST_HEAD_MOST 5u    /* an element's count of digests */
-#define TALLY_INNER_ITEM_MOST 72u    /* an inner item: its head, a count, a BookPtr of two copies */
-
-#define TALLY_LEAF_ROOM       (TALLY_SHEET_PAYLOAD - TALLY_NODE_HEAD_MOST)
-
-/* A tag's item longer than a leaf holds: more text than this, and every one
- * of them alone in a node of at most TALLY_LONG_TAG_SHEETS Sheets. */
-#define TALLY_LONG_TAG_TEXT   (TALLY_LEAF_ROOM - TALLY_ITEM_HEAD_MOST - TALLY_TAG_BODY_MOST)
-#define TALLY_LONG_TAG_SHEETS ((TALLY_NODE_HEAD_MOST + TALLY_ITEM_HEAD_MOST + TALLY_TAG_BODY_MOST + TAG_TEXT_WIDTH + \
-                                TALLY_SHEET_PAYLOAD - 1u) / TALLY_SHEET_PAYLOAD)
 
 /* What one tree of the Tally holds, measured: the bytes its items fill its
  * leaves by — a long item's at one byte past a leaf's room — and the Sheets of
@@ -92,27 +80,22 @@ static uint64_t TallyFilled(uint64_t bytes, uint64_t room)
  * inner nodes above until one is its root. */
 static uint64_t TallyTreeBlocks(const TallyTreeCost* t, uint64_t atom)
 {
-    uint64_t nodes  = TallyFilled(t->bytes, TALLY_LEAF_ROOM);
-    uint64_t blocks = nodes * atom + t->sheets * atom;
-    while (nodes > 1u) {
-        nodes   = TallyFilled(nodes * TALLY_INNER_ITEM_MOST, TALLY_LEAF_ROOM);
-        blocks += nodes * atom;
-    }
-    return blocks;
+    uint64_t nodes = TallyFilled(t->bytes, TALLY_LEAF_ROOM);
+    return nodes * atom + t->sheets * atom + EndpaperInnerBlocks(nodes, atom);
 }
 
-/* One live file into FILES and DIGESTS: its header, its Parcels, and the
+/* One live file into FILES and DIGESTS: its header; its Parcels — memory's,
+ * one to one, at most PARCEL_STRIPS_MOST runs each and, of a file of more
+ * than one, at least PARCEL_STRIPS_LEAST (file_record.h), so no more of them
+ * than one a PARCEL_STRIPS_LEAST runs, each shorter than a leaf; and the
  * digests of the blocks its runs name — an element at the least for each run,
  * and one more for each window of DIGEST_ITEM_MOST a run crosses. */
 static void TallyFileCost(const FileRecord* rec, TallyTreeCost* files, TallyTreeCost* digests)
 {
     TallyItemCost(files, TALLY_FILE_HEAD_MOST + rec->name_len + (uint64_t)rec->tag_count * TALLY_TAG_MOST);
     uint64_t runs    = rec->strip_count;
-    uint64_t parcels = (runs + PARCEL_STRIPS_MOST - 1u) / PARCEL_STRIPS_MOST;
-    for (uint64_t p = 0; p < parcels; p++) {
-        uint64_t in = runs / parcels + (p < runs % parcels ? 1u : 0u);
-        TallyItemCost(files, TALLY_PARCEL_HEAD_MOST + in * TALLY_RUN_MOST);
-    }
+    uint64_t parcels = (runs + PARCEL_STRIPS_LEAST - 1u) / PARCEL_STRIPS_LEAST;
+    files->bytes += parcels * (TALLY_ITEM_HEAD_MOST + TALLY_PARCEL_HEAD_MOST) + runs * TALLY_RUN_MOST;
     uint64_t elements = 2u * runs + (rec->blocks + DIGEST_ITEM_MOST - 1u) / DIGEST_ITEM_MOST;
     digests->bytes += elements * (TALLY_ITEM_HEAD_MOST + TALLY_DIGEST_HEAD_MOST) + rec->blocks * 8u;
 }
@@ -135,7 +118,16 @@ static void TallyFilesCost(TallyTreeCost* files, TallyTreeCost* digests)
     }
 }
 
-uint64_t TallyCostBlocks(void)
+/* The measure from above of each tree of a whole Tally, in blocks of one
+ * copy. */
+typedef struct {
+    uint64_t files;
+    uint64_t tags;
+    uint64_t use;
+    uint64_t digests;
+} TallyCostParts;
+
+static void TallyCostOf(TallyCostParts* out)
 {
     TallyTreeCost files = { 0 }, tags = { 0 }, use = { 0 }, digests = { 0 };
     uint64_t      atom  = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
@@ -154,9 +146,37 @@ uint64_t TallyCostBlocks(void)
     if (memory && memory->bytes)
         TallyItemCost(&use, TALLY_USE_BODY_MOST + memory->bytes);
     UseTextDrop(memory);
-    return TallyTreeBlocks(&files, atom) + TallyTreeBlocks(&tags, atom) + TallyTreeBlocks(&use, atom) +
-           TallyTreeBlocks(&digests, atom);
+    out->files   = TallyTreeBlocks(&files, atom);
+    out->tags    = TallyTreeBlocks(&tags, atom);
+    out->use     = TallyTreeBlocks(&use, atom);
+    out->digests = TallyTreeBlocks(&digests, atom);
 }
+
+static uint64_t TallyLess(uint64_t a, uint64_t b)
+{
+    return a < b ? a : b;
+}
+
+/* The next Tally (§16.4 п.7), `above` the measure from above: each of FILES,
+ * TAGS and DIGESTS by the last Tally and the growth since — every change
+ * memory holds among it (endpaper_fact.c) — where that is known and less;
+ * both are bounds of it from above. */
+static uint64_t TallyNextOf(const TallyCostParts* above)
+{
+    uint64_t files = 0, digests = 0, tags = 0;
+    EndpaperFactMost(&files, &digests, &tags);
+    return TallyLess(files, above->files) + TallyLess(tags, above->tags) + above->use +
+           TallyLess(digests, above->digests);
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+uint64_t TallyCostBlocks(void)
+{
+    TallyCostParts p;
+    TallyCostOf(&p);
+    return TallyNextOf(&p);
+}
+#endif
 
 /*
  * ‼ THE RESERVE A WRITE OF DATA LEAVES IS KEPT, NOT MEASURED A WRITE (§3.6). A
@@ -166,15 +186,20 @@ uint64_t TallyCostBlocks(void)
  * since may be in no record the measure walked yet, a Stake of a write still
  * in flight among them. Every such block is counted as the most it can add to
  * a Tally — a run of its own in FILES, in a Parcel of its own, and an element
- * of its own in DIGESTS with its digest — so what the kept measure says is
- * never less than a measure taken now. The ribbon measures afresh each time it
- * is given a Quire, and a write that finds no room asks a fresh measure
- * before it is refused (EndpaperDataKeeps).
+ * of its own in DIGESTS with its digest. What is kept is the measure from
+ * above, its trees apart: the allowance is a bound by the same rule as it,
+ * not by the one of the last Tally (endpaper_fact.c) — by which a block put
+ * in an old file counts the file whole — and the measure by the last Tally is
+ * read as it stands each time, every change memory holds in it. So the kept
+ * measure is the lesser of the two as a measure taken now is, each no less
+ * than a measure taken now's, and never less than it. The ribbon measures
+ * afresh each time it is given a Quire, and a write that finds no room asks a
+ * fresh measure before it is refused (EndpaperDataKeeps).
  */
 #define TALLY_DATA_FILES_MOST   (TALLY_RUN_MOST + TALLY_ITEM_HEAD_MOST + TALLY_PARCEL_HEAD_MOST)
 #define TALLY_DATA_DIGESTS_MOST (8u + 2u * (TALLY_ITEM_HEAD_MOST + TALLY_DIGEST_HEAD_MOST))
 
-static volatile uint64_t s_kept_cost;      /* the last measure, in blocks */
+static TallyCostParts    s_kept_above;     /* the last measure from above, in blocks */
 static volatile uint64_t s_kept_from;      /* the data handed when the measure before it began */
 static volatile uint64_t s_kept_began;     /* ... and when this one began */
 static volatile uint32_t s_kept_epoch;     /* the mounting they are of; 0 for none */
@@ -195,14 +220,16 @@ uint64_t EndpaperKeeps(uint64_t quire_blocks)
 {
     if (quire_blocks == 0)
         return 0;
-    uint32_t epoch = tagfs_mount_epoch();
-    uint64_t began = AllotmentBookTaken();
-    uint64_t cost  = TallyCostBlocks();
-    uint32_t turn  = __atomic_load_n(&s_kept_turn, __ATOMIC_ACQUIRE);
+    TallyCostParts above;
+    uint32_t       epoch = tagfs_mount_epoch();
+    uint64_t       began = AllotmentBookTaken();
+    TallyCostOf(&above);
+    uint64_t cost = TallyNextOf(&above);
+    uint32_t turn = __atomic_load_n(&s_kept_turn, __ATOMIC_ACQUIRE);
     if (!(turn & 1u) &&
         __atomic_compare_exchange_n(&s_kept_turn, &turn, turn + 1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         uint64_t before = s_kept_epoch == epoch ? s_kept_began : began;
-        s_kept_cost  = cost;
+        s_kept_above = above;
         s_kept_from  = before < began ? before : began;
         s_kept_began = before > began ? before : began;
         s_kept_epoch = epoch;
@@ -214,30 +241,50 @@ uint64_t EndpaperKeeps(uint64_t quire_blocks)
 
 /* The kept measure of this mounting, whole: false when there is none, or one
  * was being kept as it was read. */
-static bool EndpaperKept(uint64_t* cost, uint64_t* from)
+static bool EndpaperKept(TallyCostParts* above, uint64_t* from)
 {
     uint32_t turn = __atomic_load_n(&s_kept_turn, __ATOMIC_ACQUIRE);
     if (turn & 1u)
         return false;
     bool ours = s_kept_epoch == tagfs_mount_epoch();
-    *cost     = s_kept_cost;
+    *above    = s_kept_above;
     *from     = s_kept_from;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     return ours && __atomic_load_n(&s_kept_turn, __ATOMIC_RELAXED) == turn;
 }
 
-uint64_t EndpaperDataKeeps(bool afresh)
+/* The next Tally by the kept measure and the data handed since it: false
+ * when there is none whole. */
+static bool EndpaperKeptCost(uint64_t* cost)
 {
-    uint64_t q = RibbonCursorNow()->quire_blocks;
-    if (q == 0)
-        return 0;
-    uint64_t cost = 0, from = 0;
-    if (afresh || !EndpaperKept(&cost, &from))
-        return EndpaperKeeps(q) + q;
+    TallyCostParts above;
+    uint64_t       from = 0;
+    if (!EndpaperKept(&above, &from))
+        return false;
     uint64_t      since = AllotmentBookTaken() - from;
     uint64_t      atom  = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
     TallyTreeCost files = { since * TALLY_DATA_FILES_MOST, 0 }, digests = { since * TALLY_DATA_DIGESTS_MOST, 0 };
-    cost += TallyTreeBlocks(&files, atom) + TallyTreeBlocks(&digests, atom);
+    above.files   += TallyTreeBlocks(&files, atom);
+    above.digests += TallyTreeBlocks(&digests, atom);
+    *cost = TallyNextOf(&above);
+    return true;
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+uint64_t TallyKeptBlocks(void)
+{
+    uint64_t cost = UINT64_MAX;
+    return EndpaperKeptCost(&cost) ? cost : UINT64_MAX;
+}
+#endif
+
+uint64_t EndpaperDataKeeps(bool afresh)
+{
+    uint64_t q = RibbonCursorNow()->quire_blocks, cost = 0;
+    if (q == 0)
+        return 0;
+    if (afresh || !EndpaperKeptCost(&cost))
+        return EndpaperKeeps(q) + q;
     uint64_t tally = 2u * ((cost + q - 1u) / q) * q;
     return tally + BinderRingShort(tally, q) + q;
 }

@@ -73,6 +73,7 @@ void BinderMountReset(void)
     kfree(g_binder.held);
     memset(&g_binder, 0, sizeof(g_binder));
     BirthsLetGo();
+    EndpaperForget();
 }
 
 error_t BinderSlotsMake(uint32_t ring)

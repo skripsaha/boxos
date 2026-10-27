@@ -3,6 +3,7 @@
 
 #include "settle_internal.h"
 #include "sewing.h"
+#include "endpaper_fact.h"
 #include "../mount/tally_read.h"
 #include "../file_map/file_record.h"
 
@@ -407,6 +408,7 @@ typedef struct {
     BinderKid*    dleaves;       /* the DIGESTS leaves laid, for the reads to turn to (binder.c) */
     uint32_t      ndleaves;
     bool          dleaves_lost;  /* memory would not keep them */
+    EndpaperLaid  laid;          /* what the walk laid of FILES, TAGS and DIGESTS: the next reserve's measure */
 } BinderWork;
 
 /* binder_nodes.c: the walk of every tree begun over again — the slice, A, B

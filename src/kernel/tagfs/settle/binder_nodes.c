@@ -284,6 +284,7 @@ static error_t TagsNext(BinderWork* w, BinderItem* it, bool* got)
     p->tag = id + 1u;
     if (!ItemRoom(p, 30u + sp.key_len + sp.value_len))
         return ERR_NO_MEMORY;
+    EndpaperLaidTag(&w->laid, (uint64_t)sp.key_len + sp.value_len);
     TallyTag t = { .flags = sp.value ? TALLY_TAG_HAS_VALUE : 0u, .key = (const uint8_t*)sp.key,
                    .key_len = sp.key_len, .value = (const uint8_t*)sp.value, .value_len = sp.value_len };
     *it = (BinderItem){ .key = { id, 0 }, .count = 1, .body = p->buf, .len = TallyTagPut(p->buf, &t) };
@@ -543,6 +544,9 @@ static error_t FillAdd(BinderWork* w, const BinderItem* it)
                             it->body, it->len);
     f->last  = it->key;
     f->count += it->count;
+    uint64_t runs = 0;
+    if (w->tree == TALLY_FILES && w->level == 0 && it->key.k2 && BookVarintGet(it->body, it->len, &runs))
+        w->laid.runs += runs;   /* a Parcel's runs: each widens with the next Tally's seq (endpaper_fact.c) */
     return OK;
 }
 
@@ -632,6 +636,7 @@ static error_t FillLay(BinderWork* w)
     BinderKid kid = { .key = f->first, .count = f->count, .sheets = sheets, .off = off, .rot = NULL };
     if (!LevelPut(&w->lv[w->level], &kid))
         return ERR_NO_MEMORY;
+    EndpaperLaidNode(&w->laid, w->tree, w->level, sheets, w->grid, f->first.k1);
     w->off = off + sheets;
     w->nodes++;
     f->n = 0;
@@ -824,6 +829,10 @@ void BinderNodesBegin(BinderWork* w)
     w->dropped    = 0;
     w->trees_done = false;
     memset(w->root, 0, sizeof(w->root));
+    memset(&w->laid, 0, sizeof(w->laid));
+    for (uint32_t i = 0; i < w->nrot; i++)
+        EndpaperLaidNode(&w->laid, w->rot[i].tree, w->rot[i].at.level, 0, w->grid,
+                         w->rot[i].at.has_lo ? w->rot[i].at.lo.k1 : 0);
     TreeBegin(w, TreeAfter(0));
 }
 

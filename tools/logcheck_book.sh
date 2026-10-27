@@ -334,7 +334,9 @@ stand_docket_mount_ground_rests stand_docket_claim_refused stand_docket_closed_d
 stand_docket_warrant
 stand_binder_whole stand_binder_node_refused stand_binder_unslotted stand_binder_slot_torn
 stand_binder_slot_flush_refused stand_binder_slot_unsure stand_binder_parcels stand_binder_heals stand_binder_rotten_named
-stand_binder_slack stand_binder_ground_back stand_binder_full_back stand_binder_standing_end"
+stand_binder_slack stand_binder_ground_back stand_binder_full_back stand_binder_standing_end
+stand_endpaper_owed stand_endpaper_labeled_carries stand_endpaper_mount stand_endpaper_pending
+stand_endpaper_kept"
 STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_(tally_rot_three_paths|ribbon_slip_three_roads): the port.s road stands aside — '
 STAND_BOOK_RIBBON_LAID='[TESTS] stand_ribbon: stitches laid past the Tally'
 STAND_BOOK_RIBBON_BACK='[TESTS] stand_ribbon: what the test laid is put back'

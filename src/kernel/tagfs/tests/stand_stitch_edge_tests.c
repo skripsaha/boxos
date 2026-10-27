@@ -390,7 +390,7 @@ static TestResult TestStandStitchTallyCostLong(void)
     uint64_t laid = StandEdgeTallyButTags() + StandEdgeTagLeaves(reg);
     uint64_t cost = TallyCostBlocks();
     TestEvidence("blocks a writer lays of the Tally, the TAGS tree's leaves alone:", laid);
-    TestEvidence("blocks the reserve measures a whole Tally at:", cost);
+    TestEvidence("blocks the reserve measures the next Tally at:", cost);
     TEST_ASSERT(cost >= laid, "the measure is never less than the Tally a writer lays of the same tags");
 out:
     STAND_STITCH_PUT_BACK(&s);

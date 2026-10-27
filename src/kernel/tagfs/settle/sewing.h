@@ -234,16 +234,22 @@ void     RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved);
 #endif
 
 /*
- * The book's reserve (endpaper.c). TallyCostBlocks: the blocks one copy of a
- * whole Tally of the volume as memory holds it takes — an upper bound by the
- * rules every writer of a Tally keeps (§16.2 п.24, §16.3 пп.1, 5), never less
- * than the Tally a writer lays of it. EndpaperKeeps: the ground the ribbon
- * leaves free for the Tallies — one whole Tally, both copies, in whole Quires
- * of `quire_blocks`, and what the ring's slots lack of one (binder.h,
- * BinderRingShort): the Tallies that fill the ring give nothing back. With no
- * TagFS lock held.
+ * The book's reserve (endpaper.c). EndpaperKeeps: the ground the ribbon
+ * leaves free for the Tallies — the next Tally, both copies, in whole Quires
+ * of `quire_blocks`: each tree measured from above — an upper bound by the
+ * rules every writer of a Tally keeps (§16.2 п.24, §16.3 пп.1, 5) — or, FILES,
+ * TAGS and DIGESTS, by the last Tally laid and the growth since where that is
+ * known and less (endpaper_fact.h, §16.4 п.7); and what the ring's slots lack
+ * of one (binder.h, BinderRingShort): the Tallies that fill the ring give
+ * nothing back. With no TagFS lock held. For the stand: the blocks one copy
+ * of the next Tally takes by that measure taken now (TallyCostBlocks), and by
+ * the one a write of data keeps with the data handed since (TallyKeptBlocks,
+ * UINT64_MAX when none is kept).
  */
+#ifdef CONFIG_VOLUME_TESTS
 uint64_t TallyCostBlocks(void);
+uint64_t TallyKeptBlocks(void);
+#endif
 uint64_t EndpaperKeeps(uint64_t quire_blocks);
 
 /* The free blocks a write of a file's data must leave (§3.6, §16.2 п.6): the

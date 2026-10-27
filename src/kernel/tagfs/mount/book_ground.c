@@ -73,8 +73,12 @@ static void BookGroundNodeOf(const TallyPlace* at, uint32_t slot)
         if (BinderSlotNode(slot, TallyPtrBlock(&at->ptr, k), at->ptr.sheets, at->ptr.seq) != OK)
             g_book.binder_short = true;
     }
-    if (g_book.stood && slot == g_book.stood->index)
+    if (g_book.stood && slot == g_book.stood->index) {
         g_book.tally_blocks += at->ptr.sheets;
+        EndpaperLaidNode(&g_book.laid, g_book.laid_tree, at->level, at->ptr.sheets,
+                         g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u,
+                         at->has_lo ? at->lo.k1 : 0);
+    }
 }
 
 error_t BookGroundNode(void* ctx, const TallyPlace* at)

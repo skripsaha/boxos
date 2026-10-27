@@ -133,13 +133,16 @@ void DocketPutLocked(Jot* j, Jot** spent)
     Jot* p = DocketFind(j->fid, before);
     if (!p) {
         DocketInsert(j, before);
+        EndpaperJotIn(j);
         return;
     }
     /* The newest state is j's; the one it replaces leaves with j. */
     FileRecord* older = p->now;
+    EndpaperJotOut(p);
     p->kind = JotMerged(p->kind, j->kind);
     p->now  = j->now;
     j->now  = older;
+    EndpaperJotIn(p);
     JotSpent(j, spent);
 }
 
@@ -150,11 +153,13 @@ void DocketTakeLocked(DocketTaken* out)
     memset(s_head, 0, sizeof(s_head));
     s_count = 0;
     s_takes++;
+    EndpaperDocketTaken();
 }
 
 void DocketBackLocked(DocketTaken* t, Jot** spent)
 {
     Jot* before[JOT_LEVELS];
+    EndpaperDocketBack();
     while (t->first) {
         Jot* o = t->first;
         t->first   = o->next[0];
@@ -167,9 +172,12 @@ void DocketBackLocked(DocketTaken* t, Jot** spent)
         }
         /* What came since is newer: o's base stays, p's state. */
         FileRecord* base = o->was;
+        EndpaperJotOut(o);
+        EndpaperJotOut(p);
         p->kind = JotMerged(o->kind, p->kind);
         o->was  = p->was;
         p->was  = base;
+        EndpaperJotIn(p);
         JotSpent(o, spent);
     }
     t->count = 0;
@@ -191,6 +199,7 @@ void DocketDropAll(void)
     memset(s_head, 0, sizeof(s_head));
     s_count = 0;
     s_takes++;
+    EndpaperDocketDropped();
 }
 
 bool DocketBaseLacks(uint64_t fid, uint64_t k, uint64_t block)
@@ -238,7 +247,10 @@ error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
             StripWalkBegin(j->now, &w);
             while (rc == OK && StripWalkNextGround(&w, &s))
                 rc = BirthsNoted(&s, 1, seq);
-        } else if (j->kind == JOT_SHAPED) {
+        } else if (j->nsplices) {
+            /* A Shaped carried, whatever the Jot's kind: a Labeled after a
+             * write merges to one (JotMerged) and still lays its Shaped
+             * (JotChangedPut). */
             uint64_t n = 0;
             for (uint64_t i = 0; i < j->nsplices; i++)
                 n += j->splices[i].ninsert;

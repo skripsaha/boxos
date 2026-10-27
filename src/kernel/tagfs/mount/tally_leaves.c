@@ -293,6 +293,7 @@ static error_t BookFileParcel(BookFile* f, uint64_t first, const uint8_t* body, 
         BookFileBroken(f, words);
     }
     TallyTake(body, len, &at, &n);
+    g_book.laid.runs += n;
     for (uint64_t i = 0; i < n; i++) {
         TallyRun r;
         TallyRunGet(body, len, &at, &cursor, seq, &r);
@@ -678,6 +679,8 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
         TagFSUnderGlass(words);
         return OK;
     }
+    if (rc == OK)
+        EndpaperLaidTag(&g_book.laid, (uint64_t)t.key_len + t.value_len);
     return rc;
 }
 
@@ -718,6 +721,8 @@ static error_t LeavesRot(void* ctx, const TallyPlace* at, const char* why)
 {
     uint64_t tree = ((const LeavesWalk*)ctx)->tree;
     char     lo[48], hi[48];
+    if (at->level > 0)
+        EndpaperLaidNode(&g_book.laid, tree, at->level, 0, 1u, at->has_lo ? at->lo.k1 : 0);
     if (tree == TALLY_FILES)
         return BookRangeRots(at, why);
     g_book.said.rotten++;

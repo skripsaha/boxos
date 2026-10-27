@@ -380,8 +380,10 @@ static error_t TallySliceTake(BinderRun* r)
     error_t rc = SliceTake(w);
     if (rc == OK)
         rc = GroundTake(w);
-    if (rc == OK)
+    if (rc == OK) {
         TallyCounts(r);
+        EndpaperTallyBegun(w->seq, r->counts.next_fid);
+    }
     return rc;
 }
 
@@ -607,6 +609,7 @@ static error_t TallyDone(BinderRun* r)
     if (r->captured)
         GlossCaptured(w);
     RibbonTallied(w->seq);
+    EndpaperTallyLaid(&w->laid);
     g_binder.useful      -= g_binder.useful >= r->useful_at ? r->useful_at : g_binder.useful;
     g_binder.tally_blocks = w->off;
     g_binder.tallies++;
@@ -667,6 +670,7 @@ static void TallyEnded(BinderRun* r, error_t rc)
         kprintf("[TagFS] the Tally of the state after stitch %llu was refused at %s (error %u): the slots hold "
                 "what they held%s\n", (unsigned long long)r->k, r->stage ? r->stage : "its slice", (unsigned)rc,
                 r->slot_begun ? ", and the slot it was written over is held as naming either Tally" : "");
+    EndpaperTallyLaid(NULL);
     BinderNodesLetGo(&r->w);
     SliceLetGo(&r->w);
     kfree(r->fresh.ground);
