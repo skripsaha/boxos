@@ -157,6 +157,39 @@ link → ET_EXEC
 
 No intermediate object needs to be created as a TagFS file by default.
 
+## Artifact and shell path audit
+
+The existing shell already provides the launch contract: an external command
+is started by `proc_exec_gen(line, NULL, &generation)`, and the complete typed
+line becomes the child's Luggage. The shell waits on that exact `(pid,
+generation)` through `process_gone`; the assembler must not add another
+launcher or another exit-event path.
+
+The storage path is also already sufficient, but it has to be used in the
+right order:
+
+1. Resolve the source name inside the current Use Context. Zero matches and
+   more than one match are distinct human errors; choosing one by array order
+   is forbidden.
+2. Read the source bytes through the existing Manifest-native storage API.
+3. Read full source metadata through the self-describing
+   `STORAGE_OBJ_GET_INFO` response. The public `file_info_t` helper is
+   intentionally lossy and is unsuitable for tag inheritance.
+4. Assemble and link completely in memory. Do not create a destination file
+   while syntax, symbol, relocation or segment validation can still fail.
+5. Create the destination through `create`, passing the inherited source tags
+   plus explicit output tags. `create` also applies the current Use Context and
+   the filename stem, with kernel-side deduplication.
+6. Set the exact size with `file_span`, write all bytes with checked short-write
+   handling, then call `anchor` so the new artifact is durable.
+7. On a storage failure after creation, attempt `delete` of that exact id and
+   surface both the original refusal and a cleanup refusal; no partial file is
+   silently reported as a successful build.
+
+This path uses only existing storage/user APIs and does not require a TagFS
+kernel change. It does require a small, reusable BoxLib full-metadata adapter
+before the assembler can promise lossless source-tag inheritance.
+
 ## Next bounded design phase
 
 Before implementation, produce a symbol-level closure for the first complete

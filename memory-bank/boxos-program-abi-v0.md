@@ -268,6 +268,16 @@ program.asm
   → box.exit
 ```
 
+The artifact step has one additional userspace requirement. `file_info_t` is a
+display convenience with a fixed 32-byte name and five short tags; its own
+implementation reports when it truncates a record. It cannot be used to copy
+source tags into the generated program without violating the no-loss rule.
+The toolchain therefore needs a reusable full-metadata adapter over the
+existing `STORAGE_OBJ_GET_INFO` response before the artifact phase. The
+adapter must grow its output buffer until the complete self-describing answer
+arrives, preserve every tag spelling, and expose an explicit ownership/free
+contract. This is a BoxLib userspace addition; it does not change TagFS.
+
 The raw Manifest/Crate surface can be added to the same assembler after the
 minimal runtime path is proven.
 
@@ -309,8 +319,12 @@ minimal runtime path is proven.
    relocation set (including `R_X86_64_TPOFF32`) and the existing Nameplate
    contract; unsupported TLS use is a hard diagnostic, never a silent drop.
 4. **Native artifact flow** — resolve the source through the current context,
-   preserve all source tags, add explicitly requested output tags, and create
-   or update the ELF artifact through existing BoxOS storage APIs.
+   obtain its full metadata without `file_info_t` truncation, preserve all
+   source tags, add explicitly requested output tags, and create or update the
+   ELF artifact through existing BoxOS storage APIs. Publish only after the
+   image is complete: `create` → `file_span` → complete `fwrite` sequence →
+   `anchor`; on a failed write or anchor, attempt a real delete and report the
+   artifact id if cleanup itself fails.
 5. **Shell launch verification** — launch the generated artifact by its name
    and tags, verify output and exit handling, and exercise ambiguity/error
    paths.
