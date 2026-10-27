@@ -25,6 +25,29 @@ typedef struct {
     tag_t tags[5];
 } file_info_t;
 
+/* Full metadata for tools that must preserve a file exactly.  file_info_t is
+ * deliberately a small display structure and may truncate names or tags;
+ * this type owns complete copies returned by STORAGE_OBJ_GET_INFO.
+ *
+ * Filename and Tags are heap-owned by the value.  Tags is a comma-separated
+ * list of complete tag spellings, or NULL when the file has no tags.  The
+ * caller releases both with FileMetadataRelease(). */
+typedef struct {
+    file_id_t FileId;
+    uint32_t  Flags;
+    uint64_t  Size;
+    uint16_t  TagCount;
+    char     *Filename;
+    char     *Tags;
+} FileMetadata;
+
+/* Read the complete self-describing metadata record.  The response buffer is
+ * grown until the kernel can return every byte; no field is truncated. */
+int FileMetadataRead(file_id_t FileId, FileMetadata *Out);
+
+/* Release all heap-owned members and reset Out to its empty state. */
+void FileMetadataRelease(FileMetadata *Metadata);
+
 /*
  * Inside the Use Context by default. When the user has said `use code cpp`,
  * query("project") asks for files that are code AND cpp AND project, and
