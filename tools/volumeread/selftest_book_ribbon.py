@@ -10,36 +10,53 @@ from . import bookread, ondisk, stitch, stitch_ribbon, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal
-from .selftest_book import Born, Errata, Found, Glass, Label
+from .selftest_book import Born, Errata, Found, FrameDeed, Glass, Label
+from .selftest_book_tally import PlantBookmark
 from .selftest_cases import Case
 
+# A growth past the image the base was read from, by 4096 blocks: ground no
+# head Deed of the base names.
+GROWTH = 4096 * SECTORS_PER_BLOCK
 
-def RecordNamed(c, base, also=()):
+
+def LandingRecord(c, base, late=(), also=()):
     """The sectors the landing laid over the book `base`, as one machine
-    writes them (§3.3): its data, a flush, then the book's units, and after a
-    flush `also` — (lba, sectors) of units written again as they lie, a Tally
-    node and a slot — a record of them classified (blklog_book.py): a file's
-    data named by the stitch after it, every unit by its sectors' heads, and
-    none unowned."""
-    from . import blklog
-    from .selftest_cases import SyntheticLog
+    writes them (§3.3): its data but at blocks `late`, a flush, the book's
+    units, a flush — then its data at blocks `late`, which no stitch after it
+    names, and `also`: (lba, sectors) written again as they lie, a Tally
+    node, a slot, a file's block of the base. The entries of a record
+    (selftest_cases.SyntheticLog)."""
+    from .blklog import LOG_FLUSH
     g = c.g
     laid = {x: raw for x, raw in c.medium.over.items() if base.over.get(x) != raw}
 
-    def Unit(lba):
+    def Data(lba):
         raw = laid[lba]
-        return raw[4:bookread.HEAD_BYTES] != bytes(bookread.HEAD_BYTES - 4) and \
-            bookread.SectorCheck(raw, g.uuid, lba - g.base)
+        return raw[4:bookread.HEAD_BYTES] == bytes(bookread.HEAD_BYTES - 4) or \
+            not bookread.SectorCheck(raw, g.uuid, lba - g.base)
 
     lbas = sorted(laid)
-    entries = [(x, 0, laid[x]) for x in lbas if not Unit(x)] + [(0, blklog.LOG_FLUSH, b"")] + \
-        [(x, 0, laid[x]) for x in lbas if Unit(x)] + [(0, blklog.LOG_FLUSH, b"")] + \
+    lately = {x for x in lbas if Data(x) and (x - g.base) // SECTORS_PER_BLOCK in late}
+    return [(x, 0, laid[x]) for x in lbas if Data(x) and x not in lately] + [(0, LOG_FLUSH, b"")] + \
+        [(x, 0, laid[x]) for x in lbas if not Data(x)] + [(0, LOG_FLUSH, b"")] + \
+        [(x, 0, laid[x]) for x in sorted(lately)] + \
         [(lba + k, 0, c.medium.sectors(lba + k, 1)) for lba, n in also for k in range(n)]
-    log = blklog.BlkLog(SyntheticLog(entries, len(entries)), base.SizeSectors())
+
+
+def RecordKinds(g, base, entries, sectors):
+    """A machine's record of `entries` over the book `base`, of a medium
+    `sectors` long (None: past the image, where a growth takes its ground),
+    classified (blklog_book.py): {volume block: the kinds its sectors are
+    named}."""
+    from . import blklog
+    from .selftest_cases import SyntheticLog
+    log = blklog.BlkLog(SyntheticLog(entries, len(entries)), sectors)
     named = blklog.Classifier(log, base)
-    kinds = [t.kind for w in log.Writes() for t in named.Classify(w)]
-    need = {"stitch", "file"} | ({"sheet", "slot"} if also else set())
-    return bool(kinds) and "unowned" not in kinds and need <= set(kinds)
+    kinds = {}
+    for w in log.Writes():
+        for t in named.Classify(w):
+            kinds.setdefault((t.first_lba - g.base) // SECTORS_PER_BLOCK, set()).add(t.kind)
+    return kinds
 
 
 def RecordCases(bt):
@@ -73,20 +90,7 @@ def RecordCases(bt):
             s = pen.Sew([stitch.UseContext(b"next")], flags=0)
             bt.Zero(o, s.vlbas[4], s.of - 4)
 
-    leaf = bt.Node(tally.FILES)
-
-    def Recorded(o):
-        d = bt.Fresh(o, 0, 2, 5)
-        bt.Pen(o).Sew([Born(bt.F, f1, d, b"recorded")], flags=stitch.DATA_FLUSHED)
-
     return [
-        Case("B56 a stitch and its data as a machine's record writes them", Recorded, checks=[
-            ("every write of the record is named — the data a file's, by the stitch after it; the stitch, a "
-             "Tally node and a slot by their sectors' heads — none unowned",
-             lambda c: RecordNamed(c, bt.base, also=[(c.g.base + leaf.blocks[0] * SECTORS_PER_BLOCK,
-                                                      leaf.sheets * SECTORS_PER_BLOCK),
-                                                     (c.g.base + tally.SlotBlock(c.g, 0) * SECTORS_PER_BLOCK,
-                                                      SECTORS_PER_BLOCK)]))]),
         Case("B10 a record of kind 31 not to be stepped over", Kind31(0), must={"UNDER_GLASS"}, checks=[
             ("the volume is read only and the stitch is not applied",
              lambda c: Glass(c, "kind 31") and f1 not in c.mount.files),
@@ -140,6 +144,87 @@ def RecordCases(bt):
                      ("and nothing is said", lambda c: not c.findings),
                      ("%u is never given again: the next file id is %u" % (f2, f3),
                       lambda c: c.mount.counts["next_fid"] == f3)]),
+    ]
+
+
+def MachineRecordCases(bt):
+    """The landings as one machine's record writes them, every write named by
+    blklog_book.py: a stitch and its data, and data no stitch of the record
+    names — on ground free as of its epoch, where a book's census counts it
+    (§3.4 L-8), and no one's where that census cannot say it is free: a
+    bookmark keeps the count, a growth's ground before the head Deed names
+    it, a book that does not mount."""
+    from .blklog import LOG_FLUSH
+    f1, g, F, size = bt.fid, bt.ground, bt.F, bt.base.SizeSectors()
+    leaf, held = bt.Node(tally.FILES), bt.S.Ground()[0][0]
+
+    def Again(block, blocks=1):
+        return [(g.base + block * SECTORS_PER_BLOCK, blocks * SECTORS_PER_BLOCK)]
+
+    def Recorded(o):
+        d = bt.Fresh(o, 0, 2, 5)
+        bt.Pen(o).Sew([Born(F, f1, d, b"recorded")], flags=stitch.DATA_FLUSHED)
+
+    def Named(c):
+        k = RecordKinds(g, bt.base, LandingRecord(c, bt.base, also=Again(leaf.blocks[0], leaf.sheets) +
+                                                  Again(tally.SlotBlock(g, 0))), size)
+        return k.get(F) == k.get(F + 1) == {"file"} and not any(v & {"unowned", "free"} for v in k.values()) \
+            and {"stitch", "sheet", "slot"} <= set().union(*k.values())
+
+    def Unnamed(o):
+        """F written and let go before any stitch, F + 1 written and named by
+        the stitch, F + 2 written with no stitch after it."""
+        bt.Fresh(o, 0, 1, 21)
+        d = bt.Fresh(o, 1, 1, 22)
+        bt.Pen(o).Sew([Born(F + 1, f1, d, b"unnamed")], flags=stitch.DATA_FLUSHED)
+        bt.Fresh(o, 2, 1, 23)
+
+    def UnnamedKinds(c):
+        k = RecordKinds(g, bt.base, LandingRecord(c, bt.base, {F + 2}, Again(held)), size)
+        return k.get(F) == k.get(F + 2) == {"free"} and k.get(F + 1) == k.get(held) == {"file"} and \
+            not any("unowned" in v for v in k.values()) and any("stitch" in v for v in k.values())
+
+    def Alone(plant):
+        """`plant`, and F written after it, named by no stitch."""
+        return lambda o: (plant(o), bt.Fresh(o, 0, 1, 24))
+
+    def NoOnes(c):
+        k = RecordKinds(g, bt.base, LandingRecord(c, bt.base, {F}), size)
+        return k.get(F) == {"unowned"}
+
+    deed = g.deed
+    grown = dict(deed, sectors=deed["sectors"] + GROWTH, tail_sector=deed["tail_sector"] + GROWTH)
+    far = FrameDeed(grown, deed["frame"], tuple(deed["boot"][k] for k in ondisk.VOLUME_BOOT.names),
+                    ondisk.DEED_ROLE_TAIL)
+    past = g.data_end + 7
+
+    def Grown(c):
+        k = RecordKinds(g, bt.base, [(g.base + grown["tail_sector"], 0, far), (0, LOG_FLUSH, b""),
+                                     (g.base + past * SECTORS_PER_BLOCK, 0, b"\x5a" * BLOCK)], None)
+        return k.get(grown["tail_sector"] // SECTORS_PER_BLOCK) == {"deed"} and k.get(past) == {"unowned"}
+
+    return [
+        Case("B56 a stitch and its data as a machine's record writes them", Recorded, checks=[
+            ("every write of the record is named — the data at F and F + 1 a file's, block by block, by the "
+             "stitch after it; the stitch, a Tally node and a slot by their sectors' heads — none unowned, none "
+             "on free ground", Named)]),
+        Case("B58 data no stitch of the record names", Unnamed, checks=[
+            ("the data written over before a stitch named it, and the data no stitch follows, are on ground "
+             "free as of their epoch; the data the stitch names the file's, and %s's block written again as "
+             "it lies the file's of the census — none unowned" % Label(bt.S), UnnamedKinds)]),
+        Case("B58b data no stitch names, on a book a bookmark holds", Alone(lambda o: PlantBookmark(bt, o)),
+             must={"UNDER_GLASS"}, checks=[
+                 ("F is no one's: where a Tally names a bookmark, whose ground neither census derives, what is "
+                  "free is not counted (B13)", NoOnes)]),
+        Case("B58c data no stitch names, on ground a growth took before the head Deed names it", lambda o: None,
+             checks=[("the far copy of a growth by %u blocks, a flush, and data at block %u, past the end the "
+                      "head Deed names: the far copy the growth's, the data no one's — the census of its epoch "
+                      "ends at block %u" % (GROWTH // SECTORS_PER_BLOCK, past, g.data_end), Grown)]),
+        Case("B58d data no stitch names, on a book that does not mount",
+             Alone(lambda o: bt.Zero(o, tally.SlotBlock(g, 0) * SECTORS_PER_BLOCK, SECTORS_PER_BLOCK)),
+             must={"SPINE_NONE"}, checks=[
+                 ("F is no one's: a book none of whose slots holds names no owner, and no ground free (B35)",
+                  NoOnes)]),
     ]
 
 

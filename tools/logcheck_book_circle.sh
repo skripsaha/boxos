@@ -168,9 +168,9 @@ book_circle_order() {
         harness "circle: the record of the write boot does not account for the image it left — ${said:-no answer}"
         return
     fi
-    said=$(python3 tools/volume-read.py "$base" cut "$record" --list 2>/dev/null | grep -cE '(  |; )unowned ')
+    said=$(python3 tools/volume-read.py "$base" cut "$record" --list 2>/dev/null | grep -cE '(  |; )(unowned|free) ')
     [ "$said" = 0 ]
-    chk $? "circle: every write of the record is named by blklog_book.py — $said unowned"
+    chk $? "circle: every write of the record is named by blklog_book.py — $said unowned or on free ground"
     python3 - "$img" "$record" >"$SCRATCH/circle.order" 2>&1 <<'ORDER_EOF'
 import bisect, sys
 sys.path.insert(0, "tools")
