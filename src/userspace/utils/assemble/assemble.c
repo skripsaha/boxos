@@ -365,13 +365,16 @@ static int BuildImage(AssembleRequest *Request, BoxAsmBlob *Image)
     BoxAsmBlob Program = { 0 };
     char Error[ASSEMBLE_ERROR_BYTES] = { 0 };
     int Rc = BoxAsmSourceAssemble((const char *)Request->SourceBytes,
-                                  (size_t)Request->SourceSize, &Program,
-                                  Error, sizeof(Error));
+                                  (size_t)Request->SourceSize, Request->SourceName,
+                                  &Program, Error, sizeof(Error));
 
     free(Request->SourceBytes);
     Request->SourceBytes = NULL;
     if (Rc != 0) {
-        SayError(Request->SourceName, Rc, Error);
+        if (Error[0] != '\0')
+            printf("assemble: %s\n", Error);
+        else
+            SayError(Request->SourceName, Rc, NULL);
         return Rc;
     }
     Rc = LinkEmbedded(Request->SourceName, &Program, Image, Error, sizeof(Error));

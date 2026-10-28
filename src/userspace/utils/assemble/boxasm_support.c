@@ -111,6 +111,96 @@ char *BoxAsmCopyText(const char *Text, size_t Length)
     return Copy;
 }
 
+/* FNV-1a: names are short and the index only needs an even spread. */
+static uint32_t BoxAsmNameHash(const char *Name)
+{
+    uint32_t Hash = 2166136261u;
+
+    while (*Name != '\0') {
+        Hash ^= (uint8_t)*Name++;
+        Hash *= 16777619u;
+    }
+    return Hash;
+}
+
+static BoxAsmNameSlot *BoxAsmNameIndexSlot(const BoxAsmNameIndex *Index,
+                                           const char *Name, uint32_t Hash)
+{
+    size_t Mask = Index->Capacity - 1u;
+    size_t At = Hash & Mask;
+
+    for (;;) {
+        BoxAsmNameSlot *Slot = &Index->Slots[At];
+        if (!Slot->Name || (Slot->Hash == Hash && strcmp(Slot->Name, Name) == 0))
+            return Slot;
+        At = (At + 1u) & Mask;
+    }
+}
+
+static int BoxAsmNameIndexGrow(BoxAsmNameIndex *Index)
+{
+    size_t Capacity = Index->Capacity ? Index->Capacity * 2u : 256u;
+    BoxAsmNameSlot *Old = Index->Slots;
+    size_t OldCapacity = Index->Capacity;
+    size_t At;
+
+    if (Capacity < Index->Capacity || Capacity > SIZE_MAX / sizeof(BoxAsmNameSlot))
+        return -ERR_NO_MEMORY;
+    Index->Slots = (BoxAsmNameSlot *)malloc(Capacity * sizeof(BoxAsmNameSlot));
+    if (!Index->Slots) {
+        Index->Slots = Old;
+        return -ERR_NO_MEMORY;
+    }
+    memset(Index->Slots, 0, Capacity * sizeof(BoxAsmNameSlot));
+    Index->Capacity = Capacity;
+    for (At = 0; At < OldCapacity; At++)
+        if (Old[At].Name)
+            *BoxAsmNameIndexSlot(Index, Old[At].Name, Old[At].Hash) = Old[At];
+    free(Old);
+    return 0;
+}
+
+int BoxAsmNameIndexClaim(BoxAsmNameIndex *Index, const char *Name,
+                         uint32_t **Value, uint8_t *Fresh)
+{
+    uint32_t Hash = BoxAsmNameHash(Name);
+    BoxAsmNameSlot *Slot;
+
+    if ((Index->Count + 1u) * 4u > Index->Capacity * 3u &&
+        BoxAsmNameIndexGrow(Index) != 0)
+        return -ERR_NO_MEMORY;
+    Slot = BoxAsmNameIndexSlot(Index, Name, Hash);
+    *Fresh = Slot->Name == NULL;
+    if (*Fresh) {
+        Slot->Name = Name;
+        Slot->Hash = Hash;
+        Slot->Value = 0;
+        Index->Count++;
+    }
+    *Value = &Slot->Value;
+    return 0;
+}
+
+int BoxAsmNameIndexFind(const BoxAsmNameIndex *Index, const char *Name,
+                        uint32_t *Value)
+{
+    const BoxAsmNameSlot *Slot;
+
+    if (Index->Capacity == 0 || !Name)
+        return 0;
+    Slot = BoxAsmNameIndexSlot(Index, Name, BoxAsmNameHash(Name));
+    if (!Slot->Name)
+        return 0;
+    *Value = Slot->Value;
+    return 1;
+}
+
+void BoxAsmNameIndexRelease(BoxAsmNameIndex *Index)
+{
+    free(Index->Slots);
+    memset(Index, 0, sizeof(*Index));
+}
+
 void BoxAsmMessageBegin(BoxAsmMessage *Message, char *Buffer, size_t Capacity)
 {
     Message->Text = Capacity != 0 ? Buffer : NULL;
@@ -152,6 +242,11 @@ void BoxAsmMessageName(BoxAsmMessage *Message, const char *Name)
     BoxAsmMessagePut(Message, "'", 1u);
     BoxAsmMessageText(Message, Name ? Name : "(unnamed)");
     BoxAsmMessagePut(Message, "'", 1u);
+}
+
+void BoxAsmMessageSpan(BoxAsmMessage *Message, const char *Text, size_t Length)
+{
+    BoxAsmMessagePut(Message, Text, Length);
 }
 
 void BoxAsmMessageDecimal(BoxAsmMessage *Message, int64_t Value)

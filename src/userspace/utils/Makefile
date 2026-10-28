@@ -62,9 +62,7 @@ BOXCXX     = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o
 # The assembler is several parts, kept in its own directory.
 ASSEMBLE_DIR  = assemble
-ASSEMBLE_OBJS = $(addprefix $(ASSEMBLE_DIR)/,assemble.o boxasm_support.o \
-	boxasm_elf.o boxasm_source.o boxasm_link.o boxasm_link_symbols.o \
-	boxasm_link_names.o boxasm_link_output.o)
+ASSEMBLE_OBJS = $(patsubst %.c,%.o,$(wildcard $(ASSEMBLE_DIR)/*.c))
 ASSEMBLE_RUNTIME_BLOB = $(ASSEMBLE_DIR)/runtime_blob.o
 ASSEMBLE_ENTRY_BLOB = $(ASSEMBLE_DIR)/entry_blob.o
 

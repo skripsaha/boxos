@@ -380,8 +380,10 @@ The linker was brought to this contract (see the correction in
 `tools/nameplate` by `tools/boxasm_stand.sh`. When the result would wear
 neither `app` nor `utility`, `assemble` adds `app` and says so in its output,
 which also prints the tags the new file actually wears (owner decision,
-2026-10-28). The v0 source front-end is next replaced by a lexer, an operand
-model and a table-driven x86-64 encoder; the unfinished string-matching encoder
-begun before that decision is kept in `git stash`, not in the tree.
+2026-10-28). The v0 source front-end is replaced by a lexer, an operand model,
+a table-driven x86-64 encoder held to NASM byte for byte, multi-pass layout
+with jump relaxation and an ELF object writer; the language is documented in
+`boxasm-language.md`. The unfinished string-matching encoder begun before that
+decision is kept in `git stash`, not in the tree.
 This is a deliberately bounded first language slice; it is complete within
 that scope and does not pretend to be the future general-purpose assembler.

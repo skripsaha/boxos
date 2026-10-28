@@ -4,92 +4,46 @@
 #include "box/memory.h"
 #include "box/string.h"
 
-/* FNV-1a: names are short and the table only needs an even spread. */
-static uint32_t BoxAsmNameHash(const char *Name)
-{
-    uint32_t Hash = 2166136261u;
-
-    while (*Name != '\0') {
-        Hash ^= (uint8_t)*Name++;
-        Hash *= 16777619u;
-    }
-    return Hash;
-}
-
-/* The slot holding Name, or the empty slot where it belongs. The table is
- * never full, so the probe always ends. */
-static BoxAsmGlobal *BoxAsmGlobalSlot(const BoxAsmGlobalMap *Map,
-                                      const char *Name, uint32_t Hash)
-{
-    size_t Mask = Map->Capacity - 1u;
-    size_t At = Hash & Mask;
-
-    for (;;) {
-        BoxAsmGlobal *Slot = &Map->Slots[At];
-        if (!Slot->Name || (Slot->Hash == Hash && strcmp(Slot->Name, Name) == 0))
-            return Slot;
-        At = (At + 1u) & Mask;
-    }
-}
-
-static int BoxAsmGlobalGrow(BoxAsmGlobalMap *Map)
-{
-    size_t Capacity = Map->Capacity ? Map->Capacity * 2u : 256u;
-    BoxAsmGlobal *Old = Map->Slots;
-    size_t OldCapacity = Map->Capacity;
-    size_t Index;
-
-    if (Capacity < Map->Capacity || Capacity > SIZE_MAX / sizeof(BoxAsmGlobal))
-        return -ERR_NO_MEMORY;
-    Map->Slots = (BoxAsmGlobal *)malloc(Capacity * sizeof(BoxAsmGlobal));
-    if (!Map->Slots) {
-        Map->Slots = Old;
-        return -ERR_NO_MEMORY;
-    }
-    memset(Map->Slots, 0, Capacity * sizeof(BoxAsmGlobal));
-    Map->Capacity = Capacity;
-    for (Index = 0; Index < OldCapacity; Index++)
-        if (Old[Index].Name)
-            *BoxAsmGlobalSlot(Map, Old[Index].Name, Old[Index].Hash) = Old[Index];
-    free(Old);
-    return 0;
-}
-
-/* The slot for Name, made when absent; *Fresh says which. */
+/* The entry for Name, made when absent; *Fresh says which. */
 static int BoxAsmGlobalClaim(BoxAsmGlobalMap *Map, const char *Name,
                              BoxAsmGlobal **Out, uint8_t *Fresh)
 {
-    uint32_t Hash = BoxAsmNameHash(Name);
-    BoxAsmGlobal *Slot;
+    uint32_t *Position;
 
-    if ((Map->Count + 1u) * 4u > Map->Capacity * 3u &&
-        BoxAsmGlobalGrow(Map) != 0)
+    if (BoxAsmNameIndexClaim(&Map->Index, Name, &Position, Fresh) != 0)
         return -ERR_NO_MEMORY;
-    Slot = BoxAsmGlobalSlot(Map, Name, Hash);
-    *Fresh = Slot->Name == NULL;
     if (*Fresh) {
-        memset(Slot, 0, sizeof(*Slot));
-        Slot->Name = Name;
-        Slot->Hash = Hash;
-        Map->Count++;
+        if (Map->Count == Map->Capacity) {
+            size_t Capacity = Map->Capacity ? Map->Capacity * 2u : 256u;
+            BoxAsmGlobal *Grown;
+
+            if (Capacity > UINT32_MAX || Capacity > SIZE_MAX / sizeof(*Grown))
+                return -ERR_NO_MEMORY;
+            Grown = (BoxAsmGlobal *)realloc(Map->Items, Capacity * sizeof(*Grown));
+            if (!Grown)
+                return -ERR_NO_MEMORY;
+            Map->Items = Grown;
+            Map->Capacity = Capacity;
+        }
+        *Position = (uint32_t)Map->Count;
+        memset(&Map->Items[Map->Count], 0, sizeof(BoxAsmGlobal));
+        Map->Items[Map->Count++].Name = Name;
     }
-    *Out = Slot;
+    *Out = &Map->Items[*Position];
     return 0;
 }
 
 const BoxAsmGlobal *BoxAsmGlobalFind(const BoxAsmGlobalMap *Map, const char *Name)
 {
-    const BoxAsmGlobal *Slot;
+    uint32_t Position;
 
-    if (Map->Capacity == 0 || !Name)
-        return NULL;
-    Slot = BoxAsmGlobalSlot(Map, Name, BoxAsmNameHash(Name));
-    return Slot->Name ? Slot : NULL;
+    return BoxAsmNameIndexFind(&Map->Index, Name, &Position) ? &Map->Items[Position] : NULL;
 }
 
 void BoxAsmGlobalRelease(BoxAsmGlobalMap *Map)
 {
-    free(Map->Slots);
+    BoxAsmNameIndexRelease(&Map->Index);
+    free(Map->Items);
     memset(Map, 0, sizeof(*Map));
 }
 

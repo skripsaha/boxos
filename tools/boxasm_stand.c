@@ -95,7 +95,7 @@ int main(int Argc, char **Argv)
         if (!Load(Argv[2], &Source))
             return 2;
         return Finish(BoxAsmSourceAssemble((const char *)Source.Data, (size_t)Source.Size,
-                                           &Out, Error, sizeof(Error)),
+                                           Source.Name, &Out, Error, sizeof(Error)),
                       Error, &Out, Argv[3]);
     }
     if ((Argc == 6 || (Argc == 7 && strcmp(Argv[6], "symbols") == 0)) &&

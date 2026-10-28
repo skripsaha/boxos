@@ -50,19 +50,19 @@ typedef struct {
 } BoxAsmObjectList;
 
 /* A global name and the definition that prevails for it. Name points into the
- * defining object's string table; NULL marks an empty slot. */
+ * defining object's string table. */
 typedef struct {
     const char *Name;
-    uint32_t    Hash;
     uint32_t    Object;
     uint32_t    Symbol;
     uint8_t     Strong;
 } BoxAsmGlobal;
 
 typedef struct {
-    BoxAsmGlobal *Slots;
-    size_t        Count;
-    size_t        Capacity; /* a power of two */
+    BoxAsmNameIndex Index;      /* name -> position in Items */
+    BoxAsmGlobal   *Items;
+    size_t          Count;
+    size_t          Capacity;
 } BoxAsmGlobalMap;
 
 typedef struct {

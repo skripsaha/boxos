@@ -1,0 +1,549 @@
+#include "boxasm_isa.h"
+
+#include "box/error.h"
+#include "box/memory.h"
+#include "box/string.h"
+
+/* ---- Building statements ------------------------------------------------ */
+
+int BoxAsmAddStatement(BoxAsmAssembler *Asm, uint8_t Kind, const BoxAsmLocation *Where,
+                       uint32_t *Out)
+{
+    BoxAsmStatement *Statement;
+
+    if (Asm->StatementCount >= UINT32_MAX ||
+        BoxAsmGrowArray((void **)&Asm->Statements, &Asm->StatementCapacity,
+                        Asm->StatementCount, sizeof(BoxAsmStatement)) != 0)
+        return -ERR_NO_MEMORY;
+    Statement = &Asm->Statements[Asm->StatementCount];
+    memset(Statement, 0, sizeof(*Statement));
+    Statement->Kind = Kind;
+    Statement->Section = Asm->CurrentSection;
+    Statement->Where = *Where;
+    Asm->Sections[Asm->CurrentSection].Used = 1;
+    *Out = (uint32_t)Asm->StatementCount++;
+    return 0;
+}
+
+int BoxAsmDefineLabel(BoxAsmAssembler *Asm, const char *Name, const BoxAsmLocation *Where,
+                      uint32_t *Out)
+{
+    BoxAsmSymbol *Symbol;
+    uint32_t Statement;
+    int Rc = BoxAsmSymbolClaim(Asm, Name, strlen(Name), Where, Out);
+
+    if (Rc != 0)
+        return Rc;
+    Symbol = &Asm->Symbols[*Out];
+    if (Symbol->Kind == BOXASM_SYMBOL_EXTERN)
+        return BoxAsmFail(Asm, Where, "is declared extern, so this program cannot define it",
+                          Symbol->Name);
+    if (Symbol->Kind != BOXASM_SYMBOL_UNDEFINED)
+        return BoxAsmFail(Asm, Where, "is already defined", Symbol->Name);
+    Symbol->Kind = BOXASM_SYMBOL_LABEL;
+    Symbol->Section = Asm->CurrentSection;
+    Symbol->Defined = *Where;
+    if ((Rc = BoxAsmAddStatement(Asm, BOXASM_STMT_LABEL, Where, &Statement)) != 0)
+        return Rc;
+    Asm->Statements[Statement].Symbol = *Out;
+    return 0;
+}
+
+int BoxAsmAddInstruction(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, const char *Name,
+                         const BoxAsmOperand *Operands, uint8_t Count)
+{
+    const BoxAsmInstruction *Instruction;
+    BoxAsmStatement *Statement;
+    uint8_t Condition;
+    uint32_t Index;
+    int Rc;
+
+    Instruction = BoxAsmFindInstruction(Name, strlen(Name), &Condition);
+    if (!Instruction || Count > 3)
+        return -ERR_INVALID_ARGUMENT;
+    if ((Rc = BoxAsmAddStatement(Asm, BOXASM_STMT_INSTRUCTION, Where, &Index)) != 0)
+        return Rc;
+    Statement = &Asm->Statements[Index];
+    Statement->Instruction = Instruction;
+    Statement->Condition = Condition;
+    Statement->OperandCount = Count;
+    if (Count != 0)
+        memcpy(Statement->Operands, Operands, Count * sizeof(BoxAsmOperand));
+    return 0;
+}
+
+static int BoxAsmAddItem(BoxAsmAssembler *Asm, const BoxAsmDataItem *Item)
+{
+    if (Asm->ItemCount >= UINT32_MAX ||
+        BoxAsmGrowArray((void **)&Asm->Items, &Asm->ItemCapacity, Asm->ItemCount,
+                        sizeof(BoxAsmDataItem)) != 0)
+        return -ERR_NO_MEMORY;
+    Asm->Items[Asm->ItemCount++] = *Item;
+    return 0;
+}
+
+static int BoxAsmAddStringItem(BoxAsmAssembler *Asm, const BoxAsmLocation *Where,
+                               const uint8_t *Bytes, size_t Length)
+{
+    BoxAsmDataItem Item;
+
+    if (Asm->StringBytes.Size > UINT32_MAX || Length > UINT32_MAX ||
+        BoxAsmBufferAppend(&Asm->StringBytes, Bytes, Length) != 0)
+        return -ERR_NO_MEMORY;
+    memset(&Item, 0, sizeof(Item));
+    Item.IsString = 1;
+    Item.StringOffset = (uint32_t)(Asm->StringBytes.Size - Length);
+    Item.StringLength = (uint32_t)Length;
+    Item.Where = *Where;
+    return BoxAsmAddItem(Asm, &Item);
+}
+
+int BoxAsmAddBytes(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, const uint8_t *Bytes,
+                   size_t Length)
+{
+    uint32_t Index;
+    int Rc = BoxAsmAddStatement(Asm, BOXASM_STMT_DATA, Where, &Index);
+
+    if (Rc != 0)
+        return Rc;
+    Asm->Statements[Index].Width = 1;
+    Asm->Statements[Index].FirstItem = (uint32_t)Asm->ItemCount;
+    Asm->Statements[Index].ItemCount = 1;
+    return BoxAsmAddStringItem(Asm, Where, Bytes, Length);
+}
+
+/* ---- Words -------------------------------------------------------------- */
+
+static uint8_t BoxAsmDataWidth(const BoxAsmToken *Token, uint8_t *Reserve)
+{
+    static const char *const Data[4] = { "db", "dw", "dd", "dq" };
+    static const char *const Space[4] = { "resb", "resw", "resd", "resq" };
+    uint8_t Index;
+
+    for (Index = 0; Index < 4; Index++) {
+        if (BoxAsmTokenIs(Token, Data[Index]) || BoxAsmTokenIs(Token, Space[Index])) {
+            *Reserve = BoxAsmTokenIs(Token, Space[Index]);
+            return (uint8_t)(1u << Index);
+        }
+    }
+    return 0;
+}
+
+static int BoxAsmIsDirective(const BoxAsmToken *Token)
+{
+    static const char *const Words[] = {
+        "section", "segment", "global", "extern", "default", "bits", "align", "times", "equ"
+    };
+    uint8_t Reserve;
+    size_t Index;
+
+    for (Index = 0; Index < sizeof(Words) / sizeof(Words[0]); Index++)
+        if (BoxAsmTokenIs(Token, Words[Index]))
+            return 1;
+    return BoxAsmDataWidth(Token, &Reserve) != 0;
+}
+
+static int BoxAsmIsBox(const BoxAsmToken *Token)
+{
+    return Token->Kind == BOXASM_TOKEN_IDENTIFIER && Token->Length > 4 &&
+           memcmp(Token->Text, "box.", 4u) == 0;
+}
+
+/* Whether a word means something here, so it is not taken for a label. */
+static int BoxAsmIsKnownWord(const BoxAsmToken *Token)
+{
+    uint8_t Condition;
+
+    return BoxAsmIsDirective(Token) || BoxAsmIsBox(Token) ||
+           BoxAsmFindInstruction(Token->Text, Token->Length, &Condition) != NULL;
+}
+
+static int BoxAsmEndOfStatement(const BoxAsmToken *Token)
+{
+    return Token->Kind == BOXASM_TOKEN_NEWLINE || Token->Kind == BOXASM_TOKEN_END;
+}
+
+/* Whether the token after this one ends a list item: so a string is the
+ * item, not the start of an expression. */
+static int BoxAsmStringStandsAlone(const BoxAsmLexer *Lexer, const BoxAsmToken *Token)
+{
+    BoxAsmLexer Ahead = *Lexer;
+    BoxAsmToken Next;
+    const char *Why;
+
+    return Token->Kind == BOXASM_TOKEN_STRING && BoxAsmLexNext(&Ahead, &Next, &Why) == 0 &&
+           (BoxAsmTokenIsPunct(&Next, ',') || BoxAsmEndOfStatement(&Next));
+}
+
+/* ---- Directives --------------------------------------------------------- */
+
+static int BoxAsmParseSection(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token)
+{
+    uint8_t Index;
+
+    for (Index = 0; Index < BOXASM_SECTION_COUNT; Index++) {
+        if (Token->Kind == BOXASM_TOKEN_IDENTIFIER &&
+            Token->Length == strlen(BoxAsmSectionNames[Index]) &&
+            memcmp(Token->Text, BoxAsmSectionNames[Index], Token->Length) == 0) {
+            Asm->CurrentSection = Index;
+            return BoxAsmNextToken(Asm, Lexer, Token);
+        }
+    }
+    return BoxAsmFail(Asm, &Token->Where,
+                      "BoxASM places code and data in .text, .rodata, .data and .bss", NULL);
+}
+
+static int BoxAsmParseNames(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                            uint8_t Extern)
+{
+    for (;;) {
+        BoxAsmSymbol *Symbol;
+        uint32_t Index;
+        char *Name;
+        int Rc;
+
+        if (Token->Kind != BOXASM_TOKEN_IDENTIFIER || Token->Text[0] == '.')
+            return BoxAsmFail(Asm, &Token->Where, "expected a plain name", NULL);
+        if ((Rc = BoxAsmLabelName(Asm, Token, &Name)) != 0)
+            return Rc;
+        Rc = BoxAsmSymbolClaim(Asm, Name, strlen(Name), &Token->Where, &Index);
+        free(Name);
+        if (Rc != 0)
+            return Rc;
+        Symbol = &Asm->Symbols[Index];
+        if (Extern && Symbol->Kind != BOXASM_SYMBOL_UNDEFINED && Symbol->Kind != BOXASM_SYMBOL_EXTERN)
+            return BoxAsmFail(Asm, &Token->Where, "is defined here, so it is not extern", Symbol->Name);
+        if ((Extern && Symbol->Global) ||
+            (!Extern && Symbol->Kind == BOXASM_SYMBOL_EXTERN))
+            return BoxAsmFail(Asm, &Token->Where, "cannot be both global and extern", Symbol->Name);
+        if (Extern)
+            Symbol->Kind = BOXASM_SYMBOL_EXTERN;
+        else
+            Symbol->Global = 1;
+        if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+            return Rc;
+        if (!BoxAsmTokenIsPunct(Token, ','))
+            return 0;
+        if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+            return Rc;
+    }
+}
+
+static int BoxAsmParseData(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                           uint32_t Index)
+{
+    for (;;) {
+        BoxAsmDataItem Item;
+        int Rc;
+
+        memset(&Item, 0, sizeof(Item));
+        Item.Where = Token->Where;
+        if (BoxAsmStringStandsAlone(Lexer, Token)) {
+            BoxAsmBuffer Bytes = { 0 };
+            Rc = BoxAsmLexStringBytes(Token, &Bytes);
+            if (Rc == 0)
+                Rc = BoxAsmAddStringItem(Asm, &Token->Where, Bytes.Data, Bytes.Size);
+            BoxAsmBufferRelease(&Bytes);
+            if (Rc == 0)
+                Rc = BoxAsmNextToken(Asm, Lexer, Token);
+        } else {
+            Rc = BoxAsmParseExpression(Asm, Lexer, Token, &Item.Expr);
+            if (Rc == 0)
+                Rc = BoxAsmAddItem(Asm, &Item);
+        }
+        if (Rc != 0)
+            return Rc;
+        Asm->Statements[Index].ItemCount++;
+        if (!BoxAsmTokenIsPunct(Token, ','))
+            return 0;
+        if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+            return Rc;
+    }
+}
+
+/* db dw dd dq and resb resw resd resq: data in its sections, space in .bss. */
+static int BoxAsmParseStorage(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                              const BoxAsmToken *Word, uint32_t Times)
+{
+    uint8_t Reserve;
+    uint8_t Width = BoxAsmDataWidth(Word, &Reserve);
+    int InBss = Asm->CurrentSection == BOXASM_SECTION_BSS;
+    uint32_t Index;
+    int Rc;
+
+    if (Reserve && !InBss)
+        return BoxAsmFail(Asm, &Word->Where,
+                          "reserves space only in .bss; elsewhere write `times N db 0`", NULL);
+    if (!Reserve && InBss)
+        return BoxAsmFail(Asm, &Word->Where,
+                          ".bss holds no bytes: reserve its space with resb, resw, resd or resq", NULL);
+    if ((Rc = BoxAsmAddStatement(Asm, Reserve ? BOXASM_STMT_RESERVE : BOXASM_STMT_DATA,
+                                 &Word->Where, &Index)) != 0)
+        return Rc;
+    Asm->Statements[Index].Width = Width;
+    Asm->Statements[Index].Times = Times;
+    Asm->Statements[Index].FirstItem = (uint32_t)Asm->ItemCount;
+    if (Reserve)
+        return BoxAsmParseExpression(Asm, Lexer, Token, &Asm->Statements[Index].Count);
+    return BoxAsmParseData(Asm, Lexer, Token, Index);
+}
+
+static int BoxAsmParseInstruction(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                                  const BoxAsmToken *Word, uint32_t Times)
+{
+    BoxAsmOperand Operands[3] = { { 0 } };
+    uint8_t Count = 0;
+    uint8_t Condition;
+    const BoxAsmInstruction *Instruction =
+        BoxAsmFindInstruction(Word->Text, Word->Length, &Condition);
+    uint32_t Index;
+    int Rc;
+
+    if (!Instruction) {
+        BoxAsmMessage Message;
+        BoxAsmFailBegin(Asm, &Word->Where, &Message);
+        BoxAsmMessageText(&Message, "'");
+        BoxAsmMessageSpan(&Message, Word->Text, Word->Length);
+        BoxAsmMessageText(&Message, "' is not an instruction, a directive or a box operation");
+        return BoxAsmFailEnd(Asm, &Word->Where, &Message);
+    }
+    if (Asm->CurrentSection == BOXASM_SECTION_BSS)
+        return BoxAsmFail(Asm, &Word->Where, ".bss holds no code", NULL);
+    while (!BoxAsmEndOfStatement(Token)) {
+        if (Count == 3)
+            return BoxAsmFail(Asm, &Token->Where, "an instruction has at most three operands", NULL);
+        if ((Rc = BoxAsmParseOperand(Asm, Lexer, Token, &Operands[Count])) != 0)
+            return Rc;
+        Count++;
+        if (BoxAsmEndOfStatement(Token))
+            break;
+        if (!BoxAsmTokenIsPunct(Token, ','))
+            return BoxAsmFail(Asm, &Token->Where, "expected ',' between operands", NULL);
+        if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+            return Rc;
+    }
+    if ((Rc = BoxAsmAddStatement(Asm, BOXASM_STMT_INSTRUCTION, &Word->Where, &Index)) != 0)
+        return Rc;
+    Asm->Statements[Index].Instruction = Instruction;
+    Asm->Statements[Index].Condition = Condition;
+    Asm->Statements[Index].OperandCount = Count;
+    Asm->Statements[Index].Times = Times;
+    memcpy(Asm->Statements[Index].Operands, Operands, sizeof(Operands));
+    return 0;
+}
+
+static int BoxAsmParseStatement(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                                const BoxAsmToken *Word, uint32_t Times);
+
+static int BoxAsmParseTimes(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                            const BoxAsmToken *Word)
+{
+    BoxAsmToken Repeated;
+    uint32_t Count;
+    uint8_t Condition;
+    uint8_t Reserve = 0;
+    int Rc;
+
+    if ((Rc = BoxAsmParseExpression(Asm, Lexer, Token, &Count)) != 0)
+        return Rc;
+    if (Token->Kind != BOXASM_TOKEN_IDENTIFIER ||
+        !((BoxAsmDataWidth(Token, &Reserve) != 0 && !Reserve) ||
+          BoxAsmFindInstruction(Token->Text, Token->Length, &Condition) != NULL))
+        return BoxAsmFail(Asm, &Word->Where, "times repeats one instruction or db, dw, dd, dq", NULL);
+    Repeated = *Token;
+    if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+        return Rc;
+    return BoxAsmParseStatement(Asm, Lexer, Token, &Repeated, Count);
+}
+
+static int BoxAsmParseSetting(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                              const BoxAsmToken *Word)
+{
+    if (BoxAsmTokenIs(Word, "default")) {
+        if (!BoxAsmTokenIs(Token, "rel") && !BoxAsmTokenIs(Token, "abs"))
+            return BoxAsmFail(Asm, &Token->Where, "default is rel or abs", NULL);
+        Asm->DefaultAbsolute = BoxAsmTokenIs(Token, "abs");
+        return BoxAsmNextToken(Asm, Lexer, Token);
+    }
+    if (Token->Kind != BOXASM_TOKEN_NUMBER || Token->Number != 64)
+        return BoxAsmFail(Asm, &Token->Where, "BoxASM assembles 64-bit code: bits 64", NULL);
+    return BoxAsmNextToken(Asm, Lexer, Token);
+}
+
+static int BoxAsmParseStatement(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                                const BoxAsmToken *Word, uint32_t Times)
+{
+    uint8_t Reserve;
+    uint32_t Index;
+    int Rc;
+
+    if (BoxAsmDataWidth(Word, &Reserve) != 0)
+        return BoxAsmParseStorage(Asm, Lexer, Token, Word, Times);
+    if (Times == 0 && (BoxAsmTokenIs(Word, "section") || BoxAsmTokenIs(Word, "segment")))
+        return BoxAsmParseSection(Asm, Lexer, Token);
+    if (Times == 0 && (BoxAsmTokenIs(Word, "global") || BoxAsmTokenIs(Word, "extern")))
+        return BoxAsmParseNames(Asm, Lexer, Token, BoxAsmTokenIs(Word, "extern"));
+    if (Times == 0 && (BoxAsmTokenIs(Word, "default") || BoxAsmTokenIs(Word, "bits")))
+        return BoxAsmParseSetting(Asm, Lexer, Token, Word);
+    if (Times == 0 && BoxAsmTokenIs(Word, "times"))
+        return BoxAsmParseTimes(Asm, Lexer, Token, Word);
+    if (Times == 0 && BoxAsmTokenIs(Word, "align")) {
+        if ((Rc = BoxAsmAddStatement(Asm, BOXASM_STMT_ALIGN, &Word->Where, &Index)) != 0)
+            return Rc;
+        return BoxAsmParseExpression(Asm, Lexer, Token, &Asm->Statements[Index].Count);
+    }
+    if (BoxAsmTokenIs(Word, "equ"))
+        return BoxAsmFail(Asm, &Word->Where, "equ needs a name before it: `size equ 16`", NULL);
+    if (Times == 0 && BoxAsmIsBox(Word))
+        return BoxAsmParseBox(Asm, Lexer, Token, Word);
+    return BoxAsmParseInstruction(Asm, Lexer, Token, Word, Times);
+}
+
+/* ---- Lines -------------------------------------------------------------- */
+
+static int BoxAsmParseEqu(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                          const BoxAsmToken *Name)
+{
+    BoxAsmSymbol *Symbol;
+    uint32_t Index, Statement;
+    char *Text;
+    int Rc;
+
+    if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0 ||
+        (Rc = BoxAsmLabelName(Asm, Name, &Text)) != 0)
+        return Rc;
+    Rc = BoxAsmSymbolClaim(Asm, Text, strlen(Text), &Name->Where, &Index);
+    free(Text);
+    if (Rc != 0)
+        return Rc;
+    Symbol = &Asm->Symbols[Index];
+    if (Symbol->Kind != BOXASM_SYMBOL_UNDEFINED)
+        return BoxAsmFail(Asm, &Name->Where, "is already defined", Symbol->Name);
+    if ((Rc = BoxAsmParseExpression(Asm, Lexer, Token, &Asm->Symbols[Index].Expr)) != 0)
+        return Rc;
+    Symbol = &Asm->Symbols[Index];
+    Symbol->Kind = BOXASM_SYMBOL_CONSTANT;
+    Symbol->Section = Asm->CurrentSection;
+    Symbol->Defined = Name->Where;
+    if ((Rc = BoxAsmAddStatement(Asm, BOXASM_STMT_LABEL, &Name->Where, &Statement)) != 0)
+        return Rc;
+    Asm->Statements[Statement].Symbol = Index;
+    return 0;
+}
+
+static int BoxAsmParseLabel(BoxAsmAssembler *Asm, const BoxAsmToken *Name)
+{
+    uint32_t Index;
+    char *Text;
+    int Rc = BoxAsmLabelName(Asm, Name, &Text);
+
+    if (Rc != 0)
+        return Rc;
+    Rc = BoxAsmDefineLabel(Asm, Text, &Name->Where, &Index);
+    free(Text);
+    if (Rc == 0 && Name->Text[0] != '.')
+        Asm->Scope = Index;
+    return Rc;
+}
+
+/* Whether a word before this one is a label written without its colon. */
+static int BoxAsmTakesLabel(const BoxAsmToken *Token)
+{
+    uint8_t Reserve;
+
+    return Token->Kind == BOXASM_TOKEN_IDENTIFIER &&
+           (BoxAsmDataWidth(Token, &Reserve) != 0 || BoxAsmTokenIs(Token, "times") ||
+            BoxAsmTokenIs(Token, "equ"));
+}
+
+/* [label:] [statement] — a label may also stand without its colon before
+ * db, dw, dd, dq, resb..resq, times and equ, as `msg db "Hi", 0`. */
+static int BoxAsmParseLine(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token)
+{
+    BoxAsmToken Word = *Token;
+    int Colon;
+    int Rc;
+
+    if (Token->Kind != BOXASM_TOKEN_IDENTIFIER)
+        return BoxAsmFail(Asm, &Token->Where,
+                          "a line starts with a label, an instruction or a directive", NULL);
+    if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+        return Rc;
+    Colon = BoxAsmTokenIsPunct(Token, ':');
+    if (!Colon && (BoxAsmIsKnownWord(&Word) || !BoxAsmTakesLabel(Token)))
+        return BoxAsmParseStatement(Asm, Lexer, Token, &Word, 0);
+    if (Colon && (Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+        return Rc;
+    if (BoxAsmTokenIs(Token, "equ"))
+        return BoxAsmParseEqu(Asm, Lexer, Token, &Word);
+    if ((Rc = BoxAsmParseLabel(Asm, &Word)) != 0)
+        return Rc;
+    if (BoxAsmEndOfStatement(Token))
+        return 0;
+    if (Token->Kind != BOXASM_TOKEN_IDENTIFIER)
+        return BoxAsmFail(Asm, &Token->Where, "expected an instruction or a directive", NULL);
+    Word = *Token;
+    if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+        return Rc;
+    return BoxAsmParseStatement(Asm, Lexer, Token, &Word, 0);
+}
+
+/* What the whole source must hold once it is read: every name it uses
+ * defined or declared extern, only labels global, and main to start at. */
+static int BoxAsmCheckProgram(BoxAsmAssembler *Asm, const BoxAsmLocation *Start)
+{
+    uint32_t Main = 0;
+    size_t Index;
+
+    for (Index = BOXASM_SECTION_COUNT + 1u; Index < Asm->SymbolCount; Index++) {
+        BoxAsmSymbol *Symbol = &Asm->Symbols[Index];
+
+        if (Symbol->Kind == BOXASM_SYMBOL_UNDEFINED && Symbol->Global)
+            return BoxAsmFail(Asm, &Symbol->Used, "is declared global but never defined",
+                              Symbol->Name);
+        if (Symbol->Kind == BOXASM_SYMBOL_UNDEFINED)
+            return BoxAsmFail(Asm, &Symbol->Used,
+                              "is never defined; a name from outside the program is declared "
+                              "with extern", Symbol->Name);
+        if (Symbol->Kind == BOXASM_SYMBOL_CONSTANT && Symbol->Global)
+            return BoxAsmFail(Asm, &Symbol->Defined, "is a constant; only a label can be global",
+                              Symbol->Name);
+    }
+    if (!BoxAsmNameIndexFind(&Asm->SymbolIndex, "main", &Main) ||
+        Asm->Symbols[Main].Kind != BOXASM_SYMBOL_LABEL ||
+        Asm->Symbols[Main].Section != BOXASM_SECTION_TEXT || !Asm->Symbols[Main].Global)
+        return BoxAsmFail(Asm, Start,
+                          "a program starts at main: write `global main` and put `main:` in "
+                          "section .text", NULL);
+    return 0;
+}
+
+int BoxAsmParse(BoxAsmAssembler *Asm, const char *Source, size_t Size)
+{
+    BoxAsmLexer Lexer;
+    BoxAsmToken Token;
+    BoxAsmLocation Start = { 1, 1, Source };
+    int Rc;
+
+    BoxAsmLexBegin(&Lexer, Source, Size);
+    if ((Rc = BoxAsmNextToken(Asm, &Lexer, &Token)) != 0)
+        return Rc;
+    while (Token.Kind != BOXASM_TOKEN_END) {
+        if (Token.Kind == BOXASM_TOKEN_NEWLINE) {
+            if ((Rc = BoxAsmNextToken(Asm, &Lexer, &Token)) != 0)
+                return Rc;
+            continue;
+        }
+        if ((Rc = BoxAsmParseLine(Asm, &Lexer, &Token)) != 0)
+            return Rc;
+        if (!BoxAsmEndOfStatement(&Token)) {
+            BoxAsmMessage Message;
+            BoxAsmFailBegin(Asm, &Token.Where, &Message);
+            BoxAsmMessageText(&Message, "unexpected '");
+            BoxAsmMessageSpan(&Message, Token.Text, Token.Length);
+            BoxAsmMessageText(&Message, "' after the statement");
+            return BoxAsmFailEnd(Asm, &Token.Where, &Message);
+        }
+    }
+    return BoxAsmCheckProgram(Asm, &Start);
+}
