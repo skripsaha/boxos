@@ -599,6 +599,21 @@ endif
 
 SEEKLAG_MARK = $(BUILDDIR)/.seeklag.$(if $(SEEKLAG),at-$(SEEKLAG),unset)
 
+# ── STARTUP_TESTS=off ──────────────────────────────────────────────────────
+#
+# The kernel's startup tests (TagFS_RunTests, after the boot's mount and
+# before the shell) left out of a VOLUME_TESTS=on kernel built for a lever of
+# the stand alone — logcheck defragdelete's hold (write_job.c). Its scenario
+# stands on a volume of its own across two boots, and the tests that write
+# would lay their files, their refused blocks and their mounts over it in
+# between.
+STARTUP_TESTS ?= on
+ifeq ($(STARTUP_TESTS),off)
+CFLAGS += -DCONFIG_RUN_STARTUP_TESTS=0
+endif
+
+STARTUP_TESTS_MARK = $(BUILDDIR)/.startup_tests.$(if $(filter off,$(STARTUP_TESTS)),off,on)
+
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
 # purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults
@@ -677,6 +692,7 @@ BUILD_KEYS_SET := $(strip \
   $(if $(filter on,$(RETURNFAIL)),RETURNFAIL=on,) \
   $(if $(SETTLECUT),SETTLECUT=$(SETTLECUT),) \
   $(if $(SEEKLAG),SEEKLAG=$(SEEKLAG),) \
+  $(if $(filter off,$(STARTUP_TESTS)),STARTUP_TESTS=off,) \
   $(if $(filter on,$(ENUMSILENCE)),ENUMSILENCE=on,) \
   $(if $(filter on,$(STRICT)),STRICT=on,) \
   $(if $(filter off,$(NOEXEC)),NOEXEC=off,) \
@@ -1005,6 +1021,10 @@ $(SEEKLAG_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.seeklag.*
 	@touch $@
 
+$(STARTUP_TESTS_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.startup_tests.*
+	@touch $@
+
 $(INTX_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.intx.*
 	@touch $@
@@ -1046,7 +1066,7 @@ BUILD_KEY_MARKS := $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) \
                    $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) \
                    $(SETTLECUT_MARK) $(IOMMU_MARK) $(INTX_MARK) $(DEBUG_MARK) \
                    $(BRINGUP_MARK) $(WEDGETEST_MARK) $(ENUMSILENCE_MARK) \
-                   $(STRICT_MARK) $(SEEKLAG_MARK)
+                   $(STRICT_MARK) $(SEEKLAG_MARK) $(STARTUP_TESTS_MARK)
 
 $(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(BUILD_KEY_MARKS) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
@@ -2245,6 +2265,8 @@ info:
 	@echo "                       (not with VOLUME_TESTS=on)"
 	@echo "  SEEKLAG=<us>       — every read on the volume's seat waits <us> microseconds, a seek"
 	@echo "                       the stand's medium does not make (only with VOLUME_TESTS=on)"
+	@echo "  STARTUP_TESTS=off  — the kernel's startup tests left out, for a scenario on a volume"
+	@echo "                       of its own (logcheck defragdelete, built VOLUME_TESTS=on)"
 
 debug: $(IMAGE)
 	@$(MAKE) run GDB=on IMAGE=$(IMAGE) CORES=$(CORES) MEM=$(MEM) FULLSCREEN=$(FULLSCREEN) USB=$(USB) AHCI=$(AHCI) LOG=$(LOG) DEBUG=$(DEBUG)

@@ -22,6 +22,20 @@
  * pair's so its ground comes in several runs; afterwards every slot holds its
  * last file, whole, and nothing it deleted — and the same again after the
  * power button and a reboot (defragback).
+ *
+ * ‼ AND THE STAND HOLDS ONE IN THE MIDDLE OF ITS WORK UNTIL ITS FILE IS GONE.
+ * A delete lands under a running defrag only by luck: 0 to 10 times a run,
+ * measured, and a run of 0 proved nothing. On a VOLUME_TESTS=on build
+ * defragger 0 defrags each file aimed at — whole, and given up by the churn's
+ * next round — with the stand's hold (SysDefragFile): once its first window
+ * took the run the file is gathered into and copied into it, it goes no
+ * further until the file is given up, then finds it deleted under it and
+ * gives the run back; the kernel says each hold and what it answered. A file
+ * that lies in one run by then has no middle to be held in, and is defragged
+ * as any other. Gen 0 is made before any defragger runs, so it lies in many
+ * runs, and defragger 0 runs alone until the kernel said its first hold: the
+ * first round, and defragger 1, begin only then. The case gives up whatever
+ * is still aimed at before it ends, so no hold outlives it.
  */
 
 #include "box/print.h"
@@ -32,6 +46,8 @@
 #include "box/system.h"
 #include "box/touch.h"
 #include "box/error.h"
+#include "box/timeouts.h"
+#include "box/core/manifest.h"
 #include "quilltest.h"
 
 /* =========================================================================
@@ -370,6 +386,13 @@ QuillVerdict QuillReadDelete(const char *const *args)
 #define QUILL_DF_PIECE      4096u
 #define QUILL_DF_MOST       ((192u << 10) + 4096u * 63u + 8u * 99u + 7u)
 #define QUILL_DF_MAGIC      0x3147415246454451ull    /* "QDEFRAG1" */
+#define QUILL_DF_HELD       "quilltest:defragheld"   /* the kernel says the first hold here */
+#ifdef CONFIG_VOLUME_TESTS
+#define QUILL_DF_LEVER      true                     /* the kernel has the stand's hold */
+#else
+#define QUILL_DF_LEVER      false
+#endif
+#define QUILL_DF_NONE_HELD  1                        /* defragger 0's first pass: no hold */
 
 /* What a slot's file says of itself in its first 32 bytes. */
 typedef struct __attribute__((packed)) {
@@ -384,6 +407,13 @@ typedef struct {
     volatile uint32_t stop;
     volatile uint32_t slots;
     volatile file_id_t fid[QUILL_DF_SLOTS];
+    /* The slot's file once it is whole, until it is given up: defragger 0
+     * defrags it with the stand's hold; 0 for none. */
+    volatile file_id_t aim[QUILL_DF_SLOTS];
+    volatile TouchTag held_tag;                     /* where the first hold is said, or invalid */
+    volatile uint32_t began;                        /* the driver heard it: the rounds began */
+    volatile uint32_t armed;                        /* defragger 0's defrags with the hold ... */
+    volatile uint32_t armed_gone;                   /* ... that found the file deleted under them */
     volatile uint32_t passes[QUILL_DF_DEFRAGGERS];
     volatile uint32_t moved[QUILL_DF_DEFRAGGERS];   /* defrags answered with a score */
     volatile uint32_t gone[QUILL_DF_DEFRAGGERS];    /* ... with a file not found: deleted under it */
@@ -425,36 +455,95 @@ static bool QuillDfIs(file_id_t fid, uint32_t s, uint32_t g, uint64_t *have, uin
     return *size == QuillDfSize(s, g) && memcmp(have, want, *size) == 0;
 }
 
+/* A defrag of `fid` with the stand's hold — the file id followed by the tag
+ * the hold is said on (SysDefragFile) — answered as defrag() is. */
+static int QuillDfHold(file_id_t fid, TouchTag says)
+{
+    uint8_t  params[12];
+    uint32_t score = 0;
+    memcpy(params, &fid, 8);
+    memcpy(params + 8, &says, 4);
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_DEFRAG_FILE, params, sizeof(params), NULL, 0, &score,
+                     sizeof(score), NULL, BOX_ANSWER_GUARANTEED, NULL);
+    return rc != 0 ? box_fail(rc) : (int)score;
+}
+
+/* Slot `s`'s file defragged and counted: 0, or the refusal. Defragger 0
+ * (`lever`) defrags the file the hold is aimed at with it, the hold said on
+ * the driver's tag until the rounds began; every other defrag is defrag().
+ * One with the hold that answers a score is no defect: a file in one run has
+ * no middle to be held in (wjob_stand_holds), and the kernel says each hold it
+ * laid and what that defrag answered (logcheck defragdelete holds them). */
+static int QuillDfOne(QuillDfBoard *b, uint32_t me, uint32_t s, bool lever)
+{
+    file_id_t aim = lever ? __atomic_load_n(&b->aim[s], __ATOMIC_ACQUIRE) : 0;
+    file_id_t fid = aim ? aim : __atomic_load_n(&b->fid[s], __ATOMIC_ACQUIRE);
+    if (fid == 0)
+        return 0;
+    int d;
+    if (aim) {
+        bool began = __atomic_load_n(&b->began, __ATOMIC_ACQUIRE);
+        b->armed++;
+        d = QuillDfHold(aim, began ? TOUCH_TAG_INVALID : b->held_tag);
+    } else {
+        d = defrag(fid);
+    }
+    if (d >= 0) {
+        b->moved[me]++;
+    } else if (box_errno_of(d) == ERR_FILE_NOT_FOUND) {
+        b->gone[me]++;
+        b->armed_gone += aim != 0;
+    } else {
+        return d;
+    }
+    return 0;
+}
+
+/* Defragger 0's end, said where the driver waits for the first hold before
+ * the rounds begin — so it never waits for a hold that will not come. Once
+ * they began nobody waits there, and nothing is said. */
+static void QuillDfSayEnded(uint32_t me, const QuillDfBoard *b)
+{
+    file_id_t none = 0;
+    if (QUILL_DF_LEVER && me == 0 && (!b || !__atomic_load_n(&b->began, __ATOMIC_ACQUIRE)))
+        touch_send(touch_intern(QUILL_DF_HELD), &none, sizeof(none), 0);
+}
+
 QuillVerdict QuillDefragger(const char *const *args)
 {
     uint32_t me = 0;
     QuillDfBoard *board = QuillNumber(args[0], &me) && me < QUILL_DF_DEFRAGGERS
                               ? bay_open(QUILL_DF_BOARD, 0, BAY_OPEN) : NULL;
     if (!board) {
+        QuillDfSayEnded(me, NULL);
         printf("[QUILL] defragger: FAIL — '%s' names no defragger of a running defragdelete "
                "(0 to %u, with its board open; nothing was defragged)\n", args[0],
                QUILL_DF_DEFRAGGERS - 1);
         return QUILL_FAIL;
     }
-    int rc = 0;
+    /* Defragger 0 goes round gen 0 alone: a defrag of it held never comes
+     * back before the rounds began, so a pass that ends before they did held
+     * none — and the driver waits for nothing that will come. */
+    bool lever = QUILL_DF_LEVER && me == 0;
+    int  rc    = 0;
     while (rc == 0 && !__atomic_load_n(&board->stop, __ATOMIC_ACQUIRE)) {
-        for (uint32_t s = 0; s < board->slots && rc == 0; s++) {
-            file_id_t fid = __atomic_load_n(&board->fid[s], __ATOMIC_ACQUIRE);
-            if (fid == 0)
-                continue;
-            int d = defrag(fid);
-            if (d >= 0)
-                board->moved[me]++;
-            else if (box_errno_of(d) == ERR_FILE_NOT_FOUND)
-                board->gone[me]++;
-            else
-                rc = d;
-        }
+        for (uint32_t s = 0; s < board->slots && rc == 0; s++)
+            rc = QuillDfOne(board, me, s, lever);
         board->passes[me]++;
+        if (rc == 0 && lever && !__atomic_load_n(&board->began, __ATOMIC_ACQUIRE))
+            rc = QUILL_DF_NONE_HELD;
     }
     board->refusal[me] = rc;
+    QuillDfSayEnded(me, board);
     uint32_t moved = board->moved[me], gone = board->gone[me], passes = board->passes[me];
     bay_release(board);
+    if (rc == QUILL_DF_NONE_HELD) {
+        printf("[QUILL] defragger: FAIL — defragger 0 went round every slot of gen 0 and the "
+               "kernel held none of its defrags: each ended in its first window, so no file "
+               "could be deleted under one in the middle of its work (%u answered, %u found "
+               "deleted)\n", moved, gone);
+        return QUILL_FAIL;
+    }
     if (rc != 0) {
         printf("[QUILL] defragger: FAIL — defragger %u: a defrag answered %d (error %u) after %u "
                "answered and %u found deleted\n", me, rc, box_errno_of(rc), moved, gone);
@@ -466,8 +555,9 @@ QuillVerdict QuillDefragger(const char *const *args)
 }
 
 /* Slots `s` and `s + 1` made at gen `g` and written 4 KiB at a time, in turn,
- * each published to the defraggers the moment it is made. 0, or the refusal. */
-static int QuillDfMakePair(QuillDfBoard *b, uint32_t s, uint32_t g, uint64_t *bufs[2])
+ * each published to the defraggers the moment it is made — and, `aimed`, the
+ * hold aimed at both once they are whole. 0, or the refusal. */
+static int QuillDfMakePair(QuillDfBoard *b, uint32_t s, uint32_t g, uint64_t *bufs[2], bool aimed)
 {
     file_id_t fids[2];
     uint64_t sizes[2];
@@ -491,10 +581,14 @@ static int QuillDfMakePair(QuillDfBoard *b, uint32_t s, uint32_t g, uint64_t *bu
             if (put != (int64_t)n)
                 return put < 0 ? (int)put : -1;
         }
+    for (uint32_t j = 0; j < 2 && aimed; j++)
+        __atomic_store_n(&b->aim[s + j], fids[j], __ATOMIC_RELEASE);
     return 0;
 }
 
-/* Slots `s` and `s + 1` deleted: taken off the board, then given up. */
+/* Slots `s` and `s + 1` deleted: taken off the board, then given up — the
+ * hold's aim at each taken off only once it is, so a file whose delete was
+ * refused is still aimed at for the case's end to give up. */
 static int QuillDfDeletePair(QuillDfBoard *b, uint32_t s)
 {
     for (uint32_t j = 0; j < 2; j++) {
@@ -502,6 +596,7 @@ static int QuillDfDeletePair(QuillDfBoard *b, uint32_t s)
         int      rc  = fid ? delete(fid) : -1;
         if (rc != 0)
             return rc;
+        __atomic_store_n(&b->aim[s + j], 0u, __ATOMIC_RELEASE);
     }
     return 0;
 }
@@ -516,19 +611,88 @@ static bool QuillDfArgs(const char *who, const char *const *args, uint32_t *slot
     return false;
 }
 
-/* Every slot made at gen 0, the defraggers started, and ROUNDS rounds of
- * every pair deleted and made again: 0, or the refusal that stopped it, with
- * *where saying what it was. */
+/* The tag the kernel says defragger 0's first hold on, claimed before any
+ * defragger runs — none on a build without the hold. 0, or the refusal. */
+static int QuillDfHearHolds(QuillDfBoard *b)
+{
+    b->held_tag = TOUCH_TAG_INVALID;
+    if (!QUILL_DF_LEVER)
+        return 0;
+    TouchTag heard = touch_pair_choose(touch_intern(QUILL_DF_HELD));
+    int      rc    = heard != TOUCH_TAG_INVALID ? touch_claim(heard, TOUCH_REST, 0, 0) : -1;
+    if (rc == 0)
+        b->held_tag = heard;
+    return rc;
+}
+
+/* The kernel's word that defragger 0's defrag of a file of gen 0 is held in
+ * the middle of its work — or that defragger's own, should it end first: the
+ * first round gives that file up under the hold. The rounds begin either
+ * way, and defragger 0 says no more holds. 0, or the wait's refusal. */
+static int QuillDfFirstHeld(QuillDfBoard *b)
+{
+    Touch     said;
+    file_id_t fid = 0;
+    int       rc  = touch_await(b->held_tag, &said, 0);
+    if (rc == 0 && said.payload_len >= sizeof(fid))
+        memcpy(&fid, said.payload, sizeof(fid));
+    __atomic_store_n(&b->began, 1u, __ATOMIC_RELEASE);
+    if (rc != 0)
+        printf("[QUILL] defragdelete: the wait for the kernel's word on %s answered %d\n",
+               QUILL_DF_HELD, rc);
+    else if (fid)
+        printf("[QUILL] defragdelete: the stand holds defragger 0's defrag of file %llu in the "
+               "middle of its work — the first round begins\n", (unsigned long long)fid);
+    else
+        printf("[QUILL] defragdelete: defragger 0 ended before a defrag of it was held — the "
+               "first round begins\n");
+    return rc;
+}
+
+/* The end of the case: every file the hold is still aimed at given up — none
+ * once every round ran, the ones a refusal left otherwise — so no defrag the
+ * stand holds outlives the case. 0, or the first refusal, *kept its file,
+ * still aimed at. ‼ The kernel lets a hold go only when its file is given up:
+ * a volume that refuses every delete keeps one of such a file for good, and
+ * the halt owes that defrag. */
+static int QuillDfGiveUpAimed(QuillDfBoard *b, file_id_t *kept)
+{
+    int first = 0;
+    for (uint32_t s = 0; s < b->slots; s++) {
+        file_id_t aim = __atomic_load_n(&b->aim[s], __ATOMIC_ACQUIRE), was = aim;
+        if (aim == 0)
+            continue;
+        __atomic_compare_exchange_n(&b->fid[s], &was, 0u, false, __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE);
+        int rc = delete(aim);
+        if (rc == 0) {
+            __atomic_store_n(&b->aim[s], 0u, __ATOMIC_RELEASE);
+        } else if (first == 0) {
+            first = rc;
+            *kept = aim;
+        }
+    }
+    return first;
+}
+
+/* Every slot made at gen 0, the defraggers started — the second only once
+ * the first was held (QuillDfFirstHeld) — and ROUNDS rounds of every pair
+ * deleted and made again: 0, or the refusal that stopped it, with *where
+ * saying what it was. */
 static int QuillDfChurn(QuillDfBoard *b, uint32_t slots, uint32_t rounds, uint64_t *bufs[2],
                         QuillCabin cabins[QUILL_DF_DEFRAGGERS], uint32_t *started,
                         const char **where)
 {
     int rc = 0;
     for (uint32_t s = 0; s < slots && rc == 0; s += 2)
-        rc = QuillDfMakePair(b, s, 0, bufs);
+        rc = QuillDfMakePair(b, s, 0, bufs, QUILL_DF_LEVER);
     *where = "making gen 0";
     for (*started = 0; rc == 0 && *started < QUILL_DF_DEFRAGGERS; (*started)++) {
         char line[QUILL_LINE_CAP];
+        if (*started == 1 && b->held_tag != TOUCH_TAG_INVALID && (rc = QuillDfFirstHeld(b)) != 0) {
+            *where = "waiting for the first hold";
+            return rc;
+        }
         QuillCabinLine(line, "defragger", *started, 0, false);
         if ((rc = QuillCabinStart(&cabins[*started], line)) <= 0) {
             *where = "starting a defragger";
@@ -541,7 +705,7 @@ static int QuillDfChurn(QuillDfBoard *b, uint32_t slots, uint32_t rounds, uint64
             *where = "deleting";
             if ((rc = QuillDfDeletePair(b, s)) == 0) {
                 *where = "making";
-                rc = QuillDfMakePair(b, s, g, bufs);
+                rc = QuillDfMakePair(b, s, g, bufs, QUILL_DF_LEVER && g < rounds);
             }
         }
         uint32_t moved = 0, gone = 0;
@@ -555,6 +719,27 @@ static int QuillDfChurn(QuillDfBoard *b, uint32_t slots, uint32_t rounds, uint64
                    rounds, slots, moved, gone);
     }
     return rc;
+}
+
+/* The defraggers stopped and waited for — but not defragger 0 when a file the
+ * hold was aimed at could not be given up (`kept`): a defrag of it the stand
+ * holds never ends. A defragger's word on the board counts as well as its
+ * exit: one that ended before it was waited for is answered as departed, its
+ * exit code 0 (SysProcessGone keeps no history). The ones that failed. */
+static uint32_t QuillDfEnd(QuillDfBoard *b, const QuillCabin *cabins, uint32_t started,
+                           file_id_t kept)
+{
+    uint32_t failed = 0;
+    __atomic_store_n(&b->stop, 1u, __ATOMIC_RELEASE);
+    for (uint32_t d = 0; d < started; d++) {
+        int32_t code = 0;
+        if ((d == 0 && kept != 0) || QuillCabinEnd(&cabins[d], &code) != 0 || code != 0 ||
+            b->refusal[d] != 0)
+            failed++;
+    }
+    if (b->held_tag != TOUCH_TAG_INVALID)
+        touch_release(b->held_tag);
+    return failed;
 }
 
 QuillVerdict QuillDefragDelete(const char *const *args)
@@ -571,21 +756,30 @@ QuillVerdict QuillDefragDelete(const char *const *args)
     }
     memset((void *)board, 0, sizeof(*board));
     board->slots = slots;
+    int hrc      = QuillDfHearHolds(board);
+    if (hrc != 0) {
+        printf("[QUILL] defragdelete: FAIL — the tag %s, where the kernel says the first hold, "
+               "would not open (answer %d; nothing was made)\n", QUILL_DF_HELD, hrc);
+        bay_release(board);
+        return QUILL_FAIL;
+    }
 
     QuillCabin  cabins[QUILL_DF_DEFRAGGERS];
     uint32_t    started = 0;
     const char *where   = "";
+    file_id_t   kept    = 0;
     int         rc      = QuillDfChurn(board, slots, rounds, bufs, cabins, &started, &where);
-    __atomic_store_n(&board->stop, 1u, __ATOMIC_RELEASE);
-    uint32_t failed = 0, moved = 0, gone = 0;
+    int         grc     = QuillDfGiveUpAimed(board, &kept);
+    if (rc == 0 && grc != 0) {
+        rc    = grc;
+        where = "giving up what the hold was aimed at";
+    }
+    uint32_t failed = QuillDfEnd(board, cabins, started, kept), moved = 0, gone = 0;
     for (uint32_t d = 0; d < started; d++) {
-        int32_t code = 0;
-        if (QuillCabinEnd(&cabins[d], &code) != 0 || code != 0)
-            failed++;
         moved += board->moved[d];
         gone  += board->gone[d];
     }
-    uint32_t whole = 0, bad = slots;
+    uint32_t armed = board->armed, held = board->armed_gone, whole = 0, bad = slots;
     for (uint32_t s = 0; s < slots && rc == 0; s++) {
         uint32_t found = 0;
         uint64_t size  = 0;
@@ -599,15 +793,20 @@ QuillVerdict QuillDefragDelete(const char *const *args)
     if (rc == 0 && started == QUILL_DF_DEFRAGGERS && failed == 0 && whole == slots && arc == 0) {
         printf("[QUILL] defragdelete: PENDING — %u slots deleted and made again %u times beside %u "
                "defraggers, which answered %u defrags and found the file deleted under them %u "
-               "times, each as due; every slot holds its gen %u, read back whole; anchored — "
-               "after a reboot, quilltest defragback %u %u reads them again\n", slots, rounds,
-               QUILL_DF_DEFRAGGERS, moved, gone, rounds, slots, rounds);
+               "times — %u of the %u that asked the stand's hold among them — each as due; every "
+               "slot holds its gen %u, read back whole; anchored — after a reboot, quilltest "
+               "defragback %u %u reads them again\n", slots, rounds, QUILL_DF_DEFRAGGERS, moved,
+               gone, held, armed, rounds, slots, rounds);
         return QUILL_PENDING;
     }
+    if (kept)
+        printf("[QUILL] defragdelete: the stand's hold of file %llu could not be let go — its "
+               "delete was refused — so defragger 0 was not waited for\n",
+               (unsigned long long)kept);
     printf("[QUILL] defragdelete: FAIL — %s answered %d; %u of %u defraggers started, %u failed "
-           "(%u defrags answered, %u found deleted); %u of %u slots read back whole, the first "
-           "not slot %u; anchor %d\n", where, rc, started, QUILL_DF_DEFRAGGERS, failed, moved,
-           gone, whole, slots, bad, arc);
+           "(%u defrags answered, %u found deleted, %u of the %u with the stand's hold); %u of %u "
+           "slots read back whole, the first not slot %u; anchor %d\n", where, rc, started,
+           QUILL_DF_DEFRAGGERS, failed, moved, gone, held, armed, whole, slots, bad, arc);
     return QUILL_FAIL;
 }
 

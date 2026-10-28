@@ -82,7 +82,8 @@
 #                         read across it all is the file's own bytes
 #   logcheck.sh defragdelete defrag and delete in a loop on 16c, the power
 #                         button, a reboot: nothing deleted comes back, every
-#                         slot whole, no block owned twice
+#                         slot whole, no block owned twice; built
+#                         VOLUME_TESTS=on STARTUP_TESTS=off for the stand's hold
 #   logcheck.sh cores     the four of them
 #   logcheck.sh both
 #
@@ -11616,7 +11617,18 @@ run_turnsmut() {
 #                at a time beside its pair, so it lies in several runs — while
 #                two cabins defrag every slot over and over; then the power
 #                button, a reboot, and every slot holds its last gen, whole, one
-#                file of its name: nothing deleted came back.
+#                file of its name: nothing deleted came back. Built
+#                VOLUME_TESTS=on STARTUP_TESTS=off: defragger 0 asks the
+#                stand's hold of each file it comes to that the next round
+#                gives up, so a defrag whose first window took the run the file
+#                is gathered into waits there, in the middle of its work, for
+#                the delete — a file in one run by then has no middle — and
+#                the kernel says each hold and what it answered: the file
+#                given up under it, the run gone back. The first round waits
+#                for the first hold, so a run holds one by construction (a
+#                defrag beside a delete found it so 0 to 10 times a run, by
+#                luck, and 0 proved nothing). No startup test runs: the
+#                scenario's volume is its own across both boots.
 #
 # THE MUTATIONS THEY EXIST FOR, each put in by hand and the scenario run on it,
 # whole, on this tree (2026-10-07):
@@ -11654,6 +11666,10 @@ run_turnsmut() {
 #                is refused ERR_TAGFS_NO_SPACE in the first round: red too, for
 #                a reason the scenario does not name, so it is not the one
 #                written here.
+#                And the stand's hold not holding — HelmReadyOnceVacated
+#                (helm.c) listing the holder at once (2026-10-28). MEASURED:
+#                11 passed, 1 failed — the kernel held 8 defrags and all 8 went
+#                on and answered a score, none the file given up under it.
 # ---------------------------------------------------------------------------
 
 CORES_STAND=${CORES_STAND:-"UEFI=on STRICT=on CORES=16 MEM=8G"}
@@ -12116,21 +12132,38 @@ CORES_SLOTS_EOF
 
 run_defragdelete() {
     echo "== defragdelete: $DEFRAG_SLOTS slots deleted and made again $DEFRAG_ROUNDS times beside two defraggers on $CORES_STAND, then the power button =="
-    local L1="$SCRATCH/serial.cores.defrag1.log" L2="$SCRATCH/serial.cores.defrag2.log" said gathered gone
+    local L1="$SCRATCH/serial.cores.defrag1.log" L2="$SCRATCH/serial.cores.defrag2.log" said gathered gone armed held given
+    local case_log="$SCRATCH/cores.defrag.case.log"
     cores_keys || return
     rm -f "$L1" "$L2"
     make run-stop >/dev/null 2>&1
     rm -f build/boxos.img
-    build "$(strict_key "${CORES_KEYS[@]}")"
+    # VOLUME_TESTS=on for the stand's hold (write_job.c, wjob_stand_holds):
+    # defragger 0's defrags of a file the churn gives up next round go no
+    # further, once their first window took the run they gather into, until
+    # it is given up. STARTUP_TESTS=off: no startup test writes on the
+    # scenario's volume, in either boot.
+    if ! build_with_key VOLUME_TESTS=on STARTUP_TESTS=off "$(strict_key "${CORES_KEYS[@]}")"; then
+        echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "defragdelete: VOLUME_TESTS=on does not build"
+        return
+    fi
     mutate_product build/boxos.img
 
-    if cores_boot defrag1 "defragdelete" "${CORES_KEYS[@]}"; then
+    if cores_boot defrag1 "defragdelete" VOLUME_TESTS=on STARTUP_TESTS=off "${CORES_KEYS[@]}"; then
         cores_case "quilltest defragdelete $DEFRAG_SLOTS $DEFRAG_ROUNDS" "$WAIT_QUIET_SLOW_S"
         cores_said "defragdelete" PENDING
-        gathered=$(tail -n +$((CORES_MARK + 1)) build/serial.log | tr -d '\r' | grep -acE '^\[TagFS\] file [0-9]+: [0-9]+ extent\(s\) of it, [0-9]+ block\(s\), gathered into one run')
+        tail -n +$((CORES_MARK + 1)) build/serial.log | tr -d '\r' >"$case_log"
+        gathered=$(grep -acE '^\[TagFS\] file [0-9]+: [0-9]+ extent\(s\) of it, [0-9]+ block\(s\), gathered into one run' "$case_log")
+        # Counted where they stand, not where a line begins: a kernel line may
+        # land inside a line the case is printing (measured: "...answe[Storage]
+        # file 97: the defrag the stand held went on ...").
+        held=$(grep -aoE '\[Storage\] file [0-9]+: the stand holds a defrag of it, [0-9]+ of [0-9]+ block\(s\) copied into the run it took, until the file is given up' "$case_log" | wc -l | tr -d ' ')
+        given=$(grep -aoE '\[Storage\] file [0-9]+: the defrag the stand held went on and answered [0-9]+ — the file given up under it, the run it took gone back' "$case_log" | wc -l | tr -d ' ')
         gone=$(printf '%s\n' "$CORES_SAID" | sed -nE 's/.* found the file deleted under them ([0-9]+) times.*/\1/p')
-        [ "${gathered:-0}" -gt 0 ] && [ "${gone:-0}" -gt 0 ]
-        chk $? "defragdelete: the defraggers gathered files the kernel named $gathered time(s) and found a file deleted under them ${gone:-no} time(s) — both are what the case asks"
+        armed=$(printf '%s\n' "$CORES_SAID" | sed -nE "s/.* — ([0-9]+) of the [0-9]+ that asked the stand's hold among them — .*/\1/p")
+        [ "${gathered:-0}" -gt 0 ] && [ "${held:-0}" -gt 0 ] && [ "${given:-0}" -eq "${held:-0}" ] && [ "${armed:-0}" -ge "${held:-0}" ]
+        chk $? "defragdelete: the defraggers gathered files the kernel named $gathered time(s) and found a file deleted under them ${gone:-no} time(s); the kernel held ${held:-no} defrag(s) in the middle of their work, ${given:-no} of them went on to find the file given up under them, and ${armed:-no} of defragger 0's defrags with the hold found it deleted — gathered > 0, held >= 1, every one held found its file given up, defragger 0 heard each"
         cores_halt defrag1 button
         chk $? "defragdelete: the power button's halt said its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L1" | tr -d '\r' | tail -1 | cut -c1-100))"
         cores_faults "$L1" "defragdelete: boot 1"
@@ -12141,7 +12174,7 @@ run_defragdelete() {
             *)                    bad "defragdelete: off the medium after the power button — $said" ;;
         esac
     fi
-    if cores_boot defrag2 "defragdelete: the reboot" "${CORES_KEYS[@]}"; then
+    if cores_boot defrag2 "defragdelete: the reboot" VOLUME_TESTS=on STARTUP_TESTS=off "${CORES_KEYS[@]}"; then
         cores_case "quilltest defragback $DEFRAG_SLOTS $DEFRAG_ROUNDS" "$WAIT_QUIET_SLOW_S"
         cores_said "defragdelete: after the reboot"
         cores_halt defrag2 bye
@@ -12153,6 +12186,7 @@ run_defragdelete() {
     lockrank_judge "$L1 $L2" "defragdelete"
     make run-stop >/dev/null 2>&1
     restore build/boxos.img
+    buildkey_restore
 }
 
 run_cores() {
