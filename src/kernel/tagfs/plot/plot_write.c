@@ -6,6 +6,7 @@
 #include "../ink/fallow.h"                 /* FallowBlocks — ground a cycle gives back */
 #include "../glean/glean.h"                /* GleanMayFree — ground the pool's slack gives back */
 #include "../metadata_pool/meta_pool.h"
+#include "../mount/away.h"                 /* AwayDepartures — what a book's write is held to at its Ink */
 
 /*
  * Blocks written the synchronous way, a stretch a command (PlotStretchAt):
@@ -84,13 +85,14 @@ static error_t PlotLayStretch(Plot *p, const PlotStretch *s, const PlotSource *s
         /* The door's first question, asked before it: a medium already gone
          * is sent no command, and none is counted. One that leaves under the
          * command refuses it with the same answer, and that one went out. */
-        bool     sent  = !TagFSMediumGone();
-        uint64_t began = rdtsc();
+        bool     sent     = !TagFSMediumGone();
+        uint64_t departed = AwayDepartures();
+        uint64_t began    = rdtsc();
         rc = TagFSWriteRun(s->block, staged, buf, &landed);
         p->data_us += cpu_tsc_to_us(rdtsc() - began);
         if (sent)
             TagFSDataCostLaid(staged);
-        error_t noted = PlotWindowLanded(p, s->block, buf, landed);
+        error_t noted = PlotWindowLanded(p, departed, s->block, buf, landed);
         if (rc == OK && noted != OK) {
             landed = 0;      /* a block whose digest is not held is no block of the file's */
             rc     = noted;

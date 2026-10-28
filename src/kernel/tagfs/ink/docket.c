@@ -219,7 +219,7 @@ uint64_t DocketTakes(void)
     return s_takes;
 }
 
-bool DocketWasFrom(uint64_t fid, uint64_t* at, FileRecord** was)
+bool DocketWasFrom(uint64_t fid, uint64_t* at, FileRecord** was, FileRecord** now)
 {
     Jot* before[JOT_LEVELS];
     (void)DocketFind(fid, before);
@@ -230,6 +230,11 @@ bool DocketWasFrom(uint64_t fid, uint64_t* at, FileRecord** was)
     *was = j->was;
     if (j->was)
         __atomic_add_fetch(&j->was->refs, 1, __ATOMIC_ACQ_REL);
+    if (now) {
+        *now = j->now;
+        if (j->now)
+            __atomic_add_fetch(&j->now->refs, 1, __ATOMIC_ACQ_REL);
+    }
     return true;
 }
 

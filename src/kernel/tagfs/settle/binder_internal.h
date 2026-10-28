@@ -53,6 +53,7 @@ typedef struct {
     bool        captured;       /* ... and the Gloss may let go of what its DIGESTS names */
     bool        taken;          /* the runs at A and B are taken from the map */
     bool        slot_begun;     /* a write of the slot was issued: it may hold either Tally */
+    SlotSealed* sealed;         /* the slot's unit as sealed: the slot's to keep when it is held unsure */
     SlotGround  fresh;          /* the ground the slot will hold, made at TAKE */
     BinderRot*  rot;            /* the nodes it names as they lie: the FILES ones the mount found, ... */
     uint32_t    nrot;           /* ... and every DIGESTS node no copy of reads, found at TAKE */

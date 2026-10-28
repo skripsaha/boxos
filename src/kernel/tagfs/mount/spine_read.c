@@ -169,28 +169,27 @@ static error_t SpineParse(SpineSlot* s, const BookUnit* u)
     return rc;
 }
 
-error_t SpineSlotJudge(SpineSlot* s)
+/* *s judged from the unit *u its read (`rc`) laid in, let go of here. */
+static error_t SpineSlotFrom(SpineSlot* s, BookUnit* u, error_t rc)
 {
-    BookUnit u;
-    error_t  rc = BookUnitRead(s->block * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS, BOOK_UNIT_SLOT, 0, &u);
     if (rc == OK) {
-        if (BookUnitBlank(&u)) {
+        if (BookUnitBlank(u)) {
             s->state = SPINE_SLOT_BLANK;
-        } else if (!u.whole) {
+        } else if (!u->whole) {
             s->state = SPINE_SLOT_TORN;
-            memcpy(s->why, u.why, sizeof(u.why));
+            memcpy(s->why, u->why, sizeof(u->why));
         } else {
-            s->seq = u.head.seq;
-            rc     = SpineParse(s, &u);
+            s->seq = u->head.seq;
+            rc     = SpineParse(s, u);
             if (rc == OK || rc == ERR_TAGFS_CORRUPTED) {
                 s->state  = rc == OK ? SPINE_SLOT_VALID : SPINE_SLOT_TORN;
-                s->stream = u.stream;
-                u.stream  = NULL;
+                s->stream = u->stream;
+                u->stream = NULL;
                 rc        = OK;
             }
         }
     }
-    BookUnitLetGo(&u);
+    BookUnitLetGo(u);
     if (s->state != SPINE_SLOT_VALID) {
         kfree(s->root);
         kfree(s->stream);
@@ -199,6 +198,20 @@ error_t SpineSlotJudge(SpineSlot* s)
         s->roots  = 0;
     }
     return rc;
+}
+
+error_t SpineSlotJudge(SpineSlot* s)
+{
+    BookUnit u;
+    error_t  rc = BookUnitRead(s->block * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS, BOOK_UNIT_SLOT, 0, &u);
+    return SpineSlotFrom(s, &u, rc);
+}
+
+error_t SpineSlotJudgeSectors(SpineSlot* s, const uint8_t* sectors)
+{
+    BookUnit u;
+    error_t  rc = BookUnitOf(s->block * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS, BOOK_UNIT_SLOT, 0, sectors, &u);
+    return SpineSlotFrom(s, &u, rc);
 }
 
 void SpineSlotLetGo(SpineSlot* s)

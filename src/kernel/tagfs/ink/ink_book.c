@@ -2,6 +2,7 @@
 #include "../mount/book_mount.h"
 #include "../settle/sewing.h"
 #include "../integrity/gloss.h"
+#include "../mount/perambulation.h"
 
 /*
  * Format v2's second half of an Ink (ink_internal.h): the writer's half of
@@ -430,12 +431,14 @@ static uint64_t InkBookPlotHeld(const Plot* p)
 }
 
 static error_t InkBookPlotLocked(const Plot* p, const RecordWhere* was, InkBookWork* w, Jot* j, Jot** spent,
-                                 InkReceipt* out)
+                                 uint64_t departed, InkReceipt* out)
 {
     TagFSState* fs = InkState();
     error_t     rc = InkVolumeTakes();
     if (rc != OK)
         return rc;
+    if (AwayDepartures() != departed)
+        return INK_AGAIN;           /* the medium left and came back since its blocks were held: again */
     RecordWhere now, gone;
     FileRecord* still = FileMapRecordHold(fs->files, p->fid, &now);
     if (!still)
@@ -472,16 +475,19 @@ static error_t InkBookPlotLocked(const Plot* p, const RecordWhere* was, InkBookW
 error_t InkBookPlot(const Plot* p, const FileRecord* cur, const RecordWhere* was, uint64_t small_us,
                     InkReceipt* out)
 {
-    InkBookWork w     = { 0 };
-    Jot*        spent = NULL;
-    Jot*        j     = NULL;
-    error_t     rc    = InkBookPlotBuilt(p, cur, &w);
+    InkBookWork w        = { 0 };
+    Jot*        spent    = NULL;
+    Jot*        j        = NULL;
+    uint64_t    departed = 0;
+    error_t     rc       = AwayProofPlot(p, &departed);
+    if (rc == OK)
+        rc = InkBookPlotBuilt(p, cur, &w);
     if (rc == OK && !(j = JotMake(JOT_SHAPED, p->fid, NULL, NULL)))
         rc = ERR_NO_MEMORY;
     if (rc == OK) {
         w.rec->small_append_us = small_us;
         TagFSLockTake(&InkState()->lock);
-        rc = InkBookPlotLocked(p, was, &w, j, &spent, out);
+        rc = InkBookPlotLocked(p, was, &w, j, &spent, departed, out);
         TagFSLockDrop(&InkState()->lock);
         RibbonClaimSay(rc);
     }

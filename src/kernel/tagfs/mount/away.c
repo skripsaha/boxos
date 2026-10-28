@@ -1,5 +1,7 @@
 #include "away.h"
 #include "book_mount.h"
+#include "perambulation.h"
+#include "errata.h"
 #include "../ledger/ledger.h"
 #include "../scribe/scribe.h"
 #include "../settle/settle.h"
@@ -15,6 +17,7 @@
 
 static uint64_t s_found_seq;    /* the newest Ledger the returned medium holds */
 static uint64_t s_left_seq;     /* the one a cycle this kernel settled on it */
+static volatile uint64_t s_departures;  /* the medium left, this boot: AwayLeft counts it */
 
 /*
  * ‼ WHAT A BOOK GIVEN UP LEAVES KNOWN, ONE ENTRY A VOLUME, FOR THE REST OF THE
@@ -133,8 +136,26 @@ static uint64_t AwayUnsettled(void)
     return inked > settled ? inked - settled : 0;
 }
 
+uint64_t AwayDepartures(void)
+{
+    return __atomic_load_n(&s_departures, __ATOMIC_ACQUIRE);
+}
+
+bool AwayDeedSame(const DeedCopy* head)
+{
+    TagFSState* fs    = tagfs_get_state();
+    uint16_t    bytes = 0;
+    if (fs->format == DEED_FORMAT_V2) {
+        const VolumeFrame* frame = (const VolumeFrame*)DeedStamp(head, VOLUME_STAMP_FRAME, &bytes);
+        return frame && bytes >= sizeof(VolumeFrame) && memcmp(frame, &g_book.frame, sizeof(VolumeFrame)) == 0;
+    }
+    const VolumeLayout* layout = (const VolumeLayout*)DeedStamp(head, VOLUME_STAMP_LAYOUT, &bytes);
+    return layout && bytes >= sizeof(VolumeLayout) && memcmp(layout, &fs->layout, sizeof(VolumeLayout)) == 0;
+}
+
 void AwayLeft(bool swapped)
 {
+    __atomic_add_fetch(&s_departures, 1u, __ATOMIC_ACQ_REL);
     kprintf("[TagFS] the medium the volume lives on has %s — its book is held open: %llu "
             "change(s) no cycle settled, and everyone waiting on them, wait for the same volume "
             "to come back as it was left; every read and write of it is refused until then\n",
@@ -163,15 +184,39 @@ AwayVerdict AwayJudgeOn(uint8_t seat, uint64_t base)
     return AwayJudge(&found);
 }
 
+/* A book taken up (perambulation.h): said with what was found, and the
+ * verdict its mount holds asked for again — the session's first cycle owes it
+ * still, and the departure may have refused the one that was asked. */
+static void AwayBookTakenUp(uint8_t seat)
+{
+    const PerambulationSaid* p = PerambulationLast();
+    char                     last[96];
+    if (p->last)
+        ksnprintf(last, sizeof(last), "its last stitch, seq %llu, where it was sewn", (unsigned long long)p->last);
+    else
+        ksnprintf(last, sizeof(last), "no stitch of it past its newest slot, which stands for every one");
+    kprintf("[TagFS] the volume is back, in seat %u: %s — its book as this kernel left it: %s and nothing another "
+            "writer laid past it, its newest slot seq %llu, and %llu block(s) of data no stitch settled read back as "
+            "written. Its book is taken up: %llu change(s) no cycle settled go to the medium with the next cycle, "
+            "none lost%s\n",
+            seat, BoardroomSeatName(seat), last, (unsigned long long)p->slot, (unsigned long long)p->proved,
+            (unsigned long long)AwayUnsettled(),
+            p->tried ? "; its own stitch cut short lies past the last, and the next goes on past it (M-6)" : "");
+    ErrataAsk();
+}
+
 void AwayTakeUp(uint8_t seat)
 {
-    kprintf("[TagFS] the volume is back, in seat %u: %s — as this kernel left it: its Ledger "
-            "at seq %llu with the seal it was left with, and every write it saw kept by a flush. "
-            "Its book is taken up: %llu change(s) no cycle settled go to the medium with the "
-            "next cycle, none lost. This proves only that no BoxOS kernel settled a cycle on it "
-            "meanwhile — a host that changed its bytes and left the Ledger alone is not seen\n",
-            seat, BoardroomSeatName(seat), (unsigned long long)s_found_seq,
-            (unsigned long long)AwayUnsettled());
+    if (tagfs_get_state()->format == DEED_FORMAT_V2)
+        AwayBookTakenUp(seat);
+    else
+        kprintf("[TagFS] the volume is back, in seat %u: %s — as this kernel left it: its Ledger "
+                "at seq %llu with the seal it was left with, and every write it saw kept by a flush. "
+                "Its book is taken up: %llu change(s) no cycle settled go to the medium with the "
+                "next cycle, none lost. This proves only that no BoxOS kernel settled a cycle on it "
+                "meanwhile — a host that changed its bytes and left the Ledger alone is not seen\n",
+                seat, BoardroomSeatName(seat), (unsigned long long)s_found_seq,
+                (unsigned long long)AwayUnsettled());
     SettleSeatReady();
     HelmBookTakenUp();
 }
@@ -197,12 +242,19 @@ uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
                 AWAY_LOST, seat, (unsigned long long)s_found_seq,
                 (unsigned long long)s_left_seq, (unsigned long long)lost);
         break;
-    case AWAY_REREAD:
-        kprintf("[TagFS] the format-v2 volume came back in seat %u: this kernel reads such a volume "
-                "again from its book whenever its medium comes back, and takes up no open book of it"
-                AWAY_LOST, seat, (unsigned long long)lost);
+    case AWAY_NOT_LANDED:
+        kprintf("[TagFS] the volume came back in seat %u as this kernel left its book, but %llu of the %llu block(s) "
+                "of data no stitch settled do not read back as written — a medium's cache goes with its power, "
+                "whatever a flush said (ERR_TAGFS_NOT_LANDED to everyone waiting)" AWAY_LOST, seat,
+                (unsigned long long)PerambulationLast()->missed, (unsigned long long)PerambulationLast()->proved,
+                (unsigned long long)lost);
         break;
     case AWAY_OTHER:
+        if (tagfs_get_state()->format == DEED_FORMAT_V2) {
+            kprintf("[TagFS] the volume came back in seat %u not as this kernel left its book: %s" AWAY_LOST, seat,
+                    PerambulationLast()->why, (unsigned long long)lost);
+            break;
+        }
         kprintf("[TagFS] the volume came back in seat %u with a Ledger or a Deed this kernel did "
                 "not leave on it — a BoxOS kernel changed it meanwhile" AWAY_LOST,
                 seat, (unsigned long long)lost);
@@ -233,7 +285,7 @@ uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
         break;
     }
     HelmBookGivenUp(lost);
-    SettleWaitersAnswerAll(ERR_DEVICE_NOT_READY);
+    SettleWaitersAnswerAll(why == AWAY_NOT_LANDED ? ERR_TAGFS_NOT_LANDED : ERR_DEVICE_NOT_READY);
     return lost;
 }
 

@@ -87,6 +87,9 @@ typedef struct {
     PlotDigest   *digests;        /* every block this call wrote, with its digest */
     uint32_t      digest_count;
     uint32_t      digest_room;
+    uint64_t      departed;       /* the medium's departures (AwayDepartures) before the write of its first
+                                   * digest was sent: one since, and its Ink reads them back
+                                   * (mount/perambulation.h) */
     uint64_t      ribbon_held;    /* the ribbon's room held for its record from before its data to its
                                    * Ink (RibbonReserve), of the mounting `mount_epoch` names */
 } Plot;
@@ -316,9 +319,12 @@ error_t  PlotConveyance(const Plot *p, const FileRecord *cur, BookSplice **out, 
  * format v1, whose Plot holds the file. And `count` blocks this call wrote
  * from `block` on, `data` what they hold: each one's digest kept, for the
  * Gloss and the stitch that names it (§2.8, §8.1) — nothing on format v1,
- * whose writes record their digests as they land. OK or ERR_NO_MEMORY. */
+ * whose writes record their digests as they land. `departed` is the medium's
+ * departures (AwayDepartures) taken before the write was sent: a departure
+ * latched after the medium answered, before this call, is one since (the
+ * Plot's `departed`). OK or ERR_NO_MEMORY. */
 error_t  PlotWindowWhole(Plot *p);
-error_t  PlotWindowLanded(Plot *p, uint64_t block, const uint8_t *data, uint32_t count);
+error_t  PlotWindowLanded(Plot *p, uint64_t departed, uint64_t block, const uint8_t *data, uint32_t count);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's measure that a write copies only the Strips around its change

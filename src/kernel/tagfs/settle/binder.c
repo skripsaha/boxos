@@ -242,15 +242,18 @@ static error_t SlotSectorsWrite(uint64_t vlba, uint32_t first, uint32_t n, const
  * halves of its eight sectors — the cut a SETTLECUT `slot` makes between them
  * leaves it torn (C9), as the stand's tear leaves it with only its first
  * `tear` sectors. From the first sector issued, the slot may hold either
- * Tally (slot_begun).
+ * Tally (slot_begun) — the new one as sealed here, kept in r->sealed until the
+ * Tally ends, and by the slot itself when it is held unsure.
  */
 static error_t TallySlotWrite(BinderRun* r)
 {
     uint8_t* stream = kmalloc(TALLY_SHEET_PAYLOAD);
-    uint8_t* unit   = kmalloc(TAGFS_BLOCK_SIZE);
     uint32_t starts[TALLY_SHARED + 6u], n = 0, half = TAGFS_BLOCK_SECTORS / 2u;
-    error_t  rc     = stream && unit ? OK : ERR_NO_MEMORY;
+    r->sealed       = kmalloc(sizeof(SlotSealed));
+    error_t  rc     = stream && r->sealed ? OK : ERR_NO_MEMORY;
     if (rc == OK) {
+        uint8_t* unit = r->sealed->unit;
+        r->sealed->next = NULL;
         memset(stream, 0, TALLY_SHEET_PAYLOAD);
         uint32_t len   = SlotStream(r, stream, starts, &n);
         uint64_t block = g_book.frame.spine_block + (uint64_t)r->slot * g_book.frame.spine_stride;
@@ -275,7 +278,6 @@ static error_t TallySlotWrite(BinderRun* r)
             rc = SlotSectorsWrite(vlba, half, TAGFS_BLOCK_SECTORS - half, unit);
     }
     kfree(stream);
-    kfree(unit);
     return rc;
 }
 
@@ -309,6 +311,7 @@ static void TallyEnded(BinderRun* r, error_t rc)
     BinderSliceLetGo(&r->w);
     kfree(r->fresh.ground);
     kfree(r->rot);
+    kfree(r->sealed);
     memset(r, 0, sizeof(*r));
     __atomic_store_n(&s_under_way, 0u, __ATOMIC_RELEASE);
     BinderWeigh();

@@ -2,6 +2,7 @@
 #define TAGFS_MOUNT_AWAY_H
 
 #include "../tagfs.h"
+#include "../deed/deed.h"
 
 /*
  * The open book — a volume whose medium left, held as it was until an event
@@ -14,7 +15,10 @@
  * decides: an event does.
  *
  *   The same volume comes back (its UUID, in any seat), its Deed saying what
- *   the held one says. Its Ledger is judged against what this kernel left on
+ *   the held one says — format v1's LAYOUT, a book's FRAME. A book is judged
+ *   by Perambulation (perambulation.h): its ribbon and its newest slot as this
+ *   kernel left them, and every block written since the last kept flush read
+ *   back as written. Format v1's Ledger is judged against what this kernel left on
  *   the medium — the record a cycle settled, and the image the last S4 aimed
  *   at the other copy, landed or not — each by its seq and its seal's
  *   {settle, closed_crc32, tail_crc32}, and every write the volume saw complete
@@ -48,13 +52,20 @@ typedef enum {
     AWAY_UNREAD,        /* no copy of its Ledger reads intact */
     AWAY_SEAT_TAKEN,    /* another volume sits in the seat the book was held for */
     AWAY_HALT,          /* the machine is stopping */
-    AWAY_REREAD,        /* a format-v2 volume: a medium that leaves and comes back is read again */
-    AWAY_NOT_LANDED,    /* a book as left, but a block written since the last kept flush reads otherwise */
+    AWAY_NOT_LANDED,    /* a book as left, but a block of data no stitch settled reads otherwise */
 } AwayVerdict;
 
 /* The medium left, just now latched (TagFSMediumLeft): said once, with the
- * changes the book holds. `swapped`: another medium already sits in its seat. */
+ * changes the book holds — and counted. `swapped`: another medium already
+ * sits in its seat. AwayDepartures: how many times it has left this boot —
+ * what a book's write that laid blocks before a departure and inks them after
+ * it holds its blocks to (perambulation.h, AwayProofPlot). */
 void        AwayLeft(bool swapped);
+uint64_t    AwayDepartures(void);
+
+/* Whether the Deed `head` lays the volume out as the held one is laid out:
+ * format v1's LAYOUT, a book's FRAME (§16.1 п.3 — a book has no LAYOUT). */
+bool        AwayDeedSame(const DeedCopy* head);
 
 /* The volume's newest intact Ledger on `seat`, its ground beginning at sector
  * `base`, read and judged (AwayJudge); AWAY_UNREAD when no copy reads intact.
@@ -72,7 +83,9 @@ void        AwayTakeUp(uint8_t seat);
 
 /* The book given up, for `why`: said — with `seat`, where the medium or the
  * other volume is — and every waiter answered with the changes no cycle
- * settled, which is returned. The volume is then the caller's to let go of. */
+ * settled, which is returned: ERR_TAGFS_NOT_LANDED for a book whose blocks
+ * did not land, ERR_DEVICE_NOT_READY for any other. The volume is then the
+ * caller's to let go of. */
 uint64_t    AwayGiveUp(AwayVerdict why, uint8_t seat);
 
 /* Whether a book given up found the volume `uuid` holding less than a cycle

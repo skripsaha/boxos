@@ -150,6 +150,7 @@ typedef struct WriteJob {
     error_t           st_stop;           /* why staging stopped at st_staged; OK when it did not */
     error_t           if_status;         /* the command's answer writes here */
     uint64_t          if_submit_tsc;     /* when the write went out: its time on the medium */
+    uint64_t          if_departed;       /* the medium's departures before it went out (AwayDepartures) */
 
     /* ---- DMA staging: the run the seat takes in one command, in one piece ---- */
     void             *dma_phys;

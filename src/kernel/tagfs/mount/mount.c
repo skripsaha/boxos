@@ -661,9 +661,11 @@ void MountPromise(void)
      * its ribbon (settle/sewing.h), and a whole Tally of it once the ribbon
      * holds what one costs (settle/binder.h): the next mount reads that Tally
      * and the ribbon past it;
-     * and a medium that leaves and comes back is read again from its book:
-     * what no stitch settled is lost, which is what `anchor` is for (§16.2
-     * п.28).
+     * and a medium that leaves and comes back as it was left is taken up, what
+     * no stitch settled going with the next cycle — read again from its book
+     * otherwise, what no stitch settled then lost (§3.8, §16.5 п.10,
+     * perambulation.h). Under glass nothing is written, and nothing waits:
+     * a medium that comes back is read again.
      */
     if (tagfs_get_state()->format == DEED_FORMAT_V2 && TagFSIsUnderGlass()) {
         kprintf("[TagFS] what this volume promises: it is read as its book holds it and nothing of it is "
@@ -678,7 +680,9 @@ void MountPromise(void)
                 "stitch sewn; a file's bytes go on fresh ground, flushed before the stitch that names them, so a "
                 "block written over reads its old bytes or its new ones, never a mix; an `anchor` is answered once "
                 "a stitch of this mount carrying what it waits for is kept; a medium that leaves and comes back is "
-                "read again from its book, and what no stitch settled before an `anchor` is lost\n",
+                "taken up as it was left — its ribbon and newest slot as this kernel left them, every block written "
+                "since the last kept flush read back as written — and read again from its book otherwise, what no "
+                "stitch settled then lost (ERR_TAGFS_NOT_LANDED where a block did not land)\n",
                 (unsigned long long)(SETTLE_WINDOW_US / 1000u));
         if (BinderNoTallies())
             kprintf("[TagFS] no Tally of the book is written by this mount: %s — the ribbon is read whole at the "

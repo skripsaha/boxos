@@ -305,6 +305,17 @@ typedef struct {
     uint64_t  count;
 } BinderFill;
 
+/* A slot's unit as a write of it sealed it — its eight sectors — kept while
+ * the slot is held unsure: whichever of them the medium holds there is this
+ * kernel's own Tally, known byte for byte, never by its seq alone — a seq this
+ * kernel gave and the medium never showed, another machine that never saw it
+ * may give again (R11; mount/perambulation.c). */
+typedef struct SlotSealed SlotSealed;
+struct SlotSealed {
+    SlotSealed* next;
+    uint8_t     unit[TAGFS_BLOCK_SIZE];
+};
+
 /* The slots as this mount knows them: what each holds (§1.4, M-7). */
 typedef struct {
     bool         holds;        /* a Tally, as far as this mount knows */
@@ -312,6 +323,7 @@ typedef struct {
     uint64_t     seq;
     uint64_t     tally;
     uint64_t     tally2;       /* unsure: the Tally that may stand in it instead; 0 */
+    SlotSealed*  sealed;       /* unsure: every unit a refused write of it sealed, newest first */
     Strip*       ground;       /* its Tallies' nodes, each copy, born at `birth`, by first block */
     uint32_t     nground;
     uint32_t     capground;
@@ -363,6 +375,11 @@ extern BinderBook g_binder;
 bool        BinderListRoom(void** list, uint64_t n, uint64_t* cap, size_t size);
 bool        BinderListRoom32(void** list, uint32_t n, uint32_t* cap, size_t size);
 void        BinderSlotLetGo(SlotGround* s);
+
+/* binder_done.c: whether `unit`, the eight sectors read off slot `slot`, is
+ * byte for byte a unit this kernel sealed into it since it was held unsure.
+ * By the Settle's holder, or with the Settle held still (StitchHoldStill). */
+bool        BinderSlotSealed(uint32_t slot, const uint8_t* unit);
 void        BinderSlotSort(SlotGround* s);
 uint64_t    BinderChainIndex(const RibbonQuire* q);
 uint64_t    BinderSlotGoes(const SlotGround* old);
