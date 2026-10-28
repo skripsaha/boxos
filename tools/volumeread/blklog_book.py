@@ -1,6 +1,6 @@
 """blklog_book — what a write of a machine on a format-v2 volume touched
-(blklog.Classifier, for a book): every block of the volume has an owner, and
-the record says which without a word from the machine.
+(blklog.Classifier, for a book): every block of the volume is an owner's or
+free, and the record says which without a word from the machine.
 
 A book writes three kinds of unit, and every sector of each carries its own
 head (volume_book.h BookSectorHead: kind, seq, at of `of`, a CRC32C seeded by
@@ -17,8 +17,22 @@ read first — every one whose every sector the record holds, parsed (stitch.py
 Parsed) — and a block of data is the file's whose Born or Shaped names it in
 the first stitch to land after it. Only what no stitch of the record names is
 asked of the census as of the write's epoch (bookcensus.BookCensus): a file's
-data, ground the ribbon let go, ground held for what rotted. What neither
-names is unowned — on a record of this kernel's, a defect.
+data, ground the ribbon let go, ground held for what rotted — or ground free,
+which a book's census knows as surely as its owners (what none of them names
+is free, and there is no third state): fresh data no stitch of the record
+names at all, free at once (§3.4 L-8: a Stake let go before the S0 of the
+cycle that would have named it). Its file was written again before any
+stitch named it — each Ink of a churn between two cycles names its new bytes
+on fresh ground of their own and lets the last go, and the cycle's stitch
+carries only the record its file ends on — or the record ended before the
+stitch that would have: the power went, or no cycle ran. The record cannot
+tell such data from data a stitch should have named and did not; that is
+the census's to see (a file whose runs do not cover its size, BASE_MISMATCH)
+and the reading of what the file holds. What neither names — a census that
+does not read, a book that does not mount, whose owners it cannot name, free
+ground it does not count (a bookmark's), ground past the end its head Deed
+names (a growth's, before the head) — is unowned, and on a record of this
+kernel's a defect.
 
 The front of the volume is the front, the Spine's places its slots; a slot
 that does not hold is still the slot.
@@ -27,7 +41,7 @@ that does not hold is still the slot.
 from . import bookread, stitch, tally
 from .bookread import HEAD_BYTES, SECTOR_HEAD, UNIT_SHEET, UNIT_SLOT, UNIT_STITCH
 
-BOOK_KINDS = ("stitch", "sheet", "slot", "front", "fallow", "held", "boot")
+BOOK_KINDS = ("stitch", "sheet", "slot", "front", "fallow", "held", "boot", "free")
 _UNIT_KIND = {UNIT_STITCH: "stitch", UNIT_SHEET: "sheet", UNIT_SLOT: "slot"}
 _CENSUS_KIND = {"file": "file", "boot": "boot", "fallow": "fallow", "held": "held",
                 "tally": "sheet", "ribbon": "stitch", "front": "front", "spine": "slot", "far_deed": "deed"}
@@ -128,5 +142,9 @@ class BookSectors:
                 if c.kind in _CENSUS_KIND and any(s <= vb < s + n for s, n in c.runs):
                     kind = _CENSUS_KIND[c.kind]
                     return kind, "%s, as of its epoch" % c.label, (kind, c.label)
+            if census.mount.refusal is None and census.counted and \
+                    any(s <= vb < s + n for s, n in census.free_runs):
+                return "free", "data run block %u, free ground as of its epoch: data no stitch of the record " \
+                    "names" % vb, ("free",)
         return "unowned", "data run block %u: no stitch of the record names it, nor any owner as of its " \
-            "epoch" % vb, ("v2", "data")
+            "epoch, nor free ground of a book that mounts and counts it" % vb, ("v2", "data")
