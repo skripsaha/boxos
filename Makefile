@@ -1146,7 +1146,8 @@ $(UTILS_DIR)/timezone.elf: $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 # other utilities were being linked.
 UTILS_STAMP  := $(UTILS_DIR)/.utils.stamp
 UTILS_INPUTS := $(wildcard $(UTILS_DIR)/*.c) $(wildcard $(UTILS_DIR)/*.cpp) \
-                $(wildcard $(UTILS_DIR)/*.h) $(UTILS_DIR)/Makefile
+                $(wildcard $(UTILS_DIR)/*.h) $(UTILS_DIR)/Makefile \
+                $(wildcard $(UTILS_DIR)/assemble/*.c) $(wildcard $(UTILS_DIR)/assemble/*.h)
 
 ifneq ($(words $(wildcard $(UTIL_ELFS))),$(words $(UTIL_ELFS)))
 $(shell rm -f $(UTILS_STAMP))

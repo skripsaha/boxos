@@ -60,10 +60,12 @@ CXXLDFLAGS = $(LDFLAGS) -Wl,--undefined=__boxcxx_tls_bootstrap
 BOXLIB     = ../boxlib/libbox.a
 BOXCXX     = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o
-ASSEMBLE_OBJS = assemble.o boxasm_elf.o boxasm_source.o boxasm_link.o \
-	boxasm_link_output.o
-ASSEMBLE_RUNTIME_BLOB = assemble_runtime_blob.o
-ASSEMBLE_ENTRY_BLOB = assemble_entry_blob.o
+# The assembler is several parts, kept in its own directory.
+ASSEMBLE_DIR  = assemble
+ASSEMBLE_OBJS = $(addprefix $(ASSEMBLE_DIR)/,assemble.o boxasm_elf.o \
+	boxasm_source.o boxasm_link.o boxasm_link_output.o)
+ASSEMBLE_RUNTIME_BLOB = $(ASSEMBLE_DIR)/runtime_blob.o
+ASSEMBLE_ENTRY_BLOB = $(ASSEMBLE_DIR)/entry_blob.o
 
 UTILS = help create show files tag untag name trash erase assemble \
         me info say reboot bye defrag fsck ipc_test memtag hw \
@@ -142,11 +144,11 @@ taskcenter.elf: $(BOXLIB_START) taskcenter.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/u
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d)
+-include $(wildcard *.d $(ASSEMBLE_DIR)/*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
 	nasm -f elf64 $< -o $@
 
 clean:
-	rm -f *.o *.d *.elf
+	rm -f *.o *.d *.elf $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d
