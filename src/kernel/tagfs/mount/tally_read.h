@@ -136,6 +136,25 @@ typedef enum {
 /* The digest the Tally holds for `block`, in *digest when it is NAMED. */
 TallyDigestSays TallyDigestFind(uint64_t block, uint64_t* digest, error_t* refused);
 
+/* The nodes of the DIGESTS the reads stand on that no copy of holds — a leaf
+ * read now to know it, one already known so, an inner node the mount's walk
+ * found so — weighed one at a time: the one at *leaf handed to `rot` by its
+ * place when it is so, and *leaf moved past it; *done once none is left. The
+ * nodes a Tally names as they lie (§16.4 п.5, settle/binder.c), a leaf a turn
+ * of the Settle's holder, with no TagFS lock held. OK, or the medium's,
+ * memory's or the callback's refusal. */
+error_t TallyDigestsRottenNext(uint32_t* leaf, error_t (*rot)(void* ctx, const TallyPlace* at), void* ctx,
+                               bool* done);
+
+/* The reads of a digest turned to a Tally this mount wrote: its DIGESTS
+ * leaves `leaves`, in key order — `rotten` those named as they lie — in place
+ * of the Tally's they read before (tally_read.c). The table they go in is the
+ * one the turn before left: ERR_BUSY, nothing changed, while a read that
+ * entered it then is still in its leaf — the holder turns them at its next
+ * turn rather than wait here. By the Settle's holder. OK, or ERR_NO_MEMORY
+ * with the reads left where they were. */
+error_t TallyDigestsTurn(const TallyPlace* leaves, const bool* rotten, uint32_t n);
+
 /* The kept leaves, the leaves read and the copies of pointers past the two a
  * place holds, let go — the volume's let go of. */
 void    TallyDigestsLetGo(void);

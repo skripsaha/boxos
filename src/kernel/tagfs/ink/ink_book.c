@@ -1,6 +1,7 @@
 #include "ink_internal.h"
 #include "../mount/book_mount.h"
 #include "../settle/sewing.h"
+#include "../integrity/gloss.h"
 
 /*
  * Format v2's second half of an Ink (ink_internal.h): the writer's half of
@@ -10,7 +11,11 @@
  * Jot merged into the Docket for the next stitch (docket.h), the tag index and
  * the counters moved — nothing asked of the heap, nothing laid anywhere: the
  * stitch that takes the Docket lays the records (settle/sewing.c). What the
- * Docket spends, and the records it lets go, are let go after the lock.
+ * Docket spends, and the records it lets go, are let go after the lock. A
+ * change to a file's data comes as a Plot's window spliced into the record it
+ * was loaded from, the digests of the blocks it wrote put in the Gloss under
+ * the same lock as the record (§8.1), and the ground it let go resting in
+ * Fallow (BY_RECORD) — the writer's half of BookPut.
  *
  * ‼ THE RIBBON'S ROOM IS CLAIMED UNDER THE SAME LOCK, BEFORE ANYTHING CHANGES
  * (P21, §3.6). The bytes the change's record takes at the most are counted
@@ -241,4 +246,263 @@ error_t InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord*
     }
     JotsLetGo(spent);
     return rc;
+}
+
+// ----------------------------------------------------------------------------
+// A file's data (spec_v2 §2.8 Shaped, §3.1, §8.1)
+// ----------------------------------------------------------------------------
+
+/* The blocks the Plot wrote, as the runs they lie in, for the Gloss's room: a
+ * new array of *count — NULL with 0 for none — or ERR_NO_MEMORY. */
+static error_t InkBookWritten(const Plot* p, Strip** out, uint32_t* count)
+{
+    *out   = NULL;
+    *count = 0;
+    if (!p->digest_count)
+        return OK;
+    Strip* runs = kmalloc(sizeof(Strip) * p->digest_count);
+    if (!runs)
+        return ERR_NO_MEMORY;
+    for (uint32_t i = 0; i < p->digest_count; i++) {
+        uint64_t b = p->digests[i].block;
+        if (*count && runs[*count - 1u].start + runs[*count - 1u].count == b)
+            runs[*count - 1u].count++;
+        else
+            runs[(*count)++] = (Strip){ .start = b, .count = 1, .kind = STRIP_DATA };
+    }
+    *out = runs;
+    return OK;
+}
+
+/* The bytes the change's Shaped claims on the ribbon: its splices, every Strip
+ * they put in, and a digest a block the Plot wrote (DocketClaimOfShaped). */
+static uint64_t InkBookPlotClaim(const Plot* p, const BookSplice* sp, uint64_t nsp)
+{
+    uint64_t runs = 0;
+    for (uint64_t i = 0; i < nsp; i++)
+        runs += sp[i].ninsert;
+    return DocketClaimOfShaped(runs, nsp, p->digest_count);
+}
+
+/*
+ * What an Ink of a Plot makes before the lock: the splices of its window, the
+ * record they build, the room for the digests it wrote, and the ground the
+ * record stops naming resting in a Fallow node — with the Docket's TAKEs as
+ * they stood when the first splice was made to go on the run before it
+ * (`joined`, InkBookPlotJoin).
+ */
+typedef struct {
+    BookSplice* sp;
+    uint64_t    nsp;
+    Strip*      joined;
+    uint64_t    takes;
+    FileRecord* rec;
+    GlossRoom   gloss;
+    FallowNode* fallow;
+    uint64_t    claim;
+} InkBookWork;
+
+static void InkBookWorkLetGo(InkBookWork* w)
+{
+    GlossRoomLetGo(&w->gloss);
+    FileRecordRelease(w->rec);
+    FallowNodeLetGo(w->fallow);
+    kfree(w->joined);
+    kfree(w->sp);
+}
+
+/*
+ * ‼ APPENDS A CYCLE TAKES ARE ONE RUN (§3.7: "продлить последний вставленный
+ * прогон"). Each append's window splices its own run in after the file's last,
+ * and the record would keep one Strip an append — the stitch one run an append
+ * in its Shaped, the Tally one in FILES — though the Allotment laid each on the
+ * block that goes on from the one before. So the first run a change puts in
+ * grows the record's Strip that ends where it begins when that Strip goes on
+ * on the medium into it, both are of this mounting's writing (birth 0), and
+ * the record the next stitch lays the change against does not name its ground
+ * (DocketBaseLacks): ground no stitch named yet, which the stitch puts in whole
+ * — never a run a settled stitch named, which the stitch would have to say
+ * was taken out and put in again. A TAKE between this look and the Ink makes
+ * that ground the stitch's: the Ink, under its lock, finds the Docket's TAKEs
+ * moved and goes round, and the next look grows nothing.
+ */
+static error_t InkBookPlotJoin(const Plot* p, const FileRecord* cur, InkBookWork* w)
+{
+    StripWalk w_at;
+    Strip     last;
+    uint64_t  begins = 0;
+    if (w->nsp == 0 || w->sp[0].ninsert == 0 || w->sp[0].at == 0)
+        return OK;
+    const Strip* in = &w->sp[0].insert[0];
+    if (in->kind != STRIP_DATA || !StripWalkAt(cur, w->sp[0].at - 1u, &w_at, &begins) ||
+        !StripWalkNext(&w_at, &last) || last.kind != STRIP_DATA || begins + last.count != w->sp[0].at ||
+        last.start + last.count != in->start || last.birth != 0 || in->birth != 0 ||
+        (uint64_t)last.count + in->count > UINT32_MAX)
+        return OK;
+    TagFSLockTake(&InkState()->lock);
+    bool lacks = DocketBaseLacks(p->fid, begins, last.start);
+    w->takes   = DocketTakes();
+    TagFSLockDrop(&InkState()->lock);
+    if (!lacks)
+        return OK;
+    if (!(w->joined = kmalloc(sizeof(Strip) * w->sp[0].ninsert)))
+        return ERR_NO_MEMORY;
+    memcpy(w->joined, w->sp[0].insert, sizeof(Strip) * w->sp[0].ninsert);
+    w->joined[0].start  = last.start;
+    w->joined[0].count += last.count;
+    w->sp[0].at        -= last.count;
+    w->sp[0].remove    += last.count;
+    w->sp[0].insert     = w->joined;
+    return OK;
+}
+
+#if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
+/* Whether the ground the record stops naming is the ground the Plot let go: a
+ * disagreement said as a DEFECT, and stopped at under STRICT. */
+static bool InkBookFreedAgrees(const Plot* p, Strip* freed, uint64_t nfreed)
+{
+    Strip*   plots  = kmalloc(sizeof(Strip) * (p->freed_count ? p->freed_count : 1u));
+    uint64_t nplots = 0;
+    bool     same   = true;
+    if (!plots)
+        return true;
+    if (p->freed_count)
+        memcpy(plots, p->freed, sizeof(Strip) * p->freed_count);
+    nplots = StripsAsGround(plots, p->freed_count);
+    nfreed = StripsAsGround(freed, nfreed);
+    same   = nplots == nfreed && (nplots == 0 || memcmp(plots, freed, sizeof(Strip) * nplots) == 0);
+    kfree(plots);
+    if (same)
+        return true;
+#if CONFIG_STRICT
+    panic("[TagFS] DEFECT: file %llu: the ground its record stops naming is not the ground its Plot let go",
+          (unsigned long long)p->fid);
+#endif
+    kprintf("[TagFS] DEFECT: file %llu: the ground its record stops naming is not the ground its Plot let go — "
+            "the record's is what rests\n", (unsigned long long)p->fid);
+    return false;
+}
+#endif
+
+/*
+ * ‼ THE GROUND THAT RESTS IS THE GROUND THE RECORD STOPPED NAMING (§3.7, the
+ * one door BookPut: "посчитать освобождённые прогоны (old.runs − new.runs)").
+ * The Plot keeps its own list of what it let go, and a slip in it — a run of
+ * a hole taken for ground — would put another owner's blocks to rest and, once
+ * they ripen, hand them out again. The record knows what it owned: the Fallow
+ * node is made of the DATA ground the old record names and the new one does
+ * not, as the mount's replay of the same Shaped frees it, and nothing else.
+ */
+static error_t InkBookPlotBuilt(const Plot* p, const FileRecord* cur, InkBookWork* w)
+{
+    Strip*   freed  = NULL;
+    Strip*   written = NULL;
+    uint64_t nfreed = 0;
+    uint32_t nwritten = 0;
+    error_t  rc     = PlotConveyance(p, cur, &w->sp, &w->nsp);
+    if (rc == OK)
+        rc = InkBookPlotJoin(p, cur, w);
+    if (rc == OK)
+        rc = FileRecordSplice(cur, w->sp, w->nsp, p->size, rtc_get_unix64() * 1000000000ull, &w->rec, &freed,
+                              &nfreed);
+#if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
+    if (rc == OK)
+        (void)InkBookFreedAgrees(p, freed, nfreed);
+#endif
+    if (rc == OK && nfreed > UINT32_MAX)
+        rc = ERR_NO_MEMORY;
+    if (rc == OK && nfreed && !(w->fallow = FallowNodeMake(freed, (uint32_t)nfreed, FALLOW_BY_RECORD, p->fid)))
+        rc = ERR_NO_MEMORY;
+    if (rc == OK && (rc = InkBookWritten(p, &written, &nwritten)) == OK)
+        rc = GlossRoomFor(written, nwritten, &w->gloss);
+    if (rc == OK)
+        w->claim = InkBookPlotClaim(p, w->sp, w->nsp);
+    kfree(freed);
+    kfree(written);
+    return rc;
+}
+
+/* The room the Plot holds on the ribbon for its record: none past a mounting
+ * it was not held of. */
+static uint64_t InkBookPlotHeld(const Plot* p)
+{
+    return p->mount_epoch == tagfs_mount_epoch() ? p->ribbon_held : 0;
+}
+
+static error_t InkBookPlotLocked(const Plot* p, const RecordWhere* was, InkBookWork* w, Jot* j, Jot** spent,
+                                 InkReceipt* out)
+{
+    TagFSState* fs = InkState();
+    error_t     rc = InkVolumeTakes();
+    if (rc != OK)
+        return rc;
+    RecordWhere now, gone;
+    FileRecord* still = FileMapRecordHold(fs->files, p->fid, &now);
+    if (!still)
+        return ERR_FILE_NOT_FOUND;
+    if (now.gen != was->gen || (w->joined && DocketTakes() != w->takes))
+        rc = INK_AGAIN;
+    else
+        rc = RibbonClaimHeld(InkBookPlotHeld(p), w->claim);
+    if (rc != OK) {
+        FileRecordRelease(still);   /* the map holds it: nothing freed here */
+        return rc;
+    }
+    uint64_t     gen   = InkGenNextLocked();
+    RecordWhere  where = { .gen = gen, .shape = gen };
+    FileMapStake none  = { .count = 0 };
+    (void)FileMapRecordPut(fs->files, p->fid, w->rec, &where, 0, &none, &gone);
+    w->rec = NULL;
+    j->was = still;
+    j->now = FileMapRecordHold(fs->files, p->fid, NULL);
+    DocketPutLocked(j, spent);
+    EndpaperInked(w->sp, w->nsp);
+    for (uint32_t i = 0; i < p->digest_count; i++)
+        GlossPut(&w->gloss, p->digests[i].block, p->digests[i].digest);
+    if (w->fallow) {
+        FallowAdd(w->fallow, gen);
+        w->fallow = NULL;
+    }
+    InkDataNeedRaiseLocked(p->data_need);
+    InkGenLaidLocked(gen);
+    out->gen = gen;
+    return OK;
+}
+
+error_t InkBookPlot(const Plot* p, const FileRecord* cur, const RecordWhere* was, uint64_t small_us,
+                    InkReceipt* out)
+{
+    InkBookWork w     = { 0 };
+    Jot*        spent = NULL;
+    Jot*        j     = NULL;
+    error_t     rc    = InkBookPlotBuilt(p, cur, &w);
+    if (rc == OK && !(j = JotMake(JOT_SHAPED, p->fid, NULL, NULL)))
+        rc = ERR_NO_MEMORY;
+    if (rc == OK) {
+        w.rec->small_append_us = small_us;
+        TagFSLockTake(&InkState()->lock);
+        rc = InkBookPlotLocked(p, was, &w, j, &spent, out);
+        TagFSLockDrop(&InkState()->lock);
+        RibbonClaimSay(rc);
+    }
+    if (rc != OK)
+        JotsLetGo(j);
+    JotsLetGo(spent);
+    InkBookWorkLetGo(&w);
+    return rc;
+}
+
+void InkBookPlotNext(Plot* p)
+{
+    FileRecordRelease(p->rec);
+    p->rec          = FileMapRecordHold(InkState()->files, p->fid, NULL);
+    p->run_count    = 0;
+    p->windowed     = false;
+    p->window_was   = 0;
+    p->window_at    = p->rec ? p->rec->blocks : p->blocks;
+    p->blocks       = p->rec ? p->rec->blocks : p->blocks;
+    p->blocks_before = p->blocks;
+    p->runs_before  = p->rec ? p->rec->strip_count : 0;
+    p->digest_count = 0;
+    p->ribbon_held  = 0;    /* the Ink took the hold for its claim */
 }

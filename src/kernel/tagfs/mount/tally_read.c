@@ -593,28 +593,46 @@ error_t TallyRead(uint64_t tree, const SpineRoot* root, bool leaves, const Tally
 // DIGESTS: kept by leaf at the mount, read by leaf when a block is
 // ----------------------------------------------------------------------------
 
-/* A leaf of DIGESTS as the mount's walk named it — or a range of the tree no
- * copy of whose node reads. Written at the mount with the door shut, read by
- * every core afterwards: never changed while the volume is up. */
+/* A leaf of DIGESTS as a Tally names it — or a range of the tree no copy of
+ * whose node reads. */
 typedef struct {
     TallyPlace place;
     bool       rotten;
 } TallyDigestLeaf;
 
-static TallyDigestLeaf* s_leaves;
-static uint32_t         s_leaf_count;
-static uint32_t         s_leaf_cap;
+/*
+ * ‼ TWO TABLES OF LEAVES, AND A READ HOLDS THE ONE IT STARTED ON. The mount
+ * lays the leaves of the Tally it stands on down with the door shut; a Tally
+ * this mount writes turns every read after it to its own DIGESTS (the Gloss
+ * then lets go of what that DIGESTS names, settle/binder.c). Reads run on
+ * every core with no lock held — and a leaf may be read off the medium — so
+ * the leaves are two tables: the reads take the one `s_table_at` names,
+ * counted in it while they are in it, and a Tally lays its leaves into the
+ * other only once no read is left in it, then names it. A read that counted
+ * itself into a table no longer named goes again on the one that is.
+ */
+typedef struct {
+    TallyDigestLeaf*  leaves;
+    uint32_t          count;
+    uint32_t          cap;
+    volatile uint8_t* said;          /* a leaf whose rot was said: once each */
+    volatile uint32_t readers;
+} TallyDigestTable;
+
+static TallyDigestTable  s_tables[2];
+static volatile uint32_t s_table_at;
 
 /*
  * The leaves read lately, each as its stream — four, the most recent kept:
  * a read walks a file block by block, and a file's blocks lie in a row, which
  * one leaf of up to DIGEST_ITEM_MOST digests to an element covers. Under a
  * leaf lock of its own, which holds nothing but this table: the leaf is read
- * with no lock held, and put in after.
+ * with no lock held, and put in after. A sheet is of the table its leaf is.
  */
 #define TALLY_DIGEST_SHEETS  4u
 
 typedef struct {
+    uint32_t table;
     uint32_t leaf;        /* the index of the leaf it is; UINT32_MAX: empty */
     uint8_t* stream;      /* NULL: the leaf does not read */
     uint32_t room;
@@ -623,16 +641,16 @@ typedef struct {
 
 static TagFSLock        s_digest_lock = TAGFS_LOCK_INIT("digests", LOCK_RANK_LEAF);
 static TallyDigestSheet s_sheets[TALLY_DIGEST_SHEETS] = {
-    { UINT32_MAX, NULL, 0, 0 }, { UINT32_MAX, NULL, 0, 0 },
-    { UINT32_MAX, NULL, 0, 0 }, { UINT32_MAX, NULL, 0, 0 },
+    { 0, UINT32_MAX, NULL, 0, 0 }, { 0, UINT32_MAX, NULL, 0, 0 },
+    { 0, UINT32_MAX, NULL, 0, 0 }, { 0, UINT32_MAX, NULL, 0, 0 },
 };
 static uint64_t         s_sheet_tick;
-static volatile uint8_t* s_leaf_said;     /* a leaf whose rot was said: once each */
 
-error_t TallyDigestsKeep(const TallyPlace* leaf, bool rotten)
+/* A leaf more into table `t`. ERR_NO_MEMORY. */
+static error_t TallyDigestPut(TallyDigestTable* t, const TallyPlace* leaf, bool rotten)
 {
-    if (s_leaf_count == s_leaf_cap) {
-        uint32_t         cap  = s_leaf_cap ? s_leaf_cap * 2u : 32u;
+    if (t->count == t->cap) {
+        uint32_t         cap  = t->cap ? t->cap * 2u : 32u;
         TallyDigestLeaf* more = kmalloc(sizeof(TallyDigestLeaf) * cap);
         uint8_t*         said = kmalloc(cap);
         if (!more || !said) {
@@ -641,33 +659,103 @@ error_t TallyDigestsKeep(const TallyPlace* leaf, bool rotten)
             return ERR_NO_MEMORY;
         }
         memset(said, 0, cap);
-        if (s_leaf_count)
-            memcpy(more, s_leaves, sizeof(TallyDigestLeaf) * s_leaf_count);
-        kfree(s_leaves);
-        kfree((void*)s_leaf_said);
-        s_leaves    = more;
-        s_leaf_said = said;
-        s_leaf_cap  = cap;
+        if (t->count) {
+            memcpy(more, t->leaves, sizeof(TallyDigestLeaf) * t->count);
+            memcpy(said, (const uint8_t*)t->said, t->count);
+        }
+        kfree(t->leaves);
+        kfree((void*)t->said);
+        t->leaves = more;
+        t->said   = said;
+        t->cap    = cap;
     }
-    s_leaves[s_leaf_count++] = (TallyDigestLeaf){ *leaf, rotten };
+    t->leaves[t->count++] = (TallyDigestLeaf){ *leaf, rotten };
     return OK;
 }
 
-/* The leaf whose range holds `block` — the last whose first key is not past
- * it — or UINT32_MAX. Kept in the walk's order, which is the keys'. */
-static uint32_t TallyDigestLeafOf(uint64_t block)
+error_t TallyDigestsKeep(const TallyPlace* leaf, bool rotten)
 {
-    uint32_t lo = 0, hi = s_leaf_count;
+    return TallyDigestPut(&s_tables[s_table_at], leaf, rotten);
+}
+
+/* The table a read takes, counted into it until TallyDigestLeave. */
+static TallyDigestTable* TallyDigestEnter(void)
+{
+    for (;;) {
+        uint32_t          at = __atomic_load_n(&s_table_at, __ATOMIC_SEQ_CST);
+        TallyDigestTable* t  = &s_tables[at];
+        __atomic_add_fetch(&t->readers, 1u, __ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&s_table_at, __ATOMIC_SEQ_CST) == at)
+            return t;
+        __atomic_sub_fetch(&t->readers, 1u, __ATOMIC_SEQ_CST);
+    }
+}
+
+static void TallyDigestLeave(TallyDigestTable* t)
+{
+    __atomic_sub_fetch(&t->readers, 1u, __ATOMIC_SEQ_CST);
+}
+
+static void TallyDigestTableLetGo(TallyDigestTable* t)
+{
+    kfree(t->leaves);
+    kfree((void*)t->said);
+    t->leaves = NULL;
+    t->said   = NULL;
+    t->count = t->cap = 0;
+}
+
+/* Every sheet of table `table` — or of both, UINT32_MAX — let go. */
+static void TallyDigestSheetsLetGo(uint32_t table)
+{
+    uint8_t* gone[TALLY_DIGEST_SHEETS];
+    TagFSLockTake(&s_digest_lock);
+    for (uint32_t i = 0; i < TALLY_DIGEST_SHEETS; i++) {
+        gone[i] = NULL;
+        if (table != UINT32_MAX && s_sheets[i].table != table)
+            continue;
+        gone[i]     = s_sheets[i].stream;
+        s_sheets[i] = (TallyDigestSheet){ 0, UINT32_MAX, NULL, 0, 0 };
+    }
+    TagFSLockDrop(&s_digest_lock);
+    for (uint32_t i = 0; i < TALLY_DIGEST_SHEETS; i++)
+        kfree(gone[i]);
+}
+
+error_t TallyDigestsTurn(const TallyPlace* leaves, const bool* rotten, uint32_t n)
+{
+    uint32_t          other = __atomic_load_n(&s_table_at, __ATOMIC_SEQ_CST) ^ 1u;
+    TallyDigestTable* t     = &s_tables[other];
+    if (__atomic_load_n(&t->readers, __ATOMIC_SEQ_CST))
+        return ERR_BUSY;
+    TallyDigestSheetsLetGo(other);
+    TallyDigestTableLetGo(t);
+    for (uint32_t i = 0; i < n; i++) {
+        error_t rc = TallyDigestPut(t, &leaves[i], rotten[i]);
+        if (rc != OK) {
+            TallyDigestTableLetGo(t);
+            return rc;
+        }
+    }
+    __atomic_store_n(&s_table_at, other, __ATOMIC_SEQ_CST);
+    return OK;
+}
+
+/* The leaf of table `t` whose range holds `block` — the last whose first key
+ * is not past it — or UINT32_MAX. Kept in the keys' order. */
+static uint32_t TallyDigestLeafOf(const TallyDigestTable* t, uint64_t block)
+{
+    uint32_t lo = 0, hi = t->count;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;
-        if (!s_leaves[mid].place.has_lo || s_leaves[mid].place.lo.k1 <= block)
+        if (!t->leaves[mid].place.has_lo || t->leaves[mid].place.lo.k1 <= block)
             lo = mid + 1u;
         else
             hi = mid;
     }
     if (lo == 0)
         return UINT32_MAX;
-    const TallyPlace* p = &s_leaves[lo - 1u].place;
+    const TallyPlace* p = &t->leaves[lo - 1u].place;
     return !p->has_hi || block < p->hi.k1 ? lo - 1u : UINT32_MAX;
 }
 
@@ -701,10 +789,10 @@ static int TallyDigestIn(const uint8_t* s, uint32_t room, uint64_t block, uint64
 }
 
 /* A leaf's rot, said once — by why, its blocks read unchecked (§4.5 п.3). */
-static void TallyDigestRotSay(uint32_t leaf, const char* why)
+static void TallyDigestRotSay(TallyDigestTable* t, uint32_t leaf, const char* why)
 {
-    const TallyPlace* p = &s_leaves[leaf].place;
-    if (__atomic_exchange_n(&s_leaf_said[leaf], 1u, __ATOMIC_ACQ_REL))
+    const TallyPlace* p = &t->leaves[leaf].place;
+    if (__atomic_exchange_n(&t->said[leaf], 1u, __ATOMIC_ACQ_REL))
         return;
     kprintf("[TagFS] the DIGESTS range of blocks [%llu, %s%llu) rots in every copy (%s): those blocks "
             "read unchecked\n", (unsigned long long)(p->has_lo ? p->lo.k1 : 0), p->has_hi ? "" : "the end, ",
@@ -714,34 +802,35 @@ static void TallyDigestRotSay(uint32_t leaf, const char* why)
 /* Leaf `leaf` read off the medium: OK with its stream in *stream — NULL when
  * it does not read in any copy, said — or the refusal: memory's, or the
  * medium's. */
-static error_t TallyDigestLeafRead(uint32_t leaf, uint8_t** stream, uint32_t* room)
+static error_t TallyDigestLeafRead(TallyDigestTable* t, uint32_t leaf, uint8_t** stream, uint32_t* room)
 {
     TallyReading* r = kmalloc(sizeof(TallyReading));
     *stream = NULL;
     if (!r)
         return ERR_NO_MEMORY;
-    error_t rc = TallyNodeRead(&s_leaves[leaf].place, &r->node, &r->said);
+    error_t rc = TallyNodeRead(&t->leaves[leaf].place, &r->node, &r->said);
     if (rc == OK && r->node.unit.whole) {
         *stream = r->node.unit.stream;
         *room   = r->node.unit.count * BOOK_PAYLOAD_BYTES;
         r->node.unit.stream = NULL;
     } else if (rc == OK) {
         TallyCopiesWords(&r->said, r->words, sizeof(r->words));
-        TallyDigestRotSay(leaf, r->words);
+        TallyDigestRotSay(t, leaf, r->words);
     }
     TallyNodeLetGo(&r->node);
     kfree(r);
     return rc;
 }
 
-/* Whether leaf `leaf` is in the table, its digest of `block` asked under the
- * lock: 1 found, 0 not named, -1 its element does not read, -2 not held. */
-static int TallyDigestCached(uint32_t leaf, uint64_t block, uint64_t* digest)
+/* Whether leaf `leaf` of table `table` is held, its digest of `block` asked
+ * under the lock: 1 found, 0 not named, -1 its element does not read, -2 not
+ * held. */
+static int TallyDigestCached(uint32_t table, uint32_t leaf, uint64_t block, uint64_t* digest)
 {
     int found = -2;
     TagFSLockTake(&s_digest_lock);
     for (uint32_t i = 0; i < TALLY_DIGEST_SHEETS; i++) {
-        if (s_sheets[i].leaf == leaf && s_sheets[i].stream) {
+        if (s_sheets[i].table == table && s_sheets[i].leaf == leaf && s_sheets[i].stream) {
             s_sheets[i].used = ++s_sheet_tick;
             found = TallyDigestIn(s_sheets[i].stream, s_sheets[i].room, block, digest);
             break;
@@ -751,41 +840,43 @@ static int TallyDigestCached(uint32_t leaf, uint64_t block, uint64_t* digest)
     return found;
 }
 
-/* A leaf read with no lock held, put in the table in place of the least
- * lately used — the one it pushes out let go of after the lock. */
-static void TallyDigestCache(uint32_t leaf, uint8_t* stream, uint32_t room)
+/* A leaf read with no lock held, put in in place of the least lately used —
+ * the one it pushes out let go of after the lock. */
+static void TallyDigestCache(uint32_t table, uint32_t leaf, uint8_t* stream, uint32_t room)
 {
     uint8_t* gone = stream;
     TagFSLockTake(&s_digest_lock);
     uint32_t oldest = 0;
     bool     held   = false;
     for (uint32_t i = 0; i < TALLY_DIGEST_SHEETS; i++) {
-        held |= s_sheets[i].leaf == leaf && s_sheets[i].stream;
+        held |= s_sheets[i].table == table && s_sheets[i].leaf == leaf && s_sheets[i].stream;
         if (s_sheets[i].used < s_sheets[oldest].used)
             oldest = i;
     }
     if (!held) {
         gone = s_sheets[oldest].stream;
-        s_sheets[oldest] = (TallyDigestSheet){ leaf, stream, room, ++s_sheet_tick };
+        s_sheets[oldest] = (TallyDigestSheet){ table, leaf, stream, room, ++s_sheet_tick };
     }
     TagFSLockDrop(&s_digest_lock);
     kfree(gone);
 }
 
-TallyDigestSays TallyDigestFind(uint64_t block, uint64_t* digest, error_t* refused)
+/* TallyDigestFind on table `t`, the read counted into it. */
+static TallyDigestSays TallyDigestFindIn(TallyDigestTable* t, uint64_t block, uint64_t* digest, error_t* refused)
 {
-    uint32_t leaf = TallyDigestLeafOf(block);
+    uint32_t table = (uint32_t)(t - s_tables);
+    uint32_t leaf  = TallyDigestLeafOf(t, block);
     if (leaf == UINT32_MAX)
         return TALLY_DIGEST_UNNAMED;
-    if (s_leaves[leaf].rotten) {
-        TallyDigestRotSay(leaf, "a node above it does not read");
+    if (t->leaves[leaf].rotten) {
+        TallyDigestRotSay(t, leaf, "a node above it does not read");
         return TALLY_DIGEST_ROTTEN;
     }
-    int found = TallyDigestCached(leaf, block, digest);
+    int found = TallyDigestCached(table, leaf, block, digest);
     if (found == -2) {
         uint32_t room   = 0;
         uint8_t* stream = NULL;
-        error_t  rc     = TallyDigestLeafRead(leaf, &stream, &room);
+        error_t  rc     = TallyDigestLeafRead(t, leaf, &stream, &room);
         if (rc != OK) {
             *refused = rc;
             return TALLY_DIGEST_UNREAD;
@@ -793,22 +884,53 @@ TallyDigestSays TallyDigestFind(uint64_t block, uint64_t* digest, error_t* refus
         if (!stream)
             return TALLY_DIGEST_ROTTEN;
         found = TallyDigestIn(stream, room, block, digest);
-        TallyDigestCache(leaf, stream, room);
+        TallyDigestCache(table, leaf, stream, room);
     }
     if (found < 0) {
-        TallyDigestRotSay(leaf, "its element does not read");
+        TallyDigestRotSay(t, leaf, "its element does not read");
         return TALLY_DIGEST_ROTTEN;
     }
     return found == 1 ? TALLY_DIGEST_NAMED : TALLY_DIGEST_UNNAMED;
 }
 
+TallyDigestSays TallyDigestFind(uint64_t block, uint64_t* digest, error_t* refused)
+{
+    TallyDigestTable* t    = TallyDigestEnter();
+    TallyDigestSays   says = TallyDigestFindIn(t, block, digest, refused);
+    TallyDigestLeave(t);
+    return says;
+}
+
+error_t TallyDigestsRottenNext(uint32_t* leaf, error_t (*rot)(void* ctx, const TallyPlace* at), void* ctx,
+                               bool* done)
+{
+    TallyDigestTable* t  = TallyDigestEnter();
+    error_t           rc = OK;
+    if (*leaf < t->count) {
+        bool rotten = t->leaves[*leaf].rotten;
+        if (!rotten) {
+            uint8_t* s    = NULL;
+            uint32_t room = 0;
+            rc     = TallyDigestLeafRead(t, *leaf, &s, &room);
+            rotten = rc == OK && s == NULL;
+            kfree(s);
+        }
+        if (rc == OK && rotten)
+            rc = rot(ctx, &t->leaves[*leaf].place);
+        *leaf += rc == OK;
+    }
+    *done = rc == OK && *leaf >= t->count;
+    TallyDigestLeave(t);
+    return rc;
+}
+
 /* One leaf's elements, each a run of digested blocks — and one that does not
  * read, the range up to the next element's key, or the leaf's end. */
-static void TallyDigestsOf(uint32_t leaf, const uint8_t* s, uint32_t room,
+static void TallyDigestsOf(TallyDigestTable* t, uint32_t leaf, const uint8_t* s, uint32_t room,
                            void (*run)(void* ctx, uint64_t start, uint64_t count),
                            void (*rot)(void* ctx, uint64_t start, uint64_t count, bool to_end), void* ctx)
 {
-    const TallyPlace* p = &s_leaves[leaf].place;
+    const TallyPlace* p = &t->leaves[leaf].place;
     NodeHead          h;
     TallyKey          prev, key;
     uint32_t          at = 0, body, len;
@@ -827,7 +949,7 @@ static void TallyDigestsOf(uint32_t leaf, const uint8_t* s, uint32_t room,
         if (TallyDigestsGet(s + body, len, &n, &d) != TALLY_BODY_BROKEN) {
             run(ctx, key.k1, n);
         } else {
-            TallyDigestRotSay(leaf, "its element does not read");
+            TallyDigestRotSay(t, leaf, "its element does not read");
             broken = key.k1;
             open   = true;
         }
@@ -839,21 +961,22 @@ static void TallyDigestsOf(uint32_t leaf, const uint8_t* s, uint32_t room,
 error_t TallyDigestsEach(void (*run)(void* ctx, uint64_t start, uint64_t count),
                          void (*rot)(void* ctx, uint64_t start, uint64_t count, bool to_end), void* ctx)
 {
-    for (uint32_t leaf = 0; leaf < s_leaf_count; leaf++) {
-        const TallyPlace* p    = &s_leaves[leaf].place;
+    TallyDigestTable* t = &s_tables[s_table_at];
+    for (uint32_t leaf = 0; leaf < t->count; leaf++) {
+        const TallyPlace* p    = &t->leaves[leaf].place;
         uint64_t          lo   = p->has_lo ? p->lo.k1 : 0;
         uint32_t          room = 0;
         uint8_t*          s    = NULL;
-        error_t           rc   = s_leaves[leaf].rotten ? OK : TallyDigestLeafRead(leaf, &s, &room);
+        error_t           rc   = t->leaves[leaf].rotten ? OK : TallyDigestLeafRead(t, leaf, &s, &room);
         if (rc != OK)
             return rc;
         if (!s) {
-            if (s_leaves[leaf].rotten)
-                TallyDigestRotSay(leaf, "a node above it does not read");
+            if (t->leaves[leaf].rotten)
+                TallyDigestRotSay(t, leaf, "a node above it does not read");
             rot(ctx, lo, p->has_hi && p->hi.k1 > lo ? p->hi.k1 - lo : 0, !p->has_hi);
             continue;
         }
-        TallyDigestsOf(leaf, s, room, run, rot, ctx);
+        TallyDigestsOf(t, leaf, s, room, run, rot, ctx);
         kfree(s);
     }
     return OK;
@@ -861,20 +984,10 @@ error_t TallyDigestsEach(void (*run)(void* ctx, uint64_t start, uint64_t count),
 
 void TallyDigestsLetGo(void)
 {
-    TagFSLockTake(&s_digest_lock);
-    uint8_t* gone[TALLY_DIGEST_SHEETS];
-    for (uint32_t i = 0; i < TALLY_DIGEST_SHEETS; i++) {
-        gone[i]     = s_sheets[i].stream;
-        s_sheets[i] = (TallyDigestSheet){ UINT32_MAX, NULL, 0, 0 };
-    }
-    TagFSLockDrop(&s_digest_lock);
-    for (uint32_t i = 0; i < TALLY_DIGEST_SHEETS; i++)
-        kfree(gone[i]);
-    kfree(s_leaves);
-    kfree((void*)s_leaf_said);
-    s_leaves     = NULL;
-    s_leaf_said  = NULL;
-    s_leaf_count = s_leaf_cap = 0;
+    TallyDigestSheetsLetGo(UINT32_MAX);
+    TallyDigestTableLetGo(&s_tables[0]);
+    TallyDigestTableLetGo(&s_tables[1]);
+    s_table_at = 0;
     kfree(s_copies);
     s_copies       = NULL;
     s_copies_count = s_copies_cap = 0;

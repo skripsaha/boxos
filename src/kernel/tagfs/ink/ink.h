@@ -171,9 +171,7 @@ void     InkReadOnlyLift(void);
  * has: OK holds those Coineds' bytes on the ribbon (*held) until the tags hold
  * their ids and the registry counts them, InkBookHeldLetGo letting the hold go
  * after the interning, inside the same stay behind the door. OK on format
- * v1, which interns first as it always has. A change to a file's data a book
- * refuses when it is loaded, before a byte moves (InkMayChange,
- * StitchFilesRefused). */
+ * v1, which interns first as it always has. */
 error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held);
 void    InkBookHeldLetGo(uint64_t held);
 

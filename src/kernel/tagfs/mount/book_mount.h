@@ -5,6 +5,7 @@
 #include "spine_read.h"
 #include "tally_read.h"
 #include "ribbon.h"
+#include "../settle/endpaper_fact.h"
 
 /*
  * MountReadBook — a format-v2 volume's mount: its book read the way the spec
@@ -20,9 +21,9 @@
  * said and left to the writer that can lay them down (§16.1 п.2): the volume
  * stands under glass (tagfs.h, UnderGlass) for whatever the book carries that
  * no writer of this kernel could carry on. Otherwise this kernel's writer goes
- * on where the ribbon ends (settle/sewing.h): stitches of files made, named,
- * tagged and given up, of tags and of the Use Context; the data of a file it
- * does not yet lay into a book, and it writes no Tally.
+ * on where the ribbon ends (settle/sewing.h): stitches of files made, written,
+ * named, tagged and given up, of tags and of the Use Context; and a whole
+ * Tally of it in time (settle/binder.h), named by a slot of the Spine.
  *
  * ‼ NOT A BYTE IS WRITTEN BY THE MOUNT, before the door or after it: no growth
  * (a book grows only by a mount that writes it, §16.1 п.4), no Ledger, no
@@ -119,7 +120,34 @@ typedef struct {
     uint32_t       cap;
     uint64_t       covered;   /* the blocks its Parcels covered, in a row from block 0 */
     uint64_t       gen;       /* the seq of the stitch that last changed it (§2.8) */
+    uint64_t*      parcel_b;  /* each Parcel that read: the file block it begins at, ... */
+    uint8_t**      parcel_body;/* ... its body as it lay, and the seq of the node it lay in — kept */
+    uint32_t*      parcel_len;/* for the next Tally while the file may still be locked */
+    uint64_t*      parcel_seq;
+    uint32_t       nparcels;
+    uint32_t       capparcels;
+    bool           parcels_lost;/* memory would not keep them: no Tally carries it, were it locked */
 } BookFile;
+
+/*
+ * A file the Tally names and the mount locked by name — what of it read, kept
+ * for the next Tally to name again as it lay (settle/binder_nodes.c): a file
+ * locked stays locked, its ground held, across a Tally this kernel writes
+ * (§16.4 п.5). Its header when it read, and each Parcel that read: the file
+ * block it begins at, its body as it lay and the seq of its node — its runs
+ * read again from it by that seq, so each is named with the birth it had.
+ */
+typedef struct {
+    uint64_t      fid;
+    bool          head;
+    TagFSMetadata meta;      /* the header: its name and tags this list's own */
+    uint64_t      gen;
+    uint64_t*     parcel_b;
+    uint8_t**     parcel_body;
+    uint32_t*     parcel_len;
+    uint64_t*     parcel_seq;
+    uint32_t      nparcels;
+} BookKeptFile;
 
 /* A tag the book names that the registry cannot hold (BookTagHeld): its id
  * and its text, kept so a record that wears it finds it known — volume-read
@@ -163,8 +191,17 @@ typedef struct {
     uint32_t       naside;
     uint32_t       capaside;
     uint32_t       files_print;  /* the print of the live files, the mount done (BookFilesLaid) */
+    uint64_t       boot_fid;     /* the file whose blocks the loader reads the kernel by; 0 for none (ink.c) */
     uint32_t       use_print;    /* the print of the Use Context memory holds, and its bytes */
     uint64_t       use_bytes;
+    BookKeptFile*  kept;         /* the files locked by name, by fid: what of them read */
+    uint32_t       nkept;
+    uint32_t       capkept;
+    uint64_t       tally_blocks; /* the Tally stood on, one copy: what the next is reckoned to cost (binder.h) */
+    uint64_t       ribbon_useful;/* the useful bytes of the stitches replayed past it (§4.2) */
+    bool           binder_short; /* memory would not hold what the slots hold for the writer of a Tally */
+    EndpaperLaid   laid;         /* what the Tally stood on laid of FILES, TAGS and DIGESTS (endpaper_fact.h) */
+    uint64_t       laid_tree;    /* the tree of it being walked */
 } BookMount;
 
 extern BookMount g_book;
@@ -221,9 +258,11 @@ error_t BookUseRecalled(const uint8_t* text, uint64_t len);
 bool    BookRotLocks(uint64_t fid);
 error_t BookBornNoted(uint64_t fid);
 
-/* A file of the map locked: said with `why`, out of the map and its tags, its
- * id never given again, its DATA ground held (tally_leaves.c). OK or
- * ERR_NO_MEMORY. */
+/* A file of the map locked by the replay of the ribbon: said with `why`, out
+ * of the map and its tags, its id never given again, its DATA ground held —
+ * and the volume under glass: a Tally names no file it cannot name as it lay,
+ * and a book no Tally is written of cannot go on (UnderGlass; volume-read's
+ * bookmount.py says the same). OK or ERR_NO_MEMORY. */
 error_t BookFileLockLive(uint64_t fid, const char* why);
 
 #endif /* TAGFS_MOUNT_BOOK_MOUNT_H */

@@ -94,8 +94,11 @@ class BookMount:
     known, the tags, the Use Context, the digests of fresh data, the ground
     lying `fallow`, the other slots' nodes and Quires, and `counts`."""
 
-    def __init__(self, g):
-        self.g = g
+    def __init__(self, g, stand=None, upto=None):
+        """`stand`: the index of the slot to stand on, whatever the others
+        hold; `upto`: the last stitch replayed — the state after it, as a
+        Tally written of it holds (binder.BindCheck). Both None for a mount."""
+        self.g, self.stand, self.upto = g, stand, upto
         self.refusal, self.glass, self.said = None, [], []
         self.slots, self.slot, self.tally, self.ribbon = [], None, None, None
         self.files, self.locked, self.locked_runs, self.tags, self.use = {}, {}, {}, {}, b""
@@ -160,6 +163,8 @@ class BookMount:
     def _Tally(self):
         """п.3: the newest slot whose authoritative roots read."""
         for s in sorted((s for s in self.slots if s.state == "valid"), key=lambda s: -s.seq):
+            if self.stand is not None and s.index != self.stand:
+                continue
             t = tally.Tally(self.g, s)
             if t.refused is None:
                 self.slot, self.tally = s, t
@@ -256,7 +261,8 @@ class BookMount:
         self.said.extend(self.ribbon.said)
         sewn = [(r[0], r[2], u.seq) for u in self.ribbon.stitches for r in u.records]
         for kind, body, seq in sewn + self.ribbon.Seen():
-            self._See(kind, body, seq)
+            if self.upto is None or seq <= self.upto:
+                self._See(kind, body, seq)
 
     def _See(self, kind, body, seq):
         """The numbers a record gives, read or not applied: never given again."""
@@ -370,6 +376,8 @@ class BookMount:
         refused = self._Undone()
         self._Verify()
         for u in self.ribbon.stitches:
+            if self.upto is not None and u.seq > self.upto:
+                break
             if u.seq in refused:
                 continue
             files, tags, use, fallow = dict(self.files), dict(self.tags), self.use, []
@@ -589,9 +597,14 @@ class BookMount:
         self.fallow = ondisk.RunsSubtract(RunsNormal(self.fallow), owned)
 
     def _Lock(self, fid, why):
+        """A live file the replay locked (§3.9): it leaves the mirror, and the
+        volume goes under glass — a Tally names no file it cannot name as it
+        lay, and a book no Tally is written of cannot go on (UnderGlass)."""
         fs = self.files.pop(fid)
         self.locked[fid] = why
         self.locked_runs[fid] = list(fs.runs)
+        self.Glass("fid %u is locked by the replay of the ribbon — no Tally names a file it cannot name as it "
+                   "lay, and a book no Tally is written of cannot go on" % fid)
 
     # --- п.8 --------------------------------------------------------------------
 

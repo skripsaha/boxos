@@ -37,6 +37,12 @@ void         TagRegistryCoinedRange(TagRegistry* reg, uint32_t* lo, uint32_t* hi
 void         TagRegistryCoinedUpTo(TagRegistry* reg, uint32_t hi);
 void         TagRegistryCoinedHeld(TagRegistry* reg, uint32_t* count, uint64_t* text);
 
+/* TagRoll — the registry's tags in the order of their ids: the first id in
+ * [from, hi) the registry holds, its text in *out (resident, as the
+ * registry keeps it); false when none does. A whole Tally's TAGS is written
+ * by it (settle/binder_nodes.c). */
+bool         TagRoll(TagRegistry* reg, uint32_t from, uint32_t hi, uint32_t* id, TagSpelling* out);
+
 /* The tags the registry holds and the bytes of their keys and values — what
  * a whole Tally's TAGS is measured by (settle/endpaper.c). */
 void         TagRegistryTextBytes(TagRegistry* reg, uint64_t* tags, uint64_t* bytes);

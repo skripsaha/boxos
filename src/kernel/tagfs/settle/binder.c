@@ -1,0 +1,992 @@
+#include "binder.h"
+#include "../mount/book_mount.h"
+#include "../mount/under_glass.h"
+#include "../file_map/file_map.h"
+#include "../ink/docket.h"
+#include "../tag_registry/tag_registry.h"
+#include "../use_memory/use_memory.h"
+#include "../integrity/gloss.h"
+#include "../block_map/block_map_derived.h"
+#include "../scribe/scribe.h"
+#include "../settle_cut/settle_cut.h"
+#include "../../../kernel/drivers/timer/rtc.h"
+
+/*
+ * The Tally's steps (binder.h):
+ *
+ *   TALLY_TAKE        right after a stitch k settled, no stitch in flight, in
+ *                     one turn: the slice — every live file's record as k
+ *                     leaves it, a batch of files under the state lock at a
+ *                     time (the Docket's `was` for a file changed since, the
+ *                     map's record for the rest), the tags below the last
+ *                     Coined that settled, the Use Context the book holds, the
+ *                     ground DIGESTS speaks for; the ribbon as k leaves it.
+ *                     Then, a turn each, the cycles going on between: a leaf of
+ *                     the DIGESTS the reads stand on, to know the ones no copy
+ *                     of reads; a node of the Tally, measured with nothing
+ *                     written — and, the last one measured, the two runs its
+ *                     copies go in taken from the map
+ *   TALLY_NODES       a node a step, both copies, the cycles going on between
+ *   TALLY_FLUSH       the flush that keeps every node
+ *   TALLY_SLOT        the slot of the least seq written over: SpineHead naming
+ *                     the Tally, k and k's Clasp; a root a tree; SpineRibbon
+ *                     where the ribbon goes on past k; SpineCounts; SpineFlags
+ *                     when the medium lied
+ *   TALLY_SLOT_FLUSH  the flush that keeps the slot
+ *   TALLY_DONE        the slot named so in memory; the Tally and the ribbon
+ *                     the slot it was written over held, and no other slot
+ *                     holds, rest in Fallow (FALLOW_BY_SPINE) for the lag's
+ *                     stitches; the Gloss let go of what the Tally's DIGESTS
+ *                     now names, and the reads of a digest turned to it
+ *
+ * ‼ WHILE A TALLY IS UNDER WAY NO GROUND GOES BACK. The slice names blocks by
+ * the state after k, and their digests and births are read as the nodes are
+ * laid, a step a turn: a block a later stitch gave up, handed back and written
+ * again meanwhile would lose the digest and the birth the slice needs. Fallow
+ * rests on until the Tally is done (sewing.c asks BinderHoldsGround).
+ */
+
+
+/* The Tally under way. */
+typedef struct {
+    bool        active;
+    TallyStep   step;
+    const char* stage;
+    BinderWork  w;
+    uint64_t    target;         /* every Ink the stitch settled — what a SETTLECUT asks it covers */
+    uint64_t    k;              /* the stitch it is the state after, and its Clasp */
+    uint32_t    clasp;
+    SpineRibbon ribbon;
+    SpineCounts counts;
+    uint64_t    made_ns;
+    uint64_t    useful_at;      /* the useful bytes up to k */
+    uint64_t    used;           /* the blocks the nodes took in each run */
+    uint32_t    slot;           /* the slot written over */
+    uint64_t    slot_seq;
+    uint64_t    chain_at;       /* the chain's index of the Quire `at` lies in */
+    bool        sliced;         /* TALLY_TAKE: the slice taken, ... */
+    bool        rots_read;      /* ... every DIGESTS leaf weighed, from rot_leaf on */
+    uint32_t    rot_leaf;
+    bool        turned;         /* TALLY_DONE: the reads of a digest turned to it — or left, said — ... */
+    bool        captured;       /* ... and the Gloss may let go of what its DIGESTS names */
+    bool        taken;          /* the runs at A and B are taken from the map */
+    bool        slot_begun;     /* a write of the slot was issued: it may hold either Tally */
+    SlotGround  fresh;          /* the ground the slot will hold, made at TAKE */
+    BinderRot*  rot;            /* the nodes it names as they lie: the FILES ones the mount found, ... */
+    uint32_t    nrot;           /* ... and every DIGESTS node no copy of reads, found at TAKE */
+    uint32_t    caprot;
+} BinderRun;
+
+static BinderRun s_run;
+static volatile uint8_t s_under_way;   /* s_run.active, for the cores that are not the holder */
+
+#ifdef CONFIG_VOLUME_TESTS
+static TallyStep s_stand_stop;
+static uint32_t  s_stand_tear;
+#endif
+
+// ----------------------------------------------------------------------------
+// TALLY_TAKE: the slice
+// ----------------------------------------------------------------------------
+
+#define BINDER_SLICE_BATCH  32u     /* files a hold of the state lock looks at */
+
+/* A batch of files from `*from` on into chunk `c`, under the state lock: each
+ * as the last settled stitch left it — the Docket's `was` for one changed
+ * since (none for one born since), the map's record for the rest. False once
+ * there is no file left. */
+static bool SliceBatch(BinderWork* w, BinderFiles* c, uint64_t* from)
+{
+    FileMap*    map = tagfs_get_state()->files;
+    uint64_t    ids[BINDER_SLICE_BATCH], jot = 0;
+    FileRecord* was = NULL;
+    uint32_t    n   = FileMapFiles(map, *from, ids, BINDER_SLICE_BATCH), i = 0;
+    bool        d   = DocketWasFrom(*from, &jot, &was);
+    for (uint32_t taken = 0; taken < BINDER_SLICE_BATCH;) {
+        uint64_t m = i < n ? ids[i] : UINT64_MAX, j = d ? jot : UINT64_MAX;
+        uint64_t f = m < j ? m : j;
+        if (f == UINT64_MAX)
+            return false;
+        FileRecord* rec = NULL;
+        if (j == f) {
+            rec = was;
+            was = NULL;
+            d   = DocketWasFrom(f + 1u, &jot, &was);
+        } else {
+            rec = FileMapRecordHold(map, f, NULL);
+        }
+        i     += m == f;
+        *from  = f + 1u;
+        if (rec) {
+            c->f[c->n++] = (BinderFile){ f, rec };
+            w->nfiles++;
+            taken++;
+        }
+        if (i == n && n == BINDER_SLICE_BATCH)
+            break;
+    }
+    FileRecordRelease(was);
+    return true;
+}
+
+/* Every live file of the state after the last settled stitch, a batch at a
+ * time, the state lock let go between: no stitch settles meanwhile — this is
+ * one step of the Settle's holder. OK or ERR_NO_MEMORY. */
+static error_t SliceTake(BinderWork* w)
+{
+    TagFSLock*   lock = &tagfs_get_state()->lock;
+    BinderFiles* tail = NULL;
+    uint64_t     from = 0;
+    for (bool more = true; more;) {
+        if (!tail || tail->n + BINDER_SLICE_BATCH > BINDER_FILES_CHUNK) {
+            BinderFiles* c = kmalloc(sizeof(BinderFiles));
+            if (!c)
+                return ERR_NO_MEMORY;
+            c->next = NULL;
+            c->n    = 0;
+            if (tail)
+                tail->next = c;
+            else
+                w->files = c;
+            tail = c;
+        }
+        TagFSLockTake(lock);
+        more = SliceBatch(w, tail, &from);
+        TagFSLockDrop(lock);
+    }
+    return OK;
+}
+
+static void SliceLetGo(BinderWork* w)
+{
+    while (w->files) {
+        BinderFiles* next = w->files->next;
+        for (uint32_t i = 0; i < w->files->n; i++)
+            FileRecordRelease(w->files->f[i].rec);
+        kfree(w->files);
+        w->files = next;
+    }
+    w->nfiles = 0;
+    kfree(w->ground);
+    w->ground  = NULL;
+    w->nground = 0;
+    UseTextDrop(w->use);
+    w->use = NULL;
+}
+
+/* Runs of ground sifted down a heap of `n` by first block. */
+static void GroundSift(BinderGround* g, uint64_t at, uint64_t n)
+{
+    for (;;) {
+        uint64_t big = at, l = 2u * at + 1u, r = l + 1u;
+        if (l < n && g[l].start > g[big].start)
+            big = l;
+        if (r < n && g[r].start > g[big].start)
+            big = r;
+        if (big == at)
+            return;
+        BinderGround t = g[at];
+        g[at]  = g[big];
+        g[big] = t;
+        at     = big;
+    }
+}
+
+/* The runs in order of their first block — a heap sort, in place, as many as
+ * a volume's live files have — those that meet or overlap joined: how many
+ * are left. */
+static uint64_t GroundJoined(BinderGround* g, uint64_t n)
+{
+    for (uint64_t i = n / 2u; i-- > 0;)
+        GroundSift(g, i, n);
+    for (uint64_t end = n; end > 1u; end--) {
+        BinderGround t = g[0];
+        g[0]       = g[end - 1u];
+        g[end - 1u] = t;
+        GroundSift(g, 0, end - 1u);
+    }
+    uint64_t m = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        if (m && g[i].start <= g[m - 1u].start + g[m - 1u].count) {
+            uint64_t end = g[i].start + g[i].count;
+            if (end > g[m - 1u].start + g[m - 1u].count)
+                g[m - 1u].count = end - g[m - 1u].start;
+            continue;
+        }
+        g[m++] = g[i];
+    }
+    return m;
+}
+
+/* The ground DIGESTS speaks for: every DATA run of the slice, and what the
+ * mount holds for what rotted — in order of their first block, those that
+ * meet joined. OK or ERR_NO_MEMORY. */
+static error_t GroundTake(BinderWork* w)
+{
+    uint64_t cap = 0;
+    for (BinderFiles* c = w->files; c; c = c->next) {
+        for (uint32_t i = 0; i < c->n; i++) {
+            StripWalk walk;
+            Strip     s;
+            StripWalkBegin(c->f[i].rec, &walk);
+            while (StripWalkNextGround(&walk, &s)) {
+                if (!BinderListRoom((void**)&w->ground, w->nground, &cap, sizeof(BinderGround)))
+                    return ERR_NO_MEMORY;
+                w->ground[w->nground++] = (BinderGround){ s.start, s.count };
+            }
+        }
+    }
+    for (uint64_t i = 0; i < g_binder.nheld; i++) {
+        if (!BinderListRoom((void**)&w->ground, w->nground, &cap, sizeof(BinderGround)))
+            return ERR_NO_MEMORY;
+        w->ground[w->nground++] = g_binder.held[i];
+    }
+    w->nground = GroundJoined(w->ground, w->nground);
+    return OK;
+}
+
+// ----------------------------------------------------------------------------
+// TALLY_TAKE: the state after k, measured, and the ground its copies go in
+// ----------------------------------------------------------------------------
+
+/* Why a Tally may not be begun or go on. The first two pass on their own as
+ * the stitches go on; the volume taking no write is said by its own line. */
+static const char s_no_write[]  = "the volume takes no write";
+static const char s_not_up[]    = "the volume's book is not up";
+static const char s_unsettled[] = "no stitch of this mount has settled yet (§4.2)";
+static const char s_on_edge[]   = "the last stitch ends on its Quire's last sector, where no slot can put the "
+                                  "ribbon on — until the next stitch";
+static const char s_off_chain[] = "the Quire the ribbon stands in is not one the slots' ribbons are known to run "
+                                  "through — memory would not note it, and no Tally is written until the ribbon "
+                                  "has left it";
+
+/* Whether the volume takes no write a Tally could go on with: flags kept as
+ * atomics, asked from any core. */
+static bool BinderNoWrite(void)
+{
+    return TagFSReadOnly() || TagFSIsUnderGlass() || StitchBookRefused() || TagFSMediumLeft() || SettleHalting();
+}
+
+/* Why a Tally may not be begun as the holder's own state stands, or NULL — by
+ * the Settle's holder, who alone moves what it reads (the cursor, the chain). */
+static const char* BinderOwnMayNot(void)
+{
+    const RibbonCursor* c = RibbonCursorNow();
+    if (!g_binder.up || !c->up)
+        return s_not_up;
+    if (BinderNoTallies())
+        return BinderNoTallies();
+    if (SettledCycles() == 0)
+        return s_unsettled;
+    if (!RibbonQuireSame(&c->quire, &c->ended))
+        return s_on_edge;
+    if (BinderChainIndex(&c->quire) == UINT64_MAX)
+        return s_off_chain;
+    return NULL;
+}
+
+/* Why a Tally may not be begun now, or NULL: by the Settle's holder. */
+static const char* BinderMayNot(void)
+{
+    return BinderNoWrite() ? s_no_write : BinderOwnMayNot();
+}
+
+/* The slot a Tally is written over: the one of the least seq, one that holds
+ * nothing — or may hold either of two — least of all (§1.4). */
+static uint32_t SlotLeast(void)
+{
+    uint32_t best = 0;
+    uint64_t least = UINT64_MAX;
+    for (uint32_t i = 0; i < g_binder.ring; i++) {
+        const SlotGround* s = &g_binder.slot[i];
+        uint64_t          seq = s->holds && !s->unsure ? s->seq : 0;
+        if (seq < least) {
+            least = seq;
+            best  = i;
+        }
+    }
+    return best;
+}
+
+/*
+ * ‼ A TALLY-QUIRE IS WHOLE QUIRES (§2.6, §16.3 п.5): each copy goes in a run of
+ * its own of k Quires — the least k its nodes fit in — on an atom, the second
+ * past the first, so the two copies of a node are a Quire apart at the least
+ * and never in one unit a medium maps as one (§2.5), and a run goes back whole
+ * when the slot stops naming it. It keeps free what the ring's other slots
+ * lack of a Tally this size (BinderRingShort): the Tallies that fill the ring
+ * after it give nothing back, and each must find its ground (§16.2 п.6). No
+ * Quire of ribbon is kept past it: the next_quire takes that from the reserve
+ * itself, and a Tally the ribbon asked for once it took it must still be
+ * written — it is what gives the ribbon its ground back. OK, or the map's
+ * refusal with nothing taken.
+ */
+static error_t TallyRunsTake(BinderRun* r, uint64_t blocks)
+{
+    uint64_t q    = RibbonCursorNow()->quire_blocks;
+    uint64_t data = g_book.frame.data_block;
+    uint64_t run  = (blocks + q - 1u) / q * q;
+    uint64_t keep = BinderRingShortBut(2u * run, q, r->slot);
+    error_t  rc   = BlockMapTakeQuire(GROUND_TALLY, run, r->w.grid, keep + run, data, data, &r->w.a);
+    if (rc != OK)
+        return rc;
+    rc = BlockMapTakeQuire(GROUND_TALLY, run, r->w.grid, keep, data, r->w.a + run, &r->w.b);
+    if (rc != OK) {
+        (void)BlockMapDerivedGiveAs(GROUND_TALLY, 0, r->w.a, run);
+        return rc;
+    }
+    r->w.room = run;
+    r->taken  = true;
+    BinderSlotOwnPublish(r->slot, 2u * run);
+    return OK;
+}
+
+/* The slot's numbers (§4.5 п.8): past every fid, tag and bookmark the medium
+ * has shown — the mount's, the stitches' of this mount, the slice's. */
+static void TallyCounts(BinderRun* r)
+{
+    uint64_t fid = g_binder.seen_fid > g_binder.laid_fid ? g_binder.seen_fid : g_binder.laid_fid;
+    for (BinderFiles* c = r->w.files; c; c = c->next)
+        if (c->n && c->f[c->n - 1u].fid + 1u > fid)
+            fid = c->f[c->n - 1u].fid + 1u;
+    r->counts = (SpineCounts){ .next_fid = fid,
+                               .next_tag = g_binder.seen_tag > r->w.tag_hi ? g_binder.seen_tag : r->w.tag_hi,
+                               .next_bookmark = g_binder.seen_bookmark };
+}
+
+/* The slice of the state after k, and the ground DIGESTS speaks for: memory
+ * alone, no read of the medium — one turn of the holder, so no stitch settles
+ * inside it, and as long as a walk of every live file's runs takes. The
+ * Tally's seq is taken here: every pointer and birth_delta of it is spelled
+ * from it, and a measure of other numbers is no bound. */
+static error_t TallySliceTake(BinderRun* r)
+{
+    BinderWork*         w = &r->w;
+    const RibbonCursor* c = RibbonCursorNow();
+    uint32_t            lo = 0, hi = 0;
+    r->k         = c->last;
+    r->clasp     = c->clasp;
+    r->ribbon    = (SpineRibbon){ .at = c->quire.block + c->off / TAGFS_BLOCK_SECTORS, .quire_block = c->quire.block,
+                                  .quire_blocks = c->quire.blocks, .next_block = c->named.block,
+                                  .next_blocks = c->named.blocks };
+    r->chain_at  = BinderChainIndex(&c->quire);
+    r->useful_at = g_binder.useful;
+    r->made_ns   = rtc_get_unix64() * 1000000000ull;
+    TagRegistryCoinedRange(tagfs_get_state()->registry, &lo, &hi);
+    w->tag_hi = lo;
+    w->use    = tagfs_recall_use_context(NULL);
+    w->grid   = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
+    w->seq    = RibbonSeqNext();
+    error_t rc = SliceTake(w);
+    if (rc == OK)
+        rc = GroundTake(w);
+    if (rc == OK) {
+        TallyCounts(r);
+        EndpaperTallyBegun(w->seq, r->counts.next_fid);
+    }
+    return rc;
+}
+
+// ----------------------------------------------------------------------------
+// TALLY_SLOT: the slot of the least seq
+// ----------------------------------------------------------------------------
+
+/* The slot's stream: SpineHead, a root a tree laid, SpineRibbon, SpineCounts,
+ * SpineFlags when the medium lied — into `out`, the starts of its records
+ * into `starts`. Its length. */
+static uint32_t SlotStream(const BinderRun* r, uint8_t* out, uint32_t* starts, uint32_t* n)
+{
+    const BinderWork* w = &r->w;
+    SpineHead         h = { .tally_seq = w->seq, .stitch_seq = r->k, .stitch_clasp = r->clasp, .made_ns = r->made_ns };
+    uint32_t          at = 0;
+    *n = 0;
+    starts[(*n)++] = at;
+    at += SpineHeadPut(out + at, &h);
+    for (uint32_t tree = TALLY_FILES; tree <= TALLY_SHARED; tree++) {
+        const BinderRoot* root = &w->root[tree];
+        uint64_t          blocks[2] = { w->a + root->off, w->b + root->off };
+        uint8_t           ptr[48];
+        if (!root->laid)
+            continue;
+        uint32_t plen  = BookPtrPut(ptr, w->seq, root->sheets, blocks, 2u);
+        starts[(*n)++] = at;
+        at += SpineRootPut(out + at, tree, 0, root->level, root->items, ptr, plen);
+    }
+    starts[(*n)++] = at;
+    at += SpineRibbonPut(out + at, &r->ribbon);
+    starts[(*n)++] = at;
+    at += SpineCountsPut(out + at, &r->counts);
+    if (RibbonCursorLied()) {
+        starts[(*n)++] = at;
+        at += SpineFlagsPut(out + at, SPINE_MEDIUM_LIED);
+    }
+    return at;
+}
+
+/* The slot's sectors from `first`, `n` of them, to the medium. */
+static error_t SlotSectorsWrite(uint64_t vlba, uint32_t first, uint32_t n, const uint8_t* unit)
+{
+    int wrote = tagfs_volume_write(vlba + first, n, unit + (uint64_t)first * BOOK_SECTOR_BYTES);
+    return wrote == 0 ? OK : wrote == (int)ERR_DEVICE_NOT_READY ? ERR_DEVICE_NOT_READY : ERR_WRITE_FAILED;
+}
+
+/*
+ * The slot written over: its stream sealed at a seq past the Tally's, in two
+ * halves of its eight sectors — the cut a SETTLECUT `slot` makes between them
+ * leaves it torn (C9), as the stand's tear leaves it with only its first
+ * `tear` sectors. From the first sector issued, the slot may hold either
+ * Tally (slot_begun).
+ */
+static error_t TallySlotWrite(BinderRun* r)
+{
+    uint8_t* stream = kmalloc(TALLY_SHEET_PAYLOAD);
+    uint8_t* unit   = kmalloc(TAGFS_BLOCK_SIZE);
+    uint32_t starts[TALLY_SHARED + 6u], n = 0, half = TAGFS_BLOCK_SECTORS / 2u;
+    error_t  rc     = stream && unit ? OK : ERR_NO_MEMORY;
+    if (rc == OK) {
+        memset(stream, 0, TALLY_SHEET_PAYLOAD);
+        uint32_t len   = SlotStream(r, stream, starts, &n);
+        uint64_t block = g_book.frame.spine_block + (uint64_t)r->slot * g_book.frame.spine_stride;
+        uint64_t vlba  = block * TAGFS_BLOCK_SECTORS;
+        r->slot_seq    = RibbonSeqNext();
+        TallyUnitSeal(unit, stream, len, starts, n, BOOK_UNIT_SLOT, r->slot_seq, vlba, TAGFS_BLOCK_SECTORS,
+                      tagfs_get_state()->uuid);
+#ifdef CONFIG_VOLUME_TESTS
+        if (s_stand_tear)
+            half = s_stand_tear;
+#endif
+        r->slot_begun = true;
+        rc = SlotSectorsWrite(vlba, 0, half, unit);
+#ifdef CONFIG_VOLUME_TESTS
+        if (rc == OK && s_stand_tear)
+            rc = ERR_IO_CANCELLED;          /* the stand tears it here */
+#endif
+        SETTLE_CUT_CYCLE(r->target);
+        if (rc == OK)
+            SETTLE_CUT_AT(SETTLE_CUT_POINT_SLOT);
+        if (rc == OK)
+            rc = SlotSectorsWrite(vlba, half, TAGFS_BLOCK_SECTORS - half, unit);
+    }
+    kfree(stream);
+    kfree(unit);
+    return rc;
+}
+
+// ----------------------------------------------------------------------------
+// TALLY_DONE, and a Tally refused
+// ----------------------------------------------------------------------------
+
+/* A rotten node more for the Tally under way, in the order of tree and key. */
+static error_t RotPut(BinderRun* r, uint64_t tree, const TallyPlace* at)
+{
+    if (!BinderListRoom32((void**)&r->rot, r->nrot, &r->caprot, sizeof(BinderRot)))
+        return ERR_NO_MEMORY;
+    uint32_t i = r->nrot++;
+    while (i > 0 && (r->rot[i - 1u].tree > tree ||
+                     (r->rot[i - 1u].tree == tree && at->has_lo &&
+                      (!r->rot[i - 1u].at.has_lo || r->rot[i - 1u].at.lo.k1 > at->lo.k1 ||
+                       (r->rot[i - 1u].at.lo.k1 == at->lo.k1 && r->rot[i - 1u].at.lo.k2 > at->lo.k2))))) {
+        r->rot[i] = r->rot[i - 1u];
+        i--;
+    }
+    r->rot[i] = (BinderRot){ .tree = tree, .at = *at };
+    return OK;
+}
+
+static error_t RotOfDigests(void* ctx, const TallyPlace* at)
+{
+    return RotPut((BinderRun*)ctx, TALLY_DIGESTS, at);
+}
+
+/* The FILES nodes the Tally names as they lie, as the mount found them; the
+ * DIGESTS ones are weighed a leaf a turn after the slice — a mount reads a
+ * DIGESTS leaf only when a block of it is (§16.4 п.5). */
+static error_t RotsTaken(BinderRun* r)
+{
+    error_t rc = OK;
+    for (uint32_t i = 0; rc == OK && i < g_binder.nrot; i++)
+        if (g_binder.rot[i].tree != TALLY_DIGESTS)
+            rc = RotPut(r, g_binder.rot[i].tree, &g_binder.rot[i].at);
+    return rc;
+}
+
+/* The ground the new slot holds: the two runs, and every rotten node it names
+ * as it lies, each copy at its birth — made at TAKE, so nothing is asked of
+ * the heap once the slot is on the medium. */
+static error_t FreshGround(BinderRun* r)
+{
+    SlotGround* f    = &r->fresh;
+    uint32_t    need = 2u;
+    for (uint32_t i = 0; i < r->nrot; i++)
+        need += r->rot[i].at.ptr.copies;
+    memset(f, 0, sizeof(*f));
+    if (!(f->ground = kmalloc(sizeof(Strip) * need)))
+        return ERR_NO_MEMORY;
+    f->capground = need;
+    return OK;
+}
+
+static void FreshFill(BinderRun* r)
+{
+    SlotGround* f = &r->fresh;
+    const BinderWork* w = &r->w;
+    f->holds      = true;
+    f->seq        = r->slot_seq;
+    f->tally      = w->seq;
+    f->chain_from = r->chain_at;
+    f->nground    = 0;
+    f->ground[f->nground++] = (Strip){ .start = w->a, .count = (uint32_t)w->room, .kind = STRIP_DATA, .birth = w->seq };
+    f->ground[f->nground++] = (Strip){ .start = w->b, .count = (uint32_t)w->room, .kind = STRIP_DATA, .birth = w->seq };
+    for (uint32_t i = 0; i < r->nrot; i++)
+        for (uint32_t k = 0; k < r->rot[i].at.ptr.copies; k++)
+            f->ground[f->nground++] = (Strip){ .start = TallyPtrBlock(&r->rot[i].at.ptr, k),
+                                               .count = (uint32_t)r->rot[i].at.ptr.sheets,
+                                               .kind = STRIP_DATA, .birth = r->rot[i].at.ptr.seq };
+    BinderSlotSort(f);
+}
+
+/* The first DIGESTS range the Tally names as it lies that reaches past `at`,
+ * clipped to [at, end): [*lo, *hi) — both `end` when none does. */
+static void RotDigestsFrom(const BinderWork* w, uint64_t at, uint64_t end, uint64_t* lo, uint64_t* hi)
+{
+    *lo = *hi = end;
+    for (uint32_t i = 0; i < w->nrot; i++) {
+        const BinderRot* r   = &w->rot[i];
+        uint64_t         rlo = r->at.has_lo ? r->at.lo.k1 : 0, rhi = r->at.has_hi ? r->at.hi.k1 : UINT64_MAX;
+        if (r->tree != TALLY_DIGESTS || rhi <= at || rlo >= *lo)
+            continue;
+        *lo = rlo > at ? rlo : at;
+        *hi = rhi < end ? rhi : end;
+    }
+}
+
+/*
+ * The Gloss let go of every digest the Tally's DIGESTS now names — the ground
+ * of the slice, a run at a time under the state lock — but of a block in a
+ * DIGESTS range the Tally names as it lies (§16.4 п.5): no element of that
+ * range is laid, and the Gloss is all that holds the digest of a block
+ * written there since. It keeps those while this mount lasts — said: past it
+ * they read unchecked, as the range's other blocks do, until it is healed.
+ */
+static void GlossCaptured(const BinderWork* w)
+{
+    TagFSLock* lock = &tagfs_get_state()->lock;
+    uint64_t   kept = 0;
+    for (uint64_t i = 0; i < w->nground; i++) {
+        uint64_t at = w->ground[i].start, end = at + w->ground[i].count;
+        while (at < end) {
+            uint64_t lo = end, hi = end;
+            RotDigestsFrom(w, at, end, &lo, &hi);
+            if (lo > at) {
+                TagFSLockTake(lock);
+                GlossForget(at, lo - at);
+                TagFSLockDrop(lock);
+            }
+            kept += hi - lo;
+            at    = hi;
+        }
+    }
+    GlossTrim();
+    if (kept)
+        kprintf("[TagFS] %llu block(s) Tally %llu speaks for lie in a DIGESTS range it names as it lies, no copy "
+                "of which reads: the digests of those written since stay in memory while this mount lasts, and "
+                "past it those blocks read unchecked until the range is healed\n", (unsigned long long)kept,
+                (unsigned long long)w->seq);
+}
+
+static error_t TallyDone(BinderRun* r)
+{
+    BinderWork* w   = &r->w;
+    SlotGround  old = g_binder.slot[r->slot];
+    FreshFill(r);
+    g_binder.slot[r->slot] = r->fresh;
+    memset(&r->fresh, 0, sizeof(r->fresh));
+    if (r->slot + 1u > g_binder.nslots)
+        g_binder.nslots = r->slot + 1u;
+    BinderSlotOwnPublish(r->slot, 0);
+    uint64_t gone = BinderSlotGoes(&old);
+    BinderSlotLetGo(&old);
+    if (r->captured)
+        GlossCaptured(w);
+    RibbonTallied(w->seq);
+    EndpaperTallyLaid(&w->laid);
+    g_binder.useful      -= g_binder.useful >= r->useful_at ? r->useful_at : g_binder.useful;
+    g_binder.tally_blocks = w->off;
+    g_binder.tallies++;
+    kprintf("[TagFS] Tally %llu is written over slot %u: the state after stitch %llu, %llu node(s) in %llu "
+            "block(s) a copy; %llu block(s) no slot holds any more rest in Fallow%s\n", (unsigned long long)w->seq,
+            r->slot, (unsigned long long)r->k, (unsigned long long)w->nodes, (unsigned long long)w->off,
+            (unsigned long long)gone, w->dropped ? "; DIGESTS elements a rotten range covers left out" : "");
+    return OK;
+}
+
+/* A slot whose write or flush was refused may hold the Tally it held or the
+ * new one, whole (C9, C10): held as holding both until a Tally is written over
+ * it, and written over first. */
+static void SlotUnsure(BinderRun* r)
+{
+    SlotGround* s = &g_binder.slot[r->slot];
+    FreshFill(r);
+    uint32_t n    = s->nground + r->fresh.nground;
+    Strip*   both = kmalloc(sizeof(Strip) * n);
+    if (!both) {
+        kprintf("[TagFS] no memory to hold slot %u as naming either Tally — the new Tally's ground is held until "
+                "the volume is mounted again\n", r->slot);
+        return;
+    }
+    if (s->nground)
+        memcpy(both, s->ground, sizeof(Strip) * s->nground);
+    memcpy(both + s->nground, r->fresh.ground, sizeof(Strip) * r->fresh.nground);
+    kfree(s->ground);
+    s->ground    = both;
+    s->nground   = n;
+    s->capground = n;
+    BinderSlotSort(s);
+    s->unsure = true;
+    s->tally2 = r->w.seq;
+    if (!s->holds) {
+        s->holds = true;
+        s->tally = r->w.seq;
+    }
+    if (r->chain_at < s->chain_from)
+        s->chain_from = r->chain_at;
+    if (r->slot + 1u > g_binder.nslots)
+        g_binder.nslots = r->slot + 1u;
+    BinderSlotOwnPublish(r->slot, 0);
+}
+
+/* The Tally under way ended without its DONE: its runs given back when no
+ * slot can name them, held when the slot's write began; everything let go. */
+static void TallyEnded(BinderRun* r, error_t rc)
+{
+    if (rc != OK && r->taken && r->slot_begun)
+        SlotUnsure(r);
+    else if (rc != OK && r->taken) {
+        (void)BlockMapDerivedGiveAs(GROUND_TALLY, 0, r->w.a, r->w.room);
+        (void)BlockMapDerivedGiveAs(GROUND_TALLY, 0, r->w.b, r->w.room);
+        BinderSlotOwnPublish(r->slot, 0);
+    }
+    if (rc != OK)
+        kprintf("[TagFS] the Tally of the state after stitch %llu was refused at %s (error %u): the slots hold "
+                "what they held%s\n", (unsigned long long)r->k, r->stage ? r->stage : "its slice", (unsigned)rc,
+                r->slot_begun ? ", and the slot it was written over is held as naming either Tally" : "");
+    EndpaperTallyLaid(NULL);
+    BinderNodesLetGo(&r->w);
+    SliceLetGo(&r->w);
+    kfree(r->fresh.ground);
+    kfree(r->rot);
+    memset(r, 0, sizeof(*r));
+    __atomic_store_n(&s_under_way, 0u, __ATOMIC_RELEASE);
+    BinderWeigh();
+}
+
+// ----------------------------------------------------------------------------
+// TALLY_TAKE, a turn at a time
+// ----------------------------------------------------------------------------
+
+/* Every node no copy of reads known — the FILES ones the mount found, the
+ * DIGESTS ones weighed a leaf a turn — the ground the slot will hold made
+ * room for, and the walk begun with nothing written. */
+static error_t TallyMeasureBegin(BinderRun* r)
+{
+    error_t rc = FreshGround(r);
+    if (rc != OK)
+        return rc;
+    r->w.rot       = r->rot;
+    r->w.nrot      = r->nrot;
+    r->w.measuring = true;
+    BinderNodesBegin(&r->w);
+    return OK;
+}
+
+/* Every node measured: the blocks one copy takes, its pointers laid at their
+ * widest — the runs its copies go in taken, in the slot of the least seq, and
+ * the walk begun again to write them. */
+static error_t TallyMeasured(BinderRun* r)
+{
+    uint64_t blocks = r->w.off ? r->w.off : r->w.grid;
+    r->slot = SlotLeast();
+    error_t rc = TallyRunsTake(r, blocks);
+    if (rc != OK)
+        return rc;
+    r->w.measuring = false;
+    BinderNodesBegin(&r->w);
+    return OK;
+}
+
+/* TALLY_TAKE a turn at a time: the slice; a DIGESTS leaf weighed; a node
+ * measured. *taken once the runs the copies go in are. */
+static error_t TallyTakeStep(BinderRun* r, bool* taken)
+{
+    bool    done = false;
+    error_t rc   = OK;
+    *taken = false;
+    if (!r->sliced) {
+        r->sliced = true;
+        if ((rc = RotsTaken(r)) == OK)
+            rc = TallySliceTake(r);
+        return rc;
+    }
+    if (!r->rots_read) {
+        rc = TallyDigestsRottenNext(&r->rot_leaf, RotOfDigests, r, &done);
+        if (rc == OK && done) {
+            r->rots_read = true;
+            rc           = TallyMeasureBegin(r);
+        }
+        return rc;
+    }
+    if ((rc = BinderNodeNext(&r->w, &done)) != OK || !done)
+        return rc;
+    rc     = TallyMeasured(r);
+    *taken = rc == OK;
+    return rc;
+}
+
+// ----------------------------------------------------------------------------
+// The steps
+// ----------------------------------------------------------------------------
+
+static error_t TallyFlush(void)
+{
+    return VolumeFlushFor(VolumeFlushNeed());
+}
+
+static const char* const s_stages[] = {
+    [TALLY_TAKE] = "its slice and measure", [TALLY_NODES] = "its nodes", [TALLY_FLUSH] = "the flush of its nodes",
+    [TALLY_SLOT] = "its slot", [TALLY_SLOT_FLUSH] = "the flush of its slot", [TALLY_DONE] = "its DONE",
+};
+
+/* One step of the Tally under way: *done once its DONE ran. */
+static error_t TallyStepRun(BinderRun* r, bool* done)
+{
+    bool    end = false;
+    error_t rc  = OK;
+    r->stage    = s_stages[r->step];
+#ifdef CONFIG_VOLUME_TESTS
+    if (s_stand_stop && r->step == s_stand_stop)
+        return ERR_IO_CANCELLED;      /* the stand stops it here: the volume left as a cut leaves it */
+#endif
+    switch (r->step) {
+    case TALLY_TAKE:
+        if ((rc = TallyTakeStep(r, &end)) == OK && end)
+            r->step = TALLY_NODES;
+        break;
+    case TALLY_NODES:
+        if ((rc = BinderNodeNext(&r->w, &end)) == OK && end)
+            r->step = TALLY_FLUSH;
+        break;
+    case TALLY_FLUSH:
+        SETTLE_CUT_CYCLE(r->target);
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_TALLY);
+        if ((rc = TallyFlush()) == OK)
+            r->step = TALLY_SLOT;
+        break;
+    case TALLY_SLOT:
+        if ((rc = TallySlotWrite(r)) == OK)
+            r->step = TALLY_SLOT_FLUSH;
+        break;
+    case TALLY_SLOT_FLUSH:
+        if ((rc = TallyFlush()) == OK)
+            r->step = TALLY_DONE;
+        break;
+    case TALLY_DONE:
+        if (!r->turned) {
+            error_t turn = BinderDigestsTurn(&r->w);
+            if (turn == ERR_BUSY)
+                break;              /* a read is still in the table the turn takes: the next turn */
+            r->turned   = true;
+            r->captured = turn == OK;
+        }
+        rc    = TallyDone(r);
+        *done = true;
+        break;
+    }
+    return rc;
+}
+
+/* The useful bytes the next Tally is owed at: TALLY_SLACK times what it is
+ * reckoned to cost — the last Tally's nodes in both copies and its slot. */
+static uint64_t TallyCostBytes(void)
+{
+    return (2u * g_binder.tally_blocks + 1u) * TAGFS_BLOCK_SIZE;
+}
+
+/*
+ * What BinderOwed reads, published by the Settle's holder each time what it
+ * weighs moves — a stitch settled, a Quire given the ribbon, a Tally ended,
+ * the mount stood: whether TALLY_SLACK is reached, and why none may be begun
+ * as its own state stands. A reason that will not pass with the next stitch,
+ * met while a Tally is owed, is said once a mount (§16 "nothing in silence").
+ */
+void BinderWeigh(void)
+{
+    bool        due = g_binder.useful >= (uint64_t)TALLY_SLACK * TallyCostBytes();
+    const char* why = BinderOwnMayNot();
+    __atomic_store_n(&g_binder.due, due ? 1u : 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_binder.may_not, why, __ATOMIC_RELEASE);
+    bool owed = due || __atomic_load_n(&g_binder.demanded, __ATOMIC_ACQUIRE);
+    if (owed && why == s_off_chain && g_binder.said != why) {
+        g_binder.said = why;
+        kprintf("[TagFS] a Tally is owed and not begun: %s\n", why);
+    }
+}
+
+bool BinderOwed(void)
+{
+    if (__atomic_load_n(&s_under_way, __ATOMIC_ACQUIRE))
+        return true;
+    bool due = __atomic_load_n(&g_binder.demanded, __ATOMIC_ACQUIRE) ||
+               __atomic_load_n(&g_binder.due, __ATOMIC_ACQUIRE);
+    return due && SettledCycles() >= __atomic_load_n(&g_binder.retry_after, __ATOMIC_ACQUIRE) &&
+           !BinderNoWrite() && __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE) == NULL;
+}
+
+bool BinderHoldsGround(void)
+{
+    return __atomic_load_n(&s_under_way, __ATOMIC_ACQUIRE) != 0;
+}
+
+void BinderDemanded(void)
+{
+    __atomic_store_n(&g_binder.demanded, 1u, __ATOMIC_RELEASE);
+}
+
+void BinderStopped(error_t rc)
+{
+    if (s_run.active)
+        TallyEnded(&s_run, rc);
+}
+
+/* One step, by a holder of the Settle's Scribe: a Tally begun first when
+ * none is under way — or the one under way ended, the volume taking no write
+ * from here (BinderStopped). OK and *done; or the refusal, the Tally ended
+ * with it. */
+static error_t BinderStep(bool* done)
+{
+    BinderRun* r = &s_run;
+    *done = false;
+    if (r->active && BinderNoWrite()) {
+        TallyEnded(r, ERR_TAGFS_READ_ONLY);
+        return ERR_TAGFS_READ_ONLY;
+    }
+    if (!r->active) {
+        if (BinderMayNot()) {
+            BinderWeigh();          /* what BinderOwed read was stale: the cursor moved since */
+            return ERR_BUSY;
+        }
+        memset(r, 0, sizeof(*r));
+        r->active = true;
+        r->step   = TALLY_TAKE;
+        r->target = SettledGen();
+        __atomic_store_n(&s_under_way, 1u, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_binder.demanded, 0u, __ATOMIC_RELEASE);
+    }
+    error_t rc = TallyStepRun(r, done);
+    if (rc != OK) {
+        __atomic_store_n(&g_binder.retry_after, SettledCycles() + 1u, __ATOMIC_RELEASE);
+        TallyEnded(r, rc);
+    } else if (*done) {
+        TallyEnded(r, OK);
+    }
+    return rc;
+}
+
+/* The Settle's Scribe taken as a pass that answers no asker: given back with
+ * the cover it found, so every one waiting takes the next pass itself. */
+static bool BinderScribeTake(uint64_t* written)
+{
+    uint64_t cover = 0;
+    error_t  refused = OK;
+    uint64_t ticket = ScribeAsk(&g_settle_scribe);
+    if (ScribeTry(&g_settle_scribe, ticket, &cover, &refused) != SCRIBE_MINE)
+        return false;
+    *written = __atomic_load_n(&g_settle_scribe.written, __ATOMIC_ACQUIRE);
+    return true;
+}
+
+bool BinderTurn(void)
+{
+    uint64_t written = 0;
+    bool     done    = false;
+    if (!tagfs_enter())
+        return false;
+    if (!BinderScribeTake(&written)) {
+        tagfs_leave();
+        return false;
+    }
+    (void)BinderStep(&done);
+    ScribeGive(&g_settle_scribe, written, OK);
+    tagfs_leave();
+    return true;
+}
+
+error_t BinderRunWhole(void)
+{
+    uint64_t written = 0;
+    bool     done    = false;
+    error_t  rc      = OK;
+    const char* why  = s_run.active ? NULL : BinderMayNot();
+    if (why) {
+        kprintf("[TagFS] a Tally is asked for and not begun: %s\n", why);
+        return ERR_BUSY;
+    }
+    while (rc == OK && !done) {
+        uint64_t   cover = 0, ticket = ScribeAsk(&g_settle_scribe);
+        error_t    refused = OK;
+        ScribeTurn turn = ScribeWait(&g_settle_scribe, ticket, &cover, &refused);
+        if (turn == SCRIBE_SELF)
+            return ERR_BUSY;            /* this core holds it beneath the asker */
+        if (turn != SCRIBE_MINE)
+            continue;                   /* a pass covered the ask: the Tally's step is still owed */
+        written = __atomic_load_n(&g_settle_scribe.written, __ATOMIC_ACQUIRE);
+        rc      = BinderStep(&done);
+        ScribeGive(&g_settle_scribe, written, OK);
+    }
+    return rc;
+}
+
+void BinderStitchSettled(uint64_t seq, uint64_t useful, uint64_t fid_most, error_t births)
+{
+    if (births != OK && !BinderNoTallies()) {
+        BinderNoTalliesFrom("memory would not keep the births of the runs a stitch put in");
+        kprintf("[TagFS] memory would not keep the births of the runs stitch %llu put in — no Tally is written "
+                "by this mount: the ribbon is read whole at the next mount, and runs out of Quires before it "
+                "does (ERR_TAGFS_NO_SPACE said then)\n", (unsigned long long)seq);
+    }
+    g_binder.useful += useful;
+    if (fid_most + 1u > g_binder.laid_fid)
+        g_binder.laid_fid = fid_most + 1u;
+    BinderWeigh();
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+void BinderStandStopAt(TallyStep at)
+{
+    s_stand_stop = at;
+}
+
+void BinderStandTearSlot(uint32_t sectors)
+{
+    s_stand_tear = sectors < TAGFS_BLOCK_SECTORS ? sectors : 0;
+}
+
+void BinderStand(BinderStandSaid* out)
+{
+    memset(out, 0, sizeof(*out));
+    out->next_slot     = SlotLeast();
+    out->useful        = g_binder.useful;
+    out->cost          = TallyCostBytes();
+    out->tally_blocks  = g_binder.tally_blocks;
+    out->tallies       = g_binder.tallies;
+    out->owed          = BinderOwed();
+    uint64_t from      = UINT64_MAX;
+    for (uint32_t i = 0; i < g_binder.nslots; i++) {
+        const SlotGround* s = &g_binder.slot[i];
+        if (s->holds && s->chain_from < from)
+            from = s->chain_from;
+        out->ribbon_quires += s->holds ? s->nextra : 0u;
+    }
+    if (from != UINT64_MAX && from >= g_binder.chain_base)
+        out->ribbon_quires += g_binder.chain_base + g_binder.nchain - from;
+}
+#endif

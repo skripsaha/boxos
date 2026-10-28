@@ -75,18 +75,48 @@ error_t  BlockMapDerivedStock(void);
 error_t  BlockMapDerivedHold(uint32_t pages);
 
 /*
- * A whole Quire for the ribbon (spec_v2 §3.6), its next_quire given ahead of
- * need: `blocks` free blocks in a row, the first on a multiple of `align` —
- * the medium's atom — inside the data run [first, the map's end), looked for
- * from `from` on and then from `first`; never taken where fewer than `keep`
- * blocks would be left free after it — the ground a whole Tally needs
- * (sewing.h, EndpaperKeeps). Claimed for the ribbon. With no TagFS lock held:
+ * A run of the book's own (spec_v2 §3.6): a whole Quire for the ribbon, its
+ * next_quire given ahead of need, or the run a copy of a whole Tally goes in
+ * (settle/binder.c) — `blocks` free blocks in a row, the first on a multiple
+ * of `align` — the medium's atom — inside the data run [first, the map's
+ * end), looked for from `from` on and then from `first`; never taken where
+ * fewer than `keep` blocks would be left free after it — for the ribbon the
+ * ground a whole Tally needs (sewing.h, EndpaperKeeps), for a Tally a Quire
+ * of ribbon. Claimed for `owner`. With no TagFS lock held:
  * its pages are stocked first, and the state lock taken. OK and *start;
  * ERR_TAGFS_NO_SPACE when no such run is free or the reserve forbids it;
  * ERR_NO_MEMORY with no page for the map.
  */
-error_t  BlockMapTakeQuire(uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first, uint64_t from,
-                           uint64_t* start);
+error_t  BlockMapTakeQuire(GroundOwner owner, uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first,
+                           uint64_t from, uint64_t* start);
+
+/*
+ * A file's data on the live map (allotment.c, AllotmentTakeBook), under the
+ * state lock — the stock of pages made before it, with no lock held
+ * (BlockMapDerivedStock):
+ *
+ *   BlockMapDerivedRunFree    the first run of `want` free blocks from `from`
+ *                             on, then from the map's start, in no window of a
+ *                             file but `fid`'s: true and *start
+ *   BlockMapDerivedRunFreeBack the last such run inside [lo, hi): the one
+ *                             farthest from where a file at `lo` goes on
+ *   BlockMapDerivedFreeFrom   how many blocks from `block` on are free, in a
+ *                             row, in no other file's window — `most` at most
+ *   BlockMapDerivedTakeLocked the run claimed for file `fid`: OK; ERR_NO_MEMORY
+ *                             when the stock held no page for a window it
+ *                             leaves mixed
+ *
+ * BlockMapDerivedGive, with no TagFS lock held: a run file `fid` took and no
+ * record named given back — its pages stocked first and the state lock taken;
+ * BlockMapDerivedGiveAs the same for a run of any owner's — a Tally's run no
+ * slot came to name.
+ */
+bool     BlockMapDerivedRunFree(uint64_t from, uint64_t want, uint64_t fid, uint64_t* start);
+bool     BlockMapDerivedRunFreeBack(uint64_t lo, uint64_t hi, uint64_t want, uint64_t fid, uint64_t* start);
+uint64_t BlockMapDerivedFreeFrom(uint64_t block, uint64_t most, uint64_t fid);
+error_t  BlockMapDerivedTakeLocked(uint64_t fid, uint64_t start, uint64_t count);
+error_t  BlockMapDerivedGive(uint64_t fid, uint64_t start, uint64_t count);
+error_t  BlockMapDerivedGiveAs(GroundOwner owner, uint64_t who, uint64_t start, uint64_t count);
 
 /* The build ended: OK, the map up and its free count the volume's; or
  * ERR_NO_MEMORY, the map let go and *what the refusal, which names how many

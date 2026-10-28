@@ -46,6 +46,30 @@ static bool StandEdgeEndsOn(uint64_t last, uint32_t walked)
            said.ribbon[RIBBON_CODE_DEAD_BRANCH] == walked && !TagFSIsUnderGlass();
 }
 
+/* The newest slot's ribbon walked by its StitchHeads alone — the walk the
+ * mount reads a slot it does not stand on by (ribbon_heads.c RibbonQuiresOf),
+ * and once a Tally is written over another slot the slot stood on now is one:
+ * it ends on `last` and runs through `in`, the Quire a retry lies in, as the
+ * mount's own walk does (§16.4 п.4, rule (б′)). */
+static bool StandEdgeHeadsReach(uint64_t last, const RibbonQuire* in)
+{
+    SpineSlot*  slots = NULL;
+    RibbonWalk* w     = NULL;
+    uint32_t    count = 0;
+    bool        held  = false;
+    char        what[96];
+    if (SpineRead(&g_book.frame, &slots, &count, what, sizeof(what)) != OK || count == 0) {
+        SpineLetGo(slots, count);
+        return false;
+    }
+    if (RibbonQuiresOf(&slots[0], &w) == OK && w->seq == last)
+        for (uint32_t i = 0; i < w->nquires && !held; i++)
+            held = RibbonQuireSame(&w->quires[i], in);
+    RibbonWalkLetGo(w);
+    SpineLetGo(slots, count);
+    return held;
+}
+
 // ----------------------------------------------------------------------------
 // M-6 inside the next_quire: a retry on the atom past a refused attempt, until
 // the Quire runs out (§16.4 п.4)
@@ -83,6 +107,8 @@ static TestResult TestStandStitchRetryQuireEntered(void)
     BlockFailDisarm();
     TEST_ASSERT(StandEdgeEndsOn(now.last, 1),
                 "mounted again, its ribbon goes on past the Quire's first atom to the retry, the walk said");
+    TEST_ASSERT(StandEdgeHeadsReach(now.last, &l.quire),
+                "and walked by its StitchHeads alone, as a slot not stood on is, it takes the retry up the same");
 out:
     if (!waiter.answered)
         (void)SettleWaitUnlink(&waiter.w);
@@ -115,6 +141,46 @@ static TestResult TestStandStitchRetryRefusedTwice(void)
                 "laid in the next_quire on the atom past the refused retry");
     BlockFailDisarm();
     TEST_ASSERT(StandEdgeEndsOn(now.last, 1), "mounted again, its ribbon ends on it, the walk said");
+out:
+    BlockFailDisarm();
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+/* A stitch whose write the medium refuses past its first sector — its head
+ * lands, naming the stitch before it — and whose retry at the next_quire's
+ * start is refused whole: the retry after that lies on the atom past it. A
+ * slot not stood on is walked by its heads past the head that landed into the
+ * next_quire, and on to the retry (§16.4 п.4, rule (б′)): nothing names the
+ * head, so the next_quire is looked into, as pass 1 looks. */
+static TestResult TestStandStitchRetryHeadLanded(void)
+{
+    TestResult   verdict = TEST_PASS;
+    StandStitch  s;
+    RibbonCursor l, now;
+    bool         kept  = false;
+    const char*  aside = StandStitchAside(&s);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT_OK(StandStitchSay("g", 1, 1, &kept), "a word is laid down");
+    RibbonCursorStand(&l);
+    TEST_ASSERT(kept && l.off && l.next.blocks && l.atom > 1u, "inside its Quire, the stitch naming the next_quire");
+    BlockFailArmRefusedWrites(s.seat, s.base + l.quire.block * TAGFS_BLOCK_SECTORS + l.off + 1u, l.atom - 1u);
+    TEST_ASSERT(BlockFailAddBadSectors(s.seat, s.base + l.next.block * TAGFS_BLOCK_SECTORS, l.atom),
+                "the medium refuses a write past the first sector where the ribbon stands, and at the start of the "
+                "next_quire");
+    TEST_ASSERT_OK(StandStitchSay("h", 1, 2, &kept),
+                   "a stitch whose head landed, and its retry at the next_quire's start refused, settle by the "
+                   "retry after");
+    TEST_ASSERT_EQ(BlockFailSeen(), 2, "after two refusals");
+    RibbonCursorStand(&now);
+    TEST_ASSERT(kept && RibbonQuireSame(&now.sewn.quire, &l.next) && now.sewn.off == l.atom,
+                "laid in the next_quire on the atom past the refused retry");
+    BlockFailDisarm();
+    TEST_ASSERT(StandEdgeHeadsReach(now.last, &l.next),
+                "walked by its StitchHeads alone, the ribbon goes on past the head that landed into the "
+                "next_quire, to the retry");
 out:
     BlockFailDisarm();
     STAND_STITCH_PUT_BACK(&s);
@@ -324,7 +390,7 @@ static TestResult TestStandStitchTallyCostLong(void)
     uint64_t laid = StandEdgeTallyButTags() + StandEdgeTagLeaves(reg);
     uint64_t cost = TallyCostBlocks();
     TestEvidence("blocks a writer lays of the Tally, the TAGS tree's leaves alone:", laid);
-    TestEvidence("blocks the reserve measures a whole Tally at:", cost);
+    TestEvidence("blocks the reserve measures the next Tally at:", cost);
     TEST_ASSERT(cost >= laid, "the measure is never less than the Tally a writer lays of the same tags");
 out:
     STAND_STITCH_PUT_BACK(&s);
@@ -369,6 +435,8 @@ static const TestCase g_stand_stitch_edge_tests[] = {
     { .name = "stand_stitch_retry_quire_entered", .func = TestStandStitchRetryQuireEntered,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_stitch_retry_refused_twice", .func = TestStandStitchRetryRefusedTwice,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_stitch_retry_head_landed", .func = TestStandStitchRetryHeadLanded,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_stitch_retry_runs_out", .func = TestStandStitchRetryRunsOut,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },

@@ -108,4 +108,16 @@ error_t  InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint
 error_t  InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord* cur, FallowNode* fallow,
                           InkReceipt* out);
 
+/* A Plot's change of a book's file (TagFSInkPlot): its window spliced into
+ * `cur` — the record it was loaded from, sitting at `was` — the Jot made, the
+ * digests of what it wrote put in the Gloss, the ribbon's room the Plot held
+ * taken for its claim, and the ground the record stops naming laid to rest,
+ * `small_us` the small append's time or 0. Then InkBookPlotNext: the Plot made
+ * to go on from the record it inked — held afresh, its window empty — as a
+ * write's next window does; a file given up since leaves it no record, and
+ * its next window is refused ERR_FILE_NOT_FOUND (plot_internal.h). */
+error_t  InkBookPlot(const Plot* p, const FileRecord* cur, const RecordWhere* was, uint64_t small_us,
+                     InkReceipt* out);
+void     InkBookPlotNext(Plot* p);
+
 #endif /* TAGFS_INK_INTERNAL_H */

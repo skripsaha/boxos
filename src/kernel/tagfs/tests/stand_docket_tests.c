@@ -21,11 +21,11 @@
 // what its medium holds holds the file as memory did before; changes of one
 // file between two stitches merge — a file born and given up before a stitch
 // named it leaves no record, a Born and the renames after it one Born of the
-// last name, two renames of a settled file one Labeled of the last — and a
-// change to a file's data is refused before a byte, as this kernel lays none
-// into a book. Ground a file gave up rests until the ribbon has left the Quire
-// its stitch lies in — the last of its Quires, for one that runs on into the
-// next — and the lag's stitches settled past it, two on a medium that lied;
+// last name, two renames of a settled file one Labeled of the last (a file's
+// data is stand_fresh's, stand_fresh_tests.c). Ground a file gave up rests
+// until the ribbon has left the Quire its stitch lies in — the last of its
+// Quires, for one that runs on into the next — and the lag's stitches settled
+// past it, two on a medium that lied;
 // room asked for closes that Quire early, and what a mount finds the ribbon
 // let go rests the same way. A change claims its room on the ribbon first —
 // the room past the stitch in flight, the Coineds of every tag given an id
@@ -206,34 +206,6 @@ static TestResult TestStandDocketMerges(void)
     FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, kept, NULL);
     TEST_ASSERT(rec && strcmp(rec->name, "docket-last.txt") == 0, "and with the renamed file by its last name");
     FileRecordRelease(rec);
-out:
-    STAND_STITCH_PUT_BACK(&s);
-    return verdict;
-}
-
-// ----------------------------------------------------------------------------
-// A change to a file's data is refused before a byte (§16.1 п.2)
-// ----------------------------------------------------------------------------
-
-static TestResult TestStandDocketDataRefused(void)
-{
-    TestResult  verdict = TEST_PASS;
-    StandStitch s;
-    uint64_t    fid = 0, plain = 0;
-    uint32_t    next;
-    const char* aside = StandStitchAside(&s);
-
-    if (aside)
-        return test_steps_aside(aside);
-    next = tagfs_get_state()->registry->next_id;
-    TEST_ASSERT(StandDocketPlainFile(&plain), "the book holds a file");
-    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5A);
-    TEST_ASSERT_EQ(TestFileWrite(plain, g_test_buffer, TAGFS_BLOCK_SIZE), -1, "its bytes are not written");
-    TEST_ASSERT_EQ(tagfs_create_file("docket-data.txt", NULL, 0, &fid), 0, "a file made on the book");
-    TEST_ASSERT_EQ(TestFileWrite(fid, g_test_buffer, TAGFS_BLOCK_SIZE), -1, "takes no byte either");
-    TEST_ASSERT(!TagFSReadOnly(), "and the volume takes files still");
-    TEST_ASSERT_EQ(tagfs_get_state()->registry->next_id, next + 1u,
-                   "the one id given is the new file's name's tag: a write refused interns nothing");
 out:
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -745,8 +717,6 @@ static const TestCase g_stand_docket_tests[] = {
     { .name = "stand_docket_each_change_mounts_again", .func = TestStandDocketEachChangeMountsAgain,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_docket_merges", .func = TestStandDocketMerges,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
-    { .name = "stand_docket_data_refused", .func = TestStandDocketDataRefused,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_docket_ground_rests", .func = TestStandDocketGroundRests,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },

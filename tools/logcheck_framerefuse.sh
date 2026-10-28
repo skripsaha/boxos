@@ -32,10 +32,11 @@
 # Then the same on a volume with its book whole (`create_tagfs --v2`, its
 # census clean before the boot): mounted, the machine's Use Context set to
 # what the volume does not remember — and remembered, a stitch on its ribbon —
-# `anchor_test` asked to write and anchor a file and refused before a byte,
-# and the power button pressed, the halt laying its last stitch — and every
-# write that lands in the volume's ground lands in its ribbon, by place, the
-# book left whole and holding the Use Context said.
+# `anchor_test` asked to write and anchor a file, its bytes laid on fresh
+# ground, and the power button pressed, the halt laying its last stitch — and
+# every write that lands in the volume's ground lands in its ribbon or on the
+# ground a live file of the book the machine left names, by place, the book
+# left whole and holding the Use Context said.
 # Then the blank ring again through UEFI (OVMF and TagBoot): the loader has to
 # take the kernel where the BOOT stamp of a deed bearing FRAME names it, and
 # the kernel it loads has to turn the volume away in the same words. Then
@@ -51,7 +52,8 @@
 # volume turned away — counted by where each write lands, and again by what
 # the classifier names it (cut --list), which has to be standing on the volume
 # as format v2 to name anything at all — nor anywhere in a book's ground but
-# the Quires of the ribbon the book the machine left names.
+# the Quires of the ribbon the book the machine left names and the ground its
+# files' runs name.
 #
 # ‼ A KERNEL BEFORE THIS ONE IS ASKED THE SAME, ONCE. FRAMEREFUSE_KERNEL=
 # <kernel.bin> puts that kernel in the same image instead, booted the same
@@ -66,12 +68,13 @@
 FRAMEREFUSE_V2_SAYS="carries a format-v2 volume (its deed bears FRAME); this kernel cannot read a format-v2 book — boot a newer kernel"
 FRAMEREFUSE_V1_SAYS="carries no layout this kernel understands"
 FRAMEREFUSE_BLANK_SAYS="this volume is NOT mounted: none of the 3 slots of its Spine holds"
-FRAMEREFUSE_BOOK_SAYS="what this volume promises: its book takes files made, named, tagged and given up, the names of tags and the memory of its Use Context"
+FRAMEREFUSE_BOOK_SAYS="what this volume promises: its book takes files made, written, named, tagged and given up, the names of tags and the memory of its Use Context"
 
 # framerefuse_judge BEFORE RECORD FINAL — what the record says the machine
 # wrote, against the image before the boot; one line, FRAMEREFUSE k=v ... —
 # `ribbon` the writes inside the ground that land in the Quires of the ribbon
-# the book FINAL holds names (0 for a volume that is no book).
+# the book FINAL holds names, `data` those on the ground its live files' runs
+# name (0 for a volume that is no book).
 framerefuse_judge() {
     local list="$SCRATCH/framerefuse.list.json" against
     against=$(python3 tools/volume-read.py "$1" cut "$2" --against "$3" 2>&1)
@@ -91,56 +94,59 @@ lo, hi = stand.start, stand.start + stand.deed["sectors"]
 writes = json.load(open(sys.argv[2]))["writes"]
 inside = [w for w in writes if w["lba"] < hi and w["lba"] + w["sectors"] > lo]
 named = [(w, t) for w in writes for t in w["touches"] if t["kind"] != "outside"]
-quires = []
+quires, runs = [], []
 try:
     from volumeread.bookground import BookGround
     from volumeread.bookmount import BookMount
     m = BookMount(BookGround(medium.Medium(sys.argv[3]), None))
     if m.refusal is None and m.ribbon is not None:
         quires = list(m.ribbon.quires) + ([m.ribbon.next] if m.ribbon.next else [])
+    if m.refusal is None:
+        runs = [(r.start, r.count) for fs in m.files.values() for r in fs.runs if not r.hole]
 except Exception as e:
     print("  the book the machine left does not read: %s" % e)
-def InRibbon(w):
+def Within(w, places):
     a, b = w["lba"] - lo, w["lba"] - lo + w["sectors"]
-    return any(q[0] * 8 <= a and b <= (q[0] + q[1]) * 8 for q in quires)
-ribbon = [w for w in inside if InRibbon(w)]
-for w in [w for w in inside if not InRibbon(w)][:5]:
-    print("  write %u.%u, LBA %u+%u, lands in the volume's ground %u..%u, outside its ribbon"
+    return any(q[0] * 8 <= a and b <= (q[0] + q[1]) * 8 for q in places)
+ribbon = [w for w in inside if Within(w, quires)]
+data = [w for w in inside if not Within(w, quires) and Within(w, runs)]
+for w in [w for w in inside if not Within(w, quires) and not Within(w, runs)][:5]:
+    print("  write %u.%u, LBA %u+%u, lands in the volume's ground %u..%u, outside its ribbon and its files"
           % (w["epoch"], w["index"], w["lba"], w["sectors"], lo, hi - 1))
 for w, t in named[:5]:
     print("  write %u.%u is named %s: %s" % (w["epoch"], w["index"], t["kind"], t["what"]))
-print("FRAMEREFUSE record=whole format=%s writes=%u inside=%u named=%u ribbon=%u"
-      % (stand.format, len(writes), len(inside), len(named), len(ribbon)))
+print("FRAMEREFUSE record=whole format=%s writes=%u inside=%u named=%u ribbon=%u data=%u"
+      % (stand.format, len(writes), len(inside), len(named), len(ribbon), len(data)))
 PY
 }
 
 # framerefuse_book_said LEG L — what the log of a leg whose book the machine
 # mounts carries: the mount, the Use Context the person said remembered by a
-# stitch of its cycle, the file anchor_test makes made and its write refused
-# first and said so — a file's data this kernel does not lay into a book — and
-# the halt laying its stitch and syncing the volume.
+# stitch of its cycle, the file anchor_test makes written and anchored — its
+# bytes on fresh ground, named by a stitch — and the halt laying its stitch
+# and syncing the volume.
 framerefuse_book_said() {
     local leg=$1 L=$2
     grep -qE "MOUNTED — [0-9]+ file" "$L"
     chk $? "framerefuse ($leg): the book is mounted ($(grep -oE 'MOUNTED — [0-9]+ file\(s\)' "$L" | head -1))"
     grep -aqE "^Context set\r?$" "$L"
     chk $? "framerefuse ($leg): the new Use Context is remembered by the volume — a stitch of its cycle"
-    grep -aqE "\[ANCHOR\] fwrite rc=-856" "$L"
-    chk $? "framerefuse ($leg): and the file anchor_test makes is made, its write refused first, ERR_TAGFS_READ_ONLY ($(grep -a '\[ANCHOR\]' "$L" | tail -1 | tr -d '\r'))"
-    grep -aq "^\[TagFS\] this kernel writes files, their names, their tags and their giving up into a format-v2 book, and not yet the data of a file" "$L"
-    chk $? "framerefuse ($leg): said in so many words"
+    grep -aqE "\[ANCHOR\] WROTE\+ANCHORED" "$L"
+    chk $? "framerefuse ($leg): and the file anchor_test makes is written and anchored on the book ($(grep -a '\[ANCHOR\]' "$L" | tail -1 | tr -d '\r'))"
     grep -aq '^\[HALT\] Storage sync complete' "$L"
     chk $? "framerefuse ($leg): and the halt lays its stitch and syncs the volume"
 }
 
 # framerefuse_book_left LEG IMG VERDICT — the book the machine left: every
-# write that lands in its ground lands in its ribbon, the book is whole, and
-# it holds the Use Context the person said, its last stitch the halt's, CLEAN.
+# write that lands in its ground lands in its ribbon or on its files' ground,
+# some in each, the book is whole, and it holds the Use Context the person
+# said, its last stitch the halt's, CLEAN.
 framerefuse_book_left() {
     local leg=$1 img=$2 verdict=$3
-    echo "$verdict" | sed -nE 's/.* inside=([0-9]+) named=[0-9]+ ribbon=([0-9]+)$/\1 \2/p' |
-        { read -r inside ribbon && [ "$inside" -gt 0 ] && [ "$inside" = "$ribbon" ]; }
-    chk $? "framerefuse ($leg): every write that lands in the book's ground lands in its ribbon, by place ($verdict)"
+    echo "$verdict" | sed -nE 's/.* inside=([0-9]+) named=[0-9]+ ribbon=([0-9]+) data=([0-9]+)$/\1 \2 \3/p' |
+        { read -r inside ribbon data && [ "$ribbon" -gt 0 ] && [ "$data" -gt 0 ] &&
+          [ "$inside" = "$((ribbon + data))" ]; }
+    chk $? "framerefuse ($leg): every write that lands in the book's ground lands in its ribbon or on the ground its files' runs name, by place ($verdict)"
     python3 tools/volume-read.py "$img" check --json >"$SCRATCH/framerefuse.$leg.after.json" 2>/dev/null
     chk $? "framerefuse ($leg): the book the machine left is whole ($(tail -1 "$SCRATCH/framerefuse.$leg.after.json" | cut -c1-60))"
     python3 - "$SCRATCH/framerefuse.$leg.after.json" <<'PY'
@@ -253,7 +259,7 @@ PY
     if [ -n "$mounts" ]; then
         framerefuse_book_left "$leg" "$img" "$verdict"
     else
-        echo "$verdict" | grep -q "format=v2 .* inside=0 named=0 ribbon=0$"
+        echo "$verdict" | grep -q "format=v2 .* inside=0 named=0 ribbon=0 data=0$"
         chk $? "framerefuse ($leg): not one write lands in the volume's ground, by place and by name ($verdict)"
     fi
     rm -f "$img" "$before"

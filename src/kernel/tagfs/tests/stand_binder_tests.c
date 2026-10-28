@@ -1,0 +1,952 @@
+#include "stand_binder.h"
+#include "stand_fresh.h"
+#include "../ink/fallow.h"
+#include "../plot/plot.h"
+#include "../settle/binder.h"
+#include "../mount/book_mount.h"
+#include "../mount/spine_read.h"
+#include "../mount/away.h"
+#include "../file_map/file_map.h"
+#include "../block_map/block_map_derived.h"
+#include "../tag_registry/tag_registry.h"
+#include "block_fail.h"
+#include "boardroom.h"
+
+#ifdef CONFIG_VOLUME_TESTS
+
+// ============================================================================
+// The stand_binder suite: the kernel writes a whole Tally of a format-v2
+// volume and the Spine slot that names it (spec_v2 §4.1–§4.4, §1.4, §2.5,
+// §16.2 пп.4–6, §16.4 п.5)
+//
+// The state after a settled stitch, every tree written whole in two copies,
+// the slot of the least seq named over it: mounted again on that slot, the
+// volume is the one memory held — files, their ground and bytes, tags, the
+// Use Context — with no stitch left to replay. A Tally refused at a node
+// leaves the slot it stood on (C7); one cut after its nodes and their flush
+// is nobody's, its ground free (C8); a slot torn leaves the one before (C9);
+// a flush of the slot refused leaves it whole or not at all (C10); a file of
+// many Parcels comes back whole, a cut inside the Tally or not (C23). A copy
+// of a node that would not read is written again by the next Tally (C24); a
+// node no copy of which reads is named by the next Tally as it lies, its
+// range rotten, its files locked and its blocks held as before (§16.4 п.5).
+// A Tally is owed once the ribbon past the newest slot holds as many useful
+// bytes as a Tally costs (TALLY_SLACK); the Tallies give the ribbon's Quires
+// back, so the volume filled and emptied has its ground again, and a tag
+// interned at the ribbon's end no longer holds the cycles. Every test puts
+// the Spine and the ribbon back as it found them.
+// ============================================================================
+
+bool StandBinderRead(const StandBinder* b, uint64_t block, uint8_t* out)
+{
+    return BoardroomRead(b->s.seat, b->s.base + block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS, out) == 0;
+}
+
+bool StandBinderWrite(const StandBinder* b, uint64_t block, const uint8_t* in)
+{
+    return BoardroomWrite(b->s.seat, b->s.base + block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS, in, NULL) == 0;
+}
+
+/* Why the test stands aside here, or NULL — the ring kept as found. */
+const char* StandBinderAside(StandBinder* b)
+{
+    memset(b, 0, sizeof(*b));
+    const char* aside = StandStitchAside(&b->s);
+    if (aside)
+        return aside;
+    b->slots  = g_book.frame.spine_slots;
+    b->spine  = g_book.frame.spine_block;
+    b->stride = g_book.frame.spine_stride;
+    if (b->slots == 0 || b->slots > STAND_BINDER_SLOTS_MOST)
+        return "the Spine's ring is not one the stand keeps";
+    if (!(b->ring = kmalloc((uint64_t)b->slots * TAGFS_BLOCK_SIZE)))
+        return "no memory to keep the ring";
+    for (uint32_t i = 0; i < b->slots; i++)
+        if (!StandBinderRead(b, b->spine + i * b->stride, b->ring + (uint64_t)i * TAGFS_BLOCK_SIZE))
+            return "the ring would not be read";
+    BinderStandGivenBegin();
+    b->nground = BinderStandGround(b->ground, STAND_BINDER_GROUND_MOST);
+    if (b->nground > STAND_BINDER_GROUND_MOST)
+        return "the slots hold more runs of ground than the stand keeps";
+    for (uint32_t i = 0; i < b->nground; i++) {
+        uint64_t bytes = (uint64_t)b->ground[i].count * TAGFS_BLOCK_SIZE;
+        if (!(b->held[i] = kmalloc(bytes)))
+            return "no memory to keep the slots' ground";
+        if (BoardroomRead(b->s.seat, b->s.base + b->ground[i].start * TAGFS_BLOCK_SECTORS,
+                          b->ground[i].count * TAGFS_BLOCK_SECTORS, b->held[i]) != 0)
+            return "the slots' ground would not be read";
+    }
+    return NULL;
+}
+
+/* A block the test changes by hand, kept as found for the put-back. */
+bool StandBinderKeep(StandBinder* b, uint64_t block)
+{
+    if (b->kept || !(b->kept = kmalloc(TAGFS_BLOCK_SIZE)))
+        return false;
+    b->kept_block = block;
+    return StandBinderRead(b, block, b->kept);
+}
+
+/* Every Quire the ribbon was given while the test ran written over with zeros
+ * — what the ring and its ground as found are written back over after — so no
+ * stitch of the test lies past the end of the ribbon the test found: the next
+ * mount's direct scan would read it as what settled and is lost (§3.9). */
+static bool StandBinderGivenZeroed(const StandBinder* b)
+{
+    static RibbonQuire given[256];
+    uint32_t           n  = BinderStandGiven(given, 256u);
+    bool               ok = n <= 256u;
+    memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
+    for (uint32_t i = 0; ok && i < n; i++)
+        for (uint64_t k = 0; ok && k < given[i].blocks; k++)
+            ok = StandBinderWrite(b, given[i].block + k, g_test_output);
+    return ok;
+}
+
+/* The volume let go of, the ring and the kept block written back as found,
+ * the ribbon put back (StandStitchPutBack) and the volume mounted on it. */
+bool StandBinderPutBack(StandBinder* b)
+{
+    bool ok = true;
+    if (tagfs_get_state()->initialized)
+        TagFSStandLetGo();
+    ok &= StandBinderGivenZeroed(b);
+    for (uint32_t i = 0; b->ring && i < b->slots; i++)
+        ok &= StandBinderWrite(b, b->spine + i * b->stride, b->ring + (uint64_t)i * TAGFS_BLOCK_SIZE);
+    if (b->kept)
+        ok &= StandBinderWrite(b, b->kept_block, b->kept);
+    for (uint32_t i = 0; i < b->nground && i < STAND_BINDER_GROUND_MOST; i++) {
+        if (b->held[i])
+            ok &= BoardroomWrite(b->s.seat, b->s.base + b->ground[i].start * TAGFS_BLOCK_SECTORS,
+                                 b->ground[i].count * TAGFS_BLOCK_SECTORS, b->held[i], NULL) == 0;
+        kfree(b->held[i]);
+        b->held[i] = NULL;
+    }
+    kfree(b->ring);
+    kfree(b->kept);
+    b->ring = b->kept = NULL;
+    return StandStitchPutBack(&b->s) && ok;
+}
+
+/* Whether `n` bytes are all zero. */
+static bool StandBinderZeros(const uint8_t* p, uint64_t n)
+{
+    for (uint64_t i = 0; i < n; i++)
+        if (p[i])
+            return false;
+    return true;
+}
+
+/* What the volume holds, as a mount says it: its live files' print and count,
+ * the Use Context's print, the tags of the registry and their bytes. */
+typedef struct {
+    uint32_t files_print;
+    uint64_t files;
+    uint32_t use_print;
+    uint64_t use_bytes;
+    uint64_t tags;
+    uint64_t text;
+    uint64_t locked;
+    uint64_t held;
+    uint32_t rotten;
+} StandBinderState;
+
+static void StandBinderStateOf(StandBinderState* st)
+{
+    MountBookSaid said;
+    MountBookStandSaid(&said);
+    memset(st, 0, sizeof(*st));
+    st->files_print = g_book.files_print;
+    st->files       = g_book.files;
+    st->use_print   = g_book.use_print;
+    st->use_bytes   = g_book.use_bytes;
+    st->locked      = said.locked;
+    st->held        = said.held;
+    st->rotten      = said.rotten;
+    TagRegistryTextBytes(tagfs_get_state()->registry, &st->tags, &st->text);
+}
+
+static bool StandBinderSame(const StandBinderState* a, const StandBinderState* b)
+{
+    bool same = a->files_print == b->files_print && a->files == b->files && a->use_print == b->use_print &&
+                a->use_bytes == b->use_bytes && a->tags == b->tags && a->text == b->text &&
+                a->locked == b->locked && a->held == b->held && a->rotten == b->rotten;
+    if (!same)
+        kprintf("[TESTS] stand_binder: the states differ — files print %08X/%08X, files %llu/%llu, Use %08X/%08X "
+                "%llu/%llu bytes, tags %llu/%llu of %llu/%llu bytes, locked %llu/%llu, held %llu/%llu, rotten "
+                "%u/%u\n", a->files_print, b->files_print, (unsigned long long)a->files,
+                (unsigned long long)b->files, a->use_print, b->use_print, (unsigned long long)a->use_bytes,
+                (unsigned long long)b->use_bytes, (unsigned long long)a->tags, (unsigned long long)b->tags,
+                (unsigned long long)a->text, (unsigned long long)b->text, (unsigned long long)a->locked,
+                (unsigned long long)b->locked, (unsigned long long)a->held, (unsigned long long)b->held,
+                a->rotten, b->rotten);
+    return same;
+}
+
+/* Whether a slot of the ring holds other bytes than the test found it with —
+ * the Tally's slot written, whole or in part. */
+static bool StandBinderTornWritten(const StandBinder* b)
+{
+    for (uint32_t i = 0; i < b->slots; i++) {
+        if (!StandBinderRead(b, b->spine + i * b->stride, g_test_output))
+            return false;
+        if (memcmp(g_test_output, b->ring + (uint64_t)i * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE) != 0)
+            return true;
+    }
+    return false;
+}
+
+/* The slot of the ring that holds with the greatest seq, read off the medium:
+ * its index, its seq and the Tally it names; false when none holds. */
+static bool StandBinderNewest(uint32_t* index, uint64_t* seq, uint64_t* tally)
+{
+    SpineSlot* slots = NULL;
+    uint32_t   count = 0;
+    char       what[96];
+    bool       found = SpineRead(&g_book.frame, &slots, &count, what, sizeof(what)) == OK && count > 0;
+    if (found) {
+        *index = slots[0].index;
+        *seq   = slots[0].seq;
+        *tally = slots[0].head.tally_seq;
+    }
+    SpineLetGo(slots, count);
+    return found;
+}
+
+/* A few files, their names and tags, data in one of them, and a word: settled,
+ * the volume mounted again on it — the state a Tally is then written of. */
+static bool StandBinderSow(StandFreshModel* m, uint64_t* data_fid)
+{
+    static const char* names[] = { "bind-a.txt", "bind-b.txt", "bind-c.bin" };
+    uint64_t           fid     = 0;
+    bool               kept    = false;
+    for (uint32_t i = 0; i < 3u; i++)
+        if (tagfs_create_file(names[i], NULL, 0, &fid) != 0)
+            return false;
+    *data_fid = fid;
+    if (!StandFreshModelMake(m, 8u * TAGFS_BLOCK_SIZE) ||
+        StandFreshWrite(m, fid, 0, 5u * TAGFS_BLOCK_SIZE + 77u, 21) != 5 * TAGFS_BLOCK_SIZE + 77)
+        return false;
+    if (StandStitchSay("bind: the word", 14, 1, &kept) != OK || !kept)
+        return false;
+    /* A Tally of a mount is written only once a stitch of that mount settled
+     * (§4.2): one more, carrying nothing, after the mount. */
+    return TagFSSettle() == OK && StandStitchRemount() && StandFreshHolds(m, fid) && TagFSSettle() == OK;
+}
+
+/* `n` Tallies in a row, the lag's stitches settled past each: OK, or the
+ * first refusal. */
+error_t StandBinderTallies(uint32_t n)
+{
+    error_t rc = OK;
+    for (uint32_t t = 0; rc == OK && t < n; t++) {
+        rc = BinderRunWhole();
+        for (uint64_t l = 0; rc == OK && l <= FallowLag(); l++)
+            rc = TagFSSettle();
+    }
+    return rc;
+}
+
+// ----------------------------------------------------------------------------
+// A whole Tally, and the slot that names it
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandBinderWhole(void)
+{
+    TestResult       verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel  m;
+    StandBinderState before, after;
+    MountBookSaid    said;
+    RibbonCursor     c;
+    uint64_t         fid = 0, seq = 0, tally = 0;
+    uint32_t         index = 0, stood = 0;
+    const char*      aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandBinderSow(&m, &fid), "files, data and a word are settled, and the volume mounted again");
+    StandBinderStateOf(&before);
+    MountBookStandSaid(&said);
+    stood = said.slot;
+    RibbonCursorStand(&c);
+    TEST_ASSERT_OK(BinderRunWhole(), "a whole Tally is written");
+    TEST_ASSERT(StandBinderNewest(&index, &seq, &tally), "a slot of the ring holds");
+    TEST_ASSERT(index != stood, "the newest is not the one the mount stood on: the Tally's slot");
+    TEST_ASSERT(tally > c.last && seq > tally, "it names a Tally past the last stitch, at a seq past the Tally's");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    MountBookStandSaid(&said);
+    StandBinderStateOf(&after);
+    TEST_ASSERT_EQ(said.slot, index, "on the Tally's slot");
+    TEST_ASSERT_EQ(said.sewn, 0, "with no stitch to replay past it");
+    TEST_ASSERT_EQ(said.last, c.last, "its chain ending on the stitch the Tally is the state after");
+    TEST_ASSERT(StandBinderSame(&before, &after), "and the state it mounts is the one the stitches left");
+    TEST_ASSERT(StandFreshHolds(&m, fid), "the file reads its bytes");
+    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles on it");
+    TEST_ASSERT(StandStitchRemount(), "and the volume mounts again");
+    MountBookStandSaid(&said);
+    TEST_ASSERT(said.slot == index && said.sewn == 1, "on the same slot, the stitch past the Tally replayed");
+out:
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// C7: a node refused — the slot stays the one stood on
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandBinderNodeRefused(void)
+{
+    TestResult       verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel  m;
+    StandBinderState before, after;
+    MountBookSaid    said;
+    uint64_t         fid = 0, free = 0;
+    uint32_t         stood = 0;
+    const char*      aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandBinderSow(&m, &fid), "the state is settled and mounted");
+    StandBinderStateOf(&before);
+    MountBookStandSaid(&said);
+    stood = said.slot;
+    free  = tagfs_get_state()->ledger.free_blocks;
+    BlockFailArm(b.s.seat, BLOCK_FAIL_WRITE, 0, 0, 1);
+    TEST_ASSERT(BinderRunWhole() != OK, "the Tally whose first node the medium refuses is refused");
+    BlockFailDisarm();
+    TEST_ASSERT_EQ(tagfs_get_state()->ledger.free_blocks, free, "and the ground it took is given back");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    MountBookStandSaid(&said);
+    StandBinderStateOf(&after);
+    TEST_ASSERT_EQ(said.slot, stood, "on the slot it stood on (C7)");
+    TEST_ASSERT(StandBinderSame(&before, &after), "the state the same");
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    TEST_ASSERT_OK(BinderRunWhole(), "and the next Tally is written");
+out:
+    BlockFailDisarm();
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// C8, C9, C10: the slot never written, torn, or its flush refused
+// ----------------------------------------------------------------------------
+
+/* What a Tally cut by StandBinderCut left in the session, before the volume
+ * was mounted again: the slot it was written over, the free count right after
+ * the cut, and the slot the next Tally would be written over. */
+typedef struct {
+    uint32_t written;
+    uint64_t free;
+    uint32_t next;
+} StandBinderCutSaid;
+
+/* The Tally begun and ended by `how` (0: stopped before its slot; 1: its slot
+ * torn; 2: its slot's flush refused), its answer. */
+static error_t StandBinderCutRun(StandBinder* b, uint32_t how)
+{
+    if (how == 0)
+        BinderStandStopAt(TALLY_SLOT);
+    else if (how == 1)
+        BinderStandTearSlot(4);
+    else
+        BlockFailArm(b->s.seat, BLOCK_FAIL_FLUSH, 0, 0, 2);
+    error_t rc = BinderRunWhole();
+    BlockFailDisarm();
+    BinderStandStopAt(0);
+    BinderStandTearSlot(0);
+    TestEvidence("the Tally cut ended with", (uint64_t)rc);
+    return rc;
+}
+
+/* The state sown and mounted, a Tally begun and ended by `how`, what the
+ * session held right after in *cut, and the volume mounted again: the slot it
+ * stands on in *slot, the free count it had before the Tally and has now. */
+static bool StandBinderCut(StandBinder* b, uint32_t how, StandBinderState* before, StandBinderState* after,
+                           uint32_t* stood, uint32_t* slot, uint64_t* free_before, uint64_t* free_after,
+                           StandBinderCutSaid* cut)
+{
+    StandFreshModel m;
+    MountBookSaid   said;
+    BinderStandSaid bs;
+    uint64_t        fid = 0;
+    memset(&m, 0, sizeof(m));
+    bool ok = StandBinderSow(&m, &fid);
+    StandFreshModelLetGo(&m);
+    if (!ok)
+        return false;
+    StandBinderStateOf(before);
+    MountBookStandSaid(&said);
+    BinderStand(&bs);
+    *stood       = said.slot;
+    *free_before = tagfs_get_state()->ledger.free_blocks;
+    cut->written = bs.next_slot;
+    error_t rc   = StandBinderCutRun(b, how);
+    if (how == 0 ? rc != ERR_IO_CANCELLED : rc == OK || rc == ERR_BUSY)
+        return false;
+    BinderStand(&bs);
+    cut->free = tagfs_get_state()->ledger.free_blocks;
+    cut->next = bs.next_slot;
+    if (!StandStitchRemount())
+        return false;
+    MountBookStandSaid(&said);
+    *slot       = said.slot;
+    *free_after = tagfs_get_state()->ledger.free_blocks;
+    StandBinderStateOf(after);
+    return true;
+}
+
+static TestResult TestStandBinderUnslotted(void)
+{
+    TestResult       verdict = TEST_PASS;
+    static StandBinder b;
+    StandBinderCutSaid cut;
+    StandBinderState before, after;
+    uint32_t         stood = 0, slot = 0;
+    uint64_t         free_before = 0, free_after = 0;
+    const char*      aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandBinderCut(&b, 0, &before, &after, &stood, &slot, &free_before, &free_after, &cut),
+                "a Tally cut after its nodes and their flush, the volume mounted again");
+    TEST_ASSERT_EQ(cut.free, free_before, "its ground went back as it was cut: no slot can name it");
+    TEST_ASSERT_EQ(slot, stood, "the slot stood on is the one before (C8)");
+    TEST_ASSERT(StandBinderSame(&before, &after), "the state the same");
+    TEST_ASSERT_EQ(free_after, free_before, "and the nodes no slot names are nobody's: the free count as before");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+static TestResult TestStandBinderSlotTorn(void)
+{
+    TestResult       verdict = TEST_PASS;
+    static StandBinder b;
+    StandBinderCutSaid cut;
+    StandBinderState before, after;
+    uint32_t         stood = 0, slot = 0, index = 0;
+    uint64_t         free_before = 0, free_after = 0, seq = 0, tally = 0;
+    const char*      aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandBinderCut(&b, 1, &before, &after, &stood, &slot, &free_before, &free_after, &cut),
+                "a Tally whose slot is torn, the volume mounted again");
+    TEST_ASSERT(cut.free < free_before && cut.next == cut.written,
+                "the session held its ground as the torn slot may name it, and would write that slot over first");
+    TEST_ASSERT_EQ(slot, stood, "the mount stands on the slot before (C9)");
+    TEST_ASSERT(StandBinderNewest(&index, &seq, &tally) && index == stood, "the torn one holds not");
+    TEST_ASSERT(StandBinderTornWritten(&b), "and a slot of the ring was written in part: the tear is the Tally's");
+    TEST_ASSERT(StandBinderSame(&before, &after), "the state the same");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+static TestResult TestStandBinderSlotFlushRefused(void)
+{
+    TestResult       verdict = TEST_PASS;
+    static StandBinder b;
+    StandBinderCutSaid cut;
+    StandBinderState before, after;
+    uint32_t         stood = 0, slot = 0;
+    uint64_t         free_before = 0, free_after = 0;
+    const char*      aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandBinderCut(&b, 2, &before, &after, &stood, &slot, &free_before, &free_after, &cut),
+                "a Tally whose slot's flush the medium refuses is refused, the volume mounted again");
+    TEST_ASSERT(cut.free < free_before && cut.next == cut.written,
+                "the session held its ground as the slot may name it, and would write that slot over first");
+    TEST_ASSERT(slot == stood || slot == cut.written, "the mount stands on the slot before, or on the Tally whole");
+    TEST_ASSERT(StandBinderSame(&before, &after), "whole or not at all, the state the same (C10)");
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    TEST_ASSERT_OK(BinderRunWhole(), "and a Tally after it is written");
+    TEST_ASSERT(StandStitchRemount(), "and the volume mounts on it");
+    StandBinderStateOf(&after);
+    TEST_ASSERT(StandBinderSame(&before, &after), "the state the same again");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+/* A slot torn, and the session goes on without a mount between: the slot
+ * that may name either Tally is written over first, and the Tally written
+ * over it gives both pairs of nodes back. */
+static TestResult TestStandBinderSlotUnsure(void)
+{
+    TestResult       verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel  m;
+    StandBinderState before, after;
+    BinderStandSaid  bs;
+    MountBookSaid    said;
+    uint64_t         fid = 0, free0 = 0, free1 = 0, seq = 0, tally = 0;
+    uint32_t         torn = 0, index = 0;
+    const char*      aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandBinderSow(&m, &fid), "the state is settled and mounted");
+    StandBinderStateOf(&before);
+    BinderStand(&bs);
+    torn  = bs.next_slot;
+    free0 = tagfs_get_state()->ledger.free_blocks;
+    error_t rc = StandBinderCutRun(&b, 1);
+    TEST_ASSERT(rc != OK && rc != ERR_BUSY, "a Tally whose slot is torn is refused");
+    free1 = tagfs_get_state()->ledger.free_blocks;
+    TEST_ASSERT(free1 < free0, "and the ground it took stays held: the torn slot may name it");
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch settles, no mount between");
+    BinderStand(&bs);
+    TEST_ASSERT_EQ(bs.next_slot, torn, "the slot that may name either Tally is the one written over next");
+    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally is written, the lag's stitches settled past it");
+    TEST_ASSERT(StandBinderNewest(&index, &seq, &tally) && index == torn, "over the torn slot");
+    TEST_ASSERT(tagfs_get_state()->ledger.free_blocks >= free1,
+                "and its DONE gave both pairs back — the torn Tally's and what the slot held before — for the one "
+                "it took");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    MountBookStandSaid(&said);
+    StandBinderStateOf(&after);
+    TEST_ASSERT_EQ(said.slot, torn, "on the Tally written over the torn slot");
+    TEST_ASSERT(StandBinderSame(&before, &after) && StandFreshHolds(&m, fid), "the state the same, the file whole");
+out:
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// C23: a file of many Parcels, whole across a Tally and a cut inside one
+// ----------------------------------------------------------------------------
+
+#define STAND_BINDER_STRIDED  300u     /* blocks written one apart: a Strip each, a hole between */
+
+static TestResult TestStandBinderParcels(void)
+{
+    TestResult       verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel  m;
+    StandBinderState before, after;
+    uint64_t         fid = 0, strips = 0;
+    const char*      aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandFreshModelMake(&m, 2u * STAND_BINDER_STRIDED * TAGFS_BLOCK_SIZE), "room for the file");
+    TEST_ASSERT_EQ(tagfs_create_file("bind-parcels.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_OK(StandFreshSpan(&m, fid, 2u * STAND_BINDER_STRIDED * TAGFS_BLOCK_SIZE), "spanned over a hole");
+    for (uint64_t k = 0; k < STAND_BINDER_STRIDED; k++)
+        TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 2u * k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 30u + k),
+                       TAGFS_BLOCK_SIZE, "every other block written");
+    TEST_ASSERT_OK(TagFSSettle(), "and settled");
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted again, a stitch of it settled");
+    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    strips          = rec ? rec->strip_count : 0;
+    FileRecordRelease(rec);
+    TestEvidence("Strips of the strided file", strips);
+    TEST_ASSERT(strips > 2u * PARCEL_STRIPS_MOST, "the file's Strips fill three Parcels and more");
+    StandBinderStateOf(&before);
+    BinderStandStopAt(TALLY_FLUSH);
+    (void)BinderRunWhole();
+    BinderStandStopAt(0);
+    TEST_ASSERT(StandStitchRemount(), "a Tally cut inside, before its flush: the volume mounts again");
+    StandBinderStateOf(&after);
+    TEST_ASSERT(StandBinderSame(&before, &after) && StandFreshHolds(&m, fid), "on the Tally before, the file whole");
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "mounted again, a stitch of it settled");
+    TEST_ASSERT_OK(BinderRunWhole(), "a whole Tally is written");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    StandBinderStateOf(&after);
+    rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    TEST_ASSERT(rec && rec->strip_count == strips, "the file's Strips as they were");
+    FileRecordRelease(rec);
+    TEST_ASSERT(StandBinderSame(&before, &after) && StandFreshHolds(&m, fid), "the state the same, the file whole");
+out:
+    BinderStandStopAt(0);
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// C24: a copy that would not read is written again by the next Tally
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandBinderHeals(void)
+{
+    TestResult       verdict = TEST_PASS;
+    static StandBinder b;
+    StandBinderState before, after;
+    MountBookSaid    said;
+    TallyPlace       root;
+    const char*      aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount(), "the volume mounted afresh");
+    TEST_ASSERT(TallyStandNodeWhere(TALLY_FILES, 0, &root) && root.ptr.copies == 2, "the FILES root, two copies");
+    TEST_ASSERT(StandBinderKeep(&b, root.ptr.block[0]), "its first copy's first block kept as found");
+    memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
+    TEST_ASSERT(StandBinderWrite(&b, root.ptr.block[0], g_test_output), "and written over with zeros");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    MountBookStandSaid(&said);
+    TEST_ASSERT(said.mended >= 1, "reading the root's second copy, and saying the first will be mended");
+    StandBinderStateOf(&before);
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    TEST_ASSERT_OK(BinderRunWhole(), "a whole Tally is written");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    MountBookStandSaid(&said);
+    StandBinderStateOf(&after);
+    TEST_ASSERT_EQ(said.mended, 0, "every copy of every node holds: the pair written anew (C24)");
+    TEST_ASSERT(StandBinderSame(&before, &after), "the state the same");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// §16.4 п.5: a node no copy of which reads is named as it lies
+// ----------------------------------------------------------------------------
+
+#define STAND_BINDER_MANY  140u       /* files enough for FILES to take two leaves and more */
+
+static TestResult TestStandBinderRottenNamed(void)
+{
+    TestResult       verdict = TEST_PASS;
+    static StandBinder b;
+    StandBinderState before, after;
+    MountBookSaid    said;
+    TallyPlace       leaf;
+    char             name[64];
+    uint64_t         fid = 0, files = 0;
+    bool             found = false;
+    const char*      aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    for (uint32_t i = 0; i < STAND_BINDER_MANY; i++) {
+        ksnprintf(name, sizeof(name), "bind-rot-%04u-of-a-name-long-enough.txt", i);
+        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &fid), 0, "a file is made");
+    }
+    TEST_ASSERT_OK(TagFSSettle(), "the files settled");
+    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    files = g_book.files;
+    for (uint32_t i = 1; !found && TallyStandNodeWhere(TALLY_FILES, i, &leaf); i++)
+        found = leaf.level == 0 && leaf.has_lo && leaf.has_hi;
+    TEST_ASSERT(found && leaf.ptr.copies == 2, "a leaf of FILES between two others, two copies");
+    TEST_ASSERT(StandBinderKeep(&b, leaf.ptr.block[0]), "kept");
+    memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
+    TEST_ASSERT(StandBinderWrite(&b, leaf.ptr.block[0], g_test_output) &&
+                StandBinderWrite(&b, leaf.ptr.block[1], g_test_output), "both its copies written over with zeros");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    StandBinderStateOf(&before);
+    TEST_ASSERT(before.rotten == 1 && before.files < files, "its range rotten, the files in it locked");
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    TEST_ASSERT_OK(BinderRunWhole(), "and a Tally is written over the rotten range");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    MountBookStandSaid(&said);
+    StandBinderStateOf(&after);
+    TEST_ASSERT(StandBinderSame(&before, &after), "the same range rotten, the same files locked, the same held");
+    TEST_ASSERT(TallyStandNodeWhere(TALLY_FILES, 0, &leaf) && said.sewn == 0, "the new Tally stood on");
+    TEST_ASSERT(StandBinderRead(&b, b.kept_block, g_test_output), "the rotten copy read back");
+    TEST_ASSERT(StandBinderZeros(g_test_output, TAGFS_BLOCK_SIZE), "and nobody wrote it: the node is named as it lies");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// TALLY_SLACK: a Tally is owed once the ribbon holds what one costs
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandBinderSlack(void)
+{
+    TestResult      verdict = TEST_PASS;
+    static StandBinder b;
+    BinderStandSaid said, last;
+    bool            kept = false;
+    uint32_t        k = 0;
+    const char*     aside = StandBinderAside(&b);
+
+    memset(&last, 0, sizeof(last));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount(), "the volume mounted afresh");
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    BinderStand(&said);
+    TEST_ASSERT(!said.owed, "no Tally owed with the ribbon this short");
+    for (k = 0; k < 4096u && !said.owed; k++) {
+        last = said;
+        TEST_ASSERT_OK(StandStitchSayLong(1000u, (char)('a' + k % 26u), 200u + k, &kept), "a word is settled");
+        BinderStand(&said);
+    }
+    TestEvidence("useful bytes past the newest slot's at when a Tally fell owed", said.useful);
+    TestEvidence("the bytes the next Tally is reckoned to cost", said.cost);
+    TEST_ASSERT(said.owed && said.useful >= TALLY_SLACK * said.cost && last.useful < TALLY_SLACK * last.cost,
+                "a Tally falls owed by TALLY_SLACK, and not before");
+    TEST_ASSERT_OK(BinderRunWhole(), "it is written");
+    BinderStand(&said);
+    TEST_ASSERT(!said.owed && said.useful == 0, "and nothing is owed past it");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// The ribbon's Quires come back with the Tallies
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandBinderGroundBack(void)
+{
+    TestResult      verdict = TEST_PASS;
+    static StandBinder b;
+    BinderStandSaid said;
+    RibbonCursor    c;
+    bool            kept = false;
+    uint64_t        free0 = 0, free1 = 0, quires0 = 0;
+    const char*     aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount(), "the volume mounted afresh");
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    free0 = tagfs_get_state()->ledger.free_blocks;
+    RibbonCursorStand(&c);
+    quires0 = c.quires;
+    for (uint32_t k = 0; k < 6u; k++)
+        TEST_ASSERT_OK(StandStitchSayFilling(c.quire_blocks * TAGFS_BLOCK_SECTORS / 2u, (char)('A' + k), 300u + k,
+                                             &kept), "a word half a Quire long is settled");
+    RibbonCursorStand(&c);
+    TestEvidence("Quires the ribbon ran through", c.quires - quires0);
+    TEST_ASSERT(c.quires >= quires0 + 3u, "the ribbon ran through three Quires and more");
+    for (uint32_t t = 0; t < 4u; t++) {
+        TEST_ASSERT_OK(BinderRunWhole(), "a Tally is written");
+        for (uint64_t l = 0; l <= FallowLag(); l++)
+            TEST_ASSERT_OK(TagFSSettle(), "and stitches settle past it");
+    }
+    BinderStand(&said);
+    free1 = tagfs_get_state()->ledger.free_blocks;
+    TestEvidence("Quires of the ribbon the slots hold after four Tallies", said.ribbon_quires);
+    TestEvidence("free blocks lost to the book after the Tallies", free0 > free1 ? free0 - free1 : 0);
+    TEST_ASSERT(said.ribbon_quires <= 2u, "the slots hold no more than two Quires of the ribbon");
+    TEST_ASSERT(free1 + 2u * c.quire_blocks +
+                    6u * ((said.tally_blocks + c.quire_blocks - 1u) / c.quire_blocks) * c.quire_blocks >= free0,
+                "and the ground the ribbon ran through is back, all but what three Tallies of whole Quires and two "
+                "Quires of ribbon hold");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// A Tally past two Quires on a fresh ring: the volume filled to its refusal, a
+// Tally always possible, and emptied, its ground back (§16.2 п.6)
+// ----------------------------------------------------------------------------
+
+/* Files of one name — a tag is never given back (§4.4), a header is: so many
+ * headers take FILES past two Quires of a Tally, 128 or so to a leaf. Half of
+ * them are made after a Tally, so the Tally of the full volume is twice the
+ * one before it: a reserve that kept the last Tally's size alone, its growth
+ * since left out, would let the data take the ground it needs (§16.4 п.7). */
+#define STAND_BINDER_BIG_FILES  72000u
+#define STAND_BINDER_BIG_BATCH  4000u
+
+/* `n` files of the one name made, a batch settled at a time: the first id
+ * into *first unless it holds one. */
+static TestResult StandBinderMake(uint32_t n, uint64_t* first)
+{
+    TestResult verdict = TEST_PASS;
+    uint64_t   fid     = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        TEST_ASSERT_EQ(tagfs_create_file("bind-big.n", NULL, 0, &fid), 0, "a file is made");
+        *first = *first ? *first : fid;
+        if (i % STAND_BINDER_BIG_BATCH == STAND_BINDER_BIG_BATCH - 1u)
+            TEST_ASSERT_OK(TagFSSettle(), "the files settle a batch at a time");
+    }
+    TEST_ASSERT_OK(TagFSSettle(), "every file settled");
+out:
+    return verdict;
+}
+
+/* One file written until the volume refuses it: the refusal. */
+static error_t StandBinderFill(uint64_t fid)
+{
+    TagFSFileHandle* h       = tagfs_open(fid, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    uint64_t         written = 0;
+    PlotSource       src     = { .kernel = g_test_buffer, .bytes = sizeof(g_test_buffer) };
+    error_t          rc      = h ? OK : ERR_FILE_NOT_FOUND;
+    TestFillAt(g_test_buffer, sizeof(g_test_buffer), 47, 0);
+    while (rc == OK)
+        rc = tagfs_write(h, &src, &written);
+    if (h)
+        tagfs_close(h);
+    return rc;
+}
+
+static TestResult TestStandBinderFullBack(void)
+{
+    TestResult      verdict = TEST_PASS;
+    static StandBinder b;
+    BinderStandSaid said;
+    uint64_t        free0 = 0, first = 0, fill = 0, big = 0, half = 0;
+    const char*     aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    uint64_t q = RibbonCursorNow()->quire_blocks;
+    free0 = tagfs_get_state()->ledger.free_blocks;
+    TEST_ASSERT(StandBinderMake(STAND_BINDER_BIG_FILES / 2u, &first) == TEST_PASS, "half the files are made");
+    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally of them is written");
+    BinderStand(&said);
+    half = said.tally_blocks;
+    TEST_ASSERT(StandBinderMake(STAND_BINDER_BIG_FILES / 2u, &first) == TEST_PASS, "and as many again after it");
+    TEST_ASSERT_EQ(tagfs_create_file("bind-fill.bin", NULL, 0, &fill), 0, "a file to fill the volume is made");
+    TEST_ASSERT_EQ(StandBinderFill(fill), ERR_TAGFS_NO_SPACE, "and written until the volume refuses it");
+    TEST_ASSERT_OK(TagFSSettle(), "every file and every byte settled");
+    TestEvidence("free blocks the full volume keeps for the book", tagfs_get_state()->ledger.free_blocks);
+    TEST_ASSERT_OK(StandBinderTallies(3u), "the volume full, a Tally is always possible: three in a row, over the "
+                   "two slots that held nothing and the one that held the Tally the volume was made with");
+    BinderStand(&said);
+    big = said.tally_blocks;
+    TestEvidence("blocks a copy of the Tally of half the files took", half);
+    TestEvidence("blocks a copy of the Tally of the full volume takes", big);
+    TEST_ASSERT(big > 2u * q && big >= half + half / 2u, "a Tally past two Quires, grown by half and more since the "
+                "one of half the files");
+    TEST_ASSERT_EQ(tagfs_delete_file(fill, INK_UNWARRANTED), 0, "the data is given up");
+    for (uint64_t f = first; f < first + STAND_BINDER_BIG_FILES; f++) {
+        TEST_ASSERT_EQ(tagfs_delete_file(f, INK_UNWARRANTED), 0, "a file is given up");
+        if ((f - first) % STAND_BINDER_BIG_BATCH == STAND_BINDER_BIG_BATCH - 1u)
+            TEST_ASSERT_OK(TagFSSettle(), "the deletes settle a batch at a time");
+    }
+    TEST_ASSERT_OK(TagFSSettle(), "every delete settled");
+    TEST_ASSERT_OK(SettleForRoom(), "room is asked for: the ribbon leaves the Quire the deletes lie in");
+    TEST_ASSERT_OK(StandBinderTallies(4u), "and Tallies of the emptied volume are written over the whole ring");
+    BinderStand(&said);
+    uint64_t free1 = tagfs_get_state()->ledger.free_blocks;
+    uint64_t ring  = 6u * ((said.tally_blocks + q - 1u) / q) * q;
+    TestEvidence("free blocks the book keeps past the start, the volume emptied", free0 > free1 ? free0 - free1 : 0);
+    TEST_ASSERT(said.tally_blocks < big && said.ribbon_quires <= 2u,
+                "the Tallies of the emptied volume are small again, and the slots hold two Quires of ribbon at most");
+    TEST_ASSERT(free1 + 2u * q + ring >= free0,
+                "and its ground is back — the data's, the big Tallies', the ribbon's — all but what the ring holds "
+                "now: three Tallies of whole Quires, both copies, and two Quires of ribbon");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// A ribbon that can be given no next_quire: the Tallies it asks for take its
+// end in (SETTLE_DEMAND_TALLY), and a tag interned there no longer holds the
+// cycles
+// ----------------------------------------------------------------------------
+
+#define STAND_BINDER_WORDS  192u    /* a thirty-second of a Quire each: the ribbon runs through six */
+
+/* A word of the test said, a Quire's thirty-second long; refused while the
+ * ribbon has no next_quire (§3.6), and said again once the Tallies it asked
+ * for, and the lag's stitches past them, gave its Quires back — the first two
+ * over slots that held nothing let go of none, and the reserve keeps their
+ * ground (BinderRingShort). *refused counts the times it was refused,
+ * *tallies the Tallies written. */
+static error_t StandBinderWord(uint32_t k, uint64_t q, uint32_t* refused, uint32_t* tallies)
+{
+    BinderStandSaid said;
+    bool            kept = false;
+    error_t         rc   = StandStitchSayFilling(q * TAGFS_BLOCK_SECTORS / 32u, (char)('a' + k % 26u), 600u + k, &kept);
+    for (uint32_t tries = 0; rc == ERR_TAGFS_NO_SPACE && tries < 8u; tries++) {
+        (*refused)++;
+        BinderStand(&said);
+        if (said.owed && BinderRunWhole() == OK)
+            (*tallies)++;
+        for (uint64_t l = 0; l <= FallowLag(); l++)
+            (void)TagFSSettle();
+        rc = StandStitchSayFilling(q * TAGFS_BLOCK_SECTORS / 32u, (char)('a' + k % 26u), 600u + k, &kept);
+    }
+    return rc;
+}
+
+static TestResult TestStandBinderStandingEnd(void)
+{
+    TestResult      verdict = TEST_PASS;
+    static StandBinder b;
+    TagSpelling     sp    = { .key = "bind-standing", .key_len = 13, .value = NULL, .value_len = 0 };
+    uint32_t        id    = 0, tallies = 0, refused = 0, interned = 0;
+    bool            shrunk = false;
+    const char*     aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount(), "the volume mounted afresh");
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    uint64_t q = RibbonCursorNow()->quire_blocks;
+    shrunk = BlockMapDerivedStandShrink(EndpaperKeeps(q) + q / 2u);
+    TEST_ASSERT(shrunk, "the volume made small: the book's reserve and half a Quire — room for the Tallies that fill "
+                "the ring and one more, and no next_quire past them");
+    for (uint32_t k = 0; k < STAND_BINDER_WORDS; k++) {
+        uint32_t before = refused;
+        TEST_ASSERT_OK(StandBinderWord(k, q, &refused, &tallies), "a word is settled, refused or not first");
+        /* A tag interned with no file changed, right where the ribbon ran
+         * out: its Coined is laid once the ground came back. */
+        if (refused > before && !interned++)
+            TEST_ASSERT_OK(TagFSInternSpelling(&sp, &id), "a tag is interned with no file changed");
+    }
+    TestEvidence("Tallies the ribbon asked for while it ran through six Quires", tallies);
+    TEST_ASSERT(refused > 0 && interned, "the ribbon ran out, and a tag was interned there");
+    TEST_ASSERT(tallies >= 3u, "the Tallies it asked for gave its Quires back");
+    TEST_ASSERT_OK(TagFSSettle(), "and the cycles go on: the ribbon's end does not stand");
+out:
+    if (shrunk)
+        BlockMapDerivedStandGrow();
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+
+static const TestCase g_stand_binder_tests[] = {
+    { .name = "stand_binder_whole", .func = TestStandBinderWhole,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_node_refused", .func = TestStandBinderNodeRefused,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_unslotted", .func = TestStandBinderUnslotted,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_slot_torn", .func = TestStandBinderSlotTorn,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_slot_flush_refused", .func = TestStandBinderSlotFlushRefused,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_slot_unsure", .func = TestStandBinderSlotUnsure,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_parcels", .func = TestStandBinderParcels,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_heals", .func = TestStandBinderHeals,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_rotten_named", .func = TestStandBinderRottenNamed,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_slack", .func = TestStandBinderSlack,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_ground_back", .func = TestStandBinderGroundBack,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_full_back", .func = TestStandBinderFullBack,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_binder_standing_end", .func = TestStandBinderStandingEnd,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+};
+
+const TestSuite g_stand_binder_suite = {
+    g_stand_binder_tests, sizeof(g_stand_binder_tests) / sizeof(g_stand_binder_tests[0])
+};
+
+#endif /* CONFIG_VOLUME_TESTS */

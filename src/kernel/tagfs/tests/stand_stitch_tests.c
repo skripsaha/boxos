@@ -590,7 +590,7 @@ static TestResult TestStandStitchTallyCost(void)
     uint64_t laid = StandStitchTallyBlocks();
     uint64_t cost = TallyCostBlocks();
     TestEvidence("blocks of one copy of the Tally the mount stands on:", laid);
-    TestEvidence("blocks the reserve measures a whole Tally at:", cost);
+    TestEvidence("blocks the reserve measures the next Tally at:", cost);
     TEST_ASSERT(laid > 0 && cost >= laid, "the measure is never less than the Tally the maker laid");
     for (uint32_t i = 0; i < 64u; i++) {
         TagSpelling tag;

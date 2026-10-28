@@ -214,6 +214,8 @@ typedef enum {
     SETTLE_DEMAND_ROOM  = 1u << 0,  /* the allocator is short while Fallow rests blocks,
                                        or while Glean may take the pool's slack off */
     SETTLE_DEMAND_LEAVE = 1u << 1,  /* a program left with changes no cycle settled */
+    SETTLE_DEMAND_TALLY = 1u << 2,  /* a book's ribbon wants a Tally to take it in: no next_quire
+                                       could be given — a Tally's work, not a cycle's (binder.h) */
 } SettleDemandKind;
 
 /* An Ink was made (after its lock was dropped): the window's clock starts for
@@ -270,12 +272,9 @@ void     SettleCadenceHold(bool hold);
 /*
  * Format v2's writer (settle/sewing.c). StitchBookRefused: no Quire took a
  * stitch's write — the volume may only be read until it is mounted again, part
- * of what TagFSReadOnly answers (M-6). StitchFilesRefused: a change to a
- * file's data is one this kernel does not yet lay into a book — said once a
- * mount, and ERR_TAGFS_READ_ONLY; a write's load asks it of a book (ink.c).
+ * of what TagFSReadOnly answers (M-6).
  */
 bool     StitchBookRefused(void);
-error_t  StitchFilesRefused(void);
 
 /* A part of format v1's cycle — the pool's Spares, Glean, the Ledger's write —
  * reached on a book: a defect of the road there, which the cycle's dispatch by

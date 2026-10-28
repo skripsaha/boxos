@@ -314,18 +314,22 @@ void StripWalkBegin(const FileRecord* rec, StripWalk* w)
         WalkDown(w, rec->tract);
 }
 
-bool StripWalkNext(StripWalk* w, Strip* out)
+bool StripWalkAt(const FileRecord* rec, uint64_t k, StripWalk* w, uint64_t* begins)
+{
+    return TractWalkAt(rec->tract, k, w, begins);
+}
+
+/* The Parcel the walk stands in with a Strip of it left — the walk moved on
+ * past every Parcel it had spent — or NULL once there is none. */
+static const Parcel* WalkParcel(StripWalk* w)
 {
     while (w->depth) {
         const Tract* leaf = w->node[w->depth - 1u];
         uint32_t*    slot = &w->slot[w->depth - 1u];
         if (*slot < leaf->count) {
             const Parcel* p = leaf->kid[*slot].node;
-            if (w->strip < p->count) {
-                w->parcel = p;
-                *out = p->strip[w->strip++];
-                return true;
-            }
+            if (w->strip < p->count)
+                return w->parcel = p;
             (*slot)++;
             w->strip = 0;
             continue;
@@ -338,7 +342,27 @@ bool StripWalkNext(StripWalk* w, Strip* out)
         if (w->depth)
             WalkDown(w, w->node[w->depth - 1u]->kid[w->slot[w->depth - 1u]].node);
     }
-    return false;
+    return NULL;
+}
+
+bool StripWalkNext(StripWalk* w, Strip* out)
+{
+    const Parcel* p = WalkParcel(w);
+    if (!p)
+        return false;
+    *out = p->strip[w->strip++];
+    return true;
+}
+
+bool StripWalkParcel(StripWalk* w, const Strip** strips, uint32_t* count)
+{
+    const Parcel* p = WalkParcel(w);
+    if (!p)
+        return false;
+    *strips  = &p->strip[w->strip];
+    *count   = p->count - w->strip;
+    w->strip = p->count;
+    return true;
 }
 
 bool StripWalkNextGround(StripWalk* w, Strip* out)

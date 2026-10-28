@@ -1,4 +1,5 @@
 #include "block_map_derived.h"
+#include "block_map_internal.h"   /* AllotmentTakeBackLocked — a window given back before the ribbon is refused */
 #include "../tagfs.h"
 #include "amp.h"           /* amp_get_core_index — the stand's HEAPFAIL on the builder's core */
 
@@ -561,8 +562,23 @@ static bool RunAlignedIn(uint64_t lo, uint64_t hi, uint64_t want, uint32_t align
     return true;
 }
 
-error_t BlockMapTakeQuire(uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first, uint64_t from,
-                          uint64_t* start)
+/* The first run of `want` free blocks beginning on `align` inside [lo, hi)
+ * that lies in no file's window but `fid`'s (block_map.h, Allotment; 0: in no
+ * file's at all): *start. A run a window cuts is looked for again past it. */
+static bool RunAlignedFree(uint64_t lo, uint64_t hi, uint64_t want, uint32_t align, uint64_t fid,
+                           uint64_t* start)
+{
+    uint64_t past = 0;
+    while (lo < hi && RunAlignedIn(lo, hi, want, align, start)) {
+        if (!AllotmentOthersIn(fid, *start, want, &past))
+            return true;
+        lo = past > *start ? past : *start + 1u;
+    }
+    return false;
+}
+
+error_t BlockMapTakeQuire(GroundOwner owner, uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first,
+                          uint64_t from, uint64_t* start)
 {
     TagFSLock* lock = &tagfs_get_state()->lock;
     uint64_t   met  = 0;
@@ -571,18 +587,105 @@ error_t BlockMapTakeQuire(uint64_t blocks, uint32_t align, uint64_t keep, uint64
         return rc;
     TagFSLockTake(lock);
     uint64_t hi = s_map.end;
+    align       = align ? align : 1u;
     if (!s_map.up) {
         rc = ERR_NOT_INITIALIZED;
     } else if (blocks == 0 || s_map.free < blocks || s_map.free - blocks < keep) {
         rc = ERR_TAGFS_NO_SPACE;
     } else {
+        /* A file's window is given back before the book is refused a run:
+         * the book's ground is the book's, and a window only a hint. */
         from = from < first || from >= hi ? first : from;
-        if (!RunAlignedIn(from, hi, blocks, align ? align : 1u, start) &&
-            !RunAlignedIn(first, from + blocks < hi ? from + blocks : hi, blocks, align ? align : 1u, start))
-            rc = ERR_TAGFS_NO_SPACE;
-        else
-            rc = MapPut(GROUND_RIBBON, 0, *start, blocks, true, &met);
+        bool found = false;
+        for (uint32_t round = 0; round < 2u && !found; round++) {
+            found = RunAlignedFree(from, hi, blocks, align, 0, start) ||
+                    RunAlignedFree(first, from + blocks < hi ? from + blocks : hi, blocks, align, 0, start);
+            if (!found && (round || !AllotmentTakeBackLocked(0)))
+                break;
+        }
+        rc = found ? MapPut(owner, 0, *start, blocks, true, &met) : ERR_TAGFS_NO_SPACE;
     }
+    uint64_t* loose = PagesLooseTaken();
+    TagFSLockDrop(lock);
+    PagesLoose(loose);
+    return rc;
+}
+
+// ----------------------------------------------------------------------------
+// A file's data: the runs a write takes and gives back (allotment.c)
+// ----------------------------------------------------------------------------
+
+bool BlockMapDerivedRunFree(uint64_t from, uint64_t want, uint64_t fid, uint64_t* start)
+{
+    if (!s_map.up || want == 0)
+        return false;
+    uint64_t lo = from < s_map.end ? from : 0;
+    return RunAlignedFree(lo, s_map.end, want, 1u, fid, start) ||
+           (lo && RunAlignedFree(0, lo + want < s_map.end ? lo + want : s_map.end, want, 1u, fid, start));
+}
+
+bool BlockMapDerivedRunFreeBack(uint64_t lo, uint64_t hi, uint64_t want, uint64_t fid, uint64_t* start)
+{
+    uint64_t run = 0, past = 0;
+    if (!s_map.up || want == 0)
+        return false;
+    for (uint64_t b = hi < s_map.end ? hi : s_map.end; b > lo;) {
+        uint32_t             w     = (uint32_t)((b - 1u) / BLOCK_MAP_WINDOW_BLOCKS);
+        uint64_t             base  = (uint64_t)w * BLOCK_MAP_WINDOW_BLOCKS;
+        uint64_t             floor = base > lo ? base : lo;
+        const DerivedWindow* win   = &s_map.win[w];
+        if (!win->bits && win->free == 0) {
+            run = 0;
+            b   = floor;
+            continue;
+        }
+        for (; b > floor; b--) {
+            uint64_t block = b - 1u, off = block - base;
+            bool     free  = !win->bits || !(win->bits[off / 64u] & (1ull << (off % 64u)));
+            run = free && !AllotmentOthersIn(fid, block, 1, &past) ? run + 1u : 0;
+            if (run == want) {
+                *start = block;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+uint64_t BlockMapDerivedFreeFrom(uint64_t block, uint64_t most, uint64_t fid)
+{
+    uint64_t n = 0, past = 0;
+    while (n < most && s_map.up && BlockMapDerivedIsFree(block + n) && !AllotmentOthersIn(fid, block + n, 1, &past))
+        n++;
+    return n;
+}
+
+error_t BlockMapDerivedTakeLocked(uint64_t fid, uint64_t start, uint64_t count)
+{
+    uint64_t met = 0;
+    error_t  rc  = MapPut(GROUND_FILE, fid, start, count, true, &met);
+#if CONFIG_STRICT
+    if (rc == OK && met)
+        panic("[TagFS] DEFECT: file %llu was handed %llu block(s) the block map holds taken",
+              (unsigned long long)fid, (unsigned long long)met);
+#endif
+    return rc;
+}
+
+error_t BlockMapDerivedGive(uint64_t fid, uint64_t start, uint64_t count)
+{
+    return BlockMapDerivedGiveAs(GROUND_FILE, fid, start, count);
+}
+
+error_t BlockMapDerivedGiveAs(GroundOwner owner, uint64_t who, uint64_t start, uint64_t count)
+{
+    TagFSLock* lock = &tagfs_get_state()->lock;
+    uint64_t   met  = 0;
+    error_t    rc   = BlockMapDerivedStock();
+    if (rc != OK)
+        return rc;
+    TagFSLockTake(lock);
+    rc              = s_map.up ? MapPut(owner, who, start, count, false, &met) : ERR_NOT_INITIALIZED;
     uint64_t* loose = PagesLooseTaken();
     TagFSLockDrop(lock);
     PagesLoose(loose);

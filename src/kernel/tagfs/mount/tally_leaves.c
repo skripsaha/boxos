@@ -1,4 +1,6 @@
 #include "book_mount.h"
+#include "../settle/binder.h"
+#include "under_glass.h"
 #include "ground_census.h"
 #include "../file_map/file_map.h"
 #include "../tag_registry/tag_registry.h"
@@ -36,12 +38,29 @@ static void LeavesLonger(const char* what, uint32_t left)
 // FILES: a header, then the Parcels that cover its blocks in a row
 // ----------------------------------------------------------------------------
 
+/* The Parcels kept for the gathered file, let go. */
+static void BookParcelsForget(BookFile* f)
+{
+    for (uint32_t i = 0; i < f->nparcels; i++)
+        kfree(f->parcel_body[i]);
+    kfree(f->parcel_b);
+    kfree(f->parcel_body);
+    kfree(f->parcel_len);
+    kfree(f->parcel_seq);
+    f->parcel_b    = NULL;
+    f->parcel_body = NULL;
+    f->parcel_len  = NULL;
+    f->parcel_seq  = NULL;
+    f->nparcels = f->capparcels = 0;
+}
+
 /* The gathering's memory let go, and the gathering emptied. */
 static void BookFileForget(BookFile* f)
 {
     kfree(f->meta.filename);
     kfree(f->meta.tag_ids);
     kfree(f->strips);
+    BookParcelsForget(f);
     memset(f, 0, sizeof(*f));
 }
 
@@ -159,6 +178,61 @@ static bool BookFileRun(BookFile* f, const TallyRun* r)
     return true;
 }
 
+/* Room for one Parcel more in the gathering's lists: false with no memory. */
+static bool BookParcelRoom(BookFile* f)
+{
+    if (f->nparcels < f->capparcels)
+        return true;
+    uint32_t  cap  = f->capparcels ? f->capparcels * 2u : 8u;
+    uint64_t* pb   = kmalloc(sizeof(uint64_t) * cap);
+    uint8_t** body = kmalloc(sizeof(uint8_t*) * cap);
+    uint32_t* len  = kmalloc(sizeof(uint32_t) * cap);
+    uint64_t* seq  = kmalloc(sizeof(uint64_t) * cap);
+    if (!pb || !body || !len || !seq) {
+        kfree(pb);
+        kfree(body);
+        kfree(len);
+        kfree(seq);
+        return false;
+    }
+    if (f->nparcels) {
+        memcpy(pb, f->parcel_b, sizeof(uint64_t) * f->nparcels);
+        memcpy(body, f->parcel_body, sizeof(uint8_t*) * f->nparcels);
+        memcpy(len, f->parcel_len, sizeof(uint32_t) * f->nparcels);
+        memcpy(seq, f->parcel_seq, sizeof(uint64_t) * f->nparcels);
+    }
+    kfree(f->parcel_b);
+    kfree(f->parcel_body);
+    kfree(f->parcel_len);
+    kfree(f->parcel_seq);
+    f->parcel_b    = pb;
+    f->parcel_body = body;
+    f->parcel_len  = len;
+    f->parcel_seq  = seq;
+    f->capparcels  = cap;
+    return true;
+}
+
+/* A Parcel that read, kept as it lay — its file block, its body, the seq of
+ * its node — for a file the mount may lock by name (BookKeptFile): let go at
+ * the file's close when it stands. False with no memory. */
+static bool BookParcelMarked(BookFile* f, uint64_t b, const uint8_t* body, uint32_t len, uint64_t seq)
+{
+    uint8_t* copy = kmalloc(len ? len : 1u);
+    if (!copy || !BookParcelRoom(f)) {
+        kfree(copy);
+        return false;
+    }
+    if (len)
+        memcpy(copy, body, len);
+    f->parcel_b[f->nparcels]    = b;
+    f->parcel_body[f->nparcels] = copy;
+    f->parcel_len[f->nparcels]  = len;
+    f->parcel_seq[f->nparcels]  = seq;
+    f->nparcels++;
+    return true;
+}
+
 /* The blocks a file's bytes take, its last one part filled. */
 static uint64_t BookFileNeed(const BookFile* f)
 {
@@ -219,12 +293,17 @@ static error_t BookFileParcel(BookFile* f, uint64_t first, const uint8_t* body, 
         BookFileBroken(f, words);
     }
     TallyTake(body, len, &at, &n);
+    g_book.laid.runs += n;
     for (uint64_t i = 0; i < n; i++) {
         TallyRun r;
         TallyRunGet(body, len, &at, &cursor, seq, &r);
         f->ext |= r.ext != NULL;
         if (!BookFileRun(f, &r))
             return ERR_NO_MEMORY;
+    }
+    if (!f->parcels_lost && !BookParcelMarked(f, first, body, len, seq)) {
+        BookParcelsForget(f);
+        f->parcels_lost = true;     /* a matter only for a file the mount locks (BookFileKept) */
     }
     f->covered = covered;
     ksnprintf(words, sizeof(words), "a Parcel of fid %llu", (unsigned long long)f->fid);
@@ -288,6 +367,45 @@ static error_t BookLockedByName(uint64_t fid, const char* why)
     return OK;
 }
 
+/* What of a gathered file read, kept for the next Tally (BookKeptFile): the
+ * gathering's own header and Parcels moved into the list, nothing copied.
+ * Where memory would not keep them — its Parcels as they lay, or a place in the
+ * list — the mount goes on, and no Tally is written by it: a Tally names a
+ * file locked by name as it lay or not at all. Said. */
+static void BookFileKept(BookFile* f)
+{
+    static const char lost[] = "memory would not keep what of a file locked by name read, which a Tally carries "
+                               "as it lay";
+    BookKeptFile*     more   = NULL;
+    uint32_t          cap    = g_book.capkept ? g_book.capkept * 2u : 8u;
+    if (!f->parcels_lost && g_book.nkept == g_book.capkept && !(more = kmalloc(sizeof(BookKeptFile) * cap)))
+        f->parcels_lost = true;
+    if (f->parcels_lost) {
+        if (!BinderNoTallies())
+            kprintf("[TagFS] fid %llu: %s — no Tally is written by this mount\n", (unsigned long long)f->fid, lost);
+        BinderNoTalliesFrom(lost);
+        return;
+    }
+    if (more) {
+        if (g_book.nkept)
+            memcpy(more, g_book.kept, sizeof(BookKeptFile) * g_book.nkept);
+        kfree(g_book.kept);
+        g_book.kept    = more;
+        g_book.capkept = cap;
+    }
+    g_book.kept[g_book.nkept++] = (BookKeptFile){ .fid = f->fid, .head = f->head, .meta = f->meta, .gen = f->gen,
+                                                  .parcel_b = f->parcel_b, .parcel_body = f->parcel_body,
+                                                  .parcel_len = f->parcel_len, .parcel_seq = f->parcel_seq,
+                                                  .nparcels = f->nparcels };
+    f->meta.filename = NULL;
+    f->meta.tag_ids  = NULL;
+    f->parcel_b      = NULL;
+    f->parcel_body   = NULL;
+    f->parcel_len    = NULL;
+    f->parcel_seq    = NULL;
+    f->nparcels = f->capparcels = 0;
+}
+
 /* A file the book holds and cannot read: said, kept by name for every open of
  * it to be refused, and what of its ground it is known to name held. */
 static error_t BookFileLock(BookFile* f, const char* why)
@@ -296,6 +414,8 @@ static error_t BookFileLock(BookFile* f, const char* why)
     for (uint32_t i = 0; rc == OK && i < f->nstrips; i++)
         if (f->strips[i].kind == STRIP_DATA)
             BookGroundHoldRun(f->strips[i].start, f->strips[i].count);
+    if (rc == OK)
+        BookFileKept(f);
     return rc;
 }
 
@@ -308,7 +428,11 @@ error_t BookFileLockLive(uint64_t fid, const char* why)
     Strip       run;
     if (!rec)
         return OK;
+    char    glass[192];
     error_t rc = BookLockedByName(fid, why);
+    ksnprintf(glass, sizeof(glass), "fid %llu is locked by the replay of the ribbon — no Tally names a file it "
+              "cannot name as it lay, and a book no Tally is written of cannot go on", (unsigned long long)fid);
+    TagFSUnderGlass(glass);
     StripWalkBegin(rec, &walk);
     while (rc == OK && StripWalkNextGround(&walk, &run))
         BookGroundHoldRun(run.start, run.count);
@@ -417,6 +541,8 @@ error_t BookRangeRots(const TallyPlace* at, const char* why)
         g_book.rot    = more;
         g_book.caprot = cap;
     }
+    if (BinderRotten(TALLY_FILES, at) != OK)
+        return ERR_NO_MEMORY;
     g_book.rot[g_book.nrot++] = (BookRotten){ at->lo, at->hi, at->has_hi, at->count };
     if (g_book.file.open && at->has_lo && at->lo.k1 == g_book.file.fid)
         g_book.file.rotten = true;
@@ -553,6 +679,8 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
         TagFSUnderGlass(words);
         return OK;
     }
+    if (rc == OK)
+        EndpaperLaidTag(&g_book.laid, (uint64_t)t.key_len + t.value_len);
     return rc;
 }
 
@@ -593,6 +721,8 @@ static error_t LeavesRot(void* ctx, const TallyPlace* at, const char* why)
 {
     uint64_t tree = ((const LeavesWalk*)ctx)->tree;
     char     lo[48], hi[48];
+    if (at->level > 0)
+        EndpaperLaidNode(&g_book.laid, tree, at->level, 0, 1u, at->has_lo ? at->lo.k1 : 0);
     if (tree == TALLY_FILES)
         return BookRangeRots(at, why);
     g_book.said.rotten++;

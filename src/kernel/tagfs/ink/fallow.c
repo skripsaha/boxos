@@ -7,6 +7,8 @@
 #include "../glean/glean.h"
 #include "../file_map/file_record.h"
 #include "../block_map/block_map_derived.h"
+#include "../integrity/gloss.h"
+#include "../settle/binder.h"
 
 struct FallowNode {
     FallowNode* next;
@@ -294,7 +296,8 @@ uint32_t FallowUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits)
  * not cover stays in the node, which rests on, and the next cycle gives it
  * back. A run the map refuses for any other reason — a block of it already
  * free, or past the data run — is said by the map, and no cycle could give it
- * back: it leaves the node. The blocks given back.
+ * back: it leaves the node. On a book, a run given back takes the digests the
+ * Gloss holds for it out with it (§8.1). The blocks given back.
  */
 static uint64_t NodeGiveBack(FallowNode* n, bool book)
 {
@@ -307,6 +310,10 @@ static uint64_t NodeGiveBack(FallowNode* n, bool book)
         error_t  back = book ? BlockMapDerivedRelease(n->fid ? GROUND_FILE : GROUND_FALLOW, n->fid, run.start,
                                                       run.count, &met)
                              : BlockMapGiveHeldLocked(run.start, run.count);
+        if (back == OK && book) {
+            GlossForget(run.start, run.count);    /* its next owner is held to its own digest */
+            BirthsForget(run.start, run.count);   /* ... and born where its own stitch puts it */
+        }
         if (back == OK)
             given += run.count - met;
         else if (back == ERR_NO_MEMORY)
@@ -408,6 +415,14 @@ void FallowQuireLeft(uint64_t seq)
     for (FallowNode* n = s_head; n; n = n->next)
         if (n->ripe_at != 0 && n->stitch < seq)
             n->left = true;
+}
+
+void FallowSpineAdd(FallowNode* node, uint64_t cycle)
+{
+    node->ripe_at = cycle + FallowLag();
+    node->left    = true;
+    node->stitch  = 0;
+    FallowAdd(node, 0);
 }
 
 bool FallowAwaitsQuire(void)

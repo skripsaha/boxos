@@ -181,8 +181,8 @@ static error_t HelmSpanStep(Plot *plot, uint64_t size, bool grow_only, bool *out
         *out_ended = true;
     } else {
         uint64_t end = plot->size + HelmWindowBytes(plot->size);
-        if (end > size || end < plot->size)
-            end = size;
+        if (end > size || end < plot->size || plot->book)
+            end = size;     /* a book's growth is a hole, written nowhere: one step */
         rc = PlotRoomFor(plot, size);
         if (rc == OK)
             rc = PlotExtendZero(plot, end);
@@ -235,8 +235,8 @@ error_t HelmSpan(TagFSFileHandle *handle, uint64_t size, uint64_t *out_was)
  * before it ends. */
 static bool HelmRunsAreOne(const Strip *runs, uint32_t count)
 {
-    for (uint32_t i = 1; i < count; i++)
-        if (runs[i].start != runs[i - 1].start + runs[i - 1].count)
+    for (uint32_t i = 0; i < count; i++)
+        if (runs[i].kind != STRIP_DATA || (i && runs[i].start != runs[i - 1].start + runs[i - 1].count))
             return false;
     return true;
 }
@@ -256,6 +256,8 @@ static error_t HelmDefragBegin(TagFSFileHandle *handle, HelmDefragging *d, bool 
     Plot   *plot = &d->plot;
     error_t rc   = HelmPlotLoad(handle, plot);
     d->loaded = true;
+    if (rc == OK)
+        rc = PlotWindowWhole(plot);     /* a book's Plot holds the whole file for a move of every run */
     if (rc == OK)
         rc = PlotTrimTo(plot, plot->size / TAGFS_BLOCK_SIZE + (plot->size % TAGFS_BLOCK_SIZE != 0));
     if (rc == OK && HelmRunsAreOne(plot->runs, plot->run_count)) {

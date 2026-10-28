@@ -1,4 +1,5 @@
 #include "book_mount.h"
+#include "../settle/binder.h"
 #include "book_unit.h"
 #include "away.h"
 #include "ground_census.h"
@@ -176,6 +177,8 @@ static error_t BookRibbon(const char** what)
     if (rc != OK)
         return rc;
     g_book.said.sewn  = w->nstitch;
+    for (uint32_t i = 0; i < w->nstitch; i++)
+        g_book.ribbon_useful += w->stitch[i]->useful;
     g_book.said.last  = w->nstitch ? w->stitch[w->nstitch - 1u]->seq : g_book.stood->head.stitch_seq;
     g_book.said.lied  = w->lied;
     g_book.said.flags = w->nstitch && w->stitch[w->nstitch - 1u]->head_read ? w->stitch[w->nstitch - 1u]->head.flags
@@ -215,6 +218,8 @@ static error_t BookDigestRot(void* ctx, const TallyPlace* at, const char* why)
 {
     (void)ctx;
     (void)why;
+    if (at->level > 0)
+        EndpaperLaidNode(&g_book.laid, TALLY_DIGESTS, at->level, 0, 1u, at->has_lo ? at->lo.k1 : 0);
     return TallyDigestsKeep(at, true);
 }
 
@@ -233,6 +238,8 @@ static error_t BookTree(const SpineRoot* root)
     TallySink sink = { .ctx = NULL, .item = NULL, .node = BookGroundNode, .said = true,
                        .mended = &g_book.said.mended, .shapes = &g_book.said.shapes };
     bool derived = root->tree == TALLY_MAP || root->tree == TALLY_SHARED || (root->flags & TALLY_ROOT_DERIVED);
+
+    g_book.laid_tree = root->tree;
 
     if (!derived && !BookTreeAuthoritative(root)) {
         ksnprintf(words, sizeof(words), "slot %u names a tree of kind %llu this reader does not know, and "
@@ -310,6 +317,8 @@ static void BookBounds(void)
             "names\n", (unsigned long long)fid, (unsigned long long)tag, (unsigned long long)bookmark,
             (unsigned long long)(BookSeqSeen() + 1u));
     g_book.next_fid         = fid;
+    g_book.next_tag         = tag;
+    g_book.next_bookmark    = bookmark;
     fs->ledger.next_file_id = fid > UINT32_MAX ? UINT32_MAX : (uint32_t)fid;
     fs->ledger.total_files  = g_book.files;
     TagRegistryNumbersFrom(fs->registry, tag > (uint64_t)TAGFS_MAX_TAG_ID + 1u ? TAGFS_MAX_TAG_ID + 1u
@@ -361,12 +370,32 @@ static error_t BookSpine(const char** what)
     return rc;
 }
 
+/* What the slots hold, for the writer of a Tally (settle/binder.h): the ring
+ * as its FRAME names it, and each slot that holds, by its seq and its
+ * Tally's — their nodes and ribbons come with the census. */
+static error_t BookSlotsHeld(const char** what)
+{
+    if (BinderSlotsMake(g_book.frame.spine_slots) != OK) {
+        *what = "there is no memory for what the slots of its Spine hold";
+        return ERR_NO_MEMORY;
+    }
+    for (uint32_t i = 0; i < g_book.nslots; i++)
+        if (BinderSlotHolds(g_book.slots[i].index, g_book.slots[i].seq, g_book.slots[i].head.tally_seq) != OK) {
+            *what = "its Spine read a slot past the ring its FRAME names";
+            return ERR_TAGFS_CORRUPTED;
+        }
+    return OK;
+}
+
 error_t MountReadBook(const char** what)
 {
     BookSeqSeenForget();
+    BinderMountReset();
     error_t rc = BookMemory(what);
     if (rc == OK)
         rc = BookSpine(what);
+    if (rc == OK)
+        rc = BookSlotsHeld(what);
     if (rc == OK)
         rc = BookStand(what);
     if (rc != OK)
@@ -390,6 +419,9 @@ error_t MountReadBook(const char** what)
         TagFSUnderGlass("a Tally of its book names a bookmark, whose ground this kernel does not derive — its "
                         "writer takes no ground without the map of it");
     BookBounds();
+    BinderMountStood(g_book.stood->index, g_book.tally_blocks, g_book.ribbon_useful, g_book.next_fid,
+                     g_book.next_tag, g_book.next_bookmark);
+    EndpaperStood(&g_book.laid, g_book.stood->head.tally_seq, g_book.stood->counts.next_fid);
     kprintf("[TagFS] the book as memory holds it: its files print 0x%08X, its Use Context %llu byte(s) print "
             "0x%08X\n", g_book.files_print, (unsigned long long)g_book.use_bytes, g_book.use_print);
     if (g_book.bookmarked)
@@ -511,6 +543,18 @@ void MountBookLetGo(void)
     SpineLetGo(g_book.slots, g_book.nslots);
     kfree(g_book.rot);
     kfree(g_book.locked);
+    for (uint32_t i = 0; i < g_book.nkept; i++) {
+        BookKeptFile* k = &g_book.kept[i];
+        for (uint32_t p = 0; p < k->nparcels; p++)
+            kfree(k->parcel_body[p]);
+        kfree(k->meta.filename);
+        kfree(k->meta.tag_ids);
+        kfree(k->parcel_b);
+        kfree(k->parcel_body);
+        kfree(k->parcel_len);
+        kfree(k->parcel_seq);
+    }
+    kfree(g_book.kept);
     kfree(g_book.fallow);
     kfree(g_book.born);
     for (uint32_t i = 0; i < g_book.naside; i++)
@@ -518,6 +562,7 @@ void MountBookLetGo(void)
     kfree(g_book.aside);
     RibbonWalkLetGo(g_book.ribbon);
     RibbonCursorLetGo();
+    BinderMountReset();
     GlossLetGo();
     TallyDigestsLetGo();
     BlockMapDerivedLetGo();

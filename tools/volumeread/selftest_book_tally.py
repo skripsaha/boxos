@@ -180,16 +180,17 @@ def RangeCases(bt):
     Lay = PaddedLay(bt, content, plan)
     leaf = [n for n in plan.nodes if n.tree == tally.FILES and n.level == 0][-1]
     pdig = [n for n in plan.nodes if n.tree == tally.DIGESTS and n.level == 0][-1]
+    fdig = [n for n in plan.nodes if n.tree == tally.DIGESTS and n.level == 0][0]
     locked = sorted({k[0] for k, _b in leaf.items})
     whole = [fid for fid in locked if (fid, 0) in {k for k, _b in leaf.items}]
     held = RunsNormal([(r.start, r.count) for fid in locked for r in content.files[fid].runs if not r.hole])
     end = bt.ground.data_end
 
-    def RotFiles(o, digests=False):
+    def RotFiles(o, digests=False, first=False):
         Lay(o)
         bt.RotNode(o, leaf)
         if digests:
-            bt.RotNode(o, pdig)
+            bt.RotNode(o, fdig if first else pdig)
 
     def Named(o):
         """B4, and a stitch that renames a file whose header the rotten leaf
@@ -263,6 +264,10 @@ def RangeCases(bt):
              must={"RANGE_ROTTEN", "HELD_BLOCKS"}, checks=[
                  ("the DIGESTS leaf holds its whole range from block %u but what the living name"
                   % pdig.items[0][0], lambda c: Within(c, pdig.items[0][0]))]),
+        Case("B6c a FILES leaf and the first DIGESTS leaf rotten", lambda o: RotFiles(o, digests=True, first=True),
+             must={"RANGE_ROTTEN", "HELD_BLOCKS"}, checks=[
+                 ("the first DIGESTS leaf is a rotten range from the start, and ground past it is free",
+                  lambda c: Found(c, "RANGE_ROTTEN", "DIGESTS") and c.kernel["free"] > 0)]),
     ]
 
 

@@ -122,6 +122,7 @@ static bool RibbonParsed(RibbonUnit* u, error_t* rc)
         u->longer    += len - used;
         u->clasp_read = true;
         u->clasp_at   = start;
+        u->useful     = at;
         return true;
     }
 }

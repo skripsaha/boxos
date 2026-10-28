@@ -88,6 +88,7 @@ typedef enum {
     FALLOW_BY_LEDGER    = 2,
     FALLOW_BY_USE_CHAIN = 3,   /* runs[0] begins with the chain's first link */
     FALLOW_BY_UNLINK    = 4,
+    FALLOW_BY_SPINE     = 5,   /* a book's: a Tally's node or a Quire of the ribbon no slot holds */
 } FallowKind;
 
 typedef struct FallowNode FallowNode;
@@ -187,6 +188,18 @@ uint64_t    FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
  * once FallowLag() stitches more settled — and the ribbon left its Quire. The
  * mount's nodes are named so by the last stitch it read, as cycle 0. */
 void        FallowStitchSettled(uint64_t target, uint64_t seq, uint64_t cycle);
+
+/*
+ * Under the state lock, at a Tally's DONE (settle/binder.c): ground no slot of
+ * the Spine holds any more — the nodes of the Tally its slot was written over
+ * that no slot's Tally names, the Quires of the ribbon every slot names its
+ * `at` later than (FALLOW_BY_SPINE, §3.4, M-7, L-12). The slot that let go of
+ * it lies on the medium once its flush was kept, but a medium may lie about a
+ * flush: so it rests as a stitch's freer does, for FallowLag() stitches more
+ * to settle after the `cycle`-th — with no Quire to leave and no handle to
+ * wait for, and goes back with them.
+ */
+void        FallowSpineAdd(FallowNode* node, uint64_t cycle);
 
 /* Under the state lock: the ribbon left the Quire the stitches before `seq`
  * lie in — `seq` is the first stitch begun past it, and it settled — so every

@@ -249,17 +249,6 @@ void InkBookHeldLetGo(uint64_t held)
     TagFSLockDrop(&InkState()->lock);
 }
 
-/* A change to a file's data on a book — a write, a span, a defrag — is one
- * this kernel does not lay into a book yet (StitchFilesRefused): refused when
- * it is loaded, before a byte of it moves. */
-static error_t InkDataTakes(void)
-{
-    error_t rc = InkVolumeBegins();
-    if (rc == OK && InkState()->format == DEED_FORMAT_V2)
-        rc = StitchFilesRefused();
-    return rc;
-}
-
 /* The guard's answer, `boot` the answer to whether the change touches the
  * kernel's blocks: those are refused to every call; a file the system keeps,
  * to a call with no warrant. */
@@ -282,19 +271,23 @@ error_t InkGuardSays(uint64_t fid, bool boot, const uint32_t* tags, uint32_t tag
 }
 
 /* The guard with the ground a change lets go of asked too: a Plot's freed runs
- * are the kernel's no more than its runs may be. */
+ * are the kernel's no more than its runs may be. A book's Plot holds a window
+ * of its file's runs, not all of them: the file the loader reads the kernel by
+ * is known by its id, named when the mount laid every file's ground
+ * (book_ground.c, BookFilesLaid). */
 static error_t InkGuard(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
                         const Strip* runs, uint32_t run_count,
                         const Strip* freed, uint32_t freed_count, InkWarrant warrant)
 {
-    bool boot = InkTouchesBoot(runs, run_count) || InkTouchesBoot(freed, freed_count);
+    bool boot = (InkState()->format == DEED_FORMAT_V2 && fid == g_book.boot_fid) ||
+                InkTouchesBoot(runs, run_count) || InkTouchesBoot(freed, freed_count);
     return InkGuardSays(fid, boot, tags, tag_count, warrant);
 }
 
 error_t InkMayChange(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
                      const Strip* runs, uint32_t run_count, InkWarrant warrant)
 {
-    error_t rc = InkDataTakes();
+    error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
     return InkGuard(fid, tags, tag_count, runs, run_count, NULL, 0, warrant);
@@ -342,15 +335,15 @@ static bool InkPlotLazy(const Plot* p, const FileRecord* cur, uint64_t now_us, b
  * size, not its bytes. */
 error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
 {
-    error_t rc = InkState()->format == DEED_FORMAT_V2 ? InkDataTakes() : OK;
-    if (rc == OK)
-        rc = InkGuard(p->fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count,
-                      p->freed, p->freed_count, p->warrant);
+    error_t rc = InkGuard(p->fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count,
+                          p->freed, p->freed_count, p->warrant);
     if (rc != OK)
         return rc;
 
+    /* A book's Ink makes its Fallow node of the ground its record stops
+     * naming (ink_book.c, InkBookPlotBuilt). */
     FallowNode* fallow = NULL;
-    if (p->freed_count &&
+    if (p->freed_count && !p->book &&
         !(fallow = FallowNodeMake(p->freed, p->freed_count, FALLOW_BY_RECORD, p->fid)))
         return ERR_NO_MEMORY;
 
@@ -374,20 +367,25 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
         }
         bool small = false;
         lazy = InkPlotLazy(p, cur, now_us, &small);
-        InkRecord r;
-        rc = InkPlotRecord(p, cur, now, &r);
-        if (rc == OK) {
-            r.rec->small_append_us = small ? now_us : 0;
-            TagFSLockTake(&InkState()->lock);
-            rc = InkPlotLocked(p, &was, &r, fallow, out);
-            TagFSLockDrop(&InkState()->lock);
+        if (p->book) {
+            rc = InkBookPlot(p, cur, &was, small ? now_us : 0, out);
+            FileRecordRelease(cur);
+        } else {
+            InkRecord r;
+            rc = InkPlotRecord(p, cur, now, &r);
+            if (rc == OK) {
+                r.rec->small_append_us = small ? now_us : 0;
+                TagFSLockTake(&InkState()->lock);
+                rc = InkPlotLocked(p, &was, &r, fallow, out);
+                TagFSLockDrop(&InkState()->lock);
+            }
+            /* The record this Ink replaced goes here, after the lock: `cur`
+             * holds it — the map's record while `was` is the map's place for
+             * it — so the map lets go of it under the lock without freeing a
+             * byte, and what only it named is freed now, with no lock held. */
+            FileRecordRelease(cur);
+            InkRecordLetGo(&r);
         }
-        /* The record this Ink replaced goes here, after the lock: `cur` holds
-         * it — the map's record while `was` is the map's place for it — so
-         * the map lets go of it under the lock without freeing a byte, and
-         * what only it named is freed now, with no lock held. */
-        FileRecordRelease(cur);
-        InkRecordLetGo(&r);
         if (rc == OK) {
             fallow = NULL;
             break;
@@ -408,6 +406,8 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
     p->shape         = out->gen;
     p->data_need     = 0;
     p->data_us       = 0;
+    if (p->book)
+        InkBookPlotNext(p);
     SettleInked(out->gen, lazy);
     return OK;
 }
