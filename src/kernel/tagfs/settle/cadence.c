@@ -118,7 +118,8 @@ uint64_t TagFSInkedHere(void)
  * of cycles never starves it — the next turn after each cycle ends while one
  * is under way. A waiter's cycle waits for one step at most: a node laid or
  * measured, a DIGESTS leaf read, a flush, the slot — or the slice, which is
- * memory alone, as long as a walk of every live file's runs takes (binder.c).
+ * memory alone, as long as a walk of every live file's runs takes
+ * (binder_slice.c).
  */
 static volatile uint8_t s_binder_turn;
 

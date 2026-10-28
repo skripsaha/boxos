@@ -2,9 +2,10 @@
 mounts it: the Spine's slots (п.2), the Tally of the newest slot whose roots
 read (п.3, the rotten ranges below a root said, not refused), the Tallies of
 the other slots for the ground they hold (п.4), the ribbon from that slot's
-`at` (п.5: pass 1 in stitch.Ribbon, pass 2 here — every record through the
-one rule of §3.7, a file's records held to its base), the data of the newest
-stitch held to its digests (п.6), and the numbers never given again (п.8).
+`at` (п.5: pass 1 in stitch_ribbon.Ribbon, pass 2 here — every record through
+the one rule of §3.7, a file's records held to its base), the data of the
+newest stitch held to its digests (п.6), and the numbers never given again
+(п.8).
 
 It writes nothing and decides everything a mount decides: which slot, which
 files are live and which locked, what of their blocks lies fallow, the next
@@ -14,7 +15,7 @@ fid, tag, bookmark and seq — and every reason the volume may only be read
 The ground's owners and the findings are bookcensus.py's; this is the mount.
 """
 
-from . import bookread, ondisk, stitch, tally
+from . import bookread, ondisk, stitch, stitch_ribbon, tally
 from .bookread import Short
 from .ondisk import BLOCK, RunsNormal
 from .stitch import (BORN, COINED, FROZEN, LABELED, QUITCLAIM, SHAPED, THAWED, UNDONE, USE_CONTEXT,
@@ -246,7 +247,8 @@ class BookMount:
                 # claim).
                 ptrs = [r.ptr for r in t.rotten if r.ptr] + ([root.Pointer()] if t.refused else [])
                 self.older_nodes.extend((b, p["sheets"], p["seq"], s.index) for p in ptrs if p for b in p["blocks"])
-            self.older_quires.extend((q[0], q[1], 0, s.index) for q in stitch.Ribbon(self.g, s, scan=False).quires)
+            self.older_quires.extend((q[0], q[1], 0, s.index)
+                                     for q in stitch_ribbon.Ribbon(self.g, s, scan=False).quires)
 
     # --- п.5-6 ----------------------------------------------------------------
 
@@ -260,7 +262,7 @@ class BookMount:
         taken += [(b, r.ptr["sheets"]) for r in self.tally.rotten if r.ptr for b in r.ptr["blocks"]]
         taken += [r for fs in self.files.values() for r in fs.Ground()]
         self.ribbon_said = len(self.said)
-        self.ribbon = stitch.Ribbon(self.g, self.slot, taken)
+        self.ribbon = stitch_ribbon.Ribbon(self.g, self.slot, taken)
         self.said.extend(self.ribbon.said)
         sewn = [(r[0], r[2], u.seq) for u in self.ribbon.stitches for r in u.records]
         for kind, body, seq in sewn + self.ribbon.Seen():

@@ -160,7 +160,7 @@ static error_t BookUnitWholeOf(BookUnit* u, uint16_t kind, uint64_t seq)
 
 /*
  * ‼ THE LENGTH A POINTER NAMES IS ITS WORD UNTIL THE UNIT AGREES. A node's
- * Sheets are bounded only by the volume's end (tally_read.c): a pointer worn
+ * Sheets are bounded only by the volume's end (tally_walk.c): a pointer worn
  * or written wrong may name a unit of a hundred thousand sectors where its
  * node is eight, and the heap may have no room for that many. Before such a
  * refusal is called a want of memory, the unit's first sector is asked what

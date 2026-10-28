@@ -24,8 +24,8 @@ import sys
 
 from powercut import COMMIT_KINDS, HARM, VOLUME_READ, Outside, Ranges, RecordBytes, Run
 
-# What volume-read says of a mount that does not stand on the newest seal
-# borne out (census.py _Seal): no harm on a cut before its sync's flush — a
+# What volume-read says of a mount that does not stand on the newest seal borne
+# out (census_claims.py _Seal): no harm on a cut before its sync's flush — a
 # cut there rolls the cycle back — and a record the seal says landed that the
 # medium does not hold on a state the flush stood behind.
 SEAL_NOT_STOOD = ("SEAL_FELL_BACK", "SEAL_TAIL_TORN", "SEAL_ALONE_TORN", "SEAL_UNBORNE")

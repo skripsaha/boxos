@@ -98,9 +98,11 @@ STAND_NAME=logcheck
 # The mkfs scenario: tools/logcheck_mkfs.sh.
 . "$(dirname "$0")/logcheck_mkfs.sh"
 # The book's census and the stand's road on a book: tools/logcheck_book.sh,
-# its USB road tools/logcheck_book_usb.sh; the kernel's Tallies of a book:
+# its USB road tools/logcheck_book_usb.sh, the book the kernel writes read back
+# by both readers tools/logcheck_book_circle.sh; the kernel's Tallies of a book:
 # tools/logcheck_bind.sh.
 . "$(dirname "$0")/logcheck_book.sh"
+. "$(dirname "$0")/logcheck_book_circle.sh"
 . "$(dirname "$0")/logcheck_book_usb.sh"
 . "$(dirname "$0")/logcheck_bind.sh"
 # A book taking the ground behind it (grow, growcut on VOLUME_FORMAT=v2;
@@ -8883,16 +8885,16 @@ EOF2
 }
 
 census_exempt_on() {
-    mutate tools/volumeread/census.py
+    mutate tools/volumeread/census_claims.py
     python3 - <<'EOF2'
-p = "tools/volumeread/census.py"
+p = "tools/volumeread/census_claims.py"
 s = open(p).read()
 anchor = "            if r.fid != 0 and not r.unpack_ok:\n"
 assert s.count(anchor) == 1, "census exemption anchor missing"
 s = s.replace(anchor, "            if not r.unpack_ok:  # logcheck mutation: retired records are called bad\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done tools/volumeread/census.py "logcheck mutation"
+    mut_done tools/volumeread/census_claims.py "logcheck mutation"
 }
 
 run_censusmut() {
@@ -8914,7 +8916,7 @@ run_censusmut() {
     census_exempt_on
     python3 tools/volume-read.py build/boxos.img self-test >"$SCRATCH/census.exempt.out" 2>&1
     local rc=$?
-    restore tools/volumeread/census.py
+    restore tools/volumeread/census_claims.py
     local c14
     c14=$(grep -m1 "C14 retired is not bad" "$SCRATCH/census.exempt.out")
     if [ $rc -ne 0 ] && echo "$c14" | grep -q "unexpected RECORD_CRC"; then

@@ -139,7 +139,7 @@ def Elements(content, seq, refs=()):
     for fid in sorted(set(content.files) | set(kept)):
         if fid in kept:
             # A file locked by name, named again as what of it read lay — each
-            # run with the birth it had (§16.4 п.5, settle/binder_nodes.c).
+            # run with the birth it had (§16.4 п.5, settle/binder_items.c).
             head, parts = kept[fid]
             if head is not None:
                 files.append(((fid, 0), FileHeadEncode(head)))
@@ -387,7 +387,7 @@ def _FilesDiffer(have, want):
 
 def _DigestsWanted(p):
     """The digests a Tally of the state `p` mounted carries (the kernel's
-    settle/binder.c GroundTake): of every block of every live file, of every
+    settle/binder_slice.c BinderGroundTake): of every block of every live file, of every
     block a locked file is known to name — the census holds those whatever
     locked it (bookcensus.py _Held) — and, a FILES range rotten, of every
     block the Tally before named a digest of and none of its living files
@@ -407,10 +407,11 @@ def _DigestsWanted(p):
 
 
 def _RibbonPast(p, s0, k):
-    """Past stitch k, as the walk from the older slot `s0` keeps it (stitch.py
-    Ribbon._Take): k itself, the Quire the ribbon stands in where it goes on,
-    the next_quire named there — (0, 0) for none — and whether the medium was
-    known to lie by then: the older slot's word or a stitch's up to k."""
+    """Past stitch k, as the walk from the older slot `s0` keeps it
+    (stitch_ribbon.py Ribbon._Take): k itself, the Quire the ribbon stands in
+    where it goes on, the next_quire named there — (0, 0) for none — and
+    whether the medium was known to lie by then: the older slot's word or a
+    stitch's up to k."""
     r = s0.ribbon
     quire, nxt = (r["quire_block"], r["quire_blocks"]), (r["next_block"], r["next_blocks"])
     lied = bool(s0.flags & SPINE_MEDIUM_LIED)

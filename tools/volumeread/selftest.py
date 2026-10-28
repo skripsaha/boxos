@@ -34,8 +34,8 @@ from .selftest_book import BookTargets
 from .selftest_book_tally import (Pristine, Circles, SpineCases, RangeCases, TreeShapeCases, ElementCases,
                                   SlotRootCases)
 from .selftest_book_ribbon import (RecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases,
-                                   RibbonFurtherCases, RibbonLossCases, RibbonCases, RibbonShapeCases,
-                                   RibbonBoundCases)
+                                   RibbonFurtherCases, RibbonCases)
+from .selftest_book_ribbon_damage import RibbonLossCases, RibbonShapeCases, RibbonBoundCases
 
 # ---------------------------------------------------------------------------
 # Running

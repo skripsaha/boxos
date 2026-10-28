@@ -113,7 +113,7 @@ uint64_t DocketTakes(void);
  * the caller lets go (NULL for a file born since: no settled stitch names
  * it). False when there is none. Between two cycles this and the map's record
  * of every other file are the state after the last stitch that settled — what
- * a whole Tally is written of (settle/binder.c). */
+ * a whole Tally is written of (settle/binder_slice.c). */
 bool  DocketWasFrom(uint64_t fid, uint64_t* at, FileRecord** was);
 
 /* By the Settle's holder with no lock, at the S6 of stitch `seq` built of *t,

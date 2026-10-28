@@ -364,14 +364,14 @@ uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, 
  * first atom after it — where the refused attempt lies, which is never written
  * over — and walks the next_quire that stitch names from its start, over every
  * unit lying there, to the first whole stitch naming it and the Quire it ends
- * in as the one it came from (ribbon_collate.c, RibbonFurther; stitch.py
- * alike). So the retry goes to that next_quire: at its start, or, where the
- * attempt refused lies in it, on the atom past the attempt's `of` — however
- * much of it the medium took — with a new seq, naming the Quire the last
- * stitch ends in. And not at all when no next_quire is named past it (there
- * was nothing to take), or when the attempts refused have run it to its end:
- * a retry anywhere else is a stitch the waiters were told is kept and the next
- * mount does not read.
+ * in as the one it came from (ribbon_collate.c, RibbonFurther;
+ * stitch_ribbon.py alike). So the retry goes to that next_quire: at its start,
+ * or, where the attempt refused lies in it, on the atom past the attempt's
+ * `of` — however much of it the medium took — with a new seq, naming the Quire
+ * the last stitch ends in. And not at all when no next_quire is named past it
+ * (there was nothing to take), or when the attempts refused have run it to its
+ * end: a retry anywhere else is a stitch the waiters were told is kept and the
+ * next mount does not read.
  */
 const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of)
 {

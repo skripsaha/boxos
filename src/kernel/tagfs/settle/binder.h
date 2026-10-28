@@ -15,13 +15,17 @@
  *
  *   binder.c        the Tally's steps — TALLY_TAKE, TALLY_NODES, TALLY_FLUSH,
  *                   TALLY_SLOT, TALLY_SLOT_FLUSH, TALLY_DONE — when one is
- *                   owed (TALLY_SLACK, SETTLE_DEMAND_TALLY), the slice it is
- *                   written of, the slot, and the ground the slots stop holding
- *                   (SpineHolds, FALLOW_BY_SPINE)
+ *                   owed (TALLY_SLACK, SETTLE_DEMAND_TALLY), the slot, and the
+ *                   ground the slots stop holding (SpineHolds, FALLOW_BY_SPINE)
+ *   binder_slice.c  the slice a Tally is written of, and the ground DIGESTS
+ *                   speaks for
+ *   binder_done.c   a Tally's DONE, and a slot whose write was refused held as
+ *                   naming either Tally
  *   binder_nodes.c  the nodes: the elements of each tree in key order, packed
  *                   by the one rule every writer of a Tally keeps — the same as
  *                   mkfs's (tools/create_tagfs_bind.c) and volume-read's
  *                   (tools/volumeread/binder.py) — and laid at A and B
+ *   binder_items.c  the elements of each tree, as they come out of memory
  *   births.c        the seq that put each run of this mount's writing in, for
  *                   the runs a Tally names (a run in memory is born 0 until a
  *                   mount reads it back)
@@ -199,7 +203,7 @@ void        BirthsForget(uint64_t start, uint64_t count);
 void        BirthsTrim(void);
 void        BirthsLetGo(void);
 
-/* --- binder.c and binder_nodes.c alone ---------------------------------- */
+/* --- the Binder's own files (binder*.c) alone --------------------------- */
 
 /* A file of the slice: its id, and the record of it the state after the
  * stitch names — held for as long as the Tally is being written. */
@@ -266,7 +270,7 @@ typedef struct {
     uint32_t len;
 } BinderItem;
 
-/* The elements of the tree being laid, as they come (binder_nodes.c). */
+/* The elements of the tree being laid, as they come (binder_items.c). */
 typedef struct {
     uint32_t     tree;
     BinderFiles* chunk;          /* FILES: the slice, where the walk stands */

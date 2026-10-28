@@ -164,8 +164,9 @@ uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, 
 const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of);
 bool     RibbonCloseEarly(void);
 
-/* A Tally of seq `tally` was written over the slot of the least seq (binder.c):
- * every stitch from here is replayed over it. By the Settle's holder. */
+/* A Tally of seq `tally` was written over the slot of the least seq
+ * (binder_done.c): every stitch from here is replayed over it. By the Settle's
+ * holder. */
 void     RibbonTallied(uint64_t tally);
 
 /*
