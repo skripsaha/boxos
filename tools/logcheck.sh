@@ -1277,17 +1277,17 @@ run_healthy() {
     # tree registers. The numbers are the code's, not a run's (K9): a build
     # without VOLUME_TESTS walks the nine suites of tests.h TEST_SUITES not
     # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
-    # book 15, ribbon 5, integrity 3, use_context 5 TestCases, 43 run; the 11
+    # book 15, ribbon 6, integrity 3, use_context 5 TestCases, 44 run; the 11
     # whose reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
-    # g_volume_tests_allowed), and the 32 that only read pass — none of them
+    # g_volume_tests_allowed), and the 33 that only read pass — none of them
     # stands aside on this stand's fresh image, whose first file wears a tag
     # (use_context_narrows). A test added or taken out moves this line in the
     # same commit.
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
     local said
     said=$(stand_summary "$L")
-    [ "$said" = "TagFS: 43 run, 32 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
-    chk $? "TagFS startup tests: the 43 this tree registers ran, 32 reads passed and 11 writes stood down (${said:-no summary})"
+    [ "$said" = "TagFS: 44 run, 33 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
+    chk $? "TagFS startup tests: the 44 this tree registers ran, 33 reads passed and 11 writes stood down (${said:-no summary})"
     lockrank_judge "$L" "healthy 1c"
 
     # (7) the kernel's ear works — mutation-proven harness, see commit
