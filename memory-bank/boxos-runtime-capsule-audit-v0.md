@@ -314,9 +314,17 @@ R_X86_64_TPOFF32 S + A - TP  (only with the exact TLS layout contract)
 
 Relocations against a discarded section, undefined symbol, unsupported type,
 or out-of-range value are hard errors naming object, section, offset, symbol,
-type and computed value. `_GLOBAL_OFFSET_TABLE_`, `__cxa_finalize` and the
-init/fini array symbols are resolved as explicit runtime/linker contracts;
-they are never left as unresolved bytes in an ET_EXEC image.
+type and computed value. The names `user.ld` defines (`__init_array_*`,
+`__fini_array_*`, `__tdata_*`, `__tbss_size`, `__eh_frame_*`,
+`__nameplate_*`, `__bss_*`, `__program_end`) are valued by the layout. A weak
+reference nobody defines (`__cxa_finalize` in `runtime_init.o`) is zero by the
+weak rule. No other name is special: `_GLOBAL_OFFSET_TABLE_` is only an
+undefined symbol in `string.o` with no relocation against it, so any future
+reference to it is refused as undefined rather than given a value.
+
+TPOFF32 uses the variant II thread pointer: the start of the TLS block plus its
+size rounded up to the block's alignment. A TPOFF32 against a non-TLS symbol,
+or any other relocation against a TLS symbol, is refused.
 
 ### Nameplate
 
@@ -324,10 +332,15 @@ Nameplate is part of the first complete image contract, not an optional host
 post-process. After code/rodata addresses are fixed, the linker harvests the
 same executable symbols that `tools/nameplate` accepts, builds the existing
 `NameplateHeader` table, places `.nameplate` before `.data`, and then lays out
-the writable sections. A final verification pass must re-derive each entry
-from the emitted symbol table and reject address drift or a table that would
-not fit the format. This removes the host-only two-pass dependency without
-changing the in-image Nameplate format consumed by the kernel and BoxLib.
+the writable sections. The harvest is `tools/nameplate`'s rule exactly: a
+function or an untyped label in executable code, at a nonzero final address
+inside its output section, one name per address chosen by the same order
+(typed, sized, global, then by name). The linker checks that placing the
+table moved no section before it. Independently, `tools/boxasm_stand.sh` links
+with `BOXASM_LINK_SYMBOLS`, runs `tools/nameplate verify` on the image and
+compares every name and size with GNU ld's two-pass link of the same objects.
+Images assembled inside BoxOS carry no `.symtab`: the Nameplate already names
+their code, and nothing on the machine reads a symbol table.
 
 ### Acceptance criteria for the linker phase
 
@@ -343,9 +356,31 @@ The phase is complete only when one implementation can:
 - produce an ET_EXEC image that the existing loader can launch without a
   kernel or TagFS change.
 
-These checks are satisfied for the bounded v0 target and are the regression
-criteria for future linker changes. Unsupported language constructs still fail
-before an artifact is created.
+These checks are the regression criteria for future linker changes and are
+run by `tools/boxasm_stand.sh` (the `boxasm` gate in `tools/gates.sh`).
+Unsupported language constructs still fail before an artifact is created.
+
+### Correction — 2026-10-28
+
+The first v0 commit (`eb541873`) recorded these criteria as satisfied, but a
+check against GNU ld on the same inputs showed four were not:
+
+1. Two strong definitions of one name linked silently (the resolver stopped at
+   the first). Now every global definition enters one hash table when its
+   object is selected, and a second strong one is refused naming both objects.
+2. The Nameplate dropped every function at offset 0 of its input section —
+   23 of 281 names in `hello`, `_start` and `main` among them. It now matches
+   `tools/nameplate` name for name and size for size.
+3. Refusals carried no names ("unresolved symbol"); several carried no text.
+4. The v0 assembler wrote a local symbol after the globals with a wrong
+   `sh_info`, an object GNU ld rejects. The ELF reader now enforces the
+   local/global boundary, and the assembler writes it correctly.
+
+Also corrected: TPOFF32 rounding, the `.tdata` alignment of 64 from `user.ld`,
+the location counter not advancing for an empty output section, GNU ar long
+member names, prioritized `.init_array.N`/`.ctors` refused instead of placed
+out of order, and relocation tables of sections the image does not carry
+skipped instead of refused without a word.
 
 ## Quality constraints
 

@@ -3,12 +3,20 @@
 
 #include "boxasm_elf.h"
 
-/* Link the assembled ET_REL object with the existing entry object and the
- * embedded BoxLib archive.  The result is one ET_EXEC image suitable for the
- * current BoxOS loader. */
+/* Also write .symtab and .strtab into the image. The images assembled inside
+ * BoxOS do not carry them: the Nameplate already names their code at runtime,
+ * and nothing on the machine reads a symbol table. A host check asks for them
+ * so tools/nameplate can verify the table against the image's own symbols. */
+#define BOXASM_LINK_SYMBOLS 0x1u
+
+/* Link the assembled ET_REL object with the entry object and the runtime
+ * archive into one ET_EXEC image for the BoxOS loader, laid out by the
+ * contract of src/userspace/boxlib/user.ld. Every refusal is written into
+ * Error naming the object, section, offset and symbol it concerns. */
 int BoxAsmLink(const BoxAsmBlob *Entry,
                const BoxAsmBlob *Program,
                const BoxAsmBlob *RuntimeArchive,
+               uint32_t Flags,
                BoxAsmBlob *Out,
                char *Error,
                size_t ErrorCapacity);

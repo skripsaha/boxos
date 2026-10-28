@@ -1,7 +1,7 @@
 #ifndef BOXASM_ELF_H
 #define BOXASM_ELF_H
 
-#include "box/defs.h"
+#include "boxasm_support.h"
 
 /* ELF64 structures used by the in-BoxOS assembler and linker.  The target
  * toolchain is freestanding, so it cannot depend on a host <elf.h>. */
@@ -79,12 +79,6 @@ typedef struct {
     uint64_t                      StringBytes;
 } BoxAsmElfObject;
 
-typedef struct {
-    uint8_t *Data;
-    uint64_t Size;
-    uint64_t Capacity;
-} BoxAsmBuffer;
-
 /* ELF constants used by the bounded BoxASM v0 contract. */
 #define BOXASM_ELF_MAGIC0 0x7Fu
 #define BOXASM_ELF_MAGIC1 'E'
@@ -120,6 +114,7 @@ typedef struct {
 #define BOXASM_STT_OBJECT 1u
 #define BOXASM_STT_FUNC 2u
 #define BOXASM_STT_SECTION 3u
+#define BOXASM_STT_FILE 4u
 #define BOXASM_STT_TLS 6u
 
 #define BOXASM_PT_LOAD 1u
@@ -144,18 +139,11 @@ typedef struct {
 #define BOXASM_RELA_SYMBOL(Info) ((uint32_t)((Info) >> 32))
 #define BOXASM_RELA_TYPE(Info) ((uint32_t)(Info))
 
-int BoxAsmBufferReserve(BoxAsmBuffer *Buffer, uint64_t Additional);
-int BoxAsmBufferAppend(BoxAsmBuffer *Buffer, const void *Data, uint64_t Size);
-int BoxAsmBufferAppendZeroes(BoxAsmBuffer *Buffer, uint64_t Size);
-int BoxAsmBufferAlign(BoxAsmBuffer *Buffer, uint64_t Alignment);
-void BoxAsmBufferRelease(BoxAsmBuffer *Buffer);
-
 int BoxAsmElfOpen(const BoxAsmBlob *Blob, uint16_t ExpectedType,
                   BoxAsmElfObject *Out, char *Error, size_t ErrorCapacity);
 const char *BoxAsmElfSectionName(const BoxAsmElfObject *Object, uint16_t Index);
 const uint8_t *BoxAsmElfSectionData(const BoxAsmElfObject *Object,
                                     uint16_t Index);
 const char *BoxAsmElfSymbolName(const BoxAsmElfObject *Object, uint32_t Index);
-int BoxAsmElfSectionClass(const BoxAsmElfObject *Object, uint16_t Index);
 
 #endif

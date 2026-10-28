@@ -4,280 +4,286 @@
 #include "box/memory.h"
 #include "box/string.h"
 
-#define BOXASM_OUTPUT_USER_BASE 0xC000ull
-#define BOXASM_OUTPUT_PAGE 0x1000ull
+/* Header indices after the output sections. */
+typedef struct {
+    uint16_t Symtab;
+    uint16_t Strtab;
+    uint16_t Shstrtab;
+    uint16_t Count;
+} BoxAsmTrailer;
 
-static uint64_t BoxAsmOutputAlign(uint64_t Value, uint64_t Alignment)
+typedef struct {
+    uint64_t ReadOnlyEnd;    /* file offset where the R+X segment's bytes end */
+    uint64_t DataStart;      /* file offset of the RW segment */
+    uint64_t DataEnd;        /* file offset where the RW segment's bytes end */
+    uint64_t SymtabOffset;
+    uint64_t StrtabOffset;
+    uint64_t ShstrtabOffset;
+    uint64_t HeadersOffset;
+    uint32_t Names[BOXASM_SLOT_COUNT + 3];
+} BoxAsmFileLayout;
+
+static int BoxAsmPadTo(BoxAsmBuffer *File, uint64_t Offset)
 {
-    uint64_t Mask;
-
-    if (Alignment <= 1u)
-        return Value;
-    if ((Alignment & (Alignment - 1u)) != 0 ||
-        Value > UINT64_MAX - (Alignment - 1u))
-        return UINT64_MAX;
-    Mask = Alignment - 1u;
-    return (Value + Mask) & ~Mask;
+    if (Offset < File->Size)
+        return -ERR_INVALID_STATE;
+    return BoxAsmBufferAppendZeroes(File, Offset - File->Size);
 }
 
-static int BoxAsmOutputBuildSectionNames(const BoxAsmLinkImage *Image,
-                                          BoxAsmBuffer *Names,
-                                          uint32_t Offsets[12],
-                                          uint32_t *ShstrtabName)
+static int BoxAsmAppendName(BoxAsmBuffer *Names, const char *Name, uint32_t *Out)
 {
-    size_t Index;
-
-    if (BoxAsmBufferAppend(Names, "", 1u) != 0)
-        return -ERR_NO_MEMORY;
-    for (Index = 1; Index < 12; Index++) {
-        if (Names->Size > UINT32_MAX)
-            return -ERR_INVALID_ARGUMENT;
-        Offsets[Index] = (uint32_t)Names->Size;
-        if (BoxAsmBufferAppend(Names, Image->Sections[Index].Name,
-                               strlen(Image->Sections[Index].Name) + 1u) != 0)
-            return -ERR_NO_MEMORY;
-    }
     if (Names->Size > UINT32_MAX)
         return -ERR_INVALID_ARGUMENT;
-    *ShstrtabName = (uint32_t)Names->Size;
-    if (BoxAsmBufferAppend(Names, ".shstrtab", 10u) != 0)
-        return -ERR_NO_MEMORY;
-    return 0;
+    *Out = (uint32_t)Names->Size;
+    return BoxAsmBufferAppend(Names, Name, strlen(Name) + 1u);
 }
 
-static int BoxAsmOutputAppendReadOnly(BoxAsmLinkImage *Image,
-                                      BoxAsmBuffer *File,
-                                      uint64_t *FirstFileEnd)
+static int BoxAsmBuildSectionNames(const BoxAsmLinkImage *Image,
+                                   const BoxAsmTrailer *Trailer,
+                                   BoxAsmBuffer *Names, BoxAsmFileLayout *Layout)
 {
-    size_t Index;
+    size_t Slot;
+    int Rc = BoxAsmBufferAppend(Names, "", 1u);
 
-    for (Index = 1; Index <= 5; Index++) {
-        BoxAsmOutputSection *Section = &Image->Sections[Index];
-        uint64_t Wanted;
+    for (Slot = 1; Rc == 0 && Slot < BOXASM_SLOT_COUNT; Slot++)
+        Rc = BoxAsmAppendName(Names, Image->Sections[Slot].Name, &Layout->Names[Slot]);
+    if (Rc == 0 && Trailer->Symtab != 0)
+        Rc = BoxAsmAppendName(Names, ".symtab", &Layout->Names[Trailer->Symtab]);
+    if (Rc == 0 && Trailer->Strtab != 0)
+        Rc = BoxAsmAppendName(Names, ".strtab", &Layout->Names[Trailer->Strtab]);
+    if (Rc == 0)
+        Rc = BoxAsmAppendName(Names, ".shstrtab", &Layout->Names[Trailer->Shstrtab]);
+    return Rc;
+}
 
-        if (!Section->Present)
+/* The R+X segment: the image's first page of file holds the headers, and from
+ * the second on, file offset and address advance together from USER_BASE. */
+static int BoxAsmWriteReadOnly(BoxAsmLinkImage *Image, BoxAsmBuffer *File,
+                               BoxAsmFileLayout *Layout)
+{
+    size_t Slot;
+
+    for (Slot = BOXASM_SLOT_TEXT; Slot <= BOXASM_SLOT_NAMEPLATE; Slot++) {
+        BoxAsmOutputSection *Section = &Image->Sections[Slot];
+        int Rc;
+
+        Section->FileOffset = BOXASM_PAGE + Section->Address - BOXASM_USER_BASE;
+        if (Section->Size == 0)
             continue;
-        if (Section->Address < BOXASM_OUTPUT_USER_BASE)
-            return -ERR_INVALID_ARGUMENT;
-        Wanted = BOXASM_OUTPUT_PAGE + Section->Address - BOXASM_OUTPUT_USER_BASE;
-        if (Wanted < File->Size)
-            return -ERR_INVALID_ARGUMENT;
-        if (BoxAsmBufferAppendZeroes(File, Wanted - File->Size) != 0)
-            return -ERR_NO_MEMORY;
-        Section->FileOffset = Wanted;
-        if (Section->Data.Size != 0 &&
-            BoxAsmBufferAppend(File, Section->Data.Data, Section->Data.Size) != 0)
-            return -ERR_NO_MEMORY;
-        *FirstFileEnd = File->Size;
+        Rc = BoxAsmPadTo(File, Section->FileOffset);
+        if (Rc == 0)
+            Rc = BoxAsmBufferAppend(File, Section->Data.Data, Section->Data.Size);
+        if (Rc != 0)
+            return Rc;
+        Layout->ReadOnlyEnd = File->Size;
     }
     return 0;
 }
 
-static int BoxAsmOutputAppendWritable(BoxAsmLinkImage *Image,
-                                      BoxAsmBuffer *File,
-                                      uint64_t *DataFileStart,
-                                      uint64_t *DataFileEnd)
+/* The RW segment starts on a fresh page of file, congruent with its address.
+ * Sections without bytes are placed, as GNU ld places them, where the
+ * segment's bytes end. */
+static int BoxAsmWriteWritable(BoxAsmLinkImage *Image, BoxAsmBuffer *File,
+                               BoxAsmFileLayout *Layout)
 {
-    size_t Index;
-
-    *DataFileStart = BoxAsmOutputAlign(File->Size, BOXASM_OUTPUT_PAGE);
-    if (*DataFileStart == UINT64_MAX ||
-        BoxAsmBufferAppendZeroes(File, *DataFileStart - File->Size) != 0)
-        return -ERR_NO_MEMORY;
-    for (Index = 6; Index <= 9; Index++) {
-        BoxAsmOutputSection *Section = &Image->Sections[Index];
-        uint64_t Wanted;
-
-        if (!Section->Present)
-            continue;
-        if (Section->Address < Image->Sections[6].Address ||
-            *DataFileStart > UINT64_MAX -
-                (Section->Address - Image->Sections[6].Address))
-            return -ERR_INVALID_ARGUMENT;
-        Wanted = *DataFileStart + Section->Address - Image->Sections[6].Address;
-        if (Wanted < File->Size)
-            return -ERR_INVALID_ARGUMENT;
-        if (BoxAsmBufferAppendZeroes(File, Wanted - File->Size) != 0)
-            return -ERR_NO_MEMORY;
-        Section->FileOffset = Wanted;
-        if (Section->Data.Size != 0 &&
-            BoxAsmBufferAppend(File, Section->Data.Data, Section->Data.Size) != 0)
-            return -ERR_NO_MEMORY;
-        *DataFileEnd = File->Size;
-    }
-    if (*DataFileEnd == 0)
-        *DataFileEnd = *DataFileStart;
-    if (Image->TlsMemorySize != 0 &&
-        BoxAsmBufferAlign(File, Image->TlsAlign) != 0)
-        return -ERR_NO_MEMORY;
-    for (Index = 10; Index <= 11; Index++)
-        if (Image->Sections[Index].Present)
-            Image->Sections[Index].FileOffset = File->Size;
-
-    Image->TlsFileOffset = Image->Sections[9].Present
-        ? Image->Sections[9].FileOffset
-        : (Image->Sections[10].Present ? Image->Sections[10].FileOffset : 0);
-    Image->TlsAddress = Image->Sections[9].Present
-        ? Image->Sections[9].Address
-        : (Image->Sections[10].Present ? Image->Sections[10].Address : 0);
-    Image->TlsFileSize = Image->Sections[9].Size;
-    Image->TlsMemorySize = Image->Sections[10].Present
-        ? Image->Sections[10].Address + Image->Sections[10].Size - Image->TlsAddress
-        : Image->Sections[9].Size;
-    Image->TlsAlign = Image->Sections[9].Align > Image->Sections[10].Align
-        ? Image->Sections[9].Align : Image->Sections[10].Align;
-    return 0;
-}
-
-static void BoxAsmOutputBuildSectionHeaders(const BoxAsmLinkImage *Image,
-                                            BoxAsmElfSectionHeader Sections[13],
-                                            const uint32_t Offsets[12],
-                                            uint32_t ShstrtabName,
-                                            uint64_t SectionNamesOffset,
-                                            uint64_t SectionNamesSize)
-{
-    size_t Index;
-
-    memset(Sections, 0, sizeof(BoxAsmElfSectionHeader) * 13u);
-    for (Index = 1; Index < 12; Index++) {
-        const BoxAsmOutputSection *Section = &Image->Sections[Index];
-        Sections[Index].Name = Offsets[Index];
-        Sections[Index].Type = Section->Type;
-        Sections[Index].Flags = Section->Flags;
-        Sections[Index].Address = Section->Address;
-        Sections[Index].Offset = Section->FileOffset;
-        Sections[Index].Size = Section->Size;
-        Sections[Index].AddressAlign = Section->Align;
-    }
-    Sections[12] = (BoxAsmElfSectionHeader){ ShstrtabName, BOXASM_SHT_STRTAB, 0, 0,
-                                             SectionNamesOffset, SectionNamesSize,
-                                             0, 0, 1, 0 };
-}
-
-static void BoxAsmOutputBuildProgramHeaders(const BoxAsmLinkImage *Image,
-                                            BoxAsmElfProgramHeader Programs[3],
-                                            uint64_t FirstFileEnd,
-                                            uint64_t DataFileStart,
-                                            uint64_t DataFileEnd,
-                                            uint16_t ProgramCount)
-{
-    memset(Programs, 0, sizeof(BoxAsmElfProgramHeader) * 3u);
-    Programs[0] = (BoxAsmElfProgramHeader){ BOXASM_PT_LOAD, BOXASM_PF_R | BOXASM_PF_X,
-                                            BOXASM_OUTPUT_PAGE, BOXASM_OUTPUT_USER_BASE,
-                                            BOXASM_OUTPUT_USER_BASE,
-                                            FirstFileEnd - BOXASM_OUTPUT_PAGE,
-                                            FirstFileEnd - BOXASM_OUTPUT_PAGE,
-                                            BOXASM_OUTPUT_PAGE };
-    Programs[1] = (BoxAsmElfProgramHeader){ BOXASM_PT_LOAD, BOXASM_PF_R | BOXASM_PF_W,
-                                            DataFileStart, Image->Sections[6].Address,
-                                            Image->Sections[6].Address,
-                                            DataFileEnd - DataFileStart,
-                                            Image->ProgramEnd - Image->Sections[6].Address,
-                                            BOXASM_OUTPUT_PAGE };
-    if (ProgramCount == 3u)
-        Programs[2] = (BoxAsmElfProgramHeader){ BOXASM_PT_TLS, BOXASM_PF_R,
-                                                Image->TlsFileOffset, Image->TlsAddress,
-                                                Image->TlsAddress, Image->TlsFileSize,
-                                                Image->TlsMemorySize, Image->TlsAlign };
-}
-
-static void BoxAsmOutputBuildElfHeader(BoxAsmElfHeader *Header,
-                                       const BoxAsmLinkImage *Image,
-                                       uint64_t SectionHeaderOffset,
-                                       uint16_t ProgramCount)
-{
-    memset(Header, 0, sizeof(*Header));
-    Header->Ident[0] = BOXASM_ELF_MAGIC0;
-    Header->Ident[1] = BOXASM_ELF_MAGIC1;
-    Header->Ident[2] = BOXASM_ELF_MAGIC2;
-    Header->Ident[3] = BOXASM_ELF_MAGIC3;
-    Header->Ident[4] = BOXASM_ELF_CLASS64;
-    Header->Ident[5] = BOXASM_ELF_LSB;
-    Header->Ident[6] = BOXASM_ELF_CURRENT;
-    Header->Type = BOXASM_ET_EXEC;
-    Header->Machine = BOXASM_EM_X86_64;
-    Header->Version = BOXASM_ELF_CURRENT;
-    Header->Entry = Image->Entry;
-    Header->ProgramHeaderOffset = sizeof(*Header);
-    Header->SectionHeaderOffset = SectionHeaderOffset;
-    Header->HeaderSize = sizeof(*Header);
-    Header->ProgramHeaderSize = sizeof(BoxAsmElfProgramHeader);
-    Header->ProgramHeaderCount = ProgramCount;
-    Header->SectionHeaderSize = sizeof(BoxAsmElfSectionHeader);
-    Header->SectionHeaderCount = 13;
-    Header->SectionNameIndex = 12;
-}
-
-int BoxAsmWriteOutput(BoxAsmLinkImage *Image, BoxAsmBlob *Out,
-                      char *Error, size_t ErrorCapacity)
-{
-    BoxAsmBuffer File = { 0 };
-    BoxAsmBuffer SectionNames = { 0 };
-    BoxAsmElfHeader Header;
-    BoxAsmElfProgramHeader Programs[3];
-    BoxAsmElfSectionHeader Sections[13];
-    uint32_t SectionNameOffsets[12];
-    uint32_t ShstrtabName;
-    uint64_t FirstFileEnd = 0;
-    uint64_t DataFileStart = 0;
-    uint64_t DataFileEnd = 0;
-    uint64_t SectionHeaderOffset;
-    size_t HeaderBytes;
-    uint16_t ProgramCount;
+    uint64_t DataAddress = Image->Sections[BOXASM_SLOT_DATA].Address;
+    size_t Slot;
     int Rc;
 
-    (void)Error;
-    (void)ErrorCapacity;
-    ProgramCount = Image->TlsMemorySize != 0 ? 3u : 2u;
-    Rc = BoxAsmOutputBuildSectionNames(Image, &SectionNames,
-                                       SectionNameOffsets, &ShstrtabName);
+    Layout->DataStart = BoxAsmAlignUp(File->Size, BOXASM_PAGE);
+    if (Layout->DataStart == UINT64_MAX)
+        return -ERR_NO_MEMORY;
+    Rc = BoxAsmPadTo(File, Layout->DataStart);
     if (Rc != 0)
-        goto Fail;
-    HeaderBytes = sizeof(BoxAsmElfHeader) +
-                  (size_t)ProgramCount * sizeof(BoxAsmElfProgramHeader);
-    if (BoxAsmBufferAppendZeroes(&File, HeaderBytes) != 0 ||
-        BoxAsmBufferAlign(&File, BOXASM_OUTPUT_PAGE) != 0) {
-        Rc = -ERR_NO_MEMORY;
-        goto Fail;
-    }
-    Rc = BoxAsmOutputAppendReadOnly(Image, &File, &FirstFileEnd);
-    if (Rc != 0)
-        goto Fail;
-    Rc = BoxAsmOutputAppendWritable(Image, &File, &DataFileStart, &DataFileEnd);
-    if (Rc != 0)
-        goto Fail;
-    if (BoxAsmBufferAlign(&File, 8u) != 0 ||
-        BoxAsmBufferAppend(&File, SectionNames.Data, SectionNames.Size) != 0) {
-        Rc = -ERR_NO_MEMORY;
-        goto Fail;
-    }
-    SectionHeaderOffset = BoxAsmOutputAlign(File.Size, 8u);
-    if (SectionHeaderOffset == UINT64_MAX ||
-        BoxAsmBufferAppendZeroes(&File, SectionHeaderOffset - File.Size) != 0) {
-        Rc = -ERR_NO_MEMORY;
-        goto Fail;
-    }
-    BoxAsmOutputBuildSectionHeaders(Image, Sections, SectionNameOffsets,
-                                    ShstrtabName,
-                                    SectionHeaderOffset - SectionNames.Size,
-                                    SectionNames.Size);
-    BoxAsmOutputBuildProgramHeaders(Image, Programs, FirstFileEnd,
-                                    DataFileStart, DataFileEnd, ProgramCount);
-    BoxAsmOutputBuildElfHeader(&Header, Image, SectionHeaderOffset, ProgramCount);
-    memcpy(File.Data, &Header, sizeof(Header));
-    memcpy(File.Data + Header.ProgramHeaderOffset, Programs,
-           ProgramCount * sizeof(BoxAsmElfProgramHeader));
-    if (BoxAsmBufferAppend(&File, Sections, sizeof(Sections)) != 0) {
-        Rc = -ERR_NO_MEMORY;
-        goto Fail;
-    }
-    Out->Data = File.Data;
-    Out->Size = File.Size;
-    File.Data = NULL;
-    BoxAsmBufferRelease(&SectionNames);
-    return 0;
+        return Rc;
+    Layout->DataEnd = Layout->DataStart;
+    for (Slot = BOXASM_SLOT_DATA; Slot < BOXASM_SLOT_COUNT; Slot++) {
+        BoxAsmOutputSection *Section = &Image->Sections[Slot];
 
-Fail:
+        if (Section->Type == BOXASM_SHT_NOBITS)
+            continue;
+        Section->FileOffset = Layout->DataStart + Section->Address - DataAddress;
+        if (Section->Size == 0)
+            continue;
+        Rc = BoxAsmPadTo(File, Section->FileOffset);
+        if (Rc == 0)
+            Rc = BoxAsmBufferAppend(File, Section->Data.Data, Section->Data.Size);
+        if (Rc != 0)
+            return Rc;
+        Layout->DataEnd = File->Size;
+    }
+    Image->Sections[BOXASM_SLOT_TBSS].FileOffset = Layout->DataEnd;
+    Image->Sections[BOXASM_SLOT_BSS].FileOffset = Layout->DataEnd;
+    return 0;
+}
+
+static int BoxAsmWriteTrailer(BoxAsmLinkImage *Image, BoxAsmBuffer *File,
+                              const BoxAsmBuffer *SectionNames,
+                              BoxAsmFileLayout *Layout)
+{
+    int Rc = BoxAsmBufferAlign(File, 8u);
+
+    if (Rc == 0 && Image->Symbols.Size != 0) {
+        Layout->SymtabOffset = File->Size;
+        Rc = BoxAsmBufferAppend(File, Image->Symbols.Data, Image->Symbols.Size);
+        if (Rc == 0) {
+            Layout->StrtabOffset = File->Size;
+            Rc = BoxAsmBufferAppend(File, Image->SymbolNames.Data,
+                                    Image->SymbolNames.Size);
+        }
+    }
+    if (Rc == 0) {
+        Layout->ShstrtabOffset = File->Size;
+        Rc = BoxAsmBufferAppend(File, SectionNames->Data, SectionNames->Size);
+    }
+    if (Rc == 0)
+        Rc = BoxAsmBufferAlign(File, 8u);
+    Layout->HeadersOffset = File->Size;
+    return Rc;
+}
+
+static int BoxAsmAppendSectionHeaders(const BoxAsmLinkImage *Image,
+                                      const BoxAsmTrailer *Trailer,
+                                      const BoxAsmFileLayout *Layout,
+                                      uint64_t SectionNamesSize, BoxAsmBuffer *File)
+{
+    BoxAsmElfSectionHeader Header;
+    size_t Slot;
+    int Rc;
+
+    memset(&Header, 0, sizeof(Header));
+    Rc = BoxAsmBufferAppend(File, &Header, sizeof(Header));
+    for (Slot = 1; Rc == 0 && Slot < BOXASM_SLOT_COUNT; Slot++) {
+        const BoxAsmOutputSection *Section = &Image->Sections[Slot];
+
+        Header = (BoxAsmElfSectionHeader){
+            Layout->Names[Slot], Section->Type, Section->Flags, Section->Address,
+            Section->FileOffset, Section->Size, 0, 0, Section->Align, 0
+        };
+        Rc = BoxAsmBufferAppend(File, &Header, sizeof(Header));
+    }
+    if (Rc == 0 && Trailer->Symtab != 0) {
+        Header = (BoxAsmElfSectionHeader){
+            Layout->Names[Trailer->Symtab], BOXASM_SHT_SYMTAB, 0, 0,
+            Layout->SymtabOffset, Image->Symbols.Size, Trailer->Strtab,
+            Image->FirstGlobal, 8, sizeof(BoxAsmElfSymbol)
+        };
+        Rc = BoxAsmBufferAppend(File, &Header, sizeof(Header));
+        Header = (BoxAsmElfSectionHeader){
+            Layout->Names[Trailer->Strtab], BOXASM_SHT_STRTAB, 0, 0,
+            Layout->StrtabOffset, Image->SymbolNames.Size, 0, 0, 1, 0
+        };
+        if (Rc == 0)
+            Rc = BoxAsmBufferAppend(File, &Header, sizeof(Header));
+    }
+    Header = (BoxAsmElfSectionHeader){
+        Layout->Names[Trailer->Shstrtab], BOXASM_SHT_STRTAB, 0, 0,
+        Layout->ShstrtabOffset, SectionNamesSize, 0, 0, 1, 0
+    };
+    if (Rc == 0)
+        Rc = BoxAsmBufferAppend(File, &Header, sizeof(Header));
+    return Rc;
+}
+
+static void BoxAsmWriteFileHeaders(const BoxAsmLinkImage *Image,
+                                   const BoxAsmTrailer *Trailer,
+                                   const BoxAsmFileLayout *Layout,
+                                   uint16_t ProgramCount, BoxAsmBuffer *File)
+{
+    const BoxAsmOutputSection *Data = &Image->Sections[BOXASM_SLOT_DATA];
+    const BoxAsmOutputSection *Tdata = &Image->Sections[BOXASM_SLOT_TDATA];
+    BoxAsmElfProgramHeader Programs[3];
+    BoxAsmElfHeader Header;
+
+    memset(Programs, 0, sizeof(Programs));
+    Programs[0] = (BoxAsmElfProgramHeader){
+        BOXASM_PT_LOAD, BOXASM_PF_R | BOXASM_PF_X, BOXASM_PAGE,
+        BOXASM_USER_BASE, BOXASM_USER_BASE,
+        Layout->ReadOnlyEnd - BOXASM_PAGE, Layout->ReadOnlyEnd - BOXASM_PAGE,
+        BOXASM_PAGE
+    };
+    Programs[1] = (BoxAsmElfProgramHeader){
+        BOXASM_PT_LOAD, BOXASM_PF_R | BOXASM_PF_W, Layout->DataStart,
+        Data->Address, Data->Address, Layout->DataEnd - Layout->DataStart,
+        Image->ProgramEnd - Data->Address, BOXASM_PAGE
+    };
+    if (ProgramCount == 3u)
+        Programs[2] = (BoxAsmElfProgramHeader){
+            BOXASM_PT_TLS, BOXASM_PF_R,
+            Layout->DataStart + Image->TlsAddress - Data->Address,
+            Image->TlsAddress, Image->TlsAddress, Tdata->Size,
+            Image->TlsMemorySize, Image->TlsAlign
+        };
+
+    memset(&Header, 0, sizeof(Header));
+    Header.Ident[0] = BOXASM_ELF_MAGIC0;
+    Header.Ident[1] = BOXASM_ELF_MAGIC1;
+    Header.Ident[2] = BOXASM_ELF_MAGIC2;
+    Header.Ident[3] = BOXASM_ELF_MAGIC3;
+    Header.Ident[4] = BOXASM_ELF_CLASS64;
+    Header.Ident[5] = BOXASM_ELF_LSB;
+    Header.Ident[6] = BOXASM_ELF_CURRENT;
+    Header.Type = BOXASM_ET_EXEC;
+    Header.Machine = BOXASM_EM_X86_64;
+    Header.Version = BOXASM_ELF_CURRENT;
+    Header.Entry = Image->Entry;
+    Header.ProgramHeaderOffset = sizeof(Header);
+    Header.SectionHeaderOffset = Layout->HeadersOffset;
+    Header.HeaderSize = sizeof(Header);
+    Header.ProgramHeaderSize = sizeof(BoxAsmElfProgramHeader);
+    Header.ProgramHeaderCount = ProgramCount;
+    Header.SectionHeaderSize = sizeof(BoxAsmElfSectionHeader);
+    Header.SectionHeaderCount = Trailer->Count;
+    Header.SectionNameIndex = Trailer->Shstrtab;
+    memcpy(File->Data, &Header, sizeof(Header));
+    memcpy(File->Data + sizeof(Header), Programs,
+           ProgramCount * sizeof(BoxAsmElfProgramHeader));
+}
+
+/* The image as the BoxOS loader takes it: ELF header and program headers in
+ * the first page, two W^X PT_LOAD segments, PT_TLS when there is a TLS block,
+ * then the section names and headers. */
+int BoxAsmWriteOutput(BoxAsmLinker *Link, BoxAsmBlob *Out)
+{
+    BoxAsmLinkImage *Image = &Link->Image;
+    BoxAsmBuffer File = { 0 };
+    BoxAsmBuffer SectionNames = { 0 };
+    BoxAsmFileLayout Layout;
+    BoxAsmTrailer Trailer;
+    uint16_t ProgramCount = Image->TlsMemorySize != 0 ? 3u : 2u;
+    int Rc;
+
+    memset(&Layout, 0, sizeof(Layout));
+    memset(&Trailer, 0, sizeof(Trailer));
+    Trailer.Count = BOXASM_SLOT_COUNT;
+    if (Image->Symbols.Size != 0) {
+        Trailer.Symtab = Trailer.Count++;
+        Trailer.Strtab = Trailer.Count++;
+    }
+    Trailer.Shstrtab = Trailer.Count++;
+
+    Rc = BoxAsmBuildSectionNames(Image, &Trailer, &SectionNames, &Layout);
+    if (Rc == 0)
+        Rc = BoxAsmBufferAppendZeroes(&File, sizeof(BoxAsmElfHeader) +
+                                      ProgramCount * sizeof(BoxAsmElfProgramHeader));
+    if (Rc == 0)
+        Rc = BoxAsmWriteReadOnly(Image, &File, &Layout);
+    if (Rc == 0)
+        Rc = BoxAsmWriteWritable(Image, &File, &Layout);
+    if (Rc == 0)
+        Rc = BoxAsmWriteTrailer(Image, &File, &SectionNames, &Layout);
+    if (Rc == 0)
+        Rc = BoxAsmAppendSectionHeaders(Image, &Trailer, &Layout,
+                                        SectionNames.Size, &File);
+    if (Rc == 0) {
+        BoxAsmWriteFileHeaders(Image, &Trailer, &Layout, ProgramCount, &File);
+        Out->Data = File.Data;
+        Out->Size = File.Size;
+        File.Data = NULL;
+    } else if (Rc != -ERR_NO_MEMORY) {
+        BoxAsmMessageSet(Link->Error, Link->ErrorCapacity,
+                         "the image layout cannot be written as an ELF file");
+    }
     BoxAsmBufferRelease(&SectionNames);
     BoxAsmBufferRelease(&File);
     return Rc;

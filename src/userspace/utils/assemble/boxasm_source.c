@@ -43,19 +43,6 @@ typedef struct {
 #define BOXASM_SOURCE_SYMBOL_PRINT 0xFFFFFFFFu
 #define BOXASM_SOURCE_SYMBOL_EXIT  0xFFFFFFFEu
 
-static void BoxAsmSourceError(char *Error, size_t Capacity, const char *Text)
-{
-    size_t Length;
-
-    if (!Error || Capacity == 0)
-        return;
-    Length = strlen(Text);
-    if (Length >= Capacity)
-        Length = Capacity - 1u;
-    memcpy(Error, Text, Length);
-    Error[Length] = '\0';
-}
-
 static void BoxAsmSourceDrop(BoxAsmSource *Source)
 {
     size_t Index;
@@ -72,17 +59,6 @@ static void BoxAsmSourceDrop(BoxAsmSource *Source)
     BoxAsmBufferRelease(&Source->Text);
     BoxAsmBufferRelease(&Source->Rodata);
     memset(Source, 0, sizeof(*Source));
-}
-
-static char *BoxAsmDuplicateSpan(const char *Begin, size_t Length)
-{
-    char *Copy = (char *)malloc(Length + 1u);
-
-    if (!Copy)
-        return NULL;
-    memcpy(Copy, Begin, Length);
-    Copy[Length] = '\0';
-    return Copy;
 }
 
 static char *BoxAsmTrim(char *Text)
@@ -128,7 +104,7 @@ static int BoxAsmAddLabel(BoxAsmSource *Source, const char *Name, uint64_t Offse
     if (BoxAsmGrow((void **)&Source->Labels, &Source->LabelCapacity,
                    Source->LabelCount, sizeof(*Source->Labels)) != 0)
         return -ERR_NO_MEMORY;
-    Copy = BoxAsmDuplicateSpan(Name, strlen(Name));
+    Copy = BoxAsmCopyText(Name, strlen(Name));
     if (!Copy)
         return -ERR_NO_MEMORY;
     Source->Labels[Source->LabelCount++] = (BoxAsmSourceLabel){ Copy, Offset };
@@ -293,14 +269,14 @@ static int BoxAsmParseLine(BoxAsmSource *Source, char *Line,
         if (strcmp(Section, ".text") == 0) Source->InText = 1;
         else if (strcmp(Section, ".rodata") == 0) Source->InText = 0;
         else {
-            BoxAsmSourceError(Error, ErrorCapacity, "BoxASM supports only .text and .rodata");
+            BoxAsmMessageSet(Error, ErrorCapacity, "BoxASM supports only .text and .rodata");
             return -ERR_INVALID_ARGUMENT;
         }
         return 0;
     }
     if (strncmp(Text, "global ", 7u) == 0) {
         if (strcmp(BoxAsmTrim(Text + 7u), "main") != 0) {
-            BoxAsmSourceError(Error, ErrorCapacity, "BoxASM v0 exports only main");
+            BoxAsmMessageSet(Error, ErrorCapacity, "BoxASM v0 exports only main");
             return -ERR_INVALID_ARGUMENT;
         }
         Source->SawGlobalMain = 1;
@@ -311,7 +287,7 @@ static int BoxAsmParseLine(BoxAsmSource *Source, char *Line,
         if (Length > 1u && Text[Length - 1u] == ':') {
             Text[Length - 1u] = '\0';
             if (!Source->InText || strcmp(Text, "main") != 0 || Source->SawMain) {
-                BoxAsmSourceError(Error, ErrorCapacity, "only one text label, main, is supported");
+                BoxAsmMessageSet(Error, ErrorCapacity, "only one text label, main, is supported");
                 return -ERR_INVALID_ARGUMENT;
             }
             Rc = BoxAsmAddLabel(Source, "main", Source->Text.Size);
@@ -335,7 +311,7 @@ static int BoxAsmParseLine(BoxAsmSource *Source, char *Line,
 
         if (!Source->InText || BoxAsmParseString(BoxAsmTrim(Text + 8u), &Value) != 0) {
             BoxAsmBufferRelease(&Value);
-            BoxAsmSourceError(Error, ErrorCapacity, "box.say requires a quoted string in .text");
+            BoxAsmMessageSet(Error, ErrorCapacity, "box.say requires a quoted string in .text");
             return -ERR_INVALID_ARGUMENT;
         }
         if (BoxAsmAddString(Source, (const char *)Value.Data, (size_t)Value.Size,
@@ -362,7 +338,7 @@ static int BoxAsmParseLine(BoxAsmSource *Source, char *Line,
 
         if (!Source->InText || BoxAsmParseInteger(BoxAsmTrim(Text + 9u), &Code) != 0 ||
             Code < INT32_MIN || Code > INT32_MAX) {
-            BoxAsmSourceError(Error, ErrorCapacity, "box.exit requires a signed 32-bit code");
+            BoxAsmMessageSet(Error, ErrorCapacity, "box.exit requires a signed 32-bit code");
             return -ERR_INVALID_ARGUMENT;
         }
         memcpy(Move + 1u, &Code, sizeof(uint32_t));
@@ -376,7 +352,7 @@ static int BoxAsmParseLine(BoxAsmSource *Source, char *Line,
         return 0;
     }
 
-    BoxAsmSourceError(Error, ErrorCapacity, "unknown BoxASM v0 statement");
+    BoxAsmMessageSet(Error, ErrorCapacity, "unknown BoxASM v0 statement");
     return -ERR_INVALID_ARGUMENT;
 }
 
@@ -410,11 +386,12 @@ static int BoxAsmBuildObject(BoxAsmSource *Source, BoxAsmBlob *Out,
     uint32_t SymtabName;
     uint32_t StrtabName;
     uint32_t ShstrtabName;
+    uint32_t FirstGlobal;
     size_t Index;
     int Rc = -ERR_NO_MEMORY;
 
     if (!Source->SawGlobalMain || !Source->SawMain || !Source->SawExit) {
-        BoxAsmSourceError(Error, ErrorCapacity,
+        BoxAsmMessageSet(Error, ErrorCapacity,
                           "source must export main and contain box.exit");
         return -ERR_INVALID_ARGUMENT;
     }
@@ -437,9 +414,25 @@ static int BoxAsmBuildObject(BoxAsmSource *Source, BoxAsmBlob *Out,
         BoxAsmAppendString(&SectionNames, ".shstrtab", &ShstrtabName) != 0)
         goto Done;
 
+    /* ELF puts every local symbol before the first global one, and the
+     * symbol table's sh_info names that boundary. The strings are local:
+     * symbols 1..StringCount; main, print and exit follow. */
     memset(&Symbol, 0, sizeof(Symbol));
     if (BoxAsmBufferAppend(&Symbols, &Symbol, sizeof(Symbol)) != 0)
         goto Done;
+    for (Index = 0; Index < Source->StringCount; Index++) {
+        uint64_t End = Index + 1u < Source->StringCount ?
+                       Source->Strings[Index + 1u].Offset : Source->Rodata.Size;
+        memset(&Symbol, 0, sizeof(Symbol));
+        Symbol.Name = Source->Strings[Index].NameOffset;
+        Symbol.Info = BOXASM_SYMBOL_INFO(BOXASM_STB_LOCAL, BOXASM_STT_OBJECT);
+        Symbol.SectionIndex = 3;
+        Symbol.Value = Source->Strings[Index].Offset;
+        Symbol.Size = End - Source->Strings[Index].Offset;
+        if (BoxAsmBufferAppend(&Symbols, &Symbol, sizeof(Symbol)) != 0)
+            goto Done;
+    }
+    FirstGlobal = (uint32_t)(Symbols.Size / sizeof(Symbol));
     memset(&Symbol, 0, sizeof(Symbol));
     Symbol.Name = MainName;
     Symbol.Info = BOXASM_SYMBOL_INFO(BOXASM_STB_GLOBAL, BOXASM_STT_FUNC);
@@ -460,23 +453,14 @@ static int BoxAsmBuildObject(BoxAsmSource *Source, BoxAsmBlob *Out,
     Symbol.SectionIndex = BOXASM_SHN_UNDEF;
     if (BoxAsmBufferAppend(&Symbols, &Symbol, sizeof(Symbol)) != 0)
         goto Done;
-    for (Index = 0; Index < Source->StringCount; Index++) {
-        memset(&Symbol, 0, sizeof(Symbol));
-        Symbol.Name = Source->Strings[Index].NameOffset;
-        Symbol.Info = BOXASM_SYMBOL_INFO(BOXASM_STB_LOCAL, BOXASM_STT_OBJECT);
-        Symbol.SectionIndex = 3;
-        Symbol.Value = Source->Strings[Index].Offset;
-        Symbol.Size = strlen(Source->Strings[Index].Name);
-        if (BoxAsmBufferAppend(&Symbols, &Symbol, sizeof(Symbol)) != 0)
-            goto Done;
-    }
 
     for (Index = 0; Index < Source->RelocationCount; Index++) {
         BoxAsmSourceRelocation *Input = &Source->Relocations[Index];
         Relocation.Address = Input->Offset;
         Relocation.Info = BOXASM_RELA_INFO(
-            Input->Symbol == BOXASM_SOURCE_SYMBOL_PRINT ? 2u :
-            (Input->Symbol == BOXASM_SOURCE_SYMBOL_EXIT ? 3u : 4u + Input->Symbol),
+            Input->Symbol == BOXASM_SOURCE_SYMBOL_PRINT ? FirstGlobal + 1u :
+            (Input->Symbol == BOXASM_SOURCE_SYMBOL_EXIT ? FirstGlobal + 2u :
+             1u + Input->Symbol),
             Input->Type);
         Relocation.Addend = Input->Addend;
         if (BoxAsmBufferAppend(&Rela, &Relocation, sizeof(Relocation)) != 0)
@@ -494,7 +478,8 @@ static int BoxAsmBuildObject(BoxAsmSource *Source, BoxAsmBlob *Out,
                                             BOXASM_SHF_ALLOC, 0, 0, Source->Rodata.Size,
                                             0, 0, 1, 0 };
     Sections[4] = (BoxAsmElfSectionHeader){ SymtabName, BOXASM_SHT_SYMTAB, 0, 0, 0,
-                                            Symbols.Size, 5, 2, 8, sizeof(BoxAsmElfSymbol) };
+                                            Symbols.Size, 5, FirstGlobal, 8,
+                                            sizeof(BoxAsmElfSymbol) };
     Sections[5] = (BoxAsmElfSectionHeader){ StrtabName, BOXASM_SHT_STRTAB, 0, 0, 0,
                                             Strings.Size, 0, 0, 1, 0 };
     Sections[6] = (BoxAsmElfSectionHeader){ ShstrtabName, BOXASM_SHT_STRTAB, 0, 0, 0,
@@ -564,7 +549,7 @@ int BoxAsmSourceAssemble(const char *Source, size_t SourceSize,
     int Rc = 0;
 
     if (!Source || !Out) {
-        BoxAsmSourceError(Error, ErrorCapacity, "source is missing");
+        BoxAsmMessageSet(Error, ErrorCapacity, "source is missing");
         return -ERR_INVALID_ARGUMENT;
     }
     memset(Out, 0, sizeof(*Out));

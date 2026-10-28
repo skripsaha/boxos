@@ -2,6 +2,7 @@
 #include "boxasm_link.h"
 #include "boxasm_source.h"
 
+#include "box/error.h"
 #include "box/file.h"
 #include "box/luggage.h"
 #include "box/memory.h"
@@ -9,17 +10,32 @@
 #include "box/string.h"
 #include "box/system.h"
 
+#define ASSEMBLE_ERROR_BYTES 512u
+
 extern const uint8_t _binary____build_boxlib_start_o_start[];
 extern const uint8_t _binary____build_boxlib_start_o_end[];
 extern const uint8_t _binary____boxlib_libbox_a_start[];
 extern const uint8_t _binary____boxlib_libbox_a_end[];
 
+static const char *DescribeError(int Rc)
+{
+    switch (box_errno_of(Rc)) {
+    case OK: return "ok";
+#define ASSEMBLE_ERROR_TEXT(SUFFIX, name, value, msg, cat) case ERR_##SUFFIX: return msg;
+    BOX_ERROR_LIST(ASSEMBLE_ERROR_TEXT)
+#undef ASSEMBLE_ERROR_TEXT
+    default: return "unknown error";
+    }
+}
+
+/* "assemble: <stage>: <detail>", the detail being the toolchain's own
+ * sentence when it wrote one and the system's name for the error otherwise. */
 static void SayError(const char *Stage, int Rc, const char *Detail)
 {
     if (Detail && Detail[0] != '\0')
-        printf("assemble: %s: %s (error %d)\n", Stage, Detail, Rc);
+        printf("assemble: %s: %s\n", Stage, Detail);
     else
-        printf("assemble: %s (error %d)\n", Stage, Rc);
+        printf("assemble: %s: %s\n", Stage, DescribeError(Rc));
 }
 
 static int EndsWithAsm(const char *Name)
@@ -124,13 +140,17 @@ static int TokenHasKey(const char *Tags, const char *Wanted)
     return 0;
 }
 
+/* The source's tags, then the ones the command names. The shell starts only
+ * a file that wears app or utility, so a program that would wear neither is
+ * given app and the command says so; *AddedApp reports it. */
 static int AppendExplicitTags(char *Buffer, size_t Capacity, size_t *Used,
-                              int WordCount, int TagWordStart)
+                              int WordCount, int TagWordStart, int *AddedApp)
 {
     int Index;
     int HasApp = TokenHasKey(Buffer, "app");
     int HasUtility = TokenHasKey(Buffer, "utility");
 
+    *AddedApp = 0;
     for (Index = TagWordStart; Index < WordCount; Index++) {
         const char *Token = luggage_word(Index);
         char Clean[128];
@@ -155,16 +175,18 @@ static int AppendExplicitTags(char *Buffer, size_t Capacity, size_t *Used,
         if (TokenHasKey(Clean, "app")) HasApp = 1;
         if (TokenHasKey(Clean, "utility")) HasUtility = 1;
     }
-    if (!HasApp && !HasUtility && AppendTags(Buffer, Capacity, Used, "app") != 0)
-        return -ERR_INVALID_ARGUMENT;
+    if (!HasApp && !HasUtility) {
+        if (AppendTags(Buffer, Capacity, Used, "app") != 0)
+            return -ERR_INVALID_ARGUMENT;
+        *AddedApp = 1;
+    }
     return 0;
 }
 
 static int FindSource(const char *Name, file_id_t *OutFile)
 {
-    file_id_t *Ids = NULL;
-    int Count = find_file_by_name(Name, NULL, NULL, 0);
-    int Found;
+    file_id_t Id;
+    int Count = find_file_by_name(Name, &Id, NULL, 1u);
 
     if (Count < 0)
         return Count;
@@ -172,21 +194,12 @@ static int FindSource(const char *Name, file_id_t *OutFile)
         return -ERR_FILE_NOT_FOUND;
     if (Count != 1)
         return -ERR_INVALID_STATE;
-    Ids = (file_id_t *)malloc(sizeof(*Ids));
-    if (!Ids)
-        return -ERR_NO_MEMORY;
-    Found = find_file_by_name(Name, Ids, NULL, 1u);
-    if (Found != 1) {
-        free(Ids);
-        return Found < 0 ? Found : -ERR_FILE_NOT_FOUND;
-    }
-    *OutFile = Ids[0];
-    free(Ids);
+    *OutFile = Id;
     return 0;
 }
 
-static int LinkEmbedded(BoxAsmBlob *Program, BoxAsmBlob *Image,
-                        char *Error, size_t ErrorCapacity)
+static int LinkEmbedded(const char *SourceName, BoxAsmBlob *Program,
+                        BoxAsmBlob *Image, char *Error, size_t ErrorCapacity)
 {
     BoxAsmBlob Entry = { _binary____build_boxlib_start_o_start,
                          (uint64_t)(_binary____build_boxlib_start_o_end -
@@ -196,24 +209,27 @@ static int LinkEmbedded(BoxAsmBlob *Program, BoxAsmBlob *Image,
                                   (uint64_t)(_binary____boxlib_libbox_a_end -
                                              _binary____boxlib_libbox_a_start),
                                   "libbox.a" };
-    int Rc = BoxAsmLink(&Entry, Program, &RuntimeArchive, Image,
-                        Error, ErrorCapacity);
+    int Rc;
 
+    Program->Name = SourceName;
+    Rc = BoxAsmLink(&Entry, Program, &RuntimeArchive, 0, Image,
+                    Error, ErrorCapacity);
     free((void *)Program->Data);
     Program->Data = NULL;
     Program->Size = 0;
     return Rc;
 }
 
+/* create, span, every byte written, anchor — and on any refusal after the
+ * create, the half-made file deleted so no artifact pretends to be whole. */
 static int PublishImage(const char *OutputName, const char *Tags,
-                        const BoxAsmBlob *Image, int *CleanupFailed)
+                        const BoxAsmBlob *Image, file_id_t *OutFile,
+                        int *CleanupFailed)
 {
     int64_t FileId;
     int Rc;
     uint64_t Offset = 0;
 
-    if (!OutputName || !Tags || !Image || !CleanupFailed)
-        return -ERR_INVALID_ARGUMENT;
     *CleanupFailed = 0;
     FileId = create(OutputName, Tags);
     if (FileId < 0)
@@ -235,92 +251,161 @@ static int PublishImage(const char *OutputName, const char *Tags,
         Rc = anchor((file_id_t)FileId);
     if (Rc != 0 && delete((file_id_t)FileId) != 0)
         *CleanupFailed = 1;
+    if (Rc == 0)
+        *OutFile = (file_id_t)FileId;
+    return Rc;
+}
+
+static void SayPublished(const char *SourceName, const char *OutputName,
+                         file_id_t FileId, int AddedApp)
+{
+    FileMetadata Metadata;
+
+    printf("assembled %s -> %s\n", SourceName, OutputName);
+    memset(&Metadata, 0, sizeof(Metadata));
+    if (FileMetadataRead(FileId, &Metadata) == 0) {
+        printf("tags: %s\n", Metadata.Tags ? Metadata.Tags : "(none)");
+        FileMetadataRelease(&Metadata);
+    }
+    if (AddedApp)
+        println("added app: without app or utility the shell cannot start it");
+}
+
+/* What one `assemble` command asks for, gathered before anything is built. */
+typedef struct {
+    const char *SourceName;
+    const char *RequestedOutput;
+    int         TagWordStart;
+    char        OutputName[64];
+    char        Tags[2048];
+    size_t      TagLength;
+    int         AddedApp;
+    uint8_t    *SourceBytes;
+    uint64_t    SourceSize;
+} AssembleRequest;
+
+/* "assemble program.asm [-> program.elf] [tags ...]", read from Luggage. */
+static int ReadCommand(AssembleRequest *Request, int WordCount)
+{
+    if (WordCount < 2) {
+        println("Usage: assemble program.asm [-> program.elf] [tags ...]");
+        return -ERR_INVALID_ARGUMENT;
+    }
+    Request->SourceName = luggage_word(1);
+    Request->TagWordStart = 2;
+    if (WordCount >= 4 && strcmp(luggage_word(2), "->") == 0) {
+        Request->RequestedOutput = luggage_word(3);
+        Request->TagWordStart = 4;
+    }
+    if (BuildOutputName(Request->SourceName, Request->RequestedOutput,
+                        Request->OutputName, sizeof(Request->OutputName)) != 0) {
+        SayError("output name", -ERR_INVALID_ARGUMENT,
+                 "the name is empty or longer than 63 characters");
+        return -ERR_INVALID_ARGUMENT;
+    }
+    return 0;
+}
+
+/* The one source file the name means here, its bytes, and the tags the
+ * program will wear: the source's own, then the command's. */
+static int LoadSource(AssembleRequest *Request, int WordCount)
+{
+    file_id_t SourceId;
+    FileMetadata Metadata;
+    int Rc = FindSource(Request->SourceName, &SourceId);
+
+    if (Rc == -ERR_FILE_NOT_FOUND) {
+        printf("assemble: there is no %s here\n", Request->SourceName);
+        return Rc;
+    }
+    if (Rc == -ERR_INVALID_STATE) {
+        printf("assemble: more than one file is named %s; narrow the context with use\n",
+               Request->SourceName);
+        return Rc;
+    }
+    if (Rc != 0) {
+        SayError("source lookup", Rc, NULL);
+        return Rc;
+    }
+    memset(&Metadata, 0, sizeof(Metadata));
+    Rc = FileMetadataRead(SourceId, &Metadata);
+    if (Rc != 0) {
+        SayError("source metadata", Rc, NULL);
+        return Rc;
+    }
+    if (Metadata.Size == 0) {
+        printf("assemble: %s is empty\n", Request->SourceName);
+        Rc = -ERR_INVALID_ARGUMENT;
+    }
+    if (Rc == 0) {
+        Rc = ReadFileBytes(SourceId, Metadata.Size, &Request->SourceBytes);
+        if (Rc != 0)
+            SayError("source read", Rc, NULL);
+    }
+    if (Rc == 0) {
+        Request->SourceSize = Metadata.Size;
+        if (AppendTags(Request->Tags, sizeof(Request->Tags), &Request->TagLength,
+                       Metadata.Tags) != 0 ||
+            AppendExplicitTags(Request->Tags, sizeof(Request->Tags),
+                               &Request->TagLength, WordCount,
+                               Request->TagWordStart, &Request->AddedApp) != 0) {
+            SayError("output tags", -ERR_INVALID_ARGUMENT,
+                     "the tags do not fit, or one is longer than 127 characters");
+            Rc = -ERR_INVALID_ARGUMENT;
+        }
+    }
+    FileMetadataRelease(&Metadata);
+    return Rc;
+}
+
+/* Source to ET_REL to the linked image, entirely in memory: a program that
+ * does not assemble or link leaves no file behind. */
+static int BuildImage(AssembleRequest *Request, BoxAsmBlob *Image)
+{
+    BoxAsmBlob Program = { 0 };
+    char Error[ASSEMBLE_ERROR_BYTES] = { 0 };
+    int Rc = BoxAsmSourceAssemble((const char *)Request->SourceBytes,
+                                  (size_t)Request->SourceSize, &Program,
+                                  Error, sizeof(Error));
+
+    free(Request->SourceBytes);
+    Request->SourceBytes = NULL;
+    if (Rc != 0) {
+        SayError(Request->SourceName, Rc, Error);
+        return Rc;
+    }
+    Rc = LinkEmbedded(Request->SourceName, &Program, Image, Error, sizeof(Error));
+    if (Rc != 0)
+        SayError("link", Rc, Error);
     return Rc;
 }
 
 int main(void)
 {
     int WordCount = (int)luggage_word_count();
-    const char *SourceName;
-    const char *RequestedOutput = NULL;
-    char OutputName[64];
-    char Tags[2048];
-    size_t TagLength = 0;
-    file_id_t SourceId;
-    FileMetadata Metadata;
-    uint8_t *SourceBytes = NULL;
-    BoxAsmBlob Program = { 0 };
+    AssembleRequest Request;
     BoxAsmBlob Image = { 0 };
-    char Error[256] = { 0 };
-    int TagWordStart = 2;
+    file_id_t OutputId = 0;
+    int CleanupFailed = 0;
     int Rc;
 
-    if (WordCount < 2) {
-        println("Usage: assemble program.asm [-> program.elf] [tags ...]");
+    memset(&Request, 0, sizeof(Request));
+    if (ReadCommand(&Request, WordCount) != 0 ||
+        LoadSource(&Request, WordCount) != 0 ||
+        BuildImage(&Request, &Image) != 0) {
+        free(Request.SourceBytes);
         exit(1);
     }
-    SourceName = luggage_word(1);
-    if (WordCount >= 4 && strcmp(luggage_word(2), "->") == 0)
-        RequestedOutput = luggage_word(3);
-    if (RequestedOutput)
-        TagWordStart = 4;
-    Rc = BuildOutputName(SourceName, RequestedOutput, OutputName,
-                         sizeof(OutputName));
+    Rc = PublishImage(Request.OutputName, Request.Tags, &Image, &OutputId,
+                      &CleanupFailed);
+    free((void *)Image.Data);
     if (Rc != 0) {
-        SayError("output name", Rc, NULL);
+        SayError("writing the program", Rc, NULL);
+        if (CleanupFailed)
+            printf("assemble: the half-written %s could not be deleted\n",
+                   Request.OutputName);
         exit(1);
     }
-    Rc = FindSource(SourceName, &SourceId);
-    if (Rc != 0) {
-        SayError("source lookup", Rc, NULL);
-        exit(1);
-    }
-    memset(&Metadata, 0, sizeof(Metadata));
-    Rc = FileMetadataRead(SourceId, &Metadata);
-    if (Rc != 0) {
-        SayError("source metadata", Rc, NULL);
-        exit(1);
-    }
-    Rc = ReadFileBytes(SourceId, Metadata.Size, &SourceBytes);
-    if (Rc != 0) {
-        FileMetadataRelease(&Metadata);
-        SayError("source read", Rc, NULL);
-        exit(1);
-    }
-    memset(Tags, 0, sizeof(Tags));
-    if (AppendTags(Tags, sizeof(Tags), &TagLength, Metadata.Tags) != 0 ||
-        AppendExplicitTags(Tags, sizeof(Tags), &TagLength, WordCount,
-                           TagWordStart) != 0) {
-        free(SourceBytes);
-        FileMetadataRelease(&Metadata);
-        SayError("output tags", -ERR_INVALID_ARGUMENT, NULL);
-        exit(1);
-    }
-    Rc = BoxAsmSourceAssemble((const char *)SourceBytes, (size_t)Metadata.Size,
-                              &Program, Error, sizeof(Error));
-    free(SourceBytes);
-    FileMetadataRelease(&Metadata);
-    if (Rc != 0) {
-        SayError("assembly", Rc, Error);
-        exit(1);
-    }
-    Rc = LinkEmbedded(&Program, &Image, Error, sizeof(Error));
-    if (Rc != 0) {
-        SayError("link", Rc, Error);
-        exit(1);
-    }
-
-    {
-        int CleanupFailed;
-        Rc = PublishImage(OutputName, Tags, &Image, &CleanupFailed);
-        free((void *)Image.Data);
-        Image.Data = NULL;
-        if (Rc != 0) {
-            SayError("publish output", Rc,
-                     CleanupFailed ? "cleanup failed" : NULL);
-            exit(1);
-        }
-    }
-    printf("assembled %s -> %s\n", SourceName, OutputName);
+    SayPublished(Request.SourceName, Request.OutputName, OutputId, Request.AddedApp);
     exit(0);
 }

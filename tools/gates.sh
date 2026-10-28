@@ -13,9 +13,10 @@
 #                 Unset, the checkout this file is in.
 #
 # Thirty-four gates — twenty-two of logcheck's and twelve of PowerCut's — then
-# framerefuse, the stand, and volume-read's self-test over the image a plain
+# framerefuse, the stand, volume-read's self-test over the image a plain
 # `make` lays down (logcheck's mkfs runs it over the one `make VOLUME_FORMAT=v2`
-# lays, whose book mkfs bound). The list is here, in the tree it judges, and
+# lays, whose book mkfs bound), and boxasm, the in-BoxOS assembler and linker
+# held to GNU ld and tools/nameplate. The list is here, in the tree it judges, and
 # not beside a session: a list kept out of the tree can lose a gate without a
 # diff saying so.
 #
@@ -43,7 +44,7 @@ gate_names() {
     local g
     for g in $GATES_LOGCHECK; do echo "$g"; done
     for g in $GATES_POWERCUT; do echo "pc_$g"; done
-    echo framerefuse; echo stand; echo volread_selftest
+    echo framerefuse; echo stand; echo volread_selftest; echo boxasm
 }
 
 # The command a gate is: its harness and its name there.
@@ -51,6 +52,7 @@ gate_run() {
     case "$1" in
         pc_*)             tools/powercut.sh "${1#pc_}" ;;
         volread_selftest) make && python3 tools/volume-read.py build/boxos.img self-test ;;
+        boxasm)           tools/boxasm_stand.sh ;;
         *)                tools/logcheck.sh "$1" ;;
     esac
 }
@@ -94,7 +96,7 @@ for name in $WANTED; do
     # The harness's own closing words: its count, and the caveats and harness
     # failures it owns to — each cut at its explanation.
     verdict=$(sed $'s/\x1b\\[[0-9;]*m//g' "$OUT/$name.out" \
-              | grep -E '^(logcheck|powercut): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases' \
+              | grep -E '^(logcheck|powercut|boxasm): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases' \
               | sed 's/ — .*//' | paste -sd '|' - | sed 's/|/; /g')
     line="$name rc=$rc $(( $(date +%s) - t0 ))s ${verdict:-(no verdict line)}"
     echo "$line" | tee -a "$OUT/SUMMARY"
