@@ -138,9 +138,11 @@ subtract to a number.
 
   The C call ABI passes `double` and `float` arguments in `xmm0..xmm7` and
   returns one in `xmm0`; every xmm register may change across a call, and
-  `al` counts the vector registers a variadic callee receives. BoxLib's
-  `printf` prints no floating-point numbers (`%f`): a program prints them
-  scaled to integers, as `fractions.asm` does.
+  `al` counts the vector registers a variadic callee receives. A `float`
+  goes to a variadic function such as `printf` widened to a `double`
+  (`cvtss2sd`). BoxLib's `printf` writes C's whole set of conversions, `%f
+  %e %g %a` among them, each value's digits exact and rounded to nearest:
+  `fractions.asm` prints its results that way.
 - Alone: `nop int3 leave cqo cdq cwd cdqe cwde cbw pushfq popfq cld std clc stc
   cmc endbr64 pause ud2`.
 
@@ -223,5 +225,4 @@ lines and compares the two objects.
 
 - SSE3 and later, AVX (VEX), MMX and x87; raw Manifest, `box.notify`,
   `box.wait`.
-- Printing floating-point numbers: BoxLib's C `printf` has no `%f %e %g`.
 - Programs made of several sources; a native BoxOS object format.
