@@ -57,8 +57,8 @@ stand_book_again() {
     said=$(stand_summary "$L")
     echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed, [0-9]+ skipped, 0 held under a caveat"
     chk $? "stand: $2, second boot — the $STAND_RUN tests ran again on the book it left, nothing failed (${said:-no summary})"
-    ! grep -aqE "KERNEL PANIC|$STAND_BOOK_DEFECT" "$L"
-    chk $? "stand: $2, second boot — no panic, no defect of TagFS said"
+    ! grep -aq 'KERNEL PANIC' "$L" && [ -z "$(stand_book_defects "$L")" ]
+    chk $? "stand: $2, second boot — no panic, no defect of TagFS said but the one each lever of the stand draws ($(stand_book_defects "$L" | head -1 | cut -c1-120))"
     ! grep -aqE "$STAND_MIRROR_DEFECT" "$L"
     chk $? "stand: $2, second boot — every live file of the map stood as its record"
 }

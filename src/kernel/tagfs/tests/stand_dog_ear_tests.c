@@ -1,0 +1,535 @@
+#include "stand_binder.h"
+#include "stand_fresh.h"
+#include "../ink/fallow.h"
+#include "../integrity/gloss.h"
+#include "../settle/binder.h"
+#include "../mount/book_mount.h"
+#include "../mount/tally_read.h"
+#include "../file_map/file_map.h"
+
+#ifdef CONFIG_VOLUME_TESTS
+
+// ============================================================================
+// The stand_dog_ear suite: the keys a Tally's trees changed since the Tally
+// before it, and the self-check that holds them to the state (spec_v2
+// §16.5 п.9, §4.3 TALLY_TAKE, §2.5)
+//
+// DogEar is every key of FILES, TAGS, USE and DIGESTS changed since the Tally
+// the next one is laid against — by a stitch that settled, by the ribbon a
+// mount replayed past its slot, by a copy of a node that would not read — and
+// Foliation that Tally's nodes as memory knows them. A Tally written whole
+// holds each element of its own whose key DogEar does not hold to the element
+// the Tally before it holds under that key, byte for byte (STRICT and the
+// stand): an element changed outside DogEar is a DEFECT, and no Tally is
+// written over a DogEar the state gives the lie to. The volume's medium does
+// not change: every Tally is written whole. The self-check is held to bite on
+// every way an element can be changed outside DogEar — a header, a Parcel's
+// runs, a Parcel gone, a Parcel new, a digest — each by a lever of the
+// stand's, pulled behind every Ink and let go (not on a STRICT kernel, which
+// stops there). Every test puts the Spine and the ribbon back as it found
+// them.
+// ============================================================================
+
+/* Files of a long name, enough for FILES to take two leaves and more. */
+#define STAND_DOG_EAR_MANY  160u
+
+/* What a mount says of the volume: its live files' print and count, the Use
+ * Context's print. */
+typedef struct {
+    uint32_t files_print;
+    uint64_t files;
+    uint32_t use_print;
+} StandDogEarState;
+
+static void StandDogEarStateOf(StandDogEarState* st)
+{
+    st->files_print = g_book.files_print;
+    st->files       = g_book.files;
+    st->use_print   = g_book.use_print;
+}
+
+static bool StandDogEarSame(const StandDogEarState* a, const StandDogEarState* b)
+{
+    return a->files_print == b->files_print && a->files == b->files && a->use_print == b->use_print;
+}
+
+/* `n` files of a long name made from `from` on, settled: the first id in
+ * *first. */
+static bool StandDogEarMake(uint32_t from, uint32_t n, uint64_t* first)
+{
+    char     name[64];
+    uint64_t fid = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        ksnprintf(name, sizeof(name), "dogear-%05u-of-a-name-long-enough.txt", from + i);
+        if (tagfs_create_file(name, NULL, 0, &fid) != 0)
+            return false;
+        if (i == 0)
+            *first = fid;
+    }
+    return TagFSSettle() == OK;
+}
+
+// ----------------------------------------------------------------------------
+// The self-check bites: an element changed outside DogEar refuses the Tally
+// ----------------------------------------------------------------------------
+
+/* The lines the stand says round each lever on the self-check: the book's
+ * judge (tools/logcheck_book.sh, stand_book_defects) holds that each pair
+ * holds the one DEFECT of the self-check its lever draws, and that no line of
+ * TagFS says DEFECT outside them. */
+#define STAND_DOG_EAR_LEVER   "[TESTS] stand_dog_ear: a lever pulled behind every Ink"
+#define STAND_DOG_EAR_LET_GO  "[TESTS] stand_dog_ear: the lever let go"
+
+/* What a lever changes behind every Ink — no stitch carried it, so no key of
+ * it is in DogEar — and what it held before. */
+typedef struct {
+    FileRecord*  rec;        /* a live file's record */
+    const Tract* tract;      /* the runs swapped into it: its own taken, another's given */
+    uint64_t     strips;     /* ... and their count of Strips and of blocks */
+    uint64_t     blocks;
+    Strip*       strip;      /* a run whose birth is moved */
+    uint64_t     block;      /* a block whose digest the Gloss is told */
+    uint64_t     was;        /* what was changed held before: a time, a birth, a digest */
+} StandDogEarHand;
+
+typedef void (*StandDogEarPull)(StandDogEarHand* h, bool on);
+
+/* The lever pulled, a Tally asked for, the lever let go — between the stand's
+ * two lines — and at once a stitch and a Tally of the state put back, before
+ * the test says a word of what came: a kernel whose Tally the lever did not
+ * stop leaves no Tally of a state that never was past the test. What the
+ * levered Tally answered; *after what the one after it did. */
+static error_t StandDogEarLevered(const char* what, StandDogEarPull pull, StandDogEarHand* h, error_t* after)
+{
+    kprintf(STAND_DOG_EAR_LEVER ": %s\n", what);
+    pull(h, true);
+    error_t rc = BinderRunWhole();
+    pull(h, false);
+    kprintf(STAND_DOG_EAR_LET_GO "\n");
+    *after = TagFSSettle();
+    if (*after == OK)
+        *after = BinderRunWhole();
+    return rc;
+}
+
+/* A header no stitch carried: the record's time moved (FILES, part 0). */
+static void StandDogEarTimeMoved(StandDogEarHand* h, bool on)
+{
+    if (on) {
+        h->was                = h->rec->modified_time;
+        h->rec->modified_time = h->was + 1000000000ull;
+    } else {
+        h->rec->modified_time = h->was;
+    }
+}
+
+/* A Parcel no stitch carried: a run's birth moved, so the Parcel the Tally
+ * before holds, spelled again from this Tally's seq, is not this one's. Below
+ * the birth it had — or past it, from the first seq — it stays below every
+ * seq that lays it. */
+static void StandDogEarBirthMoved(StandDogEarHand* h, bool on)
+{
+    if (on) {
+        h->was          = h->strip->birth;
+        h->strip->birth = h->was > 1u ? h->was - 1u : h->was + 1u;
+    } else {
+        h->strip->birth = h->was;
+    }
+}
+
+/* Parcels no stitch carried: the record's runs swapped with the hand's — the
+ * file's own taken away (a Parcel of the Tally before this one has not), or
+ * another file's given to a file of none (one the Tally before has not).
+ * Pulled and let go alike: the swap undoes itself. */
+static void StandDogEarRunsSwapped(StandDogEarHand* h, bool on)
+{
+    const Tract* tract  = h->rec->tract;
+    uint64_t     strips = h->rec->strip_count, blocks = h->rec->blocks;
+    (void)on;
+    h->rec->tract       = h->tract;
+    h->rec->strip_count = h->strips;
+    h->rec->blocks      = h->blocks;
+    h->tract            = tract;
+    h->strips           = strips;
+    h->blocks           = blocks;
+}
+
+/* A digest no stitch carried: the Gloss told another for a block — under the
+ * state lock, as Ink tells it (ink_book.c) — then the one it had. */
+static void StandDogEarGlossTold(StandDogEarHand* h, bool on)
+{
+    Strip     one = { .start = h->block, .count = 1, .kind = STRIP_DATA, .birth = 0 };
+    GlossRoom room;
+    if (GlossRoomFor(&one, 1, &room) != OK) {
+        kprintf("[TESTS] stand_dog_ear: no memory to tell the Gloss block %llu's digest\n",
+                (unsigned long long)h->block);
+        return;
+    }
+    TagFSLockTake(&tagfs_get_state()->lock);
+    GlossPut(&room, h->block, on ? ~h->was : h->was);
+    TagFSLockDrop(&tagfs_get_state()->lock);
+    GlossRoomLetGo(&room);
+}
+
+static TestResult TestStandDogEarStrictBites(void)
+{
+#if CONFIG_STRICT
+    return test_steps_aside("a STRICT kernel stops at the self-check's DEFECT: an element changed outside "
+                            "DogEar is one it panics on, never one it writes past");
+#else
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandDogEarHand    h;
+    uint64_t           fid   = 0;
+    error_t            rc    = OK, after = OK;
+    const char*        aside = StandBinderAside(&b);
+
+    memset(&h, 0, sizeof(h));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT_EQ(tagfs_create_file("dogear-strict.txt", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_OK(TagFSSettle(), "and settled");
+    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of it is written: every element it changed lies in DogEar");
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch settles past it");
+    h.rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    TEST_ASSERT(h.rec != NULL, "the file's record is held");
+    rc = StandDogEarLevered("a file's header no stitch carried", StandDogEarTimeMoved, &h, &after);
+    TEST_ASSERT_EQ(rc, ERR_TAGFS_CORRUPTED, "the Tally is refused: its self-check finds the file's header changed "
+                   "outside DogEar (a DEFECT)");
+    TEST_ASSERT_OK(after, "the record as the stitches left it again, a stitch settles and the Tally is written");
+out:
+    FileRecordRelease(h.rec);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+#endif
+}
+
+/* A file of three blocks of data — and, with `e`, an empty one made beside it
+ * — settled, a Tally of them written and the volume mounted on it, its runs
+ * born where that Tally says: their records held. */
+static bool StandDogEarTallied(StandFreshModel* m, const char* name, uint64_t* data, FileRecord** d, FileRecord** e)
+{
+    uint32_t bytes = 3u * TAGFS_BLOCK_SIZE;
+    uint64_t empty = 0;
+    char     none[64];
+    ksnprintf(none, sizeof(none), "%s.none", name);
+    if (tagfs_create_file(name, NULL, 0, data) != 0 || (e && tagfs_create_file(none, NULL, 0, &empty) != 0) ||
+        !StandFreshModelMake(m, bytes) || StandFreshWrite(m, *data, 0, bytes, 61) != (int)bytes ||
+        TagFSSettle() != OK || BinderRunWhole() != OK || !StandStitchRemount() || TagFSSettle() != OK)
+        return false;
+    *d = FileMapRecordHold(tagfs_get_state()->files, *data, NULL);
+    if (e)
+        *e = FileMapRecordHold(tagfs_get_state()->files, empty, NULL);
+    return *d && (*d)->tract && (!e || (*e && !(*e)->tract));
+}
+
+static TestResult TestStandDogEarRunsBite(void)
+{
+#if CONFIG_STRICT
+    return test_steps_aside("a STRICT kernel stops at the self-check's DEFECT: a Parcel changed outside DogEar is "
+                            "one it panics on, never one it writes past");
+#else
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel    m;
+    StandDogEarHand    h;
+    StripWalk          walk;
+    FileRecord*        d = NULL;
+    FileRecord*        e = NULL;
+    const Strip*       strips = NULL;
+    uint32_t           n = 0;
+    uint64_t           data = 0;
+    error_t            rc = OK, after = OK;
+    const char*        aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    memset(&h, 0, sizeof(h));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandDogEarTallied(&m, "dogear-runs.bin", &data, &d, &e),
+                "a file of data and an empty one, a Tally of them, the volume mounted on it");
+    StripWalkBegin(d, &walk);
+    TEST_ASSERT(StripWalkParcel(&walk, &strips, &n) && n > 0 && strips[0].kind == STRIP_DATA && strips[0].birth,
+                "the data's first run, born where the Tally says");
+    h.strip = (Strip*)(uintptr_t)&strips[0];    /* the lever writes what memory holds as never changed */
+    rc = StandDogEarLevered("a run's birth no stitch carried", StandDogEarBirthMoved, &h, &after);
+    TEST_ASSERT_EQ(rc, ERR_TAGFS_CORRUPTED, "refused: the Parcel, spelled again from this Tally's seq, differs");
+    TEST_ASSERT_OK(after, "the birth put back, the Tally is written");
+    h = (StandDogEarHand){ .rec = d, .tract = NULL, .strips = 0, .blocks = 0 };
+    rc = StandDogEarLevered("a file's runs taken away by no stitch", StandDogEarRunsSwapped, &h, &after);
+    TEST_ASSERT_EQ(rc, ERR_TAGFS_CORRUPTED, "refused: a Parcel of the Tally before is not in this one");
+    TEST_ASSERT_OK(after, "the runs put back, the Tally is written");
+    h = (StandDogEarHand){ .rec = e, .tract = d->tract, .strips = d->strip_count, .blocks = d->blocks };
+    rc = StandDogEarLevered("another file's runs given an empty one by no stitch", StandDogEarRunsSwapped, &h,
+                            &after);
+    TEST_ASSERT_EQ(rc, ERR_TAGFS_CORRUPTED, "refused: a Parcel this Tally lays is not in the Tally before");
+    TEST_ASSERT_OK(after, "the empty file empty again, the Tally is written");
+    FileRecordRelease(d);
+    FileRecordRelease(e);
+    d = e = NULL;
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    TEST_ASSERT(StandFreshHolds(&m, data), "the data reads its bytes");
+out:
+    FileRecordRelease(d);
+    FileRecordRelease(e);
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+#endif
+}
+
+static TestResult TestStandDogEarDigestBites(void)
+{
+#if CONFIG_STRICT
+    return test_steps_aside("a STRICT kernel stops at the self-check's DEFECT: a digest changed outside DogEar is "
+                            "one it panics on, never one it writes past");
+#else
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel    m;
+    StandDogEarHand    h;
+    FileSpot           spot = { 0, 0, 0 };
+    FileRecord*        d = NULL;
+    uint64_t           data = 0;
+    error_t            rc = OK, after = OK, refused = OK;
+    const char*        aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    memset(&h, 0, sizeof(h));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandDogEarTallied(&m, "dogear-digest-bites.bin", &data, &d, NULL),
+                "a file of data, a Tally of it, the volume mounted on it");
+    TEST_ASSERT(FileRecordFind(d, 0, &spot) && spot.block, "the data's first block");
+    h.block = spot.block;
+    TEST_ASSERT(TallyDigestFind(spot.block, &h.was, &refused) == TALLY_DIGEST_NAMED,
+                "its digest, the Tally's");
+    rc = StandDogEarLevered("a block's digest no stitch carried", StandDogEarGlossTold, &h, &after);
+    TEST_ASSERT_EQ(rc, ERR_TAGFS_CORRUPTED, "refused: the DIGESTS element of the block differs from the Tally "
+                   "before's");
+    TEST_ASSERT_OK(after, "the Gloss told the digest it had, the Tally is written");
+    FileRecordRelease(d);
+    d = NULL;
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    tagfs_readahead_invalidate(spot.block);
+    TEST_ASSERT(StandFreshHolds(&m, data), "the data reads its bytes, its digests as they were");
+out:
+    FileRecordRelease(d);
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+#endif
+}
+
+// ----------------------------------------------------------------------------
+// The ribbon a mount replays: every key it changed in DogEar
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandDogEarReplayed(void)
+{
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel    m;
+    StandDogEarState   before, after;
+    MountBookSaid      said;
+    uint64_t           first = 0, data = 0, gone = 0, renamed = 0;
+    uint32_t           tag = 0;
+    bool               kept = false;
+    const char*        aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandDogEarMake(0, STAND_DOG_EAR_MANY, &first), "files enough for FILES to take two leaves");
+    TEST_ASSERT_EQ(tagfs_create_file("dogear-data.bin", NULL, 0, &data), 0, "a file for data is made");
+    TEST_ASSERT(StandFreshModelMake(&m, 12u * TAGFS_BLOCK_SIZE) &&
+                StandFreshWrite(&m, data, 0, 6u * TAGFS_BLOCK_SIZE, 31) == 6 * TAGFS_BLOCK_SIZE, "and written");
+    TEST_ASSERT_OK(TagFSSettle(), "everything settled");
+    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of it is written");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    /* Every kind of change, a stitch each, into the ribbon past the slot. */
+    TEST_ASSERT(StandFreshWrite(&m, data, 2u * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 32) == TAGFS_BLOCK_SIZE &&
+                TagFSSettle() == OK, "a block of the data written over, settled");
+    TEST_ASSERT(StandFreshWrite(&m, data, 6u * TAGFS_BLOCK_SIZE, 3u * TAGFS_BLOCK_SIZE, 33) == 3 * TAGFS_BLOCK_SIZE &&
+                TagFSSettle() == OK, "the data grown, settled");
+    renamed = first + STAND_DOG_EAR_MANY / 2u;
+    TEST_ASSERT(tagfs_rename_file(renamed, "dogear-renamed.txt", INK_UNWARRANTED) == 0 && TagFSSettle() == OK,
+                "a file in the middle renamed, settled");
+    TEST_ASSERT(tagfs_tag_intern("dogear:replayed", &tag) == OK && tagfs_add_tag(first, tag, INK_UNWARRANTED) == 0 &&
+                TagFSSettle() == OK, "a tag coined and given the first file, settled");
+    gone = first + STAND_DOG_EAR_MANY - 1u;
+    TEST_ASSERT(tagfs_delete_file(gone, INK_UNWARRANTED) == 0 && TagFSSettle() == OK, "the last file given up, settled");
+    TEST_ASSERT(StandStitchSay("dogear: the word", 16, 1, &kept) == OK && kept, "a word said, settled");
+    TEST_ASSERT(tagfs_create_file("dogear-born.txt", NULL, 0, &first) == 0 && TagFSSettle() == OK,
+                "a file born, settled");
+    StandDogEarStateOf(&before);
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    MountBookStandSaid(&said);
+    TEST_ASSERT(said.sewn >= 7u, "the ribbon past the Tally replayed, a stitch a change");
+    StandDogEarStateOf(&after);
+    TEST_ASSERT(StandDogEarSame(&before, &after), "the state the stitches left");
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of the replayed state is written: every element the ribbon changed "
+                   "lies in DogEar, and its self-check finds none changed outside it");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    MountBookStandSaid(&said);
+    StandDogEarStateOf(&after);
+    TEST_ASSERT_EQ(said.sewn, 0, "with no stitch to replay past it");
+    TEST_ASSERT(StandDogEarSame(&before, &after), "and the state the same");
+    TEST_ASSERT(StandFreshHolds(&m, data), "the data reads its bytes");
+out:
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// The stitches of this mount: the tag one coined and the word one said
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandDogEarStitched(void)
+{
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandDogEarState   before, after;
+    uint64_t           fid  = 0;
+    uint32_t           tag  = 0;
+    bool               kept = false;
+    const char*        aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT_EQ(tagfs_create_file("dogear-stitched.txt", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "settled, and a Tally of it written");
+    TEST_ASSERT(tagfs_tag_intern("dogear:stitched", &tag) == OK && tagfs_add_tag(fid, tag, INK_UNWARRANTED) == 0 &&
+                TagFSSettle() == OK, "a tag coined and given the file, settled — the volume not mounted between");
+    TEST_ASSERT(StandStitchSay("dogear: stitched", 16, 1, &kept) == OK && kept, "a word said, settled");
+    StandDogEarStateOf(&before);
+    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of these stitches is written: the tag they coined, the word they "
+                   "said and the file they tagged lie in DogEar, and its self-check finds nothing changed outside it");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    StandDogEarStateOf(&after);
+    TEST_ASSERT(StandDogEarSame(&before, &after), "the state the stitches left");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// Filled and emptied: what the Tally before named and the next does not is in
+// DogEar
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandDogEarEmptied(void)
+{
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel    m;
+    StandDogEarState   after;
+    uint64_t           first = 0, files0 = 0, free0 = 0, free1 = 0;
+    const char*        aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    files0 = g_book.files;
+    free0  = tagfs_get_state()->ledger.free_blocks;
+    TEST_ASSERT(StandDogEarMake(0, STAND_DOG_EAR_MANY, &first), "files enough for FILES to take two leaves");
+    TEST_ASSERT(StandFreshModelMake(&m, 8u * TAGFS_BLOCK_SIZE), "a model of the data");
+    for (uint64_t f = first; f < first + 8u; f++)
+        TEST_ASSERT(StandFreshWrite(&m, f, 0, 4u * TAGFS_BLOCK_SIZE + 9u, 40u + f) == 4 * TAGFS_BLOCK_SIZE + 9,
+                    "data written into a file of the first leaf");
+    TEST_ASSERT_OK(TagFSSettle(), "everything settled");
+    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally of the filled volume is written");
+    for (uint64_t f = first; f < first + STAND_DOG_EAR_MANY; f++)
+        TEST_ASSERT_EQ(tagfs_delete_file(f, INK_UNWARRANTED), 0, "a file is given up");
+    TEST_ASSERT_OK(TagFSSettle(), "every delete settled");
+    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally of the emptied volume is written: every element the Tally "
+                   "before named and this one does not lies in DogEar");
+    TEST_ASSERT_OK(StandBinderTallies(1u), "and another, with nothing changed between");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    StandDogEarStateOf(&after);
+    free1 = tagfs_get_state()->ledger.free_blocks;
+    TestEvidence("free blocks the emptied volume lacks of the start", free0 > free1 ? free0 - free1 : 0);
+    TEST_ASSERT_EQ(after.files, files0, "the files the volume began with, and no other");
+    TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "a stitch of this mount settles, a Tally is written");
+out:
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// A copy that would not read: the Tally after it written whole, its self-check
+// reading the node through the copy that holds
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandDogEarMended(void)
+{
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandDogEarState   before, after;
+    MountBookSaid      said;
+    TallyPlace         leaf;
+    uint64_t           first = 0;
+    bool               found = false;
+    const char*        aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandDogEarMake(0, STAND_DOG_EAR_MANY, &first), "files enough for FILES to take two leaves");
+    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    for (uint32_t i = 1; !found && TallyStandNodeWhere(TALLY_FILES, i, &leaf); i++)
+        found = leaf.level == 0 && leaf.has_lo && leaf.has_hi;
+    TEST_ASSERT(found && leaf.ptr.copies == 2, "a leaf of FILES between two others, two copies");
+    TEST_ASSERT(StandBinderKeep(&b, leaf.ptr.block[0]), "its first copy's first block kept as found");
+    memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
+    TEST_ASSERT(StandBinderWrite(&b, leaf.ptr.block[0], g_test_output), "and written over with zeros");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    MountBookStandSaid(&said);
+    TEST_ASSERT(said.mended >= 1 && said.rotten == 0, "the leaf read through its second copy, its first to mend");
+    StandDogEarStateOf(&before);
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    TEST_ASSERT_OK(BinderRunWhole(), "a Tally is written: its self-check reads the leaf through the copy that holds");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    MountBookStandSaid(&said);
+    StandDogEarStateOf(&after);
+    TEST_ASSERT_EQ(said.mended, 0, "every copy of every node holds");
+    TEST_ASSERT(StandDogEarSame(&before, &after), "the state the same");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+
+static const TestCase g_stand_dog_ear_tests[] = {
+    { .name = "stand_dog_ear_strict_bites", .func = TestStandDogEarStrictBites,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_dog_ear_runs_bite", .func = TestStandDogEarRunsBite,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_dog_ear_digest_bites", .func = TestStandDogEarDigestBites,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_dog_ear_replayed", .func = TestStandDogEarReplayed,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_dog_ear_stitched", .func = TestStandDogEarStitched,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_dog_ear_emptied", .func = TestStandDogEarEmptied,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_dog_ear_mended", .func = TestStandDogEarMended,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+};
+
+const TestSuite g_stand_dog_ear_suite = {
+    g_stand_dog_ear_tests, sizeof(g_stand_dog_ear_tests) / sizeof(g_stand_dog_ear_tests[0])
+};
+
+#endif /* CONFIG_VOLUME_TESTS */
