@@ -81,9 +81,12 @@ heirloom_tree() {
         || { cat "$SCRATCH/heirloom.tree.log"; return 1; }
     # Not this file's make(): commit N is not this tree, so nothing about it is
     # asked for on its behalf but the format its volume is laid down in and,
-    # for `refusal`, the pass it carries (heirloom_old_pass, UUID given).
+    # for `refusal`, the pass it carries (heirloom_old_pass, UUID given). The
+    # one key every make of a harness carries is given all the same (stand.sh
+    # says why): the pass is an injection, and N's own pack gate refuses to
+    # stamp a tree carrying one unless the harness says it is asking.
     [ -z "${2:-}" ] || heirloom_old_pass "$2" || return 1
-    command make -C "$HEIRLOOM_TREE" ${HEIRLOOM_FORMAT:+VOLUME_FORMAT=$HEIRLOOM_FORMAT} \
+    command make -C "$HEIRLOOM_TREE" HARNESS=on ${HEIRLOOM_FORMAT:+VOLUME_FORMAT=$HEIRLOOM_FORMAT} \
         >"$SCRATCH/heirloom.build.log" 2>&1 || { tail -25 "$SCRATCH/heirloom.build.log"; return 1; }
 }
 
@@ -161,13 +164,60 @@ PY
     return $rc
 }
 
+# The shell's prompt is read from the LINES, never from the last two bytes of
+# the file (wait_for_prompt): on a book the cycle a write inked runs in the
+# window after it, and what the kernel says on its way — the reserve of its
+# own paths growing, a stitch settling — lands wherever its moment falls. Said
+# right after a prompt it carries the prompt away from the end of the file
+# ("~ [KLIB] …") and the echo of what is typed next onto a line of its own;
+# wait_for_prompt then waits its whole ceiling on a shell that stood there all
+# along, and type_line, finding no "~ bye", types it again (measured: refusal
+# and the format-v2 heirloom, 2026-10-28). Read as fullvolume_type reads it
+# (logcheck.sh).
+#
+# And counted from the ECHO, never from a count of lines taken before the
+# typing: a kernel line said after the prompt and before that count ends the
+# prompt's line inside it, and the shell's prompt before the command is then
+# no longer past it — the echo and the next prompt are all there is, one
+# prompt where two were counted, and the wait gives up on a shell standing at
+# its prompt.
+#
+# heirloom_prompt AFTER — a line beginning "~ " past line AFTER: the shell's
+# prompt, whatever the kernel appended to it; then the burst it may still be
+# in, over.
+heirloom_prompt() {
+    wait_until "$WAIT_QUIET_SLOW_S" "the shell's prompt" \
+        "tail -n +$(($1 + 1)) build/serial.log | grep -aq '^~ '" build/serial.log \
+        || { echo "  (the shell never came back to its prompt)"; return 1; }
+    wait_for_quiet "$BOOT_BURST_QUIET_S" build/serial.log
+}
+
+# heirloom_echo COMMAND FROM — the number of the first line past line FROM
+# that carries COMMAND's echo, on the prompt's own line or on one of its own;
+# nothing while there is none.
+heirloom_echo() {
+    local n
+    n=$(tail -n +$(($2 + 1)) build/serial.log 2>/dev/null | grep -anE "^(~ )?$1" | head -1 | cut -d: -f1)
+    [ -z "$n" ] || echo $(($2 + n))
+}
+
+# heirloom_type COMMAND FROM — typed once, the line counted FROM before it,
+# and its echo waited for (heirloom_echo). Once: qemu-input.sh has seen every
+# character echoed, a short line erased and typed whole again, and a second
+# typing here would land on a line that holds the command already, or run it
+# twice — two files where the receipt holds kernel N's one, and only it.
+heirloom_type() {
+    type_cmd "$1" && sleep 1 && key_press ret &&
+        wait_until "$TYPE_ECHO_QUIET_S" "the echo of '$1'" "[ -n \"\$(heirloom_echo '$1' $2)\" ]" build/serial.log
+}
+
 # heirloom_machine TAG DISK STICK CMD... — boot DISK (with STICK on USB, when
 # one is named), wait for a volume to be mounted and its shell to stand at the
 # prompt, type each CMD, halt through `bye`, and keep the log as
 # serial.heirloom_TAG.log. 0 when the halt's sync wrote the volume; 1 when a
 # machine ran and did not get that far; 2 when none was started at all.
 heirloom_machine() {
-    local tag=$1 disk=$2 stick=$3 extra="" mark cmd ran=1; shift 3
+    local tag=$1 disk=$2 stick=$3 extra="" mark from cmd ran=1; shift 3
     [ -n "$stick" ] && extra="-drive if=none,id=stick,file=$stick,format=raw -device usb-storage,bus=xhci1.0,drive=stick,id=usbstick"
     make run-stop >/dev/null 2>&1
     rm -f build/serial.log
@@ -182,12 +232,14 @@ heirloom_machine() {
     if wait_for_line -E build/serial.log 'is MOUNTED — [0-9]+ file|KERNEL PANIC' "$WAIT_QUIET_S" &&
        mark=$(grep -an 'is MOUNTED — [0-9]* file' build/serial.log | head -1 | cut -d: -f1) &&
        [ -n "$mark" ] && wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" "$mark" &&
-       wait_for_prompt; then
+       heirloom_prompt "$mark"; then
         ran=0
         for cmd in "$@"; do
-            type_line "$cmd" && wait_for_prompt || { ran=1; break; }
+            from=$(wc -l < build/serial.log)
+            heirloom_type "$cmd" "$from" && heirloom_prompt "$(heirloom_echo "$cmd" "$from")" || { ran=1; break; }
         done
-        if [ $ran = 0 ] && ! { type_line "bye" &&
+        from=$(wc -l < build/serial.log)
+        if [ $ran = 0 ] && ! { heirloom_type "bye" "$from" &&
                                wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" &&
                                grep -aq '^\[HALT\] Storage sync complete' build/serial.log; }; then
             ran=1
@@ -293,6 +345,35 @@ heirloom_written() {
     heirloom_untouched "the host's census after $HEIRLOOM_LEFT_BY"
     [ -n "$HEIRLOOM_N_FID" ] && [ "$(heirloom_persist n)" = "$HEIRLOOM_N_FID" ]
     chk $? "heirloom: and it carries the file kernel N wrote, and only it — $HEIRLOOM_PERSIST fid(s) $(heirloom_persist n), kernel N's ${HEIRLOOM_N_FID:-unread}"
+    # With no file of N's the rest has nothing to hand on, and would judge
+    # kernel N+1 by one never written — a magic that does not match, a census
+    # short of it.
+    if [ -z "$HEIRLOOM_N_FID" ]; then
+        heirloom_unwritten "$from" "$L"
+        return 1
+    fi
+}
+
+# heirloom_unwritten COMMIT LOG — why kernel N, commit COMMIT, left no file to
+# hand on, said as far as LOG and the history establish it and no further. Its
+# machine never took `persist write`: that, and the FAILs above. It took it on
+# a book, and COMMIT is from before the first kernel that writes a file's data
+# on one (HEIRLOOM_BOOK_DATA): the operator's choice of N, no verdict on
+# BoxOS — a HARNESS line, the run inconclusive. Otherwise only what persist
+# said and what the census found: the FAILs above are the verdict on kernel N.
+HEIRLOOM_BOOK_DATA=9825f2b1   # step 2.3j: a format-v2 book takes a file's data
+heirloom_unwritten() {
+    local said census
+    said=$(grep -aoE '\[PERSIST\] .*' "$2" | tail -1 | cut -c1-80)
+    census="$HEIRLOOM_PERSIST fid(s) on its volume: $(heirloom_persist n)"
+    if ! grep -aqE '^(~ )?persist write' "$2"; then
+        echo "  (kernel N, commit $1, never took 'persist write' — its machine stopped before it; nothing of N's to hand on)"
+    elif [ "${HEIRLOOM_FORMAT:-}" = v2 ] &&
+         { git -C "$ROOT" merge-base --is-ancestor "$HEIRLOOM_BOOK_DATA" "$1" 2>/dev/null; [ $? = 1 ]; }; then
+        harness "heirloom: commit $1 is from before $HEIRLOOM_BOOK_DATA (step 2.3j), the first kernel to write a file's data on a book — no N for HEIRLOOM_FORMAT=v2 (persist: ${said:-nothing}; $census)"
+    else
+        echo "  (kernel N, commit $1, took 'persist write' and said no WROTE — persist: ${said:-nothing}; $census; nothing of N's to hand on)"
+    fi
 }
 
 # Kernel N+1 is handed the heirloom on a stick, reads it, and writes on it.

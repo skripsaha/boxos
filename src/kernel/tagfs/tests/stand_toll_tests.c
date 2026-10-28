@@ -8,8 +8,6 @@
 #include "../settle/settle.h"
 #include "../settle/sewing.h"
 #include "block_fail.h"
-#include "baton.h"
-#include "amp.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
 
@@ -223,23 +221,13 @@ out:
 // The window of a frequent small writer: five seconds on a book, a Lull on v1
 // ----------------------------------------------------------------------------
 
-/* One turn of the machine by hand (stand_settle's own): the knock, the
- * batons, the service point. */
-static void StandTollTurn(void)
-{
-    SettleKnock();
-    BatonPump(amp_get_core_index());
-    SettleServiceIfPending();
-    cpu_pause();
-}
-
 /* The cadence let run for `us`: whether a cycle settled anything meanwhile. */
 static bool StandTollCycled(uint64_t us)
 {
     uint64_t settled = SettledGen();
     uint64_t until   = rdtsc() + cpu_us_to_tsc(us);
     while (rdtsc() < until && SettledGen() == settled)
-        StandTollTurn();
+        StandSettleTurn();
     return SettledGen() != settled;
 }
 
@@ -248,14 +236,18 @@ static bool StandTollCycled(uint64_t us)
  * makes its writer a frequent small one. Its third comes past a Lull and well
  * inside the window: on a book it is lazy still — no cycle begins for it
  * before the window ends — and on format v1 a Lull is all it waits, as it
- * always did. `book` is which the test asks.
+ * always did. `book` is which the test asks. On a book the ribbon is put back
+ * as the test found it: the file given up still leaves its stitches past the
+ * Tally and its blocks fallow, which every later mount — the next tests', the
+ * next boot's of a book on a stick — would replay as its own.
  */
 static TestResult StandTollSmallWriter(bool book)
 {
     TestResult  verdict = TEST_PASS;
+    StandStitch s;
     uint64_t    fid = 0, lull = 0, size = 0;
     bool        let_go = false;
-    const char* aside  = StandStepsAsideFor();
+    const char* aside  = book ? StandStitchAside(&s) : StandStepsAsideFor();
 
     if (aside)
         return test_steps_aside(aside);
@@ -288,6 +280,8 @@ out:
     if (fid)
         (void)tagfs_delete_file(fid, INK_UNWARRANTED);
     (void)TagFSSettle();
+    if (book)
+        STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
 

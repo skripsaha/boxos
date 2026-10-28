@@ -8,6 +8,8 @@
 #include "../mount/book_mount.h"
 #include "../mount/tally_read.h"
 #include "../file_map/file_map.h"
+#include "../use_memory/use_memory.h"
+#include "crypto.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -41,8 +43,10 @@
 /* Files of a long name, enough for FILES to take two leaves and more. */
 #define STAND_DOG_EAR_MANY  160u
 
-/* What a mount says of the volume: its live files' print and count, the Use
- * Context's print. */
+/* The state memory holds: its live files' print and count, the Use Context's
+ * print — taken as a mount takes them, from what memory holds now and not
+ * from g_book, whose numbers are the last mount's: so the state the stitches
+ * left is held to the one a mount of them makes. */
 typedef struct {
     uint32_t files_print;
     uint64_t files;
@@ -51,14 +55,21 @@ typedef struct {
 
 static void StandDogEarStateOf(StandDogEarState* st)
 {
-    st->files_print = g_book.files_print;
-    st->files       = g_book.files;
-    st->use_print   = g_book.use_print;
+    UseText* use    = tagfs_recall_use_context(NULL);
+    st->files_print = BookFilesStandPrint();
+    st->files       = tagfs_get_state()->ledger.total_files;
+    st->use_print   = use && use->bytes ? KCrc32c((const uint8_t*)use->text, (uint32_t)use->bytes) : 0;
+    UseTextDrop(use);
 }
 
 static bool StandDogEarSame(const StandDogEarState* a, const StandDogEarState* b)
 {
-    return a->files_print == b->files_print && a->files == b->files && a->use_print == b->use_print;
+    bool same = a->files_print == b->files_print && a->files == b->files && a->use_print == b->use_print;
+    if (!same)
+        kprintf("[TESTS] stand_dog_ear: the states differ — files print %08X/%08X, files %llu/%llu, Use %08X/%08X\n",
+                a->files_print, b->files_print, (unsigned long long)a->files, (unsigned long long)b->files,
+                a->use_print, b->use_print);
+    return same;
 }
 
 /* Whether DogEar holds `key` of `tree` among the spans put in since the last
@@ -483,7 +494,7 @@ static TestResult TestStandDogEarEmptied(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    files0 = g_book.files;
+    files0 = tagfs_get_state()->ledger.total_files;
     free0  = tagfs_get_state()->ledger.free_blocks;
     TEST_ASSERT(StandDogEarMake(0, STAND_DOG_EAR_MANY, &first), "files enough for FILES to take two leaves");
     TEST_ASSERT(StandFreshModelMake(&m, 8u * TAGFS_BLOCK_SIZE), "a model of the data");

@@ -1,4 +1,5 @@
 #include "stand_stitch.h"
+#include "stand_ribbon.h"
 #include "volume_ribbon.h"
 #include "../tagfs.h"
 #include "../mount/away.h"
@@ -106,30 +107,33 @@ static bool StandStitchZeroQuire(const StandStitch* s, const RibbonQuire* q)
 }
 
 /*
- * The ribbon put back as the test found it: the volume let go of, every
- * sector past where the ribbon stood in its Quire to zeros, and every Quire it
- * went on into since — the next_quire the test found, and the Quire and the
- * next_quire it stands at now — whole; the machine holding no Use Context
- * again when it held none, so the mount does not tell the volume one it took
- * up from a test's stitch (UseContextRecall); the volume mounted again. False
- * when a sector would not take its zeros, or the volume did not come up where
- * the ribbon stood before.
+ * The ribbon put back as the test found it: the volume let go of with no
+ * caller left inside it (StandRibbonLetGo), every sector past where the ribbon
+ * stood in its Quire to zeros, and every Quire it went on into since — the
+ * next_quire the test found, and the Quire and the next_quire it stands at now
+ * — whole; the machine holding no Use Context again when it held none, so the
+ * mount does not tell the volume one it took up from a test's stitch
+ * (UseContextRecall); the volume mounted again. False when a sector would not
+ * take its zeros, or the volume did not come up where the ribbon stood before;
+ * false, and no zeros laid, when a caller is still inside the volume at the
+ * bound — a cycle of its writer would sew past them.
  */
 bool StandStitchPutBack(const StandStitch* s)
 {
     RibbonCursor now;
-    RibbonCursorStand(&now);
-    if (tagfs_get_state()->initialized)
-        TagFSStandLetGo();
-    uint64_t first = s->at.quire.block + s->at.off / TAGFS_BLOCK_SECTORS;
-    bool     ok    = StandStitchZero(s, first, s->at.quire.block + s->at.quire.blocks - first);
-    ok &= StandStitchZeroQuire(s, &s->at.next);
-    ok &= StandStitchZeroQuire(s, &now.quire);
-    ok &= StandStitchZeroQuire(s, &now.next);
-    ok &= StandStitchZeroQuire(s, &now.sewn_hop);
+    bool         down = StandRibbonLetGo(&now), ok = down;
+    if (down) {
+        uint64_t first = s->at.quire.block + s->at.off / TAGFS_BLOCK_SECTORS;
+        ok  = StandStitchZero(s, first, s->at.quire.block + s->at.quire.blocks - first);
+        ok &= StandStitchZeroQuire(s, &s->at.next);
+        ok &= StandStitchZeroQuire(s, &now.quire);
+        ok &= StandStitchZeroQuire(s, &now.next);
+        ok &= StandStitchZeroQuire(s, &now.sewn_hop);
+    }
     if (!s->context)
         UseContextClear();
-    kprintf("[TESTS] stand_stitch: the ribbon is put back as it was found\n");
+    kprintf("[TESTS] stand_stitch: the ribbon is %s\n",
+            down ? "put back as it was found" : "NOT put back — a caller stayed inside the volume");
     StandRibbonArrive();
     TagFSStandHoldAgain();
     RibbonCursorStand(&now);
@@ -137,7 +141,8 @@ bool StandStitchPutBack(const StandStitch* s)
                 RibbonQuireSame(&now.quire, &s->at.quire) && now.off == s->at.off;
     if (!back)
         kprintf("[TESTS] stand_stitch: put back — zeros %s, mounted %d, the ribbon at seq %llu, sector %llu of "
-                "Quire %llu; it stood at seq %llu, sector %llu of Quire %llu\n", ok ? "laid" : "refused",
+                "Quire %llu; it stood at seq %llu, sector %llu of Quire %llu\n",
+                !down ? "not laid" : ok ? "laid" : "refused",
                 (int)tagfs_get_state()->initialized, (unsigned long long)now.last, (unsigned long long)now.off,
                 (unsigned long long)now.quire.block, (unsigned long long)s->at.last,
                 (unsigned long long)s->at.off, (unsigned long long)s->at.quire.block);

@@ -107,7 +107,11 @@ typedef struct {
 } MountBookSaid;
 
 #ifdef CONFIG_VOLUME_TESTS
-void    MountBookStandSaid(MountBookSaid* out);
+void     MountBookStandSaid(MountBookSaid* out);
+/* The print of the live files memory holds now, taken as the mount takes it
+ * (BookFilesLaid) and claiming no ground: g_book's print is the last mount's,
+ * and a stitch since does not move it (book_ground.c). */
+uint32_t BookFilesStandPrint(void);
 #endif
 
 // ----------------------------------------------------------------------------

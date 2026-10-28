@@ -11,8 +11,6 @@
 #include "../block_map/block_map_derived.h"
 #include "../settle/sewing.h"
 #include "../settle/settle.h"
-#include "baton.h"
-#include "amp.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
 
@@ -192,13 +190,25 @@ out:
     return verdict;
 }
 
+/* Whether a cycle holds the Settle — from its S0 to its Give. */
+static bool StandErrataCycling(void)
+{
+    return __atomic_load_n(&g_settle_scribe.holder, __ATOMIC_ACQUIRE) != 0;
+}
+
 /*
  * The session's first cycle is asked at the door's opening (SETTLE_DEMAND_
  * ERRATA): no change is owed, no program asks, and the cadence alone lays the
  * verdict down — at once, not a window on: with nothing inked, nothing else
  * would ever begin it. The stand holds the cadence, so it is let go here, and
- * the machine turned by hand as the cadence's own tests turn it, until the
- * ribbon's cursor moves past a stitch.
+ * the machine turned by hand until a cycle holds the Settle — well inside the
+ * window; held again at once, the cycle in flight runs on to its end — on the
+ * committer's core, after the ribbon's cursor has moved past its stitch — and
+ * no other begins behind it, and the machine is turned until it gave the
+ * Settle back, a window of its own to do it in. What the test reads and puts
+ * back is the medium as that one cycle left it: the cycle leaves the volume's
+ * door only after its Give (settle.c, SettleRunEnd), and the put-back waits
+ * that out before it lays a byte (StandRibbonLetGo).
  */
 static TestResult TestStandErrataAsked(void)
 {
@@ -208,7 +218,7 @@ static TestResult TestStandErrataAsked(void)
     RibbonCursor        c, now;
     RibbonUnit*         u = NULL;
     uint64_t            digests[2], until = 0;
-    bool                let_go = false, moved = false;
+    bool                let_go = false, began = false, moved = false;
     const char*         aside = StandRibbonAside(&w);
 
     if (aside)
@@ -230,17 +240,21 @@ static TestResult TestStandErrataAsked(void)
     SettleCadenceHold(false);
     let_go = true;
     until  = rdtsc() + cpu_us_to_tsc(SETTLE_WINDOW_US / 2u);
-    while (!moved && rdtsc() < until) {
-        SettleKnock();
-        BatonPump(amp_get_core_index());
-        SettleServiceIfPending();
-        cpu_pause();
+    while (!began && !moved && rdtsc() < until) {
+        StandSettleTurn();
+        began = StandErrataCycling();
         RibbonCursorStand(&now);
         moved = now.quire.block != c.quire.block || now.off != c.off;
     }
-    TEST_ASSERT(moved, "the cadence sewed a stitch by itself, well inside the window");
     SettleCadenceHold(true);
     let_go = false;
+    TEST_ASSERT(began || moved, "the cadence began a cycle by itself, well inside the window");
+    until = rdtsc() + cpu_us_to_tsc(SETTLE_WINDOW_US);
+    while (StandErrataCycling() && rdtsc() < until)
+        StandSettleTurn();
+    RibbonCursorStand(&now);
+    moved = now.quire.block != c.quire.block || now.off != c.off;
+    TEST_ASSERT(moved && !StandErrataCycling(), "and the cycle sewed a stitch and ended");
     TEST_ASSERT(StandStitchRead(&u) && StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, w.fid),
                 "the session's first, carrying the verdict");
     TEST_ASSERT(StandErrataWears(w.fid), "and the file rolled back wears settle:undone");
