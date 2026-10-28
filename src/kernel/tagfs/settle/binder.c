@@ -183,9 +183,9 @@ static error_t TallySliceTake(BinderRun* r)
     w->use    = tagfs_recall_use_context(NULL);
     w->grid   = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
     w->seq    = RibbonSeqNext();
-    error_t rc = SliceTake(w);
+    error_t rc = BinderSliceTake(w);
     if (rc == OK)
-        rc = GroundTake(w);
+        rc = BinderGroundTake(w);
     if (rc == OK) {
         TallyCounts(r);
         EndpaperTallyBegun(w->seq, r->counts.next_fid);
@@ -287,7 +287,7 @@ static error_t TallySlotWrite(BinderRun* r)
 static void TallyEnded(BinderRun* r, error_t rc)
 {
     if (rc != OK && r->taken && r->slot_begun)
-        SlotUnsure(r);
+        BinderSlotUnsure(r);
     else if (rc != OK && r->taken) {
         (void)BlockMapDerivedGiveAs(GROUND_TALLY, 0, r->w.a, r->w.room);
         (void)BlockMapDerivedGiveAs(GROUND_TALLY, 0, r->w.b, r->w.room);
@@ -299,7 +299,7 @@ static void TallyEnded(BinderRun* r, error_t rc)
                 r->slot_begun ? ", and the slot it was written over is held as naming either Tally" : "");
     EndpaperTallyLaid(NULL);
     BinderNodesLetGo(&r->w);
-    SliceLetGo(&r->w);
+    BinderSliceLetGo(&r->w);
     kfree(r->fresh.ground);
     kfree(r->rot);
     memset(r, 0, sizeof(*r));
@@ -316,7 +316,7 @@ static void TallyEnded(BinderRun* r, error_t rc)
  * room for, and the walk begun with nothing written. */
 static error_t TallyMeasureBegin(BinderRun* r)
 {
-    error_t rc = FreshGround(r);
+    error_t rc = BinderFreshGround(r);
     if (rc != OK)
         return rc;
     r->w.rot       = r->rot;
@@ -350,12 +350,12 @@ static error_t TallyTakeStep(BinderRun* r, bool* taken)
     *taken = false;
     if (!r->sliced) {
         r->sliced = true;
-        if ((rc = RotsTaken(r)) == OK)
+        if ((rc = BinderRotsTaken(r)) == OK)
             rc = TallySliceTake(r);
         return rc;
     }
     if (!r->rots_read) {
-        rc = TallyDigestsRottenNext(&r->rot_leaf, RotOfDigests, r, &done);
+        rc = TallyDigestsRottenNext(&r->rot_leaf, BinderRotOfDigests, r, &done);
         if (rc == OK && done) {
             r->rots_read = true;
             rc           = TallyMeasureBegin(r);
@@ -424,7 +424,7 @@ static error_t TallyStepRun(BinderRun* r, bool* done)
             r->turned   = true;
             r->captured = turn == OK;
         }
-        rc    = TallyDone(r);
+        rc    = BinderTallyDone(r);
         *done = true;
         break;
     }

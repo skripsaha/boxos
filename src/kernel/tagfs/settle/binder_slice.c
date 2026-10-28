@@ -57,7 +57,7 @@ static bool SliceBatch(BinderWork* w, BinderFiles* c, uint64_t* from)
 /* Every live file of the state after the last settled stitch, a batch at a
  * time, the state lock let go between: no stitch settles meanwhile — this is
  * one step of the Settle's holder. OK or ERR_NO_MEMORY. */
-error_t SliceTake(BinderWork* w)
+error_t BinderSliceTake(BinderWork* w)
 {
     TagFSLock*   lock = &tagfs_get_state()->lock;
     BinderFiles* tail = NULL;
@@ -82,7 +82,7 @@ error_t SliceTake(BinderWork* w)
     return OK;
 }
 
-void SliceLetGo(BinderWork* w)
+void BinderSliceLetGo(BinderWork* w)
 {
     while (w->files) {
         BinderFiles* next = w->files->next;
@@ -146,7 +146,7 @@ static uint64_t GroundJoined(BinderGround* g, uint64_t n)
 /* The ground DIGESTS speaks for: every DATA run of the slice, and what the
  * mount holds for what rotted — in order of their first block, those that
  * meet joined. OK or ERR_NO_MEMORY. */
-error_t GroundTake(BinderWork* w)
+error_t BinderGroundTake(BinderWork* w)
 {
     uint64_t cap = 0;
     for (BinderFiles* c = w->files; c; c = c->next) {

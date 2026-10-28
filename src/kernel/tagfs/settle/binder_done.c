@@ -26,7 +26,7 @@ static error_t RotPut(BinderRun* r, uint64_t tree, const TallyPlace* at)
     return OK;
 }
 
-error_t RotOfDigests(void* ctx, const TallyPlace* at)
+error_t BinderRotOfDigests(void* ctx, const TallyPlace* at)
 {
     return RotPut((BinderRun*)ctx, TALLY_DIGESTS, at);
 }
@@ -34,7 +34,7 @@ error_t RotOfDigests(void* ctx, const TallyPlace* at)
 /* The FILES nodes the Tally names as they lie, as the mount found them; the
  * DIGESTS ones are weighed a leaf a turn after the slice — a mount reads a
  * DIGESTS leaf only when a block of it is (§16.4 п.5). */
-error_t RotsTaken(BinderRun* r)
+error_t BinderRotsTaken(BinderRun* r)
 {
     error_t rc = OK;
     for (uint32_t i = 0; rc == OK && i < g_binder.nrot; i++)
@@ -46,7 +46,7 @@ error_t RotsTaken(BinderRun* r)
 /* The ground the new slot holds: the two runs, and every rotten node it names
  * as it lies, each copy at its birth — made at TAKE, so nothing is asked of
  * the heap once the slot is on the medium. */
-error_t FreshGround(BinderRun* r)
+error_t BinderFreshGround(BinderRun* r)
 {
     SlotGround* f    = &r->fresh;
     uint32_t    need = 2u;
@@ -127,7 +127,7 @@ static void GlossCaptured(const BinderWork* w)
                 (unsigned long long)w->seq);
 }
 
-error_t TallyDone(BinderRun* r)
+error_t BinderTallyDone(BinderRun* r)
 {
     BinderWork* w   = &r->w;
     SlotGround  old = g_binder.slot[r->slot];
@@ -156,7 +156,7 @@ error_t TallyDone(BinderRun* r)
 /* A slot whose write or flush was refused may hold the Tally it held or the
  * new one, whole (C9, C10): held as holding both until a Tally is written over
  * it, and written over first. */
-void SlotUnsure(BinderRun* r)
+void BinderSlotUnsure(BinderRun* r)
 {
     SlotGround* s = &g_binder.slot[r->slot];
     FreshFill(r);

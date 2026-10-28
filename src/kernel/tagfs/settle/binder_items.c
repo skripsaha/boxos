@@ -20,7 +20,7 @@
 // Keys
 // ----------------------------------------------------------------------------
 
-bool KeyLess(uint64_t tree, TallyKey a, TallyKey b)
+bool BinderKeyLess(uint64_t tree, TallyKey a, TallyKey b)
 {
     if (a.k1 != b.k1)
         return a.k1 < b.k1;
@@ -37,13 +37,13 @@ static TallyKey RotKey(const BinderRot* r)
 /* Whether element key `k` lies inside the range of rotten node `r`: from its
  * lower separator (or the start), up to its upper one — or, with none, at its
  * lower separator alone, where no element may stand beside it. */
-bool RotCovers(const BinderRot* r, TallyKey k)
+bool BinderRotCovers(const BinderRot* r, TallyKey k)
 {
-    if (r->at.has_lo && KeyLess(r->tree, k, r->at.lo))
+    if (r->at.has_lo && BinderKeyLess(r->tree, k, r->at.lo))
         return false;
     if (r->at.has_hi)
-        return KeyLess(r->tree, k, r->at.hi);
-    return r->at.has_lo && !KeyLess(r->tree, r->at.lo, k);
+        return BinderKeyLess(r->tree, k, r->at.hi);
+    return r->at.has_lo && !BinderKeyLess(r->tree, r->at.lo, k);
 }
 
 // ----------------------------------------------------------------------------
@@ -288,7 +288,7 @@ static bool DigestsRot(const BinderWork* w, uint64_t block, uint64_t* past, uint
         const BinderRot* r = &w->rot[i];
         if (r->tree != TALLY_DIGESTS)
             continue;
-        if (RotCovers(r, (TallyKey){ block, 0 })) {
+        if (BinderRotCovers(r, (TallyKey){ block, 0 })) {
             *past = r->at.has_hi ? r->at.hi.k1 : block + 1u;
             return true;
         }
@@ -378,7 +378,7 @@ static error_t DigestsNext(BinderWork* w, BinderItem* it, bool* got)
 }
 
 /* The next element of the tree's leaves: *got false at its end. */
-error_t LeafItemNext(BinderWork* w, BinderItem* it, bool* got)
+error_t BinderLeafItemNext(BinderWork* w, BinderItem* it, bool* got)
 {
     switch (w->tree) {
     case TALLY_FILES:
@@ -405,7 +405,7 @@ error_t LeafItemNext(BinderWork* w, BinderItem* it, bool* got)
 
 /* The level below's next node, or rotten node, in key order — the element
  * that names it: its first key, the count it carries, its BookPtr. */
-error_t InnerItemNext(BinderWork* w, BinderItem* it, bool* got)
+error_t BinderInnerItemNext(BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems*       p   = &w->items;
     const BinderLevel* lv  = &w->lv[w->level - 1u];
@@ -425,7 +425,7 @@ error_t InnerItemNext(BinderWork* w, BinderItem* it, bool* got)
     *got = kid || rot;
     if (!*got)
         return OK;
-    if (rot && (!kid || KeyLess(w->tree, RotKey(rot), kid->key))) {
+    if (rot && (!kid || BinderKeyLess(w->tree, RotKey(rot), kid->key))) {
         if (rot->at.ptr.copies > BINDER_PTR_COPIES_MOST)
             return ERR_TAGFS_CORRUPTED;
         for (uint32_t k = 0; k < rot->at.ptr.copies; k++)

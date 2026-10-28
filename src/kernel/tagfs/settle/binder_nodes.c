@@ -219,7 +219,7 @@ static bool FillBarred(const BinderWork* w, TallyKey key)
     for (uint32_t i = 0; i < w->nrot; i++) {
         const BinderRot* r = &w->rot[i];
         if (r->tree == w->tree && r->at.level >= w->level && r->at.has_lo &&
-            KeyLess(w->tree, w->fill.last, r->at.lo) && !KeyLess(w->tree, key, r->at.lo))
+            BinderKeyLess(w->tree, w->fill.last, r->at.lo) && !BinderKeyLess(w->tree, key, r->at.lo))
             return true;
     }
     return false;
@@ -231,7 +231,7 @@ static bool FillBarred(const BinderWork* w, TallyKey key)
 static bool ItemRotten(const BinderWork* w, TallyKey key)
 {
     for (uint32_t i = 0; i < w->nrot; i++)
-        if (w->rot[i].tree == w->tree && RotCovers(&w->rot[i], key))
+        if (w->rot[i].tree == w->tree && BinderRotCovers(&w->rot[i], key))
             return true;
     return false;
 }
@@ -246,7 +246,7 @@ static error_t LevelStep(BinderWork* w, bool* laid)
         bool    got = p->held;
         error_t rc  = OK;
         if (!got)
-            rc = w->level == 0 ? LeafItemNext(w, &p->item, &got) : InnerItemNext(w, &p->item, &got);
+            rc = w->level == 0 ? BinderLeafItemNext(w, &p->item, &got) : BinderInnerItemNext(w, &p->item, &got);
         if (rc != OK)
             return rc;
         p->held = false;

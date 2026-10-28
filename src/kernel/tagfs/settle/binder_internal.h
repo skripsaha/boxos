@@ -20,10 +20,10 @@
  * tree's leaves, and of the level above the leaves being laid — the level
  * below's next node or rotten node — *got false at its end. OK, ERR_NO_MEMORY,
  * a refusal of a DIGESTS leaf the Tally stood on, or ERR_TAGFS_CORRUPTED. */
-bool        KeyLess(uint64_t tree, TallyKey a, TallyKey b);
-bool        RotCovers(const BinderRot* r, TallyKey k);
-error_t     LeafItemNext(BinderWork* w, BinderItem* it, bool* got);
-error_t     InnerItemNext(BinderWork* w, BinderItem* it, bool* got);
+bool        BinderKeyLess(uint64_t tree, TallyKey a, TallyKey b);
+bool        BinderRotCovers(const BinderRot* r, TallyKey k);
+error_t     BinderLeafItemNext(BinderWork* w, BinderItem* it, bool* got);
+error_t     BinderInnerItemNext(BinderWork* w, BinderItem* it, bool* got);
 
 /* The Tally under way. */
 typedef struct {
@@ -59,18 +59,18 @@ typedef struct {
  * live file's record — OK or ERR_NO_MEMORY; everything it holds let go; the
  * ground DIGESTS speaks for, in order of first block, the runs that meet
  * joined — OK or ERR_NO_MEMORY. */
-error_t     SliceTake(BinderWork* w);
-void        SliceLetGo(BinderWork* w);
-error_t     GroundTake(BinderWork* w);
+error_t     BinderSliceTake(BinderWork* w);
+void        BinderSliceLetGo(BinderWork* w);
+error_t     BinderGroundTake(BinderWork* w);
 
 /* binder_done.c: a DIGESTS node no copy of reads, for the Tally `ctx` names;
  * the FILES nodes the mount found so; the ground the new slot will hold, made
  * at TAKE; the Tally's DONE; a slot whose write or flush was refused held as
  * naming either Tally. */
-error_t     RotOfDigests(void* ctx, const TallyPlace* at);
-error_t     RotsTaken(BinderRun* r);
-error_t     FreshGround(BinderRun* r);
-error_t     TallyDone(BinderRun* r);
-void        SlotUnsure(BinderRun* r);
+error_t     BinderRotOfDigests(void* ctx, const TallyPlace* at);
+error_t     BinderRotsTaken(BinderRun* r);
+error_t     BinderFreshGround(BinderRun* r);
+error_t     BinderTallyDone(BinderRun* r);
+void        BinderSlotUnsure(BinderRun* r);
 
 #endif /* TAGFS_SETTLE_BINDER_INTERNAL_H */

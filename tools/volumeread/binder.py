@@ -387,7 +387,7 @@ def _FilesDiffer(have, want):
 
 def _DigestsWanted(p):
     """The digests a Tally of the state `p` mounted carries (the kernel's
-    settle/binder_slice.c GroundTake): of every block of every live file, of every
+    settle/binder_slice.c BinderGroundTake): of every block of every live file, of every
     block a locked file is known to name — the census holds those whatever
     locked it (bookcensus.py _Held) — and, a FILES range rotten, of every
     block the Tally before named a digest of and none of its living files
