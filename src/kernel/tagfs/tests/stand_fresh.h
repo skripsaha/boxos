@@ -37,6 +37,9 @@ typedef struct {
 bool     StandFreshModelMake(StandFreshModel* m, uint64_t room);
 void     StandFreshModelLetGo(StandFreshModel* m);
 int      StandFreshWrite(StandFreshModel* m, uint64_t fid, uint64_t at, uint32_t bytes, uint64_t stream);
+/* The port's write of `bytes` of the model from `at` (WriteJob), the model
+ * filled there first: the job's answer, or ERR_TIMEOUT. */
+error_t  StandFreshPortWrite(StandFreshModel* m, uint64_t fid, uint64_t at, uint32_t bytes);
 error_t  StandFreshSpan(StandFreshModel* m, uint64_t fid, uint64_t size);
 bool     StandFreshHolds(const StandFreshModel* m, uint64_t fid);
 uint32_t StandFreshPrint(uint64_t fid, uint64_t* runs);
