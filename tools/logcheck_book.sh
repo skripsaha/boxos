@@ -331,19 +331,21 @@ stand_ribbon_slip_three_roads stand_ribbon_torn_tail stand_ribbon_next_quire sta
 stand_ribbon_dead_branch stand_ribbon_undone
 stand_stitch_answers_after_flush stand_stitch_use_context stand_stitch_coined stand_stitch_halt_clean
 stand_stitch_retry_atom stand_stitch_retry_flush stand_stitch_refused_everywhere stand_stitch_ribbon_runs_out
-stand_stitch_tally_cost stand_stitch_medium_lied stand_stitch_replug_loses stand_blockfail_refused_writes
+stand_stitch_tally_cost stand_stitch_medium_lied stand_stitch_replug_kept stand_blockfail_refused_writes
 stand_stitch_retry_quire_entered stand_stitch_retry_refused_twice stand_stitch_retry_head_landed
 stand_stitch_retry_runs_out
 stand_stitch_runs_on_leaves
 stand_stitch_tally_cost_long stand_registry_counts_from_nothing
 stand_docket_each_change_mounts_again stand_docket_merges stand_docket_data_refused stand_docket_ground_rests
-stand_docket_mount_ground_rests stand_docket_claim_refused stand_docket_closed_damaged stand_docket_replug_loses
+stand_docket_mount_ground_rests stand_docket_claim_refused stand_docket_closed_damaged stand_docket_replug_kept
 stand_docket_warrant
 stand_binder_whole stand_binder_node_refused stand_binder_unslotted stand_binder_slot_torn
 stand_binder_slot_flush_refused stand_binder_slot_unsure stand_binder_parcels stand_binder_heals stand_binder_rotten_named
 stand_binder_slack stand_binder_ground_back stand_binder_full_back stand_binder_standing_end
 stand_endpaper_owed stand_endpaper_labeled_carries stand_endpaper_mount stand_endpaper_pending
-stand_endpaper_kept"
+stand_endpaper_kept
+stand_away_other_stitches stand_away_not_landed stand_away_own_attempt stand_away_born_not_landed
+stand_away_newer_slot stand_away_lied_whole stand_away_verdict"
 STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_(tally_rot_three_paths|ribbon_slip_three_roads): the port.s road stands aside — '
 STAND_BOOK_RIBBON_LAID='[TESTS] stand_ribbon: stitches laid past the Tally'
 STAND_BOOK_RIBBON_BACK='[TESTS] stand_ribbon: what the test laid is put back'
@@ -414,8 +416,14 @@ stand_book_judge() {
     got=$(grep -acE '^\[TESTS\] .*, knocked at by the stand under glass, refused before a byte' "$L")
     [ "$got" = 4 ]
     chk $? "stand: $what — the four doors below the glass refuse the stand's knock ($got)"
-    grep -aqE '^\[TagFS\] the format-v2 volume came back in seat [0-9]+: this kernel reads such a volume again from its book' "$L"
-    chk $? "stand: $what — the book's medium came back and is read again, said"
+    grep -aqE '^\[TagFS\] the volume is back, in seat [0-9]+: .* — its book as this kernel left it: ' "$L"
+    chk $? "stand: $what — the book's medium came back as it was left and its book is taken up, said"
+    grep -aqE '^\[TagFS\] the volume came back in seat [0-9]+ as this kernel left its book, but [1-9][0-9]* of the [0-9]+ block\(s\) of data no stitch settled do not read back as written' "$L"
+    chk $? "stand: $what — a block of data no stitch settled that did not land gives the book up, said with how many"
+    grep -aqE '^\[TagFS\] the volume came back in seat [0-9]+ not as this kernel left its book: ' "$L"
+    chk $? "stand: $what — a medium another machine changed gives the book up, said with why"
+    ! grep -aqF 'this kernel reads such a volume again from its book' "$L"
+    chk $? "stand: $what — no book's medium is read again for being a book's"
     ! grep -aq 'KERNEL PANIC' "$L"
     chk $? "stand: $what — no panic"
     ! grep -aqE "$STAND_MIRROR_DEFECT" "$L"

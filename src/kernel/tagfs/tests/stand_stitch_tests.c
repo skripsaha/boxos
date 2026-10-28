@@ -665,11 +665,12 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// A medium that leaves and comes back is read again: what no stitch settled is
-// lost, and its waiters are told (§16.2 п.28)
+// A book's medium that leaves and comes back as it was left is taken up: the
+// word no stitch settled goes to the medium with the next cycle, its waiter
+// answered then (§3.8, §16.5 п.10)
 // ----------------------------------------------------------------------------
 
-static TestResult TestStandStitchReplugLoses(void)
+static TestResult TestStandStitchReplugKept(void)
 {
     TestResult               verdict = TEST_PASS;
     StandStitch              s;
@@ -677,7 +678,7 @@ static TestResult TestStandStitchReplugLoses(void)
     uint64_t                 saying = 0, ticket = 0;
     bool                     away   = false;
     const char*              aside  = StandStitchAside(&s);
-    static const char        word[] = "replug,lost";
+    static const char        word[] = "replug,kept";
 
     if (aside)
         return test_steps_aside(aside);
@@ -686,21 +687,21 @@ static TestResult TestStandStitchReplugLoses(void)
     UseText* t      = UseTextMake(word, sizeof(word) - 1u);
     TEST_ASSERT(t != NULL, "a word is made");
     TEST_ASSERT_EQ(UseMemorySay(t, saying + 2000u, &ticket), USE_SAID_OWED, "and said: a cycle owes it the medium");
-    UseTextDrop(t);
     SettleWaitLinkCycle(&waiter.w, StandStitchAnswered);
     TagFSStandMediumLeaves();
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_REREAD, "the medium leaves and comes back: read again");
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium leaves and comes back as it was left: "
+                   "its book is taken up");
     away = false;
-    TEST_ASSERT(waiter.answered && waiter.rc == ERR_DEVICE_NOT_READY,
-                "the word's waiter is told it is lost, not answered OK");
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, as a book read again is");
-    StandRibbonArrive();
-    TagFSStandHoldAgain();
+    TEST_ASSERT(!waiter.answered, "the word's waiter is told nothing yet: no change is lost");
+    TEST_ASSERT_OK(TagFSSettle(), "the next cycle settles");
+    TEST_ASSERT(waiter.answered && waiter.rc == OK, "and the word's waiter is answered OK by it");
+    TEST_ASSERT(StandStitchRemount(), "the volume is mounted again on what its medium holds");
     UseText* back = tagfs_recall_use_context(NULL);
-    TEST_ASSERT(UseTextSame(back, before), "mounted again, it remembers what its book holds, not the lost word");
+    TEST_ASSERT(UseTextSame(back, t), "and remembers the word its book was taken up with");
     UseTextDrop(back);
 out:
+    UseTextDrop(t);
     UseTextDrop(before);
     if (away)
         (void)TagFSStandMediumReturns(NULL);
@@ -767,7 +768,7 @@ static const TestCase g_stand_stitch_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_stitch_medium_lied", .func = TestStandStitchMediumLied,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
-    { .name = "stand_stitch_replug_loses", .func = TestStandStitchReplugLoses,
+    { .name = "stand_stitch_replug_kept", .func = TestStandStitchReplugKept,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_blockfail_refused_writes", .func = TestStandBlockFailRefusedWrites,
       .reach = TEST_READS_ONLY },

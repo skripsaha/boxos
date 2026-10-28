@@ -49,6 +49,7 @@ typedef enum {
     AWAY_SEAT_TAKEN,    /* another volume sits in the seat the book was held for */
     AWAY_HALT,          /* the machine is stopping */
     AWAY_REREAD,        /* a format-v2 volume: a medium that leaves and comes back is read again */
+    AWAY_NOT_LANDED,    /* a book as left, but a block written since the last kept flush reads otherwise */
 } AwayVerdict;
 
 /* The medium left, just now latched (TagFSMediumLeft): said once, with the
@@ -98,6 +99,11 @@ void        AwayNumbersKnown(const uint8_t uuid[16], uint64_t* next_file_id,
  */
 void        TagFSStandMediumLeaves(void);
 AwayVerdict TagFSStandMediumReturns(const VolumeLedger* found);
+/* The medium leaves (TagFSStandMediumLeaves) once the next run of a file's
+ * blocks has landed, before its writer hears so (run/run.c, TagFSWriteRun):
+ * the departure a core attending the seat latches while a writer's command is
+ * answered. Once. */
+void        TagFSStandLeavesAfterRun(void);
 
 /*
  * And the stand's own take-down and mount, for the road a mount takes when the

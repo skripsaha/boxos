@@ -10,6 +10,7 @@
 #include "../settle_cut/settle_cut.h"
 #include "../integrity/gloss.h"
 #include "../mount/errata.h"
+#include "../mount/away.h"
 #include "amp.h"
 #include "dog_ear.h"
 #include "../../../kernel/drivers/timer/rtc.h"
@@ -594,6 +595,31 @@ static error_t StitchRefused(StitchSnap* s, error_t rc)
     return OK;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's departure in the middle of a stitch: the sectors written past
+ * which the medium leaves, plus one; 0 unarmed. */
+static volatile uint32_t s_stand_leaves;
+
+void StitchStandLeaves(uint32_t sectors)
+{
+    __atomic_store_n(&s_stand_leaves, sectors == UINT32_MAX ? UINT32_MAX : sectors + 1u, __ATOMIC_RELEASE);
+}
+
+/* The medium leaves here, once, where the stand armed it to: before the next
+ * window of the stitch once `sectors` of it are written, or before its last
+ * flush once all of them are. */
+static void StitchStandLeft(const StitchSnap* s)
+{
+    uint32_t armed = __atomic_load_n(&s_stand_leaves, __ATOMIC_ACQUIRE);
+    uint32_t at    = armed - 1u < s->of ? armed - 1u : s->of;
+    if (armed && s->written >= at && __atomic_exchange_n(&s_stand_leaves, 0u, __ATOMIC_ACQ_REL))
+        TagFSStandMediumLeaves();
+}
+#define STITCH_STAND_LEFT(s) StitchStandLeft(s)
+#else
+#define STITCH_STAND_LEFT(s) ((void)(s))
+#endif
+
 // ----------------------------------------------------------------------------
 // The cycle
 // ----------------------------------------------------------------------------
@@ -639,12 +665,14 @@ error_t StitchRunStep(bool* done)
         break;
     }
     case STITCH_STEP_STITCH:
+        STITCH_STAND_LEFT(s);
         s->stage = "the stitch";
         rc       = StitchWrite(s, &last);
         if (rc == OK && last)
             s->step = STITCH_STEP_LAST_FLUSH;
         break;
     case STITCH_STEP_LAST_FLUSH:
+        STITCH_STAND_LEFT(s);
         if (!s->toll && s->fresh)
             SETTLE_CUT_AT(SETTLE_CUT_POINT_SPARED);
         SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);

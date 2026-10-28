@@ -195,6 +195,18 @@ void RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved)
     *reserved = s_reserved;
     TagFSLockDrop(&fs->lock);
 }
+
+static volatile bool s_stand_marks_refused;
+
+void RibbonStandMarksRefused(void)
+{
+    __atomic_store_n(&s_stand_marks_refused, true, __ATOMIC_RELEASE);
+}
+
+bool RibbonStandMarksRefusing(void)
+{
+    return __atomic_exchange_n(&s_stand_marks_refused, false, __ATOMIC_ACQ_REL);
+}
 #endif
 
 uint64_t RibbonSeqNext(void)

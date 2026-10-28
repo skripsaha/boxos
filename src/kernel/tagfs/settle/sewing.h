@@ -229,6 +229,16 @@ void     RibbonRoomOf(const RibbonCursor* c, uint64_t flight, uint64_t* any, uin
 #ifdef CONFIG_VOLUME_TESTS
 /* The cursor as it stands, for the stand between two cycles. */
 void     RibbonCursorStand(RibbonCursor* out);
+/* The next stitch's medium leaves (TagFSStandMediumLeaves) once `sectors` of
+ * it are on the medium — UINT32_MAX: the whole of it, before its last flush —
+ * so the cycle is refused there, as a hand pulling the medium out refuses it.
+ * Once. For the stand. */
+void     StitchStandLeaves(uint32_t sectors);
+/* The next room asked of the heap for the marks of what this kernel left on
+ * the ribbon (ribbon_left.c) refused, as a heap that has none refuses it:
+ * armed, and taken by the one it refuses. Once. For the stand. */
+void     RibbonStandMarksRefused(void);
+bool     RibbonStandMarksRefusing(void);
 /* The bytes claimed by changes no stitch has taken, and those held for changes
  * in the making (RibbonReserve), as they stand — for the stand. */
 void     RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved);

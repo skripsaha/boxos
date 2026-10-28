@@ -4,12 +4,24 @@
 #include "../integrity/integrity.h"
 #include "../read/read.h"
 #include "../scribe/scribe.h"   /* VolumeWriteSeen — what a flush must cover now */
+#ifdef CONFIG_VOLUME_TESTS
+#include "../mount/away.h"      /* TagFSStandMediumLeaves — the stand's departure after a run lands */
+#endif
 
 /*
  * The data run's door for runs (run.h). Every block goes to its seat by its
  * sector (tagfs_block_to_sector), which is where the volume's base is applied;
  * the door LockRank watches is the Boardroom's, behind it.
  */
+
+#ifdef CONFIG_VOLUME_TESTS
+static volatile bool s_stand_leaves_after;
+
+void TagFSStandLeavesAfterRun(void)
+{
+    __atomic_store_n(&s_stand_leaves_after, true, __ATOMIC_RELEASE);
+}
+#endif
 
 uint32_t TagFSRunBlocks(void)
 {
@@ -78,6 +90,10 @@ error_t TagFSWriteRun(uint64_t first, uint32_t count, const void *buffer, uint32
         }
     }
     *out_landed = landed;
+#ifdef CONFIG_VOLUME_TESTS
+    if (landed && __atomic_exchange_n(&s_stand_leaves_after, false, __ATOMIC_ACQ_REL))
+        TagFSStandMediumLeaves();
+#endif
     if (landed == count)
         return OK;
     return TagFSMediumGone() ? ERR_DEVICE_NOT_READY : ERR_WRITE_FAILED;

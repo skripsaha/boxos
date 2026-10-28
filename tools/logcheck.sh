@@ -108,6 +108,9 @@ STAND_NAME=logcheck
 # A book taking the ground behind it (grow, growcut on VOLUME_FORMAT=v2;
 # growglass): tools/logcheck_book_grow.sh.
 . "$(dirname "$0")/logcheck_book_grow.sh"
+# A book's stick leaving while a write is in flight (replugwrite on
+# VOLUME_FORMAT=v2): tools/logcheck_book_replug.sh.
+. "$(dirname "$0")/logcheck_book_replug.sh"
 
 # Waits for the SHELL BANNER, not for "userspace is starting".
 #
@@ -867,7 +870,7 @@ replugwrite_round() {
     # only once nothing in it holds the file.
     replugwrite_drive_gone || return 1
     if [ "$change" = moved ]; then
-        ledger_moved_on_host "$SCRATCH/stick.img" && REPLUGWRITE_MOVED=0
+        "${REPLUGWRITE_MOVE:-ledger_moved_on_host}" "$SCRATCH/stick.img" && REPLUGWRITE_MOVED=0
     fi
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" || return 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick" || return 1
@@ -922,15 +925,16 @@ replugwrite_judge() {
     fi
     ok "replugwrite: $what — the write in the medium answered ERR_DEVICE_NOT_READY with the bytes the file holds of it: $(tr -d '\r' < "$L" | grep -aoE "write to file $fid refused \(error 203\): [0-9]+ of its [0-9]+ byte\(s\) are the file's" | head -1)"
     verdict=$(tr -d '\r' < "$L" | grep -aE '^\[TagFS\] (the volume is back, in seat|the volume came back in seat|another volume sits in seat)' | head -1)
-    case "$change:$verdict" in
-        same:*"the volume is back, in seat"*) up=taken ;;
-        same:*"with its Ledger as this kernel left it"*"was never covered by a flush"*) up=given ;;
-        moved:*"with a Ledger or a Deed this kernel did not leave on it"*) up=given ;;
-        *) up="" ;;
+    case "${REPLUGWRITE_UP:-v1}:$change:$verdict" in
+        v1:same:*"the volume is back, in seat"*) up=taken ;;
+        v1:same:*"with its Ledger as this kernel left it"*"was never covered by a flush"*) up=given ;;
+        v1:moved:*"with a Ledger or a Deed this kernel did not leave on it"*) up=given ;;
+        v1:*) up="" ;;
+        *) up=$("$REPLUGWRITE_UP" "$change" "$verdict") ;;
     esac
     [ -n "$up" ]
     chk $? "replugwrite: $what — the return was judged as such a stick must be: ${verdict:-no verdict at all}"
-    [ "$change" = moved ] && { [ "$REPLUGWRITE_MOVED" = 0 ]; chk $? "replugwrite: $what — the host moved its Ledger on while it was out"; }
+    [ "$change" = moved ] && { [ "$REPLUGWRITE_MOVED" = 0 ]; chk $? "replugwrite: $what — ${REPLUGWRITE_MOVE_SAID:-the host moved its Ledger on while it was out}"; }
     if [ "$up" = given ]; then
         grep -aqE '^\[TagFS\] the volume on seat [0-9]+ is MOUNTED' "$L"
         chk $? "replugwrite: $what — the book given up, the volume was mounted again from the medium as it now is"
@@ -1087,6 +1091,7 @@ REPLUGWRITE_CENSUS
 }
 
 run_replugwrite() {
+    [ "${VOLUME_FORMAT:-v1}" = v2 ] && { run_replugwritebook; return; }
     echo "== replugwrite: the stick leaves while a write is in flight and writers wait for its Helm, and comes back as it left, then changed =="
     local r change name seed from rc last pid L="$SCRATCH/serial.replugwrite.log"
     REPLUGWRITE_ABSENT=""

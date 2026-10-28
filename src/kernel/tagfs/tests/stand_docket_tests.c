@@ -624,34 +624,39 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// A book's medium that leaves and comes back is read again: a file no stitch
-// settled is lost, and its waiter told (§16.2 п.28)
+// A book's medium that leaves and comes back as it was left is taken up: a
+// file no stitch settled, its bytes written and no flush kept since, is read
+// back off the medium and goes on with the next cycle (§3.8, §16.5 п.10)
 // ----------------------------------------------------------------------------
 
-static TestResult TestStandDocketReplugLoses(void)
+static TestResult TestStandDocketReplugKept(void)
 {
     TestResult               verdict = TEST_PASS;
     StandStitch              s;
     static StandStitchWaiter waiter;
-    uint64_t                 fid  = 0;
+    static uint8_t           bytes[2u * TAGFS_BLOCK_SIZE];
+    uint64_t                 fid  = 0, block = 0;
     bool                     away = false;
     const char*              aside = StandStitchAside(&s);
 
     if (aside)
         return test_steps_aside(aside);
     memset(&waiter, 0, sizeof(waiter));
-    TEST_ASSERT_EQ(tagfs_create_file("replug-file.txt", NULL, 0, &fid), 0, "a file is made, no stitch carrying it");
+    for (uint32_t i = 0; i < sizeof(bytes); i++)
+        bytes[i] = (uint8_t)(i * 7u + 3u);
+    TEST_ASSERT(StandMakeFile("replug-file.bin", bytes, sizeof(bytes), &fid), "a file of two blocks is made, no "
+                "stitch carrying it");
     SettleWaitLink(&waiter.w, InkedGen(), StandStitchAnswered);
     TagFSStandMediumLeaves();
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_REREAD, "the medium leaves and comes back: read again");
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium leaves and comes back as it was left: "
+                   "its book is taken up, the file's bytes read back as written");
     away = false;
-    TEST_ASSERT(waiter.answered && waiter.rc == ERR_DEVICE_NOT_READY,
-                "the file's waiter is told it is lost, not answered OK");
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, as a book read again is");
-    StandRibbonArrive();
-    TagFSStandHoldAgain();
-    TEST_ASSERT(StandDocketGone(fid), "mounted again, it holds what its book holds — not the file");
+    TEST_ASSERT(!waiter.answered, "the file's waiter is told nothing yet: no change is lost");
+    TEST_ASSERT_OK(TagFSSettle(), "the next cycle settles");
+    TEST_ASSERT(waiter.answered && waiter.rc == OK, "and the file's waiter is answered OK by it");
+    TEST_ASSERT(StandStitchRemount(), "the volume is mounted again on what its medium holds");
+    TEST_ASSERT(StandDocketLive(fid) && StandBlockOf(fid, 1, &block), "and holds the file, both its blocks");
 out:
     if (away)
         (void)TagFSStandMediumReturns(NULL);
@@ -738,7 +743,7 @@ static const TestCase g_stand_docket_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_docket_closed_damaged", .func = TestStandDocketClosedDamaged,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
-    { .name = "stand_docket_replug_loses", .func = TestStandDocketReplugLoses,
+    { .name = "stand_docket_replug_kept", .func = TestStandDocketReplugKept,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_docket_warrant", .func = TestStandDocketWarrant,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
