@@ -565,7 +565,7 @@ static TestResult TestStandRibbonUndone(void)
     MountBookSaid      said;
     uint64_t           digests[2];
     uint8_t            body[32];
-    uint32_t           fid;
+    uint64_t           fid;
     const char*        aside = StandRibbonAside(&w);
 
     if (aside)
@@ -573,7 +573,7 @@ static TestResult TestStandRibbonUndone(void)
     TEST_ASSERT(StandRibbonData(&w, digests), "two free blocks are written with a pattern");
     StandRibbonBorn(r1, w.fid, TAGFS_BLOCK_SIZE, w.free, 1, digests, 0, 0, 0);
     StandRibbonEmpty(r1, w.fid + 1u);
-    fid = (uint32_t)w.fid;
+    fid = w.fid;
     StandRibbonPut(r2, RIBBON_UNDONE, body, RibbonUndoneBodyPut(body, 1, UNDONE_NOT_LANDED, &fid, 1));
     TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);

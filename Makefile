@@ -557,6 +557,9 @@ RETURNFAIL_MARK = $(BUILDDIR)/.returnfail.$(if $(filter on,$(RETURNFAIL)),on,off
 #
 #   registry pool table integrity bitmap ledger flush done usechain stitch
 #   tally slot (a format-v2 Tally: before its nodes' flush, inside its slot)
+#   spared (a format-v2 stitch its toll spared the flush of its data, before
+#   its last flush) undone (before the first atom of the stitch that lays a
+#   mount's verdict down — that stitch, anchored or not)
 #
 # tagfs/settle_cut/settle_cut.h is the one list of them; a value that is not on
 # it names an undeclared point and does not compile. Its mark lives apart from

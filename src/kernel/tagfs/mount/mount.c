@@ -14,6 +14,7 @@
 #include "../use_memory/use_memory.h"
 #include "../glean/glean.h"
 #include "../scribe/scribe.h"
+#include "errata.h"
 
 /*
  * The mount's read of the volume (mount.h). Everything here runs with the
@@ -605,6 +606,11 @@ error_t MountReadVolume(const char** what)
 
 void MountAfterDoor(void)
 {
+    /* A book whose mount holds a verdict asks for the session's first cycle
+     * at once: it lays the verdict down (mount/errata.h, §3.5). After the
+     * cadence was reset for this mount, which forgets every demand. */
+    if (tagfs_get_state()->format == DEED_FORMAT_V2)
+        ErrataAsk();
     if (tagfs_get_state()->format != DEED_FORMAT_V1)
         return;
 

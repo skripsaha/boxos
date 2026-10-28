@@ -90,6 +90,7 @@ typedef struct RoadsteadBerth {
     void*              theirs_ctx;
     uint32_t           seating;
     uint8_t            seat;
+    uint64_t           issued;     /* the TSC as the room handed it to the seat: what the read took (read_pace.h) */
 #ifdef CONFIG_VOLUME_TESTS
     /* BLOCKFAIL let the sectors before the plan's first one go out as their
      * own command: their answer becomes the refusal the caller was to hear. */

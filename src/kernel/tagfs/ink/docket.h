@@ -130,9 +130,11 @@ void  DocketSettled(DocketTaken* t, uint64_t seq);
 
 /* By the Settle's holder with no lock, as the stitch is built of *t: the
  * records its Jots become at the most, the bytes they take with their tags
- * and lengths, the longest body, and the most tags one Jot's two records wear
- * between them — each changed file's splices found on the way (DocketMeasure,
- * ERR_NO_MEMORY for no room for them); and those records laid into `out` from
+ * and lengths, the longest body, the most tags one Jot's two records wear
+ * between them, and the runs of fresh data they will name and its blocks —
+ * what a mount's check of the stitch reads (StitchToll) — each changed
+ * file's splices found on the way (DocketMeasure, ERR_NO_MEMORY for no room
+ * for them); and those records laid into `out` from
  * *at by fid — a Born of the file as it stands, its runs and their digests; a
  * Shaped of how its data changed since what settled, then a Labeled of what
  * else differs; a Quitclaim of what settled; nothing for a Jot whose two
@@ -140,7 +142,8 @@ void  DocketSettled(DocketTaken* t, uint64_t seq);
  * the blocks of fresh data they name added to *fresh (Clasp.fresh), each Jot
  * told whether the stitch carries it (DocketLay). ERR_NO_MEMORY for the room
  * its tags are put in order in, and the runs and digests laid apart first. */
-error_t DocketMeasure(DocketTaken* t, uint64_t* records, uint64_t* bytes, uint64_t* body, uint32_t* tags);
+error_t DocketMeasure(DocketTaken* t, uint64_t* records, uint64_t* bytes, uint64_t* body, uint32_t* tags,
+                      uint64_t* runs, uint64_t* fresh);
 error_t DocketLay(DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uint32_t* at, uint8_t* body,
                   uint32_t* starts, uint32_t* n, uint64_t* fresh);
 

@@ -16,7 +16,7 @@
 
 /* The golden stitch's records, as the header's comment lays them down. */
 static const uint32_t g_golden_tags[]   = { 3, 5, 300 };
-static const uint32_t g_golden_undone[] = { 5, 6 };
+static const uint64_t g_golden_undone[] = { 5, 6 };
 static const uint32_t g_golden_add[]    = { 9 };
 static const uint32_t g_golden_drop[]   = { 3 };
 static const uint32_t g_golden_scope[]  = { 2, 3 };
@@ -363,12 +363,35 @@ out:
     return verdict;
 }
 
+/* An Undone names a file by all 64 bits of its id (§16.5 п.5): over fids 5
+ * and 2^32 + 7, the bytes volume-read's own codec lays
+ * (tools/volumeread/selftest_book_errata.py, UNDONE_WIDE_GOLDEN) — and read
+ * back as they were laid. */
+static TestResult TestRibbonUndoneWide(void)
+{
+    static const uint64_t fids[2] = { 5, (1ull << 32) + 7u };
+    static const uint8_t  golden[] = { 0x06, 0x09, 0x01, 0x01, 0x02, 0x05, 0x81, 0x80, 0x80, 0x80, 0x10 };
+    TestResult   verdict = TEST_PASS;
+    uint8_t      body[64], out[80];
+    RibbonUndone d;
+    uint32_t     used = 0, at = 0, len = RibbonUndoneBodyPut(body, 1, UNDONE_NOT_LANDED, fids, 2);
+    uint32_t     n = RibbonRecordPut(out, RIBBON_UNDONE, 0, body, len);
+    uint64_t     id = 0;
+    TEST_ASSERT(n == sizeof(golden) && memcmp(out, golden, n) == 0, "the record is volume-read's, byte for byte");
+    TEST_ASSERT(RibbonUndoneGet(body, len, &d, &used) != TALLY_BODY_BROKEN && d.nfid == 2, "it reads back");
+    TEST_ASSERT(TallyIdNext(d.fids, d.fids_bytes, &at, &id, 1) && id == 5, "its first fid is 5");
+    TEST_ASSERT(TallyIdNext(d.fids, d.fids_bytes, &at, &id, 0) && id == fids[1], "and its second 2^32 + 7");
+out:
+    return verdict;
+}
+
 static const TestCase g_ribbon_tests[] = {
     { .name = "golden_stitch",   .func = TestRibbonGoldenStitch,  .reach = TEST_READS_ONLY },
     { .name = "records_cut",     .func = TestRibbonRecordsCut,    .reach = TEST_READS_ONLY },
     { .name = "records_circle",  .func = TestRibbonRecordsCircle, .reach = TEST_READS_ONLY },
     { .name = "runs_and_shape",  .func = TestRibbonRunsAndShape,  .reach = TEST_READS_ONLY },
     { .name = "unit_names",      .func = TestRibbonUnitNames,     .reach = TEST_READS_ONLY },
+    { .name = "undone_wide",     .func = TestRibbonUndoneWide,    .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_ribbon_suite = {

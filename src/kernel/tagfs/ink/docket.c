@@ -350,9 +350,36 @@ static void JotMeasured(const Jot* j, uint64_t* records, uint64_t* bytes, uint64
     }
 }
 
-error_t DocketMeasure(DocketTaken* t, uint64_t* records, uint64_t* bytes, uint64_t* body, uint32_t* tags)
+/* The runs of fresh data the records of `j` will name, and their blocks:
+ * every DATA Strip of a Born, every DATA Strip a Shaped's splices put in —
+ * the ones DocketLay lays with a digest each (JotRunPut). */
+static void JotFresh(const Jot* j, uint64_t* runs, uint64_t* fresh)
 {
-    *records = *bytes = *body = 0;
+    Strip     s;
+    StripWalk w;
+    if (j->kind == JOT_BORN) {
+        StripWalkBegin(j->now, &w);
+        while (StripWalkNext(&w, &s))
+            if (s.kind != STRIP_HOLE) {
+                (*runs)++;
+                *fresh += s.count;
+            }
+        return;
+    }
+    if ((j->kind != JOT_LABELED && j->kind != JOT_SHAPED) || !JotShapes(j))
+        return;
+    for (uint64_t i = 0; i < j->nsplices; i++)
+        for (uint64_t k = 0; k < j->splices[i].ninsert; k++)
+            if (j->splices[i].insert[k].kind != STRIP_HOLE) {
+                (*runs)++;
+                *fresh += j->splices[i].insert[k].count;
+            }
+}
+
+error_t DocketMeasure(DocketTaken* t, uint64_t* records, uint64_t* bytes, uint64_t* body, uint32_t* tags,
+                      uint64_t* runs, uint64_t* fresh)
+{
+    *records = *bytes = *body = *runs = *fresh = 0;
     *tags = 0;
     for (Jot* j = t->first; j; j = j->next[0]) {
         JotSplicesLetGo(j);
@@ -363,6 +390,7 @@ error_t DocketMeasure(DocketTaken* t, uint64_t* records, uint64_t* bytes, uint64
         }
         uint32_t worn = (j->now ? j->now->tag_count : 0u) + (j->was ? j->was->tag_count : 0u);
         JotMeasured(j, records, bytes, body);
+        JotFresh(j, runs, fresh);
         *tags = worn > *tags ? worn : *tags;
     }
     return OK;

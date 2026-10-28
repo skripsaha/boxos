@@ -131,6 +131,16 @@ static inline uint32_t RibbonIdsPut(uint8_t *out, const uint32_t *ids, uint32_t 
     return at + TallyIdsPut(out + at, ids, n);
 }
 
+/* A rising list of file ids, written as every list of ids is (RibbonIdsPut):
+ * a file id is 64 bits wide (§2.2), and one rule with stitch.py's IdsPut. */
+static inline uint32_t RibbonFidsPut(uint8_t *out, const uint64_t *fids, uint32_t n)
+{
+    uint32_t at = BookVarintPut(out, n);
+    for (uint32_t i = 0; i < n; i++)
+        at += BookVarintPut(out + at, i ? fids[i] - fids[i - 1] - 1u : fids[0]);
+    return at;
+}
+
 /* Such a list read whole from *at: its count in *n, its ids pointed at in
  * *ids for *bytes bytes, each walked again by TallyIdNext. 0 when it does not
  * read, or passes 2^64 - 1. */
@@ -678,12 +688,12 @@ static inline int RibbonCoinedGet(const uint8_t *b, uint32_t len, uint64_t *id, 
 /* Undone — a mount's verdict that outlives the next mount (H-1): seq_back ·
  * why · fids (count, rising) — every record of these fids in the stitch
  * seq_back before this one is passed over. */
-static inline uint32_t RibbonUndoneBodyPut(uint8_t *out, uint64_t seq_back, uint64_t why, const uint32_t *fids,
+static inline uint32_t RibbonUndoneBodyPut(uint8_t *out, uint64_t seq_back, uint64_t why, const uint64_t *fids,
                                            uint32_t n)
 {
     uint32_t at = BookVarintPut(out, seq_back);
     at += BookVarintPut(out + at, why);
-    return at + RibbonIdsPut(out + at, fids, n);
+    return at + RibbonFidsPut(out + at, fids, n);
 }
 
 typedef struct {

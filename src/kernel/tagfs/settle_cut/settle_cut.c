@@ -10,7 +10,7 @@
 /* The Makefile hands the point over as SETTLE_CUT_POINT_<VALUE>; a value that
  * names no point is an undeclared identifier and never gets this far. */
 _Static_assert(CONFIG_TAGFS_SETTLE_CUT_POINT >= SETTLE_CUT_POINT_REGISTRY &&
-               CONFIG_TAGFS_SETTLE_CUT_POINT <= SETTLE_CUT_POINT_SLOT,
+               CONFIG_TAGFS_SETTLE_CUT_POINT <= SETTLE_CUT_POINT_UNDONE,
                "SETTLECUT names no point of the Settle cycle");
 
 static const char *const SettleCutWhere[] = {
@@ -26,6 +26,8 @@ static const char *const SettleCutWhere[] = {
     [SETTLE_CUT_POINT_STITCH]    = "before the stitch's last atom is written",
     [SETTLE_CUT_POINT_TALLY]     = "before a Tally's flush, its nodes written and no slot naming them",
     [SETTLE_CUT_POINT_SLOT]      = "before the second half of a Tally's slot is written",
+    [SETTLE_CUT_POINT_SPARED]    = "before the last flush of a stitch whose toll spared the flush of its data",
+    [SETTLE_CUT_POINT_UNDONE]    = "before the first atom of the stitch that lays the mount's verdict down",
 };
 
 static volatile uint32_t g_settle_cycles;       /* cycles that took their snapshot */
@@ -36,11 +38,23 @@ static volatile uint32_t g_settle_cut_made;
 void SettleCutSayArmed(void)
 {
     __atomic_store_n(&g_settle_anchor, 0, __ATOMIC_RELEASE);
+    /* The verdict's stitch is the session's first, asked at the door's opening
+     * before any program can anchor (mount.c, ErrataAsk) — so that point waits
+     * for no anchor, and says so in a sentence of its own: the anchored one is
+     * the sentence PowerCut's settlecut waits for (tools/powercut.sh,
+     * SC_ARMED_ERE), held word for word to this file by its selftest. */
+    if (CONFIG_TAGFS_SETTLE_CUT_POINT == SETTLE_CUT_POINT_UNDONE) {
+        kprintf("[SETTLECUT] armed for the verdict: the first stitch to reach point %u of %u, "
+                "%s, stops this machine there, anchored or not\n",
+                (unsigned)CONFIG_TAGFS_SETTLE_CUT_POINT, (unsigned)SETTLE_CUT_POINT_UNDONE,
+                SettleCutWhere[CONFIG_TAGFS_SETTLE_CUT_POINT]);
+        return;
+    }
     kprintf("[SETTLECUT] armed: the first cycle to reach point %u of %u, %s, with the "
             "change of the first anchor after this line in its snapshot stops this "
             "machine there\n",
             (unsigned)CONFIG_TAGFS_SETTLE_CUT_POINT,
-            (unsigned)SETTLE_CUT_POINT_SLOT,
+            (unsigned)SETTLE_CUT_POINT_UNDONE,
             SettleCutWhere[CONFIG_TAGFS_SETTLE_CUT_POINT]);
 }
 
@@ -84,7 +98,7 @@ void SettleCutAt(SettleCutPoint here)
         return;
     uint64_t anchor = __atomic_load_n(&g_settle_anchor, __ATOMIC_ACQUIRE);
     uint64_t target = __atomic_load_n(&g_settle_target, __ATOMIC_ACQUIRE);
-    if (anchor == 0 || target < anchor)
+    if (here != SETTLE_CUT_POINT_UNDONE && (anchor == 0 || target < anchor))
         return;                 /* a cycle of the cadence's own, not the anchor's */
     if (__atomic_exchange_n(&g_settle_cut_made, 1u, __ATOMIC_ACQ_REL) != 0)
         return;                 /* the first passage, on any core, is the cut */
@@ -110,7 +124,7 @@ void SettleCutAt(SettleCutPoint here)
             "this boot, whose snapshot reaches Ink %llu of the anchor's %llu, on "
             "core %u — %u of the %u other core(s) answered the roll call and run "
             "no more, and nothing after this point was issued to the medium\n",
-            (unsigned)here, (unsigned)SETTLE_CUT_POINT_SLOT,
+            (unsigned)here, (unsigned)SETTLE_CUT_POINT_UNDONE,
             SettleCutWhere[here], cycle, (unsigned long long)target,
             (unsigned long long)anchor, (unsigned)me, answered,
             (unsigned)(g_amp.total_cores ? g_amp.total_cores - 1u : 0u));

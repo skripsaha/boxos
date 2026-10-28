@@ -177,6 +177,16 @@ typedef struct {
     uint8_t* text;
 } BookTagAside;
 
+/* A stitch the mount's verdict undoes (errata.h): its seq, why, and the files
+ * it rolls back — rising, each once, when the replay is done. */
+typedef struct {
+    uint64_t  seq;
+    uint64_t  why;
+    uint64_t* fids;
+    uint32_t  nfids;
+    uint32_t  capfids;
+} BookErratum;
+
 typedef struct {
     VolumeFrame    frame;
     uint64_t       data_end;     /* the far Deed's block: the data run is [frame.data_block, data_end) */
@@ -224,6 +234,12 @@ typedef struct {
     bool           binder_short; /* memory would not hold what the slots hold for the writer of a Tally */
     EndpaperLaid   laid;         /* what the Tally stood on laid of FILES, TAGS and DIGESTS (endpaper_fact.h) */
     uint64_t       laid_tree;    /* the tree of it being walked */
+    BookErratum*   errata;       /* the mount's verdict, in order of seq and why (errata.h) */
+    uint32_t       nerrata;
+    uint32_t       caperrata;
+    uint64_t*      wear;         /* the files it rolls back, rising, each once: settle:undone owed them */
+    uint32_t       nwear;
+    uint32_t       worn;         /* of them, the ones the Ink of the tag is done for */
 } BookMount;
 
 extern BookMount g_book;

@@ -205,10 +205,12 @@ error_t InkVolumeTakes(void)
 /* Whether the volume takes a change not begun yet: none once a stopping
  * machine's halt shut it (TagFSShutForHalt). Asked in the first half alone — a
  * change begun before the shut is the halt's to settle, and a write's bytes may
- * already stand in place. */
+ * already stand in place. The settle:undone a mount's verdict owes is put on by
+ * the cycle itself before its snapshot, on the core that holds it — on that
+ * cycle's books, a halt's too (sewing.c, StitchWorn). */
 error_t InkVolumeBegins(void)
 {
-    if (SettleHalting())
+    if (SettleHalting() && !StitchWearsVerdict())
         return ERR_DEVICE_NOT_READY;
     return InkVolumeTakes();
 }
@@ -315,9 +317,12 @@ static bool InkWearsLazy(const FileRecord* cur)
  * Whether a write is a frequent small writer's (settle.h), told by what it
  * does: it grew the file by data that cost the medium less time than the last
  * Settle cycle did — settling it would cost more than it — and the file's last
- * change was such an append too, less than a Lull ago. Both measures are the
- * medium's own, measured; nothing here is a number of bytes or of writes.
- * `small` says whether this one is such an append, for the next to ask.
+ * change was such an append too, less than a while ago: on a book the window
+ * itself (§3.7, В5 — such a writer's cycles come at most one a window), on
+ * format v1 a Lull, as it ever was (§16.5 п.8: format v1 is frozen, its
+ * behaviour with it). Both measures are the medium's own, measured; nothing
+ * here is a number of bytes or of writes. `small` says whether this one is
+ * such an append, for the next to ask.
  */
 static bool InkPlotLazy(const Plot* p, const FileRecord* cur, uint64_t now_us, bool* small)
 {
@@ -326,7 +331,7 @@ static bool InkPlotLazy(const Plot* p, const FileRecord* cur, uint64_t now_us, b
     if (InkWearsLazy(cur))
         return true;
     return *small && cur->small_append_us != 0 && now_us > cur->small_append_us &&
-           now_us - cur->small_append_us < SettleLullUs();
+           now_us - cur->small_append_us < (p->book ? SETTLE_WINDOW_US : SettleLullUs());
 }
 
 /* The tags the Plot was loaded with are the ones asked, with the warrant it
