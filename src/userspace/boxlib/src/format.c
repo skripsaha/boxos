@@ -12,16 +12,15 @@
 
 #include "box/core/format.h"
 
-#include <float.h>
-#include <stddef.h>
-
 #include "box/string.h"
 
 #define BOX_FORMAT_INT_MAX 0x7FFFFFFF
 
-/* %j's types, which box/defs.h does not name. */
+/* The types and the width C names in headers BoxLib does not take from the
+ * compiler: %j's, %ls's characters, and the long double's significand. */
 typedef __INTMAX_TYPE__ BoxFormatIntMax;
 typedef __UINTMAX_TYPE__ BoxFormatUintMax;
+typedef __WCHAR_TYPE__ BoxFormatWide;
 
 typedef struct {
     uint8_t Left;        /* '-' */
@@ -168,7 +167,7 @@ static void BoxFormatText(BoxFormatOut *Out, const BoxFormatSpec *Spec, const ch
  * character. */
 static void BoxFormatString(BoxFormatOut *Out, const BoxFormatSpec *Spec, const void *Argument)
 {
-    const wchar_t *Wide = (const wchar_t *)Argument;
+    const BoxFormatWide *Wide = (const BoxFormatWide *)Argument;
     size_t Bytes = 0;
     size_t Index;
     size_t After;
@@ -254,7 +253,7 @@ static void BoxFormatDecodeDouble(double Value, BoxFormatFloat *Out)
 
 static void BoxFormatDecodeLongDouble(long double Value, BoxFormatFloat *Out)
 {
-#if LDBL_MANT_DIG == 64
+#if __LDBL_MANT_DIG__ == 64
     /* x87 extended: 64 significand bits, the integer bit among them, then 15
      * bits of exponent and the sign. */
     unsigned char Raw[sizeof(long double)];
@@ -280,7 +279,7 @@ static void BoxFormatDecodeLongDouble(long double Value, BoxFormatFloat *Out)
         Out->Kind = BOX_FLOAT_FINITE;
         Out->Exponent = (int32_t)Field - 16446;
     }
-#elif LDBL_MANT_DIG == 53
+#elif __LDBL_MANT_DIG__ == 53
     BoxFormatDecodeDouble((double)Value, Out);
 #else
 #error "long double is neither binary64 nor x87 extended"

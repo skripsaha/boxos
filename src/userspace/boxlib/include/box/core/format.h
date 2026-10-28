@@ -1,8 +1,6 @@
 #ifndef BOX_CORE_FORMAT_H
 #define BOX_CORE_FORMAT_H
 
-#include <stdarg.h>
-
 #include "box/defs.h"
 
 /* Where formatted text goes. Put receives it in order, in pieces of any
