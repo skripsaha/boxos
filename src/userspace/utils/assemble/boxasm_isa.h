@@ -24,7 +24,16 @@ typedef enum {
     BOXASM_CLASS_REL,        /* a branch target */
     BOXASM_CLASS_RM8,        /* a register or memory of exactly 1 byte */
     BOXASM_CLASS_RM16,
-    BOXASM_CLASS_RM32
+    BOXASM_CLASS_RM32,
+    BOXASM_CLASS_XMM,        /* an xmm register, in ModRM.reg */
+    BOXASM_CLASS_XMM_R,      /* an xmm register, in ModRM.rm */
+    BOXASM_CLASS_XMM_M32,    /* an xmm register or 4 bytes of memory, in ModRM.rm */
+    BOXASM_CLASS_XMM_M64,    /* an xmm register or 8 bytes of memory */
+    BOXASM_CLASS_XMM_M128,   /* an xmm register or 16 bytes of memory on a 16-byte boundary */
+    BOXASM_CLASS_XMM_U128,   /* an xmm register or 16 bytes of memory anywhere (movups) */
+    BOXASM_CLASS_M64,        /* 8 bytes of memory */
+    BOXASM_CLASS_M128,       /* 16 bytes of memory on a 16-byte boundary */
+    BOXASM_CLASS_R32_M16     /* a 32- or 64-bit register, or 2 bytes of memory (pinsrw) */
 } BoxAsmOperandClass;
 
 #define BOXASM_SIZE_8   0x1u
@@ -44,6 +53,7 @@ typedef enum {
 #define BOXASM_FORM_AS32       0x10u  /* encoded as the 32-bit operation (mov r64, u32) */
 #define BOXASM_FORM_NOT_EAX    0x20u  /* not with eax as the +r register (xchg eax, eax) */
 #define BOXASM_FORM_REX_W      0x40u  /* REX.W whatever the size (cmpxchg16b) */
+#define BOXASM_FORM_PREDICATE  0x80u  /* the statement's condition follows as an imm8 (cmpltps) */
 
 typedef struct {
     uint8_t Class[3];

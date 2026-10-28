@@ -9,7 +9,8 @@ typedef enum {
     BOXASM_MISMATCH_OPERANDS = 0,
     BOXASM_MISMATCH_UNSIZED,
     BOXASM_MISMATCH_SIZE,
-    BOXASM_MISMATCH_RANGE
+    BOXASM_MISMATCH_RANGE,
+    BOXASM_MISMATCH_MEMORY      /* memory of another size than the form reads */
 } BoxAsmMismatch;
 
 typedef struct {
@@ -20,6 +21,7 @@ typedef struct {
     uint8_t                Count;
     uint8_t                OperationSize;   /* bytes; 0 for a form without one */
     uint8_t                OnlySize;        /* the instruction's one size, 0 when it has several */
+    uint8_t                MemoryWanted;    /* MISMATCH_MEMORY: the bytes the form reads */
     BoxAsmEncoding        *Out;
     uint8_t                Rex;
     uint8_t                HasHigh8;
@@ -109,8 +111,28 @@ static int BoxAsmIsMemory(const BoxAsmOperand *Operand, uint8_t Size)
            (Operand->Size == 0 || Operand->Size == Size);
 }
 
-static int BoxAsmClassMatches(const BoxAsmOperand *Operand, uint8_t Class, uint8_t Size,
-                              BoxAsmMismatch *Why)
+static int BoxAsmIsXmm(const BoxAsmOperand *Operand)
+{
+    return Operand->Kind == BOXASM_OPERAND_REGISTER &&
+           Operand->Register.Class == BOXASM_REGISTER_XMM;
+}
+
+/* Memory of Bytes for a form that reads exactly that many; memory said to be
+ * of another size is noted, so the refusal can say what the form reads. */
+static int BoxAsmIsMemoryOf(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand,
+                            uint8_t Bytes, BoxAsmMismatch *Why)
+{
+    if (BoxAsmIsMemory(Operand, Bytes))
+        return 1;
+    if (Operand->Kind == BOXASM_OPERAND_MEMORY) {
+        *Why = BOXASM_MISMATCH_MEMORY;
+        Encoder->MemoryWanted = Bytes;
+    }
+    return 0;
+}
+
+static int BoxAsmClassMatches(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand,
+                              uint8_t Class, uint8_t Size, BoxAsmMismatch *Why)
 {
     int Immediate = Operand->Kind == BOXASM_OPERAND_IMMEDIATE &&
                     (Operand->Size == 0 || Operand->Size == Size);
@@ -146,6 +168,17 @@ static int BoxAsmClassMatches(const BoxAsmOperand *Operand, uint8_t Class, uint8
                                       (Operand->Kind == BOXASM_OPERAND_MEMORY && Operand->Size == 2);
     case BOXASM_CLASS_RM32:    return BoxAsmIsRegister(Operand, 4) ||
                                       (Operand->Kind == BOXASM_OPERAND_MEMORY && Operand->Size == 4);
+    case BOXASM_CLASS_XMM:
+    case BOXASM_CLASS_XMM_R:   return BoxAsmIsXmm(Operand);
+    case BOXASM_CLASS_XMM_M32: return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 4, Why);
+    case BOXASM_CLASS_XMM_M64: return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 8, Why);
+    case BOXASM_CLASS_XMM_M128:
+    case BOXASM_CLASS_XMM_U128: return BoxAsmIsXmm(Operand) ||
+                                       BoxAsmIsMemoryOf(Encoder, Operand, 16, Why);
+    case BOXASM_CLASS_M64:     return BoxAsmIsMemoryOf(Encoder, Operand, 8, Why);
+    case BOXASM_CLASS_M128:    return BoxAsmIsMemoryOf(Encoder, Operand, 16, Why);
+    case BOXASM_CLASS_R32_M16: return BoxAsmIsRegister(Operand, 4) || BoxAsmIsRegister(Operand, 8) ||
+                                      BoxAsmIsMemoryOf(Encoder, Operand, 2, Why);
     default:                   return 0;
     }
 }
@@ -167,6 +200,8 @@ static uint8_t BoxAsmOperationSize(const BoxAsmEncoder *Encoder, const BoxAsmFor
         if (Class != BOXASM_CLASS_REG && Class != BOXASM_CLASS_RM &&
             Class != BOXASM_CLASS_MEM && Class != BOXASM_CLASS_ACC &&
             Class != BOXASM_CLASS_IMM)
+            continue;
+        if (BoxAsmIsXmm(Operand))       /* never a general operand: the class refuses it */
             continue;
         Own = Operand->Kind == BOXASM_OPERAND_REGISTER ? Operand->Register.Size : Operand->Size;
         if (Own == 0)
@@ -203,7 +238,7 @@ static int BoxAsmFormMatches(BoxAsmEncoder *Encoder, const BoxAsmForm *Form, uin
          (Form->Sizes & BoxAsmSizeBit(Encoder->OperationSize)) == 0))
         return 0;
     for (Index = 0; Index < Count; Index++)
-        if (!BoxAsmClassMatches(&Encoder->Operands[Index], Form->Class[Index],
+        if (!BoxAsmClassMatches(Encoder, &Encoder->Operands[Index], Form->Class[Index],
                                 Encoder->OperationSize, Why))
             return 0;
     if ((Form->Flags & BOXASM_FORM_NOT_EAX) != 0 && Encoder->OperationSize == 4 &&
@@ -239,7 +274,7 @@ static int BoxAsmPutField(BoxAsmEncoder *Encoder, const BoxAsmValue *Value, uint
         if (Out->FixupCount == sizeof(Out->Fixups) / sizeof(Out->Fixups[0]))
             return -ERR_INVALID_STATE;
         Out->Fixups[Out->FixupCount++] = (BoxAsmFixup){
-            Kind, Out->Length, Width, TakesAddress, *Value
+            Kind, Out->Length, Width, TakesAddress, 0, *Value
         };
     }
     return BoxAsmPut(Encoder, &Constant, Width);
@@ -343,7 +378,15 @@ static int BoxAsmIsRmClass(uint8_t Class)
 {
     return Class == BOXASM_CLASS_RM || Class == BOXASM_CLASS_MEM ||
            Class == BOXASM_CLASS_ADDRESS || Class == BOXASM_CLASS_RM8 ||
-           Class == BOXASM_CLASS_RM16 || Class == BOXASM_CLASS_RM32;
+           Class == BOXASM_CLASS_RM16 || Class == BOXASM_CLASS_RM32 ||
+           (Class >= BOXASM_CLASS_XMM_R && Class <= BOXASM_CLASS_R32_M16);
+}
+
+/* Whether the memory an r/m of this class names must sit on 16 bytes: a
+ * packed SSE operand, but for the instructions made to read it anywhere. */
+static int BoxAsmClassAligned(uint8_t Class)
+{
+    return Class == BOXASM_CLASS_XMM_M128 || Class == BOXASM_CLASS_M128;
 }
 
 static int BoxAsmIsImmediateClass(uint8_t Class)
@@ -401,7 +444,8 @@ static uint8_t BoxAsmRegField(BoxAsmEncoder *Encoder)
     if (Encoder->Form->Digit != BOXASM_DIGIT_REG)
         return Encoder->Form->Digit;
     for (Index = 0; Index < Encoder->Count; Index++) {
-        if (Encoder->Form->Class[Index] == BOXASM_CLASS_REG) {
+        if (Encoder->Form->Class[Index] == BOXASM_CLASS_REG ||
+            Encoder->Form->Class[Index] == BOXASM_CLASS_XMM) {
             uint8_t Number = Encoder->Operands[Index].Register.Number;
             if (Number >= 8)
                 Encoder->Rex |= 0x44;
@@ -482,11 +526,20 @@ static int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
     if ((Rc = BoxAsmPut(Encoder, Opcode, Form->OpcodeLength)) != 0 ||
         (Rc = BoxAsmPut(Encoder, Address, AddressLength)) != 0)
         return Rc;
-    if (DisplacementWidth != 0 &&
-        (Rc = BoxAsmPutField(Encoder, &Displacement, DisplacementWidth, DisplacementKind,
-                             Form->Class[RmIndex] == BOXASM_CLASS_ADDRESS)) != 0)
+    if (DisplacementWidth != 0) {
+        uint8_t Before = Encoder->Out->FixupCount;
+
+        if ((Rc = BoxAsmPutField(Encoder, &Displacement, DisplacementWidth, DisplacementKind,
+                                 Form->Class[RmIndex] == BOXASM_CLASS_ADDRESS)) != 0)
+            return Rc;
+        if (Encoder->Out->FixupCount != Before && BoxAsmClassAligned(Form->Class[RmIndex]))
+            Encoder->Out->Fixups[Before].Aligned = 16;
+    }
+    if ((Rc = BoxAsmPutImmediates(Encoder, Short)) != 0)
         return Rc;
-    return BoxAsmPutImmediates(Encoder, Short);
+    if (Form->Flags & BOXASM_FORM_PREDICATE)
+        return BoxAsmPut(Encoder, &Encoder->Statement->Condition, 1);
+    return 0;
 }
 
 /* Whether the prefix the source wrote goes with the instruction and the
@@ -512,19 +565,25 @@ static int BoxAsmCheckPrefix(BoxAsmEncoder *Encoder)
             Why = "lock needs a memory destination: the first operand of ";
         break;
     case BOXASM_PREFIX_REP:
-        if (Instruction->Takes & BOXASM_TAKES_REPE)
+        if (!(Instruction->Takes & (BOXASM_TAKES_REP | BOXASM_TAKES_REPE)))
+            Why = "rep goes only on movs, stos and lods, not on ";
+        else if (Encoder->Count != 0)
+            Why = "rep repeats only a string instruction, written without operands, "
+                  "not this form of ";
+        else if (Instruction->Takes & BOXASM_TAKES_REPE)
             Why = "say when to stop with repe (while equal) or repne (while not equal), "
                   "not rep, before ";
-        else if (!(Instruction->Takes & BOXASM_TAKES_REP))
-            Why = "rep goes only on movs, stos and lods, not on ";
         break;
     case BOXASM_PREFIX_REPE:
     case BOXASM_PREFIX_REPNE:
-        if (!(Instruction->Takes & BOXASM_TAKES_REPE))
-            Why = (Instruction->Takes & BOXASM_TAKES_REP)
-                  ? "movs, stos and lods repeat with rep; repe and repne go on cmps and "
-                    "scas, not on "
-                  : "repe and repne go only on cmps and scas, not on ";
+        if (!(Instruction->Takes & (BOXASM_TAKES_REP | BOXASM_TAKES_REPE)))
+            Why = "repe and repne go only on cmps and scas, not on ";
+        else if (Encoder->Count != 0)
+            Why = "repe and repne repeat only cmps or scas, written without operands, "
+                  "not this form of ";
+        else if (!(Instruction->Takes & BOXASM_TAKES_REPE))
+            Why = "movs, stos and lods repeat with rep; repe and repne go on cmps and "
+                  "scas, not on ";
         break;
     default:
         break;
@@ -550,6 +609,17 @@ static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
         break;
     case BOXASM_MISMATCH_SIZE:
         BoxAsmMessageText(&Message, "the operands are of different sizes for ");
+        break;
+    case BOXASM_MISMATCH_MEMORY:
+        BoxAsmMessageText(&Message, "the memory is read as ");
+        BoxAsmMessageDecimal(&Message, Encoder->MemoryWanted);
+        BoxAsmMessageText(&Message, Encoder->MemoryWanted == 16
+                                    ? " bytes (oword, or no size) by "
+                                    : Encoder->MemoryWanted == 8
+                                    ? " bytes (qword, or no size) by "
+                                    : Encoder->MemoryWanted == 4
+                                    ? " bytes (dword, or no size) by "
+                                    : " bytes (word, or no size) by ");
         break;
     case BOXASM_MISMATCH_RANGE: {
         uint8_t At;

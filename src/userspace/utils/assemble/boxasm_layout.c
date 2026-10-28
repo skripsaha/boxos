@@ -316,6 +316,42 @@ static int BoxAsmShortReachFails(BoxAsmAssembler *Asm, const BoxAsmStatement *St
     return BoxAsmFailEnd(Asm, &Statement->Where, &Message);
 }
 
+/* Memory that a packed SSE operation reads or writes must sit on its
+ * boundary, or the processor stops the program (#GP). Named by a label of
+ * the program, it is known to sit there only when the label does and its
+ * section is aligned at least as far; a name from outside is the linker's. */
+static int BoxAsmCheckAligned(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement,
+                              const BoxAsmFixup *Fixup)
+{
+    const BoxAsmSymbol *Symbol;
+    BoxAsmMessage Message;
+    uint64_t Offset;
+
+    if (Fixup->Aligned == 0 || Fixup->Value.Symbol == 0)
+        return 0;
+    Symbol = &Asm->Symbols[Fixup->Value.Symbol];
+    if (Symbol->Kind != BOXASM_SYMBOL_LABEL && Symbol->Kind != BOXASM_SYMBOL_SECTION)
+        return 0;
+    Offset = (Symbol->Kind == BOXASM_SYMBOL_LABEL ? Symbol->Offset : 0) +
+             (uint64_t)Fixup->Value.Constant;
+    if (Offset % Fixup->Aligned == 0 && Asm->Sections[Symbol->Section].Align >= Fixup->Aligned)
+        return 0;
+    BoxAsmFailBegin(Asm, &Statement->Where, &Message);
+    BoxAsmMessageName(&Message, Statement->Instruction->Name);
+    BoxAsmMessageText(&Message, " needs its memory on a ");
+    BoxAsmMessageDecimal(&Message, Fixup->Aligned);
+    BoxAsmMessageText(&Message, "-byte boundary, and ");
+    BoxAsmMessageName(&Message, Symbol->Name);
+    if (Fixup->Value.Constant != 0) {
+        BoxAsmMessageText(&Message, Fixup->Value.Constant > 0 ? " +" : " ");
+        BoxAsmMessageDecimal(&Message, Fixup->Value.Constant);
+    }
+    BoxAsmMessageText(&Message, Offset % Fixup->Aligned != 0
+                                ? " is not on one: put align 16 before the data"
+                                : " is not known to be: put align 16 before the data");
+    return BoxAsmFailEnd(Asm, &Statement->Where, &Message);
+}
+
 /* A field resting on a symbol: a distance within the section is written now;
  * anything the linker must place becomes a relocation. */
 static int BoxAsmResolveFixup(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement,
@@ -330,6 +366,8 @@ static int BoxAsmResolveFixup(BoxAsmAssembler *Asm, const BoxAsmStatement *State
     int Rc;
 
     if (Fixup->TakesAddress && (Rc = BoxAsmNoteTaken(Asm, Value, &Statement->Where)) != 0)
+        return Rc;
+    if ((Rc = BoxAsmCheckAligned(Asm, Statement, Fixup)) != 0)
         return Rc;
     if (Fixup->Kind == BOXASM_FIXUP_RELATIVE || Fixup->Kind == BOXASM_FIXUP_BRANCH) {
         int Local;
@@ -416,7 +454,7 @@ static int BoxAsmEmitItem(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement
         (Rc = BoxAsmRangeFails(Asm, &Item->Where, Value.Constant, Statement->Width, 0)) != 0)
         return Rc;
     if (Value.Symbol != 0) {
-        Fixup = (BoxAsmFixup){ BOXASM_FIXUP_ABSOLUTE, 0, Statement->Width, 1, Value };
+        Fixup = (BoxAsmFixup){ BOXASM_FIXUP_ABSOLUTE, 0, Statement->Width, 1, 0, Value };
         if ((Rc = BoxAsmResolveFixup(Asm, Statement, Here, Statement->Width, &Fixup,
                                      (uint8_t *)&Field)) != 0)
             return Rc;

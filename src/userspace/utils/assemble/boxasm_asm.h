@@ -10,13 +10,14 @@ typedef enum {
     BOXASM_REGISTER_NONE = 0,
     BOXASM_REGISTER_GENERAL,    /* rax..r15 and their 32/16/8-bit names */
     BOXASM_REGISTER_HIGH8,      /* ah ch dh bh: no REX may accompany them */
-    BOXASM_REGISTER_RIP
+    BOXASM_REGISTER_RIP,
+    BOXASM_REGISTER_XMM         /* xmm0..xmm15 */
 } BoxAsmRegisterClass;
 
 typedef struct {
     uint8_t Class;
     uint8_t Number;     /* 0..15 */
-    uint8_t Size;       /* bytes: 1, 2, 4, 8 */
+    uint8_t Size;       /* bytes: 1, 2, 4, 8, 16 */
     uint8_t NeedsRex;   /* spl bpl sil dil */
 } BoxAsmRegister;
 
@@ -179,6 +180,7 @@ typedef struct {
     uint8_t     Offset;      /* of the field within the instruction */
     uint8_t     Width;       /* 1, 4 or 8 */
     uint8_t     TakesAddress;
+    uint8_t     Aligned;     /* the boundary the memory it names must sit on, 0 none */
     BoxAsmValue Value;
 } BoxAsmFixup;
 

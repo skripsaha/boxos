@@ -4,6 +4,9 @@
     boxasm_oracle.py corpus [nasm]       print the corpus: every supported form, in
                                          BoxASM's spelling or NASM's
     boxasm_oracle.py compare OURS NASM   compare two ELF objects of one source
+    boxasm_oracle.py floats ASM BYTES    write a program of floating-point data, ties
+                                         included, and the bytes of its .data rounded
+                                         exactly — the witness where NASM 3 is wrong
 
 The corpus is generated, not written by hand: every instruction with every
 operand class it takes, registers 0 to 15 of every width, the address forms,
@@ -19,9 +22,11 @@ the same byte, R_X86_64_PLT32 and PC32 compare equal, and a PC-relative
 reference inside its own section is applied before the bytes are compared.
 """
 
+import random
 import struct
 import subprocess
 import sys
+from fractions import Fraction
 
 REG64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"]
@@ -314,6 +319,190 @@ def atomic_lines():
     return out
 
 
+XMM = ["xmm%d" % n for n in range(16)]
+SSE_MEMORY = ["[rax]", "[rsp + 8]", "[r13]", "[rbx + rcx*4 + 16]", "[sse_data]"]
+FLOAT_OPS = ["add", "sub", "mul", "div", "min", "max", "sqrt"]
+FLOAT_TYPES = {"ps": "oword", "pd": "oword", "ss": "dword", "sd": "qword"}
+PACKED_OPS = ["and", "andn", "or", "xor", "unpckl", "unpckh"]
+PREDICATES = ["eq", "lt", "le", "unord", "neq", "nlt", "nle", "ord"]
+SSE_INTEGER = ["paddb", "paddw", "paddd", "paddq", "psubb", "psubw", "psubd", "psubq",
+               "paddsb", "paddsw", "paddusb", "paddusw", "psubsb", "psubsw", "psubusb",
+               "psubusw", "pmullw", "pmulhw", "pmulhuw", "pmuludq", "pmaddwd", "pavgb", "pavgw",
+               "pmaxsw", "pmaxub", "pminsw", "pminub", "psadbw", "pand", "pandn", "por", "pxor",
+               "pcmpeqb", "pcmpeqw", "pcmpeqd", "pcmpgtb", "pcmpgtw", "pcmpgtd", "packsswb",
+               "packssdw", "packuswb", "punpcklbw", "punpcklwd", "punpckldq", "punpcklqdq",
+               "punpckhbw", "punpckhwd", "punpckhdq", "punpckhqdq"]
+SSE_SHIFTS = ["psllw", "pslld", "psllq", "psrlw", "psrld", "psrlq", "psraw", "psrad"]
+
+
+def xmm_pairs():
+    return [(XMM[i], XMM[(i * 5 + 3) % 16]) for i in range(16)]
+
+
+def sse_operation(op, size_word):
+    """An xmm operation on every register pair and on memory, sized and not."""
+    out = ["%s %s, %s" % (op, a, b) for a, b in xmm_pairs()]
+    out += ["%s %s, %s" % (op, XMM[(i * 3) % 16], mem) for i, mem in enumerate(SSE_MEMORY)]
+    out.append("%s xmm11, %s [rdx + 32]" % (op, size_word))
+    return out
+
+
+def sse_lines():
+    """Every SSE and SSE2 instruction BoxASM has, in each of its forms."""
+    out = []
+    for op in FLOAT_OPS:
+        for kind, word in FLOAT_TYPES.items():
+            out += sse_operation(op + kind, word)
+    for op in PACKED_OPS:
+        for kind in ("ps", "pd"):
+            out += sse_operation(op + kind, "oword")
+    for op, word in (("rcpps", "oword"), ("rcpss", "dword"), ("rsqrtps", "oword"),
+                     ("rsqrtss", "dword"), ("comiss", "dword"), ("comisd", "qword"),
+                     ("ucomiss", "dword"), ("ucomisd", "qword"), ("cvtss2sd", "dword"),
+                     ("cvtsd2ss", "qword"), ("cvtps2pd", "qword"), ("cvtpd2ps", "oword"),
+                     ("cvtdq2ps", "oword"), ("cvtps2dq", "oword"), ("cvttps2dq", "oword"),
+                     ("cvtdq2pd", "qword"), ("cvtpd2dq", "oword"), ("cvttpd2dq", "oword")):
+        out += sse_operation(op, word)
+    for op in SSE_INTEGER:
+        out += sse_operation(op, "oword")
+    for kind, word in FLOAT_TYPES.items():
+        for predicate in PREDICATES:
+            out += ["cmp%s%s xmm2, xmm13" % (predicate, kind),
+                    "cmp%s%s xmm9, %s [rax]" % (predicate, kind, word)]
+        for imm in range(8):
+            out.append("cmp%s xmm%d, xmm%d, %d" % (kind, imm, 15 - imm, imm))
+        out.append("cmp%s xmm4, [rsp + 8], 6" % kind)
+    for op in ("shufps", "shufpd", "pshufd", "pshufhw", "pshuflw"):
+        out += ["%s %s, %s, 0x%02X" % (op, a, b, (i * 37) & 0xFF)
+                for i, (a, b) in enumerate(xmm_pairs()[:6])]
+        out.append("%s xmm10, [sse_data], 0x1B" % op)
+    for op in ("movaps", "movapd", "movups", "movupd", "movdqa", "movdqu"):
+        out += ["%s %s, %s" % (op, a, b) for a, b in xmm_pairs()[:8]]
+        for i, mem in enumerate(SSE_MEMORY):
+            out += ["%s %s, %s" % (op, XMM[(i * 7) % 16], mem),
+                    "%s %s, %s" % (op, mem, XMM[(i * 11) % 16])]
+    out += ["movups xmm1, [rax + 1]", "movdqu [rbx + 3], xmm12"]
+    for op, word in (("movss", "dword"), ("movsd", "qword")):
+        out += ["%s %s, %s" % (op, a, b) for a, b in xmm_pairs()[:8]]
+        out += ["%s xmm5, %s [rcx]" % (op, word), "%s %s [rcx + 4], xmm14" % (op, word),
+                "%s xmm8, [sse_data]" % op, "%s [sse_data], xmm0" % op]
+    for op in ("movlps", "movhps", "movlpd", "movhpd"):
+        out += ["%s xmm3, [rdi]" % op, "%s xmm12, qword [r9 + 8]" % op, "%s [rsi], xmm7" % op,
+                "%s [sse_data], xmm15" % op]
+    out += ["movhlps %s, %s" % pair for pair in xmm_pairs()[:6]]
+    out += ["movlhps %s, %s" % pair for pair in xmm_pairs()[:6]]
+    for i in range(16):
+        out += ["movd %s, %s" % (XMM[i], REG32[(i + 5) % 16]),
+                "movd %s, %s" % (REG32[(i + 9) % 16], XMM[i]),
+                "movq %s, %s" % (XMM[i], REG64[(i + 5) % 16]),
+                "movq %s, %s" % (REG64[(i + 9) % 16], XMM[i])]
+    out += ["movd xmm3, [rax]", "movd xmm11, dword [rsp + 4]", "movd [rbx], xmm6",
+            "movq xmm1, xmm9", "movq xmm13, [rdx]", "movq xmm2, qword [r12]",
+            "movq [rax], xmm10", "movq qword [rsp], xmm4"]
+    for i, reg in enumerate(("eax", "r9d", "rax", "r12")):
+        out += ["movmskps %s, %s" % (reg, XMM[i * 4]), "movmskpd %s, %s" % (reg, XMM[i * 4 + 1])]
+    out += ["pmovmskb eax, xmm3", "pmovmskb r10d, xmm14"]
+    out += ["movntps [rax], xmm1", "movntpd [r8], xmm9", "movntdq [sse_data], xmm2",
+            "movnti [rdi], eax", "movnti [rdi + 8], r11", "maskmovdqu xmm1, xmm2",
+            "maskmovdqu xmm10, xmm15"]
+    for op, kind in (("cvtsi2ss", "dword"), ("cvtsi2sd", "dword")):
+        for i, reg in enumerate(("eax", "r10d", "rax", "r15")):
+            out.append("%s %s, %s" % (op, XMM[i * 5 % 16], reg))
+        out += ["%s xmm6, dword [rax]" % op, "%s xmm14, qword [rbx + 8]" % op]
+    for op, word in (("cvtss2si", "dword"), ("cvttss2si", "dword"),
+                     ("cvtsd2si", "qword"), ("cvttsd2si", "qword")):
+        for i, reg in enumerate(("eax", "r11d", "rax", "r14")):
+            out.append("%s %s, %s" % (op, reg, XMM[i * 6 % 16]))
+        out += ["%s ecx, %s [rax]" % (op, word), "%s r8, [rsp + 8]" % op]
+    for op in SSE_SHIFTS:
+        out += sse_operation(op, "oword")[:4]
+        out += ["%s xmm3, 1" % op, "%s xmm12, 15" % op, "%s xmm0, [rax]" % op]
+    out += ["pslldq xmm1, 4", "pslldq xmm14, 15", "psrldq xmm2, 8", "psrldq xmm9, 1"]
+    for reg in ("eax", "r9d", "rax", "r13"):
+        out += ["pextrw %s, xmm5, 3" % reg, "pinsrw xmm11, %s, 7" % reg]
+    out += ["pinsrw xmm2, [rax], 1", "pinsrw xmm2, word [rsp + 2], 0"]
+    out += ["ldmxcsr [rsp]", "stmxcsr [rsp + 4]", "ldmxcsr dword [sse_data]",
+            "prefetchnta [rax]", "prefetcht0 [rsi + 64]", "prefetcht1 [r12]",
+            "prefetcht2 byte [sse_data]", "clflush [rdi]"]
+    return out
+
+
+def exact_value(text):
+    """The rational a decimal floating-point constant writes."""
+    text = text.replace("_", "")
+    mantissa, _, exponent = text.partition("e")
+    whole, _, fraction = mantissa.partition(".")
+    return Fraction(int(whole + fraction or "0")) * \
+        Fraction(10) ** (int(exponent or "0") - len(fraction))
+
+
+def float_bits(text, precision, smallest, bias):
+    """IEEE 754 bits rounded to nearest, ties to even, from the exact value;
+    None past the largest or rounding to zero, and 'tie' with the bits when
+    the value sits exactly halfway between two."""
+    value = exact_value(text)
+    if value == 0:
+        return 0, False
+    top = value.numerator.bit_length() - value.denominator.bit_length()
+    while Fraction(2) ** top > value:
+        top -= 1
+    while Fraction(2) ** (top + 1) <= value:
+        top += 1
+    lowest = max(top - (precision - 1), smallest - (precision - 1))
+    scaled = value / Fraction(2) ** lowest
+    mantissa = scaled.numerator // scaled.denominator
+    rest = scaled - mantissa
+    if rest > Fraction(1, 2) or (rest == Fraction(1, 2) and mantissa % 2 == 1):
+        mantissa += 1
+    if mantissa == 0:
+        return None, False
+    if mantissa >> precision:
+        mantissa >>= 1
+        lowest += 1
+    if mantissa >> (precision - 1):
+        field = lowest + precision - 1 + bias
+        if field > 2 * bias:
+            return None, False
+        bits = field << (precision - 1) | (mantissa & ((1 << (precision - 1)) - 1))
+    else:
+        bits = mantissa
+    return bits, rest == Fraction(1, 2)
+
+
+FORMATS = {8: (53, -1022, 1023), 4: (24, -126, 127)}
+FLOAT_EDGES = ["0.0", "1.0", "2.5", "0.1", "0.3", "1.5e300", "1.7976931348623157e308",
+               "2.2250738585072014e-308", "2.2250738585072011e-308", "4.9406564584124654e-324",
+               "0.1000000000000000055511151231257827021181583404541015625",
+               "1." + "0" * 900 + "1", "0." + "0" * 300 + "17", "1_000.5", "0.000_1", "1.e10",
+               "3.4028234663852886e38", "1.17549435e-38", "1.4e-45", "9007199254740993.0",
+               "16777217.0", "9007199254740995.0", "16777219.0", "2.4703282292062328e-324"]
+
+
+def float_literals(count, seed):
+    rng = random.Random(seed)
+    out = list(FLOAT_EDGES)
+    for _ in range(count):
+        digits = "".join(rng.choice("0123456789") for _ in range(rng.randint(1, 25)))
+        point = rng.randint(1, len(digits))
+        text = digits[:point] + "." + digits[point:]
+        out.append(text + ("e%d" % rng.randint(-340, 320) if rng.random() < 0.8 else ""))
+    return out
+
+
+def float_data(width, count, seed, ties):
+    """Constants that fit the width, each with its negation, and their bits;
+    without the ties when NASM is to read them (it rounds a tie down)."""
+    lines, data = [], b""
+    for text in float_literals(count, seed):
+        bits, tie = float_bits(text, *FORMATS[width])
+        if bits is None or (tie and not ties):
+            continue
+        lines.append("    %s %s, -%s" % ("dq" if width == 8 else "dd", text, text))
+        sign = 1 << (width * 8 - 1)
+        data += struct.pack("<QQ" if width == 8 else "<II", bits, bits | sign)
+    return lines, data
+
+
 def short_branch_lines():
     """loop and jrcxz, which have only a rel8, both ways."""
     out = ["loop_top:", "nop"]
@@ -330,12 +519,13 @@ def program(nasm):
     rip = "[rel " if nasm else "[rip + "
     near = " strict near " if nasm else " near "
     data_align = "    align 8, db 0" if nasm else "    align 8"
+    sse_align = "    align 16, db 0" if nasm else "    align 16"
     lines = ["default rel", "bits 64", "extern outside_fn", "global main",
              "section .text", "main:"]
     for part in (alu_lines, test_lines, mov_lines, address_lines, xchg_lines,
                  stack_lines, unary_lines, imul_lines, shift_lines, extend_lines,
                  condition_lines, branch_lines, string_lines, bit_lines, atomic_lines,
-                 short_branch_lines):
+                 short_branch_lines, sse_lines):
         lines += ["    " + line if not line.endswith(":") else line for line in part()]
     lines += ["    " + op for op in ALONE]
     lines += ["    ret 16", "    align 16", "code_target:", "    endbr64", "    ret",
@@ -348,6 +538,10 @@ def program(nasm):
               "    times 5 db 7", data_align, "words_end:",
               "section .data", "data_q:", "    dq data_q, data_q + 8, code_target, message",
               "    dd data_q", "    times 3 dq 0x11", "    db 'A', 'BC', \"D\"",
+              sse_align, "sse_data:", "    dq 1.5, -2.25", "    dd 0.5, -0.0, 1.e-3, 7.0"] + \
+             float_data(8, 300, 64, False)[0] + float_data(4, 300, 32, False)[0] + \
+             ["    dq __Infinity__, -__Infinity__, __QNaN__, __NaN__, __SNaN__",
+              "    dd __Infinity__, -__QNaN__, __SNaN__",
               "section .bss", "    resb 3", "    resw 2", "    resd 5", "    resq 4"]
     text = "\n".join(lines) + "\n"
     return text.replace("[rip + ", rip).replace(" near ", near)
@@ -455,7 +649,16 @@ def main(argv):
         return 0
     if len(argv) == 4 and argv[1] == "compare":
         return 0 if compare(argv[2], argv[3]) else 1
-    print(__doc__.strip().splitlines()[2:5], file=sys.stderr)
+    if len(argv) == 4 and argv[1] == "floats":
+        doubles, double_bytes = float_data(8, 3000, 20261028, True)
+        singles, single_bytes = float_data(4, 3000, 1028, True)
+        with open(argv[2], "w") as source:
+            source.write("section .text\nglobal main\nmain:\n    ret\nsection .data\n")
+            source.write("\n".join(doubles + singles) + "\n")
+        with open(argv[3], "wb") as data:
+            data.write(double_bytes + single_bytes)
+        return 0
+    print("\n".join(__doc__.strip().splitlines()[2:8]), file=sys.stderr)
     return 2
 
 

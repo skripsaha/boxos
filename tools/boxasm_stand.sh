@@ -72,6 +72,20 @@ else
     fail encodings_match_nasm "$out"
 fi
 
+# Floating-point constants, ties included, against their exact rounding:
+# NASM 3 rounds a decimal exactly halfway between two floats down, not to even.
+python3 "$ORACLE" floats "$WORK/floats.asm" "$WORK/floats.want" ||
+    { echo "boxasm: harness failed — the oracle wrote no float witness"; exit 2; }
+if ! "$STAND" assemble "$WORK/floats.asm" "$WORK/floats.o" 2> "$WORK/floats.err"; then
+    fail floats_round_exactly "$(head -3 "$WORK/floats.err")"
+elif ! x86_64-elf-objcopy -O binary -j .data "$WORK/floats.o" "$WORK/floats.got"; then
+    fail floats_round_exactly "objcopy could not read .data"
+elif cmp -s "$WORK/floats.got" "$WORK/floats.want"; then
+    ok "floats_round_exactly ($(grep -c '^    d' "$WORK/floats.asm") lines)"
+else
+    fail floats_round_exactly "$(cmp "$WORK/floats.got" "$WORK/floats.want" 2>&1 | head -1)"
+fi
+
 # ---- the linker, held to GNU ld and tools/nameplate -------------------------
 
 x86_64-elf-ld -nostdlib -static -T "$LD_SCRIPT" -o "$WORK/ref.pass1" "$ENTRY" "$WORK/hello.o" "$ARCHIVE" &&
@@ -190,8 +204,8 @@ assembly_refuses() {
 }
 
 HEAD=$'section .text\nglobal main\nmain:\n'
-assembly_refuses unknown_instruction "$HEAD    movq rax, 2"$'\n' \
-    "unknown_instruction.asm:4:5: 'movq' is not an instruction, a directive or a box operation"
+assembly_refuses unknown_instruction "$HEAD    vaddps xmm0, xmm1, xmm2"$'\n' \
+    "unknown_instruction.asm:4:5: 'vaddps' is not an instruction, a directive or a box operation"
 assembly_refuses undefined_name "$HEAD    jmp nowhere"$'\n' \
     "undefined_name.asm:4:9: 'nowhere' is never defined; a name from outside the program is declared with extern"
 assembly_refuses unsized_memory "$HEAD    inc [rax]"$'\n' \
@@ -239,5 +253,26 @@ assembly_refuses loop_out_of_reach "$HEAD    loop far"$'\n    times 200 nop\nfar
     "loop_out_of_reach.asm:4:5: 'loop' reaches -128 to 127 bytes, and its target is 200 away"
 assembly_refuses short_to_extern $'section .text\nextern printf\nglobal main\nmain:\n    jmp short printf\n' \
     "short_to_extern.asm:5:5: a short jump reaches only a label of its own section"
+assembly_refuses sse_unaligned $'section .data\nv dd 1, 2, 3, 4\n'"$HEAD    movaps xmm0, [v]"$'\n' \
+    "sse_unaligned.asm:6:5: 'movaps' needs its memory on a 16-byte boundary, and 'v' is not known to be: put align 16 before the data"
+assembly_refuses sse_misplaced $'section .data\nalign 16\npad db 1\nv dd 1, 2, 3, 4\n'"$HEAD    addps xmm0, [v]"$'\n' \
+    "sse_misplaced.asm:8:5: 'addps' needs its memory on a 16-byte boundary, and 'v' is not on one: put align 16 before the data"
+assembly_refuses sse_memory_size "$HEAD    movss xmm0, qword [rax]"$'\n' \
+    "sse_memory_size.asm:4:5: the memory is read as 4 bytes (dword, or no size) by 'movss'"
+assembly_refuses integer_unsized "$HEAD    cvtsi2sd xmm0, [rax]"$'\n' \
+    "integer_unsized.asm:4:5: the operation size is not said: write byte, word, dword or qword before the memory operand of 'cvtsi2sd'"
+assembly_refuses rep_sse_form "$HEAD    rep movsd xmm0, xmm1"$'\n' \
+    "rep_sse_form.asm:4:5: rep repeats only a string instruction, written without operands, not this form of 'movsd'"
+assembly_refuses avx_register "$HEAD    addps ymm0, xmm1"$'\n' \
+    "avx_register.asm:4:11: 'ymm0' is an AVX register; BoxASM has SSE's xmm0 to xmm15"
+assembly_refuses float_in_code "$HEAD    mov eax, 1.5"$'\n' \
+    "float_in_code.asm:4:14: a floating-point number stands only in dd or dq data: put it there and load it from memory"
+assembly_refuses float_in_word $'section .data\n    dw 1.5\n' \
+    "float_in_word.asm:2:8: a floating-point number goes in dd (32-bit) or dq (64-bit)"
+assembly_refuses float_too_large $'section .data\n    dd 1.e39\n' \
+    "float_too_large.asm:2:8: 1.e39 does not fit a 32-bit float (dd)"
+assembly_refuses float_too_small $'section .data\n    dq 1.e-400\n' \
+    "float_too_small.asm:2:8: 1.e-400 is too small for a 64-bit float (dq): it would be 0"
+
 echo "boxasm: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]

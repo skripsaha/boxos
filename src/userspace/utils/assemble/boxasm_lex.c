@@ -48,6 +48,42 @@ static char BoxAsmPeek(const BoxAsmLexer *Lexer, size_t Ahead)
 /* Decimal, 0x hexadecimal or 0b binary, with _ allowed between digits. A
  * letter or digit run on past the number is part of a malformed number,
  * never the start of the next token. */
+static size_t BoxAsmSkipDigits(const BoxAsmLexer *Lexer, size_t At)
+{
+    while (At < Lexer->Size && (BoxAsmIsDigit(Lexer->Source[At]) || Lexer->Source[At] == '_'))
+        At++;
+    return At;
+}
+
+/* digits '.' [digits] [e|E [+|-] digits], '_' among any of the digits. */
+static int BoxAsmLexFloat(BoxAsmLexer *Lexer, BoxAsmToken *Out, const char **Why)
+{
+    size_t At = BoxAsmSkipDigits(Lexer, Lexer->Position) + 1u;
+
+    At = BoxAsmSkipDigits(Lexer, At);
+    if (At < Lexer->Size && (Lexer->Source[At] == 'e' || Lexer->Source[At] == 'E')) {
+        size_t Digits;
+
+        At++;
+        if (At < Lexer->Size && (Lexer->Source[At] == '+' || Lexer->Source[At] == '-'))
+            At++;
+        Digits = At;
+        At = BoxAsmSkipDigits(Lexer, At);
+        if (At == Digits || !BoxAsmIsDigit(Lexer->Source[Digits])) {
+            Lexer->Position = At;
+            *Why = "an exponent needs its digits: 1.5e3";
+            return -1;
+        }
+    }
+    Lexer->Position = At;
+    if (At < Lexer->Size && BoxAsmIdentifierPart(Lexer->Source[At])) {
+        *Why = "malformed number";
+        return -1;
+    }
+    Out->Kind = BOXASM_TOKEN_FLOAT;
+    return 0;
+}
+
 static int BoxAsmLexNumber(BoxAsmLexer *Lexer, BoxAsmToken *Out, const char **Why)
 {
     uint64_t Base = 10;
@@ -62,6 +98,11 @@ static int BoxAsmLexNumber(BoxAsmLexer *Lexer, BoxAsmToken *Out, const char **Wh
                (BoxAsmPeek(Lexer, 1) == 'b' || BoxAsmPeek(Lexer, 1) == 'B')) {
         Base = 2;
         Lexer->Position += 2;
+    } else {
+        size_t End = BoxAsmSkipDigits(Lexer, Lexer->Position);
+
+        if (End < Lexer->Size && Lexer->Source[End] == '.')
+            return BoxAsmLexFloat(Lexer, Out, Why);
     }
     while (Lexer->Position < Lexer->Size) {
         char Ch = Lexer->Source[Lexer->Position];

@@ -61,6 +61,14 @@ A tag in the command names the one meant without a question:
 - Strings are written `"..."` or `'...'` and take the escapes `\n \t \r \0 \\
   \" \' \xHH`. Used as a number, a string of up to 8 bytes is read
   little-endian: `mov al, 'A'`.
+- Floating-point constants go in `dd` (32-bit) and `dq` (64-bit):
+  `dq 3.14159, -2.5, 1.e10, 6.022e23`, `dd 0.1`. The `.` is what makes one
+  (`dd 1` is an integer); `_` may stand among the digits. `__Infinity__`,
+  `__QNaN__` (or `__NaN__`) and `__SNaN__` are the special values. Each is
+  rounded straight from its digits to the nearest value of its width, ties
+  to even. One too large for its width, or not zero but rounding to zero, is
+  refused. Instructions take no floating-point immediates: a constant is put
+  in data and loaded from there (`movsd xmm0, [pi]`).
 
 ### Expressions
 
@@ -73,7 +81,7 @@ subtract to a number.
 
 - Registers: `rax..r15`, `eax..r15d`, `ax..r15w`, `al..r15b` (also `r8l`),
   `spl bpl sil dil`, and `ah bh ch dh` (which no instruction needing REX may
-  use).
+  use); `xmm0..xmm15` for SSE.
 - Memory: `[base + index*scale + displacement]`. The scale (1, 2, 4, 8) may
   be written first: `[8*rcx + table]`.
 - `[label]` is RIP-relative. `[abs label]` is the 32-bit absolute address,
@@ -97,6 +105,42 @@ subtract to a number.
 - Strings: `movs stos lods cmps scas`, each with `b w d q`.
 - Atomics: `xadd cmpxchg cmpxchg8b cmpxchg16b`; fences `lfence sfence mfence`.
 - The processor: `cpuid rdtsc rdtscp rdrand rdseed`.
+- SSE and SSE2, which every x86-64 processor has:
+  - `add sub mul div min max sqrt` with `ps pd ss sd`; `rcpps rcpss rsqrtps
+    rsqrtss`; `and andn or xor unpckl unpckh` with `ps pd`; `shufps shufpd`;
+  - compares `cmpps cmppd cmpss cmpsd` with an imm8, and `cmp` + `eq lt le
+    unord neq nlt nle ord` + `ps pd ss sd` (`cmpltsd`); `comiss comisd
+    ucomiss ucomisd`;
+  - moves `movaps movapd movups movupd movss movsd movlps movhps movlpd
+    movhpd movhlps movlhps movdqa movdqu movd movq movmskps movmskpd
+    pmovmskb movntps movntpd movntdq movnti maskmovdqu`;
+  - conversions `cvtsi2ss cvtsi2sd cvtss2si cvttss2si cvtsd2si cvttsd2si
+    cvtss2sd cvtsd2ss cvtps2pd cvtpd2ps cvtdq2ps cvtps2dq cvttps2dq cvtdq2pd
+    cvtpd2dq cvttpd2dq`;
+  - packed integers `padd psub` (`b w d q`), `padds paddus psubs psubus`
+    (`b w`), `pmullw pmulhw pmulhuw pmuludq pmaddwd pavgb pavgw pmaxsw
+    pmaxub pminsw pminub psadbw pand pandn por pxor pcmpeq pcmpgt` (`b w d`),
+    `packsswb packssdw packuswb punpckl punpckh` (`bw wd dq qdq`), shifts
+    `psll psrl` (`w d q`) and `psra` (`w d`) by xmm or imm8, `pslldq psrldq`,
+    `pshufd pshufhw pshuflw pextrw pinsrw`;
+  - `ldmxcsr stmxcsr prefetchnta prefetcht0 prefetcht1 prefetcht2 clflush`.
+
+  `movsd` and `cmpsd` without operands are the string instructions; with
+  them, SSE2's. An SSE operand of memory reads 4 (`ss`), 8 (`sd`, `movq`) or
+  16 bytes (`oword`); a size written must be that one.
+
+  Packed operations need their 16 bytes of memory on a 16-byte boundary, or
+  the processor stops the program; only `movups movupd movdqu` read memory
+  anywhere. When the memory is a label of the program, the assembler proves
+  the boundary — the label's place a multiple of 16 in a section something
+  said `align 16` in — or refuses the line. Memory through a register is the
+  program's to align.
+
+  The C call ABI passes `double` and `float` arguments in `xmm0..xmm7` and
+  returns one in `xmm0`; every xmm register may change across a call, and
+  `al` counts the vector registers a variadic callee receives. BoxLib's
+  `printf` prints no floating-point numbers (`%f`): a program prints them
+  scaled to integers, as `fractions.asm` does.
 - Alone: `nop int3 leave cqo cdq cwd cdqe cwde cbw pushfq popfq cld std clc stc
   cmc endbr64 pause ud2`.
 
@@ -158,6 +202,18 @@ BoxOS userspace has no red zone.
   NASM gives one to another section or object an R_X86_64_PC8 relocation.
 - `lock` where it cannot go, `rep` before `cmps` or `scas`, and a prefix on
   a line of its own are refused. NASM warns of the first and takes the others.
+- A decimal floating-point constant exactly halfway between two values of
+  its width rounds to the even one, as IEEE 754 and C compilers round it.
+  NASM 3.01 rounds it down (`dd 16777219.0` is 0x4B800002 here, 0x4B800001
+  there); `tools/boxasm_oracle.py floats` holds BoxASM to the exact value.
+- A floating-point constant too large for its width, or rounding to zero,
+  is refused; NASM warns and writes infinity, or writes zero.
+- `cvtsi2ss` and `cvtsi2sd` from memory need its size (`dword` or `qword`);
+  NASM takes unsized memory for a dword.
+- Packed SSE memory through a label not proven on a 16-byte boundary is
+  refused; NASM assembles it, and the program stops when it runs.
+- Hexadecimal floating-point constants, `__float32__()` and the other float
+  functions of NASM are not built.
 
 Everything else in the shared subset assembles to the same bytes and
 relocations: `tools/boxasm_oracle.py` generates a corpus of about 5,000
@@ -165,5 +221,7 @@ lines and compares the two objects.
 
 ## Not built yet
 
-- SSE/AVX instructions; raw Manifest, `box.notify`, `box.wait`.
+- SSE3 and later, AVX (VEX), MMX and x87; raw Manifest, `box.notify`,
+  `box.wait`.
+- Printing floating-point numbers: BoxLib's C `printf` has no `%f %e %g`.
 - Programs made of several sources; a native BoxOS object format.

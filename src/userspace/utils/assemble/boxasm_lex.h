@@ -17,7 +17,8 @@ typedef enum {
     BOXASM_TOKEN_IDENTIFIER,
     BOXASM_TOKEN_NUMBER,
     BOXASM_TOKEN_STRING,      /* "..." or '...'; a number where a number is meant */
-    BOXASM_TOKEN_PUNCT        /* one of , : [ ] ( ) + - * / % & | ^ ~ $ and << >> $$ */
+    BOXASM_TOKEN_PUNCT,       /* one of , : [ ] ( ) + - * / % & | ^ ~ $ and << >> $$ */
+    BOXASM_TOKEN_FLOAT        /* digits '.' digits [e[+-]digits]: its text, read by data */
 } BoxAsmTokenKind;
 
 typedef struct {

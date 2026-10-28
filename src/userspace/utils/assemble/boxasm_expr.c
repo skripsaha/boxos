@@ -170,6 +170,10 @@ static int BoxAsmParsePrimary(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmTo
         if ((Rc = BoxAsmParseSymbol(Asm, Token, Out)) != 0)
             return Rc;
         return BoxAsmNextToken(Asm, Lexer, Token);
+    } else if (Token->Kind == BOXASM_TOKEN_FLOAT) {
+        return BoxAsmFail(Asm, &Token->Where,
+                          "a floating-point number stands only in dd or dq data: "
+                          "put it there and load it from memory", NULL);
     } else {
         return BoxAsmFail(Asm, &Token->Where, "expected a number, a name or '('", NULL);
     }

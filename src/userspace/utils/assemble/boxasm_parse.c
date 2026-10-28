@@ -1,3 +1,4 @@
+#include "boxasm_float.h"
 #include "boxasm_isa.h"
 
 #include "box/error.h"
@@ -230,6 +231,66 @@ static int BoxAsmParseNames(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToke
     }
 }
 
+static int BoxAsmIsFloatWord(const BoxAsmToken *Token)
+{
+    uint64_t Bits;
+
+    return Token->Kind == BOXASM_TOKEN_FLOAT ||
+           (Token->Kind == BOXASM_TOKEN_IDENTIFIER &&
+            BoxAsmFloatSpecial(Token->Text, Token->Length, 0, 8, &Bits));
+}
+
+/* Whether the item ahead is a floating-point constant: one, or a sign
+ * before one. */
+static int BoxAsmFloatAhead(const BoxAsmLexer *Lexer, const BoxAsmToken *Token)
+{
+    BoxAsmLexer Ahead = *Lexer;
+    BoxAsmToken Next;
+    const char *Why;
+
+    if (BoxAsmIsFloatWord(Token))
+        return 1;
+    return (BoxAsmTokenIsPunct(Token, '-') || BoxAsmTokenIsPunct(Token, '+')) &&
+           BoxAsmLexNext(&Ahead, &Next, &Why) == 0 && BoxAsmIsFloatWord(&Next);
+}
+
+/* A floating-point item of dd (binary32) or dq (binary64), its bits made a
+ * number the item holds. */
+static int BoxAsmParseFloatItem(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                                uint8_t Width, BoxAsmDataItem *Item)
+{
+    BoxAsmExpr Node;
+    BoxAsmMessage Message;
+    const char *Why = NULL;
+    int Negative = 0;
+    int Rc;
+
+    if (Width != 4 && Width != 8)
+        return BoxAsmFail(Asm, &Token->Where,
+                          "a floating-point number goes in dd (32-bit) or dq (64-bit)", NULL);
+    if (BoxAsmTokenIsPunct(Token, '-') || BoxAsmTokenIsPunct(Token, '+')) {
+        Negative = BoxAsmTokenIsPunct(Token, '-');
+        if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+            return Rc;
+    }
+    memset(&Node, 0, sizeof(Node));
+    Node.Kind = BOXASM_EXPR_NUMBER;
+    Node.Where = Token->Where;
+    if (Token->Kind == BOXASM_TOKEN_IDENTIFIER)
+        (void)BoxAsmFloatSpecial(Token->Text, Token->Length, Negative, Width, &Node.Number);
+    else if (BoxAsmFloatBits(Token->Text, Token->Length, Negative, Width, &Node.Number, &Why) != 0) {
+        BoxAsmFailBegin(Asm, &Token->Where, &Message);
+        BoxAsmMessageSpan(&Message, Token->Text, Token->Length);
+        BoxAsmMessageText(&Message, " ");
+        BoxAsmMessageText(&Message, Why);
+        return BoxAsmFailEnd(Asm, &Token->Where, &Message);
+    }
+    if ((Rc = BoxAsmMakeExpr(Asm, &Node, &Item->Expr)) != 0 ||
+        (Rc = BoxAsmAddItem(Asm, Item)) != 0)
+        return Rc;
+    return BoxAsmNextToken(Asm, Lexer, Token);
+}
+
 static int BoxAsmParseData(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
                            uint32_t Index)
 {
@@ -239,7 +300,9 @@ static int BoxAsmParseData(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken
 
         memset(&Item, 0, sizeof(Item));
         Item.Where = Token->Where;
-        if (BoxAsmStringStandsAlone(Lexer, Token)) {
+        if (BoxAsmFloatAhead(Lexer, Token)) {
+            Rc = BoxAsmParseFloatItem(Asm, Lexer, Token, Asm->Statements[Index].Width, &Item);
+        } else if (BoxAsmStringStandsAlone(Lexer, Token)) {
             BoxAsmBuffer Bytes = { 0 };
             Rc = BoxAsmLexStringBytes(Token, &Bytes);
             if (Rc == 0)
