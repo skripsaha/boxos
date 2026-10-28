@@ -10,6 +10,8 @@
 #include "../settle_cut/settle_cut.h"
 #include "../integrity/gloss.h"
 #include "../mount/errata.h"
+#include "loose_leaves.h"
+#include "../helm/engross.h"
 #include "amp.h"
 #include "dog_ear.h"
 #include "../../../kernel/drivers/timer/rtc.h"
@@ -107,6 +109,7 @@ typedef struct {
     bool        use_out;      /* the word had no room on the ribbon: the stitch is laid without it */
     DocketTaken jots;         /* the files' changes up to the target, by fid */
     uint64_t    claimed;      /* the ribbon's bytes their Inks claimed, taken (RibbonClaimTaken) */
+    uint64_t    flight;       /* the sectors TAKE counted it in flight at the most (StitchFlight) */
     uint64_t    data_need;    /* the flush that keeps every block the Inks up to the target wrote */
     uint64_t    d_us;         /* the toll's measures, taken at S0: the last cycle's D, */
     ReadPaceSeen pace;        /* and the pace the medium's reads were seen to keep */
@@ -231,7 +234,8 @@ static void StitchTake(StitchSnap* s)
      * leaf, taken under the state lock (lock_rank.h). */
     TagRegistryCoinedRange(fs->registry, &s->coined_lo, &s->coined_hi);
     TagRegistryCoinedHeld(fs->registry, &coined, &text);
-    RibbonFlightBegins(StitchFlight(s, coined, text));
+    s->flight = StitchFlight(s, coined, text);
+    RibbonFlightBegins(s->flight);
     TagFSLockDrop(&fs->lock);
     StitchCloseForRoom(s, awaits);
     FallowGiveRoomHold(s->cycle);
@@ -455,6 +459,23 @@ static void StitchSectorsLetGo(StitchSnap* s)
     s->written = 0;
 }
 
+/* The stitch held to the room TAKE counted it in flight: the claims of its
+ * Inks and what every stitch carries hold every record it lays (P21) — the
+ * room the next changes are granted is judged by that count, and a stitch
+ * past it lays where none was kept for it. */
+static void StitchHeldToFlight(const StitchSnap* s)
+{
+    if (s->of <= s->flight)
+        return;
+#if CONFIG_STRICT
+    panic("[TagFS] DEFECT: stitch %llu lays %u sector(s), past the %llu its TAKE counted in flight",
+          (unsigned long long)s->seq, s->of, (unsigned long long)s->flight);
+#endif
+    kprintf("[TagFS] DEFECT: stitch %llu lays %u sector(s), past the %llu its TAKE counted in flight — the claims "
+            "of its Inks fell short of what it carries\n", (unsigned long long)s->seq, s->of,
+            (unsigned long long)s->flight);
+}
+
 /* The stitch measured, given its place and its seq, laid and sealed — the
  * heap's, never a frame's; *word whether it carries the person's word. */
 static error_t StitchLay(StitchSnap* s, bool* word)
@@ -476,6 +497,7 @@ static error_t StitchLay(StitchSnap* s, bool* word)
     if (rc == OK) {
         s->useful = len;
         s->of     = (uint32_t)RibbonStitchSectors(len, RibbonCursorNow()->atom);
+        StitchHeldToFlight(s);
         rc    = RibbonRoom(s->of, !l.use_written, &s->at, &s->hop);
     }
     if (rc == OK && !(s->sectors = kmalloc((uint64_t)s->of * BOOK_SECTOR_BYTES)))
@@ -549,6 +571,10 @@ static error_t StitchWrite(StitchSnap* s, bool* done)
     uint32_t n    = StitchWindow(s, &vlba);
     if (s->written == 0 && ErrataHeld())
         SETTLE_CUT_AT(SETTLE_CUT_POINT_UNDONE);
+#ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
+    if (s->written == 0 && EngrossCarriedBy(s->target))
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_ENGROSS);
+#endif
     if (s->written == s->of - RibbonCursorNow()->atom)
         SETTLE_CUT_AT(SETTLE_CUT_POINT_STITCH);
     int rc = tagfs_volume_write(vlba, n, s->sectors + (uint64_t)s->written * BOOK_SECTOR_BYTES);
@@ -734,6 +760,7 @@ void StitchRunEnd(error_t rc)
         uint64_t fid_most = 0;
         error_t  births   = DocketBirths(&s->jots, s->seq, &fid_most);
         StitchDogEared(s);
+        LooseLeavesSettled(&s->jots);
         BinderStitchSettled(s->seq, s->useful, fid_most, births);
         EndpaperGrew(&s->jots, s->seq);
         DocketSettled(&s->jots, s->seq);

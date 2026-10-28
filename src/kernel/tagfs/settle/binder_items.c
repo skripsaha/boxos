@@ -85,6 +85,19 @@ static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
 {
     BinderItems*      p    = &w->items;
     const FileRecord* rec  = f->rec;
+    if (rec->slip) {
+        /* A Tally carries no Slip (§2.8, §4.3): a slice that keeps one would
+         * lose the tail to the slot that moves the ribbon past it. No slice is
+         * taken while one lies (LooseLeaves, BinderMayNot) — one found is the
+         * Binder's own defect, and the Tally is refused. */
+#if CONFIG_STRICT
+        panic("[TagFS] DEFECT: fid %llu keeps Slips over its last block in the slice of a Tally",
+              (unsigned long long)f->fid);
+#endif
+        kprintf("[TagFS] DEFECT: fid %llu keeps Slips over its last block in the slice of a Tally — the Tally is "
+                "refused\n", (unsigned long long)f->fid);
+        return ERR_BUSY;
+    }
     uint64_t          need = 70u + rec->name_len + 10u * (uint64_t)rec->tag_count;
     uint64_t          ids  = (uint64_t)rec->tag_count * sizeof(uint32_t);
     if (!ItemRoom(p, need + ids))

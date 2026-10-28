@@ -6,6 +6,8 @@
 #include "../block_map/block_map_derived.h"
 #include "../scribe/scribe.h"
 #include "../settle_cut/settle_cut.h"
+#include "../helm/engross.h"
+#include "loose_leaves.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 
 /*
@@ -65,10 +67,10 @@ static const char s_on_edge[]   = "the last stitch ends on its Quire's last sect
 static const char s_off_chain[] = "the Quire the ribbon stands in is not one the slots' ribbons are known to run "
                                   "through — memory would not note it, and no Tally is written until the ribbon "
                                   "has left it";
+static const char s_loose[]     = "the settled state carries Slips (§16.5 п.14) — each tail goes into its block "
+                                  "first (Engross)";
 
-/* Whether the volume takes no write a Tally could go on with: flags kept as
- * atomics, asked from any core. */
-static bool BinderNoWrite(void)
+bool BinderNoWrite(void)
 {
     return TagFSReadOnly() || TagFSIsUnderGlass() || StitchBookRefused() || TagFSMediumLeft() || SettleHalting();
 }
@@ -88,6 +90,8 @@ static const char* BinderOwnMayNot(void)
         return s_on_edge;
     if (BinderChainIndex(&c->quire) == UINT64_MAX)
         return s_off_chain;
+    if (LooseLeaves() > 0)
+        return s_loose;      /* a Tally carries no Slip: its slice would lose the tail */
     return NULL;
 }
 
@@ -463,6 +467,16 @@ void BinderWeigh(void)
         g_binder.said = why;
         kprintf("[TagFS] a Tally is owed and not begun: %s\n", why);
     }
+    /* Owed and held back by nothing but the tails: no Slip is given from here
+     * (plot_slip.c), and the Helm's service lays each tail in its block. */
+    __atomic_store_n(&g_binder.engross, owed && (why == NULL || why == s_loose) ? 1u : 0u, __ATOMIC_RELEASE);
+    if (owed && why == s_loose)
+        EngrossAsked();
+}
+
+bool BinderEngrossOwed(void)
+{
+    return __atomic_load_n(&g_binder.engross, __ATOMIC_ACQUIRE) && !BinderNoWrite();
 }
 
 bool BinderOwed(void)
@@ -560,6 +574,16 @@ error_t BinderRunWhole(void)
     bool     done    = false;
     error_t  rc      = OK;
     const char* why  = s_run.active ? NULL : BinderMayNot();
+    if (why == s_loose) {
+        /* The caller waits for its Tally: the tails go into their blocks in
+         * its own call, and the cycle that carries them settles first. */
+        rc = EngrossWhole();
+        if (rc == OK)
+            rc = TagFSSettle();
+        if (rc != OK)
+            return rc;
+        why = BinderMayNot();
+    }
     if (why) {
         kprintf("[TagFS] a Tally is asked for and not begun: %s\n", why);
         return ERR_BUSY;

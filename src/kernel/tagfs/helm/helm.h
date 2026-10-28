@@ -19,7 +19,9 @@
  * kernel that cannot be parked is refused rather than left spinning.
  *
  * Who holds no Helm: a read, which walks the record its open copied; a name
- * or a tag, whose Ink never touches the extents; and a delete, whose Quitclaim
+ * or a tag, whose Ink never touches the extents — but for a tag of key system,
+ * boot or god put on a book's file, which goes on under the Helm with the
+ * file's tail laid in its block first (engross.h); and a delete, whose Quitclaim
  * marks the file `vacated` — the holder answers ERR_FILE_NOT_FOUND at its own
  * Ink, and its Stakes go back.
  *
@@ -64,6 +66,11 @@ bool     HelmAsk(OpenFileEntry* ofe, HelmWaiter* w);
 /* The Helm for `w` only when it is free: false, and w not queued, when it is
  * held or parked, or the medium left. */
 bool     HelmTry(OpenFileEntry* ofe, HelmWaiter* w);
+
+/* HelmTry for the Engross service (engross.h): a Helm it finds held is noted,
+ * and its holder's let-go asks the service again (EngrossAsked) — the one look
+ * a turn took at a held Helm is never the service's last. */
+bool     HelmTryNoted(OpenFileEntry* ofe, HelmWaiter* w);
 
 /* The Helm for a caller in the kernel, only when it is free: such a caller
  * cannot be parked behind the holder the way a program is (write_job.c), and
@@ -179,6 +186,13 @@ error_t  HelmSpan(TagFSFileHandle* handle, uint64_t size, uint64_t* out_was);
 error_t  HelmDefragWindow(TagFSFileHandle* handle, HelmDefragging* d, bool* out_ended);
 void     HelmDefragLetGo(HelmDefragging* d);
 error_t  HelmDefrag(TagFSFileHandle* handle);
+
+/* Engross by the holder of the file's Helm (helm_work.c, spec_v2 §16.5 п.14):
+ * its tail, out of the Slips over its last block, laid in that block and
+ * inked — through the Ink, as a defrag is. *out_laid whether there was one;
+ * OK, or the refusal of the load, the Plot or the Ink — ERR_WOULD_BLOCK among
+ * them while the ribbon's room is on its way. */
+error_t  HelmEngross(TagFSFileHandle* handle, bool* out_laid);
 
 /* A caller in the kernel standing in its call, whose call answered *rc: true
  * when it was ERR_WOULD_BLOCK and Settle cycles brought ground back

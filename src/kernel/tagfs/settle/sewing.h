@@ -35,8 +35,9 @@
  * blocks of fresh data they put in named with their digests and flushed
  * before the stitch (FIRST_FLUSH), or nothing — an empty stitch is the answer
  * to a waiter, the halt's last word, the first FLUSH of a mount (§3.5) and the
- * stitch that closes a Quire early for room (В1). A tail shorter than a block
- * goes as a block on fresh ground: this kernel lays no Slip (§2.8).
+ * stitch that closes a Quire early for room (В1). A write that lies wholly in
+ * a file's last block and leaves it short of full rides in the stitch as a
+ * Slip — the change since the last stitch, one span (§2.8, §16.5 п.13).
  */
 
 /* The bytes a record's tag and length take at the most, a StitchHead's whole

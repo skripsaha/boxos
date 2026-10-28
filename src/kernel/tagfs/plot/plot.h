@@ -89,6 +89,16 @@ typedef struct {
     uint32_t      digest_room;
     uint64_t      ribbon_held;    /* the ribbon's room held for its record from before its data to its
                                    * Ink (RibbonReserve), of the mounting `mount_epoch` names */
+    /* A book's write that rides a Slip instead of a block (plot_slip.c):
+     * its own TailSlip — the Plot's alone until its Ink folds it into the
+     * tail the record keeps (TailSlipFold) — and the span of the last block
+     * its bytes take; NULL for a write that lays blocks. */
+    TailSlip     *slip;
+    uint32_t      slip_off;
+    uint32_t      slip_len;
+#ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
+    bool          engross;        /* an Engross's: its Ink says so (EngrossInked, settle_cut.h) */
+#endif
 } Plot;
 
 /* The file's record, out of the map of live files afresh — never a handle's
@@ -149,6 +159,8 @@ typedef struct {
     uint64_t from_first;  /* the block the rest of the first is read from: `block` itself on format
                            * v1, the file's old block on fresh ground (format v2, §3.1) */
     uint64_t from_last;   /* ... and of the last */
+    uint64_t k;           /* the file's block its first block is: the Slips over the last lie under the
+                           * write that reads it (format v2, tail_slip.h) */
 } PlotStretch;
 
 /* The stretch a write reaches at file byte `pos` with `left` of its bytes
@@ -319,6 +331,14 @@ error_t  PlotConveyance(const Plot *p, const FileRecord *cur, BookSplice **out, 
  * whose writes record their digests as they land. OK or ERR_NO_MEMORY. */
 error_t  PlotWindowWhole(Plot *p);
 error_t  PlotWindowLanded(Plot *p, uint64_t block, const uint8_t *data, uint32_t count);
+
+/* Engross (plot_slip.c, spec_v2 §16.5 п.14): a book's file whose last block
+ * has Slips over it gets that block laid again on fresh ground — its base,
+ * the Slips over it, zeros past the size — and the Plot names it, *laid; the
+ * caller inks it, and the record lets the Slips go with the block they lay
+ * on. OK and nothing done for a file with no Slip, or on format v1; or the
+ * refusal of the ground, the read, the write or the ribbon's room. */
+error_t  PlotEngross(Plot *p, bool *laid);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's measure that a write copies only the Strips around its change

@@ -78,6 +78,17 @@ typedef enum {
  * as atomics, never the slots' or the chain's memory, which the holder moves. */
 bool        BinderOwed(void);
 
+/* Whether a Tally is owed and held back by nothing but the Slips the settled
+ * state carries (LooseLeaves) — or by nothing at all: no write lays a new
+ * Slip meanwhile (plot_slip.c), and the Helm's service lays each tail in its
+ * block (helm/engross.h). From any core, lock-free, as BinderOwed. */
+bool        BinderEngrossOwed(void);
+
+/* Whether the volume takes no write a Tally could go on with — only read,
+ * under glass, refused by its book, its medium gone, or the machine halting:
+ * flags kept as atomics, asked from any core. */
+bool        BinderNoWrite(void);
+
 /* One step of the Tally, by the cadence's committer: the Settle's Scribe taken
  * as a pass of its own that answers no asker, the step run, the Scribe given
  * back. False when the Scribe was another's. With no TagFS lock held. */
@@ -348,6 +359,7 @@ typedef struct {
     const char* volatile no_tallies; /* why no Tally is written by this mount at all, or NULL */
     volatile uint8_t demanded;
     volatile uint8_t due;       /* TALLY_SLACK reached: published by the Settle's holder */
+    volatile uint8_t engross;   /* owed, and held back by nothing but the settled Slips: published */
     const char* volatile may_not;/* why none may be begun as the holder's own state stands, or NULL: published */
     const char*    said;        /* the last such reason said while one was owed */
     volatile uint64_t retry_after; /* a refused Tally is tried again once this cycle settled */

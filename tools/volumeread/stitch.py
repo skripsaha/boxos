@@ -65,6 +65,21 @@ def _Slip(slip):
     return VarintPut(off) + VarintPut(len(data)) + data
 
 
+def SlipDelta(before, after, cut):
+    """The Slip a stitch lays on a file's last block (§16.5 п.13) — one rule
+    with the kernel's (file_map/tail_slip.c, TailSlipDelta): `before` the
+    overlay a reader holds once the record's splices and size stand, `after`
+    the writer's, each {offset: byte} of the block, and `cut` the file's bytes
+    in it. The span from the first byte the two disagree on to the last, its
+    bytes the writer's — a byte it does not cover the zero of the hole beneath
+    (over a DATA block the writer covers the span whole); (0, b"") for none."""
+    diff = [i for i in range(cut) if after.get(i) != before.get(i)]
+    if not diff:
+        return (0, b"")
+    lo, hi = diff[0], diff[-1] + 1
+    return (lo, bytes(after.get(i, 0) for i in range(lo, hi)))
+
+
 def _Digests(digests):
     return b"".join(d.to_bytes(8, "little") for d in digests)
 

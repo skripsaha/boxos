@@ -204,6 +204,7 @@ bool PlotStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t most, Pl
                                 (uint32_t)(head + out->bytes - (count - 1) * PLOT_BLOCK));
     out->from_first = block;
     out->from_last  = block + count - 1;
+    out->k          = k;
     return true;
 }
 

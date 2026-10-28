@@ -7,6 +7,7 @@
 #include "../ink/ink.h"
 #include "../ink/fallow.h"
 #include "../run/run.h"
+#include "../file_map/tail_slip.h"
 
 /*
  * PlotWindow — the Plot of a format-v2 volume (plot.h): fresh ground, and a
@@ -70,6 +71,7 @@ void PlotWindowLoad(Plot *p, FileRecord *rec)
  * change, while the mounting it was held of stands. */
 void PlotWindowLetGo(Plot *p)
 {
+    PlotSlipLetGo(p);
     FileRecordRelease(p->rec);
     kfree(p->fresh);
     kfree(p->digests);
@@ -317,14 +319,15 @@ static error_t PlotFreshFor(Plot *p, uint64_t k, uint64_t n, bool short_last,
 // ----------------------------------------------------------------------------
 
 /* The most bytes the record of the window's change takes on the ribbon: a
- * Shaped of one splice a run the window ends with, and a digest a block of
- * fresh ground — what the Ink claims (docket.h, DocketClaimOfShaped). */
+ * Shaped of one splice a run the window ends with, a digest a block of fresh
+ * ground, and the Slip the write rides — what the Ink claims (docket.h,
+ * DocketClaimOfShaped). */
 static uint64_t PlotWindowRibbonMost(const Plot *p)
 {
     uint64_t fresh = p->fresh_blocks;
     for (uint32_t i = 0; i < p->stake_count; i++)
         fresh += p->stakes[i].count;
-    return DocketClaimOfShaped((uint64_t)p->run_count + p->fresh_count + 2u, 1, fresh);
+    return DocketClaimOfShaped((uint64_t)p->run_count + p->fresh_count + 2u, 1, fresh, PlotSlipMost(p));
 }
 
 /*
@@ -354,6 +357,10 @@ error_t PlotWindowRoomAsked(Plot *p)
 
 error_t PlotWindowBegin(Plot *p, uint64_t at, uint64_t bytes)
 {
+    bool    slipped = false;
+    error_t chose   = PlotSlipBegin(p, at, bytes, &slipped);
+    if (chose != OK || slipped)
+        return chose;
     uint64_t had   = p->blocks_before;
     uint64_t k0    = at / PLOT_BLOCK;
     uint64_t k1    = PlotWindowBlocksFor(at + bytes);
@@ -361,6 +368,12 @@ error_t PlotWindowBegin(Plot *p, uint64_t at, uint64_t bytes)
     uint64_t size  = at + bytes > p->size ? at + bytes : p->size;
     bool     short_last = size % PLOT_BLOCK != 0;
     error_t  rc    = PlotWindowCover(p, k0 < had ? k0 : had, k1 < had ? k1 : had);
+    /* A full last block with Slips over it, which a write past it leaves
+     * untouched, stops being the last: it goes into a block with them first
+     * (§2.8 — they lie on the last block alone). */
+    if (rc == OK && k0 >= had && had && TailSlipOn(p->rec, had - 1u) &&
+        (rc = PlotWindowCover(p, had - 1u, had)) == OK)
+        rc = PlotWindowTail(p, had - 1u, PLOT_BLOCK);
     if (rc == OK && k0 < over)
         rc = PlotFreshFor(p, k0, over - k0, short_last && over == PlotWindowBlocksFor(size), PlotFreshPut);
     if (rc == OK && k1 > p->blocks)
@@ -404,6 +417,7 @@ bool PlotWindowStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t mo
     uint64_t carried = count * PLOT_BLOCK - head;
     out->block      = block;
     out->count      = (uint32_t)count;
+    out->k          = k;
     out->head       = head;
     out->bytes      = carried < left ? carried : left;
     out->from_first = block;
@@ -556,7 +570,7 @@ error_t PlotWindowTrim(Plot *p, uint64_t keep_blocks)
 /* A hole of `count` blocks after the file's last run — the hole it ends with
  * grown, where it ends with one: a hole owns no ground, and naming more of it
  * gives up none. */
-static error_t PlotAppendHole(Plot *p, uint64_t count)
+error_t PlotAppendHole(Plot *p, uint64_t count)
 {
     while (count > 0) {
         uint32_t n = count > UINT32_MAX ? UINT32_MAX : (uint32_t)count;
@@ -575,10 +589,11 @@ static error_t PlotAppendHole(Plot *p, uint64_t count)
     return OK;
 }
 
-/* The file's last block, which the growth makes whole, laid again on fresh
- * ground with zeros past the old size — what lay past it there, a cut tail or
- * a previous owner's bytes, is not the file's. */
-static error_t PlotWindowTail(Plot *p, uint64_t k, uint32_t tail)
+/* The file's last block laid again on fresh ground — for a growth that makes
+ * it whole, or a tail its Slips leave (Engross): its base, the Slips over it,
+ * zeros past the file's `tail` bytes of it — what lay past them there, a cut
+ * tail or a previous owner's bytes, is not the file's. */
+error_t PlotWindowTail(Plot *p, uint64_t k, uint32_t tail)
 {
     FileSpot spot;
     uint8_t *buf = NULL;
@@ -591,10 +606,13 @@ static error_t PlotWindowTail(Plot *p, uint64_t k, uint32_t tail)
         rc = PlotWindowRoomAsked(p);
     if (rc == OK && !(buf = kmalloc(PLOT_BLOCK)))
         rc = ERR_NO_MEMORY;
-    if (rc == OK && (rc = tagfs_read_block(spot.block, buf)) != OK)
-        kprintf("[TagFS] file %llu: its last block %llu answered %u to its read, so it is not grown past its "
-                "%llu bytes\n", p->fid, (unsigned long long)spot.block, (unsigned)rc, (unsigned long long)p->size);
+    if (rc == OK && spot.kind != STRIP_DATA)
+        memset(buf, 0, PLOT_BLOCK);
+    else if (rc == OK && (rc = tagfs_read_block(spot.block, buf)) != OK)
+        kprintf("[TagFS] file %llu: its last block %llu answered %u to its read, so it is not laid again with "
+                "its %llu bytes\n", p->fid, (unsigned long long)spot.block, (unsigned)rc, (unsigned long long)p->size);
     if (rc == OK) {
+        (void)TailSlipOver(p->rec, k, buf);
         memset(buf + tail, 0, PLOT_BLOCK - tail);
         rc = TagFSWriteRun(block, 1, buf, &landed);
     }
@@ -608,18 +626,33 @@ static error_t PlotWindowTail(Plot *p, uint64_t k, uint32_t tail)
     return rc;
 }
 
+/* Whether a growth of the file to `size` lays its last block again: a DATA
+ * block short of full holds, past the size, bytes that are not the file's; and
+ * a block with Slips over it that stops being the last — they lie on the last
+ * block alone — goes into a block with them (§2.8). A hole short of full
+ * grown inside itself reads zeros past its Slips: nothing is laid. */
+static bool PlotWindowTailOwed(const Plot *p, uint64_t size)
+{
+    uint64_t had = PlotWindowBlocksFor(p->size);
+    FileSpot spot;
+    if (had == 0 || !PlotWindowSpot(p, had - 1u, &spot))
+        return false;
+    if (TailSlipOn(p->rec, had - 1u) && PlotWindowBlocksFor(size) > had)
+        return true;
+    return p->size % PLOT_BLOCK && spot.kind == STRIP_DATA;
+}
+
 error_t PlotWindowGrow(Plot *p, uint64_t size)
 {
     uint64_t had  = PlotWindowBlocksFor(p->size);
     uint32_t tail = (uint32_t)(p->size % PLOT_BLOCK);
-    FileSpot spot;
     if (!p->rec)
         return ERR_FILE_NOT_FOUND;
     error_t  rc   = PlotWindowCover(p, had ? had - 1u : 0, p->rec->blocks);
     if (rc == OK)
         rc = PlotTrimTo(p, had);       /* ground past the size holds no byte of the file */
-    if (rc == OK && tail && PlotWindowSpot(p, had - 1u, &spot) && spot.kind == STRIP_DATA)
-        rc = PlotWindowTail(p, had - 1u, tail);
+    if (rc == OK && PlotWindowTailOwed(p, size))
+        rc = PlotWindowTail(p, had - 1u, tail ? tail : PLOT_BLOCK);
     if (rc == OK)
         rc = PlotAppendHole(p, PlotWindowBlocksFor(size) - p->blocks);
     if (rc == OK) {
@@ -631,12 +664,9 @@ error_t PlotWindowGrow(Plot *p, uint64_t size)
 
 error_t PlotWindowRoomFor(const Plot *p, uint64_t end)
 {
-    FileSpot spot;
-    uint64_t had  = PlotWindowBlocksFor(p->size);
     if (!p->rec)
         return ERR_FILE_NOT_FOUND;
-    uint64_t need = p->size % PLOT_BLOCK && end > p->size && PlotWindowSpot(p, had - 1u, &spot) &&
-                    spot.kind == STRIP_DATA ? 1u : 0u;
+    uint64_t need = end > p->size && PlotWindowTailOwed(p, end) ? 1u : 0u;
     if (need == 0)
         return OK;
     TagFSState *fs   = tagfs_get_state();

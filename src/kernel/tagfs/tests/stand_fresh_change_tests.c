@@ -61,7 +61,7 @@ static TestResult TestStandChangeNamesOnlyNew(void)
     StandStitch     s;
     StandFreshModel m;
     uint64_t        fid = 0, runs = 0, claimed = 0, reserved = 0, fresh = 0, a = 0, b = 0, strips = 0;
-    uint64_t        one = DocketClaimOfShaped(1, 1, 1);
+    uint64_t        one = DocketClaimOfShaped(1, 1, 1, 0);
     uint32_t        flushes = 0;
     const char*     aside = StandStitchAside(&s);
 

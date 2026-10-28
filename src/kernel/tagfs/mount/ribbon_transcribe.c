@@ -2,10 +2,10 @@
 #include "errata.h"
 #include "book_mount.h"
 #include "../file_map/file_map.h"
-#include "../file_map/tail_slip.h"
 #include "../integrity/gloss.h"
 #include "../tag_registry/tag_registry.h"
 #include "../settle/dog_ear.h"
+#include "../settle/loose_leaves.h"
 
 /*
  * RibbonTranscribe — pass 2 of the ribbon (spec_v2 §4.5 п.5, §3.7): every
@@ -615,22 +615,20 @@ static error_t RibbonOutsideLocked(RibbonWalk* w, uint64_t fid)
     return BookFileLockLive(fid, "it names ground outside the data run");
 }
 
-/* What of a file the replay leaves standing this kernel cannot carry on:
- * a run with an extension, Slips on its last block, flags past 32 bits. */
-static void RibbonCarriedSaid(const RibbonReplay* rp, uint64_t fid)
+/* What of a file the replay leaves standing this kernel cannot carry on: a
+ * run with an extension, flags past 32 bits. Slips on its last block it
+ * carries on (§16.5 п.13) — counted, true, for the Tally that may not take
+ * its slice before they are laid in a block (LooseLeaves). */
+static bool RibbonCarriedSaid(const RibbonReplay* rp, uint64_t fid)
 {
     char        why[192];
     FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
     if (!rec)
-        return;
+        return false;
+    bool slipped = rec->slip != NULL;
     if (RibbonListHas(rp->ext, rp->next, fid)) {
         ksnprintf(why, sizeof(why), "a run of fid %llu carries an extension this kernel cannot carry on (CODEC, "
                   "SHARED or COPY, §8)", (unsigned long long)fid);
-        TagFSUnderGlass(why);
-    }
-    if (rec->slip) {
-        ksnprintf(why, sizeof(why), "fid %llu's last block carries a Slip — this kernel cannot fold a Slip into a "
-                  "block (§16.1, decision 2)", (unsigned long long)fid);
         TagFSUnderGlass(why);
     }
     if (RibbonFlagsOf(rp, NULL, rec) >> 32) {
@@ -639,6 +637,7 @@ static void RibbonCarriedSaid(const RibbonReplay* rp, uint64_t fid)
         TagFSUnderGlass(why);
     }
     FileRecordRelease(rec);
+    return slipped;
 }
 
 /* The replay's last word on the files it changed: those outside the data run
@@ -664,8 +663,10 @@ static error_t RibbonSettled(RibbonReplay* rp)
             rc = BookFileLockLive(rp->mismatched[i], "it is rolled back to blocks another file now holds (§3.9)");
         }
     }
+    uint64_t loose = 0;
     for (uint32_t i = 0; rc == OK && i < rp->ntouched; i++)
-        RibbonCarriedSaid(rp, rp->touched[i]);
+        loose += RibbonCarriedSaid(rp, rp->touched[i]);
+    LooseLeavesMounted(loose);
     return rc;
 }
 

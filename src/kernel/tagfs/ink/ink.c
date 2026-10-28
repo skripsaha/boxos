@@ -1,6 +1,7 @@
 #include "ink_internal.h"
 #include "../mount/book_mount.h"
 #include "../settle/sewing.h"
+#include "../helm/engross.h"
 #include "boardroom.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
@@ -541,14 +542,26 @@ out:
     return rc;
 }
 
-error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
-                  InkReceipt* out)
+error_t InkFieldsLaid(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
+                      InkReceipt* out)
 {
     error_t rc;
     do {
         rc = InkFieldsOnce(fid, name, add, drop, warrant, out);
     } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
     return rc;
+}
+
+/* A file the loader reads by its blocks keeps no tail in Slips (§9.1): on a
+ * book, a tag of key system, boot or god goes on with the tail laid in its
+ * block first, under the file's Helm. Unwarranted, the change is refused as
+ * it always was, and lays nothing. */
+error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
+                  InkReceipt* out)
+{
+    if (InkState()->format == DEED_FORMAT_V2 && warrant == INK_WARRANTED && InkTagGuarded(add))
+        return EngrossGuarded(fid, name, add, drop, out);
+    return InkFieldsLaid(fid, name, add, drop, warrant, out);
 }
 
 // ----------------------------------------------------------------------------

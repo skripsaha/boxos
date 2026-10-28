@@ -266,6 +266,9 @@ typedef struct {
     /* Its holder let go while the medium was away: the FIFO is held with the
      * volume's open book, handed on nobody until the book is taken up. */
     bool          parked;
+    /* A turn of Engross found it held (HelmTryNoted): the holder's let-go asks
+     * the service again. */
+    bool          noted;
     volatile bool vacated;    /* a Quitclaim gave the file up */
     /* The extents the holder's unfinished Plot will ink, claimed as room in
      * the file's record that no name or tag inked meanwhile may take (RT-19);

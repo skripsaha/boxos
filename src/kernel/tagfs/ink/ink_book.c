@@ -2,6 +2,8 @@
 #include "../mount/book_mount.h"
 #include "../settle/sewing.h"
 #include "../integrity/gloss.h"
+#include "../file_map/tail_slip.h"
+#include "../helm/engross.h"
 
 /*
  * Format v2's second half of an Ink (ink_internal.h): the writer's half of
@@ -275,13 +277,35 @@ static error_t InkBookWritten(const Plot* p, Strip** out, uint32_t* count)
 }
 
 /* The bytes the change's Shaped claims on the ribbon: its splices, every Strip
- * they put in, and a digest a block the Plot wrote (DocketClaimOfShaped). */
-static uint64_t InkBookPlotClaim(const Plot* p, const BookSplice* sp, uint64_t nsp)
+ * they put in, a digest a block the Plot wrote, and the Slip it may lay — the
+ * Slips of `rec` when the write rode one and what the change from `cur`
+ * brings into a hole (TailSlipClaim) (DocketClaimOfShaped). */
+static uint64_t InkBookPlotClaim(const Plot* p, const BookSplice* sp, uint64_t nsp, const FileRecord* cur,
+                                 const FileRecord* rec)
 {
     uint64_t runs = 0;
     for (uint64_t i = 0; i < nsp; i++)
         runs += sp[i].ninsert;
-    return DocketClaimOfShaped(runs, nsp, p->digest_count);
+    return DocketClaimOfShaped(runs, nsp, p->digest_count, TailSlipClaim(cur, rec, p->slip != NULL));
+}
+
+/*
+ * ‼ A WRITE THAT RODE A SLIP IS FOLDED INTO THE TAIL ITS RECORD KEEPS. The
+ * record the splices built keeps the Slips of the record it was built from by
+ * their one rule (FileRecordSplice, TailSlipKept); the write's own Slip holds
+ * its bytes alone. So the write's Slip takes every other byte of the tail
+ * from the kept ones and is the record's tail — the Plot's TailSlip, made
+ * before the lock and given no other memory here (§16.5 п.15: the heap that
+ * refused it refused it at the write). The Plot holds it until the Ink is
+ * laid: an Ink that goes round folds it again onto the record it finds then.
+ */
+static void InkBookPlotFolded(const Plot* p, FileRecord* rec)
+{
+    if (!p->slip)
+        return;
+    TailSlipFold(p->slip, p->slip_off, p->slip_len, rec->slip);
+    TailSlipLetGo(rec->slip);
+    rec->slip = TailSlipHold(p->slip);
 }
 
 /*
@@ -405,6 +429,8 @@ static error_t InkBookPlotBuilt(const Plot* p, const FileRecord* cur, InkBookWor
     if (rc == OK)
         rc = FileRecordSplice(cur, w->sp, w->nsp, p->size, rtc_get_unix64() * 1000000000ull, &w->rec, &freed,
                               &nfreed);
+    if (rc == OK)
+        InkBookPlotFolded(p, w->rec);
 #if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
     if (rc == OK)
         (void)InkBookFreedAgrees(p, freed, nfreed);
@@ -416,7 +442,7 @@ static error_t InkBookPlotBuilt(const Plot* p, const FileRecord* cur, InkBookWor
     if (rc == OK && (rc = InkBookWritten(p, &written, &nwritten)) == OK)
         rc = GlossRoomFor(written, nwritten, &w->gloss);
     if (rc == OK)
-        w->claim = InkBookPlotClaim(p, w->sp, w->nsp);
+        w->claim = InkBookPlotClaim(p, w->sp, w->nsp, cur, w->rec);
     kfree(freed);
     kfree(written);
     return rc;
@@ -464,6 +490,10 @@ static error_t InkBookPlotLocked(const Plot* p, const RecordWhere* was, InkBookW
         w->fallow = NULL;
     }
     InkDataNeedRaiseLocked(p->data_need);
+#ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
+    if (p->engross)
+        EngrossInked(gen);  /* before the lock goes: the cycle whose snapshot takes `gen` sees it */
+#endif
     InkGenLaidLocked(gen);
     out->gen = gen;
     return OK;
@@ -505,4 +535,8 @@ void InkBookPlotNext(Plot* p)
     p->runs_before  = p->rec ? p->rec->strip_count : 0;
     p->digest_count = 0;
     p->ribbon_held  = 0;    /* the Ink took the hold for its claim */
+    TailSlipLetGo(p->slip); /* the record holds the write's Slip now */
+    p->slip     = NULL;
+    p->slip_off = 0;
+    p->slip_len = 0;
 }

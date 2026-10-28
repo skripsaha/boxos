@@ -152,7 +152,8 @@ FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uin
  * The old record with `count` splices applied, its size `size` and its
  * modified time `mtime` — the Parcels no splice touches shared with the old
  * record, the ones a splice touches built anew (a Parcel past the most is
- * cut, one below the least joined to a neighbour). OK and the new record with
+ * cut, one below the least joined to a neighbour) — and old's Slips as their
+ * one rule keeps them (tail_slip.h, TailSlipKept). OK and the new record with
  * one reference in *out; ERR_INVALID_ARGUMENT, said, for a splice that does
  * not fit the runs (out of order, past their end, an inserted Strip of no
  * block), ERR_NO_MEMORY — and nothing built either way.

@@ -12,8 +12,10 @@
  * stitch naming it left it (`was`) and as its newest change leaves it (`now`);
  * the record the stitch carries is read off the two when the stitch is built —
  * a Born of `now`, its runs and their digests with it; a Shaped of how the
- * runs, the size and the time of `was` became those of `now`, spliced
- * (FileRecordSplices), and a Labeled of what differs in its name, flags and
+ * runs, the size, the time and the tail of `was` became those of `now`,
+ * spliced (FileRecordSplices) — the tail as the one span of its last block a
+ * reader of `was` holds otherwise (TailSlipDelta) — and a Labeled of what
+ * differs in its name, flags and
  * tags; a Quitclaim of `was`. So the changes a file has between two stitches
  * merge by keeping the newest `now` (§3.7, the design §2 п.22): a Born and a
  * rename or a write after it are one Born of the last state, two renames one
@@ -67,6 +69,8 @@ struct Jot {
     BookSplice* splices;    /* the stitch's BUILD: how `was`'s runs became `now`'s, measured once */
     uint64_t    nsplices;
     Strip*      inserted;   /* ... and the Strips they put in */
+    uint32_t    slip_off;   /* ... and the Slip its record lays: the span of the last block changed since */
+    uint32_t    slip_len;   /*     `was` (TailSlipDelta), 0 for none */
     Jot*        next[];     /* the Docket's list, `levels` of them */
 };
 
@@ -136,7 +140,8 @@ void  DocketSettled(DocketTaken* t, uint64_t seq);
  * file's splices found on the way (DocketMeasure, ERR_NO_MEMORY for no room
  * for them); and those records laid into `out` from
  * *at by fid — a Born of the file as it stands, its runs and their digests; a
- * Shaped of how its data changed since what settled, then a Labeled of what
+ * Shaped of how its data changed since what settled — the Slip of each the
+ * span of its last block changed since (TailSlipDelta) — then a Labeled of what
  * else differs; a Quitclaim of what settled; nothing for a Jot whose two
  * records are the same — each one's offset into starts[*n], *n counted on,
  * the blocks of fresh data they name added to *fresh (Clasp.fresh), each Jot
@@ -155,9 +160,11 @@ uint64_t DocketClaimOf(JotKind kind, const FileRecord* was, const FileRecord* no
 /* The bytes a change of a file's data claims (P21): a Shaped of `nsplice`
  * splices putting in `runs` Strips and `fresh` blocks of fresh data, each
  * splice counted with two Strips more — the two a later change may cut out of
- * one, which the merged record then carries — so the claims of the changes a
- * Jot merges hold the one record it lays. */
-uint64_t DocketClaimOfShaped(uint64_t runs, uint64_t nsplice, uint64_t fresh);
+ * one, which the merged record then carries — and a Slip of `slip` bytes, the
+ * span the tail it leaves covers (0 for none: the empty Slip's two bytes are
+ * every record's) — so the claims of the changes a Jot merges hold the one
+ * record it lays. */
+uint64_t DocketClaimOfShaped(uint64_t runs, uint64_t nsplice, uint64_t fresh, uint64_t slip);
 
 /* The kind a Jot of `older` becomes with a change of `newer` after it. */
 JotKind JotMerged(JotKind older, JotKind newer);

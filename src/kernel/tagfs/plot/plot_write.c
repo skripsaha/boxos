@@ -3,6 +3,7 @@
 #include "atomics.h"
 #include "cpu_calibrate.h"
 #include "../run/run.h"
+#include "../file_map/tail_slip.h"
 #include "../ink/fallow.h"                 /* FallowBlocks — ground a cycle gives back */
 #include "../glean/glean.h"                /* GleanMayFree — ground the pool's slack gives back */
 #include "../metadata_pool/meta_pool.h"
@@ -56,6 +57,11 @@ static error_t PlotStage(Plot *p, const PlotStretch *s, uint32_t i, const PlotSo
             return rc;
         }
     }
+    /* The rest of the file's last block is what a read of it gives: its base
+     * and the Slips over it (format v2, tail_slip.h) — the block the write lays
+     * carries them, and the record that names it lets them go. */
+    if (fill != PLOT_FILL_WHOLE)
+        (void)TailSlipOver(p->rec, s->k + i, into);
 
     error_t rc = PlotSourcePull(src, from + at, into + off, chunk);
     if (rc != OK)
@@ -107,12 +113,15 @@ static error_t PlotLayStretch(Plot *p, const PlotStretch *s, const PlotSource *s
 
 error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done)
 {
+    *out_done = 0;
+    if (p->slip)
+        return PlotSlipWrite(p, at, src, out_done);   /* its bytes ride the stitch: no block moves */
+
     uint32_t most = TagFSRunBlocks();
     uint8_t *buf  = PlotRunBuffer(&most);
     uint64_t done = 0;
     error_t  rc   = OK;
 
-    *out_done = 0;
     if (!buf)
         return ERR_NO_MEMORY;
 

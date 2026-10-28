@@ -319,3 +319,29 @@ error_t HelmDefrag(TagFSFileHandle *handle)
     HelmDefragLetGo(&d);
     return rc;
 }
+
+// ----------------------------------------------------------------------------
+// Engross
+// ----------------------------------------------------------------------------
+
+/*
+ * A tail out of the Slips over the last block, laid in that block (§16.5
+ * п.14) — by the holder of the Helm, so no write of the file lays a Slip
+ * beside it, and through the Ink, the one door a file changes by: the block
+ * laid on fresh ground with the Slips in it (PlotEngross), named by one inked
+ * record, which lets the Slips go with the block they lay on.
+ */
+error_t HelmEngross(TagFSFileHandle *handle, bool *out_laid)
+{
+    Plot    plot;
+    error_t rc = HelmPlotLoad(handle, &plot);
+    *out_laid  = false;
+    if (rc == OK)
+        rc = PlotEngross(&plot, out_laid);
+    if (rc == OK && *out_laid) {
+        InkReceipt inked;
+        rc = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
+    }
+    PlotRelease(&plot);
+    return rc;
+}

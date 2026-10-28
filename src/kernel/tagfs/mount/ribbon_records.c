@@ -193,22 +193,6 @@ static void RibbonTagsUnknown(RibbonStage* st, const uint8_t* ids, uint32_t byte
         ksnprintf(out + w, room - w, "]");
 }
 
-/* The file's last block as a record leaves it — its index, and the block it
- * lies on (UINT64_MAX for a hole, past its runs for none) — or false for a
- * file of no bytes. */
-static bool RibbonLastBlock(const FileRecord* rec, uint64_t* k, uint64_t* block)
-{
-    FileSpot spot;
-    if (!rec->size)
-        return false;
-    *k = (rec->size - 1u) / TAGFS_BLOCK_SIZE;
-    if (!FileRecordFind(rec, *k, &spot))
-        *block = UINT64_MAX - 1u;
-    else
-        *block = spot.kind == STRIP_HOLE ? UINT64_MAX : spot.block;
-    return true;
-}
-
 /* A Slip laid on the record's last block — held to its rules: inside the
  * block and not past the file's size (§2.8). OK; *fits false when it does
  * not; ERR_NO_MEMORY. */
@@ -506,14 +490,16 @@ static error_t RibbonShapedStands(RibbonReplay* rp, RibbonStage* st, const Ribbo
 }
 
 /* Shaped (§2.8, §3.7): the file at its base, its splices fitting its blocks,
- * its blocks its size, its Slip in its last block — a splice that changes
- * the last block lets the Slips go (§16.3 п.7). */
+ * its blocks its size, its Slip in its last block — the Slips before it kept
+ * by their one rule, the Ink's (FileRecordSplice, TailSlipKept): a splice that
+ * changes the last block lets them go (§16.3 п.7), the size cuts them (§16.5
+ * п.13). */
 static error_t RibbonShapedApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
 {
     RibbonShaped d;
     FileRecord * now = NULL, *rec = NULL;
     uint32_t     used = 0, at = 0;
-    uint64_t     seq = st->u->seq, kb = 0, bb = 0, ka = 0, ba = 0, cursor = 0, k = 0;
+    uint64_t     seq = st->u->seq, cursor = 0, k = 0;
     bool         fits = true;
     char         why[96];
     if (!RibbonBodyTaken(st, RIBBON_SHAPED, RibbonShapedGet(st->u->stream + r->body, r->len, seq, &d, &used),
@@ -535,7 +521,6 @@ static error_t RibbonShapedApplied(RibbonReplay* rp, RibbonStage* st, const Ribb
     error_t rc = RibbonBased(rp, st, RIBBON_SHAPED, d.fid, d.base, &now);
     if (rc != OK || !now)
         return rc;
-    bool had = RibbonLastBlock(now, &kb, &bb);
     rc = RibbonShapedRecord(st, &d, now, &rec, &fits, why, sizeof(why));
     FileRecordRelease(now);
     if (rc != OK)
@@ -543,11 +528,6 @@ static error_t RibbonShapedApplied(RibbonReplay* rp, RibbonStage* st, const Ribb
     if (!fits)
         return RibbonMismatch(rp, st, RIBBON_SHAPED, d.fid, "%s", why);
     rec->gen = seq;
-    bool has = RibbonLastBlock(rec, &ka, &ba);
-    if (d.nsplice && (had != has || kb != ka || bb != ba)) {
-        TailSlipLetGo(rec->slip);
-        rec->slip = NULL;
-    }
     rc = RibbonRecordFits(rp, st, RIBBON_SHAPED, rec, &d.slip, &fits);
     if (rc != OK || !fits) {
         FileRecordRelease(rec);
