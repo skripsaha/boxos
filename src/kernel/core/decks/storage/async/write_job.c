@@ -194,6 +194,38 @@ static void wjob_wait_for_room(WriteJob *j)
     SettleWaitLinkCycle(&j->room, wjob_room_came);
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/*
+ * The stand's hold (WriteJobAsk.hold) — logcheck defragdelete's. A delete
+ * lands under a running defrag only by luck, so a program's defrag asked to
+ * hold goes no further, once its first window took the run it gathers into
+ * and copied into it, until its file is given up: its caller parked as
+ * between any two windows, the job listed by the give-up itself
+ * (HelmReadyOnceVacated), and its next window finds the file given up
+ * (HelmDefragWindow) — the run it took goes back as the job ends
+ * (HelmDefragLetGo). A defrag that ends in its first window — a file in one
+ * run, or one the medium takes in one command — has no middle to be held in.
+ * Said before it is laid down: once it is, the job is not touched here again.
+ */
+static bool wjob_stand_holds(WriteJob *j)
+{
+    if (!j->hold)
+        return false;
+    j->hold = false;
+    j->held = true;
+    kprintf("[Storage] file %llu: the stand holds a defrag of it, %llu of %llu block(s) copied "
+            "into the run it took, until the file is given up\n", j->file_id,
+            (unsigned long long)j->defrag.gather.copied,
+            (unsigned long long)j->defrag.gather.blocks);
+    if (j->hold_says != TOUCH_TAG_INVALID &&
+        TouchPublishId(j->hold_says, &j->file_id, sizeof(j->file_id), j->target->pid, 0) == 0)
+        kprintf("[Storage] file %llu: nobody heard the stand's hold said on tag %u\n",
+                j->file_id, (unsigned)j->hold_says);
+    HelmReadyOnceVacated(&j->stand_hold, j->handle->ofe, &j->helm);
+    return true;
+}
+#endif
+
 /* A synchronous job's turn under the Helm it holds: its work, or — when the
  * cycle it waited for was refused for good — that refusal. A job with
  * windows left gives its core back — its caller parked if it was not yet, the
@@ -225,6 +257,10 @@ static int wjob_turn(WriteJob *j)
                 continue;
             wjob_defer(j, j->ctx);
         }
+#ifdef CONFIG_VOLUME_TESTS
+        if (wjob_stand_holds(j))
+            return ERR_WOULD_BLOCK;
+#endif
         HelmReady(&j->helm);   /* the job is the service point's now: not touched again here */
         return ERR_WOULD_BLOCK;
     }
@@ -468,6 +504,12 @@ int wjob_finalize(WriteJob *j, error_t rc)
 
     PlotRelease(&j->plot);
     HelmDefragLetGo(&j->defrag);
+#ifdef CONFIG_VOLUME_TESTS
+    if (j->held)
+        kprintf("[Storage] file %llu: the defrag the stand held went on and answered %u%s\n",
+                j->file_id, (unsigned)rc, rc == ERR_FILE_NOT_FOUND
+                ? " — the file given up under it, the run it took gone back" : "");
+#endif
     wjob_say_refused(j, rc);
     if (rc != OK && !j->medium_left)
         TagFSWriteRefused();
@@ -601,6 +643,8 @@ static error_t wjob_make(const WriteJobAsk *ask, Crate *crates, const OpContext 
     /* The stand's caller never stands in its call: its answer is the record. */
     j->stand         = ask->stand;
     j->deferred      = ask->stand != NULL;
+    j->hold          = ask->kind == WRITE_JOB_DEFRAG && ask->hold && j->target;
+    j->hold_says     = ask->hold_says;
 #endif
     wjob_choose_async(j);
     *out = j;

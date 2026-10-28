@@ -73,8 +73,29 @@ typedef struct {
     Crate       *out_crate;     /* WRITE: [u64 inked][u64 size], every answer; DEFRAG: [u32 score]; or NULL */
 #ifdef CONFIG_VOLUME_TESTS
     struct WriteJobStandAnswer *stand;   /* the stand's caller: its answer told here */
+    /* DEFRAG, a program's, on the stand (WriteJobAskStandHold): once its
+     * first window took the run it gathers into it goes no further until the
+     * file is given up (wjob_stand_holds), and says it holds on this Touch
+     * tag — TOUCH_TAG_INVALID says nothing. */
+    bool         hold;
+    uint32_t     hold_says;
 #endif
 } WriteJobAsk;
+
+/* SYSTEM_OP_DEFRAG_FILE's params past the file id: on the stand
+ * (VOLUME_TESTS=on), a [u32 touch tag] there asks the stand's hold, said on
+ * that tag; a kernel built without it reads nothing there. */
+static inline void WriteJobAskStandHold(WriteJobAsk *ask, const uint8_t *params, uint32_t size)
+{
+#ifdef CONFIG_VOLUME_TESTS
+    if (size >= sizeof(uint64_t) + sizeof(uint32_t)) {
+        ask->hold = true;
+        memcpy(&ask->hold_says, params + sizeof(uint64_t), sizeof(ask->hold_says));
+    }
+#else
+    (void)ask, (void)params, (void)size;
+#endif
+}
 
 typedef enum {
     W_INIT = 0,
@@ -185,6 +206,10 @@ typedef struct WriteJob {
 
 #ifdef CONFIG_VOLUME_TESTS
     struct WriteJobStandAnswer *stand;
+    bool              hold;              /* WriteJobAsk.hold, until the job is held once */
+    bool              held;              /* the stand held it: its answer is said */
+    uint32_t          hold_says;
+    HelmStandHold     stand_hold;        /* where helm.c keeps it while it is held */
 #endif
 } WriteJob;
 
