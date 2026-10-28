@@ -34,9 +34,15 @@
  *                and no slot naming them                         (TALLY_FLUSH)
  *  12 slot       before the second half of a Tally's slot is written —
  *                the slot torn                                    (TALLY_SLOT)
+ *  13 spared     before the last flush of a format-v2 stitch whose toll
+ *                spared the flush of its data: its data and its atoms
+ *                written, neither flushed                         (S5)
+ *  14 undone     before the first atom of the stitch that lays a mount's
+ *                verdict down — the first such stitch, anchored or not:
+ *                the verdict is the scenario                      (STITCH)
  *
  * A format-v2 cycle passes `flush` and `done` as format v1's does, around its
- * own last flush; `stitch` is its alone. `tally` and `slot` are passed by the
+ * own last flush; `stitch`, `spared` and `undone` are its alone. `tally` and `slot` are passed by the
  * Tally that covers the anchor — the state after a stitch that carries it
  * (settle/binder.c), a work of the same Scribe between the cycles.
  *
@@ -76,7 +82,9 @@ typedef enum {
     SETTLE_CUT_POINT_USECHAIN,
     SETTLE_CUT_POINT_STITCH,
     SETTLE_CUT_POINT_TALLY,
-    SETTLE_CUT_POINT_SLOT
+    SETTLE_CUT_POINT_SLOT,
+    SETTLE_CUT_POINT_SPARED,
+    SETTLE_CUT_POINT_UNDONE
 } SettleCutPoint;
 
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
@@ -92,7 +100,8 @@ void SettleCutAnchored(uint64_t gen);
 /* The cycle passes `here`. Returns at every point but the armed one, at that
  * one in a cycle that does not cover the anchor, and at it once the cut has
  * been made; the first passage of the armed point by a cycle that covers the
- * anchor, on any core, does not return at all. */
+ * anchor, on any core, does not return at all. `undone` waits for no anchor:
+ * its first passage is the cut. */
 void SettleCutAt(SettleCutPoint here);
 
 /* Said once a volume is mounted: which point this kernel will cut at — and

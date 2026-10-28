@@ -27,9 +27,10 @@
 // append, a block written over whole or in part, synchronously or through the
 // port, a cut, a growth across a hole — the cycle settles and the volume
 // mounted again holds the same bytes and the same ground. A write the medium
-// refuses names nothing (C1). A stitch naming fresh data pays the flush before
-// its atoms and says so (DATA_FLUSHED), one naming none needs no flush ahead
-// of it; and a fresh block read before any Tally names it is held to the
+// refuses names nothing (C1). A stitch naming fresh data whose check would
+// cost the mount more than the last cycle cost pays the flush before its
+// atoms and says so (DATA_FLUSHED), one naming none needs no flush ahead of
+// it; and a fresh block read before any Tally names it is held to the
 // digest its record carries, on every road a read takes. Every test puts the
 // ribbon back as it found it (stand_stitch.h).
 // ============================================================================
@@ -316,7 +317,8 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// Fresh data is flushed before the stitch that names it (§16.2 п.7, §3.3)
+// Fresh data whose check would cost more than a cycle is flushed before the
+// stitch that names it (§3.3, §16.5 п.3)
 // ----------------------------------------------------------------------------
 
 bool StandFreshLastStitch(uint64_t* flags, uint64_t* fresh)
@@ -344,9 +346,10 @@ static TestResult TestStandFreshFlushesFirst(void)
     TEST_ASSERT(StandFreshModelMake(&m, 4u * TAGFS_BLOCK_SIZE), "room for the file's bytes");
     TEST_ASSERT_EQ(tagfs_create_file("fresh-flush.bin", NULL, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_OK(TagFSSettle(), "and its Born settled");
+    BlockFailReadPace(true, 1, 1000000u);
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 2u * TAGFS_BLOCK_SIZE, 31), 2 * TAGFS_BLOCK_SIZE, "two blocks written");
     BlockFailArm(s.seat, BLOCK_FAIL_FLUSH, 0, 0, BLOCK_FAIL_NEVER);
-    TEST_ASSERT_OK(TagFSSettle(), "the cycle that names them settles");
+    TEST_ASSERT_OK(TagFSSettle(), "the cycle that names them settles, their check named dearer than its D");
     TEST_ASSERT_EQ(BlockFailSeen(), 2, "paying two flushes: the data's before the stitch, and the one after it");
     TEST_ASSERT(StandFreshLastStitch(&flags, &fresh) && (flags & STITCH_DATA_FLUSHED) && fresh == 2,
                 "its stitch says DATA_FLUSHED, and its Clasp the two fresh blocks it names");
@@ -366,6 +369,7 @@ static TestResult TestStandFreshFlushesFirst(void)
                 "and the stitch was laid again at the start of the next_quire: no atom of it went before the flush");
     TEST_ASSERT(StandStitchRemount() && StandFreshHolds(&m, fid), "mounted again, the file holds the new bytes");
 out:
+    BlockFailReadPace(false, 0, 0);
     BlockFailDisarm();
     StandFreshModelLetGo(&m);
     STAND_STITCH_PUT_BACK(&s);

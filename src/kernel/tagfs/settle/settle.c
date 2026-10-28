@@ -633,7 +633,8 @@ static void SettleRunEnd(error_t rc)
             kprintf("[Settle] the cycle that would have settled %llu change(s) was refused at "
                     "%s (error %u) — nothing of it is declared settled, and the next cycle "
                     "writes it all again\n",
-                    (unsigned long long)(target - SettledGen()), book ? StitchRunStage() : snap->stage,
+                    (unsigned long long)(target > SettledGen() ? target - SettledGen() : 0u),
+                    book ? StitchRunStage() : snap->stage,
                     (unsigned)rc);
         s_failing = true;
         if (book)

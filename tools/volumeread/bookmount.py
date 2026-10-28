@@ -93,7 +93,10 @@ class BookMount:
     [(code, severity, sentence)], the slots, the slot stood on, its Tally,
     the ribbon, the live `files`, the `locked` ones and what of their runs is
     known, the tags, the Use Context, the digests of fresh data, the ground
-    lying `fallow`, the other slots' nodes and Quires, and `counts`."""
+    lying `fallow`, the other slots' nodes and Quires, `counts`, and
+    `errata` — the mount's verdict the session's first stitch lays down, an
+    Undone each: [(seq of the stitch undone, why, [fids rising])] in order
+    (§16.5 п.4, the kernel's mount/errata.c)."""
 
     def __init__(self, g, stand=None, upto=None):
         """`stand`: the index of the slot to stand on, whatever the others
@@ -104,6 +107,7 @@ class BookMount:
         self.slots, self.slot, self.tally, self.ribbon = [], None, None, None
         self.files, self.locked, self.locked_runs, self.tags, self.use = {}, {}, {}, {}, b""
         self.overlay, self.fallow, self.undone, self.mismatched, self.born = {}, [], {}, set(), set()
+        self.errata, self._errata = [], {}
         self.older_nodes, self.older_quires = [], []
         self.ribbon_said, self.applied = 0, []
         self.lied_check = None
@@ -320,8 +324,8 @@ class BookMount:
         """п.6: the data the newest stitch put down held to its digests — when
         it was sewn without DATA_FLUSHED, and the newest two on a medium that
         lied (M-2). A file whose block did not land is rolled back by its
-        splice (§3.9): its records of that stitch are passed over, as an
-        Undone of the next session will say — which this kernel cannot write.
+        splice (§3.9): its records of that stitch are passed over, as the
+        Undone of the session's first stitch will say (`errata`).
         Clasp.fresh bounds the read before a block of it is read (§2.7): a
         stitch whose records name other fresh blocks than its Clasp is one
         pass 2 does not apply (_Fresh), and none of its data is read. A block
@@ -347,6 +351,11 @@ class BookMount:
             d = stitch.RecordDecode(kind, body, u.seq)
         except Short:
             return
+        if d["fid"] in self.undone.get(u.seq, ()):
+            # Passed over already — by an Undone on the ribbon, or by this
+            # check's own verdict on an earlier record of the file: one Undone
+            # a stitch undone, never a second (§2.8, ribbon_verify.c).
+            return
         runs = d["runs"] if kind == BORN else [r for _a, _m, rs in d["splices"] for r in rs]
         fresh = [r for r in runs if not r.hole and tally.EXT_SHARED not in stitch.Extensions(r.ext)]
         bad, k, digests = None, 0, d["digests"]
@@ -363,6 +372,7 @@ class BookMount:
         if bad is None:
             return
         self.undone.setdefault(u.seq, set()).add(d["fid"])
+        self._Erratum(u.seq, 1, d["fid"])
         torn = self.ribbon.torn is not None
         self.ribbon.lied = self.ribbon.lied or torn
         self.Say("NOT_LANDED", "note", "fid %u's data in stitch %u did not land (block %u of %u checked does "
@@ -371,8 +381,6 @@ class BookMount:
                      "; a torn stitch lies after it, so the medium did not keep what it confirmed: a flush "
                      "that lied, or what was written spoilt by the next write (M-2) — MEDIUM_LIED"
                      if torn else ""))
-        self.Glass("fid %u is rolled back by its splice, and a roll-back is a verdict an Undone carries, "
-                   "which this kernel does not write" % d["fid"])
 
     def _Replay(self):
         """Pass 2: every stitch sewn on, in order, each record through the
@@ -385,20 +393,36 @@ class BookMount:
                 break
             if u.seq in refused:
                 continue
-            files, tags, use, fallow = dict(self.files), dict(self.tags), self.use, []
             try:
-                if u.head is not None and u.head.longer:
-                    raise Refused("its StitchHead or Clasp is %u byte(s) longer than this reader knows — "
-                                  "written by a kernel that knows more" % u.head.longer)
-                for kind, ign, body, _at in u.records:
-                    use = self._Record(u, kind, ign, body, files, tags, fallow, use)
-                self._Fresh(u)
+                files, tags, use, fallow, overlay = self._Stitch(u)
             except Refused as e:
                 self.Glass("stitch %u is not applied: %s" % (u.seq, e))
                 continue
             self.files, self.tags, self.use = files, tags, use
             self.fallow.extend(fallow)
+            self.overlay.update(overlay)
             self.applied.append(u.seq)
+
+    def _Stitch(self, u):
+        """One stitch's records through their rules, on copies of what the
+        mount holds. A record that does not fit its file (the rule of rot)
+        passes over the file's records from there, and the stitch is gathered
+        again from its first record without any of them — the file where the
+        stitch found it, as the next mount leaves it once the Undone of the
+        verdict passes over every record of that fid in the stitch (§2.8, H-1;
+        ribbon_transcribe.c RibbonStitchApplied). Each gathering again passes
+        over one fid more, so it ends."""
+        while True:
+            files, tags, use, fallow, overlay = dict(self.files), dict(self.tags), self.use, [], {}
+            passed = len(self.undone.get(u.seq, ()))
+            if u.head is not None and u.head.longer:
+                raise Refused("its StitchHead or Clasp is %u byte(s) longer than this reader knows — "
+                              "written by a kernel that knows more" % u.head.longer)
+            for kind, ign, body, _at in u.records:
+                use = self._Record(u, kind, ign, body, files, tags, fallow, use, overlay)
+            self._Fresh(u)
+            if len(self.undone.get(u.seq, ())) == passed:
+                return files, tags, use, fallow, overlay
 
     @staticmethod
     def _FreshNamed(u):
@@ -423,7 +447,7 @@ class BookMount:
         if named != u.parsed.fresh:
             raise Refused("its Clasp names %u fresh block(s) and its records %u (§2.7)" % (u.parsed.fresh, named))
 
-    def _Record(self, u, kind, ign, body, files, tags, fallow, use):
+    def _Record(self, u, kind, ign, body, files, tags, fallow, use, overlay):
         if kind not in KIND_NAMES or kind in (stitch.STITCH_HEAD, stitch.CLASP):
             if not ign:
                 raise Refused("it carries a record of kind %u this reader does not know and may not step "
@@ -453,14 +477,14 @@ class BookMount:
             self._Coined(u, d, tags)
             return use
         try:
-            self._File(u, kind, d, files, tags, fallow)
+            self._File(u, kind, d, files, tags, fallow, overlay)
         except Mismatch as e:
             self.mismatched.add(d["fid"])
+            self.undone.setdefault(u.seq, set()).add(d["fid"])
+            self._Erratum(u.seq, 2, d["fid"])
             self.Say("BASE_MISMATCH", "damage", "stitch %u's %s of fid %u does not fit the file: %s — the "
                      "file stays as it last matched (§3.9, the rule of rot)" % (u.seq, KIND_NAMES[kind],
                                                                                d["fid"], e))
-            self.Glass("fid %u is rolled back by the rule of rot, and a roll-back is a verdict an Undone "
-                       "carries, which this kernel does not write" % d["fid"])
         return use
 
     @staticmethod
@@ -479,7 +503,7 @@ class BookMount:
                           % (tid, ts.Text().decode("utf-8", "replace"), have.Text().decode("utf-8", "replace")))
         tags[tid] = ts
 
-    def _File(self, u, kind, d, files, tags, fallow):
+    def _File(self, u, kind, d, files, tags, fallow, overlay):
         fid, seq = d["fid"], u.seq
         if kind == BORN:
             if fid in files or fid in self.locked:
@@ -519,7 +543,7 @@ class BookMount:
         self._Slip(fs, d["slip"])
         blocks = [r.start + i for r in self._Runs(kind, d) if not r.hole and
                   tally.EXT_SHARED not in stitch.Extensions(r.ext) for i in range(r.count)]
-        self.overlay.update(zip(blocks, d["digests"]))
+        overlay.update(zip(blocks, d["digests"]))
         files[fid] = fs
 
     @staticmethod
@@ -587,6 +611,8 @@ class BookMount:
             mine = RunsNormal(self.files[fid].Ground())
             others = RunsNormal([r for f, fs in self.files.items() if f != fid for r in fs.Ground()])
             if ondisk.RunsIntersect(mine, others):
+                for _why, fids in self._errata.values():
+                    fids.discard(fid)
                 self._Lock(fid, "it is rolled back to blocks another file now holds (§3.9)")
         for fs in self.files.values():
             if any(r.ext is not None for r in fs.runs):
@@ -600,6 +626,13 @@ class BookMount:
                            "that knows more" % fs.fid)
         owned = RunsNormal([r for fs in self.files.values() for r in fs.Ground()])
         self.fallow = ondisk.RunsSubtract(RunsNormal(self.fallow), owned)
+        self.errata = [(seq, why, sorted(fids)) for seq, (why, fids) in sorted(self._errata.items()) if fids]
+
+    def _Erratum(self, seq, why, fid):
+        """`fid` rolled back from stitch `seq` for `why` into the verdict: one
+        Undone a stitch undone (§2.8), its why the first found — the check of
+        the data comes before the replay (errata.c, ErrataAdd)."""
+        self._errata.setdefault(seq, (why, set()))[1].add(fid)
 
     def _Lock(self, fid, why):
         """A live file the replay locked (§3.9): it leaves the mirror, and the

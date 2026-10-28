@@ -202,7 +202,8 @@ bool     SettleMediumLied(void);
 // pockets, not only after the last one.
 //
 // A frequent small writer — small appends to one file, each smaller than what
-// settling it costs the medium, again before a Lull has passed — or one whose
+// settling it costs the medium, again before a Lull has passed (on a book,
+// before the window has: its cycles come at most one a window) — or one whose
 // file wears settle:lazy, does not start cycles by Lull: its changes wait for
 // the window or a demand.
 // ============================================================================
@@ -216,6 +217,8 @@ typedef enum {
     SETTLE_DEMAND_LEAVE = 1u << 1,  /* a program left with changes no cycle settled */
     SETTLE_DEMAND_TALLY = 1u << 2,  /* a book's ribbon wants a Tally to take it in: no next_quire
                                        could be given — a Tally's work, not a cycle's (binder.h) */
+    SETTLE_DEMAND_ERRATA = 1u << 3, /* a book's mount holds a verdict: the session's first cycle lays it
+                                       down at once, never after a Lull (§3.5, mount/errata.h) */
 } SettleDemandKind;
 
 /* An Ink was made (after its lock was dropped): the window's clock starts for
@@ -272,9 +275,13 @@ void     SettleCadenceHold(bool hold);
 /*
  * Format v2's writer (settle/sewing.c). StitchBookRefused: no Quire took a
  * stitch's write — the volume may only be read until it is mounted again, part
- * of what TagFSReadOnly answers (M-6).
+ * of what TagFSReadOnly answers (M-6). StitchWearsVerdict: this core is the
+ * Settle's holder putting settle:undone on the files of the mount's verdict,
+ * before its cycle's snapshot — Inks of the cycle itself, which a stopping
+ * machine's halt does not refuse (ink.c, InkVolumeBegins).
  */
 bool     StitchBookRefused(void);
+bool     StitchWearsVerdict(void);
 
 /* A part of format v1's cycle — the pool's Spares, Glean, the Ledger's write —
  * reached on a book: a defect of the road there, which the cycle's dispatch by

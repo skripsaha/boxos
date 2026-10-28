@@ -212,6 +212,10 @@ typedef enum {
     ERR_TAGFS_FID_EXHAUSTED = 869,
 
     // TagFS Module Errors (1000-1099)
+    /* A write the book's mount found never reached the medium: the stitch that
+     * named its data landed and the data did not (spec_v2 §3.9) — the file is
+     * rolled back by its splice, or never born. */
+    ERR_TAGFS_NOT_LANDED = 1000,
     // BoxHash
     ERR_BOXHASH_INVALID_CONTEXT = 1040,
     ERR_BOXHASH_VERIFICATION_FAILED = 1041,

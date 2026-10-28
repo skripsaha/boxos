@@ -9,8 +9,12 @@
 #include "../use_memory/use_memory.h"
 #include "../settle_cut/settle_cut.h"
 #include "../integrity/gloss.h"
+#include "../mount/errata.h"
+#include "amp.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 #include "boardroom.h"
+#include "kheap.h"
+#include "read_pace.h"
 #include "crypto.h"
 
 /*
@@ -24,18 +28,22 @@
  *                lying past it (RibbonFlightBegins); the next_quire asked for
  *                first, with no lock held, when the ribbon has none; the
  *                Quire closed early when room is asked for and Fallow waits
- *                for it to be left; the pages Fallow's gives may want held
+ *                for it to be left; the pages Fallow's gives may want held;
+ *                and what its toll is judged by: the last cycle's D less the
+ *                flush of its data, and the pace the medium's reads were seen
+ *                to keep (StitchToll)
  *   BUILD        no lock: the stream — StitchHead naming the last stitch by
- *                its seq and its Clasp, the Coineds, the UseContext, a record
- *                of each file the Docket names by fid, the Clasp summing the
- *                blocks of fresh data they name — its place on the ribbon, its
- *                seq, and its sectors sealed
- *   FIRST_FLUSH  only for a stitch that names fresh data (Clasp.fresh > 0,
- *                §16.2 п.7): the flush that keeps every block the Inks it
- *                carries wrote, before any atom of the stitch that names them
- *   STITCH       its atoms, a window the seat takes at a time; every stitch
- *                says DATA_FLUSHED — the one naming no fresh data has nothing
- *                to flush ahead of it
+ *                its seq and its Clasp, the Undones of the mount's verdict,
+ *                the Coineds, the UseContext, a record of each file the
+ *                Docket names by fid, the Clasp summing the blocks of fresh
+ *                data they name — its toll, its place on the ribbon, its seq,
+ *                and its sectors sealed
+ *   FIRST_FLUSH  only for a stitch whose toll is the flush of its data: the
+ *                flush that keeps every block the Inks it carries wrote,
+ *                before any atom of the stitch that names them
+ *   STITCH       its atoms, a window the seat takes at a time; a stitch that
+ *                paid its toll, or names no fresh data to flush ahead of it,
+ *                says DATA_FLUSHED
  *   LAST_FLUSH   S5: the cycle's one flush that must be kept
  *   DONE         S6: the cursor past it; under the state lock, the target
  *                settled — and the Use Context with it, or the word it had no
@@ -46,13 +54,17 @@
  *                are answered (settle.c). A cycle refused gives the Docket it
  *                took back, under what came since, and its claims with it
  *
- * ‼ ON THE MEDIUM: THE DATA, THE FLUSH, THE STITCH, THE FLUSH (§3.2, §16.2 п.7).
+ * ‼ ON THE MEDIUM: THE DATA, [THE FLUSH], THE STITCH, THE FLUSH (§3.2, §3.3).
  * A stitch names blocks of fresh data that were written before its TAKE, and
  * a medium may keep its writes in any order until a flush is kept: a stitch
  * that landed with the data it names not landed would name blocks that hold
- * nothing of the file. So the stitch naming fresh data is begun only once the
- * flush of that data is kept, and says so (DATA_FLUSHED); the mount need not
- * read those blocks back to believe the stitch.
+ * nothing of the file. Either the stitch is begun only once the flush of that
+ * data is kept, and says so (DATA_FLUSHED) — the mount need not read those
+ * blocks back to believe it — or it is not, and the mount reads every one of
+ * them back against the digest its record carries, rolling a file whose data
+ * did not land back by its splice (mount/ribbon_verify.c). Which, the toll
+ * decides (StitchToll): the flush where the check would cost more than a
+ * cycle does.
  *
  * ‼ A WRITE THE MEDIUM REFUSES IS TAKEN AGAIN WHERE NOTHING OF IT LIES AND
  * THE MOUNT'S READER WALKS (M-6, §3.2, §4.5 п.5 (б), §16.4 п.4). Any refusal
@@ -95,7 +107,11 @@ typedef struct {
     DocketTaken jots;         /* the files' changes up to the target, by fid */
     uint64_t    claimed;      /* the ribbon's bytes their Inks claimed, taken (RibbonClaimTaken) */
     uint64_t    data_need;    /* the flush that keeps every block the Inks up to the target wrote */
+    uint64_t    d_us;         /* the toll's measures, taken at S0: the last cycle's D, */
+    ReadPaceSeen pace;        /* and the pace the medium's reads were seen to keep */
+    bool        toll;         /* the stitch pays the flush of its data before its atoms */
     uint64_t    fresh;        /* the blocks of fresh data the stitch names (Clasp.fresh) */
+    uint64_t    flush_us;     /* what the flush of its data took the medium: no part of D (§16.5 п.1) */
     uint64_t    seq;          /* this attempt's */
     uint32_t    clasp;
     uint8_t*    sectors;      /* the attempt sealed: `of` sectors */
@@ -108,6 +124,12 @@ typedef struct {
 } StitchSnap;
 
 static StitchSnap s_stitch;
+
+/* What the flush of its data took the medium in the last cycle that settled —
+ * the cycle whose busy time the cadence keeps as D (cadence.c, s_d_us): the
+ * Settle's holder's alone, written as that cycle ends and read as the next
+ * one's S0 takes the toll's D. */
+static uint64_t s_settled_flush_us;
 
 /* No Quire took the write: the book takes none until the volume is mounted
  * again. */
@@ -140,6 +162,14 @@ bool StitchBookRefused(void)
     return __atomic_load_n(&s_book_refused, __ATOMIC_ACQUIRE) != 0;
 }
 
+/* The core putting the verdict's tags on, + 1; 0 while none is. */
+static volatile uint32_t s_wearing;
+
+bool StitchWearsVerdict(void)
+{
+    return __atomic_load_n(&s_wearing, __ATOMIC_ACQUIRE) == (uint32_t)amp_get_core_index() + 1u;
+}
+
 // ----------------------------------------------------------------------------
 // TAKE
 // ----------------------------------------------------------------------------
@@ -161,13 +191,15 @@ static void StitchCloseForRoom(StitchSnap* s, bool awaits)
         RibbonNextGiven();
 }
 
-/* The sectors the stitch TAKE took can take at the most: its claims, the
- * Coineds of the tags given ids since the last stitch settled — `coined` of
- * them, `text` bytes of keys and values, every one in its range — the word
- * owed, and what every stitch carries. */
+/* The sectors the stitch TAKE took can take at the most: its claims — the
+ * Labeleds of settle:undone the verdict's files wear among them — the Undones
+ * of the mount's verdict, the Coineds of the tags given ids since the last
+ * stitch settled — `coined` of them, `text` bytes of keys and values, every
+ * one in its range — the word owed, and what every stitch carries. */
 static uint64_t StitchFlight(const StitchSnap* s, uint32_t coined, uint64_t text)
 {
-    uint64_t bytes = STITCH_HEAD_MOST + STITCH_CLASP_MOST + s->claimed + (uint64_t)coined * STITCH_COINED_MOST + text;
+    uint64_t bytes = STITCH_HEAD_MOST + STITCH_CLASP_MOST + s->claimed + ErrataBytes() +
+                     (uint64_t)coined * STITCH_COINED_MOST + text;
     if (s->use_owed)
         bytes += STITCH_USE_MOST + (s->use ? s->use->bytes : 0u);
     return RibbonStitchSectors(bytes, RibbonCursorNow()->atom);
@@ -186,7 +218,7 @@ static void StitchTake(StitchSnap* s)
     s->target    = InkedGen();
     s->data_need = InkDataNeed();
     s->cycle     = SettledCycles() + 1u;
-    s->flags     = STITCH_DATA_FLUSHED | (s->why == SETTLE_FOR_HALT && HelmOwed() == 0 ? STITCH_CLEAN : 0u) |
+    s->flags     = (s->why == SETTLE_FOR_HALT && HelmOwed() == 0 ? STITCH_CLEAN : 0u) |
                    (RibbonCursorLied() ? STITCH_MEDIUM_LIED : 0u);
     s->use_owed  = UseMemoryStitchTake(&s->use, &s->use_ticket);
     s->claimed   = RibbonClaimTaken();
@@ -202,8 +234,45 @@ static void StitchTake(StitchSnap* s)
     TagFSLockDrop(&fs->lock);
     StitchCloseForRoom(s, awaits);
     FallowGiveRoomHold(s->cycle);
+    /* The toll's D is the last settled cycle's less the flush of its own data
+     * (§16.5 п.1), so a flush paid never spares the next cycle its own; the
+     * cadence's D — the Lull, the medium's share, the small writer's measure —
+     * is the whole of that cycle's time on the medium, the flush with it. */
+    uint64_t d = SettleLastDUs();
+    s->d_us    = d > s_settled_flush_us ? d - s_settled_flush_us : 0;
+    ReadPaceTake(&s->pace);
     s->made_ns = rtc_get_unix64() * 1000000000ull;
     SETTLE_CUT_CYCLE(s->target);
+}
+
+/*
+ * ‼ THE TAG GOES DOWN WITH THE VERDICT (§16.5 п.6, M-10). Each file the
+ * mount's verdict rolls back wears settle:undone, put on by an ordinary Ink
+ * before the snapshot of the cycle that lays the verdict down — so the one
+ * stitch carries both, and no mount finds the Undone without the tag of a file
+ * that can wear one. Every cycle until one settles carries the verdict (a
+ * stitch that settled without it would leave the next mount to replay what
+ * it undoes, H-1), so it is the first cycle that begins — asked at the door's
+ * opening (mount.c, ErrataAsk) — that puts them on, and a cycle refused before
+ * the last of them puts the rest on in the next. Off the heap's reserve, which
+ * is the steps' own: a refusal of the moment — the heap (SETTLE_PARK_HEAP), the
+ * ribbon's room (tried a window on), a volume taking no change now — refuses
+ * the cycle, never laying the verdict without them (errata.h, ErrataWorn). A
+ * stopping machine's halt refuses every change not begun; these are its own
+ * cycle's, made before its snapshot, and pass (StitchWearsVerdict).
+ */
+static error_t StitchWorn(StitchSnap* s)
+{
+    if (!ErrataHeld())
+        return OK;
+    KHeapScope was = KHeapScopeEnter(KHEAP_CHARGE_KERNEL, 0);
+    __atomic_store_n(&s_wearing, (uint32_t)amp_get_core_index() + 1u, __ATOMIC_RELEASE);
+    error_t    rc  = ErrataWorn();
+    __atomic_store_n(&s_wearing, 0u, __ATOMIC_RELEASE);
+    KHeapScopeLeave(was);
+    if (rc != OK)
+        s->stage = "the settle:undone the mount's verdict owes its files";
+    return rc;
 }
 
 // ----------------------------------------------------------------------------
@@ -220,6 +289,8 @@ typedef struct {
     uint64_t records;
     uint64_t bytes;
     uint64_t body;
+    uint64_t runs;         /* the runs of fresh data the files' records name, */
+    uint64_t fresh;        /* and their blocks: what a mount's check reads */
 } StitchLoad;
 
 /* Tag `id` as a Coined carries it: false when the registry gave no tag that id. */
@@ -233,15 +304,18 @@ static bool StitchCoinedTag(uint32_t id, TallyTag* t)
     return true;
 }
 
-/* The records measured: every tag given an id since the last stitch settled,
- * and the word owed when the book does not hold it already (§7: the same text
- * is written never again), and the files' — ERR_NO_MEMORY for no room for
- * how their runs changed. */
+/* The records measured: the Undones of the mount's verdict while it is held,
+ * every tag given an id since the last stitch settled, and the word owed when
+ * the book does not hold it already (§7: the same text is written never
+ * again), and the files' — ERR_NO_MEMORY for no room for how their runs
+ * changed. */
 static error_t StitchMeasure(StitchSnap* s, StitchLoad* l)
 {
     memset(l, 0, sizeof(*l));
-    l->bytes = STITCH_HEAD_MOST + STITCH_CLASP_MOST;
-    l->body  = STITCH_HEAD_MOST > STITCH_CLASP_MOST ? STITCH_HEAD_MOST : STITCH_CLASP_MOST;
+    l->bytes   = STITCH_HEAD_MOST + STITCH_CLASP_MOST + ErrataBytes();
+    l->body    = STITCH_HEAD_MOST > STITCH_CLASP_MOST ? STITCH_HEAD_MOST : STITCH_CLASP_MOST;
+    l->body    = ErrataBodyMost() > l->body ? ErrataBodyMost() : l->body;
+    l->records = ErrataUndones();
     for (uint32_t id = s->coined_lo; id < s->coined_hi; id++) {
         TallyTag t;
         if (!StitchCoinedTag(id, &t))
@@ -265,14 +339,68 @@ static error_t StitchMeasure(StitchSnap* s, StitchLoad* l)
         l->body    = body > l->body ? body : l->body;
     }
     uint64_t records = 0, bytes = 0, body = 0;
-    error_t  rc      = DocketMeasure(&s->jots, &records, &bytes, &body, &l->jot_tags);
+    error_t  rc      = DocketMeasure(&s->jots, &records, &bytes, &body, &l->jot_tags, &l->runs, &l->fresh);
     l->records += records;
     l->bytes   += bytes;
     l->body     = body > l->body ? body : l->body;
     return rc;
 }
 
-/* The stream laid into `out`: StitchHead, the records `l` measured, Clasp;
+/*
+ * ‼ THE FLUSH OF THE DATA IS PAID BY WHAT ITS CHECK WOULD COST (§3.3, M-13,
+ * §16.5 п.1-3). A stitch that names fresh data and is begun before its flush
+ * leaves the mount to read every block of it back: its runs, each a seek, and
+ * its bytes at the pace the medium's reads keep — the worst S0 saw since the
+ * last S0 (read_pace.h). Where that costs more than D — the last cycle that
+ * settled, less what the flush of its own data took, so a flush paid never
+ * spares the next one its own — the cycle pays the flush first, and the mount
+ * believes the stitch; where it does not, the mount's check stays within a
+ * cycle's cost however the medium seeks. With no pace known, and for the
+ * halt's CLEAN stitch, the flush is paid: the last stitch of a machine
+ * stopping is checked by nobody before the next mount. A stitch naming no
+ * fresh data has nothing to flush ahead of it, nor anything to check. Taken
+ * once at S0 and judged in each BUILD, so a retry (M-6) is judged by the same
+ * measures.
+ */
+static bool StitchToll(const StitchSnap* s, uint64_t runs, uint64_t fresh)
+{
+    if (!fresh)
+        return false;
+    if ((s->flags & STITCH_CLEAN) || !s->pace.rate)
+        return true;
+    if (fresh > UINT64_MAX / ((uint64_t)TAGFS_BLOCK_SIZE * 1000000ull))
+        return true;
+    uint64_t read_us = fresh * TAGFS_BLOCK_SIZE * 1000000ull / s->pace.rate;
+    if (read_us > s->d_us)
+        return true;
+    return s->pace.seek_us && runs > (s->d_us - read_us) / s->pace.seek_us;
+}
+
+/* The fresh blocks the stitch lays are not the ones its toll was judged by: a
+ * defect of the measure, said; the flush of its data is paid all the same,
+ * so the stitch's word for it — whatever it says — never outruns the medium. */
+static void StitchFreshUnmeasured(StitchSnap* s, uint64_t measured)
+{
+#if CONFIG_STRICT
+    panic("[TagFS] DEFECT: stitch %llu lays %llu fresh block(s) and its toll was judged by %llu",
+          (unsigned long long)s->seq, (unsigned long long)s->fresh, (unsigned long long)measured);
+#endif
+    kprintf("[TagFS] DEFECT: stitch %llu lays %llu fresh block(s) and its toll was judged by %llu — the flush of "
+            "its data is paid before it all the same\n", (unsigned long long)s->seq,
+            (unsigned long long)s->fresh, (unsigned long long)measured);
+    s->toll = true;
+}
+
+/*
+ * ‼ THE VERDICT GOES FIRST, AND WITH EVERY ATTEMPT (§2.8, §16.5 п.5). The
+ * mount's reader takes an Undone only before every other record of its
+ * stitch — one after a Coined would leave the stitch unapplied — so the
+ * Undones of the mount's verdict follow the StitchHead straight away, one a
+ * stitch undone, and each names the stitch it undoes by its distance from
+ * this attempt's own seq: a retry (M-6) takes a new seq, and lays them again
+ * reckoned from it.
+ *
+ * The stream laid into `out`: StitchHead, the records `l` measured, Clasp;
  * `starts` each record's offset, *nstarts how many — never more than the
  * records measured and the two around them, which `starts` holds. Its length
  * in *len, and the Clasp's sum in *clasp; ERR_NO_MEMORY for the room the
@@ -282,18 +410,21 @@ static error_t StitchStream(StitchSnap* s, const StitchLoad* l, uint8_t* out, ui
 {
     const RibbonCursor* c = RibbonCursorNow();
     bool                came = c->came.blocks && (c->off == 0 || c->refused);
-    StitchHead          h = { .flags = s->flags, .prev = c->last ? s->seq - c->last : 0, .prev_clasp = c->clasp,
+    uint64_t            flushed = s->toll || !l->fresh ? STITCH_DATA_FLUSHED : 0u;
+    StitchHead          h = { .flags = s->flags | flushed, .prev = c->last ? s->seq - c->last : 0, .prev_clasp = c->clasp,
                               .tally = s->seq - c->tally, .made_ns = s->made_ns, .next_block = c->next.block,
                               .next_blocks = c->next.blocks, .from_block = came ? c->came.block : 0,
                               .from_blocks = came ? c->came.blocks : 0 };
-    uint32_t n = 0, at = RibbonRecordPut(out, RIBBON_STITCH_HEAD, 0, body, StitchHeadBodyPut(body, &h));
+    uint32_t n = 0, coined = 0, at = RibbonRecordPut(out, RIBBON_STITCH_HEAD, 0, body, StitchHeadBodyPut(body, &h));
     starts[n++] = 0;
-    for (uint32_t id = s->coined_lo; id < s->coined_hi && n <= l->coined; id++) {
+    at = ErrataLay(out, at, s->seq, body, starts, &n);
+    for (uint32_t id = s->coined_lo; id < s->coined_hi && coined < l->coined; id++) {
         TallyTag t;
         if (!StitchCoinedTag(id, &t))
             continue;
         starts[n++] = at;
         at += RibbonRecordPut(out + at, RIBBON_COINED, 0, body, RibbonCoinedBodyPut(body, id, &t));
+        coined++;
     }
     if (l->use_written) {
         starts[n++] = at;
@@ -305,6 +436,8 @@ static error_t StitchStream(StitchSnap* s, const StitchLoad* l, uint8_t* out, ui
     error_t rc = DocketLay(&s->jots, s->seq, l->jot_tags, out, &at, body, starts, &n, &s->fresh);
     if (rc != OK)
         return rc;
+    if (s->fresh != l->fresh)
+        StitchFreshUnmeasured(s, l->fresh);
     Clasp clasped = { .records = n - 1u, .fresh = s->fresh, .crc = KCrc32c(out, at) };
     *clasp      = clasped.crc;
     starts[n++] = at;
@@ -329,6 +462,7 @@ static error_t StitchLay(StitchSnap* s, bool* word)
     StitchSectorsLetGo(s);
     error_t   measured = StitchMeasure(s, &l);
     *word = l.use_written;
+    s->toll = StitchToll(s, l.runs, l.fresh);
     uint8_t*  stream = kmalloc(l.bytes);
     uint8_t*  body   = kmalloc(l.body);
     uint32_t* starts = kmalloc(sizeof(uint32_t) * (l.records + 2u));
@@ -412,6 +546,8 @@ static error_t StitchWrite(StitchSnap* s, bool* done)
 {
     uint64_t vlba = 0;
     uint32_t n    = StitchWindow(s, &vlba);
+    if (s->written == 0 && ErrataHeld())
+        SETTLE_CUT_AT(SETTLE_CUT_POINT_UNDONE);
     if (s->written == s->of - RibbonCursorNow()->atom)
         SETTLE_CUT_AT(SETTLE_CUT_POINT_STITCH);
     int rc = tagfs_volume_write(vlba, n, s->sectors + (uint64_t)s->written * BOOK_SECTOR_BYTES);
@@ -477,6 +613,9 @@ error_t StitchRunStep(bool* done)
     bool        last = false;
     switch (s->step) {
     case STITCH_STEP_TAKE:
+        rc = StitchWorn(s);
+        if (rc != OK)
+            break;
         StitchTake(s);
         s->step = STITCH_STEP_BUILD;
         break;
@@ -484,17 +623,20 @@ error_t StitchRunStep(bool* done)
         s->stage = "the stitch's making";
         rc       = StitchBuild(s);
         if (rc == OK)
-            s->step = s->fresh ? STITCH_STEP_FIRST_FLUSH : STITCH_STEP_STITCH;
+            s->step = s->toll ? STITCH_STEP_FIRST_FLUSH : STITCH_STEP_STITCH;
         else if (rc == ERR_TAGFS_READ_ONLY)
             rc = StitchNowhere(s, "the attempts refused leave the next_quire the last stitch sewn names no room "
                                   "for the retry");
         break;
-    case STITCH_STEP_FIRST_FLUSH:
-        s->stage = "the flush of the data the stitch names";
-        rc       = VolumeFlushFor(s->data_need);
+    case STITCH_STEP_FIRST_FLUSH: {
+        uint64_t t0 = SettleNowUs();
+        s->stage    = "the flush of the data the stitch names";
+        rc           = VolumeFlushFor(s->data_need);
+        s->flush_us += SettleNowUs() - t0;
         if (rc == OK)
             s->step = STITCH_STEP_STITCH;
         break;
+    }
     case STITCH_STEP_STITCH:
         s->stage = "the stitch";
         rc       = StitchWrite(s, &last);
@@ -502,6 +644,8 @@ error_t StitchRunStep(bool* done)
             s->step = STITCH_STEP_LAST_FLUSH;
         break;
     case STITCH_STEP_LAST_FLUSH:
+        if (!s->toll && s->fresh)
+            SETTLE_CUT_AT(SETTLE_CUT_POINT_SPARED);
         SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);
         s->stage = "the flush after the stitch";
         rc       = VolumeFlushFor(VolumeFlushNeed());
@@ -577,6 +721,8 @@ void StitchRunEnd(error_t rc)
         BinderStitchSettled(s->seq, s->useful, fid_most, births);
         EndpaperGrew(&s->jots, s->seq);
         DocketSettled(&s->jots, s->seq);
+        ErrataSettled(s->seq);
+        s_settled_flush_us = s->flush_us;
         RibbonNextGiven();
     }
     /* Past the Coineds the stitch laid and the next_quire asked: the room a

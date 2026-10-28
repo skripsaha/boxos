@@ -10,7 +10,7 @@ from . import bookread, ondisk, stitch, stitch_ribbon, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal
-from .selftest_book import Born, Found, Glass, Label
+from .selftest_book import Born, Errata, Found, Glass, Label
 from .selftest_cases import Case
 
 
@@ -112,25 +112,27 @@ def RecordCases(bt):
              lambda c: c.kernel["mounts"] is True and (c.kernel["sewn"], c.kernel["last"], c.kernel["applied"],
                                                         c.kernel["next_seq"]) == (1, 3, 1, 4))]),
         Case("B26 the newest stitch's data never landed", lambda o: Unlanded(o, False),
-             must={"NOT_LANDED", "UNDER_GLASS"}, checks=[
-                 ("%u is rolled back by its splice, and the roll-back cannot be written by this kernel"
-                  % f2, lambda c: f2 not in c.mount.files and Glass(c, "roll")),
+             must={"NOT_LANDED"}, checks=[
+                 ("%u is rolled back by its splice, a verdict the session's first stitch lays down"
+                  % f2, lambda c: f2 not in c.mount.files and Errata(c, f2, 1)),
                  ("its id is never given again, and no lie is said", lambda c: c.mount.counts["next_fid"] ==
                   f2 + 1 and not c.mount.ribbon.lied)]),
         Case("B26b the newest stitch's data never landed, a torn stitch after it", lambda o: Unlanded(o, True),
-             must={"NOT_LANDED", "UNDER_GLASS", "RIBBON_TORN"}, checks=[
+             must={"NOT_LANDED", "RIBBON_TORN"}, checks=[
                  ("the medium did not keep what it confirmed: MEDIUM_LIED, said",
-                  lambda c: c.mount.ribbon.lied and Found(c, "NOT_LANDED", "MEDIUM_LIED"))]),
+                  lambda c: c.mount.ribbon.lied and Found(c, "NOT_LANDED", "MEDIUM_LIED")),
+                 ("and %u is rolled back by the verdict" % f2, lambda c: Errata(c, f2, 1))]),
         Case("B33 a Born of a file that exists", One([again]), must={"UNDER_GLASS"}, checks=[
                  ("the stitch is not applied: it gives birth to %s, which exists" % Label(bt.S),
                   lambda c: Glass(c, "gives birth to fid %u" % bt.S.fid) and
                   c.mount.files[bt.S.fid].name == bt.S.name)]),
         Case("B27 a record that does not match its base",
              One([stitch.Labeled(fid=bt.S.fid, base=1, name=b"stray")]),
-             must={"BASE_MISMATCH", "UNDER_GLASS"}, checks=[
+             must={"BASE_MISMATCH"}, checks=[
                  ("%s stays as the tally has it" % Label(bt.S),
                   lambda c: c.mount.files[bt.S.fid].name == bt.S.name),
-                 ("its roll-back is a verdict this kernel cannot write", lambda c: Glass(c, "roll"))]),
+                 ("its roll-back is a verdict, why 2 — the volume written on",
+                  lambda c: Errata(c, bt.S.fid, 2) and not c.mount.glass)]),
         Case("B28 two files born and the second quitclaimed in one stitch", Quitclaimed,
              checks=[("%u lives and %u is gone, its block lying fallow (M-1)" % (f1, f2),
                       lambda c: f1 in c.mount.files and f2 not in c.mount.files and
@@ -446,24 +448,25 @@ def RecordRuleCases(bt):
                  ("the stitch is not applied: an Undone stands first in its stitch (§2.8)",
                   lambda c: Glass(c, "an Undone after another record") and f1 not in c.mount.files and
                   S.fid in c.mount.files)]),
-        Case("B22b a Slip past the file's size", Sewn(past), must={"BASE_MISMATCH", "UNDER_GLASS"}, checks=[
+        Case("B22b a Slip past the file's size", Sewn(past), must={"BASE_MISMATCH"}, checks=[
             ("the file does not match its Slip and is not born", lambda c: Found(c, "BASE_MISMATCH", "Slip") and
-             f1 not in c.mount.files)]),
+             f1 not in c.mount.files and Errata(c, f1, 2))]),
         Case("B26c on a volume that lied, the stitch before the newest did not land", Lied,
-             must={"NOT_LANDED", "UNDER_GLASS"}, checks=[
+             must={"NOT_LANDED"}, checks=[
                  ("both newest stitches are held to their data, DATA_FLUSHED or not (M-2): %u is rolled back"
                   % f1, lambda c: Found(c, "NOT_LANDED", "fid %u" % f1, "stitch 3") and
-                  f1 not in c.mount.files and f2 in c.mount.files)]),
+                  f1 not in c.mount.files and f2 in c.mount.files and Errata(c, f1, 1))]),
         Case("B27b a Shaped whose runs do not cover its size", Sewn(lambda q, d: [
             stitch.Shaped(fid=S.fid, base=q - S.gen, size=S.size + 10 * BLOCK, mtime_ns=1, splices=[],
-                          digests=[])]), must={"BASE_MISMATCH", "UNDER_GLASS"}, checks=[
+                          digests=[])]), must={"BASE_MISMATCH"}, checks=[
             ("%s does not match: its runs do not cover its size" % Label(S),
-             lambda c: Found(c, "BASE_MISMATCH", "fid %u" % S.fid, "runs cover"))]),
+             lambda c: Found(c, "BASE_MISMATCH", "fid %u" % S.fid, "runs cover") and Errata(c, S.fid, 2))]),
         Case("B27c a Labeled that puts on a tag already worn", Sewn(lambda q, d: [
             stitch.Labeled(fid=worn.fid, base=q - worn.gen, add=[worn.tags[0]])]),
-             must={"BASE_MISMATCH", "UNDER_GLASS"}, checks=[
+             must={"BASE_MISMATCH"}, checks=[
                  ("%s does not match: the tag is worn" % Label(worn),
-                  lambda c: Found(c, "BASE_MISMATCH", "fid %u" % worn.fid, "already worn"))]),
+                  lambda c: Found(c, "BASE_MISMATCH", "fid %u" % worn.fid, "already worn") and
+                  Errata(c, worn.fid, 2))]),
         Case("B27d a Labeled that takes ACTIVE off", Sewn(lambda q, d: [
             stitch.Labeled(fid=S.fid, base=q - S.gen, flags=(0, ondisk.FILE_ACTIVE))]), must={"UNDER_GLASS"},
              checks=[("the stitch is not applied: a file leaves by Quitclaim, not by losing ACTIVE (§2.8)",

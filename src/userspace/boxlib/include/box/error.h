@@ -204,6 +204,8 @@ typedef uint32_t error_t;
     X(A20_FAILED,                    a20_failed,                    972,  "a20 gate failed",               "boot") \
     X(LONG_MODE_FAILED,              long_mode_failed,              973,  "long mode failed",              "boot") \
     X(KERNEL_LOAD_FAILED,            kernel_load_failed,            974,  "kernel load failed",            "boot") \
+    /* TagFS module — a write the mount found never landed (1000) */ \
+    X(TAGFS_NOT_LANDED,              tagfs_not_landed,              1000, "tagfs write did not land",      "tagfs") \
     /* TagFS module — BoxHash (1040-1042) */ \
     X(BOXHASH_INVALID_CONTEXT,       boxhash_invalid_context,       1040, "boxhash invalid context",       "boxhash") \
     X(BOXHASH_VERIFICATION_FAILED,   boxhash_verification_failed,   1041, "boxhash verification failed",   "boxhash") \

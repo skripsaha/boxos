@@ -557,6 +557,9 @@ RETURNFAIL_MARK = $(BUILDDIR)/.returnfail.$(if $(filter on,$(RETURNFAIL)),on,off
 #
 #   registry pool table integrity bitmap ledger flush done usechain stitch
 #   tally slot (a format-v2 Tally: before its nodes' flush, inside its slot)
+#   spared (a format-v2 stitch its toll spared the flush of its data, before
+#   its last flush) undone (before the first atom of the stitch that lays a
+#   mount's verdict down — that stitch, anchored or not)
 #
 # tagfs/settle_cut/settle_cut.h is the one list of them; a value that is not on
 # it names an undeclared point and does not compile. Its mark lives apart from
@@ -574,6 +577,27 @@ CFLAGS += -DCONFIG_TAGFS_SETTLE_CUT_POINT=SETTLE_CUT_POINT_$(shell printf '%s' '
 endif
 
 SETTLECUT_MARK = $(BUILDDIR)/.settlecut.$(if $(SETTLECUT),at-$(SETTLECUT),unset)
+
+# ── SEEKLAG=<us> ───────────────────────────────────────────────────────────
+#
+# A seek the stand's medium does not make: from the first startup test that
+# writes, every read command on the volume's seat waits <us> microseconds
+# before its driver is handed it (core/boardroom/block_fail.h,
+# BlockFailReadLag) — so the mount's check of a book's newest stitch is held
+# to the D its writer judged it by on a medium that seeks (spec_v2 §3.3,
+# M-13). A lever of the stand: only with VOLUME_TESTS=on.
+SEEKLAG ?=
+ifneq ($(SEEKLAG),)
+ifneq ($(VOLUME_TESTS),on)
+$(error SEEKLAG=$(SEEKLAG) is a lever of the stand — build it with VOLUME_TESTS=on)
+endif
+ifneq ($(shell printf '%s' '$(SEEKLAG)' | tr -d '0-9'),)
+$(error SEEKLAG=$(SEEKLAG) names no number of microseconds)
+endif
+CFLAGS += -DCONFIG_SEEKLAG_US=$(SEEKLAG)u
+endif
+
+SEEKLAG_MARK = $(BUILDDIR)/.seeklag.$(if $(SEEKLAG),at-$(SEEKLAG),unset)
 
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
@@ -652,6 +676,7 @@ BUILD_KEYS_SET := $(strip \
   $(if $(filter on,$(HOLDGROUND)),HOLDGROUND=on,) \
   $(if $(filter on,$(RETURNFAIL)),RETURNFAIL=on,) \
   $(if $(SETTLECUT),SETTLECUT=$(SETTLECUT),) \
+  $(if $(SEEKLAG),SEEKLAG=$(SEEKLAG),) \
   $(if $(filter on,$(ENUMSILENCE)),ENUMSILENCE=on,) \
   $(if $(filter on,$(STRICT)),STRICT=on,) \
   $(if $(filter off,$(NOEXEC)),NOEXEC=off,) \
@@ -973,6 +998,10 @@ $(SETTLECUT_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.settlecut.*
 	@touch $@
 
+$(SEEKLAG_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.seeklag.*
+	@touch $@
+
 $(INTX_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.intx.*
 	@touch $@
@@ -1014,7 +1043,7 @@ BUILD_KEY_MARKS := $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) \
                    $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) \
                    $(SETTLECUT_MARK) $(IOMMU_MARK) $(INTX_MARK) $(DEBUG_MARK) \
                    $(BRINGUP_MARK) $(WEDGETEST_MARK) $(ENUMSILENCE_MARK) \
-                   $(STRICT_MARK)
+                   $(STRICT_MARK) $(SEEKLAG_MARK)
 
 $(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(BUILD_KEY_MARKS) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
@@ -2211,6 +2240,8 @@ info:
 	@echo "                       at <point>, as a power cut that kept the drive's cache would:"
 	@echo "                       registry|pool|table|integrity|bitmap|ledger|flush|done|usechain"
 	@echo "                       (not with VOLUME_TESTS=on)"
+	@echo "  SEEKLAG=<us>       — every read on the volume's seat waits <us> microseconds, a seek"
+	@echo "                       the stand's medium does not make (only with VOLUME_TESTS=on)"
 
 debug: $(IMAGE)
 	@$(MAKE) run GDB=on IMAGE=$(IMAGE) CORES=$(CORES) MEM=$(MEM) FULLSCREEN=$(FULLSCREEN) USB=$(USB) AHCI=$(AHCI) LOG=$(LOG) DEBUG=$(DEBUG)

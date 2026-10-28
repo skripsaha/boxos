@@ -1,4 +1,5 @@
 #include "ribbon.h"
+#include "errata.h"
 #include "book_mount.h"
 #include "../file_map/file_map.h"
 #include "../file_map/tail_slip.h"
@@ -26,10 +27,11 @@
  * apply — a kind it does not know, a body longer than it knows, a Born of a
  * file that exists, a Coined that renames an id — is not applied, and the
  * volume may only be read (UnderGlass). A record that does not fit the file
- * it names (its base, its blocks, its Slip) is the rule of rot (§3.9): the
- * file stays as it last matched, said, and the roll-back is a verdict an
- * Undone carries — whose writer this kernel is not — so the volume stands
- * under glass for it too (§16.1 п.2).
+ * it names (its base, its blocks, its Slip) is the rule of rot (§3.9): said,
+ * and the file rolled back to where the stitch found it — every record of it
+ * in that stitch passed over, as the Undone the session's first stitch lays
+ * down for the verdict will pass them over for the next mount (§2.8, errata.h),
+ * so this mount and that one leave the file the same (H-1).
  *
  * Read the way volume-read replays the same ribbon (tools/volumeread/
  * bookmount.py _Undone, _Replay, _Record, _File, _Settle).
@@ -134,7 +136,8 @@ void RibbonSkipSorted(RibbonSkipSet* set)
     set->n = kept;
 }
 
-bool RibbonSkipHas(const RibbonSkipSet* set, uint64_t seq, uint64_t fid)
+/* Where (seq, fid) lies in a sorted set, or would. */
+static uint32_t RibbonSkipAt(const RibbonSkipSet* set, uint64_t seq, uint64_t fid)
 {
     RibbonSkip want = { seq, fid };
     uint32_t   lo = 0, hi = set->n;
@@ -145,7 +148,28 @@ bool RibbonSkipHas(const RibbonSkipSet* set, uint64_t seq, uint64_t fid)
         else
             hi = mid;
     }
-    return lo < set->n && RibbonSkipOrder(&set->at[lo], &want, NULL) == 0;
+    return lo;
+}
+
+error_t RibbonSkipPut(RibbonSkipSet* set, uint64_t seq, uint64_t fid)
+{
+    uint32_t at  = RibbonSkipAt(set, seq, fid);
+    uint64_t cap = set->cap;
+    if (at < set->n && set->at[at].seq == seq && set->at[at].fid == fid)
+        return OK;
+    if (!RibbonGrow((void**)&set->at, set->n, &cap, sizeof(RibbonSkip)))
+        return ERR_NO_MEMORY;
+    set->cap = (uint32_t)cap;
+    memmove(&set->at[at + 1u], &set->at[at], sizeof(RibbonSkip) * (set->n - at));
+    set->at[at] = (RibbonSkip){ seq, fid };
+    set->n++;
+    return OK;
+}
+
+bool RibbonSkipHas(const RibbonSkipSet* set, uint64_t seq, uint64_t fid)
+{
+    uint32_t at = RibbonSkipAt(set, seq, fid);
+    return at < set->n && set->at[at].seq == seq && set->at[at].fid == fid;
 }
 
 /* Why an Undone may name a stitch, in bookmount.py's words. */
@@ -307,28 +331,40 @@ error_t RibbonStageFallow(RibbonStage* st, uint64_t start, uint64_t count, bool 
     return OK;
 }
 
-/* A file whose flags reach past the 32 bits memory holds, its high bits kept
- * (0 lets it go). */
-error_t RibbonHighSet(RibbonReplay* rp, uint64_t fid, uint32_t high)
+/* The high bits of a file's flags into `list`: the file's entry set, or one
+ * added — for 0 too when `zero` keeps it (a stage's: the stitch clears bits
+ * the mirror's file wears), else 0 adds none. */
+static error_t RibbonHighInto(RibbonHigh** list, uint32_t* n, uint32_t* capn, uint64_t fid, uint32_t high,
+                              bool zero)
 {
-    for (uint32_t i = 0; i < rp->nhigh; i++) {
-        if (rp->high[i].fid == fid) {
-            rp->high[i].high = high;
+    for (uint32_t i = 0; i < *n; i++) {
+        if ((*list)[i].fid == fid) {
+            (*list)[i].high = high;
             return OK;
         }
     }
-    if (!high)
+    if (!high && !zero)
         return OK;
-    uint64_t cap = rp->caphigh;
-    if (!RibbonGrow((void**)&rp->high, rp->nhigh, &cap, sizeof(RibbonHigh)))
+    uint64_t cap = *capn;
+    if (!RibbonGrow((void**)list, *n, &cap, sizeof(RibbonHigh)))
         return ERR_NO_MEMORY;
-    rp->caphigh = (uint32_t)cap;
-    rp->high[rp->nhigh++] = (RibbonHigh){ fid, high };
+    *capn = (uint32_t)cap;
+    (*list)[(*n)++] = (RibbonHigh){ fid, high };
     return OK;
 }
 
-uint64_t RibbonFlagsOf(const RibbonReplay* rp, const FileRecord* rec)
+/* Kept by the stage, so a stitch not applied — or gathered again without the
+ * file — leaves the replay's as it found them. */
+error_t RibbonHighSet(RibbonStage* st, uint64_t fid, uint32_t high)
 {
+    return RibbonHighInto(&st->high, &st->nhigh, &st->caphigh, fid, high, true);
+}
+
+uint64_t RibbonFlagsOf(const RibbonReplay* rp, const RibbonStage* st, const FileRecord* rec)
+{
+    for (uint32_t i = 0; st && i < st->nhigh; i++)
+        if (st->high[i].fid == rec->file_id)
+            return (uint64_t)st->high[i].high << 32 | rec->flags;
     for (uint32_t i = 0; i < rp->nhigh; i++)
         if (rp->high[i].fid == rec->file_id)
             return (uint64_t)rp->high[i].high << 32 | rec->flags;
@@ -427,6 +463,8 @@ static error_t RibbonStageLaid(RibbonReplay* rp, RibbonStage* st)
     }
     for (uint64_t i = 0; rc == OK && i < st->ndigests; i++)
         rc = GlossNote(st->digests[i].block, st->digests[i].digest);
+    for (uint32_t i = 0; rc == OK && i < st->nhigh; i++)
+        rc = RibbonHighInto(&rp->high, &rp->nhigh, &rp->caphigh, st->high[i].fid, st->high[i].high, false);
     return rc;
 }
 
@@ -439,18 +477,14 @@ static void RibbonStageLetGo(RibbonStage* st)
     kfree(st->coins);
     kfree(st->fallow);
     kfree(st->digests);
+    kfree(st->high);
 }
 
-/* Stitch `u` replayed: every record through its rule, then the whole of it
- * laid into memory — or none of it, said, when a record of it may not be
- * applied. */
-static error_t RibbonStitchApplied(RibbonReplay* rp, const RibbonUnit* u)
+/* Stitch `u`'s records through their rules into a stage of their own: OK,
+ * or ERR_NO_MEMORY. */
+static error_t RibbonStitchGathered(RibbonReplay* rp, const RibbonUnit* u, RibbonStage* st)
 {
-    RibbonStage* st = kmalloc(sizeof(RibbonStage));
-    char         why[256];
-    error_t      rc = OK;
-    if (!st)
-        return ERR_NO_MEMORY;
+    error_t rc = OK;
     memset(st, 0, sizeof(*st));
     st->u = u;
     if (u->head_read && u->longer)
@@ -460,6 +494,39 @@ static error_t RibbonStitchApplied(RibbonReplay* rp, const RibbonUnit* u)
         rc = RibbonRecordApplied(rp, st, &u->records[i]);
     if (rc == OK && !st->refused[0])
         RibbonFreshHeld(st);
+    return rc;
+}
+
+/*
+ * Stitch `u` replayed: every record through its rule, then the whole of it
+ * laid into memory — or none of it, said, when a record of it may not be
+ * applied.
+ *
+ * ‼ A FILE THE RULE OF ROT ROLLS BACK LEAVES THE STITCH WHOLE (§2.8, H-1). A
+ * record that does not fit its file puts (seq, fid) among the skips at once
+ * (ribbon_records.c, RibbonMismatch) — the file's records after it in the
+ * stitch are passed over from there — and the stitch is gathered again from
+ * its first record, so the file's records BEFORE it are passed over too: the
+ * file stands where the stitch found it, and its fresh ground rests in
+ * Fallow, exactly as the next mount leaves it once the Undone of the verdict
+ * passes over every record of that fid in the stitch. Each gathering again
+ * passes over one fid more, so it ends; the files' records of other fids are
+ * gathered as they were.
+ */
+static error_t RibbonStitchApplied(RibbonReplay* rp, const RibbonUnit* u)
+{
+    RibbonStage* st = kmalloc(sizeof(RibbonStage));
+    char         why[256];
+    uint32_t     ext = rp->next;
+    error_t      rc  = OK;
+    if (!st)
+        return ERR_NO_MEMORY;
+    rc = RibbonStitchGathered(rp, u, st);
+    while (rc == OK && st->rot && !st->refused[0]) {
+        RibbonStageLetGo(st);
+        rp->next = ext;                 /* the files a gathering let go noted no extension */
+        rc       = RibbonStitchGathered(rp, u, st);
+    }
     if (rc == OK && st->refused[0]) {
         ksnprintf(why, sizeof(why), "stitch %llu is not applied: %s", (unsigned long long)u->seq, st->refused);
         TagFSUnderGlass(why);
@@ -562,7 +629,7 @@ static void RibbonCarriedSaid(const RibbonReplay* rp, uint64_t fid)
                   "block (§16.1, decision 2)", (unsigned long long)fid);
         TagFSUnderGlass(why);
     }
-    if (RibbonFlagsOf(rp, rec) >> 32) {
+    if (RibbonFlagsOf(rp, NULL, rec) >> 32) {
         ksnprintf(why, sizeof(why), "fid %llu carries flags past the 32 bits this kernel holds — written by a "
                   "kernel that knows more", (unsigned long long)fid);
         TagFSUnderGlass(why);
@@ -573,7 +640,9 @@ static void RibbonCarriedSaid(const RibbonReplay* rp, uint64_t fid)
 /* The replay's last word on the files it changed: those outside the data run
  * locked; those rolled back by the rule of rot onto blocks another file now
  * holds locked (§3.9 — the rule rolls back only onto ground no one else
- * owns); what this kernel cannot carry on said. */
+ * owns), and no verdict of the mount's: a file locked is not rolled back, and
+ * the next mount locks it again by the same rule; what this kernel cannot
+ * carry on said. */
 static error_t RibbonSettled(RibbonReplay* rp)
 {
     error_t rc = OK;
@@ -586,8 +655,10 @@ static error_t RibbonSettled(RibbonReplay* rp)
         FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, rp->mismatched[i], NULL);
         bool        on  = rec && RibbonOnOthers(rec);
         FileRecordRelease(rec);
-        if (on)
+        if (on) {
+            ErrataLeaves(rp->mismatched[i]);
             rc = BookFileLockLive(rp->mismatched[i], "it is rolled back to blocks another file now holds (§3.9)");
+        }
     }
     for (uint32_t i = 0; rc == OK && i < rp->ntouched; i++)
         RibbonCarriedSaid(rp, rp->touched[i]);
@@ -634,9 +705,9 @@ error_t RibbonTranscribe(RibbonWalk* w, const char** what)
         rc    = RibbonUndones(rp);
     }
     if (rc == OK) {
+        RibbonSkipSorted(&rp->undone);
         rc   = RibbonVerify(w, &rp->undone);
         read = rc == OK || rc == ERR_NO_MEMORY;
-        RibbonSkipSorted(&rp->undone);
     }
     for (uint32_t s = 0; rc == OK && s < w->nstitch; s++)
         if (!RibbonListHas(rp->refused, rp->nrefused, w->stitch[s]->seq))
@@ -645,6 +716,8 @@ error_t RibbonTranscribe(RibbonWalk* w, const char** what)
         rc = BookUseRecalled(rp->use, rp->use_len);
     if (rc == OK)
         rc = RibbonSettled(rp);
+    if (rc == OK)
+        rc = ErrataClosed();
     if (rp)
         RibbonReplayLetGo(rp);
     if (rc == ERR_NO_MEMORY)

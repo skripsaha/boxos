@@ -11,6 +11,8 @@
 #include "../settle/sewing.h"
 #include "boardroom.h"
 #include "crypto.h"
+#include "errata.h"
+#include "read_pace.h"
 
 /*
  * A format-v2 volume's mount (book_mount.h): the ground, the Spine, the slot
@@ -67,6 +69,7 @@ error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sect
     char        words[160];
 
     MountBookLetGo();
+    ReadPaceWatch(seat);                             /* the mount's own reads: the medium's first measure */
     memset(&fs->layout, 0, sizeof(fs->layout));      /* format v1's alone: never filled here */
     memset(&fs->ledger, 0, sizeof(fs->ledger));      /* and its Ledger: only the numbers given next
                                                       * (BookBounds) and the free count its block
@@ -563,6 +566,7 @@ void MountBookLetGo(void)
     for (uint32_t i = 0; i < g_book.naside; i++)
         kfree(g_book.aside[i].text);
     kfree(g_book.aside);
+    ErrataLetGo();
     RibbonWalkLetGo(g_book.ribbon);
     RibbonCursorLetGo();
     BinderMountReset();

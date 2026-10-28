@@ -345,6 +345,8 @@ const char* ErrorString(error_t err) {
             return "TagFS file ids exhausted";
 
         // TagFS Module Errors
+        case ERR_TAGFS_NOT_LANDED:
+            return "TagFS write did not land";
         case ERR_BOXHASH_INVALID_CONTEXT:
             return "BoxHash invalid context";
         case ERR_BOXHASH_VERIFICATION_FAILED:

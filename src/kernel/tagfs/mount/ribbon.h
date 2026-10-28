@@ -275,15 +275,18 @@ typedef struct {
 } RibbonSkipSet;
 
 /* A skip added as it comes; the set sorted once, each kept once, before it is
- * asked (RibbonSkipSorted). */
+ * asked (RibbonSkipSorted) — and, once sorted, a skip put in its place, so the
+ * set stays sorted for the next ask (RibbonSkipPut). */
 error_t RibbonSkipAdd(RibbonSkipSet* set, uint64_t seq, uint64_t fid);
 void    RibbonSkipSorted(RibbonSkipSet* set);
+error_t RibbonSkipPut(RibbonSkipSet* set, uint64_t seq, uint64_t fid);
 bool    RibbonSkipHas(const RibbonSkipSet* set, uint64_t seq, uint64_t fid);
 
 /* §4.5 п.6: the data the newest stitch put down (the newest two on a medium
- * that lied) held to the digests its records carry; every file whose block
- * did not land into `undone` for that stitch, said, and the volume under
- * glass for the verdict no writer here can lay down. OK, ERR_NO_MEMORY, or the
+ * that lied) held to the digests its records carry — a record an Undone on
+ * the ribbon already passes over is not read; every file whose block did not
+ * land put into `undone` (sorted) for that stitch, said, and into the verdict
+ * the session's first stitch lays down (errata.h). OK, ERR_NO_MEMORY, or the
  * medium's refusal. */
 error_t RibbonVerify(RibbonWalk* w, RibbonSkipSet* undone);
 
@@ -331,9 +334,12 @@ typedef struct {
     uint64_t          nfallow, capfallow;
     RibbonDigest*     digests;
     uint64_t          ndigests, capdigests;
+    RibbonHigh*       high;       /* the high bits of the flags its records leave, 0 kept too */
+    uint32_t          nhigh, caphigh;
     bool              use_set;
     const uint8_t*    use;
     uint64_t          use_len;
+    bool              rot;        /* a record of it did not fit its file (the rule of rot): gathered again */
     char              refused[200];   /* why the stitch is not applied; "" while it is */
 } RibbonStage;
 
@@ -375,10 +381,11 @@ FileRecord* RibbonFileNow(RibbonStage* st, uint64_t fid, bool* held);
 error_t     RibbonStagePut(RibbonStage* st, uint64_t fid, FileRecord* rec);
 error_t     RibbonStageFallow(RibbonStage* st, uint64_t start, uint64_t count, bool once);
 
-/* A file's flags past the 32 bits memory holds: kept (0 lets them go), and the
- * whole of them for a record. */
-error_t     RibbonHighSet(RibbonReplay* rp, uint64_t fid, uint32_t high);
-uint64_t    RibbonFlagsOf(const RibbonReplay* rp, const FileRecord* rec);
+/* A file's flags past the 32 bits memory holds: kept by the stage, laid with
+ * it (0 lets them go), and the whole of them for a record — the stage's
+ * first, when there is one. */
+error_t     RibbonHighSet(RibbonStage* st, uint64_t fid, uint32_t high);
+uint64_t    RibbonFlagsOf(const RibbonReplay* rp, const RibbonStage* st, const FileRecord* rec);
 
 /* A record through the rule of its kind into the stage (ribbon_records.c),
  * and the stitch's Clasp.fresh held to its records: OK, or ERR_NO_MEMORY —

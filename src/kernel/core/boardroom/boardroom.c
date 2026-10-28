@@ -20,6 +20,7 @@
 #include "cpu_calibrate.h"
 #include "atomics.h"
 #include "block_fail.h"
+#include "read_pace.h"
 #include "lock_rank.h"     /* LockRankWitness — a TagFS lock held across the medium is named */
 
 /*
@@ -877,6 +878,7 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
     int            rc      = 0;
     while (count > 0) {
         uint32_t run = (count > most) ? most : count;
+        uint64_t t0  = rdtsc();
 
 #ifdef CONFIG_VOLUME_TESTS
         /* Per run, because a run is what a driver is handed: the runs before a
@@ -887,12 +889,14 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
                                               : BoardMediumRefusal(s->kind, BLOCK_FAIL_READ));
             break;
         }
+        BlockFailReadLagged(seat);
 #endif
 
         rc = BoardReadAnswer(s->kind, BoardSeatRead(s, lba, run, out));
         if (rc != 0) {
             break;
         }
+        ReadPaceRead(seat, run, rdtsc() - t0);
 
         out   += run * BOARDROOM_SECTOR_BYTES;
         lba   += run;
@@ -1089,6 +1093,9 @@ static void BoardAsyncAnswered(uint8_t index, uint8_t slot, error_t status, void
     if (s) {
         BoardSeatAnswered(s, b->seating, status == OK);
     }
+    if (status == OK && !b->write) {
+        ReadPaceRead(b->seat, b->sectors, rdtsc() - b->issued);
+    }
     theirs(index, slot, status, their);
 }
 
@@ -1109,6 +1116,7 @@ static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_
     berth->theirs_ctx = ctx;
     berth->seat       = seat;
     berth->seating    = __atomic_load_n(&s->seating, __ATOMIC_ACQUIRE);
+    berth->issued     = rdtsc();
 
     /* From here the room's answer is the one every road below calls, the
      * refusals BLOCKFAIL makes in a medium's place among them. */
@@ -1141,6 +1149,8 @@ static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_
         berth->sectors = keep;
         berth->struck  = true;
     }
+    if (!write)
+        BlockFailReadLagged(seat);
 #endif
 
     switch (s->kind) {

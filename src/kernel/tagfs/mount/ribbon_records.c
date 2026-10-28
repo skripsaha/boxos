@@ -1,5 +1,6 @@
 #include "ribbon.h"
 #include "book_mount.h"
+#include "errata.h"
 #include "../file_map/file_map.h"
 #include "../file_map/tail_slip.h"
 #include "../tag_registry/tag_registry.h"
@@ -95,12 +96,15 @@ static error_t RibbonStrips(const uint8_t* runs, uint32_t bytes, uint64_t n, uin
 // The rules of §3.7
 // ----------------------------------------------------------------------------
 
-/* A record that does not fit the file it names (§3.9, the rule of rot): said,
- * the file left as it last matched, and the volume under glass for the
- * roll-back an Undone carries. */
+/* A record that does not fit the file it names (§3.9, the rule of rot): said;
+ * the file's records of the stitch passed over from here, and the stitch
+ * gathered again without any of them (ribbon_transcribe.c, RibbonStitchApplied)
+ * — the file where the stitch found it; and the roll-back a verdict the
+ * session's first stitch lays down as an Undone of the stitch, why 2
+ * (errata.h). */
 static error_t RibbonMismatch(RibbonReplay* rp, RibbonStage* st, uint64_t kind, uint64_t fid, const char* fmt, ...)
 {
-    char    why[192], glass[192];
+    char    why[192];
     va_list ap;
     va_start(ap, fmt);
     kvsnprintf(why, sizeof(why), fmt, ap);
@@ -108,10 +112,11 @@ static error_t RibbonMismatch(RibbonReplay* rp, RibbonStage* st, uint64_t kind, 
     RibbonSay(rp->w, RIBBON_CODE_BASE_MISMATCH, "stitch %llu's %s of fid %llu does not fit the file: %s — the file "
               "stays as it last matched (§3.9, the rule of rot)", (unsigned long long)st->u->seq,
               g_kind_names[kind], (unsigned long long)fid, why);
-    ksnprintf(glass, sizeof(glass), "fid %llu is rolled back by the rule of rot, and a roll-back is a verdict an "
-              "Undone carries, which this kernel does not write", (unsigned long long)fid);
-    TagFSUnderGlass(glass);
-    return RibbonListAdd(&rp->mismatched, &rp->nmismatched, &rp->capmismatched, fid) ? OK : ERR_NO_MEMORY;
+    st->rot = true;
+    if (!RibbonListAdd(&rp->mismatched, &rp->nmismatched, &rp->capmismatched, fid) ||
+        RibbonSkipPut(&rp->undone, st->u->seq, fid) != OK)
+        return ERR_NO_MEMORY;
+    return ErrataAdd(st->u->seq, UNDONE_ROT, fid);
 }
 
 /* Whether a body read as its kind is read: refused, said, when it does not
@@ -253,7 +258,7 @@ static error_t RibbonRecordFits(RibbonReplay* rp, RibbonStage* st, uint64_t kind
 
 /* A Born's file built: its name, the tags this kernel can wear, its runs, and
  * the stitch's seq for its gen. NULL with no memory. */
-static FileRecord* RibbonBornRecord(RibbonReplay* rp, const RibbonBorn* b, uint64_t seq)
+static FileRecord* RibbonBornRecord(RibbonStage* st, const RibbonBorn* b, uint64_t seq)
 {
     TagFSMetadata meta;
     uint32_t      at = 0;
@@ -278,7 +283,7 @@ static FileRecord* RibbonBornRecord(RibbonReplay* rp, const RibbonBorn* b, uint6
         meta.created_time  = b->created_ns;
         meta.modified_time = b->modified_ns;
         meta.extent_count  = (uint32_t)nstrips;
-        if ((rec = FileRecordBuild(&meta)) != NULL && RibbonHighSet(rp, b->fid, (uint32_t)(b->flags >> 32)) != OK) {
+        if ((rec = FileRecordBuild(&meta)) != NULL && RibbonHighSet(st, b->fid, (uint32_t)(b->flags >> 32)) != OK) {
             FileRecordRelease(rec);
             rec = NULL;
         }
@@ -348,7 +353,7 @@ static error_t RibbonBornApplied(RibbonReplay* rp, RibbonStage* st, const Ribbon
         return RibbonMismatch(rp, st, RIBBON_BORN, b.fid, "its runs cover %llu blocks and its %llu bytes need %llu",
                               (unsigned long long)b.blocks, (unsigned long long)b.size,
                               (unsigned long long)RibbonBlocksOf(b.size));
-    FileRecord* rec = RibbonBornRecord(rp, &b, seq);
+    FileRecord* rec = RibbonBornRecord(st, &b, seq);
     return rec ? RibbonBornStands(rp, st, &b, rec) : ERR_NO_MEMORY;
 }
 
@@ -605,7 +610,7 @@ static error_t RibbonLabelTags(RibbonReplay* rp, RibbonStage* st, const RibbonLa
 /* The Labeled applied to `now`: its name, flags and tags. */
 static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const RibbonLabeled* d, const FileRecord* now)
 {
-    uint64_t  flags = RibbonFlagsOf(rp, now);
+    uint64_t  flags = RibbonFlagsOf(rp, st, now);
     uint32_t  n     = 0;
     bool      fits  = true;
     char*     name  = NULL;
@@ -633,7 +638,7 @@ static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const Ribbon
             memcpy(name, now->name, now->name_len);
         name[d->what & LABEL_NAME ? d->name_len : now->name_len] = '\0';
         FileRecord* rec = FileRecordRelabel(now, name, tags, n, (uint32_t)flags);
-        if (!rec || RibbonHighSet(rp, d->fid, (uint32_t)(flags >> 32)) != OK) {
+        if (!rec || RibbonHighSet(st, d->fid, (uint32_t)(flags >> 32)) != OK) {
             FileRecordRelease(rec);
             rc = ERR_NO_MEMORY;
         } else {

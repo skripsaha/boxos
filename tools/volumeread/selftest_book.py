@@ -250,6 +250,13 @@ def Glass(c, *words):
     return any(all(w in g for w in words) for g in c.mount.glass)
 
 
+def Errata(c, fid, why):
+    """The mount's verdict rolls `fid` back for `why` (1 NOT_LANDED, 2 the
+    rule of rot) — held in memory for the session's first stitch to lay down
+    as an Undone, and no reason of glass says it (§16.5 п.4)."""
+    return any(w == why and fid in fids for _s, w, fids in c.mount.errata) and not Glass(c, "roll")
+
+
 def Found(c, code, *words):
     return any(x.code == code and all(w in x.text for w in words) for x in c.findings)
 

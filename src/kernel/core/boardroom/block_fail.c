@@ -1,5 +1,7 @@
 #include "block_fail.h"
 #include "klib.h"
+#include "cpu_calibrate.h"
+#include "atomics.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -282,6 +284,49 @@ void BlockFailProtect(uint8_t seat, bool on)
 bool BlockFailProtects(uint8_t seat)
 {
     return __atomic_load_n(&g_block_fail_protected, __ATOMIC_ACQUIRE) == (uint32_t)seat + 1u;
+}
+
+/* The seek the stand's medium is given: its microseconds above, the seat + 1
+ * below — one word, so a read on any core sees a whole lag or none. */
+static volatile uint64_t g_block_fail_lag;
+
+void BlockFailReadLag(uint8_t seat, uint32_t us)
+{
+    __atomic_store_n(&g_block_fail_lag, us ? (uint64_t)us << 32 | ((uint32_t)seat + 1u) : 0u, __ATOMIC_RELEASE);
+    kprintf("[BLOCKFAIL] seat %u %s %u us\n", seat, us ? "seeks before every read:" : "seeks no more: was", us);
+}
+
+/* The pace the stand names: written whole before it is pinned, and read
+ * after the pin is seen — a test names it between cycles. */
+static volatile uint64_t g_block_fail_rate;
+static volatile uint64_t g_block_fail_seek_us;
+static volatile uint8_t  g_block_fail_paced;
+
+void BlockFailReadPace(bool pinned, uint64_t rate, uint64_t seek_us)
+{
+    __atomic_store_n(&g_block_fail_paced, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_block_fail_rate, rate, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_block_fail_seek_us, seek_us, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_block_fail_paced, pinned ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
+bool BlockFailReadPaced(uint64_t* rate, uint64_t* seek_us)
+{
+    if (!__atomic_load_n(&g_block_fail_paced, __ATOMIC_ACQUIRE))
+        return false;
+    *rate    = __atomic_load_n(&g_block_fail_rate, __ATOMIC_RELAXED);
+    *seek_us = __atomic_load_n(&g_block_fail_seek_us, __ATOMIC_RELAXED);
+    return true;
+}
+
+void BlockFailReadLagged(uint8_t seat)
+{
+    uint64_t lag = __atomic_load_n(&g_block_fail_lag, __ATOMIC_ACQUIRE);
+    if (!lag || (uint32_t)lag != (uint32_t)seat + 1u)
+        return;
+    uint64_t until = rdtsc() + cpu_us_to_tsc(lag >> 32);
+    while (rdtsc() < until)
+        cpu_pause();
 }
 
 #endif /* CONFIG_VOLUME_TESTS */
