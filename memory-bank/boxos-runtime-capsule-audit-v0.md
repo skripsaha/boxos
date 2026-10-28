@@ -1,6 +1,8 @@
 # BoxOS Runtime Capsule Audit v0
 
-Status: design evidence. Read-only audit; no implementation changes.
+Status: implementation evidence for the bounded v0 capsule in the isolated
+`boxos-native-toolchain` worktree. The audit records the live ABI and the
+decisions that constrain the implementation.
 
 ## Finding
 
@@ -193,10 +195,34 @@ This path uses only existing storage/user APIs and does not require a TagFS
 kernel change. It does require a small, reusable BoxLib full-metadata adapter
 before the assembler can promise lossless source-tag inheritance.
 
-## Next bounded design phase
+The adapter and the first assembler/linker implementation are present in the
+isolated `boxos-native-toolchain` worktree. The runtime archive is embedded as
+its original `ar` bytes in the `assemble` utility; the utility parses and
+links the contained ET_REL members at runtime, so the program code is not
+copied into a second hand-written runtime.
 
-Before implementation, produce a symbol-level closure for the first complete
-runtime target:
+Verification on 2026-10-28:
+
+1. `make clean && make` completed with error-parity 179/179, CET audit
+   `checked=2309 violations=0 skipped=9`, and a consistent TagFS image.
+2. The image contained `assemble.elf` as `utility,toolchain` and the source
+   fixture `hello.asm` as `code,asm,example`.
+3. In QEMU, `use code asm example`, `assemble hello.asm -> hello.elf`, and
+   `hello` completed successfully. The program printed through the existing
+   screen Current path and returned to the shell.
+4. The first run failed with a user-mode `#GP` in `ring_take`. The generated
+   `main` had no ABI prologue, so its first BoxLib call used the wrong stack
+   alignment. Adding `endbr64; push rbp; mov rbp,rsp` removed the failure; the
+   second run completed without an exception.
+
+This closes the first vertical runtime capsule slice. `box.wait` and raw
+Manifest authoring remain outside the bounded BoxASM v0 language, even though
+the linked runtime already carries the existing Result/Manifest machinery.
+
+## Future bounded design phase
+
+The first complete runtime target is now linked and launched. Future work may
+extend the closure with:
 
 1. `box.notify` / `box.yield`;
 2. `box.wait` with cookie-correct Result handling;
@@ -214,8 +240,8 @@ For each target, record:
 - async completion paths;
 - whether the current linker script and Nameplate path cover the image.
 
-Only after this closure is complete should the first linker/runtime code be
-written.
+Any extension must record its own closure and acceptance evidence before it is
+added to the user-facing language.
 
 ## First internal linker contract
 
@@ -317,9 +343,9 @@ The phase is complete only when one implementation can:
 - produce an ET_EXEC image that the existing loader can launch without a
   kernel or TagFS change.
 
-Until those checks pass, the assembler may produce an in-memory ET_REL object
-for diagnostics, but it must not claim that `assemble ... -> program.elf`
-created a runnable program.
+These checks are satisfied for the bounded v0 target and are the regression
+criteria for future linker changes. Unsupported language constructs still fail
+before an artifact is created.
 
 ## Quality constraints
 

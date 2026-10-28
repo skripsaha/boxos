@@ -751,7 +751,7 @@ DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
-UTIL_NAMES = help create show files tag untag name trash erase \
+UTIL_NAMES = help create show files tag untag name trash erase assemble \
              me info say reboot bye defrag fsck ipc_test memtag hw \
              timezone logsave lastsaid rgbtest usetest luggagetest headcount \
              draft playtime lavalamp finish taskcenter
@@ -1360,6 +1360,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/name.elf    "utility,storage" \
 	$(UTILS_DIR)/trash.elf   "utility,storage" \
 	$(UTILS_DIR)/erase.elf   "utility,storage" \
+	$(UTILS_DIR)/assemble.elf "utility,toolchain" \
 	$(UTILS_DIR)/me.elf      "utility" \
 	$(UTILS_DIR)/info.elf    "utility,storage" \
 	$(UTILS_DIR)/say.elf     "utility" \
@@ -1369,6 +1370,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/fsck.elf    "utility,storage" \
 	$(UTILS_DIR)/timezone.elf "utility,system,clock" \
 	$(USERSPACE_DIR)/hello.txt   "message,text" \
+	$(USERSPACE_DIR)/hello.asm   "code,asm,example" \
 	$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
 	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "utility" \

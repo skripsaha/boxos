@@ -60,8 +60,12 @@ CXXLDFLAGS = $(LDFLAGS) -Wl,--undefined=__boxcxx_tls_bootstrap
 BOXLIB     = ../boxlib/libbox.a
 BOXCXX     = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o
+ASSEMBLE_OBJS = assemble.o boxasm_elf.o boxasm_source.o boxasm_link.o \
+	boxasm_link_output.o
+ASSEMBLE_RUNTIME_BLOB = assemble_runtime_blob.o
+ASSEMBLE_ENTRY_BLOB = assemble_entry_blob.o
 
-UTILS = help create show files tag untag name trash erase \
+UTILS = help create show files tag untag name trash erase assemble \
         me info say reboot bye defrag fsck ipc_test memtag hw \
         timezone logsave lastsaid rgbtest usetest luggagetest rollcall handset headcount \
         draft playtime lavalamp finish taskcenter
@@ -75,6 +79,19 @@ include ../nameplate.mk
 
 %.elf: $(BOXLIB_START) %.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
+
+assemble.elf: $(BOXLIB_START) $(ASSEMBLE_OBJS) $(ASSEMBLE_RUNTIME_BLOB) \
+		$(ASSEMBLE_ENTRY_BLOB) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $(ASSEMBLE_OBJS) \
+		$(ASSEMBLE_RUNTIME_BLOB) $(ASSEMBLE_ENTRY_BLOB) $(BOXLIB))
+
+$(ASSEMBLE_RUNTIME_BLOB): $(BOXLIB)
+	@x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents $< $@
+
+$(ASSEMBLE_ENTRY_BLOB): $(BOXLIB_START)
+	@x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents $< $@
 
 # draft is four parts — the book, the glass, the volume, and what decides —
 # and the pattern rule above links exactly one object, so it names its own.

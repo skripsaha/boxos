@@ -1,6 +1,8 @@
 # BoxOS Program ABI v0
 
-Status: design draft. No implementation is implied by this document yet.
+Status: v0 implementation recorded in the isolated `boxos-native-toolchain`
+worktree. The contract remains bounded; future language features must extend
+it deliberately rather than silently changing the entry, I/O or exit rules.
 
 This note defines the proposed contract between a native BoxOS program and the
 existing kernel/userspace runtime. It is intentionally separate from the
@@ -304,37 +306,41 @@ minimal runtime path is proven.
 - A compatibility path must preserve the same BoxOS ABI and lifetime rules,
   rather than creating a second hidden programming model.
 
-## Open decisions before implementation
+## Decisions closed for v0
 
-1. The exact raw syntax for Manifest and Crate construction.
-2. The exact first runtime capsule needed to implement `box.say` through
-   `Current("screen")` without introducing a second output path.
-3. How a standalone assembler program receives and parses Luggage.
-4. Whether a generated Nameplate is part of the first ELF output.
-5. How runtime helpers are represented in the future native executable format.
+1. The first runtime capsule uses the existing `libbox.a` ET_REL modules and
+   keeps the `Current("screen")` output path intact.
+2. `_start` supplies the existing Luggage contract; v0 does not add an
+   `argc/argv` ABI.
+3. Generated ELF images carry the existing Nameplate format.
+4. The v0 source language exposes only `box.say` and `box.exit`; raw Manifest
+   and Crate construction remains a future language surface.
+
+The future native executable format and the final syntax for raw operations
+remain open until the bounded ELF path has more users and measured needs.
 
 ## Planned phases
 
-1. **ABI design** — finish entry, notify, wait, exit, output and lifetime
-   contracts without changing the kernel.
-2. **Standalone assembler** — assemble one source file into a valid `ET_EXEC`
+1. **ABI design** — completed for the bounded entry, output and exit path
+   without changing the kernel.
+2. **Standalone assembler** — completed for one source file into a valid `ET_EXEC`
    ELF with code/data segments and a deterministic entry point.
-3. **Runtime and link stage** — map the dependency closure needed by
+3. **Runtime and link stage** — completed for the dependency closure needed by
    `box.notify`, `box.yield`, `box.wait`, `box.exit` and `box.say`; package it
    as real ELF64 ET_REL runtime modules and link it without duplicating code.
    The first linker must also preserve `.tdata`/`.tbss`, the measured
    relocation set (including `R_X86_64_TPOFF32`) and the existing Nameplate
    contract; unsupported TLS use is a hard diagnostic, never a silent drop.
-4. **Native artifact flow** — resolve the source through the current context,
+4. **Native artifact flow** — completed: resolve the source through the current context,
    obtain its full metadata without `file_info_t` truncation, preserve all
    source tags, add explicitly requested output tags, and create or update the
    ELF artifact through existing BoxOS storage APIs. Publish only after the
    image is complete: `create` → `file_span` → complete `fwrite` sequence →
    `anchor`; on a failed write or anchor, attempt a real delete and report the
    artifact id if cleanup itself fails.
-5. **Shell launch verification** — launch the generated artifact by its name
-   and tags, verify output and exit handling, and exercise ambiguity/error
-   paths.
+5. **Shell launch verification** — completed for the fixture: launch the
+   generated artifact by its name and tags, verify output and exit handling.
+   Ambiguity and syntax-error paths remain regression cases for future tests.
 6. **Native format stage** — only after the ELF bootstrap path, runtime ABI and
    linker behavior are proven, design the native BoxOS object/executable format
    around measured needs instead of guesses.
@@ -349,3 +355,23 @@ Every implementation phase must be complete within its stated boundary:
 - all ownership and asynchronous completion rules are explicit;
 - changed behavior is verified on the actual BoxOS path before the next phase;
 - TagFS remains outside the first toolchain implementation boundary.
+
+## Implementation status — 2026-10-28
+
+The first implementation slice now exists on branch `boxos-native-toolchain`:
+
+- `assemble` is a shipped userspace utility, built into the image with the
+  `utility,toolchain` tags;
+- its v0 source language accepts only `section .text`, `global main`, `main:`,
+  `box.say "..."` and `box.exit <signed-32-bit-code>`; unsupported syntax is a
+  hard diagnostic, not a silent no-op;
+- the source is emitted as ET_REL in memory, then linked with the embedded
+  current `boxlib_start.o` and the real `libbox.a` ET_REL archive;
+- the linker performs archive closure, ordinary AMD64 RELA relocations,
+  TPOFF32, W^X PT_LOAD layout, PT_TLS and an in-image Nameplate;
+- the output is published through the existing storage path, with full source
+  metadata, exact sizing, checked writes and `anchor`.
+
+`src/userspace/hello.asm` is the image fixture for the first end-to-end run.
+This is a deliberately bounded first language slice; it is complete within
+that scope and does not pretend to be the future general-purpose assembler.
