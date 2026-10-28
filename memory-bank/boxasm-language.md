@@ -19,6 +19,24 @@ because the shell starts nothing else. A program that does not assemble or
 link leaves no file behind. Errors read `file:line:column: what is wrong`,
 followed by the line and a caret under the place.
 
+Assembling again replaces the program: the file of that name wearing every
+tag the new one will wear is put out of the way once the new one is written
+whole, and its other tags (`favorite`, `autostart`) pass to the new one. When
+that is not one file, `assemble` asks:
+
+```text
+there is another hello.elf, tags hello,code,asm,app
+replace it? (yes, or no to make a new one beside it)
+
+hello.elf could mean any of these:
+  1: tags hello,code,asm,example,app
+  2: tags hello,code,asm,test,app
+which one does the program replace? (a number, or new)
+```
+
+A tag in the command names the one meant without a question:
+`assemble hello.asm (tags test)`.
+
 ## Source
 
 - One statement per line; `;` starts a comment. Mnemonics, registers and
@@ -118,7 +136,5 @@ lines and compares the two objects.
 
 ## Not built yet
 
-- Artifact Resolution, as agreed: updating the exact `name + tags` match
-  instead of creating a second file.
 - SSE/AVX instructions; raw Manifest, `box.notify`, `box.wait`.
 - Programs made of several sources; a native BoxOS object format.

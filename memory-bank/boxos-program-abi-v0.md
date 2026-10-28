@@ -387,3 +387,20 @@ with jump relaxation and an ELF object writer; the language is documented in
 decision is kept in `git stash`, not in the tree.
 This is a deliberately bounded first language slice; it is complete within
 that scope and does not pretend to be the future general-purpose assembler.
+
+Update 2026-10-28, Artifact Resolution (owner decisions of the same day):
+assembling again puts the program in place of the one it was, never beside
+it. The program it replaces is the file in the Use Context with its name that
+wears every tag the new program will wear (the source's, the command's, and
+`app` when added); its other tags do not count against it. When no such file
+is one file, `assemble` asks, as the command grammar says (section 6): one
+other file of that name — "there is another NAME, tags ... — replace it?",
+`no` making a new program beside it; several — they are listed with their
+tags and one is chosen by number, or `new`. With no one at the console to
+answer, nothing is written and the command says to name the file by a tag it
+wears. The new program is written whole and anchored before the one it
+replaces is deleted, so a refusal anywhere leaves the old one as it was; a
+failure to delete the old one deletes the new one. The new program wears
+every tag of the old one whose key the build does not give (a rebuild changes
+what the program is made of, never what it was told). Its file id is new.
+An output named like its own source is refused.

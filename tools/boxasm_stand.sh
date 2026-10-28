@@ -33,9 +33,9 @@ make -s -C src/userspace/boxlib > "$WORK/make.log" 2>&1 &&
     { cat "$WORK/make.log"; echo "boxasm: harness failed — the runtime inputs did not build"; exit 2; }
 
 STAND=$WORK/boxasm_stand
-# Every part of the toolchain but the BoxOS utility's own main.
+# Every part of the toolchain but the BoxOS command's own files.
 $CC_HOST -std=c11 -O1 -Wall -Wextra -I"$ASM_DIR" -Isrc/userspace/boxlib/include -Isrc/include \
-    tools/boxasm_stand.c $(ls "$ASM_DIR"/*.c | grep -v '/assemble\.c$') \
+    tools/boxasm_stand.c $(ls "$ASM_DIR"/*.c | grep -v '/assemble[^/]*\.c$') \
     -o "$STAND" > "$WORK/cc.log" 2>&1 ||
     { cat "$WORK/cc.log"; echo "boxasm: harness failed — the stand did not compile"; exit 2; }
 if [ -s "$WORK/cc.log" ]; then
