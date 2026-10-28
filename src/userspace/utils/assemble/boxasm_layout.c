@@ -52,9 +52,16 @@ static int BoxAsmIsJump(const BoxAsmStatement *Statement)
            Statement->Operands[0].Kind == BOXASM_OPERAND_IMMEDIATE;
 }
 
+static int BoxAsmIsShortOnly(const BoxAsmStatement *Statement)
+{
+    return Statement->Kind == BOXASM_STMT_INSTRUCTION &&
+           Statement->Instruction->Kind == BOXASM_KIND_SHORT_BRANCH;
+}
+
 /* Whether a jump at Here takes its two-byte form: when it reaches its target
  * in the same section, or when the source says `short`. A target not yet
- * placed by the first pass is assumed near, so the first pass starts short. */
+ * placed by the first pass is assumed near, so the first pass starts short.
+ * loop and jrcxz have no other form. */
 static uint8_t BoxAsmShortJump(const BoxAsmAssembler *Asm, const BoxAsmStatement *Statement,
                                uint64_t Here)
 {
@@ -62,6 +69,8 @@ static uint8_t BoxAsmShortJump(const BoxAsmAssembler *Asm, const BoxAsmStatement
     uint64_t Offset;
     int64_t Distance;
 
+    if (BoxAsmIsShortOnly(Statement))
+        return 1;
     if (!BoxAsmIsJump(Statement) || Statement->Long || Statement->Times != 0 ||
         Target->Reach == BOXASM_BRANCH_NEAR)
         return 0;
@@ -283,6 +292,30 @@ static int BoxAsmRangeFails(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, i
     return BoxAsmFailEnd(Asm, Where, &Message);
 }
 
+/* A rel8 that cannot carry its target: one in another section or another
+ * object is the linker's to place, and a byte is too narrow for that. */
+static int BoxAsmShortReachFails(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement,
+                                 int Local, int64_t Distance)
+{
+    BoxAsmMessage Message;
+
+    BoxAsmFailBegin(Asm, &Statement->Where, &Message);
+    if (BoxAsmIsShortOnly(Statement)) {
+        BoxAsmMessageName(&Message, Statement->Instruction->Name);
+        BoxAsmMessageText(&Message, " reaches");
+    } else {
+        BoxAsmMessageText(&Message, "a short jump reaches");
+    }
+    if (!Local) {
+        BoxAsmMessageText(&Message, " only a label of its own section");
+    } else {
+        BoxAsmMessageText(&Message, " -128 to 127 bytes, and its target is ");
+        BoxAsmMessageDecimal(&Message, Distance);
+        BoxAsmMessageText(&Message, " away");
+    }
+    return BoxAsmFailEnd(Asm, &Statement->Where, &Message);
+}
+
 /* A field resting on a symbol: a distance within the section is written now;
  * anything the linker must place becomes a relocation. */
 static int BoxAsmResolveFixup(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement,
@@ -299,19 +332,15 @@ static int BoxAsmResolveFixup(BoxAsmAssembler *Asm, const BoxAsmStatement *State
     if (Fixup->TakesAddress && (Rc = BoxAsmNoteTaken(Asm, Value, &Statement->Where)) != 0)
         return Rc;
     if (Fixup->Kind == BOXASM_FIXUP_RELATIVE || Fixup->Kind == BOXASM_FIXUP_BRANCH) {
+        int Local;
+
         if (Value->Symbol == 0)
             return BoxAsmFail(Asm, &Statement->Where, "a jump or call goes to a label", NULL);
-        if (BoxAsmLocalTarget(Asm, Value, Statement->Section, &Target)) {
-            Field = (int64_t)(Target - End);
-            if (Fixup->Width == 1 && (Field < -128 || Field > 127)) {
-                BoxAsmMessage Message;
-                BoxAsmFailBegin(Asm, &Statement->Where, &Message);
-                BoxAsmMessageText(&Message, "a short jump reaches -128 to 127 bytes, and its "
-                                            "target is ");
-                BoxAsmMessageDecimal(&Message, Field);
-                BoxAsmMessageText(&Message, " away");
-                return BoxAsmFailEnd(Asm, &Statement->Where, &Message);
-            }
+        Local = BoxAsmLocalTarget(Asm, Value, Statement->Section, &Target);
+        Field = Local ? (int64_t)(Target - End) : 0;
+        if (Fixup->Width == 1 && (!Local || Field < -128 || Field > 127))
+            return BoxAsmShortReachFails(Asm, Statement, Local, Field);
+        if (Local) {
             if ((Rc = BoxAsmRangeFails(Asm, &Statement->Where, Field, Fixup->Width, 1)) != 0)
                 return Rc;
             memcpy(Bytes + Fixup->Offset, &Field, Fixup->Width);

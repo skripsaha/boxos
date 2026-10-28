@@ -1373,6 +1373,7 @@ VOLUME_CONTENT = \
 	$(USERSPACE_DIR)/hello.txt   "message,text" \
 	$(USERSPACE_DIR)/hello.asm   "code,asm,example" \
 	$(USERSPACE_DIR)/countdown.asm "code,asm,example" \
+	$(USERSPACE_DIR)/machine.asm "code,asm,example" \
 	$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
 	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "utility" \

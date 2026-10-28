@@ -79,19 +79,44 @@ subtract to a number.
 - `[label]` is RIP-relative. `[abs label]` is the 32-bit absolute address,
   and `[rip + label]` is the same as `[rel label]`. An address made of a bare
   number is absolute.
-- `byte word dword qword` say the size of a memory operand where no register
-  does: `inc qword [rax]`. Instructions with one size need none:
-  `push [rax]`, `jmp [rbx]`, `sete [rcx]`.
+- `byte word dword qword oword` say the size of a memory operand where no
+  register does: `inc qword [rax]`. Instructions with one size need none:
+  `push [rax]`, `jmp [rbx]`, `sete [rcx]`, `cmpxchg16b [rdi]`.
 - `short` and `near` before a jump target force rel8 or rel32. Without them,
   the assembler takes the shortest form that reaches.
 
 ### Instructions
 
-`mov movzx movsx movsxd lea xchg push pop add or adc sbb and sub xor cmp test
-inc dec not neg mul imul div idiv rol ror rcl rcr shl sal shr sar jmp call ret
-jcc setcc cmovcc` (with every condition spelling), and `nop int3 leave cqo cdq
-cwd cdqe cwde cbw pushfq popfq cld std endbr64 pause ud2`. Each encodes as
-NASM encodes it.
+- Moves and arithmetic: `mov movzx movsx movsxd lea xchg push pop add or adc
+  sbb and sub xor cmp test inc dec not neg mul imul div idiv`.
+- Shifts and rotates: `rol ror rcl rcr shl sal shr sar shld shrd`.
+- Bits: `bt bts btr btc bsf bsr popcnt lzcnt tzcnt bswap`.
+- Branches: `jmp call ret`, `jcc setcc cmovcc` with every condition
+  spelling, and `loop loope loopz loopne loopnz jrcxz jecxz`, which reach
+  only -128 to 127 bytes.
+- Strings: `movs stos lods cmps scas`, each with `b w d q`.
+- Atomics: `xadd cmpxchg cmpxchg8b cmpxchg16b`; fences `lfence sfence mfence`.
+- The processor: `cpuid rdtsc rdtscp rdrand rdseed`.
+- Alone: `nop int3 leave cqo cdq cwd cdqe cwde cbw pushfq popfq cld std clc stc
+  cmc endbr64 pause ud2`.
+
+Each encodes as NASM encodes it.
+
+`popcnt` needs CPUID.1:ECX bit 23, `lzcnt` the LZCNT bit of leaf 0x80000001,
+`tzcnt` BMI1, `rdrand` and `rdseed` their own bits, `cmpxchg16b` CX16.
+The assembler cannot know the machine a program will run on: a processor
+without `lzcnt` or `tzcnt` runs them as `bsr` and `bsf`, which answer
+differently, and one without the others stops the program. Ask `cpuid`
+first, as `machine.asm` does with `bt ecx, 23`.
+
+### Prefixes
+
+`lock` goes before an instruction the processor lets lock (`add adc and btc
+btr bts cmpxchg cmpxchg8b cmpxchg16b dec inc neg not or sbb sub xadd xchg
+xor`) whose destination is memory. `rep` goes before `movs stos lods`;
+`repe`/`repz` and `repne`/`repnz` before `cmps scas`. A prefix and its
+instruction share a line. Any other pairing is refused: the processor
+would reject it, or read it as another instruction (`rep bsf` is `tzcnt`).
 
 ### box operations
 
@@ -129,6 +154,10 @@ BoxOS userspace has no red zone.
   told `db 0`.
 - `[label]` is RIP-relative without `default rel`.
 - `[rip + x]` is accepted as a spelling of `[rel x]`.
+- A short jump, `loop` or `jrcxz` reaches only a label of its own section;
+  NASM gives one to another section or object an R_X86_64_PC8 relocation.
+- `lock` where it cannot go, `rep` before `cmps` or `scas`, and a prefix on
+  a line of its own are refused. NASM warns of the first and takes the others.
 
 Everything else in the shared subset assembles to the same bytes and
 relocations: `tools/boxasm_oracle.py` generates a corpus of about 5,000

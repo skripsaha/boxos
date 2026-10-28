@@ -217,5 +217,27 @@ assembly_refuses unclosed_string "$HEAD    box.say \"unclosed"$'\n' \
 assembly_refuses bytes_in_bss $'section .bss\n    db 1\n' \
     "bytes_in_bss.asm:2:5: .bss holds no bytes: reserve its space with resb, resw, resd or resq"
 
+assembly_refuses lock_not_lockable "$HEAD    lock mov [rax], eax"$'\n' \
+    "lock_not_lockable.asm:4:5: lock goes only on add, adc, and, btc, btr, bts, cmpxchg, cmpxchg8b, cmpxchg16b, dec, inc, neg, not, or, sbb, sub, xadd, xchg and xor, not on 'mov'"
+assembly_refuses lock_register "$HEAD    lock add eax, 1"$'\n' \
+    "lock_register.asm:4:5: lock needs a memory destination: the first operand of 'add'"
+assembly_refuses lock_memory_source "$HEAD    lock add eax, [rax]"$'\n' \
+    "lock_memory_source.asm:4:5: lock needs a memory destination: the first operand of 'add'"
+assembly_refuses rep_not_string "$HEAD    rep add eax, 1"$'\n' \
+    "rep_not_string.asm:4:5: rep goes only on movs, stos and lods, not on 'add'"
+assembly_refuses rep_on_compare "$HEAD    rep cmpsb"$'\n' \
+    "rep_on_compare.asm:4:5: say when to stop with repe (while equal) or repne (while not equal), not rep, before 'cmpsb'"
+assembly_refuses repe_on_move "$HEAD    repe movsb"$'\n' \
+    "repe_on_move.asm:4:5: movs, stos and lods repeat with rep; repe and repne go on cmps and scas, not on 'movsb'"
+assembly_refuses two_prefixes "$HEAD    lock rep movsb"$'\n' \
+    "two_prefixes.asm:4:10: an instruction takes one prefix"
+assembly_refuses prefix_alone "$HEAD    rep"$'\n' \
+    "prefix_alone.asm:4:5: 'rep' is a prefix: the instruction it goes before follows it on its line"
+assembly_refuses loop_near "$HEAD    loop near main"$'\n' \
+    "loop_near.asm:4:5: 'loop' has no near form: it reaches -128 to 127 bytes"
+assembly_refuses loop_out_of_reach "$HEAD    loop far"$'\n    times 200 nop\nfar:\n    ret\n' \
+    "loop_out_of_reach.asm:4:5: 'loop' reaches -128 to 127 bytes, and its target is 200 away"
+assembly_refuses short_to_extern $'section .text\nextern printf\nglobal main\nmain:\n    jmp short printf\n' \
+    "short_to_extern.asm:5:5: a short jump reaches only a label of its own section"
 echo "boxasm: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]

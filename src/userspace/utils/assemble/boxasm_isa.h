@@ -31,6 +31,7 @@ typedef enum {
 #define BOXASM_SIZE_16  0x2u
 #define BOXASM_SIZE_32  0x4u
 #define BOXASM_SIZE_64  0x8u
+#define BOXASM_SIZE_128 0x10u
 #define BOXASM_SIZE_WIDE (BOXASM_SIZE_16 | BOXASM_SIZE_32 | BOXASM_SIZE_64)
 
 #define BOXASM_DIGIT_NONE 0xFEu  /* no ModRM byte */
@@ -42,6 +43,7 @@ typedef enum {
 #define BOXASM_FORM_CONDITION  0x08u  /* the condition code is added to the last opcode byte */
 #define BOXASM_FORM_AS32       0x10u  /* encoded as the 32-bit operation (mov r64, u32) */
 #define BOXASM_FORM_NOT_EAX    0x20u  /* not with eax as the +r register (xchg eax, eax) */
+#define BOXASM_FORM_REX_W      0x40u  /* REX.W whatever the size (cmpxchg16b) */
 
 typedef struct {
     uint8_t Class[3];
@@ -50,13 +52,21 @@ typedef struct {
     uint8_t OpcodeLength;
     uint8_t Digit;
     uint8_t Flags;
+    uint8_t Prefix;      /* a prefix that is part of the opcode (F3 of popcnt), 0 none */
 } BoxAsmForm;
 
 typedef enum {
     BOXASM_KIND_PLAIN = 0,
     BOXASM_KIND_JUMP,          /* jmp and jcc: rel8 when it reaches */
-    BOXASM_KIND_CALL
+    BOXASM_KIND_CALL,
+    BOXASM_KIND_SHORT_BRANCH   /* loop and jrcxz: rel8 only */
 } BoxAsmInstructionKind;
+
+/* The prefixes of the source an instruction takes. */
+#define BOXASM_TAKES_LOCK  0x1u   /* lock, with a memory destination */
+#define BOXASM_TAKES_REP   0x2u   /* rep: movs, stos, lods */
+#define BOXASM_TAKES_REPE  0x4u   /* repe and repne: cmps, scas */
+#define BOXASM_TAKES_BOTH  0x8u   /* xchg: it writes both operands, so either is a destination */
 
 struct BoxAsmInstruction {
     const char       *Name;
@@ -65,6 +75,7 @@ struct BoxAsmInstruction {
     uint8_t           Kind;
     uint8_t           Conditional;
     uint8_t           SwapImmediate;   /* imul r, imm means imul r, r, imm */
+    uint8_t           Takes;           /* BOXASM_TAKES_* */
 };
 
 typedef struct BoxAsmInstruction BoxAsmInstruction;
@@ -73,6 +84,10 @@ typedef struct BoxAsmInstruction BoxAsmInstruction;
  * condition code goes to *Condition. NULL when there is none. */
 const BoxAsmInstruction *BoxAsmFindInstruction(const char *Name, size_t Length,
                                                uint8_t *Condition);
+
+/* The prefix a word names (lock, rep, repe, repz, repne, repnz, any case), as
+ * a BOXASM_PREFIX_*; BOXASM_PREFIX_NONE when it names none. */
+uint8_t BoxAsmFindPrefix(const char *Name, size_t Length);
 
 /* The bytes of one instruction whose operands carry this pass's values. Short
  * asks a jump for its rel8 form. A field that depends on a symbol is left zero

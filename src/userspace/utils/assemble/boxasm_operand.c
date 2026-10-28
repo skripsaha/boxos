@@ -132,6 +132,7 @@ static uint8_t BoxAsmSizeKeyword(const BoxAsmToken *Token)
     if (BoxAsmTokenIs(Token, "word"))  return 2;
     if (BoxAsmTokenIs(Token, "dword")) return 4;
     if (BoxAsmTokenIs(Token, "qword")) return 8;
+    if (BoxAsmTokenIs(Token, "oword")) return 16;
     return 0;
 }
 

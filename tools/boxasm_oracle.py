@@ -33,7 +33,7 @@ REG8 = ["al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil"] + \
        ["r%db" % n for n in range(8, 16)]
 HIGH8 = ["ah", "ch", "dh", "bh"]
 REGS = {1: REG8, 2: REG16, 4: REG32, 8: REG64}
-SIZE_WORD = {1: "byte", 2: "word", 4: "dword", 8: "qword"}
+SIZE_WORD = {1: "byte", 2: "word", 4: "dword", 8: "qword", 16: "oword"}
 
 MEMORY = ["[rax]", "[rbx + 8]", "[rbp]", "[rsp]", "[r12]", "[r13]", "[r13 + 0x100]",
           "[rsp + 8]", "[rax + rcx*4]", "[rax + r9*8 + 16]", "[r12 + r13*2 - 128]",
@@ -57,7 +57,12 @@ CONDITIONS = ["o", "no", "b", "c", "nae", "ae", "nb", "nc", "e", "z", "ne", "nz"
               "be", "na", "a", "nbe", "s", "ns", "p", "pe", "np", "po", "l", "nge",
               "ge", "nl", "le", "ng", "g", "nle"]
 ALONE = ["ret", "nop", "int3", "leave", "cqo", "cdq", "cwd", "cdqe", "cwde", "cbw",
-         "pushfq", "popfq", "cld", "std", "endbr64", "pause", "ud2"]
+         "pushfq", "popfq", "cld", "std", "endbr64", "pause", "ud2", "clc", "stc", "cmc",
+         "cpuid", "rdtsc", "rdtscp", "lfence", "mfence", "sfence"]
+STRINGS = {"movs": "rep", "stos": "rep", "lods": "rep", "cmps": "repe", "scas": "repe"}
+LOCKABLE = ALU[:7] + ["inc", "dec", "not", "neg"]
+BIT_TESTS = ["bt", "bts", "btr", "btc"]
+SCANS = ["bsf", "bsr", "popcnt", "lzcnt", "tzcnt"]
 
 
 def register_pairs(size):
@@ -242,6 +247,82 @@ def branch_lines():
     return out
 
 
+def string_lines():
+    """Every string instruction at every width, bare and repeated."""
+    out = []
+    for op, prefixes in STRINGS.items():
+        for width in "bwdq":
+            out.append("%s%s" % (op, width))
+            if prefixes == "rep":
+                out.append("rep %s%s" % (op, width))
+            else:
+                out += ["repe %s%s" % (op, width), "repz %s%s" % (op, width),
+                        "repne %s%s" % (op, width), "repnz %s%s" % (op, width)]
+    return out
+
+
+def bit_lines():
+    """bt*, the scans, bswap and the double shifts: every register of every
+    width they take, memory, and the bit numbers at the edges of an imm8."""
+    out = []
+    for size in (2, 4, 8):
+        word = SIZE_WORD[size]
+        for a, b in register_pairs(size):
+            for op in BIT_TESTS:
+                out.append("%s %s, %s" % (op, a, b))
+            for op in SCANS:
+                out.append("%s %s, %s" % (op, a, b))
+            out += ["shld %s, %s, 5" % (a, b), "shrd %s, %s, cl" % (a, b)]
+        for op in BIT_TESTS:
+            out += ["%s %s, 0" % (op, REGS[size][3]), "%s %s, 255" % (op, REGS[size][11]),
+                    "%s %s [rbx + 4], 7" % (op, word),
+                    "%s [rax + rcx*2], %s" % (op, REGS[size][9])]
+        for op in SCANS:
+            out.append("%s %s, %s [rsp + 16]" % (op, REGS[size][14], word))
+        out += ["shld %s [rdi], %s, 1" % (word, REGS[size][2]),
+                "shrd %s [r13], %s, cl" % (word, REGS[size][10])]
+        for reg in REGS[size]:
+            out += ["rdrand %s" % reg, "rdseed %s" % reg]
+    for size in (4, 8):
+        out += ["bswap %s" % reg for reg in REGS[size]]
+    return out
+
+
+def atomic_lines():
+    """xadd and cmpxchg plain and locked, every lockable instruction locked on
+    memory, and the double-width compare-exchanges."""
+    out = []
+    for size in (1, 2, 4, 8):
+        word = SIZE_WORD[size]
+        for a, b in register_pairs(size)[:6]:
+            out += ["xadd %s, %s" % (a, b), "cmpxchg %s, %s" % (a, b)]
+        out += ["lock xchg [rdx], %s" % REGS[size][7], "lock xchg %s, [r9 + 4]" % REGS[size][12],
+                "lock xadd [rbx], %s" % REGS[size][4], "lock cmpxchg [r12 + 8], %s" % REGS[size][13],
+                "xadd %s [rsp], %s" % (word, REGS[size][0])]
+        for op in LOCKABLE[:7]:
+            out += ["lock %s %s [rdi + 8], %s" % (op, word, REGS[size][6]),
+                    "lock %s %s [rax], 1" % (op, word)]
+        for op in LOCKABLE[7:]:
+            out.append("lock %s %s [rcx + rdx*8]" % (op, word))
+        if size > 1:
+            for op in BIT_TESTS[1:]:
+                out += ["lock %s %s [rsi], %s" % (op, word, REGS[size][15]),
+                        "lock %s %s [rsi], 9" % (op, word)]
+    for mem in MEMORY[:12]:
+        out += ["cmpxchg8b %s" % mem, "lock cmpxchg8b qword %s" % mem,
+                "cmpxchg16b %s" % mem, "lock cmpxchg16b oword %s" % mem]
+    return out
+
+
+def short_branch_lines():
+    """loop and jrcxz, which have only a rel8, both ways."""
+    out = ["loop_top:", "nop"]
+    for op in ("loop", "loope", "loopz", "loopne", "loopnz", "jrcxz", "jecxz"):
+        out += ["%s loop_top" % op, "%s loop_end" % op]
+    out += ["times 20 nop", "loop_end:"]
+    return out
+
+
 def program(nasm):
     """The corpus in BoxASM's spelling, or NASM's where the two differ: NASM
     writes [rip + x] as [rel x], keeps a jump near only as `strict near`,
@@ -253,7 +334,8 @@ def program(nasm):
              "section .text", "main:"]
     for part in (alu_lines, test_lines, mov_lines, address_lines, xchg_lines,
                  stack_lines, unary_lines, imul_lines, shift_lines, extend_lines,
-                 condition_lines, branch_lines):
+                 condition_lines, branch_lines, string_lines, bit_lines, atomic_lines,
+                 short_branch_lines):
         lines += ["    " + line if not line.endswith(":") else line for line in part()]
     lines += ["    " + op for op in ALONE]
     lines += ["    ret 16", "    align 16", "code_target:", "    endbr64", "    ret",

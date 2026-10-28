@@ -33,6 +33,7 @@ static uint8_t BoxAsmSizeBit(uint8_t Bytes)
     case 2: return BOXASM_SIZE_16;
     case 4: return BOXASM_SIZE_32;
     case 8: return BOXASM_SIZE_64;
+    case 16: return BOXASM_SIZE_128;
     default: return 0;
     }
 }
@@ -44,6 +45,7 @@ static uint8_t BoxAsmSingleSize(uint8_t Sizes)
     case BOXASM_SIZE_16: return 2;
     case BOXASM_SIZE_32: return 4;
     case BOXASM_SIZE_64: return 8;
+    case BOXASM_SIZE_128: return 16;
     default: return 0;
     }
 }
@@ -360,7 +362,8 @@ static void BoxAsmPrepareOpcode(BoxAsmEncoder *Encoder, uint8_t Size, uint8_t *O
     memcpy(Opcode, Form->Opcode, Form->OpcodeLength);
     if (Form->Flags & BOXASM_FORM_CONDITION)
         Opcode[Last] = (uint8_t)(Opcode[Last] + Encoder->Statement->Condition);
-    if (Size == 8 && !(Form->Flags & BOXASM_FORM_DEFAULT64) && Form->Sizes != 0)
+    if ((Form->Flags & BOXASM_FORM_REX_W) ||
+        (Size == 8 && !(Form->Flags & BOXASM_FORM_DEFAULT64) && Form->Sizes != 0))
         Encoder->Rex |= 0x48;
     for (Index = 0; Index < Encoder->Count; Index++) {
         const BoxAsmOperand *Operand = &Encoder->Operands[Index];
@@ -429,6 +432,18 @@ static int BoxAsmPutImmediates(BoxAsmEncoder *Encoder, uint8_t Short)
     return 0;
 }
 
+/* The prefix that goes after the operand-size prefix and before REX, as
+ * NASM writes it: the source's rep, repe or repne, or the form's own F3. */
+static uint8_t BoxAsmRepeatByte(uint8_t Prefix, uint8_t FormPrefix)
+{
+    switch (Prefix) {
+    case BOXASM_PREFIX_REP:
+    case BOXASM_PREFIX_REPE:  return 0xF3;
+    case BOXASM_PREFIX_REPNE: return 0xF2;
+    default:                  return FormPrefix;
+    }
+}
+
 /* Prefixes, REX, opcode, ModRM, SIB, displacement and immediate, in the order
  * the processor reads them. */
 static int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
@@ -442,6 +457,7 @@ static int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
     BoxAsmValue Displacement = { 0, 0 };
     uint8_t DisplacementKind = 0;
     uint8_t DisplacementWidth = 0;
+    uint8_t Repeat = BoxAsmRepeatByte(Encoder->Statement->Prefix, Form->Prefix);
     int Rc;
 
     BoxAsmPrepareOpcode(Encoder, Size, Opcode);
@@ -454,7 +470,12 @@ static int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
     if (Encoder->Rex != 0 && Encoder->HasHigh8)
         return BoxAsmFail(Encoder->Asm, &Encoder->Statement->Where,
                           "ah, bh, ch and dh cannot be used in an instruction that needs REX", NULL);
+    if (Encoder->Statement->Prefix == BOXASM_PREFIX_LOCK &&
+        (Rc = BoxAsmPut(Encoder, "\xF0", 1)) != 0)
+        return Rc;
     if (Size == 2 && Form->Sizes != 0 && (Rc = BoxAsmPut(Encoder, "\x66", 1)) != 0)
+        return Rc;
+    if (Repeat != 0 && (Rc = BoxAsmPut(Encoder, &Repeat, 1)) != 0)
         return Rc;
     if (Encoder->Rex != 0 && (Rc = BoxAsmPut(Encoder, &Encoder->Rex, 1)) != 0)
         return Rc;
@@ -466,6 +487,54 @@ static int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
                              Form->Class[RmIndex] == BOXASM_CLASS_ADDRESS)) != 0)
         return Rc;
     return BoxAsmPutImmediates(Encoder, Short);
+}
+
+/* Whether the prefix the source wrote goes with the instruction and the
+ * form it took: lock only on a memory destination of an instruction the
+ * processor lets lock, rep only on movs, stos and lods, repe and repne only on
+ * cmps and scas. Anything else the processor rejects (#UD) or reads as
+ * another instruction (rep bsf is tzcnt), so it is refused here. */
+static int BoxAsmCheckPrefix(BoxAsmEncoder *Encoder)
+{
+    const BoxAsmStatement *Statement = Encoder->Statement;
+    const BoxAsmInstruction *Instruction = Statement->Instruction;
+    const char *Why = NULL;
+    BoxAsmMessage Message;
+
+    switch (Statement->Prefix) {
+    case BOXASM_PREFIX_LOCK:
+        if (!(Instruction->Takes & BOXASM_TAKES_LOCK))
+            Why = "lock goes only on add, adc, and, btc, btr, bts, cmpxchg, cmpxchg8b, "
+                  "cmpxchg16b, dec, inc, neg, not, or, sbb, sub, xadd, xchg and xor, not on ";
+        else if (Encoder->Operands[0].Kind != BOXASM_OPERAND_MEMORY &&
+                 !((Instruction->Takes & BOXASM_TAKES_BOTH) &&
+                   Encoder->Operands[1].Kind == BOXASM_OPERAND_MEMORY))
+            Why = "lock needs a memory destination: the first operand of ";
+        break;
+    case BOXASM_PREFIX_REP:
+        if (Instruction->Takes & BOXASM_TAKES_REPE)
+            Why = "say when to stop with repe (while equal) or repne (while not equal), "
+                  "not rep, before ";
+        else if (!(Instruction->Takes & BOXASM_TAKES_REP))
+            Why = "rep goes only on movs, stos and lods, not on ";
+        break;
+    case BOXASM_PREFIX_REPE:
+    case BOXASM_PREFIX_REPNE:
+        if (!(Instruction->Takes & BOXASM_TAKES_REPE))
+            Why = (Instruction->Takes & BOXASM_TAKES_REP)
+                  ? "movs, stos and lods repeat with rep; repe and repne go on cmps and "
+                    "scas, not on "
+                  : "repe and repne go only on cmps and scas, not on ";
+        break;
+    default:
+        break;
+    }
+    if (!Why)
+        return 0;
+    BoxAsmFailBegin(Encoder->Asm, &Statement->Where, &Message);
+    BoxAsmMessageText(&Message, Why);
+    BoxAsmMessageName(&Message, Instruction->Name);
+    return BoxAsmFailEnd(Encoder->Asm, &Statement->Where, &Message);
 }
 
 static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
@@ -525,9 +594,17 @@ int BoxAsmEncode(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement, uint8_t
     for (Index = 0; Index < Instruction->FormCount; Index++)
         Sizes |= Instruction->Forms[Index].Sizes;
     Encoder.OnlySize = BoxAsmSingleSize(Sizes);
+    if (Instruction->Kind == BOXASM_KIND_SHORT_BRANCH && Encoder.Count == 1 &&
+        Encoder.Operands[0].Reach == BOXASM_BRANCH_NEAR)
+        return BoxAsmFail(Asm, &Statement->Where,
+                          "has no near form: it reaches -128 to 127 bytes", Instruction->Name);
     for (Index = 0; Index < Instruction->FormCount; Index++) {
         if (BoxAsmFormMatches(&Encoder, &Instruction->Forms[Index], Short, &Why)) {
+            int Rc;
+
             Encoder.Form = &Instruction->Forms[Index];
+            if ((Rc = BoxAsmCheckPrefix(&Encoder)) != 0)
+                return Rc;
             return BoxAsmEmitForm(&Encoder, Short);
         }
     }

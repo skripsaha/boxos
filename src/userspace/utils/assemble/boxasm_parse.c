@@ -155,7 +155,8 @@ static int BoxAsmIsKnownWord(const BoxAsmToken *Token)
     uint8_t Condition;
 
     return BoxAsmIsDirective(Token) || BoxAsmIsBox(Token) ||
-           BoxAsmFindInstruction(Token->Text, Token->Length, &Condition) != NULL;
+           BoxAsmFindInstruction(Token->Text, Token->Length, &Condition) != NULL ||
+           BoxAsmFindPrefix(Token->Text, Token->Length) != BOXASM_PREFIX_NONE;
 }
 
 static int BoxAsmEndOfStatement(const BoxAsmToken *Token)
@@ -289,7 +290,7 @@ static int BoxAsmParseStorage(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmTo
 }
 
 static int BoxAsmParseInstruction(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
-                                  const BoxAsmToken *Word, uint32_t Times)
+                                  const BoxAsmToken *Word, uint32_t Times, uint8_t Prefix)
 {
     BoxAsmOperand Operands[3] = { { 0 } };
     uint8_t Count = 0;
@@ -328,7 +329,38 @@ static int BoxAsmParseInstruction(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxA
     Asm->Statements[Index].Condition = Condition;
     Asm->Statements[Index].OperandCount = Count;
     Asm->Statements[Index].Times = Times;
+    Asm->Statements[Index].Prefix = Prefix;
     memcpy(Asm->Statements[Index].Operands, Operands, sizeof(Operands));
+    return 0;
+}
+
+/* lock, rep, repe or repne, and the instruction it goes before on its line. */
+static int BoxAsmParsePrefixed(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                               const BoxAsmToken *Word, uint32_t Times)
+{
+    BoxAsmToken Instruction = *Token;
+    BoxAsmMessage Message;
+    uint8_t Condition;
+    int Rc;
+
+    if (Token->Kind == BOXASM_TOKEN_IDENTIFIER &&
+        BoxAsmFindPrefix(Token->Text, Token->Length) != BOXASM_PREFIX_NONE)
+        return BoxAsmFail(Asm, &Token->Where, "an instruction takes one prefix", NULL);
+    if (Token->Kind != BOXASM_TOKEN_IDENTIFIER ||
+        !BoxAsmFindInstruction(Token->Text, Token->Length, &Condition)) {
+        BoxAsmFailBegin(Asm, &Word->Where, &Message);
+        BoxAsmMessageText(&Message, "'");
+        BoxAsmMessageSpan(&Message, Word->Text, Word->Length);
+        BoxAsmMessageText(&Message, "' is a prefix: the instruction it goes before follows "
+                                    "it on its line");
+        return BoxAsmFailEnd(Asm, &Word->Where, &Message);
+    }
+    if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0 ||
+        (Rc = BoxAsmParseInstruction(Asm, Lexer, Token, &Instruction, Times,
+                                     BoxAsmFindPrefix(Word->Text, Word->Length))) != 0)
+        return Rc;
+    /* The statement begins at its prefix, and what is said of it points there. */
+    Asm->Statements[Asm->StatementCount - 1u].Where = Word->Where;
     return 0;
 }
 
@@ -348,7 +380,8 @@ static int BoxAsmParseTimes(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToke
         return Rc;
     if (Token->Kind != BOXASM_TOKEN_IDENTIFIER ||
         !((BoxAsmDataWidth(Token, &Reserve) != 0 && !Reserve) ||
-          BoxAsmFindInstruction(Token->Text, Token->Length, &Condition) != NULL))
+          BoxAsmFindInstruction(Token->Text, Token->Length, &Condition) != NULL ||
+          BoxAsmFindPrefix(Token->Text, Token->Length) != BOXASM_PREFIX_NONE))
         return BoxAsmFail(Asm, &Word->Where, "times repeats one instruction or db, dw, dd, dq", NULL);
     Repeated = *Token;
     if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
@@ -396,7 +429,9 @@ static int BoxAsmParseStatement(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsm
         return BoxAsmFail(Asm, &Word->Where, "equ needs a name before it: `size equ 16`", NULL);
     if (Times == 0 && BoxAsmIsBox(Word))
         return BoxAsmParseBox(Asm, Lexer, Token, Word);
-    return BoxAsmParseInstruction(Asm, Lexer, Token, Word, Times);
+    if (BoxAsmFindPrefix(Word->Text, Word->Length) != BOXASM_PREFIX_NONE)
+        return BoxAsmParsePrefixed(Asm, Lexer, Token, Word, Times);
+    return BoxAsmParseInstruction(Asm, Lexer, Token, Word, Times, BOXASM_PREFIX_NONE);
 }
 
 /* ---- Lines -------------------------------------------------------------- */

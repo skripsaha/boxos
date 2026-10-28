@@ -101,10 +101,20 @@ typedef enum {
 
 struct BoxAsmInstruction;
 
+/* A prefix written before an instruction. */
+typedef enum {
+    BOXASM_PREFIX_NONE = 0,
+    BOXASM_PREFIX_LOCK,
+    BOXASM_PREFIX_REP,
+    BOXASM_PREFIX_REPE,
+    BOXASM_PREFIX_REPNE
+} BoxAsmPrefix;
+
 typedef struct {
     uint8_t                          Kind;
     uint8_t                          Section;
     uint8_t                          Condition;     /* jcc setcc cmovcc */
+    uint8_t                          Prefix;        /* BOXASM_PREFIX_* */
     uint8_t                          OperandCount;
     uint8_t                          Long;          /* a branch grown to rel32; never shrinks */
     uint8_t                          Width;         /* DATA, RESERVE: item size */
