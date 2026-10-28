@@ -1,6 +1,6 @@
 """stitch_pen — a pen that sews stitches the way a kernel does (spec_v2 §2.7,
 §3.2, §16.4 п.4), for the self-test's landings, and the circle that holds what
-it sewed against what the ribbon reads back (stitch.py Ribbon)."""
+it sewed against what the ribbon reads back (stitch_ribbon.py Ribbon)."""
 
 from .bookread import PAYLOAD_BYTES, UNIT_STITCH, UnitSeal
 from .ondisk import SECTORS_PER_BLOCK

@@ -190,14 +190,14 @@ uint64_t    FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
 void        FallowStitchSettled(uint64_t target, uint64_t seq, uint64_t cycle);
 
 /*
- * Under the state lock, at a Tally's DONE (settle/binder.c): ground no slot of
- * the Spine holds any more — the nodes of the Tally its slot was written over
- * that no slot's Tally names, the Quires of the ribbon every slot names its
- * `at` later than (FALLOW_BY_SPINE, §3.4, M-7, L-12). The slot that let go of
- * it lies on the medium once its flush was kept, but a medium may lie about a
- * flush: so it rests as a stitch's freer does, for FallowLag() stitches more
- * to settle after the `cycle`-th — with no Quire to leave and no handle to
- * wait for, and goes back with them.
+ * Under the state lock, at a Tally's DONE (settle/binder_done.c): ground no
+ * slot of the Spine holds any more — the nodes of the Tally its slot was
+ * written over that no slot's Tally names, the Quires of the ribbon every slot
+ * names its `at` later than (FALLOW_BY_SPINE, §3.4, M-7, L-12). The slot that
+ * let go of it lies on the medium once its flush was kept, but a medium may
+ * lie about a flush: so it rests as a stitch's freer does, for FallowLag()
+ * stitches more to settle after the `cycle`-th — with no Quire to leave and no
+ * handle to wait for, and goes back with them.
  */
 void        FallowSpineAdd(FallowNode* node, uint64_t cycle);
 

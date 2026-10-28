@@ -24,9 +24,9 @@
  * п.11): `start + of`, never this mount's atom — a volume moved onto a medium
  * of another physical block is read the same.
  *
- * The rules and the lines are volume-read's (tools/volumeread/stitch.py
- * Ribbon), word for word where the kernel can say them so: the census
- * scenario plants every rule and holds the two readers to one answer.
+ * The rules and the lines are volume-read's (tools/volumeread/stitch_ribbon.py
+ * Ribbon), word for word where the kernel can say them so: the census scenario
+ * plants every rule and holds the two readers to one answer.
  */
 
 /* A line of the ribbon, made here before it is said (the door is shut and
@@ -498,7 +498,7 @@ static bool RibbonNamesStitch(const RibbonUnit* u, const RibbonUnit* s)
  * it, where only the last one can have a retry. *kept so; the unit at its end
  * into *ahead, read through *hop — the next step's rule (а) when the walk
  * takes `s` on through that Quire: every unit of the chain is read once
- * (stitch.py Ribbon._Kept).
+ * (stitch_ribbon.py Ribbon._Kept).
  */
 static error_t RibbonKept(const RibbonWalk* w, const RibbonUnit* s, bool* kept, RibbonUnit** ahead, RibbonQuire* hop)
 {

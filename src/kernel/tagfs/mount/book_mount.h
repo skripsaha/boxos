@@ -148,7 +148,7 @@ typedef struct {
 
 /*
  * A file the Tally names and the mount locked by name — what of it read, kept
- * for the next Tally to name again as it lay (settle/binder_nodes.c): a file
+ * for the next Tally to name again as it lay (settle/binder_items.c): a file
  * locked stays locked, its ground held, across a Tally this kernel writes
  * (§16.4 п.5). Its header when it read, and each Parcel that read: the file
  * block it begins at, its body as it lay and the seq of its node — its runs

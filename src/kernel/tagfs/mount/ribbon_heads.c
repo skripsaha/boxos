@@ -22,8 +22,9 @@
  * pass 1 goes on by the stitch after it (rule (в)). The one leans to claiming
  * a Quire more — a Quire held while a slot names it, never one given while a
  * slot needs it; the other is the price the spec sets on reading heads alone.
- * volume-read walks the same ribbon whole (stitch.py Ribbon, scan=False;
- * §16.3 п.13), and the census holds the two to one answer on every landing.
+ * volume-read walks the same ribbon whole (stitch_ribbon.py Ribbon,
+ * scan=False; §16.3 п.13), and the census holds the two to one answer on every
+ * landing.
  *
  * ‼ A RETRY IS FOUND WHERE THE WRITER PUTS IT, AND LOOKED FOR WHERE PASS 1
  * LOOKS (§16.4 п.4, rule (б′)). A slot this kernel wrote names a ribbon this

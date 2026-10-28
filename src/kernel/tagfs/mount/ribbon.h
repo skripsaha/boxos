@@ -25,11 +25,11 @@
  *                        every format shares, through the one door of the
  *                        mirror
  *
- * Read the way volume-read reads the same ribbon (tools/volumeread/stitch.py
- * Ribbon, bookmount.py _Replay): the census scenario boots a landing of every
- * rule and holds the kernel's lines to what the host predicts. Every line a
- * mount says of the ribbon is `[TagFS] ribbon CODE: ...`, CODE the census's
- * own for the finding.
+ * Read the way volume-read reads the same ribbon
+ * (tools/volumeread/stitch_ribbon.py Ribbon, bookmount.py _Replay): the census
+ * scenario boots a landing of every rule and holds the kernel's lines to what
+ * the host predicts. Every line a mount says of the ribbon is
+ * `[TagFS] ribbon CODE: ...`, CODE the census's own for the finding.
  *
  * Everything here runs inside the mount, with the door shut, on the one core
  * attending it: the walk's memory is the heap's, never a frame's, and no lock
@@ -111,7 +111,7 @@ typedef struct {
     uint64_t reach;
 } RibbonGroundRun;
 
-/* The ribbon walked from a slot's `at` (stitch.py Ribbon). */
+/* The ribbon walked from a slot's `at` (stitch_ribbon.py Ribbon). */
 typedef struct {
     const SpineSlot* slot;
     bool             stood;       /* the slot the mount stands on: lines said, the scan made */
@@ -189,11 +189,11 @@ uint64_t RibbonUnitsReadStand(void);
 error_t RibbonUnitFind(const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, RibbonUnit** out);
 
 /* The first sector from `place` to the end of its Quire holding a stitch of
- * seq past `after` (rule (б′), stitch.py Ribbon._Further): *found, its offset
- * from `place` in *j and its head in *head — and, when it is the first sector
- * of its unit, that unit read in *out, running on into the next_quire its own
- * StitchHead names where that lies where one may. OK, or the medium's or
- * memory's refusal. */
+ * seq past `after` (rule (б′), stitch_ribbon.py Ribbon._Further): *found, its
+ * offset from `place` in *j and its head in *head — and, when it is the first
+ * sector of its unit, that unit read in *out, running on into the next_quire
+ * its own StitchHead names where that lies where one may. OK, or the medium's
+ * or memory's refusal. */
 error_t RibbonUnitAhead(const RibbonPlace* place, uint64_t after, uint64_t* j, BookSectorHead* head, bool* found,
                         RibbonUnit** out);
 

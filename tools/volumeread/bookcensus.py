@@ -51,7 +51,7 @@ def BlockDigest(raw, lanes):
 
 
 # The copies of a node that did not hold the kernel names one line each before
-# it says the rest by their count (mount/tally_read.c TALLY_COPIES_SAID).
+# it says the rest by their count (mount/tally_read_internal.h TALLY_COPIES_SAID).
 KERNEL_COPIES_SAID = 4
 
 

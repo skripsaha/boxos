@@ -8,7 +8,8 @@
  * there is (§3.9, §16.3 пп.10–11): every unit of a seq past the last stitch
  * taken in the rest of the last Quire and all of its next, joined to the one
  * its StitchHead names, each branch said by the census's own codes — word for
- * word volume-read's (tools/volumeread/stitch.py Ribbon._Scan, _Branches).
+ * word volume-read's (tools/volumeread/stitch_ribbon.py Ribbon._Scan,
+ * _Branches).
  */
 
 /* The unit of seq `seq` past the end, or NULL. */
