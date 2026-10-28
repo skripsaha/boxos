@@ -27,6 +27,7 @@ static GroundRun* s_runs;
 static uint32_t   s_count;
 static uint32_t   s_cap;
 static bool       s_refused;       /* a claim found no memory: the census decides nothing */
+static uint64_t   s_reach;         /* past the farthest block an owner but the far Deed names */
 
 /* The sweep: the next run not yet met, and the runs a window before this one
  * carried over its end. */
@@ -65,6 +66,8 @@ static uint64_t ClaimEnd(void)
 static void GroundClaimAs(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t namer)
 {
     uint64_t run = ClaimEnd();
+    if (owner != GROUND_FAR_DEED)
+        GroundCensusNamed(start, count);
     if (s_refused || count == 0 || start >= run || owner >= GROUND_OWNER_KINDS)
         return;
     if (count > run - start)
@@ -611,6 +614,18 @@ GroundOwner GroundClaimOf(uint64_t block)
 }
 #endif
 
+void GroundCensusNamed(uint64_t start, uint64_t count)
+{
+    uint64_t end = start + count < start ? UINT64_MAX : start + count;
+    if (count && end > s_reach)
+        s_reach = end;
+}
+
+uint64_t GroundCensusReach(void)
+{
+    return s_reach;
+}
+
 void GroundCensusEnd(void)
 {
     kfree(s_runs);
@@ -620,6 +635,7 @@ void GroundCensusEnd(void)
     s_count         = 0;
     s_cap           = 0;
     s_refused       = false;
+    s_reach         = 0;
     s_next          = 0;
     s_carried_count = 0;
 }

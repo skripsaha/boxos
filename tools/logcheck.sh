@@ -35,6 +35,9 @@
 #   logcheck.sh censusmut either half of that reconcile broken on purpose — the
 #                         kernel's pool walk, the census's retired-record rule —
 #                         must turn it red
+#   logcheck.sh growglass a book under glass on a bigger medium takes no ground
+#                         and writes nothing; grow and growcut ask a book the
+#                         same with VOLUME_FORMAT=v2 (logcheck_book_grow.sh)
 #   logcheck.sh stand     the startup tests that write (VOLUME_TESTS=on), on the
 #                         legacy channel and on AHCI, each image booted twice:
 #                         0 failed, the caveats held with their numbers, the
@@ -94,10 +97,15 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_framerefuse.sh"
 # The mkfs scenario: tools/logcheck_mkfs.sh.
 . "$(dirname "$0")/logcheck_mkfs.sh"
-# The book's census and the stand's road on a book: tools/logcheck_book.sh;
-# the kernel's Tallies of a book: tools/logcheck_bind.sh.
+# The book's census and the stand's road on a book: tools/logcheck_book.sh,
+# its USB road tools/logcheck_book_usb.sh; the kernel's Tallies of a book:
+# tools/logcheck_bind.sh.
 . "$(dirname "$0")/logcheck_book.sh"
+. "$(dirname "$0")/logcheck_book_usb.sh"
 . "$(dirname "$0")/logcheck_bind.sh"
+# A book taking the ground behind it (grow, growcut on VOLUME_FORMAT=v2;
+# growglass): tools/logcheck_book_grow.sh.
+. "$(dirname "$0")/logcheck_book_grow.sh"
 
 # Waits for the SHELL BANNER, not for "userspace is starting".
 #
@@ -7282,6 +7290,7 @@ EOF2
 }
 
 run_grow() {
+    [ "${VOLUME_FORMAT:-v1}" = v2 ] && { run_growbook; return; }
     echo "== grow: a volume on a bigger medium takes the ground behind it =="
     rm -f build/boxos.img   # a scenario that measures growth starts from a volume that has not grown
     build STRICT=on
@@ -7355,6 +7364,7 @@ run_grow() {
 }
 
 run_growcut() {
+    [ "${VOLUME_FORMAT:-v1}" = v2 ] && { run_growcutbook; return; }
     echo "== growcut: a growth cut between its two writes still mounts, and finishes =="
     #
     # The order is the crash safety: the far copy is written first, the head
@@ -9272,6 +9282,13 @@ STANDUSB_BLOCKFAILS=48   # stand_judge's table, its USB column
 STANDUSB_SEAT="usb[0-9]+ [^)]*"
 
 run_standusb() {
+    if [ "${VOLUME_FORMAT:-v1}" = v2 ]; then
+        echo "== standusb, a book: the startup tests that write, on a USB stick of format v2, twice =="
+        stand_book_usb again
+        lockrank_judge "$SCRATCH/serial.stand_book_usb.log $SCRATCH/serial.stand_book_usb_again.log" "standusb, the book"
+        buildkey_restore
+        return
+    fi
     echo "== standusb: the startup tests that write, on a USB volume, twice =="
     local tag=stand_usb what="USB, BIOS 4c" boot="$SCRATCH/standusb.boot.img"
     local stick="$SCRATCH/standusb.stick.img" built kept rc extra logs="" f
@@ -12231,6 +12248,7 @@ case "${1:-both}" in
     caretmut) run_caretmut ;;
     grow)     run_grow ;;
     growcut)  run_growcut ;;
+    growglass) run_growglass ;;
     growmut)  run_growmut ;;
     census)   run_census ;;
     censusmut) run_censusmut ;;
@@ -12252,7 +12270,7 @@ case "${1:-both}" in
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
     all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growglass|growmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

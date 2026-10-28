@@ -281,32 +281,38 @@ census_book() {
 # every mount after it the same free — but those a test of the ribbon makes
 # while its own stitches lie on the medium.
 #
-#   test                                        image   padded   uefi
-#   stand_blockfail_flush_refused                  1        1       1   the flush it asks for
-#   stand_flush_ticket                             1        1       1   the flush its ticket waits on
-#   stand_medium_bell_rings_once                   1        1       1   the read of the volume's first block
-#   stand_blockfail_two_ranges                     2        2       2   a read in each range
-#   stand_roadstead_refusal_rings_once             0        0       1   an AHCI port's alone
-#   stand_tally_rotten_leaf_locked                 0       18       0   copy 1 then copy 2: the run, then each sector
-#   stand_stitch_retry_atom                        1        1       1   the stitch's first atom
-#   stand_stitch_retry_flush                       1        1       1   the flush after the stitch
-#   stand_blockfail_refused_writes                 4        4       4   two writes into each range
-#   stand_stitch_retry_quire_entered               1        1       1   the first atom of the Quire entered
-#   stand_stitch_retry_refused_twice               2        2       2   a stitch and its retry at the next's start
-#   stand_stitch_retry_head_landed                 2        2       2   a stitch past its head, and its retry at the next's start
-#   stand_docket_closed_damaged                    4        4       4   the stitch's unit, then its sector, read twice
-#   stand_fresh_refused_names_nothing              1        1       1   the first command of a file's write
-#   stand_fresh_flushes_first                      1        1       1   the flush of the data before the stitch
-#   stand_binder_node_refused                      1        1       1   the Tally's first node
-#   stand_binder_slot_flush_refused                1        1       1   the flush of the Tally's slot
-#   total                                         24       42      25
-#   stand_stitch_refused_everywhere                N        N       N   every attempt, as many as its line says
-#   stand_stitch_retry_runs_out                    N        N       N   a stitch and every atom of the next: its line
+#   test                                        image   padded   uefi   usb
+#   stand_blockfail_flush_refused                  1        1       1     1   the flush it asks for
+#   stand_flush_ticket                             1        1       1     1   the flush its ticket waits on
+#   stand_medium_bell_rings_once                   1        1       1     1   the read of the volume's first block
+#   stand_blockfail_two_ranges                     2        2       2     2   a read in each range
+#   stand_roadstead_refusal_rings_once             0        0       1     0   an AHCI port's alone
+#   stand_tally_rotten_leaf_locked                 0       18       0     0   copy 1 then copy 2: the run, then each sector
+#   stand_stitch_retry_atom                        1        1       1     1   the stitch's first atom
+#   stand_stitch_retry_flush                       1        1       1     1   the flush after the stitch
+#   stand_blockfail_refused_writes                 4        4       4     4   two writes into each range
+#   stand_stitch_retry_quire_entered               1        1       1     1   the first atom of the Quire entered
+#   stand_stitch_retry_refused_twice               2        2       2     2   a stitch and its retry at the next's start
+#   stand_stitch_retry_head_landed                 2        2       2     2   a stitch past its head, and its retry at the next's start
+#   stand_docket_closed_damaged                    4        4       4     4   the stitch's unit, then its sector, read twice
+#   stand_fresh_refused_names_nothing              1        1       1     1   the first command of a file's write
+#   stand_fresh_flushes_first                      1        1       1     1   the flush of the data before the stitch
+#   stand_binder_node_refused                      1        1       1     1   the Tally's first node
+#   stand_binder_slot_flush_refused                1        1       1     1   the flush of the Tally's slot
+#   total                                         24       42      25    24
+#   stand_stitch_refused_everywhere                N        N       N     N   every attempt, as many as its line says
+#   stand_stitch_retry_runs_out                    N        N       N     N   a stitch and every atom of the next: its line
 # ---------------------------------------------------------------------------
 
 STAND_BOOK_BLOCKFAILS=24
 STAND_BOOK_PADDED_BLOCKFAILS=42
 STAND_BOOK_UEFI_BLOCKFAILS=25
+# The book on a USB stick (stand_book_usb): the usb column — its seat's reads
+# go through the port as on UEFI, so stand_tally_rotten_leaf_locked stands
+# down there and refuses nothing, and the stick is no AHCI port for
+# stand_roadstead_refusal_rings_once to refuse on. Derived from the rows, not
+# yet measured: the first boot of the leg pins it.
+STAND_BOOK_USB_BLOCKFAILS=24
 STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
 # C13 (stand_docket_closed_damaged): sector 1 of a stitch the kernel sewed will
 # not read at the next mount — the line names it and the record bytes it took.
@@ -456,8 +462,9 @@ stand_book() {
         echo "BUILD FAILED (VOLUME_TESTS=on STRICT=on VOLUME_FORMAT=v2) — tail:"; tail -25 "$SCRATCH/build.log"
         bad "stand: the book — VOLUME_TESTS=on STRICT=on VOLUME_FORMAT=v2 does not build"
     fi
+    stand_book_usb
     STAND_FORMAT=$keep
-    lockrank_judge "$SCRATCH/serial.stand_book.log $SCRATCH/serial.stand_book_padded.log $SCRATCH/serial.stand_book_uefi.log" \
+    lockrank_judge "$SCRATCH/serial.stand_book.log $SCRATCH/serial.stand_book_padded.log $SCRATCH/serial.stand_book_uefi.log $SCRATCH/serial.stand_book_usb.log" \
         "stand, the book"
 }
 
@@ -618,6 +625,9 @@ book_circle_order() {
         harness "circle: the record of the write boot does not account for the image it left — ${said:-no answer}"
         return
     fi
+    said=$(python3 tools/volume-read.py "$base" cut "$record" --list 2>/dev/null | grep -cE '(  |; )unowned ')
+    [ "$said" = 0 ]
+    chk $? "circle: every write of the record is named by blklog_book.py — $said unowned"
     python3 - "$img" "$record" >"$SCRATCH/circle.order" 2>&1 <<'ORDER_EOF'
 import bisect, sys
 sys.path.insert(0, "tools")

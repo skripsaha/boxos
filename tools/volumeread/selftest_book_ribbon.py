@@ -13,6 +13,34 @@ from .selftest_book import Born, Found, Glass, Label
 from .selftest_cases import Case
 
 
+def RecordNamed(c, base, also=()):
+    """The sectors the landing laid over the book `base`, as one machine
+    writes them (§3.3): its data, a flush, then the book's units, and after a
+    flush `also` — (lba, sectors) of units written again as they lie, a Tally
+    node and a slot — a record of them classified (blklog_book.py): a file's
+    data named by the stitch after it, every unit by its sectors' heads, and
+    none unowned."""
+    from . import blklog
+    from .selftest_cases import SyntheticLog
+    g = c.g
+    laid = {x: raw for x, raw in c.medium.over.items() if base.over.get(x) != raw}
+
+    def Unit(lba):
+        raw = laid[lba]
+        return raw[4:bookread.HEAD_BYTES] != bytes(bookread.HEAD_BYTES - 4) and \
+            bookread.SectorCheck(raw, g.uuid, lba - g.base)
+
+    lbas = sorted(laid)
+    entries = [(x, 0, laid[x]) for x in lbas if not Unit(x)] + [(0, blklog.LOG_FLUSH, b"")] + \
+        [(x, 0, laid[x]) for x in lbas if Unit(x)] + [(0, blklog.LOG_FLUSH, b"")] + \
+        [(lba + k, 0, c.medium.sectors(lba + k, 1)) for lba, n in also for k in range(n)]
+    log = blklog.BlkLog(SyntheticLog(entries, len(entries)), base.SizeSectors())
+    named = blklog.Classifier(log, base)
+    kinds = [t.kind for w in log.Writes() for t in named.Classify(w)]
+    need = {"stitch", "file"} | ({"sheet", "slot"} if also else set())
+    return bool(kinds) and "unowned" not in kinds and need <= set(kinds)
+
+
 def RecordCases(bt):
     f1, f2, f3 = bt.fid, bt.fid + 1, bt.fid + 2
 
@@ -44,7 +72,20 @@ def RecordCases(bt):
             s = pen.Sew([stitch.UseContext(b"next")], flags=0)
             bt.Zero(o, s.vlbas[4], s.of - 4)
 
+    leaf = bt.Node(tally.FILES)
+
+    def Recorded(o):
+        d = bt.Fresh(o, 0, 2, 5)
+        bt.Pen(o).Sew([Born(bt.F, f1, d, b"recorded")], flags=stitch.DATA_FLUSHED)
+
     return [
+        Case("B56 a stitch and its data as a machine's record writes them", Recorded, checks=[
+            ("every write of the record is named — the data a file's, by the stitch after it; the stitch, a "
+             "Tally node and a slot by their sectors' heads — none unowned",
+             lambda c: RecordNamed(c, bt.base, also=[(c.g.base + leaf.blocks[0] * SECTORS_PER_BLOCK,
+                                                      leaf.sheets * SECTORS_PER_BLOCK),
+                                                     (c.g.base + tally.SlotBlock(c.g, 0) * SECTORS_PER_BLOCK,
+                                                      SECTORS_PER_BLOCK)]))]),
         Case("B10 a record of kind 31 not to be stepped over", Kind31(0), must={"UNDER_GLASS"}, checks=[
             ("the volume is read only and the stitch is not applied",
              lambda c: Glass(c, "kind 31") and f1 not in c.mount.files),

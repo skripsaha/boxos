@@ -149,7 +149,9 @@ static bool BookFileStrip(BookFile* f, const Strip* s)
 /* A run of the book into Strips: a run longer than a Strip counts is laid in
  * as many as it takes. What of a DATA run lies outside the data run is not
  * the file's to name — the file is locked for it, and only what lies inside
- * is laid, the part a lock holds (BookGroundHoldRun); a HOLE is laid only
+ * is laid, the part a lock holds (BookGroundHoldRun); the run as it is named
+ * goes to the census's reach, so ground past the far Deed a locked file names
+ * is never taken as no one's (mount/book_grow.c); a HOLE is laid only
  * while the file's Parcels have covered no more than its bytes need — of a
  * file locked, a hole names no ground and is not kept. So what is laid is
  * bounded by the volume and by the file, never by a number a run carries. */
@@ -160,8 +162,10 @@ static bool BookFileRun(BookFile* f, const TallyRun* r)
         return true;
     if (!r->hole) {
         uint64_t lo = g_book.frame.data_block, hi = g_book.data_end;
-        if (start < lo || end > hi)
+        if (start < lo || end > hi) {
             BookFileBroken(f, "it names ground outside the data run");
+            GroundCensusNamed(r->start, r->count);
+        }
         start = start < lo ? lo : start;
         end   = end > hi ? hi : end;
         if (start >= end)

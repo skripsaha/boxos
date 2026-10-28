@@ -656,6 +656,11 @@ class TreeRead:
 # ---------------------------------------------------------------------------
 
 
+# Why the Tally locks a file a DATA run of which lies outside the data run — the
+# kernel's words (tally_leaves.c BookFileRun).
+OUTSIDE = "it names ground outside the data run"
+
+
 class Tally:
     """What the Tally of `slot` holds (§4.5 п.3): its content, the trees as
     read, the rotten ranges, the copies to mend, what this kernel cannot
@@ -666,7 +671,7 @@ class Tally:
     def __init__(self, g, slot):
         self.slot, self.seq = slot, slot.tally_seq
         self.trees, self.rotten, self.glass, self.mended, self.shape = {}, [], [], [], list(slot.shape)
-        self.locked, self.locked_runs, self.gaps, self.refused = {}, {}, [], None
+        self.locked, self.locked_runs, self.gaps, self.outside, self.refused = {}, {}, [], [], None
         self.content = Content(slot.made_ns)
         self.content.next_fid = slot.counts["next_fid"]
         self.content.next_tag = slot.counts["next_tag"]
@@ -691,14 +696,16 @@ class Tally:
             if tree in (BOOKMARKS, LIEN) and root.items:
                 self.glass.append("its %s tree is not empty — a bookmark this kernel cannot hold "
                                   "(§5)" % TREE_NAMES[tree])
-        self._Files()
+        self._Files(g)
         self._Rest()
 
-    def _Files(self):
+    def _Files(self, g):
         """The files of FILES: a header and the Parcels that cover its blocks
-        in a row. A file a rotten range touches, or whose Parcels do not
-        cover it, is locked (§4.5 п.3, §2.9) — what of its runs could be read
-        is kept beside the lock, for the blocks it names are held."""
+        in a row. A file a rotten range touches, whose Parcels do not cover
+        it, or a DATA run of which lies outside the data run, is locked
+        (§4.5 п.3, §2.9) — what of its runs could be read is kept beside the
+        lock, for the blocks it names are held; locked by the Tally, not by
+        the replay, the volume stays writable (tally_leaves.c BookFileRun)."""
         t = self.trees.get(FILES)
         files, parts, broken = {}, {}, {}
         for (fid, part), body, seq in (t.items if t else []):
@@ -719,8 +726,11 @@ class Tally:
             if any(r.Touches((fid, 0), (fid + 1, 0)) for r in rotten):
                 why = "it lies in a rotten range of FILES"
             else:
-                why = broken.get(fid) or self._Cover(fid, files.get(fid), parts.get(fid, []))
-                if why:
+                why = broken.get(fid) or self._Cover(fid, files.get(fid), parts.get(fid, []), g)
+                if why == OUTSIDE:
+                    self.outside.append((fid, [(r.start, r.count) for r in known if not r.hole and
+                                               (r.start < g.data_block or r.start + r.count > g.data_end)]))
+                elif why:
                     self.gaps.append((fid, why))
             if why:
                 self.locked[fid], self.locked_runs[fid] = why, known
@@ -729,9 +739,11 @@ class Tally:
                 self.content.files[fid] = files[fid]
 
     @staticmethod
-    def _Cover(fid, fs, parcels):
+    def _Cover(fid, fs, parcels, g):
         """Why the Parcels of `fid` do not cover its blocks [0, ⌈size/4096⌉)
-        in a row, one after another from block 0 (§2.9), or None."""
+        in a row, one after another from block 0 (§2.9), or name a DATA run
+        outside the data run (OUTSIDE) — in the order the kernel reads them,
+        Parcel by Parcel — or None."""
         if fs is None:
             return "fid %u has Parcels and no header" % fid
         at = 0
@@ -739,6 +751,8 @@ class Tally:
             if b != at:
                 return ("fid %u's Parcel from block %u follows its blocks up to %u — %s"
                         % (fid, b, at, "a hole" if b > at else "an overlap"))
+            if any(not r.hole and (r.start < g.data_block or r.start + r.count > g.data_end) for r in runs):
+                return OUTSIDE
             fs.parcels.append(runs)
             fs.runs.extend(runs)
             at += sum(r.count for r in runs)

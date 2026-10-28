@@ -32,6 +32,8 @@ from . import ondisk
 from .ondisk import SECTOR, SECTORS_PER_BLOCK, BLOCK
 from .medium import OverlayMedium, StandOnDeed, Unreadable, GroundCandidates
 from .census import GroundCensus
+from .bookcensus import BookCensus
+from .blklog_book import BOOK_KINDS, BookSectors
 
 LOG_FLUSH, LOG_FUA, LOG_DISCARD, LOG_MARK = 1, 2, 4, 8   # blklogwrites.c:25-28
 LOG_FLAG_MASK = 0xF                                     # blklogwrites.c:29-32
@@ -41,7 +43,7 @@ LOG_SUPER = struct.Struct("<QQQI")                      # blklogwrites.c:38-43 l
 LOG_ENTRY = struct.Struct("<QQQQ")                      # blklogwrites.c:45-50 log_write_entry
 
 KINDS = ("deed", "ledger", "diskbook", "bitmap", "registry", "table", "pool",
-         "integrity", "manifest", "tuse", "spare", "file", "unowned", "outside")
+         "integrity", "manifest", "tuse", "spare", "file", "unowned", "outside") + BOOK_KINDS
 
 
 class LogUnreadable(Exception):
@@ -298,27 +300,35 @@ class Classifier:
             self.has_mbr = base.sectors(0, 1)[510:512] == b"\x55\xaa"
         except IOError:
             self.has_mbr = False
-        self.cache = {}
+        self.cache, self.grown, self.grown_at = {}, {}, None
+        self.book = None      # a format-v2 volume's writes, named (blklog_book.py)
 
     def _Owners(self, epoch):
-        """The census of base + epochs 0..epoch, built incrementally."""
+        """The census of base + epochs 0..epoch, built incrementally: the
+        book's for a format-v2 volume, which never moves the stand — a book's
+        Deed changes only by a growth, whose far copy is named by its bytes."""
         while self.done_epoch < epoch:
             self.done_epoch += 1
             for w in self.log.epochs[self.done_epoch]:
                 self.log.Apply(self.over, w)
             self.census = None
         if self.census is None:
+            v2 = self.stand is not None and self.stand.format == "v2"
             try:
-                self.census = GroundCensus(self.over, self.forced_start)
+                self.census = (BookCensus if v2 else GroundCensus)(self.over, self.forced_start)
             except (Unreadable, IOError):
                 self.census = False
-            self.stand = self.census.f.stand if self.census else self.stand
+            if self.census and not v2:
+                self.stand = self.census.f.stand
         return self.census
 
     def Classify(self, w):
         if w.seq in self.cache:
             return self.cache[w.seq]
-        census = self._Owners(w.epoch) if self.stand is not None else None
+        # A book's census is asked only of data no stitch of the record names
+        # (blklog_book.py): its units name themselves.
+        v2 = self.stand is not None and self.stand.format == "v2"
+        census = self._Owners(w.epoch) if self.stand is not None and not v2 else None
         touches, cur = [], None
         for i in range(w.sectors):
             kind, what, group = self._Sector(w, i, census)
@@ -356,17 +366,25 @@ class Classifier:
         one group are one touch."""
         lba = w.lba + i
         st = self.stand
-        if st is None or not st.start <= lba < st.start + st.deed["sectors"]:
+        grown = self._GrownDeed(w) if st is not None else None
+        if grown:
+            return "deed", grown, ("deed", "grown")
+        if st is None or not st.start <= lba < st.start + self._Sectors(w):
             what = self._Outside(lba)
             return "outside", what, ("outside", what)
-        self.lay = lay = (census.f.layout if census else st.deed["layout"])
         v = lba - st.start
         vb = v // SECTORS_PER_BLOCK
-        if vb == 0 or v // SECTORS_PER_BLOCK == st.deed["tail_sector"] // SECTORS_PER_BLOCK:
+        tail, before = self._Tails(w)
+        if vb == 0 or vb == tail // SECTORS_PER_BLOCK:
             what = "head deed" if vb == 0 else "far copy of the deed"
             return "deed", what, ("deed", vb)
+        if any(vb == t // SECTORS_PER_BLOCK for t in before) and self._Erased(w, st.start + vb * SECTORS_PER_BLOCK):
+            return "deed", "the far copy the volume grew past, erased", ("deed", vb, "erased")
         if st.format == "v2":
-            return self._FrameSector(vb)
+            if self.book is None:
+                self.book = BookSectors(self.log, st, self._Owners, self._Sectors)
+            return self.book.Sector(w, i, vb)
+        self.lay = lay = (census.f.layout if census else st.deed["layout"])
         if lay["state_block"] <= vb < lay["state_block"] + lay["state_blocks"]:
             c = vb - lay["state_block"]
             if v % SECTORS_PER_BLOCK:
@@ -400,20 +418,49 @@ class Classifier:
                 else ("data", kind, what, b)
         return "unowned", "volume block %u, in no region of the deed" % vb, ("gap", vb)
 
-    def _FrameSector(self, vb):
-        """A block of a format-v2 volume, named by where it sits in the FRAME:
-        no book is read here, so nothing says who owns it, and it is unowned.
-        A volume without LAYOUT is placed by its FRAME and never by a v1 rule."""
-        f = self.stand.deed["frame"]
-        if f is None:
-            return "unowned", "volume block %u of a format-v2 volume whose FRAME is short" % vb, ("v2", vb)
-        k = vb - f["spine_block"]
-        if f["spine_stride"] and k >= 0 and k % f["spine_stride"] == 0 and \
-                k // f["spine_stride"] < f["spine_slots"]:
-            return "unowned", "Spine slot %u (format v2)" % (k // f["spine_stride"]), ("v2", "slot", vb)
-        if vb < f["data_block"]:
-            return "unowned", "front matter block %u (format v2)" % vb, ("v2", "front")
-        return "unowned", "data run block %u (format v2: no book names its owner)" % vb, ("v2", "data")
+    def _Growths(self, w):
+        """Every growth whose far copy the record wrote before w, in the order
+        written: (sectors, tail_sector) its Deed names."""
+        if self.grown_at is None:
+            self.grown_at = [(x.seq,) + self.grown[x.seq][1:] for x in self.log.Writes()
+                             if not x.discard and self._GrownDeed(x)]
+        return [(n, t) for seq, n, t in self.grown_at if seq < w.seq]
+
+    def _Sectors(self, w):
+        """How far the volume runs for write w: its Deed's length, or a growth's
+        whose far copy the record wrote before w — the ground the volume took is
+        its own from then on, a book's every block an owner's."""
+        return max([self.stand.deed["sectors"]] + [n for n, _t in self._Growths(w)])
+
+    def _Tails(self, w):
+        """Where the far copy lies for write w — the last growth's before it, or
+        the Deed's — and every place it lay before."""
+        tails = [self.stand.deed["tail_sector"]] + [t for _n, t in self._Growths(w)]
+        return tails[-1], tails[:-1]
+
+    def _Erased(self, w, lba):
+        """Is w the growth's erasing of the far copy it left behind
+        (ground_grow.c GroundGrowOldTailErased): a Deed's sectors at `lba`,
+        every byte zero."""
+        return (w.lba == lba and w.sectors == ondisk.DEED_SECTORS and
+                not any(any(self.log.SectorData(w, k)) for k in range(w.sectors)))
+
+    def _GrownDeed(self, w):
+        """What a write past the volume's end is when it is this volume's own
+        far Deed laid at the end of the ground it is taking (a growth:
+        ground_grow.c, the far copy written before the head) — the sentence
+        naming it, or None."""
+        if w.seq not in self.grown:
+            st, grown = self.stand, (None,)
+            if w.sectors >= ondisk.DEED_SECTORS:
+                raw = b"".join(bytes(self.log.SectorData(w, k)) for k in range(ondisk.DEED_SECTORS))
+                d = ondisk.ReadDeed(raw)
+                if (d["ok"] and d["role"] == ondisk.DEED_ROLE_TAIL and d["uuid"] == st.deed["uuid"] and
+                        w.lba == st.start + d["tail_sector"] and d["sectors"] > st.deed["sectors"]):
+                    grown = ("far copy of the deed, the volume grown to %u sectors" % d["sectors"], d["sectors"],
+                             d["tail_sector"])
+            self.grown[w.seq] = grown
+        return self.grown[w.seq][0]
 
     def _DataBlock(self, w, i, b, census):
         v_first = (self.lay["data_block"] + b) * SECTORS_PER_BLOCK + self.stand.start

@@ -762,7 +762,7 @@ static error_t volume_take_ground(uint8_t seat)
 
     VolumeTakeDeed(&head);
     g_state.format = format;
-    turned = format == DEED_FORMAT_V2 ? MountBookGround(seat, &head)
+    turned = format == DEED_FORMAT_V2 ? MountBookGround(seat, &head, ground_run)
                                       : VolumeTakeLayout(seat, &head);
     if (turned != OK)
         return VolumeGroundRefused(&head, turned);
@@ -821,7 +821,7 @@ static error_t volume_take_ground(uint8_t seat)
      * A volume standing on its tail copy is not grown: its head is gone, and
      * the head is the commit point. Nor is a format-v2 one here: a book grows
      * by its prologue alone, after it is read and only by a mount that writes
-     * it (spec_v2 §16.1 п.4) — and this kernel writes no book.
+     * it (spec_v2 §16.1 п.4, book_mount.h MountBookGrow).
      */
     if (format == DEED_FORMAT_V1 && head.head.role == VOLUME_DEED_ROLE_HEAD) {
         volume_take_more_ground(seat, ground_run, &head);

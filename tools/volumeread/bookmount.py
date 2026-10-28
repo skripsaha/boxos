@@ -188,6 +188,9 @@ class BookMount:
         for fid, why in t.gaps:
             self.Say("PARCEL_GAP", "damage", "fid %u does not match its Parcels — %s; it is locked (§2.9, "
                      "§3.9)" % (fid, why))
+        for fid, out in t.outside:
+            self.Say("EXTENT_OUTSIDE", "damage", "fid %u names blocks %s outside the data run [%u, %u) — it is "
+                     "locked" % (fid, ondisk.RunsText(RunsNormal(out)), self.g.data_block, self.g.data_end))
         for why in t.shape:
             self.Say("RECORD_SHAPE", "damage", "the book is written against its own shape — %s" % why)
         self.files = {fid: fs.Copy() for fid, fs in t.content.files.items()}

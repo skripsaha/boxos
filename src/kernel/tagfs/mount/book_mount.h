@@ -25,9 +25,11 @@
  * named, tagged and given up, of tags and of the Use Context; and a whole
  * Tally of it in time (settle/binder.h), named by a slot of the Spine.
  *
- * ‼ NOT A BYTE IS WRITTEN BY THE MOUNT, before the door or after it: no growth
- * (a book grows only by a mount that writes it, §16.1 п.4), no Ledger, no
- * Spare, no flush. Two mounts of one volume are one state (C12).
+ * ‼ NOT A BYTE IS WRITTEN BY THE MOUNT, before the door or after it — no
+ * Ledger, no Spare, no flush — but the one act a book's mount may make once
+ * every verdict is in: taking the ground behind the volume, by a mount that
+ * writes it (book_grow.c, §16.1 п.4). Two mounts of one volume that grows by
+ * neither are one state (C12).
  *
  * The two readers of a book — this one and volume-read's (tools/volumeread/
  * bookmount.py, bookcensus.py KernelBook) — name the same things in the same
@@ -39,11 +41,26 @@
  */
 
 /* The ground of a format-v2 volume standing on the Deed `head`
- * (volume_take_ground): its FRAME taken, block numbers counted from the
- * volume's block 0 up to its far Deed, and the verdicts the ground gives
- * before a sector of the book is read — a FRAME longer than this kernel's, a
- * ground off the medium's physical blocks (§1.2, §1.5): under glass. OK. */
-error_t MountBookGround(uint8_t seat, const DeedCopy* head);
+ * (volume_take_ground), of ground the partition table runs `ground_sectors`
+ * long: its FRAME taken, block numbers counted from the volume's block 0 up
+ * to its far Deed, and the verdicts the ground gives before a sector of the
+ * book is read — a FRAME longer than this kernel's, a ground off the medium's
+ * physical blocks (§1.2, §1.5): under glass. OK. */
+error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sectors);
+
+/*
+ * The volume takes the ground behind it (spec_v2 §16.1 п.4, §1.3): after its
+ * book is read and its block map derived, before the door — and only by a
+ * mount that writes it, every verdict in. A volume under glass takes none, nor
+ * one stood on its far copy alone, nor one whose medium refuses writes as
+ * protected; nor while the census cannot say the ground past its end is no
+ * one's — a rotten FILES range may name it, an owner does. Then its far Deed
+ * and its head are written for the longer volume, the format-v1 way
+ * (ground_grow.h), the block map widened over the new ground and the data run
+ * ended at the new far Deed. Said either way; nothing written unless all of
+ * it can be (book_grow.c).
+ */
+void    MountBookGrow(uint8_t seat);
 
 /* The book read into memory (above). OK, or the refusal with *what saying it
  * in the words the mount's refusal line carries (tagfs.c, mount_refused):
@@ -161,6 +178,9 @@ typedef struct {
 typedef struct {
     VolumeFrame    frame;
     uint64_t       data_end;     /* the far Deed's block: the data run is [frame.data_block, data_end) */
+    uint64_t       ground;       /* how far the partition table runs the volume's ground, sectors */
+    bool           on_head;      /* stood on the Deed at its head — not on its far copy alone */
+    uint64_t       reach;        /* past the farthest block an owner but the far Deed names (census) */
     uint32_t       atom;         /* the medium's atom of a write, bytes (§1.5) */
     SpineSlot*     slots;        /* the slots that hold, newest first */
     uint32_t       nslots;
@@ -229,7 +249,8 @@ error_t BookGroundCensus(const char** what);
  * (book_ground.c) — a TallySink's `node`. */
 error_t BookGroundNode(void* ctx, const TallyPlace* at);
 
-/* A run of ground a locked file is known to name: held unless another owns it. */
+/* A run of ground a locked file is known to name: what of it lies in the data
+ * run held unless another owns it, all of it counted in the census's reach. */
 void    BookGroundHoldRun(uint64_t start, uint64_t count);
 
 /* Every live file's ground claimed for the census and the tags it wears

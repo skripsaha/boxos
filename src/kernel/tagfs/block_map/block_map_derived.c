@@ -692,6 +692,154 @@ error_t BlockMapDerivedGiveAs(GroundOwner owner, uint64_t who, uint64_t start, u
     return rc;
 }
 
+#if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
+/* A page against its summary: its free count, its longest run, the blocks
+ * past the map's end set. */
+static bool PageHolds(uint32_t w)
+{
+    const DerivedWindow* win  = &s_map.win[w];
+    uint32_t             n    = WindowBlocks(w), ones = 0;
+    for (uint32_t i = 0; i < DERIVED_WORDS; i++)
+        ones += WordOnes(win->bits[i]);
+    for (uint32_t off = n; off < BLOCK_MAP_WINDOW_BLOCKS; off++)
+        if (!(win->bits[off / 64u] & (1ull << (off % 64u))))
+            return false;
+    return BLOCK_MAP_WINDOW_BLOCKS - ones == win->free && win->free > 0 && win->free < n &&
+           BitsLongest(win->bits) == win->longest;
+}
+#endif
+
+// ----------------------------------------------------------------------------
+// A volume that grew (mount/book_grow.c)
+// ----------------------------------------------------------------------------
+
+error_t BlockMapDerivedWidenMake(uint64_t end, BlockMapWidening* w, const char** what)
+{
+    uint64_t windows = (end + BLOCK_MAP_WINDOW_BLOCKS - 1u) / BLOCK_MAP_WINDOW_BLOCKS;
+    *w = (BlockMapWidening){ end, NULL, NULL };
+    if (!s_map.up || end <= s_map.end) {
+        *what = "its block map is not up, or would not be any wider";
+        return ERR_INVALID_ARGUMENT;
+    }
+    if (windows > UINT32_MAX) {
+        ksnprintf(s_words, sizeof(s_words), "its block map would count %llu windows of %u blocks, and it counts "
+                  "them in 32 bits", (unsigned long long)windows, BLOCK_MAP_WINDOW_BLOCKS);
+        *what = s_words;
+        return ERR_OUT_OF_RANGE;
+    }
+    w->win  = kmalloc(sizeof(DerivedWindow) * windows);
+    w->page = s_map.end % BLOCK_MAP_WINDOW_BLOCKS ? kmalloc(DERIVED_WORDS * sizeof(uint64_t)) : NULL;
+    if (!w->win || (s_map.end % BLOCK_MAP_WINDOW_BLOCKS && !w->page)) {
+        ksnprintf(s_words, sizeof(s_words), "there is no memory for its block map's summary of %llu windows, "
+                  "%llu KiB", (unsigned long long)windows,
+                  (unsigned long long)(windows * sizeof(DerivedWindow) / 1024u));
+        *what = s_words;
+        BlockMapDerivedWidenDrop(w);
+        return ERR_NO_MEMORY;
+    }
+    return OK;
+}
+
+/* The map's old last window, cut short by its old end, given the blocks past
+ * it up to the new end: free, the page `*page` made for it where it was whole
+ * taken and is mixed now. */
+static void WidenLastWindow(uint32_t last, uint64_t old_end, uint64_t** page)
+{
+    DerivedWindow* win = &s_map.win[last];
+    uint32_t       was = (uint32_t)(old_end - (uint64_t)last * BLOCK_MAP_WINDOW_BLOCKS);
+    uint32_t       now = WindowBlocks(last);
+    if (!win->bits && win->free == 0) {
+        win->bits = *page;
+        *page     = NULL;
+        memset(win->bits, 0xFF, DERIVED_WORDS * sizeof(uint64_t));
+    }
+    if (win->bits)
+        BitsPut(win->bits, was, now, false);
+    win->free  += now - was;
+    s_map.free += now - was;
+    WindowSettle(last);
+}
+
+#if CONFIG_STRICT
+/* The widened map held to what it was given: every window from the old last
+ * one on to its page, or whole free or whole taken; every block past the old
+ * end free; the windows' counts summed to the map's — a growth that handed
+ * out the new ground wrongly is a DEFECT before the door opens. */
+static void WidenHeld(uint32_t from, uint64_t old_end)
+{
+    uint64_t sum = 0;
+    for (uint32_t w = 0; w < s_map.windows; w++) {
+        const DerivedWindow* win = &s_map.win[w];
+        uint64_t             lo  = (uint64_t)w * BLOCK_MAP_WINDOW_BLOCKS, hi = lo + WindowBlocks(w);
+        uint64_t             b   = old_end > lo ? old_end : lo;
+        bool                 held;
+        sum += win->free;
+        if (w < from)
+            continue;
+        if (!win->bits)
+            held = (win->free == 0 || win->free == WindowBlocks(w)) && win->longest == win->free &&
+                   (b >= hi || win->free != 0);
+        else
+            for (held = PageHolds(w); held && b < hi; b++)
+                held = !(win->bits[(b - lo) / 64u] & (1ull << ((b - lo) % 64u)));
+        if (!held)
+            panic("[TagFS] DEFECT: the block map widened from block %llu does not hold its window %u — %u free, "
+                  "longest %u", (unsigned long long)old_end, w, win->free, win->longest);
+    }
+    if (sum != s_map.free)
+        panic("[TagFS] DEFECT: the block map widened from block %llu counts %llu free and its windows %llu",
+              (unsigned long long)old_end, (unsigned long long)s_map.free, (unsigned long long)sum);
+}
+#endif
+
+/*
+ * ‼ THE SUMMARY IS COPIED WHOLE, AND ONLY THE GROUND PAST THE OLD END IS NEW.
+ * Every window the map had keeps its count, its longest run and its page; the
+ * old last window, cut short by the far Deed's block, takes the blocks past it
+ * free (WidenLastWindow); every window past it is whole free. The pages a
+ * window lets go of here go where any change's do (PageGiven), and the old
+ * summary, the page that was not wanted and the loose ones are freed once the
+ * state lock is dropped.
+ */
+void BlockMapDerivedWidenPut(BlockMapWidening* w)
+{
+    TagFSLock*     lock     = &tagfs_get_state()->lock;
+    DerivedWindow* win      = w->win;
+    uint64_t*      page     = w->page;
+    uint64_t       windows  = (w->end + BLOCK_MAP_WINDOW_BLOCKS - 1u) / BLOCK_MAP_WINDOW_BLOCKS;
+    TagFSLockTake(lock);
+    DerivedWindow* old      = s_map.win;
+    uint32_t       had      = s_map.windows;
+    uint64_t       old_end  = s_map.end;
+    memcpy(win, old, sizeof(DerivedWindow) * had);
+    s_map.win     = win;
+    s_map.end     = w->end;
+    s_map.windows = (uint32_t)windows;
+    for (uint32_t k = had; k < s_map.windows; k++) {
+        s_map.win[k] = (DerivedWindow){ WindowBlocks(k), WindowBlocks(k), NULL };
+        s_map.free  += WindowBlocks(k);
+    }
+    if (old_end % BLOCK_MAP_WINDOW_BLOCKS)
+        WidenLastWindow(had - 1u, old_end, &page);
+    tagfs_get_state()->ledger.free_blocks = s_map.free;
+#if CONFIG_STRICT
+    WidenHeld(had - 1u, old_end);
+#endif
+    uint64_t* loose = PagesLooseTaken();
+    TagFSLockDrop(lock);
+    kfree(old);
+    kfree(page);
+    PagesLoose(loose);
+    *w = (BlockMapWidening){ 0, NULL, NULL };
+}
+
+void BlockMapDerivedWidenDrop(BlockMapWidening* w)
+{
+    kfree(w->win);
+    kfree(w->page);
+    *w = (BlockMapWidening){ 0, NULL, NULL };
+}
+
 void BlockMapDerivedLetGo(void)
 {
     if (s_map.unnamed)
@@ -718,21 +866,6 @@ void BlockMapDerivedStandRefuse(bool refused)
 uint32_t BlockMapDerivedStandShort(void)
 {
     return s_stand_short;
-}
-
-/* A page against its summary: its free count, its longest run, the blocks
- * past the map's end set. */
-static bool PageHolds(uint32_t w)
-{
-    const DerivedWindow* win  = &s_map.win[w];
-    uint32_t             n    = WindowBlocks(w), ones = 0;
-    for (uint32_t i = 0; i < DERIVED_WORDS; i++)
-        ones += WordOnes(win->bits[i]);
-    for (uint32_t off = n; off < BLOCK_MAP_WINDOW_BLOCKS; off++)
-        if (!(win->bits[off / 64u] & (1ull << (off % 64u))))
-            return false;
-    return BLOCK_MAP_WINDOW_BLOCKS - ones == win->free && win->free > 0 && win->free < n &&
-           BitsLongest(win->bits) == win->longest;
 }
 
 /* The runs the stand holds to make the volume small, to let go of again. */

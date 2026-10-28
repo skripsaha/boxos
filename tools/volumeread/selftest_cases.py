@@ -44,7 +44,9 @@ def FrameCases(t, medium):
     # A cut of a volume with no LAYOUT: the classifier places each write by
     # the FRAME — the Deed, a Spine slot, the front matter, the data run — and
     # one outside the ground stays outside, where reading v1's regions off a
-    # Deed that has none fell over on the first write into the ground.
+    # Deed that has none fell over on the first write into the ground. A
+    # sector that is no unit of the book is placed by where it lies; in the
+    # data run, with no stitch naming it and no book to ask, it is no one's.
     over = OverlayMedium(medium)
     PlantFrame(t, over)
     grain = 256
@@ -56,7 +58,7 @@ def FrameCases(t, medium):
     log = blklog.BlkLog(SyntheticLog(entries, len(entries)), over.SizeSectors())
     named = [[(x.kind, x.what) for x in blklog.Classifier(log, over).Classify(w)]
              for w in log.Writes()]
-    want = [("deed", "head deed"), ("unowned", "Spine slot 1"), ("unowned", "front matter"),
+    want = [("deed", "head deed"), ("slot", "Spine slot 1"), ("front", "front matter"),
             ("unowned", "data run block"), ("outside", "boot code")]
     ok = len(named) == len(want) and all(
         len(n) == 1 and n[0][0] == kind and what in n[0][1] for n, (kind, what) in zip(named, want))

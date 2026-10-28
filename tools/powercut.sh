@@ -57,6 +57,12 @@
 #               sentences settle_cut.c prints, and a record forged by one byte
 #               that the record's self-check must refuse.
 #
+# FORMAT v2 (VOLUME_FORMAT=v2): noanchor, nextfid, hog, halt, race and
+# noanchormut on a book — every image the run builds is one, its record named
+# by the book's units and its cuts judged by the book's census; the scenarios
+# of format v1's own machinery are refused by name (below). `all` runs the
+# book's set.
+#
 # Every census code a scenario was measured showing is its own caveat row —
 # (scenario, code), stand_caveat.sh — held under 1.6, the ORPHAN of an
 # unanchored create (noanchor, hog) and race's lost anchored file under 1.4
@@ -362,6 +368,15 @@ pc_record() {
     echo "machine: ${PC_KEYS[*]:-plain BIOS}, $PC_CORES core(s), a userspace write goes by $PC_PATH" >>"$PC_DIR/facts.txt"
     python3 "$VR" "$PC_DIR/base.img" cut "$PC_DIR/run.log" --list --json >"$PC_DIR/list.json" || {
         harness "$PC_NAME: volume-read could not list the record"; return 1; }
+    if [ "$PC_FORMAT" = v2 ]; then
+        # A book's every block is an owner's, and its record names each write
+        # by its sectors' heads or the stitch after it (blklog_book.py).
+        said=$(python3 -c 'import json, sys
+print(sum(t["kind"] == "unowned" for w in json.load(open(sys.argv[1]))["writes"] for t in w["touches"]))' \
+            "$PC_DIR/list.json")
+        [ "$said" = 0 ]
+        chk $? "$PC_NAME: every write of the record on the book is named — $said unowned"
+    fi
     PC_SEED=$(shasum -a 256 "$PC_DIR/run.log" | cut -c1-16)
     python3 "$PC" plan "$PC_DIR/list.json" --seed "$PC_SEED" --all-max "$PC_SUBSET_ALL_MAX" \
         --sample "$PC_SAMPLE_SUBSETS" --tear-all-max "$PC_TEAR_ALL_MAX" >"$PC_DIR/plan.json" || {
@@ -918,7 +933,37 @@ SAYS_EOF
 }
 
 pc_preflight
+# VOLUME_FORMAT=v2: every image of the run is a book (the Makefile's key, held
+# for every make of the run by stand.sh's make through STAND_FORMAT), and the
+# record is judged by the book's census and blklog_book.py — a step committed
+# by its stitch (powercut.py COMMIT_KINDS), the slot's counts in the Ledger's
+# place. A scenario that stands on format v1's own machinery has no book to
+# ask and is refused by name: settlecut's points of the v1 cycle, chaingrow's
+# registry and table chains, and the mutations of v1's mount (nextfidmut) and
+# of its cycle's pool and Ledger (poolmut, flushmut).
+PC_FORMAT=${VOLUME_FORMAT:-v1}
+case "$PC_FORMAT" in v1|v2) ;; *) echo "powercut: VOLUME_FORMAT=$PC_FORMAT names no format"; exit 2 ;; esac
+[ "$PC_FORMAT" = v2 ] && STAND_FORMAT=v2
+case "$PC_FORMAT:${1:-}" in
+    v2:settlecut|v2:chaingrow|v2:nextfidmut|v2:poolmut|v2:flushmut)
+        echo "powercut: $1 stands on format v1's own machinery and is no scenario of a book (VOLUME_FORMAT=v2)"
+        exit 2 ;;
+    v2:all)
+        run_selftest
+        for keys in "" "STRICT=on CORES=4 MEM=4G" "UEFI=on STRICT=on CORES=4 MEM=4G"; do
+            # shellcheck disable=SC2086
+            run_scenario noanchor $keys; run_scenario nextfid $keys
+        done
+        run_scenario hog; run_scenario hog UEFI=on STRICT=on
+        for keys in "STRICT=on CORES=4 MEM=4G" "UEFI=on STRICT=on CORES=16 MEM=8G"; do
+            # shellcheck disable=SC2086
+            run_scenario halt $keys; run_scenario race $keys
+        done
+        run_noanchormut
+        set -- done ;;
+esac
 case "${1:-}" in
+    done) ;;
     noanchor|nextfid|hog|halt|race|chaingrow)
         run_scenario "$@" ;;
     settlecut)   shift; run_settlecut "$@" ;;
@@ -942,8 +987,8 @@ case "${1:-}" in
         run_scenario chaingrow
         run_noanchormut; run_nextfidmut; run_poolmut; run_flushmut ;;
     *)
-        echo "usage: $0 noanchor|nextfid|hog|halt|race|settlecut|chaingrow [MACHINE KEYS...]"
-        echo "       $0 noanchormut|nextfidmut|poolmut|flushmut|selftest|all"
+        echo "usage: [VOLUME_FORMAT=v2] $0 noanchor|nextfid|hog|halt|race|settlecut|chaingrow [MACHINE KEYS...]"
+        echo "       [VOLUME_FORMAT=v2] $0 noanchormut|nextfidmut|poolmut|flushmut|selftest|all"
         exit 2 ;;
 esac
 

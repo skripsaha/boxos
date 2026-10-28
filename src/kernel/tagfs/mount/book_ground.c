@@ -99,6 +99,7 @@ void BookGroundHoldRun(uint64_t start, uint64_t count)
 {
     uint64_t lo = g_book.frame.data_block, hi = g_book.data_end;
     uint64_t end = start + count < start ? UINT64_MAX : start + count;
+    GroundCensusNamed(start, count);
     if (start < lo)
         start = lo;
     if (end > hi)
@@ -167,11 +168,13 @@ static error_t BookGroundOlder(const char** what)
 }
 
 /* The ground the ribbon let go, fallow (M-1): neither a file's nor free —
- * what of it no other owner names is the census's to cut (GroundCensusBook). */
+ * what of it no other owner names is the census's to cut (GroundCensusBook);
+ * what of it lies past the volume counts in the reach alone. */
 static void BookGroundFallow(void)
 {
     for (uint64_t i = 0; i < g_book.nfallow; i++) {
         uint64_t start = g_book.fallow[i].start, end = start + g_book.fallow[i].count;
+        GroundCensusNamed(start, g_book.fallow[i].count);
         if (end > g_book.data_end + 1u)
             end = g_book.data_end + 1u;
         if (start < end)
@@ -373,6 +376,7 @@ error_t BookGroundCensus(const char** what)
         rc = BookFallowCut(what);
     if (rc == OK)
         BookHeldKept();
+    g_book.reach = GroundCensusReach();
     GroundCensusEnd();
     if (rc != OK)
         return rc;

@@ -22,7 +22,7 @@ import re
 import subprocess
 import sys
 
-from powercut import HARM, VOLUME_READ, Outside, Ranges, RecordBytes, Run
+from powercut import COMMIT_KINDS, HARM, VOLUME_READ, Outside, Ranges, RecordBytes, Run
 
 # What volume-read says of a mount that does not stand on the newest seal
 # borne out (census.py _Seal): no harm on a cut before its sync's flush — a
@@ -63,21 +63,26 @@ class Judge:
         for s in self.run.steps:
             if not s["durable"]:
                 continue
-            f, led = self.run.AckFlush(s), self.run.LedgerWrites(s)
+            f, led, unit = self.run.AckFlush(s), self.run.CommitWrites(s), self.Unit()
             if not led:
                 self.Out("ack:" + s["step"], "fail", "%s was acknowledged at record entry %d and wrote "
-                         "no ledger in entries %d..%d, so no sync of its own stands behind it"
-                         % (s["step"], s["ack"], s["before"] + 1, s["ack"]))
+                         "no %s in entries %d..%d, so no sync of its own stands behind it"
+                         % (s["step"], s["ack"], unit, s["before"] + 1, s["ack"]))
             elif f is None:
                 self.Out("ack:" + s["step"], "fail", "%s was acknowledged at record entry %d with no "
-                         "flush behind its last ledger write, entry %d — %s"
-                         % (s["step"], s["ack"], led[-1], "the answer was read with nothing after it"
+                         "flush behind its last %s write, entry %d — %s"
+                         % (s["step"], s["ack"], unit, led[-1], "the answer was read with nothing after it"
                             if led[-1] >= s["ack"] else "none in entries %d..%d" % (led[-1] + 1, s["ack"])))
             else:
                 self.Out("ack:" + s["step"], "behaves", "%s was acknowledged at record entry %d and "
-                         "the flush at entry %d, the first after its last ledger write (entry %d), "
+                         "the flush at entry %d, the first after its last %s write (entry %d), "
                          "closing epoch %d, stands behind it"
-                         % (s["step"], s["ack"], f, led[-1], self.run.closes[f]))
+                         % (s["step"], s["ack"], f, unit, led[-1], self.run.closes[f]))
+
+    def Unit(self):
+        """What commits a step on the volume of this run: format v1's Ledger, a
+        book's stitch (powercut.py COMMIT_KINDS)."""
+        return "stitch" if self.base.get("format") == "v2" else "ledger"
 
     def BaseFiles(self):
         """No cut the kernel mounts loses or changes a file the base held. A cut
@@ -213,7 +218,7 @@ class Judge:
         writes last, all applied — is consistent and stands on the seal that sync wrote, borne
         out; a WriteJob's flush of data promises nothing."""
         synced = {w["epoch"] for w in self.run.listing["writes"]
-                  if any(t["kind"] == "ledger" for t in w["touches"])}
+                  if any(t["kind"] in COMMIT_KINDS for t in w["touches"])}
         ends = [(self.run.Canon("e%d-all" % e["epoch"]), e["flush_seq"])
                 for e in self.run.listing["epochs"] if e["flush_seq"] and e["epoch"] in synced]
         blind = ["%s (flush at entry %d)" % (c, f) for c, f in ends if not self.run.Judged(c)]
@@ -316,6 +321,8 @@ class Judge:
         m = re.search(r"fid=(\d+)", step["line"]) if step else None
         fid = m.group(1) if m else None
         seen, judged, ahead, blind = [], 0, 0, []
+        book = self.base.get("format") == "v2"
+        counter = "the slot it stands on" if book else "its Ledger"
         for b in self.boots:
             if not b["why"].startswith("prefix"):
                 continue
@@ -331,8 +338,8 @@ class Judge:
             if due > counted:
                 ahead += 1
             if a.group(1) and int(a.group(1)) < due:
-                seen.append("%s (%s): its medium names ids below %d, its Ledger counts %d, and "
-                            "anchor_test was issued fid %s" % (b["id"], b["why"], due, counted,
+                seen.append("%s (%s): its medium names ids below %d, %s counts %d, and "
+                            "anchor_test was issued fid %s" % (b["id"], b["why"], due, counter, counted,
                                                                a.group(1)))
         if blind:
             self.Out("reissue", "harness", "volume-read gave no next file id for %d booted cut(s), "
@@ -344,10 +351,11 @@ class Judge:
                      "shows: %s" % (len(seen), judged, "; ".join(seen[:2])))
         elif not ahead:
             self.Out("reissue", "fail", "none of %d prefix cuts has a medium naming more files than "
-                     "its Ledger counts, so no cut asked the question" % judged)
+                     "%s counts, so no cut asked the question" % (judged, counter))
         else:
             self.Out("reissue", "behaves", "none of %d prefix cuts issued an id its medium shows — "
-                     "%d of them name the anchor's fid %s ahead of their Ledger" % (judged, ahead, fid))
+                     "%d of them name the anchor's fid %s ahead of %s"
+                     % (judged, ahead, fid, "the slots they stand on" if book else "their Ledger"))
 
     def Grown(self):
         """chaingrow's own question: did the recorded run give the tag registry
@@ -403,6 +411,8 @@ def Reconcile(r, log):
     if have != want or int(mounted.group(1)) != want[2]:
         wrong.append("the kernel says %s blocks, free, files and MOUNTED %s; check predicted %s"
                      % (have, mounted.group(1), want))
+    if r.get("format") == "v2":
+        return wrong      # a book keeps no bitmap and no pool: its census is its mount's (bookcensus.py)
     for pat, a, b in ((r"\[TagFS FSCK\] Bitmap mismatch: (\d+) orphan, (\d+) missing", "orphan", "missing"),
                       (r"\[TagFS FSCK\] (\d+) file table entry\(s\) corrected from this volume's "
                        r"metadata pool, (\d+) file\(s\) lost", "corrected", "lost")):
