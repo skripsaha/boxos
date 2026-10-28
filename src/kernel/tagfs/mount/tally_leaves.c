@@ -754,7 +754,7 @@ error_t TallyLeaves(uint64_t tree, const SpineRoot* root)
         .rotten = LeavesRot,
         .node   = BookGroundNode,
         .said   = true,
-        .mended = &g_book.said.mended,
+        .mend   = BookGroundMended,
         .shapes = &g_book.said.shapes,
     };
     error_t rc = TallyRead(tree, root, true, &sink);

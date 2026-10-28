@@ -9,6 +9,7 @@
 #include "../use_memory/use_memory.h"
 #include "../settle_cut/settle_cut.h"
 #include "../integrity/gloss.h"
+#include "dog_ear.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 #include "boardroom.h"
 #include "crypto.h"
@@ -527,6 +528,20 @@ const char* StitchRunStage(void)
     return s_stitch.stage ? s_stitch.stage : "the stitch's snapshot";
 }
 
+/* What the settled stitch changed of the book's trees, into DogEar (dog_ear.h):
+ * every file it carried a record of, the tags it coined, the Use Context when
+ * it carried one — what the next Tally lays anew of the state it leaves. */
+static void StitchDogEared(const StitchSnap* s)
+{
+    for (const Jot* j = s->jots.first; j; j = j->next[0])
+        if (j->carried)
+            DogEarFileChanged(j->fid, j->was, j->now);
+    if (s->coined_hi > s->coined_lo)
+        DogEarPut(TALLY_TAGS, (TallyKey){ s->coined_lo, 0 }, (TallyKey){ s->coined_hi, 0 });
+    if (s->use_owed)
+        DogEarPut(TALLY_USE, (TallyKey){ 0, 0 }, (TallyKey){ 1, 0 });
+}
+
 /* DONE: the ribbon's cursor past the stitch — the room it leaves published
  * while the flight still stands, so a claim is judged by too little room —
  * then, under the state lock, the target settled, the word the stitch carried
@@ -574,6 +589,7 @@ void StitchRunEnd(error_t rc)
         TagRegistryCoinedUpTo(fs->registry, s->coined_hi);
         uint64_t fid_most = 0;
         error_t  births   = DocketBirths(&s->jots, s->seq, &fid_most);
+        StitchDogEared(s);
         BinderStitchSettled(s->seq, s->useful, fid_most, births);
         EndpaperGrew(&s->jots, s->seq);
         DocketSettled(&s->jots, s->seq);

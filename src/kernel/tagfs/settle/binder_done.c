@@ -141,6 +141,8 @@ error_t BinderTallyDone(BinderRun* r)
     BinderSlotLetGo(&old);
     if (r->captured)
         GlossCaptured(w);
+    DogEarTakenLetGo();
+    FoliationDraftDone(w->seq, r->captured);
     RibbonTallied(w->seq);
     EndpaperTallyLaid(&w->laid);
     g_binder.useful      -= g_binder.useful >= r->useful_at ? r->useful_at : g_binder.useful;

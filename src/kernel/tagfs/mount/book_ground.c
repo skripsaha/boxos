@@ -4,6 +4,8 @@
 #include "../ink/ink.h"
 #include "crypto.h"
 #include "../settle/binder.h"
+#include "../settle/dog_ear.h"
+#include "../settle/foliation.h"
 
 /*
  * The census of a format-v2 volume (book_mount.h; spec_v2 §4.6): no bitmap
@@ -85,7 +87,18 @@ error_t BookGroundNode(void* ctx, const TallyPlace* at)
 {
     (void)ctx;
     BookGroundNodeOf(at, g_book.stood->index);
+    FoliationNoted(g_book.laid_tree, at, g_book.stood->head.tally_seq);
     return OK;
+}
+
+void BookGroundMended(void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed)
+{
+    (void)ctx;
+    g_book.said.mended += failed;
+    if (at->level == 0)
+        DogEarMended(tree, at);
+    else
+        FoliationRelay(tree, at);
 }
 
 /* A node of a slot not stood on, `ctx` the slot. */

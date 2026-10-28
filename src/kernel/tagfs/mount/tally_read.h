@@ -74,17 +74,19 @@ typedef struct {
 /* What a walk hands its reader: every leaf item, in key order, with the seq
  * of the node it lies in (its Parcel's runs count their births from it,
  * §2.9); every rotten range; every node it reaches, by its place — read or
- * not, so the ground every copy of it takes is claimed. A callback's refusal
+ * not, so the ground every copy of it takes is claimed; and every node read
+ * from a copy past one that did not hold, by its place — `failed` copies before
+ * it did not, and the next Tally writes it again (§2.5). A callback's refusal
  * ends the walk with it. */
 typedef struct {
     void*   ctx;
     error_t (*item)(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq);
     error_t (*rotten)(void* ctx, const TallyPlace* at, const char* why);
     error_t (*node)(void* ctx, const TallyPlace* at);
+    void    (*mend)(void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed);
     bool    said;      /* the Tally the mount stands on: what the walk finds against the
                         * format is said, and what it cannot carry on puts the volume
                         * under glass — of any other slot's Tally, neither */
-    uint32_t* mended;  /* when `said`: counts each copy that did not hold, the next read in its place */
     uint32_t* shapes;  /* when `said`: counts each shape said against the format */
 } TallySink;
 
@@ -102,6 +104,13 @@ error_t TallyRootReads(uint64_t tree, const SpineRoot* root, char* why, size_t r
  * memory's, or a callback's. A root that does not read here is a rotten
  * range of the whole tree: the mount asked TallyRootReads first. */
 error_t TallyRead(uint64_t tree, const SpineRoot* root, bool leaves, const TallySink* sink);
+
+/* The leaf at `at` of `tree` read alone, from the first of its copies that
+ * holds: its items handed to sink->item in key order and the copies before it
+ * to sink->mend — or, no copy holding, the leaf handed to sink->rotten. OK, or
+ * memory's, the medium's or a callback's refusal. Nothing said: the Binder's
+ * self-check reads the Tally before the one it lays so (settle/binder_check.c). */
+error_t TallyLeafRead(uint64_t tree, const TallyPlace* at, const TallySink* sink);
 
 /* A tree's name, as the book's lines say it. */
 const char* TallyTreeName(uint64_t tree);
@@ -145,6 +154,11 @@ TallyDigestSays TallyDigestFind(uint64_t block, uint64_t* digest, error_t* refus
  * memory's or the callback's refusal. */
 error_t TallyDigestsRottenNext(uint32_t* leaf, error_t (*rot)(void* ctx, const TallyPlace* at), void* ctx,
                                bool* done);
+
+/* The `index`-th leaf of the DIGESTS the reads stand on, in key order —
+ * *rotten for a range of it no copy of whose node reads: false past the last.
+ * By the Settle's holder, who alone turns them (TallyDigestsTurn). */
+bool    TallyDigestLeafAt(uint32_t index, TallyPlace* out, bool* rotten);
 
 /* The reads of a digest turned to a Tally this mount wrote: its DIGESTS
  * leaves `leaves`, in key order — `rotten` those named as they lie — in place

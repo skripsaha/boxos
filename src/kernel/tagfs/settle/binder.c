@@ -178,6 +178,7 @@ static error_t TallySliceTake(BinderRun* r)
     r->chain_at  = BinderChainIndex(&c->quire);
     r->useful_at = g_binder.useful;
     r->made_ns   = rtc_get_unix64() * 1000000000ull;
+    DogEarTake();
     TagRegistryCoinedRange(tagfs_get_state()->registry, &lo, &hi);
     w->tag_hi = lo;
     w->use    = tagfs_recall_use_context(NULL);
@@ -293,10 +294,16 @@ static void TallyEnded(BinderRun* r, error_t rc)
         (void)BlockMapDerivedGiveAs(GROUND_TALLY, 0, r->w.b, r->w.room);
         BinderSlotOwnPublish(r->slot, 0);
     }
-    if (rc != OK)
+    if (rc != OK) {
         kprintf("[TagFS] the Tally of the state after stitch %llu was refused at %s (error %u): the slots hold "
                 "what they held%s\n", (unsigned long long)r->k, r->stage ? r->stage : "its slice", (unsigned)rc,
                 r->slot_begun ? ", and the slot it was written over is held as naming either Tally" : "");
+        DogEarTakenBack();
+        FoliationDraftLetGo();
+    }
+#if BINDER_CHECKS
+    BinderCheckLetGo();
+#endif
     EndpaperTallyLaid(NULL);
     BinderNodesLetGo(&r->w);
     BinderSliceLetGo(&r->w);
@@ -606,6 +613,7 @@ void BinderStand(BinderStandSaid* out)
     out->tally_blocks  = g_binder.tally_blocks;
     out->tallies       = g_binder.tallies;
     out->owed          = BinderOwed();
+    out->checked       = BinderCheckHeld();
     uint64_t from      = UINT64_MAX;
     for (uint32_t i = 0; i < g_binder.nslots; i++) {
         const SlotGround* s = &g_binder.slot[i];

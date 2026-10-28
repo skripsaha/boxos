@@ -1,6 +1,8 @@
 #include "binder.h"
 #include "../mount/book_mount.h"
 #include "../ink/fallow.h"
+#include "dog_ear.h"
+#include "foliation.h"
 
 /*
  * What the slots of the Spine hold (binder.h, FALLOW_BY_SPINE, §3.4, M-7):
@@ -64,6 +66,8 @@ void BinderSlotLetGo(SlotGround* s)
 void BinderMountReset(void)
 {
     BinderStopped(ERR_DEVICE_NOT_READY);
+    DogEarLetGo();
+    FoliationLetGo();
     for (uint32_t i = 0; i < g_binder.ring; i++)
         BinderSlotLetGo(&g_binder.slot[i]);
     kfree(g_binder.slot);

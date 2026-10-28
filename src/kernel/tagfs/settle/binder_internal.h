@@ -2,6 +2,8 @@
 #define TAGFS_SETTLE_BINDER_INTERNAL_H
 
 #include "binder.h"
+#include "dog_ear.h"
+#include "foliation.h"
 
 /*
  * The Binder, between its own files (binder.h): the Tally under way, which
@@ -13,6 +15,8 @@
  *   binder_slice.c  the slice and the ground DIGESTS speaks for, for TALLY_TAKE
  *   binder_done.c   what TAKE makes for a Tally's end, its DONE, and a slot
  *                   whose write was refused
+ *   binder_check.c  a whole Tally held to the one before it, element by
+ *                   element outside DogEar — a STRICT kernel's and the stand's
  */
 
 /* binder_items.c: whether key `a` comes before `b` in `tree`; whether element
@@ -72,5 +76,33 @@ error_t     BinderRotsTaken(BinderRun* r);
 error_t     BinderFreshGround(BinderRun* r);
 error_t     BinderTallyDone(BinderRun* r);
 void        BinderSlotUnsure(BinderRun* r);
+
+/* The Binder's self-check is built where a DEFECT is looked for: a STRICT
+ * kernel, and the stand's. */
+#if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
+#define BINDER_CHECKS 1
+#else
+#define BINDER_CHECKS 0
+#endif
+
+#if BINDER_CHECKS
+/* binder_check.c: a whole Tally held to the one it is laid against (§16.5
+ * п.9) — begun with the walk that lays it; a turn of the Settle's holder
+ * begun, in which it reads one leaf of the Tally before at the most; a leaf
+ * element of the tree being laid, as it comes — and whether it is owed to the
+ * next turn's leaf, unchecked, to be handed again; the tree's leaves spent,
+ * what is left of the Tally before's read a leaf a turn, *more while some is
+ * — and whether the walk stands so; the elements held to the Tally before by
+ * the last check; its own let go. OK, or ERR_TAGFS_CORRUPTED for an element
+ * changed outside DogEar: a DEFECT, said — a STRICT kernel stops there. */
+void     BinderCheckBegin(void);
+void     BinderCheckTurn(void);
+error_t  BinderCheckItem(const BinderWork* w, const BinderItem* it);
+bool     BinderCheckOwed(void);
+error_t  BinderCheckTreeEnd(const BinderWork* w, bool* more);
+bool     BinderCheckDraining(void);
+uint64_t BinderCheckHeld(void);
+void     BinderCheckLetGo(void);
+#endif
 
 #endif /* TAGFS_SETTLE_BINDER_INTERNAL_H */

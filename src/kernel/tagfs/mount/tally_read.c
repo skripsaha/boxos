@@ -1,4 +1,5 @@
 #include "tally_read_internal.h"
+#include "../settle/dog_ear.h"
 
 /*
  * The Tally's reader, the parts a mount keeps (tally_read.h): a node's pointer
@@ -160,7 +161,7 @@ typedef struct {
     TallyDigestLeaf*  leaves;
     uint32_t          count;
     uint32_t          cap;
-    volatile uint8_t* said;          /* a leaf whose rot was said: once each */
+    volatile uint8_t* said;          /* a leaf's rot and a copy of it found wanting, each said once */
     volatile uint32_t readers;
 } TallyDigestTable;
 
@@ -333,15 +334,39 @@ static int TallyDigestIn(const uint8_t* s, uint32_t room, uint64_t block, uint64
     return 0;
 }
 
+/* What is said of a leaf, once each: its rot, a copy of it that did not hold. */
+#define TALLY_DIGEST_SAID_ROT   1u
+#define TALLY_DIGEST_SAID_MEND  2u
+
 /* A leaf's rot, said once — by why, its blocks read unchecked (§4.5 п.3). */
 static void TallyDigestRotSay(TallyDigestTable* t, uint32_t leaf, const char* why)
 {
     const TallyPlace* p = &t->leaves[leaf].place;
-    if (__atomic_exchange_n(&t->said[leaf], 1u, __ATOMIC_ACQ_REL))
+    if (__atomic_fetch_or(&t->said[leaf], TALLY_DIGEST_SAID_ROT, __ATOMIC_ACQ_REL) & TALLY_DIGEST_SAID_ROT)
         return;
     kprintf("[TagFS] the DIGESTS range of blocks [%llu, %s%llu) rots in every copy (%s): those blocks "
             "read unchecked\n", (unsigned long long)(p->has_lo ? p->lo.k1 : 0), p->has_hi ? "" : "the end, ",
             (unsigned long long)(p->has_hi ? p->hi.k1 : tagfs_get_state()->block_end), why);
+}
+
+/*
+ * ‼ A LEAF READ PAST A COPY THAT DID NOT HOLD IS WRITTEN AGAIN (§2.5, §16.5
+ * п.9). The mount reads the inner nodes of DIGESTS alone, so a leaf's first
+ * copy is first found wanting by the read of a block it names: its range goes
+ * into DogEar here — the next Tally writes the leaf again — and the copy is
+ * said once.
+ */
+static void TallyDigestMended(TallyDigestTable* t, uint32_t leaf, TallyReading* r)
+{
+    const TallyPlace* p = &t->leaves[leaf].place;
+    DogEarMended(TALLY_DIGESTS, p);
+    if (__atomic_fetch_or(&t->said[leaf], TALLY_DIGEST_SAID_MEND, __ATOMIC_ACQ_REL) & TALLY_DIGEST_SAID_MEND)
+        return;
+    TallyCopiesWords(&r->said, r->words, sizeof(r->words));
+    kprintf("[TagFS] the DIGESTS leaf of blocks [%llu, %s%llu): %u of its copies do not hold (%s) — read from "
+            "the next, and the next Tally writes the leaf again\n", (unsigned long long)(p->has_lo ? p->lo.k1 : 0),
+            p->has_hi ? "" : "the end, ", (unsigned long long)(p->has_hi ? p->hi.k1 : tagfs_get_state()->block_end),
+            r->said.failed, r->words);
 }
 
 /* Leaf `leaf` read off the medium: OK with its stream in *stream — NULL when
@@ -354,6 +379,8 @@ static error_t TallyDigestLeafRead(TallyDigestTable* t, uint32_t leaf, uint8_t**
     if (!r)
         return ERR_NO_MEMORY;
     error_t rc = TallyNodeRead(&t->leaves[leaf].place, &r->node, &r->said);
+    if (rc == OK && r->node.unit.whole && r->said.failed)
+        TallyDigestMended(t, leaf, r);
     if (rc == OK && r->node.unit.whole) {
         *stream = r->node.unit.stream;
         *room   = r->node.unit.count * BOOK_PAYLOAD_BYTES;
@@ -444,6 +471,16 @@ TallyDigestSays TallyDigestFind(uint64_t block, uint64_t* digest, error_t* refus
     TallyDigestSays   says = TallyDigestFindIn(t, block, digest, refused);
     TallyDigestLeave(t);
     return says;
+}
+
+bool TallyDigestLeafAt(uint32_t index, TallyPlace* out, bool* rotten)
+{
+    const TallyDigestTable* t = &s_tables[__atomic_load_n(&s_table_at, __ATOMIC_ACQUIRE)];
+    if (index >= t->count)
+        return false;
+    *out    = t->leaves[index].place;
+    *rotten = t->leaves[index].rotten;
+    return true;
 }
 
 error_t TallyDigestsRottenNext(uint32_t* leaf, error_t (*rot)(void* ctx, const TallyPlace* at), void* ctx,
