@@ -395,6 +395,16 @@ static void TestSayWritePath(void)
             (unsigned)g_amp.total_cores);
 }
 
+/* SEEKLAG=<us>: the volume's seat seeks before every read from the first test
+ * that writes on (block_fail.h, BlockFailReadLag) — a medium that seeks, for
+ * the tests to meet as it is. */
+static void TestSeekLag(void)
+{
+#ifdef CONFIG_SEEKLAG_US
+    BlockFailReadLag(tagfs_get_seat(), CONFIG_SEEKLAG_US);
+#endif
+}
+
 /*
  * A fault left armed.
  *
@@ -529,6 +539,7 @@ error_t TagFS_RunAllTests(TestStats* stats)
             }
             if (test->reach == TEST_WRITES_TO_VOLUME && !path_said) {
                 TestSayWritePath();
+                TestSeekLag();
                 path_said = true;
             }
             TestRun(test, stats);

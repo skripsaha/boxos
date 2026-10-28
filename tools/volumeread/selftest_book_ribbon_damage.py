@@ -9,7 +9,7 @@ from . import bookread, ondisk, stitch, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal
-from .selftest_book import Born, Found, Glass, Label
+from .selftest_book import Born, Errata, Found, Glass, Label
 from .selftest_cases import Case
 
 
@@ -64,7 +64,9 @@ def RibbonLossCases(bt):
              must={"STITCH_TORN", "BASE_MISMATCH", "UNDER_GLASS"}, checks=[
                  ("%s is locked: the blocks it last matched on are %u's now" % (Label(S), f1),
                   lambda c: c.mount.locked.get(S.fid, "").find("another file") >= 0 and f1 in c.mount.files),
-                 ("and no block has two owners", lambda c: not Found(c, "DOUBLE_OWNER"))]),
+                 ("and no block has two owners", lambda c: not Found(c, "DOUBLE_OWNER")),
+                 ("a file locked is no verdict: no Undone will name it",
+                  lambda c: all(S.fid not in fids for _s, _w, fids in c.mount.errata))]),
         Case("B30b what settled is lost, the stitch naming it torn too", lambda o: Torn(o, False),
              must={"DEAD_BRANCH"}, checks=[
                  ("seq 5's StitchHead reads and names 4: what settled is lost — MEDIUM_LIED",
@@ -252,28 +254,30 @@ def RibbonBoundCases(bt):
             ("no stitch past its Tally is read", lambda c: Found(c, "RIBBON_TORN", "outside the data run") and
              c.mount.slot.index == 1 and not c.mount.ribbon.quires)]),
         Case("B48 a CODEC run of 2^62 blocks in the stitch the mount checks", Coded,
-             must={"BASE_MISMATCH", "UNDER_GLASS"}, checks=[
+             must={"BASE_MISMATCH"}, checks=[
                  ("one block is checked against its one digest; the record does not cover its size",
                   lambda c: not Found(c, "NOT_LANDED") and Found(c, "BASE_MISMATCH", "fid %u" % f1, "runs cover")
-                  and f1 not in c.mount.files)]),
+                  and f1 not in c.mount.files and Errata(c, f1, 2))]),
         Case("B48b a Clasp counting other fresh blocks over data that did not land", Miscounted,
              must={"UNDER_GLASS"}, checks=[
                  ("its data is not read: the stitch is not applied for its Clasp, and nothing is said not landed",
                   lambda c: not Found(c, "NOT_LANDED") and Glass(c, "fresh") and f1 not in c.mount.files)]),
-        Case("B49 a Born of a hole of 2^62 blocks", Sewn(Gap), must={"BASE_MISMATCH", "UNDER_GLASS"}, checks=[
-            ("its runs do not cover its size", lambda c: Found(c, "BASE_MISMATCH", "fid %u" % f1, "runs cover"))]),
-        Case("B49b a Shaped putting in a hole of 2^62 blocks", Sewn(Widened), must={"BASE_MISMATCH", "UNDER_GLASS"},
+        Case("B49 a Born of a hole of 2^62 blocks", Sewn(Gap), must={"BASE_MISMATCH"}, checks=[
+            ("its runs do not cover its size", lambda c: Found(c, "BASE_MISMATCH", "fid %u" % f1, "runs cover") and
+             Errata(c, f1, 2))]),
+        Case("B49b a Shaped putting in a hole of 2^62 blocks", Sewn(Widened), must={"BASE_MISMATCH"},
              checks=[("%s does not match: its runs do not cover its size" % Label(S),
                       lambda c: Found(c, "BASE_MISMATCH", "fid %u" % S.fid, "runs cover") and
-                      c.mount.files[S.fid].runs == S.runs)]),
+                      c.mount.files[S.fid].runs == S.runs and Errata(c, S.fid, 2))]),
         Case("B50 a file born wearing a tag of id 2^31 coined before it", Sewn(worn), must={"UNDER_GLASS"},
              checks=[("the tag is known — coined — and the file born; the kernel cannot hold the id, said",
                       lambda c: f1 in c.mount.files and Glass(c, "past 2^31") and
                       not Found(c, "BASE_MISMATCH"))]),
         Case("B51 the newest stitch's data past the volume's end", Sewn(gone, flags=0),
-             must={"NOT_LANDED", "UNDER_GLASS"}, checks=[
+             must={"NOT_LANDED"}, checks=[
                  ("a block the medium does not give did not land: %u is rolled back" % f1,
-                  lambda c: Found(c, "NOT_LANDED", "fid %u" % f1, "block %u" % past) and f1 not in c.mount.files)]),
+                  lambda c: Found(c, "NOT_LANDED", "fid %u" % f1, "block %u" % past) and f1 not in c.mount.files
+                  and Errata(c, f1, 1))]),
         Case("B52 two thousand files born in forty stitches, their fids falling", Many, checks=[
             ("every one is born, and nothing is said",
              lambda c: all(f in c.mount.files for f in range(f1, f1 + 2000)) and not c.findings and

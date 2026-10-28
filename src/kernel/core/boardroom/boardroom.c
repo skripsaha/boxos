@@ -887,6 +887,7 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
                                               : BoardMediumRefusal(s->kind, BLOCK_FAIL_READ));
             break;
         }
+        BlockFailReadLagged(seat);
 #endif
 
         rc = BoardReadAnswer(s->kind, BoardSeatRead(s, lba, run, out));
@@ -1141,6 +1142,8 @@ static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_
         berth->sectors = keep;
         berth->struck  = true;
     }
+    if (!write)
+        BlockFailReadLagged(seat);
 #endif
 
     switch (s->kind) {

@@ -148,15 +148,19 @@ print("%u 0x%016X" % (len(b), h))' 2>/dev/null)
 
 # book_circle_order BASE RECORD IMG — the order the disk finished the writes
 # of the boot that turned BASE into IMG, from the record blklogwrites kept of
-# it (POWERCUT=on), held to §3.3 as §16.2 п.7 puts it for this kernel: data →
-# FLUSH#1 → the stitch's atoms → FLUSH. Every stitch the ribbon of IMG carries
-# is read by volume-read's own reader (bookmount.py); the boot's are those
-# whose sectors the record wrote. The last write of every block of fresh data
-# their Born and Shaped records name, made before the stitch's first atom,
-# stands behind a flush the atom does not; the last atom of a stitch stands
-# behind a flush the next stitch's first does not; and every stitch the boot
-# sewed says DATA_FLUSHED. The record is first held to account for IMG, byte
-# for byte, or nothing it says means anything.
+# it (POWERCUT=on), held to §3.3 by each stitch's own word: one that says
+# DATA_FLUSHED — its toll paid — data → FLUSH#1 → the stitch's atoms → FLUSH;
+# one that does not, data → the stitch's atoms → FLUSH, both behind the one
+# flush. Every stitch the ribbon of IMG carries is read by volume-read's own
+# reader (bookmount.py); the boot's are those whose sectors the record wrote.
+# The last write of every block of fresh data their Born and Shaped records
+# name is made before the stitch's first atom; of a stitch that says
+# DATA_FLUSHED it stands behind a flush the atom does not; and the last atom of
+# a stitch stands behind a flush the next stitch's first does not — which, of a
+# stitch that does not say it, puts its data behind that flush too, as nothing
+# else would. And a CLEAN stitch — a stopping machine's last — never spares the
+# flush of its data. The record is first held to account for IMG, byte for
+# byte, or nothing it says means anything.
 book_circle_order() {
     local base=$1 record=$2 img=$3 said line
     said=$(python3 tools/volume-read.py "$base" cut "$record" --against "$img" 2>&1)
@@ -206,7 +210,7 @@ if m.refusal or m.ribbon is None:
     say(False, "the book the boot left does not mount: %s" % (m.refusal or "no ribbon"))
     sys.exit(0)
 sewn = older = with_data = blocks = 0
-torn, unflagged, unwritten, unflushed, crossed = [], [], [], [], []
+torn, spared, unwritten, unflushed, crossed, clean = [], [], [], [], [], []
 before = None
 for u in m.ribbon.stitches:
     at = [touched[g.base + p.Vlba()][-1] for p in u.places if g.base + p.Vlba() in touched]
@@ -219,8 +223,11 @@ for u in m.ribbon.stitches:
         continue
     sewn += 1
     first, last = min(at), max(at)
-    if not u.head.flags & stitch.DATA_FLUSHED:
-        unflagged.append(u.seq)
+    paid = bool(u.head.flags & stitch.DATA_FLUSHED)
+    if not paid:
+        spared.append(u.seq)
+        if u.head.flags & stitch.CLEAN:
+            clean.append(u.seq)
     if before is not None and writes[before[1]].epoch >= writes[first].epoch:
         crossed.append((before[0], u.seq))
     before = (u.seq, last)
@@ -235,7 +242,7 @@ for u in m.ribbon.stitches:
             lasts.append(seen[j - 1] if j else None)
         if None in lasts:
             unwritten.append((u.seq, b))
-        elif writes[max(lasts)].epoch >= writes[first].epoch:
+        elif paid and writes[max(lasts)].epoch >= writes[first].epoch:
             unflushed.append((u.seq, b))
 tail = before is not None and writes[before[1]].epoch < len(log.epochs) - 1
 say(sewn > 0 and with_data > 0 and not torn,
@@ -244,11 +251,12 @@ say(sewn > 0 and with_data > 0 and not torn,
     % (sewn, with_data, blocks, older, torn or "none", len(writes), len(log.flush_seqs)))
 say(not unwritten, "every block of fresh data a stitch names was written before the stitch's first atom "
     "(%u not: %s)" % (len(unwritten), unwritten[:4]))
-say(not unflushed, "and stands behind a flush that atom does not — data, then FLUSH#1, then the stitch "
-    "(%u block(s) not: %s)" % (len(unflushed), unflushed[:4]))
+say(not unflushed, "and, of a stitch that says DATA_FLUSHED, stands behind a flush that atom does not — data, "
+    "then FLUSH#1, then the stitch (%u block(s) not: %s); %u stitch(es) spared it, their data before their "
+    "atoms: %s" % (len(unflushed), unflushed[:4], len(spared), spared[:4]))
+say(not clean, "no CLEAN stitch spared the flush of its data (%u did: %s)" % (len(clean), clean[:4]))
 say(not crossed and tail, "the atoms of every stitch stand behind a flush the next stitch's first does not, "
     "and the last stitch's behind one (%u crossed: %s; the last behind a flush: %s)" % (len(crossed), crossed[:4], tail))
-say(not unflagged, "every stitch the boot sewed says DATA_FLUSHED (%u do not: %s)" % (len(unflagged), unflagged[:4]))
 ORDER_EOF
     while IFS= read -r line; do
         case "$line" in

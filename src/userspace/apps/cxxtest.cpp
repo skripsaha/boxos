@@ -8875,6 +8875,7 @@ void Phase47()
             {box::errc::hardware,               "hardware"}, {box::errc::cpu_error,             "hardware"},
             {box::errc::acpi_not_found,         "acpi"},     {box::errc::acpi_fadt_not_found,   "acpi"},
             {box::errc::tagfs_not_initialized,  "tagfs"},    {box::errc::tagfs_fid_exhausted,   "tagfs"},
+            {box::errc::tagfs_not_landed,       "tagfs"},
             {box::errc::pocket_ring_full,       "ipc"},      {box::errc::result_stash_full,     "ipc"},
             {box::errc::route_target_full,      "routing"},  {box::errc::route_invalid_tag,     "routing"},
             {box::errc::pocket_failed,          "ipc"},
