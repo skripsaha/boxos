@@ -1,3 +1,4 @@
+#include "boxasm_macro.h"
 #include "boxasm_source.h"
 
 #include "boxasm_asm.h"
@@ -39,30 +40,49 @@ int BoxAsmGrowArray(void **Items, size_t *Capacity, size_t Count, size_t Size)
 
 /* ---- Diagnostics -------------------------------------------------------- */
 
+/* The source line a location stands for, and the macro call it was
+ * written in: through the preprocessor's lines once the text read is its
+ * expansion, as the preprocessor said while it works. */
+static void BoxAsmPlace(const BoxAsmAssembler *Asm, const BoxAsmLocation *Where, uint32_t *Line,
+                        uint32_t *Frame)
+{
+    *Line = Where->Line;
+    *Frame = Asm->FailFrame;
+    if (Asm->Expanded && Asm->Expansion)
+        BoxAsmExpansionPlace(Asm->Expansion, Where->Line, Line, Frame);
+}
+
 /* "file:line:column: " — or nothing at all during a layout pass, whose
  * values are not settled yet. */
 void BoxAsmFailBegin(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, BoxAsmMessage *Message)
 {
+    uint32_t Line;
+    uint32_t Frame;
+
     if (Asm->Measuring) {
         BoxAsmMessageBegin(Message, NULL, 0);
         return;
     }
+    BoxAsmPlace(Asm, Where, &Line, &Frame);
     BoxAsmMessageBegin(Message, Asm->Error, Asm->ErrorCapacity);
     BoxAsmMessageText(Message, Asm->FileName);
     BoxAsmMessageText(Message, ":");
-    BoxAsmMessageDecimal(Message, Where->Line);
+    BoxAsmMessageDecimal(Message, Line);
     BoxAsmMessageText(Message, ":");
     BoxAsmMessageDecimal(Message, Where->Column);
     BoxAsmMessageText(Message, ": ");
 }
 
-/* The source line under the message and a caret at the column, its tabs
- * kept so the caret lands where the eye does. */
+/* The line under the message — as the macros made it — and a caret at the
+ * column, its tabs kept so the caret lands where the eye does; then each
+ * macro call the line was reached through, the innermost first. */
 int BoxAsmFailEnd(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, BoxAsmMessage *Message)
 {
     const char *Line = Where->LineStart;
     size_t Length = 0;
     uint32_t Column;
+    uint32_t Source;
+    uint32_t Frame;
 
     if (!Line)
         return -ERR_INVALID_ARGUMENT;
@@ -75,7 +95,16 @@ int BoxAsmFailEnd(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, BoxAsmMessa
     for (Column = 1; Column < Where->Column && Column <= Length; Column++)
         BoxAsmMessageSpan(Message, Line[Column - 1u] == '\t' ? "\t" : " ", 1u);
     BoxAsmMessageText(Message, "^");
-    (void)Asm;
+    BoxAsmPlace(Asm, Where, &Source, &Frame);
+    while (Asm->Expansion && Frame != 0 && Frame < Asm->Expansion->FrameCount) {
+        const BoxAsmFrame *Call = &Asm->Expansion->Frames[Frame];
+
+        BoxAsmMessageText(Message, "\n    in the macro ");
+        BoxAsmMessageName(Message, (const char *)Asm->Expansion->Names.Data + Call->Name);
+        BoxAsmMessageText(Message, " called at line ");
+        BoxAsmMessageDecimal(Message, Call->Line);
+        Frame = Call->Parent;
+    }
     return -ERR_INVALID_ARGUMENT;
 }
 
@@ -145,6 +174,7 @@ int BoxAsmSourceAssemble(const char *Source, size_t SourceSize, const char *File
                          BoxAsmBlob *Out, char *Error, size_t ErrorCapacity)
 {
     BoxAsmAssembler Asm;
+    BoxAsmExpansion Expansion;
     char *Text;
     int Rc;
 
@@ -157,9 +187,14 @@ int BoxAsmSourceAssemble(const char *Source, size_t SourceSize, const char *File
     Text = BoxAsmCopyText(Source, SourceSize);
     if (!Text)
         return -ERR_NO_MEMORY;
+    memset(&Expansion, 0, sizeof(Expansion));
     Rc = BoxAsmBegin(&Asm, FileName, Error, ErrorCapacity);
     if (Rc == 0)
-        Rc = BoxAsmParse(&Asm, Text, SourceSize);
+        Rc = BoxAsmPreprocess(&Asm, Text, SourceSize, &Expansion);
+    if (Rc == 0) {
+        Asm.Expanded = 1;
+        Rc = BoxAsmParse(&Asm, (const char *)Expansion.Text.Data, (size_t)Expansion.Text.Size);
+    }
     if (Rc == 0)
         Rc = BoxAsmLayout(&Asm);
     if (Rc == 0)
@@ -169,6 +204,7 @@ int BoxAsmSourceAssemble(const char *Source, size_t SourceSize, const char *File
     if (Rc == -ERR_NO_MEMORY)
         BoxAsmMessageSet(Error, ErrorCapacity, "out of memory while assembling");
     BoxAsmEnd(&Asm);
+    BoxAsmExpansionRelease(&Expansion);
     free(Text);
     if (Out->Data)
         Out->Name = FileName;

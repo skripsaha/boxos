@@ -4,6 +4,9 @@
     boxasm_oracle.py corpus [nasm]       print the corpus: every supported form, in
                                          BoxASM's spelling or NASM's
     boxasm_oracle.py compare OURS NASM   compare two ELF objects of one source
+    boxasm_oracle.py macros [nasm]       print the program written with every preprocessor
+                                         feature both assemblers share, in BoxASM's
+                                         spelling or NASM's
     boxasm_oracle.py floats ASM BYTES    write a program of floating-point data, ties
                                          included, and the bytes of its .data rounded
                                          exactly — the witness where NASM 3 is wrong
@@ -547,6 +550,260 @@ def program(nasm):
     return text.replace("[rip + ", rip).replace(" near ", near)
 
 
+# ---- The preprocessor ------------------------------------------------------------
+
+# Single-line and multi-line macros, their parameters, defaults, greedy and
+# rotated lists, %% labels, %+, overloads, %unmacro, a macro defining a
+# macro, a macro named like an instruction, %if and every test it takes,
+# %rep and %exitrep nested, __LINE__, struc and istruc. NASM pads alignment
+# in data with nop unless told db 0.
+MACRO_PROGRAM = r"""; every preprocessor feature both assemblers share
+%define COUNT 4
+%define sq(x) ((x)*(x))
+%define add3(a, b, c) (a + b + c)
+%xdefine BASE COUNT * 2
+%assign total COUNT + 1
+%define lazy later
+%define later 77
+%macro prologue 0
+    push rbp
+    mov rbp, rsp
+%endmacro
+%macro epilogue 0
+    mov rsp, rbp
+    pop rbp
+    ret
+%endmacro
+%macro defs 1-3 20, 30
+    dd %0, %1, %2, %3
+%endmacro
+%macro loop_to 2
+    mov ecx, %2
+%%again:
+    dec ecx
+    jnz %%again
+    mov %1, ecx
+%endmacro
+%macro greedy 1+
+    db %1
+%endmacro
+%macro rot 1-*
+%rep %0
+    db %1
+%rotate 1
+%endrep
+%endmacro
+%macro paste 2
+    %1%+_label: dd %{2}0
+%endmacro
+%macro save 1-*
+%rep %0
+    push %1
+%rotate 1
+%endrep
+%endmacro
+%macro restore 1-*
+%rep %0
+%rotate -1
+    pop %1
+%endrep
+%endmacro
+%macro clear 1
+%ifidni %1, eax
+    xor eax, eax
+%elifidn %1, ebx
+    xor ebx, ebx
+%else
+    mov %1, 0
+%endif
+%endmacro
+%macro typed 1
+%ifnum %1
+    dd %1
+%elifstr %1
+    db %1, 0
+%elifid %1
+    dq %1
+%endif
+%endmacro
+
+%macro nodef 1-4
+    dd %0, 0%4
+%endmacro
+%macro somedef 1-4 9
+    dd %0, %2
+%endmacro
+%macro inner 1
+%%self: dd %1, %%self - $$
+%endmacro
+%macro outer 2
+%%mine: inner %1
+    inner %2
+    dd %%mine - $$
+%endmacro
+%macro maker 1
+%macro made_%1 0
+    db '%1'
+%endmacro
+%endmacro
+%macro over 1
+    db 1, %1
+%endmacro
+%macro over 2
+    db 2, %1, %2
+%endmacro
+%macro gone 0
+    db 0x55
+%endmacro
+%macro push 2
+    push %1
+    push %2
+%endmacro
+%macro list 3
+    dd %1 + 0%2 + %3
+%endmacro
+%macro braced 2
+    db %1
+    db %2
+%endmacro
+%macro where 0
+    dd __LINE__
+%endmacro
+%define again(x) x + 1
+%define again(x, y) x + y
+global main
+section .text
+main:
+    push rax
+    push rbx, rcx
+    prologue
+    mov eax, sq(3)
+    mov ebx, add3(1, 2, 3)
+    mov ecx, BASE
+    mov edx, total
+    mov esi, lazy
+.inner:
+    loop_to eax, 10
+    loop_to ebx, COUNT
+    jmp .inner
+helper: loop_to edx, 3
+    save rbx, r12, r13
+    restore rbx, r12, r13
+    clear eax
+    clear ebx
+    clear ecx
+%ifdef COUNT
+    nop
+%endif
+%ifndef NOPE
+    int3
+%endif
+%if COUNT > 3 && total == 5 || 0
+    cld
+%elif 1
+    std
+%else
+    ud2
+%endif
+%if 0
+    this would not assemble
+%endif
+%ifmacro rot
+    pause
+%endif
+%assign i 0
+%rep 3
+    mov eax, i
+%assign i i+1
+%endrep
+%rep 100
+%if i > 5
+%exitrep
+%endif
+    inc eax
+%assign i i+1
+%endrep
+    epilogue
+
+section .data
+    defs 1
+    defs 1, 2
+    defs 1, 2, 3
+    greedy 1, 2, 3
+    rot 4, 5, 6
+    paste here, 7
+    typed 42
+    typed 'hi'
+    typed p1
+%undef COUNT
+%ifndef COUNT
+    db 0xEE
+%endif
+
+struc point
+.x: resd 1
+.y: resd 1
+.name: resb 10
+    alignb 4
+.tail: resq 1
+endstruc
+
+align 16
+p1: istruc point
+    at point.x, dd 1
+    at point.y, dd 2
+    at point.name, db "corner"
+iend
+    dd point_size, point.y, point.name, point.tail
+section .data
+    nodef 5
+    nodef 5, 6, 7
+    somedef 5
+    somedef 5, 6
+    somedef 5, 6, 7
+    outer 1, 2
+    outer 3, 4
+    maker one
+    made_one
+    over 7
+    over 8, 9
+    gone
+%unmacro gone 0
+%macro gone 0
+    db 0x66
+%endmacro
+    gone
+    list 1,,3
+    braced {1, 2, 3}, 4
+    dd again(1), again(2, 3)
+%if 'ab' == 0x6261 && "c" == 99
+    db 0x77
+%endif
+%assign n 0
+%rep 4
+%assign m 0
+%rep 10
+%if m >= 2
+%exitrep
+%endif
+    db n, m
+%assign m m+1
+%endrep
+%assign n n+1
+%endrep
+    where
+    dd __LINE__
+%define ra rb
+%define rb ra
+%define ra_val 5
+    dd ra_val
+"""
+
+
+def macros(nasm):
+    return MACRO_PROGRAM.replace("\nalign 16\n", "\nalign 16, db 0\n") if nasm else MACRO_PROGRAM
+
+
 # ---- Comparison --------------------------------------------------------------
 
 R_64, R_PC32, R_PLT32, R_32, R_32S = 1, 2, 4, 10, 11
@@ -646,6 +903,9 @@ def compare(ours, theirs):
 def main(argv):
     if len(argv) in (2, 3) and argv[1] == "corpus" and argv[2:] in ([], ["nasm"]):
         sys.stdout.write(program(argv[2:] == ["nasm"]))
+        return 0
+    if len(argv) in (2, 3) and argv[1] == "macros" and argv[2:] in ([], ["nasm"]):
+        sys.stdout.write(macros(argv[2:] == ["nasm"]))
         return 0
     if len(argv) == 4 and argv[1] == "compare":
         return 0 if compare(argv[2], argv[3]) else 1

@@ -164,6 +164,54 @@ xor`) whose destination is memory. `rep` goes before `movs stos lods`;
 instruction share a line. Any other pairing is refused: the processor
 would reject it, or read it as another instruction (`rep bsf` is `tzcnt`).
 
+### Macros
+
+A preprocessor carries out NASM's directives before the assembler reads a
+word, line by line, the way NASM's does:
+
+- `%define NAME text`, `%define NAME(a, b) text` (the parentheses right after
+  the name; overloads by the number of arguments), `%xdefine` (expanded where
+  written), `%assign NAME expression`, `%undef NAME`. A macro is expanded
+  again in what it expands to, but never inside its own expansion.
+  `__LINE__` and `__FILE__` are there unless defined.
+- `%macro NAME 2`, `1-3` (with defaults after the count: `%macro m 1-3 20,
+  30`), `0-*`, and `+` for a last parameter that takes the rest of the line;
+  `%endmacro`, `%unmacro NAME count`. In the body: `%1`, `%{10}`, `%0`
+  (the count, defaults included), `%%label` (a label of each call's own),
+  `%+` (joins what stands on either side), `%rotate n`. Parameters are split
+  at commas; `{a, b}` is one. Overloads take counts of their own. A macro
+  named like an instruction stands aside for a count it does not take.
+  A call may follow a label: `start: prologue`.
+- `%if expression`, `%elif`, `%else`, `%endif`; the expression takes numbers
+  and characters, `+ - * / % << >> & | ^ ~`, comparisons `== = != <> < <= >
+  >=`, and `! && ^^ ||`. Tests: `%ifdef NAME`, `%ifmacro NAME [count]`,
+  `%ifidn a, b` and `%ifidni` (the same tokens; any case), `%ifnum`,
+  `%ifstr`, `%ifid`. Each has its `%ifn…` and `%elif…` forms.
+- `%rep count` … `%endrep`, and `%exitrep` to leave it.
+- `%error text` (or `%fatal`) refuses with the text.
+
+`struc NAME` … `endstruc` writes a layout: its labels (`.x` is `NAME.x`) are
+offsets from 0, made by `resb resw resd resq` and `align` (or `alignb`), and
+`NAME_size` is where it ends. They are constants: `mov eax, [rbx + point.y]`,
+`add rbx, point_size`. `istruc NAME` … `iend` lays one out in data: `at
+point.y, dd 2` fills with zeros up to the field and writes it there, and iend
+fills to `NAME_size`.
+
+An error in a macro's expansion is said at the line of the macro that made
+it, the line shown as it expanded, then each call it was reached through:
+
+```text
+prog.asm:2:14: 'nowhere' is never defined; ...
+        mov eax, nowhere
+                 ^
+    in the macro 'load' called at line 5
+    in the macro 'twice' called at line 10
+```
+
+Calls go 256 deep, `%define`s expand 1000 deep, the expanded source reaches
+16 MiB and the preprocessor walks 50 million lines; a source past any of them
+is refused with its line. `macros.asm` shows most of this at work.
+
 ### box operations
 
 - `box.say "text"` or `box.say label` (NUL-ended) prints through BoxLib's
@@ -216,6 +264,15 @@ BoxOS userspace has no red zone.
   refused; NASM assembles it, and the program stops when it runs.
 - Hexadecimal floating-point constants, `__float32__()` and the other float
   functions of NASM are not built.
+- The preprocessor computes `/ % >>` signed, as the assembler does. A macro
+  called with a count no overload takes is refused; NASM leaves the line as
+  it was (with a warning) unless the name is also an instruction.
+- `struc` gives back the scope of `.local` names it found; NASM leaves its
+  name as the scope. `at` is a directive only inside an istruc.
+- Not built of NASM's preprocessor: `%include` (a decision about naming a
+  file in TagFS comes first), `%push`/`%pop` contexts and `%$` names,
+  `%strlen %substr %strcat`, `%warning`, the case-blind `%idefine`
+  `%imacro`, `%[...]`, `%line`, `%pragma`.
 
 Everything else in the shared subset assembles to the same bytes and
 relocations: `tools/boxasm_oracle.py` generates a corpus of about 5,000

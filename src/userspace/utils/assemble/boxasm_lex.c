@@ -18,9 +18,11 @@ static int BoxAsmIdentifierStart(char Ch)
     return BoxAsmIsLetter(Ch) || Ch == '.';
 }
 
+/* '@' among a name's characters: the preprocessor names a macro's own
+ * labels ..@3.loop, as NASM does. */
 static int BoxAsmIdentifierPart(char Ch)
 {
-    return BoxAsmIsLetter(Ch) || BoxAsmIsDigit(Ch) || Ch == '.';
+    return BoxAsmIsLetter(Ch) || BoxAsmIsDigit(Ch) || Ch == '.' || Ch == '@';
 }
 
 static int BoxAsmDigitValue(char Ch)

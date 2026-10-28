@@ -133,7 +133,8 @@ static uint8_t BoxAsmDataWidth(const BoxAsmToken *Token, uint8_t *Reserve)
 static int BoxAsmIsDirective(const BoxAsmToken *Token)
 {
     static const char *const Words[] = {
-        "section", "segment", "global", "extern", "default", "bits", "align", "times", "equ"
+        "section", "segment", "global", "extern", "default", "bits", "align", "times", "equ",
+        "struc", "endstruc", "istruc", "iend", "alignb"
     };
     uint8_t Reserve;
     size_t Index;
@@ -466,6 +467,49 @@ static int BoxAsmParseSetting(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmTo
     return BoxAsmNextToken(Asm, Lexer, Token);
 }
 
+/* at FIELD[, what it holds]: zeros up to the field, then its statement. */
+static int BoxAsmParseAt(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                         const BoxAsmToken *Word)
+{
+    BoxAsmToken Held;
+    uint32_t Field;
+    int Rc;
+
+    if ((Rc = BoxAsmParseExpression(Asm, Lexer, Token, &Field)) != 0 ||
+        (Rc = BoxAsmInstancePad(Asm, &Word->Where, Field)) != 0)
+        return Rc;
+    if (BoxAsmEndOfStatement(Token))
+        return 0;
+    if (!BoxAsmTokenIsPunct(Token, ','))
+        return BoxAsmFail(Asm, &Token->Where,
+                          "expected ',' and what the field holds: at point.x, dd 1", NULL);
+    if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+        return Rc;
+    if (Token->Kind != BOXASM_TOKEN_IDENTIFIER)
+        return BoxAsmFail(Asm, &Token->Where, "expected what the field holds: at point.x, dd 1", NULL);
+    Held = *Token;
+    if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+        return Rc;
+    return BoxAsmParseStatement(Asm, Lexer, Token, &Held, 0);
+}
+
+/* A statement between struc and endstruc: a reservation or an align. */
+static int BoxAsmParseField(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                            const BoxAsmToken *Word, uint32_t Times)
+{
+    uint8_t Reserve;
+    uint8_t Width = BoxAsmDataWidth(Word, &Reserve);
+
+    if (Times == 0 && BoxAsmTokenIs(Word, "endstruc"))
+        return BoxAsmStrucClose(Asm, Word);
+    if (Times == 0 && Width != 0 && Reserve)
+        return BoxAsmStrucReserve(Asm, Lexer, Token, Word, Width);
+    if (Times == 0 && (BoxAsmTokenIs(Word, "align") || BoxAsmTokenIs(Word, "alignb")))
+        return BoxAsmStrucReserve(Asm, Lexer, Token, Word, 0);
+    return BoxAsmFail(Asm, &Word->Where,
+                      "a struc holds fields: labels, resb, resw, resd, resq and align", NULL);
+}
+
 static int BoxAsmParseStatement(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
                                 const BoxAsmToken *Word, uint32_t Times)
 {
@@ -473,6 +517,18 @@ static int BoxAsmParseStatement(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsm
     uint32_t Index;
     int Rc;
 
+    if (Asm->Struc.Open)
+        return BoxAsmParseField(Asm, Lexer, Token, Word, Times);
+    if (Times == 0 && BoxAsmTokenIs(Word, "struc"))
+        return BoxAsmStrucOpen(Asm, Lexer, Token, Word);
+    if (Times == 0 && BoxAsmTokenIs(Word, "endstruc"))
+        return BoxAsmStrucClose(Asm, Word);
+    if (Times == 0 && BoxAsmTokenIs(Word, "istruc"))
+        return BoxAsmInstanceOpen(Asm, Lexer, Token, Word);
+    if (Times == 0 && BoxAsmTokenIs(Word, "iend"))
+        return BoxAsmInstanceClose(Asm, Word);
+    if (Times == 0 && Asm->Struc.Instance && BoxAsmTokenIs(Word, "at"))
+        return BoxAsmParseAt(Asm, Lexer, Token, Word);
     if (BoxAsmDataWidth(Word, &Reserve) != 0)
         return BoxAsmParseStorage(Asm, Lexer, Token, Word, Times);
     if (Times == 0 && (BoxAsmTokenIs(Word, "section") || BoxAsmTokenIs(Word, "segment")))
@@ -537,6 +593,13 @@ static int BoxAsmParseLabel(BoxAsmAssembler *Asm, const BoxAsmToken *Name)
 
     if (Rc != 0)
         return Rc;
+    if (Asm->Struc.Open) {                     /* a field: the offset it begins at */
+        Rc = BoxAsmStrucField(Asm, Text, &Name->Where);
+        if (Rc == 0 && Name->Text[0] != '.')
+            Rc = BoxAsmSymbolClaim(Asm, Text, strlen(Text), &Name->Where, &Asm->Scope);
+        free(Text);
+        return Rc;
+    }
     Rc = BoxAsmDefineLabel(Asm, Text, &Name->Where, &Index);
     free(Text);
     if (Rc == 0 && Name->Text[0] != '.')
@@ -643,5 +706,7 @@ int BoxAsmParse(BoxAsmAssembler *Asm, const char *Source, size_t Size)
             return BoxAsmFailEnd(Asm, &Token.Where, &Message);
         }
     }
+    if ((Rc = BoxAsmStrucCheckClosed(Asm)) != 0)
+        return Rc;
     return BoxAsmCheckProgram(Asm, &Start);
 }

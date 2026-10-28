@@ -68,7 +68,8 @@ int BoxAsmLabelName(BoxAsmAssembler *Asm, const BoxAsmToken *Token, char **Out)
     const char *Scope;
     size_t ScopeLength;
 
-    if (Token->Text[0] != '.') {
+    /* A macro's own label, ..@N.name, is no local one: it belongs to its call. */
+    if (Token->Text[0] != '.' || (Token->Length > 3 && memcmp(Token->Text, "..@", 3) == 0)) {
         *Out = BoxAsmCopyText(Token->Text, Token->Length);
         return *Out ? 0 : -ERR_NO_MEMORY;
     }

@@ -31,6 +31,9 @@ typedef enum {
     BOXASM_SECTION_COUNT
 } BoxAsmSection;
 
+/* The most bytes a section, or a struc, may hold. */
+#define BOXASM_MAX_SECTION_BYTES (1ull << 32)
+
 /* ---- Expressions -------------------------------------------------------- */
 
 typedef enum {
@@ -97,10 +100,12 @@ typedef enum {
     BOXASM_STMT_INSTRUCTION,
     BOXASM_STMT_DATA,           /* db dw dd dq */
     BOXASM_STMT_RESERVE,        /* resb resw resd resq */
-    BOXASM_STMT_ALIGN
+    BOXASM_STMT_ALIGN,
+    BOXASM_STMT_PAD             /* zeros up to Symbol + Count: istruc's at and iend */
 } BoxAsmStatementKind;
 
 struct BoxAsmInstruction;
+typedef struct BoxAsmExpansion BoxAsmExpansion;
 
 /* A prefix written before an instruction. */
 typedef enum {
@@ -217,6 +222,20 @@ typedef struct {
     BoxAsmLocation Where;
 } BoxAsmTakenAddress;
 
+/* struc ... endstruc, a layout of named offsets written as reservations, and
+ * istruc ... iend, one instance of it laid out in data. */
+typedef struct {
+    uint8_t        Open;           /* between struc and endstruc */
+    uint32_t       Name;           /* the struc's symbol */
+    uint64_t       Offset;         /* where its next field begins */
+    uint32_t       SavedScope;     /* the scope of `.local` names before it */
+    BoxAsmLocation Where;
+    uint8_t        Instance;       /* between istruc and iend */
+    uint32_t       Start;          /* the instance's first byte, a label */
+    uint32_t       Size;           /* the instanced struc's NAME_size */
+    BoxAsmLocation InstanceWhere;
+} BoxAsmStruc;
+
 /* ---- The assembler ------------------------------------------------------ */
 
 typedef struct {
@@ -248,6 +267,10 @@ typedef struct {
     BoxAsmTakenAddress *Taken;
     size_t              TakenCount;
     size_t              TakenCapacity;
+    const struct BoxAsmExpansion *Expansion; /* the preprocessor's lines and calls */
+    uint8_t             Expanded;        /* the text read is Expansion's: lines map back */
+    uint32_t            FailFrame;       /* while it works: the macro call of its line */
+    BoxAsmStruc         Struc;
 } BoxAsmAssembler;
 
 /* boxasm_source.c */
@@ -299,6 +322,20 @@ int BoxAsmAddBytes(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, const uint
 /* boxasm_box.c */
 int BoxAsmParseBox(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
                    const BoxAsmToken *Word);
+
+/* boxasm_struc.c */
+int BoxAsmStrucOpen(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                    const BoxAsmToken *Word);
+int BoxAsmStrucClose(BoxAsmAssembler *Asm, const BoxAsmToken *Word);
+int BoxAsmStrucField(BoxAsmAssembler *Asm, const char *Name, const BoxAsmLocation *Where);
+/* resb, resw, resd, resq N in a struc (Width bytes each), or align N (Width 0). */
+int BoxAsmStrucReserve(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                       const BoxAsmToken *Word, uint8_t Width);
+int BoxAsmInstanceOpen(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                       const BoxAsmToken *Word);
+int BoxAsmInstancePad(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, uint32_t Field);
+int BoxAsmInstanceClose(BoxAsmAssembler *Asm, const BoxAsmToken *Word);
+int BoxAsmStrucCheckClosed(BoxAsmAssembler *Asm);
 
 /* boxasm_layout.c */
 int BoxAsmLayout(BoxAsmAssembler *Asm);

@@ -1375,6 +1375,7 @@ VOLUME_CONTENT = \
 	$(USERSPACE_DIR)/countdown.asm "code,asm,example" \
 	$(USERSPACE_DIR)/machine.asm "code,asm,example" \
 	$(USERSPACE_DIR)/fractions.asm "code,asm,example" \
+	$(USERSPACE_DIR)/macros.asm "code,asm,example" \
 	$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
 	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "utility" \

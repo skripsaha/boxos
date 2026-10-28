@@ -72,6 +72,19 @@ else
     fail encodings_match_nasm "$out"
 fi
 
+# The preprocessor's work, held to NASM's on one program using every feature
+# the two share.
+python3 "$ORACLE" macros > "$WORK/macros.asm" && python3 "$ORACLE" macros nasm > "$WORK/macros_nasm.asm" &&
+    nasm -f elf64 -w-all "$WORK/macros_nasm.asm" -o "$WORK/macros_nasm.o" ||
+    { echo "boxasm: harness failed — NASM did not assemble the macro program"; exit 2; }
+if ! "$STAND" assemble "$WORK/macros.asm" "$WORK/macros.o" 2> "$WORK/macros.err"; then
+    fail macros_match_nasm "$(head -3 "$WORK/macros.err")"
+elif out=$(python3 "$ORACLE" compare "$WORK/macros.o" "$WORK/macros_nasm.o" 2>&1); then
+    ok "macros_match_nasm ($(wc -l < "$WORK/macros.asm" | tr -d ' ') lines)"
+else
+    fail macros_match_nasm "$out"
+fi
+
 # Floating-point constants, ties included, against their exact rounding:
 # NASM 3 rounds a decimal exactly halfway between two floats down, not to even.
 python3 "$ORACLE" floats "$WORK/floats.asm" "$WORK/floats.want" ||
@@ -274,5 +287,46 @@ assembly_refuses float_too_large $'section .data\n    dd 1.e39\n' \
 assembly_refuses float_too_small $'section .data\n    dq 1.e-400\n' \
     "float_too_small.asm:2:8: 1.e-400 is too small for a 64-bit float (dq): it would be 0"
 
+assembly_refuses endif_alone "$HEAD%endif"$'\n' \
+    "endif_alone.asm:4:1: %endif has no %if before it"
+assembly_refuses if_not_closed "$HEAD%if 1"$'\n    nop\n' \
+    "if_not_closed.asm:4:1: this %if is not closed by %endif"
+assembly_refuses macro_not_closed $'%macro m 0\n    nop\n'"$HEAD" \
+    "macro_not_closed.asm:1:1: this %macro is not closed by %endmacro"
+assembly_refuses macro_count "$HEAD"$'%macro two 2\n    db %1, %2\n%endmacro\n    two 1\n' \
+    "macro_count.asm:7:5: 'two' takes 2 parameters, and 1 is given here"
+assembly_refuses error_directive "$HEAD"$'%error "the table is too large"\n' \
+    "error_directive.asm:4:1: the table is too large"
+assembly_refuses macro_recursion $'%macro rec 0\n    rec\n%endmacro\n'"$HEAD    rec"$'\n' \
+    "macro_recursion.asm:2:5: 'rec' is called inside macro calls 256 deep: a macro may be calling itself"
+assembly_refuses parameter_outside "$HEAD    mov eax, %1"$'\n' \
+    "parameter_outside.asm:4:14: '%1' is a parameter of a macro, and this line is in none"
+assembly_refuses if_label "$HEAD%if size > 2"$'\n%endif\n' \
+    "if_label.asm:4:5: 'size' has no value before assembly: the preprocessor computes with numbers and the macros that stand for them"
+assembly_refuses if_divide "$HEAD%define ZERO 0"$'\n%if 1/ZERO\n%endif\n' \
+    "if_divide.asm:5:6: division by zero"
+assembly_refuses define_count "$HEAD%define f(x) x"$'\n    mov eax, f(1, 2)\n' \
+    "define_count.asm:5:14: no %define of 'f' takes 2 arguments"
+assembly_refuses define_mixed $'%define f(x) x\n%define f 1\n' \
+    "define_mixed.asm:2:9: is already a %define with parameters; a name takes them or not"
+assembly_refuses unknown_directive "$HEAD%frobnicate"$'\n' \
+    "unknown_directive.asm:4:1: '%frobnicate' is not a directive of the preprocessor"
+assembly_refuses struc_instruction $'struc s\n.a: resd 1\n    mov eax, 1\nendstruc\n' \
+    "struc_instruction.asm:3:5: a struc holds fields: labels, resb, resw, resd, resq and align"
+assembly_refuses istruc_unknown $'section .data\nx: istruc nothing\niend\n'"$HEAD" \
+    "istruc_unknown.asm:2:11: names no struc written before it"
+assembly_refuses at_out_of_order $'struc s\n.a: resd 1\n.b: resd 1\nendstruc\nsection .data\nistruc s\n at s.b, dd 2\n at s.a, dd 1\niend\n'"$HEAD" \
+    "at_out_of_order.asm:8:2: the field begins before what the istruc already holds: write the fields in their order, each no larger than its room"
+
+# An error in a macro's expansion points at the line of the macro and names
+# the calls it came through, the innermost first.
+printf '%s' $'%macro load 1\n    mov eax, %1\n%endmacro\n%macro twice 1\n    load %1\n%endmacro\n'"$HEAD    twice nowhere"$'\n' > "$WORK/in_macro.asm"
+said=$("$STAND" assemble "$WORK/in_macro.asm" "$WORK/in_macro.o" 2>&1)
+want="in_macro.asm:2:14: 'nowhere' is never defined; a name from outside the program is declared with extern
+        mov eax, nowhere
+                 ^
+    in the macro 'load' called at line 5
+    in the macro 'twice' called at line 10"
+if [ "$said" = "$want" ]; then ok macro_call_chain; else fail macro_call_chain "said '$said'"; fi
 echo "boxasm: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]

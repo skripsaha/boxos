@@ -5,7 +5,6 @@
 #include "box/string.h"
 
 #define BOXASM_MAX_PASSES        64u
-#define BOXASM_MAX_SECTION_BYTES (1ull << 32)
 
 static const uint8_t BoxAsmEndbr64[4] = { 0xF3, 0x0F, 0x1E, 0xFA };
 
@@ -160,6 +159,21 @@ static int BoxAsmStatementSize(BoxAsmAssembler *Asm, BoxAsmStatement *Statement,
         if ((uint64_t)Count > Asm->Sections[Statement->Section].Align)
             Asm->Sections[Statement->Section].Align = (uint64_t)Count;
         break;
+    case BOXASM_STMT_PAD: {
+        int64_t Field;
+        uint64_t Target;
+
+        if ((Rc = BoxAsmEvaluateConstant(Asm, Statement->Count, Here, Statement->Section,
+                                         &Field)) != 0)
+            return Rc;
+        Target = Asm->Symbols[Statement->Symbol].Offset + (uint64_t)Field;
+        if (Field < 0 || Target < Here)
+            return BoxAsmFail(Asm, &Statement->Where,
+                              "the field begins before what the istruc already holds: write "
+                              "the fields in their order, each no larger than its room", NULL);
+        One = Target - Here;
+        break;
+    }
     default:
         break;
     }
@@ -481,8 +495,9 @@ static int BoxAsmEmitStatement(BoxAsmAssembler *Asm, BoxAsmStatement *Statement)
         return Rc;
     if (Statement->Kind == BOXASM_STMT_INSTRUCTION)
         return BoxAsmEmitInstruction(Asm, Statement, (uint64_t)Times);
-    if (Statement->Kind == BOXASM_STMT_ALIGN) {
-        uint8_t Fill = Statement->Section == BOXASM_SECTION_TEXT ? 0x90 : 0;
+    if (Statement->Kind == BOXASM_STMT_ALIGN || Statement->Kind == BOXASM_STMT_PAD) {
+        uint8_t Fill = Statement->Kind == BOXASM_STMT_ALIGN &&
+                       Statement->Section == BOXASM_SECTION_TEXT ? 0x90 : 0;
         for (Repeat = 0; (uint64_t)Repeat < Statement->Size; Repeat++)
             if (BoxAsmBufferAppend(Bytes, &Fill, 1u) != 0)
                 return -ERR_NO_MEMORY;
