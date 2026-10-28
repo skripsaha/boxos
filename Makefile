@@ -945,6 +945,9 @@ $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tag
 # parcel-host: tools/parcel_host.mk (a host test, its own file).
 include tools/parcel_host.mk
 
+# dog-ear-host: tools/dog_ear_host.mk (a host test, its own file).
+include tools/dog_ear_host.mk
+
 # Create OS signature file on first build
 $(TAGFS_OS_SIGNATURE): | $(BUILDDIR)
 	@echo "$(UNAME_S):$(UNAME_M)" > $@

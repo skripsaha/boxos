@@ -265,8 +265,8 @@ static void TallyNodeSaid(const TallySink* sink, uint64_t tree, const TallyPlace
         kprintf("[TagFS] the %s node of level %llu at blocks %s: and %u more of its copies do not hold; copy %u "
                 "is read, and the next Tally writes the node again\n", TallyTreeName(tree),
                 (unsigned long long)p->level, blocks, r->said.failed - one_by_one, r->said.failed + 1u);
-    if (sink->mended)
-        *sink->mended += r->said.failed;
+    if (sink->mend && r->said.failed)
+        sink->mend(sink->ctx, tree, p, r->said.failed);
     if (r->node.head_longer) {
         ksnprintf(words, sizeof(words), "a NodeHead is %u byte(s) longer than this reader knows — written "
                   "by a kernel that knows more", r->node.head_longer);
@@ -414,6 +414,31 @@ static error_t TallyVisit(uint64_t tree, const TallyPlace* p, bool leaves, const
         rc = p->level == 0 ? TallyLeafItems(tree, p, r, sink) : TallyInnerKids(tree, p, r, sink, st);
     }
     TallyNodeLetGo(&r->node);
+    return rc;
+}
+
+error_t TallyLeafRead(uint64_t tree, const TallyPlace* at, const TallySink* sink)
+{
+    TallyReading* r = kmalloc(sizeof(TallyReading));
+    error_t       rc;
+    if (!r)
+        return ERR_NO_MEMORY;
+    if (at->ptr.copies == 0) {
+        kfree(r);
+        return sink->rotten(sink->ctx, at, "its pointer: it does not read");
+    }
+    if ((rc = TallyNodeRead(at, &r->node, &r->said)) == OK) {
+        if (!r->node.unit.whole || r->node.head.tree != tree || r->node.head.level != 0) {
+            TallyCopiesWords(&r->said, r->words, sizeof(r->words));
+            rc = sink->rotten(sink->ctx, at, r->words);
+        } else {
+            if (sink->mend && r->said.failed)
+                sink->mend(sink->ctx, tree, at, r->said.failed);
+            rc = TallyLeafItems(tree, at, r, sink);
+        }
+    }
+    TallyNodeLetGo(&r->node);
+    kfree(r);
     return rc;
 }
 

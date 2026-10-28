@@ -5,6 +5,7 @@
 #include "../file_map/tail_slip.h"
 #include "../integrity/gloss.h"
 #include "../tag_registry/tag_registry.h"
+#include "../settle/dog_ear.h"
 
 /*
  * RibbonTranscribe — pass 2 of the ribbon (spec_v2 §4.5 п.5, §3.7): every
@@ -405,6 +406,7 @@ static error_t RibbonFileLaid(RibbonReplay* rp, RibbonStaged* s)
     FileMapStake stake = { .count = 0 };
     error_t      rc    = RibbonTagsMoved(old, s->rec, s->fid, true);
     memset(&where, 0, sizeof(where));
+    DogEarFileChanged(s->fid, old, s->rec);       /* changed since the Tally the mount stands on */
     if (rc == OK)
         rc = RibbonTagsMoved(s->rec, old, s->fid, false);
     if (rc == OK && s->rec) {
@@ -437,6 +439,7 @@ static error_t RibbonStageLaid(RibbonReplay* rp, RibbonStage* st)
         rc = RibbonFileLaid(rp, &st->files[i]);
     for (uint32_t i = 0; rc == OK && i < st->ncoins; i++) {
         const TallyTag* t = &st->coins[i].tag;
+        DogEarPut(TALLY_TAGS, (TallyKey){ st->coins[i].id, 0 }, (TallyKey){ st->coins[i].id + 1u, 0 });
         if (!st->coins[i].held) {
             rc = BookTagAsideNoted(st->coins[i].id, t);
             continue;
@@ -452,6 +455,7 @@ static error_t RibbonStageLaid(RibbonReplay* rp, RibbonStage* st)
         }
     }
     if (st->use_set) {
+        DogEarPut(TALLY_USE, (TallyKey){ 0, 0 }, (TallyKey){ 1, 0 });
         rp->use_set = true;
         rp->use     = st->use;
         rp->use_len = st->use_len;

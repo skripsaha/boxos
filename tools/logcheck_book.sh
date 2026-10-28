@@ -350,11 +350,32 @@ STAND_BOOK_RIBBON_BACK='[TESTS] stand_ribbon: what the test laid is put back'
 STAND_BOOK_STITCH_LAID='[TESTS] stand_stitch: the ribbon is sewn past where it stood'
 STAND_BOOK_STITCH_BACK='[TESTS] stand_stitch: the ribbon is put back as it was found'
 STAND_BOOK_DEFECT='\[(TagFS|Settle)\] DEFECT'
+# The stand's levers on the Tally's self-check (stand_dog_ear_tests.c,
+# StandDogEarLevered): each changes the state behind every Ink between its two
+# lines, and on a kernel not STRICT the Tally it asks for is refused by the
+# self-check's DEFECT (settle/binder_check.c, CheckDefect) — one line, of the
+# self-check's own words, between the two; a STRICT kernel stands them down.
+STAND_BOOK_LEVER='[TESTS] stand_dog_ear: a lever pulled behind every Ink'
+STAND_BOOK_LEVER_GO='[TESTS] stand_dog_ear: the lever let go'
+STAND_BOOK_LEVER_DEFECT='^\[TagFS\] DEFECT: the (FILES|DIGESTS) element \([0-9]+, [0-9]+\) (differs from the Tally before.s|is not in the Tally before|is in the Tally before and not in this one), and DogEar does not hold its key'
 STAND_BOOK_MAP_SHORT='^\[TagFS\] this volume is NOT mounted: its block map is short of memory: [1-9][0-9]* mixed window'
 STAND_BOOK_MAP_MET='^\[TagFS FSCK\] the run of 3 block\(s\) from data block [0-9]+ that the tally claims meets 2 taken already'
 STAND_BOOK_MAP_FREED='^\[TagFS FSCK\] the run of 1 block\(s\) from data block [0-9]+ that file [0-9]+ lets go meets 1 free already'
 STAND_BOOK_MAP_PAST='^\[TagFS FSCK\] more claims and releases on the block map meet blocks so already than are named one by one \(32\)'
 STAND_BOOK_MAP_COUNT='^\[TagFS FSCK\] and 10 more claim\(s\) and release\(s\) on the block map met blocks so already'
+
+# stand_book_defects LOG — every defect of TagFS a boot of a book said that no
+# lever of the stand drew: each line of STAND_BOOK_DEFECT outside the levers'
+# lines, and inside a lever's any but the one self-check DEFECT it draws — a
+# lever that drew none, or more than one, named. Empty for a boot with none.
+stand_book_defects() {
+    DEFECT="$STAND_BOOK_DEFECT" DRAWN="$STAND_BOOK_LEVER_DEFECT" awk -v on="$STAND_BOOK_LEVER" \
+        -v off="$STAND_BOOK_LEVER_GO" '
+        index($0, on) == 1  { pulled = 1; drawn = 0; what = $0; next }
+        index($0, off) == 1 { if (pulled && drawn != 1) print "a lever drew " drawn " DEFECT(s) of the self-check, not one: " what
+                              pulled = 0; next }
+        $0 ~ ENVIRON["DEFECT"] { if (pulled && $0 ~ ENVIRON["DRAWN"] && drawn++ == 0) next; print }' "$1"
+}
 
 # stand_book_judge TAG WHAT BLOCKFAILS ASIDE PORT IMG — one boot of a book:
 # ASIDE the one stand_tally test that may stand down there, or empty; PORT
@@ -399,8 +420,9 @@ stand_book_judge() {
     chk $? "stand: $what — no panic"
     ! grep -aqE "$STAND_MIRROR_DEFECT" "$L"
     chk $? "stand: $what — every live file of the map stood as its record, with no row to disagree with"
-    ! grep -aqE "$STAND_BOOK_DEFECT" "$L"
-    chk $? "stand: $what — no defect of TagFS said: no door below the glass reached by a road nobody shut, no code of format v1 asked for a LAYOUT, no cycle asked ($(grep -aE "$STAND_BOOK_DEFECT" "$L" | head -1 | cut -c1-120))"
+    got=$(stand_book_defects "$L")
+    [ -z "$got" ]
+    chk $? "stand: $what — no defect of TagFS said but the one each lever of the stand draws from the Tally's self-check: no door below the glass reached by a road nobody shut, no code of format v1 asked for a LAYOUT, no cycle asked, no element of a Tally changed outside DogEar ($(echo "$got" | head -1 | cut -c1-120))"
     got=$(grep -ac '^\[BLOCKFAIL\] seat [0-9]*: ' "$L")
     t=$(grep -aoE "$STAND_BOOK_REFUSED" "$L" | sed -E "s/$STAND_BOOK_REFUSED/\1/" | awk '{ n += $1 } END { print n + 0 }')
     [ "$got" = "$((want + t))" ] && [ "$t" -gt 0 ]

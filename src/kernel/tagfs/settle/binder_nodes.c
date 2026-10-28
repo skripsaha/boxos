@@ -237,14 +237,19 @@ static bool ItemRotten(const BinderWork* w, TallyKey key)
 }
 
 /* The node of this level filled until it is full, or its elements are spent:
- * *laid when one was laid; nothing laid and nothing held, the level is done. */
-static error_t LevelStep(BinderWork* w, bool* laid)
+ * *spent when the turn is — a node laid, or the self-check owed a leaf of the
+ * Tally before the next turn reads, the element held for it; nothing laid and
+ * nothing held, the level is done. */
+static error_t LevelStep(BinderWork* w, bool* spent)
 {
     BinderItems* p = &w->items;
-    *laid = false;
+    *spent = false;
     for (;;) {
-        bool    got = p->held;
-        error_t rc  = OK;
+#if BINDER_CHECKS
+        bool    fresh = !p->held || BinderCheckOwed();  /* not one held back from the node before, checked */
+#endif
+        bool    got   = p->held;
+        error_t rc    = OK;
         if (!got)
             rc = w->level == 0 ? BinderLeafItemNext(w, &p->item, &got) : BinderInnerItemNext(w, &p->item, &got);
         if (rc != OK)
@@ -258,21 +263,30 @@ static error_t LevelStep(BinderWork* w, bool* laid)
                     (unsigned long long)p->item.key.k1, (unsigned long long)p->item.key.k2);
             return ERR_TAGFS_CORRUPTED;
         }
+#if BINDER_CHECKS
+        if (w->level == 0 && fresh && !w->measuring && (rc = BinderCheckItem(w, &p->item)) != OK)
+            return rc;
+        if (BinderCheckOwed()) {
+            p->held = true;
+            *spent  = true;
+            return OK;
+        }
+#endif
         if (FillBarred(w, p->item.key) || !FillTakes(w, &p->item)) {
             p->held = true;
-            *laid   = true;
+            *spent  = true;
             return FillLay(w);
         }
         if ((rc = FillAdd(w, &p->item)) != OK)
             return rc;
         if (FillLong(w)) {
-            *laid = true;
+            *spent = true;
             return FillLay(w);
         }
     }
     if (w->fill.n == 0)
         return OK;
-    *laid = true;
+    *spent = true;
     return FillLay(w);
 }
 
@@ -367,6 +381,11 @@ static void LevelEnded(BinderWork* w)
     if (lv->n == 1u && !rot) {
         w->root[w->tree] = (BinderRoot){ .laid = true, .level = w->level, .items = lv->kid[0].count,
                                          .sheets = lv->kid[0].sheets, .off = lv->kid[0].off };
+        if (!w->measuring) {
+            TallyPtr ptr = { .seq = w->seq, .sheets = lv->kid[0].sheets, .copies = 2u, .more = 0,
+                             .block = { w->a + lv->kid[0].off, w->b + lv->kid[0].off } };
+            FoliationDraftNode(w->tree, w->level, lv->kid[0].key, true, lv->kid[0].count, &ptr);
+        }
     } else if ((lv->n || rot) && w->level + 1u < BINDER_LEVELS_MOST) {
         w->level++;
         w->kid_at = 0;
@@ -396,15 +415,44 @@ void BinderNodesBegin(BinderWork* w)
         EndpaperLaidNode(&w->laid, w->rot[i].tree, w->rot[i].at.level, 0, w->grid,
                          w->rot[i].at.has_lo ? w->rot[i].at.lo.k1 : 0);
     TreeBegin(w, TreeAfter(0));
+    if (w->measuring)
+        return;
+    FoliationDraftBegin();
+#if BINDER_CHECKS
+    BinderCheckBegin();
+#endif
+}
+
+/* A tree's leaves spent: what is left of the Tally before's under them held
+ * to DogEar, a leaf of it a turn (binder_check.c) — *more while some is. */
+static error_t LeavesSpent(BinderWork* w, bool* more)
+{
+    *more = false;
+#if BINDER_CHECKS
+    if (w->level == 0 && !w->measuring)
+        return BinderCheckTreeEnd(w, more);
+#else
+    (void)w;
+#endif
+    return OK;
 }
 
 error_t BinderNodeNext(BinderWork* w, bool* done)
 {
     *done = false;
+#if BINDER_CHECKS
+    BinderCheckTurn();
+#endif
     while (!w->trees_done) {
-        bool    laid = false;
-        error_t rc   = LevelStep(w, &laid);
-        if (rc != OK || laid)
+        bool    spent = false, more = false;
+        error_t rc    = OK;
+#if BINDER_CHECKS
+        if (!(w->level == 0 && !w->measuring && BinderCheckDraining()))
+#endif
+            rc = LevelStep(w, &spent);
+        if (rc != OK || spent)
+            return rc;
+        if ((rc = LeavesSpent(w, &more)) != OK || more)
             return rc;
         LevelEnded(w);
     }

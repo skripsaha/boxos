@@ -435,6 +435,8 @@ error_t BinderInnerItemNext(BinderWork* w, BinderItem* it, bool* got)
             return ERR_NO_MEMORY;
         *it = (BinderItem){ .key = RotKey(rot), .count = rot->at.count, .body = p->buf,
                             .len = TallyInnerPut(p->buf, rot->at.count, ptr, plen) };
+        if (!w->measuring)
+            FoliationDraftNode(w->tree, w->level - 1u, it->key, false, rot->at.count, &rot->at.ptr);
         w->rot_at++;
         return OK;
     }
@@ -445,6 +447,11 @@ error_t BinderInnerItemNext(BinderWork* w, BinderItem* it, bool* got)
         return ERR_NO_MEMORY;
     *it = (BinderItem){ .key = kid->key, .count = kid->count, .body = p->buf,
                         .len = TallyInnerPut(p->buf, kid->count, ptr, plen) };
+    if (!w->measuring) {
+        TallyPtr laid = { .seq = w->seq, .sheets = kid->sheets, .copies = 2u, .more = 0,
+                          .block = { blocks[0], blocks[1] } };
+        FoliationDraftNode(w->tree, w->level - 1u, kid->key, false, kid->count, &laid);
+    }
     w->kid_at++;
     return OK;
 }

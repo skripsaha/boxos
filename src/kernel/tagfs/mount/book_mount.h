@@ -263,9 +263,13 @@ error_t BookRangeRots(const TallyPlace* at, const char* why);
 error_t BookGroundCensus(const char** what);
 
 /* Every node of the Tally the mount stands on a walk reaches, every copy its
- * pointer names, claimed for the census as that slot names it
- * (book_ground.c) — a TallySink's `node`. */
+ * pointer names, claimed for the census as that slot names it, and noted in
+ * the Foliation (book_ground.c) — a TallySink's `node`; and a node of it read
+ * past a copy that did not hold, counted and written again by the next Tally —
+ * a leaf's keys into DogEar, an inner node marked in the Foliation — a
+ * TallySink's `mend`. */
 error_t BookGroundNode(void* ctx, const TallyPlace* at);
+void    BookGroundMended(void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed);
 
 /* A run of ground a locked file is known to name: what of it lies in the data
  * run held unless another owns it, all of it counted in the census's reach. */

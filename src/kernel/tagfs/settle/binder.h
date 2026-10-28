@@ -442,7 +442,7 @@ void        BinderStandTearSlot(uint32_t sectors);
 /* What the Binder holds, for the stand: the slot it would write next, the
  * useful bytes past the newest slot's `at`, what the next Tally is reckoned to
  * cost in bytes, the Quires of the ribbon the slots hold, the blocks the last
- * Tally took in one copy. */
+ * Tally took in one copy, the elements its self-check held. */
 typedef struct {
     uint32_t next_slot;
     uint64_t useful;
@@ -451,6 +451,7 @@ typedef struct {
     uint64_t tally_blocks;
     uint64_t tallies;        /* written by this mount */
     bool     owed;
+    uint64_t checked;        /* elements of the last Tally its self-check held to the Tally before */
 } BinderStandSaid;
 void        BinderStand(BinderStandSaid* out);
 

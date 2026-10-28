@@ -241,7 +241,7 @@ static error_t BookTree(const SpineRoot* root)
 {
     char      words[192];
     TallySink sink = { .ctx = NULL, .item = NULL, .node = BookGroundNode, .said = true,
-                       .mended = &g_book.said.mended, .shapes = &g_book.said.shapes };
+                       .mend = BookGroundMended, .shapes = &g_book.said.shapes };
     bool derived = root->tree == TALLY_MAP || root->tree == TALLY_SHARED || (root->flags & TALLY_ROOT_DERIVED);
 
     g_book.laid_tree = root->tree;
