@@ -2,29 +2,30 @@
  * executor.c — BoxOS shell command executor
  *
  * Built-in commands are looked up in g_commands[].
- * External commands are spawned via proc_exec_gen() with the typed line as
- * their Luggage; the child's end is waited for as a STATE (process_gone).
+ * External commands are programs found by name, whose Form the typed line is
+ * sorted into (program.c, fill.c).
  */
 
 #include "executor.h"
 #include "shell.h"
 #include "commands/commands.h"
+#include "parser.h"
+#include "program.h"
+#include "fill.h"
 #include "box/string.h"
-#include "box/system.h"
-#include "box/touch.h"
-#include "box/debug.h"
 #include "box/error.h"
 #include "box/core/result.h"
 #include "box/print.h"
 
-static char g_error[SHELL_ERROR_MAX];
+static char        g_error[SHELL_ERROR_MAX];
+static const char *g_line = "";
 
 /* =========================================================================
  * Command table — all built-in commands registered here
  * ========================================================================= */
 
 const ShellCommand g_commands[] = {
-    {"help",  cmd_help,  "help",       "Show available commands"},
+    {"help",  cmd_help,  "help [NAME]", "Show commands, or what a program takes"},
     {"use",   cmd_use,   "use [tags]", "Set/clear the Use Context"},
     {"exit",  cmd_exit,  "exit",       "Exit shell (or Ctrl+Q)"},
     {"clear", cmd_clear, "clear",      "Clear screen"},
@@ -36,6 +37,7 @@ const ShellCommand g_commands[] = {
      * remain; this is the copy that cannot be taken away. */
     {"said",  cmd_said,  "said [before]",
                                  "What this machine said (add a NAME to file it)"},
+    {"run",   cmd_run,   "run THING",  "Start a program given as a file, or `it`"},
     {NULL, NULL, NULL, NULL}
 };
 
@@ -43,61 +45,21 @@ const ShellCommand g_commands[] = {
  * External command execution
  * ========================================================================= */
 
-/* The shell no longer subscribes to process:died at all.
- *
- * It used to claim that multicast and read a child's exit off the TouchRing.
- * The claim carried two costs and one defect. It had to be armed BEFORE the
- * spawn and drained after, because a claim is a subscription to EDGES and an
- * edge that arrives before you listen is simply not there. And a multicast is
- * best-effort: TouchPublish may drop, and a dropped death left the shell
- * waiting for one for the rest of the boot — measured on a wedged UEFI 16c
- * machine, fifteen cores parked and the shell spinning in touch_wait forever,
- * with no prompt ever again.
- *
- * process_gone asks the same question as a STATE instead, so there is no
- * before-and-after to get wrong, nothing to pre-arm, nothing to drain, and
- * nothing that can be dropped. */
-
-/* The line goes to the child whole, as typed: it is the child's Luggage,
- * in its cabin before its first instruction. Nothing is sent after the
- * spawn, so there is no message to be late, no buffer to fill, no word to
- * cut short — the 240-byte IPC buffer, the 64-byte words and the child's
- * one-second wait for them are all gone with it. */
+/* The programs the name means are found the way the kernel would find them
+ * and the person is asked which when there are several. The words after the
+ * name are sorted into the program's Form (fill.c), which starts it and waits
+ * for its end. 0 when the command was handled, and anything it had to say was
+ * said; else the reason no program was found. */
 static int RunExternal(const char *name, const char *line)
 {
-    uint32_t gen = 0;
-    int pid = proc_exec_gen(line, NULL, &gen);
-    if (pid <= 0) {
-        /* Carried up, not flattened. "There is no such program" and "the
-         * program is there and would not start" are different facts, and the
-         * caller printed the same sentence for both. */
-        return (pid == 0) ? -ERR_SPAWN_FAILED : pid;
-    }
+    file_id_t program;
+    int picked = ProgramPick(name, &program);
+    if (picked == PROGRAM_SAID)
+        return 0;
+    if (picked < 0)
+        return picked;
 
-    /* Wait until THIS child is gone — one park, no clock, nothing to poll.
-     *
-     * The kernel answers from the child's own record: already finished is
-     * reported at once, still running is parked on, and the single place a
-     * life ends pays every waiter it owes. Because the question is about a
-     * state rather than an event, there is no window between asking and being
-     * registered — the shape of failure that used to hang this shell (a
-     * dropped process:died) has no room left to happen.
-     *
-     * A missing answer would now be a kernel defect that Nightwatch can prove,
-     * which is the other half of the repair: the old wait spun in userspace,
-     * so the shell stayed PROC_WORKING and that spin also kept every core from
-     * ever looking idle — the oracle was blinded twice over, which is why this
-     * took three sessions to name. A parked waiter is visible. */
-    int32_t child_exit = 0;
-    int     gone_rc    = process_gone((uint32_t)pid, gen, &child_exit);
-    if (gone_rc != 0) {
-        /* The only honest failure left: the kernel says this incarnation was
-         * never issued, i.e. it vanished between spawn and ask. Say it rather
-         * than return as if the program had run. */
-        kdbg_print("[shell] '%s' (pid %d gen %u): process.gone refused — rc=%d",
-                   name, pid, gen, gone_rc);
-    }
-
+    FillAndRun(program, name, ParserRest(line, 1));
     return 0;
 }
 
@@ -108,6 +70,7 @@ static int RunExternal(const char *name, const char *line)
 int ExecutorRun(ParsedCommand *cmd, const char *line)
 {
     g_error[0] = '\0';
+    g_line = line ? line : "";
 
     if (!cmd || cmd->argc == 0 || !line) {
         memcpy(g_error, "No command", 11);
@@ -162,6 +125,11 @@ int ExecutorRun(ParsedCommand *cmd, const char *line)
         g_error[name_len + tail_len] = '\0';
     }
     return -1;
+}
+
+const char *ExecutorLine(void)
+{
+    return g_line;
 }
 
 const char *ExecutorGetError(void)
