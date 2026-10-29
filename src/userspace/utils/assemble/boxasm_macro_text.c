@@ -397,7 +397,7 @@ static int BoxAsmPpIsOff(const BoxAsmPpOff *Off, uint32_t Macro)
 }
 
 static int BoxAsmPpExpandText(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text,
-                              BoxAsmBuffer *Out, const BoxAsmPpOff *Off, uint32_t Depth);
+                              BoxAsmBuffer *Out, const BoxAsmPpOff *Off, uintptr_t Start);
 
 /* A %define's body with its parameters replaced by the arguments, and %+
  * joining what stands beside it, NUL-ended in Out. */
@@ -513,7 +513,7 @@ static int BoxAsmPpBuiltin(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmP
  * the arguments a macro with parameters takes. */
 static int BoxAsmPpExpandWord(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text,
                               size_t *At, const BoxAsmPpToken *Token, BoxAsmBuffer *Out,
-                              const BoxAsmPpOff *Off, uint32_t Depth)
+                              const BoxAsmPpOff *Off, uintptr_t Start)
 {
     BoxAsmBuffer Bound = { 0 };
     BoxAsmPpOff Inner;
@@ -561,20 +561,19 @@ static int BoxAsmPpExpandWord(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char
     Inner.Macro = Macro;
     Inner.Up = Off;
     if (Rc == 0)
-        Rc = BoxAsmPpExpandText(Pp, Line, (const char *)Bound.Data, Out, &Inner, Depth + 1u);
+        Rc = BoxAsmPpExpandText(Pp, Line, (const char *)Bound.Data, Out, &Inner, Start);
     BoxAsmBufferRelease(&Bound);
     return Rc;
 }
 
 static int BoxAsmPpExpandText(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text,
-                              BoxAsmBuffer *Out, const BoxAsmPpOff *Off, uint32_t Depth)
+                              BoxAsmBuffer *Out, const BoxAsmPpOff *Off, uintptr_t Start)
 {
     size_t At = 0;
     int Rc = 0;
 
-    if (Depth > BOXASM_MACRO_NESTING)
-        return BoxAsmPpFail(Pp, Line, NULL,
-                            "the %defines expand inside one another more than 1000 deep", NULL);
+    if (BoxAsmTooDeep(Pp->Asm, Start))
+        return BoxAsmPpFail(Pp, Line, NULL, "the %defines expand inside one another too deep", NULL);
     for (;;) {
         BoxAsmPpToken Token;
 
@@ -582,7 +581,7 @@ static int BoxAsmPpExpandText(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char
         if (Token.Kind == BOXASM_PP_END)
             return 0;
         if (Token.Kind == BOXASM_PP_WORD)
-            Rc = BoxAsmPpExpandWord(Pp, Line, Text, &At, &Token, Out, Off, Depth);
+            Rc = BoxAsmPpExpandWord(Pp, Line, Text, &At, &Token, Out, Off, Start);
         else
             Rc = BoxAsmPpAppend(Out, Token.Text, Token.Length);
         if (Rc != 0)
@@ -597,7 +596,7 @@ int BoxAsmPpExpand(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text, Box
     int Rc;
 
     Out->Size = 0;
-    Rc = BoxAsmPpExpandText(Pp, Line, Text, Out, NULL, 0);
+    Rc = BoxAsmPpExpandText(Pp, Line, Text, Out, NULL, (uintptr_t)__builtin_frame_address(0));
     if (Rc == 0) {                             /* the comment goes along as it was */
         do
             BoxAsmPpNext(Text, &At, &Token);
@@ -616,6 +615,7 @@ typedef struct {
     const BoxAsmPpLine *Line;
     const char         *Text;
     size_t              At;
+    uintptr_t           Start;     /* the stack where the expression began */
 } BoxAsmPpEval;
 
 typedef enum {
@@ -755,6 +755,9 @@ static int BoxAsmPpUnary(BoxAsmPpEval *Eval, int64_t *Out)
     int Rc;
 
     BoxAsmPpSkip(Eval);
+    if (BoxAsmTooDeep(Eval->Pp->Asm, Eval->Start))
+        return BoxAsmPpFail(Eval->Pp, Eval->Line, Eval->Text + Eval->At,
+                            "the expression nests too deep", NULL);
     Operator = Eval->Text[Eval->At];
     if (Operator != '-' && Operator != '+' && Operator != '~' && Operator != '!')
         return BoxAsmPpPrimary(Eval, Out);
@@ -843,7 +846,7 @@ static int BoxAsmPpLevelOf(BoxAsmPpEval *Eval, BoxAsmPpLevel Level, int64_t *Out
 
 int BoxAsmPpEvaluate(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text, int64_t *Out)
 {
-    BoxAsmPpEval Eval = { Pp, Line, Text, 0 };
+    BoxAsmPpEval Eval = { Pp, Line, Text, 0, (uintptr_t)__builtin_frame_address(0) };
     int Rc;
 
     BoxAsmPpSkip(&Eval);

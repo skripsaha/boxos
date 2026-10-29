@@ -9,6 +9,13 @@
 
 #define BOXASM_SHOWN_LINE 120u
 
+/* The stack the work may take: of the 64 KiB a BoxOS program has, what the
+ * command takes before the work begins, what an inner construct takes before
+ * it is the one named (BOXASM_STACK_OWN), and what one more level and a
+ * refusal take after the last look are left over. */
+#define BOXASM_STACK_BUDGET (40u << 10)
+#define BOXASM_STACK_OWN    (4u << 10)
+
 const char *const BoxAsmSectionNames[BOXASM_SECTION_COUNT] = {
     ".text", ".rodata", ".data", ".bss"
 };
@@ -36,6 +43,14 @@ int BoxAsmGrowArray(void **Items, size_t *Capacity, size_t Count, size_t Size)
     *Items = Grown;
     *Capacity = Fresh;
     return 0;
+}
+
+int BoxAsmTooDeep(const BoxAsmAssembler *Asm, uintptr_t Start)
+{
+    uintptr_t Here = (uintptr_t)__builtin_frame_address(0);
+
+    return Here < Asm->StackBase && Asm->StackBase - Here > BOXASM_STACK_BUDGET &&
+           Here < Start && Start - Here > BOXASM_STACK_OWN;
 }
 
 /* ---- Diagnostics -------------------------------------------------------- */
@@ -98,12 +113,27 @@ int BoxAsmFailEnd(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, BoxAsmMessa
     BoxAsmPlace(Asm, Where, &Source, &Frame);
     while (Asm->Expansion && Frame != 0 && Frame < Asm->Expansion->FrameCount) {
         const BoxAsmFrame *Call = &Asm->Expansion->Frames[Frame];
+        const char *Name = (const char *)Asm->Expansion->Names.Data + Call->Name;
+        uint32_t Times = 1;
 
+        /* A macro calling itself from one line is one line said once. */
+        Frame = Call->Parent;
+        while (Frame != 0 && Frame < Asm->Expansion->FrameCount &&
+               Asm->Expansion->Frames[Frame].Line == Call->Line &&
+               strcmp((const char *)Asm->Expansion->Names.Data +
+                      Asm->Expansion->Frames[Frame].Name, Name) == 0) {
+            Frame = Asm->Expansion->Frames[Frame].Parent;
+            Times++;
+        }
         BoxAsmMessageText(Message, "\n    in the macro ");
-        BoxAsmMessageName(Message, (const char *)Asm->Expansion->Names.Data + Call->Name);
+        BoxAsmMessageName(Message, Name);
         BoxAsmMessageText(Message, " called at line ");
         BoxAsmMessageDecimal(Message, Call->Line);
-        Frame = Call->Parent;
+        if (Times > 1) {
+            BoxAsmMessageText(Message, " (");
+            BoxAsmMessageDecimal(Message, Times);
+            BoxAsmMessageText(Message, " calls, one inside another)");
+        }
     }
     return -ERR_INVALID_ARGUMENT;
 }
@@ -189,6 +219,7 @@ int BoxAsmSourceAssemble(const char *Source, size_t SourceSize, const char *File
         return -ERR_NO_MEMORY;
     memset(&Expansion, 0, sizeof(Expansion));
     Rc = BoxAsmBegin(&Asm, FileName, Error, ErrorCapacity);
+    Asm.StackBase = (uintptr_t)__builtin_frame_address(0);
     if (Rc == 0)
         Rc = BoxAsmPreprocess(&Asm, Text, SourceSize, &Expansion);
     if (Rc == 0) {

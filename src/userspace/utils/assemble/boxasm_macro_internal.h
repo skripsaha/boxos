@@ -3,11 +3,9 @@
 
 #include "boxasm_macro.h"
 
-/* How far the preprocessor goes before it says the source runs away: calls
- * of macros inside macros, single-line expansions inside expansions, bytes
- * of expanded source, and lines walked (a %rep without output still walks). */
-#define BOXASM_MACRO_CALLS     256u
-#define BOXASM_MACRO_NESTING   1000u
+/* How far the preprocessor goes before it says the source runs away: bytes
+ * of expanded source, and lines walked (a %rep without output still walks).
+ * How deep macros nest is the stack's to say (BoxAsmTooDeep). */
 #define BOXASM_MACRO_OUTPUT    (16u << 20)
 #define BOXASM_MACRO_WALKED    50000000u
 #define BOXASM_MACRO_NAME      255u
@@ -81,7 +79,6 @@ typedef struct {
     size_t             ConditionCount;
     size_t             ConditionCapacity;
     BoxAsmCall        *Call;       /* the call being expanded, NULL outside one */
-    uint32_t           Calls;      /* calls open */
     uint32_t           Unique;     /* the last %%label number given */
     uint32_t           OuterReps;  /* %rep loops open outside any call */
     uint8_t            ExitRep;    /* %exitrep: the innermost %rep stops */

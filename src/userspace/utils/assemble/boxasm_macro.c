@@ -141,10 +141,10 @@ static int BoxAsmPpInvoke(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPp
         return BoxAsmPpCountMismatch(Pp, Line, Name->Text, First, Count);
     }
     Macro = &Pp->Multis[Index - 1u];
-    if (Pp->Calls >= BOXASM_MACRO_CALLS) {
+    if (BoxAsmTooDeep(Pp->Asm, Pp->Asm->StackBase)) {
         BoxAsmPpFreeList(Args, Count);
         return BoxAsmPpFail(Pp, Line, Name->Text,
-                            "is called inside macro calls 256 deep: a macro may be calling itself",
+                            "is called inside macro calls too deep: a macro may be calling itself",
                             Macro->Name);
     }
     /* The parameters left out that have defaults take them, and %0 counts
@@ -184,9 +184,7 @@ static int BoxAsmPpInvoke(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPp
     Call.Reps = 0;
     Outer = Pp->Call;
     Pp->Call = &Call;
-    Pp->Calls++;
     Rc = BoxAsmPpLines(Pp, Body, Macro->BodyCount);
-    Pp->Calls--;
     Pp->Call = Outer;
     free(Body);
     BoxAsmPpFreeList(Args, Count);

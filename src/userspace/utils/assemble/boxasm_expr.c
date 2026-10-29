@@ -135,6 +135,8 @@ static int BoxAsmParsePrimary(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmTo
 
     memset(&Node, 0, sizeof(Node));
     Node.Where = Token->Where;
+    if (BoxAsmTooDeep(Asm, Asm->StackBase))
+        return BoxAsmFail(Asm, &Token->Where, "the expression nests too deep", NULL);
     if (BoxAsmTokenIsPunct(Token, '-') || BoxAsmTokenIsPunct(Token, '~') ||
         BoxAsmTokenIsPunct(Token, '+')) {
         uint16_t Operator = Token->Punct;
@@ -345,6 +347,10 @@ int BoxAsmEvaluate(BoxAsmAssembler *Asm, uint32_t Expr, uint64_t Here,
     int Rc;
 
     memset(Out, 0, sizeof(*Out));
+    if (BoxAsmTooDeep(Asm, Asm->StackBase))
+        return BoxAsmFail(Asm, &Node->Where,
+                          "the expression is too deep to work out: too many operations, "
+                          "and names defined by names, inside one another", NULL);
     switch (Node->Kind) {
     case BOXASM_EXPR_NUMBER:
         Out->Constant = (int64_t)Node->Number;

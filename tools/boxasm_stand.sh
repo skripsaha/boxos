@@ -298,7 +298,7 @@ assembly_refuses macro_count "$HEAD"$'%macro two 2\n    db %1, %2\n%endmacro\n  
 assembly_refuses error_directive "$HEAD"$'%error "the table is too large"\n' \
     "error_directive.asm:4:1: the table is too large"
 assembly_refuses macro_recursion $'%macro rec 0\n    rec\n%endmacro\n'"$HEAD    rec"$'\n' \
-    "macro_recursion.asm:2:5: 'rec' is called inside macro calls 256 deep: a macro may be calling itself"
+    "macro_recursion.asm:2:5: 'rec' is called inside macro calls too deep: a macro may be calling itself"
 assembly_refuses parameter_outside "$HEAD    mov eax, %1"$'\n' \
     "parameter_outside.asm:4:14: '%1' is a parameter of a macro, and this line is in none"
 assembly_refuses if_label "$HEAD%if size > 2"$'\n%endif\n' \
@@ -328,5 +328,52 @@ want="in_macro.asm:2:14: 'nowhere' is never defined; a name from outside the pro
     in the macro 'load' called at line 5
     in the macro 'twice' called at line 10"
 if [ "$said" = "$want" ]; then ok macro_call_chain; else fail macro_call_chain "said '$said'"; fi
+
+# ---- depth: the stack a BoxOS program has ------------------------------------
+# A source nests as deep as it likes; `assemble` has 64 KiB of stack and a
+# guard page past it. The stand is built again as BoxOS builds the command —
+# no optimisation — and run on 64 KiB: each source below refuses in words, the
+# place it names being wherever the stack ran short.
+STAND0=$WORK/boxasm_stand_o0
+$CC_HOST -std=c11 -O0 -w -I"$ASM_DIR" -Isrc/userspace/boxlib/include -Isrc/include \
+    tools/boxasm_stand.c $(ls "$ASM_DIR"/*.c | grep -v '/assemble[^/]*\.c$') -o "$STAND0" ||
+    { echo "boxasm: harness failed — the unoptimised stand did not compile"; exit 2; }
+python3 - "$WORK" <<'EOF'
+import sys
+work = sys.argv[1]
+head = 'section .text\nglobal main\nmain:\n    ret\n'
+deep = {
+    'deep_macro': '%macro rec 0\n    rec\n%endmacro\n' + head + '    rec\n',
+    'deep_counting': '%macro count 1\n%if %1 > 0\n    db %1\n    count %1-1\n%endif\n%endmacro\n'
+                     + head + 'section .data\n    count 100000\n',
+    'deep_defines': '\n'.join(['%define d0 1'] + ['%%define d%d d%d' % (i, i - 1) for i in range(1, 900)])
+                    + '\n' + head + 'section .data\n    dd d899\n',
+    'deep_parentheses': head + 'section .data\n    dd ' + '(' * 3000 + '1' + ')' * 3000 + '\n',
+    'deep_if': head + '%if ' + '(' * 3000 + '1' + ')' * 3000 + '\n%endif\n',
+    'deep_sum': head + 'section .data\n    dd ' + '+'.join(['1'] * 20000) + '\n',
+    'deep_equ': head + 'c0 equ 1\n' + '\n'.join('c%d equ c%d+1' % (i, i - 1) for i in range(1, 3000))
+                + '\nsection .data\n    dd c2999\n',
+}
+for name, text in deep.items():
+    with open('%s/%s.asm' % (work, name), 'w') as f:
+        f.write(text)
+EOF
+deep_refuses() {
+    local name=$1 want=$2 said rc
+    said=$( (ulimit -s 64; "$STAND0" assemble "$WORK/$name.asm" "$WORK/$name.o") 2>&1 | head -1)
+    rc=$( (ulimit -s 64; "$STAND0" assemble "$WORK/$name.asm" "$WORK/$name.o" > /dev/null 2>&1); echo $?)
+    said=$(printf '%s' "$said" | sed -E 's/^[^:]+:[0-9]+:[0-9]+: //')
+    if [ "$rc" != 1 ]; then fail "$name" "ended with $rc instead of refusing"
+    elif [ "$said" != "$want" ]; then fail "$name" "said '$said', expected '$want'"
+    else ok "$name"; fi
+}
+deep_refuses deep_macro "'rec' is called inside macro calls too deep: a macro may be calling itself"
+deep_refuses deep_counting "'count' is called inside macro calls too deep: a macro may be calling itself"
+deep_refuses deep_defines "the %defines expand inside one another too deep"
+deep_refuses deep_parentheses "the expression nests too deep"
+deep_refuses deep_if "the expression nests too deep"
+deep_refuses deep_sum "the expression is too deep to work out: too many operations, and names defined by names, inside one another"
+deep_refuses deep_equ "the expression is too deep to work out: too many operations, and names defined by names, inside one another"
+
 echo "boxasm: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]
