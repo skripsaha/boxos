@@ -518,7 +518,7 @@ static void test_arrow(void)
 }
 
 static void check_luggage(const char *label, const char *form_text, const char *line, const char *program,
-                          const char *want, size_t want_length)
+                          bool souvenir, const char *want, size_t want_length)
 {
     BoxForm        form;
     BoxFormLookup  lookup = { stand_find, stand_all, g_them, g_them_count, g_them_known };
@@ -532,6 +532,7 @@ static void check_luggage(const char *label, const char *form_text, const char *
     form_fill_step(filler, &question);
     check_int(label, question.Step, BOX_FORM_DONE);
     if (program) form_fill_program(filler, program);
+    if (souvenir) check_int(label, form_fill_souvenir(filler), 0);
     check_int(label, form_fill_luggage(filler, 77, &bytes, &length), 0);
     check(length == want_length && memcmp(bytes, want, want_length) == 0, label, bytes, want);
     free(bytes);
@@ -542,7 +543,9 @@ static void check_luggage(const char *label, const char *form_text, const char *
 #define TAG_BYTES "tag a.txt done\0filled 1\0field things\0#1\0field words\0=done\0screen #77\0"
 
 #define BYTES(label, form, line, program, text) \
-    check_luggage(label, form, line, program, text, sizeof(text) - 1)
+    check_luggage(label, form, line, program, false, text, sizeof(text) - 1)
+#define SOUVENIR_BYTES(label, form, line, program, text) \
+    check_luggage(label, form, line, program, true, text, sizeof(text) - 1)
 
 static void test_luggage_bytes(void)
 {
@@ -554,6 +557,10 @@ static void test_luggage_bytes(void)
     BYTES("bytes no program", WORDS, "x  y", NULL, "x  y\0filled 1\0field words\0=x\0=y\0screen #77\0");
     BYTES("bytes no words", "form 1\n", "", "prog", "prog\0filled 1\0screen #77\0");
     BYTES("bytes undeclared", "form 1\n", "", NULL, "\0filled 1\0screen #77\0");
+    SOUVENIR_BYTES("bytes souvenir", TAG, "a.txt done", "tag", TAG_BYTES "souvenir\0");
+    SOUVENIR_BYTES("bytes souvenir undeclared", "form 1\n", "", "prog",
+                   "prog\0filled 1\0screen #77\0souvenir\0");
+    check_int("souvenir no filler", form_fill_souvenir(NULL), -ERR_INVALID_ARGUMENT);
 }
 
 /* ---- the Luggage, read ---------------------------------------------------- */
@@ -613,6 +620,9 @@ static void test_luggage_read(void)
     BAD("two screens", TAG, "t\0filled 1\0field things\0#1\0field words\0=a\0screen #2\0screen #3\0");
     BAD("bad screen", TAG, "t\0filled 1\0field things\0#1\0field words\0=a\0screen #x\0");
     BAD("unknown record", TAG, "t\0filled 1\0field things\0#1\0field words\0=a\0bogus\0");
+    BAD("two souvenirs", TAG, "t\0filled 1\0field things\0#1\0field words\0=a\0souvenir\0souvenir\0");
+    BAD("souvenir with a word", TAG, "t\0filled 1\0field things\0#1\0field words\0=a\0souvenir x\0");
+    BAD("souvenir before filled", TAG, "t\0souvenir\0filled 1\0field things\0#1\0field words\0=a\0");
     BAD("field for no form", "", "t\0filled 1\0field words\0=a\0");
 
     const char screen[] = "t\0filled 1\0field things\0#1\0field words\0=a\0screen #42\0";
@@ -621,6 +631,18 @@ static void test_luggage_read(void)
     check_int("screen bad", (long)form_records_screen("t\0filled 1\0screen #0x\0", 22), 0);
     check_int("screen twice", (long)form_records_screen("t\0screen #1\0screen #2\0", 22), 0);
     check_int("screen line only", (long)form_records_screen("screen #1", 9), 0);
+
+    const char asked[] = "t\0filled 1\0field things\0#1\0field words\0=a\0souvenir\0";
+    check_int("luggage souvenir", decode(TAG, asked, sizeof(asked) - 1), 1);
+    const char both[] = "t\0filled 1\0field things\0#1\0field words\0=a\0screen #2\0souvenir\0";
+    check_int("luggage screen and souvenir", decode(TAG, both, sizeof(both) - 1), 1);
+    check_int("luggage souvenir no form", decode("", "t\0filled 1\0souvenir\0", 20), 1);
+    check_int("souvenir read", form_records_souvenir(asked, sizeof(asked) - 1), 1);
+    check_int("souvenir absent", form_records_souvenir("t\0filled 1\0", 11), 0);
+    check_int("souvenir twice", form_records_souvenir("t\0souvenir\0souvenir\0", 20), 0);
+    check_int("souvenir as a word", form_records_souvenir("t\0filled 1\0field words\0=souvenir\0", 33), 0);
+    check_int("souvenir unended", form_records_souvenir("t\0filled 1\0souvenir", 19), 0);
+    check_int("souvenir line only", form_records_souvenir("souvenir", 8), 0);
 }
 
 /* ---- the Form's text ------------------------------------------------------ */
@@ -952,6 +974,29 @@ static void test_screen_file(void)
     check_int("screen file is read once", (long)form_screen_file(), 42);
 }
 
+/* A Souvenir is sent only when the Luggage asks for it: the shell's bytes with
+ * `souvenir`, not a line alone (started by a program, filled by BoxLib) and
+ * not records that leave it out. */
+static void test_souvenir_wanted(void)
+{
+    static const char shell[] = "tag a.txt\0filled 1\0field things\0#1\0souvenir\0";
+    static const char quiet[] = "tag a.txt\0filled 1\0field things\0#1\0";
+    static const char line[]  = "tag a.txt";
+
+    g_luggage_bytes  = shell;
+    g_luggage_length = sizeof(shell) - 1;
+    check_int("souvenir wanted", form_souvenir_wanted(), 1);
+    g_luggage_bytes  = quiet;
+    g_luggage_length = sizeof(quiet) - 1;
+    check_int("souvenir not asked", form_souvenir_wanted(), 0);
+    g_luggage_bytes  = line;
+    g_luggage_length = sizeof(line) - 1;
+    check_int("souvenir wanted line only", form_souvenir_wanted(), 0);
+    g_luggage_bytes  = NULL;
+    g_luggage_length = 0;
+    check_int("souvenir no luggage", form_souvenir_wanted(), 0);
+}
+
 int main(void)
 {
     reset_volume();
@@ -973,6 +1018,7 @@ int main(void)
     test_lookup_trouble();
     test_undeclared();
     test_screen_file();
+    test_souvenir_wanted();
     printf("form: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

@@ -49,6 +49,7 @@ struct BoxFormFiller {
     BoxFormLookup  *Lookup;
     char           *Line;
     char           *Program;
+    uint8_t         Souvenir;        /* the starter reads what the program gives back */
     FormItem       *Items;
     size_t          ItemCount;
     size_t          ItemCapacity;

@@ -63,6 +63,7 @@ extern "C" {
  *     #ID               a file of the field, its id in decimal
  *     =TEXT             a word of the field (a name and the text are one each)
  *     screen #ID        what the program prints is added to the end of this file
+ *     souvenir          the starter reads what the program gives back
  *
  * ---- The arrow and what a command gives --------------------------------
  *
@@ -71,8 +72,13 @@ extern "C" {
  * made, it gives back with souvenir_things(), and that is what `them` is
  * after it. Any other program writes to the screen, and the arrow turns the
  * screen into the file (`screen #ID`): then that file is what the command
- * gave, whatever the program gave back — `planets -> out.txt` makes `them`
- * and `it` the file out.txt. The shell does this once the program is gone.
+ * gave — `planets -> out.txt` makes `them` and `it` the file out.txt. The
+ * shell does this once the program is gone.
+ *
+ * A Souvenir goes only to a starter that asked for it (`souvenir`). The
+ * shell asks when it will keep it: the Form gives things and the arrow did
+ * not make the screen a file. A program started by anyone else gives back
+ * to no one.
  *
  * `them` is all that the last command gave; `it` is one file: the file when
  * it gave one, a question which when it gave several. A program that fills its
@@ -123,9 +129,10 @@ int         form_things(uint32_t field, const file_id_t **ids, size_t *count);
 int         form_words(uint32_t field, const char *const **words, size_t *count);
 const char *form_text(uint32_t field);
 
-/* Give files back to the one who started the program — the shell keeps them
- * as `them` for the next command. Called again, the files add up. 0, or a
- * negative -error_t (nobody to give them to is 0: given to no one). */
+/* Give files back to the one who started the program, when it asked for
+ * them — the shell keeps them as `them` for the next command. Called again,
+ * the files add up. 0, or a negative -error_t (nobody asked, or the one who
+ * did is gone: 0, given to no one). */
 int souvenir_things(const file_id_t *ids, size_t count);
 
 /* The shell's side: every file the program `from_pid` gave back, in the order
@@ -230,6 +237,10 @@ int  form_fill_sure(BoxFormFiller *filler, bool yes);
 /* The program's name as typed — word 0 of the Luggage, put before the line
  * the filler was given. Optional; before form_fill_luggage. */
 int  form_fill_program(BoxFormFiller *filler, const char *name);
+/* The starter will read what the program gives back: the Luggage asks the
+ * program for its Souvenir. Without it the program gives back to no one.
+ * Optional; before form_fill_luggage. */
+int  form_fill_souvenir(BoxFormFiller *filler);
 /* DONE: the arrow's file when the program has no `into` — its id, or 0 with
  * *create the name of a file to make first (the shell makes it); none: 0
  * and NULL. *create lives until form_fill_end. */

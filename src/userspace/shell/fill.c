@@ -131,10 +131,10 @@ static void WaitGone(const char *who, uint32_t pid, uint32_t generation)
 }
 
 /* What the command gave becomes `them`. When its screen went into a file
- * through the arrow, that file is what it gave, whatever the program gave
- * back; otherwise the program's Souvenir decides, when its Form says it gives
- * things. What it queued is read off either way so no stale gift is met later. */
-static void KeepGift(const BoxForm *form, uint32_t pid, file_id_t screen)
+ * through the arrow, that file is what it gave; otherwise the Souvenir the
+ * shell asked for. Whatever the program queued is read off either way, so no
+ * stale gift is met later. */
+static void KeepGift(bool asked, uint32_t pid, file_id_t screen)
 {
     file_id_t *given = NULL;
     size_t     count = 0;
@@ -148,7 +148,7 @@ static void KeepGift(const BoxForm *form, uint32_t pid, file_id_t screen)
         ThemKeep(given, 1);
         return;
     }
-    if (collected && form->Gives == BOX_FORM_GIVES_THINGS) {
+    if (collected && asked) {
         ThemKeep(given, count);
         return;
     }
@@ -160,6 +160,11 @@ static int Launch(BoxFormFiller *filler, const BoxForm *form, file_id_t program,
     file_id_t screen = 0;
     int       rc = ArrowScreen(filler, who, &screen);
     if (rc == 0) rc = form_fill_program(filler, who);
+
+    /* The Souvenir is asked for only when it becomes `them`: the Form gives
+     * things and the arrow did not make the screen a file. */
+    bool souvenir = screen == 0 && form->Gives == BOX_FORM_GIVES_THINGS;
+    if (rc == 0 && souvenir) rc = form_fill_souvenir(filler);
 
     char  *bytes = NULL;
     size_t length = 0;
@@ -175,7 +180,7 @@ static int Launch(BoxFormFiller *filler, const BoxForm *form, file_id_t program,
     }
 
     WaitGone(who, (uint32_t)pid, generation);
-    KeepGift(form, (uint32_t)pid, screen);
+    KeepGift(souvenir, (uint32_t)pid, screen);
     return 0;
 }
 

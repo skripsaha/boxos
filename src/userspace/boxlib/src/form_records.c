@@ -1,9 +1,11 @@
 /*
- * form_records.c — the walk over the records in Luggage bytes, and the one
- * record every program's output depends on: `screen #ID`, where the arrow
- * points. It is kept apart from the rest of Form so that a program which never
- * reads a Form links only this, and print.c can ask where its output goes
- * without the filler coming with it.
+ * form_records.c — the walk over the records in Luggage bytes, and the two
+ * records a program reads without its Form: `screen #ID`, where the arrow
+ * points, and `souvenir`, the starter asking for what the program gives back.
+ * They are kept apart from the rest of Form so that a program which never
+ * reads a Form links only this: print.c asks where its output goes, and
+ * souvenir_things() whether anyone wants its files, without the filler coming
+ * with them.
  */
 
 #include "box/core/form_internal.h"
@@ -65,6 +67,30 @@ file_id_t form_records_screen(const char *bytes, size_t length)
         if (screen != 0 || !form_records_id(text + 8, size - 8, &screen)) return 0;
     }
     return screen;
+}
+
+bool form_records_souvenir(const char *bytes, size_t length)
+{
+    FormRecords records;
+    if (!form_records_start(&records, bytes, length)) return false;
+
+    const char *text;
+    size_t      size;
+    bool        asked = false;
+
+    while (form_records_next(&records, &text, &size)) {
+        if (size == (size_t)-1) return false;
+        if (size != 8 || memcmp(text, "souvenir", 8) != 0) continue;
+        if (asked) return false;
+        asked = true;
+    }
+    return asked;
+}
+
+bool form_souvenir_wanted(void)
+{
+    Luggage l = luggage();
+    return l.length != 0 && form_records_souvenir(l.bytes, l.length);
 }
 
 file_id_t form_screen_file(void)

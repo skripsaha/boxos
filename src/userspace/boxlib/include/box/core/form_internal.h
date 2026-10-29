@@ -35,9 +35,10 @@ const char *form_kind_name(uint8_t kind);
 int         form_kind_of(const char *name, size_t length);
 
 /* The Luggage records for Values, after Line (Length bytes; the NUL after it
- * is written here). Screen 0 for none. */
-int form_records_encode(const FormValues *values, file_id_t screen, const char *line,
-                        size_t length, char **bytes, size_t *total);
+ * is written here). Screen 0 for none; Souvenir: the starter reads what the
+ * program gives back. */
+int form_records_encode(const FormValues *values, file_id_t screen, bool souvenir,
+                        const char *line, size_t length, char **bytes, size_t *total);
 
 /* The records of Luggage bytes read against Form (NULL: a program with no
  * Form). 1: decoded into Values and Screen. 0: there are no records — the
@@ -48,6 +49,9 @@ int form_records_decode(const BoxForm *form, const char *bytes, size_t length,
 
 /* Only the `screen #ID` record, read without a Form; 0 for none or a bad one. */
 file_id_t form_records_screen(const char *bytes, size_t length);
+/* Only the `souvenir` record, read without a Form: true when it is there
+ * once; none, two, or records that do not end, false. */
+bool      form_records_souvenir(const char *bytes, size_t length);
 
 /* Walking the records of Luggage bytes. */
 typedef struct {
@@ -84,6 +88,9 @@ void form_line_release(FormTokens *tokens);
 /* The program side: where the program's `screen #ID` file is, 0 for none.
  * Reads the Luggage only — it asks nobody and fills nothing. */
 file_id_t form_screen_file(void);
+/* The program side: the one who started the program asked for its Souvenir
+ * (`souvenir`). Reads the Luggage only. */
+bool      form_souvenir_wanted(void);
 
 #ifdef __cplusplus
 }

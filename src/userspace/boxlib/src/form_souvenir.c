@@ -1,6 +1,11 @@
 /*
  * form_souvenir.c — files a program gives back to the one who started it.
  *
+ * Only when that one asked: the starter says it in the Luggage (`souvenir`)
+ * and then reads what comes. A program started by anyone who did not ask —
+ * another program, a test, its own line filled by BoxLib — sends nothing, so
+ * no message lands in a queue whose owner never looks for it.
+ *
  * A souvenir is one IPC message to the spawner: a magic word, a count, then
  * that many file ids, each eight bytes. Many files go in several messages,
  * each as large as a message can be. The kernel queues a message before the
@@ -9,6 +14,7 @@
  */
 
 #include "box/form.h"
+#include "box/core/form_internal.h"
 #include "box/core/cabin.h"
 #include "box/core/result.h"
 #include "box/error.h"
@@ -24,7 +30,7 @@ int souvenir_things(const file_id_t *ids, size_t count)
 {
     if (count > 0 && !ids) return -ERR_INVALID_ARGUMENT;
     uint32_t spawner = cabin_info()->spawner_pid;
-    if (spawner == 0 || count == 0) return 0;
+    if (spawner == 0 || count == 0 || !form_souvenir_wanted()) return 0;
 
     size_t   most = count < SOUVENIR_FIRST ? count : SOUVENIR_FIRST;
     uint8_t *message = malloc(SOUVENIR_HEAD + most * sizeof(file_id_t));

@@ -13,8 +13,8 @@
 //   box::form::things(0)    — field 0's files, as ids      (thing, things)
 //   box::form::words(1)     — field 1's words              (words, name, text, into)
 //   box::form::text(1)      — field 1 as one text, words joined by single spaces
-//   box::form::souvenir(v)  — files given back to the one who started the program;
-//                             the shell keeps them as `them` for the next command
+//   box::form::souvenir(v)  — files given back to the one who started the program,
+//                             when it asked; the shell keeps them as `them`
 //
 // A program started by someone other than the shell has its fields filled by
 // BoxLib from the line at the first ask, asking nobody. When the line cannot

@@ -34,7 +34,9 @@ the screen.
 
 **Souvenir.** A program gives files back (`souvenir_things`); the shell
 keeps them as `them`/`it`: `files draft` then `tag them done`;
-`assemble planets.asm` then `run it`.
+`assemble planets.asm` then `run it`. It goes only to a starter that asked
+for it (the `souvenir` record in the Luggage): the shell asks when it will
+keep it, and a program started by anyone else gives back to no one.
 
 **Asking.** Only when it must, before the program starts: a name that is
 more than one file ("which one? (a number)"), a required field left empty
