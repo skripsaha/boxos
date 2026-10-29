@@ -242,10 +242,28 @@ static uint32_t BookFilePrinted(uint32_t crc, const FileRecord* rec)
     return KCrc32cContinue(crc, (const uint8_t*)&nruns, sizeof(nruns));
 }
 
-/* Every live file's ground claimed, the print of them taken, and the file the
- * loader reads the kernel by named once, so a change of a book's file asks
- * the guard of its id and not of every run it has (ink.c, InkMayChange). */
-void BookFilesLaid(void)
+/* A live file's ground claimed, the file the loader reads the kernel by named
+ * once, so a change of a book's file asks the guard of its id and not of every
+ * run it has (ink.c, InkMayChange), and the next tag past every tag it wears. */
+static void BookFileGround(uint64_t fid, const FileRecord* rec)
+{
+    StripWalk walk;
+    Strip     run;
+    StripWalkBegin(rec, &walk);
+    while (StripWalkNextGround(&walk, &run)) {
+        GroundClaim(GROUND_FILE, run.start, run.count, fid);
+        if (!g_book.boot_fid && InkTouchesBoot(&run, 1))
+            g_book.boot_fid = fid;
+    }
+    for (uint32_t t = 0; t < rec->tag_count; t++)
+        if ((uint64_t)rec->tags[t] + 1u > g_book.next_tag)
+            g_book.next_tag = (uint64_t)rec->tags[t] + 1u;
+}
+
+/* The print of every live file memory holds, in the order of their ids — the
+ * one rule bookcensus.py's MirrorPrint follows — and, when `laid`, each one's
+ * ground with it (BookFileGround). */
+static uint32_t BookFilesWalk(bool laid)
 {
     TagFSState* fs   = tagfs_get_state();
     uint64_t    from = 0, ids[32];
@@ -253,26 +271,30 @@ void BookFilesLaid(void)
     while ((n = FileMapRows(fs->files, from, ids, 32)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec = FileMapRecordHold(fs->files, ids[i], NULL);
-            StripWalk   walk;
-            Strip       run;
             if (!rec)
                 continue;
-            StripWalkBegin(rec, &walk);
-            while (StripWalkNextGround(&walk, &run)) {
-                GroundClaim(GROUND_FILE, run.start, run.count, ids[i]);
-                if (!g_book.boot_fid && InkTouchesBoot(&run, 1))
-                    g_book.boot_fid = ids[i];
-            }
-            for (uint32_t t = 0; t < rec->tag_count; t++)
-                if ((uint64_t)rec->tags[t] + 1u > g_book.next_tag)
-                    g_book.next_tag = (uint64_t)rec->tags[t] + 1u;
+            if (laid)
+                BookFileGround(ids[i], rec);
             crc = BookFilePrinted(crc, rec);
             FileRecordRelease(rec);
         }
         from = ids[n - 1] + 1;
     }
-    g_book.files_print = crc;
+    return crc;
 }
+
+/* Every live file's ground claimed and the print of them taken. */
+void BookFilesLaid(void)
+{
+    g_book.files_print = BookFilesWalk(true);
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+uint32_t BookFilesStandPrint(void)
+{
+    return BookFilesWalk(false);
+}
+#endif
 
 /* The front of the volume, less the Spine's slots, and the slots themselves. */
 static void BookGroundFront(void)

@@ -411,8 +411,7 @@ static error_t StitchStream(StitchSnap* s, const StitchLoad* l, uint8_t* out, ui
 {
     const RibbonCursor* c = RibbonCursorNow();
     bool                came = c->came.blocks && (c->off == 0 || c->refused);
-    uint64_t            flushed = s->toll || !l->fresh ? STITCH_DATA_FLUSHED : 0u;
-    StitchHead          h = { .flags = s->flags | flushed, .prev = c->last ? s->seq - c->last : 0, .prev_clasp = c->clasp,
+    StitchHead          h = { .flags = s->flags, .prev = c->last ? s->seq - c->last : 0, .prev_clasp = c->clasp,
                               .tally = s->seq - c->tally, .made_ns = s->made_ns, .next_block = c->next.block,
                               .next_blocks = c->next.blocks, .from_block = came ? c->came.block : 0,
                               .from_blocks = came ? c->came.blocks : 0 };
@@ -464,6 +463,12 @@ static error_t StitchLay(StitchSnap* s, bool* word)
     error_t   measured = StitchMeasure(s, &l);
     *word = l.use_written;
     s->toll = StitchToll(s, l.runs, l.fresh);
+    /* Judged again by each attempt with its toll, and kept in s->flags, so the
+     * word its StitchHead carries (StitchStream) is the one handed on as it
+     * settles (RibbonSewn: the stand's mirror of the cursor, sewn_flags; a
+     * kernel without VOLUME_TESTS keeps none). The other readers of s->flags
+     * ask STITCH_CLEAN alone (StitchToll, SettleSettledLocked). */
+    s->flags = (s->flags & ~(uint64_t)STITCH_DATA_FLUSHED) | (s->toll || !l.fresh ? STITCH_DATA_FLUSHED : 0u);
     uint8_t*  stream = kmalloc(l.bytes);
     uint8_t*  body   = kmalloc(l.body);
     uint32_t* starts = kmalloc(sizeof(uint32_t) * (l.records + 2u));

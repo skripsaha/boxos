@@ -225,7 +225,7 @@ static void StandSettleArmLedger(uint32_t nth)
 /* One turn of the machine, done by hand: the knock the tick would give, the
  * batons left on this core, the service point — the committer's own on one
  * core; on more, a K-Core's, which the knock wakes to look again. */
-static void StandSettleTurn(void)
+void StandSettleTurn(void)
 {
     SettleKnock();
     BatonPump(amp_get_core_index());

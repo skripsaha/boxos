@@ -118,6 +118,10 @@ const char* StandStepsAsideFor(void);
 const char* StandPortAside(uint8_t seat);
 void        StandPortTurn(uint8_t seat);
 
+/* One turn of the machine a cycle of the Settle goes on in, done by hand: the
+ * knock, the batons on this core, the service point (stand_settle_tests.c). */
+void StandSettleTurn(void);
+
 /* A file of `bytes` bytes of `data`, created and written through the handle
  * API, named `name` and carrying no tag but its name's. False — with nothing
  * left behind — when either step did not answer in full. */
