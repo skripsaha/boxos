@@ -1380,6 +1380,8 @@ VOLUME_CONTENT = \
 	$(USERSPACE_DIR)/planets.inc "code,asm,example" \
 	$(USERSPACE_DIR)/lines.inc "code,asm,asmlib" \
 	$(USERSPACE_DIR)/lines_core.inc "code,asm,asmlib" \
+	$(USERSPACE_DIR)/tidy "itinerary,example" \
+	$(USERSPACE_DIR)/try "itinerary,example" \
 	$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
 	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "utility" \
