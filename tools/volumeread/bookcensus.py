@@ -27,6 +27,8 @@ into ground_owners.py: BOOK_OWNERS, those of format v2.
 """
 
 import hashlib
+import json
+import os
 import struct
 
 from . import bookread, stitch, tally
@@ -48,6 +50,29 @@ def BlockDigest(raw, lanes):
     if got is None:
         got = _DIGESTS[key] = bookread.Integrity(raw, lanes)
     return got
+
+
+# PowerCut checks thousands of cuts of one record, each census in a process of
+# its own, and nearly every block each holds to its digest is one every other
+# holds too — the base's files. WyHash in Python is nine tenths of such a
+# census (race's record: 1.36 s of 1.52), so a run takes each block's once and
+# hands the memo on (volume-read cut --digests-out, --digests). Keyed as above,
+# by the bytes and the seed's lane, a memo of another volume or another run
+# names nothing a census meets: it never stands in for a digest it was not.
+def DigestMemoWrite(path):
+    """The digests this process took, written whole to a sibling and renamed:
+    a reader never meets half of a memo."""
+    tmp = "%s.%d" % (path, os.getpid())
+    with open(tmp, "w") as fh:
+        json.dump([[lane, key.hex(), got] for (lane, key), got in _DIGESTS.items()], fh)
+    os.replace(tmp, path)
+
+
+def DigestMemoRead(path):
+    """A memo DigestMemoWrite kept, taken as this process's own."""
+    with open(path) as fh:
+        for lane, key, got in json.load(fh):
+            _DIGESTS[(lane, bytes.fromhex(key))] = got
 
 
 # The copies of a node that did not hold the kernel names one line each before
@@ -499,6 +524,7 @@ class BookCensus:
         fs = self.mount.files[fid]
         return {"fid": fid, "state": state, "name": fs.name.decode("utf-8", "replace"), "size": fs.size,
                 "gen": fs.gen, "flags": fs.flags, "tags": list(fs.tags),
+                "tag_text": [self.mount.tags[t].Text().decode("utf-8", "replace") for t in fs.tags if t in self.mount.tags],
                 "runs": [["hole" if r.hole else "data", r.start, r.count, r.birth] for r in fs.runs],
                 "extents": [list(x) for x in fs.Ground()], "slips": len(fs.slips), "visible": True,
                 "sha256": self.Sha256(fid)}
@@ -526,7 +552,8 @@ class BookCensus:
             r = m.ribbon
 
             def Unit(u):
-                return {"seq": u.seq, "vlba": u.start.Vlba(), "of": u.of, "sound": u.Sound(),
+                return {"seq": u.seq, "vlba": u.start.Vlba(), "vlbas": [p.Vlba() for p in u.places], "of": u.of,
+                        "sound": u.Sound(),
                         "records": len(u.records), "lost_sectors": u.Lost(), "lost_bytes": u.lost,
                         "clasp": u.clasp}
             out["ribbon"] = {"at": m.slot.ribbon["at"], "stitches": [Unit(u) for u in r.stitches],

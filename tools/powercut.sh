@@ -359,7 +359,7 @@ pc_switched_off() {   # QEMU, stopped by -no-shutdown, says so
 # pc_record — the record held against the disk it describes, then listed,
 # planned and every distinct medium in the plan judged by volume-read.
 pc_record() {
-    local said
+    local said memo=()
     if ! said=$(python3 "$VR" "$PC_DIR/base.img" cut "$PC_DIR/run.log" --against "$PC_DIR/run.img" 2>&1); then
         harness "$PC_NAME: the record does not account for the disk QEMU left — $said"
         return 1
@@ -380,9 +380,13 @@ for t in w["touches"]]; print(k.count("unowned"), k.count("free"))' "$PC_DIR/lis
     python3 "$PC" plan "$PC_DIR/list.json" --seed "$PC_SEED" --all-max "$PC_SUBSET_ALL_MAX" \
         --sample "$PC_SAMPLE_SUBSETS" --tear-all-max "$PC_TEAR_ALL_MAX" >"$PC_DIR/plan.json" || {
         harness "$PC_NAME: the plan could not be made"; return 1; }
+    # A book's checks share the block digests they take (powercut.py checks
+    # --digests): every cut of the run holds the base's files to theirs.
+    [ "$PC_FORMAT" = v1 ] || memo=(--digests "$PC_DIR/digests.json")
     python3 "$PC" checks "$PC_DIR/plan.json" "$PC_DIR/base.img" "$PC_DIR/run.log" \
-        "$PC_DIR/base.check.json" --jobs "$PC_CHECK_JOBS" >"$PC_DIR/cuts.jsonl" || {
+        "$PC_DIR/base.check.json" --jobs "$PC_CHECK_JOBS" ${memo[@]+"${memo[@]}"} >"$PC_DIR/cuts.jsonl" || {
         harness "$PC_NAME: the checks could not be run"; return 1; }
+    [ "$PC_FORMAT" = v1 ] || pc_lies
 }
 
 # pc_ask CMD ACK_ERE — one question to a booted cut; its answer, or the
@@ -396,7 +400,8 @@ pc_ask() {
 }
 
 # pc_boots PICKS [ARGS...] — the media the policy names (tools/powercut.py
-# boots, ARGS handed to it), each built, booted, asked the scenario's question
+# boots, ARGS handed to it), each built, booted (by PC_BOOT, pc_boot unless a
+# scenario's volume arrives otherwise), asked the scenario's question
 # (PC_ASK_CMD/PC_ASK_ACK — none when PC_ASK_CMD is empty — and on the final
 # state PC_FINAL_CMD/PC_FINAL_ACK too), and its log kept.
 pc_boots() {
@@ -413,7 +418,7 @@ pc_boots() {
         fi || { harness "$PC_NAME: $id could not be built to boot"; continue; }
         # A volume the kernel refused holds no program to ask with; the
         # refusal itself is what the judge weighs.
-        if pc_boot "$img" && ! grep -aq '\[TagFS\] this volume is NOT mounted' build/serial.log; then
+        if "${PC_BOOT:-pc_boot}" "$img" && ! grep -aq '\[TagFS\] this volume is NOT mounted' build/serial.log; then
             [ -n "$PC_ASK_CMD" ] && pc_ask "$PC_ASK_CMD" "$PC_ASK_ACK"
             case "$why" in *"final state"*)
                 [ -n "${PC_FINAL_CMD:-}" ] && pc_ask "$PC_FINAL_CMD" "$PC_FINAL_ACK" ;;
@@ -452,6 +457,12 @@ pc_caveats() {
                    subset:TAG_ABSENT" ;;
     esac
     [ "$PC_FORMAT" = v2 ] || for code in $codes; do echo "code:$code=$base:$code"; done
+    # A book's own oracles, each with the defect it stands for (stand_caveat.sh).
+    [ "$PC_FORMAT" = v1 ] || printf '%s\n' files:whole=book:whole order=book:order lines:pc-l.log=book:lines \
+        slip:blocks=book:slip tipin=book:tipin spared=book:spared engross=book:engross chain=book:chain \
+        blot:owners=book:owners smudge:owners=book:owners blot:proven=book:lost smudge:said=book:lost \
+        smudge:wiped=book:wiped blot:boots=book:boots smudge:boots=book:boots
+    [ "$1" != machineb ] || echo lines:b-l.log=book:lines
 }
 
 # pc_judge ARGS... — every oracle (tools/powercut.py judge), into
@@ -459,6 +470,7 @@ pc_caveats() {
 pc_judge() {
     local c args=()
     for c in $(pc_caveats "$PC_NAME"); do args+=(--caveat "$c"); done
+    [ "$PC_FORMAT" = v1 ] || pc_lie_boots
     echo "took $(( $(date +%s) - PC_T0 )) s to judge; the report is $PC_DIR/report.txt" >>"$PC_DIR/facts.txt"
     python3 "$PC" judge "$PC_DIR" --path "$PC_PATH" ${args[@]+"${args[@]}"} "$@" >"$PC_DIR/verdicts.tsv" || {
         harness "$PC_NAME: the judge could not read this run"; return 1; }
@@ -694,7 +706,9 @@ run_scenario() {   # run_scenario NAME KEYS... — build, run, judge, say
 # The two sentences of settle_cut.c the scenario waits for, said once here for
 # sc_boot_cut and for the selftest that holds them against that file's text.
 SC_SETTLE_CUT_C=src/kernel/tagfs/settle_cut/settle_cut.c
-SC_ARMED_ERE='^\[SETTLECUT\] armed: the first cycle to reach point [0-9]+ of [0-9]+, .*, with the change of the first anchor after this line in its snapshot stops this machine there$'
+# A point no anchor's cycle reaches — the verdict's stitch, an Engross's —
+# says it is armed for it in a sentence of its own (settle_cut.c).
+SC_ARMED_ERE='^\[SETTLECUT\] armed( for the (verdict|Engross))?: the first (cycle|stitch) to reach point [0-9]+ of [0-9]+, .*, (with the change of the first anchor after this line in its snapshot stops this machine there|stops this machine there, anchored or not)$'
 SC_CUT_ERE='\[SETTLECUT\] the power went at point [0-9]+ of [0-9]+, .*, in cycle [0-9]+ of this boot, whose snapshot reaches Ink [0-9]+ of the anchor.s [0-9]+,'
 
 # sc_says — every sentence settle_cut.c prints, rendered as kprintf renders
@@ -709,7 +723,7 @@ where = dict(re.findall(r'\[SETTLE_CUT_POINT_(\w+)\]\s*=\s*"([^"]*)"', src))
 for call in re.findall(r'kprintf\(((?:\s*"(?:[^"\\]|\\.)*")+)', src):
     line = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', call)).replace("\\n", "")
     line = re.sub(r"%(?:ll)?u", "6", line).replace("%s", where.get("LEDGER", "?"))
-    for which, head in (("armed", "[SETTLECUT] armed: "), ("cut", "[SETTLECUT] the power went ")):
+    for which, head in (("armed", "[SETTLECUT] armed"), ("cut", "[SETTLECUT] the power went ")):
         if line.startswith(head):
             print("%s\t%s" % (which, line))
 EOF
@@ -793,8 +807,8 @@ run_selftest() {
     # against that file's own text, so a word changed on either side is a FAIL
     # here, and not a scenario that waits a minute for a line nobody prints.
     says=$(sc_says)
-    [ "$(printf '%s\n' "$says" | cut -f1 | sort | tr '\n' ' ')" = "armed cut " ]
-    chk $? "selftest: $SC_SETTLE_CUT_C prints one sentence of each kind settlecut waits for (found: $(printf '%s\n' "$says" | cut -f1 | tr '\n' ' '))"
+    [ "$(printf '%s\n' "$says" | cut -f1 | sort -u | tr '\n' ' ')" = "armed cut " ]
+    chk $? "selftest: $SC_SETTLE_CUT_C prints the sentences of each kind settlecut waits for (found: $(printf '%s\n' "$says" | cut -f1 | tr '\n' ' '))"
     while IFS="$TAB" read -r which line; do
         case "$which" in armed) ere=$SC_ARMED_ERE ;; cut) ere=$SC_CUT_ERE ;; *) continue ;; esac
         printf '%s\n' "$line" | grep -qE "$ere"
@@ -827,7 +841,7 @@ pc_preflight
 PC_FORMAT=${VOLUME_FORMAT:-v1}
 case "$PC_FORMAT" in v1|v2) ;; *) echo "powercut: VOLUME_FORMAT=$PC_FORMAT names no format"; exit 2 ;; esac
 [ "$PC_FORMAT" = v2 ] && STAND_FORMAT=v2
-if [ "$PC_FORMAT" = v2 ] && pc_book "${1:-}"; then set -- done; fi
+if [ "$PC_FORMAT" = v2 ] && pc_book "$@"; then set -- done; fi
 case "${1:-}" in
     done) ;;
     noanchor|nextfid|hog|halt|race|chaingrow)
@@ -855,6 +869,8 @@ case "${1:-}" in
     *)
         echo "usage: [VOLUME_FORMAT=v2] $0 noanchor|nextfid|hog|halt|race|settlecut|chaingrow [MACHINE KEYS...]"
         echo "       [VOLUME_FORMAT=v2] $0 noanchormut|nextfidmut|poolmut|flushmut|selftest|all"
+        echo "       VOLUME_FORMAT=v2 $0 overwrite|logger|tipin|spared|sessions|undonecut|engross|replug|machineb [MACHINE KEYS...]"
+        echo "       VOLUME_FORMAT=v2 $0 firstflushmut|lastflushmut|booknextfidmut|stitchmut"
         exit 2 ;;
 esac
 

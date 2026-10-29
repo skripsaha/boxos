@@ -29,6 +29,13 @@ from powercut import COMMIT_KINDS, HARM, VOLUME_READ, Outside, Ranges, RecordByt
 # cut there rolls the cycle back — and a record the seal says landed that the
 # medium does not hold on a state the flush stood behind.
 SEAL_NOT_STOOD = ("SEAL_FELL_BACK", "SEAL_TAIL_TORN", "SEAL_ALONE_TORN", "SEAL_UNBORNE")
+# And of a book (bookmount.py, stitch_ribbon.py): data a stitch the flush stood
+# behind names that did not land, a slot fallen back, the ribbon's end or a
+# closed stitch torn — none of which a state behind a flush may show. But a
+# torn tail past the ribbon's end said as a note: a stitch cut while it was
+# written, its own retry gone on past it (M-6, away.c AwayBookTakenUp) — the
+# flush that closes the retry's epoch stands behind the retry, not the cut.
+BOOK_NOT_STOOD = ("NOT_LANDED", "SLOT_FELL_BACK", "RIBBON_TORN", "STITCH_TORN")
 
 
 # ---------------------------------------------------------------------------
@@ -209,8 +216,9 @@ class Judge:
         damage or a leak code, and a mount that does not stand on the newest
         seal borne out — each in the census's words. Empty when nothing."""
         said = ["%s/%s" % x for x in self.run.Signature(cid)]
-        said += ["%s: %s" % (code, text) for code, _sev, text in
-                 self.run.results.get(cid, {}).get("findings", []) if code in SEAL_NOT_STOOD]
+        said += ["%s: %s" % (code, text) for code, sev, text in
+                 self.run.results.get(cid, {}).get("findings", []) if code in SEAL_NOT_STOOD + BOOK_NOT_STOOD
+                 and (code, sev) != ("RIBBON_TORN", "note")]
         return " ".join(said)
 
     def Boundaries(self):
@@ -264,6 +272,13 @@ class Judge:
             return self.Reissue(arg)
         if what == "grown":
             return self.Grown()
+        if what in ("logger", "lines", "tipin", "spared", "engross", "chain"):
+            import powercut_judge_book as book
+            name, _sep, most = arg.partition(":")
+            return {"logger": lambda: book.Logger(self, arg), "lines": lambda: book.Lines(self, name, int(most or 0)),
+                    "tipin": lambda: book.Tipin(self),
+                    "spared": lambda: book.Spared(self), "engross": lambda: book.Engross(self),
+                    "chain": lambda: book.Chain(self, arg)}[what]()
         final = self.Final()
         if final is None:
             return self.Out("verify", "fail", "the final state was not booted")
@@ -434,13 +449,19 @@ def CmdJudge(a):
     j.Durable()
     j.Codes()
     j.Boundaries()
+    if base.get("format") == "v2":
+        import powercut_judge_book
+        powercut_judge_book.Whole(j)
+        powercut_judge_book.Order(j)
     j.Boots()
-    if a.verify:
-        j.Verify(a.verify)
+    for kind in a.verify:
+        j.Verify(kind)
     if a.final_consistent:
         j.FinalState()
     if a.hogged:
         j.Hogged()
+    import powercut_lie
+    powercut_lie.Judge(j)
     with open(os.path.join(a.dir, "report.txt"), "w") as fh:
         fh.write(Report(run, j))
     return 0
@@ -544,7 +565,9 @@ def Report(run, judge):
                           run.listing["stop"], "".join("; " + n for n in run.listing["notes"])))
     L.append("plan: seed %s — every subset of an epoch of up to %d volume writes, else every prefix, "
              "every single omission and %d drawn; the last write of each epoch torn by sectors "
-             "(every sector up to %d)" % (p["seed"], p["all_max"], p["sample"], p["tear_all_max"]))
+             "(every sector up to %d)%s" % (p["seed"], p["all_max"], p["sample"], p["tear_all_max"],
+                                            ", and a book's every stitch at each of its sectors"
+                                            if judge.base.get("format") == "v2" else ""))
     groups = []
     for e in p["epochs"]:
         shape = tuple(e.get(k, 0) for k in ("writes", "outside", "subsets", "enumerated", "not_enumerated",
@@ -579,6 +602,12 @@ def Report(run, judge):
         L.append("  %s — %s: %s" % (b["id"], b["why"], "KERNEL PANIC" if "KERNEL PANIC" in b["log"]
                                     else "mounted, %s file(s)" % m.group(1) if m else
                                     "NOT mounted" if "is NOT mounted" in b["log"] else "no mount line"))
+    lies, _results = __import__("powercut_lie").Plan(run.dir)
+    if lies is not None:
+        n = lies["counts"]
+        L.append("lies, counted apart (powercut_lie.py): %d Blot and %d Smudge media, %d distinct, %d collapsed "
+                 "into an earlier one; their verdicts are keyed blot: and smudge:"
+                 % (n["blot"], n["smudge"], n["distinct"], n["collapsed"]))
     booted = {b["id"] for b in judge.boots}
     alone = [c["id"] for c in run.canon if c["id"] not in booted]
     L.append("judged by check alone: %d media, named on the next line of report.txt" % len(alone))

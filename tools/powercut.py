@@ -13,7 +13,9 @@ it had made durable:
     powercut.py step STEPS --step NAME --cmd CMD --before N --ack N --quiet N
                            --line TEXT [--durable NAME:RECORD:FROM:TO] [--noquiet]
     powercut.py plan LIST --seed HEX [--all-max N --sample N --tear-all-max N] > PLAN
-    powercut.py checks PLAN BASE LOG BASECHECK [--jobs N] > CUTS
+    powercut.py checks PLAN BASE LOG BASECHECK [--jobs N] [--lies] [--digests MEMO] > CUTS
+    powercut.py lies LIST > LIES
+    powercut.py lieboots DIR --sample N --seed HEX > LIEBOOTS
     powercut.py boots DIR --picks final|prefixes:STEP --sample N --seed HEX [--by-kind] > BOOTS
     powercut.py judge DIR --path PATH [--caveat KEY=NAME]... [--verify KIND] [--hogged] [--waited S]
                       [--by-kind]
@@ -32,7 +34,11 @@ from the seed, and the plan counts exactly how many subsets were NOT built.
 The last volume write of every epoch is also torn as a prefix: after every
 sector when it is at most --tear-all-max sectors, otherwise after sector 1,
 sector n-1 and every 4 KiB boundary — and the plan counts the prefixes it did
-not tear. An epoch with nothing left unbuilt is enumerated whole, and only
+not tear. A book's stitch is torn after every sector it has wherever it
+stands in its epoch, the writes before it kept: a stitch is one unit
+whatever windows it went out in, and a power cut in any 512-byte quantum of
+it is a cut the mount must take (spec_v2 §3.10 C2), so no quantum of one is
+left to a sample. An epoch with nothing left unbuilt is enumerated whole, and only
 there does a defect's absence say anything: a sample cannot show one is gone —
 and neither can a record a writer kept writing (a step --noquiet), whose cuts
 are one run's timing and not the machine's.
@@ -49,7 +55,10 @@ may close one and not the other: an order of writes closes every prefix,
 and only a flush between two writes closes the subsets that part them.
 
 `judge` and `settlecut` are asked here and answered by tools/powercut_judge.py:
-every oracle, one verdict line each, and the report of the run.
+every oracle, one verdict line each, and the report of the run — a book's own
+oracles beside it (powercut_judge_book.py). `lies` and `lieboots` are
+answered by tools/powercut_lie.py: the media a medium that lied leaves (Blot,
+Smudge), planned, judged by `checks --lies` and counted apart from the cuts.
 
 A step's acknowledgement stands behind the first flush after the last write of
 its own that touches the ledger — HEAD's sync writes the ledger last and then
@@ -82,6 +91,7 @@ RECORDS = {
     "persist": (0x42504552, 16),     # apps/persist.c PersistRecord: magic, seq, sum, 0
     "quill":   (0x5155494C, 16),     # apps/quilltest_powercut.c QuillRecord: magic, seq, sum, 0
     "empty":   (0, 0),               # apps/quilltest_powercut.c QuillCrowd: made, never written
+    "log":     (0, 48),              # apps/quilltest_book.c QuillLogLine: a line; a record of N is N lines
 }
 
 
@@ -92,7 +102,15 @@ def Mix(a, b):
     return (x * 0x85EBCA6B) & 0xFFFFFFFF
 
 
+def LogLine(n):
+    """Line n of quilltest log: its number in eight digits, dots, a newline."""
+    return b"%08d" % (n % 100000000) + b"." * (RECORDS["log"][1] - 9) + b"\n"
+
+
 def RecordBytes(kind, seq):
+    """The bytes a record holds; a logger's record of seq is its first seq lines."""
+    if kind == "log":
+        return b"".join(LogLine(n) for n in range(seq))
     magic, size = RECORDS[kind]
     if size == 0:
         return b""
@@ -139,6 +157,11 @@ def Outside(w):
     return bool(w["touches"]) and all(t["kind"] == "outside" for t in w["touches"])
 
 
+def Stitch(w):
+    """A write that lays a sector of a book's stitch (blklog_book.py)."""
+    return any(t["kind"] == "stitch" for t in w["touches"])
+
+
 # ---------------------------------------------------------------------------
 # step — one thing the machine was asked, as JSON the shell cannot get wrong
 # ---------------------------------------------------------------------------
@@ -149,8 +172,8 @@ def CmdStep(a):
             "line": a.line, "durable": None, "noquiet": a.noquiet}
     if a.durable:
         name, record, lo, hi = a.durable.rsplit(":", 3)
-        step["durable"] = {"name": name, "record": record, "size": RECORDS[record][1],
-                           "from": int(lo), "to": int(hi)}
+        step["durable"] = {"name": name, "record": record, "from": int(lo), "to": int(hi),
+                           "size": RECORDS[record][1] * (int(hi) if record == "log" else 1)}
     with open(a.steps, "a") as fh:
         fh.write(json.dumps(step, sort_keys=True) + "\n")
     return 0
@@ -199,10 +222,17 @@ class Planner:
         tears, n = [], 0
         if vol and vol[-1]["sectors"] >= 2:
             n = vol[-1]["sectors"]
-            tears = range(1, n) if n <= self.tear_all_max else sorted({1, n - 1} | set(range(8, n, 8)))
+            tears = range(1, n) if n <= self.tear_all_max or Stitch(vol[-1]) else \
+                sorted({1, n - 1} | set(range(8, n, 8)))
             for j in tears:
                 out.append(("t%03d" % j, frozenset(idx[:-1]), (vol[-1]["index"], (1 << j) - 1)))
-        return out, how, len(tears), max(0, n - 1 - len(tears)), n
+        stitched = 0
+        for p, w in enumerate(vol[:-1]):
+            if Stitch(w):
+                for j in range(1, w["sectors"]):
+                    out.append(("w%03dt%03d" % (p, j), frozenset(idx[:p]), (w["index"], (1 << j) - 1)))
+                    stitched += 1
+        return out, how, len(tears) + stitched, max(0, n - 1 - len(tears)), n
 
     def Run(self):
         prov, seen, cuts, epochs, through_before = {}, {}, [], [], 0
@@ -319,17 +349,23 @@ def CompactBook(d):
     derives against the one the slot it stands on counts — the Ledger's place
     in format v2 (SpineCounts) — the kernel's count line, and the ribbon: how
     many stitches it sews on, the last, how many torn, whether the medium is
-    shown to have lied. A book has no chains."""
+    shown to have lied — and the last it sews on, every line the mount says
+    of it by its code, and where each sector of each stitch lies on the device
+    — on into its next Quire too (stitch.py Place.On). A book has no chains. And every file it shows, as [fid, name, size, sha256]: a book's
+    file is the state a stitch left it in, held to every state a flush stood
+    behind (powercut_judge_book.py Whole)."""
     k, b = d["kernel"], d["book"]
     slot = next((x for x in b["slots"] if x["index"] == b["slot"]), None)
-    r = b["ribbon"]
+    r, start = b["ribbon"], (d.get("ground") or {}).get("start", 0)
     return {"says": {"data_blocks": k.get("data_blocks"), "free": k.get("free"), "files": k.get("files")},
             "next_file_id": b["counts"].get("next_fid"),
             "ledger_next": (slot["counts"] or {}).get("next_fid") if slot else None,
             "refused": {}, "chains": {},
+            "files": [[f["fid"], f.get("name"), f.get("size"), f.get("sha256")] for f in d["files"] if f["visible"]],
             "book": {"slot": b["slot"], "tally": (b["tally"] or {}).get("seq"),
                      "stitches": len(r["stitches"]), "torn": len(r["torn"]), "lied": r["lied"],
-                     "glass": list(b["under_glass"])}}
+                     "glass": list(b["under_glass"]), "last": k.get("last"), "ribbon": k.get("ribbon") or {},
+                     "sewn": [[u["seq"], [start + v for v in u["vlbas"]]] for u in r["stitches"]]}}
 
 
 def CmdChecks(a):
@@ -339,20 +375,44 @@ def CmdChecks(a):
         base = json.load(fh)
     base_files = {FileKey(f): f for f in base["files"] if f["visible"]}
     base_names = {(f["fid"], f.get("name")) for f in base["files"]}
-    todo = [c for c in plan["cuts"] if c["same"] is None]
+    # A lie's plan (powercut_lie.py) is judged the same way into a file of its
+    # own: its media named by what they lose, the power's cuts by what they keep.
+    todo = [c for c in plan["media" if a.lies else "cuts"] if c["same"] is None]
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
 
-    def One(c):
+    def One(c, memo=None):
         cmd = [sys.executable, VOLUME_READ, a.base, "cut", a.log, "--epoch", str(c["epoch"]),
                "--keep", c["keep"] or "none"]
-        if c["tear"]:
+        if memo:
+            cmd += [memo, a.digests]
+        if c.get("tear"):
             cmd += ["--tear", "%d:0x%x" % tuple(c["tear"])]
+        if c.get("blot"):
+            cmd += ["--blot", c["blot"]]
+        if c.get("smudge"):
+            cmd += ["--smudge", ",".join("%d+%d" % tuple(x) for x in c["smudge"])]
         r = subprocess.run(cmd + ["--check", "--json"], stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, universal_newlines=True, env=env)
         return Compact(c["id"], r.returncode, r.stdout, r.stderr, base_files, base_names)
 
+    # The block digests a book's census takes are nearly all the same in every
+    # cut of one record (bookcensus.py DigestMemoWrite): the final state's
+    # check, the cut that holds the most of the record, takes them first and
+    # keeps them in --digests, and every other check reads them there.
+    first = {}
+    if a.digests and not a.lies and plan["cuts"] and not os.path.exists(a.digests):
+        final = {c["id"]: c for c in plan["cuts"]}.get("e%d-all" % max(c["epoch"] for c in plan["cuts"]))
+        final = final and (final["same"] or final["id"])
+        for c in todo:
+            if c["id"] == final:
+                first[final] = One(c, "--digests-out")
+    memo = "--digests" if a.digests and os.path.exists(a.digests) else None
+
+    def Each(c):
+        return first.get(c["id"]) or One(c, memo)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as pool:
-        for n, res in enumerate(pool.map(One, todo), 1):
+        for n, res in enumerate(pool.map(Each, todo), 1):
             print(json.dumps(res, sort_keys=True))
             if n % 500 == 0:
                 print("checks: %d of %d media judged" % (n, len(todo)), file=sys.stderr)
@@ -640,6 +700,14 @@ def Main():
     for x in ("plan", "base", "log", "basecheck"):
         s.add_argument(x)
     s.add_argument("--jobs", type=int, default=4)
+    s.add_argument("--lies", action="store_true")
+    s.add_argument("--digests")
+    s = sub.add_parser("lies")
+    s.add_argument("list")
+    s = sub.add_parser("lieboots")
+    s.add_argument("dir")
+    s.add_argument("--sample", type=int, default=2)
+    s.add_argument("--seed", required=True)
     s = sub.add_parser("boots")
     s.add_argument("dir")
     s.add_argument("--picks", required=True)
@@ -650,7 +718,7 @@ def Main():
     s.add_argument("dir")
     s.add_argument("--path", required=True)
     s.add_argument("--caveat", action="append", default=[])
-    s.add_argument("--verify")
+    s.add_argument("--verify", action="append", default=[])
     s.add_argument("--hogged", action="store_true")
     s.add_argument("--final-consistent", action="store_true")
     s.add_argument("--waited", type=int, default=0)
@@ -670,13 +738,20 @@ def Main():
     sub.add_parser("selftest")
     a = ap.parse_args()
     if not a.verb:
-        ap.error("say what to do: step, plan, checks, boots, judge, settlecut, crowd, forge or selftest")
+        ap.error("say what to do: step, plan, checks, lies, lieboots, boots, judge, settlecut, crowd, forge "
+                 "or selftest")
     if a.verb in ("selftest", "forge"):
         # The gate judging itself lives beside it, and is handed this very
         # module: the arithmetic tested is the arithmetic the judge runs.
         import powercut_selftest
         return (powercut_selftest.SelfTest(sys.modules[__name__]) if a.verb == "selftest"
                 else powercut_selftest.Forge(a))
+    if a.verb in ("lies", "lieboots"):
+        # The lie lives beside it, and takes the run and Compact from this
+        # module, registered under its own name as for the judge (below).
+        sys.modules.setdefault("powercut", sys.modules[__name__])
+        import powercut_lie
+        return (powercut_lie.CmdLies if a.verb == "lies" else powercut_lie.CmdLieBoots)(a)
     if a.verb in ("judge", "settlecut"):
         # The judge lives beside it as well, and takes the run, the records and
         # the severities from this module: registered under its own name

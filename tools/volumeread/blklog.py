@@ -18,12 +18,17 @@ Reading it:
 
 A crash state is `base + every write of the epochs before K + a subset of epoch
 K [+ torn writes of epoch K]`, applied in log order, built as an overlay over
-the base without copying it. Writes in flight across a flush may have landed
+the base without copying it. A medium that lied is built the same way, apart
+(spec_v2 §16.5 п.21): Blot leaves out named writes of the epochs before K —
+writes a flush the medium answered stood behind, and it did not keep — and
+Smudge lays named sectors last, as bytes no writer laid: the rest of a flash
+page a write in flight tore. Writes in flight across a flush may have landed
 on either side of it and are counted before it, so this enumerates a SUBSET of
 the reachable crash states: it can miss one, it never invents one.
 """
 
 import bisect
+import hashlib
 import mmap
 import os
 import struct
@@ -180,18 +185,30 @@ class BlkLog:
                                 % (k, len(self.epochs), len(self.epochs) - 1))
         return self.epochs[k]
 
-    def Cut(self, base, k, keep, tears):
-        """base + epochs before K + the kept writes and torn writes of K, in log
-        order, so the later of two overlapping kept writes wins."""
+    def Cut(self, base, k, keep, tears, blot=frozenset(), smudge=()):
+        """base + epochs before K but the entries `blot` names + the kept writes
+        and torn writes of K, in log order, so the later of two overlapping kept
+        writes wins; then every sector of `smudge` ([(lba, sectors)]) spoilt."""
         over = OverlayMedium(base)
+        lost = set(blot)
         for ep in self.epochs[:k]:
             for w in ep:
-                self.Apply(over, w)
+                if w.seq not in lost:
+                    self.Apply(over, w)
+                lost.discard(w.seq)
+        if lost:
+            raise LogUnreadable("--blot names entr%s %s, which no write of an epoch before %u is"
+                                % ("y" if len(lost) == 1 else "ies", ",".join(map(str, sorted(lost))), k))
         for w in self.Epoch(k):
             if w.index in keep:
                 self.Apply(over, w)
             elif w.index in tears:
                 self.Apply(over, w, tears[w.index])
+        for lba, n in smudge:
+            if lba < 0 or n < 1 or lba + n > base.SizeSectors():
+                raise LogUnreadable("--smudge %u+%u runs past the base's %u sectors" % (lba, n, base.SizeSectors()))
+            for x in range(lba, lba + n):
+                over.over[x] = Smudged(x)
         return over
 
     def EpochFacts(self):
@@ -204,6 +221,12 @@ class BlkLog:
             out.append({"epoch": k, "writes": len(ep), "flush_seq": fs,
                         "maybe_qemu_exit_flush": fs is not None and fs > last_write})
         return out
+
+
+def Smudged(lba):
+    """What a spoilt sector reads back as: bytes of its own place, the same
+    every time, that no unit's CRC32C nor any digest of data bears out."""
+    return hashlib.sha256(b"smudged sector %u" % lba).digest() * (SECTOR // 32)
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +272,26 @@ def _Index(text, n):
     if not 0 <= i < n:
         raise LogUnreadable("write %u is not in this epoch, which has %u (0..%u)" % (i, n, n - 1))
     return i
+
+
+def ParseSmudge(text):
+    """`LBA+N[,LBA+N...]`, medium sectors."""
+    out = []
+    for item in filter(None, (text or "").split(",")):
+        lba, sep, n = item.partition("+")
+        if not sep:
+            raise LogUnreadable("--smudge wants LBA+N, not %r" % item)
+        out.append((_Int(lba, "a smudged sector"), _Int(n, "a count of smudged sectors")))
+    return out
+
+
+def ParseBlot(text):
+    """`SEQ | SEQ-SEQ [,...]`: entries of the log, flushes counted."""
+    out = set()
+    for item in filter(None, (text or "").split(",")):
+        a, _sep, b = item.partition("-")
+        out.update(range(_Int(a, "a blotted entry"), _Int(b or a, "a blotted entry") + 1))
+    return out
 
 
 def ParseSubsetBits(text, epoch):

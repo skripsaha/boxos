@@ -37,6 +37,7 @@ mut_run() {  # mut_run NAME BASE KEY SEEN WHY [KEYS...] — the mutated tree thr
 # as the Settle did under step 1.4 — and persist's write, which nobody waits
 # for, must be gone after the power.
 run_noanchormut() {
+    local PC_LIES=off
     mut_on src/kernel/tagfs/settle/cadence.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
@@ -117,4 +118,90 @@ EOF
         "on the WriteJob the data's own flush comes first, and still the anchor's ack has none behind it" \
         STRICT=on CORES=4 MEM=4G
     restore src/kernel/tagfs/settle/settle.c
+}
+
+# A book's mutants (VOLUME_FORMAT=v2). The ones above bite format v1's path,
+# and on a book would pass without touching a line it runs; each of these puts
+# one fault into the book's own (settle/sewing.c, mount/book_mount.c) and
+# asks the verdict that must say so. None asks for the lie's media: one
+# verdict of the power's is the question.
+
+# The flush of a stitch's data (FIRST_FLUSH, §3.3) taken out: the stitch still
+# says DATA_FLUSHED, and the record shows its data behind no flush its first
+# atom is not. Asked of halt, whose last cycle is CLEAN and so always pays that
+# toll (StitchToll) — the anchor's cycle may spare it on a measured medium.
+run_firstflushmut() {
+    local PC_LIES=off
+    mut_on src/kernel/tagfs/settle/sewing.c "logcheck mutation" <<'MUT_EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+a = "        rc           = VolumeFlushFor(s->data_need);\n"
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, "        rc           = OK;   /* logcheck mutation: the stitch's data is never flushed before it */\n"))
+MUT_EOF
+    mut_run firstflushmut halt order fail \
+        "the flush of a stitch's data taken out, a stitch that says DATA_FLUSHED stands before its data's flush"
+    restore src/kernel/tagfs/settle/sewing.c
+}
+
+# The cycle's one kept flush (LAST_FLUSH, S5) taken out: the anchor's ack
+# stands behind no flush after its stitch.
+run_lastflushmut() {
+    local PC_LIES=off
+    mut_on src/kernel/tagfs/settle/sewing.c "logcheck mutation" <<'MUT_EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+a = "        rc       = VolumeFlushFor(VolumeFlushNeed());\n"
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, "        rc       = OK;   /* logcheck mutation: the stitch's last flush is never asked */\n"))
+MUT_EOF
+    mut_run lastflushmut nextfid ack:anchor_test fail "the flush after the stitch taken out, the anchor's ack has none behind it"
+    restore src/kernel/tagfs/settle/sewing.c
+}
+
+# The next file id derived from the ribbon past the Tally (§4.5 п.8) taken
+# out: the slot's count and the Tally's leaves stand, and a cut whose ribbon
+# bore the anchor's file hands its id out again.
+run_booknextfidmut() {
+    local PC_LIES=off
+    mut_on src/kernel/tagfs/mount/book_mount.c "logcheck mutation" <<'MUT_EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+a = "    if (w->seen_fid > g_book.next_fid)\n"
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, "    if (0 && w->seen_fid > g_book.next_fid)   /* logcheck mutation: the ribbon's fids are not counted */\n"))
+MUT_EOF
+    mut_run booknextfidmut nextfid reissue defect \
+        "the ribbon's fids left out of the next file id, a cut whose ribbon bore the anchor's file hands its id out again"
+    restore src/kernel/tagfs/mount/book_mount.c
+}
+
+# A stitch never written — the cycle answers as though it were: the anchor's
+# ack stands behind no stitch of its own.
+run_stitchmut() {
+    local PC_LIES=off
+    mut_on src/kernel/tagfs/settle/sewing.c "logcheck mutation" <<'MUT_EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+a = "    int rc = tagfs_volume_write(vlba, n, s->sectors + (uint64_t)s->written * BOOK_SECTOR_BYTES);\n"
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, "    int rc = (int)(vlba & 0u);   /* logcheck mutation: the stitch is never written */\n"))
+MUT_EOF
+    mut_run stitchmut nextfid ack:anchor_test fail "a stitch never written, the anchor's ack stands behind no stitch of its own"
+    restore src/kernel/tagfs/settle/sewing.c
+}
+
+# The late arrival (powercut_book.sh replug): the machine passes over its own
+# ATA disk, so the volume it mounts is the USB stick the host hands it — the
+# stick a replug takes away and brings back. Not a mutant asked for a verdict:
+# a tree edited so the scenario can be put at all, under the same manifest,
+# plate and restore as every mutation (the same edit as logcheck.sh's).
+pc_latearrival_on() {
+    mut_on src/kernel/tagfs/tagfs.c "logcheck mutation" <<'MUT_EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+a = "static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])\n{\n"
+assert s.count(a) == 1
+open(p, "w").write(s.replace(a, a + "    if (BoardroomSeatKind(seat) == BOARD_ATA) return false;   /* logcheck mutation: the internal disk is not this machine's */\n"))
+MUT_EOF
 }

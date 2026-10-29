@@ -18,7 +18,8 @@ be able to damage it. The only files it writes are the ones it is told to
     tools/volume-read.py DEVICE cut LOG --count [--json]
     tools/volume-read.py DEVICE cut LOG --list [--json]
     tools/volume-read.py DEVICE cut LOG --epoch K (--keep SET | --subset-bits MASK)
-                                       [--tear W:MASK]... (--out IMG | --check [--json])
+                                       [--tear W:MASK]... (--out IMG | --check [--json]
+                                       [--digests MEMO] [--digests-out MEMO])
     tools/volume-read.py DEVICE cut LOG --against FINAL
     tools/volume-read.py IMAGE  self-test [--emit CASE --out IMG]
 
@@ -29,8 +30,10 @@ on a volume of format v2, as its book holds them once its ribbon is replayed.
 and a simulation of what the next mount decides (exit 0 consistent, 1 not,
 2 unreadable) — on format v2 the book's census (bookcensus.py), every owner
 derived from the names that take a block. `cut` reads a QEMU blklogwrites log
-of this DEVICE and builds any crash state out of it. `self-test` plants every
-rule's damage into an overlay over IMAGE and checks that each is caught.
+of this DEVICE and builds any crash state out of it; the cuts of one record
+share a memo of the block digests a book's census takes (bookcensus.py
+DigestMemoWrite). `self-test` plants every rule's damage into an overlay over
+IMAGE and checks that each is caught.
 
 DEVICE is a raw device or an image file:
 
@@ -251,6 +254,7 @@ def CmdCheck(args, medium):
 
 def CmdCut(args, medium):
     from volumeread import blklog
+    from volumeread.bookcensus import DigestMemoRead, DigestMemoWrite
     try:
         log = blklog.BlkLog(args.log, medium.SizeSectors())
         if args.against:
@@ -273,18 +277,28 @@ def CmdCut(args, medium):
         else:
             keep = blklog.ParseKeep(args.keep, epoch, classifier.Classify)
         tears = blklog.ParseTears(args.tear or [], epoch, keep)
-        over = log.Cut(medium, args.epoch, keep, tears)
+        over = log.Cut(medium, args.epoch, keep, tears, blklog.ParseBlot(args.blot),
+                       blklog.ParseSmudge(args.smudge))
         if args.out:
             cloned = over.WriteOut(args.out, [(args.log, "the log")])
             print(f"cut: epoch {args.epoch}, {len(keep)} of {len(epoch)} write(s) kept, "
                   f"{len(tears)} torn — {len(over.over)} sector(s) laid over "
                   f"{'a clone' if cloned else 'a copy'} of the base in {args.out}")
             return 0
+        if args.digests:
+            try:
+                DigestMemoRead(args.digests)
+            except (OSError, ValueError, TypeError) as e:
+                print(f"cut: the memo of digests {args.digests} does not read — {e}", file=sys.stderr)
+                return 2
         try:
-            return SayCensus(AnyCensus(over, args.start), args.json)
+            census = AnyCensus(over, args.start)
         except (Unreadable, IOError) as e:
             print(f"check: unreadable — {e}")
             return 2
+        if args.digests_out:
+            DigestMemoWrite(args.digests_out)
+        return SayCensus(census, args.json)
     except (blklog.LogUnreadable, ValueError) as e:
         print(f"cut: {e}", file=sys.stderr)
         return 2
@@ -403,9 +417,13 @@ def Main():
     cut.add_argument("--keep", metavar="SET")
     cut.add_argument("--subset-bits", metavar="MASK")
     cut.add_argument("--tear", action="append", metavar="W:MASK")
+    cut.add_argument("--blot", metavar="SEQS", help="entries of epochs before K the medium did not keep")
+    cut.add_argument("--smudge", metavar="LBA+N,...", help="sectors laid last as bytes no writer laid")
     cut.add_argument("--out", metavar="IMG")
     cut.add_argument("--check", action="store_true")
     cut.add_argument("--json", action="store_true")
+    cut.add_argument("--digests", metavar="MEMO", help="a book's block digests a check of the same run took")
+    cut.add_argument("--digests-out", metavar="MEMO", help="the block digests this check took, kept")
     sub.add_parser("bound", parents=[start], help="the newest Tally held to the one rule of binding")
     st = sub.add_parser("self-test", parents=[start], help="every census rule, planted and caught")
     st.add_argument("--emit", metavar="CASE")
