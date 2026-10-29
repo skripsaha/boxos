@@ -143,6 +143,9 @@ typedef struct {
     Strip*         strips;
     uint32_t       nstrips;
     uint32_t       cap;
+    uint32_t*      cut;       /* the Strips each Parcel laid, in order: memory cuts the file as its Tally did */
+    uint32_t       ncut;
+    uint32_t       capcut;
     uint64_t       covered;   /* the blocks its Parcels covered, in a row from block 0 */
     uint64_t       gen;       /* the seq of the stitch that last changed it (§2.8) */
     uint64_t*      parcel_b;  /* each Parcel that read: the file block it begins at, ... */
@@ -204,6 +207,7 @@ typedef struct {
     bool           on_head;      /* stood on the Deed at its head — not on its far copy alone */
     uint64_t       reach;        /* past the farthest block an owner but the far Deed names (census) */
     uint32_t       atom;         /* the medium's atom of a write, bytes (§1.5) */
+    uint32_t       ribbon_atom;  /* the ribbon's: a flash page on a removable medium (§16.6 п.2) */
     SpineSlot*     slots;        /* the slots that hold, newest first */
     uint32_t       nslots;
     SpineSlot*     stood;        /* the one the mount stands on */
@@ -260,6 +264,10 @@ error_t TallyLeaves(uint64_t tree, const SpineRoot* root);
 
 /* The last file the FILES walk gathered, laid into memory or locked. */
 error_t BookFileClose(void);
+/* The gathering's memory let go — its name, tags, Strips, cut and Parcels —
+ * and the gathering emptied: by the walk at each file it closes, and by the
+ * mount's let-go of a walk a refusal stopped mid-file (MountBookLetGo). */
+void    BookFileForget(BookFile* f);
 
 /* A rotten FILES range kept among the mount's (g_book.rot) and noted for
  * Facsimile to weigh once the walk is done (tally_leaves.c). OK or

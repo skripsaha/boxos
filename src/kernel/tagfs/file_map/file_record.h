@@ -142,6 +142,10 @@ typedef struct {
  * block (count 0). Every allocation is made here, with no lock held. */
 FileRecord* FileRecordBuild(const TagFSMetadata* meta);
 
+/* The same, its Strips cut as `cut` gives — the Strips of each Parcel, `ncut`
+ * of them, as a Tally laid them (tract.h TractOfParcels): a book's mount. */
+FileRecord* FileRecordBuildCut(const TagFSMetadata* meta, const uint32_t* cut, uint64_t ncut, bool* recut);
+
 /* A record with a new header — `name`, `tags`, `flags` — and every one of the
  * old record's runs, shared rather than copied; its times, size and file id
  * the old one's. NULL when there is no memory. */

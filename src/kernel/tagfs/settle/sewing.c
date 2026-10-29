@@ -209,7 +209,7 @@ static uint64_t StitchFlight(const StitchSnap* s, uint32_t coined, uint64_t text
                      (uint64_t)coined * STITCH_COINED_MOST + text;
     if (s->use_owed)
         bytes += STITCH_USE_MOST + (s->use ? s->use->bytes : 0u);
-    return RibbonStitchSectors(bytes, RibbonCursorNow()->atom);
+    return RibbonStitchOf(bytes);
 }
 
 static void StitchTake(StitchSnap* s)
@@ -525,7 +525,7 @@ static error_t StitchLay(StitchSnap* s, bool* word)
     }
     if (rc == OK) {
         s->useful = len;
-        s->of     = (uint32_t)RibbonStitchSectors(len, RibbonCursorNow()->atom);
+        s->of     = (uint32_t)RibbonStitchOf(len);
         StitchHeldToFlight(s);
         rc    = RibbonRoom(s->of, !l.use_written, &s->at, &s->hop);
     }
@@ -573,6 +573,15 @@ static error_t StitchBuild(StitchSnap* s)
 // STITCH
 // ----------------------------------------------------------------------------
 
+/* The sector of a stitch its last atom of the ribbon begins at: a stitch ends
+ * on one (RibbonStitchOf), and one begun inside a flash page, past an end a
+ * writer of a smaller atom left, may be shorter than a page — all of it then. */
+static uint64_t StitchLastAtom(const StitchSnap* s)
+{
+    uint32_t atom = RibbonCursorNow()->atom;
+    return s->of > atom ? s->of - atom : 0;
+}
+
 /* The window of the stitch written next: from sector `written` on, as many as
  * the seat takes in one command, inside one Quire — and the last atom a write
  * of its own, so the cut that stops before it tears a stitch of more than one
@@ -580,7 +589,7 @@ static error_t StitchBuild(StitchSnap* s)
 static uint32_t StitchWindow(const StitchSnap* s, uint64_t* vlba)
 {
     uint64_t left  = s->at.quire.blocks * TAGFS_BLOCK_SECTORS - s->at.off;
-    uint32_t atom  = RibbonCursorNow()->atom;
+    uint64_t last  = StitchLastAtom(s);
     uint64_t n     = s->of - s->written;
     uint64_t most  = BoardroomSeatRun(tagfs_get_seat());
     if (s->written < left) {
@@ -589,8 +598,8 @@ static uint32_t StitchWindow(const StitchSnap* s, uint64_t* vlba)
     } else {
         *vlba = s->hop.block * TAGFS_BLOCK_SECTORS + (s->written - left);
     }
-    if (s->written + n > s->of - atom && s->written < s->of - atom)
-        n = s->of - atom - s->written;
+    if (s->written + n > last && s->written < last)
+        n = last - s->written;
     return (uint32_t)(n < most ? n : most);
 }
 
@@ -605,7 +614,7 @@ static error_t StitchWrite(StitchSnap* s, bool* done)
     if (s->written == 0 && EngrossCarriedBy(s->target))
         SETTLE_CUT_AT(SETTLE_CUT_POINT_ENGROSS);
 #endif
-    if (s->written == s->of - RibbonCursorNow()->atom)
+    if (s->written == StitchLastAtom(s))
         SETTLE_CUT_AT(SETTLE_CUT_POINT_STITCH);
     int rc = tagfs_volume_write(vlba, n, s->sectors + (uint64_t)s->written * BOOK_SECTOR_BYTES);
     if (rc != 0)
@@ -706,6 +715,10 @@ error_t StitchRunStep(bool* done)
         break;
     case STITCH_STEP_BUILD:
         s->stage = "the stitch's making";
+#ifdef CONFIG_VOLUME_TESTS
+        if ((rc = SettleStandRefusalHere(OK)) != OK)
+            break;
+#endif
         rc       = StitchBuild(s);
         if (rc == OK)
             s->step = s->toll ? STITCH_STEP_FIRST_FLUSH : STITCH_STEP_STITCH;

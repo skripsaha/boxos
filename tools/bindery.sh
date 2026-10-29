@@ -1,7 +1,7 @@
 #!/bin/bash
 # bindery — receipts across kernels: a volume one kernel wrote, read by the next.
 #
-#     HEIRLOOM_FROM=<commit> [HEIRLOOM_FORMAT=v2] tools/bindery.sh heirloom
+#     HEIRLOOM_FROM=<commit> [HEIRLOOM_FORMAT=v1|v2] tools/bindery.sh heirloom
 #     HEIRLOOM_FROM=<commit> tools/bindery.sh refusal
 #
 # A machine outlives its builds. The machines on the desk and the sticks beside
@@ -43,7 +43,9 @@
 # HEIRLOOM_FORMAT=v2 makes the heirloom a book: commit N's volume laid down
 # with VOLUME_FORMAT=v2 and this tree's disk too — kernel N's book read and
 # written by kernel N+1, and back (receipt (а) of step 2.3: the kernel of 2.3j
-# and the next). Unset, format v1: commit b9962f55's volume, the last kernel's
+# and the next). Unset, format v1 — named to every make of the run, commit N's
+# and this tree's alike, never left to the format a build makes when nobody
+# names one (spec_v2 §16.5 п.22): commit b9962f55's volume, the last kernel's
 # before the book, is receipt (в) — the frozen path read on.
 #
 # `refusal` is the receipt the other way round, (б): a book THIS tree laid
@@ -58,6 +60,9 @@ STAND_NAME=bindery
 # ROOT, SCRATCH, the verdict counters, the mutation manifest and its
 # preflights, the way out, the waits and the typer: tools/stand.sh.
 . "$(dirname "$0")/stand.sh"
+
+HEIRLOOM_FORMAT=${HEIRLOOM_FORMAT:-v1}
+case "$HEIRLOOM_FORMAT" in v1|v2) ;; *) echo "bindery: HEIRLOOM_FORMAT=$HEIRLOOM_FORMAT names no format"; exit 2 ;; esac
 
 HEIRLOOM_TREE="$SCRATCH/heirloom.tree"       # commit N, checked out and built
 HEIRLOOM_IMG="$SCRATCH/heirloom.img"         # the volume kernel N writes
@@ -86,7 +91,7 @@ heirloom_tree() {
     # says why): the pass is an injection, and N's own pack gate refuses to
     # stamp a tree carrying one unless the harness says it is asking.
     [ -z "${2:-}" ] || heirloom_old_pass "$2" || return 1
-    command make -C "$HEIRLOOM_TREE" HARNESS=on ${HEIRLOOM_FORMAT:+VOLUME_FORMAT=$HEIRLOOM_FORMAT} \
+    command make -C "$HEIRLOOM_TREE" HARNESS=on VOLUME_FORMAT="$HEIRLOOM_FORMAT" \
         >"$SCRATCH/heirloom.build.log" 2>&1 || { tail -25 "$SCRATCH/heirloom.build.log"; return 1; }
 }
 
@@ -368,7 +373,7 @@ heirloom_unwritten() {
     census="$HEIRLOOM_PERSIST fid(s) on its volume: $(heirloom_persist n)"
     if ! grep -aqE '^(~ )?persist write' "$2"; then
         echo "  (kernel N, commit $1, never took 'persist write' — its machine stopped before it; nothing of N's to hand on)"
-    elif [ "${HEIRLOOM_FORMAT:-}" = v2 ] &&
+    elif [ "$HEIRLOOM_FORMAT" = v2 ] &&
          { git -C "$ROOT" merge-base --is-ancestor "$HEIRLOOM_BOOK_DATA" "$1" 2>/dev/null; [ $? = 1 ]; }; then
         harness "heirloom: commit $1 is from before $HEIRLOOM_BOOK_DATA (step 2.3j), the first kernel to write a file's data on a book — no N for HEIRLOOM_FORMAT=v2 (persist: ${said:-nothing}; $census)"
     else
@@ -381,7 +386,7 @@ heirloom_handed() {
     local L="$SCRATCH/serial.heirloom_n1.log" rc count tree seat own kept found handed
     echo "-- kernel N+1: this tree, its boarding pass naming the heirloom $HEIRLOOM_UUID --"
     heirloom_pass_on "$HEIRLOOM_UUID"
-    STAND_FORMAT=${HEIRLOOM_FORMAT:-} build
+    STAND_FORMAT=$HEIRLOOM_FORMAT build
     if ! cp build/boxos.img "$HEIRLOOM_BOOT"; then
         harness "heirloom: this tree's image could not be copied to $HEIRLOOM_BOOT"
         heirloom_pass_off
@@ -392,7 +397,7 @@ heirloom_handed() {
 
     heirloom_untouched "the host, between the machines,"
     handed=$(heirloom_sha)
-    STAND_FORMAT=${HEIRLOOM_FORMAT:-} heirloom_machine n1 "$HEIRLOOM_BOOT" "$HEIRLOOM_IMG" "persist verify" "persist write"; rc=$?
+    STAND_FORMAT=$HEIRLOOM_FORMAT heirloom_machine n1 "$HEIRLOOM_BOOT" "$HEIRLOOM_IMG" "persist verify" "persist write"; rc=$?
     heirloom_pass_off
     [ $rc = 2 ] && return 1
     heirloom_let_go "kernel N+1"
@@ -512,7 +517,7 @@ run_refusal() {
     build
     refusal_written || { buildkey_restore; return; }
     echo "-- kernel N: commit $from, its boarding pass naming this tree's book $HEIRLOOM_UUID --"
-    if ! HEIRLOOM_FORMAT="" heirloom_tree "$from" "$HEIRLOOM_UUID" ||
+    if ! HEIRLOOM_FORMAT=v1 heirloom_tree "$from" "$HEIRLOOM_UUID" ||
        ! cp "$HEIRLOOM_TREE/build/boxos.img" "$HEIRLOOM_BOOT"; then
         harness "refusal: commit $from would not check out and build ($SCRATCH/heirloom.build.log)"
         buildkey_restore; return
@@ -549,7 +554,7 @@ run_heirloom() {
 case "${1:-}" in
     heirloom) run_heirloom ;;
     refusal)  run_refusal ;;
-    *) echo "usage: HEIRLOOM_FROM=<commit> [HEIRLOOM_FORMAT=v2] $0 heirloom"
+    *) echo "usage: HEIRLOOM_FROM=<commit> [HEIRLOOM_FORMAT=v1|v2] $0 heirloom"
        echo "       HEIRLOOM_FROM=<commit> $0 refusal"; exit 2 ;;
 esac
 

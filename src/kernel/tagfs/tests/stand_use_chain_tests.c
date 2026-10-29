@@ -437,13 +437,17 @@ out:
 
 static const TestCase g_stand_use_chain_tests[] = {
     { .name  = "stand_use_chain_wide", .func = TestStandUseChainWide,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_use_context" },
     { .name  = "stand_use_chain_no_orphan", .func = TestStandUseChainNoOrphan,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_use_context" },
     { .name  = "stand_use_chain_named_by_both", .func = TestStandUseChainNamedByBoth,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_use_context" },
     { .name  = "stand_use_chain_rot_rolls_back", .func = TestStandUseChainRotRollsBack,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_use_context" },
 };
 
 const TestSuite g_stand_use_chain_suite = {

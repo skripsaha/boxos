@@ -102,6 +102,10 @@ typedef struct {
     bool          promised;       /* the block its first Slip's tail is laid in promised to the file, until its
                                    * Ink puts the record that holds the Slip, and the promise with it, or the
                                    * Plot is let go (block_map.h, AllotmentPromise) */
+    bool          part;           /* a window past the first of a write cut at the medium's command — by the
+                                   * Helm (helm_work.c) or a program's WriteJob (write_job_port.c w_alloc): the
+                                   * write as its caller gave it began in a block before this one, so it does
+                                   * not lie in the file's last block alone */
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
     bool          engross;        /* an Engross's: its Ink says so (EngrossInked, settle_cut.h) */
 #endif

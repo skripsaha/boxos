@@ -207,12 +207,14 @@ static const TestCase g_stand_integrity_tests[] = {
       .func  = TestStandIntegrityLayPagesTakeNoDigest, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a page of the integrity map pushed out into a map being laid records a "
                        "digest of its own block, which pushes the next dirty page out for it — "
-                       "as deep as the map has slots, on the deepest road to the medium" },
+                       "as deep as the map has slots, on the deepest road to the medium",
+      .format = DEED_FORMAT_V1, .analog = "stand_fresh_digest_held" },
     { .name  = "stand_integrity_pool_block_reads_past_a_stale_digest",
       .func  = TestStandIntegrityPoolBlockReadsPastAStaleDigest, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a closed pool block whose digest went stale in a stop between two cycles "
                        "is read by Glean as rot every cycle, stays on the chain for good, and the "
-                       "chain grows without bound" },
+                       "chain grows without bound",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_undigested_refused" },
 };
 
 const TestSuite g_stand_integrity_suite = {

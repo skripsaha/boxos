@@ -111,7 +111,9 @@ STAND_NAME=logcheck
 # growglass): tools/logcheck_book_grow.sh.
 . "$(dirname "$0")/logcheck_book_grow.sh"
 # A book's stick leaving while a write is in flight (replugwrite on
-# VOLUME_FORMAT=v2): tools/logcheck_book_replug.sh.
+# VOLUME_FORMAT=v2), and a stick the host moved on while it was out, by its
+# format (moved_on_host, moved_on_said: replug, holdground, returnfail):
+# tools/logcheck_book_replug.sh.
 . "$(dirname "$0")/logcheck_book_replug.sh"
 
 # Waits for the SHELL BANNER, not for "userspace is starting".
@@ -668,7 +670,7 @@ run_replug() {
     wait_for_line build/serial.log "the medium the volume lives on has left" "$WAIT_QUIET_S" $((SECOND_LINES + 1))
     sleep 2
     local MOVED=1
-    ledger_moved_on_host "$SCRATCH/stick.img" && MOVED=0
+    moved_on_host "$SCRATCH/stick.img" && MOVED=0
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
@@ -739,15 +741,15 @@ run_replug() {
 
     # ── the second return: the stick's Ledger moved while it was away ──────
     [ "$MOVED" = 0 ]
-    chk $? "the host moved the stick's Ledger on while it was out"
-    grep -q "came back in seat 1 with a Ledger or a Deed this kernel did not leave on it" "$T"
-    chk $? "the stick whose Ledger moved was judged not to be the book this kernel holds"
+    chk $? "the host moved the stick's book on (its Ledger, or a book's Spine slot) while it was out"
+    grep -q "$(moved_on_said)" "$T"
+    chk $? "the stick whose book moved was judged not to be the book this kernel holds"
     ! grep -q "the volume is back, in seat" "$T"
     chk $? "and was not taken up as that book"
     grep -q "\[TagFS\] the volume on seat 1 is MOUNTED" "$T"
     chk $? "the volume was mounted anew from the medium as it now is"
     local GIVEN_AT UP_AT READ_AT
-    GIVEN_AT=$(grep -n "did not leave on it" "$T" | head -1 | cut -d: -f1)
+    GIVEN_AT=$(grep -n "$(moved_on_said)" "$T" | head -1 | cut -d: -f1)
     UP_AT=$(grep -n "is MOUNTED" "$T" | head -1 | cut -d: -f1)
     READ_AT=$(grep -n "\[ANCHOR\] PASS" "$T" | head -1 | cut -d: -f1)
     [ -n "$GIVEN_AT" ] && [ -n "$UP_AT" ] && [ -n "$READ_AT" ] && \
@@ -1093,7 +1095,7 @@ REPLUGWRITE_CENSUS
 }
 
 run_replugwrite() {
-    [ "${VOLUME_FORMAT:-v1}" = v2 ] && { run_replugwritebook; return; }
+    [ "$(stand_format)" = v2 ] && { run_replugwritebook; return; }
     echo "== replugwrite: the stick leaves while a write is in flight and writers wait for its Helm, and comes back as it left, then changed =="
     local r change name seed from rc last pid L="$SCRATCH/serial.replugwrite.log"
     REPLUGWRITE_ABSENT=""
@@ -3098,7 +3100,7 @@ run_holdground() {
     # The stick is changed while it is out, and pushed back in. drive_add
     # first: an HMP drive is auto-delete and went with the device.
     local MOVED=1
-    ledger_moved_on_host "$SCRATCH/stick.img" && MOVED=0
+    moved_on_host "$SCRATCH/stick.img" && MOVED=0
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
@@ -3127,7 +3129,7 @@ run_holdground() {
     grep -q "HOLDGROUND. a caller was inside the volume when its medium left" "$S"
     chk $? "somebody was inside the volume when the medium left"
     [ "$MOVED" = 0 ]
-    chk $? "the host moved the stick's Ledger on while it was out"
+    chk $? "the host moved the stick's book on (its Ledger, or a book's Spine slot) while it was out"
 
     # ── a program asking the absent medium hears it is absent ──────────────
     grep -q "answered 203 — 0 of .* bytes had landed" "$S"
@@ -3136,8 +3138,8 @@ run_holdground() {
     chk $? "and the program was refused by name, not called unknown"
 
     # ── ‼ NOT THE BOOK THIS KERNEL HOLDS ───────────────────────────────────
-    grep -q "came back in seat 1 with a Ledger or a Deed this kernel did not leave on it" "$S"
-    chk $? "the stick whose Ledger moved was judged not to be the book this kernel holds"
+    grep -q "$(moved_on_said)" "$S"
+    chk $? "the stick whose book moved was judged not to be the book this kernel holds"
     ! grep -q "the volume is back, in seat" "$S"
     chk $? "and was not taken up as that book"
 
@@ -3154,7 +3156,7 @@ run_holdground() {
     # In that ORDER. A "let go of" line that precedes the "still inside" line
     # would mean the memory went back first and the sentence came after.
     local GIVEN_AT WAIT_AT OUT_AT FREE_AT MOUNT_AT
-    GIVEN_AT=$(grep -n "did not leave on it" "$S" | head -1 | cut -d: -f1)
+    GIVEN_AT=$(grep -n "$(moved_on_said)" "$S" | head -1 | cut -d: -f1)
     WAIT_AT=$(grep -nE "the volume is on its way out and [1-9]" "$S" | head -1 | cut -d: -f1)
     OUT_AT=$(grep -n "HOLDGROUND. the caller has stepped out" "$S" | head -1 | cut -d: -f1)
     FREE_AT=$(grep -n  "the last caller is out and the old volume" "$S" | head -1 | cut -d: -f1)
@@ -3265,7 +3267,7 @@ run_returnfail() {
     # spent on the re-mount this build is told to fail; nothing is plugged in
     # after it.
     local MOVED=1
-    ledger_moved_on_host "$SCRATCH/stick.img" && MOVED=0
+    moved_on_host "$SCRATCH/stick.img" && MOVED=0
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
@@ -3294,8 +3296,8 @@ run_returnfail() {
     grep -q "the medium the volume lives on has left — its book is held open" "$S"
     chk $? "and the medium then left, its book held open"
     [ "$MOVED" = 0 ]
-    chk $? "the host moved the stick's Ledger on while it was out"
-    grep -q "came back in seat 1 with a Ledger or a Deed this kernel did not leave on it" "$S"
+    chk $? "the host moved the stick's book on (its Ledger, or a book's Spine slot) while it was out"
+    grep -q "$(moved_on_said)" "$S"
     chk $? "the changed stick was not taken for the book this kernel holds, and the book was given up"
     grep -q "this volume is NOT mounted: RETURNFAIL=on asked this re-mount to fail" "$S"
     chk $? "the re-mount failed where it was told to, and said so out loud"
@@ -3328,7 +3330,7 @@ run_returnfail() {
     # An asking that comes before the reset is a machine asking on a clock, or
     # at once, which is what this replaced.
     local GIVEN_AT OWED_AT RESET_AT ASK_AT UP_AT
-    GIVEN_AT=$(grep -n "did not leave on it" "$S" | head -1 | cut -d: -f1)
+    GIVEN_AT=$(grep -n "$(moved_on_said)" "$S" | head -1 | cut -d: -f1)
     OWED_AT=$(grep -n "refused a read while its volume was being read" "$S" | head -1 | cut -d: -f1)
     RESET_AT=$(grep -n "its medium is reset once" "$S" | head -1 | cut -d: -f1)
     ASK_AT=$(grep -n "asking for the volume nobody has mounted" "$S" | head -1 | cut -d: -f1)
@@ -7299,7 +7301,7 @@ EOF2
 }
 
 run_grow() {
-    [ "${VOLUME_FORMAT:-v1}" = v2 ] && { run_growbook; return; }
+    [ "$(stand_format)" = v2 ] && { run_growbook; return; }
     echo "== grow: a volume on a bigger medium takes the ground behind it =="
     rm -f build/boxos.img   # a scenario that measures growth starts from a volume that has not grown
     build STRICT=on
@@ -7373,7 +7375,7 @@ run_grow() {
 }
 
 run_growcut() {
-    [ "${VOLUME_FORMAT:-v1}" = v2 ] && { run_growcutbook; return; }
+    [ "$(stand_format)" = v2 ] && { run_growcutbook; return; }
     echo "== growcut: a growth cut between its two writes still mounts, and finishes =="
     #
     # The order is the crash safety: the far copy is written first, the head
@@ -8847,6 +8849,14 @@ CENSUS_EOF
 }
 
 run_census() {
+    # The census of the format this run makes (stand_format): a book's landings
+    # and the books the kernel writes, or format v1's plantings — the
+    # Backlist's (spec_v2 §16.5 п.22).
+    if [ "$(stand_format)" = v2 ]; then
+        echo "== census, a book: the host's roll call and the kernel's name the same book =="
+        census_book_all
+        return
+    fi
     echo "== census: the host's roll call and the kernel's name the same blocks =="
     local plant line
     census_qemu_io
@@ -8862,21 +8872,8 @@ run_census() {
         done < "$SCRATCH/census.$plant.verdict"
         lockrank_judge "$SCRATCH/serial.$plant.log" "census $plant"
     done
-    census_book
-    book_circle
-    book_big
-    book_stitchcut
-    book_bind
-    book_bindcut tally
-    book_bindcut slot
-    book_bindcut tally second
-    book_bindcut slot second
-    book_bindrot B4
-    book_bindrot B6c
-    book_escheat B4
-    book_escheat B6c
-    book_escheat B4g 1
 }
+
 
 # ---------------------------------------------------------------------------
 # book_proofblind: the copy check of a Tally laid in must be able to go red
@@ -9290,6 +9287,15 @@ stand_twice() {
 }
 
 run_stand() {
+    # The stand of the format this run makes (stand_format): a book's on its
+    # roads, or format v1's — the Backlist's (spec_v2 §16.5 п.22) — on its own.
+    if [ "$(stand_format)" = v2 ]; then
+        echo "== stand, a book: the startup tests that write, on a volume of format v2 =="
+        stand_book
+        book_proofblind
+        buildkey_restore
+        return
+    fi
     echo "== stand: the startup tests that write, on both roads to the medium, twice each =="
     local f logs=""
     rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
@@ -9301,8 +9307,6 @@ run_stand() {
         [ -f "$f" ] && logs="$logs $f"
     done
     lockrank_judge "$logs" "stand, both roads"
-    stand_book
-    book_proofblind
     buildkey_restore
 }
 
@@ -9340,7 +9344,7 @@ STANDUSB_BLOCKFAILS=48   # stand_judge's table, its USB column
 STANDUSB_SEAT="usb[0-9]+ [^)]*"
 
 run_standusb() {
-    if [ "${VOLUME_FORMAT:-v1}" = v2 ]; then
+    if [ "$(stand_format)" = v2 ]; then
         echo "== standusb, a book: the startup tests that write, on a USB stick of format v2, twice =="
         stand_book_usb again
         lockrank_judge "$SCRATCH/serial.stand_book_usb.log $SCRATCH/serial.stand_book_usb_again.log" "standusb, the book"

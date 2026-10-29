@@ -363,15 +363,17 @@ QMP_EOF
 # pc_stick_add IMG [RECORD [append]] — IMG handed to the machine as a USB
 # stick, its writes and flushes on RECORD when one is named: emptied first, or
 # with `append` gone on from where another machine left it (blklogwrites
-# log-append reads the record's superblock, which every entry rewrites).
+# log-append reads the record's superblock, which every entry rewrites — the
+# sector size with it: QEMU refuses log-sector-size beside log-append, "log-append
+# and log-sector-size are mutually exclusive").
 pc_stick_add() {
-    local top=stick-file append=false
-    [ "${3:-}" = append ] && append=true
+    local top=stick-file append=false size='"log-sector-size": 512, '
+    [ "${3:-}" = append ] && append=true size=
     set -- "$1" "${2:-}" '{"execute": "blockdev-add", "arguments": {"driver": "file", "node-name": "stick-file", "filename": "'"$1"'", "cache": {"no-flush": true}}}'
     if [ -n "$2" ]; then
         [ "$append" = true ] || : > "$2"
         set -- "$@" '{"execute": "blockdev-add", "arguments": {"driver": "file", "node-name": "stick-logfile", "filename": "'"$2"'", "cache": {"no-flush": true}}}' \
-            '{"execute": "blockdev-add", "arguments": {"driver": "blklogwrites", "node-name": "stick-log", "file": "stick-file", "log": "stick-logfile", "log-sector-size": 512, "log-super-update-interval": 1, "log-append": '"$append"'}}'
+            '{"execute": "blockdev-add", "arguments": {"driver": "blklogwrites", "node-name": "stick-log", "file": "stick-file", "log": "stick-logfile", '"$size"'"log-super-update-interval": 1, "log-append": '"$append"'}}'
         top=stick-log
     fi
     pc_qmp "${@:3}" '{"execute": "blockdev-add", "arguments": {"driver": "raw", "node-name": "stick", "file": "'"$top"'"}}' &&

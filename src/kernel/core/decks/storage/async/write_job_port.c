@@ -159,6 +159,7 @@ static bool w_alloc(WriteJob *j)
         window = HelmWindowBytes(at);
         if (window > left)
             window = left;
+        j->plot.part = j->bytes_inked > 0;   /* a window past the write's first rides no Slip (plot_slip.c) */
         rc = PlotBeginWrite(&j->plot, at, false, window, &at);
     }
     if (rc == OK && j->plot.slip)

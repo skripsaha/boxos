@@ -4,6 +4,7 @@
 #include "../metadata_pool/meta_pool.h"
 #include "../ink/fallow.h"
 #include "../settle/settle.h"
+#include "../settle/binder.h"
 #include "../integrity/integrity.h"
 #include "boardroom.h"
 #include "write_job.h"   /* WriteJobSeatRunsAsync — the road a program's write takes */
@@ -224,11 +225,72 @@ static uint32_t VolumeChainLength(uint32_t head_volume_block, uint32_t magic)
     return links;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/* A book's own ground, each block once: the runs its Tallies and ribbon hold
+ * (BinderStandGround — the slots' nodes, their ribbons' Quires and the next
+ * one given, what of the pair of Tally-Quires the next Tally goes on in is not
+ * laid yet), which overlap where a Tally was laid in among the nodes of the
+ * one before. False when the heap will not hold them. */
+static bool BookOwnBlocks(uint64_t* own)
+{
+    uint32_t n    = BinderStandGround(NULL, 0);
+    Strip*   runs = kmalloc((uint64_t)(n ? n : 1u) * sizeof(Strip));
+    if (!runs)
+        return false;
+    n = BinderStandGround(runs, n);
+    for (uint32_t i = 1; i < n; i++)
+        for (uint32_t k = i; k > 0 && runs[k - 1].start > runs[k].start; k--) {
+            Strip t     = runs[k];
+            runs[k]     = runs[k - 1];
+            runs[k - 1] = t;
+        }
+    uint64_t blocks = 0, reach = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t lo = runs[i].start > reach ? runs[i].start : reach;
+        uint64_t hi = runs[i].start + runs[i].count;
+        if (hi > lo)
+            blocks += hi - lo;
+        reach = hi > reach ? hi : reach;
+    }
+    kfree(runs);
+    *own = blocks;
+    return true;
+}
+#endif
+
 bool VolumeTallyTake(VolumeTally* tally)
 {
     TagFSState* fs = tagfs_get_state();
     if (!fs || !fs->initialized)
         return false;
+
+    /* A book keeps no chain, pool or integrity map: what is in use of its
+     * volume and not its own ground — its Tallies', its ribbon's, and Fallow's,
+     * which gives back at a lag — is its files' blocks, and any a write took
+     * and named nowhere. The front, the Spine's slots, the far Deed and the
+     * ground held for rotten ranges are the same before and after a test, and
+     * fall out of the difference the count is read by. Across a cycle that
+     * settles a Tally may be cut, and the nodes it laid in its pair of
+     * Tally-Quires are the book's, kept for the next Tally to go on in
+     * (binder.c TallyEnded), and named by no slot — so the runner reads
+     * `held` across a test only when no cycle settled within it (`cycles`,
+     * VolumeResidueSaid). The book's ground is the stand's to name
+     * (BinderStandGround): a build without VOLUME_TESTS counts its files. */
+    if (fs->format == DEED_FORMAT_V2) {
+        uint64_t own = 0;
+#ifdef CONFIG_VOLUME_TESTS
+        if (!BookOwnBlocks(&own))
+            return false;
+#endif
+        TagFSLockTake(&fs->lock);
+        uint64_t used = fs->block_end - fs->ledger.free_blocks;
+        uint64_t rest = FallowBlocks();
+        tally->files  = fs->ledger.total_files;
+        TagFSLockDrop(&fs->lock);
+        tally->held   = used - own - rest;
+        tally->cycles = SettledCycles();
+        return true;
+    }
 
     uint64_t chains =
         VolumeChainLength(fs->layout.tag_registry_block,  TAGFS_REGISTRY_MAGIC) +
@@ -242,8 +304,25 @@ bool VolumeTallyTake(VolumeTally* tally)
     tally->files = fs->ledger.total_files;
     TagFSLockDrop(&fs->lock);
 
-    tally->held = used - own;
+    tally->held   = used - own;
+    tally->cycles = SettledCycles();
     return true;
+}
+
+/* Whether `held` tells across a test: always on format v1; on a book only in a
+ * VOLUME_TESTS build, which names its own ground, and when no cycle settled
+ * within the test (VolumeTally). */
+static bool VolumeHeldRead(const VolumeTally* before, const VolumeTally* after)
+{
+    if (tagfs_get_state()->format != DEED_FORMAT_V2)
+        return true;
+#ifdef CONFIG_VOLUME_TESTS
+    return after->cycles == before->cycles;
+#else
+    (void)before;
+    (void)after;
+    return false;
+#endif
 }
 
 /* True when the test left the volume other than it found it — every
@@ -265,7 +344,7 @@ static bool VolumeResidueSaid(const char* name, const VolumeTally* before)
                 (unsigned long long)after.files);
         residue = true;
     }
-    if (after.held != before->held) {
+    if (after.held != before->held && VolumeHeldRead(before, &after)) {
         kprintf("[TESTS] %s failed: it left residue — %llu block(s) in use "
                 "outside the volume's own chains before it and %llu after\n",
                 name, (unsigned long long)before->held,
@@ -393,6 +472,18 @@ static void TestSayWritePath(void)
             WriteJobSeatRunsAsync(seat) ? "through the port, parked on each answer"
                                         : "the synchronous path too",
             (unsigned)g_amp.total_cores);
+#ifdef CONFIG_VOLUME_TESTS
+    if (tagfs_get_state()->format == DEED_FORMAT_V2)
+        kprintf("[TESTS] on a book each test that writes is held to the files it leaves, and — when no cycle "
+                "settled within it — to the blocks in use outside the book's own ground: a block a write took and "
+                "named nowhere is free again at the next mount, which derives the map from the book, and only a "
+                "count in this session finds it\n");
+#else
+    if (tagfs_get_state()->format == DEED_FORMAT_V2)
+        kprintf("[TESTS] on a book each test that writes is held to the files it leaves alone: a build without "
+                "VOLUME_TESTS does not name the book's own ground, and the blocks a test leaves in use are "
+                "counted by the stand's build\n");
+#endif
 }
 
 /* SEEKLAG=<us>: the volume's seat seeks before every read from the first test
@@ -444,11 +535,32 @@ static bool TestLeftAFaultArmed(const TestCase* test)
 #endif
 }
 
+/*
+ * On a book the cadence lays a Tally between cycles, and while the tests run
+ * the cadence is held (SettleCadenceHold): a test meets only the cycles it
+ * drives. So the Tally the cycles of the tests before left owed is laid here,
+ * before the next test that writes, as the cadence would have laid it between
+ * them — its Slips laid in their blocks first, as the cadence's Engross would.
+ * Without it the ribbon of a whole stand runs on past every Tally — measured:
+ * 10393 stitches over 39 Quires, read whole by every mount after them.
+ */
+static void TestTallyOwedLaid(const TestCase* test)
+{
+    if (tagfs_get_state()->format != DEED_FORMAT_V2 || !BinderEngrossOwed())
+        return;
+    error_t rc = BinderRunWhole();
+    if (rc != OK)
+        kprintf("[TESTS] the Tally owed before %s was not laid (error %u): the test meets the ribbon as "
+                "it stands\n", test->name, (unsigned)rc);
+}
+
 static void TestRun(const TestCase* test, TestStats* stats)
 {
     bool        guarded = test->reach == TEST_WRITES_TO_VOLUME;
     VolumeTally before;
 
+    if (guarded)
+        TestTallyOwedLaid(test);
     if (guarded && !VolumeTallyTake(&before)) {
         stats->total_failed++;
         kprintf("[TESTS] %s was not run: the volume could not be counted before "
@@ -511,11 +623,8 @@ error_t TagFS_RunAllTests(TestStats* stats)
             const TestCase* test = &suite->tests[i];
             stats->total_tests++;
 
-            /* A test written for the other format, or one that writes on a
-             * book this kernel does not write, stands aside — counted. */
-            if ((test->format != DEED_FORMAT_NONE && test->format != volume) ||
-                (volume == DEED_FORMAT_V2 && test->format == DEED_FORMAT_NONE &&
-                 test->reach == TEST_WRITES_TO_VOLUME)) {
+            /* A test written for the other format stands aside — counted. */
+            if (test->format != DEED_FORMAT_NONE && test->format != volume) {
                 aside_format++;
                 stats->total_skipped++;
                 continue;
@@ -552,9 +661,7 @@ error_t TagFS_RunAllTests(TestStats* stats)
     if (aside_format > 0)
         kprintf("[TESTS] %u test(s) stood aside: this volume is format %s — %s\n", aside_format,
                 volume == DEED_FORMAT_V2 ? "v2" : "v1",
-                volume == DEED_FORMAT_V2 ? "they are written for format v1's records, or write to the "
-                                           "volume as format v1's cycle does; a book is written only by the "
-                                           "tests written for it"
+                volume == DEED_FORMAT_V2 ? "they are written for format v1's records"
                                          : "they are written for a format-v2 book");
     if (skipped_writers > 0) {
         kprintf("[TESTS] %u test(s) that write to the volume were not run — "

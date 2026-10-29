@@ -49,6 +49,26 @@ static volatile uint64_t s_flight;
  * said once a mount. */
 static volatile uint8_t  s_long_said;
 
+/* A stitch that ends inside a flash page, said once a mount (RibbonPlaced);
+ * the last Quire begun off a page gone on into, said once, its block + 1
+ * (RibbonEnteredSaid). */
+static volatile uint8_t  s_inside_said;
+static volatile uint64_t s_entered_said;
+
+/* The medium's atom, sectors (§1.5): no write of the ribbon is smaller. */
+static uint32_t RibbonMediumAtom(void)
+{
+    return g_book.atom / BOOK_SECTOR_BYTES;
+}
+
+/* Whether `q` is laid on atoms of `atom` sectors: its first block and its
+ * length whole atoms. A Quire a writer of a smaller atom took may not be. */
+static bool RibbonQuireOn(const RibbonQuire* q, uint32_t atom)
+{
+    uint64_t blocks = atom / TAGFS_BLOCK_SECTORS ? atom / TAGFS_BLOCK_SECTORS : 1u;
+    return q->blocks && !(q->block % blocks) && !(q->blocks % blocks);
+}
+
 /* `sectors` of a stitch as the bytes of records it carries besides its
  * StitchHead and its Clasp. */
 static uint64_t RibbonRoomBytes(uint64_t sectors)
@@ -71,6 +91,13 @@ void RibbonRoomOf(const RibbonCursor* c, uint64_t flight, uint64_t* any, uint64_
 {
     uint64_t left = c->up ? c->quire.blocks * TAGFS_BLOCK_SECTORS - c->off : 0;
     uint64_t next = c->up ? c->next.blocks * TAGFS_BLOCK_SECTORS : 0;
+    uint64_t at   = c->quire.block * TAGFS_BLOCK_SECTORS + c->off, m = RibbonMediumAtom();
+    /* A stitch ends on an atom of the ribbon (RibbonStitchEnds): begun off
+     * one, or in a Quire a writer of a smaller atom laid off one, it may take
+     * up to that atom less the medium's past its length — that much less is
+     * claimed. On the grid it takes nothing more. */
+    uint64_t slack = c->atom > m && ((at % c->atom) || !RibbonQuireOn(&c->quire, c->atom) ||
+                                     (c->next.blocks && !RibbonQuireOn(&c->next, c->atom))) ? c->atom - m : 0;
     if (flight && flight < left) {
         left -= flight;
     } else if (flight) {
@@ -78,8 +105,8 @@ void RibbonRoomOf(const RibbonCursor* c, uint64_t flight, uint64_t* any, uint64_
         left = next > past ? next - past : 0;
         next = 0;
     }
-    *any   = next && left + next > 2u * c->atom ? left + next - 2u * c->atom : 0;
-    *frees = left > c->atom ? left - c->atom : 0;
+    *any   = next && left + next > 2u * c->atom + slack ? left + next - 2u * c->atom - slack : 0;
+    *frees = left > c->atom + slack ? left - c->atom - slack : 0;
     if (*frees < *any)
         *frees = *any;
 }
@@ -109,11 +136,63 @@ static uint64_t RibbonQuireBlocks(const RibbonQuire* now, uint32_t atom)
     return (grain + atoms - 1u) / atoms * atoms;
 }
 
+/* The cursor gone on into `q` at its start, a Quire a writer of a smaller
+ * atom took off an atom of the ribbon — the next_quire named before this
+ * mount took one on it, where none could be taken or a retry is taken up
+ * there alone (M-6) — said once a Quire: the stitch laid at its start shares
+ * a flash page with what lies before it. */
+static void RibbonEnteredSaid(const RibbonQuire* q)
+{
+    uint64_t pb = s_cursor.atom / TAGFS_BLOCK_SECTORS;
+    if (!pb || !(q->block % pb) ||
+        __atomic_exchange_n(&s_entered_said, q->block + 1u, __ATOMIC_ACQ_REL) == q->block + 1u)
+        return;
+    kprintf("[TagFS] the ribbon goes on into its Quire %llu+%llu, which a writer of a smaller atom took off a flash "
+            "page of %u bytes: the stitch laid at its start shares a page with what lies before it, and ends on a "
+            "page, every one after it begun on one (§16.6 п.2)\n", (unsigned long long)q->block,
+            (unsigned long long)q->blocks, s_cursor.atom * BOOK_SECTOR_BYTES);
+}
+
+/*
+ * Where the cursor laid at the walk's end goes on (volume_ribbon.h,
+ * RibbonGoesOn): at the end, or at the start of the next_quire named — *hop —
+ * said where the stitch laid there first shares a flash page; or nowhere, the
+ * words for the glass. A next_quire named off the medium's atom no stitch is
+ * written in (§1.5): the cursor forgets it, and the first stitch names one it
+ * takes (RibbonNextGiven) — a retry, which the reader takes up there alone,
+ * refused (RibbonRetry).
+ */
+static const char* RibbonGoesOnAt(RibbonCursor* c, bool* hop)
+{
+    uint32_t way = RibbonGoesOn(c->quire.block, c->quire.blocks, c->off, c->next.block, c->next.blocks,
+                                RibbonMediumAtom(), c->atom);
+    *hop = (way & RIBBON_ON_NEXT) != 0;
+    if (!way)
+        return "neither where its ribbon ends nor the next_quire it names lies on the medium's atom — a writer of a "
+               "smaller atom laid them — and no write past its end would leave the settled sectors beside it whole "
+               "(§1.5)";
+    if (way == (RIBBON_ON_END | RIBBON_ON_SHARED))
+        kprintf("[TagFS] the ribbon ends at sector %llu of its Quire %llu+%llu, inside a flash page of %u bytes — a "
+                "writer of a smaller atom laid it — and names no next_quire laid on pages: the stitch this mount lays "
+                "first shares that page with the last one settled, and ends on a page, every one after it begun on "
+                "one (§16.2 п.11, §16.6 п.2)\n", (unsigned long long)c->off, (unsigned long long)c->quire.block,
+                (unsigned long long)c->quire.blocks, c->atom * BOOK_SECTOR_BYTES);
+    if (!*hop && c->next.blocks && !RibbonQuireOn(&c->next, RibbonMediumAtom())) {
+        kprintf("[TagFS] the next_quire the ribbon names, %llu+%llu, lies off the medium's atom of %u bytes: no "
+                "stitch is written in it, and the next stitch names one taken in its stead (§1.5)\n",
+                (unsigned long long)c->next.block, (unsigned long long)c->next.blocks,
+                RibbonMediumAtom() * BOOK_SECTOR_BYTES);
+        c->next = (RibbonQuire){ 0, 0 };
+    }
+    return NULL;
+}
+
 error_t RibbonCursorMount(const RibbonWalk* w, const char** glass)
 {
-    RibbonCursor* c = &s_cursor;
+    RibbonCursor* c   = &s_cursor;
+    bool          hop = false;
     memset(c, 0, sizeof(*c));
-    c->atom = g_book.atom / BOOK_SECTOR_BYTES;
+    __atomic_store_n(&s_entered_said, 0u, __ATOMIC_RELEASE);
     if (!w->has_end) {
         *glass = "its ribbon ends where the walk cannot say what comes next — no writer goes on from there";
         return ERR_TAGFS_READ_ONLY;
@@ -123,14 +202,18 @@ error_t RibbonCursorMount(const RibbonWalk* w, const char** glass)
         return ERR_TAGFS_READ_ONLY;
     }
     c->quire = w->end.quire;
-    c->off   = (w->end.off + c->atom - 1u) / c->atom * c->atom;
+    c->off   = w->end.off;
     c->next  = RibbonQuireSame(&w->end.quire, &w->quire) ? w->next : (RibbonQuire){ 0, 0 };
     c->came  = RibbonQuireSame(&w->end.quire, &w->quire) ? (RibbonQuire){ 0, 0 } : w->quire;
-    if (c->off >= c->quire.blocks * TAGFS_BLOCK_SECTORS) {
-        if (!c->next.blocks) {
-            *glass = "its ribbon fills its last Quire, and names no next_quire to go on in";
-            return ERR_TAGFS_READ_ONLY;
-        }
+    c->atom  = g_book.ribbon_atom / BOOK_SECTOR_BYTES;
+    if (c->off >= c->quire.blocks * TAGFS_BLOCK_SECTORS && !c->next.blocks) {
+        *glass = "its ribbon fills its last Quire, and names no next_quire to go on in";
+        return ERR_TAGFS_READ_ONLY;
+    }
+    if ((*glass = RibbonGoesOnAt(c, &hop)) != NULL)
+        return ERR_TAGFS_READ_ONLY;
+    if (hop) {
+        RibbonEnteredSaid(&c->next);
         c->came  = c->quire;
         c->quire = c->next;
         c->next  = (RibbonQuire){ 0, 0 };
@@ -158,6 +241,7 @@ error_t RibbonCursorMount(const RibbonWalk* w, const char** glass)
     __atomic_store_n(&s_flight, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_refused_free, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_long_said, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_inside_said, 0u, __ATOMIC_RELEASE);
     RibbonLeftMount(w, c->lied, c->given);
     RibbonRoomPublish();
     return OK;
@@ -229,22 +313,32 @@ uint64_t RibbonSeqNext(void)
  * Tallies need would go to (EndpaperKeeps — a whole Tally, and what the ring's
  * slots lack of one) nor a block promised to a Slip's tail (BlockMapTakeQuire):
  * a Quire of the ribbon comes back only once the slots stop
- * naming it, which only a Tally written over one of them does.
+ * naming it, which only a Tally written over one of them does. Laid on an
+ * atom of the ribbon — a flash page on a removable medium (§16.6 п.2) — and
+ * asked for again while the one named is not: a next_quire a writer of a
+ * smaller atom took off a page is gone on into only while none on a page can
+ * be taken, its ground held until a Tally lets the ribbon's Quires before
+ * the one it stands in go, as every Quire a stitch named.
  */
 void RibbonNextGiven(void)
 {
     RibbonCursor* c = &s_cursor;
     uint64_t      start = 0;
-    if (!c->up || c->next.blocks)
+    if (!c->up || (c->next.blocks && RibbonQuireOn(&c->next, c->atom)))
         return;
     c->taken = BlockMapTakeQuire(GROUND_RIBBON, c->quire_blocks,
                                  c->atom / TAGFS_BLOCK_SECTORS ? c->atom / TAGFS_BLOCK_SECTORS : 1u,
                                  EndpaperKeeps(c->quire_blocks), g_book.frame.data_block,
                                  c->quire.block + c->quire.blocks, &start);
     if (c->taken == OK) {
+        if (c->next.blocks)
+            kprintf("[TagFS] the next_quire the ribbon names, %llu+%llu, a writer of a smaller atom took off a "
+                    "flash page of %u bytes: the ribbon names %llu+%llu, laid on pages, in its stead (§16.6 п.2)\n",
+                    (unsigned long long)c->next.block, (unsigned long long)c->next.blocks,
+                    c->atom * BOOK_SECTOR_BYTES, (unsigned long long)start, (unsigned long long)c->quire_blocks);
         c->next = (RibbonQuire){ start, c->quire_blocks };
         BinderRibbonGiven(&c->next);
-    } else if (c->taken == ERR_TAGFS_NO_SPACE) {
+    } else if (c->taken == ERR_TAGFS_NO_SPACE && !c->next.blocks) {
         SettleDemand(SETTLE_DEMAND_TALLY);
         __atomic_store_n(&s_refused_free, AllotmentFreeUnpromised(), __ATOMIC_RELEASE);
     }
@@ -291,6 +385,34 @@ static void RibbonOutSaid(void)
  * one thing a stitch carries that no claim held room for (`promised` false):
  * refused here, it is left out of the stitch (sewing.c).
  */
+uint64_t RibbonStitchOf(uint64_t len)
+{
+    const RibbonCursor* c    = &s_cursor;
+    uint64_t            left = c->quire.blocks * TAGFS_BLOCK_SECTORS - c->off;
+    return RibbonStitchEnds(RibbonStitchSectors(len, RibbonMediumAtom()),
+                            c->quire.block * TAGFS_BLOCK_SECTORS + c->off, left,
+                            c->next.blocks ? c->next.block * TAGFS_BLOCK_SECTORS : 0, c->atom);
+}
+
+/* A stitch of `of` sectors given its place, `left` of its Quire past it: OK,
+ * said where it runs on into a Quire begun off a flash page, or ends inside
+ * one short of its Quire's end (volume_ribbon.h, RibbonStitchEnds) — the
+ * stitch after it shares that page. */
+static error_t RibbonPlaced(uint64_t of, uint64_t left)
+{
+    const RibbonCursor* c   = &s_cursor;
+    uint64_t            end = c->quire.block * TAGFS_BLOCK_SECTORS + c->off + of;
+    if (of > left)
+        RibbonEnteredSaid(&c->next);
+    else if (of < left && end % c->atom && !__atomic_exchange_n(&s_inside_said, 1u, __ATOMIC_ACQ_REL))
+        kprintf("[TagFS] the ribbon's Quire %llu+%llu, which a writer of a smaller atom laid, ends inside a flash "
+                "page of %u bytes and no next_quire is given: a stitch of %llu sector(s) ends inside a page short of "
+                "it, and the stitch after it shares that page (§3.6, §16.6 п.2)\n",
+                (unsigned long long)c->quire.block, (unsigned long long)c->quire.blocks,
+                c->atom * BOOK_SECTOR_BYTES, (unsigned long long)of);
+    return OK;
+}
+
 error_t RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop)
 {
     RibbonCursor* c    = &s_cursor;
@@ -301,7 +423,7 @@ error_t RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop
     if (c->next.blocks) {
         uint64_t most = left + c->next.blocks * TAGFS_BLOCK_SECTORS - 2u * c->atom;
         if (of <= left || of <= most)
-            return OK;
+            return RibbonPlaced(of, left);
         if (c->refused)
             return ERR_TAGFS_READ_ONLY;
         if (promised && !__atomic_exchange_n(&s_long_said, 1u, __ATOMIC_ACQ_REL))
@@ -321,7 +443,7 @@ error_t RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop
      * kept for (§3.6): the ground it gives up is what a next_quire is taken
      * from again. */
     if ((promised || c->refused) && of + c->atom <= left)
-        return OK;
+        return RibbonPlaced(of, left);
     if (c->refused)
         return ERR_TAGFS_READ_ONLY;
     RibbonOutSaid();
@@ -401,6 +523,9 @@ const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t 
     c->cut += cut ? 1u : 0u;
     if (!c->named.blocks)
         return "the last stitch sewn names no next_quire, where alone a reader takes a retry up";
+    if (!RibbonQuireOn(&c->named, RibbonMediumAtom()))
+        return "the next_quire the last stitch sewn names, where alone a reader takes a retry up, lies off the "
+               "medium's atom: a write there would rewrite the sectors beside it (§1.5)";
     if (RibbonPlaceOn(at, of, hop, &end) && RibbonQuireSame(&end.quire, &c->named))
         off = end.off;
     else if (!RibbonQuireSame(&at->quire, &c->ended))
@@ -409,6 +534,8 @@ const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t 
         c->next = (RibbonQuire){ 0, 0 };
         __atomic_add_fetch(&c->quires, 1u, __ATOMIC_RELAXED);
     }
+    if (off == 0)
+        RibbonEnteredSaid(&c->named);
     c->came  = c->ended;
     c->quire = c->named;
     c->off   = off;
@@ -433,6 +560,7 @@ bool RibbonCloseEarly(void)
     if (!c->up || c->refused || !c->named.blocks || !RibbonQuireSame(&c->quire, &c->ended) ||
         !RibbonQuireSame(&c->named, &c->next))
         return false;
+    RibbonEnteredSaid(&c->named);
     c->came  = c->ended;
     c->quire = c->named;
     c->next  = (RibbonQuire){ 0, 0 };

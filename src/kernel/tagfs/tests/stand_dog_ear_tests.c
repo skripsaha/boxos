@@ -426,8 +426,20 @@ static TestResult TestStandDogEarReplayed(void)
     TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
     TEST_ASSERT_OK(BinderRunWhole(), "a Tally of the replayed state is written: every element the ribbon changed "
                    "lies in DogEar, and its self-check finds none changed outside it");
-    TEST_ASSERT(DogEarStand(TALLY_FILES, false, NULL, 0) == 0 && DogEarStand(TALLY_TAGS, false, NULL, 0) == 0 &&
-                !DogEarStandLost(false), "the Tally whose slice took them cleared them");
+    /* Not "DogEar is empty": a Tally's DONE may Glean (binder_glean.c) — the
+     * Tally-Quires the tests before left past the pair, emptiest first, put in
+     * for the next Tally to lay again. Those are leaves the new Tally names as
+     * they lie, in a Quire past the pair it laid in; every key the ribbon
+     * changed lies in a leaf it laid anew, which no Glean of it can choose. */
+    TEST_ASSERT(!StandDogEarHolds(TALLY_FILES, (TallyKey){ data, 0 }) &&
+                !StandDogEarHolds(TALLY_FILES, (TallyKey){ data, 1 }) &&
+                !StandDogEarHolds(TALLY_FILES, (TallyKey){ renamed, 0 }) &&
+                !StandDogEarHolds(TALLY_FILES, (TallyKey){ first, 0 }) &&
+                !StandDogEarHolds(TALLY_FILES, (TallyKey){ gone, 0 }) &&
+                !StandDogEarHolds(TALLY_FILES, (TallyKey){ born, 0 }) &&
+                !StandDogEarHolds(TALLY_TAGS, (TallyKey){ tag, 0 }) &&
+                !StandDogEarHolds(TALLY_USE, (TallyKey){ 0, 0 }) && !DogEarStandLost(false),
+                "the Tally whose slice took them let every one of them go");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
     MountBookStandSaid(&said);
     StandDogEarStateOf(&after);

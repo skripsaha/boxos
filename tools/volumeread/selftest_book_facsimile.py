@@ -245,7 +245,7 @@ def FacsimileReplayCases(bt):
 
 
 def BootSlipCases(bt):
-    """B61: a Shaped of the file the loader reads the kernel by laying a Slip
+    """B65: a Shaped of the file the loader reads the kernel by laying a Slip
     of its last block's own bytes — a stitch only another writer sews: no call
     of this kernel changes that file, so its tail is neither laid in its block
     nor let go by Escheat, and the mount takes the book to read only at once
@@ -267,7 +267,7 @@ def BootSlipCases(bt):
                                splices=[], digests=[], slip=slip)], flags=stitch.DATA_FLUSHED)
 
     return [
-        Case("B61 a Slip on the file the loader reads the kernel by", Slipped, checks=[
+        Case("B65 a Slip on the file the loader reads the kernel by", Slipped, checks=[
             ("the book mounts, the file carrying the Slip",
              lambda c: c.mount.refusal is None and c.mount.files[boot].slips == [slip]),
             ("and may only be read, the file named: no call changes it (§16.6 п.4)",

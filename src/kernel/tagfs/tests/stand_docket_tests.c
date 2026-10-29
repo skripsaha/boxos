@@ -271,15 +271,16 @@ static TestResult TestStandDocketGroundRests(void)
                 "its ground rests: the stitch that gave it up lies in a Quire the ribbon has not left");
     RibbonCursor was, now;
     RibbonCursorStand(&was);
-    uint64_t free = fs->ledger.free_blocks;
+    uint64_t free = fs->ledger.free_blocks, rested = FallowBlocks();
     TEST_ASSERT_OK(StandDocketRoom(), "room is asked for");
     RibbonCursorStand(&now);
     TEST_ASSERT(RibbonQuireSame(&now.quire, &was.next) && now.sewn.off == 0,
                 "and the Quire is closed early: the ribbon went on at the start of its next_quire");
     uint64_t taken = now.next.blocks && !RibbonQuireSame(&now.next, &was.next) ? now.next.blocks : 0;
-    TEST_ASSERT(BlockMapDerivedIsFree(first) && fs->ledger.free_blocks + taken == free + blocks,
-                "the file's ground is free once the lag's stitches settled past it there — all of it, less "
-                "the next_quire the ribbon was given in the new Quire");
+    TEST_ASSERT(BlockMapDerivedIsFree(first) && fs->ledger.free_blocks + taken == free + rested,
+                "the file's ground is free once the lag's stitches settled past it there — all of it, and all "
+                "else the Quire's stitches let go before the test, less the next_quire the ribbon was given in "
+                "the new Quire");
     TEST_ASSERT_EQ(FallowBlocks(), 0, "and nothing rests");
     TEST_ASSERT(StandStitchRemount() && StandDocketGone(plain), "mounted again, the volume holds no such file");
 out:
@@ -454,7 +455,10 @@ static TestResult TestStandDocketHandleHolds(void)
     TEST_ASSERT(handle != NULL, "it is opened");
     TEST_ASSERT_EQ(tagfs_delete_file(plain, INK_UNWARRANTED), 0, "and given up while open");
     TEST_ASSERT_OK(TagFSSettle(), "its Quitclaim settles");
-    TEST_ASSERT(BlockMapDerivedStandShrink(EndpaperKeeps(s.at.quire_blocks) + s.at.quire_blocks - 1u),
+    /* What else rests — let go by the stitches of the tests before, in this
+     * Quire — comes back with the room asked for; the cut leaves it out. */
+    uint64_t others = FallowBlocks() > blocks ? FallowBlocks() - blocks : 0;
+    TEST_ASSERT(BlockMapDerivedStandShrink(EndpaperKeeps(s.at.quire_blocks) + s.at.quire_blocks - 1u - others),
                 "the free ground is cut short of a Quire past the Tally's");
     held = true;
     (void)StandDocketRoom();
@@ -506,7 +510,16 @@ static TestResult TestStandDocketLiedLag(void)
     RibbonCursorStand(&was);
     TEST_ASSERT_OK(StandDocketRoom(), "room is asked for, closing the Quire early");
     RibbonCursorStand(&now);
-    TEST_ASSERT(StandDocketStandsIn(&s.at.next) && BlockMapDerivedIsFree(first), "and the ground is free");
+    TEST_ASSERT(StandDocketStandsIn(&s.at.next), "the ribbon stands in the next_quire it was given");
+    /* Room asked for stops at the first room that comes back — and ground the
+     * tests before let go rests in the Quire too, which the first stitch past
+     * it may bring back — so the lag is held to the file's own ground. */
+    if (now.last - was.last < 2u) {
+        TEST_ASSERT(!BlockMapDerivedIsFree(first), "the first stitch, that left its Quire, does not give it back");
+        TEST_ASSERT_OK(TagFSSettle(), "a cycle more");
+        RibbonCursorStand(&now);
+    }
+    TEST_ASSERT(BlockMapDerivedIsFree(first), "and the ground is free");
     TEST_ASSERT_EQ(now.last - was.last, 2,
                    "given back by the second stitch past its own, not the first that left its Quire: the lag is two");
 out:

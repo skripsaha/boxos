@@ -6,6 +6,7 @@
 #include "../settle/settle.h"
 #include "../ledger/ledger.h"
 #include "../mount/away.h"
+#include "../mount/book_mount.h"
 #include "../metadata_pool/meta_pool.h"
 #include "../file_map/file_map.h"
 #include "pmm.h"          /* pages held back, and given back as a cabin's memory comes back */
@@ -73,10 +74,26 @@ bool StandMountSettles(void)
  * (tagfs_clear_the_ground), and the next mount reads ground the medium's map
  * still holds as taken and named by nobody — the orphans a census gives back,
  * once it does (B1). A test that takes the volume down leaves none behind.
+ *
+ * A book gives ground back only once its ribbon has left the Quire of the
+ * stitch that let it go (fallow.c NodeHeldOnBook), and a few cycles do not
+ * leave a Quire: so on a book what rests is asked for as room, as a full
+ * volume asks — the ribbon's Quire closed early and the lag's stitches laid
+ * past it (SettleForRoom) — once the cycles have settled what was let go.
  */
+error_t StandBookRoom(void)
+{
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+    error_t rc = SettleForRoom();
+    tagfs_leave();
+    return rc;
+}
+
 bool StandSettledBare(void)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs   = tagfs_get_state();
+    bool        book = fs->format == DEED_FORMAT_V2;
     for (uint32_t cycle = 0; cycle < STAND_BARE_CYCLES; cycle++) {
         if (TagFSSettle() != OK)
             return false;
@@ -85,6 +102,8 @@ bool StandSettledBare(void)
         TagFSLockDrop(&fs->lock);
         if (resting == 0)
             return TagFSSettle() == OK;
+        if (book && cycle > 0 && StandBookRoom() != OK)
+            return false;
     }
     return false;
 }
@@ -103,6 +122,37 @@ void StandMountClose(uint8_t seat)
         (void)StandMountSettles();
     }
     TagFSStandHoldAgain();
+}
+
+/* The volume's data run, in sectors of its medium: what format v1's LAYOUT
+ * names, or a book's FRAME — [frame.data_block, data_end), its Tally's nodes
+ * and its ribbon's Quires among the files' blocks (book_mount.h). Taken while
+ * the volume is up. */
+static void StandDataRun(uint64_t* first, uint64_t* span)
+{
+    TagFSState* fs = tagfs_get_state();
+    if (fs->format == DEED_FORMAT_V2) {
+        *first = tagfs_block_to_sector(g_book.frame.data_block);
+        *span  = (g_book.data_end - g_book.frame.data_block) * TAGFS_BLOCK_SECTORS;
+        return;
+    }
+    *first = tagfs_block_to_sector(0);
+    *span  = (uint64_t)fs->layout.data_blocks * TAGFS_BLOCK_SECTORS;
+}
+
+/* The metadata a mount reads first, in sectors of its medium, every copy of
+ * it: format v1's Ledger, or a book's Spine — the ring of its slots. Taken
+ * while the volume is up. */
+static void StandFirstMetadata(uint64_t* first, uint64_t* span)
+{
+    TagFSState* fs = tagfs_get_state();
+    if (fs->format == DEED_FORMAT_V2) {
+        *first = tagfs_block_to_sector(g_book.frame.spine_block);
+        *span  = (uint64_t)g_book.frame.spine_slots * g_book.frame.spine_stride * TAGFS_BLOCK_SECTORS;
+        return;
+    }
+    *first = tagfs_get_volume_base() + (uint64_t)fs->layout.state_block * TAGFS_BLOCK_SECTORS;
+    *span  = (uint64_t)VOLUME_LEDGER_COPIES * TAGFS_BLOCK_SECTORS;
 }
 
 /*
@@ -188,8 +238,7 @@ TestResult TestStandMediumMountRingsInItsOwnBreath(void)
     BoardKind   kind    = BoardroomSeatKind(seat);
     uint8_t     index   = BoardroomSeatIndex(seat);
     uint32_t    epoch   = tagfs_mount_epoch();
-    uint64_t    first   = tagfs_block_to_sector(0);
-    uint64_t    span    = (uint64_t)fs->layout.data_blocks * TAGFS_BLOCK_SECTORS;
+    uint64_t    first   = 0, span = 0;
     uint32_t    attempts0 = 0, resets0 = 0, attempts = 0, resets = 0;
     bool        let_go  = false;
     const char* aside   = StandStepsAsideFor();
@@ -198,6 +247,7 @@ TestResult TestStandMediumMountRingsInItsOwnBreath(void)
         return test_steps_aside(aside);
 
     TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
+    StandDataRun(&first, &span);
     let_go = true;
     TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
     BoardroomNoteDeparture(kind, index);
@@ -229,7 +279,8 @@ out:
 #define STAND_MOUNT_IDLE_TURNS 64u
 
 /*
- * P14. The sectors of both of the Ledger's copies cannot be read, and stay so
+ * P14. The sectors of both of the Ledger's copies — of every slot of a book's
+ * Spine — cannot be read, and stay so
  * — a medium error under the metadata the mount reads first — and the seat's
  * recovery says seat:ready each time it answers the refused command. The
  * attempts are counted: the arrival's, refused; the seat reset once, its bell
@@ -248,8 +299,7 @@ TestResult TestStandMediumMountBadSectorWaits(void)
     BoardKind   kind    = BoardroomSeatKind(seat);
     uint8_t     index   = BoardroomSeatIndex(seat);
     uint32_t    epoch   = tagfs_mount_epoch();
-    uint64_t    ledger  = tagfs_get_volume_base() +
-                          (uint64_t)fs->layout.state_block * TAGFS_BLOCK_SECTORS;
+    uint64_t    first   = 0, span = 0;
     uint32_t    attempts0 = 0, resets0 = 0, attempts = 0, resets = 0;
     bool        let_go  = false;
     const char* aside   = StandStepsAsideFor();
@@ -258,13 +308,14 @@ TestResult TestStandMediumMountBadSectorWaits(void)
         return test_steps_aside(aside);
 
     TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
+    StandFirstMetadata(&first, &span);
     let_go = true;
     TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
     BoardroomNoteDeparture(kind, index);
     TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
 
     TagFSStandMountCounts(&attempts0, &resets0);
-    BlockFailArmBadSectors(seat, ledger, (uint64_t)VOLUME_LEDGER_COPIES * TAGFS_BLOCK_SECTORS);
+    BlockFailArmBadSectors(seat, first, span);
     TagFSStandMountTurn(STAND_MOUNT_SEAT_RINGS, 0);
     TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
     TEST_ASSERT(StandMountSettles(),
@@ -486,8 +537,7 @@ TestResult TestStandMediumMountResetsTheSeat(void)
     BoardKind   kind    = BoardroomSeatKind(seat);
     uint8_t     index   = BoardroomSeatIndex(seat);
     uint32_t    epoch   = tagfs_mount_epoch();
-    uint64_t    first   = tagfs_block_to_sector(0);
-    uint64_t    span    = (uint64_t)fs->layout.data_blocks * TAGFS_BLOCK_SECTORS;
+    uint64_t    first   = 0, span = 0;
     bool        let_go  = false;
     const char* aside   = StandStepsAsideFor();
 
@@ -495,6 +545,7 @@ TestResult TestStandMediumMountResetsTheSeat(void)
         return test_steps_aside(aside);
 
     TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
+    StandDataRun(&first, &span);
     let_go = true;
     TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
     BoardroomNoteDeparture(kind, index);

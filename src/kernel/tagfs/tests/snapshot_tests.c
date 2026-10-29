@@ -104,7 +104,8 @@ static const TestCase g_cow_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a write into the first block of a longer extent, under a snapshot, "
                        "moves the whole extent onto a one-block copy, so the file's later "
-                       "blocks read blocks it never held" },
+                       "blocks read blocks it never held",
+      .format = DEED_FORMAT_V1, .analog = "stand_fresh_change_names_only_new" },
 };
 
 const TestSuite g_cow_suite = {

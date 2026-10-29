@@ -136,7 +136,16 @@ bool StandBlockOf(uint64_t file_id, uint64_t k, uint64_t* out_block);
  * -1 when the file would not open. */
 int  StandWriteAt(uint64_t file_id, uint64_t offset, const void* data, uint32_t bytes);
 
-/* Whether the block map calls a data-run block taken. */
+/* The commands BLOCKFAIL answered under the plan just let go (BlockFailSeen
+ * keeps them past BlockFailDisarm, until the next plan), said by a test whose
+ * count the Helm's service makes with it — the service and the test race to
+ * read the block — so the stand's judge adds what was said to what it counts
+ * of every other test (tools/logcheck_book.sh, STAND_BOOK_RACED). */
+void StandBlockFailRaced(const char* suite);
+
+/* Whether the volume calls a block taken: format v1's block map, or a book's
+ * map derived from its Tally and ribbon — where a block that rests in Fallow
+ * is taken too, as format v1's map holds it until its cycles give it back. */
 bool StandBlockInUse(uint64_t block);
 
 /* One storage-deck op asked as `ctx` asks it — NULL for a caller in the
@@ -231,6 +240,12 @@ TestResult TestStandFrozenBlockFreedTwice(void);
  * counted back in. */
 bool       StandMountSettles(void);
 bool       StandSettledBare(void);
+
+/* Room asked for on a book, as a full volume asks it: the ribbon's Quire
+ * closed early and the lag's stitches laid past it (SettleForRoom) — what a
+ * book's Fallow waits for before it gives ground back, where format v1's
+ * waits for its cycles alone. Its answer. */
+error_t    StandBookRoom(void);
 void       StandMountClose(uint8_t seat);
 TestResult TestStandMediumMountLosesItsSeat(void);
 TestResult TestStandMediumMountRingsInItsOwnBreath(void);

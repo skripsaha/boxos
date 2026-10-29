@@ -46,7 +46,9 @@ on says so by the ribbon while the medium still shows the stitch (C13) — by
 what settled is lost and MEDIUM_LIED where the torn stitch in flight names it
 (C18) — and one that wiped a settled stitch whole with nothing past it is a
 FAIL of its own, smudge:wiped: no reader can tell it from a cycle that never
-wrote, and C18 says it all the same. Booted media are booted twice — the
+wrote, and C18 says it all the same — on a removable medium the ribbon is
+written in flash pages, the page torn here (§16.6 п.2), and no stitch in
+flight shares one with a settled stitch. Booted media are booted twice — the
 first boot mounts, its session writes, its power button settles it; the
 second mounts what the first left — each boot reaching a shell, each mount
 the one volume-read predicted (powercut_judge_book.TwoBoots), and nothing the
@@ -62,7 +64,10 @@ import re
 
 from powercut import HARM, LoadLines, Outside, RangeSet, Ranges, Stitch
 
-PAGE_SECTORS = 32                       # a flash page of 16 KiB, in 512-byte sectors (§16.5 п.21)
+# A flash page of 16 KiB, in 512-byte sectors (§16.5 п.21): the page a mount
+# lifts a removable medium's ribbon atom to (volume_book.h BOOK_FLASH_PAGE_BYTES,
+# §16.6 п.2), held to it by the selftest (LieAtomTests).
+PAGE_SECTORS = 32
 DATA_KINDS = ("file", "free")           # blklog_book.py: a block of data, named or not yet
 UNIT_KINDS = ("stitch", "sheet", "slot")
 # The codes in which a book's census names what its medium lost (bookmount.py,
@@ -80,6 +85,11 @@ LOUD_BY = {"blot": LOUD, "smudge": tuple(c for c in LOUD if c != "DIGEST_MISMATC
 # settled lost (C18).
 PROVEN, SETTLED_LOST = "the lie is proven", "what settled is lost"
 STITCH_SEQ = re.compile(r"stitch seq (\d+)(?:, (\d+) sector)?")
+# Either line counts what settled is lost with its seqs — runs "a..b", ", ..."
+# where the kernel's line had no room — and says the largest seq found past
+# the end, which no seq given next repeats (§3.9, C17).
+LOST_COUNT = re.compile(r"what settled is lost: at most (\d+) stitch\(es\), seq ([0-9., ]*?)(?:;| —)")
+LARGEST = re.compile(r"no seq up to (\d+), the largest found")
 
 
 # ---------------------------------------------------------------------------
@@ -243,21 +253,82 @@ def Plan(d):
 # ---------------------------------------------------------------------------
 
 
-def Stitches(run, m):
-    """The stitches of the record a medium holds whole: seq -> its sectors'
-    device LBAs, of the writes it applies (blklog_book.py names a stitch's
-    sectors `stitch seq S[, N sector(s)]`)."""
-    lost, keep, held, of = RangeSet(m["blot"]), RangeSet(m["keep"]), {}, {}
-    for w in run.listing["writes"]:
-        if w["epoch"] > m["epoch"] or w["seq"] in lost or (w["epoch"] == m["epoch"] and w["index"] not in keep):
+def Held(run, m):
+    """The stitches of the record up to a medium's epoch, and of those the
+    sectors it holds as the last write laid them: (seqs, seq -> its sectors'
+    device LBAs held, seq -> its sectors), of the writes it applies — a torn
+    write's sectors by its mask, a Smudge's spoilt sectors no one's
+    (blklog_book.py names a stitch's sectors `stitch seq S[, N sector(s)]`)."""
+    lost, keep, tear = RangeSet(m["blot"]), RangeSet(m["keep"]), m.get("tear")
+    seqs, owner, of = set(), {}, {}
+    for w in sorted(run.listing["writes"], key=lambda w: w["seq"]):
+        if w["epoch"] > m["epoch"]:
             continue
+        mask = 0 if w["seq"] in lost else -1 if w["epoch"] < m["epoch"] or w["index"] in keep else \
+            tear[1] if tear and tear[0] == w["index"] else 0
         for t in w["touches"]:
             hit = STITCH_SEQ.match(t["what"]) if t["kind"] == "stitch" else None
             if hit:
-                seq = int(hit.group(1))
-                of[seq] = int(hit.group(2) or 1)
-                held.setdefault(seq, set()).update(range(t["first_lba"], t["first_lba"] + t["sectors"]))
+                seqs.add(int(hit.group(1)))
+                of[int(hit.group(1))] = int(hit.group(2) or 1)
+            for x in range(t["first_lba"], t["first_lba"] + t["sectors"]):
+                if mask >> (x - w["lba"]) & 1:
+                    owner[x] = int(hit.group(1)) if hit else None
+    for lba, n in m.get("smudge") or []:
+        owner.update((x, None) for x in range(lba, lba + n))
+    held = {}
+    for x, seq in owner.items():
+        if seq is not None:
+            held.setdefault(seq, set()).add(x)
+    return seqs, held, of
+
+
+def Stitches(run, m):
+    """The stitches of the record a medium holds whole: seq -> its sectors'
+    device LBAs."""
+    _seqs, held, of = Held(run, m)
     return {seq: lbas for seq, lbas in held.items() if len(lbas) >= of[seq]}
+
+
+def SeqRuns(text):
+    """The seqs a line names as runs "a..b, c" — and whether it cut them
+    short (", ...")."""
+    seqs, cut = set(), False
+    for part in (p.strip() for p in text.split(",") if p.strip()):
+        if part == "...":
+            cut = True
+        elif ".." in part:
+            lo, hi = part.split("..")
+            seqs.update(range(int(lo), int(hi) + 1))
+        else:
+            seqs.add(int(part))
+    return seqs, cut
+
+
+def Counted(run, m, last, line):
+    """What a Blot medium's line of what settled is lost owes (C17), '' when
+    it is said: its count the seqs it names; every stitch of the record past
+    the census's last, below the largest it holds whole, that the medium does
+    not hold whole named — and none it does; and the largest seq found the
+    largest of a stitch it holds a sector of past that last."""
+    count, largest = LOST_COUNT.search(line), LARGEST.search(line)
+    if not count or not largest:
+        return "says what settled is lost without its count or the largest seq found: %s" % line[:120]
+    seqs, held, of = Held(run, m)
+    whole = {seq for seq, lbas in held.items() if len(lbas) >= of[seq]}
+    named, cut = SeqRuns(count.group(2))
+    top = max(seq for seq in whole if seq > last)
+    want = {seq for seq in seqs if last < seq < top and seq not in whole}
+    found = max(seq for seq in held if seq > last)
+    if not cut and int(count.group(1)) != len(named):
+        return "counts %s stitch(es) lost and names %d: %s" % (count.group(1), len(named), count.group(2))
+    if not cut and want - named:
+        return "leaves stitch(es) %s out of what settled is lost, which it does not hold whole" % Ranges(want - named)
+    if named & whole:
+        return "names stitch(es) %s lost, which it holds whole" % Ranges(named & whole)
+    if int(largest.group(1)) != found:
+        return "says %s the largest seq found, where it holds stitch %d past %d" % (largest.group(1), found, last)
+    return ""
 
 
 def Loud(r, kind):
@@ -268,7 +339,9 @@ def Loud(r, kind):
 
 
 def Lines(r, words):
-    return [f[2] for f in r.get("findings", []) if f[0] == "DEAD_BRANCH" and words in f[2]]
+    """The ribbon's lines a census said that begin with `words`: the lie
+    proven counts what settled is lost too, and is no line of it (M-2)."""
+    return [f[2] for f in r.get("findings", []) if f[0] == "DEAD_BRANCH" and f[2].startswith(words)]
 
 
 def Honest(run, m):
@@ -294,6 +367,10 @@ def Proven(run, m, r):
         return "%s holds stitch(es) %s whole past the last its census sews on, %s, and %s" % (
             m["id"], Ranges(past), last, "does not mark the medium MEDIUM_LIED" if said else
             "says neither the lie proven nor what settled lost (codes %s)" % (Loud(r, "blot") or "none"))
+    wrong = Counted(run, m, last, said[0]) if past else ""
+    if wrong:
+        return "%s holds stitch(es) %s whole past the last its census sews on, %s, and %s" % (
+            m["id"], Ranges(past), last, wrong)
     if not past and Lines(r, PROVEN):
         return "%s holds no whole stitch past the last its census sews on, %s, and says the lie proven: %s" % (
             m["id"], last, Lines(r, PROVEN)[0][:120])
@@ -358,8 +435,9 @@ def Judge(j):
         if kind == "smudge":
             j.Out("smudge:wiped", "fail" if wiped else "behaves", "%d of %d smudge media leave no sector of a "
                   "settled stitch and nothing past it, so no reader can say what settled is lost — C18 says it; "
-                  "how a book may (a ribbon's atom no smaller than a flash page, or C18 amended) is the owner's "
-                  "to decide: %s" % (len(wiped), len(judged), "; ".join(wiped[:2])) if wiped else
+                  "a mount on a removable medium writes the ribbon in flash pages so that no new stitch shares "
+                  "one with a settled stitch (§16.6 п.2), a fixed one in the medium's atom: %s" % (
+                      len(wiped), len(judged), "; ".join(wiped[:2])) if wiped else
                   "no one of %d smudge media wipes a settled stitch whole with nothing past it" % len(judged))
     Boots(j, plan, results)
 

@@ -1,11 +1,14 @@
 #include "stand_stitch.h"
 #include "volume_ribbon.h"
 #include "volume_tally.h"
+#include "../mount/away.h"
+#include "../block_map/block_map_derived.h"
 #include "../mount/book_mount.h"
 #include "../mount/tally_read.h"
 #include "../tag_registry/tag_registry.h"
 #include "../ink/ink.h"
 #include "block_fail.h"
+#include "boardroom.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -283,11 +286,20 @@ static TestResult TestStandStitchWalkReadsOnce(void)
     RibbonCursor  now;
     MountBookSaid said;
     bool          kept  = false;
-    uint64_t      k     = 40, word = 8u * TALLY_SHEET_PAYLOAD;
+    uint64_t      k     = 40, word = 8u * TALLY_SHEET_PAYLOAD, found_read = 0, found_sewn = 0;
     const char*   aside = StandStitchAside(&s);
 
     if (aside)
         return test_steps_aside(aside);
+    /* What the walk of the ribbon as the test found it costs: the stitches
+     * the tests before sewed past the Tally — a retry among them with the
+     * attempt the medium refused, a unit read and never sewn (M-6) — are
+     * read by every mount after, and are no part of this test's walk. */
+    uint64_t at_found = RibbonUnitsReadStand();
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on the ribbon as it was found");
+    found_read = RibbonUnitsReadStand() - at_found;
+    MountBookStandSaid(&said);
+    found_sewn = said.sewn;
     RibbonCursorStand(&now);
     for (; RibbonQuireSame(&now.quire, &s.at.quire) && k < 40u + 4096u; k++) {
         TEST_ASSERT_OK(StandStitchSayLong(word, (char)('a' + k % 26u), k, &kept), "a long word is laid down");
@@ -300,8 +312,9 @@ static TestResult TestStandStitchWalkReadsOnce(void)
     TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
     uint64_t read = RibbonUnitsReadStand() - before;
     MountBookStandSaid(&said);
-    TEST_ASSERT(said.sewn >= k - 40u, "with every stitch sewn on");
-    TEST_ASSERT(read <= (uint64_t)said.sewn + 8u,
+    TestEvidence("units of the chain the mount read past those it read of the ribbon as found", read - found_read);
+    TEST_ASSERT(said.sewn >= found_sewn + (k - 40u), "with every stitch sewn on");
+    TEST_ASSERT(read <= found_read + ((uint64_t)said.sewn - found_sewn) + 8u,
                 "each unit of the chain read once: rules (б) and (б′) are weighed for no stitch a later one names, "
                 "and the next_quire is not walked for every stitch of the Quire before it (§16.4 п.4)");
 out:
@@ -431,6 +444,236 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// On a removable medium the ribbon is laid in atoms of a flash page: no new
+// stitch shares a page with a settled one (§16.6 п.2, C18)
+// ----------------------------------------------------------------------------
+
+/* The page the owner set the atom of a removable medium's ribbon to (§16.6
+ * п.2) — stated here, not taken from the kernel it holds to. */
+#define STAND_FLASH_PAGE_BYTES 16384u
+
+/* Why a test of a removable medium's ribbon stands aside here, or NULL — its
+ * page in sectors in *page. */
+static const char* StandPageAside(StandStitch* s, uint32_t* page)
+{
+    const char* aside = StandStitchAside(s);
+    if (aside)
+        return aside;
+    if (!BoardroomSeatIsRemovable(s->seat))
+        return "the volume is on a medium that is not removable: its ribbon keeps the medium's atom";
+    *page = (g_book.atom > STAND_FLASH_PAGE_BYTES ? g_book.atom : STAND_FLASH_PAGE_BYTES) / BOOK_SECTOR_BYTES;
+    return NULL;
+}
+
+/* Whether `p` of a volume begins on a page of `page` sectors: a ground laid on
+ * a mebibyte begins on one. */
+static bool StandOnPage(const RibbonPlace* p, uint32_t page)
+{
+    return (p->quire.block * TAGFS_BLOCK_SECTORS + p->off) % page == 0;
+}
+
+/* Whether `q` is laid on pages of `page` sectors: its first block and its
+ * length whole pages. */
+static bool StandLaidOnPage(const RibbonQuire* q, uint32_t page)
+{
+    uint64_t pb = page / TAGFS_BLOCK_SECTORS;
+    return q->blocks && q->block % pb == 0 && q->blocks % pb == 0;
+}
+
+/* A Quire of the ribbon's size begun a block past a page, on ground free past
+ * the ribbon's Quire, as a writer of a smaller atom takes a next_quire: its
+ * run taken from the map of the volume mounted, the claim let go with it. */
+static bool StandOffPageQuire(const StandStitch* s, uint32_t page, RibbonQuire* out)
+{
+    uint64_t start = 0, pb = page / TAGFS_BLOCK_SECTORS;
+    if (BlockMapTakeQuire(GROUND_RIBBON, s->at.quire_blocks + pb, (uint32_t)pb, 0, g_book.frame.data_block,
+                          s->at.quire.block + s->at.quire.blocks, &start) != OK)
+        return false;
+    *out = (RibbonQuire){ start + 1u, s->at.quire_blocks };
+    return true;
+}
+
+/* Why a test that lays a stitch of `of` sectors at the ribbon's end naming a
+ * next_quire begun off a page (*off) stands aside here, or NULL. */
+static const char* StandOffPageAside(StandStitch* s, uint32_t* page, uint32_t of, RibbonQuire* off)
+{
+    const char* aside = StandPageAside(s, page);
+    if (aside)
+        return aside;
+    if (s->at.off + of + 2u * *page > s->at.quire.blocks * TAGFS_BLOCK_SECTORS || !StandOffPageQuire(s, *page, off))
+        return "the ribbon has no room left in its Quire for three stitches, or no Quire is free past it";
+    return NULL;
+}
+
+static TestResult TestStandStitchPageAtom(void)
+{
+    TestResult   verdict = TEST_PASS;
+    StandStitch  s;
+    RibbonCursor l;
+    uint32_t     page  = 0;
+    bool         kept  = false;
+    const char*  aside = StandPageAside(&s, &page);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT_EQ(s.at.atom, page, "on a removable medium the ribbon is written in atoms of a flash page");
+    TEST_ASSERT_OK(StandStitchSay("page,atom", 9u, 1, &kept), "a word is said");
+    RibbonCursorStand(&l);
+    TEST_ASSERT(kept && StandOnPage(&l.sewn, page) && l.sewn_of % page == 0,
+                "its stitch begins on a page and is whole pages long");
+    TEST_ASSERT(StandStitchRemount(), "the volume is mounted again");
+    RibbonCursorStand(&l);
+    TEST_ASSERT(l.atom == page && l.off % page == 0 && l.quire.block % (page / TAGFS_BLOCK_SECTORS) == 0,
+                "and its ribbon goes on on a page, in pages");
+out:
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+/*
+ * A ribbon whose last stitch ends inside a page — laid by a mount of a smaller
+ * atom, as a fixed medium's is — goes on at the start of the next_quire that
+ * stitch names, the one place past it a reader takes a stitch up (rule (б)),
+ * never in that page; and the walk of the next mount takes the stitch there up.
+ */
+static TestResult TestStandStitchPageAtomHop(void)
+{
+    TestResult    verdict = TEST_PASS;
+    StandStitch   s;
+    RibbonCursor  l, now;
+    MountBookSaid said;
+    uint32_t      page  = 0;
+    bool          kept  = false;
+    const char*   aside = StandPageAside(&s, &page);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT_EQ(s.at.atom, page, "on a removable medium the ribbon is written in atoms of a flash page");
+    if (!s.at.next.blocks || s.at.off + page > s.at.quire.blocks * TAGFS_BLOCK_SECTORS) {
+        verdict = test_steps_aside("the ribbon names no next_quire, or has no page of its Quire left");
+        goto out;
+    }
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(StandStitchLayEmpty(&s, STITCH_DATA_FLUSHED) != 0,
+                "a stitch a block long, as a smaller atom lays it, is laid at the ribbon's end: it ends inside a page");
+    TEST_ASSERT(StandRibbonUp(), "the volume mounts on it");
+    RibbonCursorStand(&l);
+    TEST_ASSERT(l.last == s.at.given + 1u && l.off == 0 && RibbonQuireSame(&l.quire, &s.at.next) &&
+                RibbonQuireSame(&l.came, &s.at.quire),
+                "its ribbon goes on at the start of the next_quire that stitch names, never in its page");
+    TEST_ASSERT_OK(StandStitchSay("page,hop", 8u, 1, &kept), "a word is said");
+    RibbonCursorStand(&now);
+    TEST_ASSERT(kept && RibbonQuireSame(&now.sewn.quire, &s.at.next) && now.sewn.off == 0,
+                "its stitch is laid there");
+    TEST_ASSERT(StandStitchRemount(), "the volume is mounted again");
+    MountBookStandSaid(&said);
+    TEST_ASSERT(said.last == now.last && said.ribbon[RIBBON_CODE_DEAD_BRANCH] == 0,
+                "its walk takes that stitch up from the next_quire's start, as rule (б) does: nothing of a dead "
+                "branch said");
+out:
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+/*
+ * A ribbon whose end lies on a page, its last stitch naming a next_quire a
+ * writer of a smaller atom took a block past a page, goes on at its end and
+ * names a next_quire laid on a page in its stead: the ribbon never goes on in
+ * the one begun off a page while another can be taken, and no stitch it lays
+ * shares a page with a settled one, in its Quire or the next.
+ */
+static TestResult TestStandStitchPageNamed(void)
+{
+    TestResult    verdict = TEST_PASS;
+    StandStitch   s;
+    RibbonCursor  l, now;
+    RibbonQuire   off;
+    MountBookSaid said;
+    uint32_t      page  = 0;
+    bool          kept  = false;
+    const char*   aside = StandOffPageAside(&s, &page, STAND_STITCH_LAID_MOST, &off);
+
+    if (aside)
+        return test_steps_aside(aside);
+    if (page > STAND_STITCH_LAID_MOST) {
+        verdict = test_steps_aside("the medium's page is longer than a stitch the stand lays by hand");
+        goto out;
+    }
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(StandStitchLayAt(&s, STITCH_DATA_FLUSHED, page, &off) != 0,
+                "a stitch a page long is laid at the ribbon's end, naming a next_quire begun a block past a page");
+    TEST_ASSERT(StandRibbonUp(), "the volume mounts on it");
+    RibbonCursorStand(&l);
+    TEST_ASSERT(l.last == s.at.given + 1u && RibbonQuireSame(&l.quire, &s.at.quire) &&
+                l.off == s.at.off + page && RibbonQuireSame(&l.named, &off),
+                "its ribbon goes on at its end, on a page, past the stitch naming the next_quire begun off one");
+    TEST_ASSERT_OK(StandStitchSay("page,named", 10u, 1, &kept), "a word is said");
+    RibbonCursorStand(&now);
+    TEST_ASSERT(kept && StandOnPage(&now.sewn, page) && StandOnPage(&(RibbonPlace){ now.quire, now.off }, page),
+                "its stitch begins and ends on a page");
+    TEST_ASSERT(StandLaidOnPage(&now.named, page) && !RibbonQuireSame(&now.named, &off),
+                "and names a next_quire laid on a page in the stead of the one begun off a page");
+    TEST_ASSERT(StandStitchRemount(), "the volume is mounted again");
+    MountBookStandSaid(&said);
+    TEST_ASSERT(said.last == now.last && said.ribbon[RIBBON_CODE_DEAD_BRANCH] == 0 &&
+                said.ribbon[RIBBON_CODE_RIBBON_TORN] == 0 && !TagFSIsUnderGlass(),
+                "its walk takes that stitch up, and the next_quire it names");
+out:
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+/*
+ * A ribbon whose last stitch ends inside a page, naming a next_quire begun off
+ * a page — both a writer of a smaller atom's — goes on at its end, in atoms of
+ * a page: the stitch it lays first shares that page with the last one settled
+ * and ends on a page, naming a next_quire laid on one, and every stitch after
+ * it begins on a page and is whole pages — never a mount of stitches a block
+ * long (§16.2 п.11, §16.6 п.2).
+ */
+static TestResult TestStandStitchPageInside(void)
+{
+    TestResult    verdict = TEST_PASS;
+    StandStitch   s;
+    RibbonCursor  l, now;
+    RibbonQuire   off;
+    MountBookSaid said;
+    uint32_t      page  = 0;
+    bool          kept  = false;
+    const char*   aside = StandOffPageAside(&s, &page, VOLUME_BLOCK_SECTORS, &off);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(StandStitchLayAt(&s, STITCH_DATA_FLUSHED, VOLUME_BLOCK_SECTORS, &off) != 0,
+                "a stitch a block long is laid at the ribbon's end — it ends inside a page — naming a next_quire "
+                "begun a block past a page");
+    TEST_ASSERT(StandRibbonUp(), "the volume mounts on it");
+    RibbonCursorStand(&l);
+    TEST_ASSERT(l.last == s.at.given + 1u && RibbonQuireSame(&l.quire, &s.at.quire) &&
+                l.off == s.at.off + VOLUME_BLOCK_SECTORS && l.atom == page,
+                "its ribbon goes on at its end, inside the page, written in atoms of a page");
+    TEST_ASSERT_OK(StandStitchSay("page,inside", 11u, 1, &kept), "a word is said");
+    RibbonCursorStand(&now);
+    TEST_ASSERT(kept && RibbonQuireSame(&now.sewn.quire, &l.quire) && now.sewn.off == l.off &&
+                StandOnPage(&(RibbonPlace){ now.quire, now.off }, page),
+                "its stitch begins where the last one ended and ends on a page");
+    TEST_ASSERT(StandLaidOnPage(&now.named, page), "naming a next_quire laid on a page");
+    TEST_ASSERT_OK(StandStitchSay("page,after", 10u, 2, &kept), "a second word is said");
+    RibbonCursorStand(&l);
+    TEST_ASSERT(kept && StandOnPage(&l.sewn, page) && l.sewn_of % page == 0,
+                "the stitch after it begins on a page and is whole pages");
+    TEST_ASSERT(StandStitchRemount(), "the volume is mounted again");
+    MountBookStandSaid(&said);
+    TEST_ASSERT(said.last == l.last && said.ribbon[RIBBON_CODE_DEAD_BRANCH] == 0 &&
+                said.ribbon[RIBBON_CODE_RIBBON_TORN] == 0 && !TagFSIsUnderGlass(),
+                "its walk takes both stitches up");
+out:
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
 static const TestCase g_stand_stitch_edge_tests[] = {
     { .name = "stand_stitch_retry_quire_entered", .func = TestStandStitchRetryQuireEntered,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
@@ -445,6 +688,14 @@ static const TestCase g_stand_stitch_edge_tests[] = {
     { .name = "stand_stitch_walk_reads_once", .func = TestStandStitchWalkReadsOnce,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_stitch_tally_cost_long", .func = TestStandStitchTallyCostLong,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_stitch_page_atom", .func = TestStandStitchPageAtom,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_stitch_page_atom_hop", .func = TestStandStitchPageAtomHop,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_stitch_page_named", .func = TestStandStitchPageNamed,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_stitch_page_inside", .func = TestStandStitchPageInside,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_registry_counts_from_nothing", .func = TestStandRegistryCountsFromNothing,
       .reach = TEST_READS_ONLY },

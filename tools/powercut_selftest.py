@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import struct
 import sys
@@ -491,7 +492,7 @@ def LieRowTests(pc, Want, Synthetic):
                                   last if m["id"] == mid else 5, lied and m["id"] == mid))
         return Said(lie.Judge, j).get("blot:proven", ("",))[0]
 
-    proven = [("DEAD_BRANCH", "damage", "the lie is proven: stitch seq 3 lies past the end of the ribbon")]
+    proven = [("DEAD_BRANCH", "damage", PROVEN_3)]
     Want(Blot("b2-d2-all", [("DIGEST_MISMATCH", "damage", "block 9 does not match")], 1, False) == "fail",
          "a Blot holding stitch 3 whole past its census's last, 1, answered by a rot alone fails: C17 says "
          "the lie proven")
@@ -502,6 +503,78 @@ def LieRowTests(pc, Want, Synthetic):
     Want(Blot("b2-d1-data-torn", [("NOT_LANDED", "note", "fid 3's data in stitch 2 did not land")], 2, False)
          == "fail", "C5: data a stitch named not landed with that stitch's successor torn, and no MEDIUM_LIED, fails")
     SmudgeRowTests(pc, Want, Synthetic, lie)
+    LieLostTests(pc, Want, Blot)
+    LieAtomTests(pc, Want, Synthetic, lie)
+
+
+# The line a reader says of LieRowTests' Blot b2-d2-all, whose medium holds
+# stitch 3 whole and neither 1 nor 2, its census sewing on to 1 (§3.9, C17):
+# the lie proven, what settled lost counted with its seqs, and the largest
+# seq found, which no next seq repeats.
+PROVEN_3 = ("the lie is proven: stitch seq 3 lies past the end of the ribbon and names seq 2, which the medium does "
+            "not hold — a flush that lied, the cycles after it written over a hole (FAST'13, H-2); what settled is "
+            "lost: %s; seq 3 are not applied, and no seq up to %u, the largest found, is given again — MEDIUM_LIED")
+PROVEN_3 = PROVEN_3 % ("at most 1 stitch(es), seq 2", 3)
+
+
+def LieLostTests(pc, Want, Blot):
+    """C17's line held to its numbers: what settled is lost names every
+    stitch of the record past the census's last and below the largest held
+    whole that the medium does not hold whole, and no stitch it holds whole,
+    counts the seqs it names, and says the largest seq the medium holds of a
+    stitch past that last — none of them given again."""
+    def Lost(lost, largest):
+        line = PROVEN_3.replace("at most 1 stitch(es), seq 2", lost).replace("no seq up to 3,",
+                                                                             "no seq up to %u," % largest)
+        return Blot("b2-d2-all", [("DEAD_BRANCH", "damage", line)], 1, True)
+
+    Want(Lost("at most 1 stitch(es), seq 2", 3) == "behaves",
+         "the lie proven, stitch 2 lost and counted, 3 the largest found: blot:proven behaves")
+    Want(Blot("b2-d2-all", [("DEAD_BRANCH", "damage", "the lie is proven: stitch seq 3 lies past the end of the "
+                                                       "ribbon")], 1, True) == "fail",
+         "the lie proven with no count of what settled is lost, nor the next seq: blot:proven fails (C17)")
+    Want(Lost("at most 2 stitch(es), seq 2", 3) == "fail", "a count that is not the seqs it names fails")
+    Want(Lost("at most 1 stitch(es), seq 3", 3) == "fail",
+         "seq 2, which the medium does not hold, left out — and 3, which it holds whole, named lost: fails")
+    Want(Lost("at most 1 stitch(es), seq 2", 2) == "fail",
+         "the largest found said 2 where the medium holds stitch 3: fails — 3 could be given again")
+
+
+def LieAtomTests(pc, Want, Synthetic, lie):
+    """A removable medium's ribbon on an atom of a flash page (spec_v2
+    §16.6 п.2): the page Smudge tears is the page the kernel lifts the atom
+    to, and a stitch laid on that atom wipes no settled one; on an atom of a
+    block the stitch in flight wipes the one before it whole, smudge:wiped's
+    FAIL (C18). The last two a guard: the oracle reads the stitches where the
+    record lays them."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "..", "src", "include", "volume_book.h")) as fh:
+        m = re.search(r"#define\s+BOOK_FLASH_PAGE_BYTES\s+(\d+)u?\b", fh.read())
+    Want(m is not None and int(m.group(1)) == lie.PAGE_SECTORS * 512,
+         "the page Smudge tears, %u sectors, is the page the kernel lifts a removable medium's ribbon atom to "
+         "(volume_book.h BOOK_FLASH_PAGE_BYTES: %s)" % (lie.PAGE_SECTORS, m.group(1) if m else "none"))
+
+    def Wiped(atom):
+        at = 1024
+        shape = Synthetic([[(8, 900, "file", "fid 3 data, named by stitch seq 1"),
+                            (atom, at, "stitch", "stitch seq 1, %u sector(s)" % atom)],
+                           [(atom, at + atom, "stitch", "stitch seq 2, %u sector(s)" % atom),
+                            (8, at + 2 * atom, "sheet", "Tally 3 node, sheet 1")]])
+        sewn = [[1, list(range(at, at + atom))]]
+        j = Judged(pc, shape, lambda cid: Book([[1, "a", 3, "aa"]], last=1, sewn=sewn if cid == "e0-all" or
+                                               cid.startswith("e1") else ()), lie.LiePlanner(shape).Run(),
+                   lambda m: Book([[1, "a", 3, "aa"]], last=0))
+        return Said(lie.Judge, j).get("smudge:wiped", ("", ""))
+
+    # A Tally's node in flight past stitch 2 spoils the rest of a page of its
+    # own: a Smudge medium judged, so the verdict on page-long stitches is the
+    # oracle's, never one of no medium at all.
+    paged = Wiped(lie.PAGE_SECTORS)
+    Want(paged[0] == "behaves" and not re.search(r"\bof 0 smudge", paged[1]),
+         "guard: stitches a page long from a page's start — stitch 2 in flight tears no sector of stitch 1, the "
+         "node in flight after it a page of its own, and smudge:wiped behaves over the media judged (%s)" % (paged,))
+    Want(Wiped(8)[0] == "fail", "guard: stitches a block long — stitch 2 in flight tears its page, stitch 1 with "
+         "it, whole, nothing past it: smudge:wiped fails")
 
 
 def SmudgeRowTests(pc, Want, Synthetic, lie):
@@ -520,7 +593,11 @@ def SmudgeRowTests(pc, Want, Synthetic, lie):
         return got.get("smudge:said", ("",))[0], got.get("smudge:wiped", ("",))[0]
 
     torn = [("RIBBON_TORN", "note", "the ribbon ends on stitch 0; seq 1 past it is torn")]
-    lost = ([("DEAD_BRANCH", "damage", "what settled is lost: seq 1, 2 past the end of the ribbon")], True)
+    lost = ([("DEAD_BRANCH", "damage", "what settled is lost: at most 1 stitch(es), seq 1 — stitch seq 2 names 1, "
+                                       "begun only after 1 had settled, and 1 does not read whole (H-3); seq 2 past "
+                                       "the end of the ribbon are not applied, and no seq up to 2, the largest found, "
+                                       "is given again — MEDIUM_LIED")], True)
+    proven = ([("DEAD_BRANCH", "damage", PROVEN_3)], True)
     part = [[1, [991, 992]]]
     Want(Smudge(part, {"m1-0-t": lost})[0] == "fail",
          "stitch 1 at 991-992, its sector 992 spoilt by the page of stitch 2 in flight, 991 still showing it, "
@@ -529,6 +606,10 @@ def SmudgeRowTests(pc, Want, Synthetic, lie):
          "a rot is no answer to a spoilt stitch: C18 keeps X's own bytes, 0 ERR_CHECKSUM")
     Want(Smudge(part, {"m1-0": (torn, False), "m1-0-t": lost}) == ("behaves", "behaves"),
          "the torn tail said for the one, what settled is lost and MEDIUM_LIED for the torn form: both behave")
+    Want(Smudge(part, {"m1-0": (torn, False), "m1-0-t": proven})[0] == "fail",
+         "the torn form's StitchHead names stitch 1, spoilt, and its census says the lie proven, not what settled "
+         "is lost: fails — a medium a Smudge spoilt is never a lie proven (M-2), though that line counts what "
+         "settled is lost too")
     Want(Smudge(part, {"m1-0": (torn, False), "m1-0-t": (torn, False)})[0] == "fail",
          "the torn form's StitchHead names stitch 1, spoilt: a torn tail said and not what settled is lost "
          "fails (C18)")

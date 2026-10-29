@@ -33,11 +33,11 @@
  * tail (BinderMayNot). */
 void    EngrossAsked(void);
 
-/* The tails the last walk left refused for their files' own sake, as it said
- * them, that Escheat cuts: from any core, a word that may be a walk old
- * (escheat.h). The file the loader reads the kernel by, which no call changes,
- * is never among them: a book where it carries a Slip is only read
- * (mount/book_ground.c, BookBootSlipped). */
+/* The tails the last walk that tried every tail left refused for their files'
+ * own sake — none for a refusal that may pass — that Escheat can cut. From
+ * any core, one word that may be a walk old (escheat.h). The file the loader
+ * reads the kernel by is never among them: a book where it carries a Slip is
+ * only read (mount/book_ground.c, BookBootSlipped). */
 uint32_t EngrossRefusedNow(void);
 
 /* Every file's tail laid in its block now, in the caller's own call — the

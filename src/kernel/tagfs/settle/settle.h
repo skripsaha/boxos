@@ -145,7 +145,8 @@ bool     TagFSStandSettleBegin(void);
 void     TagFSStandSettleRings(bool before_its_count);
 
 /* The next cycle's block map answers `code` once its own writes are done —
- * a refusal that is not the medium's (ERR_NO_MEMORY, ERR_WOULD_BLOCK), as a
+ * on a book, the making of its stitch answers it before anything is made — a
+ * refusal that is not the medium's (ERR_NO_MEMORY, ERR_WOULD_BLOCK), as a
  * step meets one. For the stand. */
 void     TagFSStandSettleRefuses(error_t code);
 

@@ -46,7 +46,8 @@ B4b B6c B10 B11 B11b B11c B14 B15 B15b B15c B16 B16b B17 B17b B18 B19 B19b B19c 
 B23 B23b B23c B23d B23e B24 B24b B26 B26b B26c B27 B27b B27c B27d B28 B28b B29 B29b B29c B29d B29e B29f B29g B29h B29i B29j B30 B30b B32
 B33
 B55a B55b B55c B55d B55e
-B59 B59b B60 B60c B4g B60e B59d B59e B59f B59g B59h B61 B59i B59j B59k B59l
+B59 B59b B60 B60c B4g B60e B59d B59e B59f B59g B59h B65 B59i B59j B59k B59l
+B62 B63 B64
 B46 B46b B47 B47b B48 B48b B49 B49b B50 B51 B52 B53 B54"
 
 # census_book_judge NAME — the prediction against the kernel's own lines, one
@@ -155,6 +156,11 @@ for code in re.findall(r"^\[TagFS\] ribbon ([A-Z_]+): ", log, re.M):
     ribbon[code] = ribbon.get(code, 0) + 1
 say(ribbon == k["ribbon"], "it says of the ribbon %s by code; the census predicted %s"
     % (sorted(ribbon.items()) or "nothing", sorted(k["ribbon"].items()) or "nothing"))
+lost = [[int(x) for x in m.groups()] for m in re.finditer(
+    r"^\[TagFS\] ribbon DEAD_BRANCH: .*what settled is lost: at most (\d+) stitch\(es\).*no seq up to (\d+), "
+    r"the largest found", log, re.M)]
+say(lost == k.get("lost", []), "it counts what settled is lost and the largest seq found as %s; the census "
+    "predicted %s" % (lost or "nothing", k.get("lost") or "nothing"))
 m = re.search(r"^\[TagFS\] the ribbon past the Tally: (\d+) stitch\(es\) sewn on, the last seq (\d+), "
               r"(\d+) applied", log, re.M)
 have = tuple(int(x) for x in m.groups()) if m else None
@@ -301,25 +307,34 @@ census_book() {
 #   stand_fresh_flushes_first                      1        1       1     1   the flush of the data before the stitch
 #   stand_binder_node_refused                      1        1       1     1   the Tally's first node
 #   stand_binder_slot_flush_refused                1        1       1     1   the flush of the Tally's slot
-#   total                                         24       42      25    24
+#   the rows above                                24       42      25    24
+#   every other test the book runs                71       71      71    71   the neutral tests, and the book's since the rows
+#   total                                         95      113      96    95
 #   stand_stitch_refused_everywhere                N        N       N     N   every attempt, as many as its line says
 #   stand_stitch_retry_runs_out                    N        N       N     N   a stitch and every atom of the next: its line
+#   stand_slip_refused_tail, stand_escheat_tail,   N        N       N     N   the reads of a Slip's tail block the Helm's
+#   stand_escheat_tail_helm_held                                              service races the test for: its line
 # ---------------------------------------------------------------------------
 
-STAND_BOOK_BLOCKFAILS=24
-STAND_BOOK_PADDED_BLOCKFAILS=42
-STAND_BOOK_UEFI_BLOCKFAILS=25
+# Every test of the tree runs on a book, the neutral ones among them (spec_v2
+# §16.5 п.22): the 71 refusals of the tests the rows do not name were counted
+# on the BIOS 4c image, boot after boot the same; the padded, UEFI and USB
+# columns are derived from the rows, not yet measured — the first boot of each
+# leg pins them, a neutral test that refuses otherwise on its road with them.
+STAND_BOOK_BLOCKFAILS=95
+STAND_BOOK_PADDED_BLOCKFAILS=113
+STAND_BOOK_UEFI_BLOCKFAILS=96
 # The book on a USB stick (stand_book_usb): the usb column — its seat's reads
 # go through the port as on UEFI, so stand_tally_rotten_leaf_locked stands
 # down there and refuses nothing, and the stick is no AHCI port for
-# stand_roadstead_refusal_rings_once to refuse on. Derived from the rows, not
-# yet measured: the first boot of the leg pins it.
-STAND_BOOK_USB_BLOCKFAILS=24
+# stand_roadstead_refusal_rings_once to refuse on.
+STAND_BOOK_USB_BLOCKFAILS=95
 STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
 # C13 (stand_docket_closed_damaged): sector 1 of a stitch the kernel sewed will
 # not read at the next mount — the line names it and the record bytes it took.
 STAND_BOOK_C13='^\[TagFS\] ribbon STITCH_TORN: stitch [0-9]+ is closed and damaged: sector\(s\) 1 of its [0-9]+ will not read, and [1-9][0-9]* byte\(s\) of its records with them'
 STAND_BOOK_REFUSED='^\[TagFS\] the book takes no write: ([0-9]+) refusal\(s\) in a row'
+STAND_BOOK_RACED='^\[TESTS\] [a-z_]+: BLOCKFAIL answered ([0-9]+) command\(s\) of the plan let go'
 STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes files made, written, named, tagged and given up, the names of tags and the memory of its Use Context'
 STAND_BOOK_TALLY='^\[TagFS\] a whole Tally of the book is written once the ribbon past the newest slot holds as many useful bytes as one costs'
 STAND_BOOK_TESTS="stand_tally_files_read_whole stand_tally_mount_writes_nothing stand_tally_copy_one_rotten
@@ -344,8 +359,9 @@ stand_binder_whole stand_binder_node_refused stand_binder_unslotted stand_binder
 stand_binder_slot_flush_refused stand_binder_slot_unsure stand_binder_parcels stand_binder_heals stand_binder_rotten_named
 stand_binder_slack stand_binder_ground_back stand_binder_full_back stand_binder_standing_end
 stand_tip_in_parcel stand_tip_in_heals_files stand_tip_in_heals_digests stand_tip_in_emptied
-stand_tip_in_quires_held stand_tip_in_rotten_past
-stand_book_glean_quires stand_book_glean_copies stand_escheat_warrant stand_escheat_tail
+stand_tip_in_quires_held stand_tip_in_rotten_past stand_tip_in_parcels_as_they_lie stand_parity_stitch_holds_no_lock
+stand_parity_files_in_turn
+stand_book_glean_quires stand_book_glean_copies stand_escheat_warrant stand_escheat_tail stand_escheat_tail_helm_held
 stand_endpaper_owed stand_endpaper_labeled_carries stand_endpaper_mount stand_endpaper_pending
 stand_endpaper_kept
 stand_away_other_stitches stand_away_not_landed stand_away_own_attempt stand_away_born_not_landed
@@ -360,10 +376,13 @@ STAND_BOOK_DEFECT='\[(TagFS|Settle)\] DEFECT'
 # StandDogEarLevered): each changes the state behind every Ink between its two
 # lines, and on a kernel not STRICT the Tally it asks for is refused by the
 # self-check's DEFECT (settle/binder_check.c, CheckDefect) — one line, of the
-# self-check's own words, between the two; a STRICT kernel stands them down.
+# self-check's own words, between the two; a STRICT kernel stands them down. A
+# lever that moves a file's ground is met by whichever check walks it first:
+# an element of the Tally before, or the DIGESTS ground laid in
+# (settle/binder_digests.c) — either says DogEar was given the lie.
 STAND_BOOK_LEVER='[TESTS] stand_dog_ear: a lever pulled behind every Ink'
 STAND_BOOK_LEVER_GO='[TESTS] stand_dog_ear: the lever let go'
-STAND_BOOK_LEVER_DEFECT='^\[TagFS\] DEFECT: the (FILES|DIGESTS) element \([0-9]+, [0-9]+\) (differs from the Tally before.s|is not in the Tally before|is in the Tally before and not in this one), and DogEar does not hold its key'
+STAND_BOOK_LEVER_DEFECT='^\[TagFS\] DEFECT: (the (FILES|DIGESTS) element \([0-9]+, [0-9]+\) (differs from the Tally before.s|is not in the Tally before|is in the Tally before and not in this one), and DogEar does not hold its key|DIGESTS laid in .* the ground the files took and let go since is not what DogEar says)'
 STAND_BOOK_MAP_SHORT='^\[TagFS\] this volume is NOT mounted: its block map is short of memory: [1-9][0-9]* mixed window'
 STAND_BOOK_MAP_MET='^\[TagFS FSCK\] the run of 3 block\(s\) from data block [0-9]+ that the tally claims meets 2 taken already'
 STAND_BOOK_MAP_FREED='^\[TagFS FSCK\] the run of 1 block\(s\) from data block [0-9]+ that file [0-9]+ lets go meets 1 free already'
@@ -388,7 +407,7 @@ stand_book_defects() {
 # "taken" where the seat's reads go through the port, "aside" where they
 # cannot; IMG the image booted, whose census volume-read predicts.
 stand_book_judge() {
-    local L="$SCRATCH/serial.$1.log" what=$2 want=$3 aside=$4 port=$5 img=$6 said got t
+    local L="$SCRATCH/serial.$1.log" what=$2 want=$3 aside=$4 port=$5 img=$6 said got t r
     said=$(stand_summary "$L")
     echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed, [0-9]+ skipped, 0 held under a caveat"
     chk $? "stand: $what — the $STAND_RUN tests this tree registers ran on the book, nothing failed (${said:-no summary})"
@@ -437,8 +456,9 @@ stand_book_judge() {
     chk $? "stand: $what — no defect of TagFS said but the one each lever of the stand draws from the Tally's self-check: no door below the glass reached by a road nobody shut, no code of format v1 asked for a LAYOUT, no cycle asked, no element of a Tally changed outside DogEar ($(echo "$got" | head -1 | cut -c1-120))"
     got=$(grep -ac '^\[BLOCKFAIL\] seat [0-9]*: ' "$L")
     t=$(grep -aoE "$STAND_BOOK_REFUSED" "$L" | sed -E "s/$STAND_BOOK_REFUSED/\1/" | awk '{ n += $1 } END { print n + 0 }')
-    [ "$got" = "$((want + t))" ] && [ "$t" -gt 0 ]
-    chk $? "stand: $what — BLOCKFAIL refused $got command(s), as many as the tests that arm it refuse here ($want, and $t of the tests whose book then takes no write, as their lines say)"
+    r=$(grep -aoE "$STAND_BOOK_RACED" "$L" | sed -E "s/$STAND_BOOK_RACED/\1/" | awk '{ n += $1 } END { print n + 0 }')
+    [ "$got" = "$((want + t + r))" ] && [ "$t" -gt 0 ] && [ "$r" -gt 0 ]
+    chk $? "stand: $what — BLOCKFAIL refused $got command(s), as many as the tests that arm it refuse here ($want, $t of the tests whose book then takes no write, and $r a Slip's tail block was read for by the Helm's service and the test, as their lines say)"
     grep -aqE "$STAND_BOOK_C13" "$L"
     chk $? "stand: $what — the stitch the kernel sewed, its sector 1 unreadable, is said closed and damaged with the bytes of its records lost (C13: $(grep -aoE "$STAND_BOOK_C13" "$L" | head -1 | cut -c1-120))"
     grep -aqE "$STAND_BOOK_HALT" "$L"
@@ -747,4 +767,25 @@ STITCHCUT_EOF
     chk $? "stitchcut: no panic, no fault"
     rm -f "$img"
     buildkey_restore
+}
+
+# census_book_all — the book's half of the census: its landings, the book the
+# kernel writes read back by both readers, its Tallies, cut and rotten, and
+# Escheat (logcheck_book.sh, logcheck_book_circle.sh, logcheck_bind.sh,
+# logcheck_escheat.sh).
+census_book_all() {
+    census_book
+    book_circle
+    book_big
+    book_stitchcut
+    book_bind
+    book_bindcut tally
+    book_bindcut slot
+    book_bindcut tally second
+    book_bindcut slot second
+    book_bindrot B4
+    book_bindrot B6c
+    book_escheat B4
+    book_escheat B6c
+    book_escheat B4g 1
 }

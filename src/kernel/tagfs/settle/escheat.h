@@ -42,9 +42,12 @@
  *                     the held ground
  *   EscheatOwed       an ask no Tally answered yet
  *   EscheatTailsActing  a walk of the files begun: the asks it cuts tails
- *                     for, 0 when every ask had its walk; EscheatTailsWalked:
- *                     that walk done — the asks it answered need no other
- *                     (helm/engross.c)
+ *                     for, 0 when every ask had its walk; EscheatTailsReach:
+ *                     the newest Ink an ask saw — a file whose record a later
+ *                     Ink made is no tail of the act's; EscheatTailsWalked:
+ *                     that walk done, having tried every file's tail, none
+ *                     passed over nor refused for what may pass — the asks it
+ *                     answered need no other (helm/engross.c)
  *   EscheatTake       TALLY_TAKE, before DogEar's: the ranges, the files and
  *                     the ground let go taken from the mount's lists, their
  *                     keys put into DogEar; EscheatTaken: the Tally under way
@@ -81,6 +84,7 @@ error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out);
  * service let go under it, counted (helm/engross.c, EngrossEscheat). */
 bool     EscheatOwed(void);
 uint64_t EscheatTailsActing(void);
+uint64_t EscheatTailsReach(void);
 void     EscheatTailsWalked(uint64_t asks);
 void     EscheatTailLost(void);
 void    EscheatTake(void);

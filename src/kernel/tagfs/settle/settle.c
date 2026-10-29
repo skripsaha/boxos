@@ -377,9 +377,10 @@ static void SettleStandRingsHere(uint8_t when)
     BoardroomNoteSeatReady(BoardroomSeatKind(seat), BoardroomSeatIndex(seat));
 }
 
-/* The block map's answer as the stand chose it, once — none of the medium's:
- * the map wrote what it owed, and the step answers the stand's code. */
-static error_t SettleStandRefusalHere(error_t rc)
+/* The step's answer as the stand chose it, once — none of the medium's: format
+ * v1's block map wrote what it owed, and the step answers the stand's code; a
+ * book's stitch answers it before it is made (sewing.c, STITCH_STEP_BUILD). */
+error_t SettleStandRefusalHere(error_t rc)
 {
     error_t chosen = __atomic_exchange_n(&s_stand_refusal, OK, __ATOMIC_ACQ_REL);
     return rc == OK ? chosen : rc;

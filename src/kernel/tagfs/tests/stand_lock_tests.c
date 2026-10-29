@@ -232,18 +232,21 @@ static const TestCase g_stand_lock_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "the tag registry's flush holds its interrupts-off lock across every write "
                        "it makes to the medium, so a core that needs a tag spins with interrupts "
-                       "off for as long as the medium takes" },
+                       "off for as long as the medium takes",
+      .format = DEED_FORMAT_V1, .analog = "stand_parity_stitch_holds_no_lock" },
     { .name  = "stand_ledger_writes_outside_its_lock", .func = TestStandLedgerWritesOutsideItsLock,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "the Ledger is written to the medium under its interrupts-off lock, so a "
                        "core that needs the Ledger spins with interrupts off for as long as the "
-                       "medium takes" },
+                       "medium takes",
+      .format = DEED_FORMAT_V1, .analog = "stand_parity_stitch_holds_no_lock" },
     { .name  = "stand_integrity_pages_outside_its_lock", .func = TestStandIntegrityPagesOutsideItsLock,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "the integrity map pages itself in and out of the medium under its "
                        "interrupts-off lock, from inside every block read and write, so every "
                        "core that reads or writes a block spins with interrupts off for as long "
-                       "as the medium takes" },
+                       "as the medium takes",
+      .format = DEED_FORMAT_V1, .analog = "stand_parity_stitch_holds_no_lock" },
     { .name  = "stand_dma_wait_keeps_the_callers_interrupts",
       .func  = TestStandDmaWaitKeepsTheCallersInterrupts,
       .reach = TEST_READS_ONLY,

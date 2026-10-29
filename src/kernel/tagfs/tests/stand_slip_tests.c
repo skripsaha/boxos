@@ -493,8 +493,11 @@ out:
 
 /* The port's road (WriteJob) rides a Slip as the synchronous one does: a
  * small write lays no block; a write across the block lays it with the Slip's
- * bytes in it; and a write into the middle of a DATA block apart from its
- * Slip's span lays the block whole, the Slip's bytes read in over its base. */
+ * bytes in it; a write into the middle of a DATA block apart from its Slip's
+ * span lays the block whole, the Slip's bytes read in over its base; and a
+ * write the job cuts into a window and a tail of 100 bytes in a new last
+ * block lays that block too — the write began blocks before it, so it does
+ * not lie in the last block alone (plot_slip.c PlotSlipBarred). */
 static TestResult TestStandSlipPort(void)
 {
     TestResult      verdict = TEST_PASS;
@@ -506,7 +509,8 @@ static TestResult TestStandSlipPort(void)
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
+    TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM + TagFSRunBlocks() * TAGFS_BLOCK_SIZE),
+                "room for the file's bytes");
     if (!WriteJobSeatRunsAsync(s.seat)) {
         kprintf("[TESTS] stand_slip_port: the port's write stands aside — the volume's seat (%s) takes no write "
                 "nobody stands over\n", BoardroomSeatName(s.seat));
@@ -533,6 +537,15 @@ static TestResult TestStandSlipPort(void)
                    "40 bytes are written through the port into the last block, apart from the Slip's span");
     TEST_ASSERT(StandSlipTailIs(fid, false, STRIP_DATA) && StandFreshHolds(&m, fid),
                 "the block is laid whole: its base, the Slip's bytes and the write");
+    TEST_ASSERT_OK(TagFSSettle(), "settled");
+    laid = StandSlipLaid();
+    TEST_ASSERT_OK(StandFreshPortWrite(&m, fid, m.size, (uint32_t)HelmWindowBytes(m.size) + 100u),
+                   "a window and 100 bytes are written through the port at its end, the job cutting them in two");
+    TestEvidence("bytes of data the window and its tail laid", StandSlipLaid() - laid);
+    TEST_ASSERT(StandSlipTailIs(fid, false, STRIP_DATA) &&
+                StandSlipLaid() == laid + (uint64_t)(TagFSRunBlocks() + 1u) * TAGFS_BLOCK_SIZE,
+                "the tail's block is laid with the window's: no Slip over it");
+    TEST_ASSERT(StandFreshHolds(&m, fid), "the file reads every byte");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     TEST_ASSERT(StandStitchRemount() && StandFreshHolds(&m, fid), "and mounted again, the same");
 out:
@@ -615,6 +628,7 @@ static TestResult TestStandSlipRefusedTail(void)
     TEST_ASSERT(StandSlipTailIs(fa, true, STRIP_DATA), "the first file keeps its Slip");
     TEST_ASSERT(BinderRunWhole() != OK, "a Tally asked for now is refused: it waits for that tail");
     BlockFailDisarm();
+    StandBlockFailRaced("stand_slip");
     TEST_ASSERT_EQ(StandFreshWrite(&ma, fa, ma.size, 10, 0x5c03u), 10, "the block read again, the file is written");
     TEST_ASSERT(StandSlipTailIs(fa, false, STRIP_DATA), "and lays its own tail in a block, the Slip in it");
     TEST_ASSERT_OK(TagFSSettle(), "the cycle that carries it settles");
