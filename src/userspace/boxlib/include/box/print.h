@@ -18,6 +18,9 @@ uint8_t io_get_mode(void);
 void io_set_display_pid(uint32_t pid);
 uint32_t io_get_display_pid(void);
 
+/* With `cmd -> file` (box/form.h) everything a program prints — print, println,
+ * print_bytes, printf, and std::cout above them — is added to the end of that
+ * file, colours dropped, and none of it reaches the screen. */
 void print(const char* str);
 void println(const char* str);
 
@@ -25,6 +28,13 @@ void println(const char* str);
  * VGA/IPC routing, colour state and UTF-8->'?' filtering as print(); the
  * byte-count form std::print and other length-carrying writers need. */
 void print_bytes(const char* data, size_t len);
+
+/* The same two, to the person's screen whatever `->` says. What a program
+ * prints goes where the arrow points; its prompt, the editor's echo and the
+ * words it says to the person do not. Without an arrow they are print and
+ * print_bytes. */
+void print_to_screen(const char* str);
+void print_bytes_to_screen(const char* data, size_t len);
 
 void clear(void);
 void io_flush(void);

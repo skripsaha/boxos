@@ -19,6 +19,9 @@
 #include "box/display.h"
 #include "box/touch.h"
 #include "box/turnin.h"
+#include "box/file.h"
+#include "box/sync.h"
+#include "box/core/form_internal.h"
 
 /* ===========================================================================
  * Per-strand print state — thread-confined, NO lock.
@@ -796,6 +799,72 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
 }
 
 /* ===========================================================================
+ * The arrow — `cmd -> file`
+ *
+ * When the shell filled the Luggage with a `screen #ID`, what the program
+ * prints is added to the end of that file instead of the screen: bytes only,
+ * the colours a run carries have no place in a file. The end is found once, as
+ * the file's size when the first byte comes, and moved on by what is written;
+ * strands share one offset under one lock. The person's screen is still
+ * reached by print_to_screen — the editor's echo and a prompt are for the
+ * person, not for the file. A file that will not take the output ends the
+ * arrow: it is said on the screen once and everything goes there from then on.
+ * =========================================================================== */
+static struct {
+    umutex_t lock;
+    uint64_t offset;
+    bool     found;
+    bool     given_up;
+} g_arrow = { UMUTEX_INIT, 0, false, false };
+
+static bool arrow_append(file_id_t file, const char *bytes, size_t len)
+{
+    bool said = false;
+
+    umutex_lock(&g_arrow.lock);
+    bool ok = !g_arrow.given_up;
+    if (ok && !g_arrow.found) {
+        file_info_t info;
+        ok = file_info(file, &info) == 0;
+        if (ok) {
+            g_arrow.offset = info.size;
+            g_arrow.found  = true;
+        }
+    }
+    while (ok && len > 0) {
+        int64_t wrote = fwrite(file, g_arrow.offset, bytes, len);
+        if (wrote <= 0) {
+            ok = false;
+            break;
+        }
+        g_arrow.offset += (uint64_t)wrote;
+        bytes += wrote;
+        len   -= (size_t)wrote;
+    }
+    if (!ok && !g_arrow.given_up) {
+        g_arrow.given_up = true;
+        said = true;
+    }
+    umutex_unlock(&g_arrow.lock);
+
+    if (said) print_to_screen("[print] the file after -> would not take the output; it goes to the screen\n");
+    return ok;
+}
+
+/* Did the file take these bytes; false sends them to the screen. */
+static bool arrow_write(const char *bytes, size_t len)
+{
+    file_id_t file = form_screen_file();
+    return file != 0 && arrow_append(file, bytes, len);
+}
+
+static void emit_text(StrandPrintState *ps, const char *bytes, int len, Color fg, Color bg)
+{
+    if (len > 0 && arrow_write(bytes, (size_t)len)) return;
+    emit_run(ps, bytes, len, fg, bg);
+}
+
+/* ===========================================================================
  * Public output API
  *
  * print() streams the input in fixed-size chunks: each chunk is UTF-8
@@ -822,7 +891,7 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
  * code that knows what a cell can hold. A chunk may end mid-sequence; the
  * Canvas assembles across calls, so a split costs nothing. */
 static void emit_chunks(StrandPrintState *ps, const char* data, size_t len,
-                        bool newline)
+                        bool newline, bool screen)
 {
     char   chunk[256];
     size_t src = 0;
@@ -835,13 +904,15 @@ static void emit_chunks(StrandPrintState *ps, const char* data, size_t len,
         int chunk_pos = (int)take;
         if (newline && src >= len) chunk[chunk_pos++] = '\n';
         if (chunk_pos == 0) break;
-        emit_run(ps, chunk, chunk_pos, ps->color_fg, ps->color_bg);
+        if (screen) emit_run(ps, chunk, chunk_pos, ps->color_fg, ps->color_bg);
+        else        emit_text(ps, chunk, chunk_pos, ps->color_fg, ps->color_bg);
     } while (src < len);
 }
 
-void print(const char* str)
+/* One batch round a whole call: a colour and the text it applies to leave
+ * together. `screen` is the person's screen whatever the arrow says. */
+static void print_chunks(const char *data, size_t len, bool screen)
 {
-    if (!str) return;
     StrandPrintState *ps = print_state_self();
 
     /* IO_MODE_IPC batches into the lane frame and flushes lazily;
@@ -852,22 +923,33 @@ void print(const char* str)
     bool we_began = false;
     if (io_direct(ps)) { vga_begin(); we_began = true; }
 
-    emit_chunks(ps, str, strlen(str), false);
+    emit_chunks(ps, data, len, false, screen);
 
     if (we_began) vga_commit();
+}
+
+void print(const char* str)
+{
+    if (!str) return;
+    print_chunks(str, strlen(str), false);
 }
 
 void print_bytes(const char* data, size_t len)
 {
     if (!data || len == 0) return;
-    StrandPrintState *ps = print_state_self();
+    print_chunks(data, len, false);
+}
 
-    bool we_began = false;
-    if (io_direct(ps)) { vga_begin(); we_began = true; }
+void print_to_screen(const char* str)
+{
+    if (!str) return;
+    print_chunks(str, strlen(str), true);
+}
 
-    emit_chunks(ps, data, len, false);
-
-    if (we_began) vga_commit();
+void print_bytes_to_screen(const char* data, size_t len)
+{
+    if (!data || len == 0) return;
+    print_chunks(data, len, true);
 }
 
 void println(const char* str)
@@ -879,8 +961,8 @@ void println(const char* str)
     bool we_began = false;
     if (io_direct(ps)) { vga_begin(); we_began = true; }
 
-    if (str) emit_chunks(ps, str, strlen(str), true);
-    else     emit_run(ps, "\n", 1, ps->color_fg, ps->color_bg);
+    if (str) emit_chunks(ps, str, strlen(str), true, false);
+    else     emit_text(ps, "\n", 1, ps->color_fg, ps->color_bg);
 
     if (we_began) vga_commit();
 }
@@ -943,7 +1025,7 @@ typedef struct {
 static void printf_flush(PrintfRun *run)
 {
     if (run->used > 0) {
-        emit_run(run->ps, run->text, run->used, run->fg, run->bg);
+        emit_text(run->ps, run->text, run->used, run->fg, run->bg);
         run->used = 0;
     }
 }

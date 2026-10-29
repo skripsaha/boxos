@@ -57,6 +57,21 @@ SECTIONS
         PROVIDE(__nameplate_end = .);
     }
 
+    /* ── Form: what this program takes and gives ─────────────────────────
+     * The text BOX_FORM (box/form.h) or the assembler's `takes` and `gives`
+     * put in .boxos.form. It sits here for the nameplate's reason — read-only,
+     * after the code, moving nothing that comes before — and the loader maps
+     * it with the rest of the read-only segment, so a program reads its own
+     * Form from memory between these symbols while the shell reads it from the
+     * image's section headers. PROVIDE: an image without a Form has the two
+     * symbols at one address and reads as no Form. */
+    .boxos.form : ALIGN(1)
+    {
+        PROVIDE(__boxos_form_start = .);
+        KEEP(*(.boxos.form))
+        PROVIDE(__boxos_form_end = .);
+    }
+
     .data : ALIGN(4096)
     {
         *(.data .data.*)

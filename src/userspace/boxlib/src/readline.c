@@ -158,7 +158,7 @@ static void EchoBlanks(uint32_t n)
     };
     while (n) {
         uint32_t chunk = n < sizeof(spaces) ? n : (uint32_t)sizeof(spaces);
-        print_bytes(spaces, chunk);
+        print_bytes_to_screen(spaces, chunk);
         n -= chunk;
     }
 }
@@ -175,7 +175,7 @@ static void EchoTail(EditLine *l, uint32_t from, uint32_t trailing_blanks)
 
     /* Redraw buf[from..len), then `trailing_blanks` blanks that erase what a
      * shorter line leaves behind, then step back to the cursor. */
-    if (l->len > from) print_bytes(l->buf + from, l->len - from);
+    if (l->len > from) print_bytes_to_screen(l->buf + from, l->len - from);
     EchoBlanks(trailing_blanks);
     int32_t back = (int32_t)(l->len - l->cursor) + (int32_t)trailing_blanks;
     console_step(-back);
@@ -244,7 +244,7 @@ static void Replace(EditLine *l, const char *text, uint32_t n)
     memcpy(l->buf, text, n);
     l->len    = n;
     l->cursor = n;
-    if (n > 0) print_bytes(l->buf, n);
+    if (n > 0) print_bytes_to_screen(l->buf, n);
 
     uint32_t blanks = was > n ? was - n : 0;
     EchoBlanks(blanks);
@@ -349,7 +349,7 @@ static void RestateLine(const EditLine *l)
 {
     if (l->len == 0) return;
     console_step(-(int32_t)l->len);
-    print_bytes(l->buf, l->len);
+    print_bytes_to_screen(l->buf, l->len);
 }
 
 /* Keys edited into `l` until Enter: the line's length, NUL-terminated in
@@ -383,7 +383,7 @@ static int EditUntilEnter(EditLine *l)
             /* Before the newline, so the line the log ends up holding is the
              * one that was accepted and not the keys it was edited out of. */
             if (l->echo_diverged) RestateLine(l);
-            print_bytes("\n", 1);
+            print_bytes_to_screen("\n", 1);
             l->buf[l->len] = '\0';
             HistoryKeep(l->buf, l->len);
             free(l->draft);
@@ -446,6 +446,6 @@ __attribute__((weak)) int getchar(void)
 
 int input(const char *prompt, char *buffer, size_t max_len)
 {
-    if (prompt) print(prompt);
+    if (prompt) print_to_screen(prompt);
     return readline(buffer, max_len);
 }
