@@ -795,7 +795,7 @@ static int BoxAsmPlaceNameplate(BoxAsmLinker *Link)
 }
 
 int BoxAsmLink(const BoxAsmBlob *Entry, const BoxAsmBlob *Program,
-               const BoxAsmBlob *RuntimeArchive, uint32_t Flags,
+               const BoxAsmBlob *RuntimeArchive, const BoxAsmBlob *Recipe, uint32_t Flags,
                BoxAsmBlob *Out, char *Error, size_t ErrorCapacity)
 {
     BoxAsmLinker Link;
@@ -810,6 +810,7 @@ int BoxAsmLink(const BoxAsmBlob *Entry, const BoxAsmBlob *Program,
     memset(&Link, 0, sizeof(Link));
     Link.Error = Error;
     Link.ErrorCapacity = ErrorCapacity;
+    Link.Recipe = Recipe && Recipe->Size != 0 ? Recipe : NULL;
     Link.ArchiveName = RuntimeArchive->Name ? RuntimeArchive->Name : "runtime archive";
     BoxAsmImageInit(&Link.Image);
 

@@ -13,6 +13,13 @@ void ThemKeep(file_id_t *ids, size_t count)
     g_known = true;
 }
 
+void ThemReplace(file_id_t old, file_id_t made)
+{
+    for (size_t i = 0; i < g_count; i++) {
+        if (g_files[i] == old) g_files[i] = made;
+    }
+}
+
 void ThemShow(BoxFormLookup *lookup)
 {
     lookup->Them      = g_files;

@@ -1,6 +1,8 @@
 #include "box/print.h"
 #include "box/form.h"
 #include "box/file.h"
+#include "box/memory.h"
+#include "box/recipe.h"
 #include "box/system.h"
 
 BOX_FORM("takes optional thing \"the file to tell about\"\n"
@@ -38,6 +40,35 @@ static void print_tags(const char *tags) {
     }
 }
 
+/* What a program made here was made from, by which tool and in which Use
+ * Context, and how each of those files stands now. Nothing for a file that
+ * carries no Recipe. */
+static void print_recipe(file_id_t file) {
+    BoxRecipe recipe;
+    if (recipe_of_file(file, &recipe) != 0) {
+        println("  Recipe: it cannot be read");
+        return;
+    }
+    if (!recipe.Declared) return;
+
+    uint8_t *states = NULL;
+    bool known = recipe_check(&recipe, &states) == 0;
+    if (recipe.Context[0])
+        printf("  Made by %s in the Use Context %s, from:\n", recipe.By, recipe.Context);
+    else
+        printf("  Made by %s with no Use Context, from:\n", recipe.By);
+    for (size_t i = 0; i < recipe.FileCount; i++) {
+        const char *now = !known                          ? ""
+                          : states[i] == RECIPE_CHANGED ? " (changed since)"
+                          : states[i] == RECIPE_GONE    ? " (gone)"
+                                                        : "";
+        printf("    %s%s\n", recipe.Files[i].Name, now);
+    }
+    if (!known) println("    (whether they changed cannot be read now)");
+    free(states);
+    recipe_release(&recipe);
+}
+
 int main(void) {
     const file_id_t *file;
     size_t file_count;
@@ -66,6 +97,7 @@ int main(void) {
     printf("  Flags: 0x%x\n", metadata.Flags);
     print_tags(metadata.Tags);
     FileMetadataRelease(&metadata);
+    print_recipe(file[0]);
 
     souvenir_things(file, 1);
     exit(0);

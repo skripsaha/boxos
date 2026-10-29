@@ -351,6 +351,28 @@ static void SayPublished(const AssembleRequest *Request, file_id_t FileId,
         println("added app: without app or utility the shell cannot start it");
 }
 
+/* A program made again by its Recipe takes its own place: no name is looked
+ * up and nothing is asked — it is the one handed over. */
+static int RemakeInPlace(const AssembleRequest *Request, const BoxAsmBlob *Image,
+                         file_id_t *Published)
+{
+    AssembleCandidate Old;
+    int Rc;
+
+    memset(&Old, 0, sizeof(Old));
+    Old.Id = Request->Remake;
+    Rc = FileMetadataRead(Old.Id, &Old.Metadata);
+    if (Rc != 0) {
+        AssembleSayError(Request->RemakeName, Rc, NULL);
+        return Rc;
+    }
+    Rc = ReplaceProgram(Request, Image, &Old, Published);
+    if (Rc == 0)
+        SayPublished(Request, *Published, &Old);
+    FileMetadataRelease(&Old.Metadata);
+    return Rc;
+}
+
 int AssemblePublish(const AssembleRequest *Request, const BoxAsmBlob *Image,
                     file_id_t *Published)
 {
@@ -359,7 +381,11 @@ int AssemblePublish(const AssembleRequest *Request, const BoxAsmBlob *Image,
     int Count;
     int Chosen;
     int Index;
-    int Rc = GatherCandidates(Request, &List, &Count);
+    int Rc;
+
+    if (Request->Remake != 0)
+        return RemakeInPlace(Request, Image, Published);
+    Rc = GatherCandidates(Request, &List, &Count);
 
     if (Rc != 0) {
         AssembleSayError("output lookup", Rc, NULL);

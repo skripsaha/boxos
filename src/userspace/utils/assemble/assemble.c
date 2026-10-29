@@ -7,6 +7,7 @@
 #include "box/form.h"
 #include "box/memory.h"
 #include "box/print.h"
+#include "box/recipe.h"
 #include "box/string.h"
 #include "box/system.h"
 
@@ -107,7 +108,7 @@ static int AppendExplicitTags(AssembleRequest *Request)
     return 0;
 }
 
-static int LinkEmbedded(const char *SourceName, BoxAsmBlob *Program,
+static int LinkEmbedded(const char *SourceName, BoxAsmBlob *Program, const BoxAsmBlob *Recipe,
                         BoxAsmBlob *Image, char *Error, size_t ErrorCapacity)
 {
     BoxAsmBlob Entry = { _binary____build_boxlib_start_o_start,
@@ -121,7 +122,7 @@ static int LinkEmbedded(const char *SourceName, BoxAsmBlob *Program,
     int Rc;
 
     Program->Name = SourceName;
-    Rc = BoxAsmLink(&Entry, Program, &RuntimeArchive, 0, Image,
+    Rc = BoxAsmLink(&Entry, Program, &RuntimeArchive, Recipe, 0, Image,
                     Error, ErrorCapacity);
     free((void *)Program->Data);
     Program->Data = NULL;
@@ -145,6 +146,94 @@ static int ReadForm(AssembleRequest *Request)
     return form_words(2, &Request->TagWords, &Request->TagWordCount);
 }
 
+/* The file a Recipe begins with, still there to be read again. */
+static int RecipeSourceThere(const BoxRecipe *Recipe, const char *Program)
+{
+    FileMetadata Metadata;
+    int Rc;
+    int Trashed;
+
+    memset(&Metadata, 0, sizeof(Metadata));
+    Rc = FileMetadataRead(Recipe->Files[0].Id, &Metadata);
+    if (Rc != 0 && Rc != -ERR_FILE_NOT_FOUND) {
+        AssembleSayError(Recipe->Files[0].Name, Rc, NULL);
+        return Rc;
+    }
+    Trashed = Rc == 0 && (Metadata.Flags & FILE_FLAG_TRASHED) != 0;
+    if (Rc == 0)
+        FileMetadataRelease(&Metadata);
+    if (Rc == 0 && !Trashed)
+        return 0;
+    printf("assemble: %s, which %s was made from, is gone\n", Recipe->Files[0].Name, Program);
+    return -ERR_FILE_NOT_FOUND;
+}
+
+/* What a Recipe asks of the build: its first file as the source, its Use
+ * Context as the home, and the program itself as what is made — unless ->
+ * names another. */
+static int TakeRecipe(AssembleRequest *Request, const BoxRecipe *Recipe)
+{
+    int Rc;
+
+    if (strcmp(Recipe->By, "assemble") != 0) {
+        printf("assemble: %s was made by %s, not by assemble\n", Request->RemakeName, Recipe->By);
+        return -ERR_INVALID_ARGUMENT;
+    }
+    Rc = RecipeSourceThere(Recipe, Request->RemakeName);
+    if (Rc != 0)
+        return Rc;
+    if (!(Request->Home = BoxAsmCopyText(Recipe->Context, strlen(Recipe->Context)))) {
+        AssembleSayError(Request->RemakeName, -ERR_NO_MEMORY, NULL);
+        return -ERR_NO_MEMORY;
+    }
+    Request->Remake = Request->RequestedOutput ? 0 : Request->SourceId;
+    if (!Request->RequestedOutput)
+        Request->RequestedOutput = Request->RemakeName;
+    Request->SourceId = Recipe->Files[0].Id;
+    return 0;
+}
+
+/* A program handed over in place of a source is made again by its Recipe.
+ * One with no Recipe was made elsewhere: there is nothing to make it from. */
+static int FollowRecipe(AssembleRequest *Request)
+{
+    BoxRecipe Recipe;
+    FileMetadata Metadata;
+    size_t Length;
+    int Rc = recipe_of_file(Request->SourceId, &Recipe);
+
+    if (Rc != 0) {
+        AssembleSayError("the program's Recipe", Rc, NULL);
+        return Rc;
+    }
+    if (!Recipe.Image)
+        return 0;
+    memset(&Metadata, 0, sizeof(Metadata));
+    if ((Rc = FileMetadataRead(Request->SourceId, &Metadata)) != 0) {
+        recipe_release(&Recipe);
+        AssembleSayError("program metadata", Rc, NULL);
+        return Rc;
+    }
+    Length = Metadata.Filename ? strlen(Metadata.Filename) : 0;
+    if (Length == 0 || Length >= sizeof(Request->RemakeName)) {
+        AssembleSayError("program name", -ERR_INVALID_ARGUMENT,
+                         "the name is empty or longer than 63 characters");
+        Rc = -ERR_INVALID_ARGUMENT;
+    } else {
+        memcpy(Request->RemakeName, Metadata.Filename, Length + 1u);
+    }
+    FileMetadataRelease(&Metadata);
+    if (Rc == 0 && !Recipe.Declared) {
+        printf("assemble: %s is a program made elsewhere: it carries no Recipe to make it again from\n",
+               Request->RemakeName);
+        Rc = -ERR_INVALID_ARGUMENT;
+    }
+    if (Rc == 0)
+        Rc = TakeRecipe(Request, &Recipe);
+    recipe_release(&Recipe);
+    return Rc;
+}
+
 /* The source file's name and, from it or from the command, the program's. */
 static int NameFiles(AssembleRequest *Request, const FileMetadata *Metadata)
 {
@@ -166,14 +255,14 @@ static int NameFiles(AssembleRequest *Request, const FileMetadata *Metadata)
 }
 
 /* The Use Context the build begins in - taken once, the home of the whole
- * build - the source's bytes, and the tags the program will wear: the
- * source's own, then the command's. */
+ * build, unless a Recipe gave it - the source's bytes, and the tags the
+ * program will wear: the source's own, then the command's. */
 static int LoadSource(AssembleRequest *Request)
 {
     FileMetadata Metadata;
     int Rc;
 
-    if ((Rc = AssembleTakeContext(&Request->Home)) != 0) {
+    if (!Request->Home && (Rc = AssembleTakeContext(&Request->Home)) != 0) {
         AssembleSayError("use context", Rc, NULL);
         return Rc;
     }
@@ -209,7 +298,8 @@ static int LoadSource(AssembleRequest *Request)
 
 /* Source to ET_REL to the linked image, entirely in memory: a program that
  * does not assemble or link leaves no file behind. Its %includes are found on
- * the volume, in the home the source was found in. */
+ * the volume, in the home the source was found in, and the image carries the
+ * Recipe of every file the build read. */
 static int BuildImage(AssembleRequest *Request, BoxAsmBlob *Image)
 {
     BoxAsmBlob Program = { 0 };
@@ -237,9 +327,23 @@ static int BuildImage(AssembleRequest *Request, BoxAsmBlob *Image)
         else
             AssembleSayError(Request->SourceName, Rc, NULL);
     } else {
-        Rc = LinkEmbedded(Request->SourceName, &Program, Image, Error, ASSEMBLE_ERROR_BYTES);
-        if (Rc != 0)
-            AssembleSayError("link", Rc, Error);
+        BoxAsmBlob Recipe = { NULL, 0, "recipe" };
+        char *Text = NULL;
+        size_t Length = 0;
+
+        Rc = AssembleRecipe(Request->Home, &Text, &Length);
+        if (Rc != 0) {
+            AssembleSayError("recipe", Rc, NULL);
+            free((void *)Program.Data);
+        } else {
+            Recipe.Data = (const uint8_t *)Text;
+            Recipe.Size = Length;
+            Rc = LinkEmbedded(Request->SourceName, &Program, &Recipe, Image, Error,
+                              ASSEMBLE_ERROR_BYTES);
+            free(Text);
+            if (Rc != 0)
+                AssembleSayError("link", Rc, Error);
+        }
     }
     free(Error);
     return Rc;
@@ -254,6 +358,7 @@ int main(void)
 
     memset(&Request, 0, sizeof(Request));
     if (ReadForm(&Request) != 0 ||
+        FollowRecipe(&Request) != 0 ||
         LoadSource(&Request) != 0 ||
         BuildImage(&Request, &Image) != 0) {
         free(Request.SourceBytes);

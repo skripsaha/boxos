@@ -295,20 +295,34 @@ int main(int Argc, char **Argv)
         Source.Files = &Volume.Files;
         return Finish(BoxAsmSourceAssemble(&Source, &Out, Error, sizeof(Error)), Error, &Out, Argv[5]);
     }
-    if ((Argc == 6 || (Argc == 7 && strcmp(Argv[6], "symbols") == 0)) &&
-        strcmp(Argv[1], "link") == 0) {
-        BoxAsmBlob Entry, Program, Archive;
-        if (!Load(Argv[2], &Entry) || !Load(Argv[3], &Program) || !Load(Argv[4], &Archive))
+    if (Argc >= 6 && strcmp(Argv[1], "link") == 0) {
+        BoxAsmBlob Entry, Program, Archive, Recipe = { 0 };
+        uint32_t Flags = 0;
+        int Known = 1;
+        int Index;
+
+        for (Index = 6; Index < Argc && Known; Index++) {
+            if (strcmp(Argv[Index], "symbols") == 0)
+                Flags |= BOXASM_LINK_SYMBOLS;
+            else if (strncmp(Argv[Index], "recipe=", 7) == 0)
+                Known = Load(Argv[Index] + 7, &Recipe) ? 1 : 2;
+            else
+                Known = 0;
+        }
+        if (Known == 2)
             return 2;
-        return Finish(BoxAsmLink(&Entry, &Program, &Archive,
-                                 Argc == 7 ? BOXASM_LINK_SYMBOLS : 0u,
-                                 &Out, Error, sizeof(Error)),
-                      Error, &Out, Argv[5]);
+        if (Known) {
+            if (!Load(Argv[2], &Entry) || !Load(Argv[3], &Program) || !Load(Argv[4], &Archive))
+                return 2;
+            return Finish(BoxAsmLink(&Entry, &Program, &Archive, Recipe.Data ? &Recipe : NULL,
+                                     Flags, &Out, Error, sizeof(Error)),
+                          Error, &Out, Argv[5]);
+        }
     }
     fprintf(stderr,
             "usage: %s assemble <source.asm> <out.o>\n"
             "       %s volume <dir> <context> <source.asm> <out.o>\n"
-            "       %s link <entry.o> <program.o> <archive.a> <out.elf> [symbols]\n",
+            "       %s link <entry.o> <program.o> <archive.a> <out.elf> [symbols] [recipe=<file>]\n",
             Argv[0], Argv[0], Argv[0]);
     return 2;
 }

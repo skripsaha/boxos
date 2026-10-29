@@ -12,10 +12,15 @@
 /* Link the assembled ET_REL object with the entry object and the runtime
  * archive into one ET_EXEC image for the BoxOS loader, laid out by the
  * contract of src/userspace/boxlib/user.ld. Every refusal is written into
- * Error naming the object, section, offset and symbol it concerns. */
+ * Error naming the object, section, offset and symbol it concerns.
+ *
+ * Recipe, when it is not NULL and not empty, is the program's Recipe
+ * (box/recipe.h): its bytes go into .boxos.recipe, a section after both
+ * segments that no segment maps — it changes no byte the loader loads. */
 int BoxAsmLink(const BoxAsmBlob *Entry,
                const BoxAsmBlob *Program,
                const BoxAsmBlob *RuntimeArchive,
+               const BoxAsmBlob *Recipe,
                uint32_t Flags,
                BoxAsmBlob *Out,
                char *Error,

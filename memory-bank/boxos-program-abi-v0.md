@@ -48,6 +48,13 @@ first design pass.
   program gives back on its way out is a Souvenir: an IPC message to its
   spawner (magic "SOUV", count, file ids), sent only when the spawner asked
   for it with the `souvenir` record.
+- A program made inside BoxOS carries its Recipe in `.boxos.recipe`
+  (`box/recipe.h`): a section after both segments that no segment maps,
+  holding as text the tool that made it (`by assemble`), the Use Context the
+  build looked in, and every file the build read — id, SHA-256 of the bytes
+  read, name — the source first. The shell reads it before starting the
+  program; a file that changed since makes the tool make it again, handed the
+  program as `it`, in the context it was made in.
 - `notify` is a semantic doorbell. The userspace macro emits the x86-64
   `syscall` instruction with `RDI = 0`; `yield` emits the same instruction with
   `RDI = GATE_YIELD` (`src/userspace/boxlib/include/box/core/notify.h`).

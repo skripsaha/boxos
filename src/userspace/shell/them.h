@@ -12,6 +12,10 @@
  * files held before are let go. */
 void ThemKeep(file_id_t *ids, size_t count);
 
+/* A file kept in place of another: a program made again by its Recipe
+ * takes its own place, so `them` holds the new one where it held the old. */
+void ThemReplace(file_id_t old, file_id_t made);
+
 /* Show a lookup the files kept, for the filler to read `them` from. */
 void ThemShow(BoxFormLookup *lookup);
 

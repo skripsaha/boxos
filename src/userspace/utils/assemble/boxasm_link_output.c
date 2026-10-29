@@ -6,6 +6,7 @@
 
 /* Header indices after the output sections. */
 typedef struct {
+    uint16_t Recipe;
     uint16_t Symtab;
     uint16_t Strtab;
     uint16_t Shstrtab;
@@ -16,11 +17,12 @@ typedef struct {
     uint64_t ReadOnlyEnd;    /* file offset where the R+X segment's bytes end */
     uint64_t DataStart;      /* file offset of the RW segment */
     uint64_t DataEnd;        /* file offset where the RW segment's bytes end */
+    uint64_t RecipeOffset;
     uint64_t SymtabOffset;
     uint64_t StrtabOffset;
     uint64_t ShstrtabOffset;
     uint64_t HeadersOffset;
-    uint32_t Names[BOXASM_SLOT_COUNT + 3];
+    uint32_t Names[BOXASM_SLOT_COUNT + 4];
 } BoxAsmFileLayout;
 
 static int BoxAsmPadTo(BoxAsmBuffer *File, uint64_t Offset)
@@ -47,6 +49,8 @@ static int BoxAsmBuildSectionNames(const BoxAsmLinkImage *Image,
 
     for (Slot = 1; Rc == 0 && Slot < BOXASM_SLOT_COUNT; Slot++)
         Rc = BoxAsmAppendName(Names, Image->Sections[Slot].Name, &Layout->Names[Slot]);
+    if (Rc == 0 && Trailer->Recipe != 0)
+        Rc = BoxAsmAppendName(Names, ".boxos.recipe", &Layout->Names[Trailer->Recipe]);
     if (Rc == 0 && Trailer->Symtab != 0)
         Rc = BoxAsmAppendName(Names, ".symtab", &Layout->Names[Trailer->Symtab]);
     if (Rc == 0 && Trailer->Strtab != 0)
@@ -117,11 +121,20 @@ static int BoxAsmWriteWritable(BoxAsmLinkImage *Image, BoxAsmBuffer *File,
     return 0;
 }
 
-static int BoxAsmWriteTrailer(BoxAsmLinkImage *Image, BoxAsmBuffer *File,
-                              const BoxAsmBuffer *SectionNames,
+/* After both segments, where no segment maps it: the Recipe, then the
+ * symbols and the section names. */
+static int BoxAsmWriteTrailer(BoxAsmLinkImage *Image, const BoxAsmBlob *Recipe,
+                              BoxAsmBuffer *File, const BoxAsmBuffer *SectionNames,
                               BoxAsmFileLayout *Layout)
 {
-    int Rc = BoxAsmBufferAlign(File, 8u);
+    int Rc = 0;
+
+    if (Recipe) {
+        Layout->RecipeOffset = File->Size;
+        Rc = BoxAsmBufferAppend(File, Recipe->Data, Recipe->Size);
+    }
+    if (Rc == 0)
+        Rc = BoxAsmBufferAlign(File, 8u);
 
     if (Rc == 0 && Image->Symbols.Size != 0) {
         Layout->SymtabOffset = File->Size;
@@ -144,7 +157,7 @@ static int BoxAsmWriteTrailer(BoxAsmLinkImage *Image, BoxAsmBuffer *File,
 
 static int BoxAsmAppendSectionHeaders(const BoxAsmLinkImage *Image,
                                       const BoxAsmTrailer *Trailer,
-                                      const BoxAsmFileLayout *Layout,
+                                      const BoxAsmFileLayout *Layout, uint64_t RecipeSize,
                                       uint64_t SectionNamesSize, BoxAsmBuffer *File)
 {
     BoxAsmElfSectionHeader Header;
@@ -159,6 +172,13 @@ static int BoxAsmAppendSectionHeaders(const BoxAsmLinkImage *Image,
         Header = (BoxAsmElfSectionHeader){
             Layout->Names[Slot], Section->Type, Section->Flags, Section->Address,
             Section->FileOffset, Section->Size, 0, 0, Section->Align, 0
+        };
+        Rc = BoxAsmBufferAppend(File, &Header, sizeof(Header));
+    }
+    if (Rc == 0 && Trailer->Recipe != 0) {
+        Header = (BoxAsmElfSectionHeader){
+            Layout->Names[Trailer->Recipe], BOXASM_SHT_PROGBITS, 0, 0,
+            Layout->RecipeOffset, RecipeSize, 0, 0, 1, 0
         };
         Rc = BoxAsmBufferAppend(File, &Header, sizeof(Header));
     }
@@ -242,7 +262,7 @@ static void BoxAsmWriteFileHeaders(const BoxAsmLinkImage *Image,
 
 /* The image as the BoxOS loader takes it: ELF header and program headers in
  * the first page, two W^X PT_LOAD segments, PT_TLS when there is a TLS block,
- * then the section names and headers. */
+ * then the Recipe when there is one, the section names and headers. */
 int BoxAsmWriteOutput(BoxAsmLinker *Link, BoxAsmBlob *Out)
 {
     BoxAsmLinkImage *Image = &Link->Image;
@@ -256,6 +276,8 @@ int BoxAsmWriteOutput(BoxAsmLinker *Link, BoxAsmBlob *Out)
     memset(&Layout, 0, sizeof(Layout));
     memset(&Trailer, 0, sizeof(Trailer));
     Trailer.Count = BOXASM_SLOT_COUNT;
+    if (Link->Recipe)
+        Trailer.Recipe = Trailer.Count++;
     if (Image->Symbols.Size != 0) {
         Trailer.Symtab = Trailer.Count++;
         Trailer.Strtab = Trailer.Count++;
@@ -271,9 +293,10 @@ int BoxAsmWriteOutput(BoxAsmLinker *Link, BoxAsmBlob *Out)
     if (Rc == 0)
         Rc = BoxAsmWriteWritable(Image, &File, &Layout);
     if (Rc == 0)
-        Rc = BoxAsmWriteTrailer(Image, &File, &SectionNames, &Layout);
+        Rc = BoxAsmWriteTrailer(Image, Link->Recipe, &File, &SectionNames, &Layout);
     if (Rc == 0)
         Rc = BoxAsmAppendSectionHeaders(Image, &Trailer, &Layout,
+                                        Link->Recipe ? Link->Recipe->Size : 0,
                                         SectionNames.Size, &File);
     if (Rc == 0) {
         BoxAsmWriteFileHeaders(Image, &Trailer, &Layout, ProgramCount, &File);

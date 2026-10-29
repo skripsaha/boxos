@@ -22,7 +22,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 FLAGS="-std=gnu11 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-builtin -I$LIB/include -Isrc/include -Dfread=StandRead -DFileMetadataRead=StandMetadata -DFileMetadataRelease=StandMetadataRelease"
 
-SOURCES="form form_line form_records form_luggage form_fill form_fill_assign"
+SOURCES="form image_section form_line form_records form_luggage form_fill form_fill_assign"
 objects=""
 for name in $SOURCES; do
     $CC_HOST $FLAGS -c "$LIB/src/$name.c" -o "$WORK/$name.o" > "$WORK/cc.log" 2>&1 ||

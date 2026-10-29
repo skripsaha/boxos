@@ -83,6 +83,7 @@ typedef struct {
     BoxAsmObjectList Objects;
     BoxAsmGlobalMap  Globals;
     BoxAsmLinkImage  Image;
+    const BoxAsmBlob *Recipe;          /* written as .boxos.recipe; NULL for none */
     const char      *ArchiveName;
     char            *Error;
     size_t           ErrorCapacity;

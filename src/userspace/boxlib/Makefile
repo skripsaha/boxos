@@ -54,6 +54,7 @@ SRCS = src/core/notify.c \
        src/use.c \
        src/luggage.c \
        src/form.c \
+       src/image_section.c \
        src/form_line.c \
        src/form_records.c \
        src/form_luggage.c \
@@ -61,6 +62,9 @@ SRCS = src/core/notify.c \
        src/form_fill_assign.c \
        src/form_program.c \
        src/form_souvenir.c \
+       src/recipe.c \
+       src/recipe_check.c \
+       src/sha256.c \
        src/system.c \
        src/ipc.c \
        src/time.c \

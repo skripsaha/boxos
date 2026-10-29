@@ -283,6 +283,60 @@ EOF
     else fail "form_symbols_$form" "$got"; fi
 done
 
+# ---- the Recipe: what a program was made from --------------------------------
+
+# The same program linked with a Recipe and without: the section carries the
+# Recipe's bytes exactly, after both segments and mapped by none, and every
+# byte the loader loads — the segments, the entry, the loadable sections —
+# is the same in both.
+printf 'recipe 1\nby assemble\ncontext demo\nfrom #41 %s planets.asm\n' \
+    ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad > "$WORK/recipe.txt"
+if "$STAND" link "$ENTRY" "$WORK/hello.o" "$ARCHIVE" "$WORK/plain.elf" 2> "$WORK/link.err" &&
+   "$STAND" link "$ENTRY" "$WORK/hello.o" "$ARCHIVE" "$WORK/recipe.elf" "recipe=$WORK/recipe.txt" \
+       2>> "$WORK/link.err"; then
+    x86_64-elf-objcopy --dump-section .boxos.recipe="$WORK/recipe.got" "$WORK/recipe.elf" "$WORK/dumped.elf" \
+        2>/dev/null
+    if cmp -s "$WORK/recipe.got" "$WORK/recipe.txt"; then ok recipe_section
+    else fail recipe_section "$(cmp "$WORK/recipe.got" "$WORK/recipe.txt" 2>&1)"; fi
+
+    x86_64-elf-objcopy -O binary "$WORK/plain.elf" "$WORK/plain.bin" &&
+        x86_64-elf-objcopy -O binary "$WORK/recipe.elf" "$WORK/recipe.bin"
+    if cmp -s "$WORK/plain.bin" "$WORK/recipe.bin" &&
+       [ "$(segments "$WORK/plain.elf")" = "$(segments "$WORK/recipe.elf")" ] &&
+       [ "$(entry "$WORK/plain.elf")" = "$(entry "$WORK/recipe.elf")" ]; then
+        ok recipe_loads_nothing
+    else
+        fail recipe_loads_nothing "the loaded image differs with a Recipe"
+    fi
+
+    placed=$(python3 - "$WORK/recipe.elf" <<'EOF'
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+phoff, shoff = struct.unpack_from('<QQ', d, 0x20)
+phcount, = struct.unpack_from('<H', d, 0x38)
+count, names = struct.unpack_from('<HH', d, 0x3c)
+ends = [o + fs for (t, f, o, v, p, fs, ms, a) in
+        (struct.unpack_from('<IIQQQQQQ', d, phoff + 56 * i) for i in range(phcount)) if t == 1]
+sec = [struct.unpack_from('<IIQQQQIIQQ', d, shoff + 64 * i) for i in range(count)]
+def name(s):
+    at = sec[names][4] + s[0]
+    return d[at:d.index(b'\0', at)].decode()
+r = [s for s in sec if name(s) == '.boxos.recipe'][0]
+print(r[1], r[2], r[3], r[4] >= max(ends), r[8])
+EOF
+)
+    if [ "$placed" = "1 0 0 True 1" ]; then ok recipe_after_segments
+    else fail recipe_after_segments "type flags address after-segments align: $placed"; fi
+
+    if x86_64-elf-readelf -aW "$WORK/recipe.elf" 2>&1 > /dev/null | grep -q .; then
+        fail recipe_readelf "$(x86_64-elf-readelf -aW "$WORK/recipe.elf" 2>&1 > /dev/null | head -3)"
+    else
+        ok recipe_readelf
+    fi
+else
+    fail recipe_link "$(cat "$WORK/link.err")"
+fi
+
 # ---- what the assembler says about a wrong program ---------------------------
 
 # The first line of the refusal — file, line, column and why — word for word.

@@ -38,6 +38,16 @@ keeps them as `them`/`it`: `files draft` then `tag them done`;
 for it (the `souvenir` record in the Luggage): the shell asks when it will
 keep it, and a program started by anyone else gives back to no one.
 
+**Recipe.** A program made here remembers what it was made from: `assemble`
+writes into the image every file it read (by id, with its SHA-256), the Use
+Context it looked in, and its own name. `info planets.elf` shows them and
+which changed since. Started from the shell — by name or with `run` — a
+program whose files changed is made again first ("planets: planets.asm
+changed since it was made; making it again"), in the context it was made in;
+when that fails nothing starts. A file that is gone makes nothing: the program
+starts as it was made, and the person is told. `assemble planets.elf` makes
+a program again by its Recipe without starting it.
+
 **Asking.** Only when it must, before the program starts: a name that is
 more than one file ("which one? (a number)"), a required field left empty
 ("tag: the tags they get?", with "there is no helo.asm here" for a typo),

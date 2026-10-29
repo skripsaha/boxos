@@ -1,15 +1,25 @@
 /* The volume as `assemble` reads it: the files a source names, found by name
  * and tags on the whole volume — the toolchain says where to look, and the
  * Use Context it looks in is taken once, when the build begins — and their
- * bytes. */
+ * bytes. Every file it hands the build is kept, with the digest of the very
+ * bytes handed, for the program's Recipe. */
 
 #include "assemble.h"
 
 #include "box/error.h"
 #include "box/file.h"
 #include "box/memory.h"
+#include "box/recipe.h"
 #include "box/string.h"
 #include "box/use.h"
+
+/* The toolchain sees Files alone; the rest is what the build has read. */
+typedef struct {
+    BoxAsmFiles    Files;
+    BoxRecipeFile *Read;
+    size_t         ReadCount;
+    size_t         ReadCapacity;
+} AssembleVolumeState;
 
 /* The name is a tag: the volume stamps every file with the stem of its name,
  * up to the last dot, so the index answers who is called so in one ask,
@@ -77,6 +87,36 @@ static int VolumeTags(BoxAsmFiles *Files, uint64_t Id, char **Out)
     return *Out ? 0 : -ERR_NO_MEMORY;
 }
 
+/* The file kept for the Recipe the first time the build reads it: the
+ * digest of the bytes it was handed, and the name it had. */
+static int VolumeKeep(AssembleVolumeState *State, uint64_t Id, const char *Name,
+                      const char *Bytes, size_t Size)
+{
+    BoxRecipeFile *File;
+    size_t Index;
+
+    for (Index = 0; Index < State->ReadCount; Index++) {
+        if (State->Read[Index].Id == Id)
+            return 0;
+    }
+    if (State->ReadCount == State->ReadCapacity) {
+        size_t Grown = State->ReadCapacity ? State->ReadCapacity * 2u : 8u;
+        BoxRecipeFile *Bigger = (BoxRecipeFile *)realloc(State->Read, Grown * sizeof(BoxRecipeFile));
+
+        if (!Bigger)
+            return -ERR_NO_MEMORY;
+        State->Read = Bigger;
+        State->ReadCapacity = Grown;
+    }
+    File = &State->Read[State->ReadCount];
+    File->Id = Id;
+    sha256(Bytes, Size, File->Digest);
+    if (!(File->Name = BoxAsmCopyText(Name, strlen(Name))))
+        return -ERR_NO_MEMORY;
+    State->ReadCount++;
+    return 0;
+}
+
 /* A short read is the volume answering with what it had in hand: asked
  * again until the whole size is here. */
 static int VolumeRead(BoxAsmFiles *Files, uint64_t Id, size_t Limit, char **Out, size_t *Size)
@@ -87,37 +127,60 @@ static int VolumeRead(BoxAsmFiles *Files, uint64_t Id, size_t Limit, char **Out,
     char *Bytes;
     int Rc;
 
-    (void)Files;
     memset(&Metadata, 0, sizeof(Metadata));
     if ((Rc = FileMetadataRead(Id, &Metadata)) != 0)
         return Rc;
     Length = Metadata.Size;
-    FileMetadataRelease(&Metadata);
-    if (Length > Limit || Length > SIZE_MAX - 1u)
+    if (Length > Limit || Length > SIZE_MAX - 1u) {
+        FileMetadataRelease(&Metadata);
         return -ERR_OUT_OF_RANGE;
-    if (!(Bytes = (char *)malloc((size_t)Length + 1u)))
+    }
+    if (!(Bytes = (char *)malloc((size_t)Length + 1u))) {
+        FileMetadataRelease(&Metadata);
         return -ERR_NO_MEMORY;
+    }
     while (Offset < Length) {
         uint64_t Remaining = Length - Offset;
         int64_t Got = fread(Id, Offset, Bytes + Offset, Remaining > 65536u ? 65536u : (size_t)Remaining);
 
         if (Got <= 0 || (uint64_t)Got > Remaining) {
+            FileMetadataRelease(&Metadata);
             free(Bytes);
             return Got < 0 ? (int)Got : -ERR_IO;
         }
         Offset += (uint64_t)Got;
     }
     Bytes[Length] = '\0';
+    Rc = VolumeKeep((AssembleVolumeState *)Files, Id,
+                    Metadata.Filename ? Metadata.Filename : "", Bytes, (size_t)Length);
+    FileMetadataRelease(&Metadata);
+    if (Rc != 0) {
+        free(Bytes);
+        return Rc;
+    }
     *Out = Bytes;
     *Size = (size_t)Length;
     return 0;
 }
 
-static BoxAsmFiles AssembleVolumeFiles = { VolumeFind, VolumeTags, VolumeRead };
+static AssembleVolumeState AssembleVolumeFiles = { { VolumeFind, VolumeTags, VolumeRead }, NULL, 0, 0 };
 
 BoxAsmFiles *AssembleVolume(void)
 {
-    return &AssembleVolumeFiles;
+    return &AssembleVolumeFiles.Files;
+}
+
+int AssembleRecipe(const char *Context, char **Text, size_t *Length)
+{
+    BoxRecipe Recipe;
+
+    memset(&Recipe, 0, sizeof(Recipe));
+    Recipe.By = (char *)"assemble";
+    Recipe.Context = (char *)Context;
+    Recipe.Files = AssembleVolumeFiles.Read;
+    Recipe.FileCount = AssembleVolumeFiles.ReadCount;
+    Recipe.Declared = 1;
+    return recipe_text(&Recipe, Text, Length);
 }
 
 int AssembleTakeContext(char **Out)

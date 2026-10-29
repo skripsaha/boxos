@@ -17,9 +17,11 @@
 # `make` lays down (logcheck's mkfs runs it over the one `make VOLUME_FORMAT=v2`
 # lays, whose book mkfs bound), boxasm, the in-BoxOS assembler and linker
 # held to GNU ld and tools/nameplate, and format, BoxLib's printf conversions
-# held to the host's C library and to exact arithmetic, and form, BoxLib's Form
+# held to the host's C library and to exact arithmetic, form, BoxLib's Form
 # — its text, its image, the sorting of a line into fields, the Luggage — held
-# to exact outcomes. The list is here, in the tree it judges, and
+# to exact outcomes, and recipe, BoxLib's Recipe and its SHA-256 — the text,
+# the image, the check of a program's files — held to exact outcomes and to
+# the host's hashlib. The list is here, in the tree it judges, and
 # not beside a session: a list kept out of the tree can lose a gate without a
 # diff saying so.
 #
@@ -48,6 +50,7 @@ gate_names() {
     for g in $GATES_LOGCHECK; do echo "$g"; done
     for g in $GATES_POWERCUT; do echo "pc_$g"; done
     echo framerefuse; echo stand; echo volread_selftest; echo boxasm; echo format; echo form
+    echo recipe
 }
 
 # The command a gate is: its harness and its name there.
@@ -58,6 +61,7 @@ gate_run() {
         boxasm)           tools/boxasm_stand.sh ;;
         format)           tools/format_stand.sh ;;
         form)             tools/form_stand.sh ;;
+        recipe)           tools/recipe_stand.sh ;;
         *)                tools/logcheck.sh "$1" ;;
     esac
 }
@@ -101,7 +105,7 @@ for name in $WANTED; do
     # The harness's own closing words: its count, and the caveats and harness
     # failures it owns to — each cut at its explanation.
     verdict=$(sed $'s/\x1b\\[[0-9;]*m//g' "$OUT/$name.out" \
-              | grep -E '^(logcheck|powercut|boxasm|format|form): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases' \
+              | grep -E '^(logcheck|powercut|boxasm|format|form|recipe): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases' \
               | sed 's/ — .*//' | paste -sd '|' - | sed 's/|/; /g')
     line="$name rc=$rc $(( $(date +%s) - t0 ))s ${verdict:-(no verdict line)}"
     echo "$line" | tee -a "$OUT/SUMMARY"

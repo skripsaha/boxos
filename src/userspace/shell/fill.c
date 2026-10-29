@@ -10,6 +10,7 @@
 
 #include "fill.h"
 #include "ask.h"
+#include "remake.h"
 #include "them.h"
 #include "box/form.h"
 #include "box/file.h"
@@ -18,6 +19,7 @@
 #include "box/memory.h"
 #include "box/error.h"
 #include "box/debug.h"
+#include "box/string.h"
 
 /* The command was stopped and the person told why. */
 #define FILL_STOPPED  1
@@ -118,57 +120,67 @@ static int ArrowScreen(BoxFormFiller *filler, const char *who, file_id_t *screen
     return 0;
 }
 
+/* How a started program ended and what it gave back. */
+typedef struct {
+    file_id_t  Screen;         /* the arrow's file, 0 for none */
+    bool       Asked;          /* its Souvenir was asked for */
+    bool       Ended;          /* its end was seen: ExitCode is its own */
+    int32_t    ExitCode;
+    bool       Collected;      /* what it queued was read off */
+    file_id_t *Given;          /* its Souvenir, heap; NULL for none */
+    size_t     Count;
+} FillEnd;
+
 /* The child's end is waited for as a STATE (process_gone), not an event: the
  * kernel answers from the child's own record, so there is no window between
- * asking and being registered and nothing that can be dropped. */
-static void WaitGone(const char *who, uint32_t pid, uint32_t generation)
+ * asking and being registered and nothing that can be dropped. What it
+ * queued is read off whether it was asked for or not, so no stale gift is
+ * met later. */
+static void WaitGone(const char *who, uint32_t pid, uint32_t generation, FillEnd *end)
 {
-    int32_t exit_code = 0;
-    int     rc = process_gone(pid, generation, &exit_code);
+    int rc = process_gone(pid, generation, &end->ExitCode);
+    end->Ended = rc == 0;
     if (rc != 0)
         kdbg_print("[shell] '%s' (pid %u gen %u): process.gone refused - rc=%d",
                    who, pid, generation, rc);
+    end->Collected = souvenir_collect(pid, &end->Given, &end->Count) == 0;
 }
 
-/* What the command gave becomes `them`. When its screen went into a file
- * through the arrow, that file is what it gave; otherwise the Souvenir the
- * shell asked for. Whatever the program queued is read off either way, so no
- * stale gift is met later. */
-static void KeepGift(bool asked, uint32_t pid, file_id_t screen)
+/* What the command gave becomes `them`: the arrow's file when its screen
+ * went into one, otherwise the Souvenir the shell asked for. */
+static void KeepGift(FillEnd *end)
 {
-    file_id_t *given = NULL;
-    size_t     count = 0;
-    bool       collected = souvenir_collect(pid, &given, &count) == 0;
-
-    if (screen != 0) {
-        free(given);
-        given = malloc(sizeof(file_id_t));
-        if (!given) return;
-        given[0] = screen;
-        ThemKeep(given, 1);
-        return;
+    if (end->Screen != 0) {
+        file_id_t *screen = malloc(sizeof(file_id_t));
+        if (screen) {
+            screen[0] = end->Screen;
+            ThemKeep(screen, 1);
+        }
+    } else if (end->Collected && end->Asked) {
+        ThemKeep(end->Given, end->Count);
+        end->Given = NULL;
     }
-    if (collected && asked) {
-        ThemKeep(given, count);
-        return;
-    }
-    free(given);
+    free(end->Given);
+    end->Given = NULL;
 }
 
-static int Launch(BoxFormFiller *filler, const BoxForm *form, file_id_t program, const char *who)
+/* Start the program with its Form filled and wait until it is gone: 0 with
+ * *end filled, FILL_STOPPED (said), or a negative -error_t. */
+static int Launch(BoxFormFiller *filler, const BoxForm *form, file_id_t program, const char *who,
+                  FillEnd *end)
 {
-    file_id_t screen = 0;
-    int       rc = ArrowScreen(filler, who, &screen);
+    memset(end, 0, sizeof(*end));
+    int rc = ArrowScreen(filler, who, &end->Screen);
     if (rc == 0) rc = form_fill_program(filler, who);
 
-    /* The Souvenir is asked for only when it becomes `them`: the Form gives
-     * things and the arrow did not make the screen a file. */
-    bool souvenir = screen == 0 && form->Gives == BOX_FORM_GIVES_THINGS;
-    if (rc == 0 && souvenir) rc = form_fill_souvenir(filler);
+    /* The Souvenir is asked for only when it is kept: the Form gives things
+     * and the arrow did not make the screen a file. */
+    end->Asked = end->Screen == 0 && form->Gives == BOX_FORM_GIVES_THINGS;
+    if (rc == 0 && end->Asked) rc = form_fill_souvenir(filler);
 
     char  *bytes = NULL;
     size_t length = 0;
-    if (rc == 0) rc = form_fill_luggage(filler, screen, &bytes, &length);
+    if (rc == 0) rc = form_fill_luggage(filler, end->Screen, &bytes, &length);
     if (rc != 0) return rc;
 
     uint32_t generation = 0;
@@ -179,33 +191,78 @@ static int Launch(BoxFormFiller *filler, const BoxForm *form, file_id_t program,
         return FILL_STOPPED;
     }
 
-    WaitGone(who, (uint32_t)pid, generation);
-    KeepGift(souvenir, (uint32_t)pid, screen);
+    WaitGone(who, (uint32_t)pid, generation, end);
     return 0;
+}
+
+/* The program's Form, read from its file: 0, or FILL_STOPPED (said). */
+static int ReadForm(file_id_t program, const char *who, BoxForm *form)
+{
+    int rc = form_of_file(program, form);
+    if (rc == 0) return 0;
+    /* The program's own file cannot be read — its medium gone, most often:
+     * it is there, and it would not start, which is what the person is told
+     * when the start itself is refused. */
+    SayFailed(who, "is there and would not start", rc);
+    return FILL_STOPPED;
 }
 
 void FillAndRun(file_id_t program, const char *who, const char *line)
 {
+    if (!RemakeWhenChanged(&program, who)) return;
+
     BoxForm form;
-    int     rc = form_of_file(program, &form);
-    if (rc != 0) {
-        /* The program's own file cannot be read — its medium gone, most often:
-         * it is there, and it would not start, which is what the person is
-         * told when the start itself is refused. */
-        SayFailed(who, "is there and would not start", rc);
-        return;
-    }
+    if (ReadForm(program, who, &form) != 0) return;
 
     BoxFormLookup  lookup;
     BoxFormFiller *filler = NULL;
+    FillEnd        end;
     form_lookup_volume(&lookup);
     ThemShow(&lookup);
 
-    rc = form_fill_begin(&form, line, &lookup, &filler);
+    int rc = form_fill_begin(&form, line, &lookup, &filler);
     if (rc == 0) rc = FillLine(filler, &form, who);
-    if (rc == 0) rc = Launch(filler, &form, program, who);
+    if (rc == 0) rc = Launch(filler, &form, program, who, &end);
+    if (rc == 0) KeepGift(&end);
     if (rc < 0) SayFailed(who, "could not be started", rc);
 
     if (filler) form_fill_end(filler);
     form_release(&form);
+}
+
+bool FillAndRunOn(file_id_t program, const char *who, file_id_t thing, file_id_t *given)
+{
+    BoxForm form;
+    *given = 0;
+    if (ReadForm(program, who, &form) != 0) return false;
+
+    /* `it` is the one file handed over: the lookup knows it and no other
+     * `it`, so the person's own `them` is neither read nor changed. */
+    BoxFormLookup   lookup;
+    BoxFormFiller  *filler = NULL;
+    BoxFormQuestion question;
+    FillEnd         end;
+    form_lookup_volume(&lookup);
+    lookup.Them      = &thing;
+    lookup.ThemCount = 1;
+    lookup.ThemKnown = true;
+
+    int rc = form_fill_begin(&form, "it", &lookup, &filler);
+    if (rc == 0) rc = form_fill_step(filler, &question);
+    if (rc == 0 && question.Step == BOX_FORM_REFUSED) {
+        printf("%s: %s\n", who, question.Word);
+        rc = FILL_STOPPED;
+    } else if (rc == 0 && question.Step != BOX_FORM_DONE) {
+        printf("%s: it would have to ask what it takes, and no one is asked here\n", who);
+        rc = FILL_STOPPED;
+    }
+    if (rc == 0) rc = Launch(filler, &form, program, who, &end);
+    if (rc < 0) SayFailed(who, "could not be started", rc);
+
+    bool ended_well = rc == 0 && end.Ended && end.ExitCode == 0;
+    if (ended_well && end.Asked && end.Collected && end.Count > 0) *given = end.Given[0];
+    if (rc == 0) free(end.Given);
+    if (filler) form_fill_end(filler);
+    form_release(&form);
+    return ended_well;
 }
