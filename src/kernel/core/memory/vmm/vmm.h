@@ -726,6 +726,14 @@ static inline bool vmm_is_page_aligned(uintptr_t addr) {
     return (addr & VMM_PAGE_OFFSET_MASK) == 0;
 }
 
+/* Whether a mapping at virt_addr may carry USER: only in the user half. The
+ * kernel's half is shared by every cabin, so a program's page there would be
+ * every cabin's — and a page the kernel later fills with its own objects,
+ * written by a program. Every function that writes a leaf holds to it. */
+static inline bool vmm_user_flag_fits(uintptr_t virt_addr, uint64_t flags) {
+    return !(flags & VMM_FLAG_USER) || virt_addr < CABIN_USER_VA_CANONICAL_END;
+}
+
 static inline uintptr_t vmm_page_align_down(uintptr_t addr) {
     return addr & VMM_PAGE_MASK;
 }

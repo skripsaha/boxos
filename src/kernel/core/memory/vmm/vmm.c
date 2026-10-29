@@ -2735,6 +2735,11 @@ vmm_map_result_t vmm_map_page_with_keyid(vmm_context_t *ctx, uintptr_t virt_addr
         return result;
     }
 
+    if (!vmm_user_flag_fits(virt_addr, flags)) {
+        result.error_msg = "A program's page above the user half";
+        return result;
+    }
+
     spin_lock(&ctx->lock);
 
     pte_t *pte = vmm_get_or_create_pte(ctx, virt_addr);
@@ -2792,6 +2797,12 @@ vmm_map_result_t vmm_map_page(vmm_context_t *ctx, uintptr_t virt_addr,
     if (!vmm_is_page_aligned(virt_addr) || !vmm_is_page_aligned(phys_addr))
     {
         result.error_msg = "Address not page-aligned";
+        return result;
+    }
+
+    if (!vmm_user_flag_fits(virt_addr, flags))
+    {
+        result.error_msg = "A program's page above the user half";
         return result;
     }
 
@@ -5209,6 +5220,7 @@ bool vmm_map_huge_2m_with_keyid(vmm_context_t *ctx, uintptr_t virt_addr,
      * above the phys-address bits and don't affect 2 MiB alignment. */
     uintptr_t phys_strip = phys_addr_with_keyid & vmm_pte_addr_mask;
     if (phys_strip & VMM_LARGE_PAGE_2M_MASK) return false;
+    if (!vmm_user_flag_fits(virt_addr, flags)) return false;
 
     spin_lock(&ctx->lock);
 
@@ -5254,6 +5266,7 @@ bool vmm_map_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr,
     if (!ctx) return false;
     if (virt_addr & VMM_LARGE_PAGE_2M_MASK) return false;
     if (phys_addr & VMM_LARGE_PAGE_2M_MASK) return false;
+    if (!vmm_user_flag_fits(virt_addr, flags)) return false;
 
     spin_lock(&ctx->lock);
 
@@ -5856,6 +5869,12 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
     debug_printf("[VMM]   present=%d write=%d user=%d reserved=%d instr=%d\n",
                  present, write, user, reserved, instr_fetch);
 
+    /* A program's fault is about the program's half of the address space
+     * alone. Nothing above it is ever mapped for a program, whatever is or is
+     * not there: the kernel heap's demand paging below is the kernel's. */
+    if (user && fault_addr >= CABIN_USER_VA_CANONICAL_END)
+        return -1;
+
     /* Phase 2H — PF.PK decode. Bit 5 of the error code signals a
      * Protection-Key violation (Intel SDM Vol 3A §4.7). We publish a
      * Touch event with the PTE's PKEY field + current PKRU so
@@ -6051,10 +6070,6 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
         }
 
         uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
-        if (user)
-        {
-            flags |= VMM_FLAG_USER;
-        }
 
         vmm_map_result_t result = vmm_map_page(ctx, page_addr, (uintptr_t)phys_page, flags);
         if (!result.success)
