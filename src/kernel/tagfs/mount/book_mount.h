@@ -207,6 +207,7 @@ typedef struct {
     bool           on_head;      /* stood on the Deed at its head — not on its far copy alone */
     uint64_t       reach;        /* past the farthest block an owner but the far Deed names (census) */
     uint32_t       atom;         /* the medium's atom of a write, bytes (§1.5) */
+    uint32_t       ribbon_atom;  /* the ribbon's: a flash page on a removable medium (§16.6 п.2) */
     SpineSlot*     slots;        /* the slots that hold, newest first */
     uint32_t       nslots;
     SpineSlot*     stood;        /* the one the mount stands on */

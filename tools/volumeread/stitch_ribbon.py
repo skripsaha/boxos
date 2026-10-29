@@ -9,6 +9,10 @@ from .ondisk import SECTORS_PER_BLOCK
 from . import tally
 from .stitch import FindUnit, Lies, MEDIUM_LIED, Peek, Place, Unit
 
+# The room the kernel's line keeps for the seqs of what settled is lost
+# (ribbon_scan.c RibbonLost, `lost`): the runs past it said as ", ...".
+LOST_ROOM = 96
+
 # ---------------------------------------------------------------------------
 # The ribbon, walked from a slot (§4.5 п.5, pass 1)
 # ---------------------------------------------------------------------------
@@ -321,21 +325,59 @@ class Ribbon:
                      "seq %u of the ribbon does, and lies past the ribbon's end — seq %s, settled, are not "
                      "taken (§16.3 п.10)" % (n, r.seq, next(u.seq for u in self.stitches if u.seq > n), seqs))
 
+    def _LostSeqs(self, lost):
+        """(n, runs): what settled and is lost (§3.9, C17, C18), at the most —
+        every seq past the chain's end up to the largest a member of the
+        branch names lost (`lost`), each begun, and settled, before the unit
+        naming it, but those the medium holds a sound stitch of past the end
+        (found, not applied) and a Tally's or a slot's the Spine names. No
+        reader can make the count exact: the ribbon's counter gives seqs that
+        never settle as a stitch, and nothing the medium holds tells one from
+        a stitch lost — a Tally's or a slot's whose slot did not land or was
+        written over, a cycle's refused before a sector of it was written, an
+        attempt's the medium refused, whose retry took a new seq (M-6) — so
+        the line says "at most" (ribbon_scan.c RibbonLostSeqs, one rule — its
+        runs "a..b" cut where the kernel's line has no room, and ended where
+        the next would pass the largest named)."""
+        slots = [tally.SlotRead(self.g, i) for i in range(self.g.frame["spine_slots"])]
+        out = {u.seq for u in self.past if u.Sound()}
+        out |= {x for sl in slots if sl.state == "valid" for x in (sl.seq, sl.tally_seq)}
+        top, lo, n, runs = max(lost), self.seq + 1, 0, ""
+        while top > self.seq and lo <= top:
+            hi = min([x for x in out if lo <= x <= top] + [top + 1])
+            sep = ", " if runs else ""
+            if hi > lo and len(runs) + 56 < LOST_ROOM:
+                runs += "%s%u..%u" % (sep, lo, hi - 1) if hi - lo > 1 else "%s%u" % (sep, lo)
+            elif hi > lo and len(runs) + 8 < LOST_ROOM and runs and not runs.endswith("."):
+                runs += ", ..."
+            n += hi - lo
+            if hi >= top:
+                break
+            lo = hi + 1
+        return n, runs
+
     def _Lost(self, r, members, lost, seqs):
         """A branch some unit of which names one that settled — for it
-        began only after that one's flush — and is not on the medium whole."""
+        began only after that one's flush — and is not on the medium whole.
+        Either line counts what settled is lost, at the most, with its seqs,
+        and says the largest seq found past the end, which no seq given next
+        repeats (§3.9, C17)."""
         absent = [m for m in lost if m not in {w.seq for w in self.past}]
+        n, runs = self._LostSeqs(lost)
+        top = max(w.seq for w in self.past)
         if r.Sound() and r.Names() in absent:
             self.Say("DEAD_BRANCH", "damage", "the lie is proven: stitch seq %u lies past the end of the "
                      "ribbon and names seq %u, which the medium does not hold — a flush that lied, the "
-                     "cycles after it written over a hole (FAST'13, H-2); seq %s are not applied — "
-                     "MEDIUM_LIED" % (r.seq, r.Names(), seqs))
+                     "cycles after it written over a hole (FAST'13, H-2); what settled is lost: at most %u "
+                     "stitch(es), seq %s; seq %s are not applied, and no seq up to %u, the largest found, is given "
+                     "again — MEDIUM_LIED" % (r.seq, r.Names(), n, runs, seqs, top))
             return
         namer = min((w for w in members if w.Names() in lost), key=lambda w: w.seq)
-        self.Say("DEAD_BRANCH", "damage", "what settled is lost: seq %s past the end of the ribbon — stitch "
-                 "seq %u names %u, begun only after %u had settled, and %u %s (H-3) — MEDIUM_LIED"
-                 % (seqs, namer.seq, namer.Names(), namer.Names(), namer.Names(),
-                    "is not on the medium" if namer.Names() in absent else "does not read whole"))
+        self.Say("DEAD_BRANCH", "damage", "what settled is lost: at most %u stitch(es), seq %s — stitch seq %u "
+                 "names %u, begun only after %u had settled, and %u %s (H-3); seq %s past the end of the ribbon are "
+                 "not applied, and no seq up to %u, the largest found, is given again — MEDIUM_LIED"
+                 % (n, runs, namer.seq, namer.Names(), namer.Names(), namer.Names(),
+                    "is not on the medium" if namer.Names() in absent else "does not read whole", seqs, top))
 
     def _Torn(self, t):
         """The stitch right after the end, torn, and nothing past it names

@@ -29,6 +29,7 @@ into ground_owners.py: BOOK_OWNERS, those of format v2.
 import hashlib
 import json
 import os
+import re
 import struct
 
 from . import bookread, stitch, tally
@@ -96,6 +97,19 @@ def KernelMendedSaid(t):
     for node, _k, _why in t.mended:
         failed[id(node)] = failed.get(id(node), 0) + 1
     return sum(min(n, KERNEL_COPIES_SAID) for n in failed.values())
+
+
+# What settled is lost, counted at the most, and the largest seq found past
+# the end, as the ribbon's line says them (stitch_ribbon.py _Lost, ribbon_scan.c
+# RibbonLost; §3.9, C17): the census holds the kernel's line to both numbers.
+LOST_SAID = re.compile(r"what settled is lost: at most (\d+) stitch\(es\).*no seq up to (\d+), the largest found")
+
+
+def KernelLostSaid(said):
+    """[[stitches lost, the largest seq found]] of each line of the ribbon
+    that counts what settled is lost, in the order it is said."""
+    return [[int(x) for x in m.groups()] for code, _s, text in said if code == "DEAD_BRANCH"
+            for m in [LOST_SAID.search(text)] if m]
 
 
 def MirrorRuns(runs):
@@ -180,7 +194,7 @@ def KernelBook(g, m, held, free, fallow):
             "next_bookmark": m.counts["next_bookmark"], "next_seq": m.counts["next_seq"],
             "data_blocks": g.data_end - g.data_block,
             "free": None if free is None else max(0, RunsCount(free) - sum(1 for fs in m.files.values() if fs.slips)),
-            "ribbon": ribbon, "sewn": len(r.stitches),
+            "ribbon": ribbon, "lost": KernelLostSaid(m.said[m.ribbon_said:]), "sewn": len(r.stitches),
             "last": r.stitches[-1].seq if r.stitches else m.slot.stitch_seq,
             "applied": len(m.applied), "lied": r.lied, "lied_check": m.lied_check, "fallow": RunsCount(fallow),
             "clean": bool(r.stitches and r.stitches[-1].head and r.stitches[-1].head.flags & stitch.CLEAN),

@@ -168,25 +168,95 @@ static RibbonUnit* RibbonLostNamer(const RibbonWalk* w, RibbonUnit* const* m, ui
     return NULL;
 }
 
+/* The first seq from `from` to `to` no stitch of which was lost — one the
+ * medium holds a sound stitch of past the end (found, not applied), or a
+ * Tally's or a slot's the Spine names; to + 1 when none. Found among the units
+ * past the end and the slots, never seq by seq: a seq a medium names may lie
+ * far past the end. */
+static uint64_t RibbonLostNotNext(const RibbonWalk* w, uint64_t from, uint64_t to)
+{
+    uint64_t next = to + 1u;
+    for (uint32_t i = 0; i < w->npast; i++)
+        if (w->past[i]->sound && w->past[i]->seq >= from && w->past[i]->seq < next)
+            next = w->past[i]->seq;
+    for (uint32_t i = 0; i < g_book.nslots; i++) {
+        uint64_t seqs[2] = { g_book.slots[i].seq, g_book.slots[i].head.tally_seq };
+        for (uint32_t k = 0; k < 2u; k++)
+            if (seqs[k] >= from && seqs[k] < next)
+                next = seqs[k];
+    }
+    return next;
+}
+
+/*
+ * What settled and is lost (§3.9, C17, C18), at the most, into `out` as runs
+ * "a..b": every seq past the chain's end up to the largest one a member of the
+ * branch names lost — each began, and settled, before the unit naming it
+ * began, the chain's own after the end with it — but those RibbonLostNotNext
+ * steps over. How many. A count no reader can make exact: the ribbon's counter
+ * gives seqs that never settle as a stitch, and nothing the medium holds tells
+ * one from a stitch lost — a Tally's or a slot's whose slot did not land or was
+ * written over (binder.c), a cycle's refused before a sector of it was written
+ * (sewing.c StitchLay: its seq taken before RibbonRoom judges its room), an
+ * attempt's the medium refused, whose retry took a new seq (M-6) — so the line
+ * says "at most" (stitch_ribbon.py _LostSeqs, one rule). The runs end where
+ * the next would pass the largest named, never past it: a seq a medium names
+ * may be the last one the counter has.
+ */
+static uint64_t RibbonLostSeqs(const RibbonWalk* w, RibbonUnit* const* m, uint32_t nm, char* out, size_t room)
+{
+    uint64_t top = 0, n = 0;
+    size_t   at  = 0;
+    out[0] = '\0';
+    for (uint32_t i = 0; i < nm; i++) {
+        uint64_t x = 0;
+        if (RibbonUnitNames(m[i], &x) && RibbonLostNamed(w, x) && x > top)
+            top = x;
+    }
+    for (uint64_t lo = w->seq + 1u; top > w->seq && lo <= top;) {
+        uint64_t hi = RibbonLostNotNext(w, lo, top);
+        if (hi > lo && at + 56u < room)
+            at += (size_t)ksnprintf(out + at, room - at, hi - lo > 1u ? "%s%llu..%llu" : "%s%llu",
+                                    at ? ", " : "", (unsigned long long)lo, (unsigned long long)(hi - 1u));
+        else if (hi > lo && at + 8u < room && at && out[at - 1u] != '.')
+            at += (size_t)ksnprintf(out + at, room - at, ", ...");
+        n += hi - lo;
+        if (hi >= top)
+            break;
+        lo = hi + 1u;
+    }
+    return n;
+}
+
 /* A branch some unit of which (`namer`, the first) names one that settled —
  * for it began only after that one's flush — and is not on the medium whole
  * (H-3); and when its root, whole, names one the medium does not hold at all,
- * the lie is proven (FAST'13, H-2). Both lie: MEDIUM_LIED. */
-static void RibbonLost(RibbonWalk* w, const RibbonUnit* r, const RibbonUnit* namer, const char* seqs)
+ * the lie is proven (FAST'13, H-2). Both lie: MEDIUM_LIED. Either line counts
+ * what settled is lost, at the most, with its seqs (RibbonLostSeqs), and says
+ * the largest seq found past the end, which no seq given next repeats (§3.9,
+ * C17). */
+static void RibbonLost(RibbonWalk* w, const RibbonUnit* r, const RibbonUnit* namer, RibbonUnit* const* m,
+                       uint32_t nm, const char* seqs)
 {
-    uint64_t named = 0, x = 0;
+    uint64_t named = 0, x = 0, top = w->past[w->npast - 1u]->seq;
+    char     lost[96];
+    uint64_t n = RibbonLostSeqs(w, m, nm, lost, sizeof(lost));
     if (r->sound && RibbonUnitNames(r, &named) && named > w->seq && !RibbonPastOf(w, named)) {
         RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "the lie is proven: stitch seq %llu lies past the end of the ribbon "
                   "and names seq %llu, which the medium does not hold — a flush that lied, the cycles after it "
-                  "written over a hole (FAST'13, H-2); seq %s are not applied — MEDIUM_LIED",
-                  (unsigned long long)r->seq, (unsigned long long)named, seqs);
+                  "written over a hole (FAST'13, H-2); what settled is lost: at most %llu stitch(es), seq %s; seq %s "
+                  "are not applied, and no seq up to %llu, the largest found, is given again — MEDIUM_LIED",
+                  (unsigned long long)r->seq, (unsigned long long)named, (unsigned long long)n, lost, seqs,
+                  (unsigned long long)top);
         return;
     }
     RibbonUnitNames(namer, &x);
-    RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "what settled is lost: seq %s past the end of the ribbon — stitch seq %llu "
-              "names %llu, begun only after %llu had settled, and %llu %s (H-3) — MEDIUM_LIED", seqs,
-              (unsigned long long)namer->seq, (unsigned long long)x, (unsigned long long)x, (unsigned long long)x,
-              RibbonPastOf(w, x) ? "does not read whole" : "is not on the medium");
+    RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "what settled is lost: at most %llu stitch(es), seq %s — stitch seq %llu "
+              "names %llu, begun only after %llu had settled, and %llu %s (H-3); seq %s past the end of the ribbon "
+              "are not applied, and no seq up to %llu, the largest found, is given again — MEDIUM_LIED",
+              (unsigned long long)n, lost, (unsigned long long)namer->seq, (unsigned long long)x,
+              (unsigned long long)x, (unsigned long long)x, RibbonPastOf(w, x) ? "does not read whole" :
+              "is not on the medium", seqs, (unsigned long long)top);
 }
 
 /* The stitch right after the end, torn, and nothing past it naming it: a cut
@@ -277,7 +347,7 @@ static void RibbonBranch(RibbonWalk* w, RibbonUnit* r, RibbonUnit* const* m, uin
         RibbonStranger(w, r, n, sewn, clasp, seqs);
     } else if (namer) {
         w->lied = true;
-        RibbonLost(w, r, namer, seqs);
+        RibbonLost(w, r, namer, m, nm, seqs);
     } else if (tail && (!has || n == w->seq)) {
         RibbonTornSaid(w, w->torn);
     } else if (!has) {

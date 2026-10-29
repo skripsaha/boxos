@@ -281,6 +281,51 @@ def RibbonEndCases(bt):
         for s in out[1:3]:
             bt.Zero(o, s.vlbas[4], s.of - 4)
 
+    def Hole(o):
+        """C17: stitch 3 sewn, 4 and 5 never landed though their flushes were
+        answered, 6 and 7 laid over the hole — 6 naming 5."""
+        d = bt.Fresh(o, 0, 5, 8)
+        pen = bt.Pen(o)
+        for k in range(5):
+            pen.Sew([Born(bt.F + k, bt.fid + k, d[k:k + 1], b"h%u" % k)], flags=stitch.DATA_FLUSHED,
+                    write=k not in (1, 2))
+
+    def SlotBetween(o):
+        """C17: stitch 3 sewn, then a Tally at seq 4 standing on it bound in
+        slot 1 at seq 5 — both seqs the ribbon's own counter gave — and 6 and
+        7 never landed, 8 laid over the hole naming 7."""
+        g, d = bt.ground, bt.Fresh(o, 0, 4, 8)
+        pen = bt.Pen(o)
+        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"t0")], flags=stitch.DATA_FLUSHED)
+        slot = tally.SlotRead(g, 0)
+        slot.tally_seq, slot.stitch_seq, slot.stitch_clasp = 4, s3.seq, s3.clasp
+        slot.ribbon = dict(slot.ribbon, at=s3.vlbas[-1] // SECTORS_PER_BLOCK + 1)
+        o.Put(g.base + tally.SlotBlock(g, 1) * SECTORS_PER_BLOCK, b"".join(tally.SlotSectors(g, 1, 5, slot)))
+        pen.tally_seq = 4
+        for k, seq in enumerate((6, 7, 8)):
+            pen.Sew([Born(bt.F + 1 + k, bt.fid + 1 + k, d[1 + k:2 + k], b"t%u" % (k + 1))],
+                    flags=stitch.DATA_FLUSHED, seq=seq, write=seq == 8)
+
+    def Island(o):
+        """C17: stitch 3 sewn; 4 never landed; 5 landed whole, naming it; 6
+        torn to half its sectors; 7 landed whole, naming 6 — one branch."""
+        d = bt.Fresh(o, 0, 5, 8)
+        pen = bt.Pen(o)
+        out = [pen.Sew([Born(bt.F + k, bt.fid + k, d[k:k + 1], b"i%u" % k)], flags=stitch.DATA_FLUSHED,
+                       write=k != 1) for k in range(5)]
+        bt.Zero(o, out[3].vlbas[4], out[3].of - 4)
+
+    def Comb(o):
+        """C17: stitch 3 sewn; 4 never landed; past it 5 to 41, every odd one
+        whole, naming the one before, every even one torn to half its
+        sectors — one branch, nineteen lost, each alone."""
+        d = bt.Fresh(o, 0, 39, 8)
+        pen = bt.Pen(o)
+        out = [pen.Sew([Born(bt.F + k, bt.fid + k, d[k:k + 1], b"c%u" % k)], flags=stitch.DATA_FLUSHED,
+                       write=k != 1) for k in range(39)]
+        for s in out[3::2]:
+            bt.Zero(o, s.vlbas[4], s.of - 4)
+
     return [*CutCases(bt),
         Case("B17 a torn stitch", lambda o: Two(o, tear=True), must={"RIBBON_TORN"}, checks=[
             ("the ribbon ends on stitch 3, %u born and %u not" % (f1, f2),
@@ -315,8 +360,50 @@ def RibbonEndCases(bt):
             ("the ribbon ends on stitch 3", lambda c: [s.seq for s in c.mount.ribbon.stitches] == [3]),
             ("stitch 6 names 5, begun only after 4 settled: what settled is lost, and said",
              lambda c: Found(c, "DEAD_BRANCH", "settled is lost", "4, 5, 6") and c.mount.ribbon.lied),
+            ("the line counts the two that settled and do not read whole, 4 and 5, at the most — a seq its "
+             "counter gave may have settled as no stitch — and the largest seq found",
+             lambda c: Found(c, "DEAD_BRANCH", "what settled is lost: at most 2 stitch(es), seq 4..5",
+                             "no seq up to 6, the largest found, is given again")),
             ("no number seen past the end is given again",
              lambda c: c.mount.counts["next_seq"] == 7 and c.mount.counts["next_fid"] == bt.fid + 4)]),
+        Case("B61 the lie proven over a hole of two (C17)", Hole, must={"DEAD_BRANCH"}, checks=[
+            ("the ribbon ends on stitch 3; 6 and 7 are not applied",
+             lambda c: [s.seq for s in c.mount.ribbon.stitches] == [3] and bt.fid + 3 not in c.mount.files),
+            ("the lie is proven, and what settled is lost is counted: at most 2 stitch(es), seq 4 and 5",
+             lambda c: Found(c, "DEAD_BRANCH", "the lie is proven",
+                             "what settled is lost: at most 2 stitch(es), seq 4..5") and c.mount.ribbon.lied),
+            ("the line says the next seq: none up to 7, the largest found, is given again — 8 is the next",
+             lambda c: Found(c, "DEAD_BRANCH", "no seq up to 7, the largest found, is given again") and
+             c.mount.counts["next_seq"] == 8)]),
+        Case("B62 a Tally and its slot bound between the end and what settled is lost (C17)", SlotBetween,
+             must={"DEAD_BRANCH"}, checks=[
+                 ("the mount stands on slot 1, whose Tally stood on stitch 3; 8 is not applied",
+                  lambda c: c.mount.slot.index == 1 and bt.fid + 3 not in c.mount.files),
+                 ("seq 4 and 5, the Tally's and the slot's the Spine names, are not counted: at most 2 stitch(es), "
+                  "seq 6 and 7",
+                  lambda c: Found(c, "DEAD_BRANCH", "the lie is proven",
+                                  "what settled is lost: at most 2 stitch(es), seq 6..7;") and c.mount.ribbon.lied),
+                 ("none up to 8, the largest found, is given again",
+                  lambda c: Found(c, "DEAD_BRANCH", "no seq up to 8, the largest found") and
+                  c.mount.counts["next_seq"] == 9)]),
+        Case("B63 a stitch past the end found whole among what settled is lost (C17)", Island,
+             must={"DEAD_BRANCH"}, checks=[
+                 ("the ribbon ends on stitch 3; 5 and 7, whole, are not applied",
+                  lambda c: [s.seq for s in c.mount.ribbon.stitches] == [3] and bt.fid + 2 not in c.mount.files),
+                 ("5, found whole, is not counted lost: at most 2 stitch(es), seq 4 and 6",
+                  lambda c: Found(c, "DEAD_BRANCH", "what settled is lost: at most 2 stitch(es), seq 4, 6;")),
+                 ("none up to 7, the largest found, is given again",
+                  lambda c: Found(c, "DEAD_BRANCH", "no seq up to 7, the largest found") and
+                  c.mount.counts["next_seq"] == 8)]),
+        Case("B64 what settled is lost in more runs than the line has room for (C17)", Comb,
+             must={"DEAD_BRANCH"}, checks=[
+                 ("the ribbon ends on stitch 3", lambda c: [s.seq for s in c.mount.ribbon.stitches] == [3]),
+                 ("all nineteen counted, the runs past the line's room said as \", ...\"",
+                  lambda c: Found(c, "DEAD_BRANCH", "what settled is lost: at most 19 stitch(es), seq 4, 6, 8, 10, "
+                                  "12, 14, 16, 18, 20, 22, 24, 26, ...;")),
+                 ("none up to 41, the largest found, is given again",
+                  lambda c: Found(c, "DEAD_BRANCH", "no seq up to 41, the largest found") and
+                  c.mount.counts["next_seq"] == 42)]),
     ]
 
 

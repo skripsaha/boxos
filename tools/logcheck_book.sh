@@ -47,6 +47,7 @@ B23 B23b B23c B23d B23e B24 B24b B26 B26b B26c B27 B27b B27c B27d B28 B28b B29 B
 B33
 B55a B55b B55c B55d B55e
 B59 B59b B60 B60c B4g B60e
+B61 B62 B63 B64
 B46 B46b B47 B47b B48 B48b B49 B49b B50 B51 B52 B53 B54"
 
 # census_book_judge NAME — the prediction against the kernel's own lines, one
@@ -155,6 +156,11 @@ for code in re.findall(r"^\[TagFS\] ribbon ([A-Z_]+): ", log, re.M):
     ribbon[code] = ribbon.get(code, 0) + 1
 say(ribbon == k["ribbon"], "it says of the ribbon %s by code; the census predicted %s"
     % (sorted(ribbon.items()) or "nothing", sorted(k["ribbon"].items()) or "nothing"))
+lost = [[int(x) for x in m.groups()] for m in re.finditer(
+    r"^\[TagFS\] ribbon DEAD_BRANCH: .*what settled is lost: at most (\d+) stitch\(es\).*no seq up to (\d+), "
+    r"the largest found", log, re.M)]
+say(lost == k.get("lost", []), "it counts what settled is lost and the largest seq found as %s; the census "
+    "predicted %s" % (lost or "nothing", k.get("lost") or "nothing"))
 m = re.search(r"^\[TagFS\] the ribbon past the Tally: (\d+) stitch\(es\) sewn on, the last seq (\d+), "
               r"(\d+) applied", log, re.M)
 have = tuple(int(x) for x in m.groups()) if m else None

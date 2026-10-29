@@ -44,7 +44,7 @@
 
 static uint8_t s_stitch_zeros[STAND_STITCH_ZEROS * TAGFS_SECTOR_SIZE];
 static uint8_t s_stitch_stream[TALLY_SHEET_PAYLOAD];
-static uint8_t s_stitch_sectors[VOLUME_BLOCK_BYTES];
+static uint8_t s_stitch_sectors[STAND_STITCH_LAID_MOST * BOOK_SECTOR_BYTES];
 
 void StandStitchAnswered(SettleWaiter* w, error_t rc)
 {
@@ -621,12 +621,18 @@ out:
 
 uint32_t StandStitchLayEmpty(const StandStitch* s, uint64_t flags)
 {
+    return StandStitchLayAt(s, flags, VOLUME_BLOCK_SECTORS, &s->at.next);
+}
+
+uint32_t StandStitchLayAt(const StandStitch* s, uint64_t flags, uint32_t of, const RibbonQuire* next)
+{
     uint8_t    body[96];
     uint32_t   starts[2];
     uint64_t   seq = s->at.given + 1u;
     StitchHead h   = { .flags = flags, .prev = s->at.last ? seq - s->at.last : 0, .prev_clasp = s->at.clasp,
-                       .tally = seq - s->at.tally, .next_block = s->at.next.block,
-                       .next_blocks = s->at.next.blocks };
+                       .tally = seq - s->at.tally, .next_block = next->block, .next_blocks = next->blocks };
+    if (of == 0 || of > STAND_STITCH_LAID_MOST || of % VOLUME_BLOCK_SECTORS)
+        return 0;
     if (s->at.came.blocks && s->at.off == 0) {
         h.from_block  = s->at.came.block;
         h.from_blocks = s->at.came.blocks;
@@ -637,9 +643,8 @@ uint32_t StandStitchLayEmpty(const StandStitch* s, uint64_t flags)
     starts[1] = at;
     at += RibbonRecordPut(s_stitch_stream + at, RIBBON_CLASP, 0, body, ClaspBodyPut(body, &c));
     uint64_t vlba = s->at.quire.block * TAGFS_BLOCK_SECTORS + s->at.off;
-    TallyUnitSeal(s_stitch_sectors, s_stitch_stream, at, starts, 2, BOOK_UNIT_STITCH, seq, vlba,
-                  VOLUME_BLOCK_SECTORS, s->uuid);
-    return BoardroomWrite(s->seat, s->base + vlba, VOLUME_BLOCK_SECTORS, s_stitch_sectors, NULL) == 0 ? c.crc : 0;
+    TallyUnitSeal(s_stitch_sectors, s_stitch_stream, at, starts, 2, BOOK_UNIT_STITCH, seq, vlba, of, s->uuid);
+    return BoardroomWrite(s->seat, s->base + vlba, of, s_stitch_sectors, NULL) == 0 ? c.crc : 0;
 }
 
 static TestResult TestStandStitchMediumLied(void)

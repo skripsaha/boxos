@@ -491,6 +491,35 @@ static inline uint32_t BookAtomOf(uint32_t geometry_physical, uint32_t medium_ph
 }
 
 /*
+ * ‼ ON A REMOVABLE MEDIUM THE RIBBON IS WRITTEN IN FLASH PAGES (spec_v2 §16.6
+ * п.2, C18). A cheap stick programs its page whole, reading, patching and
+ * rewriting it to put down part of one, and a cut in that rewrite spoils what
+ * the page held before — a settled stitch beside the new one; the newest
+ * stitch wiped whole, with nothing past it, reads as a cycle that never wrote,
+ * a loss no reader can say. So a mount on a removable medium lays the ribbon
+ * in atoms of a page — its Quires on them, each stitch ending on one
+ * (volume_ribbon.h, RibbonStitchEnds) — and a stitch it lays past another
+ * shares no page with it; only the first past an end a writer of a smaller
+ * atom left inside a page may, said (ribbon.c). The
+ * page is not on the medium: a stick says its physical block at the most
+ * (READ CAPACITY(16)), never its page, and the pages it asks of its VPD a USB
+ * stick is not asked for — Linux's usb-storage skips them (scsiglue.c
+ * sdev_configure: "Some devices don't handle VPD pages correctly"). 16 KiB is
+ * the largest page common in the NAND sticks are built from (4, 8 and 16
+ * KiB); a medium that says a larger block keeps its own. A rule of the mount
+ * alone: no atom is stored on the volume, and a reader takes the next unit
+ * where the last one ends (§16.2 п.11), whatever atom laid it.
+ */
+#define BOOK_FLASH_PAGE_BYTES 16384u
+
+/* The atom the ribbon is written in on a medium of atom `atom` (BookAtomOf),
+ * bytes: a flash page on a removable one, the medium's own otherwise. */
+static inline uint32_t BookRibbonAtomOf(uint32_t atom, int removable)
+{
+    return removable && atom < BOOK_FLASH_PAGE_BYTES ? BOOK_FLASH_PAGE_BYTES : atom;
+}
+
+/*
  * Does a ground whose first sector is `start` begin on an atom of `atom`
  * bytes? The grid is the MEDIUM's, not the volume's: its physical blocks begin
  * at `l0` and every atom / 512 sectors after — l0 the medium's own word, in

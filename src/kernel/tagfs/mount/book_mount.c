@@ -31,6 +31,33 @@ static char s_refusal[320];
 // ----------------------------------------------------------------------------
 
 /*
+ * The ribbon's atom (volume_book.h BookRibbonAtomOf): a flash page on a
+ * removable medium — a seat the Boardroom calls so, every USB stick: a stick
+ * that answers INQUIRY with RMB clear (one sold as a fixed disk) is flash
+ * behind the same bridge — and the medium's atom on any other. A page is laid
+ * on the medium's grid only where the ground begins on one; where it does not,
+ * the atom stays the medium's, said.
+ */
+static void BookRibbonAtom(uint8_t seat, uint64_t base, uint64_t first)
+{
+    uint32_t page = BookRibbonAtomOf(g_book.atom, BoardroomSeatIsRemovable(seat));
+    g_book.ribbon_atom = g_book.atom;
+    if (page == g_book.atom)
+        return;
+    if (!BookGroundOnAtom(base, first, page)) {
+        kprintf("[TagFS] seat %u is a removable medium, and its ribbon keeps the medium's %u-byte atom: its ground "
+                "begins at sector %llu, off a flash page of %u bytes, and a cut while a stitch is written may spoil "
+                "the settled stitch beside it (§16.6 п.2) — lay the ground on a mebibyte\n",
+                seat, g_book.atom, (unsigned long long)base, page);
+        return;
+    }
+    g_book.ribbon_atom = page;
+    kprintf("[TagFS] seat %u is a removable medium: its ribbon is written in atoms of a flash page, %u bytes — the "
+            "Quires it takes laid on them, each stitch ending on one, so the one after it begins on a page of its "
+            "own (§16.6 п.2)\n", seat, page);
+}
+
+/*
  * ‼ THE ATOM IS THE MEDIUM'S, AND WHERE ITS BLOCKS BEGIN IS TOO. A write of
  * this format is cut to A = the largest of 4096, the grid the volume was laid
  * out for and the physical block the medium says it is built from; and the
@@ -55,8 +82,11 @@ static void BookGroundAtom(uint8_t seat)
     if (physical > atom)
         atom = physical;
     g_book.atom = atom;
-    if (BookGroundOnAtom(base, first, atom))
+    if (BookGroundOnAtom(base, first, atom)) {
+        BookRibbonAtom(seat, base, first);
         return;
+    }
+    g_book.ribbon_atom = atom;
     ksnprintf(words, sizeof(words), "its ground begins at sector %llu, not on the medium's physical block "
               "of %u bytes, which begin at sector %llu: every write would rewrite its neighbours (§1.5) — "
               "repartition the medium", (unsigned long long)base, atom, (unsigned long long)first);
