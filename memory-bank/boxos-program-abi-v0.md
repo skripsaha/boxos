@@ -41,6 +41,12 @@ first design pass.
 - Program arguments are not passed as `argc/argv`. The spawner writes the
   command line into CabinInfo as Luggage before the first instruction
   (`src/userspace/boxlib/include/box/luggage.h`, `src/userspace/boxlib/src/luggage.c`).
+  The shell starts a program by its file id (`proc_exec_file`) and the
+  Luggage is then the line, a NUL, and the program's filled Form as
+  NUL-ended records (`filled 1`, `field KIND`, `#ID`, `=TEXT`, `screen #ID`;
+  `box/form.h`); `luggage_word` still reads the line alone. What a program
+  gives back on its way out is a Souvenir: an IPC message to its spawner
+  (magic "SOUV", count, file ids).
 - `notify` is a semantic doorbell. The userspace macro emits the x86-64
   `syscall` instruction with `RDI = 0`; `yield` emits the same instruction with
   `RDI = GATE_YIELD` (`src/userspace/boxlib/include/box/core/notify.h`).

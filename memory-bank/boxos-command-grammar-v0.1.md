@@ -2,6 +2,53 @@
 
 Status: draft. This is a design record only; it is not an implementation specification yet.
 
+## What is built (2026-10-29)
+
+The owner and Claude settled the part below after a long survey; it is
+implemented and supersedes the draft where they differ (parentheses,
+commas as sequences, several arrows).
+
+**The rule.** The words of a command come in any order. The shell sorts
+each by what it IS — a file that is here (in the Use Context), `them` or
+`it` (what the last command gave back), `all` (everything here), or a plain
+word — into the fields the program's **Form** declares, in their order.
+`everywhere` makes the names after it look past the context. A comma joins
+names into one list. A line is a step. Nothing else is special: no flags,
+no parentheses, no connecting words, and `:` stays the tags' own.
+
+**The Form.** A program says what it takes and what it gives, in its image
+(section `.boxos.form`): `takes [optional] thing|things|name|words|text|into
+"what it is"` and `gives things|text` — `BOX_FORM(...)` in C
+(`box/form.h`), `box::form` in C++ (`box/cxx/form.h`), the `takes`/`gives`
+directives in BoxASM. The shell knows only Forms: a utility and a program a
+person wrote yesterday are filled the same way. The program reads its
+fields filled (`form_things`, `form_words`, `form_text`) and never parses
+its line; started by another program, BoxLib fills them itself by the same
+rule, asking nobody. `help NAME` shows a program's Form.
+
+**The arrow.** `->` puts the result into a thing: into the program's `into`
+field when it has one (`assemble x.asm -> x.elf`), otherwise everything the
+program prints is added to the end of that file, made when it is not there
+(`info -> machine.txt`). Questions the program asks the person still go to
+the screen.
+
+**Souvenir.** A program gives files back (`souvenir_things`); the shell
+keeps them as `them`/`it`: `files draft` then `tag them done`;
+`assemble planets.asm` then `run it`.
+
+**Asking.** Only when it must, before the program starts: a name that is
+more than one file ("which one? (a number)"), a required field left empty
+("tag: the tags they get?", with "there is no helo.asm here" for a typo),
+`all` with no context ("all is the whole volume here: 92 files. sure?").
+An empty answer starts nothing.
+
+```text
+tag a.txt done              tag done a.txt, b.txt       tag them done
+rename note.txt idea.txt    create idea.txt work        files draft old
+say hello world -> notes.txt                            info -> machine.txt
+assemble planets.asm        run it                      help tag
+```
+
 ## 1. Basic form
 
 ```text
