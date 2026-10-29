@@ -87,6 +87,7 @@ caveat_row() {
         coldread)   echo "|a read into pages its program had not touched yet reported every byte and delivered only those before the first such page" ;;
         coldwrite)  echo "|a write out of pages its program had not touched yet reported every byte, and the file holds other than the zeros those pages are" ;;
         noanchor)   echo "|a file written without anchor has no name after a power cut" ;;
+        book:*)     caveat_row_book "$1" ;;
         nextfid)    echo "|a table written ahead of its ledger hands the same file id out twice" ;;
         hog)        echo "|on one core under a CPU hog nothing settles a write before the power goes" ;;
         settlecut:FID_PAST_NEXT)
@@ -169,8 +170,14 @@ caveat_row() {
         # the merged step 1.1 tree: prefix 16 of 29, subset 28 of 87.
         chaingrow:prefix:SPARE_UNNAMED|chaingrow:subset:SPARE_UNNAMED)
                     echo "1.6|a cut after the file table's or the tag registry's new block is stamped and its stamp made durable, and before the link to it is written, keeps that Spare: a stamped header nothing names, a block marked used and owned by nothing" ;;
-        # LockRank's places (lockrank_judge, below): every key a gate measured,
-        # under the step R1 section 1.7 names for it.
+        lockrank:*) caveat_row_lockrank "$1" ;;
+    esac
+}
+
+# caveat_row_lockrank NAME — LockRank's places (lockrank_judge, below): every
+# key a gate measured, under the step R1 section 1.7 names for it.
+caveat_row_lockrank() {
+    case "$1" in
         lockrank:registry@tag_registry_load:read)
                     echo "|the tag registry is read from the medium under its IRQ-off lock, so a core that looks up a tag spins with interrupts off for as long as the medium takes" ;;
         lockrank:registry@tag_registry_flush:read|\
@@ -255,6 +262,27 @@ caveat_row() {
         lockrank:proof@TestStandLockRankNamesTheMedium:read|\
         lockrank:proof@TestStandLockRankNamesTheOrder/proofstate@TestStandLockRankNamesTheOrder)
                     echo "proof|LockRank's self-tests hold a lock of their own across a read, and take one out of order, on purpose" ;;
+    esac
+}
+
+# caveat_row_book NAME — the rows of a book's own oracles in PowerCut
+# (powercut_judge_book.py, powercut_lie.py; spec_v2 §3.10, §16.5 п.21), each
+# the defect it stands for: no step — on a book none is known — so each is a
+# FAIL that names what came back the day one shows.
+caveat_row_book() {
+    case "$1" in
+        book:whole)   echo "|a power cut leaves a file of a book as no flush left it — its old bytes and new mixed, or rotten (C1, C15, C3)" ;;
+        book:order)   echo "|a stitch is written before the flush its own word promises its data stands behind, or two stitches share one (§3.3)" ;;
+        book:lines)   echo "|a logger's file comes back cut inside a line, or with fewer lines than a flush had made durable (C21)" ;;
+        book:slip)    echo "|a logger's tail is written as a block of data for every line instead of riding its stitches as a Slip (C21)" ;;
+        book:tipin)   echo "|a logger's Tallies are not laid in, or the newest one breaks the rule of binding (C7-C10)" ;;
+        book:spared)  echo "|a stitch whose toll spared its data's flush and lost data it names is taken as though the data were there (C3)" ;;
+        book:engross) echo "|a tail engrossed into a block before its stitch is named by somebody when the power goes first (C22)" ;;
+        book:chain)   echo "|the verdict a mount lays down on a book is not laid by the session's first stitch, or a block it rolled back is given twice (C16)" ;;
+        book:owners)  echo "|a medium that lost writes a kept flush stood behind leaves a book with two owners of one block (C6, C17)" ;;
+        book:lost)    echo "|a medium lost what a stitch named, the evidence on it, and the book says nothing (C5, C13, C17, C18)" ;;
+        book:wiped)   echo "|a medium that spoils the page around a stitch in flight wipes a settled stitch whole with nothing past it, and the book cannot say what settled is lost (C18)" ;;
+        book:boots)   echo "|a book a medium lied about is mounted otherwise than predicted, or a session on it gives a block twice (C16, C26)" ;;
     esac
 }
 
