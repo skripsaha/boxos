@@ -302,13 +302,76 @@ bool HelmVacated(const OpenFileEntry *ofe)
     return __atomic_load_n(&ofe->helm.vacated, __ATOMIC_ACQUIRE);
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+/*
+ * ‼ THE STAND'S HOLDS, AND THE GIVE-UP THAT LISTS THEM, SHARE ONE LOCK.
+ * A holder is laid here only while its file's `vacated` is clear, and the
+ * give-up sets `vacated` and takes the file's holders out, both under the
+ * table's lock: so either the give-up finds the holder here, or the holder
+ * finds `vacated` set and is listed at once — never neither. Once the lock
+ * is dropped neither side touches the other: a holder listed may run at once
+ * on another core, end, and let its entry and its hold go with it.
+ */
+static HelmStandHold *s_stand_holds;   /* under g_open_table_lock */
+
+void HelmReadyOnceVacated(HelmStandHold *hold, OpenFileEntry *ofe, HelmWaiter *w)
+{
+    TagFSLockTake(&g_open_table_lock);
+    bool now = __atomic_load_n(&ofe->helm.vacated, __ATOMIC_ACQUIRE);
+    if (!now) {
+        hold->ofe     = ofe;
+        hold->holder  = w;
+        hold->next    = s_stand_holds;
+        s_stand_holds = hold;
+    }
+    TagFSLockDrop(&g_open_table_lock);
+    if (now)
+        HelmReady(w);
+}
+
+/* The stand's holds of the file's entry, taken out of the list: under
+ * g_open_table_lock, and listed by the caller once it is dropped. */
+static HelmStandHold *HelmStandHoldsOf(const OpenFileEntry *e)
+{
+    HelmStandHold *taken = NULL;
+    for (HelmStandHold **at = &s_stand_holds; *at;) {
+        HelmStandHold *h = *at;
+        if (h->ofe != e) {
+            at = &h->next;
+            continue;
+        }
+        *at     = h->next;
+        h->next = taken;
+        taken   = h;
+    }
+    return taken;
+}
+
+/* Each holder taken listed — its next read first: a holder listed may run
+ * and end, its hold with it, before this one goes on. */
+static void HelmStandHoldsReady(HelmStandHold *h)
+{
+    while (h) {
+        HelmStandHold *next = h->next;
+        HelmReady(h->holder);
+        h = next;
+    }
+}
+#endif
+
 void HelmVacate(uint64_t file_id)
 {
     TagFSLockTake(&g_open_table_lock);
     OpenFileEntry *e = ofe_find(file_id);
     if (e)
         __atomic_store_n(&e->helm.vacated, true, __ATOMIC_RELEASE);
+#ifdef CONFIG_VOLUME_TESTS
+    HelmStandHold *held = e ? HelmStandHoldsOf(e) : NULL;
+#endif
     TagFSLockDrop(&g_open_table_lock);
+#ifdef CONFIG_VOLUME_TESTS
+    HelmStandHoldsReady(held);
+#endif
 }
 
 uint64_t HelmOwed(void)

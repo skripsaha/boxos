@@ -95,6 +95,21 @@ bool     HelmVacated(const OpenFileEntry* ofe);
 /* The file was given up: its Helm, when it is open, is vacated. */
 void     HelmVacate(uint64_t file_id);
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's hold of a holder (write_job.c, a defrag asked to hold its
+ * file), kept by the holder and listed in helm.c until the file is given up. */
+typedef struct HelmStandHold {
+    struct HelmStandHold* next;
+    const OpenFileEntry*  ofe;
+    HelmWaiter*           holder;
+} HelmStandHold;
+
+/* `w`, the holder of the file's Helm, listed for a service point (HelmReady)
+ * by the give-up itself (HelmVacate) — at once when the file is given up
+ * already. `hold` is the holder's until it is listed. No TagFS lock held. */
+void     HelmReadyOnceVacated(HelmStandHold* hold, OpenFileEntry* ofe, HelmWaiter* w);
+#endif
+
 /* A waiter handed the Helm that does its work synchronously: listed, and run
  * by the next service point (TagFSServiceIfPending) — never in the hand, which
  * may run in an interrupt's continuation that must not stand over the medium.

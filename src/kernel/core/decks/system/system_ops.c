@@ -1738,7 +1738,7 @@ static int SysTagCheck(const ManifestOp *op, Crate *crates, uint16_t crate_count
  *  Filesystem maintenance
  * ========================================================================= */
 
-/* SYSTEM_OP_DEFRAG_FILE  params:[u64 file_id]
+/* SYSTEM_OP_DEFRAG_FILE  params:[u64 file_id] (the stand's: WriteJobAskStandHold)
  *                        out_crate (optional): u32 frag_score
  * A WriteJob (write_job.h): the file's Helm is held for the whole gather, and
  * a caller whose file another holds is parked until it is handed on. Where the
@@ -1758,6 +1758,7 @@ static int SysDefragFile(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     ask.kind    = WRITE_JOB_DEFRAG;
     ask.warrant = StorageCallWarrant(ctx);
     ask.file_id = file_id;
+    WriteJobAskStandHold(&ask, op->params, op->param_size);
     if (op->out_crate != CRATE_INDEX_NONE)
         ask.out_crate = &crates[op->out_crate];
     return WriteJobSubmit(&ask, crates, ctx);
