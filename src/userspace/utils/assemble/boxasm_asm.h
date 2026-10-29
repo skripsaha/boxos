@@ -239,6 +239,7 @@ typedef struct {
 /* takes and gives: the text of the program's Form so far, from `form 1`. */
 typedef struct {
     BoxAsmBuffer Text;
+    BoxAsmBuffer Names;          /* the fields' NAMEs so far, each ended by a NUL */
     uint8_t      Takes;
     uint8_t      Into;
     uint8_t      Gives;

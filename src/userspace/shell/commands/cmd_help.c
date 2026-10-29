@@ -9,6 +9,7 @@
 #include "commands.h"
 #include "../shell.h"
 #include "../program.h"
+#include "../itinerary.h"
 #include "box/print.h"
 #include "box/string.h"
 #include "box/form.h"
@@ -69,8 +70,12 @@ static void ShowForm(const char *name, const BoxForm *form)
         printf("%s takes:\n", name);
         for (uint32_t i = 0; i < form->FieldCount; i++) {
             const BoxFormField *field = &form->Fields[i];
-            printf("  %s - %s%s\n", field->What, KindSaid(field),
-                   field->Optional ? " (optional)" : "");
+            if (field->Name)
+                printf("  %s: %s - %s%s\n", field->Name, field->What, KindSaid(field),
+                       field->Optional ? " (optional)" : "");
+            else
+                printf("  %s - %s%s\n", field->What, KindSaid(field),
+                       field->Optional ? " (optional)" : "");
         }
     }
     printf("%s gives: %s\n", name, GivesSaid(form));
@@ -88,7 +93,7 @@ static int HelpProgram(const char *name)
     }
 
     BoxForm form;
-    int rc = form_of_file(program, &form);
+    int rc = ProgramIsItinerary(program) ? ItineraryForm(program, &form) : form_of_file(program, &form);
     if (rc != 0) {
         printf("help: cannot read what %s takes (error %d)\n", name, -rc);
         return 1;

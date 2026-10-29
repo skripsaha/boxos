@@ -40,9 +40,29 @@ int form_fill_refuse(BoxFormFiller *filler, const char *a, const char *b, const 
 
 /* ---- the items -------------------------------------------------------- */
 
-static uint8_t role_of(const FormToken *token)
+/* The running Itinerary's field a word names, plus 1; 0 for none. */
+static uint32_t given_named(const BoxFormLookup *lookup, const char *word)
 {
+    for (size_t i = 0; lookup && i < lookup->GivenCount; i++) {
+        if (strcmp(lookup->Given[i].Name, word) == 0) return (uint32_t)i + 1;
+    }
+    return 0;
+}
+
+/* What a word is. A name of the running Itinerary's fields is what it was
+ * given — files only where files are looked up, as `them`; the shell's words
+ * are read only where files are looked up. */
+static uint8_t role_of(const BoxFormLookup *lookup, const FormToken *token, bool keywords,
+                       uint32_t *given)
+{
+    *given = 0;
     if (token->Quoted || token->CommaBefore || token->CommaAfter) return FORM_ROLE_WORD;
+    uint32_t named = given_named(lookup, token->Text);
+    if (named != 0 && (keywords || !lookup->Given[named - 1].Things)) {
+        *given = named;
+        return FORM_ROLE_GIVEN;
+    }
+    if (!keywords) return FORM_ROLE_WORD;
     if (strcmp(token->Text, "them") == 0) return FORM_ROLE_THEM;
     if (strcmp(token->Text, "it") == 0) return FORM_ROLE_IT;
     if (strcmp(token->Text, "all") == 0) return FORM_ROLE_ALL;
@@ -80,7 +100,7 @@ int form_fill_add_items(BoxFormFiller *filler, FormTokens *tokens, uint8_t bound
         FormItem *item = &filler->Items[filler->ItemCount++];
         memset(item, 0, sizeof(*item));
         item->Token      = *token;
-        item->Role       = keywords ? role_of(token) : FORM_ROLE_WORD;
+        item->Role       = role_of(filler->Lookup, token, keywords, &item->Given);
         item->Everywhere = everywhere;
         item->Bound      = bound;
         token->Text      = NULL;
@@ -123,7 +143,27 @@ static int take_arrow_name(BoxFormFiller *filler, const FormTokens *tokens, size
         filler->Refused = 1;
         return 0;
     }
-    filler->ArrowName = copy_text(tokens->Tokens[at + 1].Text, strlen(tokens->Tokens[at + 1].Text));
+    const FormToken *target = &tokens->Tokens[at + 1];
+    const char      *name = target->Text;
+    uint32_t         named = target->Quoted ? 0 : given_named(filler->Lookup, name);
+
+    /* The name of a field of the running Itinerary after the arrow is the
+     * one word it was given. */
+    if (named != 0) {
+        const BoxFormGiven *given = &filler->Lookup->Given[named - 1];
+        int rc = 0;
+        if (given->Things || given->WordCount != 1) {
+            rc = form_fill_refuse(filler, "-> wants a name after it, and ", name,
+                                  given->Things ? " stands for files" : given->WordCount == 0
+                                                                            ? " stands for no word"
+                                                                            : " stands for more than one word");
+            if (rc != BOX_FORM_REFUSED) return rc;
+            filler->Refused = 1;
+            return 0;
+        }
+        name = given->Words[0];
+    }
+    filler->ArrowName = copy_text(name, strlen(name));
     return filler->ArrowName ? 0 : -ERR_NO_MEMORY;
 }
 
@@ -317,6 +357,20 @@ int form_fill_words(BoxFormFiller *filler, const char *words)
     return rc;
 }
 
+int form_fill_field(BoxFormFiller *filler, uint32_t field, const file_id_t **ids, size_t *id_count,
+                    const char *const **words, size_t *word_count)
+{
+    if (!filler || !filler->Finished || field >= filler->Values.FieldCount || !ids || !id_count ||
+        !words || !word_count)
+        return -ERR_INVALID_ARGUMENT;
+    const FormFieldValue *value = &filler->Values.Fields[field];
+    *ids        = value->Ids;
+    *id_count   = value->IdCount;
+    *words      = (const char *const *)value->Words;
+    *word_count = value->WordCount;
+    return 0;
+}
+
 int form_fill_program(BoxFormFiller *filler, const char *name)
 {
     if (!filler || !name) return -ERR_INVALID_ARGUMENT;
@@ -380,6 +434,78 @@ char *form_fill_line_from(const BoxFormFiller *filler, size_t from, size_t *leng
     out[at] = '\0';
     *length = at;
     return out;
+}
+
+const BoxFormGiven *form_fill_given(const BoxFormFiller *filler, const FormItem *item)
+{
+    return item->Role == FORM_ROLE_GIVEN ? &filler->Lookup->Given[item->Given - 1] : NULL;
+}
+
+typedef struct {
+    char  *Bytes;
+    size_t Used;
+    size_t Capacity;
+} FillText;
+
+static int text_put(FillText *out, const char *text, size_t length)
+{
+    if (out->Capacity - out->Used <= length) {
+        size_t grown = out->Capacity ? out->Capacity * 2 : 64;
+        while (grown - out->Used <= length) grown *= 2;
+        char *bigger = realloc(out->Bytes, grown);
+        if (!bigger) return -ERR_NO_MEMORY;
+        out->Bytes    = bigger;
+        out->Capacity = grown;
+    }
+    memcpy(out->Bytes + out->Used, text, length);
+    out->Used += length;
+    out->Bytes[out->Used] = '\0';
+    return 0;
+}
+
+/* The words given under a name, joined by single spaces. */
+static int text_put_given(FillText *out, const BoxFormGiven *given)
+{
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < given->WordCount; i++) {
+        if (i > 0) rc = text_put(out, " ", 1);
+        if (rc == 0) rc = text_put(out, given->Words[i], strlen(given->Words[i]));
+    }
+    return rc;
+}
+
+/* The words of the text are cut again as the line was, so a word reads as the
+ * same name here as it did as an item. */
+char *form_fill_text_from(const BoxFormFiller *filler, size_t from, size_t *length)
+{
+    char *text = form_fill_line_from(filler, from, length);
+    if (!text || filler->Lookup->GivenCount == 0) return text;
+
+    FormTokens tokens;
+    if (form_line_cut(text, &tokens) != 0) {
+        free(text);
+        return NULL;
+    }
+    FillText out = { NULL, 0, 0 };
+    size_t   copied = 0;
+    int      rc = text_put(&out, "", 0);
+    for (size_t i = 0; rc == 0 && i < tokens.Count; i++) {
+        const FormToken *token = &tokens.Tokens[i];
+        uint32_t         named;
+        if (role_of(filler->Lookup, token, false, &named) != FORM_ROLE_GIVEN) continue;
+        rc = text_put(&out, text + copied, token->Start - copied);
+        if (rc == 0) rc = text_put_given(&out, &filler->Lookup->Given[named - 1]);
+        copied = token->End;
+    }
+    if (rc == 0) rc = text_put(&out, text + copied, *length - copied);
+    form_line_release(&tokens);
+    free(text);
+    if (rc != 0) {
+        free(out.Bytes);
+        return NULL;
+    }
+    *length = out.Used;
+    return out.Bytes;
 }
 
 int form_fill_luggage(BoxFormFiller *filler, file_id_t screen, char **bytes, size_t *length)

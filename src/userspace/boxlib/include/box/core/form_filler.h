@@ -19,7 +19,8 @@ enum {
     FORM_ROLE_WORD = 0,
     FORM_ROLE_THEM,
     FORM_ROLE_IT,
-    FORM_ROLE_ALL
+    FORM_ROLE_ALL,
+    FORM_ROLE_GIVEN            /* the name of a field of the running Itinerary */
 };
 
 enum {
@@ -40,6 +41,7 @@ typedef struct {
     uint8_t    Dropped;        /* let go with an answer */
     uint8_t    Everywhere;
     uint8_t    Bound;          /* 0: from the line; else the field it was answered for, plus 1 */
+    uint32_t   Given;          /* GIVEN: which of the lookup's Given, plus 1 */
     file_id_t *Ids;
     size_t     IdCount;
 } FormItem;
@@ -87,6 +89,12 @@ int form_fill_refuse(BoxFormFiller *filler, const char *a, const char *b, const 
 /* The line from offset `from`, as typed, without the arrow; heap, NULL when
  * there is no memory. */
 char *form_fill_line_from(const BoxFormFiller *filler, size_t from, size_t *length);
+/* The same, each word that names words given (BoxFormGiven) put in their
+ * place, joined by single spaces: the text a text field takes. */
+char *form_fill_text_from(const BoxFormFiller *filler, size_t from, size_t *length);
+/* What an item names when it is the name of a field of the running
+ * Itinerary; NULL for any other word. */
+const BoxFormGiven *form_fill_given(const BoxFormFiller *filler, const FormItem *item);
 
 /* One sort of the items into the fields: the next step, or a negative error. */
 int form_fill_assign(BoxFormFiller *filler);

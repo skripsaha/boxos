@@ -15,6 +15,9 @@
  * nothing else took; words takes all the words that are no file; text takes
  * the rest of the line as typed; into takes the arrow's target. A Form with no
  * thing field looks nothing up: every word is a plain one.
+ *
+ * The name of a field of the running Itinerary is what it was given: its
+ * files are taken as `them` is, its words wherever words go.
  */
 
 #include "box/core/form_filler.h"
@@ -36,26 +39,34 @@ static int refuse_lookup(BoxFormFiller *filler, const char *name)
     return form_fill_refuse(filler, "the volume would not say what ", name, " is");
 }
 
-static int resolve_them(BoxFormFiller *filler, FormItem *item)
+static int resolve_ids(FormItem *item, const file_id_t *ids, size_t count)
 {
-    const BoxFormLookup *lookup = filler->Lookup;
-    if (!lookup->ThemKnown || lookup->ThemCount == 0) return 0;
-
-    item->Ids = malloc(lookup->ThemCount * sizeof(file_id_t));
+    if (count == 0) return 0;
+    item->Ids = malloc(count * sizeof(file_id_t));
     if (!item->Ids) return -ERR_NO_MEMORY;
-    memcpy(item->Ids, lookup->Them, lookup->ThemCount * sizeof(file_id_t));
-    item->IdCount = lookup->ThemCount;
+    memcpy(item->Ids, ids, count * sizeof(file_id_t));
+    item->IdCount = count;
     return 0;
+}
+
+/* The name of a field of the running Itinerary that was given words. */
+static bool given_words(const BoxFormFiller *filler, const FormItem *item)
+{
+    const BoxFormGiven *given = form_fill_given(filler, item);
+    return given && !given->Things;
 }
 
 static int resolve(BoxFormFiller *filler, FormItem *item)
 {
     if (item->Resolved) return 0;
     BoxFormLookup *lookup = filler->Lookup;
+    const BoxFormGiven *given = form_fill_given(filler, item);
     int rc = 0;
 
     if (item->Role == FORM_ROLE_THEM || item->Role == FORM_ROLE_IT) {
-        rc = resolve_them(filler, item);
+        if (lookup->ThemKnown) rc = resolve_ids(item, lookup->Them, lookup->ThemCount);
+    } else if (given) {
+        if (given->Things) rc = resolve_ids(item, given->Ids, given->IdCount);
     } else {
         file_id_t *ids = NULL;
         bool       bounded = false;
@@ -79,7 +90,7 @@ static int resolve(BoxFormFiller *filler, FormItem *item)
  * looked up and every word is plain. */
 static int plain(BoxFormFiller *filler, FormItem *item, bool *is_plain)
 {
-    if (!filler->HasThing) {
+    if (!filler->HasThing || given_words(filler, item)) {
         *is_plain = true;
         return 0;
     }
@@ -119,7 +130,9 @@ static const char *failure_reason(BoxFormFiller *filler, const FormItem *item, i
         return filler->Lookup->ThemKnown ? "the last command gave nothing" : "nothing was given before";
     if (item->Role == FORM_ROLE_ALL) return "there are no files here";
 
-    int rc = form_fill_refuse(filler, "there is no ", item->Token.Text, " here");
+    int rc = item->Role == FORM_ROLE_GIVEN
+                 ? form_fill_refuse(filler, item->Token.Text, " was given no files", NULL)
+                 : form_fill_refuse(filler, "there is no ", item->Token.Text, " here");
     if (rc != BOX_FORM_REFUSED) *error = rc;
     return filler->Sentence;
 }
@@ -132,7 +145,7 @@ static const char *empty_reason(BoxFormFiller *filler, uint32_t field, int *erro
     for (size_t i = 0; i < filler->ItemCount; i++) {
         FormItem *item = &filler->Items[i];
         if (item->Dropped || !(item->Bound == 0 || item->Bound == field + 1)) continue;
-        if (!item->Resolved || item->IdCount != 0) continue;
+        if (!item->Resolved || item->IdCount != 0 || given_words(filler, item)) continue;
         if (item->Role == FORM_ROLE_WORD && item->Bound == 0 && strchr(item->Token.Text, '.') == NULL)
             continue;
 
@@ -211,7 +224,7 @@ static int take_things(BoxFormFiller *filler, uint32_t field)
 
     for (size_t i = 0; i < filler->ItemCount; i++) {
         FormItem *item = &filler->Items[i];
-        if (!usable(item, field)) continue;
+        if (!usable(item, field) || given_words(filler, item)) continue;
         if (single && out->IdCount > 0) break;
 
         int rc = resolve(filler, item);
@@ -242,9 +255,19 @@ static int take_things(BoxFormFiller *filler, uint32_t field)
 
 /* ---- name, words, text, into ------------------------------------------ */
 
-static int give_word(FormFieldValue *out, FormItem *item)
+/* The word an item is — or, for the name of words an Itinerary was given,
+ * every one of those words. */
+static int give_word(BoxFormFiller *filler, FormFieldValue *out, FormItem *item)
 {
-    int rc = form_values_add_word(out, item->Token.Text, strlen(item->Token.Text));
+    const BoxFormGiven *given = form_fill_given(filler, item);
+    int rc = 0;
+
+    if (given && !given->Things) {
+        for (size_t i = 0; rc == 0 && i < given->WordCount; i++)
+            rc = form_values_add_word(out, given->Words[i], strlen(given->Words[i]));
+    } else {
+        rc = form_values_add_word(out, item->Token.Text, strlen(item->Token.Text));
+    }
     if (rc == 0) item->Taken = 1;
     return rc;
 }
@@ -258,7 +281,14 @@ static int take_name(BoxFormFiller *filler, uint32_t field, uint32_t *waiting)
         bool is_plain;
         int  rc = plain(filler, item, &is_plain);
         if (rc != 0) return rc;
-        if (is_plain) return give_word(&filler->Values.Fields[field], item);
+        if (!is_plain) continue;
+        const BoxFormGiven *given = form_fill_given(filler, item);
+        if (given && given->WordCount != 1)
+            return form_fill_refuse(filler, item->Token.Text,
+                                    given->WordCount == 0 ? " was given no word, and a name is one"
+                                                          : " is more than one word, and a name is one",
+                                    NULL);
+        return give_word(filler, &filler->Values.Fields[field], item);
     }
     *waiting |= 1u << field;
     return 0;
@@ -272,7 +302,7 @@ static int take_words(BoxFormFiller *filler, uint32_t field)
 
         bool is_plain;
         int  rc = plain(filler, item, &is_plain);
-        if (rc == 0 && is_plain) rc = give_word(&filler->Values.Fields[field], item);
+        if (rc == 0 && is_plain) rc = give_word(filler, &filler->Values.Fields[field], item);
         if (rc != 0) return rc;
     }
     return 0;
@@ -288,7 +318,7 @@ static int take_waiting_names(BoxFormFiller *filler, uint32_t waiting)
             if (!usable(item, field) || !item->Resolved || item->IdCount == 0 ||
                 item->Role != FORM_ROLE_WORD)
                 continue;
-            int rc = give_word(&filler->Values.Fields[field], item);
+            int rc = give_word(filler, &filler->Values.Fields[field], item);
             if (rc != 0) return rc;
             break;
         }
@@ -303,13 +333,13 @@ static int take_text(BoxFormFiller *filler, uint32_t field)
 
     for (size_t i = 0; i < filler->ItemCount; i++) {
         if (!usable(&filler->Items[i], field)) continue;
-        if (filler->Items[i].Bound == field + 1) return give_word(out, &filler->Items[i]);
+        if (filler->Items[i].Bound == field + 1) return give_word(filler, out, &filler->Items[i]);
         if (first == NO_ITEM) first = i;
     }
     if (first == NO_ITEM) return 0;
 
     size_t length;
-    char  *rest = form_fill_line_from(filler, filler->Items[first].Token.Start, &length);
+    char  *rest = form_fill_text_from(filler, filler->Items[first].Token.Start, &length);
     if (!rest) return -ERR_NO_MEMORY;
     int rc = form_values_add_word(out, rest, length);
     free(rest);
@@ -325,7 +355,7 @@ static int take_into(BoxFormFiller *filler, uint32_t field)
 
     for (size_t i = 0; i < filler->ItemCount; i++) {
         FormItem *item = &filler->Items[i];
-        if (item->Bound == field + 1 && usable(item, field)) return give_word(out, item);
+        if (item->Bound == field + 1 && usable(item, field)) return give_word(filler, out, item);
     }
     if (!filler->ArrowName || filler->ArrowToInto) return 0;
     filler->ArrowToInto = 1;

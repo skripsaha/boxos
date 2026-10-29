@@ -16,6 +16,20 @@ void ThemKeep(file_id_t *ids, size_t count);
  * takes its own place, so `them` holds the new one where it held the old. */
 void ThemReplace(file_id_t old, file_id_t made);
 
+/* The kept files taken aside — `them` is nothing given after it — and put
+ * back: what an Itinerary does with the person's own `them` while it runs. */
+typedef struct {
+    file_id_t *Files;
+    size_t     Count;
+    bool       Known;
+} ThemSaved;
+
+void ThemSave(ThemSaved *saved);
+/* The saved files are `them` again; what was kept since is let go. */
+void ThemRestore(ThemSaved *saved);
+/* The saved files are let go; what is kept now stays. */
+void ThemRelease(ThemSaved *saved);
+
 /* Show a lookup the files kept, for the filler to read `them` from. */
 void ThemShow(BoxFormLookup *lookup);
 

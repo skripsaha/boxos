@@ -174,16 +174,15 @@ void ShellDrainStaleIpc(void)
     while (receive(&drain)) { }
 }
 
-/* One typed line, whatever its length, run: the cut words for a built-in,
- * the line itself for a program, which carries it as its Luggage. */
-static void ShellRunLine(const char *input)
+int ShellRunLine(const char *input)
 {
     ParsedCommand cmd;
     if (ParserParse(input, &cmd) != 0) {
         println("Error: no memory to read the command");
-        return;
+        return -1;
     }
-    if (cmd.argc > 0 && ExecutorRun(&cmd, input) != 0) {
+    int rc = cmd.argc > 0 ? ExecutorRun(&cmd, input) : 0;
+    if (rc != 0) {
         const char *err = ExecutorGetError();
         if (err && err[0] != '\0') {
             printf("%colorError: %s%color\n",
@@ -191,6 +190,7 @@ static void ShellRunLine(const char *input)
         }
     }
     ParserFree(&cmd);
+    return rc;
 }
 
 void ShellMainLoop(void)
@@ -211,6 +211,11 @@ void ShellMainLoop(void)
 void ShellStop(void)
 {
     g_state.running = false;
+}
+
+bool ShellRunning(void)
+{
+    return g_state.running;
 }
 
 ShellState *ShellGetState(void)

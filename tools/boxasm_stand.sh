@@ -221,13 +221,13 @@ link_refuses long_member_name "$WORK/long.o" "$WORK/libbox_long.a" \
 
 # ---- the Form: takes and gives ------------------------------------------------
 
-FORM_TEXT=$'form 1\ntakes optional things "the files"\ntakes words "the tags they get"\ntakes into "where it goes"\ngives text\n'
+FORM_TEXT=$'form 1\ntakes optional things "the files"\ntakes words label "the tags they get"\ntakes into "where it goes"\ngives text\n'
 cat > "$WORK/form.asm" <<'EOF'
 section .text
 global main
 extern exit
 takes OPTIONAL things "the files"
-takes words "the tags they get"
+takes words label "the tags they get"
 takes into 'where it goes'
 gives text
 main:
@@ -468,6 +468,12 @@ assembly_refuses form_two_into "${HEAD}takes into \"a\""$'\ntakes into "b"\n' \
     "form_two_into.asm:5:7: a Form takes into once: the name the arrow points at is one"
 assembly_refuses form_in_struc $'struc s\ntakes things "x"\nendstruc\n'"$HEAD" \
     "form_in_struc.asm:2:1: takes stands outside struc and istruc: it is the program's, not a layout's"
+assembly_refuses form_name_shell "${HEAD}takes words them \"w\""$'\n' \
+    "form_name_shell.asm:4:13: 'them' is the shell's own word and names no field"
+assembly_refuses form_name_twice "${HEAD}takes words a \"w\""$'\ntakes things a "t"\n' \
+    "form_name_twice.asm:5:14: 'a' names a field already"
+assembly_refuses form_name_spelled "${HEAD}takes words la.bel \"w\""$'\n' \
+    "form_name_spelled.asm:4:13: 'la.bel' cannot name a field: a letter first, then letters, digits and _"
 
 # An error in a macro's expansion points at the line of the macro and names
 # the calls it came through, the innermost first.

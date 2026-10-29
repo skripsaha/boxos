@@ -134,6 +134,7 @@ bool SuggestFor(const char *typed, char *out, size_t size)
         Consider(&closest, typed, g_commands[i].name, strlen(g_commands[i].name));
     ConsiderProgramsWearing(&closest, typed, "app");
     ConsiderProgramsWearing(&closest, typed, "utility");
+    ConsiderProgramsWearing(&closest, typed, "itinerary");
 
     if (closest.Count == 0) return false;
     Say(&closest, out, size);

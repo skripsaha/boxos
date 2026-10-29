@@ -44,6 +44,12 @@ typedef struct {
 void        ShellInit(void);
 void        ShellMainLoop(void);
 void        ShellStop(void);
+/* Whether the shell goes on: false once `exit` was said. */
+bool        ShellRunning(void);
+/* One line, whatever its length, run as if typed: the cut words for a
+ * built-in, the line itself for a program. 0 when it went through; anything
+ * else when it did not, and why was said. */
+int         ShellRunLine(const char *line);
 ShellState *ShellGetState(void);
 void        ShellUpdatePrompt(void);
 

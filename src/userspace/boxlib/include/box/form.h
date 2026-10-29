@@ -36,7 +36,7 @@ extern "C" {
  * Lines, each ended by '\n':
  *
  *     form 1                                 first; the toolchain writes it
- *     takes [optional] KIND "what it is"     a field, in order
+ *     takes [optional] KIND [NAME] "what it is"   a field, in order
  *     gives things | text                    what the program gives back
  *
  * KIND:
@@ -46,6 +46,11 @@ extern "C" {
  *     words    words, tags mostly, as many as are typed
  *     text     the rest of the line as typed, sorted into nothing
  *     into     the name `->` points at: the program puts its result there
+ *
+ * NAME, when a field has one, is what an Itinerary's steps call what it was
+ * given (see BoxFormGiven): a letter, then letters, digits and '_'; not
+ * them, it, all or everywhere; one field's only. A program may name its
+ * fields too, and `help` shows the names.
  *
  * A field is required — at least one item — unless it says `optional`.
  * "what it is" is a few words the shell says when it asks for the field and
@@ -149,6 +154,7 @@ typedef struct {
     uint8_t Kind;              /* BoxFormKind */
     uint8_t Optional;
     char   *What;              /* "the files to tag" */
+    char   *Name;              /* the field's NAME, NULL when it has none */
 } BoxFormField;
 
 typedef struct {
@@ -166,6 +172,21 @@ int  form_parse(const char *text, size_t length, BoxForm *out);
 int  form_of_file(file_id_t program, BoxForm *out);
 void form_release(BoxForm *form);
 
+/* What an Itinerary was given under one of its fields' names. A step's word
+ * that is such a name — not quoted, not in a comma list — is what was given:
+ * files where files are taken (as `them` is; to a Form with no thing field
+ * the name is a plain word), words wherever words are taken, the words
+ * joined by single spaces in a text field, and the one word of a name or of
+ * an arrow's target. */
+typedef struct {
+    const char        *Name;
+    uint8_t            Things;     /* the field took files: Ids; else Words */
+    const file_id_t   *Ids;
+    size_t             IdCount;
+    const char *const *Words;
+    size_t             WordCount;
+} BoxFormGiven;
+
 /* How the filler sees the volume: the shell's lookups. Each answers a count
  * and an array the caller frees, or a negative -error_t. */
 typedef struct BoxFormLookup BoxFormLookup;
@@ -179,6 +200,8 @@ struct BoxFormLookup {
     const file_id_t *Them;     /* `them` all of it, `it` one of it: what the last command gave */
     size_t           ThemCount;
     bool             ThemKnown;
+    const BoxFormGiven *Given; /* the running Itinerary's fields, by name; none outside one */
+    size_t              GivenCount;
 };
 
 /* The volume as BoxLib sees it — names by their stem tag, held to the whole
@@ -234,6 +257,10 @@ int  form_fill_choose(BoxFormFiller *filler, file_id_t choice);
 int  form_fill_words(BoxFormFiller *filler, const char *words);
 /* ASK_SURE answered; no is a REFUSED. */
 int  form_fill_sure(BoxFormFiller *filler, bool yes);
+/* DONE: field N as filled — its files, or its words (a name and the text
+ * are one word each). The arrays live until the next call on the filler. */
+int  form_fill_field(BoxFormFiller *filler, uint32_t field, const file_id_t **ids, size_t *id_count,
+                     const char *const **words, size_t *word_count);
 /* The program's name as typed — word 0 of the Luggage, put before the line
  * the filler was given. Optional; before form_fill_luggage. */
 int  form_fill_program(BoxFormFiller *filler, const char *name);

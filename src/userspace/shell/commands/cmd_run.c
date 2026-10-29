@@ -1,5 +1,5 @@
 /*
- * run — start a program given as a thing rather than as a name.
+ * run — start a program (or an Itinerary) given as a thing rather than as a name.
  *
  *   run planets.elf        the file called planets.elf
  *   run it                 the program the last command gave back
@@ -13,6 +13,7 @@
 #include "../parser.h"
 #include "../program.h"
 #include "../fill.h"
+#include "../itinerary.h"
 #include "box/print.h"
 #include "box/memory.h"
 
@@ -27,8 +28,11 @@ int cmd_run(int argc, char *argv[])
     if (ProgramPickThing(argv[1], &program) != PROGRAM_PICKED)
         return 1;
 
-    char *name = ProgramNameOf(program);
-    FillAndRun(program, name ? name : argv[1], ParserRest(ExecutorLine(), 2));
+    char       *name = ProgramNameOf(program);
+    const char *who  = name ? name : argv[1];
+    const char *rest = ParserRest(ExecutorLine(), 2);
+    bool went = ProgramIsItinerary(program) ? ItineraryRun(program, who, rest)
+                                            : FillAndRun(program, who, rest);
     free(name);
-    return 0;
+    return went ? 0 : 1;
 }

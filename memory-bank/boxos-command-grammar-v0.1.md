@@ -48,6 +48,24 @@ when that fails nothing starts. A file that is gone makes nothing: the program
 starts as it was made, and the person is told. `assemble planets.elf` makes
 a program again by its Recipe without starting it.
 
+**Itinerary.** Steps of the shell kept in a file that wears `itinerary`: its
+first lines are its Form (`takes`, `gives`), every line after them a step, as
+if typed. It is started by name like any program — the same sorting, the same
+questions, `help NAME` shows it. A field's NAME (`takes words label "the tag
+they get"`) is, in every step, what the field was given: files where files
+are taken, words where words go. `them` begins as its first things field and
+goes on as the steps give; with `gives things`, `them` at the end is what it
+gave. A step that does not go through stops it ("tidy: step 2 (tag files
+label) did not go through; the rest is not done"). It has no conditions, so
+one that would run itself again is not started. An arrow on it goes into its
+`into` field; with none it is refused.
+
+```text
+takes thing source "the source"        tidy n1.txt, n2.txt done
+assemble source                        try planets.asm
+run it
+```
+
 **Asking.** Only when it must, before the program starts: a name that is
 more than one file ("which one? (a number)"), a required field left empty
 ("tag: the tags they get?", with "there is no helo.asm here" for a typo),

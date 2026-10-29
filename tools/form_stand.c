@@ -122,6 +122,8 @@ static int         g_find_calls;
 static file_id_t   g_them[4];
 static size_t      g_them_count;
 static bool        g_them_known;
+static const BoxFormGiven *g_given;
+static size_t              g_given_count;
 
 static int stand_find(BoxFormLookup *lookup, const char *name, bool everywhere, file_id_t **ids)
 {
@@ -203,6 +205,8 @@ static void reset_volume(void)
     g_find_calls  = 0;
     g_them_count  = 0;
     g_them_known  = false;
+    g_given       = NULL;
+    g_given_count = 0;
 }
 
 static void set_them(const file_id_t *ids, size_t count)
@@ -289,7 +293,8 @@ static void run(const char *label, const char *form_text, const char *line, cons
                 const char *const *answers, char *result)
 {
     BoxForm        form;
-    BoxFormLookup  lookup = { stand_find, stand_all, g_them, g_them_count, g_them_known };
+    BoxFormLookup  lookup = { stand_find, stand_all, g_them, g_them_count, g_them_known,
+                              g_given, g_given_count };
     BoxFormFiller *filler;
     BoxFormQuestion question;
 
@@ -521,7 +526,7 @@ static void check_luggage(const char *label, const char *form_text, const char *
                           bool souvenir, const char *want, size_t want_length)
 {
     BoxForm        form;
-    BoxFormLookup  lookup = { stand_find, stand_all, g_them, g_them_count, g_them_known };
+    BoxFormLookup  lookup = { stand_find, stand_all, g_them, g_them_count, g_them_known, NULL, 0 };
     BoxFormFiller *filler;
     BoxFormQuestion question;
     char          *bytes;
@@ -712,7 +717,7 @@ static void test_form_refused(void)
     check_int("refuse optional only", parse("form 1\ntakes optional\n", &form), bad);
     check_int("refuse open quote", parse("form 1\ntakes words \"w\n", &form), bad);
     check_int("refuse junk after what", parse("form 1\ntakes words \"w\" more\n", &form), bad);
-    check_int("refuse what not quoted", parse("form 1\ntakes words w\n", &form), bad);
+    check_int("refuse what not quoted", parse("form 1\ntakes words the tags\n", &form), bad);
     check_int("refuse null", form_parse(NULL, 0, &form), bad);
     check_int("refuse no out", form_parse("form 1\n", 7, NULL), bad);
     check_int("refused leaves nothing", form.Declared, 0);
@@ -751,7 +756,7 @@ static void test_lookup_trouble(void)
     reset_volume();
 
     BoxForm        form;
-    BoxFormLookup  lookup = { stand_find, stand_all, g_them, 0, false };
+    BoxFormLookup  lookup = { stand_find, stand_all, g_them, 0, false, NULL, 0 };
     BoxFormFiller *filler;
     BoxFormQuestion question;
 
@@ -802,7 +807,7 @@ static void test_undeclared(void)
 {
     reset_volume();
     BoxForm        form;
-    BoxFormLookup  lookup = { stand_find, stand_all, g_them, 0, false };
+    BoxFormLookup  lookup = { stand_find, stand_all, g_them, 0, false, NULL, 0 };
     BoxFormFiller *filler;
     BoxFormQuestion question;
     char          *bytes;
@@ -963,6 +968,82 @@ static void test_cut(void)
     form_line_release(&tokens);
 }
 
+/* An Itinerary's steps: the names of its fields are what it was given. */
+static void test_given(void)
+{
+    static const file_id_t   two[] = { 1, 2 }, one[] = { 9 };
+    static const char *const label[]  = { "done", "urgent" };
+    static const char *const rename[] = { "idea.txt" };
+    static const BoxFormGiven given[] = {
+        { "files", 1, two, 2, NULL, 0 },     { "first", 1, one, 1, NULL, 0 },
+        { "nothing", 1, NULL, 0, NULL, 0 },  { "label", 0, NULL, 0, label, 2 },
+        { "newname", 0, NULL, 0, rename, 1 }, { "empty", 0, NULL, 0, NULL, 0 },
+    };
+
+    reset_volume();
+    g_given       = given;
+    g_given_count = sizeof(given) / sizeof(given[0]);
+    expect(TAG, "files label", NULL, "=> things(#1 #2) words(=done =urgent)");
+    expect(TAG, "label files", NULL, "=> things(#1 #2) words(=done =urgent)");
+    expect(TAG, "first a.txt label", NULL, "=> things(#9 #1) words(=done =urgent)");
+    expect(TAG, "files label more", NULL, "=> things(#1 #2) words(=done =urgent =more)");
+    expect(TAG, "files empty", NULL, "FIELD(1:-) UNANSWERED");
+    expect(RENAME, "first newname", NULL, "=> thing(#9) name(=idea.txt)");
+    expect(RENAME, "files newname", NULL, "WHICH(files:2) UNANSWERED");
+    expect(RENAME, "first label", NULL, "REFUSED: label is more than one word, and a name is one");
+    expect(RENAME, "first empty", NULL, "REFUSED: empty was given no word, and a name is one");
+    expect(SAY, "hello label world", NULL, "=> text(=hello done urgent world)");
+    expect(SAY, "files and label", NULL, "=> text(=files and done urgent)");
+    expect(SAY, "\"label\" label", NULL, "=> text(=\"label\" done urgent)");
+    expect(NOTE, "first hello label", NULL, "=> thing(#9) text(=hello done urgent)");
+    expect(WORDS, "label files", NULL, "=> words(=done =urgent =files)");
+    expect(TAG, "nothing label", NULL, "FIELD(0:nothing was given no files) UNANSWERED");
+    expect(TAG, "a.txt nothing label", NULL, "REFUSED: nothing was given no files");
+    expect(TAG, "\"label\" a.txt", NULL, "=> things(#1) words(=label)");
+    expect(TAG, "a.txt, files done", NULL, "REFUSED: there is no files here");
+    expect(TAG, "files label -> newname", NULL, "=> things(#1 #2) words(=done =urgent) create=idea.txt");
+    expect(TAG, "files label -> label", NULL,
+           "REFUSED: -> wants a name after it, and label stands for more than one word");
+    expect(TAG, "files label -> files", NULL, "REFUSED: -> wants a name after it, and files stands for files");
+    expect(TAG, "files label -> empty", NULL, "REFUSED: -> wants a name after it, and empty stands for no word");
+    expect(COPY, "first -> newname", NULL, "=> thing(#9) into(=idea.txt)");
+    const char *tags[] = { "words:label", NULL };
+    expect(TAG, "files", tags, "FIELD(1:-) => things(#1 #2) words(=done =urgent)");
+    const char *pick[] = { "which:2", NULL };
+    expect(TAG, "it files label", NULL, "REFUSED: nothing was given before");
+    expect(RENAME, "files newname", pick, "WHICH(files:2) => thing(#2) name(=idea.txt)");
+    reset_volume();
+}
+
+static void test_given_names(void)
+{
+    BoxForm form;
+
+    check_int("names good", parse("form 1\ntakes things files \"the files\"\ntakes optional words label_2 \"w\"\n",
+                                  &form), 0);
+    check_text("name 0", form.Fields[0].Name, "files");
+    check_text("name 1", form.Fields[1].Name, "label_2");
+    check_text("name what", form.Fields[1].What, "w");
+    check_int("name optional", form.Fields[1].Optional, 1);
+    form_release(&form);
+    check_int("name no what", parse("form 1\ntakes words label\n", &form), 0);
+    check_text("name no what name", form.Fields[0].Name, "label");
+    check_text("name no what what", form.Fields[0].What, "");
+    form_release(&form);
+    check_int("no name", parse("form 1\ntakes words \"w\"\n", &form), 0);
+    check_int("no name is null", form.Fields[0].Name == NULL, 1);
+    form_release(&form);
+    check_int("name digit first", parse("form 1\ntakes words 9x \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name them", parse("form 1\ntakes things them \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name everywhere", parse("form 1\ntakes words everywhere \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name dash", parse("form 1\ntakes words la-bel \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name dot", parse("form 1\ntakes words a.txt \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name twice", parse("form 1\ntakes words a \"w\"\ntakes things a \"t\"\n", &form),
+              -ERR_INVALID_ARGUMENT);
+    check_int("name two words", parse("form 1\ntakes words a b \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name after what", parse("form 1\ntakes words \"w\" a\n", &form), -ERR_INVALID_ARGUMENT);
+}
+
 static void test_screen_file(void)
 {
     static const char bytes[] = "tag a.txt\0filled 1\0field things\0#1\0screen #42\0";
@@ -1019,6 +1100,8 @@ int main(void)
     test_undeclared();
     test_screen_file();
     test_souvenir_wanted();
+    test_given();
+    test_given_names();
     printf("form: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

@@ -8,11 +8,15 @@
  * the kernel starts when it is given a name or a file id. */
 bool ProgramIsRunnable(file_id_t id);
 
+/* An Itinerary: an active file that wears itinerary, whose steps the shell
+ * runs (itinerary.h). */
+bool ProgramIsItinerary(file_id_t id);
+
 /* The file's name, a heap string the caller frees; NULL when it cannot be read. */
 char *ProgramNameOf(file_id_t id);
 
-/* The file's name when it is a program, a heap string the caller frees; NULL
- * when it is not one or cannot be read. */
+/* The file's name when it is a command — a program or an Itinerary — a heap
+ * string the caller frees; NULL when it is not one or cannot be read. */
 char *ProgramRunnableName(file_id_t id);
 
 /* How a pick ended. A negative value is an -error_t and nothing was said. */
@@ -20,7 +24,7 @@ char *ProgramRunnableName(file_id_t id);
 #define PROGRAM_SAID       1   /* the person was told why there is no program */
 
 /* The program a command NAME means: the files wearing the tag NAME that are
- * programs. One is taken; several are asked which; none is
+ * programs or Itineraries. One is taken; several are asked which; none is
  * -ERR_FILE_NOT_FOUND, said by the caller. */
 int ProgramPick(const char *name, file_id_t *program);
 

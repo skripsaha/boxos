@@ -12,6 +12,7 @@
 #include "parser.h"
 #include "program.h"
 #include "fill.h"
+#include "itinerary.h"
 #include "suggest.h"
 #include "box/string.h"
 #include "box/error.h"
@@ -49,19 +50,21 @@ const ShellCommand g_commands[] = {
 /* The programs the name means are found the way the kernel would find them
  * and the person is asked which when there are several. The words after the
  * name are sorted into the program's Form (fill.c), which starts it and waits
- * for its end. 0 when the command was handled, and anything it had to say was
- * said; else the reason no program was found. */
+ * for its end — or into an Itinerary's, whose steps then run (itinerary.c).
+ * 0 when it went through, 1 when it did not and why was said; else the
+ * reason no program was found. */
 static int RunExternal(const char *name, const char *line)
 {
     file_id_t program;
     int picked = ProgramPick(name, &program);
     if (picked == PROGRAM_SAID)
-        return 0;
+        return 1;
     if (picked < 0)
         return picked;
-
-    FillAndRun(program, name, ParserRest(line, 1));
-    return 0;
+    const char *rest = ParserRest(line, 1);
+    bool went = ProgramIsItinerary(program) ? ItineraryRun(program, name, rest)
+                                            : FillAndRun(program, name, rest);
+    return went ? 0 : 1;
 }
 
 /* The names close to the one typed, on a line of their own after the message;
@@ -94,16 +97,22 @@ int ExecutorRun(ParsedCommand *cmd, const char *line)
 
     const char *name = cmd->argv[0];
 
-    /* Check built-in commands */
+    /* Check built-in commands. What a command said is said: a line run inside
+     * it (an Itinerary's step) leaves no sentence here to be said twice. */
     for (int i = 0; g_commands[i].name != NULL; i++) {
-        if (strcmp(name, g_commands[i].name) == 0)
-            return g_commands[i].handler(cmd->argc, cmd->argv);
+        if (strcmp(name, g_commands[i].name) == 0) {
+            int rc = g_commands[i].handler(cmd->argc, cmd->argv);
+            g_error[0] = '\0';
+            return rc;
+        }
     }
 
     /* Try external utility */
     int rc = RunExternal(name, line);
-    if (rc == 0)
-        return 0;
+    if (rc >= 0) {
+        g_error[0] = '\0';
+        return rc;
+    }
 
     /*
      * ‼ SAY WHICH OF THE TWO THINGS HAPPENED.

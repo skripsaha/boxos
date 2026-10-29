@@ -93,6 +93,47 @@ static int take_what(FormCursor *cursor, char **what)
     return 0;
 }
 
+static bool letter(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+/* A field's NAME: a letter, then letters, digits and '_'; none of the
+ * shell's own words; no other field's. */
+static bool name_usable(const BoxForm *form, const char *name, size_t length)
+{
+    static const char *const shell_words[] = { "them", "it", "all", "everywhere" };
+
+    if (length == 0 || !letter(name[0])) return false;
+    for (size_t i = 1; i < length; i++) {
+        if (!letter(name[i]) && !(name[i] >= '0' && name[i] <= '9') && name[i] != '_') return false;
+    }
+    for (size_t i = 0; i < sizeof(shell_words) / sizeof(shell_words[0]); i++) {
+        if (word_is(name, length, shell_words[i])) return false;
+    }
+    for (uint32_t i = 0; i < form->FieldCount; i++) {
+        if (form->Fields[i].Name && word_is(name, length, form->Fields[i].Name)) return false;
+    }
+    return true;
+}
+
+/* The NAME between KIND and "what it is", when there is one. */
+static int take_name(FormCursor *cursor, const BoxForm *form, char **name)
+{
+    *name = NULL;
+    skip_blanks(cursor);
+    if (cursor->At >= cursor->End || *cursor->At == '"') return 0;
+
+    const char *word;
+    size_t      length = take_word(cursor, &word);
+    if (!name_usable(form, word, length)) return -ERR_INVALID_ARGUMENT;
+    *name = malloc(length + 1);
+    if (!*name) return -ERR_NO_MEMORY;
+    memcpy(*name, word, length);
+    (*name)[length] = '\0';
+    return 0;
+}
+
 static int parse_takes(FormCursor *cursor, BoxForm *out)
 {
     const char *word;
@@ -106,14 +147,21 @@ static int parse_takes(FormCursor *cursor, BoxForm *out)
     int kind = form_kind_of(word, length);
     if (kind < 0 || out->FieldCount >= BOX_FORM_FIELDS) return -ERR_INVALID_ARGUMENT;
 
+    char *name;
     char *what;
-    int rc = take_what(cursor, &what);
+    int rc = take_name(cursor, out, &name);
     if (rc != 0) return rc;
+    rc = take_what(cursor, &what);
+    if (rc != 0) {
+        free(name);
+        return rc;
+    }
 
     BoxFormField *field = &out->Fields[out->FieldCount++];
     field->Kind     = (uint8_t)kind;
     field->Optional = optional;
     field->What     = what;
+    field->Name     = name;
     return 0;
 }
 
@@ -172,7 +220,10 @@ int form_parse(const char *text, size_t length, BoxForm *out)
 void form_release(BoxForm *form)
 {
     if (!form) return;
-    for (uint32_t i = 0; i < form->FieldCount; i++) free(form->Fields[i].What);
+    for (uint32_t i = 0; i < form->FieldCount; i++) {
+        free(form->Fields[i].What);
+        free(form->Fields[i].Name);
+    }
     memset(form, 0, sizeof(*form));
 }
 

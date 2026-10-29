@@ -4,7 +4,8 @@
  * The rule is the kernel's (SysExecCandidate): a file counts as a program
  * when it is active and wears app or utility. The shell holds the files that
  * wear the name to the same rule before it asks the kernel to start one, so
- * what it lists is exactly what would start.
+ * what it lists is exactly what would start. An active file that wears
+ * itinerary is a command too: the shell runs its steps itself.
  */
 
 #include "program.h"
@@ -40,6 +41,18 @@ static bool IsProgram(const FileMetadata *metadata)
            (WearsKey(metadata->Tags, "app") || WearsKey(metadata->Tags, "utility"));
 }
 
+static bool IsItinerary(const FileMetadata *metadata)
+{
+    return (metadata->Flags & PROGRAM_FILE_ACTIVE) && metadata->Tags &&
+           WearsKey(metadata->Tags, "itinerary");
+}
+
+/* Whether the file is a command: a program, or an Itinerary. */
+static bool IsCommand(const FileMetadata *metadata)
+{
+    return IsProgram(metadata) || IsItinerary(metadata);
+}
+
 bool ProgramIsRunnable(file_id_t id)
 {
     FileMetadata metadata;
@@ -47,6 +60,15 @@ bool ProgramIsRunnable(file_id_t id)
     bool runnable = IsProgram(&metadata);
     FileMetadataRelease(&metadata);
     return runnable;
+}
+
+bool ProgramIsItinerary(file_id_t id)
+{
+    FileMetadata metadata;
+    if (FileMetadataRead(id, &metadata) != 0) return false;
+    bool itinerary = IsItinerary(&metadata);
+    FileMetadataRelease(&metadata);
+    return itinerary;
 }
 
 static char *CopyName(const FileMetadata *metadata)
@@ -71,12 +93,12 @@ char *ProgramRunnableName(file_id_t id)
 {
     FileMetadata metadata;
     if (FileMetadataRead(id, &metadata) != 0) return NULL;
-    char *name = IsProgram(&metadata) ? CopyName(&metadata) : NULL;
+    char *name = IsCommand(&metadata) ? CopyName(&metadata) : NULL;
     FileMetadataRelease(&metadata);
     return name;
 }
 
-/* Of the files in `ids`, those that are programs, kept in place; *unread the
+/* Of the files in `ids`, those that are commands, kept in place; *unread the
  * first refusal met reading one, 0 when each was read. A name whose files the
  * volume will not show — its medium gone — is there and would not start, not
  * a name nobody has. */
@@ -91,7 +113,7 @@ static size_t KeepPrograms(file_id_t *ids, size_t count, int *unread)
             if (*unread == 0) *unread = rc;
             continue;
         }
-        if (IsProgram(&metadata)) ids[kept++] = ids[i];
+        if (IsCommand(&metadata)) ids[kept++] = ids[i];
         FileMetadataRelease(&metadata);
     }
     return kept;
@@ -172,8 +194,8 @@ int ProgramPickThing(const char *thing, file_id_t *program)
     int  rc = themselves ? PickFromThem(thing, program) : PickFromName(thing, program);
     if (rc != PROGRAM_PICKED) return rc;
 
-    if (!ProgramIsRunnable(*program)) {
-        printf("run: %s is not a program: it wears neither app nor utility\n", thing);
+    if (!ProgramIsRunnable(*program) && !ProgramIsItinerary(*program)) {
+        printf("run: %s is not a program: it wears neither app, utility nor itinerary\n", thing);
         return PROGRAM_SAID;
     }
     return PROGRAM_PICKED;

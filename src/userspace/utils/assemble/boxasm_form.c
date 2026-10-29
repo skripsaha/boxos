@@ -73,8 +73,36 @@ static int BoxAsmFormWhat(BoxAsmAssembler *Asm, const BoxAsmToken *Token, BoxAsm
     return 0;
 }
 
+/* A field's NAME, as box/form.h has it: a letter, then letters, digits and
+ * '_'; none of the shell's words; no other field's. */
+static int BoxAsmFormName(BoxAsmAssembler *Asm, const BoxAsmToken *Token)
+{
+    static const char *const ShellWords[] = { "them", "it", "all", "everywhere" };
+    size_t Index;
+    size_t At;
+
+    for (Index = 0; Index < Token->Length; Index++) {
+        char C = Token->Text[Index];
+        int Letter = (C >= 'a' && C <= 'z') || (C >= 'A' && C <= 'Z');
+
+        if (!Letter && (Index == 0 || !((C >= '0' && C <= '9') || C == '_')))
+            return BoxAsmFormFail(Asm, Token, "'", "' cannot name a field: a letter first, then "
+                                                    "letters, digits and _");
+    }
+    for (Index = 0; Index < sizeof(ShellWords) / sizeof(ShellWords[0]); Index++)
+        if (BoxAsmTokenIs(Token, ShellWords[Index]))
+            return BoxAsmFormFail(Asm, Token, "'", "' is the shell's own word and names no field");
+    for (At = 0; At < Asm->Form.Names.Size; At += strlen((const char *)Asm->Form.Names.Data + At) + 1u)
+        if (BoxAsmTokenIs(Token, (const char *)Asm->Form.Names.Data + At))
+            return BoxAsmFormFail(Asm, Token, "'", "' names a field already");
+    if (BoxAsmBufferAppend(&Asm->Form.Names, Token->Text, Token->Length) != 0 ||
+        BoxAsmBufferAppend(&Asm->Form.Names, "", 1u) != 0)
+        return -ERR_NO_MEMORY;
+    return 0;
+}
+
 static int BoxAsmFormTakesLine(BoxAsmAssembler *Asm, uint8_t Optional, size_t Kind,
-                               const BoxAsmBuffer *What)
+                               const BoxAsmToken *FieldName, const BoxAsmBuffer *What)
 {
     const char *Name = BoxAsmFormKinds[Kind];
     int Rc = BoxAsmFormAppend(Asm, "takes ", 6u);
@@ -83,6 +111,10 @@ static int BoxAsmFormTakesLine(BoxAsmAssembler *Asm, uint8_t Optional, size_t Ki
         Rc = BoxAsmFormAppend(Asm, "optional ", 9u);
     if (Rc == 0)
         Rc = BoxAsmFormAppend(Asm, Name, strlen(Name));
+    if (Rc == 0 && FieldName)
+        Rc = BoxAsmFormAppend(Asm, " ", 1u);
+    if (Rc == 0 && FieldName)
+        Rc = BoxAsmFormAppend(Asm, FieldName->Text, FieldName->Length);
     if (Rc == 0)
         Rc = BoxAsmFormAppend(Asm, " \"", 2u);
     if (Rc == 0)
@@ -92,11 +124,13 @@ static int BoxAsmFormTakesLine(BoxAsmAssembler *Asm, uint8_t Optional, size_t Ki
     return Rc;
 }
 
-/* takes [optional] KIND "what it is" */
+/* takes [optional] KIND [NAME] "what it is" */
 static int BoxAsmParseTakes(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
                             const BoxAsmToken *Word)
 {
     BoxAsmBuffer What = { 0 };
+    BoxAsmToken FieldName;
+    int Named = 0;
     uint8_t Optional = 0;
     size_t Kind;
     int Rc;
@@ -119,8 +153,15 @@ static int BoxAsmParseTakes(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToke
                           "a Form takes into once: the name the arrow points at is one", NULL);
     if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
         return Rc;
+    if (Token->Kind == BOXASM_TOKEN_IDENTIFIER) {
+        FieldName = *Token;
+        Named = 1;
+        if ((Rc = BoxAsmFormName(Asm, &FieldName)) != 0 ||
+            (Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+            return Rc;
+    }
     if ((Rc = BoxAsmFormWhat(Asm, Token, &What)) == 0 &&
-        (Rc = BoxAsmFormTakesLine(Asm, Optional, Kind, &What)) == 0) {
+        (Rc = BoxAsmFormTakesLine(Asm, Optional, Kind, Named ? &FieldName : NULL, &What)) == 0) {
         Asm->Form.Takes++;
         Asm->Form.Into |= Kind == BOXASM_FORM_KIND_INTO;
         Rc = BoxAsmNextToken(Asm, Lexer, Token);

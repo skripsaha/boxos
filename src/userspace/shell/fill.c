@@ -10,6 +10,7 @@
 
 #include "fill.h"
 #include "ask.h"
+#include "itinerary.h"
 #include "remake.h"
 #include "them.h"
 #include "box/form.h"
@@ -207,27 +208,52 @@ static int ReadForm(file_id_t program, const char *who, BoxForm *form)
     return FILL_STOPPED;
 }
 
-void FillAndRun(file_id_t program, const char *who, const char *line)
+void FillLookup(BoxFormLookup *lookup)
 {
-    if (!RemakeWhenChanged(&program, who)) return;
+    form_lookup_volume(lookup);
+    ThemShow(lookup);
+    ItineraryShow(lookup);
+}
+
+bool FillForm(const BoxForm *form, BoxFormLookup *lookup, const char *who, const char *line,
+              BoxFormFiller **out)
+{
+    BoxFormFiller *filler = NULL;
+    int rc = form_fill_begin(form, line, lookup, &filler);
+    if (rc == 0) rc = FillLine(filler, form, who);
+    if (rc < 0) SayFailed(who, "could not be started", rc);
+    if (rc != 0) {
+        if (filler) form_fill_end(filler);
+        *out = NULL;
+        return false;
+    }
+    *out = filler;
+    return true;
+}
+
+bool FillAndRun(file_id_t program, const char *who, const char *line)
+{
+    if (!RemakeWhenChanged(&program, who)) return false;
 
     BoxForm form;
-    if (ReadForm(program, who, &form) != 0) return;
+    if (ReadForm(program, who, &form) != 0) return false;
 
     BoxFormLookup  lookup;
-    BoxFormFiller *filler = NULL;
-    FillEnd        end;
-    form_lookup_volume(&lookup);
-    ThemShow(&lookup);
-
-    int rc = form_fill_begin(&form, line, &lookup, &filler);
-    if (rc == 0) rc = FillLine(filler, &form, who);
-    if (rc == 0) rc = Launch(filler, &form, program, who, &end);
-    if (rc == 0) KeepGift(&end);
-    if (rc < 0) SayFailed(who, "could not be started", rc);
-
-    if (filler) form_fill_end(filler);
+    BoxFormFiller *filler;
+    bool           went = false;
+    FillLookup(&lookup);
+    if (FillForm(&form, &lookup, who, line, &filler)) {
+        FillEnd end;
+        int     rc = Launch(filler, &form, program, who, &end);
+        if (rc == 0) {
+            went = end.Ended && end.ExitCode == 0;
+            KeepGift(&end);
+        }
+        if (rc < 0) SayFailed(who, "could not be started", rc);
+        form_fill_end(filler);
+    }
     form_release(&form);
+    return went;
 }
 
 bool FillAndRunOn(file_id_t program, const char *who, file_id_t thing, file_id_t *given)
