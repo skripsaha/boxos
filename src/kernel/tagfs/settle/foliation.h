@@ -32,12 +32,20 @@
 typedef struct {
     TallyPlace place;
     bool       relay;       /* laid again by the next Tally, whatever its keys */
+    uint64_t   items;       /* a leaf: the runs its Parcels carry (FILES), the tags it holds (TAGS) */
+    uint64_t   text;        /* ... and the bytes of their keys and values (TAGS) */
 } FoliationNode;
 
 /* The mount: a node of `tree` of the Tally of `seq` it stands on, at `at` —
  * or one of them a copy of which did not hold, laid again by the next Tally. */
 void        FoliationNoted(uint64_t tree, const TallyPlace* at, uint64_t seq);
 void        FoliationRelay(uint64_t tree, const TallyPlace* at);
+
+/* The mount: what the leaf of `tree` it noted last holds more — `items` runs
+ * of a Parcel of FILES or tags of TAGS, `text` bytes of their keys and values
+ * — as its walk reads the leaf (the reserve's measure by the Tally before,
+ * endpaper_fact.h, counts the leaves a Tally laid in names as they lie). */
+void        FoliationLeafHolds(uint64_t tree, uint64_t items, uint64_t text);
 
 /* Why the Tally the next one is laid against is not known, or NULL. */
 const char* FoliationLost(void);
@@ -46,17 +54,37 @@ const char* FoliationLost(void);
  * USE: false past its last. */
 bool        FoliationLeafAt(uint64_t tree, uint32_t index, TallyPlace* out);
 
+/* The nodes of `tree` of that Tally — its leaves in key order, its inner
+ * nodes in the order they came — *n of them; NULL for none. */
+const FoliationNode* FoliationLeaves(uint64_t tree, uint32_t* n);
+const FoliationNode* FoliationInner(uint64_t tree, uint32_t* n);
+
+/* The inner nodes of `tree` at `level` (>= 1) of that Tally, in key order — *n
+ * of them; NULL for none. The inner nodes FoliationInner gives are then in
+ * order of level and key. */
+const FoliationNode* FoliationLevel(uint64_t tree, uint64_t level, uint32_t* n);
+
+/* The Sheets of one copy of every node of FILES, TAGS and USE and every inner
+ * node of DIGESTS that Tally holds not sealed at `seq`: what of its book the
+ * Tally of `seq` named as it lay — counted as a mount counts its book
+ * (book_ground.c, BookGroundNodeOf), Sheets and no atom. */
+uint64_t    FoliationBlocksOlder(uint64_t seq);
+
 /* Everything Foliation holds let go — a mount begun, the volume let go of. */
 void        FoliationLetGo(void);
 
 /* The Tally under way, by the Settle's holder: its draft begun; a node of
  * `tree` at `level` it names — its first key `key` and the count it carries,
- * its pointer `ptr` — in key order a level at a time, `root` for a tree's
- * root; at its DONE the draft the Foliation — `digests` when the reads were
- * turned to its DIGESTS; refused, the draft let go. */
+ * its pointer `ptr`, and a leaf what it holds (FoliationNode) — in key order
+ * a level at a time, `root` for a tree's root; every node of the Tally before under `top`, an inner node it names as
+ * it lies, taken into the draft as it was (a tree whose root it names as it
+ * lies has `root` named so too); at its DONE the draft the Foliation —
+ * `digests` when the reads were turned to its DIGESTS; refused, the draft let
+ * go. */
 void        FoliationDraftBegin(void);
 void        FoliationDraftNode(uint64_t tree, uint64_t level, TallyKey key, bool root, uint64_t count,
-                               const TallyPtr* ptr);
+                               const TallyPtr* ptr, uint64_t items, uint64_t text);
+void        FoliationDraftUnder(uint64_t tree, const TallyPlace* top);
 void        FoliationDraftDone(uint64_t seq, bool digests);
 void        FoliationDraftLetGo(void);
 

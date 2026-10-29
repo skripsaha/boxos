@@ -22,6 +22,12 @@
  * birth_delta), so the Tally before's Parcel is spelled again from this
  * Tally's seq before the two are held to each other.
  *
+ * A Tally laid in among the nodes of the one before it (TipIn) is held the
+ * same way, every element: where it checks, its slice is every file and its
+ * walk hands every element of the state — the ones under a node it names as
+ * it lies too, held here and then not laid (binder_nodes.c) — so a key that
+ * changed outside DogEar is found under a node a Tally laid in would keep.
+ *
  * The Tally before is read through the Foliation — its leaves of FILES, TAGS
  * and USE — and the reads' own table of DIGESTS leaves, a leaf at a time as
  * the keys come to it: every leaf of it read once a Tally, the cost of reading

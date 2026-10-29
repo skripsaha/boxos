@@ -18,7 +18,8 @@
  *   spine     every slot of the ring, whatever it holds
  *   tally     every node of every Tally a slot that holds names, every copy
  *             its pointer names — a rotten one too: its parent names those
- *             blocks
+ *             blocks — and what no owner names of each Tally-Quire one of
+ *             them lies in (GroundQuiresHeld)
  *   ribbon    the Quires the ribbon of each such slot runs through, and
  *             the next_quire it names where one may be named (ribbon.h)
  *   file      every DATA run of every live file, as the Tally and the
@@ -406,7 +407,11 @@ error_t BookGroundCensus(const char** what)
         return rc;
     }
     g_book.bookmarked = BookBookmarked();
-    rc = GroundCensusBook(&g_book.said.held, &g_book.said.fallow, !g_book.bookmarked, what);
+    rc = GroundQuiresHeld(g_book.stood->ribbon.quire_blocks);
+    if (rc == OK)
+        rc = GroundCensusBook(&g_book.said.held, &g_book.said.fallow, !g_book.bookmarked, what);
+    else
+        *what = "there is no memory to hold its Tallies' Quires whole";
     if (rc == OK)
         rc = BookFallowCut(what);
     if (rc == OK)

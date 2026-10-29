@@ -16,7 +16,8 @@
  *   binder.c        the Tally's steps — TALLY_TAKE, TALLY_NODES, TALLY_FLUSH,
  *                   TALLY_SLOT, TALLY_SLOT_FLUSH, TALLY_DONE — when one is
  *                   owed (TALLY_SLACK, SETTLE_DEMAND_TALLY), the slot, and the
- *                   ground the slots stop holding (SpineHolds, FALLOW_BY_SPINE)
+ *                   ground the slots stop holding (FALLOW_BY_SPINE: a
+ *                   Tally-Quire whole, once no slot names a node in it)
  *   binder_slice.c  the slice a Tally is written of, and the ground DIGESTS
  *                   speaks for
  *   binder_done.c   a Tally's DONE, and a slot whose write was refused held as
@@ -62,10 +63,12 @@ typedef enum {
  * ‼ TALLY_SLACK — A POLICY, NOT A DERIVATION (§4.2): a Tally is owed once the
  * useful bytes of the ribbon past the newest slot's `at` — the records of the
  * stitches, from their StitchHead to their Clasp, not the sectors' heads nor
- * the PAD — reach TALLY_SLACK times what the next Tally costs: its nodes in
- * both copies and its slot, 4 KiB a block. At 1 the metadata a write puts on
- * the medium is at most twice its useful bytes, and the ribbon a mount
- * replays is never longer than a Tally.
+ * the PAD — reach TALLY_SLACK times what the next Tally costs: the nodes it
+ * lays in both copies and its slot, 4 KiB a block — laid in, the leaves the
+ * keys changed since meet and their path, never more than the whole book
+ * (binder_cost.c, §16.5 п.16). At 1 the metadata a write puts on the medium
+ * is at most twice its useful bytes, and the ribbon a mount replays is never
+ * longer than a Tally.
  */
 #define TALLY_SLACK  1u
 
@@ -175,14 +178,6 @@ uint64_t    BinderRingShort(uint64_t tally, uint64_t quire);
  * ERR_NO_MEMORY. */
 error_t     BinderRotten(uint64_t tree, const TallyPlace* at);
 
-/*
- * SpineHolds — the ground of the volume's Tallies (FALLOW_BY_SPINE, §3.4,
- * M-7): whether a node born at `birth` (its pointer's seq) that the Tally
- * `death` first stopped naming is held by a slot — one whose Tally's seq lies
- * in [birth, death). UINT64_MAX for `death` is a node every Tally still names.
- */
-bool        SpineHolds(uint64_t birth, uint64_t death);
-
 /* --- births.c ------------------------------------------------------------ */
 
 /*
@@ -238,22 +233,33 @@ typedef struct {
     uint64_t count;
 } BinderGround;
 
-/* A node of the Tally stood on that no copy of reads, named by the next Tally
- * as it lies (§16.4 п.5). */
+/*
+ * BinderKept — a node of the Tally before named by a Tally as it lies, by the
+ * pointer, the separator and the count its parent gave it (§16.4 п.5, §16.5
+ * п.16): one no copy of which reads (`rotten`), or one nothing under which
+ * changed (TipIn, tip_in.h). Of these, a leaf beside a row laid anew
+ * (`margin`) is taken into the row by the Tally's measure when the row comes
+ * to less than half a Sheet (`taken`: laid with it, no longer named).
+ */
 typedef struct {
     uint64_t   tree;
     TallyPlace at;
-} BinderRot;
+    bool       rotten;
+    bool       margin;
+    bool       taken;
+    uint64_t   items;       /* a leaf: what it holds, as Foliation knows it (foliation.h) */
+    uint64_t   text;
+} BinderKept;
 
 /* A node as the level above names it: its first key, the count it carries,
- * its Sheets and its place in the two runs — or, a rotten node named as it
- * lies, the pointer it is named by. */
+ * its Sheets and the blocks of its two copies. */
 typedef struct {
-    TallyKey         key;
-    uint64_t         count;
-    uint64_t         sheets;
-    uint64_t         off;
-    const BinderRot* rot;
+    TallyKey key;
+    uint64_t count;
+    uint64_t sheets;
+    uint64_t block[2];
+    uint64_t items;      /* a leaf laid: what it holds (FoliationNode) */
+    uint64_t text;
 } BinderKid;
 
 typedef struct {
@@ -264,13 +270,13 @@ typedef struct {
 
 #define BINDER_LEVELS_MOST  24u     /* a tree of 200 a node is shallower than this for any volume */
 
-/* A tree's root as the slot names it. */
+/* A tree's root as the slot names it: one laid, or the root of the Tally
+ * before named as it lies — a tree nothing changed in. */
 typedef struct {
     bool     laid;
     uint64_t level;
     uint64_t items;
-    uint64_t sheets;
-    uint64_t off;
+    TallyPtr ptr;
 } BinderRoot;
 
 /* The element handed to the node being filled. */
@@ -279,7 +285,17 @@ typedef struct {
     uint64_t count;
     uint8_t* body;
     uint32_t len;
+    uint32_t text;       /* a tag: the bytes of its key and value */
 } BinderItem;
+
+/* Where a walk of DIGESTS' elements over a ground stands: the run in hand, the
+ * next block looked at, and the first of the tree's nodes named as they lie
+ * not behind it — a rotten range's elements are left out (binder_items.c). */
+typedef struct {
+    uint64_t ground;
+    uint64_t next;
+    uint32_t rot;
+} BinderDigestAt;
 
 /* The elements of the tree being laid, as they come (binder_items.c). */
 typedef struct {
@@ -294,8 +310,10 @@ typedef struct {
     bool         kept_head;
     uint32_t     tag;            /* TAGS: the next id looked for */
     bool         use;            /* USE: handed */
-    uint64_t     ground;         /* DIGESTS: the run of ground, and the block in it */
-    uint64_t     next;
+    BinderDigestAt digest;       /* DIGESTS: the walk over the ground — and a STRICT kernel's laid in, ... */
+    BinderDigestAt tip_at;       /* ... its walk over the ground the Tally laid in speaks for, the range it */
+    uint64_t     tip_range;      /* ... lays and offers the next element is looked for in, and its body */
+    uint8_t*     tip_buf;
     BinderItem   item;           /* the element handed and not yet in a node */
     bool         held;
     uint8_t*     buf;            /* its body */
@@ -314,6 +332,8 @@ typedef struct {
     TallyKey  first;
     TallyKey  last;
     uint64_t  count;
+    uint64_t  items;     /* a leaf: the runs of its Parcels, or its tags, and their text */
+    uint64_t  text;
 } BinderFill;
 
 /* A slot's unit as a write of it sealed it — its eight sectors — kept while
@@ -338,6 +358,10 @@ typedef struct {
     Strip*       ground;       /* its Tallies' nodes, each copy, born at `birth`, by first block */
     uint32_t     nground;
     uint32_t     capground;
+    Strip*       quires;       /* the Tally-Quires its Tallies name a node in as it lies, whole, in order
+                                * (binder_quires.c) — none for a slot a mount walked: its ground names them */
+    uint32_t     nquires;
+    uint32_t     capquires;
     RibbonQuire* extra;        /* its ribbon's Quires off the chain */
     uint32_t     nextra;
     uint32_t     capextra;
@@ -355,7 +379,7 @@ typedef struct {
     uint64_t       nchain;
     uint64_t       capchain;
     uint64_t       chain_base;
-    BinderRot*     rot;
+    BinderKept*    rot;         /* the nodes the mount found no copy of reads */
     uint32_t       nrot;
     uint32_t       caprot;
     BinderGround*  held;        /* what the mount holds for what rotted */
@@ -366,7 +390,13 @@ typedef struct {
     uint64_t       seen_bookmark;
     uint64_t       laid_fid;    /* past the highest file id a stitch of this mount named */
     uint64_t       useful;      /* the ribbon's useful bytes past the newest slot's `at` */
-    uint64_t       tally_blocks;/* the last Tally's, one copy */
+    uint64_t       tally_blocks;/* the last Tally's whole book — every node it names, laid or kept — one copy */
+    uint64_t       cost_known;  /* the next Tally's cost as last reckoned, bytes: no more than it is (binder.c,
+                                 * BinderWeigh) — 0 once what it is reckoned by may have shrunk */
+    uint64_t       pair_a;      /* the Tally-Quires the next Tally's nodes go on in: copy 1's run, ... */
+    uint64_t       pair_b;      /* ... copy 2's at as many blocks into its own */
+    uint64_t       pair_room;   /* the blocks each run holds */
+    uint64_t       pair_used;   /* ... and the blocks the Tallies laid in them took */
     uint64_t       tallies;
     const char* volatile no_tallies; /* why no Tally is written by this mount at all, or NULL */
     volatile uint8_t demanded;
@@ -383,7 +413,8 @@ extern BinderBook g_binder;
  * let go; its ground in order of first block; a Quire's place on the chain
  * (UINT64_MAX off it); what a slot written over held that no slot holds now
  * rested in Fallow — its blocks, the chain before every slot's ribbon let go
- * of in memory. */
+ * of in memory; the current pair of Tally-Quires let go for a new one, by
+ * Quires of `quire` blocks. */
 bool        BinderListRoom(void** list, uint64_t n, uint64_t* cap, size_t size);
 bool        BinderListRoom32(void** list, uint32_t n, uint32_t* cap, size_t size);
 void        BinderSlotLetGo(SlotGround* s);
@@ -395,6 +426,7 @@ bool        BinderSlotSealed(uint32_t slot, const uint8_t* unit);
 void        BinderSlotSort(SlotGround* s);
 uint64_t    BinderChainIndex(const RibbonQuire* q);
 uint64_t    BinderSlotGoes(const SlotGround* old);
+void        BinderPairLetGo(uint64_t quire);
 
 /* binder_slots.c: slot `index`'s own ground published, `more` blocks a Tally
  * under way took for it added; what every slot but `index` lacks of `tally`
@@ -408,17 +440,22 @@ void        BinderWeigh(void);
 /* What the mount holds for what rotted, for DIGESTS (book_ground.c). */
 error_t     BinderHeldRun(uint64_t start, uint64_t count);
 
-/* What a whole Tally is written of, and where it is written to. */
+/* What a Tally is written of, and where it is written to. */
 typedef struct {
     uint64_t      seq;           /* the Tally's */
+    bool          tip;           /* laid in among the nodes of the Tally before (TipIn) — not whole */
     BinderFiles*  files;         /* the slice, by fid */
     uint64_t      nfiles;
     uint32_t      tag_hi;        /* the tags below it are the book's */
     UseText*      use;
-    BinderGround* ground;        /* by first block: what DIGESTS names */
-    uint64_t      nground;
-    const BinderRot* rot;        /* by tree, then key */
-    uint32_t      nrot;
+    BinderGround* ground;        /* by first block: what DIGESTS names — laid in, in the leaves it lays and */
+    uint64_t      nground;       /* ... offers; a STRICT kernel's every block of the state, and ... */
+    BinderGround* tground;       /* ... the ground laid in apart, held to it in the ranges it lays and offers */
+    uint64_t      ntground;
+    BinderGround* dranges;
+    uint64_t      ndranges;
+    BinderKept*   kept;          /* the nodes named as they lie, by tree, then key */
+    uint32_t      nkept;
     uint64_t      a;             /* the first blocks of the runs the copies go in */
     uint64_t      b;
     uint64_t      room;          /* the blocks each run holds */
@@ -428,7 +465,19 @@ typedef struct {
     uint32_t      tree;          /* the tree being laid, and its level */
     uint32_t      level;
     uint32_t      kid_at;        /* level >= 1: the next node of the level below */
-    uint32_t      rot_at;        /* ... and the next rotten node */
+    uint32_t      kept_at;       /* ... and the next node named as it lies, of the level below */
+    uint32_t      tree_kept;     /* where the tree's own begin in `kept`, and where they end */
+    uint32_t      tree_kept_end;
+    uint32_t      bar_at;        /* the first of the tree's not behind the node being filled */
+    uint32_t      cover_at;      /* level 0: the first of the tree's whose range ends past the last key */
+    uint64_t      tree_off;      /* where the tree's nodes began in the runs: its measure begun again */
+    uint64_t      row;           /* level 0: the bytes of the leaves laid since the last leaf named as it
+                                  * lies, and of the one being filled */
+    uint32_t      row_left;      /* the margin before the row, + 1; 0 for none */
+    bool          keyed;         /* a key of this level was passed: the fill's last is it */
+    bool          rows_short;    /* a row short of half a Sheet took the margin before it in: the tree's
+                                  * measure is begun again at its end, ... */
+    bool          row_again;     /* ... once, and was */
     BinderItems   items;
     BinderFill    fill;
     BinderLevel   lv[BINDER_LEVELS_MOST];
@@ -436,9 +485,13 @@ typedef struct {
     uint8_t*      unit;          /* a node sealed, for the medium */
     uint64_t      unit_room;
     uint64_t      nodes;         /* laid */
+    uint64_t      sheets;        /* ... their Sheets, one copy */
+    uint64_t      named;         /* named as they lie */
+    uint64_t      dsheets;       /* the Sheets of the DIGESTS leaves of the Tally before it names as they lie,
+                                  * or under a node it names so — the reads' table's, never Foliation's */
     uint64_t      dropped;       /* DIGESTS elements inside a rotten range, left out */
     bool          trees_done;
-    BinderKid*    dleaves;       /* the DIGESTS leaves laid, for the reads to turn to (binder.c) */
+    BinderKid*    dleaves;       /* the DIGESTS leaves laid and named, for the reads to turn to (binder.c) */
     uint32_t      ndleaves;
     bool          dleaves_lost;  /* memory would not keep them */
     EndpaperLaid  laid;          /* what the walk laid of FILES, TAGS and DIGESTS: the next reserve's measure */
@@ -484,9 +537,11 @@ typedef struct {
 } BinderStandSaid;
 void        BinderStand(BinderStandSaid* out);
 
-/* Every run of ground the slots hold now — their Tallies' nodes and their
- * ribbons' Quires — into `out` (room `room`): how many there are. What a
- * test that writes Tallies keeps as it found it, for they may give it back. */
+/* Every run of ground the book's Tallies and ribbon hold now — the slots'
+ * Tallies' nodes and their ribbons' Quires, and what of the pair of
+ * Tally-Quires the next Tally goes on in is not laid yet — into `out` (room
+ * `room`): how many there are. What a test that writes Tallies keeps as it
+ * found it, for they may give it back. */
 uint32_t    BinderStandGround(Strip* out, uint32_t room);
 
 /* Every Quire the ribbon was given since BinderStandGivenBegin, across the

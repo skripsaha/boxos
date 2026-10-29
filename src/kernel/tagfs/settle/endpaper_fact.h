@@ -39,8 +39,10 @@ uint64_t EndpaperInnerBlocks(uint64_t kids, uint64_t atom);
  * readers: the binder as it lays each leaf (binder_nodes.c), the mount as it
  * walks the Tally it stands on (book_ground.c, tally_leaves.c). `*_leaves`
  * counts each node of level 0 and `*_blocks` their blocks, each on its atom;
- * `rot` the trees with a node named as it lies above level 0, which the
- * measure takes from above; `runs` the runs FILES's Parcels carry; `digests_last` the first key
+ * `rot` the trees with a rotten node named as it lies above level 0, whose
+ * leaves nobody knows and which the measure takes from above (a node a Tally
+ * laid in names because nothing under it changed counts its leaves as
+ * Foliation holds them, binder_kept.c); `runs` the runs FILES's Parcels carry; `digests_last` the first key
  * of DIGESTS's last leaf; `tags` and `tags_text` the tags TAGS holds and the
  * bytes of their keys and values.
  */

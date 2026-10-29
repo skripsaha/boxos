@@ -352,10 +352,10 @@ def CmdBound(args, medium):
     wrong = binder.BindCheck(medium, args.start)
     m = BookMount(BookGround(medium, args.start))
     if m.refusal is None:
-        blocks, cost, useful = binder.BindSaid(m)
+        blocks, cost, whole, useful = binder.BindSaid(m)
         print("bound: the newest slot %u (seq %u) names Tally %u, after stitch %u: %u block(s) a copy, the next "
-              "reckoned at %u byte(s); %u useful byte(s) of ribbon past its at, %u stitch(es)"
-              % (m.slot.index, m.slot.seq, m.slot.tally_seq, m.slot.stitch_seq, blocks, cost, useful,
+              "reckoned at %u byte(s) of a whole %u; %u useful byte(s) of ribbon past its at, %u stitch(es)"
+              % (m.slot.index, m.slot.seq, m.slot.tally_seq, m.slot.stitch_seq, blocks, cost, whole, useful,
                  len(m.ribbon.stitches)))
     for w in wrong:
         print("bound: %s" % w)

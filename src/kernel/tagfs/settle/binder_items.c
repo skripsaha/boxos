@@ -27,22 +27,28 @@ bool BinderKeyLess(uint64_t tree, TallyKey a, TallyKey b)
     return TallyPairKeyed(tree) && a.k2 < b.k2;
 }
 
-/* The key a rotten node is named by in its parent: its lower separator — the
- * least key there is for a tree's first node, which has none of its own. */
-static TallyKey RotKey(const BinderRot* r)
+/* The key a node named as it lies is named by in its parent: its lower
+ * separator — the least key there is for a tree's first node, which has none
+ * of its own. */
+static TallyKey KeptKey(const BinderKept* r)
 {
     return r->at.has_lo ? r->at.lo : (TallyKey){ 0, 0 };
 }
 
-/* Whether element key `k` lies inside the range of rotten node `r`: from its
- * lower separator (or the start), up to its upper one — or, with none, at its
- * lower separator alone, where no element may stand beside it. */
-bool BinderRotCovers(const BinderRot* r, TallyKey k)
+/* Whether element key `k` lies inside the range of node `r` named as it lies:
+ * from its lower separator (or the start), up to its upper one. With none, a
+ * node nothing under which changed runs to the tree's end — a key past it
+ * would have changed it — and a rotten one stands at its lower separator
+ * alone, where no element may stand beside it: what was born past it is laid
+ * past it. */
+bool BinderKeptCovers(const BinderKept* r, TallyKey k)
 {
     if (r->at.has_lo && BinderKeyLess(r->tree, k, r->at.lo))
         return false;
     if (r->at.has_hi)
         return BinderKeyLess(r->tree, k, r->at.hi);
+    if (!r->rotten)
+        return true;
     return r->at.has_lo && !BinderKeyLess(r->tree, r->at.lo, k);
 }
 
@@ -257,22 +263,37 @@ static error_t FilesNext(BinderWork* w, BinderItem* it, bool* got)
     return OK;
 }
 
-/* TAGS: every tag below the slice's mark, by id — the book's, Coined or not. */
+/* TAGS: every tag below the slice's mark, by id — the book's, Coined or not —
+ * but the ones a node named as it lies holds: the walk goes on past it, unless
+ * the self-check holds them to the Tally before. A margin's tags come out: the
+ * measure takes it into a short row, or the walk skips it (binder_nodes.c,
+ * LeafKept). */
 static error_t TagsNext(BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems* p = &w->items;
     TagSpelling  sp;
     uint32_t     id = 0;
-    *got = TagRoll(tagfs_get_state()->registry, p->tag, w->tag_hi, &id, &sp);
-    if (!*got)
-        return OK;
+    for (;;) {
+        *got = TagRoll(tagfs_get_state()->registry, p->tag, w->tag_hi, &id, &sp);
+        if (!*got)
+            return OK;
+        const BinderKept* k = BINDER_CHECKS && !w->measuring ? NULL : BinderKeptAt(w, (TallyKey){ id, 0 });
+        if (!k || k->rotten || k->margin)
+            break;
+        if (!k->at.has_hi || k->at.hi.k1 > UINT32_MAX) {
+            *got = false;
+            return OK;
+        }
+        p->tag = (uint32_t)k->at.hi.k1;
+    }
     p->tag = id + 1u;
     if (!ItemRoom(p, 30u + sp.key_len + sp.value_len))
         return ERR_NO_MEMORY;
     EndpaperLaidTag(&w->laid, (uint64_t)sp.key_len + sp.value_len);
     TallyTag t = { .flags = sp.value ? TALLY_TAG_HAS_VALUE : 0u, .key = (const uint8_t*)sp.key,
                    .key_len = sp.key_len, .value = (const uint8_t*)sp.value, .value_len = sp.value_len };
-    *it = (BinderItem){ .key = { id, 0 }, .count = 1, .body = p->buf, .len = TallyTagPut(p->buf, &t) };
+    *it = (BinderItem){ .key = { id, 0 }, .count = 1, .body = p->buf, .len = TallyTagPut(p->buf, &t),
+                        .text = sp.key_len + sp.value_len };
     return OK;
 }
 
@@ -291,23 +312,35 @@ static error_t UseNext(BinderWork* w, BinderItem* it, bool* got)
     return OK;
 }
 
-/* Where DIGESTS' rotten ranges stand to `block`: inside one (true, *past its
- * end, UINT64_MAX for none), or the next one's first block after it in
- * *until (UINT64_MAX for none). */
-static bool DigestsRot(const BinderWork* w, uint64_t block, uint64_t* past, uint64_t* until)
+/* The first block past rotten DIGESTS range `r`: its upper separator, or —
+ * with none — the one block of its lower separator (BinderKeptCovers), or none
+ * at all for a root with neither, which covers no block. */
+static uint64_t RotEnd(const BinderKept* r)
+{
+    if (r->at.has_hi)
+        return r->at.hi.k1;
+    return r->at.has_lo ? r->at.lo.k1 + 1u : 0;
+}
+
+/* Where DIGESTS' rotten ranges stand to `block`, by the walk's cursor over the
+ * tree's nodes named as they lie — the blocks it looks at only go up, so a
+ * range ending at or below `block` is passed for good: inside one (true,
+ * *past its end), or the next one's first block above it in *until
+ * (UINT64_MAX for none). A node named as it lies that reads is no range of
+ * this: its elements are walked, and the walk skips them as it lays (binder_nodes.c). */
+static bool DigestsRot(const BinderWork* w, BinderDigestAt* at, uint64_t block, uint64_t* past, uint64_t* until)
 {
     *until = UINT64_MAX;
-    for (uint32_t i = 0; i < w->nrot; i++) {
-        const BinderRot* r = &w->rot[i];
-        if (r->tree != TALLY_DIGESTS)
-            continue;
-        if (BinderRotCovers(r, (TallyKey){ block, 0 })) {
-            *past = r->at.has_hi ? r->at.hi.k1 : block + 1u;
-            return true;
-        }
-        if (r->at.has_lo && r->at.lo.k1 > block && r->at.lo.k1 < *until)
-            *until = r->at.lo.k1;
+    while (at->rot < w->tree_kept_end && (!w->kept[at->rot].rotten || RotEnd(&w->kept[at->rot]) <= block))
+        at->rot++;
+    if (at->rot == w->tree_kept_end)
+        return false;
+    const BinderKept* r = &w->kept[at->rot];
+    if (BinderKeptCovers(r, (TallyKey){ block, 0 })) {
+        *past = RotEnd(r);
+        return true;
     }
+    *until = r->at.lo.k1;
     return false;
 }
 
@@ -324,70 +357,83 @@ static error_t DigestOf(uint64_t block, uint64_t* digest, bool* have)
     return says == TALLY_DIGEST_UNREAD ? refused : OK;
 }
 
-/* The next digested block from the walk's place on, its run of ground and
- * the rotten ranges passed over: false at the end. */
-static error_t DigestsFirst(BinderWork* w, uint64_t* block, uint64_t* digest, bool* found)
+/* The next digested block of ground `g` (`n` runs) from where `at` stands, the
+ * rotten ranges passed over: false at the end. */
+static error_t DigestsFirst(BinderWork* w, const BinderGround* g, uint64_t n, BinderDigestAt* at, uint64_t* block,
+                            uint64_t* digest, bool* found)
 {
-    BinderItems* p = &w->items;
     *found = false;
-    while (p->ground < w->nground) {
-        const BinderGround* g = &w->ground[p->ground];
-        if (p->next < g->start)
-            p->next = g->start;
-        if (p->next >= g->start + g->count) {
-            p->ground++;
+    while (at->ground < n) {
+        const BinderGround* run = &g[at->ground];
+        if (at->next < run->start)
+            at->next = run->start;
+        if (at->next >= run->start + run->count) {
+            at->ground++;
             continue;
         }
         uint64_t past = 0, until = 0;
-        if (DigestsRot(w, p->next, &past, &until)) {
+        if (DigestsRot(w, at, at->next, &past, &until)) {
             w->dropped++;
-            p->next = past;
+            at->next = past;
             continue;
         }
         bool    have = false;
-        error_t rc   = DigestOf(p->next, digest, &have);
+        error_t rc   = DigestOf(at->next, digest, &have);
         if (rc != OK || have) {
-            *block = p->next++;
+            *block = at->next++;
             *found = rc == OK;
             return rc;
         }
-        p->next++;
+        at->next++;
     }
     return OK;
 }
 
-/* DIGESTS: an element of the digests of blocks in a row, in one window of
- * DIGEST_ITEM_MOST, one run of ground — cut before a rotten range. */
-static error_t DigestsNext(BinderWork* w, BinderItem* it, bool* got)
+error_t BinderDigestsElement(BinderWork* w, const BinderGround* g, uint64_t n, BinderDigestAt* at, uint8_t* buf,
+                             BinderItem* it, bool* got)
 {
-    BinderItems* p = &w->items;
-    uint64_t     first = 0, digest = 0, past = 0, until = 0;
-    error_t      rc = DigestsFirst(w, &first, &digest, got);
+    uint64_t first = 0, digest = 0, past = 0, until = 0;
+    error_t  rc    = DigestsFirst(w, g, n, at, &first, &digest, got);
     if (rc != OK || !*got)
         return rc;
-    if (!ItemRoom(p, 10u + 8u * (uint64_t)DIGEST_ITEM_MOST))
-        return ERR_NO_MEMORY;
-    uint8_t* d = p->buf + 10u;
-    uint32_t n = 0;
+    uint8_t* d = buf + 10u;
+    uint32_t k = 1;
     TallyLePut(d, digest, 8);
-    n = 1;
-    (void)DigestsRot(w, first, &past, &until);
-    const BinderGround* g = &w->ground[p->ground];
-    while (n < DIGEST_ITEM_MOST && p->next < g->start + g->count && p->next < until &&
-           p->next / DIGEST_ITEM_MOST == first / DIGEST_ITEM_MOST) {
+    (void)DigestsRot(w, at, first, &past, &until);
+    const BinderGround* run = &g[at->ground];
+    while (k < DIGEST_ITEM_MOST && at->next < run->start + run->count && at->next < until &&
+           at->next / DIGEST_ITEM_MOST == first / DIGEST_ITEM_MOST) {
         bool have = false;
-        if ((rc = DigestOf(p->next, &digest, &have)) != OK)
+        if ((rc = DigestOf(at->next, &digest, &have)) != OK)
             return rc;
         if (!have)
             break;
-        TallyLePut(d + 8u * n, digest, 8);
-        n++;
-        p->next++;
+        TallyLePut(d + 8u * k, digest, 8);
+        k++;
+        at->next++;
     }
-    uint32_t head = BookVarintPut(p->buf, n);
-    memmove(p->buf + head, d, 8u * n);
-    *it = (BinderItem){ .key = { first, 0 }, .count = 1, .body = p->buf, .len = head + 8u * n };
+    uint32_t head = BookVarintPut(buf, k);
+    memmove(buf + head, d, 8u * k);
+    *it = (BinderItem){ .key = { first, 0 }, .count = 1, .body = buf, .len = head + 8u * k };
     return OK;
+}
+
+/* DIGESTS: an element of the digests of blocks in a row, in one window of
+ * DIGEST_ITEM_MOST, one run of ground — cut before a rotten range. A STRICT
+ * kernel's Tally laid in walks every block of the state, and holds the
+ * elements it walks in the ranges it lays and offers to the ones the ground
+ * it lays in speaks for (binder_digests.c). */
+static error_t DigestsNext(BinderWork* w, BinderItem* it, bool* got)
+{
+    BinderItems* p = &w->items;
+    if (!ItemRoom(p, BINDER_DIGEST_ITEM_BYTES))
+        return ERR_NO_MEMORY;
+    error_t rc = BinderDigestsElement(w, w->ground, w->nground, &p->digest, p->buf, it, got);
+#if BINDER_CHECKS
+    if (rc == OK && w->tip && !w->measuring)
+        rc = BinderDigestsHeld(w, it, !*got);
+#endif
+    return rc;
 }
 
 /* The next element of the tree's leaves: *got false at its end. */
@@ -416,45 +462,63 @@ error_t BinderLeafItemNext(BinderWork* w, BinderItem* it, bool* got)
  * node's own as it named them — up to this many. */
 #define BINDER_PTR_COPIES_MOST  16u
 
-/* The level below's next node, or rotten node, in key order — the element
- * that names it: its first key, the count it carries, its BookPtr. */
+/* The next node of the level below named as it lies, in key order — one the
+ * measure took into a row is laid instead. */
+static const BinderKept* KeptBelowNext(BinderWork* w)
+{
+    for (; w->kept_at < w->tree_kept_end; w->kept_at++) {
+        const BinderKept* r = &w->kept[w->kept_at];
+        if (r->at.level == w->level - 1u && !r->taken)
+            return r;
+    }
+    return NULL;
+}
+
+/* A node named as it lies, as the element of the level above it: its old
+ * pointer, every copy, its old separator and count — and, laid for good,
+ * everything under it carried into the draft of the Foliation as it was. */
+static error_t KeptItem(BinderWork* w, const BinderKept* r, BinderItem* it)
+{
+    BinderItems* p = &w->items;
+    uint64_t     blocks[BINDER_PTR_COPIES_MOST];
+    uint8_t      ptr[16u + 10u * BINDER_PTR_COPIES_MOST];
+    if (r->at.ptr.copies > BINDER_PTR_COPIES_MOST)
+        return ERR_TAGFS_CORRUPTED;
+    for (uint32_t k = 0; k < r->at.ptr.copies; k++)
+        blocks[k] = TallyPtrBlock(&r->at.ptr, k);
+    uint32_t plen = BookPtrPut(ptr, r->at.ptr.seq, r->at.ptr.sheets, blocks, r->at.ptr.copies);
+    if (!ItemRoom(p, 12u + plen))
+        return ERR_NO_MEMORY;
+    *it = (BinderItem){ .key = KeptKey(r), .count = r->at.count, .body = p->buf,
+                        .len = TallyInnerPut(p->buf, r->at.count, ptr, plen) };
+    if (!w->measuring) {
+        FoliationDraftNode(w->tree, w->level - 1u, it->key, false, r->at.count, &r->at.ptr, r->items, r->text);
+        if (r->at.level > 0)
+            FoliationDraftUnder(w->tree, &r->at);
+        w->named++;
+    }
+    w->kept_at++;
+    return OK;
+}
+
+/* The level below's next node, or node named as it lies, in key order — the
+ * element that names it: its first key, the count it carries, its BookPtr. */
 error_t BinderInnerItemNext(BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems*       p   = &w->items;
     const BinderLevel* lv  = &w->lv[w->level - 1u];
     const BinderKid*   kid = w->kid_at < lv->n ? &lv->kid[w->kid_at] : NULL;
-    const BinderRot*   rot = NULL;
-    uint64_t           blocks[BINDER_PTR_COPIES_MOST];
-    uint8_t            ptr[16u + 10u * BINDER_PTR_COPIES_MOST];
+    const BinderKept*  rot = KeptBelowNext(w);
+    uint64_t           blocks[2];
+    uint8_t            ptr[16u + 20u];
     uint32_t           plen = 0;
-    while (w->rot_at < w->nrot) {
-        const BinderRot* r = &w->rot[w->rot_at];
-        if (r->tree == w->tree && r->at.level == w->level - 1u) {
-            rot = r;
-            break;
-        }
-        w->rot_at++;
-    }
     *got = kid || rot;
     if (!*got)
         return OK;
-    if (rot && (!kid || BinderKeyLess(w->tree, RotKey(rot), kid->key))) {
-        if (rot->at.ptr.copies > BINDER_PTR_COPIES_MOST)
-            return ERR_TAGFS_CORRUPTED;
-        for (uint32_t k = 0; k < rot->at.ptr.copies; k++)
-            blocks[k] = TallyPtrBlock(&rot->at.ptr, k);
-        plen = BookPtrPut(ptr, rot->at.ptr.seq, rot->at.ptr.sheets, blocks, rot->at.ptr.copies);
-        if (!ItemRoom(p, 12u + plen))
-            return ERR_NO_MEMORY;
-        *it = (BinderItem){ .key = RotKey(rot), .count = rot->at.count, .body = p->buf,
-                            .len = TallyInnerPut(p->buf, rot->at.count, ptr, plen) };
-        if (!w->measuring)
-            FoliationDraftNode(w->tree, w->level - 1u, it->key, false, rot->at.count, &rot->at.ptr);
-        w->rot_at++;
-        return OK;
-    }
-    blocks[0] = w->measuring ? g_book.data_end : w->a + kid->off;
-    blocks[1] = w->measuring ? g_book.data_end : w->b + kid->off;
+    if (rot && (!kid || BinderKeyLess(w->tree, KeptKey(rot), kid->key)))
+        return KeptItem(w, rot, it);
+    blocks[0] = w->measuring ? g_book.data_end : kid->block[0];
+    blocks[1] = w->measuring ? g_book.data_end : kid->block[1];
     plen      = BookPtrPut(ptr, w->seq, kid->sheets, blocks, 2u);
     if (!ItemRoom(p, 12u + plen))
         return ERR_NO_MEMORY;
@@ -463,7 +527,7 @@ error_t BinderInnerItemNext(BinderWork* w, BinderItem* it, bool* got)
     if (!w->measuring) {
         TallyPtr laid = { .seq = w->seq, .sheets = kid->sheets, .copies = 2u, .more = 0,
                           .block = { blocks[0], blocks[1] } };
-        FoliationDraftNode(w->tree, w->level - 1u, kid->key, false, kid->count, &laid);
+        FoliationDraftNode(w->tree, w->level - 1u, kid->key, false, kid->count, &laid, kid->items, kid->text);
     }
     w->kid_at++;
     return OK;

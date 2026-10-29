@@ -8868,6 +8868,8 @@ run_census() {
     book_bind
     book_bindcut tally
     book_bindcut slot
+    book_bindcut tally second
+    book_bindcut slot second
     book_bindrot B4
     book_bindrot B6c
 }
@@ -10926,6 +10928,19 @@ lockrank_bare() {
         grep -v '^src/kernel/tagfs/lock_rank/' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*)'
 }
 
+# lockrank_dogear_leaf FILE — 0 when FILE (settle/dog_ear.c) declares DogEar's
+# lock a leaf and takes no TagFS lock while it holds it: every reader of
+# DogEar takes it under the Settle's holder or a writer's own locks, so a rank
+# above LEAF, or a lock taken beneath it, is a new edge of the order no boot
+# may grow (lock_rank.h: while a leaf is held, no other TagFS lock is taken).
+lockrank_dogear_leaf() {
+    grep -q 'TAGFS_LOCK_INIT("dogear", LOCK_RANK_LEAF)' "$1" &&
+        awk '/TagFSLockTake\(&s_lock\)/ { held = 1; next }
+             /TagFSLockDrop\(&s_lock\)/ { held = 0; next }
+             held && /TagFSLockTake\(/   { under = 1 }
+             END                         { exit under }' "$1"
+}
+
 run_lockrankmut() {
     echo "== lockrankmut: the LockRank judge, shown what it must refuse and what it must hold =="
     local held held2 unknown twice full deadlock proof said n bare step defect
@@ -10995,6 +11010,15 @@ EOF
     restore src/kernel/tagfs/tagfs.c
     printf '%s\n' "$bare" | grep -qF "src/kernel/tagfs/tagfs.c:" && [ "$(printf '%s\n' "$bare" | grep -c .)" = 1 ]
     chk $? "lockrankmut: a bare spinlock_t put into tagfs.c is found ($(printf '%s\n' "$bare" | cut -c1-120))"
+    lockrank_dogear_leaf src/kernel/tagfs/settle/dog_ear.c
+    chk $? "lockrankmut: DogEar's lock is declared a leaf, and dog_ear.c takes no TagFS lock while it holds it"
+    sed 's/TAGFS_LOCK_INIT("dogear", LOCK_RANK_LEAF)/TAGFS_LOCK_INIT("dogear", LOCK_RANK_STATE)/' \
+        src/kernel/tagfs/settle/dog_ear.c >"$SCRATCH/lockrankmut.dog_ear_state.c"
+    awk '{ print } /TagFSLockTake\(&s_lock\)/ && !done { print "    TagFSLockTake(&tagfs_get_state()->lock);"; done = 1 }' \
+        src/kernel/tagfs/settle/dog_ear.c >"$SCRATCH/lockrankmut.dog_ear_under.c"
+    ! lockrank_dogear_leaf "$SCRATCH/lockrankmut.dog_ear_state.c" &&
+        ! lockrank_dogear_leaf "$SCRATCH/lockrankmut.dog_ear_under.c"
+    chk $? "lockrankmut: the rule turns on a DogEar lock ranked above a leaf, and on a TagFS lock taken under it"
 }
 
 # ===========================================================================

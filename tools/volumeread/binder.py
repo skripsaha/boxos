@@ -29,8 +29,8 @@ from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK
 from .stitch import MEDIUM_LIED
 from .tally import (DIGESTS, FILES, NODE_HEAD, SHEET_PAYLOAD, SPINE_MEDIUM_LIED, TAGS, TREE_NAMES, USE, Node,
-                    Root, Slot, DigestsEncode, FileHeadEncode, InnerEncode, ItemBytes, KeyFull, NodeSectors, NodeStream,
-                    ParcelEncode, SlotBlock, SlotSectors, TagEncode)
+                    Root, Rotten, Slot, Tally, DigestsEncode, FileHeadEncode, InnerEncode, ItemBytes, KeyFull,
+                    NodeSectors, NodeStream, ParcelEncode, SlotBlock, SlotSectors, TagEncode)
 
 PARCEL_STRIPS_MOST = 128             # volume_tally.h PARCEL_STRIPS_MOST
 
@@ -92,6 +92,22 @@ def Parcels(fs):
     return out
 
 
+class Kept(Rotten):
+    """A node of the Tally before a Tally names as it lies because nothing
+    under it changed (TipIn, §16.5 п.16; settle/binder_kept.c): by its
+    pointer, the separator and the count its parent gave it. Its range runs to
+    its upper separator, or to the tree's end with none — a key past it would
+    have changed it."""
+
+    __slots__ = ()
+
+
+def KeptOf(node):
+    """The node read, as a Tally names it as it lies."""
+    return Kept(node.tree, node.lo, node.hi, node.count, node.level,
+                {"seq": node.seq, "sheets": node.sheets, "blocks": list(node.blocks)}, None)
+
+
 def RefLo(r):
     """The key a rotten node is named by: its lower separator, or the least
     key for a tree's first node."""
@@ -107,6 +123,8 @@ def RefCovers(r, key):
         return False
     if r.hi is not None:
         return key < r.hi
+    if isinstance(r, Kept):
+        return True
     return r.lo is not None and key == r.lo
 
 
@@ -132,8 +150,9 @@ def DigestItems(digests, refs=()):
 
 
 def Elements(content, seq, refs=()):
-    """{tree: [(key, body)]} in key order — the leaves' items; and a tree that
-    holds nothing but rotten nodes named as they lie, there with none."""
+    """{tree: [(key, body)]} in key order — the leaves' items, but the ones a
+    node named as it lies because nothing under it changed holds; and a tree
+    that holds nothing but nodes named as they lie, there with none."""
     files = []
     kept = getattr(content, "kept", {})
     for fid in sorted(set(content.files) | set(kept)):
@@ -154,9 +173,14 @@ def Elements(content, seq, refs=()):
     out = {FILES: files, TAGS: [(tid, TagEncode(content.tags[tid])) for tid in sorted(content.tags)],
            USE: [(0, VarintPut(len(content.use)) + content.use)] if content.use else [],
            DIGESTS: DigestItems(content.digests, refs)}
+    kept = [r for r in refs if isinstance(r, Kept)]
+    for tree in out:
+        mine = [r for r in kept if r.tree == tree]
+        if mine:
+            out[tree] = [(key, b) for key, b in out[tree] if not any(RefCovers(r, key) for r in mine)]
     for tree, items in out.items():
         for key, _b in items:
-            if tree == FILES and any(r.tree == FILES and RefCovers(r, key) for r in refs):
+            if tree == FILES and any(r.tree == FILES and not isinstance(r, Kept) and RefCovers(r, key) for r in refs):
                 raise ValueError("the FILES element %r lies inside a rotten range named as it lies" % (key,))
     return {tree: items for tree, items in out.items() if items or any(r.tree == tree for r in refs)}
 
@@ -239,6 +263,12 @@ def _Lay(elements, seq, a, b, grid, refs=()):
         items = elements[tree]
         counts = [1 if tree != FILES else int(key[1] == 0) for key, _b in items]
         mine = [r for r in refs if r.tree == tree]
+        whole = [r for r in mine if isinstance(r, Kept) and r.lo is None and r.hi is None]
+        if whole:
+            # A tree nothing in changed: its root named as it lies, no node laid.
+            r = whole[0]
+            roots[tree] = Node(tree, r.level, [], r.count, r.ptr["sheets"], r.ptr["blocks"], r.ptr["seq"])
+            continue
 
         def Bars(level):
             return [r.lo for r in mine if r.level >= level and r.lo is not None]
@@ -296,7 +326,7 @@ def PlanSlot(plan, content, index=0):
     slot = Slot(index, None)
     slot.tally_seq, slot.stitch_seq, slot.stitch_clasp, slot.made_ns = plan.seq, 0, 0, content.made_ns
     for tree, n in plan.roots.items():
-        slot.roots[tree] = Root(0, n.level, n.count, PtrPut(plan.seq, n.sheets, n.blocks))
+        slot.roots[tree] = Root(0, n.level, n.count, PtrPut(n.seq or plan.seq, n.sheets, n.blocks))
     slot.ribbon = dict(at=plan.ribbon[0], quire_block=plan.ribbon[0], quire_blocks=plan.ribbon[1],
                        next_block=plan.next[0], next_blocks=plan.next[1])
     slot.counts = dict(next_fid=content.next_fid, next_tag=content.next_tag,
@@ -319,21 +349,67 @@ def BindWrite(over, g, plan, index=0):
              b"".join(SlotSectors(g, index, plan.slot_seq, slot)))
 
 
+def KeptRefs(read, seq):
+    """The nodes of the Tally read that a Tally of `seq` names as they lie:
+    those sealed before it whose parent it laid — or its root, a tree nothing
+    in changed — in key order; none under another of them."""
+    out = []
+    for tree, t in sorted(read.trees.items()):
+        old = sorted((n for n in t.nodes if n.seq != seq and n.seq),
+                     key=lambda n: ((0,) if n.lo is None else (1, n.lo), -n.level))
+        for n in old:
+            k = KeptOf(n)
+            if not (out and _Inside(k, out[-1])):
+                out.append(k)
+    return out
+
+
+def _Inside(r, k):
+    """Whether node r lies under k, a node named as it lies."""
+    return r.tree == k.tree and r.level < k.level and (k.lo is None or (r.lo is not None and k.lo <= r.lo)) and \
+        (k.hi is None or (r.hi is not None and r.hi <= k.hi))
+
+
+def KeptNamed(mount, kept):
+    """[what differs]: each node named as it lies named so by a Tally before —
+    a slot of an older seq whose Tally holds it at its level and on its lower
+    separator."""
+    older = [s for s in mount.slots if s.state == "valid" and s.seq < mount.slot.seq]
+    seen = set()
+    for s in older:
+        try:
+            for n in Tally(mount.g, s).Nodes():
+                seen.add((n.tree, n.level, tuple(n.blocks), n.lo))
+        except Unreadable:
+            continue
+    return ["the %s node of level %u at block %u is named as it lies, and no Tally before names it on that range"
+            % (TREE_NAMES[r.tree], r.level, r.ptr["blocks"][0]) for r in kept
+            if (r.tree, r.level, tuple(r.ptr["blocks"]), r.lo) not in seen]
+
+
 def Circle(medium, mount):
     """Bind again what the mount read of its slot's Tally, where it lies, and
     hold every sector against the medium: [what differs] — empty when the
-    read and the binder agree byte for byte (§2.4: one value, one spelling)."""
+    read and the binder agree byte for byte (§2.4: one value, one spelling).
+    A Tally laid in among the nodes of the one before it (TipIn, §16.5 п.16):
+    the nodes it laid bound again byte for byte, in their order from the first
+    of them, the ones it names as they lie as references — each named by a
+    Tally before on that range."""
     g, slot, tally = mount.g, mount.slot, mount.tally
     nodes = tally.Nodes()
     if not nodes:
         return ["the Tally has no node to bind again"]
-    a = min(n.blocks[0] for n in nodes)
-    b = min(n.blocks[1] for n in nodes if len(n.blocks) > 1)
+    kept = KeptRefs(tally, slot.tally_seq)
+    fresh = [n for n in nodes if n.seq == slot.tally_seq]
+    if not fresh:
+        return KeptNamed(mount, kept)
+    a = min(n.blocks[0] for n in fresh)
+    b = min(n.blocks[1] for n in fresh if len(n.blocks) > 1)
     r = slot.ribbon
-    refs = [x for x in tally.rotten if x.ptr]
+    refs = [x for x in tally.rotten if x.ptr and not any(_Inside(x, k) for k in kept)] + kept
     plan = Bind(tally.content, g, a=a, b=b, ribbon=(r["quire_block"], r["quire_blocks"]),
                 nxt=(r["next_block"], r["next_blocks"]), seq=slot.tally_seq, slot_seq=slot.seq, refs=refs)
-    wrong = []
+    wrong = KeptNamed(mount, kept)
     for n in plan.nodes:
         stream, starts = NodeStream(n.tree, n.level, n.items)
         for blk in n.blocks:
@@ -348,8 +424,8 @@ def Circle(medium, mount):
     want = b"".join(SlotSectors(g, slot.index, slot.seq, mine))
     if want != g.medium.sectors(g.base + slot.block * SECTORS_PER_BLOCK, SECTORS_PER_BLOCK):
         wrong.append("slot %u" % slot.index)
-    if len(plan.nodes) != len(nodes):
-        wrong.append("%u nodes bound against %u read" % (len(plan.nodes), len(nodes)))
+    if len(plan.nodes) != len(fresh):
+        wrong.append("%u nodes bound against %u laid" % (len(plan.nodes), len(fresh)))
     return wrong
 
 
@@ -463,10 +539,18 @@ def Useful(u):
 
 def BindSaid(m):
     """What a reader of the newest slot says of its Tally against TALLY_SLACK:
-    (the blocks its Tally takes a copy, the bytes the next is reckoned to cost,
-    the useful bytes of the ribbon past its `at`)."""
+    (the blocks its Tally's whole book takes a copy, the bytes the next is
+    reckoned to cost, the bytes a whole Tally of it would, the useful bytes of
+    the ribbon past its `at`). The next is reckoned laid in — the leaves the
+    stitches past `at` changed and their path, both copies, and the slot —
+    never more than the whole book (settle/binder.c TallyCostBytes,
+    settle/binder_cost.c; dog_ear.py)."""
+    from .dog_ear import TipInBlocks
     blocks = sum(n.sheets for n in m.tally.Nodes())
-    return blocks, (2 * blocks + 1) * BLOCK, sum(Useful(u) for u in m.ribbon.stitches)
+    whole = (2 * blocks + 1) * BLOCK
+    tip = TipInBlocks(m.tally, m.dog_ear)
+    cost = (2 * tip + 1) * BLOCK if tip < blocks else whole
+    return blocks, cost, whole, sum(Useful(u) for u in m.ribbon.stitches)
 
 
 def BindCheck(medium, start=None):

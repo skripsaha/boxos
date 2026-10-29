@@ -1,5 +1,6 @@
 #include "book_mount.h"
 #include "../settle/binder.h"
+#include "../settle/foliation.h"
 #include "under_glass.h"
 #include "ground_census.h"
 #include "../file_map/file_map.h"
@@ -298,6 +299,7 @@ static error_t BookFileParcel(BookFile* f, uint64_t first, const uint8_t* body, 
     }
     TallyTake(body, len, &at, &n);
     g_book.laid.runs += n;
+    FoliationLeafHolds(TALLY_FILES, n, 0);
     for (uint64_t i = 0; i < n; i++) {
         TallyRun r;
         TallyRunGet(body, len, &at, &cursor, seq, &r);
@@ -683,8 +685,10 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
         TagFSUnderGlass(words);
         return OK;
     }
-    if (rc == OK)
+    if (rc == OK) {
         EndpaperLaidTag(&g_book.laid, (uint64_t)t.key_len + t.value_len);
+        FoliationLeafHolds(TALLY_TAGS, 1u, (uint64_t)t.key_len + t.value_len);
+    }
     return rc;
 }
 
