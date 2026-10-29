@@ -418,11 +418,49 @@ assembly_refuses avx512_register "$HEAD    vaddps zmm0, zmm1, zmm2"$'\n' \
 assembly_refuses avx512_high_register "$HEAD    vaddps ymm16, ymm1, ymm2"$'\n' \
     "avx512_high_register.asm:4:12: 'ymm16' is an AVX-512 register; BoxASM has xmm0 to xmm15 and ymm0 to ymm15"
 assembly_refuses ymm_in_address "$HEAD    mov rax, [ymm0]"$'\n' \
-    "ymm_in_address.asm:4:15: an address is made of 64-bit registers"
-assembly_refuses vex_no_256_form "$HEAD    vpaddb ymm0, ymm1, ymm2"$'\n' \
-    "vex_no_256_form.asm:4:5: 'vpaddb' has no 256-bit form before AVX2"
+    "ymm_in_address.asm:4:5: only a gather takes a vector register as the index of its address, not 'mov'"
+assembly_refuses vector_index_load "$HEAD    vmovaps xmm1, [rax + xmm2*4]"$'\n' \
+    "vector_index_load.asm:4:5: only a gather takes a vector register as the index of its address, not 'vmovaps'"
+assembly_refuses two_vector_indices "$HEAD    vgatherdps xmm1, [xmm2 + ymm3], xmm4"$'\n' \
+    "two_vector_indices.asm:4:30: an address has one base and one index register"
+assembly_refuses gather_scale "$HEAD    vgatherdps xmm1, [rax + xmm2*3], xmm4"$'\n' \
+    "gather_scale.asm:4:29: an index is scaled by 1, 2, 4 or 8"
+assembly_refuses gather_32bit_base "$HEAD    vgatherdps xmm1, [eax + xmm2*4], xmm4"$'\n' \
+    "gather_32bit_base.asm:4:23: an address is made of 64-bit registers"
+assembly_refuses gather_16bit_base "$HEAD    vgatherdps xmm1, [bx + xmm2*4], xmm4"$'\n' \
+    "gather_16bit_base.asm:4:23: an address is made of 64-bit registers"
+assembly_refuses gather_no_index "$HEAD    vgatherdps xmm1, [rax], xmm4"$'\n' \
+    "gather_no_index.asm:4:5: the address of a gather is indexed by an xmm or ymm register, in 'vgatherdps'"
+assembly_refuses gather_general_index "$HEAD    vpgatherqq ymm1, [rax + rcx*8], ymm4"$'\n' \
+    "gather_general_index.asm:4:5: the address of a gather is indexed by an xmm or ymm register, in 'vpgatherqq'"
+assembly_refuses gather_index_width "$HEAD    vgatherdps xmm1, [rax + ymm2*4], xmm4"$'\n' \
+    "gather_index_width.asm:4:5: 'vgatherdps' has no form with registers of these widths"
+assembly_refuses gather_memory_size "$HEAD    vgatherdps xmm1, qword [rax + xmm2*4], xmm4"$'\n' \
+    "gather_memory_size.asm:4:5: the memory is read as 4 bytes (dword, or no size) by 'vgatherdps'"
+assembly_refuses gather_no_mask "$HEAD    vgatherdps xmm1, [rax + xmm2*4]"$'\n' \
+    "gather_no_mask.asm:4:5: these operands are not a form of 'vgatherdps'"
+assembly_refuses gather_destination_is_mask "$HEAD    vgatherdps xmm1, [rax + xmm2*4], xmm1"$'\n' \
+    "gather_destination_is_mask.asm:4:5: the destination, the index and the mask are three different registers, or the processor stops the program, in 'vgatherdps'"
+assembly_refuses gather_destination_is_index "$HEAD    vpgatherdd ymm3, [rax + ymm3*4], ymm4"$'\n' \
+    "gather_destination_is_index.asm:4:5: the destination, the index and the mask are three different registers, or the processor stops the program, in 'vpgatherdd'"
+assembly_refuses gather_index_is_mask "$HEAD    vgatherdpd xmm1, [rax + xmm2*8], xmm2"$'\n' \
+    "gather_index_is_mask.asm:4:5: the destination, the index and the mask are three different registers, or the processor stops the program, in 'vgatherdpd'"
+assembly_refuses gather_same_number_other_width "$HEAD    vgatherqps xmm1, [rax + ymm5*4], xmm5"$'\n' \
+    "gather_same_number_other_width.asm:4:5: the destination, the index and the mask are three different registers, or the processor stops the program, in 'vgatherqps'"
+assembly_refuses vpbroadcast_general "$HEAD    vpbroadcastb xmm1, eax"$'\n' \
+    "vpbroadcast_general.asm:4:5: 'vpbroadcastb' has no form with registers of these widths"
+assembly_refuses vpbroadcast_memory_size "$HEAD    vpbroadcastb ymm1, word [rax]"$'\n' \
+    "vpbroadcast_memory_size.asm:4:5: the memory is read as 1 byte (byte, or no size) by 'vpbroadcastb'"
+assembly_refuses vpermq_register "$HEAD    vpermq ymm1, ymm2, ymm3"$'\n' \
+    "vpermq_register.asm:4:5: these operands are not a form of 'vpermq'"
+assembly_refuses vpermd_xmm "$HEAD    vpermd xmm1, xmm2, xmm3"$'\n' \
+    "vpermd_xmm.asm:4:5: 'vpermd' has no form with registers of these widths"
+assembly_refuses vex_no_256_form "$HEAD    vphminposuw ymm0, ymm1"$'\n' \
+    "vex_no_256_form.asm:4:5: 'vphminposuw' has no 256-bit form"
+assembly_refuses vex_no_256_form_three "$HEAD    vdppd ymm0, ymm1, ymm2, 1"$'\n' \
+    "vex_no_256_form_three.asm:4:5: 'vdppd' has no 256-bit form"
 assembly_refuses vex_no_256_pair "$HEAD    vucomisd ymm0, ymm1"$'\n' \
-    "vex_no_256_pair.asm:4:5: 'vucomisd' has no 256-bit form before AVX2"
+    "vex_no_256_pair.asm:4:5: 'vucomisd' has no 256-bit form"
 assembly_refuses vex_widths_mixed "$HEAD    vaddps ymm0, xmm1, ymm2"$'\n' \
     "vex_widths_mixed.asm:4:5: 'vaddps' has no form with registers of these widths"
 assembly_refuses vex_widths_narrowed "$HEAD    vcvtpd2dq ymm0, ymm1"$'\n' \
@@ -449,8 +487,8 @@ assembly_refuses vex_integer_unsized "$HEAD    vcvtsi2sd xmm0, xmm1, [rax]"$'\n'
     "vex_integer_unsized.asm:4:5: the operation size is not said: write byte, word, dword or qword before the memory operand of 'vcvtsi2sd'"
 assembly_refuses vex_extractps_wide "$HEAD    vextractps rax, xmm1, 1"$'\n' \
     "vex_extractps_wide.asm:4:5: these operands are not a form of 'vextractps'"
-assembly_refuses vex_broadcast_register "$HEAD    vbroadcastss ymm0, xmm1"$'\n' \
-    "vex_broadcast_register.asm:4:5: 'vbroadcastss' has no form with registers of these widths"
+assembly_refuses vex_broadcast_register "$HEAD    vbroadcastsd xmm0, xmm1"$'\n' \
+    "vex_broadcast_register.asm:4:5: 'vbroadcastsd' has no form with registers of these widths"
 assembly_refuses vex_rep "$HEAD    rep vaddps xmm0, xmm1, xmm2"$'\n' \
     "vex_rep.asm:4:5: rep goes only on movs, stos and lods, not on 'vaddps'"
 assembly_refuses blendv_mask "$HEAD    blendvps xmm1, xmm2, xmm3"$'\n' \

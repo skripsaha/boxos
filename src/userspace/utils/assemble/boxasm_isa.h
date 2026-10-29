@@ -53,7 +53,15 @@ typedef enum {
     BOXASM_CLASS_YMM_M256,   /* a ymm register or 32 bytes of memory on a 32-byte boundary */
     BOXASM_CLASS_YMM_U256,   /* a ymm register or 32 bytes of memory anywhere */
     BOXASM_CLASS_U256,       /* 32 bytes of memory anywhere (vlddqu, vmaskmovps) */
-    BOXASM_CLASS_M256        /* 32 bytes of memory on a 32-byte boundary (vmovntps) */
+    BOXASM_CLASS_M256,       /* 32 bytes of memory on a 32-byte boundary (vmovntps) */
+    /* The address of a gather, in ModRM.rm with a SIB byte whose index is a
+     * vector register (VSIB): the register's width, then the bytes of one
+     * element the memory is said to hold. */
+    BOXASM_CLASS_VSIB_X32,   /* indexed by an xmm register, 4 bytes an element (vgatherdps) */
+    BOXASM_CLASS_VSIB_X64,   /* indexed by an xmm register, 8 bytes an element (vgatherdpd) */
+    BOXASM_CLASS_VSIB_Y32,   /* indexed by a ymm register, 4 bytes an element */
+    BOXASM_CLASS_VSIB_Y64,   /* indexed by a ymm register, 8 bytes an element */
+    BOXASM_CLASS_XMM_M8      /* an xmm register or 1 byte of memory, in ModRM.rm (vpbroadcastb) */
 } BoxAsmOperandClass;
 
 #define BOXASM_SIZE_8   0x1u

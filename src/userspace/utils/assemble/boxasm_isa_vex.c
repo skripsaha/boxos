@@ -53,6 +53,8 @@
 /* A shift of an xmm register by an imm8: the result goes to VEX.vvvv. */
 #define SHIFT_IMM(Opcode, Digit)                                          \
     { C(XMM_V, XMM_R, IMM8), 0, { (Opcode) }, 1, (Digit), DUP | M0F, 0x66 }
+#define SHIFT_IMM_Y(Opcode, Digit)                                        \
+    { C(YMM_V, YMM_R, IMM8), 0, { (Opcode) }, 1, (Digit), DUP | M0F | L256, 0x66 }
 
 /* The packed single and double of an operation of three operands, then its
  * scalar single and double. */
@@ -71,13 +73,17 @@
         PAIR(M0F, 0, Opcode, XMM_U128), PAIR_Y(M0F, 0, Opcode, YMM_U256) };             \
     static const BoxAsmForm V##Name##pdForms[] = {                                      \
         PAIR(M0F, 0x66, Opcode, XMM_U128), PAIR_Y(M0F, 0x66, Opcode, YMM_U256) };
-/* The integer operations of SSE2, SSSE3 and SSE4.1: xmm only until AVX2. */
+/* The integer operations of SSE2, SSSE3 and SSE4.1, on xmm registers and, from
+ * AVX2, on ymm ones. */
 #define INTEGER(Name, Map, Opcode)                                                      \
-    static const BoxAsmForm V##Name##Forms[] = { TRIPLE(Map, 0x66, Opcode, XMM_U128) };
+    static const BoxAsmForm V##Name##Forms[] = {                                        \
+        TRIPLE(Map, 0x66, Opcode, XMM_U128), TRIPLE_Y(Map, 0x66, Opcode, YMM_U256) };
 #define INTEGER_PAIR(Name, Map, Opcode)                                                 \
-    static const BoxAsmForm V##Name##Forms[] = { PAIR(Map, 0x66, Opcode, XMM_U128) };
+    static const BoxAsmForm V##Name##Forms[] = {                                        \
+        PAIR(Map, 0x66, Opcode, XMM_U128), PAIR_Y(Map, 0x66, Opcode, YMM_U256) };
 #define INTEGER_IMM(Name, Opcode)                                                       \
-    static const BoxAsmForm V##Name##Forms[] = { TRIPLE_IMM(M3A, 0x66, Opcode, XMM_U128) };
+    static const BoxAsmForm V##Name##Forms[] = {                                        \
+        TRIPLE_IMM(M3A, 0x66, Opcode, XMM_U128), TRIPLE_IMM_Y(M3A, 0x66, Opcode, YMM_U256) };
 
 FLOAT_PACKED(Add, 0x58)   FLOAT_SCALAR(Add, 0x58)
 FLOAT_PACKED(Sub, 0x5C)   FLOAT_SCALAR(Sub, 0x5C)
@@ -182,11 +188,13 @@ static const BoxAsmForm VMovmskpdForms[] = {
     VEX(C(REG, XMM_R, NONE), S32 | S64, M0F, 0x66, 0x50, NO_W),
     VEX(C(REG, YMM_R, NONE), S32 | S64, M0F | L256, 0x66, 0x50, NO_W) };
 static const BoxAsmForm VPmovmskbForms[] = {
-    VEX(C(REG, XMM_R, NONE), S32 | S64, M0F, 0x66, 0xD7, NO_W) };
+    VEX(C(REG, XMM_R, NONE), S32 | S64, M0F, 0x66, 0xD7, NO_W),
+    VEX(C(REG, YMM_R, NONE), S32 | S64, M0F | L256, 0x66, 0xD7, NO_W) };
 static const BoxAsmForm VMovntpsForms[] = { STORE(M0F, 0, 0x2B, M128), STORE_Y(M0F, 0, 0x2B, M256) };
 static const BoxAsmForm VMovntpdForms[] = { STORE(M0F, 0x66, 0x2B, M128), STORE_Y(M0F, 0x66, 0x2B, M256) };
 static const BoxAsmForm VMovntdqForms[] = { STORE(M0F, 0x66, 0xE7, M128), STORE_Y(M0F, 0x66, 0xE7, M256) };
-static const BoxAsmForm VMovntdqaForms[] = { PAIR(M38, 0x66, 0x2A, M128) };
+static const BoxAsmForm VMovntdqaForms[] = {
+    PAIR(M38, 0x66, 0x2A, M128), PAIR_Y(M38, 0x66, 0x2A, M256) };
 static const BoxAsmForm VMaskmovdquForms[] = { PAIR(M0F, 0x66, 0xF7, XMM_R) };
 static const BoxAsmForm VLddquForms[] = { PAIR(M0F, 0xF2, 0xF0, U128), PAIR_Y(M0F, 0xF2, 0xF0, U256) };
 static const BoxAsmForm VLdmxcsrForms[] = { { C(MEM, NONE, NONE), S32, { 0xAE }, 1, 2, M0F, 0 } };
@@ -232,17 +240,21 @@ INTEGER(Punpckhqdq, M0F, 0x6D)
 /* Each shift takes its count in an xmm register or memory, or an imm8. */
 #define INTEGER_SHIFT(Name, Count, Immediate, Digit)                                    \
     static const BoxAsmForm V##Name##Forms[] = {                                        \
-        TRIPLE(M0F, 0x66, Count, XMM_U128), SHIFT_IMM(Immediate, Digit) };
+        TRIPLE(M0F, 0x66, Count, XMM_U128), TRIPLE_Y(M0F, 0x66, Count, XMM_U128),       \
+        SHIFT_IMM(Immediate, Digit), SHIFT_IMM_Y(Immediate, Digit) };
 INTEGER_SHIFT(Psllw, 0xF1, 0x71, 6)  INTEGER_SHIFT(Pslld, 0xF2, 0x72, 6)
 INTEGER_SHIFT(Psllq, 0xF3, 0x73, 6)  INTEGER_SHIFT(Psrlw, 0xD1, 0x71, 2)
 INTEGER_SHIFT(Psrld, 0xD2, 0x72, 2)  INTEGER_SHIFT(Psrlq, 0xD3, 0x73, 2)
 INTEGER_SHIFT(Psraw, 0xE1, 0x71, 4)  INTEGER_SHIFT(Psrad, 0xE2, 0x72, 4)
-static const BoxAsmForm VPslldqForms[] = { SHIFT_IMM(0x73, 7) };
-static const BoxAsmForm VPsrldqForms[] = { SHIFT_IMM(0x73, 3) };
+static const BoxAsmForm VPslldqForms[] = { SHIFT_IMM(0x73, 7), SHIFT_IMM_Y(0x73, 7) };
+static const BoxAsmForm VPsrldqForms[] = { SHIFT_IMM(0x73, 3), SHIFT_IMM_Y(0x73, 3) };
 
-static const BoxAsmForm VPshufdForms[]  = { PAIR_IMM(M0F, 0x66, 0x70, XMM_U128) };
-static const BoxAsmForm VPshufhwForms[] = { PAIR_IMM(M0F, 0xF3, 0x70, XMM_U128) };
-static const BoxAsmForm VPshuflwForms[] = { PAIR_IMM(M0F, 0xF2, 0x70, XMM_U128) };
+static const BoxAsmForm VPshufdForms[] = {
+    PAIR_IMM(M0F, 0x66, 0x70, XMM_U128), PAIR_IMM_Y(M0F, 0x66, 0x70, YMM_U256) };
+static const BoxAsmForm VPshufhwForms[] = {
+    PAIR_IMM(M0F, 0xF3, 0x70, XMM_U128), PAIR_IMM_Y(M0F, 0xF3, 0x70, YMM_U256) };
+static const BoxAsmForm VPshuflwForms[] = {
+    PAIR_IMM(M0F, 0xF2, 0x70, XMM_U128), PAIR_IMM_Y(M0F, 0xF2, 0x70, YMM_U256) };
 
 /* The general register of vpinsrw is 32 bits; a 64-bit one of the extracts
  * (vpextrw, vpextrb, vpextrd) is taken, written without VEX.W, as NASM takes
@@ -283,7 +295,7 @@ INTEGER(Pminsb, M38, 0x38)    INTEGER(Pminsd, M38, 0x39)    INTEGER(Pminuw, M38,
 INTEGER(Pminud, M38, 0x3B)    INTEGER(Pmaxsb, M38, 0x3C)    INTEGER(Pmaxsd, M38, 0x3D)
 INTEGER(Pmaxuw, M38, 0x3E)    INTEGER(Pmaxud, M38, 0x3F)    INTEGER(Pmulld, M38, 0x40)
 INTEGER(Pcmpgtq, M38, 0x37)
-INTEGER_PAIR(Phminposuw, M38, 0x41)
+static const BoxAsmForm VPhminposuwForms[] = { PAIR(M38, 0x66, 0x41, XMM_U128) };
 static const BoxAsmForm VPtestForms[] = {
     PAIR(M38, 0x66, 0x17, XMM_U128), PAIR_Y(M38, 0x66, 0x17, YMM_U256) };
 static const BoxAsmForm VBlendpsForms[] = {
@@ -292,7 +304,8 @@ static const BoxAsmForm VBlendpdForms[] = {
     TRIPLE_IMM(M3A, 0x66, 0x0D, XMM_U128), TRIPLE_IMM_Y(M3A, 0x66, 0x0D, YMM_U256) };
 static const BoxAsmForm VDppsForms[] = {
     TRIPLE_IMM(M3A, 0x66, 0x40, XMM_U128), TRIPLE_IMM_Y(M3A, 0x66, 0x40, YMM_U256) };
-INTEGER_IMM(Pblendw, 0x0E)    INTEGER_IMM(Dppd, 0x41)       INTEGER_IMM(Mpsadbw, 0x42)
+INTEGER_IMM(Pblendw, 0x0E)    INTEGER_IMM(Mpsadbw, 0x42)
+static const BoxAsmForm VDppdForms[] = { TRIPLE_IMM(M3A, 0x66, 0x41, XMM_U128) };
 static const BoxAsmForm VPcmpestrmForms[] = { PAIR_IMM(M3A, 0x66, 0x60, XMM_U128) };
 static const BoxAsmForm VPcmpestriForms[] = { PAIR_IMM(M3A, 0x66, 0x61, XMM_U128) };
 static const BoxAsmForm VPcmpistrmForms[] = { PAIR_IMM(M3A, 0x66, 0x62, XMM_U128) };
@@ -301,20 +314,33 @@ static const BoxAsmForm VBlendvpsForms[] = {
     TRIPLE_SELECT(M3A, 0x66, 0x4A, XMM_U128), TRIPLE_SELECT_Y(M3A, 0x66, 0x4A, YMM_U256) };
 static const BoxAsmForm VBlendvpdForms[] = {
     TRIPLE_SELECT(M3A, 0x66, 0x4B, XMM_U128), TRIPLE_SELECT_Y(M3A, 0x66, 0x4B, YMM_U256) };
-static const BoxAsmForm VPblendvbForms[] = { TRIPLE_SELECT(M3A, 0x66, 0x4C, XMM_U128) };
+static const BoxAsmForm VPblendvbForms[] = {
+    TRIPLE_SELECT(M3A, 0x66, 0x4C, XMM_U128), TRIPLE_SELECT_Y(M3A, 0x66, 0x4C, YMM_U256) };
 
-static const BoxAsmForm VPmovsxbwForms[] = { PAIR(M38, 0x66, 0x20, XMM_M64) };
-static const BoxAsmForm VPmovsxbdForms[] = { PAIR(M38, 0x66, 0x21, XMM_M32) };
-static const BoxAsmForm VPmovsxbqForms[] = { PAIR(M38, 0x66, 0x22, XMM_M16) };
-static const BoxAsmForm VPmovsxwdForms[] = { PAIR(M38, 0x66, 0x23, XMM_M64) };
-static const BoxAsmForm VPmovsxwqForms[] = { PAIR(M38, 0x66, 0x24, XMM_M32) };
-static const BoxAsmForm VPmovsxdqForms[] = { PAIR(M38, 0x66, 0x25, XMM_M64) };
-static const BoxAsmForm VPmovzxbwForms[] = { PAIR(M38, 0x66, 0x30, XMM_M64) };
-static const BoxAsmForm VPmovzxbdForms[] = { PAIR(M38, 0x66, 0x31, XMM_M32) };
-static const BoxAsmForm VPmovzxbqForms[] = { PAIR(M38, 0x66, 0x32, XMM_M16) };
-static const BoxAsmForm VPmovzxwdForms[] = { PAIR(M38, 0x66, 0x33, XMM_M64) };
-static const BoxAsmForm VPmovzxwqForms[] = { PAIR(M38, 0x66, 0x34, XMM_M32) };
-static const BoxAsmForm VPmovzxdqForms[] = { PAIR(M38, 0x66, 0x35, XMM_M64) };
+static const BoxAsmForm VPmovsxbwForms[] = {
+    PAIR(M38, 0x66, 0x20, XMM_M64), PAIR_Y(M38, 0x66, 0x20, XMM_U128) };
+static const BoxAsmForm VPmovsxbdForms[] = {
+    PAIR(M38, 0x66, 0x21, XMM_M32), PAIR_Y(M38, 0x66, 0x21, XMM_M64) };
+static const BoxAsmForm VPmovsxbqForms[] = {
+    PAIR(M38, 0x66, 0x22, XMM_M16), PAIR_Y(M38, 0x66, 0x22, XMM_M32) };
+static const BoxAsmForm VPmovsxwdForms[] = {
+    PAIR(M38, 0x66, 0x23, XMM_M64), PAIR_Y(M38, 0x66, 0x23, XMM_U128) };
+static const BoxAsmForm VPmovsxwqForms[] = {
+    PAIR(M38, 0x66, 0x24, XMM_M32), PAIR_Y(M38, 0x66, 0x24, XMM_M64) };
+static const BoxAsmForm VPmovsxdqForms[] = {
+    PAIR(M38, 0x66, 0x25, XMM_M64), PAIR_Y(M38, 0x66, 0x25, XMM_U128) };
+static const BoxAsmForm VPmovzxbwForms[] = {
+    PAIR(M38, 0x66, 0x30, XMM_M64), PAIR_Y(M38, 0x66, 0x30, XMM_U128) };
+static const BoxAsmForm VPmovzxbdForms[] = {
+    PAIR(M38, 0x66, 0x31, XMM_M32), PAIR_Y(M38, 0x66, 0x31, XMM_M64) };
+static const BoxAsmForm VPmovzxbqForms[] = {
+    PAIR(M38, 0x66, 0x32, XMM_M16), PAIR_Y(M38, 0x66, 0x32, XMM_M32) };
+static const BoxAsmForm VPmovzxwdForms[] = {
+    PAIR(M38, 0x66, 0x33, XMM_M64), PAIR_Y(M38, 0x66, 0x33, XMM_U128) };
+static const BoxAsmForm VPmovzxwqForms[] = {
+    PAIR(M38, 0x66, 0x34, XMM_M32), PAIR_Y(M38, 0x66, 0x34, XMM_M64) };
+static const BoxAsmForm VPmovzxdqForms[] = {
+    PAIR(M38, 0x66, 0x35, XMM_M64), PAIR_Y(M38, 0x66, 0x35, XMM_U128) };
 
 static const BoxAsmForm VRoundpsForms[] = {
     PAIR_IMM(M3A, 0x66, 0x08, XMM_U128), PAIR_IMM_Y(M3A, 0x66, 0x08, YMM_U256) };
@@ -347,11 +373,11 @@ static const BoxAsmForm VPinsrdForms[] = { VEX(C4(XMM, XMM_V, RM, IMM8), S32, M3
 static const BoxAsmForm VPinsrqForms[] = {
     VEX(C4(XMM, XMM_V, RM, IMM8), S64, M3A | W1, 0x66, 0x22, DUP | NO_W) };
 
-/* AVX's own. The broadcasts read memory; their register source is AVX2's. The
+/* AVX's own. The broadcasts read memory, and from AVX2 an xmm register. The
  * masked moves have no shorthand: NASM takes none of them. */
 static const BoxAsmForm VBroadcastssForms[] = {
-    PAIR(M38, 0x66, 0x18, M32), PAIR_Y(M38, 0x66, 0x18, M32) };
-static const BoxAsmForm VBroadcastsdForms[]  = { PAIR_Y(M38, 0x66, 0x19, M64) };
+    PAIR(M38, 0x66, 0x18, XMM_M32), PAIR_Y(M38, 0x66, 0x18, XMM_M32) };
+static const BoxAsmForm VBroadcastsdForms[]  = { PAIR_Y(M38, 0x66, 0x19, XMM_M64) };
 static const BoxAsmForm VBroadcastf128Forms[] = { PAIR_Y(M38, 0x66, 0x1A, U128) };
 static const BoxAsmForm VExtractf128Forms[] = {
     VEX(C(XMM_U128, YMM, IMM8), 0, M3A | L256, 0x66, 0x19, 0) };
@@ -381,6 +407,75 @@ static const BoxAsmForm VTestpdForms[] = {
 static const BoxAsmForm VZeroupperForms[] = { { C(NONE, NONE, NONE), 0, { 0x77 }, 1, NO, M0F, 0 } };
 static const BoxAsmForm VZeroallForms[]   = {
     { C(NONE, NONE, NONE), 0, { 0x77 }, 1, NO, M0F | L256, 0 } };
+
+/* ---- AVX2 ----------------------------------------------------------------
+ * The integer operations on ymm registers are the forms above; these are the
+ * instructions AVX2 adds. The 128-bit integer loads and stores of the masked
+ * moves and the variable shifts keep their xmm form. */
+
+#define BROADCAST(Name, Opcode, Rm)                                                     \
+    static const BoxAsmForm V##Name##Forms[] = {                                        \
+        PAIR(M38, 0x66, Opcode, Rm), PAIR_Y(M38, 0x66, Opcode, Rm) };
+BROADCAST(Pbroadcastb, 0x78, XMM_M8)    BROADCAST(Pbroadcastw, 0x79, XMM_M16)
+BROADCAST(Pbroadcastd, 0x58, XMM_M32)   BROADCAST(Pbroadcastq, 0x59, XMM_M64)
+static const BoxAsmForm VBroadcasti128Forms[] = { PAIR_Y(M38, 0x66, 0x5A, U128) };
+static const BoxAsmForm VExtracti128Forms[] = {
+    VEX(C(XMM_U128, YMM, IMM8), 0, M3A | L256, 0x66, 0x39, 0) };
+static const BoxAsmForm VInserti128Forms[] = {
+    VEX(C4(YMM, YMM_V, XMM_U128, IMM8), 0, M3A | L256, 0x66, 0x38, DUP) };
+static const BoxAsmForm VPerm2i128Forms[] = { TRIPLE_IMM_Y(M3A, 0x66, 0x46, YMM_U256) };
+static const BoxAsmForm VPermdForms[]     = { TRIPLE_Y(M38, 0x66, 0x36, YMM_U256) };
+static const BoxAsmForm VPermpsForms[]    = { TRIPLE_Y(M38, 0x66, 0x16, YMM_U256) };
+static const BoxAsmForm VPermqForms[]     = { PAIR_IMM_Y(M3A | W1, 0x66, 0x00, YMM_U256) };
+static const BoxAsmForm VPermpdForms[]    = { PAIR_IMM_Y(M3A | W1, 0x66, 0x01, YMM_U256) };
+static const BoxAsmForm VPblenddForms[] = {
+    TRIPLE_IMM(M3A, 0x66, 0x02, XMM_U128), TRIPLE_IMM_Y(M3A, 0x66, 0x02, YMM_U256) };
+
+/* NASM takes the shorthand of the integer loads, unlike the float ones. */
+#define MASKED_MOVE(Name, Load, Store, Wide)                                            \
+    static const BoxAsmForm V##Name##Forms[] = {                                        \
+        VEX(C(XMM, XMM_V, U128), 0, M38 | (Wide), 0x66, Load, DUP),                       \
+        VEX(C(YMM, YMM_V, U256), 0, M38 | L256 | (Wide), 0x66, Load, DUP),                \
+        VEX(C(U128, XMM_V, XMM), 0, M38 | (Wide), 0x66, Store, 0),                      \
+        VEX(C(U256, YMM_V, YMM), 0, M38 | L256 | (Wide), 0x66, Store, 0) };
+MASKED_MOVE(Pmaskmovd, 0x8C, 0x8E, 0)
+MASKED_MOVE(Pmaskmovq, 0x8C, 0x8E, W1)
+
+/* The shifts by a count per element: dword with W0, qword with W1. */
+#define VARIABLE_SHIFT(Name, Opcode, Wide)                                              \
+    static const BoxAsmForm V##Name##Forms[] = {                                        \
+        TRIPLE(M38 | (Wide), 0x66, Opcode, XMM_U128),                                   \
+        TRIPLE_Y(M38 | (Wide), 0x66, Opcode, YMM_U256) };
+VARIABLE_SHIFT(Psllvd, 0x47, 0)   VARIABLE_SHIFT(Psllvq, 0x47, W1)
+VARIABLE_SHIFT(Psravd, 0x46, 0)
+VARIABLE_SHIFT(Psrlvd, 0x45, 0)   VARIABLE_SHIFT(Psrlvq, 0x45, W1)
+
+/* The gathers: destination, the address, and the mask in VEX.vvvv. The index
+ * register is the d or q of the name (32- or 64-bit indices), in xmm or ymm
+ * as many of them as the destination has elements; the processor stops the
+ * program when two of the three registers are one. */
+#define GATHER_DEST(Dest, Index, Mask, Vex, Opcode)                                     \
+    VEX(C(Dest, Index, Mask), 0, M38 | (Vex), 0x66, Opcode, 0)
+#define GATHER_D_SINGLE(Name, Opcode, Wide)                                             \
+    static const BoxAsmForm V##Name##Forms[] = {                                        \
+        GATHER_DEST(XMM, VSIB_X32, XMM_V, Wide, Opcode),                                \
+        GATHER_DEST(YMM, VSIB_Y32, YMM_V, L256 | (Wide), Opcode) };
+#define GATHER_D_DOUBLE(Name, Opcode, Wide)                                             \
+    static const BoxAsmForm V##Name##Forms[] = {                                        \
+        GATHER_DEST(XMM, VSIB_X64, XMM_V, Wide, Opcode),                                \
+        GATHER_DEST(YMM, VSIB_X64, YMM_V, L256 | (Wide), Opcode) };
+#define GATHER_Q_SINGLE(Name, Opcode, Wide)                                             \
+    static const BoxAsmForm V##Name##Forms[] = {                                        \
+        GATHER_DEST(XMM, VSIB_X32, XMM_V, Wide, Opcode),                                \
+        GATHER_DEST(XMM, VSIB_Y32, XMM_V, L256 | (Wide), Opcode) };
+#define GATHER_Q_DOUBLE(Name, Opcode, Wide)                                             \
+    static const BoxAsmForm V##Name##Forms[] = {                                        \
+        GATHER_DEST(XMM, VSIB_X64, XMM_V, Wide, Opcode),                                \
+        GATHER_DEST(YMM, VSIB_Y64, YMM_V, L256 | (Wide), Opcode) };
+GATHER_D_SINGLE(Gatherdps, 0x92, 0)   GATHER_D_DOUBLE(Gatherdpd, 0x92, W1)
+GATHER_Q_SINGLE(Gatherqps, 0x93, 0)   GATHER_Q_DOUBLE(Gatherqpd, 0x93, W1)
+GATHER_D_SINGLE(Pgatherdd, 0x90, 0)   GATHER_D_DOUBLE(Pgatherdq, 0x90, W1)
+GATHER_Q_SINGLE(Pgatherqd, 0x91, 0)   GATHER_Q_DOUBLE(Pgatherqq, 0x91, W1)
 
 #define PACKED_ENTRIES(Mnemonic, Name)                                   \
     PLAIN("v" Mnemonic "ps", V##Name##psForms), PLAIN("v" Mnemonic "pd", V##Name##pdForms)
@@ -484,6 +579,18 @@ static const BoxAsmInstruction BoxAsmVexInstructions[] = {
     ENTRY("maskmovpd", Maskmovpd), ENTRY("permilps", Permilps), ENTRY("permilpd", Permilpd),
     ENTRY("perm2f128", Perm2f128), ENTRY("testps", Testps), ENTRY("testpd", Testpd),
     ENTRY("zeroupper", Zeroupper), ENTRY("zeroall", Zeroall),
+    ENTRY("pbroadcastb", Pbroadcastb), ENTRY("pbroadcastw", Pbroadcastw),
+    ENTRY("pbroadcastd", Pbroadcastd), ENTRY("pbroadcastq", Pbroadcastq),
+    ENTRY("broadcasti128", Broadcasti128), ENTRY("extracti128", Extracti128),
+    ENTRY("inserti128", Inserti128), ENTRY("perm2i128", Perm2i128), ENTRY("permd", Permd),
+    ENTRY("permps", Permps), ENTRY("permq", Permq), ENTRY("permpd", Permpd),
+    ENTRY("pblendd", Pblendd), ENTRY("pmaskmovd", Pmaskmovd), ENTRY("pmaskmovq", Pmaskmovq),
+    ENTRY("psllvd", Psllvd), ENTRY("psllvq", Psllvq), ENTRY("psravd", Psravd),
+    ENTRY("psrlvd", Psrlvd), ENTRY("psrlvq", Psrlvq),
+    ENTRY("gatherdps", Gatherdps), ENTRY("gatherdpd", Gatherdpd),
+    ENTRY("gatherqps", Gatherqps), ENTRY("gatherqpd", Gatherqpd),
+    ENTRY("pgatherdd", Pgatherdd), ENTRY("pgatherdq", Pgatherdq),
+    ENTRY("pgatherqd", Pgatherqd), ENTRY("pgatherqq", Pgatherqq),
 };
 
 /* vcmpltps and its kin: vcmp, a predicate, a type; the predicate is the imm8

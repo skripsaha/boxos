@@ -163,21 +163,32 @@ static uint8_t BoxAsmSizeKeyword(const BoxAsmToken *Token)
 /* ---- Memory ------------------------------------------------------------- */
 
 /* A register term of an address: the first plain one is the base, a scaled
- * one or a second plain one the index. */
+ * one or a second plain one the index; an xmm or ymm register is always the
+ * index, of a gather. */
 static int BoxAsmAddRegister(BoxAsmAssembler *Asm, BoxAsmOperand *Out,
                              const BoxAsmRegister *Register, uint64_t Scale,
                              uint8_t Scaled, const BoxAsmLocation *Where)
 {
+    uint8_t Vector = Register->Class == BOXASM_REGISTER_XMM ||
+                     Register->Class == BOXASM_REGISTER_YMM;
+
     if (Register->Class == BOXASM_REGISTER_RIP) {
         if (Scaled || Out->Base.Class != BOXASM_REGISTER_NONE)
             return BoxAsmFail(Asm, Where, "rip can only be the base of an address", NULL);
         Out->Base = *Register;
         return 0;
     }
-    if (Register->Class != BOXASM_REGISTER_GENERAL || Register->Size != 8)
+    if (Vector == 0 && (Register->Class != BOXASM_REGISTER_GENERAL || Register->Size != 8))
         return BoxAsmFail(Asm, Where, "an address is made of 64-bit registers", NULL);
     if (Scale != 1 && Scale != 2 && Scale != 4 && Scale != 8)
         return BoxAsmFail(Asm, Where, "an index is scaled by 1, 2, 4 or 8", NULL);
+    if (Vector != 0) {
+        if (Out->Index.Class != BOXASM_REGISTER_NONE)
+            return BoxAsmFail(Asm, Where, "an address has one base and one index register", NULL);
+        Out->Index = *Register;
+        Out->Scale = (uint8_t)Scale;
+        return 0;
+    }
     if (!Scaled && Out->Base.Class == BOXASM_REGISTER_NONE) {
         Out->Base = *Register;
         return 0;

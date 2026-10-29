@@ -13,7 +13,8 @@ typedef enum {
     BOXASM_MISMATCH_MEMORY,     /* memory of another size than the form reads */
     BOXASM_MISMATCH_MASK,       /* an xmm register where the form reads xmm0 */
     BOXASM_MISMATCH_WIDTH,      /* an xmm register where the form reads a ymm, or the reverse */
-    BOXASM_MISMATCH_SELECTOR    /* something but a register where a blend selects by one */
+    BOXASM_MISMATCH_SELECTOR,   /* something but a register where a blend selects by one */
+    BOXASM_MISMATCH_VSIB        /* an address without a vector index where a gather reads one */
 } BoxAsmMismatch;
 
 typedef struct {
@@ -156,6 +157,25 @@ static int BoxAsmIsMemoryOf(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand
     return 0;
 }
 
+/* The address of a gather: memory indexed by a vector register of the class's
+ * width, and of the size of one element when it says a size. */
+static int BoxAsmIsGatherAddress(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand,
+                                 uint8_t IndexClass, uint8_t Element, BoxAsmMismatch *Why)
+{
+    if (Operand->Kind != BOXASM_OPERAND_MEMORY)
+        return 0;
+    if (Operand->Index.Class != BOXASM_REGISTER_XMM && Operand->Index.Class != BOXASM_REGISTER_YMM) {
+        *Why = BOXASM_MISMATCH_VSIB;
+        return 0;
+    }
+    if (Operand->Index.Class != IndexClass) {
+        if (*Why == BOXASM_MISMATCH_OPERANDS)
+            *Why = BOXASM_MISMATCH_WIDTH;
+        return 0;
+    }
+    return BoxAsmIsMemoryOf(Encoder, Operand, Element, Why);
+}
+
 static int BoxAsmIsMask(const BoxAsmOperand *Operand, BoxAsmMismatch *Why)
 {
     if (!BoxAsmIsXmm(Operand))
@@ -215,6 +235,7 @@ static int BoxAsmClassHolds(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand
     case BOXASM_CLASS_YMM_V:   return BoxAsmIsYmm(Operand);
     case BOXASM_CLASS_YMM_IS4: return BoxAsmIsSelector(Operand, BoxAsmIsYmm(Operand), Why);
     case BOXASM_CLASS_XMM0:    return BoxAsmIsMask(Operand, Why);
+    case BOXASM_CLASS_XMM_M8:  return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 1, Why);
     case BOXASM_CLASS_XMM_M16: return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 2, Why);
     case BOXASM_CLASS_XMM_M32: return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 4, Why);
     case BOXASM_CLASS_XMM_M64: return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 8, Why);
@@ -224,6 +245,14 @@ static int BoxAsmClassHolds(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand
     case BOXASM_CLASS_YMM_M256:
     case BOXASM_CLASS_YMM_U256: return BoxAsmIsYmm(Operand) ||
                                        BoxAsmIsMemoryOf(Encoder, Operand, 32, Why);
+    case BOXASM_CLASS_VSIB_X32: return BoxAsmIsGatherAddress(Encoder, Operand,
+                                                             BOXASM_REGISTER_XMM, 4, Why);
+    case BOXASM_CLASS_VSIB_X64: return BoxAsmIsGatherAddress(Encoder, Operand,
+                                                             BOXASM_REGISTER_XMM, 8, Why);
+    case BOXASM_CLASS_VSIB_Y32: return BoxAsmIsGatherAddress(Encoder, Operand,
+                                                             BOXASM_REGISTER_YMM, 4, Why);
+    case BOXASM_CLASS_VSIB_Y64: return BoxAsmIsGatherAddress(Encoder, Operand,
+                                                             BOXASM_REGISTER_YMM, 8, Why);
     case BOXASM_CLASS_U128:    return BoxAsmIsMemoryOf(Encoder, Operand, 16, Why);
     case BOXASM_CLASS_U256:
     case BOXASM_CLASS_M256:    return BoxAsmIsMemoryOf(Encoder, Operand, 32, Why);
@@ -247,6 +276,7 @@ static uint8_t BoxAsmClassWidth(uint8_t Class)
     case BOXASM_CLASS_XMM_R:
     case BOXASM_CLASS_XMM_M32:
     case BOXASM_CLASS_XMM_M16:
+    case BOXASM_CLASS_XMM_M8:
     case BOXASM_CLASS_XMM_M64:
     case BOXASM_CLASS_XMM_M128:
     case BOXASM_CLASS_XMM_U128:
@@ -415,7 +445,7 @@ static void BoxAsmPutAddress(BoxAsmEncoder *Encoder, uint8_t RegField,
 {
     const BoxAsmValue *Value = &Operand->Value;
     uint8_t HasBase = Operand->Base.Class == BOXASM_REGISTER_GENERAL;
-    uint8_t HasIndex = Operand->Index.Class == BOXASM_REGISTER_GENERAL;
+    uint8_t HasIndex = Operand->Index.Class != BOXASM_REGISTER_NONE;
     uint8_t Base = Operand->Base.Number;
     uint8_t Scale = Operand->Scale == 8 ? 3 : Operand->Scale == 4 ? 2 : Operand->Scale == 2 ? 1 : 0;
     uint8_t Mod;
@@ -493,6 +523,11 @@ static uint8_t BoxAsmImmediateKind(const BoxAsmEncoder *Encoder, uint8_t Class, 
     return BOXASM_FIXUP_ABSOLUTE;
 }
 
+static int BoxAsmIsGatherClass(uint8_t Class)
+{
+    return Class >= BOXASM_CLASS_VSIB_X32 && Class <= BOXASM_CLASS_VSIB_Y64;
+}
+
 static int BoxAsmIsRmClass(uint8_t Class)
 {
     return Class == BOXASM_CLASS_RM || Class == BOXASM_CLASS_MEM ||
@@ -502,7 +537,8 @@ static int BoxAsmIsRmClass(uint8_t Class)
            (Class >= BOXASM_CLASS_XMM_R && Class <= BOXASM_CLASS_R32_M16) ||
            Class == BOXASM_CLASS_YMM_R || Class == BOXASM_CLASS_YMM_M256 ||
            Class == BOXASM_CLASS_YMM_U256 || Class == BOXASM_CLASS_U256 ||
-           Class == BOXASM_CLASS_M256;
+           Class == BOXASM_CLASS_M256 || Class == BOXASM_CLASS_XMM_M8 ||
+           BoxAsmIsGatherClass(Class);
 }
 
 /* The boundary the memory an r/m of this class names must sit on, 0 for none:
@@ -822,8 +858,8 @@ static int BoxAsmGivenYmm(const BoxAsmEncoder *Encoder)
 }
 
 /* Registers of a width the instruction does not take: SSE's take xmm and say
- * which instruction takes ymm, AVX's before AVX2 have a 256-bit form only
- * where the processor has one. */
+ * which instruction takes ymm, AVX's have a 256-bit form only where the
+ * processor has one. */
 static void BoxAsmWidthMessage(const BoxAsmEncoder *Encoder, BoxAsmMessage *Message)
 {
     const BoxAsmInstruction *Instruction = Encoder->Statement->Instruction;
@@ -846,7 +882,7 @@ static void BoxAsmWidthMessage(const BoxAsmEncoder *Encoder, BoxAsmMessage *Mess
     }
     BoxAsmMessageName(Message, Instruction->Name);
     if (BoxAsmGivenYmm(Encoder) && !BoxAsmHasYmmForm(Instruction))
-        BoxAsmMessageText(Message, " has no 256-bit form before AVX2");
+        BoxAsmMessageText(Message, " has no 256-bit form");
     else
         BoxAsmMessageText(Message, " has no form with registers of these widths");
 }
@@ -886,6 +922,10 @@ static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
     case BOXASM_MISMATCH_WIDTH:
         BoxAsmWidthMessage(Encoder, &Message);
         return BoxAsmFailEnd(Encoder->Asm, &Statement->Where, &Message);
+    case BOXASM_MISMATCH_VSIB:
+        BoxAsmMessageText(&Message,
+                          "the address of a gather is indexed by an xmm or ymm register, in ");
+        break;
     case BOXASM_MISMATCH_SELECTOR:
         BoxAsmMessageText(&Message, "the selector is a register, written last, in ");
         break;
@@ -907,6 +947,77 @@ static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
     return BoxAsmFailEnd(Encoder->Asm, &Statement->Where, &Message);
 }
 
+static int BoxAsmHasGatherForm(const BoxAsmInstruction *Instruction)
+{
+    uint8_t Form;
+
+    for (Form = 0; Form < Instruction->FormCount; Form++)
+        if (BoxAsmIsGatherClass(Instruction->Forms[Form].Class[1]))
+            return 1;
+    return 0;
+}
+
+static int BoxAsmVectorIndex(const BoxAsmOperand *Operand)
+{
+    return Operand->Kind == BOXASM_OPERAND_MEMORY &&
+           (Operand->Index.Class == BOXASM_REGISTER_XMM ||
+            Operand->Index.Class == BOXASM_REGISTER_YMM);
+}
+
+/* A vector register indexes the address of a gather and nothing else. */
+static int BoxAsmCheckVectorIndex(BoxAsmEncoder *Encoder)
+{
+    const BoxAsmStatement *Statement = Encoder->Statement;
+    BoxAsmMessage Message;
+    uint8_t Index;
+
+    for (Index = 0; Index < Encoder->GivenCount; Index++) {
+        if (!BoxAsmVectorIndex(&Encoder->Given[Index]) ||
+            BoxAsmHasGatherForm(Statement->Instruction))
+            continue;
+        BoxAsmFailBegin(Encoder->Asm, &Statement->Where, &Message);
+        BoxAsmMessageText(&Message, "only a gather takes a vector register as the index of its "
+                                    "address, not ");
+        BoxAsmMessageName(&Message, Statement->Instruction->Name);
+        return BoxAsmFailEnd(Encoder->Asm, &Statement->Where, &Message);
+    }
+    return 0;
+}
+
+/* The processor stops the program (#UD) when a gather's destination, its
+ * index and its mask are not three different registers, whatever their
+ * widths: the number of each is what is compared. */
+static int BoxAsmCheckGather(BoxAsmEncoder *Encoder)
+{
+    const BoxAsmForm *Form = Encoder->Form;
+    const BoxAsmStatement *Statement = Encoder->Statement;
+    uint8_t Destination = 0;
+    uint8_t Index = 0;
+    uint8_t Mask = 0;
+    BoxAsmMessage Message;
+    uint8_t At;
+
+    if (!BoxAsmIsGatherClass(Form->Class[1]))
+        return 0;
+    for (At = 0; At < Encoder->Count; At++) {
+        uint8_t Class = Form->Class[At];
+
+        if (BoxAsmIsGatherClass(Class))
+            Index = Encoder->Operands[At].Index.Number;
+        else if (Class == BOXASM_CLASS_XMM || Class == BOXASM_CLASS_YMM)
+            Destination = Encoder->Operands[At].Register.Number;
+        else if (Class == BOXASM_CLASS_XMM_V || Class == BOXASM_CLASS_YMM_V)
+            Mask = Encoder->Operands[At].Register.Number;
+    }
+    if (Destination != Index && Destination != Mask && Index != Mask)
+        return 0;
+    BoxAsmFailBegin(Encoder->Asm, &Statement->Where, &Message);
+    BoxAsmMessageText(&Message, "the destination, the index and the mask are three different "
+                                "registers, or the processor stops the program, in ");
+    BoxAsmMessageName(&Message, Statement->Instruction->Name);
+    return BoxAsmFailEnd(Encoder->Asm, &Statement->Where, &Message);
+}
+
 int BoxAsmEncode(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement, uint8_t Short,
                  BoxAsmEncoding *Out)
 {
@@ -915,6 +1026,7 @@ int BoxAsmEncode(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement, uint8_t
     BoxAsmMismatch Why = BOXASM_MISMATCH_OPERANDS;
     uint8_t Sizes = 0;
     uint8_t Index;
+    int Rc;
 
     memset(Out, 0, sizeof(*Out));
     memset(&Encoder, 0, sizeof(Encoder));
@@ -936,12 +1048,13 @@ int BoxAsmEncode(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement, uint8_t
         Encoder.Given[0].Reach == BOXASM_BRANCH_NEAR)
         return BoxAsmFail(Asm, &Statement->Where,
                           "has no near form: it reaches -128 to 127 bytes", Instruction->Name);
+    if ((Rc = BoxAsmCheckVectorIndex(&Encoder)) != 0)
+        return Rc;
     for (Index = 0; Index < Instruction->FormCount; Index++) {
         if (BoxAsmFormMatches(&Encoder, &Instruction->Forms[Index], Short, &Why)) {
-            int Rc;
-
             Encoder.Form = &Instruction->Forms[Index];
-            if ((Rc = BoxAsmCheckPrefix(&Encoder)) != 0)
+            if ((Rc = BoxAsmCheckPrefix(&Encoder)) != 0 ||
+                (Rc = BoxAsmCheckGather(&Encoder)) != 0)
                 return Rc;
             return BoxAsmEmitForm(&Encoder, Short);
         }
