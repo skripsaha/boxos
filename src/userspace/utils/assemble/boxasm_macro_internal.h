@@ -11,10 +11,12 @@
 #define BOXASM_MACRO_NAME      255u
 #define BOXASM_MACRO_ANY       0xFFFFFFFFu   /* a parameter count of '*' */
 
-/* A line as the preprocessor walks it: its text, NUL-ended, the source line
- * it stands for, and the macro call it was written in. */
+/* A line as the preprocessor walks it: its text, NUL-ended, the file and
+ * the line of it it stands for, and the macro call or %include it was
+ * reached through. */
 typedef struct {
     const char *Text;
+    uint32_t    File;
     uint32_t    Line;
     uint32_t    Frame;
 } BoxAsmPpLine;
@@ -59,6 +61,7 @@ typedef struct {
     uint8_t  Active;           /* the lines now are assembled */
     uint8_t  Done;             /* a branch was taken, or none can be */
     uint8_t  Else;             /* %else was seen */
+    uint32_t File;
     uint32_t Line;
     uint32_t Frame;
     char    *Text;             /* its line, to show when it is never closed */
@@ -67,6 +70,12 @@ typedef struct {
 typedef struct {
     BoxAsmAssembler   *Asm;
     BoxAsmExpansion   *Out;
+    BoxAsmFiles       *Files;      /* where %includes are found; NULL: nowhere */
+    uint64_t          *Open;       /* the files being read, by id, the source first */
+    size_t             OpenCount;
+    size_t             OpenCapacity;
+    char             **Homes;      /* each file's home, by its index in Out->Files */
+    size_t             HomeCapacity;
     BoxAsmNameIndex    SingleIndex;
     BoxAsmSingleMacro *Singles;
     size_t             SingleCount;
@@ -84,6 +93,24 @@ typedef struct {
     uint8_t            ExitRep;    /* %exitrep: the innermost %rep stops */
     uint64_t           Walked;
 } BoxAsmPp;
+
+/* ---- boxasm_macro.c ----------------------------------------------------- */
+
+/* A file's text cut into its lines in place, each ended by a NUL where its
+ * newline was: file File, reached through Frame. *Lines is the caller's to
+ * free. A NUL in the text is refused where it stands: a source is text. */
+int BoxAsmPpCut(BoxAsmPp *Pp, char *Text, size_t Size, uint32_t File, uint32_t Frame,
+                BoxAsmPpLine **Lines, size_t *Count);
+/* A new frame: a macro called, or a file included, from Line. */
+int BoxAsmPpFrame(BoxAsmPp *Pp, uint8_t Kind, const char *Name, const BoxAsmPpLine *Line,
+                  uint32_t *Frame);
+/* The lines of one body: a file, a macro's call, a %rep's pass. */
+int BoxAsmPpLines(BoxAsmPp *Pp, const BoxAsmPpLine *Lines, size_t Count);
+
+/* ---- boxasm_macro_include.c --------------------------------------------- */
+
+/* %include "name" tags... [everywhere]: the one file it means, read here. */
+int BoxAsmPpInclude(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
 
 /* ---- boxasm_macro_text.c ------------------------------------------------ */
 

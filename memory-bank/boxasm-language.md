@@ -1,6 +1,6 @@
 # BoxASM — the assembler inside BoxOS
 
-Status 2026-10-28: implemented in `src/userspace/utils/assemble/`, held to
+Status 2026-10-29: implemented in `src/userspace/utils/assemble/`, held to
 NASM 3 byte for byte and to GNU ld by `tools/boxasm_stand.sh` (the `boxasm`
 gate), run end to end in BoxOS (`hello`, `countdown`).
 
@@ -189,6 +189,8 @@ word, line by line, the way NASM's does:
   `%ifstr`, `%ifid`. Each has its `%ifn…` and `%elif…` forms.
 - `%rep count` … `%endrep`, and `%exitrep` to leave it.
 - `%error text` (or `%fatal`) refuses with the text.
+- `%include "name"` reads another file where the line stands (see
+  Including a file).
 
 `struc NAME` … `endstruc` writes a layout: its labels (`.x` is `NAME.x`) are
 offsets from 0, made by `resb resw resd resq` and `align` (or `alignb`), and
@@ -198,7 +200,9 @@ point.y, dd 2` fills with zeros up to the field and writes it there, and iend
 fills to `NAME_size`.
 
 An error in a macro's expansion is said at the line of the macro that made
-it, the line shown as it expanded, then each call it was reached through:
+it, the line shown as it expanded, then each call and `%include` it was
+reached through; a macro calling itself from one line is said once, with how
+many calls deep:
 
 ```text
 prog.asm:2:14: 'nowhere' is never defined; ...
@@ -208,9 +212,62 @@ prog.asm:2:14: 'nowhere' is never defined; ...
     in the macro 'twice' called at line 10
 ```
 
-Calls go 256 deep, `%define`s expand 1000 deep, the expanded source reaches
-16 MiB and the preprocessor walks 50 million lines; a source past any of them
-is refused with its line. `macros.asm` shows most of this at work.
+How deep a source nests — macro calls in macro calls, `%define`s in
+`%define`s, files in files, parentheses, names defined by names — is measured
+on the stack: `assemble` has 64 KiB of it, and a source past what fits is
+refused in words at the line where it ran short (a recursive macro is named:
+`'rec' is called inside macro calls too deep: a macro may be calling
+itself`). The expanded source reaches 16 MiB and the preprocessor walks 50
+million lines. `macros.asm` shows most of this at work.
+
+### Including a file
+
+A file is found as BoxOS finds a file — by its name and the tags it wears,
+never by a path:
+
+```text
+%include "math.asm"                       the one called so, here
+%include "math.asm" fast                  ... that wears fast as well
+%include "print.asm" mylib everywhere     past the context: the one wearing mylib
+```
+
+- Here is the home of the file the line is written in. The source's home is
+  the Use Context the build began in, taken once, so a context said on
+  another console meanwhile moves nothing; a file found beside it has the
+  same home.
+- The words after the name are the meaning the file must wear, checked
+  whenever they are written: a file that does not wear them is not the one.
+- `everywhere` looks past the home. A file reached so finds its own
+  `%include`s among the tags of the line that reached it, so a library's
+  neighbours are its own wherever it is used.
+- Exactly one file: two that fit, or none, refuse, saying what is there and
+  what to write:
+
+```text
+prog.asm:5:10: math.asm could be any of 2 files in demo
+    %include "math.asm"
+             ^
+  say which by a tag only it wears:
+    %include "math.asm" fast    for the one wearing math, demo, fast
+    %include "math.asm" old     for the one wearing math, demo, old
+
+prog.asm:5:10: there is no lone.asm in demo
+    %include "lone.asm"
+             ^
+  outside it, reached by:
+    %include "lone.asm" game everywhere    for the one wearing lone, game
+  or let it wear demo too
+```
+
+- A file included again while it is being read is refused (the files
+  include one another in a circle); a file holding a NUL byte is no source.
+  An included file is a body of its own: a `%if` or `%macro` opened in it is
+  closed in it, and it is outside the macro call and `%rep` of its line.
+- An error in an included file names that file and the line that included
+  it: `in the file 'math.asm' included at line 3 of prog.asm`.
+- `assemble` finds the source itself the same way and says the same when it
+  cannot: which files of that name there are, and that `use` narrows or
+  changes the context.
 
 ### box operations
 
@@ -269,10 +326,12 @@ BoxOS userspace has no red zone.
   it was (with a warning) unless the name is also an instruction.
 - `struc` gives back the scope of `.local` names it found; NASM leaves its
   name as the scope. `at` is a directive only inside an istruc.
-- Not built of NASM's preprocessor: `%include` (a decision about naming a
-  file in TagFS comes first), `%push`/`%pop` contexts and `%$` names,
+- `%include` finds a file by name and tags in the context, never by a path,
+  and takes exactly one; NASM searches directories and `-I` paths and takes
+  the first. `%include <name>` and `incbin` are not built.
+- Not built of NASM's preprocessor: `%push`/`%pop` contexts and `%$` names,
   `%strlen %substr %strcat`, `%warning`, the case-blind `%idefine`
-  `%imacro`, `%[...]`, `%line`, `%pragma`.
+  `%imacro`, `%[...]`, `%line`, `%pragma`, `%depend`, `%pathsearch`.
 
 Everything else in the shared subset assembles to the same bytes and
 relocations: `tools/boxasm_oracle.py` generates a corpus of about 5,000

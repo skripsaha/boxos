@@ -55,22 +55,29 @@ int BoxAsmTooDeep(const BoxAsmAssembler *Asm, uintptr_t Start)
 
 /* ---- Diagnostics -------------------------------------------------------- */
 
-/* The source line a location stands for, and the macro call it was
- * written in: through the preprocessor's lines once the text read is its
- * expansion, as the preprocessor said while it works. */
-static void BoxAsmPlace(const BoxAsmAssembler *Asm, const BoxAsmLocation *Where, uint32_t *Line,
-                        uint32_t *Frame)
+/* The file and line a location stands for, and the macro call or %include
+ * it was reached through: through the preprocessor's lines once the text
+ * read is its expansion, as the preprocessor said while it works. */
+static void BoxAsmPlace(const BoxAsmAssembler *Asm, const BoxAsmLocation *Where, uint32_t *File,
+                        uint32_t *Line, uint32_t *Frame)
 {
+    *File = Asm->FailFile;
     *Line = Where->Line;
     *Frame = Asm->FailFrame;
     if (Asm->Expanded && Asm->Expansion)
-        BoxAsmExpansionPlace(Asm->Expansion, Where->Line, Line, Frame);
+        BoxAsmExpansionPlace(Asm->Expansion, Where->Line, File, Line, Frame);
+}
+
+static const char *BoxAsmFileName(const BoxAsmAssembler *Asm, uint32_t File)
+{
+    return Asm->Expansion ? BoxAsmExpansionFile(Asm->Expansion, File) : Asm->FileName;
 }
 
 /* "file:line:column: " — or nothing at all during a layout pass, whose
  * values are not settled yet. */
 void BoxAsmFailBegin(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, BoxAsmMessage *Message)
 {
+    uint32_t File;
     uint32_t Line;
     uint32_t Frame;
 
@@ -78,9 +85,9 @@ void BoxAsmFailBegin(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, BoxAsmMe
         BoxAsmMessageBegin(Message, NULL, 0);
         return;
     }
-    BoxAsmPlace(Asm, Where, &Line, &Frame);
+    BoxAsmPlace(Asm, Where, &File, &Line, &Frame);
     BoxAsmMessageBegin(Message, Asm->Error, Asm->ErrorCapacity);
-    BoxAsmMessageText(Message, Asm->FileName);
+    BoxAsmMessageText(Message, BoxAsmFileName(Asm, File));
     BoxAsmMessageText(Message, ":");
     BoxAsmMessageDecimal(Message, Line);
     BoxAsmMessageText(Message, ":");
@@ -90,12 +97,14 @@ void BoxAsmFailBegin(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, BoxAsmMe
 
 /* The line under the message — as the macros made it — and a caret at the
  * column, its tabs kept so the caret lands where the eye does; then each
- * macro call the line was reached through, the innermost first. */
+ * macro call and %include the line was reached through, the innermost first,
+ * the file of each named when it is not the one the message begins with. */
 int BoxAsmFailEnd(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, BoxAsmMessage *Message)
 {
     const char *Line = Where->LineStart;
     size_t Length = 0;
     uint32_t Column;
+    uint32_t File;
     uint32_t Source;
     uint32_t Frame;
 
@@ -110,7 +119,7 @@ int BoxAsmFailEnd(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, BoxAsmMessa
     for (Column = 1; Column < Where->Column && Column <= Length; Column++)
         BoxAsmMessageSpan(Message, Line[Column - 1u] == '\t' ? "\t" : " ", 1u);
     BoxAsmMessageText(Message, "^");
-    BoxAsmPlace(Asm, Where, &Source, &Frame);
+    BoxAsmPlace(Asm, Where, &File, &Source, &Frame);
     while (Asm->Expansion && Frame != 0 && Frame < Asm->Expansion->FrameCount) {
         const BoxAsmFrame *Call = &Asm->Expansion->Frames[Frame];
         const char *Name = (const char *)Asm->Expansion->Names.Data + Call->Name;
@@ -119,16 +128,28 @@ int BoxAsmFailEnd(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, BoxAsmMessa
         /* A macro calling itself from one line is one line said once. */
         Frame = Call->Parent;
         while (Frame != 0 && Frame < Asm->Expansion->FrameCount &&
+               Asm->Expansion->Frames[Frame].Kind == Call->Kind &&
+               Asm->Expansion->Frames[Frame].File == Call->File &&
                Asm->Expansion->Frames[Frame].Line == Call->Line &&
                strcmp((const char *)Asm->Expansion->Names.Data +
                       Asm->Expansion->Frames[Frame].Name, Name) == 0) {
             Frame = Asm->Expansion->Frames[Frame].Parent;
             Times++;
         }
-        BoxAsmMessageText(Message, "\n    in the macro ");
-        BoxAsmMessageName(Message, Name);
-        BoxAsmMessageText(Message, " called at line ");
+        if (Call->Kind == BOXASM_FRAME_FILE) {
+            BoxAsmMessageText(Message, "\n    in the file ");
+            BoxAsmMessageName(Message, Name);
+            BoxAsmMessageText(Message, " included at line ");
+        } else {
+            BoxAsmMessageText(Message, "\n    in the macro ");
+            BoxAsmMessageName(Message, Name);
+            BoxAsmMessageText(Message, " called at line ");
+        }
         BoxAsmMessageDecimal(Message, Call->Line);
+        if (Call->File != File) {
+            BoxAsmMessageText(Message, " of ");
+            BoxAsmMessageText(Message, BoxAsmFileName(Asm, Call->File));
+        }
         if (Times > 1) {
             BoxAsmMessageText(Message, " (");
             BoxAsmMessageDecimal(Message, Times);
@@ -200,28 +221,24 @@ static void BoxAsmEnd(BoxAsmAssembler *Asm)
     memset(Asm, 0, sizeof(*Asm));
 }
 
-int BoxAsmSourceAssemble(const char *Source, size_t SourceSize, const char *FileName,
-                         BoxAsmBlob *Out, char *Error, size_t ErrorCapacity)
+int BoxAsmSourceAssemble(const BoxAsmSource *Source, BoxAsmBlob *Out, char *Error,
+                         size_t ErrorCapacity)
 {
     BoxAsmAssembler Asm;
     BoxAsmExpansion Expansion;
-    char *Text;
     int Rc;
 
     BoxAsmMessageSet(Error, ErrorCapacity, "");
-    if (!Source || !Out || SourceSize == SIZE_MAX) {
+    if (!Source || !Source->Text || !Out || Source->Size == SIZE_MAX) {
         BoxAsmMessageSet(Error, ErrorCapacity, "the source is missing");
         return -ERR_INVALID_ARGUMENT;
     }
     memset(Out, 0, sizeof(*Out));
-    Text = BoxAsmCopyText(Source, SourceSize);
-    if (!Text)
-        return -ERR_NO_MEMORY;
     memset(&Expansion, 0, sizeof(Expansion));
-    Rc = BoxAsmBegin(&Asm, FileName, Error, ErrorCapacity);
+    Rc = BoxAsmBegin(&Asm, Source->Name, Error, ErrorCapacity);
     Asm.StackBase = (uintptr_t)__builtin_frame_address(0);
     if (Rc == 0)
-        Rc = BoxAsmPreprocess(&Asm, Text, SourceSize, &Expansion);
+        Rc = BoxAsmPreprocess(&Asm, Source, &Expansion);
     if (Rc == 0) {
         Asm.Expanded = 1;
         Rc = BoxAsmParse(&Asm, (const char *)Expansion.Text.Data, (size_t)Expansion.Text.Size);
@@ -236,8 +253,7 @@ int BoxAsmSourceAssemble(const char *Source, size_t SourceSize, const char *File
         BoxAsmMessageSet(Error, ErrorCapacity, "out of memory while assembling");
     BoxAsmEnd(&Asm);
     BoxAsmExpansionRelease(&Expansion);
-    free(Text);
     if (Out->Data)
-        Out->Name = FileName;
+        Out->Name = Source->Name;
     return Rc;
 }

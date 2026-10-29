@@ -269,6 +269,7 @@ typedef struct {
     size_t              TakenCapacity;
     const struct BoxAsmExpansion *Expansion; /* the preprocessor's lines and calls */
     uint8_t             Expanded;        /* the text read is Expansion's: lines map back */
+    uint32_t            FailFile;        /* while it works: the file of its line */
     uint32_t            FailFrame;       /* while it works: the macro call of its line */
     BoxAsmStruc         Struc;
     uintptr_t           StackBase;       /* the stack where the work began */

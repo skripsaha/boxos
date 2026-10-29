@@ -181,6 +181,7 @@ static int BoxAsmPpOpenCondition(BoxAsmPp *Pp, const BoxAsmPpLine *Line, int Act
     Condition->Active = (uint8_t)Active;
     Condition->Done = (uint8_t)Done;
     Condition->Else = 0;
+    Condition->File = Line->File;
     Condition->Line = Line->Line;
     Condition->Frame = Line->Frame;
     Pp->ConditionCount++;

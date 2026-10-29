@@ -1,12 +1,12 @@
 /* The preprocessor: NASM's %define, %xdefine, %assign, %undef, %macro,
- * %unmacro, %rotate, %if and its kin, %rep, %exitrep and %error, carried out
- * line by line before the assembler reads a word.
+ * %unmacro, %rotate, %if and its kin, %rep, %exitrep, %error and %include,
+ * carried out line by line before the assembler reads a word.
  *
- * Every line it writes remembers where it came from — the source line, and
- * the macro call it was written in — so a refusal anywhere later points at
- * the line of the source and names the calls it was reached through. A body
- * (of a macro, of a %rep, of the file) is a source of its own: a %if or a
- * %macro opened in it is closed in it. */
+ * Every line it writes remembers where it came from — the file and its line,
+ * and the macro call or %include it was reached through — so a refusal
+ * anywhere later points at the line of the file and names the calls it was
+ * reached through. A body (of a macro, of a %rep, of a file) is a source of
+ * its own: a %if or a %macro opened in it is closed in it. */
 
 #include "boxasm_macro_internal.h"
 
@@ -15,8 +15,6 @@
 #include "box/error.h"
 #include "box/memory.h"
 #include "box/string.h"
-
-static int BoxAsmPpLines(BoxAsmPp *Pp, const BoxAsmPpLine *Lines, size_t Count);
 
 /* ---- Output ------------------------------------------------------------- */
 
@@ -31,14 +29,15 @@ static int BoxAsmPpEmit(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text
         BoxAsmBufferAppend(&Out->Text, Text, Length) != 0 ||
         BoxAsmBufferAppend(&Out->Text, "\n", 1) != 0)
         return -ERR_NO_MEMORY;
+    Out->Lines[Out->LineCount].File = Line->File;
     Out->Lines[Out->LineCount].Line = Line->Line;
     Out->Lines[Out->LineCount].Frame = Line->Frame;
     Out->LineCount++;
     return 0;
 }
 
-/* A new call of Name from Line: its frame. */
-static int BoxAsmPpFrame(BoxAsmPp *Pp, const char *Name, const BoxAsmPpLine *Line, uint32_t *Frame)
+int BoxAsmPpFrame(BoxAsmPp *Pp, uint8_t Kind, const char *Name, const BoxAsmPpLine *Line,
+                  uint32_t *Frame)
 {
     BoxAsmExpansion *Out = Pp->Out;
 
@@ -47,8 +46,10 @@ static int BoxAsmPpFrame(BoxAsmPp *Pp, const char *Name, const BoxAsmPpLine *Lin
                         sizeof(BoxAsmFrame)) != 0)
         return -ERR_NO_MEMORY;
     Out->Frames[Out->FrameCount].Name = (uint32_t)Out->Names.Size;
+    Out->Frames[Out->FrameCount].File = Line->File;
     Out->Frames[Out->FrameCount].Line = Line->Line;
     Out->Frames[Out->FrameCount].Parent = Line->Frame;
+    Out->Frames[Out->FrameCount].Kind = Kind;
     if (BoxAsmBufferAppend(&Out->Names, Name, strlen(Name) + 1u) != 0)
         return -ERR_NO_MEMORY;
     *Frame = (uint32_t)Out->FrameCount++;
@@ -167,7 +168,7 @@ static int BoxAsmPpInvoke(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPp
             }
         }
     }
-    if ((Rc = BoxAsmPpFrame(Pp, Macro->Name, Line, &Frame)) != 0 ||
+    if ((Rc = BoxAsmPpFrame(Pp, BOXASM_FRAME_MACRO, Macro->Name, Line, &Frame)) != 0 ||
         !(Body = (BoxAsmPpLine *)malloc((Macro->BodyCount ? Macro->BodyCount : 1u) *
                                         sizeof(BoxAsmPpLine)))) {
         BoxAsmPpFreeList(Args, Count);
@@ -351,6 +352,8 @@ static int BoxAsmPpOtherDirective(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const 
     }
     if (BoxAsmPpWordIs(Word, "error") || BoxAsmPpWordIs(Word, "fatal"))
         return BoxAsmPpError(Pp, Line, Rest);
+    if (BoxAsmPpWordIs(Word, "include"))
+        return BoxAsmPpInclude(Pp, Line, Rest);
     if (BoxAsmPpWordIs(Word, "endmacro"))
         return BoxAsmPpFail(Pp, Line, Word->Text - 1, "%endmacro has no %macro before it", NULL);
     if (BoxAsmPpWordIs(Word, "endrep"))
@@ -465,8 +468,7 @@ static int BoxAsmPpLineOf(BoxAsmPp *Pp, const BoxAsmPpLine *Line, size_t Base,
     return Rc;
 }
 
-/* The lines of one body: a file, a macro's call, a %rep's pass. */
-static int BoxAsmPpLines(BoxAsmPp *Pp, const BoxAsmPpLine *Lines, size_t Count)
+int BoxAsmPpLines(BoxAsmPp *Pp, const BoxAsmPpLine *Lines, size_t Count)
 {
     BoxAsmPpCollect Collect;
     size_t Base = Pp->ConditionCount;
@@ -494,7 +496,7 @@ static int BoxAsmPpLines(BoxAsmPp *Pp, const BoxAsmPpLine *Lines, size_t Count)
                           NULL);
     if (Rc == 0 && !Pp->ExitRep && Pp->ConditionCount > Base) {
         const BoxAsmCondition *Open = &Pp->Conditions[Base];
-        BoxAsmPpLine At = { Open->Text, Open->Line, Open->Frame };
+        BoxAsmPpLine At = { Open->Text, Open->File, Open->Line, Open->Frame };
 
         Rc = BoxAsmPpFail(Pp, &At, NULL, "this %if is not closed by %endif", NULL);
     }
@@ -504,6 +506,42 @@ static int BoxAsmPpLines(BoxAsmPp *Pp, const BoxAsmPpLine *Lines, size_t Count)
 }
 
 /* ---- The whole source ---------------------------------------------------- */
+
+int BoxAsmPpCut(BoxAsmPp *Pp, char *Text, size_t Size, uint32_t File, uint32_t Frame,
+                BoxAsmPpLine **Lines, size_t *Count)
+{
+    size_t Capacity = 0;
+    char *At;
+
+    *Lines = NULL;
+    *Count = 0;
+    for (At = Text; (size_t)(At - Text) <= Size;) {
+        char *End = At;
+        char *Nul;
+
+        while ((size_t)(End - Text) < Size && *End != '\n')
+            End++;
+        if ((size_t)(End - Text) == Size && End == At && *Count != 0)
+            break;
+        *End = '\0';
+        if (End > At && End[-1] == '\r')
+            End[-1] = '\0';
+        if (*Count >= 0xFFFFFFFEu ||
+            BoxAsmGrowArray((void **)Lines, &Capacity, *Count, sizeof(BoxAsmPpLine)) != 0)
+            return -ERR_NO_MEMORY;
+        (*Lines)[*Count].Text = At;
+        (*Lines)[*Count].File = File;
+        (*Lines)[*Count].Line = (uint32_t)(*Count + 1u);
+        (*Lines)[*Count].Frame = Frame;
+        for (Nul = At; Nul < End && *Nul != '\0'; Nul++)
+            ;
+        if (Nul < End)
+            return BoxAsmPpFail(Pp, &(*Lines)[*Count], Nul, "a NUL byte stands here: a source is text", NULL);
+        (*Count)++;
+        At = End + 1;
+    }
+    return 0;
+}
 
 static void BoxAsmPpRelease(BoxAsmPp *Pp)
 {
@@ -515,8 +553,12 @@ static void BoxAsmPpRelease(BoxAsmPp *Pp)
     }
     for (Index = 0; Index < Pp->MultiCount; Index++)
         BoxAsmPpDropMulti(&Pp->Multis[Index]);
+    for (Index = 0; Pp->Homes && Index < Pp->Out->FileCount; Index++)
+        free(Pp->Homes[Index]);
     free(Pp->Singles);
     free(Pp->Multis);
+    free(Pp->Open);
+    free(Pp->Homes);
     BoxAsmPpCloseConditions(Pp, 0);
     free(Pp->Conditions);
     BoxAsmNameIndexRelease(&Pp->SingleIndex);
@@ -529,65 +571,70 @@ void BoxAsmExpansionRelease(BoxAsmExpansion *Expansion)
     BoxAsmBufferRelease(&Expansion->Names);
     free(Expansion->Lines);
     free(Expansion->Frames);
+    free(Expansion->Files);
     memset(Expansion, 0, sizeof(*Expansion));
 }
 
-void BoxAsmExpansionPlace(const BoxAsmExpansion *Expansion, uint32_t Line, uint32_t *Source,
-                          uint32_t *Frame)
+void BoxAsmExpansionPlace(const BoxAsmExpansion *Expansion, uint32_t Line, uint32_t *File,
+                          uint32_t *Source, uint32_t *Frame)
 {
+    *File = 0;
     *Source = Line;
     *Frame = 0;
     if (Line >= 1 && Line <= Expansion->LineCount) {
+        *File = Expansion->Lines[Line - 1u].File;
         *Source = Expansion->Lines[Line - 1u].Line;
         *Frame = Expansion->Lines[Line - 1u].Frame;
     }
 }
 
-int BoxAsmPreprocess(BoxAsmAssembler *Asm, const char *Source, size_t Size, BoxAsmExpansion *Out)
+const char *BoxAsmExpansionFile(const BoxAsmExpansion *Expansion, uint32_t File)
+{
+    if (File >= Expansion->FileCount)
+        return "source";
+    return (const char *)Expansion->Names.Data + Expansion->Files[File];
+}
+
+int BoxAsmPreprocess(BoxAsmAssembler *Asm, const BoxAsmSource *Source, BoxAsmExpansion *Out)
 {
     BoxAsmPpLine *Lines = NULL;
     size_t Count = 0;
-    size_t Capacity = 0;
     char *Text;
-    char *At;
     BoxAsmPp Pp;
-    int Rc = 0;
+    int Rc;
 
     memset(Out, 0, sizeof(*Out));
     memset(&Pp, 0, sizeof(Pp));
     Pp.Asm = Asm;
     Pp.Out = Out;
-    if (!(Text = BoxAsmCopyText(Source, Size)) ||
+    Pp.Files = Source->Files;
+    /* Frame 0 stands for none, file 0 is the source, and the source is the
+     * first file being read, its %includes looked for in its home. */
+    if (!(Text = BoxAsmCopyText(Source->Text, Source->Size)) ||
         BoxAsmGrowArray((void **)&Out->Frames, &Out->FrameCapacity, 0, sizeof(BoxAsmFrame)) != 0 ||
-        BoxAsmBufferAppend(&Out->Names, "", 1) != 0) {
+        BoxAsmGrowArray((void **)&Out->Files, &Out->FileCapacity, 0, sizeof(uint32_t)) != 0 ||
+        BoxAsmGrowArray((void **)&Pp.Open, &Pp.OpenCapacity, 0, sizeof(uint64_t)) != 0 ||
+        BoxAsmGrowArray((void **)&Pp.Homes, &Pp.HomeCapacity, 0, sizeof(char *)) != 0 ||
+        !(Pp.Homes[0] = BoxAsmCopyText(Source->Home ? Source->Home : "",
+                                       Source->Home ? strlen(Source->Home) : 0)) ||
+        BoxAsmBufferAppend(&Out->Names, "", 1) != 0 ||
+        BoxAsmBufferAppend(&Out->Names, Asm->FileName, strlen(Asm->FileName) + 1u) != 0) {
         free(Text);
+        if (Pp.Homes)
+            free(Pp.Homes[0]);
+        free(Pp.Homes);
+        free(Pp.Open);
+        BoxAsmExpansionRelease(Out);
         return -ERR_NO_MEMORY;
     }
     memset(&Out->Frames[0], 0, sizeof(BoxAsmFrame));
     Out->FrameCount = 1;
+    Out->Files[0] = 1;
+    Out->FileCount = 1;
+    Pp.Open[0] = Source->Id;
+    Pp.OpenCount = 1;
     Asm->Expansion = Out;
-    /* The source cut into its lines, each ended by a NUL where its newline was. */
-    for (At = Text; Rc == 0 && (size_t)(At - Text) <= Size;) {
-        char *End = At;
-
-        while ((size_t)(End - Text) < Size && *End != '\n')
-            End++;
-        if ((size_t)(End - Text) == Size && End == At && Count != 0)
-            break;
-        *End = '\0';
-        if (End > At && End[-1] == '\r')
-            End[-1] = '\0';
-        if (Count >= 0xFFFFFFFEu ||
-            BoxAsmGrowArray((void **)&Lines, &Capacity, Count, sizeof(BoxAsmPpLine)) != 0) {
-            Rc = -ERR_NO_MEMORY;
-            break;
-        }
-        Lines[Count].Text = At;
-        Lines[Count].Line = (uint32_t)(Count + 1u);
-        Lines[Count].Frame = 0;
-        Count++;
-        At = End + 1;
-    }
+    Rc = BoxAsmPpCut(&Pp, Text, Source->Size, 0, 0, &Lines, &Count);
     if (Rc == 0)
         Rc = BoxAsmPpLines(&Pp, Lines, Count);
     if (Rc == 0 && (BoxAsmBufferAppend(&Out->Text, "", 1) != 0))

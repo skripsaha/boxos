@@ -2,6 +2,7 @@
 #define ASSEMBLE_H
 
 #include "boxasm_elf.h"
+#include "boxasm_source.h"
 
 #include "box/types.h"
 
@@ -9,20 +10,27 @@
 typedef struct {
     const char *SourceName;
     file_id_t   SourceId;
+    char       *Home;          /* the Use Context the build began in */
     const char *RequestedOutput;
     int         TagWordStart;
     char        OutputName[64];
     char        Tags[2048];
     size_t      TagLength;
     int         AddedApp;
-    uint8_t    *SourceBytes;
-    uint64_t    SourceSize;
+    char       *SourceBytes;
+    size_t      SourceSize;
 } AssembleRequest;
 
 /* "assemble: <stage>: <detail>", the detail being the toolchain's own
  * sentence when it wrote one and the system's name for the error otherwise. */
 void AssembleSayError(const char *Stage, int Rc, const char *Detail);
-const char *AssembleDescribeError(int Rc);
+
+/* The volume's files as the toolchain asks for them (assemble_volume.c). */
+BoxAsmFiles *AssembleVolume(void);
+/* The Use Context as it is now, a comma list the caller frees: the home the
+ * whole build looks in, taken once so a context said meanwhile moves none of
+ * it. Returns 0 or a negative -error_t. */
+int AssembleTakeContext(char **Out);
 
 /* Whether the comma list wears a tag with this key, with or without a value. */
 int AssembleTagsHaveKey(const char *Tags, const char *Key);

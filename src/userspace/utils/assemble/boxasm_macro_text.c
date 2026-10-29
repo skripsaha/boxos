@@ -191,6 +191,7 @@ void BoxAsmPpFailBegin(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *At,
 {
     BoxAsmLocation Where = BoxAsmPpWhere(Line, At);
 
+    Pp->Asm->FailFile = Line->File;
     Pp->Asm->FailFrame = Line->Frame;
     BoxAsmFailBegin(Pp->Asm, &Where, Message);
 }
@@ -501,7 +502,7 @@ static int BoxAsmPpBuiltin(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmP
     *Done = 1;
     if (BoxAsmPpAppend(Out, "\"", 1) != 0)
         return -ERR_OUT_OF_RANGE;
-    for (Name = Pp->Asm->FileName; *Name != '\0'; Name++)
+    for (Name = BoxAsmExpansionFile(Pp->Out, Line->File); *Name != '\0'; Name++)
         if (((*Name == '"' || *Name == '\\') && BoxAsmPpAppend(Out, "\\", 1) != 0) ||
             BoxAsmPpAppend(Out, Name, 1) != 0)
             return -ERR_OUT_OF_RANGE;

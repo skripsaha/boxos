@@ -10,30 +10,19 @@
 #include "box/string.h"
 #include "box/system.h"
 
-#define ASSEMBLE_ERROR_BYTES 512u
+#define ASSEMBLE_ERROR_BYTES 8192u
 
 extern const uint8_t _binary____build_boxlib_start_o_start[];
 extern const uint8_t _binary____build_boxlib_start_o_end[];
 extern const uint8_t _binary____boxlib_libbox_a_start[];
 extern const uint8_t _binary____boxlib_libbox_a_end[];
 
-const char *AssembleDescribeError(int Rc)
-{
-    switch (box_errno_of(Rc)) {
-    case OK: return "ok";
-#define ASSEMBLE_ERROR_TEXT(SUFFIX, name, value, msg, cat) case ERR_##SUFFIX: return msg;
-    BOX_ERROR_LIST(ASSEMBLE_ERROR_TEXT)
-#undef ASSEMBLE_ERROR_TEXT
-    default: return "unknown error";
-    }
-}
-
 void AssembleSayError(const char *Stage, int Rc, const char *Detail)
 {
     if (Detail && Detail[0] != '\0')
         printf("assemble: %s: %s\n", Stage, Detail);
     else
-        printf("assemble: %s: %s\n", Stage, AssembleDescribeError(Rc));
+        printf("assemble: %s: %s\n", Stage, BoxAsmErrorText(Rc));
 }
 
 static int EndsWithAsm(const char *Name)
@@ -63,35 +52,6 @@ static int BuildOutputName(const char *Source, const char *Requested,
         return -ERR_INVALID_ARGUMENT;
     memcpy(Out, Source, Length);
     memcpy(Out + Length, ".elf", 5u);
-    return 0;
-}
-
-static int ReadFileBytes(file_id_t FileId, uint64_t Size, uint8_t **Out)
-{
-    uint8_t *Bytes;
-    uint64_t Offset = 0;
-
-    if (!Out || Size == 0 || Size > SIZE_MAX - 1u)
-        return -ERR_INVALID_ARGUMENT;
-    Bytes = (uint8_t *)malloc((size_t)Size + 1u);
-    if (!Bytes)
-        return -ERR_NO_MEMORY;
-    while (Offset < Size) {
-        uint64_t Remaining = Size - Offset;
-        size_t Ask = Remaining > 65536u ? 65536u : (size_t)Remaining;
-        int64_t Got = fread(FileId, Offset, Bytes + Offset, Ask);
-        if (Got < 0) {
-            free(Bytes);
-            return (int)Got;
-        }
-        if (Got == 0 || (uint64_t)Got > Remaining) {
-            free(Bytes);
-            return -ERR_IO;
-        }
-        Offset += (uint64_t)Got;
-    }
-    Bytes[Size] = '\0';
-    *Out = Bytes;
     return 0;
 }
 
@@ -159,21 +119,6 @@ static int AppendExplicitTags(char *Buffer, size_t Capacity, size_t *Used,
     return 0;
 }
 
-static int FindSource(const char *Name, file_id_t *OutFile)
-{
-    file_id_t Id;
-    int Count = find_file_by_name(Name, &Id, NULL, 1u);
-
-    if (Count < 0)
-        return Count;
-    if (Count == 0)
-        return -ERR_FILE_NOT_FOUND;
-    if (Count != 1)
-        return -ERR_INVALID_STATE;
-    *OutFile = Id;
-    return 0;
-}
-
 static int LinkEmbedded(const char *SourceName, BoxAsmBlob *Program,
                         BoxAsmBlob *Image, char *Error, size_t ErrorCapacity)
 {
@@ -218,26 +163,53 @@ static int ReadCommand(AssembleRequest *Request, int WordCount)
     return 0;
 }
 
-/* The one source file the name means here, its bytes, and the tags the
- * program will wear: the source's own, then the command's. */
+/* "assemble: <summary>", then its details: what a lookup said when it did
+ * not find its one file. */
+static void SayNotFound(int Rc, const BoxAsmBuffer *Summary, const BoxAsmBuffer *Details)
+{
+    const char *Text = (const char *)Details->Data;
+    size_t Length = (size_t)Details->Size;
+
+    if (Summary->Size == 0) {
+        AssembleSayError("source lookup", Rc, NULL);
+        return;
+    }
+    printf("assemble: %.*s\n", (int)Summary->Size, (const char *)Summary->Data);
+    if (Length != 0 && *Text == '\n') {
+        Text++;
+        Length--;
+    }
+    if (Length != 0)
+        printf("%.*s\n", (int)Length, Text);
+}
+
+/* The one source file the name means in the Use Context — taken once, the
+ * home of the whole build — its bytes, and the tags the program will wear:
+ * the source's own, then the command's. */
 static int LoadSource(AssembleRequest *Request, int WordCount)
 {
+    BoxAsmBuffer Summary = { 0 };
+    BoxAsmBuffer Details = { 0 };
+    BoxAsmLookup Lookup;
     FileMetadata Metadata;
-    int Rc = FindSource(Request->SourceName, &Request->SourceId);
+    int Rc;
 
-    if (Rc == -ERR_FILE_NOT_FOUND) {
-        printf("assemble: there is no %s here\n", Request->SourceName);
+    if ((Rc = AssembleTakeContext(&Request->Home)) != 0) {
+        AssembleSayError("use context", Rc, NULL);
         return Rc;
     }
-    if (Rc == -ERR_INVALID_STATE) {
-        printf("assemble: more than one file is named %s; narrow the context with use\n",
-               Request->SourceName);
+    Lookup.Name = Request->SourceName;
+    Lookup.Tags = "";
+    Lookup.Home = Request->Home;
+    Lookup.Everywhere = 0;
+    Lookup.Included = 0;
+    Rc = BoxAsmLocate(AssembleVolume(), &Lookup, &Request->SourceId, &Summary, &Details);
+    if (Rc != 0)
+        SayNotFound(Rc, &Summary, &Details);
+    BoxAsmBufferRelease(&Summary);
+    BoxAsmBufferRelease(&Details);
+    if (Rc != 0)
         return Rc;
-    }
-    if (Rc != 0) {
-        AssembleSayError("source lookup", Rc, NULL);
-        return Rc;
-    }
     memset(&Metadata, 0, sizeof(Metadata));
     Rc = FileMetadataRead(Request->SourceId, &Metadata);
     if (Rc != 0) {
@@ -249,12 +221,12 @@ static int LoadSource(AssembleRequest *Request, int WordCount)
         Rc = -ERR_INVALID_ARGUMENT;
     }
     if (Rc == 0) {
-        Rc = ReadFileBytes(Request->SourceId, Metadata.Size, &Request->SourceBytes);
+        Rc = AssembleVolume()->Read(AssembleVolume(), Request->SourceId, SIZE_MAX - 1u,
+                                    &Request->SourceBytes, &Request->SourceSize);
         if (Rc != 0)
             AssembleSayError("source read", Rc, NULL);
     }
     if (Rc == 0) {
-        Request->SourceSize = Metadata.Size;
         if (AppendTags(Request->Tags, sizeof(Request->Tags), &Request->TagLength,
                        Metadata.Tags) != 0 ||
             AppendExplicitTags(Request->Tags, sizeof(Request->Tags),
@@ -270,15 +242,27 @@ static int LoadSource(AssembleRequest *Request, int WordCount)
 }
 
 /* Source to ET_REL to the linked image, entirely in memory: a program that
- * does not assemble or link leaves no file behind. */
+ * does not assemble or link leaves no file behind. Its %includes are found on
+ * the volume, in the home the source was found in. */
 static int BuildImage(AssembleRequest *Request, BoxAsmBlob *Image)
 {
     BoxAsmBlob Program = { 0 };
-    char Error[ASSEMBLE_ERROR_BYTES] = { 0 };
-    int Rc = BoxAsmSourceAssemble((const char *)Request->SourceBytes,
-                                  (size_t)Request->SourceSize, Request->SourceName,
-                                  &Program, Error, sizeof(Error));
+    BoxAsmSource Source;
+    char *Error = (char *)malloc(ASSEMBLE_ERROR_BYTES);
+    int Rc;
 
+    if (!Error) {
+        AssembleSayError(Request->SourceName, -ERR_NO_MEMORY, NULL);
+        return -ERR_NO_MEMORY;
+    }
+    Error[0] = '\0';
+    Source.Text = Request->SourceBytes;
+    Source.Size = Request->SourceSize;
+    Source.Name = Request->SourceName;
+    Source.Id = Request->SourceId;
+    Source.Home = Request->Home;
+    Source.Files = AssembleVolume();
+    Rc = BoxAsmSourceAssemble(&Source, &Program, Error, ASSEMBLE_ERROR_BYTES);
     free(Request->SourceBytes);
     Request->SourceBytes = NULL;
     if (Rc != 0) {
@@ -286,11 +270,12 @@ static int BuildImage(AssembleRequest *Request, BoxAsmBlob *Image)
             printf("assemble: %s\n", Error);
         else
             AssembleSayError(Request->SourceName, Rc, NULL);
-        return Rc;
+    } else {
+        Rc = LinkEmbedded(Request->SourceName, &Program, Image, Error, ASSEMBLE_ERROR_BYTES);
+        if (Rc != 0)
+            AssembleSayError("link", Rc, Error);
     }
-    Rc = LinkEmbedded(Request->SourceName, &Program, Image, Error, sizeof(Error));
-    if (Rc != 0)
-        AssembleSayError("link", Rc, Error);
+    free(Error);
     return Rc;
 }
 
@@ -306,9 +291,11 @@ int main(void)
         LoadSource(&Request, WordCount) != 0 ||
         BuildImage(&Request, &Image) != 0) {
         free(Request.SourceBytes);
+        free(Request.Home);
         exit(1);
     }
     Rc = AssemblePublish(&Request, &Image);
     free((void *)Image.Data);
+    free(Request.Home);
     exit(Rc == 0 ? 0 : 1);
 }

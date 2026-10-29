@@ -8,15 +8,6 @@
 
 #define ASSEMBLE_ANSWER_BYTES 32u
 
-/* One tag of a comma list, read the way the volume spells it: the blanks
- * around it dropped, split at its first ':', an empty value the same as none. */
-typedef struct {
-    const char *Key;
-    size_t      KeyLength;
-    const char *Value;
-    size_t      ValueLength;
-} AssembleTag;
-
 /* A file already called by the program's name, and whether it wears every
  * tag the program will wear. */
 typedef struct {
@@ -30,75 +21,20 @@ static int TagBlank(char C)
     return C == ' ' || C == '\t';
 }
 
-/* The next tag of List from *At; 0 at its end. */
-static int NextTag(const char *List, size_t *At, AssembleTag *Out)
-{
-    while (List && List[*At] != '\0') {
-        size_t Begin = *At;
-        size_t End;
-        size_t Colon;
-
-        while (List[*At] != '\0' && List[*At] != ',')
-            (*At)++;
-        End = *At;
-        if (List[*At] == ',')
-            (*At)++;
-        while (Begin < End && TagBlank(List[Begin]))
-            Begin++;
-        while (End > Begin && TagBlank(List[End - 1u]))
-            End--;
-        if (Begin == End)
-            continue;
-        Colon = Begin;
-        while (Colon < End && List[Colon] != ':')
-            Colon++;
-        Out->Key = List + Begin;
-        Out->KeyLength = Colon - Begin;
-        Out->Value = Colon + 1u < End ? List + Colon + 1u : NULL;
-        Out->ValueLength = Colon + 1u < End ? End - Colon - 1u : 0;
-        return 1;
-    }
-    return 0;
-}
-
-static int SameKey(const AssembleTag *A, const AssembleTag *B)
-{
-    return A->KeyLength == B->KeyLength && memcmp(A->Key, B->Key, A->KeyLength) == 0;
-}
-
-static int SameTag(const AssembleTag *A, const AssembleTag *B)
-{
-    return SameKey(A, B) && A->ValueLength == B->ValueLength &&
-           (A->ValueLength == 0 || memcmp(A->Value, B->Value, A->ValueLength) == 0);
-}
-
-/* Whether List holds Tag itself, or with KeyOnly any tag of Tag's key. */
-static int ListHolds(const char *List, const AssembleTag *Tag, int KeyOnly)
-{
-    AssembleTag Worn;
-    size_t At = 0;
-
-    while (NextTag(List, &At, &Worn)) {
-        if (KeyOnly ? SameKey(&Worn, Tag) : SameTag(&Worn, Tag))
-            return 1;
-    }
-    return 0;
-}
-
 int AssembleTagsHaveKey(const char *Tags, const char *Key)
 {
-    AssembleTag Wanted = { Key, strlen(Key), NULL, 0 };
+    BoxAsmTag Wanted = { Key, strlen(Key), NULL, 0 };
 
-    return ListHolds(Tags, &Wanted, 1);
+    return BoxAsmTagsHold(Tags, &Wanted, 1);
 }
 
 static int WearsEvery(const char *Worn, const char *Wanted)
 {
-    AssembleTag Tag;
+    BoxAsmTag Tag;
     size_t At = 0;
 
-    while (NextTag(Wanted, &At, &Tag)) {
-        if (!ListHolds(Worn, &Tag, 0))
+    while (BoxAsmNextTag(Wanted, &At, &Tag)) {
+        if (!BoxAsmTagsHold(Worn, &Tag, 0))
             return 0;
     }
     return 1;
@@ -113,16 +49,16 @@ static char *CarriedTags(const char *Old, const char *New)
     size_t OldLength = Old ? strlen(Old) : 0;
     size_t Used = strlen(New);
     char *Out = (char *)malloc(Used + OldLength + 2u);
-    AssembleTag Tag;
+    BoxAsmTag Tag;
     size_t At = 0;
 
     if (!Out)
         return NULL;
     memcpy(Out, New, Used);
-    while (NextTag(Old, &At, &Tag)) {
+    while (BoxAsmNextTag(Old, &At, &Tag)) {
         const char *End = Tag.Value ? Tag.Value + Tag.ValueLength : Tag.Key + Tag.KeyLength;
 
-        if (ListHolds(New, &Tag, 1))
+        if (BoxAsmTagsHold(New, &Tag, 1))
             continue;
         if (Used != 0)
             Out[Used++] = ',';
@@ -388,7 +324,7 @@ static int ReplaceProgram(const AssembleRequest *Request, const BoxAsmBlob *Imag
     Rc = delete(Old->Id);
     if (Rc != 0) {
         printf("assemble: %s could not be replaced: %s; it is as it was\n",
-               Request->OutputName, AssembleDescribeError(Rc));
+               Request->OutputName, BoxAsmErrorText(Rc));
         if (delete(*OutFile) != 0)
             printf("assemble: the new %s, file %llu, could not be deleted\n",
                    Request->OutputName, (unsigned long long)*OutFile);

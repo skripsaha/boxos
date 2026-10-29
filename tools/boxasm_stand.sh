@@ -58,6 +58,21 @@ for program in hello countdown; do
     fi
 done
 
+# planets.asm reads three files: its table beside it, and lines.inc, a
+# library outside the examples that finds lines_core.inc beside itself.
+PLANETS=$WORK/planets_volume
+mkdir -p "$PLANETS" &&
+    cp src/userspace/planets.asm "$PLANETS/1" && cp src/userspace/planets.inc "$PLANETS/2" &&
+    cp src/userspace/lines.inc "$PLANETS/3" && cp src/userspace/lines_core.inc "$PLANETS/4" &&
+    printf '1 planets.asm code,asm,example\n2 planets.inc code,asm,example\n3 lines.inc code,asm,asmlib\n4 lines_core.inc code,asm,asmlib\n' \
+        > "$PLANETS/volume"
+if "$STAND" volume "$PLANETS" "code,asm,example" planets.asm "$WORK/planets.o" 2> "$WORK/asm.err" &&
+   "$STAND" link "$ENTRY" "$WORK/planets.o" "$ARCHIVE" "$WORK/planets.elf" symbols 2> "$WORK/link.err"; then
+    ok planets_builds
+else
+    fail planets_builds "$(cat "$WORK/asm.err" "$WORK/link.err" 2>/dev/null)"
+fi
+
 # ---- every encoding, held to NASM --------------------------------------------
 
 python3 "$ORACLE" corpus > "$WORK/corpus.asm" &&
@@ -329,6 +344,179 @@ want="in_macro.asm:2:14: 'nowhere' is never defined; a name from outside the pro
     in the macro 'twice' called at line 10"
 if [ "$said" = "$want" ]; then ok macro_call_chain; else fail macro_call_chain "said '$said'"; fi
 
+# ---- %include: files found by name and tags ----------------------------------
+# A volume of tagged files stands in for TagFS: the source is found among the
+# tags of the context given, as `assemble` finds it in the Use Context, and
+# its %includes by name and the meaning they write.
+VOL=$WORK/volume
+python3 - "$VOL" <<'EOF'
+import os, sys
+volume = sys.argv[1]
+os.makedirs(volume)
+head = 'section .text\nglobal main\nmain:\n    ret\n'
+files = [
+    ('build.asm', 'demo', '%include "defs.inc"\nsection .text\nglobal main\nmain:\n    greet\n'
+                          '    mov eax, ANSWER\n    ret\nsection .data\n    db __FILE__, 0\n%include "table.inc"\n'),
+    ('defs.inc', 'demo', '%define ANSWER 42\n%macro greet 0\n    nop\n%include "inner.inc"\n%endmacro\n'),
+    ('inner.inc', 'demo', '    xor eax, eax\n    db __FILE__\n'),
+    ('table.inc', 'demo', 'values:\n%assign i 0\n%rep 4\n    dd i * i\n%assign i i+1\n%endrep\n    db __FILE__, 0\n'),
+    ('math.asm', 'demo, fast', 'value equ 2\n'),
+    ('math.asm', 'demo, old', 'value equ 1\n'),
+    ('meaning.asm', 'demo', head + '%include "math.asm" fast\nsection .data\n    dd value\n'),
+    ('macroed.asm', 'demo', '%macro bring 1\n%include %1\n%endmacro\n' + head +
+                            'section .data\n    bring "math.asm" fast\n    dd value\n'),
+    ('print.asm', 'mylib', '%include "part.asm"\nprinted equ part_value\n'),
+    ('part.asm', 'mylib', 'part_value equ 7\n'),
+    ('part.asm', 'demo', 'part_value equ 99\n'),
+    ('library.asm', 'demo', head + '%include "print.asm" mylib everywhere\nsection .data\n    dd printed\n'),
+    ('several.asm', 'demo', head + '%include "math.asm"\n'),
+    ('slow.asm', 'demo', head + '%include "math.asm" slow\n'),
+    ('both.asm', 'demo', head + '%include "math.asm" fast old\n'),
+    ('lone.asm', 'game', 'lone_value equ 5\n'),
+    ('outside.asm', 'demo', head + '%include "lone.asm"\n'),
+    ('circle.asm', 'demo', head + '%include "round.asm"\n'),
+    ('round.asm', 'demo', '%include "circle.asm"\n'),
+    ('nowhere.asm', 'demo', head + '%include "nothing.asm"\n'),
+    ('broken.inc', 'demo', '%macro load 1\n    mov eax, %1\n%endmacro\n    load nowhere_defined\n'),
+    ('broken.asm', 'demo', head + '%include "broken.inc"\n'),
+    ('binary.inc', 'demo', 'db 1\n\0\x01\n'),
+    ('binary.asm', 'demo', head + '%include "binary.inc"\n'),
+    ('angle.asm', 'demo', head + '%include <box.inc>\n'),
+    ('twice.asm', 'demo, one', head),
+    ('twice.asm', 'demo, two', head),
+    ('away.asm', 'game', head),
+]
+with open(os.path.join(volume, 'volume'), 'w') as listing:
+    for number, (name, tags, text) in enumerate(files, 1):
+        listing.write('%d %s %s\n' % (number, name, tags))
+        with open(os.path.join(volume, str(number)), 'w', newline='') as f:
+            f.write(text)
+EOF
+# NASM reads the same files from a directory, by path.
+mkdir -p "$WORK/by_path" && cp "$VOL/1" "$WORK/by_path/build.asm" && cp "$VOL/2" "$WORK/by_path/defs.inc" &&
+    cp "$VOL/3" "$WORK/by_path/inner.inc" && cp "$VOL/4" "$WORK/by_path/table.inc" &&
+    (cd "$WORK/by_path" && nasm -f elf64 -w-all build.asm -o build_nasm.o) ||
+    { echo "boxasm: harness failed — NASM did not assemble the included files"; exit 2; }
+if ! "$STAND" volume "$VOL" demo build.asm "$WORK/build.o" 2> "$WORK/build.err"; then
+    fail includes_match_nasm "$(head -3 "$WORK/build.err")"
+elif out=$(python3 "$ORACLE" compare "$WORK/build.o" "$WORK/by_path/build_nasm.o" 2>&1); then
+    ok includes_match_nasm
+else
+    fail includes_match_nasm "$out"
+fi
+
+# A program that builds, and the first dword of its .data: which file it took.
+volume_takes() {
+    local name=$1 want=$2 said
+    if ! "$STAND" volume "$VOL" demo "$name.asm" "$WORK/$name.o" 2> "$WORK/$name.err"; then
+        fail "include_$name" "$(head -3 "$WORK/$name.err")"; return
+    fi
+    said=$(python3 - "$WORK/$name.o" <<'EOF'
+import struct, sys
+data = open(sys.argv[1], 'rb').read()
+at, count, names = struct.unpack_from('<Q', data, 0x28)[0], struct.unpack_from('<H', data, 0x3c)[0], \
+    struct.unpack_from('<H', data, 0x3e)[0]
+sections = [struct.unpack_from('<IIQQQQIIQQ', data, at + i * 64) for i in range(count)]
+for section in sections:
+    if data[sections[names][4] + section[0]:].split(b'\0')[0] == b'.data':
+        print(struct.unpack_from('<I', data, section[4])[0])
+EOF
+)
+    if [ "$said" = "$want" ]; then ok "include_$name"; else fail "include_$name" "took $said, expected $want"; fi
+}
+volume_takes meaning 2     # the math.asm that wears fast
+volume_takes macroed 2     # a %include a macro's parameter names
+volume_takes library 7     # a library reached everywhere: its own part.asm, not demo's
+
+# A refusal, whole: what is there and what to write.
+volume_says() {
+    local name=$1 source=$2 want said
+    want=$(cat)
+    said=$("$STAND" volume "$VOL" demo "$source" "$WORK/$name.o" 2>&1)
+    if [ -s "$WORK/$name.o" ]; then fail "$name" "built instead of refusing"
+    elif [ "$said" != "$want" ]; then fail "$name" "said:"$'\n'"$said"$'\n'"expected:"$'\n'"$want"
+    else ok "$name"; fi
+}
+volume_says include_several several.asm <<'EOF'
+several.asm:5:10: math.asm could be any of 2 files in demo
+    %include "math.asm"
+             ^
+  say which by a tag only it wears:
+    %include "math.asm" fast    for the one wearing math, demo, fast
+    %include "math.asm" old     for the one wearing math, demo, old
+EOF
+volume_says include_meaning_unworn slow.asm <<'EOF'
+slow.asm:5:10: no math.asm in demo wears slow
+    %include "math.asm" slow
+             ^
+  they wear:
+    math, demo, fast
+    math, demo, old
+EOF
+volume_says include_meaning_together both.asm <<'EOF'
+both.asm:5:10: no math.asm in demo wears all of fast, old
+    %include "math.asm" fast old
+             ^
+  they wear:
+    math, demo, fast
+    math, demo, old
+EOF
+volume_says include_outside outside.asm <<'EOF'
+outside.asm:5:10: there is no lone.asm in demo
+    %include "lone.asm"
+             ^
+  outside it, reached by:
+    %include "lone.asm" game everywhere    for the one wearing lone, game
+  or let it wear demo too
+EOF
+volume_says include_circle circle.asm <<'EOF'
+round.asm:1:10: 'circle.asm' is already being read: the files include one another in a circle
+    %include "circle.asm"
+             ^
+    in the file 'round.asm' included at line 5 of circle.asm
+EOF
+volume_says include_nowhere nowhere.asm <<'EOF'
+nowhere.asm:5:10: there is no file named nothing.asm here or anywhere else
+    %include "nothing.asm"
+             ^
+EOF
+volume_says include_error_inside broken.asm <<'EOF'
+broken.inc:2:14: 'nowhere_defined' is never defined; a name from outside the program is declared with extern
+        mov eax, nowhere_defined
+                 ^
+    in the macro 'load' called at line 4
+    in the file 'broken.inc' included at line 5 of broken.asm
+EOF
+volume_says include_binary binary.asm <<'EOF'
+binary.asm:5:10: binary.inc holds a NUL byte in its line 2: it is not a source
+    %include "binary.inc"
+             ^
+EOF
+volume_says include_angle angle.asm <<'EOF'
+angle.asm:5:10: expected the file's name in quotes: %include "math.asm"
+    %include <box.inc>
+             ^
+EOF
+volume_says source_several twice.asm <<'EOF'
+assemble: twice.asm could be any of 2 files in demo
+  they wear:
+    twice, demo, one
+    twice, demo, two
+  narrow the context with use
+EOF
+volume_says source_outside away.asm <<'EOF'
+assemble: there is no away.asm in demo
+  outside it, wearing:
+    away, game
+  change the context with use
+EOF
+assembly_refuses include_no_volume "$HEAD"$'%include "math.asm"\n' \
+    "include_no_volume.asm:4:10: this source is no file of a volume, and finds no other file to include"
+printf 'section .text\nglobal main\nmain:\n    db 1\0002\n' > "$WORK/nul_source.asm"
+said=$("$STAND" assemble "$WORK/nul_source.asm" "$WORK/nul_source.o" 2>&1 | head -1)
+if [ "$said" = "nul_source.asm:4:9: a NUL byte stands here: a source is text" ]; then ok nul_source
+else fail nul_source "said '$said'"; fi
+
 # ---- depth: the stack a BoxOS program has ------------------------------------
 # A source nests as deep as it likes; `assemble` has 64 KiB of stack and a
 # guard page past it. The stand is built again as BoxOS builds the command —
@@ -374,6 +562,27 @@ deep_refuses deep_parentheses "the expression nests too deep"
 deep_refuses deep_if "the expression nests too deep"
 deep_refuses deep_sum "the expression is too deep to work out: too many operations, and names defined by names, inside one another"
 deep_refuses deep_equ "the expression is too deep to work out: too many operations, and names defined by names, inside one another"
+
+# 400 files, each including the next.
+python3 - "$WORK/deep_files" <<'EOF'
+import os, sys
+volume = sys.argv[1]
+os.makedirs(volume)
+with open(os.path.join(volume, 'volume'), 'w') as listing:
+    for i in range(401):
+        name = 'chain.asm' if i == 0 else 'chain%d.inc' % i
+        listing.write('%d %s demo\n' % (i + 1, name))
+        with open(os.path.join(volume, str(i + 1)), 'w') as f:
+            f.write(('section .text\nglobal main\nmain:\n    ret\n' if i == 0 else '')
+                    + ('%%include "chain%d.inc"\n' % (i + 1) if i < 400 else 'nop\n'))
+EOF
+said=$( (ulimit -s 64; "$STAND0" volume "$WORK/deep_files" demo chain.asm "$WORK/deep_files.o") 2>&1 | head -1 |
+       sed -E 's/^[^:]+:[0-9]+:[0-9]+: //')
+if printf '%s' "$said" | grep -q -E "^'chain[0-9]+\.inc' is included inside files and macros too deep$"; then
+    ok deep_files
+else
+    fail deep_files "said '$said'"
+fi
 
 echo "boxasm: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]
