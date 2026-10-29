@@ -169,8 +169,14 @@ caveat_row() {
         # the merged step 1.1 tree: prefix 16 of 29, subset 28 of 87.
         chaingrow:prefix:SPARE_UNNAMED|chaingrow:subset:SPARE_UNNAMED)
                     echo "1.6|a cut after the file table's or the tag registry's new block is stamped and its stamp made durable, and before the link to it is written, keeps that Spare: a stamped header nothing names, a block marked used and owned by nothing" ;;
-        # LockRank's places (lockrank_judge, below): every key a gate measured,
-        # under the step R1 section 1.7 names for it.
+        lockrank:*) caveat_row_lockrank "$1" ;;
+    esac
+}
+
+# caveat_row_lockrank NAME — LockRank's places (lockrank_judge, below): every
+# key a gate measured, under the step R1 section 1.7 names for it.
+caveat_row_lockrank() {
+    case "$1" in
         lockrank:registry@tag_registry_load:read)
                     echo "|the tag registry is read from the medium under its IRQ-off lock, so a core that looks up a tag spins with interrupts off for as long as the medium takes" ;;
         lockrank:registry@tag_registry_flush:read|\
