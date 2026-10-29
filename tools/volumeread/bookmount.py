@@ -537,6 +537,7 @@ class BookMount:
             fs.size, fs.modified_ns, fs.parcels = d["size"], d["mtime_ns"], None
             if d["splices"] and LastBlock(fs) != before:
                 fs.slips = []
+            fs.slips = self._SlipsCut(fs.slips, fs.size)
         if fs.Blocks() != Blocks(fs.size):
             raise Mismatch("its runs cover %u blocks and its %u bytes need %u" % (fs.Blocks(), fs.size,
                                                                                 Blocks(fs.size)))
@@ -581,6 +582,15 @@ class BookMount:
             fs.tags = sorted((worn | set(d["add"])) - set(d["drop"]))
 
     @staticmethod
+    def _SlipsCut(slips, size):
+        """The overlays cut by the file's size (§16.5 п.13): what lay past it
+        in the last block is gone, so a growth inside the block reads its
+        base, not the bytes a cut took — one rule with the kernel's
+        (file_map/tail_slip.c, TailSlipKept)."""
+        cut = size - (Blocks(size) - 1) * BLOCK if size else 0
+        return [(off, data[:cut - off]) for off, data in slips if off < cut]
+
+    @staticmethod
     def _Slip(fs, slip):
         """A Slip's overlay laid on the file's last block (§2.8), held to its
         rules: inside the block, a file of bytes, not past its size."""
@@ -597,8 +607,8 @@ class BookMount:
         """What the replay leaves the mount to decide: a file rolled back by
         the rule of rot whose blocks another holds is locked (§3.9); a file
         naming ground outside the data run is locked; runs carried with an
-        extension, Slips, and flags past 32 bits are what this kernel cannot
-        carry on."""
+        extension and flags past 32 bits are what this kernel cannot carry
+        on; a Slip it carries on (§16.5 п.13)."""
         g = self.g
         for fid in sorted(self.files):
             fs = self.files[fid]
@@ -618,9 +628,6 @@ class BookMount:
             if any(r.ext is not None for r in fs.runs):
                 self.Glass("a run of fid %u carries an extension this kernel cannot carry on (CODEC, SHARED "
                            "or COPY, §8)" % fs.fid)
-            if fs.slips:
-                self.Glass("fid %u's last block carries a Slip — this kernel cannot fold a Slip into a "
-                           "block (§16.1 п.2)" % fs.fid)
             if fs.flags >> 32:
                 self.Glass("fid %u carries flags past the 32 bits this kernel holds — written by a kernel "
                            "that knows more" % fs.fid)

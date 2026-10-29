@@ -10,7 +10,7 @@
 /* The Makefile hands the point over as SETTLE_CUT_POINT_<VALUE>; a value that
  * names no point is an undeclared identifier and never gets this far. */
 _Static_assert(CONFIG_TAGFS_SETTLE_CUT_POINT >= SETTLE_CUT_POINT_REGISTRY &&
-               CONFIG_TAGFS_SETTLE_CUT_POINT <= SETTLE_CUT_POINT_UNDONE,
+               CONFIG_TAGFS_SETTLE_CUT_POINT <= SETTLE_CUT_POINT_LAST,
                "SETTLECUT names no point of the Settle cycle");
 
 static const char *const SettleCutWhere[] = {
@@ -28,7 +28,15 @@ static const char *const SettleCutWhere[] = {
     [SETTLE_CUT_POINT_SLOT]      = "before the second half of a Tally's slot is written",
     [SETTLE_CUT_POINT_SPARED]    = "before the last flush of a stitch whose toll spared the flush of its data",
     [SETTLE_CUT_POINT_UNDONE]    = "before the first atom of the stitch that lays the mount's verdict down",
+    [SETTLE_CUT_POINT_ENGROSS]   = "before the first atom of the stitch that names a block an Engross laid",
 };
+
+/* The points the cycle reaches with no anchor's change in it: the verdict's
+ * stitch, asked at the door's opening, and an Engross's, laid for a Tally. */
+static bool SettleCutUnanchored(SettleCutPoint here)
+{
+    return here == SETTLE_CUT_POINT_UNDONE || here == SETTLE_CUT_POINT_ENGROSS;
+}
 
 static volatile uint32_t g_settle_cycles;       /* cycles that took their snapshot */
 static volatile uint64_t g_settle_target;       /* the cycle in flight's: its holder's alone */
@@ -46,7 +54,14 @@ void SettleCutSayArmed(void)
     if (CONFIG_TAGFS_SETTLE_CUT_POINT == SETTLE_CUT_POINT_UNDONE) {
         kprintf("[SETTLECUT] armed for the verdict: the first stitch to reach point %u of %u, "
                 "%s, stops this machine there, anchored or not\n",
-                (unsigned)CONFIG_TAGFS_SETTLE_CUT_POINT, (unsigned)SETTLE_CUT_POINT_UNDONE,
+                (unsigned)CONFIG_TAGFS_SETTLE_CUT_POINT, (unsigned)SETTLE_CUT_POINT_LAST,
+                SettleCutWhere[CONFIG_TAGFS_SETTLE_CUT_POINT]);
+        return;
+    }
+    if (CONFIG_TAGFS_SETTLE_CUT_POINT == SETTLE_CUT_POINT_ENGROSS) {
+        kprintf("[SETTLECUT] armed for the Engross: the first stitch to reach point %u of %u, "
+                "%s, stops this machine there, anchored or not\n",
+                (unsigned)CONFIG_TAGFS_SETTLE_CUT_POINT, (unsigned)SETTLE_CUT_POINT_LAST,
                 SettleCutWhere[CONFIG_TAGFS_SETTLE_CUT_POINT]);
         return;
     }
@@ -54,7 +69,7 @@ void SettleCutSayArmed(void)
             "change of the first anchor after this line in its snapshot stops this "
             "machine there\n",
             (unsigned)CONFIG_TAGFS_SETTLE_CUT_POINT,
-            (unsigned)SETTLE_CUT_POINT_UNDONE,
+            (unsigned)SETTLE_CUT_POINT_LAST,
             SettleCutWhere[CONFIG_TAGFS_SETTLE_CUT_POINT]);
 }
 
@@ -98,7 +113,7 @@ void SettleCutAt(SettleCutPoint here)
         return;
     uint64_t anchor = __atomic_load_n(&g_settle_anchor, __ATOMIC_ACQUIRE);
     uint64_t target = __atomic_load_n(&g_settle_target, __ATOMIC_ACQUIRE);
-    if (here != SETTLE_CUT_POINT_UNDONE && (anchor == 0 || target < anchor))
+    if (!SettleCutUnanchored(here) && (anchor == 0 || target < anchor))
         return;                 /* a cycle of the cadence's own, not the anchor's */
     if (__atomic_exchange_n(&g_settle_cut_made, 1u, __ATOMIC_ACQ_REL) != 0)
         return;                 /* the first passage, on any core, is the cut */
@@ -124,7 +139,7 @@ void SettleCutAt(SettleCutPoint here)
             "this boot, whose snapshot reaches Ink %llu of the anchor's %llu, on "
             "core %u — %u of the %u other core(s) answered the roll call and run "
             "no more, and nothing after this point was issued to the medium\n",
-            (unsigned)here, (unsigned)SETTLE_CUT_POINT_UNDONE,
+            (unsigned)here, (unsigned)SETTLE_CUT_POINT_LAST,
             SettleCutWhere[here], cycle, (unsigned long long)target,
             (unsigned long long)anchor, (unsigned)me, answered,
             (unsigned)(g_amp.total_cores ? g_amp.total_cores - 1u : 0u));

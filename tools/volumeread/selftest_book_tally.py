@@ -93,14 +93,13 @@ def Circles(bt):
             ("slot 0 was made at the Deed's BORN, in nanoseconds",
              lambda c: c.mount.slot.made_ns == c.g.deed["born"]["created_unix"] * 10 ** 9)]),
         Case("B0c every record sewn, read back and sewn again is byte for byte",
-             lambda o: sewn.setdefault("s", StitchCircle(o)), must={"UNDER_GLASS"}, checks=[
+             lambda o: sewn.setdefault("s", StitchCircle(o)), checks=[
                  ("both stitches are taken whole and each record decodes to what was sewn",
                   lambda c: stitch_pen.Circle(c.mount.ribbon, sewn["s"]) == []),
                  ("they apply: %s renamed, fid %u gone, fid %u undone" % (Label(L), gone, bt.fid),
                   lambda c: c.mount.files[L.fid].name == b"renamed" and gone not in c.mount.files and
                   bt.fid not in c.mount.files and bt.tag in c.mount.files[L.fid].tags),
-                 ("and the only verdict is the Slip's", lambda c: len(c.mount.glass) == 1 and
-                  Glass(c, "Slip"))])]
+                 ("and the Slip is carried on: no glass (§16.5 п.13)", lambda c: not c.mount.glass)])]
 
 
 def SpineCases(bt):

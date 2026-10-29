@@ -43,6 +43,7 @@
 #include "scribe.h"      /* VolumeFlushNeed, VolumeWriteSeen — what the landed blocks wait for */
 #include "integrity.h"
 #include "run.h"         /* TagFSDataCostLaid — what a file's bytes cost the medium */
+#include "tail_slip.h"   /* TailSlipOver — the Slips over a last block the write reads */
 #include "settle.h"      /* SettleV1OnBook — no Spare is stamped for a book */
 #include "cpu_calibrate.h"  /* a stretch's time on the medium, for the cadence */
 #include "klib.h"
@@ -120,6 +121,29 @@ static void wjob_to_service(WriteJob *j)
     HelmReady(&j->helm);
 }
 
+/* A window that rides a Slip (plot_slip.c): its bytes taken out of the
+ * program's pages into the Plot's Slip, no block moved, and the window made
+ * the file's as one that landed. */
+static bool WriteJobSlip(WriteJob *j, uint64_t at, uint64_t window)
+{
+    PlotSource part = j->source;
+    uint64_t   done = 0;
+    part.bytes = window;
+    if (part.kernel)
+        part.kernel += j->bytes_inked;
+    else
+        part.user += (uintptr_t)j->bytes_inked;
+    error_t rc = PlotWriteBlocks(&j->plot, at, &part, &done);
+    if (rc != OK) {
+        wjob_finalize(j, rc);
+        return false;
+    }
+    j->window_end = j->bytes_inked + window;
+    j->bytes_done = j->bytes_inked + done;
+    wjob_to(j, W_LOG_META);
+    return true;
+}
+
 /* W_ALLOC — the window's blocks reserved and the record's room claimed before
  * any byte of it moves; every window after the first goes on from where the
  * last one's Ink left the Plot. Room on its way turns the job synchronous
@@ -136,6 +160,8 @@ static bool w_alloc(WriteJob *j)
             window = left;
         rc = PlotBeginWrite(&j->plot, at, false, window, &at);
     }
+    if (rc == OK && j->plot.slip)
+        return WriteJobSlip(j, at, window);
     if (rc == ERR_WOULD_BLOCK) {
         wjob_to_service(j);
         return false;
@@ -147,6 +173,17 @@ static bool w_alloc(WriteJob *j)
     j->window_end = j->bytes_inked + window;
     wjob_to(j, W_LOCATE);
     return true;
+}
+
+/* Page i of the stretch made what a read of its block gives: zeros for a
+ * block that held nothing of the file (`read` NULL), and the Slips over the
+ * file's last block laid on it (format v2, tail_slip.h) — the block the write
+ * lays carries them, and the record that names it lets them go. */
+static void WriteJobBase(WriteJob *j, uint32_t i, const uint8_t *read)
+{
+    if (!read)
+        memset(wjob_page(j, i), 0, TAGFS_BLOCK_SIZE);
+    (void)TailSlipOver(j->plot.rec, j->st.k + i, wjob_page(j, i));
 }
 
 /* W_LOCATE — the stretch the cursor is in: its first and last block zeroed
@@ -175,11 +212,11 @@ static bool w_locate(WriteJob *j)
     if (j->st.first == PLOT_FILL_READ)
         j->st_reads |= WJOB_READ_FIRST;
     else if (j->st.first == PLOT_FILL_FRESH)
-        memset(wjob_page(j, 0), 0, TAGFS_BLOCK_SIZE);
+        WriteJobBase(j, 0, NULL);
     if (last > 0 && j->st.last == PLOT_FILL_READ)
         j->st_reads |= WJOB_READ_LAST;
     else if (last > 0 && j->st.last == PLOT_FILL_FRESH)
-        memset(wjob_page(j, last), 0, TAGFS_BLOCK_SIZE);
+        WriteJobBase(j, last, NULL);
     wjob_to(j, j->st_reads ? W_READ_OLD : W_DMA_FILL);
     return true;
 }
@@ -255,6 +292,8 @@ static bool w_read_done(WriteJob *j)
         j->st_staged = i;
         j->st_stop   = why;
         j->st_reads  = 0;
+    } else {
+        WriteJobBase(j, i, wjob_page(j, i));
     }
     wjob_to(j, j->st_reads ? W_READ_OLD : W_DMA_FILL);
     return true;
@@ -345,7 +384,7 @@ static bool w_block_done(WriteJob *j)
  * ground reserved past them cut off. */
 static bool w_log_meta(WriteJob *j)
 {
-    j->plot.data_need = VolumeFlushNeed();
+    j->plot.data_need = j->plot.slip ? 0 : VolumeFlushNeed();   /* a Slip's bytes ride the stitch */
     error_t rc = PlotEndWrite(&j->plot, j->start_offset + j->bytes_inked,
                               j->bytes_done - j->bytes_inked);
     if (rc != OK) {

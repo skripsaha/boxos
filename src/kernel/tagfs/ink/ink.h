@@ -109,8 +109,13 @@ void    InkRoomLetGo(Plot* p);
  * moves with it: the tag of the name it had comes off, `add` (the new name's,
  * already interned) goes on first. Otherwise `add` goes on and `drop` comes
  * off (TAGFS_INVALID_TAG_ID for neither). A tag of key system, boot or god
- * goes on — a name's tag too — or comes off only with the warrant. OK — a
- * change that changes nothing is OK with no Ink — or the refusal. */
+ * goes on — a name's tag too — or comes off only with the warrant; on a book,
+ * one put on a file goes on with the file's tail laid in its block, under its
+ * Helm (helm/engross.h, EngrossGuarded): ERR_BUSY, said, while a writer holds
+ * it. OK — a change that changes nothing is OK with no Ink — or the refusal.
+ * InkFieldsLaid is the change itself, guard or no guard: Engross's own. */
+error_t InkFieldsLaid(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
+                      InkReceipt* out);
 error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
                   InkReceipt* out);
 

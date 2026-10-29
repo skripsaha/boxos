@@ -362,6 +362,21 @@ def CutCases(bt):
             for n, k in enumerate(CUT_SECTORS)]
 
 
+LOG_LINES, LOG_LINE = 100, 40
+
+
+def LogLine(i):
+    """The logger's line i: 40 bytes."""
+    return (b"line %03u of the logger " % i).ljust(LOG_LINE, b".")
+
+
+def LogSlips(c, fid):
+    """The Shaped records of `fid` the ribbon carries, in order."""
+    shaped = [stitch.RecordDecode(kind, body, s.seq) for s in c.mount.ribbon.stitches
+              for kind, _ign, body, _at in s.records if kind == stitch.SHAPED]
+    return [d for d in shaped if d["fid"] == fid]
+
+
 def RibbonCases(bt):
     """What the ribbon carries on (§2.7, §2.8): an Undone, a Slip, a Quire run
     into its next, a retry at the start of the next."""
@@ -386,6 +401,38 @@ def RibbonCases(bt):
                              slip=(0, b"a" * 100))], flags=stitch.DATA_FLUSHED)
         pen.Sew([stitch.Shaped(fid=f1, base=1, size=150, mtime_ns=2, splices=[], digests=[],
                                slip=(100, b"b" * 50))], flags=stitch.DATA_FLUSHED)
+
+    def Logger(o):
+        """A logger's lines of 40 bytes, a stitch each, on a file born empty:
+        the first puts in its hole, and each lays its line alone — the change
+        since the stitch before, by the kernel's own rule (stitch.SlipDelta,
+        §16.5 п.13), not the tail the lines have grown."""
+        pen = bt.Pen(o)
+        pen.Sew([stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=0, created_ns=1, modified_ns=1,
+                             name=b"logger", tags=(), runs=[], digests=[])], flags=stitch.DATA_FLUSHED)
+        tail, size = {}, 0
+        for i in range(LOG_LINES):
+            now = dict(tail)
+            now.update(zip(range(size, size + LOG_LINE), LogLine(i)))
+            slip = stitch.SlipDelta(tail, now, size + LOG_LINE)
+            splices = [] if size else [(0, 0, [stitch.Hole(1)])]
+            sewn.setdefault("log", []).append(pen.Sew([stitch.Shaped(
+                fid=f1, base=1, size=size + LOG_LINE, mtime_ns=2 + i, splices=splices, digests=[], slip=slip)],
+                flags=stitch.DATA_FLUSHED))
+            tail, size = now, size + LOG_LINE
+
+    def CutGrown(o):
+        """100 bytes born a hole and a Slip, cut to 50 by a Shaped of no
+        splice, grown to 80 by another: the overlay is cut by the size, and
+        what grew reads as the hole's zeros (§16.5 п.13)."""
+        pen = bt.Pen(o)
+        pen.Sew([stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
+                             name=b"cut", tags=(), runs=[stitch.Hole(1)], digests=[],
+                             slip=(0, b"a" * 100))], flags=stitch.DATA_FLUSHED)
+        pen.Sew([stitch.Shaped(fid=f1, base=1, size=50, mtime_ns=2, splices=[], digests=[])],
+                flags=stitch.DATA_FLUSHED)
+        pen.Sew([stitch.Shaped(fid=f1, base=1, size=80, mtime_ns=3, splices=[], digests=[])],
+                flags=stitch.DATA_FLUSHED)
 
     def Folded(o):
         """A file born a hole and a Slip, then its last block written whole:
@@ -454,10 +501,22 @@ def RibbonCases(bt):
              lambda c: f1 not in c.mount.files and f2 in c.mount.files),
             ("the block %u named only lies fallow" % bt.F,
              lambda c: [x.runs for x in c.claims if x.kind == "fallow"] == [[(bt.F, 1)]])]),
-        Case("B22 a Slip", Slip, must={"UNDER_GLASS"}, checks=[
+        Case("B22 a Slip", Slip, checks=[
             ("%u reads its tail out of the ribbon: 100 bytes then 50" % f1,
              lambda c: c.Content(f1) == b"a" * 100 + b"b" * 50),
-            ("the volume is read only: a Slip this kernel cannot fold", lambda c: Glass(c, "Slip"))]),
+            ("and the volume goes on: a Slip is folded by this kernel (§16.5 п.13)",
+             lambda c: not c.mount.glass and not c.findings)]),
+        Case("B22c a logger's Slips, each its stitch's change", Logger, checks=[
+            ("%u reads every line out of the ribbon" % f1,
+             lambda c: c.Content(f1) == b"".join(LogLine(i) for i in range(LOG_LINES))),
+            ("each stitch one atom, its Slip the line alone",
+             lambda c: all(len(s.vlbas) <= SECTORS_PER_BLOCK for s in sewn["log"]) and
+             all(r["slip"] == (i * LOG_LINE, LogLine(i)) for i, r in enumerate(LogSlips(c, f1)))),
+            ("and nothing is said", lambda c: not c.mount.glass and not c.findings)]),
+        Case("B22d a Slip cut by the size, then grown inside its block", CutGrown, checks=[
+            ("%u reads 50 bytes and 30 zeros, not the bytes the cut took" % f1,
+             lambda c: c.Content(f1) == b"a" * 50 + bytes(30)),
+            ("and nothing is said", lambda c: not c.mount.glass and not c.findings)]),
         Case("B32 a Slip let go by a splice of its block", Folded, checks=[
             ("%u reads its new block, the overlay gone with the hole it lay on" % f1,
              lambda c: c.Content(f1) == bt.Pattern(10)[:150]),

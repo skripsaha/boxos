@@ -152,11 +152,9 @@ bool StandFreshSettledAndBack(const StandFreshModel* m, uint64_t fid)
 // the same ground (§2.8 Shaped)
 // ----------------------------------------------------------------------------
 
-/* The port's write of `bytes` of the model from `at` (WriteJob), answered:
- * the job's answer, or ERR_TIMEOUT. */
 static WriteJobStandAnswer s_fresh_answer;
 
-static error_t StandFreshPortWrite(StandFreshModel* m, uint64_t fid, uint64_t at, uint32_t bytes)
+error_t StandFreshPortWrite(StandFreshModel* m, uint64_t fid, uint64_t at, uint32_t bytes)
 {
     WriteJobAsk ask;
     if (at + bytes > m->room)

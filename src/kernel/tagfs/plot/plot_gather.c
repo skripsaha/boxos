@@ -3,6 +3,7 @@
 #include "../run/run.h"
 #include "../integrity/integrity.h"
 #include "../file_map/file_map.h"
+#include "../file_map/tail_slip.h"
 #include "../ink/ink.h"   /* InkWearsGuarded, InkTouchesBoot — the files whose blocks stay put */
 #include "../block_map/block_map.h"
 #include "../settle/sewing.h"
@@ -238,6 +239,13 @@ static error_t PlotGatherWindow(Plot *p, PlotGathering *g)
             g->within = 0;
         }
     }
+    /* The file's last block goes with the Slips over it laid on it (format v2,
+     * tail_slip.h): the run's record lets them go with the block they lay on. */
+    uint64_t k = p->window_at;
+    for (uint32_t i = 0; i < g->first; i++)
+        k += p->runs[i].count;
+    for (uint32_t j = 0; rc == OK && j < filled; j++)
+        (void)TailSlipOver(p->rec, k + g->copied + j, buf + (size_t)j * TAGFS_BLOCK_SIZE);
     if (rc == OK && filled > 0) {
         uint32_t landed = 0;
         rc = TagFSWriteRun(to, filled, buf, &landed);

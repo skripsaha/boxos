@@ -74,6 +74,33 @@ error_t  PlotWindowGrow(Plot *p, uint64_t size);
 error_t  PlotWindowRoomFor(const Plot *p, uint64_t end);
 error_t  PlotWindowRoomAsked(Plot *p);
 
+/* A hole of `count` blocks after the file's last run (plot_window.c), and the
+ * file's last block k — the bytes of it that are the file's `tail` (1..4096)
+ * — laid again on fresh ground: its base read (zeros for a hole), the Slips
+ * over it laid on that, zeros past the tail. OK, or the refusal of the ground,
+ * the read, the write or the ribbon's room. */
+error_t  PlotAppendHole(Plot *p, uint64_t count);
+error_t  PlotWindowTail(Plot *p, uint64_t k, uint32_t tail);
+
+/*
+ * The Slip of a write (plot_slip.c, spec_v2 §3.7, §16.5 п.13-15):
+ *   PlotSlipBegin   the choice, at PlotWindowBegin: a write that lies wholly in
+ *                   the file's last block as it leaves it, leaves that block
+ *                   short of full, keeps the Slips one span, of a file that
+ *                   wears no system, boot or god and is not the loader's
+ *                   kernel, while no Tally is owed — rides a Slip: no ground
+ *                   taken, a hole put in for a new last block, *chosen; any
+ *                   other lays blocks, and the heap that refuses the Slip its
+ *                   room asks a Tally (§16.5 п.15)
+ *   PlotSlipWrite   the write's bytes into its Slip: no block moves
+ *   PlotSlipLetGo   the Slip let go of, with the Plot or its Ink
+ *   PlotSlipMost    the bytes the Slip may take in its record at the most
+ */
+error_t  PlotSlipBegin(Plot *p, uint64_t at, uint64_t bytes, bool *chosen);
+error_t  PlotSlipWrite(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
+void     PlotSlipLetGo(Plot *p);
+uint64_t PlotSlipMost(const Plot *p);
+
 /* Whether the record the Plot would ink fits format v1. */
 bool     PlotRecordFits(const Plot *p);
 

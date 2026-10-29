@@ -17,10 +17,11 @@
  *
  * It reads the Tally and the ribbon of stitches sewn past it (§4.5 п.5,
  * ribbon.h): the state it mounts is the Tally's with every stitch after it
- * replayed, the verdicts the ribbon asks for — a roll-back, a Slip to fold —
- * said and left to the writer that can lay them down (§16.1 п.2): the volume
- * stands under glass (tagfs.h, UnderGlass) for whatever the book carries that
- * no writer of this kernel could carry on. Otherwise this kernel's writer goes
+ * replayed, the verdicts the ribbon asks for — a stitch undone (Errata), a
+ * Slip a Tally waits to see laid in its block (Engross) — left to this
+ * kernel's writer, which lays them down (§16.1 п.2): the volume stands under
+ * glass (tagfs.h, UnderGlass) only for what the book carries that no writer of
+ * this kernel could carry on. Otherwise this kernel's writer goes
  * on where the ribbon ends (settle/sewing.h): stitches of files made, written,
  * named, tagged and given up, of tags and of the Use Context; and a whole
  * Tally of it in time (settle/binder.h), named by a slot of the Spine.

@@ -253,8 +253,19 @@ error_t FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t c
     rec->created_time  = old->created_time;
     rec->modified_time = mtime;
     rec->gen           = old->gen;
-    rec->slip          = TailSlipHold(old->slip);
     RecordRuns(rec, root);
+    /* The Slips go on only by their one rule — the replay's and the Ink's
+     * (tail_slip.h): a splice that changes the last block lets them go, and
+     * the size cuts them. */
+    if (TailSlipKept(old, rec, count > 0) != OK) {
+        FileRecordRelease(rec);
+        if (freed) {
+            kfree(*freed);
+            *freed  = NULL;
+            *nfreed = 0;
+        }
+        return ERR_NO_MEMORY;
+    }
     *out = rec;
     return OK;
 }

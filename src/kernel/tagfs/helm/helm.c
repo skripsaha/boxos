@@ -1,4 +1,5 @@
 #include "helm.h"
+#include "engross.h"
 #include "../ink/ink.h"
 #include "baton.h"      /* the Knock that wakes a service point for a ready waiter */
 #include "scheduler.h"   /* SchedulerHoldHere — a ready waiter's work is never switched away from */
@@ -241,7 +242,9 @@ bool HelmAsk(OpenFileEntry *ofe, HelmWaiter *w)
     return mine;
 }
 
-bool HelmTry(OpenFileEntry *ofe, HelmWaiter *w)
+/* The Helm for `w` when it is free; a held one noted when `note` — under the
+ * Helm's lock, the one its holder's let-go reads the note under. */
+static bool HelmTryAt(OpenFileEntry *ofe, HelmWaiter *w, bool note)
 {
     FileHelm *h = &ofe->helm;
     w->next = NULL;
@@ -250,10 +253,22 @@ bool HelmTry(OpenFileEntry *ofe, HelmWaiter *w)
     bool mine = !TagFSMediumLeft() && h->holder == NULL && !h->parked;
     if (mine)
         h->holder = w;
+    else if (note)
+        h->noted = true;
     TagFSLockDrop(&h->lock);
     if (mine)
         __atomic_add_fetch(&s_helm_owed, 1u, __ATOMIC_ACQ_REL);
     return mine;
+}
+
+bool HelmTry(OpenFileEntry *ofe, HelmWaiter *w)
+{
+    return HelmTryAt(ofe, w, false);
+}
+
+bool HelmTryNoted(OpenFileEntry *ofe, HelmWaiter *w)
+{
+    return HelmTryAt(ofe, w, true);
 }
 
 void HelmLetGo(OpenFileEntry *ofe, HelmWaiter *w)
@@ -278,9 +293,13 @@ void HelmLetGo(OpenFileEntry *ofe, HelmWaiter *w)
         next->next = NULL;
     }
     h->holder = next;
+    bool noted = h->noted;
+    h->noted   = false;
     TagFSLockDrop(&h->lock);
 
     __atomic_sub_fetch(&s_helm_owed, 1u, __ATOMIC_ACQ_REL);
+    if (noted)
+        EngrossAsked();     /* a tail the service found under this holder waits for it */
     if (next)
         HelmHand(next);
 }

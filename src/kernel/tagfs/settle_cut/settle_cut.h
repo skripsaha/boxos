@@ -40,9 +40,13 @@
  *  14 undone     before the first atom of the stitch that lays a mount's
  *                verdict down — the first such stitch, anchored or not:
  *                the verdict is the scenario                      (STITCH)
+ *  15 engross    before the first atom of the stitch that names a block an
+ *                Engross laid — a tail out of its Slips, laid for the Tally
+ *                that waits for it, anchored or not: the block on the medium,
+ *                no stitch naming it (C22)                        (STITCH)
  *
  * A format-v2 cycle passes `flush` and `done` as format v1's does, around its
- * own last flush; `stitch`, `spared` and `undone` are its alone. `tally` and `slot` are passed by the
+ * own last flush; `stitch`, `spared`, `undone` and `engross` are its alone. `tally` and `slot` are passed by the
  * Tally that covers the anchor — the state after a stitch that carries it
  * (settle/binder.c), a work of the same Scribe between the cycles.
  *
@@ -84,8 +88,12 @@ typedef enum {
     SETTLE_CUT_POINT_TALLY,
     SETTLE_CUT_POINT_SLOT,
     SETTLE_CUT_POINT_SPARED,
-    SETTLE_CUT_POINT_UNDONE
+    SETTLE_CUT_POINT_UNDONE,
+    SETTLE_CUT_POINT_ENGROSS
 } SettleCutPoint;
+
+/* The last point: the count every line of the cut says "of". */
+#define SETTLE_CUT_POINT_LAST SETTLE_CUT_POINT_ENGROSS
 
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
 
@@ -100,8 +108,8 @@ void SettleCutAnchored(uint64_t gen);
 /* The cycle passes `here`. Returns at every point but the armed one, at that
  * one in a cycle that does not cover the anchor, and at it once the cut has
  * been made; the first passage of the armed point by a cycle that covers the
- * anchor, on any core, does not return at all. `undone` waits for no anchor:
- * its first passage is the cut. */
+ * anchor, on any core, does not return at all. `undone` and `engross` wait
+ * for no anchor: the first passage of either is the cut. */
 void SettleCutAt(SettleCutPoint here);
 
 /* Said once a volume is mounted: which point this kernel will cut at — and

@@ -90,6 +90,12 @@ MEDIUM = ("BoardroomRead", "BoardroomWrite", "BoardroomReadAsync",
 FRAME_SCOPE = ("kernel/tagfs/", "kernel/core/decks/storage/")
 ROOT_SCOPE = "src/kernel/core/decks/storage/"
 
+# Work the filesystem runs at a service point through a pointer
+# (HelmWaiter.run, helm.c HelmRunReady) from outside the storage deck: nothing
+# calls it directly, so it is named a root here, or its chain to the medium
+# would go unmeasured.
+POINTER_ROOTS = ("src/kernel/tagfs/helm/engross.c:EngrossTurn",)
+
 CLONE = re.compile(r"\.(part|constprop|isra|cold)(\.\d+)*")
 NODE = re.compile(r'^node: \{ title: "([^"]+)" label: "([^"]*)"')
 EDGE = re.compile(r'^edge: \{ sourcename: "([^"]+)" targetname: "([^"]+)"')
@@ -345,8 +351,12 @@ def judge_reach(size, owner, calls, callers, reach_held, verdict):
         if m not in size:
             verdict.fail("%s is not in the call graph — the reach cannot be "
                          "measured" % m)
+    for r in POINTER_ROOTS:
+        if r not in size:
+            verdict.fail("%s is not in the call graph — the reach of the work a service "
+                         "point runs through it cannot be measured" % r)
     roots = [t for t in size
-             if owner[t].startswith(ROOT_SCOPE) and not callers.get(t)]
+             if (owner[t].startswith(ROOT_SCOPE) or t in POINTER_ROOTS) and not callers.get(t)]
     reach, path, loops = reach_to_medium(roots, size, calls)
     if reach is None:
         verdict.fail("no storage request reaches the medium — the call graph "
