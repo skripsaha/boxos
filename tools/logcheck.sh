@@ -106,6 +106,7 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_book_circle.sh"
 . "$(dirname "$0")/logcheck_book_usb.sh"
 . "$(dirname "$0")/logcheck_bind.sh"
+. "$(dirname "$0")/logcheck_escheat.sh"
 # A book taking the ground behind it (grow, growcut on VOLUME_FORMAT=v2;
 # growglass): tools/logcheck_book_grow.sh.
 . "$(dirname "$0")/logcheck_book_grow.sh"
@@ -8872,6 +8873,52 @@ run_census() {
     book_bindcut slot second
     book_bindrot B4
     book_bindrot B6c
+    book_escheat B4
+    book_escheat B6c
+    book_escheat B4g 1
+}
+
+# ---------------------------------------------------------------------------
+# book_proofblind: the copy check of a Tally laid in must be able to go red
+#
+# Each Tally laid in reads both copies of as many clean leaves as it lays
+# (settle/binder_proof.c, spec_v2 §16.5 п.18). With the read taken out —
+# every copy said to hold — stand_book_glean_copies, which spoils one copy of
+# a leaf no Tally laid since and waits for a Tally to lay it anew, must fail:
+# a check that reads nothing finds nothing.
+# ---------------------------------------------------------------------------
+
+book_proofblind_on() {
+    mutate src/kernel/tagfs/settle/binder_proof.c
+    python3 - <<'EOF2'
+p = "src/kernel/tagfs/settle/binder_proof.c"
+s = open(p).read()
+anchor = "        error_t rc    = TallyCopyHolds(p, k, &holds, why, sizeof(why));\n"
+assert s.count(anchor) == 1, "copy check anchor missing"
+s = s.replace(anchor, "        error_t rc    = OK;    /* logcheck mutation: no copy is read */\n        holds         = true;\n", 1)
+open(p, "w").write(s)
+EOF2
+    mut_done src/kernel/tagfs/settle/binder_proof.c "logcheck mutation"
+}
+
+book_proofblind() {
+    local keep=${STAND_FORMAT:-} L="$SCRATCH/serial.stand_book_proofblind.log"
+    echo "== book proofblind: a copy check that reads nothing must fail stand_book_glean_copies =="
+    rm -f build/boxos.img "$L"
+    STAND_FORMAT=v2
+    book_proofblind_on
+    if build_with_key VOLUME_TESTS=on STRICT=off; then
+        stand_boot stand_book_proofblind CORES=4 MEM=4G
+        if [ $? != 2 ]; then
+            grep -aqF "[TESTS] stand_book_glean_copies failed" "$L"
+            chk $? "proofblind: with no copy read, stand_book_glean_copies fails ($(grep -aoE '\[TESTS\] stand_book_glean_copies [a-z]+.*' "$L" | head -1 | cut -c1-160))"
+        fi
+    else
+        bad "proofblind: the tree with no copy read does not build — $(tail -1 "$SCRATCH/build.log")"
+    fi
+    restore src/kernel/tagfs/settle/binder_proof.c
+    STAND_FORMAT=$keep
+    rm -f build/boxos.img
 }
 
 # The two halves of the reconcile must each be able to go red. The kernel's:
@@ -9255,6 +9302,7 @@ run_stand() {
     done
     lockrank_judge "$logs" "stand, both roads"
     stand_book
+    book_proofblind
     buildkey_restore
 }
 
