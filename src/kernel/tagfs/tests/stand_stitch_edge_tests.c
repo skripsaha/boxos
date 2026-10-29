@@ -283,11 +283,20 @@ static TestResult TestStandStitchWalkReadsOnce(void)
     RibbonCursor  now;
     MountBookSaid said;
     bool          kept  = false;
-    uint64_t      k     = 40, word = 8u * TALLY_SHEET_PAYLOAD;
+    uint64_t      k     = 40, word = 8u * TALLY_SHEET_PAYLOAD, found_read = 0, found_sewn = 0;
     const char*   aside = StandStitchAside(&s);
 
     if (aside)
         return test_steps_aside(aside);
+    /* What the walk of the ribbon as the test found it costs: the stitches
+     * the tests before sewed past the Tally — a retry among them with the
+     * attempt the medium refused, a unit read and never sewn (M-6) — are
+     * read by every mount after, and are no part of this test's walk. */
+    uint64_t at_found = RibbonUnitsReadStand();
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on the ribbon as it was found");
+    found_read = RibbonUnitsReadStand() - at_found;
+    MountBookStandSaid(&said);
+    found_sewn = said.sewn;
     RibbonCursorStand(&now);
     for (; RibbonQuireSame(&now.quire, &s.at.quire) && k < 40u + 4096u; k++) {
         TEST_ASSERT_OK(StandStitchSayLong(word, (char)('a' + k % 26u), k, &kept), "a long word is laid down");
@@ -300,8 +309,9 @@ static TestResult TestStandStitchWalkReadsOnce(void)
     TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
     uint64_t read = RibbonUnitsReadStand() - before;
     MountBookStandSaid(&said);
-    TEST_ASSERT(said.sewn >= k - 40u, "with every stitch sewn on");
-    TEST_ASSERT(read <= (uint64_t)said.sewn + 8u,
+    TestEvidence("units of the chain the mount read past those it read of the ribbon as found", read - found_read);
+    TEST_ASSERT(said.sewn >= found_sewn + (k - 40u), "with every stitch sewn on");
+    TEST_ASSERT(read <= found_read + ((uint64_t)said.sewn - found_sewn) + 8u,
                 "each unit of the chain read once: rules (б) and (б′) are weighed for no stitch a later one names, "
                 "and the next_quire is not walked for every stitch of the Quire before it (§16.4 п.4)");
 out:

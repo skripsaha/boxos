@@ -43,10 +43,10 @@ static void RecordRuns(FileRecord* rec, const Tract* tract)
     rec->bytes      += tract ? tract->bytes : 0;
 }
 
-FileRecord* FileRecordBuild(const TagFSMetadata* meta)
+/* The record of `meta` over `tract`, built by `rc` — a reference the record
+ * takes over: NULL, `tract` let go, when the build or the header failed. */
+static FileRecord* RecordOf(const TagFSMetadata* meta, const Tract* tract, error_t rc)
 {
-    const Tract* tract = NULL;
-    error_t      rc    = TractOfStrips(meta->extents, meta->extents ? meta->extent_count : 0, &tract);
     if (rc == ERR_INVALID_ARGUMENT) {
 #if CONFIG_STRICT
         panic("[TagFS] DEFECT: file %llu's record names a run of no blocks, or of a kind memory "
@@ -54,6 +54,15 @@ FileRecord* FileRecordBuild(const TagFSMetadata* meta)
 #endif
         kprintf("[TagFS] DEFECT: file %llu's record names a run of no blocks, or of a kind memory "
                 "does not know — it is not built\n", meta->file_id);
+    }
+    if (rc == ERR_TAGFS_CORRUPTED) {
+#if CONFIG_STRICT
+        panic("[TagFS] DEFECT: file %llu's Parcels, as its Tally laid them, do not cut its Strips — a Parcel "
+              "of none, or more or fewer Strips in all than its record names", meta->file_id);
+#endif
+        kprintf("[TagFS] DEFECT: file %llu's Parcels, as its Tally laid them, do not cut its Strips — a Parcel "
+                "of none, or more or fewer Strips in all than its record names — it is not built\n",
+                meta->file_id);
     }
     if (rc != OK)
         return NULL;
@@ -71,6 +80,21 @@ FileRecord* FileRecordBuild(const TagFSMetadata* meta)
     rec->modified_time = meta->modified_time;
     RecordRuns(rec, tract);
     return rec;
+}
+
+FileRecord* FileRecordBuild(const TagFSMetadata* meta)
+{
+    const Tract* tract = NULL;
+    error_t      rc    = TractOfStrips(meta->extents, meta->extents ? meta->extent_count : 0, &tract);
+    return RecordOf(meta, tract, rc);
+}
+
+FileRecord* FileRecordBuildCut(const TagFSMetadata* meta, const uint32_t* cut, uint64_t ncut, bool* recut)
+{
+    const Tract* tract = NULL;
+    error_t      rc    = TractOfParcels(meta->extents, meta->extents ? meta->extent_count : 0, cut, ncut,
+                                        &tract, recut);
+    return RecordOf(meta, tract, rc);
 }
 
 FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uint32_t* tags,

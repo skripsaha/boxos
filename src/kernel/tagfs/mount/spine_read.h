@@ -33,6 +33,7 @@ typedef struct {
     uint64_t    block;
     uint32_t    state;           /* SPINE_SLOT_* */
     char        why[160];        /* TORN: why */
+    bool        unread;          /* TORN: a sector of it the medium would not read */
     uint64_t    seq;             /* VALID: the seq its eight sectors carry */
     SpineHead   head;
     SpineRibbon ribbon;
@@ -58,7 +59,12 @@ error_t SpineSlotJudgeSectors(SpineSlot* slot, const uint8_t* sectors);
  * newest first (by seq; a tie by index) — *count of them — and every TORN one
  * said as it is met. `what` (room bytes) gets the slots' states in a line, for
  * a mount that finds none valid to say. OK — none valid is *count 0 —, or
- * ERR_NO_MEMORY, or the medium's refusal. */
+ * ERR_NO_MEMORY, or the medium's refusal. None valid where the medium would
+ * not read a sector of a slot is the medium's refusal too, noted as one
+ * (ERR_READ_FAILED): that slot may be the one that holds, and a sector a
+ * reset of the seat gives back is no verdict on the book — the mount is asked
+ * again on the seat's answer, as format v1's is when its Ledger will not read
+ * (tagfs.c, mount_attempt). */
 error_t SpineRead(const VolumeFrame* frame, SpineSlot** out, uint32_t* count, char* what, size_t room);
 
 /* A slot's memory, and a run of them, let go. */

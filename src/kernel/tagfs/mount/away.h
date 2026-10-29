@@ -126,12 +126,15 @@ void        TagFSStandLeavesAfterRun(void);
  * back in, a volume up or not, because the runner lets go of it once more.
  *
  * The turn of the next mount: SEAT_EMPTIES empties the volume's seat at the
- * mount's nth block read, as a medium pulled out in the middle of its reads;
+ * mount's nth block read — a format-v1 metadata block's, or a unit of a
+ * book's (book_unit.c, which says when the read comes) — as a medium pulled
+ * out in the middle of its reads;
  * SEAT_RINGS has the seat say seat:ready, and the room say it on the spot,
  * every time a block read of a mount is refused — before the attempt has
  * ended, as a driver's recovery of the refused command says it; HEAP_REFUSES
  * has the first allocation of the registry's load answered NULL, as an
- * exhausted heap answers it (mount.c, which says when the load begins).
+ * exhausted heap answers it (mount.c, and book_mount.c for a book's, which
+ * say when the load begins).
  * Fired: the turn happened. Idle: no arrival owed, nobody attending, and no
  * owed mount waiting to be asked. Owed: a mount is owed until a seat answers
  * again after its last attempt, or the memory it was refused for comes back.
@@ -147,6 +150,7 @@ typedef enum {
 bool        TagFSStandLetGo(void);
 void        TagFSStandHoldAgain(void);
 void        TagFSStandMountTurn(StandMountTurn turn, uint32_t nth);
+void        TagFSStandMountReadComes(void);
 void        TagFSStandMountRegistryLoads(void);
 bool        TagFSStandMountTurnFired(void);
 bool        TagFSStandMountIdle(void);

@@ -340,6 +340,9 @@ static error_t BookMemory(const char** what)
 {
     TagFSState* fs = tagfs_get_state();
     fs->braid      = NULL;
+#ifdef CONFIG_VOLUME_TESTS
+    TagFSStandMountRegistryLoads();
+#endif
     fs->registry   = kmalloc(sizeof(TagRegistry));
     if (!fs->registry || tag_registry_init(fs->registry) != OK) {
         kfree(fs->registry);
@@ -367,6 +370,11 @@ static error_t BookSpine(const char** what)
                   "not read (ERR_TAGFS_CORRUPTED)", g_book.frame.spine_slots, states);
         *what = s_refusal;
         rc    = ERR_TAGFS_CORRUPTED;
+    } else if (rc == ERR_READ_FAILED && states[0]) {
+        ksnprintf(s_refusal, sizeof(s_refusal), "none of the %u slots of its Spine holds, and its medium would "
+                  "not read a sector of one (%s) — the medium's refusal, no verdict on the book: asked again "
+                  "when its seat answers", g_book.frame.spine_slots, states);
+        *what = s_refusal;
     } else if (rc != OK) {
         *what = rc == ERR_NO_MEMORY ? "there is no memory to read its Spine"
                                     : "its medium would not give up its Spine";
@@ -579,10 +587,7 @@ void BookKeptLetGo(BookKeptFile* k)
 
 void MountBookLetGo(void)
 {
-    BookFile* f = &g_book.file;
-    kfree(f->meta.filename);
-    kfree(f->meta.tag_ids);
-    kfree(f->strips);
+    BookFileForget(&g_book.file);
     SpineLetGo(g_book.slots, g_book.nslots);
     kfree(g_book.rot);
     kfree(g_book.locked);

@@ -3,6 +3,7 @@
 #include "../tagfs.h"
 #include "../run/run.h"     /* TagFSRunBlocks, TagFSDataCost — the seat's run, and the trace */
 #include "../file_map/file_map.h"  /* the file's record, its runs walked in it */
+#include "../mount/book_mount.h" /* a book's data run (g_book) */
 #include "write_job.h"      /* WriteJobSubmit, and the stand's own answer record */
 #include "block_fail.h"     /* BLOCKFAIL — the commands counted at the door, and one refused */
 #include "atomics.h"
@@ -171,7 +172,11 @@ static uint32_t StandRunFirstNonZero(const uint8_t *p, uint32_t n)
 // port — where it was two hundred and fifty-six. Counted at the Boardroom's
 // door (BLOCKFAIL armed over the file's sectors, refusing none), and by the
 // trace the performance dump reads, which must agree with the door. Each
-// block still has its own digest: the file reads back through them whole.
+// block still has its own digest: the file reads back through them whole. A
+// book lays a write over a file on fresh ground (§3.6), so there BLOCKFAIL
+// counts over the whole data run — no other write of the volume goes out
+// while the cadence is held — and the run counted is the one the file lies in
+// after the write.
 // ----------------------------------------------------------------------------
 
 static TestResult StandRunMegabyte(bool port)
@@ -186,6 +191,7 @@ static TestResult StandRunMegabyte(bool port)
     bool           running = false;
     const uint32_t N       = TagFSRunBlocks();
     const uint32_t want    = (STAND_RUN_BLOCKS + N - 1) / N;
+    const bool     book    = tagfs_get_state()->format == DEED_FORMAT_V2;
     StandRunAnswer answer;
     TagFSDataCost  before, after;
     const char    *aside   = StandRunAside(port);
@@ -206,8 +212,12 @@ static TestResult StandRunMegabyte(bool port)
     TEST_ASSERT(!port || WriteJobSeatRunsAsync(seat),
                 "a program's write on this seat goes through the port, as the path line said");
 
-    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(first),
-                 (uint64_t)STAND_RUN_BLOCKS * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
+    if (book)
+        BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(g_book.frame.data_block),
+                     (g_book.data_end - g_book.frame.data_block) * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
+    else
+        BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(first),
+                     (uint64_t)STAND_RUN_BLOCKS * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
     armed = true;
     TagFSDataCostTake(&before);
     bool answered = StandRunWrite(port, file_id, data, STAND_RUN_BYTES, &answer, &running);
@@ -221,6 +231,11 @@ static TestResult StandRunMegabyte(bool port)
     TEST_ASSERT_OK(answer.rc, "the write is answered OK");
     TEST_ASSERT_EQ(answer.written, STAND_RUN_BYTES, "with every byte of it the file's");
     TEST_ASSERT_EQ(answer.size, STAND_RUN_BYTES, "and the size it was");
+    if (book && !StandRunLiesInOneRun(file_id, &first)) {
+        verdict = test_steps_aside("the book laid the megabyte's fresh ground in more than one run, and a "
+                                   "write across runs goes out a command a run");
+        goto out;
+    }
     TestEvidence("blocks the seat takes in one command", N);
     TestEvidence("medium commands the megabyte went out in", seen);
     TEST_ASSERT_EQ(seen, want, "ceil(256 / the blocks the seat takes in one command)");

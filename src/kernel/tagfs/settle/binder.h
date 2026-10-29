@@ -517,7 +517,8 @@ error_t     BinderDigestsTurn(const BinderWork* w);
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's hands on a Tally: written whole now (BinderRunWhole), stopped
  * before step `at` — the volume left as a cut there leaves it, nothing more
- * written — or its slot torn, `sectors` of its eight written. 0 for neither. */
+ * written — or its slot torn, `sectors` of its eight written: eight, the slot
+ * written whole and its write refused. 0 for neither. */
 void        BinderStandStopAt(TallyStep at);
 void        BinderStandTearSlot(uint32_t sectors);
 
@@ -533,6 +534,9 @@ typedef struct {
     uint64_t tally_blocks;
     uint64_t tallies;        /* written by this mount */
     bool     owed;
+    bool     demanded;       /* owed whatever the ribbon holds: a Glean its DONE chose, DogEar lost */
+    uint64_t pair_left;      /* the blocks of the pair of Tally-Quires no node was laid in yet: the book's,
+                              * out of the free count, kept for the next Tally to go on in */
     uint64_t checked;        /* elements of the last Tally its self-check held to the Tally before */
 } BinderStandSaid;
 void        BinderStand(BinderStandSaid* out);

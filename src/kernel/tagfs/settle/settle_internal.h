@@ -56,6 +56,12 @@ void     SettleParkSay(void);
 /* The time the cadence counts in: microseconds of the TSC. */
 uint64_t SettleNowUs(void);
 
+#ifdef CONFIG_VOLUME_TESTS
+/* settle.c: `rc`, or — when it is OK — the refusal the stand chose for the
+ * next cycle, once (TagFSStandSettleRefuses). */
+error_t  SettleStandRefusalHere(error_t rc);
+#endif
+
 /* settle.c: a cycle of either format settled — every Ink up to `target`, as
  * the `cycle`-th of this mount, the volume sealed clean or not — under the
  * state lock, at the cycle's S6. */

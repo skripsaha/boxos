@@ -110,7 +110,7 @@ def Refused(work, name, mode, args, says):
     img = os.path.join(work, name + ".img")
     Ground(img, 131072)
     before = Sha(img)
-    rc, out = Mkfs(*([mode] if mode else []) + [img] + args)
+    rc, out = Mkfs(mode, img, *args)
     said = [l for l in out if says in l]
     print("MKFS %s refused=%u untouched=%u said=%s" % (name, rc != 0 and bool(said), Sha(img) == before,
                                                       (said or out or ["nothing"])[-1][:150]))
@@ -187,18 +187,18 @@ def Leg(leg, a):
     elif leg == "v1ids":
         lists = [["v%x" % (i * 252 + j) for j in range(252)] for i in range(130)]
         args = Files(a[0], "ids", lists)
-        Refused(a[0], "v1ids", None, args, "its format carries none past 32766")
-        rc, out = Mkfs("--ground", *args)
+        Refused(a[0], "v1ids", "--v1", args, "its format carries none past 32766")
+        rc, out = Mkfs("--ground", "--v1", *args)
         said = [l for l in out if "its format carries none past 32766" in l]
         print("MKFS v1ground refused=%u said=%s" % (rc != 0 and bool(said), (said or out or ["nothing"])[-1][:150]))
     elif leg == "v1record":
-        Refused(a[0], "v1record", None, Files(a[0], "rec", [["r%u" % j for j in range(2100)]]),
+        Refused(a[0], "v1record", "--v1", Files(a[0], "rec", [["r%u" % j for j in range(2100)]]),
                 "format v1 keeps a file's record in one pool block")
     elif leg == "keywide":
-        for mode in (None, "--v2"):
-            Refused(a[0], "keywide" + (mode or ""), mode, Files(a[0], "key", [["k" * 256]]),
+        for mode in ("--v1", "--v2"):
+            Refused(a[0], "keywide" + (mode if mode == "--v2" else ""), mode, Files(a[0], "key", [["k" * 256]]),
                     "the kernel holds a tag's key in 255 bytes")
-            Refused(a[0], "textwide" + (mode or ""), mode, Files(a[0], "text", [["k:" + "v" * 4074]]),
+            Refused(a[0], "textwide" + (mode if mode == "--v2" else ""), mode, Files(a[0], "text", [["k:" + "v" * 4074]]),
                     "the kernel holds a tag's key in 255 bytes")
 
 
@@ -242,7 +242,7 @@ mkfs_grounds() {
     chk $? "mkfs: --v2 lays a volume on a ground of 17 TiB ($(grep -a 'Ground' "$work/big.log" | head -1 | sed 's/^ *//'))"
     [ "$(python3 tools/volume-read.py "$img" check | tail -1)" = "$MKFS_CLEAN" ]
     chk $? "mkfs: and its census reads it clean"
-    ! tools/create_tagfs "$img" src/userspace/shell/shell.bin "utility,system" >"$work/big.v1.log" 2>&1 \
+    ! tools/create_tagfs --v1 "$img" src/userspace/shell/shell.bin "utility,system" >"$work/big.v1.log" 2>&1 \
         && grep -aq '16 TiB' "$work/big.v1.log"
     chk $? "mkfs: format v1 refuses the same ground ($(grep -a '16 TiB' "$work/big.v1.log" | head -1 | cut -c1-90))"
     rm -f "$img"
@@ -289,16 +289,25 @@ mkfs_tags() {
 
 run_mkfs() {
     echo "== mkfs: what create_tagfs lays down, held on the host to the format's second reader =="
-    local work="$SCRATCH/mkfs"
-    build
+    local work="$SCRATCH/mkfs" format
+    format=$(stand_format)
+    # The v1 image is built as v1 by name: the format the run asks — the gate's
+    # VOLUME_FORMAT, or the Makefile's when nobody names one — is the one the
+    # tree is put back in, and neither is format v1 for certain.
+    STAND_FORMAT=v1 build
     rm -rf "$work"
     mkdir -p "$work"
-    cp build/boxos.img "$work/v1.img" || { harness "mkfs: could not keep the v1 image"; return; }
+    python3 tools/volume-read.py build/boxos.img deed | grep -q '^format      : v1' \
+        && cp build/boxos.img "$work/v1.img" || { harness "mkfs: could not keep a v1 image"; return; }
     mkfs_image "$work"
     mkfs_grounds "$work"
     mkfs_tags "$work"
     buildkey_restore
-    python3 tools/volume-read.py build/boxos.img deed | grep -q '^format      : v1'
-    chk $? "mkfs: and \`make\` after it lays format v1 again — the image carries its format's marker"
+    # The v1 build above was plain: the tree is put back in the run's format
+    # whether or not a keyed build came after it.
+    python3 tools/volume-read.py build/boxos.img deed | grep -q "^format      : $format\$" ||
+        STAND_FORMAT=$format build
+    python3 tools/volume-read.py build/boxos.img deed | grep -q "^format      : $format\$"
+    chk $? "mkfs: and \`make\` after it lays format $format again, the format the run asked — the image carries its format's marker"
     rm -rf "$work"
 }

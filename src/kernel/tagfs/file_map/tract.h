@@ -62,6 +62,16 @@ static inline uint64_t TractBlocks(const Tract* t)
  * kind memory does not know, ERR_NO_MEMORY — and nothing built. */
 error_t TractOfStrips(const Strip* strips, uint64_t count, const Tract** out);
 
+/* The Tract of `count` Strips cut into Parcels as `cut` gives — the Strips of
+ * each, `ncut` of them, in order: as a Tally laid them — with one reference;
+ * *recut when a piece past PARCEL_STRIPS_MOST had to be cut again, so memory
+ * holds the file otherwise than the Tally did. ERR_TAGFS_CORRUPTED for a cut
+ * that is not of the Strips — a Parcel of none, or more or fewer Strips in all
+ * than there are; ERR_INVALID_ARGUMENT as TractOfStrips; ERR_NO_MEMORY — and
+ * nothing built. */
+error_t TractOfParcels(const Strip* strips, uint64_t count, const uint32_t* cut, uint64_t ncut,
+                       const Tract** out, bool* recut);
+
 /* A list of ground that grows as it is added to (TractGroundAdd: OK or
  * ERR_NO_MEMORY); its Strips are the caller's to free. */
 typedef struct {

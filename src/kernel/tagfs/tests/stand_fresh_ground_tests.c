@@ -389,7 +389,10 @@ static TestResult TestStandFreshFillAndEmpty(void)
     while (made < STAND_FRESH_FILL_MOST && rc == OK) {
         TEST_ASSERT_EQ(tagfs_create_file("fresh-fill.bin", NULL, 0, &fids[made]), 0, "a file is made");
         rc = StandFreshFill(fids[made++]);
-        TEST_ASSERT(fs->ledger.free_blocks >= kept, "and the data leaves the book's reserve free");
+        uint64_t went = __atomic_load_n(&RibbonCursorNow()->quires, __ATOMIC_ACQUIRE) - quires;
+        TEST_ASSERT(fs->ledger.free_blocks + went * s.at.quire_blocks >= kept,
+                    "and the data leaves the book's reserve free — but the Quires the ribbon went on into, "
+                    "which are what it is kept for");
     }
     TEST_ASSERT_EQ(rc, ERR_TAGFS_NO_SPACE, "filled, the volume refuses the next write: no space");
     for (uint32_t i = 0; i < made; i++)

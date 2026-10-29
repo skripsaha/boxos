@@ -618,26 +618,33 @@ out:
 
 static const TestCase g_stand_seal_tests[] = {
     { .name = "stand_seal_borne",               .func = TestStandSealBorne,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_coined" },
     { .name = "stand_seal_cut_keeps_the_seal",  .func = TestStandSealCutKeepsTheSeal,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_ribbon_torn_tail" },
     { .name = "stand_seal_lie_falls_back",      .func = TestStandSealLieFallsBack,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_medium_lied" },
     { .name = "stand_seal_rollback_stands_on_the_newest",
-      .func = TestStandSealRollbackStandsOnTheNewest, .reach = TEST_WRITES_TO_VOLUME },
+      .func = TestStandSealRollbackStandsOnTheNewest, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_away_newer_slot" },
     { .name = "stand_seal_torn_table_stands",   .func = TestStandSealTornTableStands,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_binder_slot_torn" },
     { .name = "stand_seal_fid_boundary_derived", .func = TestStandSealFidBoundaryDerived,
       .reach = TEST_READS_ONLY },
     /* Last: each takes the volume down and mounts it again. */
     { .name = "stand_seal_bad_open_block_rolls_back", .func = TestStandSealBadOpenBlockRollsBack,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a sector of the open block the medium cannot read refuses the mount, "
-                       "waiting for a seat:ready a bad sector never brings" },
+                       "waiting for a seat:ready a bad sector never brings",
+      .format = DEED_FORMAT_V1, .analog = "stand_errata_rot_late" },
     { .name = "stand_seal_bad_closed_block_is_rot", .func = TestStandSealBadClosedBlockIsRot,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a sector of a closed block the medium cannot read is taken for a "
-                       "refusal, and the mount waits for a seat:ready" },
+                       "refusal, and the mount waits for a seat:ready",
+      .format = DEED_FORMAT_V1, .analog = "stand_ribbon_closed_damaged" },
 };
 
 const TestSuite g_stand_seal_suite = {

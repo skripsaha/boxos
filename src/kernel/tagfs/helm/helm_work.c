@@ -95,9 +95,10 @@ static error_t HelmWriteWindowOnce(TagFSFileHandle *handle, const PlotSource *sr
     bool       loaded = rc == OK;
 
     if (rc == OK) {
-        at     = (handle->flags & TAGFS_HANDLE_APPEND) ? plot.size : handle->offset;
-        window = HelmWindowOf(src, *inked, at);
-        rc     = PlotBeginWrite(&plot, at, false, window.bytes, &at);
+        at        = (handle->flags & TAGFS_HANDLE_APPEND) ? plot.size : handle->offset;
+        window    = HelmWindowOf(src, *inked, at);
+        plot.part = *inked > 0;     /* a window past the write's first rides no Slip (plot_slip.c) */
+        rc        = PlotBeginWrite(&plot, at, false, window.bytes, &at);
     }
     if (rc == OK)
         rc = PlotWriteBlocks(&plot, at, &window, &done);

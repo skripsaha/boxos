@@ -255,7 +255,8 @@ out:
 
 static const TestCase g_stand_snapshot_tests[] = {
     { .name  = "stand_old_snapshots_held", .func = TestStandOldSnapshotsHeld,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_map_holds" },
 };
 
 const TestSuite g_stand_snapshot_suite = {

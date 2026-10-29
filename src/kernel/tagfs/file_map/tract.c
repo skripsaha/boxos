@@ -298,6 +298,52 @@ error_t TractOfStrips(const Strip* strips, uint64_t count, const Tract** out)
     return rc == OK ? TractRise(parcels, n, 0, out) : rc;
 }
 
+/*
+ * ‼ A PARCEL OF THE MEDIUM IS ONE PARCEL OF MEMORY (§16.1 п.7, §2.9: the
+ * boundary is the writer's, the reader does not read it again). A splice cuts
+ * only the Parcels it touched (SpliceGather), so a file written in pieces lies
+ * in the Parcels its splices left — not the even cut of all its Strips — and a
+ * Tally lays memory's one for one. Cut again at the mount, memory would hold
+ * a file its Tally does not, and DogEar, the keys changed since that Tally,
+ * would miss every key the new cut moved (settle/dog_ear.c ParcelsChanged).
+ * A piece of more than PARCEL_STRIPS_MOST — a run past a Strip's count laid in
+ * as more than one — is cut as evenly as it goes, and *recut says so.
+ */
+error_t TractOfParcels(const Strip* strips, uint64_t count, const uint32_t* cut, uint64_t ncut,
+                       const Tract** out, bool* recut)
+{
+    uint64_t pieces = 0, sum = 0, made = 0, at = 0;
+    *out   = NULL;
+    *recut = false;
+    for (uint64_t i = 0; i < count; i++)
+        if (strips[i].count == 0 || strips[i].kind > STRIP_HOLE)
+            return ERR_INVALID_ARGUMENT;
+    for (uint64_t i = 0; i < ncut; i++) {
+        if (cut[i] == 0)
+            return ERR_TAGFS_CORRUPTED;
+        sum    += cut[i];
+        pieces += CutPieces(cut[i], PARCEL_STRIPS_MOST);
+        *recut |= cut[i] > PARCEL_STRIPS_MOST;
+    }
+    if (sum != count)
+        return ERR_TAGFS_CORRUPTED;
+    const void** parcels = pieces ? kmalloc(sizeof(void*) * pieces) : NULL;
+    if (pieces && !parcels)
+        return ERR_NO_MEMORY;
+    for (uint64_t i = 0; i < ncut; i++) {
+        uint64_t n = CutPieces(cut[i], PARCEL_STRIPS_MOST);
+        for (uint64_t j = 0; j < n; j++, made++) {
+            uint64_t len = CutLength(cut[i], n, j);
+            if (!(parcels[made] = ParcelMake(&strips[at], (uint32_t)len))) {
+                KidsLetGo(parcels, made, 0);
+                return ERR_NO_MEMORY;
+            }
+            at += len;
+        }
+    }
+    return TractRise(parcels, pieces, 0, out);
+}
+
 // ----------------------------------------------------------------------------
 // Found
 // ----------------------------------------------------------------------------

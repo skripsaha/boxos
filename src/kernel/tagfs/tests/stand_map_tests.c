@@ -728,26 +728,31 @@ static const TestCase g_stand_map_tests[] = {
     { .name  = "stand_map_take_run_nearest_longest", .func = TestStandMapTakeRunNearestLongest,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a take near a hint is placed in the first run that fits, however far "
-                       "from the hint, or given less than a run the volume holds" },
+                       "from the hint, or given less than a run the volume holds",
+      .format = DEED_FORMAT_V1, .analog = "stand_fresh_ground_appends_keep_one_run" },
     { .name  = "stand_map_give_back_twice_refused", .func = TestStandMapGiveBackTwiceRefused,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a block given back while it is already free is counted free again and "
-                       "handed to a second owner" },
+                       "handed to a second owner",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_map_claim_named" },
     { .name  = "stand_map_allotment_taken_back", .func = TestStandMapAllotmentTakenBack,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a growing file's kept ground is not taken back before a take is refused "
-                       "for want of room" },
+                       "for want of room",
+      .format = DEED_FORMAT_V1, .analog = "stand_fresh_ground_fill_and_empty" },
     { .name  = "stand_map_write_in_flight_left_free", .func = TestStandMapWriteInFlightLeftFree,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a cycle settled under a write in flight sends the medium a map with the "
-                       "write's block taken, and its seal stands behind ground nothing owns" },
+                       "write's block taken, and its seal stands behind ground nothing owns",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_map_holds" },
     { .name  = "stand_map_gives_away_are_room_on_its_way",
       .func  = TestStandMapGivesAwayAreRoomOnItsWay,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a take under the state lock is told the volume has no room while gives "
-                       "wait for their sectors" },
+                       "wait for their sectors",
+      .format = DEED_FORMAT_V1, .analog = "stand_docket_ground_rests" },
     { .name  = "stand_map_plan_hold_bounded", .func = TestStandMapPlanHoldBounded,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V1,
+      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V1, .analog = "stand_tally_map_holds",
       .caveat_defect = "a take's plan walks every window of the volume, each with the run past "
                        "it, in one hold of the state lock, with interrupts off for as long as the "
                        "volume is large" },
@@ -755,17 +760,20 @@ static const TestCase g_stand_map_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a give into a window whose sector is away looks at every edit written "
                        "down for every window, and Fallow's gives under one hold cost their "
-                       "number squared" },
+                       "number squared",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_map_short_of_memory" },
     { .name  = "stand_map_flush_meets_a_write_on_its_way",
       .func  = TestStandMapFlushMeetsAWriteOnItsWay,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "S1 answers OK while a write of the map that carries its debt is still "
-                       "on its way, and never hears that write refused" },
+                       "on its way, and never hears that write refused",
+      .format = DEED_FORMAT_V1, .analog = "stand_fresh_flushes_first" },
     { .name  = "stand_map_fallow_keeps_what_the_map_cannot_write",
       .func  = TestStandMapFallowKeepsWhatTheMapCannotWrite,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "Fallow lets go of a node whose gives the map had no room to write down, "
-                       "and its blocks stay taken for good" },
+                       "and its blocks stay taken for good",
+      .format = DEED_FORMAT_V1, .analog = "stand_docket_ground_rests" },
 };
 
 const TestSuite g_stand_map_suite = {

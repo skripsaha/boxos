@@ -706,6 +706,10 @@ error_t StitchRunStep(bool* done)
         break;
     case STITCH_STEP_BUILD:
         s->stage = "the stitch's making";
+#ifdef CONFIG_VOLUME_TESTS
+        if ((rc = SettleStandRefusalHere(OK)) != OK)
+            break;
+#endif
         rc       = StitchBuild(s);
         if (rc == OK)
             s->step = s->toll ? STITCH_STEP_FIRST_FLUSH : STITCH_STEP_STITCH;

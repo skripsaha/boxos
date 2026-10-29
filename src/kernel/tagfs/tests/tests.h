@@ -55,9 +55,13 @@ typedef enum {
  *
  * format: the book the test is written for — DEED_FORMAT_V1 or
  * DEED_FORMAT_V2 — or DEED_FORMAT_NONE, left out, for any. A test stands
- * aside, counted and said by the runner, on a volume of the other format; and
- * on a format-v2 volume, which this kernel does not write, every test written
- * for any format that writes to the volume stands aside too.
+ * aside, counted and said by the runner, on a volume of the other format. A
+ * test is written for format v1 only when what it holds is format v1's own —
+ * its Ledger, chains, pool, Spares, integrity map — and then it names in
+ * `analog` the test that holds a book to the same property, one the runner
+ * walks and that runs on a book: tools/concordance.py holds every such name
+ * to the tree (Concordance), so a property cannot stop being held on the
+ * format the machine makes by a test quietly standing aside.
  */
 typedef struct {
     const char* name;
@@ -66,6 +70,7 @@ typedef struct {
     const char* caveat_step;
     const char* caveat_defect;
     DeedFormat  format;
+    const char* analog;
 } TestCase;
 
 /* A suite: `const TestSuite g_<name>_suite`, defined in a file under tests/ (a
@@ -156,6 +161,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_slip_promise)) \
     VOLUME_TESTS_ONLY(SUITE(stand_book_glean)) \
     VOLUME_TESTS_ONLY(SUITE(stand_escheat)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_parity)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;
@@ -218,12 +224,16 @@ void TestEvidence(const char* words, uint64_t n);
 
 /* What a test that writes leaves behind, as the runner counts it before and
  * after every such test (tests.c, the residue guard): the files, and the
- * blocks in use outside the volume's own chains. A test whose defect IS a
- * leak takes the same count, to measure what it leaked and to give back
- * exactly that — so the guard stays strict for everybody. */
+ * blocks in use outside the volume's own ground — format v1's chains, pool and
+ * maps; a book's Tallies, ribbon and Fallow. On a book `held` is read across a
+ * test only when no cycle settled within it (`cycles`): a Tally cut there
+ * keeps nodes no slot names. A test whose defect IS a leak takes the same
+ * count, to measure what it leaked and to give back exactly that — so the
+ * guard stays strict for everybody. */
 typedef struct {
     uint64_t files;
     uint64_t held;
+    uint64_t cycles;   /* cycles settled when it was taken (SettledCycles) */
 } VolumeTally;
 
 bool VolumeTallyTake(VolumeTally* tally);

@@ -43,10 +43,20 @@
 #define PLOT_BLOCK TAGFS_BLOCK_SIZE
 
 /* Whether the file lays no Slip whatever the write: a Plot with no record,
- * a file the loader reads by its blocks, or a Tally owed. */
+ * a window past a write's first, a file the loader reads by its blocks, or a
+ * Tally owed.
+ *
+ * ‼ THE WRITE IS THE CALLER'S, NOT THE MEDIUM'S COMMAND. The Helm cuts a write
+ * into windows of the run the medium takes in one command (helm_work.c
+ * HelmWindowBytes): eight blocks on a port, one on a legacy channel. Judged a
+ * window at a time, a write of a block and 100 bytes would lay both blocks on
+ * the one and ride its 100 bytes on a Slip on the other — the tail of every
+ * write past a block left for an Engross before each Tally on the medium
+ * whose command is smallest. A window past the first is a part of a write
+ * that began in a block before it, which does not lie in the last alone. */
 static bool PlotSlipBarred(const Plot *p)
 {
-    return !p->rec || p->fid == g_book.boot_fid || InkWearsGuarded(p->meta.tag_ids, p->meta.tag_count) ||
+    return !p->rec || p->part || p->fid == g_book.boot_fid || InkWearsGuarded(p->meta.tag_ids, p->meta.tag_count) ||
            BinderEngrossOwed();
 }
 

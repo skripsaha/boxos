@@ -1342,20 +1342,25 @@ $(TESTBIN_EMPTY):
 
 # ‼ THE FORMAT THE IMAGE'S VOLUME IS MADE IN — a key of the medium, not of the
 # kernel. `make VOLUME_FORMAT=v2` lays the volume with its book bound
-# (create_tagfs --v2, spec_v2 §9.3); v1, the default, lays it as it always
-# has. The kernel is the same either way — it reads the Deed and finds out —
-# so the key is not among BUILD_KEY_MARKS and recompiles nothing. But it does
+# (create_tagfs --v2, spec_v2 §9.3); `make VOLUME_FORMAT=v1` lays it as format
+# v1 always has. Left out, the format is VOLUME_FORMAT_DEFAULT — the one line
+# that says which format a build makes when nobody names one; create_tagfs is
+# always told the format by name, and every gate and every scenario of the
+# Backlist names its own (tools/gates.sh --formats). The kernel is the same
+# either way — it reads the Deed and finds out — so the key is not among
+# BUILD_KEY_MARKS and recompiles nothing. But it does
 # change the image, so it has a marker of its own, on the image alone: the
 # marker's NAME carries the format, a switch names a file that is not there,
 # and the image is made again — without it, `make VOLUME_FORMAT=v2` on a built
 # tree would say nothing and leave a v1 image behind, and `make` after it a
 # v2 one.
-VOLUME_FORMAT ?= v1
+VOLUME_FORMAT_DEFAULT = v1
+VOLUME_FORMAT ?= $(VOLUME_FORMAT_DEFAULT)
 ifeq ($(filter v1 v2,$(VOLUME_FORMAT)),)
 $(error VOLUME_FORMAT=$(VOLUME_FORMAT): a volume is made in format v1 or format v2)
 endif
 VOLUME_FORMAT_MARK = $(BUILDDIR)/.volume_format.$(VOLUME_FORMAT)
-VOLUME_FORMAT_FLAG = $(if $(filter v2,$(VOLUME_FORMAT)),--v2)
+VOLUME_FORMAT_FLAG = --$(VOLUME_FORMAT)
 
 $(VOLUME_FORMAT_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.volume_format.*
@@ -2242,7 +2247,7 @@ info:
 	@echo "  EMU=bochs     — Bochs (per-instruction tracing, internal debugger)"
 	@echo ""
 	@echo "Image key:"
-	@echo "  VOLUME_FORMAT=v1|v2 — the format build/boxos.img's volume is made in (v1 by default);"
+	@echo "  VOLUME_FORMAT=v1|v2 — the format build/boxos.img's volume is made in ($(VOLUME_FORMAT_DEFAULT) by default);"
 	@echo "                        the build says when this tree's kernel would not mount it"
 	@echo ""
 	@echo "Run flags (shared):"

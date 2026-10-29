@@ -838,9 +838,9 @@ SAYS_EOF
 . "$(dirname "$0")/powercut_book.sh"
 
 pc_preflight
-PC_FORMAT=${VOLUME_FORMAT:-v1}
+PC_FORMAT=$(stand_format)
 case "$PC_FORMAT" in v1|v2) ;; *) echo "powercut: VOLUME_FORMAT=$PC_FORMAT names no format"; exit 2 ;; esac
-[ "$PC_FORMAT" = v2 ] && STAND_FORMAT=v2
+STAND_FORMAT=$PC_FORMAT
 if [ "$PC_FORMAT" = v2 ] && pc_book "$@"; then set -- done; fi
 case "${1:-}" in
     done) ;;

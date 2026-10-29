@@ -813,34 +813,42 @@ static const TestCase g_stand_glean_tests[] = {
     { .name = "stand_glean_bounds_the_chain",       .func = TestStandGleanBoundsTheChain,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a file written again and settled each time leaves a pool block a cycle, "
-                       "and the chain the mount walks grows without bound" },
+                       "and the chain the mount walks grows without bound",
+      .format = DEED_FORMAT_V1, .analog = "stand_book_glean_quires" },
     { .name = "stand_glean_uniform_load",           .func = TestStandGleanUniformLoad,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_glean_head_stays_linked",      .func = TestStandGleanHeadStaysLinked,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_binder_slot_torn" },
     { .name = "stand_glean_taken_rests_until_past", .func = TestStandGleanTakenRestsUntilPast,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_docket_ground_rests" },
     { .name = "stand_glean_lie_falls_back",         .func = TestStandGleanLieFallsBack,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_docket_lied_lag" },
     { .name = "stand_glean_moved_lies_closed",      .func = TestStandGleanMovedLiesClosed,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a cycle the cadence began moved records of untouched files into the open "
-                       "tail and let their block go, and a torn page of the tail loses the files" },
+                       "tail and let their block go, and a torn page of the tail loses the files",
+      .format = DEED_FORMAT_V1, .analog = "stand_tip_in_quires_held" },
     { .name = "stand_glean_unnamed_left_free",      .func = TestStandGleanUnnamedLeftFree,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "the cycle that writes the head past a block taken off the chain sends a "
-                       "map calling it taken, and its seal stands behind ground nothing owns" },
+                       "map calling it taken, and its seal stands behind ground nothing owns",
+      .format = DEED_FORMAT_V1, .analog = "stand_binder_ground_back" },
     { .name = "stand_glean_fruitless_slack_lifted", .func = TestStandGleanFruitlessSlackLifted,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a lowered slack that gives nothing back is chased for ever, and a take "
                        "short of room waits on cycles that never bring it; or, lifted, it is "
-                       "not tried again once records die" },
+                       "not tried again once records die",
+      .format = DEED_FORMAT_V1, .analog = "stand_binder_slack" },
     /* Last: it takes the volume down and mounts it again. */
     { .name = "stand_glean_replaced_waits_for_the_close",
       .func = TestStandGleanReplacedWaitsForTheClose, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a cycle the cadence began took the chain's front off while the record "
                        "that replaced its only live one lay in the open tail, and a torn page of "
-                       "the tail loses the file" },
+                       "the tail loses the file",
+      .format = DEED_FORMAT_V1, .analog = "stand_docket_mount_ground_rests" },
 };
 
 const TestSuite g_stand_glean_suite = {

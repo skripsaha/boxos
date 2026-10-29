@@ -517,7 +517,7 @@ static TestResult TestStandAwayNewerSlot(void)
     TestResult  verdict = TEST_PASS;
     StandStitch s;
     uint32_t    newest = 0, other = 0;
-    uint64_t    seq = 0;
+    uint64_t    seq = 0, slot_vlba = 0;
     bool        away = false, forged = false;
     const char* aside = StandStitchAside(&s);
 
@@ -525,6 +525,10 @@ static TestResult TestStandAwayNewerSlot(void)
         return test_steps_aside(aside);
     if (!StandAwaySlots(&s, &newest, &other, &seq))
         return test_steps_aside("the Spine's ring has no second slot to lay a newer one in");
+    /* Where the slot lies, kept before the book is given up: the frame it is
+     * reckoned from goes with the book, and a slot put back by a frame let go
+     * of lands on the volume's head and its Deed. */
+    slot_vlba = StandAwaySlotVlba(other);
     TagFSStandMediumLeaves();
     away = true;
     forged = StandAwaySlotForged(&s, newest, other, s.at.given + 1000u);
@@ -537,7 +541,7 @@ out:
         (void)TagFSStandMediumReturns(NULL);
     if (forged) {
         TagFSStandLetGo();
-        if (BoardroomWrite(s.seat, s.base + StandAwaySlotVlba(other), VOLUME_BLOCK_SECTORS,
+        if (BoardroomWrite(s.seat, s.base + slot_vlba, VOLUME_BLOCK_SECTORS,
                            s_away_slot + VOLUME_BLOCK_SECTORS * BOOK_SECTOR_BYTES, NULL) != 0)
             verdict = TestFailedAt(__FILE__, __LINE__, "the slot laid would not be put back (slot, 0)", other, 0);
     }
