@@ -1,13 +1,21 @@
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/file.h"
-#include "box/string.h"
 #include "box/system.h"
 
-int main(void) {
-    int argc = (int)luggage_word_count();
+BOX_FORM("takes optional thing \"the file to tell about\"\n"
+         "gives things\n");
 
-    if (argc < 2) {
+int main(void) {
+    const file_id_t *file;
+    size_t file_count;
+
+    if (form_things(0, &file, &file_count) != 0) {
+        exit(1);
+        return 1;
+    }
+
+    if (file_count == 0) {
         system_info_t sys;
         if (sysinfo(&sys) != 0) {
             printf("%colorError:%color Failed to get system info\n",
@@ -31,18 +39,12 @@ int main(void) {
         return 0;
     }
 
-    file_id_t matches[4];
-    file_info_t infos[4];
-    int count = find_file_by_name(luggage_word(1), matches, infos, 4);
-
-    if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
-    if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
-
-    file_info_t info = infos[0];
+    file_info_t info;
+    if (file_info(file[0], &info) != 0) { println("Error: File not found"); exit(1); return 1; }
 
     println("File Info:");
     printf("  Filename: %s\n", info.filename);
-    printf("  File ID: %lu\n", matches[0]);
+    printf("  File ID: %lu\n", file[0]);
     printf("  Size: %u bytes\n", (unsigned)info.size);
     printf("  Flags: 0x%x\n", info.flags);
 
@@ -54,6 +56,7 @@ int main(void) {
             printf("    %s\n", info.tags[i].key);
     }
 
+    souvenir_things(file, 1);
     exit(0);
     return 0;
 }

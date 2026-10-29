@@ -1,31 +1,40 @@
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/file.h"
-#include "box/string.h"
 #include "box/system.h"
 
+BOX_FORM("takes things \"the files to put in the trash\"\n"
+         "gives things\n");
+
 int main(void) {
-    int argc = (int)luggage_word_count();
+    const file_id_t *files;
+    size_t file_count;
 
-    if (argc < 2) {
-        println("Usage: trash <filename>");
+    if (form_things(0, &files, &file_count) != 0) {
         exit(1);
         return 1;
     }
 
-    file_id_t matches[16];
-    int count = find_file_by_name(luggage_word(1), matches, NULL, 16);
+    size_t trashed = 0;
+    for (size_t i = 0; i < file_count; i++) {
+        if (tag_add(files[i], "trashed") != 0) {
+            printf("Error: Failed to trash file %lu\n", files[i]);
+            break;
+        }
+        trashed++;
+    }
 
-    if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
-    if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
+    souvenir_things(files, trashed);
 
-    if (tag_add(matches[0], "trashed") != 0) {
-        println("Error: Failed to trash file");
+    if (trashed < file_count) {
         exit(1);
         return 1;
     }
 
-    println("File moved to trash");
+    if (file_count == 1)
+        println("File moved to trash");
+    else
+        printf("%u files moved to trash\n", (unsigned)file_count);
     exit(0);
     return 0;
 }

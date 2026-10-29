@@ -1,31 +1,49 @@
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/file.h"
-#include "box/string.h"
 #include "box/system.h"
 
+BOX_FORM("takes things \"the files to take tags off\"\n"
+         "takes words \"the tags to take off\"\n"
+         "gives things\n");
+
 int main(void) {
-    int argc = (int)luggage_word_count();
+    const file_id_t *files;
+    size_t file_count;
+    const char *const *tags;
+    size_t tag_count;
 
-    if (argc < 3) {
-        println("Usage: untag <filename> <key>");
+    if (form_things(0, &files, &file_count) != 0 || form_words(1, &tags, &tag_count) != 0) {
         exit(1);
         return 1;
     }
 
-    file_id_t matches[16];
-    int count = find_file_by_name(luggage_word(1), matches, NULL, 16);
+    size_t untagged = 0;
+    for (size_t i = 0; i < file_count; i++) {
+        bool whole = true;
+        for (size_t t = 0; t < tag_count; t++) {
+            if (tag_remove(files[i], tags[t]) != 0) {
+                printf("Error: Failed to remove tag %s from file %lu\n", tags[t], files[i]);
+                whole = false;
+                break;
+            }
+        }
+        if (!whole) break;
+        untagged++;
+    }
 
-    if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
-    if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
+    souvenir_things(files, untagged);
 
-    if (tag_remove(matches[0], luggage_word(2)) != 0) {
-        println("Error: Failed to remove tag");
+    if (untagged < file_count) {
         exit(1);
         return 1;
     }
 
-    println("Tag removed");
+    const char *what = tag_count == 1 ? "Tag" : "Tags";
+    if (file_count == 1)
+        printf("%s removed\n", what);
+    else
+        printf("%s removed from %u files\n", what, (unsigned)file_count);
     exit(0);
     return 0;
 }

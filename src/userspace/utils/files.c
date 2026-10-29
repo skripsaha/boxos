@@ -1,21 +1,35 @@
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/memory.h"
 #include "box/file.h"
 #include "box/string.h"
 #include "box/system.h"
 
+BOX_FORM("takes optional words \"the tags to look for\"\n"
+         "gives things\n");
+
+/* Names are padded to the column the listing has always kept; a longer one
+ * pushes its tags along. */
+#define FILES_NAME_COLUMN 32u
+
 int main(void)
 {
-    int argc = (int)luggage_word_count();
+    const char *const *words;
+    size_t word_count;
 
-    /* Every word after the name is a tag; joined with commas into a list
-     * sized to what was typed, so no tag is ever dropped. */
+    if (form_words(0, &words, &word_count) != 0)
+    {
+        exit(1);
+        return 1;
+    }
+
+    /* Every word is a tag; joined with commas into a list sized to what was
+     * typed, so no tag is ever dropped. */
     char *query_tags = NULL;
-    if (argc > 1)
+    if (word_count > 0)
     {
         size_t total = 0;
-        for (int i = 1; i < argc; i++) total += strlen(luggage_word(i)) + 1;
+        for (size_t i = 0; i < word_count; i++) total += strlen(words[i]) + 1;
         query_tags = malloc(total);
         if (!query_tags)
         {
@@ -24,11 +38,11 @@ int main(void)
             return 1;
         }
         size_t pos = 0;
-        for (int i = 1; i < argc; i++)
+        for (size_t i = 0; i < word_count; i++)
         {
-            size_t len = strlen(luggage_word(i));
-            if (i > 1) query_tags[pos++] = ',';
-            memcpy(query_tags + pos, luggage_word(i), len);
+            size_t len = strlen(words[i]);
+            if (i > 0) query_tags[pos++] = ',';
+            memcpy(query_tags + pos, words[i], len);
             pos += len;
         }
         query_tags[pos] = '\0';
@@ -53,8 +67,11 @@ int main(void)
         return 0;
     }
 
-    file_info_t *s_file_infos = malloc((size_t)count * sizeof(file_info_t));
-    if (!s_file_infos)
+    /* Each file's whole metadata: its name and every tag at their own
+     * length. file_info_t holds five tags, and a file found by its sixth
+     * would be listed without the tag it was found by. */
+    FileMetadata *s_metadata = calloc((size_t)count, sizeof(FileMetadata));
+    if (!s_metadata)
     {
         println("Error: no memory for the file list");
         exit(1);
@@ -65,30 +82,26 @@ int main(void)
 
     for (int i = 0; i < count; i++)
     {
-        if (file_info(s_file_ids[i], &s_file_infos[i]) != 0)
-        {
-            s_file_infos[i].filename[0] = '\0';
-        }
+        if (FileMetadataRead(s_file_ids[i], &s_metadata[i]) != 0)
+            s_metadata[i].Filename = NULL;
     }
 
     /* Insertion sort by filename — stable and in place. */
     for (int i = 1; i < count; i++)
     {
-        file_info_t key_info = s_file_infos[i];
-        file_id_t   key_id   = s_file_ids[i];
-        const char *key_name = key_info.filename;
+        FileMetadata key_metadata = s_metadata[i];
+        file_id_t    key_id       = s_file_ids[i];
+        const char  *key_name     = key_metadata.Filename;
         int j = i - 1;
-        while (j >= 0 &&
-               s_file_infos[j].filename[0] != '\0' &&
-               key_name[0] != '\0' &&
-               strcmp(s_file_infos[j].filename, key_name) > 0)
+        while (j >= 0 && s_metadata[j].Filename && key_name &&
+               strcmp(s_metadata[j].Filename, key_name) > 0)
         {
-            s_file_infos[j + 1] = s_file_infos[j];
-            s_file_ids[j + 1]   = s_file_ids[j];
+            s_metadata[j + 1] = s_metadata[j];
+            s_file_ids[j + 1] = s_file_ids[j];
             j--;
         }
-        s_file_infos[j + 1] = key_info;
-        s_file_ids[j + 1]   = key_id;
+        s_metadata[j + 1] = key_metadata;
+        s_file_ids[j + 1] = key_id;
     }
 
     /* One file, one line, one call.
@@ -102,60 +115,50 @@ int main(void)
      * its own Canvas commit and its own blit, and the listing visibly crawls.
      * It is the same crawl boxlib's line editor was rewritten to remove.
      *
-     * The buffer is the ABI's own arithmetic, and so is the tag column: a name
-     * as wide as the field file_info_t hands back, " [", every tag slot as
-     * key + ':' + value with ", " between them, and "]\n". Nothing here picks
-     * a width of its own — the two 32s that used to sit in this loop were the
-     * same 32 as box/file.h's name field, written out twice. */
-    const size_t name_col  = sizeof(s_file_infos[0].filename);
-    const size_t tag_slots = sizeof(s_file_infos[0].tags) /
-                             sizeof(s_file_infos[0].tags[0]);
-    char line[sizeof(s_file_infos[0].filename) + 2 +
-              (sizeof(s_file_infos[0].tags) / sizeof(s_file_infos[0].tags[0])) *
-              (sizeof(s_file_infos[0].tags[0].key) +
-               sizeof(s_file_infos[0].tags[0].value) + 2) + 2];
-
+     * The line is sized to the file: the name padded to the listing's column,
+     * " [", the tags with ", " between them, and "]\n". */
+    size_t listed = 0;
     for (int i = 0; i < count; i++)
     {
-        if (s_file_ids[i] == 0 || s_file_infos[i].filename[0] == '\0')
+        const FileMetadata *metadata = &s_metadata[i];
+        if (s_file_ids[i] == 0 || !metadata->Filename)
             continue;
 
-        const file_info_t *info = &s_file_infos[i];
-
-        size_t pos = strlen(info->filename);
-        memcpy(line, info->filename, pos);
-        while (pos < name_col)
-            line[pos++] = ' ';
-
-        line[pos++] = ' ';
-        line[pos++] = '[';
-
-        for (uint8_t t = 0; t < info->tag_count && t < tag_slots; t++)
+        const char *tags = metadata->Tags ? metadata->Tags : "";
+        size_t name_len = strlen(metadata->Filename);
+        size_t tags_len = strlen(tags);
+        char  *line = malloc(name_len + FILES_NAME_COLUMN + 2 * tags_len + 5);
+        if (!line)
         {
-            if (t > 0)
-            {
-                line[pos++] = ',';
-                line[pos++] = ' ';
-            }
-
-            size_t key_len = strlen(info->tags[t].key);
-            memcpy(line + pos, info->tags[t].key, key_len);
-            pos += key_len;
-
-            if (info->tags[t].value[0])
-            {
-                size_t value_len = strlen(info->tags[t].value);
-                line[pos++] = ':';
-                memcpy(line + pos, info->tags[t].value, value_len);
-                pos += value_len;
-            }
+            println("Error: no memory for a line of the list");
+            break;
         }
 
+        size_t pos = name_len;
+        memcpy(line, metadata->Filename, name_len);
+        while (pos < FILES_NAME_COLUMN)
+            line[pos++] = ' ';
+        line[pos++] = ' ';
+        line[pos++] = '[';
+        for (size_t t = 0; t < tags_len; t++)
+        {
+            line[pos++] = tags[t];
+            if (tags[t] == ',' && tags[t + 1] != ' ')
+                line[pos++] = ' ';
+        }
         line[pos++] = ']';
         line[pos++] = '\n';
 
         print_bytes(line, pos);
+        free(line);
+        s_file_ids[listed++] = s_file_ids[i];
     }
+
+    for (int i = 0; i < count; i++)
+        FileMetadataRelease(&s_metadata[i]);
+    free(s_metadata);
+
+    souvenir_things(s_file_ids, listed);
 
     exit(0);
     return 0;

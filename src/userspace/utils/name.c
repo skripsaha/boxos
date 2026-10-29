@@ -1,30 +1,30 @@
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/file.h"
-#include "box/string.h"
 #include "box/system.h"
 
-int main(void) {
-    int argc = (int)luggage_word_count();
+BOX_FORM("takes thing \"the file to rename\"\n"
+         "takes name \"its new name\"\n"
+         "gives things\n");
 
-    if (argc < 3) {
-        println("Usage: name <oldname> <newname>");
+int main(void) {
+    const file_id_t *file;
+    size_t file_count;
+    const char *const *new_name;
+    size_t name_count;
+
+    if (form_things(0, &file, &file_count) != 0 || form_words(1, &new_name, &name_count) != 0) {
         exit(1);
         return 1;
     }
 
-    file_id_t matches[16];
-    int count = find_file_by_name(luggage_word(1), matches, NULL, 16);
-
-    if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
-    if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
-
-    if (file_rename(matches[0], luggage_word(2)) != 0) {
+    if (file_rename(file[0], new_name[0]) != 0) {
         println("Error: Failed to rename file");
         exit(1);
         return 1;
     }
 
+    souvenir_things(file, 1);
     println("File renamed");
     exit(0);
     return 0;

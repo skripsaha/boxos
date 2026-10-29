@@ -8,11 +8,12 @@
 
 /* What one `assemble` command asks for, gathered before anything is built. */
 typedef struct {
-    const char *SourceName;
+    char        SourceName[64];
     file_id_t   SourceId;
     char       *Home;          /* the Use Context the build began in */
     const char *RequestedOutput;
-    int         TagWordStart;
+    const char *const *TagWords;
+    size_t      TagWordCount;
     char        OutputName[64];
     char        Tags[2048];
     size_t      TagLength;
@@ -38,7 +39,9 @@ int AssembleTagsHaveKey(const char *Tags, const char *Key);
 /* The built image put on the volume as the program the request names: the
  * one it replaces found by name and tags, asked about when more than one
  * could be meant, written whole before the one it replaces is let go. Says
- * what happened. Returns 0 or a negative -error_t. */
-int AssemblePublish(const AssembleRequest *Request, const BoxAsmBlob *Image);
+ * what happened; *Published is the program's file. Returns 0 or a negative
+ * -error_t. */
+int AssemblePublish(const AssembleRequest *Request, const BoxAsmBlob *Image,
+                    file_id_t *Published);
 
 #endif

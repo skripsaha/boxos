@@ -1,31 +1,49 @@
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/file.h"
-#include "box/string.h"
 #include "box/system.h"
 
+BOX_FORM("takes things \"the files to tag\"\n"
+         "takes words \"the tags they get\"\n"
+         "gives things\n");
+
 int main(void) {
-    int argc = (int)luggage_word_count();
+    const file_id_t *files;
+    size_t file_count;
+    const char *const *tags;
+    size_t tag_count;
 
-    if (argc < 3) {
-        println("Usage: tag <filename> <key:value>");
+    if (form_things(0, &files, &file_count) != 0 || form_words(1, &tags, &tag_count) != 0) {
         exit(1);
         return 1;
     }
 
-    file_id_t matches[16];
-    int count = find_file_by_name(luggage_word(1), matches, NULL, 16);
+    size_t tagged = 0;
+    for (size_t i = 0; i < file_count; i++) {
+        bool whole = true;
+        for (size_t t = 0; t < tag_count; t++) {
+            if (tag_add(files[i], tags[t]) != 0) {
+                printf("Error: Failed to add tag %s to file %lu\n", tags[t], files[i]);
+                whole = false;
+                break;
+            }
+        }
+        if (!whole) break;
+        tagged++;
+    }
 
-    if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
-    if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
+    souvenir_things(files, tagged);
 
-    if (tag_add(matches[0], luggage_word(2)) != 0) {
-        println("Error: Failed to add tag");
+    if (tagged < file_count) {
         exit(1);
         return 1;
     }
 
-    println("Tag added");
+    const char *what = tag_count == 1 ? "Tag" : "Tags";
+    if (file_count == 1)
+        printf("%s added\n", what);
+    else
+        printf("%s added to %u files\n", what, (unsigned)file_count);
     exit(0);
     return 0;
 }

@@ -1,54 +1,24 @@
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/file.h"
 #include "box/string.h"
 #include "box/system.h"
 
+BOX_FORM("takes thing \"the file to show\"\n"
+         "gives things\n");
+
 int main(void)
 {
-    int argc = (int)luggage_word_count();
+    const file_id_t *file;
+    size_t file_count;
 
-    if (argc < 2)
+    if (form_things(0, &file, &file_count) != 0)
     {
-        println("Usage: show <filename>");
         exit(1);
         return 1;
     }
 
-    file_id_t matches[16];
-    int count = find_file_by_name(luggage_word(1), matches, NULL, 16);
-
-    if (count < 0)
-    {
-        println("Error: Failed to query files");
-        exit(1);
-        return 1;
-    }
-    if (count == 0)
-    {
-        println("Error: File not found");
-        exit(1);
-        return 1;
-    }
-
-    if (count > 1)
-    {
-        println("Multiple files found:");
-        int written = count < 16 ? count : 16;
-        for (int i = 0; i < written; i++)
-        {
-            file_info_t info;
-            if (file_info(matches[i], &info) == 0)
-            {
-                printf("  %s [file_id=%lu]\n", info.filename, matches[i]);
-            }
-        }
-        println("Error: Ambiguous name (use file_id)");
-        exit(1);
-        return 1;
-    }
-
-    file_id_t file_id = matches[0];
+    file_id_t file_id = file[0];
     file_info_t info;
     if (file_info(file_id, &info) != 0)
     {
@@ -115,6 +85,7 @@ int main(void)
     //     printf("(Truncated: showing first 4096 of %lu bytes)\n", (unsigned long)info.size);
     // }
 
+    souvenir_things(&file_id, 1);
     println("");
     exit(0);
     return 0;

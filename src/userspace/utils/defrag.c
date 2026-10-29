@@ -1,33 +1,21 @@
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/file.h"
-#include "box/string.h"
 #include "box/system.h"
-#include "box/convert.h"
+
+BOX_FORM("takes thing \"the file to defragment\"\n"
+         "gives things\n");
 
 int main(void) {
-    int argc = (int)luggage_word_count();
+    const file_id_t *file;
+    size_t file_count;
 
-    if (argc < 2) {
-        println("Usage: defrag <file_id|filename>");
+    if (form_things(0, &file, &file_count) != 0) {
         exit(1);
         return 1;
     }
 
-    file_id_t file_id;
-
-    if (is_number(luggage_word(1))) {
-        file_id = to_uint64(luggage_word(1));
-    } else {
-        file_id_t matches[16];
-        int count = find_file_by_name(luggage_word(1), matches, NULL, 16);
-
-        if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
-        if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
-
-        file_id = matches[0];
-    }
-
+    file_id_t file_id = file[0];
     int result = defrag(file_id);
 
     if (result < 0) {
@@ -36,6 +24,7 @@ int main(void) {
         return 1;
     }
 
+    souvenir_things(&file_id, 1);
     printf("Defragmented file %lu, fragmentation score: %u%%\n", file_id, (unsigned)result);
     exit(0);
     return 0;

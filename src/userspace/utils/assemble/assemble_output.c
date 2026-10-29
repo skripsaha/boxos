@@ -169,7 +169,7 @@ static int Ask(const char *Prompt, char *Answer, size_t Capacity)
 static void SayNoOneToAsk(const AssembleRequest *Request)
 {
     printf("assemble: nothing written: no one is here to say which %s the program replaces;\n"
-           "name it by a tag it wears: assemble %s (tags ...)\n",
+           "name it by a tag it wears: assemble %s tag ...\n",
            Request->OutputName, Request->SourceName);
 }
 
@@ -351,7 +351,8 @@ static void SayPublished(const AssembleRequest *Request, file_id_t FileId,
         println("added app: without app or utility the shell cannot start it");
 }
 
-int AssemblePublish(const AssembleRequest *Request, const BoxAsmBlob *Image)
+int AssemblePublish(const AssembleRequest *Request, const BoxAsmBlob *Image,
+                    file_id_t *Published)
 {
     AssembleCandidate *List;
     file_id_t OutputId = 0;
@@ -377,8 +378,10 @@ int AssemblePublish(const AssembleRequest *Request, const BoxAsmBlob *Image)
         Rc = WriteImage(Request->OutputName, Request->Tags, Image, &OutputId);
     else if (Rc == 0)
         Rc = ReplaceProgram(Request, Image, &List[Chosen], &OutputId);
-    if (Rc == 0)
+    if (Rc == 0) {
         SayPublished(Request, OutputId, Chosen >= 0 ? &List[Chosen] : NULL);
+        *Published = OutputId;
+    }
     ReleaseCandidates(List, Count);
     return Rc;
 }

@@ -4,13 +4,18 @@
 
 #include "box/error.h"
 #include "box/file.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/memory.h"
 #include "box/print.h"
 #include "box/string.h"
 #include "box/system.h"
 
 #define ASSEMBLE_ERROR_BYTES 8192u
+
+BOX_FORM("takes thing \"the source\"\n"
+         "takes optional into \"the program\"\n"
+         "takes optional words \"the program's tags\"\n"
+         "gives things\n");
 
 extern const uint8_t _binary____build_boxlib_start_o_start[];
 extern const uint8_t _binary____build_boxlib_start_o_end[];
@@ -79,42 +84,25 @@ static int AppendTags(char *Buffer, size_t Capacity, size_t *Used,
 /* The source's tags, then the ones the command names. The shell starts only
  * a file that wears app or utility, so a program that would wear neither is
  * given app and the command says so; *AddedApp reports it. */
-static int AppendExplicitTags(char *Buffer, size_t Capacity, size_t *Used,
-                              int WordCount, int TagWordStart, int *AddedApp)
+static int AppendExplicitTags(AssembleRequest *Request)
 {
-    int Index;
-    int HasApp = AssembleTagsHaveKey(Buffer, "app");
-    int HasUtility = AssembleTagsHaveKey(Buffer, "utility");
+    size_t Index;
+    int HasApp = AssembleTagsHaveKey(Request->Tags, "app");
+    int HasUtility = AssembleTagsHaveKey(Request->Tags, "utility");
 
-    *AddedApp = 0;
-    for (Index = TagWordStart; Index < WordCount; Index++) {
-        const char *Token = luggage_word(Index);
-        char Clean[128];
-        size_t Length = strlen(Token);
-        size_t Begin = 0;
-        size_t End = Length;
+    Request->AddedApp = 0;
+    for (Index = 0; Index < Request->TagWordCount; Index++) {
+        const char *Tag = Request->TagWords[Index];
 
-        while (Begin < End && (Token[Begin] == '(' || Token[Begin] == ','))
-            Begin++;
-        while (End > Begin && (Token[End - 1u] == ')' || Token[End - 1u] == ','))
-            End--;
-        if (End <= Begin ||
-            (End - Begin == 4u && memcmp(Token + Begin, "tags", 4u) == 0) ||
-            (End - Begin == 5u && memcmp(Token + Begin, "tags:", 5u) == 0))
-            continue;
-        if (End - Begin >= sizeof(Clean))
+        if (AppendTags(Request->Tags, sizeof(Request->Tags), &Request->TagLength, Tag) != 0)
             return -ERR_INVALID_ARGUMENT;
-        memcpy(Clean, Token + Begin, End - Begin);
-        Clean[End - Begin] = '\0';
-        if (AppendTags(Buffer, Capacity, Used, Clean) != 0)
-            return -ERR_INVALID_ARGUMENT;
-        if (AssembleTagsHaveKey(Clean, "app")) HasApp = 1;
-        if (AssembleTagsHaveKey(Clean, "utility")) HasUtility = 1;
+        if (AssembleTagsHaveKey(Tag, "app")) HasApp = 1;
+        if (AssembleTagsHaveKey(Tag, "utility")) HasUtility = 1;
     }
     if (!HasApp && !HasUtility) {
-        if (AppendTags(Buffer, Capacity, Used, "app") != 0)
+        if (AppendTags(Request->Tags, sizeof(Request->Tags), &Request->TagLength, "app") != 0)
             return -ERR_INVALID_ARGUMENT;
-        *AddedApp = 1;
+        Request->AddedApp = 1;
     }
     return 0;
 }
@@ -141,19 +129,33 @@ static int LinkEmbedded(const char *SourceName, BoxAsmBlob *Program,
     return Rc;
 }
 
-/* "assemble program.asm [-> program.elf] [tags ...]", read from Luggage. */
-static int ReadCommand(AssembleRequest *Request, int WordCount)
+/* The Form filled: the source file, the name the program is to have (the
+ * one `->` points at) and the tags it wears. */
+static int ReadForm(AssembleRequest *Request)
 {
-    if (WordCount < 2) {
-        println("Usage: assemble program.asm [-> program.elf] [tags ...]");
+    const file_id_t *Source;
+    const char *const *Into;
+    size_t Count;
+
+    if (form_things(0, &Source, &Count) != 0 ||
+        form_words(1, &Into, &Count) != 0)
+        return -ERR_INVALID_ARGUMENT;
+    Request->SourceId = Source[0];
+    Request->RequestedOutput = Count != 0 ? Into[0] : NULL;
+    return form_words(2, &Request->TagWords, &Request->TagWordCount);
+}
+
+/* The source file's name and, from it or from the command, the program's. */
+static int NameFiles(AssembleRequest *Request, const FileMetadata *Metadata)
+{
+    size_t Length = Metadata->Filename ? strlen(Metadata->Filename) : 0;
+
+    if (Length == 0 || Length >= sizeof(Request->SourceName)) {
+        AssembleSayError("source name", -ERR_INVALID_ARGUMENT,
+                 "the name is empty or longer than 63 characters");
         return -ERR_INVALID_ARGUMENT;
     }
-    Request->SourceName = luggage_word(1);
-    Request->TagWordStart = 2;
-    if (WordCount >= 4 && strcmp(luggage_word(2), "->") == 0) {
-        Request->RequestedOutput = luggage_word(3);
-        Request->TagWordStart = 4;
-    }
+    memcpy(Request->SourceName, Metadata->Filename, Length + 1u);
     if (BuildOutputName(Request->SourceName, Request->RequestedOutput,
                         Request->OutputName, sizeof(Request->OutputName)) != 0) {
         AssembleSayError("output name", -ERR_INVALID_ARGUMENT,
@@ -163,34 +165,11 @@ static int ReadCommand(AssembleRequest *Request, int WordCount)
     return 0;
 }
 
-/* "assemble: <summary>", then its details: what a lookup said when it did
- * not find its one file. */
-static void SayNotFound(int Rc, const BoxAsmBuffer *Summary, const BoxAsmBuffer *Details)
+/* The Use Context the build begins in - taken once, the home of the whole
+ * build - the source's bytes, and the tags the program will wear: the
+ * source's own, then the command's. */
+static int LoadSource(AssembleRequest *Request)
 {
-    const char *Text = (const char *)Details->Data;
-    size_t Length = (size_t)Details->Size;
-
-    if (Summary->Size == 0) {
-        AssembleSayError("source lookup", Rc, NULL);
-        return;
-    }
-    printf("assemble: %.*s\n", (int)Summary->Size, (const char *)Summary->Data);
-    if (Length != 0 && *Text == '\n') {
-        Text++;
-        Length--;
-    }
-    if (Length != 0)
-        printf("%.*s\n", (int)Length, Text);
-}
-
-/* The one source file the name means in the Use Context — taken once, the
- * home of the whole build — its bytes, and the tags the program will wear:
- * the source's own, then the command's. */
-static int LoadSource(AssembleRequest *Request, int WordCount)
-{
-    BoxAsmBuffer Summary = { 0 };
-    BoxAsmBuffer Details = { 0 };
-    BoxAsmLookup Lookup;
     FileMetadata Metadata;
     int Rc;
 
@@ -198,25 +177,14 @@ static int LoadSource(AssembleRequest *Request, int WordCount)
         AssembleSayError("use context", Rc, NULL);
         return Rc;
     }
-    Lookup.Name = Request->SourceName;
-    Lookup.Tags = "";
-    Lookup.Home = Request->Home;
-    Lookup.Everywhere = 0;
-    Lookup.Included = 0;
-    Rc = BoxAsmLocate(AssembleVolume(), &Lookup, &Request->SourceId, &Summary, &Details);
-    if (Rc != 0)
-        SayNotFound(Rc, &Summary, &Details);
-    BoxAsmBufferRelease(&Summary);
-    BoxAsmBufferRelease(&Details);
-    if (Rc != 0)
-        return Rc;
     memset(&Metadata, 0, sizeof(Metadata));
     Rc = FileMetadataRead(Request->SourceId, &Metadata);
     if (Rc != 0) {
         AssembleSayError("source metadata", Rc, NULL);
         return Rc;
     }
-    if (Metadata.Size == 0) {
+    Rc = NameFiles(Request, &Metadata);
+    if (Rc == 0 && Metadata.Size == 0) {
         printf("assemble: %s is empty\n", Request->SourceName);
         Rc = -ERR_INVALID_ARGUMENT;
     }
@@ -229,11 +197,9 @@ static int LoadSource(AssembleRequest *Request, int WordCount)
     if (Rc == 0) {
         if (AppendTags(Request->Tags, sizeof(Request->Tags), &Request->TagLength,
                        Metadata.Tags) != 0 ||
-            AppendExplicitTags(Request->Tags, sizeof(Request->Tags),
-                               &Request->TagLength, WordCount,
-                               Request->TagWordStart, &Request->AddedApp) != 0) {
+            AppendExplicitTags(Request) != 0) {
             AssembleSayError("output tags", -ERR_INVALID_ARGUMENT,
-                     "the tags do not fit, or one is longer than 127 characters");
+                     "the tags do not fit");
             Rc = -ERR_INVALID_ARGUMENT;
         }
     }
@@ -281,21 +247,23 @@ static int BuildImage(AssembleRequest *Request, BoxAsmBlob *Image)
 
 int main(void)
 {
-    int WordCount = (int)luggage_word_count();
     AssembleRequest Request;
     BoxAsmBlob Image = { 0 };
+    file_id_t Published = 0;
     int Rc;
 
     memset(&Request, 0, sizeof(Request));
-    if (ReadCommand(&Request, WordCount) != 0 ||
-        LoadSource(&Request, WordCount) != 0 ||
+    if (ReadForm(&Request) != 0 ||
+        LoadSource(&Request) != 0 ||
         BuildImage(&Request, &Image) != 0) {
         free(Request.SourceBytes);
         free(Request.Home);
         exit(1);
     }
-    Rc = AssemblePublish(&Request, &Image);
+    Rc = AssemblePublish(&Request, &Image, &Published);
     free((void *)Image.Data);
     free(Request.Home);
+    if (Rc == 0)
+        souvenir_things(&Published, 1);
     exit(Rc == 0 ? 0 : 1);
 }
