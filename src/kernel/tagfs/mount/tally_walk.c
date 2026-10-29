@@ -119,39 +119,64 @@ static uint32_t TallyCopiesNamed(const TallyCopiesSaid* said)
     return said->failed < TALLY_COPIES_SAID ? said->failed : TALLY_COPIES_SAID;
 }
 
+/* Copy `k` of the node at place `p` into *n — a whole SHEET unit of the
+ * pointer's seq, inside the volume, parsed as a node in its range: OK when it
+ * holds; ERR_TAGFS_CORRUPTED when it does not, why in `why`, *n let go;
+ * ERR_NO_MEMORY, or the medium's refusal. A copy past the volume's last block
+ * holds nothing a medium could. */
+static error_t TallyCopyRead(const TallyPlace* p, uint32_t k, TallyNode* n, char* why, size_t room)
+{
+    uint64_t end   = tagfs_get_state()->block_end;
+    uint64_t block = TallyPtrBlock(&p->ptr, k);
+    error_t  rc    = ERR_TAGFS_CORRUPTED;
+    memset(n, 0, sizeof(*n));
+    if (block >= end || p->ptr.sheets > end - block) {
+        ksnprintf(why, room, "it names blocks past the volume's end");
+        return rc;
+    }
+    rc = BookUnitRead(block * VOLUME_BLOCK_SECTORS, (uint32_t)(p->ptr.sheets * VOLUME_BLOCK_SECTORS),
+                      BOOK_UNIT_SHEET, p->ptr.seq, &n->unit);
+    if (rc == OK && !n->unit.whole) {
+        ksnprintf(why, room, "%s", n->unit.why);
+        rc = ERR_TAGFS_CORRUPTED;
+    } else if (rc == OK) {
+        rc = TallyNodeParse(p, n, why, room);
+    }
+    if (rc != OK)
+        TallyNodeLetGo(n);
+    return rc;
+}
+
 /*
- * The node at place `p` from the first of its copies that holds — a whole
- * SHEET unit of the pointer's seq, inside the volume, parsed as a node in
- * its range — into *n. OK with n->unit.whole when one held, the copies before
- * it in *said; OK with it false when none did; ERR_NO_MEMORY, or the medium's
- * refusal. A copy past the volume's last block holds nothing a medium could.
+ * The node at place `p` from the first of its copies that holds into *n. OK
+ * with n->unit.whole when one held, the copies before it in *said; OK with it
+ * false when none did; ERR_NO_MEMORY, or the medium's refusal.
  */
 error_t TallyNodeRead(const TallyPlace* p, TallyNode* n, TallyCopiesSaid* said)
 {
-    uint64_t end = tagfs_get_state()->block_end;
     memset(said, 0, sizeof(*said));
     for (uint32_t k = 0; k < p->ptr.copies; k++) {
-        char*    why   = said->why[said->failed < TALLY_COPIES_SAID ? said->failed : TALLY_COPIES_SAID];
-        uint64_t block = TallyPtrBlock(&p->ptr, k);
-        error_t  rc    = OK;
-        memset(n, 0, sizeof(*n));
-        if (block >= end || p->ptr.sheets > end - block) {
-            ksnprintf(why, sizeof(said->why[0]), "it names blocks past the volume's end");
-        } else {
-            rc = BookUnitRead(block * VOLUME_BLOCK_SECTORS,
-                              (uint32_t)(p->ptr.sheets * VOLUME_BLOCK_SECTORS), BOOK_UNIT_SHEET,
-                              p->ptr.seq, &n->unit);
-            if (rc == OK && !n->unit.whole)
-                memcpy(why, n->unit.why, sizeof(n->unit.why));
-            else if (rc == OK && (rc = TallyNodeParse(p, n, why, sizeof(said->why[0]))) == OK)
-                return OK;
-        }
-        TallyNodeLetGo(n);
-        if (rc != OK && rc != ERR_TAGFS_CORRUPTED)
+        char*   why = said->why[said->failed < TALLY_COPIES_SAID ? said->failed : TALLY_COPIES_SAID];
+        error_t rc  = TallyCopyRead(p, k, n, why, sizeof(said->why[0]));
+        if (rc == OK)
+            return OK;
+        if (rc != ERR_TAGFS_CORRUPTED)
             return rc;
         said->failed++;
     }
+    memset(n, 0, sizeof(*n));
     return OK;
+}
+
+error_t TallyCopyHolds(const TallyPlace* p, uint32_t k, bool* holds, char* why, size_t room)
+{
+    TallyNode* n  = kmalloc(sizeof(TallyNode));
+    error_t    rc = n ? TallyCopyRead(p, k, n, why, room) : ERR_NO_MEMORY;
+    *holds = rc == OK;
+    if (rc == OK)
+        TallyNodeLetGo(n);
+    kfree(n);
+    return rc == ERR_TAGFS_CORRUPTED ? OK : rc;
 }
 
 /* "copy 1: why; copy 2: why", as a refusal names a root that will not read —

@@ -1,4 +1,5 @@
 #include "binder_internal.h"
+#include "escheat.h"
 
 /*
  * The nodes a Tally names as they lie (binder.h, BinderKept): TipIn's sifting
@@ -113,7 +114,7 @@ error_t BinderTipInTake(BinderRun* r)
     static const uint64_t trees[] = { TALLY_FILES, TALLY_TAGS, TALLY_USE, TALLY_DIGESTS };
     TipInCount count = { 0, 0 };
     error_t    rc    = OK;
-    if (FoliationLost() || DogEarTakenLost())
+    if (FoliationLost() || DogEarTakenLost() || EscheatTaken())
         return WholeTaken(r);
     r->w.tip = true;
     for (uint32_t i = 0; rc == OK && i < sizeof(trees) / sizeof(trees[0]); i++) {

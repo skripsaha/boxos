@@ -226,6 +226,12 @@ bool    RibbonUnitWhole(const RibbonUnit* u);
 error_t RibbonCollate(const SpineSlot* slot, RibbonWalk** out);
 void    RibbonWalkLetGo(RibbonWalk* w);
 
+/* The ribbon from an older slot's `at` sewn on as pass 1 sews it, said to no
+ * one and claiming nothing — the walk Facsimile replays a range's keys over
+ * (facsimile.c). *out as RibbonCollate gives it; OK, ERR_NO_MEMORY, or the
+ * medium's refusal. */
+error_t RibbonCollateOlder(const SpineSlot* slot, RibbonWalk** out);
+
 /* ribbon_scan.c ------------------------------------------------------------ */
 
 /* The direct scan (§2.2) past the end of the walk's chain: every unit there,
@@ -296,6 +302,17 @@ error_t RibbonVerify(RibbonWalk* w, RibbonSkipSet* undone);
  * memory, the medium's — with *what the mount's line. */
 error_t RibbonTranscribe(RibbonWalk* w, const char** what);
 
+/* Facsimile's replay: the stitches of `w` to seq `upto` replayed as pass 2
+ * replays them, but only their records of keys [lo, hi) of `tree` — FILES by
+ * fid, TAGS by id — and of what a stitch gathers only its files and its
+ * coins laid into memory: its Fallow, its digests and its Use Context are the
+ * Tally's the mount stands on, which took them in. *replayed the stitches;
+ * *whole false when one was passed over — refused, or its Undone would not
+ * hold — where the mount's own replay puts the volume under glass: the range
+ * is then not the state at `upto`. OK, or memory's refusal. */
+error_t RibbonFacsimile(RibbonWalk* w, uint64_t tree, uint64_t lo, uint64_t hi, uint64_t upto, uint32_t* replayed,
+                        bool* whole);
+
 /* Pass 2's own (ribbon_transcribe.c, ribbon_records.c) ---------------------- */
 
 /* A file as a stitch leaves it: its record — NULL when it is gone. */
@@ -361,6 +378,12 @@ typedef struct {
     bool            use_set;
     const uint8_t*  use;
     uint64_t        use_len;
+    uint64_t        only;         /* Facsimile's: the tree whose keys [only_lo, only_hi) alone are
+                                   * replayed (RibbonFacsimile); 0 for every record */
+    uint64_t        only_lo, only_hi;
+    uint32_t        passed;       /* Facsimile's: stitches it passed over — refused, or an Undone
+                                   * that does not hold — where the mount's replay puts the
+                                   * volume under glass */
 } RibbonReplay;
 
 /* Lists that grow: false with no memory. A list is added to as it comes and
@@ -391,6 +414,9 @@ uint64_t    RibbonFlagsOf(const RibbonReplay* rp, const RibbonStage* st, const F
  * and the stitch's Clasp.fresh held to its records: OK, or ERR_NO_MEMORY —
  * a refusal is the stage's. */
 error_t     RibbonRecordApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r);
+/* Whether record `r` of `u` is of a key Facsimile replays — a file's in
+ * [lo, hi) of FILES, a tag's in [lo, hi) of TAGS (ribbon_records.c). */
+bool    RibbonRecordWithin(const RibbonUnit* u, const RibbonRecord* r, uint64_t tree, uint64_t lo, uint64_t hi);
 void        RibbonFreshHeld(RibbonStage* st);
 
 /* The fresh blocks a sound stitch's Borns and Shapeds name (Clasp.fresh,

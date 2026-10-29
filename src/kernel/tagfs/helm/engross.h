@@ -33,6 +33,12 @@
  * record changes. The Tally waits for each such tail (BinderMayNot). */
 void    EngrossAsked(void);
 
+/* The tails the last walk left refused for their files' own sake, as it said
+ * them, that Escheat can cut — every one but the tail of the file the loader
+ * reads the kernel by, which no call changes, *boot: from any core, a word
+ * that may be a walk old (escheat.h). */
+uint32_t EngrossRefusedNow(uint32_t* boot);
+
 /* Every file's tail laid in its block now, in the caller's own call — the
  * Tally a caller asks for and waits for (BinderRunWhole). OK; or, said, the
  * first file's refusal, or ERR_BUSY when every file left is another's Helm or

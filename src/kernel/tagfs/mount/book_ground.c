@@ -6,6 +6,7 @@
 #include "../settle/binder.h"
 #include "../settle/dog_ear.h"
 #include "../settle/foliation.h"
+#include "../settle/escheat.h"
 
 /*
  * The census of a format-v2 volume (book_mount.h; spec_v2 §4.6): no bitmap
@@ -414,8 +415,10 @@ error_t BookGroundCensus(const char** what)
         *what = "there is no memory to hold its Tallies' Quires whole";
     if (rc == OK)
         rc = BookFallowCut(what);
-    if (rc == OK)
+    if (rc == OK) {
         BookHeldKept();
+        EscheatMounted();
+    }
     g_book.reach = GroundCensusReach();
     GroundCensusEnd();
     if (rc != OK)

@@ -24,7 +24,7 @@ byte against the medium.
 """
 
 from .bookground import BookGround
-from .bookread import EntryPut, PtrPut, VarintPut
+from .bookread import EntryPut, Integrity, PtrPut, SeedLanes, VarintPut
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK
 from .stitch import MEDIUM_LIED
@@ -461,22 +461,50 @@ def _FilesDiffer(have, want):
     return wrong
 
 
-def _DigestsWanted(p):
+def _LetGo(m, p):
+    """The rotten ranges of the Tally the state `p` stands on that the newest
+    Tally (`m`'s) names no rotten node on — let go by Escheat, or laid anew:
+    a Tally may leave out a range the slot before named rotten (§16.5 п.20)."""
+    named = {(r.tree, r.lo) for r in m.tally.rotten}
+    return [r for r in p.tally.rotten if (r.tree, r.lo) not in named]
+
+
+def _LockedKept(p, gone):
+    """The files `p` locks that no range let go (`gone`) touches."""
+    return {fid for fid in p.locked if not any(r.tree == FILES and r.Touches((fid, 0), (fid + 1, 0))
+                                               for r in gone)}
+
+
+def _DigestsWanted(p, gone=(), g=None):
     """The digests a Tally of the state `p` mounted carries (the kernel's
     settle/binder_slice.c BinderGroundTake): of every block of every live file, of every
     block a locked file is known to name — the census holds those whatever
     locked it (bookcensus.py _Held) — and, a FILES range rotten, of every
     block the Tally before named a digest of and none of its living files
-    owns. What is held keeps its digest, and stays held."""
+    owns. What is held keeps its digest, and stays held — but what a range
+    let go (`gone`, _LetGo) held: its files are lost and their blocks with
+    them; and a DIGESTS range let go is laid anew of the data (§16.5 п.19,
+    the kernel's settle/escheat.c EscheatDigestOf): a block of it the ribbon
+    gives no digest of carries its data's, read off the ground `g` — none
+    when it does not read."""
     old, fresh = p.tally.content.digests, p.overlay
+    anew = [r for r in gone if r.tree == DIGESTS]
+    lanes = SeedLanes(g.uuid) if anew else None
+    kept = _LockedKept(p, gone)
     blocks = {b for fs in p.files.values() for s, n in fs.Ground() for b in range(s, s + n)}
-    blocks |= {r.start + i for runs in p.locked_runs.values() for r in runs if not r.hole for i in range(r.count)}
-    if p.FilesRot():
+    blocks |= {r.start + i for fid, runs in p.locked_runs.items() if fid in kept for r in runs if not r.hole
+               for i in range(r.count)}
+    if any(r.tree == FILES for r in p.tally.rotten if r not in gone):
         owned = {b for fs in p.tally.content.files.values() for s, n in fs.Ground() for b in range(s, s + n)}
         blocks |= set(old) - owned
     out = {}
     for b in blocks:
-        d = fresh.get(b, old.get(b))
+        d = fresh.get(b)
+        if d is None and any(r.Holds(b) for r in anew):
+            raw = g.Block(b)
+            d = None if raw is None else Integrity(raw, lanes)
+        elif d is None:
+            d = old.get(b)
         if d is not None:
             out[b] = d
     return out
@@ -573,9 +601,10 @@ def BindCheck(medium, start=None):
             continue
         t = m.tally.content
         wrong += _FilesDiffer(t.files, p.files)
-        if set(m.tally.locked) != set(p.locked):
+        gone = _LetGo(m, p)
+        if set(m.tally.locked) != _LockedKept(p, gone):
             wrong.append("the Tally locks fids %s and the state it is of %s" % (sorted(m.tally.locked)[:8],
-                                                                               sorted(p.locked)[:8]))
+                                                                               sorted(_LockedKept(p, gone))[:8]))
         tags = {i: (x.flags, x.key, x.value) for i, x in t.tags.items()}
         want = {i: (x.flags, x.key, x.value) for i, x in p.tags.items()}
         if tags != want:
@@ -583,9 +612,9 @@ def BindCheck(medium, start=None):
                 sorted(set(tags) ^ set(want))[:8], [i for i in tags if i in want and tags[i] != want[i]][:8]))
         if t.use != p.use:
             wrong.append("the Tally's Use Context is %u byte(s), the state's %u" % (len(t.use), len(p.use)))
-        dw = _DigestsWanted(p)
-        if t.digests != dw:
-            odd = sorted(b for b in set(t.digests) | set(dw) if t.digests.get(b) != dw.get(b))
+        dw = _DigestsWanted(p, gone, g)
+        odd = sorted(b for b in set(t.digests) | set(dw) if t.digests.get(b) != dw.get(b))
+        if odd:
             wrong.append("the Tally's DIGESTS and the state's differ at %u block(s), first %s" % (len(odd), odd[:6]))
         counts = {x: s1.counts[x] for x in ("next_fid", "next_tag", "next_bookmark")}
         mine = {x: p.counts[x] for x in ("next_fid", "next_tag", "next_bookmark")}

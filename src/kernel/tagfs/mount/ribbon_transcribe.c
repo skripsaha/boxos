@@ -206,7 +206,9 @@ static error_t RibbonUndoneOne(RibbonReplay* rp, const RibbonUnit* u, uint32_t i
     uint64_t            id = 0;
     if (RibbonUndoneGet(u->stream + r->body, r->len, &d, &used) == TALLY_BODY_BROKEN) {
         ksnprintf(why, sizeof(why), "stitch %llu carries an Undone that does not read", (unsigned long long)u->seq);
-        TagFSUnderGlass(why);
+        if (!rp->only)
+            TagFSUnderGlass(why);
+        rp->passed += rp->only ? 1u : 0u;
         return RibbonListAdd(&rp->refused, &rp->nrefused, &rp->caprefused, u->seq) ? OK : ERR_NO_MEMORY;
     }
     bool after = false;
@@ -238,7 +240,9 @@ static error_t RibbonUndoneOne(RibbonReplay* rp, const RibbonUnit* u, uint32_t i
                   RibbonUndoneWhy(d.why, said, sizeof(said)));
         return OK;
     }
-    TagFSUnderGlass(why);
+    if (!rp->only)
+        TagFSUnderGlass(why);     /* of an older slot's ribbon (Facsimile): the slot does not stand in */
+    rp->passed += rp->only ? 1u : 0u;
     return RibbonListAdd(&rp->refused, &rp->nrefused, &rp->caprefused, u->seq) ? OK : ERR_NO_MEMORY;
 }
 
@@ -454,6 +458,8 @@ static error_t RibbonStageLaid(RibbonReplay* rp, RibbonStage* st)
             rc = OK;
         }
     }
+    if (rp->only)
+        return rc;      /* Facsimile's: the rest is the Tally's the mount stands on */
     if (st->use_set) {
         DogEarPut(TALLY_USE, (TallyKey){ 0, 0 }, (TallyKey){ 1, 0 });
         rp->use_set = true;
@@ -495,7 +501,8 @@ static error_t RibbonStitchGathered(RibbonReplay* rp, const RibbonUnit* u, Ribbo
         RibbonRefuse(st, "its StitchHead or Clasp is %u byte(s) longer than this reader knows — written by a "
                      "kernel that knows more", u->longer);
     for (uint32_t i = 0; rc == OK && !st->refused[0] && i < u->nrecords; i++)
-        rc = RibbonRecordApplied(rp, st, &u->records[i]);
+        if (!rp->only || RibbonRecordWithin(u, &u->records[i], rp->only, rp->only_lo, rp->only_hi))
+            rc = RibbonRecordApplied(rp, st, &u->records[i]);
     if (rc == OK && !st->refused[0])
         RibbonFreshHeld(st);
     return rc;
@@ -531,12 +538,14 @@ static error_t RibbonStitchApplied(RibbonReplay* rp, const RibbonUnit* u)
         rp->next = ext;                 /* the files a gathering let go noted no extension */
         rc       = RibbonStitchGathered(rp, u, st);
     }
-    if (rc == OK && st->refused[0]) {
+    if (rc == OK && st->refused[0] && rp->only) {
+        rp->passed++;                   /* Facsimile's: the slot does not stand in for the range */
+    } else if (rc == OK && st->refused[0]) {
         ksnprintf(why, sizeof(why), "stitch %llu is not applied: %s", (unsigned long long)u->seq, st->refused);
         TagFSUnderGlass(why);
-    } else if (rc == OK) {
+    } else if (rc == OK && !st->refused[0]) {
         rc = RibbonStageLaid(rp, st);
-        g_book.said.applied += rc == OK;
+        g_book.said.applied += rc == OK && !rp->only;
     }
     RibbonStageLetGo(st);
     kfree(st);
@@ -731,5 +740,36 @@ error_t RibbonTranscribe(RibbonWalk* w, const char** what)
         *what = "its medium would not give up the data of the ribbon's newest stitch";
     else if (rc != OK)
         *what = "the memory every format shares would not take a record of the ribbon past its Tally";
+    return rc;
+}
+
+error_t RibbonFacsimile(RibbonWalk* w, uint64_t tree, uint64_t lo, uint64_t hi, uint64_t upto, uint32_t* replayed,
+                        bool* whole)
+{
+    RibbonReplay* rp = kmalloc(sizeof(RibbonReplay));
+    error_t       rc = rp ? OK : ERR_NO_MEMORY;
+    *replayed = 0;
+    if (rp) {
+        memset(rp, 0, sizeof(*rp));
+        rp->w       = w;
+        rp->only    = tree;
+        rp->only_lo = lo;
+        rp->only_hi = hi;
+    }
+    for (uint32_t s = 0; rc == OK && s < w->nstitch && w->stitch[s]->seq <= upto; s++)
+        for (uint32_t i = 0; rc == OK && i < w->stitch[s]->nrecords; i++)
+            if (w->stitch[s]->records[i].kind == RIBBON_UNDONE)
+                rc = RibbonUndoneOne(rp, w->stitch[s], i);
+    if (rc == OK)
+        RibbonSkipSorted(&rp->undone);
+    for (uint32_t s = 0; rc == OK && s < w->nstitch && w->stitch[s]->seq <= upto; s++) {
+        if (RibbonListHas(rp->refused, rp->nrefused, w->stitch[s]->seq))
+            continue;
+        rc = RibbonStitchApplied(rp, w->stitch[s]);
+        *replayed += rc == OK;
+    }
+    *whole = rp && rp->passed == 0;
+    if (rp)
+        RibbonReplayLetGo(rp);
     return rc;
 }

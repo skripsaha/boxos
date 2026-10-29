@@ -46,6 +46,8 @@
 #include "settle.h"
 #include "ink.h"
 #include "use_memory.h"
+#include "escheat.h"
+#include "async/write_job.h"   /* StorageCallWarrant */
 #include "helm.h"        /* HelmReady — an op waited for room is asked again at a service point */
 #include "amp.h"
 
@@ -240,6 +242,18 @@ int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count, const O
     int rc = SettleOpWaitFor(ctx, crates, file_id, InkedGen(), SETTLE_OP_ANCHOR,
                              "storage.anchor");
     tagfs_leave();
+    return rc;
+}
+
+/* OBJ_ESCHEAT: the act asked with the cabin's warrant as it stands now — what
+ * it lets go into the out crate. Nothing waits: the next Tally owes it. */
+int ObjEscheat(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    EscheatSaid said;
+    (void)crate_count;
+    error_t rc = TagFSEscheat(StorageCallWarrant(ctx), &said);
+    if (rc == OK && op->out_crate != CRATE_INDEX_NONE)
+        (void)crate_write(&crates[op->out_crate], ctx, &said, sizeof(said));
     return rc;
 }
 

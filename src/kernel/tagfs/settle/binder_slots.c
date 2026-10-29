@@ -1,4 +1,5 @@
-#include "binder.h"
+#include "binder_internal.h"
+#include "escheat.h"
 #include "../mount/book_mount.h"
 #include "../ink/fallow.h"
 #include "../block_map/block_map_derived.h"
@@ -75,6 +76,9 @@ void BinderMountReset(void)
     BinderStopped(ERR_DEVICE_NOT_READY);
     DogEarLetGo();
     FoliationLetGo();
+    BinderProofLetGo();
+    BinderGleanLetGo();
+    EscheatLetGo();
     for (uint32_t i = 0; i < g_binder.ring; i++)
         BinderSlotLetGo(&g_binder.slot[i]);
     kfree(g_binder.slot);
