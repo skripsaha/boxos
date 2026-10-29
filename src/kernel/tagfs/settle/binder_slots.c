@@ -53,6 +53,11 @@ bool BinderListRoom32(void** list, uint32_t n, uint32_t* cap, size_t size)
 
 void BinderSlotLetGo(SlotGround* s)
 {
+    while (s->sealed) {
+        SlotSealed* u = s->sealed;
+        s->sealed     = u->next;
+        kfree(u);
+    }
     kfree(s->ground);
     kfree(s->extra);
     memset(s, 0, sizeof(*s));

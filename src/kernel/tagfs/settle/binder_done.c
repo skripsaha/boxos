@@ -143,7 +143,7 @@ error_t BinderTallyDone(BinderRun* r)
         GlossCaptured(w);
     DogEarTakenLetGo();
     FoliationDraftDone(w->seq, r->captured);
-    RibbonTallied(w->seq);
+    RibbonTallied(w->seq, r->k);
     EndpaperTallyLaid(&w->laid);
     g_binder.useful      -= g_binder.useful >= r->useful_at ? r->useful_at : g_binder.useful;
     g_binder.tally_blocks = w->off;
@@ -157,7 +157,8 @@ error_t BinderTallyDone(BinderRun* r)
 
 /* A slot whose write or flush was refused may hold the Tally it held or the
  * new one, whole (C9, C10): held as holding both until a Tally is written over
- * it, and written over first. */
+ * it, and written over first — the new one's unit as sealed kept with it, each
+ * one of every write refused while it is so. */
 void BinderSlotUnsure(BinderRun* r)
 {
     SlotGround* s = &g_binder.slot[r->slot];
@@ -179,6 +180,11 @@ void BinderSlotUnsure(BinderRun* r)
     BinderSlotSort(s);
     s->unsure = true;
     s->tally2 = r->w.seq;
+    if (r->sealed) {
+        r->sealed->next = s->sealed;
+        s->sealed       = r->sealed;
+        r->sealed       = NULL;
+    }
     if (!s->holds) {
         s->holds = true;
         s->tally = r->w.seq;
@@ -188,4 +194,14 @@ void BinderSlotUnsure(BinderRun* r)
     if (r->slot + 1u > g_binder.nslots)
         g_binder.nslots = r->slot + 1u;
     BinderSlotOwnPublish(r->slot, 0);
+}
+
+bool BinderSlotSealed(uint32_t slot, const uint8_t* unit)
+{
+    if (slot >= g_binder.ring || !g_binder.slot[slot].unsure)
+        return false;
+    for (const SlotSealed* u = g_binder.slot[slot].sealed; u; u = u->next)
+        if (memcmp(u->unit, unit, sizeof(u->unit)) == 0)
+            return true;
+    return false;
 }

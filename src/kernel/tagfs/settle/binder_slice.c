@@ -26,7 +26,7 @@ static bool SliceBatch(BinderWork* w, BinderFiles* c, uint64_t* from)
     uint64_t    ids[BINDER_SLICE_BATCH], jot = 0;
     FileRecord* was = NULL;
     uint32_t    n   = FileMapFiles(map, *from, ids, BINDER_SLICE_BATCH), i = 0;
-    bool        d   = DocketWasFrom(*from, &jot, &was);
+    bool        d   = DocketWasFrom(*from, &jot, &was, NULL);
     for (uint32_t taken = 0; taken < BINDER_SLICE_BATCH;) {
         uint64_t m = i < n ? ids[i] : UINT64_MAX, j = d ? jot : UINT64_MAX;
         uint64_t f = m < j ? m : j;
@@ -36,7 +36,7 @@ static bool SliceBatch(BinderWork* w, BinderFiles* c, uint64_t* from)
         if (j == f) {
             rec = was;
             was = NULL;
-            d   = DocketWasFrom(f + 1u, &jot, &was);
+            d   = DocketWasFrom(f + 1u, &jot, &was, NULL);
         } else {
             rec = FileMapRecordHold(map, f, NULL);
         }

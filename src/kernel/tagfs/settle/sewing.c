@@ -12,6 +12,7 @@
 #include "../mount/errata.h"
 #include "loose_leaves.h"
 #include "../helm/engross.h"
+#include "../mount/away.h"
 #include "amp.h"
 #include "dog_ear.h"
 #include "../../../kernel/drivers/timer/rtc.h"
@@ -118,7 +119,9 @@ typedef struct {
     uint64_t    flush_us;     /* what the flush of its data took the medium: no part of D (§16.5 п.1) */
     uint64_t    seq;          /* this attempt's */
     uint32_t    clasp;
-    uint8_t*    sectors;      /* the attempt sealed: `of` sectors */
+    uint32_t    clasp_at;     /* where its Clasp lies in its stream: its crc is of every byte before */
+    RibbonTry*  laid;         /* the attempt, kept past its refusal or its cut (ribbon_left.c) */
+    uint8_t*    sectors;      /* the attempt sealed: `of` sectors, laid's */
     uint32_t    of;
     uint32_t    useful;       /* the bytes of its records, StitchHead to Clasp (§4.2) */
     RibbonPlace at;           /* where it lies, and the Quire it runs on into */
@@ -444,6 +447,7 @@ static error_t StitchStream(StitchSnap* s, const StitchLoad* l, uint8_t* out, ui
         StitchFreshUnmeasured(s, l->fresh);
     Clasp clasped = { .records = n - 1u, .fresh = s->fresh, .crc = KCrc32c(out, at) };
     *clasp      = clasped.crc;
+    s->clasp_at = at;
     starts[n++] = at;
     *nstarts    = n;
     *len        = at + RibbonRecordPut(out + at, RIBBON_CLASP, 0, body, ClaspBodyPut(body, &clasped));
@@ -452,7 +456,8 @@ static error_t StitchStream(StitchSnap* s, const StitchLoad* l, uint8_t* out, ui
 
 static void StitchSectorsLetGo(StitchSnap* s)
 {
-    kfree(s->sectors);
+    kfree(s->laid);
+    s->laid    = NULL;
     s->sectors = NULL;
     s->of      = 0;
     s->written = 0;
@@ -473,6 +478,25 @@ static void StitchHeldToFlight(const StitchSnap* s)
     kprintf("[TagFS] DEFECT: stitch %llu lays %u sector(s), past the %llu its TAKE counted in flight — the claims "
             "of its Inks fell short of what it carries\n", (unsigned long long)s->seq, s->of,
             (unsigned long long)s->flight);
+}
+
+/* The attempt whose writing began kept as laid where it lies — refused by the
+ * medium, or cut short by the medium leaving — whatever of it landed being
+ * this kernel's own to a return that finds it (ribbon_left.c); `past` when the
+ * ribbon has gone on past it already (RibbonRetry). An attempt refused before
+ * a sector of it was written is nothing on the medium. */
+static void StitchTryKept(StitchSnap* s, bool past)
+{
+    if (!s->laid || s->step < STITCH_STEP_STITCH)
+        return;
+    s->laid->at   = s->at;
+    s->laid->hop  = s->hop;
+    s->laid->of   = s->of;
+    s->laid->seq  = s->seq;
+    s->laid->past = past;
+    RibbonTryLaid(s->laid);
+    s->laid = NULL;
+    StitchSectorsLetGo(s);
 }
 
 /* The stitch measured, given its place and its seq, laid and sealed — the
@@ -505,9 +529,10 @@ static error_t StitchLay(StitchSnap* s, bool* word)
         StitchHeldToFlight(s);
         rc    = RibbonRoom(s->of, !l.use_written, &s->at, &s->hop);
     }
-    if (rc == OK && !(s->sectors = kmalloc((uint64_t)s->of * BOOK_SECTOR_BYTES)))
+    if (rc == OK && !(s->laid = RibbonTryMake(s->of)))
         rc = ERR_NO_MEMORY;
     if (rc == OK) {
+        s->sectors = s->laid->sectors;
         uint64_t left = s->at.quire.blocks * TAGFS_BLOCK_SECTORS - s->at.off;
         RibbonStitchSeal(s->sectors, stream, len, starts, nstarts, s->seq, RibbonPlaceVlba(&s->at), left,
                          s->hop.block * TAGFS_BLOCK_SECTORS, s->of, tagfs_get_state()->uuid);
@@ -595,10 +620,12 @@ static error_t StitchWrite(StitchSnap* s, bool* done)
  * refusals in a row and `nowhere`, why no reader would take a retry up. */
 static error_t StitchNowhere(const StitchSnap* s, const char* nowhere)
 {
+    const RibbonCursor* c = RibbonCursorNow();
     __atomic_store_n(&s_book_refused, 1u, __ATOMIC_RELEASE);
-    kprintf("[TagFS] the book takes no write: %u refusal(s) in a row, the last of stitch %llu at %s — %s, so none "
-            "is written: the volume may only be read from here (ERR_TAGFS_READ_ONLY)\n", RibbonCursorNow()->refused,
-            (unsigned long long)s->seq, s->stage, nowhere);
+    kprintf("[TagFS] the book takes no write: %u refusal(s) in a row%s, the last of stitch %llu at %s — %s, so none "
+            "is written: the volume may only be read from here (ERR_TAGFS_READ_ONLY)\n", c->refused - c->cut,
+            c->cut ? " past an attempt its medium leaving cut short" : "", (unsigned long long)s->seq, s->stage,
+            nowhere);
     SettleKnock();
     return ERR_TAGFS_READ_ONLY;
 }
@@ -612,10 +639,11 @@ static error_t StitchRefused(StitchSnap* s, error_t rc)
     TagFSWriteRefused();
     if (rc == ERR_NO_MEMORY || rc == ERR_DEVICE_NOT_READY || TagFSMediumLeft() || TagFSReadOnly())
         return rc;
-    const char* nowhere = RibbonRetry(&s->at, &s->hop, s->of);
+    const char* nowhere = RibbonRetry(&s->at, &s->hop, s->of, false);
+    StitchTryKept(s, nowhere == NULL);
     if (nowhere)
         return StitchNowhere(s, nowhere);
-    if (RibbonCursorNow()->refused == 1u)
+    if (RibbonCursorNow()->refused - RibbonCursorNow()->cut == 1u)
         kprintf("[TagFS] the medium refused stitch %llu at %s (error %u): the cycle goes on with a new seq in the "
                 "next_quire, block %llu, at its sector %llu (M-6)\n", (unsigned long long)s->seq, s->stage,
                 (unsigned)rc, (unsigned long long)RibbonCursorNow()->quire.block,
@@ -624,6 +652,31 @@ static error_t StitchRefused(StitchSnap* s, error_t rc)
     s->step = STITCH_STEP_BUILD;
     return OK;
 }
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's departure in the middle of a stitch: the sectors written past
+ * which the medium leaves, plus one; 0 unarmed. */
+static volatile uint32_t s_stand_leaves;
+
+void StitchStandLeaves(uint32_t sectors)
+{
+    __atomic_store_n(&s_stand_leaves, sectors == UINT32_MAX ? UINT32_MAX : sectors + 1u, __ATOMIC_RELEASE);
+}
+
+/* The medium leaves here, once, where the stand armed it to: before the next
+ * window of the stitch once `sectors` of it are written, or before its last
+ * flush once all of them are. */
+static void StitchStandLeft(const StitchSnap* s)
+{
+    uint32_t armed = __atomic_load_n(&s_stand_leaves, __ATOMIC_ACQUIRE);
+    uint32_t at    = armed - 1u < s->of ? armed - 1u : s->of;
+    if (armed && s->written >= at && __atomic_exchange_n(&s_stand_leaves, 0u, __ATOMIC_ACQ_REL))
+        TagFSStandMediumLeaves();
+}
+#define STITCH_STAND_LEFT(s) StitchStandLeft(s)
+#else
+#define STITCH_STAND_LEFT(s) ((void)(s))
+#endif
 
 // ----------------------------------------------------------------------------
 // The cycle
@@ -670,12 +723,14 @@ error_t StitchRunStep(bool* done)
         break;
     }
     case STITCH_STEP_STITCH:
+        STITCH_STAND_LEFT(s);
         s->stage = "the stitch";
         rc       = StitchWrite(s, &last);
         if (rc == OK && last)
             s->step = STITCH_STEP_LAST_FLUSH;
         break;
     case STITCH_STEP_LAST_FLUSH:
+        STITCH_STAND_LEFT(s);
         if (!s->toll && s->fresh)
             SETTLE_CUT_AT(SETTLE_CUT_POINT_SPARED);
         SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);
@@ -691,6 +746,33 @@ error_t StitchRunStep(bool* done)
         rc = StitchRefused(s, rc);
     *done = rc != OK || s->step == STITCH_STEP_DONE;
     return rc;
+}
+
+bool StitchHoldStill(uint64_t* written)
+{
+    for (;;) {
+        uint64_t cover   = 0;
+        error_t  refused = OK;
+        uint64_t ticket  = ScribeAsk(&g_settle_scribe);
+        switch (ScribeWait(&g_settle_scribe, ticket, &cover, &refused)) {
+        case SCRIBE_MINE:
+            *written = __atomic_load_n(&g_settle_scribe.written, __ATOMIC_ACQUIRE);
+            return true;
+        case SCRIBE_SELF:
+            if (!SettleRunBetweenStepsHere())
+                return false;
+            while (SettleRunBetweenStepsHere())
+                SettleRunStepHere();
+            break;
+        default:
+            break;      /* a pass covered the ask: the hold is asked again */
+        }
+    }
+}
+
+void StitchStillLetGo(uint64_t written)
+{
+    ScribeGive(&g_settle_scribe, written, OK);
 }
 
 uint64_t StitchRunTarget(void)
@@ -744,8 +826,9 @@ void StitchRunEnd(error_t rc)
          * nothing of it is written past the refusal, its ground goes back. */
         if (TagFSReadOnly() || TagFSMediumLeft())
             BinderStopped(rc);
+        StitchTryKept(s, false);
     } else {
-        uint64_t left = RibbonSewn(&s->at, &s->hop, s->of, s->seq, s->clasp, s->flags);
+        uint64_t left = RibbonSewn(&s->at, &s->hop, s->of, s->seq, s->clasp, s->clasp_at, s->flags);
         TagFSLockTake(&fs->lock);
         SettleSettledLocked(s->target, s->cycle, (s->flags & STITCH_CLEAN) != 0);
         if (s->use_owed) {

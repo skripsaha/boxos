@@ -158,12 +158,14 @@ error_t RibbonCursorMount(const RibbonWalk* w, const char** glass)
     __atomic_store_n(&s_flight, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_refused_free, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_long_said, 0u, __ATOMIC_RELEASE);
+    RibbonLeftMount(w, c->lied, c->given);
     RibbonRoomPublish();
     return OK;
 }
 
 void RibbonCursorLetGo(void)
 {
+    RibbonLeftLetGo();
     memset(&s_cursor, 0, sizeof(s_cursor));
     s_claimed  = 0;
     s_reserved = 0;
@@ -194,6 +196,18 @@ void RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved)
     *claimed  = s_claimed;
     *reserved = s_reserved;
     TagFSLockDrop(&fs->lock);
+}
+
+static volatile bool s_stand_marks_refused;
+
+void RibbonStandMarksRefused(void)
+{
+    __atomic_store_n(&s_stand_marks_refused, true, __ATOMIC_RELEASE);
+}
+
+bool RibbonStandMarksRefusing(void)
+{
+    return __atomic_exchange_n(&s_stand_marks_refused, false, __ATOMIC_ACQ_REL);
 }
 #endif
 
@@ -237,9 +251,10 @@ void RibbonNextGiven(void)
     RibbonRoomPublish();
 }
 
-void RibbonTallied(uint64_t tally)
+void RibbonTallied(uint64_t tally, uint64_t taken)
 {
     s_cursor.tally = tally;
+    RibbonLeftTallied(taken);
 }
 
 /* The ribbon run out, said once a mount — by the Settle's holder or by the
@@ -319,15 +334,18 @@ error_t RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop
  * when that is a Quire the walk had not ended in, and the one it names taken
  * unless it is the Quire it ends in. */
 uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, uint64_t seq, uint32_t clasp,
-                    uint64_t flags)
+                    uint32_t clasp_at, uint64_t flags)
 {
     RibbonCursor* c     = &s_cursor;
     uint64_t      left  = at->quire.blocks * TAGFS_BLOCK_SECTORS - at->off;
     RibbonQuire   last  = of <= left ? at->quire : *hop;
     uint64_t      bound = RibbonQuireSame(&at->quire, &c->ended) ? c->ended_from : seq;
+    BookLeftMark  mark  = { .at = *at, .hop = *hop, .of = of, .seq = seq, .clasp = clasp, .clasp_at = clasp_at };
     c->last    = seq;
     c->clasp   = clasp;
     c->refused = 0;
+    c->cut     = 0;
+    RibbonLeftSewn(&mark, c->lied);
 #ifdef CONFIG_VOLUME_TESTS
     c->sewn       = *at;
     c->sewn_hop   = *hop;
@@ -373,12 +391,13 @@ uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, 
  * end: a retry anywhere else is a stitch the waiters were told is kept and the
  * next mount does not read.
  */
-const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of)
+const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, bool cut)
 {
     RibbonCursor* c = &s_cursor;
     RibbonPlace   end;
     uint64_t      off = 0;
     c->refused++;
+    c->cut += cut ? 1u : 0u;
     if (!c->named.blocks)
         return "the last stitch sewn names no next_quire, where alone a reader takes a retry up";
     if (RibbonPlaceOn(at, of, hop, &end) && RibbonQuireSame(&end.quire, &c->named))

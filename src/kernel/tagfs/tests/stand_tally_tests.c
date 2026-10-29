@@ -623,8 +623,8 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// A book whose medium leaves and comes back is read again, and nothing is
-// read to judge it
+// A book whose medium leaves and comes back as it was left is taken up,
+// judged by what its medium holds (§3.8, §16.5 п.11)
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandTallyMediumReturns(void)
@@ -633,7 +633,7 @@ static TestResult TestStandTallyMediumReturns(void)
     uint8_t         seat    = tagfs_get_seat();
     const char*     aside   = StandTallyAside();
     StandTallyState before, after;
-    bool            away = false, down = false;
+    bool            away = false;
 
     if (aside)
         return test_steps_aside(aside);
@@ -644,27 +644,20 @@ static TestResult TestStandTallyMediumReturns(void)
     BlockFailArm(seat, BLOCK_FAIL_READ, 0, 0, BLOCK_FAIL_NEVER);
     AwayVerdict back = TagFSStandMediumReturns(NULL);
     away = false;
-    TEST_ASSERT_EQ(back, AWAY_REREAD, "its return is judged by its format: a book is read again");
-    TEST_ASSERT_EQ(BlockFailSeen(), 0, "with not a sector read to judge it — a book keeps no Ledger");
+    TEST_ASSERT_EQ(back, AWAY_AS_LEFT, "its book is taken up: nothing changed it");
+    TEST_ASSERT(BlockFailSeen() > 0, "judged by sectors read off the medium: its newest slot, the ribbon's end");
     BlockFailDisarm();
-    down = TagFSStandLetGo();
-    TEST_ASSERT(down, "the volume is let go of, as a book read again is");
-    StandTallyArrive();
-    TagFSStandHoldAgain();
-    down = false;
-    TEST_ASSERT(tagfs_get_state()->initialized && tagfs_get_state()->format == DEED_FORMAT_V2,
-                "and mounted again off its book");
+    TEST_ASSERT(tagfs_get_state()->initialized && tagfs_get_state()->format == DEED_FORMAT_V2 &&
+                !TagFSMediumLeft(), "and the volume stands, its medium here again");
     TEST_ASSERT(!TagFSIsUnderGlass(), "a book its writer goes on, as it was");
     StandTallyStateTake(&after);
     TEST_ASSERT_EQ(after.files, before.files, "with the files it held");
     TEST_ASSERT_EQ(after.sum, before.sum, "the same, by id, size and name");
 out:
+    BlockFailDisarm();
     if (away)
         (void)TagFSStandMediumReturns(NULL);
-    if (down)
-        StandTallyArrive();
-    else
-        TagFSStandLetGo();
+    TagFSStandLetGo();
     StandTallyClose();
     return verdict;
 }

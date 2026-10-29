@@ -229,6 +229,25 @@ error_t BookUnitRead(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq,
     return BookUnitWholeOf(out, kind, seq);
 }
 
+error_t BookUnitOf(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, const uint8_t* sectors,
+                   BookUnit* out)
+{
+    const uint8_t* uuid = tagfs_get_state()->uuid;
+
+    memset(out, 0, sizeof(*out));
+    out->vlba  = vlba;
+    out->count = count;
+    BookSumsJudged();
+    out->sectors = kmalloc((uint64_t)count * BOOK_SECTOR_BYTES);
+    out->state   = kmalloc(count ? count : 1u);
+    if (!out->sectors || !out->state)
+        return ERR_NO_MEMORY;
+    memcpy(out->sectors, sectors, (uint64_t)count * BOOK_SECTOR_BYTES);
+    for (uint32_t k = 0; k < count; k++)
+        out->state[k] = BookSectorJudged(out->sectors + (uint64_t)k * BOOK_SECTOR_BYTES, uuid, vlba + k);
+    return BookUnitWholeOf(out, kind, seq);
+}
+
 uint64_t BookSeqSeen(void)
 {
     return __atomic_load_n(&s_seq_seen, __ATOMIC_RELAXED);

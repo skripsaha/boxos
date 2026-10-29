@@ -60,6 +60,13 @@ typedef struct {
 error_t  BookUnitRead(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, BookUnit* out);
 void     BookUnitLetGo(BookUnit* u);
 
+/* The same judgement of `count` sectors read already, `sectors` — zeros where
+ * one would not read — by a reader past the volume's door (mount/
+ * perambulation.c): nothing of them folded into the seqs seen. OK, or
+ * ERR_NO_MEMORY; *out the caller's to let go of on every answer. */
+error_t  BookUnitOf(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, const uint8_t* sectors,
+                   BookUnit* out);
+
 /* A refusal of the medium — tagfs_volume_read's `rc`, not ERR_BAD_SECTOR —
  * counted for the mount's road back (tagfs.c), and answered as what it is:
  * ERR_DEVICE_NOT_READY, or ERR_READ_FAILED. For a reader of the volume's

@@ -8,6 +8,7 @@
 #include "../ink/fallow.h"
 #include "../run/run.h"
 #include "../file_map/tail_slip.h"
+#include "../mount/away.h"
 
 /*
  * PlotWindow — the Plot of a format-v2 volume (plot.h): fresh ground, and a
@@ -433,7 +434,7 @@ bool PlotWindowStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t mo
     return true;
 }
 
-error_t PlotWindowLanded(Plot *p, uint64_t block, const uint8_t *data, uint32_t count)
+error_t PlotWindowLanded(Plot *p, uint64_t departed, uint64_t block, const uint8_t *data, uint32_t count)
 {
     BoxHashContext ctx;
     if (!p->book || count == 0)
@@ -441,6 +442,8 @@ error_t PlotWindowLanded(Plot *p, uint64_t block, const uint8_t *data, uint32_t 
     if (!PlotRoom((void **)&p->digests, &p->digest_room, p->digest_count, (uint64_t)p->digest_count + count,
                   sizeof(PlotDigest)))
         return ERR_NO_MEMORY;
+    if (p->digest_count == 0)
+        p->departed = departed;
     BoxHashInit(&ctx, tagfs_get_state()->uuid, 16);
     for (uint32_t i = 0; i < count; i++)
         p->digests[p->digest_count++] =
@@ -597,7 +600,7 @@ error_t PlotWindowTail(Plot *p, uint64_t k, uint32_t tail)
 {
     FileSpot spot;
     uint8_t *buf = NULL;
-    uint64_t block = 0;
+    uint64_t block = 0, departed = 0;
     uint32_t landed = 0, left = 0;
     error_t  rc = PlotFreshFor(p, k, 1, false, PlotFreshPut);
     if (rc == OK && (!PlotWindowSpot(p, k, &spot) || !PlotFreshSpot(p, k, &block, &left)))
@@ -614,10 +617,11 @@ error_t PlotWindowTail(Plot *p, uint64_t k, uint32_t tail)
     if (rc == OK) {
         (void)TailSlipOver(p->rec, k, buf);
         memset(buf + tail, 0, PLOT_BLOCK - tail);
-        rc = TagFSWriteRun(block, 1, buf, &landed);
+        departed = AwayDepartures();
+        rc       = TagFSWriteRun(block, 1, buf, &landed);
     }
     if (rc == OK)
-        rc = PlotWindowLanded(p, block, buf, 1);
+        rc = PlotWindowLanded(p, departed, block, buf, 1);
     if (rc == OK)
         rc = PlotWindowEnd(p, (uint64_t)k * PLOT_BLOCK, PLOT_BLOCK);
     else if (p->fresh_blocks)

@@ -20,7 +20,8 @@
  * the slot read all the same — the two readers of a book, this and
  * volume-read's (tally.py SlotRead), judge a slot by the one rule.
  *
- * The mount's alone, with the door shut.
+ * The mount's, with the door shut — and the rule of it the judge's of a
+ * medium that came back, on sectors it read itself (SpineSlotJudgeSectors).
  */
 
 #define SPINE_SLOT_BLANK  0u
@@ -46,8 +47,12 @@ typedef struct {
 } SpineSlot;
 
 /* Slot `slot->index` at `slot->block` read and judged into *slot. OK, or
- * ERR_NO_MEMORY, or the medium's refusal (book_unit.h). */
+ * ERR_NO_MEMORY, or the medium's refusal (book_unit.h). And the same slot's
+ * eight sectors read already, `sectors`, judged by the same rule — by the
+ * judge of a medium that came back, which reads it past the volume's door
+ * (mount/perambulation.c): OK or ERR_NO_MEMORY. */
 error_t SpineSlotJudge(SpineSlot* slot);
+error_t SpineSlotJudgeSectors(SpineSlot* slot, const uint8_t* sectors);
 
 /* Every slot of the ring `frame` names: the VALID ones into a new array,
  * newest first (by seq; a tie by index) — *count of them — and every TORN one

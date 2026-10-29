@@ -88,7 +88,8 @@ typedef struct {
     bool        lied;         /* the medium is shown not to keep what it confirmed: every stitch says so */
     bool        out;          /* the ribbon ran out with no Tally to take it in, said (atomic: any core
                                * that is refused room says it) */
-    uint32_t    refused;      /* writes of a stitch the medium refused in a row */
+    uint32_t    refused;      /* attempts of a stitch given up in a row: a retry is under way, ... */
+    uint32_t    cut;          /* ... `cut` of them cut short by the medium leaving, the rest it refused */
     RibbonQuire ended;        /* the Quire the last stitch sewn ends in — a retry's from_quire */
     uint64_t    ended_from;   /* the seq of the first stitch that ends in it: those before lie in Quires
                                * left, once a stitch begins past it (FallowQuireLeft) */
@@ -154,21 +155,117 @@ bool     RibbonCursorLied(void);
  *                     one it came from; NULL. Or why no reader would take a
  *                     retry up, and none is written: no next_quire is named,
  *                     or the attempts refused fill it to its end. The
- *                     refusals in a row counted either way
+ *                     attempts given up in a row counted either way — `cut`
+ *                     one cut short by the medium leaving, which no refusal
+ *                     of the medium's is said as (ribbon_left.c)
  */
 const RibbonCursor* RibbonCursorNow(void);
 uint64_t RibbonSeqNext(void);
 void     RibbonNextGiven(void);
 error_t  RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop);
 uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, uint64_t seq, uint32_t clasp,
-                    uint64_t flags);
-const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of);
+                    uint32_t clasp_at, uint64_t flags);
+const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, bool cut);
 bool     RibbonCloseEarly(void);
 
 /* A Tally of seq `tally` was written over the slot of the least seq
- * (binder_done.c): every stitch from here is replayed over it. By the Settle's
- * holder. */
-void     RibbonTallied(uint64_t tally);
+ * (binder_done.c), taking in every stitch up to `taken`: every stitch from
+ * here is replayed over it. By the Settle's holder. */
+void     RibbonTallied(uint64_t tally, uint64_t taken);
+
+/*
+ * ‼ WHAT THIS KERNEL LEFT ON THE RIBBON IS KEPT FOR THE MEDIUM'S RETURN (spec_v2
+ * §3.8, §16.5 пп.11-12; ribbon_left.c). A medium that leaves and comes back is
+ * held to it (mount/perambulation.c) before its book is taken up:
+ *
+ *   BookLeftMark   a stitch this kernel left on the ribbon past the slot it is
+ *                  replayed over: where it lies, its seq, its Clasp and where
+ *                  that lies in its stream — the crc of every byte before it.
+ *                  Every one of them on a medium shown to lie, the last alone
+ *                  on any other (Р-c2 (б)): from the mount's walk, then from
+ *                  each stitch that settles; those a Tally took in let go
+ *   RibbonTry      an attempt of a stitch laid since the last one settled, its
+ *                  sectors as sealed: one the medium refused (M-6), one a
+ *                  departure cut short. A return finds each sector of it byte
+ *                  for byte or holds the medium changed; the stitch that
+ *                  settles next lies past every one, and lets them go
+ *
+ * Both the Settle's holder's, changed with no TagFS lock held — read by the
+ * judge of a return while it holds the Settle still (StitchHoldStill) — and
+ * let go with the volume.
+ *
+ *   RibbonLeftMarks  the marks, oldest first: *n of them; *lacking the seq of
+ *                    the newest stitch a return must be held to whose mark
+ *                    this kernel lacks — memory refused it, or the mount read
+ *                    that stitch in pieces — 0 for none: the next stitch to
+ *                    settle makes it good on a medium not shown to lie, a
+ *                    Tally taking the stitch in on one that lied; *past where
+ *                    the ribbon goes on past the last stitch sewn — or past
+ *                    the slot's Tally, none sewn — as a mount's reader finds
+ *                    its end: where any other writer's next stitch would
+ *                    begin; and *seen the largest seq the mount saw on the
+ *                    medium — every writer that mounts it gives seqs past it
+ *                    (§4.5 п.8), so a sector there of a seq no larger is
+ *                    what the mount found, never another's since
+ *   RibbonTryMake    an attempt of `of` sectors, its room asked of the heap
+ *                    with no lock held: NULL when there is none
+ *   RibbonTryLaid    the attempt the writer laid at `at` — its fields filled,
+ *                    some of its sectors maybe on the medium — kept, taken
+ *   RibbonTryOwns    whether `sector`, read at `vlba`, is a sector of an
+ *                    attempt kept, byte for byte as sealed: *newest whether of
+ *                    the newest
+ *   RibbonTryPast    the ribbon taken past the newest attempt as a retry of it
+ *                    is (RibbonRetry), once: NULL, or why no reader would take
+ *                    the next stitch up there
+ */
+typedef struct {
+    RibbonPlace at;
+    RibbonQuire hop;
+    uint32_t    of;
+    uint64_t    seq;
+    uint32_t    clasp;
+    uint32_t    clasp_at;
+} BookLeftMark;
+
+typedef struct RibbonTry RibbonTry;
+struct RibbonTry {
+    RibbonTry*  next;
+    RibbonPlace at;
+    RibbonQuire hop;
+    uint32_t    of;
+    uint64_t    seq;
+    bool        past;
+    uint8_t     sectors[];
+};
+
+const BookLeftMark* RibbonLeftMarks(uint32_t* n, uint64_t* lacking, RibbonPlace* past, uint64_t* seen);
+RibbonTry*          RibbonTryMake(uint32_t of);
+void                RibbonTryLaid(RibbonTry* t);
+bool                RibbonTryOwns(uint64_t vlba, const uint8_t* sector, bool* newest);
+const char*         RibbonTryPast(void);
+
+/* ribbon.c's own calls into ribbon_left.c: the marks a mount's walk leaves
+ * (`lied`: every one), with the largest seq it saw (`seen`), one a stitch
+ * settling adds — every try behind it let go — those a Tally took in let go,
+ * and all of it with the volume. */
+void     RibbonLeftMount(const RibbonWalk* w, bool lied, uint64_t seen);
+void     RibbonLeftSewn(const BookLeftMark* m, bool lied);
+void     RibbonLeftTallied(uint64_t taken);
+void     RibbonLeftLetGo(void);
+
+/*
+ * The Settle held still for the judge of a medium that came back (mount/
+ * perambulation.c): its Scribe taken as a pass that answers no asker — given
+ * back with the cover it found, so every asker takes the next pass itself — a
+ * cycle another core holds waited for, and one this core holds between two of
+ * its steps run out here: with the medium away, every step it has left is
+ * refused at once (tagfs_volume_write). Then no cycle and no Tally's step
+ * stands half-done while the cursor, the Docket and the tries are read. True
+ * and *written for StitchStillLetGo; false when this core holds the Scribe
+ * beneath the caller in the middle of a step, which nothing here can end.
+ */
+bool     StitchHoldStill(uint64_t* written);
+void     StitchStillLetGo(uint64_t written);
 
 /*
  * ‼ A CHANGE OF A BOOK CLAIMS ITS ROOM ON THE RIBBON BEFORE IT IS MADE (§3.6,
@@ -230,6 +327,16 @@ void     RibbonRoomOf(const RibbonCursor* c, uint64_t flight, uint64_t* any, uin
 #ifdef CONFIG_VOLUME_TESTS
 /* The cursor as it stands, for the stand between two cycles. */
 void     RibbonCursorStand(RibbonCursor* out);
+/* The next stitch's medium leaves (TagFSStandMediumLeaves) once `sectors` of
+ * it are on the medium — UINT32_MAX: the whole of it, before its last flush —
+ * so the cycle is refused there, as a hand pulling the medium out refuses it.
+ * Once. For the stand. */
+void     StitchStandLeaves(uint32_t sectors);
+/* The next room asked of the heap for the marks of what this kernel left on
+ * the ribbon (ribbon_left.c) refused, as a heap that has none refuses it:
+ * armed, and taken by the one it refuses. Once. For the stand. */
+void     RibbonStandMarksRefused(void);
+bool     RibbonStandMarksRefusing(void);
 /* The bytes claimed by changes no stitch has taken, and those held for changes
  * in the making (RibbonReserve), as they stand — for the stand. */
 void     RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved);

@@ -45,6 +45,7 @@
 #include "run.h"         /* TagFSDataCostLaid — what a file's bytes cost the medium */
 #include "tail_slip.h"   /* TailSlipOver — the Slips over a last block the write reads */
 #include "settle.h"      /* SettleV1OnBook — no Spare is stamped for a book */
+#include "away.h"        /* AwayDepartures — what a book's blocks are held to at their Ink */
 #include "cpu_calibrate.h"  /* a stretch's time on the medium, for the cadence */
 #include "klib.h"
 
@@ -332,6 +333,7 @@ static bool w_block_submit(WriteJob *j)
 {
     uint32_t staged = j->st_staged;
     j->if_submit_tsc = rdtsc();
+    j->if_departed   = AwayDepartures();
     error_t err = wjob_submit(j, true, j->st.block, staged, 0, wjob_block_complete);
     if (err != OK)
         return wjob_stop(j, err);
@@ -353,7 +355,7 @@ static bool w_block_done(WriteJob *j)
     for (uint32_t i = 0; i < landed; i++) {
         tagfs_readahead_invalidate(j->st.block + i);
         IntegrityUpdate(j->st.block + i, wjob_page(j, i));
-        if (PlotWindowLanded(&j->plot, j->st.block + i, wjob_page(j, i), 1) != OK) {
+        if (PlotWindowLanded(&j->plot, j->if_departed, j->st.block + i, wjob_page(j, i), 1) != OK) {
             landed = i;      /* a block whose digest is not kept is no block of the file's */
             if (j->if_status == OK)
                 j->if_status = ERR_NO_MEMORY;

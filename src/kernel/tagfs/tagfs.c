@@ -27,6 +27,7 @@
 #include "helm/helm.h"
 #include "mount/mount.h"
 #include "mount/away.h"
+#include "mount/perambulation.h"
 #include "mount/hold_ground.h"
 #include "mount/book_mount.h"
 #include "read/read.h"
@@ -1340,9 +1341,9 @@ static bool tagfs_abandon(void);
 static void tagfs_clear_the_ground(void);
 
 /* Where the ground of volume `uuid` begins on `seat`, and whether its Deed
- * lays it out as the held volume is laid out. A seat whose medium would not be
- * read is named to the search (g_search_unread): not finding the volume there
- * says nothing about whether it is there. */
+ * lays it out as the held volume is laid out (AwayDeedSame). A seat whose
+ * medium would not be read is named to the search (g_search_unread): not
+ * finding the volume there says nothing about whether it is there. */
 static bool volume_ground_on(uint8_t seat, const uint8_t uuid[16], uint64_t *out_base,
                              bool *out_same)
 {
@@ -1358,12 +1359,8 @@ static bool volume_ground_on(uint8_t seat, const uint8_t uuid[16], uint64_t *out
             if (at_head == ERR_IO) search_met_unread(&g_search_unread, seat);
             continue;
         }
-        uint16_t bytes = 0;
-        const VolumeLayout *layout =
-            (const VolumeLayout *)DeedStamp(&head, VOLUME_STAMP_LAYOUT, &bytes);
         bool ours = memcmp(head.head.uuid, uuid, 16) == 0;
-        *out_same = layout && bytes >= sizeof(VolumeLayout) &&
-                    memcmp(layout, &g_state.layout, sizeof(VolumeLayout)) == 0;
+        *out_same = AwayDeedSame(&head);
         DeedRelease(&head);
         if (ours) {
             *out_base = ground[g].start_sector;
@@ -1451,14 +1448,13 @@ static bool volume_book_decided(uint8_t seat, uint32_t seating, uint64_t base,
     return volume_read_again(seat, seating);
 }
 
-/* How a return of the volume's medium is judged: a format-v2 volume keeps no
- * Ledger and no open book of it is taken up — it is read again, with nothing
- * read to judge it; format v1's Ledger is judged when its Deed lays the
- * volume out as the one held, and anything else is another's. */
+/* How a return of the volume's medium is judged: a book by Perambulation,
+ * format v1's Ledger when its Deed lays the volume out as the one held — and
+ * anything else is another's. */
 static AwayVerdict VolumeReturnJudged(uint8_t seat, uint64_t base, bool same)
 {
     if (g_state.format == DEED_FORMAT_V2)
-        return AWAY_REREAD;
+        return Perambulation(seat, base, same);
     return same ? AwayJudgeOn(seat, base) : AWAY_OTHER;
 }
 

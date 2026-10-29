@@ -7,6 +7,7 @@
 #include "../ink/ink.h"   /* InkWearsGuarded, InkTouchesBoot — the files whose blocks stay put */
 #include "../block_map/block_map.h"
 #include "../settle/sewing.h"
+#include "../mount/away.h"   /* AwayDepartures — what a book's write is held to at its Ink */
 
 /*
  * PlotGather — a record out of room for extents gets it back by moving the
@@ -247,10 +248,11 @@ static error_t PlotGatherWindow(Plot *p, PlotGathering *g)
     for (uint32_t j = 0; rc == OK && j < filled; j++)
         (void)TailSlipOver(p->rec, k + g->copied + j, buf + (size_t)j * TAGFS_BLOCK_SIZE);
     if (rc == OK && filled > 0) {
-        uint32_t landed = 0;
+        uint32_t landed   = 0;
+        uint64_t departed = AwayDepartures();
         rc = TagFSWriteRun(to, filled, buf, &landed);
         if (rc == OK)
-            rc = PlotWindowLanded(p, to, buf, filled);
+            rc = PlotWindowLanded(p, departed, to, buf, filled);
         if (rc != OK)
             kprintf("[TagFS] file %llu: the gathered blocks would not be laid at %llu..%llu (error "
                     "%u) — its extents are left where they are\n", p->fid,
