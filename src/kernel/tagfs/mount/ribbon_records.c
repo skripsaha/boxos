@@ -736,6 +736,16 @@ static error_t RibbonCoinedApplied(RibbonStage* st, const RibbonRecord* r)
     return OK;
 }
 
+/* Whether a record is of a kind this reader does not know as a stitch's
+ * record: kind 0 is none — a tag of 0 is PAD, and a tag of 1 a kind no writer
+ * was given (§2.3) —, a kind past the last it knows is a newer writer's, and
+ * a StitchHead or a Clasp is the stitch's frame, never a record of it
+ * (bookmount.py _Record: a kind not in KIND_NAMES, or STITCH_HEAD, CLASP). */
+static bool RibbonKindUnknown(uint64_t kind)
+{
+    return kind < RIBBON_UNDONE || kind > RIBBON_KINDS_KNOWN;
+}
+
 /* A record of the stitch through the rule of its kind (bookmount.py _Record):
  * a kind this reader does not know stepped over when it may be, and the
  * stitch refused when it may not. */
@@ -745,7 +755,7 @@ error_t RibbonRecordApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecor
     uint32_t       used = 0;
     const uint8_t* text = NULL;
     char           why[128];
-    if (r->kind > RIBBON_KINDS_KNOWN || r->kind == RIBBON_STITCH_HEAD || r->kind == RIBBON_CLASP) {
+    if (RibbonKindUnknown(r->kind)) {
         if (!r->ignorable)
             RibbonRefuse(st, "it carries a record of kind %llu this reader does not know and may not step over "
                          "— written by a kernel that knows more", (unsigned long long)r->kind);
@@ -854,18 +864,21 @@ bool RibbonRecordWithin(const RibbonUnit* u, const RibbonRecord* r, uint64_t tre
     RibbonLabeled  l;
     TallyTag       t;
     int            got  = TALLY_BODY_BROKEN;
+    if (RibbonKindUnknown(r->kind))
+        return !r->ignorable;                   /* its keys unknown: applied, it refuses the stitch */
     if (tree == TALLY_TAGS && r->kind == RIBBON_COINED)
         got = RibbonCoinedGet(b, r->len, &key, &t, &used);
-    else if (tree == TALLY_FILES && r->kind == RIBBON_BORN && (got = RibbonBornGet(b, r->len, u->seq, &born, &used))
-             != TALLY_BODY_BROKEN)
+    else if (tree != TALLY_FILES)
+        return false;
+    else if (r->kind == RIBBON_BORN && (got = RibbonBornGet(b, r->len, u->seq, &born, &used)) != TALLY_BODY_BROKEN)
         key = born.fid;
-    else if (tree == TALLY_FILES && r->kind == RIBBON_SHAPED &&
-             (got = RibbonShapedGet(b, r->len, u->seq, &d, &used)) != TALLY_BODY_BROKEN)
+    else if (r->kind == RIBBON_SHAPED && (got = RibbonShapedGet(b, r->len, u->seq, &d, &used)) != TALLY_BODY_BROKEN)
         key = d.fid;
-    else if (tree == TALLY_FILES && r->kind == RIBBON_LABELED &&
-             (got = RibbonLabeledGet(b, r->len, &l, &used)) != TALLY_BODY_BROKEN)
+    else if (r->kind == RIBBON_LABELED && (got = RibbonLabeledGet(b, r->len, &l, &used)) != TALLY_BODY_BROKEN)
         key = l.fid;
-    else if (tree == TALLY_FILES && r->kind == RIBBON_QUITCLAIM)
+    else if (r->kind == RIBBON_QUITCLAIM)
         got = RibbonQuitclaimGet(b, r->len, &key, &base, &used);
-    return got != TALLY_BODY_BROKEN && lo <= key && key < hi;
+    else if (r->kind != RIBBON_BORN && r->kind != RIBBON_SHAPED && r->kind != RIBBON_LABELED)
+        return false;                           /* a kind that names no file */
+    return got == TALLY_BODY_BROKEN || (lo <= key && key < hi);    /* a key that does not read may be one */
 }

@@ -231,15 +231,6 @@ void EscheatMounted(void)
 // The ask
 // ----------------------------------------------------------------------------
 
-/* The refusal of an ask with nothing to let go, said for the one tail the act
- * cannot cut: the loader's kernel's, which no call changes. */
-static void NothingSaid(uint32_t boot)
-{
-    if (boot)
-        kprintf("[TagFS] Escheat: nothing to let go — the tail of the file the loader reads the kernel by is "
-                "changed by no call, warrant or none, and the Tally waits for it still\n");
-}
-
 error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out)
 {
     memset(out, 0, sizeof(*out));
@@ -249,8 +240,7 @@ error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out)
     }
     if (!tagfs_enter())
         return ERR_DEVICE_NOT_READY;
-    uint32_t boot   = 0;
-    uint64_t tails  = EngrossRefusedNow(&boot);
+    uint64_t tails  = EngrossRefusedNow();
     uint64_t leaves = TallyDigestsRotKnown();
     bool     ranges = __atomic_load_n(&g_binder.nrot, __ATOMIC_ACQUIRE) != 0;
     error_t  rc     = OK;
@@ -262,8 +252,6 @@ error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out)
         rc = ERR_NO_MEMORY;
     else if (!ranges && tails == 0 && leaves == 0)
         rc = ERR_OBJECT_NOT_FOUND;
-    if (rc == ERR_OBJECT_NOT_FOUND)
-        NothingSaid(boot);
     if (rc == OK) {
         out->tails         = tails;
         out->digest_ranges = leaves;
@@ -276,10 +264,9 @@ error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out)
         kprintf("[TagFS] Escheat asked by a cabin wearing system or god: %llu rotten range(s) of FILES, %llu "
                 "file(s) declared lost and %llu held block(s) let go by the next Tally, written whole, which lays "
                 "%llu DIGESTS range(s) known to read in no copy anew of the data; %llu tail(s) that can never be laid "
-                "in their blocks lost first%s\n", (unsigned long long)out->ranges, (unsigned long long)out->files,
+                "in their blocks lost first\n", (unsigned long long)out->ranges, (unsigned long long)out->files,
                 (unsigned long long)out->blocks, (unsigned long long)out->digest_ranges,
-                (unsigned long long)out->tails,
-                boot ? "; the tail of the file the loader reads the kernel by waits — no call changes it" : "");
+                (unsigned long long)out->tails);
     }
     tagfs_leave();
     return rc;

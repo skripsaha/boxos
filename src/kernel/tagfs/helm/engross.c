@@ -24,17 +24,15 @@ typedef struct {
     uint64_t from;        /* the next file id; UINT64_MAX once the map has no more */
     uint32_t left;
     uint32_t refused;     /* of `left`, refused by anything but a held Helm or the ribbon's room */
-    uint32_t boot;        /* of `refused`, the file the loader reads the kernel by: no call changes it */
     uint64_t first_fid;
     error_t  first;
     uint64_t act;         /* the asks of Escheat this walk cuts tails for — 0 for none (EscheatTailsActing) */
 } EngrossWalkState;
 
-/* A refusal that is the file's own — its last block unreadable, the file the
- * loader reads the kernel by, a file the mount locked — made to the record
- * that Ink `gen` made, in mounting `epoch`: tried again only once the record
- * changes, so a rotten tail is neither read nor said at every turn — or by
- * the walk that answers an ask of Escheat. */
+/* A refusal that is the file's own — its last block unreadable, a file the
+ * mount locked — made to the record that Ink `gen` made, in mounting `epoch`:
+ * tried again only once the record changes, so a rotten tail is neither read
+ * nor said at every turn — or by the walk that answers an ask of Escheat. */
 typedef struct {
     uint64_t fid;
     uint64_t gen;
@@ -180,12 +178,9 @@ static const EngrossRefusal* EngrossKnownOf(uint64_t fid, uint64_t gen)
     return NULL;
 }
 
-uint32_t EngrossRefusedNow(uint32_t* boot)
+uint32_t EngrossRefusedNow(void)
 {
-    uint32_t b = __atomic_load_n(&s_said.boot, __ATOMIC_RELAXED);
-    uint32_t r = __atomic_load_n(&s_said.refused, __ATOMIC_RELAXED);
-    *boot      = b;
-    return r > b ? r - b : 0;
+    return __atomic_load_n(&s_said.refused, __ATOMIC_RELAXED);
 }
 
 static void EngrossKnow(uint64_t fid, uint64_t gen, error_t rc)
@@ -215,7 +210,6 @@ static error_t EngrossOne(EngrossWalkState* w, uint64_t fid, bool known, uint32_
         return rc;
     if (rc == ERR_BUSY || rc == ERR_WOULD_BLOCK)
         return OK;
-    w->boot += fid == g_book.boot_fid ? 1u : 0u;
     if (w->refused++ == 0) {
         w->first_fid = fid;
         w->first     = rc;
@@ -265,7 +259,6 @@ static void EngrossWalkSaid(const EngrossWalkState* w)
 {
     if (w->refused == s_said.refused && w->first_fid == s_said.first_fid && w->first == s_said.first)
         return;
-    __atomic_store_n(&s_said.boot, w->boot, __ATOMIC_RELAXED);
     __atomic_store_n(&s_said.refused, w->refused, __ATOMIC_RELAXED);
     s_said.first_fid = w->first_fid;
     s_said.first     = w->first;
