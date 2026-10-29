@@ -110,6 +110,15 @@ int proc_exec_tagged(const char* line, const char* tags); /* child = file-tags �
  * incarnation. Returns the pid (>0) or -err; *out_gen is 0 on any failure or if
  * the kernel did not report a generation. */
 int proc_exec_gen(const char* line, const char* tags, uint32_t* out_gen);
+/* Start one particular file — the program a form or a listing named by id —
+ * rather than whichever file a name finds first. `luggage` (length bytes, NULs
+ * allowed, none when length is 0) goes into the child's cabin as its Luggage
+ * (box/luggage.h), exactly as the line does for proc_exec. The file must be
+ * what a name would have started: an active program wearing app or utility;
+ * any other id is -ERR_FILE_NOT_FOUND. `tags` and *generation are
+ * proc_exec_gen's. Returns the pid (>0) or -err. */
+int proc_exec_file(file_id_t program, const void* luggage, size_t length,
+                   const char* tags, uint32_t* generation);
 
 /* Wait until the incarnation (pid, generation) is gone, then report how it
  * ended in *out_exit (proc_exit.h: >= 0 the code it passed to exit(), -1

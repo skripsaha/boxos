@@ -24,7 +24,7 @@
  *  right block and can't collide silently with an existing range.
  * ============================================================================ */
 
-/* ─── Process + info (0x01 – 0x0A) ─────────────────────────────────── */
+/* ─── Process + info (0x01 – 0x0C) ─────────────────────────────────── */
 #define SYSTEM_OP_PROC_SPAWN        0x01
 #define SYSTEM_OP_PROC_KILL         0x02
 #define SYSTEM_OP_PROC_INFO         0x03
@@ -63,6 +63,11 @@
  * authority to check. Backs std::clock(). */
 #define SYSTEM_OP_PROC_CPUTIME      0x05
 #define SYSTEM_OP_PROC_EXEC         0x06
+/* proc.exec.file — proc.exec for one file, named by its id. params =
+ * [u64 file id][caller-tag augment]; in_crate = the Luggage bytes alone (none:
+ * no luggage); out_crate and auth as proc.exec. The file must be what a name
+ * would have started — active, wearing app or utility — else ERR_FILE_NOT_FOUND. */
+#define SYSTEM_OP_PROC_EXEC_FILE    0x0C
 #define SYSTEM_OP_INFO              0x07
 #define SYSTEM_OP_TLS_FSBASE        0x0A  /* set caller's FS base (C++ TLS) */
 

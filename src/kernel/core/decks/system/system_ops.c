@@ -1142,6 +1142,10 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
 static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
                             uint64_t found_id, const char *child_tags,
                             const uint8_t *luggage, uint32_t luggage_len);
+static int SysProcExecAugmented(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                                uint64_t found_id, char *found_tags,
+                                const char *augment, size_t aug_len,
+                                const uint8_t *luggage, uint32_t luggage_len);
 
 /* SYSTEM_OP_PROC_EXEC
  *   in_crate: [program name][NUL][luggage bytes…] — the name the program is
@@ -1239,17 +1243,72 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     } while (found_id == 0 && from != 0);
 
     if (found_id == 0) return ERR_FILE_NOT_FOUND;
+    return SysProcExecAugmented(op, crates, ctx, found_id, found_tags,
+                                augment, aug_len, luggage, luggage_len);
+}
+
+/* A found program's keys (`found_tags`, taken over and freed here — NULL when
+ * there was no memory for them) with the caller's augment folded in, then the
+ * program started. The merge comes BEFORE any binary I/O, so a reserved or
+ * unspellable augment costs zero disk reads and never spawns an orphan. */
+static int SysProcExecAugmented(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                                uint64_t found_id, char *found_tags,
+                                const char *augment, size_t aug_len,
+                                const uint8_t *luggage, uint32_t luggage_len)
+{
     if (!found_tags) return ERR_NO_MEMORY;
 
-    /* Fold the caller augment into the file's tags BEFORE any binary I/O, so
-     * a reserved or unspellable augment costs zero disk reads and never
-     * spawns an orphan. */
     char   *child_tags = NULL;
     error_t arc = proc_exec_merge_augment(found_tags, augment, aug_len, &child_tags);
     kfree(found_tags);
     if (arc != OK) return arc;
     int rc = SysProcExecFound(op, crates, ctx, found_id, child_tags, luggage, luggage_len);
     kfree(child_tags);
+    return rc;
+}
+
+/* SYSTEM_OP_PROC_EXEC_FILE
+ *   params:   [u64 file id][caller-tag augment (comma-list, may be empty)]
+ *   in_crate (optional): the program's Luggage bytes, whole — no name, no
+ *             NUL; they may hold NULs. No crate starts it with no luggage.
+ *   out_crate (optional): as SYSTEM_OP_PROC_EXEC
+ * Starts that very file, not whichever one the name picks first. It must be
+ * what a name would have started — ACTIVE and wearing app or utility; a file
+ * that is not (no such id, deleted, data) is ERR_FILE_NOT_FOUND, the answer
+ * for a name that is no program. Tags, Luggage and answer are SysProcExecFound's. */
+static int SysProcExecFile(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                           const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || !ctx->proc)                  return ERR_INVALID_ARGUMENT;
+    if (op->param_size < sizeof(uint64_t))   return ERR_INVALID_ARGUMENT;
+
+    if (process_get_count() >= PROCESS_MAX_COUNT) return ERR_PROCESS_LIMIT_EXCEEDED;
+
+    uint64_t file_id;
+    memcpy(&file_id, op->params, sizeof(file_id));
+
+    uint8_t *raw         = NULL;
+    uint32_t luggage_len = 0;
+    if (op->in_crate != CRATE_INDEX_NONE) {
+        Crate *src = &crates[op->in_crate];
+        if (src->size > UINT32_MAX) return ERR_INVALID_ARGUMENT;
+        if (src->size > 0) {
+            raw = crate_in_buf(src, ctx);
+            if (!raw) return ERR_INVALID_ADDRESS;
+            luggage_len = (uint32_t)src->size;
+        }
+    }
+
+    char *found_tags = NULL;
+    int   rc;
+    if (!SysExecCandidate(file_id, &found_tags))
+        rc = ERR_FILE_NOT_FOUND;
+    else
+        rc = SysProcExecAugmented(op, crates, ctx, file_id, found_tags,
+                                  (const char *)op->params + sizeof(file_id),
+                                  op->param_size - sizeof(file_id), raw, luggage_len);
+    if (raw) crate_buf_free(raw);
     return rc;
 }
 
@@ -2285,6 +2344,7 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_PROC_CPUTIME, SysProcCpuTime, OP_AUTH_NONE,   "system.proc.cputime"},
         { SYSTEM_OP_TLS_FSBASE,   SysTlsFsbase,   OP_AUTH_NONE,   "system.tls.fsbase" },
         { SYSTEM_OP_PROC_EXEC,    SysProcExec,    OP_AUTH_UTILITY,"system.proc.exec"  },
+        { SYSTEM_OP_PROC_EXEC_FILE, SysProcExecFile, OP_AUTH_UTILITY,"system.proc.exec.file" },
         { SYSTEM_OP_STRAND_SPAWN, SysStrandSpawn, OP_AUTH_APP,    "system.strand.spawn"},
         { SYSTEM_OP_STRAND_RELEASE, SysStrandRelease, OP_AUTH_APP, "system.strand.release"},
         { SYSTEM_OP_STRAND_POOL_BIND, SysStrandPoolBind, OP_AUTH_APP, "system.strand.pool.bind"},

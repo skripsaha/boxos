@@ -23,6 +23,7 @@
 #define SYS_PROC_INFO   SYSTEM_OP_PROC_INFO
 #define SYS_PROC_CPUTIME SYSTEM_OP_PROC_CPUTIME
 #define SYS_PROC_EXEC   SYSTEM_OP_PROC_EXEC
+#define SYS_PROC_EXEC_FILE SYSTEM_OP_PROC_EXEC_FILE
 #define SYS_DEFRAG      SYSTEM_OP_DEFRAG_FILE
 #define SYS_FRAG_SCORE  SYSTEM_OP_FRAG_SCORE
 #define EFI_INFO_BLOB_SIZE       128u
@@ -184,6 +185,31 @@ void _Exit(int exit_code)
     }
 }
 
+/* One SYS_PROC_EXEC-family call and its {pid, generation} answer. */
+static int proc_exec_submit(uint16_t opcode, const void *params, uint16_t params_size,
+                            const void *crate, uint32_t crate_len, uint32_t *out_gen)
+{
+    /* 8-byte out: the kernel writes {pid, generation} when the crate fits both.
+     * out_actual tells us whether the generation half actually arrived. */
+    uint32_t out_blob[2] = { 0, 0 };
+    uint32_t out_actual = 0;
+    /* WITHOUT a deadline, deliberately. Spawn reads the program off the
+     * medium INSIDE this call — on a throttled stick that is minutes, and a
+     * guessed budget here split one fact into two lies: the caller was told
+     * "refused" while the kernel went on to start the child ("late"). The
+     * reply is guaranteed either way — success or a real error — so there
+     * is nothing for a timer to guard; an answer that never comes is a
+     * kernel defect Nightwatch names, not something to paper over. */
+    int rc = MfCall1(DECK_SYSTEM, opcode,
+                     params, params_size,
+                     crate, crate_len,
+                     out_blob, sizeof(out_blob), &out_actual,
+                     0 /* no deadline */, NULL);
+    if (rc != 0) return box_fail(rc);
+    if (out_gen) *out_gen = (out_actual >= 8) ? out_blob[1] : 0;
+    return (int)out_blob[0];
+}
+
 int proc_exec_gen(const char *line, const char *tags, uint32_t *out_gen)
 {
     if (out_gen) *out_gen = 0;
@@ -212,26 +238,31 @@ int proc_exec_gen(const char *line, const char *tags, uint32_t *out_gen)
     crate[name_len] = '\0';
     memcpy(crate + name_len + 1, line, line_len);
 
-    /* 8-byte out: the kernel writes {pid, generation} when the crate fits both.
-     * out_actual tells us whether the generation half actually arrived. */
-    uint32_t out_blob[2] = { 0, 0 };
-    uint32_t out_actual = 0;
-    /* WITHOUT a deadline, deliberately. Spawn reads the program off the
-     * medium INSIDE this call — on a throttled stick that is minutes, and a
-     * guessed budget here split one fact into two lies: the caller was told
-     * "refused" while the kernel went on to start the child ("late"). The
-     * reply is guaranteed either way — success or a real error — so there
-     * is nothing for a timer to guard; an answer that never comes is a
-     * kernel defect Nightwatch names, not something to paper over. */
-    int rc = MfCall1(DECK_SYSTEM, SYS_PROC_EXEC,
-                     pbuf, psize,                  /* params = caller-tag augment */
-                     crate, (uint32_t)crate_len,   /* in_crate = name, NUL, line */
-                     out_blob, sizeof(out_blob), &out_actual,
-                     0 /* no deadline */, NULL);
+    int pid = proc_exec_submit(SYS_PROC_EXEC, pbuf, psize, crate, (uint32_t)crate_len, out_gen);
     free(crate);
-    if (rc != 0) return box_fail(rc);
-    if (out_gen) *out_gen = (out_actual >= 8) ? out_blob[1] : 0;
-    return (int)out_blob[0];
+    return pid;
+}
+
+int proc_exec_file(file_id_t program, const void *luggage, size_t length,
+                   const char *tags, uint32_t *generation)
+{
+    if (generation) *generation = 0;
+    if (length > 0 && !luggage) return -ERR_INVALID_ARGUMENT;
+    if (length > UINT32_MAX)    return -ERR_INVALID_ARGUMENT;
+
+    /* params: [u64 file id][caller-tag augment]. */
+    uint8_t params[PROC_EXEC_TAGS_MAX];
+    memcpy(params, &program, sizeof(program));
+    size_t psize = sizeof(program);
+    if (tags && tags[0]) {
+        size_t tlen = strlen(tags);
+        if (tlen >= PROC_EXEC_TAGS_MAX - sizeof(program)) return -ERR_INVALID_ARGUMENT;
+        memcpy(params + psize, tags, tlen);
+        psize += tlen;
+    }
+
+    return proc_exec_submit(SYS_PROC_EXEC_FILE, params, (uint16_t)psize,
+                            luggage, (uint32_t)length, generation);
 }
 
 /* proc_exec_tagged / proc_exec are the generation-agnostic spellings: the wire
