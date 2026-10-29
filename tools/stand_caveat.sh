@@ -56,6 +56,25 @@ CAVEAT=0
 # refused by the chain's name: its refusals are MP-D5, under 1.1 — the subset
 # rows too, because step 1.1 links a new block only once a flush has covered
 # its stamp (the owner, 2026-09-28), which closes the epoch they fall in.
+# A book (VOLUME_FORMAT=v2) is given none of the (scenario, code) rows
+# (powercut.sh pc_caveats). Every one is format v1's, and a book's census
+# (bookcensus.py) knows no third state between a block an owner names and a
+# free one, so no ORPHAN, and none of the owners the rest are of — no Spare,
+# file table, pool, tag registry or bitmap — so not one of their codes can
+# mean on a book what its row says (RECORD_SHAPE, the one it says too, is of
+# its own stitch or Tally node, never v1's pool): on a book a row with a step
+# would be a caveat lifted early wherever its census is whole, one with none
+# a PASS for a code no book has. A code a cut of a book shows is a FAIL until
+# the owner assigns it a step. Nor is a book given the rows of nextfid's
+# reissue and race's durable: rows with no step, which hold no caveat — each
+# names in its FAIL a defect of v1's machinery, a table written ahead of its
+# Ledger, a record retired in place, and the durable one keeps race's census,
+# which never builds every cut, a note and never a PASS (powercut_judge.py
+# Durable). On a book their FAIL says what they measured, and race's durable
+# is judged as every oracle with no row: the file whole in every cut built is
+# a PASS that names what it left unbuilt. The promise of noanchor's and hog's
+# verify — the cadence settles a write — is a book's as well, and so are
+# their rows.
 caveat_row() {
     case "$1" in
         longquery)  echo "|a query of 256 bytes or more is dropped unread, and the answer is every file in scope" ;;

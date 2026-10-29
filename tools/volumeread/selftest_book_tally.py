@@ -519,15 +519,18 @@ def ElementCases(bt):
     ]
 
 
+def PlantBookmark(bt, o):
+    """Slot 1 at seq 3, slot 0's Tally with a BOOKMARKS root of one item."""
+    g = bt.ground
+    free = bt.plan.FreeSheet()
+    binder.NodeWrite(o, g, bt.plan.seq, free, 1, tally.BOOKMARKS, 0, [(1, b"\x01\x02\x03")])
+    slot = tally.SlotRead(BookGround(o), 0)
+    slot.roots[tally.BOOKMARKS] = tally.Root(0, 0, 1, bookread.PtrPut(bt.plan.seq, 1, free))
+    o.Put(g.base + tally.SlotBlock(g, 1) * SECTORS_PER_BLOCK, b"".join(tally.SlotSectors(g, 1, 3, slot)))
+
+
 def SlotRootCases(bt):
     g = bt.ground
-
-    def Bookmarks(o):
-        free = bt.plan.FreeSheet()
-        binder.NodeWrite(o, g, bt.plan.seq, free, 1, tally.BOOKMARKS, 0, [(1, b"\x01\x02\x03")])
-        slot = tally.SlotRead(BookGround(o), 0)
-        slot.roots[tally.BOOKMARKS] = tally.Root(0, 0, 1, bookread.PtrPut(bt.plan.seq, 1, free))
-        o.Put(g.base + tally.SlotBlock(g, 1) * SECTORS_PER_BLOCK, b"".join(tally.SlotSectors(g, 1, 3, slot)))
 
     def Unread(o):
         """Slot 1 at seq 3, its TAGS root a node whose keys do not rise: its
@@ -588,7 +591,7 @@ def SlotRootCases(bt):
             o.Put(g.base + vlba, FrameDeed(deed, frame, boot, role, frame_bytes=frame_bytes))
 
     return [
-        Case("B13 BOOKMARKS not empty", Bookmarks, must={"UNDER_GLASS"}, checks=[
+        Case("B13 BOOKMARKS not empty", lambda o: PlantBookmark(bt, o), must={"UNDER_GLASS"}, checks=[
             ("the newest slot, 1 at seq 3, is stood on", lambda c: c.mount.slot.index == 1),
             ("and the volume is read only: a bookmark this kernel cannot hold",
              lambda c: Glass(c, "BOOKMARKS")),

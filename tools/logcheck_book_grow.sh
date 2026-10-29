@@ -208,9 +208,9 @@ run_growcutbook() {
     chk $? "growcutbook: the record of the boot that grew accounts for the image it left — $said"
     # Every write of it named (blklog.py, blklog_book.py): the far Deed in the
     # new ground, the old one erased, and what lands past the old end after.
-    rc=$(python3 tools/volume-read.py "$base" cut "$record" --list 2>/dev/null | grep -cE '(  |; )unowned ')
+    rc=$(python3 tools/volume-read.py "$base" cut "$record" --list 2>/dev/null | grep -cE '(  |; )(unowned|free) ')
     [ "$rc" = 0 ]
-    chk $? "growcutbook: every write of the record is named, the ground the growth took among them — $rc unowned"
+    chk $? "growcutbook: every write of the record is named, the ground the growth took among them — $rc unowned or on free ground"
     tail=$(grep -aoE 'its far copy has moved to sector [0-9]+' "$SCRATCH/serial.growcutbook1.log" | head -1 | grep -oE '[0-9]+$')
     epoch=$(grow_book_head_epoch "$base" "$record" "$start" "${tail:-0}")
     [ -n "$epoch" ]

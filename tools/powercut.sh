@@ -68,7 +68,7 @@
 # unanchored create (noanchor, hog) and race's lost anchored file under 1.4
 # (the owner, 2026-09-27); chaingrow's are (scenario, prefix|subset, code),
 # a chain refused named by its chain; its refusals were held under 1.1, which
-# lifted them.
+# lifted them. A book is given its verify rows alone (stand_caveat.sh).
 # A caveated code no cut shows is lifted early only where its absence is
 # proof: every medium of its kind built — every subset, or for a prefix
 # code every prefix — and no writer left writing through the record.
@@ -369,13 +369,12 @@ pc_record() {
     python3 "$VR" "$PC_DIR/base.img" cut "$PC_DIR/run.log" --list --json >"$PC_DIR/list.json" || {
         harness "$PC_NAME: volume-read could not list the record"; return 1; }
     if [ "$PC_FORMAT" = v2 ]; then
-        # A book's every block is an owner's, and its record names each write
-        # by its sectors' heads or the stitch after it (blklog_book.py).
-        said=$(python3 -c 'import json, sys
-print(sum(t["kind"] == "unowned" for w in json.load(open(sys.argv[1]))["writes"] for t in w["touches"]))' \
-            "$PC_DIR/list.json")
-        [ "$said" = 0 ]
-        chk $? "$PC_NAME: every write of the record on the book is named — $said unowned"
+        # A book's every block is an owner's or free: its record names each
+        # write by its heads, the stitch after it or its census (blklog_book.py).
+        said=$(python3 -c 'import json, sys; k = [t["kind"] for w in json.load(open(sys.argv[1]))["writes"]
+for t in w["touches"]]; print(k.count("unowned"), k.count("free"))' "$PC_DIR/list.json")
+        [ "${said% *}" = 0 ]
+        chk $? "$PC_NAME: every write of the record on the book is named, or data on ground free as of its epoch (§3.4 L-8) — ${said% *} unowned, ${said#* } free"
     fi
     PC_SEED=$(shasum -a 256 "$PC_DIR/run.log" | cut -c1-16)
     python3 "$PC" plan "$PC_DIR/list.json" --seed "$PC_SEED" --all-max "$PC_SUBSET_ALL_MAX" \
@@ -436,13 +435,13 @@ pc_caveats() {
         noanchor|noanchormut) base=noanchor; echo "verify=noanchor"; codes="ORPHAN" ;;
         hog)                  base=hog; echo "verify=hog"; codes="ORPHAN" ;;
         nextfid|nextfidmut|poolmut|flushmut)
-            base=nextfid; echo "reissue=nextfid"
+            base=nextfid; [ "$PC_FORMAT" = v2 ] || echo "reissue=nextfid"
             codes="FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT UNNAMED_RECORD" ;;
         halt)
             base=halt
             codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT UNNAMED_RECORD" ;;
         race)
-            base=race; echo "durable:_qt_churn@race=race:durable"
+            base=race; [ "$PC_FORMAT" = v2 ] || echo "durable:_qt_churn@race=race:durable"
             codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN RECORD_SHAPE SPARE_UNNAMED TAG_ABSENT TAG_DUPLICATE UNNAMED_RECORD" ;;
         settlecut) base=settlecut; codes="FID_PAST_NEXT ORPHAN SPARE_UNNAMED" ;;
         chaingrow)
@@ -452,7 +451,7 @@ pc_caveats() {
                    subset:FID_PAST_NEXT subset:FILE_LOST subset:MISSING subset:ORPHAN subset:SPARE_UNNAMED
                    subset:TAG_ABSENT" ;;
     esac
-    for code in $codes; do echo "code:$code=$base:$code"; done
+    [ "$PC_FORMAT" = v2 ] || for code in $codes; do echo "code:$code=$base:$code"; done
 }
 
 # pc_judge ARGS... — every oracle (tools/powercut.py judge), into
