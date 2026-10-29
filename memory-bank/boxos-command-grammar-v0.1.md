@@ -60,6 +60,11 @@ label) did not go through; the rest is not done"). It has no conditions, so
 one that would run itself again is not started. An arrow on it goes into its
 `into` field; with none it is refused.
 
+**Lists.** A comma list is a list of things: `them`, `it`, `all` and an
+Itinerary's field names mean in it what they mean alone (`tag a.txt, them
+done`); quoted, they are plain words. A file is in a field once, however many
+words name it.
+
 ```text
 takes thing source "the source"        tidy n1.txt, n2.txt done
 assemble source                        try planets.asm

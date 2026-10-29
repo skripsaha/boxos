@@ -49,14 +49,15 @@ static uint32_t given_named(const BoxFormLookup *lookup, const char *word)
     return 0;
 }
 
-/* What a word is. A name of the running Itinerary's fields is what it was
- * given — files only where files are looked up, as `them`; the shell's words
- * are read only where files are looked up. */
+/* What a word is, alone or in a comma list alike; quoted, it is a plain
+ * word. A name of the running Itinerary's fields is what it was given —
+ * files only where files are looked up, as `them`; the shell's words are
+ * read only where files are looked up. */
 static uint8_t role_of(const BoxFormLookup *lookup, const FormToken *token, bool keywords,
                        uint32_t *given)
 {
     *given = 0;
-    if (token->Quoted || token->CommaBefore || token->CommaAfter) return FORM_ROLE_WORD;
+    if (token->Quoted) return FORM_ROLE_WORD;
     uint32_t named = given_named(lookup, token->Text);
     if (named != 0 && (keywords || !lookup->Given[named - 1].Things)) {
         *given = named;

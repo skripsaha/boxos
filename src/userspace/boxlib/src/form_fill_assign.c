@@ -216,6 +216,15 @@ static int check_lists(BoxFormFiller *filler, uint32_t field)
     return 0;
 }
 
+/* A field's files are files, each there once, however many words named it. */
+static int add_file(FormFieldValue *out, file_id_t id)
+{
+    for (size_t i = 0; i < out->IdCount; i++) {
+        if (out->Ids[i] == id) return 0;
+    }
+    return form_values_add_id(out, id);
+}
+
 static int take_things(BoxFormFiller *filler, uint32_t field)
 {
     FormFieldValue *out = &filler->Values.Fields[field];
@@ -239,7 +248,7 @@ static int take_things(BoxFormFiller *filler, uint32_t field)
         rc = admit(filler, i, single);
         if (rc != 0) return rc;
         for (size_t k = 0; k < item->IdCount; k++) {
-            rc = form_values_add_id(out, item->Ids[k]);
+            rc = add_file(out, item->Ids[k]);
             if (rc != 0) return rc;
         }
         item->Taken = 1;

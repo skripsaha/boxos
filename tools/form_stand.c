@@ -392,7 +392,7 @@ static void test_shell_words(void)
     expect(RENAME, "it x", pick, "WHICH(it:2) => thing(#2) name(=x)");
     expect(TAG, "it done", NULL, "WHICH(it:2) UNANSWERED");
     expect(TAG, "a.txt it done", pick, "WHICH(it:2) => things(#1 #2) words(=done)");
-    expect(TAG, "them it done", pick, "WHICH(it:2) => things(#1 #2 #2) words(=done)");
+    expect(TAG, "them it done", pick, "WHICH(it:2) => things(#1 #2) words(=done)");
     reset_volume();
     set_them((const file_id_t[]){ 3 }, 1);
     expect(TAG, "it done", NULL, "=> things(#3) words(=done)");
@@ -1000,7 +1000,9 @@ static void test_given(void)
     expect(TAG, "nothing label", NULL, "FIELD(0:nothing was given no files) UNANSWERED");
     expect(TAG, "a.txt nothing label", NULL, "REFUSED: nothing was given no files");
     expect(TAG, "\"label\" a.txt", NULL, "=> things(#1) words(=label)");
-    expect(TAG, "a.txt, files done", NULL, "REFUSED: there is no files here");
+    expect(TAG, "a.txt, files done", NULL, "=> things(#1 #2) words(=done)");
+    expect(TAG, "a.txt label, more", NULL, "=> things(#1) words(=done =urgent =more)");
+    expect(TAG, "a.txt, \"files\" done", NULL, "REFUSED: there is no files here");
     expect(TAG, "files label -> newname", NULL, "=> things(#1 #2) words(=done =urgent) create=idea.txt");
     expect(TAG, "files label -> label", NULL,
            "REFUSED: -> wants a name after it, and label stands for more than one word");
@@ -1013,6 +1015,28 @@ static void test_given(void)
     expect(TAG, "it files label", NULL, "REFUSED: nothing was given before");
     expect(RENAME, "files newname", pick, "WHICH(files:2) => thing(#2) name(=idea.txt)");
     reset_volume();
+}
+
+/* A comma list is a list of things: `them`, `it` and `all` mean in it what
+ * they mean alone; quoted, they are plain words. A file is in a field once. */
+static void test_lists_of_things(void)
+{
+    reset_volume();
+    set_them((const file_id_t[]){ 3 }, 1);
+    expect(TAG, "a.txt, them done", NULL, "=> things(#1 #3) words(=done)");
+    expect(TAG, "them, b.txt done", NULL, "=> things(#3 #2) words(=done)");
+    expect(TAG, "a.txt, it done", NULL, "=> things(#1 #3) words(=done)");
+    expect(TAG, "a.txt, \"them\" done", NULL, "REFUSED: there is no them here");
+    expect(TAG, "them, done x", NULL, "REFUSED: there is no done here");
+    expect(TAG, "a.txt, them, a.txt done", NULL, "=> things(#1 #3) words(=done)");
+    expect(WORDS, "a, them", NULL, "=> words(=a =them)");
+    reset_volume();
+    set_them((const file_id_t[]){ 1, 2 }, 2);
+    const char *pick[] = { "which:2", NULL };
+    expect(TAG, "c.txt, it done", pick, "WHICH(it:2) => things(#9 #2) words(=done)");
+    expect(TAG, "them, a.txt done", NULL, "=> things(#1 #2) words(=done)");
+    reset_volume();
+    expect(TAG, "a.txt, them done", NULL, "REFUSED: nothing was given before");
 }
 
 static void test_given_names(void)
@@ -1102,6 +1126,7 @@ int main(void)
     test_souvenir_wanted();
     test_given();
     test_given_names();
+    test_lists_of_things();
     printf("form: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

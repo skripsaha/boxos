@@ -41,7 +41,7 @@ extern "C" {
  *
  * KIND:
  *     thing    one file that is here
- *     things   one file or more: names (a list with commas), them, it, all
+ *     things   one file or more: names, them, it, all — a list with commas of any of them
  *     name     one word, a name new or not: the program makes of it what it is
  *     words    words, tags mostly, as many as are typed
  *     text     the rest of the line as typed, sorted into nothing
@@ -173,7 +173,7 @@ int  form_of_file(file_id_t program, BoxForm *out);
 void form_release(BoxForm *form);
 
 /* What an Itinerary was given under one of its fields' names. A step's word
- * that is such a name — not quoted, not in a comma list — is what was given:
+ * that is such a name — not quoted; alone or in a comma list — is what was given:
  * files where files are taken (as `them` is; to a Form with no thing field
  * the name is a plain word), words wherever words are taken, the words
  * joined by single spaces in a text field, and the one word of a name or of
@@ -234,9 +234,10 @@ typedef struct BoxFormFiller BoxFormFiller;
 /* Begin filling Form from Line — the words after the program's name, as
  * typed. The words are cut as Luggage cuts them (blanks, "double quotes"); a
  * comma ends a word and joins the next to its list; `->` and the word after
- * it are the arrow; `them` `it` `all` `everywhere` are the shell's words, but
- * only for a Form with a thing or things field — to any other they are plain
- * words. `everywhere` makes the lookups of the names after it span the whole
+ * it are the arrow; `them` `it` `all` `everywhere` are the shell's words —
+ * alone or in a list alike, plain when quoted — but only for a Form with a
+ * thing or things field — to any other they are plain words. A file is in a
+ * field once, however many words name it. `everywhere` makes the lookups of the names after it span the whole
  * volume. The words are looked up as a field asks for them, and a Form whose
  * first field is text looks up nothing. Form and lookup outlive the filler. */
 int  form_fill_begin(const BoxForm *form, const char *line, BoxFormLookup *lookup,
