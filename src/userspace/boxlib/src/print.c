@@ -824,11 +824,12 @@ static bool arrow_append(file_id_t file, const char *bytes, size_t len)
     umutex_lock(&g_arrow.lock);
     bool ok = !g_arrow.given_up;
     if (ok && !g_arrow.found) {
-        file_info_t info;
-        ok = file_info(file, &info) == 0;
+        FileMetadata metadata;
+        ok = FileMetadataRead(file, &metadata) == 0;
         if (ok) {
-            g_arrow.offset = info.size;
+            g_arrow.offset = metadata.Size;
             g_arrow.found  = true;
+            FileMetadataRelease(&metadata);
         }
     }
     while (ok && len > 0) {

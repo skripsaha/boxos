@@ -54,7 +54,7 @@ static int resolve(BoxFormFiller *filler, FormItem *item)
     BoxFormLookup *lookup = filler->Lookup;
     int rc = 0;
 
-    if (item->Role == FORM_ROLE_THEM) {
+    if (item->Role == FORM_ROLE_THEM || item->Role == FORM_ROLE_IT) {
         rc = resolve_them(filler, item);
     } else {
         file_id_t *ids = NULL;
@@ -115,7 +115,7 @@ static int ask_sure(BoxFormFiller *filler, size_t at)
 static const char *failure_reason(BoxFormFiller *filler, const FormItem *item, int *error)
 {
     *error = 0;
-    if (item->Role == FORM_ROLE_THEM)
+    if (item->Role == FORM_ROLE_THEM || item->Role == FORM_ROLE_IT)
         return filler->Lookup->ThemKnown ? "the last command gave nothing" : "nothing was given before";
     if (item->Role == FORM_ROLE_ALL) return "there are no files here";
 
@@ -163,13 +163,14 @@ static int ask_field(BoxFormFiller *filler, uint32_t field)
 
 /* ---- thing and things ------------------------------------------------- */
 
-/* Does the file word need an answer before it can be taken. */
+/* Does the file word need an answer before it can be taken. `it` is one file:
+ * several given ask which; `them` is all of them. */
 static int admit(BoxFormFiller *filler, size_t at, bool single)
 {
     FormItem *item = &filler->Items[at];
 
     if (item->Role == FORM_ROLE_ALL && !item->Bounded && !item->Sure) return ask_sure(filler, at);
-    if (item->IdCount > 1 && (item->Role == FORM_ROLE_WORD || single)) return ask_which(filler, at);
+    if (item->IdCount > 1 && (item->Role == FORM_ROLE_WORD || item->Role == FORM_ROLE_IT || single)) return ask_which(filler, at);
     return 0;
 }
 

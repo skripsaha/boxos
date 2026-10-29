@@ -43,7 +43,8 @@ int form_fill_refuse(BoxFormFiller *filler, const char *a, const char *b, const 
 static uint8_t role_of(const FormToken *token)
 {
     if (token->Quoted || token->CommaBefore || token->CommaAfter) return FORM_ROLE_WORD;
-    if (strcmp(token->Text, "them") == 0 || strcmp(token->Text, "it") == 0) return FORM_ROLE_THEM;
+    if (strcmp(token->Text, "them") == 0) return FORM_ROLE_THEM;
+    if (strcmp(token->Text, "it") == 0) return FORM_ROLE_IT;
     if (strcmp(token->Text, "all") == 0) return FORM_ROLE_ALL;
     return FORM_ROLE_WORD;
 }

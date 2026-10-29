@@ -130,15 +130,25 @@ static void WaitGone(const char *who, uint32_t pid, uint32_t generation)
                    who, pid, generation, rc);
 }
 
-/* What the program gave becomes `them` when its Form says it gives things;
- * what it queued otherwise is read off so no stale gift is met later. */
-static void KeepGift(const BoxForm *form, uint32_t pid)
+/* What the command gave becomes `them`. When its screen went into a file
+ * through the arrow, that file is what it gave, whatever the program gave
+ * back; otherwise the program's Souvenir decides, when its Form says it gives
+ * things. What it queued is read off either way so no stale gift is met later. */
+static void KeepGift(const BoxForm *form, uint32_t pid, file_id_t screen)
 {
     file_id_t *given = NULL;
     size_t     count = 0;
-    if (souvenir_collect(pid, &given, &count) != 0) return;
+    bool       collected = souvenir_collect(pid, &given, &count) == 0;
 
-    if (form->Gives == BOX_FORM_GIVES_THINGS) {
+    if (screen != 0) {
+        free(given);
+        given = malloc(sizeof(file_id_t));
+        if (!given) return;
+        given[0] = screen;
+        ThemKeep(given, 1);
+        return;
+    }
+    if (collected && form->Gives == BOX_FORM_GIVES_THINGS) {
         ThemKeep(given, count);
         return;
     }
@@ -165,7 +175,7 @@ static int Launch(BoxFormFiller *filler, const BoxForm *form, file_id_t program,
     }
 
     WaitGone(who, (uint32_t)pid, generation);
-    KeepGift(form, (uint32_t)pid);
+    KeepGift(form, (uint32_t)pid, screen);
     return 0;
 }
 

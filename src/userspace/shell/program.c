@@ -49,16 +49,29 @@ bool ProgramIsRunnable(file_id_t id)
     return runnable;
 }
 
+static char *CopyName(const FileMetadata *metadata)
+{
+    if (!metadata->Filename) return NULL;
+    size_t length = strlen(metadata->Filename);
+    char  *name = malloc(length + 1);
+    if (name) memcpy(name, metadata->Filename, length + 1);
+    return name;
+}
+
 char *ProgramNameOf(file_id_t id)
 {
     FileMetadata metadata;
     if (FileMetadataRead(id, &metadata) != 0) return NULL;
-    char *name = NULL;
-    if (metadata.Filename) {
-        size_t length = strlen(metadata.Filename);
-        name = malloc(length + 1);
-        if (name) memcpy(name, metadata.Filename, length + 1);
-    }
+    char *name = CopyName(&metadata);
+    FileMetadataRelease(&metadata);
+    return name;
+}
+
+char *ProgramRunnableName(file_id_t id)
+{
+    FileMetadata metadata;
+    if (FileMetadataRead(id, &metadata) != 0) return NULL;
+    char *name = IsProgram(&metadata) ? CopyName(&metadata) : NULL;
     FileMetadataRelease(&metadata);
     return name;
 }

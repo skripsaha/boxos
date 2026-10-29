@@ -352,7 +352,8 @@ static void test_examples(void)
     const file_id_t both[] = { 1, 2 };
     set_them(both, 2);
     expect(TAG, "them done", NULL, "=> things(#1 #2) words(=done)");
-    expect(TAG, "it done", NULL, "=> things(#1 #2) words(=done)");
+    const char *second[] = { "which:2", NULL };
+    expect(TAG, "it done", second, "WHICH(it:2) => things(#2) words(=done)");
     reset_volume();
     expect(RENAME, "a.txt idea.txt", NULL, "=> thing(#1) name(=idea.txt)");
 }
@@ -383,9 +384,22 @@ static void test_shell_words(void)
     expect(RENAME, "them x", NULL, "WHICH(them:2) UNANSWERED");
     const char *pick[] = { "which:2", NULL };
     expect(RENAME, "them x", pick, "WHICH(them:2) => thing(#2) name(=x)");
+    expect(RENAME, "it x", pick, "WHICH(it:2) => thing(#2) name(=x)");
+    expect(TAG, "it done", NULL, "WHICH(it:2) UNANSWERED");
+    expect(TAG, "a.txt it done", pick, "WHICH(it:2) => things(#1 #2) words(=done)");
+    expect(TAG, "them it done", pick, "WHICH(it:2) => things(#1 #2 #2) words(=done)");
+    reset_volume();
+    set_them((const file_id_t[]){ 3 }, 1);
+    expect(TAG, "it done", NULL, "=> things(#3) words(=done)");
+    expect(RENAME, "it x", NULL, "=> thing(#3) name(=x)");
+    expect(TAG, "them done", NULL, "=> things(#3) words(=done)");
+    expect(WORDS, "it them", NULL, "=> words(=it =them)");
     reset_volume();
     g_them_known = true;
     expect(TAG, "them done", NULL, "FIELD(0:the last command gave nothing) UNANSWERED");
+    expect(TAG, "it done", NULL, "FIELD(0:the last command gave nothing) UNANSWERED");
+    reset_volume();
+    expect(TAG, "it done", NULL, "FIELD(0:nothing was given before) UNANSWERED");
 
     reset_volume();
     expect(TAG, "all done", NULL, "=> things(#1 #2 #3 #4 #7 #8 #9) words(=done)");

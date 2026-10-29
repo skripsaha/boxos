@@ -64,6 +64,20 @@ extern "C" {
  *     =TEXT             a word of the field (a name and the text are one each)
  *     screen #ID        what the program prints is added to the end of this file
  *
+ * ---- The arrow and what a command gives --------------------------------
+ *
+ * `->` and the word after it put the result into a thing. A program with an
+ * `into` field is handed the name and puts its result there itself; what it
+ * made, it gives back with souvenir_things(), and that is what `them` is
+ * after it. Any other program writes to the screen, and the arrow turns the
+ * screen into the file (`screen #ID`): then that file is what the command
+ * gave, whatever the program gave back — `planets -> out.txt` makes `them`
+ * and `it` the file out.txt. The shell does this once the program is gone.
+ *
+ * `them` is all that the last command gave; `it` is one file: the file when
+ * it gave one, a question which when it gave several. A program that fills its
+ * own Form has no one to ask and refuses `it` with several, as any question.
+ *
  * A program without a Form still gets `filled 1` and, with an arrow,
  * `screen #ID`, and its line without the arrow. luggage_word() and
  * luggage_tail() read the line only, as they always did.
@@ -155,7 +169,7 @@ struct BoxFormLookup {
     /* Every file in the Use Context (`all`); *Bounded 0 when there is no
      * context and the answer is the whole volume. */
     int (*All)(BoxFormLookup *lookup, file_id_t **ids, bool *bounded);
-    const file_id_t *Them;     /* `them`/`it`: what the last command gave */
+    const file_id_t *Them;     /* `them` all of it, `it` one of it: what the last command gave */
     size_t           ThemCount;
     bool             ThemKnown;
 };
@@ -168,7 +182,7 @@ void form_lookup_volume(BoxFormLookup *lookup);
 
 typedef enum {
     BOX_FORM_DONE = 0,
-    BOX_FORM_ASK_WHICH,        /* Word means several files: choose one of Choices */
+    BOX_FORM_ASK_WHICH,        /* Word (a name, or `it`) means several files: choose one of Choices */
     BOX_FORM_ASK_FIELD,        /* Field is required and empty: words for it */
     BOX_FORM_ASK_SURE,         /* `all` is the whole volume, Count files: yes or no */
     BOX_FORM_REFUSED           /* the line cannot be filled: Word is the sentence */

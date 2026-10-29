@@ -12,6 +12,7 @@
 #include "parser.h"
 #include "program.h"
 #include "fill.h"
+#include "suggest.h"
 #include "box/string.h"
 #include "box/error.h"
 #include "box/core/result.h"
@@ -61,6 +62,20 @@ static int RunExternal(const char *name, const char *line)
 
     FillAndRun(program, name, ParserRest(line, 1));
     return 0;
+}
+
+/* The names close to the one typed, on a line of their own after the message;
+ * nothing when none is close or they do not fit. */
+static void AppendSuggestion(const char *name)
+{
+    char suggestion[SHELL_ERROR_MAX];
+    if (!SuggestFor(name, suggestion, sizeof(suggestion))) return;
+
+    size_t used = strlen(g_error);
+    size_t length = strlen(suggestion);
+    if (used + 1 + length >= SHELL_ERROR_MAX) return;
+    g_error[used] = '\n';
+    memcpy(g_error + used + 1, suggestion, length + 1);
 }
 
 /* =========================================================================
@@ -116,6 +131,7 @@ int ExecutorRun(ParsedCommand *cmd, const char *line)
         memcpy(g_error, "Unknown command: ", 17);
         memcpy(g_error + 17, name, name_len);
         g_error[17 + name_len] = '\0';
+        AppendSuggestion(name);
     } else {
         /* The name is real; starting it is what failed. */
         if (name_len > SHELL_ERROR_MAX - tail_len - 2)

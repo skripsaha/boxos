@@ -18,6 +18,7 @@ extern "C" {
 enum {
     FORM_ROLE_WORD = 0,
     FORM_ROLE_THEM,
+    FORM_ROLE_IT,
     FORM_ROLE_ALL
 };
 
