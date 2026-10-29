@@ -411,6 +411,22 @@ assembly_refuses rep_sse_form "$HEAD    rep movsd xmm0, xmm1"$'\n' \
     "rep_sse_form.asm:4:5: rep repeats only a string instruction, written without operands, not this form of 'movsd'"
 assembly_refuses avx_register "$HEAD    addps ymm0, xmm1"$'\n' \
     "avx_register.asm:4:11: 'ymm0' is an AVX register; BoxASM has SSE's xmm0 to xmm15"
+assembly_refuses blendv_mask "$HEAD    blendvps xmm1, xmm2, xmm3"$'\n' \
+    "blendv_mask.asm:4:5: the mask is only xmm0, written third or left out, in 'blendvps'"
+assembly_refuses pextrb_word_register "$HEAD    pextrb ax, xmm1, 3"$'\n' \
+    "pextrb_word_register.asm:4:5: these operands are not a form of 'pextrb'"
+assembly_refuses pextrb_memory_size "$HEAD    pextrb word [rax], xmm1, 3"$'\n' \
+    "pextrb_memory_size.asm:4:5: the memory is read as 1 byte (byte, or no size) by 'pextrb'"
+assembly_refuses pmovzxbq_memory_size "$HEAD    pmovzxbq xmm0, dword [rax]"$'\n' \
+    "pmovzxbq_memory_size.asm:4:5: the memory is read as 2 bytes (word, or no size) by 'pmovzxbq'"
+assembly_refuses pinsrb_wide_register "$HEAD    pinsrb xmm0, rax, 1"$'\n' \
+    "pinsrb_wide_register.asm:4:5: these operands are not a form of 'pinsrb'"
+assembly_refuses lddqu_register "$HEAD    lddqu xmm0, xmm1"$'\n' \
+    "lddqu_register.asm:4:5: these operands are not a form of 'lddqu'"
+assembly_refuses crc32_unsized "$HEAD    crc32 eax, [rax]"$'\n' \
+    "crc32_unsized.asm:4:5: these operands are not a form of 'crc32'"
+assembly_refuses ssse3_unaligned $'section .data\nv dd 1, 2, 3, 4\n'"$HEAD    pshufb xmm0, [v]"$'\n' \
+    "ssse3_unaligned.asm:6:5: 'pshufb' needs its memory on a 16-byte boundary, and 'v' is not known to be: put align 16 before the data"
 assembly_refuses float_in_code "$HEAD    mov eax, 1.5"$'\n' \
     "float_in_code.asm:4:14: a floating-point number stands only in dd or dq data: put it there and load it from memory"
 assembly_refuses float_in_word $'section .data\n    dw 1.5\n' \

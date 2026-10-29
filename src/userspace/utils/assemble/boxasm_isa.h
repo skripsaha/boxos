@@ -25,14 +25,22 @@ typedef enum {
     BOXASM_CLASS_RM8,        /* a register or memory of exactly 1 byte */
     BOXASM_CLASS_RM16,
     BOXASM_CLASS_RM32,
+    BOXASM_CLASS_RM64,
     BOXASM_CLASS_XMM,        /* an xmm register, in ModRM.reg */
+    BOXASM_CLASS_XMM0,       /* exactly xmm0, named by no field (the mask of blendvps) */
     BOXASM_CLASS_XMM_R,      /* an xmm register, in ModRM.rm */
     BOXASM_CLASS_XMM_M32,    /* an xmm register or 4 bytes of memory, in ModRM.rm */
+    BOXASM_CLASS_XMM_M16,    /* an xmm register or 2 bytes of memory (pmovzxbq) */
     BOXASM_CLASS_XMM_M64,    /* an xmm register or 8 bytes of memory */
     BOXASM_CLASS_XMM_M128,   /* an xmm register or 16 bytes of memory on a 16-byte boundary */
     BOXASM_CLASS_XMM_U128,   /* an xmm register or 16 bytes of memory anywhere (movups) */
+    BOXASM_CLASS_U128,       /* 16 bytes of memory anywhere (lddqu) */
+    BOXASM_CLASS_M8,         /* 1 byte of memory */
+    BOXASM_CLASS_M16,        /* 2 bytes of memory */
+    BOXASM_CLASS_M32,        /* 4 bytes of memory */
     BOXASM_CLASS_M64,        /* 8 bytes of memory */
     BOXASM_CLASS_M128,       /* 16 bytes of memory on a 16-byte boundary */
+    BOXASM_CLASS_REG_R,      /* a general register of the operation size, in ModRM.rm (pextrb) */
     BOXASM_CLASS_R32_M16     /* a 32- or 64-bit register, or 2 bytes of memory (pinsrw) */
 } BoxAsmOperandClass;
 
@@ -54,6 +62,7 @@ typedef enum {
 #define BOXASM_FORM_NOT_EAX    0x20u  /* not with eax as the +r register (xchg eax, eax) */
 #define BOXASM_FORM_REX_W      0x40u  /* REX.W whatever the size (cmpxchg16b) */
 #define BOXASM_FORM_PREDICATE  0x80u  /* the statement's condition follows as an imm8 (cmpltps) */
+#define BOXASM_FORM_DATA16     0x100u /* a 66 prefix whatever the size (crc32 r32, r/m16) */
 
 typedef struct {
     uint8_t Class[3];
@@ -61,7 +70,7 @@ typedef struct {
     uint8_t Opcode[4];
     uint8_t OpcodeLength;
     uint8_t Digit;
-    uint8_t Flags;
+    uint16_t Flags;
     uint8_t Prefix;      /* a prefix that is part of the opcode (F3 of popcnt), 0 none */
 } BoxAsmForm;
 

@@ -335,6 +335,24 @@ SSE_INTEGER = ["paddb", "paddw", "paddd", "paddq", "psubb", "psubw", "psubd", "p
                "pcmpeqb", "pcmpeqw", "pcmpeqd", "pcmpgtb", "pcmpgtw", "pcmpgtd", "packsswb",
                "packssdw", "packuswb", "punpcklbw", "punpcklwd", "punpckldq", "punpcklqdq",
                "punpckhbw", "punpckhwd", "punpckhdq", "punpckhqdq"]
+SSE3_OPERATIONS = [("addsubps", "oword"), ("addsubpd", "oword"), ("haddps", "oword"),
+                   ("haddpd", "oword"), ("hsubps", "oword"), ("hsubpd", "oword"),
+                   ("movddup", "qword"), ("movshdup", "oword"), ("movsldup", "oword")]
+SSSE3_OPERATIONS = ["pshufb", "phaddw", "phaddd", "phaddsw", "pmaddubsw", "phsubw", "phsubd",
+                    "phsubsw", "psignb", "psignw", "psignd", "pmulhrsw", "pabsb", "pabsw", "pabsd"]
+SSE41_OPERATIONS = ["ptest", "pmuldq", "pcmpeqq", "packusdw", "pminsb", "pminsd", "pminuw",
+                    "pminud", "pmaxsb", "pmaxsd", "pmaxuw", "pmaxud", "pmulld", "phminposuw",
+                    "pcmpgtq"]
+SSE_IMMEDIATE_OPERATIONS = [("palignr", "oword"), ("blendps", "oword"), ("blendpd", "oword"),
+                            ("pblendw", "oword"), ("dpps", "oword"), ("dppd", "oword"),
+                            ("mpsadbw", "oword"), ("pcmpestrm", "oword"), ("pcmpestri", "oword"),
+                            ("pcmpistrm", "oword"), ("pcmpistri", "oword"), ("roundps", "oword"),
+                            ("roundpd", "oword"), ("roundss", "dword"), ("roundsd", "qword"),
+                            ("insertps", "dword")]
+SSE_WIDENING = [("pmovsxbw", "qword"), ("pmovsxbd", "dword"), ("pmovsxbq", "word"),
+                ("pmovsxwd", "qword"), ("pmovsxwq", "dword"), ("pmovsxdq", "qword"),
+                ("pmovzxbw", "qword"), ("pmovzxbd", "dword"), ("pmovzxbq", "word"),
+                ("pmovzxwd", "qword"), ("pmovzxwq", "dword"), ("pmovzxdq", "qword")]
 SSE_SHIFTS = ["psllw", "pslld", "psllq", "psrlw", "psrld", "psrlq", "psraw", "psrad"]
 
 
@@ -427,6 +445,86 @@ def sse_lines():
     out += ["ldmxcsr [rsp]", "stmxcsr [rsp + 4]", "ldmxcsr dword [sse_data]",
             "prefetchnta [rax]", "prefetcht0 [rsi + 64]", "prefetcht1 [r12]",
             "prefetcht2 byte [sse_data]", "clflush [rdi]"]
+    return out
+
+
+def sse_immediate(op, size_word):
+    """An xmm operation with an imm8, on register pairs and on memory, sized and not."""
+    out = ["%s %s, %s, 0x%02X" % (op, a, b, (i * 37 + 5) & 0xFF)
+           for i, (a, b) in enumerate(xmm_pairs())]
+    out += ["%s %s, %s, %d" % (op, XMM[(i * 3) % 16], mem, (i * 71) & 0xFF)
+            for i, mem in enumerate(SSE_MEMORY)]
+    out += ["%s xmm11, %s [rdx + 32], 255" % (op, size_word), "%s xmm0, xmm15, 0" % op]
+    return out
+
+
+def crc32_lines(nasm):
+    """crc32 of every width; a 64-bit destination over a byte as NASM writes it,
+    without REX.W."""
+    out = []
+    for i in range(16):
+        out += ["crc32 %s, %s" % (REG32[i], REG8[(i + 7) % 16]),
+                "crc32 %s, %s" % (REG32[(i + 5) % 16], REG16[(i + 3) % 16]),
+                "crc32 %s, %s" % (REG32[(i + 9) % 16], REG32[i]),
+                "crc32 %s, %s" % (REG64[i], REG64[(i * 5 + 3) % 16]),
+                "crc32 %s, %s" % (REG64[i], REG8[(i + 7) % 16])]
+    for mem in MEMORY[:12]:
+        out += ["crc32 eax, byte %s" % mem, "crc32 r9d, word %s" % mem,
+                "crc32 ebx, dword %s" % mem, "crc32 rdx, qword %s" % mem,
+                "crc32 r11, byte %s" % mem]
+    out += ["crc32 eax, ah", "crc32 r10d, sil", "crc32 ecx, bh"]
+    return out
+
+
+def sse_extension_lines(nasm):
+    """SSE3, SSSE3, SSE4.1 and SSE4.2, each instruction in each of its forms."""
+    out = []
+    for op, word in SSE3_OPERATIONS:
+        out += sse_operation(op, word)
+    out += ["lddqu %s, %s" % (XMM[(i * 5) % 16], mem) for i, mem in enumerate(SSE_MEMORY)]
+    out += ["lddqu xmm3, [rax + 1]", "lddqu xmm12, oword [rdx + 33]", "monitor", "mwait"]
+    for op in SSSE3_OPERATIONS + SSE41_OPERATIONS:
+        out += sse_operation(op, "oword")
+    for op in ("blendvps", "blendvpd", "pblendvb"):
+        out += ["%s %s, %s" % (op, a, b) for a, b in xmm_pairs()]
+        out += ["%s %s, %s, xmm0" % (op, a, b) for a, b in xmm_pairs()]
+        out += ["%s xmm%d, %s" % (op, 2 + i, mem) for i, mem in enumerate(SSE_MEMORY)]
+        out += ["%s xmm%d, %s, xmm0" % (op, 9 + i, mem) for i, mem in enumerate(SSE_MEMORY)]
+        out += ["%s xmm0, xmm0, xmm0" % op, "%s xmm5, oword [rdx + 32], xmm0" % op]
+    out += ["movntdqa %s, %s" % (XMM[(i * 3) % 16], mem) for i, mem in enumerate(SSE_MEMORY)]
+    out.append("movntdqa xmm14, oword [rdx + 16]")
+    for op, word in SSE_WIDENING:
+        out += sse_operation(op, word)
+    for op, word in SSE_IMMEDIATE_OPERATIONS:
+        out += sse_immediate(op, word)
+    for i in range(16):
+        out += ["pextrb %s, %s, %d" % (REG32[i], XMM[(i * 3) % 16], i),
+                "pextrb %s, %s, %d" % (REG64[(i + 6) % 16], XMM[(i * 7) % 16], 255 - i),
+                "extractps %s, %s, %d" % (REG32[(i + 2) % 16], XMM[(i * 5) % 16], i % 4),
+                "extractps %s, %s, %d" % (REG64[(i + 4) % 16], XMM[(i * 9) % 16], 3 - i % 4),
+                "pextrd %s, %s, %d" % (REG32[(i + 8) % 16], XMM[(i * 11) % 16], i % 4),
+                "pextrq %s, %s, %d" % (REG64[(i + 1) % 16], XMM[(i * 13) % 16], i % 2),
+                "pinsrb %s, %s, %d" % (XMM[(i * 3) % 16], REG32[(i + 5) % 16], 15 - i),
+                "pinsrd %s, %s, %d" % (XMM[(i * 5) % 16], REG32[(i + 3) % 16], i % 4),
+                "pinsrq %s, %s, %d" % (XMM[(i * 7) % 16], REG64[(i + 7) % 16], i % 2)]
+    for i, mem in enumerate(SSE_MEMORY):
+        out += ["pextrb %s, %s, %d" % (mem, XMM[(i * 4) % 16], i),
+                "pextrb byte %s, %s, %d" % (mem, XMM[(i * 4 + 1) % 16], 15 - i),
+                "pextrw %s, %s, %d" % (mem, XMM[(i * 4 + 2) % 16], i),
+                "pextrw word %s, %s, %d" % (mem, XMM[(i * 4 + 3) % 16], 7 - i),
+                "extractps %s, %s, %d" % (mem, XMM[(i * 3) % 16], i % 4),
+                "extractps dword %s, %s, %d" % (mem, XMM[(i * 3 + 1) % 16], 3 - i % 4),
+                "pextrd %s, %s, %d" % (mem, XMM[(i * 5) % 16], i % 4),
+                "pextrd dword %s, %s, 1" % (mem, XMM[(i * 5 + 1) % 16]),
+                "pextrq %s, %s, %d" % (mem, XMM[(i * 7) % 16], i % 2),
+                "pextrq qword %s, %s, 0" % (mem, XMM[(i * 7 + 1) % 16]),
+                "pinsrb %s, %s, %d" % (XMM[(i * 3) % 16], mem, i),
+                "pinsrb %s, byte %s, 15" % (XMM[(i * 3 + 1) % 16], mem),
+                "pinsrd %s, %s, %d" % (XMM[(i * 5) % 16], mem, i % 4),
+                "pinsrd %s, dword %s, 2" % (XMM[(i * 5 + 1) % 16], mem),
+                "pinsrq %s, %s, %d" % (XMM[(i * 7) % 16], mem, i % 2),
+                "pinsrq %s, qword %s, 1" % (XMM[(i * 7 + 1) % 16], mem)]
+    out += crc32_lines(nasm)
     return out
 
 
@@ -528,7 +626,7 @@ def program(nasm):
     for part in (alu_lines, test_lines, mov_lines, address_lines, xchg_lines,
                  stack_lines, unary_lines, imul_lines, shift_lines, extend_lines,
                  condition_lines, branch_lines, string_lines, bit_lines, atomic_lines,
-                 short_branch_lines, sse_lines):
+                 short_branch_lines, sse_lines, lambda: sse_extension_lines(nasm)):
         lines += ["    " + line if not line.endswith(":") else line for line in part()]
     lines += ["    " + op for op in ALONE]
     lines += ["    ret 16", "    align 16", "code_target:", "    endbr64", "    ret",

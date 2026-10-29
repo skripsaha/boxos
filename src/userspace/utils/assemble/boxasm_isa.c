@@ -10,7 +10,8 @@ typedef enum {
     BOXASM_MISMATCH_UNSIZED,
     BOXASM_MISMATCH_SIZE,
     BOXASM_MISMATCH_RANGE,
-    BOXASM_MISMATCH_MEMORY      /* memory of another size than the form reads */
+    BOXASM_MISMATCH_MEMORY,     /* memory of another size than the form reads */
+    BOXASM_MISMATCH_MASK        /* an xmm register where the form reads xmm0 */
 } BoxAsmMismatch;
 
 typedef struct {
@@ -131,6 +132,16 @@ static int BoxAsmIsMemoryOf(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand
     return 0;
 }
 
+static int BoxAsmIsMask(const BoxAsmOperand *Operand, BoxAsmMismatch *Why)
+{
+    if (!BoxAsmIsXmm(Operand))
+        return 0;
+    if (Operand->Register.Number == 0)
+        return 1;
+    *Why = BOXASM_MISMATCH_MASK;
+    return 0;
+}
+
 static int BoxAsmClassMatches(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand,
                               uint8_t Class, uint8_t Size, BoxAsmMismatch *Why)
 {
@@ -168,13 +179,22 @@ static int BoxAsmClassMatches(BoxAsmEncoder *Encoder, const BoxAsmOperand *Opera
                                       (Operand->Kind == BOXASM_OPERAND_MEMORY && Operand->Size == 2);
     case BOXASM_CLASS_RM32:    return BoxAsmIsRegister(Operand, 4) ||
                                       (Operand->Kind == BOXASM_OPERAND_MEMORY && Operand->Size == 4);
+    case BOXASM_CLASS_RM64:    return BoxAsmIsRegister(Operand, 8) ||
+                                      (Operand->Kind == BOXASM_OPERAND_MEMORY && Operand->Size == 8);
+    case BOXASM_CLASS_REG_R:   return BoxAsmIsRegister(Operand, Size);
     case BOXASM_CLASS_XMM:
     case BOXASM_CLASS_XMM_R:   return BoxAsmIsXmm(Operand);
+    case BOXASM_CLASS_XMM0:    return BoxAsmIsMask(Operand, Why);
+    case BOXASM_CLASS_XMM_M16: return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 2, Why);
     case BOXASM_CLASS_XMM_M32: return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 4, Why);
     case BOXASM_CLASS_XMM_M64: return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 8, Why);
     case BOXASM_CLASS_XMM_M128:
     case BOXASM_CLASS_XMM_U128: return BoxAsmIsXmm(Operand) ||
                                        BoxAsmIsMemoryOf(Encoder, Operand, 16, Why);
+    case BOXASM_CLASS_U128:    return BoxAsmIsMemoryOf(Encoder, Operand, 16, Why);
+    case BOXASM_CLASS_M8:      return BoxAsmIsMemoryOf(Encoder, Operand, 1, Why);
+    case BOXASM_CLASS_M16:     return BoxAsmIsMemoryOf(Encoder, Operand, 2, Why);
+    case BOXASM_CLASS_M32:     return BoxAsmIsMemoryOf(Encoder, Operand, 4, Why);
     case BOXASM_CLASS_M64:     return BoxAsmIsMemoryOf(Encoder, Operand, 8, Why);
     case BOXASM_CLASS_M128:    return BoxAsmIsMemoryOf(Encoder, Operand, 16, Why);
     case BOXASM_CLASS_R32_M16: return BoxAsmIsRegister(Operand, 4) || BoxAsmIsRegister(Operand, 8) ||
@@ -197,9 +217,9 @@ static uint8_t BoxAsmOperationSize(const BoxAsmEncoder *Encoder, const BoxAsmFor
         uint8_t Class = Form->Class[Index];
         uint8_t Own;
 
-        if (Class != BOXASM_CLASS_REG && Class != BOXASM_CLASS_RM &&
-            Class != BOXASM_CLASS_MEM && Class != BOXASM_CLASS_ACC &&
-            Class != BOXASM_CLASS_IMM)
+        if (Class != BOXASM_CLASS_REG && Class != BOXASM_CLASS_REG_R &&
+            Class != BOXASM_CLASS_RM && Class != BOXASM_CLASS_MEM &&
+            Class != BOXASM_CLASS_ACC && Class != BOXASM_CLASS_IMM)
             continue;
         if (BoxAsmIsXmm(Operand))       /* never a general operand: the class refuses it */
             continue;
@@ -379,6 +399,7 @@ static int BoxAsmIsRmClass(uint8_t Class)
     return Class == BOXASM_CLASS_RM || Class == BOXASM_CLASS_MEM ||
            Class == BOXASM_CLASS_ADDRESS || Class == BOXASM_CLASS_RM8 ||
            Class == BOXASM_CLASS_RM16 || Class == BOXASM_CLASS_RM32 ||
+           Class == BOXASM_CLASS_RM64 ||
            (Class >= BOXASM_CLASS_XMM_R && Class <= BOXASM_CLASS_R32_M16);
 }
 
@@ -517,7 +538,8 @@ static int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
     if (Encoder->Statement->Prefix == BOXASM_PREFIX_LOCK &&
         (Rc = BoxAsmPut(Encoder, "\xF0", 1)) != 0)
         return Rc;
-    if (Size == 2 && Form->Sizes != 0 && (Rc = BoxAsmPut(Encoder, "\x66", 1)) != 0)
+    if (((Size == 2 && Form->Sizes != 0) || (Form->Flags & BOXASM_FORM_DATA16)) &&
+        (Rc = BoxAsmPut(Encoder, "\x66", 1)) != 0)
         return Rc;
     if (Repeat != 0 && (Rc = BoxAsmPut(Encoder, &Repeat, 1)) != 0)
         return Rc;
@@ -619,7 +641,12 @@ static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
                                     ? " bytes (qword, or no size) by "
                                     : Encoder->MemoryWanted == 4
                                     ? " bytes (dword, or no size) by "
-                                    : " bytes (word, or no size) by ");
+                                    : Encoder->MemoryWanted == 2
+                                    ? " bytes (word, or no size) by "
+                                    : " byte (byte, or no size) by ");
+        break;
+    case BOXASM_MISMATCH_MASK:
+        BoxAsmMessageText(&Message, "the mask is only xmm0, written third or left out, in ");
         break;
     case BOXASM_MISMATCH_RANGE: {
         uint8_t At;

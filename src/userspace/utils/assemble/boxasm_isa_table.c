@@ -427,10 +427,12 @@ static const BoxAsmForm PsrldqForms[] = { SSE_SHIFT_IMM(0x73, 3) };
 static const BoxAsmForm PshufdForms[]  = { SSE_IMM(0x66, 0x70, XMM_M128) };
 static const BoxAsmForm PshufhwForms[] = { SSE_IMM(0xF3, 0x70, XMM_M128) };
 static const BoxAsmForm PshuflwForms[] = { SSE_IMM(0xF2, 0x70, XMM_M128) };
-/* pextrw and pinsrw take a 64-bit register as NASM does, written without REX.W. */
+/* pextrw and pinsrw take a 64-bit register as NASM does, written without REX.W;
+ * pextrw to memory is SSE4.1's. */
 static const BoxAsmForm PextrwForms[] = {
     { C(REG, XMM_R, IMM8), S32, { 0x0F, 0xC5 }, 2, R, 0, 0x66 },
     { C(REG, XMM_R, IMM8), S64, { 0x0F, 0xC5 }, 2, R, BOXASM_FORM_DEFAULT64, 0x66 },
+    { C(M16, XMM, IMM8),   0,   { 0x0F, 0x3A, 0x15 }, 3, R, 0, 0x66 },
 };
 static const BoxAsmForm PinsrwForms[]   = { { C(XMM, R32_M16, IMM8), 0, { 0x0F, 0xC4 }, 2, R, 0, 0x66 } };
 static const BoxAsmForm PmovmskbForms[] = { { C(REG, XMM_R, NONE), S32, { 0x0F, 0xD7 }, 2, R, 0, 0x66 } };
@@ -442,6 +444,113 @@ static const BoxAsmForm Prefetcht0Forms[]  = { { C(MEM, NONE, NONE), S8, { 0x0F,
 static const BoxAsmForm Prefetcht1Forms[]  = { { C(MEM, NONE, NONE), S8, { 0x0F, 0x18 }, 2, 2, 0, 0 } };
 static const BoxAsmForm Prefetcht2Forms[]  = { { C(MEM, NONE, NONE), S8, { 0x0F, 0x18 }, 2, 3, 0, 0 } };
 static const BoxAsmForm ClflushForms[]     = { { C(MEM, NONE, NONE), S8, { 0x0F, 0xAE }, 2, 7, 0, 0 } };
+
+/* ---- SSE3, SSSE3, SSE4.1 and SSE4.2 -------------------------------------
+ * The operand rules of SSE2 behind 0F 38 or 0F 3A, whose third opcode byte
+ * names the operation; the prefix is 66 but for SSE3's F2 and F3. */
+
+#define SSE_38(Prefix, Third, Source)                                     \
+    { C(XMM, Source, NONE), 0, { 0x0F, 0x38, (Third) }, 3, R, 0, (Prefix) }
+#define SSE_3A(Prefix, Third, Source)                                     \
+    { C(XMM, Source, IMM8), 0, { 0x0F, 0x3A, (Third) }, 3, R, 0, (Prefix) }
+/* The mask is xmm0, written third or left out: blendvps, blendvpd, pblendvb. */
+#define SSE_MASKED(Third)                                                 \
+    { C(XMM, XMM_M128, XMM0), 0, { 0x0F, 0x38, (Third) }, 3, R, 0, 0x66 }, \
+    { C(XMM, XMM_M128, NONE), 0, { 0x0F, 0x38, (Third) }, 3, R, 0, 0x66 }
+/* An operation on an xmm register and xmm/m128 behind 66 0F 38; the same
+ * behind 0F 3A with an imm8. */
+#define SSE_OPERATION_38(Name, Third)                                                 \
+    static const BoxAsmForm Name##Forms[] = { SSE_38(0x66, (Third), XMM_M128) };
+#define SSE_OPERATION_3A(Name, Third)                                                 \
+    static const BoxAsmForm Name##Forms[] = { SSE_3A(0x66, (Third), XMM_M128) };
+
+static const BoxAsmForm AddsubpsForms[] = { SSE(0xF2, 0xD0, XMM_M128) };
+static const BoxAsmForm AddsubpdForms[] = { SSE(0x66, 0xD0, XMM_M128) };
+static const BoxAsmForm HaddpsForms[]   = { SSE(0xF2, 0x7C, XMM_M128) };
+static const BoxAsmForm HaddpdForms[]   = { SSE(0x66, 0x7C, XMM_M128) };
+static const BoxAsmForm HsubpsForms[]   = { SSE(0xF2, 0x7D, XMM_M128) };
+static const BoxAsmForm HsubpdForms[]   = { SSE(0x66, 0x7D, XMM_M128) };
+static const BoxAsmForm LddquForms[]    = { SSE(0xF2, 0xF0, U128) };
+static const BoxAsmForm MovddupForms[]  = { SSE(0xF2, 0x12, XMM_M64) };
+static const BoxAsmForm MovshdupForms[] = { SSE(0xF3, 0x16, XMM_M128) };
+static const BoxAsmForm MovsldupForms[] = { SSE(0xF3, 0x12, XMM_M128) };
+static const BoxAsmForm MonitorForms[]  = { ALONE(0, 0x0F, 0x01, 0xC8) };
+static const BoxAsmForm MwaitForms[]    = { ALONE(0, 0x0F, 0x01, 0xC9) };
+
+SSE_OPERATION_38(Pshufb, 0x00)   SSE_OPERATION_38(Phaddw, 0x01)    SSE_OPERATION_38(Phaddd, 0x02)
+SSE_OPERATION_38(Phaddsw, 0x03)  SSE_OPERATION_38(Pmaddubsw, 0x04) SSE_OPERATION_38(Phsubw, 0x05)
+SSE_OPERATION_38(Phsubd, 0x06)   SSE_OPERATION_38(Phsubsw, 0x07)   SSE_OPERATION_38(Psignb, 0x08)
+SSE_OPERATION_38(Psignw, 0x09)   SSE_OPERATION_38(Psignd, 0x0A)    SSE_OPERATION_38(Pmulhrsw, 0x0B)
+SSE_OPERATION_38(Pabsb, 0x1C)    SSE_OPERATION_38(Pabsw, 0x1D)     SSE_OPERATION_38(Pabsd, 0x1E)
+SSE_OPERATION_3A(Palignr, 0x0F)
+
+SSE_OPERATION_38(Ptest, 0x17)    SSE_OPERATION_38(Pmuldq, 0x28)    SSE_OPERATION_38(Pcmpeqq, 0x29)
+SSE_OPERATION_38(Packusdw, 0x2B) SSE_OPERATION_38(Pminsb, 0x38)    SSE_OPERATION_38(Pminsd, 0x39)
+SSE_OPERATION_38(Pminuw, 0x3A)   SSE_OPERATION_38(Pminud, 0x3B)    SSE_OPERATION_38(Pmaxsb, 0x3C)
+SSE_OPERATION_38(Pmaxsd, 0x3D)   SSE_OPERATION_38(Pmaxuw, 0x3E)    SSE_OPERATION_38(Pmaxud, 0x3F)
+SSE_OPERATION_38(Pmulld, 0x40)   SSE_OPERATION_38(Phminposuw, 0x41)
+SSE_OPERATION_38(Pcmpgtq, 0x37)
+SSE_OPERATION_3A(Blendps, 0x0C)  SSE_OPERATION_3A(Blendpd, 0x0D)   SSE_OPERATION_3A(Pblendw, 0x0E)
+SSE_OPERATION_3A(Dpps, 0x40)     SSE_OPERATION_3A(Dppd, 0x41)      SSE_OPERATION_3A(Mpsadbw, 0x42)
+SSE_OPERATION_3A(Pcmpestrm, 0x60) SSE_OPERATION_3A(Pcmpestri, 0x61)
+SSE_OPERATION_3A(Pcmpistrm, 0x62) SSE_OPERATION_3A(Pcmpistri, 0x63)
+
+static const BoxAsmForm BlendvpsForms[] = { SSE_MASKED(0x14) };
+static const BoxAsmForm BlendvpdForms[] = { SSE_MASKED(0x15) };
+static const BoxAsmForm PblendvbForms[] = { SSE_MASKED(0x10) };
+static const BoxAsmForm MovntdqaForms[] = { SSE_38(0x66, 0x2A, M128) };
+
+/* pmovsx and pmovzx widen what the source holds; the memory they read is
+ * the bytes that widen, not an oword. */
+static const BoxAsmForm PmovsxbwForms[] = { SSE_38(0x66, 0x20, XMM_M64) };
+static const BoxAsmForm PmovsxbdForms[] = { SSE_38(0x66, 0x21, XMM_M32) };
+static const BoxAsmForm PmovsxbqForms[] = { SSE_38(0x66, 0x22, XMM_M16) };
+static const BoxAsmForm PmovsxwdForms[] = { SSE_38(0x66, 0x23, XMM_M64) };
+static const BoxAsmForm PmovsxwqForms[] = { SSE_38(0x66, 0x24, XMM_M32) };
+static const BoxAsmForm PmovsxdqForms[] = { SSE_38(0x66, 0x25, XMM_M64) };
+static const BoxAsmForm PmovzxbwForms[] = { SSE_38(0x66, 0x30, XMM_M64) };
+static const BoxAsmForm PmovzxbdForms[] = { SSE_38(0x66, 0x31, XMM_M32) };
+static const BoxAsmForm PmovzxbqForms[] = { SSE_38(0x66, 0x32, XMM_M16) };
+static const BoxAsmForm PmovzxwdForms[] = { SSE_38(0x66, 0x33, XMM_M64) };
+static const BoxAsmForm PmovzxwqForms[] = { SSE_38(0x66, 0x34, XMM_M32) };
+static const BoxAsmForm PmovzxdqForms[] = { SSE_38(0x66, 0x35, XMM_M64) };
+
+static const BoxAsmForm RoundpsForms[]  = { SSE_3A(0x66, 0x08, XMM_M128) };
+static const BoxAsmForm RoundpdForms[]  = { SSE_3A(0x66, 0x09, XMM_M128) };
+static const BoxAsmForm RoundssForms[]  = { SSE_3A(0x66, 0x0A, XMM_M32) };
+static const BoxAsmForm RoundsdForms[]  = { SSE_3A(0x66, 0x0B, XMM_M64) };
+static const BoxAsmForm InsertpsForms[] = { SSE_3A(0x66, 0x21, XMM_M32) };
+
+/* The general register or the memory of pextrb, extractps, pextrd and pextrq
+ * is ModRM.rm and the xmm register ModRM.reg; a 64-bit register of pextrb is
+ * written without REX.W, as pextrw's is, and extractps's with it. */
+static const BoxAsmForm PextrbForms[] = {
+    { C(REG_R, XMM, IMM8), S32 | S64, { 0x0F, 0x3A, 0x14 }, 3, R, BOXASM_FORM_DEFAULT64, 0x66 },
+    { C(M8, XMM, IMM8),    0,         { 0x0F, 0x3A, 0x14 }, 3, R, 0, 0x66 },
+};
+static const BoxAsmForm ExtractpsForms[] = {
+    { C(REG_R, XMM, IMM8), S32 | S64, { 0x0F, 0x3A, 0x17 }, 3, R, 0, 0x66 },
+    { C(M32, XMM, IMM8),   0,         { 0x0F, 0x3A, 0x17 }, 3, R, 0, 0x66 },
+};
+static const BoxAsmForm PextrdForms[] = { { C(RM, XMM, IMM8), S32, { 0x0F, 0x3A, 0x16 }, 3, R, 0, 0x66 } };
+static const BoxAsmForm PextrqForms[] = { { C(RM, XMM, IMM8), S64, { 0x0F, 0x3A, 0x16 }, 3, R, 0, 0x66 } };
+static const BoxAsmForm PinsrbForms[] = {
+    { C(XMM, REG_R, IMM8), S32, { 0x0F, 0x3A, 0x20 }, 3, R, 0, 0x66 },
+    { C(XMM, M8, IMM8),    0,   { 0x0F, 0x3A, 0x20 }, 3, R, 0, 0x66 },
+};
+static const BoxAsmForm PinsrdForms[] = { { C(XMM, RM, IMM8), S32, { 0x0F, 0x3A, 0x22 }, 3, R, 0, 0x66 } };
+static const BoxAsmForm PinsrqForms[] = { { C(XMM, RM, IMM8), S64, { 0x0F, 0x3A, 0x22 }, 3, R, 0, 0x66 } };
+
+/* crc32 accumulates over r/m8, 16, 32 or 64; the 16-bit one is the 32-bit
+ * form behind a 66, written before the F2. A 64-bit register over r/m8 is
+ * written without REX.W, as NASM writes it: the sum is 32 bits, the upper
+ * half cleared either way. */
+static const BoxAsmForm Crc32Forms[] = {
+    { C(REG, RM8, NONE),  S32 | S64, { 0x0F, 0x38, 0xF0 }, 3, R, BOXASM_FORM_DEFAULT64, 0xF2 },
+    { C(REG, RM16, NONE), S32,       { 0x0F, 0x38, 0xF1 }, 3, R, BOXASM_FORM_DATA16, 0xF2 },
+    { C(REG, RM32, NONE), S32,       { 0x0F, 0x38, 0xF1 }, 3, R, 0, 0xF2 },
+    { C(REG, RM64, NONE), S64,       { 0x0F, 0x38, 0xF1 }, 3, R, 0, 0xF2 },
+};
 
 #define INSTRUCTION(Name, Forms, Kind, Conditional, Swap, Takes)          \
     { Name, Forms, sizeof(Forms) / sizeof(Forms[0]), Kind, Conditional, Swap, Takes }
@@ -582,6 +691,45 @@ static const BoxAsmInstruction BoxAsmInstructions[] = {
     PLAIN("prefetchnta", PrefetchntaForms), PLAIN("prefetcht0", Prefetcht0Forms),
     PLAIN("prefetcht1", Prefetcht1Forms), PLAIN("prefetcht2", Prefetcht2Forms),
     PLAIN("clflush", ClflushForms),
+    PLAIN("addsubps", AddsubpsForms), PLAIN("addsubpd", AddsubpdForms),
+    PLAIN("haddps", HaddpsForms), PLAIN("haddpd", HaddpdForms),
+    PLAIN("hsubps", HsubpsForms), PLAIN("hsubpd", HsubpdForms), PLAIN("lddqu", LddquForms),
+    PLAIN("movddup", MovddupForms), PLAIN("movshdup", MovshdupForms),
+    PLAIN("movsldup", MovsldupForms), PLAIN("monitor", MonitorForms),
+    PLAIN("mwait", MwaitForms), PLAIN("pshufb", PshufbForms), PLAIN("phaddw", PhaddwForms),
+    PLAIN("phaddd", PhadddForms), PLAIN("phaddsw", PhaddswForms),
+    PLAIN("pmaddubsw", PmaddubswForms), PLAIN("phsubw", PhsubwForms),
+    PLAIN("phsubd", PhsubdForms), PLAIN("phsubsw", PhsubswForms),
+    PLAIN("psignb", PsignbForms), PLAIN("psignw", PsignwForms),
+    PLAIN("psignd", PsigndForms), PLAIN("pmulhrsw", PmulhrswForms),
+    PLAIN("pabsb", PabsbForms), PLAIN("pabsw", PabswForms), PLAIN("pabsd", PabsdForms),
+    PLAIN("palignr", PalignrForms), PLAIN("ptest", PtestForms),
+    PLAIN("pmuldq", PmuldqForms), PLAIN("pcmpeqq", PcmpeqqForms),
+    PLAIN("packusdw", PackusdwForms), PLAIN("pminsb", PminsbForms),
+    PLAIN("pminsd", PminsdForms), PLAIN("pminuw", PminuwForms),
+    PLAIN("pminud", PminudForms), PLAIN("pmaxsb", PmaxsbForms),
+    PLAIN("pmaxsd", PmaxsdForms), PLAIN("pmaxuw", PmaxuwForms),
+    PLAIN("pmaxud", PmaxudForms), PLAIN("pmulld", PmulldForms),
+    PLAIN("phminposuw", PhminposuwForms), PLAIN("pcmpgtq", PcmpgtqForms),
+    PLAIN("blendps", BlendpsForms), PLAIN("blendpd", BlendpdForms),
+    PLAIN("pblendw", PblendwForms), PLAIN("dpps", DppsForms), PLAIN("dppd", DppdForms),
+    PLAIN("mpsadbw", MpsadbwForms), PLAIN("pcmpestrm", PcmpestrmForms),
+    PLAIN("pcmpestri", PcmpestriForms), PLAIN("pcmpistrm", PcmpistrmForms),
+    PLAIN("pcmpistri", PcmpistriForms), PLAIN("blendvps", BlendvpsForms),
+    PLAIN("blendvpd", BlendvpdForms), PLAIN("pblendvb", PblendvbForms),
+    PLAIN("movntdqa", MovntdqaForms), PLAIN("pmovsxbw", PmovsxbwForms),
+    PLAIN("pmovsxbd", PmovsxbdForms), PLAIN("pmovsxbq", PmovsxbqForms),
+    PLAIN("pmovsxwd", PmovsxwdForms), PLAIN("pmovsxwq", PmovsxwqForms),
+    PLAIN("pmovsxdq", PmovsxdqForms), PLAIN("pmovzxbw", PmovzxbwForms),
+    PLAIN("pmovzxbd", PmovzxbdForms), PLAIN("pmovzxbq", PmovzxbqForms),
+    PLAIN("pmovzxwd", PmovzxwdForms), PLAIN("pmovzxwq", PmovzxwqForms),
+    PLAIN("pmovzxdq", PmovzxdqForms), PLAIN("roundps", RoundpsForms),
+    PLAIN("roundpd", RoundpdForms), PLAIN("roundss", RoundssForms),
+    PLAIN("roundsd", RoundsdForms), PLAIN("insertps", InsertpsForms),
+    PLAIN("pextrb", PextrbForms), PLAIN("extractps", ExtractpsForms),
+    PLAIN("pextrd", PextrdForms), PLAIN("pextrq", PextrqForms),
+    PLAIN("pinsrb", PinsrbForms), PLAIN("pinsrd", PinsrdForms),
+    PLAIN("pinsrq", PinsrqForms), PLAIN("crc32", Crc32Forms),
 };
 
 static const BoxAsmInstruction BoxAsmJcc =
