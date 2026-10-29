@@ -41,7 +41,7 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Internal implementation leaves (`include/std/__bits/`) | 165 |
 | Header source | ~119 000 lines |
 | Feature-test macros defined | 239 — 166 at their C++23 value, 73 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
-| BoxOS-native headers (`include/box/cxx/`) | 33 (§5) |
+| BoxOS-native headers (`include/box/cxx/`) | 35 (§5) |
 | In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 256 phases (237 of them the numbered `PhaseN` series), 6 665 runtime checks, 2 069 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
@@ -4894,7 +4894,7 @@ everything else matched.
 # 5. `box::` — the BoxOS-native surface
 
 Everything above is about the ISO library. `include/box/cxx/` is the other half of
-boxcxx: 33 headers that give BoxOS's own concepts a C++ face. They are not
+boxcxx: 35 headers that give BoxOS's own concepts a C++ face. They are not
 replacements for standard facilities and they do not shadow them — they exist
 because the kernel has ideas Unix does not, and a standard library has no words
 for them.
@@ -4908,6 +4908,7 @@ for them.
 | Storage | `tagfs.h` | Tag-addressed files: query by tags, RAII contexts and snapshots, anchor events. |
 | Time | `clock.h` | Which reckoning of time the machine keeps: validate a zone name against the database, store it under `clock:zone`, announce the change. Reading it is `std::chrono::current_zone()`; only the writing half needed a name. |
 | Messaging | `message.h`, `brook.h` | Process-to-process messages and ordered SPSC streams. |
+| Launch | `luggage.h`, `form.h` | The line a program was started with, and its Form: the fields the shell (or BoxLib) filled — files, words, text — and the files it gives back as `them`. Failures are `box::result`; a line that could not be filled answers `invalid_argument`. |
 | System | `process.h`, `child.h`, `system.h`, `manifest.h`, `cpu.h` | Process and cabin identity, child supervision, firmware/EFI introspection, the expert syscall builder. |
 | Data | `flat_hash_map.h`, `flat_hash_set.h`, `math.h`, `error.h` | A robin-hood table, an angle-and-base maths layer, the native error model. |
 
