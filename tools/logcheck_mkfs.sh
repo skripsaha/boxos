@@ -28,7 +28,8 @@
 # longer than four kilobytes, both carried whole by --v2, each file naming its
 # own tags; a vocabulary past format v1's last tag id, a record past its pool
 # block, a tag wider than the kernel holds — each refused before the first
-# write, in a sentence. Last, `make` lays format v1 again: the format's marker.
+# write, in a sentence. Last, `make` lays the run's format again: the format's
+# marker.
 #
 # ‼ THE BUILD'S IMAGE PACKS NO TREE PAST ONE LEAF. Its FILES and its TAGS fit
 # a Sheet each, and every DIGESTS element fills one alone, so where a node is
@@ -304,10 +305,12 @@ run_mkfs() {
     mkfs_tags "$work"
     buildkey_restore
     # The v1 build above was plain: the tree is put back in the run's format
-    # whether or not a keyed build came after it.
-    python3 tools/volume-read.py build/boxos.img deed | grep -q "^format      : $format\$" ||
+    # whether or not a keyed build came after it. The deed names the format
+    # and then its stamps — `format      : v2 (v1 = LAYOUT, v2 = FRAME)`,
+    # volume-read.py — so the word is matched with the space after it.
+    python3 tools/volume-read.py build/boxos.img deed | grep -q "^format      : $format " ||
         STAND_FORMAT=$format build
-    python3 tools/volume-read.py build/boxos.img deed | grep -q "^format      : $format\$"
+    python3 tools/volume-read.py build/boxos.img deed | grep -q "^format      : $format "
     chk $? "mkfs: and \`make\` after it lays format $format again, the format the run asked — the image carries its format's marker"
     rm -rf "$work"
 }

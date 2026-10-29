@@ -85,25 +85,30 @@ run_replugwritebook() {
     local REPLUGWRITE_MOVE_SAID="the host laid a newer Spine slot on it while it was out"
     local REPLUGWRITE_UP=replugwritebook_up
     echo "== replugwrite, a book: the stick of a format-v2 volume leaves while a write is in flight and writers wait for its Helm, and comes back as it left, then changed =="
+    typer_selfcheck
     local r change name seed from rc last pid L="$SCRATCH/serial.replugwritebook.log"
     REPLUGWRITE_ABSENT=""
-    latearrival_on; build
+    latelaunch_on; build
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
-        || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
+        || { make run-stop >/dev/null 2>&1; latelaunch_off; return; }
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
     if ! wait_for_line build/serial.log "the stand-in .PID 1. hands over" "$WAIT_QUIET_S"; then
-        make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latearrival_off
+        make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latelaunch_off
         harness "replugwrite, a book: the stick never became this machine's volume"
         return
     fi
     grep -aqE '^\[TagFS\] what this volume promises: its book takes' build/serial.log
     chk $? "replugwrite, a book: the stick's volume is a book this kernel writes"
     wait_for_quiet "$BOOT_BURST_QUIET_S"
+    latelaunch_held build/serial.log
+    chk $? "replugwrite, a book: every program the late launch made is held, not let run, when the launch is said"
+    replugwrite_spoke_after build/serial.log
+    chk $? "replugwrite, a book: the volume's shell speaks after the kernel says what it started — its banner past the hand-over"
     for r in $REPLUGWRITE_ROUNDS; do
         IFS=: read -r change name seed <<REPLUGWRITEBOOK_ROUND
 $r
@@ -111,7 +116,7 @@ REPLUGWRITEBOOK_ROUND
         from=$(wc -l < build/serial.log)
         replugwrite_round "$change" "$name" "$seed"; rc=$?
         if [ "$rc" != 0 ]; then
-            make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latearrival_off
+            make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latelaunch_off
             last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Storage)\]' | tail -1 | cut -c1-160)
             if [ "$rc" = 1 ]; then
                 harness "replugwrite, a book: the $change round could not be put to the machine (last: $last)"
@@ -129,7 +134,7 @@ REPLUGWRITEBOOK_ROUND
     wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$L"
-    latearrival_off
+    latelaunch_off
     grep -aq '^\[HALT\] Storage sync complete' "$L"
     chk $? "replugwrite, a book: the machine halted through bye and its last cycle settled the book ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | tail -1 | cut -c1-100))"
     ! grep -aqF 'this kernel reads such a volume again from its book' "$L"
