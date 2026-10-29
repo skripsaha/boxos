@@ -46,6 +46,13 @@
  * without, NAME-b.d is found and read back the same (logcheck book_big, the
  * next mount). Its size and the FNV-1a of its bytes are said.
  *
+ * LOGGER: A LINE A SECOND, ANCHORED RARELY. NAME-g.log gets one line of 80
+ * bytes each second for SECONDS seconds, by the machine's own clock, and an
+ * anchor after every ANCHOR_EVERY-th line (0: none but the last) whose wait is
+ * timed. What a logger leaves for the cadence to decide is the lines between
+ * the anchors: the Slip, the window of five seconds and the Tally by useful
+ * bytes (logcheck loggerhour).
+ *
  * Each says its verdict in quilltest's four words.
  */
 
@@ -56,6 +63,8 @@
 #include "box/error.h"
 #include "box/debug.h"
 #include "box/memory.h"
+#include "box/sync.h"
+#include "box/time.h"
 #include "quilltest.h"
 
 #define QUILL_BOOK_NAME_MAX  12u      /* NAME, so every name it makes stays inside 31 bytes */
@@ -585,5 +594,107 @@ QuillVerdict QuillBookLog(const char *const *args)
     }
     printf("[QUILL] log: PASS — %s (fid %lld): %u lines appended and anchored one by one, %llu bytes, print 0x%s\n",
            file, (long long)fid, lines, (unsigned long long)size, hex);
+    return QUILL_PASS;
+}
+
+// ----------------------------------------------------------------------------
+// logger — a line a second, anchored every so often
+// ----------------------------------------------------------------------------
+
+#define QUILL_LOGGER_LINE  80u
+#define QUILL_LOGGER_MOST  86400u
+
+static volatile uint64_t s_logger_pause;
+
+/* Line n of the logger, QUILL_LOGGER_LINE bytes ending in a newline. */
+static void QuillLoggerLine(uint8_t *out, uint32_t n)
+{
+    memset(out, '.', QUILL_LOGGER_LINE);
+    for (int d = 7; d >= 0; d--, n /= 10u)
+        out[d] = (uint8_t)('0' + n % 10u);
+    out[QUILL_LOGGER_LINE - 1u] = '\n';
+}
+
+/* The machine's clock reaches `until_ms`: parked on a word nobody wakes, for
+ * what is left of the second, as often as it takes. */
+static void QuillLoggerWait(uint64_t until_ms)
+{
+    uint64_t now = 0;
+    for (time_uptime_ms(&now); now < until_ms; time_uptime_ms(&now))
+        addr_park(&s_logger_pause, 0, (uint32_t)(until_ms - now));
+}
+
+typedef struct {
+    uint32_t anchors;
+    uint64_t longest_ms;
+} QuillLoggerAnchors;
+
+/* An anchor, its wait timed into *seen. */
+static int64_t QuillLoggerAnchor(QuillLoggerAnchors *seen)
+{
+    uint64_t from = 0, to = 0;
+    time_uptime_ms(&from);
+    int64_t rc = anchor(0);
+    time_uptime_ms(&to);
+    seen->anchors++;
+    if (to - from > seen->longest_ms)
+        seen->longest_ms = to - from;
+    return rc;
+}
+
+QuillVerdict QuillBookLogger(const char *const *args)
+{
+    const char *name = args[0];
+    uint32_t    seconds = 0, every = 0;
+    char        file[QUILL_BOOK_CAP], hex[17];
+    uint8_t     line[QUILL_LOGGER_LINE];
+    uint64_t    h = QUILL_FNV_BASIS, began = 0, ended = 0;
+    QuillLoggerAnchors seen = { 0, 0 };
+    if (!QuillBookNameFits("logger", name))
+        return QUILL_FAIL;
+    if (!QuillNumber(args[1], &seconds) || seconds == 0 || seconds > QUILL_LOGGER_MOST ||
+        (args[2] && !QuillNumber(args[2], &every))) {
+        printf("[QUILL] logger: FAIL — SECONDS is a number from 1 to %u and ANCHOR_EVERY a number\n",
+               QUILL_LOGGER_MOST);
+        return QUILL_FAIL;
+    }
+    QuillBookName(file, name, false, 0, "-g.log");
+    int64_t fid = QuillCreate(file), rc = fid > 0 ? 0 : fid;
+    time_uptime_ms(&began);
+    for (uint32_t n = 0; rc >= 0 && n < seconds; n++) {
+        QuillLoggerLine(line, n);
+        h = QuillFnv(h, line, QUILL_LOGGER_LINE);
+        int64_t wrote = fwrite((file_id_t)fid, (uint64_t)n * QUILL_LOGGER_LINE, line, QUILL_LOGGER_LINE);
+        rc = wrote == (int64_t)QUILL_LOGGER_LINE ? 0 : (wrote < 0 ? wrote : -1);
+        if (rc >= 0 && every && (n + 1u) % every == 0 && n + 1u < seconds)
+            rc = QuillLoggerAnchor(&seen);
+        if (rc >= 0 && n + 1u < seconds)
+            QuillLoggerWait(began + (uint64_t)(n + 1u) * 1000u);
+    }
+    time_uptime_ms(&ended);
+    if (rc >= 0)
+        rc = QuillLoggerAnchor(&seen);
+    if (rc < 0) {
+        printf("[QUILL] logger: FAIL — an append or an anchor answered %lld (error %u)\n", (long long)rc,
+               (unsigned)box_errno_of((int)rc));
+        return QUILL_FAIL;
+    }
+    uint64_t back = QUILL_FNV_BASIS, size = (uint64_t)seconds * QUILL_LOGGER_LINE;
+    for (uint64_t at = 0; at < size; at += sizeof(s_data_back)) {
+        uint64_t n = size - at < sizeof(s_data_back) ? size - at : sizeof(s_data_back);
+        if (fread((file_id_t)fid, at, s_data_back, n) != (int64_t)n) {
+            printf("[QUILL] logger: FAIL — %s would not be read back at byte %llu\n", file, (unsigned long long)at);
+            return QUILL_FAIL;
+        }
+        back = QuillFnv(back, s_data_back, n);
+    }
+    QuillHex(h, hex);
+    if (back != h) {
+        printf("[QUILL] logger: FAIL — %s reads back other bytes than the lines appended\n", file);
+        return QUILL_FAIL;
+    }
+    printf("[QUILL] logger: PASS — %s (fid %lld): %u lines in %llu ms, %u anchor(s) the longest answered in "
+           "%llu ms, %llu bytes, print 0x%s\n", file, (long long)fid, seconds, (unsigned long long)(ended - began),
+           seen.anchors, (unsigned long long)seen.longest_ms, (unsigned long long)size, hex);
     return QUILL_PASS;
 }

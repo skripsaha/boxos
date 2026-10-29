@@ -771,6 +771,10 @@ static const QuillCase g_cases[] = {
       "on a book: are LINES lines appended to NAME-l.log one at a time, each anchored — a logger, whose stitches "
       "the Tallies TALLY_SLACK owes take in — and every byte read back",
       "NAME-l.log, every earlier file of that name given up first", false },
+    { "logger", "NAME SECONDS [ANCHOR_EVERY]", 3, 1, QuillBookLogger,
+      "on a book: is a line of 80 bytes appended to NAME-g.log each second for SECONDS seconds by the machine's "
+      "clock, an anchor after every ANCHOR_EVERY-th line (none but the last without) timed, and every byte read back",
+      "NAME-g.log, every earlier file of that name given up first", false },
     { "escheat", "refused|act", 1, 0, QuillBookEscheat,
       "on a book whose Tally names a rotten range: is Escheat refused to a cabin wearing neither system nor "
       "god (refused, the program's own system tag taken off first), and, asked wearing system, what does it "
