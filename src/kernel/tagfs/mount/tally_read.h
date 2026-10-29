@@ -156,9 +156,11 @@ error_t TallyDigestsRottenNext(uint32_t* leaf, error_t (*rot)(void* ctx, const T
                                bool* done);
 
 /* The `index`-th leaf of the DIGESTS the reads stand on, in key order —
- * *rotten for a range of it no copy of whose node reads: false past the last.
+ * *rotten for a range of it no copy of whose node reads: false past the last;
+ * and how many there are.
  * By the Settle's holder, who alone turns them (TallyDigestsTurn). */
 bool    TallyDigestLeafAt(uint32_t index, TallyPlace* out, bool* rotten);
+uint32_t TallyDigestLeaves(void);
 
 /* The reads of a digest turned to a Tally this mount wrote: its DIGESTS
  * leaves `leaves`, in key order — `rotten` those named as they lie — in place

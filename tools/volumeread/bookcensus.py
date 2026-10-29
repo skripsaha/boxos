@@ -177,6 +177,7 @@ class BookCensus:
             self.Say("UNDER_GLASS", "note", "the volume may only be read: %s" % why)
         self._Claims()
         self._Held()
+        self._Quires()
         self._Sweep()
         if m.refusal is None:
             self._Boot()
@@ -307,6 +308,23 @@ class BookCensus:
 
     def Owned(self):
         return RunsNormal([r for c in self.claims if c.kind not in ("held", "boot") for r in c.runs])
+
+    def _Quires(self):
+        """A Tally-Quire is held whole while one node in it lives (§16.5
+        п.17, Р-d3): every block of a Quire — the stood slot's ribbon Quire
+        long, on the grid of the volume's blocks — a Tally's node lies in that
+        no claim names, nor the held, is the Tallies' too (mount/ground_census.c
+        GroundQuiresHeld, one rule)."""
+        m = self.mount
+        tallies = [c for c in self.claims if c.kind == "tally"]
+        q = m.slot.ribbon["quire_blocks"] if m.tally is not None and m.slot is not None else 0
+        if not tallies or not q:
+            return
+        quires = RunsNormal([(s // q * q, -(-(s + n) // q) * q - s // q * q) for c in tallies for s, n in c.runs])
+        named = RunsNormal([r for c in self.claims for r in c.runs] + list(self.held))
+        slack = RunsIntersect(RunsSubtract(quires, named), [(0, self.g.data_end + 1)])
+        if slack:
+            tallies[0].runs = RunsNormal(tallies[0].runs + slack)
 
     def _Sweep(self):
         doubles = {}

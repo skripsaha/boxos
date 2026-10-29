@@ -73,6 +73,12 @@ error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out);
  */
 error_t GroundCensusBook(uint64_t* held, uint64_t* fallow, bool derive, const char** what);
 
+/* Every block of a Quire of `quire` blocks a Tally's node lies in that no
+ * claim names claimed the Tallies' (Р-d3: a Tally-Quire held whole while one
+ * node in it lives) — after every claim, before GroundCensusBook. OK, or
+ * ERR_NO_MEMORY said. */
+error_t GroundQuiresHeld(uint64_t quire);
+
 /* Whether a block of [start, start + count) is claimed already by `owner`. */
 bool    GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count);
 

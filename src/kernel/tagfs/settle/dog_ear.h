@@ -3,6 +3,7 @@
 
 #include "../file_map/file_record.h"
 #include "../mount/tally_read.h"
+#include "binder.h"
 
 /*
  * DogEar — the keys of the book's trees changed since the Tally the next one
@@ -56,13 +57,38 @@ void     DogEarMended(uint64_t tree, const TallyPlace* at);
 
 /* TALLY_TAKE: every span held taken by the Tally; refused, given back under
  * what came since; its DONE, let go. Whether the Tally under way took `key` of
- * `tree` changed — every key, when what it took was lost — and whether it took
- * a loss. By the Settle's holder. */
+ * `tree` changed — every key, when what it took was lost — the spans of `tree`
+ * it took, in key order (*n of them), and whether it took a loss. By the
+ * Settle's holder. */
 void     DogEarTake(void);
 void     DogEarTakenBack(void);
 void     DogEarTakenLetGo(void);
 bool     DogEarTakenHolds(uint64_t tree, TallyKey key);
+const DogEarSpan* DogEarTakenSpans(uint64_t tree, uint32_t* n);
 bool     DogEarTakenLost(void);
+
+/* The ground the live files took since the slice before the one the Tally
+ * under way took and hold (`gone` false), or held at that slice and let go
+ * since (`gone`) — a block let go and taken again in both, its data new —
+ * exactly, in runs in order, *n of them, as every change of a file put it in:
+ * what DIGESTS laid
+ * in among the leaves of the Tally before lays anew of them (§16.5 п.16).
+ * Refused, given back under what moved since as one change. By the Settle's
+ * holder. */
+const BinderGround* DogEarTakenGround(bool gone, uint64_t* n);
+
+/* The ground the live files took since the last slice and hold — runs in
+ * order, *n of them: a Tally's DONE leaves their digests in the Gloss, which
+ * alone holds them, though the slice it laid named the block (binder_done.c).
+ * By the Settle's holder. */
+const BinderGround* DogEarHeldGround(uint64_t* n);
+
+/* The spans of `tree` held since the last slice from the `from`-th on, into
+ * `out` (room `room`): how many — a few at a hold of the lock, so a span put
+ * meanwhile may be passed over until the next look; and whether what is held
+ * was lost. By the Settle's holder (binder_cost.c). */
+uint32_t DogEarHeldSpans(uint64_t tree, uint32_t from, DogEarSpan* out, uint32_t room);
+bool     DogEarHeldLost(void);
 
 /* Everything DogEar holds let go — a mount begun, the volume let go of. */
 void     DogEarLetGo(void);

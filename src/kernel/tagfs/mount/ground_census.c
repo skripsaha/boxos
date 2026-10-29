@@ -583,6 +583,93 @@ static error_t RunsDerive(const char** what)
     return rc;
 }
 
+/* The Quires of `quire` blocks the Tallies' node claims lie in — on the grid
+ * of the volume's blocks — those that meet joined, in order: *n of them, into
+ * a new array; NULL with no memory. The claims sorted by their first block. */
+static GroundRun* TallyQuires(uint64_t quire, uint32_t* n)
+{
+    GroundRun* out = kmalloc(sizeof(GroundRun) * (s_count ? s_count : 1u));
+    *n = 0;
+    for (uint32_t i = 0; out && i < s_count; i++) {
+        if (s_runs[i].owner != (uint32_t)GROUND_TALLY)
+            continue;
+        uint64_t from = s_runs[i].start / quire * quire;
+        uint64_t end  = (s_runs[i].start + s_runs[i].count + quire - 1u) / quire * quire;
+        GroundRun* last = *n ? &out[*n - 1u] : NULL;
+        if (last && from <= last->start + last->who) {
+            last->who = end > last->start + last->who ? end - last->start : last->who;
+            continue;
+        }
+        out[(*n)++] = (GroundRun){ from, end - from, 0, (uint32_t)GROUND_TALLY, 0 };
+    }
+    return out;
+}
+
+/* The blocks of the Quires `q` (*nq, each run's length in its `who`) no claim
+ * names, as runs into `gaps` (room for *nq + s_count): how many. */
+static uint32_t QuireGaps(const GroundRun* q, uint32_t nq, GroundRun* gaps)
+{
+    uint32_t r = 0, n = 0;
+    uint64_t reach = 0;
+    for (uint32_t i = 0; i < nq; i++) {
+        uint64_t at = q[i].start, end = q[i].start + q[i].who;
+        while (at < end) {
+            while (r < s_count && s_runs[r].start <= at) {
+                if (s_runs[r].start + s_runs[r].count > reach)
+                    reach = s_runs[r].start + s_runs[r].count;
+                r++;
+            }
+            if (reach > at) {
+                at = reach;
+                continue;
+            }
+            uint64_t stop = r < s_count && s_runs[r].start < end ? s_runs[r].start : end;
+            gaps[n++] = (GroundRun){ at, stop - at, 0, (uint32_t)GROUND_TALLY, 0 };
+            at = stop;
+        }
+    }
+    return n;
+}
+
+/*
+ * ‼ A TALLY-QUIRE IS HELD WHOLE WHILE ONE NODE IN IT LIVES (spec_v2 §16.5
+ * п.17, Р-d3 (б)). The Binder takes its Tally-Quires whole on the grid of
+ * `quire` (settle/binder.c TallyRunsTake), and a slot holds every one a node
+ * of its Tally lies in: so every block of such a Quire that no owner names —
+ * a dead node's, the tail no Tally reached — is the Tallies' too, given to no
+ * one, and the Quire goes back whole once no node of it lives (§4.8). Only
+ * what no claim at all names is taken: a Quire cut on another grid holds
+ * nothing an owner holds. One rule with volume-read (bookcensus.py _Quires),
+ * and the block log by its census (blklog_book.py). Before the cut of the
+ * fallow and the held: every name as claimed. ERR_NO_MEMORY, said.
+ */
+error_t GroundQuiresHeld(uint64_t quire)
+{
+    uint32_t nq = 0;
+    if (!quire || s_refused)
+        return OK;
+    RunsSort(false);
+    GroundRun* q    = TallyQuires(quire, &nq);
+    GroundRun* gaps = q ? kmalloc(sizeof(GroundRun) * ((uint64_t)nq + s_count + 1u)) : NULL;
+    if (!gaps) {
+        kfree(q);
+        kprintf("[TagFS FSCK] no memory to hold the Tallies' Quires whole — a book is not mounted on a census it "
+                "could not take\n");
+        return ERR_NO_MEMORY;
+    }
+    uint32_t n = QuireGaps(q, nq, gaps);
+    for (uint32_t i = 0; i < n; i++)
+        for (uint64_t at = gaps[i].start, left = gaps[i].who; left;) {
+            uint32_t c = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
+            GroundClaimAs(GROUND_TALLY, at, c, 0, 0);
+            at   += c;
+            left -= c;
+        }
+    kfree(q);
+    kfree(gaps);
+    return s_refused ? ERR_NO_MEMORY : OK;
+}
+
 error_t GroundCensusBook(uint64_t* held, uint64_t* fallow, bool derive, const char** what)
 {
     *held   = 0;

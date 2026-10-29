@@ -25,6 +25,24 @@ static TagFSLock s_lock = TAGFS_LOCK_INIT("dogear", LOCK_RANK_LEAF);
 static DogEarSet s_held;       /* under s_lock */
 static DogEarSet s_taken;      /* the Settle's holder's alone */
 
+/* The ground the live files took (born) and let go (gone) since a slice, a
+ * block exactly — runs in order, none meeting — held since the last slice and
+ * taken by the Tally under way; put by a change of a file alone, so the
+ * Settle's holder's and the mount's: no lock. */
+typedef struct {
+    BinderGround* run;
+    uint64_t      n;
+    uint64_t      cap;
+} DogEarGround;
+
+typedef struct {
+    DogEarGround born;
+    DogEarGround gone;
+} DogEarDelta;
+
+static DogEarDelta s_delta_held;
+static DogEarDelta s_delta_taken;
+
 /* The place of `tree` among DogEar's — UINT32_MAX for a tree no Tally of this
  * kernel lays. */
 static uint32_t TreeAt(uint64_t tree)
@@ -176,6 +194,121 @@ void DogEarMended(uint64_t tree, const TallyPlace* at)
 }
 
 // ----------------------------------------------------------------------------
+// The ground born and gone
+// ----------------------------------------------------------------------------
+
+static void GroundLetGo(DogEarDelta* d)
+{
+    kfree(d->born.run);
+    kfree(d->gone.run);
+    memset(d, 0, sizeof(*d));
+}
+
+/* The first run of `g` that ends past `at`. */
+static uint64_t GroundFrom(const DogEarGround* g, uint64_t at)
+{
+    uint64_t lo = 0, hi = g->n;
+    while (lo < hi) {
+        uint64_t mid = lo + (hi - lo) / 2u;
+        if (g->run[mid].start + g->run[mid].count <= at)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+/* Room for `more` runs in `g`: false when the heap refuses it. */
+static bool GroundRoom(DogEarGround* g, uint64_t more)
+{
+    if (g->n + more <= g->cap)
+        return true;
+    uint64_t      cap = (g->n + more) * 2u + 16u;
+    BinderGround* run = kmalloc(sizeof(BinderGround) * cap);
+    if (!run)
+        return false;
+    if (g->n)
+        memcpy(run, g->run, sizeof(BinderGround) * g->n);
+    kfree(g->run);
+    g->run = run;
+    g->cap = cap;
+    return true;
+}
+
+/* [start, end) into `g`, joined with every run it meets. */
+static bool GroundAdd(DogEarGround* g, uint64_t start, uint64_t end)
+{
+    if (start >= end || !GroundRoom(g, 1))
+        return start >= end;
+    uint64_t i = start ? GroundFrom(g, start - 1u) : 0, j = i;
+    while (j < g->n && g->run[j].start <= end) {
+        start = g->run[j].start < start ? g->run[j].start : start;
+        end   = g->run[j].start + g->run[j].count > end ? g->run[j].start + g->run[j].count : end;
+        j++;
+    }
+    memmove(g->run + i + 1u, g->run + j, sizeof(BinderGround) * (g->n - j));
+    g->n       = g->n - (j - i) + 1u;
+    g->run[i]  = (BinderGround){ start, end - start };
+    return true;
+}
+
+/* [start, end) out of `g`; what of it `g` held, in order, into `cut` when
+ * given. */
+static bool GroundCut(DogEarGround* g, uint64_t start, uint64_t end, DogEarGround* cut)
+{
+    if (!GroundRoom(g, 1))
+        return false;
+    for (uint64_t i = GroundFrom(g, start); i < g->n && g->run[i].start < end;) {
+        uint64_t rs = g->run[i].start, re = rs + g->run[i].count;
+        uint64_t cs = rs > start ? rs : start, ce = re < end ? re : end;
+        if (cut && !GroundAdd(cut, cs, ce))
+            return false;
+        if (rs < cs && ce < re) {
+            memmove(g->run + i + 2u, g->run + i + 1u, sizeof(BinderGround) * (g->n - i - 1u));
+            g->run[i]      = (BinderGround){ rs, cs - rs };
+            g->run[i + 1u] = (BinderGround){ ce, re - ce };
+            g->n++;
+            return true;
+        }
+        if (rs < cs) {
+            g->run[i++].count = cs - rs;
+        } else if (ce < re) {
+            g->run[i] = (BinderGround){ ce, re - ce };
+            return true;
+        } else {
+            memmove(g->run + i, g->run + i + 1u, sizeof(BinderGround) * (g->n - i - 1u));
+            g->n--;
+        }
+    }
+    return true;
+}
+
+/*
+ * ‼ A BLOCK LET GO AND TAKEN AGAIN HOLDS NEW DATA (fallow.h: on a book a block
+ * goes back to the allocator a few stitches after it rests, never waiting for
+ * a Tally). So `born` is the ground live now that was taken since the slice,
+ * `gone` the ground live at the slice whose data has been let go since — a
+ * block let go and taken again is in both: its old digest out, the Gloss's in
+ * (§16.5 п.16). The live files took [start, end) (not `gone`): it is born,
+ * whatever it was. They lost it (`gone`): what of it was born since comes out
+ * of `born` — never live at the slice, or already gone — and the rest is gone.
+ */
+static bool DeltaMoved(DogEarDelta* d, uint64_t start, uint64_t end, bool gone)
+{
+    if (!gone)
+        return GroundAdd(&d->born, start, end);
+    DogEarGround was = { NULL, 0, 0 };
+    bool         ok  = GroundCut(&d->born, start, end, &was);
+    for (uint64_t i = 0, at = start; ok && at < end; i++) {
+        uint64_t stop = i < was.n ? was.run[i].start : end;
+        ok  = GroundAdd(&d->gone, at, stop);
+        at  = i < was.n ? was.run[i].start + was.run[i].count : end;
+    }
+    kfree(was.run);
+    return ok;
+}
+
+// ----------------------------------------------------------------------------
 // A change of a file
 // ----------------------------------------------------------------------------
 
@@ -272,9 +405,11 @@ static void GroundDiffered(DogEarChange* c)
         if (as < bs) {
             x = ae < bs ? ae : bs;
             WindowsNoted(c, as, x);
+            c->refused |= !DeltaMoved(&s_delta_held, as, x, true);
         } else if (bs < as) {
             x = be < as ? be : as;
             WindowsNoted(c, bs, x);
+            c->refused |= !DeltaMoved(&s_delta_held, bs, x, false);
         } else {
             x = ae < be ? ae : be;
         }
@@ -409,12 +544,33 @@ void DogEarTake(void)
     s_taken = s_held;
     memset(&s_held, 0, sizeof(s_held));
     TagFSLockDrop(&s_lock);
+    s_delta_taken = s_delta_held;
+    memset(&s_delta_held, 0, sizeof(s_delta_held));
+}
+
+/* What moved since the slice laid over what the Tally took: the ground the
+ * files let go since, then the ground they took — the two as one change from
+ * the slice before. The result held, false when the heap refused it. */
+static bool DeltaBack(void)
+{
+    bool ok = true;
+    for (uint64_t i = 0; ok && i < s_delta_held.gone.n; i++)
+        ok = DeltaMoved(&s_delta_taken, s_delta_held.gone.run[i].start,
+                        s_delta_held.gone.run[i].start + s_delta_held.gone.run[i].count, true);
+    for (uint64_t i = 0; ok && i < s_delta_held.born.n; i++)
+        ok = DeltaMoved(&s_delta_taken, s_delta_held.born.run[i].start,
+                        s_delta_held.born.run[i].start + s_delta_held.born.run[i].count, false);
+    GroundLetGo(&s_delta_held);
+    s_delta_held = s_delta_taken;
+    memset(&s_delta_taken, 0, sizeof(s_delta_taken));
+    return ok;
 }
 
 void DogEarTakenBack(void)
 {
     if (s_taken.lost) {
         SetLetGo(&s_taken);
+        GroundLetGo(&s_delta_taken);
         (void)HeldLose();
         BinderDemanded();       /* the refused Tally had taken the demand too */
         return;
@@ -422,11 +578,27 @@ void DogEarTakenBack(void)
     for (uint32_t i = 0; i < DOG_EAR_TREES; i++)
         SpansPut(i, s_taken.tree[i].span, s_taken.tree[i].n);
     SetLetGo(&s_taken);
+    if (!DeltaBack())
+        Lose();
 }
 
 void DogEarTakenLetGo(void)
 {
     SetLetGo(&s_taken);
+    GroundLetGo(&s_delta_taken);
+}
+
+const BinderGround* DogEarTakenGround(bool gone, uint64_t* n)
+{
+    const DogEarGround* g = gone ? &s_delta_taken.gone : &s_delta_taken.born;
+    *n = g->n;
+    return g->n ? g->run : NULL;
+}
+
+const BinderGround* DogEarHeldGround(uint64_t* n)
+{
+    *n = s_delta_held.born.n;
+    return s_delta_held.born.n ? s_delta_held.born.run : NULL;
 }
 
 bool DogEarTakenHolds(uint64_t tree, TallyKey key)
@@ -448,6 +620,30 @@ bool DogEarTakenHolds(uint64_t tree, TallyKey key)
     return lo < t->n && !KeyLess(key, t->span[lo].lo);
 }
 
+const DogEarSpan* DogEarTakenSpans(uint64_t tree, uint32_t* n)
+{
+    uint32_t at = TreeAt(tree);
+    *n = at == UINT32_MAX ? 0 : s_taken.tree[at].n;
+    return *n ? s_taken.tree[at].span : NULL;
+}
+
+uint32_t DogEarHeldSpans(uint64_t tree, uint32_t from, DogEarSpan* out, uint32_t room)
+{
+    uint32_t t = TreeAt(tree), n = 0;
+    if (t == UINT32_MAX)
+        return 0;
+    TagFSLockTake(&s_lock);
+    for (uint32_t i = from; !s_held.lost && i < s_held.tree[t].n && n < room; i++)
+        out[n++] = s_held.tree[t].span[i];
+    TagFSLockDrop(&s_lock);
+    return n;
+}
+
+bool DogEarHeldLost(void)
+{
+    return __atomic_load_n(&s_held.lost, __ATOMIC_ACQUIRE);
+}
+
 bool DogEarTakenLost(void)
 {
     return s_taken.lost;
@@ -462,6 +658,8 @@ void DogEarLetGo(void)
     TagFSLockDrop(&s_lock);
     SetLetGo(&gone);
     SetLetGo(&s_taken);
+    GroundLetGo(&s_delta_held);
+    GroundLetGo(&s_delta_taken);
 }
 
 #ifdef CONFIG_VOLUME_TESTS

@@ -9,54 +9,58 @@
  * which keeps the Tally's steps.
  */
 
-/* A rotten node more for the Tally under way, in the order of tree and key. */
-static error_t RotPut(BinderRun* r, uint64_t tree, const TallyPlace* at)
+/* Whether `a` goes after `b` among the nodes named as they lie: by tree,
+ * then by lower key — none first. */
+static bool KeptAfter(const BinderKept* a, const BinderKept* b)
 {
-    if (!BinderListRoom32((void**)&r->rot, r->nrot, &r->caprot, sizeof(BinderRot)))
+    if (a->tree != b->tree)
+        return a->tree > b->tree;
+    return a->at.has_lo && (!b->at.has_lo || BinderKeyLess(a->tree, b->at.lo, a->at.lo));
+}
+
+error_t BinderKeptPut(BinderRun* r, const BinderKept* k)
+{
+    if (!BinderListRoom32((void**)&r->kept, r->nkept, &r->capkept, sizeof(BinderKept)))
         return ERR_NO_MEMORY;
-    uint32_t i = r->nrot++;
-    while (i > 0 && (r->rot[i - 1u].tree > tree ||
-                     (r->rot[i - 1u].tree == tree && at->has_lo &&
-                      (!r->rot[i - 1u].at.has_lo || r->rot[i - 1u].at.lo.k1 > at->lo.k1 ||
-                       (r->rot[i - 1u].at.lo.k1 == at->lo.k1 && r->rot[i - 1u].at.lo.k2 > at->lo.k2))))) {
-        r->rot[i] = r->rot[i - 1u];
+    uint32_t i = r->nkept++;
+    while (i > 0 && KeptAfter(&r->kept[i - 1u], k)) {
+        r->kept[i] = r->kept[i - 1u];
         i--;
     }
-    r->rot[i] = (BinderRot){ .tree = tree, .at = *at };
+    r->kept[i] = *k;
     return OK;
 }
 
 error_t BinderRotOfDigests(void* ctx, const TallyPlace* at)
 {
-    return RotPut((BinderRun*)ctx, TALLY_DIGESTS, at);
+    return BinderKeptPut((BinderRun*)ctx, &(BinderKept){ .tree = TALLY_DIGESTS, .at = *at, .rotten = true });
 }
 
-/* The FILES nodes the Tally names as they lie, as the mount found them; the
- * DIGESTS ones are weighed a leaf a turn after the slice — a mount reads a
- * DIGESTS leaf only when a block of it is (§16.4 п.5). */
+/* The nodes of FILES, TAGS and USE the Tally names as they lie because the
+ * mount found no copy of them to read; the DIGESTS ones are weighed a leaf a
+ * turn after the slice — a mount reads a DIGESTS leaf only when a block of it
+ * is (§16.4 п.5). */
 error_t BinderRotsTaken(BinderRun* r)
 {
     error_t rc = OK;
     for (uint32_t i = 0; rc == OK && i < g_binder.nrot; i++)
         if (g_binder.rot[i].tree != TALLY_DIGESTS)
-            rc = RotPut(r, g_binder.rot[i].tree, &g_binder.rot[i].at);
+            rc = BinderKeptPut(r, &g_binder.rot[i]);
     return rc;
 }
 
-/* The ground the new slot holds: the two runs, and every rotten node it names
- * as it lies, each copy at its birth — made at TAKE, so nothing is asked of
- * the heap once the slot is on the medium. */
+/* The ground the new slot holds: the nodes laid, a run a copy, and the
+ * Tally-Quires of every node it names as it lies, whole (binder_quires.c) —
+ * made at TAKE, so nothing is asked of the heap once the slot is on the
+ * medium. */
 error_t BinderFreshGround(BinderRun* r)
 {
-    SlotGround* f    = &r->fresh;
-    uint32_t    need = 2u;
-    for (uint32_t i = 0; i < r->nrot; i++)
-        need += r->rot[i].at.ptr.copies;
+    SlotGround* f = &r->fresh;
     memset(f, 0, sizeof(*f));
-    if (!(f->ground = kmalloc(sizeof(Strip) * need)))
+    if (!(f->ground = kmalloc(sizeof(Strip) * 2u)))
         return ERR_NO_MEMORY;
-    f->capground = need;
-    return OK;
+    f->capground = 2u;
+    return BinderKeptQuires(r);
 }
 
 static void FreshFill(BinderRun* r)
@@ -68,53 +72,82 @@ static void FreshFill(BinderRun* r)
     f->tally      = w->seq;
     f->chain_from = r->chain_at;
     f->nground    = 0;
-    f->ground[f->nground++] = (Strip){ .start = w->a, .count = (uint32_t)w->room, .kind = STRIP_DATA, .birth = w->seq };
-    f->ground[f->nground++] = (Strip){ .start = w->b, .count = (uint32_t)w->room, .kind = STRIP_DATA, .birth = w->seq };
-    for (uint32_t i = 0; i < r->nrot; i++)
-        for (uint32_t k = 0; k < r->rot[i].at.ptr.copies; k++)
-            f->ground[f->nground++] = (Strip){ .start = TallyPtrBlock(&r->rot[i].at.ptr, k),
-                                               .count = (uint32_t)r->rot[i].at.ptr.sheets,
-                                               .kind = STRIP_DATA, .birth = r->rot[i].at.ptr.seq };
+    if (w->off) {
+        f->ground[f->nground++] = (Strip){ .start = w->a, .count = (uint32_t)w->off, .kind = STRIP_DATA,
+                                           .birth = w->seq };
+        f->ground[f->nground++] = (Strip){ .start = w->b, .count = (uint32_t)w->off, .kind = STRIP_DATA,
+                                           .birth = w->seq };
+    }
     BinderSlotSort(f);
 }
 
-/* The first DIGESTS range the Tally names as it lies that reaches past `at`,
- * clipped to [at, end): [*lo, *hi) — both `end` when none does. */
-static void RotDigestsFrom(const BinderWork* w, uint64_t at, uint64_t end, uint64_t* lo, uint64_t* hi)
+/* The first rotten DIGESTS range the Tally names as it lies that reaches past
+ * `at`, clipped to [at, end): [*lo, *hi) — both `end` when none does. The
+ * ranges are looked at from `*from` on, the blocks asked about only go up. */
+static void RotDigestsFrom(const BinderWork* w, uint32_t* from, uint64_t at, uint64_t end, uint64_t* lo,
+                           uint64_t* hi)
 {
     *lo = *hi = end;
-    for (uint32_t i = 0; i < w->nrot; i++) {
-        const BinderRot* r   = &w->rot[i];
-        uint64_t         rlo = r->at.has_lo ? r->at.lo.k1 : 0, rhi = r->at.has_hi ? r->at.hi.k1 : UINT64_MAX;
-        if (r->tree != TALLY_DIGESTS || rhi <= at || rlo >= *lo)
+    for (; *from < w->nkept; (*from)++) {
+        const BinderKept* r   = &w->kept[*from];
+        uint64_t          rlo = r->at.has_lo ? r->at.lo.k1 : 0, rhi = r->at.has_hi ? r->at.hi.k1 : UINT64_MAX;
+        if (r->tree != TALLY_DIGESTS || !r->rotten || r->taken || rhi <= at)
             continue;
-        *lo = rlo > at ? rlo : at;
-        *hi = rhi < end ? rhi : end;
+        if (rlo < end) {
+            *lo = rlo > at ? rlo : at;
+            *hi = rhi < end ? rhi : end;
+        }
+        return;
+    }
+}
+
+/* The Gloss let go of [at, end) — but of a block a file took since the slice:
+ * the block was let go after it and taken again, and the Gloss holds its new
+ * digest, which the Tally does not name (fallow.h: a block goes back to the
+ * allocator without waiting for a Tally). `born` (`nb`, in order) looked at
+ * from `*j` on, the blocks only going up. */
+static void GlossForgetBut(TagFSLock* lock, uint64_t at, uint64_t end, const BinderGround* born, uint64_t nb,
+                           uint64_t* j)
+{
+    while (*j < nb && born[*j].start + born[*j].count <= at)
+        (*j)++;
+    for (uint64_t k = *j; at < end; k++) {
+        uint64_t stop = k < nb && born[k].start < end ? born[k].start : end;
+        if (stop > at) {
+            TagFSLockTake(lock);
+            GlossForget(at, stop - at);
+            TagFSLockDrop(lock);
+        }
+        if (k >= nb || born[k].start >= end)
+            return;
+        at = born[k].start + born[k].count > at ? born[k].start + born[k].count : at;
     }
 }
 
 /*
  * The Gloss let go of every digest the Tally's DIGESTS now names — the ground
- * of the slice, a run at a time under the state lock — but of a block in a
- * DIGESTS range the Tally names as it lies (§16.4 п.5): no element of that
- * range is laid, and the Gloss is all that holds the digest of a block
- * written there since. It keeps those while this mount lasts — said: past it
- * they read unchecked, as the range's other blocks do, until it is healed.
+ * of the slice it laid, a run at a time under the state lock; a Tally laid in
+ * lays the ground of the leaves it lays and offers, and names every other
+ * block as the Tally before did, whose digest the Gloss let go of then — but
+ * of a block in a rotten DIGESTS range the Tally names as it lies (§16.4 п.5):
+ * no element of that range is laid, and the Gloss is all that holds the digest
+ * of a block written there since. It keeps those while this mount lasts —
+ * said: past it they read unchecked, as the range's other blocks do, until it
+ * is healed.
  */
 static void GlossCaptured(const BinderWork* w)
 {
-    TagFSLock* lock = &tagfs_get_state()->lock;
-    uint64_t   kept = 0;
+    TagFSLock*          lock = &tagfs_get_state()->lock;
+    uint64_t            kept = 0, nb = 0, j = 0;
+    uint32_t            from = 0;
+    const BinderGround* born = DogEarHeldGround(&nb);
     for (uint64_t i = 0; i < w->nground; i++) {
         uint64_t at = w->ground[i].start, end = at + w->ground[i].count;
         while (at < end) {
             uint64_t lo = end, hi = end;
-            RotDigestsFrom(w, at, end, &lo, &hi);
-            if (lo > at) {
-                TagFSLockTake(lock);
-                GlossForget(at, lo - at);
-                TagFSLockDrop(lock);
-            }
+            RotDigestsFrom(w, &from, at, end, &lo, &hi);
+            if (lo > at)
+                GlossForgetBut(lock, at, lo, born, nb, &j);
             kept += hi - lo;
             at    = hi;
         }
@@ -125,6 +158,21 @@ static void GlossCaptured(const BinderWork* w)
                 "of which reads: the digests of those written since stay in memory while this mount lasts, and "
                 "past it those blocks read unchecked until the range is healed\n", (unsigned long long)kept,
                 (unsigned long long)w->seq);
+}
+
+/* The blocks one copy of the Tally's whole book takes — every node it names,
+ * laid or named as it lies (§16.4 п.7), in Sheets as a mount of it counts them
+ * (book_ground.c, BookGroundNodeOf) and volume-read (binder.py, BindSaid): a
+ * whole Tally's are the ones it laid; one laid in adds what the Foliation
+ * keeps of the Tally before and the DIGESTS leaves the reads' table did, or —
+ * the Foliation lost — the whole book before it, an upper bound. */
+static uint64_t BookBlocks(const BinderWork* w)
+{
+    if (!w->tip)
+        return w->sheets;
+    if (FoliationLost())
+        return g_binder.tally_blocks + w->sheets;
+    return w->sheets + FoliationBlocksOlder(w->seq) + w->dsheets;
 }
 
 error_t BinderTallyDone(BinderRun* r)
@@ -139,34 +187,77 @@ error_t BinderTallyDone(BinderRun* r)
     BinderSlotOwnPublish(r->slot, 0);
     uint64_t gone = BinderSlotGoes(&old);
     BinderSlotLetGo(&old);
-    if (r->captured)
+    if (r->captured && !DogEarHeldLost())
         GlossCaptured(w);
+    else if (r->captured)
+        kprintf("[TagFS] DogEar lost the ground files took since Tally %llu's slice to a heap that refused it: the "
+                "Gloss keeps every digest it holds until the next Tally\n", (unsigned long long)w->seq);
     DogEarTakenLetGo();
     FoliationDraftDone(w->seq, r->captured);
     RibbonTallied(w->seq);
     EndpaperTallyLaid(&w->laid);
+    BinderPairUsed(r);
     g_binder.useful      -= g_binder.useful >= r->useful_at ? r->useful_at : g_binder.useful;
-    g_binder.tally_blocks = w->off;
+    g_binder.tally_blocks = BookBlocks(w);
+    g_binder.cost_known   = 0;
     g_binder.tallies++;
-    kprintf("[TagFS] Tally %llu is written over slot %u: the state after stitch %llu, %llu node(s) in %llu "
-            "block(s) a copy; %llu block(s) no slot holds any more rest in Fallow%s\n", (unsigned long long)w->seq,
-            r->slot, (unsigned long long)r->k, (unsigned long long)w->nodes, (unsigned long long)w->off,
+    kprintf("[TagFS] Tally %llu is written over slot %u: the state after stitch %llu, %llu node(s) laid in %llu "
+            "block(s) a copy, %llu named as they lie%s; %llu block(s) no slot holds any more rest in Fallow%s\n",
+            (unsigned long long)w->seq, r->slot, (unsigned long long)r->k, (unsigned long long)w->nodes,
+            (unsigned long long)w->off, (unsigned long long)w->named, w->tip ? " (laid in)" : "",
             (unsigned long long)gone, w->dropped ? "; DIGESTS elements a rotten range covers left out" : "");
     return OK;
 }
 
+/* Slot `s`'s Tally-Quires joined with `f`'s, in order, a Quire once: false
+ * with no memory. */
+static bool QuiresJoined(SlotGround* s, const SlotGround* f)
+{
+    uint32_t n = s->nquires + f->nquires, k = 0;
+    Strip*   both = n ? kmalloc(sizeof(Strip) * n) : NULL;
+    if (n && !both)
+        return false;
+    for (uint32_t i = 0, j = 0; i < s->nquires || j < f->nquires;) {
+        bool     mine = j == f->nquires || (i < s->nquires && s->quires[i].start <= f->quires[j].start);
+        Strip    x    = mine ? s->quires[i++] : f->quires[j++];
+        uint64_t last = k ? both[k - 1u].start + both[k - 1u].count : 0;
+        if (k && last >= x.start + x.count)
+            continue;
+        if (k && last >= x.start && last - both[k - 1u].start + (x.start + x.count - last) <= UINT32_MAX) {
+            both[k - 1u].count = (uint32_t)(x.start + x.count - both[k - 1u].start);
+            continue;
+        }
+        if (k && last > x.start) {
+            x.count -= (uint32_t)(last - x.start);
+            x.start  = last;
+        }
+        both[k++] = x;
+    }
+    kfree(s->quires);
+    s->quires    = both;
+    s->nquires   = k;
+    s->capquires = n;
+    return true;
+}
+
 /* A slot whose write or flush was refused may hold the Tally it held or the
  * new one, whole (C9, C10): held as holding both until a Tally is written over
- * it, and written over first. */
+ * it, and written over first. With no memory to hold it so, no slot holds the
+ * Quires the new Tally names a node in as it lies — so no Tally is written
+ * by this mount again, and no Quire is given back until the volume is mounted
+ * again. */
 void BinderSlotUnsure(BinderRun* r)
 {
     SlotGround* s = &g_binder.slot[r->slot];
     FreshFill(r);
+    BinderPairUsed(r);
     uint32_t n    = s->nground + r->fresh.nground;
     Strip*   both = kmalloc(sizeof(Strip) * n);
-    if (!both) {
+    if (!both || !QuiresJoined(s, &r->fresh)) {
+        kfree(both);
         kprintf("[TagFS] no memory to hold slot %u as naming either Tally — the new Tally's ground is held until "
                 "the volume is mounted again\n", r->slot);
+        BinderNoTalliesFrom("memory would not hold a slot that may name either of two Tallies");
         return;
     }
     if (s->nground)

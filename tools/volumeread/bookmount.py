@@ -15,7 +15,7 @@ fid, tag, bookmark and seq — and every reason the volume may only be read
 The ground's owners and the findings are bookcensus.py's; this is the mount.
 """
 
-from . import bookread, ondisk, stitch, stitch_ribbon, tally
+from . import bookread, dog_ear, ondisk, stitch, stitch_ribbon, tally
 from .bookread import Short
 from .ondisk import BLOCK, RunsNormal
 from .stitch import (BORN, COINED, FROZEN, LABELED, QUITCLAIM, SHAPED, THAWED, UNDONE, USE_CONTEXT,
@@ -110,6 +110,7 @@ class BookMount:
         self.errata, self._errata = [], {}
         self.older_nodes, self.older_quires = [], []
         self.ribbon_said, self.applied = 0, []
+        self.dog_ear = dog_ear.Fresh()         # the keys the stitches applied changed (dog_ear.py)
         self.lied_check = None
         self.seen_fid = self.seen_tag = self.seen_bookmark = 0
         self.counts = {}
@@ -398,6 +399,7 @@ class BookMount:
             except Refused as e:
                 self.Glass("stitch %u is not applied: %s" % (u.seq, e))
                 continue
+            dog_ear.Stitched(self.dog_ear, self.files, files, self.touched, self.coined, use is not self.use)
             self.files, self.tags, self.use = files, tags, use
             self.fallow.extend(fallow)
             self.overlay.update(overlay)
@@ -414,6 +416,7 @@ class BookMount:
         over one fid more, so it ends."""
         while True:
             files, tags, use, fallow, overlay = dict(self.files), dict(self.tags), self.use, [], {}
+            self.touched, self.coined = set(), []
             passed = len(self.undone.get(u.seq, ()))
             if u.head is not None and u.head.longer:
                 raise Refused("its StitchHead or Clasp is %u byte(s) longer than this reader knows — "
@@ -475,7 +478,9 @@ class BookMount:
             return use
         if kind == COINED:
             self._Coined(u, d, tags)
+            self.coined.append(d["tid"])
             return use
+        self.touched.add(d["fid"])
         try:
             self._File(u, kind, d, files, tags, fallow, overlay)
         except Mismatch as e:

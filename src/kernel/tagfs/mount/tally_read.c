@@ -483,6 +483,11 @@ bool TallyDigestLeafAt(uint32_t index, TallyPlace* out, bool* rotten)
     return true;
 }
 
+uint32_t TallyDigestLeaves(void)
+{
+    return s_tables[__atomic_load_n(&s_table_at, __ATOMIC_ACQUIRE)].count;
+}
+
 error_t TallyDigestsRottenNext(uint32_t* leaf, error_t (*rot)(void* ctx, const TallyPlace* at), void* ctx,
                                bool* done)
 {

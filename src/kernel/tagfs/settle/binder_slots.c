@@ -1,6 +1,7 @@
 #include "binder.h"
 #include "../mount/book_mount.h"
 #include "../ink/fallow.h"
+#include "../block_map/block_map_derived.h"
 #include "dog_ear.h"
 #include "foliation.h"
 
@@ -54,6 +55,7 @@ bool BinderListRoom32(void** list, uint32_t n, uint32_t* cap, size_t size)
 void BinderSlotLetGo(SlotGround* s)
 {
     kfree(s->ground);
+    kfree(s->quires);
     kfree(s->extra);
     memset(s, 0, sizeof(*s));
     s->chain_from = UINT64_MAX;
@@ -139,7 +141,7 @@ error_t BinderSlotRibbon(uint32_t index, const RibbonQuire* q)
 
 error_t BinderRotten(uint64_t tree, const TallyPlace* at)
 {
-    if (!BinderListRoom32((void**)&g_binder.rot, g_binder.nrot, &g_binder.caprot, sizeof(BinderRot)))
+    if (!BinderListRoom32((void**)&g_binder.rot, g_binder.nrot, &g_binder.caprot, sizeof(BinderKept)))
         return ERR_NO_MEMORY;
     uint32_t i = g_binder.nrot++;
     /* In the order of their tree, then of their keys: the walk of each tree
@@ -151,7 +153,7 @@ error_t BinderRotten(uint64_t tree, const TallyPlace* at)
         g_binder.rot[i] = g_binder.rot[i - 1u];
         i--;
     }
-    g_binder.rot[i] = (BinderRot){ .tree = tree, .at = *at };
+    g_binder.rot[i] = (BinderKept){ .tree = tree, .at = *at, .rotten = true };
     return OK;
 }
 
@@ -248,6 +250,7 @@ void BinderMountStood(uint32_t index, uint64_t tally_blocks, uint64_t useful, ui
     for (uint32_t i = 0; i < g_binder.ring; i++)
         BinderSlotOwnPublish(i, 0);
     g_binder.tally_blocks  = tally_blocks;
+    g_binder.cost_known    = 0;
     g_binder.useful        = useful;
     g_binder.seen_fid      = next_fid;
     g_binder.seen_tag      = next_tag;
@@ -273,7 +276,7 @@ void BinderNoTalliesFrom(const char* why)
 
 /* A slot's own Tallies' ground: its nodes born at the Tally it names, or at
  * the one it may name instead — what a Tally written over it gives back. A
- * node named as it lies is every Tally's (SpineHolds), and goes back with
+ * node named as it lies is every Tally's (QuireHeld), and goes back with
  * none. */
 static uint64_t SlotOwn(const SlotGround* s)
 {
@@ -337,6 +340,9 @@ uint32_t BinderStandGround(Strip* out, uint32_t room)
         for (uint32_t k = 0; k < s->nground; k++, n++)
             if (n < room)
                 out[n] = s->ground[k];
+        for (uint32_t k = 0; k < s->nquires; k++, n++)
+            if (n < room)
+                out[n] = s->quires[k];
         for (uint32_t k = 0; k < s->nextra; k++, n++)
             if (n < room)
                 out[n] = (Strip){ .start = s->extra[k].block, .count = (uint32_t)s->extra[k].blocks, .kind = STRIP_DATA };
@@ -346,6 +352,15 @@ uint32_t BinderStandGround(Strip* out, uint32_t room)
         if (n < room && at >= g_binder.chain_base)
             out[n] = (Strip){ .start = g_binder.chain[at - g_binder.chain_base].block,
                               .count = (uint32_t)g_binder.chain[at - g_binder.chain_base].blocks, .kind = STRIP_DATA };
+    /* And what of the pair of Tally-Quires the next Tally goes on in no node
+     * was laid in yet: the book's, no slot's. */
+    if (g_binder.pair_room > g_binder.pair_used) {
+        uint64_t used = g_binder.pair_used, left = g_binder.pair_room - used;
+        for (uint32_t k = 0; k < 2u; k++, n++)
+            if (n < room)
+                out[n] = (Strip){ .start = (k ? g_binder.pair_b : g_binder.pair_a) + used, .count = (uint32_t)left,
+                                  .kind = STRIP_DATA };
+    }
     return n;
 }
 #endif
@@ -371,49 +386,57 @@ void BinderRibbonGiven(const RibbonQuire* q)
 // What the slots hold (FALLOW_BY_SPINE)
 // ----------------------------------------------------------------------------
 
-bool SpineHolds(uint64_t birth, uint64_t death)
+/* Whether runs `g` (`n`, in order, apart from one another) take any block
+ * of [start, end). */
+static bool RunsName(const Strip* g, uint32_t n, uint64_t start, uint64_t end)
 {
-    for (uint32_t i = 0; i < g_binder.nslots; i++) {
-        const SlotGround* s = &g_binder.slot[i];
-        if (!s->holds)
-            continue;
-        if ((birth <= s->tally && s->tally < death) || (s->tally2 && birth <= s->tally2 && s->tally2 < death))
-            return true;
-    }
-    return false;
-}
-
-/* Whether slot `s`'s ground takes any block of `g` — the same node, named
- * as it lies: a Tally's blocks are no other Tally's while a slot holds it. */
-static bool SlotNames(const SlotGround* s, const Strip* g)
-{
-    uint32_t lo = 0, hi = s->nground;
+    uint32_t lo = 0, hi = n;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;
-        if (s->ground[mid].start + s->ground[mid].count <= g->start)
+        if (g[mid].start + g[mid].count <= start)
             lo = mid + 1u;
         else
             hi = mid;
     }
-    return lo < s->nground && s->ground[lo].start < g->start + g->count;
+    return lo < n && g[lo].start < end;
 }
 
-/* The Tally that first stopped naming a node born at g->birth: the least
- * Tally a slot holds past its birth that does not name it — UINT64_MAX when
- * every one still does. */
-static uint64_t NodeDeath(const Strip* g)
+/* Whether slot `s` names any block of [start, end): its nodes, or a
+ * Tally-Quire its Tally names a node in as it lies. */
+static bool SlotNames(const SlotGround* s, uint64_t start, uint64_t end)
 {
-    uint64_t death = UINT64_MAX;
-    for (uint32_t i = 0; i < g_binder.nslots; i++) {
-        const SlotGround* s = &g_binder.slot[i];
-        if (!s->holds || SlotNames(s, g))
-            continue;
-        if (s->tally > g->birth && s->tally < death)
-            death = s->tally;
-        if (s->tally2 > g->birth && s->tally2 < death)
-            death = s->tally2;
-    }
-    return death;
+    return RunsName(s->ground, s->nground, start, end) || RunsName(s->quires, s->nquires, start, end);
+}
+
+/*
+ * ‼ A TALLY-QUIRE IS HELD WHOLE WHILE ONE NODE IN IT LIVES (spec_v2 §16.5
+ * п.17, Р-d3 (б)). The Binder takes its Tally-Quires whole on the grid of the
+ * ribbon's Quire (binder.c TallyRunsTake), and every slot that holds counts
+ * the nodes of its Tally — or of either, unsure — in each by its ground and
+ * by the Quires its Tally names a node in as it lies (binder_quires.c): the
+ * Quire goes back whole once no such count is left, the nodes there that no
+ * Tally names any more and the tail no Tally reached with it (§4.8), resting
+ * in Fallow for the lag (§3.4) — the same Quire a mount's census holds whole
+ * (mount/ground_census.c GroundQuiresHeld). What of the current pair a Tally
+ * may still be laid in stays the pair's.
+ */
+static bool SlotsHold(uint64_t start, uint64_t end)
+{
+    for (uint32_t i = 0; i < g_binder.nslots; i++)
+        if (g_binder.slot[i].holds && SlotNames(&g_binder.slot[i], start, end))
+            return true;
+    return false;
+}
+
+static bool QuireHeld(uint64_t start, uint64_t end, uint64_t q)
+{
+    if (SlotsHold(start, end))
+        return true;
+    if (!g_binder.pair_room)
+        return false;
+    uint64_t used = g_binder.pair_used / q * q;
+    return (start < g_binder.pair_a + g_binder.pair_room && g_binder.pair_a + used < end) ||
+           (start < g_binder.pair_b + g_binder.pair_room && g_binder.pair_b + used < end);
 }
 
 /* Whether a Quire off the chain is another slot's too. */
@@ -445,10 +468,31 @@ static bool GoesPut(Strip** list, uint64_t* n, uint64_t* cap, uint64_t start, ui
     return true;
 }
 
+/* The Tally-Quires slot `old` named a node in that no slot holds now — its
+ * nodes and its Quires walked as one list by first block, each Quire once —
+ * into the list of what goes. False with no memory. */
+static bool QuiresGo(const SlotGround* old, uint64_t q, Strip** goes, uint64_t* ngoes, uint64_t* cap)
+{
+    uint64_t past = 0;
+    for (uint32_t i = 0, j = 0; i < old->nground || j < old->nquires;) {
+        bool         node = j == old->nquires || (i < old->nground && old->ground[i].start <= old->quires[j].start);
+        const Strip* s    = node ? &old->ground[i++] : &old->quires[j++];
+        uint64_t     end  = s->start + s->count;
+        for (uint64_t at = s->start / q * q; at < end; at += q) {
+            if (at < past || QuireHeld(at, at + q, q))
+                continue;
+            past = at + q;
+            if (!GoesPut(goes, ngoes, cap, at, q))
+                return false;
+        }
+    }
+    return true;
+}
+
 /*
- * What the slot `old` held that no slot holds now — its Tallies' nodes no
- * slot's Tally names in [birth, death) (SpineHolds), the Quires of its
- * ribbon off the chain no other slot's, and the chain from where its ribbon
+ * What the slot `old` held that no slot holds now — the Tally-Quires its
+ * nodes lie in no slot that holds names a node in (QuireHeld), whole, the
+ * Quires of its ribbon off the chain no other slot's, and the chain from where its ribbon
  * began to where the earliest slot's now does (L-12: every slot names its
  * `at` later on the ribbon than their end) — as runs, for Fallow. The chain
  * before every slot's ribbon let go of in memory. False with no memory.
@@ -458,10 +502,9 @@ static bool SlotGoes(const SlotGround* old, Strip** goes, uint64_t* n)
     uint64_t cap = 0, held = ChainHeldFrom();
     *goes = NULL;
     *n    = 0;
-    for (uint32_t i = 0; i < old->nground; i++)
-        if (!SpineHolds(old->ground[i].birth, NodeDeath(&old->ground[i])) &&
-            !GoesPut(goes, n, &cap, old->ground[i].start, old->ground[i].count))
-            return false;
+    uint64_t q = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
+    if (!QuiresGo(old, q, goes, n, &cap))
+        return false;
     for (uint32_t i = 0; i < old->nextra; i++)
         if (!ExtraHeld(&old->extra[i]) && !GoesPut(goes, n, &cap, old->extra[i].block, old->extra[i].blocks))
             return false;
@@ -481,19 +524,15 @@ static bool SlotGoes(const SlotGround* old, Strip** goes, uint64_t* n)
     return true;
 }
 
-/* What the slot `old` held that no slot holds now, resting in Fallow for the
- * lag's stitches (FALLOW_BY_SPINE): its blocks. With no memory for its node,
- * held until the volume is mounted again — said. */
-uint64_t BinderSlotGoes(const SlotGround* old)
+/* The runs `goes` (`n`) resting in Fallow for the lag's stitches
+ * (FALLOW_BY_SPINE): their blocks. With no memory for its node, held until the
+ * volume is mounted again — said. */
+static uint64_t GoesRest(Strip* goes, uint64_t n)
 {
-    Strip*      goes = NULL;
-    uint64_t    n = 0, blocks = 0;
-    FallowNode* node = NULL;
-    if (SlotGoes(old, &goes, &n) && n && n <= UINT32_MAX)
-        node = FallowNodeMake(goes, (uint32_t)n, FALLOW_BY_SPINE, 0);
+    uint64_t    blocks = 0;
+    FallowNode* node   = n && n <= UINT32_MAX ? FallowNodeMake(goes, (uint32_t)n, FALLOW_BY_SPINE, 0) : NULL;
     for (uint64_t i = 0; i < n; i++)
         blocks += goes[i].count;
-    kfree(goes);
     if (n && !node) {
         kprintf("[TagFS] no memory to rest the %llu block(s) the slots no longer hold — they are held until the "
                 "volume is mounted again\n", (unsigned long long)blocks);
@@ -504,5 +543,51 @@ uint64_t BinderSlotGoes(const SlotGround* old)
     TagFSLockTake(&tagfs_get_state()->lock);
     FallowSpineAdd(node, SettledCycles());
     TagFSLockDrop(&tagfs_get_state()->lock);
+    return blocks;
+}
+
+/*
+ * The current pair of Tally-Quires let go for a new one (binder.c
+ * TallyRunsTake), each of its two runs: the Quires no node was laid in back to
+ * the map at once — no slot ever named them; the one the last Tally ended
+ * inside, when no slot that holds names a node in it any more, resting in
+ * Fallow as a slot's ground does; every other stays with the slots that name its nodes,
+ * and goes back whole with the last of them (SlotGoes). Before the pair is
+ * moved: it reads the pair it lets go.
+ */
+void BinderPairLetGo(uint64_t q)
+{
+    if (!g_binder.pair_room || !q)
+        return;
+    uint64_t used = (g_binder.pair_used + q - 1u) / q * q, last = g_binder.pair_used / q * q;
+    Strip    goes[2];
+    uint64_t n = 0;
+    for (uint32_t k = 0; k < 2u; k++) {
+        uint64_t base = k ? g_binder.pair_b : g_binder.pair_a;
+        if (used < g_binder.pair_room)
+            (void)BlockMapDerivedGiveAs(GROUND_TALLY, 0, base + used, g_binder.pair_room - used);
+        /* The Quire the last Tally ended inside, which SlotGoes left the pair
+         * (QuireHeld) — one it filled was no longer the pair's to keep. */
+        if (last < used && !SlotsHold(base + last, base + used))
+            goes[n++] = (Strip){ .start = base + last, .count = (uint32_t)q, .kind = STRIP_DATA };
+    }
+    (void)GoesRest(goes, n);
+}
+
+/* What the slot `old` held that no slot holds now, resting in Fallow for the
+ * lag's stitches (FALLOW_BY_SPINE): its blocks. With no memory for its node,
+ * held until the volume is mounted again — said. */
+uint64_t BinderSlotGoes(const SlotGround* old)
+{
+    Strip*   goes = NULL;
+    uint64_t n    = 0;
+    if (!SlotGoes(old, &goes, &n)) {
+        kfree(goes);
+        kprintf("[TagFS] no memory to list the ground slot %llu's Tally held — what no slot holds now is held "
+                "until the volume is mounted again\n", (unsigned long long)old->seq);
+        return 0;
+    }
+    uint64_t blocks = GoesRest(goes, n);
+    kfree(goes);
     return blocks;
 }
