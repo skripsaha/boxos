@@ -40,6 +40,23 @@ static int BoxAsmPpWordEnds(char C)
     return C == '\0' || C == ' ' || C == '\t' || C == ',' || C == ';';
 }
 
+/* NASM's <name> looks along the include paths, and files here have none: the
+ * line to write instead is said, the same name in quotes. */
+static int BoxAsmPpAngle(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *At)
+{
+    const char *Close = strchr(At + 1, '>');
+    BoxAsmMessage Message;
+
+    if (!Close || Close == At + 1 || memchr(At + 1, '"', (size_t)(Close - At - 1)))
+        return BoxAsmPpFail(Pp, Line, At, "expected the file's name in quotes: %include \"math.asm\"",
+                            NULL);
+    BoxAsmPpFailBegin(Pp, Line, At, &Message);
+    BoxAsmMessageText(&Message, "files are found by name and tags, not along a path: write %include \"");
+    BoxAsmMessageSpan(&Message, At + 1, (size_t)(Close - At - 1));
+    BoxAsmMessageText(&Message, "\", and after it a tag it wears, or everywhere, to say which");
+    return BoxAsmPpFailEnd(Pp, Line, At, &Message);
+}
+
 /* The name in quotes, then words up to the end or a comment: `everywhere`,
  * or a tag. */
 static int BoxAsmPpAskOf(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, BoxAsmPpAsk *Ask)
@@ -52,6 +69,8 @@ static int BoxAsmPpAskOf(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Res
     int Rc;
 
     Ask->At = At;
+    if (*At == '<')
+        return BoxAsmPpAngle(Pp, Line, At);
     if (*At != '"' && *At != '\'' && *At != '`')
         return BoxAsmPpFail(Pp, Line, At, "expected the file's name in quotes: %include \"math.asm\"",
                             NULL);

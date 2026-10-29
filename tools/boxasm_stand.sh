@@ -635,7 +635,7 @@ binary.asm:5:10: binary.inc holds a NUL byte in its line 2: it is not a source
              ^
 EOF
 volume_says include_angle angle.asm <<'EOF'
-angle.asm:5:10: expected the file's name in quotes: %include "math.asm"
+angle.asm:5:10: files are found by name and tags, not along a path: write %include "box.inc", and after it a tag it wears, or everywhere, to say which
     %include <box.inc>
              ^
 EOF
