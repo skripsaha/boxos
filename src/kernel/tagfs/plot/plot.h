@@ -99,6 +99,9 @@ typedef struct {
     TailSlip     *slip;
     uint32_t      slip_off;
     uint32_t      slip_len;
+    bool          promised;       /* the block its first Slip's tail is laid in promised to the file, until its
+                                   * Ink puts the record that holds the Slip, and the promise with it, or the
+                                   * Plot is let go (block_map.h, AllotmentPromise) */
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
     bool          engross;        /* an Engross's: its Ink says so (EngrossInked, settle_cut.h) */
 #endif
@@ -345,6 +348,12 @@ error_t  PlotWindowLanded(Plot *p, uint64_t departed, uint64_t block, const uint
  * on. OK and nothing done for a file with no Slip, or on format v1; or the
  * refusal of the ground, the read, the write or the ribbon's room. */
 error_t  PlotEngross(Plot *p, bool *laid);
+
+/* The Plot's Slip let go of (plot_slip.c), and the block it promised its
+ * file's first Slip: by the Plot when it is let go, or the write lays no Slip;
+ * by its Ink once the record it put holds the Slip, and the promise with it
+ * (InkBookPlotNext). */
+void     PlotSlipLetGo(Plot *p);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's measure that a write copies only the Strips around its change

@@ -227,7 +227,8 @@ uint64_t RibbonSeqNext(void)
  * from then on (M-5). It is a whole Quire on an atom of the data run, looked
  * for past the Quire the ribbon stands in, and never one the ground the
  * Tallies need would go to (EndpaperKeeps — a whole Tally, and what the ring's
- * slots lack of one): a Quire of the ribbon comes back only once the slots stop
+ * slots lack of one) nor a block promised to a Slip's tail (BlockMapTakeQuire):
+ * a Quire of the ribbon comes back only once the slots stop
  * naming it, which only a Tally written over one of them does.
  */
 void RibbonNextGiven(void)
@@ -245,8 +246,7 @@ void RibbonNextGiven(void)
         BinderRibbonGiven(&c->next);
     } else if (c->taken == ERR_TAGFS_NO_SPACE) {
         SettleDemand(SETTLE_DEMAND_TALLY);
-        __atomic_store_n(&s_refused_free, __atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE),
-                         __ATOMIC_RELEASE);
+        __atomic_store_n(&s_refused_free, AllotmentFreeUnpromised(), __ATOMIC_RELEASE);
     }
     RibbonRoomPublish();
 }
@@ -265,12 +265,13 @@ static void RibbonOutSaid(void)
     const char*   none = BinderNoTallies();
     if (__atomic_exchange_n(&c->out, true, __ATOMIC_ACQ_REL))
         return;
-    kprintf("[TagFS] the ribbon has run out: %llu Quire(s) taken for it, %llu block(s) free and %llu kept for "
-            "the Tallies — %s%s; until then files, names, tags and words are refused (ERR_TAGFS_NO_SPACE), "
-            "and the rest of its Quire is kept for what was claimed before and what gives ground up\n",
+    kprintf("[TagFS] the ribbon has run out: %llu Quire(s) taken for it, %llu block(s) free, %llu kept for "
+            "the Tallies and %llu promised to the tails Slips lie over — %s%s; until then files, names, tags and "
+            "words are refused (ERR_TAGFS_NO_SPACE), and the rest of its Quire is kept for what was claimed before "
+            "and what gives ground up\n",
             (unsigned long long)__atomic_load_n(&c->quires, __ATOMIC_RELAXED),
             (unsigned long long)__atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE),
-            (unsigned long long)EndpaperKeeps(c->quire_blocks),
+            (unsigned long long)EndpaperKeeps(c->quire_blocks), (unsigned long long)AllotmentPromised(),
             none ? "no Tally is written by this mount, so none of its Quires comes back before the volume is "
                    "mounted again: " : "a Tally is asked for to take its end in, and its Quires come back only once "
                    "the slots stop naming them",
@@ -476,7 +477,9 @@ static uint64_t RibbonHeld(void)
  * settling frees what they held at the most (a hold is a claim in the making:
  * its change claims no more than it, and the cycle after takes that), while a
  * next_quire may still be
- * given, the ground having grown since the last ask was refused, or while
+ * given, the ground having grown since the last ask was refused — the free
+ * ground past the blocks promised to Slips' tails, which a next_quire leaves
+ * (AllotmentFreeUnpromised) — or while
  * ground rests in a Quire the ribbon has left for no more than its lag. Else
  * nothing a cycle does makes room: ERR_TAGFS_NO_SPACE, at once.
  */
@@ -489,8 +492,7 @@ static error_t RibbonRoomFor(uint64_t bytes, bool frees)
         return OK;
     if (s_claimed || s_reserved || __atomic_load_n(&s_flight, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&s_room_grows, __ATOMIC_ACQUIRE) ||
-        __atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE) >
-            __atomic_load_n(&s_refused_free, __ATOMIC_ACQUIRE) ||
+        AllotmentFreeUnpromised() > __atomic_load_n(&s_refused_free, __ATOMIC_ACQUIRE) ||
         FallowLeftBlocks())
         return ERR_WOULD_BLOCK;
     return ERR_TAGFS_NO_SPACE;

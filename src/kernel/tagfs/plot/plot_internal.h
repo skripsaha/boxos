@@ -88,17 +88,17 @@ error_t  PlotWindowTail(Plot *p, uint64_t k, uint32_t tail);
  *                   the file's last block as it leaves it, leaves that block
  *                   short of full, keeps the Slips one span, of a file that
  *                   wears no system, boot or god and is not the loader's
- *                   kernel, while no Tally is owed — rides a Slip: no ground
+ *                   kernel, while no Tally is owed, with a block promised
+ *                   to its tail (AllotmentPromise) — rides a Slip: no ground
  *                   taken, a hole put in for a new last block, *chosen; any
  *                   other lays blocks, and the heap that refuses the Slip its
  *                   room asks a Tally (§16.5 п.15)
  *   PlotSlipWrite   the write's bytes into its Slip: no block moves
- *   PlotSlipLetGo   the Slip let go of, with the Plot or its Ink
  *   PlotSlipMost    the bytes the Slip may take in its record at the most
+ * and PlotSlipLetGo (plot.h), with the Plot or its Ink.
  */
 error_t  PlotSlipBegin(Plot *p, uint64_t at, uint64_t bytes, bool *chosen);
 error_t  PlotSlipWrite(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
-void     PlotSlipLetGo(Plot *p);
 uint64_t PlotSlipMost(const Plot *p);
 
 /* Whether the record the Plot would ink fits format v1. */

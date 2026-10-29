@@ -590,7 +590,7 @@ error_t BlockMapTakeQuire(GroundOwner owner, uint64_t blocks, uint32_t align, ui
     align       = align ? align : 1u;
     if (!s_map.up) {
         rc = ERR_NOT_INITIALIZED;
-    } else if (blocks == 0 || s_map.free < blocks || s_map.free - blocks < keep) {
+    } else if (blocks == 0 || s_map.free < blocks || s_map.free - blocks < keep + AllotmentPromised()) {
         rc = ERR_TAGFS_NO_SPACE;
     } else {
         /* A file's window is given back before the book is refused a run:

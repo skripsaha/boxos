@@ -5,6 +5,8 @@
 #include "../ink/docket.h"
 #include "../mount/book_mount.h"
 #include "../settle/binder.h"
+#include "../settle/sewing.h"
+#include "../block_map/block_map.h"
 
 /*
  * A write that rides a Slip (spec_v2 §2.8, §3.7, §16.5 п.13-15) — the Plot of
@@ -30,6 +32,12 @@
  * the holder). Each of these lays blocks, as a write always did. The heap
  * that refuses the Slip its room is said, lays the block, and asks a Tally —
  * the event, no number of Slips counted beforehand (§16.5 п.15).
+ *
+ * ‼ AND NEVER A SLIP THE VOLUME COULD NOT LAY. Its tail goes into a block
+ * before the next Tally, so a file's first Slip is given only with a block of
+ * the free ground promised to it (block_map.h, AllotmentPromise) — where a
+ * write of a block could have had one. Where none can be promised, the write
+ * lays its block, and is refused ERR_TAGFS_NO_SPACE as such a write is.
  */
 
 #define PLOT_BLOCK TAGFS_BLOCK_SIZE
@@ -40,6 +48,18 @@ static bool PlotSlipBarred(const Plot *p)
 {
     return !p->rec || p->fid == g_book.boot_fid || InkWearsGuarded(p->meta.tag_ids, p->meta.tag_count) ||
            BinderEngrossOwed();
+}
+
+/* The block the tail of a file whose record holds no Slips yet will be laid in,
+ * promised — afresh before it is refused, as a take of data's measure is
+ * (plot_window.c, PlotFreshTake): whether it is. */
+static bool PlotSlipPromise(Plot *p)
+{
+    if (p->rec->slip || p->promised)
+        return true;
+    p->promised = AllotmentPromise(EndpaperDataKeeps(false), p->mount_epoch) ||
+                  AllotmentPromise(EndpaperDataKeeps(true), p->mount_epoch);
+    return p->promised;
 }
 
 error_t PlotSlipBegin(Plot *p, uint64_t at, uint64_t bytes, bool *chosen)
@@ -53,10 +73,11 @@ error_t PlotSlipBegin(Plot *p, uint64_t at, uint64_t bytes, bool *chosen)
     if (k >= p->blocks_before && p->blocks_before && TailSlipOn(p->rec, p->blocks_before - 1u))
         return OK;      /* the full block the Slips lie over goes into a block first (PlotWindowBegin) */
     const TailSlip *under = TailSlipOn(p->rec, k) ? p->rec->slip : NULL;
-    if (!TailSlipJoins(under, off, (uint32_t)bytes))
+    if (!TailSlipJoins(under, off, (uint32_t)bytes) || !PlotSlipPromise(p))
         return OK;
     TailSlip *slip = TailSlipBlank();
     if (!slip) {
+        PlotSlipLetGo(p);
         kprintf("[TagFS] file %llu: the heap has no room for the Slip of its %llu byte(s) at %llu — they are laid "
                 "as a block, and a Tally is asked: it lays every tail in a block and lets their memory go\n",
                 p->fid, (unsigned long long)bytes, (unsigned long long)at);
@@ -104,9 +125,12 @@ error_t PlotSlipWrite(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out
 void PlotSlipLetGo(Plot *p)
 {
     TailSlipLetGo(p->slip);
+    if (p->promised)
+        AllotmentPromiseLetGo(p->mount_epoch);
     p->slip     = NULL;
     p->slip_off = 0;
     p->slip_len = 0;
+    p->promised = false;
 }
 
 /* The tail it leaves spans no more than the Slips under it and the write. */

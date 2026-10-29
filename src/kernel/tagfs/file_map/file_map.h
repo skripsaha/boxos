@@ -149,4 +149,13 @@ void     FileMapRowsInto(FileMap* map, uint64_t first, uint32_t count, FileTable
 uint32_t FileMapCount(FileMap* map);
 size_t   FileMapBytes(FileMap* map);
 
+/* The files whose record holds Slips (tail_slip.h) — each keeps a block
+ * promised to the Engross that lays its tail (block_map.h, AllotmentPromised):
+ * counted wherever a file's record is put or let go, and nowhere else, so a
+ * promise lasts exactly as long as a record of the map holds Slips. With no
+ * lock: a word stored whole, which a take of ground reads beside the state
+ * lock's counts (AllotmentPromised — never fewer than are promised); 0 for
+ * NULL. */
+uint64_t FileMapSlips(const FileMap* map);
+
 #endif /* TAGFS_FILE_MAP_H */

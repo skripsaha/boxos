@@ -239,7 +239,10 @@ void    AllotmentRelease(uint64_t fid);
  *
  * AllotmentTakeBook: up to `want` blocks for file `fid`, never leaving fewer
  * than `keep` free — the book's reserve (endpaper.c), which data never takes
- * (§3.6) — in one run: the block `hint` names, exact, when it is free
+ * (§3.6) — and the blocks promised to the tails Slips lie over (below), but
+ * for one block of them a take `own` has: the take that lays the block its
+ * file's Slips lie over, promised to it — in one run: the block `hint` names,
+ * exact, when it is free
  * (Allotment 1: the version that fills a block continues the file's run);
  * else the front of the file's window; else a new window sized to the file,
  * the first run that long from `hint` on (Allotment 2: blocks written over in
@@ -254,9 +257,39 @@ void    AllotmentRelease(uint64_t fid);
  * handed since the volume came up.
  */
 error_t  AllotmentTakeBook(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
-                           uint64_t keep, uint64_t *start, uint32_t *got);
+                           uint64_t keep, bool own, uint64_t *start, uint32_t *got);
 bool     AllotmentOthersIn(uint64_t fid, uint64_t start, uint64_t count, uint64_t *past);
 uint64_t AllotmentBookTaken(void);
+
+/*
+ * The block a Slip promises (allotment.c, spec_v2 §16.6 п.1): every file whose
+ * record holds Slips keeps one block of the free ground for the Engross that
+ * lays its tail, and every take of a book's ground but the one that lays that
+ * block leaves it free; that one has it whatever the book's reserve.
+ *
+ * AllotmentPromised: the blocks promised — a file's whose record holds Slips
+ * (FileMapSlips), and a Plot's that gives a file its first Slip until its Ink
+ * puts the record that holds them, or it is let go. With no lock, and never
+ * fewer than are promised: a promise passing from a Plot to its record may be
+ * counted twice, and one a tail's block was taken for counted until its record
+ * holds the Slips no more.
+ * AllotmentBookMay: the blocks a take of a book's data may have of `free`,
+ * as AllotmentTakeBook judges `keep` and `own`.
+ * AllotmentPromise: one block promised to a Plot of mounting `epoch` giving a
+ * file its first Slip, the free ground having one past `keep` — what a write
+ * of data leaves (EndpaperDataKeeps) — and every promise standing; false,
+ * nothing promised, when it has none or the mounting is gone: the write lays
+ * its block, and is refused as a write of blocks is. AllotmentPromiseLetGo:
+ * that promise let go, by the Plot of mounting `epoch` — its record holds
+ * Slips now, or the write laid none.
+ * AllotmentFreeUnpromised: the free ground less what is promised — the free
+ * a program is told.
+ */
+uint64_t AllotmentPromised(void);
+uint64_t AllotmentBookMay(uint64_t free, uint64_t keep, bool own);
+bool     AllotmentPromise(uint64_t keep, uint32_t epoch);
+void     AllotmentPromiseLetGo(uint32_t epoch);
+uint64_t AllotmentFreeUnpromised(void);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The window file `fid` keeps in hand: false when it keeps none. */

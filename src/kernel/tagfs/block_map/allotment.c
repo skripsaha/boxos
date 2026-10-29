@@ -2,6 +2,7 @@
 #include "block_map_derived.h"
 #include "../ink/fallow.h"
 #include "../settle/settle.h"
+#include "../file_map/file_map.h"
 
 /*
  * Allotment — ground a growing file keeps in hand (block_map.h).
@@ -471,11 +472,91 @@ static bool AllotmentBookPick(uint64_t fid, uint32_t want, uint64_t file_blocks,
     return false;
 }
 
-static error_t AllotmentBookLocked(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
-                                   uint64_t keep, uint64_t *start, uint32_t *got)
+// ----------------------------------------------------------------------------
+// The block a Slip promises (spec_v2 §16.6 п.1)
+// ----------------------------------------------------------------------------
+
+/*
+ * ‼ A SLIP PROMISES ITS BLOCK. A write that rides a Slip takes no ground now,
+ * and its tail is laid in a block before the next Tally (Engross): given where
+ * no block is left for that, the Engross would find none, the Tally wait for it
+ * for ever and the ribbon grow. So every file whose record holds Slips keeps
+ * one block of the free ground promised to it — counted, never chosen
+ * (FileMapSlips) — and the Plot that gives a file its first Slip promises the
+ * block first (AllotmentPromise), only where a write of a block of data could
+ * have it: past what such a write leaves and every promise standing. Every
+ * take of the book's ground leaves the promises free — a write of data's
+ * (AllotmentBookMay), the ribbon's Quire and a Tally's (BlockMapTakeQuire) —
+ * but the take that lays the block a file's Slips lie over, which has that
+ * block as its own while one is free, whatever the book's reserve: the
+ * reserve's measure grows with no ground taken (a file born, a tag coined),
+ * and an Engross refused for it would leave the Tally that gives ground back
+ * waiting for ever — while the take, and the record without the Slips it is
+ * inked into, leave the free ground less the promised as it was. A Plot's
+ * promise is of its mounting, and a mounting begins with none: its files'
+ * promises are their records' (file_map.h).
+ */
+static uint64_t          s_promises;        /* the Plots' promises not let go, of mounting s_promises_epoch */
+static volatile uint32_t s_promises_epoch;
+
+/* The Plots' first: a promise passes from a Plot to its file's record — the
+ * record counted (file_map.c) before the Plot lets its own go (InkBookPlotNext)
+ * — so read in this order one in passing is counted once or twice, never
+ * missed. */
+uint64_t AllotmentPromised(void)
 {
-    uint64_t free = tagfs_get_state()->ledger.free_blocks;
-    uint64_t may  = free > keep ? free - keep : 0;
+    bool     ours  = __atomic_load_n(&s_promises_epoch, __ATOMIC_ACQUIRE) == tagfs_mount_epoch();
+    uint64_t plots = ours ? __atomic_load_n(&s_promises, __ATOMIC_ACQUIRE) : 0;
+    return plots + FileMapSlips(tagfs_get_state()->files);
+}
+
+/* The promised first: a tail's block is taken before its record lets the
+ * Slips go, so read in this order a block taken for a promise is never told
+ * free beside it. */
+uint64_t AllotmentFreeUnpromised(void)
+{
+    uint64_t promised = AllotmentPromised();
+    uint64_t free     = __atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE);
+    return free > promised ? free - promised : 0;
+}
+
+uint64_t AllotmentBookMay(uint64_t free, uint64_t keep, bool own)
+{
+    uint64_t past = keep + AllotmentPromised();
+    uint64_t may  = free > past ? free - past : 0;
+    return own && may < free ? may + 1u : may;
+}
+
+bool AllotmentPromise(uint64_t keep, uint32_t epoch)
+{
+    TagFSLock *lock = MapLock();
+    TagFSLockTake(lock);
+    /* The Plot's mounting, which its let-go names: a promise given to a Plot
+     * of a mounting gone would stand in the next for ever. */
+    bool given = epoch == tagfs_mount_epoch() && BlockMapDerivedUp();
+    if (given && s_promises_epoch != epoch) {
+        __atomic_store_n(&s_promises, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&s_promises_epoch, epoch, __ATOMIC_RELEASE);
+    }
+    given = given && tagfs_get_state()->ledger.free_blocks > keep + AllotmentPromised();
+    if (given)
+        __atomic_add_fetch(&s_promises, 1, __ATOMIC_ACQ_REL);
+    TagFSLockDrop(lock);
+    return given;
+}
+
+void AllotmentPromiseLetGo(uint32_t epoch)
+{
+    TagFSLockTake(MapLock());
+    if (s_promises_epoch == epoch)
+        __atomic_sub_fetch(&s_promises, 1, __ATOMIC_ACQ_REL);
+    TagFSLockDrop(MapLock());
+}
+
+static error_t AllotmentBookLocked(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
+                                   uint64_t keep, bool own, uint64_t *start, uint32_t *got)
+{
+    uint64_t may = AllotmentBookMay(tagfs_get_state()->ledger.free_blocks, keep, own);
     if (want > may)
         want = (uint32_t)may;
     if (want > BLOCK_MAP_TAKE_MOST)
@@ -507,14 +588,15 @@ static error_t AllotmentBookShort(uint32_t want, uint64_t keep)
         return ERR_WOULD_BLOCK;
     }
     if (!__atomic_exchange_n(&s_book_short_said, 1u, __ATOMIC_ACQ_REL))
-        kprintf("[TagFS] no block can be had for %u block(s) of a file's data: %llu free, and the book keeps "
-                "%llu for its ribbon and its Tally (ERR_TAGFS_NO_SPACE)\n", want,
-                (unsigned long long)tagfs_get_state()->ledger.free_blocks, (unsigned long long)keep);
+        kprintf("[TagFS] no block can be had for %u block(s) of a file's data: %llu free, the book keeps %llu "
+                "for its ribbon and its Tally, and %llu are promised to the tails Slips lie over "
+                "(ERR_TAGFS_NO_SPACE)\n", want, (unsigned long long)tagfs_get_state()->ledger.free_blocks,
+                (unsigned long long)keep, (unsigned long long)AllotmentPromised());
     return ERR_TAGFS_NO_SPACE;
 }
 
 error_t AllotmentTakeBook(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
-                          uint64_t keep, uint64_t *start, uint32_t *got)
+                          uint64_t keep, bool own, uint64_t *start, uint32_t *got)
 {
     if (want == 0 || fid == 0 || !start || !got)
         return ERR_INVALID_ARGUMENT;
@@ -524,7 +606,7 @@ error_t AllotmentTakeBook(uint64_t fid, uint32_t want, uint64_t file_blocks, uin
     error_t rc = BlockMapDerivedStock();
     if (rc == OK) {
         TagFSLockTake(MapLock());
-        rc = AllotmentBookLocked(fid, want, file_blocks, hint, aside, keep, start, got);
+        rc = AllotmentBookLocked(fid, want, file_blocks, hint, aside, keep, own, start, got);
         TagFSLockDrop(MapLock());
     }
     if (rc == ERR_TAGFS_NO_SPACE)

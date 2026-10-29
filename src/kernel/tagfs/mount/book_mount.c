@@ -392,6 +392,27 @@ static error_t BookSlotsHeld(const char** what)
     return OK;
 }
 
+/* The data run, its free blocks — less a block promised to each file whose
+ * tail a Slip lays (block_map.h), as a program is told — and the files; the
+ * promised said beside them. The mounting being made has no Plot of its own
+ * yet — its door is not open — and a Plot of the one before promises it
+ * nothing, so its promises are its records' alone (FileMapSlips): the count
+ * bookcensus makes of the image. */
+static void BookFreeSaid(void)
+{
+    uint64_t data     = g_book.data_end - g_book.frame.data_block;
+    uint64_t free     = tagfs_get_state()->ledger.free_blocks;
+    uint64_t promised = FileMapSlips(tagfs_get_state()->files);
+    free = free > promised ? free - promised : 0;
+    if (promised == 0)
+        kprintf("[TagFS] %llu data blocks, %llu free, %llu files\n", (unsigned long long)data,
+                (unsigned long long)free, (unsigned long long)g_book.files);
+    else
+        kprintf("[TagFS] %llu data blocks, %llu free, %llu files — and %llu block(s) promised, one to each file "
+                "whose tail a Slip lays, for the Engross that lays it there\n", (unsigned long long)data,
+                (unsigned long long)free, (unsigned long long)g_book.files, (unsigned long long)promised);
+}
+
 error_t MountReadBook(const char** what)
 {
     BookSeqSeenForget();
@@ -435,9 +456,7 @@ error_t MountReadBook(const char** what)
                 "whose ground this kernel does not read: no block is counted free, and none is given\n",
                 (unsigned long long)(g_book.data_end - g_book.frame.data_block), (unsigned long long)g_book.files);
     else
-        kprintf("[TagFS] %llu data blocks, %llu free, %llu files\n",
-                (unsigned long long)(g_book.data_end - g_book.frame.data_block),
-                (unsigned long long)tagfs_get_state()->ledger.free_blocks, (unsigned long long)g_book.files);
+        BookFreeSaid();
     return OK;
 }
 

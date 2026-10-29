@@ -83,7 +83,9 @@ error_t  BlockMapDerivedHold(uint32_t pages);
  * end), looked for from `from` on and then from `first`; never taken where
  * fewer than `keep` blocks would be left free after it — for the ribbon the
  * ground a whole Tally needs (sewing.h, EndpaperKeeps), for a Tally a Quire
- * of ribbon. Claimed for `owner`. With no TagFS lock held:
+ * of ribbon — and the blocks promised to the tails Slips lie over beside them
+ * (block_map.h, AllotmentPromised): the book's reserve and the promises take
+ * nothing of each other. Claimed for `owner`. With no TagFS lock held:
  * its pages are stocked first, and the state lock taken. OK and *start;
  * ERR_TAGFS_NO_SPACE when no such run is free or the reserve forbids it;
  * ERR_NO_MEMORY with no page for the map.
