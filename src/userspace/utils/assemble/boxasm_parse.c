@@ -356,7 +356,7 @@ static int BoxAsmParseStorage(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmTo
 static int BoxAsmParseInstruction(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
                                   const BoxAsmToken *Word, uint32_t Times, uint8_t Prefix)
 {
-    BoxAsmOperand Operands[3] = { { 0 } };
+    BoxAsmOperand Operands[4] = { { 0 } };
     uint8_t Count = 0;
     uint8_t Condition;
     const BoxAsmInstruction *Instruction =
@@ -375,8 +375,8 @@ static int BoxAsmParseInstruction(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxA
     if (Asm->CurrentSection == BOXASM_SECTION_BSS)
         return BoxAsmFail(Asm, &Word->Where, ".bss holds no code", NULL);
     while (!BoxAsmEndOfStatement(Token)) {
-        if (Count == 3)
-            return BoxAsmFail(Asm, &Token->Where, "an instruction has at most three operands", NULL);
+        if (Count == 4)
+            return BoxAsmFail(Asm, &Token->Where, "an instruction has at most four operands", NULL);
         if ((Rc = BoxAsmParseOperand(Asm, Lexer, Token, &Operands[Count])) != 0)
             return Rc;
         Count++;

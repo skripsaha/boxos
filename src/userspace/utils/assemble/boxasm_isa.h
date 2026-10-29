@@ -41,7 +41,19 @@ typedef enum {
     BOXASM_CLASS_M64,        /* 8 bytes of memory */
     BOXASM_CLASS_M128,       /* 16 bytes of memory on a 16-byte boundary */
     BOXASM_CLASS_REG_R,      /* a general register of the operation size, in ModRM.rm (pextrb) */
-    BOXASM_CLASS_R32_M16     /* a 32- or 64-bit register, or 2 bytes of memory (pinsrw) */
+    BOXASM_CLASS_R32_M16,    /* a 32- or 64-bit register, or 2 bytes of memory (pinsrw) */
+    /* AVX: where a vector register goes is part of the class. VEX.vvvv holds
+     * a register of its own, and imm8[7:4] the register a blend selects by. */
+    BOXASM_CLASS_XMM_V,      /* an xmm register, in VEX.vvvv */
+    BOXASM_CLASS_XMM_IS4,    /* an xmm register, in imm8[7:4] (vblendvps) */
+    BOXASM_CLASS_YMM,        /* a ymm register, in ModRM.reg */
+    BOXASM_CLASS_YMM_R,      /* a ymm register, in ModRM.rm */
+    BOXASM_CLASS_YMM_V,      /* a ymm register, in VEX.vvvv */
+    BOXASM_CLASS_YMM_IS4,    /* a ymm register, in imm8[7:4] */
+    BOXASM_CLASS_YMM_M256,   /* a ymm register or 32 bytes of memory on a 32-byte boundary */
+    BOXASM_CLASS_YMM_U256,   /* a ymm register or 32 bytes of memory anywhere */
+    BOXASM_CLASS_U256,       /* 32 bytes of memory anywhere (vlddqu, vmaskmovps) */
+    BOXASM_CLASS_M256        /* 32 bytes of memory on a 32-byte boundary (vmovntps) */
 } BoxAsmOperandClass;
 
 #define BOXASM_SIZE_8   0x1u
@@ -63,9 +75,25 @@ typedef enum {
 #define BOXASM_FORM_REX_W      0x40u  /* REX.W whatever the size (cmpxchg16b) */
 #define BOXASM_FORM_PREDICATE  0x80u  /* the statement's condition follows as an imm8 (cmpltps) */
 #define BOXASM_FORM_DATA16     0x100u /* a 66 prefix whatever the size (crc32 r32, r/m16) */
+#define BOXASM_FORM_DUPLICATE  0x200u /* the second operand may be left out, and is then the
+                                         first again: vaddps xmm1, xmm2 is vaddps xmm1, xmm1, xmm2 */
+
+/* The VEX prefix a form is written with, in its Flags; none of these bits is
+ * a form of the legacy encodings. The opcode bytes of a VEX form are those
+ * after the map, and its Prefix is VEX.pp: 66, F3 or F2 pick it, and none is
+ * pp 0. A field the instruction ignores (VEX.WIG, VEX.LIG) is written 0, as
+ * NASM writes it. VEX.R, X and B come from the operands as REX's do; VEX.vvvv
+ * from the operand of a _V class, 1111 when there is none. */
+#define BOXASM_FORM_VEX_MAP    0xC00u   /* the two bits of the map: 1, 2, 3, or 0 for no VEX */
+#define BOXASM_FORM_VEX_SHIFT  10u
+#define BOXASM_FORM_VEX_0F     0x400u   /* the escape 0F */
+#define BOXASM_FORM_VEX_0F38   0x800u   /* 0F 38 */
+#define BOXASM_FORM_VEX_0F3A   0xC00u   /* 0F 3A */
+#define BOXASM_FORM_VEX_L256   0x1000u  /* VEX.L: 256 bits; left clear, 128 bits or ignored */
+#define BOXASM_FORM_VEX_W1     0x2000u  /* VEX.W: 1; left clear, 0 or ignored */
 
 typedef struct {
-    uint8_t Class[3];
+    uint8_t Class[4];
     uint8_t Sizes;
     uint8_t Opcode[4];
     uint8_t OpcodeLength;

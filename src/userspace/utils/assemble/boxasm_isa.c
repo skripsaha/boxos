@@ -11,14 +11,18 @@ typedef enum {
     BOXASM_MISMATCH_SIZE,
     BOXASM_MISMATCH_RANGE,
     BOXASM_MISMATCH_MEMORY,     /* memory of another size than the form reads */
-    BOXASM_MISMATCH_MASK        /* an xmm register where the form reads xmm0 */
+    BOXASM_MISMATCH_MASK,       /* an xmm register where the form reads xmm0 */
+    BOXASM_MISMATCH_WIDTH,      /* an xmm register where the form reads a ymm, or the reverse */
+    BOXASM_MISMATCH_SELECTOR    /* something but a register where a blend selects by one */
 } BoxAsmMismatch;
 
 typedef struct {
     BoxAsmAssembler       *Asm;
     const BoxAsmStatement *Statement;
     const BoxAsmForm      *Form;
-    BoxAsmOperand          Operands[3];
+    BoxAsmOperand          Given[4];        /* the operands as written */
+    uint8_t                GivenCount;
+    BoxAsmOperand          Operands[4];     /* those of the form being tried */
     uint8_t                Count;
     uint8_t                OperationSize;   /* bytes; 0 for a form without one */
     uint8_t                OnlySize;        /* the instruction's one size, 0 when it has several */
@@ -118,6 +122,26 @@ static int BoxAsmIsXmm(const BoxAsmOperand *Operand)
            Operand->Register.Class == BOXASM_REGISTER_XMM;
 }
 
+static int BoxAsmIsYmm(const BoxAsmOperand *Operand)
+{
+    return Operand->Kind == BOXASM_OPERAND_REGISTER &&
+           Operand->Register.Class == BOXASM_REGISTER_YMM;
+}
+
+static int BoxAsmIsVector(const BoxAsmOperand *Operand)
+{
+    return BoxAsmIsXmm(Operand) || BoxAsmIsYmm(Operand);
+}
+
+/* The register a blend selects by: when what stands there is no vector
+ * register at all, noted, so the refusal can say that one is wanted. */
+static int BoxAsmIsSelector(const BoxAsmOperand *Operand, int Matches, BoxAsmMismatch *Why)
+{
+    if (!Matches && !BoxAsmIsVector(Operand))
+        *Why = BOXASM_MISMATCH_SELECTOR;
+    return Matches;
+}
+
 /* Memory of Bytes for a form that reads exactly that many; memory said to be
  * of another size is noted, so the refusal can say what the form reads. */
 static int BoxAsmIsMemoryOf(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand,
@@ -142,8 +166,8 @@ static int BoxAsmIsMask(const BoxAsmOperand *Operand, BoxAsmMismatch *Why)
     return 0;
 }
 
-static int BoxAsmClassMatches(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand,
-                              uint8_t Class, uint8_t Size, BoxAsmMismatch *Why)
+static int BoxAsmClassHolds(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand,
+                            uint8_t Class, uint8_t Size, BoxAsmMismatch *Why)
 {
     int Immediate = Operand->Kind == BOXASM_OPERAND_IMMEDIATE &&
                     (Operand->Size == 0 || Operand->Size == Size);
@@ -183,7 +207,13 @@ static int BoxAsmClassMatches(BoxAsmEncoder *Encoder, const BoxAsmOperand *Opera
                                       (Operand->Kind == BOXASM_OPERAND_MEMORY && Operand->Size == 8);
     case BOXASM_CLASS_REG_R:   return BoxAsmIsRegister(Operand, Size);
     case BOXASM_CLASS_XMM:
-    case BOXASM_CLASS_XMM_R:   return BoxAsmIsXmm(Operand);
+    case BOXASM_CLASS_XMM_R:
+    case BOXASM_CLASS_XMM_V:   return BoxAsmIsXmm(Operand);
+    case BOXASM_CLASS_XMM_IS4: return BoxAsmIsSelector(Operand, BoxAsmIsXmm(Operand), Why);
+    case BOXASM_CLASS_YMM:
+    case BOXASM_CLASS_YMM_R:
+    case BOXASM_CLASS_YMM_V:   return BoxAsmIsYmm(Operand);
+    case BOXASM_CLASS_YMM_IS4: return BoxAsmIsSelector(Operand, BoxAsmIsYmm(Operand), Why);
     case BOXASM_CLASS_XMM0:    return BoxAsmIsMask(Operand, Why);
     case BOXASM_CLASS_XMM_M16: return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 2, Why);
     case BOXASM_CLASS_XMM_M32: return BoxAsmIsXmm(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 4, Why);
@@ -191,7 +221,12 @@ static int BoxAsmClassMatches(BoxAsmEncoder *Encoder, const BoxAsmOperand *Opera
     case BOXASM_CLASS_XMM_M128:
     case BOXASM_CLASS_XMM_U128: return BoxAsmIsXmm(Operand) ||
                                        BoxAsmIsMemoryOf(Encoder, Operand, 16, Why);
+    case BOXASM_CLASS_YMM_M256:
+    case BOXASM_CLASS_YMM_U256: return BoxAsmIsYmm(Operand) ||
+                                       BoxAsmIsMemoryOf(Encoder, Operand, 32, Why);
     case BOXASM_CLASS_U128:    return BoxAsmIsMemoryOf(Encoder, Operand, 16, Why);
+    case BOXASM_CLASS_U256:
+    case BOXASM_CLASS_M256:    return BoxAsmIsMemoryOf(Encoder, Operand, 32, Why);
     case BOXASM_CLASS_M8:      return BoxAsmIsMemoryOf(Encoder, Operand, 1, Why);
     case BOXASM_CLASS_M16:     return BoxAsmIsMemoryOf(Encoder, Operand, 2, Why);
     case BOXASM_CLASS_M32:     return BoxAsmIsMemoryOf(Encoder, Operand, 4, Why);
@@ -201,6 +236,45 @@ static int BoxAsmClassMatches(BoxAsmEncoder *Encoder, const BoxAsmOperand *Opera
                                       BoxAsmIsMemoryOf(Encoder, Operand, 2, Why);
     default:                   return 0;
     }
+}
+
+/* The bytes of vector register a class takes, 0 for a class that takes none. */
+static uint8_t BoxAsmClassWidth(uint8_t Class)
+{
+    switch (Class) {
+    case BOXASM_CLASS_XMM:
+    case BOXASM_CLASS_XMM0:
+    case BOXASM_CLASS_XMM_R:
+    case BOXASM_CLASS_XMM_M32:
+    case BOXASM_CLASS_XMM_M16:
+    case BOXASM_CLASS_XMM_M64:
+    case BOXASM_CLASS_XMM_M128:
+    case BOXASM_CLASS_XMM_U128:
+    case BOXASM_CLASS_XMM_V:
+    case BOXASM_CLASS_XMM_IS4: return 16;
+    case BOXASM_CLASS_YMM:
+    case BOXASM_CLASS_YMM_R:
+    case BOXASM_CLASS_YMM_V:
+    case BOXASM_CLASS_YMM_IS4:
+    case BOXASM_CLASS_YMM_M256:
+    case BOXASM_CLASS_YMM_U256: return 32;
+    default:                   return 0;
+    }
+}
+
+/* A vector register of the other width than the class takes is noted, unless
+ * something more particular has been: xmm and ymm are different registers in
+ * every class. */
+static int BoxAsmClassMatches(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand,
+                              uint8_t Class, uint8_t Size, BoxAsmMismatch *Why)
+{
+    int Matched = BoxAsmClassHolds(Encoder, Operand, Class, Size, Why);
+    uint8_t Width = BoxAsmClassWidth(Class);
+
+    if (!Matched && Width != 0 && BoxAsmIsVector(Operand) && Operand->Register.Size != Width &&
+        *Why == BOXASM_MISMATCH_OPERANDS)
+        *Why = BOXASM_MISMATCH_WIDTH;
+    return Matched;
 }
 
 /* The size the form's sized operands agree on, the instruction's only size
@@ -221,7 +295,7 @@ static uint8_t BoxAsmOperationSize(const BoxAsmEncoder *Encoder, const BoxAsmFor
             Class != BOXASM_CLASS_RM && Class != BOXASM_CLASS_MEM &&
             Class != BOXASM_CLASS_ACC && Class != BOXASM_CLASS_IMM)
             continue;
-        if (BoxAsmIsXmm(Operand))       /* never a general operand: the class refuses it */
+        if (BoxAsmIsVector(Operand))    /* never a general operand: the class refuses it */
             continue;
         Own = Operand->Kind == BOXASM_OPERAND_REGISTER ? Operand->Register.Size : Operand->Size;
         if (Own == 0)
@@ -239,14 +313,39 @@ static uint8_t BoxAsmOperationSize(const BoxAsmEncoder *Encoder, const BoxAsmFor
     return Size;
 }
 
+static uint8_t BoxAsmFormOperands(const BoxAsmForm *Form)
+{
+    uint8_t Count = 0;
+
+    while (Count < 4 && Form->Class[Count] != BOXASM_CLASS_NONE)
+        Count++;
+    return Count;
+}
+
+/* The operands as a form reads them: those written, and for a form that lets
+ * the second be left out, that second as the first again. */
+static void BoxAsmPresentOperands(BoxAsmEncoder *Encoder, const BoxAsmForm *Form, uint8_t Count)
+{
+    uint8_t Index;
+
+    memcpy(Encoder->Operands, Encoder->Given, sizeof(Encoder->Operands));
+    Encoder->Count = Encoder->GivenCount;
+    if (!(Form->Flags & BOXASM_FORM_DUPLICATE) || Encoder->GivenCount == 0 ||
+        Count != Encoder->GivenCount + 1u)
+        return;
+    for (Index = Count - 1u; Index > 1; Index--)
+        Encoder->Operands[Index] = Encoder->Operands[Index - 1u];
+    Encoder->Operands[1] = Encoder->Operands[0];
+    Encoder->Count = Count;
+}
+
 static int BoxAsmFormMatches(BoxAsmEncoder *Encoder, const BoxAsmForm *Form, uint8_t Short,
                              BoxAsmMismatch *Why)
 {
-    uint8_t Count = 0;
+    uint8_t Count = BoxAsmFormOperands(Form);
     uint8_t Index;
 
-    while (Count < 3 && Form->Class[Count] != BOXASM_CLASS_NONE)
-        Count++;
+    BoxAsmPresentOperands(Encoder, Form, Count);
     if (Count != Encoder->Count)
         return 0;
     if (Form->Class[0] == BOXASM_CLASS_REL &&
@@ -400,14 +499,24 @@ static int BoxAsmIsRmClass(uint8_t Class)
            Class == BOXASM_CLASS_ADDRESS || Class == BOXASM_CLASS_RM8 ||
            Class == BOXASM_CLASS_RM16 || Class == BOXASM_CLASS_RM32 ||
            Class == BOXASM_CLASS_RM64 ||
-           (Class >= BOXASM_CLASS_XMM_R && Class <= BOXASM_CLASS_R32_M16);
+           (Class >= BOXASM_CLASS_XMM_R && Class <= BOXASM_CLASS_R32_M16) ||
+           Class == BOXASM_CLASS_YMM_R || Class == BOXASM_CLASS_YMM_M256 ||
+           Class == BOXASM_CLASS_YMM_U256 || Class == BOXASM_CLASS_U256 ||
+           Class == BOXASM_CLASS_M256;
 }
 
-/* Whether the memory an r/m of this class names must sit on 16 bytes: a
- * packed SSE operand, but for the instructions made to read it anywhere. */
-static int BoxAsmClassAligned(uint8_t Class)
+/* The boundary the memory an r/m of this class names must sit on, 0 for none:
+ * 16 bytes for a packed SSE operand, but for the instructions made to read it
+ * anywhere; of AVX only the moves that name an aligned width, 16 or 32. */
+static uint8_t BoxAsmClassAligned(uint8_t Class)
 {
-    return Class == BOXASM_CLASS_XMM_M128 || Class == BOXASM_CLASS_M128;
+    switch (Class) {
+    case BOXASM_CLASS_XMM_M128:
+    case BOXASM_CLASS_M128:     return 16;
+    case BOXASM_CLASS_YMM_M256:
+    case BOXASM_CLASS_M256:     return 32;
+    default:                    return 0;
+    }
 }
 
 static int BoxAsmIsImmediateClass(uint8_t Class)
@@ -466,7 +575,8 @@ static uint8_t BoxAsmRegField(BoxAsmEncoder *Encoder)
         return Encoder->Form->Digit;
     for (Index = 0; Index < Encoder->Count; Index++) {
         if (Encoder->Form->Class[Index] == BOXASM_CLASS_REG ||
-            Encoder->Form->Class[Index] == BOXASM_CLASS_XMM) {
+            Encoder->Form->Class[Index] == BOXASM_CLASS_XMM ||
+            Encoder->Form->Class[Index] == BOXASM_CLASS_YMM) {
             uint8_t Number = Encoder->Operands[Index].Register.Number;
             if (Number >= 8)
                 Encoder->Rex |= 0x44;
@@ -486,6 +596,13 @@ static int BoxAsmPutImmediates(BoxAsmEncoder *Encoder, uint8_t Short)
         uint8_t Width = BoxAsmImmediateWidth(Encoder, Class, Short);
         int Rc;
 
+        if (Class == BOXASM_CLASS_XMM_IS4 || Class == BOXASM_CLASS_YMM_IS4) {
+            uint8_t Selector = (uint8_t)(Encoder->Operands[Index].Register.Number << 4);
+
+            if ((Rc = BoxAsmPut(Encoder, &Selector, 1)) != 0)
+                return Rc;
+            continue;
+        }
         if (!BoxAsmIsImmediateClass(Class) || Width == 0)
             continue;
         Rc = BoxAsmPutField(Encoder, &Encoder->Operands[Index].Value, Width,
@@ -509,27 +626,14 @@ static uint8_t BoxAsmRepeatByte(uint8_t Prefix, uint8_t FormPrefix)
     }
 }
 
-/* Prefixes, REX, opcode, ModRM, SIB, displacement and immediate, in the order
- * the processor reads them. */
-static int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
+/* The legacy prefixes and REX: lock, the operand-size prefix, the repeat or
+ * mandatory prefix, then REX. */
+static int BoxAsmPutLegacyPrefixes(BoxAsmEncoder *Encoder, uint8_t Size)
 {
     const BoxAsmForm *Form = Encoder->Form;
-    uint8_t Address[6];
-    uint8_t AddressLength = 0;
-    uint8_t Opcode[4];
-    uint8_t Size = (Form->Flags & BOXASM_FORM_AS32) ? 4 : Encoder->OperationSize;
-    uint8_t RmIndex = BoxAsmRmIndex(Encoder);
-    BoxAsmValue Displacement = { 0, 0 };
-    uint8_t DisplacementKind = 0;
-    uint8_t DisplacementWidth = 0;
     uint8_t Repeat = BoxAsmRepeatByte(Encoder->Statement->Prefix, Form->Prefix);
     int Rc;
 
-    BoxAsmPrepareOpcode(Encoder, Size, Opcode);
-    if (Form->Digit != BOXASM_DIGIT_NONE)
-        BoxAsmPutAddress(Encoder, BoxAsmRegField(Encoder), &Encoder->Operands[RmIndex],
-                         Address, &AddressLength, &Displacement, &DisplacementKind,
-                         &DisplacementWidth);
     if (Encoder->ForceRex)
         Encoder->Rex |= 0x40;
     if (Encoder->Rex != 0 && Encoder->HasHigh8)
@@ -543,7 +647,84 @@ static int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
         return Rc;
     if (Repeat != 0 && (Rc = BoxAsmPut(Encoder, &Repeat, 1)) != 0)
         return Rc;
-    if (Encoder->Rex != 0 && (Rc = BoxAsmPut(Encoder, &Encoder->Rex, 1)) != 0)
+    if (Encoder->Rex != 0)
+        return BoxAsmPut(Encoder, &Encoder->Rex, 1);
+    return 0;
+}
+
+/* The register VEX.vvvv holds: that of the operand of a _V class, 0 when the
+ * form has none (the field is then 1111, as the inverted 0 is). */
+static uint8_t BoxAsmVexSource(const BoxAsmEncoder *Encoder)
+{
+    uint8_t Index;
+
+    for (Index = 0; Index < Encoder->Count; Index++)
+        if (Encoder->Form->Class[Index] == BOXASM_CLASS_XMM_V ||
+            Encoder->Form->Class[Index] == BOXASM_CLASS_YMM_V)
+            return Encoder->Operands[Index].Register.Number;
+    return 0;
+}
+
+static uint8_t BoxAsmVexPrefixBits(uint8_t Prefix)
+{
+    switch (Prefix) {
+    case 0x66: return 1;
+    case 0xF3: return 2;
+    case 0xF2: return 3;
+    default:   return 0;
+    }
+}
+
+/* The VEX prefix, which stands for the legacy prefixes, REX and the map's
+ * escape bytes: the two bytes of C5 when only R is needed of REX's bits and
+ * the map is 0F, else the three of C4. R, X, B and vvvv are written inverted.
+ * REX's bits are collected as for a legacy form, and are read here. */
+static int BoxAsmPutVex(BoxAsmEncoder *Encoder)
+{
+    const BoxAsmForm *Form = Encoder->Form;
+    uint8_t Map = (uint8_t)((Form->Flags & BOXASM_FORM_VEX_MAP) >> BOXASM_FORM_VEX_SHIFT);
+    uint8_t Wide = ((Encoder->Rex & 0x08) || (Form->Flags & BOXASM_FORM_VEX_W1)) ? 1u : 0u;
+    uint8_t Long = (Form->Flags & BOXASM_FORM_VEX_L256) ? 1u : 0u;
+    uint8_t Source = (uint8_t)(~BoxAsmVexSource(Encoder) & 0x0F);
+    uint8_t Reg = (Encoder->Rex & 0x04) ? 0u : 1u;
+    uint8_t Index = (Encoder->Rex & 0x02) ? 0u : 1u;
+    uint8_t Base = (Encoder->Rex & 0x01) ? 0u : 1u;
+    uint8_t Last = (uint8_t)((Source << 3) | (Long << 2) | BoxAsmVexPrefixBits(Form->Prefix));
+    uint8_t Bytes[3];
+
+    if (Map == 1 && !Wide && Index && Base) {
+        Bytes[0] = 0xC5;
+        Bytes[1] = (uint8_t)((Reg << 7) | Last);
+        return BoxAsmPut(Encoder, Bytes, 2);
+    }
+    Bytes[0] = 0xC4;
+    Bytes[1] = (uint8_t)((Reg << 7) | (Index << 6) | (Base << 5) | Map);
+    Bytes[2] = (uint8_t)((Wide << 7) | Last);
+    return BoxAsmPut(Encoder, Bytes, 3);
+}
+
+/* Prefixes, REX, opcode, ModRM, SIB, displacement and immediate, in the order
+ * the processor reads them; a VEX form's prefix is the one before its opcode. */
+static int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
+{
+    const BoxAsmForm *Form = Encoder->Form;
+    uint8_t Address[6];
+    uint8_t AddressLength = 0;
+    uint8_t Opcode[4];
+    uint8_t Size = (Form->Flags & BOXASM_FORM_AS32) ? 4 : Encoder->OperationSize;
+    uint8_t RmIndex = BoxAsmRmIndex(Encoder);
+    BoxAsmValue Displacement = { 0, 0 };
+    uint8_t DisplacementKind = 0;
+    uint8_t DisplacementWidth = 0;
+    int Rc;
+
+    BoxAsmPrepareOpcode(Encoder, Size, Opcode);
+    if (Form->Digit != BOXASM_DIGIT_NONE)
+        BoxAsmPutAddress(Encoder, BoxAsmRegField(Encoder), &Encoder->Operands[RmIndex],
+                         Address, &AddressLength, &Displacement, &DisplacementKind,
+                         &DisplacementWidth);
+    Rc = (Form->Flags & BOXASM_FORM_VEX_MAP) ? BoxAsmPutVex(Encoder) : BoxAsmPutLegacyPrefixes(Encoder, Size);
+    if (Rc != 0)
         return Rc;
     if ((Rc = BoxAsmPut(Encoder, Opcode, Form->OpcodeLength)) != 0 ||
         (Rc = BoxAsmPut(Encoder, Address, AddressLength)) != 0)
@@ -554,8 +735,8 @@ static int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
         if ((Rc = BoxAsmPutField(Encoder, &Displacement, DisplacementWidth, DisplacementKind,
                                  Form->Class[RmIndex] == BOXASM_CLASS_ADDRESS)) != 0)
             return Rc;
-        if (Encoder->Out->FixupCount != Before && BoxAsmClassAligned(Form->Class[RmIndex]))
-            Encoder->Out->Fixups[Before].Aligned = 16;
+        if (Encoder->Out->FixupCount != Before)
+            Encoder->Out->Fixups[Before].Aligned = BoxAsmClassAligned(Form->Class[RmIndex]);
     }
     if ((Rc = BoxAsmPutImmediates(Encoder, Short)) != 0)
         return Rc;
@@ -618,6 +799,58 @@ static int BoxAsmCheckPrefix(BoxAsmEncoder *Encoder)
     return BoxAsmFailEnd(Encoder->Asm, &Statement->Where, &Message);
 }
 
+static int BoxAsmHasYmmForm(const BoxAsmInstruction *Instruction)
+{
+    uint8_t Form;
+    uint8_t Operand;
+
+    for (Form = 0; Form < Instruction->FormCount; Form++)
+        for (Operand = 0; Operand < 4; Operand++)
+            if (BoxAsmClassWidth(Instruction->Forms[Form].Class[Operand]) == 32)
+                return 1;
+    return 0;
+}
+
+static int BoxAsmGivenYmm(const BoxAsmEncoder *Encoder)
+{
+    uint8_t Index;
+
+    for (Index = 0; Index < Encoder->GivenCount; Index++)
+        if (BoxAsmIsYmm(&Encoder->Given[Index]))
+            return 1;
+    return 0;
+}
+
+/* Registers of a width the instruction does not take: SSE's take xmm and say
+ * which instruction takes ymm, AVX's before AVX2 have a 256-bit form only
+ * where the processor has one. */
+static void BoxAsmWidthMessage(const BoxAsmEncoder *Encoder, BoxAsmMessage *Message)
+{
+    const BoxAsmInstruction *Instruction = Encoder->Statement->Instruction;
+    char Vex[32];
+    uint8_t Condition;
+    size_t Length = strlen(Instruction->Name);
+
+    if (!(Instruction->Forms[0].Flags & BOXASM_FORM_VEX_MAP) && BoxAsmGivenYmm(Encoder)) {
+        BoxAsmMessageName(Message, Instruction->Name);
+        BoxAsmMessageText(Message, " is SSE's and takes xmm registers");
+        if (Length + 2u <= sizeof(Vex)) {
+            Vex[0] = 'v';
+            memcpy(Vex + 1, Instruction->Name, Length + 1u);
+            if (BoxAsmFindInstruction(Vex, Length + 1u, &Condition)) {
+                BoxAsmMessageText(Message, "; for ymm write ");
+                BoxAsmMessageName(Message, Vex);
+            }
+        }
+        return;
+    }
+    BoxAsmMessageName(Message, Instruction->Name);
+    if (BoxAsmGivenYmm(Encoder) && !BoxAsmHasYmmForm(Instruction))
+        BoxAsmMessageText(Message, " has no 256-bit form before AVX2");
+    else
+        BoxAsmMessageText(Message, " has no form with registers of these widths");
+}
+
 static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
 {
     const BoxAsmStatement *Statement = Encoder->Statement;
@@ -635,7 +868,9 @@ static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
     case BOXASM_MISMATCH_MEMORY:
         BoxAsmMessageText(&Message, "the memory is read as ");
         BoxAsmMessageDecimal(&Message, Encoder->MemoryWanted);
-        BoxAsmMessageText(&Message, Encoder->MemoryWanted == 16
+        BoxAsmMessageText(&Message, Encoder->MemoryWanted == 32
+                                    ? " bytes (yword, or no size) by "
+                                    : Encoder->MemoryWanted == 16
                                     ? " bytes (oword, or no size) by "
                                     : Encoder->MemoryWanted == 8
                                     ? " bytes (qword, or no size) by "
@@ -648,11 +883,17 @@ static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
     case BOXASM_MISMATCH_MASK:
         BoxAsmMessageText(&Message, "the mask is only xmm0, written third or left out, in ");
         break;
+    case BOXASM_MISMATCH_WIDTH:
+        BoxAsmWidthMessage(Encoder, &Message);
+        return BoxAsmFailEnd(Encoder->Asm, &Statement->Where, &Message);
+    case BOXASM_MISMATCH_SELECTOR:
+        BoxAsmMessageText(&Message, "the selector is a register, written last, in ");
+        break;
     case BOXASM_MISMATCH_RANGE: {
         uint8_t At;
-        for (At = 0; At < Encoder->Count; At++)
-            if (BoxAsmIsConstant(&Encoder->Operands[At]))
-                BoxAsmMessageDecimal(&Message, Encoder->Operands[At].Value.Constant);
+        for (At = 0; At < Encoder->GivenCount; At++)
+            if (BoxAsmIsConstant(&Encoder->Given[At]))
+                BoxAsmMessageDecimal(&Message, Encoder->Given[At].Value.Constant);
         BoxAsmMessageText(&Message, " does not fit the ");
         BoxAsmMessageDecimal(&Message, Encoder->OperationSize * 8);
         BoxAsmMessageText(&Message, "-bit operation of ");
@@ -680,19 +921,19 @@ int BoxAsmEncode(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement, uint8_t
     Encoder.Asm = Asm;
     Encoder.Statement = Statement;
     Encoder.Out = Out;
-    Encoder.Count = Statement->OperandCount;
-    memcpy(Encoder.Operands, Statement->Operands, sizeof(Encoder.Operands));
-    if (Instruction->SwapImmediate && Encoder.Count == 2 &&
-        Encoder.Operands[1].Kind == BOXASM_OPERAND_IMMEDIATE) {
-        Encoder.Operands[2] = Encoder.Operands[1];
-        Encoder.Operands[1] = Encoder.Operands[0];
-        Encoder.Count = 3;
+    Encoder.GivenCount = Statement->OperandCount;
+    memcpy(Encoder.Given, Statement->Operands, sizeof(Encoder.Given));
+    if (Instruction->SwapImmediate && Encoder.GivenCount == 2 &&
+        Encoder.Given[1].Kind == BOXASM_OPERAND_IMMEDIATE) {
+        Encoder.Given[2] = Encoder.Given[1];
+        Encoder.Given[1] = Encoder.Given[0];
+        Encoder.GivenCount = 3;
     }
     for (Index = 0; Index < Instruction->FormCount; Index++)
         Sizes |= Instruction->Forms[Index].Sizes;
     Encoder.OnlySize = BoxAsmSingleSize(Sizes);
-    if (Instruction->Kind == BOXASM_KIND_SHORT_BRANCH && Encoder.Count == 1 &&
-        Encoder.Operands[0].Reach == BOXASM_BRANCH_NEAR)
+    if (Instruction->Kind == BOXASM_KIND_SHORT_BRANCH && Encoder.GivenCount == 1 &&
+        Encoder.Given[0].Reach == BOXASM_BRANCH_NEAR)
         return BoxAsmFail(Asm, &Statement->Where,
                           "has no near form: it reaches -128 to 127 bytes", Instruction->Name);
     for (Index = 0; Index < Instruction->FormCount; Index++) {

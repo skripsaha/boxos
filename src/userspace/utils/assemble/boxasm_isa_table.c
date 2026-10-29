@@ -1,4 +1,4 @@
-#include "boxasm_isa.h"
+#include "boxasm_isa_table.h"
 
 #include "box/string.h"
 
@@ -6,16 +6,6 @@
  * pair as r/m,reg; an immediate as imm8 sign-extended when it fits, then the
  * accumulator's short form, then the general one; mov r64,imm as mov r32 when
  * the value fits 32 bits unsigned, then sign-extended, then movabs. */
-
-#define C(A, B, D) { BOXASM_CLASS_##A, BOXASM_CLASS_##B, BOXASM_CLASS_##D }
-#define S8   BOXASM_SIZE_8
-#define S16  BOXASM_SIZE_16
-#define S32  BOXASM_SIZE_32
-#define S64  BOXASM_SIZE_64
-#define S128 BOXASM_SIZE_128
-#define SW   BOXASM_SIZE_WIDE
-#define R    BOXASM_DIGIT_REG
-#define NO   BOXASM_DIGIT_NONE
 
 #define ALU(Base, Digit)                                                  \
     { C(RM, REG, NONE),    S8, { (Base) + 0 }, 1, R, 0, 0 },              \
@@ -552,9 +542,6 @@ static const BoxAsmForm Crc32Forms[] = {
     { C(REG, RM64, NONE), S64,       { 0x0F, 0x38, 0xF1 }, 3, R, 0, 0xF2 },
 };
 
-#define INSTRUCTION(Name, Forms, Kind, Conditional, Swap, Takes)          \
-    { Name, Forms, sizeof(Forms) / sizeof(Forms[0]), Kind, Conditional, Swap, Takes }
-#define PLAIN(Name, Forms) INSTRUCTION(Name, Forms, BOXASM_KIND_PLAIN, 0, 0, 0)
 #define LOCKED(Name, Forms) INSTRUCTION(Name, Forms, BOXASM_KIND_PLAIN, 0, 0, BOXASM_TAKES_LOCK)
 #define REPEATED(Name, Forms, Takes) INSTRUCTION(Name, Forms, BOXASM_KIND_PLAIN, 0, 0, Takes)
 #define SWAPS(Name, Forms)                                                \
@@ -764,8 +751,7 @@ static const struct {
     { "nl", 13 }, { "le", 14 }, { "ng", 14 }, { "g", 15 },  { "nle", 15 },
 };
 
-/* Name, lowered, equals Word. */
-static int BoxAsmNameEquals(const char *Name, size_t Length, const char *Word)
+int BoxAsmNameEquals(const char *Name, size_t Length, const char *Word)
 {
     size_t Index;
 
@@ -839,6 +825,8 @@ const BoxAsmInstruction *BoxAsmFindInstruction(const char *Name, size_t Length,
         Found = BoxAsmConditional(&BoxAsmJcc, Name, Length, Condition);
     if (!Found)
         Found = BoxAsmComparePredicate(Name, Length, Condition);
+    if (!Found)
+        Found = BoxAsmFindVexInstruction(Name, Length, Condition);
     return Found;
 }
 

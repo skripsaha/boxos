@@ -41,7 +41,7 @@ REG8 = ["al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil"] + \
        ["r%db" % n for n in range(8, 16)]
 HIGH8 = ["ah", "ch", "dh", "bh"]
 REGS = {1: REG8, 2: REG16, 4: REG32, 8: REG64}
-SIZE_WORD = {1: "byte", 2: "word", 4: "dword", 8: "qword", 16: "oword"}
+SIZE_WORD = {1: "byte", 2: "word", 4: "dword", 8: "qword", 16: "oword", 32: "yword"}
 
 MEMORY = ["[rax]", "[rbx + 8]", "[rbp]", "[rsp]", "[r12]", "[r13]", "[r13 + 0x100]",
           "[rsp + 8]", "[rax + rcx*4]", "[rax + r9*8 + 16]", "[r12 + r13*2 - 128]",
@@ -528,6 +528,327 @@ def sse_extension_lines(nasm):
     return out
 
 
+YMM = ["ymm%d" % n for n in range(16)]
+AVX_MEMORY = ["[rax]", "[rsp + 8]", "[r13]", "[rbx + rcx*4 + 16]", "[r9 + r10*8 - 128]",
+              "[r12 + 0x100]", "[sse_data]"]
+AVX_ALIGNED = ["[rax]", "[rsp + 8]", "[r13]", "[rbx + rcx*4 + 16]", "[r9 + r10*8]",
+               "[avx_data]", "[avx_data + 64]"]
+VEX_PREDICATES = [
+    "eq", "lt", "lt_os", "le", "le_os", "unord", "unord_q", "neq", "neq_uq", "nlt", "nlt_us",
+    "nle", "nle_us", "ord", "ord_q", "eq_uq", "nge", "nge_us", "ngt", "ngt_us", "false",
+    "false_oq", "neq_oq", "ge", "ge_os", "gt", "gt_os", "true", "true_uq", "eq_os", "lt_oq",
+    "le_oq", "unord_s", "neq_us", "nlt_uq", "nle_uq", "ord_s", "eq_us", "nge_uq", "ngt_uq",
+    "false_os", "neq_os", "ge_oq", "gt_oq", "true_us"]
+# Registers that put VEX.R, VEX.vvvv and ModRM.rm each alone in the high half, and all three.
+VEX_PICKS = [(0, 0, 0), (9, 1, 2), (1, 10, 2), (3, 4, 12), (11, 12, 13), (7, 15, 6), (15, 14, 15)]
+
+
+def vex_picks(count=16):
+    """Register numbers for a destination, a first source and a second: the
+    edges VEX.R, vvvv and B sit on, then every register in each place."""
+    return VEX_PICKS + [(i, (i * 5 + 3) % 16, (i * 7 + 1) % 16) for i in range(count)]
+
+
+def vector_triple(op, dest, first, second, word, imm=False):
+    """op dest, first, second in registers, with memory sized and not, and the
+    second operand left out, which NASM reads as the destination again. Left
+    unsized without a word: NASM 3 takes a qword for the memory of vcmpss and
+    its kin, and refuses the dword the manual gives."""
+    out = []
+    for n, (a, b, c) in enumerate(vex_picks()):
+        out.append("%s %s, %s, %s" % (op, dest[a], first[b], second[c]) +
+                   (", %d" % ((n * 37 + 5) & 255) if imm else ""))
+    for n, mem in enumerate(AVX_MEMORY):
+        out.append("%s %s, %s, %s" % (op, dest[(n * 3) % 16], first[(n * 5 + 2) % 16], mem) +
+                   (", %d" % ((n * 71) & 255) if imm else ""))
+    sized = word + " " if word else ""
+    out.append("%s %s, %s, %s[rdx + 32]" % (op, dest[11], first[3], sized) +
+               (", 255" if imm else ""))
+    tail = ", 0x1B" if imm else ""
+    out += ["%s %s, %s%s" % (op, dest[1], second[2], tail),
+            "%s %s, %s%s" % (op, dest[10], second[12], tail),
+            "%s %s, %s%s" % (op, dest[9], AVX_MEMORY[(len(op)) % len(AVX_MEMORY)], tail),
+            "%s %s, %s[r8 + 16]%s" % (op, dest[4], sized, tail)]
+    return out
+
+
+def vector_pair(op, dest, source, word, imm=False):
+    """op dest, source in registers and with memory sized and not."""
+    out = []
+    for n, (a, b, _) in enumerate(vex_picks()):
+        out.append("%s %s, %s" % (op, dest[a], source[b]) +
+                   (", %d" % ((n * 37 + 5) & 255) if imm else ""))
+    for n, mem in enumerate(AVX_MEMORY):
+        out.append("%s %s, %s" % (op, dest[(n * 3) % 16], mem) +
+                   (", %d" % ((n * 71) & 255) if imm else ""))
+    out.append("%s %s, %s [rdx + 32]" % (op, dest[11], word) + (", 255" if imm else ""))
+    return out
+
+
+def vector_store(op, source, word, memories=AVX_MEMORY):
+    """op memory, source: the store form, sized and not."""
+    out = ["%s %s, %s" % (op, mem, source[(n * 5 + 1) % 16]) for n, mem in enumerate(memories)]
+    out.append("%s %s [r11 + 8], %s" % (op, word, source[14]))
+    return out
+
+
+def both_widths(op, xmm_word="oword", imm=False, pair=False):
+    """An operation on xmm registers, then on ymm ones."""
+    form = vector_pair if pair else vector_triple
+    if pair:
+        return form(op, XMM, XMM, xmm_word, imm) + form(op, YMM, YMM, "yword", imm)
+    return form(op, XMM, XMM, XMM, xmm_word, imm) + form(op, YMM, YMM, YMM, "yword", imm)
+
+
+AVX_FLOAT = ["add", "sub", "mul", "div", "min", "max"]
+AVX_PACKED = ["and", "andn", "or", "xor", "unpckl", "unpckh", "addsub"]
+
+
+def avx_float_lines():
+    out = []
+    for op in AVX_FLOAT:
+        for kind in ("ps", "pd"):
+            out += both_widths("v" + op + kind)
+        out += vector_triple("v" + op + "ss", XMM, XMM, XMM, "dword")
+        out += vector_triple("v" + op + "sd", XMM, XMM, XMM, "qword")
+    for kind in ("ps", "pd"):
+        out += both_widths("vsqrt" + kind, pair=True)
+    out += vector_triple("vsqrtss", XMM, XMM, XMM, "dword") + \
+           vector_triple("vsqrtsd", XMM, XMM, XMM, "qword")
+    out += both_widths("vrcpps", pair=True) + both_widths("vrsqrtps", pair=True)
+    out += vector_triple("vrcpss", XMM, XMM, XMM, "dword") + \
+           vector_triple("vrsqrtss", XMM, XMM, XMM, "dword")
+    for op in AVX_PACKED[:-1]:
+        for kind in ("ps", "pd"):
+            out += both_widths("v" + op + kind)
+    for op in ("vaddsubps", "vaddsubpd", "vhaddps", "vhaddpd", "vhsubps", "vhsubpd"):
+        out += both_widths(op)
+    out += vector_pair("vmovddup", XMM, XMM, "qword") + vector_pair("vmovddup", YMM, YMM, "yword")
+    out += both_widths("vmovshdup", pair=True) + both_widths("vmovsldup", pair=True)
+    for op, word in (("vcomiss", "dword"), ("vcomisd", "qword"), ("vucomiss", "dword"),
+                     ("vucomisd", "qword")):
+        out += vector_pair(op, XMM, XMM, word)
+    for op in ("vshufps", "vshufpd", "vcmpps", "vcmppd"):
+        out += both_widths(op, imm=True)
+    out += vector_triple("vcmpss", XMM, XMM, XMM, None, imm=True)
+    out += vector_triple("vcmpsd", XMM, XMM, XMM, "qword", imm=True)
+    for n, name in enumerate(VEX_PREDICATES):
+        out += ["vcmp%sps xmm%d, xmm%d, xmm%d" % (name, n % 16, (n * 3) % 16, (n * 7 + 1) % 16),
+                "vcmp%spd ymm%d, ymm%d, [rax + %d]" % (name, (n * 5) % 16, n % 16, n * 32),
+                "vcmp%sss xmm%d, xmm%d, [rbx]" % (name, (n + 8) % 16, n % 16),
+                "vcmp%ssd xmm%d, xmm%d" % (name, (n * 3) % 16, (n * 11 + 2) % 16)]
+    out += ["vcmpltps ymm9, ymm1, ymm15", "vcmpeq_uqps ymm3, yword [r9]", "vcmpneq_oqpd xmm0, xmm1",
+            "vcmpord_sss xmm4, [sse_data]", "vcmpps xmm1, xmm2, xmm3, 32",
+            "vcmpps ymm1, ymm2, ymm3, 255", "vcmpps xmm1, xmm2, 31"]
+    return out
+
+
+def avx_move_lines():
+    out = []
+    for op in ("vmovaps", "vmovapd", "vmovdqa"):
+        for regs, word in ((XMM, "oword"), (YMM, "yword")):
+            out += ["%s %s, %s" % (op, a, b) for a, b in zip(regs, regs[3:] + regs[:3])]
+            for n, mem in enumerate(AVX_ALIGNED):
+                out += ["%s %s, %s" % (op, regs[(n * 7) % 16], mem),
+                        "%s %s, %s" % (op, mem, regs[(n * 11 + 1) % 16])]
+            out += ["%s %s, %s [r12]" % (op, regs[3], word), "%s %s [r9 + 32], %s" % (op, word, regs[9])]
+    for op in ("vmovups", "vmovupd", "vmovdqu"):
+        for regs, word in ((XMM, "oword"), (YMM, "yword")):
+            out += ["%s %s, %s" % (op, a, b) for a, b in zip(regs, regs[5:] + regs[:5])]
+            for n, mem in enumerate(AVX_MEMORY + ["[rax + 1]", "[sse_data + 3]"]):
+                out += ["%s %s, %s" % (op, regs[(n * 7) % 16], mem),
+                        "%s %s, %s" % (op, mem, regs[(n * 11 + 1) % 16])]
+            out += ["%s %s, %s [r12]" % (op, regs[3], word), "%s %s [r9 + 32], %s" % (op, word, regs[9])]
+    for op, word in (("vmovss", "dword"), ("vmovsd", "qword")):
+        out += ["%s %s, %s, %s" % (op, XMM[a], XMM[b], XMM[c]) for a, b, c in vex_picks(8)]
+        out += ["%s %s, %s" % (op, a, b) for a, b in xmm_pairs()[:8]]
+        out += ["%s xmm5, %s [rcx]" % (op, word), "%s %s [rcx + 4], xmm14" % (op, word),
+                "%s xmm8, [sse_data]" % op, "%s [sse_data], xmm0" % op, "%s xmm13, [r9]" % op]
+    for op in ("vmovlps", "vmovhps", "vmovlpd", "vmovhpd"):
+        out += ["%s xmm3, xmm9, [rdi]" % op, "%s xmm12, xmm1, qword [r9 + 8]" % op,
+                "%s xmm6, [rsi]" % op, "%s [rsi], xmm7" % op, "%s [sse_data], xmm15" % op,
+                "%s qword [r10], xmm2" % op]
+    for op in ("vmovhlps", "vmovlhps"):
+        out += ["%s %s, %s, %s" % (op, XMM[a], XMM[b], XMM[c]) for a, b, c in vex_picks(6)]
+        out += ["%s xmm1, xmm2" % op, "%s xmm10, xmm13" % op]
+    for i in range(16):
+        out += ["vmovd %s, %s" % (XMM[i], REG32[(i + 5) % 16]),
+                "vmovd %s, %s" % (REG32[(i + 9) % 16], XMM[i]),
+                "vmovq %s, %s" % (XMM[i], REG64[(i + 5) % 16]),
+                "vmovq %s, %s" % (REG64[(i + 9) % 16], XMM[i]),
+                "vmovq %s, %s" % (XMM[i], XMM[(i * 5 + 3) % 16])]
+    out += ["vmovd xmm3, [rax]", "vmovd xmm11, dword [rsp + 4]", "vmovd [rbx], xmm6",
+            "vmovd dword [r9], xmm2", "vmovq xmm13, [rdx]", "vmovq xmm2, qword [r12]",
+            "vmovq [rax], xmm10", "vmovq qword [rsp], xmm4", "vmovq [sse_data], xmm1",
+            "vmovq xmm1, [r13 + r9*8]"]
+    for i, reg in enumerate(("eax", "r9d", "rax", "r12")):
+        out += ["vmovmskps %s, %s" % (reg, XMM[i * 4]), "vmovmskps %s, %s" % (reg, YMM[i * 4 + 2]),
+                "vmovmskpd %s, %s" % (reg, XMM[i * 4 + 1]), "vmovmskpd %s, %s" % (reg, YMM[i * 4 + 3]),
+                "vpmovmskb %s, %s" % (reg, XMM[i * 4 + 3])]
+    for op in ("vmovntps", "vmovntpd", "vmovntdq"):
+        out += vector_store(op, XMM, "oword", AVX_ALIGNED) + vector_store(op, YMM, "yword", AVX_ALIGNED)
+    out += ["vmovntdqa xmm%d, %s" % (n * 3 % 16, mem) for n, mem in enumerate(AVX_ALIGNED)]
+    out += ["vlddqu %s, %s" % (XMM[n * 5 % 16], mem) for n, mem in enumerate(AVX_MEMORY)]
+    out += ["vlddqu %s, %s" % (YMM[n * 5 % 16], mem) for n, mem in enumerate(AVX_MEMORY)]
+    out += ["vlddqu xmm12, oword [rdx + 33]", "vlddqu ymm3, yword [rdx + 33]",
+            "vmaskmovdqu xmm1, xmm2", "vmaskmovdqu xmm10, xmm15", "vmaskmovdqu xmm9, xmm1",
+            "vldmxcsr [rsp]", "vstmxcsr [rsp + 4]", "vldmxcsr dword [sse_data]",
+            "vstmxcsr [r9 + r10*4]", "vzeroupper", "vzeroall"]
+    return out
+
+
+def avx_convert_lines():
+    out = []
+    for op in ("vcvtsi2ss", "vcvtsi2sd"):
+        for i, reg in enumerate(("eax", "r10d", "rax", "r15")):
+            out += ["%s %s, %s, %s" % (op, XMM[i * 5 % 16], XMM[(i * 3 + 1) % 16], reg),
+                    "%s %s, %s" % (op, XMM[i * 5 % 16], reg)]
+        out += ["%s xmm6, xmm9, dword [rax]" % op, "%s xmm14, xmm3, qword [rbx + 8]" % op,
+                "%s xmm1, dword [r9]" % op, "%s xmm15, qword [sse_data]" % op]
+    for op, word in (("vcvtss2si", "dword"), ("vcvttss2si", "dword"),
+                     ("vcvtsd2si", "qword"), ("vcvttsd2si", "qword")):
+        for i, reg in enumerate(("eax", "r11d", "rax", "r14")):
+            out.append("%s %s, %s" % (op, reg, XMM[i * 6 % 16]))
+        out += ["%s ecx, %s [rax]" % (op, word), "%s r8, [rsp + 8]" % op,
+                "%s r9, %s [r10]" % (op, word)]
+    out += vector_triple("vcvtss2sd", XMM, XMM, XMM, "dword")
+    out += vector_triple("vcvtsd2ss", XMM, XMM, XMM, "qword")
+    out += vector_pair("vcvtps2pd", XMM, XMM, "qword") + vector_pair("vcvtps2pd", YMM, XMM, "oword")
+    out += vector_pair("vcvtdq2pd", XMM, XMM, "qword") + vector_pair("vcvtdq2pd", YMM, XMM, "oword")
+    for op in ("vcvtpd2ps", "vcvtpd2dq", "vcvttpd2dq"):
+        out += vector_pair(op, XMM, XMM, "oword") + vector_pair(op, XMM, YMM, "yword")
+    for op in ("vcvtdq2ps", "vcvtps2dq", "vcvttps2dq"):
+        out += both_widths(op, pair=True)
+    return out
+
+
+def avx_integer_lines():
+    """The integer operations AVX keeps on xmm registers."""
+    out = []
+    for op in SSE_INTEGER + SSSE3_OPERATIONS[:-3] + SSE41_OPERATIONS[1:-2] + ["pcmpgtq"]:
+        out += vector_triple("v" + op, XMM, XMM, XMM, "oword")
+    for op in ("pabsb", "pabsw", "pabsd", "phminposuw"):
+        out += vector_pair("v" + op, XMM, XMM, "oword")
+    out += both_widths("vptest", pair=True)
+    for op, word in SSE_WIDENING:
+        out += vector_pair("v" + op, XMM, XMM, word)
+    for op in SSE_SHIFTS:
+        out += vector_triple("v" + op, XMM, XMM, XMM, "oword")[:30]
+        out += ["v%s xmm3, xmm9, 1" % op, "v%s xmm12, xmm1, 15" % op, "v%s xmm0, xmm0, 7" % op,
+                "v%s xmm10, 3" % op, "v%s xmm2, 255" % op]
+    for op, digit in (("vpslldq", 4), ("vpsrldq", 8)):
+        out += ["%s xmm1, xmm2, %d" % (op, digit), "%s xmm14, xmm9, 15" % op,
+                "%s xmm3, xmm15, 1" % op, "%s xmm5, 2" % op, "%s xmm11, 9" % op]
+    for op in ("vpshufd", "vpshufhw", "vpshuflw"):
+        out += vector_pair(op, XMM, XMM, "oword", imm=True)
+    for op in ("vpalignr", "vpblendw", "vdppd", "vmpsadbw"):
+        out += vector_triple(op, XMM, XMM, XMM, "oword", imm=True)
+    for op in ("vblendps", "vblendpd", "vdpps"):
+        out += both_widths(op, imm=True)
+    for op in ("vpcmpestrm", "vpcmpestri", "vpcmpistrm", "vpcmpistri"):
+        out += vector_pair(op, XMM, XMM, "oword", imm=True)
+    for op in ("vroundps", "vroundpd"):
+        out += both_widths(op, imm=True, pair=True)
+    out += vector_triple("vroundss", XMM, XMM, XMM, "dword", imm=True)
+    out += vector_triple("vroundsd", XMM, XMM, XMM, "qword", imm=True)
+    out += vector_triple("vinsertps", XMM, XMM, XMM, "dword", imm=True)
+    for op in ("vblendvps", "vblendvpd", "vpblendvb"):
+        for regs, word in ((XMM, "oword"), (YMM, "yword")):
+            if op == "vpblendvb" and regs is YMM:
+                continue
+            out += ["%s %s, %s, %s, %s" % (op, regs[a], regs[b], regs[c], regs[(a * 3 + b) % 16])
+                    for a, b, c in vex_picks(8)]
+            out += ["%s %s, %s, %s, %s" % (op, regs[(n * 3) % 16], regs[(n * 5 + 2) % 16], mem,
+                                           regs[(n * 7 + 5) % 16])
+                    for n, mem in enumerate(AVX_MEMORY)]
+            out += ["%s %s, %s, %s [rdx + 32], %s" % (op, regs[11], regs[3], word, regs[15]),
+                    "%s %s, %s, %s" % (op, regs[1], regs[2], regs[3]),
+                    "%s %s, [rax], %s" % (op, regs[9], regs[14])]
+    return out
+
+
+def avx_extract_lines():
+    out = []
+    for i in range(16):
+        out += ["vpextrw %s, %s, %d" % (REG32[i], XMM[(i * 3) % 16], i % 8),
+                "vpextrw %s, %s, %d" % (REG64[(i + 3) % 16], XMM[(i * 5) % 16], 7 - i % 8),
+                "vpextrb %s, %s, %d" % (REG32[i], XMM[(i * 3) % 16], i),
+                "vpextrb %s, %s, %d" % (REG64[(i + 6) % 16], XMM[(i * 7) % 16], 255 - i),
+                "vextractps %s, %s, %d" % (REG32[(i + 2) % 16], XMM[(i * 5) % 16], i % 4),
+                "vpextrd %s, %s, %d" % (REG32[(i + 8) % 16], XMM[(i * 11) % 16], i % 4),
+                "vpextrd %s, %s, %d" % (REG64[(i + 4) % 16], XMM[(i * 3 + 2) % 16], 3 - i % 4),
+                "vpextrq %s, %s, %d" % (REG64[(i + 1) % 16], XMM[(i * 13) % 16], i % 2),
+                "vpinsrw %s, %s, %s, %d" % (XMM[i], XMM[(i * 3 + 1) % 16], REG32[(i + 5) % 16], i % 8),
+                "vpinsrb %s, %s, %s, %d" % (XMM[(i * 3) % 16], XMM[(i * 5 + 7) % 16], REG32[(i + 5) % 16], 15 - i),
+                "vpinsrd %s, %s, %s, %d" % (XMM[(i * 5) % 16], XMM[(i + 4) % 16], REG32[(i + 3) % 16], i % 4),
+                "vpinsrq %s, %s, %s, %d" % (XMM[(i * 7) % 16], XMM[(i * 3 + 2) % 16], REG64[(i + 7) % 16], i % 2),
+                "vpinsrw %s, %s, %d" % (XMM[i], REG32[(i + 5) % 16], i % 8),
+                "vpinsrq %s, %s, %d" % (XMM[(i * 7) % 16], REG64[(i + 7) % 16], i % 2)]
+    for i, mem in enumerate(AVX_MEMORY):
+        out += ["vpextrb %s, %s, %d" % (mem, XMM[(i * 4) % 16], i),
+                "vpextrb byte %s, %s, %d" % (mem, XMM[(i * 4 + 1) % 16], 15 - i),
+                "vpextrw %s, %s, %d" % (mem, XMM[(i * 4 + 2) % 16], i),
+                "vpextrw word %s, %s, %d" % (mem, XMM[(i * 4 + 3) % 16], 7 - i),
+                "vextractps %s, %s, %d" % (mem, XMM[(i * 3) % 16], i % 4),
+                "vextractps dword %s, %s, %d" % (mem, XMM[(i * 3 + 1) % 16], 3 - i % 4),
+                "vpextrd %s, %s, %d" % (mem, XMM[(i * 5) % 16], i % 4),
+                "vpextrd dword %s, %s, 1" % (mem, XMM[(i * 5 + 1) % 16]),
+                "vpextrq %s, %s, %d" % (mem, XMM[(i * 7) % 16], i % 2),
+                "vpextrq qword %s, %s, 0" % (mem, XMM[(i * 7 + 1) % 16]),
+                "vpinsrb %s, %s, %s, %d" % (XMM[(i * 3) % 16], XMM[(i * 7 + 1) % 16], mem, i),
+                "vpinsrb %s, %s, byte %s, 15" % (XMM[(i * 3 + 1) % 16], XMM[(i + 9) % 16], mem),
+                "vpinsrw %s, %s, %s, %d" % (XMM[(i * 3) % 16], XMM[(i * 7 + 1) % 16], mem, i),
+                "vpinsrw %s, %s, word %s, 7" % (XMM[(i * 3 + 1) % 16], XMM[(i + 9) % 16], mem),
+                "vpinsrd %s, %s, %s, %d" % (XMM[(i * 5) % 16], XMM[(i + 2) % 16], mem, i % 4),
+                "vpinsrd %s, %s, dword %s, 2" % (XMM[(i * 5 + 1) % 16], XMM[(i + 3) % 16], mem),
+                "vpinsrq %s, %s, %s, %d" % (XMM[(i * 7) % 16], XMM[(i + 5) % 16], mem, i % 2),
+                "vpinsrq %s, %s, qword %s, 1" % (XMM[(i * 7 + 1) % 16], XMM[(i + 6) % 16], mem)]
+    return out
+
+
+def avx_only_lines():
+    """The instructions AVX adds to SSE's."""
+    out = []
+    for n, mem in enumerate(AVX_MEMORY):
+        out += ["vbroadcastss xmm%d, %s" % (n * 3 % 16, mem), "vbroadcastss ymm%d, %s" % (n * 5 % 16, mem),
+                "vbroadcastsd ymm%d, %s" % (n * 7 % 16, mem), "vbroadcastf128 ymm%d, %s" % (n * 9 % 16, mem),
+                "vextractf128 %s, ymm%d, %d" % (mem, n * 3 % 16, n % 2),
+                "vinsertf128 ymm%d, ymm%d, %s, %d" % (n * 5 % 16, n * 3 % 16, mem, (n + 1) % 2),
+                "vmaskmovps xmm%d, xmm%d, %s" % (n * 3 % 16, n * 5 % 16, mem),
+                "vmaskmovps ymm%d, ymm%d, %s" % (n * 3 % 16, n * 5 % 16, mem),
+                "vmaskmovpd xmm%d, xmm%d, %s" % (n * 7 % 16, n * 5 % 16, mem),
+                "vmaskmovpd ymm%d, ymm%d, %s" % (n * 7 % 16, n * 5 % 16, mem),
+                "vmaskmovps %s, xmm%d, xmm%d" % (mem, n * 5 % 16, n * 3 % 16),
+                "vmaskmovps %s, ymm%d, ymm%d" % (mem, n * 5 % 16, n * 3 % 16),
+                "vmaskmovpd %s, xmm%d, xmm%d" % (mem, n * 5 % 16, n * 7 % 16),
+                "vmaskmovpd %s, ymm%d, ymm%d" % (mem, n * 5 % 16, n * 7 % 16),
+                "vperm2f128 ymm%d, ymm%d, %s, %d" % (n * 3 % 16, n * 5 % 16, mem, n * 40)]
+    out += ["vbroadcastss xmm9, dword [r9]", "vbroadcastss ymm2, dword [rsp]",
+            "vbroadcastsd ymm10, qword [rax + r9*2]", "vbroadcastf128 ymm1, oword [rdx]",
+            "vextractf128 oword [rax], ymm5, 1", "vinsertf128 ymm1, ymm2, oword [r8], 0",
+            "vmaskmovps ymm1, ymm2, yword [rax]", "vmaskmovpd oword [rax], xmm1, xmm2"]
+    for a, b, c in vex_picks(8):
+        out += ["vextractf128 xmm%d, ymm%d, %d" % (a, b, c % 2),
+                "vinsertf128 ymm%d, ymm%d, xmm%d, %d" % (a, b, c, c % 2),
+                "vperm2f128 ymm%d, ymm%d, ymm%d, %d" % (a, b, c, a * 16 + b)]
+    out += ["vinsertf128 ymm1, xmm2, 1", "vinsertf128 ymm9, oword [rax], 0",
+            "vperm2f128 ymm3, ymm4, 0x31"]
+    for op in ("vpermilps", "vpermilpd"):
+        out += both_widths(op)
+        out += vector_pair(op, XMM, XMM, "oword", imm=True) + vector_pair(op, YMM, YMM, "yword", imm=True)
+    for op in ("vtestps", "vtestpd"):
+        out += both_widths(op, pair=True)
+    out += ["vaddps ymm1, ymm2, [sse_data + 4]", "vpshufb xmm1, xmm2, [sse_data + 1]",
+            "vmulpd xmm3, xmm4, [avx_data + 8]", "vptest ymm5, [sse_data + 2]"]
+    return out
+
+
+def avx_lines():
+    """Every AVX instruction BoxASM has, in each of its forms, on xmm and ymm."""
+    return (avx_float_lines() + avx_move_lines() + avx_convert_lines() + avx_integer_lines() +
+            avx_extract_lines() + avx_only_lines())
+
+
 def exact_value(text):
     """The rational a decimal floating-point constant writes."""
     text = text.replace("_", "")
@@ -621,12 +942,13 @@ def program(nasm):
     near = " strict near " if nasm else " near "
     data_align = "    align 8, db 0" if nasm else "    align 8"
     sse_align = "    align 16, db 0" if nasm else "    align 16"
+    avx_align = "    align 32, db 0" if nasm else "    align 32"
     lines = ["default rel", "bits 64", "extern outside_fn", "global main",
              "section .text", "main:"]
     for part in (alu_lines, test_lines, mov_lines, address_lines, xchg_lines,
                  stack_lines, unary_lines, imul_lines, shift_lines, extend_lines,
                  condition_lines, branch_lines, string_lines, bit_lines, atomic_lines,
-                 short_branch_lines, sse_lines, lambda: sse_extension_lines(nasm)):
+                 short_branch_lines, sse_lines, lambda: sse_extension_lines(nasm), avx_lines):
         lines += ["    " + line if not line.endswith(":") else line for line in part()]
     lines += ["    " + op for op in ALONE]
     lines += ["    ret 16", "    align 16", "code_target:", "    endbr64", "    ret",
@@ -643,6 +965,7 @@ def program(nasm):
              float_data(8, 300, 64, False)[0] + float_data(4, 300, 32, False)[0] + \
              ["    dq __Infinity__, -__Infinity__, __QNaN__, __NaN__, __SNaN__",
               "    dd __Infinity__, -__QNaN__, __SNaN__",
+              avx_align, "avx_data:", "    times 16 dq 0x0123456789ABCDEF",
               "section .bss", "    resb 3", "    resw 2", "    resd 5", "    resq 4"]
     text = "\n".join(lines) + "\n"
     return text.replace("[rip + ", rip).replace(" near ", near)

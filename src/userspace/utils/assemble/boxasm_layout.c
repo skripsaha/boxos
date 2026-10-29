@@ -330,10 +330,11 @@ static int BoxAsmShortReachFails(BoxAsmAssembler *Asm, const BoxAsmStatement *St
     return BoxAsmFailEnd(Asm, &Statement->Where, &Message);
 }
 
-/* Memory that a packed SSE operation reads or writes must sit on its
- * boundary, or the processor stops the program (#GP). Named by a label of
- * the program, it is known to sit there only when the label does and its
- * section is aligned at least as far; a name from outside is the linker's. */
+/* Memory that a packed SSE operation, or an aligned AVX move, reads or writes
+ * must sit on its boundary, or the processor stops the program (#GP). Named
+ * by a label of the program, it is known to sit there only when the label
+ * does and its section is aligned at least as far; a name from outside is the
+ * linker's. */
 static int BoxAsmCheckAligned(BoxAsmAssembler *Asm, const BoxAsmStatement *Statement,
                               const BoxAsmFixup *Fixup)
 {
@@ -360,9 +361,10 @@ static int BoxAsmCheckAligned(BoxAsmAssembler *Asm, const BoxAsmStatement *State
         BoxAsmMessageText(&Message, Fixup->Value.Constant > 0 ? " +" : " ");
         BoxAsmMessageDecimal(&Message, Fixup->Value.Constant);
     }
-    BoxAsmMessageText(&Message, Offset % Fixup->Aligned != 0
-                                ? " is not on one: put align 16 before the data"
-                                : " is not known to be: put align 16 before the data");
+    BoxAsmMessageText(&Message, Offset % Fixup->Aligned != 0 ? " is not on one: put align "
+                                                              : " is not known to be: put align ");
+    BoxAsmMessageDecimal(&Message, Fixup->Aligned);
+    BoxAsmMessageText(&Message, " before the data");
     return BoxAsmFailEnd(Asm, &Statement->Where, &Message);
 }
 

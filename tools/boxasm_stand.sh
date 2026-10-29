@@ -350,8 +350,8 @@ assembly_refuses() {
 }
 
 HEAD=$'section .text\nglobal main\nmain:\n'
-assembly_refuses unknown_instruction "$HEAD    vaddps xmm0, xmm1, xmm2"$'\n' \
-    "unknown_instruction.asm:4:5: 'vaddps' is not an instruction, a directive or a box operation"
+assembly_refuses unknown_instruction "$HEAD    vpternlogd xmm0, xmm1, xmm2, 5"$'\n' \
+    "unknown_instruction.asm:4:5: 'vpternlogd' is not an instruction, a directive or a box operation"
 assembly_refuses undefined_name "$HEAD    jmp nowhere"$'\n' \
     "undefined_name.asm:4:9: 'nowhere' is never defined; a name from outside the program is declared with extern"
 assembly_refuses unsized_memory "$HEAD    inc [rax]"$'\n' \
@@ -410,7 +410,49 @@ assembly_refuses integer_unsized "$HEAD    cvtsi2sd xmm0, [rax]"$'\n' \
 assembly_refuses rep_sse_form "$HEAD    rep movsd xmm0, xmm1"$'\n' \
     "rep_sse_form.asm:4:5: rep repeats only a string instruction, written without operands, not this form of 'movsd'"
 assembly_refuses avx_register "$HEAD    addps ymm0, xmm1"$'\n' \
-    "avx_register.asm:4:11: 'ymm0' is an AVX register; BoxASM has SSE's xmm0 to xmm15"
+    "avx_register.asm:4:5: 'addps' is SSE's and takes xmm registers; for ymm write 'vaddps'"
+assembly_refuses sse_register_without_v_form "$HEAD    crc32 eax, ymm1"$'\n' \
+    "sse_register_without_v_form.asm:4:5: these operands are not a form of 'crc32'"
+assembly_refuses avx512_register "$HEAD    vaddps zmm0, zmm1, zmm2"$'\n' \
+    "avx512_register.asm:4:12: 'zmm0' is an AVX-512 register; BoxASM has xmm0 to xmm15 and ymm0 to ymm15"
+assembly_refuses avx512_high_register "$HEAD    vaddps ymm16, ymm1, ymm2"$'\n' \
+    "avx512_high_register.asm:4:12: 'ymm16' is an AVX-512 register; BoxASM has xmm0 to xmm15 and ymm0 to ymm15"
+assembly_refuses ymm_in_address "$HEAD    mov rax, [ymm0]"$'\n' \
+    "ymm_in_address.asm:4:15: an address is made of 64-bit registers"
+assembly_refuses vex_no_256_form "$HEAD    vpaddb ymm0, ymm1, ymm2"$'\n' \
+    "vex_no_256_form.asm:4:5: 'vpaddb' has no 256-bit form before AVX2"
+assembly_refuses vex_no_256_pair "$HEAD    vucomisd ymm0, ymm1"$'\n' \
+    "vex_no_256_pair.asm:4:5: 'vucomisd' has no 256-bit form before AVX2"
+assembly_refuses vex_widths_mixed "$HEAD    vaddps ymm0, xmm1, ymm2"$'\n' \
+    "vex_widths_mixed.asm:4:5: 'vaddps' has no form with registers of these widths"
+assembly_refuses vex_widths_narrowed "$HEAD    vcvtpd2dq ymm0, ymm1"$'\n' \
+    "vex_widths_narrowed.asm:4:5: 'vcvtpd2dq' has no form with registers of these widths"
+assembly_refuses vex_memory_size "$HEAD    vaddps ymm0, ymm1, oword [rax]"$'\n' \
+    "vex_memory_size.asm:4:5: the memory is read as 32 bytes (yword, or no size) by 'vaddps'"
+assembly_refuses vex_memory_size_xmm "$HEAD    vaddps xmm0, xmm1, yword [rax]"$'\n' \
+    "vex_memory_size_xmm.asm:4:5: the memory is read as 16 bytes (oword, or no size) by 'vaddps'"
+assembly_refuses vex_selector_immediate "$HEAD    vblendvps xmm1, xmm2, xmm3, 5"$'\n' \
+    "vex_selector_immediate.asm:4:5: the selector is a register, written last, in 'vblendvps'"
+assembly_refuses vex_selector_general "$HEAD    vpblendvb xmm1, xmm2, xmm3, rax"$'\n' \
+    "vex_selector_general.asm:4:5: the selector is a register, written last, in 'vpblendvb'"
+assembly_refuses vex_selector_width "$HEAD    vblendvps ymm1, ymm2, ymm3, xmm4"$'\n' \
+    "vex_selector_width.asm:4:5: 'vblendvps' has no form with registers of these widths"
+assembly_refuses vex_five_operands "$HEAD    vblendvps xmm1, xmm2, xmm3, xmm4, xmm5"$'\n' \
+    "vex_five_operands.asm:4:39: an instruction has at most four operands"
+assembly_refuses vex_unaligned $'section .data\nv dd 1, 2, 3, 4, 5, 6, 7, 8\n'"$HEAD    vmovaps xmm0, [v]"$'\n' \
+    "vex_unaligned.asm:6:5: 'vmovaps' needs its memory on a 16-byte boundary, and 'v' is not known to be: put align 16 before the data"
+assembly_refuses vex_unaligned_256 $'section .data\nalign 16\nv dd 1, 2, 3, 4, 5, 6, 7, 8\n'"$HEAD    vmovdqa ymm0, [v]"$'\n' \
+    "vex_unaligned_256.asm:7:5: 'vmovdqa' needs its memory on a 32-byte boundary, and 'v' is not known to be: put align 32 before the data"
+assembly_refuses vex_misplaced_256 $'section .data\nalign 32\npad db 1\nv dd 1, 2, 3, 4, 5, 6, 7, 8\n'"$HEAD    vmovntps [v], ymm0"$'\n' \
+    "vex_misplaced_256.asm:8:5: 'vmovntps' needs its memory on a 32-byte boundary, and 'v' is not on one: put align 32 before the data"
+assembly_refuses vex_integer_unsized "$HEAD    vcvtsi2sd xmm0, xmm1, [rax]"$'\n' \
+    "vex_integer_unsized.asm:4:5: the operation size is not said: write byte, word, dword or qword before the memory operand of 'vcvtsi2sd'"
+assembly_refuses vex_extractps_wide "$HEAD    vextractps rax, xmm1, 1"$'\n' \
+    "vex_extractps_wide.asm:4:5: these operands are not a form of 'vextractps'"
+assembly_refuses vex_broadcast_register "$HEAD    vbroadcastss ymm0, xmm1"$'\n' \
+    "vex_broadcast_register.asm:4:5: 'vbroadcastss' has no form with registers of these widths"
+assembly_refuses vex_rep "$HEAD    rep vaddps xmm0, xmm1, xmm2"$'\n' \
+    "vex_rep.asm:4:5: rep goes only on movs, stos and lods, not on 'vaddps'"
 assembly_refuses blendv_mask "$HEAD    blendvps xmm1, xmm2, xmm3"$'\n' \
     "blendv_mask.asm:4:5: the mask is only xmm0, written third or left out, in 'blendvps'"
 assembly_refuses pextrb_word_register "$HEAD    pextrb ax, xmm1, 3"$'\n' \

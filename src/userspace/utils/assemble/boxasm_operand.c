@@ -46,12 +46,13 @@ static int BoxAsmFindName(const char *Text, size_t Length, const char *const *Na
     return -1;
 }
 
-/* xmm0..xmm15. */
-static int BoxAsmXmmRegister(const char *Text, size_t Length, BoxAsmRegister *Out)
+/* xmm0..xmm15, or ymm0..ymm15 when Letter is 'y'. */
+static int BoxAsmVectorRegister(const char *Text, size_t Length, char Letter,
+                                BoxAsmRegister *Out)
 {
     uint8_t Number;
 
-    if (Length < 4 || Length > 5 || BoxAsmLower(Text[0]) != 'x' ||
+    if (Length < 4 || Length > 5 || BoxAsmLower(Text[0]) != Letter ||
         BoxAsmLower(Text[1]) != 'm' || BoxAsmLower(Text[2]) != 'm' ||
         Text[3] < '0' || Text[3] > '9' || (Length == 5 && (Text[3] == '0' ||
                                                           Text[4] < '0' || Text[4] > '9')))
@@ -61,7 +62,8 @@ static int BoxAsmXmmRegister(const char *Text, size_t Length, BoxAsmRegister *Ou
         Number = (uint8_t)(Number * 10u + (uint8_t)(Text[4] - '0'));
     if (Number > 15)
         return 0;
-    *Out = (BoxAsmRegister){ BOXASM_REGISTER_XMM, Number, 16, 0 };
+    *Out = Letter == 'x' ? (BoxAsmRegister){ BOXASM_REGISTER_XMM, Number, 16, 0 }
+                         : (BoxAsmRegister){ BOXASM_REGISTER_YMM, Number, 32, 0 };
     return 1;
 }
 
@@ -126,7 +128,7 @@ int BoxAsmRegisterLookup(const char *Text, size_t Length, BoxAsmRegister *Out)
         *Out = (BoxAsmRegister){ BOXASM_REGISTER_RIP, 0, 8, 0 };
         return 1;
     }
-    if (BoxAsmXmmRegister(Text, Length, Out))
+    if (BoxAsmVectorRegister(Text, Length, 'x', Out) || BoxAsmVectorRegister(Text, Length, 'y', Out))
         return 1;
     return BoxAsmExtendedRegister(Text, Length, Out);
 }
@@ -154,6 +156,7 @@ static uint8_t BoxAsmSizeKeyword(const BoxAsmToken *Token)
     if (BoxAsmTokenIs(Token, "dword")) return 4;
     if (BoxAsmTokenIs(Token, "qword")) return 8;
     if (BoxAsmTokenIs(Token, "oword")) return 16;
+    if (BoxAsmTokenIs(Token, "yword")) return 32;
     return 0;
 }
 
@@ -319,9 +322,9 @@ static int BoxAsmParseMemory(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmTok
     return BoxAsmSettleAddress(Asm, Out, &Where);
 }
 
-/* A vector register BoxASM does not have — mm0..mm7 of MMX, ymm and zmm of
- * AVX, xmm16 and up of AVX-512 — named as such rather than taken for a
- * label nobody defined. */
+/* A vector register BoxASM does not have — mm0..mm7 of MMX, xmm and ymm16 and
+ * up and zmm of AVX-512 — named as such rather than taken for a label nobody
+ * defined. */
 static const char *BoxAsmVectorNotBuilt(const BoxAsmToken *Token)
 {
     const char *Text = Token->Text;
@@ -345,15 +348,18 @@ static const char *BoxAsmVectorNotBuilt(const BoxAsmToken *Token)
         Number = Number * 10u + (unsigned)(Text[Index] - '0');
     }
     if (Letters == 2 && BoxAsmLower(Text[0]) == 'm' && BoxAsmLower(Text[1]) == 'm')
-        return Number < 8 ? "is an MMX register; BoxASM computes vectors in xmm0 to xmm15"
+        return Number < 8 ? "is an MMX register; BoxASM computes vectors in xmm0 to xmm15 "
+                            "and ymm0 to ymm15"
                           : NULL;
     if (Letters != 3 || BoxAsmLower(Text[1]) != 'm' || BoxAsmLower(Text[2]) != 'm' ||
         Number > 31)
         return NULL;
     switch (BoxAsmLower(Text[0])) {
-    case 'x': return Number >= 16 ? "is an AVX-512 register; BoxASM has xmm0 to xmm15" : NULL;
-    case 'y': return "is an AVX register; BoxASM has SSE's xmm0 to xmm15";
-    case 'z': return "is an AVX-512 register; BoxASM has SSE's xmm0 to xmm15";
+    case 'x':
+    case 'y': return Number >= 16 ? "is an AVX-512 register; BoxASM has xmm0 to xmm15 and "
+                                    "ymm0 to ymm15"
+                                  : NULL;
+    case 'z': return "is an AVX-512 register; BoxASM has xmm0 to xmm15 and ymm0 to ymm15";
     default:  return NULL;
     }
 }

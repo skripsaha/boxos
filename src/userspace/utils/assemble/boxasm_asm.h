@@ -11,13 +11,14 @@ typedef enum {
     BOXASM_REGISTER_GENERAL,    /* rax..r15 and their 32/16/8-bit names */
     BOXASM_REGISTER_HIGH8,      /* ah ch dh bh: no REX may accompany them */
     BOXASM_REGISTER_RIP,
-    BOXASM_REGISTER_XMM         /* xmm0..xmm15 */
+    BOXASM_REGISTER_XMM,        /* xmm0..xmm15 */
+    BOXASM_REGISTER_YMM         /* ymm0..ymm15: the xmm register's 256 bits */
 } BoxAsmRegisterClass;
 
 typedef struct {
     uint8_t Class;
     uint8_t Number;     /* 0..15 */
-    uint8_t Size;       /* bytes: 1, 2, 4, 8, 16 */
+    uint8_t Size;       /* bytes: 1, 2, 4, 8, 16, 32 */
     uint8_t NeedsRex;   /* spl bpl sil dil */
 } BoxAsmRegister;
 
@@ -125,7 +126,7 @@ typedef struct {
     uint8_t                          Long;          /* a branch grown to rel32; never shrinks */
     uint8_t                          Width;         /* DATA, RESERVE: item size */
     const struct BoxAsmInstruction  *Instruction;
-    BoxAsmOperand                    Operands[3];
+    BoxAsmOperand                    Operands[4];
     uint32_t                         FirstItem;     /* DATA */
     uint32_t                         ItemCount;
     uint32_t                         Count;         /* RESERVE count, ALIGN boundary */
