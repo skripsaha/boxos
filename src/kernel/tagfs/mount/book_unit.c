@@ -1,4 +1,5 @@
 #include "book_unit.h"
+#include "away.h"
 #include "crypto.h"
 #include "cpuid.h"
 
@@ -208,6 +209,9 @@ error_t BookUnitRead(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq,
         return OK;
     }
     BookSumsJudged();
+#ifdef CONFIG_VOLUME_TESTS
+    TagFSStandMountReadComes();
+#endif
     out->sectors = kmalloc((uint64_t)count * BOOK_SECTOR_BYTES);
     out->state   = kmalloc(count);
     if (!out->sectors || !out->state)
@@ -238,6 +242,9 @@ error_t BookUnitOf(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, c
     out->vlba  = vlba;
     out->count = count;
     BookSumsJudged();
+#ifdef CONFIG_VOLUME_TESTS
+    TagFSStandMountReadComes();
+#endif
     out->sectors = kmalloc((uint64_t)count * BOOK_SECTOR_BYTES);
     out->state   = kmalloc(count ? count : 1u);
     if (!out->sectors || !out->state)

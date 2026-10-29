@@ -1,6 +1,7 @@
 #include "book_mount.h"
 #include "../settle/binder.h"
 #include "../settle/foliation.h"
+#include "../settle/dog_ear.h"
 #include "under_glass.h"
 #include "ground_census.h"
 #include "../file_map/file_map.h"
@@ -56,12 +57,12 @@ static void BookParcelsForget(BookFile* f)
     f->nparcels = f->capparcels = 0;
 }
 
-/* The gathering's memory let go, and the gathering emptied. */
-static void BookFileForget(BookFile* f)
+void BookFileForget(BookFile* f)
 {
     kfree(f->meta.filename);
     kfree(f->meta.tag_ids);
     kfree(f->strips);
+    kfree(f->cut);
     BookParcelsForget(f);
     memset(f, 0, sizeof(*f));
 }
@@ -145,6 +146,25 @@ static bool BookFileStrip(BookFile* f, const Strip* s)
         f->cap    = cap;
     }
     f->strips[f->nstrips++] = *s;
+    return true;
+}
+
+/* The Strips a Parcel laid, `n` of them, as one Parcel of memory: false with
+ * no memory. */
+static bool BookFileCut(BookFile* f, uint32_t n)
+{
+    if (f->ncut == f->capcut) {
+        uint32_t  cap  = f->capcut ? f->capcut * 2u : 8u;
+        uint32_t* more = kmalloc(sizeof(uint32_t) * cap);
+        if (!more)
+            return false;
+        if (f->ncut)
+            memcpy(more, f->cut, sizeof(uint32_t) * f->ncut);
+        kfree(f->cut);
+        f->cut    = more;
+        f->capcut = cap;
+    }
+    f->cut[f->ncut++] = n;
     return true;
 }
 
@@ -301,6 +321,7 @@ static error_t BookFileParcel(BookFile* f, uint64_t first, const uint8_t* body, 
     TallyTake(body, len, &at, &n);
     g_book.laid.runs += n;
     FoliationLeafHolds(TALLY_FILES, n, 0);
+    uint32_t from = f->nstrips;
     for (uint64_t i = 0; i < n; i++) {
         TallyRun r;
         TallyRunGet(body, len, &at, &cursor, seq, &r);
@@ -308,6 +329,8 @@ static error_t BookFileParcel(BookFile* f, uint64_t first, const uint8_t* body, 
         if (!BookFileRun(f, &r))
             return ERR_NO_MEMORY;
     }
+    if (f->nstrips > from && !BookFileCut(f, f->nstrips - from))
+        return ERR_NO_MEMORY;
     if (!f->parcels_lost && !BookParcelMarked(f, first, body, len, seq)) {
         BookParcelsForget(f);
         f->parcels_lost = true;     /* a matter only for a file the mount locks (BookFileKept) */
@@ -458,11 +481,14 @@ error_t BookFileLockLive(uint64_t fid, const char* why)
 static error_t BookFileLive(BookFile* f)
 {
     TagFSState* fs = tagfs_get_state();
+    bool recut = false;
     f->meta.extents      = f->strips;
     f->meta.extent_count = f->nstrips;
-    FileRecord* rec = FileRecordBuild(&f->meta);
+    FileRecord* rec = FileRecordBuildCut(&f->meta, f->cut, f->ncut, &recut);
     if (!rec)
         return ERR_NO_MEMORY;
+    if (recut)   /* memory holds it otherwise than the Tally: the next Tally lays its Parcels anew */
+        DogEarPut(TALLY_FILES, (TallyKey){ f->fid, 1 }, (TallyKey){ f->fid + 1u, 0 });
     rec->gen = f->gen;
     RecordWhere  where, was;
     FileMapStake stake = { .count = 0 };

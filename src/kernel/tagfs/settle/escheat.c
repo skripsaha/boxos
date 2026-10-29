@@ -48,6 +48,7 @@
 static volatile uint64_t s_asked;     /* asks made this mount: published */
 static volatile uint64_t s_answered;  /* of them, those a Tally answered */
 static volatile uint64_t s_walked;    /* of them, those a walk of the files cut the tails for */
+static volatile uint64_t s_reach;     /* the newest Ink an ask saw: no record made after it is the act's */
 static uint64_t          s_cover;     /* the asks the Tally under way answers */
 static volatile uint64_t s_tails;     /* tails the Helm's service let go under the act */
 static bool              s_taken;     /* the Tally under way took it: the Settle's holder's */
@@ -240,6 +241,16 @@ static void NothingSaid(uint32_t boot)
                 "changed by no call, warrant or none, and the Tally waits for it still\n");
 }
 
+/* The act's reach grown to `gen`, never back: of two asks made at once, the
+ * newer's stands. */
+static void EscheatReachTo(uint64_t gen)
+{
+    uint64_t was = __atomic_load_n(&s_reach, __ATOMIC_ACQUIRE);
+    while (gen > was && !__atomic_compare_exchange_n(&s_reach, &was, gen, false, __ATOMIC_ACQ_REL,
+                                                     __ATOMIC_ACQUIRE))
+        ;
+}
+
 error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out)
 {
     memset(out, 0, sizeof(*out));
@@ -270,6 +281,7 @@ error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out)
         out->ranges        = ranges ? s_ranges : 0;
         out->files         = ranges ? s_files : 0;
         out->blocks        = ranges ? s_blocks : 0;
+        EscheatReachTo(InkedGen());     /* before the ask is counted: a walk that sees the ask sees its reach */
         __atomic_add_fetch(&s_asked, 1u, __ATOMIC_ACQ_REL);
         BinderDemanded();
         EngrossAsked();
@@ -294,6 +306,11 @@ uint64_t EscheatTailsActing(void)
 {
     uint64_t asks = __atomic_load_n(&s_asked, __ATOMIC_ACQUIRE);
     return asks > __atomic_load_n(&s_walked, __ATOMIC_ACQUIRE) ? asks : 0;
+}
+
+uint64_t EscheatTailsReach(void)
+{
+    return __atomic_load_n(&s_reach, __ATOMIC_ACQUIRE);
 }
 
 void EscheatTailsWalked(uint64_t asks)
@@ -653,5 +670,6 @@ void EscheatLetGo(void)
     __atomic_store_n(&s_asked, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&s_answered, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&s_walked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_reach, 0u, __ATOMIC_RELEASE);
     s_cover = 0;
 }

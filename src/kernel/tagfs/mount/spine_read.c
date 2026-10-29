@@ -178,6 +178,8 @@ static error_t SpineSlotFrom(SpineSlot* s, BookUnit* u, error_t rc)
         } else if (!u->whole) {
             s->state = SPINE_SLOT_TORN;
             memcpy(s->why, u->why, sizeof(u->why));
+            for (uint32_t k = 0; u->state && k < u->count && !s->unread; k++)
+                s->unread = u->state[k] == BOOK_SECTOR_UNREAD;
         } else {
             s->seq = u->head.seq;
             rc     = SpineParse(s, u);
@@ -257,9 +259,10 @@ static bool SpineKeep(SpineSlot** valid, uint32_t* n, const SpineSlot* s)
 
 error_t SpineRead(const VolumeFrame* frame, SpineSlot** out, uint32_t* count, char* what, size_t room)
 {
-    SpineSlot* slot = kmalloc(sizeof(SpineSlot));
-    size_t     said = 0;
-    error_t    rc   = slot ? OK : ERR_NO_MEMORY;
+    SpineSlot* slot   = kmalloc(sizeof(SpineSlot));
+    size_t     said   = 0;
+    bool       unread = false;
+    error_t    rc     = slot ? OK : ERR_NO_MEMORY;
 
     *out   = NULL;
     *count = 0;
@@ -273,6 +276,7 @@ error_t SpineRead(const VolumeFrame* frame, SpineSlot** out, uint32_t* count, ch
         if (slot->state == SPINE_SLOT_TORN)
             kprintf("[TagFS] Spine slot %u at block %llu does not hold: %s — the book is read off "
                     "another\n", i, (unsigned long long)slot->block, slot->why);
+        unread |= slot->state == SPINE_SLOT_TORN && slot->unread;
         if (said + 1u < room)
             said += ksnprintf(what + said, room - said, "%sslot %u %s", i ? "; " : "", i,
                               slot->state == SPINE_SLOT_BLANK ? "blank" :
@@ -281,6 +285,10 @@ error_t SpineRead(const VolumeFrame* frame, SpineSlot** out, uint32_t* count, ch
             SpineSlotLetGo(slot);
         else if (!SpineKeep(out, count, slot))
             rc = ERR_NO_MEMORY;
+    }
+    if (rc == OK && *count == 0 && unread) {
+        TagFSNoteReadRefused();
+        rc = ERR_READ_FAILED;
     }
     if (rc != OK) {
         if (slot)

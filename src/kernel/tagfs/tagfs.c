@@ -1141,7 +1141,7 @@ bool TagFSStandMountTurnFired(void)
  * the volume's seat emptied under it, the way a hand pulling the medium out in
  * the middle of the reads leaves it. The chair alone: what the room then says
  * about it is the room's, on another core, and no part of this read. */
-static void StandMountReadComes(void)
+void TagFSStandMountReadComes(void)
 {
     if (g_state.initialized ||
         __atomic_load_n(&g_stand_turn, __ATOMIC_ACQUIRE) != STAND_MOUNT_SEAT_EMPTIES ||
@@ -1815,7 +1815,7 @@ error_t TagFSMetaBlockRead(uint64_t block, void *buffer)
     if (!buffer)
         return ERR_NULL_POINTER;
 #ifdef CONFIG_VOLUME_TESTS
-    StandMountReadComes();
+    TagFSStandMountReadComes();
 #endif
     if (volume_not_here()) {
         TagFSNoteReadRefused();

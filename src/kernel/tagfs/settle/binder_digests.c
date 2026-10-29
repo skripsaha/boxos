@@ -217,17 +217,19 @@ static error_t BornIn(const BinderGround* rg, uint64_t nr, BinderGround** out, u
 }
 
 /* The ranges the ground the files took is looked for in: the ones laid and
- * offered, and every rotten range the Tally names as it lies — a block of it
- * a file took is left out of DIGESTS, said, as a whole Tally leaves it
- * (binder_done.c, GlossCaptured). In order, joined. */
-static error_t BornRanges(const BinderRun* r, const BinderGround* laid, uint64_t nl, BinderGround** out, uint64_t* n)
+ * offered, and — `rotten` — every rotten range the Tally names as it lies: a
+ * block of it a file took is left out of DIGESTS, said, as a whole Tally
+ * leaves it, its digest the Gloss's to keep (binder_done.c, GlossCaptured).
+ * In order, joined. */
+static error_t BornRanges(const BinderRun* r, const BinderGround* laid, uint64_t nl, bool rotten, BinderGround** out,
+                          uint64_t* n)
 {
     uint64_t cap = 0;
     *n = 0;
     for (uint64_t i = 0; i < nl; i++)
         if (RunPut(out, n, &cap, laid[i].start, RunEnd(&laid[i])) != OK)
             return ERR_NO_MEMORY;
-    for (uint32_t i = 0; i < r->nkept; i++) {
+    for (uint32_t i = 0; rotten && i < r->nkept; i++) {
         const BinderKept* k = &r->kept[i];
         if (k->tree == TALLY_DIGESTS && k->rotten && !k->taken &&
             RunPut(out, n, &cap, k->at.has_lo ? k->at.lo.k1 : 0, k->at.has_hi ? k->at.hi.k1 : UINT64_MAX) != OK)
@@ -245,8 +247,16 @@ static error_t GroundLaidIn(BinderRun* r)
     BinderGround *laid = NULL, *born = NULL, *g = NULL;
     uint64_t      nl = 0, nb = 0, n = 0, cap = 0;
     error_t       rc = RangesLaid(r, &laid, &nl);
+    /* ‼ HELD TO THE WALK, THE GROUND LAID IN IS THE LAID RANGES' ALONE. The
+     * walk's ground leaves out every element a rotten range the Tally names as
+     * it lies covers (binder_items.c, `dropped`), a block a file took there
+     * since among them; the self-check holds this ground to that walk's in the
+     * ranges laid and offered (BinderDigestsHeld), and a born block of a
+     * rotten range left in it is met by no element of the walk — a DEFECT of
+     * the check, not of the Tally. The release kernel's ground keeps those
+     * blocks: they are the Gloss's to keep (GlossCaptured). */
     if (rc == OK)
-        rc = BornRanges(r, laid, nl, &born, &nb);
+        rc = BornRanges(r, laid, nl, !BINDER_CHECKS, &born, &nb);
     if (rc == OK)
         rc = OldKept(r, &g, &n, &cap);
     if (rc == OK)
