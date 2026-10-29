@@ -1,5 +1,6 @@
 #include "box/print.h"
 #include "box/form.h"
+#include "box/error.h"
 #include "box/file.h"
 #include "box/memory.h"
 #include "box/string.h"
@@ -27,23 +28,34 @@ static int erase_one(file_id_t file, const char *name)
     return 0;
 }
 
+/* Emptying the trash is not asking for any one file: a file the system keeps
+ * (one wearing system or boot, refused to every program that does not) stays
+ * in the trash and is said so, and the trash was still emptied of the rest —
+ * only a file that could not be erased for any other reason is a failure. */
 static int erase_all_trashed(const file_id_t *trashed, int total)
 {
     int deleted = 0;
+    int kept = 0;
     int failed = 0;
     for (int i = 0; i < total; i++) {
         FileMetadata metadata;
         bool named = read_name(trashed[i], &metadata);
-        if (delete(trashed[i]) == 0) {
+        const char *name = named ? metadata.Filename : "a file in the trash";
+        int rc = delete(trashed[i]);
+        if (rc == 0) {
             deleted++;
+        } else if (box_errno_of(rc) == ERR_PERMISSION_DENIED) {
+            printf("%s is kept by the system; it stays in the trash\n", name);
+            kept++;
         } else {
-            printf("Could not erase %s\n", named ? metadata.Filename : "a file in the trash");
+            printf("Could not erase %s\n", name);
             failed++;
         }
         if (named) FileMetadataRelease(&metadata);
     }
-    if (deleted == 0 && failed == 0) println("The trash is empty");
-    else printf("Erased %d file%s from the trash\n", deleted, deleted == 1 ? "" : "s");
+    if (deleted == 0 && kept == 0 && failed == 0) println("The trash is empty");
+    else if (deleted > 0 || failed > 0)
+        printf("Erased %d file%s from the trash\n", deleted, deleted == 1 ? "" : "s");
     return failed > 0;
 }
 

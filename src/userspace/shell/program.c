@@ -76,12 +76,23 @@ char *ProgramRunnableName(file_id_t id)
     return name;
 }
 
-/* Of the files in `ids`, those that are programs, kept in place. */
-static size_t KeepPrograms(file_id_t *ids, size_t count)
+/* Of the files in `ids`, those that are programs, kept in place; *unread the
+ * first refusal met reading one, 0 when each was read. A name whose files the
+ * volume will not show — its medium gone — is there and would not start, not
+ * a name nobody has. */
+static size_t KeepPrograms(file_id_t *ids, size_t count, int *unread)
 {
     size_t kept = 0;
+    *unread = 0;
     for (size_t i = 0; i < count; i++) {
-        if (ProgramIsRunnable(ids[i])) ids[kept++] = ids[i];
+        FileMetadata metadata;
+        int rc = FileMetadataRead(ids[i], &metadata);
+        if (rc != 0) {
+            if (*unread == 0) *unread = rc;
+            continue;
+        }
+        if (IsProgram(&metadata)) ids[kept++] = ids[i];
+        FileMetadataRelease(&metadata);
     }
     return kept;
 }
@@ -105,8 +116,10 @@ int ProgramPick(const char *name, file_id_t *program)
     int        total = query_all_everywhere(name, &found);
     if (total < 0) return total;
 
-    size_t count = KeepPrograms(found, (size_t)total);
-    int    rc = count == 0 ? -ERR_FILE_NOT_FOUND : ChooseOne(name, found, count, program);
+    int    unread;
+    size_t count = KeepPrograms(found, (size_t)total, &unread);
+    int    rc = count != 0 ? ChooseOne(name, found, count, program)
+                           : unread != 0 ? unread : -ERR_FILE_NOT_FOUND;
     free(found);
     return rc;
 }
