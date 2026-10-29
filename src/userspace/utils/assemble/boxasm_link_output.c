@@ -63,7 +63,7 @@ static int BoxAsmWriteReadOnly(BoxAsmLinkImage *Image, BoxAsmBuffer *File,
 {
     size_t Slot;
 
-    for (Slot = BOXASM_SLOT_TEXT; Slot <= BOXASM_SLOT_NAMEPLATE; Slot++) {
+    for (Slot = BOXASM_SLOT_TEXT; Slot <= BOXASM_SLOT_FORM; Slot++) {
         BoxAsmOutputSection *Section = &Image->Sections[Slot];
         int Rc;
 

@@ -236,6 +236,14 @@ typedef struct {
     BoxAsmLocation InstanceWhere;
 } BoxAsmStruc;
 
+/* takes and gives: the text of the program's Form so far, from `form 1`. */
+typedef struct {
+    BoxAsmBuffer Text;
+    uint8_t      Takes;
+    uint8_t      Into;
+    uint8_t      Gives;
+} BoxAsmProgramForm;
+
 /* ---- The assembler ------------------------------------------------------ */
 
 typedef struct {
@@ -272,6 +280,7 @@ typedef struct {
     uint32_t            FailFile;        /* while it works: the file of its line */
     uint32_t            FailFrame;       /* while it works: the macro call of its line */
     BoxAsmStruc         Struc;
+    BoxAsmProgramForm   Form;
     uintptr_t           StackBase;       /* the stack where the work began */
 } BoxAsmAssembler;
 
@@ -333,6 +342,10 @@ int BoxAsmAddBytes(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, const uint
 /* boxasm_box.c */
 int BoxAsmParseBox(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
                    const BoxAsmToken *Word);
+
+/* boxasm_form.c */
+int BoxAsmParseForm(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                    const BoxAsmToken *Word);
 
 /* boxasm_struc.c */
 int BoxAsmStrucOpen(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,

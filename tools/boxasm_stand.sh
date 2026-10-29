@@ -219,6 +219,70 @@ boxasm_long_probe2: ret'
 link_refuses long_member_name "$WORK/long.o" "$WORK/libbox_long.a" \
     "'boxasm_long_probe' is defined twice: in long.o and in libbox_long.a(a_member_name_longer_than_sixteen.o)"
 
+# ---- the Form: takes and gives ------------------------------------------------
+
+FORM_TEXT=$'form 1\ntakes optional things "the files"\ntakes words "the tags they get"\ntakes into "where it goes"\ngives text\n'
+cat > "$WORK/form.asm" <<'EOF'
+section .text
+global main
+extern exit
+takes OPTIONAL things "the files"
+takes words "the tags they get"
+takes into 'where it goes'
+gives text
+main:
+    endbr64
+    xor edi, edi
+    call exit
+EOF
+if "$STAND" assemble "$WORK/form.asm" "$WORK/form.o" 2> "$WORK/asm.err" &&
+   x86_64-elf-objcopy -O binary --only-section=.boxos.form "$WORK/form.o" "$WORK/form.got" 2>/dev/null &&
+   printf '%s' "$FORM_TEXT" > "$WORK/form.want" && cmp -s "$WORK/form.got" "$WORK/form.want" &&
+   x86_64-elf-readelf -SW "$WORK/form.o" | awk '/ \.boxos\.form / { print $(NF-3), $(NF-2), $NF }' |
+       grep -qx 'A 0 1'; then
+    ok form_section
+else
+    fail form_section "$(cat "$WORK/asm.err" 2>/dev/null; cmp "$WORK/form.got" "$WORK/form.want" 2>&1)"
+fi
+
+# The two symbols bound the Form in the image whose bytes they name, and
+# collapse to one address when the program has none.
+for form in with without; do
+    { echo 'section .text'; echo 'global main'; echo 'extern exit'
+      echo 'extern __boxos_form_start'; echo 'extern __boxos_form_end'
+      [ $form = with ] && printf 'takes things "the files"\ngives things\n'
+      printf 'main:\n    endbr64\n    xor edi, edi\n    call exit\nsection .rodata\nalign 8\nglobal bounds\nbounds: dq __boxos_form_start, __boxos_form_end\n'
+    } > "$WORK/bounds_$form.asm"
+    "$STAND" assemble "$WORK/bounds_$form.asm" "$WORK/bounds_$form.o" 2> "$WORK/asm.err" &&
+        "$STAND" link "$ENTRY" "$WORK/bounds_$form.o" "$ARCHIVE" "$WORK/bounds_$form.elf" symbols \
+            2>> "$WORK/asm.err" || { fail "form_symbols_$form" "$(cat "$WORK/asm.err")"; continue; }
+    got=$(python3 - "$WORK/bounds_$form.elf" <<'EOF'
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+shoff, = struct.unpack_from('<Q', d, 0x28)
+count, names = struct.unpack_from('<HH', d, 0x3c)
+sec = [struct.unpack_from('<IIQQQQIIQQ', d, shoff + 64 * i) for i in range(count)]
+def name(s):
+    at = sec[names][4] + s[0]
+    return d[at:d.index(b'\0', at)].decode()
+by = {name(s): s for s in sec}
+symtab, strtab = by['.symtab'], by['.strtab']
+for i in range(symtab[5] // 24):
+    n, info, other, shndx, value, size = struct.unpack_from('<IBBHQQ', d, symtab[4] + 24 * i)
+    at = strtab[4] + n
+    if d[at:d.index(b'\0', at)] == b'bounds':
+        sh = sec[shndx]
+        start, end = struct.unpack_from('<QQ', d, sh[4] + value - sh[3])
+        form = by['.boxos.form']
+        text = d[form[4]:form[4] + form[5]].decode()
+        print(start == form[3], end == form[3] + form[5], end - start, repr(text))
+EOF
+)
+    if [ $form = with ] && [ "$got" = "True True 45 'form 1\ntakes things \"the files\"\ngives things\n'" ]; then ok form_symbols_with
+    elif [ $form = without ] && [ "$got" = "True True 0 ''" ]; then ok form_symbols_without
+    else fail "form_symbols_$form" "$got"; fi
+done
+
 # ---- what the assembler says about a wrong program ---------------------------
 
 # The first line of the refusal — file, line, column and why — word for word.
@@ -332,6 +396,24 @@ assembly_refuses istruc_unknown $'section .data\nx: istruc nothing\niend\n'"$HEA
     "istruc_unknown.asm:2:11: names no struc written before it"
 assembly_refuses at_out_of_order $'struc s\n.a: resd 1\n.b: resd 1\nendstruc\nsection .data\nistruc s\n at s.b, dd 2\n at s.a, dd 1\niend\n'"$HEAD" \
     "at_out_of_order.asm:8:2: the field begins before what the istruc already holds: write the fields in their order, each no larger than its room"
+assembly_refuses form_unknown_kind "${HEAD}takes stuff \"the files\""$'\n' \
+    "form_unknown_kind.asm:4:7: 'stuff' is no kind a Form takes: thing, things, name, words, text or into"
+assembly_refuses form_missing_kind "${HEAD}takes optional"$'\n' \
+    "form_missing_kind.asm:4:15: takes says what it takes: thing, things, name, words, text or into"
+assembly_refuses form_missing_words "${HEAD}takes things"$'\n' \
+    "form_missing_words.asm:4:13: takes says what the field is in quotes: takes things \"the files to tag\""
+assembly_refuses form_words_quote "${HEAD}takes things 'the \"files\"'"$'\n' \
+    "form_words_quote.asm:4:14: what a field is holds no newline, NUL or double quote"
+assembly_refuses form_17_takes "$HEAD$(for _ in $(seq 17); do printf 'takes words "w"\n'; done)" \
+    "form_17_takes.asm:20:1: a Form takes at most 16 fields"
+assembly_refuses form_two_gives "${HEAD}gives things"$'\ngives text\n' \
+    "form_two_gives.asm:5:1: a Form gives once: things or text"
+assembly_refuses form_gives_unknown "${HEAD}gives words"$'\n' \
+    "form_gives_unknown.asm:4:7: 'words' is not what a Form gives: things or text"
+assembly_refuses form_two_into "${HEAD}takes into \"a\""$'\ntakes into "b"\n' \
+    "form_two_into.asm:5:7: a Form takes into once: the name the arrow points at is one"
+assembly_refuses form_in_struc $'struc s\ntakes things "x"\nendstruc\n'"$HEAD" \
+    "form_in_struc.asm:2:1: takes stands outside struc and istruc: it is the program's, not a layout's"
 
 # An error in a macro's expansion points at the line of the macro and names
 # the calls it came through, the innermost first.

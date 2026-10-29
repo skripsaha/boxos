@@ -11,17 +11,18 @@
 
 static const char *const BoxAsmSlotNames[BOXASM_SLOT_COUNT] = {
     "", ".text", ".rodata", ".eh_frame", ".gcc_except_table", ".nameplate",
-    ".data", ".init_array", ".fini_array", ".tdata", ".tbss", ".bss"
+    ".boxos.form", ".data", ".init_array", ".fini_array", ".tdata", ".tbss", ".bss"
 };
 
 /* The alignment user.ld gives each output section; inputs may raise it. */
 static const uint64_t BoxAsmSlotAlign[BOXASM_SLOT_COUNT] = {
-    1, BOXASM_PAGE, BOXASM_PAGE, 8, 8, 8, BOXASM_PAGE, 8, 8, 64, 1, BOXASM_PAGE
+    1, BOXASM_PAGE, BOXASM_PAGE, 8, 8, 8, 1, BOXASM_PAGE, 8, 8, 64, 1, BOXASM_PAGE
 };
 
 static const uint64_t BoxAsmSlotFlags[BOXASM_SLOT_COUNT] = {
     0,
     BOXASM_SHF_ALLOC | BOXASM_SHF_EXECINSTR,
+    BOXASM_SHF_ALLOC,
     BOXASM_SHF_ALLOC,
     BOXASM_SHF_ALLOC,
     BOXASM_SHF_ALLOC,
@@ -280,6 +281,7 @@ static int BoxAsmSlotOf(const BoxAsmElfObject *Object, uint16_t Index)
     else if (BoxAsmNameIs(Name, ".rodata"))            Slot = BOXASM_SLOT_RODATA;
     else if (BoxAsmNameIs(Name, ".eh_frame"))          Slot = BOXASM_SLOT_EH_FRAME;
     else if (BoxAsmNameIs(Name, ".gcc_except_table"))  Slot = BOXASM_SLOT_EXCEPT_TABLE;
+    else if (strcmp(Name, ".boxos.form") == 0)         Slot = BOXASM_SLOT_FORM;
     else if (BoxAsmNameIs(Name, ".data"))              Slot = BOXASM_SLOT_DATA;
     else if (strcmp(Name, ".init_array") == 0)         Slot = BOXASM_SLOT_INIT_ARRAY;
     else if (strcmp(Name, ".fini_array") == 0)         Slot = BOXASM_SLOT_FINI_ARRAY;
@@ -458,6 +460,8 @@ static int BoxAsmLinkerSymbol(const BoxAsmLinkImage *Image, const char *Name,
         { "__eh_frame_end",     BOXASM_SLOT_EH_FRAME,   1 },
         { "__nameplate_start",  BOXASM_SLOT_NAMEPLATE,  0 },
         { "__nameplate_end",    BOXASM_SLOT_NAMEPLATE,  1 },
+        { "__boxos_form_start", BOXASM_SLOT_FORM,       0 },
+        { "__boxos_form_end",   BOXASM_SLOT_FORM,       1 },
         { "__init_array_start", BOXASM_SLOT_INIT_ARRAY, 0 },
         { "__init_array_end",   BOXASM_SLOT_INIT_ARRAY, 1 },
         { "__fini_array_start", BOXASM_SLOT_FINI_ARRAY, 0 },

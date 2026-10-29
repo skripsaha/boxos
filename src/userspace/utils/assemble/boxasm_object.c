@@ -16,6 +16,7 @@ static const uint64_t BoxAsmSectionFlags[BOXASM_SECTION_COUNT] = {
 /* Which header index each piece of the object takes. */
 typedef struct {
     uint16_t Section[BOXASM_SECTION_COUNT];   /* 0: not in the object */
+    uint16_t Form;                            /* .boxos.form: the program's Form */
     uint16_t Rela[BOXASM_SECTION_COUNT];
     uint16_t Symtab;
     uint16_t Strtab;
@@ -38,6 +39,8 @@ static void BoxAsmPlanHeaders(const BoxAsmAssembler *Asm, BoxAsmPlan *Plan)
     for (Index = 0; Index < BOXASM_SECTION_COUNT; Index++)
         if (Asm->Sections[Index].Used)
             Plan->Section[Index] = Next++;
+    if (Asm->Form.Text.Size != 0)
+        Plan->Form = Next++;
     for (Index = 0; Index < BOXASM_SECTION_COUNT; Index++)
         if (Asm->Sections[Index].RelocationCount != 0)
             Plan->Rela[Index] = Next++;
@@ -135,6 +138,21 @@ static int BoxAsmAppendSectionName(BoxAsmBuffer *Names, const char *Prefix, cons
     return 0;
 }
 
+static int BoxAsmLayForm(const BoxAsmAssembler *Asm, const BoxAsmPlan *Plan,
+                         BoxAsmBuffer *Names, BoxAsmBuffer *File, BoxAsmElfSectionHeader *Header)
+{
+    int Rc;
+
+    if (Plan->Form == 0)
+        return 0;
+    Rc = BoxAsmAppendSectionName(Names, "", ".boxos.form", Header);
+    *Header = (BoxAsmElfSectionHeader){ Header->Name, BOXASM_SHT_PROGBITS, BOXASM_SHF_ALLOC, 0,
+                                        File->Size, Asm->Form.Text.Size, 0, 0, 1, 0 };
+    if (Rc == 0)
+        Rc = BoxAsmBufferAppend(File, Asm->Form.Text.Data, Asm->Form.Text.Size);
+    return Rc;
+}
+
 /* Contents and headers of every section, laid into File in plan order. */
 static int BoxAsmLayContents(BoxAsmAssembler *Asm, const BoxAsmPlan *Plan,
                              const BoxAsmSymbolTable *Table, BoxAsmBuffer *File,
@@ -161,6 +179,8 @@ static int BoxAsmLayContents(BoxAsmAssembler *Asm, const BoxAsmPlan *Plan,
         if (Rc == 0 && Index != BOXASM_SECTION_BSS)
             Rc = BoxAsmBufferAppend(File, Image->Bytes.Data, Image->Bytes.Size);
     }
+    if (Rc == 0)
+        Rc = BoxAsmLayForm(Asm, Plan, &Names, File, &Headers[Plan->Form]);
     for (Index = 0; Rc == 0 && Index < BOXASM_SECTION_COUNT; Index++) {
         BoxAsmElfSectionHeader *Header = &Headers[Plan->Rela[Index]];
 

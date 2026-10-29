@@ -269,6 +269,45 @@ prog.asm:5:10: there is no lone.asm in demo
   cannot: which files of that name there are, and that `use` narrows or
   changes the context.
 
+### Form: what the program takes and gives
+
+A program tells the shell what it takes, so the shell sorts the words a
+person typed into the program's fields, in their order, and asks only when it
+must (see `box/form.h`):
+
+```text
+takes thing "the file to tag"            one file that is here
+takes optional things "the files"        a list of files, may be none
+takes words "the tags they get"          as many words as are typed
+takes name "the new name"                one word, new or not
+takes text "the note"                    the rest of the line as typed
+takes into "where the result goes"       the name `->` points at
+gives things                             what the program gives back:
+gives text                               files, or text (one of the two)
+```
+
+- `takes` and `gives` stand at the start of a statement, outside `struc` and
+  `istruc`, and in any section; the fields keep the order they are written
+  in, wherever the directives stand relative to code.
+- The kind is one of `thing`, `things`, `name`, `words`, `text`, `into`; the
+  words in quotes (a few words, none empty, with no newline, NUL or double
+  quote) are what the shell says when it asks for the field.
+- A Form holds at most 16 fields, `into` once, `gives` once.
+- The assembler writes the Form as the section `.boxos.form`: the line
+  `form 1`, then one line per directive, as the C macro `BOX_FORM` does. The
+  linker puts it read-only after `.nameplate`, so the shell finds it by name
+  in the file, and defines `__boxos_form_start` and `__boxos_form_end` around
+  it (equal when the program has no Form).
+
+```text
+takes optional things "the files"
+takes words "the tags they get"
+gives text
+```
+
+becomes `form 1\ntakes optional things "the files"\ntakes words "the tags they
+get"\ngives text\n`.
+
 ### box operations
 
 - `box.say "text"` or `box.say label` (NUL-ended) prints through BoxLib's
