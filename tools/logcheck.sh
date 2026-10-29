@@ -7663,7 +7663,7 @@ byname_judge() {
     sed -n '/~ info beta.txt/,/~ info alpha.txt/p' "$L" | grep -q "beta.txt" \
         && ok "$name: found by its new name" \
         || bad "$name: 'info beta.txt' did not find the file"
-    sed -n '/~ info alpha.txt/,/~ trash beta.txt/p' "$L" | grep -q "File not found" \
+    sed -n '/~ info alpha.txt/,/~ trash beta.txt/p' "$L" | grep -q "there is no alpha.txt here" \
         && ok "$name: not found by its old name" \
         || bad "$name: 'info alpha.txt' still finds the renamed file"
     grep -q "Erased 1 file from the trash" "$L" \

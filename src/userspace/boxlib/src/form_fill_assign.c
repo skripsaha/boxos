@@ -384,13 +384,29 @@ static int settle_arrow(BoxFormFiller *filler)
     return 0;
 }
 
+/* Whether a field that takes files was left without one. */
+static bool things_missing(const BoxFormFiller *filler)
+{
+    for (uint32_t field = 0; field < filler->Form->FieldCount; field++) {
+        uint8_t kind = filler->Form->Fields[field].Kind;
+        if ((kind == BOX_FORM_THING || kind == BOX_FORM_THINGS) &&
+            filler->Values.Fields[field].IdCount == 0)
+            return true;
+    }
+    return false;
+}
+
 static int check_leftovers(BoxFormFiller *filler)
 {
     if (!filler->Form->Declared) return 0;
     for (size_t i = 0; i < filler->ItemCount; i++) {
         const FormItem *item = &filler->Items[i];
-        if (item->Bound == 0 && !item->Taken && !item->Dropped)
-            return form_fill_refuse(filler, item->Token.Text, " has no place in this command", NULL);
+        if (item->Bound != 0 || item->Taken || item->Dropped) continue;
+        /* A word spelled like a file's name, where the command's file was left
+         * out, is that file not being here — not a word out of place. */
+        if (item->Role == FORM_ROLE_WORD && strchr(item->Token.Text, '.') && things_missing(filler))
+            return form_fill_refuse(filler, "there is no ", item->Token.Text, " here");
+        return form_fill_refuse(filler, item->Token.Text, " has no place in this command", NULL);
     }
     return 0;
 }

@@ -469,6 +469,14 @@ static void test_leftovers(void)
     expect("form 1\ntakes optional words \"w\"\n", "", NULL, "=> words()");
     expect(PUT, "x a.txt b.txt", NULL, "=> words(=x) things(#1 #2)");
     expect(COPY, "a.txt b.txt", NULL, "REFUSED: b.txt has no place in this command");
+    /* A file-like word where the command's file was left out is that file not
+     * being here; with the file given, it is a word out of place. */
+    expect("form 1\ntakes optional thing \"the file\"\n", "alpha.txt", NULL,
+           "REFUSED: there is no alpha.txt here");
+    expect("form 1\ntakes optional thing \"the file\"\n", "zzz", NULL,
+           "REFUSED: zzz has no place in this command");
+    expect("form 1\ntakes optional thing \"the file\"\n", "a.txt alpha.txt", NULL,
+           "REFUSED: alpha.txt has no place in this command");
 }
 
 static void test_text(void)
