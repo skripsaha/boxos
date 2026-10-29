@@ -245,22 +245,32 @@ static uint64_t PlotContinues(const Plot *p, uint64_t k)
     return spot.block + 1u;
 }
 
+/* Whether the file's blocks [k, k + n) take in the block its Slips lie over:
+ * the one promised to it (allotment.c), theirs to have. */
+static bool PlotLaysPromised(const Plot *p, uint64_t k, uint64_t n)
+{
+    uint64_t last = p->rec && p->rec->size ? (p->rec->size - 1u) / PLOT_BLOCK : 0;
+    return TailSlipOn(p->rec, last) && k <= last && last - k < n;
+}
+
 /*
  * `n` blocks of fresh ground for the file's blocks from k on, near where its
  * run goes on — each run taken a Stake, and handed to `put` with its first
  * file block. A take short of room is asked again of a fresh measure of the
- * book's reserve before it is refused (endpaper.c).
+ * book's reserve before it is refused (endpaper.c). The block promised to the
+ * file's Slips is the first run's to have, once.
  */
 static error_t PlotFreshTake(Plot *p, uint64_t k, uint64_t n, bool aside,
                              error_t (*put)(Plot *, uint64_t, uint64_t, uint32_t))
 {
-    bool     afresh = false;
+    bool     afresh = false, own = PlotLaysPromised(p, k, n);
     uint64_t keep   = EndpaperDataKeeps(false);
     while (n > 0) {
         uint64_t start = 0;
         uint32_t got   = 0;
         uint32_t want  = n > UINT32_MAX ? UINT32_MAX : (uint32_t)n;
-        error_t  rc    = AllotmentTakeBook(p->fid, want, p->blocks, PlotContinues(p, k), aside, keep, &start, &got);
+        error_t  rc    = AllotmentTakeBook(p->fid, want, p->blocks, PlotContinues(p, k), aside, keep, own, &start,
+                                           &got);
         if (rc == ERR_TAGFS_NO_SPACE && !afresh) {
             afresh = true;
             keep   = EndpaperDataKeeps(true);
@@ -268,6 +278,7 @@ static error_t PlotFreshTake(Plot *p, uint64_t k, uint64_t n, bool aside,
         }
         if (rc != OK)
             return rc;
+        own = false;
         if ((rc = PlotStake(p, start, got)) != OK) {
             (void)PlotGiveBack(p, start, got);
             return rc;
@@ -675,13 +686,15 @@ error_t PlotWindowRoomFor(const Plot *p, uint64_t end)
         return OK;
     TagFSState *fs   = tagfs_get_state();
     uint64_t    keep = EndpaperDataKeeps(false);
+    bool        own  = PlotLaysPromised(p, PlotWindowBlocksFor(p->size) - 1u, 1);
     TagFSLockTake(&fs->lock);
-    uint64_t have = fs->ledger.free_blocks + FallowBlocks();
+    uint64_t may = AllotmentBookMay(fs->ledger.free_blocks + FallowBlocks(), keep, own);
     TagFSLockDrop(&fs->lock);
-    if (have >= keep + need)
+    if (may >= need)
         return OK;
     kprintf("[TagFS] file %llu: growing it to %llu bytes lays its last block again on fresh ground, and the volume "
-            "has no block for it past the %llu its book keeps — refused\n", p->fid, (unsigned long long)end,
-            (unsigned long long)keep);
+            "has no block for it past the %llu its book keeps and the %llu promised to the tails Slips lie over — "
+            "refused\n", p->fid, (unsigned long long)end, (unsigned long long)keep,
+            (unsigned long long)AllotmentPromised());
     return ERR_TAGFS_NO_SPACE;
 }

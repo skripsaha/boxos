@@ -35,6 +35,10 @@ struct FileMap {
     uint32_t     files;
     uint32_t     nodes;
     uint64_t     record_bytes;
+    /* The files whose record holds Slips: written under the lock, read with
+     * none (FileMapSlips) — one word, stored whole, the order of its reads
+     * and of the takes beside it kept by the reader (allotment.c). */
+    volatile uint64_t slips;
     bool         said_short;     /* a refusal is said once, until the heap gives again */
 };
 
@@ -392,10 +396,19 @@ static void MapRemove(FileMap* m, uint64_t key, FileMapLeftover* left)
     }
 }
 
+/* The count of files whose record holds Slips, as `was` becomes `now` (NULL for none). */
+static void MapSlipsMet(FileMap* m, const FileRecord* was, const FileRecord* now)
+{
+    bool before = was && was->slip, after = now && now->slip;
+    if (before != after)
+        __atomic_store_n(&m->slips, m->slips + (after ? 1u : 0u) - (before ? 1u : 0u), __ATOMIC_RELEASE);
+}
+
 static void MapLetGoEntry(FileMap* m, uint64_t key, FileMapEntry* e, FileMapLeftover* left)
 {
     if (e->record) {
         m->record_bytes -= e->record->bytes;
+        MapSlipsMet(m, e->record, NULL);
         left->record = e->record;
     }
     MapRemove(m, key, left);
@@ -541,6 +554,7 @@ error_t FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
         map->record_bytes -= e->record->bytes;
         *was = e->where;
     }
+    MapSlipsMet(map, e->record, rec);
     map->record_bytes += rec->bytes;
     e->record = rec;
     e->where  = *where;
@@ -751,6 +765,11 @@ uint32_t FileMapCount(FileMap* map)
     uint32_t files = map->files;
     TagFSLockDrop(&map->lock);
     return files;
+}
+
+uint64_t FileMapSlips(const FileMap* map)
+{
+    return map ? __atomic_load_n(&map->slips, __ATOMIC_ACQUIRE) : 0;
 }
 
 size_t FileMapBytes(FileMap* map)

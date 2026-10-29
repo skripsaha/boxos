@@ -541,8 +541,5 @@ void InkBookPlotNext(Plot* p)
     p->runs_before  = p->rec ? p->rec->strip_count : 0;
     p->digest_count = 0;
     p->ribbon_held  = 0;    /* the Ink took the hold for its claim */
-    TailSlipLetGo(p->slip); /* the record holds the write's Slip now */
-    p->slip     = NULL;
-    p->slip_off = 0;
-    p->slip_len = 0;
+    PlotSlipLetGo(p);       /* the record holds the write's Slip now, and the block promised to it */
 }

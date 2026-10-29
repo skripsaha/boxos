@@ -1795,13 +1795,13 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  * counters are cumulative, monotonic snapshots; userspace derives a
  * utilization percentage from two snapshots.
  *
- * A format-v2 volume keeps no Ledger: its free count is what its block map,
- * derived from the owners' names at the mount, counts (block_map_derived.h),
- * kept where format v1's map keeps its own. "free counted" says the count is
- * there. A book whose Tally names a bookmark has no map — this kernel does not
- * read the ground a bookmark holds (book_ground.c) — and carries 0, and free
- * and used bytes of 0: not a number that would read as a full volume, or as
- * the free count of a volume mounted before it. */
+ * A format-v2 volume keeps no Ledger: its free count is its block map's,
+ * derived from the owners' names at the mount (block_map_derived.h), less what
+ * Slips promise, kept where format v1's map keeps its own. "free counted" says
+ * the count is there. A book whose Tally names a bookmark has no map — this
+ * kernel does not read the ground a bookmark holds (book_ground.c) — and
+ * carries 0, and free and used bytes of 0: not a number that would read as a
+ * full volume, or as the free count of a volume mounted before it. */
 #define SYSRES_BLOB_SIZE 80
 
 static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -1819,7 +1819,7 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (tagfs_enter()) {
         TagFSState *fs = tagfs_get_state();
         bool counted = fs->format != DEED_FORMAT_V2 || BlockMapDerivedUp();
-        uint64_t free_bytes = counted ? fs->ledger.free_blocks * (uint64_t)VOLUME_BLOCK_BYTES : 0;
+        uint64_t free_bytes = counted ? AllotmentFreeUnpromised() * (uint64_t)VOLUME_BLOCK_BYTES : 0;
         uint64_t total_bytes = fs->volume_bytes;
         if (free_bytes > total_bytes) free_bytes = total_bytes;
         uint64_t used_bytes = counted ? total_bytes - free_bytes : 0;

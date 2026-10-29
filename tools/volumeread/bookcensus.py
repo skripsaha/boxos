@@ -113,7 +113,9 @@ def KernelBook(g, m, held, free, fallow):
     in the other's place, how many blocks held, how many shapes said, the
     numbers it gives next, and its data run with the blocks of it its block
     map derives free (block_map_derived.c) — `free`, the census's own, None
-    where neither counts it (BookmarksNamed). It reads no DIGESTS leaf at the
+    where neither counts it (BookmarksNamed) — less a block promised to each
+    live file whose tail a Slip lays (block_map.h, AllotmentFreeUnpromised;
+    §16.6 п.1). It reads no DIGESTS leaf at the
     mount unless a FILES range rots (§16.3 п.12): a DIGESTS range is said
     rotten only then.
 
@@ -152,7 +154,7 @@ def KernelBook(g, m, held, free, fallow):
             "next_fid": m.counts["next_fid"], "next_tag": m.counts["next_tag"],
             "next_bookmark": m.counts["next_bookmark"], "next_seq": m.counts["next_seq"],
             "data_blocks": g.data_end - g.data_block,
-            "free": None if free is None else RunsCount(free),
+            "free": None if free is None else max(0, RunsCount(free) - sum(1 for fs in m.files.values() if fs.slips)),
             "ribbon": ribbon, "sewn": len(r.stitches),
             "last": r.stitches[-1].seq if r.stitches else m.slot.stitch_seq,
             "applied": len(m.applied), "lied": r.lied, "lied_check": m.lied_check, "fallow": RunsCount(fallow),

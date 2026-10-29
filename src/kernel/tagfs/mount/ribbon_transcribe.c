@@ -640,6 +640,24 @@ static bool RibbonCarriedSaid(const RibbonReplay* rp, uint64_t fid)
     return slipped;
 }
 
+/* ‼ THE SLIPS A MOUNT CARRIES ON ARE PROMISED AGAIN BY THE RECORDS THAT HOLD
+ * THEM (file_map.h, FileMapSlips; block_map.h, AllotmentPromised). A Tally
+ * lays no Slip, so every one the mount holds is a file's the replay touched:
+ * the Slips the Tally waits for (LooseLeaves) and the blocks promised are one
+ * number here, and two is a DEFECT, said. */
+static void RibbonPromisesHeld(uint64_t loose)
+{
+    uint64_t slips = FileMapSlips(tagfs_get_state()->files);
+    if (slips == loose)
+        return;
+#if CONFIG_STRICT
+    panic("[TagFS] DEFECT: the mount carries %llu Slip(s) on and its records hold %llu", (unsigned long long)loose,
+          (unsigned long long)slips);
+#endif
+    kprintf("[TagFS] DEFECT: the mount carries %llu Slip(s) on and its records hold %llu — the blocks promised to "
+            "their tails are the records'\n", (unsigned long long)loose, (unsigned long long)slips);
+}
+
 /* The replay's last word on the files it changed: those outside the data run
  * locked; those rolled back by the rule of rot onto blocks another file now
  * holds locked (§3.9 — the rule rolls back only onto ground no one else
@@ -667,6 +685,8 @@ static error_t RibbonSettled(RibbonReplay* rp)
     for (uint32_t i = 0; rc == OK && i < rp->ntouched; i++)
         loose += RibbonCarriedSaid(rp, rp->touched[i]);
     LooseLeavesMounted(loose);
+    if (rc == OK)
+        RibbonPromisesHeld(loose);
     return rc;
 }
 

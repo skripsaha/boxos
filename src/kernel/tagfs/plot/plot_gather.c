@@ -143,7 +143,7 @@ static error_t PlotGatherTake(Plot *p, uint64_t blocks, uint64_t hint, uint64_t 
         return BlockMapTakeFor(p->fid, (uint32_t)blocks, hint, start, __func__);
     uint32_t got = 0;
     error_t  rc  = AllotmentTakeBook(p->fid, (uint32_t)blocks, p->blocks, hint, false, EndpaperDataKeeps(true),
-                                     start, &got);
+                                     false, start, &got);
     if (rc == OK && got < blocks) {
         (void)PlotGiveBack(p, *start, got);
         rc = ERR_TAGFS_NO_SPACE;
