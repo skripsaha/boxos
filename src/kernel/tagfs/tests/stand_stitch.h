@@ -26,6 +26,8 @@
  *   StandStitchSayFilling the same, a word whose stitch takes `sectors` sectors
  *   StandStitchLayEmpty a stitch of no records laid by hand at the ribbon's end,
  *                       its `flags`, naming the last: its Clasp (0 refused)
+ *   StandStitchLayAt    the same, `of` sectors long — whole blocks, at most
+ *                       STAND_STITCH_LAID_MOST — naming `next` its next_quire
  *   StandStitchAnswered a waiter of the stand's own answered, as an anchor's is
  *   StandStitchRead     the last stitch this mount sewed, read back whole with
  *                       the mount's own reader (*out the caller's to let go)
@@ -56,6 +58,11 @@ error_t     StandStitchSay(const char* text, size_t bytes, uint64_t k, bool* kep
 error_t     StandStitchSayLong(uint64_t bytes, char letter, uint64_t k, bool* kept);
 error_t     StandStitchSayFilling(uint64_t sectors, char letter, uint64_t k, bool* kept);
 uint32_t    StandStitchLayEmpty(const StandStitch* s, uint64_t flags);
+uint32_t    StandStitchLayAt(const StandStitch* s, uint64_t flags, uint32_t of, const RibbonQuire* next);
+
+/* The longest stitch the stand lays by hand: a flash page of 16 KiB, the
+ * atom of a removable medium's ribbon (§16.6 п.2), in sectors. */
+#define STAND_STITCH_LAID_MOST 32u
 
 /* The bytes a stitch's head, its UseContext's tag and length and its Clasp
  * take, and more. */
