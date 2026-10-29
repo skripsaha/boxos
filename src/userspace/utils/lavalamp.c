@@ -42,12 +42,14 @@
 #include "box/touch.h"
 #include "box/clock.h"
 #include "box/cpu.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/system.h"
 #include "box/memory.h"
 #include "box/string.h"
 #include "box/convert.h"
 #include "box/error.h"
+
+BOX_FORM("");
 
 /* A cell is 8x16 pixels, so a distance measured down the screen counts double
  * against one measured across it. Without this every blob is an egg standing
@@ -785,13 +787,6 @@ static void say_the_tally(uint32_t frames, int code)
 
 int main(void)
 {
-    int argc = (int)luggage_word_count();
-    if (argc > 1) {
-        println("Usage: lavalamp");
-        exit(1);
-        return 1;
-    }
-
     if (lamp_setup() != 0) {
         exit(1);
         return 1;

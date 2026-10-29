@@ -19,20 +19,14 @@
 
 void tagline_from(file_id_t fid)
 {
-    file_info_t info;
     s_tagline[0] = '\0';
 
     if (fid == 0) { say_str(s_tagline, sizeof(s_tagline), "new"); return; }
-    if (file_info(fid, &info) != 0) return;
 
-    for (uint8_t t = 0; t < info.tag_count && t < 5; t++) {
-        if (s_tagline[0]) say_str(s_tagline, sizeof(s_tagline), ",");
-        say_str(s_tagline, sizeof(s_tagline), info.tags[t].key);
-        if (info.tags[t].value[0]) {
-            say_str(s_tagline, sizeof(s_tagline), ":");
-            say_str(s_tagline, sizeof(s_tagline), info.tags[t].value);
-        }
-    }
+    FileMetadata metadata;
+    if (FileMetadataRead(fid, &metadata) != 0) return;
+    if (metadata.Tags) say_str(s_tagline, sizeof(s_tagline), metadata.Tags);
+    FileMetadataRelease(&metadata);
 }
 
 char *join_with_commas(const char *const *words, uint32_t count)
@@ -92,9 +86,11 @@ int matches_by_name(const char *name, const char *tags, file_id_t **out_ids)
 
     int kept = 0;
     for (int i = 0; i < n; i++) {
-        file_info_t info;
-        if (file_info(ids[i], &info) != 0) continue;
-        if (strcmp(info.filename, name) != 0) continue;
+        FileMetadata metadata;
+        if (FileMetadataRead(ids[i], &metadata) != 0) continue;
+        bool same = metadata.Filename && strcmp(metadata.Filename, name) == 0;
+        FileMetadataRelease(&metadata);
+        if (!same) continue;
         ids[kept++] = ids[i];
     }
     if (kept == 0) { free(ids); return 0; }
@@ -106,16 +102,18 @@ int matches_by_name(const char *name, const char *tags, file_id_t **out_ids)
  * in hand, so the loop asks again until the whole size is here. */
 int load_content(void)
 {
-    file_info_t info;
-    if (file_info(g_fid, &info) != 0) return 0;
-    if (info.size == 0) return book_load("", 0);
+    FileMetadata metadata;
+    if (FileMetadataRead(g_fid, &metadata) != 0) return 0;
+    uint64_t size = metadata.Size;
+    FileMetadataRelease(&metadata);
+    if (size == 0) return book_load("", 0);
 
-    char *buf = malloc((size_t)info.size);
+    char *buf = malloc((size_t)size);
     if (!buf) return 0;
 
     uint64_t got = 0;
-    while (got < info.size) {
-        int64_t n = fread(g_fid, got, buf + got, (size_t)(info.size - got));
+    while (got < size) {
+        int64_t n = fread(g_fid, got, buf + got, (size_t)(size - got));
         if (n < 0) { free(buf); return 0; }
         if (n == 0) break;
         got += (uint64_t)n;

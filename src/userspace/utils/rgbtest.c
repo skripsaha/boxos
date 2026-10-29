@@ -31,6 +31,9 @@
 #include "box/system.h"
 #include "box/core/manifest.h"
 #include "box/timeouts.h"
+#include "box/form.h"
+
+BOX_FORM("");
 
 #define HW_VGA_GET_COLOR 0x78
 

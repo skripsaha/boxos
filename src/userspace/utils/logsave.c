@@ -17,11 +17,16 @@
  * name rather than by handing back an empty file.
  */
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/current.h"
 #include "box/error.h"
 #include "box/string.h"
 #include "box/system.h"
+
+#include "filename.h"
+
+BOX_FORM("takes optional name \"the file to write it to; watch.log if you say none\"\n"
+         "gives things\n");
 
 #define LOGSAVE_DEFAULT_NAME  "watch.log"
 
@@ -33,12 +38,14 @@ static char s_target[128];
 
 int main(void)
 {
-    int argc = (int)luggage_word_count();
-
-    const char *name = LOGSAVE_DEFAULT_NAME;
-    if (argc > 1 && luggage_word(1)[0] != '\0') {
-        name = luggage_word(1);
+    const char *const *words;
+    size_t word_count;
+    if (form_words(0, &words, &word_count) != 0) {
+        exit(1);
+        return 1;
     }
+
+    const char *name = word_count > 0 ? words[0] : LOGSAVE_DEFAULT_NAME;
 
     error_t  why = OK;
     Current *log = current_open_ex("log:file", CURRENT_READ, 0, 0, &why);
@@ -69,7 +76,7 @@ int main(void)
     Current *out = current_open_ex(s_target, CURRENT_WRITE, 0,
                                    CURRENT_CREATE | CURRENT_FRESH, &why);
     if (!out) {
-        printf("%s could not be written (error %u)\n", name, (unsigned)why);
+        printf("Could not write %s (error %u)\n", name, (unsigned)why);
         current_release(log);
         exit(1);
         return 1;
@@ -118,6 +125,8 @@ int main(void)
     }
 
     printf("%lu byte(s) written to %s\n", (unsigned long)poured, name);
+    file_id_t written = file_named(name);
+    if (written != 0) souvenir_things(&written, 1);
     if (lost) {
         printf("%lu byte(s) were said before this and the ring no longer had "
                "them — the file starts after that gap\n",

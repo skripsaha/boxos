@@ -9,12 +9,14 @@
  */
 
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/string.h"
 #include "box/memtag.h"
 #include "box/system.h"
 #include "box/pku.h"
 #include "box/convert.h"
+
+BOX_FORM("takes optional words \"what to do: stats, query tag, info region, tags region, guard tag [on|off], grant cabin tag, revoke cabin tag, cabin cabin, check cabin region, pku-region region key, dump-cache address, dump-iommu, dump-mce; nothing shows the short summary\"\n");
 
 static int parse_uint(const char *s, uint32_t *out)
 {
@@ -273,71 +275,73 @@ static void print_check(uint32_t pid, uint32_t rid)
 
 int main(void)
 {
-    int argc = (int)luggage_word_count();
+    const char *const *words;
+    size_t count;
+    if (form_words(0, &words, &count) != 0) { exit(1); return 1; }
 
-    if (argc < 2) { print_stats(); exit(0); return 0; }
+    if (count < 1) { print_stats(); exit(0); return 0; }
 
-    const char *cmd = luggage_word(1);
+    const char *cmd = words[0];
 
     if (strcmp(cmd, "stats") == 0) {
         print_stats();
     } else if (strcmp(cmd, "info") == 0) {
-        if (argc < 3) { println("usage: memtag info <region_id>"); exit(1); return 1; }
+        if (count < 2) { println("usage: memtag info <region_id>"); exit(1); return 1; }
         uint32_t rid;
-        if (parse_uint(luggage_word(2), &rid) != 0) { println("invalid region_id"); exit(1); return 1; }
+        if (parse_uint(words[1], &rid) != 0) { println("invalid region_id"); exit(1); return 1; }
         print_info(rid);
     } else if (strcmp(cmd, "tags") == 0) {
-        if (argc < 3) { println("usage: memtag tags <region_id>"); exit(1); return 1; }
+        if (count < 2) { println("usage: memtag tags <region_id>"); exit(1); return 1; }
         uint32_t rid;
-        if (parse_uint(luggage_word(2), &rid) != 0) { println("invalid region_id"); exit(1); return 1; }
+        if (parse_uint(words[1], &rid) != 0) { println("invalid region_id"); exit(1); return 1; }
         print_tags(rid);
     } else if (strcmp(cmd, "query") == 0) {
-        if (argc < 3) { println("usage: memtag query <tag>"); exit(1); return 1; }
-        print_query(luggage_word(2));
+        if (count < 2) { println("usage: memtag query <tag>"); exit(1); return 1; }
+        print_query(words[1]);
     } else if (strcmp(cmd, "guard") == 0) {
-        if (argc < 3) { println("usage: memtag guard <tag> [on|off]"); exit(1); return 1; }
-        int on = (argc >= 4 && strcmp(luggage_word(3), "off") == 0) ? 0 : 1;
-        int rc = mem_set_guard(luggage_word(2), on);
-        if (rc == 0) printf("guard %s: tag \"%s\"\n", on ? "ON " : "OFF", luggage_word(2));
+        if (count < 2) { println("usage: memtag guard <tag> [on|off]"); exit(1); return 1; }
+        int on = (count >= 3 && strcmp(words[2], "off") == 0) ? 0 : 1;
+        int rc = mem_set_guard(words[1], on);
+        if (rc == 0) printf("guard %s: tag \"%s\"\n", on ? "ON " : "OFF", words[1]);
         else         printf("%colorError: set_guard failed (rc=%d, need system tag)%color\n",
                             COLOR_RED, rc, COLOR_DEFAULT);
     } else if (strcmp(cmd, "grant") == 0) {
-        if (argc < 4) { println("usage: memtag grant <pid> <tag>"); exit(1); return 1; }
+        if (count < 3) { println("usage: memtag grant <pid> <tag>"); exit(1); return 1; }
         uint32_t pid;
-        if (parse_uint(luggage_word(2), &pid) != 0) { println("invalid pid"); exit(1); return 1; }
-        int rc = mem_cabin_grant(pid, luggage_word(3));
-        if (rc == 0) printf("granted \"%s\" to cabin %u\n", luggage_word(3), pid);
+        if (parse_uint(words[1], &pid) != 0) { println("invalid pid"); exit(1); return 1; }
+        int rc = mem_cabin_grant(pid, words[2]);
+        if (rc == 0) printf("granted \"%s\" to cabin %u\n", words[2], pid);
         else         printf("%colorError: grant failed (rc=%d)%color\n",
                             COLOR_RED, rc, COLOR_DEFAULT);
     } else if (strcmp(cmd, "revoke") == 0) {
-        if (argc < 4) { println("usage: memtag revoke <pid> <tag>"); exit(1); return 1; }
+        if (count < 3) { println("usage: memtag revoke <pid> <tag>"); exit(1); return 1; }
         uint32_t pid;
-        if (parse_uint(luggage_word(2), &pid) != 0) { println("invalid pid"); exit(1); return 1; }
-        int rc = mem_cabin_revoke(pid, luggage_word(3));
-        if (rc == 0) printf("revoked \"%s\" from cabin %u\n", luggage_word(3), pid);
+        if (parse_uint(words[1], &pid) != 0) { println("invalid pid"); exit(1); return 1; }
+        int rc = mem_cabin_revoke(pid, words[2]);
+        if (rc == 0) printf("revoked \"%s\" from cabin %u\n", words[2], pid);
         else         printf("%colorError: revoke failed (rc=%d)%color\n",
                             COLOR_RED, rc, COLOR_DEFAULT);
     } else if (strcmp(cmd, "cabin") == 0) {
-        if (argc < 3) { println("usage: memtag cabin <pid>"); exit(1); return 1; }
+        if (count < 2) { println("usage: memtag cabin <pid>"); exit(1); return 1; }
         uint32_t pid;
-        if (parse_uint(luggage_word(2), &pid) != 0) { println("invalid pid"); exit(1); return 1; }
+        if (parse_uint(words[1], &pid) != 0) { println("invalid pid"); exit(1); return 1; }
         print_cabin(pid);
     } else if (strcmp(cmd, "check") == 0) {
-        if (argc < 4) { println("usage: memtag check <pid> <region_id>"); exit(1); return 1; }
+        if (count < 3) { println("usage: memtag check <pid> <region_id>"); exit(1); return 1; }
         uint32_t pid, rid;
-        if (parse_uint(luggage_word(2), &pid) != 0) { println("invalid pid"); exit(1); return 1; }
-        if (parse_uint(luggage_word(3), &rid) != 0) { println("invalid region_id"); exit(1); return 1; }
+        if (parse_uint(words[1], &pid) != 0) { println("invalid pid"); exit(1); return 1; }
+        if (parse_uint(words[2], &rid) != 0) { println("invalid region_id"); exit(1); return 1; }
         print_check(pid, rid);
     } else if (strcmp(cmd, "pku-region") == 0) {
-        if (argc < 4) { println("usage: memtag pku-region <region_id> <pkey>"); exit(1); return 1; }
+        if (count < 3) { println("usage: memtag pku-region <region_id> <pkey>"); exit(1); return 1; }
         uint32_t rid, pkey;
-        if (parse_uint(luggage_word(2), &rid)  != 0) { println("invalid region_id"); exit(1); return 1; }
-        if (parse_uint(luggage_word(3), &pkey) != 0) { println("invalid pkey"); exit(1); return 1; }
+        if (parse_uint(words[1], &rid)  != 0) { println("invalid region_id"); exit(1); return 1; }
+        if (parse_uint(words[2], &pkey) != 0) { println("invalid pkey"); exit(1); return 1; }
         do_pku_region(rid, pkey);
     } else if (strcmp(cmd, "dump-cache") == 0) {
-        if (argc < 3) { println("usage: memtag dump-cache <phys>"); exit(1); return 1; }
+        if (count < 2) { println("usage: memtag dump-cache <phys>"); exit(1); return 1; }
         uint64_t phys;
-        if (parse_u64(luggage_word(2), &phys) != 0) { println("invalid phys (use 0x... or decimal)"); exit(1); return 1; }
+        if (parse_u64(words[1], &phys) != 0) { println("invalid phys (use 0x... or decimal)"); exit(1); return 1; }
         do_dump_cache(phys);
     } else if (strcmp(cmd, "dump-iommu") == 0) {
         do_dump_iommu();

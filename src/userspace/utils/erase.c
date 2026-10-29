@@ -10,13 +10,41 @@
  * delete. The names are looked for in the trash itself, below. */
 BOX_FORM("takes words \"the trashed files to erase, or trashed for all of them\"\n");
 
-static void erase_all_trashed(file_id_t *trashed, int total)
+/* True when the volume still knows the file's name; then the caller releases
+ * the metadata with FileMetadataRelease. */
+static bool read_name(file_id_t file, FileMetadata *metadata)
+{
+    return FileMetadataRead(file, metadata) == 0 && metadata->Filename;
+}
+
+static int erase_one(file_id_t file, const char *name)
+{
+    if (delete(file) != 0) {
+        printf("Could not erase %s\n", name);
+        return 1;
+    }
+    printf("File deleted: %s\n", name);
+    return 0;
+}
+
+static int erase_all_trashed(const file_id_t *trashed, int total)
 {
     int deleted = 0;
+    int failed = 0;
     for (int i = 0; i < total; i++) {
-        if (delete(trashed[i]) == 0) deleted++;
+        FileMetadata metadata;
+        bool named = read_name(trashed[i], &metadata);
+        if (delete(trashed[i]) == 0) {
+            deleted++;
+        } else {
+            printf("Could not erase %s\n", named ? metadata.Filename : "a file in the trash");
+            failed++;
+        }
+        if (named) FileMetadataRelease(&metadata);
     }
-    printf("Deleted %d trashed files\n", deleted);
+    if (deleted == 0 && failed == 0) println("The trash is empty");
+    else printf("Erased %d file%s from the trash\n", deleted, deleted == 1 ? "" : "s");
+    return failed > 0;
 }
 
 /* The name is looked for in the trash itself. A look-up by name asks the
@@ -28,15 +56,17 @@ static int erase_named(const file_id_t *trashed, int total, const char *name)
     file_id_t file_id = 0;
     int count = 0;
     for (int i = 0; i < total; i++) {
-        file_info_t info;
-        if (file_info(trashed[i], &info) != 0) continue;
-        if (strcmp(info.filename, name) != 0) continue;
-        file_id = trashed[i];
-        count++;
+        FileMetadata metadata;
+        if (!read_name(trashed[i], &metadata)) continue;
+        if (strcmp(metadata.Filename, name) == 0) {
+            file_id = trashed[i];
+            count++;
+        }
+        FileMetadataRelease(&metadata);
     }
 
     if (count > 1) {
-        printf("Error: %s is in the trash more than once\n", name);
+        printf("%s is in the trash more than once; erase them by their tags\n", name);
         return 1;
     }
 
@@ -44,19 +74,13 @@ static int erase_named(const file_id_t *trashed, int total, const char *name)
         /* Not in the trash: the look-up by name tells a name nobody has from
          * a file still out of the trash. */
         if (find_file_by_name(name, NULL, NULL, 0) <= 0)
-            printf("Error: File not found: %s\n", name);
+            printf("There is no file called %s\n", name);
         else
-            printf("Error: %s must be trashed first (use 'trash' command)\n", name);
+            printf("%s is not in the trash; put it there first with trash %s\n", name, name);
         return 1;
     }
 
-    if (delete(file_id) != 0) {
-        printf("Error: Failed to delete %s\n", name);
-        return 1;
-    }
-
-    printf("File deleted: %s (file %lu)\n", name, file_id);
-    return 0;
+    return erase_one(file_id, name);
 }
 
 int main(void) {
@@ -70,12 +94,12 @@ int main(void) {
 
     file_id_t *trashed = NULL;
     int total = query_all("trashed", &trashed);
-    if (total < 0) { println("Error: Failed to query files"); exit(1); return 1; }
+    if (total < 0) { println("Could not look in the trash"); exit(1); return 1; }
 
     int failed = 0;
     for (size_t i = 0; i < name_count; i++) {
         if (strcmp(names[i], "trashed") == 0)
-            erase_all_trashed(trashed, total);
+            failed |= erase_all_trashed(trashed, total);
         else
             failed |= erase_named(trashed, total, names[i]);
     }

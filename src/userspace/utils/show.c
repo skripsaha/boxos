@@ -1,11 +1,34 @@
 #include "box/print.h"
 #include "box/form.h"
 #include "box/file.h"
+#include "box/memory.h"
 #include "box/string.h"
 #include "box/system.h"
 
+#include "filename.h"
+
 BOX_FORM("takes thing \"the file to show\"\n"
          "gives things\n");
+
+#define SHOW_LIMIT 4096u
+
+/* Printable bytes as they are, line breaks and tabs kept, the rest as \xNN. */
+static void show_bytes(const char *bytes, int count)
+{
+    for (int i = 0; i < count; i++)
+    {
+        char c = bytes[i];
+        if ((c >= 32 && c < 127) || c == '\n' || c == '\r' || c == '\t')
+        {
+            char s[2] = {c, 0};
+            print(s);
+        }
+        else
+        {
+            printf("\\x%02x", (unsigned char)c);
+        }
+    }
+}
 
 int main(void)
 {
@@ -19,71 +42,43 @@ int main(void)
     }
 
     file_id_t file_id = file[0];
-    file_info_t info;
-    if (file_info(file_id, &info) != 0)
+    FileMetadata metadata;
+    if (FileMetadataRead(file_id, &metadata) != 0)
     {
-        println("Error: Failed to get file info");
+        println("Could not look at that file; it may have been erased");
         exit(1);
         return 1;
     }
+    uint64_t size = metadata.Size;
+    FileMetadataRelease(&metadata);
 
-    // printf("Content of %s (%lu bytes):\n", info.filename, (unsigned long)info.size);
-    // println("----------------------------------------");
-
-    /* Read and display file content in chunks. boxlib's fread no longer
-     * has the old 168/176-byte Pocket payload cap (Phase 12 Manifest +
-     * Crate makes it unbounded), so 4 KiB per fread is one storage
-     * syscall instead of ~24. */
-    char buffer[4096];
+    /* boxlib's fread has no Pocket payload cap (Phase 12 Manifest + Crate
+     * makes it unbounded), so 4 KiB per fread is one storage syscall
+     * instead of ~24. */
+    char buffer[SHOW_LIMIT];
     size_t total_read = 0;
-    size_t bytes_to_read = (info.size > 4096) ? 4096 : info.size; // limit display
+    size_t bytes_to_read = size > SHOW_LIMIT ? SHOW_LIMIT : (size_t)size;
 
     while (total_read < bytes_to_read)
     {
         size_t chunk = bytes_to_read - total_read;
-        if (chunk > sizeof(buffer))
-            chunk = sizeof(buffer);
-
         int result = fread(file_id, total_read, buffer, chunk);
         if (result < 0)
         {
-            println("Error: Failed to read file content");
+            char *name = name_of_file(file_id);
+            printf("Could not read %s\n", name ? name : "the file");
+            free(name);
             exit(1);
             return 1;
         }
         if (result == 0)
             break;
 
-        // Print the chunk (handle binary safely)
-        for (int i = 0; i < result; i++)
-        {
-            char c = buffer[i];
-            // Print printable characters, escape others
-            if (c >= 32 && c < 127)
-            {
-                char s[2] = {c, 0};
-                print(s);
-            }
-            else if (c == '\n' || c == '\r' || c == '\t')
-            {
-                char s[2] = {c, 0};
-                print(s);
-            }
-            else
-            {
-                printf("\\x%02x", (unsigned char)c);
-            }
-        }
-
+        show_bytes(buffer, result);
         total_read += result;
         if ((size_t)result < chunk)
             break;
     }
-
-    // if (info.size > 4096) {
-    //     println("\n----------------------------------------");
-    //     printf("(Truncated: showing first 4096 of %lu bytes)\n", (unsigned long)info.size);
-    // }
 
     souvenir_things(&file_id, 1);
     println("");

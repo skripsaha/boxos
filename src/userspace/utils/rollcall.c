@@ -15,6 +15,9 @@
 #include "box/debug.h"
 #include "box/strand.h"
 #include "box/sync.h"
+#include "box/form.h"
+
+BOX_FORM("");
 
 #define ROLLCALL_STRANDS 4u
 #define ROLLCALL_LINES   400u

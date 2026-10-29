@@ -359,9 +359,11 @@ static const char *open_the_draft(const char *name, const char *const *words, si
     if (n > 1) {
         println("Several files are called that:");
         for (int i = 0; i < n; i++) {
-            file_info_t info;
-            if (file_info(ids[i], &info) == 0)
-                printf("  %s [file_id=%lu]\n", info.filename, ids[i]);
+            FileMetadata metadata;
+            if (FileMetadataRead(ids[i], &metadata) != 0) continue;
+            printf("  %s [%s]\n", metadata.Filename ? metadata.Filename : "?",
+                   metadata.Tags ? metadata.Tags : "no tags");
+            FileMetadataRelease(&metadata);
         }
         free(ids);
         return "Name a tag that tells them apart, after the filename.";

@@ -5,6 +5,9 @@
 #include "box/clock.h"
 #include "box/string.h"
 #include "box/sync.h"
+#include "box/form.h"
+
+BOX_FORM("");
 
 /* Format a byte count as "X.YY MB" or "X.YY GB" — two decimals, truncated
  * rather than rounded, without floats. Always emits a trailing NUL into buf

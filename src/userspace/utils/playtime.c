@@ -32,11 +32,13 @@
 #include "box/touch.h"
 #include "box/clock.h"
 #include "box/cpu.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/system.h"
 #include "box/memory.h"
 #include "box/string.h"
 #include "box/error.h"
+
+BOX_FORM("");
 
 #define FRAME_US       40000u    /* 25 frames a second — ten kernel ticks exactly */
 
@@ -315,12 +317,6 @@ static void say_the_tally(uint64_t frames, uint64_t ran_ms, int code)
 
 int main(void)
 {
-    if (luggage_word_count() > 1) {
-        println("Usage: playtime");
-        exit(1);
-        return 1;
-    }
-
     if (pour_setup() != 0) {
         exit(1);
         return 1;

@@ -25,7 +25,7 @@
 
 #include "box/print.h"
 #include "box/color.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/system.h"
 #include "box/string.h"
 #include "box/convert.h"
@@ -33,7 +33,8 @@
 #include "box/error.h"
 #include "box/core/cabin.h"
 
-#define USAGE_LINE     "Usage: finish <tag> [more tags...] [anyway]"
+BOX_FORM("takes words \"the tags of the program to end (more than one narrows it); end with anyway to end one the machine runs on\"\n");
+
 #define ANYWAY_WORD    "anyway"
 #define SYSTEM_TAG     "system"
 #define TAG_MAX_BYTES  63u      /* proc_crew refuses anything longer */
@@ -110,20 +111,19 @@ static char *spaced_tags(const char *list)
 
 /* The tags as the person typed them, space-joined — for the lines that must
  * name what was asked. "anyway" is never in it: it is permission, not a tag. */
-static char *asked_phrase(int last)
+static char *asked_phrase(const char *const *tags, int count)
 {
     size_t room = 1;
-    for (int i = 1; i <= last; i++) room += strlen(luggage_word((uint32_t)i)) + 1;
+    for (int i = 0; i < count; i++) room += strlen(tags[i]) + 1;
 
     char *out = (char *)malloc(room);
     if (!out) return NULL;
 
     size_t w = 0;
-    for (int i = 1; i <= last; i++) {
-        const char *word = luggage_word((uint32_t)i);
-        size_t len = strlen(word);
+    for (int i = 0; i < count; i++) {
+        size_t len = strlen(tags[i]);
         if (w) out[w++] = ' ';
-        memcpy(out + w, word, len);
+        memcpy(out + w, tags[i], len);
         w += len;
     }
     out[w] = '\0';
@@ -186,7 +186,7 @@ static int ask_crew(const char *ask, Crew *crew)
  * Liveness is the kernel's promise here, not this program's guess: the crew
  * answer holds only cabins that were live when it was walked, so the DONE and
  * CRASHED test this pass used to carry — in two copies — could never fire. */
-static void decide_crew(Crew *crew, int last, bool anyway)
+static void decide_crew(Crew *crew, const char *const *tags, int count, bool anyway)
 {
     uint32_t self = cabin_info()->pid;
 
@@ -194,8 +194,8 @@ static void decide_crew(Crew *crew, int last, bool anyway)
         crew->verdict[i] = VERDICT_SKIPPED;
 
         bool all = true;
-        for (int w = 2; w <= last && all; w++)
-            all = wears(crew->mates[i].tags, luggage_word((uint32_t)w));
+        for (int w = 1; w < count && all; w++)
+            all = wears(crew->mates[i].tags, tags[w]);
         if (!all) continue;
         crew->matched++;
 
@@ -324,30 +324,30 @@ static void closing_report(const Crew *crew, int ended)
 
 int main(void)
 {
-    int argc = (int)luggage_word_count();
-    if (argc < 2 || luggage_word(1)[0] == '\0') {
-        println(USAGE_LINE);
+    const char *const *words;
+    size_t word_count;
+    if (form_words(0, &words, &word_count) != 0) {
         exit(1);
         return 1;
     }
 
     /* The LAST word is consent whenever it reads "anyway", with no exception:
-     * "finish anyway" spends its only word on consent and lands on the usage
-     * line below. Anywhere earlier it is a tag like any other, so the crew of
-     * a tag called "anyway" is reached by putting a word after it — "finish
-     * anyway anyway" is the shortest spelling. */
-    int  last   = argc - 1;
-    bool anyway = strcmp(luggage_word((uint32_t)last), ANYWAY_WORD) == 0;
-    if (anyway) last--;
+     * "finish anyway" spends its only word on consent and has no tag left.
+     * Anywhere earlier it is a tag like any other, so the crew of a tag
+     * called "anyway" is reached by putting a word after it - "finish anyway
+     * anyway" is the shortest spelling. */
+    int  count  = (int)word_count;
+    bool anyway = strcmp(words[count - 1], ANYWAY_WORD) == 0;
+    if (anyway) count--;
 
-    if (last < 1) {
-        println(USAGE_LINE);
+    if (count < 1) {
+        println("anyway is only a consent; say which program to end, as in: finish shell anyway");
         exit(1);
         return 1;
     }
 
-    const char *ask    = luggage_word(1);
-    char       *phrase = asked_phrase(last);
+    const char *ask    = words[0];
+    char       *phrase = asked_phrase(words, count);
     if (!phrase) {
         println("there is not enough memory to read what you asked");
         exit(1);
@@ -361,10 +361,10 @@ int main(void)
         return 1;
     }
 
-    decide_crew(&crew, last, anyway);
+    decide_crew(&crew, words, count, anyway);
 
     if (crew.matched == 0) {
-        printf("%s: nothing wears %s\n", phrase, last > 1 ? "those tags" : "that tag");
+        printf("%s: nothing wears %s\n", phrase, count > 1 ? "those tags" : "that tag");
         free_crew(&crew);
         free(phrase);
         exit(1);

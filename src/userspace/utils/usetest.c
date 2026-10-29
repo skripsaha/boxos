@@ -19,6 +19,9 @@
 #include "box/string.h"
 #include "box/memory.h"
 #include "box/error.h"
+#include "box/form.h"
+
+BOX_FORM("");
 
 #define PROBE_TAG    "use:probe"
 #define PROBE_INSIDE "use_probe_in"

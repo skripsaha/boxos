@@ -7650,7 +7650,7 @@ byname_judge() {
     grep -q "Created file: alpha.txt" "$L" \
         && ok "$name: the file was created" \
         || bad "$name: create did not answer"
-    grep -q "File renamed" "$L" \
+    grep -q "alpha.txt is now called beta.txt" "$L" \
         && ok "$name: the file was renamed" \
         || bad "$name: rename did not answer"
     # `files beta` asks by tag: the renamed file must carry its new name's tag
@@ -7666,22 +7666,22 @@ byname_judge() {
     sed -n '/~ info alpha.txt/,/~ trash beta.txt/p' "$L" | grep -q "File not found" \
         && ok "$name: not found by its old name" \
         || bad "$name: 'info alpha.txt' still finds the renamed file"
-    grep -q "Deleted 1 trashed files" "$L" \
+    grep -q "Erased 1 file from the trash" "$L" \
         && ok "$name: erase found the trashed file by its tag" \
-        || bad "$name: 'erase trashed' did not delete the one trashed file ($(grep -m1 'Deleted' "$L" || echo 'no answer'))"
-    sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -q "^File moved to trash"
-    chk $? "$name: gamma.txt went to the trash ($(sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -m1 -E '^(File moved|Error)' || echo 'no answer'))"
+        || bad "$name: 'erase trashed' did not delete the one trashed file ($(grep -m1 'Erased' "$L" || echo 'no answer'))"
+    sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -q "^gamma.txt moved to the trash"
+    chk $? "$name: gamma.txt went to the trash ($(sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -m1 -E '^(gamma.txt moved|Could not)' || echo 'no answer'))"
     local erased said
-    said=$(sed -n '/~ erase gamma.txt/,/~ files trashed/p' "$L" | grep -m1 -E "^(File deleted|Error)")
-    erased=$(echo "$said" | grep -oE "^File deleted: gamma\.txt \(file [0-9]+\)")
+    said=$(sed -n '/~ erase gamma.txt/,/~ files trashed/p' "$L" | grep -m1 -E "^(File deleted|Could not|There is no)")
+    erased=$(echo "$said" | grep -oE "^File deleted: gamma\.txt$")
     [ -n "$erased" ]
     chk $? "$name: erase by name found the trashed file in the trash (${said:-no answer})"
     sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -q "No files found"
     chk $? "$name: and the trash is empty after it ($(sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -m1 -E '^(No files found|gamma\.txt)' || echo 'no answer'))"
-    sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -q "^Error: File must be trashed first"
-    chk $? "$name: a file out of the trash is refused ($(sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -m1 -E '^(File deleted|Error)' || echo 'no answer'))"
-    sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -q "^Error: File not found"
-    chk $? "$name: a name nobody has is not found ($(sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -m1 -E '^(File deleted|Error)' || echo 'no answer'))"
+    sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -q "^delta.txt is not in the trash"
+    chk $? "$name: a file out of the trash is refused ($(sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -m1 -E '^(File deleted|Could not|delta|There is no)' || echo 'no answer'))"
+    sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -q "^There is no file called nosuch.txt"
+    chk $? "$name: a name nobody has is not found ($(sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -m1 -E '^(File deleted|Could not|delta|There is no)' || echo 'no answer'))"
     local halt rows kept refused seen
     halt=$(grep -m1 -E "$STAND_HALT_ENDS" "$L" | cut -c1-120)
     grep -q '^\[HALT\] Storage sync complete' "$L"

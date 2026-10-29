@@ -1,12 +1,15 @@
 #include "box/print.h"
 #include "box/system.h"
+#include "box/form.h"
+
+BOX_FORM("");
 
 int main(void) {
 
     int score = fragmentation();
 
     if (score < 0) {
-        println("Error: Failed to get fragmentation score");
+        println("Could not read how fragmented the volume is");
         exit(1);
         return 1;
     }

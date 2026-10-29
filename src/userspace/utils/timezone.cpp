@@ -17,13 +17,15 @@
 // can redraw without polling.
 
 #include <box/cxx/clock.h>
-#include <box/cxx/luggage.h>   // box::luggage — how BoxOS delivers arguments
+#include <box/cxx/form.h>      // box::form - what the shell sorted the line into
 
 #include <chrono>
 #include <cstdio>
 #include <format>
 #include <string>
 #include <string_view>
+
+BOX_FORM("takes optional words \"what to do: a zone name to keep, or list [prefix] to see the names; nothing shows the zone now\"\n");
 
 namespace {
 
@@ -116,23 +118,22 @@ int List(std::string_view want)
 
 }  // namespace
 
-// ‼ No (argc, argv), and that is the point rather than an omission. BoxOS does
-// not deliver arguments through the entry point at all: boxlib_start.asm passes
-// argc=0 and argv=NULL purely so a C main() signature still compiles, and the
-// real arguments are the program's Luggage — the line as typed, in its cabin
-// before main runs (box/cxx/luggage.h). Writing the POSIX shape here does not
-// fail to find the arguments — it reads argv[1] through a null pointer and
-// takes a #PF at address 8, which is exactly what this command did the first
-// time it was run in the guest.
+// No (argc, argv), and that is the point rather than an omission. BoxOS does
+// not deliver arguments through the entry point at all: the words of the line
+// arrive sorted into the program's Form, filled before main runs
+// (box/cxx/form.h). Writing the POSIX shape here would read argv[1] through a
+// null pointer and take a #PF at address 8.
 int main()
 {
-    const std::size_t words = box::luggage::size();   // word 0 is the command's name
-    if (words <= 1) return Show();
+    const auto words = box::form::words(0);
+    if (!words) return 1;
+    if (words->empty()) return Show();
 
-    if (box::luggage::word(1) == "list")
-        return List(words > 2 ? box::luggage::word(2) : std::string_view{});
-    if (words == 2) return Set(box::luggage::word(1));
+    const std::string_view first = (*words)[0];
+    if (first == "list")
+        return List(words->size() > 1 ? std::string_view((*words)[1]) : std::string_view{});
+    if (words->size() == 1) return Set(first);
 
-    std::printf("usage: timezone [<name> | list [prefix]]\n");
+    std::printf("timezone: say one zone name, or list and a prefix\n");
     return 1;
 }

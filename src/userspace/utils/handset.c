@@ -27,13 +27,15 @@
  */
 
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/strand.h"
 #include "box/touch.h"
 #include "box/keyboard.h"
 #include "box/sync.h"
 #include "box/system.h"
 #include "box/string.h"
+
+BOX_FORM("takes optional name \"how to listen: banked or deaf; leave it out to ask and read one line\"\n");
 
 static volatile uint64_t g_deaf;   /* 1 once the strand holds the ear and wears no tag */
 
@@ -85,7 +87,11 @@ static int HearToEnter(void)
 
 int main(void)
 {
-    const char *mode = luggage_word(1);
+    const char *const *words;
+    size_t word_count;
+    if (form_words(0, &words, &word_count) != 0) return 1;
+
+    const char *mode = word_count > 0 ? words[0] : NULL;
     if (mode && strcmp(mode, "banked") == 0) {
         int rc = HearToEnter();
         if (rc != 0) {
@@ -107,6 +113,11 @@ int main(void)
          * moment, and g_deaf never changes again. */
         addr_park((void *)&g_deaf, 1, 3000);
         return read_and_say();
+    }
+
+    if (mode) {
+        printf("handset knows banked and deaf, not %s\n", mode);
+        return 1;
     }
 
     printf("[HANDSET] ask\n");

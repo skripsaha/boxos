@@ -1,7 +1,10 @@
 #include "box/print.h"
 #include "box/form.h"
 #include "box/file.h"
+#include "box/memory.h"
 #include "box/system.h"
+
+#include "filename.h"
 
 BOX_FORM("takes thing \"the file to rename\"\n"
          "takes name \"its new name\"\n"
@@ -18,14 +21,19 @@ int main(void) {
         return 1;
     }
 
+    char *old_name = name_of_file(file[0]);
+    const char *was = old_name ? old_name : "the file";
+
     if (file_rename(file[0], new_name[0]) != 0) {
-        println("Error: Failed to rename file");
+        printf("Could not rename %s to %s\n", was, new_name[0]);
+        free(old_name);
         exit(1);
         return 1;
     }
 
     souvenir_things(file, 1);
-    println("File renamed");
+    printf("%s is now called %s\n", was, new_name[0]);
+    free(old_name);
     exit(0);
     return 0;
 }

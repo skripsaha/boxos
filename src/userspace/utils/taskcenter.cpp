@@ -11,9 +11,12 @@
 #include "box/cxx/console.h"
 #include "box/cxx/keyboard.h"
 #include "box/error.h"
+#include "box/form.h"
 #include "box/keyboard.h"
 #include "box/system.h"
 #include "box/vga.h"
+
+BOX_FORM("");
 
 namespace {
 

@@ -46,7 +46,7 @@ int main(void) {
     free(tags);
 
     if (file_id < 0) {
-        println("Error: Failed to create file");
+        printf("Could not create %s\n", name[0]);
         exit(1);
         return 1;
     }
