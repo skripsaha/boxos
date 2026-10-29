@@ -377,6 +377,13 @@ def LogSlips(c, fid):
     return [d for d in shaped if d["fid"] == fid]
 
 
+def PromisedLess(c, promised):
+    """The free blocks the census counts, less `promised` — a block for each
+    file a Slip lies over (§16.6 п.1); None where it counts none."""
+    free = c.Json()["census"]["free"]
+    return None if free is None else free - promised
+
+
 def RibbonCases(bt):
     """What the ribbon carries on (§2.7, §2.8): an Undone, a Slip, a Quire run
     into its next, a retry at the start of the next."""
@@ -505,7 +512,9 @@ def RibbonCases(bt):
             ("%u reads its tail out of the ribbon: 100 bytes then 50" % f1,
              lambda c: c.Content(f1) == b"a" * 100 + b"b" * 50),
             ("and the volume goes on: a Slip is folded by this kernel (§16.5 п.13)",
-             lambda c: not c.mount.glass and not c.findings)]),
+             lambda c: not c.mount.glass and not c.findings),
+            ("the kernel tells one block fewer free than the census counts: the one promised to the tail "
+             "its Slips lie over (§16.6 п.1)", lambda c: c.kernel["free"] == PromisedLess(c, 1))]),
         Case("B22c a logger's Slips, each its stitch's change", Logger, checks=[
             ("%u reads every line out of the ribbon" % f1,
              lambda c: c.Content(f1) == b"".join(LogLine(i) for i in range(LOG_LINES))),
@@ -516,11 +525,15 @@ def RibbonCases(bt):
         Case("B22d a Slip cut by the size, then grown inside its block", CutGrown, checks=[
             ("%u reads 50 bytes and 30 zeros, not the bytes the cut took" % f1,
              lambda c: c.Content(f1) == b"a" * 50 + bytes(30)),
-            ("and nothing is said", lambda c: not c.mount.glass and not c.findings)]),
+            ("and nothing is said", lambda c: not c.mount.glass and not c.findings),
+            ("the 50 bytes the cut left a Slip of hold their block promised (§16.6 п.1)",
+             lambda c: c.kernel["free"] == PromisedLess(c, 1))]),
         Case("B32 a Slip let go by a splice of its block", Folded, checks=[
             ("%u reads its new block, the overlay gone with the hole it lay on" % f1,
              lambda c: c.Content(f1) == bt.Pattern(10)[:150]),
-            ("and nothing is said: no Slip is left to fold", lambda c: not c.findings)]),
+            ("and nothing is said: no Slip is left to fold", lambda c: not c.findings),
+            ("and no block is promised: the kernel tells the free the census counts",
+             lambda c: c.kernel["free"] == PromisedLess(c, 0))]),
         Case("B24 the ribbon crosses into its next Quire", Crossing, checks=[
             ("three stitches, the second running from block %u's Quire into block %u's" % (ribbon[0], nxt[0]),
              lambda c: [s.seq for s in c.mount.ribbon.stitches] == [3, 4, 5] and
