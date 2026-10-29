@@ -81,7 +81,8 @@ typedef struct {
     uint32_t    clasp;        /* and its Clasp */
     uint64_t    tally;        /* the seq of the Tally the stitches are replayed over */
     uint64_t    given;        /* the largest seq this writer gave */
-    uint32_t    atom;         /* the medium's atom, in sectors */
+    uint32_t    atom;         /* the ribbon's atom, in sectors: a flash page on a removable medium, the
+                               * medium's atom on any other (§16.6 п.2) — the Quires taken, the room */
     uint64_t    quire_blocks; /* the blocks a Quire is given */
     uint64_t    quires;       /* the Quires the ribbon runs through past the Tally (atomic: said by any core) */
     error_t     taken;        /* how the last ask for a next_quire was answered */
@@ -121,8 +122,13 @@ bool     RibbonCursorLied(void);
  *   RibbonSeqNext     a seq for the stitch about to be built — past every one
  *                     the book showed and this writer gave — folded into what
  *                     the mount counts seen (BookSeqSeen)
+ *   RibbonStitchOf    the sectors a stitch of a `len`-byte stream takes where
+ *                     the cursor stands: whole atoms of the medium, on to the
+ *                     end of an atom of the ribbon (volume_ribbon.h,
+ *                     RibbonStitchEnds)
  *   RibbonNextGiven   a next_quire for the Quire the ribbon stands in, when it
- *                     has none: taken from the map, the Tally's ground left
+ *                     has none or the one named is off an atom of the ribbon:
+ *                     taken from the map, the Tally's ground left
  *   RibbonRoom        where a stitch of `of` sectors goes — the place, and the
  *                     Quire it may run on into — OK; ERR_TAGFS_NO_SPACE when
  *                     the rest and the next_quire, less the two atoms of it a
@@ -160,6 +166,7 @@ bool     RibbonCursorLied(void);
  *                     of the medium's is said as (ribbon_left.c)
  */
 const RibbonCursor* RibbonCursorNow(void);
+uint64_t RibbonStitchOf(uint64_t len);
 uint64_t RibbonSeqNext(void);
 void     RibbonNextGiven(void);
 error_t  RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop);

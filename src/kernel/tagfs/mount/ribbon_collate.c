@@ -107,10 +107,16 @@ bool RibbonQuireAdd(RibbonWalk* w, const RibbonQuire* q)
     return true;
 }
 
+/* A Quire on the grid of the volume's own atom — the one it was laid out for,
+ * GEOMETRY's — never the medium's this mount found (§16.2 п.11: the reader's
+ * rules are the volume's, not the mount's): a volume moved onto a medium of a
+ * coarser block reads the Quires its writers laid, one rule with volume-read
+ * (stitch.py Lies). The writer goes on in none off the medium's atom
+ * (ribbon.c, RibbonGoesOnAt; §1.5). */
 bool RibbonQuireLies(const RibbonQuire* q)
 {
     uint64_t lo = g_book.frame.data_block, hi = g_book.data_end;
-    uint64_t grid = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
+    uint64_t grid = BookAtomOf(tagfs_get_state()->geometry.physical_bytes, 0, 0) / TAGFS_BLOCK_SIZE;
     return q->blocks && q->block >= lo && q->block <= hi && q->blocks <= hi - q->block && !(q->block % grid);
 }
 

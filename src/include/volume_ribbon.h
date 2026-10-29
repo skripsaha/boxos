@@ -384,6 +384,79 @@ static inline uint64_t RibbonStitchSectors(uint64_t len, uint32_t atom)
 }
 
 /*
+ * ‼ A STITCH ENDS WHERE AN ATOM OF THE RIBBON DOES (§1.5, §16.6 п.2). Written
+ * in whole atoms of the medium from where it begins — `need` sectors of them
+ * (RibbonStitchSectors) — a stitch goes on to the end of an atom of the
+ * ribbon, `r` sectors — a flash page on a removable medium, the medium's own
+ * atom on any other — counted from the volume's first sector, which a ribbon
+ * of `r` begins on (book_mount.c): so the stitch after it begins on one, and
+ * shares it with no settled stitch, whatever atom laid the stitch before it
+ * or the Quire it lies in. `at` the volume's sector it begins at, `left` the
+ * sectors of its Quire from there, `next` the first sector of the next_quire
+ * named, 0 with none; its sectors. A Quire a writer of a smaller atom laid may
+ * end inside an atom of the ribbon: a stitch that would end past it ends with
+ * it, the next begun at the next_quire's start; with none named, where the
+ * atom a stitch keeps past it (§3.6) falls past that end, it ends on the
+ * medium's atom alone, and the stitch after it shares its page (ribbon.c,
+ * RibbonRoom, says so). Run on into the next_quire, its tail ends on an atom
+ * of the ribbon in turn; with none named it runs nowhere (RibbonRoom refuses).
+ */
+static inline uint64_t RibbonStitchEnds(uint64_t need, uint64_t at, uint64_t left, uint64_t next, uint32_t r)
+{
+    uint64_t of;
+    if (need > left)
+        return next ? left + ((next + need - left + r - 1u) / r * r - next) : need;
+    of = (at + need + r - 1u) / r * r - at;
+    if (of <= left && (next || of + r <= left))
+        return of;
+    return next && of > left ? left : need;
+}
+
+/*
+ * ‼ A WRITER GOES ON WHERE A READER TAKES THE NEXT STITCH UP, AND WRITES NO
+ * ATOM OF THE MEDIUM A SETTLED SECTOR LIES IN (§16.2 п.11, §1.5, §16.6 п.2).
+ * A reader takes the next unit where the last one ends, whatever atom laid
+ * it, or at the start of the next_quire the last one names (rule (б)) — never
+ * past a gap inside a Quire. Past an end at sector `off` of the Quire of
+ * `qn` blocks at block `qb`, the next_quire `nb`+`nn` (`nn` 0 with none
+ * named), in atoms of the medium `m` and of the ribbon `r` (sectors), the
+ * writer goes on:
+ *   RIBBON_ON_END     at the end — its Quire laid on the medium's atom, the
+ *                     end on one — sharing no page where the end lies on an
+ *                     atom of the ribbon;
+ *   RIBBON_ON_NEXT    else at the start of a next_quire laid on an atom of
+ *                     the ribbon, the rest of the Quire left as an early
+ *                     close leaves it;
+ *   | RIBBON_ON_SHARED else at the end, or at the start of a next_quire laid
+ *                     on the medium's atom alone: the stitch laid there first
+ *                     shares an atom of the ribbon — a flash page — with the
+ *                     last one settled, or with what lies before that Quire;
+ *   0                 else nowhere: no writer goes on, the volume under glass
+ *                     — never in an atom smaller than the medium's.
+ * A Quire filled whole goes on in its next_quire alone.
+ */
+#define RIBBON_ON_END    1u
+#define RIBBON_ON_NEXT   2u
+#define RIBBON_ON_SHARED 4u
+
+static inline uint32_t RibbonGoesOn(uint64_t qb, uint64_t qn, uint64_t off, uint64_t nb, uint64_t nn, uint32_t m,
+                                    uint32_t r)
+{
+    uint64_t mb = m / VOLUME_BLOCK_SECTORS ? m / VOLUME_BLOCK_SECTORS : 1u;
+    uint64_t rb = r / VOLUME_BLOCK_SECTORS ? r / VOLUME_BLOCK_SECTORS : 1u;
+    uint64_t at = qb * VOLUME_BLOCK_SECTORS + off;
+    int      end = off < qn * VOLUME_BLOCK_SECTORS && !(qb % mb) && !(qn % mb) && !(at % m);
+    int      on_m = nn && !(nb % mb) && !(nn % mb);
+    if (end && !(at % r))
+        return RIBBON_ON_END;
+    if (on_m && !(nb % rb) && !(nn % rb))
+        return RIBBON_ON_NEXT;
+    if (end)
+        return RIBBON_ON_END | RIBBON_ON_SHARED;
+    return on_m ? RIBBON_ON_NEXT | RIBBON_ON_SHARED : 0u;
+}
+
+/*
  * A stitch's stream of `len` bytes laid on its `of` sectors at `out`, sealed
  * where each lies: the first `left` at `vlba` on — the rest of its Quire — and
  * the others from `hop_vlba`, the first sector of the next_quire it runs on
