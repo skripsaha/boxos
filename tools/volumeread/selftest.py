@@ -37,6 +37,7 @@ from .selftest_book_ribbon import (RecordCases, RecordRuleCases, RibbonEndCases,
                                    RibbonFurtherCases, RibbonCases)
 from .selftest_book_ribbon_damage import RibbonLossCases, RibbonShapeCases, RibbonBoundCases
 from .selftest_book_errata import ErrataCases
+from .selftest_book_tip_in import TipInCases
 
 # ---------------------------------------------------------------------------
 # Running
@@ -49,7 +50,7 @@ def BookCases(bt):
     cases, refused = [], []
     for group in (Pristine, Circles, SpineCases, RangeCases, TreeShapeCases, ElementCases, SlotRootCases,
                   RecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases, RibbonFurtherCases,
-                  RibbonLossCases, RibbonCases, RibbonShapeCases, RibbonBoundCases, ErrataCases):
+                  RibbonLossCases, RibbonCases, RibbonShapeCases, RibbonBoundCases, ErrataCases, TipInCases):
         try:
             cases += group(bt)
         except Unreadable as e:

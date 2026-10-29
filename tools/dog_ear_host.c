@@ -270,6 +270,22 @@ static void GroundOf(const FileRecord* rec, uint8_t* mark, uint8_t bit)
             mark[b] |= bit;
 }
 
+/* Whether the ground DogEar's Tally took (`gone`, or born) is exactly the
+ * blocks marked `want` alone (1 the old record's, 2 the new one's) and the
+ * ones marked 4: let go and taken again, their data new — in both. */
+static bool GroundIs(bool gone, const uint8_t* mark, uint8_t want)
+{
+    uint64_t            n = 0, i = 0;
+    const BinderGround* r = DogEarTakenGround(gone, &n);
+    for (uint64_t b = 0; b < GROUND_MOST; b++) {
+        while (i < n && r[i].start + r[i].count <= b)
+            i++;
+        if ((i < n && r[i].start <= b) != ((mark[b] & 3u) == want || (mark[b] & 4u)))
+            return false;
+    }
+    return n == 0 || r[n - 1u].start + r[n - 1u].count <= GROUND_MOST;
+}
+
 /* DogEar after `was` became `now` held to the two: the header, each Parcel
  * key dirty unless shared at one place, nothing else of FILES; each DIGESTS
  * window whose ground one names and the other does not, and no other. */
@@ -305,6 +321,35 @@ static void Changed(const char* what, uint64_t fid, FileRecord* was, FileRecord*
     snprintf(line, sizeof(line), "%s: DIGESTS holds the windows of the ground one record names and the other "
              "does not, and no other", what);
     Say(digests, line);
+    DogEarTake();
+    snprintf(line, sizeof(line), "%s: the ground born is the blocks the new record names alone, the ground gone "
+             "the old one's alone, a block exactly", what);
+    Say(GroundIs(false, mark, 2u) && GroundIs(true, mark, 1u), line);
+    DogEarTakenLetGo();
+}
+
+/* A Tally takes `was` → `mid`, `mid` → `now` comes after it, and it is
+ * refused: given back, DogEar holds `was` → `now` — the ground born and gone
+ * of the two changes as one, a block `again` let go and taken back in both. */
+static void Moved(const char* what, FileRecord* was, FileRecord* mid, FileRecord* now, const Strip* again)
+{
+    static uint8_t mark[GROUND_MOST];
+    char           line[256];
+    DogEarLetGo();
+    DogEarFileChanged(FILE_FID, was, mid);
+    DogEarTake();
+    DogEarFileChanged(FILE_FID, mid, now);
+    DogEarTakenBack();
+    DogEarTake();
+    memset(mark, 0, sizeof(mark));
+    GroundOf(was, mark, 1u);
+    GroundOf(now, mark, 2u);
+    for (uint64_t b = again ? again->start : 0; again && b < again->start + again->count; b++)
+        mark[b] |= 4u;
+    snprintf(line, sizeof(line), "%s: given back under what came since, the ground born and gone is the two "
+             "changes as one", what);
+    Say(GroundIs(false, mark, 2u) && GroundIs(true, mark, 1u), line);
+    DogEarTakenLetGo();
 }
 
 static FileRecord* Spliced(const FileRecord* was, uint64_t at, uint64_t remove, const Strip* ins, uint64_t nins,
@@ -335,6 +380,20 @@ static void Files(void)
         Changed("a file given up", FILE_FID, was, NULL);
         Changed("a file with nothing changed but its header", FILE_FID, was, was);
     }
+    /* Block 1451 is the file's 302nd: Strip 150 of Runs(), two blocks from
+     * 1000 + 3 * 150, its second. */
+    Strip       back  = { .start = 1451u, .count = 1, .kind = STRIP_DATA, .birth = 0 };
+    Strip       other = { .start = 600100u, .count = 1, .kind = STRIP_DATA, .birth = 0 };
+    FileRecord* again = over ? Spliced(over, 301u, 1, &back, 1, blocks) : NULL;
+    FileRecord* moved = over ? Spliced(over, 301u, 1, &other, 1, blocks) : NULL;
+    Say(again && moved, "the records spliced again are built");
+    if (again && moved) {
+        Moved("a block written over and its old block taken back", was, over, again, &back);
+        Moved("a block written over twice", was, over, moved, NULL);
+        Moved("a file born and given up", NULL, was, NULL, NULL);
+    }
+    FileRecordRelease(again);
+    FileRecordRelease(moved);
     FileRecordRelease(over);
     FileRecordRelease(grow);
     FileRecordRelease(move);
@@ -356,6 +415,77 @@ static void Mended(void)
         !Holds(TALLY_FILES, false, K(4, 1)), "the last leaf of a tree, its range to the tree's end");
 }
 
+/* The Parcel test of §10.4: a file of 1 GiB in runs of two blocks, a block of
+ * it written over 10 000 times, each on fresh ground. Each change puts into
+ * DogEar the header and the Parcels it changed — the one the block lies in,
+ * or the two a cut makes of it — and no other key of FILES; the windows of
+ * the block let go and the block taken, and no other; the ground born and
+ * gone the two blocks exactly. So a Tally laid in after it lays the leaves
+ * those keys lie in and the path above them (settle/binder_sift.c), never the
+ * file's ~1000 Parcels. */
+#define BIG_STRIPS    131072u
+#define BIG_REWRITES  10000u
+
+static uint64_t s_seed = 0x9E3779B97F4A7C15ull;
+
+static uint64_t Random(void)
+{
+    s_seed ^= s_seed << 13;
+    s_seed ^= s_seed >> 7;
+    s_seed ^= s_seed << 17;
+    return s_seed;
+}
+
+/* How many Parcels of `rec` begin at a key DogEar's Tally took. */
+static uint32_t ParcelsTaken(const FileRecord* rec)
+{
+    static Heads h;
+    uint32_t     n = 0;
+    HeadsOf(rec, &h);
+    for (uint32_t i = 0; i < h.n; i++)
+        n += DogEarTakenHolds(TALLY_FILES, K(FILE_FID, 1u + h.pos[i]));
+    return n;
+}
+
+static void Rewrites(void)
+{
+    uint64_t    blocks = 2u * (uint64_t)BIG_STRIPS;
+    FileRecord* rec    = Built(FILE_FID, BIG_STRIPS, 1000u);
+    uint32_t    most_parcels = 0, most_files = 0, most_windows = 0, i = 0;
+    bool        ground = true;
+    DogEarLetGo();
+    for (; rec && i < BIG_REWRITES; i++) {
+        uint64_t    at  = Random() % blocks;
+        Strip       one = { .start = 2000000u + i, .count = 1, .kind = STRIP_DATA, .birth = 0 };
+        FileRecord* now = Spliced(rec, at, 1, &one, 1, blocks);
+        uint32_t    nf = 0, nd = 0;
+        uint64_t    nb = 0, ng = 0;
+        if (!now)
+            break;
+        DogEarFileChanged(FILE_FID, rec, now);
+        DogEarTake();
+        (void)DogEarTakenSpans(TALLY_FILES, &nf);
+        (void)DogEarTakenSpans(TALLY_DIGESTS, &nd);
+        const BinderGround* born = DogEarTakenGround(false, &nb);
+        (void)DogEarTakenGround(true, &ng);
+        uint32_t p = ParcelsTaken(now), q = ParcelsTaken(rec);
+        most_parcels = p > most_parcels ? p : most_parcels;
+        most_parcels = q > most_parcels ? q : most_parcels;
+        most_files   = nf > most_files ? nf : most_files;
+        most_windows = nd > most_windows ? nd : most_windows;
+        ground      &= nb == 1 && born[0].start == one.start && born[0].count == 1 && ng <= 1;
+        DogEarTakenLetGo();
+        FileRecordRelease(rec);
+        rec = now;
+    }
+    char line[256];
+    snprintf(line, sizeof(line), "a file of 1 GiB, %u rewrites of a block: each puts in the header and at most "
+             "the two Parcels it changed (%u), two spans of FILES (%u), two windows of DIGESTS (%u), the block born "
+             "and the block gone", i, most_parcels, most_files, most_windows);
+    Say(i == BIG_REWRITES && most_parcels <= 2u && most_files <= 2u && most_windows <= 2u && ground, line);
+    FileRecordRelease(rec);
+}
+
 int main(void)
 {
     Spans();
@@ -363,6 +493,7 @@ int main(void)
     Lost();
     Files();
     Mended();
+    Rewrites();
     DogEarLetGo();
     Say(g_parcel_host_heap.allocs == g_parcel_host_heap.frees, "DogEar let go, the heap holds nothing of it");
     printf("dog_ear_host: %s\n", s_failed ? "FAIL" : "PASS");

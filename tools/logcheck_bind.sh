@@ -88,20 +88,38 @@ print(json.load(open(sys.argv[1])).get("verdict", "no verdict"))' "$json" 2>/dev
     [ $rc = 0 ] && grep -q '^bound: HELD$' "$SCRATCH/bind.bound"
     chk $? "bind: the newest Tally is bound again where it lies byte for byte, and its state is the slot before it and its ribbon's — $(grep -v '^bound: the newest' "$SCRATCH/bind.bound" | head -3 | tr '\n' ' ' | cut -c1-300)"
     line=$(grep -E '^bound: the newest slot' "$SCRATCH/bind.bound" | head -1)
-    python3 - "$line" >"$SCRATCH/bind.slack" 2>&1 <<'BIND_EOF'
+    python3 - "$line" "$tallies" "$BOOK_BIND_LINES" >"$SCRATCH/bind.slack" 2>&1 <<'BIND_EOF'
 import re, sys
-m = re.search(r"Tally (\d+), after stitch (\d+): (\d+) block\(s\) a copy, the next reckoned at (\d+) byte\(s\); "
-              r"(\d+) useful byte\(s\) of ribbon past its at, (\d+) stitch", sys.argv[1])
+m = re.search(r"Tally (\d+), after stitch (\d+): (\d+) block\(s\) a copy, the next reckoned at (\d+) byte\(s\) "
+              r"of a whole (\d+); (\d+) useful byte\(s\) of ribbon past its at, (\d+) stitch", sys.argv[1])
 if not m:
     print("bad the bound line names no Tally: %s" % sys.argv[1])
     sys.exit(0)
-tally, k, blocks, cost, useful, sewn = map(int, m.groups())
+tally, k, blocks, cost, whole, useful, sewn = map(int, m.groups())
 # A stitch of the logger is a few hundred bytes at the most; the Tally falls
 # owed at the stitch whose bytes reach the cost, and is written a step a turn.
 print(("ok " if tally > 1 and useful <= cost + 4096 else "bad ") +
       "the ribbon past the newest slot's at holds %u useful byte(s), no more than the %u a Tally of %u block(s) a "
       "copy costs and a stitch (Tally %u, after stitch %u, %u stitch(es) past it)" % (useful, cost, blocks, tally,
                                                                                    k, sewn))
+# The next Tally lays in the leaves the logger's stitches past `at` changed and
+# the path above them, both copies, and the slot (§4.2) — its file's leaf and a
+# leaf of DIGESTS — not the whole book: TALLY_SLACK by that cost owes a Tally a
+# couple of hundred stitches apart (§12.1), not a whole book's bytes apart.
+print(("ok " if 0 < cost < whole else "bad ") +
+      "the next Tally is reckoned at %u byte(s), the leaves the stitches past `at` changed and the path above "
+      "them, against %u for the whole book (§4.2, §16.5 п.16)" % (cost, whole))
+# The arithmetic of it: TALLY_SLACK (1) times that cost over the useful bytes
+# a stitch of the logger carries is how many stitches apart its Tallies fall —
+# the logger's lines owe at least half as many Tallies as that spacing gives
+# them, and never fewer than one each thousand stitches.
+tallies, lines = int(sys.argv[2]), int(sys.argv[3])
+apart = cost * sewn // useful if useful and sewn else 0
+print(("ok " if 0 < apart <= 1000 and 2 * tallies * apart >= lines else "bad ") +
+      "the logger's Tallies fall %u stitch(es) apart by TALLY_SLACK — %u useful byte(s) a stitch against a cost of "
+      "%u — and its %u line(s) owe at least %u of them: %u written" % (apart, useful // sewn if sewn else 0, cost,
+                                                                     lines, lines // (2 * apart) if apart else 0,
+                                                                     tallies))
 BIND_EOF
     while IFS= read -r line; do
         case "$line" in
@@ -146,15 +164,40 @@ BIND_EOF
 # slot said as torn), and the next boot stands on it and says what the census
 # predicts (census_book_judge), the stitches the logger's anchors waited for
 # all there.
+#
+# `book_bindcut POINT second` cuts a Tally laid in after one this mount wrote
+# (§16.5 п.17): `quilltest crowd` makes files enough for a Tally of the
+# cadence's own before the anchor it takes after them, so the Tally the cut
+# stops goes on in the pair of Tally-Quires the one before it laid in — its
+# nodes past that one's in a Quire a slot still names. Both readers stand on
+# the slot of the last Tally the boot said it wrote, and hold that Quire
+# whole: the census consistent, the free count the kernel's.
 # ---------------------------------------------------------------------------
 
 BOOK_BINDCUT_CUT='\[SETTLECUT\] the power went at point [0-9]+ of [0-9]+'
 BOOK_BINDCUT_LINES=20000
+BOOK_BINDCUT_CROWD=6000
+BOOK_BINDCUT_TALLY='^\[TagFS\] Tally [0-9]+ is written over slot [0-9]+'
+
+# book_bindcut_before POINT SECOND — the scenario up to the cut: the logger
+# alone, or a crowd and then the logger. 0 once the machine stopped.
+book_bindcut_before() {
+    if [ -n "$2" ]; then
+        type_line "quilltest crowd $BOOK_BINDCUT_CROWD" &&
+            wait_for_line -E build/serial.log "\[QUILL\] crowd: (PASS|FAIL)|$BOOK_BINDCUT_CUT" "$WAIT_QUIET_SLOW_S" ||
+            return 1
+        grep -aqE "$BOOK_BINDCUT_CUT" build/serial.log && return 0
+        wait_for_prompt || return 1
+    fi
+    type_line "quilltest log cut $BOOK_BINDCUT_LINES" &&
+        wait_for_line -E build/serial.log "$BOOK_BINDCUT_CUT" "$WAIT_QUIET_SLOW_S"
+}
 
 book_bindcut() {
-    local point=$1 name="book_bindcut_$1" img="$SCRATCH/bindcut.img" json="$SCRATCH/census.book_bindcut_$1.json"
-    local w="$SCRATCH/serial.book_bindcut_$1_write.log" rc line
-    echo "== book bindcut $point: the power goes inside a Tally, and both readers stand on the slot before it =="
+    local point=$1 second=$2 name="book_bindcut_$1${2:+_$2}" img="$SCRATCH/bindcut.img"
+    local json="$SCRATCH/census.book_bindcut_$1${2:+_$2}.json" w="$SCRATCH/serial.book_bindcut_$1${2:+_$2}_write.log"
+    local rc line slot=0 before
+    echo "== book bindcut $point${second:+ ($second)}: the power goes inside a Tally, and both readers stand on the slot before it =="
     rm -f build/boxos.img "$img" "$w" "$SCRATCH/serial.$name.log"
     if ! build_with_key VOLUME_FORMAT=v2 SETTLECUT="$point"; then
         bad "bindcut $point: make VOLUME_FORMAT=v2 SETTLECUT=$point does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
@@ -166,26 +209,32 @@ book_bindcut() {
         harness "bindcut $point: run-bg would not start the book's image: $(tail -1 "$SCRATCH/bindcut.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
-        type_line "quilltest log cut $BOOK_BINDCUT_LINES" &&
-        wait_for_line -E build/serial.log "$BOOK_BINDCUT_CUT" "$WAIT_QUIET_SLOW_S"
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt && book_bindcut_before "$point" "$second"
     rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$w"
     [ $rc = 0 ]
     chk $? "bindcut $point: the machine stops inside the anchor's Tally ($(grep -aoE "$BOOK_BINDCUT_CUT, [^,]*" "$w" | head -1))"
+    if [ -n "$second" ]; then
+        before=$(awk -v cut="$BOOK_BINDCUT_CUT" '$0 ~ cut { exit } { print }' "$w" | grep -aE "$BOOK_BINDCUT_TALLY" | tail -1)
+        slot=$(echo "$before" | grep -oE 'slot [0-9]+' | grep -oE '[0-9]+')
+        [ -n "$slot" ]
+        chk $? "bindcut $point: a Tally of this mount was written before the one the cut stopped, which goes on in its pair (${before:-none said})"
+        slot=${slot:-0}
+    fi
     python3 tools/volume-read.py "$img" check --json >"$json" 2>"$SCRATCH/bindcut.check.err"
     chk $? "bindcut $point: volume-read finds the book the cut left consistent — the nodes no slot names nobody's ($(python3 -c 'import json, sys
 print(json.load(open(sys.argv[1])).get("verdict", "no verdict"))' "$json" 2>/dev/null))"
-    python3 - "$json" "$point" >"$SCRATCH/bindcut.verdict" 2>&1 <<'BINDCUT_EOF'
+    python3 - "$json" "$point" "$slot" >"$SCRATCH/bindcut.verdict" 2>&1 <<'BINDCUT_EOF'
 import json, sys
 k = json.load(open(sys.argv[1]))["kernel"]
+want = int(sys.argv[3])
 def say(held, text):
     print(("ok " if held else "bad ") + text)
 say(k["mounts"] and k["glass"] == 0, "the book mounts, with no reason to be only read — %s"
     % (k.get("refusal") or "%u reason(s)" % k["glass"]))
-say(k["slot"] == 0, "its census stands on slot 0, the one before the Tally the cut stopped (%s): slot %u"
-    % ("its slot never written" if sys.argv[2] == "tally" else "its slot torn", k["slot"]))
+say(k["slot"] == want, "its census stands on slot %u, the one before the Tally the cut stopped (%s): slot %u"
+    % (want, "its slot never written" if sys.argv[2] == "tally" else "its slot torn", k["slot"]))
 BINDCUT_EOF
     while IFS= read -r line; do
         case "$line" in

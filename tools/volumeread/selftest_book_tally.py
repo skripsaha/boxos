@@ -8,7 +8,7 @@ selftest_book.py lays; what the book's census must say of it."""
 from . import binder, bookread, ondisk, stitch, stitch_pen, tally
 from .bookground import BookGround
 from .medium import Unreadable
-from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal
+from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsIntersect, RunsNormal
 from .selftest_book import LANDING_ROOM, PADDING, Born, Found, FrameDeed, Glass, Label
 from .selftest_cases import Case
 
@@ -334,7 +334,8 @@ def TreeShapeCases(bt):
     # files decides, not the landing.
     short = any(s < min(leaves[-1].blocks) for k, _b in leaves[-1].items for s, _n in content.files[k[0]].Ground())
     far = {"RANGE_ROTTEN", "DOUBLE_OWNER", "RIBBON_TORN"} | ({"HELD_BLOCKS"} if short else set())
-    nxt_rest = lambda c: all(any(s <= b < s + n for s, n in c.free_runs) for b in range(nxt[0] + 1, sum(nxt)))
+    nxt_rest = lambda c: all(any(s <= b < s + n for x in c.claims if x.kind == "tally" for s, n in x.runs)
+                             for b in range(nxt[0] + 1, sum(nxt)))
 
     def SlotOver(o, index, seq, files_root=None):
         """The slot the padded book was bound with, sealed again as slot
@@ -400,7 +401,9 @@ def TreeShapeCases(bt):
                  ("the next Quire the slot names lies on that ground by its first block: the ribbon is not "
                   "taken there, as the kernel's census does not take it (book_ground.c BookGroundRibbon)",
                   lambda c: Found(c, "RIBBON_TORN", "Quire %u+%u" % nxt)),
-                 ("and the rest of it is no one's: free", nxt_rest),
+                 ("and the rest of that Quire is the Tallies' too: a Tally-Quire is held whole while one node "
+                  "in it lives, and a dead node's ground or a tail no Tally reached is given to no one (§16.5 "
+                  "п.17, Р-d3; mount/ground_census.c GroundQuiresHeld)", nxt_rest),
                  ("and the kernel of this tree mounts it with the range's files locked",
                   lambda c: c.kernel["mounts"] is True and c.kernel["rotten"] != [])]),
         Case("B39 a FILES leaf whose lead lies", lambda o: [bt.BumpLead(o, b * SECTORS_PER_BLOCK)
@@ -574,6 +577,15 @@ def SlotRootCases(bt):
     if twin is None:
         raise Unreadable("the Tally has no node of %u Sheet(s) beside the TAGS root" % tags.sheets)
 
+    def QuiresTaken(c, blocks):
+        """The free ground of the book before (c0) the Quires a node of
+        `files.sheets` at each of `blocks` lies in take — a Tally-Quire held
+        whole while one node in it lives (§16.5 п.17), the stood slot's ribbon
+        Quire long, on the grid of the volume's blocks."""
+        q = c.mount.slot.ribbon["quire_blocks"]
+        quires = RunsNormal([(b // q * q, -(-(b + files.sheets) // q) * q - b // q * q) for b in blocks])
+        return sum(n for _s, n in RunsIntersect(bt.c0.free_runs, quires))
+
     def Tallied(c, blocks):
         runs = [r for x in c.claims if x.kind == "tally" for r in x.runs]
         return all(any(s <= b < s + n for s, n in runs) for b in blocks)
@@ -611,10 +623,11 @@ def SlotRootCases(bt):
                  ("every copy the pointer names is the Tally's ground — the fifth, which no other slot names, "
                   "among them", lambda c: Tallied(c, blank[:5])),
                  ("and every file reads", lambda c: set(c.mount.files) == set(bt.content.files)),
-                 ("and the kernel of this tree mounts it on slot 1, four copies read past and each named, "
-                  "five more Sheets taken",
+                 ("and the kernel of this tree mounts it on slot 1, four copies read past and each named, the "
+                  "Quires its five Sheets lie in taken whole",
                   lambda c: c.kernel["mounts"] is True and c.kernel["slot"] == 1 and c.kernel["mended"] == 4 and
-                  c.kernel["mended_said"] == 4 and c.kernel["free"] == bt.c0.kernel["free"] - 5 * files.sheets)]),
+                  c.kernel["mended_said"] == 4 and
+                  c.kernel["free"] == bt.c0.kernel["free"] - QuiresTaken(c, blank[:4] + [bt.F + 4 * files.sheets]))]),
         Case("B43c a FILES root named by twelve copies, the first eleven not holding",
              lambda o: RootFar(o, 11), must={"NODE_COPY_ROTTEN"}, checks=[
                  ("slot 1 is stood on, its FILES root read off its twelfth copy",
@@ -623,16 +636,17 @@ def SlotRootCases(bt):
                  ("every copy the pointer names is the Tally's ground", lambda c: Tallied(c, blank + [bt.F + 11 *
                                                                                                   files.sheets])),
                  ("and the kernel of this tree mounts it on slot 1, eleven copies read past — the first four "
-                  "named one by one, the rest by their count — and twelve more Sheets taken",
+                  "named one by one, the rest by their count — and the Quires its twelve Sheets lie in taken whole",
                   lambda c: c.kernel["mounts"] is True and c.kernel["slot"] == 1 and c.kernel["mended"] == 11 and
-                  c.kernel["mended_said"] == 4 and c.kernel["free"] == bt.c0.kernel["free"] - 12 * files.sheets)]),
+                  c.kernel["mended_said"] == 4 and
+                  c.kernel["free"] == bt.c0.kernel["free"] - QuiresTaken(c, blank + [bt.F + 11 * files.sheets]))]),
         Case("B43b a FILES root named by three copies, the third never read",
              lambda o: RootOver(o, tally.FILES, list(files.blocks) + blank[:1]), checks=[
                  ("slot 1 is stood on, and nothing is said", lambda c: c.mount.slot.index == 1 and not c.findings),
                  ("the third copy is the Tally's ground, though no read reaches it",
                   lambda c: Tallied(c, blank[:1])),
-                 ("and the kernel of this tree counts it taken",
-                  lambda c: c.kernel["free"] == bt.c0.kernel["free"] - files.sheets)]),
+                 ("and the kernel of this tree counts it taken, and the Quire it lies in",
+                  lambda c: c.kernel["free"] == bt.c0.kernel["free"] - QuiresTaken(c, blank[:1]))]),
         Case("B44 two nodes of one Tally on one block",
              lambda o: RootOver(o, tally.TAGS, [tags.blocks[0], twin.blocks[1]]), must={"DOUBLE_OWNER"}, checks=[
                  ("slot 1 is stood on, its TAGS root read off its first copy",

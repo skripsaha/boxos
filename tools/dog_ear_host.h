@@ -31,5 +31,9 @@ static inline void TagFSLockDrop(TagFSLock* l)
 
 #define TAGFS_SETTLE_BINDER_H
 void BinderDemanded(void);
+typedef struct {
+    uint64_t start;
+    uint64_t count;
+} BinderGround;
 
 #endif /* DOG_EAR_HOST_H */
