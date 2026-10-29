@@ -138,6 +138,25 @@ int anchor(file_id_t file_id);
  */
 int write_settled(file_id_t file_id);
 
+/*
+ * escheat() — Escheat: what a format-v2 book can never give back let go for
+ * good (storage.escheat). Every FILES range of the Tally that no copy of its
+ * node reads: its files declared lost, their ids never given again, the blocks
+ * held for them freed once the next Tally — written whole — names none of it.
+ * Only a program wearing system or god may ask: any other is refused
+ * (ERR_ACCESS_DENIED, ERR_PERMISSION_DENIED). Nothing to let go:
+ * ERR_OBJECT_NOT_FOUND. What it lets go comes back in *said.
+ */
+typedef struct {
+    uint64_t ranges;     /* rotten ranges of FILES let go */
+    uint64_t files;      /* files declared lost */
+    uint64_t blocks;     /* blocks held for them, let go */
+    uint64_t tails;          /* tails of Slips lost */
+    uint64_t digest_ranges;  /* DIGESTS ranges — a leaf, or an inner node's whole range — known to read in
+                              * no copy, laid anew of the data */
+} EscheatAnswer;
+int escheat(EscheatAnswer* said);
+
 #ifdef __cplusplus
 }
 #endif

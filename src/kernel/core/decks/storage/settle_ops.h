@@ -14,6 +14,11 @@ int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count, const O
 int ObjWriteSettled(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                     const OpContext *ctx);
 
+/* OBJ_ESCHEAT — Escheat (tagfs/settle/escheat.h), only for a cabin wearing
+ * system or god: out_crate = [u64 ranges][u64 files lost][u64 blocks let go]
+ * [u64 tails lost][u64 DIGESTS ranges known to read in no copy, laid anew of the data]. */
+int ObjEscheat(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
+
 /* A program's `use`, told to the volume: `said` is the `saying`-th word of the
  * Use Context. `out` (optional, one byte) is 1 once the volume remembers
  * exactly it. OK with the byte written now, or ERR_WOULD_BLOCK with the caller

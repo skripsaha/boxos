@@ -843,3 +843,29 @@ void RibbonFreshHeld(RibbonStage* st)
         RibbonRefuse(st, "its Clasp names %llu fresh block(s) and its records %llu (§2.7)",
                      (unsigned long long)u->clasp.fresh, (unsigned long long)named);
 }
+
+bool RibbonRecordWithin(const RibbonUnit* u, const RibbonRecord* r, uint64_t tree, uint64_t lo, uint64_t hi)
+{
+    const uint8_t* b    = u->stream + r->body;
+    uint32_t       used = 0;
+    uint64_t       key  = 0, base = 0;
+    RibbonBorn     born;
+    RibbonShaped   d;
+    RibbonLabeled  l;
+    TallyTag       t;
+    int            got  = TALLY_BODY_BROKEN;
+    if (tree == TALLY_TAGS && r->kind == RIBBON_COINED)
+        got = RibbonCoinedGet(b, r->len, &key, &t, &used);
+    else if (tree == TALLY_FILES && r->kind == RIBBON_BORN && (got = RibbonBornGet(b, r->len, u->seq, &born, &used))
+             != TALLY_BODY_BROKEN)
+        key = born.fid;
+    else if (tree == TALLY_FILES && r->kind == RIBBON_SHAPED &&
+             (got = RibbonShapedGet(b, r->len, u->seq, &d, &used)) != TALLY_BODY_BROKEN)
+        key = d.fid;
+    else if (tree == TALLY_FILES && r->kind == RIBBON_LABELED &&
+             (got = RibbonLabeledGet(b, r->len, &l, &used)) != TALLY_BODY_BROKEN)
+        key = l.fid;
+    else if (tree == TALLY_FILES && r->kind == RIBBON_QUITCLAIM)
+        got = RibbonQuitclaimGet(b, r->len, &key, &base, &used);
+    return got != TALLY_BODY_BROKEN && lo <= key && key < hi;
+}

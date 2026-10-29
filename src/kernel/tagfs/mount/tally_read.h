@@ -112,6 +112,12 @@ error_t TallyRead(uint64_t tree, const SpineRoot* root, bool leaves, const Tally
  * self-check reads the Tally before the one it lays so (settle/binder_check.c). */
 error_t TallyLeafRead(uint64_t tree, const TallyPlace* at, const TallySink* sink);
 
+/* Whether copy `k` of the node at `p` holds — a whole SHEET unit of its seq,
+ * parsed as a node in its range — *holds, and why not in `why`: OK, or
+ * memory's or the medium's refusal. The Binder reads both copies of a leaf no
+ * Tally lays again so (settle/binder_proof.c). */
+error_t TallyCopyHolds(const TallyPlace* p, uint32_t k, bool* holds, char* why, size_t room);
+
 /* A tree's name, as the book's lines say it. */
 const char* TallyTreeName(uint64_t tree);
 
@@ -161,6 +167,12 @@ error_t TallyDigestsRottenNext(uint32_t* leaf, error_t (*rot)(void* ctx, const T
  * By the Settle's holder, who alone turns them (TallyDigestsTurn). */
 bool    TallyDigestLeafAt(uint32_t index, TallyPlace* out, bool* rotten);
 uint32_t TallyDigestLeaves(void);
+
+/* How many ranges of the DIGESTS the reads stand on are known to read in no
+ * copy — a leaf, or an inner node's whole range — named so by the mount's
+ * walk, or found so by a read since: each one Escheat lays anew of the data.
+ * From any core: Escheat's answer (settle/escheat.c). */
+uint32_t TallyDigestsRotKnown(void);
 
 /* The reads of a digest turned to a Tally this mount wrote: its DIGESTS
  * leaves `leaves`, in key order — `rotten` those named as they lie — in place

@@ -1,5 +1,6 @@
 #include "binder_internal.h"
 #include "../integrity/gloss.h"
+#include "escheat.h"
 
 /*
  * A Tally's end (binder.c, TALLY_DONE): the nodes it names as they lie and the
@@ -33,6 +34,8 @@ error_t BinderKeptPut(BinderRun* r, const BinderKept* k)
 
 error_t BinderRotOfDigests(void* ctx, const TallyPlace* at)
 {
+    if (EscheatDigestsLaid(at))
+        return OK;     /* laid anew of the data under the act (escheat.c) */
     return BinderKeptPut((BinderRun*)ctx, &(BinderKept){ .tree = TALLY_DIGESTS, .at = *at, .rotten = true });
 }
 
@@ -206,6 +209,9 @@ error_t BinderTallyDone(BinderRun* r)
             (unsigned long long)w->seq, r->slot, (unsigned long long)r->k, (unsigned long long)w->nodes,
             (unsigned long long)w->off, (unsigned long long)w->named, w->tip ? " (laid in)" : "",
             (unsigned long long)gone, w->dropped ? "; DIGESTS elements a rotten range covers left out" : "");
+    EscheatDone(w->seq);
+    BinderGleanAt(r);
+    BinderProofAt(r);
     return OK;
 }
 

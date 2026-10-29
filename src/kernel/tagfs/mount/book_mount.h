@@ -78,7 +78,8 @@ void    MountBookLetGo(void);
  * against the book's own rules (spec_v2 §4.5 п.3, §2.9). Such a file opens
  * for nobody (ERR_TAGFS_CORRUPTED, as the storage deck answers it), its id is
  * never given again and the blocks it may name are held. False on a volume
- * of format v1, which locks none, and when no volume is up.
+ * of format v1, which locks none, when no volume is up, and for a file
+ * Escheat let go — no file from then on.
  *
  * What it reads is the mount's, let go of only with the volume's door shut
  * and nobody inside (tagfs_clear_the_ground): so it is asked inside the door.
@@ -173,6 +174,10 @@ typedef struct {
     uint32_t      nparcels;
 } BookKeptFile;
 
+/* What of a file locked by name the list kept, let go (book_mount.c) — the
+ * mount let go of, or the file declared lost by Escheat (settle/escheat.c). */
+void BookKeptLetGo(BookKeptFile* k);
+
 /* A tag the book names that the registry cannot hold (BookTagHeld): its id
  * and its text, kept so a record that wears it finds it known — volume-read
  * keeps every tag TAGS or a Coined names (bookmount.py). */
@@ -256,8 +261,43 @@ error_t TallyLeaves(uint64_t tree, const SpineRoot* root);
 /* The last file the FILES walk gathered, laid into memory or locked. */
 error_t BookFileClose(void);
 
-/* A rotten FILES range, said and kept (tally_leaves.c). OK or ERR_NO_MEMORY. */
+/* A rotten FILES range kept among the mount's (g_book.rot) and noted for
+ * Facsimile to weigh once the walk is done (tally_leaves.c). OK or
+ * ERR_NO_MEMORY. */
 error_t BookRangeRots(const TallyPlace* at, const char* why);
+
+/* What Facsimile decides of a noted range (mount/facsimile.c):
+ *   BookRangeRotsLaid  a FILES range no older slot stands in for — the
+ *                      Binder names it as it lies, what rots held, said
+ *   BookTagsRotLaid    the same of a range of another tree whose leaves hold
+ *                      no file: said
+ *   BookRangeTaken     a FILES range an older slot gives back, out of
+ *                      g_book.rot — no open or record of it is locked by it;
+ *                      BookRangeBack puts it back, the take undone
+ *   BookAsideSettled   each file a rotten range reached, set aside as the
+ *                      walk closed it: let go where `taken` says its fid is
+ *                      given back, else locked as it lay; the list emptied
+ *   BookAsideLetGo     the list let go, the mount refused
+ *   BookFacsimileItem  an element of a range from the older slot's Tally:
+ *                      a FILES item gathered (BookFacsimileClose lays the last
+ *                      file in, or notes it does not stand), a TAGS one coined
+ *   BookFacsimileUnfit whether a file the take gathered did not stand, *why
+ *                      the first — the slot does not stand in for the range
+ *   BookFacsimileUndone  every file of fids [lo, hi) the take laid in let go */
+error_t BookRangeRotsLaid(const TallyPlace* at, const char* why);
+error_t BookTagsRotLaid(uint64_t tree, const TallyPlace* at, const char* why);
+void    BookRangeTaken(const TallyPlace* at);
+void    BookRangeBack(const TallyPlace* at);
+error_t BookAsideSettled(bool (*taken)(uint64_t fid));
+void    BookAsideLetGo(void);
+error_t BookFacsimileItem(uint64_t tree, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq);
+error_t BookFacsimileClose(void);
+bool    BookFacsimileUnfit(char* why, size_t room);
+void    BookFacsimileUndone(uint64_t lo, uint64_t hi);
+
+/* Whether every authoritative root slot `s` names reads (book_mount.c): OK,
+ * ERR_TAGFS_CORRUPTED with why, or the medium's or memory's refusal. */
+error_t BookSlotReads(const SpineSlot* s, char* why, size_t room);
 
 /* The census of the book (book_ground.c): every owner's claim the walk did not
  * make as it went, what rotted held, two owners of one block said, and the

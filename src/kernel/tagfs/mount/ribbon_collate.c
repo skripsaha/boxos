@@ -702,3 +702,17 @@ error_t RibbonCollate(const SpineSlot* slot, RibbonWalk** out)
     }
     return rc;
 }
+
+error_t RibbonCollateOlder(const SpineSlot* slot, RibbonWalk** out)
+{
+    error_t     rc = RibbonWalkBegun(slot, false, out);
+    RibbonWalk* w  = *out;
+    if (rc == OK)
+        rc = RibbonSew(w);
+    if (w) {
+        kfree(w->ground);
+        w->ground  = NULL;
+        w->nground = 0;
+    }
+    return rc;
+}

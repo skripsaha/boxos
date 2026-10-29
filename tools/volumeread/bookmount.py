@@ -87,6 +87,52 @@ def LastBlock(fs):
     return n - 1, "beyond its runs"
 
 
+def _Reach(r):
+    """The keys of rotten range `r` Facsimile weighs and takes, by their first
+    part, [lo, hi) — hi None to the tree's end: of FILES every fid the range
+    reaches into, the one its end lies inside too (the kernel's
+    mount/facsimile.c RangeKeys)."""
+    if r.tree == tally.FILES:
+        return r.lo[0], None if r.hi is None else r.hi[0] + (1 if r.hi[1] else 0)
+    return r.lo, r.hi
+
+
+def _Within(reach, x):
+    """Is key `x` (a fid, a tag id) inside `reach` (_Reach)?"""
+    lo, hi = reach
+    return lo <= x and (hi is None or x < hi)
+
+
+def _Groups(rotten):
+    """The rotten ranges of one tree, in key order, as Facsimile weighs them:
+    [(range, reach)] runs whose keys reach into each other (two FILES ranges
+    that share a fid) — the kernel's mount/facsimile.c GroupFrom."""
+    groups = []
+    for r in sorted(rotten, key=lambda r: (r.lo,)):
+        reach = _Reach(r)
+        last = groups[-1] if groups else None
+        if last is not None and not any(h is None for _r, (_l, h) in last) and \
+                reach[0] < max(h for _r, (_l, h) in last):
+            last.append((r, reach))
+        else:
+            groups.append([(r, reach)])
+    return groups
+
+
+def _Reaches(tree, reach, x):
+    """Does rotten range `x` meet the keys `reach` of `tree` (_Reach) — the
+    kernel's LookMeets?"""
+    lo, hi = reach
+    if x.tree != tree:
+        return False
+    xlo = x.lo[0] if tree == tally.FILES else x.lo
+    below = hi is None or xlo < hi
+    if x.hi is None:
+        return below
+    xhi, past = (x.hi[0], x.hi[1] > 0) if tree == tally.FILES else (x.hi, False)
+    return below and (lo < xhi or (lo == xhi and past))
+
+
 class BookMount:
     """The mount of the ground `g` (a bookground.BookGround). After it: `refusal`
     (None when the book mounts), `glass` (why it may only be read), `said`
@@ -110,6 +156,7 @@ class BookMount:
         self.errata, self._errata = [], {}
         self.older_nodes, self.older_quires = [], []
         self.ribbon_said, self.applied = 0, []
+        self.passed = set()                    # stitches to `upto` the replay passed over (Facsimile's rule 4)
         self.dog_ear = dog_ear.Fresh()         # the keys the stitches applied changed (dog_ear.py)
         self.lied_check = None
         self.seen_fid = self.seen_tag = self.seen_bookmark = 0
@@ -189,8 +236,17 @@ class BookMount:
                      "hold — %s; copy %u is read, and the next Tally writes the node again (§2.5)"
                      % (tally.TREE_NAMES[node.tree], node.level, "/".join(map(str, node.blocks)), k + 1,
                         why, node.copy + 1))
+        taken = self._Facsimile(t)
         for r in t.rotten:
-            self.Say("RANGE_ROTTEN", "damage", self._RangeSentence(r))
+            if r in taken:
+                s0, n = taken[r]
+                self.Say("RANGE_FACSIMILE", "note", "the %s range [%s, %s) rots in every copy (%s): read from "
+                         "slot %u's Tally (seq %u) and its ribbon replayed for its keys — %u element(s) "
+                         "(§4.5 п.3 (а), Facsimile)" % (tally.TREE_NAMES[r.tree], r.lo,
+                                                         "the end" if r.hi is None else r.hi, r.why, s0.index,
+                                                         s0.seq, n))
+            else:
+                self.Say("RANGE_ROTTEN", "damage", self._RangeSentence(r))
         for fid, why in t.gaps:
             self.Say("PARCEL_GAP", "damage", "fid %u does not match its Parcels — %s; it is locked (§2.9, "
                      "§3.9)" % (fid, why))
@@ -202,7 +258,83 @@ class BookMount:
         self.files = {fid: fs.Copy() for fid, fs in t.content.files.items()}
         self.locked, self.locked_runs = dict(t.locked), dict(t.locked_runs)
         self.tags, self.use = dict(t.content.tags), t.content.use
+        for r in taken:
+            self._FacsimileTaken(t, r, self._facsimile[r])
         return True
+
+    def _Facsimile(self, t):
+        """§4.5 п.3 (а), §16.5 п.19 — Facsimile: a rotten range of FILES or
+        TAGS the newest older slot that holds reads whole — its Tally and its
+        ribbon replayed to the stitch the slot stood on is the state after
+        (the state binder.BindCheck holds a Tally to) — is taken from there,
+        for every key of it _Reach names. {range: (the slot, the elements)};
+        the states kept for _FacsimileTaken. A node the Tallies share rots for
+        them all: then no slot stands in (honestly rarer than with whole
+        Tallies). The kernel's rules (mount/facsimile.c): TAGS weighed before
+        FILES; ranges of a tree whose keys reach into each other — two FILES
+        ranges that share a fid — weighed as one, taken together or not at
+        all; a slot stands in only where no file of the keys is locked in its
+        state and its ribbon to the stitch passed over no stitch. A TAGS range
+        the replay passed over a stitch of puts the volume under glass (the
+        kernel cannot lay a coined tag out again). A DIGESTS range is not
+        weighed: the kernel reads a DIGESTS leaf only when a block of it is
+        (§16.3 п.12) — none at the mount — and a leaf no copy of which reads
+        is laid anew of the data by Escheat alone (§16.5 п.19,
+        binder._DigestsWanted); a USE range is said as it is."""
+        self._facsimile, taken = {}, {}
+        k = self.slot.stitch_seq
+        older = sorted((s for s in self.slots if s.state == "valid" and s.seq < self.slot.seq), key=lambda s: -s.seq)
+        for tree in (tally.TAGS, tally.FILES):
+            for group in _Groups([r for r in t.rotten if r.tree == tree]):
+                his = [h for _r, (_l, h) in group]
+                reach = (group[0][1][0], None if None in his else max(his))
+                for s0 in older:
+                    if s0.stitch_seq > k:
+                        continue
+                    p = BookMount(self.g, stand=s0.index, upto=k)
+                    sewn = set() if p.ribbon is None else {u.seq for u in p.ribbon.stitches}
+                    if p.refusal is not None or p.tally is None or (k != s0.stitch_seq and k not in sewn) or \
+                            any(_Reaches(tree, reach, x) for x in p.tally.rotten):
+                        continue
+                    if tree == tally.FILES and any(_Within(reach, f) for f in p.locked):
+                        continue
+                    if p.passed:
+                        if tree == tally.FILES:
+                            continue
+                        self.Glass("the rotten TAGS keys %s taken from slot %u: its ribbon to stitch %u passes over "
+                                   "a stitch — what the take coined is not laid out again" % (reach, s0.index, k))
+                        break
+                    for r, _reach in group:
+                        self._facsimile[r] = p
+                        taken[r] = (s0, len([x for x in (p.files if tree == tally.FILES else p.tags)
+                                             if _Within(reach, x)]))
+                    break
+        return taken
+
+    @staticmethod
+    def _InRange(r, p):
+        """The elements of state `p` range `r` reaches: files by id, tag ids."""
+        lo, hi = _Reach(r)
+        keys = p.files if r.tree == tally.FILES else p.tags
+        return [x for x in keys if lo <= x and (hi is None or x < hi)]
+
+    def _FacsimileTaken(self, t, r, p):
+        """Range `r` taken from state `p`: its files or tags in place of what
+        the rotten node held — every fid it reaches into unlocked, as the
+        kernel lets go of the files it set aside (tally_leaves.c,
+        BookAsideSettled)."""
+        t.rotten.remove(r)
+        if r.tree == tally.TAGS:
+            for i in self._InRange(r, p):
+                self.tags[i] = p.tags[i]
+            return
+        lo, hi = _Reach(r)
+        for fid in [f for f in self.locked if lo <= f and (hi is None or f < hi)]:
+            self.locked.pop(fid, None)
+            self.locked_runs.pop(fid, None)
+            t.locked.pop(fid, None)
+        for fid in self._InRange(r, p):
+            self.files[fid] = p.files[fid].Copy()
 
     def _RangeSentence(self, r):
         name = tally.TREE_NAMES[r.tree]
@@ -388,6 +520,7 @@ class BookMount:
         rule of its kind (§3.7) — a stitch that may not be applied is not,
         whole."""
         refused = self._Undone()
+        self.passed |= {seq for seq in refused if self.upto is None or seq <= self.upto}
         self._Verify()
         for u in self.ribbon.stitches:
             if self.upto is not None and u.seq > self.upto:
@@ -398,6 +531,7 @@ class BookMount:
                 files, tags, use, fallow, overlay = self._Stitch(u)
             except Refused as e:
                 self.Glass("stitch %u is not applied: %s" % (u.seq, e))
+                self.passed.add(u.seq)
                 continue
             dog_ear.Stitched(self.dog_ear, self.files, files, self.touched, self.coined, use is not self.use)
             self.files, self.tags, self.use = files, tags, use

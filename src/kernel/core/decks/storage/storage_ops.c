@@ -970,6 +970,8 @@ error_t StorageDeckRegister(void)
         { STORAGE_SNAP_INFO,    ObjSnapRefused,  OP_AUTH_APP, "storage.snap.info"  },
         { STORAGE_OBJ_ANCHOR,   ObjAnchor,       OP_AUTH_APP, "storage.anchor"     },
         { STORAGE_OBJ_WRITE_SETTLED, ObjWriteSettled, OP_AUTH_APP, "storage.write.settled" },
+        /* Escheat lets a rotten range's files and blocks go for good: system. */
+        { STORAGE_OBJ_ESCHEAT,  ObjEscheat,      OP_AUTH_SYSTEM, "storage.escheat" },
     };
 
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {

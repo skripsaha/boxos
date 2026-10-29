@@ -290,6 +290,17 @@
  * lasting refusal answers with its code (ERR_TAGFS_READ_ONLY,
  * ERR_DEVICE_NOT_READY). */
 #define STORAGE_OBJ_WRITE_SETTLED   0x25
+/* obj.escheat — Escheat, the act that lets go what a format-v2 book can never
+ * give back (spec_v2 §16.5 пп.19–20): every rotten range the Tally stood on
+ * names — its files declared lost, the blocks held for it let go, a rotten
+ * DIGESTS range's digests taken anew of the data the living files name — and
+ * every tail a Slip holds that can never be laid in its block, the file left
+ * with its blocks alone. The next Tally names none of it. params = none.
+ * out_crate = [u64 ranges][u64 files lost][u64 blocks let go][u64 tails lost]
+ * [u64 DIGESTS ranges known rotten, laid anew]. Only a cabin wearing system or god: any other is
+ * refused (ERR_ACCESS_DENIED at the gate, ERR_PERMISSION_DENIED past it).
+ * ERR_OBJECT_NOT_FOUND when there is nothing to let go. */
+#define STORAGE_OBJ_ESCHEAT         0x26
 /* snap.info — structured per-snapshot record by id. params = [u32 snap_id].
  * out_crate = [u32 id][u64 parent_file_id][u64 created_time][u32 file_count]
  *             [u64 total_size][u8 flags][char name[32]]. Gives the name-by-id

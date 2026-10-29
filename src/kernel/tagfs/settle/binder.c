@@ -1,4 +1,5 @@
 #include "binder_internal.h"
+#include "escheat.h"
 #include "../mount/book_mount.h"
 #include "../mount/under_glass.h"
 #include "../tag_registry/tag_registry.h"
@@ -214,6 +215,7 @@ static error_t TallySliceTake(BinderRun* r)
     r->chain_at  = BinderChainIndex(&c->quire);
     r->useful_at = g_binder.useful;
     r->made_ns   = rtc_get_unix64() * 1000000000ull;
+    EscheatTake();
     DogEarTake();
     g_binder.cost_known = 0;
     TagRegistryCoinedRange(tagfs_get_state()->registry, &lo, &hi);
@@ -339,6 +341,7 @@ static void TallyEnded(BinderRun* r, error_t rc)
                 r->slot_begun ? ", and the slot it was written over is held as naming either Tally" : "");
         DogEarTakenBack();
         FoliationDraftLetGo();
+        EscheatTakenBack();
     }
 #if BINDER_CHECKS
     BinderCheckLetGo();

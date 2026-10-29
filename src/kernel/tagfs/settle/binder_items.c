@@ -1,4 +1,5 @@
 #include "binder_internal.h"
+#include "escheat.h"
 #include "../mount/book_mount.h"
 #include "../tag_registry/tag_registry.h"
 #include "../integrity/gloss.h"
@@ -344,7 +345,8 @@ static bool DigestsRot(const BinderWork* w, BinderDigestAt* at, uint64_t block, 
     return false;
 }
 
-/* The digest of `block`: the Gloss's, or the Tally's. *have false when neither
+/* The digest of `block`: the Gloss's, or the Tally's — or, its leaf reading
+ * in no copy under Escheat, its data's (escheat.c). *have false when none
  * names one; a refusal of the Tally's leaf, the medium's or memory's. */
 static error_t DigestOf(uint64_t block, uint64_t* digest, bool* have)
 {
@@ -354,6 +356,8 @@ static error_t DigestOf(uint64_t block, uint64_t* digest, bool* have)
         return OK;
     TallyDigestSays says = TallyDigestFind(block, digest, &refused);
     *have = says == TALLY_DIGEST_NAMED;
+    if (says == TALLY_DIGEST_ROTTEN)
+        return EscheatDigestOf(block, digest, have);
     return says == TALLY_DIGEST_UNREAD ? refused : OK;
 }
 

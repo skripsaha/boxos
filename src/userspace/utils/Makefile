@@ -62,7 +62,7 @@ BOXCXX     = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o
 
 UTILS = help create show files tag untag name trash erase \
-        me info say reboot bye defrag fsck ipc_test memtag hw \
+        me info say reboot bye defrag escheat fsck ipc_test memtag hw \
         timezone logsave lastsaid rgbtest usetest luggagetest rollcall handset headcount \
         draft playtime lavalamp finish taskcenter
 

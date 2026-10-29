@@ -1,4 +1,5 @@
 #include "book_mount.h"
+#include "facsimile.h"
 #include "../settle/binder.h"
 #include "book_unit.h"
 #include "away.h"
@@ -9,6 +10,7 @@
 #include "../tag_registry/tag_registry.h"
 #include "../use_memory/use_memory.h"
 #include "../settle/sewing.h"
+#include "../settle/escheat.h"
 #include "boardroom.h"
 #include "crypto.h"
 #include "errata.h"
@@ -101,9 +103,7 @@ static bool BookTreeAuthoritative(const SpineRoot* r)
     return r->tree >= TALLY_FILES && r->tree <= TALLY_DIGESTS && !(r->flags & TALLY_ROOT_DERIVED);
 }
 
-/* Whether every authoritative root `s` names reads: OK, ERR_TAGFS_CORRUPTED
- * with why, or the medium's or memory's refusal. */
-static error_t BookSlotReads(const SpineSlot* s, char* why, size_t room)
+error_t BookSlotReads(const SpineSlot* s, char* why, size_t room)
 {
     char* words = kmalloc(512);
     if (!words)
@@ -431,6 +431,9 @@ error_t MountReadBook(const char** what)
     GroundCensusBegin();
     rc = BookWalk(what);
     if (rc == OK)
+        rc = MountFacsimile(what);
+    FacsimileLetGo();
+    if (rc == OK)
         rc = BookRibbon(what);
     if (rc == OK) {
         BookFilesLaid();
@@ -466,7 +469,9 @@ error_t MountReadBook(const char** what)
 
 bool BookFileLocked(uint64_t fid)
 {
-    if (tagfs_get_state()->format != DEED_FORMAT_V2)
+    /* A file Escheat let go is no file from its DONE on, as after the next
+     * mount, whose Tally names it no more (settle/escheat.h). */
+    if (tagfs_get_state()->format != DEED_FORMAT_V2 || EscheatLost(fid))
         return false;
     uint32_t lo = 0, hi = g_book.nlocked;
     while (lo < hi) {
@@ -559,6 +564,19 @@ bool TagFSFileLocked(uint64_t fid)
     return locked;
 }
 
+void BookKeptLetGo(BookKeptFile* k)
+{
+    for (uint32_t p = 0; p < k->nparcels; p++)
+        kfree(k->parcel_body[p]);
+    kfree(k->meta.filename);
+    kfree(k->meta.tag_ids);
+    kfree(k->parcel_b);
+    kfree(k->parcel_body);
+    kfree(k->parcel_len);
+    kfree(k->parcel_seq);
+    memset(k, 0, sizeof(*k));
+}
+
 void MountBookLetGo(void)
 {
     BookFile* f = &g_book.file;
@@ -568,17 +586,8 @@ void MountBookLetGo(void)
     SpineLetGo(g_book.slots, g_book.nslots);
     kfree(g_book.rot);
     kfree(g_book.locked);
-    for (uint32_t i = 0; i < g_book.nkept; i++) {
-        BookKeptFile* k = &g_book.kept[i];
-        for (uint32_t p = 0; p < k->nparcels; p++)
-            kfree(k->parcel_body[p]);
-        kfree(k->meta.filename);
-        kfree(k->meta.tag_ids);
-        kfree(k->parcel_b);
-        kfree(k->parcel_body);
-        kfree(k->parcel_len);
-        kfree(k->parcel_seq);
-    }
+    for (uint32_t i = 0; i < g_book.nkept; i++)
+        BookKeptLetGo(&g_book.kept[i]);
     kfree(g_book.kept);
     kfree(g_book.fallow);
     kfree(g_book.born);

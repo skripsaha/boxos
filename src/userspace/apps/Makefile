@@ -95,7 +95,7 @@ today.elf: $(BOXLIB_START) today.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(N
 # past the thousand lines one file may hold.
 QUILLTEST_OBJS = quilltest.o quilltest_throwaway.o quilltest_powercut.o quilltest_locks.o \
                  quilltest_turns.o quilltest_cores.o quilltest_ground.o quilltest_away.o \
-                 quilltest_room.o quilltest_book.o
+                 quilltest_room.o quilltest_book.o quilltest_escheat.o
 quilltest.elf: $(BOXLIB_START) $(QUILLTEST_OBJS) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $(QUILLTEST_OBJS) $(BOXLIB))
 

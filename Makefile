@@ -796,7 +796,7 @@ DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase \
-             me info say reboot bye defrag fsck ipc_test memtag hw \
+             me info say reboot bye defrag escheat fsck ipc_test memtag hw \
              timezone logsave lastsaid rgbtest usetest luggagetest headcount \
              draft playtime lavalamp finish taskcenter
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
@@ -1427,6 +1427,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/reboot.elf  "utility,system" \
 	$(UTILS_DIR)/bye.elf     "utility,system" \
 	$(UTILS_DIR)/defrag.elf  "utility,storage" \
+	$(UTILS_DIR)/escheat.elf "utility,system,storage" \
 	$(UTILS_DIR)/fsck.elf    "utility,storage" \
 	$(UTILS_DIR)/timezone.elf "utility,system,clock" \
 	$(USERSPACE_DIR)/hello.txt   "message,text" \

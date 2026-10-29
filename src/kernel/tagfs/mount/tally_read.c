@@ -337,6 +337,7 @@ static int TallyDigestIn(const uint8_t* s, uint32_t room, uint64_t block, uint64
 /* What is said of a leaf, once each: its rot, a copy of it that did not hold. */
 #define TALLY_DIGEST_SAID_ROT   1u
 #define TALLY_DIGEST_SAID_MEND  2u
+#define TALLY_DIGEST_SAID_NONE  4u      /* the leaf itself read in no copy: Escheat's to lay anew */
 
 /* A leaf's rot, said once — by why, its blocks read unchecked (§4.5 п.3). */
 static void TallyDigestRotSay(TallyDigestTable* t, uint32_t leaf, const char* why)
@@ -453,8 +454,10 @@ static TallyDigestSays TallyDigestFindIn(TallyDigestTable* t, uint64_t block, ui
             *refused = rc;
             return TALLY_DIGEST_UNREAD;
         }
-        if (!stream)
+        if (!stream) {
+            __atomic_fetch_or(&t->said[leaf], TALLY_DIGEST_SAID_NONE, __ATOMIC_ACQ_REL);
             return TALLY_DIGEST_ROTTEN;
+        }
         found = TallyDigestIn(stream, room, block, digest);
         TallyDigestCache(table, leaf, stream, room);
     }
@@ -486,6 +489,16 @@ bool TallyDigestLeafAt(uint32_t index, TallyPlace* out, bool* rotten)
 uint32_t TallyDigestLeaves(void)
 {
     return s_tables[__atomic_load_n(&s_table_at, __ATOMIC_ACQUIRE)].count;
+}
+
+uint32_t TallyDigestsRotKnown(void)
+{
+    TallyDigestTable* t = TallyDigestEnter();
+    uint32_t          n = 0;
+    for (uint32_t i = 0; i < t->count; i++)
+        n += t->leaves[i].rotten || (t->said && (t->said[i] & TALLY_DIGEST_SAID_NONE));
+    TallyDigestLeave(t);
+    return n;
 }
 
 error_t TallyDigestsRottenNext(uint32_t* leaf, error_t (*rot)(void* ctx, const TallyPlace* at), void* ctx,

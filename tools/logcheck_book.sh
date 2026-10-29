@@ -46,6 +46,7 @@ B4b B6c B10 B11 B11b B14 B15 B15b B15c B16 B16b B17 B17b B18 B19 B19b B19c B19d 
 B23 B23b B23c B23d B23e B24 B24b B26 B26b B26c B27 B27b B27c B27d B28 B28b B29 B29b B29c B29d B29e B29f B29g B29h B29i B29j B30 B30b B32
 B33
 B55a B55b B55c B55d B55e
+B59 B59b B60 B60c B4g B60e
 B46 B46b B47 B47b B48 B48b B49 B49b B50 B51 B52 B53 B54"
 
 # census_book_judge NAME — the prediction against the kernel's own lines, one
@@ -344,6 +345,7 @@ stand_binder_slot_flush_refused stand_binder_slot_unsure stand_binder_parcels st
 stand_binder_slack stand_binder_ground_back stand_binder_full_back stand_binder_standing_end
 stand_tip_in_parcel stand_tip_in_heals_files stand_tip_in_heals_digests stand_tip_in_emptied
 stand_tip_in_quires_held stand_tip_in_rotten_past
+stand_book_glean_quires stand_book_glean_copies stand_escheat_warrant stand_escheat_tail
 stand_endpaper_owed stand_endpaper_labeled_carries stand_endpaper_mount stand_endpaper_pending
 stand_endpaper_kept
 stand_away_other_stitches stand_away_not_landed stand_away_own_attempt stand_away_born_not_landed

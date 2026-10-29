@@ -551,3 +551,10 @@ int write_settled(file_id_t file_id)
                      BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
+
+int escheat(EscheatAnswer* said)
+{
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_ESCHEAT, NULL, 0, NULL, 0, said, sizeof(*said), NULL,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    return box_fail(rc);
+}
