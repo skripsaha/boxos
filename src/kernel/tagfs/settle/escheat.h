@@ -26,10 +26,11 @@
  * block — its base unreadable — which holds every Tally back for that file
  * alone (helm/engross.c). Under the act the Helm's service cuts the file to
  * its last whole block with the act's warrant, said, and the Tally goes on —
- * each tail refused before the ask, none refused after it; the tail of the
- * file the loader reads the kernel by, which no call changes, waits, said. And it gives one thing
- * back: a DIGESTS leaf no copy of which reads is laid anew, each living
- * block's digest taken of its data (§16.5 п.19) — the one way it is.
+ * each tail refused before the ask, none refused after it. The file the
+ * loader reads the kernel by, which no call changes, never holds a Tally back
+ * so: a book where it carries a Slip is only read (§16.6 п.4). And it gives
+ * one thing back: a DIGESTS leaf no copy of which reads is laid anew, each
+ * living block's digest taken of its data (§16.5 п.19) — the one way it is.
  *
  *   EscheatMounted    the mount's census done: the held ground parted — what
  *                     a file locked for another reason names stays held —

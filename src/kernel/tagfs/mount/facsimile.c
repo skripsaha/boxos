@@ -19,7 +19,24 @@
  *      — or the slot's Tally took in that very stitch;
  *   4. every file the range reaches stands in the slot's Tally, and its
  *      ribbon to that stitch is replayed for the range's keys whole — no
- *      stitch of them refused, no Undone that would not hold.
+ *      stitch refused for a record that may be of them, nor for its own
+ *      StitchHead or Clasp, no Undone that would not hold.
+ *
+ * ‼ RULE 4 IS THE RANGE'S KEYS', NOT THE WHOLE RIBBON'S (§4.5 п.3 (а), §16.5
+ * п.19: the ribbon is replayed "by the range's keys"; bookmount.py holds the
+ * same). The Tally stood on took in stitch k, so its writer applied every
+ * stitch to k whole — a Tally is never written under glass — and the records
+ * of the range's keys among them, laid on the older slot's elements of those
+ * keys, give what the rotten node held: a record of other keys changes none of
+ * them, so a stitch refused for one alone (a Born of a fid outside the range
+ * that lives) leaves the replay of the keys whole. A record whose key does not
+ * read, or of a kind this reader does not know and may not step over, may be
+ * of them: it refuses the stitch as the mount's replay does, and the replay is
+ * not whole; so does a stitch refused for its own StitchHead or Clasp, or an
+ * Undone that would not hold — the stitch it stands in is applied by no one.
+ * The whole ribbon's rule — any stitch the older slot's own mount refuses —
+ * would ask that slot's whole state to weigh the refusals that turn on other
+ * keys' elements, which a mount that reads the range's leaves alone has not.
  *
  * Rules 1–3 are weighed before anything is laid in; rule 4 is known only by
  * laying the range in. The first slot that holds gives the range back: the
@@ -263,10 +280,13 @@ static error_t LookLaid(const FacsimileLook* l)
 }
 
 /* Group `g` laid in from slot `s` failed rule 4 for `why`: a FILES group laid
- * out again, the next slot weighed; a TAGS group under glass (above). */
-static void FacsimileUnfit(const FacsimileGroup* g, const SpineSlot* s, const char* why, bool* done)
+ * out again, the next slot weighed; a TAGS group under glass (above). Out of
+ * line: its sentence would stand on FacsimileTake's frame, from which the
+ * replay goes down the ribbon's records. */
+static __attribute__((noinline)) void FacsimileUnfit(const FacsimileGroup* g, const SpineSlot* s, const char* why,
+                                                     bool* done)
 {
-    char words[384], hi[24];
+    char words[576], hi[24];
     if (g->hi == UINT64_MAX)
         ksnprintf(hi, sizeof(hi), "the end");
     else
@@ -292,19 +312,14 @@ static void FacsimileUnfit(const FacsimileGroup* g, const SpineSlot* s, const ch
 static error_t FacsimileTake(const FacsimileGroup* g, const SpineSlot* s, FacsimileLook* l, RibbonWalk* w,
                              uint64_t k, bool* done)
 {
-    char     why[192] = "";
+    char     why[352] = "";
     uint32_t replayed = 0;
-    bool     whole    = true;
     error_t  rc;
     for (uint32_t i = g->first; g->tree == TALLY_FILES && i <= g->last; i++)
         BookRangeTaken(&s_ranges[i].at);    /* no record the replay applies is locked by it */
     rc = LookLaid(l);
-    if (rc == OK && !(g->tree == TALLY_FILES && BookFacsimileUnfit(why, sizeof(why))) && w) {
-        rc = RibbonFacsimile(w, g->tree, l->lo, l->hi, k, &replayed, &whole);
-        if (rc == OK && !whole)
-            ksnprintf(why, sizeof(why), "its ribbon to stitch %llu passes over a stitch of these keys — refused, "
-                      "or its Undone would not hold", (unsigned long long)k);
-    }
+    if (rc == OK && !(g->tree == TALLY_FILES && BookFacsimileUnfit(why, sizeof(why))) && w)
+        rc = RibbonFacsimile(w, g->tree, l->lo, l->hi, k, &replayed, why, sizeof(why));
     if (rc != OK)
         return rc;
     if (why[0]) {

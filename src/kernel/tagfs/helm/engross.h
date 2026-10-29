@@ -26,18 +26,19 @@
  * holder at a cycle's DONE (BinderWeigh), and by the let-go of a Helm a turn
  * found held (HelmTryNoted). With no TagFS lock held.
  *
- * A file whose tail would not be laid — its last block unreadable, the file
- * the loader reads the kernel by, a file the mount locked, no ground — is the
- * file's own: the walk goes on past it, says what it left once while that
- * stays the same, and tries a file refused for itself again only once its
- * record changes. The Tally waits for each such tail (BinderMayNot). */
+ * A file whose tail would not be laid — its last block unreadable, a file the
+ * mount locked, no ground — is the file's own: the walk goes on past it, says
+ * what it left once while that stays the same, and tries a file refused for
+ * itself again only once its record changes. The Tally waits for each such
+ * tail (BinderMayNot). */
 void    EngrossAsked(void);
 
 /* The tails the last walk that tried every tail left refused for their files'
- * own sake — none for a refusal that may pass — that Escheat can cut: every
- * one but the tail of the file the loader reads the kernel by, which no call
- * changes, *boot. From any core, one word that may be a walk old (escheat.h). */
-uint32_t EngrossRefusedNow(uint32_t* boot);
+ * own sake — none for a refusal that may pass — that Escheat can cut. From
+ * any core, one word that may be a walk old (escheat.h). The file the loader
+ * reads the kernel by is never among them: a book where it carries a Slip is
+ * only read (mount/book_ground.c, BookBootSlipped). */
+uint32_t EngrossRefusedNow(void);
 
 /* Every file's tail laid in its block now, in the caller's own call — the
  * Tally a caller asks for and waits for (BinderRunWhole). OK; or, said, the

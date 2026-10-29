@@ -194,6 +194,17 @@ static bool RibbonSeqSewn(const RibbonWalk* w, uint64_t seq)
     return false;
 }
 
+/* A stitch the replay does not apply, for `why`: the volume under glass — or,
+ * of an older slot's ribbon (Facsimile), the slot does not stand in for the
+ * range, the first such stitch kept in the mount's words for its line. */
+static void RibbonNotApplied(RibbonReplay* rp, const char* why)
+{
+    if (!rp->only)
+        TagFSUnderGlass(why);
+    else if (!rp->passed++)
+        ksnprintf(rp->passed_why, sizeof(rp->passed_why), "%s", why);
+}
+
 /* One Undone of stitch `u`, the `i`-th record: its fids passed over in the
  * stitch it names, said — or the stitch not applied for it. */
 static error_t RibbonUndoneOne(RibbonReplay* rp, const RibbonUnit* u, uint32_t i)
@@ -206,9 +217,7 @@ static error_t RibbonUndoneOne(RibbonReplay* rp, const RibbonUnit* u, uint32_t i
     uint64_t            id = 0;
     if (RibbonUndoneGet(u->stream + r->body, r->len, &d, &used) == TALLY_BODY_BROKEN) {
         ksnprintf(why, sizeof(why), "stitch %llu carries an Undone that does not read", (unsigned long long)u->seq);
-        if (!rp->only)
-            TagFSUnderGlass(why);
-        rp->passed += rp->only ? 1u : 0u;
+        RibbonNotApplied(rp, why);
         return RibbonListAdd(&rp->refused, &rp->nrefused, &rp->caprefused, u->seq) ? OK : ERR_NO_MEMORY;
     }
     bool after = false;
@@ -240,9 +249,7 @@ static error_t RibbonUndoneOne(RibbonReplay* rp, const RibbonUnit* u, uint32_t i
                   RibbonUndoneWhy(d.why, said, sizeof(said)));
         return OK;
     }
-    if (!rp->only)
-        TagFSUnderGlass(why);     /* of an older slot's ribbon (Facsimile): the slot does not stand in */
-    rp->passed += rp->only ? 1u : 0u;
+    RibbonNotApplied(rp, why);
     return RibbonListAdd(&rp->refused, &rp->nrefused, &rp->caprefused, u->seq) ? OK : ERR_NO_MEMORY;
 }
 
@@ -538,12 +545,10 @@ static error_t RibbonStitchApplied(RibbonReplay* rp, const RibbonUnit* u)
         rp->next = ext;                 /* the files a gathering let go noted no extension */
         rc       = RibbonStitchGathered(rp, u, st);
     }
-    if (rc == OK && st->refused[0] && rp->only) {
-        rp->passed++;                   /* Facsimile's: the slot does not stand in for the range */
-    } else if (rc == OK && st->refused[0]) {
+    if (rc == OK && st->refused[0]) {
         ksnprintf(why, sizeof(why), "stitch %llu is not applied: %s", (unsigned long long)u->seq, st->refused);
-        TagFSUnderGlass(why);
-    } else if (rc == OK && !st->refused[0]) {
+        RibbonNotApplied(rp, why);
+    } else if (rc == OK) {
         rc = RibbonStageLaid(rp, st);
         g_book.said.applied += rc == OK && !rp->only;
     }
@@ -764,11 +769,12 @@ error_t RibbonTranscribe(RibbonWalk* w, const char** what)
 }
 
 error_t RibbonFacsimile(RibbonWalk* w, uint64_t tree, uint64_t lo, uint64_t hi, uint64_t upto, uint32_t* replayed,
-                        bool* whole)
+                        char* passed, size_t room)
 {
     RibbonReplay* rp = kmalloc(sizeof(RibbonReplay));
     error_t       rc = rp ? OK : ERR_NO_MEMORY;
     *replayed = 0;
+    passed[0] = '\0';
     if (rp) {
         memset(rp, 0, sizeof(*rp));
         rp->w       = w;
@@ -788,7 +794,9 @@ error_t RibbonFacsimile(RibbonWalk* w, uint64_t tree, uint64_t lo, uint64_t hi, 
         rc = RibbonStitchApplied(rp, w->stitch[s]);
         *replayed += rc == OK;
     }
-    *whole = rp && rp->passed == 0;
+    if (rc == OK && rp->passed)
+        ksnprintf(passed, room, "its ribbon to stitch %llu passes over a stitch that may be of these keys — %s",
+                  (unsigned long long)upto, rp->passed_why);
     if (rp)
         RibbonReplayLetGo(rp);
     return rc;

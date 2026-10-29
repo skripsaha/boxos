@@ -62,10 +62,10 @@ def RecordKinds(g, base, entries, sectors):
 def RecordCases(bt):
     f1, f2, f3 = bt.fid, bt.fid + 1, bt.fid + 2
 
-    def Kind31(ignorable):
+    def Foreign(kind, ignorable):
         def Plant(o):
             d = bt.Fresh(o, 0, 1, 5)
-            bt.Pen(o).Sew([Born(bt.F, f1, d, b"kind31"), stitch.Unknown(31, ignorable, b"\x07\x07")],
+            bt.Pen(o).Sew([Born(bt.F, f1, d, b"kind%u" % kind), stitch.Unknown(kind, ignorable, b"\x07\x07")],
                           flags=stitch.DATA_FLUSHED)
         return Plant
 
@@ -91,13 +91,16 @@ def RecordCases(bt):
             bt.Zero(o, s.vlbas[4], s.of - 4)
 
     return [
-        Case("B10 a record of kind 31 not to be stepped over", Kind31(0), must={"UNDER_GLASS"}, checks=[
+        Case("B10 a record of kind 31 not to be stepped over", Foreign(31, 0), must={"UNDER_GLASS"}, checks=[
             ("the volume is read only and the stitch is not applied",
              lambda c: Glass(c, "kind 31") and f1 not in c.mount.files),
             ("its file id is never given again", lambda c: c.mount.counts["next_fid"] == f1 + 1)]),
-        Case("B11 a record of kind 31 to step over", Kind31(1), checks=[
+        Case("B11 a record of kind 31 to step over", Foreign(31, 1), checks=[
             ("the stitch is applied: %u is born" % f1, lambda c: f1 in c.mount.files and not c.mount.glass),
             ("and nothing is said", lambda c: not c.findings)]),
+        Case("B11c a record of kind 0 to step over: no kind is 0, a tag of 0 being PAD (§2.3)", Foreign(0, 1),
+             checks=[("the stitch is applied: %u is born" % f1, lambda c: f1 in c.mount.files and not c.mount.glass),
+                     ("and nothing is said", lambda c: not c.findings)]),
         Case("B14 a Frozen in a stitch", One([stitch.Frozen(1, 0, [], b"snap")]), must={"UNDER_GLASS"},
              checks=[("the volume is read only: a bookmark", lambda c: Glass(c, "Frozen"))]),
         Case("B15 a Coined RETIRED", One([stitch.Coined(bt.tag, retired=True)]), must={"UNDER_GLASS"},

@@ -38,9 +38,12 @@
 // stitch closed and damaged read by `lead`, a branch of another history left
 // out, a torn tail said, an Undone passed over, a Slip laid on the last block
 // and a fresh block held to the digest its record carries (Gloss) on every
-// road a read takes. Then every sector it laid is put back and the volume is
-// mounted again as it was. No cycle runs while a test's stitches lie on the
-// medium: the runner holds the cadence, and these tests ask for none.
+// road a read takes, and a Slip on the file the loader reads the kernel by
+// taking the book to read only. Then every sector it laid is put back and the
+// volume is mounted again as it was — written on again where a test's mount
+// left it under glass, for the glass is let go of with the volume. No cycle runs
+// while a test's stitches lie on the medium: the runner holds the cadence, and
+// these tests ask for none.
 // ============================================================================
 
 static uint8_t            s_ribbon_sectors[VOLUME_BLOCK_BYTES];
@@ -659,6 +662,55 @@ out:
     return verdict;
 }
 
+/* A Slip on the file the loader reads the kernel by (spec_v2 §16.6 п.4): a
+ * Shaped of it laying a Slip of its last block's own bytes — a stitch only
+ * another writer sews, for no call of this kernel changes that file. Its tail
+ * is neither laid in its block nor let go by Escheat, so no Tally could ever be
+ * written past it: the mount takes the book to read only at once. */
+static TestResult TestStandRibbonBootSlip(void)
+{
+    TestResult          verdict = TEST_PASS;
+    StandRibbon         w;
+    StandRibbonRecords* r    = StandRibbonFresh(0);
+    FileRecord*         rec  = NULL;
+    uint64_t            boot = g_book.boot_fid, gen = 0, size = 0, mtime = 0;
+    uint8_t             body[96], tail[16];
+    const char*         aside = StandRibbonAside(&w);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(!TagFSIsUnderGlass() && boot && StandRibbonLive(boot, &rec),
+                "the book is written on, and names the file the loader reads the kernel by");
+    gen   = rec->gen;
+    size  = rec->size;
+    mtime = rec->modified_time;
+    FileRecordRelease(rec);
+    TEST_ASSERT(size > 0, "a file of bytes");
+    uint64_t last = (size - 1u) / TAGFS_BLOCK_SIZE * TAGFS_BLOCK_SIZE;
+    uint32_t n    = size - last < sizeof(tail) ? (uint32_t)(size - last) : (uint32_t)sizeof(tail);
+    TEST_ASSERT_OK(StandRibbonReadAt(boot, last, n), "the first bytes of its last block are read");
+    memcpy(tail, g_test_output, n);
+    RibbonShaped sh = { .fid = boot, .base = w.top + 1u - gen, .size = size, .mtime_ns = mtime,
+                        .slip = { .off = 0, .len = n, .bytes = tail } };
+    StandRibbonPut(r, RIBBON_SHAPED, body, RibbonShapedBodyPut(body, &sh));
+    TEST_ASSERT(StandRibbonBaseline(), "the volume, mounted on its ribbon as it stands and counted, is let go of");
+    StitchHead h = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
+    TEST_ASSERT(StandRibbonSew(&w, w.at, w.top + 1u, &h, r, VOLUME_BLOCK_SECTORS),
+                "a Shaped of it laying a Slip of those bytes on its last block is sewn");
+    TEST_ASSERT(StandRibbonUp(), "the volume mounts on it");
+    TEST_ASSERT(StandRibbonLive(boot, &rec), "the file stands");
+    bool slipped = rec->slip != NULL && rec->size == size;
+    FileRecordRelease(rec);
+    TEST_ASSERT(slipped, "its last block carries the Slip");
+    TEST_ASSERT(TagFSIsUnderGlass(), "and the book may only be read, from the mount on: no Tally is written past "
+                "a tail no call lays");
+out:
+    if (!StandRibbonPutBack(&w))
+        verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
+                               w.nlaid, 0);
+    return verdict;
+}
+
 static const TestCase g_stand_ribbon_tests[] = {
     { .name = "stand_ribbon_slip_three_roads", .func = TestStandRibbonSlipThreeRoads,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
@@ -671,6 +723,8 @@ static const TestCase g_stand_ribbon_tests[] = {
     { .name = "stand_ribbon_dead_branch", .func = TestStandRibbonDeadBranch,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_ribbon_undone", .func = TestStandRibbonUndone,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_ribbon_boot_slip", .func = TestStandRibbonBootSlip,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
 };
 

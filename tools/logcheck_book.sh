@@ -42,12 +42,12 @@
 # (selftest_book_ribbon_damage.py).
 CENSUS_BOOK_LANDINGS="B0 B1 B2 B3 B4 B4p B5 B6 B6b B7 B7b B7c B8 B9 B9b B12 B13 B25 B34 B35 B36 B37 B38 B38b
 B38c B39 B40 B41 B42 B42b B43 B43b B43c B44 B45
-B4b B6c B10 B11 B11b B14 B15 B15b B15c B16 B16b B17 B17b B18 B19 B19b B19c B19d B19e B20 B20b B21 B21b B21c B22 B22b
+B4b B6c B10 B11 B11b B11c B14 B15 B15b B15c B16 B16b B17 B17b B18 B19 B19b B19c B19d B19e B20 B20b B21 B21b B21c B22 B22b
 B23 B23b B23c B23d B23e B24 B24b B26 B26b B26c B27 B27b B27c B27d B28 B28b B29 B29b B29c B29d B29e B29f B29g B29h B29i B29j B30 B30b B32
 B33
 B55a B55b B55c B55d B55e
-B59 B59b B60 B60c B4g B60e
-B61 B62 B63 B64
+B59 B59b B60 B60c B4g B60e B59d B59e B59f B59g B59h B65 B59i B59j B59k B59l
+B62 B63 B64
 B46 B46b B47 B47b B48 B48b B49 B49b B50 B51 B52 B53 B54"
 
 # census_book_judge NAME — the prediction against the kernel's own lines, one
@@ -344,7 +344,7 @@ stand_tally_medium_returns
 stand_tally_live_without_rows stand_tally_map_holds stand_tally_map_claim_named
 stand_tally_map_short_of_memory stand_blockfail_two_ranges
 stand_ribbon_slip_three_roads stand_ribbon_torn_tail stand_ribbon_next_quire stand_ribbon_closed_damaged
-stand_ribbon_dead_branch stand_ribbon_undone
+stand_ribbon_dead_branch stand_ribbon_undone stand_ribbon_boot_slip
 stand_stitch_answers_after_flush stand_stitch_use_context stand_stitch_coined stand_stitch_halt_clean
 stand_stitch_retry_atom stand_stitch_retry_flush stand_stitch_refused_everywhere stand_stitch_ribbon_runs_out
 stand_stitch_tally_cost stand_stitch_medium_lied stand_stitch_replug_kept stand_blockfail_refused_writes

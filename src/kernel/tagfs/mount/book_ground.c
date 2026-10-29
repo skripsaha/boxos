@@ -285,10 +285,36 @@ static uint32_t BookFilesWalk(bool laid)
     return crc;
 }
 
-/* Every live file's ground claimed and the print of them taken. */
+/*
+ * ‼ A SLIP ON THE FILE THE LOADER READS THE KERNEL BY PUTS THE BOOK UNDER
+ * GLASS (spec_v2 §16.6 п.4). The loader reads that file by its blocks (§9.1)
+ * and no call changes it (ink.c, InkGuardSays), so this kernel never gives it
+ * a Slip (plot_slip.c) — one there is another writer's, and its tail can be
+ * neither laid in its block (an Engross is a change of the file) nor let go by
+ * Escheat (its cut is one too), while every Tally waits for it (LooseLeaves).
+ * A book no Tally can ever be written of again is not written on at all: the
+ * mount says so now, not once the ribbon has run out of room.
+ */
+static void BookBootSlipped(void)
+{
+    char        why[256];
+    FileRecord* rec = g_book.boot_fid ? FileMapRecordHold(tagfs_get_state()->files, g_book.boot_fid, NULL) : NULL;
+    bool        slipped = rec && rec->slip;
+    FileRecordRelease(rec);
+    if (!slipped)
+        return;
+    ksnprintf(why, sizeof(why), "fid %llu, the file the loader reads the kernel by, carries a Slip on its last "
+              "block — no call changes that file, so its tail is neither laid in its block nor let go by Escheat, "
+              "and no Tally could be written past it", (unsigned long long)g_book.boot_fid);
+    TagFSUnderGlass(why);
+}
+
+/* Every live file's ground claimed and the print of them taken; the file the
+ * loader reads the kernel by found, and held to carry no Slip. */
 void BookFilesLaid(void)
 {
     g_book.files_print = BookFilesWalk(true);
+    BookBootSlipped();
 }
 
 #ifdef CONFIG_VOLUME_TESTS

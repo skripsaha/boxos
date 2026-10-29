@@ -144,11 +144,22 @@ class BookMount:
     Undone each: [(seq of the stitch undone, why, [fids rising])] in order
     (§16.5 п.4, the kernel's mount/errata.c)."""
 
-    def __init__(self, g, stand=None, upto=None):
+    def __init__(self, g, stand=None, upto=None, only=None, known=None):
         """`stand`: the index of the slot to stand on, whatever the others
         hold; `upto`: the last stitch replayed — the state after it, as a
-        Tally written of it holds (binder.BindCheck). Both None for a mount."""
-        self.g, self.stand, self.upto = g, stand, upto
+        Tally written of it holds (binder.BindCheck). Both None for a mount.
+        `only`: (tree, reach) — Facsimile's weighing of an older slot (the
+        kernel's RibbonFacsimile): its Tally read, its ribbon to `upto`
+        replayed for the records that may be of the keys `reach` of `tree`
+        alone (_MayBeOf) — no data checked, nothing settled, no range of its
+        own weighed: `passed` and `locked`, the Tally's, are what rule 4 asks
+        of it (_Facsimile). `known`: of a FILES `only`, the tags {id: tag} the
+        mount that weighs it knows — the kernel's registry then: the TAGS of
+        the Tally stood on and those a TAGS range laid in gave
+        (ribbon_records.c RibbonTagKnown). A Born or Labeled of the keys is
+        held to them, not to the older Tally's: the replay applies no Coined
+        (_MayBeOf), and the Tally stood on names every tag coined to it."""
+        self.g, self.stand, self.upto, self.only, self.known = g, stand, upto, only, known
         self.refusal, self.glass, self.said = None, [], []
         self.slots, self.slot, self.tally, self.ribbon = [], None, None, None
         self.files, self.locked, self.locked_runs, self.tags, self.use = {}, {}, {}, {}, b""
@@ -162,10 +173,12 @@ class BookMount:
         self.seen_fid = self.seen_tag = self.seen_bookmark = 0
         self.counts = {}
         if self._Frame() and self._Spine() and self._Tally():
-            self._Older()
+            if only is None:
+                self._Older()
             self._Ribbon()
             self._Replay()
-            self._Settle()
+            if only is None:
+                self._Settle()
         self._Bounds()
 
     def Say(self, code, severity, text):
@@ -236,7 +249,7 @@ class BookMount:
                      "hold — %s; copy %u is read, and the next Tally writes the node again (§2.5)"
                      % (tally.TREE_NAMES[node.tree], node.level, "/".join(map(str, node.blocks)), k + 1,
                         why, node.copy + 1))
-        taken = self._Facsimile(t)
+        taken = {} if self.only is not None else self._Facsimile(t)
         for r in t.rotten:
             if r in taken:
                 s0, n = taken[r]
@@ -258,6 +271,8 @@ class BookMount:
         self.files = {fid: fs.Copy() for fid, fs in t.content.files.items()}
         self.locked, self.locked_runs = dict(t.locked), dict(t.locked_runs)
         self.tags, self.use = dict(t.content.tags), t.content.use
+        if self.only is not None and self.only[0] == tally.FILES:
+            self.tags = dict(self.known)
         for r in taken:
             self._FacsimileTaken(t, r, self._facsimile[r])
         return True
@@ -265,23 +280,33 @@ class BookMount:
     def _Facsimile(self, t):
         """§4.5 п.3 (а), §16.5 п.19 — Facsimile: a rotten range of FILES or
         TAGS the newest older slot that holds reads whole — its Tally and its
-        ribbon replayed to the stitch the slot stood on is the state after
-        (the state binder.BindCheck holds a Tally to) — is taken from there,
-        for every key of it _Reach names. {range: (the slot, the elements)};
+        ribbon replayed for the range's keys to the stitch the slot stood on
+        is the state after (the state binder.BindCheck holds a Tally to) — is
+        taken from there, for every key of it _Reach names. {range: (the
+        slot, the elements)};
         the states kept for _FacsimileTaken. A node the Tallies share rots for
         them all: then no slot stands in (honestly rarer than with whole
         Tallies). The kernel's rules (mount/facsimile.c): TAGS weighed before
         FILES; ranges of a tree whose keys reach into each other — two FILES
         ranges that share a fid — weighed as one, taken together or not at
         all; a slot stands in only where no file of the keys is locked in its
-        state and its ribbon to the stitch passed over no stitch. A TAGS range
-        the replay passed over a stitch of puts the volume under glass (the
+        Tally and its ribbon to the stitch, replayed for the keys alone,
+        passed over no stitch — refused for a record that may be of them
+        (_MayBeOf), for its own StitchHead or Clasp, or for an Undone that
+        would not hold. A stitch refused for a record of other keys alone
+        leaves the keys whole: the Tally stood on took the stitch in, so its
+        writer applied it whole, and a record of other keys changes none of
+        these (the kernel's argument, facsimile.c rule 4). A TAGS range the
+        replay passed over a stitch of puts the volume under glass (the
         kernel cannot lay a coined tag out again). A DIGESTS range is not
         weighed: the kernel reads a DIGESTS leaf only when a block of it is
         (§16.3 п.12) — none at the mount — and a leaf no copy of which reads
         is laid anew of the data by Escheat alone (§16.5 п.19,
-        binder._DigestsWanted); a USE range is said as it is."""
-        self._facsimile, taken = {}, {}
+        binder._DigestsWanted); a USE range is said as it is. The tags a
+        FILES replay knows are the kernel's registry as it weighs: the Tally
+        stood on's, and every TAGS range laid in — taken, or under glass, for
+        what the take coined stays coined (LookLaid, RibbonStageLaid)."""
+        self._facsimile, taken, known = {}, {}, dict(t.content.tags)
         k = self.slot.stitch_seq
         older = sorted((s for s in self.slots if s.state == "valid" and s.seq < self.slot.seq), key=lambda s: -s.seq)
         for tree in (tally.TAGS, tally.FILES):
@@ -291,13 +316,15 @@ class BookMount:
                 for s0 in older:
                     if s0.stitch_seq > k:
                         continue
-                    p = BookMount(self.g, stand=s0.index, upto=k)
+                    p = BookMount(self.g, stand=s0.index, upto=k, only=(tree, reach), known=known)
                     sewn = set() if p.ribbon is None else {u.seq for u in p.ribbon.stitches}
                     if p.refusal is not None or p.tally is None or (k != s0.stitch_seq and k not in sewn) or \
                             any(_Reaches(tree, reach, x) for x in p.tally.rotten):
                         continue
                     if tree == tally.FILES and any(_Within(reach, f) for f in p.locked):
                         continue
+                    if tree == tally.TAGS:
+                        known.update((i, x) for i, x in p.tags.items() if _Within(reach, i))
                     if p.passed:
                         if tree == tally.FILES:
                             continue
@@ -422,10 +449,15 @@ class BookMount:
     def _Undone(self):
         """Every Undone of the ribbon, first (pass 1): {seq undone: {fid}} —
         refusing a stitch whose Undone names no stitch between the slot's
-        Tally and itself (§3.7's table)."""
+        Tally and itself (§3.7's table). To `upto` alone: the Tally written of
+        it knew no stitch past it, and absorbs an Undone of one past it that
+        names a stitch to it (§2.8) — the kernel's RibbonFacsimile reads none
+        of them."""
         sewn = {u.seq for u in self.ribbon.stitches}
         refused = set()
         for u in self.ribbon.stitches:
+            if self.upto is not None and u.seq > self.upto:
+                break
             for i, (kind, _ign, body, _at) in enumerate(u.records):
                 if kind != UNDONE:
                     continue
@@ -520,8 +552,9 @@ class BookMount:
         rule of its kind (§3.7) — a stitch that may not be applied is not,
         whole."""
         refused = self._Undone()
-        self.passed |= {seq for seq in refused if self.upto is None or seq <= self.upto}
-        self._Verify()
+        self.passed |= refused
+        if self.only is None:
+            self._Verify()
         for u in self.ribbon.stitches:
             if self.upto is not None and u.seq > self.upto:
                 break
@@ -556,10 +589,28 @@ class BookMount:
                 raise Refused("its StitchHead or Clasp is %u byte(s) longer than this reader knows — "
                               "written by a kernel that knows more" % u.head.longer)
             for kind, ign, body, _at in u.records:
-                use = self._Record(u, kind, ign, body, files, tags, fallow, use, overlay)
+                if self.only is None or self._MayBeOf(kind, ign, body, u.seq):
+                    use = self._Record(u, kind, ign, body, files, tags, fallow, use, overlay)
             self._Fresh(u)
             if len(self.undone.get(u.seq, ())) == passed:
                 return files, tags, use, fallow, overlay
+
+    def _MayBeOf(self, kind, ign, body, seq):
+        """May a record be of the keys Facsimile replays (`only`) — the
+        kernel's RibbonRecordWithin: its key among them, or not known — a
+        body of a kind that names the tree's keys that does not read, a kind
+        this reader does not know and may not step over — which, applied,
+        refuses the stitch?"""
+        tree, reach = self.only
+        if kind not in KIND_NAMES or kind in (stitch.STITCH_HEAD, stitch.CLASP):
+            return not ign
+        if kind not in ((COINED,) if tree == tally.TAGS else (BORN, SHAPED, LABELED, QUITCLAIM)):
+            return False
+        try:
+            d = stitch.RecordDecode(kind, body, seq)
+        except Short:
+            return True
+        return _Within(reach, d["tid"] if kind == COINED else d["fid"])
 
     @staticmethod
     def _FreshNamed(u):
@@ -773,6 +824,25 @@ class BookMount:
         owned = RunsNormal([r for fs in self.files.values() for r in fs.Ground()])
         self.fallow = ondisk.RunsSubtract(RunsNormal(self.fallow), owned)
         self.errata = [(seq, why, sorted(fids)) for seq, (why, fids) in sorted(self._errata.items()) if fids]
+        self._BootSlipped()
+
+    def _BootSlipped(self):
+        """§16.6 п.4: the file the loader reads the kernel by — the first live
+        file by id whose ground lies on the head deed's BOOT run, as the
+        kernel names it (book_ground.c BookFileGround) — carrying a Slip. No
+        call changes that file, so its tail is neither laid in its block nor
+        let go by Escheat, and no Tally could be written past it: the book is
+        only read, from the mount on (BookBootSlipped)."""
+        boot = self.g.deed["boot"]
+        if boot is None or not boot["kernel_blocks"]:
+            return
+        lo, hi = boot["kernel_block"], boot["kernel_block"] + boot["kernel_blocks"]
+        fid = next((f for f in sorted(self.files) if any(s < hi and s + n > lo for s, n in self.files[f].Ground())),
+                   None)
+        if fid is not None and self.files[fid].slips:
+            self.Glass("fid %u, the file the loader reads the kernel by, carries a Slip on its last block — no call "
+                       "changes that file, so its tail is neither laid in its block nor let go by Escheat, and no "
+                       "Tally could be written past it" % fid)
 
     def _Erratum(self, seq, why, fid):
         """`fid` rolled back from stitch `seq` for `why` into the verdict: one

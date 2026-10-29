@@ -25,18 +25,16 @@ typedef struct {
     uint32_t left;
     uint32_t refused;     /* of `left`, refused by anything but a held Helm or the ribbon's room: said */
     uint32_t own;         /* of `refused`, refused for the file's own sake (EngrossActs): Escheat's to cut */
-    uint32_t boot;        /* of `own`, the file the loader reads the kernel by: no call changes it */
     uint64_t first_fid;
     error_t  first;
     uint64_t act;         /* the asks of Escheat this walk cuts tails for — 0 for none (EscheatTailsActing) */
     uint64_t reach;       /* the newest Ink whose record of a file the act reaches (EscheatTailsReach) */
 } EngrossWalkState;
 
-/* A refusal that is the file's own — its last block unreadable, the file the
- * loader reads the kernel by, a file the mount locked — made to the record
- * that Ink `gen` made, in mounting `epoch`: tried again only once the record
- * changes, so a rotten tail is neither read nor said at every turn — or by
- * the walk that answers an ask of Escheat. */
+/* A refusal that is the file's own — its last block unreadable, a file the
+ * mount locked — made to the record that Ink `gen` made, in mounting `epoch`:
+ * tried again only once the record changes, so a rotten tail is neither read
+ * nor said at every turn — or by the walk that answers an ask of Escheat. */
 typedef struct {
     uint64_t fid;
     uint64_t gen;
@@ -51,9 +49,8 @@ static HelmWaiter        s_service = { .run = EngrossTurn };
 static volatile uint32_t s_listed;
 static volatile uint64_t s_asked;      /* asks made: each EngrossAsked counts one */
 /* The tails the last walk that tried every tail left refused for their own
- * sake, the file the loader reads the kernel by's above bit 32 — one word, so
- * a reader on another core never pairs one walk's count with another's: */
-static volatile uint64_t s_owned;
+ * sake, read from any core (EngrossRefusedNow): */
+static volatile uint32_t s_owned;
 /* The service point's alone — one listing runs at a time (s_listed): */
 static uint64_t          s_pass;       /* the asks the walk under way answers */
 static EngrossWalkState  s_walk;
@@ -192,12 +189,9 @@ static const EngrossRefusal* EngrossKnownOf(uint64_t fid, uint64_t gen)
     return NULL;
 }
 
-uint32_t EngrossRefusedNow(uint32_t* boot)
+uint32_t EngrossRefusedNow(void)
 {
-    uint64_t owned = __atomic_load_n(&s_owned, __ATOMIC_ACQUIRE);
-    uint32_t own   = (uint32_t)owned;
-    *boot          = (uint32_t)(owned >> 32);
-    return own > *boot ? own - *boot : 0;
+    return __atomic_load_n(&s_owned, __ATOMIC_ACQUIRE);
 }
 
 static void EngrossKnow(uint64_t fid, uint64_t gen, error_t rc)
@@ -226,10 +220,8 @@ static error_t EngrossOne(EngrossWalkState* w, uint64_t fid, bool known, uint32_
         return rc;
     if (rc == ERR_BUSY || rc == ERR_WOULD_BLOCK)
         return OK;
-    if (EngrossActs(rc)) {
+    if (EngrossActs(rc))
         w->own++;
-        w->boot += fid == g_book.boot_fid ? 1u : 0u;
-    }
     if (w->refused++ == 0) {
         w->first_fid = fid;
         w->first     = rc;
@@ -281,7 +273,7 @@ static bool EngrossWalkTried(const EngrossWalkState* w)
  * the word Escheat is asked on (EngrossRefusedNow), from either walk. */
 static void EngrossWalkOwned(const EngrossWalkState* w)
 {
-    __atomic_store_n(&s_owned, ((uint64_t)w->boot << 32) | w->own, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_owned, w->own, __ATOMIC_RELEASE);
 }
 
 /* Whether a Tally still waits for the tails. */
