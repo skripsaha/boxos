@@ -184,7 +184,10 @@ void FillAndRun(file_id_t program, const char *who, const char *line)
     BoxForm form;
     int     rc = form_of_file(program, &form);
     if (rc != 0) {
-        SayFailed(who, "cannot read what it takes", rc);
+        /* The program's own file cannot be read — its medium gone, most often:
+         * it is there, and it would not start, which is what the person is
+         * told when the start itself is refused. */
+        SayFailed(who, "is there and would not start", rc);
         return;
     }
 
