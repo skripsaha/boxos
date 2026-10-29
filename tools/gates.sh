@@ -4,6 +4,10 @@
 #     tools/gates.sh                  all of them
 #     tools/gates.sh healthy stand    only these, in the order given
 #     tools/gates.sh --list           their names, one to a line
+#     tools/gates.sh loggerhour       a long gate (GATES_LONG), run by name only:
+#                                     a logger of a line a second for an hour,
+#                                     about 65 minutes, on a book's record;
+#                                     LOGGER_SECONDS=120 for a short one
 #     tools/gates.sh --formats        no boot: every gate in its part and a
 #                                     scenario its harness runs on that format,
 #                                     no harness leaning on the default format
@@ -58,6 +62,7 @@ GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut repl
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross firstflushmut lastflushmut booknextfidmut stitchmut"
 GATES_OTHER="framerefuse concordance formats volread_selftest"
+GATES_LONG="loggerhour loggerhourmut"
 BACKLIST_LOGCHECK="census censusmut stand standusb standmut abba abbamut"
 BACKLIST_POWERCUT="settlecut chaingrow nextfid nextfidmut poolmut flushmut"
 BACKLIST_OTHER="heirloom volread_selftest"
@@ -71,6 +76,13 @@ gate_names() {
     for g in $BACKLIST_POWERCUT; do echo "v1_pc_$g"; done
     for g in $GATES_OTHER; do echo "$g"; done
     for g in $BACKLIST_OTHER; do echo "v1_$g"; done
+}
+
+# Every gate that can be asked for by name: the list a plain run goes through,
+# and the long ones, which only a name asks for.
+gate_known() {
+    gate_names
+    for g in $GATES_LONG; do echo "$g"; done
 }
 
 in_list() {
@@ -87,7 +99,7 @@ gate_format() {
         v1_pc_*) in_list "${1#v1_pc_}" $BACKLIST_POWERCUT && { echo v1; return; } ;;
         v1_*)    in_list "${1#v1_}" $BACKLIST_LOGCHECK $BACKLIST_OTHER && { echo v1; return; } ;;
         pc_*)    in_list "${1#pc_}" $GATES_POWERCUT && { echo v2; return; } ;;
-        *)       in_list "$1" $GATES_LOGCHECK $GATES_OTHER && { echo v2; return; } ;;
+        *)       in_list "$1" $GATES_LOGCHECK $GATES_OTHER $GATES_LONG && { echo v2; return; } ;;
     esac
     echo none
 }
@@ -121,7 +133,7 @@ gate_formats() {
               grep -oE 'v2:[a-z0-9]+' | sed 's/^v2://')
     book=$(awk '/^pc_book\(\)/,/^}/' tools/powercut_book.sh | grep -oE 'v2:[a-z0-9]+' | sed 's/^v2://' | sort -u |
            grep -vxF -e all $(printf -- '-e %s ' $refused))
-    for g in $(gate_names); do
+    for g in $(gate_known); do
         case "$(gate_format "$g")" in
             v1) ! in_list "${g#v1_pc_}" $book || [ "${g#v1_pc_}" = "$g" ] ||
                     { echo "gates --formats: $g — a book's own PowerCut scenario, in the Backlist"; bad=1; } ;;
@@ -159,7 +171,7 @@ for path in sys.argv[1:]:
             print(f"{path}:{i + 1}: a check that the image is format {v} where the scenario never names {v} — it holds the default")
 EOF
 )
-    [ $bad -eq 0 ] && echo "gates --formats: $(gate_names | wc -l | tr -d ' ') gates, each named by its part and a scenario its harness runs on that format; no harness leans on the default format"
+    [ $bad -eq 0 ] && echo "gates --formats: $(gate_known | wc -l | tr -d ' ') gates, each named by its part and a scenario its harness runs on that format; no harness leans on the default format"
     return $bad
 }
 
@@ -172,7 +184,7 @@ cd "$TREE" || { echo "gates: no tree at $TREE"; exit 2; }
 ALL=$(gate_names)
 if [ $# -gt 0 ]; then
     for want in "$@"; do
-        echo "$ALL" | grep -qx -- "$want" || { echo "gates: no gate is called '$want' (tools/gates.sh --list)"; exit 2; }
+        gate_known | grep -qx -- "$want" || { echo "gates: no gate is called '$want' (tools/gates.sh --list)"; exit 2; }
     done
     WANTED="$*"
 else
