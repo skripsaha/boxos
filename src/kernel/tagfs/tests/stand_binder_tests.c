@@ -65,9 +65,15 @@ const char* StandBinderAside(StandBinder* b)
         if (!StandBinderRead(b, b->spine + i * b->stride, b->ring + (uint64_t)i * TAGFS_BLOCK_SIZE))
             return "the ring would not be read";
     BinderStandGivenBegin();
-    b->nground = BinderStandGround(b->ground, STAND_BINDER_GROUND_MOST);
-    if (b->nground > STAND_BINDER_GROUND_MOST)
-        return "the slots hold more runs of ground than the stand keeps";
+    uint32_t runs = BinderStandGround(NULL, 0);
+    b->ground     = kmalloc((uint64_t)(runs ? runs : 1u) * sizeof(Strip));
+    b->held       = kmalloc((uint64_t)(runs ? runs : 1u) * sizeof(uint8_t*));
+    if (!b->ground || !b->held)
+        return "no memory to keep the slots' ground";
+    memset(b->held, 0, (uint64_t)(runs ? runs : 1u) * sizeof(uint8_t*));
+    b->nground = BinderStandGround(b->ground, runs);
+    if (b->nground != runs)
+        return "the slots' ground changed while it was kept";
     for (uint32_t i = 0; i < b->nground; i++) {
         uint64_t bytes = (uint64_t)b->ground[i].count * TAGFS_BLOCK_SIZE;
         if (!(b->held[i] = kmalloc(bytes)))
@@ -116,13 +122,17 @@ bool StandBinderPutBack(StandBinder* b)
         ok &= StandBinderWrite(b, b->spine + i * b->stride, b->ring + (uint64_t)i * TAGFS_BLOCK_SIZE);
     if (b->kept)
         ok &= StandBinderWrite(b, b->kept_block, b->kept);
-    for (uint32_t i = 0; i < b->nground && i < STAND_BINDER_GROUND_MOST; i++) {
+    for (uint32_t i = 0; b->held && i < b->nground; i++) {
         if (b->held[i])
             ok &= BoardroomWrite(b->s.seat, b->s.base + b->ground[i].start * TAGFS_BLOCK_SECTORS,
                                  b->ground[i].count * TAGFS_BLOCK_SECTORS, b->held[i], NULL) == 0;
         kfree(b->held[i]);
-        b->held[i] = NULL;
     }
+    kfree(b->held);
+    kfree(b->ground);
+    b->held    = NULL;
+    b->ground  = NULL;
+    b->nground = 0;
     kfree(b->ring);
     kfree(b->kept);
     b->ring = b->kept = NULL;
@@ -305,6 +315,7 @@ static TestResult TestStandBinderNodeRefused(void)
     StandFreshModel  m;
     StandBinderState before, after;
     MountBookSaid    said;
+    BinderStandSaid  bs;
     uint64_t         fid = 0, free = 0;
     uint32_t         stood = 0;
     const char*      aside = StandBinderAside(&b);
@@ -315,12 +326,16 @@ static TestResult TestStandBinderNodeRefused(void)
     TEST_ASSERT(StandBinderSow(&m, &fid), "the state is settled and mounted");
     StandBinderStateOf(&before);
     MountBookStandSaid(&said);
+    BinderStand(&bs);
     stood = said.slot;
-    free  = tagfs_get_state()->ledger.free_blocks;
+    free  = tagfs_get_state()->ledger.free_blocks + bs.pair_left;
     BlockFailArm(b.s.seat, BLOCK_FAIL_WRITE, 0, 0, 1);
     TEST_ASSERT(BinderRunWhole() != OK, "the Tally whose first node the medium refuses is refused");
     BlockFailDisarm();
-    TEST_ASSERT_EQ(tagfs_get_state()->ledger.free_blocks, free, "and the ground it took is given back");
+    BinderStand(&bs);
+    TEST_ASSERT_EQ(tagfs_get_state()->ledger.free_blocks + bs.pair_left, free,
+                   "and the ground its nodes took is given back — the pair of Tally-Quires it opened kept, nodes "
+                   "nobody's, for the next Tally to go on in where they began");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
     MountBookStandSaid(&said);
     StandBinderStateOf(&after);
@@ -341,7 +356,10 @@ out:
 
 /* What a Tally cut by StandBinderCut left in the session, before the volume
  * was mounted again: the slot it was written over, the free count right after
- * the cut, and the slot the next Tally would be written over. */
+ * the cut, and the slot the next Tally would be written over. Every free count
+ * here holds the open pair of Tally-Quires as free (BinderStandSaid.pair_left):
+ * no node lies in it, and a Tally that opened one and was cut keeps it for the
+ * next to go on in where its nodes began (binder.c TallyEnded). */
 typedef struct {
     uint32_t written;
     uint64_t free;
@@ -386,19 +404,20 @@ static bool StandBinderCut(StandBinder* b, uint32_t how, StandBinderState* befor
     MountBookStandSaid(&said);
     BinderStand(&bs);
     *stood       = said.slot;
-    *free_before = tagfs_get_state()->ledger.free_blocks;
+    *free_before = tagfs_get_state()->ledger.free_blocks + bs.pair_left;
     cut->written = bs.next_slot;
     error_t rc   = StandBinderCutRun(b, how);
     if (how == 0 ? rc != ERR_IO_CANCELLED : rc == OK || rc == ERR_BUSY)
         return false;
     BinderStand(&bs);
-    cut->free = tagfs_get_state()->ledger.free_blocks;
+    cut->free = tagfs_get_state()->ledger.free_blocks + bs.pair_left;
     cut->next = bs.next_slot;
     if (!StandStitchRemount())
         return false;
     MountBookStandSaid(&said);
+    BinderStand(&bs);
     *slot       = said.slot;
-    *free_after = tagfs_get_state()->ledger.free_blocks;
+    *free_after = tagfs_get_state()->ledger.free_blocks + bs.pair_left;
     StandBinderStateOf(after);
     return true;
 }
@@ -640,6 +659,13 @@ static TestResult TestStandBinderRottenNamed(void)
     }
     TEST_ASSERT_OK(TagFSSettle(), "the files settled");
     TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written");
+    /* A range that rots where an older slot still holds it in a node of its
+     * own is read back from that slot's Tally and its ribbon (Facsimile,
+     * mount/facsimile.c) and rots no more: a Tally more for every other slot
+     * of the ring, nothing changed between, names the leaves as they lie —
+     * every slot then holds the range in the one node. */
+    TEST_ASSERT_OK(StandBinderTallies(g_book.frame.spine_slots - 1u),
+                   "a Tally more for every other slot, each naming the leaves as they lie");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
     files = g_book.files;
     for (uint32_t i = 1; !found && TallyStandNodeWhere(TALLY_FILES, i, &leaf); i++)
@@ -697,7 +723,9 @@ static TestResult TestStandBinderSlack(void)
                 "a Tally falls owed by TALLY_SLACK, and not before");
     TEST_ASSERT_OK(BinderRunWhole(), "it is written");
     BinderStand(&said);
-    TEST_ASSERT(!said.owed && said.useful == 0, "and nothing is owed past it");
+    TEST_ASSERT(said.useful == 0 && (!said.owed || said.demanded),
+                "and the ribbon past it owes nothing — a Tally its DONE demanded, Glean's for the Tally-Quires the "
+                "tests before left, owed for that alone");
 out:
     STAND_BINDER_PUT_BACK(&b);
     return verdict;

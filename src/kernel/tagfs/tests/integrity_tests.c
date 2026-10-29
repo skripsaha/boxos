@@ -191,12 +191,15 @@ out:
 }
 
 static const TestCase g_integrity_tests[] = {
-    { .name = "integrity_detects_mismatch", .func = test_integrity_detects_mismatch, .reach = TEST_WRITES_TO_VOLUME },
-    { .name = "integrity_persist_reload",   .func = test_integrity_persist_reload,   .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "integrity_detects_mismatch", .func = test_integrity_detects_mismatch, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_rot_three_paths" },
+    { .name = "integrity_persist_reload",   .func = test_integrity_persist_reload,   .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_files_read_whole" },
     { .name  = "integrity_reports_every_rot", .func = TestIntegrityReportsEveryRot,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "the integrity report ring holds 64 — a 65th rotten block "
-                       "is caught and never reported" },
+                       "is caught and never reported",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_rot_three_paths" },
 };
 
 const TestSuite g_integrity_suite = {

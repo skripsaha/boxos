@@ -613,21 +613,27 @@ static const TestCase g_stand_ink_tests[] = {
     { .name  = "stand_ink_records_never_share_a_place", .func = TestStandInkRecordsNeverSharePlace,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "writers of different files commit their records without the volume's "
-                       "state lock, so two files' records are laid at one offset of the pool" },
+                       "state lock, so two files' records are laid at one offset of the pool",
+      .format = DEED_FORMAT_V1, .analog = "stand_parity_files_in_turn" },
     { .name  = "stand_ink_full_volume_still_deletes", .func = TestStandInkFullVolumeStillDeletes,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a volume with no free block and a full pool tail refuses every delete, "
-                       "so nothing can make room on it" },
+                       "so nothing can make room on it",
+      .format = DEED_FORMAT_V1, .analog = "stand_fresh_ground_fill_and_empty" },
     { .name  = "stand_ink_early_close_spares_the_last",
-      .func  = TestStandInkEarlyCloseSparesTheLast, .reach = TEST_WRITES_TO_VOLUME },
+      .func  = TestStandInkEarlyCloseSparesTheLast, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_slip_holder_engrosses" },
     { .name  = "stand_ink_spares_free_on_the_medium",
-      .func  = TestStandInkSparesFreeOnTheMedium, .reach = TEST_WRITES_TO_VOLUME },
+      .func  = TestStandInkSparesFreeOnTheMedium, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_slip_logger" },
     { .name  = "stand_ink_quitclaim_is_the_newest_record",
       .func  = TestStandInkQuitclaimIsTheNewestRecord, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a file written and then deleted is named again by the next mount, its "
-                       "write's record newer on the medium than its delete" },
+                       "write's record newer on the medium than its delete",
+      .format = DEED_FORMAT_V1, .analog = "stand_docket_ground_rests" },
     { .name  = "stand_ink_no_room_before_memory",
-      .func  = TestStandInkNoRoomBeforeMemory, .reach = TEST_WRITES_TO_VOLUME },
+      .func  = TestStandInkNoRoomBeforeMemory, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_docket_claim_refused" },
 };
 
 const TestSuite g_stand_ink_suite = {

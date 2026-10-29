@@ -499,26 +499,6 @@ out:
     return verdict;
 }
 
-/* Cycles until nothing rests in Fallow, and one more whose map says so on the
- * medium: a test that takes all of the ground, or the volume down, leaves no
- * ground at rest behind it (B1). */
-#define STAND_SETTLE_BARE_CYCLES  8u
-
-static bool StandSettleRested(void)
-{
-    TagFSState* fs = tagfs_get_state();
-    for (uint32_t cycle = 0; cycle < STAND_SETTLE_BARE_CYCLES; cycle++) {
-        if (TagFSSettle() != OK)
-            return false;
-        TagFSLockTake(&fs->lock);
-        uint64_t resting = FallowBlocks();
-        TagFSLockDrop(&fs->lock);
-        if (resting == 0)
-            return TagFSSettle() == OK;
-    }
-    return false;
-}
-
 /* Every free run of the volume, taken into a list that grows as it must, and
  * given back. */
 typedef struct {
@@ -592,7 +572,7 @@ static TestResult TestStandSettleTableShortSettles(void)
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT(StandSettleRested(), "every change is on the medium, and nothing rests");
+    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests");
     TEST_ASSERT(StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &before) &&
                 !before.broken, "the file table's chain on the medium is whole");
     row = before.links * TAGFS_FTABLE_PER_BLOCK;
@@ -917,7 +897,7 @@ static TestResult TestStandSettleRemountOwesItsOwn(void)
     TagFSNoteInkerSince(&s_stand_writer, inked);
     uint64_t gen_before = InkedGen();
 
-    TEST_ASSERT(StandSettleRested(), "every change is on the medium, and nothing rests");
+    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests");
     let_go = true;
     TEST_ASSERT(StandSettleRemount(), "the volume is let go of and MOUNTED again");
     TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
@@ -947,30 +927,37 @@ static const TestCase g_stand_settle_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a file written without anchor has no name after a power cut" },
     { .name = "stand_settle_anchor_through_chit", .func = TestStandSettleAnchorThroughChit,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_answers_after_flush" },
     { .name = "stand_settle_idle_owed",          .func = TestStandSettleIdleOwed,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "on one core under a CPU hog nothing settles a write before the power goes" },
     { .name = "stand_settle_write_protected",    .func = TestStandSettleWriteProtected,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_settle_refusal_waits_for_the_bell",
-      .func = TestStandSettleRefusalWaitsForTheBell, .reach = TEST_WRITES_TO_VOLUME },
+      .func = TestStandSettleRefusalWaitsForTheBell, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_retry_refused_twice" },
     { .name = "stand_settle_ring_during_the_cycle", .func = TestStandSettleRingDuringTheCycle,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_retry_atom" },
     { .name = "stand_settle_refusal_waits_for_its_own_event",
       .func = TestStandSettleRefusalWaitsForItsOwnEvent, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_settle_table_refusal_is_the_mediums",
-      .func = TestStandSettleTableRefusalIsTheMediums, .reach = TEST_WRITES_TO_VOLUME },
+      .func = TestStandSettleTableRefusalIsTheMediums, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_refused_everywhere" },
     { .name = "stand_settle_table_short_settles", .func = TestStandSettleTableShortSettles,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_slip_promise_tally" },
     { .name = "stand_settle_reader_owes_no_leave", .func = TestStandSettleReaderOwesNoLeave,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_settle_halt_leaves_no_viewed_ground",
       .func = TestStandSettleHaltLeavesNoViewedGround, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a clean shutdown with a reader open on a deleted file leaves its blocks "
-                       "taken on the medium and named by nothing, kept by the next mount for good" },
+                       "taken on the medium and named by nothing, kept by the next mount for good",
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_halt_clean" },
     { .name = "stand_settle_halt_seals_what_stands",
-      .func = TestStandSettleHaltSealsWhatStands, .reach = TEST_WRITES_TO_VOLUME },
+      .func = TestStandSettleHaltSealsWhatStands, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_halt_clean" },
     { .name = "stand_halt_drain_counts_what_moves",
       .func = TestStandHaltDrainCountsWhatMoves, .reach = TEST_READS_ONLY },
     /* Last: it takes the volume down and mounts it again. */

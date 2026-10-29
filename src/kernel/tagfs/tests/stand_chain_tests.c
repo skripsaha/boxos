@@ -799,34 +799,40 @@ static const TestCase g_stand_chain_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a registry that grows writes the link to its new block before the block "
                        "itself, so one refused or lost write leaves a chain the mount refuses on "
-                       "every boot" },
+                       "every boot",
+      .format = DEED_FORMAT_V1, .analog = "stand_binder_node_refused" },
     { .name  = "stand_registry_flush_keeps_its_block",
       .func  = TestStandRegistryFlushKeepsItsBlock,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a registry flush that fails after taking a block for its chain forgets "
                        "the block, which stays marked used and owned by nothing for the life of "
-                       "the volume" },
+                       "the volume",
+      .format = DEED_FORMAT_V1, .analog = "stand_binder_slot_flush_refused" },
     { .name  = "stand_table_grows_onto_a_stamp", .func = TestStandTableGrowsOntoAStamp,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a sync that lengthens the file table writes the link to its new block "
                        "before the block, so a refused write of that block leaves a chain the "
-                       "next mount refuses" },
+                       "next mount refuses",
+      .format = DEED_FORMAT_V1, .analog = "stand_binder_whole" },
     { .name  = "stand_table_growth_gives_back_its_ground",
       .func  = TestStandTableGrowthGivesBackItsGround,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a growth of the file table refused memory after it has taken its block "
-                       "returns with the block taken and named by nothing, for good (CR-11)" },
+                       "returns with the block taken and named by nothing, for good (CR-11)",
+      .format = DEED_FORMAT_V1, .analog = "stand_binder_ground_back" },
     { .name  = "stand_registry_scratch_leaves_the_volume_alone",
       .func  = TestStandRegistryScratchLeavesTheVolumeAlone,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a registry built and thrown away beside the volume's shares the volume's "
                        "chain and its mark of what is owed, so its end makes the volume's next "
-                       "flush take new blocks and leave the old ones owned by nothing" },
+                       "flush take new blocks and leave the old ones owned by nothing",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_mount_writes_nothing" },
     { .name  = "stand_registry_load_refuses_what_it_cannot_hold",
       .func  = TestStandRegistryLoadRefusesWhatItCannotHold,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a registry load whose allocation is refused drops what it could not hold "
-                       "and answers OK, so the volume mounts missing tags its medium carries" },
+                       "and answers OK, so the volume mounts missing tags its medium carries",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_map_short_of_memory" },
     { .name  = "stand_registry_key_ids_are_copies",
       .func  = TestStandRegistryKeyIdsAreCopies,
       .reach = TEST_WRITES_TO_VOLUME,

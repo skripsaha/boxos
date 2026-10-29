@@ -517,7 +517,8 @@ static const TestCase g_stand_index_tests[] = {
     { .name  = "stand_index_fid_exhausted", .func = TestStandIndexFidExhausted,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "the 2^32-th create is given file id 0 and the one after it id 1, a "
-                       "file the volume already holds" },
+                       "file the volume already holds",
+      .format = DEED_FORMAT_V1, .analog = "stand_errata_wide_fid" },
 };
 
 const TestSuite g_stand_index_suite = {

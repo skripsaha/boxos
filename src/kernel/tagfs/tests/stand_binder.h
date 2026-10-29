@@ -23,7 +23,6 @@
  */
 
 #define STAND_BINDER_SLOTS_MOST  8u
-#define STAND_BINDER_GROUND_MOST 64u     /* runs of the slots' ground a test keeps as found */
 
 /* The ring as the test found it, raw, and the ribbon (stand_stitch.h); and
  * the ground its slots hold, which the Tallies a test writes may give back
@@ -36,8 +35,8 @@ typedef struct {
     uint64_t    stride;
     uint64_t    kept_block;    /* one more block the test changed by hand, kept as found; 0 for none */
     uint8_t*    kept;
-    Strip       ground[STAND_BINDER_GROUND_MOST];   /* what the slots held as found, and its bytes */
-    uint8_t*    held[STAND_BINDER_GROUND_MOST];
+    Strip*      ground;        /* what the slots held as found — as many runs as they hold — and its bytes */
+    uint8_t**   held;
     uint32_t    nground;
 } StandBinder;
 

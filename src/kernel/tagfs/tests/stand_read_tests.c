@@ -577,7 +577,8 @@ static const TestCase g_stand_read_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a block read out of the read-ahead cache is handed out without "
                        "verify-on-read, so a rotten block is caught only when it is the "
-                       "first of the run a read prefetched" },
+                       "first of the run a read prefetched",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_rot_three_paths" },
     { .name = "stand_read_rot_through_port", .func = TestStandReadRotThroughPort,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a read through the port never checks a block against its digest, "
@@ -588,7 +589,8 @@ static const TestCase g_stand_read_tests[] = {
     { .name = "stand_read_rmw_refuses_rot", .func = TestStandReadRmwRefusesRot,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a partial write over a rotten block lays its bytes over the rot and "
-                       "writes it back under a fresh digest, so the rot is the file's for good" },
+                       "writes it back under a fresh digest, so the rot is the file's for good",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_rot_three_paths" },
 };
 
 const TestSuite g_stand_read_suite = {

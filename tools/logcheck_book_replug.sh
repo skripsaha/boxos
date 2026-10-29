@@ -140,3 +140,20 @@ REPLUGWRITEBOOK_ROUND
     ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]|^\[NIGHTWATCH\] VERDICT: .* a defect' "$L"
     chk $? "replugwrite, a book: no panic, no exception, nothing owed proved unserved"
 }
+
+# moved_on_host IMG — the stick moved on by the host while it was out, as its
+# format moves (stand_format): format v1's Ledger (ledger_moved_on_host), a
+# book's newest Spine slot (slot_moved_on_host, logcheck_book_replug.sh).
+moved_on_host() {
+    if [ "$(stand_format)" = v2 ]; then slot_moved_on_host "$1"; else ledger_moved_on_host "$1"; fi
+}
+
+# The line the kernel says of a stick in seat 1 that came back moved on, its
+# book given up (away.c, AWAY_OTHER) — by the stick's format.
+moved_on_said() {
+    if [ "$(stand_format)" = v2 ]; then
+        echo "came back in seat 1 not as this kernel left its book"
+    else
+        echo "came back in seat 1 with a Ledger or a Deed this kernel did not leave on it"
+    fi
+}

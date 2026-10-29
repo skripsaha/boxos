@@ -702,7 +702,7 @@ void BinderStandStopAt(TallyStep at)
 
 void BinderStandTearSlot(uint32_t sectors)
 {
-    s_stand_tear = sectors < TAGFS_BLOCK_SECTORS ? sectors : 0;
+    s_stand_tear = sectors <= TAGFS_BLOCK_SECTORS ? sectors : 0;
 }
 
 void BinderStand(BinderStandSaid* out)
@@ -714,6 +714,8 @@ void BinderStand(BinderStandSaid* out)
     out->tally_blocks  = g_binder.tally_blocks;
     out->tallies       = g_binder.tallies;
     out->owed          = BinderOwed();
+    out->demanded      = __atomic_load_n(&g_binder.demanded, __ATOMIC_ACQUIRE) != 0;
+    out->pair_left     = g_binder.pair_room > g_binder.pair_used ? 2u * (g_binder.pair_room - g_binder.pair_used) : 0;
     out->checked       = BinderCheckHeld();
     uint64_t from      = UINT64_MAX;
     for (uint32_t i = 0; i < g_binder.nslots; i++) {

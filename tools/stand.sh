@@ -89,6 +89,20 @@ make() {
     command make HARNESS=on ${STAND_FORMAT:+VOLUME_FORMAT=$STAND_FORMAT} "$@"
 }
 
+# stand_format — the format this run's volumes are made in: VOLUME_FORMAT when
+# the caller names one, else the one the Makefile makes when nobody does
+# (VOLUME_FORMAT_DEFAULT) — read from the Makefile, never written here, so a
+# scenario that asks the format and the make that builds its image can never
+# answer two formats: the default moves in one line, and a harness that kept a
+# default of its own would go on judging the other format's oracles over it.
+stand_format() {
+    if [ -n "${VOLUME_FORMAT:-}" ]; then
+        echo "$VOLUME_FORMAT"
+    else
+        sed -n 's/^VOLUME_FORMAT_DEFAULT = //p' "$ROOT/Makefile"
+    fi
+}
+
 # ===========================================================================
 # A BOOT ASKS FOR THE KERNEL IT BOOTS, AND STRICT IS HALF KERNEL
 # ===========================================================================

@@ -314,7 +314,8 @@ static const TestCase g_stand_use_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "an earlier Use Context whose remembering lands after a later one's "
                        "replaces it on the volume, which then remembers what the machine no "
-                       "longer holds" },
+                       "longer holds",
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_use_context" },
     { .name  = "stand_use_verdict_is_one_compare", .func = TestStandUseVerdictIsOneCompare,
       .reach = TEST_READS_ONLY,
       .caveat_defect = "the scheduler's question walks the Use Context against the cabin's tags "

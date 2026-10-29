@@ -234,7 +234,10 @@ out:
 // next owner put there. A delete is a Quitclaim now, and the ground it frees
 // rests in Fallow — and past its cycles, too, while a handle opened before it
 // is open: the reader reads the bytes it opened, and the block goes back once
-// the reader lets go.
+// the reader lets go. A book gives Fallow back only once its ribbon has left
+// the Quire of the stitch that let the ground go (fallow.c NodeHeldOnBook), so
+// there room is asked for past the cycles: the Quire left, the reader's block
+// still rests for the handle that views it (HelmViewFloor).
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
@@ -243,6 +246,7 @@ static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
     uint64_t         file_id = 0;
     uint64_t         block   = 0;
     TagFSFileHandle *reader  = NULL;
+    bool             book    = tagfs_get_state()->format == DEED_FORMAT_V2;
     const char      *aside   = StandStepsAsideFor();
 
     if (aside)
@@ -262,6 +266,8 @@ static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
     uint64_t rested = 0;
     for (uint64_t c = 0; c <= FallowLag() + 1; c++, rested++)
         TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the delete");
+    TEST_ASSERT(!book || StandBookRoom() == OK,
+                "on a book, room is asked for: the ribbon leaves the Quire whose stitch gave the file up");
     TEST_ASSERT(StandBlockInUse(block), "the reader's block still rests past the delete's cycles");
     TestEvidence("cycles the deleted file's block rested while a reader had it open", rested);
 
@@ -274,6 +280,7 @@ static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
     reader = NULL;
     for (uint64_t c = 0; c <= FallowLag(); c++)
         TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the reader let go");
+    TEST_ASSERT(!book || StandBookRoom() == OK, "on a book, room is asked for again");
     TEST_ASSERT(!StandBlockInUse(block), "and the block goes back once the reader let go");
 out:
     tagfs_close(reader);
@@ -479,7 +486,10 @@ out:
 // carries the one contract: the reason, the bytes of the write the file's
 // inked record holds, and the size the file is. Here the read of a block the
 // second window overlays is refused: the first window and the whole block
-// before the refused one are the file's, the rest of it is as it was.
+// before the refused one are the file's, the rest of it is as it was. On a
+// book a last block of 100 bytes is a Slip on the ribbon, laid in no block the
+// write could read, so there the file ends on a whole block: the write lays
+// 200 bytes over that block, and its copy reads the rest of it (§3.6).
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandHelmWriteRefusedPartWay(void)
@@ -493,7 +503,8 @@ static TestResult TestStandHelmWriteRefusedPartWay(void)
     bool           armed   = false;
     const uint32_t B       = TAGFS_BLOCK_SIZE;
     const uint64_t W       = HelmWindowBytes(0);
-    const uint32_t made    = (uint32_t)(W + B + 100);   /* its last block holds 100 bytes */
+    const bool     book    = tagfs_get_state()->format == DEED_FORMAT_V2;
+    const uint32_t made    = (uint32_t)(W + B + (book ? B : 100));   /* its last block: 100 bytes, or whole */
     const uint32_t bytes   = (uint32_t)(W + B + 200);   /* ... and the write lays 200 over it */
     uint64_t       stats[2] = { UINT64_MAX, UINT64_MAX };
     const char    *aside   = StandStepsAsideFor();
@@ -508,7 +519,7 @@ static TestResult TestStandHelmWriteRefusedPartWay(void)
     TestFillAt(old, made, 0x4E1D0400u, 0);
     TestFillAt(data, bytes, 0x4E1D0401u, 0);
     TEST_ASSERT(StandMakeFile("test_file", old, made, &file_id),
-                "a file of a window, a block and 100 bytes is made");
+                "a file of a window, a block and 100 bytes — or a whole block, on a book — is made");
     TEST_ASSERT(StandBlockOf(file_id, (uint32_t)(W / B) + 1, &block),
                 "the block the second window lays 200 bytes over is found");
 

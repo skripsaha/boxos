@@ -7,6 +7,7 @@
 #include "../mount/book_mount.h"
 #include "../settle/settle.h"
 #include "../settle/sewing.h"
+#include "../file_map/file_map.h"
 #include "block_fail.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
@@ -232,6 +233,27 @@ static bool StandTollCycled(uint64_t us)
 }
 
 /*
+ * The file's making let fall out of what its first append is judged by. Ink
+ * counts a write that grew a file as a small append when its data took less
+ * than the last cycle's D (ink.c InkPlotLazy), so whether the making counts —
+ * a block written, then a settle shorter than a Lull — rests on the D the test
+ * before left: none after a mount (CadenceMountReset), and on format v1, where
+ * the test before mounts nothing, a D the block's write beats. Counted, the
+ * first append is already the second small one, lazy, and waits for the very
+ * window its check is bounded by. So the first append comes past the horizon
+ * a frequent writer is judged by: a Lull on format v1, the window on a book.
+ */
+static void StandTollPastFrequent(uint64_t fid, bool book)
+{
+    FileRecord* rec     = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    uint64_t    since   = rec ? rec->small_append_us : 0;
+    uint64_t    horizon = book ? SETTLE_WINDOW_US : SettleLullUs();
+    FileRecordRelease(rec);
+    while (since && cpu_tsc_to_us(rdtsc()) - since <= horizon)
+        cpu_pause();
+}
+
+/*
  * A file appended to in small pieces: the second within a Lull of the first
  * makes its writer a frequent small one. Its third comes past a Lull and well
  * inside the window: on a book it is lazy still — no cycle begins for it
@@ -260,6 +282,7 @@ static TestResult StandTollSmallWriter(bool book)
         verdict = test_steps_aside("a Lull of this medium is not well inside the window");
         goto out;
     }
+    StandTollPastFrequent(fid, book);
     SettleCadenceHold(false);
     let_go = true;
     size   = TAGFS_BLOCK_SIZE;
@@ -305,7 +328,7 @@ static const TestCase g_stand_toll_tests[] = {
     { .name = "stand_toll_window_book", .func = TestStandTollWindowBook,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_toll_lull_v1", .func = TestStandTollLullV1,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V1 },
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V1, .analog = "stand_toll_window_book" },
 };
 
 const TestSuite g_stand_toll_suite = {

@@ -2,6 +2,7 @@
 #include "stand_tests.h"
 #include "../tagfs.h"
 #include "../file_map/file_map.h"
+#include "../block_map/block_map_derived.h"
 #include "block_fail.h"
 #include "boardroom.h"
 #include "amp.h"
@@ -85,8 +86,16 @@ int StandWriteAt(uint64_t file_id, uint64_t offset, const void* data, uint32_t b
     return written;
 }
 
+void StandBlockFailRaced(const char* suite)
+{
+    kprintf("[TESTS] %s: BLOCKFAIL answered %u command(s) of the plan let go — as many as the Helm's service and "
+            "the test made between them\n", suite, BlockFailSeen());
+}
+
 bool StandBlockInUse(uint64_t block)
 {
+    if (tagfs_get_state()->format == DEED_FORMAT_V2)
+        return !BlockMapDerivedIsFree(block);
     return BlockMapIsTaken(block);
 }
 
@@ -793,7 +802,8 @@ static const TestCase g_stand_tests[] = {
     { .name = "stand_blockfail_reads_the_nth",    .func = TestStandBlockFailReadsTheNth,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_blockfail_write_never_lands", .func = TestStandBlockFailWriteNeverLands,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_fresh_refused_names_nothing" },
     { .name = "stand_blockfail_flush_refused",    .func = TestStandBlockFailFlushRefused,
       .reach = TEST_READS_ONLY },
     { .name = "stand_blockfail_async_read",       .func = TestStandBlockFailAsyncRead,
@@ -841,10 +851,12 @@ static const TestCase g_stand_tests[] = {
     { .name  = "stand_sync_owns_a_refused_write", .func = TestStandSyncOwnsARefusedWrite,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a sync whose file-table write the medium refuses still writes "
-                       "the ledger and answers OK" },
+                       "the ledger and answers OK",
+      .format = DEED_FORMAT_V1, .analog = "stand_fresh_refused_names_nothing" },
     { .name  = "stand_sync_owns_a_refused_flush", .func = TestStandSyncOwnsARefusedFlush,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "a sync whose cache flush the medium refuses still answers OK" },
+      .caveat_defect = "a sync whose cache flush the medium refuses still answers OK",
+      .format = DEED_FORMAT_V1, .analog = "stand_stitch_retry_flush" },
     { .name  = "stand_write_returns_its_ground", .func = TestStandWriteReturnsItsGround,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a write whose metadata commit cannot get memory answers -1 and "
@@ -869,7 +881,8 @@ static const TestCase g_stand_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "deleting a file whose block a snapshot still keeps gives the "
                        "block back, and deleting the snapshot gives it back again, so "
-                       "the allocator counts it free twice" },
+                       "the allocator counts it free twice",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_map_claim_named" },
 };
 
 const TestSuite g_stand_suite = {

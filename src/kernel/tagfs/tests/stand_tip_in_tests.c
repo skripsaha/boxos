@@ -18,9 +18,11 @@
 // pointer it had: a file of three Parcels and more, one Parcel of it written
 // over a thousand times, costs FILES the leaves that Parcel and the file's
 // header lie in and the path above them — no other node of the tree is laid
-// anew (C23). A copy of a node that would not read, a leaf of FILES at the
-// mount or a leaf of DIGESTS at a read of a block it names, puts the node's
-// keys among the changed ones: the next Tally lays it anew and every copy
+// anew (C23); written a block apart, it comes back from the mount in the
+// Parcels its Tally laid, one for one (§16.1 п.7). A copy of a node that would
+// not read, a leaf of FILES at the mount or a leaf of DIGESTS at a read of a
+// block it names, puts the node's keys among the changed ones: the next Tally
+// lays it anew and every copy
 // holds after it (C24). A volume
 // filled and emptied by Tallies laid in so gives its ground back, every block
 // the test took free again or held by the slots (§16.5 п.17: a Quire of the
@@ -104,6 +106,18 @@ static bool StandTipInParcel(uint64_t fid, uint32_t which, uint64_t* from, uint6
     return found;
 }
 
+/* A file made as a program's call makes one: ERR_WOULD_BLOCK — the records
+ * claimed since the last stitch fill the ribbon's room, and its next Quire is
+ * on its way — waited out by the cycle that lays them and brings the room,
+ * as boxlib waits it out; the answer after that cycle is the answer. */
+static int StandTipInCreate(const char* name, uint64_t* fid)
+{
+    int rc = tagfs_create_file(name, NULL, 0, fid);
+    if (rc == -(int)ERR_WOULD_BLOCK && TagFSSettle() == OK)
+        rc = tagfs_create_file(name, NULL, 0, fid);
+    return rc;
+}
+
 /* `n` files of a long name made from `from` on, settled. */
 static bool StandTipInMake(uint32_t from, uint32_t n)
 {
@@ -111,7 +125,7 @@ static bool StandTipInMake(uint32_t from, uint32_t n)
     uint64_t fid = 0;
     for (uint32_t i = 0; i < n; i++) {
         ksnprintf(name, sizeof(name), "tipin-%05u-of-a-name-long-enough-to-fill-leaves.txt", from + i);
-        if (tagfs_create_file(name, NULL, 0, &fid) != 0)
+        if (StandTipInCreate(name, &fid) != 0)
             return false;
     }
     return TagFSSettle() == OK;
@@ -178,8 +192,94 @@ out:
 }
 
 // ----------------------------------------------------------------------------
+// A file comes back from the mount in the Parcels its Tally laid (§16.1 п.7)
+// ----------------------------------------------------------------------------
+
+/* The block each Parcel of `fid`'s record begins at, in order: how many, at
+ * most `most`. */
+static uint32_t StandTipInCut(uint64_t fid, uint64_t* at, uint32_t most)
+{
+    uint32_t n = 0;
+    uint64_t blocks = 0;
+    while (n < most && StandTipInParcel(fid, n, &at[n], &blocks))
+        n++;
+    return n;
+}
+
+/*
+ * Written a block apart, a file is cut where its splices cut it — each write
+ * that outgrew a Parcel halving that Parcel alone (file_map/tract.c
+ * SpliceGather), not the even cut of all its Strips — and a Tally lays memory's
+ * Parcels one for one. The mount reads them as they lie: were it to cut the
+ * file's Strips again, memory would hold a file its Tally does not, and DogEar
+ * — the keys changed since that Tally — would not hold a key the new cut moved:
+ * the next Tally laid in among this one's nodes keeps a leaf of the old cut
+ * beside memory's new one, which the Binder's self-check refuses as a DEFECT.
+ */
+static TestResult TestStandTipInParcelsAsTheyLie(void)
+{
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel    m;
+    uint64_t           fid = 0, cut[16], back[16];
+    uint64_t           even = (2u * STAND_TIP_IN_STRIDED + PARCEL_STRIPS_MOST - 1u) / PARCEL_STRIPS_MOST;
+    uint32_t           n = 0, nback = 0;
+    const char*        aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandFreshModelMake(&m, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "room for the file");
+    TEST_ASSERT_EQ(tagfs_create_file("tipin-cut.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_OK(StandFreshSpan(&m, fid, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "spanned over a hole");
+    for (uint64_t k = 0; k < STAND_TIP_IN_STRIDED; k++)
+        TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 2u * k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 70u + k),
+                       TAGFS_BLOCK_SIZE, "every other block written: a Strip each, a hole between");
+    n = StandTipInCut(fid, cut, ARRAY_SIZE(cut));
+    TestEvidence("Parcels the splices cut the file into", n);
+    TEST_ASSERT(n > even, "the splices cut it into more Parcels than an even cut of its Strips gives");
+    TEST_ASSERT_OK(TagFSSettle(), "the writes settle");
+    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of it is written");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    nback = StandTipInCut(fid, back, ARRAY_SIZE(back));
+    TEST_ASSERT(nback == n && memcmp(cut, back, sizeof(uint64_t) * n) == 0,
+                "the mount holds the file in the Parcels its Tally laid, one for one");
+    uint64_t at = (cut[n / 2u] + 1u) & ~1ull;   /* a written block of a Parcel in the middle */
+    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, at * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 900u), TAGFS_BLOCK_SIZE,
+                   "a block of it written over");
+    TEST_ASSERT_OK(TagFSSettle(), "and settled");
+    TEST_ASSERT_OK(BinderRunWhole(), "the Tally after it is written: DogEar held every key the write changed");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    TEST_ASSERT(StandFreshHolds(&m, fid), "and the file reads every byte written");
+out:
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
 // C24: a copy of a leaf that would not read — the next Tally lays the leaf anew
 // ----------------------------------------------------------------------------
+
+/* Whether `a` and `b`, the two copies of a node of one Sheet laid at blocks
+ * `ba` and `bb`, are the one node: every sector of each holds its sum where it
+ * lies — the sum is seeded by the sector's address (§2.5), so the two copies
+ * differ in it and only in it — and every byte past the sum is the other's. */
+static bool StandTipInCopiesOne(const uint8_t* a, uint64_t ba, const uint8_t* b, uint64_t bb)
+{
+    const uint8_t* uuid = tagfs_get_state()->uuid;
+    uint32_t       sum  = sizeof(((const BookSectorHead*)0)->crc32c);
+    for (uint32_t k = 0; k < TAGFS_BLOCK_SECTORS; k++) {
+        const uint8_t* sa = a + (uint64_t)k * BOOK_SECTOR_BYTES;
+        const uint8_t* sb = b + (uint64_t)k * BOOK_SECTOR_BYTES;
+        if (!BookSectorCheck(sa, uuid, ba * TAGFS_BLOCK_SECTORS + k) ||
+            !BookSectorCheck(sb, uuid, bb * TAGFS_BLOCK_SECTORS + k) ||
+            memcmp(sa + sum, sb + sum, BOOK_SECTOR_BYTES - sum) != 0)
+            return false;
+    }
+    return true;
+}
 
 /* The leaf of FILES of the Tally stood on whose keys begin at `lo`. */
 static bool StandTipInLeafAt(TallyKey lo, TallyPlace* out)
@@ -278,8 +378,9 @@ static TestResult TestStandTipInHealsDigests(void)
     TEST_ASSERT(StandBinderRead(&b, again.ptr.block[0], g_test_output) && g_test_output[0] | g_test_output[1],
                 "its first copy is on the medium");
     TEST_ASSERT(again.ptr.copies == 2 && StandBinderRead(&b, again.ptr.block[1], second) &&
-                memcmp(g_test_output, second, TAGFS_BLOCK_SIZE) == 0, "and its second, the same node byte for byte: "
-                "every copy holds after it (C24)");
+                StandTipInCopiesOne(g_test_output, again.ptr.block[0], second, again.ptr.block[1]),
+                "and its second, the same node: every sector of each holds at its own place, every byte past its "
+                "sum the other's — every copy holds after it (C24)");
     tagfs_readahead_invalidate(spot.block);
     TEST_ASSERT(StandFreshHolds(&m, fid), "and the data reads");
 out:
@@ -447,7 +548,7 @@ static TestResult TestStandTipInQuiresHeld(void)
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
     for (uint32_t i = 0; i < STAND_TIP_IN_QUIRED; i++) {
         ksnprintf(name, sizeof(name), "tipin-quire-%05u-of-a-name-long-enough-to-take-room.txt", i);
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &fid), 0, "a file is made");
+        TEST_ASSERT_EQ(StandTipInCreate(name, &fid), 0, "a file is made");
     }
     TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "they settled, a Tally of them written");
     for (uint32_t i = 0; FoliationStandNode(TALLY_FILES, i, &f); i++)
@@ -553,6 +654,8 @@ out:
 
 static const TestCase g_stand_tip_in_tests[] = {
     { .name = "stand_tip_in_parcel", .func = TestStandTipInParcel,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_tip_in_parcels_as_they_lie", .func = TestStandTipInParcelsAsTheyLie,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_tip_in_heals_files", .func = TestStandTipInHealsFiles,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
