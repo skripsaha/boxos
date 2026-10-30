@@ -114,6 +114,12 @@ void     RibbonCursorLetGo(void);
 /* Whether the volume's medium was shown to lie, as the next stitch will say. */
 bool     RibbonCursorLied(void);
 
+/* The mount's ask for a next_quire, with the door shut, past the free it says
+ * (book_mount.c): one given where the cursor wants it and the map has one, a
+ * refusal left to the first cycle's ask (RibbonNextGiven) with the cursor as
+ * the mount laid it. */
+void     RibbonNextGivenAtMount(void);
+
 /*
  * The cursor's moves, for the cycle's steps (sewing.c), by the Settle's
  * holder with no TagFS lock held:
