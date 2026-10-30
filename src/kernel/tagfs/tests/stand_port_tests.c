@@ -196,6 +196,9 @@ out:
 // the file still is — on a USB disk exactly as on an AHCI port. BLOCKFAIL is
 // asked at the seat's door for a command nobody stands over
 // (BoardroomWriteAsync), so the refused block's write never reaches the medium.
+// Format v1's: the write goes over the file's blocks where they lie, so the
+// block refused is one the test names before it; a book lays every write on
+// fresh ground, the run it takes named before it (its analog).
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandPortWriteRefusedPartWay(void)
@@ -270,7 +273,8 @@ static const TestCase g_stand_port_tests[] = {
     { .name  = "stand_port_write_goes_through_the_port",
       .func  = TestStandPortWriteGoesThroughThePort, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_port_write_refused_part_way", .func = TestStandPortWriteRefusedPartWay,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_run_refused_inside_fresh_through_the_port" },
 };
 
 const TestSuite g_stand_port_suite = {

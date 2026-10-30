@@ -344,6 +344,10 @@ void     StitchStandLeaves(uint32_t sectors);
  * armed, and taken by the one it refuses. Once. For the stand. */
 void     RibbonStandMarksRefused(void);
 bool     RibbonStandMarksRefusing(void);
+/* The next ask of the map for a next_quire refused, as a map with no Quire
+ * past the Tallies' ground refuses it: armed, and taken by the ask it refuses;
+ * false takes it down unspent. Whether it stood armed. Once. For the stand. */
+bool     RibbonStandNextRefused(bool armed);
 /* The bytes claimed by changes no stitch has taken, and those held for changes
  * in the making (RibbonReserve), as they stand — for the stand. */
 void     RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved);

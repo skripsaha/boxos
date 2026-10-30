@@ -51,6 +51,12 @@
 static uint8_t s_away_bytes[2u * TAGFS_BLOCK_SIZE];
 static uint8_t s_away_slot[2u * VOLUME_BLOCK_SECTORS * BOOK_SECTOR_BYTES];
 
+/* The zeros of a torn tail (TestStandAwayTornTail) are half a stitch laid by
+ * hand, which is an atom of the ribbon long and STAND_STITCH_LAID_MOST at the
+ * most: they never read past these bytes. */
+_Static_assert(sizeof(s_away_bytes) >= STAND_STITCH_LAID_MOST / 2u * BOOK_SECTOR_BYTES,
+               "half the longest stitch laid by hand fits the away tests' bytes");
+
 /* `blocks` blocks of a pattern of `seed`, made a file `name` no stitch carries
  * yet, its waiter linked: *fid. */
 static bool StandAwayFile(const char* name, uint32_t blocks, uint8_t seed, StandStitchWaiter* waiter,
@@ -118,23 +124,25 @@ static TestResult TestStandAwayOtherStitches(void)
 
     if (aside)
         return test_steps_aside(aside);
-    if (s.at.atom != VOLUME_BLOCK_SECTORS)
-        return test_steps_aside("the medium's atom is larger than a block: a stitch laid by hand here is one");
-    if (s.at.off + 2u * VOLUME_BLOCK_SECTORS > s.at.quire.blocks * TAGFS_BLOCK_SECTORS)
+    if (s.at.atom > STAND_STITCH_LAID_MOST)
+        return test_steps_aside(STAND_STITCH_ATOM_LONG);
+    if (s.at.off + 2u * s.at.atom > s.at.quire.blocks * TAGFS_BLOCK_SECTORS)
         return test_steps_aside("the ribbon's Quire has no room left for two stitches laid by hand");
     memset(&waiter, 0, sizeof(waiter));
     TEST_ASSERT(StandAwayFile("away-other.bin", 1, 5, &waiter, &fid), "a file is made, no stitch carrying it");
     TagFSStandMediumLeaves();
     away = true;
     b  = s;
-    c1 = StandStitchLayEmpty(&b, STITCH_DATA_FLUSHED);
+    /* Each an atom of the ribbon long: a flash page on a removable medium,
+     * where this kernel's next stitch begins (§16.6 п.2). */
+    c1 = StandStitchLayAt(&b, STITCH_DATA_FLUSHED, b.at.atom, &b.at.next);
     TEST_ASSERT(c1 != 0, "another machine sews a stitch where this kernel's next would go");
     b.at.last  = b.at.given + 1u;
     b.at.given = b.at.last;
     b.at.clasp = c1;
-    b.at.off  += VOLUME_BLOCK_SECTORS;
+    b.at.off  += b.at.atom;
     b.at.came  = (RibbonQuire){ 0, 0 };
-    TEST_ASSERT(StandStitchLayEmpty(&b, STITCH_DATA_FLUSHED) != 0, "and a second one after it");
+    TEST_ASSERT(StandStitchLayAt(&b, STITCH_DATA_FLUSHED, b.at.atom, &b.at.next) != 0, "and a second one after it");
     TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_OTHER, "the medium comes back holding stitches this kernel "
                    "did not sew: its book is given up");
     away = false;
@@ -397,8 +405,8 @@ static TestResult TestStandAwayOwnForged(void)
 
     if (aside)
         return test_steps_aside(aside);
-    if (s.at.atom != VOLUME_BLOCK_SECTORS)
-        return test_steps_aside("the medium's atom is larger than a block: a stitch laid by hand here is one");
+    if (s.at.atom > STAND_STITCH_LAID_MOST)
+        return test_steps_aside(STAND_STITCH_ATOM_LONG);
     memset(&waiter, 0, sizeof(waiter));
     TEST_ASSERT(StandAwayFile("away-forged.bin", 1, 29, &waiter, &fid), "a file is made, no stitch carrying it");
     TEST_ASSERT(StandAwayCutShort(), "its stitch is sewn whole and the medium leaves before its last flush");
@@ -407,7 +415,9 @@ static TestResult TestStandAwayOwnForged(void)
     TEST_ASSERT(tried > s.at.last, "its attempt lies where the ribbon stood, past the last stitch");
     b          = s;
     b.at.given = tried - 1u;
-    TEST_ASSERT(StandStitchLayEmpty(&b, STITCH_DATA_FLUSHED) != 0,
+    /* An atom of the ribbon long, as the attempt it lies over: a flash page
+     * on a removable medium (§16.6 п.2). */
+    TEST_ASSERT(StandStitchLayAt(&b, STITCH_DATA_FLUSHED, b.at.atom, &b.at.next) != 0,
                 "another machine sews a stitch of that seq in the very place of the attempt");
     TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_OTHER, "the medium comes back holding a unit of a seq this "
                    "kernel gave that is not the one it sealed: its book is given up");
@@ -628,8 +638,8 @@ static TestResult TestStandAwayLastClasp(void)
 
     if (aside)
         return test_steps_aside(aside);
-    if (s.at.atom != VOLUME_BLOCK_SECTORS)
-        return test_steps_aside("the medium's atom is larger than a block: a stitch laid by hand here is one");
+    if (s.at.atom > STAND_STITCH_LAID_MOST)
+        return test_steps_aside(STAND_STITCH_ATOM_LONG);
     TEST_ASSERT(StandAwaySettled("away-clasp"), "a cycle settles, its stitch the last this kernel left");
     RibbonCursorStand(&now);
     TagFSStandMediumLeaves();
@@ -638,7 +648,7 @@ static TestResult TestStandAwayLastClasp(void)
     b.at.quire = now.sewn.quire;
     b.at.off   = now.sewn.off;
     b.at.given = now.last - 1u;
-    TEST_ASSERT(StandStitchLayEmpty(&b, STITCH_DATA_FLUSHED) != 0,
+    TEST_ASSERT(StandStitchLayAt(&b, STITCH_DATA_FLUSHED, b.at.atom, &b.at.next) != 0,
                 "another machine lays a stitch of the same seq in its place, its body and its Clasp another");
     TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_OTHER, "the medium comes back: its last stitch does not stand "
                    "where this kernel sewed it by its Clasp, and its book is given up");
@@ -658,17 +668,20 @@ static TestResult TestStandAwayTornTail(void)
     TestResult    verdict = TEST_PASS;
     StandStitch   s;
     MountBookSaid said;
-    uint64_t      half = VOLUME_BLOCK_SECTORS / 2u;
+    uint64_t      half = 0;
     bool          away = false;
     const char*   aside = StandStitchAside(&s);
 
     if (aside)
         return test_steps_aside(aside);
-    if (s.at.atom != VOLUME_BLOCK_SECTORS)
-        return test_steps_aside("the medium's atom is larger than a block: a stitch laid by hand here is one");
+    if (s.at.atom > STAND_STITCH_LAID_MOST)
+        return test_steps_aside(STAND_STITCH_ATOM_LONG);
+    half = s.at.atom / 2u;
     TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
-    memset(s_away_bytes, 0, half * BOOK_SECTOR_BYTES);
-    TEST_ASSERT(StandStitchLayEmpty(&s, STITCH_DATA_FLUSHED) != 0 &&
+    /* The stitch an atom of the ribbon long: a flash page on a removable
+     * medium (§16.6 п.2). */
+    memset(s_away_bytes, 0, sizeof(s_away_bytes));
+    TEST_ASSERT(StandStitchLayAt(&s, STITCH_DATA_FLUSHED, s.at.atom, &s.at.next) != 0 &&
                 BoardroomWrite(s.seat, s.base + s.at.quire.block * TAGFS_BLOCK_SECTORS + s.at.off + half, half,
                                s_away_bytes, NULL) == 0,
                 "a stitch is laid at the ribbon's end and the second half of it lost: a torn tail");
@@ -702,11 +715,11 @@ static TestResult TestStandAwayLiedWhole(void)
 
     if (aside)
         return test_steps_aside(aside);
-    if (s.at.atom != VOLUME_BLOCK_SECTORS)
-        return test_steps_aside("the medium's atom is larger than a block: a stitch laid by hand here is one");
+    if (s.at.atom > STAND_STITCH_LAID_MOST)
+        return test_steps_aside(STAND_STITCH_ATOM_LONG);
     TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
-    TEST_ASSERT(StandStitchLayEmpty(&s, STITCH_DATA_FLUSHED | STITCH_MEDIUM_LIED) != 0,
-                "a stitch saying the medium lied is laid at the ribbon's end");
+    TEST_ASSERT(StandStitchLayAt(&s, STITCH_DATA_FLUSHED | STITCH_MEDIUM_LIED, s.at.atom, &s.at.next) != 0,
+                "a stitch saying the medium lied, an atom of the ribbon long, is laid at the ribbon's end");
     TEST_ASSERT(StandRibbonUp(), "the volume mounts on it");
     MountBookStandSaid(&said);
     TEST_ASSERT(said.lied, "and holds its medium to have lied");
@@ -747,8 +760,8 @@ static TestResult TestStandAwayMarksRefused(void)
 
     if (aside)
         return test_steps_aside(aside);
-    if (b.s.at.atom != VOLUME_BLOCK_SECTORS) {
-        verdict = test_steps_aside("the medium's atom is larger than a block: a stitch laid by hand here is one");
+    if (b.s.at.atom > STAND_STITCH_LAID_MOST) {
+        verdict = test_steps_aside(STAND_STITCH_ATOM_LONG);
         goto out;
     }
     TEST_ASSERT(StandAwaySettled("away-marks-0") && TagFSStandLetGo(), "a cycle settles, a stitch past the slot, "
@@ -763,8 +776,10 @@ static TestResult TestStandAwayMarksRefused(void)
     away = false;
     t = b.s;
     RibbonCursorStand(&t.at);
-    TEST_ASSERT(TagFSStandLetGo() && StandStitchLayEmpty(&t, STITCH_DATA_FLUSHED | STITCH_MEDIUM_LIED) != 0,
-                "the volume is let go of, and a stitch saying the medium lied laid at the ribbon's end");
+    TEST_ASSERT(TagFSStandLetGo() &&
+                StandStitchLayAt(&t, STITCH_DATA_FLUSHED | STITCH_MEDIUM_LIED, t.at.atom, &t.at.next) != 0,
+                "the volume is let go of, and a stitch saying the medium lied, an atom of the ribbon long, laid at "
+                "the ribbon's end");
     RibbonStandMarksRefused();
     TEST_ASSERT(StandRibbonUp(), "it mounts, memory refusing to keep the place of that stitch");
     MountBookStandSaid(&said);
@@ -822,7 +837,7 @@ static TestResult TestStandAwayVerdict(void)
     RibbonUnit*         u = NULL;
     StitchHead          h;
     uint32_t            c1 = 0, c2 = 0;
-    uint64_t            digests[2];
+    uint64_t            digests[2], fid = 0;
     static uint8_t      body[64];
     bool                away = false;
     const char*         aside = StandRibbonAside(&w);
@@ -860,8 +875,9 @@ static TestResult TestStandAwayVerdict(void)
     RibbonCursorStand(&c);
     TEST_ASSERT(w.nlaid < STAND_RIBBON_LAID, "room to put back the stitch the next cycle lays");
     w.laid[w.nlaid++] = (c.quire.block + c.off / TAGFS_BLOCK_SECTORS) * TAGFS_BLOCK_SECTORS;
-    TEST_ASSERT(StandAwaySettled("away-verdict") && StandStitchRead(&u), "the session's first cycle settles, a file "
-                "born in it");
+    TEST_ASSERT_EQ(tagfs_create_file("away-verdict", NULL, 0, &fid), 0, "a file is made on what it holds");
+    TEST_ASSERT_OK(TagFSSettle(), "the session's first cycle settles, the file born in it");
+    TEST_ASSERT(StandStitchRead(&u), "and its stitch reads back");
     TEST_ASSERT(u->nrecords > 0 && u->records[0].kind != RIBBON_UNDONE, "and its stitch carries no Undone: none twice");
 out:
     if (away)

@@ -303,6 +303,15 @@ uint64_t RibbonSeqNext(void)
     return s_cursor.given;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+static volatile bool s_stand_next_refused;
+
+bool RibbonStandNextRefused(bool armed)
+{
+    return __atomic_exchange_n(&s_stand_next_refused, armed, __ATOMIC_ACQ_REL);
+}
+#endif
+
 /*
  * ‼ THE NEXT QUIRE IS GIVEN AHEAD OF NEED (§3.6): the first stitch of each
  * Quire of the ribbon asks for the one after it, and every stitch after it
@@ -326,6 +335,11 @@ void RibbonNextGiven(void)
     uint64_t      start = 0;
     if (!c->up || (c->next.blocks && RibbonQuireOn(&c->next, c->atom)))
         return;
+#ifdef CONFIG_VOLUME_TESTS
+    if (__atomic_exchange_n(&s_stand_next_refused, false, __ATOMIC_ACQ_REL))
+        c->taken = ERR_TAGFS_NO_SPACE;
+    else
+#endif
     c->taken = BlockMapTakeQuire(GROUND_RIBBON, c->quire_blocks,
                                  c->atom / TAGFS_BLOCK_SECTORS ? c->atom / TAGFS_BLOCK_SECTORS : 1u,
                                  EndpaperKeeps(c->quire_blocks), g_book.frame.data_block,
