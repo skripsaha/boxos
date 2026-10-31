@@ -137,9 +137,69 @@ static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
     return proc;
 }
 
-/* One file of the volume started when it asks to be: the process, or NULL
- * when it does not ask or could not be started (said by the launch). */
-static process_t *autostart_consider(uint64_t file_id, bool scheduler_live)
+/*
+ * ‼ A LATE LAUNCH SAYS WHAT IT STARTED BEFORE WHAT IT STARTED SPEAKS.
+ *
+ * At boot no program runs before one sweep enqueues them all, after the last
+ * line about them (main.c). A volume that turns up later had each program let
+ * run the moment it was made, so the volume's shell printed its banner and
+ * prompt in among the kernel's lines — on a book on the stick, two runs of
+ * three: `~ [AUTOSTART] the volume brought its own shell — the stand-in (PID 1)
+ * hands over`, the prompt buried in the middle of the console. So the late
+ * launch holds what it makes, says the launch, relieves the stand-in, and only
+ * then lets them run, in the order made. Grown as they are found: a volume
+ * asks for as many as it likes.
+ */
+typedef struct {
+    process_t **procs;
+    uint32_t    count;
+    uint32_t    room;
+} AutostartHeld;
+
+/* `proc`, by the walk's reference, held until AutostartLetRun; false when no
+ * room for it could be had. */
+static bool AutostartHold(AutostartHeld *held, process_t *proc)
+{
+    if (held->count == held->room) {
+        uint32_t    room  = held->room ? held->room * 2u : 4u;
+        process_t **procs = kmalloc((size_t)room * sizeof(*procs));
+        if (!procs) return false;
+        if (held->count) memcpy(procs, held->procs, (size_t)held->count * sizeof(*procs));
+        kfree(held->procs);
+        held->procs = procs;
+        held->room  = room;
+    }
+    held->procs[held->count++] = proc;
+    return true;
+}
+
+/* A program of the late launch let run as it was made, and the walk's
+ * reference given back. Only as made: its PID was said with its line, and a
+ * stop or an end decided over it since stands (ProcessStartCreated) — a
+ * `stopped` it wears is never run past. */
+static void AutostartLetRunOne(process_t *proc)
+{
+    if (!ProcessStartCreated(proc))
+        kprintf("[AUTOSTART] PID %u was stopped or ended before the launch let it run "
+                "— left as it stands\n", proc->pid);
+    process_ref_dec(proc);
+}
+
+static void AutostartLetRun(AutostartHeld *held)
+{
+    for (uint32_t i = 0; i < held->count; i++)
+        AutostartLetRunOne(held->procs[i]);
+    kfree(held->procs);
+    held->procs = NULL;
+    held->count = held->room = 0;
+}
+
+/* One file of the volume made into a process when it asks to be: the process,
+ * loaded, not yet let run and referenced for the walk — its caller lets it run
+ * and gives the reference back — or NULL when it does not ask or could not be
+ * started (said by the launch). The reference is taken before the line names
+ * the PID: a kill by that PID cannot free what the walk still holds. */
+static process_t *autostart_consider(uint64_t file_id)
 {
     TagFSMetadata meta;
     if (tagfs_get_metadata(file_id, &meta) != 0) return NULL;
@@ -159,18 +219,7 @@ static process_t *autostart_consider(uint64_t file_id, bool scheduler_live)
 
     process_t *proc = autostart_launch_one(file_id, &meta, tags);
     if (proc) {
-        /*
-         * At boot the scheduler is not running yet and every WORKING process is
-         * swept onto a run queue in one pass afterwards, so the state is set
-         * directly — exactly as it always was. Once the machine is up there is
-         * no such pass, and process_set_state is what enqueues; it is the same
-         * call the runtime spawn path makes.
-         */
-        if (scheduler_live) {
-            process_set_state(proc, PROC_WORKING);
-        } else {
-            proc->state = PROC_WORKING;
-        }
+        process_ref_inc(proc);
         kprintf("[AUTOSTART] Started '%s' (PID %u, tags: %s)\n",
                 meta.filename, proc->pid, tags);
     }
@@ -179,7 +228,11 @@ static process_t *autostart_consider(uint64_t file_id, bool scheduler_live)
     return proc;
 }
 
-int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
+/* Every file the volume tags to start, made into a process: with `held` NULL
+ * the boot's — the state set directly, the sweep after the boot's last line
+ * enqueuing it, exactly as it always was — else the late launch's, held. How
+ * many were started. */
+static int AutostartWalk(process_t **out_first, AutostartHeld *held)
 {
     if (out_first) *out_first = NULL;
 
@@ -198,15 +251,28 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
     do {
         if (TagFSListPage(from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK) break;
         for (uint32_t i = 0; i < page.delivered; i++) {
-            process_t *proc = autostart_consider(file_ids[i], scheduler_live);
+            process_t *proc = autostart_consider(file_ids[i]);
             if (!proc) continue;
             launched++;
             if (out_first && !*out_first) *out_first = proc;
+            if (!held) {
+                proc->state = PROC_WORKING;
+                process_ref_dec(proc);
+            } else if (!AutostartHold(held, proc)) {
+                kprintf("[AUTOSTART] no memory to hold PID %u back until the launch is said "
+                        "— it runs at once\n", proc->pid);
+                AutostartLetRunOne(proc);
+            }
         }
         from = page.next;
     } while (from != 0);
 
     return launched;
+}
+
+int AutostartLaunchFromVolume(process_t **out_first)
+{
+    return AutostartWalk(out_first, NULL);
 }
 
 /*
@@ -251,13 +317,15 @@ static void autostart_on_volume_mounted(TouchTag tag, const void *payload,
     /* Re-checked inside the gate: two mounts can be announced close enough
      * together that both callers passed the load above. */
     if (__atomic_load_n(&g_volume_launched, __ATOMIC_ACQUIRE) == 0) {
-        int n = AutostartLaunchFromVolume(NULL, true);
+        AutostartHeld held = { NULL, 0, 0 };
+        int n = AutostartWalk(NULL, &held);
         if (n > 0) {
             __atomic_store_n(&g_volume_launched, 1u, __ATOMIC_RELEASE);
             kprintf("[AUTOSTART] a volume arrived after the boot had given up "
                     "— %d process(es) started from it\n", n);
             autostart_relieve_stand_in();
         }
+        AutostartLetRun(&held);
     }
 
     __atomic_store_n(&g_busy, 0u, __ATOMIC_RELEASE);
