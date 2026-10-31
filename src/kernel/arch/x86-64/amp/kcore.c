@@ -196,6 +196,17 @@ error_t kcore_submit(struct process_t* proc)
     if (!proc)
         return ERR_INVALID_ARGUMENT;
 
+    /* The queue holds the strand, not a pointer to whatever is there when a
+     * K-Core comes round to it. The slot takes a reference here; the K-Core
+     * that pops it gets that reference with it (kcore_process_entry) and drops
+     * it once the pocket is served. The reaper knows nothing of the queues:
+     * without the reference it could tear a strand down and free it while a
+     * slot still named it, and the pop read freed memory — or a strand made
+     * since in the same place, whose ring it then served. The caller holds the
+     * strand alive across this call: the syscall gate runs on it, and the
+     * re-arm holds the reference of the K-Core serving it. */
+    process_ref_inc(proc);
+
     uint8_t target = kcore_find_least_loaded();
     uint8_t my_core = amp_get_core_index();
 
@@ -225,6 +236,7 @@ error_t kcore_submit(struct process_t* proc)
      * rather than being papered over by a retry that cannot succeed. */
     kprintf("[KCORE] DEFECT: no queue slot for PID %u — dedup/capacity invariant broken\n",
             proc->pid);
+    process_ref_dec(proc);
     return ERR_KCORE_SUBMIT_FAILED;
 
 submitted:
@@ -257,11 +269,17 @@ void kcore_wake(uint8_t core_idx)
 
 static void kcore_process_entry(struct process_t* proc)
 {
-    if (!proc || proc->magic != PROCESS_MAGIC) {
+    if (!proc)
+        return;
+
+    /* The slot's reference came with the strand (kcore_submit) and is dropped
+     * at the end, whatever happens here. A strand torn down while it waited in
+     * the queue — process_destroy poisons its magic — is alive only by that
+     * reference, and is not served. */
+    if (proc->magic != PROCESS_MAGIC) {
+        process_ref_dec(proc);
         return;
     }
-
-    process_ref_inc(proc);
 
     uint8_t core_idx = amp_get_core_index();
     KCorePocketQueue* q = &g_kcore_queues[core_idx];
@@ -291,9 +309,9 @@ static void kcore_process_entry(struct process_t* proc)
      * still 1, and would otherwise sit forever.
      *
      * We're allowed to call kcore_submit recursively here — the proc
-     * goes back into a queue, ref_inc balances ref_dec, and the next
-     * pop will land in another kcore_process_entry. No locks held
-     * across this. */
+     * goes back into a queue, whose slot takes a reference of its own while
+     * this one is still held, and the next pop will land in another
+     * kcore_process_entry. No locks held across this. */
     if (!KPocketIsEmpty(proc)) {
         if (atomic_cas_u8(&proc->kcore_pending, 0, 1)) {
             kcore_submit(proc);
