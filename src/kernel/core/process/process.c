@@ -675,9 +675,20 @@ bool process_set_state(process_t *proc, process_state_t new_state)
      * the freed kernel stack reused as an iret frame). The 13 wake sites
      * (touch/kring/sync_ops/touch_ring) are best-effort and already tolerate a
      * target that has gone away, so refusing the wake here is the correct
-     * no-op — there is no live strand left to run. */
-    if (new_state == PROC_WORKING &&
-        (old_state == PROC_DONE || old_state == PROC_CRASHED))
+     * no-op — there is no live strand left to run.
+     *
+     * And not only the wake: no live state at all. An op the strand submitted
+     * just before its end can still be served after it — the K-Core that pops
+     * it knows nothing of the end — and the parking ops (addr_park, turn in,
+     * touch await, process gone, the storage jobs) set their own strand
+     * PROC_WAITING. That made a corpse WAITING: the reaper, which takes only
+     * the dead, left it and its cabin for ever, the program read as alive, and
+     * the next wake passed the guard above from WAITING and ran it. Measured:
+     * a program killed while its main strand was parking kept that strand,
+     * CRASHED -> WAITING from SysAddrPark, every time it outlived its end.
+     * Dead to dead (process_destroy's CRASHED over an exit's DONE) stays. */
+    if ((old_state == PROC_DONE || old_state == PROC_CRASHED) &&
+        new_state != PROC_DONE && new_state != PROC_CRASHED)
     {
         spin_unlock(&proc->state_lock);
         return false;
@@ -871,13 +882,21 @@ void process_destroy(process_t *proc)
      * strand), not here: a non-last strand's exit must not strip tags
      * from rings its siblings still use. */
 
-    /* Genuine-fault / kernel-forced teardown. When this is the FIRST cleanup
-     * (a real crash) it publishes process:died with PROC_EXIT_CRASHED, or with
-     * PROC_EXIT_STACK_OVERFLOW when the fault handler named that cause; when a
-     * SysProcKill already cleaned this strand (kill or self-exit), the call
-     * no-ops on touch_cleaned and that earlier disposition stands. */
-    TouchCleanupProcess(proc, proc->stack_overran ? PROC_EXIT_STACK_OVERFLOW
-                                                  : PROC_EXIT_CRASHED);
+    /* Genuine-fault / kernel-forced teardown: a strand whose death nobody
+     * committed. It takes its program with it — what it held of its program's
+     * (the heap lock above all) is lost with it, and siblings left running
+     * would wait on that for ever — so CabinEnd ends every strand of the
+     * cabin, this one last, with PROC_EXIT_CRASHED, or PROC_EXIT_STACK_OVERFLOW
+     * when the fault handler named that cause. A strand already ended — a kill,
+     * an exit, its own strand_exit — committed its death then (touch_cleaned),
+     * and that disposition stands.
+     *
+     * The strand is off the process list already, so CabinEnd's walks find
+     * only its siblings; its cabin stands, dropped only by the cleanup that
+     * follows its last reference. */
+    if (!__atomic_load_n(&proc->touch_cleaned, __ATOMIC_ACQUIRE))
+        CabinEnd(proc, proc->stack_overran ? PROC_EXIT_STACK_OVERFLOW
+                                           : PROC_EXIT_CRASHED);
 
     /* strand:exited — pairs with strand:spawned.  Fires on every strand
      * exit (main or spawned).  Cabin teardown itself happens later, when
@@ -1320,7 +1339,12 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
     proc->in_ready     = 0;
 
     spin_lock(&process_lock);
-    if (process_count >= PROCESS_MAX_COUNT)
+    /* A program that is ending takes no new strand: CabinEnd sets `ending`
+     * under this lock before it walks the list, so a strand that joins the
+     * list here is one that walk will find, and one that would join after it
+     * is refused now. */
+    bool ending = cabin->ending != 0;
+    if (ending || process_count >= PROCESS_MAX_COUNT)
     {
         spin_unlock(&process_lock);
         strand_rings_destroy(proc);
@@ -1333,7 +1357,8 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         proc->cabin = NULL;
         pid_free(proc->pid);
         kfree(proc);
-        kprintf("[STRAND] ERROR: process limit reached under lock (%u)\n", PROCESS_MAX_COUNT);
+        if (!ending)
+            kprintf("[STRAND] ERROR: process limit reached under lock (%u)\n", PROCESS_MAX_COUNT);
         return NULL;
     }
     proc->prev = NULL;

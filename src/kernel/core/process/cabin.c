@@ -13,6 +13,8 @@
 #include "atomics.h"
 #include "bay.h"       /* BayCleanupCabin — the claims are the cabin's */
 #include "brook.h"     /* BrookCleanupCabin — the mapping half of a Brook claim */
+#include "touch.h"     /* TouchCleanupProcess — each strand's death, committed once */
+#include "proc_exit.h"
 
 /*
  * cabin_set_tag_bit — intern a single tag id into the cabin's fast-path
@@ -354,4 +356,84 @@ void cabin_ref_dec(cabin_t *cabin)
     uint32_t old = atomic_fetch_sub_u32(&cabin->strand_count, 1);
     if (old == 1)
         cabin_destroy(cabin);
+}
+
+/* One strand's part in its program's end: the death committed and announced
+ * first (TouchCleanupProcess claims it once per strand and publishes
+ * process:died with this disposition), the state the reaper and the
+ * scheduler read second. In that order for the reason SysProcKill always kept
+ * it: with the state first, the reaper on another core could commit the death
+ * itself and call an ordered end a crash. */
+static void cabin_end_strand(process_t *strand, int32_t disposition)
+{
+    TouchCleanupProcess(strand, disposition);
+    process_set_state(strand, disposition >= 0 ? PROC_DONE : PROC_CRASHED);
+}
+
+void CabinEnd(process_t *named, int32_t disposition)
+{
+    if (!named)
+        return;
+    cabin_t *cabin = named->cabin;
+
+    /* The others share the end: an exit's code, a kill — and any crash cause
+     * becomes a crash, the cause having been the named strand's own. */
+    int32_t shared = (disposition < 0 && disposition != PROC_EXIT_KILLED)
+                         ? PROC_EXIT_CRASHED : disposition;
+
+    /* One live sibling a walk. Nothing is allocated, and every walk either
+     * ends a strand — which no later walk picks again, its state being dead —
+     * or finds none, so the loop is done after as many walks as the program
+     * had strands alive. None is born into the cabin meanwhile: `ending` is
+     * set under the lock strand_spawn checks it under.
+     *
+     * The main strand (hammock_base == 0) is kept for the very end, pinned by
+     * the walk that first meets it alive: it is the one the program's spawner
+     * knows it by, and watches. */
+    process_t *main_strand = NULL;
+    while (cabin)
+    {
+        process_t *next = NULL;
+
+        process_list_lock();
+        cabin->ending = 1;
+        for (process_t *p = process_get_first(); p; p = p->next)
+        {
+            if (p->cabin != cabin)
+                continue;
+            /* Nobody is left to join it. */
+            __atomic_store_n(&p->reap_blocked, 0u, __ATOMIC_SEQ_CST);
+            if (p == named)
+                continue;
+            process_state_t st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
+            if (st == PROC_DONE || st == PROC_CRASHED)
+                continue;
+            if (p->hammock_base == 0)
+            {
+                if (!main_strand)
+                {
+                    process_ref_inc(p);
+                    main_strand = p;
+                }
+                continue;
+            }
+            if (next)
+                continue;
+            process_ref_inc(p);
+            next = p;
+        }
+        process_list_unlock();
+
+        if (!next)
+            break;
+        cabin_end_strand(next, shared);
+        process_ref_dec(next);
+    }
+
+    cabin_end_strand(named, disposition);
+    if (main_strand)
+    {
+        cabin_end_strand(main_strand, shared);
+        process_ref_dec(main_strand);
+    }
 }

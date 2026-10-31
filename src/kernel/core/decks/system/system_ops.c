@@ -356,14 +356,16 @@ static error_t proc_authorize_tag_grant(const char *tags, const process_t *spawn
  * this caller launched. "Own child" is (spawner_pid, spawner_gen) — a pid alone
  * is not identity (pids recycle), so a later process inheriting a dead spawner's
  * pid must NOT inherit authority. Parentless procs (autostart/init,
- * spawner_pid==0) are reachable only via the system ensign. */
+ * spawner_pid==0) are reachable only via the system ensign. A kill never asks
+ * about a cabin-mate: SysProcKill refuses one before this gate, since a
+ * program ends whole. */
 static bool proc_has_authority_over(const process_t *caller, const process_t *target)
 {
     if (!caller || !target) return false;
     if (caller->pid == target->pid) return true;
     /* Same cabin = one trust domain: sibling strands share this address space
-     * and can already read/write each other's memory, so tagging or killing a
-     * cabin-mate is an in-domain act — and is what lets a spawned strand run
+     * and can already read/write each other's memory, so tagging a cabin-mate
+     * is an in-domain act — and is what lets a spawned strand run
      * box::tag_scope (its pid is not the cabin-main pid boxlib addresses). Guard
      * NULL so cabin-less procs don't alias; foreign targets keep a distinct
      * cabin_t and fall through. Cf. the same rule in SysStrandRelease. */
@@ -652,18 +654,26 @@ static int SysProcSpawnTagged(const OpContext *ctx, uint64_t binary_va, uint64_t
     return OK;
 }
 
-/* SYSTEM_OP_PROC_KILL
- *   params:  [u32 target_pid]            (0 == self exit; 4-byte form, code 0)
+/* SYSTEM_OP_PROC_KILL — the end of a PROGRAM: every strand of its cabin.
+ *   params:  [u32 target_pid]            (0 == the caller's own program exits;
+ *                                         4-byte form, code 0)
  *            [u32 target_pid][i32 code]  (optional 8-byte form; `code` is the
- *                                         self-exit disposition, ignored when
- *                                         killing another process)
+ *                                         exit's disposition, ignored when
+ *                                         killing another program)
  *            [u32 target_pid][i32 code][u32 generation]
  *                                        (12-byte form: kill that exact
  *                                         incarnation, or nothing)
  *   out_crate (optional): u32 killed_pid
  *
- * exit_code semantics (proc_exit.h): a self-exit publishes `code` masked to
- * [0, INT32_MAX]; killing another process forces PROC_EXIT_KILLED (-1).
+ * Any strand of another program names that program, and all of it ends
+ * (CabinEnd), its main strand announced last. A strand of the CALLER'S
+ * program other than target 0 is refused, ERR_INVALID_ARGUMENT: a strand ends
+ * only itself (SYSTEM_OP_STRAND_EXIT), and its program ends only whole —
+ * ending a sibling wherever it happens to be would leave what it holds of the
+ * program (the heap lock above all) held for ever over everyone left.
+ *
+ * exit_code semantics (proc_exit.h): an exit publishes `code` masked to
+ * [0, INT32_MAX] for every strand; a kill forces PROC_EXIT_KILLED (-1).
  *
  * WHY THE 12-BYTE FORM. A pid is a seat, and seats are re-let. Between
  * deciding to end a process and saying so, that process can end on its own
@@ -714,36 +724,30 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
         return ERR_PROCESS_NOT_FOUND;
     }
 
-    /* Internal gate (the op stays OP_AUTH_NONE so every process can self-exit):
-     * killing ANOTHER process needs authority over it — self-exit always passes
-     * (caller->pid == target->pid); beyond self, a kill needs a same-cabin
-     * sibling, the god/system ensign, or the exact child this caller spawned.
-     * Without it any app could kill any process. */
+    /* A strand of the caller's own program is not a kill's to end — the
+     * caller's own pid included: its exit is target 0, a strand's own end is
+     * SYSTEM_OP_STRAND_EXIT. */
+    if (!self_exit && target->cabin && target->cabin == ctx->proc->cabin) {
+        process_ref_dec(target);
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    /* Internal gate (the op stays OP_AUTH_NONE so every program can exit):
+     * killing ANOTHER program needs authority over it — the god/system ensign,
+     * or the exact child this caller spawned. Without it any app could kill
+     * any program. */
     if (!proc_has_authority_over(ctx->proc, target)) {
         process_ref_dec(target);
         return ERR_ACCESS_DENIED;
     }
 
-    /* Publish process:died with the CORRECT disposition and claim the cleanup
-     * BEFORE process_set_state exposes this proc to the reaper. If we marked it
-     * PROC_DONE/CRASHED first, the reaper's process_destroy (another K-Core)
-     * could win the touch_cleaned claim in that window and publish
-     * PROC_EXIT_CRASHED for an intentional exit/kill. TouchCleanupProcess reads
-     * no proc state and `target` is pinned (process_find_ref above), so claiming
-     * first is safe; the claim-guard in TouchClaimSet (touch_cleaned check under
-     * subs_lock) already blocks any sub the still-running target might race in.
-     * TouchCleanupProcess is idempotent on touch_cleaned, so the later
-     * process_destroy call no-ops and this disposition stands.
-     *
-     * Disposition (proc_exit.h): a self-exit publishes the caller's code with
-     * the sign bit cleared so it can never look like a negative sentinel; a
-     * kill-other forces PROC_EXIT_KILLED — the victim never chose a code, so
-     * any param code is ignored. */
-    TouchCleanupProcess(target,
-                        self_exit ? (int32_t)(exit_code & 0x7FFFFFFF)
-                                  : PROC_EXIT_KILLED);
-
-    process_set_state(target, self_exit ? PROC_DONE : PROC_CRASHED);
+    /* Disposition (proc_exit.h): an exit publishes the caller's code with the
+     * sign bit cleared so it can never look like a negative sentinel; a kill
+     * forces PROC_EXIT_KILLED — the program never chose a code, so any param
+     * code is ignored. `target` is pinned (process_find_ref above), which
+     * keeps its cabin standing through the whole end. */
+    CabinEnd(target, self_exit ? (int32_t)(exit_code & 0x7FFFFFFF)
+                               : PROC_EXIT_KILLED);
     __sync_synchronize();
 
     if (op->out_crate != CRATE_INDEX_NONE) {
@@ -993,6 +997,11 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
             for (process_t *iter = process_get_first(); iter; iter = iter->next) {
                 process_state_t s = iter->state;
                 if (s == PROC_CRASHED || s == PROC_DONE) continue;
+                /* Dead from the moment its death is committed: by then its
+                 * process:died is out and process_gone has answered, and its
+                 * state follows a few instructions later. A crew read in
+                 * between must not call it alive. */
+                if (__atomic_load_n(&iter->touch_cleaned, __ATOMIC_ACQUIRE)) continue;
                 if (!process_has_tag_id(iter, tid))      continue;
                 if (total < pid_cap) pid_list[total] = iter->pid;
                 total++;
@@ -1485,6 +1494,30 @@ static int SysStrandRelease(const ManifestOp *op, Crate *crates, uint16_t crate_
         __atomic_store_n(&target->reap_blocked, 0u, __ATOMIC_SEQ_CST);
 
     process_ref_dec(target);
+    return OK;
+}
+
+/* =========================================================================
+ *  SYSTEM_OP_STRAND_EXIT — the calling strand ends, and only it.
+ *
+ *  The one end that is a single strand's: it comes from that strand itself,
+ *  at a point of its own choosing (boxlib's strand_exit, after it has put down
+ *  everything it held), so nothing of its program is left held. Any other end
+ *  is its program's (SYSTEM_OP_PROC_KILL). Its process:died carries 0.
+ *
+ *  Committed as every end is: the death claimed and announced first, the state
+ *  the reaper reads second, so the reaper never calls this end a crash. The
+ *  op's own strand is pinned for the op's life, as every op's is.
+ * ========================================================================= */
+static int SysStrandExit(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                         const OpContext *ctx)
+{
+    (void)op; (void)crates; (void)crate_count;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
+
+    TouchCleanupProcess(ctx->proc, 0);
+    process_set_state(ctx->proc, PROC_DONE);
+    __sync_synchronize();
     return OK;
 }
 
@@ -2348,6 +2381,8 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_PROC_EXEC_FILE, SysProcExecFile, OP_AUTH_UTILITY,"system.proc.exec.file" },
         { SYSTEM_OP_STRAND_SPAWN, SysStrandSpawn, OP_AUTH_APP,    "system.strand.spawn"},
         { SYSTEM_OP_STRAND_RELEASE, SysStrandRelease, OP_AUTH_APP, "system.strand.release"},
+        /* Open as system.proc.kill is: every strand may end itself. */
+        { SYSTEM_OP_STRAND_EXIT,  SysStrandExit,  OP_AUTH_NONE,   "system.strand.exit"},
         { SYSTEM_OP_STRAND_POOL_BIND, SysStrandPoolBind, OP_AUTH_APP, "system.strand.pool.bind"},
         { SYSTEM_OP_INFO,         SysInfo,        OP_AUTH_NONE,   "system.info"       },
         /* Use Context: what the user is doing, said in tags. set and clear

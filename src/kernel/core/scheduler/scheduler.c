@@ -1290,12 +1290,13 @@ void schedule(void *frame_ptr)
     // PROC_CREATED → PROC_WORKING.  `next` is never NULL: scheduler_select_next
     // returns the idle task when nothing is runnable, and the destroying-task
     // re-check above also falls back to idle — so no NULL guard is needed here.
-    if (process_get_state(next) == PROC_CREATED)
-    {
-        spin_lock(&next->state_lock);
+    // Looked at and written in one hold of the lock: a program ended between
+    // a look and a later write would have its CRASHED written over, and death
+    // is terminal (process_set_state).
+    spin_lock(&next->state_lock);
+    if (next->state == PROC_CREATED)
         next->state = PROC_WORKING;
-        spin_unlock(&next->state_lock);
-    }
+    spin_unlock(&next->state_lock);
     next->last_run_time = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
     /* Start of this strand's processor-time slice. Only when it is actually
      * taking the core from someone else: on a consecutive run the slice never

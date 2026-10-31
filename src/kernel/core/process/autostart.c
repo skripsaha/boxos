@@ -217,10 +217,10 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
  * leaving both running would put two shells on one keyboard and two writers on
  * one screen. The one that was only ever standing in is the one that goes.
  *
- * Ended the way SysProcKill ends anything: the Touch subscriptions are torn
- * down and the disposition claimed BEFORE the state changes, so the reaper on
- * another core cannot get there first and call an orderly hand-over a crash.
- * The code is a clean zero — this process did nothing wrong.
+ * Ended the way SysProcKill ends a program: whole (CabinEnd), each strand's
+ * disposition claimed BEFORE its state changes, so the reaper on another core
+ * cannot get there first and call an orderly hand-over a crash. The code is a
+ * clean zero — this program did nothing wrong.
  */
 static void autostart_relieve_stand_in(void)
 {
@@ -233,8 +233,7 @@ static void autostart_relieve_stand_in(void)
     kprintf("[AUTOSTART] the volume brought its own shell — the stand-in "
             "(PID %u) hands over\n", pid);
 
-    TouchCleanupProcess(p, 0);
-    process_set_state(p, PROC_DONE);
+    CabinEnd(p, 0);
     __sync_synchronize();
     process_ref_dec(p);
 }

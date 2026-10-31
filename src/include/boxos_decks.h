@@ -231,6 +231,11 @@
  * job". */
 #define SYSTEM_OP_BELL              0xC7  /* (u32 pid) — wake that strand; carries nothing */
 
+/* strand.exit — the calling strand ends, and only it; its program goes on.
+ * Every other end is the program's, all its strands at once: proc.kill names
+ * another program (any strand of it) or, with target 0, the caller's own. */
+#define SYSTEM_OP_STRAND_EXIT       0xC8  /* () — the calling strand ends; nothing comes back to it */
+
 /* ============================================================================
  *  Storage deck opcodes — SINGLE SOURCE OF TRUTH, like the system deck above.
  *  Read by the kernel handler table (decks/storage/storage_ops.c) and by the

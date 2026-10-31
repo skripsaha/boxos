@@ -17,7 +17,7 @@
 #include "box/system.h"          /* yield */
 #include "box/timeouts.h"        /* BOX_ANSWER_GUARANTEED */
 #include "box/error.h"
-#include "boxos_decks.h"         /* DECK_SYSTEM, SYSTEM_OP_STRAND_SPAWN, SYSTEM_OP_PROC_KILL */
+#include "boxos_decks.h"         /* DECK_SYSTEM, SYSTEM_OP_STRAND_SPAWN, SYSTEM_OP_STRAND_EXIT */
 
 /* Start record: the kernel passes the strand a single argument (rdi); we
  * use it to carry both the user function and its argument through the
@@ -127,10 +127,11 @@ void strand_exit(void)
     touch_stash_free_self();
     result_stash_free_self();
 
-    /* Terminate just this strand: SYS_PROC_KILL(target == 0) means self.
-     * No __box_runtime_fini / spawner-notify — those are exit()'s job for the
-     * whole cabin and would wrongly run global teardown on a per-strand exit
-     * (this strand's own console run was handed in above).
+    /* Terminate just this strand: SYSTEM_OP_STRAND_EXIT is the one end that
+     * is a single strand's (SYSTEM_OP_PROC_KILL ends the whole program). No
+     * __box_runtime_fini — that is exit()'s, for the whole program, and would
+     * wrongly run global teardown on a per-strand exit (this strand's own
+     * console run was handed in above).
      *
      * Asked ONCE. Nothing stands between a self-kill and its answer — no
      * medium, no other process — and a self-kill that was honoured does not
@@ -141,10 +142,8 @@ void strand_exit(void)
      * room). A refusal that does come back is therefore a kernel defect, not
      * contention to be out-waited: name it, and stay parked — the trampoline
      * has no caller frame to return into. */
-    uint32_t target = 0;
-    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
-                     &target, (uint16_t)sizeof(target),
-                     NULL, 0, NULL, 0, NULL,
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_STRAND_EXIT,
+                     NULL, 0, NULL, 0, NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0)
         kdbg_print("[strand] self-kill refused rc=%d — kernel defect; strand parked for ever", rc);

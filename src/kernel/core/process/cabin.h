@@ -138,6 +138,12 @@ typedef struct cabin_t
      * K-Core / pointer refs to the strand).
      */
     atomic_u32_t strand_count;
+
+    /* The program is ending (CabinEnd): no strand is born into it any more.
+     * Written and read only under process_lock, so a strand_spawn either
+     * finished joining the process list before CabinEnd's walk, and is ended
+     * by it, or sees this and is refused. Never cleared. */
+    uint8_t ending;
 } cabin_t;
 
 _Static_assert(sizeof(cabin_t) < 4096, "cabin_t must fit in one page");
@@ -174,6 +180,33 @@ void cabin_hammock_give_back(cabin_t *cabin, uint64_t slot_base);
  * Takes NO global locks.  Must be called only when strand_count == 0.
  */
 void cabin_destroy(cabin_t *cabin);
+
+/*
+ * CabinEnd — the program `named` belongs to ends: every strand of its cabin.
+ *
+ * A program is its cabin. A strand may end itself alone (strand_exit), but no
+ * other end is the end of one strand: an end that lands while a strand holds a
+ * lock of its program's (boxlib's heap lock above all) would leave that lock
+ * held for ever over every strand still running. So a kill, an exit() from any
+ * strand and a crash all come here.
+ *
+ * `named` is the strand the end came through and carries `disposition`
+ * (proc_exit.h); the others share the program's end — the same exit code, the
+ * same kill, and for any crash cause PROC_EXIT_CRASHED, since the cause was the
+ * named strand's own. The workers are announced first, then `named`, and the
+ * main strand LAST: it is the one the program's spawner knows it by and waits
+ * on, so whoever finds it gone finds the program wholly gone.
+ *
+ * Every strand of the cabin also loses its reap-block: a joinable strand
+ * waits to be joined by its program, and its program is gone.
+ *
+ * Allocates nothing, so it cannot fail halfway. The caller holds a reference
+ * on `named` (which keeps the cabin alive) and holds no process_lock. Ends
+ * strands that are ending already without harm: each end is the death commit
+ * TouchCleanupProcess makes once per strand.
+ */
+struct process_t;
+void CabinEnd(struct process_t *named, int32_t disposition);
 
 /* Reference counting on strand_count. */
 void cabin_ref_inc(cabin_t *cabin);

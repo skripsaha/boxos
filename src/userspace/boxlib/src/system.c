@@ -152,9 +152,9 @@ void exit(int exit_code)
 
 void _Exit(int exit_code)
 {
-    /* params:[u32 target_pid][i32 exit_code] — target 0 means self exit; the
-     * code rides into SysProcKill's self-exit disposition so process:died
-     * carries the real exit code (masked to [0, INT32_MAX] kernel-side). This
+    /* params:[u32 target_pid][i32 exit_code] — target 0 means this program
+     * exits, every strand of it; the code rides into every strand's
+     * process:died (masked to [0, INT32_MAX] kernel-side). This
      * is the ONLY exit signal now: observers watch the process:died Touch
      * (which also fires on crash), so exit() sends the spawner nothing. */
     struct __attribute__((packed)) { uint32_t target; int32_t code; } kill_param = {

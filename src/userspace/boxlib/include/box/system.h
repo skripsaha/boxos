@@ -87,15 +87,17 @@ int proc_cpu_time(uint64_t* out_us);
 
 /* Normal termination: runs __cxa_finalize callbacks (std::atexit + static
  * destructors) and the .fini_array, flushes the console, then ends the
- * process. The parameter is `int` because [support.start.term] says so and
+ * program — every strand of it, whichever strand calls it; main returning is
+ * this call. Every strand's process:died carries the code. The parameter is
+ * `int` because [support.start.term] says so and
  * because the C++ <cstdlib> exports this very function as std::exit — it used
  * to be uint32_t, which no translation unit could reconcile with <cstdlib>.
  * The kernel masks the code to [0, INT32_MAX]. */
 void exit(int exit_code) __attribute__((noreturn));
 
 /* Abnormal-immediate termination: no atexit callbacks, no static destructors,
- * no .fini_array, no flush. C's _Exit, and the primitive std::quick_exit and
- * std::abort are built on. */
+ * no .fini_array, no flush. Ends the program whole, as exit() does. C's _Exit,
+ * and the primitive std::quick_exit and std::abort are built on. */
 void _Exit(int exit_code) __attribute__((noreturn));
 /* Start a program from a command LINE — "say hello world" — the way the
  * shell does. The first word names the program; the whole line, as typed,
@@ -135,10 +137,16 @@ int proc_exec_file(file_id_t program, const void* luggage, size_t length,
  * issued (a mistyped pid must not read as success).
  */
 int process_gone(uint32_t pid, uint32_t generation, int32_t* out_exit);
-int proc_kill(uint32_t pid);                                  /* kill another process by pid */
+/* End another PROGRAM, named by the pid of any strand of it: every strand of
+ * it ends, each with PROC_EXIT_KILLED, its main strand — the pid it was started
+ * as — announced last, so process_gone on that one returns when nothing of the
+ * program is left. A strand of
+ * the caller's own program is refused, -ERR_INVALID_ARGUMENT: a strand ends
+ * only itself (strand_exit), its program only whole (exit). */
+int proc_kill(uint32_t pid);
 
-/* End the exact incarnation (pid, generation) — the pair that names a
- * process, since a pid is a seat and seats are re-let. Between learning a
+/* proc_kill, aimed at the exact incarnation (pid, generation) — the pair that
+ * names a strand, since a pid is a seat and seats are re-let. Between learning a
  * pid and using it the process can leave and its seat be taken; a kill by
  * pid alone lands on whoever sits there now, and reports success. This one
  * answers -ERR_PROCESS_NOT_FOUND instead, which is the truth. generation 0

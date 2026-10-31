@@ -16,6 +16,9 @@
  *     lost / #PF); with per-strand rings each strand is the sole owner of its
  *     rings + stashes, so the proven SPSC algorithms hold under concurrency.
  *
+ *   test5..test9: a program ends whole — see the block above test5.
+ *   `strandtest crash` runs the crash case alone.
+ *
  * Emits exactly one "[STRAND] PASS" on success (the matrix greps for it).
  *
  * Strands require FSGSBASE (per-strand TLS detection uses ring-3 RDFSBASE).
@@ -30,7 +33,14 @@
 #include "box/strand.h"            /* strand_spawn */
 #include "box/cpu.h"               /* cpu_has_fsgsbase */
 #include "box/core/strand_self.h"  /* strand_self */
+#include "box/core/cabin.h"        /* cabin_info — the child's spawner, the parent's pid */
 #include "box/error.h"
+#include "box/ipc.h"               /* send, receive_wait — parent and child speak */
+#include "box/touch.h"             /* strand:exited — the reaper's word on each strand */
+#include "box/luggage.h"           /* luggage_word — a child's role rides in its cabin */
+#include "box/memory.h"            /* malloc, free — the workers' heap churn */
+#include "box/string.h"
+#include "proc_exit.h"             /* PROC_EXIT_KILLED, PROC_EXIT_CRASHED */
 
 #define ITERS     100000u   /* big enough that the two strands' runs overlap   */
 #define NWORKERS  4u        /* concurrent IPC workers in test2                 */
@@ -393,8 +403,578 @@ static int test4(void)
     return 0;
 }
 
+/* ---- test5..test9 (+ "strandtest crash"): a program ends whole ------------
+ *
+ * A program is its cabin, every strand of it. Killed from outside, main
+ * returning, exit() from any strand, a strand that crashes — each ends all of
+ * them, the main strand announced last, so whoever waits on the pid the program
+ * was started as finds it wholly gone. A strand ends only
+ * itself (strand_exit), and may not end a sibling: an end that lands inside a
+ * strand's malloc keeps the program's heap lock for ever, and every strand
+ * left alive would spin on it.
+ *
+ * Each test starts a child — this program again, its role in its luggage —
+ * that spawns CREW_WORKERS workers churning the program's heap, plus one
+ * joinable strand that finishes at once and is never joined. The crew is read
+ * by the tag the child wears (proc_crew walks every strand of every cabin
+ * wearing it), the end is made, the strand it came through and then main are
+ * waited for as a STATE (process_gone), and at that moment the crew must be
+ * empty. No timer
+ * decides any verdict; the one quiet window below only stops a parent from
+ * waiting on a child that never speaks.
+ *
+ * The crash case is its own command: every other harness reads a user-mode
+ * [EXCEPTION] as a failure, so the default run cannot carry one. */
+
+#define CREW_TAG          "strandtest:crew"
+#define CREW_LINE(role)   "strandtest crew " role
+#define CREW_WORKERS      3u
+#define CREW_MAIN_CODE    0x21   /* main's return in the "exit" and "sibling" roles */
+#define CREW_WORKER_CODE  0x22   /* worker 0's exit() in the "wexit" role           */
+#define CREW_RACE_ROUNDS  4u     /* kills landing on a crew that never stops spawning */
+#define CREW_ANY_CODE     INT32_MIN   /* the race's sparks end either way — not judged */
+
+/* How long the ring may say nothing at all before a parent stops waiting for
+ * its child's word — touch_test's figure for the same wait. Any message
+ * restarts it; only a machine gone quiet runs it down. */
+#define CREW_QUIET_MS     30000u
+
+enum { CREW_KILL, CREW_EXIT, CREW_WEXIT, CREW_CRASH, CREW_SIBLING, CREW_RACE };
+
+static volatile uint32_t  g_crew_role;
+static volatile uint64_t  g_crew_up;       /* workers begun; main parks on it      */
+static volatile uint64_t  g_crew_still;    /* park address only; never woken       */
+static volatile uint32_t  g_crew_go;       /* the parent's word has come           */
+static uint32_t           g_crew_pid[CREW_WORKERS];
+static uint32_t *volatile g_crew_nowhere;  /* stays NULL: the crash role writes it */
+
+static void crew_spark(void *arg)  { (void)arg; }
+static void crew_zombie(void *arg) { (void)arg; }
+
+static void crew_worker(void *arg)
+{
+    const uint32_t index = (uint32_t)(uintptr_t)arg;
+    __atomic_add_fetch(&g_crew_up, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_crew_up, 0);
+
+    for (;;) {
+        /* The program's heap, kept busy, so the end lands inside malloc and
+         * free as often as anywhere. */
+        void *p = malloc(48u + 16u * index);
+        if (p) { memset(p, (int)index, 16); free(p); }
+
+        if (g_crew_role == CREW_RACE) (void)strand_spawn(crew_spark, 0);
+
+        if (index == 0 && __atomic_load_n(&g_crew_go, __ATOMIC_ACQUIRE)) {
+            if (g_crew_role == CREW_WEXIT)   exit(CREW_WORKER_CODE);
+            if (g_crew_role == CREW_CRASH)   *g_crew_nowhere = 1;
+            if (g_crew_role == CREW_SIBLING) strand_exit();
+        }
+        yield();
+    }
+}
+
+static void crew_park_for_ever(void)
+{
+    for (;;) (void)addr_park(&g_crew_still, 0, 0);
+}
+
+static void crew_await_parent(uint32_t parent)
+{
+    Result r;
+    for (;;)
+        if (receive_wait(&r, CREW_QUIET_MS) && r.sender_pid == parent) return;
+}
+
+/* The child: its crew up, its report sent, then the role's end. */
+static int crew_child(const char *word)
+{
+    static const struct { const char *word; uint32_t role; } roles[] = {
+        { "kill", CREW_KILL }, { "exit", CREW_EXIT }, { "wexit", CREW_WEXIT },
+        { "crash", CREW_CRASH }, { "sibling", CREW_SIBLING }, { "race", CREW_RACE },
+    };
+    uint32_t role = UINT32_MAX;
+    for (uint32_t i = 0; i < sizeof(roles) / sizeof(roles[0]); i++)
+        if (word && strcmp(word, roles[i].word) == 0) role = roles[i].role;
+    if (role == UINT32_MAX) {
+        printf("[STRAND] FAIL crew: unknown role '%s'\n", word ? word : "");
+        return 255;
+    }
+    g_crew_role = role;
+    const uint32_t parent = cabin_info()->spawner_pid;
+
+    uint32_t zombie = strand_spawn_joinable(crew_zombie, 0);
+    if (zombie == 0) return 254;   /* the parent hears no report */
+    for (uint32_t i = 0; i < CREW_WORKERS; i++) {
+        g_crew_pid[i] = strand_spawn(crew_worker, (void *)(uintptr_t)i);
+        if (g_crew_pid[i] == 0) return 254;   /* the parent hears no report */
+    }
+    uint64_t up;
+    while ((up = __atomic_load_n(&g_crew_up, __ATOMIC_ACQUIRE)) < CREW_WORKERS)
+        (void)addr_park(&g_crew_up, up, 200);
+
+    /* Who the end will come through, and the strand nobody will join. */
+    const bool worker_ends = role == CREW_WEXIT || role == CREW_CRASH ||
+                             role == CREW_SIBLING;
+    uint32_t report[2] = { worker_ends ? g_crew_pid[0] : cabin_info()->pid, zombie };
+    send(parent, report, sizeof(report));
+
+    if (role == CREW_KILL || role == CREW_RACE) crew_park_for_ever();
+
+    crew_await_parent(parent);
+    if (role == CREW_EXIT) return CREW_MAIN_CODE;
+    if (role == CREW_SIBLING) {
+        int32_t refused = proc_kill(g_crew_pid[1]);
+        __atomic_store_n(&g_crew_go, 1u, __ATOMIC_RELEASE);
+        send(parent, &refused, sizeof(refused));
+        crew_await_parent(parent);
+        return CREW_MAIN_CODE;
+    }
+    __atomic_store_n(&g_crew_go, 1u, __ATOMIC_RELEASE);
+    crew_park_for_ever();
+    return 0;
+}
+
+/* The parent's side. */
+
+typedef struct {
+    uint32_t  main_pid, main_gen;
+    uint32_t  actor;     /* the strand the end comes through */
+    uint32_t  zombie;
+    ProcMate *mates;     /* the crew as it stood before the end */
+    int       count;
+} Crew;
+
+static bool crew_hear(uint32_t from, void *out, uint32_t len)
+{
+    uint64_t last = clock_uptime_ms();
+    for (;;) {
+        Result r;
+        if (receive_wait(&r, CREW_QUIET_MS)) {
+            last = clock_uptime_ms();
+            if (r.sender_pid == from && r.data_length >= len && r.data_addr != 0) {
+                memcpy(out, (const void *)(uintptr_t)r.data_addr, len);
+                return true;
+            }
+        } else if (clock_uptime_ms() - last >= CREW_QUIET_MS) {
+            return false;
+        }
+    }
+}
+
+/* Who wears the crew's tag and is alive (proc_crew drops the dead), or -1. */
+static int crew_now(ProcMate **mates)
+{
+    uint32_t total = 0;
+    *mates = NULL;
+    int n = proc_crew(CREW_TAG, mates, &total);
+    if (n < 0 || (uint32_t)n != total) { free(*mates); *mates = NULL; return -1; }
+    return n;
+}
+
+/* Whatever of a crew is still alive, ended one strand at a time — what a
+ * failed test owes the machine it leaves. */
+static void crew_scrap(void)
+{
+    ProcMate *m;
+    int n = crew_now(&m);
+    for (int i = 0; i < n; i++) (void)proc_finish(m[i].pid, m[i].generation);
+    free(m);
+}
+
+/* The strands a verdict found alive, named from the same look that found
+ * them — a later look may no longer see what this one saw. */
+static void crew_name(const ProcMate *m, int n, uint32_t skip, uint32_t main_pid)
+{
+    for (int i = 0; i < n; i++)
+        if (m[i].pid != skip)
+            printf("[STRAND]   aboard: strand %u%s in state %u\n", m[i].pid,
+                   m[i].pid == main_pid ? " (main)" : "", m[i].state);
+}
+
+static uint32_t crew_gen_of(const Crew *c, uint32_t pid)
+{
+    for (int i = 0; i < c->count; i++)
+        if (c->mates[i].pid == pid) return c->mates[i].generation;
+    return 0;
+}
+
+static void crew_forget(Crew *c, uint32_t pid)
+{
+    for (int i = 0; i < c->count; i++)
+        if (c->mates[i].pid == pid) { c->mates[i] = c->mates[--c->count]; return; }
+}
+
+static int crew_start(const char *test, const char *line, Crew *c)
+{
+    memset(c, 0, sizeof(*c));
+    int pid = proc_exec_gen(line, CREW_TAG, &c->main_gen);
+    if (pid <= 0) {
+        printf("[STRAND] FAIL %s: could not start '%s' (%d)\n", test, line, pid);
+        return -1;
+    }
+    c->main_pid = (uint32_t)pid;
+
+    uint32_t report[2];
+    if (!crew_hear(c->main_pid, report, sizeof(report))) {
+        printf("[STRAND] FAIL %s: the child never said its crew was up\n", test);
+        crew_scrap();
+        return -1;
+    }
+    c->actor  = report[0];
+    c->zombie = report[1];
+
+    /* main and the workers — and the never-joined one, if it has not yet
+     * finished. */
+    c->count = crew_now(&c->mates);
+    if (c->count < (int)(1 + CREW_WORKERS) || crew_gen_of(c, c->actor) == 0) {
+        printf("[STRAND] FAIL %s: a crew of %d without its strand %u, want %u or more\n",
+               test, c->count, c->actor, 1 + CREW_WORKERS);
+        crew_scrap();
+        return -1;
+    }
+    return 0;
+}
+
+/* Every strand of the ended program announced its end, each with the end it
+ * shared — want_actor for the strand it came through, want_rest for the rest.
+ * Read from process:died, matched by pid AND generation: process_gone cannot
+ * say it, since an end already committed is answered without its code. The
+ * never-joined strand ended itself before any of it and is not judged. */
+static int crew_deaths(const char *test, TouchTag died, const Crew *c,
+                       int32_t want_actor, int32_t want_rest)
+{
+    bool *heard = (bool *)malloc((size_t)c->count + 1);
+    if (!heard) {
+        printf("[STRAND] FAIL %s: no memory to follow the crew's deaths\n", test);
+        return -1;
+    }
+    uint32_t missing = 0;
+    for (int i = 0; i < c->count; i++) {
+        heard[i] = c->mates[i].pid == c->zombie;
+        if (!heard[i]) missing++;
+    }
+
+    int      rc   = 0;
+    uint64_t last = clock_uptime_ms();
+    while (rc == 0 && missing != 0) {
+        Touch t;
+        if (touch_await(died, &t, CREW_QUIET_MS) == 0) {
+            last = clock_uptime_ms();
+            TouchProcessDied d;
+            if (t.payload_len < sizeof(d)) continue;
+            memcpy(&d, t.payload, sizeof(d));
+            for (int i = 0; i < c->count; i++) {
+                const ProcMate *m = &c->mates[i];
+                if (heard[i] || m->pid != d.pid || m->generation != d.generation) continue;
+                heard[i] = true;
+                missing--;
+                int32_t want = m->pid == c->actor ? want_actor : want_rest;
+                if (want != CREW_ANY_CODE && d.exit_code != want) {
+                    printf("[STRAND] FAIL %s: strand %u ended with %d, want %d\n",
+                           test, m->pid, (int)d.exit_code, (int)want);
+                    rc = -1;
+                }
+            }
+        } else if (clock_uptime_ms() - last >= CREW_QUIET_MS) {
+            printf("[STRAND] FAIL %s: %u strand(s) of the ended program never announced "
+                   "their end\n", test, missing);
+            rc = -1;
+        }
+    }
+    free(heard);
+    return rc;
+}
+
+/* The end has been made through c->actor. Wait for that strand as a state:
+ * every worker is gone by then, and main — announced last — is the only one
+ * that may still be on its way, so it is waited for next. Then nothing of the
+ * program may be alive, and every strand announced the end it shared. */
+static int crew_judge(const char *test, Crew *c, TouchTag died,
+                      int32_t want_actor, int32_t want_rest)
+{
+    if (process_gone(c->actor, crew_gen_of(c, c->actor), NULL) != 0) {
+        printf("[STRAND] FAIL %s: the strand %u the end came through cannot be waited for\n",
+               test, c->actor);
+        crew_scrap();
+        return -1;
+    }
+
+    /* Only main may outlive the strand the end came through, and only on its
+     * way out — so main is waited for too, and then no one may be left. */
+    ProcMate *left;
+    int n = crew_now(&left);
+    int outlived = 0;
+    uint32_t skip = c->main_pid;
+    for (int i = 0; i < n; i++)
+        if (left[i].pid != c->main_pid) outlived++;
+    if (n >= 0 && outlived == 0) {
+        free(left);
+        if (process_gone(c->main_pid, c->main_gen, NULL) != 0) {
+            printf("[STRAND] FAIL %s: main cannot be waited for\n", test);
+            crew_scrap();
+            return -1;
+        }
+        n = outlived = crew_now(&left);
+        skip = 0;
+    }
+    if (n < 0) {
+        printf("[STRAND] FAIL %s: the crew could not be read\n", test);
+        crew_scrap();
+        return -1;
+    }
+    if (outlived != 0) {
+        printf("[STRAND] FAIL %s: %d strand(s) of the program outlived its end\n",
+               test, outlived);
+        crew_name(left, n, skip, c->main_pid);
+        free(left);
+        crew_scrap();
+        return -1;
+    }
+    free(left);
+    return crew_deaths(test, died, c, want_actor, want_rest);
+}
+
+/* Every strand of the ended program reaches the reaper — the never-joined one
+ * as well: nobody is left to join it, so its program's end released it.
+ * strand:exited is what the reaper says of each, naming the cabin's spawner,
+ * which is this strand. */
+static int crew_reaped(const char *test, TouchTag tag, const Crew *c)
+{
+    uint32_t pids[2 + CREW_WORKERS + 1];
+    bool     seen[2 + CREW_WORKERS + 1];
+    uint32_t n = 0;
+    for (int i = 0; i < c->count && n < sizeof(pids) / sizeof(pids[0]); i++)
+        pids[n++] = c->mates[i].pid;
+    if (crew_gen_of(c, c->zombie) == 0 && n < sizeof(pids) / sizeof(pids[0]))
+        pids[n++] = c->zombie;
+    for (uint32_t i = 0; i < n; i++) seen[i] = false;
+
+    const uint32_t me = cabin_info()->pid;
+    uint32_t missing = n;
+    uint64_t last    = clock_uptime_ms();
+    while (missing != 0) {
+        Touch t;
+        if (touch_await(tag, &t, CREW_QUIET_MS) == 0) {
+            last = clock_uptime_ms();
+            uint32_t ev[2];
+            if (t.payload_len < sizeof(ev)) continue;
+            memcpy(ev, t.payload, sizeof(ev));
+            if (ev[1] != me) continue;
+            for (uint32_t i = 0; i < n; i++)
+                if (!seen[i] && pids[i] == ev[0]) { seen[i] = true; missing--; }
+        } else if (clock_uptime_ms() - last >= CREW_QUIET_MS) {
+            for (uint32_t i = 0; i < n; i++)
+                if (!seen[i])
+                    printf("[STRAND] FAIL %s: strand %u%s of the ended program was never reclaimed\n",
+                           test, pids[i], pids[i] == c->zombie ? " (the never-joined one)" : "");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Every end below is heard from process:died, claimed before the child starts
+ * so that no death of its crew can come first. */
+static int crew_listen(const char *test, TouchTag tag)
+{
+    if (touch_claim(tag, TOUCH_REST, 0, 0) == 0) return 0;
+    printf("[STRAND] FAIL %s: could not claim the strands' ends\n", test);
+    return -1;
+}
+
+/* A kill of the program, through the strand that started it. */
+static int crew_kill(const char *test, const Crew *c)
+{
+    if (proc_finish(c->main_pid, c->main_gen) == 0) return 0;
+    printf("[STRAND] FAIL %s: the kill was refused\n", test);
+    crew_scrap();
+    return -1;
+}
+
+/* test5: a kill of the main strand ends the whole program, and the reaper
+ * takes every strand of it, the never-joined one too. */
+static int test5(void)
+{
+    TouchTag died   = TOUCH_TAG_ID("process:died");
+    TouchTag exited = TOUCH_TAG_ID("strand:exited");
+    if (crew_listen("test5", died) != 0) return -1;
+    if (crew_listen("test5", exited) != 0) { touch_release(died); return -1; }
+
+    Crew c;
+    int rc = crew_start("test5", CREW_LINE("kill"), &c);
+    if (rc == 0) rc = crew_kill("test5", &c);
+    if (rc == 0) rc = crew_judge("test5", &c, died, PROC_EXIT_KILLED, PROC_EXIT_KILLED);
+    if (rc == 0) rc = crew_reaped("test5", exited, &c);
+    touch_release(exited);
+    touch_release(died);
+
+    if (rc == 0)
+        printf("[STRAND] test5 OK: a kill of the main strand ended all %d strands of the "
+               "program, every one KILLED and reclaimed, the never-joined one too\n", c.count);
+    free(c.mates);
+    return rc;
+}
+
+/* test6: main returning ends the program, its workers with it. */
+static int test6(void)
+{
+    TouchTag died = TOUCH_TAG_ID("process:died");
+    if (crew_listen("test6", died) != 0) return -1;
+
+    Crew c;
+    int rc = crew_start("test6", CREW_LINE("exit"), &c);
+    if (rc == 0) {
+        send(c.main_pid, "go", 2);
+        rc = crew_judge("test6", &c, died, CREW_MAIN_CODE, CREW_MAIN_CODE);
+    }
+    touch_release(died);
+
+    if (rc == 0)
+        printf("[STRAND] test6 OK: main's return ended all %d strands, each with its code\n",
+               c.count);
+    free(c.mates);
+    return rc;
+}
+
+/* test7: exit() from a worker ends the program, main with it. */
+static int test7(void)
+{
+    TouchTag died = TOUCH_TAG_ID("process:died");
+    if (crew_listen("test7", died) != 0) return -1;
+
+    Crew c;
+    int rc = crew_start("test7", CREW_LINE("wexit"), &c);
+    if (rc == 0) {
+        send(c.main_pid, "go", 2);
+        rc = crew_judge("test7", &c, died, CREW_WORKER_CODE, CREW_WORKER_CODE);
+    }
+    touch_release(died);
+
+    if (rc == 0)
+        printf("[STRAND] test7 OK: exit() on a worker ended all %d strands, main too\n",
+               c.count);
+    free(c.mates);
+    return rc;
+}
+
+/* test8: a strand may not end its sibling, and strand_exit ends only the
+ * strand that calls it. */
+static int test8(void)
+{
+    TouchTag died = TOUCH_TAG_ID("process:died");
+    if (crew_listen("test8", died) != 0) return -1;
+
+    Crew c;
+    int rc = crew_start("test8", CREW_LINE("sibling"), &c);
+    if (rc != 0) { touch_release(died); free(c.mates); return rc; }
+
+    send(c.main_pid, "go", 2);
+    int32_t refused = 0;
+    if (!crew_hear(c.main_pid, &refused, sizeof(refused))) {
+        printf("[STRAND] FAIL test8: the child never said what its kill came to\n");
+        rc = -1;
+    } else if (refused != -ERR_INVALID_ARGUMENT) {
+        printf("[STRAND] FAIL test8: a strand's kill of its sibling answered %d, want %d\n",
+               (int)refused, -ERR_INVALID_ARGUMENT);
+        rc = -1;
+    }
+
+    /* The strand that called strand_exit ended, alone and with 0 ... */
+    if (rc == 0) {
+        Crew one = c;
+        ProcMate leaver = { 0 };
+        for (int i = 0; i < c.count; i++)
+            if (c.mates[i].pid == c.actor) leaver = c.mates[i];
+        one.mates = &leaver;
+        one.count = 1;
+        rc = crew_deaths("test8", died, &one, 0, 0);
+    }
+
+    /* ... and everyone else is still aboard. */
+    if (rc == 0) {
+        crew_forget(&c, c.actor);
+        ProcMate *now;
+        int n = crew_now(&now);
+        for (int i = 0; rc == 0 && i < c.count; i++) {
+            if (c.mates[i].pid == c.zombie) continue;
+            bool aboard = false;
+            for (int j = 0; j < n; j++)
+                if (now[j].pid == c.mates[i].pid) aboard = true;
+            if (!aboard) {
+                printf("[STRAND] FAIL test8: strand %u left with its sibling\n", c.mates[i].pid);
+                rc = -1;
+            }
+        }
+        free(now);
+    }
+
+    if (rc == 0) {
+        c.actor = c.main_pid;
+        send(c.main_pid, "go", 2);
+        rc = crew_judge("test8", &c, died, CREW_MAIN_CODE, CREW_MAIN_CODE);
+    } else {
+        crew_scrap();
+    }
+    touch_release(died);
+
+    if (rc == 0)
+        printf("[STRAND] test8 OK: a sibling's kill refused, strand_exit ended one strand, "
+               "main's return the rest\n");
+    free(c.mates);
+    return rc;
+}
+
+/* test9: a kill landing while the program spawns strands as fast as it can
+ * leaves none behind — a strand born in the middle of the end is refused or
+ * ended with the rest. */
+static int test9(void)
+{
+    TouchTag died = TOUCH_TAG_ID("process:died");
+    if (crew_listen("test9", died) != 0) return -1;
+
+    int rc = 0;
+    for (uint32_t r = 0; rc == 0 && r < CREW_RACE_ROUNDS; r++) {
+        Crew c;
+        rc = crew_start("test9", CREW_LINE("race"), &c);
+        if (rc == 0) rc = crew_kill("test9", &c);
+        if (rc == 0) rc = crew_judge("test9", &c, died, PROC_EXIT_KILLED, CREW_ANY_CODE);
+        free(c.mates);
+    }
+    touch_release(died);
+
+    if (rc == 0)
+        printf("[STRAND] test9 OK: %u kills of a spawning program left no strand behind\n",
+               CREW_RACE_ROUNDS);
+    return rc;
+}
+
+/* strandtest crash: a strand's crash ends its program. */
+static int crash_test(void)
+{
+    TouchTag died = TOUCH_TAG_ID("process:died");
+    if (crew_listen("crash", died) != 0) return -1;
+
+    Crew c;
+    int rc = crew_start("crash", CREW_LINE("crash"), &c);
+    if (rc == 0) {
+        send(c.main_pid, "go", 2);
+        rc = crew_judge("crash", &c, died, PROC_EXIT_CRASHED, PROC_EXIT_CRASHED);
+    }
+    touch_release(died);
+
+    if (rc == 0)
+        printf("[STRAND] crash PASS: a worker's crash ended all %d strands, each CRASHED\n",
+               c.count);
+    free(c.mates);
+    return rc;
+}
+
 int main(void)
 {
+    const char *word = luggage_word(1);
+    if (word && strcmp(word, "crew") == 0) return crew_child(luggage_word(2));
+
     printf("[STRAND] strandtest start\n");
 
     /* Strands require FSGSBASE for per-strand TLS (ring-3 RDFSBASE). Without
@@ -405,12 +985,24 @@ int main(void)
         exit(0);
     }
 
+    if (word && strcmp(word, "crash") == 0) exit(crash_test() == 0 ? 0 : 1);
+
     if (test1() != 0) exit(1);
     if (test2() != 0) exit(1);
     if (test3() != 0) exit(1);
     if (test4() != 0) exit(1);
 
-    printf("[STRAND] PASS: test1 + test2 + test3 + test4 (per-strand rings + TLS + park/wake + reaper + timed-wake)\n");
+    /* Each judged on its own, so one program end that fails does not hide
+     * how the others fared. */
+    int ended_whole = test5();
+    ended_whole |= test6();
+    ended_whole |= test7();
+    ended_whole |= test8();
+    ended_whole |= test9();
+    if (ended_whole != 0) exit(1);
+
+    printf("[STRAND] PASS: test1..test9 (per-strand rings + TLS + park/wake + reaper + "
+           "timed-wake + a program ends whole)\n");
     exit(0);
     return 0;
 }

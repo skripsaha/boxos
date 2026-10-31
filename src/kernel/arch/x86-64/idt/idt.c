@@ -1630,6 +1630,10 @@ void exception_handler(interrupt_frame_t *frame)
 
             // Mark process as crashed so scheduler won't pick it again
             process_set_state(proc, PROC_CRASHED);
+            /* A crash ends the program, so no join is coming: a joinable strand
+             * the reaper waited on would never reach process_destroy, where its
+             * program is ended with it. */
+            __atomic_store_n(&proc->reap_blocked, 0u, __ATOMIC_SEQ_CST);
 
             // Force a reschedule via the frame
             schedule(frame);
@@ -1688,6 +1692,9 @@ void exception_handler(interrupt_frame_t *frame)
             kprintf("================================================================\n");
 
             process_set_state(overflow_proc, PROC_CRASHED);
+            /* As for a user fault: its program ends at process_destroy, and a
+             * reap-block would keep the reaper from it. */
+            __atomic_store_n(&overflow_proc->reap_blocked, 0u, __ATOMIC_SEQ_CST);
 
             /* If the faulting code held the scheduler lock, force-release it
              * so schedule() can acquire it without deadlock. spin_force_release
