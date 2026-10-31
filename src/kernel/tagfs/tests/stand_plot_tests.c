@@ -883,7 +883,7 @@ static const TestCase g_stand_plot_tests[] = {
       .format = DEED_FORMAT_V1, .analog = "stand_fresh_ground_big_write" },
     { .name  = "stand_plot_defrag_by_windows", .func = TestStandPlotDefragByWindows,
       .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_fresh_ground_appends_keep_one_run" },
+      .format = DEED_FORMAT_V1, .analog = "stand_book_room_gather_one_run" },
     { .name  = "stand_plot_defrag_given_up_between_windows",
       .func  = TestStandPlotDefragGivenUpBetweenWindows, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V1, .analog = "stand_fresh_change_given_up_between" },

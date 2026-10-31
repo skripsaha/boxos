@@ -2,6 +2,7 @@
 #include "block_map_derived.h"
 #include "../ink/fallow.h"
 #include "../settle/settle.h"
+#include "../settle/binder.h"   /* BinderRoomWait — a Tally gives ground back */
 #include "../file_map/file_map.h"
 
 /*
@@ -579,22 +580,62 @@ static error_t AllotmentBookLocked(uint64_t fid, uint32_t want, uint64_t file_bl
     return ERR_TAGFS_NO_SPACE;
 }
 
-/* Nothing can be had now: room on its way while Fallow rests ground a cycle
- * gives back — the cycle asked for — else none, said once until a take is had. */
+/* Nothing can be had now past the book's fresh measure `keep`: room on its
+ * way while Fallow rests ground a cycle gives back — the cycle asked for — or
+ * while a Tally gives some back (binder.h, BinderRoomWait) — the Tally asked
+ * for; else none, said once until a take is had: how the measure was made —
+ * to the block, or from above and why no Tally made it exact
+ * (BinderRoomMeasured) — and the ground the book holds itself, named
+ * (BinderGroundHeld), so a refusal is weighed against another by what the
+ * kernel names and nothing left over (logcheck fullvolume, roomback). */
 static error_t AllotmentBookShort(uint32_t want, uint64_t keep)
 {
     if (FallowBlocks() > 0) {
         SettleDemand(SETTLE_DEMAND_ROOM);
         return ERR_WOULD_BLOCK;
     }
-    if (!__atomic_exchange_n(&s_book_short_said, 1u, __ATOMIC_ACQ_REL))
+    if (BinderRoomWait())
+        return ERR_WOULD_BLOCK;
+    if (!__atomic_exchange_n(&s_book_short_said, 1u, __ATOMIC_ACQ_REL)) {
+        const char* why      = NULL;
+        const char* measured = BinderRoomMeasured(&why);
         kprintf("[TagFS] no block can be had for %u block(s) of a file's data: %llu free, the book keeps %llu "
-                "for its ribbon and its Tally, and %llu are promised to the tails Slips lie over "
-                "(ERR_TAGFS_NO_SPACE)\n", want, (unsigned long long)tagfs_get_state()->ledger.free_blocks,
-                (unsigned long long)keep, (unsigned long long)AllotmentPromised());
+                "for its ribbon and its Tally and holds %llu itself in its Tallies and its ribbon, and %llu are "
+                "promised to the tails Slips lie over — the reserve measured %s%s%s (ERR_TAGFS_NO_SPACE)\n", want,
+                (unsigned long long)tagfs_get_state()->ledger.free_blocks, (unsigned long long)keep,
+                (unsigned long long)BinderGroundHeld(), (unsigned long long)AllotmentPromised(), measured,
+                why ? ": " : "", why ? why : "");
+    }
     return ERR_TAGFS_NO_SPACE;
 }
 
+/* A take had: the next one refused is said again — and, had whole, has its
+ * turn of the ring again. A piece short of `want` is not: the write it is for
+ * waits for the rest and gives the piece back meanwhile, so each wait round
+ * would be handed the same piece and its turn afresh — a Tally and its cycles
+ * a round, measured: more than a hundred at a fill's end, till the stitches spent the
+ * one Quire a full volume keeps the ribbon and a delete was refused. */
+static void AllotmentBookHad(bool whole)
+{
+    __atomic_store_n(&s_book_short_said, 0u, __ATOMIC_RELEASE);
+    if (whole)
+        BinderRoomTaken();
+}
+
+static error_t AllotmentBookTry(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
+                                uint64_t keep, bool own, uint64_t *start, uint32_t *got)
+{
+    TagFSLockTake(MapLock());
+    error_t rc = AllotmentBookLocked(fid, want, file_blocks, hint, aside, keep, own, start, got);
+    TagFSLockDrop(MapLock());
+    return rc;
+}
+
+/* A take short of room past a kept measure is asked again of a fresh one
+ * (endpaper.c, EndpaperDataKeeps) before it is refused: a measure kept from
+ * the data handed since is not the book's word, and no Tally is asked of it.
+ * What a Plot's Ink may add is counted before by the lesser of the two
+ * (plot_window.c, PlotTakeMost), so the fresh one's take is in it. */
 error_t AllotmentTakeBook(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
                           uint64_t keep, bool own, uint64_t *start, uint32_t *got)
 {
@@ -604,15 +645,71 @@ error_t AllotmentTakeBook(uint64_t fid, uint32_t want, uint64_t file_blocks, uin
         return ERR_TAGFS_NOT_INITIALIZED;
     AllotmentBookRoom();
     error_t rc = BlockMapDerivedStock();
+    if (rc == OK)
+        rc = AllotmentBookTry(fid, want, file_blocks, hint, aside, keep, own, start, got);
+    if (rc == ERR_TAGFS_NO_SPACE) {
+        uint64_t fresh = EndpaperDataKeeps(true);
+        if (fresh < keep)
+            rc = AllotmentBookTry(fid, want, file_blocks, hint, aside, keep = fresh, own, start, got);
+    }
+    if (rc == ERR_TAGFS_NO_SPACE)
+        rc = AllotmentBookShort(want, keep);
+    else if (rc == OK)
+        AllotmentBookHad(*got == want);
+    tagfs_leave();
+    return rc;
+}
+
+/*
+ * ‼ A GATHER IS HANDED ONE RUN WHOLE, OR NOTHING. A defrag copies a file's runs
+ * into one run of exactly their length (plot_gather.c): a piece of it is no
+ * use to it. The rules a write's take keeps — the block that continues the
+ * run, the front of the file's window, a window sized to the file — hand the
+ * longest piece up to `want`, and a window a file keeps is as long as the
+ * writes it grew by left it: a gather that went to it first was handed a
+ * piece and refused no-space on a volume with ground to spare. So the run is
+ * looked for whole, from `hint` on and then from the start, in no other
+ * file's window — the file's own cut where the run lies in it, as a write's
+ * take cuts it, so no later take of the file is handed a block of the run —
+ * past the reserve, the windows taken back once before the gather is
+ * refused, as a write's are.
+ */
+static error_t AllotmentRunLocked(uint64_t fid, uint32_t want, uint64_t hint, uint64_t keep, uint64_t *start)
+{
+    if (AllotmentBookMay(tagfs_get_state()->ledger.free_blocks, keep, false) < want)
+        return ERR_TAGFS_NO_SPACE;
+    for (uint32_t round = 0; round < 2u; round++) {
+        if (BlockMapDerivedRunFree(hint, want, fid, start)) {
+            error_t rc = BlockMapDerivedTakeLocked(fid, *start, want);
+            if (rc == OK) {
+                AllotmentCut(AllotmentFind(fid), *start, want);   /* the run may lie in the file's own window */
+                __atomic_add_fetch(&s_book_taken, want, __ATOMIC_RELEASE);
+            }
+            return rc;
+        }
+        if (!AllotmentTakeBackLocked(fid))
+            break;
+    }
+    return ERR_TAGFS_NO_SPACE;
+}
+
+error_t AllotmentTakeBookRun(uint64_t fid, uint32_t want, uint64_t hint, uint64_t keep, uint64_t *start)
+{
+    if (want == 0 || fid == 0 || !start)
+        return ERR_INVALID_ARGUMENT;
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+    AllotmentBookRoom();
+    error_t rc = BlockMapDerivedStock();
     if (rc == OK) {
         TagFSLockTake(MapLock());
-        rc = AllotmentBookLocked(fid, want, file_blocks, hint, aside, keep, own, start, got);
+        rc = AllotmentRunLocked(fid, want, hint, keep, start);
         TagFSLockDrop(MapLock());
     }
     if (rc == ERR_TAGFS_NO_SPACE)
         rc = AllotmentBookShort(want, keep);
     else if (rc == OK)
-        __atomic_store_n(&s_book_short_said, 0u, __ATOMIC_RELEASE);
+        AllotmentBookHad(true);
     tagfs_leave();
     return rc;
 }

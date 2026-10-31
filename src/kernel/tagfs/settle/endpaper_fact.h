@@ -42,7 +42,8 @@ uint64_t EndpaperInnerBlocks(uint64_t kids, uint64_t atom);
  * `rot` the trees with a rotten node named as it lies above level 0, whose
  * leaves nobody knows and which the measure takes from above (a node a Tally
  * laid in names because nothing under it changed counts its leaves as
- * Foliation holds them, binder_kept.c); `runs` the runs FILES's Parcels carry; `digests_last` the first key
+ * Foliation holds them, binder_kept.c); `runs` the runs FILES's Parcels carry and `run_leaves` the leaves of
+ * FILES they lie in — only those widen with the next Tally's seq; `digests_last` the first key
  * of DIGESTS's last leaf; `tags` and `tags_text` the tags TAGS holds and the
  * bytes of their keys and values.
  */
@@ -50,6 +51,7 @@ typedef struct {
     uint64_t files_leaves;
     uint64_t files_blocks;
     uint64_t runs;
+    uint64_t run_leaves;
     uint64_t digests_leaves;
     uint64_t digests_blocks;
     uint64_t digests_last;
@@ -120,5 +122,52 @@ void     EndpaperDocketDropped(void);
  * it lies. From any core with no TagFS lock held: the state lock is taken to
  * read what moved. */
 void     EndpaperFactMost(uint64_t* files, uint64_t* digests, uint64_t* tags);
+
+/* Whether the measure carries growth memory holds past the last Tally —
+ * settled since it or owed, or no Tally known and every item measured at its
+ * widest — what the next Tally lays and measures to the block (binder.h,
+ * BinderRoomWait); a Plot's Stakes are no such growth, no Tally lays them.
+ * From any core, lock-free: published wherever it changes. */
+bool     EndpaperGrown(void);
+
+/*
+ * What a Plot's Ink may add to the next Tally while its Stakes stand
+ * (endpaper_fact.c, §16.6 п.8): by the last Tally, its file a place of FILES
+ * with its items whole, and each window its runs lie in a place of DIGESTS;
+ * from above, the bytes its runs add to FILES and DIGESTS. `epoch` is the
+ * mounting it is counted in, 0 for none.
+ *   EndpaperStakesFile  begins *e: file `fid` as `rec` holds it, `runs` runs
+ *                       and `blocks` blocks at the most once inked
+ *   EndpaperStakesRun   a run of `count` blocks from `start` into *e —
+ *                       UINT64_MAX for one not taken yet, anywhere
+ *   EndpaperStakesSet   what the Plot counts, *held, made *now — NULL for
+ *                       none — in the measure: no TagFS lock held
+ *   EndpaperStakesGoneLocked  *held counted no more, under the state lock —
+ *                       the Ink that names its Stakes, which counts what it
+ *                       put in (EndpaperJotIn, EndpaperInked); its Plot
+ *                       forgets *held once the Ink stands
+ * A Plot's of another mounting is no count of this one's (EndpaperForget
+ * began it at none).
+ */
+typedef struct {
+    uint32_t epoch;
+    uint64_t sites;
+    uint64_t bytes;
+    uint64_t long_blocks;
+    uint64_t dsites;
+    uint64_t dbytes;
+    uint64_t files_bytes;
+    uint64_t digests_bytes;
+} EndpaperStakes;
+
+void     EndpaperStakesFile(EndpaperStakes* e, const FileRecord* rec, uint64_t fid, uint64_t runs, uint64_t blocks);
+void     EndpaperStakesRun(EndpaperStakes* e, uint64_t start, uint64_t count);
+void     EndpaperStakesSet(EndpaperStakes* held, const EndpaperStakes* now);
+void     EndpaperStakesGoneLocked(const EndpaperStakes* held);
+
+/* What the Plots' Stakes add to the measure from above, in bytes of FILES and
+ * of DIGESTS: read before the map is walked, so an Ink between the two is
+ * counted twice, never missed. Any core, lock-free. */
+void     EndpaperStakesAbove(uint64_t* files_bytes, uint64_t* digests_bytes);
 
 #endif /* TAGFS_SETTLE_ENDPAPER_FACT_H */

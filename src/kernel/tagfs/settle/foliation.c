@@ -137,6 +137,17 @@ void FoliationLeafHolds(uint64_t tree, uint64_t items, uint64_t text)
     s_book.leaf[t].node[s_book.leaf[t].n - 1u].text  += text;
 }
 
+uint64_t FoliationLeavesHolding(uint64_t tree)
+{
+    uint32_t t    = TreeAt(tree);
+    uint64_t held = 0;
+    if (s_book.lost)
+        return UINT64_MAX;
+    for (uint32_t i = 0; t != UINT32_MAX && i < s_book.leaf[t].n; i++)
+        held += s_book.leaf[t].node[i].items != 0;
+    return held;
+}
+
 const char* FoliationLost(void)
 {
     return s_book.lost;

@@ -253,36 +253,63 @@ static bool PlotLaysPromised(const Plot *p, uint64_t k, uint64_t n)
     return TailSlipOn(p->rec, last) && k <= last && last - k < n;
 }
 
+/* The blocks a take of `want` can be handed now, past what the book's reserve
+ * keeps: what it may add to the next Tally is counted for every measure
+ * before it is asked (PlotStakesCount) — for these, not for `want`, or a write
+ * at a full volume's wall keeps every other measure, the ribbon's next Quire
+ * among them, as far past the ground left as a take a hundred times what the
+ * wall gives it. The take itself asks `want`: one short of it is a piece, the
+ * write's wait for the rest no take had whole (allotment.c, AllotmentBookHad).
+ * Counted by the measure the take is judged by: the kept one, or — when it
+ * leaves less than `want`, and the take refused past it is asked again of a
+ * fresh one (AllotmentTakeBook) — the lesser of the two; counted by the kept
+ * one alone, a take the fresh one handed was in no measure until its Stake,
+ * and a full volume's reserve, counted then, stood past the free. Handed more
+ * than counted only when the free grew since — ground come back — and the
+ * count is made exact the moment the take is had. */
+static uint64_t PlotMayPast(uint64_t free, uint64_t keep, bool own)
+{
+    return (free > keep ? free - keep : 0) + (own ? 1u : 0u);
+}
+
+static uint32_t PlotTakeMost(uint32_t want, bool own)
+{
+    uint64_t keep = EndpaperDataKeeps(false), free = AllotmentFreeUnpromised();
+    uint64_t may  = PlotMayPast(free, keep, own);
+    if (may < want) {
+        uint64_t fresh = EndpaperDataKeeps(true);
+        if (fresh < keep)
+            may = PlotMayPast(free, fresh, own);
+    }
+    return may >= want ? want : (uint32_t)may;
+}
+
 /*
  * `n` blocks of fresh ground for the file's blocks from k on, near where its
  * run goes on — each run taken a Stake, and handed to `put` with its first
- * file block. A take short of room is asked again of a fresh measure of the
- * book's reserve before it is refused (endpaper.c). The block promised to the
+ * file block. The book's reserve is the measure kept with the data handed
+ * since (endpaper.c), what the take may add to the next Tally in it before
+ * it is asked (PlotTakeMost); a take short of room past it is asked again of
+ * a fresh one before it is refused (allotment.c). The block promised to the
  * file's Slips is the first run's to have, once.
  */
 static error_t PlotFreshTake(Plot *p, uint64_t k, uint64_t n, bool aside,
                              error_t (*put)(Plot *, uint64_t, uint64_t, uint32_t))
 {
-    bool     afresh = false, own = PlotLaysPromised(p, k, n);
-    uint64_t keep   = EndpaperDataKeeps(false);
+    bool own = PlotLaysPromised(p, k, n);
     while (n > 0) {
         uint64_t start = 0;
         uint32_t got   = 0;
-        uint32_t want  = n > UINT32_MAX ? UINT32_MAX : (uint32_t)n;
-        error_t  rc    = AllotmentTakeBook(p->fid, want, p->blocks, PlotContinues(p, k), aside, keep, own, &start,
-                                           &got);
-        if (rc == ERR_TAGFS_NO_SPACE && !afresh) {
-            afresh = true;
-            keep   = EndpaperDataKeeps(true);
-            continue;
-        }
+        uint32_t want  = n > BLOCK_MAP_TAKE_MOST ? BLOCK_MAP_TAKE_MOST : (uint32_t)n;
+        PlotStakesCount(p, PlotTakeMost(want, own));
+        error_t rc = AllotmentTakeBook(p->fid, want, p->blocks, PlotContinues(p, k), aside, EndpaperDataKeeps(false),
+                                       own, &start, &got);
+        if (rc == OK && (rc = PlotStake(p, start, got)) != OK)
+            (void)PlotGiveBack(p, start, got);
+        PlotStakesCount(p, 0);
         if (rc != OK)
             return rc;
         own = false;
-        if ((rc = PlotStake(p, start, got)) != OK) {
-            (void)PlotGiveBack(p, start, got);
-            return rc;
-        }
         if ((rc = put(p, k, start, got)) != OK)
             return rc;
         k += got;

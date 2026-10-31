@@ -119,7 +119,14 @@ uint64_t TagFSInkedHere(void)
  * is under way. A waiter's cycle waits for one step at most: a node laid or
  * measured, a DIGESTS leaf read, a flush, the slot — or the slice, which is
  * memory alone, as long as a walk of every live file's runs takes
- * (binder_slice.c).
+ * (binder_slice.c). But while a write short of room waits on the Tally under
+ * way (binder.h, BinderRoomAwaited) every turn is the Tally's until it ends:
+ * the write asks a cycle each round it is told to wait, and a cycle between
+ * every two steps was a stitch each on a ribbon a full volume keeps one Quire
+ * for — a Tally of two hundred steps took two hundred stitches, the ribbon ran
+ * out under it and the delete that would have given the ground back was
+ * refused (fullvolume, roomback). Its end asks the cycle that wakes the write
+ * (BinderRoomEnded).
  */
 static volatile uint8_t s_binder_turn;
 
@@ -354,7 +361,8 @@ void SettleServiceIfPending(void)
     uint64_t       now      = SettleNowUs();
     uint64_t       at       = 0;
     CadenceVerdict due      = CadenceDue(boundary, now, &at);
-    if (CadenceBinderOwed() && (due != CADENCE_NOW || __atomic_load_n(&s_binder_turn, __ATOMIC_ACQUIRE))) {
+    if (CadenceBinderOwed() &&
+        (due != CADENCE_NOW || __atomic_load_n(&s_binder_turn, __ATOMIC_ACQUIRE) || BinderRoomAwaited())) {
         if (BinderTurn())
             __atomic_store_n(&s_binder_turn, 0u, __ATOMIC_RELEASE);
         CadenceWake();

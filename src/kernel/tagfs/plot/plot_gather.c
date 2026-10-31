@@ -136,18 +136,17 @@ static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint64_t start
 }
 
 /* One free run of exactly `blocks` near `hint` for the gather: on a book from
- * its derived map past the reserve it keeps, given back when shorter. */
+ * its derived map past the reserve it keeps, whole (AllotmentTakeBookRun),
+ * what the run may add to the next Tally in the reserve before it is asked
+ * (PlotStakesCount) — counted as a Stake once staked, none if refused. */
 static error_t PlotGatherTake(Plot *p, uint64_t blocks, uint64_t hint, uint64_t *start)
 {
     if (!p->book)
         return BlockMapTakeFor(p->fid, (uint32_t)blocks, hint, start, __func__);
-    uint32_t got = 0;
-    error_t  rc  = AllotmentTakeBook(p->fid, (uint32_t)blocks, p->blocks, hint, false, EndpaperDataKeeps(true),
-                                     false, start, &got);
-    if (rc == OK && got < blocks) {
-        (void)PlotGiveBack(p, *start, got);
-        rc = ERR_TAGFS_NO_SPACE;
-    }
+    PlotStakesCount(p, blocks);
+    error_t rc = AllotmentTakeBookRun(p->fid, (uint32_t)blocks, hint, EndpaperDataKeeps(true), start);
+    if (rc != OK)
+        PlotStakesCount(p, 0);
     return rc;
 }
 
@@ -170,17 +169,20 @@ error_t PlotGatherBegin(Plot *p, uint64_t shed, uint64_t hint, PlotGathering *g)
 
     uint64_t start = 0;
     rc = PlotGatherTake(p, blocks, hint, &start);
-    if (rc != OK) {
+    /* A book's take that waits — room on its way, a Tally that gives some back
+     * (allotment.c, AllotmentBookShort) — is no refusal, and says none. */
+    if (rc != OK && (!p->book || rc != ERR_WOULD_BLOCK))
         kprintf("[TagFS] file %llu: gathering extents %u to %u of it needs one free run of %llu "
                 "block(s), and the volume has none that long\n", p->fid, first, last,
                 (unsigned long long)blocks);
+    if (rc != OK)
         return rc;
-    }
     rc = PlotStake(p, start, (uint32_t)blocks);
-    if (rc != OK) {
+    if (rc != OK)
         (void)PlotGiveBack(p, start, (uint32_t)blocks);
+    PlotStakesCount(p, 0);
+    if (rc != OK)
         return rc;
-    }
     /* On a book the record the gather leaves is held its room on the ribbon
      * before a block is copied (P21); the run goes back with the Plot. */
     if (p->book && (rc = PlotWindowRoomAsked(p)) != OK)

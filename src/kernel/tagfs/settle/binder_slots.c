@@ -110,7 +110,7 @@ error_t BinderSlotsMake(uint32_t ring)
     return OK;
 }
 
-error_t BinderSlotHolds(uint32_t index, uint64_t seq, uint64_t tally_seq)
+error_t BinderSlotHolds(uint32_t index, uint64_t seq, uint64_t tally_seq, uint64_t stitch_seq)
 {
     if (index >= g_binder.ring)
         return ERR_INVALID_ARGUMENT;
@@ -118,6 +118,7 @@ error_t BinderSlotHolds(uint32_t index, uint64_t seq, uint64_t tally_seq)
     s->holds = true;
     s->seq   = seq;
     s->tally = tally_seq;
+    s->slice = stitch_seq;
     if (index + 1u > g_binder.nslots)
         g_binder.nslots = index + 1u;
     return OK;
@@ -283,23 +284,111 @@ void BinderNoTalliesFrom(const char* why)
 // What the ring lacks (BinderRingShort)
 // ----------------------------------------------------------------------------
 
-/* A slot's own Tallies' ground: its nodes born at the Tally it names, or at
- * the one it may name instead — what a Tally written over it gives back. A
- * node named as it lies is every Tally's (QuireHeld), and goes back with
- * none. */
-static uint64_t SlotOwn(const SlotGround* s)
+static uint64_t SlotOwn(uint32_t index, uint64_t q);
+
+/* A slot held unsure over one that held nothing (BinderSlotUnsure: its Tally
+ * and the one that may stand in it the same) may hold the new Tally or none,
+ * and a mount whose write there tore stands on the newest slot before it: its
+ * slice is the bar's too, and it spends no step of the lag. */
+uint64_t BinderBarSlice(const SlotGround* slots, uint32_t n, uint64_t lag, uint64_t floor)
 {
-    uint64_t own = 0;
-    for (uint32_t i = 0; s->holds && i < s->nground; i++)
-        if (s->ground[i].birth == s->tally || (s->tally2 && s->ground[i].birth == s->tally2))
-            own += s->ground[i].count;
-    return own;
+    uint64_t slice = floor, below = UINT64_MAX;
+    for (uint64_t k = 0; k < lag;) {
+        const SlotGround* newest = NULL;
+        for (uint32_t i = 0; i < n; i++) {
+            const SlotGround* s = &slots[i];
+            if (s->holds && s->tally < below && (!newest || s->tally > newest->tally))
+                newest = s;
+        }
+        if (!newest)
+            break;
+        below = newest->tally;
+        slice = newest->slice < slice ? newest->slice : slice;
+        if (!newest->unsure || newest->tally != newest->tally2)
+            k++;
+    }
+    return slice;
+}
+
+void BinderBarPublish(uint64_t floor)
+{
+    uint32_t n     = g_binder.nslots < g_binder.ring ? g_binder.nslots : g_binder.ring;
+    uint64_t slice = BinderBarSlice(g_binder.slot, n, FallowLag(), floor);
+    TagFSLockTake(&tagfs_get_state()->lock);
+    FallowNode* spent = FallowBarLift(slice);
+    TagFSLockDrop(&tagfs_get_state()->lock);
+    FallowNodesFree(spent);
+}
+
+/* Whether a Tally over the slots but the newest gives ground back: a Quire of
+ * the chain but the one the ribbon stands in and its next_quire, or a slot
+ * whose Tally took in an older stitch than the newest's — its own nodes and
+ * the Tally-Quires they hold whole go once a Tally is written over it. */
+void BinderTurnGivesPublish(void)
+{
+    const RibbonCursor* c      = RibbonCursorNow();
+    uint64_t            newest = 0;
+    bool                gives  = false;
+    for (uint64_t i = 0; c->up && i < g_binder.nchain && !gives; i++)
+        gives = !RibbonQuireSame(&g_binder.chain[i], &c->quire) && !RibbonQuireSame(&g_binder.chain[i], &c->next);
+    for (uint32_t i = 0; i < g_binder.nslots && i < g_binder.ring; i++)
+        if (g_binder.slot[i].holds && g_binder.slot[i].slice > newest)
+            newest = g_binder.slot[i].slice;
+    for (uint32_t i = 0; i < g_binder.nslots && i < g_binder.ring && !gives; i++)
+        gives = g_binder.slot[i].holds && g_binder.slot[i].slice < newest;
+    __atomic_store_n(&g_binder.turn_gives, gives ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
+/* Slot `index`'s own as it stands: the whole Quires a Tally over it gives
+ * back, what the Tally before it let go while it rests, and what a Tally
+ * under way over it took. */
+static void SlotOwnSaid(uint32_t index)
+{
+    const SlotGround* s = &g_binder.slot[index];
+    uint64_t          q = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
+    __atomic_store_n(&g_binder.own[index], SlotOwn(index, q) + s->rest + s->under, __ATOMIC_RELEASE);
 }
 
 void BinderSlotOwnPublish(uint32_t index, uint64_t more)
 {
-    if (index < g_binder.ring)
-        __atomic_store_n(&g_binder.own[index], SlotOwn(&g_binder.slot[index]) + more, __ATOMIC_RELEASE);
+    if (index >= g_binder.ring)
+        return;
+    g_binder.slot[index].under = more;
+    SlotOwnSaid(index);
+    BinderGroundHeldPublish();
+}
+
+void BinderSlotsOwnPublish(void)
+{
+    for (uint32_t i = 0; i < g_binder.ring; i++)
+        SlotOwnSaid(i);
+    BinderGroundHeldPublish();
+}
+
+/*
+ * ‼ THE GROUND A TALLY LET GO STAYS ITS SLOT'S UNTIL IT IS FREE (§16.6 п.8). A
+ * Tally's DONE lets the slot's old ground go to Fallow for the lag's stitches
+ * (BinderSlotGoes) and the slot holds only the new Tally's: counted then, the
+ * reserve rose by the old ground at once, while the free did not until Fallow
+ * gave it back — the ribbon's Quire a full volume keeps it, the write's
+ * reserve with it, gone for the lag. So the slot counts what it let go as its
+ * own (`rest`) until Fallow gives it back, and lets the count go in the same
+ * hold of the state lock the give is made in (sewing.c): not at the TAKE of
+ * the stitch whose settling may give it — Fallow gives nothing while a Tally
+ * is under way (BinderHoldsGround), and Tallies one after another at a full
+ * volume's wall held it there while the count was gone — nor after, when a
+ * measure taken between would count it twice. A rest a DONE finds still
+ * resting is added to, never put over: its ground is no freer for it.
+ */
+void BinderRestRipens(uint64_t resting_from)
+{
+    for (uint32_t i = 0; i < g_binder.ring; i++) {
+        SlotGround* s = &g_binder.slot[i];
+        if (s->rest && s->rest_until < resting_from) {
+            __atomic_sub_fetch(&g_binder.own[i], s->rest, __ATOMIC_ACQ_REL);
+            s->rest = 0;
+        }
+    }
 }
 
 /* What each slot but `index` lacks of `tally` blocks, its own ground counted
@@ -389,6 +478,7 @@ void BinderRibbonGiven(const RibbonQuire* q)
         return;
     }
     g_binder.chain[g_binder.nchain++] = *q;
+    BinderGroundHeldPublish();
 }
 
 // ----------------------------------------------------------------------------
@@ -437,15 +527,95 @@ static bool SlotsHold(uint64_t start, uint64_t end)
     return false;
 }
 
-static bool QuireHeld(uint64_t start, uint64_t end, uint64_t q)
+/* Whether the current pair may still lay a Tally in [start, end): past the
+ * Quires its Tallies filled. */
+static bool PairHolds(uint64_t start, uint64_t end, uint64_t q)
 {
-    if (SlotsHold(start, end))
-        return true;
     if (!g_binder.pair_room)
         return false;
     uint64_t used = g_binder.pair_used / q * q;
     return (start < g_binder.pair_a + g_binder.pair_room && g_binder.pair_a + used < end) ||
            (start < g_binder.pair_b + g_binder.pair_room && g_binder.pair_b + used < end);
+}
+
+static bool QuireHeld(uint64_t start, uint64_t end, uint64_t q)
+{
+    return SlotsHold(start, end) || PairHolds(start, end, q);
+}
+
+/* Where a slot goes in the ring's turn: one that holds nothing — or may hold
+ * either of two Tallies — first, then by seq. */
+static uint64_t SlotTurn(const SlotGround* s)
+{
+    return s->holds && !s->unsure ? s->seq : 0;
+}
+
+uint32_t BinderSlotNext(void)
+{
+    uint32_t best  = 0;
+    uint64_t least = UINT64_MAX;
+    for (uint32_t i = 0; i < g_binder.ring; i++) {
+        if (SlotTurn(&g_binder.slot[i]) < least) {
+            least = SlotTurn(&g_binder.slot[i]);
+            best  = i;
+        }
+    }
+    return best;
+}
+
+/* Whether [start, end) goes back with slot `index`: no slot that holds and
+ * goes as late or later names it, nor — the slot the next Tally is written
+ * over — may the current pair still lay a Tally in it. Any other slot goes a
+ * Tally later at the least, and by then the pair has moved on — its Quire the
+ * slot's to give back (BinderPairLetGo) — or the Tally went on in that Quire
+ * and names it, the last to go. */
+static bool QuireGoesWith(uint32_t index, uint64_t start, uint64_t end, uint64_t q)
+{
+    uint64_t turn = SlotTurn(&g_binder.slot[index]);
+    for (uint32_t i = 0; i < g_binder.nslots; i++) {
+        const SlotGround* s = &g_binder.slot[i];
+        if (i != index && s->holds && SlotTurn(s) >= turn && SlotNames(s, start, end))
+            return false;
+    }
+    return index != BinderSlotNext() || !PairHolds(start, end, q);
+}
+
+/*
+ * ‼ A SLOT'S OWN GROUND IS WHAT A TALLY OVER IT GIVES BACK, IN WHOLE QUIRES
+ * (§16.4 п.7, §16.6 п.8). A Tally takes its pair in whole Quires (binder.c
+ * TallyRunsTake) and gives a slot's ground back the same (QuiresGo): counted
+ * as its nodes' blocks born at its Tally and rounded down to a Quire, each
+ * slot was short by up to a Quire a copy of what it gives back, and the
+ * reserve kept that for every slot of the ring; and a node a later Tally names
+ * as it lies was the slot's that bore it, so the DONE over that slot took it
+ * off the count of every slot while no Tally gave it back. So a Quire of the
+ * ribbon's grid any node the slot names lies in — or a Tally-Quire it names
+ * one in as it lies — is its own, whole, when it goes back with it: no slot
+ * that goes as late in the ring's turn or later names one in it, so every
+ * Quire the slots name is one slot's, the last of them to go, as SlotGoes
+ * gives it back; and the Quires the current pair may still lay a Tally in are
+ * the slot's whose Tally lies there, but for the slot the next Tally is
+ * written over (QuireGoesWith). Counted again for every slot at each DONE
+ * (BinderSlotsOwnPublish). With the Quire the ribbon's cursor does not know
+ * yet, a block a Quire — its nodes.
+ */
+static uint64_t SlotOwn(uint32_t index, uint64_t q)
+{
+    const SlotGround* s    = &g_binder.slot[index];
+    uint64_t          own  = 0;
+    uint64_t          past = 0;
+    for (uint32_t i = 0, j = 0; s->holds && (i < s->nground || j < s->nquires);) {
+        bool         node = j == s->nquires || (i < s->nground && s->ground[i].start <= s->quires[j].start);
+        const Strip* g    = node ? &s->ground[i++] : &s->quires[j++];
+        for (uint64_t at = g->start / q * q; at < g->start + g->count; at += q) {
+            if (at < past)
+                continue;
+            past = at + q;
+            if (QuireGoesWith(index, at, at + q, q))
+                own += q;
+        }
+    }
+    return own;
 }
 
 /* Whether a Quire off the chain is another slot's too. */
@@ -466,6 +636,75 @@ static uint64_t ChainHeldFrom(void)
         if (g_binder.slot[i].holds && g_binder.slot[i].chain_from < from)
             from = g_binder.slot[i].chain_from;
     return from;
+}
+
+/* Whether [start, end) is a slot's own: one that holds names it and it goes
+ * back with that slot (QuireGoesWith). */
+static bool QuireOwned(uint64_t start, uint64_t end, uint64_t q)
+{
+    for (uint32_t i = 0; i < g_binder.nslots && i < g_binder.ring; i++)
+        if (g_binder.slot[i].holds && SlotNames(&g_binder.slot[i], start, end) && QuireGoesWith(i, start, end, q))
+            return true;
+    return false;
+}
+
+/* The Quires of the ribbon the slots hold: the chain from the least place a
+ * slot's ribbon begins at — all of it while none holds — and those off it,
+ * each once. */
+static uint64_t RibbonHeld(void)
+{
+    uint64_t held = 0, from = ChainHeldFrom(), end = g_binder.chain_base + g_binder.nchain;
+    for (uint64_t at = from > g_binder.chain_base && from != UINT64_MAX ? from : g_binder.chain_base; at < end; at++)
+        held += g_binder.chain[at - g_binder.chain_base].blocks;
+    for (uint32_t i = 0; i < g_binder.nslots; i++) {
+        const SlotGround* s = &g_binder.slot[i];
+        for (uint32_t k = 0; s->holds && k < s->nextra; k++) {
+            bool before = false;
+            for (uint32_t j = 0; j < i && !before; j++)
+                for (uint32_t e = 0; g_binder.slot[j].holds && e < g_binder.slot[j].nextra && !before; e++)
+                    before = RibbonQuireSame(&g_binder.slot[j].extra[e], &s->extra[k]);
+            held += before ? 0 : s->extra[k].blocks;
+        }
+    }
+    return held;
+}
+
+/*
+ * ‼ WHAT THE BOOK HOLDS ITSELF IS NAMED, NOT WHAT IS LEFT (§16.6 п.8). A write
+ * refused at a full volume's wall says it beside what the book keeps, and a
+ * refusal is weighed against another by both (logcheck fullvolume, roomback):
+ * left over — the data run but the free, the records' blocks and the staked —
+ * it held every block no owner names, and a leak of the book's ground, or a
+ * hole a record counts, was in the number that excused it. So it is the
+ * Quires the Binder names: every Quire of the grid a slot that holds names,
+ * each the own of the last slot to go of those that name it (SlotOwn — less
+ * what a slot counts its own past its ground: the rest Fallow holds for it,
+ * the pair a Tally under way took, `under`); the Quires of the current pair
+ * no slot counts its own — those a Tally may still be laid in, the whole of a
+ * pair a Tally under way took — and the Quires of the ribbon the slots hold.
+ * Published by the Settle's holder wherever one of them moves, read from any
+ * core (BinderGroundHeld).
+ */
+void BinderGroundHeldPublish(void)
+{
+    uint64_t q    = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
+    uint64_t held = RibbonHeld();
+    for (uint32_t i = 0; i < g_binder.ring; i++) {
+        uint64_t own  = __atomic_load_n(&g_binder.own[i], __ATOMIC_ACQUIRE);
+        uint64_t past = g_binder.slot[i].rest + g_binder.slot[i].under;
+        held += own > past ? own - past : 0;
+    }
+    for (uint32_t k = 0; g_binder.pair_room && k < 2u; k++) {
+        uint64_t base = k ? g_binder.pair_b : g_binder.pair_a;
+        for (uint64_t at = base / q * q; at < base + g_binder.pair_room; at += q)
+            held += QuireOwned(at, at + q, q) ? 0 : q;
+    }
+    __atomic_store_n(&g_binder.ground_held, held, __ATOMIC_RELEASE);
+}
+
+uint64_t BinderGroundHeld(void)
+{
+    return __atomic_load_n(&g_binder.ground_held, __ATOMIC_ACQUIRE);
 }
 
 /* A run more into the list of what goes. */

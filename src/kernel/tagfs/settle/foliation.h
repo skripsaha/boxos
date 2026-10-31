@@ -47,6 +47,11 @@ void        FoliationRelay(uint64_t tree, const TallyPlace* at);
  * endpaper_fact.h, counts the leaves a Tally laid in names as they lie). */
 void        FoliationLeafHolds(uint64_t tree, uint64_t items, uint64_t text);
 
+/* The leaves of `tree` of that Tally holding anything FoliationLeafHolds
+ * counted — of FILES, the leaves a Parcel's runs lie in: UINT64_MAX while
+ * Foliation is lost. */
+uint64_t    FoliationLeavesHolding(uint64_t tree);
+
 /* Why the Tally the next one is laid against is not known, or NULL. */
 const char* FoliationLost(void);
 

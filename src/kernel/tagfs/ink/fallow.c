@@ -22,12 +22,15 @@ struct FallowNode {
     bool        unnamed;    /* nothing on the medium names it: the map's images leave it free */
     uint64_t    stitch;     /* a book's: the seq of the stitch that names its freer, once it settled */
     bool        left;       /* a book's: the ribbon has left the Quire that stitch lies in */
+    uint32_t    bar;        /* a book's: runs[count, count + bar) given back and kept from the ribbon */
     Strip       runs[];
 };
 
 /* Oldest first: nodes are added in the order their freers were made. */
 static FallowNode* s_head;
 static FallowNode* s_tail;
+static FallowNode* s_barred;          /* given back whole, its ground kept from the ribbon (FallowBarsRun) */
+static uint64_t    s_bar_slice = UINT64_MAX;   /* the stitch the oldest Tally a mount may stand on took in */
 static uint64_t    s_blocks;
 static uint32_t    s_unnamed;        /* nodes nothing on the medium names */
 
@@ -60,6 +63,7 @@ static FallowNode* NodeAlloc(uint32_t room, FallowKind kind, uint64_t fid)
     n->unnamed   = false;
     n->stitch    = 0;
     n->left      = false;
+    n->bar       = 0;
     return n;
 }
 
@@ -290,6 +294,72 @@ uint32_t FallowUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits)
 }
 
 /*
+ * ‼ GROUND A TALLY STILL NAMES GOES TO DATA, NOT TO THE RIBBON (§3.7's table).
+ * A reader takes the ribbon's step into a next_quire only clear of the files
+ * of the Tally the mount stands on (ribbon_collate.c RibbonNamed,
+ * stitch_ribbon.py Named): it weighs the next_quire before the stitches past
+ * that Tally are replayed, so a file the Tally holds that a stitch gave up
+ * since still lies on its ground for it. Given to data, such ground is
+ * nothing to the reader — the replay gives the old owner's up before the new
+ * one's takes it; given to the ribbon, the reader refuses the step there, and
+ * every stitch past it is lost to the next mount. So a record's freer that a
+ * Tally a mount may stand on did not take in — its stitch past that Tally's
+ * slice — keeps the ground it gives back from the ribbon (FallowBarsRun), the
+ * node held for its runs until a Tally past the stitch stands where a mount
+ * would (FallowBarLift). A freer of no record — a slot's Tally or Quire let
+ * go — names no file's ground. Nothing on the medium changes.
+ */
+static bool NodeBarred(const FallowNode* n)
+{
+    return n->kind == FALLOW_BY_RECORD && n->stitch > s_bar_slice;
+}
+
+static bool RunsBar(const FallowNode* n, uint64_t start, uint64_t end, uint64_t* past)
+{
+    bool met = false;
+    for (uint32_t i = n->count; i < n->count + n->bar; i++) {
+        uint64_t s = n->runs[i].start, e = s + n->runs[i].count;
+        if (s < end && start < e) {
+            met   = true;
+            *past = e > *past ? e : *past;
+        }
+    }
+    return met;
+}
+
+bool FallowBarsRun(uint64_t start, uint64_t count, uint64_t* past)
+{
+    bool met = false;
+    *past    = start;
+    for (FallowNode* n = s_head; n; n = n->next)
+        met = RunsBar(n, start, start + count, past) || met;
+    for (FallowNode* n = s_barred; n; n = n->next)
+        met = RunsBar(n, start, start + count, past) || met;
+    return met;
+}
+
+FallowNode* FallowBarLift(uint64_t slice)
+{
+    FallowNode*  spent = NULL;
+    FallowNode** at    = &s_barred;
+    s_bar_slice        = slice;
+    for (FallowNode* n = s_head; n; n = n->next)
+        if (!NodeBarred(n))
+            n->bar = 0;
+    while (*at) {
+        FallowNode* n = *at;
+        if (NodeBarred(n)) {
+            at = &n->next;
+            continue;
+        }
+        *at     = n->next;
+        n->next = spent;
+        spent   = n;
+    }
+    return spent;
+}
+
+/*
  * The node's runs back to the allocator, through the room for the map's
  * deltas made before the lock (FallowZeroDigests) — on a book, through the
  * pages held for the derived map (FallowGiveRoomHold): a run that room does
@@ -302,9 +372,10 @@ uint32_t FallowUnnamedLeftOut(uint64_t first, uint32_t count, uint8_t* bits)
 static uint64_t NodeGiveBack(FallowNode* n, bool book)
 {
     uint64_t given = 0;
-    uint32_t kept  = 0;
+    uint32_t kept  = 0, count = n->count;
+    bool     bar   = book && NodeBarred(n);
 
-    for (uint32_t i = 0; i < n->count; i++) {
+    for (uint32_t i = 0; i < count; i++) {
         Strip    run  = n->runs[i];
         uint64_t met  = 0;
         error_t  back = book ? BlockMapDerivedRelease(n->fid ? GROUND_FILE : GROUND_FALLOW, n->fid, run.start,
@@ -316,9 +387,15 @@ static uint64_t NodeGiveBack(FallowNode* n, bool book)
         }
         if (back == OK)
             given += run.count - met;
-        else if (back == ERR_NO_MEMORY)
+        if (back == ERR_NO_MEMORY) {
+            n->runs[i]      = n->runs[kept];
             n->runs[kept++] = run;
+        }
     }
+    /* The runs given back lie in [kept, count), beside those an earlier give
+     * kept from the ribbon at [count, count + bar): one stretch while the bar
+     * holds, none once it is lifted. */
+    n->bar   = bar ? n->bar + (count - kept) : 0;
     n->count = kept;
     return given;
 }
@@ -383,9 +460,14 @@ uint64_t FallowRipen(uint64_t closed_gen, uint64_t cycle, FallowNode** spent)
         if (s_tail == n)
             s_tail = prev;
         s_unnamed -= n->unnamed;
-        n->next = *spent;
-        *spent  = n;
-        n       = next;
+        if (n->bar) {
+            n->next  = s_barred;
+            s_barred = n;
+        } else {
+            n->next = *spent;
+            *spent  = n;
+        }
+        n = next;
     }
     if (stayed && !s_held_said)
         kprintf("[TagFS] Fallow: %llu block(s) rested their cycles and the block map had no "
@@ -423,6 +505,15 @@ void FallowSpineAdd(FallowNode* node, uint64_t cycle)
     node->left    = true;
     node->stitch  = 0;
     FallowAdd(node, 0);
+}
+
+uint64_t FallowSpineRipeFrom(void)
+{
+    uint64_t from = UINT64_MAX;
+    for (FallowNode* n = s_head; n; n = n->next)
+        if (n->kind == FALLOW_BY_SPINE && n->ripe_at < from)
+            from = n->ripe_at;
+    return from;
 }
 
 bool FallowAwaitsQuire(void)
@@ -506,6 +597,8 @@ uint64_t FallowBlocksMapTaken(void)
 void FallowDropAll(void)
 {
     FallowNodesFree(s_head);
+    FallowNodesFree(s_barred);
+    s_barred    = NULL;
     s_head      = NULL;
     s_tail      = NULL;
     s_blocks    = 0;

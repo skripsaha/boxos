@@ -102,23 +102,6 @@ static const char* BinderMayNot(void)
     return BinderNoWrite() ? s_no_write : BinderOwnMayNot();
 }
 
-/* The slot a Tally is written over: the one of the least seq, one that holds
- * nothing — or may hold either of two — least of all (§1.4). */
-static uint32_t SlotLeast(void)
-{
-    uint32_t best = 0;
-    uint64_t least = UINT64_MAX;
-    for (uint32_t i = 0; i < g_binder.ring; i++) {
-        const SlotGround* s = &g_binder.slot[i];
-        uint64_t          seq = s->holds && !s->unsure ? s->seq : 0;
-        if (seq < least) {
-            least = seq;
-            best  = i;
-        }
-    }
-    return best;
-}
-
 /* Where the next Tally's nodes go on in the pair: past the ones laid, on an
  * atom. */
 static uint64_t PairNext(uint64_t grid)
@@ -154,7 +137,7 @@ static error_t TallyRunsTake(BinderRun* r, uint64_t blocks)
         r->w.b    = g_binder.pair_b + at;
         r->w.room = g_binder.pair_room - at;
         r->taken  = true;
-        BinderSlotOwnPublish(r->slot, 2u * blocks);
+        BinderSlotOwnPublish(r->slot, 0);   /* the pair's: nothing off the free */
         return OK;
     }
     uint64_t run  = (blocks + q - 1u) / q * q, a = 0, b = 0;
@@ -173,7 +156,7 @@ static error_t TallyRunsTake(BinderRun* r, uint64_t blocks)
     g_binder.pair_room = r->w.room = run;
     g_binder.pair_used = 0;
     r->taken = true;
-    BinderSlotOwnPublish(r->slot, 2u * blocks);
+    BinderSlotOwnPublish(r->slot, 2u * run);   /* the pair whole, as the free gave it */
     return OK;
 }
 
@@ -358,6 +341,7 @@ static void TallyEnded(BinderRun* r, error_t rc)
     memset(r, 0, sizeof(*r));
     __atomic_store_n(&s_under_way, 0u, __ATOMIC_RELEASE);
     BinderWeigh();
+    BinderRoomEnded();
 }
 
 // ----------------------------------------------------------------------------
@@ -385,7 +369,7 @@ static error_t TallyMeasureBegin(BinderRun* r)
 static error_t TallyMeasured(BinderRun* r)
 {
     uint64_t blocks = r->w.off ? r->w.off : r->w.grid;
-    r->slot = SlotLeast();
+    r->slot = BinderSlotNext();
     error_t rc = TallyRunsTake(r, blocks);
     if (rc != OK)
         return rc;
@@ -539,6 +523,8 @@ void BinderWeigh(void)
     const char* why = BinderOwnMayNot();
     __atomic_store_n(&g_binder.due, due ? 1u : 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_binder.may_not, why, __ATOMIC_RELEASE);
+    BinderTurnGivesPublish();
+    BinderGroundHeldPublish();
     bool owed = due || __atomic_load_n(&g_binder.demanded, __ATOMIC_ACQUIRE);
     if (owed && why == s_off_chain && g_binder.said != why) {
         g_binder.said = why;
@@ -564,6 +550,62 @@ bool BinderOwed(void)
                __atomic_load_n(&g_binder.due, __ATOMIC_ACQUIRE);
     return due && SettledCycles() >= __atomic_load_n(&g_binder.retry_after, __ATOMIC_ACQUIRE) &&
            !BinderNoWrite() && __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE) == NULL;
+}
+
+bool BinderRoomWait(void)
+{
+    if (BinderNoTallies() || BinderNoWrite() || __atomic_load_n(&g_binder.room_turns, __ATOMIC_ACQUIRE) >= g_binder.ring)
+        return false;
+    if (__atomic_load_n(&s_under_way, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&g_binder.room_waits, 1u, __ATOMIC_RELEASE);   /* its end gives the slot's ground */
+        return true;
+    }
+    if (!EndpaperGrown() && !__atomic_load_n(&g_binder.turn_gives, __ATOMIC_ACQUIRE))
+        return false;
+    const char* why = __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE);
+    if (why == s_on_edge || why == s_unsettled) {
+        SettleDemand(SETTLE_DEMAND_ROOM);    /* the stitch that takes the reason away */
+        return true;
+    }
+    if (why)
+        return false;
+    __atomic_store_n(&g_binder.room_waits, 1u, __ATOMIC_RELEASE);
+    SettleDemand(SETTLE_DEMAND_TALLY);
+    return true;
+}
+
+const char* BinderRoomMeasured(const char** why)
+{
+    *why = NULL;
+    if (!EndpaperGrown())
+        return "to the block by its last Tally";
+    if (__atomic_load_n(&g_binder.room_turns, __ATOMIC_ACQUIRE) >= g_binder.ring)
+        return "from above past its last Tally, a turn of the ring waited for";
+    *why = BinderNoTallies() ? BinderNoTallies()
+         : BinderNoWrite()   ? s_no_write
+                             : __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE);
+    return "from above past its last Tally, no Tally waited for";
+}
+
+bool BinderRoomAwaited(void)
+{
+    return __atomic_load_n(&g_binder.room_waits, __ATOMIC_ACQUIRE) != 0;
+}
+
+void BinderRoomTaken(void)
+{
+    if (__atomic_load_n(&g_binder.room_turns, __ATOMIC_ACQUIRE))
+        __atomic_store_n(&g_binder.room_turns, 0u, __ATOMIC_RELEASE);
+}
+
+/* A Tally a write short of room waited on ended: one turn of the ring spent,
+ * and the write woken by a cycle to ask again. By the Settle's holder. */
+void BinderRoomEnded(void)
+{
+    if (!__atomic_exchange_n(&g_binder.room_waits, 0u, __ATOMIC_ACQ_REL))
+        return;
+    __atomic_add_fetch(&g_binder.room_turns, 1u, __ATOMIC_ACQ_REL);
+    SettleDemand(SETTLE_DEMAND_ROOM);
 }
 
 bool BinderHoldsGround(void)
@@ -645,26 +687,13 @@ bool BinderTurn(void)
     return true;
 }
 
-error_t BinderRunWhole(void)
+/* The Tally under way, or one begun, a step a turn of the Scribe until it
+ * ends, as the cadence would. */
+static error_t BinderRunSteps(void)
 {
     uint64_t written = 0;
     bool     done    = false;
     error_t  rc      = OK;
-    const char* why  = s_run.active ? NULL : BinderMayNot();
-    if (why == s_loose) {
-        /* The caller waits for its Tally: the tails go into their blocks in
-         * its own call, and the cycle that carries them settles first. */
-        rc = EngrossWhole();
-        if (rc == OK)
-            rc = TagFSSettle();
-        if (rc != OK)
-            return rc;
-        why = BinderMayNot();
-    }
-    if (why) {
-        kprintf("[TagFS] a Tally is asked for and not begun: %s\n", why);
-        return ERR_BUSY;
-    }
     while (rc == OK && !done) {
         uint64_t   cover = 0, ticket = ScribeAsk(&g_settle_scribe);
         error_t    refused = OK;
@@ -678,6 +707,38 @@ error_t BinderRunWhole(void)
         ScribeGive(&g_settle_scribe, written, OK);
     }
     return rc;
+}
+
+error_t BinderRunWhole(void)
+{
+    const char* why = s_run.active ? NULL : BinderMayNot();
+    if (why == s_loose) {
+        /* The caller waits for its Tally: the tails go into their blocks in
+         * its own call, and the cycle that carries them settles first. */
+        error_t rc = EngrossWhole();
+        if (rc == OK)
+            rc = TagFSSettle();
+        if (rc != OK)
+            return rc;
+        why = BinderMayNot();
+    }
+    if (why) {
+        kprintf("[TagFS] a Tally is asked for and not begun: %s\n", why);
+        return ERR_BUSY;
+    }
+    return BinderRunSteps();
+}
+
+/* Never the tails' Engross: a write's wait for room is reached from inside a
+ * Helm span (engross.c EngrossEscheat -> HelmSpan -> HelmRoomCameBack ->
+ * SettleForRoom), and an Engross there walks the files again under it — a
+ * recursion with no bound but the files. The Helm's service lays them
+ * (BinderWeigh asks it), and the cadence begins the Tally after. */
+error_t BinderRunAwaited(void)
+{
+    if (!s_run.active && BinderMayNot())
+        return ERR_WOULD_BLOCK;
+    return BinderRunSteps();
 }
 
 void BinderStitchSettled(uint64_t seq, uint64_t useful, uint64_t fid_most, error_t births)
@@ -708,7 +769,7 @@ void BinderStandTearSlot(uint32_t sectors)
 void BinderStand(BinderStandSaid* out)
 {
     memset(out, 0, sizeof(*out));
-    out->next_slot     = SlotLeast();
+    out->next_slot     = BinderSlotNext();
     out->useful        = g_binder.useful;
     out->cost          = TallyCostBytes();
     out->tally_blocks  = g_binder.tally_blocks;

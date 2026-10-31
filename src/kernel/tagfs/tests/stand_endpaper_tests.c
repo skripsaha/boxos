@@ -2,6 +2,7 @@
 #include "stand_fresh.h"
 #include "../settle/binder.h"
 #include "../settle/endpaper_fact.h"
+#include "../settle/foliation.h"
 #include "../file_map/file_map.h"
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -243,6 +244,45 @@ out:
     return verdict;
 }
 
+/*
+ * ‼ A LEAF NOTHING WENT IN IS THE LEAF IT WAS. A Tally of empty files, nothing
+ * changed since: no item of an empty file widens with the next Tally's seq —
+ * only a Parcel's runs do — so the next Tally's FILES is measured at the
+ * leaves the last one laid, the leaves its runs lie in recut, and never every
+ * leaf recut as though a run lay in each (endpaper_fact.c, FilesMost): less
+ * than twice the leaves it laid, where every leaf recut is three times them.
+ * The reserve keeps the measure for each slot of the ring besides
+ * (BinderRingShort), so a measure three times the book filled a volume of
+ * empty files with reserve long before its ground ran out. The next Tally
+ * fits the measure.
+ */
+static TestResult TestStandEndpaperEmptyFiles(void)
+{
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandEndpaper      laid;
+    uint64_t           first = 0;
+    uint32_t           leaves = 0;
+    const char*        aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandEndpaperMake(STAND_ENDPAPER_MANY, &first) == TEST_PASS, "empty files are made");
+    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally of them is written");
+    TEST_ASSERT(FoliationLeaves(TALLY_FILES, &leaves) && leaves > 0, "the leaves of FILES it laid are known");
+    TestEvidence("leaves of FILES the Tally laid:", leaves);
+    StandEndpaperOf(&laid, "by the Tally of empty files, nothing changed since");
+    TEST_ASSERT(laid.files < 2u * (uint64_t)leaves,
+                "FILES is measured at the leaves laid and the leaves the runs lie in, not every leaf recut");
+    TEST_ASSERT(StandEndpaperNextFits("the next Tally takes no more than the measure") == TEST_PASS,
+                "the next Tally fits the measure");
+    TEST_ASSERT(StandEndpaperGiveUp(first, STAND_ENDPAPER_MANY) == TEST_PASS, "the files are given up");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
 // ----------------------------------------------------------------------------
 // The measure a write keeps
 // ----------------------------------------------------------------------------
@@ -312,6 +352,8 @@ static const TestCase g_stand_endpaper_tests[] = {
     { .name = "stand_endpaper_pending", .func = TestStandEndpaperPending,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_endpaper_kept", .func = TestStandEndpaperKept,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_endpaper_empty_files", .func = TestStandEndpaperEmptyFiles,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
 };
 

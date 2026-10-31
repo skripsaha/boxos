@@ -37,6 +37,12 @@ static volatile uint64_t s_room_frees;
 static volatile uint8_t  s_room_grows;
 static volatile uint64_t s_refused_free;
 
+/* The slice of the last Tally's DONE that asked the next_quire again, and how
+ * many in a row took that same stitch in (RibbonNextAgain). By the Settle's
+ * holder. */
+static uint64_t          s_again_slice;
+static uint32_t          s_again_turns;
+
 /* The bytes claimed by changes no stitch has taken, and those held for changes
  * in the making — a tag about to be given an id, a write's record while its
  * data moves (RibbonReserve): under the state lock. */
@@ -354,8 +360,11 @@ static error_t RibbonNextTake(RibbonCursor* c)
  * to go on, named in every StitchHead from then on (M-5). It is a whole Quire on an atom of the data run, looked
  * for past the Quire the ribbon stands in, and never one the ground the
  * Tallies need would go to (EndpaperKeeps — a whole Tally, and what the ring's
- * slots lack of one) nor a block promised to a Slip's tail (BlockMapTakeQuire):
- * a Quire of the ribbon comes back only once the slots stop
+ * slots lack of one) nor a block promised to a Slip's tail (BlockMapTakeQuire),
+ * nor ground a file of a Tally a mount may stand on lies on — given up past
+ * it, its ground is data's, and a reader would refuse the step there
+ * (fallow.c, NodeBarred): one taken there waits for the Tally past the delete
+ * the refusal asks for. A Quire of the ribbon comes back only once the slots stop
  * naming it, which only a Tally written over one of them does. Laid on an
  * atom of the ribbon — a flash page on a removable medium (§16.6 п.2) — and
  * asked for again while the one named is not: a next_quire a writer of a
@@ -363,17 +372,36 @@ static error_t RibbonNextTake(RibbonCursor* c)
  * be taken, its ground held until a Tally lets the ribbon's Quires before
  * the one it stands in go, as every Quire a stitch named.
  */
-void RibbonNextGiven(void)
+static void RibbonNextAsk(bool ask)
 {
     RibbonCursor* c = &s_cursor;
     if (!RibbonNextWanted(c))
         return;
     c->taken = RibbonNextTake(c);
-    if (c->taken == ERR_TAGFS_NO_SPACE && !c->next.blocks) {
-        SettleDemand(SETTLE_DEMAND_TALLY);
-        __atomic_store_n(&s_refused_free, AllotmentFreeUnpromised(), __ATOMIC_RELEASE);
+    if (c->taken == ERR_WOULD_BLOCK && BinderNoTallies())
+        c->taken = ERR_TAGFS_NO_SPACE;   /* no Tally of this mount lifts the bar (fallow.c, NodeBarred) */
+    if (c->taken != OK && !c->next.blocks) {
+        /* A Tally gives the ribbon ground — the slots' Quires, the bar lifted
+         * — never the heap a refusal of memory wanted: it would want it too. */
+        if (ask && (c->taken == ERR_TAGFS_NO_SPACE || c->taken == ERR_WOULD_BLOCK))
+            SettleDemand(SETTLE_DEMAND_TALLY);
+        if (c->taken == ERR_TAGFS_NO_SPACE)
+            __atomic_store_n(&s_refused_free, AllotmentFreeUnpromised(), __ATOMIC_RELEASE);
     }
     RibbonRoomPublish();
+}
+
+void RibbonNextGiven(void)
+{
+    RibbonNextAsk(true);
+}
+
+void RibbonNextAgain(uint64_t slice)
+{
+    s_again_turns = slice == s_again_slice ? s_again_turns + 1u : 1u;
+    s_again_slice = slice;
+    if (!s_cursor.next.blocks)
+        RibbonNextAsk(s_again_turns < g_binder.ring);
 }
 
 /*
@@ -384,7 +412,9 @@ void RibbonNextGiven(void)
  * any change could ask for that cycle, demand a Tally of a cadence the mount
  * resets after (SettleMountReset) and no settled cycle of this mount would let
  * begin (BinderOwnMayNot), and be judged against the promises of the mounting
- * before, whose epoch this one has not passed yet (AllotmentPromised).
+ * before, whose epoch this one has not passed yet (AllotmentPromised) — a
+ * Quire found only on ground a mount's Tally keeps from the ribbon
+ * (ERR_WOULD_BLOCK, fallow.c NodeBarred) alike.
  */
 void RibbonNextGivenAtMount(void)
 {

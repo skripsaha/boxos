@@ -102,6 +102,13 @@ bool        BinderTurn(void);
  * may be begun — why said — or the step's refusal. */
 error_t     BinderRunWhole(void);
 
+/* The Tally a write short of room waits on (BinderRoomAwaited), written by
+ * that write's own wait for room (settle.c, SettleForRoomBook) as
+ * BinderRunWhole writes one — but never begun past the tails' Engross, which
+ * is the Helm service's: ERR_WOULD_BLOCK, said by nothing, when none may be
+ * begun now. */
+error_t     BinderRunAwaited(void);
+
 /* The stitch `seq` settled carrying `useful` bytes of records, the highest
  * file id a record of it named `fid_most`, and the births of the runs it put
  * in noted — `births`, ERR_NO_MEMORY when memory would not keep them (and no
@@ -144,7 +151,7 @@ error_t     BinderSlotsMake(uint32_t ring);
  * naming the Tally `tally_seq` — every copy of every node it names (`start`,
  * `count` blocks, written at `birth`) and every Quire of its ribbon, in order.
  * ERR_NO_MEMORY. */
-error_t     BinderSlotHolds(uint32_t index, uint64_t seq, uint64_t tally_seq);
+error_t     BinderSlotHolds(uint32_t index, uint64_t seq, uint64_t tally_seq, uint64_t stitch_seq);
 error_t     BinderSlotNode(uint32_t index, uint64_t start, uint64_t count, uint64_t birth);
 error_t     BinderSlotRibbon(uint32_t index, const RibbonQuire* q);
 
@@ -167,11 +174,85 @@ const char* BinderNoTallies(void);
  * "a ribbon's step and one Tally are always possible" holds only when the
  * reserve also keeps what the ring's slots lack of a whole Tally: for `tally`
  * blocks of one whole Tally, both copies, in whole Quires of `quire`, the sum
- * over every slot of what its own Tallies' ground — counted in whole Quires —
- * falls short of it (EndpaperKeeps adds it). From any core, lock-free: each
- * slot's own ground is published by the Settle's holder.
+ * over every slot of what its own Tallies' ground — the whole Quires a Tally
+ * written over it gives back (binder_slots.c, SlotOwn) — falls short of it
+ * (EndpaperKeeps adds it). From any core, lock-free: each slot's own ground is
+ * published by the Settle's holder.
  */
 uint64_t    BinderRingShort(uint64_t tally, uint64_t quire);
+
+/*
+ * ‼ A WRITE SHORT OF ROOM WAITS WHILE A TALLY GIVES GROUND BACK (§3.6: a
+ * request that frees nothing waits, ERR_WOULD_BLOCK, while Fallow rests ground
+ * or what the slots hold would come back; ERR_TAGFS_NO_SPACE only past that).
+ * Two grounds a Tally gives back that nothing else does:
+ *   - the reserve's measure (§16.4 п.7): the last Tally's exact size and,
+ *     from above, the growth settled since (endpaper_fact.c) — each Quire of
+ *     it kept twice, once for the Tally and once for each slot holding less
+ *     (BinderRingShort). A GiB written past the last Tally measured 980 blocks
+ *     a copy, the two Tallies after it 658 and 610: 7680 kept where 6400 did,
+ *     and the GiB written the moment a GiB was deleted came 1280 blocks short
+ *     of a volume that had them (fullvolume roomback). The Tally makes the
+ *     measure exact (EndpaperGrown);
+ *   - what the slots hold that the newest does not — every Quire of the ribbon
+ *     but the one it stands in and its next_quire, and a slot's own nodes and
+ *     the Tally-Quires they hold whole — given back once a Tally is written
+ *     over each (SlotGoes), published by the Settle's holder as it weighs
+ *     (BinderWeigh, BinderTurnGivesPublish).
+ * BinderRoomWait, by a write refused past the book's fresh measure with
+ * Fallow empty: true — the write waits — while fewer Tallies than the ring
+ * holds slots ended since a write was last handed ground, and a Tally is under
+ * way — its end gives its slot's ground back — or one of the two stands. A
+ * Tally under way at every ask spends the turn as one asked would: a Tally
+ * begun between two asks (the ribbon's, RibbonNextAgain; the useful bytes')
+ * never holds the write past it. A Tally may be begun: it is asked
+ * (SETTLE_DEMAND_TALLY), and its end — DONE or refused — counts a turn and
+ * asks the cycle that wakes the write (BinderRoomEnded); the ground the slot
+ * let go rests in Fallow, whose own wait carries the write from there. None
+ * may be begun for a reason the next stitch takes away — the ribbon on its
+ * Quire's edge: a cycle asked for room closes a Quire early, and the take
+ * after Fallow's wait meets it there — a cycle is asked. False once a whole
+ * turn of the ring is spent, none may be begun for any other reason, or the
+ * volume takes no write: the write is refused. BinderRoomAwaited: a Tally so
+ * asked and not ended — the write's own wait for room writes it (settle.c,
+ * SettleForRoomBook; BinderRunAwaited).
+ * BinderRoomTaken: a write was handed ground — the next shortfall has its
+ * turn of the ring again. BinderRoomMeasured, as a write is refused: how the
+ * reserve it met was measured — to the block, nothing grown past the last
+ * Tally; or from above, a turn of the ring waited for, or no Tally waited for
+ * and *why none may be (NULL: none was asked). From any core, no TagFS lock
+ * held.
+ */
+bool        BinderRoomWait(void);
+const char* BinderRoomMeasured(const char** why);
+bool        BinderRoomAwaited(void);
+void        BinderRoomTaken(void);
+void        BinderRoomEnded(void);
+void        BinderTurnGivesPublish(void);
+
+/* The ground the book holds itself, in blocks: every Quire of the grid a slot
+ * that holds names, the current pair's no slot counts its own, and the Quires
+ * of the ribbon the slots hold — named, each once (binder_slots.c). Published
+ * by the Settle's holder wherever one of them moves; read from any core, no
+ * TagFS lock held: said beside what the book keeps when a write is refused at
+ * a full volume's wall (allotment.c). */
+void        BinderGroundHeldPublish(void);
+uint64_t    BinderGroundHeld(void);
+
+/*
+ * The stitch the oldest Tally a mount may stand on took in, given to Fallow,
+ * which keeps from the ribbon the ground a record past it gave back
+ * (fallow.c, NodeBarred): the newest slot that holds a Tally — the FallowLag()
+ * newest once the medium lied, as many as a mount may fall back past a slot a
+ * lying medium lost — each by the older Tally it may hold while its write is
+ * unsure, and `floor`, the slot a mount stood on when it is not the newest
+ * (UINT64_MAX for none). A slot held unsure over one that held nothing may
+ * hold the new Tally or none: a mount whose write there tore stands on the
+ * newest slot before it, so it spends no step of the lag — its slice is taken
+ * and the next newest asked too. By the Settle's holder, or the mount, with no
+ * TagFS lock held: at the mount and at each Tally's DONE.
+ */
+void        BinderBarPublish(uint64_t floor);
 
 /* A node of the Tally stood on no copy of which holds — kept to be named by
  * every Tally after as it lies (§16.4 п.5): its tree, place, and level.
@@ -353,6 +434,7 @@ typedef struct {
     bool         unsure;       /* a write of it was refused: it may hold either Tally */
     uint64_t     seq;
     uint64_t     tally;
+    uint64_t     slice;        /* the stitch its Tally took in — the older one's while it is unsure */
     uint64_t     tally2;       /* unsure: the Tally that may stand in it instead; 0 */
     SlotSealed*  sealed;       /* unsure: every unit a refused write of it sealed, newest first */
     Strip*       ground;       /* its Tallies' nodes, each copy, born at `birth`, by first block */
@@ -366,6 +448,9 @@ typedef struct {
     uint32_t     nextra;
     uint32_t     capextra;
     uint64_t     chain_from;   /* where its ribbon begins on the chain; UINT64_MAX for none */
+    uint64_t     under;        /* the ground a Tally under way over it took off the free, counted its own */
+    uint64_t     rest;         /* what the Tally before it let go, resting in Fallow, counted its own ... */
+    uint64_t     rest_until;   /* ... until no node of it ripe by this cycle rests in Fallow */
 } SlotGround;
 
 
@@ -405,6 +490,10 @@ typedef struct {
     const char* volatile may_not;/* why none may be begun as the holder's own state stands, or NULL: published */
     const char*    said;        /* the last such reason said while one was owed */
     volatile uint64_t retry_after; /* a refused Tally is tried again once this cycle settled */
+    volatile uint8_t  turn_gives;  /* a Tally over the slots but the newest gives ground back: published */
+    volatile uint8_t  room_waits;  /* a write short of room waits on the Tally it asked: a cycle at its end */
+    volatile uint32_t room_turns;  /* Tallies ended for writes short of room since one was handed ground */
+    volatile uint64_t ground_held; /* the ground the book holds itself, blocks: published (BinderGroundHeld) */
 } BinderBook;
 
 extern BinderBook g_binder;
@@ -426,13 +515,31 @@ bool        BinderSlotSealed(uint32_t slot, const uint8_t* unit);
 void        BinderSlotSort(SlotGround* s);
 uint64_t    BinderChainIndex(const RibbonQuire* q);
 uint64_t    BinderSlotGoes(const SlotGround* old);
+
+/* The slot the next Tally is written over: the one of the least seq, one that
+ * holds nothing — or may hold either of two — least of all (§1.4). By the
+ * Settle's holder. */
+uint32_t    BinderSlotNext(void);
+
+/* The stitch BinderBarPublish gives Fallow, of `n` slots `slots`: the least
+ * slice of the `lag` newest that hold — one held unsure over nothing spends
+ * no step — and `floor`. Memory alone. */
+uint64_t    BinderBarSlice(const SlotGround* slots, uint32_t n, uint64_t lag, uint64_t floor);
 void        BinderPairLetGo(uint64_t quire);
 
 /* binder_slots.c: slot `index`'s own ground published, `more` blocks a Tally
- * under way took for it added; what every slot but `index` lacks of `tally`
- * blocks, in whole Quires of `quire`; no Tally written by this mount from here, for `why` (said by the
- * caller). binder.c: BinderOwed's words published again (BinderWeigh). */
+ * under way took off the free for it added — BinderSlotsOwnPublish: every
+ * slot's, as each stands; the ground a slot's Tally before let go counted its
+ * own no more once Fallow gave it back, in the hold of the state lock that
+ * gave it: once `resting_from`, the least cycle a node of that ground still
+ * resting ripens at, is past its own (BinderRestRipens, sewing.c,
+ * FallowSpineRipeFrom); what every slot but `index`
+ * lacks of `tally` blocks, in whole Quires of `quire`; no Tally written by
+ * this mount from here, for `why` (said by the caller). binder.c: BinderOwed's
+ * words published again (BinderWeigh). */
 void        BinderSlotOwnPublish(uint32_t index, uint64_t more);
+void        BinderSlotsOwnPublish(void);
+void        BinderRestRipens(uint64_t resting_from);
 uint64_t    BinderRingShortBut(uint64_t tally, uint64_t quire, uint32_t index);
 void        BinderNoTalliesFrom(const char* why);
 void        BinderWeigh(void);

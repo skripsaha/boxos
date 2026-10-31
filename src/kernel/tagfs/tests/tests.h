@@ -152,6 +152,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_fresh_change)) \
     VOLUME_TESTS_ONLY(SUITE(stand_binder)) \
     VOLUME_TESTS_ONLY(SUITE(stand_endpaper)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_book_room)) \
     VOLUME_TESTS_ONLY(SUITE(stand_errata)) \
     VOLUME_TESTS_ONLY(SUITE(stand_toll)) \
     VOLUME_TESTS_ONLY(SUITE(stand_dog_ear)) \

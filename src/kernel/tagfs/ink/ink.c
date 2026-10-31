@@ -405,6 +405,7 @@ error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
 
     p->claimed       = 0;
     p->stake_count   = 0;
+    memset(&p->stakes_counted, 0, sizeof(p->stakes_counted));   /* let go with its Ink (ink_book.c) */
     p->freed_count   = 0;
     p->size_before   = p->size;
     p->blocks_before = p->blocks;
