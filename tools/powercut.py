@@ -525,11 +525,19 @@ class Run:
             left if left < 1 << 40 else "over 2^%d" % (left.bit_length() - 1),
             sum(e.get("tears_not_built", 0) for e in es))
 
-    def SeqCeiling(self, item):
-        """The last seq a durable item may hold. TO 0 is "as many as the record
-        has entries": a writer that starts at FROM cannot have written more
-        records than the record holds writes."""
-        return item["to"] or item["from"] + self.listing["entries"]
+    def SeqCeiling(self, item, held):
+        """The last seq a durable item may hold. TO 0 is "as far as the medium
+        took the writer": no further than the record holds entries past FROM,
+        where each record it writes is a write of its own (format v1), nor than
+        HELD, the seq the final state reads back — the final state is every
+        write of the record, so no cut of it holds a newer record. On a book a
+        writer's 16 bytes ride the stitches as a Slip (spec_v2 §2.8): thousands
+        of records between two stitches, the newest stitch carrying the last.
+        Read off the medium and never off the writer's log, whose lines reach
+        the serial port through the display's lane after its writes — a halt
+        ends the programs before the lane is drained (system_halt.c), so the
+        last word a log shows may be short of the last record written."""
+        return item["to"] or max(item["from"] + self.listing["entries"], held)
 
     def LastWriteBefore(self, seq):
         return max((w["seq"] for w in self.listing["writes"] if w["seq"] < seq), default=0)
@@ -723,6 +731,7 @@ def Main():
     s.add_argument("--final-consistent", action="store_true")
     s.add_argument("--waited", type=int, default=0)
     s.add_argument("--by-kind", action="store_true")
+    s.add_argument("--medium", default="")          # a book's run signed by its medium (powercut.sh pc_sign)
     s = sub.add_parser("settlecut")
     s.add_argument("dir")
     s.add_argument("--path", required=True)

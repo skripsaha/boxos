@@ -54,10 +54,15 @@ def BootLogs(run):
     return out
 
 
+def QuillVerified(log, name):
+    """quilltest verify's PASS of NAME in a boot's LOG: (fid, seq) as matched."""
+    return re.search(r"\[QUILL\] verify: PASS — %s fid=(\d+) seq=(\d+) bytes=16" % re.escape(name), log)
+
+
 class Judge:
-    def __init__(self, run, base, caveats, path, waited, by_kind=False):
+    def __init__(self, run, base, caveats, path, waited, by_kind=False, medium=""):
         self.run, self.base, self.caveats, self.path, self.waited = run, base, caveats, path, waited
-        self.by_kind, self.census, self.boots = by_kind, {}, BootLogs(run)
+        self.by_kind, self.census, self.boots, self.medium = by_kind, {}, BootLogs(run), medium
 
     def Out(self, key, seen, what, caveat=None):
         name = self.caveats.get(caveat or key)
@@ -119,8 +124,9 @@ class Judge:
             f = run.AckFlush(s) if item else None
             if f is None:
                 continue
+            ceiling = run.SeqCeiling(item, self.FinalSeq(item["name"]))
             hashes = {hashlib.sha256(RecordBytes(item["record"], q)).hexdigest(): q
-                      for q in range(item["from"], run.SeqCeiling(item) + 1)}
+                      for q in range(item["from"], ceiling + 1)}
             need = run.LastWriteBefore(f)
             after = [c["id"] for c in run.canon if run.through[c["id"]] >= need]
             bad = []
@@ -133,16 +139,16 @@ class Judge:
             if bad:
                 self.Out(key, "defect" if self.caveats.get(key) else "fail",
                          "%s, made durable by the flush at entry %d, is missing or wrong "
-                         "in %d of the %d cuts after it, e.g. %s (%s): %s"
-                         % (item["name"], f, len(bad), len(after), bad[0][0], run.Kept(bad[0][0]),
-                            bad[0][1]))
+                         "in %d of the %d cuts after it (a whole record of seq %d..%d allowed), e.g. %s (%s): %s"
+                         % (item["name"], f, len(bad), len(after), item["from"], ceiling, bad[0][0],
+                            run.Kept(bad[0][0]), bad[0][1]))
             elif after:
                 seqs = sorted({hashes[x[5]] for cid in after for x in run.results[cid]["new_files"]
                                if x[1] == item["name"] and x[5] in hashes})
                 whole = run.Exhaustive(run.closes[f])
                 held = ("empty, as it was made" if not item["size"] else
                         "with its %d bytes, a whole record (seq %s, %d..%d allowed)"
-                        % (item["size"], Ranges(seqs), item["from"], run.SeqCeiling(item)))
+                        % (item["size"], Ranges(seqs), item["from"], ceiling))
                 self.Out(key, "behaves" if whole or not self.caveats.get(key) else "unseen",
                          "%s is visible %s, in every one of the %d cuts after the flush at entry %d%s"
                          % (item["name"], held, len(after), f,
@@ -265,6 +271,13 @@ class Judge:
     def Final(self):
         return next((b for b in self.boots if b["id"] == self.run.final), None)
 
+    def FinalSeq(self, name):
+        """The seq quilltest verify read of NAME back whole on the final state:
+        the newest record of NAME the medium took; 0 where none was read."""
+        final = self.Final()
+        ok = QuillVerified(final["log"], name) if final else None
+        return int(ok.group(2)) if ok else 0
+
     def Verify(self, kind):
         """The scenario's own question, asked of the booted media."""
         what, _sep, arg = kind.partition(":")
@@ -309,7 +322,7 @@ class Judge:
         floor = step["durable"]["from"] if step["durable"] else 1
         red = re.search(r"\[QUILL\] verify: FAIL — the volume has 0 file\(s\) called %s[^\n]*"
                         % re.escape(name), log)
-        ok = re.search(r"\[QUILL\] verify: PASS — %s fid=(\d+) seq=(\d+) bytes=16" % re.escape(name), log)
+        ok = QuillVerified(log, name)
         held = ok and (int(ok.group(2)) == int(want.group(1)) if exact and want
                        else int(ok.group(2)) >= floor)
         if red:
@@ -331,17 +344,24 @@ class Judge:
         the cut names, and past the Ledger's count (mount/mount.c); a create
         given less is given an id that was issued before. Asked only where it
         means something — a cut whose medium names more than its Ledger counts
-        — and at least one such cut must have been booted."""
+        — and at least one such cut must have been booted. On format v1 the
+        create is anchor_test's own, where its file is not found. A book's cut
+        that asks it bears the anchor's file on its ribbon ahead of the slot,
+        so anchor_test finds the file there and creates nothing: the boot is
+        asked a create of a file no medium of the run held (pc_nextfid,
+        persist write), and its id is the answer."""
         step = self.run.Step(step_name)
         m = re.search(r"fid=(\d+)", step["line"]) if step else None
         fid = m.group(1) if m else None
         seen, judged, ahead, blind = [], 0, 0, []
         book = self.base.get("format") == "v2"
         counter = "the slot it stands on" if book else "its Ledger"
+        asker = "persist write" if book else "anchor_test"
+        made = (r"\[PERSIST\] WROTE fid=(\d+)" if book else r"\[ANCHOR\] (?:WROTE\+ANCHORED fid=(\d+)|PASS)")
         for b in self.boots:
             if not b["why"].startswith("prefix"):
                 continue
-            a = re.search(r"\[ANCHOR\] (?:WROTE\+ANCHORED fid=(\d+)|PASS)", b["log"])
+            a = re.search(made, b["log"])
             if not a:
                 continue
             judged += 1
@@ -354,13 +374,14 @@ class Judge:
                 ahead += 1
             if a.group(1) and int(a.group(1)) < due:
                 seen.append("%s (%s): its medium names ids below %d, %s counts %d, and "
-                            "anchor_test was issued fid %s" % (b["id"], b["why"], due, counter, counted,
-                                                               a.group(1)))
+                            "%s was issued fid %s" % (b["id"], b["why"], due, counter, counted, asker,
+                                                      a.group(1)))
         if blind:
             self.Out("reissue", "harness", "volume-read gave no next file id for %d booted cut(s), "
                      "e.g. %s" % (len(blind), blind[0]))
         elif not judged:
-            self.Out("reissue", "fail", "no prefix cut of the anchor's epoch answered anchor_test")
+            self.Out("reissue", "fail", "no prefix cut of the anchor's epoch answered %s with a file it made"
+                     % asker if book else "no prefix cut of the anchor's epoch answered anchor_test")
         elif seen:
             self.Out("reissue", "defect", "%d of %d prefix cuts issued a file id their medium already "
                      "shows: %s" % (len(seen), judged, "; ".join(seen[:2])))
@@ -443,7 +464,7 @@ def CmdJudge(a):
     run = Run(a.dir)
     with open(os.path.join(a.dir, "base.check.json")) as fh:
         base = json.load(fh)
-    j = Judge(run, base, dict(x.split("=", 1) for x in a.caveat), a.path, a.waited, a.by_kind)
+    j = Judge(run, base, dict(x.split("=", 1) for x in a.caveat), a.path, a.waited, a.by_kind, a.medium)
     j.Acks()
     j.BaseFiles()
     j.Durable()
