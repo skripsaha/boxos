@@ -14,11 +14,16 @@
  *   -1     PROC_EXIT_KILLED  — terminated by another process via PROC_KILL.
  *   -2     PROC_EXIT_CRASHED — abnormal teardown (fault / kernel-forced) via
  *          process_destroy.
+ *   -3     PROC_EXIT_STACK_OVERFLOW — a crash whose cause is known: the
+ *          strand's stack used its whole reserve and touched the gap under
+ *          it. An observer that does not tell it from a crash reads it as
+ *          one (any negative but -1 is a crash).
  *
  * Plain integer literals, no type include — valid in both C and C++, kernel
  * and userspace. Defined ONCE here so the two sides can never drift.
  */
 #define PROC_EXIT_KILLED   (-1)
 #define PROC_EXIT_CRASHED  (-2)
+#define PROC_EXIT_STACK_OVERFLOW (-3)
 
 #endif /* BOXOS_PROC_EXIT_H */

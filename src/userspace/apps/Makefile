@@ -21,7 +21,7 @@ CXX     = x86_64-elf-g++
 #                userspace binary that links libbox.a.
 CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
          -fno-stack-protector -fno-pic -static -fno-ipa-ra \
-         -fcf-protection=full \
+         -fcf-protection=full -fstack-clash-protection \
          -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
          -fno-asynchronous-unwind-tables -fno-unwind-tables \
          -Wall -Wextra -g \
@@ -43,7 +43,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -fasynchronous-unwind-tables \
          -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
          -fno-stack-protector -fno-pic -static -fno-ipa-ra \
-         -fcf-protection=full \
+         -fcf-protection=full -fstack-clash-protection \
          -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
          -Wall -Wextra -g \
          -Werror=return-type \

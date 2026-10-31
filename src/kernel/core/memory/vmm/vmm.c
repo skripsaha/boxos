@@ -2231,7 +2231,6 @@ vmm_context_t *vmm_create_context(void)
     ctx->pml4 = (page_table_t *)vmm_phys_to_virt(pml4_phys);
     ctx->pml4_phys = pml4_phys;
     ctx->heap_start = VMM_USER_HEAP_BASE;
-    ctx->stack_top = VMM_USER_STACK_TOP;
 
     error_t pcid_err = pcid_alloc_safe(&ctx->pcid);
     if (pcid_err == ERR_PCID_EXHAUSTED)
@@ -2606,6 +2605,7 @@ void vmm_destroy_context(vmm_context_t *ctx)
     spin_unlock(&ctx->lock);
 
     uint16_t freed_pcid = ctx->pcid;
+    kfree(ctx->stacks);
     kfree(ctx);
     pcid_release(freed_pcid);
 
@@ -2783,6 +2783,50 @@ vmm_map_result_t vmm_map_page_with_keyid(vmm_context_t *ctx, uintptr_t virt_addr
     return result;
 }
 
+/* The books a first-time mapping of a page is entered in, and the same books
+ * when the page goes. Caller holds ctx->lock. */
+static void VmmNoteMapped(vmm_context_t *ctx, uint64_t flags)
+{
+    ctx->mapped_pages++;
+    if (flags & VMM_FLAG_USER)
+    {
+        ctx->user_pages++;
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.user_mapped_pages, 1);
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.total_mapped_pages, 1);
+    }
+    else
+    {
+        ctx->kernel_pages++;
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.kernel_mapped_pages, 1);
+        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.total_mapped_pages, 1);
+    }
+}
+
+static void VmmNoteUnmapped(vmm_context_t *ctx, uint64_t flags)
+{
+    if (flags & VMM_FLAG_USER)
+    {
+        if (ctx->user_pages > 0)
+            ctx->user_pages--;
+        if (global_stats.user_mapped_pages > 0)
+            atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.user_mapped_pages, 1);
+        if (global_stats.total_mapped_pages > 0)
+            atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.total_mapped_pages, 1);
+    }
+    else
+    {
+        if (ctx->kernel_pages > 0)
+            ctx->kernel_pages--;
+        if (global_stats.kernel_mapped_pages > 0)
+            atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.kernel_mapped_pages, 1);
+        if (global_stats.total_mapped_pages > 0)
+            atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.total_mapped_pages, 1);
+    }
+
+    if (ctx->mapped_pages > 0)
+        ctx->mapped_pages--;
+}
+
 vmm_map_result_t vmm_map_page(vmm_context_t *ctx, uintptr_t virt_addr,
                               uintptr_t phys_addr, uint64_t flags)
 {
@@ -2860,20 +2904,7 @@ vmm_map_result_t vmm_map_page(vmm_context_t *ctx, uintptr_t virt_addr,
     }
 
     *pte = vmm_make_pte(phys_addr, flags);
-
-    ctx->mapped_pages++;
-    if (flags & VMM_FLAG_USER)
-    {
-        ctx->user_pages++;
-        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.user_mapped_pages, 1);
-        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.total_mapped_pages, 1);
-    }
-    else
-    {
-        ctx->kernel_pages++;
-        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.kernel_mapped_pages, 1);
-        atomic_fetch_add_u64((volatile uint64_t *)&global_stats.total_mapped_pages, 1);
-    }
+    VmmNoteMapped(ctx, flags);
 
     spin_unlock(&ctx->lock);
 
@@ -2946,28 +2977,7 @@ bool vmm_unmap_page(vmm_context_t *ctx, uintptr_t virt_addr)
         return false;
     }
 
-    uint64_t flags = vmm_pte_to_flags(*pte);
-    if (flags & VMM_FLAG_USER)
-    {
-        if (ctx->user_pages > 0)
-            ctx->user_pages--;
-        if (global_stats.user_mapped_pages > 0)
-            atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.user_mapped_pages, 1);
-        if (global_stats.total_mapped_pages > 0)
-            atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.total_mapped_pages, 1);
-    }
-    else
-    {
-        if (ctx->kernel_pages > 0)
-            ctx->kernel_pages--;
-        if (global_stats.kernel_mapped_pages > 0)
-            atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.kernel_mapped_pages, 1);
-        if (global_stats.total_mapped_pages > 0)
-            atomic_fetch_sub_u64((volatile uint64_t *)&global_stats.total_mapped_pages, 1);
-    }
-
-    if (ctx->mapped_pages > 0)
-        ctx->mapped_pages--;
+    VmmNoteUnmapped(ctx, vmm_pte_to_flags(*pte));
 
     *pte = 0;
 
@@ -3302,7 +3312,7 @@ void *vmm_alloc_pages(vmm_context_t *ctx, size_t page_count, uint64_t flags)
     if (flags & VMM_FLAG_USER)
     {
         virt_base = vmm_find_free_region(ctx, vmm_pages_to_size(page_count),
-                                         VMM_USER_BASE, VMM_USER_STACK_TOP);
+                                         VMM_USER_BASE, VMM_USER_STACK_ZONE_BASE);
         if (!virt_base)
         {
             pmm_free(phys_pages, page_count);
@@ -3668,24 +3678,255 @@ int vmm_ensure_user_page(vmm_context_t *ctx, uintptr_t user_vaddr, bool writable
 }
 
 /*
+ * The stacks of an address space (vmm.h). The registry is a sorted array of
+ * [low, top) reserves under ctx->lock, so a lookup is a binary search and
+ * "this page lies in a live stack and nothing maps it" is decided and acted on
+ * in ONE hold of the lock that also guards the page tables the page goes into.
+ * That single hold is the whole argument:
+ *
+ *   • two first touches of one stack page — sibling strands on different
+ *     cores, or the strand and a kernel copy — are serialised by it; the
+ *     second finds the page present and installs nothing, so there is no
+ *     spare frame to hand back and no lost race to treat as a failure;
+ *   • a stack's release takes its entry out under the same lock before it
+ *     touches a single page, so no first touch can install a page after the
+ *     release has looked at that address;
+ *   • the frame comes from the PMM inside the hold, as vmm_map_page's table
+ *     allocation already does, so the order is ctx->lock then the buddy's
+ *     zone lock, the same one every mapper takes.
+ */
+static bool VmmStackFind(const vmm_context_t *ctx, uintptr_t addr, uint32_t *index)
+{
+    uint32_t lo = 0, hi = ctx->stack_count;
+    while (lo < hi)
+    {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (ctx->stacks[mid].top <= addr)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    *index = lo;
+    return lo < ctx->stack_count && ctx->stacks[lo].low <= addr;
+}
+
+bool vmm_stack_register(vmm_context_t *ctx, uintptr_t top)
+{
+    if (!ctx || !vmm_is_page_aligned(top) ||
+        top < CONFIG_USER_STACK_RESERVE + CONFIG_USER_STACK_GAP ||
+        top > VMM_USER_STACK_TOP)
+        return false;
+
+    uintptr_t low = top - CONFIG_USER_STACK_RESERVE;
+
+    for (;;)
+    {
+        spin_lock(&ctx->lock);
+
+        /* A stack's extent is its reserve and the gap under it. The registry's
+         * extents are disjoint and sorted, so only the first one that ends
+         * above this one's start can meet it, and `at` is where this one goes
+         * when it does not. */
+        uint32_t at;
+        VmmStackFind(ctx, low - CONFIG_USER_STACK_GAP, &at);
+        bool overlaps = at < ctx->stack_count &&
+                        ctx->stacks[at].low - CONFIG_USER_STACK_GAP < top;
+        if (overlaps)
+        {
+            spin_unlock(&ctx->lock);
+            return false;
+        }
+
+        if (ctx->stack_count < ctx->stack_capacity)
+        {
+            memmove(&ctx->stacks[at + 1], &ctx->stacks[at],
+                    (ctx->stack_count - at) * sizeof(VmmStack));
+            ctx->stacks[at].low = low;
+            ctx->stacks[at].top = top;
+            ctx->stack_count++;
+            spin_unlock(&ctx->lock);
+            return true;
+        }
+
+        uint32_t want = ctx->stack_capacity ? ctx->stack_capacity * 2 : 4;
+        spin_unlock(&ctx->lock);
+
+        VmmStack *bigger = kmalloc((size_t)want * sizeof(VmmStack));
+        if (!bigger)
+            return false;
+
+        spin_lock(&ctx->lock);
+        if (ctx->stack_capacity >= want)
+        {
+            spin_unlock(&ctx->lock);
+            kfree(bigger);
+            continue;
+        }
+        VmmStack *smaller = ctx->stacks;
+        if (smaller)
+            memcpy(bigger, smaller, (size_t)ctx->stack_count * sizeof(VmmStack));
+        ctx->stacks = bigger;
+        ctx->stack_capacity = want;
+        spin_unlock(&ctx->lock);
+        kfree(smaller);
+    }
+}
+
+bool vmm_stack_gap_hit(vmm_context_t *ctx, uintptr_t addr)
+{
+    if (!ctx)
+        return false;
+
+    spin_lock(&ctx->lock);
+    uint32_t at;
+    VmmStackFind(ctx, addr, &at);
+    bool hit = at < ctx->stack_count &&
+               addr >= ctx->stacks[at].low - CONFIG_USER_STACK_GAP &&
+               addr < ctx->stacks[at].low;
+    spin_unlock(&ctx->lock);
+    return hit;
+}
+
+/* Frames one pass of vmm_stack_release holds between clearing the entries and
+ * freeing what they named. Small enough for a kernel stack of four pages. */
+#define VMM_STACK_RELEASE_BATCH 128
+
+void vmm_stack_release(vmm_context_t *ctx, uintptr_t top)
+{
+    if (!ctx)
+        return;
+
+    spin_lock(&ctx->lock);
+    uint32_t at;
+    if (!VmmStackFind(ctx, top - VMM_PAGE_SIZE, &at) || ctx->stacks[at].top != top)
+    {
+        spin_unlock(&ctx->lock);
+        return;
+    }
+    uintptr_t low = ctx->stacks[at].low;
+    memmove(&ctx->stacks[at], &ctx->stacks[at + 1],
+            (ctx->stack_count - at - 1) * sizeof(VmmStack));
+    ctx->stack_count--;
+    spin_unlock(&ctx->lock);
+
+    /* The stack is no longer anyone's: nothing first-touches into it, so what
+     * is in its entries now is all there will ever be. Cleared a batch at a
+     * time so one shootdown makes many frames safe to free, and that shootdown
+     * covers only the pages from the first entry cleared to the last: a
+     * strand's stack is mostly never touched, and a span of more than 64
+     * pages costs every core on the cabin a whole flush instead of an invlpg
+     * a page. */
+    for (uintptr_t base = low; base < top;
+         base += (uintptr_t)VMM_STACK_RELEASE_BATCH * VMM_PAGE_SIZE)
+    {
+        uintptr_t frames[VMM_STACK_RELEASE_BATCH];
+        size_t held = 0, first = 0, last = 0;
+
+        size_t span = (top - base) / VMM_PAGE_SIZE;
+        if (span > VMM_STACK_RELEASE_BATCH)
+            span = VMM_STACK_RELEASE_BATCH;
+
+        spin_lock(&ctx->lock);
+        for (size_t i = 0; i < span; i++)
+        {
+            /* Every entry that holds a frame, present or not: one MemTag has
+             * revoked keeps its frame with PRESENT clear, and left behind it
+             * would leak the frame and refuse the next strand's first touch
+             * of the same address. */
+            pte_t *pte = vmm_get_pte(ctx, base + i * VMM_PAGE_SIZE);
+            if (!pte || *pte == 0)
+                continue;
+            if (held == 0)
+                first = i;
+            last = i;
+            frames[held++] = vmm_pte_to_phys(*pte);
+            VmmNoteUnmapped(ctx, vmm_pte_to_flags(*pte));
+            *pte = 0;
+        }
+        spin_unlock(&ctx->lock);
+
+        if (held == 0)
+            continue;
+        vmm_shootdown_pages(ctx, base + first * VMM_PAGE_SIZE, last - first + 1);
+        for (size_t i = 0; i < held; i++)
+            pmm_free((void *)frames[i], 1);
+    }
+}
+
+/* The first touch of a page of a live stack: a zeroed page, user, writable, no
+ * execute. 0 when `addr` is in no live stack, or when its entry is absent but
+ * not empty — MemTag's revoke clears PRESENT and keeps the frame
+ * (ClearPresentLeaf), and a first touch that filled that entry would hand the
+ * page back past the revoke and lose the frame; 1 when the page is there,
+ * brought in now or already; -1 when it is a stack's but no frame or page
+ * table could be had. Only an entry that was never filled, or was emptied by
+ * an unmap, is filled. */
+static int VmmStackFirstTouch(vmm_context_t *ctx, uintptr_t addr)
+{
+    uintptr_t page_addr = addr & ~(VMM_PAGE_SIZE - 1);
+    int answer = 1;
+
+    spin_lock(&ctx->lock);
+
+    uint32_t at;
+    if (!VmmStackFind(ctx, page_addr, &at))
+    {
+        spin_unlock(&ctx->lock);
+        return 0;
+    }
+
+    uint8_t level = 0;
+    pte_t *leaf = vmm_get_leaf_pte(ctx, page_addr, &level);
+    pte_t entry = leaf ? *leaf : 0;
+    if (!(entry & VMM_FLAG_PRESENT) && entry != 0)
+    {
+        answer = 0;
+    }
+    else if (!(entry & VMM_FLAG_PRESENT))
+    {
+        pte_t *pte = vmm_get_or_create_pte(ctx, page_addr);
+        void *phys = pte ? pmm_alloc_zero(1) : NULL;
+        if (!phys)
+        {
+            answer = -1;
+        }
+        else
+        {
+            uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER |
+                             VMM_FLAG_NO_EXECUTE;
+            *pte = vmm_make_pte((uintptr_t)phys, flags);
+            VmmNoteMapped(ctx, flags);
+        }
+    }
+
+    spin_unlock(&ctx->lock);
+
+    if (answer < 0)
+        kprintf("[VMM] a stack page at 0x%lx could not be had: no memory\n",
+                (unsigned long)page_addr);
+    return answer;
+}
+
+/*
  * VmmFirstTouch — the page a cabin's first touch of `addr` brings in, brought
  * in: the one place that decides what that is. The #PF handler asks it about
  * a fault the cabin took, and the kernel's copies into and out of cabin memory
  * (VmmUserCopyWindow) about a page the cabin has not touched yet, so a buffer
  * reads and writes the same whether its owner has been through it or not.
  *
- * Of what a program owns, only its heap grows on first touch — the window from
- * ctx->heap_start that CabinInfo hands it as heap_max_size. Stacks, Bay, Brook
- * and the hammock are mapped whole when they are made. The ring slot windows
- * grow on first touch as well, but they are the kernel's rings, not a buffer:
- * their producers bring them in (vmm_ensure_user_page), their own arm of the
- * fault handler covers a cabin that looks first, and a copy aimed at a slot
- * page nobody has brought in yet is refused.
+ * Of what a program owns, its heap and its stacks grow on first touch: the
+ * window from ctx->heap_start that CabinInfo hands it as heap_max_size, and
+ * the reserve of every live stack (VmmStackFirstTouch). Bay, Brook and the
+ * rest of the hammock are mapped whole when they are made. The ring slot
+ * windows grow on first touch as well, but they are the kernel's rings, not a
+ * buffer: their producers bring them in (vmm_ensure_user_page), their own arm
+ * of the fault handler covers a cabin that looks first, and a copy aimed at a
+ * slot page nobody has brought in yet is refused.
  *
  *    1  the page is there: brought in now, or already there — a sibling
  *       strand's fault or a copy on another core may get there first, and
- *       vmm_map_page refuses the second map under ctx->lock
- *    0  `addr` is not in the heap window
+ *       the second finds it present under ctx->lock
+ *    0  `addr` is in neither the heap window nor a live stack
  *   -1  it is, and the page could not be had
  *
  * A page that was not present has no TLB entry on any core, so bringing it in
@@ -3696,7 +3937,7 @@ int vmm_ensure_user_page(vmm_context_t *ctx, uintptr_t user_vaddr, bool writable
 static int VmmFirstTouch(vmm_context_t *ctx, uintptr_t addr)
 {
     if (addr < ctx->heap_start || addr >= ctx->heap_start + CONFIG_USER_HEAP_MAX_SIZE)
-        return 0;
+        return VmmStackFirstTouch(ctx, addr);
 
     uintptr_t page_addr = addr & ~(VMM_PAGE_SIZE - 1);
     if (vmm_is_mapped(ctx, page_addr))
@@ -4659,7 +4900,7 @@ void vmm_dump_context_stats(vmm_context_t *ctx)
     debug_printf("[VMM]   Kernel pages:    %zu\n", ctx->kernel_pages);
     debug_printf("[VMM]   User pages:      %zu\n", ctx->user_pages);
     debug_printf("[VMM]   Heap start:      0x%p\n", (void *)ctx->heap_start);
-    debug_printf("[VMM]   Stack top:       0x%p\n", (void *)ctx->stack_top);
+    debug_printf("[VMM]   Live stacks:     %u\n", ctx->stack_count);
 
     spin_unlock(&ctx->lock);
 }
@@ -5584,7 +5825,28 @@ typedef struct
 #define ET_EXEC 2
 #define EM_X86_64 62
 
-#define VMM_CABIN_MAX_CODE_SIZE (VMM_USER_STACK_TOP - VMM_CABIN_CODE_START - (64 * 1024))
+#define VMM_CABIN_MAX_CODE_SIZE (VMM_USER_STACK_ZONE_BASE - VMM_CABIN_CODE_START)
+
+/* A segment of an ELF image already in the cabin's address space: the frames
+ * the loader gave it and where they are mapped. */
+typedef struct
+{
+    uintptr_t virt;
+    uintptr_t phys;
+    size_t pages;
+} VmmLoadedSegment;
+
+/* An image that fails part-way gives back the segments it had mapped. They are
+ * unmapped first: freed while still mapped, the frames would be returned a
+ * second time when the cabin's address space is torn down. */
+static void VmmUnloadSegments(vmm_context_t *ctx, const VmmLoadedSegment *segments, int count)
+{
+    for (int k = 0; k < count; k++)
+    {
+        vmm_unmap_pages(ctx, segments[k].virt, segments[k].pages);
+        pmm_free((void *)segments[k].phys, segments[k].pages);
+    }
+}
 
 int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size,
                         uintptr_t *out_entry)
@@ -5695,11 +5957,7 @@ int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size,
     Elf64_Phdr *phdr_base = (Elf64_Phdr *)((uint8_t *)elf_virt + ehdr->e_phoff);
     size_t total_mapped_pages = 0;
 
-    struct
-    {
-        uintptr_t phys;
-        size_t pages;
-    } mapped_segs[MAX_LOAD_SEGMENTS];
+    VmmLoadedSegment mapped_segs[MAX_LOAD_SEGMENTS];
     int mapped_seg_count = 0;
 
     for (uint16_t i = 0; i < ehdr->e_phnum; i++)
@@ -5727,10 +5985,7 @@ int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size,
         {
             debug_printf("[VMM] ERROR: ELF segment %u data extends beyond binary (offset=0x%llx, filesz=0x%llx, binary_size=0x%llx)\n",
                          i, file_offset, filesz, (uint64_t)size);
-            for (int k = 0; k < mapped_seg_count; k++)
-            {
-                pmm_free((void *)mapped_segs[k].phys, mapped_segs[k].pages);
-            }
+            VmmUnloadSegments(ctx, mapped_segs, mapped_seg_count);
             return -ERR_INVALID_ARGUMENT;
         }
 
@@ -5738,10 +5993,7 @@ int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size,
         {
             debug_printf("[VMM] ERROR: ELF segment %u filesz (0x%llx) > memsz (0x%llx)\n",
                          i, filesz, memsz);
-            for (int k = 0; k < mapped_seg_count; k++)
-            {
-                pmm_free((void *)mapped_segs[k].phys, mapped_segs[k].pages);
-            }
+            VmmUnloadSegments(ctx, mapped_segs, mapped_seg_count);
             return -ERR_INVALID_ARGUMENT;
         }
 
@@ -5753,10 +6005,7 @@ int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size,
         if (vaddr_aligned < CABIN_CODE_START_ADDR)
         {
             debug_printf("[VMM] ERROR: Invalid ELF segment vaddr 0x%llx (below 0x%llx)\n", vaddr_aligned, (uint64_t)CABIN_CODE_START_ADDR);
-            for (int k = 0; k < mapped_seg_count; k++)
-            {
-                pmm_free((void *)mapped_segs[k].phys, mapped_segs[k].pages);
-            }
+            VmmUnloadSegments(ctx, mapped_segs, mapped_seg_count);
             return -ERR_INVALID_ARGUMENT;
         }
 
@@ -5764,10 +6013,7 @@ int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size,
         if (!segment_phys_ptr)
         {
             debug_printf("[VMM] ERROR: Failed to allocate %zu pages for segment %u\n", page_count, i);
-            for (int k = 0; k < mapped_seg_count; k++)
-            {
-                pmm_free((void *)mapped_segs[k].phys, mapped_segs[k].pages);
-            }
+            VmmUnloadSegments(ctx, mapped_segs, mapped_seg_count);
             return -1;
         }
         uintptr_t segment_phys = (uintptr_t)segment_phys_ptr;
@@ -5799,15 +6045,13 @@ int vmm_map_code_region(vmm_context_t *ctx, uintptr_t code_phys, uint64_t size,
         {
             debug_printf("[VMM] ERROR: Failed to map segment %u: %s\n", i, result.error_msg);
             pmm_free((void *)segment_phys, page_count);
-            for (int k = 0; k < mapped_seg_count; k++)
-            {
-                pmm_free((void *)mapped_segs[k].phys, mapped_segs[k].pages);
-            }
+            VmmUnloadSegments(ctx, mapped_segs, mapped_seg_count);
             return -1;
         }
 
         if (mapped_seg_count < MAX_LOAD_SEGMENTS)
         {
+            mapped_segs[mapped_seg_count].virt = vaddr_aligned;
             mapped_segs[mapped_seg_count].phys = segment_phys;
             mapped_segs[mapped_seg_count].pages = page_count;
             mapped_seg_count++;
@@ -5952,14 +6196,18 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
     }
     if (ctx && user)
     {
-        // ASLR: use per-process stack top from VMM context
-        uint64_t stack_top = ctx->stack_top;
-        uint64_t guard_base = stack_top - (CONFIG_USER_STACK_TOTAL_PAGES * VMM_PAGE_SIZE);
-        uint64_t guard_end = guard_base + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE);
-
-        if (fault_addr >= guard_base && fault_addr < guard_end)
+        /* A stack that has used its whole reserve lands here, in the gap below
+         * it. Said on the record: debug_printf compiles to nothing in release,
+         * and a program that recursed too deep would otherwise die as an
+         * anonymous page fault. The death is recorded as this and not as any
+         * crash (PROC_EXIT_STACK_OVERFLOW), and the generic dump follows. */
+        if (current && vmm_stack_gap_hit(ctx, fault_addr))
         {
-            debug_printf("[VMM] ERROR: Stack overflow detected (guard page access at 0x%llx)\n", fault_addr);
+            kprintf("[EXCEPTION] PID %u: its stack ran out — %lu MiB, the gap below it "
+                    "touched at 0x%lx\n", current->pid,
+                    (unsigned long)(CONFIG_USER_STACK_RESERVE >> 20),
+                    (unsigned long)fault_addr);
+            current->stack_overran = 1;
             return -1;
         }
 

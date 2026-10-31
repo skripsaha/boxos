@@ -11375,7 +11375,7 @@ void Phase61()
         Check(threw, "phase61 stold junk → invalid_argument");
     }
 
-    // stack probe: huge precision must not fault the 64KB stack's guard page
+    // stack probe: huge precision must stay inside the stack
     {
         static char big[10240];
         auto s1 = std::to_chars(big, big + sizeof(big), __LDBL_DENORM_MIN__, F::scientific, 5000);

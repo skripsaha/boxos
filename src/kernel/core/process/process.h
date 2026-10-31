@@ -268,14 +268,19 @@ typedef struct process_t
 
     /* Strands (P4) — set only for a strand spawned via strand_spawn into an
      * EXISTING cabin.  hammock_base is the base VA of this strand's slot in
-     * the cabin's Hammock window (see cabin_layout.h); user_stack_phys is
-     * the PMM allocation backing its user stack, freed on strand exit.
-     * Both stay 0 for the main strand, whose stack lives at the top of the
+     * the cabin's Hammock window (see cabin_layout.h); its user stack is
+     * registered in the cabin's address space (vmm_stack_register) and comes
+     * in as the strand touches it, and goes at strand exit.  hammock_base
+     * stays 0 for the main strand, whose stack lives at the top of the
      * address space and is reclaimed by vmm_destroy_context at cabin
      * teardown.  process_user_ssp_va_for derives the per-strand CET shadow
      * stack VA from hammock_base so sibling strands never collide. */
     uintptr_t         hammock_base;
-    uintptr_t         user_stack_phys;
+
+    /* Set by the fault handler when this strand's stack ran into the gap
+     * below it. process_destroy records the death as PROC_EXIT_STACK_OVERFLOW
+     * instead of PROC_EXIT_CRASHED. */
+    volatile uint8_t  stack_overran;
 
     /* Zombie-until-join (std::thread conformance). When a strand is spawned
      * JOINABLE (strand_spawn joinable=1, used by std::thread), this is 1 and the

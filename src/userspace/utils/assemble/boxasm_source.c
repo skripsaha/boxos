@@ -7,13 +7,17 @@
 #include "box/memory.h"
 #include "box/string.h"
 
+#include "boxos_limits.h"
+
 #define BOXASM_SHOWN_LINE 120u
 
-/* The stack the work may take: of the 64 KiB a BoxOS program has, what the
- * command takes before the work begins, what an inner construct takes before
- * it is the one named (BOXASM_STACK_OWN), and what one more level and a
- * refusal take after the last look are left over. */
-#define BOXASM_STACK_BUDGET (40u << 10)
+/* The stack the work may take: of the BOXOS_USER_STACK_RESERVE a BoxOS
+ * program's stack may grow to, all but BOXASM_STACK_ROOM — what the command
+ * takes before the work begins, what an inner construct takes before it is
+ * the one named (BOXASM_STACK_OWN), and what one more level and a refusal take
+ * after the last look. */
+#define BOXASM_STACK_ROOM   (24u << 10)
+#define BOXASM_STACK_BUDGET (BOXOS_USER_STACK_RESERVE - BOXASM_STACK_ROOM)
 #define BOXASM_STACK_OWN    (4u << 10)
 
 const char *const BoxAsmSectionNames[BOXASM_SECTION_COUNT] = {

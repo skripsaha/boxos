@@ -683,7 +683,7 @@ static int lamp_setup(void)
     /* The frame is the screen's size, which is the screen's business — 762 KB
      * on the widest console this ABI can address (255 x 255 cells of twelve
      * bytes; the 193 KB this once claimed is a 240x67 screen, not the widest
-     * one), and so it is heap and never the 64 KB user stack. calloc, so the
+     * one), and so it is heap and never the user stack. calloc, so the
      * three pad bytes of every cell are zero once and stay zero: the paint op
      * copies them onto the wire as they lie. */
     g_frame      = (TextCell *)calloc((size_t)g_lamp.rows * (size_t)g_lamp.cols,

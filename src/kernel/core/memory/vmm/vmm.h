@@ -5,6 +5,8 @@
 #include "error.h"
 #include "cabin_layout.h"
 #include "boxos_limits.h"   /* MAX_PROCESSES — the shadow bunk row is cut to it */
+#include "kernel_config.h"  /* CONFIG_USER_STACK_* — what the main stack's zone is cut from */
+#include "aslr.h"           /* ASLR_STACK_RANGE — how far below the top a stack may sit */
 
 #define VMM_PAGE_SIZE           4096
 #define VMM_PAGE_MASK           0xFFFFFFFFFFFFF000ULL
@@ -72,6 +74,20 @@
 #define VMM_USER_BASE           VMM_CABIN_CODE_START   // flat binary entry point (NOT ELF!)
 #define VMM_USER_STACK_TOP      0x00007FFFFFFFE000ULL  // ~128TB user space top
 #define VMM_USER_HEAP_BASE      CABIN_HEAP_BASE        // 256MB: fixed heap base (above identity map)
+
+/* The main stack's zone, from the top of the address space down. Its top is
+ * VMM_USER_STACK_TOP less a random offset below ASLR_STACK_RANGE, and from
+ * there the stack's reserve reaches CONFIG_USER_STACK_RESERVE lower. These
+ * name the lowest the reserve can start at over every offset, the gap that is
+ * never mapped under it, and under that the six pages of the CET shadow
+ * stack (low guard, four pages, high guard). The shadow stack sits below the
+ * LOWEST reach of the data stack, not at one fixed distance from the top, so
+ * no offset can put the two on top of each other. Everything a program may
+ * map of its own — code, heap, Bay, Brook, the hammock — lies below the zone. */
+#define VMM_MAIN_STACK_LOW_MIN      (VMM_USER_STACK_TOP - ASLR_STACK_RANGE - CONFIG_USER_STACK_RESERVE)
+#define VMM_MAIN_SSP_ZONE_TOP       (VMM_MAIN_STACK_LOW_MIN - CONFIG_USER_STACK_GAP)
+#define VMM_MAIN_SSP_ZONE_SIZE      (6 * 4096ULL)
+#define VMM_USER_STACK_ZONE_BASE    (VMM_MAIN_SSP_ZONE_TOP - VMM_MAIN_SSP_ZONE_SIZE)
 
 #define VMM_FLAG_PRESENT        (1ULL << 0)
 #define VMM_FLAG_WRITABLE       (1ULL << 1)
@@ -160,6 +176,14 @@ typedef enum {
     VMM_LAM_U57  = 2,
 } vmm_lam_mode_t;
 
+/* A user stack that is alive in an address space: the reserve [low, top) whose
+ * pages come in on first touch. The gap below it, [low - CONFIG_USER_STACK_GAP,
+ * low), is never mapped. */
+typedef struct {
+    uintptr_t low;
+    uintptr_t top;
+} VmmStack;
+
 typedef struct {
     page_table_t* pml4;
     uintptr_t pml4_phys;
@@ -171,7 +195,14 @@ typedef struct {
     size_t kernel_pages;
     size_t user_pages;
     uintptr_t heap_start;
-    uintptr_t stack_top;
+
+    /* The stacks alive here, sorted by low, one per strand. Guarded by `lock`,
+     * the lock that guards the page tables a stack's pages go into, so that
+     * "this address is in a live stack and nothing maps it" is one fact read
+     * and acted on in one hold. See vmm_stack_register. */
+    VmmStack *stacks;
+    uint32_t stack_count;
+    uint32_t stack_capacity;
 } vmm_context_t;
 
 typedef struct {
@@ -272,6 +303,26 @@ void vmm_free_pages(vmm_context_t* ctx, void* virt_addr, size_t page_count);
 uintptr_t vmm_virt_to_phys(vmm_context_t* ctx, uintptr_t virt_addr);
 bool vmm_is_mapped(vmm_context_t* ctx, uintptr_t virt_addr);
 uint64_t vmm_get_page_flags(vmm_context_t* ctx, uintptr_t virt_addr);
+
+/* The stacks of an address space. A user stack is not mapped when it is made:
+ * vmm_stack_register reserves [top - CONFIG_USER_STACK_RESERVE, top) and the
+ * first touch of each page brings it in — zeroed, user, writable, NX — through
+ * the rule the heap's first touch follows (VmmFirstTouch), so a program's own
+ * fault and a kernel copy into the same page see the same stack. The
+ * CONFIG_USER_STACK_GAP below the reserve is never mapped, and
+ * vmm_stack_gap_hit says whether an address fell in one.
+ *
+ * vmm_stack_release ends a stack that dies before its address space does (a
+ * strand's): it takes the stack out of the registry FIRST, and only then
+ * unmaps and frees what came in — so a sibling's fault can never install a
+ * page into a stack that is being taken apart. A main stack is not released:
+ * vmm_destroy_context frees every page of the space, stack included.
+ *
+ * `top` is page-aligned and the reserve may not overlap a live stack.
+ * vmm_stack_register returns false for a bad `top`, an overlap, or no memory. */
+bool vmm_stack_register(vmm_context_t* ctx, uintptr_t top);
+void vmm_stack_release(vmm_context_t* ctx, uintptr_t top);
+bool vmm_stack_gap_hit(vmm_context_t* ctx, uintptr_t addr);
 
 /* Ensure that the page covering `user_vaddr` is mapped into `ctx` as user memory
  * (NX, and writable when `writable`). Unmapped → allocate a zeroed phys page and

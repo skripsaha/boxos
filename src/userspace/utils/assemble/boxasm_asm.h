@@ -290,11 +290,12 @@ typedef struct {
 /* Whether the work has gone too deep into itself to go one level further,
  * for a construct whose nesting began at Start. A source nests macro calls,
  * %defines, parentheses and names defined by names as deep as it likes, each
- * level a frame on the stack, and a BoxOS program has 64 KiB of stack with a
- * guard page past them: the stack used is what is measured, since what a
- * level costs is the compiler's to say. A construct that itself took little
- * of it is not the one to name: it goes on, and what nests around it refuses
- * at its next level. Start is Asm->StackBase for the outermost. */
+ * level a frame on the stack, and a BoxOS program's stack grows to
+ * BOXOS_USER_STACK_RESERVE with a gap that is never mapped below it: the
+ * stack used is what is measured, since what a level costs is the compiler's
+ * to say. A construct that itself took little of it is not the one to name:
+ * it goes on, and what nests around it refuses at its next level. Start is
+ * Asm->StackBase for the outermost. */
 int  BoxAsmTooDeep(const BoxAsmAssembler *Asm, uintptr_t Start);
 int  BoxAsmFail(BoxAsmAssembler *Asm, const BoxAsmLocation *Where, const char *Text,
                 const char *Name);

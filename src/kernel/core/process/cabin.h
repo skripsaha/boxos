@@ -88,7 +88,7 @@ typedef struct cabin_t
 
     /* ASLR: per-cabin randomized addresses (set at creation time). */
     uint64_t aslr_heap_base;
-    uint64_t aslr_stack_top;
+    uint64_t aslr_stack_top;    /* main stack: reserve of CONFIG_USER_STACK_RESERVE below it */
     uint64_t aslr_buf_heap_base;
     uint64_t buf_heap_next;
 
@@ -115,13 +115,20 @@ typedef struct cabin_t
     spinlock_t  brook_lock;
     uint64_t    brook_va_next;
 
-    /* Hammock cursor — bump-allocates one fixed-size VA slot per spawned
-     * strand for its user stack + CET shadow stack + per-strand IPC rings +
-     * StrandInfo TLS block (see cabin_layout.h + strand_rings.c). The main
-     * strand does NOT consume a slot. Guarded by hammock_lock so concurrent
-     * strand_spawn from sibling strands never hand out the same VA. Mirrors
-     * bay_va_next / brook_va_next. */
+    /* Hammock slots — one fixed-size VA slot per spawned strand for its user
+     * stack + CET shadow stack + per-strand IPC rings + StrandInfo TLS block
+     * (see cabin_layout.h + strand_rings.c). The main strand does NOT consume
+     * a slot. hammock_va_next is the bump cursor over never-used slots
+     * (mirrors bay_va_next / brook_va_next); a slot a strand has left, every
+     * page of it unmapped, is pushed on hammock_free (hammock_free_count of
+     * hammock_free_capacity entries, kmalloc'd, grown by doubling) and spawn
+     * takes from there before it bumps. All four guarded by hammock_lock, so
+     * concurrent strand_spawn / strand exit from sibling strands never hand
+     * out the same VA. */
     uint64_t    hammock_va_next;
+    uint64_t   *hammock_free;
+    uint32_t    hammock_free_count;
+    uint32_t    hammock_free_capacity;
     spinlock_t  hammock_lock;
 
     /*
@@ -145,6 +152,20 @@ _Static_assert(sizeof(cabin_t) < 4096, "cabin_t must fit in one page");
  * Returns NULL on any allocation failure (caller must abort process_create).
  */
 cabin_t *cabin_create(uint32_t pid, const char *tags);
+
+/*
+ * cabin_hammock_take — the base VA of a hammock slot for a new strand: a slot
+ * given back if there is one, else the next never-used one. Returns false when
+ * the window is full of strands alive at once.
+ *
+ * cabin_hammock_give_back — a strand is gone and every page of its slot is
+ * unmapped; the slot is the next spawn's. The list that holds it grows with
+ * the most slots ever waiting at once. If it cannot grow, a slot at the top of
+ * the cursor lowers the cursor instead, and any other is lost to this cabin
+ * (its address space only — nothing is mapped there) and said so.
+ */
+bool cabin_hammock_take(cabin_t *cabin, uint64_t *slot_base);
+void cabin_hammock_give_back(cabin_t *cabin, uint64_t slot_base);
 
 /*
  * cabin_destroy — release all shared resources owned by this cabin.

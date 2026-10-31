@@ -211,11 +211,12 @@
  * Hammock name) to also hold the strand's OWN IPC rings + StrandInfo TLS
  * block — so one Hammock slot is now a strand's entire private footprint
  * (one window, one cursor, one slot/strand). The main strand keeps its
- * top-of-AS stack (cabin->aslr_stack_top), the fixed user-SSP region just
- * below VMM_USER_STACK_TOP, and the fixed-VA cabin IPC rings, unchanged.
+ * top-of-AS stack (cabin->aslr_stack_top), the fixed user-SSP region below
+ * its lowest possible reserve and gap, and the fixed-VA cabin IPC rings,
+ * unchanged.
  *
  * Anchored at CABIN_BROOK_END and capped ~60 GiB below the main strand's
- * stack/SSP region near VMM_USER_STACK_TOP. The kernel bump-allocates one
+ * stack/SSP zone near VMM_USER_STACK_TOP. The kernel bump-allocates one
  * fixed-size SLOT per strand from this window via the per-cabin cursor
  * cabin->hammock_va_next — the same idiom Bay/Brook use (bay_va_next /
  * brook_va_next).
@@ -224,29 +225,36 @@
  * P5a "balanced" geometry (per-strand rings sized for light workers AND
  * moderate strand-servers; capacity is a memory/throughput knob in the ring
  * header, never a correctness boundary — a full ring just back-pressures):
- *   [guard 0]
- *   [user stack 1..16]          (CONFIG_USER_STACK_PAGES, P4-identical)
- *   [mid guard 17]
- *   [CET user SSP 18..21]       (4 pages, P4-identical)
- *   [guard 22]
- *   [Pocket hdr 23][Result hdr 24][Touch hdr 25][guard 26]
- *   [Pocket slots 27..30][Result slots 31..34][Touch slots 35..36][guard 37]
- *   [C++ neg-TLS page 38 (eager-mapped Ф20b)][StrandInfo 39..42][guard 43]
- * Guards are unmapped VA gaps — any access faults. The stack/SSP offsets are
- * BIT-FOR-BIT identical to the P4 layout (so process_strand_ssp_base math is
- * preserved); the ring/StrandInfo page offsets are derived and asserted in
- * strand_rings.c (where kernel_config.h is in scope). 256 KiB/slot over a
- * ~1 TiB window leaves room for far more strands than any cabin needs. */
+ *   [gap 0..255]                (BOXOS_USER_STACK_GAP, never mapped)
+ *   [user stack 256..2303]      (BOXOS_USER_STACK_RESERVE, filled in on first touch)
+ *   [mid guard 2304]
+ *   [CET user SSP 2305..2308]   (4 pages)
+ *   [guard 2309]
+ *   [Pocket hdr 2310][Result hdr 2311][Touch hdr 2312][guard 2313]
+ *   [Pocket slots 2314..2317][Result slots 2318..2321][Touch slots 2322..2323][guard 2324]
+ *   [C++ neg-TLS page 2325 (eager-mapped Ф20b)][StrandInfo 2326..2329][guard 2330]
+ *   [unused 2331..2559]
+ * The gap and the guards are unmapped VA — any access faults. The stack is the
+ * only part of a slot that is not mapped whole when the slot is made: its
+ * pages come in as the strand touches them (see the stack registry in vmm.h),
+ * so a slot costs a strand the 24 pages that are not stack until it recurses.
+ * The ring/StrandInfo page offsets are derived and asserted in strand_rings.c
+ * (where kernel_config.h is in scope). The slot is rounded up to a whole
+ * number of 2 MiB so no two slots share a page table; 10 MiB a slot over a
+ * 1 TiB window is ~100k slots, and a slot a strand has left is handed to the
+ * next strand that spawns, so the window bounds strands alive at once, not
+ * strands spawned over the cabin's life. */
 #define CABIN_HAMMOCK_BASE             CABIN_BROOK_END
 #define CABIN_HAMMOCK_END              0x00007FF000000000ULL
 #define CABIN_HAMMOCK_SIZE             (CABIN_HAMMOCK_END - CABIN_HAMMOCK_BASE)
-#define CABIN_HAMMOCK_SLOT_PAGES       64u
+#define CABIN_HAMMOCK_SLOT_PAGES       2560u
 #define CABIN_HAMMOCK_SLOT_SIZE        (CABIN_HAMMOCK_SLOT_PAGES * 0x1000ULL)
-/* Low guard occupies page 0 of the slot; the user stack starts at page 1.
- * The CET-SSP and ring/StrandInfo page offsets depend on
- * CONFIG_USER_STACK_PAGES, so they are derived in process.c / strand_rings.c
- * (where kernel_config.h is in scope), not here. */
-#define CABIN_HAMMOCK_STACK_PAGE_OFF   1u
+/* The gap fills the first pages of the slot and the stack starts right above
+ * it. The CET-SSP and ring/StrandInfo page offsets follow the stack, so they
+ * are derived in process.c / strand_rings.c (where kernel_config.h is in
+ * scope), not here. */
+#define CABIN_HAMMOCK_STACK_PAGE_OFF   (BOXOS_USER_STACK_GAP / 0x1000u)
+#define CABIN_HAMMOCK_STACK_PAGES      (BOXOS_USER_STACK_RESERVE / 0x1000u)
 
 #define USER_CODE_ENTRY_POINT          CABIN_CODE_START_ADDR
 

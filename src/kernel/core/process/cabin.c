@@ -200,6 +200,9 @@ void cabin_destroy(cabin_t *cabin)
         MemTagClearByPhys(cabin->touch_ring_phys, "purpose:touch-ring");
     }
 
+    kfree(cabin->hammock_free);
+    cabin->hammock_free = NULL;
+
     if (cabin->tag_overflow_ids)
     {
         kfree(cabin->tag_overflow_ids);
@@ -264,6 +267,77 @@ void cabin_destroy(cabin_t *cabin)
     }
 
     kfree(cabin);
+}
+
+bool cabin_hammock_take(cabin_t *cabin, uint64_t *slot_base)
+{
+    bool taken = true;
+
+    spin_lock(&cabin->hammock_lock);
+    if (cabin->hammock_free_count > 0)
+    {
+        *slot_base = cabin->hammock_free[--cabin->hammock_free_count];
+    }
+    else if (cabin->hammock_va_next + CABIN_HAMMOCK_SLOT_SIZE <= CABIN_HAMMOCK_END)
+    {
+        *slot_base = cabin->hammock_va_next;
+        cabin->hammock_va_next += CABIN_HAMMOCK_SLOT_SIZE;
+    }
+    else
+    {
+        taken = false;
+    }
+    spin_unlock(&cabin->hammock_lock);
+    return taken;
+}
+
+void cabin_hammock_give_back(cabin_t *cabin, uint64_t slot_base)
+{
+    for (;;)
+    {
+        spin_lock(&cabin->hammock_lock);
+
+        if (cabin->hammock_free_count < cabin->hammock_free_capacity)
+        {
+            cabin->hammock_free[cabin->hammock_free_count++] = slot_base;
+            spin_unlock(&cabin->hammock_lock);
+            return;
+        }
+
+        uint32_t want = cabin->hammock_free_capacity ? cabin->hammock_free_capacity * 2 : 16;
+        spin_unlock(&cabin->hammock_lock);
+
+        uint64_t *bigger = kmalloc((size_t)want * sizeof(uint64_t));
+        if (!bigger)
+        {
+            spin_lock(&cabin->hammock_lock);
+            if (slot_base + CABIN_HAMMOCK_SLOT_SIZE == cabin->hammock_va_next)
+            {
+                cabin->hammock_va_next = slot_base;
+                spin_unlock(&cabin->hammock_lock);
+                return;
+            }
+            spin_unlock(&cabin->hammock_lock);
+            kprintf("[STRAND] hammock slot 0x%lx not given back: no memory for the list; "
+                    "the cabin's address space keeps it unused\n", (unsigned long)slot_base);
+            return;
+        }
+
+        spin_lock(&cabin->hammock_lock);
+        if (cabin->hammock_free_capacity >= want)
+        {
+            spin_unlock(&cabin->hammock_lock);
+            kfree(bigger);
+            continue;
+        }
+        uint64_t *smaller = cabin->hammock_free;
+        if (smaller)
+            memcpy(bigger, smaller, (size_t)cabin->hammock_free_count * sizeof(uint64_t));
+        cabin->hammock_free = bigger;
+        cabin->hammock_free_capacity = want;
+        spin_unlock(&cabin->hammock_lock);
+        kfree(smaller);
+    }
 }
 
 void cabin_ref_inc(cabin_t *cabin)

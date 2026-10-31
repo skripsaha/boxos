@@ -454,20 +454,30 @@ static bool process_init_context_base(process_t *proc)
     return true;
 }
 
-/* Unmap + free a strand's hammock user stack.  No-op for the main strand
- * (user_stack_phys == 0), whose stack lives at the top of the address
- * space and is reclaimed wholesale by vmm_destroy_context at cabin
- * teardown.  Used by strand_spawn error-unwind and process cleanup. */
-static void process_free_strand_stack(process_t *proc)
+/* Top of a strand's user stack: the stack runs from the page above the gap at
+ * the bottom of the slot, CONFIG_USER_STACK_PAGES of it. */
+static uint64_t process_strand_stack_top(const process_t *proc)
 {
-    if (!proc || proc->user_stack_phys == 0 || !proc->cabin)
+    return proc->hammock_base +
+           (uint64_t)(CABIN_HAMMOCK_STACK_PAGE_OFF + CONFIG_USER_STACK_PAGES) * VMM_PAGE_SIZE;
+}
+
+/* End a strand's hold on its hammock slot: the stack's pages go (and the
+ * stack with them from the registry), and then the slot is the cabin's to
+ * hand to the next strand. The slot goes back LAST and only after every other
+ * page of it is unmapped — the callers run strand_rings_destroy and
+ * cet_process_destroy first — because the next strand maps its rings and
+ * shadow stack at the same addresses. No-op for the main strand
+ * (hammock_base == 0), whose stack lives at the top of the address space and
+ * is reclaimed wholesale by vmm_destroy_context at cabin teardown.  Used by
+ * strand_spawn error-unwind and process cleanup. */
+static void process_release_strand_slot(process_t *proc)
+{
+    if (!proc || proc->hammock_base == 0 || !proc->cabin)
         return;
-    uint64_t stack_data_base =
-        proc->hammock_base + (uint64_t)CABIN_HAMMOCK_STACK_PAGE_OFF * VMM_PAGE_SIZE;
-    for (uint32_t i = 0; i < CONFIG_USER_STACK_PAGES; i++)
-        vmm_unmap_page(proc->cabin->vmm, stack_data_base + (uint64_t)i * VMM_PAGE_SIZE);
-    pmm_free((void *)proc->user_stack_phys, CONFIG_USER_STACK_PAGES);
-    proc->user_stack_phys = 0;
+    vmm_stack_release(proc->cabin->vmm, process_strand_stack_top(proc));
+    cabin_hammock_give_back(proc->cabin, proc->hammock_base);
+    proc->hammock_base = 0;
 }
 
 process_t *process_create(const char *tags)
@@ -837,10 +847,12 @@ void process_destroy(process_t *proc)
      * from rings its siblings still use. */
 
     /* Genuine-fault / kernel-forced teardown. When this is the FIRST cleanup
-     * (a real crash) it publishes process:died with PROC_EXIT_CRASHED; when a
+     * (a real crash) it publishes process:died with PROC_EXIT_CRASHED, or with
+     * PROC_EXIT_STACK_OVERFLOW when the fault handler named that cause; when a
      * SysProcKill already cleaned this strand (kill or self-exit), the call
      * no-ops on touch_cleaned and that earlier disposition stands. */
-    TouchCleanupProcess(proc, PROC_EXIT_CRASHED);
+    TouchCleanupProcess(proc, proc->stack_overran ? PROC_EXIT_STACK_OVERFLOW
+                                                  : PROC_EXIT_CRASHED);
 
     /* strand:exited — pairs with strand:spawned.  Fires on every strand
      * exit (main or spawned).  Cabin teardown itself happens later, when
@@ -1009,31 +1021,19 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     if (was_elf)
         pmm_free(code_phys, page_count);
 
-    void *user_stack_phys = pmm_alloc(CONFIG_USER_STACK_TOTAL_PAGES);
-    if (!user_stack_phys)
-    {
-        debug_printf("[PROCESS] ERROR: Failed to allocate user stack\n");
-        pmm_free(code_phys, page_count);
-        return -1;
-    }
+    /* From here the code is the address space's: a flat binary's frames are
+     * mapped and owned by that mapping, an ELF's segments were copied into
+     * frames of their own and the image above was handed back. Neither is
+     * code_phys any longer, so no failure below frees it — the cabin's
+     * teardown frees what is mapped, and a second free of code_phys is a
+     * buddy double-free. */
 
+    /* The stack is registered and nothing is mapped: the first push faults the
+     * first page in, zeroed, and the reserve fills as far as the program goes. */
     uint64_t stack_top = proc->cabin->aslr_stack_top;
-
-    uint64_t guard_page_base = stack_top - (CONFIG_USER_STACK_TOTAL_PAGES * VMM_PAGE_SIZE);
-    uint64_t stack_data_base = guard_page_base + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE);
-
-    vmm_map_result_t map_result = vmm_map_pages(
-        proc->cabin->vmm,
-        stack_data_base,
-        (uintptr_t)user_stack_phys + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE),
-        CONFIG_USER_STACK_PAGES,
-        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER);
-
-    if (!map_result.success)
+    if (!vmm_stack_register(proc->cabin->vmm, stack_top))
     {
-        debug_printf("[PROCESS] ERROR: Failed to map user stack: %s\n", map_result.error_msg);
-        pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
-        pmm_free(code_phys, page_count);
+        kprintf("[PROCESS] ERROR: could not register the user stack of PID %u\n", proc->pid);
         return -1;
     }
 
@@ -1042,8 +1042,6 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     if (!heap_phys)
     {
         debug_printf("[PROCESS] ERROR: Failed to allocate initial heap pages\n");
-        pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
-        pmm_free(code_phys, page_count);
         return -1;
     }
 
@@ -1058,13 +1056,10 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     {
         debug_printf("[PROCESS] ERROR: Failed to map user heap: %s\n", heap_map.error_msg);
         pmm_free(heap_phys, CONFIG_USER_HEAP_INITIAL_PAGES);
-        pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
-        pmm_free(code_phys, page_count);
         return -1;
     }
 
     proc->cabin->vmm->heap_start = heap_start;
-    proc->cabin->vmm->stack_top  = stack_top;
 
     CabinInfo *ci = (CabinInfo *)vmm_phys_to_virt(proc->cabin->cabin_info_phys);
     ci->magic       = CABIN_INFO_MAGIC;
@@ -1195,18 +1190,13 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         return NULL;
     }
 
-    /* Carve one hammock slot for this strand's user stack + CET SSP.  The
-     * cursor is bump-allocated under hammock_lock so concurrent spawns from
-     * sibling strands never hand out the same VA (P2 made the VMM safe for
+    /* Take one hammock slot for this strand's user stack + CET SSP + rings.
+     * A slot an earlier strand left comes first, then the next never-used one;
+     * either way it is under hammock_lock, so concurrent spawns from sibling
+     * strands never hand out the same VA (P2 made the VMM safe for
      * intra-cabin concurrency). */
-    spin_lock(&cabin->hammock_lock);
-    uint64_t slot_base = cabin->hammock_va_next;
-    bool hammock_ok = (slot_base + CABIN_HAMMOCK_SLOT_SIZE) <= CABIN_HAMMOCK_END;
-    if (hammock_ok)
-        cabin->hammock_va_next = slot_base + CABIN_HAMMOCK_SLOT_SIZE;
-    spin_unlock(&cabin->hammock_lock);
-
-    if (!hammock_ok)
+    uint64_t slot_base;
+    if (!cabin_hammock_take(cabin, &slot_base))
     {
         kprintf("[STRAND] ERROR: hammock window exhausted (PID %u)\n", proc->pid);
         kfree(proc->context.fpu_state);
@@ -1220,15 +1210,15 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
 
     proc->hammock_base = slot_base;
 
-    uint64_t stack_data_base =
-        slot_base + (uint64_t)CABIN_HAMMOCK_STACK_PAGE_OFF * VMM_PAGE_SIZE;
-    uint64_t stack_top = stack_data_base + (uint64_t)CONFIG_USER_STACK_PAGES * VMM_PAGE_SIZE;
-
-    void *ustack_phys = pmm_alloc(CONFIG_USER_STACK_PAGES);
-    if (!ustack_phys)
+    /* The stack is registered, not mapped: its pages come in zeroed as the
+     * strand touches them (vmm_stack_register), up to the reserve, with the
+     * gap at the bottom of the slot never mapped. Mapped NX like every other
+     * data page of a program. */
+    uint64_t stack_top = process_strand_stack_top(proc);
+    if (!vmm_stack_register(cabin->vmm, stack_top))
     {
-        kprintf("[STRAND] ERROR: user stack alloc failed (%u pages, PID %u)\n",
-                (unsigned)CONFIG_USER_STACK_PAGES, proc->pid);
+        kprintf("[STRAND] ERROR: user stack registration failed (PID %u)\n", proc->pid);
+        cabin_hammock_give_back(cabin, slot_base);
         kfree(proc->context.fpu_state);
         process_free_kernel_stack(proc);
         cabin_ref_dec(cabin);
@@ -1237,27 +1227,6 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         kfree(proc);
         return NULL;
     }
-
-    /* Map the stack into the SHARED cabin address space.  Same flags as the
-     * main strand's user stack (process_load_binary): user RW, no NX (the
-     * main stack is mapped executable too — keep strands consistent). */
-    vmm_map_result_t smap = vmm_map_pages(
-        cabin->vmm, stack_data_base, (uintptr_t)ustack_phys,
-        CONFIG_USER_STACK_PAGES,
-        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER);
-    if (!smap.success)
-    {
-        kprintf("[STRAND] ERROR: user stack map failed: %s (PID %u)\n", smap.error_msg, proc->pid);
-        pmm_free(ustack_phys, CONFIG_USER_STACK_PAGES);
-        kfree(proc->context.fpu_state);
-        process_free_kernel_stack(proc);
-        cabin_ref_dec(cabin);
-        proc->cabin = NULL;
-        pid_free(proc->pid);
-        kfree(proc);
-        return NULL;
-    }
-    proc->user_stack_phys = (uintptr_t)ustack_phys;
 
     /* Register frame: shared CR3 (already set by process_init_context_base),
      * the strand's entry point, its own stack, and the user argument in rdi
@@ -1300,7 +1269,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         kprintf("[STRAND] ERROR: per-strand rings/TLS setup failed (PID %u)\n", proc->pid);
         cet_process_destroy(proc);
         cet_process_destroy_kernel_ssp(proc);
-        process_free_strand_stack(proc);
+        process_release_strand_slot(proc);
         kfree(proc->context.fpu_state);
         process_free_kernel_stack(proc);
         cabin_ref_dec(cabin);
@@ -1323,7 +1292,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         strand_rings_destroy(proc);
         cet_process_destroy(proc);
         cet_process_destroy_kernel_ssp(proc);
-        process_free_strand_stack(proc);
+        process_release_strand_slot(proc);
         kfree(proc->context.fpu_state);
         process_free_kernel_stack(proc);
         cabin_ref_dec(cabin);
@@ -1620,30 +1589,41 @@ uint64_t *process_active_memtags(process_t *proc)
 /* ─── Phase 2K+ CET SSP accessors ────────────────────────────────── */
 
 #define PROCESS_USER_SSP_REGION_SIZE       (4u * 4096u)
-#define PROCESS_USER_SSP_STACK_SLACK       (8ULL * 1024ULL * 1024ULL)
 #define PROCESS_USER_SSP_REGION_TOP        \
-    (VMM_USER_STACK_TOP - PROCESS_USER_SSP_STACK_SLACK)
+    (VMM_MAIN_SSP_ZONE_TOP - 0x1000ULL)
 #define PROCESS_USER_SSP_REGION_BASE       \
     (PROCESS_USER_SSP_REGION_TOP - PROCESS_USER_SSP_REGION_SIZE)
 #define PROCESS_USER_SSP_GUARD_HI_BASE     PROCESS_USER_SSP_REGION_TOP
 #define PROCESS_USER_SSP_GUARD_LO_BASE     (PROCESS_USER_SSP_REGION_BASE - 0x1000ULL)
 
+/* The main strand's shadow stack sits under the LOWEST the main data stack can
+ * reach: its zone is the six pages [guard|SSP|guard] just below the gap that
+ * lies under the lowest possible reserve (vmm.h). It used to sit a fixed 8 MiB
+ * below the top of the address space, which the data stack's ASLR range of
+ * 8 MiB made the data stack's own floor — a 64 KiB stack could not reach it,
+ * and the first stack that could, did. */
+_Static_assert(PROCESS_USER_SSP_GUARD_LO_BASE == VMM_USER_STACK_ZONE_BASE,
+               "the main shadow stack's low guard is the bottom of the stack zone");
+
 /* Base VA of a strand's CET user shadow-stack region.
  *
- * The main strand (hammock_base == 0) uses the fixed region 8 MiB below
- * VMM_USER_STACK_TOP, exactly as before.  A strand spawned via
+ * The main strand (hammock_base == 0) uses the fixed region under the main
+ * stack zone.  A strand spawned via
  * strand_spawn (hammock_base != 0) uses the SSP slice of its own hammock
- * slot — see the slot map in cabin_layout.h: [low guard][stack 16pg]
+ * slot — see the slot map in cabin_layout.h: [gap][stack]
  * [mid guard][SSP 4pg][high guard].  Deriving from hammock_base is what
  * keeps sibling strands' shadow stacks from colliding in the shared
  * address space (CET dormant on TCG, so this is real-HW correctness). */
 #define PROCESS_USER_SSP_GUARD_PAGE        0x1000ULL
-/* The hammock slot must hold: low guard + user stack + mid guard +
+/* The hammock slot must hold: gap + user stack + mid guard +
  * 4-page CET SSP + high guard.  If the stack size grows past the slot,
  * fail the build rather than silently overlap the next strand's slot. */
+_Static_assert(CABIN_HAMMOCK_STACK_PAGE_OFF == CONFIG_USER_STACK_GAP_PAGES &&
+                   CABIN_HAMMOCK_STACK_PAGES == CONFIG_USER_STACK_PAGES,
+               "the hammock slot's stack is the kernel's stack reserve and gap");
 _Static_assert(CABIN_HAMMOCK_STACK_PAGE_OFF + CONFIG_USER_STACK_PAGES + 1u + 4u + 1u
                    <= CABIN_HAMMOCK_SLOT_PAGES,
-               "hammock slot too small for [guard|stack|guard|SSP(4pg)|guard]");
+               "hammock slot too small for [gap|stack|guard|SSP(4pg)|guard]");
 _Static_assert(PROCESS_USER_SSP_REGION_SIZE == 4u * 4096u,
                "user SSP region must be 4 pages (matches CET_USER_SSP_PAGES)");
 
@@ -2074,7 +2054,7 @@ static void process_cleanup_immediate(process_t *proc)
      * cabin down. The strand's CET shadow stacks were already unmapped in
      * process_destroy via cet_process_destroy{,_kernel_ssp}. */
     strand_rings_destroy(proc);
-    process_free_strand_stack(proc);
+    process_release_strand_slot(proc);
 
     /* Drop the strand's reference to its cabin.  strand_count goes N→N-1;
      * when it reaches 0 (last strand of the cabin), cabin_ref_dec triggers
@@ -2199,7 +2179,7 @@ void process_reap_strands(void)
          * strand was previously skipped here, leaking its slot/pid/cabin-VMM
          * forever once it exited (nothing else calls process_destroy on it at
          * runtime).  Safe: the teardown chain already no-ops the strand-only
-         * steps for hammock_base == 0 (strand_rings_destroy / free_strand_stack)
+         * steps for hammock_base == 0 (strand_rings_destroy / release_strand_slot)
          * and cabin_ref_dec frees the cabin only as the LAST strand; and pid
          * recycling is harmless — no caller addresses a process by a held pid
          * past its death (SYS_PROC_KILL is self-only; death is observed via the

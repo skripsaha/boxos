@@ -151,11 +151,11 @@ static inline uint64_t cet_supv_token_free(uintptr_t top) {
 #define CET_MSR_SUPPRESS         (1ULL << 10)   /* WAIT-FOR-ENDBRANCH state */
 #define CET_MSR_TRACKER_IDLE     (1ULL << 11)   /* WAIT-FOR-ENDBRANCH idle */
 
-/* Per-process user shadow stack — 4 pages, 16 KiB, against a 64 KiB user
- * data stack. Counted, not guessed:
+/* Per-process user shadow stack — 4 pages, 16 KiB, against an 8 MiB user data
+ * stack that grows on demand. Counted, not guessed:
  *
- *   data stack   CONFIG_USER_STACK_SIZE_KB = 64 → 16 pages (kernel_config.h)
- *   shadow stack CET_USER_SSP_PAGES        = 4  → 16 KiB = 2048 slots
+ *   data stack   BOXOS_USER_STACK_RESERVE = 8 MiB → 2048 pages (boxos_limits.h)
+ *   shadow stack CET_USER_SSP_PAGES       = 4     → 16 KiB = 2048 slots
  *
  * One call costs the shadow stack exactly 8 bytes: the return address,
  * and nothing else ever lands there. One call costs the DATA stack 16
@@ -166,19 +166,20 @@ static inline uint64_t cet_supv_token_free(uintptr_t top) {
  * own call. Anything cheaper than 16 belongs to a leaf, and a leaf is
  * the end of the chain.
  *
- * So the deepest chain 64 KiB of data stack admits is 65536 / 16 = 4096
- * frames, and the shadow stack holds 2048 of them. It runs out first, at
- * exactly half the depth, and on ANY chain of small non-leaf frames —
- * not a contrived one. The number that matches the data stack is 8
- * pages, CONFIG_USER_STACK_PAGES / 2, and that ratio survives any resize
- * of the data stack.
- *
- * It stays 4 because 4 is not this file's number. The hammock slot map
- * in cabin_layout.h puts the SSP at slot pages 18..21 with the
- * Pocket/Result/Touch rings starting at 23, PROCESS_USER_SSP_REGION_SIZE
- * in process.c hard-codes four pages behind a _Static_assert, and
- * strand_rings.c derives its ring offsets from the same layout. Growing
- * to 8 shifts every page above it in the slot. Raised with the owner.
+ * So the deepest chain 8 MiB of data stack admits is 8388608 / 16 = 524288
+ * frames, and the shadow stack holds 2048 of them. On CET hardware it runs
+ * out first, at 1/256 of the depth, on ANY chain of small non-leaf frames —
+ * so there a recursion that the data stack would carry to 8 MiB ends at the
+ * shadow stack, at 16 KiB of shadow and about 32 KiB of data stack for the
+ * smallest frames. The number that would match the data stack is 4096 pages
+ * (16 MiB of shadow stack), and it is not taken: shadow-stack pages are not
+ * demand-paged here (CET is dormant on every machine this has run on, so a
+ * fault path for them could not be tested), 4 pages is the size the hammock
+ * slot map in cabin_layout.h and PROCESS_USER_SSP_REGION_SIZE in process.c
+ * are cut to, and growing it eagerly would charge every process and strand
+ * 16 MiB of frames for a feature most of them never use. Whose decision that
+ * is — the size, or a demand-paged shadow stack — is the owner's, and it is
+ * open.
  *
  * Running out is a fault, not corruption: the push lands in the unmapped
  * guard page below the region (PROCESS_USER_SSP_GUARD_LO_BASE in

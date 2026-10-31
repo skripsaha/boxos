@@ -27,6 +27,14 @@ ORACLE=tools/boxasm_oracle.py
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/boxasm_stand.XXXXXX") || exit 2
 trap 'rm -rf "$WORK"' EXIT
 
+# The stand runs the assembler on the stack a BoxOS program has: it grows to
+# BOXOS_USER_STACK_RESERVE (src/include/boxos_limits.h), and the assembler's
+# refusals of a source that nests too deep are measured against it. The host's
+# own limit may be a little less, and a refusal must never be a crash.
+STACK_KIB=$(( $(printf '#include "boxos_limits.h"\nBOXOS_USER_STACK_RESERVE\n' |
+                $CC_HOST -E -P -Isrc/include - | tail -1) / 1024 )) && ulimit -s "$STACK_KIB" ||
+    { echo "boxasm: harness failed — no stack of BOXOS_USER_STACK_RESERVE for the stand"; exit 2; }
+
 make -s -C src/userspace/boxlib > "$WORK/make.log" 2>&1 &&
     make -s -C src/userspace/utils ../build/boxlib_start.o ../../../tools/nameplate \
         >> "$WORK/make.log" 2>&1 ||
@@ -756,10 +764,12 @@ if [ "$said" = "nul_source.asm:4:9: a NUL byte stands here: a source is text" ];
 else fail nul_source "said '$said'"; fi
 
 # ---- depth: the stack a BoxOS program has ------------------------------------
-# A source nests as deep as it likes; `assemble` has 64 KiB of stack and a
-# guard page past it. The stand is built again as BoxOS builds the command —
-# no optimisation — and run on 64 KiB: each source below refuses in words, the
-# place it names being wherever the stack ran short.
+# A source nests as deep as it likes; the stack of `assemble` grows to
+# BOXOS_USER_STACK_RESERVE with a gap that is never mapped below it. The stand
+# is built again as BoxOS builds the command — no optimisation — and run on
+# that much stack (STACK_KIB, above): each source below nests deeper than it
+# carries and refuses in words, the place it names being wherever the stack
+# ran short.
 STAND0=$WORK/boxasm_stand_o0
 $CC_HOST -std=c11 -O0 -w -I"$ASM_DIR" -Isrc/userspace/boxlib/include -Isrc/include \
     tools/boxasm_stand.c $(ls "$ASM_DIR"/*.c | grep -v '/assemble[^/]*\.c$') -o "$STAND0" ||
@@ -770,15 +780,15 @@ work = sys.argv[1]
 head = 'section .text\nglobal main\nmain:\n    ret\n'
 deep = {
     'deep_macro': '%macro rec 0\n    rec\n%endmacro\n' + head + '    rec\n',
-    'deep_counting': '%macro count 1\n%if %1 > 0\n    db %1\n    count %1-1\n%endif\n%endmacro\n'
-                     + head + 'section .data\n    count 100000\n',
-    'deep_defines': '\n'.join(['%define d0 1'] + ['%%define d%d d%d' % (i, i - 1) for i in range(1, 900)])
-                    + '\n' + head + 'section .data\n    dd d899\n',
-    'deep_parentheses': head + 'section .data\n    dd ' + '(' * 3000 + '1' + ')' * 3000 + '\n',
-    'deep_if': head + '%if ' + '(' * 3000 + '1' + ')' * 3000 + '\n%endif\n',
-    'deep_sum': head + 'section .data\n    dd ' + '+'.join(['1'] * 20000) + '\n',
-    'deep_equ': head + 'c0 equ 1\n' + '\n'.join('c%d equ c%d+1' % (i, i - 1) for i in range(1, 3000))
-                + '\nsection .data\n    dd c2999\n',
+    'deep_counting': '%macro count 1\n%if %1 > 0\n%assign left %1-1\n    db left & 0xFF\n    count left\n'
+                     '%endif\n%endmacro\n' + head + 'section .data\n    count 100000\n',
+    'deep_defines': '\n'.join(['%define d0 1'] + ['%%define d%d d%d' % (i, i - 1) for i in range(1, 40000)])
+                    + '\n' + head + 'section .data\n    dd d39999\n',
+    'deep_parentheses': head + 'section .data\n    dd ' + '(' * 30000 + '1' + ')' * 30000 + '\n',
+    'deep_if': head + '%if ' + '(' * 30000 + '1' + ')' * 30000 + '\n%endif\n',
+    'deep_sum': head + 'section .data\n    dd ' + '+'.join(['1'] * 300000) + '\n',
+    'deep_equ': head + 'c0 equ 1\n' + '\n'.join('c%d equ c%d+1' % (i, i - 1) for i in range(1, 64000))
+                + '\nsection .data\n    dd c63999\n',
 }
 for name, text in deep.items():
     with open('%s/%s.asm' % (work, name), 'w') as f:
@@ -786,8 +796,8 @@ for name, text in deep.items():
 EOF
 deep_refuses() {
     local name=$1 want=$2 said rc
-    said=$( (ulimit -s 64; "$STAND0" assemble "$WORK/$name.asm" "$WORK/$name.o") 2>&1 | head -1)
-    rc=$( (ulimit -s 64; "$STAND0" assemble "$WORK/$name.asm" "$WORK/$name.o" > /dev/null 2>&1); echo $?)
+    said=$("$STAND0" assemble "$WORK/$name.asm" "$WORK/$name.o" 2>&1 | head -1)
+    rc=$("$STAND0" assemble "$WORK/$name.asm" "$WORK/$name.o" > /dev/null 2>&1; echo $?)
     said=$(printf '%s' "$said" | sed -E 's/^[^:]+:[0-9]+:[0-9]+: //')
     if [ "$rc" != 1 ]; then fail "$name" "ended with $rc instead of refusing"
     elif [ "$said" != "$want" ]; then fail "$name" "said '$said', expected '$want'"
@@ -801,20 +811,20 @@ deep_refuses deep_if "the expression nests too deep"
 deep_refuses deep_sum "the expression is too deep to work out: too many operations, and names defined by names, inside one another"
 deep_refuses deep_equ "the expression is too deep to work out: too many operations, and names defined by names, inside one another"
 
-# 400 files, each including the next.
+# 12000 files, each including the next.
 python3 - "$WORK/deep_files" <<'EOF'
 import os, sys
 volume = sys.argv[1]
 os.makedirs(volume)
 with open(os.path.join(volume, 'volume'), 'w') as listing:
-    for i in range(401):
+    for i in range(12001):
         name = 'chain.asm' if i == 0 else 'chain%d.inc' % i
         listing.write('%d %s demo\n' % (i + 1, name))
         with open(os.path.join(volume, str(i + 1)), 'w') as f:
             f.write(('section .text\nglobal main\nmain:\n    ret\n' if i == 0 else '')
-                    + ('%%include "chain%d.inc"\n' % (i + 1) if i < 400 else 'nop\n'))
+                    + ('%%include "chain%d.inc"\n' % (i + 1) if i < 12000 else 'nop\n'))
 EOF
-said=$( (ulimit -s 64; "$STAND0" volume "$WORK/deep_files" demo chain.asm "$WORK/deep_files.o") 2>&1 | head -1 |
+said=$("$STAND0" volume "$WORK/deep_files" demo chain.asm "$WORK/deep_files.o" 2>&1 | head -1 |
        sed -E 's/^[^:]+:[0-9]+:[0-9]+: //')
 if printf '%s' "$said" | grep -q -E "^'chain[0-9]+\.inc' is included inside files and macros too deep$"; then
     ok deep_files

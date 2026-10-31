@@ -4,14 +4,19 @@
  * Layout of a Hammock slot (page indices; see cabin_layout.h for the picture),
  * P5a "balanced" geometry:
  *
- *   [guard 0][user stack 1..16][guard 17][CET SSP 18..21][guard 22]   ← P4, untouched here
- *   [Pocket hdr 23][Result hdr 24][Touch hdr 25][guard 26]
- *   [Pocket slots 27..30][Result slots 31..34][Touch slots 35..36][guard 37]
- *   [C++ neg-TLS page 38 (eager-mapped Ф20b)][StrandInfo 39..42][guard 43]
+ *   [gap 0..255][user stack 256..2303][guard 2304][CET SSP 2305..2308][guard 2309]
+ *   [Pocket hdr 2310][Result hdr 2311][Touch hdr 2312][guard 2313]
+ *   [Pocket slots 2314..2317][Result slots 2318..2321][Touch slots 2322..2323][guard 2324]
+ *   [C++ neg-TLS page 2325 (eager-mapped Ф20b)][StrandInfo 2326..2329][guard 2330]
+ *   [unused 2331..2559]
  *
- * The stack/SSP page offsets are P4-identical (process_strand_ssp_base relies
- * on it). The ring + StrandInfo offsets are derived here from kernel_config.h
- * and pinned by _Static_assert so they cannot silently drift.
+ * The stack/SSP page offsets are what process_strand_ssp_base relies on. The
+ * ring + StrandInfo offsets are derived here from kernel_config.h and pinned by
+ * _Static_assert so they cannot silently drift. Everything above the stack is
+ * the P5a tail unchanged, moved up by the stack's growth from 16 pages to 2048
+ * and the gap under it. The stack itself is not part of the tail: its pages
+ * come in as the strand touches them and are released with it
+ * (process_release_strand_slot).
  *
  * Ring slot regions are EAGER-mapped: the userspace PocketRing producer writes
  * its first Pocket to slot[0] on the strand's first syscall, and the #PF
@@ -48,43 +53,46 @@
 #define HAMMOCK_TOUCH_SLOT_PAGES    2u    /* 64  Touch  slots */
 #define HAMMOCK_STRANDINFO_PAGES    4u    /* StrandInfo block (16 KiB) */
 
-/* First ring header page = after [guard][stack][guard][SSP][guard]. */
+/* First ring header page = after [gap][stack][guard][SSP][guard]. */
 #define HAMMOCK_POCKET_HDR_PAGE \
-    (CABIN_HAMMOCK_STACK_PAGE_OFF + CONFIG_USER_STACK_PAGES + 1u + HAMMOCK_SSP_PAGES + 1u)   /* 23 */
-#define HAMMOCK_RESULT_HDR_PAGE     (HAMMOCK_POCKET_HDR_PAGE + 1u)                            /* 24 */
-#define HAMMOCK_TOUCH_HDR_PAGE      (HAMMOCK_RESULT_HDR_PAGE + 1u)                            /* 25 */
-/* guard at HAMMOCK_TOUCH_HDR_PAGE + 1 (26) */
-#define HAMMOCK_POCKET_SLOTS_PAGE   (HAMMOCK_TOUCH_HDR_PAGE + 2u)                             /* 27 */
-#define HAMMOCK_RESULT_SLOTS_PAGE   (HAMMOCK_POCKET_SLOTS_PAGE + HAMMOCK_POCKET_SLOT_PAGES)   /* 31 */
-#define HAMMOCK_TOUCH_SLOTS_PAGE    (HAMMOCK_RESULT_SLOTS_PAGE + HAMMOCK_RESULT_SLOT_PAGES)   /* 35 */
-/* guard at +2 (37), C++ neg-TLS page at 38 (eager-mapped Ф20b) */
-#define HAMMOCK_STRANDINFO_PAGE     (HAMMOCK_TOUCH_SLOTS_PAGE + HAMMOCK_TOUCH_SLOT_PAGES + 2u)/* 39 */
+    (CABIN_HAMMOCK_STACK_PAGE_OFF + CONFIG_USER_STACK_PAGES + 1u + HAMMOCK_SSP_PAGES + 1u)   /* 2310 */
+#define HAMMOCK_RESULT_HDR_PAGE     (HAMMOCK_POCKET_HDR_PAGE + 1u)                            /* 2311 */
+#define HAMMOCK_TOUCH_HDR_PAGE      (HAMMOCK_RESULT_HDR_PAGE + 1u)                            /* 2312 */
+/* guard at HAMMOCK_TOUCH_HDR_PAGE + 1 (2313) */
+#define HAMMOCK_POCKET_SLOTS_PAGE   (HAMMOCK_TOUCH_HDR_PAGE + 2u)                             /* 2314 */
+#define HAMMOCK_RESULT_SLOTS_PAGE   (HAMMOCK_POCKET_SLOTS_PAGE + HAMMOCK_POCKET_SLOT_PAGES)   /* 2318 */
+#define HAMMOCK_TOUCH_SLOTS_PAGE    (HAMMOCK_RESULT_SLOTS_PAGE + HAMMOCK_RESULT_SLOT_PAGES)   /* 2322 */
+/* guard at +2 (2324), C++ neg-TLS page at 2325 (eager-mapped Ф20b) */
+#define HAMMOCK_STRANDINFO_PAGE     (HAMMOCK_TOUCH_SLOTS_PAGE + HAMMOCK_TOUCH_SLOT_PAGES + 2u)/* 2326 */
 /* The single page directly below StrandInfo (the fs:0 TCB) backs the C++
  * variant-2 negative-offset TLS block: __boxcxx_tls_strand_init copies .tdata
  * and zeroes .tbss into [fsbase - tp_off, fsbase). One page is enough — the
  * boxcxx link-time check caps the per-strand TLS image below 4 KiB; tls_strand
  * panics if tp_off ever exceeds it. */
-#define HAMMOCK_NEGTLS_PAGE         (HAMMOCK_STRANDINFO_PAGE - 1u)                            /* 38 */
-/* guard at HAMMOCK_STRANDINFO_PAGE + HAMMOCK_STRANDINFO_PAGES (43) */
-#define HAMMOCK_END_PAGE            (HAMMOCK_STRANDINFO_PAGE + HAMMOCK_STRANDINFO_PAGES + 1u) /* 44 */
+#define HAMMOCK_NEGTLS_PAGE         (HAMMOCK_STRANDINFO_PAGE - 1u)                            /* 2325 */
+/* guard at HAMMOCK_STRANDINFO_PAGE + HAMMOCK_STRANDINFO_PAGES (2330) */
+#define HAMMOCK_END_PAGE            (HAMMOCK_STRANDINFO_PAGE + HAMMOCK_STRANDINFO_PAGES + 1u) /* 2331 */
 
-_Static_assert(HAMMOCK_POCKET_HDR_PAGE == 23,
-               "Hammock ring base must be page 23 — preserves the P4 SSP page math");
-_Static_assert(HAMMOCK_NEGTLS_PAGE == 38,
-               "C++ neg-TLS page must be 38 (directly below the StrandInfo TCB)");
+_Static_assert(HAMMOCK_POCKET_HDR_PAGE == 2310,
+               "Hammock ring base must be page 2310 — 256 gap + 2048 stack + guard + 4 SSP + guard");
+_Static_assert(HAMMOCK_NEGTLS_PAGE == HAMMOCK_POCKET_HDR_PAGE + 15u,
+               "C++ neg-TLS page must be directly below the StrandInfo TCB, 15 pages into the rings");
 _Static_assert(HAMMOCK_END_PAGE <= CABIN_HAMMOCK_SLOT_PAGES,
                "Hammock slot too small for stack+SSP+rings+StrandInfo");
+_Static_assert((CABIN_HAMMOCK_SLOT_SIZE % 0x200000ULL) == 0 &&
+                   CABIN_HAMMOCK_SLOT_PAGES - HAMMOCK_END_PAGE < 512u,
+               "Hammock slot is the tail rounded up to a whole 2 MiB, no more");
 
 /* Per-strand ring capacities = slot-region bytes / slot stride. */
 #define HAMMOCK_POCKET_CAP   (HAMMOCK_POCKET_SLOT_PAGES * VMM_PAGE_SIZE / POCKET_SLOT_SIZE)   /* 256 */
 #define HAMMOCK_RESULT_CAP   (HAMMOCK_RESULT_SLOT_PAGES * VMM_PAGE_SIZE / RESULT_SLOT_SIZE)   /* 512 */
 #define HAMMOCK_TOUCH_CAP    (HAMMOCK_TOUCH_SLOT_PAGES  * VMM_PAGE_SIZE / TOUCH_SLOT_SIZE)    /* 64  */
 
-/* Teardown span: ring headers (23) through the end of the StrandInfo block
- * (42, inclusive). The eager-mapped C++ neg-TLS page (38) falls inside and is
+/* Teardown span: ring headers (2310) through the end of the StrandInfo block
+ * (2329, inclusive). The eager-mapped C++ neg-TLS page (2325) falls inside and is
  * freed by the present-check; the guards (absent VA) are skipped. Stack
- * (1..16) and SSP (18..21) are NOT here — they are freed by
- * process_free_strand_stack / cet_process_destroy. */
+ * (256..2303) and SSP (2305..2308) are NOT here — they are freed by
+ * process_release_strand_slot / cet_process_destroy. */
 #define HAMMOCK_TEARDOWN_FIRST_PAGE  HAMMOCK_POCKET_HDR_PAGE
 #define HAMMOCK_TEARDOWN_PAGES \
     (HAMMOCK_STRANDINFO_PAGE + HAMMOCK_STRANDINFO_PAGES - HAMMOCK_POCKET_HDR_PAGE)            /* 20 */
@@ -263,7 +271,7 @@ void strand_rings_destroy(process_t *proc)
         MemTagClearByPhys(proc->touch_ring_phys, "purpose:touch-ring");
     }
 
-    /* Unmap + free ring headers, slot regions and StrandInfo (pages 23..42). */
+    /* Unmap + free ring headers, slot regions and StrandInfo (pages 2310..2329). */
     hammock_unmap_pages(vmm, hammock_page_va(proc, HAMMOCK_TEARDOWN_FIRST_PAGE),
                         HAMMOCK_TEARDOWN_PAGES);
 
