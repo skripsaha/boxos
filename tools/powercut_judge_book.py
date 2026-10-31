@@ -118,10 +118,15 @@ def Lines(j, name, most):
 
 def SlipBlocks(j, fid, lines):
     """The logger's file took, over the whole record, no more blocks of data
-    than the blocks its lines fill, two for every Tally the record laid (the
-    Engross of its tail, and the block that tail goes on in), and one for the
-    run's end. Data no stitch of the record names (`free`) is counted against
-    it too: a writer of a block a line names nothing until the next line."""
+    than the blocks its lines fill, the tail each line that crosses a block's
+    end begins in the next — a write that does not lie wholly in the file's
+    last block lays blocks, the one it fills and the one it begins
+    (plot_slip.c PlotSlipBegin), where a line that ends on a block's end lays
+    that block alone and the next begins a Slip over a hole — two for every
+    Tally the record laid (the Engross of its tail, and the block that tail
+    goes on in), and one for the run's end. Data no stitch of the record
+    names (`free`) is counted against it too: a writer of a block a line names
+    nothing until the next line."""
     sectors, tallies = 0, set()
     for w in j.run.listing["writes"]:
         for t in w["touches"]:
@@ -130,11 +135,14 @@ def SlipBlocks(j, fid, lines):
             hit = SLOT_SEQ.match(t["what"]) if t["kind"] == "slot" else None
             if hit:
                 tallies.add(int(hit.group(1)))
-    blocks, full = (sectors + BLOCK_SECTORS - 1) // BLOCK_SECTORS, lines * LOG_LINE // (BLOCK_SECTORS * 512)
-    most = full + 2 * len(tallies) + 1
+    block = BLOCK_SECTORS * 512
+    blocks, full = (sectors + BLOCK_SECTORS - 1) // BLOCK_SECTORS, lines * LOG_LINE // block
+    crossed = sum(1 for k in range(1, full + 1) if k * block % LOG_LINE)
+    most = full + crossed + 2 * len(tallies) + 1
     j.Out("slip:blocks", "fail" if blocks > most else "behaves", "the logger's file (fid %d) took %d block(s) of "
-          "data over %d line(s) and %d Tally(ies) — %s %d: its %d full block(s), two a Tally and one for the end"
-          % (fid, blocks, lines, len(tallies), "more than" if blocks > most else "within", most, full))
+          "data over %d line(s) and %d Tally(ies) — %s %d: its %d full block(s), the %d tail(s) a line crossing a "
+          "block's end began, two a Tally and one for the end"
+          % (fid, blocks, lines, len(tallies), "more than" if blocks > most else "within", most, full, crossed))
 
 
 def Logger(j, arg):

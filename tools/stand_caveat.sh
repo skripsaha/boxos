@@ -1,5 +1,6 @@
-# stand_caveat — the Caveat table, its judge, and the path every verdict about
-# a write names (stand_path), for every host harness.
+# stand_caveat — the Caveat table, its judge, the path every verdict about a
+# write names (stand_path) and the medium a volume was seated on
+# (stand_seat_kind), for every host harness.
 #
 # SOURCED, NEVER RUN — by stand.sh, so every stand harness has it the moment
 # it has stand.sh, and by tools/stress_matrix.sh directly, which has no
@@ -35,7 +36,11 @@ CAVEAT=0
 # alone, in the commit of the step it names, and the DEFECT stays for good as
 # what the test stands for: the day the defect is back, the FAIL says which
 # one it was ("|DEFECT" is a test with no caveat). A harness adds the rows of
-# its own tests here.
+# its own tests here. One STEP names no step: `limit`, a row that holds a
+# limit the owner accepted and no step will discharge — never lifted, its
+# DEFECT the limit and the owner's word for it, given only to a run the limit
+# is a limit on, so a test under it that behaves was given the row where it
+# stands for nothing (caveat_row_book).
 #
 # PowerCut's census (tools/powercut.sh): every (scenario, code) pair a
 # scenario was measured showing is its own row, held under 1.6 — except the
@@ -268,7 +273,13 @@ caveat_row_lockrank() {
 # caveat_row_book NAME — the rows of a book's own oracles in PowerCut
 # (powercut_judge_book.py, powercut_lie.py; spec_v2 §3.10, §16.5 п.21), each
 # the defect it stands for: no step — on a book none is known — so each is a
-# FAIL that names what came back the day one shows.
+# FAIL that names what came back the day one shows. One row is a limit, not a
+# defect a step discharges: book:wiped:fixed, a smudge's wipe on a fixed medium
+# (§16.6 п.5) — the settled stitches a spoilt page holds with nothing past
+# them, the newest and those before it on its page, up to three in a 16 KiB
+# page of 4 KiB atoms (C18) — given only to a run whose volume the Boardroom
+# seated as fixed (powercut.sh pc_caveats, stand_seat_kind) and asked only of a
+# wipe seen: a fixed medium no smudge wiped behaves under book:wiped.
 caveat_row_book() {
     case "$1" in
         book:whole)   echo "|a power cut leaves a file of a book as no flush left it — its old bytes and new mixed, or rotten (C1, C15, C3)" ;;
@@ -282,6 +293,8 @@ caveat_row_book() {
         book:owners)  echo "|a medium that lost writes a kept flush stood behind leaves a book with two owners of one block (C6, C17)" ;;
         book:lost)    echo "|a medium lost what a stitch named, the evidence on it, and the book says nothing (C5, C13, C17, C18)" ;;
         book:wiped)   echo "|a medium that spoils the page around a stitch in flight wipes a settled stitch whole with nothing past it, and the book cannot say what settled is lost (C18)" ;;
+        book:wiped:fixed)
+                      echo "limit|on a fixed medium the ribbon keeps the medium's own atom, so a cut that spoils the page around the stitch in flight can wipe the settled stitches that page holds whole with nothing past them — the newest, and those before it on the page — and no reader can tell them from cycles that never wrote — the format's limit on such a medium, as ext4's and NTFS's on the same disks (spec_v2 §16.6 п.5, C18)" ;;
         book:boots)   echo "|a book a medium lied about is mounted otherwise than predicted, or a session on it gives a block twice (C16, C26)" ;;
     esac
 }
@@ -307,11 +320,20 @@ caveat_judge() {
     if [ -n "$step" ]; then
         case "$seen" in
             defect)
-                printf '  \033[36mCAVEAT\033[0m caveat held: %s — %s — discharged by step %s (%s)\n' \
-                       "$name" "$defect" "$step" "$what"
+                if [ "$step" = limit ]; then
+                    printf '  \033[36mCAVEAT\033[0m caveat held: %s — %s — a limit the owner accepted, which no step discharges (%s)\n' \
+                           "$name" "$defect" "$what"
+                else
+                    printf '  \033[36mCAVEAT\033[0m caveat held: %s — %s — discharged by step %s (%s)\n' \
+                           "$name" "$defect" "$step" "$what"
+                fi
                 CAVEAT=$((CAVEAT+1)) ;;
             behaves)
-                bad "caveat lifted early: $name — the test does not test what it claims, or step $step already landed — lift the caveat ($what)" ;;
+                if [ "$step" = limit ]; then
+                    bad "limit given where it is none: $name — a test held under a limit behaves, so the row was given to a run the limit is not a limit on ($what)"
+                else
+                    bad "caveat lifted early: $name — the test does not test what it claims, or step $step already landed — lift the caveat ($what)"
+                fi ;;
             fail)
                 bad "$name: $what" ;;
         esac
@@ -353,6 +375,29 @@ stand_path() {
         "")   echo "no path: $log mounted no volume"; return 1 ;;
         *)    echo "no path: seat '$seat' is none this knows"; return 1 ;;
     esac
+}
+
+# stand_seat_kind LOG — the medium the volume of the machine that wrote LOG
+# was mounted on, as the Boardroom calls its seat: `removable` for a seat it
+# calls so ("[Boardroom]   seat N: NAME (removable)", boardroom.c — every USB
+# stick, the seat a book's mount lays its ribbon in flash pages on), `fixed`
+# for one it seats plainly, read for the seat of the kernel's own mount line
+# ("[TagFS] volume on seat N: NAME", tagfs.c). A log that mounted nothing, or
+# a seat the Boardroom never named, prints what it found instead and answers
+# 1, so the medium in a verdict is never a guess (powercut.sh pc_sign).
+stand_seat_kind() {
+    local log=$1 line seat name
+    [ -f "$log" ] || { echo "no medium: there is no log at $log"; return 1; }
+    line=$(tr -d '\r' < "$log" | sed -nE 's/^\[TagFS\] volume on seat ([0-9]+): (.*)$/\1|\2/p' | tail -1)
+    [ -n "$line" ] || { echo "no medium: $log mounted no volume"; return 1; }
+    seat=${line%%|*} name=${line#*|}
+    if tr -d '\r' < "$log" | grep -aqxF "[Boardroom]   seat $seat: $name (removable)"; then
+        echo removable
+    elif tr -d '\r' < "$log" | grep -aqxF "[Boardroom]   seat $seat: $name"; then
+        echo fixed
+    else
+        echo "no medium: the Boardroom never named seat $seat, $name"; return 1
+    fi
 }
 
 # ===========================================================================

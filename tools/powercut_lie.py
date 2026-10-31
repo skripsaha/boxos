@@ -433,13 +433,32 @@ def Judge(j):
               % (len(quiet), len(judged), kind, "; ".join(quiet[:2])) if quiet else
               "every one of %d %s media says what its loss owes" % (len(judged), kind))
         if kind == "smudge":
-            j.Out("smudge:wiped", "fail" if wiped else "behaves", "%d of %d smudge media leave no sector of a "
-                  "settled stitch and nothing past it, so no reader can say what settled is lost — C18 says it; "
-                  "a mount on a removable medium writes the ribbon in flash pages so that no new stitch shares "
-                  "one with a settled stitch (§16.6 п.2), a fixed one in the medium's atom: %s" % (
-                      len(wiped), len(judged), "; ".join(wiped[:2])) if wiped else
-                  "no one of %d smudge media wipes a settled stitch whole with nothing past it" % len(judged))
+            Wiped(j, wiped, len(judged))
     Boots(j, plan, results)
+
+
+def Wiped(j, wiped, judged):
+    """smudge:wiped — no settled stitch spoilt whole with nothing past it. A
+    mount on a removable medium writes the ribbon in flash pages so that no
+    new stitch shares one with a settled stitch (§16.6 п.2), and there a wipe
+    is a FAIL; on a fixed medium the ribbon keeps the medium's atom, and the
+    settled stitches a spoilt page holds with nothing past them — the newest,
+    and those before it on its page, up to three in a 16 KiB page of 4 KiB
+    atoms (C18) — are the format's limit (§16.6 п.5): the defect its row
+    holds, where the run is signed fixed (powercut.sh pc_caveats,
+    smudge:wiped:fixed). A FAIL says what the run was signed."""
+    if not wiped:
+        return j.Out("smudge:wiped", "behaves", "no one of %d smudge media wipes a settled stitch whole with "
+                     "nothing past it" % judged)
+    limit = "smudge:wiped:fixed" in j.caveats
+    j.Out("smudge:wiped", "defect" if limit else "fail", "%d of %d smudge media leave no sector of a settled stitch "
+          "and nothing past it, so no reader can say what settled is lost — C18 says it; %s: %s" % (
+              len(wiped), judged, "the medium is fixed, and its ribbon keeps the medium's atom: the format's limit "
+              "there, as ext4's and NTFS's on the same disks (§16.6 п.5)" if limit else "the run is signed %s, not "
+              "fixed, and a mount on a removable medium writes the ribbon in flash pages so that no new stitch "
+              "shares one with a settled stitch (§16.6 п.2)" % (j.medium or "by no medium"),
+              "; ".join(wiped[:2])),
+          caveat="smudge:wiped:fixed" if limit else None)
 
 
 def Census(j, kind, judged, results):

@@ -61,7 +61,12 @@
 # noanchormut on a book — every image the run builds is one, its record named
 # by the book's units and its cuts judged by the book's census; the scenarios
 # of format v1's own machinery are refused by name (below). `all` runs the
-# book's set.
+# book's set. nextfid's prefix boots are asked `persist write` there, not
+# anchor_test: the cut that asks bears the anchor's file on its ribbon, and
+# anchor_test would find it and make none. A book on a fixed medium (the
+# Boardroom's seat, stand_seat_kind) holds a smudge's wipe of the settled
+# stitches a spoilt page holds with nothing past them as the format's limit
+# (spec_v2 §16.6 п.5), and fails it on a removable one.
 #
 # Every census code a scenario was measured showing is its own caveat row —
 # (scenario, code), stand_caveat.sh — held under 1.6, the ORPHAN of an
@@ -196,6 +201,7 @@ pc_begin() {
         case "${key#CORES=}" in "$key"|''|*[!0-9]*) ;; *) PC_CORES=${key#CORES=} ;; esac
     done
     PC_PATH="unknown"
+    PC_MEDIUM="unknown"
     rm -rf "$PC_DIR"
     mkdir -p "$PC_DIR/boots"
     : > "$PC_DIR/steps.jsonl"
@@ -272,7 +278,24 @@ pc_logged() {
         *) harness "$PC_NAME: the recorded machine (pid $pid) was not started on $PC_DIR/run.img with its record at $PC_DIR/run.log"
            return 1 ;;
     esac
-    PC_PATH=$(stand_path build/serial.log "$PC_CORES")
+    pc_sign build/serial.log
+}
+
+# pc_sign LOG — the run signed by the machine that wrote LOG: PC_PATH, the way
+# its writes went down (stand_path), and on a book PC_MEDIUM, the medium its
+# volume was mounted on (stand_seat_kind), which decides whether a smudge's
+# wipe is the format's limit or a FAIL. A path it cannot read stops the
+# scenario, said: a verdict about a write is a verdict about one path. A
+# book's medium it cannot read is said too, and the run goes on unsigned —
+# the limit's row is not given, so a wipe stays a FAIL that names why. Format
+# v1 asks for no medium: nothing of v1's reads one.
+pc_sign() {
+    PC_PATH=$(stand_path "$1" "$PC_CORES") ||
+        { harness "$PC_NAME: the recorded boot names no way its writes go down — $PC_PATH"; return 1; }
+    [ "$PC_FORMAT" = v1 ] && return 0
+    PC_MEDIUM=$(stand_seat_kind "$1") ||
+        harness "$PC_NAME: the recorded boot's medium is not known, so a smudge's wipe is judged a FAIL and never the format's limit — $PC_MEDIUM"
+    return 0
 }
 
 # pc_step NAME CMD ACK_ERE [DURABLE [noquiet]] — ask, wait for the answer, and
@@ -365,7 +388,8 @@ pc_record() {
         return 1
     fi
     ok "$PC_NAME: the record accounts for the disk QEMU left — $said"
-    echo "machine: ${PC_KEYS[*]:-plain BIOS}, $PC_CORES core(s), a userspace write goes by $PC_PATH" >>"$PC_DIR/facts.txt"
+    echo "machine: ${PC_KEYS[*]:-plain BIOS}, $PC_CORES core(s), a userspace write goes by $PC_PATH$([ "$PC_FORMAT" = v1 ] || echo ", the volume's medium as the Boardroom seats it: $PC_MEDIUM")" \
+        >>"$PC_DIR/facts.txt"
     python3 "$VR" "$PC_DIR/base.img" cut "$PC_DIR/run.log" --list --json >"$PC_DIR/list.json" || {
         harness "$PC_NAME: volume-read could not list the record"; return 1; }
     if [ "$PC_FORMAT" = v2 ]; then
@@ -462,6 +486,11 @@ pc_caveats() {
         slip:blocks=book:slip tipin=book:tipin spared=book:spared engross=book:engross chain=book:chain \
         blot:owners=book:owners smudge:owners=book:owners blot:proven=book:lost smudge:said=book:lost \
         smudge:wiped=book:wiped blot:boots=book:boots smudge:boots=book:boots
+    # On a fixed medium a book's ribbon keeps the medium's own atom, and a
+    # smudge that wipes the settled stitches of a spoilt page whole with
+    # nothing past them is the format's limit there (spec_v2 §16.6 п.5): held
+    # by its own row, signed by the medium the recorded boot mounted (pc_sign).
+    [ "$PC_FORMAT" = v1 ] || [ "${PC_MEDIUM:-}" != fixed ] || echo smudge:wiped:fixed=book:wiped:fixed
     [ "$1" != machineb ] || echo lines:b-l.log=book:lines
 }
 
@@ -470,6 +499,7 @@ pc_caveats() {
 pc_judge() {
     local c args=()
     for c in $(pc_caveats "$PC_NAME"); do args+=(--caveat "$c"); done
+    [ "$PC_FORMAT" = v1 ] || args+=(--medium "$PC_MEDIUM")
     [ "$PC_FORMAT" = v1 ] || pc_lie_boots
     echo "took $(( $(date +%s) - PC_T0 )) s to judge; the report is $PC_DIR/report.txt" >>"$PC_DIR/facts.txt"
     python3 "$PC" judge "$PC_DIR" --path "$PC_PATH" ${args[@]+"${args[@]}"} "$@" >"$PC_DIR/verdicts.tsv" || {
@@ -523,6 +553,12 @@ pc_nextfid() {
         || return 1
     pc_cut_power && pc_record || return 1
     PC_ASK_CMD="anchor_test"; PC_ASK_ACK='\[ANCHOR\] (PASS|WROTE|FAIL|create rc|fwrite rc|anchor rc|read rc)'
+    # A book's cut that asks the question bears the anchor's file on its
+    # ribbon, and anchor_test finds it there and makes none: the create is a
+    # file no medium of the run held (powercut_judge.py Reissue).
+    if [ "$PC_FORMAT" = v2 ]; then
+        PC_ASK_CMD="persist write"; PC_ASK_ACK='\[PERSIST\] (WROTE|FAIL|create failed|fwrite failed)'
+    fi
     PC_FINAL_CMD=""
     pc_boots prefixes:anchor_test
     pc_judge --verify reissue:anchor_test
@@ -941,7 +977,7 @@ STAND_FINISHED=1
 echo
 echo "powercut: $PASS passed, $FAIL failed, $CAVEAT caveat(s) held"
 if [ "$CAVEAT" != 0 ]; then
-    echo "powercut: $CAVEAT caveat(s) held — each is a known defect reproduced on purpose, and names the step that discharges it"
+    echo "powercut: $CAVEAT caveat(s) held — each is a known defect reproduced on purpose and names the step that discharges it, or a limit the owner accepted, which no step discharges"
 fi
 if [ "$HARNESS" != 0 ]; then
     echo "powercut: $HARNESS harness failure(s) — this run could not talk to the"

@@ -317,19 +317,29 @@ pc_engross() {
 # its own disk and mounts the stick the host hands it. The stick is put
 # together over QMP the way the Makefile's POWERCUT_CHAIN puts the boot disk
 # together — its file, the record's file, blklogwrites over both, raw on top —
-# so every write and flush it takes is on the record, across a departure and
-# a return alike: the node outlives the device, and the device is put back on
-# it. A logger appends to it, anchored line by line; the stick is pulled once
-# the record shows it writing and put back, and pulled again until the
-# machine says it left with a cycle in flight — changes no cycle settled held
-# open (away.c AwayLeft) — or PC_REPLUG_TRIES departures came between cycles,
-# which puts no C14 and is a HARNESS; each departure and what its return said
-# (its own stitch cut short, M-6, or not) in facts.txt. The open book judges
-# every return (Perambulation: the book taken, every waiter answered); the
-# logger ends and the power goes. Every cut
-# of the record — before the departure, across it, after the return — is
-# judged as every book's run is, and booted on the stick as the machine took
-# it. QEMU keeps every write it took, so the return finds the book as the
+# so every write and flush it takes is on the record, across a departure and a
+# return alike: the node outlives the device, and the device is put back on
+# it. A logger appends to it, anchored line by line, on a stick paced as a
+# slow one is (pc_stick_add paced): unpaced, QEMU's stick let the logger
+# settle all its cycles before the harness, reading the record once a second,
+# had seen it writing and pulled the stick — which left with nothing in
+# flight, and no departure after it could find any. The stick is pulled once
+# the record shows it writing and put back, and pulled again until the machine
+# says it left with a cycle in flight — changes no cycle settled held open
+# (away.c AwayLeft) — or PC_REPLUG_TRIES departures came between cycles, or
+# the logger answered before one did: either puts no C14 and is a HARNESS;
+# each departure and what its return said (its own stitch cut short, M-6, or
+# not) in facts.txt. C14 as QEMU's stick puts it: a departure with the cycle
+# in flight, whose stitch the throttle holds and the drain at the pull lets
+# through whole while a stitch is one command — so the medium holds no stitch
+# of the machine's own cut short, and the return's reading of its own
+# unfinished attempt (spec_v2 §16.5 п.12) is the stand's to ask
+# (stand_away_own_attempt, stand_away_cut_midway). The open book judges every
+# return (Perambulation: the book taken, every waiter answered); the logger
+# ends and the power goes.
+# Every cut of the record — before the departure, across it, after the return
+# — is judged as every book's run is, and booted on the stick as the machine
+# took it. QEMU keeps every write it took, so the return finds the book as the
 # kernel left it: any other verdict is a FAIL.
 PC_REPLUG_LINES=${PC_REPLUG_LINES:-400}
 PC_REPLUG_AFTER=${PC_REPLUG_AFTER:-24}     # record entries the logger lays before the stick is pulled
@@ -360,46 +370,81 @@ print(json.dumps(m.get("return")))
 QMP_EOF
 }
 
-# pc_stick_add IMG [RECORD [append]] — IMG handed to the machine as a USB
-# stick, its writes and flushes on RECORD when one is named: emptied first, or
-# with `append` gone on from where another machine left it (blklogwrites
+# pc_stick_add IMG [RECORD [append|paced]] — IMG handed to the machine as a
+# USB stick, its writes and flushes on RECORD when one is named: emptied first,
+# or with `append` gone on from where another machine left it (blklogwrites
 # log-append reads the record's superblock, which every entry rewrites — the
 # sector size with it: QEMU refuses log-sector-size beside log-append, "log-append
-# and log-sector-size are mutually exclusive").
+# and log-sector-size are mutually exclusive"). `paced` takes the stick's writes
+# at PC_STICK_PACE a second, as a slow stick takes them (a throttle node over the
+# record, so every write it lets through is on the record in the order taken):
+# its flushes and reads are not held, and a drain — the stick pulled — lets
+# every write it holds through at once.
+PC_STICK_PACE=${PC_STICK_PACE:-20}
 pc_stick_add() {
     local top=stick-file append=false size='"log-sector-size": 512, '
     [ "${3:-}" = append ] && append=true size=
-    set -- "$1" "${2:-}" '{"execute": "blockdev-add", "arguments": {"driver": "file", "node-name": "stick-file", "filename": "'"$1"'", "cache": {"no-flush": true}}}'
+    set -- "$1" "${2:-}" "${3:-}" '{"execute": "blockdev-add", "arguments": {"driver": "file", "node-name": "stick-file", "filename": "'"$1"'", "cache": {"no-flush": true}}}'
     if [ -n "$2" ]; then
         [ "$append" = true ] || : > "$2"
         set -- "$@" '{"execute": "blockdev-add", "arguments": {"driver": "file", "node-name": "stick-logfile", "filename": "'"$2"'", "cache": {"no-flush": true}}}' \
             '{"execute": "blockdev-add", "arguments": {"driver": "blklogwrites", "node-name": "stick-log", "file": "stick-file", "log": "stick-logfile", '"$size"'"log-super-update-interval": 1, "log-append": '"$append"'}}'
         top=stick-log
     fi
-    pc_qmp "${@:3}" '{"execute": "blockdev-add", "arguments": {"driver": "raw", "node-name": "stick", "file": "'"$top"'"}}' &&
-        mon_raw "device_add usb-storage,drive=stick,id=usbstick"
+    if [ "$3" = paced ]; then
+        set -- "$@" '{"execute": "object-add", "arguments": {"qom-type": "throttle-group", "id": "stick-pace", "limits": {"iops-write": '"$PC_STICK_PACE"'}}}' \
+            '{"execute": "blockdev-add", "arguments": {"driver": "throttle", "node-name": "stick-paced", "throttle-group": "stick-pace", "file": "'"$top"'"}}'
+        top=stick-paced
+    fi
+    pc_qmp "${@:4}" '{"execute": "blockdev-add", "arguments": {"driver": "raw", "node-name": "stick", "file": "'"$top"'"}}' \
+        >/dev/null && pc_stick_in
+}
+
+# pc_stick_in, pc_stick_out — the stick's device put into the machine and
+# taken out over QMP, whose answer is read: a refusal comes back with QEMU's
+# reason, and no command is taken for carried out unanswered. The monitor's
+# HMP line (mon_raw) is written and its socket let go a second later with
+# nothing read back (qemu-input.sh, nc -w 1): a paced replug's stick left once
+# and was never put back — no line of the machine's, and QEMU's answer to the
+# device_add unseen — where 42 departures over QMP since were each answered
+# and put back.
+pc_stick_in() {
+    pc_qmp '{"execute": "device_add", "arguments": {"driver": "usb-storage", "drive": "stick", "id": "usbstick"}}' >/dev/null ||
+        { harness "$PC_NAME: QEMU would not put the stick in (above)"; return 1; }
+}
+pc_stick_out() {
+    pc_qmp '{"execute": "device_del", "arguments": {"id": "usbstick"}}' >/dev/null ||
+        { harness "$PC_NAME: QEMU would not take the stick out (above)"; return 1; }
+}
+
+# pc_stick_seated — QEMU holds the stick's device (0), holds none (1), or did
+# not answer (2).
+pc_stick_seated() {
+    local list
+    list=$(pc_qmp '{"execute": "qom-list", "arguments": {"path": "/machine/peripheral"}}') || return 2
+    echo "$list" | grep -q '"name": "usbstick"'
 }
 
 # pc_stick_pull MARK — the stick taken out of the machine, said by it after
 # serial line MARK, and gone from QEMU too.
 pc_stick_pull() {
-    mon_raw "device_del usbstick" &&
+    pc_stick_out &&
         wait_for_line build/serial.log "the medium the volume lives on has left" "$WAIT_QUIET_S" $(($1 + 1)) &&
-        wait_until "$WAIT_QUIET_S" "QEMU to let go of the stick" '! ./tools/qemu-input.sh raw "info usb" 2>/dev/null | grep -q usbstick'
+        wait_until "$WAIT_QUIET_S" "QEMU to let go of the stick" 'pc_stick_seated; [ $? = 1 ]'
 }
 
-# pc_stick_boot IMG [RECORD] — the machine booted from a clone of this tree's
-# image, which the late arrival passes over, and IMG handed to it as its stick
-# (pc_stick_add): booted once the stand-in hands over to the volume.
+# pc_stick_boot IMG [RECORD [append|paced]] — the machine booted from a clone
+# of this tree's image, which the late arrival passes over, and IMG handed to it
+# as its stick (pc_stick_add): booted once the stand-in hands over to the volume.
 pc_stick_boot() {
-    local record=${2:-} append=${3:-}
+    local record=${2:-} how=${3:-}
     make run-stop >/dev/null 2>&1
     pc_clone build/boxos.img "$PC_DIR/inside.img" || return 1
     if ! make run-bg BOOTDISK="$PC_DIR/inside.img" ${PC_KEYS[@]+"${PC_KEYS[@]}"} >"$PC_DIR/run-bg.out" 2>&1; then
         harness "$PC_NAME: run-bg would not start: $(tail -1 "$PC_DIR/run-bg.out")"; return 1
     fi
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" || return 1
-    pc_stick_add "$1" "$record" "$append" || { harness "$PC_NAME: QEMU would not take $1 as a stick"; return 1; }
+    pc_stick_add "$1" "$record" "$how" || { harness "$PC_NAME: QEMU would not take $1 as a stick"; return 1; }
     wait_for_line build/serial.log "the stand-in .PID 1. hands over" "$WAIT_QUIET_S" || return 1
     wait_for_quiet "$BOOT_BURST_QUIET_S"
 }
@@ -422,8 +467,8 @@ pc_replug() {
     local n0 nack nq mark line
     pc_stick_base || return 1
     pc_clone "$PC_DIR/base.img" "$PC_DIR/run.img" || return 1
-    pc_stick_boot "$PC_DIR/run.img" "$PC_DIR/run.log" || { bad "$PC_NAME: the recorded stick never became the machine's volume"; return 1; }
-    PC_PATH=$(stand_path build/serial.log "$PC_CORES")
+    pc_stick_boot "$PC_DIR/run.img" "$PC_DIR/run.log" paced || { bad "$PC_NAME: the recorded stick never became the machine's volume"; return 1; }
+    pc_sign build/serial.log || return 1
     n0=$(pc_record_count "$PC_DIR/run.log")
     mark=$(wc -l < build/serial.log)
     type_line "quilltest log pc $PC_REPLUG_LINES" || { bad "$PC_NAME: the machine never took the logger"; return 1; }
@@ -444,17 +489,24 @@ pc_replug() {
 }
 
 # pc_departures — the stick pulled and put back until it leaves with a cycle
-# in flight, every return judged; MARK left at the last departure's line.
+# in flight, every return judged; MARK, the logger's line on the way in, left
+# at the last departure's line. A logger that answered before a departure came
+# with a cycle in flight lays no more entries to wait for: said at once, with
+# its own line (pc_logger_early).
 pc_departures() {
-    local n held tries=0
+    local n held tries=0 from=$mark gone=0 back=0
     while :; do
-        tries=$((tries + 1)) n=$(pc_record_count "$PC_DIR/run.log") mark=$(wc -l < build/serial.log)
+        tries=$((tries + 1)) n=$(pc_record_count "$PC_DIR/run.log")
         wait_until "$WAIT_QUIET_S" "the logger to lay $PC_REPLUG_AFTER entries" \
-            '[ "$(pc_record_count "$PC_DIR/run.log")" -ge $((n + PC_REPLUG_AFTER)) ]' || return 1
+            '[ "$(pc_record_count "$PC_DIR/run.log")" -ge $((n + PC_REPLUG_AFTER)) ] || pc_logger_answered "$from"' || return 1
+        pc_logger_answered "$from" && { pc_logger_early build/serial.log "$from" "$gone" "$back" $((tries - 1)); return 1; }
+        mark=$(wc -l < build/serial.log)
         pc_stick_pull "$mark" &&
-            mon_raw "device_add usb-storage,drive=stick,id=usbstick" &&
+            pc_stick_in &&
             wait_for_line -E build/serial.log "the volume is back, in seat|is MOUNTED|would not mount" "$WAIT_QUIET_S" $((mark + 1)) ||
             { bad "$PC_NAME: the stick did not leave and come back: $(tail -n +$((mark + 1)) build/serial.log | tr -d '\r' | grep -aE '^\[(TagFS|Storage)\]' | tail -1 | cut -c1-160)"; return 1; }
+        gone=$mark back=$(tail -n +$((mark + 1)) build/serial.log | grep -anE "the volume is back, in seat|is MOUNTED|would not mount" | head -1 | cut -d: -f1)
+        back=$((mark + back))
         held=$(tail -n +$((mark + 1)) build/serial.log | tr -d '\r' | grep -aoE 'its book is held open: [0-9]+ change' | head -1 | grep -oE '[0-9]+')
         line=$(tail -n +$((mark + 1)) build/serial.log | tr -d '\r' | grep -aoE '\[TagFS\] .*the volume is back, in seat.*' | head -1)
         echo "$line" | grep -q "its book as this kernel left it"
@@ -464,6 +516,36 @@ pc_departures() {
         [ "$tries" -lt "$PC_REPLUG_TRIES" ] ||
             { harness "$PC_NAME: none of $tries departures came with a cycle in flight — C14 was not put"; return 1; }
     done
+}
+
+# pc_logger_answered MARK — the logger said its verdict past serial line MARK.
+pc_logger_answered() {
+    tail -n +$(($1 + 1)) build/serial.log | grep -aqE '\[QUILL\] log: (PASS|FAIL) — '
+}
+
+# pc_logger_early LOG FROM GONE BACK N — the logger's answer past serial line
+# FROM of LOG, come before any of N departures came with a cycle in flight,
+# said with its own line. A PASS laid every line with no cycle in flight to
+# take: C14 was not put, a HARNESS. A FAIL printed while the stick was away —
+# past GONE, the line the last departure began at, and before BACK, the line
+# of its return — is the rule: a book whose medium has left refuses every
+# write until it is back (away.c AwayLeft), and that departure came between
+# cycles; a HARNESS naming the window. Any other FAIL was refused with its
+# stick seated: the kernel's FAIL, with its line.
+pc_logger_early() {
+    local at line
+    at=$(tail -n +$(($2 + 1)) "$1" | tr -d '\r' | grep -anE '\[QUILL\] log: (PASS|FAIL) — ' | head -1)
+    line=${at#*:} at=$(($2 + ${at%%:*}))
+    case "$line" in
+        *"log: PASS"*)
+            harness "$PC_NAME: the logger ended after $5 departure(s), none with a cycle in flight — C14 was not put ($line)" ;;
+        *)
+            if [ "$3" -gt 0 ] && [ "$at" -gt "$3" ] && [ "$at" -lt "$4" ]; then
+                harness "$PC_NAME: the logger was refused while the stick was away (serial lines $3..$4, departure $5, which came between cycles: a book refuses every write until its medium is back) — C14 was not put ($line)"
+            else
+                bad "$PC_NAME: the logger was refused with its stick seated (serial line $at, $([ "$3" -gt 0 ] && echo "past the return at line $4" || echo "before any departure")) — $line"
+            fi ;;
+    esac
 }
 
 # run_replug NAME [KEYS...] — NAME (replug, machineb) on the tree with the late
@@ -540,7 +622,7 @@ pc_machineb() {
     pc_stick_base || return 1
     pc_clone "$PC_DIR/base.img" "$PC_DIR/run.img" || return 1
     pc_stick_boot "$PC_DIR/run.img" "$PC_DIR/run.log" || { bad "$PC_NAME: machine A never took the stick"; return 1; }
-    PC_PATH=$(stand_path build/serial.log "$PC_CORES")
+    pc_sign build/serial.log || return 1
     pc_step log "quilltest log pc $PC_MACHINEB_LINES" '\[QUILL\] log: (PASS|FAIL) — ' \
         "pc-l.log:log:$PC_MACHINEB_LINES:$PC_MACHINEB_LINES" || return 1
     pc_said log

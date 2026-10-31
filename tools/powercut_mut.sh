@@ -128,8 +128,11 @@ EOF
 
 # The flush of a stitch's data (FIRST_FLUSH, §3.3) taken out: the stitch still
 # says DATA_FLUSHED, and the record shows its data behind no flush its first
-# atom is not. Asked of halt, whose last cycle is CLEAN and so always pays that
-# toll (StitchToll) — the anchor's cycle may spare it on a measured medium.
+# atom is not. Asked of overwrite, whose first round is the first cycle of the
+# boot and names fresh data: D is nought until a cycle of the mount settles
+# (cadence.c CadenceMountReset), so its toll is paid by the rule, whatever the
+# medium's pace (StitchToll) — not of halt, whose CLEAN stitch always pays but
+# on a book names no fresh data: the churn's 16 bytes ride it as a Slip.
 run_firstflushmut() {
     local PC_LIES=off
     mut_on src/kernel/tagfs/settle/sewing.c "logcheck mutation" <<'MUT_EOF'
@@ -139,7 +142,7 @@ a = "        rc           = VolumeFlushFor(s->data_need);\n"
 assert s.count(a) == 1
 open(p, "w").write(s.replace(a, "        rc           = OK;   /* logcheck mutation: the stitch's data is never flushed before it */\n"))
 MUT_EOF
-    mut_run firstflushmut halt order fail \
+    mut_run firstflushmut overwrite order fail \
         "the flush of a stitch's data taken out, a stitch that says DATA_FLUSHED stands before its data's flush"
     restore src/kernel/tagfs/settle/sewing.c
 }
@@ -161,7 +164,9 @@ MUT_EOF
 
 # The next file id derived from the ribbon past the Tally (§4.5 п.8) taken
 # out: the slot's count and the Tally's leaves stand, and a cut whose ribbon
-# bore the anchor's file hands its id out again.
+# bore the anchor's file hands its id out again — to the file its boot is
+# asked to make (pc_nextfid: persist write; anchor_test finds its own file on
+# that ribbon and makes none).
 run_booknextfidmut() {
     local PC_LIES=off
     mut_on src/kernel/tagfs/mount/book_mount.c "logcheck mutation" <<'MUT_EOF'
