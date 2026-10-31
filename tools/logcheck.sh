@@ -117,6 +117,9 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_book_replug.sh"
 # A logger of a line a second on a book (loggerhour): tools/logcheck_book_logger.sh.
 . "$(dirname "$0")/logcheck_book_logger.sh"
+# A book's roomback by the kernel's word, and the write that waits on no Tally
+# (roombackmut): tools/logcheck_room.sh.
+. "$(dirname "$0")/logcheck_room.sh"
 
 # Waits for the SHELL BANNER, not for "userspace is starting".
 #
@@ -3879,7 +3882,15 @@ run_haltcycle() {
 #              never be told there is no room, and land whole — read back by
 #              the guest, then off the medium by volume-read, every block of it
 #              beginning with its own stream, _qra.bin gone, the volume
-#              consistent once the machine halted through bye.
+#              consistent once the machine halted through bye. On a book the
+#              write waits for the Tallies that make the reserve exact too, and
+#              may be refused no-space past them — the guest's PENDING — by
+#              what the book keeps and holds itself, named, more than when the
+#              volume was first full, the kernel's own word of both at each
+#              refusal and of the reserve measured to the block or a turn of
+#              the ring waited for (spec_v2 §16.6 п.8, logcheck_room.sh
+#              roomback_book_judge; roombackmut turns it): that much short and
+#              no more, what it took read back whole.
 #   emptyfull  the image as built, `quilltest emptyfull FULLVOLUME_EMPTIES`:
 #              that many empty files, the volume filled to its no-space,
 #              anchored, and every one of them deleted, then the file that
@@ -4043,15 +4054,16 @@ fullvolume_halted() {
     chk $? "fullvolume: $1 — no panic, no exception, nothing owed proved unserved${fault:+: $fault}"
 }
 
-# fullvolume_roomback_medium — off the copy: no _qra.bin, and _qrc.bin of
-# FULLVOLUME_MIB MiB whose every block begins with its own stream.
+# fullvolume_roomback_medium BYTES — off the copy: no _qra.bin, and _qrc.bin
+# of BYTES (FULLVOLUME_MIB MiB when none is given) whose every block begins
+# with its own stream.
 fullvolume_roomback_medium() {
     local img="$SCRATCH/fullvolume.room.img" out="$SCRATCH/fullvolume.qrc.bin" rc
     ! grep -qE '^ +_qra\.bin ' "$SCRATCH/fullvolume.room.list"
     chk $? "fullvolume: roomback — volume-read finds no _qra.bin on the medium"
     rm -f "$out"
     python3 tools/volume-read.py "$img" get _qrc.bin -o "$out" >/dev/null 2>&1
-    python3 - "$out" "$((FULLVOLUME_MIB << 20))" >"$out.said" 2>&1 <<'FULLVOLUME_EOF'
+    python3 - "$out" "${1:-$((FULLVOLUME_MIB << 20))}" >"$out.said" 2>&1 <<'FULLVOLUME_EOF'
 import struct, sys
 path, want = sys.argv[1], int(sys.argv[2])
 M = (1 << 64) - 1
@@ -4081,9 +4093,9 @@ FULLVOLUME_EOF
 }
 
 fullvolume_judge_roomback() {
-    local L="$SCRATCH/serial.fullvolume.room.log" full verdict last
+    local L="$SCRATCH/serial.fullvolume.room.log" full verdict last TOOK
     full=$(tr -d '\r' < "$L" | grep -aoE '\[QUILL\] roomback: the volume is full — .*' | tail -1)
-    verdict=$(tr -d '\r' < "$L" | grep -aoE '\[QUILL\] roomback: (PASS|FAIL) — .*' | tail -1)
+    verdict=$(tr -d '\r' < "$L" | grep -aoE '\[QUILL\] roomback: (PASS|PENDING|FAIL) — .*' | tail -1)
     if [ -z "$full" ]; then
         harness "fullvolume: roomback never filled the volume, so the case was not asked (${verdict:-no verdict at all})"
         return
@@ -4094,11 +4106,16 @@ fullvolume_judge_roomback() {
         bad "fullvolume: roomback — _qra.bin deleted, and the machine went quiet without $FULLVOLUME_SILENT: the write of a GiB never answered (last: $last)"
         return
     fi
-    grep -aq '^\[QUILL\] roomback: PASS' "$L"
-    chk $? "fullvolume: roomback — a GiB written the moment a GiB was deleted got its room, every byte, and read back whole (${verdict#*— })"
+    if [ "$(stand_format)" = v2 ]; then
+        fullvolume_roomback_book "$L" "${verdict#\[QUILL\] roomback: }"
+    else
+        TOOK=$((FULLVOLUME_MIB << 20))
+        grep -aq '^\[QUILL\] roomback: PASS' "$L"
+        chk $? "fullvolume: roomback — a GiB written the moment a GiB was deleted got its room, every byte, and read back whole (${verdict#*— })"
+    fi
     fullvolume_halted room
     fullvolume_census room
-    fullvolume_roomback_medium
+    fullvolume_roomback_medium "$TOOK"
 }
 
 fullvolume_judge_emptyfull() {
@@ -9026,7 +9043,7 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 43 (healthy says how) and
-# the 293 of the stand's own thirty-eight suites: stand 28, stand_lock 4,
+# the 301 of the stand's own thirty-nine suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
@@ -9035,12 +9052,12 @@ STAND_HELD="
 # parcel 13, tract 1, record_splices 4, stand_tally 15, stand_ribbon 6,
 # stand_stitch 12, stand_stitch_edge 8, stand_docket 14, stand_fresh 7,
 # stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
-# stand_endpaper 5.
+# stand_endpaper 6, stand_book_room 7.
 # Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=336
+STAND_RUN=344
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -12288,6 +12305,7 @@ case "${1:-both}" in
     latearrival) run_latearrival ;;
     replug)   run_replug ;;
     replugwrite) run_replugwrite ;;
+    roombackmut) run_roombackmut ;;
     nofsgsbase) run_nofsgsbase ;;
     logsave)  run_logsave ;;
     mountfail) run_mountfail ;;
@@ -12391,7 +12409,7 @@ case "${1:-both}" in
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
     all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1
