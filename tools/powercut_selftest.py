@@ -97,6 +97,8 @@ def SelfTest(pc):
     try:
         CompactTests(pc, Want)
         BookTests(pc, Want, Plan, Synthetic)
+        DurableTests(pc, Want, Synthetic)
+        ReissueTests(pc, Want, Synthetic)
         LieTests(pc, Want, Synthetic)
         LieRowTests(pc, Want, Synthetic)
         BookRowTests(pc, Want, Synthetic)
@@ -265,6 +267,15 @@ def Said(fn, *args):
     return got
 
 
+def Held(fn, *args):
+    """What fn printed as {key: (row, seen)}: the caveat row each verdict is
+    held under ("-" for none) and what it saw."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        fn(*args)
+    return {c[0]: (c[2], c[3]) for c in (line.split("\t") for line in out.getvalue().splitlines()) if len(c) == 5}
+
+
 def Judged(pc, listing, results, lies=None, lie_results=None):
     """A Judge over a run of `listing`, planned, its cuts answered by
     results(cid) — None for a cut volume-read could not judge — and its lie
@@ -378,6 +389,110 @@ def BookTests(pc, Want, Plan, Synthetic):
                                       lambda cid: Book([])), 7, 40)
     Want(got.get("slip:blocks", ("",))[0] == "behaves",
          "one block of it, its tail engrossed for the one Tally, is what a Slip writer owes (%s)" % (got,))
+
+    def Filled(blocks, lines):
+        shape = Synthetic([[(8, None, "file", "fid 7 data, named by stitch seq %d" % n) for n in range(blocks)]])
+        return Said(pjb.SlipBlocks, Judged(pc, shape, lambda cid: Book([])), 7, lines).get("slip:blocks", ("",))[0]
+
+    # A write that does not lie wholly in the file's last block lays blocks
+    # (plot_slip.c PlotSlipBegin): the line that crosses a block's end lays the
+    # block it fills and the tail it begins in the next; one that ends on it
+    # lays the block alone, and the line after begins a Slip over a hole.
+    Want(Filled(4, 171) == "behaves" and Filled(5, 171) == "behaves" and Filled(6, 171) == "fail",
+         "171 lines of 48 bytes fill 2 blocks, a line crossing the end of each: 2 full blocks and the 2 tails "
+         "the crossing lines begin, and one for the end — 5 (%s, %s, %s)"
+         % (Filled(4, 171), Filled(5, 171), Filled(6, 171)))
+    Want(Filled(6, 256) == "behaves" and Filled(7, 256) == "fail",
+         "256 lines fill 3 blocks, the 256th ending on the third's end: 3 full blocks, the 2 tails of the "
+         "first two crossings, none for the third, and one for the end — 6 (%s, %s)"
+         % (Filled(6, 256), Filled(7, 256)))
+
+
+def DurableTests(pc, Want, Synthetic):
+    """A writer that never stops (halt, race): its file past the flush a step
+    stands behind holds a record it wrote — no older than the seq it said last
+    before the halt, and no newer than the medium took: the final state is
+    every write of the record, and the seq quilltest verify reads back off it
+    is the newest record of the writer's any cut of the record holds. On a book
+    its 16 bytes ride the stitches as a Slip (spec_v2 §2.8), thousands of
+    records between two stitches, so the record's count of writes bounds
+    nothing there; nor does the writer's own word, whose lines reach the
+    serial port through the display's lane after its writes, and a halt ends
+    the programs before the lane is drained (system_halt.c)."""
+    sys.modules.setdefault("powercut", pc)
+    import powercut_judge
+    shape = Synthetic([[(8, None, "stitch", "stitch seq 4, 8 sector(s)")], []])
+
+    def Durable(seq, held, said=(), lo=3700):
+        """The verdict on a cut holding SEQ, the final state read back at HELD
+        (None: the final state never booted), the churn saying SAID from LO."""
+        item = {"name": "_qt_churn", "record": "quill", "from": lo, "to": 0, "size": 16}
+        sha = hashlib.sha256(pc.RecordBytes("quill", seq)).hexdigest()
+        j = Judged(pc, shape, lambda cid: dict(Book([]), new_files=[[81, "_qt_churn", "live", True, 16, sha]]))
+        with open(os.path.join(j.run.dir, "steps.jsonl"), "w") as fh:
+            fh.write(json.dumps({"step": "halt", "cmd": "system_powerdown", "before": 0, "ack": 2, "quiet": 2,
+                                 "line": "", "durable": item, "noquiet": False}) + "\n")
+        with open(os.path.join(j.run.dir, "run.serial.log"), "w") as fh:
+            fh.write("".join("[QUILL] churn: _qt_churn fid=81 wrote seq=%u\n" % s for s in said))
+        if held is not None:
+            os.makedirs(os.path.join(j.run.dir, "boots"), exist_ok=True)
+            with open(os.path.join(j.run.dir, "boots.txt"), "w") as fh:
+                fh.write("%s\t0\t0\t-\tthe final state\n" % j.run.final)
+            with open(os.path.join(j.run.dir, "boots", j.run.final + ".serial.log"), "w") as fh:
+                fh.write("[QUILL] verify: PASS — _qt_churn fid=81 seq=%u bytes=16: magic 0x5155494c and checksum "
+                         "0x%x read back as written\n" % (held, pc.Mix(0x5155494C, held)))
+        return Said(powercut_judge.Judge(pc.Run(j.run.dir), j.base, {}, "p", 0).Durable).get(
+            "durable:_qt_churn@halt", ("", ""))
+
+    Want(Durable(3739, 3739, [3600, 3700])[0] == "behaves",
+         "the halt's stitch names seq 3739 of a churn that said 3700 last, the final state reads 3739 back: a "
+         "record it wrote past its word, though the record holds 2 entries (%s)" % (Durable(3739, 3739, [3700]),))
+    Want(Durable(3850, 3850, [3700])[0] == "behaves",
+         "the final state reads 3850 back of a churn whose log said 3700 last — its 3800 left in the display's "
+         "lane when the halt ended it: a record the medium took, never judged by the log (%s)"
+         % (Durable(3850, 3850, [3700]),))
+    Want(Durable(57, 57, lo=1)[0] == "behaves",
+         "a churn stopped before its first word, the final state reading seq 57 back past a record of 2 entries "
+         "from 1: bounded by the medium, not by format v1's count of writes (%s)" % (Durable(57, 57, lo=1),))
+    Want(Durable(3740, 3739, [3700])[0] == "fail" and "3700..3739 allowed" in Durable(3740, 3739, [3700])[1],
+         "a record past the newest the final state holds is no record the medium took: fails, and says the seqs "
+         "it allowed (%s)" % (Durable(3740, 3739, [3700]),))
+    Want(Durable(3699, 3739, [3700])[0] == "fail", "a record older than the floor the halt stood behind fails")
+    most = 3700 + shape["entries"]
+    Want(Durable(most, None)[0] == "behaves" and Durable(most + 1, None)[0] == "fail",
+         "with no final state read back, the record's count of entries past the floor bounds it, %u — format "
+         "v1's rule, where each record is a write of its own (%s, %s)"
+         % (shape["entries"], Durable(most, None), Durable(most + 1, None)))
+
+
+def ReissueTests(pc, Want, Synthetic):
+    """No booted prefix cut hands a create an id its medium shows. On a book
+    the cut that asks it bears the anchor's file on its ribbon ahead of the
+    slot it stands on, and anchor_test finds the file there and creates none:
+    the boot is asked for a file the medium never held (persist write), and
+    the id it is given is what the verdict reads. On format v1, anchor_test's
+    own create, as it always was."""
+    shape = Synthetic([[(8, None, "stitch", "stitch seq 4, 8 sector(s)")], []])
+
+    def Reissue(log, fmt="v2"):
+        j = Judged(pc, shape, lambda cid: dict(Book([]), next_file_id=82, ledger_next=81))
+        j.base = dict(j.base, format=fmt)
+        j.run.steps = [{"step": "anchor_test", "line": "[ANCHOR] WROTE+ANCHORED fid=81.", "durable": None}]
+        j.boots = [{"id": "e0-all", "why": "prefix through entry 1 (stitch); the boundary after the flush of "
+                    "anchor_test", "log": log}]
+        return Said(j.Reissue, "anchor_test").get("reissue", ("", ""))
+
+    found = "[4] [ANCHOR] PASS — anchored write survived hard crash (seq=1)\n"
+    wrote = "[PERSIST] WROTE fid=%u seq=1 magic=0x42504552 checksum=0x1\n"
+    Want(Reissue(found + wrote % 81)[0] == "defect",
+         "a book: the ribbon bears fid 81 ahead of the slot's 81, and the boot's create is given 81 — an id its "
+         "medium shows, given again (%s)" % (Reissue(found + wrote % 81),))
+    Want(Reissue(found + wrote % 82)[0] == "behaves", "and given 82, past every id the medium shows, it behaves")
+    Want(Reissue(found)[0] == "fail",
+         "a book's boot that created nothing — anchor_test found its file — asked no question: no PASS for it "
+         "(%s)" % (Reissue(found),))
+    Want(Reissue("[ANCHOR] WROTE+ANCHORED fid=81. Now kill QEMU and re-run.\n", "v1")[0] == "defect",
+         "format v1: anchor_test's own create given 81 below the 82 due is the reissue, as it was")
 
 
 def LieTests(pc, Want, Synthetic):
@@ -582,13 +697,20 @@ def SmudgeRowTests(pc, Want, Synthetic, lie):
                        [(2, 1001, "stitch", "stitch seq 2, 2 sector(s)")]])
     plan = lie.LiePlanner(shape).Run()
 
-    def Smudge(sewn, said):
+    def Smudge(sewn, said, caveats=None, medium=None):
         # Stitch 1 is sewn on from e0-all — epoch 1's cuts, e1-none among
-        # them, are that medium and more.
+        # them, are that medium and more. With MEDIUM, the run signed by it:
+        # smudge:wiped's (seen, what).
         j = Judged(pc, shape, lambda cid: Book([[1, "a", 3, "aa"]], last=1, sewn=sewn if cid == "e0-all" or
                                                cid.startswith("e1") else ()), plan,
                    lambda m: Book([[1, "a", 3, "aa"]], said.get(m["id"], ([], False))[0], 0,
                                   said.get(m["id"], ([], False))[1]))
+        if medium is not None:
+            j.caveats, j.medium = caveats or {}, medium
+            return Said(lie.Judge, j).get("smudge:wiped", ("", ""))
+        if caveats is not None:
+            j.caveats = caveats
+            return Held(lie.Judge, j).get("smudge:wiped", ("", ""))
         got = Said(lie.Judge, j)
         return got.get("smudge:said", ("",))[0], got.get("smudge:wiped", ("",))[0]
 
@@ -616,6 +738,26 @@ def SmudgeRowTests(pc, Want, Synthetic, lie):
     Want(Smudge([[1, [994, 995]]], {"m1-0-t": lost})[1] == "fail",
          "stitch 1 at 994-995, wholly inside the page of stitch 2 in flight, nothing of either left: a settled "
          "stitch lost with no word — smudge:wiped fails, the format's answer the owner's to give")
+    # The owner's answer (spec_v2 §16.6 п.5): on a fixed medium the ribbon
+    # keeps the medium's own atom, and the settled stitches a spoilt page
+    # wipes whole with nothing past them — the newest, and those before it on
+    # its page — are the format's limit there: a caveat, signed by the machine
+    # (powercut.sh pc_caveats); on a removable one the FAIL above.
+    fixed = {"smudge:wiped": "book:wiped", "smudge:wiped:fixed": "book:wiped:fixed"}
+    Want(Smudge([[1, [994, 995]]], {"m1-0-t": lost}, fixed) == ("book:wiped:fixed", "defect"),
+         "the same wipe on a fixed medium is the defect its row names, held under book:wiped:fixed — the "
+         "format's limit there (§16.6 п.5) — and not a FAIL (%s)" % (Smudge([[1, [994, 995]]], {"m1-0-t": lost},
+                                                                            fixed),))
+    Want(Smudge([[1, [990, 991, 5000]]], {}, fixed) == ("book:wiped", "behaves"),
+         "a fixed medium no smudge wipes a settled stitch on behaves under the plain row, never held as the "
+         "limit (%s)" % (Smudge([[1, [990, 991, 5000]]], {}, fixed),))
+    Want(Smudge([[1, [994, 995]]], {"m1-0-t": lost}, {"smudge:wiped": "book:wiped"}) == ("book:wiped", "fail"),
+         "and with no machine's signature for the limit — a removable medium — the wipe fails")
+    for medium in ("removable", "no medium: the Boardroom never named seat 0, ATA primary master"):
+        got = Smudge([[1, [994, 995]]], {"m1-0-t": lost}, {"smudge:wiped": "book:wiped"}, medium)
+        Want(got[0] == "fail" and "signed %s" % medium in got[1],
+             "the FAIL of a run the limit's row was not given says what the run was signed: %s (%s)"
+             % (medium, got[1][:160]))
     Want(Smudge([[1, [990, 991, 5000]]], {}) == ("behaves", "behaves"),
          "stitch 1 at 990, 991 and on into the next Quire at 5000: sector 992 the page spoils is not its own, "
          "and nothing is owed")

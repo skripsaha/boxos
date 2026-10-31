@@ -729,6 +729,30 @@ for call in re.findall(r'kprintf\(((?:\s*"(?:[^"\\]|\\.)*")+)', src):
 EOF
 }
 
+# medium_says DIR — the logs stand_seat_kind reads, in the kernel's own words:
+# the Boardroom's seat line and TagFS's mount line, each format read off its
+# source by the arguments it prints (boardroom.c, tagfs.c), so a word changed
+# there is a FAIL of the selftest and not a book's every run unsigned.
+# DIR/fixed.log: a volume on the seat the Boardroom calls plainly;
+# DIR/removable.log: one on a seat it calls removable.
+medium_says() {
+    python3 - "$1" src/kernel/core/boardroom/boardroom.c src/kernel/tagfs/tagfs.c <<'EOF'
+import os, re, sys
+d, room, fs = sys.argv[1], open(sys.argv[2]).read(), open(sys.argv[3]).read()
+seat = re.search(r'kprintf\("([^"]*)\\n",\s*s->number,\s*s->name,\s*s->removable \? "([^"]*)" : ""\);', room)
+mount = re.search(r'kprintf\("([^"]*)\\n",\s*g_tagfs_seat,\s*BoardroomSeatName\(g_tagfs_seat\)\);', fs)
+if not seat or not mount:
+    sys.exit("medium_says: %s prints no %s line by its arguments" % (
+        (sys.argv[2], "seat") if not seat else (sys.argv[3], "mount")))
+ata, usb = "ATA primary master", "usb0 QEMU QEMU HARDDISK"
+lines = {"fixed": [(seat, (0, ata, "")), (mount, (0, ata))],
+         "removable": [(seat, (0, ata, "")), (seat, (1, usb, seat.group(2))), (mount, (1, usb))]}
+for name, said in lines.items():
+    with open(os.path.join(d, name + ".log"), "w") as fh:
+        fh.write("".join(m.group(1).replace("%u", "%d") % args + "\n" for m, args in said))
+EOF
+}
+
 # sc_boot_cut POINT — the POINT kernel's image, settled as PowerCut's base is:
 # booted once and switched off by its power button, its mount's writes and the
 # shutdown's cycle on the disk — no anchor was taken, so no cycle of that boot
@@ -816,6 +840,45 @@ run_selftest() {
     done <<SAYS_EOF
 $says
 SAYS_EOF
+    # A smudge's wipe is the format's limit on a fixed medium alone (spec_v2
+    # §16.6 п.5): the medium read off the kernel's own words of the volume's
+    # seat, as boardroom.c and tagfs.c print them (medium_says), and the
+    # limit's row given only to a book on one.
+    medium_says "$PC_DIR"
+    chk $? "selftest: the Boardroom's seat line and the mount's line read off the kernel's source"
+    said="$(stand_seat_kind "$PC_DIR/fixed.log"), $(stand_seat_kind "$PC_DIR/removable.log"), $(stand_seat_kind "$PC_DIR/planner.txt")"
+    [ "$said" = "fixed, removable, no medium: $PC_DIR/planner.txt mounted no volume" ]
+    chk $? "selftest: a volume's medium is fixed or removable as the Boardroom calls its seat ($said)"
+    [ "$(PC_FORMAT=v2 PC_MEDIUM=fixed pc_caveats halt | grep -cx 'smudge:wiped:fixed=book:wiped:fixed')" = 1 ] &&
+        [ "$(PC_FORMAT=v2 PC_MEDIUM=removable pc_caveats halt | grep -c '^smudge:wiped:fixed=')" = 0 ] &&
+        [ "$(PC_FORMAT=v1 PC_MEDIUM=fixed pc_caveats halt | grep -c '^smudge:')" = 0 ] &&
+        [ "$(caveat_step book:wiped:fixed)" = limit ]
+    chk $? "selftest: a smudge's wipe of the settled stitches of a spoilt page is held as the format's limit (row book:wiped:fixed, step '$(caveat_step book:wiped:fixed)') on a book on a fixed medium alone"
+    # The run signed (pc_sign): a way down it cannot read stops the scenario,
+    # said; a book's medium it cannot read is said, and the run goes on with
+    # no limit's row; format v1 asks for no medium.
+    sed 's/ATA primary master/NVMe 0 ns 1/' "$PC_DIR/fixed.log" >"$PC_DIR/nvme.log"
+    grep -v '^\[Boardroom\]' "$PC_DIR/fixed.log" >"$PC_DIR/unseated.log"
+    said=$(PC_FORMAT=v1; pc_sign "$PC_DIR/nvme.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
+    case "$said" in *HARNESS*"no path: seat 'NVMe 0 ns 1' is none this knows"*"rc=1 "*) true ;; *) false ;; esac
+    chk $? "selftest: a run whose writes go down a way stand_path does not know stops, and says why ($(echo $said | tail -c 120))"
+    said=$(PC_FORMAT=v1; pc_sign "$PC_DIR/unseated.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
+    [ "$said" = "rc=0 ATA sync|unknown" ]
+    chk $? "selftest: format v1 is signed by its way down alone, and asks no medium ($said)"
+    said=$(PC_FORMAT=v2; pc_sign "$PC_DIR/unseated.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
+    case "$said" in *HARNESS*"medium is not known"*"rc=0 ATA sync|no medium: the Boardroom never named seat 0"*) true ;; *) false ;; esac
+    chk $? "selftest: a book whose medium the Boardroom never named is said, and its run goes on unsigned ($(echo $said | tail -c 120))"
+    said=$(PC_FORMAT=v2; pc_sign "$PC_DIR/fixed.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
+    [ "$said" = "rc=0 ATA sync|fixed" ]
+    chk $? "selftest: a book on a fixed medium is signed by both ($said)"
+    # A logger that answered before a departure came with a cycle in flight
+    # (pc_logger_early): ended, or refused while its stick was away — C14 not
+    # put; refused with its stick seated — the kernel's FAIL, with its line.
+    printf '%s\n' "boot" "[TagFS] the medium the volume lives on has left" "[QUILL] log: FAIL — an append answered -5" \
+        "[TagFS] the volume is back, in seat 1" "[QUILL] log: PASS — pc-l.log (fid 81): 400 lines" >"$PC_DIR/away.log"
+    said="$(pc_logger_early "$PC_DIR/away.log" 0 1 4 1)|$(pc_logger_early "$PC_DIR/away.log" 3 1 4 1)|$(pc_logger_early "$PC_DIR/away.log" 0 1 2 1)"
+    case "$said" in *HARNESS*"refused while the stick was away (serial lines 1..4"*"answered -5"*"|"*HARNESS*"ended after 1 departure"*"400 lines"*"|"*FAIL*"refused with its stick seated (serial line 3"*"answered -5") true ;; *) false ;; esac
+    chk $? "selftest: a logger's early answer is said with its own line — a refusal while its stick was away and an end are C14 not put, a refusal past the return is the kernel's"
     pc_build 0 || return
     pc_base && pc_logged && pc_step anchor_test anchor_test '\[ANCHOR\] WROTE\+ANCHORED fid=[0-9]+\.' && pc_cut_power \
         || { bad "selftest: no record to judge (logs in $PC_DIR)"; return; }
