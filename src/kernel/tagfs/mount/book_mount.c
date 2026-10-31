@@ -10,6 +10,7 @@
 #include "../tag_registry/tag_registry.h"
 #include "../use_memory/use_memory.h"
 #include "../settle/sewing.h"
+#include "under_glass.h"
 #include "../settle/escheat.h"
 #include "boardroom.h"
 #include "crypto.h"
@@ -498,6 +499,16 @@ error_t MountReadBook(const char** what)
                 (unsigned long long)(g_book.data_end - g_book.frame.data_block), (unsigned long long)g_book.files);
     else
         BookFreeSaid();
+    /* A ribbon that goes on at the start of the next_quire it names
+     * (RibbonGoesOnAt) stands in it with none given past it, and a change
+     * claims room past a next_quire (RibbonRoomOf): without one every change
+     * but a freeing one waits for a cycle to give it (ERR_WOULD_BLOCK). So
+     * the mount asks first, before the door opens and any cycle runs; past
+     * the free it says, which is the volume's as it lies (bookcensus.py). A
+     * refusal is the first cycle's to ask again (RibbonNextGivenAtMount). A
+     * book under glass takes no ground. */
+    if (!TagFSIsUnderGlass())
+        RibbonNextGivenAtMount();
     return OK;
 }
 

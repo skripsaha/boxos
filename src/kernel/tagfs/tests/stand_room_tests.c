@@ -177,7 +177,9 @@ static error_t StandRoomShort(StandInkGround* g, uint64_t* ground)
 // while Fallow rests a block, and the allocator answers ERR_WOULD_BLOCK. The
 // write overwrites a block the file has, so its own ground was never the
 // question. Red before: the job ended on the allocator's answer, and the
-// program was told ERR_WOULD_BLOCK, which its boxlib drops.
+// program was told ERR_WOULD_BLOCK, which its boxlib drops. Format v1's — its
+// pool, its Spares and a write in place; a book filled to its refusal says so
+// to every write (its analog).
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandRoomSpareThroughThePort(void)
@@ -695,7 +697,8 @@ out:
 
 static const TestCase g_stand_room_tests[] = {
     { .name  = "stand_room_spare_through_the_port", .func = TestStandRoomSpareThroughThePort,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_fresh_ground_fill_and_empty" },
     { .name  = "stand_room_create_grows_the_registry",
       .func  = TestStandRoomCreateGrowsTheRegistry, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V1, .analog = "stand_docket_claim_refused" },

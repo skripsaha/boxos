@@ -32,6 +32,7 @@ typedef struct {
     uint64_t next;           /* the next_quire the slot names */
     uint64_t next_blocks;
     uint64_t at;             /* the block the ribbon goes on at */
+    uint32_t atom;           /* the ribbon's atom, in sectors: read while the volume is up, its put-back past */
     uint64_t seq;            /* the last stitch the Tally took in, and its Clasp */
     uint32_t clasp;
     uint64_t top;            /* the largest seq the mount saw: a stitch laid takes one past it */

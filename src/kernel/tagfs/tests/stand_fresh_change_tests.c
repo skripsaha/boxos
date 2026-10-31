@@ -71,8 +71,8 @@ static TestResult TestStandChangeNamesOnlyNew(void)
     TEST_ASSERT_EQ(tagfs_create_file("fresh-new.bin", NULL, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 10u * TAGFS_BLOCK_SIZE, 1), 10 * TAGFS_BLOCK_SIZE, "ten blocks written");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
-    StandFreshPrint(fid, &runs);
-    TEST_ASSERT_EQ(runs, 1, "in one run");
+    runs = StandFreshForcedRuns(fid, false);
+    TEST_ASSERT(runs >= 1, "in one run, but where ground another owner holds breaks it (Allotment 1)");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, m.size, TAGFS_BLOCK_SIZE, 2), TAGFS_BLOCK_SIZE, "a block is appended");
     RibbonClaimsStand(&claimed, &reserved);
     TestEvidence("bytes the ribbon holds claimed after one appended block", claimed);
@@ -83,7 +83,8 @@ static TestResult TestStandChangeNamesOnlyNew(void)
     TEST_ASSERT(claimed == 2u * one && reserved == 0, "and the ribbon holds two such claims, no more");
     strips = StandChangeStrips(fid);
     if (StandBlockOf(fid, 10, &a) && StandBlockOf(fid, 11, &b) && b == a + 1u)
-        TEST_ASSERT_EQ(strips, 2, "the second went on the run the first began: the settled run, and one run of both");
+        TEST_ASSERT_EQ(strips, runs + 1u,
+                       "the second went on the run the first began: the settled runs, and one run of both");
     TEST_ASSERT(StandChangeSettled(&s, &flushes, &fresh) && fresh == 2, "settled, its stitch names two fresh blocks");
     TEST_ASSERT(StandStitchRemount() && StandChangeStrips(fid) == strips && StandFreshHolds(&m, fid),
                 "and mounted again the record is the one memory held, Strip for Strip");

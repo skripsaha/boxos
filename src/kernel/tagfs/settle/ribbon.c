@@ -13,9 +13,11 @@
  * next_quire kept.
  *
  * The cursor is laid by the mount, with the door shut, where the walk of the
- * ribbon ended (RibbonCursorMount) and moved by the Settle's holder alone — a
- * stitch settled, a write refused. Nothing else changes it, so it needs no
- * lock: the stand reads it between two cycles, on the runner's core.
+ * ribbon ended (RibbonCursorMount), given a next_quire there where it wants one
+ * and the map has one (RibbonNextGivenAtMount), and moved by the Settle's
+ * holder alone from the door's opening — a next_quire given, a stitch settled,
+ * a write refused. Nothing else changes it, so it needs no lock: the stand
+ * reads it between two cycles, on the runner's core.
  */
 
 static RibbonCursor s_cursor;
@@ -303,12 +305,53 @@ uint64_t RibbonSeqNext(void)
     return s_cursor.given;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+static volatile bool s_stand_next_refused;
+
+bool RibbonStandNextRefused(bool armed)
+{
+    return __atomic_exchange_n(&s_stand_next_refused, armed, __ATOMIC_ACQ_REL);
+}
+#endif
+
+/* Whether the cursor wants a next_quire: none named, or the one named off an
+ * atom of the ribbon. */
+static bool RibbonNextWanted(const RibbonCursor* c)
+{
+    return c->up && !(c->next.blocks && RibbonQuireOn(&c->next, c->atom));
+}
+
+/* A Quire of the map for the next_quire, named by the cursor: OK, or the
+ * map's refusal. */
+static error_t RibbonNextTake(RibbonCursor* c)
+{
+    uint64_t start = 0;
+#ifdef CONFIG_VOLUME_TESTS
+    if (__atomic_exchange_n(&s_stand_next_refused, false, __ATOMIC_ACQ_REL))
+        return ERR_TAGFS_NO_SPACE;
+#endif
+    error_t rc = BlockMapTakeQuire(GROUND_RIBBON, c->quire_blocks,
+                                   c->atom / TAGFS_BLOCK_SECTORS ? c->atom / TAGFS_BLOCK_SECTORS : 1u,
+                                   EndpaperKeeps(c->quire_blocks), g_book.frame.data_block,
+                                   c->quire.block + c->quire.blocks, &start);
+    if (rc != OK)
+        return rc;
+    if (c->next.blocks)
+        kprintf("[TagFS] the next_quire the ribbon names, %llu+%llu, a writer of a smaller atom took off a "
+                "flash page of %u bytes: the ribbon names %llu+%llu, laid on pages, in its stead (§16.6 п.2)\n",
+                (unsigned long long)c->next.block, (unsigned long long)c->next.blocks,
+                c->atom * BOOK_SECTOR_BYTES, (unsigned long long)start, (unsigned long long)c->quire_blocks);
+    c->next = (RibbonQuire){ start, c->quire_blocks };
+    BinderRibbonGiven(&c->next);
+    return OK;
+}
+
 /*
- * ‼ THE NEXT QUIRE IS GIVEN AHEAD OF NEED (§3.6): the first stitch of each
- * Quire of the ribbon asks for the one after it, and every stitch after it
- * asks again while none was given — so that a Quire's end, an early close or
- * a refused write always has somewhere to go on, named in every StitchHead
- * from then on (M-5). It is a whole Quire on an atom of the data run, looked
+ * ‼ THE NEXT QUIRE IS GIVEN AHEAD OF NEED (§3.6): the mount asks for one
+ * where the cursor wants it, every cycle asks at its TAKE while none was
+ * given — before anything of the cycle claims room past it — and every stitch
+ * that settles asks again where the ribbon then stands with none — so that a Quire's end, an early close or a refused write always has somewhere
+ * to go on, named in every StitchHead from then on (M-5). It is a whole Quire on an atom of the data run, looked
  * for past the Quire the ribbon stands in, and never one the ground the
  * Tallies need would go to (EndpaperKeeps — a whole Tally, and what the ring's
  * slots lack of one) nor a block promised to a Slip's tail (BlockMapTakeQuire):
@@ -323,26 +366,31 @@ uint64_t RibbonSeqNext(void)
 void RibbonNextGiven(void)
 {
     RibbonCursor* c = &s_cursor;
-    uint64_t      start = 0;
-    if (!c->up || (c->next.blocks && RibbonQuireOn(&c->next, c->atom)))
+    if (!RibbonNextWanted(c))
         return;
-    c->taken = BlockMapTakeQuire(GROUND_RIBBON, c->quire_blocks,
-                                 c->atom / TAGFS_BLOCK_SECTORS ? c->atom / TAGFS_BLOCK_SECTORS : 1u,
-                                 EndpaperKeeps(c->quire_blocks), g_book.frame.data_block,
-                                 c->quire.block + c->quire.blocks, &start);
-    if (c->taken == OK) {
-        if (c->next.blocks)
-            kprintf("[TagFS] the next_quire the ribbon names, %llu+%llu, a writer of a smaller atom took off a "
-                    "flash page of %u bytes: the ribbon names %llu+%llu, laid on pages, in its stead (§16.6 п.2)\n",
-                    (unsigned long long)c->next.block, (unsigned long long)c->next.blocks,
-                    c->atom * BOOK_SECTOR_BYTES, (unsigned long long)start, (unsigned long long)c->quire_blocks);
-        c->next = (RibbonQuire){ start, c->quire_blocks };
-        BinderRibbonGiven(&c->next);
-    } else if (c->taken == ERR_TAGFS_NO_SPACE && !c->next.blocks) {
+    c->taken = RibbonNextTake(c);
+    if (c->taken == ERR_TAGFS_NO_SPACE && !c->next.blocks) {
         SettleDemand(SETTLE_DEMAND_TALLY);
         __atomic_store_n(&s_refused_free, AllotmentFreeUnpromised(), __ATOMIC_RELEASE);
     }
     RibbonRoomPublish();
+}
+
+/*
+ * The mount's own ask, before the door opens: a next_quire given where the map
+ * has one, and a refusal left to the first cycle's ask — the cursor as the
+ * mount laid it, its room still to grow (RibbonRoomFor: ERR_WOULD_BLOCK, and a
+ * cycle on the asker's word). Taken here a refusal would shut the room before
+ * any change could ask for that cycle, demand a Tally of a cadence the mount
+ * resets after (SettleMountReset) and no settled cycle of this mount would let
+ * begin (BinderOwnMayNot), and be judged against the promises of the mounting
+ * before, whose epoch this one has not passed yet (AllotmentPromised).
+ */
+void RibbonNextGivenAtMount(void)
+{
+    RibbonCursor* c = &s_cursor;
+    if (RibbonNextWanted(c) && RibbonNextTake(c) == OK)
+        RibbonRoomPublish();
 }
 
 void RibbonTallied(uint64_t tally, uint64_t taken)

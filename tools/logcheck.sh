@@ -1210,6 +1210,17 @@ run_stranger() {
     ! grep -q "falling back to the rule" "$L"; chk $? "the guess-rule never ran"
 }
 
+# volume_tag_kept LOG FILE TAG — the line FILE's AUTOSTART says wears TAG as
+# the volume holds it: format v1 lists a file's tags as they were given, TAG
+# first; a book lists them by id (spec_v2 §2.8), TAG wherever it stands.
+volume_tag_kept() {
+    if [ "$(stand_format)" = v2 ]; then
+        grep -qE "$2.*tags: ([^,)]+,)*$3[,)]" "$1"
+    else
+        grep -qE "$2.*tags: $3," "$1"
+    fi
+}
+
 # Occurrence names that measurement showed were resolving to INVALID before
 # the split, because they are named before any volume mounts.
 DEAD_BEFORE="mce:fault:detected mce:fault:fatal cet:fault:cp acpi:ready aml:ready \
@@ -1254,8 +1265,8 @@ run_healthy() {
     [ $dead = 0 ] && ok "all previously-dead occurrences now resolve"
 
     # (3) the volume's own vocabulary is untouched — display.elf keeps its tag
-    grep -q "AUTOSTART.*display.elf.*tags: display," "$L"; chk $? "volume tags unshifted (display.elf still 'display')"
-    grep -q "shell.bin.*tags: shell," "$L"; chk $? "volume tags unshifted (shell.bin still 'shell')"
+    volume_tag_kept "$L" 'AUTOSTART.*display\.elf' display; chk $? "volume tags unshifted (display.elf still 'display')"
+    volume_tag_kept "$L" 'shell\.bin' shell; chk $? "volume tags unshifted (shell.bin still 'shell')"
 
     # (4) nothing collided in the on-disk registry
     ! grep -q "slot .* already used" "$L"; chk $? "no registry slot collision"
@@ -1288,17 +1299,23 @@ run_healthy() {
     # tree registers. The numbers are the code's, not a run's (K9): a build
     # without VOLUME_TESTS walks the nine suites of tests.h TEST_SUITES not
     # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
-    # book 15, ribbon 6, integrity 3, use_context 5 TestCases, 44 run; the 11
-    # whose reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
-    # g_volume_tests_allowed), and the 33 that only read pass — none of them
-    # stands aside on this stand's fresh image, whose first file wears a tag
-    # (use_context_narrows). A test added or taken out moves this line in the
-    # same commit.
+    # book 15, ribbon 6, integrity 3, use_context 5 TestCases, 44 run. On a
+    # volume of format v1 the 11 whose reach is TEST_WRITES_TO_VOLUME are
+    # skipped (tests.c, g_volume_tests_allowed), and the 33 that only read
+    # pass; on a book the 6 written for format v1's records stand aside first
+    # (tests.c, their `format`) — tagfs_deed, cow_moves_only_the_block_written,
+    # integrity_detects_mismatch, integrity_persist_reload,
+    # integrity_reports_every_rot, use_context_remembered, the first of them a
+    # read — and of the 38 left the 6 that write are skipped and the 32 that
+    # read pass. None of them stands aside on this stand's fresh image, whose
+    # first file wears a tag (use_context_narrows). A test added or taken out
+    # moves this line in the same commit.
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
-    local said
+    local said passed=33 skipped=11
+    [ "$(stand_format)" = v2 ] && { passed=32; skipped=12; }
     said=$(stand_summary "$L")
-    [ "$said" = "TagFS: 44 run, 33 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
-    chk $? "TagFS startup tests: the 44 this tree registers ran, 33 reads passed and 11 writes stood down (${said:-no summary})"
+    [ "$said" = "TagFS: 44 run, $passed passed, 0 failed, $skipped skipped, 0 held under a caveat" ]
+    chk $? "TagFS startup tests: the 44 this tree registers ran on format $(stand_format), $passed reads passed and $skipped stood down or aside (${said:-no summary})"
     lockrank_judge "$L" "healthy 1c"
 
     # (7) the kernel's ear works — mutation-proven harness, see commit
@@ -1547,7 +1564,7 @@ run_uefi() {
     pci_low=$(grep "logbook 'pci:" "$L" | grep -vc 'bare=0x8')
     [ "$pci_low" = 0 ]; chk $? "no pci:* name took a volume id"
 
-    grep -q "AUTOSTART.*display.elf.*tags: display," "$L"; chk $? "uefi: volume tags unshifted"
+    volume_tag_kept "$L" 'AUTOSTART.*display\.elf' display; chk $? "uefi: volume tags unshifted"
 
     # A family the muster DECLARED must not be reported as a stranger. It was:
     # the warning judged the full name, which is new for every device that has
@@ -9025,22 +9042,24 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 43 (healthy says how) and
-# the 293 of the stand's own thirty-eight suites: stand 28, stand_lock 4,
+# suite in tests.h TEST_SUITES — the plain build's 44 (healthy says how) and
+# the 371 of the stand's own forty-eight suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
-# stand_snapshot 1, stand_read 8, stand_run 4, stand_medium 19,
+# stand_snapshot 1, stand_read 9, stand_run 6, stand_medium 19,
 # stand_warrant 8, stand_room 7, stand_integrity 2, frame 2, width 7,
-# parcel 13, tract 1, record_splices 4, stand_tally 15, stand_ribbon 6,
-# stand_stitch 12, stand_stitch_edge 8, stand_docket 14, stand_fresh 7,
+# parcel 13, tract 1, record_splices 4, stand_tally 15, stand_ribbon 8,
+# stand_stitch 12, stand_stitch_edge 12, stand_docket 14, stand_fresh 7,
 # stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
-# stand_endpaper 5.
+# stand_endpaper 5, stand_errata 8, stand_toll 5, stand_dog_ear 9,
+# stand_slip 14, stand_away 14, stand_tip_in 7, stand_slip_promise 5,
+# stand_book_glean 2, stand_escheat 3, stand_parity 2.
 # Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=336
+STAND_RUN=415
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and

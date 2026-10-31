@@ -4,6 +4,8 @@
 #include "../run/run.h"     /* TagFSRunBlocks, TagFSDataCost — the seat's run, and the trace */
 #include "../file_map/file_map.h"  /* the file's record, its runs walked in it */
 #include "../mount/book_mount.h" /* a book's data run (g_book) */
+#include "../helm/helm.h"   /* HelmWindowBytes — the run a write lays in one command */
+#include "../block_map/block_map_derived.h" /* the run of free ground a book's write takes */
 #include "write_job.h"      /* WriteJobSubmit, and the stand's own answer record */
 #include "block_fail.h"     /* BLOCKFAIL — the commands counted at the door, and one refused */
 #include "atomics.h"
@@ -271,7 +273,9 @@ out:
 // sector it failed at keeps what came before (BLOCKFAIL refuses the way one
 // does): the answer counts exactly the k-1 blocks of the run before the
 // refused one, their digests are recorded, and the refused block and every
-// one after it hold what they held.
+// one after it hold what they held. Format v1's: the run is written over where
+// it lies, so its k-th block is one the test names before the write; a book
+// lays the write on fresh ground — its analog below.
 // ----------------------------------------------------------------------------
 
 static TestResult StandRunRefusedInside(bool port)
@@ -346,6 +350,97 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// A book's write refused inside the run it takes answers exactly the blocks
+// before the refused one
+//
+// W-ERR on fresh ground (helm_work.c, CR-13): a book lays every write on
+// fresh ground, so the run refused inside is the one the write takes — for a
+// window's worth of a file that holds nothing, the first run of that many
+// free blocks (allotment.c, AllotmentBookPick: no run of its own to go on, no
+// window kept), named before the write. The medium refusing its k-th block,
+// the write answers the k-1 before it, the file is as long as they are and
+// holds them, settled the same; the refused block and every one after it no
+// record names.
+// ----------------------------------------------------------------------------
+
+static TestResult StandRunRefusedFresh(bool port)
+{
+    TestResult     verdict = TEST_PASS;
+    uint8_t        seat    = tagfs_get_seat();
+    uint64_t       file_id = 0;
+    uint64_t       first   = 0, block = 0;
+    uint8_t       *data    = NULL;
+    uint8_t       *back    = NULL;
+    bool           armed   = false;
+    bool           running = false;
+    const uint32_t B       = TAGFS_BLOCK_SIZE;
+    const uint32_t N       = (uint32_t)(HelmWindowBytes(0) / B);
+    const uint32_t k       = N / 2 + 1;   /* the refused block's place in the run, from 1 */
+    const uint32_t kept    = (k - 1) * B;
+    StandRunAnswer answer;
+    const char    *aside   = StandRunAside(port);
+
+    if (aside)
+        return test_steps_aside(aside);
+    if (N < 2)
+        return test_steps_aside("the seat takes one block in a command: a run has no inside");
+
+    data = kmalloc((uint64_t)N * B);
+    back = kmalloc((uint64_t)N * B);
+    TEST_ASSERT(data && back, "room for a window's worth and for reading it back");
+    TestFillAt(data, N * B, 0x4E1D0E00u + (port ? 1u : 0u), 0);
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0, "a file is made on the book");
+    TEST_ASSERT(BlockMapDerivedRunFree(0, N, file_id, &first),
+                "the first run of free ground a window's worth long is found: the write's to take");
+
+    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(first + k - 1), TAGFS_BLOCK_SECTORS, 1);
+    armed = true;
+    bool     answered = StandRunWrite(port, file_id, data, N * B, &answer, &running);
+    bool     fired    = BlockFailFired();
+    uint32_t seen     = BlockFailSeen();
+    BlockFailDisarm();
+    armed = false;
+
+    TEST_ASSERT(answered, "the write answers");
+    TEST_ASSERT_EQ(answer.through_port, port, "on the road it was put on, to its end");
+    TEST_ASSERT(fired, "the k-th block of the run it took was the one refused");
+    TEST_ASSERT_EQ(seen, 1, "by the first command that met it: the run's own");
+    TEST_ASSERT(answer.rc != OK, "the write answers the refusal");
+    TestEvidence("blocks the refused write answered as landed", answer.written / B);
+    TEST_ASSERT_EQ(answer.written, kept, "exactly the k-1 blocks of the run before the refused one");
+    TEST_ASSERT_EQ(answer.size, kept, "and the file is as long as they are");
+    TEST_ASSERT(StandBlockOf(file_id, k - 2, &block) && block == first + k - 2,
+                "the last of them where the run was taken");
+    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles them");
+    TEST_ASSERT_EQ(TestFileRead(file_id, back, kept), (int)kept,
+                   "the file reads back, every block checked against its own digest");
+    TEST_ASSERT_EQ(TestFirstDifference(back, data, kept), kept, "holding the blocks before the refused one");
+    TEST_ASSERT(!StandBlockOf(file_id, k - 1, &block), "and no record names the refused block or one after it");
+out:
+    if (running) {
+        data    = NULL;
+        file_id = 0;
+    }
+    if (armed)
+        BlockFailDisarm();
+    if (file_id)
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
+    kfree(data);
+    kfree(back);
+    return verdict;
+}
+
+static TestResult TestStandRunRefusedFresh(void)
+{
+    return StandRunRefusedFresh(false);
+}
+
+static TestResult TestStandRunRefusedFreshThroughThePort(void)
+{
+    return StandRunRefusedFresh(true);
+}
+
 static TestResult TestStandRunMegabyteInSeatRuns(void)
 {
     return StandRunMegabyte(false);
@@ -372,9 +467,16 @@ static const TestCase g_stand_run_tests[] = {
     { .name  = "stand_run_megabyte_through_the_port",
       .func  = TestStandRunMegabyteThroughThePort, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_run_refused_inside_a_run", .func = TestStandRunRefusedInsideARun,
-      .reach = TEST_WRITES_TO_VOLUME },
+      .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_run_refused_inside_fresh" },
     { .name  = "stand_run_refused_inside_a_run_through_the_port",
-      .func  = TestStandRunRefusedInsideARunThroughThePort, .reach = TEST_WRITES_TO_VOLUME },
+      .func  = TestStandRunRefusedInsideARunThroughThePort, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V1, .analog = "stand_run_refused_inside_fresh_through_the_port" },
+    { .name  = "stand_run_refused_inside_fresh", .func = TestStandRunRefusedFresh,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name  = "stand_run_refused_inside_fresh_through_the_port",
+      .func  = TestStandRunRefusedFreshThroughThePort, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V2 },
 };
 
 const TestSuite g_stand_run_suite = {

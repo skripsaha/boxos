@@ -61,8 +61,11 @@ uint32_t    StandStitchLayEmpty(const StandStitch* s, uint64_t flags);
 uint32_t    StandStitchLayAt(const StandStitch* s, uint64_t flags, uint32_t of, const RibbonQuire* next);
 
 /* The longest stitch the stand lays by hand: a flash page of 16 KiB, the
- * atom of a removable medium's ribbon (§16.6 п.2), in sectors. */
+ * atom of a removable medium's ribbon (§16.6 п.2), in sectors. A test that
+ * lays one an atom of the ribbon long stands down, saying so, where the atom
+ * is longer — the medium's own block, past a page (BookRibbonAtomOf). */
 #define STAND_STITCH_LAID_MOST 32u
+#define STAND_STITCH_ATOM_LONG "the ribbon's atom is longer than a stitch the stand lays by hand"
 
 /* The bytes a stitch's head, its UseContext's tag and length and its Clasp
  * take, and more. */
