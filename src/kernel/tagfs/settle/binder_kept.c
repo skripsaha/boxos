@@ -209,8 +209,10 @@ static void KeptLeafLaid(BinderWork* w, uint64_t tree, const FoliationNode* leaf
 {
     EndpaperLaidNode(&w->laid, tree, 0, leaf->place.ptr.sheets, w->grid,
                      leaf->place.has_lo ? leaf->place.lo.k1 : 0);
-    if (tree == TALLY_FILES)
-        w->laid.runs += leaf->items;
+    if (tree == TALLY_FILES) {
+        w->laid.runs       += leaf->items;
+        w->laid.run_leaves += leaf->items != 0;
+    }
     if (tree == TALLY_TAGS) {
         w->laid.tags      += leaf->items;
         w->laid.tags_text += leaf->text;

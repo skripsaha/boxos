@@ -88,7 +88,9 @@ error_t  BlockMapDerivedHold(uint32_t pages);
  * nothing of each other. Claimed for `owner`. With no TagFS lock held:
  * its pages are stocked first, and the state lock taken. OK and *start;
  * ERR_TAGFS_NO_SPACE when no such run is free or the reserve forbids it;
- * ERR_NO_MEMORY with no page for the map.
+ * ERR_WOULD_BLOCK for the ribbon when the only runs free lie on ground a Tally
+ * a mount may stand on still names as a file's (fallow.h, FallowBarsRun) — a
+ * Tally past it gives them; ERR_NO_MEMORY with no page for the map.
  */
 error_t  BlockMapTakeQuire(GroundOwner owner, uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first,
                            uint64_t from, uint64_t* start);

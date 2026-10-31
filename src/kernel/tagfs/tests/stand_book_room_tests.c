@@ -568,6 +568,37 @@ out:
     return verdict;
 }
 
+/*
+ * ‼ A SLOT HELD UNSURE OVER NOTHING SPENDS NO STEP OF THE BAR'S LAG. A Tally
+ * whose slot write was refused over a slot that held nothing may stand there
+ * or not at all, and a mount whose write there tore stands on the newest slot
+ * before it: ground freed past that slot's slice and given to the ribbon would
+ * be the ground of a file the Tally the mount stands on names, and a reader
+ * refuses the ribbon's step onto it (RIBBON_TORN). So the bar is the least
+ * slice of the newest slot before it too — the lag's steps spent by slots a
+ * mount stands on whole. Memory alone (BinderBarSlice): slots laid by hand.
+ */
+static TestResult TestStandBookRoomBarPastUnsure(void)
+{
+    TestResult verdict = TEST_PASS;
+    SlotGround s[3];
+
+    memset(s, 0, sizeof(s));
+    s[0] = (SlotGround){ .holds = true, .seq = 10, .tally = 10, .slice = 100 };
+    s[1] = (SlotGround){ .holds = true, .unsure = true, .seq = 13, .tally = 13, .tally2 = 13, .slice = 130 };
+    TEST_ASSERT_EQ(BinderBarSlice(s, 3, 1, UINT64_MAX), 100,
+                   "unsure over a slot that held nothing: the bar stands at the slice of the newest slot before it");
+    s[2] = (SlotGround){ .holds = true, .seq = 7, .tally = 7, .slice = 70 };
+    TEST_ASSERT_EQ(BinderBarSlice(s, 3, 1, UINT64_MAX), 100, "one step of the lag, the honest medium's: no further");
+    TEST_ASSERT_EQ(BinderBarSlice(s, 3, 2, UINT64_MAX), 70, "two, the medium lied: the slot before that too");
+    s[1] = (SlotGround){ .holds = true, .unsure = true, .seq = 4, .tally = 4, .tally2 = 13, .slice = 40 };
+    TEST_ASSERT_EQ(BinderBarSlice(s, 3, 1, UINT64_MAX), 100,
+                   "unsure over a slot that held a Tally: by the older one, the newest sure slot the bar's");
+    TEST_ASSERT_EQ(BinderBarSlice(s, 3, 1, 50), 50, "and the slot a mount stood on below them all");
+out:
+    return verdict;
+}
+
 // ----------------------------------------------------------------------------
 
 static const TestCase g_stand_book_room_tests[] = {
@@ -585,6 +616,8 @@ static const TestCase g_stand_book_room_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_book_room_wait_bounded", .func = TestStandBookRoomWaitBounded,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_book_room_bar_past_unsure", .func = TestStandBookRoomBarPastUnsure,
+      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
 };
 
 const TestSuite g_stand_book_room_suite = {

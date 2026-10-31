@@ -1,5 +1,6 @@
 #include "binder_internal.h"
 #include "../integrity/gloss.h"
+#include "../ink/fallow.h"     /* FallowLag — the stitches the ground a slot let go rests */
 #include "escheat.h"
 
 /*
@@ -73,6 +74,7 @@ static void FreshFill(BinderRun* r)
     f->holds      = true;
     f->seq        = r->slot_seq;
     f->tally      = w->seq;
+    f->slice      = r->k;
     f->chain_from = r->chain_at;
     f->nground    = 0;
     if (w->off) {
@@ -187,8 +189,15 @@ error_t BinderTallyDone(BinderRun* r)
     memset(&r->fresh, 0, sizeof(r->fresh));
     if (r->slot + 1u > g_binder.nslots)
         g_binder.nslots = r->slot + 1u;
-    BinderSlotOwnPublish(r->slot, 0);
+    /* What the old Tally held rests in Fallow as the slot's own until Fallow
+     * gives it back (BinderRestRipens): the reserve rises no sooner than the
+     * free does. What an earlier DONE let go and Fallow holds still is added
+     * to it, let go with the first of the two: a count let go before its
+     * ground costs a write a wait on Fallow, one kept past it the ground twice. */
     uint64_t gone = BinderSlotGoes(&old);
+    g_binder.slot[r->slot].rest       = old.rest + gone;
+    g_binder.slot[r->slot].rest_until = old.rest ? old.rest_until : SettledCycles() + FallowLag();
+    BinderSlotsOwnPublish();
     BinderSlotLetGo(&old);
     if (r->captured && !DogEarHeldLost())
         GlossCaptured(w);
@@ -198,12 +207,18 @@ error_t BinderTallyDone(BinderRun* r)
     DogEarTakenLetGo();
     FoliationDraftDone(w->seq, r->captured);
     RibbonTallied(w->seq, r->k);
+    BinderBarPublish(UINT64_MAX);
     EndpaperTallyLaid(&w->laid);
     BinderPairUsed(r);
+    BinderSlotsOwnPublish();    /* again past the pair it filled: a Quire it ended is the pair's no more */
     g_binder.useful      -= g_binder.useful >= r->useful_at ? r->useful_at : g_binder.useful;
     g_binder.tally_blocks = BookBlocks(w);
     g_binder.cost_known   = 0;
     g_binder.tallies++;
+    /* Asked past the measure this Tally made: the one before it, and all the
+     * growth since, would refuse at a full volume's wall a Quire the exact one
+     * gives — and ask a Tally more of the ribbon for it. */
+    RibbonNextAgain(r->k);
     kprintf("[TagFS] Tally %llu is written over slot %u: the state after stitch %llu, %llu node(s) laid in %llu "
             "block(s) a copy, %llu named as they lie%s; %llu block(s) no slot holds any more rest in Fallow%s\n",
             (unsigned long long)w->seq, r->slot, (unsigned long long)r->k, (unsigned long long)w->nodes,
@@ -285,12 +300,14 @@ void BinderSlotUnsure(BinderRun* r)
     if (!s->holds) {
         s->holds = true;
         s->tally = r->w.seq;
+        s->slice = r->k;
     }
     if (r->chain_at < s->chain_from)
         s->chain_from = r->chain_at;
     if (r->slot + 1u > g_binder.nslots)
         g_binder.nslots = r->slot + 1u;
     BinderSlotOwnPublish(r->slot, 0);
+    BinderBarPublish(UINT64_MAX);
 }
 
 bool BinderSlotSealed(uint32_t slot, const uint8_t* unit)

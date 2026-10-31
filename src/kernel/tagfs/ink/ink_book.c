@@ -486,6 +486,7 @@ static error_t InkBookPlotLocked(const Plot* p, const RecordWhere* was, InkBookW
     j->now = FileMapRecordHold(fs->files, p->fid, NULL);
     DocketPutLocked(j, spent);
     EndpaperInked(w->sp, w->nsp);
+    EndpaperStakesGoneLocked(&p->stakes_counted);   /* its Jot and windows count them now */
     for (uint32_t i = 0; i < p->digest_count; i++)
         GlossPut(&w->gloss, p->digests[i].block, p->digests[i].digest);
     if (w->fallow) {

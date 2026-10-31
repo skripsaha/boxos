@@ -111,6 +111,7 @@ void PlotPullStakes(Plot *p)
                 "for it — they are not given back to a mounting they were never taken from\n",
                 p->fid, p->stake_count);
         p->stake_count = 0;
+        PlotStakesCount(p, 0);
         return;
     }
     for (uint32_t i = 0; i < p->stake_count; i++) {
@@ -121,6 +122,7 @@ void PlotPullStakes(Plot *p)
                     p->stakes[i].count, (unsigned long long)p->stakes[i].start, -given);
     }
     p->stake_count = 0;
+    PlotStakesCount(p, 0);
 }
 
 void PlotRelease(Plot *p)
@@ -252,6 +254,31 @@ error_t PlotStake(Plot *p, uint64_t start, uint32_t count)
     p->stakes[p->stake_count].count = count;
     p->stake_count++;
     return OK;
+}
+
+/* The record the Ink lays at the most: every run of the file, and two more a
+ * Stake — a write into a run splits it about the new one — on the blocks it
+ * names and the Stakes'. */
+void PlotStakesCount(Plot *p, uint64_t more)
+{
+    EndpaperStakes now;
+    uint64_t       stakes = p->stake_count + (more ? 1u : 0u);
+    uint64_t       runs   = (p->rec ? p->rec->strip_count : p->run_count) + 2u * stakes;
+    uint64_t       blocks = (p->rec ? p->rec->blocks : p->blocks) + more;
+    if (!p->book)
+        return;
+    for (uint32_t i = 0; i < p->stake_count; i++)
+        blocks += p->stakes[i].count;
+    if (stakes == 0) {
+        if (p->stakes_counted.epoch)
+            EndpaperStakesSet(&p->stakes_counted, NULL);
+        return;
+    }
+    EndpaperStakesFile(&now, p->rec, p->fid, runs, blocks);
+    for (uint32_t i = 0; i < p->stake_count; i++)
+        EndpaperStakesRun(&now, p->stakes[i].start, p->stakes[i].count);
+    EndpaperStakesRun(&now, UINT64_MAX, more);
+    EndpaperStakesSet(&p->stakes_counted, &now);
 }
 
 error_t PlotLetGoLater(Plot *p, uint64_t start, uint32_t count)

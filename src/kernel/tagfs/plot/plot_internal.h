@@ -17,6 +17,12 @@ void     PlotRunsPut(Strip *runs, uint32_t *n, uint64_t start, uint32_t count);
 /* A run this call took, recorded as a Stake: OK or ERR_NO_MEMORY. */
 error_t  PlotStake(Plot *p, uint64_t start, uint32_t count);
 
+/* A book's Plot: what its Ink may add to the next Tally — its Stakes, and a
+ * take of `more` blocks still to be asked — counted in the book's reserve
+ * (endpaper_fact.h, EndpaperStakesSet) before the take is; 0 once the take
+ * is had or refused. No TagFS lock held. */
+void     PlotStakesCount(Plot *p, uint64_t more);
+
 /* Ground a record named, come to rest in Fallow once a record that no longer
  * names it is inked (TagFSInkPlot): OK or ERR_NO_MEMORY. */
 error_t  PlotLetGoLater(Plot *p, uint64_t start, uint32_t count);

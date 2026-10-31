@@ -852,7 +852,13 @@ void StitchRunEnd(error_t rc)
         }
         FallowStitchSettled(s->target, s->seq, s->cycle);
         FallowQuireLeft(left);
-        SettleGivenLocked(BinderHoldsGround() ? 0 : FallowRipen(0, s->cycle, &nodes));
+        /* A slot's rest is let go in the hold its ground is given back in:
+         * no measure between sees it twice, or the reserve without it. */
+        bool     held = BinderHoldsGround();
+        uint64_t ripe = held ? 0 : FallowRipen(0, s->cycle, &nodes);
+        if (!held)
+            BinderRestRipens(FallowSpineRipeFrom());
+        SettleGivenLocked(ripe);
         TagFSLockDrop(&fs->lock);
         FallowNodesFree(nodes);
         GlossTrim();

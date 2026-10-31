@@ -63,8 +63,12 @@
  *      piece; one changed again is counted again in place of what it was
  *      counted at (its `was`, whose gen is past the Tally's). A run of a
  *      Parcel nobody changed widens by the varint of the seqs between the two
- *      Tallies, its Parcel's length by a byte: with any run, every piece of
- *      FILES is counted as one something went in.
+ *      Tallies, its Parcel's length by a byte: every piece a run lies in is
+ *      counted as one something went in (`run_leaves`). Nothing else of an
+ *      item moves with the seq — a file's header is spelled from its own
+ *      numbers, a key from the one before it — so a piece of no run and no
+ *      change is the leaf it was: a Tally of empty files is measured at the
+ *      leaves it laid, not at every leaf recut, three times them.
  *   6. DIGESTS: an element is the run of digested blocks of one window; a
  *      block given up shortens or splits one (the split's head is less than
  *      the digest it lost); a block put in lengthens, begins or joins them —
@@ -100,8 +104,9 @@
  * (EndpaperGrew). The measure from above walks the map, so it holds the same
  * changes: the reserve kept by the lesser of the two is what "a ribbon's step
  * and a whole Tally are always possible" (§16.2 п.6) needs of the changes
- * memory holds — a block handed to a write and not yet inked in a record is
- * the kept measure's to count (endpaper.c), as before.
+ * memory holds — and a block handed to a write and not yet inked in a record
+ * is counted in both by the Plot that holds it, as its Ink will count it
+ * (below, EndpaperStakesSet).
  *
  * What settled since is counted as the stitches settle (EndpaperGrew), from
  * the Jots each stitch carried — no walk of the volume; at the mount, the
@@ -110,8 +115,9 @@
  * being written the stitches between its slice and its DONE are counted for it
  * as well (`pending`), and become the growth since the Tally once it is done.
  * The Settle's holder alone changes the Tally and what settled, as the mount
- * does with the door shut, and Ink what is owed, all under the state lock; a
- * reader takes the three in one hold of it (EndpaperFactMost).
+ * does with the door shut, Ink what is owed and a Plot what its Stakes may
+ * add, all under the state lock; a reader takes them in one hold of it
+ * (EndpaperFactMost).
  */
 
 #define ENDPAPER_SMALL     (TALLY_LEAF_ROOM / 16u)
@@ -140,6 +146,30 @@ static EndpaperSince s_since;                      /* settled since the last Tal
 static EndpaperSince s_pending;                    /* settled since the slice of the Tally under way */
 static EndpaperSince s_inked   = { .on = true };   /* owed: the Docket's Jots and the data inked for them */
 static EndpaperSince s_sewing  = { .on = true };   /* owed: the stitch in flight's */
+static EndpaperSince s_staked  = { .on = true };   /* what the Plots' Stakes may add once inked */
+static uint32_t      s_staked_epoch;               /* the mounting `s_staked` counts Plots of */
+static volatile uint64_t s_staked_files;           /* ... from above, in bytes of FILES */
+static volatile uint64_t s_staked_digests;         /* ... and of DIGESTS */
+static volatile uint8_t  s_grown;                  /* whether growth past the last Tally is held: published */
+
+static bool SinceGrown(const EndpaperSince* a)
+{
+    return a->sites || a->bytes || a->tail || a->long_blocks || a->dsites || a->dtail || a->dbytes;
+}
+
+/* Whether what settled since the last Tally or is owed holds growth a Tally
+ * would lay to the block — or no Tally is known: published under the state
+ * lock wherever either changes, read lock-free (EndpaperGrown). */
+static void SinceSaid(void)
+{
+    bool grown = !s_since.on || SinceGrown(&s_since) || SinceGrown(&s_inked) || SinceGrown(&s_sewing);
+    __atomic_store_n(&s_grown, grown ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
+bool EndpaperGrown(void)
+{
+    return __atomic_load_n(&s_grown, __ATOMIC_ACQUIRE) != 0;
+}
 
 static uint64_t FactGrid(void)
 {
@@ -216,7 +246,8 @@ static void ItemsPut(EndpaperItems* it, uint64_t key, uint64_t body, uint64_t gr
  * the header's body to the byte (FileHeadItem), its key at most its fid's
  * varint and part 0's; the Parcels — at most one a PARCEL_STRIPS_LEAST runs,
  * or one — each a key of its block, its count and its runs at the widest. */
-static void FileItems(const FileRecord* rec, uint64_t fid, uint64_t gen, uint64_t grid, EndpaperItems* it)
+static void FileItemsAs(const FileRecord* rec, uint64_t fid, uint64_t gen, uint64_t grid, uint64_t runs,
+                        uint64_t blocks, EndpaperItems* it)
 {
     memset(it, 0, sizeof(*it));
     if (!rec)
@@ -228,15 +259,19 @@ static void FileItems(const FileRecord* rec, uint64_t fid, uint64_t gen, uint64_
     for (uint32_t i = 0; i < rec->tag_count; i++)
         body += TallyVarintBytes(rec->tags[i]);
     ItemsPut(it, TallyVarintBytes(fid) + 1u, body, grid);
-    uint64_t runs = rec->strip_count;
     if (runs == 0)
         return;
     uint64_t parcels = (runs + PARCEL_STRIPS_LEAST - 1u) / PARCEL_STRIPS_LEAST;
-    uint64_t key     = 1u + TallyVarintBytes(1u + rec->blocks);
+    uint64_t key     = 1u + TallyVarintBytes(1u + blocks);
     uint64_t head    = key + TallyVarintBytes(PARCEL_STRIPS_MOST) + 2u;
     uint64_t least   = (ENDPAPER_SMALL - head) / TALLY_RUN_MOST + 1u;   /* the runs of a Parcel past SMALL */
     it->bytes += parcels * head + runs * TALLY_RUN_MOST;
     it->big   += runs / least < parcels ? runs / least : parcels;
+}
+
+static void FileItems(const FileRecord* rec, uint64_t fid, uint64_t gen, uint64_t grid, EndpaperItems* it)
+{
+    FileItemsAs(rec, fid, gen, grid, rec ? rec->strip_count : 0, rec ? rec->blocks : 0, it);
 }
 
 // ----------------------------------------------------------------------------
@@ -329,11 +364,13 @@ static void OwedAdd(EndpaperSince* to, const EndpaperSince* from)
 void EndpaperJotIn(const Jot* j)
 {
     OwedJot(&s_inked, j, 1u);
+    SinceSaid();
 }
 
 void EndpaperJotOut(const Jot* j)
 {
     OwedJot(&s_inked, j, ENDPAPER_TAKES_OUT);
+    SinceSaid();
 }
 
 /* Each window the Strips put in lie in, a place: wherever the next Tally's
@@ -344,6 +381,7 @@ void EndpaperInked(const BookSplice* sp, uint64_t nsp)
         for (uint64_t k = 0; k < sp[i].ninsert; k++)
             if (sp[i].insert[k].kind == STRIP_DATA)
                 SinceGround(&s_inked, sp[i].insert[k].start, sp[i].insert[k].count, UINT64_MAX);
+    SinceSaid();
 }
 
 void EndpaperDocketTaken(void)
@@ -362,6 +400,108 @@ void EndpaperDocketDropped(void)
 {
     s_inked  = (EndpaperSince){ .on = true };
     s_sewing = (EndpaperSince){ .on = true };
+    SinceSaid();
+}
+
+// ----------------------------------------------------------------------------
+// What a Plot's Stakes may add (§16.6 п.8)
+// ----------------------------------------------------------------------------
+
+/*
+ * ‼ GROUND HANDED TO A WRITE IS IN THE MEASURE BEFORE IT IS TAKEN. A Plot's
+ * Stakes are named by no record until its Ink (plot.h): the measure by the
+ * last Tally counts what Ink laid (above), the one from above walks the map,
+ * and the kept measure's allowance for the data handed since it (endpaper.c,
+ * EndpaperKeptCost) is from above alone — lost in the lesser of the two
+ * wherever the measure by the last Tally is less, which past a Tally it is. So
+ * a write taken to a full volume's reserve, once inked, raised the measure
+ * past the ground left, and the Quire the reserve kept the ribbon was the
+ * write's (fullvolume, roomback: next_quire refused under a Tally, the ribbon
+ * run out, a delete refused). Each Plot counts what its Ink may add while its
+ * Stakes stand, and a take's before the take is asked (plot_window.c,
+ * PlotStakesCount): by the last Tally its file a place of its own with its
+ * items whole at the widest — as the Jot its Ink lays is counted (OwedJot),
+ * whether or not a Jot of the file stands, which a TAKE may carry off before
+ * the Ink — its runs counted twice each, a run split by a write into it, and
+ * each window a Stake lies in a place of DIGESTS (SinceGround; a take not had
+ * yet, anywhere: every window its length can cross); from above, each Stake
+ * two runs, each in a Parcel of its own, and four elements of DIGESTS and the
+ * windows it crosses, its blocks' digests. The Ink lets the count go in the
+ * hold of the state lock that counts its Jot and what it put in (ink_book.c);
+ * a Plot that gives its Stakes back, with them.
+ */
+static void StakesCount(const EndpaperStakes* e, uint64_t k)
+{
+    s_staked.sites       += k * e->sites;
+    s_staked.bytes       += k * e->bytes;
+    s_staked.long_blocks += k * e->long_blocks;
+    s_staked.dsites      += k * e->dsites;
+    s_staked.dbytes      += k * e->dbytes;
+    __atomic_add_fetch(&s_staked_files, k * e->files_bytes, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&s_staked_digests, k * e->digests_bytes, __ATOMIC_RELEASE);
+}
+
+void EndpaperStakesFile(EndpaperStakes* e, const FileRecord* rec, uint64_t fid, uint64_t runs, uint64_t blocks)
+{
+    EndpaperItems it;
+    FileItemsAs(rec, fid, UINT64_MAX, FactGrid(), runs, blocks, &it);
+    memset(e, 0, sizeof(*e));
+    e->sites       = 1u;
+    e->bytes       = it.bytes + TALLY_KEY_MOST;
+    e->long_blocks = it.long_blocks;
+}
+
+void EndpaperStakesRun(EndpaperStakes* e, uint64_t start, uint64_t count)
+{
+    EndpaperSince d       = { .on = true };
+    uint64_t      windows = (count + DIGEST_ITEM_MOST - 1u) / DIGEST_ITEM_MOST;
+    if (count == 0)
+        return;
+    if (start != UINT64_MAX) {
+        SinceGround(&d, start, count, UINT64_MAX);
+    } else {
+        d.dsites = windows + 1u;
+        d.dbytes = 8u * count + d.dsites * (TALLY_ITEM_HEAD_MOST + TALLY_DIGEST_HEAD_MOST + TALLY_KEY_MOST);
+    }
+    e->dsites        += d.dsites;
+    e->dbytes        += d.dbytes;
+    e->files_bytes   += 2u * (TALLY_RUN_MOST + TALLY_ITEM_HEAD_MOST + TALLY_PARCEL_HEAD_MOST);
+    e->digests_bytes += (4u + windows) * (TALLY_ITEM_HEAD_MOST + TALLY_DIGEST_HEAD_MOST) + 8u * count;
+}
+
+void EndpaperStakesGoneLocked(const EndpaperStakes* held)
+{
+    if (held->epoch && held->epoch == s_staked_epoch)
+        StakesCount(held, ENDPAPER_TAKES_OUT);
+}
+
+void EndpaperStakesSet(EndpaperStakes* held, const EndpaperStakes* now)
+{
+    TagFSLock* lock  = &tagfs_get_state()->lock;
+    uint32_t   epoch = tagfs_mount_epoch();
+    TagFSLockTake(lock);
+    EndpaperStakesGoneLocked(held);
+    memset(held, 0, sizeof(*held));
+    if (now && epoch && s_staked_epoch != epoch) {
+        /* The first Plot of a mounting counts from none: a Plot of the one
+         * before is counted in no measure of this one. */
+        s_staked       = (EndpaperSince){ .on = true };
+        s_staked_epoch = epoch;
+        __atomic_store_n(&s_staked_files, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&s_staked_digests, 0, __ATOMIC_RELEASE);
+    }
+    if (now && epoch) {
+        *held       = *now;
+        held->epoch = epoch;
+        StakesCount(held, 1u);
+    }
+    TagFSLockDrop(lock);
+}
+
+void EndpaperStakesAbove(uint64_t* files_bytes, uint64_t* digests_bytes)
+{
+    *files_bytes   = __atomic_load_n(&s_staked_files, __ATOMIC_ACQUIRE);
+    *digests_bytes = __atomic_load_n(&s_staked_digests, __ATOMIC_ACQUIRE);
 }
 
 // ----------------------------------------------------------------------------
@@ -406,13 +546,16 @@ static bool SinceHuge(const EndpaperSince* a)
            a->dtail > ENDPAPER_HUGE || a->dbytes > ENDPAPER_HUGE;
 }
 
-/* FILES of the next Tally: the leaves laid, the pieces touched — all of them
- * when a run may widen — each a run of its own, and what went in. */
+/* FILES of the next Tally: the leaves laid, the pieces touched — each leaf a
+ * Parcel's runs lie in, which widen (п.5), and each place a change went in —
+ * each a run of its own, and what went in. A leaf of no run and no change is
+ * the leaf it was: its items are spelled from nothing the next Tally's seq
+ * moves (a file's header from its own numbers, a key from the one before it). */
 static uint64_t FilesMost(const EndpaperView* v)
 {
     const EndpaperSince *s = &v->since, *o = &v->owed;
     uint64_t             n0     = v->laid.files_leaves;
-    uint64_t             pieces = s->sites + o->sites + (v->laid.runs ? n0 + 1u : 0);
+    uint64_t             pieces = s->sites + o->sites + v->laid.run_leaves;
     uint64_t             widen  = v->laid.runs * (TallyVarintBytes(v->seqs) + 1u);
     if (pieces > n0 + 1u)
         pieces = n0 + 1u;
@@ -460,6 +603,7 @@ void EndpaperFactMost(uint64_t* files, uint64_t* digests, uint64_t* tags)
     v.since = s_since;
     v.owed  = s_inked;
     OwedAdd(&v.owed, &s_sewing);
+    OwedAdd(&v.owed, &s_staked);
     TagFSLockDrop(lock);
     *files = *digests = *tags = UINT64_MAX;
     if (!v.since.on || SinceHuge(&v.since) || SinceHuge(&v.owed) || v.laid.runs >= ENDPAPER_HUGE ||
@@ -498,6 +642,7 @@ void EndpaperTallyLaid(const EndpaperLaid* l)
         TagFSLockTake(lock);
         s_laid  = *l;
         s_since = s_pending;
+        SinceSaid();
         TagFSLockDrop(lock);
     }
     memset(&s_pending, 0, sizeof(s_pending));
@@ -539,6 +684,7 @@ void EndpaperGrew(const DocketTaken* t, uint64_t seq)
     TagFSLockTake(lock);
     s_since  = since;
     s_sewing = (EndpaperSince){ .on = true };
+    SinceSaid();
     TagFSLockDrop(lock);
 }
 
@@ -574,6 +720,7 @@ void EndpaperStood(const EndpaperLaid* l, uint64_t seq, uint64_t next_fid)
         }
         from = ids[n - 1] + 1u;
     }
+    SinceSaid();
 }
 
 void EndpaperForget(void)
@@ -581,5 +728,9 @@ void EndpaperForget(void)
     memset(&s_laid, 0, sizeof(s_laid));
     memset(&s_since, 0, sizeof(s_since));
     memset(&s_pending, 0, sizeof(s_pending));
+    s_staked       = (EndpaperSince){ .on = true };
+    s_staked_epoch = 0;
+    __atomic_store_n(&s_staked_files, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_staked_digests, 0, __ATOMIC_RELEASE);
     EndpaperDocketDropped();
 }

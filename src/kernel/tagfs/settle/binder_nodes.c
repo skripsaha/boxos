@@ -222,6 +222,8 @@ static error_t FillLay(BinderWork* w)
     if (!LevelPut(&w->lv[w->level], &kid))
         return ERR_NO_MEMORY;
     EndpaperLaidNode(&w->laid, w->tree, w->level, sheets, w->grid, f->first.k1);
+    if (w->tree == TALLY_FILES && w->level == 0 && f->items)
+        w->laid.run_leaves++;
     w->off = off + sheets;
     w->nodes++;
     w->sheets += sheets;

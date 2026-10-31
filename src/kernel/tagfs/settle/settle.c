@@ -13,6 +13,7 @@
 #include "../glean/glean.h"
 #include "../mount/away.h"
 #include "../helm/helm.h"          /* HelmOwed — a change in flight, which no clean seal outruns */
+#include "binder.h"               /* BinderRoomAwaited — the Tally a book's take waits on */
 #include "amp.h"
 #include "baton.h"
 #include "kheap.h"
@@ -849,11 +850,19 @@ error_t TagFSSettle(void)
  * flight settled, a next_quire asked for (settle/ribbon.c, RibbonClaim) — so
  * one cycle is always run before the take is asked again, which says the last
  * word itself: a book has no pool slack to glean and no map sector a give
- * waits for.
+ * waits for. A take that waits on a Tally (binder.h, BinderRoomWait) has it
+ * written here first, by its own writer, a step a turn of the Scribe — not
+ * left to the committer while its cycles turn empty, each a stitch on a
+ * ribbon a full volume has one Quire to spare for — and the ground the slot
+ * let go rests in Fallow for the rounds after. One the tails hold back is
+ * left to the Helm's service (BinderRunAwaited): this wait is reached from
+ * inside a Helm span, and an Engross here would walk the files under it.
  */
 static error_t SettleForRoomBook(void)
 {
     TagFSState* fs = tagfs_get_state();
+    if (BinderRoomAwaited())
+        (void)BinderRunAwaited();
     for (uint64_t round = 0; round <= FallowLag() + 1u; round++) {
         TagFSLockTake(&fs->lock);
         uint64_t resting = FallowBlocks();
