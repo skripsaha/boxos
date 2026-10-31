@@ -528,6 +528,7 @@ process_t *process_create(const char *tags)
      * falls back to the fixed cabin ring VAs for the main strand. */
     proc->pocket_ring_phys = cabin->pocket_ring_phys;
     proc->result_ring_phys = cabin->result_ring_phys;
+    proc->result_ring_slots = (uint32_t)RESULT_RING_SLOT_MAX;
     proc->touch_ring_phys  = cabin->touch_ring_phys;
 
     process_init_strand_fields(proc);

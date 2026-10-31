@@ -317,6 +317,9 @@ typedef struct process_t
      * the main strand); strand_rings_destroy frees the rings/slots/StrandInfo. */
     uint64_t          pocket_ring_phys;
     uint64_t          result_ring_phys;
+    /* The slots the kernel made that ResultRing with — its own record, never
+     * the header's slot_count_max, which lives in a page the cabin writes. */
+    uint32_t          result_ring_slots;
     uint64_t          touch_ring_phys;
     uint64_t          strandinfo_phys;
 

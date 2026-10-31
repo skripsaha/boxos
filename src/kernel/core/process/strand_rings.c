@@ -230,6 +230,7 @@ bool strand_rings_create(process_t *proc)
      * first scheduler dispatch installs user_fsbase via context_restore. */
     proc->pocket_ring_phys    = pocket_phys;
     proc->result_ring_phys    = result_phys;
+    proc->result_ring_slots   = HAMMOCK_RESULT_CAP;
     proc->touch_ring_phys     = touch_phys;
     proc->strandinfo_phys     = si_phys;
     proc->context.user_fsbase = strandinfo_va;
@@ -277,6 +278,7 @@ void strand_rings_destroy(process_t *proc)
 
     proc->pocket_ring_phys = 0;
     proc->result_ring_phys = 0;
+    proc->result_ring_slots = 0;
     proc->touch_ring_phys  = 0;
     proc->strandinfo_phys  = 0;
 }

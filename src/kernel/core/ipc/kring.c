@@ -194,8 +194,15 @@ bool KResultRingHasPendingReply(process_t *proc)
     uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
     uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
     if (head == tail) return false;
+    /* The scan runs under the strand's state_lock, interrupts off, and every
+     * bound in the header is the cabin's to write: head, tail and
+     * slot_count_max. A cabin that says its ring holds four billion replies
+     * would hold this core for minutes. The ring has the slots the kernel made
+     * it with (result_ring_slots), and there is never more than that to look
+     * at — a lie beyond it only cuts the liar's own scan short. */
     uint64_t scan_end = tail;
-    if (scan_end - head > cap) scan_end = head + cap;   /* defensive clamp */
+    if (scan_end - head > cap) scan_end = head + cap;
+    if (scan_end - head > proc->result_ring_slots) scan_end = head + proc->result_ring_slots;
 
     for (uint64_t pos = head; pos < scan_end; pos++) {
         Porthole    porthole;
