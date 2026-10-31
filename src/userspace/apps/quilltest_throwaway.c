@@ -242,6 +242,17 @@ QuillVerdict QuillFidHistory(const char *const *args)
             broke = fid <= 0 ? (int)fid : -1;
             break;
         }
+        /* The last file lives through an anchor. A book's next mount issues
+         * ids past every one its medium saw, never one of those again; a
+         * file born and given up inside one cycle reaches no stitch
+         * (docket.c JotMerged), and its id may be issued again (spec_v2
+         * §4.5 п.8, §16.6 п.7): with no cycle to see the last id, that
+         * mount would stand short of the ids this case spent. */
+        int lrc = i + 1u == QUILL_FID_CYCLES ? anchor(0) : 0;
+        if (lrc != 0) {
+            broke = lrc;
+            break;
+        }
         int drc = delete((file_id_t)fid);
         if (!first)
             first = (file_id_t)fid;

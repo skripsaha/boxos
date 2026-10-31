@@ -474,9 +474,10 @@ static error_t TallyStepRun(BinderRun* r, bool* done)
 }
 
 /* The useful bytes the next Tally is owed at: TALLY_SLACK times what it is
- * reckoned to cost — laid in, the leaves the keys changed since meet and their
- * path (binder_cost.c), in both copies, and its slot; never more than the
- * last Tally's whole book, both copies and the slot (§4.2, §16.5 п.16). */
+ * reckoned to cost — laid in, the leaves the keys changed since meet, each at
+ * what is left live in it, and their path (binder_cost.c), in both copies, and
+ * its slot; never more than the last Tally's whole book, both copies and the
+ * slot (§4.2, §16.5 п.16, §16.6 п.6). */
 static uint64_t TallyWholeBytes(void)
 {
     return (2u * g_binder.tally_blocks + 1u) * TAGFS_BLOCK_SIZE;
@@ -491,22 +492,37 @@ static uint64_t TallyCostBytes(void)
 /*
  * ‼ THE COST IS RECKONED AGAIN ONLY WHEN IT COULD BE REACHED. Between a
  * Tally's slice and the next, DogEar only gains keys and the Foliation, the
- * reads' table and the last book stand still, so the cost only grows: useful
- * bytes short of TALLY_SLACK times the cost last reckoned are short of the
- * cost now, and nothing is walked. Reckoned again only once the useful bytes
- * reach it — each time past a cost at least TALLY_SLACK times the bytes
- * before, a few times a Tally, never at every stitch. A slice taken, a Tally
- * ended and a mount stood shrink what it is reckoned by: the cost is reckoned
- * again from nothing (cost_known 0).
+ * reads' table and the last book stand still; a leaf costs what is left live
+ * in it (§16.6 п.6, binder_live.c), so the cost grows with every key DogEar
+ * gains and with every key born in a leaf left empty, and shrinks only where
+ * a key of the state may have gone — a file given up, a Use Context said, or
+ * ground let go that leaves a leaf of DIGESTS no block of the file's nor one
+ * taken since the slice (dog_ear.c, LeafMayEmpty) — each of which DogEar
+ * counts (DogEarGoneCount). While none went since the cost was last
+ * reckoned, useful bytes short of TALLY_SLACK times it are short of the cost
+ * now, and nothing is walked: reckoned again once the useful bytes reach it —
+ * each time past a cost at least TALLY_SLACK times the bytes before, a few
+ * times a Tally — or at the first weigh after a key went, so a Tally a large
+ * delete made cheap is owed at once. A write over a block of a file, laid on
+ * fresh ground, lets go a block of a leaf the file still holds one of: no key
+ * went, and a stitch of such writes walks nothing. Only one that may have
+ * emptied a leaf — a file given up, a file cut short of every block of a
+ * leaf, the Use Context said — walks the cost at the weigh after it. A slice
+ * taken, a Tally ended and a mount stood shrink what it is reckoned by: the
+ * cost is reckoned again from nothing (cost_known 0).
  */
 static bool TallyDue(void)
 {
     uint64_t useful = g_binder.useful;
+    uint64_t gone   = DogEarGoneCount();
+    if (!g_binder.up)
+        return false;               /* no book stands: nothing is owed, nothing weighed */
     if (useful >= (uint64_t)TALLY_SLACK * TallyWholeBytes())
         return true;
-    if (useful < (uint64_t)TALLY_SLACK * g_binder.cost_known)
+    if (gone == g_binder.cost_gone && useful < (uint64_t)TALLY_SLACK * g_binder.cost_known)
         return false;
     g_binder.cost_known = TallyCostBytes();
+    g_binder.cost_gone  = gone;
     return useful >= (uint64_t)TALLY_SLACK * g_binder.cost_known;
 }
 

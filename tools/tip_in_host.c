@@ -58,6 +58,30 @@ const TailSlip* TailSlipHold(const TailSlip* s)
     return s;
 }
 
+/* The host's records carry no Slip: a splice keeps none (file_map/tail_slip.c). */
+error_t TailSlipKept(const FileRecord* old, FileRecord* rec, bool spliced)
+{
+    (void)old;
+    (void)rec;
+    (void)spliced;
+    return OK;
+}
+
+/* The host stands on no Tally's DIGESTS: no reads' table, no leaf of it
+ * (mount/tally_read.c) — ground let go is a key that may have gone. */
+uint32_t TallyDigestLeaves(void)
+{
+    return 0;
+}
+
+bool TallyDigestLeafAt(uint32_t index, TallyPlace* out, bool* rotten)
+{
+    (void)index;
+    (void)out;
+    (void)rotten;
+    return false;
+}
+
 void TailSlipLetGo(const TailSlip* s)
 {
     (void)s;

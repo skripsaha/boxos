@@ -181,6 +181,22 @@ def BookDeed(medium, start):
     return 0
 
 
+def GroundRuns(runs):
+    """The runs of ground a book's file lies in. Its record keeps a run a
+    cycle on each run of ground — a run a settled stitch named is never grown
+    (spec_v2 §2.8: a run's birth is the stitch that put it in) — so its runs
+    count the cycles that grew it as well; one that begins where the one
+    before it ended goes on the same run of ground, a hole between them or
+    none, as the kernel's stand counts them (stand_fresh_ground_tests.c
+    StandFreshForcedRuns)."""
+    n, end = 0, None
+    for r in runs:
+        if not r.hole:
+            n += r.start != end
+            end = r.start + r.count
+    return n
+
+
 def BookFiles(args, medium, ground, how):
     """`list` and `get` of a format-v2 volume: the files its book holds once
     its ribbon is replayed, each read through its runs and Slips."""
@@ -201,8 +217,8 @@ def BookFiles(args, medium, ground, how):
         width = max(len(n) for n in named)
         for name in sorted(named):
             fs = m.files[named[name]]
-            print(f"  {name:<{width}}  {fs.size:>10} bytes  {len(fs.runs)} run(s), {fs.Blocks()} block(s)"
-                  + (f", {len(fs.slips)} Slip(s)" if fs.slips else ""))
+            print(f"  {name:<{width}}  {fs.size:>10} bytes  {len(fs.runs)} run(s), {fs.Blocks()} block(s), "
+                  f"{GroundRuns(fs.runs)} run(s) of ground" + (f", {len(fs.slips)} Slip(s)" if fs.slips else ""))
         return 0
     if args.name not in named:
         have = ", ".join(sorted(named)) or "(none)"

@@ -23,6 +23,8 @@ And the circle: a Tally read back, bound again where it lies, held byte for
 byte against the medium.
 """
 
+import bisect
+
 from .bookground import BookGround
 from .bookread import EntryPut, Integrity, PtrPut, SeedLanes, VarintPut
 from .medium import Unreadable
@@ -565,18 +567,59 @@ def Useful(u):
     return u.parsed.end if u.parsed and u.parsed.why is None else 0
 
 
+def Lives(files, tags, use, held=()):
+    """Whether a key of the state of `files`, `tags` and `use` lies in the
+    range [lo, hi) of a leaf of a tree — lo None from its first key, hi None
+    to its end (settle/binder_live.c, §16.6 п.6): of FILES, a live file's id
+    among the ids the leaf holds keys of, its upper key's file too when it
+    ends inside it; of TAGS, a tag's id; of USE, a Use Context; of DIGESTS, a
+    block of a live file's ground or of `held` — runs a locked file is known
+    to name, held for what rotted — as DIGESTS speaks for both
+    (_DigestsWanted). The kernel tells the last by its block map, past the
+    book's own ground and what rests in Fallow: the same blocks at a quiet
+    point."""
+    ground = sorted([r for fs in files.values() for r in fs.Ground()] + list(held))
+    starts = [s for s, _n in ground]
+    reach, most = [], 0
+    for s, n in ground:
+        most = max(most, s + n)
+        reach.append(most)
+    fids = sorted(files)
+    tids = sorted(tags)
+
+    def Within(keys, lo, hi):
+        i = bisect.bisect_left(keys, lo)
+        return i < len(keys) and (hi is None or keys[i] < hi)
+
+    def Live(tree, lo, hi):
+        if tree == FILES:
+            return Within(fids, lo[0] if lo is not None else 0,
+                          None if hi is None else hi[0] + 1 if hi[1] else hi[0])
+        if tree == TAGS:
+            return Within(tids, lo if lo is not None else 0, hi)
+        if tree == USE:
+            return bool(use)
+        if tree == DIGESTS:
+            i = bisect.bisect_left(starts, hi) if hi is not None else len(starts)
+            return i > 0 and reach[i - 1] > (lo if lo is not None else 0)
+        return True
+    return Live
+
+
 def BindSaid(m):
     """What a reader of the newest slot says of its Tally against TALLY_SLACK:
     (the blocks its Tally's whole book takes a copy, the bytes the next is
     reckoned to cost, the bytes a whole Tally of it would, the useful bytes of
     the ribbon past its `at`). The next is reckoned laid in — the leaves the
-    stitches past `at` changed and their path, both copies, and the slot —
-    never more than the whole book (settle/binder.c TallyCostBytes,
-    settle/binder_cost.c; dog_ear.py)."""
+    stitches past `at` changed, each at what is left live in it, and their
+    path, both copies, and the slot — never more than the whole book
+    (settle/binder.c TallyCostBytes, settle/binder_cost.c; dog_ear.py)."""
     from .dog_ear import TipInBlocks
     blocks = sum(n.sheets for n in m.tally.Nodes())
     whole = (2 * blocks + 1) * BLOCK
-    tip = TipInBlocks(m.tally, m.dog_ear)
+    held = [(r.start, r.count) for fid, runs in m.locked_runs.items() if fid in m.locked for r in runs
+            if not r.hole]
+    tip = TipInBlocks(m.tally, m.dog_ear, Lives(m.files, m.tags, m.use, held))
     cost = (2 * tip + 1) * BLOCK if tip < blocks else whole
     return blocks, cost, whole, sum(Useful(u) for u in m.ribbon.stitches)
 

@@ -43,6 +43,14 @@ typedef struct {
 static DogEarDelta s_delta_held;
 static DogEarDelta s_delta_taken;
 
+/* The changes put in since the volume was mounted that may have left a leaf
+ * with no key of the state in it — a file given up, ground let go that may
+ * leave a leaf of DIGESTS with none (LeafMayEmpty), a Use Context said: what
+ * a Tally is reckoned to cost may be less after one (settle/binder.c,
+ * TallyDue). Counted from any core; none once DogEar is let go of — a mount
+ * begun, the volume let go of. */
+static uint64_t s_gone;
+
 /* The place of `tree` among DogEar's — UINT32_MAX for a tree no Tally of this
  * kernel lays. */
 static uint32_t TreeAt(uint64_t tree)
@@ -186,6 +194,8 @@ void DogEarPut(uint64_t tree, TallyKey lo, TallyKey hi)
     DogEarSpan s  = { lo, hi };
     if (at != UINT32_MAX && KeyLess(lo, hi))
         SpansPut(at, &s, 1);
+    if (tree == TALLY_USE)
+        __atomic_add_fetch(&s_gone, 1u, __ATOMIC_RELEASE);     /* the word said may be none: its one key gone */
 }
 
 void DogEarMended(uint64_t tree, const TallyPlace* at)
@@ -323,6 +333,8 @@ typedef struct {
     Strip*      ground[2];
     uint64_t    nground[2], capground[2];
     bool        refused;
+    bool        went;       /* a key of the state may have gone: the file given up, or ground of it let go
+                             * that may leave a leaf of DIGESTS with none (LeafMayEmpty) */
 } DogEarChange;
 
 static void SpanNoted(DogEarChange* c, bool digests, TallyKey lo, TallyKey hi)
@@ -380,6 +392,68 @@ static void WindowsNoted(DogEarChange* c, uint64_t start, uint64_t end)
               last > UINT64_MAX - DIGEST_ITEM_MOST ? DOG_EAR_END : (TallyKey){ last + DIGEST_ITEM_MOST, 0 });
 }
 
+/* The range [*lo, *hi) of the leaf of DIGESTS the reads stand on that `block`
+ * lies in — the last whose lower key is not past it, the first from none, as
+ * the next Tally is reckoned by them (binder_cost.c, LeafOf); false with no
+ * leaf. */
+static bool DigestLeafOf(uint64_t block, uint64_t* lo, uint64_t* hi)
+{
+    uint32_t   a = 1, z = TallyDigestLeaves();
+    TallyPlace p;
+    bool       rotten;
+    while (a < z) {
+        uint32_t mid = a + (z - a) / 2u;
+        if (TallyDigestLeafAt(mid, &p, &rotten) && (!p.has_lo || p.lo.k1 <= block))
+            a = mid + 1u;
+        else
+            z = mid;
+    }
+    if (!TallyDigestLeafAt(a - 1u, &p, &rotten))
+        return false;
+    *lo = a > 1u && p.has_lo ? p.lo.k1 : 0;
+    *hi = p.has_hi ? p.hi.k1 : UINT64_MAX;
+    return true;
+}
+
+/* Whether runs `g` (`n`, in order, none meeting) name a block of [lo, hi). */
+static bool GroundIn(const BinderGround* g, uint64_t n, uint64_t lo, uint64_t hi)
+{
+    uint64_t a = 0, z = n;
+    while (a < z) {
+        uint64_t mid = a + (z - a) / 2u;
+        if (g[mid].start + g[mid].count <= lo)
+            a = mid + 1u;
+        else
+            z = mid;
+    }
+    return a < n && g[a].start < hi;
+}
+
+/*
+ * Whether ground [start, end) a file let go may have left a leaf of DIGESTS
+ * with no key of the state in it — the next Tally's cost may be less
+ * (binder.c, TallyDue). Not where it lies inside one leaf that the file still
+ * holds a run of ground in (`b`, `nb`: its ground after the change, laid as
+ * ground) or that a file took ground in since the slice: a block a live file
+ * holds is a key of that leaf. So a write over a block of a file, laid on
+ * fresh ground, or a cut that leaves the file a block of the leaf, is no key
+ * gone; a file given up, or cut short of every block of a leaf, may be.
+ */
+static bool LeafMayEmpty(const Strip* b, uint64_t nb, uint64_t start, uint64_t end)
+{
+    uint64_t lo = 0, hi = 0, at = 0, z = nb;
+    if (!DigestLeafOf(start, &lo, &hi) || end > hi)
+        return true;
+    while (at < z) {
+        uint64_t mid = at + (z - at) / 2u;
+        if (b[mid].start + b[mid].count <= lo)
+            at = mid + 1u;
+        else
+            z = mid;
+    }
+    return !(at < nb && b[at].start < hi) && !GroundIn(s_delta_held.born.run, s_delta_held.born.n, lo, hi);
+}
+
 /* The ground one side names and the other does not, as windows: both sides
  * laid as ground first — in order, the runs that meet joined. */
 static void GroundDiffered(DogEarChange* c)
@@ -406,6 +480,7 @@ static void GroundDiffered(DogEarChange* c)
             x = ae < bs ? ae : bs;
             WindowsNoted(c, as, x);
             c->refused |= !DeltaMoved(&s_delta_held, as, x, true);
+            c->went    |= LeafMayEmpty(b, nb, as, x);
         } else if (bs < as) {
             x = be < as ? be : as;
             WindowsNoted(c, bs, x);
@@ -502,6 +577,7 @@ void DogEarFileChanged(uint64_t fid, const FileRecord* was, const FileRecord* no
     memset(&c, 0, sizeof(c));
     if (__atomic_load_n(&s_held.lost, __ATOMIC_ACQUIRE))
         return;
+    c.went = was && !now;
     if (!was || !now) {
         SpanNoted(&c, false, (TallyKey){ fid, 0 }, end);
         if (was || now)
@@ -518,6 +594,8 @@ void DogEarFileChanged(uint64_t fid, const FileRecord* was, const FileRecord* no
         SpansPut(TreeAt(TALLY_FILES), c.files, c.nfiles);
         SpansPut(TreeAt(TALLY_DIGESTS), c.digests, c.ndigests);
     }
+    if (c.went)
+        __atomic_add_fetch(&s_gone, 1u, __ATOMIC_RELEASE);
     kfree(c.files);
     kfree(c.digests);
     kfree(c.ground[0]);
@@ -595,10 +673,16 @@ const BinderGround* DogEarTakenGround(bool gone, uint64_t* n)
     return g->n ? g->run : NULL;
 }
 
-const BinderGround* DogEarHeldGround(uint64_t* n)
+const BinderGround* DogEarHeldGround(bool gone, uint64_t* n)
 {
-    *n = s_delta_held.born.n;
-    return s_delta_held.born.n ? s_delta_held.born.run : NULL;
+    const DogEarGround* g = gone ? &s_delta_held.gone : &s_delta_held.born;
+    *n = g->n;
+    return g->n ? g->run : NULL;
+}
+
+uint64_t DogEarGoneCount(void)
+{
+    return __atomic_load_n(&s_gone, __ATOMIC_ACQUIRE);
 }
 
 bool DogEarTakenHolds(uint64_t tree, TallyKey key)
@@ -660,6 +744,7 @@ void DogEarLetGo(void)
     SetLetGo(&s_taken);
     GroundLetGo(&s_delta_held);
     GroundLetGo(&s_delta_taken);
+    __atomic_store_n(&s_gone, 0u, __ATOMIC_RELEASE);
 }
 
 #ifdef CONFIG_VOLUME_TESTS

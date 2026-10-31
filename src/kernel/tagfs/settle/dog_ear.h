@@ -77,11 +77,20 @@ bool     DogEarTakenLost(void);
  * holder. */
 const BinderGround* DogEarTakenGround(bool gone, uint64_t* n);
 
-/* The ground the live files took since the last slice and hold — runs in
- * order, *n of them: a Tally's DONE leaves their digests in the Gloss, which
- * alone holds them, though the slice it laid named the block (binder_done.c).
- * By the Settle's holder. */
-const BinderGround* DogEarHeldGround(uint64_t* n);
+/* The ground the live files took since the last slice and hold (`gone`
+ * false), or held at it and let go since (`gone`) — runs in order, *n of
+ * them, as DogEarTakenGround gives the Tally's: a Tally's DONE leaves the
+ * digests of the first in the Gloss, which alone holds them, though the slice
+ * it laid named the block (binder_done.c); what the next is reckoned to cost
+ * weighs a leaf of DIGESTS by both (binder_live.c). By the Settle's holder. */
+const BinderGround* DogEarHeldGround(bool gone, uint64_t* n);
+
+/* How many changes put in since the volume was mounted may have left a leaf
+ * with no key of the state in it: a file given up, ground of one let go that
+ * may leave a leaf of DIGESTS with none — not where the file, or a file that
+ * took ground since the slice, still holds a block of the leaf — a Use
+ * Context said. From any core. */
+uint64_t DogEarGoneCount(void);
 
 /* The spans of `tree` held since the last slice from the `from`-th on, into
  * `out` (room `room`): how many — a few at a hold of the lock, so a span put

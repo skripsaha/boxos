@@ -507,6 +507,15 @@ void FallowSpineAdd(FallowNode* node, uint64_t cycle)
     FallowAdd(node, 0);
 }
 
+uint64_t FallowRestsPast(uint64_t block)
+{
+    for (FallowNode* n = s_head; n; n = n->next)
+        for (uint32_t i = 0; n->ripe_at != 0 && i < n->count; i++)
+            if (block >= n->runs[i].start && block - n->runs[i].start < n->runs[i].count)
+                return n->runs[i].start + n->runs[i].count;
+    return block;
+}
+
 uint64_t FallowSpineRipeFrom(void)
 {
     uint64_t from = UINT64_MAX;

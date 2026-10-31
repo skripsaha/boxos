@@ -26,7 +26,9 @@
 // holds after it (C24). A volume
 // filled and emptied by Tallies laid in so gives its ground back, every block
 // the test took free again or held by the slots (§16.5 п.17: a Quire of the
-// Tallies' held while one node of it lives). The tests read the Tally a mount
+// Tallies' held while one node of it lives). A leaf costs the next Tally what
+// is left live in it: data given up costs the path above the leaves it
+// emptied, and the Tally falls owed at once (§16.6 п.6). The tests read the Tally a mount
 // stands on as the mount's walk reached it (TallyStandNodeWhere) and the
 // reads' DIGESTS table, the runner holding the cadence (tests.c,
 // SettleCadenceHold), so no Tally runs but the one a test asks for. Every
@@ -675,6 +677,12 @@ static const TestCase g_stand_tip_in_tests[] = {
     { .name = "stand_tip_in_quires_held", .func = TestStandTipInQuiresHeld,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_tip_in_rotten_past", .func = TestStandTipInRottenPast,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_tip_in_cost_lives", .func = TestStandTipInCostLives,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_tip_in_cost_files", .func = TestStandTipInCostFiles,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_tip_in_torn_down", .func = TestStandTipInTornDown,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
 };
 

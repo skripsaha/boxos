@@ -49,6 +49,13 @@ bool        StandBinderPutBack(StandBinder* b);
 error_t     StandBinderTallies(uint32_t n);
 bool        StandBinderGleaned(void);
 
+/* stand_tip_in_cost_tests.c: what the next Tally is reckoned to cost, held to
+ * the rule counted by the test (§16.6 п.6), and a Tally under way when the
+ * volume is let go of — cases of the stand_tip_in suite. */
+TestResult  TestStandTipInCostLives(void);
+TestResult  TestStandTipInCostFiles(void);
+TestResult  TestStandTipInTornDown(void);
+
 #define STAND_BINDER_PUT_BACK(b)                                                                           \
     do {                                                                                                   \
         if (!StandBinderPutBack(b))                                                                        \

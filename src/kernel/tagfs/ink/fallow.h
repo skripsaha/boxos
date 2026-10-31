@@ -221,6 +221,14 @@ void        FallowQuireLeft(uint64_t seq);
 bool        FallowAwaitsQuire(void);
 uint64_t    FallowLeftBlocks(void);
 
+/* Under the state lock: the end of the run resting here that `block` lies in,
+ * of a node whose freer settled — ground no settled state names any more, of
+ * a file or of the book's own (FALLOW_BY_SPINE) — or `block` itself where none
+ * does: one whose freer is still unsettled names ground the state the last
+ * settled stitch left still holds. What a Tally is reckoned to cost passes
+ * over it in a range of DIGESTS (settle/binder_live.c). */
+uint64_t    FallowRestsPast(uint64_t block);
+
 /* By a book's Settle holder, with no TagFS lock held, at the TAKE of cycle
  * `cycle`: the pages the derived block map may want for the gives of every
  * node that may go back at the cycle's end, held (BlockMapDerivedHold), so

@@ -71,8 +71,14 @@ void BinderSlotLetGo(SlotGround* s)
 // What the mount read
 // ----------------------------------------------------------------------------
 
+/* No book stands from the first line on: the Tally under way ends weighing
+ * nothing (binder.c, TallyDue) — a volume let go of has its file map, its
+ * registry and its Use Context gone before the book is (tagfs.c,
+ * tagfs_clear_the_ground), and what a leaf keeps live is asked of them
+ * (binder_live.c). */
 void BinderMountReset(void)
 {
+    g_binder.up = false;
     BinderStopped(ERR_DEVICE_NOT_READY);
     DogEarLetGo();
     FoliationLetGo();
@@ -541,6 +547,31 @@ static bool PairHolds(uint64_t start, uint64_t end, uint64_t q)
 static bool QuireHeld(uint64_t start, uint64_t end, uint64_t q)
 {
     return SlotsHold(start, end) || PairHolds(start, end, q);
+}
+
+/* The end of the Quire of the ribbon `q` (`n` of them) that `block` lies in,
+ * or `block`. */
+static uint64_t RibbonQuirePast(const RibbonQuire* q, uint64_t n, uint64_t block)
+{
+    for (uint64_t i = 0; i < n; i++)
+        if (block >= q[i].block && block - q[i].block < q[i].blocks)
+            return q[i].block + q[i].blocks;
+    return block;
+}
+
+uint64_t BinderOwnPast(uint64_t block)
+{
+    uint64_t q    = RibbonCursorNow()->quire_blocks;
+    uint64_t cell = q ? block / q * q : 0;
+    if (!g_binder.up)
+        return block;
+    if (q && QuireHeld(cell, cell + q, q))
+        return cell + q;
+    uint64_t past = RibbonQuirePast(g_binder.chain, g_binder.nchain, block);
+    for (uint32_t i = 0; past == block && i < g_binder.nslots; i++)
+        if (g_binder.slot[i].holds)
+            past = RibbonQuirePast(g_binder.slot[i].extra, g_binder.slot[i].nextra, block);
+    return past;
 }
 
 /* Where a slot goes in the ring's turn: one that holds nothing — or may hold

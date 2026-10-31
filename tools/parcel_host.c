@@ -69,6 +69,15 @@ const TailSlip* TailSlipHold(const TailSlip* s)
     return s;
 }
 
+/* The host's records carry no Slip: a splice keeps none (file_map/tail_slip.c). */
+error_t TailSlipKept(const FileRecord* old, FileRecord* rec, bool spliced)
+{
+    (void)old;
+    (void)rec;
+    (void)spliced;
+    return OK;
+}
+
 void TailSlipLetGo(const TailSlip* s)
 {
     (void)s;
