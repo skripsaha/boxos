@@ -765,6 +765,21 @@ void sched_dequeue_all_cores(process_t *proc)
 // Process selection (per-core)
 // ---------------------------------------------------------------------------
 
+/* May `proc` be put on a core? Only a strand that is to run — not yet started
+ * (PROC_CREATED, which its first dispatch makes WORKING) or WORKING — and not
+ * being torn down. Exited, crashed, parked or stopped, it may not, wherever it
+ * was found: a runqueue can still hold a strand whose state changed while it
+ * sat there, because a change of state takes a strand out of its home core's
+ * runqueue only on the way out of WORKING (process_set_state), and not at all
+ * from a strand already taken out to be run. Read without the state lock; the
+ * order that makes the answer good enough at dispatch is told in schedule(). */
+static inline bool SchedMayDispatch(process_t *proc)
+{
+    process_state_t st = __atomic_load_n(&proc->state, __ATOMIC_ACQUIRE);
+    return (st == PROC_CREATED || st == PROC_WORKING) &&
+           !__atomic_load_n(&proc->destroying, __ATOMIC_ACQUIRE);
+}
+
 process_t *scheduler_select_next(void)
 {
     scheduler_state_t *s = scheduler_get_state();
@@ -828,11 +843,11 @@ process_t *scheduler_select_next(void)
         s->normal_ticks++;
     }
 
-    // Skip destroying processes.
+    // Skip a strand that may not run (SchedMayDispatch): it leaves the runqueue
+    // here, and its wake — if it has one coming — queues it again.
     // `next` was already dequeued and its counter decremented above.
     // Each replacement also needs its counter decremented.
-    while (next && !process_is_idle(next) &&
-           __atomic_load_n(&next->destroying, __ATOMIC_ACQUIRE))
+    while (next && !process_is_idle(next) && !SchedMayDispatch(next))
     {
         next = runqueue_dequeue_best(&s->runqueue);
         if (next && !process_is_idle(next) && my_core < g_sched_core_count) {
@@ -917,6 +932,12 @@ static process_t *sched_try_steal(uint8_t my_core)
          * take until then. Read under the victim's runqueue lock: a queued
          * strand's claim can only be released, never taken, while we hold it. */
         if (__atomic_load_n(&q->procs[q->head]->on_cpu, __ATOMIC_ACQUIRE) >= 0)
+            continue;
+
+        /* Nor one that may not run: the victim's own selection lets it go
+         * (scheduler_select_next), and a thief that took it would have nothing
+         * to dispatch. */
+        if (!SchedMayDispatch(q->procs[q->head]))
             continue;
 
         stolen = q->procs[q->head];
@@ -1127,41 +1148,8 @@ void schedule(void *frame_ptr)
         }
     }
 
-    // Set kernel stack (top + floor) for THIS core — including idle, so the
-    // REACT headroom guard reads the correct geometry while idle runs.
-    if (next->kernel_stack_top)
-    {
-        per_core_set_kernel_rsp((uint64_t)next->kernel_stack_top,
-                                (uint64_t)next->kernel_stack);
-    }
-
     // Switch
     spin_lock(&s->scheduler_lock);
-    /* TOCTOU re-check: between scheduler_select_next (which filtered
-     * destroying processes) and this store, another core may have
-     * called process_destroy on `next` and marked destroying=1. If
-     * we commit `next` as current_process here, process_destroy's
-     * scan finds the just-stored pointer AND the destroyer races
-     * with us through the alive-ref window — net effect is a UAF
-     * when destroy eventually frees the process struct.
-     *
-     * Closing the window: re-read destroying under the same lock
-     * that process_destroy's scan synchronises with (via the
-     * ACQUIRE load on s->current_process in process_destroy.c:662).
-     * If destroying is set we fall back to idle for this tick;
-     * scheduler_select_next will pick a fresh candidate next tick. */
-    if (next && !process_is_idle(next) &&
-        __atomic_load_n(&next->destroying, __ATOMIC_ACQUIRE)) {
-        /* Selected task is being destroyed — don't dispatch it. Fall back to
-         * THIS core's idle task for this tick, NOT to NULL: with next == NULL,
-         * context_restore_to_frame is a no-op, so the IRQ frame is left holding
-         * the OUTGOING `current` and the iretq would resume `current` here —
-         * while `current` was just re-enqueued above, leaving it both running
-         * AND in a runqueue (stealable → the same context dispatched on two
-         * cores). Running idle keeps the running-XOR-runqueue invariant; the
-         * next tick re-runs scheduler_select_next and picks a fresh candidate. */
-        next = idle_process_get();
-    }
 
     /* Running-XOR-runqueue interlock: claim `next` exclusively before committing
      * it as current_process. If another core still owns it (mid-eviction there —
@@ -1174,11 +1162,14 @@ void schedule(void *frame_ptr)
     process_t *refused = NULL;
     int16_t    refused_owner = -1;
     if (next && !process_is_idle(next)) {
-        int16_t me8 = (int16_t)amp_get_core_index();
+        int16_t me8     = (int16_t)amp_get_core_index();
+        bool    claimed = false;
         if (__atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE) != me8) {
             int16_t expect = -1;
-            if (!__atomic_compare_exchange_n(&next->on_cpu, &expect, me8,
-                                             false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            if (__atomic_compare_exchange_n(&next->on_cpu, &expect, me8,
+                                            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                claimed = true;
+            } else {
                 /* Another core still owns `next` — averting double-dispatch.
                  * `next` is already out of every runqueue, so it is handed back
                  * to its owner below, once this core's scheduler_lock is gone. */
@@ -1187,6 +1178,49 @@ void schedule(void *frame_ptr)
                 next = idle_process_get();
             }
         }
+
+        /* Only now, holding the claim, is `next` asked whether it may run.
+         *
+         * Between scheduler_select_next taking it out of the runqueue and this
+         * point it was in no runqueue and on no core, and a change of state made
+         * then — its exit (SysProcKill: PROC_DONE), a park (SysAddrPark,
+         * SysTurnIn: PROC_WAITING), its destruction — found nothing to take it
+         * out of: sched_dequeue looks in a runqueue. Asked before the claim, as
+         * this was, the answer could be stale by the time the strand ran, and
+         * this core started a strand that had exited — whose teardown, seeing it
+         * on no core, then freed its FPU buffer and kernel stack under it
+         * (measured: fxrstor through a NULL fpu_state in context_restore_to_frame,
+         * and a return address read from a kernel stack already freed).
+         *
+         * The claim is a locked compare-exchange, a full barrier, so the reads
+         * below come after it. Whoever changes the state stores first and looks
+         * at on_cpu after a full barrier of its own (process_set_state for a
+         * park, process_destroy for the teardown), so one of the two always sees
+         * the other: either this core sees the new state and lets the strand
+         * go, or the other side sees it claimed and treats it as running — a
+         * strand parked on its CPU is asked to step aside, a strand on a CPU is
+         * not torn down. A consecutive run holds its claim already and needs no
+         * barrier: nothing can tear down the strand this core runs.
+         *
+         * A strand let go is in no runqueue, which is where it belongs: an exited
+         * one is the reaper's, a parked one is queued again by its wake. Idle runs
+         * instead, never NULL — with NULL the IRQ frame would resume `current`,
+         * re-enqueued above, both running and queued. */
+        if (!process_is_idle(next) && !SchedMayDispatch(next)) {
+            if (claimed)
+                __atomic_store_n(&next->on_cpu, (int16_t)-1, __ATOMIC_RELEASE);
+            next = idle_process_get();
+        }
+    }
+
+    // Set kernel stack (top + floor) for THIS core, for the strand that will run
+    // here — including idle, so the REACT headroom guard reads the correct
+    // geometry while idle runs. Set only once `next` is final: a strand let go
+    // above must not leave this core pointing at its stack.
+    if (next->kernel_stack_top)
+    {
+        per_core_set_kernel_rsp((uint64_t)next->kernel_stack_top,
+                                (uint64_t)next->kernel_stack);
     }
 
     /* Stamp the outgoing strand for reap-vs-switch safety. It leaves the run

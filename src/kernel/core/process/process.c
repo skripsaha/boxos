@@ -400,6 +400,7 @@ static void process_free_kernel_stack(process_t *proc)
 
     proc->kernel_stack_guard_base = NULL;
     proc->kernel_stack            = NULL;
+    proc->kernel_stack_top        = NULL;
 
     vmm_context_t *kernel_ctx = vmm_get_kernel_context();
     pte_t *guard_pte = vmm_get_pte(kernel_ctx, guard_virt);
@@ -704,10 +705,20 @@ bool process_set_state(process_t *proc, process_state_t new_state)
      * took the submit is the one parking it, and the strand itself is spinning
      * on its App-Core in a reply wait that nothing else will end until the
      * next tick. Asked to step aside, its spin yields at once and the
-     * scheduler takes the WAITING strand off the core. */
-    if (new_state == PROC_WAITING &&
-        __atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE) >= 0)
-        KResultStepAside(proc, true);
+     * scheduler takes the WAITING strand off the core.
+     *
+     * The state is stored before on_cpu is read, with a full barrier between,
+     * because a core may be claiming the strand to dispatch it right now — it
+     * claims first and reads the state after (schedule()). One of the two then
+     * sees the other: that core sees WAITING and does not run it, or this read
+     * sees the claim and the strand it runs is told to step aside. Without the
+     * barrier both could read the old value, and a parked strand would run. */
+    if (new_state == PROC_WAITING)
+    {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE) >= 0)
+            KResultStepAside(proc, true);
+    }
 
     bool enqueued = false;
     if (new_state == PROC_WORKING && old_state != PROC_WORKING)
@@ -793,6 +804,19 @@ void process_destroy(process_t *proc)
             running_on_core = c;
             break;
         }
+    }
+
+    /* A core that has claimed the strand to dispatch it holds on_cpu before it
+     * is anyone's current_process. It asks after the claim whether the strand
+     * is being destroyed (schedule()), and destroying was stored above before
+     * this read with a full barrier between — so either that core sees it and
+     * lets the strand go, or this read sees the claim and the strand is not
+     * torn down under a core about to run it. */
+    int16_t claimed_by = __atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE);
+    if (!is_running && claimed_by >= 0)
+    {
+        is_running      = true;
+        running_on_core = (uint8_t)claimed_by;
     }
 
     if (is_running)

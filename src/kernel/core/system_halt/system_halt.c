@@ -660,14 +660,22 @@ void halt_all_ap_cores(bool orderly)
 
 static void halt_detach_all_schedulers(void)
 {
-    // Clear current_process on every core's scheduler.
-    // AP cores are already in cli;hlt — they will never touch these pointers again.
-    // This prevents process_destroy() from refusing to destroy "current" processes.
+    // Clear current_process on every core's scheduler, and the claim (on_cpu)
+    // every core holds on the strand it runs or was dispatching.
+    // AP cores are already in cli;hlt — they will never touch these again.
+    // This prevents process_destroy() from refusing to destroy a strand a
+    // halted core still counts as its own: it refuses one that is current
+    // anywhere, and one that is claimed (see process_destroy).
     for (uint8_t c = 0; c < g_amp.total_cores; c++)
     {
         scheduler_state_t *s = scheduler_get_core(c);
         s->current_process = NULL;
     }
+
+    process_list_lock();
+    for (process_t *p = process_get_first(); p; p = p->next)
+        __atomic_store_n(&p->on_cpu, (int16_t)-1, __ATOMIC_RELEASE);
+    process_list_unlock();
 }
 
 /* The pid of the process at `index` in the list, or false when the list is
