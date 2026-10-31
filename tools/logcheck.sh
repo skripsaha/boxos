@@ -9040,7 +9040,7 @@ STAND_HELD="
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=336
+STAND_RUN=339
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -10087,7 +10087,9 @@ STAND_HELD_EOF
 #
 #   boot 1  on QUILL_BOOT1_MEM: longquery bigwrite sequential interleave
 #           coldread coldwrite usememory; then the host lists the volume and
-#           counts the extents each file was given
+#           counts the runs of ground each file was given (format v1's
+#           extents; a book's runs of ground, past the run a cycle its
+#           record keeps on each)
 #   boot 2  usememory's second half, when the first said PENDING; fidhistory
 #   boot 3  systemtag; then the host lists the volume again: is kernel.bin on it
 #
@@ -10275,10 +10277,21 @@ def said(log, case):
     word, rest = verdict(log, case)
     return "the machine said %s — %s" % (word, rest) if word else "the machine gave %s no verdict" % case
 
+# A file as the host lists it: (bytes, runs of ground, blocks). Format v1's
+# record holds an extent a run of ground; a book's holds a run a cycle on each
+# run of ground — a run a settled stitch named is never grown — so what
+# Allotment lays is the runs of ground volume-read counts beside them.
+LISTED = (r"^ +%s +(\d+) bytes +(\d+) extent\(s\), (\d+) block\(s\)$",
+          r"^ +%s +(\d+) bytes +\d+ run\(s\), (\d+) block\(s\), (\d+) run\(s\) of ground(?:, \d+ Slip\(s\))?$")
+BOOK = any(re.search(r"^ground sector .* — format v2$", l, re.M) for l in lists)
+RUNS = "run(s) of ground" if BOOK else "extent(s)"
+
 def host(listing, name):
-    m = re.search(r"^ +%s +(\d+) bytes +(\d+) extent\(s\), (\d+) block\(s\)$" % re.escape(name),
-                  listing, re.M)
-    return tuple(int(x) for x in m.groups()) if m else None
+    m = re.search(LISTED[BOOK] % re.escape(name), listing, re.M)
+    if not m:
+        return None
+    n = tuple(int(x) for x in m.groups())
+    return (n[0], n[2], n[1]) if BOOK else n
 
 # The most extents a file grown a block at a time can have: its Allotment
 # windows, each sized to the file when it has none left — 1, 1, 2, 4, … — so
@@ -10374,10 +10387,10 @@ def sequential():
     if word == "PASS" and rest.startswith("quillS.bin took %d bytes in " % SEQ) and h:
         c = ceiling(h[2])
         if h[0] == SEQ and h[2] == SEQ // 4096 and h[1] <= c:
-            return "behaves", "quillS.bin took %d bytes in a row; the host counts %d extent(s) for %d blocks, " \
-                              "the ceiling %d" % (SEQ, h[1], h[2], c)
-        return "fail", "the file is whole but quillS.bin has %d extents where %d is the ceiling (%d bytes, " \
-                       "%d blocks)" % (h[1], c, h[0], h[2])
+            return "behaves", "quillS.bin took %d bytes in a row; the host counts %d %s for %d blocks, " \
+                              "the ceiling %d" % (SEQ, h[1], RUNS, h[2], c)
+        return "fail", "the file is whole but quillS.bin has %d %s where %d is the ceiling (%d bytes, " \
+                       "%d blocks)" % (h[1], RUNS, c, h[0], h[2])
     m = re.match(r"quillS\.bin, with no other writer, refused its write at byte (\d+) of (\d+) \(error (\d+)\) "
                  r"after (\d+) writes of 4096 in a row, the byte its record's width puts the refusal at "
                  r"\((\d+)\)", rest)
@@ -10398,9 +10411,9 @@ def interleave():
         c = ceiling(WEAVE // 4096)
         if all(h[0] == WEAVE and h[2] == WEAVE // 4096 and h[1] <= c for h in (ha, hb)):
             return "behaves", "quillA.bin and quillB.bin took %d bytes each, in turn; the host counts %d and %d " \
-                              "extents, the ceiling %d" % (WEAVE, ha[1], hb[1], c)
-        return "fail", "the files are whole but quillA.bin has %d extents and quillB.bin %d where %d is the " \
-                       "ceiling" % (ha[1], hb[1], c)
+                              "%s, the ceiling %d" % (WEAVE, ha[1], hb[1], RUNS, c)
+        return "fail", "the files are whole but quillA.bin has %d %s and quillB.bin %d where %d is the " \
+                       "ceiling" % (ha[1], RUNS, hb[1], c)
     m = re.match(r"(quill[AB]\.bin) refused its write at byte (\d+) of (\d+) \(error (\d+)\) after (\d+) "
                  r"alternating writes of 4096, the byte its record's width puts the refusal at \((\d+)\); "
                  r"the (\d+) and (\d+) bytes", rest)
@@ -10469,7 +10482,10 @@ def fidhistory():
     if not b or not c:
         return "fail", "a mount did not say what it keeps: boot 2 %s, boot 3 %s" % (b, c)
     # Between the two mounts: boot 2's startup tests, then the case's ids,
-    # the last of them the last id issued before boot 3.
+    # the last of them the last id issued before boot 3. On a book an id no
+    # stitch carried may be issued again (spec_v2 §16.6 п.7); the case's last
+    # file lives through an anchor, so the medium saw it, and boot 3 issues
+    # past it — never again an id the medium saw.
     if b[2] != c[2] or last - first + 1 != FIDS or c[1] != last or first <= b[1]:
         return "fail", "the two mounts do not stand around the case's %d ids, %d to %d: %d then %d ids " \
                        "issued, %d then %d live" % (FIDS, first, last, b[1], c[1], b[2], c[2])
@@ -10486,7 +10502,7 @@ def fidhistory():
 
 def systemtag():
     word, rest = verdict(logs[2], "systemtag")
-    listed = len(re.findall(r"^ +\S+ +\d+ bytes +\d+ extent\(s\)", lists[1], re.M))
+    listed = len(re.findall(r"^ +\S+ +\d+ bytes +\d+ (?:extent|run)\(s\)", lists[1], re.M))
     present = host(lists[1], "kernel.bin") is not None
     m = re.match(r"kernel\.bin \(file (\d+)\) gave up its system tag to untag and was then deleted by erase "
                  r"trashed, programs that do not wear system \(exit 0 each\); asked about it now, the volume "
@@ -10563,7 +10579,12 @@ run_quill() {
 # come back: the Ink guard (step 1.4, ink.c) — down, untag takes the system
 # tag off kernel.bin and erase deletes it (systemtag); the Use Context's
 # chain (step 1.6B, use_memory.c) — never staked, a context of 1000 bytes is
-# carried by nothing and the volume does not remember it (usememory).
+# carried by nothing and the volume does not remember it (usememory). A book
+# carries the word in its stitch, not on a chain, so its stitch takes it out
+# too (sewing.c StitchBuild): a word with bytes finds no room on the ribbon,
+# the stitch is laid without it and the one who said it is refused — the
+# clear, an empty word, still rides. Each of the two bites its own format and
+# leaves the other's road as it was, so the mutants are one set on either.
 # fidhistory keeps one file in a thousand, so its guest must count them. The
 # slab stops counting, so the kernel's heap self-test must say FAILED. The
 # kernel's copies stop bringing in a page the program has not touched
@@ -10574,6 +10595,7 @@ run_quill() {
 quill_mutants_on() {
     mutate src/kernel/tagfs/ink/ink.c
     mutate src/kernel/tagfs/use_memory/use_memory.c
+    mutate src/kernel/tagfs/settle/sewing.c
     mutate src/userspace/apps/quilltest_throwaway.c
     python3 - <<'EOF2'
 for p, a, b in (
@@ -10586,6 +10608,9 @@ for p, a, b in (
     ("src/kernel/tagfs/use_memory/use_memory.c",
      "    error_t rc   = UseChainStake(s_cycle.need, &s_cycle.chain, &s_cycle.got);\n",
      "    error_t rc   = ERR_TAGFS_NO_SPACE;   /* logcheck mutation: no chain is staked, a Use Context rides on nothing */\n"),
+    ("src/kernel/tagfs/settle/sewing.c",
+     "    error_t rc   = StitchLay(s, &word);\n",
+     "    error_t rc   = s->use && s->use->bytes ? (word = true, ERR_TAGFS_NO_SPACE) : StitchLay(s, &word);   /* logcheck mutation: a word with bytes finds no room on the ribbon */\n"),
     ("src/userspace/apps/quilltest_throwaway.c", "        int drc = delete((file_id_t)fid);\n",
      "        int drc = (i % 1000u == 999u) ? 0 : delete((file_id_t)fid);   /* logcheck mutation: one in a thousand stays */\n"),
 ):
@@ -10595,6 +10620,7 @@ for p, a, b in (
 EOF2
     mut_done src/kernel/tagfs/ink/ink.c "logcheck mutation" 2
     mut_done src/kernel/tagfs/use_memory/use_memory.c "logcheck mutation" 1
+    mut_done src/kernel/tagfs/settle/sewing.c "logcheck mutation" 1
     mut_done src/userspace/apps/quilltest_throwaway.c "logcheck mutation" 1
 
     mutate src/lib/kernel/slab.c
@@ -10623,6 +10649,7 @@ EOF2
 quill_mutants_off() {
     restore src/kernel/tagfs/ink/ink.c
     restore src/kernel/tagfs/use_memory/use_memory.c
+    restore src/kernel/tagfs/settle/sewing.c
     restore src/userspace/apps/quilltest_throwaway.c
     restore src/lib/kernel/slab.c
     restore src/kernel/core/memory/vmm/vmm.c

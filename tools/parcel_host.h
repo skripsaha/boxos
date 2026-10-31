@@ -30,6 +30,7 @@ typedef int error_t;
 #define OK                   0
 #define ERR_INVALID_ARGUMENT 22
 #define ERR_NO_MEMORY        12
+#define ERR_TAGFS_CORRUPTED  851   /* a cut no Strips add up to (tract.c), as core/error/error.h numbers it */
 
 typedef struct {
     uint64_t start;

@@ -109,8 +109,161 @@ def _RenameCosts(c, fid):
     dog_ear.FileChanged(spans, fid, fs, renamed)
     nodes = t.trees[tally.FILES].nodes
     under = [n for n in nodes if _Holds(n, (fid, 0))]
+    try:
+        cost = dog_ear.TipInBlocks(t, spans, binder.Lives(c.mount.files, c.mount.tags, c.mount.use))
+    except (AttributeError, TypeError):
+        return False                         # red until a leaf costs what is left live in it
     return (spans[tally.FILES] == [((fid, 0), (fid, 1))] and not spans[tally.DIGESTS] and
-            dog_ear.TipInBlocks(t, spans) == sum(n.sheets for n in under) < sum(n.sheets for n in t.Nodes()))
+            cost == sum(n.sheets for n in under) < sum(n.sheets for n in t.Nodes()))
+
+
+def _FidsOf(n):
+    """The file ids a leaf of FILES holds keys of: from its lower key's — the
+    tree's first from none — to its upper key's, that file too when the leaf
+    ends inside it (settle/binder_kept.c LeafFids)."""
+    lo = n.lo[0] if n.lo is not None else 0
+    hi = None if n.hi is None else n.hi[0] + 1 if n.hi[1] else n.hi[0]
+    return lo, hi
+
+
+def _Within(x, lo, hi):
+    return x >= lo and (hi is None or x < hi)
+
+
+def _Keeps(tree, n, files):
+    """Whether leaf `n` of `tree` keeps a key of a state of `files`: a live
+    file's id in its ids, a block of a live file's ground in its range."""
+    if tree == tally.FILES:
+        lo, hi = _FidsOf(n)
+        return any(_Within(fid, lo, hi) for fid in files)
+    lo = n.lo if n.lo is not None else 0
+    return any(s + c > lo and (n.hi is None or s < n.hi) for fs in files.values() for s, c in fs.Ground())
+
+
+def _GivenUpCosts(c):
+    """What a Tally laid in after every file with ground in a leaf of DIGESTS
+    is given up is reckoned to cost (§16.6 п.6), one rule with the kernel
+    (settle/binder_cost.c, binder_live.c): each leaf the spans meet as much as
+    is left live in it — a leaf no key of the state is left in, nothing — and
+    the path above every one of them; so the leaves those files emptied are
+    out of what the leaves they met would cost at the size they had."""
+    from . import dog_ear
+    t, files = c.mount.tally, c.mount.files
+    leaves = sorted((n for n in t.trees[tally.DIGESTS].nodes if n.level == 0),
+                    key=lambda n: (n.lo is not None, n.lo))
+    pick = leaves[1] if len(leaves) > 1 else None
+    if pick is None:
+        return False
+    gone = {fid for fid, fs in files.items() if _Keeps(tally.DIGESTS, pick, {fid: fs})}
+    after = {fid: fs for fid, fs in files.items() if fid not in gone}
+    spans = dog_ear.Fresh()
+    for fid in sorted(gone):
+        dog_ear.FileChanged(spans, fid, files[fid], None)
+    emptied = sum(n.sheets for tree in (tally.FILES, tally.DIGESTS) for n in t.trees[tree].nodes
+                  if n.level == 0 and _Keeps(tree, n, files) and not _Keeps(tree, n, after))
+    try:
+        got = dog_ear.TipInBlocks(t, spans, binder.Lives(after, c.mount.tags, c.mount.use))
+        laid = dog_ear.TipInBlocks(t, spans, lambda tree, lo, hi: True)
+    except (AttributeError, TypeError):
+        return False                         # red until a leaf costs what is left live in it
+    return gone and emptied >= pick.sheets and got == laid - emptied
+
+
+def _Path(t, tree, leaf):
+    """The Sheets of every inner node over `leaf` of `tree` in Tally `t`, one
+    a level: the last node of the level whose lower key is not past the
+    leaf's — counted here, not by dog_ear.py."""
+    nodes, blocks = t.trees[tree].nodes, 0
+    for level in range(1, 1 + max(n.level for n in nodes)):
+        run = [n for n in nodes if n.level == level]
+        over = [n for n in run if n.lo is None or (leaf.lo is not None and not leaf.lo < n.lo)]
+        blocks += max(over, key=lambda n: (n.lo is not None, n.lo)).sheets
+    return blocks
+
+
+def _LeafAlone(c, tree, leaf, after, held, live):
+    """The next Tally reckoned with one span over `leaf` of `tree` alone and
+    the state of `after` (and `held`, ground held for what rotted), against
+    what it is by the rule, counted here: the leaf's Sheets where `live` says
+    a key is left in it, none where none is, and its path either way."""
+    from . import dog_ear
+    t = c.mount.tally
+    spans = dog_ear.Fresh()
+    spans[tree].append((leaf.lo, leaf.hi))
+    try:
+        got = dog_ear.TipInBlocks(t, spans, binder.Lives(after, c.mount.tags, c.mount.use, held))
+    except (AttributeError, TypeError):
+        return False                         # red until a leaf costs what is left live in it
+    return got == (leaf.sheets if live else 0) + _Path(t, tree, leaf) and _Path(t, tree, leaf) > 0
+
+
+def _Leaves(c, tree):
+    leaves = sorted((n for n in c.mount.tally.trees[tree].nodes if n.level == 0),
+                    key=lambda n: (n.lo is not None, n.lo))
+    return [(n, leaves[i + 1].lo if i + 1 < len(leaves) else None) for i, n in enumerate(leaves)]
+
+
+def _FilesEmptied(c):
+    """Every file of the first leaf of FILES given up, its upper key's file
+    among them: the leaf costs nothing, its path what it did."""
+    leaf, hi = _Leaves(c, tally.FILES)[0]
+    files = c.mount.files
+    lo, top = _FidsOf(leaf)
+    after = {fid: fs for fid, fs in files.items() if not _Within(fid, lo, top)}
+    return len(after) < len(files) and _LeafAlone(c, tally.FILES, _Span(leaf, hi), after, (), False)
+
+
+def _FilesEndInside(c):
+    """The first leaf of FILES ends inside a file — its upper key that file's
+    and not its header: every file below that one given up, the leaf keeps the
+    file's keys it holds, and costs its Sheets."""
+    leaf, hi = _Leaves(c, tally.FILES)[0]
+    if hi is None or hi[1] == 0:
+        return False                         # Padded's first leaf ends at a header: nothing to hold here
+    files = c.mount.files
+    after = {fid: fs for fid, fs in files.items() if fid >= hi[0]}
+    return hi[0] in files and _LeafAlone(c, tally.FILES, _Span(leaf, hi), after, (), True)
+
+
+def _DigestsEmptied(c):
+    """A leaf of DIGESTS past the first, every file with ground in it given up
+    and a run held for what rotted ending at its lower key and one beginning at
+    its upper: neither lies in its range, it costs nothing, and its path —
+    met by no live leaf — what it did."""
+    leaves = _Leaves(c, tally.DIGESTS)
+    leaf, hi = leaves[len(leaves) // 2]
+    files = c.mount.files
+    after = {fid: fs for fid, fs in files.items()
+             if not any(s < (hi if hi is not None else s + n + 1) and s + n > leaf.lo for s, n in fs.Ground())}
+    held = [(leaf.lo - 1, 1)] + ([(hi, 1)] if hi is not None else [])
+    return (len(after) < len(files) and _LeafAlone(c, tally.DIGESTS, _Span(leaf, hi), after, held, False) and
+            _LeafAlone(c, tally.DIGESTS, _Span(leaf, hi), after, [(leaf.lo, 1)], True))
+
+
+def _UseSaid(c):
+    """A Tally whose USE is one leaf, the Use Context said since: the leaf
+    costs nothing once the volume remembers none, its Sheets while it
+    remembers one — a tree of one leaf has no path."""
+    from types import SimpleNamespace
+    from . import dog_ear
+    leaf = SimpleNamespace(level=0, lo=None, hi=None, sheets=1)
+    t = SimpleNamespace(trees={tally.USE: SimpleNamespace(nodes=[leaf])})
+    spans = dog_ear.Fresh()
+    spans[tally.USE].append((0, 1))
+    try:
+        none = dog_ear.TipInBlocks(t, spans, binder.Lives(c.mount.files, c.mount.tags, b""))
+        said = dog_ear.TipInBlocks(t, spans, binder.Lives(c.mount.files, c.mount.tags, b"use"))
+    except (AttributeError, TypeError):
+        return False                         # red until a leaf costs what is left live in it
+    return none == 0 and said == leaf.sheets
+
+
+class _Span:
+    """A leaf as a span over its own range: its lower key, its upper — the
+    next leaf's lower, None for the last — and its Sheets."""
+
+    def __init__(self, leaf, hi):
+        self.lo, self.hi, self.sheets = leaf.lo, hi, leaf.sheets
 
 
 def _QuireHeld(c):
@@ -131,8 +284,8 @@ def TipInCases(bt):
     """B0e, B0f: a Tally laid in, bound again byte for byte; and one with a
     node not where a writer lays it, which the oracle names. B0i: one laid in
     among the leaves of DIGESTS, bound again byte for byte. B0g: what the
-    next Tally laid in is reckoned to cost after a rename. B0h: a Tally-Quire
-    held whole while one node in it lives."""
+    next Tally laid in is reckoned to cost after a rename; B0k: after files
+    are given up. B0h: a Tally-Quire held whole while one node in it lives."""
     content, plan = Padded(bt)
     if sum(1 for n in plan.nodes if n.tree == tally.FILES and n.level == 0) < 2:
         raise Unreadable("Padded's FILES is one leaf: nothing to name as it lies")
@@ -153,6 +306,19 @@ def TipInCases(bt):
         Case("B0g a Tally laid in after a rename is reckoned at its leaf and the path above it", lay, checks=[
             ("the leaf of FILES the renamed header lies in and every node over it, no other (dog_ear.py)",
              lambda c: _RenameCosts(c, fid))]),
+        Case("B0k a Tally laid in after files are given up is reckoned at what is left live in its leaves",
+             lay, checks=[
+                 ("every file with ground in a leaf of DIGESTS given up: the leaves they empty cost nothing, every "
+                  "other leaf they meet and the path above them what it did (dog_ear.py, §16.6 п.6)", _GivenUpCosts),
+                 ("every file of a leaf of FILES given up, its upper key's file among them: the leaf costs nothing, "
+                  "the path above it what it did", _FilesEmptied),
+                 ("a leaf of FILES that ends inside a file keeps that file's keys: every file below it given up, "
+                  "the leaf costs its Sheets", _FilesEndInside),
+                 ("a leaf of DIGESTS met alone, every file with ground in it given up: it costs nothing — a run "
+                  "ending at its lower key and one beginning at its upper are not in its range — and the path "
+                  "above it what it did; a run held at its lower key keeps it", _DigestsEmptied),
+                 ("a leaf of USE costs nothing once the volume remembers no Use Context, its Sheets while it "
+                  "remembers one", _UseSaid)]),
         Case("B0h a Tally-Quire is held whole while one node in it lives", lay, checks=[
             ("every Quire a node of the Tally stood on lies in is the Tallies' — its first block, its last, the "
              "blocks no node takes among them — and no block of one is free", _QuireHeld)]),
