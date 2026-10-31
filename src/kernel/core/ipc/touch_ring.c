@@ -71,10 +71,13 @@ static TouchRing *ktr_hdr(process_t *proc)
     return (TouchRing *)vmm_phys_to_virt(proc->touch_ring_phys);
 }
 
-static TouchSlot *ktr_translate_slot(process_t *target, uintptr_t uvaddr)
+/* A porthole onto one TouchSlot of `target`'s cabin; NULL when the slot is
+ * not the cabin's to read — or, for_write, to write. */
+static TouchSlot *ktr_slot_open(Porthole *porthole, process_t *target,
+                                uintptr_t uvaddr, bool for_write)
 {
-    return (TouchSlot *)vmm_translate_user_addr(target->cabin->vmm, uvaddr,
-                                                sizeof(TouchSlot));
+    return PortholeOpen(porthole, target->cabin->vmm, uvaddr,
+                        sizeof(TouchSlot), for_write);
 }
 
 /* True when the slot at the TouchRing's head is published and unconsumed.
@@ -92,9 +95,13 @@ bool KTouchRingHasUnreadAtHead(process_t *proc)
     uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
     if (head == tail) return false;
 
-    TouchSlot *slot = ktr_translate_slot(proc, touch_ring_slot_uvaddr(rr, head));
+    Porthole   porthole;
+    TouchSlot *slot = ktr_slot_open(&porthole, proc,
+                                    touch_ring_slot_uvaddr(rr, head), false);
     if (!slot) return false;
-    return __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) == 2u * (head / cap) + 1u;
+    uint64_t seq = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
+    PortholeClose(&porthole);
+    return seq == 2u * (head / cap) + 1u;
 }
 
 
@@ -204,6 +211,7 @@ bool KTouchPush(process_t *target,
      * The page is mapped before the claim, and remembered across turns: a
      * retry usually lands on the same 4 KiB page (32 slots), so the common
      * contended path costs one compare, not a page walk. */
+    Porthole   porthole;
     TouchSlot *slot     = NULL;
     uintptr_t  ensured  = 0;   /* page whose mapping this call has secured */
     uint32_t   turns    = 0;
@@ -243,7 +251,10 @@ bool KTouchPush(process_t *target,
             ensured = page;
         }
 
-        slot = ktr_translate_slot(target, uvaddr);
+        /* Open onto the slot before the claim and kept open to the publish,
+         * for WRITE on the walk the stores go through — see KResultPush,
+         * which does the same for the same reasons. */
+        slot = ktr_slot_open(&porthole, target, uvaddr, /*for_write=*/true);
         if (!slot) {
             atomic_fetch_add_u64(&g_ktr_translate_fail, 1);
             return false;
@@ -254,6 +265,7 @@ bool KTouchPush(process_t *target,
                                         __ATOMIC_RELAXED)) {
             break;   /* `pos` is ours, and `slot` is the slot it names */
         }
+        PortholeClose(&porthole);
         if (++turns == 1) atomic_fetch_add_u64(&g_ktr_contended, 1);
     }
 
@@ -262,17 +274,9 @@ bool KTouchPush(process_t *target,
 
     /* The claim's own guarantee, read back once. It costs one ACQUIRE load and
      * it is the only thing that can tell a broken consumer from a healthy one
-     * — so it is read, counted and said out loud, never waited on. */
-    if (__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) != expected) {
-        uint64_t n = atomic_fetch_add_u64(&g_ktr_seq_broken, 1);
-        if ((n & 0x3FFu) == 0) {
-            kprintf("[KTR] WARN: pid %u reported a head its consumer has not "
-                    "reached (slot %lu of round %lu was not released); its own "
-                    "event stream is what gets overwritten\n",
-                    (unsigned)target->pid, (unsigned long)(pos % cap),
-                    (unsigned long)round);
-        }
-    }
+     * — so it is read, counted and said out loud once the porthole is closed,
+     * never waited on. */
+    bool seq_broken = (__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) != expected);
 
     slot->tag_id        = tag_id;
     slot->flags         = flags;
@@ -287,7 +291,19 @@ bool KTouchPush(process_t *target,
     /* Publish — the RELEASE store makes every field above visible to the
      * consumer's ACQUIRE load of the same word. */
     __atomic_store_n(&slot->seq, expected + 1u, __ATOMIC_RELEASE);
+    PortholeClose(&porthole);
     atomic_fetch_add_u64(&g_ktr_success, 1);
+
+    if (seq_broken) {
+        uint64_t n = atomic_fetch_add_u64(&g_ktr_seq_broken, 1);
+        if ((n & 0x3FFu) == 0) {
+            kprintf("[KTR] WARN: pid %u reported a head its consumer has not "
+                    "reached (slot %lu of round %lu was not released); its own "
+                    "event stream is what gets overwritten\n",
+                    (unsigned)target->pid, (unsigned long)(pos % cap),
+                    (unsigned long)round);
+        }
+    }
 
     /* Wake: a flip that enqueued has rung the core; otherwise the scheduler's
      * doorbell rings it only if the strand is not on a CPU. */

@@ -660,18 +660,25 @@ static void nightwatch_verdict(void)
                     const ResultRing *rr =
                         (const ResultRing *)vmm_phys_to_virt(e->result_ring_phys);
                     uintptr_t slot_uva = result_ring_slot_uvaddr(rr, rr_head);
-                    const ResultSlot *slot = (const ResultSlot *)
-                        vmm_translate_user_addr(owner->cabin->vmm, slot_uva,
-                                                sizeof(ResultSlot));
-                    if (slot)
+                    Porthole porthole;
+                    const ResultSlot *window =
+                        PortholeOpen(&porthole, owner->cabin->vmm, slot_uva,
+                                     sizeof(ResultSlot), /*for_write=*/false);
+                    if (window)
+                    {
+                        ResultSlot slot;
+                        slot.seq = __atomic_load_n(&window->seq, __ATOMIC_ACQUIRE);
+                        slot.r   = window->r;
+                        PortholeClose(&porthole);
                         kprintf("        head slot: seq=%lu ctx=%u sender=%u "
                                 "err=%u len=%u addr=0x%lx\n",
-                                (unsigned long)__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE),
-                                (unsigned)slot->r.context,
-                                (unsigned)slot->r.sender_pid,
-                                (unsigned)slot->r.error_code,
-                                (unsigned)slot->r.data_length,
-                                (unsigned long)slot->r.data_addr);
+                                (unsigned long)slot.seq,
+                                (unsigned)slot.r.context,
+                                (unsigned)slot.r.sender_pid,
+                                (unsigned)slot.r.error_code,
+                                (unsigned)slot.r.data_length,
+                                (unsigned long)slot.r.data_addr);
+                    }
                 }
                 if (owner) process_ref_dec(owner);
             }

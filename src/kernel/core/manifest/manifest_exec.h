@@ -58,8 +58,8 @@ error_t ManifestExecute(ManifestHandle           handle,
  *
  * Skips the compile/handle/refcount machinery — ideal for the syscall fast
  * path where every Pocket carries its own Manifest in cabin heap. The caller
- * has already translated the user vaddr through vmm_translate_user_addr and
- * provides a kernel pointer.
+ * has already copied the Manifest out of the cabin (vmm_user_buf_in) and
+ * provides a kernel pointer to that copy.
  *
  * Validates structure on every call. For repeated execution of the same
  * Manifest, prefer ManifestCompile + ManifestExecute (cached handlers).

@@ -61,7 +61,7 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
 
     /* Page-walk-copy the sender payload into a kernel bounce buffer. A
      * straddling source range is copied across every backing frame; the old
-     * vmm_translate_user_addr clamped the range to its first page and the
+     * single-page translation clamped the range to its first page and the
      * memcpy below overran into whatever physical frame happened to follow
      * it, delivering a foreign frame's bytes to the target. */
     void *kbuf = vmm_user_buf_in(sender->cabin ? sender->cabin->vmm : NULL,

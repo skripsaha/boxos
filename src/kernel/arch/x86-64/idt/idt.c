@@ -1472,8 +1472,8 @@ void exception_handler(interrupt_frame_t *frame)
                 kprintf("[VMM]   Kernel dereferenced user-mapped page via "
                         "RIP 0x%lx without STAC/CLAC bracket.\n"
                         "[VMM]   Wrap the access in copy_to/from_user / "
-                        "put_user / get_user, OR translate via "
-                        "vmm_translate_user_addr() first.\n",
+                        "put_user / get_user, OR reach it through "
+                        "a porthole (PortholeOpen).\n",
                         frame->rip);
             }
             /* Fall through to the kernel-panic block at the bottom of

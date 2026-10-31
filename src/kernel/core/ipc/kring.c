@@ -83,7 +83,7 @@ static PocketRing *kring_pocket_hdr(process_t *proc)
     /* P5a: route by the PER-STRAND ring (proc->pocket_ring_phys), which for
      * the main strand aliases the cabin ring and for a spawned strand is its
      * own Hammock-carved ring. The cabin guard stays because downstream paths
-     * (KPocketPeek translate) deref the shared proc->cabin->vmm. */
+     * (KPocketPeek's porthole) deref the shared proc->cabin->vmm. */
     if (!proc || !proc->cabin || !proc->pocket_ring_phys) return NULL;
     return (PocketRing *)vmm_phys_to_virt(proc->pocket_ring_phys);
 }
@@ -112,17 +112,23 @@ uint32_t KPocketCount(process_t *proc)
     return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
 }
 
-Pocket *KPocketPeek(process_t *proc, uint64_t *pos_out)
+bool KPocketPeek(process_t *proc, uint64_t *pos_out, Pocket *out)
 {
     PocketRing *r = kring_pocket_hdr(proc);
-    if (!r) return NULL;
+    if (!r) return false;
     uint64_t head = __atomic_load_n(&r->hdr.head, __ATOMIC_RELAXED);
     uint64_t tail = __atomic_load_n(&r->hdr.tail, __ATOMIC_ACQUIRE);
-    if (head == tail) return NULL;
+    if (head == tail) return false;
     if (pos_out) *pos_out = head;
 
-    uintptr_t uvaddr = pocket_ring_slot_uvaddr(r, head);
-    return (Pocket *)vmm_translate_user_addr(proc->cabin->vmm, uvaddr, sizeof(Pocket));
+    Porthole porthole;
+    const Pocket *slot = PortholeOpen(&porthole, proc->cabin->vmm,
+                                      pocket_ring_slot_uvaddr(r, head),
+                                      sizeof(Pocket), /*for_write=*/false);
+    if (!slot) return false;
+    memcpy(out, slot, sizeof(*out));
+    PortholeClose(&porthole);
+    return true;
 }
 
 /* Take the ring past ONE named position, and only while it is still the head.
@@ -159,13 +165,13 @@ static ResultRing *kring_result_hdr(process_t *proc)
     return (ResultRing *)vmm_phys_to_virt(proc->result_ring_phys);
 }
 
-/* Translate a target user vaddr to a writable kernel pointer for one
- * ResultSlot. Returns NULL if the translation fails (which post-ensure
- * should be impossible barring catastrophic memory pressure). */
-static ResultSlot *kring_translate_slot(process_t *target, uintptr_t uvaddr)
+/* A porthole onto one ResultSlot of `target`'s cabin; NULL when the slot is
+ * not the cabin's to read — or, for_write, to write. */
+static ResultSlot *kring_slot_open(Porthole *porthole, process_t *target,
+                                   uintptr_t uvaddr, bool for_write)
 {
-    return (ResultSlot *)vmm_translate_user_addr(target->cabin->vmm, uvaddr,
-                                                  sizeof(ResultSlot));
+    return PortholeOpen(porthole, target->cabin->vmm, uvaddr,
+                        sizeof(ResultSlot), for_write);
 }
 
 /* True when the process's ResultRing holds a PUBLISHED, unconsumed entry
@@ -192,13 +198,16 @@ bool KResultRingHasPendingReply(process_t *proc)
     if (scan_end - head > cap) scan_end = head + cap;   /* defensive clamp */
 
     for (uint64_t pos = head; pos < scan_end; pos++) {
-        uintptr_t   uva  = result_ring_slot_uvaddr(rr, pos);
-        ResultSlot *slot = kring_translate_slot(proc, uva);
+        Porthole    porthole;
+        ResultSlot *slot = kring_slot_open(&porthole, proc,
+                                           result_ring_slot_uvaddr(rr, pos), false);
         if (!slot) continue;
-        uint64_t round = pos / cap;
-        if (__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) != 2u * round + 1u)
+        uint64_t seq     = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
+        uint64_t context = slot->r.context;
+        PortholeClose(&porthole);
+        if (seq != 2u * (pos / cap) + 1u)
             continue;                    /* in-flight reservation or consumed */
-        if (KCTX_COOKIE24(slot->r.context) != 0) return true;
+        if (KCTX_COOKIE24(context) != 0) return true;
     }
     return false;
 }
@@ -232,9 +241,13 @@ bool KResultRingHasUnreadAtHead(process_t *proc)
     uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
     if (head == tail) return false;
 
-    ResultSlot *slot = kring_translate_slot(proc, result_ring_slot_uvaddr(rr, head));
+    Porthole    porthole;
+    ResultSlot *slot = kring_slot_open(&porthole, proc,
+                                       result_ring_slot_uvaddr(rr, head), false);
     if (!slot) return false;
-    return __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) == 2u * (head / cap) + 1u;
+    uint64_t seq = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
+    PortholeClose(&porthole);
+    return seq == 2u * (head / cap) + 1u;
 }
 
 /* The two refusals that are said out loud are rate-limited by their own
@@ -368,6 +381,7 @@ bool KResultPush(process_t *target, const Result *r)
         if (limit == 0) limit = 1u;
     }
 
+    Porthole    porthole;
     ResultSlot *slot    = NULL;
     uintptr_t   ensured = 0;   /* page whose mapping this call has secured */
     uint64_t    pos     = 0;
@@ -419,8 +433,15 @@ bool KResultPush(process_t *target, const Result *r)
             ensured = page;
         }
 
-        slot = kring_translate_slot(target, uvaddr);
-        if (!slot) { krp_refused(target, r, "the slot does not translate"); return false; }
+        /* The porthole opens onto the slot BEFORE the claim and stays open to
+         * the publish: a claimed slot is always filled, so nothing that can
+         * fail may come between the two, and the slot's page cannot be given
+         * away while it is being filled. It is opened for WRITE on the walk
+         * the store goes through — the slot's address came from a header the
+         * cabin writes, and the ensure above looked at that page once, not at
+         * what this store lands in. */
+        slot = kring_slot_open(&porthole, target, uvaddr, /*for_write=*/true);
+        if (!slot) { krp_refused(target, r, "no porthole would open onto the slot"); return false; }
 
         /* The linearisation point. A failure here means ANOTHER PRODUCER won
          * the tail — the ring moved forward, so this is lock-free progress and
@@ -432,6 +453,7 @@ bool KResultPush(process_t *target, const Result *r)
                                         __ATOMIC_RELAXED)) {
             break;
         }
+        PortholeClose(&porthole);
     }
 
     uint64_t round    = pos / cap;
@@ -439,8 +461,23 @@ bool KResultPush(process_t *target, const Result *r)
 
     /* The claim's own guarantee, read back once. One ACQUIRE load, and it is
      * the only thing that can tell a broken consumer from a healthy one — so
-     * it is read, counted and named, never waited on. */
-    if (__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) != expected) {
+     * it is read, counted and named, never waited on. Named once the porthole
+     * is closed: nothing that waits is done through one. */
+    bool seq_broken = (__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) != expected);
+
+    slot->r = *r;
+
+    /* The waiter's half of the token, read before the publish: once the
+     * answer is out, its consumer may take it and say the next token. */
+    uint32_t token    = KCTX_COOKIE24(r->context);
+    uint64_t awaiting = __atomic_load_n(&rr->hdr.awaiting, __ATOMIC_ACQUIRE);
+
+    /* Publish — the RELEASE store makes the payload above visible to the
+     * consumer's ACQUIRE load of the same word. */
+    __atomic_store_n(&slot->seq, expected + 1u, __ATOMIC_RELEASE);
+    PortholeClose(&porthole);
+
+    if (seq_broken) {
         uint64_t n = __atomic_fetch_add(&g_krp_seq_broken, 1, __ATOMIC_RELAXED);
         if ((n & 0x3FFu) == 0) {
             kprintf("[KRP] WARN: pid %u reported a head its consumer has not "
@@ -451,30 +488,20 @@ bool KResultPush(process_t *target, const Result *r)
         }
     }
 
-    slot->r = *r;
-
-    /* The waiter's half of the token, when it has said one. boxlib drops on
-     * sight a reply whose token is not the one it waits on — the orphan of a
-     * call abandoned on a deadline — and with every guaranteed answer waited
-     * on without a deadline nothing is ever abandoned: an answer published
-     * under one token for a strand that waits on another is a defect, and it
-     * is said here, the one place both halves are in view. A strand that has
-     * not yet said what it waits for (0) is simply ahead of its own wait. */
-    {
-        uint32_t token    = KCTX_COOKIE24(r->context);
-        uint64_t awaiting = __atomic_load_n(&rr->hdr.awaiting, __ATOMIC_ACQUIRE);
-        if (token != 0 && awaiting != 0 && awaiting != (uint64_t)token) {
-            __atomic_fetch_add(&g_krp_token_astray, 1, __ATOMIC_RELAXED);
-            kprintf("[KRP] DEFECT: pid %u waits on token 0x%06x, but the answer "
-                    "being published for it carries token 0x%06x — its wait will "
-                    "drop this reply as an orphan\n",
-                    (unsigned int)target->pid, (unsigned int)awaiting, (unsigned int)token);
-        }
+    /* boxlib drops on sight a reply whose token is not the one it waits on —
+     * the orphan of a call abandoned on a deadline — and with every guaranteed
+     * answer waited on without a deadline nothing is ever abandoned: an answer
+     * published under one token for a strand that waits on another is a
+     * defect, and it is said here, the one place both halves are in view. A
+     * strand that has not yet said what it waits for (0) is simply ahead of
+     * its own wait. */
+    if (token != 0 && awaiting != 0 && awaiting != (uint64_t)token) {
+        __atomic_fetch_add(&g_krp_token_astray, 1, __ATOMIC_RELAXED);
+        kprintf("[KRP] DEFECT: pid %u waits on token 0x%06x, but the answer "
+                "being published for it carries token 0x%06x — its wait will "
+                "drop this reply as an orphan\n",
+                (unsigned int)target->pid, (unsigned int)awaiting, (unsigned int)token);
     }
-
-    /* Publish — the RELEASE store makes the payload above visible to the
-     * consumer's ACQUIRE load of the same word. */
-    __atomic_store_n(&slot->seq, expected + 1u, __ATOMIC_RELEASE);
 
     /* The chit this answer redeems, if one was left for it — BEFORE the wake,
      * so a strand that wakes and asks again finds its old promise KEPT and not

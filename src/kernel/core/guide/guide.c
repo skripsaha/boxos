@@ -352,17 +352,15 @@ static KHeapCharge guide_charge_of(const cabin_t *cabin)
 /*
  * Process one Pocket from a process's PocketRing.
  *
- * The guide TAKES the pocket; it does not borrow the cabin's slot. What
- * KPocketPeek hands back is the READ form of vmm_translate_user_addr — a
- * supervisor-writable Pull Map alias of the cabin's page, and vmm.h is
- * explicit that a store through it "consults neither the cabin's own R/W
- * bit, nor CR0.WP, nor CR4.SMAP", so it is "safe for reads and unsafe as a
- * write channel". The three fields the guide used to stamp into that slot —
- * pid, error_code, and later the cleared envelope — were exactly such
- * stores, and the address they landed at is not the kernel's to trust: a
+ * The guide TAKES the pocket; it does not borrow the cabin's slot. KPocketPeek
+ * copies it out through a READ porthole, and nothing is ever stored back: the
+ * three fields the guide used to stamp into the slot — pid, error_code, and
+ * later the cleared envelope — went through a supervisor-writable Pull Map
+ * alias that consults neither the cabin's own R/W bit, nor CR0.WP, nor
+ * CR4.SMAP, and the address they landed at is not the kernel's to trust: a
  * slot vaddr is slots_base + (idx % slot_count_max) * slot_size, and all
  * three of those live in the ring header page the cabin can write. A cabin
- * that names its own read-only text there gets the kernel to scribble on a
+ * that names its own read-only text there got the kernel to scribble on a
  * page it is not allowed to write, and one shared with every other process
  * running the same image.
  *
@@ -379,11 +377,8 @@ static void guide_process_pocket(process_t *proc)
     if (!proc || !proc->cabin) return;
 
     uint64_t pos;
-    const Pocket *slot = KPocketPeek(proc, &pos);
-    if (!slot) return;
-
     Pocket pocket;
-    memcpy(&pocket, slot, sizeof(pocket));
+    if (!KPocketPeek(proc, &pos, &pocket)) return;
 
     /* Kernel sets pid (security: userspace can't forge it). */
     pocket.pid = proc->pid;

@@ -8,16 +8,14 @@
  * single-frame path and the page-walked crate_io path over a Crate that spans
  * the A|B seam:
  *
- *   WRITE BACKSTOP raw vmm_translate_user_addr on a page-crossing range now
- *                  returns NULL (commit 7 fail-closed backstop), so the legacy
- *                  "translate + memcpy" can no longer reach the physically-next
- *                  SPACER frame: the straddle is refused and every frame stays
- *                  POISON.
+ *   WRITE BACKSTOP a porthole onto a page-crossing range does not open, so a
+ *                  single-frame "window + memcpy" can never reach the
+ *                  physically-next SPACER frame: the straddle is refused and
+ *                  every frame stays POISON.
  *   WRITE FIX      crate_write — both frame A's tail and frame B's head carry
  *                  the bytes, the spacer is UNtouched, the guard is intact.
- *   READ  BACKSTOP raw vmm_translate_user_addr on the straddle returns NULL, so
- *                  the legacy read can no longer snapshot the foreign SPACER
- *                  frame.
+ *   READ  BACKSTOP a porthole onto the straddle does not open, so a single-
+ *                  frame read can never snapshot the foreign SPACER frame.
  *   READ  FIX      crate_read — the snapshot equals the planted bytes across
  *                  the seam, sourced from the two real frames.
  *
@@ -30,8 +28,8 @@
  * SENDER and a fake TARGET) and proves the system/IPC straddle fix: it plants
  * a payload across the SENDER's seam and drives the converted ipc_copy_to_heap
  * source leg (vmm_user_buf_in) and dest leg (vmm_user_buf_commit_out) plus the
- * whole ipc_copy_to_heap end-to-end. BACKSTOP legs replay the legacy single-
- * frame read/write and assert the primitive now refuses the straddle (NULL),
+ * whole ipc_copy_to_heap end-to-end. BACKSTOP legs ask for a single-frame
+ * porthole onto the straddle and assert it does not open,
  * leaving the foreign spacer untouched; FIX legs assert both real frames carry
  * the payload, spacer and guard intact. One "[CRATE-IO] SELFTEST PASS" covers
  * storage + IPC.
@@ -66,6 +64,18 @@ static void fill_src(void)
 {
     for (size_t i = 0; i < sizeof(g_src); i++)
         g_src[i] = (uint8_t)(i * 2u + 1u);
+}
+
+/* True when a porthole onto [va, va+n) does not open — and closes it if it
+ * wrongly did, so a failing check leaves this core as it found it. */
+static bool porthole_refused(vmm_context_t *vmm, uintptr_t va, unsigned n,
+                             bool for_write)
+{
+    Porthole porthole;
+    if (!PortholeOpen(&porthole, vmm, va, n, for_write))
+        return true;
+    PortholeClose(&porthole);
+    return false;
 }
 
 static bool all_bytes(const uint8_t *p, unsigned len, uint8_t val)
@@ -121,8 +131,8 @@ bool NonContigPagesSetup(NonContigPages *m, uintptr_t base_va)
     }
 
     /* Map A and B at adjacent VAs (spacer deliberately unmapped) and the guard
-     * one page above B. USER-RW so the page-walk and vmm_translate_user_addr
-     * accept them. */
+     * one page above B. USER-RW so a porthole, for read and for write,
+     * accepts them. */
     vmm_map_result_t ra = vmm_map_page(m->vmm, base_va,
                                        m->phys_a, VMM_FLAGS_USER_RW);
     vmm_map_result_t rb = vmm_map_page(m->vmm, base_va + VMM_PAGE_SIZE,
@@ -187,18 +197,18 @@ static bool run_k(NonContigPages *m, unsigned k)
     crate.addr     = (uint64_t)va;
     crate.capacity = n;
 
-    /* ---- WRITE BACKSTOP — fail-closed translate refuses the straddle. -----
-     * vmm_translate_user_addr now returns NULL the instant a range crosses a
-     * page boundary, so the legacy "translate + memcpy" can no longer reach the
-     * physically-next spacer frame: the straddle is refused and both the spacer
-     * and frame B stay POISON. */
+    /* ---- WRITE BACKSTOP — a porthole refuses the straddle. ---------------
+     * A porthole does not open onto a range that crosses a page boundary, so
+     * a single-frame "window + memcpy" can never reach the physically-next
+     * spacer frame: the straddle is refused and both the spacer and frame B
+     * stay POISON. */
     memset(m->page_a, CRATE_IO_POISON, VMM_PAGE_SIZE);
     memset(m->spacer, CRATE_IO_POISON, VMM_PAGE_SIZE);
     memset(m->page_b, CRATE_IO_POISON, VMM_PAGE_SIZE);
     memset(m->guard,  CRATE_IO_POISON, VMM_PAGE_SIZE);
 
-    if (vmm_translate_user_addr(m->vmm, va, n) != NULL)
-        FAILK("write backstop: straddle translate not fail-closed", k);
+    if (!porthole_refused(m->vmm, va, n, /*for_write=*/true))
+        FAILK("write backstop: a porthole opened onto the straddle", k);
     if (!all_bytes(m->spacer, VMM_PAGE_SIZE, CRATE_IO_POISON))
         FAILK("write backstop: spacer disturbed by refused straddle", k);
     if (!all_bytes(m->page_b, VMM_PAGE_SIZE, CRATE_IO_POISON))
@@ -224,19 +234,19 @@ static bool run_k(NonContigPages *m, unsigned k)
     if (!all_bytes(m->guard, VMM_PAGE_SIZE, CRATE_IO_POISON))
         FAILK("write fix: guard page overrun", k);
 
-    /* ---- READ BACKSTOP — fail-closed translate refuses the straddle. ------
+    /* ---- READ BACKSTOP — a porthole refuses the straddle. ----------------
      * Plant the user's intended source across the seam (k bytes in A's tail,
-     * over bytes in B's head); the spacer keeps POISON. A straddling
-     * vmm_translate_user_addr now returns NULL, so the legacy read can no longer
-     * snapshot the foreign spacer. The planted bytes feed the READ FIX leg. */
+     * over bytes in B's head); the spacer keeps POISON. A porthole onto the
+     * straddle does not open, so a single-frame read can never snapshot the
+     * foreign spacer. The planted bytes feed the READ FIX leg. */
     memset(m->page_a, CRATE_IO_POISON, VMM_PAGE_SIZE);
     memset(m->spacer, CRATE_IO_POISON, VMM_PAGE_SIZE);
     memset(m->page_b, CRATE_IO_POISON, VMM_PAGE_SIZE);
     memcpy(m->page_a + (VMM_PAGE_SIZE - k), g_src, k);
     memcpy(m->page_b, g_src + k, over);
 
-    if (vmm_translate_user_addr(m->vmm, va, n) != NULL)
-        FAILK("read backstop: straddle translate not fail-closed", k);
+    if (!porthole_refused(m->vmm, va, n, /*for_write=*/false))
+        FAILK("read backstop: a porthole opened onto the straddle", k);
 
     /* ---- READ FIX — crate_read page-walks to BOTH real frames. ----------- */
     crate.size = n;
@@ -277,13 +287,13 @@ static bool run_ipc_k(NonContigPages *sender, NonContigPages *target, unsigned k
     memcpy(sender->page_a + (VMM_PAGE_SIZE - k), g_src, k);
     memcpy(sender->page_b, g_src + k, over);
 
-    /* ---- SOURCE BACKSTOP — fail-closed translate refuses the sender straddle.
-     * The legacy single-frame read (old ipc_copy_to_heap source leg) can no
-     * longer pull the sender's foreign spacer in place of frame B:
-     * vmm_translate_user_addr returns NULL on the page-crossing range. The
-     * payload planted above feeds the SOURCE FIX leg below. ---------------- */
-    if (vmm_translate_user_addr(sender->vmm, src_va, n) != NULL)
-        FAILK("ipc src backstop: straddle translate not fail-closed", k);
+    /* ---- SOURCE BACKSTOP — a porthole refuses the sender straddle. ------
+     * A single-frame read (the old ipc_copy_to_heap source leg) can never pull
+     * the sender's foreign spacer in place of frame B: a porthole onto the
+     * page-crossing range does not open. The payload planted above feeds the
+     * SOURCE FIX leg below. ---------------------------------------------- */
+    if (!porthole_refused(sender->vmm, src_va, n, /*for_write=*/false))
+        FAILK("ipc src backstop: a porthole opened onto the straddle", k);
 
     /* ---- SOURCE FIX — vmm_user_buf_in (converted source leg) page-walks both
      * sender frames into the bounce buffer. ------------------------------- */
@@ -294,17 +304,16 @@ static bool run_ipc_k(NonContigPages *sender, NonContigPages *target, unsigned k
         FAILK("ipc src fix: bounce mismatch across sender seam", k);
     }
 
-    /* ---- DEST BACKSTOP — fail-closed translate refuses the target straddle.
-     * The legacy single-frame write (old ipc_copy_to_heap dest leg) can no
-     * longer spill the bounce into the target's foreign spacer:
-     * vmm_translate_user_addr returns NULL, so every target frame stays
-     * POISON. ------------------------------------------------------------ */
+    /* ---- DEST BACKSTOP — a porthole refuses the target straddle. --------
+     * A single-frame write (the old ipc_copy_to_heap dest leg) can never spill
+     * the bounce into the target's foreign spacer: a porthole onto the
+     * straddle does not open, so every target frame stays POISON. -------- */
     memset(target->page_a, CRATE_IO_POISON, VMM_PAGE_SIZE);
     memset(target->spacer, CRATE_IO_POISON, VMM_PAGE_SIZE);
     memset(target->page_b, CRATE_IO_POISON, VMM_PAGE_SIZE);
     memset(target->guard,  CRATE_IO_POISON, VMM_PAGE_SIZE);
-    if (vmm_translate_user_addr(target->vmm, dst_va, n) != NULL)
-        { vmm_user_buf_free(kbuf); FAILK("ipc dst backstop: straddle translate not fail-closed", k); }
+    if (!porthole_refused(target->vmm, dst_va, n, /*for_write=*/true))
+        { vmm_user_buf_free(kbuf); FAILK("ipc dst backstop: a porthole opened onto the straddle", k); }
     if (!all_bytes(target->spacer, VMM_PAGE_SIZE, CRATE_IO_POISON))
         { vmm_user_buf_free(kbuf); FAILK("ipc dst backstop: spacer disturbed by refused straddle", k); }
     if (!all_bytes(target->page_b, VMM_PAGE_SIZE, CRATE_IO_POISON))

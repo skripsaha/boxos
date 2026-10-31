@@ -10475,7 +10475,7 @@ run_quill() {
 # fidhistory keeps one file in a thousand, so its guest must count them. The
 # slab stops counting, so the kernel's heap self-test must say FAILED. The
 # kernel's copies stop bringing in a page the program has not touched
-# (VmmUserCopyWindow), so coldread and coldwrite must turn to a refusal that
+# (VmmPortholeCopy), so coldread and coldwrite must turn to a refusal that
 # reports 0 bytes — never a count, which is the half of the fix that stands
 # without the other. And first, with no machine at all, caveat_judge's three
 # answers in their approved words.
@@ -10520,9 +10520,9 @@ EOF2
     python3 - <<'EOF2'
 p = "src/kernel/core/memory/vmm/vmm.c"
 s = open(p).read()
-a = "    int touched = VmmFirstTouch(ctx, user_vaddr);\n"
+a = "            int touched = VmmFirstTouch(ctx, at);\n"
 assert s.count(a) == 1, "quillmut first-touch anchor missing"
-s = s.replace(a, "    int touched = 0;   /* logcheck mutation: a copy never brings a page in */\n", 1)
+s = s.replace(a, "            int touched = 0;   /* logcheck mutation: a copy never brings a page in */\n", 1)
 open(p, "w").write(s)
 EOF2
     mut_done src/kernel/core/memory/vmm/vmm.c "logcheck mutation"

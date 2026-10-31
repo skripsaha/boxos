@@ -286,7 +286,7 @@ static uint64_t touch_emit_payload(process_t *target, TouchTag tag_id,
      * single-page-translating the whole `total` range. pmm_alloc hands out
      * non-contiguous frames, so a record that crosses a page boundary
      * (sizeof(Touch) + plen exceeding the bytes left in the first frame) would,
-     * under the old vmm_translate_user_addr + memcpy, spill the payload tail
+     * under the old single-page translation + memcpy, spill the payload tail
      * into whatever physical frame followed the first — not the second mapped
      * page. commit_out walks each page, delivering the header and payload to
      * their real frames regardless of plen or base alignment. */

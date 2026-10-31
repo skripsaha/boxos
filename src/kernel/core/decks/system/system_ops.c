@@ -71,7 +71,8 @@ extern uint64_t cpu_get_tsc_freq_khz(void);
  * variable payloads through crate_in_buf / crate_out_alloc / crate_out_commit.
  * Each walks the user page table page-by-page, so a Crate whose payload
  * crosses a page boundary is copied across every backing frame instead of
- * being clipped to its first page (the vmm_translate_user_addr straddle bug).
+ * being clipped to its first page (the old single-page translation's
+ * straddle bug).
  * ------------------------------------------------------------------------- */
 
 /* The whole of in_crate as a NUL-terminated string in the heap, *out the

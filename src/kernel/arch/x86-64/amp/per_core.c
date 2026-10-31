@@ -124,8 +124,8 @@ void per_core_record_bsp_tsc_anchor(uint64_t now_us)
  *                   any legitimate user-buffer access.
  *                 - The BoxOS audit (2026-06-08) confirmed every kernel
  *                   path that touches user memory does so via the
- *                   supervisor-aliased kernel VA returned by
- *                   vmm_translate_user_addr (kernel-direct map at
+ *                   supervisor-aliased kernel VA a porthole opens
+ *                   (PortholeOpen; kernel-direct map at
  *                   0xFFFF_8000_..., U=0) — SMAP enforcement is invisible
  *                   on these paths. Any new direct user-VA dereference
  *                   surfaces as a clean kernel #PF that idt.c's panic

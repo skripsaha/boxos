@@ -1710,8 +1710,18 @@ static void shootdown_wait_acks(uint8_t target_count, const char *what)
     }
 }
 
+static void PortholesShut(vmm_context_t *ctx);
+
 void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_count)
 {
+    /* A kernel copy reaches a cabin's frames through the Pull Map, which no
+     * flush of the cabin's translation reaches — the TLB half below cannot
+     * stop it. Every caller cleared the entries before calling, so the
+     * portholes still open onto this cabin are exactly the ones that may have
+     * read them; they are waited out first, on one core as on many. */
+    if (ctx && ctx != kernel_context)
+        PortholesShut(ctx);
+
     // Single-core: local invalidation only
     if (!g_amp.multicore_active || g_amp.total_cores <= 1)
     {
@@ -2080,6 +2090,20 @@ page_table_t *vmm_get_or_create_table(vmm_context_t *ctx, uintptr_t virt_addr, i
         }
         else if ((i == 1 || i == 2) && (*entry & VMM_FLAG_LARGE_PAGE))
         {
+            /* A program's huge page is one piece, and never split here. Its
+             * owner — a Bay or Brook claim, a heap prefault — maps it whole
+             * and takes it back whole (vmm_unmap_huge_2m), and frees the
+             * block only after that. Split under it, the take-back finds no
+             * leaf and the block is freed with 512 live entries still on it:
+             * a program reading and writing memory that is someone else's.
+             * Nothing maps inside it either, so a walk that needs a table
+             * under it is refused. Only the kernel's own leaves — the Pull
+             * Map's, for a guard page or a sealed shadow stack — are split. */
+            if (*entry & VMM_FLAG_USER)
+            {
+                vmm_set_error("A program's huge page is one piece; nothing maps inside it");
+                return NULL;
+            }
             /* Demote 1 GB (i==1, PDPT) or 2 MB (i==2, PD) huge page so
              * the walker can descend one more level. The helper is
              * race-safe (CAS-published with local invlpg) and a no-op
@@ -3911,7 +3935,7 @@ static int VmmStackFirstTouch(vmm_context_t *ctx, uintptr_t addr)
  * VmmFirstTouch — the page a cabin's first touch of `addr` brings in, brought
  * in: the one place that decides what that is. The #PF handler asks it about
  * a fault the cabin took, and the kernel's copies into and out of cabin memory
- * (VmmUserCopyWindow) about a page the cabin has not touched yet, so a buffer
+ * (VmmPortholeCopy) about a page the cabin has not touched yet, so a buffer
  * reads and writes the same whether its owner has been through it or not.
  *
  * Of what a program owns, its heap and its stacks grow on first touch: the
@@ -5323,11 +5347,11 @@ int vmm_map_touch_ring(vmm_context_t *ctx, uintptr_t phys_page)
 }
 
 /*
- * vmm_user_window — the one walk behind every kernel access to cabin
- * memory. Returns the Pull Map pointer for `user_vaddr` and, in
- * *out_span, how many bytes of the user's range that pointer is good
- * for: the distance from the address to the end of the leaf that maps
- * it. NULL means the address is not user memory the caller may touch.
+ * vmm_user_window — the one walk behind every porthole. Answers, in
+ * *out_phys, the physical byte that `user_vaddr` names and, in *out_span,
+ * how many bytes of the user's range that byte begins: the distance from
+ * the address to the end of the leaf that maps it. false means the address
+ * is not user memory the caller may touch.
  *
  * Two hardware facts decide what this function must do.
  *
@@ -5346,7 +5370,7 @@ int vmm_map_touch_ring(vmm_context_t *ctx, uintptr_t phys_page)
  *    PHYSICAL_PMD_PAGE_MASK), so the phys base is masked to the leaf's
  *    own size, never to 4 KiB.
  *
- * 2. WRITE PERMISSION. The pointer handed back is the Pull Map alias —
+ * 2. WRITE PERMISSION. The pointer a porthole hands back is the Pull Map alias —
  *    PULL_LEAF_RAM: PRESENT|WRITABLE|GLOBAL and no U/S. Access rights
  *    are a property of the translation the store actually uses (SDM
  *    Vol 3A §5.6): with CR0.WP=1 a supervisor write is permitted only
@@ -5362,23 +5386,20 @@ int vmm_map_touch_ring(vmm_context_t *ctx, uintptr_t phys_page)
  *    non-writable ELF text has the kernel overwrite it on the app's
  *    behalf — a W^X and shared-page bypass needing no privilege.
  */
-static void *vmm_user_window(vmm_context_t *ctx, uintptr_t user_vaddr,
-                             bool for_write, size_t *out_span)
+static bool vmm_user_window(vmm_context_t *ctx, uintptr_t user_vaddr,
+                            bool for_write, uintptr_t *out_phys, size_t *out_span)
 {
-    if (out_span) *out_span = 0;
-    if (!ctx) return NULL;
-
     uint8_t level = 0;
     pte_t *leaf = vmm_get_leaf_pte(ctx, user_vaddr, &level);
-    if (!leaf || level == 0) return NULL;
+    if (!leaf || level == 0) return false;
 
     /* One read of the entry: a concurrent unmap on another core must not
      * split the permission checks from the frame this call returns. */
     pte_t entry = __atomic_load_n(leaf, __ATOMIC_ACQUIRE);
     if (!(entry & VMM_FLAG_PRESENT) || !(entry & VMM_FLAG_USER))
-        return NULL;
+        return false;
     if (for_write && !(entry & VMM_FLAG_WRITABLE))
-        return NULL;
+        return false;
 
     uintptr_t page_size = (level == 3) ? (1ULL << 30)   /* 1 GiB PDPT leaf */
                         : (level == 2) ? (1ULL << 21)   /* 2 MiB PD leaf   */
@@ -5388,39 +5409,126 @@ static void *vmm_user_window(vmm_context_t *ctx, uintptr_t user_vaddr,
     uintptr_t frame  = vmm_pte_to_phys(entry) & ~page_off_mask;
     uintptr_t offset = user_vaddr & page_off_mask;
 
-    if (out_span) *out_span = (size_t)(page_size - offset);
-    return vmm_phys_to_virt(frame + offset);
+    *out_phys = frame + offset;
+    *out_span = (size_t)(page_size - offset);
+    return true;
 }
 
-void *vmm_translate_user_addr(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
+/*
+ * The badge each core wears while a porthole of its is open (vmm.h): the
+ * cabin it looks into, and a count of its looks that is odd while one is open.
+ * PortholeOpen puts the badge on BEFORE it reads the cabin's entry, and
+ * PortholeClose takes it off AFTER the last access through the window.
+ * PortholesShut runs after a cabin's entries were cleared, and waits for every
+ * other core whose badge names that cabin to take that same look's badge off.
+ *
+ * That is the whole argument, and it rests on one ordering. The opener stores
+ * its badge, fences, then loads the entry; the shutter has stored the cleared
+ * entry, fences, then loads the badges. Each side stores and then loads what
+ * the other stored, with a full fence between — so at least one of the two
+ * loads sees the other side's store (Intel SDM Vol 3A, "Memory Ordering in P6
+ * and More Recent Processor Families": loads do not pass an earlier MFENCE).
+ * Either the shutter sees the badge and waits for that look to end, or the
+ * opener sees the cleared entry and opens onto nothing. A look that began
+ * after the shutter's fence is not waited for, and need not be: it reads the
+ * entry as cleared. So the shutter waits only for looks it may have raced,
+ * each a page of work long, and a stream of new looks cannot keep it waiting.
+ *
+ * The count, not the cabin alone, is what is waited on: a core copying a long
+ * buffer opens a porthole a page after a page onto the same cabin, and a
+ * shutter that waited for the cabin to leave its badge could wait out the
+ * whole copy. A changed count means the look it saw is over.
+ *
+ * The badge is closed on the store that ends it with RELEASE: x86 does not
+ * move a load or a store past a later store, nor the stores of a string
+ * operation past a later store, and memcpy here is rep movsb or plain moves —
+ * no non-temporal store — so every access through the window is done before
+ * the badge says so.
+ *
+ * One cache line each, so a core's looks never bounce a neighbour's line.
+ */
+typedef struct {
+    vmm_context_t *cabin;
+    uint64_t       looks;
+} __attribute__((aligned(64))) PortholeBadge;
+
+static PortholeBadge g_porthole_badges[MAX_CORES];
+
+void *PortholeOpen(Porthole *porthole, vmm_context_t *ctx, uintptr_t user_vaddr,
+                   size_t size, bool for_write)
 {
-    if (size == 0)
+    if (!porthole || !ctx || size == 0 || size > VMM_PAGE_SIZE)
         return NULL;
 
-    size_t span = 0;
-    void *kaddr = vmm_user_window(ctx, user_vaddr, false, &span);
-    if (!kaddr)
-        return NULL;
+    uint64_t rflags;
+    asm volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
-    if (size > span)
+    PortholeBadge *badge = &g_porthole_badges[amp_get_core_index()];
+    uint64_t looks = __atomic_load_n(&badge->looks, __ATOMIC_RELAXED);
+    if (looks & 1)
+        panic("[VMM] a porthole onto cabin %p was opened while core %u still "
+              "looks into cabin %p — between open and close there are only "
+              "loads and stores",
+              (void *)ctx, (unsigned)amp_get_core_index(), (void *)badge->cabin);
+
+    __atomic_store_n(&badge->cabin, ctx, __ATOMIC_RELAXED);
+    __atomic_store_n(&badge->looks, looks + 1, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    uintptr_t phys = 0;
+    size_t    span = 0;
+    if (!vmm_user_window(ctx, user_vaddr, for_write, &phys, &span) || size > span)
     {
-        /* Fail-closed backstop: refuse a range that leaves the leaf instead of
-         * the old silent truncation that corrupted a foreign frame. The limit is
-         * the leaf's own size, so a 2 MiB-backed buffer is served whole rather
-         * than chopped at an imaginary 4 KiB edge. Page-walking callers
-         * (crate_read/write, vmm_user_buf_*) chunk per leaf, and the ring slot
-         * accessors are straddle-safe by geometry (slot size divides the page,
-         * slot base is page-aligned), so no production caller reaches here.
-         * Coverage is proven by the per-subsystem audits plus CrateIoSelfTest
-         * (which intentionally trips this path to verify the backstop returns
-         * NULL). Canary is debug-gated: quiet on release, and NOT a production
-         * tripwire precisely because the selftest deliberately exercises it. */
-        debug_printf("[VMM] straddle-reject: vaddr=0x%lx size=%zu leaves its mapping after %zu bytes; use crate_read/crate_write or vmm_user_buf_* (page-walked)\n",
-                     (unsigned long)user_vaddr, size, span);
+        __atomic_store_n(&badge->looks, looks + 2, __ATOMIC_RELEASE);
+        asm volatile("push %0; popfq" :: "r"(rflags) : "memory", "cc");
         return NULL;
     }
 
-    return kaddr;
+    porthole->rflags = rflags;
+    porthole->phys   = phys;
+    return vmm_phys_to_virt(phys);
+}
+
+void PortholeClose(Porthole *porthole)
+{
+    PortholeBadge *badge = &g_porthole_badges[amp_get_core_index()];
+    uint64_t looks = __atomic_load_n(&badge->looks, __ATOMIC_RELAXED);
+    if (!(looks & 1))
+        panic("[VMM] core %u closed a porthole it had not open",
+              (unsigned)amp_get_core_index());
+
+    __atomic_store_n(&badge->looks, looks + 1, __ATOMIC_RELEASE);
+    asm volatile("push %0; popfq" :: "r"(porthole->rflags) : "memory", "cc");
+}
+
+/* Wait until no porthole opened onto `ctx` before this call is open. Run after
+ * the cabin's entries were cleared; see PortholeBadge for why that suffices.
+ * The wait is a page of copying on another core with its interrupts off, so it
+ * spins — servicing a shootdown aimed at this core meanwhile, as a contended
+ * spin_lock does, since it may be called with interrupts off. */
+static void PortholesShut(vmm_context_t *ctx)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    uint8_t me = amp_get_core_index();
+    if (__atomic_load_n(&g_porthole_badges[me].looks, __ATOMIC_RELAXED) & 1)
+        panic("[VMM] core %u took a page from cabin %p from inside a porthole — "
+              "the porthole could be onto that very page", (unsigned)me, (void *)ctx);
+
+    for (uint32_t c = 0; c < g_amp.total_cores; c++)
+    {
+        if (c == me)
+            continue;
+        PortholeBadge *badge = &g_porthole_badges[c];
+        uint64_t looks = __atomic_load_n(&badge->looks, __ATOMIC_ACQUIRE);
+        if (!(looks & 1) || __atomic_load_n(&badge->cabin, __ATOMIC_RELAXED) != ctx)
+            continue;
+        while (__atomic_load_n(&badge->looks, __ATOMIC_ACQUIRE) == looks)
+        {
+            vmm_tlb_shootdown_poll();
+            cpu_pause();
+        }
+    }
 }
 
 int vmm_setup_null_trap(vmm_context_t *ctx)
@@ -5639,56 +5747,72 @@ uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
 /*
  * vmm_user_buf_in / vmm_user_buf_alloc_out / vmm_user_buf_commit_out / vmm_user_buf_free
  *
- * The single-leaf guarantee of vmm_translate_user_addr is correct (its
- * kernel pointer covers exactly one mapped frame — 4 KiB, 2 MiB or
- * 1 GiB). For user buffers that span more than one leaf we walk the
- * cabin's page tables leaf by leaf and either copy into a freshly-
- * kmalloc'd kernel buffer (for input crates) or copy out from one (for
- * output crates).
- *
- * The leaf-by-leaf walk handles non-contiguous physical frames, a
- * partial first leaf (offset != 0) and a partial last leaf (size not a
- * multiple of the leaf size). The OUT direction additionally requires
- * R/W on each leaf it writes: see vmm_user_window. A heap page the cabin
- * has not touched yet is brought in on the way, as its own first touch
- * would bring it in: see VmmUserCopyWindow.
+ * A user buffer of any length, copied between the cabin and a kernel buffer
+ * — freshly kmalloc'd for an input crate, filled by the caller for an output
+ * one. The copy itself is VmmPortholeCopy.
  */
 
 /*
- * VmmUserCopyWindow — the window a kernel COPY takes onto cabin memory:
- * vmm_user_window, and where that finds no page, the page the cabin's own
- * first touch would bring in, brought in and looked at once more
- * (VmmFirstTouch). A program's buffer is its buffer whether or not it has
- * been through every page yet — malloc hands out heap that the first touch
- * backs — so a read into one and a write out of one see what the program
- * would. A write out of such a page reads the zeros it was given. Whatever
- * else the walk refuses stays refused: a page the cabin does not have, one
- * it holds read-only for a write, one that is not user memory at all.
+ * VmmPortholeCopy — the copy every vmm_user_buf_* is: a page at a time, each
+ * page through a porthole of its own. The frames behind a contiguous user range
+ * need not be neighbours, and a porthole holds its core for a page of work and
+ * no more, so a copy of any length keeps a cabin's pages waiting on it for a
+ * page at most (see Porthole). Exactly one of `kdst` and `ksrc` is given: kdst
+ * for a copy out of the cabin, ksrc for a copy into it — which needs R/W on
+ * every leaf it writes (vmm_user_window).
  *
- * VmmFirstTouch takes the locks the cabin's own fault takes, in the same
- * order, and only for an address in the heap window. The cabin may be
- * running on another core and touch the same page first; vmm_map_page
- * settles that under ctx->lock.
+ * Where a page is not there, the page the cabin's own first touch would bring
+ * in is brought in (VmmFirstTouch) and looked at once more. A program's buffer
+ * is its buffer whether or not it has been through every page yet — malloc
+ * hands out heap that the first touch backs, and a stack grows by it — so a
+ * read into one and a write out of one see what the program would; a write
+ * out of such a page reads the zeros it was given. The first touch is taken
+ * with no porthole open, since it takes the locks the cabin's own fault takes,
+ * in the same order; the cabin may be running on another core and touch the
+ * same page first, which ctx->lock settles. Whatever else the walk refuses
+ * stays refused: a page the cabin does not have, one it holds read-only for a
+ * write, one that is not user memory at all.
  *
- * The answer keeps the reason VmmFirstTouch knows: ERR_NO_MEMORY for a heap
- * page that is the cabin's but could not be had — no frame, or no page-table
- * page to map it with — which is a shortage the caller may outlast, and
+ * The answer keeps the reason VmmFirstTouch knows: ERR_NO_MEMORY for a page
+ * that is the cabin's but could not be had — no frame, or no page-table page
+ * to map it with — which is a shortage the caller may outlast, and
  * ERR_INVALID_ADDRESS for memory the cabin does not have and cannot have,
  * which it never will.
  */
-static error_t VmmUserCopyWindow(vmm_context_t *ctx, uintptr_t user_vaddr,
-                                 bool for_write, void **window, size_t *out_span)
+static error_t VmmPortholeCopy(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size,
+                               void *kdst, const void *ksrc)
 {
-    *window = vmm_user_window(ctx, user_vaddr, for_write, out_span);
-    if (*window)
-        return OK;
-    int touched = VmmFirstTouch(ctx, user_vaddr);
-    if (touched < 0)
-        return ERR_NO_MEMORY;
-    if (touched == 0)
-        return ERR_INVALID_ADDRESS;
-    *window = vmm_user_window(ctx, user_vaddr, for_write, out_span);
-    return *window ? OK : ERR_INVALID_ADDRESS;
+    bool to_cabin = (ksrc != NULL);
+    size_t done = 0;
+    while (done < size)
+    {
+        uintptr_t at = user_vaddr + done;
+        size_t chunk = VMM_PAGE_SIZE - (at & (VMM_PAGE_SIZE - 1));
+        if (chunk > size - done)
+            chunk = size - done;
+
+        Porthole porthole;
+        void *window = PortholeOpen(&porthole, ctx, at, chunk, to_cabin);
+        if (!window)
+        {
+            int touched = VmmFirstTouch(ctx, at);
+            if (touched < 0)
+                return ERR_NO_MEMORY;
+            if (touched == 0)
+                return ERR_INVALID_ADDRESS;
+            window = PortholeOpen(&porthole, ctx, at, chunk, to_cabin);
+            if (!window)
+                return ERR_INVALID_ADDRESS;
+        }
+
+        if (to_cabin)
+            memcpy(window, (const uint8_t *)ksrc + done, chunk);
+        else
+            memcpy((uint8_t *)kdst + done, window, chunk);
+        PortholeClose(&porthole);
+        done += chunk;
+    }
+    return OK;
 }
 
 /*
@@ -5697,7 +5821,7 @@ static error_t VmmUserCopyWindow(vmm_context_t *ctx, uintptr_t user_vaddr,
  * backing and non-page-aligned start/end. No kernel buffer is allocated: the
  * caller owns the destination (stack, heap, or preallocated scratch). A heap
  * page the cabin has not touched yet is brought in on the way, as its own
- * first touch would bring it (VmmUserCopyWindow): one zeroed frame, and any
+ * first touch would bring it (VmmPortholeCopy): one zeroed frame, and any
  * page-table page its mapping needs, charged to the cabin and kept mapped.
  *
  * Returns OK; ERR_NO_MEMORY at the first heap page of the cabin's that could
@@ -5711,25 +5835,7 @@ error_t vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
                               size_t size, void *kbuf)
 {
     if (!ctx || !kbuf || size == 0) return ERR_INVALID_ARGUMENT;
-
-    size_t copied = 0;
-    while (copied < size) {
-        /* Chunk by the LEAF that maps this address, not by 4 KiB: a
-         * 2 MiB-backed buffer is one window, and a 4 KiB one is still
-         * exactly one page. vmm_user_window reports the span. */
-        size_t span = 0;
-        void *src;
-        error_t why = VmmUserCopyWindow(ctx, user_vaddr + copied, false, &src, &span);
-        if (why != OK) return why;
-        if (span == 0) return ERR_INVALID_ADDRESS;
-
-        size_t chunk = size - copied;
-        if (chunk > span) chunk = span;
-
-        memcpy((uint8_t *)kbuf + copied, src, chunk);
-        copied += chunk;
-    }
-    return OK;
+    return VmmPortholeCopy(ctx, user_vaddr, size, kbuf, NULL);
 }
 
 void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
@@ -5758,26 +5864,7 @@ error_t vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
                                  const void *kbuf, size_t size)
 {
     if (!ctx || !kbuf || size == 0) return ERR_INVALID_ARGUMENT;
-
-    size_t copied = 0;
-    while (copied < size) {
-        /* The WRITE window: the cabin's own leaf must carry R/W. The Pull
-         * Map alias this memcpy goes through is supervisor-writable, so
-         * the hardware will not refuse a store into a page the cabin gave
-         * away read-only — see vmm_user_window. */
-        size_t span = 0;
-        void *dst;
-        error_t why = VmmUserCopyWindow(ctx, user_vaddr + copied, true, &dst, &span);
-        if (why != OK) return why;
-        if (span == 0) return ERR_INVALID_ADDRESS;
-
-        size_t chunk = size - copied;
-        if (chunk > span) chunk = span;
-
-        memcpy(dst, (const uint8_t *)kbuf + copied, chunk);
-        copied += chunk;
-    }
-    return OK;
+    return VmmPortholeCopy(ctx, user_vaddr, size, NULL, kbuf);
 }
 
 void vmm_user_buf_free(void *kbuf)

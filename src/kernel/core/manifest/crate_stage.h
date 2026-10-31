@@ -20,7 +20,7 @@
  *   dispatch frame returns. A scratch-backed Crate pointer would be
  *   reused by the next dispatch on the same K-Core → corruption.
  *
- *   Pull-Map (vmm_translate_user_addr) was the v1 workaround — it
+ *   A Pull-Map pointer onto the user's page was the v1 workaround — it
  *   returned a kernel pointer that aliased user memory directly, so
  *   pinning the pointer was safe (user pages outlive dispatch). But
  *   Pull-Map silently clips at the first 4 KiB page boundary, capping

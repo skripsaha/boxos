@@ -14,9 +14,9 @@
  *
  * All input/output crates flow through vmm_user_buf_* helpers so they
  * survive multi-page user buffers without aliasing into kernel memory
- * (vmm_translate_user_addr clamps to a single physical page — using it
- * directly with multi-page outputs would write into adjacent physical
- * pages that don't match user's virtual layout).
+ * (a single porthole opens onto at most one page — a multi-page output
+ * through one window would write into adjacent physical pages that don't
+ * match user's virtual layout).
  */
 
 #include "system_deck.h"

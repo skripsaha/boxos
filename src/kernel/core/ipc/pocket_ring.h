@@ -14,8 +14,8 @@
  *
  *   Kernel consumer: reads Pocket at slots_base + (head % cap)*slot_size, then
  *   bumps head. Slot pages are guaranteed mapped (the producer only writes
- *   slots that already faulted in), but kernel access goes through
- *   vmm_translate_user_addr because Cabin's CR3 may not be active.
+ *   slots that already faulted in), but kernel access goes through a
+ *   porthole (KPocketPeek) because Cabin's CR3 may not be active.
  *
  * Empty: head == tail
  * Full:  tail - head == slot_count_max  (8192 slots = 1 MiB at 128B/slot)

@@ -871,31 +871,40 @@ void process_destroy(process_t *proc)
      * self) bumped the generation first, so the expected word no longer matches
      * and the CAS is a harmless no-op. One atomic, no lock, no allocation.
      *
-     * We re-resolve the bound VA fresh from the live cabin page tables here
-     * instead of trusting a stored phys: if the pool's page were unmapped or
-     * recycled between bind and death, a stored phys could point at a page now
-     * owned by ANOTHER cabin and we would corrupt it. vmm_virt_to_phys walks the
-     * cabin's own tables (no active-CR3 requirement, valid from the reaper
-     * K-Core), and a 0 result — last-strand/cabin teardown already tore the
-     * mapping down — simply skips the stamp, which is harmless. */
+     * Both words are reached through a porthole onto the live cabin, never a
+     * stored phys: if the pool's page were unmapped or recycled between bind
+     * and death, a stored phys could point at a page now owned by ANOTHER
+     * cabin and we would corrupt it. The porthole walks the cabin's own tables
+     * (no active-CR3 requirement, valid from the reaper K-Core), opens only
+     * onto a page the cabin holds user-WRITABLE — the pool is the program's
+     * memory, and a word the program named in a page it cannot write is not
+     * one the kernel writes for it — and keeps the page the cabin's for the
+     * one atomic. A porthole that does not open — last-strand/cabin teardown
+     * already tore the mapping down — simply skips the stamp, which is
+     * harmless. */
     _Static_assert(__builtin_offsetof(StrandPool, GenState) == 116,
                    "kernel StrandPool GenState offset");
     if (proc->strand_pool_va && proc->cabin) {
-        uintptr_t ph = vmm_virt_to_phys(proc->cabin->vmm, proc->strand_pool_va);
-        if (ph) {
-            volatile uint32_t *gs = (volatile uint32_t *)
-                ((uint8_t *)vmm_phys_to_virt(ph) +
-                 __builtin_offsetof(StrandPool, GenState));
+        Porthole porthole;
+        uint32_t *gs = PortholeOpen(&porthole, proc->cabin->vmm,
+                                    proc->strand_pool_va +
+                                        __builtin_offsetof(StrandPool, GenState),
+                                    sizeof(uint32_t), /*for_write=*/true);
+        bool stamped = false;
+        if (gs) {
             uint32_t expect = STRANDPOOL_PACK(proc->strand_pool_gen, STRANDPOOL_LIVE);
             uint32_t orphan = STRANDPOOL_PACK(proc->strand_pool_gen, STRANDPOOL_ORPHANED);
-            bool stamped = __atomic_compare_exchange_n(gs, &expect, orphan, false,
-                                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
-            if (stamped && proc->strand_pool_orphan_va) {
-                uintptr_t fph = vmm_virt_to_phys(proc->cabin->vmm,
-                                                  proc->strand_pool_orphan_va);
-                if (fph)
-                    __atomic_store_n((volatile uint32_t *)vmm_phys_to_virt(fph),
-                                     1u, __ATOMIC_RELEASE);
+            stamped = __atomic_compare_exchange_n(gs, &expect, orphan, false,
+                                                  __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+            PortholeClose(&porthole);
+        }
+        if (stamped && proc->strand_pool_orphan_va) {
+            uint32_t *pending = PortholeOpen(&porthole, proc->cabin->vmm,
+                                             proc->strand_pool_orphan_va,
+                                             sizeof(uint32_t), /*for_write=*/true);
+            if (pending) {
+                __atomic_store_n(pending, 1u, __ATOMIC_RELEASE);
+                PortholeClose(&porthole);
             }
         }
     }

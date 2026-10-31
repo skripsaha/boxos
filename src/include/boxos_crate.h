@@ -24,7 +24,8 @@
  * Lifetime:
  *   - User allocates payload at addr on its own heap.
  *   - User builds a Crate descriptor pointing at addr.
- *   - Kernel translates addr via vmm_translate_user_addr() and reads/writes.
+ *   - Kernel copies to and from addr a page at a time, each page through a
+ *     porthole onto the cabin (vmm_user_buf_*), and reads/writes.
  *   - User reclaims payload after the Pocket completes.
  *
  * The kernel never copies payload bytes into bounded stack buffers — this is
