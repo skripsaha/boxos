@@ -52,12 +52,15 @@ static bool StandFreshAppends(StandFreshModel* m, uint64_t fid, uint32_t count, 
 }
 
 /* The file's runs of ground, each break between two forced: the block that
- * would have continued the run before it is ground another owner holds, never
- * a free block the log passed over (Allotment 1). How many runs; 0 when a
- * break was not forced. `tail` lets the last run stand alone: an unfilled
- * last block is put aside, so the block it would continue on stays free for
- * the version that fills it. */
-static uint64_t StandFreshForcedRuns(uint64_t fid, bool tail)
+ * would have continued the run before it, and every block up to where the
+ * next begins past it, is ground another owner holds — never a free block the
+ * log passed over (Allotment 1). So the runs are as many as the other
+ * owners' ground the log meets makes them — the book's own Quires among it,
+ * as many as its ribbon was given — and no bound of the stand's counts them.
+ * How many runs; 0 when a break was not forced. `tail` lets the last run
+ * stand alone: an unfilled last block is put aside, so the block it would
+ * continue on stays free for the version that fills it. */
+uint64_t StandFreshForcedRuns(uint64_t fid, bool tail)
 {
     FileRecord* rec  = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
     uint64_t    runs = 0, end = 0, free = 0;
@@ -67,7 +70,10 @@ static uint64_t StandFreshForcedRuns(uint64_t fid, bool tail)
         return 0;
     StripWalkBegin(rec, &walk);
     for (uint64_t k = 0; StripWalkNextGround(&walk, &s); k += s.count) {
-        if (runs && s.start != end && BlockMapDerivedIsFree(end) && !(tail && k + s.count == rec->blocks))
+        bool passed = runs && s.start != end && BlockMapDerivedIsFree(end);
+        for (uint64_t b = end + 1u; runs && !passed && b < s.start; b++)
+            passed = BlockMapDerivedIsFree(b);
+        if (passed && !(tail && k + s.count == rec->blocks))
             free++;
         runs += !runs || s.start != end;
         end   = s.start + s.count;
@@ -78,10 +84,6 @@ static uint64_t StandFreshForcedRuns(uint64_t fid, bool tail)
     FileRecordRelease(rec);
     return free ? 0 : runs;
 }
-
-/* At most this many runs: the ground the log starts on, the book's own Quires
- * the files' ground lies before, and its unfilled last block. */
-#define STAND_FRESH_LOG_RUNS  3u
 
 /* Whether the log's record holds no more Strips than its appends make: one a
  * cycle — the appends a cycle takes go on the run its first one began, and a
@@ -112,7 +114,7 @@ static TestResult TestStandFreshAppendsKeepOneRun(void)
     TEST_ASSERT(StandFreshAppends(&m, fid, STAND_FRESH_APPENDS, TAGFS_BLOCK_SIZE), "a thousand blocks are appended");
     runs = StandFreshForcedRuns(fid, false);
     TestEvidence("runs of ground a log of a thousand appended blocks lies in", runs);
-    TEST_ASSERT(runs >= 1 && runs <= STAND_FRESH_LOG_RUNS,
+    TEST_ASSERT(runs >= 1,
                 "and each block continued the run before it wherever that block was free — a run broken only by "
                 "ground another owner holds");
     TEST_ASSERT(StandFreshLogStrips(fid, runs, false), "and its record a Strip a cycle on each run, not one an append");
@@ -122,7 +124,7 @@ static TestResult TestStandFreshAppendsKeepOneRun(void)
     TEST_ASSERT(StandFreshAppends(&m, fid, STAND_FRESH_APPENDS, 333u), "a thousand lines of 333 bytes are appended");
     runs = StandFreshForcedRuns(fid, true);
     TestEvidence("runs of ground a log of a thousand appended lines lies in", runs);
-    TEST_ASSERT(runs >= 1 && runs <= STAND_FRESH_LOG_RUNS,
+    TEST_ASSERT(runs >= 1,
                 "and the version that filled each block went on the block that continued the run, its unfilled "
                 "last block alone apart");
     TEST_ASSERT(StandFreshLogStrips(fid, runs, true), "and its record a Strip a cycle on each run, not one an append");

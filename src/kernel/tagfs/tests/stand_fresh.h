@@ -23,6 +23,9 @@
  *                          had and reads the model's bytes
  *   StandFreshLastStitch   the last stitch this mount sewed: its flags and its
  *                          Clasp's fresh blocks
+ *   StandFreshForcedRuns   how many runs of ground the file lies in, each break
+ *                          forced by ground another owner holds; 0 when one is
+ *                          not (stand_fresh_ground_tests.c)
  */
 
 typedef struct {
@@ -45,6 +48,7 @@ bool     StandFreshHolds(const StandFreshModel* m, uint64_t fid);
 uint32_t StandFreshPrint(uint64_t fid, uint64_t* runs);
 bool     StandFreshSettledAndBack(const StandFreshModel* m, uint64_t fid);
 bool     StandFreshLastStitch(uint64_t* flags, uint64_t* fresh);
+uint64_t StandFreshForcedRuns(uint64_t fid, bool tail);
 
 #endif /* CONFIG_VOLUME_TESTS */
 

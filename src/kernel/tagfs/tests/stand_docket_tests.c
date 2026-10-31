@@ -497,10 +497,12 @@ static TestResult TestStandDocketLiedLag(void)
 
     if (aside)
         return test_steps_aside(aside);
-    if (s.at.atom != VOLUME_BLOCK_SECTORS)
-        return test_steps_aside("the medium's atom is larger than a block: a stitch laid by hand here is one");
+    if (s.at.atom > STAND_STITCH_LAID_MOST)
+        return test_steps_aside(STAND_STITCH_ATOM_LONG);
     TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
-    TEST_ASSERT(StandStitchLayEmpty(&s, STITCH_DATA_FLUSHED | STITCH_MEDIUM_LIED) != 0,
+    /* An atom of the ribbon long, so the mount goes on at its end — a flash
+     * page on a removable medium (§16.6 п.2). */
+    TEST_ASSERT(StandStitchLayAt(&s, STITCH_DATA_FLUSHED | STITCH_MEDIUM_LIED, s.at.atom, &s.at.next) != 0,
                 "a stitch saying the medium lied is laid at the ribbon's end");
     TEST_ASSERT(StandRibbonUp() && FallowLag() == 2u, "the volume mounts on it, its lag two stitches");
     TEST_ASSERT(StandDocketPlainFile(&plain) && StandDocketGround(plain, &first, &blocks),

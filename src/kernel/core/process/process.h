@@ -523,6 +523,11 @@ uint32_t process_ref_count(process_t *proc);
 /* Returns true when this call made the strand runnable AND enqueued it —
  * sched_enqueue rang its core, so the caller must not ring again. */
 bool process_set_state(process_t *proc, process_state_t new_state);
+/* A process let run as it was made: PROC_CREATED -> PROC_WORKING under the
+ * state lock, enqueued as process_set_state enqueues it. False, the state left
+ * as it stands, when it is no longer as made: a stop or an end decided over it
+ * before it ever ran is not undone. */
+bool ProcessStartCreated(process_t *proc);
 process_state_t process_get_state(process_t *proc);
 
 int process_destroy_safe(process_t *proc);

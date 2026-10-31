@@ -7,6 +7,7 @@
 #include "../file_map/file_map.h"
 #include "../mount/away.h"
 #include "../mount/book_mount.h"
+#include "../mount/errata.h"
 #include "../mount/under_glass.h"
 #include "../block_map/block_map_derived.h"
 #include "../settle/sewing.h"
@@ -523,6 +524,66 @@ out:
     return verdict;
 }
 
+/* The verdict's first cycle where the mount gave the ribbon no next_quire
+ * (RibbonNextGivenAtMount, refused): the cycle asks for one at its TAKE before
+ * the verdict's settle:undone claims room past it (StitchRunStep) — so the
+ * first cycle settles, carrying the Undone, and is not refused for want of
+ * room a window on, every cycle after the same. */
+static TestResult TestStandErrataNextRefused(void)
+{
+    TestResult          verdict = TEST_PASS;
+    StandRibbon         w;
+    StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
+    MountBookSaid       said;
+    RibbonUnit*         u = NULL;
+    RibbonCursor        c;
+    uint64_t            digests[2];
+    bool                armed = false;
+    const char*         aside = StandRibbonAside(&w);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandRibbonData(&w, digests), "two free blocks are written with a pattern");
+    StandRibbonBorn(r1, w.fid, TAGFS_BLOCK_SIZE, w.free, 1, digests, 0, 0, 0);
+    StandErrataShaped(r2, w.fid, 1, w.free + 1u, digests[1] ^ 1u);
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
+    uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
+    StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
+    h2.flags       = 0;
+    h2.from_block  = w.quire;
+    h2.from_blocks = w.quire_blocks;
+    h2.next_block  = 0;
+    h2.next_blocks = 0;
+    TEST_ASSERT(c1 && StandRibbonSew(&w, w.next, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
+                "a Born, and at the start of the next_quire a Shaped whose data never landed, naming none past "
+                "it, are laid");
+    RibbonStandNextRefused(true);
+    armed = true;
+    TEST_ASSERT(StandRibbonUp() && !TagFSIsUnderGlass(), "the volume mounts on them, written on");
+    armed = RibbonStandNextRefused(false);
+    TEST_ASSERT(!armed, "the mount asked the map for a next_quire, and the map refused it");
+    MountBookStandSaid(&said);
+    TEST_ASSERT(said.ribbon[RIBBON_CODE_NOT_LANDED] == 1 && ErrataHeld(),
+                "the data that did not land is said, and the verdict is held");
+    RibbonCursorStand(&c);
+    TEST_ASSERT(c.quire.block == w.next && !c.next.blocks,
+                "the ribbon stands in the Quire it went on into, with no next_quire past it");
+    TEST_ASSERT(StandErrataFirstCycle(&w, &u),
+                "the session's first cycle settles: it asks for a next_quire before the tag claims room past it");
+    TEST_ASSERT(StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, w.fid),
+                "its stitch carries the Undone of the stitch undone, first");
+    TEST_ASSERT(StandErrataWears(w.fid), "and the file rolled back wears settle:undone");
+out:
+    if (armed)
+        (void)RibbonStandNextRefused(false);
+    RibbonUnitLetGo(u);
+    if (!StandRibbonPutBack(&w))
+        verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
+                               w.nlaid, 0);
+    return verdict;
+}
+
 static const TestCase g_stand_errata_tests[] = {
     { .name = "stand_errata_not_landed", .func = TestStandErrataNotLanded,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
@@ -537,6 +598,8 @@ static const TestCase g_stand_errata_tests[] = {
     { .name = "stand_errata_lied_two", .func = TestStandErrataLiedTwo,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_errata_wide_fid", .func = TestStandErrataWideFid,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_errata_next_refused", .func = TestStandErrataNextRefused,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
 };
 

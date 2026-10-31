@@ -217,7 +217,6 @@ static void StitchTake(StitchSnap* s)
     TagFSState* fs = tagfs_get_state();
     uint32_t    coined = 0;
     uint64_t    text   = 0;
-    RibbonNextGiven();
     SettleWaitersRunBegins();
     uint32_t demands = CadenceRunBegins();
     bool     room    = s->why == SETTLE_FOR_ROOM || (demands & SETTLE_DEMAND_ROOM);
@@ -707,6 +706,13 @@ error_t StitchRunStep(bool* done)
     bool        last = false;
     switch (s->step) {
     case STITCH_STEP_TAKE:
+        /* The next_quire first: the verdict's Labeleds claim room the cursor
+         * judges past it (RibbonRoomOf), and a cursor the mount left with none
+         * — gone on at the start of the next_quire named (RibbonGoesOnAt), its
+         * own ask refused (RibbonNextGivenAtMount) — would see every claim but
+         * a freeing one refused, the cycle with them, and the next cycle's the
+         * same, were it given only past them. */
+        RibbonNextGiven();
         rc = StitchWorn(s);
         if (rc != OK)
             break;

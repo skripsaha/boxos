@@ -16,7 +16,7 @@
 # the stick the boot left is booted once more and held as standusb holds a
 # second boot (stand_again): the suite ran again and nothing failed.
 stand_book_usb() {
-    local boot="$SCRATCH/stand.book_usb.boot.img" stick="$SCRATCH/stand.book_usb.stick.img" rc extra
+    local boot="$SCRATCH/stand.book_usb.boot.img" stick="$SCRATCH/stand.book_usb.stick.img" rc extra booted
     rm -f "$boot" "$stick" "$SCRATCH"/serial.stand_book_usb.log "$SCRATCH"/serial.stand_book_usb_again.log build/boxos.img
     latearrival_on
     if ! STAND_FORMAT=v2 build_with_key VOLUME_TESTS=on STRICT=off; then
@@ -31,11 +31,12 @@ stand_book_usb() {
         latearrival_off; rm -f "$boot" "$stick"
         return
     fi
+    booted=$(stand_book_census "$stick")
     extra="-drive if=none,id=stick,file=$stick,format=raw -device usb-storage,bus=xhci1.0,drive=stick,id=usbstick"
     STAND_FORMAT=v2 stand_boot stand_book_usb BOOTDISK="$boot" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra"; rc=$?
     if [ "$rc" != 2 ]; then
         stand_book_judge stand_book_usb "the book on a USB stick, BIOS 4c" "$STAND_BOOK_USB_BLOCKFAILS" \
-            stand_tally_rotten_leaf_locked taken "$stick"
+            stand_tally_rotten_leaf_locked taken "$stick" "$booted"
         grep -aqE "^\[TESTS\] the tests that write go through seat [0-9]+ \($STANDUSB_SEAT\)" \
             "$SCRATCH/serial.stand_book_usb.log"
         chk $? "stand: the book on a USB stick — the writes' road is the stick's seat: $(grep -aoE 'go through seat [0-9]+ \([^)]*\)' "$SCRATCH/serial.stand_book_usb.log" | head -1)"

@@ -5,12 +5,10 @@
 #include "../settle/binder.h"
 #include "../mount/book_mount.h"
 #include "../mount/spine_read.h"
-#include "../mount/away.h"
 #include "../file_map/file_map.h"
 #include "../block_map/block_map_derived.h"
 #include "../tag_registry/tag_registry.h"
 #include "block_fail.h"
-#include "boardroom.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -36,108 +34,6 @@
 // interned at the ribbon's end no longer holds the cycles. Every test puts
 // the Spine and the ribbon back as it found them.
 // ============================================================================
-
-bool StandBinderRead(const StandBinder* b, uint64_t block, uint8_t* out)
-{
-    return BoardroomRead(b->s.seat, b->s.base + block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS, out) == 0;
-}
-
-bool StandBinderWrite(const StandBinder* b, uint64_t block, const uint8_t* in)
-{
-    return BoardroomWrite(b->s.seat, b->s.base + block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS, in, NULL) == 0;
-}
-
-/* Why the test stands aside here, or NULL — the ring kept as found. */
-const char* StandBinderAside(StandBinder* b)
-{
-    memset(b, 0, sizeof(*b));
-    const char* aside = StandStitchAside(&b->s);
-    if (aside)
-        return aside;
-    b->slots  = g_book.frame.spine_slots;
-    b->spine  = g_book.frame.spine_block;
-    b->stride = g_book.frame.spine_stride;
-    if (b->slots == 0 || b->slots > STAND_BINDER_SLOTS_MOST)
-        return "the Spine's ring is not one the stand keeps";
-    if (!(b->ring = kmalloc((uint64_t)b->slots * TAGFS_BLOCK_SIZE)))
-        return "no memory to keep the ring";
-    for (uint32_t i = 0; i < b->slots; i++)
-        if (!StandBinderRead(b, b->spine + i * b->stride, b->ring + (uint64_t)i * TAGFS_BLOCK_SIZE))
-            return "the ring would not be read";
-    BinderStandGivenBegin();
-    uint32_t runs = BinderStandGround(NULL, 0);
-    b->ground     = kmalloc((uint64_t)(runs ? runs : 1u) * sizeof(Strip));
-    b->held       = kmalloc((uint64_t)(runs ? runs : 1u) * sizeof(uint8_t*));
-    if (!b->ground || !b->held)
-        return "no memory to keep the slots' ground";
-    memset(b->held, 0, (uint64_t)(runs ? runs : 1u) * sizeof(uint8_t*));
-    b->nground = BinderStandGround(b->ground, runs);
-    if (b->nground != runs)
-        return "the slots' ground changed while it was kept";
-    for (uint32_t i = 0; i < b->nground; i++) {
-        uint64_t bytes = (uint64_t)b->ground[i].count * TAGFS_BLOCK_SIZE;
-        if (!(b->held[i] = kmalloc(bytes)))
-            return "no memory to keep the slots' ground";
-        if (BoardroomRead(b->s.seat, b->s.base + b->ground[i].start * TAGFS_BLOCK_SECTORS,
-                          b->ground[i].count * TAGFS_BLOCK_SECTORS, b->held[i]) != 0)
-            return "the slots' ground would not be read";
-    }
-    return NULL;
-}
-
-/* A block the test changes by hand, kept as found for the put-back. */
-bool StandBinderKeep(StandBinder* b, uint64_t block)
-{
-    if (b->kept || !(b->kept = kmalloc(TAGFS_BLOCK_SIZE)))
-        return false;
-    b->kept_block = block;
-    return StandBinderRead(b, block, b->kept);
-}
-
-/* Every Quire the ribbon was given while the test ran written over with zeros
- * — what the ring and its ground as found are written back over after — so no
- * stitch of the test lies past the end of the ribbon the test found: the next
- * mount's direct scan would read it as what settled and is lost (§3.9). */
-static bool StandBinderGivenZeroed(const StandBinder* b)
-{
-    static RibbonQuire given[256];
-    uint32_t           n  = BinderStandGiven(given, 256u);
-    bool               ok = n <= 256u;
-    memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
-    for (uint32_t i = 0; ok && i < n; i++)
-        for (uint64_t k = 0; ok && k < given[i].blocks; k++)
-            ok = StandBinderWrite(b, given[i].block + k, g_test_output);
-    return ok;
-}
-
-/* The volume let go of, the ring and the kept block written back as found,
- * the ribbon put back (StandStitchPutBack) and the volume mounted on it. */
-bool StandBinderPutBack(StandBinder* b)
-{
-    bool ok = true;
-    if (tagfs_get_state()->initialized)
-        TagFSStandLetGo();
-    ok &= StandBinderGivenZeroed(b);
-    for (uint32_t i = 0; b->ring && i < b->slots; i++)
-        ok &= StandBinderWrite(b, b->spine + i * b->stride, b->ring + (uint64_t)i * TAGFS_BLOCK_SIZE);
-    if (b->kept)
-        ok &= StandBinderWrite(b, b->kept_block, b->kept);
-    for (uint32_t i = 0; b->held && i < b->nground; i++) {
-        if (b->held[i])
-            ok &= BoardroomWrite(b->s.seat, b->s.base + b->ground[i].start * TAGFS_BLOCK_SECTORS,
-                                 b->ground[i].count * TAGFS_BLOCK_SECTORS, b->held[i], NULL) == 0;
-        kfree(b->held[i]);
-    }
-    kfree(b->held);
-    kfree(b->ground);
-    b->held    = NULL;
-    b->ground  = NULL;
-    b->nground = 0;
-    kfree(b->ring);
-    kfree(b->kept);
-    b->ring = b->kept = NULL;
-    return StandStitchPutBack(&b->s) && ok;
-}
 
 /* Whether `n` bytes are all zero. */
 static bool StandBinderZeros(const uint8_t* p, uint64_t n)
@@ -243,19 +139,6 @@ static bool StandBinderSow(StandFreshModel* m, uint64_t* data_fid)
     /* A Tally of a mount is written only once a stitch of that mount settled
      * (§4.2): one more, carrying nothing, after the mount. */
     return TagFSSettle() == OK && StandStitchRemount() && StandFreshHolds(m, fid) && TagFSSettle() == OK;
-}
-
-/* `n` Tallies in a row, the lag's stitches settled past each: OK, or the
- * first refusal. */
-error_t StandBinderTallies(uint32_t n)
-{
-    error_t rc = OK;
-    for (uint32_t t = 0; rc == OK && t < n; t++) {
-        rc = BinderRunWhole();
-        for (uint64_t l = 0; rc == OK && l <= FallowLag(); l++)
-            rc = TagFSSettle();
-    }
-    return rc;
 }
 
 // ----------------------------------------------------------------------------
@@ -661,9 +544,11 @@ static TestResult TestStandBinderRottenNamed(void)
     TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written");
     /* A range that rots where an older slot still holds it in a node of its
      * own is read back from that slot's Tally and its ribbon (Facsimile,
-     * mount/facsimile.c) and rots no more: a Tally more for every other slot
-     * of the ring, nothing changed between, names the leaves as they lie —
-     * every slot then holds the range in the one node. */
+     * mount/facsimile.c) and rots no more: past the Tallies Glean asks for,
+     * which lay the nodes of a Quire it gleans anew, a Tally more for every
+     * other slot of the ring, nothing changed between, names the leaves as
+     * they lie — every slot then holds the range in the one node. */
+    TEST_ASSERT(StandBinderGleaned(), "and the Tallies Glean asks for after it");
     TEST_ASSERT_OK(StandBinderTallies(g_book.frame.spine_slots - 1u),
                    "a Tally more for every other slot, each naming the leaves as they lie");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
@@ -933,7 +818,9 @@ static TestResult TestStandBinderStandingEnd(void)
     }
     TestEvidence("Tallies the ribbon asked for while it ran through six Quires", tallies);
     TEST_ASSERT(refused > 0 && interned, "the ribbon ran out, and a tag was interned there");
-    TEST_ASSERT(tallies >= 3u, "the Tallies it asked for gave its Quires back");
+    /* As many as it takes the ring to let a Quire go: three where its slots
+     * held nothing to let go of, one on a book the stand ran on before. */
+    TEST_ASSERT(tallies >= 1u, "the Tallies it asked for gave its Quires back");
     TEST_ASSERT_OK(TagFSSettle(), "and the cycles go on: the ribbon's end does not stand");
 out:
     if (shrunk)

@@ -644,12 +644,9 @@ uint32_t process_ref_count(process_t *proc)
     return atomic_load_u32(&proc->ref_count);
 }
 
-bool process_set_state(process_t *proc, process_state_t new_state)
+/* The move itself, under the state lock its caller holds: whether it enqueued. */
+static bool ProcessStateMoveLocked(process_t *proc, process_state_t new_state)
 {
-    if (!proc)
-        return false;
-
-    spin_lock(&proc->state_lock);
     process_state_t old_state = proc->state;
 
     /* Death is terminal. A wake (process_set_state PROC_WORKING) that races a
@@ -667,7 +664,6 @@ bool process_set_state(process_t *proc, process_state_t new_state)
     if (new_state == PROC_WORKING &&
         (old_state == PROC_DONE || old_state == PROC_CRASHED))
     {
-        spin_unlock(&proc->state_lock);
         return false;
     }
 
@@ -715,8 +711,31 @@ bool process_set_state(process_t *proc, process_state_t new_state)
         sched_dequeue(proc);
     }
 
+    return enqueued;
+}
+
+bool process_set_state(process_t *proc, process_state_t new_state)
+{
+    if (!proc)
+        return false;
+
+    spin_lock(&proc->state_lock);
+    bool enqueued = ProcessStateMoveLocked(proc, new_state);
     spin_unlock(&proc->state_lock);
     return enqueued;
+}
+
+bool ProcessStartCreated(process_t *proc)
+{
+    if (!proc)
+        return false;
+
+    spin_lock(&proc->state_lock);
+    bool created = proc->state == PROC_CREATED;
+    if (created)
+        ProcessStateMoveLocked(proc, PROC_WORKING);
+    spin_unlock(&proc->state_lock);
+    return created;
 }
 
 process_state_t process_get_state(process_t *proc)

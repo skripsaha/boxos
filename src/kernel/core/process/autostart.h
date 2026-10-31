@@ -6,14 +6,12 @@
 struct process_t;
 
 /*
- * Start every program the mounted volume tags autostart.
- *
- * `scheduler_live` says whether processes have to put themselves on a run
- * queue: false during boot, where the state is set directly and one sweep
- * afterwards enqueues everything; true once the machine is up. Returns how
- * many were started. Safe to call with no volume — it starts nothing.
+ * Start every program the mounted volume tags autostart, at boot: the state
+ * is set directly and one sweep afterwards enqueues everything. Returns how
+ * many were started. Safe to call with no volume — it starts nothing. A volume
+ * that arrives later is started by the watch (AutostartWatchVolume).
  */
-int AutostartLaunchFromVolume(struct process_t **out_first, bool scheduler_live);
+int AutostartLaunchFromVolume(struct process_t **out_first);
 
 /* Remember the embedded shell the kernel started because there was nothing to
  * start from a volume. It is relieved of the watch if a volume turns up later

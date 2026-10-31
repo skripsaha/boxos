@@ -114,6 +114,12 @@ void     RibbonCursorLetGo(void);
 /* Whether the volume's medium was shown to lie, as the next stitch will say. */
 bool     RibbonCursorLied(void);
 
+/* The mount's ask for a next_quire, with the door shut, past the free it says
+ * (book_mount.c): one given where the cursor wants it and the map has one, a
+ * refusal left to the first cycle's ask (RibbonNextGiven) with the cursor as
+ * the mount laid it. */
+void     RibbonNextGivenAtMount(void);
+
 /*
  * The cursor's moves, for the cycle's steps (sewing.c), by the Settle's
  * holder with no TagFS lock held:
@@ -351,6 +357,10 @@ void     StitchStandLeaves(uint32_t sectors);
  * armed, and taken by the one it refuses. Once. For the stand. */
 void     RibbonStandMarksRefused(void);
 bool     RibbonStandMarksRefusing(void);
+/* The next ask of the map for a next_quire refused, as a map with no Quire
+ * past the Tallies' ground refuses it: armed, and taken by the ask it refuses;
+ * false takes it down unspent. Whether it stood armed. Once. For the stand. */
+bool     RibbonStandNextRefused(bool armed);
 /* The bytes claimed by changes no stitch has taken, and those held for changes
  * in the making (RibbonReserve), as they stand — for the stand. */
 void     RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved);

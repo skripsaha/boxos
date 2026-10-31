@@ -883,21 +883,49 @@ wait_for_prompt() {
 # and the characters go nowhere, the scenario waits out its ceiling, and it
 # reports a machine that never had a chance as a machine that failed.
 #
-# The shell echoes what it was given, so the echo is the fact that it landed.
-# Tried twice, and said out loud if it still did not, because a scenario that
-# quietly tests nothing is worse than one that fails.
-# A shell standing at its prompt echoes what it is given at once, so a log that
-# has gone quiet WITHOUT the echo is a shell that never got the keystrokes —
-# and that is worth one more try. A log still growing is a shell still working
-# through the last command, and the wait simply carries on.
+# The characters are type_cmd's to prove — it reads each back off the echo
+# and retypes the line, erased, when one did not land — so only a type_cmd
+# that could not is tried again. What is left is the Enter: past the byte the
+# typing began at, a line that ends on the command, and is itself ended.
+#
+# ‼ A LINE THE MACHINE TOOK IS NEVER TYPED AGAIN. `~ COMMAND` looked for
+# anywhere in the log missed an echo whose prompt a kernel line buried
+# (`~ [Boardroom] seat 1 carries ...` as a stick comes back): the second
+# typing went into the program already running the first — awaycheck twice in
+# three runs of four, `0 of 27` and a HARNESS verdict for a quilltest that
+# took no keys — and an earlier line, or an echo with no Enter, answered for
+# one never taken (typer_selfcheck, logcheck_autostart.sh).
 TYPE_ECHO_QUIET_S=${TYPE_ECHO_QUIET_S:-10}
+
+# type_echoed FROM CMD — the line, read past byte FROM with every kernel line
+# (`[Tag] ` to its end) taken out wherever it landed and what stood before it
+# going on with the line after; the log's last byte marked, so a line not yet
+# ended is not one.
+type_echoed() {
+    { tail -c "+$(($1 + 1))" "$WAIT_LOG" 2>/dev/null; printf '\001'; } | tr -d '\r' |
+        TYPE_ECHOED=$2 awk '
+            BEGIN { c = ENVIRON["TYPE_ECHOED"] }
+            index($0, "\001") { exit }
+            {
+                l = before $0; before = ""
+                if (match(l, /\[[A-Za-z][^][]*\] /)) { before = substr(l, 1, RSTART - 1); next }
+                if (length(l) >= length(c) && substr(l, length(l) - length(c) + 1) == c) { found = 1; exit }
+            }
+            END { exit !found }'
+}
+
 type_line() {
-    local cmd="$1" attempt=0
+    local cmd="$1" attempt=0 from
     while [ $attempt -lt 2 ]; do
+        from=$(wc -c 2>/dev/null < "$WAIT_LOG" | tr -d ' ')
         if type_cmd "$cmd"; then
             sleep 1
             key_press ret
-            wait_for_line build/serial.log "~ $cmd" "$TYPE_ECHO_QUIET_S" && return 0
+            wait_until "$TYPE_ECHO_QUIET_S" "the line '$cmd' ended past the typing" \
+                'type_echoed "${from:-0}" "$cmd"' && return 0
+            echo "  (the machine echoed every character of '$cmd' and no line since ends on it"
+            echo "   — the Enter did not land; not typed again: the machine may be running it)"
+            return 1
         fi
         attempt=$((attempt+1))
     done
