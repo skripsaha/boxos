@@ -5196,12 +5196,15 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys,
         return NULL;
     }
 
+    /* From here a page already mapped into the cabin is the mapping's:
+     * vmm_destroy_context frees every frame the cabin maps, so an error path
+     * frees only the pages not mapped yet. Freeing a mapped one as well handed
+     * it back twice — a buddy double-free, or a frame given to two owners. */
     if (vmm_map_pocket_ring(cabin_ctx, (uintptr_t)pocket_phys) != 0)
     {
         pmm_free(touch_phys, CABIN_TOUCH_RING_PAGES);
         pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
         pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
-        pmm_free(info_phys, CABIN_INFO_PAGES);
         vmm_destroy_context(cabin_ctx);
         vmm_set_error("Failed to map PocketRing");
         return NULL;
@@ -5211,8 +5214,6 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys,
     {
         pmm_free(touch_phys, CABIN_TOUCH_RING_PAGES);
         pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
-        pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
-        pmm_free(info_phys, CABIN_INFO_PAGES);
         vmm_destroy_context(cabin_ctx);
         vmm_set_error("Failed to map ResultRing");
         return NULL;
@@ -5221,9 +5222,6 @@ vmm_context_t *vmm_create_cabin(uint64_t *cabin_info_phys,
     if (vmm_map_touch_ring(cabin_ctx, (uintptr_t)touch_phys) != 0)
     {
         pmm_free(touch_phys, CABIN_TOUCH_RING_PAGES);
-        pmm_free(result_phys, CABIN_RESULT_RING_PAGES);
-        pmm_free(pocket_phys, CABIN_POCKET_RING_PAGES);
-        pmm_free(info_phys, CABIN_INFO_PAGES);
         vmm_destroy_context(cabin_ctx);
         vmm_set_error("Failed to map TouchRing");
         return NULL;
