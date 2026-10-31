@@ -109,21 +109,24 @@ def _Born(fid):
 def _Taken(c, fid, name, files):
     """Is every rotten range of the Tally stood on taken by Facsimile from slot
     0, every file `files` names live, `fid` by `name`, nothing locked or held
-    — by the kernel's census too?"""
+    — by the kernel's census too, which names each range taken and the slot it
+    is read from?"""
+    taken = sum(1 for x in c.findings if x.code == "RANGE_FACSIMILE")
     return (c.mount.refusal is None and c.mount.slot.index == 1 and not c.mount.glass and
             Found(c, "RANGE_FACSIMILE", "FILES", "slot 0") and not Found(c, "RANGE_ROTTEN") and
             set(c.mount.files) == set(files) and c.mount.files[fid].name == name and not c.mount.locked and
-            not c.held and c.kernel["mounts"] is True and not c.kernel["rotten"] and not c.kernel["held"])
+            not c.held and c.kernel["mounts"] is True and not c.kernel["rotten"] and not c.kernel["held"] and
+            c.kernel["facsimile"] == [["FILES", 0]] * taken)
 
 
 def _Laid(c, ranges):
     """Did slot 0 not stand in: `ranges` FILES range(s) rotten, none taken,
     their files locked by their parents' counts and their ground held — as
-    the kernel's census says too?"""
+    the kernel's census says too, which names no range taken?"""
     return (c.mount.refusal is None and c.mount.slot.index == 1 and not Found(c, "RANGE_FACSIMILE") and
             sum(1 for x in c.findings if x.code == "RANGE_ROTTEN" and "FILES" in x.text) == ranges and
             bool(c.held) and
-            [r["tree"] for r in c.kernel["rotten"]].count("FILES") == ranges)
+            [r["tree"] for r in c.kernel["rotten"]].count("FILES") == ranges and not c.kernel["facsimile"])
 
 
 def FacsimileRuleCases(bt):
@@ -271,5 +274,9 @@ def BootSlipCases(bt):
             ("the book mounts, the file carrying the Slip",
              lambda c: c.mount.refusal is None and c.mount.files[boot].slips == [slip]),
             ("and may only be read, the file named: no call changes it (§16.6 п.4)",
-             lambda c: Glass(c, "fid %u" % boot, "loader", "Slip") and c.kernel["glass"] == 1)]),
+             lambda c: Glass(c, "fid %u" % boot, "loader", "Slip") and c.kernel["glass"] == 1),
+            ("and the census names where in the file its Slip lies: its last block's first byte, which the "
+             "guest's read by `show` is said to stop short of or reach",
+             lambda c: [f["at"] for f in c.kernel["slipped"] if f["fid"] == boot] ==
+             [(Blocks(fs.size) - 1) * BLOCK + slip[0]])]),
     ]

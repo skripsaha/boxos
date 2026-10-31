@@ -8,6 +8,10 @@
 #                                     a logger of a line a second for an hour,
 #                                     about 65 minutes, on a book's record;
 #                                     LOGGER_SECONDS=120 for a short one
+#     tools/gates.sh census           CENSUS_LANDINGS="B59 B65": a book's
+#                                     census of those landings alone, said in
+#                                     a HARNESS line — never green, and on
+#                                     format v1 (v1_census) nothing booted
 #     tools/gates.sh --formats        no boot: every gate in its part and a
 #                                     scenario its harness runs on that format,
 #                                     no harness leaning on the default format

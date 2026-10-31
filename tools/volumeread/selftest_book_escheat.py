@@ -225,12 +225,14 @@ def EscheatCases(bt):
                   lambda c: set(c.mount.files) == set(content.files) and c.mount.files[fid].name == name and
                   not c.mount.locked),
                  ("nothing is held", lambda c: not c.held),
-                 ("and the kernel of this tree mounts it with no range rotten",
-                  lambda c: c.kernel["mounts"] is True and not c.kernel["rotten"] and not c.kernel["held"])]),
+                 ("and the kernel of this tree mounts it with no range rotten, the range read from slot 0",
+                  lambda c: c.kernel["mounts"] is True and not c.kernel["rotten"] and not c.kernel["held"] and
+                  c.kernel["facsimile"] == [["FILES", 0]])]),
         Case("B59b a FILES leaf both slots name as it lies, rotten: no older slot stands in", Shared,
              must={"RANGE_ROTTEN", "HELD_BLOCKS"}, may={"BOOT_MISMATCH"}, checks=[
                  ("the range stays rotten — slot 0 names the same node (§16.5 п.19)",
-                  lambda c: Found(c, "RANGE_ROTTEN", "FILES") and not Found(c, "RANGE_FACSIMILE"))]),
+                  lambda c: Found(c, "RANGE_ROTTEN", "FILES") and not Found(c, "RANGE_FACSIMILE") and
+                  not c.kernel["facsimile"])]),
         Case("B60 a Tally after Escheat names no node where the slot before named a rotten one", escheated,
              checks=[
                  ("the book mounts on slot 1 with no range rotten, nothing held",

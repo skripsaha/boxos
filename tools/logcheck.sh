@@ -8901,6 +8901,10 @@ run_census() {
         return
     fi
     echo "== census: the host's roll call and the kernel's name the same blocks =="
+    if [ -n "${CENSUS_LANDINGS:-}" ]; then
+        harness "census: CENSUS_LANDINGS names landings of a book's census (census_book_some), and format v1's plants its own — nothing booted"
+        return
+    fi
     local plant line
     census_qemu_io
     census_selftest

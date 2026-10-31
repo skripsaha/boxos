@@ -4,6 +4,24 @@
 #include "box/string.h"
 #include "box/system.h"
 
+/* One byte as `show` gives it: a printable one, '\n', '\r' and '\t' as they
+ * are, any other as \xNN — spelled here, not by printf: boxlib's converts no
+ * field width (print.h — %s %d %u %x %X %c %p %%), so "%02x" went out as
+ * written, and a byte's escape with it. */
+static void ShowByte(char c)
+{
+    static const char hex[] = "0123456789abcdef";
+
+    if ((c >= 32 && c < 127) || c == '\n' || c == '\r' || c == '\t')
+    {
+        char s[2] = {c, 0};
+        print(s);
+        return;
+    }
+    char s[5] = {'\\', 'x', hex[(unsigned char)c >> 4], hex[(unsigned char)c & 0xF], 0};
+    print(s);
+}
+
 int main(void)
 {
     int argc = (int)luggage_word_count();
@@ -86,24 +104,7 @@ int main(void)
 
         // Print the chunk (handle binary safely)
         for (int i = 0; i < result; i++)
-        {
-            char c = buffer[i];
-            // Print printable characters, escape others
-            if (c >= 32 && c < 127)
-            {
-                char s[2] = {c, 0};
-                print(s);
-            }
-            else if (c == '\n' || c == '\r' || c == '\t')
-            {
-                char s[2] = {c, 0};
-                print(s);
-            }
-            else
-            {
-                printf("\\x%02x", (unsigned char)c);
-            }
-        }
+            ShowByte(buffer[i]);
 
         total_read += result;
         if ((size_t)result < chunk)

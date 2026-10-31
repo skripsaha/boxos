@@ -137,9 +137,11 @@ class BookMount:
     """The mount of the ground `g` (a bookground.BookGround). After it: `refusal`
     (None when the book mounts), `glass` (why it may only be read), `said`
     [(code, severity, sentence)], the slots, the slot stood on, its Tally,
-    the ribbon, the live `files`, the `locked` ones and what of their runs is
-    known, the tags, the Use Context, the digests of fresh data, the ground
-    lying `fallow`, the other slots' nodes and Quires, `counts`, and
+    the rotten ranges of it `facsimile` takes from an older slot — [(tree,
+    the slot's index)] as the mount says them —, the ribbon, the live
+    `files`, the `locked` ones and what of their runs is known, the tags,
+    the Use Context, the digests of fresh data, the ground lying `fallow`,
+    the other slots' nodes and Quires, `counts`, and
     `errata` — the mount's verdict the session's first stitch lays down, an
     Undone each: [(seq of the stitch undone, why, [fids rising])] in order
     (§16.5 п.4, the kernel's mount/errata.c)."""
@@ -161,7 +163,7 @@ class BookMount:
         (_MayBeOf), and the Tally stood on names every tag coined to it."""
         self.g, self.stand, self.upto, self.only, self.known = g, stand, upto, only, known
         self.refusal, self.glass, self.said = None, [], []
-        self.slots, self.slot, self.tally, self.ribbon = [], None, None, None
+        self.slots, self.slot, self.tally, self.ribbon, self.facsimile = [], None, None, None, []
         self.files, self.locked, self.locked_runs, self.tags, self.use = {}, {}, {}, {}, b""
         self.overlay, self.fallow, self.undone, self.mismatched, self.born = {}, [], {}, set(), set()
         self.errata, self._errata = [], {}
@@ -253,6 +255,7 @@ class BookMount:
         for r in t.rotten:
             if r in taken:
                 s0, n = taken[r]
+                self.facsimile.append((r.tree, s0.index))
                 self.Say("RANGE_FACSIMILE", "note", "the %s range [%s, %s) rots in every copy (%s): read from "
                          "slot %u's Tally (seq %u) and its ribbon replayed for its keys — %u element(s) "
                          "(§4.5 п.3 (а), Facsimile)" % (tally.TREE_NAMES[r.tree], r.lo,

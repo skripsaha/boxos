@@ -17,8 +17,9 @@
 # without a halt writes nothing either. For every landing below, volume-read's census — the second reader,
 # written apart from the kernel's — says in numbers what the kernel's lines
 # must say: refused and in which words, or mounted on which slot with how many
-# files, which locked by fid, which ranges rotten, which copies read in the
-# other's place — the first few of a node one by one, the rest by their count
+# files, which locked by fid, which ranges rotten and which read from an older
+# slot in their place (Facsimile), which copies read in the other's place —
+# the first few of a node one by one, the rest by their count
 # — how many blocks held, how many shapes and verdicts said, which runs two
 # owners name and how long, the numbers given next, and how many blocks of its
 # data run its block map derives free, or that it counts none where a Tally
@@ -84,11 +85,18 @@ say(glass == k["glass"], "it gives %u reason(s) the volume may only be read; the
     % (glass, k["glass"]))
 locked = sorted(int(f) for f in re.findall(r"^\[TagFS\] fid (\d+) is locked: ", log, re.M))
 say(locked == k["locked"], "it locks fid(s) %s by name; the census predicted %s" % (locked, k["locked"]))
+# A range Facsimile takes is said in the same words, "rots in every copy", and
+# then where it is read from (facsimile.c FacsimileTake): rotten, it is not.
 rotten = re.findall(r"^\[TagFS\] (?:rotten range fid \[[^)]*\): (\d+) file\(s\) locked — the FILES|the (\w+) range)"
-                    r"[^\n]*rots in every copy", log, re.M)
+                    r"[^\n]*rots in every copy(?![^\n]*\(Facsimile\))", log, re.M)
 have = [("FILES" if n else tree) for n, tree in rotten]
 say(have == [r["tree"] for r in k["rotten"]], "it says rotten range(s) of %s; the census predicted %s"
     % (have or "none", [r["tree"] for r in k["rotten"]] or "none"))
+taken = sorted([tree, int(slot)] for tree, slot in
+               re.findall(r"^\[TagFS\] the (\w+) range [^\n]*rots in every copy [^\n]*: read from slot (\d+)'s "
+                          r"Tally[^\n]*\(Facsimile\)", log, re.M))
+say(taken == k["facsimile"], "it reads range(s) %s [tree, slot] from an older slot's Tally and ribbon "
+    "(Facsimile); the census predicted %s" % (taken or "none", k["facsimile"] or "none"))
 files = [int(n) for n, tree in rotten if n]
 say(files == [r["count"] for r in k["rotten"] if r["tree"] == "FILES"],
     "a rotten FILES range locks %s file(s) by its parent's count; the census predicted %s"
@@ -194,7 +202,13 @@ CENSUS_BOOK_EOF
 # and every live file whose last block carries Slips (bookcensus.py KernelBook
 # "slipped") read in the guest by `show`: its bytes, the Slips laid over its
 # base, held byte for byte to volume-read's own read of the file (Content) —
-# escaped as `show` escapes what does not print.
+# escaped as `show` escapes what does not print, and as the bytes reach the
+# log: the '\r' and '\t' `show` passes are dropped by the console daemon,
+# which keeps no byte below 0x20 but '\n' and '\b' (display.c), and each '\n'
+# goes out on the wire as "\r\n" (serial.c), so the log is read as it lies.
+# `show` gives a file's first 4096 bytes and no more (show.c): of a file whose
+# Slips lie past them — the kernel's own on B65 — the line says that those are
+# what it read.
 census_book_slipped() {
     local img="$SCRATCH/census.$1.img" json="$SCRATCH/census.$1.json" names n line
     names=$(python3 -c 'import json, sys
@@ -213,15 +227,19 @@ print(" ".join(f["name"] for f in json.load(open(sys.argv[1]))["kernel"].get("sl
     cp build/serial.log "$SCRATCH/serial.$1.slipped.log"
     python3 - "$json" "$SCRATCH/serial.$1.slipped.log" >"$SCRATCH/census.$1.slipped.verdict" 2>&1 <<'SLIPPED_EOF'
 import json, sys
+SHOWN = 4096    # the bytes of a file `show` gives (show.c)
 k = json.load(open(sys.argv[1]))["kernel"]
-log = open(sys.argv[2], errors="replace").read()
+log = open(sys.argv[2], errors="replace", newline="").read()
 for f in k.get("slipped", []):
-    want = "".join(c if 32 <= ord(c) < 127 or c in "\n\r\t" else "\\x%02x" % ord(c) for c in f["content"][:4096])
+    want = "".join(c if 32 <= ord(c) < 127 or c == "\n" else "" if c in "\r\t" else "\\x%02x" % ord(c)
+                   for c in f["content"][:SHOWN]).replace("\n", "\r\n")
     at = log.find("~ show %s" % f["name"])
     got = log[at:].split("\n", 1)[1] if at >= 0 and "\n" in log[at:] else ""
     held = got.startswith(want)
-    print("%s %s reads in the guest as volume-read reads it, its Slips over its last block (%u bytes)%s"
-          % ("ok" if held else "bad", f["name"], len(f["content"]), "" if held else ": got %r" % got[:80]))
+    where = ("its Slips over its last block" if f["at"] < SHOWN else
+             "its first %u bytes, which `show` gives — its Slips lie at byte %u, past them" % (SHOWN, f["at"]))
+    print("%s %s reads in the guest as volume-read reads it, %s (%u bytes)%s"
+          % ("ok" if held else "bad", f["name"], where, len(f["content"]), "" if held else ": got %r" % got[:80]))
 SLIPPED_EOF
     while IFS= read -r line; do
         case "$line" in
@@ -231,11 +249,11 @@ SLIPPED_EOF
     done < "$SCRATCH/census.$1.slipped.verdict"
 }
 
-# census_book — every landing of CENSUS_BOOK_LANDINGS planted on a fresh image,
+# census_book LANDING... — every landing named planted on a fresh image,
 # predicted, booted and judged.
 census_book() {
     local plant line
-    for plant in $CENSUS_BOOK_LANDINGS; do
+    for plant; do
         census_boot "book_$plant" "$plant" || continue
         census_book_judge "book_$plant"
         census_book_slipped "book_$plant"
@@ -816,12 +834,44 @@ STITCHCUT_EOF
     buildkey_restore
 }
 
+# census_book_some — the landings CENSUS_LANDINGS names, booted alone: the road
+# of a change to a few of them, where the whole census takes hours.
+#     VOLUME_FORMAT=v2 CENSUS_LANDINGS="B59 B65" tools/logcheck.sh census
+# It is no verdict on the census — its other landings and every other part of
+# census_book_all go unrun — so before the first boot it says so in a HARNESS
+# line, which keeps the run from ending green (logcheck.sh's last line), under
+# tools/gates.sh too, whose gates run in the environment it is given. A name
+# that is no landing of CENSUS_BOOK_LANDINGS, or a key that names none, boots
+# nothing.
+census_book_some() {
+    local some plant
+    read -r -d '' -a some <<< "$CENSUS_LANDINGS"
+    if [ ${#some[@]} = 0 ]; then
+        harness "census: CENSUS_LANDINGS is set and names no landing — nothing booted"
+        return
+    fi
+    set -- $CENSUS_BOOK_LANDINGS
+    for plant in "${some[@]}"; do
+        case " $* " in
+            *" $plant "*) ;;
+            *) harness "census: CENSUS_LANDINGS names $plant, no landing of a book's census (CENSUS_BOOK_LANDINGS) — nothing booted"
+               return ;;
+        esac
+    done
+    harness "census: CENSUS_LANDINGS boots ${#some[@]} of its $# landings alone (${some[*]}) and no other part of census_book_all — not a verdict on the census"
+    census_book "${some[@]}"
+}
+
 # census_book_all — the book's half of the census: its landings, the book the
 # kernel writes read back by both readers, its Tallies, cut and rotten, and
 # Escheat (logcheck_book.sh, logcheck_book_circle.sh, logcheck_bind.sh,
 # logcheck_escheat.sh).
 census_book_all() {
-    census_book
+    if [ -n "${CENSUS_LANDINGS:-}" ]; then
+        census_book_some
+        return
+    fi
+    census_book $CENSUS_BOOK_LANDINGS
     book_circle
     book_big
     book_stitchcut

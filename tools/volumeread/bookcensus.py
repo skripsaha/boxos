@@ -33,7 +33,7 @@ import re
 import struct
 
 from . import bookread, stitch, tally
-from .bookmount import BookMount
+from .bookmount import BookMount, Blocks
 from .census import SEVERITY, Finding, GroundClaim, Sweep
 from .bookground import BookGround
 from .ground_owners import BOOK_OWNERS, BOOK_OWNER_ALONE
@@ -148,7 +148,8 @@ def KernelBook(g, m, held, free, fallow):
     and a Tally that names a bookmark, whose ground no writer of this kernel
     takes without its map; or a ribbon whose end the walk does not know, which
     no writer goes on from), standing on which slot, with how many
-    files live, which locked by fid, what ranges rotten, which copies read
+    files live, which locked by fid, what ranges rotten, which read from an
+    older slot in its place (Facsimile) and from which, which copies read
     in the other's place, how many blocks held, how many shapes said, the
     numbers it gives next, and its data run with the blocks of it its block
     map derives free (block_map_derived.c) — `free`, the census's own, None
@@ -186,6 +187,7 @@ def KernelBook(g, m, held, free, fallow):
             "glass": len(m.glass) + (free is None) + (r is not None and r.end is None),
             "rotten": [{"tree": tally.TREE_NAMES[x.tree], "count": x.count} for x in t.rotten
                        if x.tree != tally.DIGESTS or rot],
+            "facsimile": sorted([tally.TREE_NAMES[tree], index] for tree, index in m.facsimile),
             "mended": len(t.mended), "mended_said": KernelMendedSaid(t), "held": RunsCount(held),
             "shape": sum(1 for code, _s, _t in said if code == "RECORD_SHAPE"),
             "torn_slots": sum(1 for code, _s, _t in said if code == "SLOT_TORN"),
@@ -229,7 +231,8 @@ class BookCensus:
         fallow = [r for c in self.claims if c.kind == "fallow" for r in c.runs]
         self.kernel = KernelBook(g, m, self.held, self.free_runs if self.counted else None, fallow)
         self.kernel["slipped"] = [{"fid": fid, "name": fs.name.decode("utf-8", "replace"),
-                                   "content": self.Content(fid).decode("latin-1")}
+                                   "content": self.Content(fid).decode("latin-1"),
+                                   "at": (Blocks(fs.size) - 1) * BLOCK + min(off for off, _d in fs.slips)}
                                   for fid, fs in sorted(m.files.items()) if fs.slips and self.Content(fid) is not None]
         self.kernel["double"] = sorted([s, n] for x in self.findings if x.code == "DOUBLE_OWNER" for s, n in x.runs)
 
