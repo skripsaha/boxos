@@ -263,18 +263,33 @@ static uint64_t NodeBlocks(const TallyPlace* p, uint32_t grid)
     return (p->ptr.sheets + grid - 1u) / grid * grid;
 }
 
+/* A leaf laid that keeps no key of the state lays nothing, laid in or whole:
+ * neither count takes it (§16.6 п.6, binder_live.c) — a margin keeps every
+ * key it had, none of its range changed. Both lose the same blocks, so laid in
+ * against whole is weighed as it would be with them; `sifted` keeps them, so
+ * a Tally whose every leaf laid emptied is weighed — and, no cheaper laid in,
+ * written whole — as before (binder_kept.c, BinderTipInTake). Asked once a
+ * Tally, a leaf laid at a time, at its slice. */
 void BinderSiftCount(const BinderSift* s, uint32_t grid, TipInCount* c)
 {
     TallyPlace p;
     bool       rotten;
-    for (uint32_t i = 0; i < s->n; i++)
-        c->tip += s->lf[i] == TIP_IN_LAID || s->lf[i] == TIP_IN_MARGIN ? NodeBlocks(&s->leaf[i].place, grid) : 0;
+    uint64_t   whole = 0, empty = 0;
+    for (uint32_t i = 0; i < s->n; i++) {
+        uint64_t blocks = NodeBlocks(&s->leaf[i].place, grid);
+        if (s->lf[i] == TIP_IN_LAID && !BinderLeafLives(s->tree, &s->leaf[i].place, s->at[i] == 0, true))
+            empty += blocks;
+        else if (s->lf[i] == TIP_IN_LAID || s->lf[i] == TIP_IN_MARGIN)
+            c->tip += blocks;
+    }
     for (uint32_t j = 0; j < s->ninner; j++) {
-        c->tip   += s->inf[j] == TIP_IN_LAID ? NodeBlocks(&s->inner[j].place, grid) : 0;
-        c->whole += NodeBlocks(&s->inner[j].place, grid);
+        c->tip += s->inf[j] == TIP_IN_LAID ? NodeBlocks(&s->inner[j].place, grid) : 0;
+        whole  += NodeBlocks(&s->inner[j].place, grid);
     }
     for (uint32_t i = 0; BinderSiftLeafAt(s->tree, i, &p, &rotten); i++)
-        c->whole += p.level == 0 ? NodeBlocks(&p, grid) : 0;
+        whole += p.level == 0 ? NodeBlocks(&p, grid) : 0;
+    c->whole  += whole - empty;
+    c->sifted += whole;
 }
 
 void BinderSiftLetGo(BinderSift* s)

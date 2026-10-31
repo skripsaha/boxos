@@ -418,6 +418,16 @@ bool BlockMapDerivedIsFree(uint64_t block)
     return win->bits ? !(win->bits[off / 64u] & (1ull << (off % 64u))) : win->free != 0;
 }
 
+bool BlockMapDerivedWindow(uint32_t w, uint32_t* blocks, uint32_t* free, const uint64_t** bits)
+{
+    if (!s_map.up || w >= s_map.windows)
+        return false;
+    *blocks = WindowBlocks(w);
+    *free   = s_map.win[w].free;
+    *bits   = s_map.win[w].bits;
+    return true;
+}
+
 bool BlockMapDerivedRunIn(uint32_t window, uint32_t want, uint64_t* start)
 {
     if (!s_map.win || window >= s_map.windows || want == 0 || s_map.win[window].longest < want)

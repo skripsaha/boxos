@@ -143,7 +143,7 @@ static void GlossCaptured(const BinderWork* w)
     TagFSLock*          lock = &tagfs_get_state()->lock;
     uint64_t            kept = 0, nb = 0, j = 0;
     uint32_t            from = 0;
-    const BinderGround* born = DogEarHeldGround(&nb);
+    const BinderGround* born = DogEarHeldGround(false, &nb);
     for (uint64_t i = 0; i < w->nground; i++) {
         uint64_t at = w->ground[i].start, end = at + w->ground[i].count;
         while (at < end) {

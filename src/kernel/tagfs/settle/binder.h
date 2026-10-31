@@ -129,6 +129,12 @@ void        BinderStopped(error_t rc);
  * Fallow's gives) — the slice names blocks by the state it was taken of. */
 bool        BinderHoldsGround(void);
 
+/* The end of the book's own ground `block` lies in — a Tally-Quire a slot
+ * holds or the pair holds, whole on the grid of the ribbon's Quire, or a
+ * Quire of the ribbon, on the chain or a slot's off it — or `block` itself
+ * where it is none of these. By the Settle's holder, who alone moves them. */
+uint64_t    BinderOwnPast(uint64_t block);
+
 /* --- the mount, with the door shut ------------------------------------- */
 
 /* Everything the Binder keeps let go — the volume let go of, or mounted
@@ -391,8 +397,11 @@ typedef struct {
     uint64_t       laid_fid;    /* past the highest file id a stitch of this mount named */
     uint64_t       useful;      /* the ribbon's useful bytes past the newest slot's `at` */
     uint64_t       tally_blocks;/* the last Tally's whole book — every node it names, laid or kept — one copy */
-    uint64_t       cost_known;  /* the next Tally's cost as last reckoned, bytes: no more than it is (binder.c,
-                                 * BinderWeigh) — 0 once what it is reckoned by may have shrunk */
+    uint64_t       cost_known;  /* the next Tally's cost as last reckoned, bytes: no more than it is while no key
+                                 * went since (binder.c, TallyDue) — but by a leaf only a write under way kept live
+                                 * then, one given up since (binder_live.c) — 0 once what it is reckoned by may
+                                 * have shrunk */
+    uint64_t       cost_gone;   /* DogEarGoneCount when it was: a key gone since may have made it less */
     uint64_t       pair_a;      /* the Tally-Quires the next Tally's nodes go on in: copy 1's run, ... */
     uint64_t       pair_b;      /* ... copy 2's at as many blocks into its own */
     uint64_t       pair_room;   /* the blocks each run holds */

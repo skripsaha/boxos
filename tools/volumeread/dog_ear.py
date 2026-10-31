@@ -16,8 +16,10 @@ A Tally laid in lays again every leaf a changed key lies in — the key's leaf
 is the last whose lower key is not past it, the first for a key below every
 separator — and every inner node over one of them; the next Tally is reckoned
 at the Sheets of those, both copies, and the slot, never more than the whole
-book's. A tree the Tally before has no node of costs a block once a key of it
-changed.
+book's. A leaf at what is left live in it: its Sheets while a key of the state
+lies in its range, none when none does — its path all the same, the parent
+that drops it laid (§16.6 п.6; binder.py Lives says which do). A tree the
+Tally before has no node of costs a block once a key of it changed.
 """
 
 import bisect
@@ -121,7 +123,7 @@ def _Index(los, key):
     return bisect.bisect_right(los, key)
 
 
-def _TreeBlocks(nodes, spans):
+def _TreeBlocks(tree, nodes, spans, lives):
     leaves = sorted((n for n in nodes if n.level == 0), key=lambda n: (n.lo is not None, n.lo))
     if not leaves:
         return 1
@@ -134,7 +136,8 @@ def _TreeBlocks(nodes, spans):
             if hi is not None and not leaves[k].lo < hi:
                 break
             dirty.add(k)
-    blocks = sum(leaves[i].sheets for i in dirty)
+    blocks = sum(leaves[i].sheets for i in dirty
+                 if lives(tree, leaves[i].lo if i else None, leaves[i + 1].lo if i + 1 < len(leaves) else None))
     for level in range(1, 1 + max(n.level for n in nodes)):
         run = sorted((n for n in nodes if n.level == level), key=lambda n: (n.lo is not None, n.lo))
         rlos = [n.lo for n in run[1:]]
@@ -143,8 +146,10 @@ def _TreeBlocks(nodes, spans):
     return blocks
 
 
-def TipInBlocks(t, spans):
+def TipInBlocks(t, spans, lives):
     """The Sheets of one copy of the leaves the spans meet and their path in
-    Tally `t` — binder_cost.c BinderTipInBlocks."""
-    return sum(_TreeBlocks(t.trees[tree].nodes if tree in t.trees else [], ss)
+    Tally `t` — binder_cost.c BinderTipInBlocks: a leaf only where
+    lives(tree, lo, hi) says a key of the state lies in [lo, hi), lo None
+    from the tree's first key, hi None to its end."""
+    return sum(_TreeBlocks(tree, t.trees[tree].nodes if tree in t.trees else [], ss, lives)
                for tree, ss in spans.items() if ss)

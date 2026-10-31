@@ -66,11 +66,14 @@ typedef struct {
 } BinderSift;
 
 /* The dry count of a Tally laid in (§16.5 п.16): what laying it in would lay —
- * the nodes laid and offered, at the size they had — and what laying it whole
- * would, every node of the trees sifted. */
+ * the nodes laid and offered, at the size they had, a leaf laid that keeps no
+ * key of the state at none (§16.6 п.6) — and what laying it whole would, every
+ * node of the trees sifted but those leaves; and every node of them, each at
+ * the size it had: a Tally before with none is laid in, never weighed. */
 typedef struct {
     uint64_t tip;
     uint64_t whole;
+    uint64_t sifted;
 } TipInCount;
 
 /* A DIGESTS leaf TipIn lays or offers, read: a run of blocks one of its
@@ -173,9 +176,23 @@ void        BinderDigestsKeptLaid(BinderWork* w);
 void        BinderDigestsLetGo(BinderRun* r);
 
 /* binder_cost.c: the blocks of one copy of the leaves the keys DogEar holds
- * meet and of their path — what a Tally laid in now would lay again;
- * UINT64_MAX when what it would be laid against, or what changed, is lost. */
+ * meet — each at what is left live in it — and of their path: what a Tally
+ * laid in now would lay again; UINT64_MAX when what it would be laid against,
+ * or what changed, is lost. */
 uint64_t    BinderTipInBlocks(void);
+
+/* binder_kept.c: the file ids a leaf of FILES holds keys of, [*from, *to):
+ * from its lower key's — the tree's first leaf from none — to its upper
+ * key's, that file too when the leaf ends inside it. What a Tally laid in
+ * slices of the leaf (BinderSiftTaken) and what is left live in it
+ * (binder_live.c) are asked by these ids alike. */
+void        BinderLeafFids(const TallyPlace* p, bool first, uint64_t* from, uint64_t* to);
+
+/* binder_live.c: whether the leaf of `tree` at `p` — the tree's `first`, its
+ * range open below — keeps a key of the state now (§16.6 п.6), weighed by the
+ * ground the Tally under way took (`taken`) or by what moved since the last
+ * slice. By the Settle's holder or the mount, no TagFS lock held. */
+bool        BinderLeafLives(uint64_t tree, const TallyPlace* p, bool first, bool taken);
 
 /* binder_kept.c: TipIn at the slice — the Tally laid in when Foliation knows
  * the Tally before and DogEar what changed since, each tree of FILES, TAGS and

@@ -131,6 +131,19 @@ bool     BlockMapDerivedUp(void);
 /* Whether `block` is free: false past the map's end. */
 bool     BlockMapDerivedIsFree(uint64_t block);
 
+/* Under the state lock: window `w` as it stands — the blocks of it the volume
+ * has, how many of them no owner names, and its page (NULL for a window whole
+ * free or whole taken), read while the lock is held. False past the last
+ * window, or with no map up. */
+bool     BlockMapDerivedWindow(uint32_t w, uint32_t* blocks, uint32_t* free, const uint64_t** bits);
+
+/* The first block of [start, end) an owner — any — names: `end` when none
+ * does, past the map's end none does; with the map down `start`, nothing
+ * known. A look a few windows a hold of the state lock, taken here
+ * (block_map_look.c): no TagFS lock held. What a Tally is reckoned to cost
+ * asks it of a range of DIGESTS (settle/binder_live.c). */
+uint64_t BlockMapDerivedTakenFrom(uint64_t start, uint64_t end);
+
 /* The first run of at least `want` free blocks inside window `window`: true and
  * *start, or false when the window holds none. */
 bool     BlockMapDerivedRunIn(uint32_t window, uint32_t want, uint64_t* start);

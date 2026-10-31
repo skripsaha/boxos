@@ -5,11 +5,14 @@
  * §4.2, §16.5 п.16): laid in among the nodes of the Tally before (TipIn), it
  * lays again the leaves the keys DogEar holds meet and every inner node over
  * one of them, up to the root — the dirty leaves and their path, one copy
- * each. The leaves of FILES, TAGS and USE and every inner node are the
- * Foliation's, the leaves of DIGESTS the reads' own table (tally_read.h); a
- * tree the Tally before has no node of costs one block once a key of it
- * changed. One rule with volume-read (tools/volumeread/dog_ear.py, TipInBlocks):
- * what census holds the bound line to.
+ * each; a leaf at what is left live in it, its Sheets while a key of the state
+ * lies in its range and none when none does, its path all the same: the
+ * parent that drops it is laid (§16.6 п.6, binder_live.c). The leaves of
+ * FILES, TAGS and USE and every inner node are the Foliation's, the leaves of
+ * DIGESTS the reads' own table (tally_read.h); a tree the Tally before has no
+ * node of costs one block once a key of it changed. One rule with volume-read
+ * (tools/volumeread/dog_ear.py, TipInBlocks): what census holds the bound line
+ * to.
  *
  * ‼ A LOOK, NOT A HOLD. DogEar is looked at a few spans a hold of its lock, so
  * a span a read of a digest puts in meanwhile may be passed over — it is
@@ -81,7 +84,8 @@ static void PathCounted(CostTree* c, const TallyPlace* p, bool first)
     }
 }
 
-/* Every leaf span `s` meets, and its path, counted once. */
+/* Every leaf span `s` meets, at what is left live in it, and its path,
+ * counted once. */
 static void SpanCounted(CostTree* c, const DogEarSpan* s)
 {
     TallyPlace p;
@@ -90,7 +94,7 @@ static void SpanCounted(CostTree* c, const DogEarSpan* s)
             return;
         if (i < c->next)
             continue;
-        c->blocks += p.ptr.sheets;
+        c->blocks += BinderLeafLives(c->tree, &p, i == 0, false) ? p.ptr.sheets : 0;
         c->next    = i + 1u;
         PathCounted(c, &p, i == 0);
     }

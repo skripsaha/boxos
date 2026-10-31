@@ -44,13 +44,16 @@ static error_t FidsPut(BinderRun* r, uint64_t from, uint64_t to)
     return OK;
 }
 
-/* The file ids a leaf of FILES holds keys of: from its lower key's — the
- * tree's first leaf from none — to its upper key's, that file too when the
- * leaf ends inside it. */
+void BinderLeafFids(const TallyPlace* p, bool first, uint64_t* from, uint64_t* to)
+{
+    *from = p->has_lo && !first ? p->lo.k1 : 0;
+    *to   = !p->has_hi ? UINT64_MAX : p->hi.k2 && p->hi.k1 != UINT64_MAX ? p->hi.k1 + 1u : p->hi.k1;
+}
+
 static error_t LeafFids(BinderRun* r, const TallyPlace* p, bool first)
 {
-    uint64_t from = p->has_lo && !first ? p->lo.k1 : 0;
-    uint64_t to   = !p->has_hi ? UINT64_MAX : p->hi.k2 && p->hi.k1 != UINT64_MAX ? p->hi.k1 + 1u : p->hi.k1;
+    uint64_t from = 0, to = 0;
+    BinderLeafFids(p, first, &from, &to);
     return FidsPut(r, from, to);
 }
 
@@ -104,15 +107,17 @@ static error_t WholeTaken(BinderRun* r)
  * ‼ A TALLY LAID IN THAT WOULD COST A WHOLE ONE IS WRITTEN WHOLE (§16.5 п.16).
  * Both measures counted dry, before anything is sliced: the nodes laying it
  * in lays and offers, at the size they had, against every node of the trees
- * it sifts. One no cheaper is no Tally laid in — a whole one names nothing as
- * it lies, and its Tally-Quires go back whole once the slots stop naming them.
+ * it sifts — a leaf laid with no key of the state left in it in neither
+ * (§16.6 п.6, binder_sift.c BinderSiftCount). One no cheaper is no Tally laid
+ * in — a whole one names nothing as it lies, and its Tally-Quires go back
+ * whole once the slots stop naming them.
  * DIGESTS is sifted here and held: the leaves it lays are read a turn each
  * before it is known which of them read (binder_digests.c).
  */
 error_t BinderTipInTake(BinderRun* r)
 {
     static const uint64_t trees[] = { TALLY_FILES, TALLY_TAGS, TALLY_USE, TALLY_DIGESTS };
-    TipInCount count = { 0, 0 };
+    TipInCount count = { 0, 0, 0 };
     error_t    rc    = OK;
     if (FoliationLost() || DogEarTakenLost() || EscheatTaken())
         return WholeTaken(r);
@@ -128,7 +133,7 @@ error_t BinderTipInTake(BinderRun* r)
         if (s == &one)
             BinderSiftLetGo(s);
     }
-    if (rc == OK && count.whole && count.tip >= count.whole)
+    if (rc == OK && count.sifted && count.tip >= count.whole)
         return WholeTaken(r);
 #if BINDER_CHECKS
     /* The self-check holds every element of the state to the Tally before:
