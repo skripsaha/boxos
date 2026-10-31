@@ -269,8 +269,9 @@ census_book() {
 # suites are what runs, and the suites written for any format that only read.
 #
 # Judged: the STAND_RUN tests this tree registers walked, nothing failed,
-# nothing held; every book test ran — none stood down but the leaf on an
-# image whose FILES is one leaf; the port's road of the rotten block taken
+# nothing held; every book test ran — none stood down but on the legs
+# STAND_BOOK_ASIDE names, by its own words, and the leaf on an image whose
+# FILES is one leaf; the port's road of the rotten block taken
 # on the AHCI port and said to stand aside on the ATA disk, never skipped in
 # silence; the lines that say what the volume promises and that no Tally is
 # written, and the one refusal of a change to a file; a block with no digest
@@ -286,30 +287,49 @@ census_book() {
 # are inserted — past the bound, counted, said once when the counting begins
 # and the count when the map is let go — and the boot's mount saying the data
 # blocks, free and files volume-read's census predicts of the image booted,
-# every mount after it the same free — but those a test of the ribbon makes
-# while its own stitches lie on the medium.
+# and the last mount those it predicts of the image the halt left — but a
+# mount a test of the ribbon makes while its own stitches lie on the medium.
+# No mount between is held to the boot's free: a stitch refused takes the
+# ribbon on into its next_quire (RibbonRetry, M-6) and the next stitch names
+# another Quire, the book's until a Tally lets the ribbon's Quires before it
+# go; what a test leaves of the volume is the runner's to say
+# (VolumeResidueSaid, tests.c).
 #
 #   test                                        image   padded   uefi   usb
 #   stand_blockfail_flush_refused                  1        1       1     1   the flush it asks for
 #   stand_flush_ticket                             1        1       1     1   the flush its ticket waits on
 #   stand_medium_bell_rings_once                   1        1       1     1   the read of the volume's first block
 #   stand_blockfail_two_ranges                     2        2       2     2   a read in each range
+#   stand_blockfail_async_read                     0        0       1     1   the read nobody stands over: the ATA
+#                                                                             disk has none, and stands it down
 #   stand_roadstead_refusal_rings_once             0        0       1     0   an AHCI port's alone
-#   stand_tally_rotten_leaf_locked                 0       18       0     0   copy 1 then copy 2: the run, then each sector
+#   stand_medium_no_medium_flush_refused           0        0       0     1   a USB disk's flush, its medium gone
+#   stand_medium_sync_cache_remembered             0        0       0     3   a USB disk's flush: the command
+#                                                                             refused, then its medium gone twice
+#   stand_tally_rotten_leaf_locked                 0       36       0     0   both copies of the leaf below the
+#                                                                             root, the run then each sector (9),
+#                                                                             read twice by the mount
 #   stand_stitch_retry_atom                        1        1       1     1   the stitch's first atom
 #   stand_stitch_retry_flush                       1        1       1     1   the flush after the stitch
 #   stand_blockfail_refused_writes                 4        4       4     4   two writes into each range
 #   stand_stitch_retry_quire_entered               1        1       1     1   the first atom of the Quire entered
 #   stand_stitch_retry_refused_twice               2        2       2     2   a stitch and its retry at the next's start
 #   stand_stitch_retry_head_landed                 2        2       2     2   a stitch past its head, and its retry at the next's start
-#   stand_docket_closed_damaged                    4        4       4     4   the stitch's unit, then its sector, read twice
+#   stand_docket_closed_damaged                   16       16      16     6   the stitch's unit, then its sector,
+#                                                                             each time the mount's reader takes
+#                                                                             it up: 8 on a disk, 3 on the stick,
+#                                                                             whose reads take a page and more
 #   stand_fresh_refused_names_nothing              1        1       1     1   the first command of a file's write
 #   stand_fresh_flushes_first                      1        1       1     1   the flush of the data before the stitch
 #   stand_binder_node_refused                      1        1       1     1   the Tally's first node
 #   stand_binder_slot_flush_refused                1        1       1     1   the flush of the Tally's slot
-#   the rows above                                24       42      25    24
-#   every other test the book runs                71       71      71    71   the neutral tests, and the book's since the rows
-#   total                                         95      113      96    95
+#   stand_run_refused_inside_fresh                 0        0       1     1   the k-th block of the run a write
+#                                                                             takes: a seat of one block a
+#                                                                             command stands it down
+#   stand_run_refused_inside_fresh_through_the_port 0       0       1     1   the same, through the port
+#   the rows above                                36       72      40    33
+#   every other test the book runs                59       59      59    59   the same on every leg (below)
+#   total                                         95      131      99    92
 #   stand_stitch_refused_everywhere                N        N       N     N   every attempt, as many as its line says
 #   stand_stitch_retry_runs_out                    N        N       N     N   a stitch and every atom of the next: its line
 #   stand_slip_refused_tail, stand_escheat_tail,   N        N       N     N   the reads of a Slip's tail block the Helm's
@@ -317,18 +337,20 @@ census_book() {
 # ---------------------------------------------------------------------------
 
 # Every test of the tree runs on a book, the neutral ones among them (spec_v2
-# §16.5 п.22): the 71 refusals of the tests the rows do not name were counted
-# on the BIOS 4c image, boot after boot the same; the padded, UEFI and USB
-# columns are derived from the rows, not yet measured — the first boot of each
-# leg pins them, a neutral test that refuses otherwise on its road with them.
+# §16.5 п.22). A test whose refusals differ from one leg to another is a row
+# above, so each column differs from the next by its rows alone; the rest —
+# 59, the same on every leg — is the refusals of the tests the rows do not
+# name, counted on each leg's boots (two boots each the same): the log names
+# no test a refusal is of, so that one number is a run's, the rows the code's.
+# A test that comes to refuse otherwise on a leg is a row of its own.
 STAND_BOOK_BLOCKFAILS=95
-STAND_BOOK_PADDED_BLOCKFAILS=113
-STAND_BOOK_UEFI_BLOCKFAILS=96
+STAND_BOOK_PADDED_BLOCKFAILS=131
+STAND_BOOK_UEFI_BLOCKFAILS=99
 # The book on a USB stick (stand_book_usb): the usb column — its seat's reads
 # go through the port as on UEFI, so stand_tally_rotten_leaf_locked stands
 # down there and refuses nothing, and the stick is no AHCI port for
 # stand_roadstead_refusal_rings_once to refuse on.
-STAND_BOOK_USB_BLOCKFAILS=95
+STAND_BOOK_USB_BLOCKFAILS=92
 STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
 # C13 (stand_docket_closed_damaged): sector 1 of a stitch the kernel sewed will
 # not read at the next mount — the line names it and the record bytes it took.
@@ -337,40 +359,43 @@ STAND_BOOK_REFUSED='^\[TagFS\] the book takes no write: ([0-9]+) refusal\(s\) in
 STAND_BOOK_RACED='^\[TESTS\] [a-z_]+: BLOCKFAIL answered ([0-9]+) command\(s\) of the plan let go'
 STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes files made, written, named, tagged and given up, the names of tags and the memory of its Use Context'
 STAND_BOOK_TALLY='^\[TagFS\] a whole Tally of the book is written once the ribbon past the newest slot holds as many useful bytes as one costs'
-STAND_BOOK_TESTS="stand_tally_files_read_whole stand_tally_mount_writes_nothing stand_tally_copy_one_rotten
-stand_tally_rotten_leaf_locked stand_tally_writes_refused stand_tally_rot_three_paths
-stand_tally_undigested_refused stand_tally_length_asked stand_tally_lower_doors_refused
-stand_tally_medium_returns
-stand_tally_live_without_rows stand_tally_map_holds stand_tally_map_claim_named
-stand_tally_map_short_of_memory stand_blockfail_two_ranges
-stand_ribbon_slip_three_roads stand_ribbon_torn_tail stand_ribbon_next_quire stand_ribbon_closed_damaged
-stand_ribbon_dead_branch stand_ribbon_undone stand_ribbon_boot_slip
-stand_stitch_answers_after_flush stand_stitch_use_context stand_stitch_coined stand_stitch_halt_clean
-stand_stitch_retry_atom stand_stitch_retry_flush stand_stitch_refused_everywhere stand_stitch_ribbon_runs_out
-stand_stitch_tally_cost stand_stitch_medium_lied stand_stitch_replug_kept stand_blockfail_refused_writes
-stand_stitch_retry_quire_entered stand_stitch_retry_refused_twice stand_stitch_retry_head_landed
-stand_stitch_retry_runs_out
-stand_stitch_runs_on_leaves
-stand_stitch_tally_cost_long stand_registry_counts_from_nothing
-stand_docket_each_change_mounts_again stand_docket_merges stand_docket_data_refused stand_docket_ground_rests
-stand_docket_mount_ground_rests stand_docket_claim_refused stand_docket_closed_damaged stand_docket_replug_kept
-stand_docket_warrant
-stand_binder_whole stand_binder_node_refused stand_binder_unslotted stand_binder_slot_torn
-stand_binder_slot_flush_refused stand_binder_slot_unsure stand_binder_parcels stand_binder_heals stand_binder_rotten_named
-stand_binder_slack stand_binder_ground_back stand_binder_full_back stand_binder_standing_end
-stand_tip_in_parcel stand_tip_in_heals_files stand_tip_in_heals_digests stand_tip_in_emptied
-stand_tip_in_quires_held stand_tip_in_rotten_past stand_tip_in_parcels_as_they_lie stand_tip_in_cost_lives
-stand_tip_in_cost_files stand_tip_in_torn_down
-stand_parity_stitch_holds_no_lock
-stand_parity_files_in_turn
-stand_book_glean_quires stand_book_glean_copies stand_escheat_warrant stand_escheat_tail stand_escheat_tail_helm_held
-stand_endpaper_owed stand_endpaper_labeled_carries stand_endpaper_mount stand_endpaper_pending
-stand_endpaper_kept
-stand_away_other_stitches stand_away_not_landed stand_away_own_attempt stand_away_born_not_landed
-stand_away_newer_slot stand_away_lied_whole stand_away_verdict"
+# The book's tests: every TestCase of format v2 the registry holds (tests.h
+# TEST_SUITES, read by tools/concordance.py — counted off the code, not a run),
+# and every neutral one registered in a file beside them — a book suite's own,
+# written for any format — each run on every leg but where it stands down by
+# its own words, named here
+# as TEST:LEG,LEG — the Flash page's tests on a seat that is not removable,
+# the levers on the Tally's self-check on a STRICT kernel, which stops at
+# their DEFECT, and the tests of a run inside one command, or of a window of
+# three blocks, on the ATA disk, which takes one block a command;
+# stand_tally_rotten_leaf_locked is each leg's ASIDE.
+STAND_BOOK_ASIDE="stand_stitch_page_atom:stand_book,stand_book_padded,stand_book_uefi
+stand_stitch_page_atom_hop:stand_book,stand_book_padded,stand_book_uefi
+stand_stitch_page_inside:stand_book,stand_book_padded,stand_book_uefi
+stand_stitch_page_named:stand_book,stand_book_padded,stand_book_uefi
+stand_dog_ear_digest_bites:stand_book_uefi stand_dog_ear_runs_bite:stand_book_uefi
+stand_dog_ear_strict_bites:stand_book_uefi
+stand_run_refused_inside_fresh:stand_book,stand_book_padded
+stand_run_refused_inside_fresh_through_the_port:stand_book,stand_book_padded
+stand_readahead_reads_its_version:stand_book,stand_book_padded"
+
+# stand_book_tests — every test of format v2 the registry holds, and every
+# neutral one in a file that registers one of them, by name.
+stand_book_tests() {
+    python3 -c 'import sys; sys.path.insert(0, "tools"); import concordance as c
+cases, _ = c.Cases(".")
+book = {w.split(":")[0] for n, (w, f, a) in cases.items() if f == "V2"}
+print(" ".join(sorted(n for n, (w, f, a) in cases.items()
+                      if f == "V2" or (f == "NONE" and w.split(":")[0] in book))))'
+}
 STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_(tally_rot_three_paths|ribbon_slip_three_roads): the port.s road stands aside — '
 STAND_BOOK_RIBBON_LAID='[TESTS] stand_ribbon: stitches laid past the Tally'
 STAND_BOOK_RIBBON_BACK='[TESTS] stand_ribbon: what the test laid is put back'
+# What the test laid put back to the end of each atom of the ribbon a stitch
+# of it lies in — a flash page on a stick (StandRibbonZeroAtom): the mount
+# after it, up to its MOUNTED line, finds no piece past the ribbon's end.
+STAND_BOOK_PIECES='^\[TagFS\] ribbon DEAD_BRANCH: past the end of the ribbon lie pieces '
+STAND_BOOK_MOUNTED='^\[TagFS\] the volume on seat [0-9]+ is MOUNTED'
 STAND_BOOK_STITCH_LAID='[TESTS] stand_stitch: the ribbon is sewn past where it stood'
 STAND_BOOK_STITCH_BACK='[TESTS] stand_stitch: the ribbon is put back as it was found'
 STAND_BOOK_DEFECT='\[(TagFS|Settle)\] DEFECT'
@@ -404,19 +429,31 @@ stand_book_defects() {
         $0 ~ ENVIRON["DEFECT"] { if (pulled && $0 ~ ENVIRON["DRAWN"] && drawn++ == 0) next; print }' "$1"
 }
 
-# stand_book_judge TAG WHAT BLOCKFAILS ASIDE PORT IMG — one boot of a book:
-# ASIDE the one stand_tally test that may stand down there, or empty; PORT
-# "taken" where the seat's reads go through the port, "aside" where they
-# cannot; IMG the image booted, whose census volume-read predicts.
+# stand_book_census IMG — "DATA FREE FILES" volume-read's census predicts a
+# kernel mounting IMG derives, or nothing.
+stand_book_census() {
+    python3 tools/volume-read.py "$1" check --json 2>/dev/null | python3 -c 'import json, sys
+k = json.load(sys.stdin)["kernel"]
+print("%s %s %s" % (k["data_blocks"], k["free"], k["files"]))' 2>/dev/null
+}
+
+# stand_book_judge TAG WHAT BLOCKFAILS ASIDE PORT IMG BOOTED — one boot of a
+# book: ASIDE the one stand_tally test that may stand down there, or empty;
+# PORT "taken" where the seat's reads go through the port, "aside" where they
+# cannot; IMG the image booted, as the boot left it; BOOTED the census
+# volume-read predicted of it before the boot (stand_book_census).
 stand_book_judge() {
-    local L="$SCRATCH/serial.$1.log" what=$2 want=$3 aside=$4 port=$5 img=$6 said got t r
+    local L="$SCRATCH/serial.$1.log" what=$2 want=$3 aside=$4 port=$5 img=$6 booted=$7 said got t r last
     said=$(stand_summary "$L")
     echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed, [0-9]+ skipped, 0 held under a caveat"
     chk $? "stand: $what — the $STAND_RUN tests this tree registers ran on the book, nothing failed (${said:-no summary})"
     grep -aqE '^\[TESTS\] [0-9]+ test\(s\) stood aside: this volume is format v2' "$L"
     chk $? "stand: $what — the tests the book is not for are counted aside, in so many words ($(grep -aoE '[0-9]+ test\(s\) stood aside: this volume is format v2[^—]*' "$L" | head -1))"
-    for t in $STAND_BOOK_TESTS; do
-        if [ "$t" = "$aside" ]; then
+    t=$(stand_book_tests)
+    [ -n "$t" ]
+    chk $? "stand: $what — the tests of format v2 the registry holds are read off it ($(echo $t | wc -w | tr -d ' '))"
+    for t in $t; do
+        if [ "$t" = "$aside" ] || echo "$STAND_BOOK_ASIDE" | tr ' ' '\n' | grep -qE "^$t:(.*,)?$1(,|\$)"; then
             grep -aqF "[TESTS] $t ran and stood down: " "$L"
             chk $? "stand: $what — $t stands down here, saying why"
         else
@@ -463,6 +500,13 @@ stand_book_judge() {
     chk $? "stand: $what — BLOCKFAIL refused $got command(s), as many as the tests that arm it refuse here ($want, $t of the tests whose book then takes no write, and $r a Slip's tail block was read for by the Helm's service and the test, as their lines say)"
     grep -aqE "$STAND_BOOK_C13" "$L"
     chk $? "stand: $what — the stitch the kernel sewed, its sector 1 unreadable, is said closed and damaged with the bytes of its records lost (C13: $(grep -aoE "$STAND_BOOK_C13" "$L" | head -1 | cut -c1-120))"
+    got=$(PIECES="$STAND_BOOK_PIECES" UP="$STAND_BOOK_MOUNTED" awk -v back="$STAND_BOOK_RIBBON_BACK" '
+              index($0, back) == 1            { after = 1; next }
+              after && $0 ~ ENVIRON["PIECES"] { n++ }
+              $0 ~ ENVIRON["UP"]              { after = 0 }
+              END                             { print n + 0 }' "$L")
+    [ "$got" = 0 ]
+    chk $? "stand: $what — what a test of the ribbon laid is put back whole: the mount after it finds no piece of a stitch past the ribbon's end ($got)"
     grep -aqE "$STAND_BOOK_HALT" "$L"
     chk $? "stand: $what — the halt through bye lays its stitch and syncs the volume"
     got=$(grep -acE "$STAND_BOOK_MAP_SHORT" "$L")
@@ -473,23 +517,21 @@ stand_book_judge() {
     got=$(grep -acE "$STAND_BOOK_MAP_PAST" "$L")
     [ "$got" = 1 ] && grep -aqE "$STAND_BOOK_MAP_COUNT" "$L"
     chk $? "stand: $what — past the 32 named, the rest are said to be counted once, when they begin ($got), and their count (the stand's 2 + 40 less 32) when the map is let go"
-    want=$(python3 tools/volume-read.py "$img" check --json 2>/dev/null | python3 -c 'import json, sys
-k = json.load(sys.stdin)["kernel"]
-print("%s %s %s" % (k["data_blocks"], k["free"], k["files"]))' 2>/dev/null)
+    want=$(stand_book_census "$img")
     got=$(awk -v laid="$STAND_BOOK_RIBBON_LAID" -v back="$STAND_BOOK_RIBBON_BACK" \
               -v sewing="$STAND_BOOK_STITCH_LAID" -v sewn_back="$STAND_BOOK_STITCH_BACK" \
               'index($0, laid) == 1 || index($0, sewing) == 1 { sewn = 1 }
                index($0, back) == 1 || index($0, sewn_back) == 1 { sewn = 0 } !sewn' "$L" |
           grep -aE '^\[TagFS\] [0-9]+ data blocks, [0-9]+ free, [0-9]+ files' |
           sed -E 's/^\[TagFS\] ([0-9]+) data blocks, ([0-9]+) free, ([0-9]+) files.*/\1 \2 \3/')
-    [ -n "$want" ] && [ "$(echo "$got" | head -1)" = "$want" ] &&
-        [ "$(echo "$got" | cut -d' ' -f1-2 | sort -u)" = "${want% *}" ]
-    chk $? "stand: $what — the boot's mount derives the data blocks, free and files volume-read's census predicts of the image, and every mount after it the same free — a leaf a test rots locks files, and holds their blocks ($(echo "$got" | sort | uniq -c | tr -s ' \n' ' '); predicted ${want:-nothing})"
+    last=$(echo "$got" | tail -1)
+    [ -n "$booted" ] && [ "$(echo "$got" | head -1)" = "$booted" ] && [ -n "$want" ] && [ "$last" = "$want" ]
+    chk $? "stand: $what — the boot's mount derives the data blocks, free and files volume-read's census predicts of the image booted, and the last mount those it predicts of the image the halt left ($(echo "$got" | head -1), predicted ${booted:-nothing}; $last, predicted ${want:-nothing})"
 }
 
 # stand_book — the book's three boots (above).
 stand_book() {
-    local img="$SCRATCH/stand.book_padded.img" keep=${STAND_FORMAT:-}
+    local img="$SCRATCH/stand.book_padded.img" keep=${STAND_FORMAT:-} booted
     rm -f build/boxos.img "$img" "$SCRATCH"/serial.stand_book.log "$SCRATCH"/serial.stand_book_padded.log \
           "$SCRATCH"/serial.stand_book_uefi.log
     STAND_FORMAT=v2
@@ -499,22 +541,25 @@ stand_book() {
         STAND_FORMAT=$keep
         return
     fi
+    booted=$(stand_book_census build/boxos.img)
     stand_boot stand_book CORES=4 MEM=4G
     [ $? = 2 ] || stand_book_judge stand_book "the book, BIOS 4c" "$STAND_BOOK_BLOCKFAILS" \
-        stand_tally_rotten_leaf_locked aside build/boxos.img
+        stand_tally_rotten_leaf_locked aside build/boxos.img "$booted"
     if python3 tools/volume-read.py build/boxos.img self-test --emit B4p --out "$img" \
             >"$SCRATCH/stand.book_padded.emit" 2>&1; then
+        booted=$(stand_book_census "$img")
         stand_boot stand_book_padded BOOTDISK="$img" CORES=4 MEM=4G
         [ $? = 2 ] || stand_book_judge stand_book_padded "the padded book, BIOS 4c" \
-            "$STAND_BOOK_PADDED_BLOCKFAILS" "" aside "$img"
+            "$STAND_BOOK_PADDED_BLOCKFAILS" "" aside "$img" "$booted"
     else
         bad "stand: the padded book could not be planted — $(tail -1 "$SCRATCH/stand.book_padded.emit")"
     fi
     rm -f "$img" build/boxos.img
     if build_with_key VOLUME_TESTS=on STRICT=on; then
+        booted=$(stand_book_census build/boxos.img)
         stand_boot stand_book_uefi UEFI=on STRICT=on CORES=4 MEM=4G
         [ $? = 2 ] || stand_book_judge stand_book_uefi "the book, UEFI 4c on an AHCI port, STRICT" \
-            "$STAND_BOOK_UEFI_BLOCKFAILS" stand_tally_rotten_leaf_locked taken build/boxos.img
+            "$STAND_BOOK_UEFI_BLOCKFAILS" stand_tally_rotten_leaf_locked taken build/boxos.img "$booted"
     else
         echo "BUILD FAILED (VOLUME_TESTS=on STRICT=on VOLUME_FORMAT=v2) — tail:"; tail -25 "$SCRATCH/build.log"
         bad "stand: the book — VOLUME_TESTS=on STRICT=on VOLUME_FORMAT=v2 does not build"

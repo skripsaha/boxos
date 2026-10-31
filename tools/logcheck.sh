@@ -117,6 +117,9 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_book_replug.sh"
 # A logger of a line a second on a book (loggerhour): tools/logcheck_book_logger.sh.
 . "$(dirname "$0")/logcheck_book_logger.sh"
+# The AUTOSTART lines, the late launch held until it is said (latelaunchmut)
+# and the typer reading the console after it: tools/logcheck_autostart.sh.
+. "$(dirname "$0")/logcheck_autostart.sh"
 
 # Waits for the SHELL BANNER, not for "userspace is starting".
 #
@@ -1099,23 +1102,28 @@ REPLUGWRITE_CENSUS
 run_replugwrite() {
     [ "$(stand_format)" = v2 ] && { run_replugwritebook; return; }
     echo "== replugwrite: the stick leaves while a write is in flight and writers wait for its Helm, and comes back as it left, then changed =="
+    typer_selfcheck
     local r change name seed from rc last pid L="$SCRATCH/serial.replugwrite.log"
     REPLUGWRITE_ABSENT=""
-    latearrival_on; build
+    latelaunch_on; build
     make run-stop >/dev/null 2>&1
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
-        || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
+        || { make run-stop >/dev/null 2>&1; latelaunch_off; return; }
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
     if ! wait_for_line build/serial.log "the stand-in .PID 1. hands over" "$WAIT_QUIET_S"; then
-        make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latearrival_off
+        make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latelaunch_off
         harness "replugwrite: the stick never became this machine's volume"
         return
     fi
     wait_for_quiet "$BOOT_BURST_QUIET_S"
+    latelaunch_held build/serial.log
+    chk $? "replugwrite: every program the late launch made is held, not let run, when the launch is said"
+    replugwrite_spoke_after build/serial.log
+    chk $? "replugwrite: the volume's shell speaks after the kernel says what it started — its banner past the hand-over"
     for r in $REPLUGWRITE_ROUNDS; do
         IFS=: read -r change name seed <<REPLUGWRITE_ROUND
 $r
@@ -1123,7 +1131,7 @@ REPLUGWRITE_ROUND
         from=$(wc -l < build/serial.log)
         replugwrite_round "$change" "$name" "$seed"; rc=$?
         if [ "$rc" != 0 ]; then
-            make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latearrival_off
+            make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latelaunch_off
             last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Storage)\]' | tail -1 | cut -c1-160)
             if [ "$rc" = 1 ]; then
                 harness "replugwrite: the $change round could not be put to the machine (last: $last)"
@@ -1141,7 +1149,7 @@ REPLUGWRITE_ROUND
     wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$L"
-    latearrival_off
+    latelaunch_off
     grep -aq '^\[HALT\] Storage sync complete' "$L"
     chk $? "replugwrite: the machine halted through bye and its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | tail -1 | cut -c1-100))"
     python3 tools/volume-read.py "$SCRATCH/stick.img" check --json >"$SCRATCH/replugwrite.check.json" 2>/dev/null
@@ -1215,6 +1223,35 @@ run_stranger() {
 DEAD_BEFORE="mce:fault:detected mce:fault:fatal cet:fault:cp acpi:ready aml:ready \
 display:ready mce:migration:completed apei:memory:error apei:ghes:ready"
 
+# healthy_startup_tests LOG — (6) of healthy: TagFS itself still healthy, and
+# every test it counts is one this tree registers. The numbers are the code's,
+# not a run's (K9): a build without VOLUME_TESTS walks the nine suites of
+# tests.h TEST_SUITES not
+# under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
+# book 15, ribbon 6, integrity 3, use_context 5 TestCases, 44 run; the 11
+# whose reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
+# g_volume_tests_allowed), and the 33 that only read pass — none of them
+# stands aside on this stand's fresh image, whose first file wears a tag
+# (use_context_narrows). On a book the 6 written for format v1's records
+# stand aside first (tests.c, TestCase.format): tagfs_deed, which only
+# reads, and 5 of the 11 writers — so 32 reads pass, and 6 + 6 are
+# skipped. A test added or taken out moves this line in the same commit.
+healthy_startup_tests() {
+    local L=$1
+    grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
+    local said want="TagFS: 44 run, 33 passed, 0 failed, 11 skipped, 0 held under a caveat"
+    local told="33 reads passed and 11 writes stood down"
+    if [ "$(stand_format)" = v2 ]; then
+        want="TagFS: 44 run, 32 passed, 0 failed, 12 skipped, 0 held under a caveat"
+        told="32 reads passed, 6 written for format v1 stood aside and 6 writes stood down"
+        grep -aq "^\[TESTS\] 6 test(s) stood aside: this volume is format v2" "$L"
+        chk $? "TagFS startup tests: on a book the 6 written for format v1's records stand aside"
+    fi
+    said=$(stand_summary "$L")
+    [ "$said" = "$want" ]
+    chk $? "TagFS startup tests: the 44 this tree registers ran, $told (${said:-no summary})"
+}
+
 run_healthy() {
     echo "== healthy: volume mounted =="
     probe_on; build; boot healthy; probe_off
@@ -1254,8 +1291,8 @@ run_healthy() {
     [ $dead = 0 ] && ok "all previously-dead occurrences now resolve"
 
     # (3) the volume's own vocabulary is untouched — display.elf keeps its tag
-    grep -q "AUTOSTART.*display.elf.*tags: display," "$L"; chk $? "volume tags unshifted (display.elf still 'display')"
-    grep -q "shell.bin.*tags: shell," "$L"; chk $? "volume tags unshifted (shell.bin still 'shell')"
+    autostart_wears "$L" 'display\.elf' display; chk $? "volume tags unshifted (display.elf still 'display')"
+    autostart_wears "$L" 'shell\.bin' shell; chk $? "volume tags unshifted (shell.bin still 'shell')"
 
     # (4) nothing collided in the on-disk registry
     ! grep -q "slot .* already used" "$L"; chk $? "no registry slot collision"
@@ -1284,21 +1321,8 @@ run_healthy() {
     distinct=$(grep '^\[PROBE\] logbook' "$L" | sed "s/.*logbook //;s/ full.*//" | sort -u | wc -l | tr -d ' ')
     [ "$distinct" -ge 24 ]; chk $? "Logbook holds the full vocabulary ($distinct distinct names, $names resolves)"
 
-    # (6) TagFS itself still healthy — and every test it counts is one this
-    # tree registers. The numbers are the code's, not a run's (K9): a build
-    # without VOLUME_TESTS walks the nine suites of tests.h TEST_SUITES not
-    # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
-    # book 15, ribbon 6, integrity 3, use_context 5 TestCases, 44 run; the 11
-    # whose reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
-    # g_volume_tests_allowed), and the 33 that only read pass — none of them
-    # stands aside on this stand's fresh image, whose first file wears a tag
-    # (use_context_narrows). A test added or taken out moves this line in the
-    # same commit.
-    grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
-    local said
-    said=$(stand_summary "$L")
-    [ "$said" = "TagFS: 44 run, 33 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
-    chk $? "TagFS startup tests: the 44 this tree registers ran, 33 reads passed and 11 writes stood down (${said:-no summary})"
+    # (6) TagFS itself still healthy, every test it counts one this tree registers
+    healthy_startup_tests "$L"
     lockrank_judge "$L" "healthy 1c"
 
     # (7) the kernel's ear works — mutation-proven harness, see commit
@@ -1547,7 +1571,7 @@ run_uefi() {
     pci_low=$(grep "logbook 'pci:" "$L" | grep -vc 'bare=0x8')
     [ "$pci_low" = 0 ]; chk $? "no pci:* name took a volume id"
 
-    grep -q "AUTOSTART.*display.elf.*tags: display," "$L"; chk $? "uefi: volume tags unshifted"
+    autostart_wears "$L" 'display\.elf' display; chk $? "uefi: volume tags unshifted"
 
     # A family the muster DECLARED must not be reported as a stranger. It was:
     # the warning judged the full name, which is new for every device that has
@@ -9025,22 +9049,24 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 43 (healthy says how) and
-# the 293 of the stand's own thirty-eight suites: stand 28, stand_lock 4,
+# suite in tests.h TEST_SUITES — the plain build's 44 (healthy says how) and
+# the 374 of the stand's own forty-eight suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
-# stand_snapshot 1, stand_read 8, stand_run 4, stand_medium 19,
+# stand_snapshot 1, stand_read 9, stand_run 6, stand_medium 19,
 # stand_warrant 8, stand_room 7, stand_integrity 2, frame 2, width 7,
-# parcel 13, tract 1, record_splices 4, stand_tally 15, stand_ribbon 6,
-# stand_stitch 12, stand_stitch_edge 8, stand_docket 14, stand_fresh 7,
+# parcel 13, tract 1, record_splices 4, stand_tally 15, stand_ribbon 8,
+# stand_stitch 12, stand_stitch_edge 12, stand_docket 14, stand_fresh 7,
 # stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
-# stand_endpaper 5.
+# stand_endpaper 5, stand_errata 8, stand_toll 5, stand_dog_ear 9,
+# stand_slip 14, stand_away 14, stand_tip_in 10, stand_slip_promise 5,
+# stand_book_glean 2, stand_escheat 3, stand_parity 2.
 # Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=339
+STAND_RUN=418
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -12315,6 +12341,7 @@ case "${1:-both}" in
     latearrival) run_latearrival ;;
     replug)   run_replug ;;
     replugwrite) run_replugwrite ;;
+    latelaunchmut) run_latelaunchmut ;;
     nofsgsbase) run_nofsgsbase ;;
     logsave)  run_logsave ;;
     mountfail) run_mountfail ;;
@@ -12418,7 +12445,7 @@ case "${1:-both}" in
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
     all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

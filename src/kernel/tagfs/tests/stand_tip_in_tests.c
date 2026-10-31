@@ -161,6 +161,9 @@ static TestResult TestStandTipInParcel(void)
     TEST_ASSERT(StandTipInParcel(fid, 2u, &from, &blocks), "the file has a third Parcel");
     TEST_ASSERT(StandTipInParcel(fid, 1u, &from, &blocks) && blocks >= 4u, "the middle Parcel, its blocks");
     TEST_ASSERT_OK(BinderRunWhole(), "a Tally of it all is written");
+    /* What the Tally over the writes lays anew is theirs alone once the
+     * nodes of a Tally-Quire Glean chose are laid again before it. */
+    TEST_ASSERT(StandBinderGleaned(), "and the Tallies Glean asks for after it");
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounts on it, a stitch of it settled");
     TallyKey lo = { fid, 0 }, hi = { fid, 1u + from + blocks };
     StandTipInFilesOf(StandTipInStood(), lo, hi, &whole);
@@ -177,13 +180,19 @@ static TestResult TestStandTipInParcel(void)
     TEST_ASSERT_OK(BinderRunWhole(), "a Tally is written over them");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
     StandTipInFilesOf(StandTipInStood(), lo, hi, &laid);
+    kprintf("[TESTS] stand_tip_in: FILES of %u node(s) and %llu level(s) above its leaves, %u laid anew over the "
+            "writes, %u of them leaves the file's header and the Parcel lie in; %u node(s) before them\n",
+            laid.nodes, (unsigned long long)laid.depth, laid.fresh, laid.meeting, whole.nodes);
     TestEvidence("nodes of FILES the Tally laid anew", laid.fresh);
     TestEvidence("of them, leaves the file's header and the written Parcel lie in", laid.meeting);
     TestEvidence("levels above the leaves", laid.depth);
     TEST_ASSERT(laid.meeting >= 1, "the Parcel's leaf is laid anew");
-    TEST_ASSERT(laid.fresh <= laid.meeting + laid.depth,
-                "and nothing of FILES but the leaves the file's header and the Parcel lie in and the path above "
-                "them (C23)");
+    /* The Parcel's Strips grow as its blocks are written over apart from
+     * their run; a leaf they overfill splits, and the half the split gives
+     * may hold only the keys after the file's — one node more than before. */
+    TEST_ASSERT(laid.fresh <= laid.meeting + laid.depth + (laid.nodes > whole.nodes ? 1u : 0u),
+                "and nothing of FILES but the leaves the file's header and the Parcel lie in, the leaf a split of "
+                "theirs gives and the path above them (C23)");
     TEST_ASSERT(laid.nodes == whole.nodes || laid.nodes + 1u == whole.nodes || laid.nodes == whole.nodes + 1u,
                 "the tree as many nodes as before, one either way");
     TEST_ASSERT(StandFreshHolds(&m, fid), "and the file reads every byte written");

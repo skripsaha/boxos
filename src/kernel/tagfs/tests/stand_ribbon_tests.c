@@ -155,6 +155,7 @@ static bool StandRibbonWhere(StandRibbon* w)
     w->next         = c.next.block;
     w->next_blocks  = c.next.blocks;
     w->at           = c.quire.block + c.off / TAGFS_BLOCK_SECTORS;
+    w->atom         = c.atom;
     w->seq          = c.last;
     w->clasp        = c.clasp;
     w->top          = c.given;
@@ -264,6 +265,25 @@ bool StandRibbonData(StandRibbon* w, uint64_t digests[2])
     return true;
 }
 
+/* Zeros from `vlba` to the end of the atom of the ribbon it lies in — a block
+ * at the least: a stitch the kernel sewed there is that atom long, a flash
+ * page on a removable medium (§16.6 п.2), and a sector of it left would be a
+ * piece of a stitch past the ribbon's end. An atom never crosses a Quire's
+ * end: the Quires are laid on it. The atom is the one the test found the
+ * volume up with (StandRibbonWhere): the put-back runs with it let go of,
+ * and a book let go of names none (MountBookLetGo). */
+static bool StandRibbonZeroAtom(const StandRibbon* w, uint64_t vlba)
+{
+    uint64_t atom = w->atom;
+    uint64_t n    = atom > VOLUME_BLOCK_SECTORS ? atom - vlba % atom : VOLUME_BLOCK_SECTORS;
+    bool     ok   = true;
+    for (uint64_t at = 0; at < n; at += VOLUME_BLOCK_SECTORS)
+        ok &= BoardroomWrite(w->seat, w->base + vlba + at,
+                             (uint32_t)(n - at < VOLUME_BLOCK_SECTORS ? n - at : VOLUME_BLOCK_SECTORS),
+                             s_ribbon_sectors, NULL) == 0;
+    return ok;
+}
+
 /* Everything the test laid put back — the stitches' sectors to zeros, the
  * free blocks to their bytes — once the volume is let go of with no caller
  * left inside it (StandRibbonLetGo), and the volume mounted again on it: false
@@ -275,7 +295,7 @@ bool StandRibbonPutBack(StandRibbon* w)
     bool down = StandRibbonLetGo(NULL), ok = down;
     memset(s_ribbon_sectors, 0, sizeof(s_ribbon_sectors));
     for (uint32_t i = 0; down && i < w->nlaid; i++)
-        ok &= BoardroomWrite(w->seat, w->base + w->laid[i], VOLUME_BLOCK_SECTORS, s_ribbon_sectors, NULL) == 0;
+        ok &= StandRibbonZeroAtom(w, w->laid[i]);
     if (down && w->data)
         ok &= BoardroomWrite(w->seat, w->base + w->free * TAGFS_BLOCK_SECTORS, 2u * TAGFS_BLOCK_SECTORS,
                              s_ribbon_kept, NULL) == 0;
@@ -711,6 +731,61 @@ out:
     return verdict;
 }
 
+/* The mount's ask for a next_quire refused (RibbonNextGivenAtMount): a ribbon
+ * gone on into the next_quire it named, its stitch there naming none past it,
+ * mounted with the map refusing the Quire the mount asks for. The room is still
+ * to grow — a change waits for the cycle that asks again (ERR_WOULD_BLOCK), not
+ * refused for good with no cycle asked (ERR_TAGFS_NO_SPACE) — and past that
+ * cycle the ribbon names a next_quire and the change is taken. */
+static TestResult TestStandRibbonMountNextRefused(void)
+{
+    TestResult         verdict = TEST_PASS;
+    StandRibbon        w;
+    StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
+    RibbonCursor       c;
+    uint64_t           fid   = 0;
+    bool               armed = false;
+    const char*        aside = StandRibbonAside(&w);
+
+    if (aside)
+        return test_steps_aside(aside);
+    StandRibbonEmpty(r1, w.fid);
+    StandRibbonEmpty(r2, w.fid + 1u);
+    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
+    uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
+    StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
+    h2.from_block  = w.quire;
+    h2.from_blocks = w.quire_blocks;
+    h2.next_block  = 0;
+    h2.next_blocks = 0;
+    TEST_ASSERT(c1 && StandRibbonSew(&w, w.next, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
+                "a stitch, and one at the start of the next_quire it names naming none past it, are laid");
+    RibbonStandNextRefused(true);
+    armed = true;
+    TEST_ASSERT(StandRibbonUp() && !TagFSIsUnderGlass(), "the volume mounts on them, written on");
+    armed = RibbonStandNextRefused(false);
+    TEST_ASSERT(!armed, "the mount asked the map for a next_quire, and the map refused it");
+    RibbonCursorStand(&c);
+    TEST_ASSERT(c.up && c.quire.block == w.next && !c.next.blocks,
+                "the ribbon stands in the Quire it went on into, with no next_quire past it");
+    TEST_ASSERT_EQ(tagfs_create_file("mount-next", NULL, 0, &fid), ERR_WOULD_BLOCK,
+                   "a file asked for waits for a cycle: the room is still to grow, not refused for good");
+    TEST_ASSERT(w.nlaid < STAND_RIBBON_LAID, "room to put back the stitch the cycle lays");
+    w.laid[w.nlaid++] = (c.quire.block + c.off / TAGFS_BLOCK_SECTORS) * TAGFS_BLOCK_SECTORS;
+    TEST_ASSERT_OK(TagFSSettle(), "the cycle it waits for runs");
+    RibbonCursorStand(&c);
+    TEST_ASSERT(c.next.blocks != 0, "and asks the map again: the ribbon names a next_quire");
+    TEST_ASSERT_EQ(tagfs_create_file("mount-next", NULL, 0, &fid), 0, "the file asked for again is made");
+out:
+    if (armed)
+        (void)RibbonStandNextRefused(false);
+    if (!StandRibbonPutBack(&w))
+        verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
+                               w.nlaid, 0);
+    return verdict;
+}
+
 static const TestCase g_stand_ribbon_tests[] = {
     { .name = "stand_ribbon_slip_three_roads", .func = TestStandRibbonSlipThreeRoads,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
@@ -725,6 +800,8 @@ static const TestCase g_stand_ribbon_tests[] = {
     { .name = "stand_ribbon_undone", .func = TestStandRibbonUndone,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_ribbon_boot_slip", .func = TestStandRibbonBootSlip,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_ribbon_mount_next_refused", .func = TestStandRibbonMountNextRefused,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
 };
 

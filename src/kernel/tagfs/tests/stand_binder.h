@@ -6,7 +6,7 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 /*
- * The kit a test that writes Tallies is run with (stand_binder_tests.c),
+ * The kit a test that writes Tallies is run with (stand_binder_hand.c),
  * shared by the suites that write them: stand_binder, and stand_endpaper
  * (stand_endpaper_tests.c), the measure of the next Tally the reserve keeps.
  *
@@ -20,6 +20,7 @@
  *                         (STAND_BINDER_PUT_BACK at `out`)
  *   StandBinderTallies    `n` Tallies in a row, the lag's stitches settled
  *                         past each: OK, or the first refusal
+ *   StandBinderGleaned    the Tallies Glean asks for laid, none owed after
  */
 
 #define STAND_BINDER_SLOTS_MOST  8u
@@ -46,6 +47,7 @@ const char* StandBinderAside(StandBinder* b);
 bool        StandBinderKeep(StandBinder* b, uint64_t block);
 bool        StandBinderPutBack(StandBinder* b);
 error_t     StandBinderTallies(uint32_t n);
+bool        StandBinderGleaned(void);
 
 /* stand_tip_in_cost_tests.c: what the next Tally is reckoned to cost, held to
  * the rule counted by the test (§16.6 п.6), and a Tally under way when the

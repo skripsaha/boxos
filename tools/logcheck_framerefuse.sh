@@ -32,11 +32,15 @@
 # Then the same on a volume with its book whole (`create_tagfs --v2`, its
 # census clean before the boot): mounted, the machine's Use Context set to
 # what the volume does not remember — and remembered, a stitch on its ribbon —
-# `anchor_test` asked to write and anchor a file, its bytes laid on fresh
-# ground, and the power button pressed, the halt laying its last stitch — and
-# every write that lands in the volume's ground lands in its ribbon or on the
-# ground a live file of the book the machine left names, by place, the book
-# left whole and holding the Use Context said.
+# `anchor_test` asked to write and anchor a file of 128 bytes, less than a
+# block, so its bytes ride a Slip in the stitch that anchors it and no block
+# of data is written (spec_v2 §2.8: a new small file is born with one HOLE run
+# and a Slip; its block is written once the tail fills it, or before a Tally,
+# and three stitches owe no Tally) — and the power button pressed, the halt
+# laying its last stitch — and every write that lands in the volume's ground
+# lands in its ribbon, none on the ground a live file of the book the machine
+# left names, by place, the book left whole, holding the Use Context said and
+# the file's 128 bytes.
 # Then the blank ring again through UEFI (OVMF and TagBoot): the loader has to
 # take the kernel where the BOOT stamp of a deed bearing FRAME names it, and
 # the kernel it loads has to turn the volume away in the same words. Then
@@ -123,8 +127,8 @@ PY
 # framerefuse_book_said LEG L — what the log of a leg whose book the machine
 # mounts carries: the mount, the Use Context the person said remembered by a
 # stitch of its cycle, the file anchor_test makes written and anchored — its
-# bytes on fresh ground, named by a stitch — and the halt laying its stitch
-# and syncing the volume.
+# bytes riding a Slip in a stitch — and the halt laying its stitch and syncing
+# the volume.
 framerefuse_book_said() {
     local leg=$1 L=$2
     grep -qE "MOUNTED — [0-9]+ file" "$L"
@@ -138,15 +142,16 @@ framerefuse_book_said() {
 }
 
 # framerefuse_book_left LEG IMG VERDICT — the book the machine left: every
-# write that lands in its ground lands in its ribbon or on its files' ground,
-# some in each, the book is whole, and it holds the Use Context the person
-# said, its last stitch the halt's, CLEAN.
+# write that lands in its ground lands in its ribbon — a file of less than a
+# block lays no block of data (§2.8) — the book is whole, it holds the Use
+# Context the person said, its last stitch the halt's, CLEAN, and the file
+# anchor_test wrote, its 128 bytes as it wrote them: off no block, so off the
+# Slip that carried them.
 framerefuse_book_left() {
     local leg=$1 img=$2 verdict=$3
     echo "$verdict" | sed -nE 's/.* inside=([0-9]+) named=[0-9]+ ribbon=([0-9]+) data=([0-9]+)$/\1 \2 \3/p' |
-        { read -r inside ribbon data && [ "$ribbon" -gt 0 ] && [ "$data" -gt 0 ] &&
-          [ "$inside" = "$((ribbon + data))" ]; }
-    chk $? "framerefuse ($leg): every write that lands in the book's ground lands in its ribbon or on the ground its files' runs name, by place ($verdict)"
+        { read -r inside ribbon data && [ "$ribbon" -gt 0 ] && [ "$data" = 0 ] && [ "$inside" = "$ribbon" ]; }
+    chk $? "framerefuse ($leg): every write that lands in the book's ground lands in its ribbon, by place — anchor_test's file, less than a block, rides a Slip and lays no block of data ($verdict)"
     python3 tools/volume-read.py "$img" check --json >"$SCRATCH/framerefuse.$leg.after.json" 2>/dev/null
     chk $? "framerefuse ($leg): the book the machine left is whole ($(tail -1 "$SCRATCH/framerefuse.$leg.after.json" | cut -c1-60))"
     python3 - "$SCRATCH/framerefuse.$leg.after.json" <<'PY'
@@ -158,6 +163,16 @@ sys.exit(0 if k["use_bytes"] == len(b"framerefuse") and k["use_print"] == bookre
          and k["clean"] else 1)
 PY
     chk $? "framerefuse ($leg): and holds the Use Context the person said, its last stitch the halt's, CLEAN"
+    python3 tools/volume-read.py "$img" get _anchor_test 2>/dev/null | python3 -c '
+import struct, sys
+b = sys.stdin.buffer.read()
+def Mix(a, s):   # anchor_test.c mix()
+    x = (a ^ (s * 2654435761)) & 0xFFFFFFFF
+    x ^= x >> 16
+    return (x * 0x85EBCA6B) & 0xFFFFFFFF
+ok = len(b) == 128 and struct.unpack_from("<III", b) == (0x414E4348, 1, Mix(0x414E4348, 1)) and not any(b[12:])
+sys.exit(0 if ok else 1)'
+    chk $? "framerefuse ($leg): and the file anchor_test wrote, its 128 bytes as written — read off the Slip that carried them"
 }
 
 # framerefuse_leg KERNEL SAYS LEG MODE [KEYS...] — the image made around

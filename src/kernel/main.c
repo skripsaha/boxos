@@ -1062,7 +1062,7 @@ void kernel_main(void)
      * line happened to be reached — and a machine whose medium finished
      * enumerating a second later came up empty and stayed that way. */
     process_t *initial_proc = NULL;
-    int autostart_count = AutostartLaunchFromVolume(&initial_proc, false);
+    int autostart_count = AutostartLaunchFromVolume(&initial_proc);
 
     // Fallback: if no autostart files found, use embedded shell binary
     if (!initial_proc)

@@ -176,6 +176,10 @@ out:
 
 // ----------------------------------------------------------------------------
 // A read beside a write never serves a stale read-ahead block (N1)
+//
+// Format v1's: its write goes over the block where it lies, under a window a
+// handle holds. A book lays every write on fresh ground and a handle reads the
+// version it opened (tagfs.c, MP-D16) — its analog below.
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandReadAheadForgetsAWrite(void)
@@ -230,6 +234,82 @@ static TestResult TestStandReadAheadForgetsAWrite(void)
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, newer, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "and is what the write left, not what the late fetch read");
 out:
+    tagfs_close(handle);
+    if (file_id)
+        tagfs_delete_file(file_id, INK_UNWARRANTED);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// A book's read beside a write serves the version its handle opened (N1)
+//
+// A book never writes a block a version names: the write over lays fresh
+// ground, and the ground the version an open handle reads stays held until it
+// is closed (MP-D16). So what the window and a fetch that lands after the
+// write hold is that version's, and is what the handle reads; a handle opened
+// after the write reads the write.
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandReadAheadReadsItsVersion(void)
+{
+    TestResult       verdict = TEST_PASS;
+    uint64_t         file_id = 0;
+    uint64_t         first   = 0, again = 0;
+    TagFSFileHandle* handle  = NULL;
+    TagFSFileHandle* later   = NULL;
+    const char*      aside   = StandStepsAsideFor();
+    uint8_t*         newer   = g_test_buffer + STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE;
+    uint64_t         got     = 0;
+
+    if (aside)
+        return test_steps_aside(aside);
+    if (TagFSRunBlocks() < STAND_READ_BLOCKS)
+        return test_steps_aside("the medium hands over fewer than three blocks at a time, so "
+                                "no window holds the run this test fetches");
+    TEST_ASSERT(StandReadMakeRun(STAND_READ_BLOCKS, 0x76, &file_id, &first),
+                "a three-block file is made in one run");
+    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TEST_ASSERT(handle != NULL, "and opened to read");
+
+    TEST_ASSERT_OK(tagfs_read(handle, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got),
+                   "its first two blocks are read in one fetch");
+    TEST_ASSERT(ReadAheadServe(handle, first + 1) != NULL, "and the window holds the second");
+    TestFillAt(newer, TAGFS_BLOCK_SIZE, 0x77, TAGFS_BLOCK_SIZE);
+    TEST_ASSERT_EQ(StandWriteAt(file_id, TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+                   "the second block is written over whole");
+    TEST_ASSERT(StandBlockOf(file_id, 1, &again) && again != first + 1, "on fresh ground");
+    handle->offset = 0;
+    TEST_ASSERT_OK(tagfs_read(handle, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got),
+                   "the two blocks are read again through the handle opened before it");
+    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, 2 * TAGFS_BLOCK_SIZE),
+                   2 * TAGFS_BLOCK_SIZE, "and are the version it opened");
+
+    uint32_t count = STAND_READ_BLOCKS;
+    uint64_t gen   = ReadAheadBegin(handle, first, &count);
+    TEST_ASSERT(gen != 0 && count == STAND_READ_BLOCKS, "a fetch of the three is named");
+    TEST_ASSERT_OK(TagFSReadRun(first, count, ReadAheadBuffer(handle)),
+                   "and reads the medium before the write lands");
+    TestFillAt(newer, TAGFS_BLOCK_SIZE, 0x78, 2 * TAGFS_BLOCK_SIZE);
+    TEST_ASSERT_EQ(StandWriteAt(file_id, 2 * TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE),
+                   TAGFS_BLOCK_SIZE, "the third block is written over whole meanwhile");
+    (void)ReadAheadLand(handle, gen, count);
+    handle->offset = 2 * TAGFS_BLOCK_SIZE;
+    TEST_ASSERT_OK(tagfs_read(handle, g_test_output, TAGFS_BLOCK_SIZE, &got),
+                   "the third block is read through the same handle");
+    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer + 2 * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE),
+                   TAGFS_BLOCK_SIZE, "and is its version's, the fetch that landed late or the medium alike");
+
+    later = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TEST_ASSERT(later != NULL, "a handle opened after the writes");
+    later->offset = TAGFS_BLOCK_SIZE;
+    TEST_ASSERT_OK(tagfs_read(later, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got), "reads the two blocks");
+    TEST_ASSERT_EQ(TestFirstDifference(g_test_output + TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE),
+                   TAGFS_BLOCK_SIZE, "the third what its write left");
+    TestFillAt(newer, TAGFS_BLOCK_SIZE, 0x77, TAGFS_BLOCK_SIZE);
+    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, newer, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+                   "and the second what its write left");
+out:
+    tagfs_close(later);
     tagfs_close(handle);
     if (file_id)
         tagfs_delete_file(file_id, INK_UNWARRANTED);
@@ -572,7 +652,10 @@ static const TestCase g_stand_read_tests[] = {
     { .name = "stand_readahead_forgets_a_write", .func = TestStandReadAheadForgetsAWrite,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a read-ahead fetch that lands after a write to its block fills the "
-                       "cache with what the block held before, and a later read serves it" },
+                       "cache with what the block held before, and a later read serves it",
+      .format = DEED_FORMAT_V1, .analog = "stand_readahead_reads_its_version" },
+    { .name = "stand_readahead_reads_its_version", .func = TestStandReadAheadReadsItsVersion,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name  = "stand_readahead_hit_is_verified", .func = TestStandReadAheadHitIsVerified,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a block read out of the read-ahead cache is handed out without "
