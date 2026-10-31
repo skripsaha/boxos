@@ -249,8 +249,15 @@ void    AllotmentRelease(uint64_t fid);
  * one call land in one run). A take `aside` — a block that will not be full
  * — lies away from the blocks the file goes on into after `hint`, so they
  * stay free for the versions that fill them. As
- * TagFSTakeRun answers when nothing can be had: ERR_WOULD_BLOCK while Fallow
- * rests ground, the room asked of the cycle, else ERR_TAGFS_NO_SPACE, said.
+ * TagFSTakeRun answers when nothing can be had — past `keep` and again past
+ * the book's fresh measure when that is less (EndpaperDataKeeps): ERR_WOULD_BLOCK
+ * while Fallow rests ground, the room asked of the cycle, or while a Tally
+ * gives ground back, the Tally asked (binder.h, BinderRoomWait); else
+ * ERR_TAGFS_NO_SPACE, said.
+ * AllotmentTakeBookRun: one run of exactly `want` blocks for file `fid`'s
+ * gather (plot_gather.c), from `hint` on — never a piece of it, whatever
+ * window the file keeps — past `keep` and the promises, answered as
+ * AllotmentTakeBook answers when none can be had.
  * AllotmentOthersIn, under the state lock: whether [start, start + count)
  * meets the window of a file other than `fid` (0: any file's) — *past where
  * the first such ends. AllotmentBookTaken: the blocks a book's data was
@@ -258,6 +265,7 @@ void    AllotmentRelease(uint64_t fid);
  */
 error_t  AllotmentTakeBook(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
                            uint64_t keep, bool own, uint64_t *start, uint32_t *got);
+error_t  AllotmentTakeBookRun(uint64_t fid, uint32_t want, uint64_t hint, uint64_t keep, uint64_t *start);
 bool     AllotmentOthersIn(uint64_t fid, uint64_t start, uint64_t count, uint64_t *past);
 uint64_t AllotmentBookTaken(void);
 

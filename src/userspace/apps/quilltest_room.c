@@ -14,7 +14,11 @@
  * then, nothing resting — anchors, deletes _qra.bin, and at once writes MIB
  * MiB to a new _qrc.bin: every piece must land whole, and the file read back
  * must be its own stream. The one MiB more _qra.bin had is the room the new
- * file's record may take, never the write's own.
+ * file's record may take, never the write's own. On a book the write waits
+ * for the Tallies that make the reserve exact and may yet be refused the
+ * growth of what the book keeps and holds (spec_v2 §16.6 п.8): refused
+ * no-space part way, whatever it took read back whole, it says PENDING —
+ * logcheck gives the verdict by the kernel's word.
  *
  * ‼ EMPTYFULL: DELETES ON A VOLUME WITH NO ROOM LEFT.
  * A delete gives up a file with a Quitclaim, a record in the pool; on a
@@ -181,7 +185,7 @@ QuillVerdict QuillRoomBack(const char *const *args)
     int      cend = room.refusal;
     bay_release(room.buf);
     int64_t  rerr = 0;
-    uint64_t good = c == bytes ? QuillReadBack((file_id_t)cfid, QUILL_SEED_ROOMC, bytes, &rerr) : 0;
+    uint64_t good = c > 0 ? QuillReadBack((file_id_t)cfid, QUILL_SEED_ROOMC, c, &rerr) : 0;
     arc = anchor(0);
 
     if (drc == 0 && cfid > 0 && c == bytes && good == bytes && arc == 0) {
@@ -189,6 +193,16 @@ QuillVerdict QuillRoomBack(const char *const *args)
                "in %llu ms, read back whole; anchored\n", (unsigned long long)bytes,
                (unsigned long long)ms);
         return QUILL_PASS;
+    }
+    /* Refused no-space part way, all it took read back: a book's word to give
+     * (the reserve's measure, §16.6 п.8), never this case's — format v1 holds
+     * it to the PASS above, a book to what the kernel says it keeps. */
+    if (drc == 0 && cfid > 0 && c > 0 && cend == -(int)ERR_TAGFS_NO_SPACE && good == c && arc == 0) {
+        printf("[QUILL] roomback: PENDING — _qra.bin deleted (0), _qrc.bin (create %ld) took %llu of %llu "
+               "bytes in %llu ms and was refused %d; read back good to byte %llu (read %lld, anchor 0): what "
+               "the book keeps says the rest\n", cfid, (unsigned long long)c, (unsigned long long)bytes,
+               (unsigned long long)ms, cend, (unsigned long long)good, (long long)rerr);
+        return QUILL_PENDING;
     }
     printf("[QUILL] roomback: FAIL — _qra.bin deleted (%d), _qrc.bin (create %ld) took %llu of %llu "
            "bytes in %llu ms and was refused %d; read back good to byte %llu (read %lld, anchor %d)\n",

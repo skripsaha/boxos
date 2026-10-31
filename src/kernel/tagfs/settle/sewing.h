@@ -175,6 +175,13 @@ const RibbonCursor* RibbonCursorNow(void);
 uint64_t RibbonStitchOf(uint64_t len);
 uint64_t RibbonSeqNext(void);
 void     RibbonNextGiven(void);
+/* At a Tally's DONE that took in stitch `slice`, with no next_quire given: the
+ * take again — the Tally may have lifted what kept the ribbon from ground
+ * (fallow.c, NodeBarred) or let Quires go — and, none had, the next Tally of
+ * the ring's turn asked, which lets the next slot's Quires go: until the ring
+ * turned whole, as many Tallies in a row as it has slots taking in the same
+ * stitch — past that a Tally gives nothing more until a stitch settles. */
+void     RibbonNextAgain(uint64_t slice);
 error_t  RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop);
 uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, uint64_t seq, uint32_t clasp,
                     uint32_t clasp_at, uint64_t flags);

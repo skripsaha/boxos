@@ -201,6 +201,12 @@ void        FallowStitchSettled(uint64_t target, uint64_t seq, uint64_t cycle);
  */
 void        FallowSpineAdd(FallowNode* node, uint64_t cycle);
 
+/* Under the state lock: the least cycle a node of that ground still resting
+ * goes back at, UINT64_MAX for none — what a slot counts its own past its
+ * DONE is free once no node of it, ripe by its cycle, rests (binder_slots.c,
+ * BinderRestRipens). */
+uint64_t    FallowSpineRipeFrom(void);
+
 /* Under the state lock: the ribbon left the Quire the stitches before `seq`
  * lie in — `seq` is the first stitch begun past it, and it settled — so every
  * node a stitch before it named waits for its lag alone from here. */
@@ -233,6 +239,17 @@ void        FallowGiveRoomHold(uint64_t cycle);
  * `closed_gen` — one in the pool's open tail, whose ground no cycle gives back
  * until a cycle closes the tail (1). */
 bool        FallowRestsOnTail(uint64_t closed_gen);
+
+/* Under the state lock (fallow.c, NodeBarred): FallowBarsRun — whether
+ * [start, start + count) meets ground a record's freer gave back that a Tally
+ * a mount may stand on still names as a file's, which a Quire of the ribbon
+ * may not take; *past where the last of it that meets the run ends.
+ * FallowBarLift — `slice`, the stitch the oldest Tally a mount may stand on
+ * took in, now stands (UINT64_MAX: none is known, nothing is kept from the
+ * ribbon): what it no longer keeps from the ribbon, spent, to be freed with
+ * no TagFS lock held (FallowNodesFree). */
+bool        FallowBarsRun(uint64_t start, uint64_t count, uint64_t* past);
+FallowNode* FallowBarLift(uint64_t slice);
 
 /* Nodes FallowRipen spent, freed with no TagFS lock held. */
 void        FallowNodesFree(FallowNode* list);

@@ -1,6 +1,7 @@
 #include "block_map_derived.h"
 #include "block_map_internal.h"   /* AllotmentTakeBackLocked — a window given back before the ribbon is refused */
 #include "../tagfs.h"
+#include "../ink/fallow.h"    /* FallowBarsRun — ground a Tally still names, kept from the ribbon's Quire */
 #include "amp.h"           /* amp_get_core_index — the stand's HEAPFAIL on the builder's core */
 
 /*
@@ -587,6 +588,23 @@ static bool RunAlignedFree(uint64_t lo, uint64_t hi, uint64_t want, uint32_t ali
     return false;
 }
 
+/* RunAlignedFree for a run of the book's own: for the ribbon's Quire, past
+ * the ground Fallow keeps from the ribbon (fallow.h, FallowBarsRun) — a
+ * Tally a mount may stand on names a file on it, and a reader would refuse the
+ * ribbon's step there; *barred when a run passed over for it was free. */
+static bool RunQuireFree(GroundOwner owner, uint64_t lo, uint64_t hi, uint64_t want, uint32_t align,
+                         uint64_t* start, bool* barred)
+{
+    uint64_t past = 0;
+    while (lo < hi && RunAlignedFree(lo, hi, want, align, 0, start)) {
+        if (owner != GROUND_RIBBON || !FallowBarsRun(*start, want, &past))
+            return true;
+        *barred = true;
+        lo      = past;
+    }
+    return false;
+}
+
 error_t BlockMapTakeQuire(GroundOwner owner, uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first,
                           uint64_t from, uint64_t* start)
 {
@@ -606,14 +624,15 @@ error_t BlockMapTakeQuire(GroundOwner owner, uint64_t blocks, uint32_t align, ui
         /* A file's window is given back before the book is refused a run:
          * the book's ground is the book's, and a window only a hint. */
         from = from < first || from >= hi ? first : from;
-        bool found = false;
+        bool found = false, barred = false;
         for (uint32_t round = 0; round < 2u && !found; round++) {
-            found = RunAlignedFree(from, hi, blocks, align, 0, start) ||
-                    RunAlignedFree(first, from + blocks < hi ? from + blocks : hi, blocks, align, 0, start);
+            found = RunQuireFree(owner, from, hi, blocks, align, start, &barred) ||
+                    RunQuireFree(owner, first, from + blocks < hi ? from + blocks : hi, blocks, align, start,
+                                 &barred);
             if (!found && (round || !AllotmentTakeBackLocked(0)))
                 break;
         }
-        rc = found ? MapPut(owner, 0, *start, blocks, true, &met) : ERR_TAGFS_NO_SPACE;
+        rc = found ? MapPut(owner, 0, *start, blocks, true, &met) : barred ? ERR_WOULD_BLOCK : ERR_TAGFS_NO_SPACE;
     }
     uint64_t* loose = PagesLooseTaken();
     TagFSLockDrop(lock);

@@ -3,6 +3,7 @@
 
 #include "../tagfs.h"
 #include "../file_map/file_record.h"
+#include "../settle/endpaper_fact.h"
 #include "vmm.h"
 
 /*
@@ -60,6 +61,8 @@ typedef struct {
     Stake        *stakes;
     uint32_t      stake_count;
     uint32_t      stake_room;
+    EndpaperStakes stakes_counted; /* a book's: what its Stakes may add to the next Tally, in the measure
+                                    * while they stand (PlotStakesCount) */
     Strip        *freed;          /* ground the record stops naming, to Fallow once it is inked */
     uint32_t      freed_count;
     uint32_t      freed_room;

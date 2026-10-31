@@ -133,6 +133,9 @@ static void TallyCostOf(TallyCostParts* out)
     uint64_t      atom  = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
     uint64_t      ntags = 0, text = 0;
 
+    /* The Plots' Stakes first, the map after: a Stake inked between the two
+     * is counted twice, never missed (endpaper_fact.h). */
+    EndpaperStakesAbove(&files.bytes, &digests.bytes);
     TallyFilesCost(&files, &digests);
     if (tagfs_get_state()->registry)
         TagRegistryTextBytes(tagfs_get_state()->registry, &ntags, &text);
@@ -192,9 +195,12 @@ uint64_t TallyCostBlocks(void)
  * in an old file counts the file whole — and the measure by the last Tally is
  * read as it stands each time, every change memory holds in it. So the kept
  * measure is the lesser of the two as a measure taken now is, each no less
- * than a measure taken now's, and never less than it. The ribbon measures
- * afresh each time it is given a Quire, and a write that finds no room asks a
- * fresh measure before it is refused (EndpaperDataKeeps).
+ * than a measure taken now's, and never less than it. A block still staked
+ * is counted by its Plot in both measures besides (endpaper_fact.c,
+ * EndpaperStakesSet) — the allowance here, from above alone, is lost wherever
+ * the measure by the last Tally is the lesser. The ribbon measures afresh each
+ * time it is given a Quire, and a write that finds no room asks a fresh
+ * measure before it is refused (AllotmentTakeBook).
  */
 #define TALLY_DATA_FILES_MOST   (TALLY_RUN_MOST + TALLY_ITEM_HEAD_MOST + TALLY_PARCEL_HEAD_MOST)
 #define TALLY_DATA_DIGESTS_MOST (8u + 2u * (TALLY_ITEM_HEAD_MOST + TALLY_DIGEST_HEAD_MOST))
@@ -253,17 +259,21 @@ static bool EndpaperKept(TallyCostParts* above, uint64_t* from)
     return ours && __atomic_load_n(&s_kept_turn, __ATOMIC_RELAXED) == turn;
 }
 
-/* The next Tally by the kept measure and the data handed since it: false
- * when there is none whole. */
+/* The next Tally by the kept measure, the data handed since it and what the
+ * Plots' Stakes may add now — a take counted before it is asked, which no
+ * measure kept before it holds (endpaper_fact.c): false when there is none
+ * whole. */
 static bool EndpaperKeptCost(uint64_t* cost)
 {
     TallyCostParts above;
-    uint64_t       from = 0;
+    uint64_t       from = 0, staked = 0, sdigests = 0;
+    EndpaperStakesAbove(&staked, &sdigests);
     if (!EndpaperKept(&above, &from))
         return false;
     uint64_t      since = AllotmentBookTaken() - from;
     uint64_t      atom  = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
-    TallyTreeCost files = { since * TALLY_DATA_FILES_MOST, 0 }, digests = { since * TALLY_DATA_DIGESTS_MOST, 0 };
+    TallyTreeCost files   = { since * TALLY_DATA_FILES_MOST + staked, 0 };
+    TallyTreeCost digests = { since * TALLY_DATA_DIGESTS_MOST + sdigests, 0 };
     above.files   += TallyTreeBlocks(&files, atom);
     above.digests += TallyTreeBlocks(&digests, atom);
     *cost = TallyNextOf(&above);

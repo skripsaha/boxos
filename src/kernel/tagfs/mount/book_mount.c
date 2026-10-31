@@ -12,6 +12,7 @@
 #include "../settle/sewing.h"
 #include "under_glass.h"
 #include "../settle/escheat.h"
+#include "../settle/foliation.h"
 #include "boardroom.h"
 #include "crypto.h"
 #include "errata.h"
@@ -424,7 +425,8 @@ static error_t BookSlotsHeld(const char** what)
         return ERR_NO_MEMORY;
     }
     for (uint32_t i = 0; i < g_book.nslots; i++)
-        if (BinderSlotHolds(g_book.slots[i].index, g_book.slots[i].seq, g_book.slots[i].head.tally_seq) != OK) {
+        if (BinderSlotHolds(g_book.slots[i].index, g_book.slots[i].seq, g_book.slots[i].head.tally_seq,
+                            g_book.slots[i].head.stitch_seq) != OK) {
             *what = "its Spine read a slot past the ring its FRAME names";
             return ERR_TAGFS_CORRUPTED;
         }
@@ -490,6 +492,11 @@ error_t MountReadBook(const char** what)
     MountBookGrow(tagfs_get_seat());
     BinderMountStood(g_book.stood->index, g_book.tally_blocks, g_book.ribbon_useful, g_book.next_fid,
                      g_book.next_tag, g_book.next_bookmark);
+    /* The leaves of FILES a Parcel's runs lie in, as the walk of the leaves
+     * counted them into Foliation — every leaf when Foliation was lost. */
+    uint64_t run_leaves    = FoliationLeavesHolding(TALLY_FILES);
+    g_book.laid.run_leaves = run_leaves != UINT64_MAX ? run_leaves : g_book.laid.runs ? g_book.laid.files_leaves : 0;
+    BinderBarPublish(g_book.stood->head.stitch_seq);
     EndpaperStood(&g_book.laid, g_book.stood->head.tally_seq, g_book.stood->counts.next_fid);
     kprintf("[TagFS] the book as memory holds it: its files print 0x%08X, its Use Context %llu byte(s) print "
             "0x%08X\n", g_book.files_print, (unsigned long long)g_book.use_bytes, g_book.use_print);

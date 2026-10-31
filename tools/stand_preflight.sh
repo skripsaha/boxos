@@ -9,10 +9,10 @@
 # tools/ is asked as well as src/: an oracle that proves a host tool edits
 # that tool exactly as one that proves the kernel edits the kernel, and an
 # edit left behind there is a tool that judges every later run with its
-# defect put back. Eight files in tools/ carry the two phrases as TEXT and are
+# defect put back. Nine files in tools/ carry the two phrases as TEXT and are
 # passed over by name: the files the harnesses write them from into their
 # mutations (logcheck.sh, logcheck_book_logger.sh, logcheck_autostart.sh,
-# bindery.sh, powercut_mut.sh — powercut.sh keeps none of its own), stand.sh,
+# logcheck_room.sh, bindery.sh, powercut_mut.sh — powercut.sh keeps none of its own), stand.sh,
 # whose mutate and restore insist on them, this
 # file, which asks for them, and the plate that reads them. A harness added
 # to tools/ is added to this list, and until it is this refuses to run and
@@ -21,7 +21,7 @@
 # own compiled search for them.
 MUT_LEFTOVER=$( { grep -rl -e "logcheck mutation" -e "logcheck injection" src
                   grep -rlI -e "logcheck mutation" -e "logcheck injection" \
-                       --exclude=logcheck.sh --exclude=logcheck_book_logger.sh --exclude=logcheck_autostart.sh --exclude=bindery.sh --exclude=powercut_mut.sh \
+                       --exclude=logcheck.sh --exclude=logcheck_book_logger.sh --exclude=logcheck_autostart.sh --exclude=logcheck_room.sh --exclude=bindery.sh --exclude=powercut_mut.sh \
                        --exclude=stand.sh --exclude=stand_preflight.sh --exclude=buildplate.c tools
                 } 2>/dev/null || true)
 if [ -n "$MUT_LEFTOVER" ]; then
