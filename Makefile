@@ -753,7 +753,7 @@ DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase assemble \
              me info say reboot bye defrag fsck ipc_test memtag hw \
-             timezone logsave lastsaid rgbtest usetest luggagetest headcount \
+             timezone logsave lastsaid rgbtest usetest faretest luggagetest headcount \
              draft playtime lavalamp finish taskcenter hexer stringview
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
@@ -1390,6 +1390,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
 	$(UTILS_DIR)/hw.elf      "utility,system,hardware" \
 	$(UTILS_DIR)/usetest.elf "utility,system,test" \
+	$(UTILS_DIR)/faretest.elf "utility,system,test" \
 	$(UTILS_DIR)/luggagetest.elf "utility,test" \
 	$(UTILS_DIR)/logsave.elf "utility,system,log" \
 	$(UTILS_DIR)/lastsaid.elf "utility,system,log" \

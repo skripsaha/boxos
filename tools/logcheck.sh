@@ -5063,6 +5063,77 @@ run_runnable() {
     chk $? "runnable: and no strand was accused of being runnable and unscheduled"
 }
 
+# fare — the scheduler's Fare, judged by a program (src/userspace/utils/
+# faretest.c): two children spin without entering the kernel, one wearing the
+# Use Context; with none the two divide their core evenly, with it said before
+# they start or while they spin the one wearing it is given three quarters, and
+# a sleep of the program judging them ends on time. On one core and on two —
+# two being one K-Core and one application core, where both children share the
+# only core there is to share: faretest saying SKIP there is a failure, since
+# the shares it skips are the whole point.
+fare_boot() {
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=$2 >/dev/null 2>&1
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    sleep 4
+    if type_cmd "faretest"; then
+        sleep 1
+        key_press ret
+        wait_until "$WAIT_QUIET_S" "faretest's verdict" \
+            'grep -qE "\[FARE\] (PASS|FAIL:)" build/serial.log'
+        sleep 1
+    fi
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+}
+
+run_fare() {
+    echo "== fare: two children on one core — even with no Use Context, three quarters to the one wearing it =="
+    build STRICT=on
+    local cores L
+    for cores in 1 2; do
+        fare_boot "fare$cores" "$cores"
+        L="$SCRATCH/serial.fare$cores.log"
+        grep -q "\[FARE\] PASS" "$L"
+        chk $? "fare: faretest passed on $cores core(s)"
+        ! grep -qE "\[FARE\] (FAIL|SKIP)" "$L"
+        chk $? "fare: and on $cores core(s) no check failed and none was skipped"
+        grep "\[FARE\] FAIL\|\[FARE\] SKIP" "$L" | head -4 | sed 's/^/       /'
+    done
+}
+
+# The oracle measured against itself: a Use Context that costs nothing less,
+# and the same run must FAIL on the shares it gives.
+fare_flat_on() {
+    mutate src/kernel/core/scheduler/scheduler.c
+    python3 - <<'PY'
+p = "src/kernel/core/scheduler/scheduler.c"
+s = open(p).read()
+anchor = "#define SCHED_CONTEXT_FARE_SHARE 3"
+assert anchor in s, "fare mutation anchor missing"
+open(p, "w").write(s.replace(anchor, "#define SCHED_CONTEXT_FARE_SHARE 1 /* logcheck mutation: the context pays the full fare */", 1))
+PY
+    mut_done src/kernel/core/scheduler/scheduler.c "logcheck mutation"
+}
+
+fare_flat_off() {
+    restore src/kernel/core/scheduler/scheduler.c
+}
+
+run_faremut() {
+    echo "== faremut: the Use Context pays the full Fare, and faretest must say the shares are wrong =="
+    fare_flat_on; build STRICT=on
+    fare_boot faremut 1
+    fare_flat_off
+    L="$SCRATCH/serial.faremut.log"
+    grep -q "\[FARE\] FAIL .*75% asked" "$L"
+    chk $? "faremut: faretest named the share the context did not get"
+    ! grep -q "\[FARE\] PASS" "$L"
+    chk $? "faremut: and did not pass"
+
+    build   # leave the tree built from clean sources
+}
+
 run_runnablemut() {
     echo "== runnablemut: schedule() drops one strand after dequeuing it, and Nightwatch must name it =="
     runnable_drop_on; build STRICT=on
@@ -12217,6 +12288,8 @@ case "${1:-both}" in
     kcoreclaimmut) run_kcoreclaimmut ;;
     runnable)   run_runnable ;;
     runnablemut) run_runnablemut ;;
+    fare)        run_fare ;;
+    faremut)     run_faremut ;;
     lostwake)   run_lostwake ;;
     lostwakemut) run_lostwakemut ;;
     chit)       run_chit ;;
@@ -12275,7 +12348,7 @@ case "${1:-both}" in
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
     all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|fare|faremut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|fullvolume|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1
