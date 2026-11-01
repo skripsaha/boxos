@@ -9,6 +9,8 @@
 #include "../use_memory/use_memory.h"
 #include "../mount/away.h"
 #include "block_fail.h"
+#include "../settle/binder.h"
+#include "../settle/endpaper_fact.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -243,6 +245,63 @@ static error_t StandDocketRoom(void)
     return rc;
 }
 
+/*
+ * A file asked for on a ribbon with no next_quire and no room on it is
+ * answered as the state it meets says (ribbon.c, RibbonClaimSay; binder.c,
+ * BinderRibbonWait): told to wait on a Tally — the one under way, or one its
+ * own wait for room writes where the measure grew past the last Tally or a
+ * Tally gives the ring's ground back, the ring not turned since a change was
+ * given room — and refused no-space at once where none can give; nothing
+ * holds a Tally back here. Not made either way: its name's tag not interned,
+ * no stitch laid for it, and a wait it is told is on that Tally, asked of it.
+ * *first the answer.
+ */
+static TestResult StandDocketShutAsk(const char* name, uint64_t* fid, int* first)
+{
+    TestResult   verdict = TEST_PASS;
+    TagFSState*  fs      = tagfs_get_state();
+    RibbonCursor was, now;
+    uint32_t     next  = fs->registry->next_id;
+    bool         under = BinderHoldsGround();
+    bool         waits = !BinderNoTallies() && !BinderNoWrite() &&
+                         __atomic_load_n(&g_binder.room_turns, __ATOMIC_ACQUIRE) < g_binder.ring &&
+                         (under || EndpaperGrown() || __atomic_load_n(&g_binder.turn_gives, __ATOMIC_ACQUIRE));
+    TEST_ASSERT(under || __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE) == NULL,
+                "nothing holds a Tally back: one may be begun");
+    RibbonCursorStand(&was);
+    *first = tagfs_create_file(name, NULL, 0, fid);
+    RibbonCursorStand(&now);
+    TEST_ASSERT_EQ(*first, waits ? -(int)ERR_WOULD_BLOCK : -(int)ERR_TAGFS_NO_SPACE,
+                   "a file is not made where its Born has no room on the ribbon: told to wait on the Tally that "
+                   "gives the ribbon its Quires back where one may, refused where none can");
+    TEST_ASSERT_EQ(fs->registry->next_id, next, "and its name's tag is not interned");
+    TEST_ASSERT(now.off == was.off && now.last == was.last, "and no stitch was laid for it");
+    TEST_ASSERT(*first != -(int)ERR_WOULD_BLOCK || BinderRoomAwaited(),
+                "told to wait, it waits on that Tally, asked of its own wait for room — on nothing else");
+out:
+    return verdict;
+}
+
+/* The file asked for again past each of its waits for room, a turn of the
+ * ring at the most: made with the next_quire a Tally gave, or refused
+ * no-space — never waiting for ever, and no Tally left asked for. *rc the
+ * answer, from the first. */
+static TestResult StandDocketShutWaited(const char* name, uint64_t* fid, int* rc)
+{
+    TestResult verdict = TEST_PASS;
+    uint32_t   waits   = 0;
+    for (; *rc == -(int)ERR_WOULD_BLOCK && waits <= g_binder.ring; waits++) {
+        (void)StandDocketRoom();
+        *rc = tagfs_create_file(name, NULL, 0, fid);
+    }
+    TestEvidence("waits for room the file asked for took", waits);
+    TEST_ASSERT(*rc == 0 || *rc == -(int)ERR_TAGFS_NO_SPACE,
+                "answered within a turn of the ring: made with the next_quire a Tally gave, or refused no-space");
+    TEST_ASSERT(!BinderRoomAwaited(), "and no Tally is left asked for");
+out:
+    return verdict;
+}
+
 /* Whether the ribbon stands in Quire `q`. */
 static bool StandDocketStandsIn(const RibbonQuire* q)
 {
@@ -323,9 +382,9 @@ static TestResult TestStandDocketClaimRefused(void)
 {
     TestResult  verdict = TEST_PASS;
     StandStitch s;
-    TagFSState* fs    = tagfs_get_state();
-    bool        kept  = false, held = false;
+    bool        kept  = false, held = false, named = false;
     error_t     rc    = OK;
+    int         made  = 0;
     uint64_t    fid   = 0, plain = 0, k = 10;
     const char* aside = StandStitchAside(&s);
 
@@ -338,20 +397,27 @@ static TestResult TestStandDocketClaimRefused(void)
     for (; rc == OK && k < 10u + 3u * s.at.quire_blocks; k++)
         rc = StandStitchSayLong(16u * TALLY_SHEET_PAYLOAD, (char)('a' + k % 26u), k, &kept);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_NO_SPACE, "words are laid down until the ribbon runs out");
-    uint32_t next = fs->registry->next_id;
-    TEST_ASSERT_EQ(tagfs_create_file("docket-full.txt", NULL, 0, &fid), -(int)ERR_TAGFS_NO_SPACE,
-                   "a file is not made where its Born has no room on the ribbon and none can come");
-    TEST_ASSERT_EQ(fs->registry->next_id, next, "and its name's tag is not interned");
+    TEST_ASSERT(StandDocketShutAsk("docket-full.txt", &fid, &made) == TEST_PASS,
+                "a file is asked for where the ribbon ran out");
+    TEST_ASSERT(StandDocketShutWaited("docket-full.txt", &fid, &made) == TEST_PASS, "and answered past its waits");
+    if (made == 0) {
+        TEST_ASSERT_EQ(tagfs_delete_file(fid, INK_UNWARRANTED), 0, "the file a Tally gave room for is given up");
+        fid = 0;
+    }
     TEST_ASSERT_EQ(tagfs_delete_file(plain, INK_UNWARRANTED), 0, "a file is given up all the same");
     TEST_ASSERT(TagFSSettle() == OK && SettledGen() == InkedGen(),
                 "and its Quitclaim settles in the rest of the Quire kept for what frees — the word the ribbon "
                 "refused was left out of the stitch that refused it, and holds nothing back");
     BlockMapDerivedStandGrow();
     held = false;
-    TEST_ASSERT_EQ(tagfs_create_file("docket-full.txt", NULL, 0, &fid), -(int)ERR_WOULD_BLOCK,
-                   "with ground back, a create waits for the cycle that gives the ribbon its next_quire");
-    TEST_ASSERT_OK(TagFSSettle(), "that cycle settles");
-    TEST_ASSERT_EQ(tagfs_create_file("docket-full.txt", NULL, 0, &fid), 0, "and the file is made");
+    named = RibbonCursorNow()->next.blocks != 0;
+    TEST_ASSERT_EQ(tagfs_create_file("docket-full.txt", NULL, 0, &fid), named ? 0 : -(int)ERR_WOULD_BLOCK,
+                   "with ground back, a create waits for the cycle that gives the ribbon its next_quire — made at "
+                   "once where a Tally gave it one");
+    if (!named) {
+        TEST_ASSERT_OK(TagFSSettle(), "that cycle settles");
+        TEST_ASSERT_EQ(tagfs_create_file("docket-full.txt", NULL, 0, &fid), 0, "and the file is made");
+    }
     TEST_ASSERT_OK(TagFSSettle(), "its Born settles");
 out:
     if (held)
@@ -392,16 +458,17 @@ out:
 
 /* A file made whose Born the stitch that runs on into the next_quire carries,
  * with the ground cut short of a next_quire's own: the Born settles, the ribbon
- * stands in that Quire with none past it, a create is refused before anything
- * changes and a file given up settles in the rest kept. */
+ * stands in that Quire with none past it, a create is not made — nothing
+ * changes, and a wait it is told is on a Tally and ends within the ring
+ * (StandDocketShutAsk) — and a file given up settles in the rest kept. */
 static TestResult TestStandDocketClaimAcross(void)
 {
     TestResult   verdict = TEST_PASS;
     StandStitch  s;
     RibbonCursor now;
-    TagFSState*  fs    = tagfs_get_state();
     bool         kept  = false, held = false;
-    uint64_t     fid   = 0, more = 0, plain = 0;
+    int          made  = 0;
+    uint64_t     fid   = 0, more = 0, plain = 0, gone = 0;
     const char*  aside = StandStitchAside(&s);
 
     if (aside)
@@ -419,14 +486,17 @@ static TestResult TestStandDocketClaimAcross(void)
     RibbonCursorStand(&now);
     TEST_ASSERT(RibbonQuireSame(&now.quire, &s.at.next) && !now.next.blocks && SettledGen() == InkedGen(),
                 "and its stitch, the Born with it, runs on into the next_quire and settles: no next_quire past it");
-    uint32_t next = fs->registry->next_id;
-    TEST_ASSERT_EQ(tagfs_create_file("across-more.txt", NULL, 0, &more), -(int)ERR_TAGFS_NO_SPACE,
-                   "a file is not made where no room can come");
-    TEST_ASSERT_EQ(fs->registry->next_id, next, "and its name's tag is not interned");
+    TEST_ASSERT(StandDocketShutAsk("across-more.txt", &more, &made) == TEST_PASS,
+                "a file is asked for where the ribbon has no room");
+    TEST_ASSERT(StandDocketShutWaited("across-more.txt", &more, &made) == TEST_PASS, "and answered past its waits");
+    if (made == 0) {
+        TEST_ASSERT_EQ(tagfs_delete_file(more, INK_UNWARRANTED), 0, "the file a Tally gave room for is given up");
+        gone = more;
+    }
     TEST_ASSERT_EQ(tagfs_delete_file(plain, INK_UNWARRANTED), 0, "a file is given up");
     TEST_ASSERT(TagFSSettle() == OK && SettledGen() == InkedGen(), "and its Quitclaim settles in the rest kept");
-    TEST_ASSERT(StandStitchRemount() && StandDocketLive(fid) && StandDocketGone(plain),
-                "mounted again: the file made is there, the one given up is not");
+    TEST_ASSERT(StandStitchRemount() && StandDocketLive(fid) && StandDocketGone(plain) &&
+                (!gone || StandDocketGone(gone)), "mounted again: the file made is there, the ones given up are not");
 out:
     if (held)
         BlockMapDerivedStandGrow();
@@ -436,14 +506,18 @@ out:
 
 /* Ground an open handle still views rests whatever the ribbon does — no cycle
  * brings it back while the handle is open: with no next_quire and no room, a
- * create is refused at once, not told to wait, and no stitch is laid for it. */
+ * create is never told to wait for it — refused at once, or told to wait on a
+ * Tally that gives the ribbon its Quires back, and answered within the ring
+ * while the handle stays open (StandDocketShutWaited) — and no stitch is laid
+ * for it. */
 static TestResult TestStandDocketHandleHolds(void)
 {
     TestResult       verdict = TEST_PASS;
     StandStitch      s;
-    RibbonCursor     was, now;
+    RibbonCursor     was;
     TagFSFileHandle* handle = NULL;
     bool             held   = false;
+    int              made   = 0;
     uint64_t         plain  = 0, first = 0, blocks = 0, fid = 0;
     const char*      aside  = StandStitchAside(&s);
 
@@ -467,10 +541,13 @@ static TestResult TestStandDocketHandleHolds(void)
                 "room asked for closes the Quire early: the ribbon stands in the next with none past it");
     TEST_ASSERT(!BlockMapDerivedIsFree(first) && FallowBlocks() >= blocks,
                 "the lag's stitches settled, and the file's ground rests for the open handle");
-    TEST_ASSERT_EQ(tagfs_create_file("held.txt", NULL, 0, &fid), -(int)ERR_TAGFS_NO_SPACE,
-                   "a file is refused at once: no cycle brings back what a handle views");
-    RibbonCursorStand(&now);
-    TEST_ASSERT(now.off == was.off && now.last == was.last, "and no stitch was laid for it");
+    TEST_ASSERT(StandDocketShutAsk("held.txt", &fid, &made) == TEST_PASS,
+                "a file is asked for: no cycle brings back what a handle views");
+    TEST_ASSERT(StandDocketShutWaited("held.txt", &fid, &made) == TEST_PASS,
+                "and answered past its waits with the handle still open — never told to wait for it");
+    TEST_ASSERT(!BlockMapDerivedIsFree(first), "and the ground the handle views rests still");
+    if (made == 0)
+        TEST_ASSERT_EQ(tagfs_delete_file(fid, INK_UNWARRANTED), 0, "the file a Tally gave room for is given up");
     tagfs_close(handle);
     handle = NULL;
     TEST_ASSERT_OK(TagFSSettle(), "the handle closed, a cycle settles");

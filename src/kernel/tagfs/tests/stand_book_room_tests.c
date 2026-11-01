@@ -30,7 +30,9 @@
 // full volume's wall the reserve holds a write's ground from its take, each
 // slot's own in whole Quires until the free has it, and a write short of room
 // only by the measure of growth waits on the Tally that makes it exact
-// (§16.6 п.8). Every test puts the volume back as it found it.
+// (§16.6 п.8) — and a change short of room on the ribbon waits on the Tally
+// that gives the ribbon its next_quire. Every test puts the volume back as it
+// found it.
 // ============================================================================
 
 #define STAND_BOOK_ROOM_RUNS  16u
@@ -568,6 +570,249 @@ out:
     return verdict;
 }
 
+/* A file of a block made, settled and given up past the newest Tally: its
+ * ground rests until the ribbon leaves the Quire its Quitclaim lies in. */
+static TestResult StandBookRoomGivenUp(StandFreshModel* m, const char* name)
+{
+    TestResult verdict = TEST_PASS;
+    uint64_t   fid     = 0;
+    TEST_ASSERT(StandFreshModelMake(m, TAGFS_BLOCK_SIZE), "room for the file");
+    TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(StandFreshWrite(m, fid, 0, TAGFS_BLOCK_SIZE, 0x3Cu), (int)TAGFS_BLOCK_SIZE,
+                   "a block of it written");
+    TEST_ASSERT_OK(TagFSSettle(), "and settled");
+    TEST_ASSERT_EQ(tagfs_delete_file(fid, INK_UNWARRANTED), 0, "it is given up");
+    fid = 0;
+    TEST_ASSERT_OK(TagFSSettle(), "its Quitclaim settles past the newest Tally");
+out:
+    if (fid)
+        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+    return verdict;
+}
+
+/*
+ * ‼ A CHANGE THAT WAITS FOR A BARRED NEXT_QUIRE WAITS ON THE TALLY THAT LIFTS
+ * THE BAR. A file is given up past the newest Tally and room asked for closes
+ * the Quire its stitch lies in early: the ribbon stands in its next_quire with
+ * none past it, and every free Quire lies on ground kept from the ribbon as the
+ * delete's is (fallow.c, NodeBarred — FallowStandBar). A file asked for waits
+ * for room on the ribbon, and its own wait for room writes the Tally past the
+ * delete — the bar lifted, a next_quire given — within a turn of the ring, each
+ * wait laying no more stitches than the lag's. Waited out a cycle at a time,
+ * the Tally a step between every two, the cycles' stitches spent the rest of
+ * the Quire the ribbon stood in, and the GiB written the moment a GiB was
+ * deleted was refused half-way (fullvolume, roomback). The file asked for
+ * again is made. The runner holds the cadence: no Tally is written but by the
+ * wait.
+ */
+static TestResult TestStandBookRoomBarWaitsTally(void)
+{
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel    m;
+    RibbonCursor       c;
+    uint64_t           made = 0, tallies = 0, last = 0;
+    uint32_t           waits = 0;
+    bool               armed = false;
+    int                rc    = 0;
+    const char*        aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandBookRoomQuiet(), "the volume mounted afresh, the lag's stitches settled past it");
+    TEST_ASSERT(StandBookRoomGivenUp(&m, "book-room-x.bin") == TEST_PASS, "a file is given up");
+    FallowStandBar(RibbonCursorNow()->last);
+    armed = true;
+    TEST_ASSERT_OK(SettleForRoom(), "room is asked for, closing the Quire early");
+    RibbonCursorStand(&c);
+    TEST_ASSERT(!c.next.blocks && c.taken == ERR_WOULD_BLOCK,
+                "the ribbon stands in its next_quire with none past it: every free Quire lies on ground kept from it");
+    tallies = g_binder.tallies;
+    last    = c.last;
+    rc      = tagfs_create_file("book-room-y.bin", NULL, 0, &made);
+    TEST_ASSERT_EQ(rc, -(int)ERR_WOULD_BLOCK, "a file asked for waits for room on the ribbon");
+    for (waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits < g_binder.ring; waits++) {
+        TEST_ASSERT_OK(SettleForRoom(), "its wait for room ends");
+        rc = tagfs_create_file("book-room-y.bin", NULL, 0, &made);
+    }
+    TestEvidence("waits for room the file asked for took", waits);
+    TEST_ASSERT(g_binder.tallies > tallies, "its wait for room writes the Tally past the delete");
+    TEST_ASSERT_EQ(rc, 0, "and the file asked for again is made: the bar lifted, the ribbon names a next_quire");
+    RibbonCursorStand(&c);
+    TestEvidence("stitches the waits laid", c.last - last);
+    TEST_ASSERT(c.last - last <= (uint64_t)waits * (FallowLag() + 2u),
+                "each wait laid no more stitches than the lag's — never the Quire's rest a cycle at a time");
+out:
+    if (armed)
+        FallowStandBar(0);
+    if (made && rc == 0)
+        (void)tagfs_delete_file(made, INK_UNWARRANTED);
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+/* Every free block past the Tallies' reserve promised, and words run the
+ * ribbon on into its next_quire: it stands there with none past it, its ask
+ * refused past the reserve — nothing resting in a Quire it left, no claim or
+ * hold, no stitch in flight, so no cycle makes room on it (ribbon.c,
+ * RibbonRoomFor) and a change short of room is refused at once but for a
+ * Tally. */
+static TestResult StandBookRoomRibbonShut(uint32_t epoch, uint64_t* promised)
+{
+    TestResult   verdict = TEST_PASS;
+    RibbonCursor c;
+    uint64_t     q = RibbonCursorNow()->quire_blocks, left = 0, claimed = 0, reserved = 0;
+    bool         kept = false;
+    while (AllotmentPromise(EndpaperKeeps(q), epoch))
+        (*promised)++;
+    RibbonCursorStand(&c);
+    left = c.quire.blocks * TAGFS_BLOCK_SECTORS - c.off;
+    TEST_ASSERT(left > 2u * c.atom && c.next.blocks, "the ribbon has more than two atoms of its Quire, and a next");
+    TEST_ASSERT_OK(StandStitchSayFilling(left - 2u * c.atom, 'u', 80, &kept), "a word leaves two atoms of it");
+    TEST_ASSERT_OK(StandStitchSayFilling(4u * c.atom, 'v', 81, &kept),
+                   "a word four atoms long runs on into the next_quire and settles");
+    RibbonCursorStand(&c);
+    RibbonClaimsStand(&claimed, &reserved);
+    TEST_ASSERT(!c.next.blocks && c.taken == ERR_TAGFS_NO_SPACE,
+                "every free block past the Tallies' reserve promised: no next_quire past it, refused past the reserve");
+    TEST_ASSERT(FallowLeftBlocks() == 0 && claimed == 0 && reserved == 0,
+                "nothing rests in a Quire the ribbon left and no room is claimed or held: no cycle makes room");
+out:
+    return verdict;
+}
+
+/*
+ * ‼ A CHANGE REFUSED ROOM ON THE RIBBON WAITS ON THE TALLY UNDER WAY. A Tally
+ * is begun and the ribbon shut past the Tallies' reserve (StandBookRoomRibbonShut)
+ * while the Tally under way — whose end asks the next_quire again by the
+ * measure it makes (ribbon.c, RibbonNextAgain) — rests nothing in Fallow for a
+ * cycle to give back. A file asked for waits on it rather than be refused at
+ * once — at a full volume's wall a measure from above refused a next_quire the
+ * exact one gives (§16.6 п.8) — and its wait for room ends that Tally; with
+ * none under way the file is answered, made with what the Tally gave back or
+ * refused no-space, never waiting for ever.
+ */
+static TestResult TestStandBookRoomRibbonWaitsUnderWay(void)
+{
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    uint64_t           made = 0, promised = 0;
+    uint32_t           epoch = 0;
+    bool               under = false;
+    int                rc    = 0;
+    const char*        aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandBookRoomQuiet(), "the volume mounted afresh, the lag's stitches settled past it");
+    TEST_ASSERT(StandBookRoomBegun(), "a Tally is begun, and is under way");
+    under = true;
+    epoch = tagfs_mount_epoch();
+    TEST_ASSERT(StandBookRoomRibbonShut(epoch, &promised) == TEST_PASS, "the ribbon is shut past the reserve");
+    rc = tagfs_create_file("book-room-v.bin", NULL, 0, &made);
+    TEST_ASSERT_EQ(rc, -(int)ERR_WOULD_BLOCK, "a file asked for waits on the Tally under way, not refused at once");
+    TEST_ASSERT_OK(SettleForRoom(), "its wait for room ends");
+    under = BinderHoldsGround();
+    TEST_ASSERT(!under, "and ends the Tally under way");
+    for (uint32_t waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits <= g_binder.ring; waits++) {
+        rc = tagfs_create_file("book-room-v.bin", NULL, 0, &made);
+        if (rc == -(int)ERR_WOULD_BLOCK)
+            TEST_ASSERT_OK(SettleForRoom(), "each wait for room ends");
+    }
+    TEST_ASSERT(rc == 0 || rc == -(int)ERR_TAGFS_NO_SPACE,
+                "with no Tally under way the file is answered: made with what the Tally gave back, or refused "
+                "no-space — never waiting for ever");
+out:
+    if (under)
+        (void)BinderRunWhole();
+    for (; promised > 0; promised--)
+        AllotmentPromiseLetGo(epoch);
+    if (made && rc == 0)
+        (void)tagfs_delete_file(made, INK_UNWARRANTED);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
+/* Whether the reserve a refusal met was measured to the block or a turn of the
+ * ring was waited for (binder.h, BinderRoomMeasured): not from above with no
+ * Tally waited for. */
+static bool StandBookRoomMeasuredBy(void)
+{
+    const char* why      = NULL;
+    const char* measured = BinderRoomMeasured(&why);
+    return strcmp(measured, "to the block by its last Tally") == 0 ||
+           strcmp(measured, "from above past its last Tally, a turn of the ring waited for") == 0;
+}
+
+/*
+ * ‼ A CHANGE REFUSED ROOM ON THE RIBBON BY A MEASURE FROM ABOVE WAITS ON THE
+ * TALLY THAT MAKES IT EXACT. A file is written past the newest Tally — the
+ * Tallies' reserve measured from above (§16.4 п.7) — no Tally is under way,
+ * and the ribbon is shut past that reserve (StandBookRoomRibbonShut). A file
+ * asked for waits rather than be refused at once: at a full volume's wall a
+ * measure from above refused the next_quire with 7168 free under a reserve of
+ * 7424, and the GiB written the moment a GiB was deleted came 3840 blocks
+ * short with no Tally waited for (§16.6 п.8). Its own wait for room writes
+ * that Tally; asked again round after round, it is answered within a turn of
+ * the ring — made with the next_quire the Tally gives, or refused no-space by
+ * a reserve measured to the block or a turn of the ring waited for, no Tally
+ * left asked for. The runner holds the cadence: no Tally is written but by the
+ * wait.
+ */
+static TestResult TestStandBookRoomRibbonWaitsGrown(void)
+{
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandFreshModel    m;
+    uint64_t           fid = 0, made = 0, promised = 0, tallies = 0;
+    uint32_t           epoch = 0, waits = 0;
+    int                rc    = 0;
+    const char*        aside = StandBinderAside(&b);
+
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandBookRoomQuiet(), "the volume mounted afresh, the lag's stitches settled past it");
+    TEST_ASSERT(StandFreshModelMake(&m, TAGFS_BLOCK_SIZE), "room for the file");
+    TEST_ASSERT_EQ(tagfs_create_file("book-room-g.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 0x6Bu), (int)TAGFS_BLOCK_SIZE,
+                   "a block of it written");
+    TEST_ASSERT_OK(TagFSSettle(), "and settled past the newest Tally");
+    epoch = tagfs_mount_epoch();
+    TEST_ASSERT(StandBookRoomRibbonShut(epoch, &promised) == TEST_PASS, "the ribbon is shut past the reserve");
+    TEST_ASSERT(EndpaperGrown() && !BinderHoldsGround(),
+                "the reserve is measured from above past the newest Tally, and no Tally is under way");
+    tallies = g_binder.tallies;
+    rc      = tagfs_create_file("book-room-h.bin", NULL, 0, &made);
+    TEST_ASSERT_EQ(rc, -(int)ERR_WOULD_BLOCK,
+                   "a file asked for waits on the Tally that makes the measure exact, not refused at once");
+    TEST_ASSERT(BinderRoomAwaited(), "that Tally asked of its own wait for room");
+    TEST_ASSERT_OK(SettleForRoom(), "its wait for room ends");
+    TEST_ASSERT(g_binder.tallies > tallies, "and writes the Tally");
+    for (waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits <= g_binder.ring; waits++) {
+        rc = tagfs_create_file("book-room-h.bin", NULL, 0, &made);
+        if (rc == -(int)ERR_WOULD_BLOCK)
+            TEST_ASSERT_OK(SettleForRoom(), "each wait for room ends");
+    }
+    TestEvidence("asks of the file past its first wait", waits);
+    TEST_ASSERT(rc == 0 || (rc == -(int)ERR_TAGFS_NO_SPACE && StandBookRoomMeasuredBy()),
+                "answered within a turn of the ring: made, or refused no-space by a reserve measured to the block "
+                "or a turn of the ring waited for — never from above with no Tally waited for");
+    TEST_ASSERT(!BinderRoomAwaited(), "and no Tally is left asked for");
+out:
+    for (; promised > 0; promised--)
+        AllotmentPromiseLetGo(epoch);
+    if (made && rc == 0)
+        (void)tagfs_delete_file(made, INK_UNWARRANTED);
+    if (fid)
+        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
 /*
  * ‼ A SLOT HELD UNSURE OVER NOTHING SPENDS NO STEP OF THE BAR'S LAG. A Tally
  * whose slot write was refused over a slot that held nothing may stand there
@@ -615,6 +860,12 @@ static const TestCase g_stand_book_room_tests[] = {
     { .name = "stand_book_room_rest_under_tally", .func = TestStandBookRoomRestUnderTally,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_book_room_wait_bounded", .func = TestStandBookRoomWaitBounded,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_book_room_bar_waits_tally", .func = TestStandBookRoomBarWaitsTally,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_book_room_ribbon_waits_under_way", .func = TestStandBookRoomRibbonWaitsUnderWay,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_book_room_ribbon_waits_grown", .func = TestStandBookRoomRibbonWaitsGrown,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_book_room_bar_past_unsure", .func = TestStandBookRoomBarPastUnsure,
       .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },

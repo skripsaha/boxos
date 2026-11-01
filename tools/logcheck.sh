@@ -3909,10 +3909,11 @@ run_haltcycle() {
 #              consistent once the machine halted through bye. On a book the
 #              write waits for the Tallies that make the reserve exact too, and
 #              may be refused no-space past them — the guest's PENDING — by
-#              what the book keeps and holds itself, named, more than when the
-#              volume was first full, the kernel's own word of both at each
-#              refusal and of the reserve measured to the block or a turn of
-#              the ring waited for (spec_v2 §16.6 п.8, logcheck_room.sh
+#              the ground free and the book holds itself, named, more than
+#              when the volume was first full, the kernel's own word of both at
+#              each refusal — of the data, or of the ribbon — and of the
+#              reserve measured to the block or a turn of the ring waited for,
+#              no more free than it keeps (spec_v2 §16.6 п.8, logcheck_room.sh
 #              roomback_book_judge; roombackmut turns it): that much short and
 #              no more, what it took read back whole.
 #   emptyfull  the image as built, `quilltest emptyfull FULLVOLUME_EMPTIES`:
@@ -11883,13 +11884,26 @@ cores_type() {
     type_line "$1"
 }
 
+# The verdict is read once the case's prompt is back: a case whose workers say
+# their own verdicts first — defragdelete's two defraggers, a line each just
+# before its own — was read at the first verdict line, and a read that fell
+# between them took a defragger's PASS for the case's (measured: "defragdelete
+# — defragger: PASS — defragger 1 went round the slots 561 times", FAIL, the
+# case's PENDING one line later). A fault answers at once: no prompt comes
+# back past it.
 cores_answer() {
-    local line=$1 quiet=$2
+    local line=$1 quiet=$2 rc=0
     wait_for_line -E build/serial.log "$CORES_VERDICT|$CORES_FAULT" "$quiet" $((CORES_MARK + 1)) || return 1
+    if tail -n +$((CORES_MARK + 1)) build/serial.log | tr -d '\r' | grep -qaE "$CORES_FAULT"; then
+        rc=1
+    else
+        wait_until "$WAIT_QUIET_S" "the shell's prompt after $line" \
+            '[ "$(tail -n +$((CORES_MARK + 1)) build/serial.log | tr -d "\r" | grep -cE "^(\[[^]]*\] )?~ ")" -ge 2 ]'
+        rc=$?
+    fi
     CORES_SAID=$(tail -n +$((CORES_MARK + 1)) build/serial.log | tr -d '\r' | grep -aE "$CORES_VERDICT" | tail -1)
     [ -n "$CORES_SAID" ] || return 1
-    wait_until "$WAIT_QUIET_S" "the shell's prompt after $line" \
-        '[ "$(tail -n +$((CORES_MARK + 1)) build/serial.log | tr -d "\r" | grep -cE "^(\[[^]]*\] )?~ ")" -ge 2 ]'
+    return $rc
 }
 
 # cores_halt TAG HOW — the machine stopped through `bye`, or the power button
