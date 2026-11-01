@@ -9,7 +9,57 @@
 #include "box/memory.h"
 #include "box/string.h"
 
+/* The key a name is kept under: as written, or, for a name of any case, in
+ * lower case. 0 when it is longer than a name may be. */
+static int BoxAsmPpKey(const char *Name, size_t Length, int Blind, char *Key)
+{
+    size_t Index;
+
+    if (Length > BOXASM_MACRO_NAME)
+        return 0;
+    for (Index = 0; Index < Length; Index++)
+        Key[Index] = Blind && Name[Index] >= 'A' && Name[Index] <= 'Z'
+                         ? (char)(Name[Index] - 'A' + 'a') : Name[Index];
+    Key[Length] = '\0';
+    return 1;
+}
+
 /* ---- Single-line macros -------------------------------------------------- */
+
+/* The live overload of Key with Params parameters in one index. */
+static uint32_t BoxAsmPpFindSingleIn(const BoxAsmPp *Pp, const BoxAsmNameIndex *Names,
+                                     const char *Key, int32_t Params, int *AnyLive)
+{
+    uint32_t Index;
+
+    if (!BoxAsmNameIndexFind(Names, Key, &Index))
+        return 0;
+    for (; Index != 0; Index = Pp->Singles[Index - 1u].Next) {
+        const BoxAsmSingleMacro *Macro = &Pp->Singles[Index - 1u];
+
+        if (!Macro->Live)
+            continue;
+        *AnyLive = 1;
+        if (Macro->ParamCount == Params)
+            return Index;
+    }
+    return 0;
+}
+
+uint32_t BoxAsmPpFindSingle(const BoxAsmPp *Pp, const char *Name, size_t Length,
+                            int32_t Params, int *AnyLive)
+{
+    char Key[BOXASM_MACRO_NAME + 1u];
+    uint32_t Index;
+
+    *AnyLive = 0;
+    if (!BoxAsmPpKey(Name, Length, 0, Key))
+        return 0;
+    if ((Index = BoxAsmPpFindSingleIn(Pp, &Pp->SingleIndex, Key, Params, AnyLive)) != 0)
+        return Index;
+    (void)BoxAsmPpKey(Name, Length, 1, Key);
+    return BoxAsmPpFindSingleIn(Pp, &Pp->SingleBlindIndex, Key, Params, AnyLive);
+}
 
 void BoxAsmPpDropSingle(BoxAsmSingleMacro *Macro)
 {
@@ -20,21 +70,27 @@ void BoxAsmPpDropSingle(BoxAsmSingleMacro *Macro)
     Macro->Live = 0;
 }
 
-/* Name (Params parameters, -1 none) made to stand for Body, which it now owns. */
-static int BoxAsmPpDefine(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPpToken *Name,
-                          int32_t ParamCount, char **Params, char *Body)
+int BoxAsmPpDefine(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPpToken *Name,
+                   int32_t ParamCount, char **Params, char *Body, int Blind)
 {
+    BoxAsmNameIndex *Names = Blind ? &Pp->SingleBlindIndex : &Pp->SingleIndex;
+    char Lookup[BOXASM_MACRO_NAME + 1u];
     uint32_t *Head;
     uint32_t Index;
     uint8_t Fresh;
     char *Key;
-    int AnyLive;
+    int AnyLive = 0;
 
-    Index = BoxAsmPpFindSingle(Pp, Name->Text, Name->Length, ParamCount, &AnyLive);
+    if (!BoxAsmPpKey(Name->Text, Name->Length, Blind, Lookup)) {
+        BoxAsmPpFreeList(Params, (uint32_t)(ParamCount > 0 ? ParamCount : 0));
+        free(Body);
+        return BoxAsmPpFail(Pp, Line, Name->Text, "a macro's name is at most 255 characters", NULL);
+    }
+    Index = BoxAsmPpFindSingleIn(Pp, Names, Lookup, ParamCount, &AnyLive);
     if (Index == 0 && AnyLive) {
         /* Live overloads, none of this count: with parameters only when this
          * is plain, a plain one when this takes parameters. */
-        uint32_t Plain = BoxAsmPpFindSingle(Pp, Name->Text, Name->Length, -1, &AnyLive);
+        uint32_t Plain = BoxAsmPpFindSingleIn(Pp, Names, Lookup, -1, &AnyLive);
 
         if (ParamCount < 0 || Plain != 0) {
             BoxAsmPpFreeList(Params, (uint32_t)(ParamCount > 0 ? ParamCount : 0));
@@ -57,28 +113,28 @@ static int BoxAsmPpDefine(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPp
     if (Pp->SingleCount >= 0xFFFFFFFEu ||
         BoxAsmGrowArray((void **)&Pp->Singles, &Pp->SingleCapacity, Pp->SingleCount,
                         sizeof(BoxAsmSingleMacro)) != 0 ||
-        !(Key = BoxAsmCopyText(Name->Text, Name->Length))) {
+        !(Key = BoxAsmCopyText(Lookup, Name->Length))) {
         BoxAsmPpFreeList(Params, (uint32_t)(ParamCount > 0 ? ParamCount : 0));
         free(Body);
         return -ERR_NO_MEMORY;
     }
-    if (BoxAsmNameIndexClaim(&Pp->SingleIndex, Key, &Head, &Fresh) != 0) {
+    if (BoxAsmNameIndexClaim(Names, Key, &Head, &Fresh) != 0) {
         free(Key);
         BoxAsmPpFreeList(Params, (uint32_t)(ParamCount > 0 ? ParamCount : 0));
         free(Body);
         return -ERR_NO_MEMORY;
     }
     Pp->Singles[Pp->SingleCount] = (BoxAsmSingleMacro){
-        Key, ParamCount, Params, Body, *Head, 1
+        Key, ParamCount, Params, Body, *Head, 1, (uint8_t)(Blind != 0)
     };
     *Head = (uint32_t)++Pp->SingleCount;
     return 0;
 }
 
 /* %define NAME body, %define NAME(a, b) body, and %xdefine, its body expanded
- * where it is written. */
+ * where it is written; %idefine and %ixdefine, Blind, of a name in any case. */
 int BoxAsmPpParseDefine(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest,
-                               int Expand)
+                        int Expand, int Blind)
 {
     BoxAsmPpToken Name;
     char **Params = NULL;
@@ -142,11 +198,12 @@ int BoxAsmPpParseDefine(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest
             return Rc != 0 ? Rc : -ERR_NO_MEMORY;
         }
     }
-    return BoxAsmPpDefine(Pp, Line, &Name, ParamCount, Params, Text);
+    return BoxAsmPpDefine(Pp, Line, &Name, ParamCount, Params, Text, Blind);
 }
 
-/* %assign NAME expression: the name stands for the expression's value. */
-int BoxAsmPpParseAssign(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest)
+/* %assign NAME expression: the name stands for the expression's value;
+ * %iassign, Blind, a name of any case. */
+int BoxAsmPpParseAssign(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, int Blind)
 {
     BoxAsmPpToken Name;
     char Digits[24];
@@ -170,24 +227,33 @@ int BoxAsmPpParseAssign(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest
         Digits[sizeof(Digits) - 1u - Count++] = '-';
     if (!(Text = BoxAsmCopyText(Digits + sizeof(Digits) - Count, Count)))
         return -ERR_NO_MEMORY;
-    return BoxAsmPpDefine(Pp, Line, &Name, -1, NULL, Text);
+    return BoxAsmPpDefine(Pp, Line, &Name, -1, NULL, Text, Blind);
 }
 
+/* The overloads of one key in one index dropped. */
+static void BoxAsmPpDropAll(BoxAsmPp *Pp, const BoxAsmNameIndex *Names, const char *Key)
+{
+    uint32_t Index;
+
+    if (BoxAsmNameIndexFind(Names, Key, &Index))
+        for (; Index != 0; Index = Pp->Singles[Index - 1u].Next)
+            BoxAsmPpDropSingle(&Pp->Singles[Index - 1u]);
+}
+
+/* %undef NAME: the name in its case, and an %idefine of it in any. */
 int BoxAsmPpUndefine(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest)
 {
     BoxAsmPpToken Name;
     char Key[BOXASM_MACRO_NAME + 1u];
-    uint32_t Index;
     int Rc;
 
     Rest = BoxAsmPpSpaces(Rest);
     if ((Rc = BoxAsmPpName(Pp, Line, Rest, "expected the name to %undef", &Name)) != 0)
         return Rc;
-    memcpy(Key, Name.Text, Name.Length);
-    Key[Name.Length] = '\0';
-    if (BoxAsmNameIndexFind(&Pp->SingleIndex, Key, &Index))
-        for (; Index != 0; Index = Pp->Singles[Index - 1u].Next)
-            BoxAsmPpDropSingle(&Pp->Singles[Index - 1u]);
+    (void)BoxAsmPpKey(Name.Text, Name.Length, 0, Key);
+    BoxAsmPpDropAll(Pp, &Pp->SingleIndex, Key);
+    (void)BoxAsmPpKey(Name.Text, Name.Length, 1, Key);
+    BoxAsmPpDropAll(Pp, &Pp->SingleBlindIndex, Key);
     return BoxAsmPpNothingMore(Pp, Line, Name.Text + Name.Length);
 }
 
@@ -218,9 +284,10 @@ static const char *BoxAsmPpCount(const char *Text, uint32_t *Out)
 }
 
 /* %macro NAME n, n-m, n-*, with '+' for a greedy last parameter, .nolist,
- * and the defaults of the parameters past n. */
+ * and the defaults of the parameters past n; %imacro, Blind, called in any
+ * case. */
 int BoxAsmPpParseMacro(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest,
-                              BoxAsmMultiMacro *Macro)
+                       BoxAsmMultiMacro *Macro, int Blind)
 {
     BoxAsmPpToken Name;
     const char *At;
@@ -268,6 +335,7 @@ int BoxAsmPpParseMacro(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest,
         return -ERR_NO_MEMORY;
     }
     Macro->Defined = Line->Line;
+    Macro->Blind = (uint8_t)(Blind != 0);
     return 0;
 }
 
@@ -284,13 +352,14 @@ void BoxAsmPpDropMulti(BoxAsmMultiMacro *Macro)
 int BoxAsmPpRegister(BoxAsmPp *Pp, BoxAsmPpCollect *Collect)
 {
     BoxAsmMultiMacro *Macro = &Collect->Macro;
+    BoxAsmNameIndex *Names = Macro->Blind ? &Pp->MultiBlindIndex : &Pp->MultiIndex;
     uint32_t Index = 0;
     uint32_t *Head;
     uint8_t Fresh;
     char Key[BOXASM_MACRO_NAME + 1u];
 
-    memcpy(Key, Macro->Name, strlen(Macro->Name) + 1u);
-    if (BoxAsmNameIndexFind(&Pp->MultiIndex, Key, &Index)) {
+    (void)BoxAsmPpKey(Macro->Name, strlen(Macro->Name), Macro->Blind, Key);
+    if (BoxAsmNameIndexFind(Names, Key, &Index)) {
         for (; Index != 0; Index = Pp->Multis[Index - 1u].Next) {
             BoxAsmMultiMacro *Other = &Pp->Multis[Index - 1u];
             uint64_t OtherMax = Other->Greedy ? BOXASM_MACRO_ANY : Other->Max;
@@ -316,7 +385,9 @@ int BoxAsmPpRegister(BoxAsmPp *Pp, BoxAsmPpCollect *Collect)
     Macro->BodyCount = (uint32_t)Collect->Count;
     Collect->Lines = NULL;
     Collect->Count = 0;
-    if (BoxAsmNameIndexClaim(&Pp->MultiIndex, Macro->Name, &Head, &Fresh) != 0)
+    if (Macro->Blind)                          /* the index keeps the key it is given */
+        memcpy(Macro->Name, Key, strlen(Key));
+    if (BoxAsmNameIndexClaim(Names, Macro->Name, &Head, &Fresh) != 0)
         return -ERR_NO_MEMORY;
     Macro->Next = *Head;
     Macro->Live = 1;
@@ -326,15 +397,18 @@ int BoxAsmPpRegister(BoxAsmPp *Pp, BoxAsmPpCollect *Collect)
     return 0;
 }
 
-int BoxAsmPpUnmacro(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest)
+/* %unmacro NAME counts, and %unimacro, Blind, of an %imacro. */
+int BoxAsmPpUnmacro(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, int Blind)
 {
     BoxAsmMultiMacro Spec;
+    char Key[BOXASM_MACRO_NAME + 1u];
     uint32_t Index;
-    int Rc = BoxAsmPpParseMacro(Pp, Line, Rest, &Spec);
+    int Rc = BoxAsmPpParseMacro(Pp, Line, Rest, &Spec, Blind);
 
     if (Rc != 0)
         return Rc;
-    if (BoxAsmNameIndexFind(&Pp->MultiIndex, Spec.Name, &Index)) {
+    (void)BoxAsmPpKey(Spec.Name, strlen(Spec.Name), Blind, Key);
+    if (BoxAsmNameIndexFind(Blind ? &Pp->MultiBlindIndex : &Pp->MultiIndex, Key, &Index)) {
         for (; Index != 0; Index = Pp->Multis[Index - 1u].Next) {
             BoxAsmMultiMacro *Macro = &Pp->Multis[Index - 1u];
 
@@ -351,21 +425,32 @@ int BoxAsmPpUnmacro(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest)
     return Rc;
 }
 
-uint32_t BoxAsmPpFindMulti(const BoxAsmPp *Pp, const char *Name, size_t Length)
+/* The first live overload of a name in one index. */
+static uint32_t BoxAsmPpFindMultiIn(const BoxAsmPp *Pp, const BoxAsmNameIndex *Names,
+                                    const char *Key)
 {
-    char Key[BOXASM_MACRO_NAME + 1u];
     uint32_t Index;
 
-    if (Length > BOXASM_MACRO_NAME)
-        return 0;
-    memcpy(Key, Name, Length);
-    Key[Length] = '\0';
-    if (!BoxAsmNameIndexFind(&Pp->MultiIndex, Key, &Index))
+    if (!BoxAsmNameIndexFind(Names, Key, &Index))
         return 0;
     for (; Index != 0; Index = Pp->Multis[Index - 1u].Next)
         if (Pp->Multis[Index - 1u].Live)
             return Index;
     return 0;
+}
+
+/* A macro of the name as written, else an %imacro of it in any case. */
+uint32_t BoxAsmPpFindMulti(const BoxAsmPp *Pp, const char *Name, size_t Length)
+{
+    char Key[BOXASM_MACRO_NAME + 1u];
+    uint32_t Index;
+
+    if (!BoxAsmPpKey(Name, Length, 0, Key))
+        return 0;
+    if ((Index = BoxAsmPpFindMultiIn(Pp, &Pp->MultiIndex, Key)) != 0)
+        return Index;
+    (void)BoxAsmPpKey(Name, Length, 1, Key);
+    return BoxAsmPpFindMultiIn(Pp, &Pp->MultiBlindIndex, Key);
 }
 
 /* Whether a live overload of the macro takes Count parameters. */

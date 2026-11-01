@@ -21,10 +21,12 @@ void BoxAsmPpCloseConditions(BoxAsmPp *Pp, size_t Count)
 
 typedef enum {
     BOXASM_PP_IF_VALUE = 0, BOXASM_PP_IF_DEF, BOXASM_PP_IF_IDN, BOXASM_PP_IF_IDNI,
-    BOXASM_PP_IF_NUM, BOXASM_PP_IF_STR, BOXASM_PP_IF_ID, BOXASM_PP_IF_MACRO
+    BOXASM_PP_IF_NUM, BOXASM_PP_IF_STR, BOXASM_PP_IF_ID, BOXASM_PP_IF_MACRO, BOXASM_PP_IF_CTX
 } BoxAsmPpTest;
 
-static const char *const BoxAsmPpTests[] = { "", "def", "idn", "idni", "num", "str", "id", "macro" };
+static const char *const BoxAsmPpTests[] = {
+    "", "def", "idn", "idni", "num", "str", "id", "macro", "ctx"
+};
 
 /* Which test a %if or %elif spelling asks: if, ifn, ifdef, ifndef, ifidn and
  * the rest. Returns 1 for %if*, 2 for %elif*, 0 for neither. */
@@ -110,6 +112,8 @@ static int BoxAsmPpTestOf(BoxAsmPp *Pp, const BoxAsmPpLine *Line, BoxAsmPpTest T
     int AnyLive;
     int Rc;
 
+    if (Test == BOXASM_PP_IF_CTX)
+        return BoxAsmPpContextIs(Pp, Line, Rest, Truth);
     if (Test == BOXASM_PP_IF_DEF || Test == BOXASM_PP_IF_MACRO) {
         const char *After;
 
@@ -196,6 +200,7 @@ int BoxAsmPpCondition(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPpToke
     BoxAsmCondition *Top = Pp->ConditionCount > Base ? &Pp->Conditions[Pp->ConditionCount - 1u] : NULL;
     BoxAsmBuffer Substituted = { 0 };
     BoxAsmPpLine Working = *Line;
+    BoxAsmBuffer Lead = { 0 };
     BoxAsmPpTest Test;
     int Negate;
     int Kind = BoxAsmPpConditionWord(Word, &Test, &Negate);
@@ -239,10 +244,15 @@ int BoxAsmPpCondition(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPpToke
             Working.Text = (const char *)Substituted.Data;
             (void)BoxAsmPpDirective(Working.Text, &Again, &Rest);
         }
-        Rc = BoxAsmPpTestOf(Pp, &Working, Test, Rest, &Truth);
+        /* %ifdef %$name asks of the context's own name. */
+        if (Test == BOXASM_PP_IF_DEF || Test == BOXASM_PP_IF_MACRO)
+            Rc = BoxAsmPpContextLead(Pp, &Working, &Rest, &Lead);
+        if (Rc == 0)
+            Rc = BoxAsmPpTestOf(Pp, &Working, Test, Rest, &Truth);
         Truth ^= Negate;
     }
     BoxAsmBufferRelease(&Substituted);
+    BoxAsmBufferRelease(&Lead);
     if (Rc != 0)
         return Rc;
     if (Kind == 1)

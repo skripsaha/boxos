@@ -30,6 +30,7 @@ typedef struct {
     char     *Body;
     uint32_t  Next;
     uint8_t   Live;
+    uint8_t   Blind;           /* %idefine: its name matches in any case */
 } BoxAsmSingleMacro;
 
 /* A multi-line macro, overloaded by the counts of parameters it takes. */
@@ -45,6 +46,7 @@ typedef struct {
     uint32_t      Defined;
     uint32_t      Next;
     uint8_t       Live;
+    uint8_t       Blind;       /* %imacro: its name matches in any case */
 } BoxAsmMultiMacro;
 
 /* The parameters of the macro call a line is expanded in. */
@@ -55,6 +57,17 @@ typedef struct {
     uint32_t Unique;           /* the number of its %%labels */
     uint32_t Reps;             /* %rep loops open in it, for %exitrep */
 } BoxAsmCall;
+
+/* One context of %push: its name ("" when it was given none), the number
+ * its local names are made unique by, and the line that opened it. */
+typedef struct {
+    char    *Name;
+    uint32_t Number;
+    uint32_t File;
+    uint32_t Line;
+    uint32_t Frame;
+    char    *Text;
+} BoxAsmPpContext;
 
 /* One open %if: whether its branch is taken, and what it knows of the rest. */
 typedef struct {
@@ -71,22 +84,28 @@ typedef struct {
     BoxAsmAssembler   *Asm;
     BoxAsmExpansion   *Out;
     BoxAsmFiles       *Files;      /* where %includes are found; NULL: nowhere */
+    BoxAsmBuffer      *Said;       /* where %warning's lines go; NULL: nowhere */
     uint64_t          *Open;       /* the files being read, by id, the source first */
     size_t             OpenCount;
     size_t             OpenCapacity;
     char             **Homes;      /* each file's home, by its index in Out->Files */
     size_t             HomeCapacity;
     BoxAsmNameIndex    SingleIndex;
+    BoxAsmNameIndex    SingleBlindIndex; /* %idefine'd names, in lower case */
     BoxAsmSingleMacro *Singles;
     size_t             SingleCount;
     size_t             SingleCapacity;
     BoxAsmNameIndex    MultiIndex;
+    BoxAsmNameIndex    MultiBlindIndex;  /* %imacro'd names, in lower case */
     BoxAsmMultiMacro  *Multis;
     size_t             MultiCount;
     size_t             MultiCapacity;
     BoxAsmCondition   *Conditions;
     size_t             ConditionCount;
     size_t             ConditionCapacity;
+    BoxAsmPpContext   *Contexts;   /* %push's stack, its top last */
+    size_t             ContextCount;
+    size_t             ContextCapacity;
     BoxAsmCall        *Call;       /* the call being expanded, NULL outside one */
     uint32_t           Unique;     /* the last %%label number given */
     uint32_t           OuterReps;  /* %rep loops open outside any call */
@@ -107,10 +126,42 @@ int BoxAsmPpFrame(BoxAsmPp *Pp, uint8_t Kind, const char *Name, const BoxAsmPpLi
 /* The lines of one body: a file, a macro's call, a %rep's pass. */
 int BoxAsmPpLines(BoxAsmPp *Pp, const BoxAsmPpLine *Lines, size_t Count);
 
+/* ---- boxasm_macro_context.c --------------------------------------------- */
+
+/* %push [name], %pop [name] and %repl name. */
+int  BoxAsmPpPush(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
+int  BoxAsmPpPop(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
+int  BoxAsmPpReplace(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
+/* %ifctx name...: whether the top context is called one of the names. */
+int  BoxAsmPpContextIs(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, int *Truth);
+/* Text with each %$name, %$$name and deeper written as the name the context
+ * gives it, ..@N.name, as it stands now; Out is Text itself (*Out == Text)
+ * when it names none. */
+int  BoxAsmPpContextText(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text,
+                         BoxAsmBuffer *Buffer, const char **Out);
+/* A directive whose first word, at *Rest, is %$name: the line with that word
+ * the context's own, in Buffer, *Working and *Rest moved into it. */
+int  BoxAsmPpContextLead(BoxAsmPp *Pp, BoxAsmPpLine *Working, const char **Rest,
+                         BoxAsmBuffer *Buffer);
+/* A context left open at the end of the source is refused at its %push. */
+int  BoxAsmPpContextsClosed(BoxAsmPp *Pp);
+void BoxAsmPpDropContexts(BoxAsmPp *Pp);
+
+/* ---- boxasm_macro_string.c ----------------------------------------------- */
+
+/* %strlen NAME string, %substr NAME string, start[, length], and %strcat
+ * NAME string, string...: NAME defined as the length or the string made. */
+int BoxAsmPpStrlen(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
+int BoxAsmPpSubstr(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
+int BoxAsmPpStrcat(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
+
 /* ---- boxasm_macro_include.c --------------------------------------------- */
 
 /* %include "name" tags... [everywhere]: the one file it means, read here. */
 int BoxAsmPpInclude(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
+/* An ordinary line about to be put out: when it is an incbin, the one file
+ * it means read, its bytes kept for the line. */
+int BoxAsmPpIncbin(BoxAsmPp *Pp, const BoxAsmPpLine *Line);
 
 /* ---- boxasm_macro_text.c ------------------------------------------------ */
 
@@ -131,6 +182,8 @@ typedef struct {
 
 /* The token at *At, *At moved past it. */
 void BoxAsmPpNext(const char *Line, size_t *At, BoxAsmPpToken *Out);
+/* Whether a name may hold the character past its first. */
+int  BoxAsmPpPart(char Ch);
 int  BoxAsmPpWordIs(const BoxAsmPpToken *Token, const char *Word);
 
 /* A refusal at a column of a line, the line shown and the calls it came by. */
@@ -154,8 +207,9 @@ int BoxAsmPpExpand(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text,
 int BoxAsmPpEvaluate(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text,
                      int64_t *Out);
 
-/* The live single-line macro called Name with Params parameters (-1: none);
- * 0 when there is none. Returns its index + 1. */
+/* The live single-line macro called Name with Params parameters (-1: none),
+ * defined in that case or with %idefine in any; 0 when there is none.
+ * Returns its index + 1. */
 uint32_t BoxAsmPpFindSingle(const BoxAsmPp *Pp, const char *Name, size_t Length,
                             int32_t Params, int *AnyLive);
 
@@ -214,15 +268,20 @@ typedef struct {
 } BoxAsmPpCollect;
 
 void     BoxAsmPpDropSingle(BoxAsmSingleMacro *Macro);
-int      BoxAsmPpParseDefine(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, int Expand);
-int      BoxAsmPpParseAssign(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
+/* Name made to stand for Body (Params parameters, -1 none), which it owns;
+ * Blind, in any case. */
+int      BoxAsmPpDefine(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPpToken *Name,
+                        int32_t ParamCount, char **Params, char *Body, int Blind);
+int      BoxAsmPpParseDefine(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, int Expand,
+                             int Blind);
+int      BoxAsmPpParseAssign(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, int Blind);
 int      BoxAsmPpUndefine(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
 void     BoxAsmPpDropBody(BoxAsmPpLine *Lines, size_t Count);
 int      BoxAsmPpParseMacro(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest,
-                            BoxAsmMultiMacro *Macro);
+                            BoxAsmMultiMacro *Macro, int Blind);
 void     BoxAsmPpDropMulti(BoxAsmMultiMacro *Macro);
 int      BoxAsmPpRegister(BoxAsmPp *Pp, BoxAsmPpCollect *Collect);
-int      BoxAsmPpUnmacro(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest);
+int      BoxAsmPpUnmacro(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, int Blind);
 uint32_t BoxAsmPpFindMulti(const BoxAsmPp *Pp, const char *Name, size_t Length);
 int      BoxAsmPpTakes(const BoxAsmPp *Pp, uint32_t Index, uint32_t Count);
 

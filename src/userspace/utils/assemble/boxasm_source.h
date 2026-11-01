@@ -23,14 +23,15 @@ struct BoxAsmFiles {
 /* What to assemble: the source's text and name and, when it is a file of a
  * volume, which file, the tags it was found among — its home, "" for the
  * whole volume — and the volume its %includes are found on (NULL: the
- * source includes nothing). */
+ * source includes nothing); and where what it says goes (NULL: nowhere). */
 typedef struct {
-    const char  *Text;
-    size_t       Size;
-    const char  *Name;
-    uint64_t     Id;
-    const char  *Home;
-    BoxAsmFiles *Files;
+    const char   *Text;
+    size_t        Size;
+    const char   *Name;
+    uint64_t      Id;
+    const char   *Home;
+    BoxAsmFiles  *Files;
+    BoxAsmBuffer *Said;   /* what %warning says, a line each: file:line: warning: text */
 } BoxAsmSource;
 
 /* Assemble BoxASM source into an x86-64 ELF relocatable object: the program
@@ -68,7 +69,8 @@ typedef struct {
     const char *Tags;          /* a comma list, "" for none */
     const char *Home;
     uint8_t     Everywhere;
-    uint8_t     Included;      /* asked by a %include: what to write is said as one */
+    const char *Directive;     /* asked by a line, %include or incbin: what to write is
+                                  said as such a line; NULL when the command asks */
 } BoxAsmLookup;
 
 /* The one file a lookup means: 0 and its id. Otherwise the refusal said in

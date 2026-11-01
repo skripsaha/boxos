@@ -20,7 +20,7 @@ static int BoxAsmPpDigit(char Ch)
     return Ch >= '0' && Ch <= '9';
 }
 
-static int BoxAsmPpPart(char Ch)
+int BoxAsmPpPart(char Ch)
 {
     return BoxAsmPpLetter(Ch) || BoxAsmPpDigit(Ch) || Ch == '.' || Ch == '@';
 }
@@ -358,31 +358,6 @@ int BoxAsmPpSubstitute(BoxAsmPp *Pp, const BoxAsmPpLine *Line, BoxAsmBuffer *Out
 
 /* ---- Single-line macros -------------------------------------------------- */
 
-uint32_t BoxAsmPpFindSingle(const BoxAsmPp *Pp, const char *Name, size_t Length,
-                            int32_t Params, int *AnyLive)
-{
-    char Key[BOXASM_MACRO_NAME + 1u];
-    uint32_t Index;
-
-    *AnyLive = 0;
-    if (Length > BOXASM_MACRO_NAME)
-        return 0;
-    memcpy(Key, Name, Length);
-    Key[Length] = '\0';
-    if (!BoxAsmNameIndexFind(&Pp->SingleIndex, Key, &Index))
-        return 0;
-    for (; Index != 0; Index = Pp->Singles[Index - 1u].Next) {
-        const BoxAsmSingleMacro *Macro = &Pp->Singles[Index - 1u];
-
-        if (!Macro->Live)
-            continue;
-        *AnyLive = 1;
-        if (Macro->ParamCount == Params)
-            return Index;
-    }
-    return 0;
-}
-
 /* The macros an expansion is inside, which it does not expand again. */
 typedef struct BoxAsmPpOff {
     uint32_t                   Macro;
@@ -517,6 +492,8 @@ static int BoxAsmPpExpandWord(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char
                               const BoxAsmPpOff *Off, uintptr_t Start)
 {
     BoxAsmBuffer Bound = { 0 };
+    BoxAsmBuffer Local = { 0 };
+    const char *Body = NULL;
     BoxAsmPpOff Inner;
     char **Args = NULL;
     uint32_t Count = 0;
@@ -561,9 +538,12 @@ static int BoxAsmPpExpandWord(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char
     BoxAsmPpFreeList(Args, Count);
     Inner.Macro = Macro;
     Inner.Up = Off;
+    if (Rc == 0)                               /* a context's name in it is the context's now */
+        Rc = BoxAsmPpContextText(Pp, Line, (const char *)Bound.Data, &Local, &Body);
     if (Rc == 0)
-        Rc = BoxAsmPpExpandText(Pp, Line, (const char *)Bound.Data, Out, &Inner, Start);
+        Rc = BoxAsmPpExpandText(Pp, Line, Body, Out, &Inner, Start);
     BoxAsmBufferRelease(&Bound);
+    BoxAsmBufferRelease(&Local);
     return Rc;
 }
 
@@ -592,12 +572,15 @@ static int BoxAsmPpExpandText(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char
 
 int BoxAsmPpExpand(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text, BoxAsmBuffer *Out)
 {
+    BoxAsmBuffer Local = { 0 };
     size_t At = 0;
     BoxAsmPpToken Token;
     int Rc;
 
     Out->Size = 0;
-    Rc = BoxAsmPpExpandText(Pp, Line, Text, Out, NULL, (uintptr_t)__builtin_frame_address(0));
+    Rc = BoxAsmPpContextText(Pp, Line, Text, &Local, &Text);
+    if (Rc == 0)
+        Rc = BoxAsmPpExpandText(Pp, Line, Text, Out, NULL, (uintptr_t)__builtin_frame_address(0));
     if (Rc == 0) {                             /* the comment goes along as it was */
         do
             BoxAsmPpNext(Text, &At, &Token);
@@ -606,6 +589,7 @@ int BoxAsmPpExpand(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Text, Box
     }
     if (Rc == 0)
         Rc = BoxAsmPpEndText(Out);
+    BoxAsmBufferRelease(&Local);
     return BoxAsmPpTooLarge(Pp, Line, Rc);
 }
 

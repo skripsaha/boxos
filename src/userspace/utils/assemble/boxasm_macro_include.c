@@ -40,27 +40,43 @@ static int BoxAsmPpWordEnds(char C)
     return C == '\0' || C == ' ' || C == '\t' || C == ',' || C == ';';
 }
 
+static int BoxAsmPpNoQuotes(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *At,
+                            const char *Directive)
+{
+    BoxAsmMessage Message;
+
+    BoxAsmPpFailBegin(Pp, Line, At, &Message);
+    BoxAsmMessageText(&Message, "expected the file's name in quotes: ");
+    BoxAsmMessageText(&Message, Directive);
+    BoxAsmMessageText(&Message, Directive[0] == '%' ? " \"math.asm\"" : " \"data.bin\"");
+    return BoxAsmPpFailEnd(Pp, Line, At, &Message);
+}
+
 /* NASM's <name> looks along the include paths, and files here have none: the
  * line to write instead is said, the same name in quotes. */
-static int BoxAsmPpAngle(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *At)
+static int BoxAsmPpAngle(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *At,
+                         const char *Directive)
 {
     const char *Close = strchr(At + 1, '>');
     BoxAsmMessage Message;
 
     if (!Close || Close == At + 1 || memchr(At + 1, '"', (size_t)(Close - At - 1)))
-        return BoxAsmPpFail(Pp, Line, At, "expected the file's name in quotes: %include \"math.asm\"",
-                            NULL);
+        return BoxAsmPpNoQuotes(Pp, Line, At, Directive);
     BoxAsmPpFailBegin(Pp, Line, At, &Message);
-    BoxAsmMessageText(&Message, "files are found by name and tags, not along a path: write %include \"");
+    BoxAsmMessageText(&Message, "files are found by name and tags, not along a path: write ");
+    BoxAsmMessageText(&Message, Directive);
+    BoxAsmMessageText(&Message, " \"");
     BoxAsmMessageSpan(&Message, At + 1, (size_t)(Close - At - 1));
     BoxAsmMessageText(&Message, "\", and after it a tag it wears, or everywhere, to say which");
     return BoxAsmPpFailEnd(Pp, Line, At, &Message);
 }
 
-/* The name in quotes, then words up to the end or a comment: `everywhere`,
- * or a tag. */
-static int BoxAsmPpAskOf(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, BoxAsmPpAsk *Ask)
+/* The name in quotes, then words up to the end or a comment — or, for
+ * incbin, a comma — `everywhere`, or a tag. */
+static int BoxAsmPpAskOf(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, BoxAsmPpAsk *Ask,
+                         const char *Directive)
 {
+    int Incbin = Directive[0] != '%';
     BoxAsmBuffer Bytes = { 0 };
     BoxAsmLexer Lexer;
     BoxAsmToken Token;
@@ -70,10 +86,9 @@ static int BoxAsmPpAskOf(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Res
 
     Ask->At = At;
     if (*At == '<')
-        return BoxAsmPpAngle(Pp, Line, At);
+        return BoxAsmPpAngle(Pp, Line, At, Directive);
     if (*At != '"' && *At != '\'' && *At != '`')
-        return BoxAsmPpFail(Pp, Line, At, "expected the file's name in quotes: %include \"math.asm\"",
-                            NULL);
+        return BoxAsmPpNoQuotes(Pp, Line, At, Directive);
     BoxAsmLexBegin(&Lexer, At, strlen(At));
     if (BoxAsmLexNext(&Lexer, &Token, &Why) != 0)
         return BoxAsmPpFail(Pp, Line, At, Why, NULL);
@@ -91,9 +106,9 @@ static int BoxAsmPpAskOf(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Res
     for (At += Token.Length;;) {
         const char *Word;
 
-        while (*At == ' ' || *At == '\t' || *At == ',')
+        while (*At == ' ' || *At == '\t' || (*At == ',' && !Incbin))
             At++;
-        if (*At == '\0' || *At == ';')
+        if (*At == '\0' || *At == ';' || *At == ',')
             return 0;
         for (Word = At; !BoxAsmPpWordEnds(*At); At++) {
             if (*At == '"' || *At == '\'' || *At == '`')
@@ -236,7 +251,7 @@ int BoxAsmPpInclude(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest)
 
     memset(&Ask, 0, sizeof(Ask));
     if ((Rc = BoxAsmPpExpandRest(Pp, Line, Rest, &Expanded, &Working, &After)) != 0 ||
-        (Rc = BoxAsmPpAskOf(Pp, &Working, After, &Ask)) != 0)
+        (Rc = BoxAsmPpAskOf(Pp, &Working, After, &Ask, "%include")) != 0)
         goto Done;
     if (BoxAsmBufferAppend(&Ask.Tags, "", 1) != 0) {     /* the list as text */
         Rc = -ERR_NO_MEMORY;
@@ -251,7 +266,7 @@ int BoxAsmPpInclude(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest)
     Lookup.Tags = (const char *)Ask.Tags.Data;
     Lookup.Home = Pp->Homes[Working.File];
     Lookup.Everywhere = Ask.Everywhere;
-    Lookup.Included = 1;
+    Lookup.Directive = "%include";
     if ((Rc = BoxAsmLocate(Pp->Files, &Lookup, &Id, &Summary, &Details)) != 0) {
         if (Rc != -ERR_NO_MEMORY)
             Rc = BoxAsmPpNotFound(Pp, &Working, &Ask, Rc, &Summary, &Details);
@@ -273,6 +288,80 @@ int BoxAsmPpInclude(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest)
     Rc = BoxAsmPpReadIn(Pp, &Working, &Ask, Id, Ask.Everywhere ? Lookup.Tags : Lookup.Home);
 Done:
     BoxAsmBufferRelease(&Expanded);
+    BoxAsmBufferRelease(&Summary);
+    BoxAsmBufferRelease(&Details);
+    BoxAsmPpAskRelease(&Ask);
+    return Rc;
+}
+
+/* incbin "name" tags... [everywhere][, skip[, count]]: the file found as
+ * %include finds one, its bytes kept for the line; how many of them the
+ * program takes is the assembler's to read from the rest. */
+int BoxAsmPpIncbin(BoxAsmPp *Pp, const BoxAsmPpLine *Line)
+{
+    BoxAsmExpansion *Out = Pp->Out;
+    BoxAsmBuffer Summary = { 0 };
+    BoxAsmBuffer Details = { 0 };
+    BoxAsmLookup Lookup;
+    BoxAsmPpToken Token;
+    BoxAsmPpAsk Ask;
+    size_t At = 0;
+    uint64_t Id = 0;
+    char *Bytes = NULL;
+    size_t Size = 0;
+    int Rc;
+
+    do BoxAsmPpNext(Line->Text, &At, &Token);
+    while (Token.Kind != BOXASM_PP_END && !(Token.Kind == BOXASM_PP_WORD && BoxAsmPpWordIs(&Token, "incbin")));
+    if (Token.Kind == BOXASM_PP_END)
+        return 0;
+    memset(&Ask, 0, sizeof(Ask));
+    if ((Rc = BoxAsmPpAskOf(Pp, Line, Token.Text + Token.Length, &Ask, "incbin")) != 0)
+        goto Done;
+    if (BoxAsmBufferAppend(&Ask.Tags, "", 1) != 0) {
+        Rc = -ERR_NO_MEMORY;
+        goto Done;
+    }
+    if (!Pp->Files) {
+        Rc = BoxAsmPpFail(Pp, Line, Ask.At,
+                          "this source is no file of a volume, and finds no other file to read", NULL);
+        goto Done;
+    }
+    Lookup.Name = Ask.Name;
+    Lookup.Tags = (const char *)Ask.Tags.Data;
+    Lookup.Home = Pp->Homes[Line->File];
+    Lookup.Everywhere = Ask.Everywhere;
+    Lookup.Directive = "incbin";
+    if ((Rc = BoxAsmLocate(Pp->Files, &Lookup, &Id, &Summary, &Details)) != 0) {
+        if (Rc != -ERR_NO_MEMORY)
+            Rc = BoxAsmPpNotFound(Pp, Line, &Ask, Rc, &Summary, &Details);
+        goto Done;
+    }
+    /* The program's bytes are counted in 32 bits: a file past 4 GiB fits none. */
+    if ((Rc = Pp->Files->Read(Pp->Files, Id, UINT32_MAX, &Bytes, &Size)) < 0) {
+        BoxAsmMessage Message;
+
+        BoxAsmPpFailBegin(Pp, Line, Ask.At, &Message);
+        BoxAsmMessageText(&Message, Ask.Name);
+        BoxAsmMessageText(&Message, Rc == -ERR_OUT_OF_RANGE ? " is larger than 4 GiB, more than a program holds"
+                                                            : " could not be read: ");
+        if (Rc != -ERR_OUT_OF_RANGE)
+            BoxAsmMessageText(&Message, BoxAsmErrorText(Rc));
+        Rc = BoxAsmPpFailEnd(Pp, Line, Ask.At, &Message);
+        goto Done;
+    }
+    Rc = 0;
+    if (BoxAsmGrowArray((void **)&Out->Incbins, &Out->IncbinCapacity, Out->IncbinCount,
+                        sizeof(BoxAsmIncbin)) != 0 ||
+        BoxAsmBufferAppend(&Out->Binary, Bytes, Size) != 0) {
+        Rc = -ERR_NO_MEMORY;
+        goto Done;
+    }
+    Out->Incbins[Out->IncbinCount++] = (BoxAsmIncbin){
+        (uint32_t)(Out->LineCount + 1u), Out->Binary.Size - Size, Size
+    };
+Done:
+    free(Bytes);
     BoxAsmBufferRelease(&Summary);
     BoxAsmBufferRelease(&Details);
     BoxAsmPpAskRelease(&Ask);

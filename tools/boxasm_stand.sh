@@ -574,6 +574,29 @@ assembly_refuses macro_count "$HEAD"$'%macro two 2\n    db %1, %2\n%endmacro\n  
     "macro_count.asm:7:5: 'two' takes 2 parameters, and 1 is given here"
 assembly_refuses error_directive "$HEAD"$'%error "the table is too large"\n' \
     "error_directive.asm:4:1: the table is too large"
+assembly_refuses include_unquoted "$HEAD%include math"$'\n' \
+    "include_unquoted.asm:4:10: expected the file's name in quotes: %include \"math.asm\""
+assembly_refuses pop_empty "$HEAD%pop"$'\n' \
+    "pop_empty.asm:4:1: %pop has no %push before it"
+assembly_refuses pop_other "$HEAD%push loop"$'\n%pop if\n' \
+    "pop_other.asm:5:6: the context on top is 'loop', not 'if'"
+assembly_refuses context_none "$HEAD    jmp %\$end"$'\n' \
+    "context_none.asm:4:9: '%\$end' is local to a context, and no %push has opened one"
+assembly_refuses context_deep "$HEAD%push a"$'\n    jmp %$$$end\n%pop\n' \
+    "context_deep.asm:5:9: '%\$\$\$end' names the context 2 below the top, and only 1 is open"
+assembly_refuses context_open "$HEAD%push a"$'\n    ret\n' \
+    "context_open.asm:4:1: this %push opened a context no %pop closed"
+assembly_refuses substr_first "$HEAD%substr s 'abc', 0"$'\n' \
+    "substr_first.asm:4:10: a string's first byte is 1"
+assembly_refuses strlen_string "$HEAD%strlen n 5"$'\n' \
+    "strlen_string.asm:4:11: expected a string in quotes"
+printf '%s' "$HEAD"'%warning "look" here'$'\n    ret\n' > "$WORK/warning_said.asm"
+said=$("$STAND" assemble "$WORK/warning_said.asm" "$WORK/warning_said.o" 2>&1)
+if [ -s "$WORK/warning_said.o" ] && [ "$said" = 'warning_said.asm:4: warning: "look" here' ]; then
+    ok warning_said
+else
+    fail warning_said "said '$said'$([ -s "$WORK/warning_said.o" ] || echo ', and no object')"
+fi
 assembly_refuses macro_recursion $'%macro rec 0\n    rec\n%endmacro\n'"$HEAD    rec"$'\n' \
     "macro_recursion.asm:2:5: 'rec' is called inside macro calls too deep: a macro may be calling itself"
 assembly_refuses parameter_outside "$HEAD    mov eax, %1"$'\n' \
@@ -690,6 +713,67 @@ elif out=$(python3 "$ORACLE" compare "$WORK/build.o" "$WORK/by_path/build_nasm.o
 else
     fail includes_match_nasm "$out"
 fi
+
+# incbin: the bytes of a file found as %include finds one — whole, past a
+# skip, a count of them, repeated by times, named by a %define — held to
+# NASM's incbin of the same file by its path; then what it refuses.
+BIN=$WORK/incbin_volume
+mkdir -p "$BIN" && python3 - "$BIN" <<'EOF'
+import os, sys
+volume = sys.argv[1]
+head = 'section .text\nglobal main\nmain:\n'
+program = """default rel
+section .rodata
+whole: incbin "blob.bin"
+part incbin "blob.bin" data, 16, 8
+rest: incbin "blob.bin" data everywhere, 760
+none: incbin "blob.bin", 772
+twice: times 2 incbin "blob.bin", 3, 2
+%define BLOB "blob.bin"
+viadef: incbin BLOB, 0, 4
+section .text
+global main
+main:
+    lea rax, [part]
+    ret
+"""
+files = [('prog.asm', 'demo', program), ('blob.bin', 'data, demo', bytes(range(256)) * 3 + b'tail'),
+         ('beyond.asm', 'demo', head + '    incbin "blob.bin", 900\n'),
+         ('negative.asm', 'demo', head + '    incbin "blob.bin", -1\n'),
+         ('bss.asm', 'demo', head + 'section .bss\n    incbin "blob.bin"\n'),
+         ('unquoted.asm', 'demo', head + '    incbin blob\n'),
+         ('far.bin', 'data, game', b'far'),
+         ('outside.asm', 'demo', head + '    incbin "far.bin"\n')]
+with open(os.path.join(volume, 'volume'), 'w') as listing:
+    for number, (name, tags, data) in enumerate(files, 1):
+        listing.write('%d %s %s\n' % (number, name, tags))
+        with open(os.path.join(volume, str(number)), 'wb') as f:
+            f.write(data if isinstance(data, bytes) else data.encode())
+with open(os.path.join(volume, 'nasm.asm'), 'w') as f:
+    f.write(program.replace('"blob.bin" data everywhere', '"2"').replace('"blob.bin" data', '"2"')
+            .replace('"blob.bin"', '"2"'))
+EOF
+(cd "$BIN" && nasm -f elf64 -w-all nasm.asm -o nasm.o) ||
+    { echo "boxasm: harness failed — NASM did not assemble the incbin program"; exit 2; }
+if ! "$STAND" volume "$BIN" demo prog.asm "$WORK/incbin.o" 2> "$WORK/incbin.err"; then
+    fail incbin_matches_nasm "$(head -3 "$WORK/incbin.err")"
+elif out=$(python3 "$ORACLE" compare "$WORK/incbin.o" "$BIN/nasm.o" 2>&1); then
+    ok incbin_matches_nasm
+else
+    fail incbin_matches_nasm "$out"
+fi
+incbin_refuses() {
+    local name=$1 want=$2 said
+    said=$("$STAND" volume "$BIN" demo "$name.asm" "$WORK/incbin_$name.o" 2>&1 | head -1)
+    if [ -s "$WORK/incbin_$name.o" ]; then fail "incbin_$name" "built instead of refusing"
+    elif [ "$said" != "$want" ]; then fail "incbin_$name" "said '$said', expected '$want'"
+    else ok "incbin_$name"; fi
+}
+incbin_refuses beyond "beyond.asm:4:5: the file holds 772 bytes, fewer than the 900 incbin skips"
+incbin_refuses negative "negative.asm:4:24: incbin skips 0 or more bytes"
+incbin_refuses bss "bss.asm:5:5: .bss holds no bytes: reserve its space with resb, resw, resd or resq"
+incbin_refuses unquoted "unquoted.asm:4:12: expected the file's name in quotes: incbin \"data.bin\""
+incbin_refuses outside "outside.asm:4:12: there is no far.bin in demo"
 
 # A program that builds, and the first dword of its .data: which file it took.
 volume_takes() {

@@ -1,5 +1,6 @@
 #include "boxasm_float.h"
 #include "boxasm_isa.h"
+#include "boxasm_macro.h"
 
 #include "box/error.h"
 #include "box/memory.h"
@@ -134,7 +135,7 @@ static int BoxAsmIsDirective(const BoxAsmToken *Token)
 {
     static const char *const Words[] = {
         "section", "segment", "global", "extern", "default", "bits", "align", "times", "equ",
-        "struc", "endstruc", "istruc", "iend", "alignb", "takes", "gives"
+        "struc", "endstruc", "istruc", "iend", "alignb", "takes", "gives", "incbin"
     };
     uint8_t Reserve;
     size_t Index;
@@ -353,6 +354,75 @@ static int BoxAsmParseStorage(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmTo
     return BoxAsmParseData(Asm, Lexer, Token, Index);
 }
 
+/* incbin's skip or count: a number known where the line stands, 0 or more. */
+static int BoxAsmIncbinNumber(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                              const char *What, int64_t *Out)
+{
+    uint32_t Expr;
+    int Rc;
+
+    if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0 ||
+        (Rc = BoxAsmParseExpression(Asm, Lexer, Token, &Expr)) != 0 ||
+        (Rc = BoxAsmEvaluateConstant(Asm, Expr, 0, Asm->CurrentSection, Out)) != 0)
+        return Rc;
+    if (*Out < 0)
+        return BoxAsmFail(Asm, &Asm->Exprs[Expr].Where, What, NULL);
+    return 0;
+}
+
+/* incbin "name" [tags] [everywhere][, skip[, count]]: the bytes of the file
+ * the preprocessor found for the line, past the first skip, count of them or
+ * as many as there are, laid out as db lays out a string. */
+static int BoxAsmParseIncbin(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                             const BoxAsmToken *Word, uint32_t Times)
+{
+    const BoxAsmIncbin *Read = BoxAsmExpansionIncbin(Asm->Expansion, Word->Where.Line);
+    int64_t Skip = 0;
+    int64_t Count = -1;
+    uint32_t Index;
+    int Rc;
+
+    if (Asm->CurrentSection == BOXASM_SECTION_BSS)
+        return BoxAsmFail(Asm, &Word->Where,
+                          ".bss holds no bytes: reserve its space with resb, resw, resd or resq", NULL);
+    if (!Read)
+        return BoxAsmFail(Asm, &Word->Where, "incbin names its file in quotes: incbin \"data.bin\"", NULL);
+    while (!BoxAsmEndOfStatement(Token) && !BoxAsmTokenIsPunct(Token, ','))   /* the file, found */
+        if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
+            return Rc;
+    if (BoxAsmTokenIsPunct(Token, ',') &&
+        (Rc = BoxAsmIncbinNumber(Asm, Lexer, Token, "incbin skips 0 or more bytes", &Skip)) != 0)
+        return Rc;
+    if (BoxAsmTokenIsPunct(Token, ',') &&
+        (Rc = BoxAsmIncbinNumber(Asm, Lexer, Token, "incbin takes 0 or more bytes", &Count)) != 0)
+        return Rc;
+    if ((uint64_t)Skip > Read->Size) {
+        BoxAsmMessage Message;
+
+        BoxAsmFailBegin(Asm, &Word->Where, &Message);
+        BoxAsmMessageText(&Message, "the file holds ");
+        BoxAsmMessageDecimal(&Message, (int64_t)Read->Size);
+        BoxAsmMessageText(&Message, " bytes, fewer than the ");
+        BoxAsmMessageDecimal(&Message, Skip);
+        BoxAsmMessageText(&Message, " incbin skips");
+        return BoxAsmFailEnd(Asm, &Word->Where, &Message);
+    }
+    if (Count < 0 || (uint64_t)Count > Read->Size - (uint64_t)Skip)
+        Count = (int64_t)(Read->Size - (uint64_t)Skip);
+    if (Asm->StringBytes.Size + (uint64_t)Count > UINT32_MAX)
+        return BoxAsmFail(Asm, &Word->Where,
+                          "the program's strings and included files pass 4 GiB", NULL);
+    if ((Rc = BoxAsmAddStatement(Asm, BOXASM_STMT_DATA, &Word->Where, &Index)) != 0)
+        return Rc;
+    Asm->Statements[Index].Width = 1;
+    Asm->Statements[Index].Times = Times;
+    Asm->Statements[Index].FirstItem = (uint32_t)Asm->ItemCount;
+    Asm->Statements[Index].ItemCount = 1;
+    return BoxAsmAddStringItem(Asm, &Word->Where,
+                               Asm->Expansion->Binary.Data + Read->Offset + (uint64_t)Skip,
+                               (size_t)Count);
+}
+
 static int BoxAsmParseInstruction(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
                                   const BoxAsmToken *Word, uint32_t Times, uint8_t Prefix)
 {
@@ -443,10 +513,11 @@ static int BoxAsmParseTimes(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToke
     if ((Rc = BoxAsmParseExpression(Asm, Lexer, Token, &Count)) != 0)
         return Rc;
     if (Token->Kind != BOXASM_TOKEN_IDENTIFIER ||
-        !((BoxAsmDataWidth(Token, &Reserve) != 0 && !Reserve) ||
+        !((BoxAsmDataWidth(Token, &Reserve) != 0 && !Reserve) || BoxAsmTokenIs(Token, "incbin") ||
           BoxAsmFindInstruction(Token->Text, Token->Length, &Condition) != NULL ||
           BoxAsmFindPrefix(Token->Text, Token->Length) != BOXASM_PREFIX_NONE))
-        return BoxAsmFail(Asm, &Word->Where, "times repeats one instruction or db, dw, dd, dq", NULL);
+        return BoxAsmFail(Asm, &Word->Where, "times repeats one instruction or db, dw, dd, dq, incbin",
+                          NULL);
     Repeated = *Token;
     if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)
         return Rc;
@@ -533,6 +604,8 @@ static int BoxAsmParseStatement(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsm
         return BoxAsmParseAt(Asm, Lexer, Token, Word);
     if (BoxAsmDataWidth(Word, &Reserve) != 0)
         return BoxAsmParseStorage(Asm, Lexer, Token, Word, Times);
+    if (BoxAsmTokenIs(Word, "incbin"))
+        return BoxAsmParseIncbin(Asm, Lexer, Token, Word, Times);
     if (Times == 0 && (BoxAsmTokenIs(Word, "section") || BoxAsmTokenIs(Word, "segment")))
         return BoxAsmParseSection(Asm, Lexer, Token);
     if (Times == 0 && (BoxAsmTokenIs(Word, "global") || BoxAsmTokenIs(Word, "extern")))
@@ -616,11 +689,11 @@ static int BoxAsmTakesLabel(const BoxAsmToken *Token)
 
     return Token->Kind == BOXASM_TOKEN_IDENTIFIER &&
            (BoxAsmDataWidth(Token, &Reserve) != 0 || BoxAsmTokenIs(Token, "times") ||
-            BoxAsmTokenIs(Token, "equ"));
+            BoxAsmTokenIs(Token, "equ") || BoxAsmTokenIs(Token, "incbin"));
 }
 
 /* [label:] [statement] — a label may also stand without its colon before
- * db, dw, dd, dq, resb..resq, times and equ, as `msg db "Hi", 0`. */
+ * db, dw, dd, dq, resb..resq, times, incbin and equ, as `msg db "Hi", 0`. */
 static int BoxAsmParseLine(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token)
 {
     BoxAsmToken Word = *Token;

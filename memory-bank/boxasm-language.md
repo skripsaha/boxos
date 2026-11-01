@@ -276,7 +276,10 @@ word, line by line, the way NASM's does:
   the name; overloads by the number of arguments), `%xdefine` (expanded where
   written), `%assign NAME expression`, `%undef NAME`. A macro is expanded
   again in what it expands to, but never inside its own expansion.
-  `__LINE__` and `__FILE__` are there unless defined.
+  `__LINE__` and `__FILE__` are there unless defined. `%idefine`,
+  `%ixdefine` and `%iassign` define a name that matches in any case
+  (`%idefine Size 4` is `SIZE` and `size` too); `%undef` takes it away in
+  any case.
 - `%macro NAME 2`, `1-3` (with defaults after the count: `%macro m 1-3 20,
   30`), `0-*`, and `+` for a last parameter that takes the rest of the line;
   `%endmacro`, `%unmacro NAME count`. In the body: `%1`, `%{10}`, `%0`
@@ -284,14 +287,30 @@ word, line by line, the way NASM's does:
   `%+` (joins what stands on either side), `%rotate n`. Parameters are split
   at commas; `{a, b}` is one. Overloads take counts of their own. A macro
   named like an instruction stands aside for a count it does not take.
-  A call may follow a label: `start: prologue`.
+  A call may follow a label: `start: prologue`. `%imacro` defines one called
+  in any case, `%unimacro` takes it away.
 - `%if expression`, `%elif`, `%else`, `%endif`; the expression takes numbers
   and characters, `+ - * / % << >> & | ^ ~`, comparisons `== = != <> < <= >
   >=`, and `! && ^^ ||`. Tests: `%ifdef NAME`, `%ifmacro NAME [count]`,
   `%ifidn a, b` and `%ifidni` (the same tokens; any case), `%ifnum`,
-  `%ifstr`, `%ifid`. Each has its `%ifn…` and `%elif…` forms.
+  `%ifstr`, `%ifid`, `%ifctx name…` (the context on top is one of them).
+  Each has its `%ifn…` and `%elif…` forms.
 - `%rep count` … `%endrep`, and `%exitrep` to leave it.
-- `%error text` (or `%fatal`) refuses with the text.
+- `%push [name]` opens a context, `%pop [name]` closes the one on top (the
+  name, when written, must be its), `%repl name` renames it. `%$name` is a
+  name of the context on top — a label, or a macro `%define %$x 1` — and
+  `%$$name` one of the context below it: each is a name of its own, as
+  `%%label` is a call's. A `%define` whose body holds one names the context
+  it is expanded in. Contexts are the whole source's: one opened in a macro
+  may be closed outside it; one left open at the end is refused.
+- `%strlen NAME string` defines NAME as how many bytes the string holds;
+  `%substr NAME string, start[, length]` as the bytes from the start'th (the
+  first is 1), one when no length is written, and to the end and one short of
+  it for -1 and -2; `%strcat NAME string, string...` as the strings joined.
+  Strings are read as the assembler reads them, escapes and all.
+- `%error text` (or `%fatal`) refuses with the text; `%warning text` says it
+  (`prog.asm:4: warning: text`, before what `assemble` says of the build)
+  and the work goes on.
 - `%include "name"` reads another file where the line stands (see
   Including a file).
 
@@ -372,6 +391,25 @@ prog.asm:5:10: there is no lone.asm in demo
 - `assemble` finds the source itself the same way and says the same when it
   cannot: which files of that name there are, and that `use` narrows or
   changes the context.
+
+### Including a file's bytes
+
+`incbin` lays out the bytes of a file, as `db` lays out a string's. The file
+is found as `%include` finds one — by its name and tags, `everywhere` past
+the home — and after it may stand how many bytes to skip and how many to
+take:
+
+```text
+logo: incbin "logo.bin"                        the whole file
+part  incbin "table.bin" data, 16, 64          64 bytes past the first 16
+rest: incbin "table.bin" data everywhere, 16   all past the first 16
+      times 2 incbin "beep.bin"
+```
+
+The skip and the count are numbers known where the line stands. A count
+past the end takes what there is; a skip past the end, a number below 0, or
+an incbin in .bss is refused. A file is at most 4 GiB, and so are the bytes
+of all the program's strings and files together.
 
 ### Form: what the program takes and gives
 
@@ -493,12 +531,20 @@ BoxOS userspace has no red zone.
   it was (with a warning) unless the name is also an instruction.
 - `struc` gives back the scope of `.local` names it found; NASM leaves its
   name as the scope. `at` is a directive only inside an istruc.
-- `%include` finds a file by name and tags in the context, never by a path,
-  and takes exactly one; NASM searches directories and `-I` paths and takes
-  the first. `%include <name>` and `incbin` are not built.
-- Not built of NASM's preprocessor: `%push`/`%pop` contexts and `%$` names,
-  `%strlen %substr %strcat`, `%warning`, the case-blind `%idefine`
-  `%imacro`, `%[...]`, `%line`, `%pragma`, `%depend`, `%pathsearch`.
+- `%include` and `incbin` find a file by name and tags in the context,
+  never by a path, and take exactly one; NASM searches directories and `-I`
+  paths and takes the first. `%include <name>` is refused with the line to
+  write.
+- An incbin skipping past the end of its file, or skipping or taking fewer
+  than 0 bytes, is refused; NASM writes nothing, or refuses the skip only.
+  An incbin in .bss is refused; NASM warns and leaves it out.
+- A context `%push` opened and no `%pop` closed is refused at the end; NASM
+  leaves it. `%substr` from before the first byte is refused.
+- `%ifmacro` finds an `%imacro` in any case, as a call does; NASM 3 finds it
+  only in its own. Of a `%define` and an `%idefine` of one name, the
+  `%define` is found by its own spelling; NASM takes the newer.
+- Not built of NASM's preprocessor: `%defstr %deftok`, `%[...]`, `%line`,
+  `%pragma`, `%depend`, `%pathsearch`.
 
 Everything else in the shared subset assembles to the same bytes and
 relocations: `tools/boxasm_oracle.py` generates a corpus of about 36,000

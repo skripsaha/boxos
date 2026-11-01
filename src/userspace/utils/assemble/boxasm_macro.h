@@ -29,9 +29,17 @@ typedef struct {
     uint8_t  Kind;
 } BoxAsmFrame;
 
+/* A file an incbin line read: the line of the expanded text it stands on,
+ * and where its bytes are in Binary. */
+typedef struct {
+    uint32_t Line;
+    uint64_t Offset;
+    uint64_t Size;
+} BoxAsmIncbin;
+
 /* The source as the assembler reads it once the preprocessor is done: its
- * text, one line per output line, where each line came from, and the names
- * of the files read. */
+ * text, one line per output line, where each line came from, the names of
+ * the files read, and the bytes of those its incbins read. */
 struct BoxAsmExpansion {
     BoxAsmBuffer  Text;
     BoxAsmOrigin *Lines;
@@ -44,6 +52,10 @@ struct BoxAsmExpansion {
     size_t        FileCount;
     size_t        FileCapacity;
     BoxAsmBuffer  Names;
+    BoxAsmBuffer  Binary;
+    BoxAsmIncbin *Incbins;         /* in the order of their lines */
+    size_t        IncbinCount;
+    size_t        IncbinCapacity;
 };
 
 /* The source with its %define, %macro, %if, %rep, %include and the rest
@@ -61,5 +73,8 @@ void BoxAsmExpansionPlace(const BoxAsmExpansion *Expansion, uint32_t Line, uint3
 
 /* The name of file File of the expansion. */
 const char *BoxAsmExpansionFile(const BoxAsmExpansion *Expansion, uint32_t File);
+
+/* The file the incbin on a line of the expanded text read; NULL for none. */
+const BoxAsmIncbin *BoxAsmExpansionIncbin(const BoxAsmExpansion *Expansion, uint32_t Line);
 
 #endif

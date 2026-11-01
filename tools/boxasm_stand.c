@@ -234,8 +234,12 @@ static void StandSayRefusal(int Rc, const BoxAsmBuffer *Summary, const BoxAsmBuf
         fprintf(stderr, "%.*s\n", (int)Length, Text);
 }
 
-static int Finish(int Rc, const char *Error, const BoxAsmBlob *Out, const char *Path)
+static int Finish(int Rc, const char *Error, const BoxAsmBlob *Out, const char *Path,
+                  BoxAsmBuffer *Said)
 {
+    if (Said->Size != 0)
+        fprintf(stderr, "%.*s", (int)Said->Size, (const char *)Said->Data);
+    BoxAsmBufferRelease(Said);
     if (Rc != 0) {
         fprintf(stderr, "%s\n", Error[0] ? Error : "(refused without a sentence)");
         return 1;
@@ -251,6 +255,7 @@ int main(int Argc, char **Argv)
 {
     static char Error[8192];
     BoxAsmBlob Out = { 0 };
+    BoxAsmBuffer Said = { 0 };
 
     if (Argc == 4 && strcmp(Argv[1], "assemble") == 0) {
         BoxAsmBlob Loaded;
@@ -261,12 +266,14 @@ int main(int Argc, char **Argv)
         Source.Text = (const char *)Loaded.Data;
         Source.Size = (size_t)Loaded.Size;
         Source.Name = Loaded.Name;
-        return Finish(BoxAsmSourceAssemble(&Source, &Out, Error, sizeof(Error)), Error, &Out, Argv[3]);
+        Source.Said = &Said;
+        return Finish(BoxAsmSourceAssemble(&Source, &Out, Error, sizeof(Error)), Error, &Out, Argv[3],
+                      &Said);
     }
     if (Argc == 6 && strcmp(Argv[1], "volume") == 0) {
         BoxAsmBuffer Summary = { 0 };
         BoxAsmBuffer Details = { 0 };
-        BoxAsmLookup Lookup = { Argv[4], "", Argv[3], 0, 0 };
+        BoxAsmLookup Lookup = { Argv[4], "", Argv[3], 0, NULL };
         BoxAsmSource Source = { 0 };
         StandVolume Volume;
         uint64_t Id = 0;
@@ -293,7 +300,9 @@ int main(int Argc, char **Argv)
         Source.Id = Id;
         Source.Home = Argv[3];
         Source.Files = &Volume.Files;
-        return Finish(BoxAsmSourceAssemble(&Source, &Out, Error, sizeof(Error)), Error, &Out, Argv[5]);
+        Source.Said = &Said;
+        return Finish(BoxAsmSourceAssemble(&Source, &Out, Error, sizeof(Error)), Error, &Out, Argv[5],
+                      &Said);
     }
     if (Argc >= 6 && strcmp(Argv[1], "link") == 0) {
         BoxAsmBlob Entry, Program, Archive, Recipe = { 0 };
@@ -316,7 +325,7 @@ int main(int Argc, char **Argv)
                 return 2;
             return Finish(BoxAsmLink(&Entry, &Program, &Archive, Recipe.Data ? &Recipe : NULL,
                                      Flags, &Out, Error, sizeof(Error)),
-                          Error, &Out, Argv[5]);
+                          Error, &Out, Argv[5], &Said);
         }
     }
     fprintf(stderr,

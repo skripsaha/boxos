@@ -1439,6 +1439,69 @@ helper: loop_to edx, 3
 %endrep
     epilogue
 
+%push outer
+%define %$v 7
+%$top:
+%push inner
+%$top:
+    dd %$$v
+    jmp %$$top
+%ifctx inner
+    db 1
+%endif
+%repl renamed
+%ifctx outer renamed
+    db 2
+%endif
+%ifnctx inner
+    db 3
+%endif
+%pop
+%ifdef %$v
+    db 4
+%endif
+%define atuse %$z
+%push third
+%$z: jmp atuse
+%pop third
+%pop outer
+%strlen slen 'hello'
+    dd slen
+%substr sub1 'hello', 2, 3
+%substr sub2 'hello', 2
+%substr sub3 'hello', 2, -1
+%substr sub4 'hello', 9, 2
+    db sub1, sub2, sub3, sub4, 0
+%strcat cat 'ab', "cd", 'e'
+%strcat quote "it's", 'x'
+    db cat, quote
+%idefine Big 9
+    dd BIG, big, Big
+%imacro Twice 1
+    db %1, %1
+%endmacro
+    TWICE 3
+    twice 4
+%ixdefine Mx Big+1
+    dd mx
+%iassign Cnt 3
+%iassign cnt CNT+1
+    dd cNT
+%undef bIG
+%ifndef Big
+    db 6
+%endif
+%unimacro TWICE 1
+%ifnmacro twice
+    db 7
+%endif
+%macro outerm 0
+%imacro innerm 0
+    db 8
+%endmacro
+%endmacro
+    outerm
+    INNERM
 section .data
     defs 1
     defs 1, 2

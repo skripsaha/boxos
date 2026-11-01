@@ -248,7 +248,8 @@ static int BoxAsmPpOrdinary(BoxAsmPp *Pp, const BoxAsmPpLine *Line)
             }
         }
     }
-    Rc = BoxAsmPpEmit(Pp, &Working, Working.Text, (size_t)Expanded.Size);
+    if ((Rc = BoxAsmPpIncbin(Pp, &Working)) == 0)
+        Rc = BoxAsmPpEmit(Pp, &Working, Working.Text, (size_t)Expanded.Size);
     BoxAsmBufferRelease(&Expanded);
     return Rc;
 }
@@ -271,35 +272,75 @@ static int BoxAsmPpRotate(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Re
     return 0;
 }
 
-/* %error and %fatal: the text, or the string, as the refusal. */
-static int BoxAsmPpError(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest)
+/* What %error or %warning says: its rest expanded, and a string alone
+ * without its quotes. A heap string. */
+static int BoxAsmPpSaying(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest, char **Out)
 {
     BoxAsmBuffer Expanded = { 0 };
-    BoxAsmMessage Message;
+    BoxAsmPpToken Token;
+    size_t At = 0;
     char *Text;
     int Rc;
 
+    *Out = NULL;
     if ((Rc = BoxAsmPpExpand(Pp, Line, Rest, &Expanded)) != 0) {
         BoxAsmBufferRelease(&Expanded);
         return Rc;
     }
-    {
-        size_t At = 0;
-        BoxAsmPpToken Token;
-
-        do BoxAsmPpNext((const char *)Expanded.Data, &At, &Token); while (Token.Kind != BOXASM_PP_END);
-        Text = BoxAsmPpTrimmed((const char *)Expanded.Data, (size_t)(Token.Text - (const char *)Expanded.Data));
-    }
+    do BoxAsmPpNext((const char *)Expanded.Data, &At, &Token); while (Token.Kind != BOXASM_PP_END);
+    Text = BoxAsmPpTrimmed((const char *)Expanded.Data, (size_t)(Token.Text - (const char *)Expanded.Data));
     BoxAsmBufferRelease(&Expanded);
     if (!Text)
         return -ERR_NO_MEMORY;
+    if (BoxAsmPpOneToken(Text, BOXASM_PP_STRING) && strlen(Text) >= 2) {
+        memmove(Text, Text + 1, strlen(Text) - 2u);
+        Text[strlen(Text) - 2u] = '\0';
+    }
+    *Out = Text;
+    return 0;
+}
+
+/* %error and %fatal: the text, or the string, as the refusal. */
+static int BoxAsmPpError(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest)
+{
+    BoxAsmMessage Message;
+    char *Text;
+    int Rc;
+
+    if ((Rc = BoxAsmPpSaying(Pp, Line, Rest, &Text)) != 0)
+        return Rc;
     BoxAsmPpFailBegin(Pp, Line, NULL, &Message);
-    if (BoxAsmPpOneToken(Text, BOXASM_PP_STRING) && strlen(Text) >= 2)
-        BoxAsmMessageSpan(&Message, Text + 1, strlen(Text) - 2u);
-    else
-        BoxAsmMessageText(&Message, Text[0] ? Text : "%error");
+    BoxAsmMessageText(&Message, Text[0] ? Text : "%error");
     free(Text);
     return BoxAsmPpFailEnd(Pp, Line, NULL, &Message);
+}
+
+/* %warning: the text said, as file:line: warning: text, and the work goes on. */
+static int BoxAsmPpWarning(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const char *Rest)
+{
+    const char *File = BoxAsmExpansionFile(Pp->Out, Line->File);
+    char Digits[12];
+    size_t Count = 0;
+    uint32_t Number = Line->Line;
+    char *Text;
+    int Rc;
+
+    if ((Rc = BoxAsmPpSaying(Pp, Line, Rest, &Text)) != 0)
+        return Rc;
+    do {
+        Digits[sizeof(Digits) - 1u - Count++] = (char)('0' + Number % 10u);
+        Number /= 10u;
+    } while (Number != 0);
+    if (Pp->Said &&
+        (BoxAsmBufferAppend(Pp->Said, File, strlen(File)) != 0 ||
+         BoxAsmBufferAppend(Pp->Said, ":", 1) != 0 ||
+         BoxAsmBufferAppend(Pp->Said, Digits + sizeof(Digits) - Count, Count) != 0 ||
+         BoxAsmBufferAppend(Pp->Said, ": warning: ", 11) != 0 ||
+         BoxAsmBufferAppend(Pp->Said, Text, strlen(Text)) != 0 ||
+         BoxAsmBufferAppend(Pp->Said, "\n", 1) != 0))
+        Rc = -ERR_NO_MEMORY;
+    free(Text);
+    return Rc;
 }
 
 static int BoxAsmPpStartCollect(BoxAsmPp *Pp, const BoxAsmPpLine *Line, BoxAsmPpCollect *Collect,
@@ -313,27 +354,69 @@ static int BoxAsmPpStartCollect(BoxAsmPp *Pp, const BoxAsmPpLine *Line, BoxAsmPp
     return Collect->Start.Text ? 0 : -ERR_NO_MEMORY;
 }
 
+/* The directives that give a name first: a name of the context (%$name) is
+ * the context's where the directive stands. *Handled 0 for any other. */
+static int BoxAsmPpNamingDirective(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPpToken *Word,
+                                   const char *Rest, int *Handled)
+{
+    static const char *const Words[] = {
+        "define", "xdefine", "idefine", "ixdefine", "assign", "iassign", "undef",
+        "strlen", "substr", "strcat"
+    };
+    BoxAsmBuffer Lead = { 0 };
+    BoxAsmPpLine Working = *Line;
+    size_t Which;
+    int Rc;
+
+    for (Which = 0; Which < sizeof(Words) / sizeof(Words[0]); Which++)
+        if (BoxAsmPpWordIs(Word, Words[Which]))
+            break;
+    *Handled = Which < sizeof(Words) / sizeof(Words[0]);
+    if (!*Handled)
+        return 0;
+    if ((Rc = BoxAsmPpContextLead(Pp, &Working, &Rest, &Lead)) == 0) {
+        switch (Which) {
+        case 0: Rc = BoxAsmPpParseDefine(Pp, &Working, Rest, 0, 0); break;
+        case 1: Rc = BoxAsmPpParseDefine(Pp, &Working, Rest, 1, 0); break;
+        case 2: Rc = BoxAsmPpParseDefine(Pp, &Working, Rest, 0, 1); break;
+        case 3: Rc = BoxAsmPpParseDefine(Pp, &Working, Rest, 1, 1); break;
+        case 4: Rc = BoxAsmPpParseAssign(Pp, &Working, Rest, 0); break;
+        case 5: Rc = BoxAsmPpParseAssign(Pp, &Working, Rest, 1); break;
+        case 6: Rc = BoxAsmPpUndefine(Pp, &Working, Rest); break;
+        case 7: Rc = BoxAsmPpStrlen(Pp, &Working, Rest); break;
+        case 8: Rc = BoxAsmPpSubstr(Pp, &Working, Rest); break;
+        default: Rc = BoxAsmPpStrcat(Pp, &Working, Rest); break;
+        }
+    }
+    BoxAsmBufferRelease(&Lead);
+    return Rc;
+}
+
 /* The other directives, on a line of a taken branch. */
 static int BoxAsmPpOtherDirective(BoxAsmPp *Pp, const BoxAsmPpLine *Line, const BoxAsmPpToken *Word,
                                   const char *Rest, BoxAsmPpCollect *Collect)
 {
+    int Handled;
     int Rc;
 
-    if (BoxAsmPpWordIs(Word, "define"))
-        return BoxAsmPpParseDefine(Pp, Line, Rest, 0);
-    if (BoxAsmPpWordIs(Word, "xdefine"))
-        return BoxAsmPpParseDefine(Pp, Line, Rest, 1);
-    if (BoxAsmPpWordIs(Word, "assign"))
-        return BoxAsmPpParseAssign(Pp, Line, Rest);
-    if (BoxAsmPpWordIs(Word, "undef"))
-        return BoxAsmPpUndefine(Pp, Line, Rest);
-    if (BoxAsmPpWordIs(Word, "macro")) {
-        if ((Rc = BoxAsmPpParseMacro(Pp, Line, Rest, &Collect->Macro)) != 0)
+    if ((Rc = BoxAsmPpNamingDirective(Pp, Line, Word, Rest, &Handled)) != 0 || Handled)
+        return Rc;
+    if (BoxAsmPpWordIs(Word, "macro") || BoxAsmPpWordIs(Word, "imacro")) {
+        if ((Rc = BoxAsmPpParseMacro(Pp, Line, Rest, &Collect->Macro,
+                                     BoxAsmPpWordIs(Word, "imacro"))) != 0)
             return Rc;
         return BoxAsmPpStartCollect(Pp, Line, Collect, BOXASM_PP_COLLECT_MACRO);
     }
-    if (BoxAsmPpWordIs(Word, "unmacro"))
-        return BoxAsmPpUnmacro(Pp, Line, Rest);
+    if (BoxAsmPpWordIs(Word, "unmacro") || BoxAsmPpWordIs(Word, "unimacro"))
+        return BoxAsmPpUnmacro(Pp, Line, Rest, BoxAsmPpWordIs(Word, "unimacro"));
+    if (BoxAsmPpWordIs(Word, "push"))
+        return BoxAsmPpPush(Pp, Line, Rest);
+    if (BoxAsmPpWordIs(Word, "pop"))
+        return BoxAsmPpPop(Pp, Line, Rest);
+    if (BoxAsmPpWordIs(Word, "repl"))
+        return BoxAsmPpReplace(Pp, Line, Rest);
+    if (BoxAsmPpWordIs(Word, "warning"))
+        return BoxAsmPpWarning(Pp, Line, Rest);
     if (BoxAsmPpWordIs(Word, "rep")) {
         Rc = BoxAsmPpRestValue(Pp, Line, Rest, &Collect->Times);
         if (Rc == 0 && Collect->Times < 0)
@@ -382,7 +465,8 @@ static int BoxAsmPpGather(BoxAsmPpCollect *Collect, const BoxAsmPpLine *Line, in
 
     *Ended = 0;
     if (BoxAsmPpDirective(Line->Text, &Word, &Rest)) {
-        if (BoxAsmPpWordIs(&Word, Open)) {
+        if (BoxAsmPpWordIs(&Word, Open) ||
+            (Collect->Kind == BOXASM_PP_COLLECT_MACRO && BoxAsmPpWordIs(&Word, "imacro"))) {
             Collect->Depth++;
         } else if (BoxAsmPpWordIs(&Word, Close)) {
             if (Collect->Depth == 0) {
@@ -561,14 +645,19 @@ static void BoxAsmPpRelease(BoxAsmPp *Pp)
     free(Pp->Homes);
     BoxAsmPpCloseConditions(Pp, 0);
     free(Pp->Conditions);
+    BoxAsmPpDropContexts(Pp);
     BoxAsmNameIndexRelease(&Pp->SingleIndex);
+    BoxAsmNameIndexRelease(&Pp->SingleBlindIndex);
     BoxAsmNameIndexRelease(&Pp->MultiIndex);
+    BoxAsmNameIndexRelease(&Pp->MultiBlindIndex);
 }
 
 void BoxAsmExpansionRelease(BoxAsmExpansion *Expansion)
 {
     BoxAsmBufferRelease(&Expansion->Text);
     BoxAsmBufferRelease(&Expansion->Names);
+    BoxAsmBufferRelease(&Expansion->Binary);
+    free(Expansion->Incbins);
     free(Expansion->Lines);
     free(Expansion->Frames);
     free(Expansion->Files);
@@ -586,6 +675,24 @@ void BoxAsmExpansionPlace(const BoxAsmExpansion *Expansion, uint32_t Line, uint3
         *Source = Expansion->Lines[Line - 1u].Line;
         *Frame = Expansion->Lines[Line - 1u].Frame;
     }
+}
+
+const BoxAsmIncbin *BoxAsmExpansionIncbin(const BoxAsmExpansion *Expansion, uint32_t Line)
+{
+    size_t Low = 0;
+    size_t High = Expansion->IncbinCount;
+
+    while (Low < High) {
+        size_t Middle = Low + (High - Low) / 2u;
+
+        if (Expansion->Incbins[Middle].Line == Line)
+            return &Expansion->Incbins[Middle];
+        if (Expansion->Incbins[Middle].Line < Line)
+            Low = Middle + 1u;
+        else
+            High = Middle;
+    }
+    return NULL;
 }
 
 const char *BoxAsmExpansionFile(const BoxAsmExpansion *Expansion, uint32_t File)
@@ -608,6 +715,7 @@ int BoxAsmPreprocess(BoxAsmAssembler *Asm, const BoxAsmSource *Source, BoxAsmExp
     Pp.Asm = Asm;
     Pp.Out = Out;
     Pp.Files = Source->Files;
+    Pp.Said = Source->Said;
     /* Frame 0 stands for none, file 0 is the source, and the source is the
      * first file being read, its %includes looked for in its home. */
     if (!(Text = BoxAsmCopyText(Source->Text, Source->Size)) ||
@@ -637,6 +745,8 @@ int BoxAsmPreprocess(BoxAsmAssembler *Asm, const BoxAsmSource *Source, BoxAsmExp
     Rc = BoxAsmPpCut(&Pp, Text, Source->Size, 0, 0, &Lines, &Count);
     if (Rc == 0)
         Rc = BoxAsmPpLines(&Pp, Lines, Count);
+    if (Rc == 0)
+        Rc = BoxAsmPpContextsClosed(&Pp);
     if (Rc == 0 && (BoxAsmBufferAppend(&Out->Text, "", 1) != 0))
         Rc = -ERR_NO_MEMORY;
     if (Rc == 0)

@@ -303,6 +303,7 @@ static int LoadSource(AssembleRequest *Request)
 static int BuildImage(AssembleRequest *Request, BoxAsmBlob *Image)
 {
     BoxAsmBlob Program = { 0 };
+    BoxAsmBuffer Said = { 0 };
     BoxAsmSource Source;
     char *Error = (char *)malloc(ASSEMBLE_ERROR_BYTES);
     int Rc;
@@ -318,7 +319,11 @@ static int BuildImage(AssembleRequest *Request, BoxAsmBlob *Image)
     Source.Id = Request->SourceId;
     Source.Home = Request->Home;
     Source.Files = AssembleVolume();
+    Source.Said = &Said;
     Rc = BoxAsmSourceAssemble(&Source, &Program, Error, ASSEMBLE_ERROR_BYTES);
+    if (Said.Size != 0)                        /* what the source said, before how it ended */
+        printf("assemble: %.*s", (int)Said.Size, (const char *)Said.Data);
+    BoxAsmBufferRelease(&Said);
     free(Request->SourceBytes);
     Request->SourceBytes = NULL;
     if (Rc != 0) {

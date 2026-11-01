@@ -229,7 +229,7 @@ static int BoxAsmOwnTag(const BoxAsmFound *Found, int Self, const BoxAsmLookup *
     return 0;
 }
 
-/* `%include "NAME" kept own [everywhere]`: the line that means file Self —
+/* `%include "NAME" kept own [everywhere]`, or incbin's: the line that means file Self —
  * the meaning asked for that it wears, and a tag only it wears. 0 with
  * nothing said when, among several, it wears no tag of its own. */
 static int BoxAsmSayInclude(BoxAsmBuffer *Out, const BoxAsmFound *Found, int Self,
@@ -244,7 +244,8 @@ static int BoxAsmSayInclude(BoxAsmBuffer *Out, const BoxAsmFound *Found, int Sel
     *Said = HasOwn || Found->Count == 1;
     if (!*Said)
         return 0;
-    if ((Rc = BoxAsmSay(Out, "%include \"")) != 0 || (Rc = BoxAsmSay(Out, Lookup->Name)) != 0 ||
+    if ((Rc = BoxAsmSay(Out, Lookup->Directive)) != 0 || (Rc = BoxAsmSay(Out, " \"")) != 0 ||
+        (Rc = BoxAsmSay(Out, Lookup->Name)) != 0 ||
         (Rc = BoxAsmSay(Out, "\"")) != 0)
         return Rc;
     while (BoxAsmNextTag(Lookup->Tags, &At, &Tag)) {
@@ -343,7 +344,7 @@ static int BoxAsmSaySeveral(const BoxAsmFound *Found, const BoxAsmLookup *Lookup
             return Rc;
     if ((Rc = BoxAsmSay(Summary, " files ")) != 0 || (Rc = BoxAsmSayWhere(Summary, Home)) != 0)
         return Rc;
-    if (Lookup->Included) {
+    if (Lookup->Directive) {
         if ((Rc = BoxAsmSay(Details, "  say which by a tag only it wears:")) != 0)
             return Rc;
         return BoxAsmSayFound(Details, Found, Lookup, 1, Lookup->Everywhere);
@@ -384,10 +385,10 @@ static int BoxAsmSayOutside(const BoxAsmFound *Named, const BoxAsmLookup *Lookup
 
     if ((Rc = BoxAsmSay(Summary, "there is no ")) != 0 || (Rc = BoxAsmSay(Summary, Lookup->Name)) != 0 ||
         (Rc = BoxAsmSay(Summary, " ")) != 0 || (Rc = BoxAsmSayWhere(Summary, Home)) != 0 ||
-        (Rc = BoxAsmSay(Details, Lookup->Included ? "  outside it, reached by:" : "  outside it, wearing:")) != 0 ||
-        (Rc = BoxAsmSayFound(Details, Named, Lookup, Lookup->Included, 1)) != 0)
+        (Rc = BoxAsmSay(Details, Lookup->Directive ? "  outside it, reached by:" : "  outside it, wearing:")) != 0 ||
+        (Rc = BoxAsmSayFound(Details, Named, Lookup, Lookup->Directive != NULL, 1)) != 0)
         return Rc;
-    if (!Lookup->Included)
+    if (!Lookup->Directive)
         return BoxAsmSay(Details, "\n  change the context with use");
     if ((Rc = BoxAsmSay(Details, Named->Count == 1 ? "\n  or let it wear " : "\n  or let the one meant wear ")) != 0 ||
         (Rc = BoxAsmSayTags(Details, Home)) != 0)
