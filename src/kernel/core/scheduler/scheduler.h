@@ -42,6 +42,13 @@ typedef struct {
     /* The strand running here gave its core away (sched_yield_turn): its
      * next schedule() stands it behind the next one. This core's alone. */
     bool        turn_given;
+    /* What this core last dispatched: a strand at all (busy_here), and one
+     * wearing the Use Context — its Fit not 0 (context_here). Written by this
+     * core at every dispatch; read by the others, without a lock, when one of
+     * them makes room for the person's work (scheduler.c, sched_make_room)
+     * and looks for a core to send an outsider to. */
+    volatile bool busy_here;
+    volatile bool context_here;
     _Atomic bool is_parked;            // Written by BSP recalc, read by AP timer IRQ — must be atomic
     uint32_t    idle_tick_count;       // Consecutive idle ticks
     /* Quiescence sequence (reap-vs-switch safety). Bumped at the top of every

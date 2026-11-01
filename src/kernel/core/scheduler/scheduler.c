@@ -384,6 +384,25 @@ static bool sched_least_other(RunQueue *rq, const process_t *proc, uint64_t *far
     return true;
 }
 
+/*
+ * Whether the core that last switched `proc` out has left its kernel stack.
+ * A core stands on the stack of the strand it switches out until the iretq
+ * that ends its schedule() — the interrupt frame it returns through is at the
+ * top of that stack — and a strand run on another core before then has its
+ * first interrupt frame laid over that one: the core returns into another
+ * strand's registers. The evicting core's quiesce_seq passing the strand's
+ * stamp says it has gone (process.c, strand_stack_in_use, the reaper's own
+ * question). Until then a strand is run where it is, by that core.
+ */
+static bool sched_stack_left(const process_t *proc)
+{
+    uint8_t qc = proc->quiesce_core;
+    if (qc == QUIESCE_CORE_NONE || qc >= g_sched_core_count)
+        return true;
+    return __atomic_load_n(&g_core_sched[qc].quiesce_seq, __ATOMIC_ACQUIRE) >
+           __atomic_load_n(&proc->quiesce_seq, __ATOMIC_ACQUIRE);
+}
+
 void sched_yield_turn(void)
 {
     scheduler_state_t *s = scheduler_get_state();
@@ -412,7 +431,11 @@ error_t sched_enqueue(process_t *proc)
      * dispatch claim (on_cpu) refuses a strand another core still holds, and
      * the strand refused there used to be dropped. So while on_cpu names a
      * core, that core is the target, and cold migration is not considered: the
-     * cache is not cold, it is in use.
+     * cache is not cold, it is in use. And a moment longer, until that core
+     * has left the strand's kernel stack (sched_stack_left): switched out, the
+     * strand is under its feet until its iretq, and run on another core first
+     * it would have its interrupt frames laid over the one that core returns
+     * through.
      *
      * Read under the strand's state_lock (process_set_state holds it), so
      * on_cpu can only move from a core to -1 from here on, never to a new
@@ -427,6 +450,9 @@ error_t sched_enqueue(process_t *proc)
 
     if (owner >= 0 && (uint32_t)owner < g_sched_core_count) {
         target_core = (uint8_t)owner;
+    }
+    else if (!sched_stack_left(proc)) {
+        target_core = proc->quiesce_core;
     }
     // If cache-cold (not run recently), consider load balancing
     // Only migrate if another core has ≥2 fewer processes (avoid thrashing)
@@ -694,6 +720,12 @@ static process_t *sched_try_steal(uint8_t my_core)
         if (!SchedMayDispatch(stolen))
             continue;
 
+        /* Nor one whose stack the victim may still stand on: switched out in
+         * the victim's schedule() still running, re-queued before the victim
+         * picked its next, released before the victim's iretq. */
+        if (!sched_stack_left(stolen))
+            continue;
+
         runqueue_remove(&vs->runqueue, stolen);
         break;
     }
@@ -709,6 +741,95 @@ static process_t *sched_try_steal(uint8_t my_core)
     }
 
     return stolen;
+}
+
+/*
+ * The person's work keeps a core to itself while outsiders can share one. When
+ * this core has just dispatched a strand wearing the Use Context and an
+ * outsider — a strand of no Fit — waits in its runqueue, that outsider moves to
+ * the least loaded application core running no strand of the context (what
+ * waits there and what runs; an idle core first): the outsiders squeeze up
+ * among themselves, and a game is not handed a turn in four of a core while an
+ * outsider has one of its own. One move a dispatch, so nothing ping-pongs.
+ *
+ * The move is one step, under both runqueue locks — the lower core's first,
+ * the only place two are held — and under the outsider's state_lock, taken
+ * without waiting since everywhere else it is taken before a runqueue lock. A
+ * park takes a strand out of the runqueue of the core its Fare is reckoned on
+ * and a wake puts it into its home core's, each under that lock: either sees
+ * the outsider wholly here or wholly there, never in neither — to be queued
+ * here again by a wake and then there by the move, in two runqueues at once.
+ * Only a strand whose stack this core has left (sched_stack_left): never the
+ * one it is switching out right now. Returns whether one moved.
+ */
+static bool sched_make_room(scheduler_state_t *s, uint8_t me)
+{
+    if (RunqueueAtomicTotal(&s->runqueue) == 0)
+        return false;
+
+    uint8_t  target    = 0xFF;
+    uint32_t best_load = UINT32_MAX;
+    for (uint8_t c = 0; c < g_sched_core_count; c++) {
+        if (c == me || g_amp.cores[c].is_kcore || !amp_core_online(&g_amp.cores[c]))
+            continue;
+        if (__atomic_load_n(&g_core_sched[c].context_here, __ATOMIC_RELAXED))
+            continue;
+        uint32_t load = RunqueueAtomicTotal(&g_core_sched[c].runqueue) +
+                        (__atomic_load_n(&g_core_sched[c].busy_here, __ATOMIC_RELAXED) ? 1u : 0u);
+        if (load < best_load) {
+            best_load = load;
+            target    = c;
+        }
+    }
+    if (target == 0xFF)
+        return false;
+
+    scheduler_state_t *t      = &g_core_sched[target];
+    spinlock_t        *first  = me < target ? &s->runqueue.lock : &t->runqueue.lock;
+    spinlock_t        *second = me < target ? &t->runqueue.lock : &s->runqueue.lock;
+    spin_lock(first);
+    spin_lock(second);
+
+    /* Its state is read under its state_lock, where it is decisive. */
+    process_t *outsider = NULL;
+    for (uint32_t i = 0; (outsider = runqueue_at(&s->runqueue, i)) != NULL; i++) {
+        if (__atomic_load_n(&outsider->on_cpu, __ATOMIC_ACQUIRE) >= 0 ||
+            UseContextFit(outsider) != 0 || !sched_stack_left(outsider) ||
+            !spin_trylock(&outsider->state_lock))
+            continue;
+        if (SchedMayDispatch(outsider))
+            break;
+        spin_unlock(&outsider->state_lock);
+    }
+
+    bool moved = false;
+    if (outsider) {
+        uint64_t fare      = outsider->fare;
+        int16_t  fare_core = outsider->fare_core;
+        runqueue_remove(&s->runqueue, outsider);
+        sched_place(outsider, target);
+        moved = runqueue_enqueue(&t->runqueue, outsider);
+        if (moved) {
+            outsider->home_core = target;
+        } else {
+            /* The target's runqueue at its ceiling: the outsider stays here at
+             * the Fare it had, in the room it left under these same locks. */
+            outsider->fare = fare;
+            __atomic_store_n(&outsider->fare_core, fare_core, __ATOMIC_RELAXED);
+            (void)runqueue_enqueue(&s->runqueue, outsider);
+        }
+        spin_unlock(&outsider->state_lock);
+    }
+    spin_unlock(second);
+    spin_unlock(first);
+
+    /* A parked core is woken for it, as an enqueue wakes one. */
+    if (moved) {
+        if (scheduler_is_core_parked(target))
+            scheduler_unpark_core(target);
+        lapic_send_ipi(g_amp.cores[target].lapic_id, IPI_WAKE_VECTOR);
+    }
+    return moved;
 }
 
 /* A dispatch claim lost to the core that still runs the strand. By
@@ -1003,6 +1124,10 @@ void schedule(void *frame_ptr)
         }
     }
     s->current_process = next;
+    bool busy_now    = !process_is_idle(next);
+    bool context_now = busy_now && UseContextFit(next) != 0;
+    __atomic_store_n(&s->busy_here, busy_now, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->context_here, context_now, __ATOMIC_RELAXED);
     /* The ask to step aside is recomputed at every dispatch: true exactly when
      * somebody is left waiting in this core's runqueue. */
     if (!process_is_idle(next))
@@ -1017,6 +1142,15 @@ void schedule(void *frame_ptr)
 
     if (refused)
         sched_hand_back(refused, refused_owner);
+
+    /* The person's work keeps its core to itself while an outsider can move —
+     * and the ask to step aside is asked again if nobody is left to step
+     * aside for. */
+    if (context_now && g_amp.multicore_active && sched_make_room(s, amp_get_core_index())) {
+        spin_lock(&s->scheduler_lock);
+        KResultStepAside(next, RunqueueAtomicTotal(&s->runqueue) != 0);
+        spin_unlock(&s->scheduler_lock);
+    }
 
     /* Nightwatch: real work dispatched here, so this core is no longer idle
      * and a later stall counts as a new episode. One byte store. */
