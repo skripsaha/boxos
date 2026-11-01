@@ -21,4 +21,10 @@ struct BoxFormatSink {
  * count passes INT_MAX. */
 int BoxFormat(BoxFormatSink *Sink, const char *Format, va_list Args);
 
+/* BoxFormat's text into Text, as C's vsnprintf writes it: as much of it as
+ * Capacity holds with a NUL after it — nothing at all when Capacity is 0, and
+ * then Text may be NULL — and the length of the whole text returned, or -1.
+ * A buffer has no colour, so %color is C's %c followed by "olor" there. */
+int BoxFormatInto(char *Text, size_t Capacity, const char *Format, va_list Args);
+
 #endif

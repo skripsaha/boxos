@@ -1040,3 +1040,35 @@ int BoxFormat(BoxFormatSink *Sink, const char *Format, va_list Args)
         return -1;
     return (int)Out.Written;
 }
+
+/* ---- Into a buffer -------------------------------------------------------- */
+
+typedef struct {
+    BoxFormatSink Sink;
+    char         *Text;
+    size_t        Kept;
+    size_t        Room;      /* bytes that may still be kept, the NUL aside */
+} BoxFormatBuffer;
+
+static void BoxFormatBufferPut(BoxFormatSink *Sink, const char *Bytes, size_t Count)
+{
+    BoxFormatBuffer *Buffer = (BoxFormatBuffer *)Sink;
+    size_t Step = Count < Buffer->Room ? Count : Buffer->Room;
+
+    if (Step == 0)
+        return;
+    memcpy(Buffer->Text + Buffer->Kept, Bytes, Step);
+    Buffer->Kept += Step;
+    Buffer->Room -= Step;
+}
+
+int BoxFormatInto(char *Text, size_t Capacity, const char *Format, va_list Args)
+{
+    size_t Room = Text && Capacity != 0 ? Capacity - 1u : 0;
+    BoxFormatBuffer Buffer = { { BoxFormatBufferPut, NULL }, Text, 0, Room };
+    int Count = BoxFormat(&Buffer.Sink, Format, Args);
+
+    if (Text && Capacity != 0)
+        Text[Buffer.Kept] = '\0';
+    return Count;
+}

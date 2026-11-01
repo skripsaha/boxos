@@ -437,12 +437,6 @@ int vfprintf(FILE *stream, const char *format, va_list arg) noexcept
     return Run(s, format, arg);
 }
 
-int vsnprintf(char *str, size_t n, const char *format, va_list arg) noexcept
-{
-    Sink s{nullptr, str, n, 0, false};
-    return Run(s, format, arg);
-}
-
 int vsprintf(char *str, const char *format, va_list arg) noexcept
 {
     // No bound, which is what sprintf means and why it is the one to avoid.
@@ -464,15 +458,6 @@ int fprintf(FILE *stream, const char *format, ...) noexcept
     return r;
 }
 
-int snprintf(char *str, size_t n, const char *format, ...) noexcept
-{
-    va_list ap;
-    va_start(ap, format);
-    const int r = vsnprintf(str, n, format, ap);
-    va_end(ap);
-    return r;
-}
-
 int sprintf(char *str, const char *format, ...) noexcept
 {
     va_list ap;
@@ -484,10 +469,25 @@ int sprintf(char *str, const char *format, ...) noexcept
 
 } // namespace std
 
-// The strong definition that overrides boxlib's weak one. It is not in
-// namespace std because it IS ::printf — the same function the whole tree has
-// always called, now converting everything C asks for. A C++ program links
-// this; a C-only program, which cannot link boxcxx, keeps boxlib's.
+// The strong definitions that override boxlib's weak ones. They are not in
+// namespace std because they ARE ::printf, ::snprintf and ::vsnprintf — the
+// functions the whole tree calls by those names. A C++ program links these; a
+// C-only program, which cannot link boxcxx, keeps boxlib's.
+extern "C" int vsnprintf(char *str, size_t n, const char *format, va_list arg)
+{
+    Sink s{nullptr, str, n, 0, false};
+    return Run(s, format, arg);
+}
+
+extern "C" int snprintf(char *str, size_t n, const char *format, ...)
+{
+    va_list ap;
+    va_start(ap, format);
+    const int r = ::vsnprintf(str, n, format, ap);
+    va_end(ap);
+    return r;
+}
+
 extern "C" int printf(const char *format, ...)
 {
     va_list ap;

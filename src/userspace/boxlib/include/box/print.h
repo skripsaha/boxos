@@ -65,6 +65,14 @@ void io_flush(void);
  */
 int printf(const char* fmt, ...);
 
+/* C's snprintf and vsnprintf: printf's conversions written into str instead
+ * of to the screen — at most n - 1 bytes of the text and a NUL after them,
+ * nothing at all when n is 0 (and then str may be NULL) — returning the
+ * length of the whole text, or -1. A buffer has no colour: %color is C's %c
+ * there. A C++ program's <cstdio> names these same two functions. */
+int snprintf(char* str, size_t n, const char* fmt, ...);
+int vsnprintf(char* str, size_t n, const char* fmt, va_list args);
+
 /* Input — the line editor (readline.c), event-driven over the console's ear. */
 int readline(char* buffer, size_t max_len);
 

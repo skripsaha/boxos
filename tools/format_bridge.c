@@ -4,30 +4,10 @@
 
 #include "../src/userspace/boxlib/src/format.c"
 
-typedef struct {
-    BoxFormatSink Sink;
-    char         *Text;
-    size_t        Used;
-    size_t        Capacity;
-} BridgeSink;
-
-static void BridgePut(BoxFormatSink *Sink, const char *Bytes, size_t Count)
-{
-    BridgeSink *Bridge = (BridgeSink *)Sink;
-    size_t Room = Bridge->Capacity - 1u - Bridge->Used;
-    size_t Step = Count < Room ? Count : Room;
-
-    memcpy(Bridge->Text + Bridge->Used, Bytes, Step);
-    Bridge->Used += Step;
-    Bridge->Text[Bridge->Used] = '\0';
-}
-
+/* BoxLib's own vsnprintf, the one the stand holds to the host's. */
 int BridgeFormat(char *Text, size_t Capacity, const char *Format, va_list Args)
 {
-    BridgeSink Bridge = { { BridgePut, NULL }, Text, 0, Capacity };
-
-    Text[0] = '\0';
-    return BoxFormat(&Bridge.Sink, Format, Args);
+    return BoxFormatInto(Text, Capacity, Format, Args);
 }
 
 /* One x87 long double, Mantissa x 2^Exponent, by %f, %e or %g. */
@@ -36,12 +16,11 @@ int BridgeExtended(char *Text, size_t Capacity, char Conversion, int Precision, 
 {
     static uint32_t Limb[BOX_FORMAT_LONG_LIMBS];
     static uint32_t Chunk[BOX_FORMAT_LONG_CHUNKS];
-    BridgeSink Bridge = { { BridgePut, NULL }, Text, 0, Capacity };
-    BoxFormatOut Out = { &Bridge.Sink, 0, 0 };
+    BoxFormatBuffer Buffer = { { BoxFormatBufferPut, NULL }, Text, 0, Capacity - 1u };
+    BoxFormatOut Out = { &Buffer.Sink, 0, 0 };
     BoxFormatSpec Spec;
     BoxFormatFloat Value;
 
-    Text[0] = '\0';
     memset(&Spec, 0, sizeof(Spec));
     Spec.Conversion = Conversion;
     Spec.Precision = Precision;
@@ -52,5 +31,6 @@ int BridgeExtended(char *Text, size_t Capacity, char Conversion, int Precision, 
     Value.Mantissa = Mantissa;
     Value.Exponent = Exponent;
     BoxFormatFloating(&Out, &Spec, &Value, Limb, BOX_FORMAT_LONG_LIMBS, Chunk);
+    Text[Buffer.Kept] = '\0';
     return (int)Out.Written;
 }

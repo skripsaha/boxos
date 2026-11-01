@@ -1181,6 +1181,22 @@ __attribute__((weak)) int printf(const char *fmt, ...)
     return written;
 }
 
+/* Weak, as printf is: a C++ program links <cstdio>'s, which is the same
+ * function by name (boxcxx std/cstdio). */
+__attribute__((weak)) int vsnprintf(char *str, size_t n, const char *fmt, va_list args)
+{
+    return BoxFormatInto(str, n, fmt, args);
+}
+
+__attribute__((weak)) int snprintf(char *str, size_t n, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(str, n, fmt, args);
+    va_end(args);
+    return written;
+}
+
 /* ===========================================================================
  * The ear — where this strand's keys arrive (the editor is readline.c)
  *

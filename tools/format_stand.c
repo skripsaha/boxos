@@ -3,7 +3,9 @@
  *   format_stand random N       N random conversions — integers, characters,
  *                               strings, pointers and every floating form with
  *                               random flags, widths and precisions — each
- *                               compared with the host's vsnprintf
+ *                               compared with the host's vsnprintf; then N/10
+ *                               texts cut at random capacities, BoxLib's bound
+ *                               held to the host's snprintf byte for byte
  *   format_stand extended FILE  x87 long double vectors from format_oracle.py:
  *                               the host has no 80-bit type to compare with
  *
@@ -41,6 +43,18 @@ static char *Ours(int *Count, const char *Format, ...)
     *Count = BridgeFormat(Text, FORMAT_STAND_TEXT, Format, Args);
     va_end(Args);
     return Text;
+}
+
+/* BoxLib's vsnprintf at a capacity of the caller's. */
+static int OursBounded(char *Text, size_t Capacity, const char *Format, ...)
+{
+    va_list Args;
+    int Count;
+
+    va_start(Args, Format);
+    Count = BridgeFormat(Text, Capacity, Format, Args);
+    va_end(Args);
+    return Count;
 }
 
 static char *Theirs(int *Count, const char *Format, ...)
@@ -406,10 +420,53 @@ static int ExtendedRun(const char *Path)
     return Count != 0 && Failed == 0;
 }
 
+/* snprintf's bound: the text cut to Capacity - 1 bytes and ended there, no
+ * byte past Capacity written, nothing at all at a Capacity of 0 — where the
+ * buffer may be NULL — and the length of the whole text returned either way.
+ * Both buffers start filled with one mark, and are compared whole. */
+static int BoundRun(unsigned long Count)
+{
+    static const char *Strings[] = { "", "box", "BoxOS tags", "a longer string of text" };
+    unsigned long Failed = 0;
+    unsigned long Index;
+
+    for (Index = 0; Index < Count; Index++) {
+        const char *Text = Strings[Below(4)];
+        long long Number = (long long)Random() >> Below(64);
+        double Value = RandomDouble();
+        int Width = (int)Below(30);
+        int Precision = (int)Below(12);
+        int Full = snprintf(NULL, 0, "[%*s|%lld|%.*e]", Width, Text, Number, Precision, Value);
+        size_t Capacity = Below((unsigned)Full + 3u);
+        int Absent = Capacity == 0 && Below(2) == 0;
+        char A[160];
+        char B[160];
+        int CountA;
+        int CountB;
+
+        memset(A, 0x5A, sizeof(A));
+        memset(B, 0x5A, sizeof(B));
+        CountA = OursBounded(Absent ? NULL : A, Capacity, "[%*s|%lld|%.*e]", Width, Text, Number,
+                             Precision, Value);
+        CountB = snprintf(Absent ? NULL : B, Capacity, "[%*s|%lld|%.*e]", Width, Text, Number,
+                          Precision, Value);
+        if (CountA == CountB && memcmp(A, B, sizeof(A)) == 0)
+            continue;
+        if (++Failed <= 20)
+            printf("  capacity %zu of %d: ours [%.*s] (%d), host [%.*s] (%d)\n", Capacity, Full,
+                   (int)Capacity, A, CountA, (int)Capacity, B, CountB);
+    }
+    printf("bound: %lu texts cut at random capacities, %lu differ\n", Count, Failed);
+    return Failed == 0;
+}
+
 int main(int Count, char **Words)
 {
-    if (Count == 3 && strcmp(Words[1], "random") == 0)
-        return RandomRun(strtoul(Words[2], NULL, 10)) && FixedCases() ? 0 : 1;
+    if (Count == 3 && strcmp(Words[1], "random") == 0) {
+        unsigned long Conversions = strtoul(Words[2], NULL, 10);
+
+        return RandomRun(Conversions) && FixedCases() && BoundRun(Conversions / 10) ? 0 : 1;
+    }
     if (Count == 3 && strcmp(Words[1], "extended") == 0)
         return ExtendedRun(Words[2]) ? 0 : 1;
     fputs("usage: format_stand random N | extended FILE\n", stderr);
