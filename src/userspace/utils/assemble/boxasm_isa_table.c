@@ -304,8 +304,21 @@ static const BoxAsmForm JecxzForms[]  = { SHORT_ONLY(0x67, 0xE3) };
 #define SSE_PACKED(Name, Second)                                                    \
     static const BoxAsmForm Name##psForms[] = { SSE(0, (Second), XMM_M128) };       \
     static const BoxAsmForm Name##pdForms[] = { SSE(0x66, (Second), XMM_M128) };
-/* A packed integer operation of SSE2: 66 0F with xmm/m128. */
+/* MMX: the same operation on an mm register and mm/m64, with no prefix. */
+#define MMX(Second, Source)                                               \
+    { C(MM, Source, NONE), 0, { 0x0F, (Second) }, 2, R, 0, 0 }
+#define MMX_SHIFT_IMM(Second, Digit)                                      \
+    { C(MM_R, IMM8, NONE), 0, { 0x0F, (Second) }, 2, (Digit), 0, 0 }
+/* A packed integer operation of SSE2, 66 0F with xmm/m128, and of MMX. */
 #define SSE_INTEGER(Name, Second)                                                   \
+    static const BoxAsmForm Name##Forms[] = {                                      \
+        SSE(0x66, (Second), XMM_M128), MMX((Second), MM_M64) };
+/* The low halves interleaved: MMX reads only the 4 bytes it takes. */
+#define SSE_INTEGER_LOW(Name, Second)                                               \
+    static const BoxAsmForm Name##Forms[] = {                                      \
+        SSE(0x66, (Second), XMM_M128), MMX((Second), MM_M32) };
+/* SSE2's own, of no MMX form. */
+#define SSE_INTEGER_XMM(Name, Second)                                               \
     static const BoxAsmForm Name##Forms[] = { SSE(0x66, (Second), XMM_M128) };
 
 SSE_FLOAT(Add, 0x58)
@@ -361,14 +374,21 @@ static const BoxAsmForm MovdquForms[] = { SSE(0xF3, 0x6F, XMM_U128), SSE_STORE(0
 static const BoxAsmForm MovdForms[] = {
     { C(XMM, RM, NONE), S32, { 0x0F, 0x6E }, 2, R, 0, 0x66 },
     { C(RM, XMM, NONE), S32, { 0x0F, 0x7E }, 2, R, 0, 0x66 },
+    { C(MM, RM, NONE),  S32, { 0x0F, 0x6E }, 2, R, 0, 0 },
+    { C(RM, MM, NONE),  S32, { 0x0F, 0x7E }, 2, R, 0, 0 },
 };
 /* movq: xmm and xmm/m64 by F3 0F 7E and 66 0F D6 first, as NASM chooses;
- * a general register by 66 REX.W 0F 6E and 7E. */
+ * a general register by 66 REX.W 0F 6E and 7E. Of mm, mm/m64 by 0F 6F and
+ * 7F, a general register by REX.W 0F 6E and 7E. */
 static const BoxAsmForm MovqForms[] = {
     SSE(0xF3, 0x7E, XMM_M64),
     SSE_STORE(0x66, 0xD6, XMM_M64),
     { C(XMM, RM, NONE), S64, { 0x0F, 0x6E }, 2, R, 0, 0x66 },
     { C(RM, XMM, NONE), S64, { 0x0F, 0x7E }, 2, R, 0, 0x66 },
+    MMX(0x6F, MM_M64),
+    { C(MM_M64, MM, NONE), 0, { 0x0F, 0x7F }, 2, R, 0, 0 },
+    { C(MM, RM, NONE),  S64, { 0x0F, 0x6E }, 2, R, 0, 0 },
+    { C(RM, MM, NONE),  S64, { 0x0F, 0x7E }, 2, R, 0, 0 },
 };
 static const BoxAsmForm MovmskpsForms[] = { { C(REG, XMM_R, NONE), S32 | S64, { 0x0F, 0x50 }, 2, R, 0, 0 } };
 static const BoxAsmForm MovmskpdForms[] = { { C(REG, XMM_R, NONE), S32 | S64, { 0x0F, 0x50 }, 2, R, 0, 0x66 } };
@@ -408,19 +428,20 @@ SSE_INTEGER(Psadbw, 0xF6)  SSE_INTEGER(Pand, 0xDB)    SSE_INTEGER(Pandn, 0xDF)
 SSE_INTEGER(Por, 0xEB)     SSE_INTEGER(Pxor, 0xEF)    SSE_INTEGER(Pcmpeqb, 0x74)
 SSE_INTEGER(Pcmpeqw, 0x75) SSE_INTEGER(Pcmpeqd, 0x76) SSE_INTEGER(Pcmpgtb, 0x64)
 SSE_INTEGER(Pcmpgtw, 0x65) SSE_INTEGER(Pcmpgtd, 0x66) SSE_INTEGER(Packsswb, 0x63)
-SSE_INTEGER(Packssdw, 0x6B) SSE_INTEGER(Packuswb, 0x67) SSE_INTEGER(Punpcklbw, 0x60)
-SSE_INTEGER(Punpcklwd, 0x61) SSE_INTEGER(Punpckldq, 0x62) SSE_INTEGER(Punpcklqdq, 0x6C)
+SSE_INTEGER(Packssdw, 0x6B) SSE_INTEGER(Packuswb, 0x67) SSE_INTEGER_LOW(Punpcklbw, 0x60)
+SSE_INTEGER_LOW(Punpcklwd, 0x61) SSE_INTEGER_LOW(Punpckldq, 0x62)
+SSE_INTEGER_XMM(Punpcklqdq, 0x6C)
 SSE_INTEGER(Punpckhbw, 0x68) SSE_INTEGER(Punpckhwd, 0x69) SSE_INTEGER(Punpckhdq, 0x6A)
-SSE_INTEGER(Punpckhqdq, 0x6D)
+SSE_INTEGER_XMM(Punpckhqdq, 0x6D)
 
-static const BoxAsmForm PsllwForms[] = { SSE(0x66, 0xF1, XMM_M128), SSE_SHIFT_IMM(0x71, 6) };
-static const BoxAsmForm PslldForms[] = { SSE(0x66, 0xF2, XMM_M128), SSE_SHIFT_IMM(0x72, 6) };
-static const BoxAsmForm PsllqForms[] = { SSE(0x66, 0xF3, XMM_M128), SSE_SHIFT_IMM(0x73, 6) };
-static const BoxAsmForm PsrlwForms[] = { SSE(0x66, 0xD1, XMM_M128), SSE_SHIFT_IMM(0x71, 2) };
-static const BoxAsmForm PsrldForms[] = { SSE(0x66, 0xD2, XMM_M128), SSE_SHIFT_IMM(0x72, 2) };
-static const BoxAsmForm PsrlqForms[] = { SSE(0x66, 0xD3, XMM_M128), SSE_SHIFT_IMM(0x73, 2) };
-static const BoxAsmForm PsrawForms[] = { SSE(0x66, 0xE1, XMM_M128), SSE_SHIFT_IMM(0x71, 4) };
-static const BoxAsmForm PsradForms[] = { SSE(0x66, 0xE2, XMM_M128), SSE_SHIFT_IMM(0x72, 4) };
+/* A shift by a count in a register or memory, or in an imm8; of xmm and mm. */
+#define SHIFTS(Name, Second, Immediate, Digit)                                      \
+    static const BoxAsmForm Name##Forms[] = {                                      \
+        SSE(0x66, (Second), XMM_M128), SSE_SHIFT_IMM((Immediate), (Digit)),        \
+        MMX((Second), MM_M64), MMX_SHIFT_IMM((Immediate), (Digit)) };
+SHIFTS(Psllw, 0xF1, 0x71, 6)   SHIFTS(Pslld, 0xF2, 0x72, 6)   SHIFTS(Psllq, 0xF3, 0x73, 6)
+SHIFTS(Psrlw, 0xD1, 0x71, 2)   SHIFTS(Psrld, 0xD2, 0x72, 2)   SHIFTS(Psrlq, 0xD3, 0x73, 2)
+SHIFTS(Psraw, 0xE1, 0x71, 4)   SHIFTS(Psrad, 0xE2, 0x72, 4)
 static const BoxAsmForm PslldqForms[] = { SSE_SHIFT_IMM(0x73, 7) };
 static const BoxAsmForm PsrldqForms[] = { SSE_SHIFT_IMM(0x73, 3) };
 static const BoxAsmForm PshufdForms[]  = { SSE_IMM(0x66, 0x70, XMM_M128) };
@@ -432,9 +453,32 @@ static const BoxAsmForm PextrwForms[] = {
     { C(REG, XMM_R, IMM8), S32, { 0x0F, 0xC5 }, 2, R, 0, 0x66 },
     { C(REG, XMM_R, IMM8), S64, { 0x0F, 0xC5 }, 2, R, BOXASM_FORM_DEFAULT64, 0x66 },
     { C(M16, XMM, IMM8),   0,   { 0x0F, 0x3A, 0x15 }, 3, R, 0, 0x66 },
+    { C(REG, MM_R, IMM8),  S32, { 0x0F, 0xC5 }, 2, R, 0, 0 },
 };
-static const BoxAsmForm PinsrwForms[]   = { { C(XMM, R32_M16, IMM8), 0, { 0x0F, 0xC4 }, 2, R, 0, 0x66 } };
-static const BoxAsmForm PmovmskbForms[] = { { C(REG, XMM_R, NONE), S32, { 0x0F, 0xD7 }, 2, R, 0, 0x66 } };
+/* Of mm, as NASM takes them, only a 32-bit register. */
+static const BoxAsmForm PinsrwForms[] = {
+    { C(XMM, R32_M16, IMM8), 0,   { 0x0F, 0xC4 }, 2, R, 0, 0x66 },
+    { C(MM, REG_R, IMM8),    S32, { 0x0F, 0xC4 }, 2, R, 0, 0 },
+    { C(MM, M16, IMM8),      0,   { 0x0F, 0xC4 }, 2, R, 0, 0 },
+};
+static const BoxAsmForm PmovmskbForms[] = {
+    { C(REG, XMM_R, NONE), S32, { 0x0F, 0xD7 }, 2, R, 0, 0x66 },
+    { C(REG, MM_R, NONE),  S32, { 0x0F, 0xD7 }, 2, R, 0, 0 },
+};
+
+/* MMX's own, and SSE's moves and conversions between mm and xmm. */
+static const BoxAsmForm EmmsForms[]     = { ALONE(0, 0x0F, 0x77) };
+static const BoxAsmForm PshufwForms[]   = { { C(MM, MM_M64, IMM8), 0, { 0x0F, 0x70 }, 2, R, 0, 0 } };
+static const BoxAsmForm MaskmovqForms[] = { MMX(0xF7, MM_R) };
+static const BoxAsmForm MovntqForms[]   = { { C(M64, MM, NONE), 0, { 0x0F, 0xE7 }, 2, R, 0, 0 } };
+static const BoxAsmForm Movq2dqForms[]  = { SSE(0xF3, 0xD6, MM_R) };
+static const BoxAsmForm Movdq2qForms[]  = { { C(MM, XMM_R, NONE), 0, { 0x0F, 0xD6 }, 2, R, 0, 0xF2 } };
+static const BoxAsmForm Cvtpi2psForms[] = { SSE(0, 0x2A, MM_M64) };
+static const BoxAsmForm Cvtpi2pdForms[] = { SSE(0x66, 0x2A, MM_M64) };
+static const BoxAsmForm Cvtps2piForms[]  = { { C(MM, XMM_M64, NONE), 0, { 0x0F, 0x2D }, 2, R, 0, 0 } };
+static const BoxAsmForm Cvttps2piForms[] = { { C(MM, XMM_M64, NONE), 0, { 0x0F, 0x2C }, 2, R, 0, 0 } };
+static const BoxAsmForm Cvtpd2piForms[]  = { { C(MM, XMM_M128, NONE), 0, { 0x0F, 0x2D }, 2, R, 0, 0x66 } };
+static const BoxAsmForm Cvttpd2piForms[] = { { C(MM, XMM_M128, NONE), 0, { 0x0F, 0x2C }, 2, R, 0, 0x66 } };
 
 static const BoxAsmForm LdmxcsrForms[]     = { { C(MEM, NONE, NONE), S32, { 0x0F, 0xAE }, 2, 2, 0, 0 } };
 static const BoxAsmForm StmxcsrForms[]     = { { C(MEM, NONE, NONE), S32, { 0x0F, 0xAE }, 2, 3, 0, 0 } };
@@ -476,12 +520,19 @@ static const BoxAsmForm MovsldupForms[] = { SSE(0xF3, 0x12, XMM_M128) };
 static const BoxAsmForm MonitorForms[]  = { ALONE(0, 0x0F, 0x01, 0xC8) };
 static const BoxAsmForm MwaitForms[]    = { ALONE(0, 0x0F, 0x01, 0xC9) };
 
-SSE_OPERATION_38(Pshufb, 0x00)   SSE_OPERATION_38(Phaddw, 0x01)    SSE_OPERATION_38(Phaddd, 0x02)
-SSE_OPERATION_38(Phaddsw, 0x03)  SSE_OPERATION_38(Pmaddubsw, 0x04) SSE_OPERATION_38(Phsubw, 0x05)
-SSE_OPERATION_38(Phsubd, 0x06)   SSE_OPERATION_38(Phsubsw, 0x07)   SSE_OPERATION_38(Psignb, 0x08)
-SSE_OPERATION_38(Psignw, 0x09)   SSE_OPERATION_38(Psignd, 0x0A)    SSE_OPERATION_38(Pmulhrsw, 0x0B)
-SSE_OPERATION_38(Pabsb, 0x1C)    SSE_OPERATION_38(Pabsw, 0x1D)     SSE_OPERATION_38(Pabsd, 0x1E)
-SSE_OPERATION_3A(Palignr, 0x0F)
+/* SSSE3 also on mm registers and mm/m64, with no prefix. */
+#define SSSE3_OPERATION(Name, Third)                                                  \
+    static const BoxAsmForm Name##Forms[] = {                                        \
+        SSE_38(0x66, (Third), XMM_M128),                                             \
+        { C(MM, MM_M64, NONE), 0, { 0x0F, 0x38, (Third) }, 3, R, 0, 0 } };
+SSSE3_OPERATION(Pshufb, 0x00)   SSSE3_OPERATION(Phaddw, 0x01)    SSSE3_OPERATION(Phaddd, 0x02)
+SSSE3_OPERATION(Phaddsw, 0x03)  SSSE3_OPERATION(Pmaddubsw, 0x04) SSSE3_OPERATION(Phsubw, 0x05)
+SSSE3_OPERATION(Phsubd, 0x06)   SSSE3_OPERATION(Phsubsw, 0x07)   SSSE3_OPERATION(Psignb, 0x08)
+SSSE3_OPERATION(Psignw, 0x09)   SSSE3_OPERATION(Psignd, 0x0A)    SSSE3_OPERATION(Pmulhrsw, 0x0B)
+SSSE3_OPERATION(Pabsb, 0x1C)    SSSE3_OPERATION(Pabsw, 0x1D)     SSSE3_OPERATION(Pabsd, 0x1E)
+static const BoxAsmForm PalignrForms[] = {
+    SSE_3A(0x66, 0x0F, XMM_M128),
+    { C(MM, MM_M64, IMM8), 0, { 0x0F, 0x3A, 0x0F }, 3, R, 0, 0 } };
 
 SSE_OPERATION_38(Ptest, 0x17)    SSE_OPERATION_38(Pmuldq, 0x28)    SSE_OPERATION_38(Pcmpeqq, 0x29)
 SSE_OPERATION_38(Packusdw, 0x2B) SSE_OPERATION_38(Pminsb, 0x38)    SSE_OPERATION_38(Pminsd, 0x39)
@@ -586,6 +637,11 @@ static const BoxAsmInstruction BoxAsmInstructions[] = {
     PLAIN("cpuid", CpuidForms), PLAIN("rdtsc", RdtscForms), PLAIN("rdtscp", RdtscpForms),
     PLAIN("lfence", LfenceForms), PLAIN("mfence", MfenceForms), PLAIN("sfence", SfenceForms),
     PLAIN("lahf", LahfForms), PLAIN("sahf", SahfForms), PLAIN("xgetbv", XgetbvForms),
+    PLAIN("emms", EmmsForms), PLAIN("pshufw", PshufwForms), PLAIN("maskmovq", MaskmovqForms),
+    PLAIN("movntq", MovntqForms), PLAIN("movq2dq", Movq2dqForms), PLAIN("movdq2q", Movdq2qForms),
+    PLAIN("cvtpi2ps", Cvtpi2psForms), PLAIN("cvtpi2pd", Cvtpi2pdForms),
+    PLAIN("cvtps2pi", Cvtps2piForms), PLAIN("cvttps2pi", Cvttps2piForms),
+    PLAIN("cvtpd2pi", Cvtpd2piForms), PLAIN("cvttpd2pi", Cvttpd2piForms),
     PLAIN("movbe", MovbeForms),
     REPEATED("movsb", MovsbForms, BOXASM_TAKES_REP),
     REPEATED("movsw", MovswForms, BOXASM_TAKES_REP),
@@ -838,6 +894,8 @@ const BoxAsmInstruction *BoxAsmFindInstruction(const char *Name, size_t Length,
         Found = BoxAsmComparePredicate(Name, Length, Condition);
     if (!Found)
         Found = BoxAsmFindVexInstruction(Name, Length, Condition);
+    if (!Found)
+        Found = BoxAsmFindX87Instruction(Name, Length);
     return Found;
 }
 

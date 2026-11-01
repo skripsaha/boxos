@@ -62,7 +62,24 @@ typedef enum {
     BOXASM_CLASS_VSIB_Y32,   /* indexed by a ymm register, 4 bytes an element */
     BOXASM_CLASS_VSIB_Y64,   /* indexed by a ymm register, 8 bytes an element */
     BOXASM_CLASS_XMM_M8,     /* an xmm register or 1 byte of memory, in ModRM.rm (vpbroadcastb) */
-    BOXASM_CLASS_REG_V       /* a general register of the operation size, in VEX.vvvv (andn, shlx) */
+    BOXASM_CLASS_REG_V,      /* a general register of the operation size, in VEX.vvvv (andn, shlx) */
+    /* MMX: the mm registers in ModRM, as SSE's xmm. */
+    BOXASM_CLASS_MM,         /* an mm register, in ModRM.reg */
+    BOXASM_CLASS_MM_R,       /* an mm register, in ModRM.rm */
+    BOXASM_CLASS_MM_M32,     /* an mm register or 4 bytes of memory (punpcklbw) */
+    BOXASM_CLASS_MM_M64,     /* an mm register or 8 bytes of memory */
+    /* x87: a stack register is added to the last opcode byte; memory that
+     * an instruction reads in several sizes must say its own. */
+    BOXASM_CLASS_FPU,        /* st0..st7, added to the last opcode byte */
+    BOXASM_CLASS_FPU0,       /* exactly st0, named by no field */
+    BOXASM_CLASS_AX,         /* exactly ax, named by no field (fstsw ax) */
+    BOXASM_CLASS_M80,        /* 10 bytes of memory (tword): fbld, fbstp */
+    BOXASM_CLASS_SIZED_M16,  /* 2 bytes of memory, said word: fild word */
+    BOXASM_CLASS_SIZED_M32,  /* 4 bytes, said dword */
+    BOXASM_CLASS_SIZED_M64,  /* 8 bytes, said qword */
+    BOXASM_CLASS_SIZED_M80,  /* 10 bytes, said tword */
+    BOXASM_CLASS_STATE,      /* memory the x87 state is kept in, of no size said (fsave) */
+    BOXASM_CLASS_M512        /* fxsave's 512 bytes, of no size said, on a 16-byte boundary */
 } BoxAsmOperandClass;
 
 #define BOXASM_SIZE_8   0x1u
@@ -100,6 +117,11 @@ typedef enum {
 #define BOXASM_FORM_VEX_0F3A   0xC00u   /* 0F 3A */
 #define BOXASM_FORM_VEX_L256   0x1000u  /* VEX.L: 256 bits; left clear, 128 bits or ignored */
 #define BOXASM_FORM_VEX_W1     0x2000u  /* VEX.W: 1; left clear, 0 or ignored */
+
+/* The x87's waiting forms (fstcw, finit) are wait, 9B, and the form that
+ * does not wait: 9B is an instruction of its own and goes before every
+ * prefix. */
+#define BOXASM_FORM_WAIT       0x4000u
 
 typedef struct {
     uint8_t Class[4];

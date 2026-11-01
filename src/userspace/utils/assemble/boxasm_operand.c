@@ -67,6 +67,17 @@ static int BoxAsmVectorRegister(const char *Text, size_t Length, char Letter,
     return 1;
 }
 
+/* mm0..mm7, or st0..st7: a two-letter name and one digit. */
+static int BoxAsmEightRegister(const char *Text, size_t Length, const char *Letters,
+                               uint8_t Class, uint8_t Size, BoxAsmRegister *Out)
+{
+    if (Length != 3 || BoxAsmLower(Text[0]) != Letters[0] || BoxAsmLower(Text[1]) != Letters[1] ||
+        Text[2] < '0' || Text[2] > '7')
+        return 0;
+    *Out = (BoxAsmRegister){ Class, (uint8_t)(Text[2] - '0'), Size, 0 };
+    return 1;
+}
+
 /* r8..r15 with a width suffix: none, d, w, b or l. */
 static int BoxAsmExtendedRegister(const char *Text, size_t Length, BoxAsmRegister *Out)
 {
@@ -128,7 +139,9 @@ int BoxAsmRegisterLookup(const char *Text, size_t Length, BoxAsmRegister *Out)
         *Out = (BoxAsmRegister){ BOXASM_REGISTER_RIP, 0, 8, 0 };
         return 1;
     }
-    if (BoxAsmVectorRegister(Text, Length, 'x', Out) || BoxAsmVectorRegister(Text, Length, 'y', Out))
+    if (BoxAsmVectorRegister(Text, Length, 'x', Out) || BoxAsmVectorRegister(Text, Length, 'y', Out) ||
+        BoxAsmEightRegister(Text, Length, "mm", BOXASM_REGISTER_MMX, 8, Out) ||
+        BoxAsmEightRegister(Text, Length, "st", BOXASM_REGISTER_FPU, 10, Out))
         return 1;
     return BoxAsmExtendedRegister(Text, Length, Out);
 }
@@ -155,6 +168,7 @@ static uint8_t BoxAsmSizeKeyword(const BoxAsmToken *Token)
     if (BoxAsmTokenIs(Token, "word"))  return 2;
     if (BoxAsmTokenIs(Token, "dword")) return 4;
     if (BoxAsmTokenIs(Token, "qword")) return 8;
+    if (BoxAsmTokenIs(Token, "tword")) return 10;
     if (BoxAsmTokenIs(Token, "oword")) return 16;
     if (BoxAsmTokenIs(Token, "yword")) return 32;
     return 0;
@@ -333,9 +347,8 @@ static int BoxAsmParseMemory(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmTok
     return BoxAsmSettleAddress(Asm, Out, &Where);
 }
 
-/* A vector register BoxASM does not have — mm0..mm7 of MMX, xmm and ymm16 and
- * up and zmm of AVX-512 — named as such rather than taken for a label nobody
- * defined. */
+/* A vector register BoxASM does not have — xmm and ymm16 and up and zmm of
+ * AVX-512 — named as such rather than taken for a label nobody defined. */
 static const char *BoxAsmVectorNotBuilt(const BoxAsmToken *Token)
 {
     const char *Text = Token->Text;
@@ -358,10 +371,6 @@ static const char *BoxAsmVectorNotBuilt(const BoxAsmToken *Token)
             return NULL;
         Number = Number * 10u + (unsigned)(Text[Index] - '0');
     }
-    if (Letters == 2 && BoxAsmLower(Text[0]) == 'm' && BoxAsmLower(Text[1]) == 'm')
-        return Number < 8 ? "is an MMX register; BoxASM computes vectors in xmm0 to xmm15 "
-                            "and ymm0 to ymm15"
-                          : NULL;
     if (Letters != 3 || BoxAsmLower(Text[1]) != 'm' || BoxAsmLower(Text[2]) != 'm' ||
         Number > 31)
         return NULL;
@@ -373,6 +382,17 @@ static const char *BoxAsmVectorNotBuilt(const BoxAsmToken *Token)
     case 'z': return "is an AVX-512 register; BoxASM has xmm0 to xmm15 and ymm0 to ymm15";
     default:  return NULL;
     }
+}
+
+/* st(1), as the manuals write an x87 register; BoxASM, as NASM, writes st1. */
+static int BoxAsmStackParenthesized(const BoxAsmLexer *Lexer, const BoxAsmToken *Token)
+{
+    BoxAsmLexer Ahead = *Lexer;
+    BoxAsmToken Next;
+    const char *Why;
+
+    return BoxAsmTokenIs(Token, "st") && BoxAsmLexNext(&Ahead, &Next, &Why) == 0 &&
+           BoxAsmTokenIsPunct(&Next, '(');
 }
 
 /* register | [size] '[' address ']' | [size] [short|near] expression */
@@ -413,6 +433,9 @@ int BoxAsmParseOperand(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *To
         BoxAsmMessageText(&Message, BoxAsmVectorNotBuilt(Token));
         return BoxAsmFailEnd(Asm, &Token->Where, &Message);
     }
+    if (BoxAsmStackParenthesized(Lexer, Token))
+        return BoxAsmFail(Asm, &Token->Where,
+                          "the x87 registers are written st0 to st7: st1, not st(1)", NULL);
     if (BoxAsmTokenIs(Token, "short") || BoxAsmTokenIs(Token, "near")) {
         Out->Reach = BoxAsmTokenIs(Token, "short") ? BOXASM_BRANCH_SHORT : BOXASM_BRANCH_NEAR;
         if ((Rc = BoxAsmNextToken(Asm, Lexer, Token)) != 0)

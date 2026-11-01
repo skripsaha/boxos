@@ -1013,6 +1013,123 @@ def movbe_lines():
     return out
 
 
+X87_ALONE = ["fnop", "fchs", "fabs", "ftst", "fxam", "fld1", "fldl2t", "fldl2e", "fldpi",
+             "fldlg2", "fldln2", "fldz", "f2xm1", "fyl2x", "fptan", "fpatan", "fxtract",
+             "fprem1", "fdecstp", "fincstp", "fprem", "fyl2xp1", "fsqrt", "fsincos", "frndint",
+             "fscale", "fsin", "fcos", "fcompp", "fucompp", "finit", "fninit", "fclex",
+             "fnclex", "fwait", "wait"]
+X87_ARITHMETIC = ["fadd", "fmul", "fsub", "fsubr", "fdiv", "fdivr"]
+X87_INTEGER = ["fiadd", "fimul", "ficom", "ficomp", "fisub", "fisubr", "fidiv", "fidivr"]
+X87_WITH_TOP = ["fucom", "fucomp", "fcomi", "fcomip", "fucomi", "fucomip", "fcmovb", "fcmove",
+                "fcmovbe", "fcmovu", "fcmovnb", "fcmovne", "fcmovnbe", "fcmovnu"]
+# Memory sizes each x87 load, store and integer operation reads, said.
+X87_SIZED = {"fld": ("dword", "qword", "tword"), "fst": ("dword", "qword"),
+             "fstp": ("dword", "qword", "tword"), "fild": ("word", "dword", "qword"),
+             "fist": ("word", "dword"), "fistp": ("word", "dword", "qword"),
+             "fisttp": ("word", "dword", "qword"), "fcom": ("dword", "qword"),
+             "fcomp": ("dword", "qword")}
+X87_STATE = ["fldenv", "fstenv", "fnstenv", "frstor", "fsave", "fnsave"]
+FXSAVE_MEMORY = ["[rax]", "[rsp + 16]", "[r13]", "[rbx + rcx*4 + 16]", "[r9 + r10*8]",
+                 "[sse_data]", "[avx_data + 32]"]
+
+
+def x87_lines():
+    """Every x87 instruction: alone, with each stack register in each place
+    it takes, with each memory size it reads, said, and the state it keeps."""
+    out = list(X87_ALONE)
+    st = ["st%d" % i for i in range(8)]
+    for op in X87_ARITHMETIC:
+        out += [op, op + "p"]
+        for i, reg in enumerate(st):
+            out += ["%s st0, %s" % (op, reg), "%s %s, st0" % (op, reg), "%s %s" % (op, reg),
+                    "%sp %s, st0" % (op, reg), "%sp %s" % (op, reg)]
+        for n, mem in enumerate(MEMORY):
+            out.append("%s %s %s" % (op, ("dword", "qword")[n % 2], mem))
+    for op in X87_WITH_TOP + ["fcom", "fcomp"]:
+        out.append(op)
+        out += ["%s %s" % (op, reg) for reg in st] + ["%s st0, %s" % (op, reg) for reg in st]
+    for op in ("fld", "fst", "fstp", "ffree", "ffreep", "fxch"):
+        out += ["%s %s" % (op, reg) for reg in st]
+    out += ["fxch", "ffree", "ffreep", "fld", "fst", "fstp"] + ["fxch st0, %s" % reg for reg in st] + \
+           ["fxch %s, st0" % reg for reg in st]
+    for op, words in X87_SIZED.items():
+        for n, mem in enumerate(MEMORY):
+            out.append("%s %s %s" % (op, words[n % len(words)], mem))
+    for op in X87_INTEGER:
+        for n, mem in enumerate(MEMORY):
+            out.append("%s %s %s" % (op, ("word", "dword")[n % 2], mem))
+    for n, mem in enumerate(MEMORY):
+        out += ["fbld %s" % mem, "fbstp %s" % mem, "fbld tword %s" % mem,
+                "fldcw %s" % mem, "fstcw %s" % mem, "fnstcw word %s" % mem,
+                "fstsw %s" % mem, "fnstsw word %s" % mem]
+        out += ["%s %s" % (op, mem) for op in X87_STATE]
+    out += ["fstsw ax", "fnstsw ax"]
+    for mem in FXSAVE_MEMORY:
+        out += ["%s %s" % (op, mem) for op in ("fxsave", "fxrstor", "fxsave64", "fxrstor64")]
+    return out
+
+
+MMX_INTEGER = ["paddb", "paddw", "paddd", "paddq", "psubb", "psubw", "psubd", "psubq", "paddsb",
+               "paddsw", "paddusb", "paddusw", "psubsb", "psubsw", "psubusb", "psubusw", "pmullw",
+               "pmulhw", "pmulhuw", "pmuludq", "pmaddwd", "pavgb", "pavgw", "pmaxsw", "pmaxub",
+               "pminsw", "pminub", "psadbw", "pand", "pandn", "por", "pxor", "pcmpeqb", "pcmpeqw",
+               "pcmpeqd", "pcmpgtb", "pcmpgtw", "pcmpgtd", "packsswb", "packssdw", "packuswb",
+               "punpckhbw", "punpckhwd", "punpckhdq", "pshufb", "phaddw", "phaddd", "phaddsw",
+               "pmaddubsw", "phsubw", "phsubd", "phsubsw", "psignb", "psignw", "psignd",
+               "pmulhrsw", "pabsb", "pabsw", "pabsd", "maskmovq"]
+MMX_SHIFTS = ["psllw", "pslld", "psllq", "psrlw", "psrld", "psrlq", "psraw", "psrad"]
+MM = ["mm%d" % i for i in range(8)]
+
+
+def mmx_lines():
+    """Every MMX form: each operation on every pair of mm registers and on
+    memory, sized and not; the shifts by a register, memory and an imm8; the
+    moves to and from general registers and memory; SSE's conversions and
+    moves between mm and xmm."""
+    out = []
+    pairs = [(a, b) for a in range(8) for b in range(8) if (a * 3 + b) % 5 == 0] + [(0, 0), (7, 7)]
+    for op in MMX_INTEGER:
+        out += ["%s %s, %s" % (op, MM[a], MM[b]) for a, b in pairs]
+        if op != "maskmovq":
+            out += ["%s %s, %s" % (op, MM[n % 8], mem) for n, mem in enumerate(MEMORY)]
+            out.append("%s mm3, qword [r9 + 8]" % op)
+    for op in ("punpcklbw", "punpcklwd", "punpckldq"):
+        out += ["%s %s, %s" % (op, MM[a], MM[b]) for a, b in pairs]
+        out += ["%s %s, %s" % (op, MM[n % 8], mem) for n, mem in enumerate(MEMORY)]
+        out.append("%s mm6, dword [rdx]" % op)
+    for op in MMX_SHIFTS:
+        out += ["%s %s, %s" % (op, MM[a], MM[b]) for a, b in pairs[:6]]
+        out += ["%s %s, %s" % (op, MM[n % 8], mem) for n, mem in enumerate(MEMORY[:6])]
+        out += ["%s %s, %d" % (op, MM[i], [0, 1, 7, 15, 31, 63, 127, 255][i]) for i in range(8)]
+    for n, mem in enumerate(MEMORY):
+        out += ["movd %s, %s" % (MM[n % 8], mem), "movd %s, %s" % (mem, MM[(n + 3) % 8]),
+                "movq %s, %s" % (MM[n % 8], mem), "movq %s, %s" % (mem, MM[(n + 5) % 8]),
+                "pshufw %s, %s, %d" % (MM[n % 8], mem, n * 11), "movntq %s, %s" % (mem, MM[n % 8]),
+                "pinsrw %s, %s, %d" % (MM[n % 8], mem, n % 4),
+                "cvtpi2ps xmm%d, %s" % (n % 16, mem), "cvtpi2pd xmm%d, %s" % ((n * 3) % 16, mem),
+                "cvtps2pi %s, %s" % (MM[n % 8], mem), "cvttps2pi %s, %s" % (MM[n % 8], mem),
+                "palignr %s, %s, %d" % (MM[n % 8], mem, n)]
+    for n, mem in enumerate(AVX_ALIGNED[:5] + ["[sse_data]"]):
+        out += ["cvtpd2pi %s, %s" % (MM[n % 8], mem), "cvttpd2pi %s, %s" % (MM[n % 8], mem)]
+    for i in range(16):
+        m = MM[i % 8]
+        out += ["movd %s, %s" % (m, REG32[i]), "movd %s, %s" % (REG32[(i + 5) % 16], m),
+                "movq %s, %s" % (m, REG64[i]), "movq %s, %s" % (REG64[(i + 9) % 16], m),
+                "movq %s, %s" % (m, MM[(i * 3) % 8]),
+                "pextrw %s, %s, %d" % (REG32[i], m, i % 4),
+                "pinsrw %s, %s, %d" % (m, REG32[(i + 2) % 16], i % 4),
+                "pmovmskb %s, %s" % (REG32[i], m),
+                "movq2dq xmm%d, %s" % (i, m), "movdq2q %s, xmm%d" % (m, 15 - i),
+                "cvtpi2ps xmm%d, %s" % (i, m), "cvtps2pi %s, xmm%d" % (m, i),
+                "cvtpd2pi %s, xmm%d" % (m, (i * 7) % 16), "pshufw %s, %s, %d" % (m, MM[(i + 1) % 8], i * 17),
+                "palignr %s, %s, %d" % (m, MM[(i + 2) % 8], i * 9)]
+    out += ["movd mm1, dword [rax]", "movd dword [r8], mm2", "movq mm3, qword [rbx]",
+            "movq qword [rsi], mm4", "pinsrw mm5, word [rdi], 2", "movntq qword [r10], mm6",
+            "cvtpi2ps xmm9, qword [rcx]", "cvtps2pi mm1, qword [rdx]", "cvtpd2pi mm2, oword [rax]",
+            "emms"]
+    return out
+
+
 def v3_lines():
     """What x86-64-v3 adds to AVX2: FMA, F16C, BMI1, BMI2 and MOVBE."""
     return fma_lines() + f16c_lines() + bmi_lines() + movbe_lines()
@@ -1124,7 +1241,7 @@ def program(nasm):
                  stack_lines, unary_lines, imul_lines, shift_lines, extend_lines,
                  condition_lines, branch_lines, string_lines, bit_lines, atomic_lines,
                  short_branch_lines, sse_lines, lambda: sse_extension_lines(nasm), avx_lines,
-                 v3_lines):
+                 v3_lines, x87_lines, mmx_lines):
         lines += ["    " + line if not line.endswith(":") else line for line in part()]
     lines += ["    " + op for op in ALONE]
     lines += ["    ret 16", "    align 16", "code_target:", "    endbr64", "    ret",

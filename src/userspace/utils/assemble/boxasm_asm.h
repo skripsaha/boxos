@@ -12,13 +12,15 @@ typedef enum {
     BOXASM_REGISTER_HIGH8,      /* ah ch dh bh: no REX may accompany them */
     BOXASM_REGISTER_RIP,
     BOXASM_REGISTER_XMM,        /* xmm0..xmm15 */
-    BOXASM_REGISTER_YMM         /* ymm0..ymm15: the xmm register's 256 bits */
+    BOXASM_REGISTER_YMM,        /* ymm0..ymm15: the xmm register's 256 bits */
+    BOXASM_REGISTER_MMX,        /* mm0..mm7: the x87 registers' 64-bit mantissas */
+    BOXASM_REGISTER_FPU         /* st0..st7: the x87 stack, from its top */
 } BoxAsmRegisterClass;
 
 typedef struct {
     uint8_t Class;
     uint8_t Number;     /* 0..15 */
-    uint8_t Size;       /* bytes: 1, 2, 4, 8, 16, 32 */
+    uint8_t Size;       /* bytes: 1, 2, 4, 8, 10, 16, 32 */
     uint8_t NeedsRex;   /* spl bpl sil dil */
 } BoxAsmRegister;
 

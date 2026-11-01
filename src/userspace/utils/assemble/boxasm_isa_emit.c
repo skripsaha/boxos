@@ -138,6 +138,8 @@ static int BoxAsmIsRmClass(uint8_t Class)
            Class == BOXASM_CLASS_YMM_R || Class == BOXASM_CLASS_YMM_M256 ||
            Class == BOXASM_CLASS_YMM_U256 || Class == BOXASM_CLASS_U256 ||
            Class == BOXASM_CLASS_M256 || Class == BOXASM_CLASS_XMM_M8 ||
+           (Class >= BOXASM_CLASS_MM_R && Class <= BOXASM_CLASS_MM_M64) ||
+           (Class >= BOXASM_CLASS_M80 && Class <= BOXASM_CLASS_M512) ||
            BoxAsmIsGatherClass(Class);
 }
 
@@ -148,7 +150,8 @@ static uint8_t BoxAsmClassAligned(uint8_t Class)
 {
     switch (Class) {
     case BOXASM_CLASS_XMM_M128:
-    case BOXASM_CLASS_M128:     return 16;
+    case BOXASM_CLASS_M128:
+    case BOXASM_CLASS_M512:     return 16;
     case BOXASM_CLASS_YMM_M256:
     case BOXASM_CLASS_M256:     return 32;
     default:                    return 0;
@@ -184,6 +187,8 @@ static void BoxAsmPrepareOpcode(BoxAsmEncoder *Encoder, uint8_t Size, uint8_t *O
             if (Operand->Register.Number >= 8)
                 Encoder->Rex |= 0x41;
         }
+        if (Form->Class[Index] == BOXASM_CLASS_FPU)
+            Opcode[Last] = (uint8_t)(Opcode[Last] + Operand->Register.Number);
     }
 }
 
@@ -212,7 +217,8 @@ static uint8_t BoxAsmRegField(BoxAsmEncoder *Encoder)
     for (Index = 0; Index < Encoder->Count; Index++) {
         if (Encoder->Form->Class[Index] == BOXASM_CLASS_REG ||
             Encoder->Form->Class[Index] == BOXASM_CLASS_XMM ||
-            Encoder->Form->Class[Index] == BOXASM_CLASS_YMM) {
+            Encoder->Form->Class[Index] == BOXASM_CLASS_YMM ||
+            Encoder->Form->Class[Index] == BOXASM_CLASS_MM) {
             uint8_t Number = Encoder->Operands[Index].Register.Number;
             if (Number >= 8)
                 Encoder->Rex |= 0x44;
@@ -356,6 +362,8 @@ int BoxAsmEmitForm(BoxAsmEncoder *Encoder, uint8_t Short)
     int Rc;
 
     BoxAsmPrepareOpcode(Encoder, Size, Opcode);
+    if ((Form->Flags & BOXASM_FORM_WAIT) && (Rc = BoxAsmPut(Encoder, "\x9B", 1)) != 0)
+        return Rc;
     if (Form->Digit != BOXASM_DIGIT_NONE)
         BoxAsmPutAddress(Encoder, BoxAsmRegField(Encoder), &Encoder->Operands[RmIndex],
                          Address, &AddressLength, &Displacement, &DisplacementKind,

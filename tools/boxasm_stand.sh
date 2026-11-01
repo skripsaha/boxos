@@ -513,6 +513,26 @@ assembly_refuses bmi_count_size "$HEAD    shlx rax, rbx, ecx"$'\n' \
     "bmi_count_size.asm:4:5: the operands are of different sizes for 'shlx'"
 assembly_refuses bmi_no_tbm "$HEAD    bextr eax, ebx, 5"$'\n' \
     "bmi_no_tbm.asm:4:5: these operands are not a form of 'bextr'"
+assembly_refuses x87_unsized "$HEAD    fld [rax]"$'\n' \
+    "x87_unsized.asm:4:5: the size of the memory is not said: write dword, qword or tword before the memory operand of 'fld'"
+assembly_refuses x87_size "$HEAD    fist qword [rax]"$'\n' \
+    "x87_size.asm:4:5: the memory is word or dword, no other size, for 'fist'"
+assembly_refuses x87_one_size "$HEAD    fbld qword [rax]"$'\n' \
+    "x87_one_size.asm:4:5: the memory is read as 10 bytes (tword, or no size) by 'fbld'"
+assembly_refuses x87_state_sized "$HEAD    fxsave qword [rax]"$'\n' \
+    "x87_state_sized.asm:4:5: no size is said for the memory of 'fxsave': it is a block of the instruction's own size"
+assembly_refuses x87_parenthesized "$HEAD    fadd st(1)"$'\n' \
+    "x87_parenthesized.asm:4:10: the x87 registers are written st0 to st7: st1, not st(1)"
+assembly_refuses x87_two_stores "$HEAD    fstp st0, st1"$'\n' \
+    "x87_two_stores.asm:4:5: these operands are not a form of 'fstp'"
+assembly_refuses fxsave_unaligned $'section .data\nv dq 1\nstate: times 512 db 0\n'"$HEAD    fxsave [state]"$'\n' \
+    "fxsave_unaligned.asm:7:5: 'fxsave' needs its memory on a 16-byte boundary, and 'state' is not on one: put align 16 before the data"
+assembly_refuses mmx_movd_wide "$HEAD    movd rax, mm0"$'\n' \
+    "mmx_movd_wide.asm:4:5: these operands are not a form of 'movd'"
+assembly_refuses mmx_low_half "$HEAD    punpcklbw mm0, qword [rax]"$'\n' \
+    "mmx_low_half.asm:4:5: the memory is read as 4 bytes (dword, or no size) by 'punpcklbw'"
+assembly_refuses mmx_in_address "$HEAD    mov eax, [mm0]"$'\n' \
+    "mmx_in_address.asm:4:15: an address is made of 64-bit registers"
 assembly_refuses movbe_registers "$HEAD    movbe eax, ebx"$'\n' \
     "movbe_registers.asm:4:5: these operands are not a form of 'movbe'"
 assembly_refuses movbe_lock "$HEAD    lock movbe [rax], eax"$'\n' \

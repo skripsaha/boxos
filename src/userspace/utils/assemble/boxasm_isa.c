@@ -14,7 +14,10 @@ typedef enum {
     BOXASM_MISMATCH_MASK,       /* an xmm register where the form reads xmm0 */
     BOXASM_MISMATCH_WIDTH,      /* an xmm register where the form reads a ymm, or the reverse */
     BOXASM_MISMATCH_SELECTOR,   /* something but a register where a blend selects by one */
-    BOXASM_MISMATCH_VSIB        /* an address without a vector index where a gather reads one */
+    BOXASM_MISMATCH_VSIB,       /* an address without a vector index where a gather reads one */
+    BOXASM_MISMATCH_X87_UNSIZED,/* x87 memory of no size said where several are read */
+    BOXASM_MISMATCH_X87_SIZE,   /* x87 memory of a size the instruction does not read */
+    BOXASM_MISMATCH_STATE       /* a size said for memory that is a block of the instruction's own */
 } BoxAsmMismatch;
 
 static uint8_t BoxAsmSizeBit(uint8_t Bytes)
@@ -115,6 +118,43 @@ static int BoxAsmIsYmm(const BoxAsmOperand *Operand)
 static int BoxAsmIsVector(const BoxAsmOperand *Operand)
 {
     return BoxAsmIsXmm(Operand) || BoxAsmIsYmm(Operand);
+}
+
+static int BoxAsmIsMmx(const BoxAsmOperand *Operand)
+{
+    return Operand->Kind == BOXASM_OPERAND_REGISTER &&
+           Operand->Register.Class == BOXASM_REGISTER_MMX;
+}
+
+static int BoxAsmIsFpu(const BoxAsmOperand *Operand)
+{
+    return Operand->Kind == BOXASM_OPERAND_REGISTER &&
+           Operand->Register.Class == BOXASM_REGISTER_FPU;
+}
+
+/* x87 memory of exactly Bytes, its size said: an x87 instruction that reads
+ * memory of several sizes is told which, never left to guess a dword. */
+static int BoxAsmIsSizedMemory(const BoxAsmOperand *Operand, uint8_t Bytes, BoxAsmMismatch *Why)
+{
+    if (Operand->Kind != BOXASM_OPERAND_MEMORY)
+        return 0;
+    if (Operand->Size == Bytes)
+        return 1;
+    if (*Why == BOXASM_MISMATCH_OPERANDS || *Why == BOXASM_MISMATCH_X87_SIZE)
+        *Why = Operand->Size == 0 ? BOXASM_MISMATCH_X87_UNSIZED : BOXASM_MISMATCH_X87_SIZE;
+    return 0;
+}
+
+/* Memory the instruction reads or writes as a block of its own size, the
+ * x87 environment or state: no size is said for it. */
+static int BoxAsmIsStateMemory(const BoxAsmOperand *Operand, BoxAsmMismatch *Why)
+{
+    if (Operand->Kind != BOXASM_OPERAND_MEMORY)
+        return 0;
+    if (Operand->Size == 0)
+        return 1;
+    *Why = BOXASM_MISMATCH_STATE;
+    return 0;
 }
 
 /* The register a blend selects by: when what stands there is no vector
@@ -247,6 +287,22 @@ static int BoxAsmClassHolds(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand
     case BOXASM_CLASS_M128:    return BoxAsmIsMemoryOf(Encoder, Operand, 16, Why);
     case BOXASM_CLASS_R32_M16: return BoxAsmIsRegister(Operand, 4) || BoxAsmIsRegister(Operand, 8) ||
                                       BoxAsmIsMemoryOf(Encoder, Operand, 2, Why);
+    case BOXASM_CLASS_MM:
+    case BOXASM_CLASS_MM_R:    return BoxAsmIsMmx(Operand);
+    case BOXASM_CLASS_MM_M32:  return BoxAsmIsMmx(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 4, Why);
+    case BOXASM_CLASS_MM_M64:  return BoxAsmIsMmx(Operand) || BoxAsmIsMemoryOf(Encoder, Operand, 8, Why);
+    case BOXASM_CLASS_FPU:     return BoxAsmIsFpu(Operand);
+    case BOXASM_CLASS_FPU0:    return BoxAsmIsFpu(Operand) && Operand->Register.Number == 0;
+    case BOXASM_CLASS_AX:      return BoxAsmIsRegister(Operand, 2) &&
+                                      Operand->Register.Class == BOXASM_REGISTER_GENERAL &&
+                                      Operand->Register.Number == 0;
+    case BOXASM_CLASS_M80:     return BoxAsmIsMemoryOf(Encoder, Operand, 10, Why);
+    case BOXASM_CLASS_SIZED_M16: return BoxAsmIsSizedMemory(Operand, 2, Why);
+    case BOXASM_CLASS_SIZED_M32: return BoxAsmIsSizedMemory(Operand, 4, Why);
+    case BOXASM_CLASS_SIZED_M64: return BoxAsmIsSizedMemory(Operand, 8, Why);
+    case BOXASM_CLASS_SIZED_M80: return BoxAsmIsSizedMemory(Operand, 10, Why);
+    case BOXASM_CLASS_STATE:
+    case BOXASM_CLASS_M512:    return BoxAsmIsStateMemory(Operand, Why);
     default:                   return 0;
     }
 }
@@ -492,6 +548,38 @@ static void BoxAsmWidthMessage(const BoxAsmEncoder *Encoder, BoxAsmMessage *Mess
         BoxAsmMessageText(Message, " has no form with registers of these widths");
 }
 
+/* The size words of the memory an x87 instruction reads, from the smallest:
+ * "word, dword or qword". */
+static void BoxAsmSizedWords(const BoxAsmInstruction *Instruction, BoxAsmMessage *Message)
+{
+    static const char *const Words[] = { "word", "dword", "qword", "tword" };
+    uint8_t Seen = 0;
+    uint8_t Count = 0;
+    uint8_t Said = 0;
+    uint8_t Form;
+    uint8_t Operand;
+    uint8_t Size;
+
+    for (Form = 0; Form < Instruction->FormCount; Form++)
+        for (Operand = 0; Operand < 4; Operand++) {
+            uint8_t Class = Instruction->Forms[Form].Class[Operand];
+
+            if (Class >= BOXASM_CLASS_SIZED_M16 && Class <= BOXASM_CLASS_SIZED_M80 &&
+                !(Seen & (1u << (Class - BOXASM_CLASS_SIZED_M16)))) {
+                Seen |= (uint8_t)(1u << (Class - BOXASM_CLASS_SIZED_M16));
+                Count++;
+            }
+        }
+    for (Size = 0; Size < 4; Size++) {
+        if (!(Seen & (1u << Size)))
+            continue;
+        if (Said != 0)
+            BoxAsmMessageText(Message, Said + 1u == Count ? " or " : ", ");
+        BoxAsmMessageText(Message, Words[Size]);
+        Said++;
+    }
+}
+
 static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
 {
     const BoxAsmStatement *Statement = Encoder->Statement;
@@ -511,6 +599,8 @@ static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
         BoxAsmMessageDecimal(&Message, Encoder->MemoryWanted);
         BoxAsmMessageText(&Message, Encoder->MemoryWanted == 32
                                     ? " bytes (yword, or no size) by "
+                                    : Encoder->MemoryWanted == 10
+                                    ? " bytes (tword, or no size) by "
                                     : Encoder->MemoryWanted == 16
                                     ? " bytes (oword, or no size) by "
                                     : Encoder->MemoryWanted == 8
@@ -534,6 +624,21 @@ static int BoxAsmNoForm(BoxAsmEncoder *Encoder, BoxAsmMismatch Why)
     case BOXASM_MISMATCH_SELECTOR:
         BoxAsmMessageText(&Message, "the selector is a register, written last, in ");
         break;
+    case BOXASM_MISMATCH_X87_UNSIZED:
+        BoxAsmMessageText(&Message, "the size of the memory is not said: write ");
+        BoxAsmSizedWords(Statement->Instruction, &Message);
+        BoxAsmMessageText(&Message, " before the memory operand of ");
+        break;
+    case BOXASM_MISMATCH_X87_SIZE:
+        BoxAsmMessageText(&Message, "the memory is ");
+        BoxAsmSizedWords(Statement->Instruction, &Message);
+        BoxAsmMessageText(&Message, ", no other size, for ");
+        break;
+    case BOXASM_MISMATCH_STATE:
+        BoxAsmMessageText(&Message, "no size is said for the memory of ");
+        BoxAsmMessageName(&Message, Statement->Instruction->Name);
+        BoxAsmMessageText(&Message, ": it is a block of the instruction's own size");
+        return BoxAsmFailEnd(Encoder->Asm, &Statement->Where, &Message);
     case BOXASM_MISMATCH_RANGE: {
         uint8_t At;
         for (At = 0; At < Encoder->GivenCount; At++)

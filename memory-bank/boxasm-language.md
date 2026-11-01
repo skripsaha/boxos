@@ -3,8 +3,8 @@
 Status 2026-11-01: implemented in `src/userspace/utils/assemble/`, held to
 NASM 3 byte for byte and to GNU ld by `tools/boxasm_stand.sh` (the `boxasm`
 gate), run end to end in BoxOS (`hello`, `countdown`). The instructions are
-x86-64's general ones, SSE to SSE4.2, and AVX, AVX2, FMA, F16C, BMI1, BMI2
-and MOVBE — x86-64-v3's sets — but for x87 and MMX.
+all of x86-64-v3 a program runs: the general ones, x87, MMX, SSE to SSE4.2,
+AVX, AVX2, FMA, F16C, BMI1, BMI2 and MOVBE.
 
 ## Using it
 
@@ -83,14 +83,16 @@ subtract to a number.
 
 - Registers: `rax..r15`, `eax..r15d`, `ax..r15w`, `al..r15b` (also `r8l`),
   `spl bpl sil dil`, and `ah bh ch dh` (which no instruction needing REX may
-  use); `xmm0..xmm15` for SSE, `ymm0..ymm15` for AVX.
+  use); `xmm0..xmm15` for SSE, `ymm0..ymm15` for AVX, `mm0..mm7` for MMX,
+  `st0..st7` for the x87 stack (`st1`, never `st(1)`).
 - Memory: `[base + index*scale + displacement]`. The scale (1, 2, 4, 8) may
   be written first: `[8*rcx + table]`.
 - `[label]` is RIP-relative. `[abs label]` is the 32-bit absolute address,
   and `[rip + label]` is the same as `[rel label]`. An address made of a bare
   number is absolute.
-- `byte word dword qword oword yword` (1 to 32 bytes) say the size of a
-  memory operand where no register does: `inc qword [rax]`. Instructions with one size need none:
+- `byte word dword qword tword oword yword` (1, 2, 4, 8, 10, 16 and 32
+  bytes) say the size of a memory operand where no register does: `inc
+  qword [rax]`. Instructions with one size need none:
   `push [rax]`, `jmp [rbx]`, `sete [rcx]`, `cmpxchg16b [rdi]`.
 - `short` and `near` before a jump target force rel8 or rel32. Without them,
   the assembler takes the shortest form that reaches.
@@ -199,6 +201,44 @@ subtract to a number.
 - `movbe` loads or stores with the bytes reversed; `lahf` and `sahf` move the
   flags through ah; `xgetbv` reads the register ecx names — with 0, XCR0,
   whose bits 1 and 2 say the system saves the xmm and ymm registers.
+- x87, on the stack of st0 (its top) to st7:
+  - loads and stores: `fld fst fstp` of memory (`dword` or `qword`, and
+    `tword` but for `fst`) or a stack register, `fild fistp fisttp` of a
+    `word`, `dword` or `qword` integer and `fist` of a `word` or `dword`,
+    `fbld fbstp` of a 10-byte decimal, `fxch`, and the constants `fld1 fldz
+    fldpi fldl2e fldl2t fldlg2 fldln2`;
+  - `fadd fsub fsubr fmul fdiv fdivr` of a `dword` or `qword` of memory into
+    st0, or between st0 and st(i) either way (`fadd st0, st3`, `fadd st3,
+    st0`, and `fadd st3` for st0 += st3); their popping forms `faddp` and
+    kin; and `fiadd fisub fisubr fimul fidiv fidivr` of a `word` or `dword`
+    integer;
+  - compares `fcom fcomp fcompp fucom fucomp fucompp ficom ficomp ftst fxam`,
+    and `fcomi fcomip fucomi fucomip`, which set the flags `jcc` reads, and
+    the moves on them `fcmovb fcmove fcmovbe fcmovu fcmovnb fcmovne fcmovnbe
+    fcmovnu`;
+  - `fabs fchs fsqrt fsin fcos fsincos fptan fpatan f2xm1 fyl2x fyl2xp1
+    fscale fprem fprem1 frndint fxtract fdecstp fincstp ffree ffreep fnop`;
+  - the control word `fldcw fstcw fnstcw`, the status word `fstsw fnstsw` (to
+    `ax` or a word of memory), the environment and state `fldenv fstenv
+    fnstenv frstor fsave fnsave`, `finit fninit fclex fnclex fwait wait`;
+    `fxsave fxrstor fxsave64 fxrstor64` keep the x87, MMX and SSE state in
+    512 bytes on a 16-byte boundary, proven for a label as for SSE.
+
+  A stack register is written st0 to st7. Left out, a register is st1:
+  `fxch`, `fcom`, `fld`, `fcmovb` are those with st1, and `fadd` with no
+  operand is `faddp st1, st0`, as NASM takes them. The waiting forms
+  (`fstcw`, `fstsw`, `finit`) are `wait` before the form that does not wait.
+  Memory an instruction reads in several sizes says which; memory of one
+  size may say it or not, and the environment and state say none.
+- MMX, on `mm0..mm7`: the integer operations of SSE2 and SSSE3 above, each
+  also on an mm register and mm/m64 (`paddw mm1, [rax]`, `pshufb mm0, mm1`,
+  `psllq mm2, 4`) but `punpcklqdq punpckhqdq pshufd pshufhw pshuflw pslldq
+  psrldq`; `punpcklbw punpcklwd punpckldq` of mm read 4 bytes of memory.
+  `movd` (32 bits) and `movq` (64) between mm and a general register or
+  memory, `movq` between mm registers, `pextrw pinsrw pmovmskb` with a
+  32-bit register, `pshufw maskmovq movntq emms`; and SSE's `cvtpi2ps
+  cvtpi2pd cvtps2pi cvttps2pi cvtpd2pi cvttpd2pi movq2dq movdq2q`. The mm
+  registers are the x87 registers' own: `emms` gives them back to the x87.
 - Alone: `nop int3 leave cqo cdq cwd cdqe cwde cbw pushfq popfq cld std clc stc
   cmc endbr64 pause ud2`.
 
@@ -211,7 +251,8 @@ CPUID.1:ECX (bits 0, 9, 19, 20, 22, 12, 28, 29), AVX2, BMI1 and BMI2 in
 CPUID.7:EBX (bits 5, 3, 8), `lahf` and `sahf` in bit 0 of ECX of leaf
 0x80000001. An instruction encoded with VEX also needs the system to save
 the ymm registers: CPUID.1:ECX bit 27 (OSXSAVE), then `xgetbv` with ecx 0
-and bits 1 and 2 of eax. BoxOS saves them.
+and bits 1 and 2 of eax. BoxOS saves them. x87, MMX and fxsave are in
+every x86-64 processor.
 The assembler cannot know the machine a program will run on: a processor
 without `lzcnt` or `tzcnt` runs them as `bsr` and `bsf`, which answer
 differently, and one without the others stops the program. Ask `cpuid`
@@ -432,6 +473,17 @@ BoxOS userspace has no red zone.
 - `sarx shlx shrx` take a count register of the operation's size, as the
   manual writes them; NASM takes a general register of any size there.
 - `bextr` with an immediate is AMD's TBM, not built; NASM writes it.
+- x87 memory an instruction reads in several sizes must say which; NASM
+  takes a dword where none is said (a word for `fisttp`).
+- A memory operand of one size (`fbld`, `fldcw`, MMX's mm/m64) said to be
+  of another, or the x87 environment and state and fxsave's 512 bytes said
+  to be of any, is refused; NASM ignores what is said.
+- `st(1)` is refused, naming `st1`; NASM's `fadd to st1` is not built (write
+  `fadd st1, st0`), nor are the 8087's and 287's `fdisi feni fsetpm`.
+- `movd` takes 32 bits; NASM also takes a 64-bit register with an mm one,
+  which is `movq`.
+- `pinsrw` takes a 32-bit register or a word of memory, as the manual
+  writes it; NASM also takes a 16-bit register.
 - Packed SSE memory through a label not proven on a 16-byte boundary is
   refused; NASM assembles it, and the program stops when it runs.
 - Hexadecimal floating-point constants, `__float32__()` and the other float
@@ -449,11 +501,10 @@ BoxOS userspace has no red zone.
   `%imacro`, `%[...]`, `%line`, `%pragma`, `%depend`, `%pathsearch`.
 
 Everything else in the shared subset assembles to the same bytes and
-relocations: `tools/boxasm_oracle.py` generates a corpus of about 31,000
+relocations: `tools/boxasm_oracle.py` generates a corpus of about 36,000
 lines and compares the two objects.
 
 ## Not built yet
 
-- x87 and MMX, `fxsave` and `fxrstor` (next); AVX-512; raw Manifest,
-  `box.notify`, `box.wait`.
+- AVX-512; raw Manifest, `box.notify`, `box.wait`.
 - Programs made of several sources; a native BoxOS object format.
