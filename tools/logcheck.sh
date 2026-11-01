@@ -6452,7 +6452,7 @@ finish_boot() {
     local MARK
     MARK=$(wc -l < build/serial.log)
     local cmd
-    for cmd in "finish nobody" "finish display" "finish display anyway" "me"; do
+    for cmd in "finish nobody" "finish display" "finish display anyway" "finish display"; do
         type_cmd "$cmd"
         sleep 1
         key_press ret
@@ -6482,9 +6482,12 @@ run_finish() {
     grep -q "^nothing ended$" "$L" \
         && ok "finish: nothing was ended while the guard stood" \
         || bad "finish: something was ended although the guard spoke"
-    grep -q "Processes: 2 live" "$L" \
+    # Asked again after the word anyway: nobody wears display any more — the
+    # daemon is gone — and the shell answered the asking. Not a count of what
+    # is alive, which is whatever the machine autostarts besides.
+    grep -q "^display: nothing wears that tag$" "$L" \
         && ok "finish: after the word anyway the daemon is gone and the shell still answers" \
-        || bad "finish: the daemon survived the word anyway, or the shell stopped answering ($(grep -m1 'Processes:' "$L" || echo 'no answer at all'))"
+        || bad "finish: the daemon survived the word anyway, or the shell stopped answering ($(grep -m1 '^display: ' "$L" || echo 'no answer at all'))"
     grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
         && bad "finish: the kernel spoke of a stall or fault" \
         || ok "finish: no verdict, no panic"
