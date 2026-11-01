@@ -477,11 +477,74 @@ GATHER_Q_SINGLE(Gatherqps, 0x93, 0)   GATHER_Q_DOUBLE(Gatherqpd, 0x93, W1)
 GATHER_D_SINGLE(Pgatherdd, 0x90, 0)   GATHER_D_DOUBLE(Pgatherdq, 0x90, W1)
 GATHER_Q_SINGLE(Pgatherqd, 0x91, 0)   GATHER_Q_DOUBLE(Pgatherqq, 0x91, W1)
 
+/* ---- FMA ----------------------------------------------------------------
+ * One rounding of a product and a sum, the destination one of the three: 132
+ * is dest = dest * rm + vvvv, 213 is dest = vvvv * dest + rm, 231 is dest =
+ * vvvv * rm + dest; fmsub subtracts the third, fnmadd and fnmsub negate the
+ * product, fmaddsub and fmsubadd alternate the two from element to element.
+ * Single precision is VEX.W0, double W1; the orders' opcodes are 0x10 apart.
+ * All three operands are written: the destination is also a source, so NASM
+ * takes no form that leaves the second out. */
+#define FMA(Rm, Vex, Opcode) VEX(C(XMM, XMM_V, Rm), 0, Vex, 0x66, Opcode, 0)
+#define FMA_Y(Vex, Opcode)   VEX(C(YMM, YMM_V, YMM_U256), 0, (Vex) | L256, 0x66, Opcode, 0)
+#define FMA_PACKED(Name, Opcode)                                                        \
+    static const BoxAsmForm V##Name##psForms[] = {                                      \
+        FMA(XMM_U128, M38, Opcode), FMA_Y(M38, Opcode) };                               \
+    static const BoxAsmForm V##Name##pdForms[] = {                                      \
+        FMA(XMM_U128, M38 | W1, Opcode), FMA_Y(M38 | W1, Opcode) };
+#define FMA_SCALAR(Name, Opcode)                                                        \
+    static const BoxAsmForm V##Name##ssForms[] = { FMA(XMM_M32, M38, Opcode) };         \
+    static const BoxAsmForm V##Name##sdForms[] = { FMA(XMM_M64, M38 | W1, Opcode) };
+#define FMA_ORDERS(Shape, Name, Opcode)                                                 \
+    Shape(Name##132, (Opcode)) Shape(Name##213, (Opcode) + 0x10)                        \
+    Shape(Name##231, (Opcode) + 0x20)
+FMA_ORDERS(FMA_PACKED, Fmaddsub, 0x96)   FMA_ORDERS(FMA_PACKED, Fmsubadd, 0x97)
+FMA_ORDERS(FMA_PACKED, Fmadd, 0x98)      FMA_ORDERS(FMA_SCALAR, Fmadd, 0x99)
+FMA_ORDERS(FMA_PACKED, Fmsub, 0x9A)      FMA_ORDERS(FMA_SCALAR, Fmsub, 0x9B)
+FMA_ORDERS(FMA_PACKED, Fnmadd, 0x9C)     FMA_ORDERS(FMA_SCALAR, Fnmadd, 0x9D)
+FMA_ORDERS(FMA_PACKED, Fnmsub, 0x9E)     FMA_ORDERS(FMA_SCALAR, Fnmsub, 0x9F)
+
+/* ---- F16C ---------------------------------------------------------------
+ * Half precision to single and back: four or eight halves, in 8 or 16 bytes,
+ * are as many singles in an xmm or a ymm register. vcvtps2ph writes its
+ * halves to ModRM.rm, rounded as its imm8 says. */
+static const BoxAsmForm VCvtph2psForms[] = {
+    PAIR(M38, 0x66, 0x13, XMM_M64), PAIR_Y(M38, 0x66, 0x13, XMM_U128) };
+static const BoxAsmForm VCvtps2phForms[] = {
+    VEX(C(XMM_M64, XMM, IMM8), 0, M3A, 0x66, 0x1D, 0),
+    VEX(C(XMM_U128, YMM, IMM8), 0, M3A | L256, 0x66, 0x1D, 0) };
+
+/* ---- BMI1 and BMI2 ------------------------------------------------------
+ * General registers under VEX: 32 bits are VEX.W0, 64 are W1, and VEX.L is
+ * 0. A source the operation takes as a whole register is in VEX.vvvv: the
+ * one andn inverts, the control of bextr and bzhi, the count of the shifts,
+ * the low half mulx writes; blsi, blsmsk and blsr write it. Of three
+ * operands the second may be left out and is then the first again, as NASM
+ * takes it: bzhi eax, ecx is bzhi eax, eax, ecx. */
+#define GENERAL(Classes, Map, Prefix, Opcode, Digit)                                    \
+    { Classes, S32 | S64, { (Opcode) }, 1, (Digit), (Map), (Prefix) }
+static const BoxAsmForm AndnForms[]   = { GENERAL(C(REG, REG_V, RM), M38 | DUP, 0, 0xF2, R) };
+static const BoxAsmForm BextrForms[]  = { GENERAL(C(REG, RM, REG_V), M38 | DUP, 0, 0xF7, R) };
+static const BoxAsmForm BlsiForms[]   = { GENERAL(C(REG_V, RM, NONE), M38, 0, 0xF3, 3) };
+static const BoxAsmForm BlsmskForms[] = { GENERAL(C(REG_V, RM, NONE), M38, 0, 0xF3, 2) };
+static const BoxAsmForm BlsrForms[]   = { GENERAL(C(REG_V, RM, NONE), M38, 0, 0xF3, 1) };
+static const BoxAsmForm BzhiForms[]   = { GENERAL(C(REG, RM, REG_V), M38 | DUP, 0, 0xF5, R) };
+static const BoxAsmForm MulxForms[]   = { GENERAL(C(REG, REG_V, RM), M38 | DUP, 0xF2, 0xF6, R) };
+static const BoxAsmForm PdepForms[]   = { GENERAL(C(REG, REG_V, RM), M38 | DUP, 0xF2, 0xF5, R) };
+static const BoxAsmForm PextForms[]   = { GENERAL(C(REG, REG_V, RM), M38 | DUP, 0xF3, 0xF5, R) };
+static const BoxAsmForm RorxForms[]   = { GENERAL(C(REG, RM, IMM8), M3A, 0xF2, 0xF0, R) };
+static const BoxAsmForm SarxForms[]   = { GENERAL(C(REG, RM, REG_V), M38 | DUP, 0xF3, 0xF7, R) };
+static const BoxAsmForm ShlxForms[]   = { GENERAL(C(REG, RM, REG_V), M38 | DUP, 0x66, 0xF7, R) };
+static const BoxAsmForm ShrxForms[]   = { GENERAL(C(REG, RM, REG_V), M38 | DUP, 0xF2, 0xF7, R) };
+
 #define PACKED_ENTRIES(Mnemonic, Name)                                   \
     PLAIN("v" Mnemonic "ps", V##Name##psForms), PLAIN("v" Mnemonic "pd", V##Name##pdForms)
 #define SCALAR_ENTRIES(Mnemonic, Name)                                   \
     PLAIN("v" Mnemonic "ss", V##Name##ssForms), PLAIN("v" Mnemonic "sd", V##Name##sdForms)
 #define ENTRY(Mnemonic, Name) PLAIN("v" Mnemonic, V##Name##Forms)
+#define FMA_ENTRIES(Shape, Mnemonic, Name)                                         \
+    Shape(Mnemonic "132", Name##132), Shape(Mnemonic "213", Name##213),            \
+    Shape(Mnemonic "231", Name##231)
 
 static const BoxAsmInstruction BoxAsmVexInstructions[] = {
     PACKED_ENTRIES("add", Add),  SCALAR_ENTRIES("add", Add),
@@ -591,6 +654,18 @@ static const BoxAsmInstruction BoxAsmVexInstructions[] = {
     ENTRY("gatherqps", Gatherqps), ENTRY("gatherqpd", Gatherqpd),
     ENTRY("pgatherdd", Pgatherdd), ENTRY("pgatherdq", Pgatherdq),
     ENTRY("pgatherqd", Pgatherqd), ENTRY("pgatherqq", Pgatherqq),
+    FMA_ENTRIES(PACKED_ENTRIES, "fmaddsub", Fmaddsub),
+    FMA_ENTRIES(PACKED_ENTRIES, "fmsubadd", Fmsubadd),
+    FMA_ENTRIES(PACKED_ENTRIES, "fmadd", Fmadd),   FMA_ENTRIES(SCALAR_ENTRIES, "fmadd", Fmadd),
+    FMA_ENTRIES(PACKED_ENTRIES, "fmsub", Fmsub),   FMA_ENTRIES(SCALAR_ENTRIES, "fmsub", Fmsub),
+    FMA_ENTRIES(PACKED_ENTRIES, "fnmadd", Fnmadd), FMA_ENTRIES(SCALAR_ENTRIES, "fnmadd", Fnmadd),
+    FMA_ENTRIES(PACKED_ENTRIES, "fnmsub", Fnmsub), FMA_ENTRIES(SCALAR_ENTRIES, "fnmsub", Fnmsub),
+    ENTRY("cvtph2ps", Cvtph2ps), ENTRY("cvtps2ph", Cvtps2ph),
+    PLAIN("andn", AndnForms), PLAIN("bextr", BextrForms), PLAIN("blsi", BlsiForms),
+    PLAIN("blsmsk", BlsmskForms), PLAIN("blsr", BlsrForms), PLAIN("bzhi", BzhiForms),
+    PLAIN("mulx", MulxForms), PLAIN("pdep", PdepForms), PLAIN("pext", PextForms),
+    PLAIN("rorx", RorxForms), PLAIN("sarx", SarxForms), PLAIN("shlx", ShlxForms),
+    PLAIN("shrx", ShrxForms),
 };
 
 /* vcmpltps and its kin: vcmp, a predicate, a type; the predicate is the imm8

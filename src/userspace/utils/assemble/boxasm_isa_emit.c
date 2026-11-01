@@ -296,7 +296,8 @@ static uint8_t BoxAsmVexSource(const BoxAsmEncoder *Encoder)
 
     for (Index = 0; Index < Encoder->Count; Index++)
         if (Encoder->Form->Class[Index] == BOXASM_CLASS_XMM_V ||
-            Encoder->Form->Class[Index] == BOXASM_CLASS_YMM_V)
+            Encoder->Form->Class[Index] == BOXASM_CLASS_YMM_V ||
+            Encoder->Form->Class[Index] == BOXASM_CLASS_REG_V)
             return Encoder->Operands[Index].Register.Number;
     return 0;
 }

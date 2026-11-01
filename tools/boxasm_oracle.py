@@ -66,7 +66,7 @@ CONDITIONS = ["o", "no", "b", "c", "nae", "ae", "nb", "nc", "e", "z", "ne", "nz"
               "ge", "nl", "le", "ng", "g", "nle"]
 ALONE = ["ret", "nop", "int3", "leave", "cqo", "cdq", "cwd", "cdqe", "cwde", "cbw",
          "pushfq", "popfq", "cld", "std", "endbr64", "pause", "ud2", "clc", "stc", "cmc",
-         "cpuid", "rdtsc", "rdtscp", "lfence", "mfence", "sfence"]
+         "cpuid", "rdtsc", "rdtscp", "lfence", "mfence", "sfence", "lahf", "sahf", "xgetbv"]
 STRINGS = {"movs": "rep", "stos": "rep", "lods": "rep", "cmps": "repe", "scas": "repe"}
 LOCKABLE = ALU[:7] + ["inc", "dec", "not", "neg"]
 BIT_TESTS = ["bt", "bts", "btr", "btc"]
@@ -549,11 +549,12 @@ def vex_picks(count=16):
     return VEX_PICKS + [(i, (i * 5 + 3) % 16, (i * 7 + 1) % 16) for i in range(count)]
 
 
-def vector_triple(op, dest, first, second, word, imm=False):
-    """op dest, first, second in registers, with memory sized and not, and the
-    second operand left out, which NASM reads as the destination again. Left
-    unsized without a word: NASM 3 takes a qword for the memory of vcmpss and
-    its kin, and refuses the dword the manual gives."""
+def vector_triple(op, dest, first, second, word, imm=False, duplicate=True):
+    """op dest, first, second in registers, with memory sized and not, and —
+    unless the instruction takes no such form — the second operand left out,
+    which NASM reads as the destination again. Left unsized without a word:
+    NASM 3 takes a qword for the memory of vcmpss and its kin, and refuses the
+    dword the manual gives."""
     out = []
     for n, (a, b, c) in enumerate(vex_picks()):
         out.append("%s %s, %s, %s" % (op, dest[a], first[b], second[c]) +
@@ -564,6 +565,8 @@ def vector_triple(op, dest, first, second, word, imm=False):
     sized = word + " " if word else ""
     out.append("%s %s, %s, %s[rdx + 32]" % (op, dest[11], first[3], sized) +
                (", 255" if imm else ""))
+    if not duplicate:
+        return out
     tail = ", 0x1B" if imm else ""
     out += ["%s %s, %s%s" % (op, dest[1], second[2], tail),
             "%s %s, %s%s" % (op, dest[10], second[12], tail),
@@ -592,12 +595,13 @@ def vector_store(op, source, word, memories=AVX_MEMORY):
     return out
 
 
-def both_widths(op, xmm_word="oword", imm=False, pair=False):
+def both_widths(op, xmm_word="oword", imm=False, pair=False, duplicate=True):
     """An operation on xmm registers, then on ymm ones."""
     form = vector_pair if pair else vector_triple
     if pair:
         return form(op, XMM, XMM, xmm_word, imm) + form(op, YMM, YMM, "yword", imm)
-    return form(op, XMM, XMM, XMM, xmm_word, imm) + form(op, YMM, YMM, YMM, "yword", imm)
+    return form(op, XMM, XMM, XMM, xmm_word, imm, duplicate) + \
+        form(op, YMM, YMM, YMM, "yword", imm, duplicate)
 
 
 AVX_FLOAT = ["add", "sub", "mul", "div", "min", "max"]
@@ -931,6 +935,89 @@ def avx2_lines():
     return out + gather_lines()
 
 
+FMA_ORDERS = ("132", "213", "231")
+BMI_SOURCE_LAST = ("andn", "mulx", "pdep", "pext")     # op r, vvvv, r/m
+BMI_CONTROL_LAST = ("bextr", "bzhi", "sarx", "shlx", "shrx")   # op r, r/m, vvvv
+BMI_ONE_SOURCE = ("blsi", "blsmsk", "blsr")             # op vvvv, r/m
+
+
+def fma_lines():
+    """Every FMA instruction in its three orders, packed on both widths and
+    scalar with the element's memory; its three operands always written."""
+    out = []
+    for family in ("fmaddsub", "fmsubadd", "fmadd", "fmsub", "fnmadd", "fnmsub"):
+        for order in FMA_ORDERS:
+            for kind in ("ps", "pd"):
+                out += both_widths("v" + family + order + kind, duplicate=False)
+            if family in ("fmaddsub", "fmsubadd"):
+                continue
+            out += vector_triple("v" + family + order + "ss", XMM, XMM, XMM, "dword",
+                                 duplicate=False)
+            out += vector_triple("v" + family + order + "sd", XMM, XMM, XMM, "qword",
+                                 duplicate=False)
+    return out
+
+
+def f16c_lines():
+    """Halves to singles from a register or memory, and back with each
+    rounding the imm8 names, to a register or memory."""
+    out = vector_pair("vcvtph2ps", XMM, XMM, "qword") + vector_pair("vcvtph2ps", YMM, XMM, "oword")
+    for source, word in ((XMM, "qword"), (YMM, "oword")):
+        for n, (a, b, _) in enumerate(vex_picks()):
+            out.append("vcvtps2ph %s, %s, %d" % (XMM[a], source[b], (n * 37 + 4) & 255))
+        for n, mem in enumerate(AVX_MEMORY):
+            out.append("vcvtps2ph %s, %s, %d" % (mem, source[(n * 5 + 3) % 16], n & 7))
+        out.append("vcvtps2ph %s [r10 + 24], %s, 255" % (word, source[12]))
+    return out
+
+
+def bmi_lines():
+    """BMI1 and BMI2 on 32- and 64-bit registers: the destination, the source
+    in VEX.vvvv and the r/m each in the high half and not, then memory, sized
+    and not; the three-operand ones with the second left out, which NASM
+    reads as the first again; rorx with the edges of its imm8."""
+    out = []
+    for size in (4, 8):
+        regs, word = REGS[size], SIZE_WORD[size]
+        for n, (a, b, c) in enumerate(vex_picks()):
+            out += ["%s %s, %s, %s" % (op, regs[a], regs[b], regs[c]) for op in BMI_SOURCE_LAST]
+            out += ["%s %s, %s, %s" % (op, regs[a], regs[c], regs[b]) for op in BMI_CONTROL_LAST]
+            out += ["%s %s, %s" % (op, regs[b], regs[c]) for op in BMI_ONE_SOURCE]
+            out.append("rorx %s, %s, %d" % (regs[a], regs[c], (n * 41) & 255))
+        for n, mem in enumerate(MEMORY):
+            a, b = regs[(n * 3) % 16], regs[(n * 5 + 2) % 16]
+            out += ["%s %s, %s, %s" % (op, a, b, mem) for op in BMI_SOURCE_LAST]
+            out += ["%s %s, %s, %s" % (op, a, mem, b) for op in BMI_CONTROL_LAST]
+            out += ["%s %s, %s" % (op, b, mem) for op in BMI_ONE_SOURCE]
+            out.append("rorx %s, %s, %d" % (a, mem, [0, 1, 31, 63, 127, 255][n % 6]))
+        for a, b, _ in vex_picks(4):
+            out += ["%s %s, %s" % (op, regs[a], regs[b]) for op in BMI_SOURCE_LAST + BMI_CONTROL_LAST]
+        out += ["%s %s, [rcx + 4]" % (op, regs[6]) for op in BMI_SOURCE_LAST]
+        out += ["%s %s, %s, %s [rbx + 8]" % (op, regs[1], regs[9], word) for op in BMI_SOURCE_LAST]
+        out += ["%s %s, %s [rbx + 8], %s" % (op, regs[10], word, regs[2]) for op in BMI_CONTROL_LAST]
+        out += ["%s %s, %s [r12]" % (op, regs[13], word) for op in BMI_ONE_SOURCE]
+        out.append("rorx %s, %s [rsp], 7" % (regs[15], word))
+    return out
+
+
+def movbe_lines():
+    """movbe in both directions on every register of each width it takes,
+    with the memory sized and not."""
+    out = []
+    for size in (2, 4, 8):
+        for n, reg in enumerate(REGS[size]):
+            mem = MEMORY[n % len(MEMORY)]
+            out += ["movbe %s, %s" % (reg, mem), "movbe %s, %s" % (mem, reg)]
+        out += ["movbe %s, %s [rax + 2]" % (REGS[size][7], SIZE_WORD[size]),
+                "movbe %s [r9], %s" % (SIZE_WORD[size], REGS[size][12])]
+    return out
+
+
+def v3_lines():
+    """What x86-64-v3 adds to AVX2: FMA, F16C, BMI1, BMI2 and MOVBE."""
+    return fma_lines() + f16c_lines() + bmi_lines() + movbe_lines()
+
+
 def avx_lines():
     """Every AVX and AVX2 instruction BoxASM has, in each of its forms."""
     return (avx_float_lines() + avx_move_lines() + avx_convert_lines() + avx_integer_lines() +
@@ -1036,7 +1123,8 @@ def program(nasm):
     for part in (alu_lines, test_lines, mov_lines, address_lines, xchg_lines,
                  stack_lines, unary_lines, imul_lines, shift_lines, extend_lines,
                  condition_lines, branch_lines, string_lines, bit_lines, atomic_lines,
-                 short_branch_lines, sse_lines, lambda: sse_extension_lines(nasm), avx_lines):
+                 short_branch_lines, sse_lines, lambda: sse_extension_lines(nasm), avx_lines,
+                 v3_lines):
         lines += ["    " + line if not line.endswith(":") else line for line in part()]
     lines += ["    " + op for op in ALONE]
     lines += ["    ret 16", "    align 16", "code_target:", "    endbr64", "    ret",

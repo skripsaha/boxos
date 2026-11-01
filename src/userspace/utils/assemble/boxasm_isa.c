@@ -208,7 +208,8 @@ static int BoxAsmClassHolds(BoxAsmEncoder *Encoder, const BoxAsmOperand *Operand
                                       (Operand->Kind == BOXASM_OPERAND_MEMORY && Operand->Size == 4);
     case BOXASM_CLASS_RM64:    return BoxAsmIsRegister(Operand, 8) ||
                                       (Operand->Kind == BOXASM_OPERAND_MEMORY && Operand->Size == 8);
-    case BOXASM_CLASS_REG_R:   return BoxAsmIsRegister(Operand, Size);
+    case BOXASM_CLASS_REG_R:
+    case BOXASM_CLASS_REG_V:   return BoxAsmIsRegister(Operand, Size);
     case BOXASM_CLASS_XMM:
     case BOXASM_CLASS_XMM_R:
     case BOXASM_CLASS_XMM_V:   return BoxAsmIsXmm(Operand);
@@ -305,6 +306,7 @@ static uint8_t BoxAsmOperationSize(const BoxAsmEncoder *Encoder, const BoxAsmFor
         uint8_t Own;
 
         if (Class != BOXASM_CLASS_REG && Class != BOXASM_CLASS_REG_R &&
+            Class != BOXASM_CLASS_REG_V &&
             Class != BOXASM_CLASS_RM && Class != BOXASM_CLASS_MEM &&
             Class != BOXASM_CLASS_ACC && Class != BOXASM_CLASS_IMM)
             continue;

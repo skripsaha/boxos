@@ -497,6 +497,26 @@ assembly_refuses vex_extractps_wide "$HEAD    vextractps rax, xmm1, 1"$'\n' \
     "vex_extractps_wide.asm:4:5: these operands are not a form of 'vextractps'"
 assembly_refuses vex_broadcast_register "$HEAD    vbroadcastsd xmm0, xmm1"$'\n' \
     "vex_broadcast_register.asm:4:5: 'vbroadcastsd' has no form with registers of these widths"
+assembly_refuses fma_three_operands "$HEAD    vfmadd132ps xmm1, xmm2"$'\n' \
+    "fma_three_operands.asm:4:5: these operands are not a form of 'vfmadd132ps'"
+assembly_refuses fma_scalar_memory "$HEAD    vfmadd231sd xmm1, xmm2, oword [rax]"$'\n' \
+    "fma_scalar_memory.asm:4:5: the memory is read as 8 bytes (qword, or no size) by 'vfmadd231sd'"
+assembly_refuses f16c_widths "$HEAD    vcvtph2ps ymm0, ymm1"$'\n' \
+    "f16c_widths.asm:4:5: 'vcvtph2ps' has no form with registers of these widths"
+assembly_refuses f16c_memory "$HEAD    vcvtps2ph oword [rax], xmm1, 0"$'\n' \
+    "f16c_memory.asm:4:5: the memory is read as 8 bytes (qword, or no size) by 'vcvtps2ph'"
+assembly_refuses bmi_sixteen_bits "$HEAD    andn ax, bx, cx"$'\n' \
+    "bmi_sixteen_bits.asm:4:5: these operands are not a form of 'andn'"
+assembly_refuses bmi_sizes_mixed "$HEAD    mulx eax, ebx, qword [rax]"$'\n' \
+    "bmi_sizes_mixed.asm:4:5: the operands are of different sizes for 'mulx'"
+assembly_refuses bmi_count_size "$HEAD    shlx rax, rbx, ecx"$'\n' \
+    "bmi_count_size.asm:4:5: the operands are of different sizes for 'shlx'"
+assembly_refuses bmi_no_tbm "$HEAD    bextr eax, ebx, 5"$'\n' \
+    "bmi_no_tbm.asm:4:5: these operands are not a form of 'bextr'"
+assembly_refuses movbe_registers "$HEAD    movbe eax, ebx"$'\n' \
+    "movbe_registers.asm:4:5: these operands are not a form of 'movbe'"
+assembly_refuses movbe_lock "$HEAD    lock movbe [rax], eax"$'\n' \
+    "movbe_lock.asm:4:5: lock goes only on add, adc, and, btc, btr, bts, cmpxchg, cmpxchg8b, cmpxchg16b, dec, inc, neg, not, or, sbb, sub, xadd, xchg and xor, not on 'movbe'"
 assembly_refuses vex_rep "$HEAD    rep vaddps xmm0, xmm1, xmm2"$'\n' \
     "vex_rep.asm:4:5: rep goes only on movs, stos and lods, not on 'vaddps'"
 assembly_refuses blendv_mask "$HEAD    blendvps xmm1, xmm2, xmm3"$'\n' \

@@ -1,8 +1,10 @@
 # BoxASM — the assembler inside BoxOS
 
-Status 2026-10-29: implemented in `src/userspace/utils/assemble/`, held to
+Status 2026-11-01: implemented in `src/userspace/utils/assemble/`, held to
 NASM 3 byte for byte and to GNU ld by `tools/boxasm_stand.sh` (the `boxasm`
-gate), run end to end in BoxOS (`hello`, `countdown`).
+gate), run end to end in BoxOS (`hello`, `countdown`). The instructions are
+x86-64's general ones, SSE to SSE4.2, and AVX, AVX2, FMA, F16C, BMI1, BMI2
+and MOVBE — x86-64-v3's sets — but for x87 and MMX.
 
 ## Using it
 
@@ -81,14 +83,14 @@ subtract to a number.
 
 - Registers: `rax..r15`, `eax..r15d`, `ax..r15w`, `al..r15b` (also `r8l`),
   `spl bpl sil dil`, and `ah bh ch dh` (which no instruction needing REX may
-  use); `xmm0..xmm15` for SSE.
+  use); `xmm0..xmm15` for SSE, `ymm0..ymm15` for AVX.
 - Memory: `[base + index*scale + displacement]`. The scale (1, 2, 4, 8) may
   be written first: `[8*rcx + table]`.
 - `[label]` is RIP-relative. `[abs label]` is the 32-bit absolute address,
   and `[rip + label]` is the same as `[rel label]`. An address made of a bare
   number is absolute.
-- `byte word dword qword oword` say the size of a memory operand where no
-  register does: `inc qword [rax]`. Instructions with one size need none:
+- `byte word dword qword oword yword` (1 to 32 bytes) say the size of a
+  memory operand where no register does: `inc qword [rax]`. Instructions with one size need none:
   `push [rax]`, `jmp [rbx]`, `sete [rcx]`, `cmpxchg16b [rdi]`.
 - `short` and `near` before a jump target force rel8 or rel32. Without them,
   the assembler takes the shortest form that reaches.
@@ -143,13 +145,73 @@ subtract to a number.
   (`cvtss2sd`). BoxLib's `printf` writes C's whole set of conversions, `%f
   %e %g %a` among them, each value's digits exact and rounded to nearest:
   `fractions.asm` prints its results that way.
+- SSE3, SSSE3, SSE4.1 and SSE4.2:
+  - `addsubps addsubpd haddps haddpd hsubps hsubpd lddqu movddup movshdup
+    movsldup monitor mwait`;
+  - `pabsb pabsw pabsd phaddw phaddd phaddsw phsubw phsubd phsubsw pmaddubsw
+    pmulhrsw pshufb psignb psignw psignd palignr`;
+  - `blendps blendpd pblendw` and `blendvps blendvpd pblendvb`, whose mask is
+    xmm0, written third or left out; `dpps dppd mpsadbw extractps insertps
+    movntdqa packusdw pcmpeqq phminposuw ptest pmuldq pmulld`, `pmin` and
+    `pmax` with `sb sd uw ud`, `pextrb pextrd pextrq pinsrb pinsrd pinsrq`,
+    `pmovsx` and `pmovzx` with `bw bd bq wd wq dq`, `roundps roundpd roundss
+    roundsd`;
+  - `crc32` of a byte, word, dword or qword, `pcmpestri pcmpestrm pcmpistri
+    pcmpistrm pcmpgtq`.
+- AVX and AVX2, in the VEX encoding:
+  - the `v` form of each SSE to SSE4.2 instruction above but `movnti`, the
+    prefetches, `clflush`, `monitor`, `mwait` and `crc32`, which have none,
+    with a destination of its own: `vaddps
+    xmm1, xmm2, xmm3`. Where the second operand is left out it is the first
+    again: `vaddps xmm1, xmm2` is `vaddps xmm1, xmm1, xmm2`. AVX widens the
+    floating-point operations and the moves to ymm, AVX2 the integer ones;
+    the others stay on xmm and say so when given a ymm;
+  - `vcmpps vcmppd vcmpss vcmpsd` with an imm8, and `vcmp`, one of the 32
+    predicates by name, then `ps pd ss sd`: `vcmplt_oqpd`, `vcmpneq_uqss`;
+  - AVX's own: `vbroadcastss vbroadcastsd vbroadcastf128 vextractf128
+    vinsertf128 vmaskmovps vmaskmovpd vpermilps vpermilpd vperm2f128 vtestps
+    vtestpd vzeroupper vzeroall`; `vblendvps vblendvpd vpblendvb` take the
+    register they select by last;
+  - AVX2's own: `vpbroadcastb vpbroadcastw vpbroadcastd vpbroadcastq
+    vbroadcasti128 vextracti128 vinserti128 vperm2i128 vpermd vpermps vpermq
+    vpermpd vpblendd vpmaskmovd vpmaskmovq vpsllvd vpsllvq vpsravd vpsrlvd
+    vpsrlvq`;
+  - the gathers `vgatherdps vgatherdpd vgatherqps vgatherqpd vpgatherdd
+    vpgatherdq vpgatherqd vpgatherqq`, whose address is indexed by a vector
+    register: `vpgatherdd ymm0, [rax + ymm1*4], ymm2`. The destination, the
+    index and the mask are three different registers, or the processor stops
+    the program, so the assembler refuses them otherwise. A vector register
+    indexes no other address.
+
+  Of AVX's memory operands only those of `vmovaps vmovapd vmovdqa` and the
+  non-temporal moves must be on a boundary of their width, 16 or 32 bytes;
+  the assembler proves it as it does for SSE.
+- FMA: `vfmadd vfmsub vfnmadd vfnmsub` with `132 213 231` and `ps pd ss sd`,
+  and `vfmaddsub vfmsubadd` with `132 213 231` and `ps pd` — a product and a
+  sum rounded once. The digits say which operands are multiplied: 132 is
+  `first = first * third + second`, 213 is `first = second * first + third`,
+  231 is `first = second * third + first`. All three are always written.
+- F16C: `vcvtph2ps` turns four or eight half-precision numbers into singles,
+  `vcvtps2ph` turns them back, rounded as its imm8 says.
+- BMI1 and BMI2, on 32- and 64-bit registers: `andn bextr blsi blsmsk blsr
+  bzhi mulx pdep pext rorx sarx shlx shrx`. Of those with three operands the
+  second may be left out: `shlx eax, ecx` is `shlx eax, eax, ecx`.
+- `movbe` loads or stores with the bytes reversed; `lahf` and `sahf` move the
+  flags through ah; `xgetbv` reads the register ecx names — with 0, XCR0,
+  whose bits 1 and 2 say the system saves the xmm and ymm registers.
 - Alone: `nop int3 leave cqo cdq cwd cdqe cwde cbw pushfq popfq cld std clc stc
   cmc endbr64 pause ud2`.
 
 Each encodes as NASM encodes it.
 
 `popcnt` needs CPUID.1:ECX bit 23, `lzcnt` the LZCNT bit of leaf 0x80000001,
-`tzcnt` BMI1, `rdrand` and `rdseed` their own bits, `cmpxchg16b` CX16.
+`tzcnt` BMI1, `rdrand` and `rdseed` their own bits, `cmpxchg16b` CX16. So
+does each set: SSE3, SSSE3, SSE4.1, SSE4.2, MOVBE, FMA, AVX and F16C in
+CPUID.1:ECX (bits 0, 9, 19, 20, 22, 12, 28, 29), AVX2, BMI1 and BMI2 in
+CPUID.7:EBX (bits 5, 3, 8), `lahf` and `sahf` in bit 0 of ECX of leaf
+0x80000001. An instruction encoded with VEX also needs the system to save
+the ymm registers: CPUID.1:ECX bit 27 (OSXSAVE), then `xgetbv` with ecx 0
+and bits 1 and 2 of eax. BoxOS saves them.
 The assembler cannot know the machine a program will run on: a processor
 without `lzcnt` or `tzcnt` runs them as `bsr` and `bsf`, which answer
 differently, and one without the others stops the program. Ask `cpuid`
@@ -214,8 +276,9 @@ prog.asm:2:14: 'nowhere' is never defined; ...
 
 How deep a source nests — macro calls in macro calls, `%define`s in
 `%define`s, files in files, parentheses, names defined by names — is measured
-on the stack: `assemble` has 64 KiB of it, and a source past what fits is
-refused in words at the line where it ran short (a recursive macro is named:
+on the stack: a BoxOS program's stack grows to 8 MiB, `assemble` takes all
+but 24 KiB of it, and a source past what fits is refused in words at the
+line where it ran short (a recursive macro is named:
 `'rec' is called inside macro calls too deep: a macro may be calling
 itself`). The expanded source reaches 16 MiB and the preprocessor walks 50
 million lines. `macros.asm` shows most of this at work.
@@ -354,8 +417,21 @@ BoxOS userspace has no red zone.
   there); `tools/boxasm_oracle.py floats` holds BoxASM to the exact value.
 - A floating-point constant too large for its width, or rounding to zero,
   is refused; NASM warns and writes infinity, or writes zero.
-- `cvtsi2ss` and `cvtsi2sd` from memory need its size (`dword` or `qword`);
-  NASM takes unsized memory for a dword.
+- `cvtsi2ss` and `cvtsi2sd` from memory, and their `v` forms, need its size
+  (`dword` or `qword`); NASM takes unsized memory for a dword.
+- `vcmpss`, `vcmpltss` and their kin read 4 bytes of memory, as the manual
+  says, and take `dword`; NASM 3 refuses `dword` and takes `qword`.
+- An immediate a form keeps in one byte is -128 to 255; NASM warns of
+  another and keeps its low byte.
+- The destination, index and mask of a gather that are not three different
+  registers are refused; NASM assembles them, and the processor stops the
+  program.
+- An operand only AVX-512 gives a form for (`vpbroadcastd xmm0, eax`) is
+  refused; NASM writes the EVEX form, which a processor without AVX-512
+  cannot run.
+- `sarx shlx shrx` take a count register of the operation's size, as the
+  manual writes them; NASM takes a general register of any size there.
+- `bextr` with an immediate is AMD's TBM, not built; NASM writes it.
 - Packed SSE memory through a label not proven on a 16-byte boundary is
   refused; NASM assembles it, and the program stops when it runs.
 - Hexadecimal floating-point constants, `__float32__()` and the other float
@@ -373,11 +449,11 @@ BoxOS userspace has no red zone.
   `%imacro`, `%[...]`, `%line`, `%pragma`, `%depend`, `%pathsearch`.
 
 Everything else in the shared subset assembles to the same bytes and
-relocations: `tools/boxasm_oracle.py` generates a corpus of about 5,000
+relocations: `tools/boxasm_oracle.py` generates a corpus of about 31,000
 lines and compares the two objects.
 
 ## Not built yet
 
-- SSE3 and later, AVX (VEX), MMX and x87; raw Manifest, `box.notify`,
-  `box.wait`.
+- x87 and MMX, `fxsave` and `fxrstor` (next); AVX-512; raw Manifest,
+  `box.notify`, `box.wait`.
 - Programs made of several sources; a native BoxOS object format.

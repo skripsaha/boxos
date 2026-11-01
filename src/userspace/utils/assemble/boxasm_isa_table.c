@@ -213,6 +213,9 @@ static const BoxAsmForm RdtscpForms[]  = { ALONE(0, 0x0F, 0x01, 0xF9) };
 static const BoxAsmForm LfenceForms[]  = { ALONE(0, 0x0F, 0xAE, 0xE8) };
 static const BoxAsmForm MfenceForms[]  = { ALONE(0, 0x0F, 0xAE, 0xF0) };
 static const BoxAsmForm SfenceForms[]  = { ALONE(0, 0x0F, 0xAE, 0xF8) };
+static const BoxAsmForm LahfForms[]    = { ALONE(0, 0x9F) };
+static const BoxAsmForm SahfForms[]    = { ALONE(0, 0x9E) };
+static const BoxAsmForm XgetbvForms[]  = { ALONE(0, 0x0F, 0x01, 0xD0) };
 
 STRING(Movs, 0xA4)
 STRING(Cmps, 0xA6)
@@ -258,6 +261,12 @@ static const BoxAsmForm RdrandForms[] = {
 
 static const BoxAsmForm RdseedForms[] = {
     { C(REG, NONE, NONE), SW, { 0x0F, 0xC7 }, 2, 7, 0, 0 },
+};
+
+/* A load or a store with its bytes reversed: one operand memory. */
+static const BoxAsmForm MovbeForms[] = {
+    { C(REG, MEM, NONE), SW, { 0x0F, 0x38, 0xF0 }, 3, R, 0, 0 },
+    { C(MEM, REG, NONE), SW, { 0x0F, 0x38, 0xF1 }, 3, R, 0, 0 },
 };
 
 static const BoxAsmForm LoopForms[]   = { SHORT_ONLY(0, 0xE2) };
@@ -576,6 +585,8 @@ static const BoxAsmInstruction BoxAsmInstructions[] = {
     PLAIN("clc", ClcForms),   PLAIN("stc", StcForms),   PLAIN("cmc", CmcForms),
     PLAIN("cpuid", CpuidForms), PLAIN("rdtsc", RdtscForms), PLAIN("rdtscp", RdtscpForms),
     PLAIN("lfence", LfenceForms), PLAIN("mfence", MfenceForms), PLAIN("sfence", SfenceForms),
+    PLAIN("lahf", LahfForms), PLAIN("sahf", SahfForms), PLAIN("xgetbv", XgetbvForms),
+    PLAIN("movbe", MovbeForms),
     REPEATED("movsb", MovsbForms, BOXASM_TAKES_REP),
     REPEATED("movsw", MovswForms, BOXASM_TAKES_REP),
     REPEATED("movsd", MovsdForms, BOXASM_TAKES_REP),

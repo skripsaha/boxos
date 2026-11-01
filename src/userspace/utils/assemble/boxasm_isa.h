@@ -61,7 +61,8 @@ typedef enum {
     BOXASM_CLASS_VSIB_X64,   /* indexed by an xmm register, 8 bytes an element (vgatherdpd) */
     BOXASM_CLASS_VSIB_Y32,   /* indexed by a ymm register, 4 bytes an element */
     BOXASM_CLASS_VSIB_Y64,   /* indexed by a ymm register, 8 bytes an element */
-    BOXASM_CLASS_XMM_M8      /* an xmm register or 1 byte of memory, in ModRM.rm (vpbroadcastb) */
+    BOXASM_CLASS_XMM_M8,     /* an xmm register or 1 byte of memory, in ModRM.rm (vpbroadcastb) */
+    BOXASM_CLASS_REG_V       /* a general register of the operation size, in VEX.vvvv (andn, shlx) */
 } BoxAsmOperandClass;
 
 #define BOXASM_SIZE_8   0x1u
