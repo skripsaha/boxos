@@ -25,7 +25,8 @@
  *                          Clasp's fresh blocks
  *   StandFreshForcedRuns   how many runs of ground the file lies in, each break
  *                          forced by ground another owner holds; 0 when one is
- *                          not (stand_fresh_ground_tests.c)
+ *                          not (stand_fresh_ground_tests.c) — asked before a
+ *                          cycle may give back ground the writes found held
  */
 
 typedef struct {

@@ -1,6 +1,8 @@
 #include "stand_binder.h"
 #include "stand_fresh.h"
 #include "../settle/binder.h"
+#include "../block_map/block_map.h"
+#include "../block_map/block_map_derived.h"
 #include "../settle/foliation.h"
 #include "../settle/settle.h"
 #include "../mount/book_mount.h"
@@ -604,11 +606,65 @@ static bool StandTipInDigestLast(TallyPlace* out)
     return found;
 }
 
+/* The free ground below a block held for the stand, as a volume is made small
+ * (block_map_derived.c, BlockMapDerivedStandShrink): GROUND_HELD, given back. */
+typedef struct {
+    Strip*   runs;
+    uint64_t n, cap;
+} StandTipInHold;
+
+/* Every free run below `end` in no file's window held, the reserve a write of
+ * data keeps and `room` blocks besides left free: a file written now is laid
+ * past `end`. Each run is looked for before it is asked of the map, so no take
+ * that finds none gives the files' windows back (BlockMapTakeQuire). False
+ * when memory or the map refused. */
+static bool StandTipInHoldBelow(StandTipInHold* h, uint64_t end, uint64_t room)
+{
+    uint64_t keep = EndpaperDataKeeps(false) + room, data = g_book.frame.data_block, at = 0, got = 0;
+    for (uint64_t w = BLOCK_MAP_TAKE_MOST; w > 0;) {
+        TagFSLockTake(&tagfs_get_state()->lock);
+        bool below = BlockMapDerivedRunFree(data, w, 0, &at) && at + w <= end;
+        TagFSLockDrop(&tagfs_get_state()->lock);
+        if (!below) {
+            w /= 2u;
+            continue;
+        }
+        error_t rc = BlockMapTakeQuire(GROUND_HELD, w, 1u, keep, data, at, &got);
+        if (rc == ERR_TAGFS_NO_SPACE) {     /* past the reserve: a shorter run may still be held */
+            w /= 2u;
+            continue;
+        }
+        if (rc == OK && (got + w > end || !BinderListRoom((void**)&h->runs, h->n, &h->cap, sizeof(Strip)))) {
+            (void)BlockMapDerivedGiveAs(GROUND_HELD, 0, got, w);
+            return false;
+        }
+        if (rc != OK)
+            return false;
+        h->runs[h->n++] = (Strip){ .start = got, .count = (uint32_t)w, .kind = STRIP_DATA };
+    }
+    return true;
+}
+
+static void StandTipInHoldBack(StandTipInHold* h)
+{
+    for (uint64_t i = 0; i < h->n; i++)
+        (void)BlockMapDerivedGiveAs(GROUND_HELD, 0, h->runs[i].start, h->runs[i].count);
+    kfree(h->runs);
+    memset(h, 0, sizeof(*h));
+}
+
+/*
+ * The file born after the leaf rots is laid past its first key: the free
+ * ground below it held while the file is written — on a book whose files the
+ * tests before gave up, holes below the key take more than the file is
+ * written to first — and given back before the Tally.
+ */
 static TestResult TestStandTipInRottenPast(void)
 {
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    data, past;
+    StandTipInHold     held  = { NULL, 0, 0 };
     TallyPlace         last;
     FileRecord*        rec   = NULL;
     FileSpot           spot  = { 0, 0, 0 };
@@ -637,6 +693,8 @@ static TestResult TestStandTipInRottenPast(void)
     TEST_ASSERT(StandStitchRemount(), "the volume mounts again: the leaf rots when a read reaches it");
     TEST_ASSERT_EQ(tagfs_create_file("tipin-rot-past.bin", NULL, 0, &pfid), 0, "a file is made after");
     TEST_ASSERT(StandFreshModelMake(&past, (uint64_t)STAND_TIP_IN_PAST_MOST * TAGFS_BLOCK_SIZE), "its model");
+    TEST_ASSERT(StandTipInHoldBelow(&held, last.lo.k1 + 1u, STAND_TIP_IN_PAST_MOST),
+                "the free ground up to the rotten leaf's first key held while it is written");
     for (at = 0; !beyond && at < STAND_TIP_IN_PAST_MOST; at += STAND_TIP_IN_PAST_STEP) {
         TEST_ASSERT(StandFreshWrite(&past, pfid, at * TAGFS_BLOCK_SIZE, STAND_TIP_IN_PAST_STEP * TAGFS_BLOCK_SIZE,
                                     73) == (int)(STAND_TIP_IN_PAST_STEP * TAGFS_BLOCK_SIZE), "written on");
@@ -649,12 +707,14 @@ static TestResult TestStandTipInRottenPast(void)
     }
     TestEvidence("blocks written until one lay past the rotten leaf's first", at);
     TEST_ASSERT(beyond, "a block of it lies past the rotten leaf's first key");
+    StandTipInHoldBack(&held);
     TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "a stitch of this mount settles, a Tally is written");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
     TEST_ASSERT(StandFreshHolds(&past, pfid), "every block of it reads: what was born past the rotten leaf is laid "
                 "past it, the leaf named as it lies (§16.4 п.5)");
 out:
     FileRecordRelease(rec);
+    StandTipInHoldBack(&held);
     StandFreshModelLetGo(&past);
     StandFreshModelLetGo(&data);
     STAND_BINDER_PUT_BACK(&b);

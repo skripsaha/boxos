@@ -91,20 +91,19 @@ def BookRun(t=None, medium=None):
 
 
 def BookEmit(t, name, out, medium=None):
-    """The landing `name` written to `out`; None when there is none of that
-    name, or (its name, sectors written)."""
+    """The landing `name` written to `out`: (its name, sectors written, []) —
+    or (None, the names of the landings there are, [(group, why)] of the
+    groups the image gave nothing to aim at) when there is none of that name,
+    so a landing refused is said with why, never as one that does not exist."""
     bt = BookTargets(t, medium)
-    wanted = [c for c in BookCases(bt)[0] if c.name == name or c.name.split()[0] == name]
+    cases, refused = BookCases(bt)
+    wanted = [c for c in cases if c.name == name or c.name.split()[0] == name]
     if not wanted:
-        return None
+        return None, [c.name.split()[0] for c in cases], refused
     o = bt.Fork()
     wanted[0].plant(o)
     o.WriteOut(out)
-    return wanted[0].name, len(o.over)
-
-
-def BookNames(t, medium=None):
-    return [c.name.split()[0] for c in BookCases(BookTargets(t, medium))[0]]
+    return wanted[0].name, len(o.over), []
 
 
 def BookOwnersCheck(heard):
@@ -243,13 +242,14 @@ def Emit(medium, device, name, out):
             over.WriteOut(out)
             said, sectors = wanted[0].name, len(over.over)
         else:
-            landed = BookEmit(t, name, out, medium if book else None)
-            if landed is None:
-                print("self-test: no case %r; the cases are %s" % (name, ", ".join(
-                    ([] if book else [c.name.split()[0] for c in Cases(t)]) +
-                    BookNames(t, medium if book else None))))
+            said, landed, refused = BookEmit(t, name, out, medium if book else None)
+            if said is None:
+                print("self-test: no case %r; the cases are %s%s" % (name, ", ".join(
+                    ([] if book else [c.name.split()[0] for c in Cases(t)]) + landed),
+                    "".join("; the image gives %s nothing to aim at — %s" % (group, why)
+                            for group, why in refused)))
                 return 2
-            said, sectors = landed
+            sectors = landed
     except (ValueError, Unreadable) as e:
         print("self-test: %s" % e)
         return 2

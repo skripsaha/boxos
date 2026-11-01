@@ -264,6 +264,15 @@ TestResult TestStandMediumMountWaitsForMemory(void);
 void       StandRibbonArrive(void);
 bool       StandRibbonUp(void);
 
+/* stand_tally_tests.c: why a test written for a book stands aside here, or
+ * NULL; the volume's medium arriving again, attended until the mount road has
+ * nothing left to do, bounded; and whatever a test left — the plan down, the
+ * volume up again if it is not, and the runner counted back in, once. The
+ * stand_tally suite's, shared with its case in stand_tally_range_tests.c. */
+const char* StandTallyAside(void);
+void        StandTallyArrive(void);
+void        StandTallyClose(void);
+
 #endif /* CONFIG_VOLUME_TESTS */
 
 #endif /* TAGFS_STAND_TESTS_H */

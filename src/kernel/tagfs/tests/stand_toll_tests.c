@@ -25,7 +25,8 @@
 // DATA_FLUSHED, and the mount reads its data back. The pace is named by the
 // stand (BlockFailReadPace) where a test must meet one answer: QEMU's times
 // drift. On a medium that seeks (BlockFailReadLag, SEEKLAG=) the check a
-// spared stitch costs the mount stays within the D the writer judged it by.
+// spared stitch costs the mount stays within the D the writer judged it by —
+// weighed by the stand's own clock, a seek for every read command it gives.
 //
 // And the window a frequent small writer waits for: five seconds on a book, a
 // Lull on format v1, as it ever was (§16.5 п.8 — format v1 is frozen).
@@ -103,10 +104,20 @@ out:
     return verdict;
 }
 
-/* M-13 on an honest medium that seeks: the mount's first reads are the first
- * measure; a cycle bearing many files costs a D a seek fits in many times
- * over; a block written after it is spared its flush, and the mount's check
- * of it takes no longer than that D. */
+/*
+ * M-13 on a medium that seeks: a stitch the writer spares its flush has the
+ * mount's check of it cost the medium no more than the D it was judged by, by
+ * the stand's own clock. Every read of the seat waits the stand's seek
+ * (BlockFailReadLag) and the writer judges the check by that seek, the pace
+ * named (BlockFailReadPace) — a block's bytes nothing beside it: the medium's
+ * own measure is the worst read of a period, which one stall of the host
+ * lengthens past any cycle. The seek is the build's (SEEKLAG=), or two thirds
+ * of the D the cycle before cost where that is less, so one seek and a block
+ * fit in that D whatever the host made of the cycle — no cycle is run again
+ * until one is long enough. The check is weighed by the read commands the
+ * mount gives the block, a seek each, and the block's bytes at that pace; its
+ * microseconds, the host's, are evidence.
+ */
 static TestResult TestStandTollCheckWithinD(void)
 {
     TestResult      verdict = TEST_PASS;
@@ -114,9 +125,10 @@ static TestResult TestStandTollCheckWithinD(void)
     StandFreshModel m;
     MountBookSaid   said;
     char            name[32];
-    uint64_t        fid = 0, other = 0, flags = 0, fresh = 0, d = 0;
+    bool            up = false;
+    uint64_t        fid = 0, other = 0, flags = 0, fresh = 0, d = 0, seek = 0, block = 0, reads = 0, cost = 0;
 #ifdef CONFIG_SEEKLAG_US
-    uint32_t        lag = CONFIG_SEEKLAG_US;
+    uint32_t        lag = CONFIG_SEEKLAG_US ? CONFIG_SEEKLAG_US : STAND_TOLL_LAG_US;
 #else
     uint32_t        lag = STAND_TOLL_LAG_US;
 #endif
@@ -126,25 +138,46 @@ static TestResult TestStandTollCheckWithinD(void)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, TAGFS_BLOCK_SIZE), "room for the file's bytes");
     BlockFailReadLag(s.seat, lag);
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on a medium that seeks: the first measure of its reads");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on a medium that seeks");
     TEST_ASSERT_EQ(tagfs_create_file("toll-seek.bin", NULL, 0, &fid), 0, "a file is made");
     for (uint32_t i = 0; i < STAND_TOLL_FILES; i++) {
         ksnprintf(name, sizeof(name), "toll-seek-%u.bin", i);
         TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &other), 0, "and many more with it");
     }
     TEST_ASSERT_OK(TagFSSettle(), "one cycle bears them all");
-    d = SettleLastDUs();
+    d    = SettleLastDUs();
+    seek = d * 2u / 3u < lag ? d * 2u / 3u : lag;
     TestEvidence("D of the cycle that bore them, us", d);
+    TEST_ASSERT(seek > 0, "a cycle bearing many files costs a D a seek fits in");
+    BlockFailReadLag(s.seat, (uint32_t)seek);
+    BlockFailReadPace(true, STAND_TOLL_FAST, seek);
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 64), TAGFS_BLOCK_SIZE, "a block is written");
     TEST_ASSERT_OK(TagFSSettle(), "and settles");
     TEST_ASSERT(StandFreshLastStitch(&flags, &fresh) && !(flags & STITCH_DATA_FLUSHED) && fresh == 1,
                 "spared its flush: one seek and one block cost less than that D");
-    TEST_ASSERT(StandStitchRemount() && StandFreshHolds(&m, fid), "mounted again, the file holds the block");
+    BlockFailReadPace(false, 0, 0);
+    TEST_ASSERT(StandBlockOf(fid, 0, &block), "the block's ground read off its record");
+    BlockFailArm(s.seat, BLOCK_FAIL_READ, s.base + block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS,
+                 BLOCK_FAIL_NEVER);
+    up    = StandStitchRemount();
+    reads = BlockFailSeen();
+    BlockFailDisarm();
+    TEST_ASSERT(up && StandFreshHolds(&m, fid), "mounted again, the file holds the block");
     MountBookStandSaid(&said);
     TestEvidence("the mount's check of it, us", said.check_us);
-    TEST_ASSERT_EQ(said.checked, 1, "the mount read the block back");
-    TEST_ASSERT(said.check_us <= d, "and its check took no longer than the D the writer judged it by (M-13)");
+    TEST_ASSERT_EQ(said.checked, 1, "the mount read back the one block the writer counted");
+    cost = reads * seek + said.checked * TAGFS_BLOCK_SIZE * 1000000ull / STAND_TOLL_FAST;
+    TestEvidence("read commands the mount's check gave the block, a seek each", reads);
+    TEST_ASSERT(reads >= 1, "off the medium");
+    if (cost > d) {
+        verdict = TestFailedAt(__FILE__, __LINE__, "and the check cost the medium no more than the D the writer "
+                               "judged it by, by the stand's clock: a seek a read and the block's bytes at the "
+                               "pace (cost, D) (M-13)", (int64_t)cost, (int64_t)d);
+        goto out;
+    }
 out:
+    BlockFailReadPace(false, 0, 0);
+    BlockFailDisarm();
     BlockFailReadLag(s.seat, STAND_TOLL_LAG_KEPT);
     StandFreshModelLetGo(&m);
     STAND_STITCH_PUT_BACK(&s);

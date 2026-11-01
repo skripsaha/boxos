@@ -25,8 +25,9 @@
 // stitch_ribbon.py Named): ground a file the newest Tally names gave up since
 // may go to data, and goes to the ribbon only once a Tally past its giving up
 // was written — for ground a delete gave back in this session and for the
-// ground the mount found the ribbon let go alike. A defrag gathers its file
-// into one run it is handed whole, wherever the file's own window lies. At a
+// ground the mount found the ribbon let go alike (stand_book_room_quire_tests.c).
+// A defrag gathers its file into one run it is handed whole, wherever the
+// file's own window lies. At a
 // full volume's wall the reserve holds a write's ground from its take, each
 // slot's own in whole Quires until the free has it, and a write short of room
 // only by the measure of growth waits on the Tally that makes it exact
@@ -34,126 +35,6 @@
 // that gives the ribbon its next_quire. Every test puts the volume back as it
 // found it.
 // ============================================================================
-
-#define STAND_BOOK_ROOM_RUNS  16u
-
-typedef struct {
-    Strip    runs[STAND_BOOK_ROOM_RUNS];
-    uint32_t n;
-} StandBookRoomGround;
-
-/* The ground file `fid` names, the first STAND_BOOK_ROOM_RUNS runs of it. */
-static bool StandBookRoomGroundOf(uint64_t fid, StandBookRoomGround* g)
-{
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
-    StripWalk   w;
-    Strip       s;
-    g->n = 0;
-    if (!rec)
-        return false;
-    StripWalkBegin(rec, &w);
-    while (g->n < STAND_BOOK_ROOM_RUNS && StripWalkNextGround(&w, &s))
-        g->runs[g->n++] = s;
-    FileRecordRelease(rec);
-    return g->n > 0;
-}
-
-static bool StandBookRoomMeets(const StandBookRoomGround* g, uint64_t start, uint64_t count)
-{
-    for (uint32_t i = 0; i < g->n; i++)
-        if (g->runs[i].start < start + count && start < g->runs[i].start + g->runs[i].count)
-            return true;
-    return false;
-}
-
-/* A file of two Quires' blocks written and settled, a Tally of it written:
- * its id, and the ground it names, the newest slot's Tally naming it. */
-static TestResult StandBookRoomLaid(StandFreshModel* m, const char* name, uint64_t q, uint64_t* fid,
-                                    StandBookRoomGround* g)
-{
-    TestResult verdict = TEST_PASS;
-    uint32_t   bytes   = (uint32_t)(2u * q * TAGFS_BLOCK_SIZE);
-    TEST_ASSERT(StandFreshModelMake(m, bytes), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, fid), 0, "a file is made");
-    TEST_ASSERT_EQ(StandFreshWrite(m, *fid, 0, bytes, 0x5Au), (int)bytes, "two Quires of it written");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled");
-    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally of it is written: the newest slot names its ground");
-    TEST_ASSERT(StandBookRoomGroundOf(*fid, g), "the ground it names is read");
-out:
-    return verdict;
-}
-
-/* A Quire of the ribbon's size asked for as RibbonNextGiven asks, looked for
- * from `from` on: whether it meets `g` — and it is given back. */
-static TestResult StandBookRoomAsk(uint64_t q, uint64_t from, const StandBookRoomGround* g, bool* meets)
-{
-    TestResult verdict = TEST_PASS;
-    uint64_t   start   = 0;
-    TEST_ASSERT_OK(BlockMapTakeQuire(GROUND_RIBBON, q, 1u, 0, g_book.frame.data_block, from, &start),
-                   "a Quire of the ribbon is given");
-    TestEvidence("the Quire given begins at block", start);
-    *meets = StandBookRoomMeets(g, start, q);
-    TEST_ASSERT_OK(BlockMapDerivedGiveAs(GROUND_RIBBON, 0, start, q), "and given back");
-out:
-    return verdict;
-}
-
-/*
- * ‼ A NEXT_QUIRE IS GIVEN CLEAR OF THE FILES THE NEWEST TALLY NAMES. A file the
- * newest Tally holds is given up and its ground comes back: asked from its
- * first block, a Quire of the ribbon is given elsewhere — named past that
- * Tally, a reader would refuse the ribbon's step there (RIBBON_TORN) and every
- * stitch past it would be lost to the next mount. Once a Tally past the delete
- * is written the ground is the ribbon's too. The same holds of the ground the
- * mount found the ribbon let go: a file deleted past the Tally, the volume
- * mounted again on it and the ground back — the Quire asked for there is
- * given elsewhere.
- */
-static TestResult TestStandBookRoomNextQuireClear(void)
-{
-    TestResult          verdict = TEST_PASS;
-    static StandBinder  b;
-    StandFreshModel     m1, m2;
-    StandBookRoomGround g1, g2;
-    uint64_t            fid1 = 0, fid2 = 0, q = 0;
-    bool                meets = false;
-    const char*         aside = StandBinderAside(&b);
-    memset(&m1, 0, sizeof(m1));
-    memset(&m2, 0, sizeof(m2));
-    if (aside)
-        return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    q = RibbonCursorNow()->quire_blocks;
-    TEST_ASSERT(StandBookRoomLaid(&m1, "book-room-a.bin", q, &fid1, &g1) == TEST_PASS, "the file is laid");
-    TEST_ASSERT_EQ(tagfs_delete_file(fid1, INK_UNWARRANTED), 0, "it is given up");
-    fid1 = 0;
-    TEST_ASSERT(TagFSSettle() == OK && SettleForRoom() == OK, "settled, and its ground asked back");
-    TEST_ASSERT_EQ(FallowBlocks(), 0, "nothing rests: its ground is free again");
-    TEST_ASSERT(StandBookRoomAsk(q, g1.runs[0].start, &g1, &meets) == TEST_PASS, "a Quire is asked for");
-    TEST_ASSERT(!meets, "the Quire of the ribbon lies clear of the ground the newest Tally names a file on");
-    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally past the delete is written");
-    TEST_ASSERT(StandBookRoomAsk(q, g1.runs[0].start, &g1, &meets) == TEST_PASS, "a Quire is asked again");
-    TEST_ASSERT(meets, "and once no slot's Tally names the file, its ground is the ribbon's too");
-
-    TEST_ASSERT(StandBookRoomLaid(&m2, "book-room-b.bin", q, &fid2, &g2) == TEST_PASS, "a second file is laid");
-    TEST_ASSERT_EQ(tagfs_delete_file(fid2, INK_UNWARRANTED), 0, "it is given up");
-    fid2 = 0;
-    TEST_ASSERT(TagFSSettle() == OK, "the delete settled past the Tally");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounted again on that Tally");
-    TEST_ASSERT_OK(SettleForRoom(), "the ground the ribbon let go asked back");
-    TEST_ASSERT_EQ(FallowBlocks(), 0, "nothing rests: the file's ground is free again");
-    TEST_ASSERT(StandBookRoomAsk(q, g2.runs[0].start, &g2, &meets) == TEST_PASS, "a Quire is asked for");
-    TEST_ASSERT(!meets, "the Quire lies clear of the ground the Tally the mount stands on names a file on");
-out:
-    if (fid1)
-        (void)tagfs_delete_file(fid1, INK_UNWARRANTED);
-    if (fid2)
-        (void)tagfs_delete_file(fid2, INK_UNWARRANTED);
-    StandFreshModelLetGo(&m1);
-    StandFreshModelLetGo(&m2);
-    STAND_BINDER_PUT_BACK(&b);
-    return verdict;
-}
 
 /*
  * ‼ A DEFRAG ON A BOOK IS HANDED ITS ONE RUN WHOLE. A file of many runs — every
@@ -466,14 +347,28 @@ static bool StandBookRoomBegun(void)
  * the lag's cycles give the ground back, the count goes with it.
  *
  * The Tally weighed is the first over a slot that holds one whose DONE lets
- * ground go, in two turns of the ring: a Tally that changes nothing lays no
- * node anew, and one that changes little lays it in the pair the slot's
- * Tally lay in — every node and Quire the slot names a newer slot names too,
- * and its DONE gives nothing back. A slot holds ground alone once a Tally
- * since laid its nodes elsewhere — a Glean's, a pair moved on, the tests'
- * before — which on a book past its first test of a Tally is the ring's
- * first turn, and two turns that give none are said.
+ * ground go. A Tally that changes nothing lays no node anew, and one that
+ * changes little lays it in the pair the slot's Tally lay in: what the slot
+ * holds alone are the Quires of the ribbon its `at` lies before every newer
+ * slot's (binder_slots.c, SlotGoes) — none while the ring's Tallies stand in
+ * one Quire, as empty stitches leave them. So before each Tally the ribbon is
+ * run on into a Quire it had not entered: within a turn of the ring every slot
+ * stands in a Quire of its own, and the one written over lets its Quire go.
  */
+static bool StandBookRoomQuireOn(uint64_t k)
+{
+    RibbonCursor c;
+    bool         kept = false;
+    RibbonCursorStand(&c);
+    uint64_t was = c.quire.block, half = c.quire_blocks * TAGFS_BLOCK_SECTORS / 2u;
+    for (uint32_t i = 0; i < 3u && c.quire.block == was; i++) {
+        if (StandStitchSayFilling(half, (char)('a' + (k + i) % 26u), k + i, &kept) != OK)
+            return false;
+        RibbonCursorStand(&c);
+    }
+    return c.quire.block != was;
+}
+
 static TestResult TestStandBookRoomRestUnderTally(void)
 {
     TestResult         verdict = TEST_PASS;
@@ -481,28 +376,27 @@ static TestResult TestStandBookRoomRestUnderTally(void)
     uint64_t           rested = 0, fallow = 0, held = 0;
     uint32_t           r = 0;
     bool               under = false;
+    error_t            rc = OK;
     const char*        aside = StandBinderAside(&b);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles: a Tally may begin");
-    for (uint32_t t = 0; t <= 2u * g_binder.ring && rested <= fallow; t++) {
-        if (t > 0)
-            for (uint64_t l = 0; l <= FallowLag(); l++)
-                TEST_ASSERT_OK(TagFSSettle(), "the lag's stitches of a Tally that gave nothing back settle");
+    for (uint32_t t = 0; t <= g_binder.ring && rested <= fallow; t++) {
         bool holds;
+        TEST_ASSERT(StandBookRoomQuireOn(400u + 4u * t), "the ribbon is run on into a Quire it had not entered");
         r      = BinderSlotNext();
         holds  = g_binder.slot[r].holds;
         fallow = FallowBlocks();
-        TEST_ASSERT_OK(BinderRunWhole(), "a Tally is written over the slot the ring writes next");
+        if ((rc = BinderRunWhole()) == ERR_BUSY && TagFSSettle() == OK) {
+            fallow = FallowBlocks();    /* the cycle a Tally waited on may have given ground back */
+            rc     = BinderRunWhole();
+        }
+        TEST_ASSERT_OK(rc, "a Tally is written over the slot the ring writes next");
         rested = holds ? FallowBlocks() : fallow;
     }
-    if (rested <= fallow) {
-        verdict = test_steps_aside("no Tally over two turns of the ring let ground go to Fallow: every slot names "
-                                   "the nodes and Quires the one written over named, no Tally having laid them "
-                                   "anew elsewhere");
-        goto out;
-    }
+    TEST_ASSERT(rested > fallow, "within a turn of the ring a Tally's DONE lets the Quire of the ribbon only the "
+                                 "slot it wrote over named go to Fallow");
     held = __atomic_load_n(&g_binder.own[r], __ATOMIC_ACQUIRE);
     TestEvidence("blocks its Tally let go to Fallow", rested - fallow);
     TEST_ASSERT(StandBookRoomBegun(), "the next Tally is begun at once, and is under way");
