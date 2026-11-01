@@ -166,12 +166,16 @@ BIND_EOF
 # all there.
 #
 # `book_bindcut POINT second` cuts a Tally laid in after one this mount wrote
-# (§16.5 п.17): `quilltest crowd` makes files enough for a Tally of the
-# cadence's own before the anchor it takes after them, so the Tally the cut
-# stops goes on in the pair of Tally-Quires the one before it laid in — its
-# nodes past that one's in a Quire a slot still names. Both readers stand on
-# the slot of the last Tally the boot said it wrote, and hold that Quire
-# whole: the census consistent, the free count the kernel's.
+# (§16.5 п.17): `quilltest crowd N 0 unanchored` makes files enough for a Tally
+# and takes no anchor, the cadence settles them and writes that Tally — waited
+# for by its line — and only then does the logger take the boot's first
+# anchor, the one the cut watches. So the Tally the cut stops goes on in the
+# pair of Tally-Quires the one before it laid in — its nodes past that one's in
+# a Quire a slot still names. Both readers stand on the slot of the last Tally
+# the boot said it wrote, and hold that Quire whole: the census consistent, the
+# free count the kernel's. An anchored crowd took the boot's first anchor
+# itself: on a book its files and its anchor settle in one cycle of the
+# window's (SETTLE_WINDOW_US), and the cut stopped the first Tally of the boot.
 # ---------------------------------------------------------------------------
 
 BOOK_BINDCUT_CUT='\[SETTLECUT\] the power went at point [0-9]+ of [0-9]+'
@@ -180,21 +184,33 @@ BOOK_BINDCUT_CROWD=6000
 BOOK_BINDCUT_TALLY='^\[TagFS\] Tally [0-9]+ is written over slot [0-9]+'
 
 # book_bindcut_before POINT SECOND — the scenario up to the cut: the logger
-# alone, or a crowd and then the logger. 0 once the machine stopped.
+# alone, or an unanchored crowd, the Tally the cadence writes of it, and then
+# the logger. 0 once the machine stopped.
 book_bindcut_before() {
+    local said from
     if [ -n "$2" ]; then
-        type_line "quilltest crowd $BOOK_BINDCUT_CROWD" &&
+        from=$(($(wc -l < build/serial.log) + 1))
+        type_line "quilltest crowd $BOOK_BINDCUT_CROWD 0 unanchored" &&
             wait_for_line -E build/serial.log "\[QUILL\] crowd: (PASS|FAIL)|$BOOK_BINDCUT_CUT" "$WAIT_QUIET_SLOW_S" ||
             return 1
         grep -aqE "$BOOK_BINDCUT_CUT" build/serial.log && return 0
-        wait_for_prompt || return 1
+        # The prompt comes back before the Tally's lines, which then follow it
+        # on its line: the shell is ready once a line past the crowd's verdict
+        # begins with it, whatever is written after it. The Tally is one the
+        # cadence wrote of the crowd's files — begun once the crowd was asked,
+        # never one of the boot's before it.
+        said=$(grep -anE '\[QUILL\] crowd: (PASS|FAIL)' build/serial.log | tail -1 | cut -d: -f1)
+        wait_for_line build/serial.log '^~ ' "$WAIT_QUIET_SLOW_S" "$((said + 1))" &&
+            wait_for_line -E build/serial.log "$BOOK_BINDCUT_TALLY|$BOOK_BINDCUT_CUT" "$WAIT_QUIET_SLOW_S" "$from" ||
+            return 1
+        grep -aqE "$BOOK_BINDCUT_CUT" build/serial.log && return 0
     fi
     type_line "quilltest log cut $BOOK_BINDCUT_LINES" &&
         wait_for_line -E build/serial.log "$BOOK_BINDCUT_CUT" "$WAIT_QUIET_SLOW_S"
 }
 
 book_bindcut() {
-    local point=$1 second=$2 name="book_bindcut_$1${2:+_$2}" img="$SCRATCH/bindcut.img"
+    local point=$1 second=${2:-} name="book_bindcut_$1${2:+_$2}" img="$SCRATCH/bindcut.img"
     local json="$SCRATCH/census.book_bindcut_$1${2:+_$2}.json" w="$SCRATCH/serial.book_bindcut_$1${2:+_$2}_write.log"
     local rc line slot=0 before
     echo "== book bindcut $point${second:+ ($second)}: the power goes inside a Tally, and both readers stand on the slot before it =="

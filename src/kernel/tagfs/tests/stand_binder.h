@@ -21,6 +21,10 @@
  *   StandBinderTallies    `n` Tallies in a row, the lag's stitches settled
  *                         past each: OK, or the first refusal
  *   StandBinderGleaned    the Tallies Glean asks for laid, none owed after
+ *   StandBinderRot        a leaf of FILES rotten in both its copies, every slot
+ *                         naming it in the one node, and the volume mounted
+ *                         again on it writing nothing (the stand_binder and
+ *                         stand_escheat suites)
  */
 
 #define STAND_BINDER_SLOTS_MOST  8u
@@ -48,6 +52,7 @@ bool        StandBinderKeep(StandBinder* b, uint64_t block);
 bool        StandBinderPutBack(StandBinder* b);
 error_t     StandBinderTallies(uint32_t n);
 bool        StandBinderGleaned(void);
+TestResult  StandBinderRot(StandBinder* b, uint64_t* files);
 
 /* stand_tip_in_cost_tests.c: what the next Tally is reckoned to cost, held to
  * the rule counted by the test (§16.6 п.6), and a Tally under way when the

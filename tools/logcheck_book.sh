@@ -249,12 +249,51 @@ SLIPPED_EOF
     done < "$SCRATCH/census.$1.slipped.verdict"
 }
 
+# census_fresh — the image make makes, made again: a volume that booted
+# before is not the one predicted.
+census_fresh() {
+    rm -f build/boxos.img
+    build
+}
+
+# census_plant NAME CASE — census_boot on the image make made last, which
+# nothing booted since: the plant is written beside it (an overlay of its
+# sectors, selftest.py Emit), and the boot is of the plant, so a run of
+# landings makes the image once (census_book) and not once a landing — a make
+# of the image took 30 of the 35 seconds a landing of a book's census cost.
+census_plant() {
+    local img="$SCRATCH/census.$1.img"
+    make run-stop >/dev/null 2>&1
+    if ! python3 tools/volume-read.py build/boxos.img self-test --emit "$2" --out "$img" \
+            >"$SCRATCH/census.$1.emit" 2>&1; then
+        bad "census: $2 could not be planted in a fresh image — $(tail -1 "$SCRATCH/census.$1.emit")"
+        return 1
+    fi
+    python3 tools/volume-read.py "$img" check --json >"$SCRATCH/census.$1.json"
+    if ! make run-bg BOOTDISK="$img" >"$SCRATCH/census.$1.run-bg" 2>&1; then
+        harness "census: run-bg would not start the volume planted with $2: $(tail -1 "$SCRATCH/census.$1.run-bg")"
+        return 1
+    fi
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    local rc=$?
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+    [ $rc = 0 ] || bad "census: the volume planted with $2 never reached a shell"
+    return $rc
+}
+
 # census_book LANDING... — every landing named planted on a fresh image,
-# predicted, booted and judged.
+# predicted, booted and judged. The image is made once: every landing is
+# planted beside it and boots its plant (census_plant). A landing's image is
+# read by no one once it is judged, and is let go then — the hundred and
+# twenty-nine kept are 18 GiB — but one a FAIL was said of, kept for the road to
+# its root.
 census_book() {
-    local plant line
+    local plant line failed
+    census_fresh
     for plant; do
-        census_boot "book_$plant" "$plant" || continue
+        failed=$FAIL
+        census_plant "book_$plant" "$plant" || continue
         census_book_judge "book_$plant"
         census_book_slipped "book_$plant"
         while IFS= read -r line; do
@@ -265,6 +304,7 @@ census_book() {
         done < "$SCRATCH/census.book_$plant.verdict"
         ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]' "$SCRATCH/serial.book_$plant.log"
         chk $? "census $plant: no panic, no fault"
+        [ "$FAIL" != "$failed" ] || rm -f "$SCRATCH/census.book_$plant.img"
     done
 }
 
@@ -885,4 +925,5 @@ census_book_all() {
     book_escheat B4
     book_escheat B6c
     book_escheat B4g 1
+    book_escheat B4 0 written
 }

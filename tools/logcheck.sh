@@ -8710,27 +8710,10 @@ census_selftest() {
 # was handed, so what boots is what was predicted. It says why itself when it
 # answers 1 — a plant that would not take, the boot a harness fault, or a
 # machine that never reached its shell — and its caller counts nothing more.
+# Its two halves are logcheck_book.sh's (census_fresh, census_plant).
 census_boot() {
-    local img="$SCRATCH/census.$1.img"
-    rm -f build/boxos.img        # a volume that booted before is not the one predicted
-    build
-    make run-stop >/dev/null 2>&1
-    if ! python3 tools/volume-read.py build/boxos.img self-test --emit "$2" --out "$img" \
-            >"$SCRATCH/census.$1.emit" 2>&1; then
-        bad "census: $2 could not be planted in a fresh image — $(tail -1 "$SCRATCH/census.$1.emit")"
-        return 1
-    fi
-    python3 tools/volume-read.py "$img" check --json >"$SCRATCH/census.$1.json"
-    if ! make run-bg BOOTDISK="$img" >"$SCRATCH/census.$1.run-bg" 2>&1; then
-        harness "census: run-bg would not start the volume planted with $2: $(tail -1 "$SCRATCH/census.$1.run-bg")"
-        return 1
-    fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    local rc=$?
-    make run-stop >/dev/null 2>&1
-    cp build/serial.log "$SCRATCH/serial.$1.log"
-    [ $rc = 0 ] || bad "census: the volume planted with $2 never reached a shell"
-    return $rc
+    census_fresh
+    census_plant "$@"
 }
 
 # census_judge NAME — the prediction against the kernel's own lines, one
@@ -9072,7 +9055,7 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 44 (healthy says how) and
-# the 383 of the stand's own forty-nine suites: stand 28, stand_lock 4,
+# the 389 of the stand's own forty-nine suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
@@ -9083,12 +9066,12 @@ STAND_HELD="
 # stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
 # stand_endpaper 6, stand_errata 8, stand_toll 5, stand_dog_ear 9,
 # stand_slip 14, stand_away 14, stand_tip_in 10, stand_slip_promise 5,
-# stand_book_glean 2, stand_escheat 3, stand_parity 2, stand_book_room 11.
+# stand_book_glean 2, stand_escheat 6, stand_parity 2, stand_book_room 11.
 # Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=430
+STAND_RUN=433
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
