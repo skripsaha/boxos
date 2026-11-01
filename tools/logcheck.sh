@@ -7539,6 +7539,34 @@ run_brigademut() {
 }
 
 # ===========================================================================
+# crewcrash — a strand's crash ends its program, every strand of it
+# ===========================================================================
+#
+# A crashed strand takes with it whatever it held of its program — the heap
+# lock above all — and siblings left running would wait on that for ever. So
+# process_destroy ends the whole program of a strand whose death nobody
+# committed (CabinEnd), the main strand last. `strandtest crash` is the
+# instrument, run alone: every other scenario reads a user-mode [EXCEPTION] as
+# a failure, and this one needs exactly one — the worker's own.
+run_crewcrash() {
+    echo "== crewcrash: a worker's crash ends its program, every strand of it =="
+    build STRICT=on
+    if ! util_boot crewcrash "STRICT=on CORES=16 MEM=4G" "strandtest crash" "\[STRAND\] (crash PASS|FAIL crash)"; then
+        bad "crewcrash: never reached a shell"; return
+    fi
+    L="$SCRATCH/serial.crewcrash.log"
+    grep -q "\[STRAND\] crash PASS" "$L" \
+        && ok "crewcrash: the worker's crash ended all of its program, every strand CRASHED" \
+        || bad "crewcrash: $(grep -m1 '\[STRAND\] FAIL' "$L" || echo 'no verdict from strandtest crash at all')"
+    [ "$(grep -c '^\[EXCEPTION\] Killing PID' "$L")" -eq 1 ] \
+        && ok "crewcrash: one fault, the worker's own" \
+        || bad "crewcrash: $(grep -c '^\[EXCEPTION\] Killing PID' "$L") fault(s), want the worker's one"
+    grep -qE "VERDICT|PANIC" "$L" \
+        && bad "crewcrash: the kernel spoke of a stall or panic" \
+        || ok "crewcrash: no verdict, no panic"
+}
+
+# ===========================================================================
 # headcount — every carrier of a tag is told once, and every one answers
 # ===========================================================================
 #
@@ -12162,6 +12190,7 @@ case "${1:-both}" in
     handsetdeafmut) run_handsetdeafmut ;;
     brigade)    run_brigade ;;
     brigademut) run_brigademut ;;
+    crewcrash)  run_crewcrash ;;
     headcount)  run_headcount ;;
     headcountmut) run_headcountmut ;;
     deadline)   run_deadline ;;

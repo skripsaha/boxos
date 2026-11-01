@@ -12,7 +12,7 @@
 #     TREE=DIR    the checkout the gates run in, judged by its OWN harnesses.
 #                 Unset, the checkout this file is in.
 #
-# Thirty-four gates — twenty-two of logcheck's and twelve of PowerCut's — then
+# Thirty-five gates — twenty-three of logcheck's and twelve of PowerCut's — then
 # framerefuse, the stand, volume-read's self-test over the image a plain
 # `make` lays down (logcheck's mkfs runs it over the one `make VOLUME_FORMAT=v2`
 # lays, whose book mkfs bound), boxasm, the in-BoxOS assembler and linker
@@ -41,7 +41,7 @@ set -u
 
 GATES_LOGCHECK="healthy unattended byname quill quillmut census censusmut lockrankmut
                 replug holdground returnfail standmut abba abbamut turns turnsmut cores
-                replugwrite haltcycle fullvolume standusb mkfs"
+                replugwrite haltcycle fullvolume standusb mkfs crewcrash"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid nextfidmut hog settlecut chaingrow
                 poolmut flushmut halt race"
 

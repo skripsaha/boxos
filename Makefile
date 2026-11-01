@@ -1338,14 +1338,14 @@ VOLUME_CONTENT = \
 	$(BROOKSTRAND_BIN)   "app,utility,test" \
 	$(BROOKEXEC_BIN)     "app,utility,test,cxx" \
 	$(CURRENTEXEC_BIN)   "app,utility,test,cxx" \
-	$(CLOCK_BIN)         "app,utility,display,clock,autostart" \
-	$(CALENDAR_BIN)      "app,utility,display,calendar" \
-	$(BONSAI_BIN)        "app,utility,display" \
-	$(BIGCLOCK_BIN)      "app,utility,display,clock" \
-	$(SNAKE_BIN)         "app,utility,game,display" \
-	$(HACKER_BIN)        "app,utility,display" \
-	$(PIPES_BIN)         "app,utility,display" \
-	$(WORDLE_BIN)        "app,utility,display,game" \
+	$(CLOCK_BIN)         "app,utility,clock,autostart" \
+	$(CALENDAR_BIN)      "app,utility,calendar" \
+	$(BONSAI_BIN)        "app,utility" \
+	$(BIGCLOCK_BIN)      "app,utility,clock" \
+	$(SNAKE_BIN)         "app,utility,game" \
+	$(HACKER_BIN)        "app,utility" \
+	$(PIPES_BIN)         "app,utility" \
+	$(WORDLE_BIN)        "app,utility,game" \
 	$(STRANDPARK_BIN)    "app,utility,test" \
 	$(CHILDSPIN_BIN)     "app,utility,test" \
 	$(PRINT_STRESS_BIN)  "app,utility,test" \
@@ -1391,15 +1391,15 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/luggagetest.elf "utility,test" \
 	$(UTILS_DIR)/logsave.elf "utility,system,log" \
 	$(UTILS_DIR)/lastsaid.elf "utility,system,log" \
-	$(UTILS_DIR)/rgbtest.elf "utility,test,display" \
+	$(UTILS_DIR)/rgbtest.elf "utility,test" \
 	$(UTILS_DIR)/rollcall.elf "utility,test" \
 	$(UTILS_DIR)/handset.elf "utility,test" \
 	$(UTILS_DIR)/headcount.elf "utility,test" \
 	$(UTILS_DIR)/draft.elf    "utility,storage" \
-	$(UTILS_DIR)/playtime.elf "utility,display" \
-	$(UTILS_DIR)/lavalamp.elf "utility,display" \
+	$(UTILS_DIR)/playtime.elf "utility" \
+	$(UTILS_DIR)/lavalamp.elf "utility" \
 	$(UTILS_DIR)/finish.elf   "utility,system" \
-	$(UTILS_DIR)/taskcenter.elf "utility,display"
+	$(UTILS_DIR)/taskcenter.elf "utility"
 
 $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
 	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) $(VOLUME_CONTENT)); \
