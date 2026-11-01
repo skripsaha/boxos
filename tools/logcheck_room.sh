@@ -8,54 +8,70 @@
 # FULLVOLUME_STRETCH and FULLVOLUME_MIB logcheck.sh's. Its own file for the
 # reason logcheck_mkfs.sh has one: logcheck.sh is twelve thousand lines.
 
-# The kernel's refusal of a file's data at the wall (allotment.c,
-# AllotmentBookShort): what the book keeps and holds itself, named, and how
-# the reserve was measured.
-ROOMBACK_REFUSED='\[TagFS\] no block can be had for [0-9]+ block\(s\) of a file.s data: .*'
+# The kernel's refusal at the wall, said as a write's wait for a Tally ends —
+# of a file's data (allotment.c, AllotmentBookShort) or of the room its record
+# takes on the ribbon (ribbon.c, RibbonRefusedSaid): what was free, what the
+# book keeps and holds itself, named, and how the reserve was measured. Either
+# may end the write: the one the ribbon ends is weighed by its own word, never
+# by a line of the data's said before it, nor taken for none. The ribbon run
+# out under the Settle's own stitch (RibbonOutSaid) ends no change's wait and
+# is no refusal of one.
+ROOMBACK_REFUSED='\[TagFS\] no (block can be had for [0-9]+ block\(s\) of a file.s data|room on the ribbon for a change of the volume): .*'
 
 # roomback_book_judge L VERDICT — the guest's VERDICT of roomback on a book
 # (`PASS — …` or `PENDING — …`, the word taken off) weighed by the log L: the
 # GiB written the moment a GiB was deleted waits for the Tally that makes the
 # reserve's measure exact, or for a turn of the ring, and is refused no-space
 # only past them — so the last refusal after the delete says its reserve
-# measured to the block, or a turn of the ring waited for, and the write took
-# all of the GiB but what the book keeps and holds itself more than when the
-# volume was first full (the kernel's word at its last refusal before the
-# volume was full and its last after): the next Tally measured to the block,
-# the Tallies, their pair and the ribbon of a book that took in a file laid
-# finer in the ground of the one deleted (§16.4 п.7) — named by the Binder,
-# each a Quire it holds (binder_slots.c, BinderGroundHeld), never what is left
-# of the data run past the free and the files, which held a leak as well as
-# the book and made any refusal its own excuse. The MiB _qra.bin was laid past
-# the GiB is the room for the rest. What it took reads back whole. 0 or 1;
-# ROOMBACK_SAID what was weighed, ROOMBACK_TOOK the bytes it took.
+# measured to the block, or a turn of the ring waited for, with no more free
+# than the book keeps and the tails are promised — and the write took all of
+# the GiB but the ground that was not data's grew by since the volume was
+# first full: what was free and what the book holds itself, each as the
+# kernel named it at its last refusal before the volume was full and its last
+# after, up to the guest's verdict — the refusal said as the wait for a Tally
+# ends, never a line of the halt's past it. The next Tally
+# measured to the block, the Tallies, their pair and the ribbon of a book that
+# took in a file laid finer in the ground of the one deleted (§16.4 п.7) —
+# named by the Binder, each a Quire it holds (binder_slots.c,
+# BinderGroundHeld), never what is left of the data run past the free and the
+# files, which held a leak as well as the book and made any refusal its own
+# excuse. Free, not kept: what the book keeps is a measure, and the ground
+# under it is what was free — at the first wall a Tally's pair taken out of the
+# reserve between two of the fill's refusals left 4352 free under a reserve
+# of 4864, and a judge by the reserve held that write 512 blocks short of the
+# ground the second wall had back, or not, as the Tally fell before the last
+# refusal or after it. The MiB _qra.bin was laid past the GiB is the room for
+# the rest. What it took reads back whole. 0 or 1; ROOMBACK_SAID what was
+# weighed, ROOMBACK_TOOK the bytes it took.
 roomback_book_judge() {
-    local L="$1" verdict="$2" at w1 w2 k1 h1 k2 h2 m2 took want refused good anchor allowed
-    local held='s/.*the book keeps ([0-9]+) for its ribbon and its Tally and holds ([0-9]+) itself.*/\1 \2/p'
+    local L="$1" verdict="$2" at end w1 w2 f1 k1 h1 f2 k2 h2 p2 m2 took want refused good anchor allowed
+    local named='s/.* ([0-9]+)( block\(s\))? free, the book keeps ([0-9]+) for its ribbon and its Tally and holds ([0-9]+) itself in its Tallies and its ribbon, and ([0-9]+) are promised.*/\1 \3 \4 \5/p'
     ROOMBACK_TOOK=$((FULLVOLUME_MIB << 20))
     ROOMBACK_SAID="every byte, read back whole (${verdict#*— })"
     case "$verdict" in PASS*) return 0 ;; esac
     at=$(tr -d '\r' < "$L" | grep -anE '\[QUILL\] roomback: the volume is full — ' | tail -1 | cut -d: -f1)
     w1=$(tr -d '\r' < "$L" | head -n "${at:-0}" | grep -aoE "$ROOMBACK_REFUSED" | tail -1)
-    w2=$(tr -d '\r' < "$L" | tail -n +"${at:-1}" | grep -aoE "$ROOMBACK_REFUSED" | tail -1)
-    read -r k1 h1 <<<"$(echo "$w1" | sed -nE "$held")"
-    read -r k2 h2 <<<"$(echo "$w2" | sed -nE "$held")"
+    end=$(tr -d '\r' < "$L" | grep -anE '\[QUILL\] roomback: (PASS|PENDING|FAIL) — ' | tail -1 | cut -d: -f1)
+    w2=$(tr -d '\r' < "$L" | head -n "${end:-0}" | tail -n +"${at:-1}" | grep -aoE "$ROOMBACK_REFUSED" | tail -1)
+    read -r f1 k1 h1 _ <<<"$(echo "$w1" | sed -nE "$named")"
+    read -r f2 k2 h2 p2 <<<"$(echo "$w2" | sed -nE "$named")"
     m2=$(echo "$w2" | sed -nE 's/.* — the reserve measured (.*) \(ERR_TAGFS_NO_SPACE\)$/\1/p')
     read -r took want refused good anchor <<EOF_ROOMBACK
 $(echo "$verdict" | sed -nE 's/^PENDING — .*took ([0-9]+) of ([0-9]+) bytes .* refused (-?[0-9]+); read back good to byte ([0-9]+) \(read -?[0-9]+, anchor (-?[0-9]+)\).*/\1 \2 \3 \4 \5/p')
 EOF_ROOMBACK
-    if [ -z "$took" ] || [ -z "$h1" ] || [ -z "$h2" ] || [ -z "$m2" ]; then
-        ROOMBACK_SAID="the write of a GiB on the book came short, and the guest's verdict or the kernel's word of what the book keeps and holds and how it was measured (before the volume was full: ${w1:-none}; after: ${w2:-none}) does not say by how much (${verdict#*— })"
+    if [ -z "$took" ] || [ -z "$h1" ] || [ -z "$p2" ] || [ -z "$m2" ]; then
+        ROOMBACK_SAID="the write of a GiB on the book came short, and the guest's verdict or the kernel's word of what was free, what the book keeps and holds and how it was measured (before the volume was full: ${w1:-none}; after: ${w2:-none}) does not say by how much (${verdict#*— })"
         return 1
     fi
     ROOMBACK_TOOK=$took
-    allowed=$(( ((k2 > k1 ? k2 - k1 : 0) + (h2 > h1 ? h2 - h1 : 0)) * 4096 ))
-    ROOMBACK_SAID="a GiB written the moment a GiB was deleted on a book took $took of $want bytes, all but the $(( (want - took) / 4096 )) block(s) of the $(( allowed / 4096 )) the book keeps and holds more than when the volume was first full (keeps $k2 and holds $h2, against $k1 and $h1), refused no-space ($refused) with its reserve measured $m2, and read back whole to byte $good"
+    allowed=$(( f2 + h2 > f1 + h1 ? (f2 + h2 - f1 - h1) * 4096 : 0 ))
+    ROOMBACK_SAID="a GiB written the moment a GiB was deleted on a book took $took of $want bytes, all but the $(( (want - took) / 4096 )) block(s) of the $(( allowed / 4096 )) the free and what the book holds grew by since the volume was first full ($f2 free and $h2 held, against $f1 and $h1; it keeps $k2, $p2 promised), refused no-space ($refused) with its reserve measured $m2, and read back whole to byte $good"
     case "$m2" in
         "to the block by its last Tally"|*", a turn of the ring waited for") ;;
         *) return 1 ;;
     esac
-    [ "$refused" = -852 ] && [ "$good" = "$took" ] && [ "$anchor" = 0 ] && [ "$took" -ge $((want - allowed)) ]
+    [ "$f2" -le $((k2 + p2)) ] && [ "$refused" = -852 ] && [ "$good" = "$took" ] && [ "$anchor" = 0 ] &&
+        [ "$took" -ge $((want - allowed)) ]
 }
 
 # fullvolume_roomback_book L VERDICT — roomback on a book, judged

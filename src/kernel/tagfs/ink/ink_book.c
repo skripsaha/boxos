@@ -97,7 +97,7 @@ error_t InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, con
         TagFSLockTake(&fs->lock);
         rc = InkBookFieldsLocked(fid, was, f, add, &rec, j, stake, claim, &spent, out);
         TagFSLockDrop(&fs->lock);
-        RibbonClaimSay(rc);
+        rc = RibbonClaimSay(rc);
     }
     if (rc == OK) {
         SettleInked(out->gen, false);
@@ -174,7 +174,7 @@ error_t InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint6
             TagFSLockTake(&fs->lock);
             rc = InkBookNewLocked(tags, count, &rec, j, &st, claim, &spent, out_fid, out);
             TagFSLockDrop(&fs->lock);
-            RibbonClaimSay(rc);
+            rc = RibbonClaimSay(rc);
         }
         if (rc == OK)
             SettleInked(out->gen, false);
@@ -238,7 +238,7 @@ error_t InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord*
         TagFSLockTake(&fs->lock);
         rc = InkBookQuitclaimLocked(fid, was, cur, fallow, j, &spent, out);
         TagFSLockDrop(&fs->lock);
-        RibbonClaimSay(rc);
+        rc = RibbonClaimSay(rc);
     }
     if (rc == OK) {
         SettleInked(out->gen, false);
@@ -520,7 +520,7 @@ error_t InkBookPlot(const Plot* p, const FileRecord* cur, const RecordWhere* was
         TagFSLockTake(&InkState()->lock);
         rc = InkBookPlotLocked(p, was, &w, j, &spent, departed, out);
         TagFSLockDrop(&InkState()->lock);
-        RibbonClaimSay(rc);
+        rc = RibbonClaimSay(rc);
     }
     if (rc != OK)
         JotsLetGo(j);

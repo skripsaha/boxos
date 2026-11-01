@@ -327,10 +327,25 @@ static bool RunsBar(const FallowNode* n, uint64_t start, uint64_t end, uint64_t*
     return met;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+static volatile uint64_t s_stand_bar;
+
+void FallowStandBar(uint64_t stitch)
+{
+    __atomic_store_n(&s_stand_bar, stitch, __ATOMIC_RELEASE);
+}
+#endif
+
 bool FallowBarsRun(uint64_t start, uint64_t count, uint64_t* past)
 {
     bool met = false;
     *past    = start;
+#ifdef CONFIG_VOLUME_TESTS
+    if (__atomic_load_n(&s_stand_bar, __ATOMIC_ACQUIRE) > s_bar_slice) {
+        *past = start + count;
+        return true;
+    }
+#endif
     for (FallowNode* n = s_head; n; n = n->next)
         met = RunsBar(n, start, start + count, past) || met;
     for (FallowNode* n = s_barred; n; n = n->next)

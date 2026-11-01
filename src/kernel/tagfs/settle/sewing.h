@@ -87,8 +87,8 @@ typedef struct {
     uint64_t    quires;       /* the Quires the ribbon runs through past the Tally (atomic: said by any core) */
     error_t     taken;        /* how the last ask for a next_quire was answered */
     bool        lied;         /* the medium is shown not to keep what it confirmed: every stitch says so */
-    bool        out;          /* the ribbon ran out with no Tally to take it in, said (atomic: any core
-                               * that is refused room says it) */
+    bool        out;          /* the ribbon ran out under a stitch, said until a next_quire is given again
+                               * (atomic: the Settle's holder says it, a mount clears it) */
     uint32_t    refused;      /* attempts of a stitch given up in a row: a retry is under way, ... */
     uint32_t    cut;          /* ... `cut` of them cut short by the medium leaving, the rest it refused */
     RibbonQuire ended;        /* the Quire the last stitch sewn ends in — a retry's from_quire */
@@ -322,8 +322,12 @@ void     StitchStillLetGo(uint64_t written);
  *                     target, and the stitch carries its record
  *   RibbonClaimBack   under the state lock: claims given back to the next
  *                     stitch — a cycle refused gives back what it took
- *   RibbonClaimSay    with no lock: a claim refused ERR_TAGFS_NO_SPACE said,
- *                     once a mount, as the ribbon run out
+ *   RibbonClaimSay    with no lock, as a change's claim was answered: the
+ *                     answer it stands by — short of room while a Tally gives
+ *                     the ribbon its next_quire, ERR_WOULD_BLOCK on that Tally
+ *                     (binder.h, BinderRibbonWait); refused, ERR_TAGFS_NO_SPACE
+ *                     said as a change refused room on the ribbon, once until
+ *                     a change is given room on it
  *   RibbonFlightBegins under the state lock, at TAKE: the stitch in flight takes
  *                     `sectors` at the most — the room a claim is judged by is
  *                     the room past it, and none past a Quire it may run into
@@ -339,7 +343,7 @@ void     RibbonReserveLetGo(uint64_t bytes);
 error_t  RibbonClaimHeld(uint64_t held, uint64_t bytes);
 uint64_t RibbonClaimTaken(void);
 void     RibbonClaimBack(uint64_t bytes);
-void     RibbonClaimSay(error_t rc);
+error_t  RibbonClaimSay(error_t rc);
 void     RibbonFlightBegins(uint64_t sectors);
 void     RibbonFlightEnds(void);
 void     RibbonRoomOf(const RibbonCursor* c, uint64_t flight, uint64_t* any, uint64_t* frees);

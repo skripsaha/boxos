@@ -390,7 +390,7 @@ error_t PlotWindowRoomAsked(Plot *p)
     if (rc == OK)
         p->ribbon_held = most;
     TagFSLockDrop(&fs->lock);
-    RibbonClaimSay(rc);
+    rc = RibbonClaimSay(rc);
     return rc;
 }
 

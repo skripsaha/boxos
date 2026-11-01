@@ -250,6 +250,12 @@ bool        FallowRestsOnTail(uint64_t closed_gen);
  * no TagFS lock held (FallowNodesFree). */
 bool        FallowBarsRun(uint64_t start, uint64_t count, uint64_t* past);
 FallowNode* FallowBarLift(uint64_t slice);
+#ifdef CONFIG_VOLUME_TESTS
+/* For the stand: every free run kept from the ribbon as ground a freer named
+ * by stitch `stitch` gave back — until a slice of `stitch` or past it stands
+ * (FallowBarLift), as a delete's node is (NodeBarred); 0 lets it go. */
+void        FallowStandBar(uint64_t stitch);
+#endif
 
 /* Nodes FallowRipen spent, freed with no TagFS lock held. */
 void        FallowNodesFree(FallowNode* list);

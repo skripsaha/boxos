@@ -37,6 +37,19 @@ static volatile uint64_t s_room_frees;
 static volatile uint8_t  s_room_grows;
 static volatile uint64_t s_refused_free;
 
+/* The ribbon stands with no next_quire, its last ask refused past the reserve
+ * — or answered with one found only on ground a Tally a mount may stand on
+ * keeps from it (fallow.c, NodeBarred): published with the room. A change
+ * short of room on the ribbon waited on a Tally for it, and no change that
+ * does not free has been given room since (RibbonClaimSay, RibbonRoomFor):
+ * the ribbon's shortfall is the volume's, not a change's, so any change given
+ * room past it ends it. A change refused room on the ribbon, said until one
+ * is given room (RibbonRefusedSaid). Any core, no lock; let go at mount. */
+static volatile uint8_t  s_room_refused;
+static volatile uint8_t  s_room_barred;
+static volatile uint8_t  s_room_waited;
+static volatile uint8_t  s_refused_said;
+
 /* The slice of the last Tally's DONE that asked the next_quire again, and how
  * many in a row took that same stitch in (RibbonNextAgain). By the Settle's
  * holder. */
@@ -130,6 +143,10 @@ static void RibbonRoomPublish(void)
     __atomic_store_n(&s_room_frees, RibbonRoomBytes(frees), __ATOMIC_RELEASE);
     __atomic_store_n(&s_room_grows, (uint8_t)(c->up && ((flight && flight >= left) || c->next.blocks ||
                                                         c->taken != ERR_TAGFS_NO_SPACE)), __ATOMIC_RELEASE);
+    __atomic_store_n(&s_room_refused, (uint8_t)(c->up && !c->next.blocks && c->taken == ERR_TAGFS_NO_SPACE),
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&s_room_barred, (uint8_t)(c->up && !c->next.blocks && c->taken == ERR_WOULD_BLOCK),
+                     __ATOMIC_RELEASE);
 }
 
 /* A Quire's blocks for this volume: the grain it was laid out in (§2.6 — the
@@ -250,6 +267,8 @@ error_t RibbonCursorMount(const RibbonWalk* w, const char** glass)
     __atomic_store_n(&s_refused_free, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_long_said, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&s_inside_said, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_room_waited, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_refused_said, 0u, __ATOMIC_RELEASE);
     RibbonLeftMount(w, c->lied, c->given);
     RibbonRoomPublish();
     return OK;
@@ -349,6 +368,7 @@ static error_t RibbonNextTake(RibbonCursor* c)
                 c->atom * BOOK_SECTOR_BYTES, (unsigned long long)start, (unsigned long long)c->quire_blocks);
     c->next = (RibbonQuire){ start, c->quire_blocks };
     BinderRibbonGiven(&c->next);
+    __atomic_store_n(&c->out, false, __ATOMIC_RELEASE);   /* the next run out is said again */
     return OK;
 }
 
@@ -429,25 +449,35 @@ void RibbonTallied(uint64_t tally, uint64_t taken)
     RibbonLeftTallied(taken);
 }
 
-/* The ribbon run out, said once a mount — by the Settle's holder or by the
- * first change refused room: no next_quire, and none can be given. */
+/*
+ * The ribbon run out under a stitch of the Settle's holder, said once until it
+ * is given a next_quire again: no next_quire, and the stitch does not fit in
+ * the rest of its Quire (RibbonRoom). The stitch is no change refused — a word
+ * aboard is left out of it and the stitch laid again (sewing.c, StitchBuild),
+ * a change short of room waits on the Tally that gives the ribbon its
+ * next_quire while one may (RibbonClaimSay) and is refused with its own line
+ * (RibbonRefusedSaid) — so this line says the ribbon's state, never the end of
+ * a change's wait.
+ */
 static void RibbonOutSaid(void)
 {
-    RibbonCursor* c = &s_cursor;
+    RibbonCursor* c    = &s_cursor;
     const char*   none = BinderNoTallies();
     if (__atomic_exchange_n(&c->out, true, __ATOMIC_ACQ_REL))
         return;
     kprintf("[TagFS] the ribbon has run out: %llu Quire(s) taken for it, %llu block(s) free, %llu kept for "
-            "the Tallies and %llu promised to the tails Slips lie over — %s%s; until then files, names, tags and "
-            "words are refused (ERR_TAGFS_NO_SPACE), and the rest of its Quire is kept for what was claimed before "
-            "and what gives ground up\n",
+            "the Tallies and %llu promised to the tails Slips lie over — %s%s; until then %s, and the rest of its "
+            "Quire is kept for what was claimed before and what gives ground up\n",
             (unsigned long long)__atomic_load_n(&c->quires, __ATOMIC_RELAXED),
             (unsigned long long)__atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE),
             (unsigned long long)EndpaperKeeps(c->quire_blocks), (unsigned long long)AllotmentPromised(),
             none ? "no Tally is written by this mount, so none of its Quires comes back before the volume is "
                    "mounted again: " : "a Tally is asked for to take its end in, and its Quires come back only once "
                    "the slots stop naming them",
-            none ? none : "");
+            none ? none : "",
+            none ? "files, names, tags and words are refused (ERR_TAGFS_NO_SPACE)"
+                 : "a word the person says finds no room, and a file, a name or a tag waits on that Tally — "
+                   "refused once the ring has turned or none can give");
 }
 
 /*
@@ -694,8 +724,16 @@ static error_t RibbonRoomFor(uint64_t bytes, bool frees)
     uint64_t room = __atomic_load_n(frees ? &s_room_frees : &s_room_any, __ATOMIC_ACQUIRE);
     uint64_t want = bytes ? bytes : STITCH_RECORD_HEAD_MOST;
     uint64_t held = RibbonHeld();
-    if (room >= want && held <= room - want)
+    if (room >= want && held <= room - want) {
+        /* Room for a change that does not free is what a change short of it
+         * waited on a Tally for: the shortfall ended, the next has its turn of
+         * the ring again. A freeing one is given room in the rest kept for it
+         * while the shortfall stands (RibbonRoomOf), and ends nothing. */
+        if (!frees && __atomic_load_n(&s_room_waited, __ATOMIC_ACQUIRE) &&
+            __atomic_exchange_n(&s_room_waited, 0u, __ATOMIC_ACQ_REL))
+            BinderRoomTaken();
         return OK;
+    }
     if (s_claimed || s_reserved || __atomic_load_n(&s_flight, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&s_room_grows, __ATOMIC_ACQUIRE) ||
         AllotmentFreeUnpromised() > __atomic_load_n(&s_refused_free, __ATOMIC_ACQUIRE) ||
@@ -749,8 +787,66 @@ void RibbonClaimBack(uint64_t bytes)
     s_claimed += bytes;
 }
 
-void RibbonClaimSay(error_t rc)
+/*
+ * A change refused room on the ribbon, said once until a change is given room
+ * on it — as a write of data refused at the wall says it (allotment.c,
+ * AllotmentBookShort), as its wait for a Tally ends: what was free, what the
+ * book keeps — the Tallies' reserve and the Quire the ribbon asks past it, as
+ * a write of data leaves both — the ground it holds itself, named
+ * (BinderGroundHeld), and how the reserve was measured (BinderRoomMeasured),
+ * so a write the ribbon ends is weighed by the kernel's word as one the data's
+ * wall ends (logcheck fullvolume, roomback). Said by the change, never by the
+ * Settle's stitch (RibbonOutSaid): its words are this change's, at the end of
+ * this change's wait.
+ */
+static void RibbonRefusedSaid(void)
 {
+    const char* why = NULL;
+    if (__atomic_exchange_n(&s_refused_said, 1u, __ATOMIC_ACQ_REL))
+        return;
+    const char* measured = BinderRoomMeasured(&why);
+    kprintf("[TagFS] no room on the ribbon for a change of the volume: %llu free, the book keeps %llu for its "
+            "ribbon and its Tally and holds %llu itself in its Tallies and its ribbon, and %llu are promised to the "
+            "tails Slips lie over — the reserve measured %s%s%s (ERR_TAGFS_NO_SPACE)\n",
+            (unsigned long long)__atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE),
+            (unsigned long long)(EndpaperKeeps(s_cursor.quire_blocks) + s_cursor.quire_blocks),
+            (unsigned long long)BinderGroundHeld(), (unsigned long long)AllotmentPromised(), measured,
+            why ? ": " : "", why ? why : "");
+}
+
+/*
+ * ‼ A CHANGE SHORT OF ROOM ON THE RIBBON WAITS FOR THE TALLY THAT GIVES IT ONE
+ * (§3.6, §16.6 п.8). With no next_quire every claim but a freeing one waits
+ * (RibbonRoomOf), and while the next_quire is found only on ground a delete
+ * past the newest Tally gave back, nothing but a Tally past the delete gives
+ * one (fallow.c, NodeBarred). Waited out a cycle at a time, the cycles were a
+ * stitch each with nothing a claim may lay, in the one Quire the ribbon stood
+ * in, and a stitch of the Tally's steps between every two: the Quire's rest
+ * was spent before the Tally ended, the stitch past it found no room, and its
+ * waiters — the GiB written the moment a GiB was deleted among them — were
+ * refused no-space half-way (fullvolume, roomback). So the change waits on that
+ * Tally, as a write short of ground does (binder.h, BinderRibbonWait): its own
+ * wait for room writes it, and the cadence gives it every turn. Refused past
+ * the reserve, it waits as a write of data refused past it does — on the Tally
+ * under way, or one that makes the measure exact or gives the ring's ground
+ * back, whose end asks the next_quire again by the measure it makes
+ * (RibbonNextAgain): at a full volume's wall the room a measure from above
+ * refused — and is refused once the ring has turned or none can give, said as
+ * its own refusal (RibbonRefusedSaid). A change that does not free given room
+ * once one waited gives the next shortfall its turn of the ring again
+ * (RibbonRoomFor).
+ */
+error_t RibbonClaimSay(error_t rc)
+{
+    bool barred  = rc == ERR_WOULD_BLOCK && __atomic_load_n(&s_room_barred, __ATOMIC_ACQUIRE);
+    bool refused = rc == ERR_TAGFS_NO_SPACE && __atomic_load_n(&s_room_refused, __ATOMIC_ACQUIRE);
+    if ((barred || refused) && BinderRibbonWait(barred)) {
+        __atomic_store_n(&s_room_waited, 1u, __ATOMIC_RELEASE);
+        return ERR_WOULD_BLOCK;
+    }
+    if (rc == OK && __atomic_load_n(&s_refused_said, __ATOMIC_ACQUIRE))
+        __atomic_store_n(&s_refused_said, 0u, __ATOMIC_RELEASE);   /* the next refusal is said again */
     if (rc == ERR_TAGFS_NO_SPACE)
-        RibbonOutSaid();
+        RibbonRefusedSaid();
+    return rc;
 }
