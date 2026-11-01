@@ -170,15 +170,15 @@ PY
 }
 
 # The shell's prompt is read from the LINES, never from the last two bytes of
-# the file (wait_for_prompt): on a book the cycle a write inked runs in the
-# window after it, and what the kernel says on its way — the reserve of its
-# own paths growing, a stitch settling — lands wherever its moment falls. Said
-# right after a prompt it carries the prompt away from the end of the file
-# ("~ [KLIB] …") and the echo of what is typed next onto a line of its own;
-# wait_for_prompt then waits its whole ceiling on a shell that stood there all
-# along, and type_line, finding no "~ bye", types it again (measured: refusal
-# and the format-v2 heirloom, 2026-10-28). Read as fullvolume_type reads it
-# (logcheck.sh).
+# the file, as wait_for_prompt read it then: on a book the cycle a write inked
+# runs in the window after it, and what the kernel says on its way — the
+# reserve of its own paths growing, a stitch settling — lands wherever its
+# moment falls. Said right after a prompt it carries the prompt away from the
+# end of the file ("~ [KLIB] …") and the echo of what is typed next onto a
+# line of its own; wait_for_prompt waited its whole ceiling on a shell that
+# stood there all along, and type_line, finding no "~ bye", typed it again
+# (measured: refusal and the format-v2 heirloom, 2026-10-28). Read as
+# fullvolume_type reads it (logcheck.sh).
 #
 # And counted from the ECHO, never from a count of lines taken before the
 # typing: a kernel line said after the prompt and before that count ends the

@@ -3,11 +3,12 @@
 # uefi), every program of a volume that arrives late held until the kernel has
 # said what it started (replugwrite on either format, latelaunchmut), and the
 # typer reading a command's echo off a console whose prompt a kernel line may
-# have buried (replugwrite).
+# have buried, and the shell's prompt read at its end whatever the kernel said
+# after it (replugwrite on either format, loggerhour).
 #
 # SOURCED, NEVER RUN — by logcheck.sh; ok, bad, chk, harness, build, mutate,
-# mut_done, restore, type_line, wait_for_line, wait_for_quiet, mon_raw and
-# SCRATCH are stand.sh's, latearrival_on/off and stick_from_boot_image
+# mut_done, restore, type_line, prompt_at_end, wait_for_line, wait_for_quiet,
+# mon_raw and SCRATCH are stand.sh's, latearrival_on/off and stick_from_boot_image
 # logcheck.sh's. Its own file for the reason logcheck_mkfs.sh has one:
 # logcheck.sh is twelve thousand lines.
 
@@ -173,6 +174,47 @@ typer_selfcheck() {
     typer_case "the Enter lost, the same line typed and answered before" \
         "~ $c\r\n[QUILL] awaycheck: PASS\r\n~ " "$c" "" "1 1"
     typer_case "the Enter lost after a prompt" "~ " "$c" "" "1 1"
+    typer_case "a byte no locale reads in a kernel line inside the echo" \
+        "~ " "quilltest aw[TagFS] \xff\xfe\r\naycheck _qtyper 3 32" "\r\n" "0 1"
+    prompt_selfcheck
+}
+
+# ‼ A FREE SHELL IS ITS PROMPT AT THE END OF THE LOG, WHATEVER THE KERNEL SAID
+# AFTER IT. The logger's last lines owed a Tally, written the moment its prompt
+# was back (`~ [TagFS] Tally 668 is written over slot 2: ...`): the log ended
+# on the kernel's line, wait_for_prompt (stand_typer.sh) held a free shell for
+# a busy one through its quiet window, `bye` was never typed, and the hour
+# said the machine never stopped (loggerhour). The prompt of a Use Context,
+# `[circle,sewn] ~ `, is the prompt and not a kernel line, and a byte the
+# host's locale does not read is a byte, wherever in the boot it fell.
+# prompt_case plays the log on the host and holds what prompt_at_end answers:
+# 0 at the prompt, 1 while the shell is not there yet.
+prompt_case() {
+    local name=$1 log=$2 want=$3 dir="$SCRATCH/prompt" got
+    rm -rf "$dir"; mkdir -p "$dir/build"
+    printf '%b' "$log" > "$dir/build/serial.log"
+    got=$(cd "$dir" && { prompt_at_end; echo $?; })
+    [ "$got" = "$want" ]
+    chk $? "prompt: $name — the shell's prompt at the end of the log answers $want (answered: ${got:-nothing})"
+}
+
+prompt_selfcheck() {
+    local ended="[QUILL] logger: PASS — loggerh-g.log (fid 81): 3600 lines in 3599003 ms\r\n"
+    local tally="[TagFS] Tally 668 is written over slot 2: the state after stitch 667"
+    local running="~ quilltest logger loggerh 3600 600\r\n" used="[circle,sewn] ~ "
+    prompt_case "the prompt last in the log" "$ended~ " 0
+    prompt_case "a Tally said after the prompt" "$ended~ $tally\r\n" 0
+    prompt_case "two kernel lines said after it" "$ended~ $tally\r\n[KLIB] a\r\n" 0
+    prompt_case "a kernel line after it not yet ended" "$ended~ $tally" 1
+    prompt_case "a key typed after it" "$ended~ b" 1
+    prompt_case "the logger running, its progress said" "$running[QUILL] logger: 30 of 3600 lines appended, 0 anchor(s)\r\n" 1
+    prompt_case "the logger running, a Tally said under it" "$running$tally\r\n" 1
+    prompt_case "a Use Context's prompt last in the log" "$ended$used" 0
+    prompt_case "a Tally said after a Use Context's prompt" "$ended$used$tally\r\n" 0
+    prompt_case "a kernel line after a Use Context's prompt not yet ended" "$ended$used$tally" 1
+    prompt_case "a command typed at a Use Context's prompt" "$ended${used}quilltest names circle" 1
+    prompt_case "a byte no locale reads early in the boot" "boot \xff\xfe\r\n$ended~ " 0
+    prompt_case "a byte 1 and a NUL in the log" "\001boot\0000\r\n$ended\0000~ " 0
 }
 
 # latelaunch_leg MODE LOG — latearrival's machine with its late launch said

@@ -5253,8 +5253,8 @@ wakedrop_off() {
 # Between rounds the shell must be back at its prompt, and that is read from
 # the LINES, not from the last two bytes of the file: the watch's witness line
 # lands after a prompt that has no newline yet, so the file ends in the
-# witness and wait_for_prompt would wait its whole ceiling for a shell that
-# was ready all along (measured: the first run of this scenario). A second
+# witness and wait_for_prompt, then reading those two bytes, waited its whole
+# ceiling for a shell that was ready all along (the first run of it). A second
 # line beginning "~ " since the round was typed is the shell's next prompt,
 # whatever the kernel appended to it.
 lostwake_prompt_back() {
