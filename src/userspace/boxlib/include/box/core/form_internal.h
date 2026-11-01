@@ -85,9 +85,6 @@ typedef struct {
 int  form_line_cut(const char *line, FormTokens *out);
 void form_line_release(FormTokens *tokens);
 
-/* The program side: where the program's `screen #ID` file is, 0 for none.
- * Reads the Luggage only — it asks nobody and fills nothing. */
-file_id_t form_screen_file(void);
 /* The program side: the one who started the program asked for its Souvenir
  * (`souvenir`). Reads the Luggage only. */
 bool      form_souvenir_wanted(void);

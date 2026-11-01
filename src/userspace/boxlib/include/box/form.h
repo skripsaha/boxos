@@ -140,6 +140,13 @@ const char *form_text(uint32_t field);
  * did is gone: 0, given to no one). */
 int souvenir_things(const file_id_t *ids, size_t count);
 
+/* The file this program's screen is, when an arrow made it one (`screen #ID`):
+ * what it prints is added to that file. 0 when what it prints reaches the
+ * person. A program that takes the whole glass asks this first — under an
+ * arrow its result is the text the file takes, not a picture. Reads the
+ * Luggage only; it asks nobody. */
+file_id_t form_screen_file(void);
+
 /* The shell's side: every file the program `from_pid` gave back, in the order
  * given, into a heap array the caller frees (NULL when none). Reads what is
  * pending without waiting; messages that are not souvenirs from that pid are
