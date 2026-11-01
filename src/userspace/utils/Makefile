@@ -69,7 +69,7 @@ ASSEMBLE_ENTRY_BLOB = $(ASSEMBLE_DIR)/entry_blob.o
 UTILS = help create show files tag untag name trash erase assemble \
         me info say reboot bye defrag fsck ipc_test memtag hw \
         timezone logsave lastsaid rgbtest usetest luggagetest rollcall handset headcount \
-        draft playtime lavalamp finish taskcenter
+        draft playtime lavalamp finish taskcenter loupe sift
 
 .PHONY: all clean
 
