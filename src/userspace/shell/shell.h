@@ -51,7 +51,10 @@ bool        ShellRunning(void);
  * else when it did not, and why was said. */
 int         ShellRunLine(const char *line);
 ShellState *ShellGetState(void);
-void        ShellUpdatePrompt(void);
+/* The Use Context as the kernel holds it, comma-joined, into a buffer of its
+ * own size the caller frees: the number of tags, 0 for none (*out NULL),
+ * negative when the kernel refused. */
+int         ShellContextWhole(char **out);
 
 /* Drop everything sitting in the IPC mailbox. Use between operations
  * that could otherwise consume a leftover Result (a late display PING

@@ -21,13 +21,15 @@ static void sort_names(char **names, int count)
     }
 }
 
-/* Every utility on the volume, however many there are, by its whole name. */
+/* Every utility on the volume, however many there are, by its whole name —
+ * whatever the Use Context: a program is started by its name from anywhere on
+ * the volume, so the list of what can be started is the whole volume's. */
 static void list_utilities(void)
 {
     file_id_t    *ids      = NULL;
     FileMetadata *metadata = NULL;
     char        **names    = NULL;
-    int count = query_all("utility", &ids);
+    int count = query_all_everywhere("utility", &ids);
     if (count > 0) {
         metadata = calloc((size_t)count, sizeof(FileMetadata));
         names    = malloc((size_t)count * sizeof(char *));
@@ -60,7 +62,7 @@ int main(void) {
     println("BoxOS Shell v1.0 - Available Commands:");
     println("");
     println("Built-in:");
-    println("  use [tags]               Set/clear context tags");
+    println("  use [tags] [+tag] [-tag] Set, change or clear the Use Context");
     println("  clear                    Clear the screen");
     println("  exit                     Exit shell");
     println("");

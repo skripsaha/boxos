@@ -28,7 +28,7 @@ static const char *g_line = "";
 
 const ShellCommand g_commands[] = {
     {"help",  cmd_help,  "help [NAME]", "Show available commands, or what a program takes"},
-    {"use",   cmd_use,   "use [tags]", "Set/clear the Use Context"},
+    {"use",   cmd_use,   "use [tags] [+tag] [-tag]", "Set, change or clear the Use Context"},
     {"exit",  cmd_exit,  "exit",       "Exit shell (or Ctrl+Q)"},
     {"clear", cmd_clear, "clear",      "Clear screen"},
     /* Built in, and that is the whole point of it: the board failure being

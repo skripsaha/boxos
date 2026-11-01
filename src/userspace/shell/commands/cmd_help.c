@@ -21,12 +21,19 @@ static void ListCommands(void)
     println("BoxOS Shell - Available commands:");
     println("");
 
+    /* The descriptions stand in one column, two blanks past the longest
+     * usage. */
+    size_t column = 0;
+    for (int i = 0; g_commands[i].name != NULL; i++) {
+        size_t usage_len = strlen(g_commands[i].usage);
+        if (usage_len > column) column = usage_len;
+    }
+
     for (int i = 0; g_commands[i].name != NULL; i++) {
         print("  ");
         print(g_commands[i].usage);
 
-        size_t usage_len = strlen(g_commands[i].usage);
-        for (size_t pad = usage_len + 2; pad < 20; pad++)
+        for (size_t pad = strlen(g_commands[i].usage); pad < column + 2; pad++)
             print(" ");
 
         print(g_commands[i].description);

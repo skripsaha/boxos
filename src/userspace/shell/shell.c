@@ -56,10 +56,6 @@ void ShellInit(void)
         ShellDrainStaleIpc();
     }
 
-    /* The context this shell was born into — a nested shell inherits the
-     * user's `use`, because the context is the machine's, not a shell's. */
-    ShellUpdatePrompt();
-
     clear();
     println("BoxOS Shell v2.0");
     println("Type 'help' for commands, 'exit' to quit.");
@@ -73,7 +69,7 @@ void ShellInit(void)
 /* The whole context, comma-joined, into a buffer of its own size the caller
  * frees: the number of tags, 0 for none, negative when the kernel refused.
  * Asked for its size first and read again if it grew in between. */
-static int ShellContextWhole(char **out)
+int ShellContextWhole(char **out)
 {
     *out = NULL;
     for (;;) {
@@ -114,12 +110,14 @@ static size_t ShellDecimal(char *out, uint32_t n)
 
 /*
  * The prompt says what the kernel holds as the Use Context — "[code,cpp] ~ " —
- * read fresh each time rather than kept as a copy of what this shell typed, so
- * a nested shell shows the context it was born into and a context set by a
- * system program shows up too. As many whole tags as the prompt has room for
- * are shown, never one torn mid-tag, and the rest are counted: "[code,cpp +3]".
+ * read before every prompt rather than kept as a copy of what this shell
+ * typed: the context is the machine's, so whoever said it last — this shell,
+ * a nested one that has ended, a system program, a volume that came up with
+ * its memory — is what the person sees. As many whole tags as the prompt has
+ * room for are shown, never one torn mid-tag, and the rest are counted:
+ * "[code,cpp +3]".
  */
-void ShellUpdatePrompt(void)
+static void ShellUpdatePrompt(void)
 {
     char *whole = NULL;
     int   total = ShellContextWhole(&whole);
@@ -196,6 +194,7 @@ int ShellRunLine(const char *input)
 void ShellMainLoop(void)
 {
     while (g_state.running) {
+        ShellUpdatePrompt();
         print(g_state.prompt);
         io_flush();
 
