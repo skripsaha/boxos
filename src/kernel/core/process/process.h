@@ -149,9 +149,9 @@ typedef struct process_t
     int32_t score;
     uint64_t last_run_time;
     /* Processor time this process has been given, in MICROSECONDS, summed at
-     * every context switch away from it (scheduler.c) and read by
-     * system.proc.cputime, which backs std::clock(). Whole slices only: the
-     * slice in progress is not in it. */
+     * every context switch away from it (scheduler.c). Whole slices only: the
+     * slice in progress is not in it — process_cpu_time_us adds it, and is
+     * what system.proc.cputime (std::clock()) and system.proc.crew read. */
     uint64_t total_cpu_time;
     /* TSC at the moment this process was given the core. The pair above is
      * measured with the TSC and not with the scheduler tick, and that is not a
@@ -537,6 +537,11 @@ size_t process_snapshot_tags(process_t *proc, char *buffer, size_t buffer_size);
 void process_ref_inc(process_t *proc);
 void process_ref_dec(process_t *proc);
 uint32_t process_ref_count(process_t *proc);
+
+/* Processor time `proc` has been given, in microseconds: its completed slices
+ * and the one it is running now. What system.proc.cputime says of the caller
+ * and system.proc.crew of each mate. */
+uint64_t process_cpu_time_us(const process_t *proc);
 
 /* Returns true when this call made the strand runnable AND enqueued it —
  * sched_enqueue rang its core, so the caller must not ring again. */

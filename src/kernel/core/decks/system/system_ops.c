@@ -47,7 +47,6 @@
 #include "amp.h"
 #include "scheduler.h"
 #include "guide.h"   /* guide_dispatch_stats — enclosed/addressed split for perf.dump */
-#include "atomics.h"        /* rdtsc — system.proc.cputime's in-flight term */
 
 /* TSC frequency, for turning a cycle delta into microseconds. */
 extern uint64_t cpu_get_tsc_freq_khz(void);
@@ -833,32 +832,7 @@ static int SysProcCpuTime(const ManifestOp *op, Crate *crates, uint16_t crate_co
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(uint64_t)) return ERR_BUFFER_TOO_SMALL;
 
-    /* Completed slices, plus the one running right now.
-     *
-     * The in-flight term is measured from cpu_tsc_stamp, and the base matters
-     * more than the arithmetic. An earlier version used last_run_time and was
-     * wrong twice over: schedule() re-stamps it on every pass, and it SURVIVES
-     * A PARK, so the difference spanned a whole sleep and a 300 ms nap read as
-     * 300 ms of processor time. cpu_tsc_stamp exists only while the strand
-     * holds the core — set when it takes it, cleared when it leaves — so a
-     * strand that is not running contributes nothing here, and one that is
-     * gets credited to the cycle.
-     *
-     * Without this term the answer would only move at a context switch, and on
-     * a machine with a spare core a strand can run a long time without one: a
-     * 50 ms CPU-bound loop on 16 cores measured as zero. That is what this
-     * paragraph is for.
-     *
-     * The read happens on the core the caller is running on, so the two TSC
-     * values come from the same clock. */
-    uint64_t us = __atomic_load_n(&ctx->proc->total_cpu_time, __ATOMIC_RELAXED);
-    const uint64_t stamp = ctx->proc->cpu_tsc_stamp;
-    if (stamp != 0) {
-        const uint64_t khz = cpu_get_tsc_freq_khz();
-        const uint64_t now = rdtsc();
-        if (khz != 0 && now > stamp) us += ((now - stamp) * 1000ULL) / khz;
-    }
-
+    uint64_t us = process_cpu_time_us(ctx->proc);
     if (crate_write(out, ctx, &us, sizeof(us)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
@@ -1026,7 +1000,7 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
             uint32_t pid   = mate->pid;
             uint32_t gen   = mate->generation;
             uint32_t state = (uint32_t)mate->state;
-            uint64_t cpu   = mate->total_cpu_time;
+            uint64_t cpu   = process_cpu_time_us(mate);
 
             uint64_t room  = alloc_sz - used - PROC_CREW_FIXED;
             size_t   tlen  = process_snapshot_tags(mate,

@@ -28,6 +28,7 @@
 #include "brook.h"
 #include "tagfs.h"
 #include "use_context.h"    /* UseContextCabinChanged — a cabin's tags decide its verdict */
+#include "cpu_calibrate.h"  /* cpu_get_tsc_freq_khz — the slice in progress, in microseconds */
 #include "per_core.h"
 #include "amp.h"
 #include "cet_lifecycle.h"  /* Phase 2K+ per-process shadow-stack hooks */
@@ -657,6 +658,37 @@ uint32_t process_ref_count(process_t *proc)
     if (!proc)
         return 0;
     return atomic_load_u32(&proc->ref_count);
+}
+
+/* Completed slices, plus the one running right now.
+ *
+ * The in-flight term is measured from cpu_tsc_stamp, and the base matters more
+ * than the arithmetic. An earlier version used last_run_time and was wrong
+ * twice over: schedule() re-stamps it on every pass, and it SURVIVES A PARK, so
+ * the difference spanned a whole sleep and a 300 ms nap read as 300 ms of
+ * processor time. cpu_tsc_stamp exists only while the strand holds the core —
+ * set when it takes it, cleared when it leaves — so a strand that is not
+ * running contributes nothing here, and one that is gets credited to the cycle.
+ *
+ * Without this term the answer would only move at a context switch, and a
+ * strand can run a long time without one: a 50 ms CPU-bound loop on 16 cores
+ * measured as zero, and a strand alone on a core runs without one for as long
+ * as it runs. system.proc.crew read the completed slices alone, and showed such
+ * a strand at no processor at all, then at more than a core once it was
+ * switched out.
+ *
+ * The stamp is taken on the core running the strand and read on the core that
+ * asks; a read that falls behind the stamp adds nothing. */
+uint64_t process_cpu_time_us(const process_t *proc)
+{
+    uint64_t us = __atomic_load_n(&proc->total_cpu_time, __ATOMIC_RELAXED);
+    const uint64_t stamp = proc->cpu_tsc_stamp;
+    if (stamp != 0) {
+        const uint64_t khz = cpu_get_tsc_freq_khz();
+        const uint64_t now = rdtsc();
+        if (khz != 0 && now > stamp) us += ((now - stamp) * 1000ULL) / khz;
+    }
+    return us;
 }
 
 bool process_set_state(process_t *proc, process_state_t new_state)
