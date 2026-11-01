@@ -2,8 +2,8 @@
  * use — say what the person at this machine is doing, in tags.
  *
  *   use code cpp      the Use Context is now {code, cpp}: files are seen and
- *                     created inside it, programs wearing both tags pay a
- *                     third of the scheduler's Fare
+ *                     created inside it, a program wearing both tags pays a
+ *                     third of the scheduler's Fare and one wearing either half
  *   use +draft        draft is added to it
  *   use -cpp          cpp is taken out of it
  *   use +draft -cpp   both, in one word: nobody ever sees one done and not

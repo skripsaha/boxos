@@ -29,9 +29,10 @@ uint32_t g_timer_frequency = SCHEDULER_DEFAULT_TICK_HZ;
 static uint32_t g_steal_cooldown;
 
 /* What a strand pays for the time it holds a core is its Fare: the time
- * itself — or, while its cabin wears every tag of the Use Context, a third of
- * it. The person's work is given three quarters of a core it shares with one
- * outsider, the share Linux gives nice -5 over nice 0 (3121 to 1024). */
+ * itself, the less the more of the Use Context its cabin wears — a third of
+ * it for every tag of the context, half for half of them. The person's work
+ * is given three quarters of a core it shares with one outsider, the share
+ * Linux gives nice -5 over nice 0 (3121 to 1024). */
 #define SCHED_CONTEXT_FARE_SHARE 3
 
 // ---------------------------------------------------------------------------
@@ -317,10 +318,13 @@ static inline uint64_t sched_turn(void)
     return (uint64_t)cpu_get_tsc_freq_khz() * 1000u / CONFIG_SCHED_APP_TICK_HZ;
 }
 
-/* The Fare `proc` pays for holding a core `cycles` long. */
+/* The Fare `proc` pays for holding a core `cycles` long: the cycles over its
+ * weight, one and as much more as its Fit — up to SCHED_CONTEXT_FARE_SHARE. */
 static inline uint64_t sched_fare_for(const process_t *proc, uint64_t cycles)
 {
-    return UseContextMatches(proc) ? cycles / SCHED_CONTEXT_FARE_SHARE : cycles;
+    uint64_t fit = UseContextFit(proc);
+    return cycles * USE_CONTEXT_FIT_FULL /
+           (USE_CONTEXT_FIT_FULL + (SCHED_CONTEXT_FARE_SHARE - 1) * fit);
 }
 
 /*

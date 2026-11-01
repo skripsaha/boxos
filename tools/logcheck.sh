@@ -5066,8 +5066,9 @@ run_runnable() {
 # fare — the scheduler's Fare, judged by a program (src/userspace/utils/
 # faretest.c): two children spin without entering the kernel, one wearing the
 # Use Context; with none the two divide their core evenly, with it said before
-# they start or while they spin the one wearing it is given three quarters, and
-# a sleep of the program judging them ends on time. On one core and on two —
+# they start or while they spin the one wearing it is given three quarters —
+# two thirds when it wears one of the context's two tags — and a sleep of the
+# program judging them ends on time. On one core and on two —
 # two being one K-Core and one application core, where both children share the
 # only core there is to share: faretest saying SKIP there is a failure, since
 # the shares it skips are the whole point.

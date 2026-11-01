@@ -3,10 +3,10 @@
 // The idiomatic C++ face of box/use.h. The Use Context is ONE per machine, kept
 // by the kernel and spoken for by the shell (`use code cpp`) or a program with
 // system authority; every station of the system reads it — the scheduler gives
-// programs wearing every context tag three quarters of a core they share with
-// one outsider, TagFS narrows queries to it and stamps created files with it
-// (box::tagfs::query / create, with the _everywhere spellings for the whole
-// volume).
+// a program the more of a core it shares the more of the context's tags it
+// wears (three quarters against one outsider for all of them), TagFS narrows
+// queries to it and stamps created files with it (box::tagfs::query / create,
+// with the _everywhere spellings for the whole volume).
 //
 //   box::use::set("code,cpp")            — say what the user is doing (system authority)
 //   box::use::set({"code", "cpp"})       — the same, from a list

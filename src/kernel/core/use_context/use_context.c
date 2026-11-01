@@ -34,18 +34,23 @@ struct UseList {
 /*
  * What a verdict is counted against: the context's numbers at one moment,
  * those under 64 as a mask and the rest sorted, so a cabin's tag is found by
- * halves. `whole` is false with no context, or with a tag the volume has no
- * number for — nothing can wear a tag that does not exist. Immutable; the
- * newest one is kept for the next asker while the context's shape stands.
+ * halves, and how many tags the context has. A tag the volume has no number
+ * for is in that count and in neither set — nothing can wear a tag that does
+ * not exist — and the tags that do exist are worn all the same. Immutable;
+ * the newest one is kept for the next asker while the context's shape stands.
  */
 typedef struct UseSnapshot {
     uint32_t refs;
     uint64_t shape;
-    bool     whole;
+    uint32_t total;
     uint64_t bits;
     uint32_t over_count;
     uint32_t over[];
 } UseSnapshot;
+
+/* A verdict word: the epoch it was counted at, over the Fit it found. */
+#define USE_FIT_BITS 9u
+#define USE_FIT_MASK ((1u << USE_FIT_BITS) - 1u)
 
 /*
  * The context as it stands, under `lock`: a leaf taken for pointer stores and
@@ -574,18 +579,14 @@ static UseSnapshot *UseSnapshotBuild(const UseList *l, uint64_t shape)
     if (!s) return NULL;
     s->refs       = 1;
     s->shape      = shape;
-    s->whole      = room > 0;
+    s->total      = room;
     s->bits       = 0;
     s->over_count = 0;
-    for (uint32_t i = 0; i < room && s->whole; i++) {
+    for (uint32_t i = 0; i < room; i++) {
         uint32_t id = __atomic_load_n(&l->ids[i], __ATOMIC_ACQUIRE);
-        if (id == TAGFS_INVALID_TAG_ID) s->whole = false;
-        else if (id < 64)               s->bits |= (uint64_t)1 << id;
-        else                            s->over[s->over_count++] = id;
-    }
-    if (!s->whole) {
-        s->over_count = 0;
-        return s;
+        if (id == TAGFS_INVALID_TAG_ID) continue;
+        if (id < 64) s->bits |= (uint64_t)1 << id;
+        else         s->over[s->over_count++] = id;
     }
     KSort(s->over, s->over_count, sizeof(uint32_t), UseIdOrder, NULL);
     uint32_t distinct = 0;
@@ -641,37 +642,36 @@ static bool UseSnapshotHas(const UseSnapshot *s, uint32_t id)
 }
 
 /*
- * Whether `cabin` wears every tag of the snapshot. The cabin's tags are read
- * without its lock: every change to them raises the epoch after it is made,
- * so a count taken across a change is labelled with an epoch already stale and
- * is counted again. A cabin's numbers past 63 are distinct, so the context's
- * are all worn exactly when each of them is found once — every worn number
- * looked up by halves in the snapshot, no sort and no copy of the cabin's.
+ * How much of the snapshot's context `cabin` wears: its Fit, the share of the
+ * context's tags among the cabin's, out of USE_CONTEXT_FIT_FULL. The cabin's
+ * tags are read without its lock: every change to them raises the epoch after
+ * it is made, so a count taken across a change is labelled with an epoch
+ * already stale and is counted again. A cabin's numbers past 63 are distinct,
+ * so each one found in the snapshot is one more of the context's tags worn —
+ * every worn number looked up by halves, no sort and no copy of the cabin's.
  */
-static bool UseSnapshotWornBy(const UseSnapshot *s, const cabin_t *cabin)
+static uint32_t UseSnapshotFit(const UseSnapshot *s, const cabin_t *cabin)
 {
-    if (!s->whole) return false;
-    uint64_t worn = __atomic_load_n(&cabin->tag_bits, __ATOMIC_ACQUIRE);
-    if ((worn & s->bits) != s->bits) return false;
-    if (s->over_count == 0) return true;
-
-    uint32_t        n   = __atomic_load_n(&cabin->tag_overflow_count, __ATOMIC_ACQUIRE);
-    const uint32_t *ids = __atomic_load_n(&cabin->tag_overflow_ids, __ATOMIC_ACQUIRE);
-    if (!ids || n < s->over_count) return false;
-    uint32_t hits = 0;
-    for (uint32_t i = 0; i < n; i++)
-        if (UseSnapshotHas(s, __atomic_load_n(&ids[i], __ATOMIC_RELAXED))) hits++;
-    return hits == s->over_count;
+    if (s->total == 0) return 0;
+    uint64_t worn  = __atomic_load_n(&cabin->tag_bits, __ATOMIC_ACQUIRE);
+    uint64_t count = CountSetBits(worn & s->bits);
+    if (s->over_count != 0) {
+        uint32_t        n   = __atomic_load_n(&cabin->tag_overflow_count, __ATOMIC_ACQUIRE);
+        const uint32_t *ids = __atomic_load_n(&cabin->tag_overflow_ids, __ATOMIC_ACQUIRE);
+        for (uint32_t i = 0; ids && i < n; i++)
+            if (UseSnapshotHas(s, __atomic_load_n(&ids[i], __ATOMIC_RELAXED))) count++;
+    }
+    return (uint32_t)(count * USE_CONTEXT_FIT_FULL / s->total);
 }
 
-bool UseContextMatches(const struct process_t *proc)
+uint32_t UseContextFit(const struct process_t *proc)
 {
-    if (!proc || !proc->cabin) return false;
+    if (!proc || !proc->cabin) return 0;
     uint64_t word = __atomic_load_n(&proc->cabin->use_verdict, __ATOMIC_ACQUIRE);
-    if ((word >> 1) != __atomic_load_n(&g_use_epoch, __ATOMIC_ACQUIRE) &&
+    if ((word >> USE_FIT_BITS) != __atomic_load_n(&g_use_epoch, __ATOMIC_ACQUIRE) &&
         !__atomic_load_n(&g_use_owed, __ATOMIC_RELAXED))
         __atomic_store_n(&g_use_owed, 1u, __ATOMIC_RELEASE);
-    return (word & 1u) != 0;
+    return (uint32_t)(word & USE_FIT_MASK);
 }
 
 void UseContextVerdictRefresh(struct process_t *proc)
@@ -681,19 +681,19 @@ void UseContextVerdictRefresh(struct process_t *proc)
 
     uint64_t epoch = __atomic_load_n(&g_use_epoch, __ATOMIC_ACQUIRE);
     uint64_t word  = __atomic_load_n(&cabin->use_verdict, __ATOMIC_ACQUIRE);
-    if ((word >> 1) >= epoch) return;
+    if ((word >> USE_FIT_BITS) >= epoch) return;
 
     UseSnapshot *s = UseSnapshotHold();
     if (!s) {
         __atomic_store_n(&g_use_owed, 1u, __ATOMIC_RELEASE);
         return;
     }
-    uint64_t verdict = (epoch << 1) | (UseSnapshotWornBy(s, cabin) ? 1u : 0u);
+    uint64_t verdict = (epoch << USE_FIT_BITS) | UseSnapshotFit(s, cabin);
     UseSnapshotDrop(s);
 
     /* Never over a newer word: a recount that began later may have landed
      * first. */
-    while ((word >> 1) < epoch &&
+    while ((word >> USE_FIT_BITS) < epoch &&
            !__atomic_compare_exchange_n(&cabin->use_verdict, &word, verdict, false,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         ;

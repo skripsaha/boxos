@@ -10,6 +10,8 @@
  *   with the context faretest:hot — said before the children start, and said
  *   while they spin — hot is given three quarters of it (it pays a third of
  *   the Fare); cleared again, the two are even;
+ *   with the context faretest:hot and faretest:other, of which hot wears one,
+ *   hot fits it half, pays half the Fare and is given two thirds;
  *   and every sleep of this program ends when it was asked to, whatever the
  *   children do.
  *
@@ -35,6 +37,7 @@
 
 #define FARE_TAG        "faretest"
 #define FARE_HOT        "faretest:hot"
+#define FARE_OTHER      "faretest:other"   /* worn by neither child */
 #define FARE_WINDOW_MS  2000u
 #define FARE_SETTLE_MS  300u
 #define FARE_SLACK      5u      /* percentage points a share may stray */
@@ -174,6 +177,12 @@ static int Run(void)
     (void)use_set(FARE_HOT, NULL);
     if (Pair(&hot, &cold) < 0) return -1;
     Judge("the context said before the children started", &hot, &cold, 75);
+    Stop(&hot);
+    Stop(&cold);
+
+    (void)use_set(FARE_HOT "," FARE_OTHER, NULL);
+    if (Pair(&hot, &cold) < 0) return -1;
+    Judge("hot wearing one of the context's two tags", &hot, &cold, 67);
     Stop(&hot);
     Stop(&cold);
 

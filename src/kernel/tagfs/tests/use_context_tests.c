@@ -19,6 +19,7 @@
 static uint64_t    s_inside[256];
 static uint64_t    s_everywhere[256];
 static char        s_tag_text[512];
+static char        s_pair_text[512 + 32];
 static TagSpelling s_spelled[8];
 
 /* The held context's tags, spelled into s_spelled for a query. */
@@ -43,7 +44,7 @@ static void use_snapshot_restore(UseList* saved)
     UseListDrop(saved);
 }
 
-/* A strand that wears exactly one tag, for UseContextMatches. */
+/* A strand that wears exactly one tag, for UseContextFit. */
 static process_t* use_test_strand(uint32_t tag_id, cabin_t** out_cabin)
 {
     cabin_t*   cabin = kmalloc(sizeof(cabin_t));
@@ -83,11 +84,11 @@ static void use_test_strand_free(process_t* proc, cabin_t* cabin)
 /* The scheduler's answer for a strand whose cabin was just changed by hand:
  * the change said, the verdict recounted as the strand's entry would, and the
  * question asked. */
-static bool use_verdict_after_change(process_t* proc)
+static uint32_t use_fit_after_change(process_t* proc)
 {
     UseContextCabinChanged();
     UseContextVerdictRefresh(proc);
-    return UseContextMatches(proc);
+    return UseContextFit(proc);
 }
 
 /* Spelling: blanks dropped, "key:" is "key", a repeat kept once where it was
@@ -229,8 +230,8 @@ static TestResult test_use_context_walls(void)
     proc = use_test_strand(0, &cabin);
     TEST_ASSERT(proc != NULL, "no memory for a stand-in strand");
     cabin->tag_bits = ~(uint64_t)0;
-    TEST_ASSERT(!use_verdict_after_change(proc),
-                "a tag without a number on this volume puts nobody in the tier");
+    TEST_ASSERT_EQ(use_fit_after_change(proc), 0,
+                   "a tag without a number on this volume is worn by nobody");
 out:
     if (proc)
         use_test_strand_free(proc, cabin);
@@ -239,8 +240,10 @@ out:
     return verdict;
 }
 
-/* Narrowing: a context of a tag some file wears shows only files wearing it,
- * and a strand wearing it is in the tier while one without is not. */
+/* Narrowing: a context of a tag some file wears shows only files wearing it;
+ * a strand wearing it fits the context whole and one without not at all, and
+ * under a context of that tag and one no file wears, the strand wearing the
+ * first fits it half — the tag nobody wears is still half of what was said. */
 static TestResult test_use_context_narrows(void)
 {
     TestResult    verdict   = TEST_PASS;
@@ -291,17 +294,25 @@ static TestResult test_use_context_narrows(void)
 
     proc = use_test_strand(tag_id, &cabin);
     TEST_ASSERT(proc != NULL, "no memory for a stand-in strand");
-    bool wearing = use_verdict_after_change(proc);
+    uint32_t wearing = use_fit_after_change(proc);
     cabin->tag_bits           = 0;
     cabin->tag_overflow_count = 0;
-    bool bare = use_verdict_after_change(proc);
+    uint32_t bare = use_fit_after_change(proc);
     UseContextClear(NULL);
     if (tag_id < 64) cabin->tag_bits = (uint64_t)1 << tag_id;
     else             cabin->tag_overflow_count = 1;
-    bool after_clear = use_verdict_after_change(proc);
-    TEST_ASSERT(wearing, "a strand wearing the context's tag is in the tier");
-    TEST_ASSERT(!bare, "a strand without it is not");
-    TEST_ASSERT(!after_clear, "with no context there is no tier");
+    uint32_t after_clear = use_fit_after_change(proc);
+    TEST_ASSERT_EQ(wearing, USE_CONTEXT_FIT_FULL, "a strand wearing the context's one tag fits it whole");
+    TEST_ASSERT_EQ(bare, 0, "a strand without it does not fit at all");
+    TEST_ASSERT_EQ(after_clear, 0, "with no context nothing fits");
+
+    static const char nobodys[] = ",use:fit:nobody";
+    memcpy(s_pair_text, s_tag_text, tag_len);
+    memcpy(s_pair_text + tag_len, nobodys, sizeof(nobodys) - 1);
+    TEST_ASSERT_OK(UseContextSet(s_pair_text, tag_len + sizeof(nobodys) - 1, NULL),
+                   "a context of the tag and one no file wears");
+    TEST_ASSERT_EQ(use_fit_after_change(proc), USE_CONTEXT_FIT_FULL / 2,
+                   "a strand wearing one of the context's two tags fits it half");
 out:
     if (proc)
         use_test_strand_free(proc, cabin);

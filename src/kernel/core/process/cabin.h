@@ -61,9 +61,9 @@ typedef struct cabin_t
     TagOverflowRetired *tag_overflow_retired;  /* old buffers, freed at cabin_destroy */
 
     /* The Use Context's verdict on this cabin, one word: the epoch it was
-     * counted at << 1 | whether the cabin wears every context tag. The
-     * scheduler reads it and compares one epoch (use_context.h); 0 is stale
-     * from birth. */
+     * counted at, over the cabin's Fit — how much of the context it wears.
+     * The scheduler reads it and compares one epoch (use_context.h); 0 is
+     * stale from birth. */
     uint64_t use_verdict;
 
     /* MemTag held-tag set, level 1 — see the block above MemCabinGrant in

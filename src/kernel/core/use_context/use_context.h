@@ -14,11 +14,11 @@ struct process_t;
  * cpp`) or by a program with system authority. It is not a property of a
  * process or of a cabin: it is the ship's declared condition, and every station
  * reads it and adjusts itself. Two stations do today. The scheduler charges a
- * strand whose cabin wears every context tag a third of the Fare others pay
- * for the same time (scheduler.c). TagFS narrows a query to the context and
- * stamps a created file with it, unless the caller asked for the whole
- * volume. A later station asks the same question through the same door and
- * needs nothing added here.
+ * strand the less Fare the more of the context's tags its cabin wears — a
+ * third of it for all of them (scheduler.c). TagFS narrows a query to the
+ * context and stamps a created file with it, unless the caller asked for the
+ * whole volume. A later station asks the same question through the same door
+ * and needs nothing added here.
  *
  * TAGS, NOT NUMBERS. A tag is a name, `key` or `key:value`. Its number is a
  * page in one particular book, and this machine keeps three books: the mounted
@@ -126,12 +126,15 @@ error_t UseContextChange(const char *add, size_t add_len, const char *drop, size
                          UseWord *word, bool *changed);
 
 /*
- * The scheduler's question: does this strand's cabin wear EVERY tag of the
- * context? One compare, no lock, nothing of the context read: the cabin's
- * verdict word, previous or current. A stale word is answered with its
- * previous verdict, and the recount it owes is asked for.
+ * The scheduler's question: how much of the context does this strand's cabin
+ * wear? Its Fit — the share of the context's tags the cabin wears, out of
+ * USE_CONTEXT_FIT_FULL: every one of them FULL, half of them half, none 0,
+ * and 0 with no context. One load, no lock, nothing of the context read: the
+ * cabin's verdict word, previous or current. A stale word is answered with
+ * its previous Fit, and the recount it owes is asked for.
  */
-bool    UseContextMatches(const struct process_t *proc);
+#define USE_CONTEXT_FIT_FULL 256u
+uint32_t UseContextFit(const struct process_t *proc);
 
 /* The verdict of this strand's cabin made current, counted outside any lock
  * against a snapshot of the context — at the strand's entry into the kernel. */
