@@ -65,7 +65,7 @@ CONDITIONS = ["o", "no", "b", "c", "nae", "ae", "nb", "nc", "e", "z", "ne", "nz"
               "be", "na", "a", "nbe", "s", "ns", "p", "pe", "np", "po", "l", "nge",
               "ge", "nl", "le", "ng", "g", "nle"]
 ALONE = ["ret", "nop", "int3", "leave", "cqo", "cdq", "cwd", "cdqe", "cwde", "cbw",
-         "pushfq", "popfq", "cld", "std", "endbr64", "pause", "ud2", "clc", "stc", "cmc",
+         "pushfq", "popfq", "pushf", "popf", "cld", "std", "endbr64", "pause", "ud2", "clc", "stc", "cmc",
          "cpuid", "rdtsc", "rdtscp", "lfence", "mfence", "sfence", "lahf", "sahf", "xgetbv"]
 STRINGS = {"movs": "rep", "stos": "rep", "lods": "rep", "cmps": "repe", "scas": "repe"}
 LOCKABLE = ALU[:7] + ["inc", "dec", "not", "neg"]
