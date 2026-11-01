@@ -271,7 +271,7 @@ error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out)
         out->blocks        = ranges ? s_blocks : 0;
         EscheatReachTo(InkedGen());     /* before the ask is counted: a walk that sees the ask sees its reach */
         __atomic_add_fetch(&s_asked, 1u, __ATOMIC_ACQ_REL);
-        BinderDemanded();
+        BinderTallyAsked();
         EngrossAsked();
         kprintf("[TagFS] Escheat asked by a cabin wearing system or god: %llu rotten range(s) of FILES, %llu "
                 "file(s) declared lost and %llu held block(s) let go by the next Tally, written whole, which lays "

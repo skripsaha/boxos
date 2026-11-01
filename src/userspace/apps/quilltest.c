@@ -702,11 +702,12 @@ static const QuillCase g_cases[] = {
       "DESTRUCTIVE: every file called NAME that does not wear system or boot is deleted first, "
       "and the anchors make it durable; then NAME, and the churn it started, still writing",
       false },
-    { "crowd", "N [FROM]", 2, 1, QuillCrowd,
+    { "crowd", "N [FROM] [unanchored]", 3, 2, QuillCrowd,
       "for the power-cut stand: N files, each wearing a tag no other file wears, so each adds "
       "one record to the tag registry and one row to the file table",
-      "N files crowdNNNNNNNNNN numbered from FROM (0 when it is not given), anchored; a file "
-      "already called one of those names is deleted first and made again", false },
+      "N files crowdNNNNNNNNNN numbered from FROM (0 when it is not given), anchored unless "
+      "unanchored is said; a file already called one of those names is deleted first and made "
+      "again", false },
     { "beside", "KIND COUNT MIB", 3, 0, QuillBeside,
       "are a write of MIB MiB and its anchor answered beside COUNT cabins of KIND — flood, "
       "calls handed in without waiting, or hog, a core computed on — and do the floods go on",

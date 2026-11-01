@@ -85,7 +85,10 @@ static const char* BinderOwnMayNot(void)
         return s_not_up;
     if (BinderNoTallies())
         return BinderNoTallies();
-    if (SettledCycles() == 0)
+    /* This mount's own count: the book stands and is weighed (tagfs.c
+     * MountReadBook) before the Settle's count is reset (SettleMountReset), so
+     * SettledCycles there is the count of the mount before. */
+    if (g_binder.stitches == 0)
         return s_unsettled;
     if (!RibbonQuireSame(&c->quire, &c->ended))
         return s_on_edge;
@@ -551,6 +554,13 @@ void BinderWeigh(void)
     __atomic_store_n(&g_binder.engross, owed && (why == NULL || why == s_loose) ? 1u : 0u, __ATOMIC_RELEASE);
     if (owed && why == s_loose)
         EngrossAsked();
+    /* An act asked of a Tally has no waiter to ask again, as a write short of
+     * room has (BinderRoomAsk): held back by what the next stitch takes away,
+     * its holder asks that stitch — a stitch the ask's cycle laid may end on
+     * its Quire's last sector, and nobody writing, no cycle comes. */
+    if ((why == s_unsettled || why == s_on_edge) && __atomic_load_n(&g_binder.demanded, __ATOMIC_ACQUIRE) &&
+        !__atomic_load_n(&s_under_way, __ATOMIC_ACQUIRE) && EscheatOwed())
+        SettleDemand(SETTLE_DEMAND_ROOM);
 }
 
 bool BinderEngrossOwed(void)
@@ -666,6 +676,15 @@ bool BinderHoldsGround(void)
 void BinderDemanded(void)
 {
     __atomic_store_n(&g_binder.demanded, 1u, __ATOMIC_RELEASE);
+}
+
+void BinderTallyAsked(void)
+{
+    BinderDemanded();
+    if (BinderOwed())
+        SettleKnock();
+    else
+        SettleDemand(SETTLE_DEMAND_ROOM);
 }
 
 void BinderStopped(error_t rc)
@@ -800,6 +819,7 @@ void BinderStitchSettled(uint64_t seq, uint64_t useful, uint64_t fid_most, error
                 "does (ERR_TAGFS_NO_SPACE said then)\n", (unsigned long long)seq);
     }
     g_binder.useful += useful;
+    g_binder.stitches++;
     if (fid_most + 1u > g_binder.laid_fid)
         g_binder.laid_fid = fid_most + 1u;
     BinderWeigh();

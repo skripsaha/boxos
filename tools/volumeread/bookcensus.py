@@ -315,8 +315,8 @@ class BookCensus:
         for fid in sorted(m.files):
             self.Named("file", self.Label(fid), [(s, n, fid, None) for s, n in m.files[fid].Ground()])
         # What lies past the volume's last block is no one's to hold: a run a
-        # record named there is cut at the volume's end (book_ground.c
-        # BookGroundFallow).
+        # record named there is cut at the volume's end (ribbon_transcribe.c
+        # RibbonStageFallow).
         owned = RunsNormal([r for c in self.claims for r in c.runs] + [(self.g.data_end + 1, 1 << 64)])
         self.Claim("fallow", "the ground the ribbon let go (M-1)", RunsSubtract(m.fallow, owned))
 
