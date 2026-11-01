@@ -754,7 +754,7 @@ UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase assemble \
              me info say reboot bye defrag fsck ipc_test memtag hw \
              timezone logsave lastsaid rgbtest usetest luggagetest headcount \
-             draft playtime lavalamp finish taskcenter loupe sift
+             draft playtime lavalamp finish taskcenter hexer stringview
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1355,8 +1355,8 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/help.elf    "utility" \
 	$(UTILS_DIR)/create.elf  "utility,storage" \
 	$(UTILS_DIR)/show.elf    "utility,storage" \
-	$(UTILS_DIR)/loupe.elf   "utility,storage" \
-	$(UTILS_DIR)/sift.elf    "utility,storage" \
+	$(UTILS_DIR)/hexer.elf   "utility,storage" \
+	$(UTILS_DIR)/stringview.elf "utility,storage" \
 	$(UTILS_DIR)/files.elf   "utility,storage" \
 	$(UTILS_DIR)/tag.elf     "utility,storage" \
 	$(UTILS_DIR)/untag.elf   "utility,storage" \

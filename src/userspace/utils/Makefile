@@ -69,7 +69,7 @@ ASSEMBLE_ENTRY_BLOB = $(ASSEMBLE_DIR)/entry_blob.o
 UTILS = help create show files tag untag name trash erase assemble \
         me info say reboot bye defrag fsck ipc_test memtag hw \
         timezone logsave lastsaid rgbtest usetest luggagetest rollcall handset headcount \
-        draft playtime lavalamp finish taskcenter loupe sift
+        draft playtime lavalamp finish taskcenter hexer stringview
 
 .PHONY: all clean
 
@@ -133,6 +133,19 @@ timezone.elf: $(BOXLIB_START) timezone.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.
 
 taskcenter.elf: $(BOXLIB_START) taskcenter.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) taskcenter.o $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+# hexer and stringview are C++ in parts, as draft is in C: each names its own
+# objects, links libboxcxx.a before libbox.a, and is stripped like taskcenter.
+HEXER_OBJS      = hexer.o hexer_bytes.o hexer_paint.o hexer_list.o
+STRINGVIEW_OBJS = stringview.o stringview_sift.o stringview_paint.o
+
+hexer.elf: $(BOXLIB_START) $(HEXER_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(HEXER_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+stringview.elf: $(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.
