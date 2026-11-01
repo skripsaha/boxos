@@ -501,15 +501,21 @@ static int QuillCrowdClear(const char *name, uint32_t *deleted, file_id_t *other
  * registry, flushed as the file is made (tagfs.c, "The name is a tag"), and
  * one row to the file table, which the anchor after the last one writes. A
  * name an earlier crowd made is made again, its old file deleted first: that
- * spends a file id and adds no record, and the verdict counts those apart. */
+ * spends a file id and adds no record, and the verdict counts those apart.
+ * `unanchored` takes no anchor after them: the changes are the cadence's to
+ * settle, so the boot's first anchor — the one a SETTLECUT kernel watches — is
+ * one a later case takes (logcheck_bind.sh, book_bindcut second). */
 QuillVerdict QuillCrowd(const char *const *args)
 {
     uint32_t count = 0, from = 0;
+    bool     unanchored = args[1] && args[2] && strcmp(args[2], "unanchored") == 0;
     if (!QuillNumber(args[0], &count) || count == 0 ||
-        (args[1] && !QuillNumber(args[1], &from)) || count - 1 > UINT32_MAX - from) {
-        printf("[QUILL] crowd: FAIL — N is a count above 0 and FROM a number, FROM + N - 1 at "
-               "most %u; '%s' and '%s' are not (0 files made)\n", UINT32_MAX, args[0],
-               args[1] ? args[1] : "0");
+        (args[1] && !QuillNumber(args[1], &from)) || count - 1 > UINT32_MAX - from ||
+        (args[1] && args[2] && !unanchored)) {
+        printf("[QUILL] crowd: FAIL — N is a count above 0, FROM a number, FROM + N - 1 at "
+               "most %u, and the word after FROM 'unanchored' or none; '%s', '%s' and '%s' are "
+               "not (0 files made)\n", UINT32_MAX, args[0], args[1] ? args[1] : "0",
+               args[1] && args[2] ? args[2] : "");
         return QUILL_FAIL;
     }
 
@@ -525,15 +531,16 @@ QuillVerdict QuillCrowd(const char *const *args)
         int crc = QuillCrowdClear(name, &deleted, &other);
         int64_t fid = crc == 0 ? create_everywhere(name, NULL) : 0;
         if (fid <= 0) {
-            int arc = anchor(0);
+            int arc = unanchored ? 0 : anchor(0);
+            const char *how = unanchored ? "left unanchored, anchors asked:" : "anchor answered";
             if (crc == 1)
                 printf("[QUILL] crowd: FAIL — at index %u of %u, %s: fid %lu wears its tag under "
                        "another name, so the tag would not be the new file's own; %u made before "
-                       "it (anchor %d)\n", i, count, name, other, i, arc);
+                       "it (%s %d)\n", i, count, name, other, i, how, arc);
             else
                 printf("[QUILL] crowd: FAIL — at index %u of %u, %s could not be made (%s "
-                       "answered %d); %u made before it (anchor %d)\n", i, count, name,
-                       crc ? "clearing its name" : "create", crc ? crc : (int)fid, i, arc);
+                       "answered %d); %u made before it (%s %d)\n", i, count, name,
+                       crc ? "clearing its name" : "create", crc ? crc : (int)fid, i, how, arc);
             return QUILL_FAIL;
         }
         again += deleted > 0;
@@ -546,7 +553,7 @@ QuillVerdict QuillCrowd(const char *const *args)
             printf("[QUILL] crowd: %u of %u made, the last %s fid=%lu\n", i + 1, count, name,
                    last_fid);
     }
-    int arc = anchor(0);
+    int arc = unanchored ? 0 : anchor(0);
     time_uptime_ms(&t1);
     if (arc != 0) {
         printf("[QUILL] crowd: FAIL — %u files %s..%s were made (fids %lu..%lu) and the anchor "
@@ -555,7 +562,7 @@ QuillVerdict QuillCrowd(const char *const *args)
     }
     printf("[QUILL] crowd: PASS — made %u files %s..%s, fids %lu..%lu, each wearing a tag no other "
            "file wears (its name); %u of the names made again over a file of their own; "
-           "anchored, %llu ms in all\n", count, first, name, first_fid, last_fid, again,
-           (unsigned long long)(t1 - t0));
+           "%s, %llu ms in all\n", count, first, name, first_fid, last_fid, again,
+           unanchored ? "left unanchored" : "anchored", (unsigned long long)(t1 - t0));
     return QUILL_PASS;
 }

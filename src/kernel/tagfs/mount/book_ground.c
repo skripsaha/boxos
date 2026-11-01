@@ -183,18 +183,13 @@ static error_t BookGroundOlder(const char** what)
 }
 
 /* The ground the ribbon let go, fallow (M-1): neither a file's nor free —
- * what of it no other owner names is the census's to cut (GroundCensusBook);
- * what of it lies past the volume counts in the reach alone. */
+ * what of it no other owner names is the census's to cut (GroundCensusBook).
+ * It lies inside the volume: what a record named past it the stage counted in
+ * the reach alone (ribbon_transcribe.c RibbonStageFallow). */
 static void BookGroundFallow(void)
 {
-    for (uint64_t i = 0; i < g_book.nfallow; i++) {
-        uint64_t start = g_book.fallow[i].start, end = start + g_book.fallow[i].count;
-        GroundCensusNamed(start, g_book.fallow[i].count);
-        if (end > g_book.data_end + 1u)
-            end = g_book.data_end + 1u;
-        if (start < end)
-            BookClaim(GROUND_FALLOW, start, end - start, 0);
-    }
+    for (uint64_t i = 0; i < g_book.nfallow; i++)
+        BookClaim(GROUND_FALLOW, g_book.fallow[i].start, g_book.fallow[i].count, 0);
 }
 
 /* A run of the print (MirrorRuns): a hole, or DATA from `start`, `blocks`

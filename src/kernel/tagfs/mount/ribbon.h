@@ -351,8 +351,9 @@ typedef struct {
     uint32_t          nfiles, capfiles;
     RibbonCoin*       coins;
     uint32_t          ncoins, capcoins;
-    Strip*            fallow;
+    Strip*            fallow;     /* inside the volume */
     uint64_t          nfallow, capfallow;
+    uint64_t          reach;      /* past the farthest block the ground it let go names, as a record names it */
     RibbonDigest*     digests;
     uint64_t          ndigests, capdigests;
     RibbonHigh*       high;       /* the high bits of the flags its records leave, 0 kept too */

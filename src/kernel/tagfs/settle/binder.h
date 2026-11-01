@@ -122,6 +122,16 @@ void        BinderStitchSettled(uint64_t seq, uint64_t useful, uint64_t fid_most
  * held. From any context. */
 void        BinderDemanded(void);
 
+/* A Tally asked for an act only a Tally carries out (Escheat), which nobody
+ * waits on to ask again: demanded, and the committer woken to begin it — or,
+ * where none is owed as the Settle's holder published it, the cycle asked
+ * whose stitch it weighs again on its own state (BinderWeigh): none may be
+ * begun before a stitch of this mount settles or past a stitch that ends on
+ * its Quire's last sector, and a refused Tally is tried again once a cycle
+ * more settles. A demand alone woke no one, and with nobody writing no cycle
+ * came: the act was asked and never laid. From any core, no TagFS lock held. */
+void        BinderTallyAsked(void);
+
 /* A Quire given the ribbon, in its order (ribbon.c): the ribbon's ground the
  * slots hold from their `at` on. By the Settle's holder, or the mount. */
 void        BinderRibbonGiven(const RibbonQuire* q);
@@ -509,6 +519,7 @@ typedef struct {
     uint64_t       seen_tag;
     uint64_t       seen_bookmark;
     uint64_t       laid_fid;    /* past the highest file id a stitch of this mount named */
+    uint64_t       stitches;    /* stitches of this mount settled (BinderStitchSettled) */
     uint64_t       useful;      /* the ribbon's useful bytes past the newest slot's `at` */
     uint64_t       tally_blocks;/* the last Tally's whole book — every node it names, laid or kept — one copy */
     uint64_t       cost_known;  /* the next Tally's cost as last reckoned, bytes: no more than it is while no key

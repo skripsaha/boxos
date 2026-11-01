@@ -3,6 +3,7 @@
 #include "../settle/binder.h"
 #include "../mount/book_mount.h"
 #include "../mount/away.h"
+#include "../mount/tally_read.h"
 #include "boardroom.h"
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -168,6 +169,47 @@ bool StandBinderGleaned(void)
         BinderStand(&said);
     }
     return rc == OK && !said.demanded;
+}
+
+#define STAND_BINDER_MANY  140u       /* files enough for FILES to take two leaves and more */
+
+/* A leaf of FILES between two others rotten in both its copies, and the
+ * volume mounted again on it writing nothing: *files the files it held
+ * before. A range that rots where an older slot still holds it in a node of
+ * its own is read back from that slot's Tally and its ribbon (Facsimile,
+ * mount/facsimile.c) and rots no more: past the Tallies Glean asks for, which
+ * lay the nodes of a Quire it gleans anew, a Tally more for every other slot
+ * of the ring, nothing changed between, names the leaves as they lie — every
+ * slot then holds the range in the one node. */
+TestResult StandBinderRot(StandBinder* b, uint64_t* files)
+{
+    TestResult verdict = TEST_PASS;
+    TallyPlace leaf;
+    char       name[64];
+    uint64_t   fid   = 0;
+    bool       found = false;
+
+    for (uint32_t i = 0; i < STAND_BINDER_MANY; i++) {
+        ksnprintf(name, sizeof(name), "bind-rot-%04u-of-a-name-long-enough.txt", i);
+        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &fid), 0, "a file is made");
+    }
+    TEST_ASSERT_OK(TagFSSettle(), "the files settled");
+    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written");
+    TEST_ASSERT(StandBinderGleaned(), "and the Tallies Glean asks for after it");
+    TEST_ASSERT_OK(StandBinderTallies(g_book.frame.spine_slots - 1u),
+                   "a Tally more for every other slot, each naming the leaves as they lie");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    *files = g_book.files;
+    for (uint32_t i = 1; !found && TallyStandNodeWhere(TALLY_FILES, i, &leaf); i++)
+        found = leaf.level == 0 && leaf.has_lo && leaf.has_hi;
+    TEST_ASSERT(found && leaf.ptr.copies == 2, "a leaf of FILES between two others, two copies");
+    TEST_ASSERT(StandBinderKeep(b, leaf.ptr.block[0]), "kept");
+    memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
+    TEST_ASSERT(StandBinderWrite(b, leaf.ptr.block[0], g_test_output) &&
+                StandBinderWrite(b, leaf.ptr.block[1], g_test_output), "both its copies written over with zeros");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+out:
+    return verdict;
 }
 
 #endif /* CONFIG_VOLUME_TESTS */

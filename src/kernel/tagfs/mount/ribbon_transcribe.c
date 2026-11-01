@@ -1,6 +1,7 @@
 #include "ribbon.h"
 #include "errata.h"
 #include "book_mount.h"
+#include "ground_census.h"
 #include "../file_map/file_map.h"
 #include "../integrity/gloss.h"
 #include "../tag_registry/tag_registry.h"
@@ -326,9 +327,24 @@ error_t RibbonStagePut(RibbonStage* st, uint64_t fid, FileRecord* rec)
 }
 
 /* DATA ground the stitch lets go, in Strips a u32 counts; `once` keeps a run
- * the stitch already let go from being let go twice. */
+ * the stitch already let go from being let go twice. Only what lies inside the
+ * volume is laid, as the census claims it (book_ground.c BookGroundFallow,
+ * bookcensus.py Claim); the run as the record names it goes to the stage's
+ * reach, which the census counts once the stage is laid, so ground past the
+ * far Deed the ribbon let go is never taken as no one's (mount/book_grow.c). So
+ * what is laid is bounded by the volume, never by a number a run carries, as a
+ * file's runs are (tally_leaves.c BookFileRun): a Born the rule of rot passed
+ * over with a CODEC run of 2^62 blocks was laid as 2^30 Strips, and the mount
+ * was refused for want of memory where it mounts with the file as it last
+ * matched (census B48). */
 error_t RibbonStageFallow(RibbonStage* st, uint64_t start, uint64_t count, bool once)
 {
+    uint64_t end = start + count < start ? UINT64_MAX : start + count;
+    if (count && end > st->reach)
+        st->reach = end;
+    if (end > g_book.data_end + 1u)
+        end = g_book.data_end + 1u;
+    count = start < end ? end - start : 0;
     for (uint64_t i = 0; once && i < st->nfallow; i++)
         if (st->fallow[i].start == start && st->fallow[i].count == count)
             return OK;
@@ -478,6 +494,7 @@ static error_t RibbonStageLaid(RibbonReplay* rp, RibbonStage* st)
             return ERR_NO_MEMORY;
         g_book.fallow[g_book.nfallow++] = st->fallow[i];
     }
+    GroundCensusNamed(0, st->reach);    /* the reach alone: the census claims the Strips */
     for (uint64_t i = 0; rc == OK && i < st->ndigests; i++)
         rc = GlossNote(st->digests[i].block, st->digests[i].digest);
     for (uint32_t i = 0; rc == OK && i < st->nhigh; i++)

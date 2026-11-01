@@ -289,6 +289,34 @@ grow_glass_reach() {
     rm -f "$img"
 }
 
+# grow_glass_fallow BASE — a writable book whose ribbon let go a run past the
+# far Deed (B48: a Born the rule of rot passes over, its CODEC run 2^62 blocks
+# long): what of the run lies inside is fallow, and none of the ground behind
+# is taken — the stage counts the run in the census's reach as the record
+# names it (ribbon_transcribe.c RibbonStageFallow, RibbonStageLaid).
+grow_glass_fallow() {
+    local img="$SCRATCH/growfallow.img" before after L
+    if ! python3 tools/volume-read.py "$1" self-test --emit B48 --out "$img" >"$SCRATCH/growfallow.emit" 2>&1; then
+        bad "growglass: the run the ribbon let go past the far Deed (B48) could not be planted — $(tail -1 "$SCRATCH/growfallow.emit")"
+        rm -f "$img"; return
+    fi
+    before=$(grow_book_numbers "$img")
+    grow_book_boot growfallow "$img"
+    L="$SCRATCH/serial.growfallow.log"
+    grep -aqE 'it takes none of the rest: its book names ground up to block [0-9]+, past the far Deed' "$L"
+    chk $? "growglass: the volume takes none of the ground behind it, for its ribbon let go a run that names it"
+    ! grep -aqE 'it takes the rest$|the volume now runs [0-9]+ sectors|the volume may only be read: ' "$L"
+    chk $? "growglass: no growth begins past the ribbon's run, and the volume is not under glass"
+    grep -aqE 'is MOUNTED — [0-9]+ file' "$L"
+    chk $? "growglass: the book with the run let go is mounted"
+    after=$(grow_book_numbers "$img")
+    [ -n "$before" ] && [ "${after%% *}" = "${before%% *}" ]
+    chk $? "growglass: and its Deed still runs ${before%% *} sectors after the boot past the ribbon's run — ${after%% *}"
+    ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]|\[(TagFS|Settle)\] DEFECT' "$L"
+    chk $? "growglass: no panic, no fault, no defect said past the ribbon's run"
+    rm -f "$img"
+}
+
 run_growglass() {
     echo "== growglass: a book on a bigger medium that may not take the ground behind it takes none of it =="
     local said
@@ -296,6 +324,7 @@ run_growglass() {
     said=$(grow_book_image growglass.base) || { bad "growglass: no stretched book — ${said:-not built}"; buildkey_restore; return; }
     grow_glass_frame "$SCRATCH/growglass.base.img"
     grow_glass_reach "$SCRATCH/growglass.base.img"
+    grow_glass_fallow "$SCRATCH/growglass.base.img"
     rm -f "$SCRATCH/growglass.base.img"
     buildkey_restore
 }

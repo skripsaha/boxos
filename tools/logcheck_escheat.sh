@@ -2,7 +2,7 @@
 # Sourced by tools/logcheck.sh: the book's Escheat on a rotten range.
 
 # ---------------------------------------------------------------------------
-# book_escheat PLANT [KEPT]
+# book_escheat PLANT [KEPT [written]]
 #
 # Escheat — the act that lets go what a format-v2 book can never give back
 # (spec_v2 §16.5 п.20). The landing PLANT (B4: a FILES leaf rotten in both
@@ -15,34 +15,48 @@
 # it. The image is then held: the census stands on that Tally — no range
 # rotten, no block held, the free ground grown by what was held; volume-read
 # takes it (the Tally may leave out a range the slot before named rotten); and
-# the next boot says what the census predicts.
+# the next boot says what the census predicts. Asked on a volume nobody wrote
+# to since its mount, the Tally the act asks may not be begun before a stitch
+# of the mount settles, and the ask asks the cycle that lays it; `written`
+# makes a file and anchors it first, so the act is asked where a Tally may be
+# begun at once and the ask wakes the committer to begin it (binder.c
+# BinderTallyAsked).
 # ---------------------------------------------------------------------------
 
 BOOK_ESCHEAT_REFUSED='^\[QUILL\] escheat refused: '
 BOOK_ESCHEAT_ASKED='^\[QUILL\] escheat asked: answered 0 — [1-9][0-9]* range'
 BOOK_ESCHEAT_LAID='^\[TagFS\] Escheat laid by Tally [0-9]+: '
 
+# book_escheat_written [written] — nothing, or a file made and anchored, and
+# the shell back.
+book_escheat_written() {
+    [ -z "$1" ] && return 0
+    type_line "quilltest crowd 1 0" &&
+        wait_for_line -E build/serial.log '\[QUILL\] crowd: (PASS|FAIL)' "$WAIT_QUIET_S" && wait_for_prompt
+}
+
 book_escheat() {
-    local plant=$1 kept=${2:-0} name="book_escheat_$1" img="$SCRATCH/escheat.img" before="$SCRATCH/escheat.before.json"
-    local json="$SCRATCH/census.book_escheat_$1.json" w="$SCRATCH/serial.book_escheat_$1_write.log" rc line
-    echo "== book escheat $plant: a rotten range let go by the act, and the Tally after it =="
+    local plant=$1 kept=${2:-0} written=${3:-} name="book_escheat_$1${3:+_$3}" img="$SCRATCH/escheat.img"
+    local before="$SCRATCH/escheat.before.json" json="$SCRATCH/census.book_escheat_$1${3:+_$3}.json"
+    local w="$SCRATCH/serial.book_escheat_$1${3:+_$3}_write.log" what="$1${3:+ $3}" rc line
+    echo "== book escheat $plant${written:+ ($written)}: a rotten range let go by the act, and the Tally after it =="
     rm -f build/boxos.img "$img" "$w" "$SCRATCH/serial.$name.log"
     build
     make run-stop >/dev/null 2>&1
     if ! python3 tools/volume-read.py build/boxos.img self-test --emit "$plant" --out "$img" \
             >"$SCRATCH/escheat.emit" 2>&1; then
-        bad "escheat $plant: it could not be planted in a fresh image — $(tail -1 "$SCRATCH/escheat.emit")"
+        bad "escheat $what: it could not be planted in a fresh image — $(tail -1 "$SCRATCH/escheat.emit")"
         return
     fi
     python3 tools/volume-read.py "$img" check --json >"$before" 2>/dev/null
     if ! make run-bg BOOTDISK="$img" >"$SCRATCH/escheat.run-bg" 2>&1; then
-        harness "escheat $plant: run-bg would not start the planted book: $(tail -1 "$SCRATCH/escheat.run-bg")"
+        harness "escheat $what: run-bg would not start the planted book: $(tail -1 "$SCRATCH/escheat.run-bg")"
         return
     fi
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest escheat refused" &&
         wait_for_line -E build/serial.log '\[QUILL\] escheat (refused|NOT REFUSED): ' "$WAIT_QUIET_S" &&
-        wait_for_prompt && type_line "quilltest escheat act" &&
+        wait_for_prompt && book_escheat_written "$written" && type_line "quilltest escheat act" &&
         wait_for_line -E build/serial.log '\[QUILL\] escheat (asked|FAILED): ' "$WAIT_QUIET_S" &&
         wait_for_line -E build/serial.log "$BOOK_ESCHEAT_LAID" "$WAIT_QUIET_SLOW_S" && wait_for_prompt &&
         type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
@@ -51,9 +65,9 @@ book_escheat() {
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$w"
     grep -aqE "$BOOK_ESCHEAT_REFUSED" "$w"
-    chk $? "escheat $plant: a cabin wearing neither system nor god is refused ($(grep -aoE '\[QUILL\] escheat (refused|NOT REFUSED): .*' "$w" | head -1 | cut -c1-160))"
+    chk $? "escheat $what: a cabin wearing neither system nor god is refused ($(grep -aoE '\[QUILL\] escheat (refused|NOT REFUSED): .*' "$w" | head -1 | cut -c1-160))"
     [ $rc = 0 ] && grep -aqE "$BOOK_ESCHEAT_ASKED" "$w" && grep -aqE "$BOOK_ESCHEAT_LAID" "$w"
-    chk $? "escheat $plant: asked wearing system, the act is taken and the next Tally names none of it ($(grep -aoE "$BOOK_ESCHEAT_LAID.*" "$w" | tail -1 | cut -c1-200))"
+    chk $? "escheat $what: asked wearing system, the act is taken and the next Tally names none of it ($(grep -aoE "$BOOK_ESCHEAT_LAID.*" "$w" | tail -1 | cut -c1-200))"
     python3 tools/volume-read.py "$img" check --json >"$json" 2>"$SCRATCH/escheat.check.err"
     python3 - "$before" "$json" "$kept" >"$SCRATCH/escheat.verdict" 2>&1 <<'ESCHEAT_EOF'
 import json, sys
@@ -77,30 +91,30 @@ print(("ok " if not damage else "bad ") + "volume-read finds no damage after the
 ESCHEAT_EOF
     while IFS= read -r line; do
         case "$line" in
-            "ok "*) ok  "escheat $plant: ${line#ok }" ;;
-            *)      bad "escheat $plant: ${line#bad }" ;;
+            "ok "*) ok  "escheat $what: ${line#ok }" ;;
+            *)      bad "escheat $what: ${line#bad }" ;;
         esac
     done <"$SCRATCH/escheat.verdict"
     python3 tools/volume-read.py "$img" bound >"$SCRATCH/escheat.bound" 2>&1
     [ $? = 0 ] && grep -q '^bound: HELD$' "$SCRATCH/escheat.bound"
-    chk $? "escheat $plant: the Tally after the act is bound again and taken against the slot before — $(grep -v '^bound: the newest' "$SCRATCH/escheat.bound" | head -3 | tr '\n' ' ' | cut -c1-300)"
+    chk $? "escheat $what: the Tally after the act is bound again and taken against the slot before — $(grep -v '^bound: the newest' "$SCRATCH/escheat.bound" | head -3 | tr '\n' ' ' | cut -c1-300)"
     if ! make run-bg BOOTDISK="$img" >"$SCRATCH/escheat.again.run-bg" 2>&1; then
-        harness "escheat $plant: run-bg would not start the book again: $(tail -1 "$SCRATCH/escheat.again.run-bg")"
+        harness "escheat $what: run-bg would not start the book again: $(tail -1 "$SCRATCH/escheat.again.run-bg")"
         return
     fi
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
     rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$name.log"
-    [ $rc = 0 ] || bad "escheat $plant: the book after the act never reached a shell"
+    [ $rc = 0 ] || bad "escheat $what: the book after the act never reached a shell"
     census_book_judge "$name"
     while IFS= read -r line; do
         case "$line" in
-            "ok "*)  ok  "escheat $plant, the next mount: ${line#ok }" ;;
-            "bad "*) bad "escheat $plant, the next mount: ${line#bad }" ;;
+            "ok "*)  ok  "escheat $what, the next mount: ${line#ok }" ;;
+            "bad "*) bad "escheat $what, the next mount: ${line#bad }" ;;
         esac
     done <"$SCRATCH/census.$name.verdict"
     ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]' "$w" "$SCRATCH/serial.$name.log"
-    chk $? "escheat $plant: no panic, no fault"
+    chk $? "escheat $what: no panic, no fault"
     rm -f "$img"
 }

@@ -22,8 +22,11 @@
 // be read holds every Tally back for that file alone, said, until the act:
 // then the tail is lost — the file cut to the end of its last whole block —
 // and the Tally goes on. The ranges of FILES the act lets go are the landings'
-// (logcheck book_escheat B4, B6c). Every test puts the Spine and the ribbon
-// back as it found them.
+// (logcheck book_escheat B4, B6c), and a range rotten by hand here: the act
+// asked with nobody writing is laid by the Tally the cadence writes — mounted
+// again with nothing written, a stitch after the ask ending on its Quire's
+// last sector, a Tally refused before it. Every test puts the Spine and the
+// ribbon back as it found them.
 // ============================================================================
 
 #define STAND_ESCHEAT_ROOM      (4u * TAGFS_BLOCK_SIZE)
@@ -265,6 +268,144 @@ out:
 }
 
 // ----------------------------------------------------------------------------
+// The act asked has no waiter to ask again: its Tally begun by the ask and by
+// the Settle's holder, nobody writing
+// ----------------------------------------------------------------------------
+
+/* The act laid by a Tally the cadence writes by itself, nobody writing: the
+ * cadence the runner holds (tests.c) let go of, a turn of it run by hand on
+ * this core as well, until no ask is owed and neither a Tally nor a cycle is
+ * under way — false past the guard. */
+static bool StandEscheatLaidByCadence(void)
+{
+    uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_ESCHEAT_BOUND_MS);
+    SettleCadenceHold(false);
+    while ((EscheatOwed() || BinderHoldsGround() || __atomic_load_n(&g_settle_scribe.holder, __ATOMIC_ACQUIRE)) &&
+           rdtsc() < bound)
+        StandSettleTurn();
+    SettleCadenceHold(true);
+    return !EscheatOwed();
+}
+
+/*
+ * ‼ AN ACT ASKED HAS NO WAITER TO ASK AGAIN. A write short of room waits on
+ * the Tally it asked and asks once more each round; Escheat is answered by a
+ * Tally nobody waits on, so the ask and the Settle's holder after it see that
+ * Tally begun. Mounted again, nothing written since, no Tally may be begun
+ * before a stitch of this mount settles (§4.2) — held so by this mount's own
+ * count, never the count of the one before it, which the book's weigh at the
+ * mount still read (binder.c BinderOwnMayNot): a Tally said owed, begun by
+ * the committer's turn, held back there — and the ask asks the cycle whose
+ * stitch lets it be begun. The cadence then writes the Tally that lays the act.
+ */
+static TestResult TestStandEscheatRemounted(void)
+{
+    TestResult   verdict = TEST_PASS;
+    StandBinder* b = &s_escheat_binder;
+    EscheatSaid  said;
+    uint64_t     files = 0;
+    const char*  aside = StandBinderAside(b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    verdict = StandBinderRot(b, &files);
+    if (verdict != TEST_PASS)
+        goto out;
+    TEST_ASSERT_OK(TagFSEscheat(INK_WARRANTED, &said), "Escheat asked with the warrant, nothing written since the mount");
+    TEST_ASSERT(said.ranges >= 1, "it names the rotten range");
+    TEST_ASSERT(!BinderOwed(), "no stitch of this mount has settled: the Tally it asks is not owed before one does");
+    TEST_ASSERT(TagFSStandSettleDemands() & SETTLE_DEMAND_ROOM, "and the ask asks the cycle whose stitch lets it begin");
+    TEST_ASSERT(StandEscheatLaidByCadence(), "the cadence settles that stitch and writes the Tally that lays the act, "
+                                             "nobody writing");
+out:
+    STAND_BINDER_PUT_BACK(b);
+    return verdict;
+}
+
+/*
+ * Nor is the act left to a write by the stitch after the ask: one that ends
+ * on its Quire's last sector leaves the ribbon where no slot can put it on,
+ * no Tally begun until a stitch more (binder.c s_on_edge), and the Settle's
+ * holder, weighing that stitch, asks the cycle of the next itself
+ * (BinderWeigh) — the Tally then begun lays the act.
+ */
+static TestResult TestStandEscheatOnEdge(void)
+{
+    TestResult   verdict = TEST_PASS;
+    StandBinder* b = &s_escheat_binder;
+    EscheatSaid  said;
+    RibbonCursor c;
+    uint64_t     files = 0, left = 0;
+    bool         kept  = false;
+    const char*  aside = StandBinderAside(b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    verdict = StandBinderRot(b, &files);
+    if (verdict != TEST_PASS)
+        goto out;
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    RibbonCursorStand(&c);
+    left = c.quire.blocks * TAGFS_BLOCK_SECTORS - c.off;
+    if (left <= 2u * c.atom) {
+        /* Too little of the Quire for a word of its own to fill it. */
+        TEST_ASSERT_OK(StandStitchSayFilling(4u * c.atom, 'w', 90, &kept), "a word runs on into the next Quire");
+        RibbonCursorStand(&c);
+        left = c.quire.blocks * TAGFS_BLOCK_SECTORS - c.off;
+    }
+    TEST_ASSERT_OK(TagFSEscheat(INK_WARRANTED, &said), "Escheat asked with the warrant");
+    TEST_ASSERT(BinderOwed(), "the Tally it asks is owed: one may be begun as the ribbon stands");
+    TEST_ASSERT_OK(StandStitchSayFilling(left, 'x', 91, &kept), "a word whose stitch fills the rest of its Quire is "
+                                                                "laid down, the cadence held");
+    RibbonCursorStand(&c);
+    TEST_ASSERT(kept && c.off == 0 && !BinderOwed(), "the stitch ended on its Quire's last sector: no Tally may be "
+                                                     "begun until a stitch more");
+    TEST_ASSERT(TagFSStandSettleDemands() & SETTLE_DEMAND_ROOM, "and the holder, weighing that stitch, asks the cycle "
+                                                                "of the next");
+    TEST_ASSERT(StandEscheatLaidByCadence(), "the cadence settles it and writes the Tally that lays the act, nobody "
+                                             "writing");
+out:
+    STAND_BINDER_PUT_BACK(b);
+    return verdict;
+}
+
+/*
+ * Nor by a Tally refused before the ask: one refused is tried again once a
+ * cycle more settles (binder.c retry_after), and the ask asks that cycle, as
+ * no write will — the Tally then begun lays the act.
+ */
+static TestResult TestStandEscheatRetried(void)
+{
+    TestResult   verdict = TEST_PASS;
+    StandBinder* b = &s_escheat_binder;
+    EscheatSaid  said;
+    uint64_t     files = 0;
+    error_t      rc = OK;
+    const char*  aside = StandBinderAside(b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    verdict = StandBinderRot(b, &files);
+    if (verdict != TEST_PASS)
+        goto out;
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    BlockFailArm(b->s.seat, BLOCK_FAIL_WRITE, 0, 0, 1);
+    rc = BinderRunWhole();
+    BlockFailDisarm();
+    TEST_ASSERT(rc != OK && !BinderNoWrite(), "the Tally whose first node the medium refuses is refused, and the "
+                                              "volume takes writes still");
+    TEST_ASSERT_OK(TagFSEscheat(INK_WARRANTED, &said), "Escheat asked with the warrant");
+    TEST_ASSERT(!BinderOwed(), "the Tally it asks is not owed before a cycle more settles");
+    TEST_ASSERT(TagFSStandSettleDemands() & SETTLE_DEMAND_ROOM, "and the ask asks that cycle");
+    TEST_ASSERT(StandEscheatLaidByCadence(), "the cadence settles it and writes the Tally that lays the act, nobody "
+                                             "writing");
+out:
+    BlockFailDisarm();
+    STAND_BINDER_PUT_BACK(b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
 
 static const TestCase g_stand_escheat_tests[] = {
     { .name = "stand_escheat_warrant", .func = TestStandEscheatWarrant,
@@ -272,6 +413,12 @@ static const TestCase g_stand_escheat_tests[] = {
     { .name = "stand_escheat_tail", .func = TestStandEscheatTail,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_escheat_tail_helm_held", .func = TestStandEscheatTailHelmHeld,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_escheat_remounted", .func = TestStandEscheatRemounted,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_escheat_on_edge", .func = TestStandEscheatOnEdge,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_escheat_retried", .func = TestStandEscheatRetried,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
 };
 
