@@ -23,6 +23,11 @@
 #      is halted.
 #   4. Kernel N boots the heirloom once more and reads what kernel N+1 wrote:
 #      the way back, which a frozen format path owes as much as the way out.
+#      On a book kernel N may meet what its writer cannot carry on — what
+#      N+1 writes and N was built before — and then it stands the book under
+#      glass and writes not a byte of it (spec_v2 §16.1 п.2), and says why:
+#      a reason held to what the censuses show N+1 left, never taken on N's
+#      word.
 #
 # Between the machines the host only reads the heirloom (volume-read check),
 # and that is measured, not said: the heirloom's sha256 is taken the moment a
@@ -53,7 +58,12 @@
 # (commit b9962f55, step 2.2b) — whose boarding pass names it. N must refuse it
 # in the words step 2.1 gave it ("carries a format-v2 volume ... cannot read a
 # format-v2 book") and leave every byte of it as it found it: its sha256 is
-# held to the one this tree's halt left.
+# held to the one this tree's halt left. N's source is asked for those words
+# before a byte is built, and a kernel without them is no N for this receipt —
+# said as a HARNESS line, which says why as far as the history shows it
+# (refusal_owed): one that knows the book (step 2.3's, a3233c4d, and every one
+# since) owes the book's way back, `heirloom`; one from before step 2.1 never
+# had the words.
 
 set -u
 STAND_NAME=bindery
@@ -147,12 +157,15 @@ PASS_EOF
 # heirloom_census IMG NAME — volume-read's census of IMG: its exit status;
 # heirloom.NAME.files, every file the next mount would show — its name, its
 # file id and its sha256; heirloom.NAME.count, how many files the census says
-# the kernel will count.
+# the kernel will count; heirloom.NAME.slipped, on a book, the id of every file
+# whose last block carries a Slip, one a line — no file at all when the census
+# gave no account of Slips (format v1, or no census read), so an account never
+# taken is not read as one that found none.
 heirloom_census() {
     python3 tools/volume-read.py "$1" check --json >"$SCRATCH/heirloom.$2.json" 2>&1
     local rc=$?
     python3 - "$SCRATCH/heirloom.$2.json" "$SCRATCH/heirloom.$2" <<'PY'
-import json, sys
+import json, os, sys
 try:
     d = json.load(open(sys.argv[1]))
 except ValueError:
@@ -165,8 +178,23 @@ k = d.get("kernel") or {}
 says = (k.get("says") or {}).get("files") if d.get("format") != "v2" else k.get("files")
 with open(sys.argv[2] + ".count", "w") as out:
     out.write("%s\n" % ("" if says is None else says))
+slipped = k.get("slipped")
+if isinstance(slipped, list):
+    with open(sys.argv[2] + ".slipped", "w") as out:
+        out.writelines("%s\n" % s["fid"] for s in slipped)
+elif os.path.exists(sys.argv[2] + ".slipped"):
+    os.remove(sys.argv[2] + ".slipped")
 PY
     return $rc
+}
+
+# heirloom_slipped NAME — the ids heirloom.NAME.slipped holds, in a row; "none"
+# when census NAME found no Slip, "unread" when it gave no account of them.
+heirloom_slipped() {
+    [ -f "$SCRATCH/heirloom.$1.slipped" ] || { echo unread; return; }
+    local ids
+    ids=$(paste -sd' ' - < "$SCRATCH/heirloom.$1.slipped")
+    echo "${ids:-none}"
 }
 
 # The shell's prompt is read from the LINES, never from the last two bytes of
@@ -219,7 +247,11 @@ heirloom_type() {
 # heirloom_machine TAG DISK STICK CMD... — boot DISK (with STICK on USB, when
 # one is named), wait for a volume to be mounted and its shell to stand at the
 # prompt, type each CMD, halt through `bye`, and keep the log as
-# serial.heirloom_TAG.log. 0 when the halt's sync wrote the volume; 1 when a
+# serial.heirloom_TAG.log. 0 when the halt came to one of its ends
+# (STAND_HALT_ENDS), whichever — its sync written, under glass, the medium
+# taking what it was given without the volume's records, or the volume not
+# made durable. So 0 is not that the volume was left well: every caller asks
+# how it was left (heirloom_synced; under glass, heirloom_back_glass). 1 when a
 # machine ran and did not get that far; 2 when none was started at all.
 heirloom_machine() {
     local tag=$1 disk=$2 stick=$3 extra="" mark from cmd ran=1; shift 3
@@ -245,14 +277,23 @@ heirloom_machine() {
         done
         from=$(wc -l < build/serial.log)
         if [ $ran = 0 ] && ! { heirloom_type "bye" "$from" &&
-                               wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" &&
-                               grep -aq '^\[HALT\] Storage sync complete' build/serial.log; }; then
+                               wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"; }; then
             ran=1
         fi
     fi
     make run-stop >/dev/null 2>&1
     tr -d '\r' < build/serial.log > "$SCRATCH/serial.heirloom_$tag.log"
     return $ran
+}
+
+# heirloom_synced LOG — the halt's sync wrote the volume.
+heirloom_synced() { grep -aq '^\[HALT\] Storage sync complete' "$1"; }
+
+# heirloom_glass LOG — why the kernel stood the volume it mounted under glass
+# (under_glass.c, TagFSUnderGlass: each reason said once a mount), one reason a
+# line; nothing when it gave none and the volume was its writer's.
+heirloom_glass() {
+    grep -aoE '\[TagFS\] the volume may only be read: .*' "$1" | cut -d: -f2- | sed 's/^ //'
 }
 
 # heirloom_mounted LOG UUID FILES — the volume UUID was mounted, on the seat
@@ -340,7 +381,7 @@ heirloom_written() {
     HEIRLOOM_N_FID=$(heirloom_fid "$L" WROTE)
     [ -n "$HEIRLOOM_N_FID" ]
     chk $? "heirloom: kernel N wrote on it ($(grep -aoE '\[PERSIST\] WROTE fid=[0-9]+ seq=[0-9]+' "$L" | head -1))"
-    [ $rc = 0 ]
+    [ $rc = 0 ] && heirloom_synced "$L"
     chk $? "heirloom: kernel N halted through bye, and its sync wrote the volume"
     heirloom_clean "$L"
     chk $? "heirloom: kernel N — no panic, no fault"
@@ -416,7 +457,7 @@ heirloom_handed() {
     HEIRLOOM_N1_FID=$(heirloom_fid "$L" WROTE)
     [ -n "$HEIRLOOM_N1_FID" ] && [ "$HEIRLOOM_N1_FID" != "$HEIRLOOM_N_FID" ]
     chk $? "heirloom: kernel N+1 wrote a file of its own on the heirloom — fid ${HEIRLOOM_N1_FID:-none}, not kernel N's ${HEIRLOOM_N_FID:-unread}"
-    [ $rc = 0 ]
+    [ $rc = 0 ] && heirloom_synced "$L"
     chk $? "heirloom: kernel N+1 halted through bye, and its sync wrote the heirloom"
     heirloom_clean "$L"
     chk $? "heirloom: kernel N+1 — no panic, no fault"
@@ -432,13 +473,24 @@ heirloom_handed() {
     chk $? "heirloom: every file kernel N left is there under its id, byte for byte, but the one kernel N+1 wrote again ($kept line(s) differ)"
 }
 
-# Kernel N boots the heirloom kernel N+1 left, and reads what N+1 wrote.
+# Kernel N boots the heirloom kernel N+1 left, and reads what N+1 wrote — then
+# goes one of two ways, as the volume it meets says. Its own writer's to carry
+# on: its halt's sync writes it. Or carrying what kernel N's writer cannot
+# carry on — on a book, what N+1 writes and N was built before it (a Slip in a
+# file's last block, which `persist write` itself lays): the volume stands
+# under glass (spec_v2 §16.1 п.2, UnderGlass), read whole and written not at
+# all, and kernel N says why. Why is held to the censuses taken before and
+# after N+1 wrote, and the glass is put down to N+1 only as far as they show
+# what it names (heirloom_back_glass). Either way the volume is not spoiled:
+# every file N+1 left is there under its id, byte for byte, as the census
+# after kernel N finds it.
 heirloom_back() {
-    local L="$SCRATCH/serial.heirloom_back.log" rc count found
+    local L="$SCRATCH/serial.heirloom_back.log" rc count found glass left kept
     echo "-- kernel N again, on the heirloom kernel N+1 left --"
     count=$(cat "$SCRATCH/heirloom.n1.count")
 
     heirloom_untouched "the host, between the machines,"
+    left=$HEIRLOOM_SHA
     heirloom_machine back "$HEIRLOOM_IMG" "" "persist verify"; rc=$?
     [ $rc = 2 ] && return 1
     heirloom_let_go "kernel N, the way back,"
@@ -450,20 +502,102 @@ heirloom_back() {
     grep -aq '\[PERSIST\] PASS: file survived reboot, payload intact' "$L" &&
         [ -n "$found" ] && [ "$found" = "$HEIRLOOM_N1_FID" ]
     chk $? "heirloom: kernel N read back what kernel N+1 wrote — fid ${found:-none}, kernel N+1's ${HEIRLOOM_N1_FID:-unread} ($(heirloom_said "$L"))"
-    [ $rc = 0 ]
-    chk $? "heirloom: kernel N halted through bye, and its sync wrote the heirloom"
+    glass=$(heirloom_glass "$L")
+    if [ -z "$glass" ]; then
+        [ $rc = 0 ] && heirloom_synced "$L"
+        chk $? "heirloom: kernel N halted through bye, and its sync wrote the heirloom"
+    else
+        heirloom_back_glass "$L" "$rc" "$glass" "$left"
+    fi
     heirloom_clean "$L"
     chk $? "heirloom: kernel N, the way back — no panic, no fault"
 
     heirloom_census "$HEIRLOOM_IMG" back
     chk $? "heirloom: the heirloom kernel N left the second time is consistent (volume-read check)"
     heirloom_untouched "the host's census after $HEIRLOOM_LEFT_BY"
+    kept=$(diff "$SCRATCH/heirloom.n1.files" "$SCRATCH/heirloom.back.files" | grep -c '^[<>]')
+    [ "$kept" = 0 ]
+    chk $? "heirloom: every file kernel N+1 left is there under its id, byte for byte, once kernel N has been on it ($kept line(s) differ)"
+}
+
+# heirloom_back_glass LOG RC WHY LEFT — kernel N, the way back (its LOG, its
+# machine's RC), stood the heirloom under glass for WHY, one reason a line.
+#
+# On format v1 each is a FAIL: v1's path is frozen, format and behaviour
+# (spec_v2 §16.1 п.1), so a v1 volume this tree wrote is one kernel N's writer
+# carries on. On a book each is held to the censuses, never taken on kernel
+# N's word: a field kernel N+1 spoiled reads to N as what it cannot carry on
+# reads, and the sentence is the one N chose for it. A Slip in fid X's last
+# block (ribbon_transcribe.c, RibbonCarriedSaid) is N+1's when the census of
+# the heirloom N+1 left finds one there and the census of the volume N left
+# found none; a reason no census here gives an account of is a FAIL — the
+# glass not shown to be N+1's doing — until the receipt is taught to hold it.
+#
+# And under glass nothing is written, measured three ways: the halt says it
+# wrote nothing; no door that writes was reached (a STRICT kernel N panics at
+# one, any other says it, under_glass.c TagFSGlassRefused); and the heirloom's
+# sha256 is still LEFT, the one kernel N+1 left, taken before the host read a
+# byte of it.
+heirloom_back_glass() {
+    local why fid doors
+    while IFS= read -r why; do
+        [ -n "$why" ] || continue
+        fid=$(printf '%s\n' "$why" | sed -nE "s/^fid ([0-9]+)'s last block carries a Slip( .*)?$/\1/p")
+        if [ "$HEIRLOOM_FORMAT" != v2 ]; then
+            bad "heirloom: kernel N stood the volume kernel N+1 left under glass, and format v1's path is frozen — a v1 volume this tree wrote is one kernel N carries on — $why"
+        elif [ -z "$fid" ]; then
+            bad "heirloom: kernel N stood the book kernel N+1 left under glass for what no census here gives an account of — not shown to be kernel N+1's doing — $why"
+        else
+            [ -f "$SCRATCH/heirloom.n.slipped" ] && grep -qx "$fid" "$SCRATCH/heirloom.n1.slipped" 2>/dev/null &&
+                ! grep -qx "$fid" "$SCRATCH/heirloom.n.slipped"
+            chk $? "heirloom: kernel N stood the book under glass for the Slip kernel N+1 laid in fid $fid's last block, which the volume kernel N left did not carry (spec_v2 §16.1 п.2; Slips in fid(s) $(heirloom_slipped n1) after N+1, $(heirloom_slipped n) after N) — $why"
+        fi
+    done <<< "$3"
+    [ "$2" = 0 ] && grep -aqE '^\[HALT\] the volume on seat [0-9]+ stands under glass: this kernel wrote nothing to it' "$1"
+    chk $? "heirloom: kernel N halted through bye, and its halt wrote nothing to the heirloom under glass"
+    doors=$(grep -ac 'was asked to write a volume that stands under glass' "$1")
+    [ "$doors" = 0 ]
+    chk $? "heirloom: no door that writes was reached under glass ($doors said)"
+    [ -n "$4" ] && [ "$HEIRLOOM_SHA" = "$4" ]
+    chk $? "heirloom: kernel N wrote not a byte of the heirloom under glass — its sha256 is still the one kernel N+1 left"
 }
 
 # --- refusal: a book this tree wrote, handed to a kernel from before the book --
 
-# Step 2.1's refusal of a book (deed.c, DeedFormatRefused), as kernel N says it.
-REFUSAL_SAID='carries a format-v2 volume \(its deed bears FRAME\); this kernel cannot read a format-v2 book'
+# Step 2.1's refusal of a book (deed.c, DeedFormatRefused), as kernel N says it;
+# REFUSAL_WORDS, the part of it one line of N's source carries whole.
+REFUSAL_WORDS='this kernel cannot read a format-v2 book'
+REFUSAL_SAID="carries a format-v2 volume \\(its deed bears FRAME\\); $REFUSAL_WORDS"
+
+# Whether a kernel owes that refusal its source says; why one does not, its
+# history: step 2.1 (REFUSAL_GIVEN) gave a kernel the words and step 2.3
+# (HEIRLOOM_BOOK_READ), the first kernel to read a book, took them away. A
+# source is without them either way — a kernel that knows the book, or one
+# from before the words, which refuses a book as format v1's kernels refuse a
+# volume they have no layout for (spec_v2 §10.2) — and only the history tells
+# the two apart.
+REFUSAL_GIVEN=c8f85135        # step 2.1: a kernel refuses a book in REFUSAL_WORDS
+HEIRLOOM_BOOK_READ=a3233c4d   # step 2.3: a kernel reads a book
+
+# refusal_owed COMMIT — COMMIT's kernel owes the refusal in step 2.1's words:
+# its source carries them. When it does not, why, as far as the history
+# establishes it and no further — a HARNESS line, nothing built: asked of such
+# a kernel the receipt would hold it to words it never had and call whatever
+# it does with the book a FAIL.
+refusal_owed() {
+    local knows given
+    git -C "$ROOT" grep -qF "$REFUSAL_WORDS" "$1" -- src/kernel && return 0
+    git -C "$ROOT" merge-base --is-ancestor "$HEIRLOOM_BOOK_READ" "$1" 2>/dev/null; knows=$?
+    git -C "$ROOT" merge-base --is-ancestor "$REFUSAL_GIVEN" "$1" 2>/dev/null; given=$?
+    if [ $knows = 0 ]; then
+        harness "refusal: commit $1 knows the book — $HEIRLOOM_BOOK_READ (step 2.3), the first kernel to read one, is in its history and its source has no '$REFUSAL_WORDS'; it owes the book's way back (HEIRLOOM_FORMAT=v2 $0 heirloom), not a refusal"
+    elif [ $knows = 1 ] && [ $given = 1 ]; then
+        harness "refusal: commit $1 is from before the words — $REFUSAL_GIVEN (step 2.1), which gave a kernel '$REFUSAL_WORDS', is not in its history; the refusal in step 2.1's words is owed by a kernel of steps 2.1–2.2b (b9962f55)"
+    else
+        harness "refusal: commit $1's source has no '$REFUSAL_WORDS' — there is no refusal in step 2.1's words to hold its kernel to"
+    fi
+    return 1
+}
 
 # The book laid down by this tree and written by its kernel: `persist write`,
 # halted through `bye`.
@@ -480,7 +614,7 @@ refusal_written() {
     STAND_FORMAT=v2 heirloom_machine k "$HEIRLOOM_IMG" "" "persist write"; rc=$?
     [ $rc = 2 ] && return 1
     heirloom_let_go "this tree's kernel"
-    [ -n "$(heirloom_fid "$L" WROTE)" ] && [ $rc = 0 ]
+    [ -n "$(heirloom_fid "$L" WROTE)" ] && [ $rc = 0 ] && heirloom_synced "$L"
     chk $? "refusal: this tree's kernel wrote on its book and halted, its sync writing it ($(grep -aoE '\[PERSIST\] WROTE fid=[0-9]+' "$L" | head -1))"
     heirloom_census "$HEIRLOOM_IMG" k
     chk $? "refusal: volume-read finds the book this tree's kernel left consistent"
@@ -514,6 +648,7 @@ run_refusal() {
         harness "refusal: HEIRLOOM_FROM names no commit ('$from') — it says which kernel from before the book refuses it"
         return
     fi
+    refusal_owed "$from" || return
     build
     refusal_written || { buildkey_restore; return; }
     echo "-- kernel N: commit $from, its boarding pass naming this tree's book $HEIRLOOM_UUID --"
