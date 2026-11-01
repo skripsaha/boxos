@@ -237,7 +237,7 @@ error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held)
     TagFSLockTake(&fs->lock);
     rc = bytes ? RibbonReserve(bytes) : RibbonClaim(0, false);
     TagFSLockDrop(&fs->lock);
-    RibbonClaimSay(rc);
+    rc = RibbonClaimSay(rc);
     if (rc == OK)
         *held = bytes;
     return rc;

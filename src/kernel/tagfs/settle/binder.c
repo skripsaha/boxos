@@ -568,7 +568,11 @@ bool BinderOwed(void)
            !BinderNoWrite() && __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE) == NULL;
 }
 
-bool BinderRoomWait(void)
+/* A wait on a Tally that `gives` what the waiter lacks, if it is begun: the
+ * one under way, or one asked — the cycle that takes the reason away asked
+ * where none may be begun until the next stitch — within the turn of the ring
+ * since a waiter was last given whole what it waited for. */
+static bool BinderRoomAsk(bool gives)
 {
     if (BinderNoTallies() || BinderNoWrite() || __atomic_load_n(&g_binder.room_turns, __ATOMIC_ACQUIRE) >= g_binder.ring)
         return false;
@@ -576,7 +580,7 @@ bool BinderRoomWait(void)
         __atomic_store_n(&g_binder.room_waits, 1u, __ATOMIC_RELEASE);   /* its end gives the slot's ground */
         return true;
     }
-    if (!EndpaperGrown() && !__atomic_load_n(&g_binder.turn_gives, __ATOMIC_ACQUIRE))
+    if (!gives)
         return false;
     const char* why = __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE);
     if (why == s_on_edge || why == s_unsettled) {
@@ -588,6 +592,16 @@ bool BinderRoomWait(void)
     __atomic_store_n(&g_binder.room_waits, 1u, __ATOMIC_RELEASE);
     SettleDemand(SETTLE_DEMAND_TALLY);
     return true;
+}
+
+bool BinderRoomWait(void)
+{
+    return BinderRoomAsk(EndpaperGrown() || __atomic_load_n(&g_binder.turn_gives, __ATOMIC_ACQUIRE));
+}
+
+bool BinderRibbonWait(bool barred)
+{
+    return BinderRoomAsk(barred || EndpaperGrown() || __atomic_load_n(&g_binder.turn_gives, __ATOMIC_ACQUIRE));
 }
 
 const char* BinderRoomMeasured(const char** why)

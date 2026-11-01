@@ -222,14 +222,43 @@ uint64_t    BinderRingShort(uint64_t tally, uint64_t quire);
  * volume takes no write: the write is refused. BinderRoomAwaited: a Tally so
  * asked and not ended — the write's own wait for room writes it (settle.c,
  * SettleForRoomBook; BinderRunAwaited).
- * BinderRoomTaken: a write was handed ground — the next shortfall has its
- * turn of the ring again. BinderRoomMeasured, as a write is refused: how the
- * reserve it met was measured — to the block, nothing grown past the last
- * Tally; or from above, a turn of the ring waited for, or no Tally waited for
- * and *why none may be (NULL: none was asked). From any core, no TagFS lock
- * held.
+ * BinderRibbonWait, by a change of the volume refused room on the ribbon or
+ * told to wait for it while the ribbon has no next_quire: the same wait, on
+ * the Tally that gives it one. `barred` — the next_quire found only on ground
+ * a Tally a mount may stand on keeps from it (fallow.c, NodeBarred) — a Tally
+ * past the freer's stitch, asked whatever the measure: the bar lifts once the
+ * oldest of the FallowLag() newest slots a mount may stand on takes it in
+ * (binder_slots.c, BinderBarSlice) — one Tally, two on a medium that lied, a
+ * slot held unsure spending no step — so each wait asks the next Tally within
+ * the turn of the ring until the bar's slice stands past the freer. Refused
+ * past the reserve, a Tally as a write of data short of ground waits for one —
+ * the Tally under way, or one that makes the measure exact or gives the
+ * ring's ground back — whose end asks the next_quire again by the measure it
+ * makes (ribbon.c, RibbonNextAgain): at a full volume's wall a measure from
+ * above refused the next_quire with 7168 free under a reserve of 7424, and
+ * the GiB written the moment a GiB was deleted was refused 3840 blocks short
+ * with no Tally waited for, where a write of data waits. Under the same turn
+ * of the ring, and written by the change's own wait for room as a write short of
+ * ground has its Tally written: waited out a cycle at a time, the stitches of
+ * the cycles — every one with nothing a claim may lay, in the Quire the
+ * ribbon stands in, a stitch of the Tally's steps between every two — spent
+ * that Quire's rest before the Tally ended, the ribbon ran out under the
+ * write and the GiB written the moment a GiB was deleted was refused
+ * half-way (fullvolume, roomback). Held back by what the wait's Tally does not
+ * take away — the tails' Engross, left to the Helm's service, or a Quire off
+ * the chain — no Tally is waited on: refused, the change is refused as a write
+ * of data is; barred, it waits a cycle at a time as it did before (ribbon.c,
+ * RibbonRoomFor).
+ * BinderRoomTaken: a write was handed ground, or a change that does not free
+ * room on the ribbon once one waited for it (ribbon.c, RibbonRoomFor) — the
+ * next shortfall has its turn of the ring again. BinderRoomMeasured, as a
+ * write is refused: how the reserve it met was measured — to the block,
+ * nothing grown past the last Tally; or from above, a turn of the ring waited
+ * for, or no Tally waited for and *why none may be (NULL: none was asked).
+ * From any core, no TagFS lock held.
  */
 bool        BinderRoomWait(void);
+bool        BinderRibbonWait(bool barred);
 const char* BinderRoomMeasured(const char** why);
 bool        BinderRoomAwaited(void);
 void        BinderRoomTaken(void);
