@@ -70,9 +70,10 @@ static TestResult TestStandChangeNamesOnlyNew(void)
     TEST_ASSERT(StandFreshModelMake(&m, 16u * TAGFS_BLOCK_SIZE), "room for the file's bytes");
     TEST_ASSERT_EQ(tagfs_create_file("fresh-new.bin", NULL, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 10u * TAGFS_BLOCK_SIZE, 1), 10 * TAGFS_BLOCK_SIZE, "ten blocks written");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled");
     runs = StandFreshForcedRuns(fid, false);
-    TEST_ASSERT(runs >= 1, "in one run, but where ground another owner holds breaks it (Allotment 1)");
+    TEST_ASSERT(runs >= 1, "in one run, but where ground another owner holds breaks it (Allotment 1) — judged "
+                           "before the cycle, which may give ground the take found held back to the free");
+    TEST_ASSERT_OK(TagFSSettle(), "and settled");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, m.size, TAGFS_BLOCK_SIZE, 2), TAGFS_BLOCK_SIZE, "a block is appended");
     RibbonClaimsStand(&claimed, &reserved);
     TestEvidence("bytes the ribbon holds claimed after one appended block", claimed);

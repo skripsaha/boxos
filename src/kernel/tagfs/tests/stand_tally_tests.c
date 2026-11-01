@@ -1,5 +1,6 @@
 #include "tests.h"
 #include "stand_tests.h"
+#include "stand_binder.h"
 #include "../tagfs.h"
 #include "../file_map/file_map.h"
 #include "../mount/away.h"
@@ -27,16 +28,16 @@
 // The stand_tally suite: a format-v2 volume read off its book
 //
 // This kernel reads a format-v2 volume's book — the Spine's slots and the
-// Tally of the newest one that reads — and writes into it only stitches
-// (settle/sewing.h): a change to a file's data it refuses. So these
-// are asked of the volume the machine stands on, every one written for format
-// v2 and standing aside on any other: every file it holds reads whole, each
-// block held to its digest; a mount writes nothing, and two mounts are one
-// state (C12); a node whose first copy rotted reads off its second, said
-// (§2.5); a FILES leaf neither copy of which reads is a rotten range —
-// mounted, its files locked, its blocks held (C19); every road that would
-// change a file is refused before a byte, and every door below the glass of a
-// volume under it; a rotten data block is refused on the three roads a read
+// Tally of the newest one that reads — and writes into it stitches and the
+// Tallies past them (settle/sewing.h, settle/binder.h): a change to a file's
+// data it refuses. So these are asked of the volume the machine stands on,
+// every one written for format v2 and standing aside on any other: every file
+// it holds reads whole, each block held to its digest; a mount writes nothing,
+// and two mounts are one state (C12); a node whose first copy rotted reads off
+// its second, said (§2.5); a FILES leaf neither copy of which reads is a
+// rotten range — mounted, its files locked, its blocks held (C19:
+// stand_tally_range_tests.c); every road that would change a file is refused
+// before a byte, and every door below the glass of a volume under it; a rotten data block is refused on the three roads a read
 // takes, and a block with no digest as one that does not match; a medium that
 // leaves and comes back has its book read again, with nothing read to judge
 // it; and the live files are the records, with no table to agree with. And BLOCKFAIL's plan of bad sectors in
@@ -46,14 +47,18 @@
 //
 // What a test does to the medium it does by the Boardroom's own doors, beside
 // TagFS: no cycle runs while it does, and the stand's hand is the medium's rot.
-// Every sector it changes it puts back, and mounts again on it.
+// Every sector it changes it puts back, and mounts again on it. The rotten
+// range alone may write Tallies first — where no leaf below the root is one
+// every slot names as it lies — and does so with the kit a test that writes
+// Tallies is run with (stand_binder.h): the ring, the ground its slots hold and
+// the ribbon put back as it found them.
 // ============================================================================
 
 #define STAND_TALLY_MOUNT_MS  10000u
 
 /* The volume's medium arriving again, attended until the mount road has
  * nothing left to do — mounted or refused — bounded. */
-static void StandTallyArrive(void)
+void StandTallyArrive(void)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_TALLY_MOUNT_MS);
     TagFSAttendArrival();
@@ -68,7 +73,7 @@ static void StandTallyArrive(void)
 /* Whatever a test left: the plan down, the volume up again if it is not, and
  * the runner counted back in — once, here: a test that let the volume go and
  * met it again leaves the runner's hold to this. */
-static void StandTallyClose(void)
+void StandTallyClose(void)
 {
     BlockFailDisarm();
     if (!tagfs_get_state()->initialized)
@@ -77,7 +82,7 @@ static void StandTallyClose(void)
 }
 
 /* Why a test written for a book stands aside here, or NULL. */
-static const char* StandTallyAside(void)
+const char* StandTallyAside(void)
 {
     if (tagfs_get_state()->format != DEED_FORMAT_V2)
         return "the volume is not format v2: there is no book to read";
@@ -294,122 +299,6 @@ out:
             verdict = TestFailedAt(__FILE__, __LINE__, "mounted on the sector put back, a copy still "
                                    "does not read (mended, 0)", said.mended, 0);
     }
-    StandTallyClose();
-    return verdict;
-}
-
-// ----------------------------------------------------------------------------
-// A FILES leaf neither copy of which reads: a rotten range (C19)
-// ----------------------------------------------------------------------------
-
-/* The first live file whose header (fid, 0) lies in the leaf's [lo, hi): 0
- * when none. Not the lo key's own file: a separator stays where the file it
- * was cut at lay, and on a book whose files were given up since — every boot
- * of a stand past its first — that file may be gone. */
-static uint64_t StandTallyLeafFirstFile(const TallyPlace* leaf)
-{
-    uint64_t from = leaf->has_lo ? leaf->lo.k1 + (leaf->lo.k2 != 0 ? 1u : 0u) : 0, fid = 0;
-    if (FileMapRows(tagfs_get_state()->files, from, &fid, 1) != 1)
-        return 0;
-    if (leaf->has_hi && (fid > leaf->hi.k1 || (fid == leaf->hi.k1 && leaf->hi.k2 == 0)))
-        return 0;
-    return fid;
-}
-
-/* The least Tally a slot that holds may hold — either of an unsure slot's
- * two. A node laid by a Tally no later than it is one every slot names as it
- * lies: no slot holds another copy of its range. */
-static uint64_t StandTallyOldestHeld(void)
-{
-    uint64_t least = UINT64_MAX;
-    for (uint32_t i = 0; g_binder.slot && i < g_binder.nslots; i++) {
-        const SlotGround* s = &g_binder.slot[i];
-        if (!s->holds)
-            continue;
-        if (s->tally < least)
-            least = s->tally;
-        if (s->unsure && s->tally2 && s->tally2 < least)
-            least = s->tally2;
-    }
-    return least;
-}
-
-/*
- * The last FILES leaf below the root whose range holds a live file's header,
- * and that file — none when the root is the one leaf, or no leaf below it
- * holds a header memory has a file for. One every slot names as it lies
- * first: a leaf a Tally laid anew since an older slot's has another copy of
- * its range there, and Facsimile reads the range back from that slot
- * (facsimile.c — only a node shared with the Tally stood on rots for both) —
- * on a book whose leaves the tests before laid anew, every boot of a stand
- * past its first, the last leaf is one such.
- */
-static bool StandTallyLeafBelowRoot(TallyPlace* leaf, uint64_t* fid)
-{
-    TallyPlace n;
-    uint64_t   oldest = StandTallyOldestHeld();
-    bool       found = false, shared = false;
-    for (uint32_t i = 1; TallyStandNodeWhere(TALLY_FILES, i, &n); i++) {
-        uint64_t first = n.level == 0 ? StandTallyLeafFirstFile(&n) : 0;
-        bool     named = n.ptr.seq <= oldest;
-        if (first && (named || !shared)) {
-            *leaf  = n;
-            *fid   = first;
-            found  = true;
-            shared = named;
-        }
-    }
-    return found;
-}
-
-static TestResult TestStandTallyRottenLeafLocked(void)
-{
-    TestResult     verdict = TEST_PASS;
-    uint8_t        seat    = tagfs_get_seat();
-    uint64_t       base    = tagfs_get_volume_base();
-    const char*    aside   = StandTallyAside();
-    TallyPlace leaf;
-    MountBookSaid  said;
-    bool           down    = false;
-    uint64_t       fid     = 0, sectors = 0;
-    FileRecord*    rec     = NULL;
-
-    if (aside)
-        return test_steps_aside(aside);
-    if (!StandTallyLeafBelowRoot(&leaf, &fid))
-        return test_steps_aside("no leaf below its FILES root holds a live file's header — the tree "
-                                "is one leaf, its root: no range lies below a root to rot (a book of "
-                                "more files has one — the stand's padded landing)");
-    rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
-    TEST_ASSERT(rec != NULL, "a live file whose header the leaf holds");
-    FileRecordRelease(rec);
-
-    down = TagFSStandLetGo();
-    TEST_ASSERT(down, "the volume is let go of");
-    sectors = leaf.ptr.sheets * TAGFS_BLOCK_SECTORS;
-    BlockFailArmBadSectors(seat, base + leaf.ptr.block[0] * TAGFS_BLOCK_SECTORS, sectors);
-    TEST_ASSERT(BlockFailAddBadSectors(seat, base + leaf.ptr.block[1] * TAGFS_BLOCK_SECTORS, sectors),
-                "both copies of the leaf will not read");
-    StandTallyArrive();
-    TagFSStandHoldAgain();
-    down = false;
-
-    TEST_ASSERT(tagfs_get_state()->initialized, "the volume mounts all the same");
-    MountBookStandSaid(&said);
-    TEST_ASSERT_EQ(said.rotten, 1, "with one rotten range of FILES");
-    TEST_ASSERT(said.locked > 0, "whose files are locked");
-    TEST_ASSERT(TagFSFileLocked(fid), "the leaf's first file among them");
-    TEST_ASSERT(tagfs_open(fid, TAGFS_HANDLE_READ) == NULL, "and no open of it is handed out");
-    TEST_ASSERT(said.held > 0, "and the blocks they named are held");
-out:
-    BlockFailDisarm();
-    if (!down && tagfs_get_state()->initialized)
-        TagFSStandLetGo();
-    StandTallyArrive();
-    MountBookStandSaid(&said);
-    if (said.rotten != 0 || TagFSFileLocked(fid))
-        verdict = TestFailedAt(__FILE__, __LINE__, "mounted with the sectors reading again, a range "
-                               "is still rotten (rotten, 0)", said.rotten, 0);
     StandTallyClose();
     return verdict;
 }
@@ -952,7 +841,7 @@ static const TestCase g_stand_tally_tests[] = {
     { .name = "stand_tally_copy_one_rotten", .func = TestStandTallyCopyOneRotten,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_tally_rotten_leaf_locked", .func = TestStandTallyRottenLeafLocked,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_tally_writes_refused", .func = TestStandTallyWritesRefused,
       .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
     { .name = "stand_tally_rot_three_paths", .func = TestStandTallyRotThreePaths,

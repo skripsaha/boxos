@@ -56,6 +56,14 @@ TestResult  TestStandTipInCostLives(void);
 TestResult  TestStandTipInCostFiles(void);
 TestResult  TestStandTipInTornDown(void);
 
+/* stand_tally_range_tests.c: a FILES leaf neither copy of which reads, a
+ * rotten range (C19) — its Tallies written first where no leaf is one every
+ * slot names as it lies — a case of the stand_tally suite. And
+ * stand_book_room_quire_tests.c: a next_quire given clear of the files the
+ * newest Tally names (§3.7) — a case of the stand_book_room suite. */
+TestResult  TestStandTallyRottenLeafLocked(void);
+TestResult  TestStandBookRoomNextQuireClear(void);
+
 #define STAND_BINDER_PUT_BACK(b)                                                                           \
     do {                                                                                                   \
         if (!StandBinderPutBack(b))                                                                        \

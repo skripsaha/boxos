@@ -275,7 +275,12 @@ census_book() {
 # booted three times. BIOS, four cores, its seat an ATA disk; then the padded
 # landing of it (self-test --emit B4p: the image's files and forty more, whose
 # FILES tree is a root over two leaves) the same way, for the one test that
-# needs a leaf below a root to rot (stand_tally_rotten_leaf_locked); then the
+# needs a leaf below a root to rot (stand_tally_rotten_leaf_locked) — planted
+# before the first boot, over the image as it was made: the boot's tests leave
+# its files as they found them, not its Tally and ribbon, and on the book they
+# left the grown Tally's next_quire falls on the free run the landing's files
+# take (selftest_book_tally.py Padded: "would lie over the landings' files"),
+# so planted after it the leg was never booted; then the
 # image again under UEFI, STRICT, four cores, its seat an AHCI port — the seat
 # whose reads go through the port, parked on each answer, so the rotten block
 # is refused on the port's road too (stand_tally_rot_three_paths), and every
@@ -549,7 +554,7 @@ stand_book_judge() {
 
 # stand_book — the book's three boots (above).
 stand_book() {
-    local img="$SCRATCH/stand.book_padded.img" keep=${STAND_FORMAT:-} booted
+    local img="$SCRATCH/stand.book_padded.img" keep=${STAND_FORMAT:-} booted planted
     rm -f build/boxos.img "$img" "$SCRATCH"/serial.stand_book.log "$SCRATCH"/serial.stand_book_padded.log \
           "$SCRATCH"/serial.stand_book_uefi.log
     STAND_FORMAT=v2
@@ -560,11 +565,13 @@ stand_book() {
         return
     fi
     booted=$(stand_book_census build/boxos.img)
+    python3 tools/volume-read.py build/boxos.img self-test --emit B4p --out "$img" \
+        >"$SCRATCH/stand.book_padded.emit" 2>&1
+    planted=$?
     stand_boot stand_book CORES=4 MEM=4G
     [ $? = 2 ] || stand_book_judge stand_book "the book, BIOS 4c" "$STAND_BOOK_BLOCKFAILS" \
         stand_tally_rotten_leaf_locked aside build/boxos.img "$booted"
-    if python3 tools/volume-read.py build/boxos.img self-test --emit B4p --out "$img" \
-            >"$SCRATCH/stand.book_padded.emit" 2>&1; then
+    if [ "$planted" = 0 ]; then
         booted=$(stand_book_census "$img")
         stand_boot stand_book_padded BOOTDISK="$img" CORES=4 MEM=4G
         [ $? = 2 ] || stand_book_judge stand_book_padded "the padded book, BIOS 4c" \
