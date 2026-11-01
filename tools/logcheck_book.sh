@@ -391,8 +391,8 @@ census_book() {
 #                                                                             command stands it down
 #   stand_run_refused_inside_fresh_through_the_port 0       0       1     1   the same, through the port
 #   the rows above                                36       72      40    33
-#   every other test the book runs                59       59      59    59   the same on every leg (below)
-#   total                                         95      131      99    92
+#   every other test the book runs                60       60      60    60   the same on every leg (below)
+#   total                                         96      132     100    93
 #   stand_stitch_refused_everywhere                N        N       N     N   every attempt, as many as its line says
 #   stand_stitch_retry_runs_out                    N        N       N     N   a stitch and every atom of the next: its line
 #   stand_slip_refused_tail, stand_escheat_tail,   N        N       N     N   the reads of a Slip's tail block the Helm's
@@ -402,18 +402,18 @@ census_book() {
 # Every test of the tree runs on a book, the neutral ones among them (spec_v2
 # §16.5 п.22). A test whose refusals differ from one leg to another is a row
 # above, so each column differs from the next by its rows alone; the rest —
-# 59, the same on every leg — is the refusals of the tests the rows do not
+# 60, the same on every leg — is the refusals of the tests the rows do not
 # name, counted on each leg's boots (two boots each the same): the log names
 # no test a refusal is of, so that one number is a run's, the rows the code's.
 # A test that comes to refuse otherwise on a leg is a row of its own.
-STAND_BOOK_BLOCKFAILS=95
-STAND_BOOK_PADDED_BLOCKFAILS=131
-STAND_BOOK_UEFI_BLOCKFAILS=99
+STAND_BOOK_BLOCKFAILS=96
+STAND_BOOK_PADDED_BLOCKFAILS=132
+STAND_BOOK_UEFI_BLOCKFAILS=100
 # The book on a USB stick (stand_book_usb): the usb column — its seat's reads
 # go through the port as on UEFI, so stand_tally_rotten_leaf_locked stands
 # down there and refuses nothing, and the stick is no AHCI port for
 # stand_roadstead_refusal_rings_once to refuse on.
-STAND_BOOK_USB_BLOCKFAILS=92
+STAND_BOOK_USB_BLOCKFAILS=93
 STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
 # C13 (stand_docket_closed_damaged): sector 1 of a stitch the kernel sewed will
 # not read at the next mount — the line names it and the record bytes it took.
