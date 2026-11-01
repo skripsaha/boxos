@@ -671,9 +671,15 @@ static void io_flush_state(StrandPrintState *ps)
         lane_flush_run(ps);
 }
 
+static void arrow_flush(StrandPrintState *ps);
+
+/* The strand's staged run to the screen, and what the arrow gathered to its
+ * file. */
 void io_flush(void)
 {
-    io_flush_state(print_state_self());
+    StrandPrintState *ps = print_state_self();
+    io_flush_state(ps);
+    arrow_flush(ps);
 }
 
 /* ===========================================================================
@@ -809,59 +815,135 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
  * reached by print_to_screen — the editor's echo and a prompt are for the
  * person, not for the file. A file that will not take the output ends the
  * arrow: it is said on the screen once and everything goes there from then on.
+ *
+ * What is printed is gathered, and added to the file a gathering at a time —
+ * when it is full, and at io_flush, which exit() and strand_exit() call — not a
+ * write a call. A write is a change of the volume, and a run is as short as a
+ * colour: MEASURED, `loupe say.elf -> say.hex`, which colours each byte by its
+ * kind, wrote its 772 KB in 193 thousand writes and took 87 s, longer than the
+ * same lines took to draw; gathered, 1 s. The shell reads the file once the
+ * program is gone, and by then the program's exit has added the rest; a
+ * program that dies without exiting loses what it had gathered, as its
+ * unfinished line on the screen is lost.
  * =========================================================================== */
+#define ARROW_GATHER 65536u
+
 static struct {
     umutex_t lock;
     uint64_t offset;
     bool     found;
     bool     given_up;
-} g_arrow = { UMUTEX_INIT, 0, false, false };
+    char    *gathered;     /* ARROW_GATHER bytes, had with the first byte */
+    size_t   used;
+} g_arrow = { UMUTEX_INIT, 0, false, false, NULL, 0 };
 
-static bool arrow_append(file_id_t file, const char *bytes, size_t len)
+/* As much of `bytes` as the file takes, added at its end. */
+static size_t arrow_put_locked(file_id_t file, const char *bytes, size_t len)
 {
-    bool said = false;
-
-    umutex_lock(&g_arrow.lock);
-    bool ok = !g_arrow.given_up;
-    if (ok && !g_arrow.found) {
+    if (!g_arrow.found) {
         FileMetadata metadata;
-        ok = FileMetadataRead(file, &metadata) == 0;
-        if (ok) {
-            g_arrow.offset = metadata.Size;
-            g_arrow.found  = true;
-            FileMetadataRelease(&metadata);
-        }
+        if (FileMetadataRead(file, &metadata) != 0) return 0;
+        g_arrow.offset = metadata.Size;
+        g_arrow.found  = true;
+        FileMetadataRelease(&metadata);
     }
-    while (ok && len > 0) {
-        int64_t wrote = fwrite(file, g_arrow.offset, bytes, len);
-        if (wrote <= 0) {
-            ok = false;
-            break;
-        }
-        g_arrow.offset += (uint64_t)wrote;
-        bytes += wrote;
-        len   -= (size_t)wrote;
-    }
-    if (!ok && !g_arrow.given_up) {
-        g_arrow.given_up = true;
-        said = true;
-    }
-    umutex_unlock(&g_arrow.lock);
 
-    if (said) print_to_screen("[print] the file after -> would not take the output; it goes to the screen\n");
+    size_t took = 0;
+    while (took < len) {
+        int64_t wrote = fwrite(file, g_arrow.offset, bytes + took, len - took);
+        if (wrote <= 0) break;
+        g_arrow.offset += (uint64_t)wrote;
+        took           += (size_t)wrote;
+    }
+    return took;
+}
+
+/* What was gathered, into the file. False when the file would not take all
+ * of it: the arrow is given up, and *Spill is the part never written. */
+static bool arrow_empty_locked(file_id_t file, const char **spill, size_t *spill_len)
+{
+    size_t took = arrow_put_locked(file, g_arrow.gathered, g_arrow.used);
+    bool   ok   = took == g_arrow.used;
+    if (!ok) {
+        *spill     = g_arrow.gathered + took;
+        *spill_len = g_arrow.used - took;
+    }
+    g_arrow.used = 0;
     return ok;
 }
 
-/* Did the file take these bytes; false sends them to the screen. */
-static bool arrow_write(const char *bytes, size_t len)
+/* The arrow given up, by the one who gave it up: said once, and the bytes it
+ * gathered and the file never took shown in its place. Nobody gathers once it
+ * is given up, so the gathering is this caller's alone to show and free. */
+static void arrow_end(StrandPrintState *ps, const char *spill, size_t spill_len)
+{
+    print_to_screen("[print] the file after -> would not take the output; it goes to the screen\n");
+    if (spill_len) emit_run(ps, spill, (int)spill_len, COLOR_DEFAULT, COLOR_DEFAULT);
+
+    umutex_lock(&g_arrow.lock);
+    free(g_arrow.gathered);
+    g_arrow.gathered = NULL;
+    umutex_unlock(&g_arrow.lock);
+}
+
+/* Did the file take these bytes — written, or gathered to be; false sends
+ * them to the screen. Without memory for a gathering each call is written as
+ * it comes, as it always was. */
+static bool arrow_write(StrandPrintState *ps, const char *bytes, size_t len)
 {
     file_id_t file = form_screen_file();
-    return file != 0 && arrow_append(file, bytes, len);
+    if (file == 0) return false;
+
+    const char *spill     = NULL;
+    size_t      spill_len = 0;
+    bool        ended     = false;
+
+    umutex_lock(&g_arrow.lock);
+    bool ok = !g_arrow.given_up;
+    if (ok && !g_arrow.gathered) g_arrow.gathered = malloc(ARROW_GATHER);
+    if (ok && g_arrow.gathered && len > ARROW_GATHER - g_arrow.used)
+        ok = arrow_empty_locked(file, &spill, &spill_len);
+    if (ok) {
+        if (g_arrow.gathered && len <= ARROW_GATHER - g_arrow.used) {
+            memcpy(g_arrow.gathered + g_arrow.used, bytes, len);
+            g_arrow.used += len;
+        } else {
+            ok = arrow_put_locked(file, bytes, len) == len;
+        }
+    }
+    if (!ok && !g_arrow.given_up) {
+        g_arrow.given_up = true;
+        ended = true;
+    }
+    umutex_unlock(&g_arrow.lock);
+
+    if (ended) arrow_end(ps, spill, spill_len);
+    return ok;
+}
+
+/* The gathering into the file now. */
+static void arrow_flush(StrandPrintState *ps)
+{
+    file_id_t file = form_screen_file();
+    if (file == 0) return;
+
+    const char *spill     = NULL;
+    size_t      spill_len = 0;
+    bool        ended     = false;
+
+    umutex_lock(&g_arrow.lock);
+    if (!g_arrow.given_up && g_arrow.used > 0 && !arrow_empty_locked(file, &spill, &spill_len)) {
+        g_arrow.given_up = true;
+        ended = true;
+    }
+    umutex_unlock(&g_arrow.lock);
+
+    if (ended) arrow_end(ps, spill, spill_len);
 }
 
 static void emit_text(StrandPrintState *ps, const char *bytes, int len, Color fg, Color bg)
 {
-    if (len > 0 && arrow_write(bytes, (size_t)len)) return;
+    if (len > 0 && arrow_write(ps, bytes, (size_t)len)) return;
     emit_run(ps, bytes, len, fg, bg);
 }
 

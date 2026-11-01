@@ -20,7 +20,9 @@ uint32_t io_get_display_pid(void);
 
 /* With `cmd -> file` (box/form.h) everything a program prints — print, println,
  * print_bytes, printf, and std::cout above them — is added to the end of that
- * file, colours dropped, and none of it reaches the screen. */
+ * file, colours dropped, and none of it reaches the screen. It is gathered and
+ * added a gathering at a time; io_flush() adds what is gathered now, and exit()
+ * does before the program ends. */
 void print(const char* str);
 void println(const char* str);
 
