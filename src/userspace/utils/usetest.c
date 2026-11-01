@@ -6,7 +6,9 @@
  * on: use_set is taken; a file created inside the context is stamped with it;
  * a query inside the context sees that file and not one created everywhere;
  * a query everywhere sees both; use_get reports the context; use_clear puts
- * the walls away. Whatever context the user had is restored at the end, and
+ * the walls away; use_change adds a tag after the one standing and takes tags
+ * out, one word each, until none is left. Whatever context the user had is
+ * restored at the end, and
  * both probe files are erased — the volume is left as it was found.
  *
  * Prints "[USE] PASS" or "[USE] FAIL: <what>"; the stress matrix gates on it.
@@ -24,6 +26,7 @@
 BOX_FORM("");
 
 #define PROBE_TAG    "use:probe"
+#define PROBE_MORE   "use:probe:more"
 #define PROBE_INSIDE "use_probe_in"
 #define PROBE_OUT    "use_probe_out"
 
@@ -108,6 +111,31 @@ int main(void)
         verdict = fail("after use_clear both files should be visible", 0);
         goto restore;
     }
+
+    /* Change: a tag added after the one standing, then each taken out — a
+     * word each, remembered by the volume, until no context is left. */
+    rc = use_set(PROBE_TAG, NULL);
+    if (rc < 0) { verdict = fail("use_set before the change", rc); goto restore; }
+    rc = use_change(PROBE_MORE, NULL, &remembered);
+    if (rc < 0) { verdict = fail("use_change adding a tag", rc); goto restore; }
+    if (!remembered) { verdict = fail("the volume did not remember the change", 0); goto restore; }
+    rc = use_get(got, sizeof(got), NULL);
+    if (rc != 2 || strcmp(got, PROBE_TAG "," PROBE_MORE) != 0) {
+        verdict = fail("the added tag does not stand after the one said before", rc < 0 ? rc : 0);
+        goto restore;
+    }
+    rc = use_change(NULL, PROBE_TAG, &remembered);
+    if (rc < 0) { verdict = fail("use_change taking a tag out", rc); goto restore; }
+    rc = use_get(got, sizeof(got), NULL);
+    if (rc != 1 || strcmp(got, PROBE_MORE) != 0) {
+        verdict = fail("the tag taken out still stands", rc < 0 ? rc : 0);
+        goto restore;
+    }
+    rc = use_change(NULL, PROBE_MORE, &remembered);
+    if (rc < 0) { verdict = fail("use_change taking the last tag out", rc); goto restore; }
+    if (!remembered) { verdict = fail("the volume did not remember the context cleared by a change", 0); goto restore; }
+    rc = use_get(got, sizeof(got), NULL);
+    if (rc != 0) { verdict = fail("a change that took every tag out left a context", rc < 0 ? rc : 0); goto restore; }
 
 restore:
     if (inside_id > 0) delete((file_id_t)inside_id);

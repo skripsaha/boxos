@@ -128,7 +128,7 @@ bool StandStitchPutBack(const StandStitch* s)
     ok &= StandStitchZeroQuire(s, &now.next);
     ok &= StandStitchZeroQuire(s, &now.sewn_hop);
     if (!s->context)
-        UseContextClear();
+        UseContextClear(NULL);
     kprintf("[TESTS] stand_stitch: the ribbon is put back as it was found\n");
     StandRibbonArrive();
     TagFSStandHoldAgain();

@@ -63,9 +63,9 @@ static void StandUseRestore(UseList* saved)
 {
     UseText* text = UseListText(saved);
     if (text)
-        UseContextSet(text->text, text->bytes);
+        UseContextSet(text->text, text->bytes, NULL);
     else
-        UseContextClear();
+        UseContextClear(NULL);
     UseListDrop(saved);
 }
 
@@ -104,7 +104,7 @@ static TestResult TestStandUseLooksUpOnly(void)
     char*      list    = StandUseList(NULL, "standuse", STAND_USE_FRESH, &len);
 
     TEST_ASSERT(list != NULL, "memory for ten thousand tags");
-    TEST_ASSERT_OK(UseContextSet(list, len), "a context of ten thousand new tags is said");
+    TEST_ASSERT_OK(UseContextSet(list, len, NULL), "a context of ten thousand new tags is said");
     now = UseContextHold();
     TEST_ASSERT_EQ(UseListCount(now), STAND_USE_FRESH, "every tag is in it");
     TEST_ASSERT(UseListText(now)->bytes == len && memcmp(UseListText(now)->text, list, len) == 0,
@@ -148,9 +148,9 @@ static TestResult TestStandUseLaterWordStands(void)
     uint64_t    late_saying = 0;
     UseText*    medium      = NULL;
 
-    TEST_ASSERT_OK(UseContextSet(quiet, sizeof(quiet) - 1), "the short word is said");
+    TEST_ASSERT_OK(UseContextSet(quiet, sizeof(quiet) - 1, NULL), "the short word is said");
     early = UseContextHold();
-    TEST_ASSERT_OK(UseContextSet(night, sizeof(night) - 1), "and the long one after it");
+    TEST_ASSERT_OK(UseContextSet(night, sizeof(night) - 1, NULL), "and the long one after it");
     late = UseContextHold();
 
     changed = true;
@@ -265,7 +265,7 @@ static TestResult TestStandUseVerdictIsOneCompare(void)
     proc = StandUseStrand(id, &cabin);
     TEST_ASSERT(proc != NULL, "memory for a stand-in strand");
 
-    TEST_ASSERT_OK(UseContextSet("system", 6), "a context of one tag is said");
+    TEST_ASSERT_OK(UseContextSet("system", 6, NULL), "a context of one tag is said");
     UseContextVerdictRefresh(proc);
     uint64_t narrow = StandUseAsk(proc, &answer);
     TEST_ASSERT(answer, "a strand wearing the one tag is in the tier");
@@ -281,7 +281,7 @@ static TestResult TestStandUseVerdictIsOneCompare(void)
 
     list = StandUseList("system", "standwide", STAND_USE_WIDE - 1, &len);
     TEST_ASSERT(list != NULL, "memory for a hundred thousand tags");
-    TEST_ASSERT_OK(UseContextSet(list, len), "a context of a hundred thousand tags is said");
+    TEST_ASSERT_OK(UseContextSet(list, len, NULL), "a context of a hundred thousand tags is said");
     UseContextVerdictRefresh(proc);
     uint64_t wide = StandUseAsk(proc, &answer);
     TEST_ASSERT(!answer, "tags the volume has no number for put nobody in the tier");

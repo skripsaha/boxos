@@ -220,31 +220,24 @@ static void UseListFill(UseList *l, const TagSpelling *tags, const uint32_t *ord
 }
 
 /*
- * A comma-separated list read into a context. The whole list is spelled
- * before anything is sized by it, and a tag that does not spell refuses it
- * with the spelling's code. Repeats are found by sorting — n log n compares,
- * not every tag against every other — and the first saying of each is kept.
- * *out is NULL, with OK, for a list that names no tag.
+ * Spelled tags made a list: repeats found by sorting — n log n compares, not
+ * every tag against every other — and the first saying of each kept, in the
+ * order said. The spellings point into text the caller holds while this
+ * runs; the list copies what it keeps. *out is NULL, with OK, for no tag.
  */
-static error_t UseListParse(const char *list, size_t len, UseList **out)
+static error_t UseListOfSpellings(const TagSpelling *tags, uint32_t spoken, UseList **out)
 {
     *out = NULL;
-    uint32_t spoken = 0;
-    error_t  rc     = TagListCount(list, len, &spoken);
-    if (rc != OK || spoken == 0) return rc;
+    if (spoken == 0) return OK;
 
-    TagSpelling *tags  = kmalloc(sizeof(TagSpelling) * spoken);
-    uint32_t    *order = kmalloc(sizeof(uint32_t) * spoken);
-    uint32_t    *place = kmalloc(sizeof(uint32_t) * spoken);
-    rc = ERR_NO_MEMORY;
-    if (!tags || !order || !place) goto done;
+    uint32_t *order = kmalloc(sizeof(uint32_t) * spoken);
+    uint32_t *place = kmalloc(sizeof(uint32_t) * spoken);
+    error_t   rc    = ERR_NO_MEMORY;
+    if (!order || !place) goto done;
 
-    size_t at = 0;
-    for (uint32_t k = 0; k < spoken; k++) {
-        (void)TagListNext(list, len, &at, &tags[k]);   /* judged whole above */
+    for (uint32_t k = 0; k < spoken; k++)
         order[k] = k;
-    }
-    KSort(order, spoken, sizeof(uint32_t), UseSpokenOrder, tags);
+    KSort(order, spoken, sizeof(uint32_t), UseSpokenOrder, (void *)tags);
 
     for (uint32_t s = 0; s < spoken; s++) {
         bool repeat = s > 0 && TagSpellingCompare(&tags[order[s]], &tags[order[s - 1]]) == 0;
@@ -269,9 +262,31 @@ static error_t UseListParse(const char *list, size_t len, UseList **out)
     *out = l;
     rc   = OK;
 done:
-    kfree(tags);
     kfree(order);
     kfree(place);
+    return rc;
+}
+
+/*
+ * A comma-separated list read into a context. The whole list is spelled
+ * before anything is sized by it, and a tag that does not spell refuses it
+ * with the spelling's code. *out is NULL, with OK, for a list that names no
+ * tag.
+ */
+static error_t UseListParse(const char *list, size_t len, UseList **out)
+{
+    *out = NULL;
+    uint32_t spoken = 0;
+    error_t  rc     = TagListCount(list, len, &spoken);
+    if (rc != OK || spoken == 0) return rc;
+
+    TagSpelling *tags = kmalloc(sizeof(TagSpelling) * spoken);
+    if (!tags) return ERR_NO_MEMORY;
+    size_t at = 0;
+    for (uint32_t k = 0; k < spoken; k++)
+        (void)TagListNext(list, len, &at, &tags[k]);   /* judged whole above */
+    rc = UseListOfSpellings(tags, spoken, out);
+    kfree(tags);
     return rc;
 }
 
@@ -327,23 +342,35 @@ void UseContextCabinChanged(void)
     UseEpochRaise();
 }
 
+/* What a conditional saying was made over: the list the context held and
+ * how many words had been said. */
+typedef struct UseSeen {
+    const UseList *list;
+    uint64_t       said;
+} UseSeen;
+
 /*
  * `l` becomes the context — NULL for none. Unconditionally for a person's
- * word; for a volume's memory (`only_over` true) only while the machine still
- * holds none and nobody has said anything since `looked`. One store under the
- * lock; the old list is let go of outside it.
+ * word (`over` NULL); for a volume's memory or a change only while the
+ * context is still what was seen and nobody has said anything since. One
+ * store under the lock, the word's text and number taken under it for `word`;
+ * the old list is let go of outside it.
  */
-static bool UseContextInstall(UseList *l, bool only_over, uint64_t looked)
+static bool UseContextInstall(UseList *l, const UseSeen *over, UseWord *word)
 {
     UseListHold(l);
     spin_lock(&g_use.lock);
-    bool     take = !only_over || (g_use.list == NULL && g_use.said == looked);
+    bool     take = !over || (g_use.list == over->list && g_use.said == over->said);
     UseList *gone = l;
     if (take) {
         gone       = g_use.list;
         g_use.list = l;
         g_use.said++;
         __atomic_store_n(&g_use_waiting, (l && l->count) ? 1u : 0u, __ATOMIC_SEQ_CST);
+        if (word) {
+            word->said   = UseTextHold(l ? l->said : NULL);
+            word->saying = g_use.said;
+        }
     }
     spin_unlock(&g_use.lock);
     UseListDrop(gone);
@@ -389,24 +416,107 @@ static void UseListBind(UseList *l)
     if (bound) UseContextChanged();
 }
 
-error_t UseContextSet(const char *list, size_t len)
+error_t UseContextSet(const char *list, size_t len, UseWord *word)
 {
     UseList *l  = NULL;
     error_t  rc = UseListParse(list, len, &l);
     if (rc != OK) return rc;
     if (!l) {
-        UseContextClear();
+        UseContextClear(word);
         return OK;
     }
-    UseContextInstall(l, false, 0);
+    UseContextInstall(l, NULL, word);
     UseListBind(l);
     UseListDrop(l);
     return OK;
 }
 
-void UseContextClear(void)
+void UseContextClear(UseWord *word)
 {
-    UseContextInstall(NULL, false, 0);
+    UseContextInstall(NULL, NULL, word);
+}
+
+/*
+ * The list `now` would be after a change: its own tags but those of `less`,
+ * then the tags of `more` it does not say yet and `less` does not take out,
+ * in the order said. *differs false when that is `now` exactly — then *out is
+ * NULL and nothing is built; *out NULL with *differs true when nothing is
+ * left. The spellings point into the three lists, which the caller holds.
+ */
+static error_t UseListChanged(const UseList *now, const UseList *more, const UseList *less,
+                              UseList **out, bool *differs)
+{
+    *out     = NULL;
+    *differs = false;
+    uint32_t room = UseListCount(now) + UseListCount(more);
+    if (room == 0) return OK;
+
+    TagSpelling *kept = kmalloc(sizeof(TagSpelling) * room);
+    if (!kept) return ERR_NO_MEMORY;
+    uint32_t n = 0, at;
+    for (uint32_t i = 0; i < UseListCount(now); i++) {
+        TagSpelling tag = UseListTag(now, i);
+        if (less && UseListFind(less, &tag, &at)) {
+            *differs = true;
+            continue;
+        }
+        kept[n++] = tag;
+    }
+    for (uint32_t i = 0; i < UseListCount(more); i++) {
+        TagSpelling tag = UseListTag(more, i);
+        if ((now && UseListFind(now, &tag, &at)) || (less && UseListFind(less, &tag, &at)))
+            continue;
+        kept[n++] = tag;
+        *differs  = true;
+    }
+    error_t rc = *differs ? UseListOfSpellings(kept, n, out) : OK;
+    kfree(kept);
+    return rc;
+}
+
+/*
+ * The change is built from the context as it was seen, outside every lock,
+ * and set only over that same context; a word said meanwhile is looked at
+ * again and changed in turn. Each round that does not set lost to a word that
+ * did, so the change is never starved by its own retries.
+ */
+error_t UseContextChange(const char *add, size_t add_len, const char *drop, size_t drop_len,
+                         UseWord *word, bool *changed)
+{
+    UseList *more = NULL, *less = NULL;
+    error_t  rc   = UseListParse(add, add_len, &more);
+    if (rc == OK) rc = UseListParse(drop, drop_len, &less);
+    if (changed) *changed = false;
+
+    while (rc == OK) {
+        spin_lock(&g_use.lock);
+        UseList *now  = UseListHold(g_use.list);
+        UseSeen  seen = { now, g_use.said };
+        spin_unlock(&g_use.lock);
+
+        UseList *next    = NULL;
+        bool     differs = false;
+        rc = UseListChanged(now, more, less, &next, &differs);
+        if (rc == OK && !differs) {
+            if (word) {
+                word->said   = UseTextHold(now ? now->said : NULL);
+                word->saying = seen.said;
+            }
+            UseListDrop(now);
+            break;
+        }
+        bool took = rc == OK && UseContextInstall(next, &seen, word);
+        UseListDrop(now);
+        if (took) {
+            UseListBind(next);
+            if (changed) *changed = true;
+        }
+        UseListDrop(next);
+        if (took) break;
+    }
+    UseListDrop(more);
+    UseListDrop(less);
+    return rc;
 }
 
 void UseContextBindTag(const TagSpelling *tag, uint32_t tag_id)
@@ -621,16 +731,6 @@ void UseContextServiceIfPending(void)
  * The volume's memory
  * ------------------------------------------------------------------------- */
 
-UseText *UseContextSaying(uint64_t *out_saying)
-{
-    spin_lock(&g_use.lock);
-    UseText *said   = UseTextHold(g_use.list ? g_use.list->said : NULL);
-    uint64_t saying = g_use.said;
-    spin_unlock(&g_use.lock);
-    *out_saying = saying;
-    return said;
-}
-
 void UseContextRemember(bool *remembered)
 {
     bool kept = false;
@@ -702,7 +802,8 @@ static bool UseContextAdopt(const UseText *memory, uint64_t looked)
     }
     if (!l) return true;
 
-    bool adopted = UseContextInstall(l, true, looked);
+    UseSeen nothing = { NULL, looked };
+    bool    adopted = UseContextInstall(l, &nothing, NULL);
     if (adopted) {
         UseListBind(l);
         UseRecallSay(l);
@@ -752,7 +853,7 @@ void UseContextInit(void)
 
 void UseContextShutdown(void)
 {
-    UseContextClear();
+    UseContextClear(NULL);
     spin_lock(&g_use.lock);
     UseSnapshot *s = g_use.snapshot;
     g_use.snapshot = NULL;

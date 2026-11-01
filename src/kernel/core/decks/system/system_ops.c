@@ -1575,23 +1575,23 @@ static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate
  *  Use Context (use) — what the user is doing, said in tags
  * ========================================================================= */
 
-/* After a set or a clear: the volume is told, and the caller learns whether
- * it listened. out_crate (optional): u8 — 1 when the volume now remembers
- * exactly this context, 0 when it does not (no volume up, no ground on it for
- * the context, a medium that will not take the write, a later word already
- * said to it). The context itself is set either way; the person is told,
- * never refused. A word the medium does not hold yet is answered when the
- * Settle cycle that carries it settles: the caller waits behind its Chit,
- * never inside the kernel. */
-static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext *ctx)
+/* After a set, a clear or a change: the volume is told the caller's own word,
+ * and the caller learns whether it listened. out_crate (optional): u8 — 1 when
+ * the volume now remembers exactly this word, 0 when it does not (no volume
+ * up, no ground on it for the context, a medium that will not take the write,
+ * a later word already said to it). The context itself is set either way; the
+ * person is told, never refused. A word the medium does not hold yet is
+ * answered when the Settle cycle that carries it settles: the caller waits
+ * behind its Chit, never inside the kernel. The word's text is let go of
+ * here. */
+static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                            UseWord *word)
 {
     Crate *out = (op->out_crate != CRATE_INDEX_NONE && crates[op->out_crate].capacity >= 1)
                      ? &crates[op->out_crate]
                      : NULL;
-    uint64_t saying = 0;
-    UseText *said   = UseContextSaying(&saying);
-    int      rc     = SettleUseRemembered(said, saying, ctx, crates, out);
-    UseTextDrop(said);
+    int rc = SettleUseRemembered(word->said, word->saying, ctx, crates, out);
+    UseTextDrop(word->said);
     return rc;
 }
 
@@ -1608,9 +1608,10 @@ static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     (void)crate_count;
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
 
+    UseWord word = { NULL, 0 };
     if (op->in_crate == CRATE_INDEX_NONE || crates[op->in_crate].size == 0) {
-        UseContextClear();
-        return UseSayRemembered(op, crates, ctx);
+        UseContextClear(&word);
+        return UseSayRemembered(op, crates, ctx, &word);
     }
 
     Crate *src = &crates[op->in_crate];
@@ -1618,10 +1619,44 @@ static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (!raw) return ERR_INVALID_ADDRESS;
 
     /* Read at the crate's own length: the context copies what it keeps. */
-    error_t rc = UseContextSet(raw, src->size);
+    error_t rc = UseContextSet(raw, src->size, &word);
     crate_buf_free(raw);
     if (rc != OK) return rc;   /* refused: the context is as it was, nothing to tell */
-    return UseSayRemembered(op, crates, ctx);
+    return UseSayRemembered(op, crates, ctx, &word);
+}
+
+/* SYSTEM_OP_USE_CHANGE  in_crate: [u32 n][n bytes: the tags to add][the rest:
+ * the tags to take out], each a comma-separated list, either empty. The
+ * context changed in one word — never half of it seen — over whatever was
+ * said meanwhile (UseContextChange). out_crate (optional): u8 remembered, as
+ * use.set's; for a change that changes nothing it is said of the word that
+ * stands. */
+static int SysUseChange(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                        const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
+    if (op->in_crate == CRATE_INDEX_NONE || crates[op->in_crate].size < sizeof(uint32_t))
+        return ERR_INVALID_ARGUMENT;
+
+    Crate      *src = &crates[op->in_crate];
+    const char *raw = crate_in_buf(src, ctx);
+    if (!raw) return ERR_INVALID_ADDRESS;
+
+    uint32_t add_len = 0;
+    memcpy(&add_len, raw, sizeof(add_len));
+    size_t lists = src->size - sizeof(add_len);
+    if (add_len > lists) {
+        crate_buf_free((void *)raw);
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    UseWord word = { NULL, 0 };
+    const char *add = raw + sizeof(add_len);
+    error_t rc = UseContextChange(add, add_len, add + add_len, lists - add_len, &word, NULL);
+    crate_buf_free((void *)raw);
+    if (rc != OK) return rc;   /* refused: the context is as it was, nothing to tell */
+    return UseSayRemembered(op, crates, ctx, &word);
 }
 
 /* SYSTEM_OP_USE_CLEAR  nothing in; out_crate (optional): u8 remembered — see
@@ -1631,8 +1666,9 @@ static int SysUseClear(const ManifestOp *op, Crate *crates, uint16_t crate_count
 {
     (void)crate_count;
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    UseContextClear();
-    return UseSayRemembered(op, crates, ctx);
+    UseWord word = { NULL, 0 };
+    UseContextClear(&word);
+    return UseSayRemembered(op, crates, ctx, &word);
 }
 
 /* SYSTEM_OP_USE_GET  out_crate: [u32 count][u32 needed][(u16 len)(char tag[len])]*
@@ -2385,11 +2421,12 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_STRAND_EXIT,  SysStrandExit,  OP_AUTH_NONE,   "system.strand.exit"},
         { SYSTEM_OP_STRAND_POOL_BIND, SysStrandPoolBind, OP_AUTH_APP, "system.strand.pool.bind"},
         { SYSTEM_OP_INFO,         SysInfo,        OP_AUTH_NONE,   "system.info"       },
-        /* Use Context: what the user is doing, said in tags. set and clear
-         * speak for the user, so they take system authority — the shell, or a
-         * program wearing `system`. get is anyone's: any program may ask what
-         * the user is doing. */
+        /* Use Context: what the user is doing, said in tags. set, change and
+         * clear speak for the user, so they take system authority — the
+         * shell, or a program wearing `system`. get is anyone's: any program
+         * may ask what the user is doing. */
         { SYSTEM_OP_USE_SET,      SysUseSet,      OP_AUTH_SYSTEM, "system.use.set"    },
+        { SYSTEM_OP_USE_CHANGE,   SysUseChange,   OP_AUTH_SYSTEM, "system.use.change" },
         { SYSTEM_OP_USE_GET,      SysUseGet,      OP_AUTH_NONE,   "system.use.get"    },
         { SYSTEM_OP_USE_CLEAR,    SysUseClear,    OP_AUTH_SYSTEM, "system.use.clear"  },
         /* Tags: app+. */

@@ -37,9 +37,9 @@ static void use_snapshot_restore(UseList* saved)
 {
     const UseText* text = UseListText(saved);
     if (text)
-        UseContextSet(text->text, text->bytes);
+        UseContextSet(text->text, text->bytes, NULL);
     else
-        UseContextClear();
+        UseContextClear(NULL);
     UseListDrop(saved);
 }
 
@@ -101,7 +101,7 @@ static TestResult test_use_context_spelling(void)
     UseList*   now     = NULL;
     char       unfit[300];
 
-    TEST_ASSERT_OK(UseContextSet(said, sizeof(said) - 1),
+    TEST_ASSERT_OK(UseContextSet(said, sizeof(said) - 1, NULL),
                    "a list with blanks, an empty value and a repeat is a context");
     now = UseContextHold();
     TEST_ASSERT(now != NULL, "the context is set");
@@ -113,12 +113,93 @@ static TestResult test_use_context_spelling(void)
 
     memset(unfit, 'k', sizeof(unfit) - 1);
     unfit[sizeof(unfit) - 1] = '\0';
-    TEST_ASSERT_EQ(UseContextSet(unfit, sizeof(unfit) - 1), ERR_TAGFS_TAG_TOO_LONG,
+    TEST_ASSERT_EQ(UseContextSet(unfit, sizeof(unfit) - 1, NULL), ERR_TAGFS_TAG_TOO_LONG,
                    "a key longer than the registry's field is refused as too long");
     now = UseContextHold();
     TEST_ASSERT_EQ(UseListCount(now), 3, "the refusal left the context as it was");
 out:
     UseListDrop(now);
+    use_snapshot_restore(saved);
+    return verdict;
+}
+
+/* Change: tags added after those said, one said already kept where it was,
+ * tags taken out, one in both lists taken out, a change of nothing told so
+ * with no word said, everything taken out clears, an unfit tag refuses the
+ * change with the context as it was — and every saying answers with its own
+ * word, the earlier one still saying what it said. */
+static TestResult test_use_context_change(void)
+{
+    static const char two[]        = "use:test:a,use:test:b";
+    static const char add[]        = "use:test:c, use:test:a";
+    static const char drop[]       = "use:test:b";
+    static const char changed_to[] = "use:test:a,use:test:c";
+    static const char said_again[] = "use:test:a";
+    static const char other[]      = "use:test:x";
+    static const char both[]       = "use:test:d";
+    static const char lone[]       = "use:test:e";
+    TestResult verdict = TEST_PASS;
+    UseList*   saved   = UseContextHold();
+    UseList*   now     = NULL;
+    UseWord    first   = { NULL, 0 };
+    UseWord    second  = { NULL, 0 };
+    UseWord    word    = { NULL, 0 };
+    bool       changed = false;
+    char       unfit[300];
+
+    TEST_ASSERT_OK(UseContextSet(two, sizeof(two) - 1, &first), "a context of two tags");
+    TEST_ASSERT(first.said && strcmp(first.said->text, two) == 0, "the word answered is the one said");
+
+    TEST_ASSERT_OK(UseContextChange(add, sizeof(add) - 1, drop, sizeof(drop) - 1, &second, &changed),
+                   "a tag added, one said again and one taken out, in one change");
+    TEST_ASSERT(changed, "the change changed the context");
+    TEST_ASSERT_EQ(second.saying, first.saying + 1, "a word of its own, the next one");
+    TEST_ASSERT(second.said && strcmp(second.said->text, changed_to) == 0,
+                "the one said again kept where it was, the new one after it, the other gone");
+    now = UseContextHold();
+    TEST_ASSERT(now && strcmp(UseListText(now)->text, changed_to) == 0, "and that is the context");
+    UseListDrop(now);
+    now = NULL;
+    TEST_ASSERT(strcmp(first.said->text, two) == 0, "the earlier word still says what it said");
+
+    TEST_ASSERT_OK(UseContextChange(said_again, sizeof(said_again) - 1, other, sizeof(other) - 1,
+                                    &word, &changed),
+                   "a change of nothing: a tag said already, one not said taken out");
+    TEST_ASSERT(!changed, "is told it changed nothing");
+    TEST_ASSERT_EQ(word.saying, second.saying, "and says no word: the standing one is answered");
+    UseTextDrop(word.said);
+    word.said = NULL;
+
+    TEST_ASSERT_OK(UseContextChange(both, sizeof(both) - 1, both, sizeof(both) - 1, &word, &changed),
+                   "a tag both added and taken out");
+    TEST_ASSERT(!changed, "is taken out, so nothing changed");
+    UseTextDrop(word.said);
+    word.said = NULL;
+
+    memset(unfit, 'k', sizeof(unfit) - 1);
+    unfit[sizeof(unfit) - 1] = '\0';
+    TEST_ASSERT_EQ(UseContextChange(unfit, sizeof(unfit) - 1, "", 0, &word, &changed),
+                   ERR_TAGFS_TAG_TOO_LONG, "a key longer than the registry's field refuses the change");
+    now = UseContextHold();
+    TEST_ASSERT(now && strcmp(UseListText(now)->text, changed_to) == 0,
+                "the refusal left the context as it was");
+    UseListDrop(now);
+    now = NULL;
+
+    TEST_ASSERT_OK(UseContextChange("", 0, changed_to, sizeof(changed_to) - 1, &word, &changed),
+                   "every tag taken out");
+    TEST_ASSERT(changed && word.said == NULL, "clears: the word says no context");
+    now = UseContextHold();
+    TEST_ASSERT(now == NULL, "and none stands");
+
+    TEST_ASSERT_OK(UseContextChange(lone, sizeof(lone) - 1, "", 0, &word, &changed),
+                   "a tag added to no context");
+    TEST_ASSERT(changed && word.said && strcmp(word.said->text, lone) == 0, "is the context");
+out:
+    UseListDrop(now);
+    UseTextDrop(first.said);
+    UseTextDrop(second.said);
+    UseTextDrop(word.said);
     use_snapshot_restore(saved);
     return verdict;
 }
@@ -136,7 +217,7 @@ static TestResult test_use_context_walls(void)
     uint64_t   ids[8];
     TagFSPage  page;
 
-    TEST_ASSERT_OK(UseContextSet(said, sizeof(said) - 1),
+    TEST_ASSERT_OK(UseContextSet(said, sizeof(said) - 1, NULL),
                    "a tag the volume does not know is still a context");
     now = UseContextHold();
     TEST_ASSERT_EQ(UseListCount(now), 1, "one tag");
@@ -192,7 +273,7 @@ static TestResult test_use_context_narrows(void)
 
     saved = UseContextHold();
     taken = true;
-    TEST_ASSERT_OK(UseContextSet(s_tag_text, tag_len), "a context of a tag the volume knows");
+    TEST_ASSERT_OK(UseContextSet(s_tag_text, tag_len, NULL), "a context of a tag the volume knows");
     now = UseContextHold();
 
     TEST_ASSERT(use_spelled(now), "the context's tags spell");
@@ -214,7 +295,7 @@ static TestResult test_use_context_narrows(void)
     cabin->tag_bits           = 0;
     cabin->tag_overflow_count = 0;
     bool bare = use_verdict_after_change(proc);
-    UseContextClear();
+    UseContextClear(NULL);
     if (tag_id < 64) cabin->tag_bits = (uint64_t)1 << tag_id;
     else             cabin->tag_overflow_count = 1;
     bool after_clear = use_verdict_after_change(proc);
@@ -368,6 +449,7 @@ out:
 
 static const TestCase g_use_context_tests[] = {
     { .name = "use_context_spelling",   .func = test_use_context_spelling,   .reach = TEST_READS_ONLY },
+    { .name = "use_context_change",     .func = test_use_context_change,     .reach = TEST_READS_ONLY },
     { .name = "use_context_walls",      .func = test_use_context_walls,      .reach = TEST_READS_ONLY },
     { .name = "use_context_narrows",    .func = test_use_context_narrows,    .reach = TEST_READS_ONLY },
     { .name = "use_context_remembered", .func = test_use_context_remembered, .reach = TEST_WRITES_TO_VOLUME },

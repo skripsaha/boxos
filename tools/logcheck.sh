@@ -1265,17 +1265,17 @@ run_healthy() {
     # tree registers. The numbers are the code's, not a run's (K9): a build
     # without VOLUME_TESTS walks the nine suites of tests.h TEST_SUITES not
     # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
-    # book 15, ribbon 5, integrity 3, use_context 5 TestCases, 43 run; the 11
+    # book 15, ribbon 5, integrity 3, use_context 6 TestCases, 44 run; the 11
     # whose reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
-    # g_volume_tests_allowed), and the 32 that only read pass — none of them
+    # g_volume_tests_allowed), and the 33 that only read pass — none of them
     # stands aside on this stand's fresh image, whose first file wears a tag
     # (use_context_narrows). A test added or taken out moves this line in the
     # same commit.
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
     local said
     said=$(stand_summary "$L")
-    [ "$said" = "TagFS: 43 run, 32 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
-    chk $? "TagFS startup tests: the 43 this tree registers ran, 32 reads passed and 11 writes stood down (${said:-no summary})"
+    [ "$said" = "TagFS: 44 run, 33 passed, 0 failed, 11 skipped, 0 held under a caveat" ]
+    chk $? "TagFS startup tests: the 44 this tree registers ran, 33 reads passed and 11 writes stood down (${said:-no summary})"
     lockrank_judge "$L" "healthy 1c"
 
     # (7) the kernel's ear works — mutation-proven harness, see commit
@@ -8982,7 +8982,7 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 43 (healthy says how) and
+# suite in tests.h TEST_SUITES — the plain build's 44 (healthy says how) and
 # the 254 of the stand's own thirty-two suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
@@ -8994,7 +8994,7 @@ STAND_HELD="
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=297
+STAND_RUN=298
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and

@@ -53,10 +53,15 @@
  * names): set and clear answer, in an optional 1-byte out_crate, whether it
  * now does — 1 remembered, 0 not (no volume, no ground on it for the context,
  * a medium that will not take the write, a later word already said); the
- * context is set either way. */
+ * context is set either way. change takes [u32 n][n bytes: the tags to
+ * add][the rest: the tags to take out] — each a comma-separated list, either
+ * empty — and changes the context in one word: added tags go after those it
+ * says, a tag in both lists is taken out, nothing left clears; it needs system
+ * authority and answers as set does. */
 #define SYSTEM_OP_USE_SET           0x04
 #define SYSTEM_OP_USE_GET           0x08
 #define SYSTEM_OP_USE_CLEAR         0x09
+#define SYSTEM_OP_USE_CHANGE        0x0D
 /* () -> u64 microseconds of processor time used by the CALLING cabin. Self
  * only, deliberately: another cabin's processor time is information this op
  * has no business handing out, and a question about yourself needs no

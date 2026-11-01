@@ -99,9 +99,31 @@ UseText       *UseListText(const UseList *l);
  * tag the volume registry could not hold is refused with the spelling's code
  * (ERR_TAGFS_TAG_TOO_LONG, ERR_TAGFS_INVALID_TAG) and the context is left as
  * it was. The volume's numbers are looked up, never issued.
+ *
+ * Each saying answers with its own word (`word` may be NULL): the text it
+ * said, held for the caller, and its number among the sayings — so the
+ * volume is asked whether it remembers THIS word, never one said after it.
  */
-error_t UseContextSet(const char *list, size_t len);
-void    UseContextClear(void);
+typedef struct UseWord {
+    UseText *said;       /* NULL when the word cleared; the caller drops it */
+    uint64_t saying;
+} UseWord;
+
+error_t UseContextSet(const char *list, size_t len, UseWord *word);
+void    UseContextClear(UseWord *word);
+
+/*
+ * The context changed in one word: the tags of `add` put after those it says
+ * — one it already says stays where it is — and the tags of `drop` taken out;
+ * a tag in both is taken out, and nothing left clears. Either list may be
+ * empty, and is spelled as UseContextSet spells; a tag that does not spell
+ * refuses the change and the context is left as it was. A word said by
+ * somebody else while the change was being made is changed in turn, never
+ * overwritten. *changed (optional) is false when the context already said
+ * exactly that: then no word is said, and `word` is the one standing.
+ */
+error_t UseContextChange(const char *add, size_t add_len, const char *drop, size_t drop_len,
+                         UseWord *word, bool *changed);
 
 /*
  * The scheduler's question: does this strand's cabin wear EVERY tag of the
@@ -133,11 +155,6 @@ void    UseContextCabinChanged(void);
  * The context is set all the same — the person is told, never refused.
  */
 void    UseContextRemember(bool *remembered);
-
-/* The context's text as it stands, and which word it is — for a program's
- * `use`, which tells the volume without waiting inside the kernel
- * (SettleUseRemembered). A reference the caller drops; NULL for none. */
-UseText *UseContextSaying(uint64_t *out_saying);
 
 /*
  * A volume is up — said on every road to a mounted volume. A machine holding
