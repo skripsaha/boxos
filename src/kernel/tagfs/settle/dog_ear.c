@@ -383,13 +383,30 @@ static void GroundNoted(DogEarChange* c, uint32_t side, const Strip* s, uint64_t
     }
 }
 
+/* The keys of DIGESTS over the windows of DIGEST_ITEM_MOST blocks [start,
+ * end) lies in: [*lo, *hi). */
+static void WindowsOf(uint64_t start, uint64_t end, TallyKey* lo, TallyKey* hi)
+{
+    uint64_t last = (end - 1u) / DIGEST_ITEM_MOST * DIGEST_ITEM_MOST;
+    *lo = (TallyKey){ start / DIGEST_ITEM_MOST * DIGEST_ITEM_MOST, 0 };
+    *hi = last > UINT64_MAX - DIGEST_ITEM_MOST ? DOG_EAR_END : (TallyKey){ last + DIGEST_ITEM_MOST, 0 };
+}
+
 /* The windows of DIGEST_ITEM_MOST blocks [start, end) lies in. */
 static void WindowsNoted(DogEarChange* c, uint64_t start, uint64_t end)
 {
-    uint64_t lo   = start / DIGEST_ITEM_MOST * DIGEST_ITEM_MOST;
-    uint64_t last = (end - 1u) / DIGEST_ITEM_MOST * DIGEST_ITEM_MOST;
-    SpanNoted(c, true, (TallyKey){ lo, 0 },
-              last > UINT64_MAX - DIGEST_ITEM_MOST ? DOG_EAR_END : (TallyKey){ last + DIGEST_ITEM_MOST, 0 });
+    TallyKey lo, hi;
+    WindowsOf(start, end, &lo, &hi);
+    SpanNoted(c, true, lo, hi);
+}
+
+void DogEarGroundChanged(uint64_t start, uint64_t count)
+{
+    TallyKey lo, hi;
+    if (count == 0)
+        return;
+    WindowsOf(start, start + count, &lo, &hi);
+    DogEarPut(TALLY_DIGESTS, lo, hi);
 }
 
 /* The range [*lo, *hi) of the leaf of DIGESTS the reads stand on that `block`
