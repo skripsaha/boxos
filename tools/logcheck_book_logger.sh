@@ -26,10 +26,15 @@
 # (`bye`). Four things are held, each a line of the verdict (loggerhour.py):
 #
 #   writes    every write of the record is a stitch of one atom, a Tally's node
-#             or slot, or a block of the logger's data; a cycle of the logger
-#             costs the host exactly one atom, and its lines are not carried to
-#             blocks a line at a time (Slip) — only as the tail fills, or for a
-#             Tally that owes an Engross
+#             or slot, or a block of the logger's data — among them, one a Tally
+#             at the most, a tail the Helm's service laid (Engross) and the
+#             logger's next line laid again before a cycle named it, as the
+#             kernel reads the writer to be the Helm's holder, which a program
+#             is for one write (loggerhour.py TailsLaidAgain, held to its cases
+#             by loggerhour_selftest.py); a cycle of the logger costs the host
+#             exactly one atom, and its lines are not carried to blocks a line
+#             at a time (Slip) — only as the tail fills, or for a Tally that
+#             owes an Engross
 #   cycles    no more than one a window of five seconds, but those an anchor,
 #             the file's making and the halt ask for at once — and no fewer than
 #             the window's promise gives; every anchor answered inside half a
@@ -51,6 +56,58 @@ LOGGERHOUR_SECONDS=${LOGGER_SECONDS:-3600}
 LOGGERHOUR_ANCHOR_EVERY=${LOGGER_ANCHOR_EVERY:-$(( ${LOGGER_SECONDS:-3600} / 6 ))}
 LOGGERMUT_SECONDS=${LOGGERMUT_SECONDS:-120}
 LOGGERHOUR_SAID='\[QUILL\] logger: PASS — [^ ]+ \(fid [0-9]+\): [0-9]+ lines in [0-9]+ ms'
+# What the logger says of its progress every QUILL_LOGGER_SAY (30) lines
+# (quilltest_book.c): its wait is the stand's ordinary one, the quiet window a
+# logger gone quiet and the runaway guard counted from the newest line said.
+# Held to the guard from the wait's start, the hour stopped at 900 s.
+LOGGERHOUR_PROGRESS='^\[QUILL\] logger: [0-9]+ of [0-9]+ lines appended'
+
+# ‼ A RUN THE HARNESS ASKED TO BE LONG IS WAITED OUT BY ITS OWN PROGRESS.
+# progress_case plays the machine on the host — a line a second for ten
+# seconds, the first SAID of them the logger's progress and the rest a
+# kernel's line, then the verdict — and holds what wait_for_line answers with
+# ARGS before its file and the runaway guard three seconds long: the run
+# waited out by -P while its progress keeps coming, given up past the guard
+# by the startup tests it never said, and by -P once its progress stops,
+# however the log grows.
+progress_case() {
+    local name=$1 want=$2 said=$3 f="$SCRATCH/progress.log" w got
+    shift 3
+    : > "$f"
+    ( for i in 1 2 3 4 5 6 7 8 9 10; do
+          sleep 1
+          if [ "$i" -le "$said" ]; then echo "[QUILL] logger: $((i * 30)) of 300 lines appended, 0 anchor(s)"
+          else echo "[TagFS] Tally $i is written over slot 1: the state after stitch $((i * 50))"; fi >> "$f"
+      done
+      echo "[QUILL] logger: PASS — progress-g.log (fid 81): 300 lines in 10000 ms" >> "$f" ) &
+    w=$!
+    got=$(WAIT_RUNAWAY_S=3 wait_for_line -E "$@" "$f" '\[QUILL\] logger: (PASS|FAIL)' 5 >/dev/null; echo $?)
+    kill "$w" 2>/dev/null; wait "$w" 2>/dev/null
+    [ "$got" = "$want" ]
+    chk $? "progress: $name — wait_for_line answers $want (answered: ${got:-nothing})"
+}
+
+progress_selfcheck() {
+    progress_case "the logger's progress said past the guard, counted by -P" 0 10 -P "$LOGGERHOUR_PROGRESS"
+    progress_case "the same run held to the startup tests, none said" 1 10
+    progress_case "its progress stopped, the kernel still talking" 1 2 -P "$LOGGERHOUR_PROGRESS"
+}
+
+# loggerhour_selftest — the judge's rule for a block of free ground the
+# logger's, held to the cases loggerhour_selftest.py makes up: a self-test
+# that cannot answer is one that failed.
+loggerhour_selftest() {
+    local line
+    python3 tools/loggerhour_selftest.py >"$SCRATCH/loggerhour.selftest" 2>&1
+    [ $? = 0 ] || grep -q '^bad ' "$SCRATCH/loggerhour.selftest" || bad "loggerhour, the judge's self-test did not answer"
+    while IFS= read -r line; do
+        case "$line" in
+            "ok "*)  ok  "loggerhour: ${line#ok }" ;;
+            "bad "*) bad "loggerhour: ${line#bad }" ;;
+            *)       bad "loggerhour, the judge's self-test said: $line" ;;
+        esac
+    done < "$SCRATCH/loggerhour.selftest"
+}
 
 # loggerhour_record TAG SECONDS EVERY — the book's image booted on the BIOS
 # machine with its disk recorded, the logger run and the machine stopped:
@@ -69,7 +126,7 @@ loggerhour_record() {
     fi
     wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest logger loggerh $seconds $every" &&
-        wait_for_line -E build/serial.log '\[QUILL\] logger: (PASS|FAIL)' "$((seconds + WAIT_QUIET_SLOW_S))" &&
+        wait_for_line -E -P "$LOGGERHOUR_PROGRESS" build/serial.log '\[QUILL\] logger: (PASS|FAIL)' &&
         wait_for_prompt && type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
     rc=$?
     sleep 1
@@ -82,6 +139,9 @@ book_loggerhour() {
     local name=loggerhour seconds=$LOGGERHOUR_SECONDS every=$LOGGERHOUR_ANCHOR_EVERY
     local img="$SCRATCH/$name.img" w="$SCRATCH/serial.${name}_write.log" rc line
     echo "== loggerhour: a logger of a line a second, $seconds s, anchored every $every lines, on a book's record =="
+    prompt_selfcheck
+    progress_selfcheck
+    loggerhour_selftest
     rm -f build/boxos.img "$SCRATCH/serial.$name.log"
     if ! build_with_key VOLUME_FORMAT=v2; then
         bad "loggerhour: make VOLUME_FORMAT=v2 does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
@@ -171,6 +231,7 @@ loggerhourmut_leg() {
 
 run_loggerhourmut() {
     echo "== loggerhourmut: the window, the Slip and the useful bytes taken away, each oracle must turn =="
+    progress_selfcheck
     rm -f build/boxos.img
     loggerhourmut_leg src/kernel/tagfs/ink/ink.c \
         '(p->book ? SETTLE_WINDOW_US : SettleLullUs());' \
