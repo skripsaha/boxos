@@ -230,9 +230,13 @@ static bool StandBookGleanLeafNth(uint32_t n, TallyPlace* out)
 
 /*
  * ‼ ONLY THE COPY CHECK LAYS THE LEAF ANEW HERE. The Tally of the files is
- * written whole in the pair of Tally-Quires the mount took, and no mount
- * follows: every Tally laid in after it stays in that pair, so Glean counts
- * no Quire past it (binder_glean.c) and nothing gathers the leaf. The logger's
+ * written whole in the pair of Tally-Quires the mount took, and the Tallies a
+ * Glean asks for are laid before the leaf is spoiled: on a book whose
+ * Tally-Quires earlier Tallies thinned — every boot of a stand past its first
+ * — that Tally's DONE may choose one to glean, and a Tally of it would lay
+ * the clean leaf anew with its live nodes. No mount follows: every Tally laid
+ * in after them stays in that pair, so Glean counts no Quire past it
+ * (binder_glean.c) and nothing more gathers the leaf. The logger's
  * file lies past every file of the leaf, its lines change no key of it, and
  * the leaf after it is clean too: a Tally that lays the spoiled leaf anew and
  * not its clean neighbour did so because a copy of it was found wanting —
@@ -255,6 +259,7 @@ static TestResult TestStandBookGleanCopies(void)
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
     TEST_ASSERT(StandBookGleanMake("proof", STAND_BOOK_COPY_FILES), "files enough for FILES to take five leaves");
     TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written whole, in the pair of Tally-Quires the mount took");
+    TEST_ASSERT(StandBinderGleaned(), "the Tallies Glean asks for laid first");
     TEST_ASSERT(StandBookGleanLeafNth(1, &leaf) && StandBookGleanLeafNth(2, &next) && next.has_hi,
                 "FILES holds a second leaf and a third with leaves past it");
     TEST_ASSERT(leaf.ptr.copies == 2, "the second leaf has two copies");

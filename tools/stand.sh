@@ -634,6 +634,18 @@ WAIT_QUIET_S=${WAIT_QUIET_S:-60}
 # reads. Those waits say so by name instead of quietly raising the ordinary one.
 WAIT_QUIET_SLOW_S=${WAIT_QUIET_SLOW_S:-240}
 WAIT_RUNAWAY_S=${WAIT_RUNAWAY_S:-900}
+# A kernel built VOLUME_TESTS=on says each startup test as it begins
+# (tests.c TestRun), and a test past every one the wait has seen begun is the
+# fact its runaway guard counts from. Without it the guard was a ceiling on
+# the whole boot: quill's three boots run the 427 tests on a volume a gigabyte
+# larger, the tests that fill it to the wall lay all of it at a few MB/s, and a
+# boot was measured at 298 s to 647 s to its shell by the host's load, its
+# longest test at 105 s — so the 900 s a whole boot was held to is a load
+# away, and a test is held to it alone. A test number that falls back is a
+# machine that began its tests again — reset, as STRICT keeps no -no-reboot
+# (Makefile) — and from it nothing counts as progress: a guest that resets in
+# a loop prints for ever and begins test 1 every boot.
+STAND_TEST_BEGUN='^\[TESTS\] [0-9]+ of [0-9]+: '
 WAIT_LOG=build/serial.log
 # The last thing a halt says about the volume, whichever way its sync went
 # (system_halt.c, halt_sync_storage). Not a bare ‼: that also opens "DID NOT
@@ -679,7 +691,7 @@ wait_for_line() {
     if [ "$1" = "-E" ]; then _wf_flag="-E"; shift; fi
     local _wf_file="$1" _wf_pat="$2"
     local _wf_quiet="${3:-$WAIT_QUIET_S}" _wf_from="${4:-1}"
-    local _wf_size _wf_last="" _wf_still=0 _wf_spent=0
+    local _wf_size _wf_last="" _wf_still=0 _wf_spent=0 _wf_most=0 _wf_top _wf_fell _wf_over
     while : ; do
         if [ -f "$_wf_file" ]; then
             if [ "$_wf_from" -gt 1 ]; then
@@ -689,6 +701,15 @@ wait_for_line() {
                 grep -q $_wf_flag -- "$_wf_pat" "$_wf_file" 2>/dev/null && return 0
             fi
             _wf_size=$(wc -c < "$_wf_file" 2>/dev/null | tr -d ' ')
+            # The tests begun in this wait's window: the highest number, and
+            # the first that came at or below the one before it (0: none).
+            read -r _wf_top _wf_fell _wf_over <<<"$(tail -n +"$_wf_from" "$_wf_file" 2>/dev/null |
+                STAND_WF_PAT="$STAND_TEST_BEGUN" awk '$0 ~ ENVIRON["STAND_WF_PAT"] {
+                    n = $2 + 0; if (!fell && n <= last) { fell = n; over = last }; last = n; if (n > top) top = n }
+                    END { print top + 0, fell + 0, over + 0 }')"
+            if [ "$_wf_fell" -eq 0 ] && [ "$_wf_top" -gt "$_wf_most" ]; then
+                _wf_most=$_wf_top; _wf_spent=0
+            fi
         else
             _wf_size=0
         fi
@@ -703,7 +724,13 @@ wait_for_line() {
         fi
         _wf_spent=$((_wf_spent + 1))
         if [ "$_wf_spent" -ge "$WAIT_RUNAWAY_S" ]; then
-            echo "  (waited for '$_wf_pat': $_wf_file grew for ${WAIT_RUNAWAY_S}s and never said it — giving up on a machine that is still talking)"
+            if [ "${_wf_fell:-0}" -gt 0 ]; then
+                echo "  (waited for '$_wf_pat': $_wf_file grew for ${WAIT_RUNAWAY_S}s past the newest startup test it began and never said it — the machine began its startup tests again, test $_wf_fell after test $_wf_over — giving up on a machine that restarts)"
+            elif [ "$_wf_most" -gt 0 ]; then
+                echo "  (waited for '$_wf_pat': $_wf_file grew for ${WAIT_RUNAWAY_S}s past the newest startup test it began and never said it — $(tail -n +"$_wf_from" "$_wf_file" | grep -aE -- "$STAND_TEST_BEGUN" | tail -1 | tr -d '\r' | sed 's/^\[TESTS\] //') — giving up on a machine that is still talking)"
+            else
+                echo "  (waited for '$_wf_pat': $_wf_file grew for ${WAIT_RUNAWAY_S}s and never said it — giving up on a machine that is still talking)"
+            fi
             return 1
         fi
         sleep 1

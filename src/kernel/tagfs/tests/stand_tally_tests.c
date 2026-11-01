@@ -8,6 +8,7 @@
 #include "../mount/book_unit.h"
 #include "../block_map/block_map_derived.h"
 #include "../settle/settle.h"
+#include "../settle/binder.h"
 #include "../read/read.h"
 #include "../integrity/integrity.h"
 #include "read_job.h"
@@ -301,15 +302,61 @@ out:
 // A FILES leaf neither copy of which reads: a rotten range (C19)
 // ----------------------------------------------------------------------------
 
-/* The last FILES leaf below the root — none when the root is the one leaf. */
-static bool StandTallyLeafBelowRoot(TallyPlace* leaf)
+/* The first live file whose header (fid, 0) lies in the leaf's [lo, hi): 0
+ * when none. Not the lo key's own file: a separator stays where the file it
+ * was cut at lay, and on a book whose files were given up since — every boot
+ * of a stand past its first — that file may be gone. */
+static uint64_t StandTallyLeafFirstFile(const TallyPlace* leaf)
+{
+    uint64_t from = leaf->has_lo ? leaf->lo.k1 + (leaf->lo.k2 != 0 ? 1u : 0u) : 0, fid = 0;
+    if (FileMapRows(tagfs_get_state()->files, from, &fid, 1) != 1)
+        return 0;
+    if (leaf->has_hi && (fid > leaf->hi.k1 || (fid == leaf->hi.k1 && leaf->hi.k2 == 0)))
+        return 0;
+    return fid;
+}
+
+/* The least Tally a slot that holds may hold — either of an unsure slot's
+ * two. A node laid by a Tally no later than it is one every slot names as it
+ * lies: no slot holds another copy of its range. */
+static uint64_t StandTallyOldestHeld(void)
+{
+    uint64_t least = UINT64_MAX;
+    for (uint32_t i = 0; g_binder.slot && i < g_binder.nslots; i++) {
+        const SlotGround* s = &g_binder.slot[i];
+        if (!s->holds)
+            continue;
+        if (s->tally < least)
+            least = s->tally;
+        if (s->unsure && s->tally2 && s->tally2 < least)
+            least = s->tally2;
+    }
+    return least;
+}
+
+/*
+ * The last FILES leaf below the root whose range holds a live file's header,
+ * and that file — none when the root is the one leaf, or no leaf below it
+ * holds a header memory has a file for. One every slot names as it lies
+ * first: a leaf a Tally laid anew since an older slot's has another copy of
+ * its range there, and Facsimile reads the range back from that slot
+ * (facsimile.c — only a node shared with the Tally stood on rots for both) —
+ * on a book whose leaves the tests before laid anew, every boot of a stand
+ * past its first, the last leaf is one such.
+ */
+static bool StandTallyLeafBelowRoot(TallyPlace* leaf, uint64_t* fid)
 {
     TallyPlace n;
-    bool           found = false;
+    uint64_t   oldest = StandTallyOldestHeld();
+    bool       found = false, shared = false;
     for (uint32_t i = 1; TallyStandNodeWhere(TALLY_FILES, i, &n); i++) {
-        if (n.level == 0) {
-            *leaf = n;
-            found = true;
+        uint64_t first = n.level == 0 ? StandTallyLeafFirstFile(&n) : 0;
+        bool     named = n.ptr.seq <= oldest;
+        if (first && (named || !shared)) {
+            *leaf  = n;
+            *fid   = first;
+            found  = true;
+            shared = named;
         }
     }
     return found;
@@ -329,13 +376,10 @@ static TestResult TestStandTallyRottenLeafLocked(void)
 
     if (aside)
         return test_steps_aside(aside);
-    if (!StandTallyLeafBelowRoot(&leaf))
-        return test_steps_aside("its FILES tree is one leaf, its root: no range lies below a "
-                                "root to rot (a book of more files has one — the stand's padded "
-                                "landing)");
-    /* The leaf's first whole file: its header is the leaf's own when the
-     * leaf's range begins at a header, else it lies before the leaf. */
-    fid = leaf.lo.k1 + (leaf.lo.k2 != 0 ? 1u : 0u);
+    if (!StandTallyLeafBelowRoot(&leaf, &fid))
+        return test_steps_aside("no leaf below its FILES root holds a live file's header — the tree "
+                                "is one leaf, its root: no range lies below a root to rot (a book of "
+                                "more files has one — the stand's padded landing)");
     rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
     TEST_ASSERT(rec != NULL, "a live file whose header the leaf holds");
     FileRecordRelease(rec);

@@ -462,6 +462,15 @@ static bool StandBookRoomBegun(void)
  * Every cycle of the lag settled with the next Tally under way, the slot
  * counts its ground its own while Fallow rests it; once that Tally ends and
  * the lag's cycles give the ground back, the count goes with it.
+ *
+ * The Tally weighed is the first over a slot that holds one whose DONE lets
+ * ground go, in two turns of the ring: a Tally that changes nothing lays no
+ * node anew, and one that changes little lays it in the pair the slot's
+ * Tally lay in — every node and Quire the slot names a newer slot names too,
+ * and its DONE gives nothing back. A slot holds ground alone once a Tally
+ * since laid its nodes elsewhere — a Glean's, a pair moved on, the tests'
+ * before — which on a book past its first test of a Tally is the ring's
+ * first turn, and two turns that give none are said.
  */
 static TestResult TestStandBookRoomRestUnderTally(void)
 {
@@ -474,14 +483,26 @@ static TestResult TestStandBookRoomRestUnderTally(void)
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT_OK(StandBinderTallies(g_binder.ring + 1u), "the ring is filled, a Tally over every slot");
-    r      = StandBookRoomLeast();
-    fallow = FallowBlocks();
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally is written over the slot of the least seq");
-    rested = FallowBlocks();
-    held   = __atomic_load_n(&g_binder.own[r], __ATOMIC_ACQUIRE);
-    TestEvidence("blocks its Tally let go to Fallow", rested > fallow ? rested - fallow : 0);
-    TEST_ASSERT(rested > fallow, "the DONE let the slot's old ground go to Fallow");
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles: a Tally may begin");
+    for (uint32_t t = 0; t <= 2u * g_binder.ring && rested <= fallow; t++) {
+        if (t > 0)
+            for (uint64_t l = 0; l <= FallowLag(); l++)
+                TEST_ASSERT_OK(TagFSSettle(), "the lag's stitches of a Tally that gave nothing back settle");
+        bool holds;
+        r      = BinderSlotNext();
+        holds  = g_binder.slot[r].holds;
+        fallow = FallowBlocks();
+        TEST_ASSERT_OK(BinderRunWhole(), "a Tally is written over the slot the ring writes next");
+        rested = holds ? FallowBlocks() : fallow;
+    }
+    if (rested <= fallow) {
+        verdict = test_steps_aside("no Tally over two turns of the ring let ground go to Fallow: every slot names "
+                                   "the nodes and Quires the one written over named, no Tally having laid them "
+                                   "anew elsewhere");
+        goto out;
+    }
+    held = __atomic_load_n(&g_binder.own[r], __ATOMIC_ACQUIRE);
+    TestEvidence("blocks its Tally let go to Fallow", rested - fallow);
     TEST_ASSERT(StandBookRoomBegun(), "the next Tally is begun at once, and is under way");
     under = true;
     for (uint64_t l = 0; l <= FallowLag() + 1u; l++) {
@@ -512,7 +533,10 @@ out:
  * one when they reach TALLY_SLACK) held the write for as long as Tallies were
  * begun: the turn was not counted on the ask that found one under way. With
  * every free block past the reserve promised, one begun before each ask, the
- * take waits and is then refused no-space once the ring has turned.
+ * take waits and is then refused no-space once the ring has turned. An ask
+ * that finds ground resting in Fallow — the begun Tally's cycles may let a
+ * Quire of the ribbon go — waits on the cycle that gives it back, not on the
+ * Tally (allotment.c, AllotmentBookShort), and spends no turn: counted apart.
  */
 static TestResult TestStandBookRoomWaitBounded(void)
 {
@@ -520,10 +544,10 @@ static TestResult TestStandBookRoomWaitBounded(void)
     static StandBinder b;
     StandFreshModel    m;
     uint64_t           fid = 0, promised = 0, start = 0, q = 0;
-    uint32_t           got = 0, epoch = 0, rounds = 0, waited = 0, bytes = 0;
-    error_t            rc    = OK;
-    bool               under = false;
-    const char*        aside = StandBinderAside(&b);
+    uint32_t           got = 0, epoch = 0, rounds = 0, waited = 0, rested = 0, bytes = 0;
+    error_t            rc     = OK;
+    bool               under  = false, fallow = false;
+    const char*        aside  = StandBinderAside(&b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
@@ -541,17 +565,20 @@ static TestResult TestStandBookRoomWaitBounded(void)
             TEST_ASSERT_OK(TagFSSettle(), "the lag's stitches settle, what the last Tally let go given back");
         promised += StandBookRoomPromiseAll(epoch);
         TEST_ASSERT(StandBookRoomBegun(), "a Tally is begun before the ask, and is under way");
-        under = true;
-        rc    = AllotmentTakeBook(fid, 1u, 1u, 0, false, EndpaperDataKeeps(false), false, &start, &got);
+        under  = true;
+        fallow = FallowBlocks() > 0;
+        rc     = AllotmentTakeBook(fid, 1u, 1u, 0, false, EndpaperDataKeeps(false), false, &start, &got);
         if (rc == OK)
             (void)BlockMapDerivedGive(fid, start, got);
         if (rc != ERR_WOULD_BLOCK && rc != OK)
             break;
-        waited += rc == ERR_WOULD_BLOCK ? 1u : 0u;
+        waited += rc == ERR_WOULD_BLOCK && !fallow ? 1u : 0u;
+        rested += rc == ERR_WOULD_BLOCK && fallow ? 1u : 0u;
         TEST_ASSERT_OK(BinderRunWhole(), "the Tally under way ends");
         under = false;
     }
     TestEvidence("asks a take short of room waited on a Tally under way", waited);
+    TestEvidence("asks it waited on ground resting in Fallow", rested);
     TEST_ASSERT(waited > 0, "a block of data, every other free one promised: the take waits on the Tally under way");
     TEST_ASSERT_EQ(rc, ERR_TAGFS_NO_SPACE, "and is refused no-space once the ring has turned, a Tally under way at "
                                            "every ask — never held for as long as Tallies are begun");

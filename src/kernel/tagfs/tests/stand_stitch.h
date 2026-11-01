@@ -14,11 +14,16 @@
  * (stand_docket_tests.c), the files a book's Ink changes.
  *
  *   StandStitchAside    why a test written for a book's writer stands aside
- *                       here, or NULL — and where the ribbon stood, kept in *s
+ *                       here, or NULL — and where the ribbon stood, kept in *s,
+ *                       the machine's Use Context set aside for the test
+ *   StandStitchContextBack the machine given back the Use Context set aside, if
+ *                       one still is: false when it would not be set again — by
+ *                       the put-back, and by the runner after every test
  *   StandStitchRemount  the volume let go of, writing nothing, and mounted
  *                       again on what its medium holds: true when it came up
- *   StandStitchPutBack  the ribbon put back as the test found it, the volume
- *                       mounted again on it (STAND_STITCH_PUT_BACK at `out`)
+ *   StandStitchPutBack  the ribbon put back as the test found it, the machine's
+ *                       Use Context given back, the volume mounted again on it
+ *                       (STAND_STITCH_PUT_BACK at `out`)
  *   StandStitchSay      the Use Context told to the volume as the machine's
  *                       `k`-th word past any it said, settled by the cycle the
  *                       word demands: its answer, *kept whether the volume holds it
@@ -33,14 +38,12 @@
  *                       the mount's own reader (*out the caller's to let go)
  */
 
-/* Where the ribbon stood when the test began, on what seat and base, and
- * whether the machine held a Use Context of its own then. */
+/* Where the ribbon stood when the test began, and on what seat and base. */
 typedef struct {
     RibbonCursor at;
     uint8_t      seat;
     uint64_t     base;
     uint8_t      uuid[16];
-    bool         context;
 } StandStitch;
 
 /* A waiter of the stand's own, as an anchor's is. */
@@ -52,6 +55,7 @@ typedef struct {
 
 void        StandStitchAnswered(SettleWaiter* w, error_t rc);
 const char* StandStitchAside(StandStitch* s);
+bool        StandStitchContextBack(void);
 bool        StandStitchRemount(void);
 bool        StandStitchPutBack(const StandStitch* s);
 error_t     StandStitchSay(const char* text, size_t bytes, uint64_t k, bool* kept);

@@ -24,13 +24,9 @@ bool StandBinderWrite(const StandBinder* b, uint64_t block, const uint8_t* in)
     return BoardroomWrite(b->s.seat, b->s.base + block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS, in, NULL) == 0;
 }
 
-/* Why the test stands aside here, or NULL — the ring kept as found. */
-const char* StandBinderAside(StandBinder* b)
+/* The ring and the ground its slots hold kept as found: NULL, or why not. */
+static const char* StandBinderKeepRing(StandBinder* b)
 {
-    memset(b, 0, sizeof(*b));
-    const char* aside = StandStitchAside(&b->s);
-    if (aside)
-        return aside;
     b->slots  = g_book.frame.spine_slots;
     b->spine  = g_book.frame.spine_block;
     b->stride = g_book.frame.spine_stride;
@@ -48,9 +44,12 @@ const char* StandBinderAside(StandBinder* b)
     if (!b->ground || !b->held)
         return "no memory to keep the slots' ground";
     memset(b->held, 0, (uint64_t)(runs ? runs : 1u) * sizeof(uint8_t*));
-    b->nground = BinderStandGround(b->ground, runs);
-    if (b->nground != runs)
+    /* nground counts what `held` was made for, so it is set only once the
+     * count is the one it was made by: the slots' ground grown between the
+     * two asks would have the let-go walk past its end. */
+    if (BinderStandGround(b->ground, runs) != runs)
         return "the slots' ground changed while it was kept";
+    b->nground = runs;
     for (uint32_t i = 0; i < b->nground; i++) {
         uint64_t bytes = (uint64_t)b->ground[i].count * TAGFS_BLOCK_SIZE;
         if (!(b->held[i] = kmalloc(bytes)))
@@ -60,6 +59,27 @@ const char* StandBinderAside(StandBinder* b)
             return "the slots' ground would not be read";
     }
     return NULL;
+}
+
+/* Why the test stands aside here, or NULL — the ring kept as found. A test
+ * that stands aside once the ribbon was kept lays nothing and puts nothing
+ * back: what was taken to keep the ring is let go, and the runner gives the
+ * machine back its Use Context (StandStitchContextBack). */
+const char* StandBinderAside(StandBinder* b)
+{
+    memset(b, 0, sizeof(*b));
+    const char* aside = StandStitchAside(&b->s);
+    if (aside || !(aside = StandBinderKeepRing(b)))
+        return aside;
+    for (uint32_t i = 0; b->held && i < b->nground; i++)
+        kfree(b->held[i]);
+    kfree(b->held);
+    kfree(b->ground);
+    kfree(b->ring);
+    b->held   = NULL;
+    b->ground = NULL;
+    b->ring   = NULL;
+    return aside;
 }
 
 /* A block the test changes by hand, kept as found for the put-back. */

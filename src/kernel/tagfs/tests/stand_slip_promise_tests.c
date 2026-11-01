@@ -31,7 +31,10 @@
 // but the promised, the reserve be what it may, the same. A Slip let go — its
 // file given up, cut to nothing — gives its promise back; a mount holds every
 // Slip it carries on promised again; and the free ground a program is told of
-// is the free ground less what is promised.
+// is the free ground less what is promised. A Slip given or refused at the
+// wall is weighed where the measure stands, the wall's wait on a Tally held
+// down (BinderStandNoRoomWait): a Tally written there for room lays every
+// tail, and the promises go with it before the test has counted them.
 // ============================================================================
 
 #define STAND_PROMISE_ROOM   3u      /* blocks past the reserve a filled volume keeps free */
@@ -137,6 +140,7 @@ static TestResult TestStandSlipPromiseRefused(void)
 
     if (aside)
         return test_steps_aside(aside);
+    (void)BinderStandNoRoomWait(true);
     TEST_ASSERT(StandPromiseFilled(&s, fids, STAND_PROMISE_FILES, STAND_PROMISE_ROOM, &shrunk),
                 "four files are made, and the volume cut to three blocks past its reserve");
     for (uint32_t i = 0; i < STAND_PROMISE_ROOM; i++) {
@@ -151,6 +155,7 @@ static TestResult TestStandSlipPromiseRefused(void)
     TEST_ASSERT_EQ(StandPromiseSeen(), tagfs_get_state()->ledger.free_blocks - STAND_PROMISE_ROOM,
                    "a program is told the free ground less the three blocks promised");
 out:
+    (void)BinderStandNoRoomWait(false);
     if (shrunk)
         BlockMapDerivedStandGrow();
     STAND_STITCH_PUT_BACK(&s);
@@ -172,6 +177,7 @@ static TestResult TestStandSlipPromiseTally(void)
 
     if (aside)
         return test_steps_aside(aside);
+    (void)BinderStandNoRoomWait(true);
     TEST_ASSERT(StandPromiseFilled(&b->s, fids, STAND_PROMISE_FILES, STAND_PROMISE_ROOM, &shrunk),
                 "four files are made, and the volume cut to three blocks past its reserve");
     for (uint32_t i = 0; i < STAND_PROMISE_FILES; i++) {
@@ -182,6 +188,7 @@ static TestResult TestStandSlipPromiseTally(void)
         lines += rc == OK;
     }
     TEST_ASSERT(lines >= STAND_PROMISE_ROOM, "every block past the reserve gave a Slip");
+    (void)BinderStandNoRoomWait(false);
     TEST_ASSERT_OK(TagFSSettle(), "the Slips settle");
     BinderDemanded();
     TEST_ASSERT_OK(TagFSSettle(), "a Tally is demanded, and a cycle weighs it");
@@ -199,6 +206,7 @@ static TestResult TestStandSlipPromiseTally(void)
         TEST_ASSERT(!slipped[i] || (StandPromiseHolds(fids[i], STAND_PROMISE_LINE) && !StandPromiseSlipped(fids[i])),
                     "and every file reads its line out of its block");
 out:
+    (void)BinderStandNoRoomWait(false);
     if (shrunk)
         BlockMapDerivedStandGrow();
     STAND_BINDER_PUT_BACK(b);
@@ -223,6 +231,7 @@ static TestResult TestStandSlipPromiseOwn(void)
 
     if (aside)
         return test_steps_aside(aside);
+    (void)BinderStandNoRoomWait(true);
     TEST_ASSERT(StandPromiseFilled(&b->s, fids, STAND_PROMISE_FILES, STAND_PROMISE_ROOM, &shrunk),
                 "four files are made, and the volume cut to three blocks past its reserve");
     for (uint32_t i = 0; i < STAND_PROMISE_FILES; i++) {
@@ -233,6 +242,7 @@ static TestResult TestStandSlipPromiseOwn(void)
         lines += rc == OK;
     }
     TEST_ASSERT(lines >= STAND_PROMISE_ROOM, "every block past the reserve gave a Slip");
+    (void)BinderStandNoRoomWait(false);
     TEST_ASSERT_OK(TagFSSettle(), "the Slips settle");
     TEST_ASSERT(BlockMapDerivedStandShrink(STAND_PROMISE_ROOM),
                 "the volume is cut to three free blocks: the reserve's measure stands past all its ground");
@@ -249,6 +259,7 @@ static TestResult TestStandSlipPromiseOwn(void)
     for (uint32_t i = 0; i < STAND_PROMISE_FILES; i++)
         TEST_ASSERT(!slipped[i] || StandPromiseHolds(fids[i], STAND_PROMISE_LINE), "every file reads its line");
 out:
+    (void)BinderStandNoRoomWait(false);
     if (shrunk)
         BlockMapDerivedStandGrow();
     STAND_BINDER_PUT_BACK(b);
@@ -269,6 +280,7 @@ static TestResult TestStandSlipPromiseGivenBack(void)
 
     if (aside)
         return test_steps_aside(aside);
+    (void)BinderStandNoRoomWait(true);
     TEST_ASSERT(StandPromiseFilled(&s, fids, 3, 2, &shrunk), "three files are made, and the volume cut to two "
                                                              "blocks past its reserve");
     TEST_ASSERT(StandPromiseWrite(fids[0], 0, STAND_PROMISE_LINE) == OK && StandPromiseSlipped(fids[0]) &&
@@ -288,6 +300,7 @@ static TestResult TestStandSlipPromiseGivenBack(void)
     TEST_ASSERT_EQ(StandPromiseWrite(fids[2], 2u * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE), ERR_TAGFS_NO_SPACE,
                    "and no more: nothing came back but the two promises");
 out:
+    (void)BinderStandNoRoomWait(false);
     if (shrunk)
         BlockMapDerivedStandGrow();
     STAND_STITCH_PUT_BACK(&s);
@@ -319,12 +332,14 @@ static TestResult TestStandSlipPromiseRemount(void)
                    "and a program is told the free ground less a block promised to each");
     TEST_ASSERT_OK(SettleForRoom(), "nothing rests in Fallow");
     shrunk = true;
+    (void)BinderStandNoRoomWait(true);
     TEST_ASSERT(BlockMapDerivedStandShrink(EndpaperKeeps(b->s.at.quire_blocks) + b->s.at.quire_blocks + 3u),
                 "the volume is cut to three blocks past its reserve: two promised, and one");
     TEST_ASSERT(StandPromiseWrite(fids[2], 0, STAND_PROMISE_LINE) == OK && StandPromiseSlipped(fids[2]),
                 "one Slip more is given: the one block past the reserve and the promises");
     TEST_ASSERT_EQ(StandPromiseWrite(fids[3], 0, STAND_PROMISE_LINE), ERR_TAGFS_NO_SPACE,
                    "and the next refused: the two promised before the mount stand");
+    (void)BinderStandNoRoomWait(false);
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     BinderDemanded();
     TEST_ASSERT_OK(TagFSSettle(), "a Tally is demanded, and a cycle weighs it");
@@ -335,6 +350,7 @@ static TestResult TestStandSlipPromiseRemount(void)
     for (uint32_t i = 0; i < 3u; i++)
         TEST_ASSERT(StandPromiseHolds(fids[i], STAND_PROMISE_LINE), "every file reads its line");
 out:
+    (void)BinderStandNoRoomWait(false);
     if (shrunk)
         BlockMapDerivedStandGrow();
     STAND_BINDER_PUT_BACK(b);
