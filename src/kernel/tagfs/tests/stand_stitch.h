@@ -11,7 +11,9 @@
  * suites that sew on a format-v2 volume's ribbon: stand_stitch,
  * stand_stitch_edge (stand_stitch_edge_tests.c) — the edges of a Quire, a
  * refusal there, and the measure of the Tally's reserve — and stand_docket
- * (stand_docket_tests.c), the files a book's Ink changes.
+ * (stand_docket_tests.c), the files a book's Ink changes: those of its tests
+ * whose wait for room a Tally answers are run with the kit that writes
+ * Tallies (stand_binder.h), which puts back the ring this one does not.
  *
  *   StandStitchAside    why a test written for a book's writer stands aside
  *                       here, or NULL — and where the ribbon stood, kept in *s,

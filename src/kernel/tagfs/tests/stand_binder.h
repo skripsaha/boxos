@@ -7,8 +7,11 @@
 
 /*
  * The kit a test that writes Tallies is run with (stand_binder_hand.c),
- * shared by the suites that write them: stand_binder, and stand_endpaper
- * (stand_endpaper_tests.c), the measure of the next Tally the reserve keeps.
+ * shared by every suite whose tests write a Tally or wait on one — a Tally
+ * over the ring the stitch kit (stand_stitch.h) cannot put back: stand_binder,
+ * whose kit it was, stand_endpaper (stand_endpaper_tests.c), the measure of
+ * the next Tally the reserve keeps, and each suite that includes it — the
+ * tests of stand_docket whose wait for room a Tally answers among them.
  *
  *   StandBinderRead/Write a block of the volume, as the medium holds it
  *   StandBinderAside      why the test stands aside here, or NULL — the ring
