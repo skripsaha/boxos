@@ -45,6 +45,19 @@ typedef struct {
      * lock xadd on `count` are both full barriers, so either the gate sees
      * the claim or the producer sees the flag. */
     volatile uint32_t in_hlt;
+    /* The strands this K-Core has taken out of `slots` and holds until it
+     * serves them, the least Tip first: a binary heap only this K-Core
+     * touches, so it takes no lock and needs no slot index — a held strand's
+     * Tip moves only while it is served, and then it is held nowhere. `count`
+     * goes on counting them; it falls when a strand is served, not when it
+     * leaves the ring, and that is what every reader of a queue's depth asks.
+     * Sized as the ring, and for the same reason. */
+    struct process_t** held;
+    uint32_t           held_count;
+    /* This K-Core's Waterline: the least Tip among the strands it held when
+     * it last served one, and never lower than it was. Written by this
+     * K-Core; read by another when a strand comes from it (sched_rebase). */
+    volatile uint64_t  waterline;
 } __attribute__((aligned(64))) KCorePocketQueue;
 
 extern KCorePocketQueue *g_kcore_queues;

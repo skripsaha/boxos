@@ -169,6 +169,12 @@ typedef struct process_t
     uint64_t fare;
     uint64_t fare_tsc;
     int16_t fare_core;
+    /* The Tip: the time K-Cores have spent serving this strand's pockets, at
+     * the same price as the Fare, on the scale of one K-Core's Waterline —
+     * tip_core's, -1 until its first pocket is held (kcore.c). Only the K-Core
+     * holding or serving the strand touches the two. */
+    uint64_t tip;
+    int16_t tip_core;
     int32_t rq_index;               // Slot in its core's runqueue (-1 = not enqueued)
     /* Running-XOR-runqueue interlock: the core index this strand is currently
      * dispatched on, or -1 if on no core. schedule() CAS-claims it before

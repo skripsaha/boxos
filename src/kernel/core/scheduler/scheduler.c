@@ -318,41 +318,43 @@ static inline uint64_t sched_turn(void)
     return (uint64_t)cpu_get_tsc_freq_khz() * 1000u / CONFIG_SCHED_APP_TICK_HZ;
 }
 
-/* The Fare `proc` pays for holding a core `cycles` long: the cycles over its
- * weight, one and as much more as its Fit — up to SCHED_CONTEXT_FARE_SHARE. */
-static inline uint64_t sched_fare_for(const process_t *proc, uint64_t cycles)
+/* The cycles over the strand's weight: one, and as much more as its Fit —
+ * up to SCHED_CONTEXT_FARE_SHARE. */
+uint64_t sched_fare_for(const process_t *proc, uint64_t cycles)
 {
     uint64_t fit = UseContextFit(proc);
     return cycles * USE_CONTEXT_FIT_FULL /
            (USE_CONTEXT_FIT_FULL + (SCHED_CONTEXT_FARE_SHARE - 1) * fit);
 }
 
+uint64_t sched_rebase(uint64_t paid, bool known, uint64_t there, uint64_t here)
+{
+    uint64_t turn   = sched_turn();
+    uint64_t lowest = here > turn ? here - turn : 0;
+    uint64_t level  = here;
+
+    if (known) {
+        int64_t ahead = (int64_t)(paid - there);
+        level = (ahead < 0 && (uint64_t)-ahead > here) ? 0 : here + (uint64_t)ahead;
+    }
+    return level < lowest ? lowest : level;
+}
+
 /*
  * A strand comes to `core` from outside its runqueue — woken, new, moved,
- * stolen, handed back — and its Fare is brought onto that core's scale. One
- * reckoned against another core's Waterline keeps how far above or below it
- * stood there; a newcomer stands at the Waterline. And none stands more than
- * a turn below it: a strand that slept is served soon after it wakes, but a
+ * stolen, handed back — and its Fare is brought onto that core's scale
+ * (sched_rebase): a strand that slept is served soon after it wakes, but a
  * long sleep buys it one turn, not the core. Under `core`'s runqueue lock,
  * which is what this core's Waterline and a queued strand's Fare are read
  * and written under.
  */
 static void sched_place(process_t *proc, uint8_t core)
 {
-    uint64_t waterline = g_core_sched[core].waterline;
-    uint64_t turn      = sched_turn();
-    uint64_t lowest    = waterline > turn ? waterline - turn : 0;
-    int16_t  from      = proc->fare_core;
+    int16_t  from  = proc->fare_core;
+    bool     known = from >= 0 && (uint32_t)from < g_sched_core_count;
+    uint64_t there = known ? __atomic_load_n(&g_core_sched[from].waterline, __ATOMIC_RELAXED) : 0;
 
-    if (from < 0 || (uint32_t)from >= g_sched_core_count) {
-        proc->fare = waterline;
-    } else if ((uint8_t)from != core) {
-        uint64_t there = __atomic_load_n(&g_core_sched[from].waterline, __ATOMIC_RELAXED);
-        int64_t  ahead = (int64_t)(proc->fare - there);
-        proc->fare = (ahead < 0 && (uint64_t)-ahead > waterline) ? 0 : waterline + (uint64_t)ahead;
-    }
-    if (proc->fare < lowest)
-        proc->fare = lowest;
+    proc->fare = sched_rebase(proc->fare, known, there, g_core_sched[core].waterline);
     __atomic_store_n(&proc->fare_core, (int16_t)core, __ATOMIC_RELAXED);
 }
 

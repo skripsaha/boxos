@@ -248,6 +248,8 @@ static void process_init_strand_fields(process_t *proc)
     proc->fare             = 0;
     proc->fare_tsc         = 0;
     proc->fare_core        = -1;                  /* placed by its first enqueue */
+    proc->tip              = 0;
+    proc->tip_core         = -1;                  /* placed by its first pocket */
     proc->park_seq         = 0;
     proc->state            = PROC_CREATED;
     spinlock_init(&proc->state_lock);

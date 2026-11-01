@@ -89,6 +89,18 @@ bool scheduler_core_cpu_usage(uint8_t core_idx, uint64_t *busy_tsc,
                               uint64_t *total_tsc, bool *parked);
 
 error_t sched_enqueue(process_t *proc);
+
+/* What holding a core `cycles` long costs `proc`: the cycles, the less the
+ * more of the Use Context its cabin wears (its Fit) — down to a third for all
+ * of it. The one price of a core's time, an App Core's Fare and a K-Core's
+ * Tip (kcore.c) alike. */
+uint64_t sched_fare_for(const process_t *proc, uint64_t cycles);
+
+/* `paid` — a Fare or a Tip — brought from the core it was reckoned on, whose
+ * Waterline is `there` (`known` false: none), to the core whose Waterline is
+ * `here`: it keeps how far above or below `there` it stood, a newcomer stands
+ * at `here`, and none stands more than a turn below `here`. */
+uint64_t sched_rebase(uint64_t paid, bool known, uint64_t there, uint64_t here);
 error_t sched_dequeue(process_t *proc);
 /* The strand running on this core gives its core away (GATE_YIELD): its next
  * schedule() stands it behind the strand this core runs next, so the one it
