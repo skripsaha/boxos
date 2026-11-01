@@ -10229,17 +10229,21 @@ quill_boot() {
 }
 
 # quill_run CASE [QUIET_S] — one case: typed, its verdict line, and the shell
-# back at its prompt. The prompt is counted as lines, not read as the last two
-# bytes of the log: a Use Context makes it `[tags] ~ `, and a kernel line may
-# follow it.
+# back at its prompt. The prompt is read as a line past the verdict's, not as
+# the last two bytes of the log: a Use Context makes it `[tags] ~ `, and a
+# kernel line may follow it. Never counted from the mark: a kernel line that
+# ends the line the prompt the case is typed at began — `~ [TagFS] Tally 144
+# is written ...` — puts that prompt before the mark and the echo on a line of
+# its own, and a count of two waited out the quiet window on a shell that was
+# back (a Tally's DONE said between bigwrite's prompt and the next case typed).
 quill_run() {
-    local mark
+    local mark said="\[QUILL\] $1: (PASS|DEFECT|PENDING|FAIL) "
     mark=$(wc -l < build/serial.log)
     type_line "quilltest $1" || return 1
-    wait_for_line -E build/serial.log "\[QUILL\] $1: (PASS|DEFECT|PENDING|FAIL) " \
-        "${2:-$WAIT_QUIET_S}" $((mark + 1)) || return 1
+    wait_for_line -E build/serial.log "$said" "${2:-$WAIT_QUIET_S}" $((mark + 1)) || return 1
     wait_until "$WAIT_QUIET_S" "the shell's prompt after quilltest $1" \
-        '[ "$(tail -n +$((mark + 1)) build/serial.log | tr -d "\r" | grep -cE "^(\[[^]]*\] )?~ ")" -ge 2 ]' \
+        '[ -n "$(tail -n +$((mark + 1)) build/serial.log | tr -d "\r" | sed -nE "/$said/,\$p" | tail -n +2 |
+                 grep -m1 -E "^(\[[^]]*\] )?~ ")" ]' \
         || return 1
     wait_for_quiet 3
 }

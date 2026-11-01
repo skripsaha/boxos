@@ -638,6 +638,17 @@ error_t     BinderDigestsTurn(const BinderWork* w);
 void        BinderStandStopAt(TallyStep at);
 void        BinderStandTearSlot(uint32_t sectors);
 
+/* The wall's wait on a Tally held down, as a ring with nothing to give back
+ * holds it: armed, BinderRoomWait answers false and a take short of room past
+ * the book's measure is refused there, the refusal saying the stand holds it
+ * down; false takes it down. Whether it stood armed — the runner takes it down
+ * after every test and fails one that left it (tests.c). A test of the reserve
+ * a write of data leaves, or of the blocks Slips are promised, weighs them
+ * where the measure stands: at the wall a Tally written for room lays the
+ * Slips' tails and gives a slot's ground back — the stand_book_room suite's to
+ * weigh. */
+bool        BinderStandNoRoomWait(bool armed);
+
 /* What the Binder holds, for the stand: the slot it would write next, the
  * useful bytes past the newest slot's `at`, what the next Tally is reckoned to
  * cost in bytes, the Quires of the ribbon the slots hold, the blocks the last

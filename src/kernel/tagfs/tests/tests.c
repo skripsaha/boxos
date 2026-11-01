@@ -12,6 +12,7 @@
 #ifdef CONFIG_VOLUME_TESTS
 #include "block_fail.h"
 #include "stand_tests.h"
+#include "stand_stitch.h"
 #endif
 
 // ============================================================================
@@ -503,31 +504,60 @@ static void TestSeekLag(void)
  * back with one still standing — out through an assertion, or by forgetting —
  * would have it strike the runner's own count of the volume, the next test,
  * or the rest of the boot. So both are taken down after every test, before
- * anything is counted, and a test that left one standing has failed.
+ * anything is counted, and a test that left one standing has failed. So is
+ * the wall's wait on a Tally held down (BinderStandNoRoomWait): left standing,
+ * every test after would meet a full volume's wall with no Tally written for
+ * room, and none would say so.
  */
 static bool TestLeftAFaultArmed(const TestCase* test)
 {
 #ifdef CONFIG_VOLUME_TESTS
     bool block   = BlockFailDisarm();
     bool heap    = HeapFailDisarm();
+    bool wall    = BinderStandNoRoomWait(false);
     bool protect = BlockFailProtects(tagfs_get_seat());
     if (protect)
         BlockFailProtect(tagfs_get_seat(), false);
-    if (!block && !heap && !protect)
+    if (!block && !heap && !wall && !protect)
         return false;
 
-    const char* left[3] = { "", "", "" };
+    const char* left[4];
     uint32_t    n = 0;
     if (block)
         left[n++] = "BLOCKFAIL";
     if (heap)
         left[n++] = "HEAPFAIL";
+    if (wall)
+        left[n++] = "the wall's wait on a Tally held down";
     if (protect)
         left[n++] = "a protected medium";
-    kprintf("[TESTS] %s failed: it left %s%s%s%s%s armed — taken down by the runner "
-            "before anything else could meet it\n", test->name, left[0],
-            n == 3 ? ", " : n == 2 ? " and " : "", n > 1 ? left[1] : "",
-            n == 3 ? " and " : "", n == 3 ? left[2] : "");
+    char   said[160];
+    size_t at = 0;
+    for (uint32_t i = 0; i < n; i++)
+        at += (size_t)ksnprintf(said + at, sizeof(said) - at, "%s%s",
+                                i == 0 ? "" : i + 1 == n ? " and " : ", ", left[i]);
+    kprintf("[TESTS] %s failed: it left %s armed — taken down by the runner before anything else could meet "
+            "it\n", test->name, said);
+    return true;
+#else
+    (void)test;
+    return false;
+#endif
+}
+
+/*
+ * The machine's Use Context a test of a book's writer set aside
+ * (StandStitchAside) and stood aside past, never putting the ribbon back:
+ * given back here, after the faults are taken down, so the next test and the
+ * boot's own mounts meet the machine the boot had. A test it would not be set
+ * again for has failed.
+ */
+static bool TestLeftContextAside(const TestCase* test)
+{
+#ifdef CONFIG_VOLUME_TESTS
+    if (StandStitchContextBack())
+        return false;
+    kprintf("[TESTS] %s failed: the machine's Use Context it set aside would not be given back\n", test->name);
     return true;
 #else
     (void)test;
@@ -554,7 +584,7 @@ static void TestTallyOwedLaid(const TestCase* test)
                 "it stands\n", test->name, (unsigned)rc);
 }
 
-static void TestRun(const TestCase* test, TestStats* stats)
+static void TestRun(const TestCase* test, uint32_t of, TestStats* stats)
 {
     bool        guarded = test->reach == TEST_WRITES_TO_VOLUME;
     VolumeTally before;
@@ -573,16 +603,24 @@ static void TestRun(const TestCase* test, TestStats* stats)
     g_failure_said      = false;
     g_evidence.given    = false;
 
-    debug_printf("[TESTS] running %s\n", test->name);
+    /* Said as it begins where the tests write: some of those fill the volume
+     * to its wall — a gigabyte on quill's stretched one, minutes of a loaded
+     * host — and a harness waiting for the shell tells a boot still going
+     * through them from one printing for ever only by this line (stand.sh
+     * STAND_TEST_BEGUN). A plain build's tests only read, and its boot reads
+     * on the owner's screen as it did. */
+    if (g_volume_tests_allowed)
+        kprintf("[TESTS] %u of %u: %s\n", stats->total_tests, of, test->name);
     TestResult seen = test->func();
     bool left_armed = TestLeftAFaultArmed(test);
+    bool left_aside = TestLeftContextAside(test);
 
     /* Residue first: a test that left the volume changed has failed, and
      * whatever it would otherwise have been judged — held included — is not
      * said, so a count of held lines never includes one that failed. */
     if (guarded && VolumeResidueSaid(test->name, &before))
         stats->total_failed++;
-    else if (left_armed)
+    else if (left_armed || left_aside)
         stats->total_failed++;
     else
         TestJudge(test, seen, stats);
@@ -613,6 +651,10 @@ error_t TagFS_RunAllTests(TestStats* stats)
     uint32_t   aside_format    = 0;
     bool       path_said       = false;
     DeedFormat volume          = tagfs_get_state()->format;
+    uint32_t   registered      = 0;
+
+    for (uint32_t s = 0; s < ARRAY_SIZE(g_suites); s++)
+        registered += g_suites[s]->count;
 
     /* No cycle begins on its own while the tests run: each meets the cycles
      * it drives, and a fault it arms is met by one of them (settle.h). */
@@ -651,7 +693,7 @@ error_t TagFS_RunAllTests(TestStats* stats)
                 TestSeekLag();
                 path_said = true;
             }
-            TestRun(test, stats);
+            TestRun(test, registered, stats);
         }
     }
     SettleCadenceHold(false);

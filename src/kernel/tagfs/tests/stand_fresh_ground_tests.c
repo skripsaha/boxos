@@ -5,6 +5,7 @@
 #include "../file_map/file_map.h"
 #include "../file_map/tract.h"
 #include "../block_map/block_map_derived.h"
+#include "../settle/binder.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -20,8 +21,12 @@
 // record's head, never the file: the Plot holds a window around the write, not
 // the runs. Data never takes the ground the book keeps for its ribbon and its
 // Tally (Endpaper): filled to its refusal and emptied, the volume gives the
-// data's ground back. A write longer than any one stitch could name lands in
-// parts, and reads back whole.
+// data's ground back — weighed where the measure stands, the wall's wait on a
+// Tally held down (BinderStandNoRoomWait): a turn of the ring at the wall gives
+// a slot's ground back, as much as a ribbon that went through Quires since the
+// slots' Tallies left them, and the Tallies it writes are no ribbon's to put
+// back. A write longer than any one stitch could name lands in parts, and
+// reads back whole.
 // ============================================================================
 
 /* The volume's free blocks the data may never take: the Tally's two copies and
@@ -383,6 +388,7 @@ static TestResult TestStandFreshFillAndEmpty(void)
     if (aside)
         return test_steps_aside(aside);
     kept = StandFreshKept(&s);
+    (void)BinderStandNoRoomWait(true);
     TEST_ASSERT(BlockMapDerivedStandShrink(kept + STAND_FRESH_FILL_ROOM), "the volume is cut to 96 blocks past its reserve");
     shrunk = true;
     free   = fs->ledger.free_blocks;
@@ -404,6 +410,7 @@ static TestResult TestStandFreshFillAndEmpty(void)
     TEST_ASSERT(fs->ledger.free_blocks + quires * s.at.quire_blocks >= free,
                 "and the data's ground came back — all of it but the Quires the ribbon went on into");
 out:
+    (void)BinderStandNoRoomWait(false);
     if (shrunk)
         BlockMapDerivedStandGrow();
     STAND_STITCH_PUT_BACK(&s);

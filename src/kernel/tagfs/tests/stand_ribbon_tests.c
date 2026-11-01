@@ -8,6 +8,7 @@
 #include "../mount/book_unit.h"
 #include "../integrity/integrity.h"
 #include "../integrity/gloss.h"
+#include "../ink/ink.h"
 #include "../box_hash/box_hash.h"
 #include "../block_map/block_map_derived.h"
 #include "../settle/sewing.h"
@@ -317,6 +318,15 @@ const char* StandRibbonAside(StandRibbon* w)
     const char* aside = StandStepsAsideFor();
     if (aside)
         return aside;
+    /* A change memory holds and no cycle settled is settled first: the test
+     * lets the volume go writing nothing, and puts back what it laid past
+     * where the ribbon stood (StandStitchAside says why). One that would not
+     * settle is the test's failure, said here. */
+    error_t settled = InkedGen() != SettledGen() ? TagFSSettle() : OK;
+    if (settled != OK) {
+        (void)TestFailedAt(__FILE__, __LINE__, "what memory holds settles before the ribbon is kept", settled, OK);
+        return "what memory holds would not settle before the ribbon is kept";
+    }
     if (!StandRibbonWhere(w))
         return "the ribbon has no Quire with room past its end on a block, a next_quire and two free blocks";
     return NULL;
@@ -769,7 +779,7 @@ static TestResult TestStandRibbonMountNextRefused(void)
     RibbonCursorStand(&c);
     TEST_ASSERT(c.up && c.quire.block == w.next && !c.next.blocks,
                 "the ribbon stands in the Quire it went on into, with no next_quire past it");
-    TEST_ASSERT_EQ(tagfs_create_file("mount-next", NULL, 0, &fid), ERR_WOULD_BLOCK,
+    TEST_ASSERT_EQ(tagfs_create_file("mount-next", NULL, 0, &fid), -(int)ERR_WOULD_BLOCK,
                    "a file asked for waits for a cycle: the room is still to grow, not refused for good");
     TEST_ASSERT(w.nlaid < STAND_RIBBON_LAID, "room to put back the stitch the cycle lays");
     w.laid[w.nlaid++] = (c.quire.block + c.off / TAGFS_BLOCK_SECTORS) * TAGFS_BLOCK_SECTORS;

@@ -46,6 +46,13 @@ static uint8_t s_stitch_zeros[STAND_STITCH_ZEROS * TAGFS_SECTOR_SIZE];
 static uint8_t s_stitch_stream[TALLY_SHEET_PAYLOAD];
 static uint8_t s_stitch_sectors[STAND_STITCH_LAID_MOST * BOOK_SECTOR_BYTES];
 
+/* The Use Context the machine held when a test kept the ribbon, set aside for
+ * it (StandStitchAside): the kit's, never the test's frame — a test that
+ * stands aside past its Aside, having laid nothing, returns before any
+ * put-back, and the runner gives it back after every test (tests.c,
+ * StandStitchContextBack). One test runs at a time. */
+static UseText* s_stitch_context;
+
 void StandStitchAnswered(SettleWaiter* w, error_t rc)
 {
     StandStitchWaiter* s = (StandStitchWaiter*)w;
@@ -53,7 +60,17 @@ void StandStitchAnswered(SettleWaiter* w, error_t rc)
     s->answered = true;
 }
 
-/* Why a test written for a book's writer stands aside here, or NULL. */
+/*
+ * Why a test written for a book's writer stands aside here, or NULL — and the
+ * machine's Use Context set aside, given back at the put-back or, by the
+ * runner, after the test. A machine that holds a context keeps it over the
+ * volume's memory at every mount and tells the volume (UseContextRecall): on
+ * a volume that remembers one — a word a program said before this boot's
+ * mount — each mount of the test would lay the machine's word over the one
+ * the test said and the state the test weighs, as no volume that remembers
+ * none does. A change that would not settle first is the test's failure, said
+ * where it was met: the kit stands aside past it, and the runner judges it.
+ */
 const char* StandStitchAside(StandStitch* s)
 {
     if (tagfs_get_state()->format != DEED_FORMAT_V2)
@@ -61,19 +78,44 @@ const char* StandStitchAside(StandStitch* s)
     const char* aside = StandStepsAsideFor();
     if (aside)
         return aside;
+    /* A change memory holds and no cycle settled — one a test before this one
+     * left to the cadence, a delete at its `out` — is settled first: the
+     * put-back lays zeros past where the ribbon stood, and that change's
+     * stitch sewn there would go with the test's, the file it gave up live
+     * again at the next mount. */
+    error_t settled = InkedGen() != SettledGen() ? TagFSSettle() : OK;
+    if (settled != OK) {
+        (void)TestFailedAt(__FILE__, __LINE__, "what memory holds settles before the ribbon is kept", settled, OK);
+        return "what memory holds would not settle before the ribbon is kept";
+    }
     memset(s, 0, sizeof(*s));
     RibbonCursorStand(&s->at);
     s->seat = tagfs_get_seat();
     s->base = tagfs_get_volume_base();
     memcpy(s->uuid, tagfs_get_state()->uuid, sizeof(s->uuid));
-    UseList* held = UseContextHold();
-    s->context = held != NULL;
-    UseListDrop(held);
     if (!s->at.up)
         return "the writer has no cursor on the ribbon";
+    if (!s_stitch_context) {
+        UseList* held    = UseContextHold();
+        s_stitch_context = UseTextHold(UseListText(held));
+        UseListDrop(held);
+    }
+    if (s_stitch_context)
+        UseContextClear();
     kprintf("[TESTS] stand_stitch: the ribbon is sewn past where it stood — the mounts on it are this test's, "
             "until it is put back\n");
     return NULL;
+}
+
+bool StandStitchContextBack(void)
+{
+    UseText* context = s_stitch_context;
+    s_stitch_context = NULL;
+    bool ok = !context || UseContextSet(context->text, context->bytes) == OK;
+    UseTextDrop(context);
+    if (!ok)
+        kprintf("[TESTS] stand_stitch: the machine's Use Context would not be set again\n");
+    return ok;
 }
 
 /* The volume let go of — writing nothing — and mounted again on what its
@@ -111,12 +153,14 @@ static bool StandStitchZeroQuire(const StandStitch* s, const RibbonQuire* q)
  * caller left inside it (StandRibbonLetGo), every sector past where the ribbon
  * stood in its Quire to zeros, and every Quire it went on into since — the
  * next_quire the test found, and the Quire and the next_quire it stands at now
- * — whole; the machine holding no Use Context again when it held none, so the
- * mount does not tell the volume one it took up from a test's stitch
- * (UseContextRecall); the volume mounted again. False when a sector would not
- * take its zeros, or the volume did not come up where the ribbon stood before;
- * false, and no zeros laid, when a caller is still inside the volume at the
- * bound — a cycle of its writer would sew past them.
+ * — whole; the machine holding the Use Context it held when the test began,
+ * and none when it held none, so the mount neither tells the volume one it
+ * took up from a test's stitch nor loses the one it held (UseContextRecall:
+ * the word it holds the volume remembers already, and nothing is written);
+ * the volume mounted again. False when a sector would not take its zeros, the
+ * context would not be set again, or the volume did not come up where the
+ * ribbon stood before; false, and no zeros laid, when a caller is still inside
+ * the volume at the bound — a cycle of its writer would sew past them.
  */
 bool StandStitchPutBack(const StandStitch* s)
 {
@@ -130,8 +174,8 @@ bool StandStitchPutBack(const StandStitch* s)
         ok &= StandStitchZeroQuire(s, &now.next);
         ok &= StandStitchZeroQuire(s, &now.sewn_hop);
     }
-    if (!s->context)
-        UseContextClear();
+    UseContextClear();
+    ok &= StandStitchContextBack();
     kprintf("[TESTS] stand_stitch: the ribbon is %s\n",
             down ? "put back as it was found" : "NOT put back — a caller stayed inside the volume");
     StandRibbonArrive();
@@ -173,10 +217,16 @@ static bool StandStitchCarries(const RibbonUnit* u, uint64_t kind, const uint8_t
 
 /* The Use Context told to the volume as the machine's `k`-th word past any it
  * said, settled by the cycle the word demands: its answer, and whether the
- * volume now holds it. */
+ * volume now holds it. The machine is left holding none, as a word said past
+ * it leaves it: the one it took up at a mount of the test — what the volume
+ * remembered before the test, on a volume a program said one to — would be
+ * told over this word at the next mount (UseContextRecall), where a mount on
+ * the test's stitches takes up the word they carry, as on a volume that
+ * remembered none. */
 error_t StandStitchSay(const char* text, size_t bytes, uint64_t k, bool* kept)
 {
     uint64_t saying = 0;
+    UseContextClear();
     UseTextDrop(tagfs_recall_use_context(&saying));
     UseText* t = bytes ? UseTextMake(text, bytes) : NULL;
     if (bytes && !t)

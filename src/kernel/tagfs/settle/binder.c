@@ -568,8 +568,22 @@ bool BinderOwed(void)
            !BinderNoWrite() && __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE) == NULL;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+static volatile bool s_stand_no_room_wait;
+static const char    s_stand_held_down[] = "the stand holds the wall's wait on a Tally down";
+
+bool BinderStandNoRoomWait(bool armed)
+{
+    return __atomic_exchange_n(&s_stand_no_room_wait, armed, __ATOMIC_ACQ_REL);
+}
+#endif
+
 bool BinderRoomWait(void)
 {
+#ifdef CONFIG_VOLUME_TESTS
+    if (__atomic_load_n(&s_stand_no_room_wait, __ATOMIC_ACQUIRE))
+        return false;
+#endif
     if (BinderNoTallies() || BinderNoWrite() || __atomic_load_n(&g_binder.room_turns, __ATOMIC_ACQUIRE) >= g_binder.ring)
         return false;
     if (__atomic_load_n(&s_under_way, __ATOMIC_ACQUIRE)) {
@@ -593,13 +607,19 @@ bool BinderRoomWait(void)
 const char* BinderRoomMeasured(const char** why)
 {
     *why = NULL;
+#ifdef CONFIG_VOLUME_TESTS
+    if (__atomic_load_n(&s_stand_no_room_wait, __ATOMIC_ACQUIRE))
+        *why = s_stand_held_down;    /* BinderRoomWait waited for no Tally and no turn of the ring */
+#endif
     if (!EndpaperGrown())
         return "to the block by its last Tally";
     if (__atomic_load_n(&g_binder.room_turns, __ATOMIC_ACQUIRE) >= g_binder.ring)
         return "from above past its last Tally, a turn of the ring waited for";
-    *why = BinderNoTallies() ? BinderNoTallies()
-         : BinderNoWrite()   ? s_no_write
-                             : __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE);
+    const char* not_now = BinderNoTallies() ? BinderNoTallies()
+                        : BinderNoWrite()   ? s_no_write
+                                            : __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE);
+    if (not_now)
+        *why = not_now;
     return "from above past its last Tally, no Tally waited for";
 }
 
