@@ -159,6 +159,67 @@ def Replay(guest, stitches, carried, cost_next):
     return owed, rewrites, waiting
 
 
+def TouchBytes(log, w, t):
+    return b"".join(bytes(log.SectorData(w, t.first_lba - w.lba + i)) for i in range(t.sectors))
+
+
+def TailsLaidAgain(log, classifier, fid, owed):
+    """The writes of the record's free ground that are the logger's tail the
+    Helm's service laid for a Tally owed and the logger laid again before a
+    cycle named it: {(log seq of the write, its first sector): (log seq of the
+    one that laid it again, the Tally)}.
+
+    A Tally owed asks the Helm's service to lay every tail in its block at the
+    DONE of the cycle the bytes reached its cost in (helm/engross.h). §16.5
+    п.14 gives the service the files with no writer and the holder of the
+    handle its own tail; the kernel reads the writer as the Helm's holder, and
+    a program holds it for one write — each fwrite opens the file for its own
+    job (write_job.c wjob_make, tagfs_open) — so between two lines the
+    logger's file has no writer and the service lays its tail. And while the
+    Tally is owed no Slip is given (plot_slip.c), so a line the logger appends
+    before the cycle that carries the Engross lays the block again on fresh
+    ground, its tail folded in, and the Engross's block is let go before any
+    stitch named it: free at once (§3.4 L-8, blklog_book.py). One is that
+    block and no other write: a single block of free ground, the file's bytes
+    up to the size the Engross saw and zeros past it, laid past the stitch the
+    Tally fell owed at and before the one its slice is taken after, and laid
+    again — the same bytes and more — by the next write of the logger's data
+    before a stitch; one for each Tally at the most. It rests on that reading
+    of п.14: a service that yields to a writer who writes again within the
+    window lays no such block, and this is then no longer the logger's.
+    `owed` is Replay's; loggerhour_selftest.py holds the rule to its cases."""
+    writes = [w for w in log.Writes() if not w.discard]
+    again, after = {}, None
+    for k, w in enumerate(writes):
+        ts = classifier.Classify(w)
+        for t in ts:
+            said = re.match(r"stitch seq (\d+)", t.what) if t.kind == "stitch" else None
+            after = int(said.group(1)) if said else after
+        tally = next((o[0] for o in owed if o[3] is not None and after is not None and o[3] <= after < o[1] and
+                      o[0] not in {v[1] for v in again.values()}), None)
+        if tally is None:
+            continue
+        for t in ts:
+            if t.kind != "free" or t.sectors != SECTORS_PER_BLOCK:
+                continue
+            tail = TouchBytes(log, w, t)
+            size = len(tail.rstrip(b"\0"))
+            if not 0 < size < BLOCK or b"\0" in tail[:size]:
+                continue
+            for later in writes[k + 1:]:
+                us = classifier.Classify(later)
+                if any(u.kind == "stitch" for u in us):
+                    break
+                laid = [TouchBytes(log, later, u) for u in us if u.kind == "file" and
+                        re.search(r"fid %u data" % fid, u.what)]
+                if any(b[:size] == tail[:size] and len(b.rstrip(b"\0")) > size for b in laid):
+                    again[(w.seq, t.first_lba)] = (later.seq, tally)
+                    break
+            if (w.seq, t.first_lba) in again:
+                break
+    return again
+
+
 def Fnv(data):
     h = 0xCBF29CE484222325
     for byte in data:
@@ -177,20 +238,26 @@ def Judge(base_path, record_path, img_path, guest):
     classifier = blklog.Classifier(log, base)
     stitches = RecordStitches(log, classifier.stand)
     fid, lines, anchors = guest["fid"], guest["lines"], guest["anchors"]
+    owed, rewrites, waiting = Replay(guest, stitches, RibbonUseful(base_path), NextCost(img_path))
+    again = TailsLaidAgain(log, classifier, fid, owed)
     took = {}
     for w in log.Writes():
         for t in ([] if w.discard else classifier.Classify(w)):
             own = t.kind != "file" or re.search(r"fid %u data" % fid, t.what)
-            took.setdefault(t.kind if own else "file of another", []).append(t.sectors)
+            kind = "file" if t.kind == "free" and (w.seq, t.first_lba) in again else t.kind
+            took.setdefault(kind if own else "file of another", []).append(t.sectors)
     sectors = {kind: sum(n) for kind, n in took.items()}
     cycles = Cycles(stitches, fid)
-    owed, rewrites, waiting = Replay(guest, stitches, RibbonUseful(base_path), NextCost(img_path))
 
     other = {k: sum(n) for k, n in took.items() if k not in ("stitch", "sheet", "slot", "file")}
-    say(not other and bool(cycles), "every write of the record is a stitch, a node or a slot of a Tally, or a block of "
-        "the logger's file (fid %u): %u stitch(es), %u node sector(s), %u slot sector(s), %u data sector(s); "
-        "anything else: %s" % (fid, len(took.get("stitch", ())), sectors.get("sheet", 0), sectors.get("slot", 0),
-                               sectors.get("file", 0), other or "nothing"))
+    say(not other and bool(cycles),
+        "every write of the record is a stitch, a node or a slot of a Tally, or a block of the logger's file (fid %u): "
+        "%u stitch(es), %u node sector(s), %u slot sector(s), %u data sector(s) — %u block(s) of them a tail the "
+        "Helm's service laid for a Tally owed and the logger's next line laid again before a cycle named it (%s), "
+        "one for each of the %u Tally(ies) owed at the most; anything else: %s" % (
+            fid, len(took.get("stitch", ())), sectors.get("sheet", 0), sectors.get("slot", 0), sectors.get("file", 0),
+            len(again), ", ".join("log seq %u laid again by %u, Tally %u" % (k[0], v[0], v[1])
+                                  for k, v in sorted(again.items())) or "none", len(owed), other or "nothing"))
     big = [s.seq for s in stitches.values() if s.sectors != SECTORS_PER_BLOCK]
     say(not big and sectors.get("stitch", 0) == len(stitches) * SECTORS_PER_BLOCK,
         "a cycle costs the host one atom: %d stitch(es) of %u sector(s) = %u B each%s"

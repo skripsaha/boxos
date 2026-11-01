@@ -49,7 +49,9 @@
  * LOGGER: A LINE A SECOND, ANCHORED RARELY. NAME-g.log gets one line of 80
  * bytes each second for SECONDS seconds, by the machine's own clock, and an
  * anchor after every ANCHOR_EVERY-th line (0: none but the last) whose wait is
- * timed. What a logger leaves for the cadence to decide is the lines between
+ * timed, saying every QUILL_LOGGER_SAY lines how many it has appended — the
+ * console's, never the volume's: the record it is judged by holds no write of
+ * it. What a logger leaves for the cadence to decide is the lines between
  * the anchors: the Slip, the window of five seconds and the Tally by useful
  * bytes (logcheck loggerhour).
  *
@@ -603,6 +605,11 @@ QuillVerdict QuillBookLog(const char *const *args)
 
 #define QUILL_LOGGER_LINE  80u
 #define QUILL_LOGGER_MOST  86400u
+/* How often the logger says how far it got: half the quiet window a stand
+ * holds a machine to (tools/stand.sh WAIT_QUIET_S, 60 s), so a logger that
+ * stops is a machine gone quiet, and a wait as long as the run — an hour —
+ * counts its runaway guard from the newest line said, not from its start. */
+#define QUILL_LOGGER_SAY   30u
 
 static volatile uint64_t s_logger_pause;
 
@@ -668,6 +675,8 @@ QuillVerdict QuillBookLogger(const char *const *args)
         rc = wrote == (int64_t)QUILL_LOGGER_LINE ? 0 : (wrote < 0 ? wrote : -1);
         if (rc >= 0 && every && (n + 1u) % every == 0 && n + 1u < seconds)
             rc = QuillLoggerAnchor(&seen);
+        if (rc >= 0 && (n + 1u) % QUILL_LOGGER_SAY == 0 && n + 1u < seconds)
+            printf("[QUILL] logger: %u of %u lines appended, %u anchor(s)\n", n + 1u, seconds, seen.anchors);
         if (rc >= 0 && n + 1u < seconds)
             QuillLoggerWait(began + (uint64_t)(n + 1u) * 1000u);
     }
