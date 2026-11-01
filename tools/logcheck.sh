@@ -11596,10 +11596,10 @@ turnsmut_loop_on() {
     python3 - <<'EOF'
 p = "src/kernel/arch/x86-64/amp/kcore.c"
 s = open(p).read()
-a = "        struct process_t* proc = kcore_queue_pop(q);\n        if (proc)\n            kcore_process_entry(proc);\n"
+a = "        kcore_take_arrivals(q);\n        struct process_t* proc = kcore_next(q);\n        if (proc)\n            kcore_process_entry(proc);\n"
 assert s.count(a) == 1, "turnsmut loop anchor missing"
 s = s.replace(a, "        struct process_t* proc;\n"
-                 "        while ((proc = kcore_queue_pop(q)) != NULL)   /* logcheck mutation: the queue popped until it is empty */\n"
+                 "        while (kcore_take_arrivals(q), (proc = kcore_next(q)) != NULL)   /* logcheck mutation: the queue served until it is empty */\n"
                  "            kcore_process_entry(proc);\n", 1)
 open(p, "w").write(s)
 EOF
