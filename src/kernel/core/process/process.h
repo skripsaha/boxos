@@ -148,7 +148,6 @@ typedef struct process_t
 
     int32_t score;
     uint64_t last_run_time;
-    uint32_t consecutive_runs;
     /* Processor time this process has been given, in MICROSECONDS, summed at
      * every context switch away from it (scheduler.c) and read by
      * system.proc.cputime, which backs std::clock(). Whole slices only: the
@@ -163,9 +162,14 @@ typedef struct process_t
      * what made std::clock() indistinguishable from wall time. Zero means "not
      * currently holding the core". */
     uint64_t cpu_tsc_stamp;
-    int8_t current_prio;            // Current scheduler priority level (set on enqueue)
-    int8_t rq_prio;                 // Priority level in runqueue (-1 = not enqueued)
-    int16_t rq_index;               // Index in queue (-1 = not enqueued)
+    /* The Fare: the time this strand has held a core, in TSC cycles, on the
+     * scale of one core's Waterline — fare_core's, -1 until it is first
+     * placed. A strand whose cabin wears the Use Context pays a third of it
+     * (scheduler.c). fare_tsc is when it was last charged, zero before. */
+    uint64_t fare;
+    uint64_t fare_tsc;
+    int16_t fare_core;
+    int32_t rq_index;               // Slot in its core's runqueue (-1 = not enqueued)
     /* Running-XOR-runqueue interlock: the core index this strand is currently
      * dispatched on, or -1 if on no core. schedule() CAS-claims it before
      * committing the strand as current_process and releases it on switch-out, so

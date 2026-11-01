@@ -140,10 +140,9 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
  *  Scheduler / runqueue / process / IPC tunables
  * ============================================================================ */
 
-/* Adaptive tick-rate bounds (Hz). */
-#define CONFIG_SCHED_MIN_TICK_HZ      10
-#define CONFIG_SCHED_MAX_TICK_HZ      500
+/* The system tick (Hz), and an App Core's tick: one turn on a core. */
 #define CONFIG_SCHED_DEFAULT_TICK_HZ  250
+#define CONFIG_SCHED_APP_TICK_HZ      100
 
 /* Core parking. */
 #define CONFIG_SCHED_PARK_IDLE_TICKS    100
@@ -159,15 +158,8 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
 /* How often (in global ticks) scheduler_recalc_parameters() runs. */
 #define CONFIG_SCHED_RECALC_INTERVAL  10
 
-/* Fairness and starvation limits. */
-#define CONFIG_SCHED_MAX_CONSECUTIVE_RUNS 5
-#define CONFIG_SCHED_MIN_FAIRNESS         2
-#define CONFIG_SCHED_MAX_FAIRNESS         20
-#define CONFIG_SCHED_MIN_STARVATION       10
-#define CONFIG_SCHED_MAX_STARVATION       100
-
-/* Per-core runqueue capacity. Grows from INITIAL_CAP up to MAX_CAP via
- * runqueue_grow. */
+/* Per-core runqueue capacity. Grows from INITIAL_CAP up to MAX_CAP as it
+ * fills. */
 #define CONFIG_RUNQUEUE_INITIAL_CAP   64
 #define CONFIG_RUNQUEUE_MAX_CAP       4096
 

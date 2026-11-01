@@ -13,12 +13,12 @@ struct process_t;
  * One per machine, owned by the kernel, set by the user's shell (`use code
  * cpp`) or by a program with system authority. It is not a property of a
  * process or of a cabin: it is the ship's declared condition, and every station
- * reads it and adjusts itself. Two stations do today. The scheduler runs a
- * strand whose cabin wears every context tag in the context tier
- * (SCHED_PRIO_CONTEXT). TagFS narrows a query to the context and stamps a
- * created file with it, unless the caller asked for the whole volume. A later
- * station asks the same question through the same door and needs nothing
- * added here.
+ * reads it and adjusts itself. Two stations do today. The scheduler charges a
+ * strand whose cabin wears every context tag a third of the Fare others pay
+ * for the same time (scheduler.c). TagFS narrows a query to the context and
+ * stamps a created file with it, unless the caller asked for the whole
+ * volume. A later station asks the same question through the same door and
+ * needs nothing added here.
  *
  * TAGS, NOT NUMBERS. A tag is a name, `key` or `key:value`. Its number is a
  * page in one particular book, and this machine keeps three books: the mounted
@@ -138,7 +138,9 @@ bool    UseContextMatches(const struct process_t *proc);
 void    UseContextVerdictRefresh(struct process_t *proc);
 
 /* The recount for every cabin whose verdict is stale, when one is owed: one
- * load when none is. Called from the service loops, with interrupts on. */
+ * load when none is. Called from the service loops, with interrupts on, and
+ * on one core from the tick that interrupted a program (idt.c), where no
+ * kernel lock can be held. */
 void    UseContextServiceIfPending(void);
 
 /* A cabin's tags changed: every verdict is stale from here on. Said after the

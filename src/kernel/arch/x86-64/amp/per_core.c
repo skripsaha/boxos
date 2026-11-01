@@ -705,7 +705,7 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
     } else {
         // App Cores are preemptively scheduled by the LAPIC timer (calibrated
         // against the per-core TSC in lapic_timer_init).
-        lapic_timer_init(LAPIC_TIMER_VECTOR, 100);
+        lapic_timer_init(LAPIC_TIMER_VECTOR, CONFIG_SCHED_APP_TICK_HZ);
     }
 
     pc->initialized = true;

@@ -243,9 +243,11 @@ static void process_init_strand_fields(process_t *proc)
 {
     proc->score            = 0;
     proc->last_run_time    = 0;
-    proc->consecutive_runs = 0;
     proc->total_cpu_time   = 0;
     proc->cpu_tsc_stamp    = 0;
+    proc->fare             = 0;
+    proc->fare_tsc         = 0;
+    proc->fare_core        = -1;                  /* placed by its first enqueue */
     proc->park_seq         = 0;
     proc->state            = PROC_CREATED;
     spinlock_init(&proc->state_lock);
@@ -498,7 +500,6 @@ process_t *process_create(const char *tags)
 
     memset(proc, 0, sizeof(process_t));
     proc->magic    = PROCESS_MAGIC;
-    proc->rq_prio  = -1;
     proc->rq_index = -1;
 
     proc->pid = pid_alloc();
@@ -1196,7 +1197,6 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
 
     memset(proc, 0, sizeof(process_t));
     proc->magic    = PROCESS_MAGIC;
-    proc->rq_prio  = -1;
     proc->rq_index = -1;
     /* Zombie-until-join: a joinable strand (std::thread) must not be reaped on
      * exit until join()/detach() releases it, so its pid (== thread::id) stays
@@ -2270,10 +2270,10 @@ void process_reap_strands(void)
              * (process_set_state refuses to resurrect a dead strand, and the
              * schedule() re-enqueue re-checks WORKING under the runqueue lock),
              * so this is a defense-in-depth assertion of the invariant; if it
-             * ever holds we just retry next tick. rq_prio/rq_index are -1
-             * exactly when not enqueued (maintained under each runqueue lock; an
-             * aligned scalar read is a safe conservative hint either way). */
-            if (p->rq_prio >= 0 || p->rq_index >= 0)
+             * ever holds we just retry next tick. rq_index is -1 exactly when
+             * not enqueued (maintained under each runqueue lock; an aligned
+             * scalar read is a safe conservative hint either way). */
+            if (p->rq_index >= 0)
                 continue;
             process_ref_inc(p);
             batch[n++] = p;

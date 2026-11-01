@@ -12,10 +12,11 @@ extern "C" {
  *
  * One per machine, kept by the kernel. The shell sets it when the user says
  * `use code cpp`; from then on every station of the system reads it and
- * adjusts itself: a program whose cabin wears every context tag runs in the
- * scheduler's context tier, a file query is narrowed to the context and a
- * created file is stamped with it (see query_everywhere / create_everywhere
- * in box/file.h for the whole-volume spellings). Any program may ask what
+ * adjusts itself: a program whose cabin wears every context tag is given
+ * three quarters of a core it shares with one outsider, a file query is
+ * narrowed to the context and a created file is stamped with it (see
+ * query_everywhere / create_everywhere in box/file.h for the whole-volume
+ * spellings). Any program may ask what
  * the user is doing; only the shell and programs with system authority may
  * say it, because the context is the user's, not a program's.
  *

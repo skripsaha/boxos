@@ -5031,12 +5031,14 @@ runnable_drop_on() {
     python3 - <<'EOF'
 p = "src/kernel/core/scheduler/scheduler.c"
 s = open(p).read()
-anchor = """    // Select next
-    process_t *next = scheduler_select_next();
+anchor = """    process_t *next = (current && !process_is_idle(current) && TagFSIdleOwed())
+                          ? idle_process_get()
+                          : scheduler_select_next();
 """
 assert anchor in s, "runnable drop anchor missing"
-dropped = """    // Select next
-    process_t *next = scheduler_select_next();
+dropped = """    process_t *next = (current && !process_is_idle(current) && TagFSIdleOwed())
+                          ? idle_process_get()
+                          : scheduler_select_next();
     { static uint32_t lcm_seen; if (next && !process_is_idle(next) && next->pid >= 3 && ++lcm_seen == 2000) next = idle_process_get(); } /* logcheck mutation: one application strand is taken out of its runqueue and never dispatched */
 """
 open(p, "w").write(s.replace(anchor, dropped, 1))

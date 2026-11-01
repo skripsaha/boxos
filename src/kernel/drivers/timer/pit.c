@@ -71,27 +71,6 @@ void pit_init(uint32_t frequency_hz) {
     debug_printf("[PIT] Timer initialized: %u Hz (%u ticks/sec)\n", pit_frequency, pit_frequency);
 }
 
-void pit_set_frequency(uint32_t frequency_hz) {
-    if (frequency_hz == 0 || frequency_hz > PIT_FREQUENCY)
-        return;
-    if (frequency_hz == pit_frequency)
-        return;  // No change needed
-
-    uint32_t divisor = PIT_FREQUENCY / frequency_hz;
-    if (divisor > 65535)
-        divisor = 65535;
-
-    // Reprogram PIT Channel 0 on the fly
-    // Channel 0, LSB+MSB access, Mode 2 (rate generator), binary
-    uint8_t command = PIT_CMD_CHANNEL0 | PIT_CMD_RW_BOTH | PIT_CMD_MODE2 | PIT_CMD_BINARY;
-    outb(PIT_COMMAND, command);
-    outb(PIT_CHANNEL0, (uint8_t)(divisor & 0xFF));
-    outb(PIT_CHANNEL0, (uint8_t)((divisor >> 8) & 0xFF));
-
-    pit_frequency = frequency_hz;
-    g_timer_frequency = frequency_hz;
-}
-
 uint64_t pit_get_ticks(void) {
     /* Cross-core read of a counter the IRQ0 BSP increments. Aligned 64-bit
      * load is atomic on x86_64; explicit __atomic_load_n removes the formal
@@ -102,9 +81,8 @@ uint64_t pit_get_ticks(void) {
 void pit_tick(void) {
     __atomic_add_fetch(&pit_ticks, 1, __ATOMIC_RELAXED);
 
-    /* Advance microsecond counter. freq may change between ticks (scheduler
-     * reprograms PIT under load), but each tick contributes 1_000_000/freq
-     * microseconds at the freq IT was issued at — preserving monotonicity.
+    /* Advance microsecond counter: each tick contributes 1_000_000/freq
+     * microseconds at the rate pit_init programmed.
      * This accumulator is the machine's clock only on a board with no HPET;
      * where an HPET exists, pit_get_uptime_us() reads the counter instead and
      * this total is never consulted. */
