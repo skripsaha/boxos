@@ -29,15 +29,16 @@
 // not change: every Tally is written whole. The self-check is held to bite on
 // every way an element can be changed outside DogEar — a header, a Parcel's
 // runs, a Parcel gone, a Parcel new, a digest — each by a lever of the
-// stand's, pulled behind every Ink and let go (not on a STRICT kernel, which
-// stops there). DogEar is held to what each source puts in — a stitch of this
-// mount, a mount's replay, a stitch's deletes, a copy of a FILES leaf or of a
-// DIGESTS leaf found wanting — and to the Tally that clears it. The tests
-// look at the Foliation and the reads' DIGESTS table, the Settle's holder's,
-// from outside its Scribe: the runner holds the cadence (tests.c,
-// SettleCadenceHold), so no Tally runs but the one a test asks for and waits
-// out, and none turns them under its look. Every test puts the Spine and the
-// ribbon back as it found them.
+// stand's, pulled behind every Ink on a key DogEar does not hold — the
+// Tallies a Glean asks for laid first where it holds it — and let go (not on
+// a STRICT kernel, which stops there). DogEar is held to what each source
+// puts in — a stitch of this mount, a mount's replay, a stitch's deletes, a
+// copy of a FILES leaf or of a DIGESTS leaf found wanting — and to the Tally
+// that clears it. The tests look at the Foliation and the reads' DIGESTS
+// table, the Settle's holder's, from outside its Scribe: the runner holds the
+// cadence (tests.c, SettleCadenceHold), so no Tally runs but the one a test
+// asks for and waits out, and none turns them under its look. Every test puts
+// the Spine and the ribbon back as it found them.
 // ============================================================================
 
 /* Files of a long name, enough for FILES to take two leaves and more. */
@@ -73,17 +74,59 @@ static bool StandDogEarSame(const StandDogEarState* a, const StandDogEarState* b
 }
 
 /* Whether DogEar holds `key` of `tree` among the spans put in since the last
- * slice. */
+ * slice — every one, a page of them at a time. */
 static bool StandDogEarHolds(uint64_t tree, TallyKey key)
 {
     static DogEarSpan spans[256];
-    uint32_t          n = DogEarStand(tree, false, spans, 256u);
-    for (uint32_t i = 0; i < n && i < 256u; i++)
-        if ((key.k1 > spans[i].lo.k1 || (key.k1 == spans[i].lo.k1 && key.k2 >= spans[i].lo.k2)) &&
-            (key.k1 < spans[i].hi.k1 || (key.k1 == spans[i].hi.k1 && key.k2 < spans[i].hi.k2)))
-            return true;
+    uint32_t          n = 0;
+    for (uint32_t from = 0; (n = DogEarHeldSpans(tree, from, spans, 256u)) > 0; from += n)
+        for (uint32_t i = 0; i < n; i++)
+            if ((key.k1 > spans[i].lo.k1 || (key.k1 == spans[i].lo.k1 && key.k2 >= spans[i].lo.k2)) &&
+                (key.k1 < spans[i].hi.k1 || (key.k1 == spans[i].hi.k1 && key.k2 < spans[i].hi.k2)))
+                return true;
     return false;
 }
+
+/* `key` of `tree`, the one a lever changes, lying outside DogEar — where the
+ * self-check holds an element to the Tally before; one whose key DogEar took
+ * it leaves to memory (binder_check.c, CheckInLeaf). A Tally's DONE may glean
+ * a Tally-Quire, the keys of its leaves put in DogEar for the next Tally to
+ * lay (binder_glean.c, GleanNode): on a used book that Quire may hold the
+ * lever's leaf, so the Tallies that lay it are written first — a slot of the
+ * ring at the most, for a Quire laid again goes into the pair, which Glean
+ * never chooses. TEST_PASS, or why not said at the caller's `line` after its
+ * `what`: a Tally refused (its rc), DogEar lost, or the key held still. */
+static TestResult StandDogEarOutside(int line, uint64_t tree, TallyKey key, const char* what)
+{
+    char     why[200];
+    error_t  rc = OK;
+    uint32_t t  = 0;
+    for (; rc == OK && StandDogEarHolds(tree, key) && t < g_book.frame.spine_slots; t++)
+        rc = StandBinderTallies(1u);
+    if (rc != OK) {
+        ksnprintf(why, sizeof(why), "%s: a Tally laid to take it out of DogEar was refused (rc, OK)", what);
+        return TestFailedAt(__FILE__, line, why, rc, OK);
+    }
+    if (DogEarStandLost(false)) {
+        ksnprintf(why, sizeof(why), "%s: DogEar lost what was put in, so no key is known outside it (lost, 0)",
+                  what);
+        return TestFailedAt(__FILE__, line, why, 1, 0);
+    }
+    if (StandDogEarHolds(tree, key)) {
+        ksnprintf(why, sizeof(why), "%s: DogEar holds it still past a Tally a slot of the ring (Tallies, slots)",
+                  what);
+        return TestFailedAt(__FILE__, line, why, t, g_book.frame.spine_slots);
+    }
+    return TEST_PASS;
+}
+
+/* The lever's key outside DogEar (StandDogEarOutside), or the test fails at
+ * the line that asked. */
+#define STAND_DOG_EAR_OUTSIDE(tree, key, what)                                         \
+    do {                                                                               \
+        if ((verdict = StandDogEarOutside(__LINE__, (tree), (key), (what))) != TEST_PASS) \
+            goto out;                                                                  \
+    } while (0)
 
 /* `n` files of a long name made from `from` on, settled: the first id in
  * *first. */
@@ -230,6 +273,7 @@ static TestResult TestStandDogEarStrictBites(void)
     TEST_ASSERT_OK(TagFSSettle(), "a stitch settles past it");
     h.rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
     TEST_ASSERT(h.rec != NULL, "the file's record is held");
+    STAND_DOG_EAR_OUTSIDE(TALLY_FILES, ((TallyKey){ fid, 0 }), "its header's key lies outside DogEar");
     rc = StandDogEarLevered("a file's header no stitch carried", StandDogEarTimeMoved, &h, &after);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_CORRUPTED, "the Tally is refused: its self-check finds the file's header changed "
                    "outside DogEar (a DEFECT)");
@@ -290,14 +334,18 @@ static TestResult TestStandDogEarRunsBite(void)
     TEST_ASSERT(StripWalkParcel(&walk, &strips, &n) && n > 0 && strips[0].kind == STRIP_DATA && strips[0].birth,
                 "the data's first run, born where the Tally says");
     h.strip = (Strip*)(uintptr_t)&strips[0];    /* the lever writes what memory holds as never changed */
+    STAND_DOG_EAR_OUTSIDE(TALLY_FILES, ((TallyKey){ data, 1 }), "the data's Parcel's key lies outside DogEar");
     rc = StandDogEarLevered("a run's birth no stitch carried", StandDogEarBirthMoved, &h, &after);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_CORRUPTED, "refused: the Parcel, spelled again from this Tally's seq, differs");
     TEST_ASSERT_OK(after, "the birth put back, the Tally is written");
     h = (StandDogEarHand){ .rec = d, .tract = NULL, .strips = 0, .blocks = 0 };
+    STAND_DOG_EAR_OUTSIDE(TALLY_FILES, ((TallyKey){ data, 1 }), "and lies outside it again");
     rc = StandDogEarLevered("a file's runs taken away by no stitch", StandDogEarRunsSwapped, &h, &after);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_CORRUPTED, "refused: a Parcel of the Tally before is not in this one");
     TEST_ASSERT_OK(after, "the runs put back, the Tally is written");
     h = (StandDogEarHand){ .rec = e, .tract = d->tract, .strips = d->strip_count, .blocks = d->blocks };
+    STAND_DOG_EAR_OUTSIDE(TALLY_FILES, ((TallyKey){ e->file_id, 1 }),
+                          "the empty file's first Parcel's key lies outside DogEar");
     rc = StandDogEarLevered("another file's runs given an empty one by no stitch", StandDogEarRunsSwapped, &h,
                             &after);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_CORRUPTED, "refused: a Parcel this Tally lays is not in the Tally before");
@@ -343,6 +391,8 @@ static TestResult TestStandDogEarDigestBites(void)
     h.block = spot.block;
     TEST_ASSERT(TallyDigestFind(spot.block, &h.was, &refused) == TALLY_DIGEST_NAMED,
                 "its digest, the Tally's");
+    STAND_DOG_EAR_OUTSIDE(TALLY_DIGESTS, ((TallyKey){ spot.block, 0 }),
+                          "the key of its DIGESTS element lies outside DogEar");
     rc = StandDogEarLevered("a block's digest no stitch carried", StandDogEarGlossTold, &h, &after);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_CORRUPTED, "refused: the DIGESTS element of the block differs from the Tally "
                    "before's");

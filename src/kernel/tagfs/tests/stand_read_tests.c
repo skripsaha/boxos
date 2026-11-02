@@ -404,7 +404,9 @@ out:
     return verdict;
 }
 
-/* The same rot through the port: the job checks each block before it lands. */
+/* The same rot through the port: the job checks each block before it lands —
+ * against format v1's map, which a book has none of; a book's block is held
+ * to its Tally's DIGESTS on the port's road by stand_tally_rot_three_paths. */
 static TestResult TestStandReadRotThroughPort(void)
 {
     TestResult       verdict = TEST_PASS;
@@ -665,7 +667,8 @@ static const TestCase g_stand_read_tests[] = {
     { .name = "stand_read_rot_through_port", .func = TestStandReadRotThroughPort,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a read through the port never checks a block against its digest, "
-                       "and a rotten block reaches the program as data" },
+                       "and a rotten block reaches the program as data",
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_rot_three_paths" },
     { .name = "stand_read_holes", .func = TestStandReadHoles, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_read_holes_through_port", .func = TestStandReadHolesThroughPort,
       .reach = TEST_WRITES_TO_VOLUME },

@@ -430,8 +430,13 @@ STAND_BOOK_TALLY='^\[TagFS\] a whole Tally of the book is written once the ribbo
 # as TEST:LEG,LEG — the Flash page's tests on a seat that is not removable,
 # the levers on the Tally's self-check on a STRICT kernel, which stops at
 # their DEFECT, and the tests of a run inside one command, or of a window of
-# three blocks, on the ATA disk, which takes one block a command;
-# stand_tally_rotten_leaf_locked is each leg's ASIDE.
+# three blocks, on the ATA disk, which takes one block a command — and those
+# of a read or a write through the port there, whose legacy channel answers
+# only a read somebody stands over (stand_read_tests.c, StandReadPortAside:
+# ReadJobSeatRunsAsync) and moves every byte of a write by the processor
+# (stand_port_tests.c, StandPortAside: the seat's kind), said in the words
+# STAND_BOOK_ASIDE_WORDS holds them to; stand_tally_rotten_leaf_locked is
+# each leg's ASIDE.
 STAND_BOOK_ASIDE="stand_stitch_page_atom:stand_book,stand_book_padded,stand_book_uefi
 stand_stitch_page_atom_hop:stand_book,stand_book_padded,stand_book_uefi
 stand_stitch_page_inside:stand_book,stand_book_padded,stand_book_uefi
@@ -440,7 +445,16 @@ stand_dog_ear_digest_bites:stand_book_uefi stand_dog_ear_runs_bite:stand_book_ue
 stand_dog_ear_strict_bites:stand_book_uefi
 stand_run_refused_inside_fresh:stand_book,stand_book_padded
 stand_run_refused_inside_fresh_through_the_port:stand_book,stand_book_padded
+stand_run_megabyte_through_the_port:stand_book,stand_book_padded
+stand_read_hole_refused_through_port:stand_book,stand_book_padded
+stand_read_holes_through_port:stand_book,stand_book_padded
 stand_readahead_reads_its_version:stand_book,stand_book_padded"
+# TEST|WORDS — a row of STAND_BOOK_ASIDE whose test may stand down for more
+# than one reason, and the reason its legs are for: the line it stands down
+# by begins with them.
+STAND_BOOK_ASIDE_WORDS="stand_run_megabyte_through_the_port|the volume's seat is a legacy channel, whose processor moves every byte
+stand_read_hole_refused_through_port|a read on this seat stands in its call: one core, or a seat that answers only a read somebody stands over
+stand_read_holes_through_port|a read on this seat stands in its call: one core, or a seat that answers only a read somebody stands over"
 
 # stand_book_tests — every test of format v2 the registry holds, and every
 # neutral one in a file that registers one of them, by name.
@@ -506,7 +520,7 @@ print("%s %s %s" % (k["data_blocks"], k["free"], k["files"]))' 2>/dev/null
 # cannot; IMG the image booted, as the boot left it; BOOTED the census
 # volume-read predicted of it before the boot (stand_book_census).
 stand_book_judge() {
-    local L="$SCRATCH/serial.$1.log" what=$2 want=$3 aside=$4 port=$5 img=$6 booted=$7 said got t r last
+    local L="$SCRATCH/serial.$1.log" what=$2 want=$3 aside=$4 port=$5 img=$6 booted=$7 said got t r last words
     said=$(stand_summary "$L")
     echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed, [0-9]+ skipped, 0 held under a caveat"
     chk $? "stand: $what — the $STAND_RUN tests this tree registers ran on the book, nothing failed (${said:-no summary})"
@@ -517,8 +531,9 @@ stand_book_judge() {
     chk $? "stand: $what — the tests of format v2 the registry holds are read off it ($(echo $t | wc -w | tr -d ' '))"
     for t in $t; do
         if [ "$t" = "$aside" ] || echo "$STAND_BOOK_ASIDE" | tr ' ' '\n' | grep -qE "^$t:(.*,)?$1(,|\$)"; then
-            grep -aqF "[TESTS] $t ran and stood down: " "$L"
-            chk $? "stand: $what — $t stands down here, saying why"
+            words=$(echo "$STAND_BOOK_ASIDE_WORDS" | awk -v t="$t|" 'index($0, t) == 1 { print substr($0, length(t) + 1); exit }')
+            grep -aqF "[TESTS] $t ran and stood down: $words" "$L"
+            chk $? "stand: $what — $t stands down here, saying why${words:+: $words}"
         else
             ! grep -aqF "[TESTS] $t ran and stood down: " "$L" && ! grep -aqF "[TESTS] $t failed" "$L"
             chk $? "stand: $what — $t ran"

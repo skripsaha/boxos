@@ -360,7 +360,8 @@ static bool StandTallyRunOfThree(uint64_t* fid, uint64_t* first)
     return false;
 }
 
-/* The port's read of the file's first three blocks, answered. */
+/* The port's read of the file's first three blocks, answered — into a sink
+ * of zeros, so the bytes in it are the ones the job landed. */
 static error_t StandTallyPortRead(uint64_t fid)
 {
     TagFSFileHandle* h = tagfs_open(fid, TAGFS_HANDLE_READ);
@@ -369,6 +370,7 @@ static error_t StandTallyPortRead(uint64_t fid)
         return ERR_FILE_NOT_FOUND;
     memset(&ask, 0, sizeof(ask));
     memset(&s_tally_answer, 0, sizeof(s_tally_answer));
+    memset(g_test_output, 0, 3u * TAGFS_BLOCK_SIZE);
     ask.file_id     = fid;
     ask.sink.kernel = g_test_output;
     ask.sink.bytes  = 3u * TAGFS_BLOCK_SIZE;
@@ -407,11 +409,14 @@ static TestResult TestStandTallyRotThreePaths(void)
     uint64_t    fid = 0, first = 0, vlba = 0;
     uint8_t*    was     = g_test_buffer;
     uint8_t*    rot     = g_test_buffer + TAGFS_SECTOR_SIZE;
+    uint8_t*    held    = g_test_buffer + TAGFS_BLOCK_SIZE;
     bool        rotten  = false;
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandTallyRunOfThree(&fid, &first), "a file of three blocks in one run");
+    TEST_ASSERT_OK(StandTallyReadAt(fid, 0, TAGFS_BLOCK_SIZE), "its first block read as the file holds it");
+    memcpy(held, g_test_output, TAGFS_BLOCK_SIZE);
     vlba = (first + 1u) * TAGFS_BLOCK_SECTORS;
     TEST_ASSERT(StandTallySector(seat, base, vlba, was, false), "its second block is read");
     memcpy(rot, was, TAGFS_SECTOR_SIZE);
@@ -426,12 +431,17 @@ static TestResult TestStandTallyRotThreePaths(void)
     TEST_ASSERT_EQ(StandTallyReadAt(fid, 0, 3u * TAGFS_BLOCK_SIZE), ERR_CHECKSUM,
                    "and a read of the run through the read-ahead window answers the same");
     TEST_ASSERT(IntegrityErrorCount() > errors, "the rot is counted");
-    if (ReadJobSeatRunsAsync(seat))
+    if (ReadJobSeatRunsAsync(seat)) {
         TEST_ASSERT_EQ(StandTallyPortRead(fid), ERR_CHECKSUM, "and the port's read answers the same");
-    else
+        TEST_ASSERT_EQ(s_tally_answer.landed, TAGFS_BLOCK_SIZE,
+                       "with the block before it landed, and not one byte of the rotten one");
+        TEST_ASSERT_EQ(TestFirstDifference(g_test_output, held, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+                       "as the file holds it");
+    } else {
         kprintf("[TESTS] stand_tally_rot_three_paths: the port's road stands aside — the volume's seat "
                 "(%s) takes no read nobody stands over, so no read of it goes through the port\n",
                 BoardroomSeatName(seat));
+    }
 out:
     if (rotten) {
         if (!StandTallySector(seat, base, vlba, was, true))

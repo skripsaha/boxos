@@ -1,4 +1,4 @@
-#include "stand_stitch.h"
+#include "stand_binder.h"
 #include "volume_ribbon.h"
 #include "../ink/ink.h"
 #include "../mount/book_mount.h"
@@ -36,7 +36,10 @@
 // sector of it unreadable, is closed and damaged at the next mount; and a
 // medium that leaves and comes back loses the file no stitch settled; the
 // warrant guards a book's files as format v1's. Every test puts the ribbon
-// back as it found it (stand_stitch.h).
+// back as it found it (stand_stitch.h) — and one whose wait for room may be
+// answered by a Tally the Spine's ring and the ground its slots hold too
+// (stand_binder.h): the Tally a wait writes is laid over a slot, which no
+// zeros on the ribbon take back.
 // ============================================================================
 
 /* Whether file `fid`, as memory holds it, is called `name`, wears its name's
@@ -380,21 +383,21 @@ out:
 
 static TestResult TestStandDocketClaimRefused(void)
 {
-    TestResult  verdict = TEST_PASS;
-    StandStitch s;
-    bool        kept  = false, held = false, named = false;
-    error_t     rc    = OK;
-    int         made  = 0;
-    uint64_t    fid   = 0, plain = 0, k = 10;
-    const char* aside = StandStitchAside(&s);
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    bool               kept  = false, held = false, named = false;
+    error_t            rc    = OK;
+    int                made  = 0;
+    uint64_t           fid   = 0, plain = 0, k = 10;
+    const char*        aside = StandBinderAside(&b);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandDocketPlainFile(&plain), "the book holds a file with blocks");
-    TEST_ASSERT(BlockMapDerivedStandShrink(EndpaperKeeps(s.at.quire_blocks) + s.at.quire_blocks),
+    TEST_ASSERT(BlockMapDerivedStandShrink(EndpaperKeeps(b.s.at.quire_blocks) + b.s.at.quire_blocks),
                 "its free ground is cut to one Quire past the Tally's");
     held = true;
-    for (; rc == OK && k < 10u + 3u * s.at.quire_blocks; k++)
+    for (; rc == OK && k < 10u + 3u * b.s.at.quire_blocks; k++)
         rc = StandStitchSayLong(16u * TALLY_SHEET_PAYLOAD, (char)('a' + k % 26u), k, &kept);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_NO_SPACE, "words are laid down until the ribbon runs out");
     TEST_ASSERT(StandDocketShutAsk("docket-full.txt", &fid, &made) == TEST_PASS,
@@ -422,7 +425,7 @@ static TestResult TestStandDocketClaimRefused(void)
 out:
     if (held)
         BlockMapDerivedStandGrow();
-    STAND_STITCH_PUT_BACK(&s);
+    STAND_BINDER_PUT_BACK(&b);
     return verdict;
 }
 
@@ -463,18 +466,18 @@ out:
  * (StandDocketShutAsk) — and a file given up settles in the rest kept. */
 static TestResult TestStandDocketClaimAcross(void)
 {
-    TestResult   verdict = TEST_PASS;
-    StandStitch  s;
-    RibbonCursor now;
-    bool         kept  = false, held = false;
-    int          made  = 0;
-    uint64_t     fid   = 0, more = 0, plain = 0, gone = 0;
-    const char*  aside = StandStitchAside(&s);
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    RibbonCursor       now;
+    bool               kept  = false, held = false;
+    int                made  = 0;
+    uint64_t           fid   = 0, more = 0, plain = 0, gone = 0;
+    const char*        aside = StandBinderAside(&b);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandDocketPlainFile(&plain), "the book holds a file with blocks");
-    TEST_ASSERT(BlockMapDerivedStandShrink(EndpaperKeeps(s.at.quire_blocks) + s.at.quire_blocks - 1u),
+    TEST_ASSERT(BlockMapDerivedStandShrink(EndpaperKeeps(b.s.at.quire_blocks) + b.s.at.quire_blocks - 1u),
                 "its free ground is cut short of a Quire past the Tally's: no next_quire past the next is given");
     held = true;
     RibbonCursorStand(&now);
@@ -484,7 +487,7 @@ static TestResult TestStandDocketClaimAcross(void)
     TEST_ASSERT_EQ(tagfs_create_file("across.txt", NULL, 0, &fid), 0, "a file is made: its Born claims its room");
     TEST_ASSERT_OK(StandStitchSayFilling(4u * now.atom, 'x', 71, &kept), "a word four atoms long is said");
     RibbonCursorStand(&now);
-    TEST_ASSERT(RibbonQuireSame(&now.quire, &s.at.next) && !now.next.blocks && SettledGen() == InkedGen(),
+    TEST_ASSERT(RibbonQuireSame(&now.quire, &b.s.at.next) && !now.next.blocks && SettledGen() == InkedGen(),
                 "and its stitch, the Born with it, runs on into the next_quire and settles: no next_quire past it");
     TEST_ASSERT(StandDocketShutAsk("across-more.txt", &more, &made) == TEST_PASS,
                 "a file is asked for where the ribbon has no room");
@@ -500,7 +503,7 @@ static TestResult TestStandDocketClaimAcross(void)
 out:
     if (held)
         BlockMapDerivedStandGrow();
-    STAND_STITCH_PUT_BACK(&s);
+    STAND_BINDER_PUT_BACK(&b);
     return verdict;
 }
 
@@ -512,14 +515,14 @@ out:
  * for it. */
 static TestResult TestStandDocketHandleHolds(void)
 {
-    TestResult       verdict = TEST_PASS;
-    StandStitch      s;
-    RibbonCursor     was;
-    TagFSFileHandle* handle = NULL;
-    bool             held   = false;
-    int              made   = 0;
-    uint64_t         plain  = 0, first = 0, blocks = 0, fid = 0;
-    const char*      aside  = StandStitchAside(&s);
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    RibbonCursor       was;
+    TagFSFileHandle*   handle = NULL;
+    bool               held   = false;
+    int                made   = 0;
+    uint64_t           plain  = 0, first = 0, blocks = 0, fid = 0;
+    const char*        aside  = StandBinderAside(&b);
 
     if (aside)
         return test_steps_aside(aside);
@@ -532,12 +535,13 @@ static TestResult TestStandDocketHandleHolds(void)
     /* What else rests — let go by the stitches of the tests before, in this
      * Quire — comes back with the room asked for; the cut leaves it out. */
     uint64_t others = FallowBlocks() > blocks ? FallowBlocks() - blocks : 0;
-    TEST_ASSERT(BlockMapDerivedStandShrink(EndpaperKeeps(s.at.quire_blocks) + s.at.quire_blocks - 1u - others),
+    uint64_t quire  = b.s.at.quire_blocks;
+    TEST_ASSERT(BlockMapDerivedStandShrink(EndpaperKeeps(quire) + quire - 1u - others),
                 "the free ground is cut short of a Quire past the Tally's");
     held = true;
     (void)StandDocketRoom();
     RibbonCursorStand(&was);
-    TEST_ASSERT(RibbonQuireSame(&was.quire, &s.at.next) && !was.next.blocks,
+    TEST_ASSERT(RibbonQuireSame(&was.quire, &b.s.at.next) && !was.next.blocks,
                 "room asked for closes the Quire early: the ribbon stands in the next with none past it");
     TEST_ASSERT(!BlockMapDerivedIsFree(first) && FallowBlocks() >= blocks,
                 "the lag's stitches settled, and the file's ground rests for the open handle");
@@ -557,7 +561,7 @@ out:
         tagfs_close(handle);
     if (held)
         BlockMapDerivedStandGrow();
-    STAND_STITCH_PUT_BACK(&s);
+    STAND_BINDER_PUT_BACK(&b);
     return verdict;
 }
 
