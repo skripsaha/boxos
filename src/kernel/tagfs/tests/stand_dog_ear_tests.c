@@ -87,6 +87,10 @@ static bool StandDogEarHolds(uint64_t tree, TallyKey key)
     return false;
 }
 
+/* What the levers stand on, and the levers below, are built only where a test
+ * pulls one: a STRICT kernel stops at the DEFECT a lever draws, so there the
+ * tests that pull them step aside and nothing calls them. */
+#if !CONFIG_STRICT
 /* `key` of `tree`, the one a lever changes, lying outside DogEar — where the
  * self-check holds an element to the Tally before; one whose key DogEar took
  * it leaves to memory (binder_check.c, CheckInLeaf). A Tally's DONE may glean
@@ -127,6 +131,7 @@ static TestResult StandDogEarOutside(int line, uint64_t tree, TallyKey key, cons
         if ((verdict = StandDogEarOutside(__LINE__, (tree), (key), (what))) != TEST_PASS) \
             goto out;                                                                  \
     } while (0)
+#endif
 
 /* `n` files of a long name made from `from` on, settled: the first id in
  * *first. */
@@ -169,6 +174,7 @@ typedef struct {
 
 typedef void (*StandDogEarPull)(StandDogEarHand* h, bool on);
 
+#if !CONFIG_STRICT
 /* The lever pulled, a Tally asked for, the lever let go — between the stand's
  * two lines — and at once a stitch and a Tally of the state put back, before
  * the test says a word of what came: a kernel whose Tally the lever did not
@@ -245,6 +251,7 @@ static void StandDogEarGlossTold(StandDogEarHand* h, bool on)
     TagFSLockDrop(&tagfs_get_state()->lock);
     GlossRoomLetGo(&room);
 }
+#endif
 
 static TestResult TestStandDogEarStrictBites(void)
 {
@@ -285,6 +292,7 @@ out:
 #endif
 }
 
+#if !CONFIG_STRICT
 /* A file of three blocks of data — and, with `e`, an empty one made beside it
  * — settled, a Tally of them written and the volume mounted on it, its runs
  * born where that Tally says: their records held. */
@@ -303,6 +311,7 @@ static bool StandDogEarTallied(StandFreshModel* m, const char* name, uint64_t* d
         *e = FileMapRecordHold(tagfs_get_state()->files, empty, NULL);
     return *d && (*d)->tract && (!e || (*e && !(*e)->tract));
 }
+#endif
 
 static TestResult TestStandDogEarRunsBite(void)
 {

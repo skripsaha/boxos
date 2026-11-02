@@ -44,6 +44,21 @@
  * file's length: the window it keeps is shorter, and a take that went to the
  * window first would hand the gather a piece and refuse it no-space on a volume
  * with ground to spare. The file lies in one run and reads back whole.
+ *
+ * ‼ THE WINDOW IS ONE A TAKE WITH NO HINT MADE. What a write leaves its file
+ * in hand is what its last take kept, as long as the ground let it be: the free
+ * blocks past a run it went on at its hint (allotment.c, AllotmentBookAhead),
+ * or the rest of a window sized to the file as it stood where its run broke
+ * (AllotmentBookWindow). The versions come off that window's front, or lie at
+ * their hint where it is free and keep what is free past it, so what they
+ * leave in hand is the ground's doing too — and may be nothing, a window used
+ * to its very end gone (AllotmentCut). So the window the versions leave is let
+ * go, as the file's delete lets it go (ink_book.c, InkBookQuitclaimLocked), and
+ * the file's first block is written over: a first block goes on from no run
+ * (plot_window.c, PlotContinues), so its take has no hint and no window to
+ * come off, and takes a new window sized to the file — itself in front, the
+ * rest kept (Allotment 2) — on any seat and ground with a free run as long as
+ * the file, which the gather's own take needs as well.
  */
 #define STAND_BOOK_ROOM_GATHER  64u
 
@@ -71,6 +86,12 @@ static TestResult TestStandBookRoomGatherOneRun(void)
     for (uint32_t k = 1; k < STAND_BOOK_ROOM_GATHER; k += 2u)
         TEST_ASSERT_EQ(StandFreshWrite(&m, fid, (uint64_t)k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 0x40u + k),
                        TAGFS_BLOCK_SIZE, "every other block written over");
+    TagFSLockTake(&tagfs_get_state()->lock);
+    AllotmentRelease(fid);
+    TagFSLockDrop(&tagfs_get_state()->lock);
+    TEST_ASSERT(!AllotmentHeld(fid, &start, &window), "the window the versions left in hand is let go");
+    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 0x40u), TAGFS_BLOCK_SIZE,
+                   "and the first block written over");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
     TEST_ASSERT(StandFreshPrint(fid, &runs) && runs > 1u, "the file lies in many runs");
     TestEvidence("runs the file lies in", runs);
