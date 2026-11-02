@@ -56,7 +56,7 @@ constexpr std::size_t PanelHeight  = 15;
 constexpr std::size_t PanelInner   = PanelWidth - 2;
 constexpr std::size_t ValueColumn  = 13;
 constexpr std::size_t MinimumCols  = PanelOriginX + PanelWidth;
-constexpr std::size_t MinimumRows  = PanelOriginY + PanelHeight + 1;
+constexpr std::size_t MinimumRows  = LogoOriginY + LogoCellRows + 1;
 
 constexpr char UpperHalfBlock = static_cast<char>(0xDF);
 
@@ -437,9 +437,19 @@ bool PaintReport(const Report &ReportData)
 
     constexpr std::size_t ReportRows = LogoOriginY + LogoCellRows;
     constexpr std::size_t ReportCols = PanelOriginX + PanelWidth;
+    constexpr std::size_t PromptRows = 1;
     std::size_t PaintTop = Cursor.row;
-    if (PaintTop + ReportRows > Dimensions.rows)
-        PaintTop = Dimensions.rows > ReportRows ? Dimensions.rows - ReportRows : 0;
+    if (PaintTop + ReportRows + PromptRows > Dimensions.rows) {
+        std::size_t BottomTop = Dimensions.rows - ReportRows - PromptRows;
+        std::size_t Scrolls = PaintTop > BottomTop ? PaintTop - BottomTop : 0;
+        for (std::size_t I = 0; I < Scrolls; I++) {
+            if (vga_scroll_up() != 0) {
+                print_to_screen("passport: the screen would not scroll for its portrait\n");
+                return false;
+            }
+        }
+        PaintTop = BottomTop;
+    }
 
     std::vector<TextCell> Frame(ReportRows * ReportCols, MakeCell(' ', ValueInk, COLOR_BLACK));
     PaintLogo(Frame, ReportRows, ReportCols);
