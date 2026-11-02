@@ -1,11 +1,9 @@
 #include "idt.h"
 #include "right_of_way.h"
-#include "serial.h"      /* WireDrain — the halt is heard */
 #include "gdt.h"
 #include "tss.h"
 #include "klib.h"
-#include "klib_panic.h" /* PanicClaimForException — one claim for the dump and panic() */
-#include "klib_logring.h" /* LogKeepFlush — the dump outlives a warm reset */
+#include "klib_panic.h" /* PanicClaimForException, PanicEndAccount — one claim and one end for the dump and panic() */
 #include "io.h"
 #include "pic.h"
 #include "irqchip.h"
@@ -1214,7 +1212,8 @@ void exception_handler(interrupt_frame_t *frame)
      * gets a fresh handler frame and a fresh false: on another core it stops
      * at the claim without a word, and on the core whose dump it broke it
      * ends that dump where it broke off, its own account one line of its
-     * vector, error code and RIP (klib_panic.c). */
+     * vector, error code and RIP — or, the dump said whole, that line saying
+     * it came after it (klib_panic.c). */
     bool panic_claimed_here = false;
 
     /*
@@ -1832,24 +1831,9 @@ void exception_handler(interrupt_frame_t *frame)
     kprintf("====================================================================\n");
     kprintf("System halted.\n");
 
-    /* The account out of this core's cache and into the memory the NEXT boot
-     * reads. A warm reset invalidates the caches without writing them back
-     * (Intel SDM Vol 3A §11.5.1, Table 11-7), so a dump that never left the
-     * cache is a dump nobody will ever see — and a panicked machine is reset
-     * by hand. Takes no lock and waits on nothing, which is what makes it
-     * callable with every peer frozen. */
-    LogKeepFlush();
-
-    /* Everything said, onto the wire: interrupts are off, so the line cannot
-     * drive itself. Nothing to break first: a lock on the way that this core
-     * holds itself, or a stopped core left held, the owner of the panic takes
-     * as it stands (klib_lock.c). */
-    WireDrain();
-
-    while (1)
-    {
-        asm volatile("cli; hlt");
-    }
+    /* Said whole: marked so, out to the memory the next boot reads and onto
+     * the wire, and standing (klib_panic.c). */
+    PanicEndAccount();
 }
 
 /*

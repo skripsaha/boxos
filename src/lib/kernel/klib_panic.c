@@ -18,13 +18,16 @@
  * that matters is its own kind of confusion.
  *
  * The claim is never given back, and its owner never leaves its account:
- * panic() and the dump end standing, a fault or a panic inside either ends it
- * here, one line saying by what, standing; and the one road the exception
- * handler has back to work — the recovery of a kernel stack overflow, which
- * discards the context and schedules another — is closed to the owner
- * (idt.c). That is what makes "the owner of a panic waits on no lock"
- * (klib_lock.c) sound: with every other core stopped, the only code left
- * running is the account, and the account only says. */
+ * panic() and the dump end standing (PanicEndAccount), a fault or a panic
+ * inside either ends it here, one line saying by what, standing — and what
+ * brings the owner back here once the account is said whole, a fatal #MC in
+ * its drain or waking it from its stand, one line saying what came after it,
+ * standing again; and the one road the exception handler has back to work —
+ * the recovery of a kernel stack overflow, which discards the context and
+ * schedules another — is closed to the owner (idt.c). That is what makes
+ * "the owner of a panic waits on no lock" (klib_lock.c) sound: with every
+ * other core stopped, the only code left running is the account, and the
+ * account only says. */
 #include "klib_panic.h"
 #include "klib.h"
 #include "klib_logring.h" /* LogKeepFlush — what was said outlives a warm reset */
@@ -41,9 +44,18 @@
 static volatile uint32_t g_panic_owner;
 
 /* How many times the owner has come to the claim: 1 for its account, 2 for a
- * fault or a panic inside it, 3 for one inside the line that says so. Touched
- * by the owner alone, after it holds the claim, so it needs no atomic. */
+ * fault or a panic inside it — or for what brings it back once the account is
+ * said whole (g_panic_account_said) — 3 for one inside the line that says so.
+ * Touched by the owner alone, after it holds the claim, so it needs no
+ * atomic. */
 static uint32_t g_panic_depth;
+
+/* Set by the owner once the last line of its account is said, before that
+ * account goes out to the memory the next boot reads and to the wire
+ * (PanicEndAccount); read by it alone, when something brings it back to the
+ * claim after that — in the drain, or woken from the stand. Volatile: made
+ * before the hlt, not after a loop the compiler knows never ends. */
+static volatile bool g_panic_account_said;
 
 static uint32_t PanicMe(void)
 {
@@ -171,11 +183,15 @@ static void PanicSayf(int (*say)(const char *, va_list), const char *format, ...
 }
 
 /* The one line that ends an account a fault or a panic broke off, "Account
- * broken off by " BY and then FORMAT with ARGS, said by SAY. */
+ * broken off by " BY and then FORMAT with ARGS, said by SAY — or, the account
+ * said whole before it came, "After the account: " and the same: the lines
+ * above it are all there are, and a reader told they broke off would look for
+ * the rest. */
 static void PanicSayBreakBy(int (*say)(const char *, va_list), const char *by,
                             const char *format, va_list args)
 {
-    PanicSayf(say, "\nAccount broken off by %s", by);
+    PanicSayf(say, "\n%s%s",
+              g_panic_account_said ? "After the account: " : "Account broken off by ", by);
     say(format, args);
     PanicSayf(say, "\n");
 }
@@ -254,7 +270,12 @@ static bool PanicClaim(bool *already_claimed_here)
      * the message of the panic inside it; nothing walked, named, or read
      * through a pointer of the dead account's. What was said goes out before
      * that line (PanicSayBreak), so a fault inside the line itself — the third
-     * coming, which stands at once — costs the account nothing but the line. */
+     * coming, which stands at once — costs the account nothing but the line.
+     * Once the account is said whole (PanicEndAccount), what brings it here
+     * broke nothing off — a #MC taken in its drain, or one waking the owner
+     * from its stand, which a #MC does whatever the interrupt flag: the record
+     * of a memory error found after the account; the same one line says it
+     * came after the account, which is whole above it. */
     if (++g_panic_depth != 2)
         PanicStand();
     return true;
@@ -279,6 +300,37 @@ void PanicClaimForMessage(bool *already_claimed_here, const char *message, va_li
     if (!PanicClaim(already_claimed_here))
         return;
     PanicSayBreak("panic: ", message, args);
+    PanicStand();
+}
+
+void PanicEndAccount(void)
+{
+    /* Said whole: its last line is said — in the ring, and on the glass, every
+     * line of it having closed its own Canvas batch (klib_print.c, kvprintf).
+     * Marked here, before it goes out, not after: once the wire has gone over
+     * to its interrupt, what the transmitter has not taken of the account
+     * waits in the ring for the drain below — a byte every 86.8 us at 115200
+     * baud (serial.c, wire_program_port), a whole dump the best part of a
+     * tenth of a second — and a #MC taken in that time broke nothing off
+     * either: its line drains what was said before it says itself
+     * (PanicSayBreak), so it still comes after the whole account. After this,
+     * a second coming broke nothing. */
+    g_panic_account_said = true;
+
+    /* The account out of this core's cache and into the memory the NEXT boot
+     * reads. A warm reset invalidates the caches without writing them back
+     * (Intel SDM Vol 3A §11.5.1, Table 11-7), so an account that never left
+     * the cache is an account nobody will ever see — and a panicked machine is
+     * reset by hand. Takes no lock and waits on nothing, which is what makes
+     * it callable with every peer frozen. */
+    LogKeepFlush();
+
+    /* Everything said, onto the wire: interrupts are off, so the line cannot
+     * drive itself. Nothing to break first: a lock on the way that this core
+     * holds itself, or a stopped core left held, the owner of the panic takes
+     * as it stands (klib_lock.c). */
+    WireDrain();
+
     PanicStand();
 }
 
