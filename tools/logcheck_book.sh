@@ -369,14 +369,14 @@ census_book() {
 #   stand_medium_no_medium_flush_refused           0        0       0     1   a USB disk's flush, its medium gone
 #   stand_medium_sync_cache_remembered             0        0       0     3   a USB disk's flush: the command
 #                                                                             refused, then its medium gone twice
-#   stand_tally_rotten_leaf_locked                 0       54       0     0   both copies of the leaf below the
+#   stand_tally_rotten_leaf_locked                 0       18       0     0   both copies of the leaf below the
 #                                                                             root, the run then each sector (9),
-#                                                                             read by the mount once for each slot
-#                                                                             of the ring (3), the test having
-#                                                                             each name the leaf as it lies: the
-#                                                                             walk of the slot it stands on, then
-#                                                                             Facsimile's look in each older one
-#                                                                             (facsimile.c)
+#                                                                             read by the mount once: the walk of
+#                                                                             the slot it stands on — every slot
+#                                                                             of the ring names the leaf as it
+#                                                                             lies, and Facsimile's look in each
+#                                                                             older one takes the answer the walk
+#                                                                             had (mount/foxing.c)
 #   stand_stitch_retry_atom                        1        1       1     1   the stitch's first atom
 #   stand_stitch_retry_flush                       1        1       1     1   the flush after the stitch
 #   stand_blockfail_refused_writes                 4        4       4     4   two writes into each range
@@ -395,9 +395,9 @@ census_book() {
 #                                                                             takes: a seat of one block a
 #                                                                             command stands it down
 #   stand_run_refused_inside_fresh_through_the_port 0       0       1     1   the same, through the port
-#   the rows above                                36       90      40    33
+#   the rows above                                36       54      40    33
 #   every other test the book runs                61       61      61    61   the same on every leg (below)
-#   total                                         97      151     101    94
+#   total                                         97      115     101    94
 #   stand_stitch_refused_everywhere,               N        N       N     N   every attempt, as many as its line says
 #   stand_slip_engross_cut
 #   stand_stitch_retry_runs_out                    N        N       N     N   a stitch and every atom of the next: its line
@@ -422,7 +422,7 @@ census_book() {
 # judge takes it off (STAND_BOOK_REFUSED, STAND_BOOK_RACED). A test that
 # comes to refuse otherwise on a leg is a row of its own.
 STAND_BOOK_BLOCKFAILS=97
-STAND_BOOK_PADDED_BLOCKFAILS=151
+STAND_BOOK_PADDED_BLOCKFAILS=115
 STAND_BOOK_UEFI_BLOCKFAILS=101
 # The book on a USB stick (stand_book_usb): the usb column — its seat's reads
 # go through the port as on UEFI, so stand_tally_rotten_leaf_locked stands

@@ -371,10 +371,25 @@ out:
     return verdict;
 }
 
+/* The slots of the ring held as naming either of two Tallies: a Tally refused
+ * once its slot's write began leaves its slot so (binder_done.c
+ * BinderSlotUnsure), one refused at a node before it leaves the ring as it
+ * was (C7). */
+static uint32_t StandEscheatUnsure(void)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; g_binder.slot && i < g_binder.nslots; i++)
+        n += g_binder.slot[i].unsure;
+    return n;
+}
+
 /*
  * Nor by a Tally refused before the ask: one refused is tried again once a
  * cycle more settles (binder.c retry_after), and the ask asks that cycle, as
- * no write will — the Tally then begun lays the act.
+ * no write will — the Tally then begun lays the act. The cycle settled before
+ * it carries a word of the Use Context, so the Tally has a node to lay and the
+ * medium refuses that node (C7): with nothing changed since the mount, the
+ * rotten node kept as it lies, its first write would be its slot (C9).
  */
 static TestResult TestStandEscheatRetried(void)
 {
@@ -382,7 +397,9 @@ static TestResult TestStandEscheatRetried(void)
     StandBinder* b = &s_escheat_binder;
     EscheatSaid  said;
     uint64_t     files = 0;
+    uint32_t     unsure = 0;
     error_t      rc = OK;
+    bool         kept = false;
     const char*  aside = StandBinderAside(b);
 
     if (aside)
@@ -390,12 +407,17 @@ static TestResult TestStandEscheatRetried(void)
     verdict = StandBinderRot(b, &files);
     if (verdict != TEST_PASS)
         goto out;
-    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    TEST_ASSERT_OK(StandStitchSay("escheat retried", 15, 1, &kept), "a word of the Use Context settles in a stitch "
+                                                                     "of this mount: the Tally has a node to lay");
+    TEST_ASSERT(kept, "and the volume holds it");
+    unsure = StandEscheatUnsure();
     BlockFailArm(b->s.seat, BLOCK_FAIL_WRITE, 0, 0, 1);
     rc = BinderRunWhole();
     BlockFailDisarm();
-    TEST_ASSERT(rc != OK && !BinderNoWrite(), "the Tally whose first node the medium refuses is refused, and the "
-                                              "volume takes writes still");
+    TEST_ASSERT(rc != OK && BlockFailFired() && !BinderNoWrite(), "the Tally whose first node the medium refuses is "
+                                                                  "refused, and the volume takes writes still");
+    TEST_ASSERT_EQ(StandEscheatUnsure(), unsure, "refused at its node, before its slot was written: no slot of the "
+                                                 "ring comes to be held as naming either Tally (C7)");
     TEST_ASSERT_OK(TagFSEscheat(INK_WARRANTED, &said), "Escheat asked with the warrant");
     TEST_ASSERT(!BinderOwed(), "the Tally it asks is not owed before a cycle more settles");
     TEST_ASSERT(TagFSStandSettleDemands() & SETTLE_DEMAND_ROOM, "and the ask asks that cycle");
