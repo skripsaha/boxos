@@ -227,33 +227,87 @@ static uint32_t VolumeChainLength(uint32_t head_volume_block, uint32_t magic)
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-/* A book's own ground, each block once: the runs its Tallies and ribbon hold
- * (BinderStandGround — the slots' nodes, their ribbons' Quires and the next
- * one given, what of the pair of Tally-Quires the next Tally goes on in is not
- * laid yet), which overlap where a Tally was laid in among the nodes of the
- * one before. False when the heap will not hold them. */
+/* The Quires of the grid of `q` blocks that [start, start + count) meets,
+ * marked in `bit` (`nquire` of them). */
+static void StandTallyQuireMark(uint64_t* bit, uint64_t nquire, uint64_t q, uint64_t start, uint64_t count)
+{
+    for (uint64_t at = start / q; count && at < nquire && at * q < start + count; at++)
+        bit[at / 64u] |= 1ull << (at % 64u);
+}
+
+/* Whether the Quire `at` of the grid is marked in `bit` (`nquire` of them). */
+static bool StandTallyQuireMarked(const uint64_t* bit, uint64_t nquire, uint64_t at)
+{
+    return at < nquire && (bit[at / 64u] & (1ull << (at % 64u)));
+}
+
+uint64_t StandTallyQuires(uint64_t q, uint64_t** marks, uint64_t* nquire)
+{
+    uint64_t n = (tagfs_get_state()->block_end + q - 1u) / q, blocks = 0;
+    uint64_t* bit = kmalloc(sizeof(uint64_t) * (n / 64u + 1u));
+    if (!bit)
+        return UINT64_MAX;
+    memset(bit, 0, sizeof(uint64_t) * (n / 64u + 1u));
+    for (uint32_t i = 0; i < g_binder.nslots; i++) {
+        const SlotGround* s = &g_binder.slot[i];
+        for (uint32_t k = 0; s->holds && k < s->nground; k++)
+            StandTallyQuireMark(bit, n, q, s->ground[k].start, s->ground[k].count);
+        for (uint32_t k = 0; s->holds && k < s->nquires; k++)
+            StandTallyQuireMark(bit, n, q, s->quires[k].start, s->quires[k].count);
+    }
+    StandTallyQuireMark(bit, n, q, g_binder.pair_a, g_binder.pair_room);
+    StandTallyQuireMark(bit, n, q, g_binder.pair_b, g_binder.pair_room);
+    for (uint64_t at = 0; at < n; at++)
+        blocks += StandTallyQuireMarked(bit, n, at) ? q : 0;
+    *marks  = bit;
+    *nquire = n;
+    return blocks;
+}
+
+/* A book's own ground, each block once, as its census holds it at a mount and
+ * its Binder at a Tally (spec_v2 §16.5 п.17): every Quire of the grid a slot
+ * names a node in, and the current pair, whole (StandTallyQuires) — a slot a
+ * mount read names its nodes alone, and the census holds the Quire each lies
+ * in (mount/ground_census.c GroundQuiresHeld), the Binder gives it back whole
+ * (settle/binder_slots.c QuiresGo) — and the ribbon's Quires the slots hold,
+ * the one it is in and its next_quire, as they lie: a ribbon's Quire is taken
+ * on its atom, not on that grid (settle/ribbon.c), so it is no Quire of it.
+ * What else BinderStandGround names lies in the Quires marked. False when the
+ * heap will not hold them. */
 static bool BookOwnBlocks(uint64_t* own)
 {
-    uint32_t n    = BinderStandGround(NULL, 0);
-    Strip*   runs = kmalloc((uint64_t)(n ? n : 1u) * sizeof(Strip));
-    if (!runs)
+    const RibbonCursor* c      = RibbonCursorNow();
+    uint64_t            q      = c->quire_blocks ? c->quire_blocks : 1u, nquire = 0;
+    uint64_t*           marks  = NULL;
+    uint64_t            blocks = StandTallyQuires(q, &marks, &nquire);
+    uint32_t            room   = BinderStandGround(NULL, 0);
+    Strip*              runs   = blocks != UINT64_MAX ? kmalloc(((uint64_t)room + 2u) * sizeof(Strip)) : NULL;
+    if (!runs) {
+        kfree(marks);
         return false;
-    n = BinderStandGround(runs, n);
+    }
+    uint32_t n = BinderStandGround(runs, room);
+    n          = n < room ? n : room;
+    runs[n++]  = (Strip){ .start = c->quire.block, .count = (uint32_t)c->quire.blocks, .kind = STRIP_DATA };
+    runs[n++]  = (Strip){ .start = c->next.block, .count = (uint32_t)c->next.blocks, .kind = STRIP_DATA };
     for (uint32_t i = 1; i < n; i++)
         for (uint32_t k = i; k > 0 && runs[k - 1].start > runs[k].start; k--) {
             Strip t     = runs[k];
             runs[k]     = runs[k - 1];
             runs[k - 1] = t;
         }
-    uint64_t blocks = 0, reach = 0;
+    uint64_t reach = 0;
     for (uint32_t i = 0; i < n; i++) {
-        uint64_t lo = runs[i].start > reach ? runs[i].start : reach;
         uint64_t hi = runs[i].start + runs[i].count;
-        if (hi > lo)
-            blocks += hi - lo;
+        for (uint64_t at = runs[i].start > reach ? runs[i].start : reach; at < hi;) {
+            uint64_t to = (at / q + 1u) * q < hi ? (at / q + 1u) * q : hi;
+            blocks += StandTallyQuireMarked(marks, nquire, at / q) ? 0 : to - at;
+            at = to;
+        }
         reach = hi > reach ? hi : reach;
     }
     kfree(runs);
+    kfree(marks);
     *own = blocks;
     return true;
 }
@@ -275,8 +329,9 @@ bool VolumeTallyTake(VolumeTally* tally)
      * Tally-Quires are the book's, kept for the next Tally to go on in
      * (binder.c TallyEnded), and named by no slot — so the runner reads
      * `held` across a test only when no cycle settled within it (`cycles`,
-     * VolumeResidueSaid). The book's ground is the stand's to name
-     * (BinderStandGround): a build without VOLUME_TESTS counts its files. */
+     * VolumeResidueSaid). The book's ground is the stand's to name, Quires
+     * whole as its census holds them (BookOwnBlocks): a build without
+     * VOLUME_TESTS counts its files. */
     if (fs->format == DEED_FORMAT_V2) {
         uint64_t own = 0;
 #ifdef CONFIG_VOLUME_TESTS

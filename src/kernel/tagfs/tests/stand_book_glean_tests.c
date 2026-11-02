@@ -56,40 +56,6 @@ static bool StandBookGleanLine(StandFreshModel* m, uint64_t fid, uint32_t line)
            TagFSSettle() == OK && StandBinderTallies(1u) == OK;
 }
 
-/* The Quires of the grid of `q` blocks that [start, start + count) meets,
- * marked in `bit` (`nquire` of them). */
-static void StandBookGleanMark(uint64_t* bit, uint64_t nquire, uint64_t q, uint64_t start, uint64_t count)
-{
-    for (uint64_t at = start / q; count && at < nquire && at * q < start + count; at++)
-        bit[at / 64u] |= 1ull << (at % 64u);
-}
-
-/* Every Quire a slot that holds names a node in — its own nodes and the
- * Quires its Tally names a node in as it lies — and the current pair: the
- * blocks they take, a Quire whole; UINT64_MAX with no memory. */
-static uint64_t StandBookGleanHeld(uint64_t q, uint64_t** marks, uint64_t* nquire)
-{
-    uint64_t n = (tagfs_get_state()->block_end + q - 1u) / q, blocks = 0;
-    uint64_t* bit = kmalloc(sizeof(uint64_t) * (n / 64u + 1u));
-    if (!bit)
-        return UINT64_MAX;
-    memset(bit, 0, sizeof(uint64_t) * (n / 64u + 1u));
-    for (uint32_t i = 0; i < g_binder.nslots; i++) {
-        const SlotGround* s = &g_binder.slot[i];
-        for (uint32_t k = 0; s->holds && k < s->nground; k++)
-            StandBookGleanMark(bit, n, q, s->ground[k].start, s->ground[k].count);
-        for (uint32_t k = 0; s->holds && k < s->nquires; k++)
-            StandBookGleanMark(bit, n, q, s->quires[k].start, s->quires[k].count);
-    }
-    StandBookGleanMark(bit, n, q, g_binder.pair_a, g_binder.pair_room);
-    StandBookGleanMark(bit, n, q, g_binder.pair_b, g_binder.pair_room);
-    for (uint64_t at = 0; at < n; at++)
-        blocks += bit[at / 64u] & (1ull << (at % 64u)) ? q : 0;
-    *marks  = bit;
-    *nquire = n;
-    return blocks;
-}
-
 /* The blocks every copy of every node of the Tally the next one is laid
  * against takes, in Sheets: the live nodes. */
 static uint64_t StandBookGleanLive(void)
@@ -155,7 +121,7 @@ static TestResult TestStandBookGleanQuires(void)
     TestEvidence("the pair of Tally-Quires moved on", moves);
     TEST_ASSERT(moves >= STAND_BOOK_GLEAN_MOVES, "the Tallies went through Tally-Quires");
     TEST_ASSERT_OK(StandBinderTallies(g_binder.ring + 2u), "and the ring written over twice and more");
-    held = StandBookGleanHeld(q, &marks, &nquire);
+    held = StandTallyQuires(q, &marks, &nquire);
     live = StandBookGleanLive();
     TestEvidence("blocks of the Tally-Quires the slots and the pair hold", held);
     TestEvidence("blocks the live nodes take, every copy", live);
