@@ -437,7 +437,7 @@ bool PaintReport(const Report &ReportData)
 
     constexpr std::size_t ReportRows = LogoOriginY + LogoCellRows;
     constexpr std::size_t ReportCols = PanelOriginX + PanelWidth;
-    std::size_t PaintTop = Cursor.row >= LogoOriginY ? Cursor.row - LogoOriginY : 0;
+    std::size_t PaintTop = Cursor.row;
     if (PaintTop + ReportRows > Dimensions.rows)
         PaintTop = Dimensions.rows > ReportRows ? Dimensions.rows - ReportRows : 0;
 
