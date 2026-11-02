@@ -49,9 +49,9 @@ constexpr std::size_t LogoCellRows    = LogoPixelHeight / 2;
 constexpr std::size_t LogoOriginX     = 1;
 constexpr std::size_t LogoOriginY     = 2;
 
-constexpr std::size_t PanelOriginX = 35;
+constexpr std::size_t PanelOriginX = 37;
 constexpr std::size_t PanelOriginY = 2;
-constexpr std::size_t PanelWidth   = 44;
+constexpr std::size_t PanelWidth   = 42;
 constexpr std::size_t PanelHeight  = 15;
 constexpr std::size_t PanelInner   = PanelWidth - 2;
 constexpr std::size_t ValueColumn  = 13;
@@ -432,15 +432,23 @@ bool PaintReport(const Report &ReportData)
         return false;
     }
 
-    std::size_t Rows = Dimensions.rows;
-    std::size_t Cols = Dimensions.cols;
-    std::vector<TextCell> Frame(Rows * Cols, MakeCell(' ', ValueInk, COLOR_BLACK));
-    PaintLogo(Frame, Rows, Cols);
-    PaintPanel(Frame, Rows, Cols, ReportData);
+    vga_pos_t Cursor{};
+    (void)vga_getcursor(&Cursor);
 
-    std::size_t CursorRow = std::min(Rows - 1, PanelOriginY + PanelHeight + 1);
-    vga_setcursor(static_cast<uint8_t>(CursorRow), 0);
-    return vga_paint(0, 0, Dimensions.rows, Dimensions.cols, Frame.data()) == 0;
+    constexpr std::size_t ReportRows = LogoOriginY + LogoCellRows;
+    constexpr std::size_t ReportCols = PanelOriginX + PanelWidth;
+    std::size_t PaintTop = Cursor.row >= LogoOriginY ? Cursor.row - LogoOriginY : 0;
+    if (PaintTop + ReportRows > Dimensions.rows)
+        PaintTop = Dimensions.rows > ReportRows ? Dimensions.rows - ReportRows : 0;
+
+    std::vector<TextCell> Frame(ReportRows * ReportCols, MakeCell(' ', ValueInk, COLOR_BLACK));
+    PaintLogo(Frame, ReportRows, ReportCols);
+    PaintPanel(Frame, ReportRows, ReportCols, ReportData);
+
+    std::size_t AfterReport = std::min<std::size_t>(Dimensions.rows - 1, PaintTop + ReportRows);
+    vga_setcursor(static_cast<uint8_t>(AfterReport), 0);
+    return vga_paint(static_cast<uint8_t>(PaintTop), 0,
+                     static_cast<uint8_t>(ReportRows), static_cast<uint8_t>(ReportCols), Frame.data()) == 0;
 }
 
 int Run()
