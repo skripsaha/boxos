@@ -62,7 +62,8 @@
 set -u
 
 GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut replug holdground returnfail
-                turns turnsmut cores replugwrite latelaunchmut haltcycle fullvolume roombackmut stand standusb mkfs"
+                turns turnsmut cores replugwrite latelaunchmut haltcycle halthog halthogmut fullvolume roombackmut
+                stand standusb mkfs"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross firstflushmut lastflushmut booknextfidmut stitchmut"
 GATES_OTHER="framerefuse concordance formats volread_selftest"

@@ -35,6 +35,11 @@ static uint8_t g_baton_oneway_owed[MAX_CORES];
  * by the owning core only; read by it (BatonRunningHere). */
 static uint32_t g_baton_running[MAX_CORES];
 
+/* The one-way pass this core has taken and is running for the rest of the
+ * boot. Written by the owning core as it takes the pass; read by its own
+ * scheduler (BatonOneWayIdleOwed). */
+static uint8_t g_baton_oneway_taken[MAX_CORES];
+
 /* ==========================================================================
  *  Raw MP link — the one primitive both the public push and the consumer's
  *  stub re-anchor share. Allocation-free, IRQ-safe. Does NOT touch
@@ -277,7 +282,36 @@ static void baton_take_one_way(BatonQueue *q, uint8_t core_idx, void (*run)(void
 {
     baton_say_one_way(core_idx, run);
     atomic_fetch_add_u64(&q->popped, 1);
+    __atomic_store_n(&g_baton_oneway_taken[core_idx], 1u, __ATOMIC_RELEASE);
     run(ctx);
+}
+
+/* ‼ ON ONE CORE THE PASS THAT DOES NOT COME BACK IS OWED THE CORE TURN ABOUT.
+ * On a machine of one core a one-way pass is taken by one of two pumps at
+ * rest. The tick's pumps only when the tick came over ring 3 (idt.c), and the
+ * halt it takes runs with interrupts off, never switched from. cpu_idle's
+ * leaves the power button's halt standing in the idle context, which the tick
+ * switches away from like any idle, and which the scheduler handed the core
+ * again only when nothing else was ready: a program that never parked kept it
+ * for good. The halt wakes the machine's programs itself — system:shutdown,
+ * before its courtesy window (system_halt.c) — and one that answers by
+ * computing kept the machine running with its halt begun and never ended
+ * (logcheck halthog). Measured on powercut's base as well, twice in some 270
+ * boots: the halt's "[HALT] Draining async writes...", the volume's word that
+ * it takes no change from here and two lines of the heap's reserve, and
+ * nothing more for a minute; of twenty looks at the core over four seconds,
+ * fifteen in clock.elf's result_wait at ring 3 — one wait, the same frame each
+ * time, its answer not come — five in interrupt handlers, none in the halt;
+ * and a second press refused as "already taking one". Owed the next quantum
+ * from whoever ran this one (idle.c, IdleOwed), the halt has every other one
+ * wherever it stands, until the cli that ends every program's turn. A K-Core
+ * runs no program to owe a quantum to. */
+bool BatonOneWayIdleOwed(void)
+{
+    if (g_amp.total_cores != 1)
+        return false;
+    uint8_t core = amp_get_core_index();
+    return core < MAX_CORES && __atomic_load_n(&g_baton_oneway_taken[core], __ATOMIC_ACQUIRE) != 0;
 }
 
 /* ==========================================================================

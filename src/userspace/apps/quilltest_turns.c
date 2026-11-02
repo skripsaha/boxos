@@ -22,6 +22,12 @@
  * that gives its turns to the floods alone says nothing at all, which the
  * host judges too (logcheck turns). The floods count on a board both see — a
  * Bay, the same memory in every cabin.
+ *
+ * ‼ AND THE HALT THE POWER BUTTON BEGINS AT REST IS ONE OF THE TURNS.
+ * shutdownhog waits for the word that the machine is stopping and answers it
+ * by computing without a park — the program a one-core machine's halt has to
+ * share its core with from its courtesy window to its roll call (logcheck
+ * halthog).
  */
 
 #include "box/print.h"
@@ -31,6 +37,7 @@
 #include "box/convert.h"
 #include "box/system.h"
 #include "box/time.h"
+#include "box/touch.h"
 #include "box/error.h"
 #include "box/core/manifest.h"
 #include "box/core/result.h"
@@ -240,4 +247,39 @@ QuillVerdict QuillBeside(const char *const *args)
            (unsigned long long)good, (unsigned long long)bytes, (long long)alone.wrote,
            (long long)beside.wrote, alone.anchored, beside.anchored, (long long)rerr, stuck, arc);
     return whole ? QUILL_PASS : QUILL_FAIL;
+}
+
+/* =========================================================================
+ *  shutdownhog — told the machine is stopping, it computes without end
+ * ========================================================================= */
+
+/* system:shutdown is published by the halt itself, before its courtesy window
+ * (system_halt.c), so this cabin wakes inside the halt and keeps the core from
+ * then on unless the scheduler hands the halt its turns. Its first line is the
+ * host's cue to press the button; its second says the word came. */
+QuillVerdict QuillShutdownHog(const char *const *args)
+{
+    (void)args;
+    uint32_t pid = cabin_info()->pid;
+    TouchTag tag = TOUCH_TAG_ID(TOUCH_TAG_SYSTEM_SHUTDOWN);
+    int      rc  = touch_claim(tag, TOUCH_REST, 0, 0);
+    if (rc != 0) {
+        printf("[QUILL] shutdownhog: FAIL — pid %u could not claim system:shutdown (answer %d)\n",
+               pid, rc);
+        return QUILL_FAIL;
+    }
+    printf("[QUILL] shutdownhog: pid %u waits for the machine to stop, and then computes without "
+           "end\n", pid);
+    Touch told;
+    rc = touch_await(tag, &told, 0);
+    if (rc != 0) {
+        printf("[QUILL] shutdownhog: FAIL — pid %u was answered %d waiting for system:shutdown\n",
+               pid, rc);
+        return QUILL_FAIL;
+    }
+    printf("[QUILL] shutdownhog: the machine is stopping — pid %u computes without end and never "
+           "parks\n", pid);
+    volatile uint64_t x = pid;
+    for (;;)
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
 }

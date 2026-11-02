@@ -715,6 +715,9 @@ static const QuillCase g_cases[] = {
     { "flood", "SLOT", 1, 0, QuillFlood,
       "for beside: calls handed in without waiting for them, counted in SLOT of its board",
       "nothing; never returns while beside's board is there", false },
+    { "shutdownhog", "", 0, 0, QuillShutdownHog,
+      "for the halt's stand: a cabin that waits for system:shutdown and then computes without end",
+      "nothing: a cabin spinning until the machine stops; never returns once told", false },
     { "away", "NAME COUNT SEED", 3, 0, QuillAway,
       "are COUNT writers appending to NAME — one in the medium, the rest waiting for its Helm — "
       "each answered when the medium leaves and comes back (seeds SEED + 1 to SEED + COUNT)",

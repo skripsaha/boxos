@@ -71,6 +71,7 @@ QuillVerdict QuillCrowd(const char *const *args);
 /* The machine's turns, quilltest_turns.c. */
 QuillVerdict QuillFlood(const char *const *args);
 QuillVerdict QuillBeside(const char *const *args);
+QuillVerdict QuillShutdownHog(const char *const *args);
 
 /* A worker in a cabin of its own (quilltest_cores.c): started from its line,
  * and its end waited for as a state — process_gone's answer, its exit in
