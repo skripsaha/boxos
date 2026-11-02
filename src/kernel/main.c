@@ -1014,6 +1014,10 @@ void kernel_main(void)
     kprintf("Kernel initialization complete!\n");
     kprintf("\n");
 
+#ifdef CONFIG_PANIC_STOP_PROOF /* in place of the startup tests; never returns */
+    { extern __attribute__((noreturn)) void PanicStopProof(void); PanicStopProof(); }
+#endif
+
 #if CONFIG_RUN_STARTUP_TESTS
     kprintf("\n[TESTS] Running startup tests...\n");
     kprintf("========================================\n");

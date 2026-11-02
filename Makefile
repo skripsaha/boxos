@@ -648,6 +648,31 @@ CFLAGS += -DCONFIG_XHCI_ENUM_SILENCE_PROOF=1
 endif
 ENUMSILENCE_MARK = $(BUILDDIR)/.enumsilence.$(if $(filter on,$(ENUMSILENCE)),on,off)
 
+# A K-Core dies while the BSP stands with its interrupts off.
+#
+# The startup tests run on the BSP before the sti that opens it to interrupts
+# (main.c), and so does everything else kernel_main does; a K-Core that
+# panicked there broadcast a halt the BSP could not take, and the BSP went on
+# while the account of the panic waited behind it. `make PANICSTOP=panic`
+# builds the kernel that puts that case on purpose (panic_stop_proof.c): in
+# place of the startup tests the BSP takes the console lock and runs on with
+# interrupts off, saying nothing, and the first K-Core beside it calls panic();
+# `PANICSTOP=fault` has that K-Core execute ud2 instead, so the exception dump
+# (idt.c) is the account, and `PANICSTOP=nested` has it call panic() with a
+# string at a non-canonical address, so the account faults inside its own
+# first line. A machine built this way must STOP at the panic, every core of
+# it, the BSP too — logcheck panicstop. Boot it with CORES=4 at the least:
+# below four cores the BSP is the only K-Core (amp_calculate_kcores). Never in
+# a shipped build.
+PANICSTOP ?=
+ifneq ($(PANICSTOP),)
+ifeq ($(filter panic fault nested,$(PANICSTOP)),)
+$(error PANICSTOP=$(PANICSTOP) names no case — panic (the K-Core calls panic()), fault (it executes ud2) or nested (it faults inside its own account))
+endif
+CFLAGS += -DCONFIG_PANIC_STOP_PROOF=$(if $(filter fault,$(PANICSTOP)),2,$(if $(filter nested,$(PANICSTOP)),3,1))
+endif
+PANICSTOP_MARK = $(BUILDDIR)/.panicstop.$(if $(PANICSTOP),$(PANICSTOP),unset)
+
 # ── STRICT=on, the kernel's half ───────────────────────────────────────────
 #
 # STRICT=on is first a machine key: QEMU run the way real hardware runs (the
@@ -696,6 +721,7 @@ BUILD_KEYS_SET := $(strip \
   $(if $(SEEKLAG),SEEKLAG=$(SEEKLAG),) \
   $(if $(filter off,$(STARTUP_TESTS)),STARTUP_TESTS=off,) \
   $(if $(filter on,$(ENUMSILENCE)),ENUMSILENCE=on,) \
+  $(if $(PANICSTOP),PANICSTOP=$(PANICSTOP),) \
   $(if $(filter on,$(STRICT)),STRICT=on,) \
   $(if $(filter off,$(NOEXEC)),NOEXEC=off,) \
   $(if $(filter off,$(IOMMU)),IOMMU=off,))
@@ -1033,6 +1059,10 @@ $(STARTUP_TESTS_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.startup_tests.*
 	@touch $@
 
+$(PANICSTOP_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.panicstop.*
+	@touch $@
+
 $(INTX_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.intx.*
 	@touch $@
@@ -1074,7 +1104,8 @@ BUILD_KEY_MARKS := $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) \
                    $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) \
                    $(SETTLECUT_MARK) $(IOMMU_MARK) $(INTX_MARK) $(DEBUG_MARK) \
                    $(BRINGUP_MARK) $(WEDGETEST_MARK) $(ENUMSILENCE_MARK) \
-                   $(STRICT_MARK) $(SEEKLAG_MARK) $(STARTUP_TESTS_MARK)
+                   $(STRICT_MARK) $(SEEKLAG_MARK) $(STARTUP_TESTS_MARK) \
+                   $(PANICSTOP_MARK)
 
 $(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(BUILD_KEY_MARKS) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
