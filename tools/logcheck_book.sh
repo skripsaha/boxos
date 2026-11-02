@@ -369,9 +369,14 @@ census_book() {
 #   stand_medium_no_medium_flush_refused           0        0       0     1   a USB disk's flush, its medium gone
 #   stand_medium_sync_cache_remembered             0        0       0     3   a USB disk's flush: the command
 #                                                                             refused, then its medium gone twice
-#   stand_tally_rotten_leaf_locked                 0       36       0     0   both copies of the leaf below the
+#   stand_tally_rotten_leaf_locked                 0       54       0     0   both copies of the leaf below the
 #                                                                             root, the run then each sector (9),
-#                                                                             read twice by the mount
+#                                                                             read by the mount once for each slot
+#                                                                             of the ring (3), the test having
+#                                                                             each name the leaf as it lies: the
+#                                                                             walk of the slot it stands on, then
+#                                                                             Facsimile's look in each older one
+#                                                                             (facsimile.c)
 #   stand_stitch_retry_atom                        1        1       1     1   the stitch's first atom
 #   stand_stitch_retry_flush                       1        1       1     1   the flush after the stitch
 #   stand_blockfail_refused_writes                 4        4       4     4   two writes into each range
@@ -390,10 +395,11 @@ census_book() {
 #                                                                             takes: a seat of one block a
 #                                                                             command stands it down
 #   stand_run_refused_inside_fresh_through_the_port 0       0       1     1   the same, through the port
-#   the rows above                                36       72      40    33
-#   every other test the book runs                60       60      60    60   the same on every leg (below)
-#   total                                         96      132     100    93
-#   stand_stitch_refused_everywhere                N        N       N     N   every attempt, as many as its line says
+#   the rows above                                36       90      40    33
+#   every other test the book runs                61       61      61    61   the same on every leg (below)
+#   total                                         97      151     101    94
+#   stand_stitch_refused_everywhere,               N        N       N     N   every attempt, as many as its line says
+#   stand_slip_engross_cut
 #   stand_stitch_retry_runs_out                    N        N       N     N   a stitch and every atom of the next: its line
 #   stand_slip_refused_tail, stand_escheat_tail,   N        N       N     N   the reads of a Slip's tail block the Helm's
 #   stand_escheat_tail_helm_held                                              service races the test for: its line
@@ -402,18 +408,27 @@ census_book() {
 # Every test of the tree runs on a book, the neutral ones among them (spec_v2
 # §16.5 п.22). A test whose refusals differ from one leg to another is a row
 # above, so each column differs from the next by its rows alone; the rest —
-# 60, the same on every leg — is the refusals of the tests the rows do not
-# name, counted on each leg's boots (two boots each the same): the log names
-# no test a refusal is of, so that one number is a run's, the rows the code's.
-# A test that comes to refuse otherwise on a leg is a row of its own.
-STAND_BOOK_BLOCKFAILS=96
-STAND_BOOK_PADDED_BLOCKFAILS=132
-STAND_BOOK_UEFI_BLOCKFAILS=100
+# 61, the same on every leg — is the refusals of the tests the rows do not
+# name: stand_medium_mount_bad_sector_waits 54, and one each of
+# stand_blockfail_reads_the_nth, stand_rmw_read_refused,
+# stand_medium_mount_resets_the_seat,
+# stand_medium_mount_rings_in_its_own_breath,
+# stand_helm_write_refused_part_way, stand_escheat_retried and
+# stand_escheat_windows. A refusal is the test's whose line "[TESTS] N of M:
+# name" (tests.c, TestRun) last comes before it, and each test refuses as
+# many on every boot of a leg, less what its own line says: an N row's count
+# moves with the race or the attempts its line counts — the stick's
+# stand_escheat_tail_helm_held 3 on one boot and 2 on the next — and the
+# judge takes it off (STAND_BOOK_REFUSED, STAND_BOOK_RACED). A test that
+# comes to refuse otherwise on a leg is a row of its own.
+STAND_BOOK_BLOCKFAILS=97
+STAND_BOOK_PADDED_BLOCKFAILS=151
+STAND_BOOK_UEFI_BLOCKFAILS=101
 # The book on a USB stick (stand_book_usb): the usb column — its seat's reads
 # go through the port as on UEFI, so stand_tally_rotten_leaf_locked stands
 # down there and refuses nothing, and the stick is no AHCI port for
 # stand_roadstead_refusal_rings_once to refuse on.
-STAND_BOOK_USB_BLOCKFAILS=93
+STAND_BOOK_USB_BLOCKFAILS=94
 STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
 # C13 (stand_docket_closed_damaged): sector 1 of a stitch the kernel sewed will
 # not read at the next mount — the line names it and the record bytes it took.
