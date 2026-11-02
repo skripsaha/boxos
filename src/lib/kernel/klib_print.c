@@ -22,10 +22,9 @@
 #include "klib_logring.h"
 #include "video.h"
 #include "canvas.h"
-#include "serial.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
-#include "klib_panic.h" /* PanicClaimForMessage — one claim, every other core stopped */
+#include "klib_panic.h" /* PanicClaimForMessage, PanicEndAccount — one claim, every other core stopped */
 
 /* Module-local state — neither escapes outside this TU. */
 static spinlock_t g_kprintf_lock;
@@ -599,18 +598,8 @@ __attribute__((noreturn)) void panic(const char *message, ...)
 
     va_end(args);
 
-    /* The account out of this core's cache and into the memory the NEXT boot
-     * reads. A warm reset invalidates the caches without writing them back
-     * (Intel SDM Vol 3A §11.5.1), so a banner that never left the cache is a
-     * banner nobody will ever see — and a panicked machine is reset by hand.
-     * Takes no lock and waits on nothing; safe with every peer frozen. */
-    LogKeepFlush();
-
-    /* Everything said, onto the wire, before the last breath: the line
-     * drives itself by interrupt and interrupts are off. */
-    WireDrain();
-
-    while (1)
-        asm volatile("hlt");
+    /* Said whole: marked so, out to the memory the next boot reads and onto
+     * the wire, and standing (klib_panic.c). */
+    PanicEndAccount();
 }
 
