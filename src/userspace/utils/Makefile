@@ -69,7 +69,8 @@ ASSEMBLE_ENTRY_BLOB = $(ASSEMBLE_DIR)/entry_blob.o
 UTILS = help create show files tag untag name trash erase assemble \
         me info say reboot bye defrag fsck ipc_test memtag hw \
         timezone logsave lastsaid rgbtest usetest faretest luggagetest rollcall handset headcount \
-        draft playtime lavalamp finish taskcenter hexer stringview
+        draft playtime lavalamp finish taskcenter hexer stringview \
+        calculate difference copy typer flame
 
 .PHONY: all clean
 
@@ -146,6 +147,36 @@ hexer.elf: $(BOXLIB_START) $(HEXER_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.
 
 stringview.elf: $(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+# calculate, difference, copy, typer and flame are C++, the larger ones in
+# parts named after their program; linked and stripped as hexer and stringview.
+CALCULATE_OBJS  = calculate.o calculate_integer.o calculate_fraction.o calculate_math.o \
+                  calculate_show.o calculate_read.o calculate_parse.o
+DIFFERENCE_OBJS = difference.o difference_myers.o difference_text.o difference_print.o
+COPY_OBJS       = copy.o
+TYPER_OBJS      = typer.o typer_passages.o typer_text.o typer_attempt.o typer_record.o \
+                  typer_store.o typer_screen.o typer_paint.o typer_results.o
+FLAME_OBJS      = flame.o flame_sim.o flame_palette.o flame_font.o flame_paint.o flame_menu.o
+
+calculate.elf: $(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+difference.elf: $(BOXLIB_START) $(DIFFERENCE_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(DIFFERENCE_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+copy.elf: $(BOXLIB_START) $(COPY_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(COPY_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+typer.elf: $(BOXLIB_START) $(TYPER_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TYPER_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+flame.elf: $(BOXLIB_START) $(FLAME_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(FLAME_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.
