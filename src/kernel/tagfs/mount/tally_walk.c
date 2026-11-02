@@ -1,4 +1,5 @@
 #include "tally_read_internal.h"
+#include "foxing.h"
 
 /*
  * The Tally, walked (tally_read.h). Every node is read into memory the heap
@@ -123,7 +124,8 @@ static uint32_t TallyCopiesNamed(const TallyCopiesSaid* said)
  * pointer's seq, inside the volume, parsed as a node in its range: OK when it
  * holds; ERR_TAGFS_CORRUPTED when it does not, why in `why`, *n let go;
  * ERR_NO_MEMORY, or the medium's refusal. A copy past the volume's last block
- * holds nothing a medium could. */
+ * holds nothing a medium could; one the mount reading its book found spoiled
+ * already is not asked of the medium again (foxing.h). */
 static error_t TallyCopyRead(const TallyPlace* p, uint32_t k, TallyNode* n, char* why, size_t room)
 {
     uint64_t end   = tagfs_get_state()->block_end;
@@ -134,10 +136,13 @@ static error_t TallyCopyRead(const TallyPlace* p, uint32_t k, TallyNode* n, char
         ksnprintf(why, room, "it names blocks past the volume's end");
         return rc;
     }
+    if (FoxingSays(block, p->ptr.sheets, p->ptr.seq, why, room))
+        return rc;
     rc = BookUnitRead(block * VOLUME_BLOCK_SECTORS, (uint32_t)(p->ptr.sheets * VOLUME_BLOCK_SECTORS),
                       BOOK_UNIT_SHEET, p->ptr.seq, &n->unit);
     if (rc == OK && !n->unit.whole) {
         ksnprintf(why, room, "%s", n->unit.why);
+        FoxingNoted(block, p->ptr.sheets, p->ptr.seq, n->unit.why);
         rc = ERR_TAGFS_CORRUPTED;
     } else if (rc == OK) {
         rc = TallyNodeParse(p, n, why, room);

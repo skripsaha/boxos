@@ -14,7 +14,8 @@
  *   2. its tree of the range, walked by its inner nodes alone, names the
  *      leaves the range's keys reach, and none of them, nor a node above
  *      them, reads in no copy — a node shared with the Tally stood on rots
- *      for both, and the slot is passed over;
+ *      for both, and the slot is passed over, the copies the walk found
+ *      spoiled not asked of the medium again (foxing.h);
  *   3. its ribbon from its `at` reaches the stitch the Tally stood on took in
  *      — or the slot's Tally took in that very stitch;
  *   4. every file the range reaches stands in the slot's Tally, and its

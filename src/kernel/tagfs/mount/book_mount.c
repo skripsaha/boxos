@@ -1,5 +1,6 @@
 #include "book_mount.h"
 #include "facsimile.h"
+#include "foxing.h"
 #include "../settle/binder.h"
 #include "book_unit.h"
 #include "away.h"
@@ -458,6 +459,7 @@ error_t MountReadBook(const char** what)
 {
     BookSeqSeenForget();
     BinderMountReset();
+    FoxingBegin();
     error_t rc = BookMemory(what);
     if (rc == OK)
         rc = BookSpine(what);
@@ -465,8 +467,10 @@ error_t MountReadBook(const char** what)
         rc = BookSlotsHeld(what);
     if (rc == OK)
         rc = BookStand(what);
-    if (rc != OK)
+    if (rc != OK) {
+        FoxingEnd();
         return rc;
+    }
 
     BookSlotSaid(g_book.stood);
     GroundCensusBegin();
@@ -483,6 +487,7 @@ error_t MountReadBook(const char** what)
     RibbonWalkLetGo(g_book.ribbon);
     g_book.ribbon = NULL;
     GroundCensusEnd();
+    FoxingEnd();
     if (rc != OK)
         return rc;
     if (g_book.bookmarked)
