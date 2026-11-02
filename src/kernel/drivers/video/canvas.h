@@ -115,7 +115,7 @@ void CanvasBatchBegin(void);
 void CanvasBatchEnd(void);
 
 /* Panic / fatal-path recovery — forcibly resets the batch counter so a
- * subsequent kprintf commits immediately.  Discards any pending plan. */
+ * subsequent kprintf commits immediately, and commits the pending plan. */
 void CanvasForceReset(void);
 
 void CanvasPrintChar(char c, uint32_t fg, uint32_t bg);

@@ -173,9 +173,17 @@ void lapic_write(uint32_t reg, uint32_t value);
 // ICR delivery status bit
 #define LAPIC_ICR_SEND_PENDING  (1 << 12)
 
+// ICR Delivery Mode 100b — NMI; the vector field is ignored for it
+#define LAPIC_ICR_DELIVERY_NMI  (4u << 8)
+
 // IPI delivery
 void lapic_send_ipi(uint32_t dest_lapic_id, uint8_t vector);
 void lapic_send_ipi_all_excluding_self(uint8_t vector);
+
+/* An NMI to one core: taken whatever its RFLAGS.IF says, so it reaches a core
+ * that keeps its interrupts off — the stop of a panic (klib_panic.c). The same
+ * no-refusal rule as the directed send above. */
+void LapicSendNmi(uint32_t dest_lapic_id);
 
 /* Returns true if the local APIC is currently running in x2APIC mode
  * (IA32_APIC_BASE bit 10 = EXTD). Sampled once at lapic_init and cached;

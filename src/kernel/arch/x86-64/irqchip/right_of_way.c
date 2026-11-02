@@ -15,9 +15,9 @@
  * The ceiling is not a number either. It is one below the lowest vector this
  * kernel keeps for itself, so that nothing a device is given can outrank the
  * interrupts the kernel uses to stop, to reschedule, and to shoot down a TLB.
- * A device above IPI_PANIC_VECTOR could preempt the broadcast halt that a
- * panic sends — which is to say, a machine already in trouble would fail to
- * stop because the controller that caused the trouble kept talking. */
+ * A device above IPI_HALT_VECTOR could preempt the broadcast halt (system_halt.c)
+ * — which is to say, a machine on its way down would fail to stop because the
+ * controller that caused the trouble kept talking. */
 #define POOL_FLOOR_VECTOR   32
 #define POOL_CEILING_VECTOR (IPI_WAKE_VECTOR - 1)
 
@@ -149,7 +149,7 @@ static void PoolSeatTheKernelsOwn(void)
 
     BitSet(IPI_WAKE_VECTOR);      HolderSet((uint8_t)IPI_WAKE_VECTOR, "the wake IPI");
     BitSet(IPI_SHOOTDOWN_VECTOR); HolderSet((uint8_t)IPI_SHOOTDOWN_VECTOR, "the TLB shootdown IPI");
-    BitSet(IPI_PANIC_VECTOR);     HolderSet((uint8_t)IPI_PANIC_VECTOR, "the panic IPI");
+    BitSet(IPI_HALT_VECTOR);      HolderSet((uint8_t)IPI_HALT_VECTOR, "the halt IPI");
     BitSet(LAPIC_TIMER_VECTOR);   HolderSet((uint8_t)LAPIC_TIMER_VECTOR, "the LAPIC timer");
 
     /* The spurious vector gets its own sentence because the prohibition is
@@ -157,7 +157,7 @@ static void PoolSeatTheKernelsOwn(void)
      * vector must not be programmed into an LVT entry or an IOAPIC redirection
      * entry. A line delivered under it is acknowledged by nobody, its ISR bit
      * stays set, and every class at or below 15 goes deaf — which on this
-     * kernel means the panic IPI and the TLB shootdown stop arriving. */
+     * kernel means the halt IPI and the TLB shootdown stop arriving. */
     BitSet(LAPIC_SPURIOUS_VECTOR);
     HolderSet((uint8_t)LAPIC_SPURIOUS_VECTOR, "the spurious vector, which the SDM forbids routing anything to");
 }

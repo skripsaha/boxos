@@ -53,6 +53,7 @@
 #include "amp.h"
 #include "lapic.h"        /* LVT CMCI — the delivery half of §16.5 */
 #include "right_of_way.h" /* the vector a corrected error is delivered under */
+#include "klib_panic.h"   /* PanicClaimForException — the fatal record opens the account */
 
 /* ─── State ────────────────────────────────────────────────────────── */
 
@@ -756,8 +757,8 @@ static MceUcrAction mce_ucr_action(uint64_t status, uintptr_t phys) {
  *
  * The pass happens once the verdict is known, and not one line earlier,
  * because a baton is only worth handing to someone who will still be there
- * to run it. A kernel-mode FATAL verdict sends idt.c down
- * panic_claim_or_halt → the dump → IPI_PANIC → `cli; hlt` on every core, and
+ * to run it. A kernel-mode FATAL verdict ends in the panic's claim, which
+ * stops every other core by an NMI, then the dump, then `cli; hlt`, and
  * nothing on that road pumps a baton: the whole MCA record — bank, status,
  * addr, misc, MCG_STATUS, RIP — would be queued to a core that halts before
  * it drains, and the operator would read "KERNEL PANIC: #MC (vector 18)"
@@ -766,13 +767,12 @@ static MceUcrAction mce_ucr_action(uint64_t status, uintptr_t phys) {
  * record ITSELF.
  *
  * Saying it there is legal for a reason, not by exception:
- *   - MCG_STATUS has already been cleared by then, so a core that wedges on
- *     the console lock is no longer a core with MCIP set — the "second
- *     machine-check event ⇒ architectural shutdown" hazard is over;
- *   - the caller is about to take that very lock for its panic dump from
- *     this very frame. If the interrupted code held it, the dump was going
- *     to wedge on it anyway; speaking here moves nothing into the hazard and
- *     buys the MCA protocol ahead of it.
+ *   - MCG_STATUS is cleared on this core by then, so a second machine-check
+ *     event meets no MCIP here (a core the panic stops inside its own walk
+ *     has its MCIP cleared by its stand, klib_panic.c);
+ *   - the record follows the panic's claim, as the account's first lines (the
+ *     same `panic_claimed_here`), so it waits on no lock (klib_lock.c), where
+ *     before the claim it spun for good on a console lock its #MC broke into.
  * On every other road — a recoverable verdict, or a fatal one from ring 3
  * where idt.c kills the process and the machine lives — the handler stays
  * silent and lets the K-Core speak, because there the wedge would be a fresh
@@ -1591,7 +1591,7 @@ static void MceCmciSay(void) {
             me->owed ? me->owed : "nothing asked this core to arm it");
 }
 
-bool mce_handle(interrupt_frame_t *frame) {
+bool mce_handle(interrupt_frame_t *frame, bool *panic_claimed_here) {
     bool     any_fatal = false;
     uint32_t decoded   = 0;          /* banks that held a valid record */
 
@@ -1953,19 +1953,16 @@ bool mce_handle(interrupt_frame_t *frame) {
      *      closes it with a fact, not with a wait.
      *
      *   3. MAKING THE MACHINE STOP WHEN SOMEBODY ELSE HELD THE FATAL
-     *      RECORD. A core that grades its own walk fatal returns false and
-     *      idt.c stops the machine: panic_claim_or_halt → the dump →
-     *      IPI_PANIC to every other core → `cli; hlt`. That is an EVENT, and
-     *      the LAPIC's IRR makes it one that cannot be lost — but be exact
-     *      about where it lands. IPI_PANIC is vector 0xF2 behind an ordinary
-     *      interrupt gate, and vector 18 is an interrupt gate too, so a core
-     *      standing right here has IF=0 and does NOT take it here. It waits
-     *      in that core's IRR exactly as it waits out any spin_lock critical
-     *      section, and is taken the instant IRET restores IF. The subject
-     *      therefore resumes, runs briefly, and then halts: the stop arrives
-     *      late, never by a deadline, and fails to arrive only for a core
-     *      that never enables interrupts again — which is a property of
-     *      every panic on this kernel, not of this handler.
+     *      RECORD. A core that grades its own walk fatal in ring 0 claims
+     *      the panic, which sends an NMI to every other online core.
+     *      Vector 18 is an interrupt gate, so a core standing right here has
+     *      IF=0 — but an NMI does not ask IF, and a #MC handler does not hold
+     *      NMIs back, so the core takes it here, on its own IST stack, and
+     *      stands there, its MCIP cleared by the stand (klib_panic.c). The
+     *      stop arrives at once, and fails to arrive only for a core that is
+     *      not online — not started yet, or given up on by the orderly halt's
+     *      roll call (system_halt.c) — a property of every panic on this
+     *      kernel, not of this handler.
      *
      * The record is still said, loudly, by the MCE_NOTE_NO_BANK line, so an
      * unexplained #MC is never silent.
@@ -2062,9 +2059,12 @@ bool mce_handle(interrupt_frame_t *frame) {
      * a record handed to a K-Core there is a record nobody ever reads — and
      * it is the fatal case whose numbers matter most. Before BatonInit there
      * is no K-Core to hand it to at all. In both cases this core says it
-     * itself; MCIP is already cleared, and on the fatal road idt.c is about
-     * to take the same console lock from the same frame regardless. */
-    bool say_here = (fatal && (frame->cs & 3) == 0) || !deferral_open;
+     * itself; MCIP is already cleared. On the fatal road the panic is claimed
+     * first ("What the #MC saw", above); a loser stands unheard, its records
+     * with it — which core tells is the rendezvous this kernel declines. */
+    bool fatal_here = fatal && (frame->cs & 3) == 0;
+    bool say_here   = fatal_here || !deferral_open;
+    if (fatal_here) PanicClaimForException(panic_claimed_here, frame, 0);
 
     for (uint32_t k = 0; k < claimed_n; k++) {
         mce_note_deliver(claimed[k], say_here);

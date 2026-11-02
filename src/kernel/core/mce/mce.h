@@ -264,8 +264,11 @@ void          MceCmciArmLocal(void);
  * migration, publishes Touch events, and delivers one record per decoded
  * bank: to a K-Core, which says it and applies the `mce:poisoned` tag, or —
  * when the verdict is fatal in kernel mode and every core is about to halt
- * without draining anything — from the handler itself. */
-bool          mce_handle(interrupt_frame_t *frame);
+ * without draining anything — from the handler itself, as the first lines of
+ * the panic's account: the claim is taken first, into the caller's
+ * `panic_claimed_here`, which the dump that follows claims by in turn
+ * (klib_panic.h). */
+bool          mce_handle(interrupt_frame_t *frame, bool *panic_claimed_here);
 
 /* True after mce_init has completed (so callers know whether per-AP
  * init is required, etc.). */
