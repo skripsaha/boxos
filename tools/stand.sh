@@ -720,9 +720,13 @@ wait_for_line() {
             fi
             _wf_size=$(wc -c < "$_wf_file" 2>/dev/null | tr -d ' ')
             # The progress said in this wait's window: the highest count, and
-            # the first that came at or below the one before it (0: none).
+            # the first that came at or below the one before it (0: none). Read
+            # as bytes (LC_ALL=C), as the typer reads the log: awk in the host's
+            # UTF-8 locale stops at a byte that is not UTF-8 ("towc: multibyte
+            # conversion failure", powercut race's boots of torn media), says
+            # nothing on stdout, and the count it gave up was no count at all.
             read -r _wf_top _wf_fell _wf_over <<<"$(tail -n +"$_wf_from" "$_wf_file" 2>/dev/null |
-                STAND_WF_PAT="$_wf_said" awk '$0 ~ ENVIRON["STAND_WF_PAT"] && match($0, /[0-9]+/) {
+                STAND_WF_PAT="$_wf_said" LC_ALL=C awk '$0 ~ ENVIRON["STAND_WF_PAT"] && match($0, /[0-9]+/) {
                     n = substr($0, RSTART, RLENGTH) + 0
                     if (!fell && n <= last) { fell = n; over = last }; last = n; if (n > top) top = n }
                     END { print top + 0, fell + 0, over + 0 }')"

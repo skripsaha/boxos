@@ -18,6 +18,16 @@
 # is no refusal of one.
 ROOMBACK_REFUSED='\[TagFS\] no (block can be had for [0-9]+ block\(s\) of a file.s data|room on the ribbon for a change of the volume): .*'
 
+# roomback_exact MEASURE — 0 when a refusal's reserve was measured as a write
+# may be refused at the wall (§16.6 п.8, binder.c BinderRoomMeasured): to the
+# block by the last Tally, or from above once a turn of the ring was waited for.
+roomback_exact() {
+    case "$1" in
+        "to the block by its last Tally"|*", a turn of the ring waited for") return 0 ;;
+    esac
+    return 1
+}
+
 # roomback_book_judge L VERDICT — the guest's VERDICT of roomback on a book
 # (`PASS — …` or `PENDING — …`, the word taken off) weighed by the log L: the
 # GiB written the moment a GiB was deleted waits for the Tally that makes the
@@ -41,36 +51,73 @@ ROOMBACK_REFUSED='\[TagFS\] no (block can be had for [0-9]+ block\(s\) of a file
 # of 4864, and a judge by the reserve held that write 512 blocks short of the
 # ground the second wall had back, or not, as the Tally fell before the last
 # refusal or after it. The MiB _qra.bin was laid past the GiB is the room for
-# the rest. What it took reads back whole. 0 or 1; ROOMBACK_SAID what was
-# weighed, ROOMBACK_TOOK the bytes it took.
+# the rest. What it took reads back whole.
+#
+# ‼ THE FILL IS A WRITE AT THE WALL TOO, held to the same law: the volume is
+# first full only where the fill's last refusal was measured to the block or
+# past a turn of the ring, with no more free than the book keeps and promises.
+# The fill writes _qrb.bin without a pause, so every refusal it meets comes
+# with the piece it inked just before past the last Tally's slice — growth the
+# measure holds (endpaper_fact.c, SinceSaid) — and the reserve kept from above
+# counts each block handed since its kept measure at its widest, a run of its
+# own in FILES and an element of its own in DIGESTS (endpaper.c,
+# EndpaperKeptCost): the fill is short of room only by the measure of growth
+# whenever it reaches the wall, the very write §16.6 п.8 makes wait. Measured
+# on this volume: from above the book keeps 8448 and 8960 where the Tally's
+# exact measure keeps 4864, and a fill refused there without its wait stops
+# 3584 to 4096 blocks short of a volume that had them — the margin the kernel
+# whose write waits on no Tally (roombackmut) then wrote the whole GiB into,
+# twice, while a judge of the GiB's write alone found nothing short. A first
+# wall measured exactly leaves that kernel no margin, and the GiB's own write
+# reaches the wall growing by the same measure. 0 when it holds, 1 when it was
+# weighed and does not, 2 when the guest or the kernel never said what it
+# weighs; ROOMBACK_SAID what was weighed, ROOMBACK_TOOK the bytes it took.
 roomback_book_judge() {
-    local L="$1" verdict="$2" at end w1 w2 f1 k1 h1 f2 k2 h2 p2 m2 took want refused good anchor allowed
+    local L="$1" verdict="$2" at end w1 w2 f1 k1 h1 p1 m1 f2 k2 h2 p2 m2 took want refused good anchor allowed
     local named='s/.* ([0-9]+)( block\(s\))? free, the book keeps ([0-9]+) for its ribbon and its Tally and holds ([0-9]+) itself in its Tallies and its ribbon, and ([0-9]+) are promised.*/\1 \3 \4 \5/p'
+    local measured='s/.* — the reserve measured (.*) \(ERR_TAGFS_NO_SPACE\)$/\1/p'
     ROOMBACK_TOOK=$((FULLVOLUME_MIB << 20))
-    ROOMBACK_SAID="every byte, read back whole (${verdict#*— })"
-    case "$verdict" in PASS*) return 0 ;; esac
     at=$(tr -d '\r' < "$L" | grep -anE '\[QUILL\] roomback: the volume is full — ' | tail -1 | cut -d: -f1)
-    w1=$(tr -d '\r' < "$L" | head -n "${at:-0}" | grep -aoE "$ROOMBACK_REFUSED" | tail -1)
+    if [ -z "$at" ]; then
+        ROOMBACK_SAID="the guest never said the volume was full, so there is no first wall to weigh (${verdict#*— })"
+        return 2
+    fi
+    w1=$(tr -d '\r' < "$L" | head -n "$at" | grep -aoE "$ROOMBACK_REFUSED" | tail -1)
+    read -r f1 k1 h1 p1 <<<"$(echo "$w1" | sed -nE "$named")"
+    m1=$(echo "$w1" | sed -nE "$measured")
+    if [ -z "$p1" ] || [ -z "$m1" ]; then
+        ROOMBACK_SAID="the volume was full and the kernel's word of what was free, what the book keeps and holds and how it was measured at its first wall is not there (${w1:-none})"
+        return 2
+    fi
+    if ! roomback_exact "$m1"; then
+        ROOMBACK_SAID="the volume was first full with $f1 free where the book keeps $k1 and $p1 are promised, its reserve measured $m1 — the fill refused by the measure of its growth with no Tally waited for to make it exact, and the GiB after it weighed against the ground the fill left (${verdict#*— })"
+        return 1
+    fi
+    if [ "$f1" -gt $((k1 + p1)) ]; then
+        ROOMBACK_SAID="the volume was first full with $f1 free, more than the $k1 the book keeps and the $p1 promised, its reserve measured $m1 — the fill refused room it had (${verdict#*— })"
+        return 1
+    fi
+    ROOMBACK_SAID="every byte, read back whole, the volume first full by its reserve measured $m1 (${verdict#*— })"
+    case "$verdict" in
+        PASS*) return 0 ;;
+        FAIL*) ROOMBACK_SAID="the guest's own verdict of the GiB is FAIL, past a first wall measured $m1 — ${verdict#*— }"
+               return 2 ;;
+    esac
     end=$(tr -d '\r' < "$L" | grep -anE '\[QUILL\] roomback: (PASS|PENDING|FAIL) — ' | tail -1 | cut -d: -f1)
     w2=$(tr -d '\r' < "$L" | head -n "${end:-0}" | tail -n +"${at:-1}" | grep -aoE "$ROOMBACK_REFUSED" | tail -1)
-    read -r f1 k1 h1 _ <<<"$(echo "$w1" | sed -nE "$named")"
     read -r f2 k2 h2 p2 <<<"$(echo "$w2" | sed -nE "$named")"
-    m2=$(echo "$w2" | sed -nE 's/.* — the reserve measured (.*) \(ERR_TAGFS_NO_SPACE\)$/\1/p')
+    m2=$(echo "$w2" | sed -nE "$measured")
     read -r took want refused good anchor <<EOF_ROOMBACK
 $(echo "$verdict" | sed -nE 's/^PENDING — .*took ([0-9]+) of ([0-9]+) bytes .* refused (-?[0-9]+); read back good to byte ([0-9]+) \(read -?[0-9]+, anchor (-?[0-9]+)\).*/\1 \2 \3 \4 \5/p')
 EOF_ROOMBACK
-    if [ -z "$took" ] || [ -z "$h1" ] || [ -z "$p2" ] || [ -z "$m2" ]; then
+    if [ -z "$took" ] || [ -z "$p2" ] || [ -z "$m2" ]; then
         ROOMBACK_SAID="the write of a GiB on the book came short, and the guest's verdict or the kernel's word of what was free, what the book keeps and holds and how it was measured (before the volume was full: ${w1:-none}; after: ${w2:-none}) does not say by how much (${verdict#*— })"
-        return 1
+        return 2
     fi
     ROOMBACK_TOOK=$took
     allowed=$(( f2 + h2 > f1 + h1 ? (f2 + h2 - f1 - h1) * 4096 : 0 ))
     ROOMBACK_SAID="a GiB written the moment a GiB was deleted on a book took $took of $want bytes, all but the $(( (want - took) / 4096 )) block(s) of the $(( allowed / 4096 )) the free and what the book holds grew by since the volume was first full ($f2 free and $h2 held, against $f1 and $h1; it keeps $k2, $p2 promised), refused no-space ($refused) with its reserve measured $m2, and read back whole to byte $good"
-    case "$m2" in
-        "to the block by its last Tally"|*", a turn of the ring waited for") ;;
-        *) return 1 ;;
-    esac
-    [ "$f2" -le $((k2 + p2)) ] && [ "$refused" = -852 ] && [ "$good" = "$took" ] && [ "$anchor" = 0 ] &&
+    roomback_exact "$m2" && [ "$f2" -le $((k2 + p2)) ] && [ "$refused" = -852 ] && [ "$good" = "$took" ] && [ "$anchor" = 0 ] &&
         [ "$took" -ge $((want - allowed)) ]
 }
 
@@ -84,11 +131,12 @@ fullvolume_roomback_book() {
 
 # roombackmut — the judge of a book's roomback turns on a write that waits on
 # no Tally: BinderRoomWait answering false, a write short of room only by the
-# measure of growth past the last Tally is refused no-space at once, and the
-# refusal after the delete says the reserve measured from above with no Tally
-# waited for — the very kernel §16.6 п.8 put the wait in, whose GiB came 1280
-# blocks short of a volume that had them. A book's case: format v1 has no
-# Tally to wait on, and stands it down.
+# measure of growth past the last Tally is refused no-space at once — the
+# fill at the first wall, whose refusal says the reserve measured from above
+# with no Tally waited for, and the GiB after the delete wherever the fill's
+# wall left it no margin — the very kernel §16.6 п.8 put the wait in, whose
+# GiB came 1280 blocks short of a volume that had them. A book's case: format
+# v1 has no Tally to wait on, and stands it down.
 roomback_wait_on() {
     mutate src/kernel/tagfs/settle/binder.c
     python3 - <<'EOF'
@@ -117,10 +165,13 @@ run_roombackmut() {
     verdict=$(tr -d '\r' < "$L" | grep -aoE '\[QUILL\] roomback: (PASS|PENDING|FAIL) — .*' | tail -1)
     if [ -z "$verdict" ]; then
         harness "roombackmut: roomback gave no verdict on the kernel whose write waits on no Tally (last: $(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS)\]' | tail -1 | cut -c1-160))"
-    elif roomback_book_judge "$L" "${verdict#\[QUILL\] roomback: }"; then
-        bad "roombackmut: a write that waits on no Tally holds roomback's judge — $ROOMBACK_SAID"
     else
-        ok "roombackmut: a write that waits on no Tally turns roomback's judge — $ROOMBACK_SAID"
+        roomback_book_judge "$L" "${verdict#\[QUILL\] roomback: }"
+        case $? in
+            0) bad "roombackmut: a write that waits on no Tally holds roomback's judge — $ROOMBACK_SAID" ;;
+            1) ok "roombackmut: a write that waits on no Tally turns roomback's judge — $ROOMBACK_SAID" ;;
+            *) harness "roombackmut: roomback's judge had nothing to weigh on the kernel whose write waits on no Tally — $ROOMBACK_SAID" ;;
+        esac
     fi
     build   # leave the tree built plain, as every scenario here does
 }
