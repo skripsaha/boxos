@@ -778,8 +778,8 @@ void CanvasForceReset(void)
     if (!s_canvas.ready) return;
     /* Panic-path: an interrupted commit may have left the lock held by
      * a dead core.  Reset the lock first so the post-panic kprintf can
-     * grab it cleanly; then clear pending plan state so the banner
-     * commits immediately on the next CanvasBatchEnd. */
+     * grab it cleanly; then let go of the batch whoever opened it, so the
+     * banner commits on the next CanvasBatchEnd. */
     spin_force_release(&s_canvas_lock);
     s_canvas.batch_depth = 0;
     /* A core that died halfway through a character must not have its tail
@@ -787,7 +787,13 @@ void CanvasForceReset(void)
      * has those bytes whole. */
     s_canvas.utf8_have   = 0;
     s_canvas.utf8_need   = 0;
-    plan_reset(&s_canvas);
+    /* What the batch let go of had put on the shadow is committed, not
+     * dropped: the panic's own line a batch opened after it held off the
+     * glass is among it, and so is a scroll — a plan dropped with a scroll in
+     * it leaves the glass a row behind the shadow for good, and every commit
+     * after it blits only the rows it dirties. Nothing pending commits
+     * nothing (canvas_commit_locked's early exit). */
+    canvas_commit_locked(&s_canvas);
 }
 
 /* =========================================================================

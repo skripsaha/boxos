@@ -13,6 +13,7 @@
  * IST recovery paths (kernel-stack overflow, panic) where the original
  * holder's frame is unreachable. */
 #include "klib.h"
+#include "klib_panic.h" /* PanicOwnedHere — the owner of a panic waits on no lock */
 
 /* Hook drained by spin_lock() while it spins with IRQs disabled — see the
  * declaration in klib.h. RELEASE on publish / ACQUIRE on read so the function
@@ -49,6 +50,13 @@ void spin_lock(spinlock_t *lock)
         do
         {
             if (svc) svc();
+            /* The core that holds a panic takes the lock as it stands. Every
+             * other core has been stopped by an NMI wherever it was, a held
+             * lock included, and will never give it back; and a fault inside
+             * the panic's own account finds the locks that account holds.
+             * Waiting here is the silent machine (klib_panic.c). */
+            if (PanicOwnedHere())
+                break;
             asm volatile("pause");
         } while (__sync_lock_test_and_set(&lock->locked, 1));
     }

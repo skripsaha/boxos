@@ -1,9 +1,10 @@
 #include "idt.h"
 #include "right_of_way.h"
-#include "serial.h"      /* WireForceRelease / WireDrain — the halt is heard */
+#include "serial.h"      /* WireDrain — the halt is heard */
 #include "gdt.h"
 #include "tss.h"
 #include "klib.h"
+#include "klib_panic.h" /* PanicClaimForException — one claim for the dump and panic() */
 #include "klib_logring.h" /* LogKeepFlush — the dump outlives a warm reset */
 #include "io.h"
 #include "pic.h"
@@ -830,67 +831,6 @@ static bool panic_probe_present(uint64_t va)
     return true;
 }
 
-/*
- * One panic, one dump.
- *
- * Everything the dump prints touches something: the VGA buffer, the serial
- * UART, and — for the stack trace — memory the fault may already have proved
- * untrustworthy. A fault raised in the middle of that re-enters the handler,
- * and so does every other core that hit the same bug at the same instant.
- * Without this claim the screen fills and the first dump, the only one whose
- * CR2 still names the original cause, scrolls away. That is what a six-core
- * machine did on its first real boot: the path already ended in `cli; hlt`,
- * and it still never got there.
- *
- * Claimed BEFORE the first line is printed, not after: the loser must leave no
- * trace at all, because half a line of someone else's dump on the end of the
- * one that matters is its own kind of confusion.
- */
-/* Every peer core stopped, by the vector right_of_way.c reserves for it.
- *
- * Guarded on the LAPIC being mapped: a panic raised before lapic_init has no
- * way to reach another core and no other core to reach — they are started
- * through that same LAPIC — and writing through an unmapped MMIO window would
- * fault inside the panic, which is what turned this machine's first panic into
- * a fault at address 0x20. One "all excluding self" ICR write (Intel SDM Vol
- * 3A, ICR Destination Shorthand 11b), no walk of the core table, and NOT
- * waited for: a core that will never answer must not cost the machine the only
- * account of why it died. The same three facts as klib_print.c's panic(). */
-static void PanicHaltPeers(void)
-{
-    if (!g_amp.multicore_active) return;
-    if (!lapic_is_mapped())      return;
-    lapic_send_ipi_all_excluding_self(IPI_PANIC_VECTOR);
-}
-
-static void panic_claim_or_halt(bool *already_claimed_here)
-{
-    if (*already_claimed_here)
-        return; /* same dump, further down the same page */
-
-    static volatile uint32_t panic_claimed = 0;
-    if (__atomic_exchange_n(&panic_claimed, 1u, __ATOMIC_ACQ_REL) != 0)
-    {
-        for (;;)
-            __asm__ volatile("cli; hlt");
-    }
-    *already_claimed_here = true;
-
-    /* Peers stopped by the WINNER, here, before its first line — and by the
-     * winner only. The dump used to broadcast after the whole register dump
-     * and stack walk had printed, so every other core wrote the same console
-     * and the same log ring for the entire length of the account of the crash.
-     *
-     * ‼ The loser must not reach this. "All excluding self" includes the core
-     * that is writing the dump, so a broadcast from a core that lost the claim
-     * would halt the winner mid-sentence; the loser halts above instead. The
-     * claim itself still holds against a re-entrant fault: an exception arrives
-     * through an interrupt gate with IF=0 (Intel SDM Vol 3A §6.12.1), so a peer
-     * already inside its own exception handler cannot take this IPI and stops
-     * at the exchange above. */
-    PanicHaltPeers();
-}
-
 /* The kernel's own Nameplate, linked in by the second pass — see the linker
  * script and the Makefile. Riveted to the image, so naming a frame costs no
  * disk, no lock and no matching kernel.elf at the other end of the world;
@@ -1212,14 +1152,69 @@ static void handle_nmi(interrupt_frame_t *frame)
     }
 }
 
+/* Phase 2K — #CP (vector 21) Control-Protection Exception. Fires
+ * when a shadow-stack mismatch or IBT violation occurs. Error code
+ * bits (Intel SDM Vol 3D §17.7):
+ *   bits 14:0  — CP error type:
+ *     1 = NEAR_RET     shadow-stack mismatch on RET
+ *     2 = FAR_RET_IRET shadow-stack mismatch on FAR RET/IRET
+ *     3 = ENDBRANCH    indirect branch missing ENDBR target
+ *     4 = RSTORSSP     RSTORSSP token validation failed
+ *     5 = SETSSBSY     SETSSBSY token validation failed
+ *   bit 15     — ENCL  set when fault is in SGX enclave
+ *
+ * Logged and published to Touch; the caller then falls through to the
+ * generic kill-process path. Recovery is the future per-process CET
+ * lifecycle's job. */
+static void ExceptionCpReport(const interrupt_frame_t *frame)
+{
+    uint16_t cp_type = (uint16_t)(frame->error_code & 0x7FFFu);
+    bool cp_enclave = (frame->error_code & 0x8000u) != 0;
+    kprintf("[CET] #CP fired: type=%u enclave=%d RIP=0x%lx\n",
+            (unsigned)cp_type, (int)cp_enclave, frame->rip);
+    if ((frame->cs & 3) == 0)
+        panic_name_addr("[CET]   in ", frame->rip, false);
+    /* Touch publish via pre-resolved tag (resolved in vmm_cet_probe
+     * at BSP boot, outside IRQ context). TouchLogbookIntern in this
+     * handler would take registry locks → deadlock against any
+     * thread holding the Touch lock at the moment #CP fired. */
+    TouchTag cp_tag = vmm_get_cet_cp_tag();
+    struct
+    {
+        uint64_t rip;
+        uint16_t cp_type;
+        uint8_t enclave;
+        uint8_t pad;
+    } ev = {
+        .rip = frame->rip,
+        .cp_type = cp_type,
+        .enclave = cp_enclave ? 1u : 0u,
+        .pad = 0,
+    };
+    if (cp_tag != TOUCH_TAG_INVALID)
+    {
+        TouchPublishIrqPair(cp_tag, TOUCH_TAG_INVALID,
+                            &ev, (uint16_t)sizeof(ev), 0u, 0u);
+    }
+    /* Bump the cet_lifecycle stat counter (RELAXED — never load-
+     * bearing). Visible via `hw cet status`. */
+    {
+        extern void cet_lifecycle_record_cp_fault(void);
+        cet_lifecycle_record_cp_fault();
+    }
+}
+
 void exception_handler(interrupt_frame_t *frame)
 {
     /* Scoped to THIS invocation. A kernel #PF claims the dump at the [VMM]
-     * line and then walks on into the panic block below, which claims again;
-     * without a per-invocation record the second claim sees the flag its own
-     * first claim set and halts the dump it was about to print. A re-entrant
-     * fault gets a fresh handler frame, a fresh false, and is stopped — which
-     * is the whole point. */
+     * line, and a fatal kernel #MC before its record (mce.c), and each then
+     * walks on into the panic block below, which claims again; without a
+     * per-invocation record the second claim sees the flag its own first
+     * claim set and halts the dump it was about to print. A re-entrant fault
+     * gets a fresh handler frame and a fresh false: on another core it stops
+     * at the claim without a word, and on the core whose dump it broke it
+     * ends that dump where it broke off, its own account one line of its
+     * vector, error code and RIP (klib_panic.c). */
     bool panic_claimed_here = false;
 
     /*
@@ -1253,6 +1248,19 @@ void exception_handler(interrupt_frame_t *frame)
     uint64_t fault_addr;
     __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
 
+    /* A panic's stop before anything is counted. The core that holds a panic
+     * stops every other core by an NMI, having published its claim before the
+     * first was sent, so an NMI that finds another core's claim is that stop,
+     * and the core stands here for good: nothing counted, printed or taken,
+     * no user pointer, and no IRET — so no NMI after it either. Counted, the
+     * stop would put one exception per stopped core into the dump's "Exception
+     * count", a cascade that never was. Without a claim, or on the core that
+     * holds it, the NMI is the platform's and goes on below exactly as before.
+     * klib_panic.c says why an NMI and what one meets on a core already
+     * standing, or inside another IST handler. */
+    if (frame->vector == 2)
+        PanicStandIfClaimedElsewhere();
+
     atomic_fetch_add_u64(&exception_count, 1);
 
 #ifdef CONFIG_BRINGUP_HOLD_ON_FIRST_FAULT
@@ -1283,8 +1291,8 @@ void exception_handler(interrupt_frame_t *frame)
      * kill-process (ring 3) / panic-and-halt (ring 0) path below. */
     if (frame->vector == 18)
     {
-        extern bool mce_handle(interrupt_frame_t *);
-        if (mce_handle(frame))
+        extern bool mce_handle(interrupt_frame_t *, bool *panic_claimed_here);
+        if (mce_handle(frame, &panic_claimed_here))
         {
             return; /* recovered — IRET back to user/kernel */
         }
@@ -1292,57 +1300,11 @@ void exception_handler(interrupt_frame_t *frame)
          * exception_handler whether to kill the process or halt.) */
     }
 
-    /* Phase 2K — #CP (vector 21) Control-Protection Exception. Fires
-     * when a shadow-stack mismatch or IBT violation occurs. Error code
-     * bits (Intel SDM Vol 3D §17.7):
-     *   bits 14:0  — CP error type:
-     *     1 = NEAR_RET     shadow-stack mismatch on RET
-     *     2 = FAR_RET_IRET shadow-stack mismatch on FAR RET/IRET
-     *     3 = ENDBRANCH    indirect branch missing ENDBR target
-     *     4 = RSTORSSP     RSTORSSP token validation failed
-     *     5 = SETSSBSY     SETSSBSY token validation failed
-     *   bit 15     — ENCL  set when fault is in SGX enclave
-     *
-     * We log + publish Touch and fall through to the generic kill-process
-     * path. Recovery is the future per-process CET lifecycle's job. */
-    if (frame->vector == 21)
-    {
-        uint16_t cp_type = (uint16_t)(frame->error_code & 0x7FFFu);
-        bool cp_enclave = (frame->error_code & 0x8000u) != 0;
-        kprintf("[CET] #CP fired: type=%u enclave=%d RIP=0x%lx\n",
-                (unsigned)cp_type, (int)cp_enclave, frame->rip);
-        if ((frame->cs & 3) == 0)
-            panic_name_addr("[CET]   in ", frame->rip, false);
-        /* Touch publish via pre-resolved tag (resolved in vmm_cet_probe
-         * at BSP boot, outside IRQ context). TouchLogbookIntern in this
-         * handler would take registry locks → deadlock against any
-         * thread holding the Touch lock at the moment #CP fired. */
-        TouchTag cp_tag = vmm_get_cet_cp_tag();
-        struct
-        {
-            uint64_t rip;
-            uint16_t cp_type;
-            uint8_t enclave;
-            uint8_t pad;
-        } ev = {
-            .rip = frame->rip,
-            .cp_type = cp_type,
-            .enclave = cp_enclave ? 1u : 0u,
-            .pad = 0,
-        };
-        if (cp_tag != TOUCH_TAG_INVALID)
-        {
-            TouchPublishIrqPair(cp_tag, TOUCH_TAG_INVALID,
-                                &ev, (uint16_t)sizeof(ev), 0u, 0u);
-        }
-        /* Bump the cet_lifecycle stat counter (RELAXED — never load-
-         * bearing). Visible via `hw cet status`. */
-        {
-            extern void cet_lifecycle_record_cp_fault(void);
-            cet_lifecycle_record_cp_fault();
-        }
-        /* Fall through to generic kill — Phase 2K is observe-only. */
-    }
+    /* #CP said and published (ExceptionCpReport), then killed or panicked on
+     * below — not on the owner of a panic: there it is a fault inside the
+     * account, said by one line of numbers and nothing named (klib_panic.c). */
+    if (frame->vector == 21 && !PanicOwnedHere())
+        ExceptionCpReport(frame);
 
     if (frame->vector == 14)
     {
@@ -1384,7 +1346,7 @@ void exception_handler(interrupt_frame_t *frame)
      * safety. Later than the uaccess fixup and later than
      * vmm_handle_page_fault, because an EFI runtime region is demand-pageable
      * like any other and a lifeline asked first would refuse a fault the VMM
-     * was about to answer correctly. Earlier than panic_claim_or_halt, because
+     * was about to answer correctly. Earlier than the panic's claim, because
      * a claimed panic ends in `cli; hlt` and there is no returning from it.
      * Outside the vector-14 block, because firmware answers a bad descriptor
      * or a forbidden MSR with #GP far more often than with #PF.
@@ -1425,7 +1387,7 @@ void exception_handler(interrupt_frame_t *frame)
              * otherwise a fault raised while printing the dump announces
              * itself once before being silenced, and the screen ends with a
              * second address that is a consequence, not a cause. */
-            panic_claim_or_halt(&panic_claimed_here);
+            PanicClaimForException(&panic_claimed_here, frame, fault_addr);
 
             /* RSVD (bit 3) is asked FIRST, and it silences the SMAP claim.
              *
@@ -1663,8 +1625,16 @@ void exception_handler(interrupt_frame_t *frame)
      * (PROC_CRASHED) and schedules another, which is the one action the SDM
      * does leave open. Vector 12 is a Fault, not an Abort, and is unaffected
      * by that reading; for it the defect was purely the false cause and the
-     * innocent victim. */
-    if (frame->vector == 8 || frame->vector == 12)
+     * innocent victim.
+     *
+     * Never on the core that holds a panic. There the overflow is inside the
+     * account (a kprintf deep in panic(), or the dump's own walk), every other
+     * core is stopped where it stood, and the owner waits on no lock
+     * (klib_lock.c): scheduling another process from here would be that
+     * process run on one core through every lock the stopped ones hold, the
+     * volume's among them. It is a fault inside the account, and the claim
+     * below ends the account (klib_panic.c). */
+    if ((frame->vector == 8 || frame->vector == 12) && !PanicOwnedHere())
     {
         process_t *overflow_proc = find_process_by_kernel_stack_overflow(frame->rsp);
         if (overflow_proc)
@@ -1743,7 +1713,7 @@ void exception_handler(interrupt_frame_t *frame)
      *
      * The loser of the race stops without printing a word, because a second
      * dump scrolls the first one away just as effectively as a loop does. */
-    panic_claim_or_halt(&panic_claimed_here);
+    PanicClaimForException(&panic_claimed_here, frame, fault_addr);
 
     kprintf("\n");
     kprintf("====================================================================\n");
@@ -1871,9 +1841,9 @@ void exception_handler(interrupt_frame_t *frame)
     LogKeepFlush();
 
     /* Everything said, onto the wire: interrupts are off, so the line cannot
-     * drive itself, and the locks may be this core's own. The peers were
-     * stopped at panic_claim_or_halt, before the first line of this dump. */
-    WireForceRelease();
+     * drive itself. Nothing to break first: a lock on the way that this core
+     * holds itself, or a stopped core left held, the owner of the panic takes
+     * as it stands (klib_lock.c). */
     WireDrain();
 
     while (1)
@@ -2221,7 +2191,7 @@ void irq_handler(interrupt_frame_t *frame)
         return;
     }
 
-    if (vector == IPI_PANIC_VECTOR)
+    if (vector == IPI_HALT_VECTOR)
     {
         /* Stop — unless an orderly halt found this core inside a held span:
          * a Scribe pass, or a command it stands over on a medium. Reaching
@@ -2234,12 +2204,14 @@ void irq_handler(interrupt_frame_t *frame)
          * that never gives it back. So under an orderly halt such a core owes
          * its stop and returns: it runs the span to its end and stops where it
          * lets its last one go (ScribeGive, HaltStopIfOwedHere), and the roll
-         * call waits for that as it waits for any arrival. A panic does not
-         * raise g_halt_orderly — every core stops where it stands, holding
-         * what it holds, as it always did. A core waiting on a legacy-IDE DMA
-         * inside such a section keeps its caller's interrupts off — it takes
-         * the drive's answer itself (BmideAnswerHere, drivers/disk/ata_async.c)
-         * — so it too takes this IPI only once the caller's lock is let go. */
+         * call waits for that as it waits for any arrival. A halt that is not
+         * orderly (a power cut, settle_cut.c) does not raise g_halt_orderly —
+         * every core stops where it stands, holding what it holds; a panic does
+         * not come here at all, it stops cores by an NMI (klib_panic.c). A
+         * core waiting on a legacy-IDE DMA inside such a section keeps its
+         * caller's interrupts off — it takes the drive's answer itself
+         * (BmideAnswerHere, drivers/disk/ata_async.c) — so it too takes this
+         * IPI only once the caller's lock is let go. */
         if (__atomic_load_n(&g_halt_orderly, __ATOMIC_ACQUIRE) && SchedulerHeldHere())
         {
             CoreDescriptor *me = &g_amp.cores[amp_get_core_index()];
@@ -2254,9 +2226,9 @@ void irq_handler(interrupt_frame_t *frame)
          * completion — a legacy-IDE waiter claims and publishes one with its
          * interrupts off (ata_async.c) — and a command of its own still in
          * flight is retired by whoever waits on its channel next. It pairs
-         * with the initiator's acquire load: the initiator (system_halt,
-         * panic) used to wait a guessed few milliseconds and then assume every
-         * core had arrived. */
+         * with the initiator's acquire load: the initiator (system_halt) used
+         * to wait a guessed few milliseconds and then assume every core had
+         * arrived. */
         lapic_send_eoi();
         HaltFreezeHere();
     }

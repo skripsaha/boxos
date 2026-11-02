@@ -46,7 +46,7 @@
 // AMP inter-processor interrupt vectors
 #define IPI_WAKE_VECTOR         0xF0    // 240 — wake idle AP or reschedule
 #define IPI_SHOOTDOWN_VECTOR    0xF1    // 241 — TLB shootdown
-#define IPI_PANIC_VECTOR        0xF2    // 242 — broadcast halt on panic
+#define IPI_HALT_VECTOR         0xF2    // 242 — every halt, a power cut's too (system_halt.c)
 
 // Interrupt controller type
 typedef enum {

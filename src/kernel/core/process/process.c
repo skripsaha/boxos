@@ -2113,7 +2113,7 @@ static void process_cleanup_immediate(process_t *proc)
 }
 
 /* Shutdown-only: forcibly reclaim the process-subsystem locks after every AP
- * core is confirmed halted. If an AP was stopped (IPI_PANIC → cli;hlt) while
+ * core is confirmed halted. If an AP was stopped (IPI_HALT → cli;hlt) while
  * holding process_lock — e.g. mid strand-reaper snapshot or process_destroy —
  * it will never release it, and the BSP's shutdown walk (halt_terminate_all_
  * processes → process_list_lock) would spin forever. system_halt calls this

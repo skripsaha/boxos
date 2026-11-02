@@ -536,7 +536,7 @@ void halt_all_ap_cores(bool orderly)
     /* Who is being asked, sampled BEFORE the broadcast. A core that was already
      * offline never had to answer, and holding it to this roll call would mean
      * waiting on a core that is not running. Each asked core's arrival word is
-     * cleared first, so an answer left over from an earlier panic broadcast
+     * cleared first, so an answer left over from an earlier halt broadcast
      * cannot be read as an answer to this one. 256 bytes of stack against a
      * 16 KB kernel stack — the array is the cheap part. */
     bool asked[MAX_CORES];
@@ -555,10 +555,10 @@ void halt_all_ap_cores(bool orderly)
     if (orderly)
         __atomic_store_n(&g_halt_orderly, true, __ATOMIC_RELEASE);
 
-    lapic_send_ipi_all_excluding_self(IPI_PANIC_VECTOR);
+    lapic_send_ipi_all_excluding_self(IPI_HALT_VECTOR);
 
     /* Wait for the FACT, not for a guessed five milliseconds. Every asked core
-     * publishes its own arrival from the IPI_PANIC branch of the interrupt
+     * publishes its own arrival from the IPI_HALT branch of the interrupt
      * handler with a release store, which the acquire load below pairs with.
      * The old code slept 5 ms and then ASSUMED — so a core that answered a
      * moment late was treated exactly like a core that answered, and a core
@@ -626,7 +626,7 @@ void halt_all_ap_cores(bool orderly)
     {
         /* Nothing to force. A core that published its arrival was not inside a
          * stretch that kept interrupts off: spin_lock does `cli` before it
-         * acquires and restores RFLAGS only in spin_unlock, so IPI_PANIC waits
+         * acquires and restores RFLAGS only in spin_unlock, so IPI_HALT waits
          * in that core's LAPIC IRR until the lock is released — for every
          * section that does not turn interrupts back on itself. process_lock
          * and the cleanup queue's lock are such sections, so a complete roll
@@ -1007,11 +1007,10 @@ void system_halt(bool reboot)
      * below may reset or park the CPU before the next rung ever runs. A
      * message queued behind a rung that never finishes is a message nobody
      * reads. ForceRelease always comes before Drain: halt_all_ap_cores()
-     * can freeze another core with IPI_PANIC while it is mid-kprintf,
+     * can freeze another core with IPI_HALT while it is mid-kprintf,
      * still holding g_serial_lock, and that core is never coming back to
      * release it — WireDrain() alone would spin forever on a lock its
-     * holder abandoned. idt.c's own panic exit uses the same pair in the
-     * same order for the same reason. */
+     * holder abandoned. */
     WireForceRelease();
     WireDrain();
 

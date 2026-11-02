@@ -9,7 +9,7 @@
 void system_halt(bool reboot) __attribute__((noreturn));
 
 // Stop every other core and wait for each one's own word that it has stopped
-// (the IPI_PANIC roll call). A core that answered was not inside a stretch that
+// (the IPI_HALT roll call). A core that answered was not inside a stretch that
 // kept interrupts off, and a spin_lock section that does not turn them back on
 // itself is such a stretch to its end — so a core that answered holds none of
 // those. A legacy-IDE DMA wait inside a caller's section no longer turns them
@@ -39,7 +39,7 @@ extern volatile bool g_halt_orderly;
 // This core stops for good: interrupts off, no longer online, its own word
 // that it arrived (CoreDescriptor.halted) published for the roll call, and
 // hlt. The end of
-// the IPI_PANIC branch, and of whatever ends the last held span of a core an
+// the IPI_HALT branch, and of whatever ends the last held span of a core an
 // orderly halt found in one.
 void HaltFreezeHere(void) __attribute__((noreturn));
 

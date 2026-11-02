@@ -110,6 +110,9 @@ bool     HeapFailFired(void);
 
 __attribute__((noreturn)) void panic(const char* message, ...);
 int kprintf(const char* format, ...);
+int kvprintf(const char* format, va_list args);
+int KvprintfRing(const char* format, va_list args);  /* the ring alone */
+int KvprintfGlass(const char* format, va_list args); /* the glass alone */
 int ksnprintf(char* buf, size_t size, const char* fmt, ...);
 int kvsnprintf(char* buf, size_t size, const char* fmt, va_list args);
 void kputchar(char c);

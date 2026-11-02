@@ -25,14 +25,16 @@
 #include "serial.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
-#include "amp.h"        /* g_amp — is there a peer core to stop at all */
-#include "lapic.h"      /* lapic_is_mapped, lapic_send_ipi_all_excluding_self */
-#include "irqchip.h"    /* IPI_PANIC_VECTOR */
+#include "klib_panic.h" /* PanicClaimForMessage — one claim, every other core stopped */
 
 /* Module-local state — neither escapes outside this TU. */
 static spinlock_t g_kprintf_lock;
 
-void console_lock_acquire(void) { spin_lock(&g_kprintf_lock); }
+void console_lock_acquire(void)
+{
+    spin_lock(&g_kprintf_lock);
+    PanicStandIfClaimedElsewhere(); /* the console is the panic's alone — see kvprintf */
+}
 void console_lock_release(void) { spin_unlock(&g_kprintf_lock); }
 
 /* mem_init() runs before any kprintf-class call that needs the lock to be
@@ -51,26 +53,12 @@ int kputnl(void)
     return 1;
 }
 
-void kputchar(char c)
+/* kputchar's half on the glass, the ring left as it is: one byte of the
+ * console at the cursor. Apart, because the line that ends a panic's broken
+ * account is said to the ring and the glass one after the other
+ * (KvprintfRing, KvprintfGlass). */
+static void GlassPutChar(char c)
 {
-    /* kprintf's own bytes, one at a time, and nobody else's: the only caller
-     * is screen_emit below, so everything arriving here is already under
-     * g_kprintf_lock and inside the Canvas batch kprintf opened around its
-     * whole format string. That is what lets the Canvas assemble a multi-byte
-     * character out of these separate calls — it holds the part-built
-     * character only until the batch closes (canvas.c, print_utf8_byte_locked
-     * and batch_end_locked), and kprintf's batch does not close in the middle
-     * of one.
-     *
-     * This used to say that the keyboard's echo also came through here, and
-     * without the console lock. It has not since the line editor moved to
-     * boxlib: the echo is userspace text now and reaches the console as a
-     * HW_VGA_PUTSTRING, which mirrors its own bytes into the log ring at the
-     * hardware deck. So this is where the KERNEL's half of the ring is fed,
-     * not the whole of it. The serial line reads the ring (the Wire,
-     * serial.c): nothing here waits on a UART. */
-    LogRingPut(c);
-
     if (c == '\n')
     {
         kputnl();
@@ -93,6 +81,28 @@ void kputchar(char c)
         VideoPrintCharCur(c);
         VideoUpdateCursor();
     }
+}
+
+void kputchar(char c)
+{
+    /* kprintf's own bytes, one at a time, and nobody else's: the only caller
+     * is screen_emit below, so everything arriving here is already under
+     * g_kprintf_lock and inside the Canvas batch kprintf opened around its
+     * whole format string. That is what lets the Canvas assemble a multi-byte
+     * character out of these separate calls — it holds the part-built
+     * character only until the batch closes (canvas.c, print_utf8_byte_locked
+     * and batch_end_locked), and kprintf's batch does not close in the middle
+     * of one.
+     *
+     * This used to say that the keyboard's echo also came through here, and
+     * without the console lock. It has not since the line editor moved to
+     * boxlib: the echo is userspace text now and reaches the console as a
+     * HW_VGA_PUTSTRING, which mirrors its own bytes into the log ring at the
+     * hardware deck. So this is where the KERNEL's half of the ring is fed,
+     * not the whole of it. The serial line reads the ring (the Wire,
+     * serial.c): nothing here waits on a UART. */
+    LogRingPut(c);
+    GlassPutChar(c);
 }
 
 /* ============================================================================
@@ -425,6 +435,30 @@ static const kfmt_ops_t SCREEN_OPS = {
     .set_cursor = screen_set_cursor,
 };
 
+/* --- Ring ops and glass ops: the two halves of the screen ops apart. --- */
+static int RingEmit(void *ctx, char c)
+{
+    (void)ctx;
+    LogRingPut(c);
+    return 1;
+}
+static const kfmt_ops_t RING_OPS = {
+    .emit_char  = RingEmit,
+    .set_attr   = NULL,
+    .set_cursor = NULL,
+};
+static int GlassEmit(void *ctx, char c)
+{
+    (void)ctx;
+    GlassPutChar(c);
+    return 1;
+}
+static const kfmt_ops_t GLASS_OPS = {
+    .emit_char  = GlassEmit,
+    .set_attr   = screen_set_attr,
+    .set_cursor = screen_set_cursor,
+};
+
 /* --- Buffer ops: drives a bounded char buffer for ksnprintf/kvsnprintf. --- */
 typedef struct { char *buf; size_t pos; size_t size; } kfmt_buf_ctx_t;
 
@@ -444,11 +478,25 @@ static const kfmt_ops_t BUF_OPS = {
     .set_cursor = NULL,
 };
 
-int kprintf(const char *format, ...)
+int kvprintf(const char *format, va_list args)
 {
-    va_list args;
-    va_start(args, format);
     spin_lock(&g_kprintf_lock);
+    /* Once a panic is claimed the console is its account's alone. A core that
+     * comes to it after the claim stands here, before it puts a byte in the
+     * ring or opens a Canvas batch: the NMI that stops it may still be on its
+     * way. The lock it stands holding is taken by the owner as it stands
+     * (klib_lock.c). */
+    PanicStandIfClaimedElsewhere();
+    /* And on the owner, every line of the account first lets go of whatever
+     * Canvas batch another core left open, committing what it held. Not once
+     * at the claim: the claim's NMIs are not waited for, so a core already
+     * past the stand above, or in a Manifest op (manifest_exec.c), or any
+     * other road that opens a batch, can open one between the claim and the
+     * NMI that stops it — and a batch nobody closes keeps every commit after
+     * it, the whole account, off the glass. Each line before this one closed
+     * its own batch, so the owner lets go of nothing of its own. */
+    if (PanicOwnedHere())
+        CanvasForceReset();
     /* Wrap the per-char emit loop in one Canvas batch.  A multi-line
      * banner used to fire one full-frame blit per '\n'-induced scroll;
      * batched, the whole banner ends in a single coalesced blit. */
@@ -456,6 +504,41 @@ int kprintf(const char *format, ...)
     int n = kvformat(&SCREEN_OPS, NULL, format, args);
     VideoBatchEnd();
     spin_unlock(&g_kprintf_lock);
+    return n;
+}
+
+/* kvprintf's two halves apart, for the line that ends a panic's account a
+ * fault or a panic broke off (klib_panic.c): the ring alone first — and so the
+ * wire, and the memory the next boot reads — then the glass alone, so a fault
+ * in the glass's own path costs the wire nothing. Under the console lock,
+ * which the owner of a panic takes as it stands; KvprintfGlass in a Canvas
+ * batch of its own and lets go of none another left open, which the owner
+ * does before it (CanvasForceReset). */
+int KvprintfRing(const char *format, va_list args)
+{
+    spin_lock(&g_kprintf_lock);
+    PanicStandIfClaimedElsewhere();
+    int n = kvformat(&RING_OPS, NULL, format, args);
+    spin_unlock(&g_kprintf_lock);
+    return n;
+}
+
+int KvprintfGlass(const char *format, va_list args)
+{
+    spin_lock(&g_kprintf_lock);
+    PanicStandIfClaimedElsewhere();
+    VideoBatchBegin();
+    int n = kvformat(&GLASS_OPS, NULL, format, args);
+    VideoBatchEnd();
+    spin_unlock(&g_kprintf_lock);
+    return n;
+}
+
+int kprintf(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int n = kvprintf(format, args);
     va_end(args);
     return n;
 }
@@ -478,59 +561,37 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...)
     return n;
 }
 
-/* Every other core stopped, by the vector right_of_way.c reserves for exactly
- * this (irqchip.h: 240-242 are the kernel's own IPIs).
- *
- * Guarded on the LAPIC being mapped: a panic raised before lapic_init has no
- * way to reach another core and no other core to reach — they are started
- * through that same LAPIC — and writing through an unmapped MMIO window
- * would fault inside the panic. Sent with the "all excluding self" shorthand
- * (Intel SDM Vol 3A, ICR Destination Shorthand 11b), one write, no walk of
- * the core table, and NOT waited for: a core that will never answer must not
- * cost the machine the only account of why it died. */
-static void PanicHaltPeers(void)
-{
-    if (!g_amp.multicore_active) return;
-    if (!lapic_is_mapped())      return;
-    lapic_send_ipi_all_excluding_self(IPI_PANIC_VECTOR);
-}
-
 __attribute__((noreturn)) void panic(const char *message, ...)
 {
-    /* This core stops taking interrupts first. An interrupt landing after the
-     * locks below are broken would re-enter kprintf on a lock that no longer
-     * means anything. */
+    /* This core stops taking interrupts first: nothing else is to run on it
+     * while it says what happened, and an interrupt handler's kprintf would
+     * land in the middle of the banner. */
     asm volatile("cli");
 
-    /* EVERY lock the banner needs, broken BEFORE the banner and not after it.
-     * The console lock was already broken here; the ring's and the line's
-     * were not, and they are on the same path — kprintf -> kputchar ->
-     * LogRingPut takes the ring lock and then WireKick takes the line's. A
-     * core that died holding either one used to take the panic with it, in
-     * silence, before a single character had been said. WireForceRelease
-     * breaks both (serial.c). spin_force_release skips the saved-flags
-     * restore, which is right here because this never returns. */
-    spin_force_release(&g_kprintf_lock);
-    WireForceRelease();
-
-    /* Discard any pending Canvas batch state left by an interrupted
-     * Manifest op so the panic banner commits on its first kprintf. */
-    CanvasForceReset();
-
-    /* Peers stopped before the banner is composed rather than after it: a
-     * core still running keeps writing into the same console and the same
-     * ring while the account of the crash is being written into them. The
-     * exception path (panic_dump, idt.c) broadcasts the same vector. */
-    PanicHaltPeers();
-
+    /* The one claim both accounts take (klib_panic.c), before the banner is
+     * composed: a core still running keeps writing into the same console and
+     * the same ring while the account of the crash is being written into
+     * them. A core that lost it to another stands there without a word; the
+     * winner has every other online core stopped by an NMI, and each line it
+     * says lets go of the Canvas batch a stopped core left open (kvprintf);
+     * and the core that holds it already, this panic inside its own account,
+     * ends that account with this message as the line that says by what.
+     * No lock is broken up front: every lock the banner takes on its way
+     * — the console's, the ring's in LogRingPut, the line's in WireKick — is
+     * taken by this core as it stands if another holds it (klib_lock.c), so a
+     * core that died holding one, or one this core holds itself, costs the
+     * banner nothing. */
     va_list args;
     va_start(args, message);
+    bool claimed_here = false;
+    PanicClaimForMessage(&claimed_here, message, args);
 
+    /* The message straight onto the console, no copy of it on this stack: a
+     * message whose own arguments are the next bug faults inside the
+     * account's line, where the claim ends it with the line that says by
+     * what (klib_panic.c), the words before the fault said. */
     kprintf("\n%[E]KERNEL PANIC:%[D] ");
-
-    char temp_buf[512];
-    kvsnprintf(temp_buf, sizeof(temp_buf), message, args);
-    kprintf("%s", temp_buf);
+    kvprintf(message, args);
 
     kprintf("\n\nDebug info:");
     kprintf("\n- Stack pointer: %p", __builtin_frame_address(0));
@@ -546,10 +607,7 @@ __attribute__((noreturn)) void panic(const char *message, ...)
     LogKeepFlush();
 
     /* Everything said, onto the wire, before the last breath: the line
-     * drives itself by interrupt and interrupts are off. Forced open a
-     * second time because a peer that never answered the halt IPI may have
-     * taken the line's lock again while the banner was printing. */
-    WireForceRelease();
+     * drives itself by interrupt and interrupts are off. */
     WireDrain();
 
     while (1)

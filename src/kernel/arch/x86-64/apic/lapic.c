@@ -629,6 +629,12 @@ void lapic_send_ipi_all_excluding_self(uint8_t vector) {
     (void)icr_send(0u, (uint32_t)vector | (3u << 18), false);
 }
 
+void LapicSendNmi(uint32_t dest_lapic_id) {
+    /* Delivery Mode 100b and no vector: Intel SDM Vol 3A, "Interrupt Command
+     * Register (ICR)" — for NMI "the vector information is ignored". */
+    (void)icr_send(dest_lapic_id, LAPIC_ICR_DELIVERY_NMI, false);
+}
+
 /*
  * Translate ACPI 6.5 §5.2.12.5 MPS INTI Flags into LVT bits 13/15.
  *
