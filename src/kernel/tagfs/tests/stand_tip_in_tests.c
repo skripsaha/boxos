@@ -422,6 +422,25 @@ static uint64_t StandTipInHeld(void)
     return n <= 1024u ? blocks : UINT64_MAX;
 }
 
+/*
+ * Filled and emptied, the volume's ground comes back. From before the fill,
+ * every block the test took is free or the slots' again — and from the mount
+ * on the full volume no block of what the fill left is lost: the data's
+ * blocks and every Quire of the full volume's Tallies, let go as the Tallies
+ * of the emptied one write over the slots that named them (BinderSlotGoes),
+ * are free, resting in Fallow, or the book's own again. The free blocks and
+ * the slots' ground counted alone do not see ground the slots let go to no
+ * one: the count spans a mount, which derives the map from the book, so what
+ * the slots lost before the mount is free after it and pays for what they lose
+ * after. So the test counts what is in use outside the book's own ground
+ * (VolumeTallyTake) from a mount, with none between — a Tally-Quire whole, as
+ * the mount's census holds it though the slots it read name its nodes alone:
+ * the ring filled with Tallies of the volume as found leaves it as it was —
+ * the Tallies that write over the slots the mount read give back the Quires
+ * no slot names a node in now whole, not their nodes alone (QuiresGo) — and
+ * from the mount on the full volume it falls by the data's blocks, not one
+ * more or less.
+ */
 static TestResult TestStandTipInEmptied(void)
 {
     TestResult         verdict = TEST_PASS;
@@ -429,6 +448,7 @@ static TestResult TestStandTipInEmptied(void)
     StandFreshModel    m;
     char               name[80];
     uint64_t           first = 0, fid = 0, data = 0, free0 = 0, held0 = 0;
+    VolumeTally        found, ringed, full, emptied;
     const char*        aside = StandBinderAside(&b);
 
     memset(&m, 0, sizeof(m));
@@ -436,7 +456,11 @@ static TestResult TestStandTipInEmptied(void)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
     uint64_t q = RibbonCursorNow()->quire_blocks;
+    TEST_ASSERT(VolumeTallyTake(&found), "what is in use outside the book's own ground counted");
     TEST_ASSERT_OK(StandBinderTallies(3u), "the ring filled with Tallies of the volume as found");
+    TEST_ASSERT(VolumeTallyTake(&ringed), "and counted again");
+    TEST_ASSERT_EQ(ringed.held, found.held, "the ring filled leaves what is in use outside the book's own ground as "
+                   "it was: a Quire of the Tallies the mount read no slot names any more goes back whole (§16.5 п.17)");
     free0 = tagfs_get_state()->ledger.free_blocks;
     held0 = StandTipInHeld();
     TEST_ASSERT(held0 != UINT64_MAX, "the slots' ground counted");
@@ -454,6 +478,7 @@ static TestResult TestStandTipInEmptied(void)
                        64 * TAGFS_BLOCK_SIZE, "its bytes written");
     TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally of them is written");
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounts on it, a stitch of it settled");
+    TEST_ASSERT(VolumeTallyTake(&full), "what is in use outside the book's own ground counted on the full volume");
     for (uint64_t f = first; f < first + STAND_TIP_IN_FILLED / 2u; f++) {
         TEST_ASSERT_EQ(tagfs_delete_file(f, INK_UNWARRANTED), 0, "half the files given up");
         if ((f - first) % 1000u == 999u)
@@ -479,6 +504,11 @@ static TestResult TestStandTipInEmptied(void)
     TEST_ASSERT(free1 + held1 + 2u * q >= free0 + held0,
                 "every block the test took is free again or held by the slots, but the ribbon's Quire and its "
                 "next_quire: no Quire of the Tallies is left neither (§16.5 п.17)");
+    TEST_ASSERT(VolumeTallyTake(&emptied), "what is in use outside the book's own ground counted again");
+    TEST_ASSERT_EQ(emptied.held, full.held - STAND_TIP_IN_FILL_MB * 256u,
+                   "and from the mount on the full volume what is in use outside the book's own ground falls by the "
+                   "data's blocks exactly: a Quire of its Tallies no slot names any more is free or rests in Fallow, "
+                   "whole (§16.5 п.17)");
 out:
     StandFreshModelLetGo(&m);
     STAND_BINDER_PUT_BACK(&b);
@@ -653,11 +683,40 @@ static void StandTipInHoldBack(StandTipInHold* h)
     memset(h, 0, sizeof(*h));
 }
 
+/* Of the first `blocks` blocks of file `fid`, how many lie past block `key`
+ * (*past), and how many of those an element of the reads' DIGESTS names
+ * (*named) — not a rotten range read unchecked (TallyDigestFind). False when
+ * its record is not held. */
+static bool StandTipInNamedPast(uint64_t fid, uint64_t blocks, uint64_t key, uint64_t* named, uint64_t* past)
+{
+    FileRecord* rec  = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileSpot    spot = { 0, 0, 0 };
+    *named = *past = 0;
+    if (!rec)
+        return false;
+    for (uint64_t i = 0; i < blocks; i++) {
+        uint64_t digest  = 0;
+        error_t  refused = OK;
+        if (!FileRecordFind(rec, i, &spot) || spot.kind != STRIP_DATA || spot.block <= key)
+            continue;
+        (*past)++;
+        *named += TallyDigestFind(spot.block, &digest, &refused) == TALLY_DIGEST_NAMED;
+    }
+    FileRecordRelease(rec);
+    return true;
+}
+
 /*
  * The file born after the leaf rots is laid past its first key: the free
  * ground below it held while the file is written — on a book whose files the
  * tests before gave up, holes below the key take more than the file is
- * written to first — and given back before the Tally.
+ * written to first — and given back before the Tally. A rotten last leaf
+ * stands at its first key alone (binder_items.c, BinderKeptCovers), so the
+ * Tally walks on past that one block (RotEnd) and lays the digests of what was
+ * born past it in a leaf of their own: the mount after reads them checked. A
+ * walk that left the rest of the ground out with the rotten range would lose
+ * no byte — those blocks would read unchecked, and the file read back the
+ * same — so the test holds the Tally's DIGESTS to naming each of them.
  */
 static TestResult TestStandTipInRottenPast(void)
 {
@@ -668,7 +727,7 @@ static TestResult TestStandTipInRottenPast(void)
     TallyPlace         last;
     FileRecord*        rec   = NULL;
     FileSpot           spot  = { 0, 0, 0 };
-    uint64_t           fid = 0, pfid = 0, at = 0;
+    uint64_t           fid = 0, pfid = 0, at = 0, named = 0, past_key = 0;
     bool               beyond = false;
     const char*        aside = StandBinderAside(&b);
 
@@ -710,6 +769,10 @@ static TestResult TestStandTipInRottenPast(void)
     StandTipInHoldBack(&held);
     TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "a stitch of this mount settles, a Tally is written");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    TEST_ASSERT(StandTipInNamedPast(pfid, at, last.lo.k1, &named, &past_key) && past_key > 0,
+                "its blocks past the rotten leaf's first key, found again");
+    TEST_ASSERT_EQ(named, past_key, "and the Tally's DIGESTS names every one: laid past the rotten leaf, which "
+                   "stands at its first key alone — none left out with its range, read unchecked (BinderKeptCovers)");
     TEST_ASSERT(StandFreshHolds(&past, pfid), "every block of it reads: what was born past the rotten leaf is laid "
                 "past it, the leaf named as it lies (§16.4 п.5)");
 out:

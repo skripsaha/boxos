@@ -497,7 +497,11 @@ out:
  * span lays the block whole, the Slip's bytes read in over its base; and a
  * write the job cuts into a window and a tail of 100 bytes in a new last
  * block lays that block too — the write began blocks before it, so it does
- * not lie in the last block alone (plot_slip.c PlotSlipBarred). */
+ * not lie in the last block alone (plot_slip.c PlotSlipBarred). On a machine
+ * whose seat has no port road — one core, a legacy channel — a program's
+ * write is the synchronous one the other tests of the suite hold, and this one
+ * stands aside, said, rather than passing on nothing — before it takes
+ * anything, as the port's other tests (StandPortAside). */
 static TestResult TestStandSlipPort(void)
 {
     TestResult      verdict = TEST_PASS;
@@ -505,17 +509,13 @@ static TestResult TestStandSlipPort(void)
     StandFreshModel m;
     uint64_t        fid = 0, laid = 0, off = 0, len = 0;
     uint32_t        of  = 0;
-    const char*     aside = StandStitchAside(&s);
+    const char*     aside = StandPortAside(tagfs_get_seat());
 
-    if (aside)
+    if (aside || (aside = StandStitchAside(&s)) != NULL)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM + TagFSRunBlocks() * TAGFS_BLOCK_SIZE),
                 "room for the file's bytes");
-    if (!WriteJobSeatRunsAsync(s.seat)) {
-        kprintf("[TESTS] stand_slip_port: the port's write stands aside — the volume's seat (%s) takes no write "
-                "nobody stands over\n", BoardroomSeatName(s.seat));
-        goto out;
-    }
+    TEST_ASSERT(WriteJobSeatRunsAsync(s.seat), "a program's write on this seat goes through the port");
     TEST_ASSERT_EQ(tagfs_create_file("slip-port.bin", NULL, 0, &fid), 0, "a file is made");
     TEST_ASSERT_OK(TagFSSettle(), "and its Born settled");
     laid = StandSlipLaid();

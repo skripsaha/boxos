@@ -446,6 +446,7 @@ stand_dog_ear_strict_bites:stand_book_uefi
 stand_run_refused_inside_fresh:stand_book,stand_book_padded
 stand_run_refused_inside_fresh_through_the_port:stand_book,stand_book_padded
 stand_run_megabyte_through_the_port:stand_book,stand_book_padded
+stand_slip_port:stand_book,stand_book_padded
 stand_read_hole_refused_through_port:stand_book,stand_book_padded
 stand_read_holes_through_port:stand_book,stand_book_padded
 stand_readahead_reads_its_version:stand_book,stand_book_padded"
@@ -453,6 +454,7 @@ stand_readahead_reads_its_version:stand_book,stand_book_padded"
 # than one reason, and the reason its legs are for: the line it stands down
 # by begins with them.
 STAND_BOOK_ASIDE_WORDS="stand_run_megabyte_through_the_port|the volume's seat is a legacy channel, whose processor moves every byte
+stand_slip_port|the volume's seat is a legacy channel, whose processor moves every byte
 stand_read_hole_refused_through_port|a read on this seat stands in its call: one core, or a seat that answers only a read somebody stands over
 stand_read_holes_through_port|a read on this seat stands in its call: one core, or a seat that answers only a read somebody stands over"
 

@@ -118,6 +118,14 @@ const char* StandStepsAsideFor(void);
 const char* StandPortAside(uint8_t seat);
 void        StandPortTurn(uint8_t seat);
 
+/* Every Quire of the grid of `q` blocks a slot that holds names a node in —
+ * its own nodes and the Quires its Tally names a node in as it lies — and the
+ * current pair, marked a bit a Quire into a new array (*marks, the caller's to
+ * let go; *nquire bits): the blocks they take, a Quire whole — the Tallies'
+ * ground as a mount's census holds it (spec_v2 §16.5 п.17). UINT64_MAX with no
+ * memory (tests.c). */
+uint64_t StandTallyQuires(uint64_t q, uint64_t** marks, uint64_t* nquire);
+
 /* One turn of the machine a cycle of the Settle goes on in, done by hand: the
  * knock, the batons on this core, the service point (stand_settle_tests.c). */
 void StandSettleTurn(void);
