@@ -39,6 +39,18 @@
  * Anything the kernel speaks that is not here is said out loud once, by name,
  * so a forgotten entry is a line in the log rather than a shell that hangs.
  *
+ * ‼ ONE KEY HERE IS THE VOLUME'S OWN: system
+ *
+ * system:shutdown and system:reboot are the halt's word (system_halt.c), and a
+ * name is mustered with its bare key, so "system" — the first of TagFS's
+ * reserved keys, the auth key of id 0 (tagfs_reserved.h) — is the kernel's
+ * book's from boot: a process asking by "system", or by any "system:X", lands
+ * here and hears the halt's word, never a file's write or anchor TagFS
+ * publishes on id 0. Unmustered, a process that asked for the halt's word
+ * before the halt held the volume's ids and heard nothing (logcheck halthog),
+ * and the halt's first publish took "system" into this book all the same.
+ * Nothing in the tree listens to files by "system".
+ *
  * Keep it sorted. It is read by people.
  */
 #define TOUCH_KERNEL_MUSTER(X)          \
@@ -107,6 +119,8 @@
     X("strand:parked")                  \
     X("strand:spawned")                 \
     X("strand:woken")                   \
+    X("system:reboot")                  \
+    X("system:shutdown")                \
     X("tme:keyid:rekey:failed")         \
     X("tme:pool:ready")                 \
     X("usb:arrived")                    \

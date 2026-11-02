@@ -213,6 +213,11 @@ uint32_t BatonPumpAtRest(uint8_t core_idx);
  * that may not take a Scribe (scribe.h, rule 6). */
 bool BatonRunningHere(void);
 
+/* Whether the only core has taken its one-way pass: then the idle context is
+ * owed the next quantum from whoever ran this one, as RT-10 owes it for a
+ * cycle (idle.c, IdleOwed). By the scheduler, on its own core. */
+bool BatonOneWayIdleOwed(void);
+
 /* How many passes this core's queue is still holding. BatonOutstanding only
  * ever said WHETHER a queue was busy, which made "one unit of work" mean "one
  * core has something" and hid how much — the shutdown drain reported a single

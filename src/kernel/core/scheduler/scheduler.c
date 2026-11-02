@@ -12,7 +12,6 @@
 #include "ready_queue.h"
 #include "xhci_interrupt.h"
 #include "notify.h"
-#include "tagfs.h"
 #include "per_core.h"
 #include "amp.h"
 #include "pit.h"
@@ -1099,15 +1098,8 @@ void schedule(void *frame_ptr)
         spin_unlock(&s->runqueue.lock);
     }
 
-    /* RT-10. On one core the volume's service point runs only in the idle
-     * context, and a program that never parks would never let it: while a
-     * cycle is owed — its window ran out, or somebody demanded it — or a
-     * file's Helm work is listed — a write's next window — idle is owed the
-     * next quantum, taken from whoever ran this one. A cycle it begins holds
-     * the core to its end (scribe.h), a window its own, and then the program
-     * has the core back: the debt costs the program a turn, never the machine
-     * its promise, nor a write its pace. */
-    process_t *next = (current && !process_is_idle(current) && TagFSIdleOwed())
+    /* RT-10: on one core idle may be owed the next quantum (idle.c, IdleOwed). */
+    process_t *next = (current && !process_is_idle(current) && IdleOwed())
                           ? idle_process_get()
                           : scheduler_select_next();
 

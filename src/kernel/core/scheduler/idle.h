@@ -17,6 +17,10 @@ process_t *idle_process_get(void);
 
 bool process_is_idle(process_t *proc);
 
+// Whether idle is owed the next quantum from whoever ran this one (RT-10,
+// idle.c). Asked by schedule() on its own core.
+bool IdleOwed(void);
+
 // Assembly entry point: idle loop (idle_loop.asm) — calls cpu_idle() per pass.
 void idle_loop(void);
 
