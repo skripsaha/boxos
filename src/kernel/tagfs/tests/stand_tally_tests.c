@@ -12,6 +12,7 @@
 #include "../settle/binder.h"
 #include "../read/read.h"
 #include "../integrity/integrity.h"
+#include "../integrity/gloss.h"
 #include "read_job.h"
 #include "write_job.h"
 #include "../run/run.h"
@@ -134,8 +135,38 @@ static bool StandTallySector(uint8_t seat, uint64_t base, uint64_t vlba, void* b
 // Every file reads whole, each block held to its digest
 // ----------------------------------------------------------------------------
 
-/* Every DATA block of `rec` carries a digest the Tally holds; how many. */
-static bool StandTallyDigested(const FileRecord* rec, uint64_t* blocks)
+/* The blocks of the live files by where a read finds their digests. */
+typedef struct {
+    uint64_t gloss;     /* the Gloss holds them */
+    uint64_t tally;     /* the Tally's DIGESTS */
+} StandTallyNamed;
+
+/* What the Tally's DIGESTS said of a block the Gloss does not hold (tally_read.h). */
+static const char* StandTallyDigestSaid(TallyDigestSays says)
+{
+    switch (says) {
+    case TALLY_DIGEST_UNNAMED: return "the leaf that would name it reads, and no element of it does";
+    case TALLY_DIGEST_ROTTEN:  return "that leaf, or its element, reads in no copy";
+    case TALLY_DIGEST_UNREAD:  return "that leaf could not be read now";
+    default:                   return "it is named";
+    }
+}
+
+/*
+ * Every DATA block of `rec` carries the digest it was written with, asked
+ * where a read asks it (integrity.c, IntegrityVerifyBook; spec_v2 §8.1): the
+ * Gloss first, then the Tally's DIGESTS. The Gloss holds what no Tally names
+ * yet (gloss.h) — a block a stitch past the Tally put in among them, named by
+ * that stitch alone until the next Tally: a used book holds such blocks
+ * whenever the machine before it stopped with stitches sewn past its last
+ * Tally — the mount says "the ribbon past the Tally: N stitch(es)"
+ * (book_mount.c) — and they stay so until a Tally is laid, which the tests run
+ * before this one may or may not owe. Asked of the Tally alone, the verdict
+ * was the book's history, not its state. A block neither names is said with
+ * the Tally's answer for it — no element, no copy, or no read now and why —
+ * before the claim fails.
+ */
+static bool StandTallyDigested(const FileRecord* rec, StandTallyNamed* named)
 {
     StripWalk walk;
     Strip     run;
@@ -144,9 +175,20 @@ static bool StandTallyDigested(const FileRecord* rec, uint64_t* blocks)
         for (uint64_t k = 0; k < run.count; k++) {
             uint64_t digest  = 0;
             error_t  refused = OK;
-            if (TallyDigestFind(run.start + k, &digest, &refused) != TALLY_DIGEST_NAMED)
-                return false;
-            (*blocks)++;
+            if (GlossFind(run.start + k, &digest)) {
+                named->gloss++;
+                continue;
+            }
+            TallyDigestSays says = TallyDigestFind(run.start + k, &digest, &refused);
+            if (says == TALLY_DIGEST_NAMED) {
+                named->tally++;
+                continue;
+            }
+            kprintf("[TESTS] stand_tally_files_read_whole: block %llu of file %llu — the Gloss holds no digest of "
+                    "it, and of the Tally's DIGESTS %s (TallyDigestFind %d, refused %d)\n",
+                    (unsigned long long)(run.start + k), (unsigned long long)rec->file_id,
+                    StandTallyDigestSaid(says), (int)says, (int)refused);
+            return false;
         }
     }
     return true;
@@ -173,11 +215,12 @@ static error_t StandTallyReadWhole(uint64_t fid, uint64_t* got)
 
 static TestResult TestStandTallyFilesReadWhole(void)
 {
-    TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    const char* aside   = StandTallyAside();
-    uint64_t    from = 0, files = 0, blocks = 0, ids[16];
-    uint32_t    n;
+    TestResult      verdict = TEST_PASS;
+    TagFSState*     fs      = tagfs_get_state();
+    const char*     aside   = StandTallyAside();
+    StandTallyNamed named   = { 0, 0 };
+    uint64_t        from = 0, files = 0, ids[16];
+    uint32_t        n;
 
     if (aside)
         return test_steps_aside(aside);
@@ -186,10 +229,11 @@ static TestResult TestStandTallyFilesReadWhole(void)
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec = FileMapRecordHold(fs->files, ids[i], NULL);
             TEST_ASSERT(rec != NULL, "every live file has its record");
-            bool     digested = StandTallyDigested(rec, &blocks);
+            bool     digested = StandTallyDigested(rec, &named);
             uint64_t size     = rec->size;
             FileRecordRelease(rec);
-            TEST_ASSERT(digested, "every block a live file names carries the digest it was written with");
+            TEST_ASSERT(digested, "every block a live file names carries the digest it was written with — the "
+                        "Gloss's, or the Tally's");
             uint64_t got = 0;
             TEST_ASSERT_OK(StandTallyReadWhole(ids[i], &got), "the file reads, every block of it");
             TEST_ASSERT_EQ(got, size, "to its last byte");
@@ -197,6 +241,10 @@ static TestResult TestStandTallyFilesReadWhole(void)
         }
         from = ids[n - 1] + 1;
     }
+    if (named.gloss)
+        kprintf("[TESTS] stand_tally_files_read_whole: %llu block(s) of the live files are held to the digests "
+                "the Gloss holds, %llu to the Tally's DIGESTS\n", (unsigned long long)named.gloss,
+                (unsigned long long)named.tally);
     TEST_ASSERT(files > 0, "the book holds files");
     TEST_ASSERT_EQ(files, FileMapCount(fs->files), "and the walk met every one the mount holds");
     TEST_ASSERT_EQ(IntegrityErrorCount(), errors, "and no block read otherwise than its digest says");

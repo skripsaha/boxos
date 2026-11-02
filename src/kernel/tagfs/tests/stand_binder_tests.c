@@ -666,16 +666,40 @@ out:
     return verdict;
 }
 
+/* How far the fill has gone is said each time the file passes another
+ * STAND_BINDER_FILL_SAY, and — once the volume has less than that free — each
+ * time it passes another STAND_BINDER_FILL_SAY_WALL. A volume stretched a
+ * gigabyte (logcheck.sh, quill) is filled for minutes on a loaded host, and a
+ * log that does not grow for WAIT_QUIET_S is a machine the harness gives up on
+ * as hung (stand.sh, wait_for_line): so the fill talks by what it laid, as
+ * quilltest_room.c's does, never by the clock — to the wall, where the file
+ * grows by what each round of the kernel's wait for room gives back (settle.c,
+ * SettleForRoomBook), less than STAND_BINDER_FILL_SAY in all, for minutes. A
+ * stretch in which it lays less than STAND_BINDER_FILL_SAY_WALL is the
+ * kernel's to say — the Tally its wait writes when it waits on one (binder.h,
+ * BinderRoomWait) — and the cycles of a round are said by nothing: one
+ * tagfs_write stands in them. */
+#define STAND_BINDER_FILL_SAY       (64ull << 20)
+#define STAND_BINDER_FILL_SAY_WALL  (1ull << 20)
+
 /* One file written until the volume refuses it: the refusal. */
 static error_t StandBinderFill(uint64_t fid)
 {
     TagFSFileHandle* h       = tagfs_open(fid, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
-    uint64_t         written = 0;
+    uint64_t         written = 0, said = 0;
     PlotSource       src     = { .kernel = g_test_buffer, .bytes = sizeof(g_test_buffer) };
     error_t          rc      = h ? OK : ERR_FILE_NOT_FOUND;
     TestFillAt(g_test_buffer, sizeof(g_test_buffer), 47, 0);
-    while (rc == OK)
+    while (rc == OK) {
         rc = tagfs_write(h, &src, &written);
+        uint64_t room = tagfs_get_state()->ledger.free_blocks * TAGFS_BLOCK_SIZE;
+        uint64_t step = room < STAND_BINDER_FILL_SAY ? STAND_BINDER_FILL_SAY_WALL : STAND_BINDER_FILL_SAY;
+        if (h->file_size >= said + step) {
+            said = h->file_size - h->file_size % step;
+            kprintf("[TESTS] stand_binder_full_back: the file that fills the volume holds %llu MiB\n",
+                    (unsigned long long)(h->file_size >> 20));
+        }
+    }
     if (h)
         tagfs_close(h);
     return rc;
