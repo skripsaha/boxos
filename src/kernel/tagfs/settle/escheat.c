@@ -352,7 +352,11 @@ static bool EscheatMoved(void)
 /* Every key the Tally after the act lays otherwise than the one before:
  * each range let go, each file lost with it, the windows of DIGESTS over the
  * ground let go — DogEar's, so the self-check holds the rest to the Tally
- * before (§16.5 п.9; the Tally is whole, its Foliation kept: EscheatTaken). */
+ * before (§16.5 п.9; the Tally is whole, its Foliation kept: EscheatTaken).
+ * The windows whole, not the ground's own keys: a live block past ground let
+ * go in its window begins an element of its own (DogEarGroundChanged), a key
+ * the Tally before never had — one the self-check, where it is built
+ * (binder_internal.h, BINDER_CHECKS), would meet outside DogEar. */
 static void EscheatKeys(void)
 {
     for (uint32_t i = 0; i < s_nrot; i++)
@@ -360,10 +364,8 @@ static void EscheatKeys(void)
                   s_rot[i].at.has_hi ? s_rot[i].at.hi : DOG_EAR_END);
     for (uint32_t i = 0; i < s_nkept; i++)
         DogEarPut(TALLY_FILES, (TallyKey){ s_kept[i].fid, 0 }, (TallyKey){ s_kept[i].fid + 1u, 0 });
-    for (uint64_t i = 0; i < s_nfree; i++) {
-        uint64_t lo = s_free[i].start > DIGEST_ITEM_MOST ? s_free[i].start - DIGEST_ITEM_MOST : 0;
-        DogEarPut(TALLY_DIGESTS, (TallyKey){ lo, 0 }, (TallyKey){ s_free[i].start + s_free[i].count, 0 });
-    }
+    for (uint64_t i = 0; i < s_nfree; i++)
+        DogEarGroundChanged(s_free[i].start, s_free[i].count);
 }
 
 void EscheatTake(void)

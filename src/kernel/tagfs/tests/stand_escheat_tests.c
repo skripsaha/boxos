@@ -1,6 +1,7 @@
 #include "stand_binder.h"
 #include "stand_fresh.h"
 #include "../settle/binder.h"
+#include "../settle/dog_ear.h"
 #include "../settle/escheat.h"
 #include "../settle/settle.h"
 #include "../file_map/file_map.h"
@@ -25,8 +26,9 @@
 // (logcheck book_escheat B4, B6c), and a range rotten by hand here: the act
 // asked with nobody writing is laid by the Tally the cadence writes — mounted
 // again with nothing written, a stitch after the ask ending on its Quire's
-// last sector, a Tally refused before it. Every test puts the Spine and the
-// ribbon back as it found them.
+// last sector, a Tally refused before it — and the keys of DIGESTS it changes,
+// every window of the ground it lets go, are DogEar's. Every test puts the
+// Spine and the ribbon back as it found them.
 // ============================================================================
 
 #define STAND_ESCHEAT_ROOM      (4u * TAGFS_BLOCK_SIZE)
@@ -406,6 +408,138 @@ out:
 }
 
 // ----------------------------------------------------------------------------
+// The keys of DIGESTS the act changes: every window of the ground it lets go
+// ----------------------------------------------------------------------------
+
+/* Whether DogEar's span `s` holds every key of DIGESTS over blocks [lo, hi):
+ * (lo, 0) not below it, (hi - 1, 0) below its end. */
+static bool StandEscheatSpanHolds(const DogEarSpan* s, uint64_t lo, uint64_t hi)
+{
+    bool from = s->lo.k1 < lo || (s->lo.k1 == lo && s->lo.k2 == 0);
+    bool to   = s->hi.k1 > hi - 1u || (s->hi.k1 == hi - 1u && s->hi.k2 > 0);
+    return from && to;
+}
+
+/* How many runs of the ground the mount holds for its rotten ranges lie in a
+ * window of DIGEST_ITEM_MOST blocks — a DIGESTS element's — that DogEar does
+ * not hold whole among the spans put in since the last slice; the first such
+ * said. None when DogEar was lost whole: every key is then changed (dog_ear.h).
+ * UINT64_MAX when memory refuses the room to read the spans. */
+static uint64_t StandEscheatWindowsOpen(void)
+{
+    DogEarSpan* spans = NULL;
+    uint32_t    room  = 0, n = 0;
+    uint64_t    open  = 0;
+    /* DogEarStand answers how many spans it holds, not how many it copied: a
+     * span put in from another core since the room was weighed (a read of a
+     * digest mends a leaf, DogEarMended) is read again into room for all. */
+    while ((n = DogEarStand(TALLY_DIGESTS, false, spans, room)) > room) {
+        kfree(spans);
+        room  = n;
+        spans = kmalloc(sizeof(DogEarSpan) * room);
+        if (!spans)
+            return UINT64_MAX;
+    }
+    /* Asked after the read: lost before it or during it, what was read is
+     * not DogEar's word, and every key is held changed anyway. */
+    if (DogEarStandLost(false)) {
+        kprintf("[TESTS] stand_escheat: DogEar was lost whole — every key of DIGESTS is held changed\n");
+        kfree(spans);
+        return 0;
+    }
+    for (uint64_t i = 0; i < g_binder.nheld; i++) {
+        const BinderGround* g  = &g_binder.held[i];
+        uint64_t            lo = g->start / DIGEST_ITEM_MOST * DIGEST_ITEM_MOST;
+        uint64_t            hi = (g->start + g->count - 1u) / DIGEST_ITEM_MOST * DIGEST_ITEM_MOST + DIGEST_ITEM_MOST;
+        bool                held = false;
+        for (uint32_t s = 0; !held && s < n; s++)
+            held = StandEscheatSpanHolds(&spans[s], lo, hi);
+        if (!held && open++ == 0)
+            kprintf("[TESTS] stand_escheat: the ground [%llu, %llu) the act lets go lies in the windows of DIGESTS "
+                    "[%llu, %llu), and DogEar does not hold them whole\n", (unsigned long long)g->start,
+                    (unsigned long long)(g->start + g->count), (unsigned long long)lo, (unsigned long long)hi);
+    }
+    kfree(spans);
+    return open;
+}
+
+/* The act's Tally refused at its first node, as the medium refuses it: its
+ * answer. One the ribbon lets no Tally begin yet is asked again past a stitch
+ * more, the medium's refusal armed only for the Tally. */
+static error_t StandEscheatRefusedAtNode(const StandBinder* b)
+{
+    error_t rc = ERR_BUSY;
+    for (uint32_t t = 0; rc == ERR_BUSY && t < 2u; t++) {
+        if (t && TagFSSettle() != OK)
+            break;
+        BlockFailArm(b->s.seat, BLOCK_FAIL_WRITE, 0, 0, 1);
+        rc = BinderRunWhole();
+        BlockFailDisarm();
+    }
+    return rc;
+}
+
+/*
+ * ‼ THE ACT CHANGES WHOLE WINDOWS OF DIGESTS. A DIGESTS element is the
+ * digests of blocks in a row inside one window of DIGEST_ITEM_MOST blocks
+ * (volume_tally.h), so ground let go out of the middle of one leaves the
+ * blocks past it in the window an element of their own, keyed by the first of
+ * them — a key the Tally before never had. DogEar takes every window the
+ * ground let go lies in, as it takes a file's (dog_ear.c WindowsNoted), or
+ * the self-check — built in every stand kernel (binder_internal.h,
+ * BINDER_CHECKS) — meets that key outside it where a live block lies past
+ * the ground in its window: a STRICT kernel stops there, the stand's
+ * other kernels refuse every Tally that owes the act. Here, on any book: a
+ * Tally that took the act, refused at its first node, gives DogEar back what
+ * it took, read whole windows — a run of ground that ends inside its window
+ * shows the rule, a live block past it or not; and the act's Tally after it is
+ * laid, held to the one before — which the self-check bites on only where a
+ * live block lies past the ground in its window (the stand's padded book has
+ * one).
+ */
+static TestResult TestStandEscheatWindows(void)
+{
+    TestResult   verdict = TEST_PASS;
+    StandBinder* b = &s_escheat_binder;
+    EscheatSaid  said;
+    uint64_t     files = 0, held = 0, open = 0, inside = 0;
+    error_t      rc = OK;
+    const char*  aside = StandBinderAside(b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    verdict = StandBinderRot(b, &files);
+    if (verdict != TEST_PASS)
+        goto out;
+    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
+    TEST_ASSERT_OK(TagFSEscheat(INK_WARRANTED, &said), "Escheat asked with the warrant");
+    for (uint64_t i = 0; i < g_binder.nheld; i++) {
+        held += g_binder.held[i].count;
+        inside += (g_binder.held[i].start + g_binder.held[i].count) % DIGEST_ITEM_MOST != 0;
+    }
+    TestEvidence("blocks the mount holds for the rotten range", held);
+    /* The rule shows on a run that ends inside its window: one ended on a
+     * window's last block leaves no element past it to be keyed anew. */
+    TestEvidence("runs of that ground that end inside their window of DIGESTS", inside);
+    TEST_ASSERT(said.blocks > 0 && said.blocks == held, "the act lets go ground, every block the mount holds for "
+                                                        "the range: no file locked for another reason keeps any");
+    rc = StandEscheatRefusedAtNode(b);
+    TEST_ASSERT(rc != OK && BlockFailFired() && !BinderNoWrite(), "the Tally that took the act is refused at its "
+                                                                  "first node, and the volume takes writes still");
+    TEST_ASSERT(EscheatOwed(), "the act is owed again, what it took back where it was");
+    open = StandEscheatWindowsOpen();
+    TestEvidence("runs of the ground let go whose windows of DIGESTS DogEar does not hold whole", open);
+    TEST_ASSERT_EQ(open, 0, "DogEar holds every window of DIGESTS the ground the act lets go lies in");
+    TEST_ASSERT_OK(StandBinderTallies(1u), "the act's Tally is laid past a cycle more, its self-check held to the "
+                                           "Tally before");
+    TEST_ASSERT(!EscheatOwed(), "and the act with it");
+out:
+    BlockFailDisarm();
+    STAND_BINDER_PUT_BACK(b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
 
 static const TestCase g_stand_escheat_tests[] = {
     { .name = "stand_escheat_warrant", .func = TestStandEscheatWarrant,
@@ -419,6 +553,8 @@ static const TestCase g_stand_escheat_tests[] = {
     { .name = "stand_escheat_on_edge", .func = TestStandEscheatOnEdge,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_escheat_retried", .func = TestStandEscheatRetried,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_escheat_windows", .func = TestStandEscheatWindows,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
 };
 

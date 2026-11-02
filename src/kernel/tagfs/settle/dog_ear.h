@@ -17,7 +17,10 @@
  *     every file a replayed stitch changed, the same way;
  *   a copy of a leaf that would not read (DogEarMended) — the mount's walk,
  *     a read of a digest, the Binder's self-check: the next Tally writes the
- *     leaf again (§2.5).
+ *     leaf again (§2.5);
+ *   Escheat, at the TALLY_TAKE of the Tally that owes it (escheat.c): the
+ *     rotten ranges, the files locked with them, and the ground it lets go
+ *     (DogEarGroundChanged).
  *
  * ‼ A TALLY TAKES WHAT IS HELD AT ITS SLICE, AND ONLY THAT. TALLY_TAKE takes
  * every span held (DogEarTake) — the keys the stitches up to k changed — and
@@ -54,6 +57,15 @@ void     DogEarFileChanged(uint64_t fid, const FileRecord* was, const FileRecord
 
 /* The leaf at `at` of `tree`, a copy of which did not hold: its range. */
 void     DogEarMended(uint64_t tree, const TallyPlace* at);
+
+/* Ground [start, start + count) whose digests changed with no record of a
+ * file to say so — the held ground Escheat lets go: every window of
+ * DIGEST_ITEM_MOST blocks it lies in, as DogEarFileChanged takes a file's. A
+ * DIGESTS element is blocks in a row inside one window (volume_tally.h), so
+ * ground let go out of the middle of one leaves the blocks past it in the
+ * window an element of their own, keyed by the first of them — a key the
+ * Tally before never had, and none of the ground's own. With no TagFS lock. */
+void     DogEarGroundChanged(uint64_t start, uint64_t count);
 
 /* TALLY_TAKE: every span held taken by the Tally; refused, given back under
  * what came since; its DONE, let go. Whether the Tally under way took `key` of

@@ -16,7 +16,11 @@
  *     one record names and the other does not: a Parcel written over in the
  *     middle, the file grown at its end, a splice that moves every block past
  *     it, a file born and one given up. Each held to the two records walked
- *     Parcel by Parcel and block by block here, apart from the kernel's walk.
+ *     Parcel by Parcel and block by block here, apart from the kernel's walk;
+ *   - ground let go with no record to say so (Escheat's) puts in every window
+ *     of DIGESTS it lies in and no other key: ground ended inside a window,
+ *     on its last block, a window's first block alone, none, and the end of
+ *     the keys — each key held to the window it lies in, counted here.
  */
 
 #include "../src/kernel/tagfs/settle/dog_ear.h"
@@ -439,6 +443,54 @@ static void Mended(void)
         !Holds(TALLY_FILES, false, K(4, 1)), "the last leaf of a tree, its range to the tree's end");
 }
 
+/* Whether the window of DIGEST_ITEM_MOST blocks block `k` lies in meets
+ * [start, end): the window of the key, apart from dog_ear.c's windows of the
+ * ground. */
+static bool WindowMeets(uint64_t k, uint64_t start, uint64_t end)
+{
+    uint64_t lo   = k - k % DIGEST_ITEM_MOST;
+    uint64_t last = lo > UINT64_MAX - (DIGEST_ITEM_MOST - 1u) ? UINT64_MAX : lo + (DIGEST_ITEM_MOST - 1u);
+    return lo < end && start <= last;
+}
+
+/* Ground [start, start + count) let go with no record to say so: DIGESTS
+ * holds the key of every block whose window meets it, from three windows
+ * before it to three past it — and no other tree anything. */
+static void Ground(const char* what, uint64_t start, uint64_t count)
+{
+    char     line[256];
+    uint64_t end  = start + count;
+    uint64_t from = start > 3u * DIGEST_ITEM_MOST ? start - 3u * DIGEST_ITEM_MOST : 0;
+    uint64_t to   = end < UINT64_MAX - 3u * DIGEST_ITEM_MOST ? end + 3u * DIGEST_ITEM_MOST : UINT64_MAX;
+    bool     held = true;
+    DogEarLetGo();
+    DogEarGroundChanged(start, count);
+    for (uint64_t k = from;; k++) {
+        held &= Holds(TALLY_DIGESTS, false, K(k, 0)) == (count && WindowMeets(k, start, end));
+        if (k == to)
+            break;
+    }
+    held &= DogEarStand(TALLY_FILES, false, s_spans, SPANS_MOST) == 0 &&
+            DogEarStand(TALLY_TAGS, false, s_spans, SPANS_MOST) == 0 && !DogEarStandLost(false);
+    snprintf(line, sizeof(line), "%s: DIGESTS holds every window of the ground [%llu, +%llu) and no other", what,
+             (unsigned long long)start, (unsigned long long)count);
+    Say(held, line);
+}
+
+/* Ground let go with no record to say so (Escheat's): a DIGESTS element is
+ * blocks in a row inside one window, so ground let go out of the middle of
+ * one leaves the blocks past it an element keyed by the first of them. */
+static void Grounds(void)
+{
+    Ground("across two windows, ended inside the second", 79000u, 237u);
+    Ground("from a window's first block, ended inside it", 10670u, 337u);
+    Ground("over fifteen windows, ended inside the last", 1689u, 6967u);
+    Ground("ended on a window's last block", 3u * DIGEST_ITEM_MOST + 10u, 2u * DIGEST_ITEM_MOST - 10u);
+    Ground("one block, a window's first", 7u * DIGEST_ITEM_MOST, 1u);
+    Ground("no ground", 5000u, 0);
+    Ground("at the end of the keys", UINT64_MAX - 100u, 100u);
+}
+
 /* The Parcel test of §10.4: a file of 1 GiB in runs of two blocks, a block of
  * it written over 10 000 times, each on fresh ground. Each change puts into
  * DogEar the header and the Parcels it changed — the one the block lies in,
@@ -517,6 +569,7 @@ int main(void)
     Lost();
     Files();
     Mended();
+    Grounds();
     Rewrites();
     DogEarLetGo();
     Say(g_parcel_host_heap.allocs == g_parcel_host_heap.frees, "DogEar let go, the heap holds nothing of it");
