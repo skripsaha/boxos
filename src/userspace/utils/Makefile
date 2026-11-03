@@ -70,7 +70,7 @@ UTILS = help create show files tag untag name trash erase assemble \
         me info say reboot bye defrag fsck ipc_test memtag hw \
         timezone logsave lastsaid rgbtest usetest faretest luggagetest rollcall handset headcount \
         draft playtime lavalamp finish taskcenter hexer stringview \
-        calculate difference copy typer flame passport
+        calculate difference copy typer flame checksum passport
 
 .PHONY: all clean
 
@@ -149,7 +149,7 @@ stringview.elf: $(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-# calculate, difference, copy, typer, flame and passport are C++, the larger ones in
+# calculate, difference, copy, typer, flame, checksum and passport are C++, the larger ones in
 # parts named after their program; linked and stripped as hexer and stringview.
 CALCULATE_OBJS  = calculate.o calculate_integer.o calculate_fraction.o calculate_math.o \
                   calculate_show.o calculate_read.o calculate_parse.o
@@ -158,7 +158,12 @@ COPY_OBJS       = copy.o
 TYPER_OBJS      = typer.o typer_passages.o typer_text.o typer_attempt.o typer_record.o \
                   typer_store.o typer_screen.o typer_paint.o typer_results.o
 FLAME_OBJS      = flame.o flame_sim.o flame_palette.o flame_font.o flame_paint.o flame_menu.o
+CHECKSUM_OBJS   = checksum.o checksum_small.o checksum_sha2.o checksum_sha3.o checksum_kinds.o
 PASSPORT_OBJS   = passport.o
+# The utilities are built without optimisation, for their debug information;
+# a hash is the one place in them where that costs — every byte of a file
+# goes through its rounds — so these three are built as BoxLib is, -O2.
+checksum_small.o checksum_sha2.o checksum_sha3.o: CXXFLAGS += -O2
 
 calculate.elf: $(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
@@ -178,6 +183,10 @@ typer.elf: $(BOXLIB_START) $(TYPER_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.
 
 flame.elf: $(BOXLIB_START) $(FLAME_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(FLAME_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+checksum.elf: $(BOXLIB_START) $(CHECKSUM_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(CHECKSUM_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
