@@ -11,6 +11,8 @@
 #include "shell.h"
 #include "parser.h"
 #include "executor.h"
+#include "history.h"
+#include "whisper.h"
 #include "box/print.h"
 #include "box/string.h"
 #include "box/memory.h"
@@ -60,6 +62,8 @@ void ShellInit(void)
     println("BoxOS Shell v2.0");
     println("Type 'help' for commands, 'exit' to quit.");
     println("");
+
+    HistoryLoad();
 }
 
 /* =========================================================================
@@ -191,6 +195,15 @@ int ShellRunLine(const char *input)
     return rc;
 }
 
+/* The line typed at the prompt, kept with the Use Context it was typed in. */
+static void ShellKeepLine(const char *line)
+{
+    char *context = NULL;
+    ShellContextWhole(&context);
+    HistoryKeep(line, context);
+    free(context);
+}
+
 void ShellMainLoop(void)
 {
     while (g_state.running) {
@@ -198,11 +211,18 @@ void ShellMainLoop(void)
         print(g_state.prompt);
         io_flush();
 
-        /* The line grows as it is typed: no ceiling but memory. */
+        /* The line grows as it is typed: no ceiling but memory. The Whisper
+         * sees the volume as it is when this line begins. */
+        ShellWhisper whisper;
+        WhisperBegin(&whisper);
         char *input = NULL;
-        int   len   = readline_grow(&input);
-        if (len > 0)
+        int   len   = readline_whispered(&input, &whisper.Line);
+        WhisperEnd(&whisper);
+
+        if (len > 0) {
+            ShellKeepLine(input);
             ShellRunLine(input);
+        }
         free(input);
     }
 }

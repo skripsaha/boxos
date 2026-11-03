@@ -285,14 +285,15 @@ int64_t fread(file_id_t file_id, uint64_t offset, void *buffer, size_t size)
     return (int64_t)out_actual;            /* 0..req, always >= 0 */
 }
 
-int64_t fwrite(file_id_t file_id, uint64_t offset, const void *buffer, size_t size)
+/* obj.write with `flags` (STORAGE_WRITE_*): fwrite's answer. */
+static int64_t write_with(file_id_t file_id, uint64_t offset, uint32_t flags,
+                          const void *buffer, size_t size)
 {
     if (!buffer || size == 0) return -ERR_INVALID_ARGUMENT;
     uint32_t req = size > UINT32_MAX ? UINT32_MAX : (uint32_t)size;
 
-    /* params: [u64 file_id][u64 offset][u32 flags=0]. */
+    /* params: [u64 file_id][u64 offset][u32 flags]. */
     uint8_t params[20];
-    uint32_t flags = 0;
     memcpy(params,      &file_id, 8);
     memcpy(params + 8,  &offset,  8);
     memcpy(params + 16, &flags,   4);
@@ -316,6 +317,16 @@ int64_t fwrite(file_id_t file_id, uint64_t offset, const void *buffer, size_t si
         return bytes_written > 0 ? (int64_t)bytes_written : box_fail(rc);
     if (out_actual < 8) return (int64_t)req; /* op succeeded; assume full write of the submitted crate */
     return (int64_t)bytes_written;
+}
+
+int64_t fwrite(file_id_t file_id, uint64_t offset, const void *buffer, size_t size)
+{
+    return write_with(file_id, offset, 0, buffer, size);
+}
+
+int64_t file_append(file_id_t file_id, const void *buffer, size_t size)
+{
+    return write_with(file_id, 0, STORAGE_WRITE_APPEND, buffer, size);
 }
 
 /* =========================================================================

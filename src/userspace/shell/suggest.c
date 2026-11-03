@@ -11,8 +11,6 @@
 #include "suggest.h"
 #include "program.h"
 #include "shell.h"
-#include "box/file.h"
-#include "box/memory.h"
 #include "box/string.h"
 
 #define SUGGEST_NAME_MAX  48
@@ -77,28 +75,16 @@ static void Consider(Closest *closest, const char *typed, const char *name, size
     if (closest->Count < SUGGEST_SHOWN) memcpy(closest->Names[closest->Count++], stem, length + 1);
 }
 
-static size_t StemLength(const char *filename)
-{
-    size_t length = strlen(filename);
-    for (size_t i = length; i > 0; i--) {
-        if (filename[i - 1] == '.') return i - 1;
-    }
-    return length;
-}
+typedef struct {
+    Closest    *Closest;
+    const char *Typed;
+} Search;
 
-static void ConsiderProgramsWearing(Closest *closest, const char *typed, const char *tag)
+static void ConsiderProgram(void *context, file_id_t id, const char *filename)
 {
-    file_id_t *ids = NULL;
-    int        count = query_all_everywhere(tag, &ids);
-    if (count <= 0) return;
-
-    for (int i = 0; i < count; i++) {
-        char *name = ProgramRunnableName(ids[i]);
-        if (!name) continue;
-        Consider(closest, typed, name, StemLength(name));
-        free(name);
-    }
-    free(ids);
+    (void)id;
+    Search *search = context;
+    Consider(search->Closest, search->Typed, filename, ProgramStemLength(filename));
 }
 
 static size_t Append(char *out, size_t at, size_t size, const char *text)
@@ -132,9 +118,8 @@ bool SuggestFor(const char *typed, char *out, size_t size)
 
     for (int i = 0; g_commands[i].name != NULL; i++)
         Consider(&closest, typed, g_commands[i].name, strlen(g_commands[i].name));
-    ConsiderProgramsWearing(&closest, typed, "app");
-    ConsiderProgramsWearing(&closest, typed, "utility");
-    ConsiderProgramsWearing(&closest, typed, "itinerary");
+    Search search = { &closest, typed };
+    ProgramEachCommand(ConsiderProgram, &search);
 
     if (closest.Count == 0) return false;
     Say(&closest, out, size);

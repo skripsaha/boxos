@@ -27,10 +27,12 @@ static const char *g_line = "";
  * ========================================================================= */
 
 const ShellCommand g_commands[] = {
-    {"help",  cmd_help,  "help [NAME]", "Show available commands, or what a program takes"},
-    {"use",   cmd_use,   "use [tags] [+tag] [-tag]", "Set, change or clear the Use Context"},
-    {"exit",  cmd_exit,  "exit",       "Exit shell (or Ctrl+Q)"},
-    {"clear", cmd_clear, "clear",      "Clear screen"},
+    {"help",  cmd_help,  "help [NAME]", "Show available commands, or what a program takes",
+                                                                    SHELL_TAKES_COMMAND},
+    {"use",   cmd_use,   "use [tags] [+tag] [-tag]", "Set, change or clear the Use Context",
+                                                                    SHELL_TAKES_TAGS},
+    {"exit",  cmd_exit,  "exit",       "Exit shell (or Ctrl+Q)",    SHELL_TAKES_NOTHING},
+    {"clear", cmd_clear, "clear",      "Clear screen",              SHELL_TAKES_NOTHING},
     /* Built in, and that is the whole point of it: the board failure being
      * chased is one where the volume mounts and reports its files while the
      * shell can find none of them, so `logsave` and `lastsaid` — both ELF
@@ -38,9 +40,11 @@ const ShellCommand g_commands[] = {
      * worth having. This needs no lookup and no spawn. Both of those tools
      * remain; this is the copy that cannot be taken away. */
     {"said",  cmd_said,  "said [before]",
-                                 "What this machine said (add a NAME to file it)"},
-    {"run",   cmd_run,   "run THING",  "Start a program given as a file, or `it`"},
-    {NULL, NULL, NULL, NULL}
+                                 "What this machine said (add a NAME to file it)",
+                                                                    SHELL_TAKES_NOTHING},
+    {"run",   cmd_run,   "run THING",  "Start a program given as a file, or `it`",
+                                                                    SHELL_TAKES_PROGRAM},
+    {NULL, NULL, NULL, NULL, SHELL_TAKES_NOTHING}
 };
 
 /* =========================================================================

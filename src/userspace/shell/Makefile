@@ -46,7 +46,8 @@ BOXLIB = ../boxlib/libbox.a
 BOXLIB_START = ../build/boxlib_start.o
 
 # Source files
-CORE_SRCS = shell.c parser.c executor.c ask.c them.c program.c fill.c remake.c itinerary.c suggest.c
+CORE_SRCS = shell.c parser.c executor.c ask.c them.c program.c fill.c remake.c itinerary.c suggest.c \
+            history.c view.c whisper.c
 CMD_SRCS = commands/cmd_use.c commands/cmd_exit.c commands/cmd_clear.c commands/cmd_help.c commands/cmd_said.c commands/cmd_run.c
 
 SRCS = $(CORE_SRCS) $(CMD_SRCS)

@@ -80,6 +80,38 @@ int readline(char* buffer, size_t max_len);
  * ceiling but memory: its length, and *line — NUL-terminated, the caller's to
  * free — or -1 with *line NULL when the ear is gone or no memory was had. */
 int readline_grow(char** line);
+
+/* A Whisper: what a line could go on to be, laid dim past the caret while it
+ * is typed. The one who reads the line knows its lines; the editor shows what
+ * it is told and takes it when it is asked to:
+ *
+ *   Tab          the next word of what is whispered, as if it were typed
+ *   Shift+Tab    all of it
+ *   Tab, with nothing whispered — what the line still needs, laid dim and
+ *                never typed; the next key takes it away
+ *
+ * Something is whispered only while the caret is at the end of a line that has
+ * something on it, and asked again after every key. Every answer is a heap
+ * string the editor frees, NULL for nothing, and only what the editor could
+ * have typed itself is shown. The whisperer is handed back to itself, so a
+ * caller keeps what it needs in a structure that begins with one of these, as
+ * BoxFormLookup is kept. */
+typedef struct LineWhisper LineWhisper;
+struct LineWhisper {
+    /* What may follow `line` — the characters that would come next. */
+    char *(*Continue)(LineWhisper* whisper, const char* line, uint32_t length);
+    /* What `line` still needs, said in words: laid when Tab has nothing to take. */
+    char *(*Needs)(LineWhisper* whisper, const char* line, uint32_t length);
+    /* The whisperer's line `back` lines before its newest (0: the newest);
+     * NULL past the oldest. Up and Down walk these. */
+    char *(*Recall)(LineWhisper* whisper, uint32_t back);
+};
+
+/* readline_grow with a Whisper. Up and Down walk the whisperer's lines rather
+ * than the cabin's history, and the line read is not kept in that history:
+ * the whisperer keeps what it wants. */
+int readline_whispered(char** line, LineWhisper* whisper);
+
 int getchar(void);
 int input(const char* prompt, char* buffer, size_t max_len);
 

@@ -30,11 +30,21 @@ typedef struct {
 
 typedef int (*CommandHandler)(int argc, char *argv[]);
 
+/* What a built-in command's words are — a built-in has no Form, and this is
+ * the part of one the Whisper needs. */
+typedef enum {
+    SHELL_TAKES_NOTHING = 0,
+    SHELL_TAKES_COMMAND,       /* its first word is a command's name */
+    SHELL_TAKES_PROGRAM,       /* its first word is a program's file */
+    SHELL_TAKES_TAGS           /* its words are tags, + or - before each when changing */
+} ShellTakes;
+
 typedef struct {
     const char     *name;
     CommandHandler  handler;
     const char     *usage;
     const char     *description;
+    ShellTakes      takes;
 } ShellCommand;
 
 /* =========================================================================

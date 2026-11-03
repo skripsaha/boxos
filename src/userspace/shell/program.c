@@ -98,6 +98,53 @@ char *ProgramRunnableName(file_id_t id)
     return name;
 }
 
+size_t ProgramStemLength(const char *filename)
+{
+    size_t length = strlen(filename);
+    for (size_t i = length; i > 0; i--) {
+        if (filename[i - 1] == '.') return i - 1;
+    }
+    return length;
+}
+
+static bool Seen(const file_id_t *seen, size_t count, file_id_t id)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (seen[i] == id) return true;
+    }
+    return false;
+}
+
+void ProgramEachCommand(ProgramVisit visit, void *context)
+{
+    static const char *const kCommandTags[] = { "app", "utility", "itinerary" };
+
+    file_id_t *seen = NULL;
+    size_t     seen_count = 0, seen_room = 0;
+    for (size_t t = 0; t < sizeof(kCommandTags) / sizeof(kCommandTags[0]); t++) {
+        file_id_t *ids = NULL;
+        int        count = query_all_everywhere(kCommandTags[t], &ids);
+        for (int i = 0; i < count; i++) {
+            if (Seen(seen, seen_count, ids[i])) continue;
+            if (seen_count == seen_room) {
+                size_t     room = seen_room ? seen_room * 2 : 32;
+                file_id_t *more = realloc(seen, room * sizeof(file_id_t));
+                if (!more) break;
+                seen      = more;
+                seen_room = room;
+            }
+            seen[seen_count++] = ids[i];
+
+            char *name = ProgramRunnableName(ids[i]);
+            if (!name) continue;
+            visit(context, ids[i], name);
+            free(name);
+        }
+        free(ids);
+    }
+    free(seen);
+}
+
 /* Of the files in `ids`, those that are commands, kept in place; *unread the
  * first refusal met reading one, 0 when each was read. A name whose files the
  * volume will not show — its medium gone — is there and would not start, not

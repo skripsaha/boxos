@@ -77,6 +77,10 @@ int file_info(file_id_t file_id, file_info_t* info);
  * short count; the refusal is the answer of the next call, from there. */
 int64_t fread(file_id_t file_id, uint64_t offset, void* buffer, size_t size);
 int64_t fwrite(file_id_t file_id, uint64_t offset, const void* buffer, size_t size);
+/* fwrite at the file's end as it is when the write reaches the file: writers
+ * adding to one file never lay their bytes over each other's. The same answer
+ * as fwrite. */
+int64_t file_append(file_id_t file_id, const void* buffer, size_t size);
 /* `delete` is a C++ keyword — C++ callers use file_delete(), bound to the
  * same ELF symbol via asm label. C keeps the original name unchanged. */
 #ifdef __cplusplus

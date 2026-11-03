@@ -19,6 +19,15 @@ char *ProgramNameOf(file_id_t id);
  * string the caller frees; NULL when it is not one or cannot be read. */
 char *ProgramRunnableName(file_id_t id);
 
+/* How much of a file's name is the name it is called by: up to its last dot,
+ * as the volume stamps it. */
+size_t ProgramStemLength(const char *filename);
+
+/* Every command on the volume — each program's and Itinerary's file — handed
+ * to `visit` once, with its file's name. */
+typedef void (*ProgramVisit)(void *context, file_id_t id, const char *filename);
+void ProgramEachCommand(ProgramVisit visit, void *context);
+
 /* How a pick ended. A negative value is an -error_t and nothing was said. */
 #define PROGRAM_PICKED     0
 #define PROGRAM_SAID       1   /* the person was told why there is no program */
