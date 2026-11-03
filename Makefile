@@ -755,7 +755,7 @@ UTIL_NAMES = help create show files tag untag name trash erase assemble \
              me info say reboot bye defrag fsck ipc_test memtag hw \
              timezone logsave lastsaid rgbtest usetest faretest luggagetest headcount \
              draft playtime lavalamp finish taskcenter hexer stringview \
-             calculate difference copy typer flame checksum passport
+             calculate difference copy typer flame checksum passport aquarium
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -776,7 +776,9 @@ TESTBIN_EMPTY = $(BUILDDIR)/testbin.bin
 # quietly disappears. That is exactly what happened when the ESP first became
 # part of the image — the build got as far as `dd if=` an empty filename.
 UEFI_ESP_IMG = $(BUILDDIR)/esp.img
-VBOX_VDI     = $(BUILDDIR)/boxos.vdi
+# VirtualBox is not used here: its disk is not built (the rule is kept below,
+# commented, for when it is).
+# VBOX_VDI     = $(BUILDDIR)/boxos.vdi
 
 # ==== UEFI BOOTLOADER ====
 # The loader's files, and every header any of them reads: a change to one is a
@@ -828,7 +830,7 @@ CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 .DELETE_ON_ERROR:
 
 # ==== MAIN TARGET ====
-all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) $(VBOX_VDI) uefi check-endbr64
+all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) uefi check-endbr64
 
 # ==== CET / IBT POST-LINK AUDIT ====
 # Verifies every globally-visible function in the kernel ELF begins with
@@ -877,7 +879,7 @@ check-deps:
 	@command -v $(OBJCOPY) >/dev/null || (echo "ERROR: x86_64-elf-objcopy not found" && exit 1)
 	@command -v $(QEMU) >/dev/null || echo "WARNING: qemu-system-x86_64 not found (needed for 'make run')"
 	@command -v bochs   >/dev/null || echo "WARNING: bochs not found (needed for 'make bochs')"
-	@command -v VBoxManage >/dev/null || (echo "WARNING: VBoxManage not found" && sleep 2)
+#	@command -v VBoxManage >/dev/null || (echo "WARNING: VBoxManage not found" && sleep 2)
 	@echo "All dependencies OK."
 
 # ==== BUILD RULES ====
@@ -1341,12 +1343,12 @@ VOLUME_CONTENT = \
 	$(CURRENTEXEC_BIN)   "app,utility,test,cxx" \
 	$(CLOCK_BIN)         "app,utility,clock,autostart" \
 	$(CALENDAR_BIN)      "app,utility,calendar" \
-	$(BONSAI_BIN)        "app,utility" \
+	$(BONSAI_BIN)        "app,utility,fun" \
 	$(BIGCLOCK_BIN)      "app,utility,clock" \
-	$(SNAKE_BIN)         "app,utility,game" \
-	$(HACKER_BIN)        "app,utility" \
-	$(PIPES_BIN)         "app,utility" \
-	$(WORDLE_BIN)        "app,utility,game" \
+	$(SNAKE_BIN)         "app,utility,game,fun" \
+	$(HACKER_BIN)        "app,utility,fun" \
+	$(PIPES_BIN)         "app,utility,fun" \
+	$(WORDLE_BIN)        "app,utility,game,fun" \
 	$(STRANDPARK_BIN)    "app,utility,test" \
 	$(CHILDSPIN_BIN)     "app,utility,test" \
 	$(PRINT_STRESS_BIN)  "app,utility,test" \
@@ -1400,17 +1402,18 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/handset.elf "utility,test" \
 	$(UTILS_DIR)/headcount.elf "utility,test" \
 	$(UTILS_DIR)/draft.elf    "utility,storage" \
-	$(UTILS_DIR)/playtime.elf "utility" \
-	$(UTILS_DIR)/lavalamp.elf "utility" \
+	$(UTILS_DIR)/playtime.elf "utility,fun" \
+	$(UTILS_DIR)/lavalamp.elf "utility,fun" \
 	$(UTILS_DIR)/finish.elf   "utility,system" \
 	$(UTILS_DIR)/taskcenter.elf "utility" \
 	$(UTILS_DIR)/calculate.elf "utility" \
 	$(UTILS_DIR)/difference.elf "utility,storage" \
 	$(UTILS_DIR)/copy.elf "utility,storage" \
-	$(UTILS_DIR)/typer.elf "utility" \
-	$(UTILS_DIR)/flame.elf "utility" \
+	$(UTILS_DIR)/typer.elf "utility,fun" \
+	$(UTILS_DIR)/flame.elf "utility,fun" \
 	$(UTILS_DIR)/checksum.elf "utility,storage" \
-	$(UTILS_DIR)/passport.elf "utility,system"
+	$(UTILS_DIR)/passport.elf "utility,system" \
+	$(UTILS_DIR)/aquarium.elf "utility,fun"
 
 $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
 	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) $(VOLUME_CONTENT)); \
@@ -1474,10 +1477,10 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 # 1034 the loader could read. They were two build targets that produced two
 # files nobody could start a machine from, and `all` waited on both.
 
-$(VBOX_VDI): $(IMAGE)
-	@echo "Creating VirtualBox VDI..."
-	@rm -f $@
-	@VBoxManage convertfromraw $< $@ --format VDI
+# $(VBOX_VDI): $(IMAGE)
+# 	@echo "Creating VirtualBox VDI..."
+# 	@rm -f $@
+# 	@VBoxManage convertfromraw $< $@ --format VDI
 
 # ==== UEFI BOOTLOADER BUILD ====
 # Build strategy:
