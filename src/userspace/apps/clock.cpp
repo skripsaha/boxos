@@ -48,7 +48,7 @@ int main() {
     auto next = std::chrono::steady_clock::now();
     for (;;) {
         paint_time();
-        next += std::chrono::milliseconds(1);
+        next += std::chrono::milliseconds(100);
         std::this_thread::sleep_until(next);
     }
 }
