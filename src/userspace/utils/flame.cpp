@@ -4,7 +4,7 @@
  *   flame frame gas        fire from all four edges, blue
  *   flame pit #20c0a0      a bonfire in the middle of the bottom
  *   flame BoxOS            the word BoxOS, standing in flames
- *   flame top toxic Hi!    a word as well as a placement burns both
+ *   flame top Hi!          the word wins: a word to burn means `where` is word
  *
  *   ESC                    the menu opens and closes; the fire keeps burning
  *   1-6, p, s, -/+, ,/.    where, colour, sparks, height, wind without the menu
@@ -36,7 +36,7 @@
 #include "flame.h"
 
 BOX_FORM("takes optional words \"where it burns and its colour: bottom, top, sides, frame, pit; "
-         "fire, gas, toxic, spirit or #rrggbb; any other word burns\"\n");
+         "fire, gas, toxic, spirit or #rrggbb; any other word burns, and only that word\"\n");
 
 namespace {
 
@@ -92,22 +92,20 @@ bool TakeInk(std::string_view Word, const std::string &Low, FlameSettings &Setti
 }
 
 /* Settings from the words; every word that is neither a placement nor a
- * colour is burned. A word and no placement means the word alone burns. */
+ * colour is burned, and a word to burn means `where` is word whatever place
+ * the line also names: only one thing burns at a time. */
 FlameSettings ReadWords(const char *const *Words, std::size_t Count)
 {
     FlameSettings Settings;
-    bool          Placed = false;
     for (std::size_t At = 0; At < Count; At++) {
         std::string Low = Lower(Words[At]);
-        if (TakePlacement(Low, Settings)) {
-            Placed = true;
-        } else if (!TakeInk(Words[At], Low, Settings)) {
+        if (!TakePlacement(Low, Settings) && !TakeInk(Words[At], Low, Settings)) {
             if (!Settings.Word.empty()) Settings.Word += ' ';
             Settings.Word += Words[At];
         }
     }
     if (Settings.Word.size() > FlameWordMax) Settings.Word.resize(FlameWordMax);
-    if (!Settings.Word.empty() && !Placed) Settings.Place = FlamePlace::Word;
+    if (!Settings.Word.empty()) Settings.Place = FlamePlace::Word;
     if (Settings.Place == FlamePlace::Pit) Settings.Sparks = true;
     return Settings;
 }

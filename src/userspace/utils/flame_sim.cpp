@@ -1,15 +1,17 @@
 /* flame_sim.cpp — the heat.
  *
  * Every cell holds a heat 0..255. A cell that is not a source takes its heat
- * from the cell one step toward its source (the "pull"), blurred 1-2-1 across
+ * from the cell one step toward its source (the "pull"), blurred 1-6-1 across
  * the pull so a flame has a body rather than a column of noise, leaned by the
  * wind, and cooled by a random amount. Pulling from the source side is what
  * makes the same rule burn up from the bottom, down from the top, inward from
  * the sides and the frame: only the map of pulls changes.
  *
- * A source does not hold still. Each walks randomly between hot and less hot,
- * and that slow walk is what makes tongues of different height: a flame fed
+ * A source does not hold still. Its heat follows a slow field of noise along
+ * the edge, and that is what makes tongues of different height: a flame fed
  * by a cooler source dies sooner.
+ *
+ * Only one body burns: the placement, or the word when `where` is word.
  *
  * Time is counted in fixed ticks (TickUs), never in frames: the caller steps
  * as many ticks as the clock owes, so the fire moves as fast on a slow
@@ -201,14 +203,12 @@ FlameLayer FlameFire::WordLayer(const std::string &Word)
 
 void FlameFire::Rebuild(const FlameSettings &Settings)
 {
-    Layers.clear();
     Sparks.clear();
     std::fill(Out.begin(), Out.end(), 0);
-    if (Settings.Place != FlamePlace::Word) Layers.push_back(PlaceLayer(Settings.Place));
-    if (!Settings.Word.empty()) Layers.push_back(WordLayer(Settings.Word));
+    Body = Settings.Place == FlamePlace::Word ? WordLayer(Settings.Word) : PlaceLayer(Settings.Place);
 }
 
-void FlameFire::StepLayer(FlameLayer &Layer, int Key, const FlameSettings &Settings)
+void FlameFire::StepLayer(FlameLayer &Layer, const FlameSettings &Settings)
 {
     const int W = Wide;
     const int H = High;
@@ -228,7 +228,7 @@ void FlameFire::StepLayer(FlameLayer &Layer, int Key, const FlameSettings &Setti
             std::uint64_t Dice = Roll();
 
             if (Layer.Source[Cell]) {
-                int Surge = Noise[static_cast<std::size_t>(((Clock >> 2) + Key * 97) & (TurbulenceSide - 1)) * TurbulenceSide +
+                int Surge = Noise[static_cast<std::size_t>((Clock >> 2) & (TurbulenceSide - 1)) * TurbulenceSide +
                                   ((X + Y) & (TurbulenceSide - 1))];
                 int Hot   = Layer.Source[Cell] - (Surge * Layer.Surge >> 8) - static_cast<int>((Dice >> 16) & 7);
                 Layer.Next[Cell] = static_cast<std::uint8_t>(std::max(Hot, 0));
@@ -299,18 +299,14 @@ void FlameFire::StepSparks(const FlameSettings &Settings)
 
 void FlameFire::Step(const FlameSettings &Settings)
 {
-    for (std::size_t Key = 0; Key < Layers.size(); Key++) StepLayer(Layers[Key], static_cast<int>(Key), Settings);
+    StepLayer(Body, Settings);
     Clock++;
 
-    if (Settings.Sparks) {
-        for (const FlameLayer &Layer : Layers) Spawn(Layer, Layer.SparkChance);
-    }
+    if (Settings.Sparks) Spawn(Body, Body.SparkChance);
     StepSparks(Settings);
     if (!Settings.Sparks) Sparks.clear();
 
-    std::fill(Out.begin(), Out.end(), 0);
-    for (const FlameLayer &Layer : Layers)
-        for (std::size_t Cell = 0; Cell < Out.size(); Cell++) Out[Cell] = std::max(Out[Cell], Layer.Heat[Cell]);
+    Out = Body.Heat;
 
     for (const FlameSpark &Spark : Sparks) {
         auto Cell = static_cast<std::size_t>(static_cast<int>(Spark.Y)) * Wide + static_cast<int>(Spark.X);

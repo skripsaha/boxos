@@ -66,8 +66,8 @@ struct FlameSpawn {
     FlameStepDir Away;
 };
 
-/* One body of fire: its own sources, its own way heat is pulled. A word burns
- * in a layer of its own, rising, whatever the placement does. */
+/* The body of fire: its sources and the way heat is pulled. Either a placement
+ * or a word burns, never both: a word is fire that rises from its letters. */
 struct FlameLayer {
     std::vector<std::uint8_t>  Heat, Next, Source, Cool;
     std::vector<FlameStepDir>  Pull;
@@ -102,14 +102,14 @@ private:
     FlameLayer    EmptyLayer(int Extent);
     void          MakeTurbulence();
     int           Turbulence(FlameStepDir Pull, int X, int Y) const;
-    void          StepLayer(FlameLayer &Layer, int Key, const FlameSettings &Settings);
+    void          StepLayer(FlameLayer &Layer, const FlameSettings &Settings);
     void          StepSparks(const FlameSettings &Settings);
     void          Spawn(const FlameLayer &Layer, int Chance);
 
     int                         Wide;
     int                         High;
     std::uint64_t               Seed;
-    std::vector<FlameLayer>     Layers;
+    FlameLayer                  Body;
     std::vector<FlameSpark>     Sparks;
     std::vector<std::uint8_t>   Out;
     std::vector<std::uint8_t>   Noise;
