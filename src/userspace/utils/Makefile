@@ -70,7 +70,8 @@ UTILS = help create show files tag untag name trash erase assemble \
         me info say reboot bye defrag fsck ipc_test memtag hw \
         timezone logsave lastsaid rgbtest usetest faretest luggagetest rollcall handset headcount \
         draft playtime lavalamp finish taskcenter hexer stringview \
-        calculate difference copy typer flame checksum passport aquarium
+        calculate difference copy typer flame checksum passport aquarium \
+        nyancat fireworks 2048 tetris todo tagmap
 
 .PHONY: all clean
 
@@ -149,7 +150,8 @@ stringview.elf: $(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-# calculate, difference, copy, typer, flame, checksum, passport and aquarium are C++, the larger ones in
+# calculate, difference, copy, typer, flame, checksum, passport, aquarium, nyancat,
+# fireworks, 2048, tetris, todo and tagmap are C++, the larger ones in
 # parts named after their program; linked and stripped as hexer and stringview.
 CALCULATE_OBJS  = calculate.o calculate_integer.o calculate_fraction.o calculate_math.o \
                   calculate_show.o calculate_read.o calculate_parse.o
@@ -161,6 +163,14 @@ FLAME_OBJS      = flame.o flame_sim.o flame_palette.o flame_font.o flame_paint.o
 CHECKSUM_OBJS   = checksum.o checksum_small.o checksum_sha2.o checksum_sha3.o checksum_kinds.o
 PASSPORT_OBJS   = passport.o
 AQUARIUM_OBJS   = aquarium.o aquarium_kinds.o aquarium_scene.o aquarium_life.o aquarium_paint.o
+# The glass a program owns and its own small file on the volume, shared by
+# the programs after aquarium (stage.h, keep.h).
+NYANCAT_OBJS    = nyancat.o stage.o
+FIREWORKS_OBJS  = fireworks.o stage.o
+2048_OBJS       = 2048.o stage.o keep.o
+TETRIS_OBJS     = tetris.o tetris_play.o stage.o keep.o
+TODO_OBJS       = todo.o todo_list.o stage.o keep.o
+TAGMAP_OBJS     = tagmap.o tagmap_tiles.o stage.o keep.o
 # The utilities are built without optimisation, for their debug information;
 # a hash is the one place in them where that costs — every byte of a file
 # goes through its rounds — so these three are built as BoxLib is, -O2.
@@ -168,6 +178,8 @@ checksum_small.o checksum_sha2.o checksum_sha3.o: CXXFLAGS += -O2
 # The aquarium's picture is worked out pixel by pixel, every pixel of every
 # frame, so it is built -O2 for the same reason.
 aquarium_paint.o: CXXFLAGS += -O2
+# So are the night sky's sparks: every one of thousands, every frame.
+fireworks.o: CXXFLAGS += -O2
 
 calculate.elf: $(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
@@ -195,6 +207,30 @@ checksum.elf: $(BOXLIB_START) $(CHECKSUM_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)
 
 aquarium.elf: $(BOXLIB_START) $(AQUARIUM_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(AQUARIUM_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+nyancat.elf: $(BOXLIB_START) $(NYANCAT_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(NYANCAT_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+fireworks.elf: $(BOXLIB_START) $(FIREWORKS_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(FIREWORKS_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+2048.elf: $(BOXLIB_START) $(2048_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(2048_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+tetris.elf: $(BOXLIB_START) $(TETRIS_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TETRIS_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+todo.elf: $(BOXLIB_START) $(TODO_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TODO_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+tagmap.elf: $(BOXLIB_START) $(TAGMAP_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TAGMAP_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
