@@ -1,11 +1,15 @@
 /* passport — a BoxOS machine portrait.
  *
- * The screen path owns one finished TextCell frame and hands it to the glass
- * with one vga_paint. The logo is a two-pixel-high raster per console cell:
- * the CP437 upper-half block carries one colour in its foreground and one in
- * its background. Under an arrow the same report is emitted as text, because
- * a painted frame is deliberately not part of the console text stream.
- */
+ * The bubble on the left, and beside it a card of what this machine is and
+ * what it is doing: the Use Context first, then memory, the volume and the
+ * load as gauges, then the cores and their clocks, then the console's sixteen
+ * colours. The card is built once as lines of coloured runs; the screen path
+ * paints them into one TextCell frame and hands it to the glass with one
+ * vga_paint, and under an arrow the same lines are written as text, because a
+ * painted frame is deliberately not part of the console text stream.
+ *
+ * The logo is a two-pixel-high raster per console cell: the CP437 upper-half
+ * block carries one colour in its foreground and one in its background. */
 
 #include <algorithm>
 #include <cstddef>
@@ -19,11 +23,15 @@
 #include "box/clock.h"
 #include "box/color.h"
 #include "box/error.h"
+#include "box/file.h"
 #include "box/form.h"
+#include "box/memory.h"
 #include "box/print.h"
 #include "box/sync.h"
 #include "box/system.h"
 #include "box/vga.h"
+
+#include "keep.h"
 
 BOX_FORM("gives text\n");
 
@@ -40,35 +48,68 @@ constexpr Color PanelBackground = COLOR_RGB(0x12, 0x09, 0x12);
 constexpr Color TitleInk        = BubbleLight;
 constexpr Color LabelInk        = BubbleLight;
 constexpr Color ValueInk        = COLOR_LIGHT_GRAY;
+constexpr Color QuietInk        = COLOR_RGB(0x8C, 0x8C, 0x8C);
 constexpr Color AccentInk       = BubblePink;
 constexpr Color StatusInk       = BubbleMid;
+constexpr Color FrameInk        = BubbleMid;
+
+/* A gauge is green while there is room, amber when it is getting full, red
+ * when it nearly is; what is left of it is dots. */
+constexpr Color GaugeGood  = COLOR_RGB(0x50, 0xD0, 0x60);
+constexpr Color GaugeTight = COLOR_AMBER;
+constexpr Color GaugeFull  = COLOR_RGB(0xFF, 0x50, 0x50);
+constexpr Color GaugeLeft  = COLOR_RGB(0x4A, 0x4A, 0x4A);
 
 constexpr std::size_t LogoPixelWidth  = 32;
 constexpr std::size_t LogoPixelHeight = 32;
 constexpr std::size_t LogoCellRows    = LogoPixelHeight / 2;
 constexpr std::size_t LogoOriginX     = 1;
-constexpr std::size_t LogoOriginY     = 2;
+constexpr std::size_t TopMargin       = 1;
 
-constexpr std::size_t PanelOriginX = 37;
-constexpr std::size_t PanelOriginY = 2;
-constexpr std::size_t PanelWidth   = 42;
-constexpr std::size_t PanelHeight  = 15;
+constexpr std::size_t PanelOriginX = 35;
+constexpr std::size_t PanelWidth   = 45;
 constexpr std::size_t PanelInner   = PanelWidth - 2;
-constexpr std::size_t ValueColumn  = 13;
+constexpr std::size_t ContentWidth = PanelInner - 2;   /* a blank inside each side */
+constexpr std::size_t LabelWidth   = 11;
+constexpr std::size_t ValueWidth   = ContentWidth - LabelWidth;
+constexpr std::size_t GaugeWidth   = ValueWidth - 5;   /* and " 100%" after it */
 constexpr std::size_t MinimumCols  = PanelOriginX + PanelWidth;
-constexpr std::size_t MinimumRows  = LogoOriginY + LogoCellRows + 1;
 
-constexpr char UpperHalfBlock = static_cast<char>(0xDF);
+namespace Glyph {
+constexpr char UpperHalf = static_cast<char>(0xDF);
+constexpr char Across    = static_cast<char>(0xC4);
+constexpr char Down      = static_cast<char>(0xB3);
+constexpr char TopLeft   = static_cast<char>(0xDA);
+constexpr char TopRight  = static_cast<char>(0xBF);
+constexpr char LowLeft   = static_cast<char>(0xC0);
+constexpr char LowRight  = static_cast<char>(0xD9);
+constexpr char TeeLeft   = static_cast<char>(0xC3);
+constexpr char TeeRight  = static_cast<char>(0xB4);
+constexpr char Filled    = static_cast<char>(0xFE);
+constexpr char Left      = static_cast<char>(0xFA);
+}
 
-struct ReportField {
-    std::string Label;
-    std::string Value;
+/* ---- the card, as lines of coloured runs ---------------------------------- */
+
+struct Run {
+    std::string Text;
     Color       Ink;
 };
 
-struct Report {
-    std::vector<ReportField> Fields;
+enum class LineKind { Words, Rule, Swatches };
+
+struct Line {
+    LineKind         Kind  = LineKind::Words;
+    Color            Paper = PanelBackground;
+    std::vector<Run> Runs;
 };
+
+/* The console's sixteen, in its own order. */
+constexpr Color Swatches[] = {COLOR_BLACK,     COLOR_DARK_BLUE, COLOR_DARK_GREEN, COLOR_DARK_CYAN,
+                              COLOR_DARK_RED,  COLOR_DARK_MAGENTA, COLOR_BROWN,   COLOR_LIGHT_GRAY,
+                              COLOR_DARK_GRAY, COLOR_BLUE,      COLOR_GREEN,      COLOR_CYAN,
+                              COLOR_RED,       COLOR_MAGENTA,   COLOR_YELLOW,     COLOR_WHITE};
+constexpr std::size_t SwatchWidth = 2;
 
 struct ReportSample {
     system_info_t      Info{};
@@ -76,46 +117,10 @@ struct ReportSample {
     system_resources_t After{};
     bool               ResourcesKnown = false;
     bool               LoadKnown      = false;
+    std::string        Context;
+    int                FilesAll    = -1;   /* on the volume; < 0 unknown */
+    int                FilesInView = -1;   /* in the Use Context */
 };
-
-TextCell MakeCell(char Character, Color Foreground, Color Background)
-{
-    TextCell Cell{};
-    Cell.ch = Character;
-    Cell.fg = Foreground;
-    Cell.bg = Background;
-    return Cell;
-}
-
-void PutCell(std::vector<TextCell> &Frame, std::size_t Rows, std::size_t Cols,
-             std::size_t Row, std::size_t Col, char Character,
-             Color Foreground, Color Background)
-{
-    if (Row >= Rows || Col >= Cols) return;
-    Frame[Row * Cols + Col] = MakeCell(Character, Foreground, Background);
-}
-
-void FillCellRange(std::vector<TextCell> &Frame, std::size_t Rows, std::size_t Cols,
-                   std::size_t Row, std::size_t First, std::size_t Last,
-                   char Character, Color Foreground, Color Background)
-{
-    if (Row >= Rows || First >= Cols) return;
-    Last = std::min(Last, Cols);
-    for (std::size_t Col = First; Col < Last; Col++)
-        PutCell(Frame, Rows, Cols, Row, Col, Character, Foreground, Background);
-}
-
-void PutText(std::vector<TextCell> &Frame, std::size_t Rows, std::size_t Cols,
-             std::size_t Row, std::size_t Col, std::string_view Text,
-             Color Foreground, Color Background, std::size_t Limit)
-{
-    std::size_t Count = std::min(Text.size(), Limit);
-    for (std::size_t I = 0; I < Count; I++) {
-        unsigned char Byte = static_cast<unsigned char>(Text[I]);
-        char Character = (Byte >= 0x20 && Byte < 0x7F) ? static_cast<char>(Byte) : '?';
-        PutCell(Frame, Rows, Cols, Row, Col + I, Character, Foreground, Background);
-    }
-}
 
 std::string FixedText(const char *Bytes, std::size_t Capacity)
 {
@@ -124,16 +129,23 @@ std::string FixedText(const char *Bytes, std::size_t Capacity)
     return std::string(Bytes, Length);
 }
 
-std::string CompactBytes(uint64_t Value)
+/* 3.1 MiB, 64 MiB: a decimal while it says something. */
+std::string Size(std::uint64_t Value)
 {
-    constexpr uint64_t KiB = 1ull << 10;
-    constexpr uint64_t MiB = 1ull << 20;
-    constexpr uint64_t GiB = 1ull << 30;
+    static const char *const Units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+    double Amount = static_cast<double>(Value);
+    int    Unit   = 0;
+    while (Amount >= 1024.0 && Unit < 4) {
+        Amount /= 1024.0;
+        Unit++;
+    }
+    if (Unit == 0) return std::format("{} B", Value);
+    return Amount < 10.0 ? std::format("{:.1f} {}", Amount, Units[Unit]) : std::format("{:.0f} {}", Amount, Units[Unit]);
+}
 
-    if (Value >= GiB) return std::format("{} GiB", Value / GiB);
-    if (Value >= MiB) return std::format("{} MiB", Value / MiB);
-    if (Value >= KiB) return std::format("{} KiB", Value / KiB);
-    return std::format("{} B", Value);
+std::string Plural(std::uint64_t Count, std::string_view One)
+{
+    return std::format("{} {}{}", Count, One, Count == 1 ? "" : "s");
 }
 
 std::string Uptime(uint64_t Nanoseconds)
@@ -154,37 +166,27 @@ std::string Uptime(uint64_t Nanoseconds)
 
 std::string Frequency(uint64_t KiloHertz)
 {
-    if (KiloHertz == 0) return "unavailable";
-    if (KiloHertz >= 1000000) {
-        uint64_t Whole = KiloHertz / 1000000;
-        uint64_t Frac  = (KiloHertz % 1000000) / 10000;
-        return std::format("{}.{:02} GHz", Whole, Frac);
-    }
+    if (KiloHertz >= 1000000) return std::format("{}.{:02} GHz", KiloHertz / 1000000, (KiloHertz % 1000000) / 10000);
+    if (KiloHertz >= 1000) return std::format("{} MHz", KiloHertz / 1000);
     return std::format("{} kHz", KiloHertz);
 }
 
 std::string TickSource(const system_info_t &Info)
 {
     switch (Info.tick_source) {
-    case SYSINFO_TICK_SOURCE_HPET_LEGACY:
-        return std::format("{} Hz / HPET timer 0", Info.tick_freq_hz);
-    case SYSINFO_TICK_SOURCE_8254:
-        return std::format("{} Hz / 8254 channel 0", Info.tick_freq_hz);
-    default:
-        return "no IRQ0 source";
+    case SYSINFO_TICK_SOURCE_HPET_LEGACY: return std::format("{} Hz from HPET timer 0", Info.tick_freq_hz);
+    case SYSINFO_TICK_SOURCE_8254:        return std::format("{} Hz from the 8254", Info.tick_freq_hz);
+    default:                              return "no IRQ0 source";
     }
 }
 
-std::string CpuLoad(const system_resources_t &Before, const system_resources_t &After)
+/* The share of the processor that was busy over the sample window, or -1. */
+int CpuLoad(const system_resources_t &Before, const system_resources_t &After)
 {
-    if (After.cpu_total_tsc < Before.cpu_total_tsc || After.cpu_busy_tsc < Before.cpu_busy_tsc)
-        return "unavailable";
-
+    if (After.cpu_total_tsc <= Before.cpu_total_tsc || After.cpu_busy_tsc < Before.cpu_busy_tsc) return -1;
     uint64_t Total = After.cpu_total_tsc - Before.cpu_total_tsc;
     uint64_t Busy  = After.cpu_busy_tsc - Before.cpu_busy_tsc;
-    if (Total == 0) return "unavailable";
-    if (Busy >= Total) return "100%";
-    return std::format("{}%", (Busy * 100) / Total);
+    return static_cast<int>(std::min<uint64_t>(100, Busy * 100 / Total));
 }
 
 void WaitForSampleWindow(uint32_t Milliseconds)
@@ -197,50 +199,142 @@ void WaitForSampleWindow(uint32_t Milliseconds)
     while (clock_uptime_ms() - Started < Milliseconds) yield();
 }
 
-Report MakeReport(const ReportSample &Sample)
+int CountFiles(bool Everywhere)
+{
+    file_id_t *Ids   = nullptr;
+    int        Count = Everywhere ? query_all_everywhere(nullptr, &Ids) : query_all(nullptr, &Ids);
+    free(Ids);
+    return Count;
+}
+
+Line Field(std::string_view Label, std::string Value, Color Ink)
+{
+    std::string Head(Label);
+    Head.resize(LabelWidth, ' ');
+    return Line{LineKind::Words, PanelBackground, {{std::move(Head), LabelInk}, {std::move(Value), Ink}}};
+}
+
+/* A gauge under its label, or under the line above when Label is empty: the
+ * share as squares, the rest as dots, the share in figures. */
+Line Gauge(std::string_view Label, int Percent)
+{
+    Percent = std::clamp(Percent, 0, 100);
+    std::size_t Lit   = (GaugeWidth * static_cast<std::size_t>(Percent) + 50) / 100;
+    Color       Ink   = Percent >= 90 ? GaugeFull : Percent >= 70 ? GaugeTight : GaugeGood;
+    std::string Head(Label);
+    Head.resize(LabelWidth, ' ');
+    return Line{LineKind::Words, PanelBackground,
+                {{std::move(Head), LabelInk},
+                 {std::string(Lit, Glyph::Filled), Ink},
+                 {std::string(GaugeWidth - Lit, Glyph::Left), GaugeLeft},
+                 {std::format(" {:>3}%", Percent), ValueInk}}};
+}
+
+Line Rule()
+{
+    return Line{LineKind::Rule, PanelBackground, {}};
+}
+
+int Share(std::uint64_t Part, std::uint64_t Whole)
+{
+    return Whole == 0 ? 0 : static_cast<int>(std::min<std::uint64_t>(100, Part * 100 / Whole));
+}
+
+/* "code,cpp" as it is said: use code cpp. */
+std::string Spoken(std::string_view Tags)
+{
+    std::string Out;
+    for (char Ch : Tags) {
+        if (Ch == ',') {
+            if (!Out.empty() && Out.back() != ' ') Out += ' ';
+        } else if (Ch != ' ' || (!Out.empty() && Out.back() != ' ')) {
+            Out += Ch;
+        }
+    }
+    return Out;
+}
+
+/* What the person is doing and what holds the machine up for it. */
+void AddLife(std::vector<Line> &Card, const ReportSample &Sample)
 {
     const system_info_t &Info = Sample.Info;
-    Report               Result;
-    Result.Fields.reserve(10);
+    Card.push_back(Sample.Context.empty() ? Field("context", "none: the whole volume", QuietInk)
+                                          : Field("context", "use " + Spoken(Sample.Context), AccentInk));
+    if (Sample.FilesAll >= 0) {
+        std::string Files = Plural(static_cast<std::uint64_t>(Sample.FilesAll), "file");
+        if (!Sample.Context.empty() && Sample.FilesInView >= 0) Files += std::format(", {} in view", Sample.FilesInView);
+        Card.push_back(Field("files", std::move(Files), ValueInk));
+    }
+    Card.push_back(Field("uptime", Uptime(Info.uptime_ns), ValueInk));
+    Card.push_back(Field("processes", std::format("{} live", Info.process_count), ValueInk));
+}
 
-    Result.Fields.push_back({"system", FixedText(Info.version, sizeof(Info.version)), AccentInk});
-    Result.Fields.push_back({"uptime", Uptime(Info.uptime_ns), ValueInk});
-    Result.Fields.push_back({
-        "memory",
-        std::format("{} / {} / {}", CompactBytes(Info.used_memory), CompactBytes(Info.free_memory),
-                    CompactBytes(Info.total_memory)),
-        ValueInk});
-    Result.Fields.push_back({
-        "cpu",
-        std::format("{} cores / {} K / {} App", Info.cpu_total, Info.cpu_k_cores, Info.cpu_app_cores),
-        ValueInk});
-    Result.Fields.push_back({"load", Sample.LoadKnown ? CpuLoad(Sample.Before, Sample.After) : "unavailable",
-                             Sample.LoadKnown ? AccentInk : StatusInk});
+void AddGauges(std::vector<Line> &Card, const ReportSample &Sample)
+{
+    const system_info_t &Info = Sample.Info;
+    Card.push_back(Field("memory", std::format("{} of {} in use", Size(Info.used_memory), Size(Info.total_memory)),
+                         ValueInk));
+    Card.push_back(Gauge("", Share(Info.used_memory, Info.total_memory)));
 
-    if (Sample.ResourcesKnown && Sample.Before.volume_present) {
-        std::string Volume = FixedText(Sample.Before.volume_name, sizeof(Sample.Before.volume_name));
-        if (Volume.empty()) Volume = "unnamed volume";
-        if (Sample.Before.volume_free_counted)
-            Volume += std::format(" / {} free", CompactBytes(Sample.Before.volume_free_bytes));
-        else
-            Volume += " / free ground not counted";
-        Result.Fields.push_back({"volume", std::move(Volume), ValueInk});
+    const system_resources_t &Volume = Sample.Before;
+    if (Sample.ResourcesKnown && Volume.volume_present) {
+        std::string Name = FixedText(Volume.volume_name, sizeof(Volume.volume_name));
+        if (Name.empty()) Name = "unnamed";
+        Card.push_back(Field("volume", std::move(Name), ValueInk));
+        if (Volume.volume_free_counted) {
+            Card.push_back(Field("", std::format("{} of {} in use", Size(Volume.volume_used_bytes),
+                                                 Size(Volume.volume_total_bytes)),
+                                 ValueInk));
+            Card.push_back(Gauge("", Share(Volume.volume_used_bytes, Volume.volume_total_bytes)));
+        } else {
+            Card.push_back(Field("", std::format("{}, free not counted", Size(Volume.volume_total_bytes)), ValueInk));
+        }
     } else {
-        Result.Fields.push_back({"volume", "unavailable", StatusInk});
+        Card.push_back(Field("volume", "none mounted", StatusInk));
     }
 
-    Result.Fields.push_back({"processes", std::format("{} live", Info.process_count), ValueInk});
-
-    std::string Runtime = Info.multicore_active ? "AMP" : "single-core";
-    if (Info.has_waitpkg) Runtime += " / UMWAIT";
-    Result.Fields.push_back({"runtime", std::move(Runtime), ValueInk});
-
-    std::string Timing = Frequency(Info.tsc_freq_khz);
-    if (!Info.has_invariant_tsc) Timing += " / non-invariant";
-    Result.Fields.push_back({"timing", std::move(Timing), Info.has_invariant_tsc ? ValueInk : AccentInk});
-    Result.Fields.push_back({"tick", TickSource(Info), ValueInk});
-    return Result;
+    int Load = Sample.LoadKnown ? CpuLoad(Sample.Before, Sample.After) : -1;
+    Card.push_back(Load >= 0 ? Gauge("load", Load) : Field("load", "not measured", StatusInk));
 }
+
+void AddCores(std::vector<Line> &Card, const system_info_t &Info)
+{
+    Card.push_back(Field("cpu", std::format("{}: {} kernel, {} app", Plural(Info.cpu_total, "core"), Info.cpu_k_cores,
+                                            Info.cpu_app_cores),
+                         ValueInk));
+    std::string Runtime = Info.multicore_active ? "AMP, cores apart" : "single-core";
+    if (Info.has_waitpkg) Runtime += ", UMWAIT";
+    Card.push_back(Field("runtime", std::move(Runtime), ValueInk));
+    if (Info.tsc_freq_khz == 0) {
+        Card.push_back(Field("clock", "TSC not calibrated", StatusInk));
+    } else {
+        std::string Clock = Frequency(Info.tsc_freq_khz) + " TSC";
+        if (!Info.has_invariant_tsc) Clock += ", not invariant";
+        Card.push_back(Field("clock", std::move(Clock), Info.has_invariant_tsc ? ValueInk : AccentInk));
+    }
+    Card.push_back(Field("tick", TickSource(Info), ValueInk));
+}
+
+std::vector<Line> MakeCard(const ReportSample &Sample)
+{
+    std::string Name  = FixedText(Sample.Info.version, sizeof(Sample.Info.version));
+    std::string Title = Name;
+    Title.resize(ContentWidth - 8, ' ');
+    Title += "passport";
+
+    std::vector<Line> Card;
+    Card.push_back(Line{LineKind::Words, BubbleDark, {{std::move(Title), TitleInk}}});
+    AddLife(Card, Sample);
+    Card.push_back(Rule());
+    AddGauges(Card, Sample);
+    Card.push_back(Rule());
+    AddCores(Card, Sample.Info);
+    Card.push_back(Rule());
+    Card.push_back(Line{LineKind::Swatches, PanelBackground, {}});
+    return Card;
+}
+
+/* ---- the bubble ----------------------------------------------------------- */
 
 int DistanceSquared(int X, int Y, int CenterX, int CenterY)
 {
@@ -298,103 +392,12 @@ Color LogoPixel(int X, int Y)
     return SatellitePixel(X, Y, 27, 28, 4);
 }
 
-void PaintLogo(std::vector<TextCell> &Frame, std::size_t Rows, std::size_t Cols)
-{
-    for (std::size_t PixelRow = 0; PixelRow < LogoPixelHeight; PixelRow += 2) {
-        for (std::size_t PixelCol = 0; PixelCol < LogoPixelWidth; PixelCol++) {
-            Color Top    = LogoPixel(static_cast<int>(PixelCol), static_cast<int>(PixelRow));
-            Color Bottom = LogoPixel(static_cast<int>(PixelCol), static_cast<int>(PixelRow + 1));
-            char Character = Top == COLOR_BLACK && Bottom == COLOR_BLACK ? ' ' : UpperHalfBlock;
-            PutCell(Frame, Rows, Cols, LogoOriginY + PixelRow / 2, LogoOriginX + PixelCol,
-                    Character, Top, Bottom);
-        }
-    }
-}
-
-std::string FitText(std::string_view Text, std::size_t Width)
-{
-    std::string Result(Text.substr(0, std::min(Text.size(), Width)));
-    Result.resize(Width, ' ');
-    return Result;
-}
-
-std::string PanelLine(std::string_view Content)
-{
-    return "|" + FitText(Content, PanelInner) + "|";
-}
-
-std::vector<std::string> MakePanelLines(const Report &ReportData)
-{
-    std::vector<std::string> Lines;
-    Lines.reserve(PanelHeight);
-    Lines.push_back("+" + std::string(PanelInner, '-') + "+");
-    Lines.push_back(PanelLine(" passport  /  machine portrait"));
-    Lines.push_back(PanelLine(std::string(PanelInner, '-')));
-
-    for (const ReportField &Field : ReportData.Fields) {
-        std::string Content = " ";
-        Content += Field.Label;
-        Content.resize(ValueColumn - 1, ' ');
-        Content += Field.Value;
-        Lines.push_back(PanelLine(Content));
-    }
-
-    Lines.push_back(PanelLine(std::string(PanelInner, '-')));
-    Lines.push_back("+" + std::string(PanelInner, '-') + "+");
-    return Lines;
-}
-
-void PaintPanel(std::vector<TextCell> &Frame, std::size_t Rows, std::size_t Cols,
-                const Report &ReportData)
-{
-    for (std::size_t Row = PanelOriginY; Row < PanelOriginY + PanelHeight; Row++)
-        FillCellRange(Frame, Rows, Cols, Row, PanelOriginX, PanelOriginX + PanelWidth,
-                      ' ', ValueInk, PanelBackground);
-
-    std::size_t Left = PanelOriginX;
-    std::size_t Right = PanelOriginX + PanelWidth - 1;
-    std::size_t Top = PanelOriginY;
-    std::size_t Bottom = PanelOriginY + PanelHeight - 1;
-
-    for (std::size_t Col = Left + 1; Col < Right; Col++) {
-        PutCell(Frame, Rows, Cols, Top, Col, '-', BubbleMid, PanelBackground);
-        PutCell(Frame, Rows, Cols, Bottom, Col, '-', BubbleMid, PanelBackground);
-    }
-    PutCell(Frame, Rows, Cols, Top, Left, '+', BubbleMid, PanelBackground);
-    PutCell(Frame, Rows, Cols, Top, Right, '+', BubbleMid, PanelBackground);
-    PutCell(Frame, Rows, Cols, Bottom, Left, '+', BubbleMid, PanelBackground);
-    PutCell(Frame, Rows, Cols, Bottom, Right, '+', BubbleMid, PanelBackground);
-
-    for (std::size_t Row = Top + 1; Row < Bottom; Row++) {
-        PutCell(Frame, Rows, Cols, Row, Left, '|', BubbleMid, PanelBackground);
-        PutCell(Frame, Rows, Cols, Row, Right, '|', BubbleMid, PanelBackground);
-    }
-
-    FillCellRange(Frame, Rows, Cols, Top + 1, Left + 1, Right, ' ', TitleInk, BubbleDark);
-    PutCell(Frame, Rows, Cols, Top + 1, Left, '|', TitleInk, BubbleDark);
-    PutCell(Frame, Rows, Cols, Top + 1, Right, '|', TitleInk, BubbleDark);
-    PutText(Frame, Rows, Cols, Top + 1, Left + 2, "passport  /  machine portrait",
-            TitleInk, BubbleDark, PanelInner - 2);
-
-    FillCellRange(Frame, Rows, Cols, Top + 2, Left + 1, Right, '-', BubbleDark, PanelBackground);
-    FillCellRange(Frame, Rows, Cols, Bottom - 1, Left + 1, Right, '-', BubbleDark, PanelBackground);
-
-    for (std::size_t I = 0; I < ReportData.Fields.size(); I++) {
-        const ReportField &Field = ReportData.Fields[I];
-        std::size_t Row = Top + 3 + I;
-        PutText(Frame, Rows, Cols, Row, Left + 2, Field.Label,
-                LabelInk, PanelBackground, ValueColumn - 2);
-        PutText(Frame, Rows, Cols, Row, Left + ValueColumn, Field.Value,
-                Field.Ink, PanelBackground, PanelInner - ValueColumn + 1);
-    }
-}
-
 std::string TextLogoLine(std::size_t Row)
 {
     std::string Line;
     Line.reserve(LogoPixelWidth);
     for (std::size_t Col = 0; Col < LogoPixelWidth; Col++) {
-        Color Top = LogoPixel(static_cast<int>(Col), static_cast<int>(Row * 2));
+        Color Top    = LogoPixel(static_cast<int>(Col), static_cast<int>(Row * 2));
         Color Bottom = LogoPixel(static_cast<int>(Col), static_cast<int>(Row * 2 + 1));
         if (Top == COLOR_BLACK && Bottom == COLOR_BLACK) Line += ' ';
         else if (Top == BubbleBlack || Bottom == BubbleBlack) Line += '@';
@@ -404,45 +407,129 @@ std::string TextLogoLine(std::size_t Row)
     return Line;
 }
 
-std::string TextReport(const Report &ReportData)
-{
-    std::vector<std::string> Panel = MakePanelLines(ReportData);
-    std::string Output;
-    std::size_t Rows = std::max(LogoCellRows, Panel.size());
-    for (std::size_t Row = 0; Row < Rows; Row++) {
-        Output.append(LogoOriginX, ' ');
-        Output += Row < LogoCellRows ? TextLogoLine(Row) : std::string(LogoPixelWidth, ' ');
-        Output.append(PanelOriginX - LogoOriginX - LogoPixelWidth, ' ');
-        if (Row < Panel.size()) Output += Panel[Row];
-        Output += '\n';
+/* ---- the portrait on the glass -------------------------------------------- */
+
+class Portrait {
+public:
+    Portrait(std::size_t Rows, std::size_t Cols) : Rows(Rows), Cols(Cols), Frame(Rows * Cols, Blank()) {}
+
+    void Logo(std::size_t Top);
+    void Card(std::size_t Top, const std::vector<Line> &Lines);
+    const TextCell *Cells() const { return Frame.data(); }
+
+private:
+    static TextCell Blank()
+    {
+        TextCell Cell{};
+        Cell.ch = ' ';
+        Cell.fg = ValueInk;
+        Cell.bg = COLOR_BLACK;
+        return Cell;
     }
-    return Output;
+
+    void Put(std::size_t Row, std::size_t Col, char Ch, Color Ink, Color Paper)
+    {
+        if (Row >= Rows || Col >= Cols) return;
+        TextCell &Cell = Frame[Row * Cols + Col];
+        Cell.ch = Ch;
+        Cell.fg = Ink;
+        Cell.bg = Paper;
+    }
+
+    void Edge(std::size_t Row, char LeftCorner, char Middle, char RightCorner);
+    void Words(std::size_t Row, const Line &One);
+    void Strip(std::size_t Row);
+
+    std::size_t           Rows, Cols;
+    std::vector<TextCell> Frame;
+};
+
+void Portrait::Logo(std::size_t Top)
+{
+    for (std::size_t PixelRow = 0; PixelRow < LogoPixelHeight; PixelRow += 2) {
+        for (std::size_t PixelCol = 0; PixelCol < LogoPixelWidth; PixelCol++) {
+            Color Upper = LogoPixel(static_cast<int>(PixelCol), static_cast<int>(PixelRow));
+            Color Lower = LogoPixel(static_cast<int>(PixelCol), static_cast<int>(PixelRow + 1));
+            char  Ch    = Upper == COLOR_BLACK && Lower == COLOR_BLACK ? ' ' : Glyph::UpperHalf;
+            Put(Top + PixelRow / 2, LogoOriginX + PixelCol, Ch, Upper, Lower);
+        }
+    }
 }
 
-bool PaintReport(const Report &ReportData)
+void Portrait::Edge(std::size_t Row, char LeftCorner, char Middle, char RightCorner)
+{
+    Put(Row, PanelOriginX, LeftCorner, FrameInk, PanelBackground);
+    for (std::size_t Col = 1; Col + 1 < PanelWidth; Col++) Put(Row, PanelOriginX + Col, Middle, FrameInk, PanelBackground);
+    Put(Row, PanelOriginX + PanelWidth - 1, RightCorner, FrameInk, PanelBackground);
+}
+
+void Portrait::Words(std::size_t Row, const Line &One)
+{
+    Put(Row, PanelOriginX, Glyph::Down, FrameInk, PanelBackground);
+    for (std::size_t Col = 1; Col + 1 < PanelWidth; Col++) Put(Row, PanelOriginX + Col, ' ', ValueInk, One.Paper);
+    Put(Row, PanelOriginX + PanelWidth - 1, Glyph::Down, FrameInk, PanelBackground);
+
+    std::size_t Col = 0;
+    for (const Run &Piece : One.Runs) {
+        for (char Ch : Piece.Text) {
+            if (Col >= ContentWidth) return;
+            unsigned char Byte = static_cast<unsigned char>(Ch);
+            char Shown = Byte >= 0x20 && Byte != 0x7F ? Ch : '?';
+            Put(Row, PanelOriginX + 2 + Col++, Shown, Piece.Ink, One.Paper);
+        }
+    }
+}
+
+void Portrait::Strip(std::size_t Row)
+{
+    Words(Row, Line{});
+    std::size_t Wide = SwatchWidth * (sizeof(Swatches) / sizeof(Swatches[0]));
+    std::size_t Col  = PanelOriginX + 1 + (PanelInner - Wide) / 2;
+    for (Color Swatch : Swatches)
+        for (std::size_t At = 0; At < SwatchWidth; At++) Put(Row, Col++, ' ', Swatch, Swatch);
+}
+
+void Portrait::Card(std::size_t Top, const std::vector<Line> &Lines)
+{
+    Edge(Top, Glyph::TopLeft, Glyph::Across, Glyph::TopRight);
+    for (std::size_t At = 0; At < Lines.size(); At++) {
+        std::size_t Row = Top + 1 + At;
+        switch (Lines[At].Kind) {
+        case LineKind::Rule:     Edge(Row, Glyph::TeeLeft, Glyph::Across, Glyph::TeeRight); break;
+        case LineKind::Swatches: Strip(Row); break;
+        case LineKind::Words:    Words(Row, Lines[At]); break;
+        }
+    }
+    Edge(Top + 1 + Lines.size(), Glyph::LowLeft, Glyph::Across, Glyph::LowRight);
+}
+
+std::size_t LogoTop(std::size_t CardRows)
+{
+    return TopMargin + (CardRows > LogoCellRows ? (CardRows - LogoCellRows) / 2 : 0);
+}
+
+bool PaintReport(const std::vector<Line> &Lines)
 {
     vga_dimensions_t Dimensions{};
     if (vga_getdimensions(&Dimensions) != 0) {
         print_to_screen("passport: this screen would not say how big it is\n");
         return false;
     }
-    if (Dimensions.cols < MinimumCols || Dimensions.rows < MinimumRows) {
+    std::size_t CardRows   = Lines.size() + 2;
+    std::size_t ReportRows = TopMargin + std::max(LogoCellRows, CardRows);
+    constexpr std::size_t PromptRows = 1;
+    if (Dimensions.cols < MinimumCols || Dimensions.rows < ReportRows + PromptRows) {
         print_to_screen(std::format("passport: screen is {} columns by {} rows; needs at least {} by {}\n",
-                                    Dimensions.cols, Dimensions.rows, MinimumCols, MinimumRows).c_str());
+                                    Dimensions.cols, Dimensions.rows, MinimumCols, ReportRows + PromptRows).c_str());
         return false;
     }
 
     vga_pos_t Cursor{};
     (void)vga_getcursor(&Cursor);
-
-    constexpr std::size_t ReportRows = LogoOriginY + LogoCellRows;
-    constexpr std::size_t ReportCols = PanelOriginX + PanelWidth;
-    constexpr std::size_t PromptRows = 1;
     std::size_t PaintTop = Cursor.row;
     if (PaintTop + ReportRows + PromptRows > Dimensions.rows) {
         std::size_t BottomTop = Dimensions.rows - ReportRows - PromptRows;
-        std::size_t Scrolls = PaintTop > BottomTop ? PaintTop - BottomTop : 0;
-        for (std::size_t I = 0; I < Scrolls; I++) {
+        for (std::size_t Scrolls = PaintTop - BottomTop; Scrolls > 0; Scrolls--) {
             if (vga_scroll_up() != 0) {
                 print_to_screen("passport: the screen would not scroll for its portrait\n");
                 return false;
@@ -451,17 +538,59 @@ bool PaintReport(const Report &ReportData)
         PaintTop = BottomTop;
     }
 
-    std::vector<TextCell> Frame(ReportRows * ReportCols, MakeCell(' ', ValueInk, COLOR_BLACK));
-    PaintLogo(Frame, ReportRows, ReportCols);
-    PaintPanel(Frame, ReportRows, ReportCols, ReportData);
+    Portrait Picture(ReportRows, MinimumCols);
+    Picture.Logo(LogoTop(CardRows));
+    Picture.Card(TopMargin, Lines);
 
-    std::size_t AfterReport = std::min<std::size_t>(Dimensions.rows - 1, PaintTop + ReportRows);
-    vga_setcursor(static_cast<uint8_t>(AfterReport), 0);
-    return vga_paint(static_cast<uint8_t>(PaintTop), 0,
-                     static_cast<uint8_t>(ReportRows), static_cast<uint8_t>(ReportCols), Frame.data()) == 0;
+    vga_setcursor(static_cast<uint8_t>(PaintTop + ReportRows), 0);
+    return vga_paint(static_cast<uint8_t>(PaintTop), 0, static_cast<uint8_t>(ReportRows),
+                     static_cast<uint8_t>(MinimumCols), Picture.Cells()) == 0;
 }
 
-int Run()
+/* ---- the portrait as text ------------------------------------------------- */
+
+/* A line of the card in plain characters: squares and dots are # and . */
+std::string TextCardLine(const Line &One)
+{
+    if (One.Kind == LineKind::Rule) return "+" + std::string(PanelInner, '-') + "+";
+    std::string Content;
+    for (const Run &Piece : One.Runs) {
+        for (char Ch : Piece.Text) {
+            unsigned char Byte = static_cast<unsigned char>(Ch);
+            Content += Ch == Glyph::Filled ? '#' : Ch == Glyph::Left ? '.' : Byte >= 0x20 && Byte < 0x7F ? Ch : '?';
+        }
+    }
+    Content.resize(ContentWidth, ' ');
+    return "| " + Content + " |";
+}
+
+std::string TextReport(const std::vector<Line> &Lines)
+{
+    std::vector<std::string> Card;
+    Card.push_back("+" + std::string(PanelInner, '-') + "+");
+    /* The colours are no text, and neither is the rule over them. */
+    for (std::size_t At = 0; At < Lines.size(); At++) {
+        bool OverSwatches = At + 1 < Lines.size() && Lines[At + 1].Kind == LineKind::Swatches;
+        if (Lines[At].Kind == LineKind::Swatches || (Lines[At].Kind == LineKind::Rule && OverSwatches)) continue;
+        Card.push_back(TextCardLine(Lines[At]));
+    }
+    Card.push_back(Card.front());
+
+    std::size_t LogoAt = LogoTop(Card.size()) - TopMargin;
+    /* No margin before the bubble: a line as wide as an 80-column console
+     * would wrap there and leave a blank line after every one. */
+    std::string Output;
+    for (std::size_t Row = 0; Row < std::max(LogoAt + LogoCellRows, Card.size()); Row++) {
+        bool Logo = Row >= LogoAt && Row < LogoAt + LogoCellRows;
+        Output += Logo ? TextLogoLine(Row - LogoAt) : std::string(LogoPixelWidth, ' ');
+        Output.append(PanelOriginX - LogoOriginX - LogoPixelWidth, ' ');
+        if (Row < Card.size()) Output += Card[Row];
+        Output += '\n';
+    }
+    return Output;
+}
+
+int Portray()
 {
     ReportSample Sample;
     if (sysinfo(&Sample.Info) != 0) {
@@ -474,14 +603,17 @@ int Run()
         WaitForSampleWindow(100);
         Sample.LoadKnown = system_resources(&Sample.After) == 0;
     }
+    Sample.Context  = KeepContext();
+    Sample.FilesAll = CountFiles(true);
+    if (!Sample.Context.empty()) Sample.FilesInView = CountFiles(false);
 
-    Report ReportData = MakeReport(Sample);
+    std::vector<Line> Lines = MakeCard(Sample);
     if (form_screen_file() != 0) {
-        std::string Text = TextReport(ReportData);
+        std::string Text = TextReport(Lines);
         print_bytes(Text.data(), Text.size());
         return 0;
     }
-    return PaintReport(ReportData) ? 0 : 1;
+    return PaintReport(Lines) ? 0 : 1;
 }
 
 } // namespace
@@ -489,7 +621,7 @@ int Run()
 int main()
 {
     try {
-        return Run();
+        return Portray();
     } catch (const std::bad_alloc &) {
         print_to_screen("passport: there is not enough memory for its portrait\n");
         return 1;
