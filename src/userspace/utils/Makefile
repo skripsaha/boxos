@@ -169,7 +169,7 @@ NYANCAT_OBJS    = nyancat.o stage.o
 FIREWORKS_OBJS  = fireworks.o stage.o
 2048_OBJS       = 2048.o stage.o keep.o
 TETRIS_OBJS     = tetris.o tetris_play.o stage.o keep.o
-TODO_OBJS       = todo.o todo_list.o stage.o keep.o
+TODO_OBJS       = todo.o todo_list.o todo_view.o stage.o keep.o
 TAGMAP_OBJS     = tagmap.o tagmap_tiles.o stage.o keep.o
 # The utilities are built without optimisation, for their debug information;
 # a hash is the one place in them where that costs — every byte of a file
