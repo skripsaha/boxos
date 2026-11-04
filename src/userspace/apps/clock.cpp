@@ -8,8 +8,11 @@
 namespace {
 
 constexpr std::uint8_t kClockWidth = 8;
-constexpr box::color kForeground = box::color::rgb(0x18, 0x18, 0x18);
-constexpr box::color kBackground = box::color::rgb(0xF3, 0xF1, 0xF1);
+// Light digits on a dark ground, the colons quieter; pulse.cpp beside it
+// wears the same. The ground is a grey a text console shows as black.
+constexpr box::color kForeground = box::color::rgb(0xE6, 0xE6, 0xE6);
+constexpr box::color kSeparator = box::color::rgb(0x8C, 0x8C, 0x8C);
+constexpr box::color kBackground = box::color::rgb(0x26, 0x26, 0x26);
 
 char digit(std::int64_t value) { return static_cast<char>('0' + value); }
 
@@ -28,7 +31,7 @@ void paint_time() {
 
     TextCell cells[kClockWidth];
     for (std::uint8_t i = 0; i < kClockWidth; ++i) {
-        cells[i].fg = kForeground.raw();
+        cells[i].fg = text[i] == ':' ? kSeparator.raw() : kForeground.raw();
         cells[i].bg = kBackground.raw();
         cells[i].ch = text[i];
         cells[i].pad[0] = 0;
