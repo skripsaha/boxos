@@ -36,9 +36,11 @@ constexpr float         KeysShown  = 6.0f;
 constexpr float         RocketPull = 0.5f;    /* screen heights a second, a second: a rocket's fall */
 constexpr int           KindCount  = 9;
 
-/* The night and the city are greys: the text console keeps them black. */
-const Color SkyTop     = COLOR_RGB(0x0C, 0x0C, 0x10);
-const Color SkyLow     = COLOR_RGB(0x1A, 0x16, 0x20);
+/* The night and the city are greys: the text console keeps them black. The
+ * night lightens toward the horizon with a violet tint kept the same share of
+ * its lightness all the way down, so no row of it is saturated enough to turn
+ * blue there. */
+constexpr int NightTop = 12, NightLow = 30;
 const Color Building   = COLOR_RGB(0x06, 0x06, 0x08);
 const Color Window     = COLOR_RGB(0xFF, 0xC8, 0x50);
 const Color MoonInk    = COLOR_RGB(0xF0, 0xEC, 0xC8);
@@ -130,7 +132,8 @@ void Show::BuildSky()
 {
     Sky.assign(static_cast<std::size_t>(Width) * Height, COLOR_BLACK);
     for (int Y = 0; Y < Height; Y++) {
-        Color Row = color_mix(SkyTop, SkyLow, static_cast<std::uint8_t>(Y * 255 / std::max(1, Height - 1)));
+        int   Light = NightTop + (NightLow - NightTop) * Y / std::max(1, Height - 1);
+        Color Row   = COLOR_RGB(Light, (Light * 86 + 50) / 100, (Light * 120 + 50) / 100);
         for (int X = 0; X < Width; X++) Sky[static_cast<std::size_t>(Y) * Width + X] = Row;
     }
     for (int Star = Width * Height / 160; Star > 0; Star--)
