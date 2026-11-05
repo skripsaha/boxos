@@ -76,8 +76,12 @@ paths, brushes, windows, pointer input, and presentation guarantees remain in
 
 Design accepted on 2026-11-05. The first implementation slice now provides
 `painter::core` geometry and colors plus `painter::tui::Frame` and
-`painter::tui::Stage`. `nyancat`, `fireworks`, and `2048` are migrated
-consumers linked through `libpainter.a`; their models, animation, persistence,
-and visual composition remain application code. The Git checkpoint before implementation is tagged
+`painter::tui::Stage`. All direct legacy-`stage.h` consumers are now migrated:
+`nyancat`, `fireworks`, `2048`, `tetris`, `minesweeper`, `mandelbrot`,
+`tagmap`, and `todo` link through `libpainter.a`. Their models, animation,
+persistence, layout algorithms, and visual composition remain application
+code. The remaining custom screen implementations (`aquarium`, `flame`,
+`typer`, `eyes`, `hexer`, `stringview`, `passport`, `taskcenter`, `qr`) still
+own their frame adapters and are the next migration layer. The Git checkpoint before implementation is tagged
 `painter-preimplementation`, and the implementation branch proceeds in
 bounded commits so that checkpoint remains an immediate rollback point.
