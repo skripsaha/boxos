@@ -172,7 +172,7 @@ AQUARIUM_OBJS   = aquarium.o aquarium_kinds.o aquarium_scene.o aquarium_life.o a
 # The glass a program owns and its own small file on the volume, shared by
 # the programs after aquarium (stage.h, keep.h).
 NYANCAT_OBJS    = nyancat.o
-FIREWORKS_OBJS  = fireworks.o stage.o
+FIREWORKS_OBJS  = fireworks.o
 2048_OBJS       = 2048.o stage.o keep.o
 TETRIS_OBJS     = tetris.o tetris_play.o stage.o keep.o
 TODO_OBJS       = todo.o todo_list.o todo_view.o stage.o keep.o
@@ -225,8 +225,8 @@ nyancat.elf: $(BOXLIB_START) $(NYANCAT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BO
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(NYANCAT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-fireworks.elf: $(BOXLIB_START) $(FIREWORKS_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(FIREWORKS_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+fireworks.elf: $(BOXLIB_START) $(FIREWORKS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(FIREWORKS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 2048.elf: $(BOXLIB_START) $(2048_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)

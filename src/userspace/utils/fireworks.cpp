@@ -16,17 +16,27 @@
 #include <cmath>
 #include <format>
 #include <new>
+#include <optional>
 #include <vector>
 
 #include "box/clock.h"
 #include "box/cpu.h"
 #include "box/form.h"
+#include "box/print.h"
 
-#include "stage.h"
+#include "painter/core/color.h"
+#include "painter/tui/stage.h"
 
 BOX_FORM("");
 
 namespace {
+
+using Color = painter::core::Color;
+namespace Colors = painter::core::Colors;
+using painter::tui::EventKind;
+using painter::tui::Stage;
+using painter::tui::StageError;
+using painter::tui::TextStyle;
 
 constexpr std::uint64_t FrameUs    = 33333;
 constexpr float         MostStep   = 0.05f;   /* seconds a step of the sparks covers at most */
@@ -41,20 +51,20 @@ constexpr int           KindCount  = 9;
  * its lightness all the way down, so no row of it is saturated enough to turn
  * blue there. */
 constexpr int NightTop = 12, NightLow = 30;
-const Color Building   = COLOR_RGB(0x06, 0x06, 0x08);
-const Color Window     = COLOR_RGB(0xFF, 0xC8, 0x50);
-const Color MoonInk    = COLOR_RGB(0xF0, 0xEC, 0xC8);
-const Color StarInk    = COLOR_RGB(0xB0, 0xB8, 0xD0);
-const Color SparkInk   = COLOR_RGB(0xFF, 0xA0, 0x40);
-const Color BarPaper   = COLOR_RGB(0x3A, 0x3A, 0x3A);
-const Color BarInk     = COLOR_RGB(0xEE, 0xEE, 0xEE);
-const Color KeyInk     = COLOR_AMBER;
-const Color HintInk    = COLOR_RGB(0x8C, 0x8C, 0x8C);
+const Color Building   = Color::Rgb(0x06, 0x06, 0x08);
+const Color Window     = Color::Rgb(0xFF, 0xC8, 0x50);
+const Color MoonInk    = Color::Rgb(0xF0, 0xEC, 0xC8);
+const Color StarInk    = Color::Rgb(0xB0, 0xB8, 0xD0);
+const Color SparkInk   = Color::Rgb(0xFF, 0xA0, 0x40);
+const Color BarPaper   = Color::Rgb(0x3A, 0x3A, 0x3A);
+const Color BarInk     = Color::Rgb(0xEE, 0xEE, 0xEE);
+const Color KeyInk     = Colors::Amber;
+const Color HintInk    = Color::Rgb(0x8C, 0x8C, 0x8C);
 
-const Color Inks[] = {COLOR_RGB(0xFF, 0x30, 0x30), COLOR_RGB(0xFF, 0x90, 0x20), COLOR_RGB(0xFF, 0xD8, 0x40),
-                      COLOR_RGB(0x40, 0xFF, 0x60), COLOR_RGB(0x30, 0x80, 0xFF), COLOR_RGB(0xC0, 0x50, 0xFF),
-                      COLOR_RGB(0xFF, 0x60, 0xC0), COLOR_RGB(0x40, 0xE0, 0xFF), COLOR_RGB(0xFF, 0xFF, 0xFF)};
-const Color Gold   = COLOR_RGB(0xFF, 0xC0, 0x40);
+const Color Inks[] = {Color::Rgb(0xFF, 0x30, 0x30), Color::Rgb(0xFF, 0x90, 0x20), Color::Rgb(0xFF, 0xD8, 0x40),
+                      Color::Rgb(0x40, 0xFF, 0x60), Color::Rgb(0x30, 0x80, 0xFF), Color::Rgb(0xC0, 0x50, 0xFF),
+                      Color::Rgb(0xFF, 0x60, 0xC0), Color::Rgb(0x40, 0xE0, 0xFF), Color::Rgb(0xFF, 0xFF, 0xFF)};
+const Color Gold   = Color::Rgb(0xFF, 0xC0, 0x40);
 
 /* In the order of the keys 1 to 9. */
 enum class Kind : std::uint8_t { Peony, Chrysanthemum, Ring, Willow, Crossette, TwoColour, Strobe, Palm, Heart };
@@ -76,14 +86,15 @@ struct Light {
 
 class Show {
 public:
-    Stage Glass;
+    std::optional<Stage> Glass;
 
     void Begin()
     {
-        Width  = Glass.Cols;
-        Height = Glass.Rows * 2;
+        const painter::core::Size Dimensions = Glass->Size();
+        Width  = Dimensions.Width;
+        Height = Dimensions.Height * 2;
         Field.assign(static_cast<std::size_t>(Width) * Height, Light{});
-        Pixels.assign(Field.size(), COLOR_BLACK);
+        Pixels.assign(Field.size(), Colors::Black);
         BuildSky();
     }
 
@@ -130,10 +141,11 @@ private:
  * and the city along the bottom with its windows lit. */
 void Show::BuildSky()
 {
-    Sky.assign(static_cast<std::size_t>(Width) * Height, COLOR_BLACK);
+    Sky.assign(static_cast<std::size_t>(Width) * Height, Colors::Black);
     for (int Y = 0; Y < Height; Y++) {
         int   Light = NightTop + (NightLow - NightTop) * Y / std::max(1, Height - 1);
-        Color Row   = COLOR_RGB(Light, (Light * 86 + 50) / 100, (Light * 120 + 50) / 100);
+        Color Row = Color::Rgb(static_cast<std::uint8_t>(Light), static_cast<std::uint8_t>((Light * 86 + 50) / 100),
+                               static_cast<std::uint8_t>((Light * 120 + 50) / 100));
         for (int X = 0; X < Width; X++) Sky[static_cast<std::size_t>(Y) * Width + X] = Row;
     }
     for (int Star = Width * Height / 160; Star > 0; Star--)
@@ -166,9 +178,9 @@ void Show::Shine(float X, float Y, Color Ink, int Strength)
     int Px = static_cast<int>(X), Py = static_cast<int>(Y);
     if (Px < 0 || Py < 0 || Px >= Width || Py >= Height) return;
     Light &Here = Field[static_cast<std::size_t>(Py) * Width + Px];
-    Here.R = static_cast<std::uint16_t>(std::min(1020, Here.R + static_cast<int>(COLOR_R(Ink) * Strength >> 8)));
-    Here.G = static_cast<std::uint16_t>(std::min(1020, Here.G + static_cast<int>(COLOR_G(Ink) * Strength >> 8)));
-    Here.B = static_cast<std::uint16_t>(std::min(1020, Here.B + static_cast<int>(COLOR_B(Ink) * Strength >> 8)));
+    Here.R = static_cast<std::uint16_t>(std::min(1020, Here.R + static_cast<int>(Ink.Red() * Strength >> 8)));
+    Here.G = static_cast<std::uint16_t>(std::min(1020, Here.G + static_cast<int>(Ink.Green() * Strength >> 8)));
+    Here.B = static_cast<std::uint16_t>(std::min(1020, Here.B + static_cast<int>(Ink.Blue() * Strength >> 8)));
 }
 
 /* A burst lights the whole sky for a moment. */
@@ -178,9 +190,9 @@ void Show::Flash(Color Ink, int Strength)
         return static_cast<std::uint16_t>(std::min(1020u, Was + (Channel * static_cast<std::uint32_t>(Strength) >> 8)));
     };
     for (Light &Here : Field) {
-        Here.R = Add(Here.R, COLOR_R(Ink));
-        Here.G = Add(Here.G, COLOR_G(Ink));
-        Here.B = Add(Here.B, COLOR_B(Ink));
+        Here.R = Add(Here.R, Ink.Red());
+        Here.G = Add(Here.G, Ink.Green());
+        Here.B = Add(Here.B, Ink.Blue());
     }
 }
 
@@ -230,14 +242,14 @@ void Show::Burst(const Spark &Shell)
     float Speed = static_cast<float>(Height) * 0.5f;
     int   Many  = std::clamp(Height, 50, 140);
     Color Ink   = AnyInk();
-    Flash(color_mix(Ink, COLOR_WHITE, 170), 14);
-    for (int Glow = 0; Glow < 12; Glow++) Shine(Shell.X + Between(-1, 1), Shell.Y + Between(-1, 1), COLOR_WHITE, 255);
+    Flash(Color::Mix(Ink, Colors::White, 170), 14);
+    for (int Glow = 0; Glow < 12; Glow++) Shine(Shell.X + Between(-1, 1), Shell.Y + Between(-1, 1), Colors::White, 255);
 
     switch (Shell.Bursts) {
     case Kind::Peony: Shed(Shell, Many, Ink, Speed, 1.4f, 1.6f); break;
     case Kind::Chrysanthemum:
         Shed(Shell, Many, Ink, Speed * 1.1f, 2.0f, 1.3f);
-        Shed(Shell, Many / 3, COLOR_WHITE, Speed * 0.6f, 1.2f, 1.6f);
+        Shed(Shell, Many / 3, Colors::White, Speed * 0.6f, 1.2f, 1.6f);
         break;
     case Kind::Ring: {
         std::size_t First = Sparks.size();
@@ -261,7 +273,7 @@ void Show::Burst(const Spark &Shell)
         break;
     case Kind::Strobe: {
         std::size_t First = Sparks.size();
-        Shed(Shell, Many, COLOR_WHITE, Speed * 0.9f, 2.2f, 1.8f);
+        Shed(Shell, Many, Colors::White, Speed * 0.9f, 2.2f, 1.8f);
         for (std::size_t At = First; At < Sparks.size(); At++) Sparks[At].Strobe = true;
         break;
     }
@@ -278,7 +290,7 @@ void Show::Burst(const Spark &Shell)
             One.Vy = Hy / 16.0f * Speed * 0.8f;
             One.Span = One.Life = 1.6f;
             One.Drag = 1.6f;
-            One.Ink  = COLOR_RGB(0xFF, 0x50, 0x90);
+            One.Ink  = Color::Rgb(0xFF, 0x50, 0x90);
             Sparks.push_back(One);
         }
         break;
@@ -345,31 +357,38 @@ void Show::Draw(float Seconds, float Shown)
     for (const Spark &One : Sparks) {
         float Left = One.Span > 0 ? One.Life / One.Span : 1.0f;
         if (One.Strobe && (static_cast<int>(Time * 20.0f + One.X) % 3) != 0) continue;
-        Color Ink = Left < 0.35f ? color_mix(One.Ink, COLOR_RGB(0xC0, 0x20, 0x10), static_cast<std::uint8_t>((0.35f - Left) * 600)) : One.Ink;
+        Color Ink = Left < 0.35f ? Color::Mix(One.Ink, Color::Rgb(0xC0, 0x20, 0x10),
+                                              static_cast<std::uint8_t>((0.35f - Left) * 600)) : One.Ink;
         Shine(One.X, One.Y, Ink, static_cast<int>(120 + 136 * std::min(1.0f, Left * 1.4f)));
     }
 
     for (std::size_t At = 0; At < Field.size(); At++) {
         Color Base = Sky[At];
         const Light &Here = Field[At];
-        Pixels[At] = COLOR_RGB(std::min(255, static_cast<int>(COLOR_R(Base)) + Here.R),
-                               std::min(255, static_cast<int>(COLOR_G(Base)) + Here.G),
-                               std::min(255, static_cast<int>(COLOR_B(Base)) + Here.B));
+        Pixels[At] = Color::Rgb(static_cast<std::uint8_t>(std::min(255, static_cast<int>(Base.Red()) + Here.R)),
+                                static_cast<std::uint8_t>(std::min(255, static_cast<int>(Base.Green()) + Here.G)),
+                                static_cast<std::uint8_t>(std::min(255, static_cast<int>(Base.Blue()) + Here.B)));
     }
     for (std::size_t Star = 0; Star < Twinkles.size(); Star++) {
         std::size_t At = static_cast<std::size_t>(Twinkles[Star]);
         if ((Star * 7 + static_cast<std::size_t>(Time * 2.0f)) % 3 != 0 && Sky[At] != MoonInk)
-            Pixels[At] = color_mix(Pixels[At], StarInk, 200);
+            Pixels[At] = Color::Mix(Pixels[At], StarInk, 200);
     }
-    Glass.Pixels(Pixels);
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    FrameBuffer.PutPixels(Pixels);
 
     if (Shown < KeysShown) {
-        int Row = Glass.Rows - 1, Col = 1;
-        Glass.Fill(Row, 0, Glass.Cols, ' ', BarInk, BarPaper);
-        Col = Glass.Write(Row, Col, "fireworks", BarInk, BarPaper);
+        const painter::core::Size Dimensions = Glass->Size();
+        const int Row = Dimensions.Height - 1;
+        int Col = 1;
+        const TextStyle BarStyle{BarInk, BarPaper};
+        const TextStyle KeyStyle{KeyInk, BarPaper};
+        const TextStyle HintStyle{HintInk, BarPaper};
+        FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', BarStyle);
+        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, "fireworks", BarStyle));
         for (auto [Keys, What] : {std::pair{"space", "a rocket"}, {"1-9", "a kind"}, {"f", "finale"}, {"q", "leave"}}) {
-            Col = Glass.Write(Row, Col + 2, Keys, KeyInk, BarPaper);
-            Col = Glass.Write(Row, Col + 1, What, HintInk, BarPaper);
+            Col += 2 + static_cast<int>(FrameBuffer.Write({Col + 2, Row}, Keys, KeyStyle));
+            Col += 1 + static_cast<int>(FrameBuffer.Write({Col + 1, Row}, What, HintStyle));
         }
     }
 }
@@ -380,11 +399,12 @@ int main()
 {
     try {
         Show Night;
-        if (std::optional<std::string> Refusal = Night.Glass.Take("fireworks", 40, 12)) {
-            Night.Glass.Give();
-            StageSay(*Refusal);
+        std::expected<Stage, StageError> Opened = Stage::Open("fireworks", 40, 12);
+        if (!Opened) {
+            print_to_screen((Opened.error().Describe("fireworks") + '\n').c_str());
             return 1;
         }
+        Night.Glass = std::move(*Opened);
         Night.Begin();
 
         std::uint64_t Began = clock_uptime_us(), Last = Began;
@@ -395,25 +415,30 @@ int main()
             for (float Left = Seconds; Left > 0; Left -= MostStep) Night.Step(std::min(MostStep, Left));
             Last = Now;
             Night.Draw(Seconds, static_cast<float>(Now - Began) / 1e6f);
-            if (!(Shown = Night.Glass.Show())) break;
+            if (!(Shown = static_cast<bool>(Night.Glass->Present()))) break;
 
             std::uint64_t Spent = clock_uptime_us() - Now;
-            kb_event_t    Key;
-            StageHeard    Heard = Night.Glass.Listen(Key, Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
-            if (Heard == StageHeard::Gone) break;
-            if (Heard != StageHeard::Key || (Key.mods & KB_MOD_EXTENDED)) continue;
-            if (Key.ascii == 'q' || Key.ascii == 'Q' || Key.ascii == KEY_ESCAPE) break;
-            if (Key.ascii == ' ') Night.Launch(Night.AnyKind(), Night.AnyX());
-            if (Key.ascii >= '1' && Key.ascii <= '9') Night.Launch(static_cast<Kind>(Key.ascii - '1'), Night.AnyX());
-            if (Key.ascii == 'f' || Key.ascii == 'F') Night.Finale();
+            const painter::tui::Event Event = Night.Glass->Wait(
+                Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
+            if (Event.Kind == EventKind::Gone) break;
+            if (Event.Kind != EventKind::Key || Event.Key.IsExtended()) continue;
+            if (Event.Key.Ascii == 'q' || Event.Key.Ascii == 'Q' ||
+                Event.Key.Ascii == painter::tui::KeyCodes::Escape)
+                break;
+            if (Event.Key.Ascii == ' ') Night.Launch(Night.AnyKind(), Night.AnyX());
+            if (Event.Key.Ascii >= '1' && Event.Key.Ascii <= '9')
+                Night.Launch(static_cast<Kind>(Event.Key.Ascii - '1'), Night.AnyX());
+            if (Event.Key.Ascii == 'f' || Event.Key.Ascii == 'F') Night.Finale();
         }
         unsigned Launched = Night.Launched;
-        Night.Glass.Give();
-        StageSay(Shown ? std::format("[FIREWORKS] {} rocket{} went up", Launched, Launched == 1 ? "" : "s")
-                       : "The screen stopped taking frames.");
+        (void)Night.Glass->Close();
+        const std::string Message = Shown ? std::format("[FIREWORKS] {} rocket{} went up", Launched,
+                                                         Launched == 1 ? "" : "s")
+                                          : "The screen stopped taking frames.";
+        print_to_screen((Message + '\n').c_str());
         return Shown ? 0 : 1;
     } catch (const std::bad_alloc &) {
-        StageSay("There is not enough memory for a sky the size of this screen.");
+        print_to_screen("There is not enough memory for a sky the size of this screen.\n");
         return 1;
     }
 }
