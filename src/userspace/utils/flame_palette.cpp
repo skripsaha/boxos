@@ -2,6 +2,8 @@
  * what is not burning is not drawn, and ends near white, because the hottest
  * part of a flame is the part too bright to have a colour. */
 
+#include "box/color.h"
+
 #include "flame.h"
 
 namespace {

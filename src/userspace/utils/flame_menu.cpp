@@ -10,8 +10,6 @@
 #include <string_view>
 
 #include "box/color.h"
-#include "box/keyboard.h"
-#include "box/vga.h"
 
 #include "flame.h"
 
@@ -68,30 +66,29 @@ constexpr char GaugeEmpty        = static_cast<char>(0xB0);
  *   ChosenInk #000000  black         ChosenBg #aaaaaa  light gray
  *   TitleInk  #ffb040  yellow        NoteInk  #e04040  light red
  *   FieldInk  #ffffff  white         FieldBg  #a05a00  brown       */
-constexpr Color Ink       = COLOR_LIGHT_GRAY;
-constexpr Color Paper     = COLOR_RGB(0x30, 0x30, 0x30);
-constexpr Color ChosenInk = COLOR_BLACK;
-constexpr Color ChosenBg  = COLOR_LIGHT_GRAY;
-constexpr Color TitleInk  = COLOR_AMBER;
-constexpr Color FieldInk  = COLOR_WHITE;
-constexpr Color FieldBg   = COLOR_RGB(0xA0, 0x5A, 0x00);
-constexpr Color NoteInk   = COLOR_RED;
+using PainterColor = painter::core::Color;
+
+constexpr PainterColor Ink       = painter::core::Colors::LightGray;
+constexpr PainterColor Paper     = PainterColor::Rgb(0x30, 0x30, 0x30);
+constexpr PainterColor ChosenInk = painter::core::Colors::Black;
+constexpr PainterColor ChosenBg  = painter::core::Colors::LightGray;
+constexpr PainterColor TitleInk  = painter::core::Colors::Amber;
+constexpr PainterColor FieldInk  = painter::core::Colors::White;
+constexpr PainterColor FieldBg   = PainterColor::Rgb(0xA0, 0x5A, 0x00);
+constexpr PainterColor NoteInk   = painter::core::Colors::Red;
 
 struct Canvas {
-    TextCell *Cells;
+    painter::tui::Frame &Cells;
     int       Rows;
     int       Cols;
 
-    void Put(int Row, int Col, char Ch, Color Fg, Color Bg) const
+    void Put(int Row, int Col, char Ch, PainterColor Fg, PainterColor Bg) const
     {
         if (Row < 0 || Col < 0 || Row >= Rows || Col >= Cols) return;
-        TextCell &Cell = Cells[static_cast<std::size_t>(Row) * Cols + Col];
-        Cell.ch = Ch;
-        Cell.fg = Fg;
-        Cell.bg = Bg;
+        Cells.Put({Col, Row}, painter::tui::Cell{Ch, Fg, Bg});
     }
 
-    void Write(int Row, int Col, std::string_view Text, Color Fg, Color Bg) const
+    void Write(int Row, int Col, std::string_view Text, PainterColor Fg, PainterColor Bg) const
     {
         for (std::size_t At = 0; At < Text.size(); At++) Put(Row, Col + static_cast<int>(At), Text[At], Fg, Bg);
     }
@@ -219,20 +216,20 @@ FlameOutcome FlameMenu::Accept(FlameSettings &Settings)
     return Outcome;
 }
 
-FlameOutcome FlameMenu::Type(const FlameKey &Key, FlameSettings &Settings)
+FlameOutcome FlameMenu::Type(const painter::tui::KeyEvent &Key, FlameSettings &Settings)
 {
-    if (Key.Extended) return {};
+    if (Key.IsExtended()) return {};
 
     char Ch = Key.Ascii;
-    if (Ch == KEY_ESCAPE) {
+    if (Ch == painter::tui::KeyCodes::Escape) {
         Editing = false;
         Note    = nullptr;
         return {};
     }
-    if (Ch == KEY_ENTER) return Accept(Settings);
+    if (Ch == painter::tui::KeyCodes::Enter) return Accept(Settings);
 
     Note = nullptr;
-    if (Ch == KEY_BACKSPACE || Ch == 0x7F) {
+    if (Ch == painter::tui::KeyCodes::Backspace || Ch == 0x7F) {
         if (!Text.empty()) Text.pop_back();
         return {};
     }
@@ -242,23 +239,23 @@ FlameOutcome FlameMenu::Type(const FlameKey &Key, FlameSettings &Settings)
     return {};
 }
 
-FlameOutcome FlameMenu::Choose(const FlameKey &Key, FlameSettings &Settings)
+FlameOutcome FlameMenu::Choose(const painter::tui::KeyEvent &Key, FlameSettings &Settings)
 {
     Note = nullptr;
-    if (Key.Extended) {
+    if (Key.IsExtended()) {
         switch (Key.Scancode) {
-        case KEY_UP:    Item = (Item + RowCount - 1) % RowCount; break;
-        case KEY_DOWN:  Item = (Item + 1) % RowCount; break;
-        case KEY_LEFT:  return Apply(Item, -1, Settings);
-        case KEY_RIGHT: return Apply(Item, 1, Settings);
+        case painter::tui::KeyCodes::Up:    Item = (Item + RowCount - 1) % RowCount; break;
+        case painter::tui::KeyCodes::Down:  Item = (Item + 1) % RowCount; break;
+        case painter::tui::KeyCodes::Left:  return Apply(Item, -1, Settings);
+        case painter::tui::KeyCodes::Right: return Apply(Item, 1, Settings);
         default: break;
         }
         return {};
     }
     switch (Key.Ascii) {
-    case KEY_ESCAPE: Open = false; break;
-    case KEY_TAB:    Item = (Item + 1) % RowCount; break;
-    case KEY_ENTER:  BeginEdit(Settings); break;
+    case painter::tui::KeyCodes::Escape: Open = false; break;
+    case painter::tui::KeyCodes::Tab:    Item = (Item + 1) % RowCount; break;
+    case painter::tui::KeyCodes::Enter:  BeginEdit(Settings); break;
     case '-':        return Apply(Item, -1, Settings);
     case '+':
     case '=':        return Apply(Item, 1, Settings);
@@ -267,21 +264,21 @@ FlameOutcome FlameMenu::Choose(const FlameKey &Key, FlameSettings &Settings)
     return {};
 }
 
-FlameOutcome FlameMenu::Quick(const FlameKey &Key, FlameSettings &Settings)
+FlameOutcome FlameMenu::Quick(const painter::tui::KeyEvent &Key, FlameSettings &Settings)
 {
-    if (Key.Extended) {
+    if (Key.IsExtended()) {
         switch (Key.Scancode) {
-        case KEY_LEFT:  return Apply(RowWind, -1, Settings);
-        case KEY_RIGHT: return Apply(RowWind, 1, Settings);
-        case KEY_UP:    return Apply(RowHeight, 1, Settings);
-        case KEY_DOWN:  return Apply(RowHeight, -1, Settings);
+        case painter::tui::KeyCodes::Left:  return Apply(RowWind, -1, Settings);
+        case painter::tui::KeyCodes::Right: return Apply(RowWind, 1, Settings);
+        case painter::tui::KeyCodes::Up:    return Apply(RowHeight, 1, Settings);
+        case painter::tui::KeyCodes::Down:  return Apply(RowHeight, -1, Settings);
         default: return {};
         }
     }
     char Ch = Key.Ascii;
     if (Ch >= '1' && Ch < '1' + FlamePlaceCount) return SetPlace(static_cast<FlamePlace>(Ch - '1'), Settings);
     switch (Ch) {
-    case KEY_ESCAPE: Open = true; break;
+    case painter::tui::KeyCodes::Escape: Open = true; break;
     case 'p':
     case 'P':        return Apply(RowColour, 1, Settings);
     case 's':
@@ -298,10 +295,10 @@ FlameOutcome FlameMenu::Quick(const FlameKey &Key, FlameSettings &Settings)
     return {};
 }
 
-FlameOutcome FlameMenu::OnKey(const FlameKey &Key, FlameSettings &Settings)
+FlameOutcome FlameMenu::OnKey(const painter::tui::KeyEvent &Key, FlameSettings &Settings)
 {
-    bool IsQ = !Key.Extended && (Key.Ascii == 'q' || Key.Ascii == 'Q');
-    if ((Key.Ctrl && IsQ) || (!Editing && IsQ)) {
+    bool IsQ = !Key.IsExtended() && (Key.Ascii == 'q' || Key.Ascii == 'Q');
+    if ((Key.IsCtrl() && IsQ) || (!Editing && IsQ)) {
         FlameOutcome Leaving;
         Leaving.Leave = true;
         return Leaving;
@@ -310,7 +307,7 @@ FlameOutcome FlameMenu::OnKey(const FlameKey &Key, FlameSettings &Settings)
     return Open ? Choose(Key, Settings) : Quick(Key, Settings);
 }
 
-void FlameMenu::Draw(TextCell *Frame, int Rows, int Cols, const FlameSettings &Settings) const
+void FlameMenu::Draw(painter::tui::Frame &Frame, int Rows, int Cols, const FlameSettings &Settings) const
 {
     Canvas Glass{Frame, Rows, Cols};
     int    Top  = OriginRow(Rows);
@@ -331,8 +328,8 @@ void FlameMenu::Draw(TextCell *Frame, int Rows, int Cols, const FlameSettings &S
 
     for (int Line = 0; Line < RowCount; Line++) {
         bool  Chosen = Line == Item;
-        Color Fg     = Chosen ? ChosenInk : Ink;
-        Color Bg     = Chosen ? ChosenBg : Paper;
+        PainterColor Fg = Chosen ? ChosenInk : Ink;
+        PainterColor Bg = Chosen ? ChosenBg : Paper;
         int   Y      = Top + 1 + Line;
 
         Glass.Put(Y, Left, Vertical, Ink, Paper);

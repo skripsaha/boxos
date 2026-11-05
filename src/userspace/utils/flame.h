@@ -10,8 +10,8 @@
  * and flame.cpp decides: the Form, the clock and the loop.
  *
  * A fire is a grid of heat, one pixel for every half of a cell: two pixels
- * stand in a cell's height. The colours are BoxLib's (box/color.h): a palette
- * is mixed with color_mix and a #rrggbb read with color_parse.
+ * stand in a cell's height. The simulation keeps raw RGB palette values; the
+ * Painter adapter turns them into frame cells at the edge.
  */
 
 #include <array>
@@ -19,9 +19,9 @@
 #include <string>
 #include <vector>
 
-#include "box/color.h"
-
-struct TextCell;
+#include "painter/core/color.h"
+#include "painter/tui/frame.h"
+#include "painter/tui/stage.h"
 
 enum class FlamePlace : std::uint8_t { Bottom, Top, Sides, Frame, Pit, Word };
 enum class FlameInk : std::uint8_t { Fire, Gas, Toxic, Spirit, Custom };
@@ -116,13 +116,6 @@ private:
     unsigned                    Clock = 0;
 };
 
-struct FlameKey {
-    char          Ascii;
-    bool          Ctrl;
-    bool          Extended;
-    std::uint8_t  Scancode;
-};
-
 struct FlameOutcome {
     bool Leave     = false;
     bool Rebuild   = false;
@@ -133,14 +126,14 @@ class FlameMenu {
 public:
     bool Open = false;
 
-    FlameOutcome OnKey(const FlameKey &Key, FlameSettings &Settings);
-    void         Draw(TextCell *Frame, int Rows, int Cols, const FlameSettings &Settings) const;
+    FlameOutcome OnKey(const painter::tui::KeyEvent &Key, FlameSettings &Settings);
+    void         Draw(painter::tui::Frame &Frame, int Rows, int Cols, const FlameSettings &Settings) const;
     void         Caret(int Rows, int Cols, int &Row, int &Col) const;
 
 private:
-    FlameOutcome Quick(const FlameKey &Key, FlameSettings &Settings);
-    FlameOutcome Choose(const FlameKey &Key, FlameSettings &Settings);
-    FlameOutcome Type(const FlameKey &Key, FlameSettings &Settings);
+    FlameOutcome Quick(const painter::tui::KeyEvent &Key, FlameSettings &Settings);
+    FlameOutcome Choose(const painter::tui::KeyEvent &Key, FlameSettings &Settings);
+    FlameOutcome Type(const painter::tui::KeyEvent &Key, FlameSettings &Settings);
     FlameOutcome Apply(int Row, int Delta, FlameSettings &Settings);
     FlameOutcome SetPlace(FlamePlace Place, FlameSettings &Settings);
     FlameOutcome Accept(FlameSettings &Settings);
@@ -157,6 +150,7 @@ constexpr int FlameMinRows = 14;
 
 /* Two pixels to a cell: the upper half block, ink the pixel above, paper the
  * pixel below. */
-void FlamePaintFire(const FlameFire &Fire, const FlamePalette &Palette, TextCell *Frame, int Rows, int Cols);
+void FlamePaintFire(const FlameFire &Fire, const FlamePalette &Palette, painter::tui::Frame &Frame, int Rows,
+                    int Cols);
 
 #endif
