@@ -19,20 +19,15 @@
  * hexer_list.cpp.
  */
 
-#include <cstring>
 #include <format>
 #include <new>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "box/color.h"
 #include "box/file.h"
 #include "box/form.h"
-#include "box/keyboard.h"
 #include "box/print.h"
-#include "box/touch.h"
-#include "box/vga.h"
 
 #include "file_heading.h"
 #include "hexer.h"
@@ -167,12 +162,6 @@ std::string NeedleText(const HexerNeedle &Needle)
     return Text;
 }
 
-/* The screen is given back however the program leaves it. */
-struct ScreenHeld {
-    Hexer &Viewer;
-    ~ScreenHeld() { Viewer.GiveScreenBack(); }
-};
-
 }
 
 Hexer::Hexer(file_id_t File, std::string Name, std::string Tags, HexerPart Part)
@@ -183,51 +172,47 @@ Hexer::Hexer(file_id_t File, std::string Name, std::string Tags, HexerPart Part)
 
 std::optional<std::string> Hexer::TakeScreen()
 {
-    vga_dimensions_t Size;
-    if (vga_getdimensions(&Size) != 0) return std::string("This screen would not say how big it is.");
-    if (Size.rows == 0 || Size.cols == 0) return std::string("This machine has no console to show a file on.");
-    if (Size.rows < 3) return std::string("This screen has too few rows for a title, a line and a foot.");
-    Rows = Size.rows;
-    Cols = Size.cols;
-
     /* Sixteen bytes a line, or eight where sixteen do not fit. */
     auto LineWidth = [this](std::uint32_t Bytes) { return Digits + 4 * Bytes + 4; };
+    std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
+        painter::tui::Stage::Open("hexer", static_cast<std::int32_t>(LineWidth(8)), 3);
+    if (!Opened) return Opened.error().Describe("hexer");
+    Glass.emplace(std::move(*Opened));
+    Rows = static_cast<std::uint32_t>(Glass->Size().Height);
+    Cols = static_cast<std::uint32_t>(Glass->Size().Width);
+
     if (LineWidth(16) <= Cols)     Width = 16;
     else if (LineWidth(8) <= Cols) Width = 8;
-    else return std::format("This screen is {} columns wide; a line of hexer needs {}.", Cols, LineWidth(8));
+    else {
+        GiveScreenBack();
+        return std::format("This screen is {} columns wide; a line of hexer needs {}.", Cols, LineWidth(8));
+    }
     Top = At - At % Width;
-
-    Frame.assign(static_cast<std::size_t>(Rows) * Cols, TextCell{});
-    Ear = console_listen();
-    if (Ear == TOUCH_TAG_INVALID) return std::string("This machine has no way to hear a key.");
     return std::nullopt;
 }
 
 void Hexer::Run()
 {
-    ScreenHeld Held{*this};
     while (!Leaving) {
-        Paint();
+        if (!Paint()) break;
 
         /* No deadline: nothing changes between keys. A refusal means there is
          * nothing left to hear, and a loop on it would be a screen no key
          * could leave. */
-        Touch Event;
-        if (touch_await(Ear, &Event, 0) != 0) break;
-        if (Event.payload_len < sizeof(kb_event_t)) continue;
-
-        kb_event_t Key;
-        std::memcpy(&Key, Event.payload, sizeof(Key));
+        painter::tui::Event Event = Glass->Wait();
+        if (Event.Kind != painter::tui::EventKind::Key) break;
         Message.clear();        /* a message stands until the next key */
-        OnKey(Key);
+        OnKey(Event.Key);
     }
+    GiveScreenBack();
 }
 
 void Hexer::GiveScreenBack()
 {
-    console_unlisten();
-    (void)vga_clear_rgb(COLOR_LIGHT_GRAY, COLOR_BLACK);
-    (void)vga_setcursor(0, 0);
+    if (Glass) {
+        (void)Glass->Close();
+        Glass.reset();
+    }
 }
 
 std::string Hexer::Summary() const
@@ -236,7 +221,7 @@ std::string Hexer::Summary() const
     return std::format("hexer: {} - {} byte{} saved", Name, Bytes.SavedBytes(), Bytes.SavedBytes() == 1 ? "" : "s");
 }
 
-void Hexer::OnKey(const kb_event_t &Key)
+void Hexer::OnKey(const painter::tui::KeyEvent &Key)
 {
     if (CommandOpen) OnCommandKey(Key);
     else             OnEditKey(Key);
@@ -263,42 +248,42 @@ void Hexer::Type(std::uint8_t Value)
     MoveBy(1);
 }
 
-void Hexer::OnEditKey(const kb_event_t &Key)
+void Hexer::OnEditKey(const painter::tui::KeyEvent &Key)
 {
-    if (Key.mods & KB_MOD_CTRL) {
-        if (Key.ascii == 's' || Key.ascii == 'S')      Save();
-        else if (Key.ascii == 'q' || Key.ascii == 'Q') Leave();
+    if (Key.IsCtrl()) {
+        if (Key.Ascii == 's' || Key.Ascii == 'S')      Save();
+        else if (Key.Ascii == 'q' || Key.Ascii == 'Q') Leave();
         return;         /* every other chord is deliberately not a command */
     }
 
     std::int64_t Page = static_cast<std::int64_t>(TextRows()) * Width;
-    if (Key.mods & KB_MOD_EXTENDED) {
-        switch (Key.scancode) {
-        case KEY_LEFT:   MoveBy(-1); break;
-        case KEY_RIGHT:  MoveBy(1); break;
-        case KEY_UP:     MoveBy(-static_cast<std::int64_t>(Width)); break;
-        case KEY_DOWN:   MoveBy(Width); break;
-        case KEY_PAGEUP: MoveBy(-Page); break;
-        case KEY_PAGEDN: MoveBy(Page); break;
-        case KEY_HOME:   MoveTo(At - At % Width); break;
-        case KEY_END:    MoveTo(At - At % Width + Width - 1); break;
+    if (Key.IsExtended()) {
+        switch (Key.Scancode) {
+        case painter::tui::KeyCodes::Left:    MoveBy(-1); break;
+        case painter::tui::KeyCodes::Right:   MoveBy(1); break;
+        case painter::tui::KeyCodes::Up:      MoveBy(-static_cast<std::int64_t>(Width)); break;
+        case painter::tui::KeyCodes::Down:    MoveBy(Width); break;
+        case painter::tui::KeyCodes::PageUp:  MoveBy(-Page); break;
+        case painter::tui::KeyCodes::PageDown: MoveBy(Page); break;
+        case painter::tui::KeyCodes::Home:    MoveTo(At - At % Width); break;
+        case painter::tui::KeyCodes::End:     MoveTo(At - At % Width + Width - 1); break;
         default: break;
         }
         return;
     }
 
-    char Ch = Key.ascii;
-    if (Ch == KEY_ESCAPE) {
+    char Ch = Key.Ascii;
+    if (Ch == painter::tui::KeyCodes::Escape) {
         CommandOpen = true;
         Command.clear();
         return;
     }
-    if (Ch == KEY_TAB) {
+    if (Ch == painter::tui::KeyCodes::Tab) {
         InText  = !InText;
         LowHalf = false;
         return;
     }
-    if (Ch == KEY_BACKSPACE || Ch == 0x7f) {
+    if (Ch == painter::tui::KeyCodes::Backspace || Ch == 0x7f) {
         MoveBy(-1);
         return;
     }
@@ -323,12 +308,12 @@ void Hexer::OnEditKey(const kb_event_t &Key)
     }
 }
 
-void Hexer::OnCommandKey(const kb_event_t &Key)
+void Hexer::OnCommandKey(const painter::tui::KeyEvent &Key)
 {
-    if (Key.mods & (KB_MOD_CTRL | KB_MOD_EXTENDED)) return;
+    if (Key.IsCtrl() || Key.IsExtended()) return;
 
-    char Ch = Key.ascii;
-    if (Ch == KEY_ESCAPE) {
+    char Ch = Key.Ascii;
+    if (Ch == painter::tui::KeyCodes::Escape) {
         CommandOpen = false;
         return;
     }
@@ -337,7 +322,7 @@ void Hexer::OnCommandKey(const kb_event_t &Key)
         RunCommand();
         return;
     }
-    if (Ch == KEY_BACKSPACE || Ch == 0x7f) {
+    if (Ch == painter::tui::KeyCodes::Backspace || Ch == 0x7f) {
         if (!Command.empty()) Command.pop_back();
         return;
     }

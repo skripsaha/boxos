@@ -152,8 +152,8 @@ taskcenter.elf: $(BOXLIB_START) taskcenter.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/u
 HEXER_OBJS      = hexer.o hexer_bytes.o hexer_paint.o hexer_list.o
 STRINGVIEW_OBJS = stringview.o stringview_sift.o stringview_paint.o
 
-hexer.elf: $(BOXLIB_START) $(HEXER_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(HEXER_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+hexer.elf: $(BOXLIB_START) $(HEXER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(HEXER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 stringview.elf: $(BOXLIB_START) $(STRINGVIEW_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)

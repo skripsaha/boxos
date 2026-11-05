@@ -1,36 +1,35 @@
-/* hexer_paint.cpp — the glass. One frame of cells a paint, laid down by one
- * vga_paint: a title, the lines of the part, a foot. It decides which lines
+/* hexer_paint.cpp — the glass. One Painter frame a paint: a title, the lines
+ * of the part, a foot. It decides which lines
  * are in view and changes nothing of the file. */
 
 #include <format>
 #include <vector>
 
-#include "box/color.h"
-#include "box/vga.h"
-
 #include "hexer.h"
 
 namespace {
 
-constexpr Color TitleInk    = COLOR_WHITE;
-constexpr Color TitlePaper  = COLOR_SLATE;
-constexpr Color Paper       = COLOR_BLACK;
-constexpr Color OffsetInk   = COLOR_SLATE;
-constexpr Color ChangedPaper = COLOR_DARK_RED;
-constexpr Color CursorPaper = COLOR_WHITE;
-constexpr Color ShadowPaper = COLOR_DARK_GRAY;
-constexpr Color HintInk     = COLOR_DARK_GRAY;
-constexpr Color MessageInk  = COLOR_AMBER;
-constexpr Color CommandInk  = COLOR_WHITE;
+using PainterColor = painter::core::Color;
+
+constexpr PainterColor TitleInk     = painter::core::Colors::White;
+constexpr PainterColor TitlePaper   = painter::core::Colors::Slate;
+constexpr PainterColor Paper        = painter::core::Colors::Black;
+constexpr PainterColor OffsetInk    = painter::core::Colors::Slate;
+constexpr PainterColor ChangedPaper = painter::core::Colors::DarkRed;
+constexpr PainterColor CursorPaper  = painter::core::Colors::White;
+constexpr PainterColor ShadowPaper  = painter::core::Colors::DarkGray;
+constexpr PainterColor HintInk      = painter::core::Colors::DarkGray;
+constexpr PainterColor MessageInk   = painter::core::Colors::Amber;
+constexpr PainterColor CommandInk   = painter::core::Colors::White;
 
 /* What a byte is, said by its colour: zero, text, a blank, a control, high. */
-Color InkOf(std::uint8_t Byte)
+PainterColor InkOf(std::uint8_t Byte)
 {
-    if (Byte == 0) return COLOR_DARK_GRAY;
-    if (Byte == ' ' || Byte == '\t' || Byte == '\n' || Byte == '\r') return COLOR_TEAL;
-    if (Byte < 0x20 || Byte == 0x7f) return COLOR_AMBER;
-    if (Byte >= 0x80) return COLOR_VIOLET;
-    return COLOR_LEAF;
+    if (Byte == 0) return painter::core::Colors::DarkGray;
+    if (Byte == ' ' || Byte == '\t' || Byte == '\n' || Byte == '\r') return painter::core::Colors::Teal;
+    if (Byte < 0x20 || Byte == 0x7f) return painter::core::Colors::Amber;
+    if (Byte >= 0x80) return painter::core::Colors::Violet;
+    return painter::core::Colors::Leaf;
 }
 
 constexpr char HexDigit[] = "0123456789abcdef";
@@ -47,19 +46,18 @@ std::uint32_t Hexer::TextColumn(std::uint32_t Byte) const
     return Digits + 3 * Width + 4 + Byte;
 }
 
-void Hexer::Put(std::uint32_t Row, std::uint32_t Col, char Ch, Color Fg, Color Bg)
+void Hexer::Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::core::Color Fg,
+                painter::core::Color Bg)
 {
     if (Row >= Rows || Col >= Cols) return;
-    TextCell &Cell = Frame[Row * Cols + Col];
-    Cell = TextCell{};
-    Cell.fg = Fg;
-    Cell.bg = Bg;
-    Cell.ch = Ch;
+    Glass->FrameBuffer().Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
+                              painter::tui::Cell{Ch, Fg, Bg});
 }
 
 /* A name off the volume is bytes, not letters: what the font has no glyph for
  * is drawn '?'. */
-std::uint32_t Hexer::Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, Color Fg, Color Bg)
+std::uint32_t Hexer::Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text,
+                           painter::core::Color Fg, painter::core::Color Bg)
 {
     for (char Ch : Text) {
         if (Col >= Cols) break;
@@ -104,7 +102,7 @@ void Hexer::PaintLines()
         Message = std::format("the file gave no bytes past 0x{:x}", Top + Got);
 
     for (std::uint32_t Row = 1; Row <= TextRowCount; Row++) {
-        for (std::uint32_t Col = 0; Col < Cols; Col++) Put(Row, Col, ' ', COLOR_LIGHT_GRAY, Paper);
+        for (std::uint32_t Col = 0; Col < Cols; Col++) Put(Row, Col, ' ', painter::core::Colors::LightGray, Paper);
 
         std::uint64_t LineAt = Top + static_cast<std::uint64_t>(Row - 1) * Width;
         if (LineAt >= Part.Hi) continue;
@@ -115,16 +113,16 @@ void Hexer::PaintLines()
             if (Place < Part.Lo || Place >= Part.Hi || Place - Top >= Got) continue;
 
             std::uint8_t Value   = Buffer[Place - Top];
-            Color        Ink     = InkOf(Value);
-            Color        HexBg   = Changed[Place - Top] ? ChangedPaper : Paper;
-            Color        TextBg  = HexBg;
-            Color        HexFg   = Ink;
-            Color        TextFg  = Ink;
+            PainterColor Ink     = InkOf(Value);
+            PainterColor HexBg   = Changed[Place - Top] ? ChangedPaper : Paper;
+            PainterColor TextBg  = HexBg;
+            PainterColor HexFg   = Ink;
+            PainterColor TextFg  = Ink;
             if (Place == At) {
                 HexBg  = InText ? ShadowPaper : CursorPaper;
                 TextBg = InText ? CursorPaper : ShadowPaper;
-                HexFg  = InText ? COLOR_WHITE : COLOR_BLACK;
-                TextFg = InText ? COLOR_BLACK : COLOR_WHITE;
+                HexFg  = InText ? painter::core::Colors::White : painter::core::Colors::Black;
+                TextFg = InText ? painter::core::Colors::Black : painter::core::Colors::White;
             }
             Put(Row, HexColumn(Byte), HexDigit[Value >> 4], HexFg, HexBg);
             Put(Row, HexColumn(Byte) + 1, HexDigit[Value & 0xf], HexFg, HexBg);
@@ -136,7 +134,7 @@ void Hexer::PaintLines()
 void Hexer::PaintFoot()
 {
     std::uint32_t Row = Rows - 1;
-    for (std::uint32_t Col = 0; Col < Cols; Col++) Put(Row, Col, ' ', COLOR_LIGHT_GRAY, Paper);
+    for (std::uint32_t Col = 0; Col < Cols; Col++) Put(Row, Col, ' ', painter::core::Colors::LightGray, Paper);
 
     if (CommandOpen) {
         Put(Row, 0, ':', CommandInk, Paper);
@@ -150,7 +148,7 @@ void Hexer::PaintFoot()
     }
 }
 
-void Hexer::Paint()
+bool Hexer::Paint()
 {
     FollowCursor();
     PaintTitle();
@@ -169,6 +167,6 @@ void Hexer::Paint()
         CaretRow = 1 + static_cast<std::uint32_t>((At - At % Width - Top) / Width);
         CaretCol = InText ? TextColumn(Byte) : HexColumn(Byte) + (LowHalf ? 1 : 0);
     }
-    (void)vga_setcursor(static_cast<std::uint8_t>(CaretRow), static_cast<std::uint8_t>(CaretCol));
-    (void)vga_paint(0, 0, static_cast<std::uint8_t>(Rows), static_cast<std::uint8_t>(Cols), Frame.data());
+    if (!Glass->SetCursor({static_cast<std::int32_t>(CaretCol), static_cast<std::int32_t>(CaretRow)})) return false;
+    return static_cast<bool>(Glass->Present());
 }

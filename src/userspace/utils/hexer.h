@@ -17,11 +17,9 @@
 #include <string_view>
 #include <vector>
 
-#include "box/color.h"
 #include "box/file.h"
-#include "box/keyboard.h"
-#include "box/touch.h"
-#include "box/vga.h"
+#include "painter/core/color.h"
+#include "painter/tui/stage.h"
 
 /* What `find` looks for, and whether it was asked as bytes or as text. */
 struct HexerNeedle {
@@ -77,9 +75,9 @@ public:
 
 private:
     /* hexer.cpp */
-    void OnKey(const kb_event_t &Key);
-    void OnEditKey(const kb_event_t &Key);
-    void OnCommandKey(const kb_event_t &Key);
+    void OnKey(const painter::tui::KeyEvent &Key);
+    void OnEditKey(const painter::tui::KeyEvent &Key);
+    void OnCommandKey(const painter::tui::KeyEvent &Key);
     void RunCommand();
     void Go(std::string_view Where);
     void Find(std::string_view What);
@@ -90,13 +88,15 @@ private:
     void MoveBy(std::int64_t Delta);
 
     /* hexer_paint.cpp */
-    void          Paint();
+    bool          Paint();
     void          FollowCursor();
     void          PaintTitle();
     void          PaintLines();
     void          PaintFoot();
-    void          Put(std::uint32_t Row, std::uint32_t Col, char Ch, Color Fg, Color Bg);
-    std::uint32_t Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, Color Fg, Color Bg);
+    void          Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::core::Color Fg,
+                      painter::core::Color Bg);
+    std::uint32_t Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, painter::core::Color Fg,
+                        painter::core::Color Bg);
     std::uint32_t TextRows() const { return Rows - 2; }
     std::uint32_t HexColumn(std::uint32_t Byte) const;
     std::uint32_t TextColumn(std::uint32_t Byte) const;
@@ -115,8 +115,7 @@ private:
     std::uint32_t         Cols = 0;
     std::uint32_t         Width = 16;  /* bytes a line shows; 8 on a narrow screen */
     std::uint32_t         Digits = 8;
-    std::vector<TextCell> Frame;
-    TouchTag              Ear = TOUCH_TAG_INVALID;
+    std::optional<painter::tui::Stage> Glass;
 
     bool                      CommandOpen = false;
     std::string               Command;
