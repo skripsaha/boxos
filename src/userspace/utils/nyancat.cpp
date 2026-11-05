@@ -245,24 +245,6 @@ void Say(std::string_view Text)
     print_to_screen(Line.c_str());
 }
 
-std::string StageRefusal(const StageError &Failure)
-{
-    switch (Failure.Kind) {
-    case painter::tui::StageErrorKind::TooSmall:
-        return std::format("This screen is {} by {} rows; nyancat needs at least {} by {}.",
-                           Failure.Actual.Width, Failure.Actual.Height, Failure.Required.Width,
-                           Failure.Required.Height);
-    case painter::tui::StageErrorKind::NoConsole: return "This machine has no console to show a cat on.";
-    case painter::tui::StageErrorKind::KeyboardUnavailable: return "This machine has no way to hear a key.";
-    case painter::tui::StageErrorKind::DimensionsUnavailable:
-        return std::format("This machine would not say how big its screen is: {}", Failure.Cause);
-    case painter::tui::StageErrorKind::FrameUnavailable:
-        return std::format("There is not enough memory for a cat the size of this screen: {}", Failure.Cause);
-    case painter::tui::StageErrorKind::InvalidState: return "The screen could not be opened.";
-    }
-    return "The screen could not be opened.";
-}
-
 }
 
 int main()
@@ -271,7 +253,7 @@ int main()
         Flight Show;
         std::expected<Stage, StageError> Opened = Stage::Open("nyancat", 40, 14);
         if (!Opened) {
-            Say(StageRefusal(Opened.error()));
+            Say(Opened.error().Describe("nyancat"));
             return 1;
         }
         Show.Glass = std::move(*Opened);

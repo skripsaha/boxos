@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include "box/cxx/error.h"
@@ -51,6 +52,8 @@ struct StageError {
     box::error     Cause;
     core::Size     Actual;
     core::Size     Required;
+
+    std::string Describe(std::string_view Subject) const;
 };
 
 struct KeyEvent {

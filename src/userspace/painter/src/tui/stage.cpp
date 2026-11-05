@@ -1,6 +1,7 @@
 #include "painter/tui/stage.h"
 
 #include <cstring>
+#include <format>
 #include <new>
 #include <utility>
 #include <vector>
@@ -42,6 +43,26 @@ StageError Error(StageErrorKind Kind, box::error CauseValue, core::Size Actual, 
 }
 
 }  // namespace
+
+std::string StageError::Describe(std::string_view Subject) const
+{
+    switch (Kind) {
+    case StageErrorKind::DimensionsUnavailable:
+        return std::format("This machine would not say how big its screen is: {}", Cause);
+    case StageErrorKind::NoConsole:
+        return std::format("This machine has no console for {}.", Subject);
+    case StageErrorKind::TooSmall:
+        return std::format("This screen is {} by {} rows; {} needs at least {} by {}.", Actual.Width,
+                           Actual.Height, Subject, Required.Width, Required.Height);
+    case StageErrorKind::FrameUnavailable:
+        return std::format("There is not enough memory for {}: {}", Subject, Cause);
+    case StageErrorKind::KeyboardUnavailable:
+        return "This machine has no way to hear a key.";
+    case StageErrorKind::InvalidState:
+        return std::format("The screen for {} could not be opened.", Subject);
+    }
+    return std::format("The screen for {} could not be opened.", Subject);
+}
 
 std::expected<Stage, StageError> Stage::Open(std::string_view Name, std::int32_t LeastCols,
                                              std::int32_t LeastRows) noexcept
