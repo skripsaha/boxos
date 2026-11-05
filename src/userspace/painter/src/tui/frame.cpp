@@ -150,14 +150,25 @@ Cell Frame::Read(core::Point At) const noexcept
 
 void Frame::WriteNative(void *RawOut, std::size_t Count) const noexcept
 {
-    if (!RawOut) return;
+    WriteNativeRegion(RawOut, Count, {0, 0, Bounds.Width, Bounds.Height});
+}
+
+void Frame::WriteNativeRegion(void *RawOut, std::size_t Count, core::Rect Region) const noexcept
+{
+    if (!RawOut || Region.Empty() || Region.X < 0 || Region.Y < 0 || Region.X > Bounds.Width - Region.Width ||
+        Region.Y > Bounds.Height - Region.Height)
+        return;
     TextCell *Out = static_cast<TextCell *>(RawOut);
-    const std::size_t Used = std::min(Count, Cells.size());
-    for (std::size_t At = 0; At < Used; At++) {
-        Out[At] = TextCell{};
-        Out[At].fg = Cells[At].Foreground.Raw();
-        Out[At].bg = Cells[At].Background.Raw();
-        Out[At].ch = Cells[At].Glyph;
+    std::size_t Used = 0;
+    for (std::int32_t Row = Region.Y; Row < Region.Y + Region.Height; Row++) {
+        for (std::int32_t Col = Region.X; Col < Region.X + Region.Width && Used < Count; Col++) {
+            const Cell &Value = At({Col, Row});
+            Out[Used] = TextCell{};
+            Out[Used].fg = Value.Foreground.Raw();
+            Out[Used].bg = Value.Background.Raw();
+            Out[Used].ch = Value.Glyph;
+            Used++;
+        }
     }
 }
 

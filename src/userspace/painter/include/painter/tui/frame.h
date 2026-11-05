@@ -80,6 +80,7 @@ private:
 
     /* The kernel-facing representation stays private to Painter. */
     void WriteNative(void *Out, std::size_t Count) const noexcept;
+    void WriteNativeRegion(void *Out, std::size_t Count, core::Rect Region) const noexcept;
 
     core::Size       Bounds;
     std::vector<Cell> Cells;

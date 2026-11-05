@@ -105,13 +105,19 @@ std::expected<core::Point, box::error> Surface::Cursor() const noexcept
 
 box::status Surface::Paint(core::Point Origin, const Frame &FrameBuffer) noexcept
 {
+    return Paint(Origin, FrameBuffer, {0, 0, FrameBuffer.Size().Width, FrameBuffer.Size().Height});
+}
+
+box::status Surface::Paint(core::Point Origin, const Frame &FrameBuffer, core::Rect Region) noexcept
+{
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
-    const core::Size Region = FrameBuffer.Size();
-    if (Origin.X < 0 || Origin.Y < 0 || Region.Empty() || Origin.X > State->Bounds.Width - Region.Width ||
-        Origin.Y > State->Bounds.Height - Region.Height)
+    const core::Size FrameSize = FrameBuffer.Size();
+    if (Region.Empty() || Region.X < 0 || Region.Y < 0 || Region.X > FrameSize.Width - Region.Width ||
+        Region.Y > FrameSize.Height - Region.Height || Origin.X < 0 || Origin.Y < 0 ||
+        Origin.X > State->Bounds.Width - Region.Width || Origin.Y > State->Bounds.Height - Region.Height)
         return std::unexpected(box::error{box::errc::out_of_range});
 
-    const std::optional<std::size_t> CellCount = Region.CellCount();
+    const std::optional<std::size_t> CellCount = core::Size{Region.Width, Region.Height}.CellCount();
     if (!CellCount)
         return std::unexpected(box::error{box::errc::invalid_argument});
     try {
@@ -119,7 +125,7 @@ box::status Surface::Paint(core::Point Origin, const Frame &FrameBuffer) noexcep
     } catch (const std::bad_alloc &) {
         return std::unexpected(box::error{box::errc::no_memory});
     }
-    FrameBuffer.WriteNative(State->NativeCells.data(), State->NativeCells.size());
+    FrameBuffer.WriteNativeRegion(State->NativeCells.data(), State->NativeCells.size(), Region);
     const int Code = vga_paint(static_cast<std::uint8_t>(Origin.Y), static_cast<std::uint8_t>(Origin.X),
                                static_cast<std::uint8_t>(Region.Height), static_cast<std::uint8_t>(Region.Width),
                                State->NativeCells.data());

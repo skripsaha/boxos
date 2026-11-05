@@ -29,6 +29,7 @@ public:
 
     std::expected<core::Point, box::error> Cursor() const noexcept;
     box::status Paint(core::Point Origin, const Frame &FrameBuffer) noexcept;
+    box::status Paint(core::Point Origin, const Frame &FrameBuffer, core::Rect Region) noexcept;
     box::status SetCursor(core::Point At) noexcept;
     box::status ScrollUp() noexcept;
     box::status Close() noexcept;

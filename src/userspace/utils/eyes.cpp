@@ -16,42 +16,42 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <format>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "box/clock.h"
-#include "box/color.h"
 #include "box/cpu.h"
-#include "box/error.h"
 #include "box/form.h"
-#include "box/keyboard.h"
 #include "box/print.h"
-#include "box/touch.h"
-#include "box/vga.h"
+
+#include "painter/core/color.h"
+#include "painter/tui/glyph.h"
+#include "painter/tui/keyboard.h"
+#include "painter/tui/surface.h"
 
 BOX_FORM("takes optional words \"where they stand: top, bottom, left, right or middle; bottom right if none\"\n");
 
 namespace {
 
+using PainterColor = painter::core::Color;
+
 constexpr std::uint32_t MovingMs = 33;
 constexpr std::uint32_t StillMs  = 250;
 constexpr float         Pi       = 3.14159265f;
-constexpr char          UpperHalf = static_cast<char>(0xDF);
 
 /* Eye colours, light on the black of the console: every one keeps its family
  * on a sixteen-colour console too. */
-const Color Sclera    = COLOR_RGB(0xF4, 0xF4, 0xF4);
-const Color ScleraRim = COLOR_RGB(0xB8, 0xB8, 0xC0);
-const Color Pupil     = COLOR_RGB(0x0E, 0x0E, 0x10);
-const Color Glint     = COLOR_WHITE;
-const Color Lid       = COLOR_RGB(0x3C, 0x3C, 0x44);
-const Color LidEdge   = COLOR_RGB(0x18, 0x18, 0x1C);
-const Color Empty     = COLOR_BLACK;
-const Color Irises[]  = {COLOR_RGB(0x2E, 0x6C, 0xD0), COLOR_RGB(0x2E, 0x9A, 0x5A), COLOR_RGB(0x8A, 0x52, 0x22),
-                         COLOR_RGB(0x9A, 0x80, 0x30), COLOR_RGB(0x60, 0x78, 0x90), COLOR_RGB(0x8A, 0x40, 0xB0)};
+const PainterColor Sclera    = PainterColor::Rgb(0xF4, 0xF4, 0xF4);
+const PainterColor ScleraRim = PainterColor::Rgb(0xB8, 0xB8, 0xC0);
+const PainterColor Pupil     = PainterColor::Rgb(0x0E, 0x0E, 0x10);
+const PainterColor Glint     = painter::core::Colors::White;
+const PainterColor Lid       = PainterColor::Rgb(0x3C, 0x3C, 0x44);
+const PainterColor LidEdge   = PainterColor::Rgb(0x18, 0x18, 0x1C);
+const PainterColor Empty     = painter::core::Colors::Black;
+const PainterColor Irises[]  = {PainterColor::Rgb(0x2E, 0x6C, 0xD0), PainterColor::Rgb(0x2E, 0x9A, 0x5A), PainterColor::Rgb(0x8A, 0x52, 0x22),
+                         PainterColor::Rgb(0x9A, 0x80, 0x30), PainterColor::Rgb(0x60, 0x78, 0x90), PainterColor::Rgb(0x8A, 0x40, 0xB0)};
 
 void Say(std::string_view Text)
 {
@@ -92,7 +92,7 @@ public:
     const Look &Eye(int Which) const { return Now[Which]; }
 
     int   Blinks = 0;
-    Color Iris   = Irises[0];
+    PainterColor Iris   = Irises[0];
 
 private:
     void Next();
@@ -211,7 +211,7 @@ bool Pair::Step(float Seconds)
 
 /* The pixels of the pair, each eye an ellipse: the white shaded toward its
  * rim, the iris with a darker ring, the pupil, a glint, and the lids. */
-class Canvas {
+class EyePicture {
 public:
     void Size(int Scale)
     {
@@ -229,7 +229,7 @@ public:
         for (int Which = 0; Which < 2; Which++) DrawEye(Which * (EyeW + Gap), Eyes.Eye(Which), Eyes.Iris);
     }
 
-    Color At(int X, int Y) const
+    PainterColor At(int X, int Y) const
     {
         return Y < Height ? Dots[static_cast<std::size_t>(Y) * Width + X] : Empty;
     }
@@ -237,13 +237,13 @@ public:
     int Width = 0, Height = 0;
 
 private:
-    void DrawEye(int Left, const Look &Eye, Color Iris);
+    void DrawEye(int Left, const Look &Eye, PainterColor Iris);
 
     int                EyeW = 10, EyeH = 12, Gap = 2;
-    std::vector<Color> Dots;
+    std::vector<PainterColor> Dots;
 };
 
-void Canvas::DrawEye(int Left, const Look &Eye, Color Iris)
+void EyePicture::DrawEye(int Left, const Look &Eye, PainterColor Iris)
 {
     float Rx = EyeW / 2.0f, Ry = EyeH / 2.0f;
     float Cx = Left + Rx, Cy = Ry;
@@ -257,15 +257,15 @@ void Canvas::DrawEye(int Left, const Look &Eye, Color Iris)
             float Px = X + 0.5f, Py = Y + 0.5f;
             float Ex = (Px - Cx) / Rx, Ey = (Py - Cy) / Ry, Edge = Ex * Ex + Ey * Ey;
             if (Edge > 1.0f) continue;
-            Color Ink;
+            PainterColor Ink;
             if (Py < LidTop || Py > LidLow) {
                 bool Rim = Py >= LidTop - 1.0f && Py < LidTop;
                 Ink = Eye.Shut > 0.02f && Rim ? LidEdge : Lid;
             } else {
                 float Dx = Px - Ix, Dy = Py - Iy, Far = std::sqrt(Dx * Dx + Dy * Dy);
                 if (Far <= Rp) Ink = Pupil;
-                else if (Far <= Ri) Ink = Far > Ri - 1.0f ? color_mix(Iris, COLOR_BLACK, 110) : Iris;
-                else Ink = color_mix(Sclera, ScleraRim, static_cast<std::uint8_t>(std::clamp(Edge * Edge * 255.0f, 0.0f, 255.0f)));
+                else if (Far <= Ri) Ink = Far > Ri - 1.0f ? PainterColor::Mix(Iris, painter::core::Colors::Black, 110) : Iris;
+                else Ink = PainterColor::Mix(Sclera, ScleraRim, static_cast<std::uint8_t>(std::clamp(Edge * Edge * 255.0f, 0.0f, 255.0f)));
                 float Gx = Px - (Ix - Rp * 0.6f), Gy = Py - (Iy - Rp * 0.6f);
                 if (Far <= Ri && Gx * Gx + Gy * Gy <= std::max(0.6f, Rp * Rp * 0.18f)) Ink = Glint;
             }
@@ -309,44 +309,34 @@ Place Where(const char *const *Words, std::size_t Count, int Cols, int Rows, int
 /* The pixels laid as half blocks at `At`, a row of cells at a time, and only
  * the cells an eye covers: the console round them is left as it is. Erased,
  * the same cells are laid blank. */
-void Paint(const Canvas &Picture, Place At, bool Erase)
+box::status Paint(const EyePicture &Picture, painter::tui::Surface &Screen, painter::tui::Frame &Frame, Place At,
+                  bool Erase)
 {
     int Rows = (Picture.Height + 1) / 2;
-    std::vector<TextCell> Run;
     for (int Row = 0; Row < Rows; Row++) {
+        std::size_t Run = 0;
+        int          Start = 0;
         for (int X = 0; X <= Picture.Width; X++) {
-            Color Top = X < Picture.Width ? Picture.At(X, Row * 2) : Empty;
-            Color Low = X < Picture.Width ? Picture.At(X, Row * 2 + 1) : Empty;
+            PainterColor Top = X < Picture.Width ? Picture.At(X, Row * 2) : Empty;
+            PainterColor Low = X < Picture.Width ? Picture.At(X, Row * 2 + 1) : Empty;
             bool  Inked = X < Picture.Width && (Top != Empty || Low != Empty);
             if (Inked) {
-                TextCell Cell{};
-                Cell.ch = Erase ? ' ' : UpperHalf;
-                Cell.fg = Erase ? COLOR_LIGHT_GRAY : Top;
-                Cell.bg = Erase ? COLOR_BLACK : Low;
-                Run.push_back(Cell);
+                if (Run == 0) Start = X;
+                Frame.Put({X, Row}, painter::tui::Cell{Erase ? ' ' : painter::tui::Glyphs::UpperHalf,
+                                                       Erase ? painter::core::Colors::LightGray : Top,
+                                                       Erase ? painter::core::Colors::Black : Low});
+                Run++;
                 continue;
             }
-            if (!Run.empty()) {
-                int Start = X - static_cast<int>(Run.size());
-                (void)vga_paint(static_cast<std::uint8_t>(At.Row + Row), static_cast<std::uint8_t>(At.Col + Start), 1,
-                                static_cast<std::uint8_t>(Run.size()), Run.data());
-                Run.clear();
+            if (Run != 0) {
+                box::status Painted = Screen.Paint({At.Col + Start, At.Row + Row}, Frame,
+                                                    {Start, Row, static_cast<std::int32_t>(Run), 1});
+                if (!Painted) return Painted;
+                Run = 0;
             }
         }
     }
-}
-
-enum class Heard { Key, Quiet, Gone };
-
-Heard Listen(TouchTag Ear, kb_event_t &Key, std::uint32_t TimeoutMs)
-{
-    Touch Event;
-    int   Code = touch_await(Ear, &Event, TimeoutMs);
-    if (Code == -ERR_TIMEOUT) return Heard::Quiet;
-    if (Code != 0) return Heard::Gone;
-    if (Event.payload_len < sizeof(kb_event_t)) return Heard::Quiet;
-    std::memcpy(&Key, Event.payload, sizeof(Key));
-    return Heard::Key;
+    return {};
 }
 
 }
@@ -357,20 +347,31 @@ int main()
     std::size_t        Count;
     if (form_words(0, &Words, &Count) != 0) return 1;
 
-    vga_dimensions_t Glass{};
-    if (vga_getdimensions(&Glass) != 0 || Glass.rows < 10 || Glass.cols < 30) {
-        Say("eyes: this screen is too small for a pair of eyes");
+    std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
+        painter::tui::Surface::Open("eyes", 30, 10);
+    if (!Opened) {
+        Say(Opened.error().Describe("eyes"));
         return 1;
     }
-    Canvas Picture;
-    Picture.Size(Glass.rows >= 40 && Glass.cols >= 120 ? 2 : 1);
-    Place At = Where(Words, Count, Glass.cols, Glass.rows, Picture.Width, (Picture.Height + 1) / 2);
+    painter::tui::Surface Screen = std::move(*Opened);
+    painter::core::Size Dimensions = Screen.Size();
+    EyePicture Picture;
+    Picture.Size(Dimensions.Height >= 40 && Dimensions.Width >= 120 ? 2 : 1);
+    Place At = Where(Words, Count, Dimensions.Width, Dimensions.Height, Picture.Width, (Picture.Height + 1) / 2);
 
-    TouchTag Ear = console_listen();
-    if (Ear == TOUCH_TAG_INVALID) {
-        Say("eyes: this machine has no way to hear a key");
+    std::expected<painter::tui::Keyboard, painter::tui::StageError> Input = painter::tui::Keyboard::Open("eyes");
+    if (!Input) {
+        Say(Input.error().Describe("eyes"));
         return 1;
     }
+    painter::tui::Keyboard Keys = std::move(*Input);
+    std::expected<painter::tui::Frame, box::error> Created =
+        painter::tui::Frame::Create({Picture.Width, (Picture.Height + 1) / 2});
+    if (!Created) {
+        (void)Keys.Close();
+        return 1;
+    }
+    painter::tui::Frame Overlay = std::move(*Created);
     Pair Eyes;
     Eyes.Begin();
 
@@ -380,17 +381,18 @@ int main()
         bool          Moving = Eyes.Step(std::min(0.5f, static_cast<float>(Now - Last) / 1e6f));
         Last = Now;
         Picture.Draw(Eyes);
-        Paint(Picture, At, false);
+        if (!Paint(Picture, Screen, Overlay, At, false)) break;
 
-        kb_event_t Key;
-        Heard      What = Listen(Ear, Key, Moving ? MovingMs : StillMs);
-        if (What == Heard::Gone) break;
-        if (What == Heard::Key && !(Key.mods & KB_MOD_EXTENDED) &&
-            (Key.ascii == 'q' || Key.ascii == 'Q' || Key.ascii == KEY_ESCAPE))
+        painter::tui::Event Event = Keys.Wait(Moving ? MovingMs : StillMs);
+        if (Event.Kind == painter::tui::EventKind::Gone) break;
+        if (Event.Kind == painter::tui::EventKind::Key && !Event.Key.IsExtended() &&
+            (Event.Key.Ascii == 'q' || Event.Key.Ascii == 'Q' ||
+             Event.Key.Ascii == painter::tui::KeyCodes::Escape))
             break;
     }
-    console_unlisten();
-    Paint(Picture, At, true);
+    (void)Keys.Close();
+    (void)Paint(Picture, Screen, Overlay, At, true);
+    (void)Screen.Close();
     Say(std::format("[EYES] {} blink{}", Eyes.Blinks, Eyes.Blinks == 1 ? "" : "s"));
     return 0;
 }
