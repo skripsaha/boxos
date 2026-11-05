@@ -23,6 +23,7 @@
 #include <format>
 #include <map>
 #include <new>
+#include <optional>
 
 #include "box/file.h"
 #include "box/form.h"
@@ -30,7 +31,9 @@
 #include "box/print.h"
 
 #include "keep.h"
-#include "stage.h"
+#include "painter/core/color.h"
+#include "painter/tui/glyph.h"
+#include "painter/tui/stage.h"
 #include "tagmap.h"
 
 BOX_FORM("takes optional things \"the files to map; with none, the Use Context\"\n"
@@ -38,25 +41,31 @@ BOX_FORM("takes optional things \"the files to map; with none, the Use Context\"
 
 namespace {
 
-const Color Page      = COLOR_RGB(0x12, 0x12, 0x12);
-const Color BarPaper  = COLOR_RGB(0x3A, 0x3A, 0x3A);
-const Color TitleInk  = COLOR_AMBER;
-const Color ScopeInk  = COLOR_RGB(0x60, 0xA0, 0xE0);
-const Color TextInk   = COLOR_RGB(0xEE, 0xEE, 0xEE);
-const Color DimInk    = COLOR_RGB(0xC0, 0xC0, 0xC0);
-const Color HintInk   = COLOR_RGB(0x8C, 0x8C, 0x8C);
-const Color KeyInk    = COLOR_AMBER;
-const Color DarkInk   = COLOR_RGB(0x10, 0x10, 0x10);
-const Color MoreInk   = COLOR_RGB(0x40, 0x40, 0x40);
-const Color MoreGrain = COLOR_RGB(0x5C, 0x5C, 0x5C);
-const Color MoreLit   = COLOR_RGB(0xB4, 0xB4, 0xB4);
+using Color = painter::core::Color;
+namespace Colors = painter::core::Colors;
+using painter::tui::EventKind;
+using painter::tui::KeyEvent;
+using painter::tui::Stage;
+using painter::tui::StageError;
+using painter::tui::TextStyle;
+
+const Color Page      = Color::Rgb(0x12, 0x12, 0x12);
+const Color BarPaper  = Color::Rgb(0x3A, 0x3A, 0x3A);
+const Color TitleInk  = Colors::Amber;
+const Color ScopeInk  = Color::Rgb(0x60, 0xA0, 0xE0);
+const Color TextInk   = Color::Rgb(0xEE, 0xEE, 0xEE);
+const Color DimInk    = Color::Rgb(0xC0, 0xC0, 0xC0);
+const Color HintInk   = Color::Rgb(0x8C, 0x8C, 0x8C);
+const Color KeyInk    = Colors::Amber;
+const Color DarkInk   = Color::Rgb(0x10, 0x10, 0x10);
+const Color MoreInk   = Color::Rgb(0x40, 0x40, 0x40);
+const Color MoreGrain = Color::Rgb(0x5C, 0x5C, 0x5C);
+const Color MoreLit   = Color::Rgb(0xB4, 0xB4, 0xB4);
 
 /* One of each of the console's six dark hues, so neighbours differ there too;
  * lit, each is its light twin. */
-const Color Tints[] = {COLOR_RGB(0x24, 0x58, 0xB0), COLOR_RGB(0x2A, 0x80, 0x40), COLOR_RGB(0xA8, 0x2C, 0x2C),
-                       COLOR_RGB(0x1C, 0x7C, 0x84), COLOR_RGB(0x8A, 0x2E, 0x9A), COLOR_RGB(0xA0, 0x60, 0x1C)};
-
-constexpr char LeftHalf = static_cast<char>(0xDD);
+const Color Tints[] = {Color::Rgb(0x24, 0x58, 0xB0), Color::Rgb(0x2A, 0x80, 0x40), Color::Rgb(0xA8, 0x2C, 0x2C),
+                       Color::Rgb(0x1C, 0x7C, 0x84), Color::Rgb(0x8A, 0x2E, 0x9A), Color::Rgb(0xA0, 0x60, 0x1C)};
 
 struct MapFile {
     file_id_t                Id;
@@ -117,7 +126,7 @@ enum class Act { Stay, Leave, Give };
 
 class Map {
 public:
-    Stage                    Glass;
+    std::optional<Stage>      Glass;
     std::vector<MapFile>     Files;
     std::string              Scope;
     std::vector<std::string> Common;
@@ -128,7 +137,7 @@ public:
     Level Root();
     void  Arrange(Level &Here);
     void  Draw();
-    Act   OnKey(const kb_event_t &Key);
+    Act   OnKey(const KeyEvent &Key);
     std::string Text();
 
 private:
@@ -213,7 +222,8 @@ void Map::Arrange(Level &Here)
         return Weight(A) != Weight(B) ? Weight(A) > Weight(B) : A.Name < B.Name;
     });
 
-    int High = Glass.Rows - 3, Wide = Glass.Cols;
+    const painter::core::Size Dimensions = Glass->Size();
+    int High = Dimensions.Height - 3, Wide = Dimensions.Width;
     std::vector<std::uint64_t> Weights;
     for (const Entry &One : Here.Entries) Weights.push_back(Weight(One));
     std::uint64_t MoreWeight = 0;
@@ -248,19 +258,21 @@ std::uint64_t Map::Whole(const Level &Here) const
  * it as many of its name, its size and its count as it has rows for. */
 void Map::Tile(const TagmapTile &Place, const Entry &One, bool Chosen, std::uint64_t Whole)
 {
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
     bool  Gathered = One.Is == Kind::More;
     Color Ink      = Gathered ? MoreInk : Tints[Place.Index % (sizeof(Tints) / sizeof(Tints[0]))];
-    if (Chosen) Ink = Gathered ? MoreLit : color_mix(Ink, COLOR_WHITE, 120);
+    if (Chosen) Ink = Gathered ? MoreLit : Color::Mix(Ink, Colors::White, 120);
     Color Grain = Gathered && !Chosen ? MoreGrain : Ink;
 
     for (int R = 0; R < Place.High; R++) {
         for (int C = 0; C < Place.Wide; C++) {
             bool Bottom = R == Place.High - 1 && Place.High > 1, Right = C == Place.Wide - 1 && Place.Wide > 1;
             int  Row = Place.Row + R, Col = Place.Col + C;
-            if (Bottom && Right) Glass.Put(Row, Col, ' ', Page, Page);
-            else if (Right) Glass.Put(Row, Col, LeftHalf, Ink, Page);
-            else if (Bottom) Glass.Put(Row, Col, Glyph::UpperHalf, Ink, Page);
-            else Glass.Put(Row, Col, Gathered ? Glyph::LightShade : ' ', Grain, Ink);
+            if (Bottom && Right) FrameBuffer.Put({Col, Row}, ' ', TextStyle{Page, Page});
+            else if (Right) FrameBuffer.Put({Col, Row}, painter::tui::Glyphs::LeftHalf, TextStyle{Ink, Page});
+            else if (Bottom) FrameBuffer.Put({Col, Row}, painter::tui::Glyphs::UpperHalf, TextStyle{Ink, Page});
+            else FrameBuffer.Put({Col, Row}, Gathered ? painter::tui::Glyphs::LightShade : ' ',
+                                 TextStyle{Grain, Ink});
         }
     }
 
@@ -277,32 +289,37 @@ void Map::Tile(const TagmapTile &Place, const Entry &One, bool Chosen, std::uint
     for (int Line = 0; Line < std::min(Rows, Shown); Line++) {
         std::string Text = Lines[Line];
         if (static_cast<int>(Text.size()) > Room) Text = Text.substr(0, static_cast<std::size_t>(Room - 1)) + "~";
-        Glass.Write(Place.Row + Line, Place.Col + 1, Text, Chosen ? DarkInk : Line == 0 ? TextInk : DimInk, Ink);
+        FrameBuffer.Write({Place.Col + 1, Place.Row + Line}, Text,
+                          TextStyle{Chosen ? DarkInk : Line == 0 ? TextInk : DimInk, Ink});
     }
 }
 
 void Map::Head()
 {
-    Glass.Fill(0, 0, Glass.Cols, ' ', TextInk, Page);
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
+    FrameBuffer.Fill({0, 0, Dimensions.Width, 1}, ' ', TextStyle{TextInk, Page});
     std::string Weighed = BySize ? "by size" : "by count";
-    int         Edge    = Glass.Cols - 1 - static_cast<int>(Weighed.size());
-    int         Col     = Glass.Write(0, 1, "tagmap", TitleInk, Page);
-    Col = Glass.Write(0, Col + 2, Scope, ScopeInk, Page);
+    int         Edge    = Dimensions.Width - 1 - static_cast<int>(Weighed.size());
+    int         Col     = static_cast<int>(FrameBuffer.Write({1, 0}, "tagmap", TextStyle{TitleInk, Page}));
+    Col = static_cast<int>(FrameBuffer.Write({Col + 2, 0}, Scope, TextStyle{ScopeInk, Page}));
     for (std::size_t Depth = 1; Depth < Path.size(); Depth++) {
-        Col = Glass.Write(0, Col, " > ", HintInk, Page);
-        Col = Glass.Write(0, Col, Path[Depth].Crumb, TextInk, Page);
+        Col = static_cast<int>(FrameBuffer.Write({Col, 0}, " > ", TextStyle{HintInk, Page}));
+        Col = static_cast<int>(FrameBuffer.Write({Col, 0}, Path[Depth].Crumb, TextStyle{TextInk, Page}));
     }
-    if (Col < Edge) Glass.Write(0, Edge, Weighed, HintInk, Page);
+    if (Col < Edge) FrameBuffer.Write({Edge, 0}, Weighed, TextStyle{HintInk, Page});
 }
 
 /* What the chosen tile is, and the keys. */
 void Map::Foot()
 {
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
     const Level &Here = Path.back();
-    int          Row  = Glass.Rows - 2;
-    Glass.Fill(Row, 0, Glass.Cols, ' ', TextInk, Page);
+    int          Row  = Dimensions.Height - 2;
+    FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', TextStyle{TextInk, Page});
     if (!Note.empty()) {
-        Glass.Write(Row, 1, Note, TitleInk, Page);
+        FrameBuffer.Write({1, Row}, Note, TextStyle{TitleInk, Page});
     } else if (Here.Selected < Here.Tiles.size()) {
         const Entry &One   = Here.Shown(Here.Tiles[Here.Selected].Index);
         std::string  About = One.Name;
@@ -314,35 +331,38 @@ void Map::Foot()
         } else {
             About += std::format(": {} file{}, {}", One.Files.size(), One.Files.size() == 1 ? "" : "s", TagmapSize(One.Bytes));
         }
-        int Col = Glass.Write(Row, 1, About, TextInk, Page);
+        int Col = static_cast<int>(FrameBuffer.Write({1, Row}, About, TextStyle{TextInk, Page}));
         if (Path.size() == 1 && !Common.empty()) {
             std::string All = "all wear " + Joined(Common);
-            if (Col + 2 + static_cast<int>(All.size()) < Glass.Cols)
-                Glass.Write(Row, Glass.Cols - 1 - static_cast<int>(All.size()), All, ScopeInk, Page);
+            if (Col + 2 + static_cast<int>(All.size()) < Dimensions.Width)
+                FrameBuffer.Write({Dimensions.Width - 1 - static_cast<int>(All.size()), Row}, All,
+                                  TextStyle{ScopeInk, Page});
         }
     }
 
-    Row = Glass.Rows - 1;
-    Glass.Fill(Row, 0, Glass.Cols, ' ', TextInk, BarPaper);
+    Row = Dimensions.Height - 1;
+    FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', TextStyle{TextInk, BarPaper});
     int Col = 1;
     for (auto [Keys, What] : {std::pair{"\x1B\x18\x19\x1A", "choose"}, {"enter", "open"}, {"bksp", "back"},
                               {"space", "give"}, {"w", BySize ? "by count" : "by size"}, {"q", "leave"}}) {
         int Wide = static_cast<int>(std::string_view(Keys).size() + 1 + std::string_view(What).size() + 2);
-        if (Col + Wide > Glass.Cols) break;
-        Col = Glass.Write(Row, Col, Keys, KeyInk, BarPaper);
-        Col = Glass.Write(Row, Col + 1, What, HintInk, BarPaper) + 2;
+        if (Col + Wide > Dimensions.Width) break;
+        Col = static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, BarPaper}));
+        Col = static_cast<int>(FrameBuffer.Write({Col + 1, Row}, What, TextStyle{HintInk, BarPaper})) + 2;
     }
 }
 
 void Map::Draw()
 {
-    Glass.Clear(Page);
+    const painter::core::Size Dimensions = Glass->Size();
+    Glass->FrameBuffer().Clear(TextStyle{Page, Page});
     Head();
     const Level  &Here  = Path.back();
     std::uint64_t Total = Whole(Here);
     for (std::size_t At = 0; At < Here.Tiles.size(); At++)
         Tile(Here.Tiles[At], Here.Shown(Here.Tiles[At].Index), At == Here.Selected, Total);
-    if (Here.Tiles.empty()) Glass.Centre(Glass.Rows / 2, "nothing here to map", HintInk, Page);
+    if (Here.Tiles.empty()) Glass->FrameBuffer().Centre(Dimensions.Height / 2, "nothing here to map",
+                                                        TextStyle{HintInk, Page});
     Foot();
 }
 
@@ -367,30 +387,30 @@ void Map::Enter()
     Arrange(Path.back());
 }
 
-Act Map::OnKey(const kb_event_t &Key)
+Act Map::OnKey(const KeyEvent &Key)
 {
     Note.clear();
     Level &Here = Path.back();
-    if (Key.mods & KB_MOD_EXTENDED) {
+    if (Key.IsExtended()) {
         TagmapWay Way;
-        switch (Key.scancode) {
-        case KEY_LEFT:  Way = TagmapWay::Left; break;
-        case KEY_RIGHT: Way = TagmapWay::Right; break;
-        case KEY_UP:    Way = TagmapWay::Up; break;
-        case KEY_DOWN:  Way = TagmapWay::Down; break;
+        switch (Key.Scancode) {
+        case painter::tui::KeyCodes::Left:  Way = TagmapWay::Left; break;
+        case painter::tui::KeyCodes::Right: Way = TagmapWay::Right; break;
+        case painter::tui::KeyCodes::Up:    Way = TagmapWay::Up; break;
+        case painter::tui::KeyCodes::Down:  Way = TagmapWay::Down; break;
         default: return Act::Stay;
         }
         Here.Selected = TagmapStep(Here.Tiles, Here.Selected, Way);
         return Act::Stay;
     }
-    switch (Key.ascii) {
+    switch (Key.Ascii) {
     case 'q':
     case 'Q':
-    case KEY_ESCAPE: return Act::Leave;
+    case painter::tui::KeyCodes::Escape: return Act::Leave;
     case ' ': return Here.Tiles.empty() ? Act::Stay : Act::Give;
     case '\n':
     case '\r': Enter(); break;
-    case KEY_BACKSPACE:
+    case painter::tui::KeyCodes::Backspace:
     case 0x7F:
         if (Path.size() > 1) {
             Path.pop_back();
@@ -432,6 +452,13 @@ std::string Give(const Map &Atlas)
                        One.Name);
 }
 
+void Say(std::string_view Text)
+{
+    std::string Line(Text);
+    Line += '\n';
+    print_to_screen(Line.c_str());
+}
+
 }
 
 int main()
@@ -443,11 +470,11 @@ int main()
 
         Map Atlas;
         if (std::optional<std::string> Refusal = Atlas.Gather(Given, Count)) {
-            StageSay("tagmap: " + *Refusal);
+            Say("tagmap: " + *Refusal);
             return 1;
         }
         if (Atlas.Files.empty()) {
-            StageSay(std::format("tagmap: there are no files in {} to map", Atlas.Scope));
+            Say(std::format("tagmap: there are no files in {} to map", Atlas.Scope));
             return 0;
         }
         Atlas.Path.push_back(Atlas.Root());
@@ -458,23 +485,23 @@ int main()
             return 0;
         }
 
-        if (std::optional<std::string> Refusal = Atlas.Glass.Take("tagmap", 40, 12)) {
-            Atlas.Glass.Give();
-            StageSay(*Refusal);
+        std::expected<Stage, StageError> Opened = Stage::Open("tagmap", 40, 12);
+        if (!Opened) {
+            Say(Opened.error().Describe("tagmap"));
             return 1;
         }
+        Atlas.Glass = std::move(*Opened);
         Atlas.Arrange(Atlas.Path.back());
 
         bool Painted = true;
         Act  Last    = Act::Leave;
         for (;;) {
             Atlas.Draw();
-            if (!(Painted = Atlas.Glass.Show())) break;
-            kb_event_t Key;
-            StageHeard Heard = Atlas.Glass.Listen(Key, 0);
-            if (Heard == StageHeard::Gone) break;
-            if (Heard != StageHeard::Key) continue;
-            if ((Last = Atlas.OnKey(Key)) != Act::Stay) break;
+            if (!(Painted = static_cast<bool>(Atlas.Glass->Present()))) break;
+            const painter::tui::Event Event = Atlas.Glass->Wait();
+            if (Event.Kind == EventKind::Gone) break;
+            if (Event.Kind != EventKind::Key) continue;
+            if ((Last = Atlas.OnKey(Event.Key)) != Act::Stay) break;
         }
         std::uint64_t Bytes = 0;
         for (const MapFile &File : Atlas.Files) Bytes += File.Bytes;
@@ -483,11 +510,11 @@ int main()
         std::string Said = Last == Act::Give ? Give(Atlas)
                                              : std::format("[TAGMAP] {} files, {}, {} tags", Atlas.Files.size(),
                                                            TagmapSize(Bytes), Tags);
-        Atlas.Glass.Give();
-        StageSay(Painted ? Said : "The screen stopped taking frames.");
+        (void)Atlas.Glass->Close();
+        Say(Painted ? Said : "The screen stopped taking frames.");
         return Painted ? 0 : 1;
     } catch (const std::bad_alloc &) {
-        StageSay("There is not enough memory for a map of so many files.");
+        Say("There is not enough memory for a map of so many files.");
         return 1;
     }
 }

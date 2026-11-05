@@ -180,7 +180,7 @@ FIREWORKS_OBJS  = fireworks.o
 2048_OBJS       = 2048.o keep.o
 TETRIS_OBJS     = tetris.o tetris_play.o keep.o
 TODO_OBJS       = todo.o todo_list.o todo_view.o stage.o keep.o
-TAGMAP_OBJS     = tagmap.o tagmap_tiles.o stage.o keep.o
+TAGMAP_OBJS     = tagmap.o tagmap_tiles.o keep.o
 MANDELBROT_OBJS = mandelbrot.o mandelbrot_paint.o
 QR_OBJS         = qr.o qr_code.o
 MINESWEEPER_OBJS = minesweeper.o minesweeper_field.o keep.o
@@ -245,8 +245,8 @@ todo.elf: $(BOXLIB_START) $(TODO_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TODO_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-tagmap.elf: $(BOXLIB_START) $(TAGMAP_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TAGMAP_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+tagmap.elf: $(BOXLIB_START) $(TAGMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TAGMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 mandelbrot.elf: $(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
