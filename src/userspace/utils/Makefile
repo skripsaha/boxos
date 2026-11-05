@@ -48,6 +48,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -Werror=return-type \
          -I../boxcxx/include/std \
          -I../boxcxx/include \
+         -I../painter/include \
          -I../boxlib/include \
          -I../../include
 
@@ -59,6 +60,7 @@ LDFLAGS    = -nostdlib -static -T $(BOXLIB_DIR)/user.ld
 CXXLDFLAGS = $(LDFLAGS) -Wl,--undefined=__boxcxx_tls_bootstrap
 BOXLIB     = ../boxlib/libbox.a
 BOXCXX     = ../boxcxx/libboxcxx.a
+PAINTER    = ../painter/libpainter.a
 BOXLIB_START = ../build/boxlib_start.o
 # The assembler is several parts, kept in its own directory.
 ASSEMBLE_DIR  = assemble
@@ -74,6 +76,10 @@ UTILS = help create show files tag untag name trash erase assemble \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes
 
 .PHONY: all clean
+
+.PHONY: $(PAINTER)
+$(PAINTER): $(BOXCXX) $(BOXLIB)
+	@cd ../painter && $(MAKE)
 
 all: $(addsuffix .elf,$(UTILS))
 
@@ -165,7 +171,7 @@ PASSPORT_OBJS   = passport.o keep.o
 AQUARIUM_OBJS   = aquarium.o aquarium_kinds.o aquarium_scene.o aquarium_life.o aquarium_paint.o
 # The glass a program owns and its own small file on the volume, shared by
 # the programs after aquarium (stage.h, keep.h).
-NYANCAT_OBJS    = nyancat.o stage.o
+NYANCAT_OBJS    = nyancat.o
 FIREWORKS_OBJS  = fireworks.o stage.o
 2048_OBJS       = 2048.o stage.o keep.o
 TETRIS_OBJS     = tetris.o tetris_play.o stage.o keep.o
@@ -215,8 +221,8 @@ aquarium.elf: $(BOXLIB_START) $(AQUARIUM_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(AQUARIUM_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-nyancat.elf: $(BOXLIB_START) $(NYANCAT_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(NYANCAT_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+nyancat.elf: $(BOXLIB_START) $(NYANCAT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(NYANCAT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 fireworks.elf: $(BOXLIB_START) $(FIREWORKS_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)

@@ -74,8 +74,10 @@ paths, brushes, windows, pointer input, and presentation guarantees remain in
 
 ## Current state
 
-Design accepted on 2026-11-05. No Painter implementation exists yet. The Git
-checkpoint containing this document preserves the pre-implementation tree,
-including unrelated pre-existing utility changes and untracked utility
-sources. Implementation must proceed in bounded commits so this checkpoint
-remains an immediate rollback point.
+Design accepted on 2026-11-05. The first implementation slice now provides
+`painter::core` geometry and colors plus `painter::tui::Frame` and
+`painter::tui::Stage`. `nyancat` is the first migrated consumer and is linked
+through `libpainter.a`; its model and visual composition remain application
+code. The Git checkpoint before implementation is tagged
+`painter-preimplementation`, and the implementation branch proceeds in
+bounded commits so that checkpoint remains an immediate rollback point.

@@ -1173,7 +1173,7 @@ ifneq ($(words $(wildcard $(UTIL_ELFS))),$(words $(UTIL_ELFS)))
 $(shell rm -f $(UTILS_STAMP))
 endif
 
-$(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(UTILS_INPUTS)
+$(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(UTILS_INPUTS)
 	@echo "Building utilities..."
 	@cd $(UTILS_DIR) && $(MAKE)
 	@touch $@

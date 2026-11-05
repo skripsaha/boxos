@@ -12,33 +12,43 @@
 #include <algorithm>
 #include <format>
 #include <new>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 #include "box/clock.h"
 #include "box/cpu.h"
 #include "box/form.h"
+#include "box/print.h"
 
-#include "stage.h"
+#include "painter/core/color.h"
+#include "painter/tui/stage.h"
 
 BOX_FORM("");
 
 namespace {
+
+using Color = painter::core::Color;
+using painter::tui::EventKind;
+using painter::tui::Stage;
+using painter::tui::StageError;
+using painter::tui::TextStyle;
 
 constexpr std::uint64_t FrameUs   = 33333;
 constexpr float         CatFrames = 14.0f;   /* a second: legs, tail and bob */
 constexpr int           CatWide   = 34;
 constexpr int           CatHigh   = 21;
 
-const Color Space    = COLOR_RGB(0x00, 0x33, 0x66);
-const Color Outline  = COLOR_RGB(0x00, 0x00, 0x00);
-const Color Crust    = COLOR_RGB(0xFF, 0xCC, 0x99);
-const Color Frosting = COLOR_RGB(0xFF, 0x99, 0xFF);
-const Color Sprinkle = COLOR_RGB(0xFF, 0x33, 0x99);
-const Color Fur      = COLOR_RGB(0x99, 0x99, 0x99);
-const Color Cheek    = COLOR_RGB(0xFF, 0x99, 0x99);
-const Color White    = COLOR_RGB(0xFF, 0xFF, 0xFF);
-const Color Bands[]  = {COLOR_RGB(0xFF, 0x00, 0x00), COLOR_RGB(0xFF, 0x99, 0x00), COLOR_RGB(0xFF, 0xFF, 0x00),
-                        COLOR_RGB(0x33, 0xFF, 0x00), COLOR_RGB(0x00, 0x99, 0xFF), COLOR_RGB(0x66, 0x33, 0xFF)};
+const Color Space    = Color::Rgb(0x00, 0x33, 0x66);
+const Color Outline  = painter::core::Colors::Black;
+const Color Crust    = Color::Rgb(0xFF, 0xCC, 0x99);
+const Color Frosting = Color::Rgb(0xFF, 0x99, 0xFF);
+const Color Sprinkle = Color::Rgb(0xFF, 0x33, 0x99);
+const Color Fur      = Color::Rgb(0x99, 0x99, 0x99);
+const Color Cheek    = Color::Rgb(0xFF, 0x99, 0x99);
+const Color White    = painter::core::Colors::White;
+const Color Bands[]  = {Color::Rgb(0xFF, 0x00, 0x00), Color::Rgb(0xFF, 0x99, 0x00), Color::Rgb(0xFF, 0xFF, 0x00),
+                        Color::Rgb(0x33, 0xFF, 0x00), Color::Rgb(0x00, 0x99, 0xFF), Color::Rgb(0x66, 0x33, 0xFF)};
 
 struct Star {
     float X, Y;
@@ -173,7 +183,7 @@ void DrawCat(Picture &View, int X, int Y, int Frame)
 }
 
 struct Flight {
-    Stage              Glass;
+    std::optional<Stage> Glass;
     Picture            View;
     std::vector<Star>  Stars;
     std::uint64_t      Seed   = cpu_rdtsc() | 1;
@@ -221,11 +231,37 @@ struct Flight {
         DrawRainbow(View, CatX, CatY, static_cast<int>(Seconds * CatFrames));
         DrawCat(View, CatX, CatY, Frame);
 
-        Glass.Pixels(View.Dots);
+        Glass->FrameBuffer().PutPixels(View.Dots);
         std::string Count = std::format(" You have nyaned for {:.1f} seconds! ", Seconds);
-        Glass.Centre(Glass.Rows - 1, Count, White, Space);
+        const painter::core::Size Dimensions = Glass->Size();
+        Glass->FrameBuffer().Centre(Dimensions.Height - 1, Count, TextStyle{White, Space});
     }
 };
+
+void Say(std::string_view Text)
+{
+    std::string Line(Text);
+    Line += '\n';
+    print_to_screen(Line.c_str());
+}
+
+std::string StageRefusal(const StageError &Failure)
+{
+    switch (Failure.Kind) {
+    case painter::tui::StageErrorKind::TooSmall:
+        return std::format("This screen is {} by {} rows; nyancat needs at least {} by {}.",
+                           Failure.Actual.Width, Failure.Actual.Height, Failure.Required.Width,
+                           Failure.Required.Height);
+    case painter::tui::StageErrorKind::NoConsole: return "This machine has no console to show a cat on.";
+    case painter::tui::StageErrorKind::KeyboardUnavailable: return "This machine has no way to hear a key.";
+    case painter::tui::StageErrorKind::DimensionsUnavailable:
+        return std::format("This machine would not say how big its screen is: {}", Failure.Cause);
+    case painter::tui::StageErrorKind::FrameUnavailable:
+        return std::format("There is not enough memory for a cat the size of this screen: {}", Failure.Cause);
+    case painter::tui::StageErrorKind::InvalidState: return "The screen could not be opened.";
+    }
+    return "The screen could not be opened.";
+}
 
 }
 
@@ -233,14 +269,16 @@ int main()
 {
     try {
         Flight Show;
-        if (std::optional<std::string> Refusal = Show.Glass.Take("nyancat", 40, 14)) {
-            Show.Glass.Give();
-            StageSay(*Refusal);
+        std::expected<Stage, StageError> Opened = Stage::Open("nyancat", 40, 14);
+        if (!Opened) {
+            Say(StageRefusal(Opened.error()));
             return 1;
         }
+        Show.Glass = std::move(*Opened);
         /* The classic cat on 80 x 25; twice and more where the screen is. */
-        int Scale = std::max(1, std::min(Show.Glass.Cols / 80, Show.Glass.Rows * 2 / 50));
-        Show.View.Resize(Show.Glass.Cols, Show.Glass.Rows * 2, Scale);
+        const painter::core::Size Dimensions = Show.Glass->Size();
+        int Scale = std::max(1, std::min(Dimensions.Width / 80, Dimensions.Height * 2 / 50));
+        Show.View.Resize(Dimensions.Width, Dimensions.Height * 2, Scale);
         Show.SowStars();
 
         std::uint64_t Began = clock_uptime_us();
@@ -251,27 +289,29 @@ int main()
             Show.Step(static_cast<float>(Now - Last) / 1e6f);
             Last = Now;
             Show.Draw(static_cast<float>(Now - Began) / 1e6f);
-            if (!(Shown = Show.Glass.Show())) break;
+            if (auto Presented = Show.Glass->Present(); !Presented) {
+                Shown = false;
+                break;
+            }
 
             std::uint64_t Spent = clock_uptime_us() - Now;
-            kb_event_t    Key;
-            StageHeard    Heard = Show.Glass.Listen(Key, Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
-            if (Heard == StageHeard::Gone) break;
-            if (Heard != StageHeard::Key) continue;
-            if (Key.mods & KB_MOD_EXTENDED) {
-                if (Key.scancode == KEY_UP) Show.Height = std::max(0.0f, Show.Height - 0.1f);
-                if (Key.scancode == KEY_DOWN) Show.Height = std::min(1.0f, Show.Height + 0.1f);
-            } else if (Key.ascii == 'q' || Key.ascii == 'Q' || Key.ascii == KEY_ESCAPE) {
+            painter::tui::Event Event = Show.Glass->Wait(Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
+            if (Event.Kind == EventKind::Gone) break;
+            if (Event.Kind != EventKind::Key) continue;
+            if (Event.Key.IsExtended()) {
+                if (Event.Key.Scancode == painter::tui::KeyCodes::Up) Show.Height = std::max(0.0f, Show.Height - 0.1f);
+                if (Event.Key.Scancode == painter::tui::KeyCodes::Down) Show.Height = std::min(1.0f, Show.Height + 0.1f);
+            } else if (Event.Key.Ascii == 'q' || Event.Key.Ascii == 'Q' || Event.Key.Ascii == painter::tui::KeyCodes::Escape) {
                 break;
             }
         }
         float Nyaned = static_cast<float>(clock_uptime_us() - Began) / 1e6f;
-        Show.Glass.Give();
-        StageSay(Shown ? std::format("[NYANCAT] nyaned for {:.1f} seconds", Nyaned)
-                       : "The screen stopped taking frames.");
+        (void)Show.Glass->Close();
+        Say(Shown ? std::format("[NYANCAT] nyaned for {:.1f} seconds", Nyaned)
+                  : "The screen stopped taking frames.");
         return Shown ? 0 : 1;
     } catch (const std::bad_alloc &) {
-        StageSay("There is not enough memory for a cat the size of this screen.");
+        Say("There is not enough memory for a cat the size of this screen.");
         return 1;
     }
 }

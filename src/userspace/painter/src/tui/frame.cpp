@@ -127,6 +127,22 @@ bool Frame::BlendPixel(core::Point Pixel, core::Color Ink, std::uint8_t Weight)
     return true;
 }
 
+bool Frame::PutPixels(std::span<const core::Color> Pixels)
+{
+    const std::optional<std::size_t> Count = Bounds.CellCount();
+    if (!Count || Pixels.size() != *Count * 2u) return false;
+
+    for (std::int32_t Row = 0; Row < Bounds.Height; Row++) {
+        for (std::int32_t Col = 0; Col < Bounds.Width; Col++) {
+            Cell &Target = At({Col, Row});
+            Target.Glyph = Glyphs::UpperHalf;
+            Target.Foreground = Pixels[static_cast<std::size_t>(Row * 2) * Bounds.Width + Col];
+            Target.Background = Pixels[static_cast<std::size_t>(Row * 2 + 1) * Bounds.Width + Col];
+        }
+    }
+    return true;
+}
+
 Cell Frame::Read(core::Point At) const noexcept
 {
     return InBounds(At) ? this->At(At) : Cell{};

@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -58,6 +59,7 @@ public:
      * containing cell an upper-half glyph and changes only the selected half. */
     bool PutPixel(core::Point Pixel, core::Color Ink);
     bool BlendPixel(core::Point Pixel, core::Color Ink, std::uint8_t Weight);
+    bool PutPixels(std::span<const core::Color> Pixels);
 
     Cell Read(core::Point At) const noexcept;
 
