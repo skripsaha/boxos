@@ -265,8 +265,8 @@ eyes.elf: $(BOXLIB_START) $(EYES_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(EYES_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(PASSPORT_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.

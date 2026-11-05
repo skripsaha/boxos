@@ -4,9 +4,9 @@
  * what it is doing: the Use Context first, then memory, the volume and the
  * load as gauges, then the cores and their clocks, then the console's sixteen
  * colours. The card is built once as lines of coloured runs; the screen path
- * paints them into one TextCell frame and hands it to the glass with one
- * vga_paint, and under an arrow the same lines are written as text, because a
- * painted frame is deliberately not part of the console text stream.
+ * paints them into one Painter frame and presents that regional surface, and
+ * under an arrow the same lines are written as text, because a painted frame
+ * is deliberately not part of the console text stream.
  *
  * The logo is a two-pixel-high raster per console cell: the CP437 upper-half
  * block carries one colour in its foreground and one in its background. */
@@ -21,7 +21,6 @@
 #include <vector>
 
 #include "box/clock.h"
-#include "box/color.h"
 #include "box/error.h"
 #include "box/file.h"
 #include "box/form.h"
@@ -29,36 +28,40 @@
 #include "box/print.h"
 #include "box/sync.h"
 #include "box/system.h"
-#include "box/vga.h"
 
 #include "keep.h"
+#include "painter/core/color.h"
+#include "painter/tui/glyph.h"
+#include "painter/tui/surface.h"
 
 BOX_FORM("gives text\n");
 
 namespace {
 
-constexpr Color BubbleDark  = COLOR_RGB(0x81, 0x26, 0x5C);
-constexpr Color BubbleMid   = COLOR_RGB(0xB8, 0x3E, 0x79);
-constexpr Color BubblePink  = COLOR_RGB(0xE8, 0x5C, 0x93);
-constexpr Color BubbleLight = COLOR_RGB(0xFF, 0xE2, 0xF0);
-constexpr Color BubbleBlack = COLOR_RGB(0x0F, 0x0F, 0x12);
-constexpr Color PupilGlow   = COLOR_RGB(0x3A, 0x3A, 0x40);
+using PainterColor = painter::core::Color;
 
-constexpr Color PanelBackground = COLOR_RGB(0x12, 0x09, 0x12);
-constexpr Color TitleInk        = BubbleLight;
-constexpr Color LabelInk        = BubbleLight;
-constexpr Color ValueInk        = COLOR_LIGHT_GRAY;
-constexpr Color QuietInk        = COLOR_RGB(0x8C, 0x8C, 0x8C);
-constexpr Color AccentInk       = BubblePink;
-constexpr Color StatusInk       = BubbleMid;
-constexpr Color FrameInk        = BubbleMid;
+constexpr PainterColor BubbleDark  = PainterColor::Rgb(0x81, 0x26, 0x5C);
+constexpr PainterColor BubbleMid   = PainterColor::Rgb(0xB8, 0x3E, 0x79);
+constexpr PainterColor BubblePink  = PainterColor::Rgb(0xE8, 0x5C, 0x93);
+constexpr PainterColor BubbleLight = PainterColor::Rgb(0xFF, 0xE2, 0xF0);
+constexpr PainterColor BubbleBlack = PainterColor::Rgb(0x0F, 0x0F, 0x12);
+constexpr PainterColor PupilGlow   = PainterColor::Rgb(0x3A, 0x3A, 0x40);
+
+constexpr PainterColor PanelBackground = PainterColor::Rgb(0x12, 0x09, 0x12);
+constexpr PainterColor TitleInk        = BubbleLight;
+constexpr PainterColor LabelInk        = BubbleLight;
+constexpr PainterColor ValueInk        = painter::core::Colors::LightGray;
+constexpr PainterColor QuietInk        = PainterColor::Rgb(0x8C, 0x8C, 0x8C);
+constexpr PainterColor AccentInk       = BubblePink;
+constexpr PainterColor StatusInk       = BubbleMid;
+constexpr PainterColor FrameInk        = BubbleMid;
 
 /* A gauge is green while there is room, amber when it is getting full, red
  * when it nearly is; what is left of it is dots. */
-constexpr Color GaugeGood  = COLOR_RGB(0x50, 0xD0, 0x60);
-constexpr Color GaugeTight = COLOR_AMBER;
-constexpr Color GaugeFull  = COLOR_RGB(0xFF, 0x50, 0x50);
-constexpr Color GaugeLeft  = COLOR_RGB(0x4A, 0x4A, 0x4A);
+constexpr PainterColor GaugeGood  = PainterColor::Rgb(0x50, 0xD0, 0x60);
+constexpr PainterColor GaugeTight = painter::core::Colors::Amber;
+constexpr PainterColor GaugeFull  = PainterColor::Rgb(0xFF, 0x50, 0x50);
+constexpr PainterColor GaugeLeft  = PainterColor::Rgb(0x4A, 0x4A, 0x4A);
 
 constexpr std::size_t LogoPixelWidth  = 32;
 constexpr std::size_t LogoPixelHeight = 32;
@@ -93,22 +96,22 @@ constexpr char Left      = static_cast<char>(0xFA);
 
 struct Run {
     std::string Text;
-    Color       Ink;
+    PainterColor       Ink;
 };
 
 enum class LineKind { Words, Rule, Swatches };
 
 struct Line {
     LineKind         Kind  = LineKind::Words;
-    Color            Paper = PanelBackground;
+    PainterColor            Paper = PanelBackground;
     std::vector<Run> Runs;
 };
 
 /* The console's sixteen, in its own order. */
-constexpr Color Swatches[] = {COLOR_BLACK,     COLOR_DARK_BLUE, COLOR_DARK_GREEN, COLOR_DARK_CYAN,
-                              COLOR_DARK_RED,  COLOR_DARK_MAGENTA, COLOR_BROWN,   COLOR_LIGHT_GRAY,
-                              COLOR_DARK_GRAY, COLOR_BLUE,      COLOR_GREEN,      COLOR_CYAN,
-                              COLOR_RED,       COLOR_MAGENTA,   COLOR_YELLOW,     COLOR_WHITE};
+constexpr PainterColor Swatches[] = {painter::core::Colors::Black,     painter::core::Colors::DarkBlue, painter::core::Colors::DarkGreen, painter::core::Colors::DarkCyan,
+                              painter::core::Colors::DarkRed,  painter::core::Colors::DarkMagenta, painter::core::Colors::Brown,   painter::core::Colors::LightGray,
+                              painter::core::Colors::DarkGray, painter::core::Colors::Blue,      painter::core::Colors::Green,      painter::core::Colors::Cyan,
+                              painter::core::Colors::Red,       painter::core::Colors::Magenta,   painter::core::Colors::Yellow,     painter::core::Colors::White};
 constexpr std::size_t SwatchWidth = 2;
 
 struct ReportSample {
@@ -207,7 +210,7 @@ int CountFiles(bool Everywhere)
     return Count;
 }
 
-Line Field(std::string_view Label, std::string Value, Color Ink)
+Line Field(std::string_view Label, std::string Value, PainterColor Ink)
 {
     std::string Head(Label);
     Head.resize(LabelWidth, ' ');
@@ -220,7 +223,7 @@ Line Gauge(std::string_view Label, int Percent)
 {
     Percent = std::clamp(Percent, 0, 100);
     std::size_t Lit   = (GaugeWidth * static_cast<std::size_t>(Percent) + 50) / 100;
-    Color       Ink   = Percent >= 90 ? GaugeFull : Percent >= 70 ? GaugeTight : GaugeGood;
+    PainterColor       Ink   = Percent >= 90 ? GaugeFull : Percent >= 70 ? GaugeTight : GaugeGood;
     std::string Head(Label);
     Head.resize(LabelWidth, ' ');
     return Line{LineKind::Words, PanelBackground,
@@ -343,14 +346,14 @@ int DistanceSquared(int X, int Y, int CenterX, int CenterY)
     return Dx * Dx + Dy * Dy;
 }
 
-Color SurfaceColor(int Distance, int RadiusSquared)
+PainterColor SurfaceColor(int Distance, int RadiusSquared)
 {
     int Weight = RadiusSquared == 0 ? 255 : (RadiusSquared - Distance) * 255 / RadiusSquared;
     Weight = std::clamp(Weight, 0, 255);
-    return color_mix(BubbleDark, BubblePink, static_cast<uint8_t>(Weight));
+    return PainterColor::Mix(BubbleDark, BubblePink, static_cast<uint8_t>(Weight));
 }
 
-Color BubblePixel(int X, int Y)
+PainterColor BubblePixel(int X, int Y)
 {
     constexpr int Center = 15;
     constexpr int Outer  = 14 * 14;
@@ -358,37 +361,37 @@ Color BubblePixel(int X, int Y)
     constexpr int Pupil  = 6 * 6;
 
     int Distance = DistanceSquared(X, Y, Center, Center);
-    if (Distance > Outer) return COLOR_BLACK;
+    if (Distance > Outer) return painter::core::Colors::Black;
 
     if (Distance <= Pupil) {
         if (X < 13 && Y < 13 && Distance > 15)
-            return color_mix(BubbleBlack, PupilGlow, 90);
+            return PainterColor::Mix(BubbleBlack, PupilGlow, 90);
         return BubbleBlack;
     }
 
     if (Distance <= Ring) {
         int Weight = (Ring - Distance) * 255 / (Ring - Pupil);
-        return color_mix(BubbleMid, BubbleLight, static_cast<uint8_t>(std::clamp(Weight, 0, 255)));
+        return PainterColor::Mix(BubbleMid, BubbleLight, static_cast<uint8_t>(std::clamp(Weight, 0, 255)));
     }
     return SurfaceColor(Distance - Ring, Outer - Ring);
 }
 
-Color SatellitePixel(int X, int Y, int CenterX, int CenterY, int Radius)
+PainterColor SatellitePixel(int X, int Y, int CenterX, int CenterY, int Radius)
 {
     int RadiusSquared = Radius * Radius;
     int Distance      = DistanceSquared(X, Y, CenterX, CenterY);
-    return Distance <= RadiusSquared ? SurfaceColor(Distance, RadiusSquared) : COLOR_BLACK;
+    return Distance <= RadiusSquared ? SurfaceColor(Distance, RadiusSquared) : painter::core::Colors::Black;
 }
 
-Color LogoPixel(int X, int Y)
+PainterColor LogoPixel(int X, int Y)
 {
-    Color Main = BubblePixel(X, Y);
-    if (Main != COLOR_BLACK) return Main;
+    PainterColor Main = BubblePixel(X, Y);
+    if (Main != painter::core::Colors::Black) return Main;
 
-    Color TopLeft = SatellitePixel(X, Y, 3, 4, 3);
-    if (TopLeft != COLOR_BLACK) return TopLeft;
-    Color Right = SatellitePixel(X, Y, 30, 12, 2);
-    if (Right != COLOR_BLACK) return Right;
+    PainterColor TopLeft = SatellitePixel(X, Y, 3, 4, 3);
+    if (TopLeft != painter::core::Colors::Black) return TopLeft;
+    PainterColor Right = SatellitePixel(X, Y, 30, 12, 2);
+    if (Right != painter::core::Colors::Black) return Right;
     return SatellitePixel(X, Y, 27, 28, 4);
 }
 
@@ -397,9 +400,9 @@ std::string TextLogoLine(std::size_t Row)
     std::string Line;
     Line.reserve(LogoPixelWidth);
     for (std::size_t Col = 0; Col < LogoPixelWidth; Col++) {
-        Color Top    = LogoPixel(static_cast<int>(Col), static_cast<int>(Row * 2));
-        Color Bottom = LogoPixel(static_cast<int>(Col), static_cast<int>(Row * 2 + 1));
-        if (Top == COLOR_BLACK && Bottom == COLOR_BLACK) Line += ' ';
+        PainterColor Top    = LogoPixel(static_cast<int>(Col), static_cast<int>(Row * 2));
+        PainterColor Bottom = LogoPixel(static_cast<int>(Col), static_cast<int>(Row * 2 + 1));
+        if (Top == painter::core::Colors::Black && Bottom == painter::core::Colors::Black) Line += ' ';
         else if (Top == BubbleBlack || Bottom == BubbleBlack) Line += '@';
         else if (Top == BubbleLight || Bottom == BubbleLight) Line += 'o';
         else Line += '#';
@@ -411,29 +414,21 @@ std::string TextLogoLine(std::size_t Row)
 
 class Portrait {
 public:
-    Portrait(std::size_t Rows, std::size_t Cols) : Rows(Rows), Cols(Cols), Frame(Rows * Cols, Blank()) {}
+    Portrait(std::size_t Rows, std::size_t Cols, painter::tui::Frame FrameValue)
+        : Rows(Rows), Cols(Cols), FrameBuffer(std::move(FrameValue))
+    {
+    }
 
     void Logo(std::size_t Top);
     void Card(std::size_t Top, const std::vector<Line> &Lines);
-    const TextCell *Cells() const { return Frame.data(); }
+    const painter::tui::Frame &Canvas() const { return FrameBuffer; }
 
 private:
-    static TextCell Blank()
-    {
-        TextCell Cell{};
-        Cell.ch = ' ';
-        Cell.fg = ValueInk;
-        Cell.bg = COLOR_BLACK;
-        return Cell;
-    }
-
-    void Put(std::size_t Row, std::size_t Col, char Ch, Color Ink, Color Paper)
+    void Put(std::size_t Row, std::size_t Col, char Ch, PainterColor Ink, PainterColor Paper)
     {
         if (Row >= Rows || Col >= Cols) return;
-        TextCell &Cell = Frame[Row * Cols + Col];
-        Cell.ch = Ch;
-        Cell.fg = Ink;
-        Cell.bg = Paper;
+        FrameBuffer.Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
+                        painter::tui::Cell{Ch, Ink, Paper});
     }
 
     void Edge(std::size_t Row, char LeftCorner, char Middle, char RightCorner);
@@ -441,16 +436,16 @@ private:
     void Strip(std::size_t Row);
 
     std::size_t           Rows, Cols;
-    std::vector<TextCell> Frame;
+    painter::tui::Frame FrameBuffer;
 };
 
 void Portrait::Logo(std::size_t Top)
 {
     for (std::size_t PixelRow = 0; PixelRow < LogoPixelHeight; PixelRow += 2) {
         for (std::size_t PixelCol = 0; PixelCol < LogoPixelWidth; PixelCol++) {
-            Color Upper = LogoPixel(static_cast<int>(PixelCol), static_cast<int>(PixelRow));
-            Color Lower = LogoPixel(static_cast<int>(PixelCol), static_cast<int>(PixelRow + 1));
-            char  Ch    = Upper == COLOR_BLACK && Lower == COLOR_BLACK ? ' ' : Glyph::UpperHalf;
+            PainterColor Upper = LogoPixel(static_cast<int>(PixelCol), static_cast<int>(PixelRow));
+            PainterColor Lower = LogoPixel(static_cast<int>(PixelCol), static_cast<int>(PixelRow + 1));
+            char  Ch    = Upper == painter::core::Colors::Black && Lower == painter::core::Colors::Black ? ' ' : Glyph::UpperHalf;
             Put(Top + PixelRow / 2, LogoOriginX + PixelCol, Ch, Upper, Lower);
         }
     }
@@ -485,7 +480,7 @@ void Portrait::Strip(std::size_t Row)
     Words(Row, Line{});
     std::size_t Wide = SwatchWidth * (sizeof(Swatches) / sizeof(Swatches[0]));
     std::size_t Col  = PanelOriginX + 1 + (PanelInner - Wide) / 2;
-    for (Color Swatch : Swatches)
+    for (PainterColor Swatch : Swatches)
         for (std::size_t At = 0; At < SwatchWidth; At++) Put(Row, Col++, ' ', Swatch, Swatch);
 }
 
@@ -510,27 +505,25 @@ std::size_t LogoTop(std::size_t CardRows)
 
 bool PaintReport(const std::vector<Line> &Lines)
 {
-    vga_dimensions_t Dimensions{};
-    if (vga_getdimensions(&Dimensions) != 0) {
-        print_to_screen("passport: this screen would not say how big it is\n");
-        return false;
-    }
     std::size_t CardRows   = Lines.size() + 2;
     std::size_t ReportRows = TopMargin + std::max(LogoCellRows, CardRows);
     constexpr std::size_t PromptRows = 1;
-    if (Dimensions.cols < MinimumCols || Dimensions.rows < ReportRows + PromptRows) {
-        print_to_screen(std::format("passport: screen is {} columns by {} rows; needs at least {} by {}\n",
-                                    Dimensions.cols, Dimensions.rows, MinimumCols, ReportRows + PromptRows).c_str());
+    std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
+        painter::tui::Surface::Open("passport", MinimumCols, static_cast<std::int32_t>(ReportRows + PromptRows));
+    if (!Opened) {
+        print_to_screen((Opened.error().Describe("passport") + '\n').c_str());
         return false;
     }
+    painter::tui::Surface Surface = std::move(*Opened);
+    const painter::core::Size Dimensions = Surface.Size();
 
-    vga_pos_t Cursor{};
-    (void)vga_getcursor(&Cursor);
-    std::size_t PaintTop = Cursor.row;
-    if (PaintTop + ReportRows + PromptRows > Dimensions.rows) {
-        std::size_t BottomTop = Dimensions.rows - ReportRows - PromptRows;
+    std::expected<painter::core::Point, box::error> Cursor = Surface.Cursor();
+    if (!Cursor) return false;
+    std::size_t PaintTop = static_cast<std::size_t>(Cursor->Y);
+    if (PaintTop + ReportRows + PromptRows > static_cast<std::size_t>(Dimensions.Height)) {
+        std::size_t BottomTop = static_cast<std::size_t>(Dimensions.Height) - ReportRows - PromptRows;
         for (std::size_t Scrolls = PaintTop - BottomTop; Scrolls > 0; Scrolls--) {
-            if (vga_scroll_up() != 0) {
+            if (!Surface.ScrollUp()) {
                 print_to_screen("passport: the screen would not scroll for its portrait\n");
                 return false;
             }
@@ -538,13 +531,15 @@ bool PaintReport(const std::vector<Line> &Lines)
         PaintTop = BottomTop;
     }
 
-    Portrait Picture(ReportRows, MinimumCols);
+    std::expected<painter::tui::Frame, box::error> Created =
+        painter::tui::Frame::Create({static_cast<std::int32_t>(MinimumCols), static_cast<std::int32_t>(ReportRows)});
+    if (!Created) return false;
+    Portrait Picture(ReportRows, MinimumCols, std::move(*Created));
     Picture.Logo(LogoTop(CardRows));
     Picture.Card(TopMargin, Lines);
 
-    vga_setcursor(static_cast<uint8_t>(PaintTop + ReportRows), 0);
-    return vga_paint(static_cast<uint8_t>(PaintTop), 0, static_cast<uint8_t>(ReportRows),
-                     static_cast<uint8_t>(MinimumCols), Picture.Cells()) == 0;
+    if (!Surface.Paint({0, static_cast<std::int32_t>(PaintTop)}, Picture.Canvas())) return false;
+    return static_cast<bool>(Surface.SetCursor({0, static_cast<std::int32_t>(PaintTop + ReportRows)}));
 }
 
 /* ---- the portrait as text ------------------------------------------------- */
