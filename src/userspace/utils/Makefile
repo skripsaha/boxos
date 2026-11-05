@@ -71,7 +71,7 @@ UTILS = help create show files tag untag name trash erase assemble \
         timezone logsave lastsaid rgbtest usetest faretest luggagetest rollcall handset headcount \
         draft playtime lavalamp finish taskcenter hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
-        nyancat fireworks 2048 tetris todo tagmap
+        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes
 
 .PHONY: all clean
 
@@ -151,7 +151,7 @@ stringview.elf: $(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_
 	@x86_64-elf-objcopy --strip-all $@
 
 # calculate, difference, copy, typer, flame, checksum, passport, aquarium, nyancat,
-# fireworks, 2048, tetris, todo and tagmap are C++, the larger ones in
+# fireworks, 2048, tetris, todo, tagmap, mandelbrot, qr, minesweeper and eyes are C++, the larger ones in
 # parts named after their program; linked and stripped as hexer and stringview.
 CALCULATE_OBJS  = calculate.o calculate_integer.o calculate_fraction.o calculate_math.o \
                   calculate_show.o calculate_read.o calculate_parse.o
@@ -171,6 +171,10 @@ FIREWORKS_OBJS  = fireworks.o stage.o
 TETRIS_OBJS     = tetris.o tetris_play.o stage.o keep.o
 TODO_OBJS       = todo.o todo_list.o todo_view.o stage.o keep.o
 TAGMAP_OBJS     = tagmap.o tagmap_tiles.o stage.o keep.o
+MANDELBROT_OBJS = mandelbrot.o mandelbrot_paint.o stage.o
+QR_OBJS         = qr.o qr_code.o
+MINESWEEPER_OBJS = minesweeper.o minesweeper_field.o stage.o keep.o
+EYES_OBJS       = eyes.o
 # The utilities are built without optimisation, for their debug information;
 # a hash is the one place in them where that costs — every byte of a file
 # goes through its rounds — so these three are built as BoxLib is, -O2.
@@ -180,6 +184,8 @@ checksum_small.o checksum_sha2.o checksum_sha3.o: CXXFLAGS += -O2
 aquarium_paint.o: CXXFLAGS += -O2
 # So are the night sky's sparks: every one of thousands, every frame.
 fireworks.o: CXXFLAGS += -O2
+# And a fractal is nothing but that: every pixel followed up to thousands of steps.
+mandelbrot_paint.o: CXXFLAGS += -O2
 
 calculate.elf: $(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
@@ -231,6 +237,22 @@ todo.elf: $(BOXLIB_START) $(TODO_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld
 
 tagmap.elf: $(BOXLIB_START) $(TAGMAP_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TAGMAP_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+mandelbrot.elf: $(BOXLIB_START) $(MANDELBROT_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(MANDELBROT_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+qr.elf: $(BOXLIB_START) $(QR_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(QR_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+minesweeper.elf: $(BOXLIB_START) $(MINESWEEPER_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(MINESWEEPER_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+eyes.elf: $(BOXLIB_START) $(EYES_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(EYES_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)

@@ -757,7 +757,7 @@ UTIL_NAMES = help create show files tag untag name trash erase assemble \
              timezone logsave lastsaid rgbtest usetest faretest luggagetest headcount \
              draft playtime lavalamp finish taskcenter hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
-             nyancat fireworks 2048 tetris todo tagmap
+             nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1422,7 +1422,11 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/2048.elf "utility,game,fun" \
 	$(UTILS_DIR)/tetris.elf "utility,game,fun" \
 	$(UTILS_DIR)/todo.elf "utility" \
-	$(UTILS_DIR)/tagmap.elf "utility,storage"
+	$(UTILS_DIR)/tagmap.elf "utility,storage" \
+	$(UTILS_DIR)/mandelbrot.elf "utility,fun" \
+	$(UTILS_DIR)/qr.elf "utility" \
+	$(UTILS_DIR)/minesweeper.elf "utility,game,fun" \
+	$(UTILS_DIR)/eyes.elf "utility,fun"
 
 $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
 	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) $(VOLUME_CONTENT)); \

@@ -1,0 +1,387 @@
+/* minesweeper — find the mines without stepping on one.
+ *
+ *   minesweeper              the intermediate field, 16 x 16 with 40 mines
+ *   minesweeper expert       30 x 16 with 99; or beginner, 9 x 9 with 10
+ *
+ *   arrows        move                  space, enter  open; on a number, chord
+ *   f             flag, or unflag       1 2 3         beginner, intermediate, expert
+ *   r             a new field           q, ESC        leave
+ *
+ * The rules are minesweeper_field.cpp. The squares are as big as the glass
+ * allows — two or three cells wide on a text console, up to six by three on a wide
+ * framebuffer — raised while closed and sunk once open. The best time of
+ * each field is kept in minesweeper.record (keep.h). */
+
+#include <algorithm>
+#include <charconv>
+#include <cstring>
+#include <format>
+#include <new>
+#include <string>
+
+#include "box/clock.h"
+#include "box/cpu.h"
+#include "box/form.h"
+
+#include "keep.h"
+#include "minesweeper.h"
+#include "stage.h"
+
+BOX_FORM("takes optional words \"the field: beginner, intermediate or expert\"\n");
+
+namespace {
+
+const Keep              Record{"minesweeper.record", "minesweeper,record"};
+constexpr std::uint64_t RevealUs = 30000;   /* between two mines shown after a loss */
+
+const Color Page        = COLOR_RGB(0x12, 0x12, 0x12);
+/* A big square stands apart by its gaps; a square one row high has none to
+ * spare, so its neighbours alternate light and dark grey — two greys a text
+ * console tells apart. The one chosen is white. */
+const Color Raised      = COLOR_RGB(0x9A, 0x9A, 0x9A);
+const Color RaisedOdd   = COLOR_RGB(0xA8, 0xA8, 0xA8);
+const Color RaisedEven  = COLOR_RGB(0x78, 0x78, 0x78);
+const Color RaisedHere  = COLOR_RGB(0xE8, 0xE8, 0xE8);
+const Color RaisedLight = COLOR_RGB(0xC8, 0xC8, 0xC8);
+const Color Sunken      = COLOR_RGB(0x2A, 0x2A, 0x2A);
+const Color SunkenHere  = COLOR_RGB(0x4A, 0x4A, 0x4A);
+const Color Blast       = COLOR_RGB(0xC0, 0x30, 0x30);
+const Color FlagInk     = COLOR_RGB(0xE0, 0x30, 0x30);
+const Color MineInk     = COLOR_RGB(0xEE, 0xEE, 0xEE);
+const Color TitleInk    = COLOR_AMBER;
+const Color TextInk     = COLOR_RGB(0xEE, 0xEE, 0xEE);
+const Color HintInk     = COLOR_RGB(0x8C, 0x8C, 0x8C);
+const Color GoodInk     = COLOR_RGB(0x60, 0xE0, 0x70);
+const Color BadInk      = COLOR_RGB(0xFF, 0x60, 0x60);
+const Color FaceInk     = COLOR_RGB(0xF0, 0xD0, 0x40);
+const Color BarPaper    = COLOR_RGB(0x3A, 0x3A, 0x3A);
+const Color KeyInk      = COLOR_AMBER;
+
+/* The numbers as the game has always had them, lightened for a dark square:
+ * blue, green, red, violet, amber, cyan, white, grey. */
+const Color NumberInks[9] = {Sunken,
+                             COLOR_RGB(0x60, 0x90, 0xFF), COLOR_RGB(0x50, 0xC8, 0x50), COLOR_RGB(0xFF, 0x50, 0x50),
+                             COLOR_RGB(0xC0, 0x70, 0xFF), COLOR_RGB(0xE0, 0xA0, 0x30), COLOR_RGB(0x40, 0xD0, 0xD0),
+                             COLOR_RGB(0xEE, 0xEE, 0xEE), COLOR_RGB(0x9A, 0x9A, 0x9A)};
+
+constexpr char FlagGlyph = 0x10;
+constexpr char MineGlyph = 0x0F;
+constexpr char LeftHalf  = static_cast<char>(0xDD);
+
+/* Square sizes, biggest first: the first the glass holds is taken. */
+constexpr int TileSizes[][2] = {{6, 3}, {4, 2}, {3, 1}, {2, 1}};
+
+class Board {
+public:
+    Stage     Glass;
+    MineField Field;
+    int       Played = 0, Cleared = 0;
+    int       Best[MineSizeCount] = {};
+    std::string Trouble;
+
+    void Begin(int Which);
+    bool Fits(int Which) const;
+    void Draw();
+    /* False to leave. */
+    bool OnKey(const kb_event_t &Key);
+    std::uint32_t Wait() const;
+    int  Level() const { return Which; }
+    bool Beaten() const { return NewBest; }
+
+private:
+    void Tile(int X, int Y, const std::vector<int> &Rank, int ShownMines);
+    void Head();
+    void Foot();
+    void Act(bool Flag);
+    int  Seconds() const;
+
+    int           Which = 1;
+    int           CursorX = 0, CursorY = 0;
+    int           TileW = 2, TileH = 1, Left = 0, Top = 0;
+    std::uint64_t StartedAt = 0, EndedAt = 0;
+    bool          NewBest = false;
+};
+
+bool Board::Fits(int Level) const
+{
+    const MineSize &Size = MineSizes[Level];
+    return Size.Wide * 2 <= Glass.Cols - 2 && Size.High <= Glass.Rows - 5;
+}
+
+void Board::Begin(int Level)
+{
+    Which = Level;
+    const MineSize &Size = MineSizes[Which];
+    Field.Start(Size, cpu_rdtsc());
+    for (const auto &Tile : TileSizes) {
+        TileW = Tile[0];
+        TileH = Tile[1];
+        if (Size.Wide * TileW <= Glass.Cols - 2 && Size.High * TileH <= Glass.Rows - 5) break;
+    }
+    Left      = (Glass.Cols - Size.Wide * TileW) / 2;
+    Top       = std::max(2, (Glass.Rows - 1 - Size.High * TileH) / 2 + 1);
+    CursorX   = Size.Wide / 2;
+    CursorY   = Size.High / 2;
+    StartedAt = EndedAt = 0;
+    NewBest   = false;
+}
+
+int Board::Seconds() const
+{
+    if (StartedAt == 0) return 0;
+    std::uint64_t End = EndedAt ? EndedAt : clock_uptime_us();
+    return std::min(999, static_cast<int>((End - StartedAt) / 1000000));
+}
+
+/* One square: raised and closed, a flag on it, sunk and open with its number,
+ * or a mine shown once the field is lost. */
+void Board::Tile(int X, int Y, const std::vector<int> &Rank, int ShownMines)
+{
+    const MineCell &Cell = Field.At(X, Y);
+    bool  Here   = X == CursorX && Y == CursorY;
+    bool  Lost   = Field.State == MineState::Lost;
+    bool  Shown  = Cell.Open || (Lost && Cell.Mine && Rank[static_cast<std::size_t>(Y * Field.Wide + X)] < ShownMines);
+    int   Row    = Top + Y * TileH, Col = Left + X * TileW;
+    char  Mark  = ' ';
+    Color Ink    = TextInk;
+    Color Paper;
+
+    if (!Shown) {
+        Paper = Here ? RaisedHere : TileH > 1 ? Raised : (X + Y) % 2 ? RaisedOdd : RaisedEven;
+        if (Cell.Flag) {
+            bool Wrong = Lost && !Cell.Mine;
+            Mark = Wrong ? 'X' : FlagGlyph;
+            Ink   = Wrong ? Blast : FlagInk;
+        }
+    } else {
+        Paper = Here ? SunkenHere : Sunken;
+        if (Cell.Mine) {
+            Mark = MineGlyph;
+            Ink   = MineInk;
+            if (X == Field.HitX && Y == Field.HitY) Paper = Blast;
+        } else if (Cell.Near) {
+            Mark = static_cast<char>('0' + Cell.Near);
+            Ink   = NumberInks[Cell.Near];
+        }
+    }
+    /* A half-cell gap along the bottom and the right of a square big enough
+     * to spare it, so the squares stand apart; a raised one lit along its top. */
+    bool GapBelow = TileH > 1, GapRight = TileH > 1;
+    for (int R = 0; R < TileH; R++) {
+        for (int C = 0; C < TileW; C++) {
+            bool Below = GapBelow && R == TileH - 1, Right = GapRight && C == TileW - 1;
+            if (Below && Right) Glass.Put(Row + R, Col + C, ' ', Page, Page);
+            else if (Right) Glass.Put(Row + R, Col + C, LeftHalf, Paper, Page);
+            else if (Below) Glass.Put(Row + R, Col + C, Glyph::LowerHalf, Page, Paper);
+            else if (R == 0 && TileH > 1 && !Shown) Glass.Put(Row + R, Col + C, Glyph::UpperHalf, RaisedLight, Paper);
+            else Glass.Put(Row + R, Col + C, ' ', Ink, Paper);
+        }
+    }
+    if (Mark != ' ') Glass.Put(Row + (TileH - 1) / 2, Col + (TileW - 1) / 2, Mark, Ink, Paper);
+}
+
+/* The flags left, a face, the time. */
+void Board::Head()
+{
+    int Wide  = std::max(Field.Wide * TileW, 30);
+    int Start = (Glass.Cols - Wide) / 2;
+    Glass.Write(Top - 2, Start, "minesweeper", TitleInk, Page);
+    std::string Name = MineSizes[Which].Name;
+    Glass.Write(Top - 2, Start + Wide - static_cast<int>(Name.size()), Name, HintInk, Page);
+
+    Glass.Put(Top - 1, Start, FlagGlyph, FlagInk, Page);
+    Glass.Write(Top - 1, Start + 2, std::format("{:>3}", Field.FlagsLeft()), TextInk, Page);
+    const char *Face = Field.State == MineState::Won ? "B)" : Field.State == MineState::Lost ? "X(" : ":)";
+    Glass.Write(Top - 1, Start + Wide / 2 - 1, Face, Field.State == MineState::Lost ? BadInk : FaceInk, Page);
+    std::string Time = std::format("{:03} s", Seconds());
+    Glass.Write(Top - 1, Start + Wide - static_cast<int>(Time.size()), Time, TextInk, Page);
+}
+
+/* How the field went, under it, and the keys along the bottom. */
+void Board::Foot()
+{
+    int Row = Top + Field.High * TileH;
+    if (Row < Glass.Rows - 1) {
+        int BestTime = Best[Which];
+        if (Field.State == MineState::Won)
+            Glass.Centre(Row, NewBest ? std::format("cleared in {} s, a new best!", Seconds())
+                                      : std::format("cleared in {} s (best {} s)", Seconds(), BestTime),
+                         GoodInk, Page);
+        else if (Field.State == MineState::Lost)
+            Glass.Centre(Row, "boom. r for a new field", BadInk, Page);
+        else if (BestTime > 0)
+            Glass.Centre(Row, std::format("best {} s", BestTime), HintInk, Page);
+    }
+    int Bar = Glass.Rows - 1, Col = 1;
+    Glass.Fill(Bar, 0, Glass.Cols, ' ', TextInk, BarPaper);
+    for (auto [Keys, What] : {std::pair{"\x1B\x18\x19\x1A", "move"}, {"space", "open"}, {"f", "flag"},
+                              {"1 2 3", "field"}, {"r", "new"}, {"q", "leave"}}) {
+        int Wide = static_cast<int>(std::string_view(Keys).size() + std::string_view(What).size()) + 3;
+        if (Col + Wide > Glass.Cols) break;
+        Col = Glass.Write(Bar, Col, Keys, KeyInk, BarPaper);
+        Col = Glass.Write(Bar, Col + 1, What, HintInk, BarPaper) + 2;
+    }
+}
+
+void Board::Draw()
+{
+    Glass.Clear(Page);
+    std::vector<int> Order = Field.MinesByDistance();
+    std::vector<int> Rank(static_cast<std::size_t>(Field.Wide * Field.High), 1 << 30);
+    for (std::size_t At = 0; At < Order.size(); At++) Rank[static_cast<std::size_t>(Order[At])] = static_cast<int>(At);
+    int Shown = 0;
+    if (Field.State == MineState::Lost)
+        Shown = static_cast<int>(std::min<std::uint64_t>(Order.size(), (clock_uptime_us() - EndedAt) / RevealUs + 1));
+
+    Head();
+    for (int Y = 0; Y < Field.High; Y++)
+        for (int X = 0; X < Field.Wide; X++) Tile(X, Y, Rank, Shown);
+    Foot();
+}
+
+/* An opening or a flag, and what it changed: the clock started, stopped, a
+ * best time kept. */
+void Board::Act(bool Flag)
+{
+    MineState Was = Field.State;
+    if (Flag) Field.ToggleFlag(CursorX, CursorY);
+    else if (Field.At(CursorX, CursorY).Open) Field.Chord(CursorX, CursorY);
+    else Field.Open(CursorX, CursorY);
+
+    std::uint64_t Now = clock_uptime_us();
+    if (Was == MineState::Fresh && Field.State != MineState::Fresh) {
+        StartedAt = Now;
+        Played++;
+    }
+    if (Was == Field.State || (Field.State != MineState::Won && Field.State != MineState::Lost)) return;
+    EndedAt = Now;
+    if (Field.State != MineState::Won) return;
+    Cleared++;
+    int Time = std::max(1, Seconds());
+    if (Best[Which] == 0 || Time < Best[Which]) {
+        Best[Which] = Time;
+        NewBest     = true;
+    }
+}
+
+bool Board::OnKey(const kb_event_t &Key)
+{
+    if (Key.mods & KB_MOD_EXTENDED) {
+        switch (Key.scancode) {
+        case KEY_LEFT:  CursorX = std::max(0, CursorX - 1); break;
+        case KEY_RIGHT: CursorX = std::min(Field.Wide - 1, CursorX + 1); break;
+        case KEY_UP:    CursorY = std::max(0, CursorY - 1); break;
+        case KEY_DOWN:  CursorY = std::min(Field.High - 1, CursorY + 1); break;
+        default: break;
+        }
+        return true;
+    }
+    char Ch = Key.ascii;
+    if (Ch >= 'A' && Ch <= 'Z') Ch = static_cast<char>(Ch - 'A' + 'a');
+    switch (Ch) {
+    case 'q':
+    case KEY_ESCAPE: return false;
+    case ' ':
+    case '\n':
+    case '\r': Act(false); break;
+    case 'f':  Act(true); break;
+    case 'r':  Begin(Which); break;
+    case '1':
+    case '2':
+    case '3':
+        if (Fits(Ch - '1')) Begin(Ch - '1');
+        break;
+    default: break;
+    }
+    return true;
+}
+
+/* While the clock runs, until its next second; while the mines are being
+ * shown, the next of them; else the keys alone. */
+std::uint32_t Board::Wait() const
+{
+    std::uint64_t Now = clock_uptime_us();
+    if (Field.State == MineState::Lost && (Now - EndedAt) / RevealUs < Field.MinesByDistance().size())
+        return static_cast<std::uint32_t>(RevealUs / 1000);
+    if (Field.State == MineState::Playing)
+        return static_cast<std::uint32_t>((1000000 - (Now - StartedAt) % 1000000) / 1000 + 1);
+    return 0;
+}
+
+void ReadBest(Board &Desk)
+{
+    std::string Text;
+    if (std::optional<std::string> Refusal = KeepRead(Record, Text)) {
+        Desk.Trouble = *Refusal;
+        return;
+    }
+    for (int Level = 0; Level < MineSizeCount; Level++) {
+        std::string Name = std::string(MineSizes[Level].Name) + ' ';
+        std::size_t At   = Text.find(Name);
+        if (At != std::string::npos)
+            std::from_chars(Text.data() + At + Name.size(), Text.data() + Text.size(), Desk.Best[Level]);
+    }
+}
+
+std::string BestText(const Board &Desk)
+{
+    std::string Text;
+    for (int Level = 0; Level < MineSizeCount; Level++)
+        if (Desk.Best[Level] > 0) Text += std::format("{} {}\n", MineSizes[Level].Name, Desk.Best[Level]);
+    return Text;
+}
+
+int Asked(const char *const *Words, std::size_t Count)
+{
+    for (std::size_t At = 0; At < Count; At++)
+        for (int Level = 0; Level < MineSizeCount; Level++)
+            if (std::strcmp(Words[At], MineSizes[Level].Name) == 0) return Level;
+    return -1;
+}
+
+}
+
+int main()
+{
+    try {
+        const char *const *Words;
+        std::size_t        Count;
+        if (form_words(0, &Words, &Count) != 0) return 1;
+
+        Board Desk;
+        if (std::optional<std::string> Refusal = Desk.Glass.Take("minesweeper", 40, 16)) {
+            Desk.Glass.Give();
+            StageSay(*Refusal);
+            return 1;
+        }
+        int Level = Asked(Words, Count);
+        if (Level < 0) Level = Desk.Fits(1) ? 1 : 0;
+        if (!Desk.Fits(Level)) Level = 0;
+        ReadBest(Desk);
+        int Kept[MineSizeCount];
+        std::copy(std::begin(Desk.Best), std::end(Desk.Best), Kept);
+        Desk.Begin(Level);
+
+        bool Painted = true;
+        for (;;) {
+            Desk.Draw();
+            if (!(Painted = Desk.Glass.Show())) break;
+            kb_event_t Key;
+            StageHeard Heard = Desk.Glass.Listen(Key, Desk.Wait());
+            if (Heard == StageHeard::Gone) break;
+            if (Heard == StageHeard::Key && !Desk.OnKey(Key)) break;
+        }
+        Desk.Glass.Give();
+
+        /* Kept only when beaten, and never over a record that could not be read. */
+        if (Desk.Trouble.empty() && !std::equal(std::begin(Kept), std::end(Kept), std::begin(Desk.Best))) {
+            if (std::optional<std::string> Refusal = KeepWrite(Record, BestText(Desk))) Desk.Trouble = *Refusal;
+        }
+        StageSay(std::format("[MINESWEEPER] {} played, {} cleared", Desk.Played, Desk.Cleared));
+        if (!Desk.Trouble.empty()) StageSay("minesweeper: the best times are not kept: " + Desk.Trouble);
+        return Painted ? 0 : 1;
+    } catch (const std::bad_alloc &) {
+        StageSay("There is not enough memory for the field.");
+        return 1;
+    }
+}
