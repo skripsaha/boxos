@@ -77,6 +77,10 @@ UTILS = help create show files tag untag name trash erase assemble \
 
 .PHONY: all clean
 
+# The Painter archive has its own target, but utilities must still default to
+# the complete utility set when this Makefile is invoked recursively.
+.DEFAULT_GOAL := all
+
 .PHONY: $(PAINTER)
 $(PAINTER): $(BOXCXX) $(BOXLIB)
 	@cd ../painter && $(MAKE)
