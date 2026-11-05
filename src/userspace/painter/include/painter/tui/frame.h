@@ -29,6 +29,7 @@ struct Cell {
 };
 
 class Stage;
+class Surface;
 
 class Frame {
 public:
@@ -84,6 +85,7 @@ private:
     std::vector<Cell> Cells;
 
     friend class Stage;
+    friend class Surface;
 };
 
 }  // namespace painter::tui

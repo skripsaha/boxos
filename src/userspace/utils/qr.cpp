@@ -18,8 +18,10 @@
 
 #include "box/form.h"
 #include "box/print.h"
-#include "box/vga.h"
 
+#include "painter/core/color.h"
+#include "painter/tui/glyph.h"
+#include "painter/tui/surface.h"
 #include "qr_code.h"
 
 BOX_FORM("takes text \"the words to make a code of\"\n");
@@ -30,7 +32,8 @@ constexpr int  QuietMost  = 4;   /* what the standard asks round a code */
 constexpr int  QuietLeast = 2;   /* what a phone still reads, when the glass is small */
 constexpr int  Indent     = 2;
 constexpr int  TextQuiet  = 4;
-constexpr char UpperHalf  = static_cast<char>(0xDF);
+using Color = painter::core::Color;
+namespace Colors = painter::core::Colors;
 
 void Say(std::string_view Text)
 {
@@ -80,43 +83,43 @@ std::string AsText(const QrCode &Code, std::size_t Bytes)
 
 /* The rows of the console from the cursor down, scrolled up first when the
  * code would not fit under it; the row it begins at, or -1. */
-int MakeRoom(int Rows, const vga_dimensions_t &Glass)
+std::expected<int, box::error> MakeRoom(int Rows, painter::tui::Surface &Glass)
 {
-    vga_pos_t Cursor{};
-    (void)vga_getcursor(&Cursor);
-    int Top = Cursor.row, Bottom = Glass.rows - Rows - 1;   /* a row left for the prompt */
+    std::expected<painter::core::Point, box::error> Cursor = Glass.Cursor();
+    if (!Cursor) return std::unexpected(Cursor.error());
+    int Top = Cursor->Y, Bottom = Glass.Size().Height - Rows - 1;   /* a row left for the prompt */
     for (; Top > Bottom; Top--)
-        if (vga_scroll_up() != 0) return -1;
+        if (auto Scrolled = Glass.ScrollUp(); !Scrolled) return std::unexpected(Scrolled.error());
     return Top;
 }
 
-bool Paint(const QrCode &Code, int Quiet, const vga_dimensions_t &Glass)
+bool Paint(const QrCode &Code, int Quiet, painter::tui::Surface &Glass)
 {
     int Side = Code.Size + 2 * Quiet, Rows = (Side + 1) / 2;
-    int Top  = MakeRoom(Rows + 1, Glass);
-    if (Top < 0) return false;
+    std::expected<int, box::error> Top = MakeRoom(Rows + 1, Glass);
+    if (!Top) return false;
 
-    std::vector<TextCell> Cells(static_cast<std::size_t>(Rows) * Side);
+    std::expected<painter::tui::Frame, box::error> Created = painter::tui::Frame::Create({Side, Rows});
+    if (!Created) return false;
+    painter::tui::Frame &Frame = *Created;
     for (int Row = 0; Row < Rows; Row++) {
         for (int X = 0; X < Side; X++) {
-            TextCell &Cell = Cells[static_cast<std::size_t>(Row) * Side + X];
-            Cell.ch = UpperHalf;
-            Cell.fg = DarkAt(Code, Quiet, X, Row * 2) ? COLOR_BLACK : COLOR_WHITE;
-            Cell.bg = DarkAt(Code, Quiet, X, Row * 2 + 1) ? COLOR_BLACK : COLOR_WHITE;
+            painter::tui::Cell Cell;
+            Cell.Glyph       = painter::tui::Glyphs::UpperHalf;
+            Cell.Foreground = DarkAt(Code, Quiet, X, Row * 2) ? Colors::Black : Colors::White;
+            Cell.Background = DarkAt(Code, Quiet, X, Row * 2 + 1) ? Colors::Black : Colors::White;
+            Frame.Put({X, Row}, Cell);
         }
     }
-    if (vga_paint(static_cast<std::uint8_t>(Top), Indent, static_cast<std::uint8_t>(Rows),
-                  static_cast<std::uint8_t>(Side), Cells.data()) != 0)
-        return false;
-    vga_setcursor(static_cast<std::uint8_t>(Top + Rows), 0);
-    return true;
+    if (!Glass.Paint({Indent, *Top}, Frame)) return false;
+    return static_cast<bool>(Glass.SetCursor({0, *Top + Rows}));
 }
 
 /* The biggest version whose code fits the glass with the least quiet zone,
  * under the code a line for the caption and one for the prompt. */
-int MostVersionFor(const vga_dimensions_t &Glass)
+int MostVersionFor(const painter::core::Size &Glass)
 {
-    int Side = std::min(static_cast<int>(Glass.cols) - Indent, (static_cast<int>(Glass.rows) - 2) * 2);
+    int Side = std::min(Glass.Width - Indent, (Glass.Height - 2) * 2);
     return (Side - 2 * QuietLeast - 17) / 4;
 }
 
@@ -142,14 +145,17 @@ int Run()
         return 0;
     }
 
-    vga_dimensions_t Glass{};
-    if (vga_getdimensions(&Glass) != 0 || Glass.rows == 0) {
-        Say("qr: this machine did not say how big its screen is");
+    std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
+        painter::tui::Surface::Open("qr", 30, 10);
+    if (!Opened) {
+        Say(Opened.error().Describe("qr"));
         return 1;
     }
-    int Most = std::min(40, MostVersionFor(Glass));
+    painter::tui::Surface Glass = std::move(*Opened);
+    const painter::core::Size Dimensions = Glass.Size();
+    int Most = std::min(40, MostVersionFor(Dimensions));
     if (Most < 1) {
-        Say(std::format("qr: a screen of {} by {} is too small for a code", Glass.cols, Glass.rows));
+        Say(std::format("qr: a screen of {} by {} is too small for a code", Dimensions.Width, Dimensions.Height));
         return 1;
     }
     std::optional<QrCode> Code = QrCode::Make(Words, QrLevel::Low, Most);
@@ -158,7 +164,7 @@ int Run()
                         QrCode::Capacity(Most, QrLevel::Low), QrCode::Capacity(40, QrLevel::Low)));
         return 1;
     }
-    int Room  = std::min(static_cast<int>(Glass.cols) - Indent, (static_cast<int>(Glass.rows) - 2) * 2) - Code->Size;
+    int Room  = std::min(Dimensions.Width - Indent, (Dimensions.Height - 2) * 2) - Code->Size;
     int Quiet = std::clamp(Room / 2, QuietLeast, QuietMost);
     if (!Paint(*Code, Quiet, Glass)) {
         Say("qr: the screen would not take the code");
