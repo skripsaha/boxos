@@ -266,16 +266,19 @@ void Explorer::StatusBar()
     painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
     const painter::core::Size Dimensions = Glass->Size();
     int Row = Dimensions.Height - 1;
-    int Col = static_cast<int>(FrameBuffer.Write({1, Row}, View.Julia ? "julia" : "mandelbrot",
-                                                 TextStyle{KeyInk, BarPaper}));
+    int Col = 1;
+    Col += static_cast<int>(FrameBuffer.Write({Col, Row}, View.Julia ? "julia" : "mandelbrot",
+                                              TextStyle{KeyInk, BarPaper}));
 
     int         Digits = std::clamp(static_cast<int>(std::log10(HomeWidth / View.Width)) + 4, 4, 15);
     double      X = View.Julia ? View.JuliaX : View.CentreX, Y = View.Julia ? View.JuliaY : View.CentreY;
     std::string Where  = std::format("{}{:.{}f} {:+.{}f}i", View.Julia ? "c = " : "", X, Digits, Y, Digits);
-    Col = static_cast<int>(FrameBuffer.Write({Col + 2, Row}, Where, TextStyle{BarInk, BarPaper}));
+    Col += 2;
+    Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Where, TextStyle{BarInk, BarPaper}));
 
     std::string Depth = std::format("x{:.3g}", HomeWidth / View.Width);
-    Col = static_cast<int>(FrameBuffer.Write({Col + 2, Row}, Depth, TextStyle{BarInk, BarPaper}));
+    Col += 2;
+    Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Depth, TextStyle{BarInk, BarPaper}));
     std::string More = std::format("{} steps  {}", FractalSteps(View, Detail), FractalPalettes(Palette).Name);
     if (Touring) More += std::format("  tour: {}", Sights[Visiting].Name);
     if (!Picture.Whole()) More += "  drawing";
@@ -291,8 +294,10 @@ void Explorer::KeysBar()
                               {"a", "turn"}, {"space", "tour"}, {"[]", "detail"}, {"r", "home"}, {"q", "leave"}}) {
         int Wide = static_cast<int>(std::string_view(Keys).size() + std::string_view(What).size()) + 3;
         if (Col + Wide > Dimensions.Width) break;
-        Col = static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, BarPaper}));
-        Col = static_cast<int>(FrameBuffer.Write({Col + 1, Row}, What, TextStyle{HintInk, BarPaper})) + 2;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, BarPaper}));
+        Col += 1;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, What, TextStyle{HintInk, BarPaper}));
+        Col += 2;
     }
 }
 
