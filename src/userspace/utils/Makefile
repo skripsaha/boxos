@@ -178,7 +178,7 @@ AQUARIUM_OBJS   = aquarium.o aquarium_kinds.o aquarium_scene.o aquarium_life.o a
 NYANCAT_OBJS    = nyancat.o
 FIREWORKS_OBJS  = fireworks.o
 2048_OBJS       = 2048.o keep.o
-TETRIS_OBJS     = tetris.o tetris_play.o stage.o keep.o
+TETRIS_OBJS     = tetris.o tetris_play.o keep.o
 TODO_OBJS       = todo.o todo_list.o todo_view.o stage.o keep.o
 TAGMAP_OBJS     = tagmap.o tagmap_tiles.o stage.o keep.o
 MANDELBROT_OBJS = mandelbrot.o mandelbrot_paint.o stage.o
@@ -237,8 +237,8 @@ fireworks.elf: $(BOXLIB_START) $(FIREWORKS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) 
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(2048_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-tetris.elf: $(BOXLIB_START) $(TETRIS_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TETRIS_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+tetris.elf: $(BOXLIB_START) $(TETRIS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TETRIS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 todo.elf: $(BOXLIB_START) $(TODO_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)

@@ -20,35 +20,46 @@
 #include "box/clock.h"
 #include "box/cpu.h"
 #include "box/form.h"
+#include "box/print.h"
 
 #include "keep.h"
-#include "stage.h"
+#include "painter/core/color.h"
+#include "painter/tui/glyph.h"
+#include "painter/tui/stage.h"
 #include "tetris.h"
 
 BOX_FORM("");
 
 namespace {
 
+using Color = painter::core::Color;
+namespace Colors = painter::core::Colors;
+using painter::tui::EventKind;
+using painter::tui::KeyEvent;
+using painter::tui::Stage;
+using painter::tui::StageError;
+using painter::tui::TextStyle;
+
 constexpr std::uint64_t FrameUs  = 16667;
 constexpr float         MostStep = 0.05f;
 const Keep              Record{"tetris.record", "tetris,record"};
 
-const Color Page     = COLOR_RGB(0x0C, 0x0C, 0x0C);
-const Color WellInk  = COLOR_RGB(0x10, 0x10, 0x10);
-const Color GridInk  = COLOR_RGB(0x34, 0x34, 0x34);
-const Color FrameInk = COLOR_RGB(0x8C, 0x8C, 0x8C);
-const Color LabelInk = COLOR_RGB(0x8C, 0x8C, 0x8C);
-const Color ValueInk = COLOR_RGB(0xEE, 0xEE, 0xEE);
-const Color KeyInk   = COLOR_AMBER;
-const Color TitleInk = COLOR_RGB(0x40, 0xE0, 0xFF);
-const Color FlashInk = COLOR_RGB(0xFF, 0xFF, 0xFF);
+const Color Page     = Color::Rgb(0x0C, 0x0C, 0x0C);
+const Color WellInk  = Color::Rgb(0x10, 0x10, 0x10);
+const Color GridInk  = Color::Rgb(0x34, 0x34, 0x34);
+const Color FrameInk = Color::Rgb(0x8C, 0x8C, 0x8C);
+const Color LabelInk = Color::Rgb(0x8C, 0x8C, 0x8C);
+const Color ValueInk = Color::Rgb(0xEE, 0xEE, 0xEE);
+const Color KeyInk   = Colors::Amber;
+const Color TitleInk = Color::Rgb(0x40, 0xE0, 0xFF);
+const Color FlashInk = Color::Rgb(0xFF, 0xFF, 0xFF);
 
 /* The guideline's colours: I cyan, O yellow, T purple, S green, Z red, J blue,
  * L orange. All light but orange, so on a text console L is the one brown and
  * O stays yellow. */
-const Color PieceInks[] = {COLOR_RGB(0x40, 0xE8, 0xF8), COLOR_RGB(0xF0, 0xE0, 0x40), COLOR_RGB(0xA8, 0x30, 0xF0),
-                           COLOR_RGB(0x30, 0xE0, 0x40), COLOR_RGB(0xF0, 0x20, 0x20), COLOR_RGB(0x30, 0x60, 0xFF),
-                           COLOR_RGB(0xF0, 0x90, 0x00)};
+const Color PieceInks[] = {Color::Rgb(0x40, 0xE8, 0xF8), Color::Rgb(0xF0, 0xE0, 0x40), Color::Rgb(0xA8, 0x30, 0xF0),
+                           Color::Rgb(0x30, 0xE0, 0x40), Color::Rgb(0xF0, 0x20, 0x20), Color::Rgb(0x30, 0x60, 0xFF),
+                           Color::Rgb(0xF0, 0x90, 0x00)};
 
 /* Box-drawing glyphs of the console font: the double frame. */
 constexpr char FrameSide = static_cast<char>(0xBA), FrameTop = static_cast<char>(0xCD);
@@ -57,19 +68,20 @@ constexpr char CornerBL = static_cast<char>(0xC8), CornerBR = static_cast<char>(
 
 class Table {
 public:
-    Stage Glass;
-    Well  Game;
+    std::optional<Stage> Glass;
+    Well                Game;
     unsigned Best   = 0;
     bool     Paused = false;
     float    Clock  = 0;
 
     void Measure()
     {
-        Scale = std::max(1, std::min((Glass.Rows - 2) / WellHigh, (Glass.Cols - 44) / (2 * WellWide)));
+        const painter::core::Size Dimensions = Glass->Size();
+        Scale = std::max(1, std::min((Dimensions.Height - 2) / WellHigh, (Dimensions.Width - 44) / (2 * WellWide)));
         Wide  = 2 * Scale * WellWide + 2;
         High  = Scale * WellHigh + 2;
-        Left  = (Glass.Cols - Wide) / 2;
-        Top   = std::max(0, (Glass.Rows - High) / 2);
+        Left  = (Dimensions.Width - Wide) / 2;
+        Top   = std::max(0, (Dimensions.Height - High) / 2);
     }
 
     void Draw();
@@ -88,16 +100,18 @@ private:
  * and its foot shaded, so the pile reads as blocks and not as paint. */
 void Table::Block(int Row, int Col, Color Ink, int Size)
 {
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
     if (Size == 1) {
-        Glass.Fill(Row, Col, 2, ' ', Ink, Ink);
+        FrameBuffer.Fill({Col, Row, 2, 1}, ' ', TextStyle{Ink, Ink});
         return;
     }
-    Color Lit = color_mix(Ink, COLOR_WHITE, 90), Shade = color_mix(Ink, COLOR_BLACK, 70);
+    Color Lit = Color::Mix(Ink, Colors::White, 90), Shade = Color::Mix(Ink, Colors::Black, 70);
     for (int R = 0; R < Size; R++) {
         for (int C = 0; C < 2 * Size; C++) {
-            if (R == 0) Glass.Put(Row, Col + C, Glyph::UpperHalf, Lit, Ink);
-            else if (R == Size - 1) Glass.Put(Row + R, Col + C, Glyph::LowerHalf, Shade, Ink);
-            else Glass.Put(Row + R, Col + C, ' ', Ink, Ink);
+            if (R == 0) FrameBuffer.Put({Col + C, Row}, painter::tui::Glyphs::UpperHalf, TextStyle{Lit, Ink});
+            else if (R == Size - 1)
+                FrameBuffer.Put({Col + C, Row + R}, painter::tui::Glyphs::LowerHalf, TextStyle{Shade, Ink});
+            else FrameBuffer.Put({Col + C, Row + R}, ' ', TextStyle{Ink, Ink});
         }
     }
 }
@@ -107,65 +121,77 @@ void Table::Mini(int Row, int Col, Piece Kind, bool Dim)
 {
     if (Kind == Piece::None) return;
     Color Ink = PieceInks[static_cast<int>(Kind)];
-    if (Dim) Ink = color_mix(Ink, Page, 150);
+    if (Dim) Ink = Color::Mix(Ink, Page, 150);
     for (const auto &Cell : PieceCells(Kind, 0)) Block(Row + Cell[0], Col + 2 * Cell[1], Ink, 1);
 }
 
 void Table::Frame()
 {
-    Glass.Put(Top, Left, CornerTL, FrameInk, Page);
-    Glass.Put(Top, Left + Wide - 1, CornerTR, FrameInk, Page);
-    Glass.Put(Top + High - 1, Left, CornerBL, FrameInk, Page);
-    Glass.Put(Top + High - 1, Left + Wide - 1, CornerBR, FrameInk, Page);
-    Glass.Fill(Top, Left + 1, Wide - 2, FrameTop, FrameInk, Page);
-    Glass.Fill(Top + High - 1, Left + 1, Wide - 2, FrameTop, FrameInk, Page);
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    const TextStyle FrameStyle{FrameInk, Page};
+    FrameBuffer.Put({Left, Top}, CornerTL, FrameStyle);
+    FrameBuffer.Put({Left + Wide - 1, Top}, CornerTR, FrameStyle);
+    FrameBuffer.Put({Left, Top + High - 1}, CornerBL, FrameStyle);
+    FrameBuffer.Put({Left + Wide - 1, Top + High - 1}, CornerBR, FrameStyle);
+    FrameBuffer.Fill({Left + 1, Top, Wide - 2, 1}, FrameTop, FrameStyle);
+    FrameBuffer.Fill({Left + 1, Top + High - 1, Wide - 2, 1}, FrameTop, FrameStyle);
     for (int Row = Top + 1; Row < Top + High - 1; Row++) {
-        Glass.Put(Row, Left, FrameSide, FrameInk, Page);
-        Glass.Put(Row, Left + Wide - 1, FrameSide, FrameInk, Page);
+        FrameBuffer.Put({Left, Row}, FrameSide, FrameStyle);
+        FrameBuffer.Put({Left + Wide - 1, Row}, FrameSide, FrameStyle);
     }
 }
 
 void Table::Panels()
 {
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
+    const TextStyle TitleStyle{TitleInk, Page};
+    const TextStyle LabelStyle{LabelInk, Page};
+    const TextStyle ValueStyle{ValueInk, Page};
+    const TextStyle KeyStyle{KeyInk, Page};
     int Side = Left - 14, Row = Top + 1;
-    Glass.Write(Row, Side, "TETRIS", TitleInk, Page);
-    Glass.Write(Row + 2, Side, "hold", LabelInk, Page);
+    FrameBuffer.Write({Side, Row}, "TETRIS", TitleStyle);
+    FrameBuffer.Write({Side, Row + 2}, "hold", LabelStyle);
     Mini(Row + 3, Side, Game.Held(), !Game.CanHold());
     struct Figure { const char *Label; unsigned Value; };
     const Figure Figures[] = {{"score", Game.Score}, {"lines", Game.Lines}, {"level", Game.Level}, {"best", Best}};
     Row += 7;
     for (const Figure &One : Figures) {
-        Glass.Write(Row, Side, One.Label, LabelInk, Page);
-        Glass.Write(Row + 1, Side, std::to_string(One.Value), ValueInk, Page);
+        FrameBuffer.Write({Side, Row}, One.Label, LabelStyle);
+        FrameBuffer.Write({Side, Row + 1}, std::to_string(One.Value), ValueStyle);
         Row += 3;
     }
 
     int Right = Left + Wide + 3;
     Row = Top + 1;
-    Glass.Write(Row, Right, "next", LabelInk, Page);
+    FrameBuffer.Write({Right, Row}, "next", LabelStyle);
     for (int At = 0; At < NextShown; At++) Mini(Row + 2 + At * 3, Right, Game.Upcoming(At), At > 0);
 
     Row = Top + 2 + NextShown * 3 + 1;
     for (auto [Keys, What] : {std::pair{"\x1B\x1A", "move"}, {"\x18 x z", "turn"}, {"\x19", "down"},
                               {"space", "drop"}, {"c", "hold"}, {"p", "pause"}, {"q", "leave"}}) {
-        if (Row >= Glass.Rows) break;
-        int Col = Glass.Write(Row, Right, Keys, KeyInk, Page);
-        Glass.Write(Row++, Col + 1, What, LabelInk, Page);
+        if (Row >= Dimensions.Height) break;
+        int Col = static_cast<int>(FrameBuffer.Write({Right, Row}, Keys, KeyStyle));
+        FrameBuffer.Write({Col + 1, Row++}, What, LabelStyle);
     }
 }
 
 void Table::Overlay(std::string_view Line, std::string_view Hint)
 {
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
     int Row = Top + High / 2 - 2, Width = Wide - 2;
-    for (int R = 0; R < 5; R++) Glass.Fill(Row + R, Left + 1, Width, ' ', ValueInk, Page);
-    Glass.Write(Row + 1, Left + 1 + (Width - static_cast<int>(Line.size())) / 2, Line, TitleInk, Page);
+    FrameBuffer.Fill({Left + 1, Row, Width, 5}, ' ', TextStyle{ValueInk, Page});
+    FrameBuffer.Write({Left + 1 + (Width - static_cast<int>(Line.size())) / 2, Row + 1}, Line,
+                      TextStyle{TitleInk, Page});
     if (static_cast<int>(Hint.size()) <= Width)
-        Glass.Write(Row + 3, Left + 1 + (Width - static_cast<int>(Hint.size())) / 2, Hint, LabelInk, Page);
+        FrameBuffer.Write({Left + 1 + (Width - static_cast<int>(Hint.size())) / 2, Row + 3}, Hint,
+                          TextStyle{LabelInk, Page});
 }
 
 void Table::Draw()
 {
-    Glass.Clear(Page);
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    FrameBuffer.Clear(TextStyle{Page, Page});
     Frame();
     Panels();
 
@@ -181,8 +207,8 @@ void Table::Draw()
                 Block(Y, X, Flashing && Flash ? FlashInk : PieceInks[static_cast<int>(Cell)], Scale);
                 continue;
             }
-            for (int Dy = 0; Dy < Scale; Dy++) Glass.Fill(Y + Dy, X, 2 * Scale, ' ', WellInk, WellInk);
-            Glass.Put(Y + Scale / 2, X + Scale, Glyph::Dot, GridInk, WellInk);
+            FrameBuffer.Fill({X, Y, 2 * Scale, Scale}, ' ', TextStyle{WellInk, WellInk});
+            FrameBuffer.Put({X + Scale, Y + Scale / 2}, painter::tui::Glyphs::Dot, TextStyle{GridInk, WellInk});
         }
     }
 
@@ -194,8 +220,8 @@ void Table::Draw()
             int R = Ghost + Cell[0] - WellHidden, C = Now.Col + Cell[1];
             if (R < 0) continue;
             int Y = Top + 1 + R * Scale, X = Left + 1 + C * 2 * Scale;
-            for (int Dy = 0; Dy < Scale; Dy++)
-                Glass.Fill(Y + Dy, X, 2 * Scale, Glyph::LightShade, color_mix(Ink, WellInk, 110), WellInk);
+            FrameBuffer.Fill({X, Y, 2 * Scale, Scale}, painter::tui::Glyphs::LightShade,
+                             TextStyle{Color::Mix(Ink, WellInk, 110), WellInk});
         }
         for (const auto &Cell : PieceCells(Now.Kind, Now.Turn)) {
             int R = Now.Row + Cell[0] - WellHidden, C = Now.Col + Cell[1];
@@ -221,23 +247,23 @@ unsigned ReadBest(std::string &Trouble)
 }
 
 /* False to leave. */
-bool OnKey(Table &Desk, const kb_event_t &Key)
+bool OnKey(Table &Desk, const KeyEvent &Key)
 {
     Well &Game = Desk.Game;
-    if (Key.mods & KB_MOD_EXTENDED) {
+    if (Key.IsExtended()) {
         if (Desk.Paused) return true;
-        switch (Key.scancode) {
-        case KEY_LEFT:  Game.Shift(-1); break;
-        case KEY_RIGHT: Game.Shift(1); break;
-        case KEY_DOWN:  Game.SoftDrop(); break;
-        case KEY_UP:    Game.Turn(1); break;
+        switch (Key.Scancode) {
+        case painter::tui::KeyCodes::Left:  Game.Shift(-1); break;
+        case painter::tui::KeyCodes::Right: Game.Shift(1); break;
+        case painter::tui::KeyCodes::Down:  Game.SoftDrop(); break;
+        case painter::tui::KeyCodes::Up:    Game.Turn(1); break;
         default: break;
         }
         return true;
     }
-    char Ch = Key.ascii;
+    char Ch = Key.Ascii;
     if (Ch >= 'A' && Ch <= 'Z') Ch = static_cast<char>(Ch - 'A' + 'a');
-    if (Ch == 'q' || Ch == KEY_ESCAPE) return false;
+    if (Ch == 'q' || Ch == painter::tui::KeyCodes::Escape) return false;
     if (Ch == 'r') {
         Game.Start(cpu_rdtsc());
         Desk.Paused = false;
@@ -251,17 +277,25 @@ bool OnKey(Table &Desk, const kb_event_t &Key)
     return true;
 }
 
+void Say(std::string_view Text)
+{
+    std::string Line(Text);
+    Line += '\n';
+    print_to_screen(Line.c_str());
+}
+
 }
 
 int main()
 {
     try {
         Table Desk;
-        if (std::optional<std::string> Refusal = Desk.Glass.Take("tetris", 64, 22)) {
-            Desk.Glass.Give();
-            StageSay(*Refusal);
+        std::expected<Stage, StageError> Opened = Stage::Open("tetris", 64, 22);
+        if (!Opened) {
+            Say(Opened.error().Describe("tetris"));
             return 1;
         }
+        Desk.Glass = std::move(*Opened);
         Desk.Measure();
         std::string Trouble;
         unsigned    Kept = ReadBest(Trouble);
@@ -278,25 +312,25 @@ int main()
             if (!Desk.Paused) Desk.Game.Pass(Seconds);
             Desk.Best = std::max(Desk.Best, Desk.Game.Score);
             Desk.Draw();
-            if (!(Painted = Desk.Glass.Show())) break;
+            if (!(Painted = static_cast<bool>(Desk.Glass->Present()))) break;
 
             std::uint64_t Spent = clock_uptime_us() - Now;
-            kb_event_t    Key;
-            StageHeard    Heard = Desk.Glass.Listen(Key, Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
-            if (Heard == StageHeard::Gone) break;
-            if (Heard == StageHeard::Key && !OnKey(Desk, Key)) break;
+            const painter::tui::Event Event = Desk.Glass->Wait(
+                Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
+            if (Event.Kind == EventKind::Gone) break;
+            if (Event.Kind == EventKind::Key && !OnKey(Desk, Event.Key)) break;
         }
 
         unsigned Score = Desk.Game.Score, Best = Desk.Best;
-        Desk.Glass.Give();
+        (void)Desk.Glass->Close();
         if (Trouble.empty() && Best > Kept) {
             if (std::optional<std::string> Refusal = KeepWrite(Record, std::format("best {}\n", Best))) Trouble = *Refusal;
         }
-        StageSay(std::format("[TETRIS] score {}, {} lines, best {}", Score, Desk.Game.Lines, Best));
-        if (!Trouble.empty()) StageSay(std::format("tetris: the best score is not kept: {}", Trouble));
+        Say(std::format("[TETRIS] score {}, {} lines, best {}", Score, Desk.Game.Lines, Best));
+        if (!Trouble.empty()) Say(std::format("tetris: the best score is not kept: {}", Trouble));
         return Painted ? 0 : 1;
     } catch (const std::bad_alloc &) {
-        StageSay("There is not enough memory for tetris.");
+        Say("There is not enough memory for tetris.");
         return 1;
     }
 }
