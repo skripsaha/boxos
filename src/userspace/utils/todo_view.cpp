@@ -14,27 +14,33 @@
 
 namespace {
 
-const Color Paper       = COLOR_RGB(0x12, 0x12, 0x12);
-const Color BarPaper    = COLOR_RGB(0x3A, 0x3A, 0x3A);
-const Color ChosenPaper = COLOR_RGB(0x2E, 0x2E, 0x2E);
-const Color FlashPaper  = COLOR_RGB(0x1E, 0x5A, 0x2A);
-const Color RuleInk     = COLOR_RGB(0x3A, 0x3A, 0x3A);
-const Color TitleInk    = COLOR_AMBER;
-const Color TitleText   = COLOR_RGB(0x1A, 0x1A, 0x1A);
-const Color ViewInk     = COLOR_RGB(0x60, 0xA0, 0xE0);
-const Color TextInk     = COLOR_RGB(0xEE, 0xEE, 0xEE);
-const Color DoneInk     = COLOR_RGB(0x6E, 0x6E, 0x6E);
-const Color TickInk     = COLOR_RGB(0x60, 0xE0, 0x70);
-const Color StarInk     = COLOR_AMBER;
-const Color HintInk     = COLOR_RGB(0x8C, 0x8C, 0x8C);
-const Color KeyInk      = COLOR_AMBER;
-const Color BadInk      = COLOR_RGB(0xFF, 0x70, 0x70);
-const Color GaugeLeft   = COLOR_RGB(0x4A, 0x4A, 0x4A);
+using Color = painter::core::Color;
+namespace Colors = painter::core::Colors;
+using painter::tui::Frame;
+namespace Glyphs = painter::tui::Glyphs;
+using painter::tui::TextStyle;
+
+const Color Paper       = Color::Rgb(0x12, 0x12, 0x12);
+const Color BarPaper    = Color::Rgb(0x3A, 0x3A, 0x3A);
+const Color ChosenPaper = Color::Rgb(0x2E, 0x2E, 0x2E);
+const Color FlashPaper  = Color::Rgb(0x1E, 0x5A, 0x2A);
+const Color RuleInk     = Color::Rgb(0x3A, 0x3A, 0x3A);
+const Color TitleInk    = painter::core::Colors::Amber;
+const Color TitleText   = Color::Rgb(0x1A, 0x1A, 0x1A);
+const Color ViewInk     = Color::Rgb(0x60, 0xA0, 0xE0);
+const Color TextInk     = Color::Rgb(0xEE, 0xEE, 0xEE);
+const Color DoneInk     = Color::Rgb(0x6E, 0x6E, 0x6E);
+const Color TickInk     = Color::Rgb(0x60, 0xE0, 0x70);
+const Color StarInk     = painter::core::Colors::Amber;
+const Color HintInk     = Color::Rgb(0x8C, 0x8C, 0x8C);
+const Color KeyInk      = painter::core::Colors::Amber;
+const Color BadInk      = Color::Rgb(0xFF, 0x70, 0x70);
+const Color GaugeLeft   = Color::Rgb(0x4A, 0x4A, 0x4A);
 
 /* A tag's colour, the same for it every time: one of six light hues, each a
  * family of its own on a sixteen-colour console too. */
-const Color TagInks[] = {COLOR_RGB(0x60, 0xA0, 0xF0), COLOR_RGB(0x70, 0xD0, 0x80), COLOR_RGB(0x60, 0xD0, 0xD0),
-                         COLOR_RGB(0xD0, 0x80, 0xE0), COLOR_RGB(0xF0, 0x80, 0x80), COLOR_RGB(0xE0, 0xD0, 0x60)};
+const Color TagInks[] = {Color::Rgb(0x60, 0xA0, 0xF0), Color::Rgb(0x70, 0xD0, 0x80), Color::Rgb(0x60, 0xD0, 0xD0),
+                         Color::Rgb(0xD0, 0x80, 0xE0), Color::Rgb(0xF0, 0x80, 0x80), Color::Rgb(0xE0, 0xD0, 0x60)};
 
 constexpr char StarGlyph   = static_cast<char>(0x0F);
 constexpr char FilledGlyph = static_cast<char>(0xFE);
@@ -70,106 +76,123 @@ int ChipsWidth(const std::vector<std::string_view> &Tags)
 /* The title, what is in view, and how much of it is done. */
 void TodoDesk::Head(const std::vector<std::size_t> &Places)
 {
-    int Col = Glass.Write(0, 1, " todo ", TitleText, TitleInk);
+    Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
+    int Col = static_cast<int>(FrameBuffer.Write({1, 0}, " todo ", TextStyle{TitleText, TitleInk}));
     std::string View = List.Everywhere ? "everywhere" : Context.empty() ? "everything" : "for " + Spoken(Context);
-    Col = Glass.Write(0, Col + 2, View, ViewInk, Paper);
+    Col = static_cast<int>(FrameBuffer.Write({Col + 2, 0}, View, TextStyle{ViewInk, Paper}));
 
     std::size_t Done = static_cast<std::size_t>(
         std::count_if(Places.begin(), Places.end(), [&](std::size_t At) { return List.Items[At].Done; }));
-    if (!Places.empty() && Col + 4 + GaugeWidth + 16 < Glass.Cols) {
+    if (!Places.empty() && Col + 4 + GaugeWidth + 16 < Dimensions.Width) {
         int Lit = static_cast<int>(Done * GaugeWidth / Places.size());
-        Col = Glass.Write(0, Col + 4, std::string(static_cast<std::size_t>(Lit), FilledGlyph), TickInk, Paper);
-        Col = Glass.Write(0, Col, std::string(static_cast<std::size_t>(GaugeWidth - Lit), Glyph::Dot), GaugeLeft, Paper);
-        Glass.Write(0, Col + 1, std::format("{} of {} done", Done, Places.size()), HintInk, Paper);
+        Col = static_cast<int>(FrameBuffer.Write({Col + 4, 0}, std::string(static_cast<std::size_t>(Lit), FilledGlyph),
+                                               TextStyle{TickInk, Paper}));
+        Col = static_cast<int>(FrameBuffer.Write({Col, 0}, std::string(static_cast<std::size_t>(GaugeWidth - Lit), Glyphs::Dot),
+                                               TextStyle{GaugeLeft, Paper}));
+        FrameBuffer.Write({Col + 1, 0}, std::format("{} of {} done", Done, Places.size()), TextStyle{HintInk, Paper});
     }
-    Glass.Fill(1, 0, Glass.Cols, RuleGlyph, RuleInk, Paper);
+    FrameBuffer.Fill({0, 1, Dimensions.Width, 1}, RuleGlyph, TextStyle{RuleInk, Paper});
 }
 
 /* One thing on its row: the box, the star, the words, the context's chips. */
 void TodoDesk::Thing(int Row, const TodoItem &Item, std::size_t At, bool Chosen)
 {
+    Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
     Color         Back  = Chosen ? ChosenPaper : Paper;
     std::uint64_t Since = clock_uptime_us() - FlashAt;
     if (At == Flashed && Since < TodoFlashUs)
-        Back = color_mix(FlashPaper, Back, static_cast<std::uint8_t>(Since * 255 / TodoFlashUs));
+        Back = Color::Mix(FlashPaper, Back, static_cast<std::uint8_t>(Since * 255 / TodoFlashUs));
 
-    Glass.Fill(Row, 0, Glass.Cols, ' ', TextInk, Back);
-    if (Chosen) Glass.Put(Row, 1, Glyph::Pointer, TitleInk, Back);
-    Glass.Write(Row, 3, "[ ]", Item.Done ? DoneInk : HintInk, Back);
-    if (Item.Done) Glass.Put(Row, 4, Glyph::Tick, TickInk, Back);
-    if (Item.Star) Glass.Put(Row, 7, StarGlyph, Item.Done ? DoneInk : StarInk, Back);
+    FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', TextStyle{TextInk, Back});
+    if (Chosen) FrameBuffer.Put({1, Row}, Glyphs::Pointer, TextStyle{TitleInk, Back});
+    FrameBuffer.Write({3, Row}, "[ ]", TextStyle{Item.Done ? DoneInk : HintInk, Back});
+    if (Item.Done) FrameBuffer.Put({4, Row}, Glyphs::Tick, TextStyle{TickInk, Back});
+    if (Item.Star) FrameBuffer.Put({7, Row}, StarGlyph, TextStyle{Item.Done ? DoneInk : StarInk, Back});
 
     std::vector<std::string_view> Tags = TodoTags(Item.Context);
     int Chips = ChipsWidth(Tags);
-    if (Chips > Glass.Cols / 3) Chips = 0;
-    int         Room = Glass.Cols - 9 - (Chips ? Chips + 3 : 1);
+    if (Chips > Dimensions.Width / 3) Chips = 0;
+    int         Room = Dimensions.Width - 9 - (Chips ? Chips + 3 : 1);
     std::string Text = Item.Text;
     if (static_cast<int>(Text.size()) > Room) Text = Text.substr(0, static_cast<std::size_t>(std::max(0, Room - 3))) + "...";
-    Glass.Write(Row, 9, Text, Item.Done ? DoneInk : TextInk, Back);
+    FrameBuffer.Write({9, Row}, Text, TextStyle{Item.Done ? DoneInk : TextInk, Back});
     if (!Chips) return;
 
-    int Col = Glass.Cols - 1 - Chips;
+    int Col = Dimensions.Width - 1 - Chips;
     for (std::string_view Tag : Tags) {
-        Color Ink = Item.Done ? color_mix(TagInk(Tag), Back, 150) : TagInk(Tag);
-        Glass.Put(Row, Col, Glyph::Bullet, Ink, Back);
-        Col = Glass.Write(Row, Col + 2, Tag, Ink, Back) + 2;
+        Color Ink = Item.Done ? Color::Mix(TagInk(Tag), Back, 150) : TagInk(Tag);
+        FrameBuffer.Put({Col, Row}, Glyphs::Bullet, TextStyle{Ink, Back});
+        Col = static_cast<int>(FrameBuffer.Write({Col + 2, Row}, Tag, TextStyle{Ink, Back})) + 2;
     }
 }
 
 /* A box ticked, and what to do about there being nothing. */
 void TodoDesk::Empty()
 {
-    int Row = Glass.Rows / 2 - 2, Col = Glass.Cols / 2 - 14;
+    Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
+    int Row = Dimensions.Height / 2 - 2, Col = Dimensions.Width / 2 - 14;
     static const char Box[3][5] = {{'\xDA', '\xC4', '\xC4', '\xC4', '\xBF'},
                                    {'\xB3', ' ', '\xFB', ' ', '\xB3'},
                                    {'\xC0', '\xC4', '\xC4', '\xC4', '\xD9'}};
     for (int R = 0; R < 3; R++)
-        for (int C = 0; C < 5; C++) Glass.Put(Row + R, Col + C, Box[R][C], R == 1 && C == 2 ? TickInk : HintInk, Paper);
-    Glass.Write(Row, Col + 8, "nothing to do here", TextInk, Paper);
-    Glass.Write(Row + 1, Col + 8, "a adds a thing", HintInk, Paper);
+        for (int C = 0; C < 5; C++)
+            FrameBuffer.Put({Col + C, Row + R}, Box[R][C], TextStyle{R == 1 && C == 2 ? TickInk : HintInk, Paper});
+    FrameBuffer.Write({Col + 8, Row}, "nothing to do here", TextStyle{TextInk, Paper});
+    FrameBuffer.Write({Col + 8, Row + 1}, "a adds a thing", TextStyle{HintInk, Paper});
     std::size_t Elsewhere = List.Items.size();
     if (!List.Everywhere && !Context.empty() && Elsewhere > 0)
-        Glass.Write(Row + 2, Col + 8, std::format("tab shows all {}", Elsewhere), HintInk, Paper);
+        FrameBuffer.Write({Col + 8, Row + 2}, std::format("tab shows all {}", Elsewhere), TextStyle{HintInk, Paper});
 }
 
 /* The cheer: a banner, and sparks that grow and fade where they fall. */
 void TodoDesk::Sparks()
 {
+    Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
     std::uint64_t Since = clock_uptime_us() - CheerAt;
     if (CheerAt == 0 || Since >= TodoCheerUs) return;
     static const char Phases[] = {static_cast<char>(0xFA), '+', '*', StarGlyph, '*', '+', static_cast<char>(0xFA)};
     for (const TodoSpark &One : Confetti) {
         if (Since < One.Born || Since - One.Born >= SparkUs) continue;
-        if (One.Row >= Glass.Rows - 1 || One.Col >= Glass.Cols) continue;
+        if (One.Row >= Dimensions.Height - 1 || One.Col >= Dimensions.Width) continue;
         std::size_t Phase = static_cast<std::size_t>((Since - One.Born) * sizeof(Phases) / SparkUs);
-        TextCell   &Cell  = Glass.At(One.Row, One.Col);
-        if (Cell.ch != ' ') continue;
-        Cell.ch = Phases[Phase];
-        Cell.fg = One.Ink;
+        painter::tui::Cell Cell = FrameBuffer.Read({One.Col, One.Row});
+        if (Cell.Glyph != ' ') continue;
+        Cell.Glyph = Phases[Phase];
+        Cell.Foreground = One.Ink;
+        FrameBuffer.Put({One.Col, One.Row}, Cell);
     }
-    std::string Banner = std::format("  {} all done here  ", Glyph::Tick);
-    int         Row    = Glass.Rows / 2;
-    int         Col    = Glass.Centre(Row, Banner, COLOR_WHITE, FlashPaper);
-    Glass.Fill(Row - 1, Col, static_cast<int>(Banner.size()), ' ', COLOR_WHITE, FlashPaper);
-    Glass.Fill(Row + 1, Col, static_cast<int>(Banner.size()), ' ', COLOR_WHITE, FlashPaper);
+    std::string Banner = std::format("  {} all done here  ", Glyphs::Tick);
+    int         Row    = Dimensions.Height / 2;
+    int         Col    = static_cast<int>(FrameBuffer.Centre(Row, Banner, TextStyle{Colors::White, FlashPaper}));
+    FrameBuffer.Fill({Col, Row - 1, static_cast<int>(Banner.size()), 1}, ' ', TextStyle{Colors::White, FlashPaper});
+    FrameBuffer.Fill({Col, Row + 1, static_cast<int>(Banner.size()), 1}, ' ', TextStyle{Colors::White, FlashPaper});
 }
 
 /* The words being typed, a note, or the keys: as many as fit, chosen by how
  * much they are needed and laid in their own order. */
 void TodoDesk::Bar()
 {
-    int Row = Glass.Rows - 1;
-    Glass.Fill(Row, 0, Glass.Cols, ' ', TextInk, BarPaper);
+    Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
+    int Row = Dimensions.Height - 1;
+    FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', TextStyle{TextInk, BarPaper});
     if (Now != TodoMode::Browse) {
-        int Col  = Glass.Write(Row, 1, Now == TodoMode::Adding ? "to do: " : "change: ", KeyInk, BarPaper);
-        int Room = Glass.Cols - Col - 1;
+        int Col  = static_cast<int>(FrameBuffer.Write({1, Row}, Now == TodoMode::Adding ? "to do: " : "change: ",
+                                                        TextStyle{KeyInk, BarPaper}));
+        int Room = Dimensions.Width - Col - 1;
         std::size_t From = Caret > static_cast<std::size_t>(Room) ? Caret - static_cast<std::size_t>(Room) : 0;
-        Glass.Write(Row, Col, std::string_view(Line).substr(From, static_cast<std::size_t>(Room)), TextInk, BarPaper);
-        Glass.Put(Row, Col + static_cast<int>(Caret - From), Caret < Line.size() ? Line[Caret] : ' ', BarPaper, TextInk);
+        FrameBuffer.Write({Col, Row}, std::string_view(Line).substr(From, static_cast<std::size_t>(Room)),
+                          TextStyle{TextInk, BarPaper});
+        FrameBuffer.Put({Col + static_cast<int>(Caret - From), Row}, Caret < Line.size() ? Line[Caret] : ' ',
+                        TextStyle{BarPaper, TextInk});
         return;
     }
     if (!Note.empty()) {
-        Glass.Write(Row, 1, Note, BadInk, BarPaper);
+        FrameBuffer.Write({1, Row}, Note, TextStyle{BadInk, BarPaper});
         return;
     }
     struct Hint { const char *Keys, *What; int Need; };
@@ -181,26 +204,27 @@ void TodoDesk::Bar()
     int  Most  = -1, Used = 1;
     for (int Need = 0; Need <= 8; Need++)
         for (const Hint &One : Hints)
-            if (One.Need == Need && Used + Width(One) <= Glass.Cols && Most == Need - 1) {
+            if (One.Need == Need && Used + Width(One) <= Dimensions.Width && Most == Need - 1) {
                 Used += Width(One);
                 Most = Need;
             }
     int Col = 1;
     for (const Hint &One : Hints) {
         if (One.Need > Most) continue;
-        Col = Glass.Write(Row, Col, One.Keys, KeyInk, BarPaper);
-        Col = Glass.Write(Row, Col + 1, One.What, HintInk, BarPaper) + 2;
+        Col = static_cast<int>(FrameBuffer.Write({Col, Row}, One.Keys, TextStyle{KeyInk, BarPaper}));
+        Col = static_cast<int>(FrameBuffer.Write({Col + 1, Row}, One.What, TextStyle{HintInk, BarPaper})) + 2;
     }
 }
 
 void TodoDesk::Draw()
 {
-    Glass.Clear(Paper);
+    Glass->FrameBuffer().Clear(TextStyle{Paper, Paper});
     std::vector<std::size_t> Places = List.View(Here());
     if (!Places.empty()) Selected = std::min(Selected, Places.size() - 1);
     Head(Places);
 
-    int Room = Glass.Rows - 1 - FirstRow;
+    const painter::core::Size Dimensions = Glass->Size();
+    int Room = Dimensions.Height - 1 - FirstRow;
     if (Places.empty()) {
         Empty();
     } else {
@@ -214,7 +238,8 @@ void TodoDesk::Draw()
     }
     bool AllDone = !Places.empty() &&
                    std::all_of(Places.begin(), Places.end(), [&](std::size_t At) { return List.Items[At].Done; });
-    if (AllDone && Shown + 1 < Room) Glass.Centre(FirstRow + Shown + 1, "all done here, enjoy the quiet", TickInk, Paper);
+    if (AllDone && Shown + 1 < Room)
+        Glass->FrameBuffer().Centre(FirstRow + Shown + 1, "all done here, enjoy the quiet", TextStyle{TickInk, Paper});
     Sparks();
     Bar();
 }

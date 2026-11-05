@@ -37,10 +37,16 @@ BOX_FORM("takes optional text \"a thing to do; with none, the list on the screen
 
 namespace {
 
+using Color = painter::core::Color;
+using painter::tui::EventKind;
+using painter::tui::KeyEvent;
+using painter::tui::Stage;
+using painter::tui::StageError;
+
 constexpr int CellsPerSpark = 60;   /* the cheer is as thick on a big screen as on a small one */
 
-const Color SparkInks[] = {COLOR_RGB(0x60, 0xA0, 0xF0), COLOR_RGB(0x70, 0xD0, 0x80), COLOR_RGB(0x60, 0xD0, 0xD0),
-                           COLOR_RGB(0xD0, 0x80, 0xE0), COLOR_RGB(0xF0, 0x80, 0x80), COLOR_RGB(0xE0, 0xD0, 0x60)};
+const Color SparkInks[] = {Color::Rgb(0x60, 0xA0, 0xF0), Color::Rgb(0x70, 0xD0, 0x80), Color::Rgb(0x60, 0xD0, 0xD0),
+                           Color::Rgb(0xD0, 0x80, 0xE0), Color::Rgb(0xF0, 0x80, 0x80), Color::Rgb(0xE0, 0xD0, 0x60)};
 
 }
 
@@ -78,9 +84,10 @@ void TodoDesk::Cheer()
         Seed ^= Seed << 17;
         return Seed;
     };
-    for (int Spark = Glass.Rows * Glass.Cols / CellsPerSpark; Spark > 0; Spark--) {
-        Confetti.push_back({static_cast<int>(2 + Roll() % static_cast<std::uint64_t>(std::max(1, Glass.Rows - 3))),
-                            static_cast<int>(Roll() % static_cast<std::uint64_t>(Glass.Cols)),
+    const painter::core::Size Dimensions = Glass->Size();
+    for (int Spark = Dimensions.Height * Dimensions.Width / CellsPerSpark; Spark > 0; Spark--) {
+        Confetti.push_back({static_cast<int>(2 + Roll() % static_cast<std::uint64_t>(std::max(1, Dimensions.Height - 3))),
+                            static_cast<int>(Roll() % static_cast<std::uint64_t>(Dimensions.Width)),
                             SparkInks[Roll() % (sizeof(SparkInks) / sizeof(SparkInks[0]))],
                             Roll() % (TodoCheerUs * 2 / 3)});
     }
@@ -101,21 +108,21 @@ void TodoDesk::Toggle(std::size_t At)
 }
 
 /* A key while words are typed: true once they are done with. */
-bool TodoDesk::Type(const kb_event_t &Key)
+bool TodoDesk::Type(const KeyEvent &Key)
 {
-    if (Key.mods & KB_MOD_EXTENDED) {
-        switch (Key.scancode) {
-        case KEY_LEFT:   if (Caret > 0) Caret--; break;
-        case KEY_RIGHT:  if (Caret < Line.size()) Caret++; break;
-        case KEY_HOME:   Caret = 0; break;
-        case KEY_END:    Caret = Line.size(); break;
-        case KEY_DELETE: if (Caret < Line.size()) Line.erase(Caret, 1); break;
+    if (Key.IsExtended()) {
+        switch (Key.Scancode) {
+        case painter::tui::KeyCodes::Left:   if (Caret > 0) Caret--; break;
+        case painter::tui::KeyCodes::Right:  if (Caret < Line.size()) Caret++; break;
+        case painter::tui::KeyCodes::Home:   Caret = 0; break;
+        case painter::tui::KeyCodes::End:    Caret = Line.size(); break;
+        case painter::tui::KeyCodes::Delete: if (Caret < Line.size()) Line.erase(Caret, 1); break;
         default: break;
         }
         return false;
     }
-    char Ch = Key.ascii;
-    if (Ch == KEY_ESCAPE) return true;
+    char Ch = Key.Ascii;
+    if (Ch == painter::tui::KeyCodes::Escape) return true;
     if (Ch == '\n' || Ch == '\r') {
         std::vector<std::size_t> Places = List.View(Here());
         if (Now == TodoMode::Adding) {
@@ -141,17 +148,17 @@ bool TodoDesk::Type(const kb_event_t &Key)
 }
 
 /* A key on the list itself, but the one that leaves. */
-void TodoDesk::Browse(const kb_event_t &Key, const std::vector<std::size_t> &Places)
+void TodoDesk::Browse(const KeyEvent &Key, const std::vector<std::size_t> &Places)
 {
     bool Some = Selected < Places.size();
-    if (Key.mods & KB_MOD_EXTENDED) {
-        bool Shift = (Key.mods & KB_MOD_SHIFT) != 0;
-        switch (Key.scancode) {
-        case KEY_UP:     if (Shift) Move(-1); else if (Selected > 0) Selected--; break;
-        case KEY_DOWN:   if (Shift) Move(1); else if (Selected + 1 < Places.size()) Selected++; break;
-        case KEY_HOME:   Selected = 0; break;
-        case KEY_END:    Selected = Places.empty() ? 0 : Places.size() - 1; break;
-        case KEY_DELETE:
+    if (Key.IsExtended()) {
+        bool Shift = Key.IsShift();
+        switch (Key.Scancode) {
+        case painter::tui::KeyCodes::Up:     if (Shift) Move(-1); else if (Selected > 0) Selected--; break;
+        case painter::tui::KeyCodes::Down:   if (Shift) Move(1); else if (Selected + 1 < Places.size()) Selected++; break;
+        case painter::tui::KeyCodes::Home:   Selected = 0; break;
+        case painter::tui::KeyCodes::End:    Selected = Places.empty() ? 0 : Places.size() - 1; break;
+        case painter::tui::KeyCodes::Delete:
             if (Some) {
                 List.Items.erase(List.Items.begin() + static_cast<std::ptrdiff_t>(Places[Selected]));
                 Keep();
@@ -161,7 +168,7 @@ void TodoDesk::Browse(const kb_event_t &Key, const std::vector<std::size_t> &Pla
         }
         return;
     }
-    char Ch = Key.ascii;
+    char Ch = Key.Ascii;
     if (Ch >= 'A' && Ch <= 'Z') Ch = static_cast<char>(Ch - 'A' + 'a');
     if (Ch == '\t') {
         List.Everywhere = !List.Everywhere;
@@ -188,14 +195,14 @@ void TodoDesk::Browse(const kb_event_t &Key, const std::vector<std::size_t> &Pla
     }
 }
 
-bool TodoDesk::OnKey(const kb_event_t &Key)
+bool TodoDesk::OnKey(const KeyEvent &Key)
 {
     Note.clear();
     if (Now != TodoMode::Browse) {
         if (Type(Key)) Now = TodoMode::Browse;
         return true;
     }
-    if (!(Key.mods & KB_MOD_EXTENDED) && (Key.ascii == 'q' || Key.ascii == 'Q' || Key.ascii == KEY_ESCAPE)) return false;
+    if (!Key.IsExtended() && (Key.Ascii == 'q' || Key.Ascii == 'Q' || Key.Ascii == painter::tui::KeyCodes::Escape)) return false;
     std::size_t Before = List.Items.size();
     Browse(Key, List.View(Here()));
     if (List.Items.size() < Before) Flashed = static_cast<std::size_t>(-1);
@@ -210,6 +217,13 @@ std::uint32_t TodoDesk::Settle() const
     return Moving ? 33 : 0;
 }
 
+void Say(std::string_view Text)
+{
+    std::string Line(Text);
+    Line += '\n';
+    print_to_screen(Line.c_str());
+}
+
 int main()
 {
     try {
@@ -220,7 +234,7 @@ int main()
         TodoDesk Todo;
         Todo.Context = KeepContext();
         if (std::optional<std::string> Refusal = Todo.List.Load()) {
-            StageSay("todo: the list was not read: " + *Refusal);
+            Say("todo: the list was not read: " + *Refusal);
             return 1;
         }
 
@@ -228,12 +242,12 @@ int main()
             const char *Text = form_text(0);
             Todo.List.Add(Text ? Text : "", Todo.Here());
             if (std::optional<std::string> Refusal = Todo.List.Save()) {
-                StageSay("todo: not kept: " + *Refusal);
+                Say("todo: not kept: " + *Refusal);
                 return 1;
             }
             const TodoItem &Added = Todo.List.Items.back();
-            StageSay(Added.Context.empty() ? std::format("todo: {}", Added.Text)
-                                           : std::format("todo: {}  (for {})", Added.Text, Added.Context));
+            Say(Added.Context.empty() ? std::format("todo: {}", Added.Text)
+                                      : std::format("todo: {}  (for {})", Added.Text, Added.Context));
             return 0;
         }
 
@@ -244,29 +258,29 @@ int main()
             return 0;
         }
 
-        if (std::optional<std::string> Refusal = Todo.Glass.Take("todo", 40, 8)) {
-            Todo.Glass.Give();
-            StageSay(*Refusal);
+        std::expected<Stage, StageError> Opened = Stage::Open("todo", 40, 8);
+        if (!Opened) {
+            Say(Opened.error().Describe("todo"));
             return 1;
         }
+        Todo.Glass = std::move(*Opened);
         bool Painted = true;
         for (;;) {
             Todo.Draw();
-            if (!(Painted = Todo.Glass.Show())) break;
-            kb_event_t Key;
-            StageHeard Heard = Todo.Glass.Listen(Key, Todo.Settle());
-            if (Heard == StageHeard::Gone) break;
-            if (Heard == StageHeard::Key && !Todo.OnKey(Key)) break;
+            if (!(Painted = static_cast<bool>(Todo.Glass->Present()))) break;
+            const painter::tui::Event Event = Todo.Glass->Wait(Todo.Settle());
+            if (Event.Kind == EventKind::Gone) break;
+            if (Event.Kind == EventKind::Key && !Todo.OnKey(Event.Key)) break;
         }
-        Todo.Glass.Give();
+        (void)Todo.Glass->Close();
         std::vector<std::size_t> Places = Todo.List.View(Todo.Here());
         std::size_t Left = static_cast<std::size_t>(
             std::count_if(Places.begin(), Places.end(), [&](std::size_t At) { return !Todo.List.Items[At].Done; }));
-        StageSay(std::format("[TODO] {} to do{}", Left, Todo.Here().empty() ? "" : " here"));
-        if (!Todo.Note.empty()) StageSay("todo: " + Todo.Note);
+        Say(std::format("[TODO] {} to do{}", Left, Todo.Here().empty() ? "" : " here"));
+        if (!Todo.Note.empty()) Say("todo: " + Todo.Note);
         return Painted ? 0 : 1;
     } catch (const std::bad_alloc &) {
-        StageSay("There is not enough memory for the list.");
+        Say("There is not enough memory for the list.");
         return 1;
     }
 }

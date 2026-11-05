@@ -7,10 +7,13 @@
  * the keys alone then (Settle). */
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "stage.h"
+#include "painter/core/color.h"
+#include "painter/tui/glyph.h"
+#include "painter/tui/stage.h"
 #include "todo.h"
 
 constexpr std::uint64_t TodoFlashUs = 450000;    /* a thing marked done glows this long */
@@ -20,14 +23,14 @@ enum class TodoMode { Browse, Adding, Changing };
 
 struct TodoSpark {
     int           Row, Col;
-    Color         Ink;
+    painter::core::Color Ink;
     std::uint64_t Born;   /* microseconds into the cheer */
 };
 
 class TodoDesk {
 public:
-    Stage       Glass;
-    TodoList    List;
+    std::optional<painter::tui::Stage> Glass;
+    TodoList                         List;
     std::string Context;   /* the Use Context */
     std::string Note;      /* said on the bar until the next key */
 
@@ -35,7 +38,7 @@ public:
     std::string_view Here() const { return List.Everywhere ? std::string_view{} : std::string_view{Context}; }
 
     /* False to leave. */
-    bool OnKey(const kb_event_t &Key);
+    bool OnKey(const painter::tui::KeyEvent &Key);
     void Draw();
     /* How long the keys may be waited for before the picture changes by
      * itself, in milliseconds; 0 when it will not. */
@@ -45,8 +48,8 @@ private:
     void Keep();
     void Move(int Way);
     void Toggle(std::size_t At);
-    bool Type(const kb_event_t &Key);
-    void Browse(const kb_event_t &Key, const std::vector<std::size_t> &Places);
+    bool Type(const painter::tui::KeyEvent &Key);
+    void Browse(const painter::tui::KeyEvent &Key, const std::vector<std::size_t> &Places);
     void Cheer();
 
     void Head(const std::vector<std::size_t> &Places);
