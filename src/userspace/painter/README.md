@@ -6,7 +6,7 @@ surface:
 
 - `painter::core` — geometry, rectangles, clipping, and other backend-neutral
   values that are genuinely shared;
-- `painter::tui` — the first implementation: `Frame`, `Stage`, regions,
+- `painter::tui` — the first implementation: `Frame`, `Stage`, `Surface`, regions,
   glyphs, half-block pixel drawing, palettes, and typed console input;
 - `painter::gui` — the future home for real pixel graphics, windows, paths,
   brushes, pointer input, and other GUI-specific contracts.
@@ -75,13 +75,15 @@ paths, brushes, windows, pointer input, and presentation guarantees remain in
 ## Current state
 
 Design accepted on 2026-11-05. The first implementation slice now provides
-`painter::core` geometry and colors plus `painter::tui::Frame` and
-`painter::tui::Stage`. All direct legacy-`stage.h` consumers are now migrated:
+`painter::core` geometry and colors plus `painter::tui::Frame`,
+`painter::tui::Stage`, and the regional `painter::tui::Surface`. All direct
+legacy-`stage.h` consumers are now migrated:
 `nyancat`, `fireworks`, `2048`, `tetris`, `minesweeper`, `mandelbrot`,
-`tagmap`, and `todo` link through `libpainter.a`. Their models, animation,
+`tagmap`, `todo`, and the regional `qr` renderer link through `libpainter.a`.
+Their models, animation,
 persistence, layout algorithms, and visual composition remain application
 code. The remaining custom screen implementations (`aquarium`, `flame`,
-`typer`, `eyes`, `hexer`, `stringview`, `passport`, `taskcenter`, `qr`) still
-own their frame adapters and are the next migration layer. The Git checkpoint before implementation is tagged
+`typer`, `eyes`, `hexer`, `stringview`, `passport`, `taskcenter`) still own
+their frame adapters and are the next migration layer. The Git checkpoint before implementation is tagged
 `painter-preimplementation`, and the implementation branch proceeds in
 bounded commits so that checkpoint remains an immediate rollback point.
