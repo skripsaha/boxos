@@ -14,7 +14,9 @@
 #include <cstdint>
 #include <vector>
 
-#include "box/color.h"
+#include "painter/core/color.h"
+
+using PainterColor = painter::core::Color;
 
 /* Where the view looks and how wide it is, in the complex plane. */
 struct FractalView {
@@ -56,7 +58,7 @@ private:
 /* A gradient of 256 colours, looped. */
 struct FractalPalette {
     const char *Name;
-    Color       Ramp[256];
+    PainterColor Ramp[256];
 };
 
 const FractalPalette &FractalPalettes(int Which);
@@ -65,6 +67,6 @@ int                   FractalPaletteCount();
 /* The counts coloured: every `Spread` steps of the count go once round the
  * palette, which is turned by `Turn`; inside is black. */
 void FractalColour(const FractalPicture &Picture, const FractalPalette &Palette, float Spread, float Turn,
-                   std::vector<Color> &Pixels);
+                   std::vector<PainterColor> &Pixels);
 
 #endif

@@ -21,17 +21,26 @@
 #include <cstring>
 #include <format>
 #include <new>
+#include <optional>
 #include <string>
 
 #include "box/clock.h"
 #include "box/form.h"
+#include "box/print.h"
 
 #include "mandelbrot.h"
-#include "stage.h"
+#include "painter/tui/stage.h"
 
 BOX_FORM("takes optional words \"tour, julia, or a palette: classic, fire, ocean, candy, aurora\"\n");
 
 namespace {
+
+using Color = painter::core::Color;
+using painter::tui::EventKind;
+using painter::tui::KeyEvent;
+using painter::tui::Stage;
+using painter::tui::StageError;
+using painter::tui::TextStyle;
 
 constexpr std::uint64_t WorkUs     = 40000;   /* of working out between two frames */
 constexpr std::uint64_t TurnUs     = 40000;   /* a frame while the colours turn */
@@ -41,10 +50,10 @@ constexpr double        Nearer     = 1.5;
 constexpr double        TourIn     = 0.82;    /* each whole picture of the tour */
 constexpr double        TourOut    = 1.0 / 0.55;
 
-const Color BarPaper = COLOR_RGB(0x3A, 0x3A, 0x3A);
-const Color BarInk   = COLOR_RGB(0xEE, 0xEE, 0xEE);
-const Color KeyInk   = COLOR_AMBER;
-const Color HintInk  = COLOR_RGB(0x8C, 0x8C, 0x8C);
+const Color BarPaper = Color::Rgb(0x3A, 0x3A, 0x3A);
+const Color BarInk   = Color::Rgb(0xEE, 0xEE, 0xEE);
+const Color KeyInk   = painter::core::Colors::Amber;
+const Color HintInk  = Color::Rgb(0x8C, 0x8C, 0x8C);
 
 /* Where the tour goes: points whose neighbourhood stays rich as deep as a
  * double reaches — Seahorse Valley, the double spiral near it, and two
@@ -62,11 +71,11 @@ enum class Bar { Keys, Status, Hidden };
 
 class Explorer {
 public:
-    Stage Glass;
+    std::optional<Stage> Glass;
 
     void Begin(const char *const *Words, std::size_t Count);
     /* False to leave. */
-    bool OnKey(const kb_event_t &Key);
+    bool OnKey(const KeyEvent &Key);
     void Step(float Seconds);
     void Draw(float Shown);
     std::uint32_t Wait() const;
@@ -106,9 +115,10 @@ private:
 
 void Explorer::Begin(const char *const *Words, std::size_t Count)
 {
-    Picture.Resize(Glass.Cols, Glass.Rows * 2);
+    const painter::core::Size Dimensions = Glass->Size();
+    Picture.Resize(Dimensions.Width, Dimensions.Height * 2);
     /* The set is about 3.4 wide and 2.6 high: the view is as wide as both need. */
-    HomeWidth = std::max(3.4, 2.6 * Glass.Cols / (Glass.Rows * 2.0));
+    HomeWidth = std::max(3.4, 2.6 * Dimensions.Width / (Dimensions.Height * 2.0));
     View      = HomeView(false);
     Began     = clock_uptime_us();
     for (std::size_t At = 0; At < Count; At++) {
@@ -174,18 +184,18 @@ void Explorer::Tour()
     Restart();
 }
 
-bool Explorer::OnKey(const kb_event_t &Key)
+bool Explorer::OnKey(const KeyEvent &Key)
 {
-    if (Key.mods & KB_MOD_EXTENDED) {
-        bool Shift = (Key.mods & KB_MOD_SHIFT) != 0;
+    if (Key.IsExtended()) {
+        bool Shift = Key.IsShift();
         int  Dx = 0, Dy = 0;
-        switch (Key.scancode) {
-        case KEY_LEFT:  Dx = -1; break;
-        case KEY_RIGHT: Dx = 1; break;
-        case KEY_UP:    Dy = 1; break;
-        case KEY_DOWN:  Dy = -1; break;
-        case KEY_PAGEUP:  Zoom(Nearer); return true;
-        case KEY_PAGEDN:  Zoom(1 / Nearer); return true;
+        switch (Key.Scancode) {
+        case painter::tui::KeyCodes::Left:  Dx = -1; break;
+        case painter::tui::KeyCodes::Right: Dx = 1; break;
+        case painter::tui::KeyCodes::Up:    Dy = 1; break;
+        case painter::tui::KeyCodes::Down:  Dy = -1; break;
+        case painter::tui::KeyCodes::PageUp:  Zoom(Nearer); return true;
+        case painter::tui::KeyCodes::PageDown:  Zoom(1 / Nearer); return true;
         default: return true;
         }
         Touring = false;
@@ -198,11 +208,11 @@ bool Explorer::OnKey(const kb_event_t &Key)
         }
         return true;
     }
-    char Ch = Key.ascii;
+    char Ch = Key.Ascii;
     if (Ch >= 'A' && Ch <= 'Z') Ch = static_cast<char>(Ch - 'A' + 'a');
     switch (Ch) {
     case 'q':
-    case KEY_ESCAPE: return false;
+    case painter::tui::KeyCodes::Escape: return false;
     case '+':
     case '=':
     case '\n':
@@ -253,31 +263,36 @@ std::uint32_t Explorer::Wait() const
 
 void Explorer::StatusBar()
 {
-    int Row = Glass.Rows - 1;
-    int Col = Glass.Write(Row, 1, View.Julia ? "julia" : "mandelbrot", KeyInk, BarPaper);
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
+    int Row = Dimensions.Height - 1;
+    int Col = static_cast<int>(FrameBuffer.Write({1, Row}, View.Julia ? "julia" : "mandelbrot",
+                                                 TextStyle{KeyInk, BarPaper}));
 
     int         Digits = std::clamp(static_cast<int>(std::log10(HomeWidth / View.Width)) + 4, 4, 15);
     double      X = View.Julia ? View.JuliaX : View.CentreX, Y = View.Julia ? View.JuliaY : View.CentreY;
     std::string Where  = std::format("{}{:.{}f} {:+.{}f}i", View.Julia ? "c = " : "", X, Digits, Y, Digits);
-    Col = Glass.Write(Row, Col + 2, Where, BarInk, BarPaper);
+    Col = static_cast<int>(FrameBuffer.Write({Col + 2, Row}, Where, TextStyle{BarInk, BarPaper}));
 
     std::string Depth = std::format("x{:.3g}", HomeWidth / View.Width);
-    Col = Glass.Write(Row, Col + 2, Depth, BarInk, BarPaper);
+    Col = static_cast<int>(FrameBuffer.Write({Col + 2, Row}, Depth, TextStyle{BarInk, BarPaper}));
     std::string More = std::format("{} steps  {}", FractalSteps(View, Detail), FractalPalettes(Palette).Name);
     if (Touring) More += std::format("  tour: {}", Sights[Visiting].Name);
     if (!Picture.Whole()) More += "  drawing";
-    Glass.Write(Row, Col + 2, More, HintInk, BarPaper);
+    FrameBuffer.Write({Col + 2, Row}, More, TextStyle{HintInk, BarPaper});
 }
 
 void Explorer::KeysBar()
 {
-    int Row = Glass.Rows - 1, Col = 1;
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
+    int Row = Dimensions.Height - 1, Col = 1;
     for (auto [Keys, What] : {std::pair{"\x1B\x18\x19\x1A", "look"}, {"+-", "zoom"}, {"j", "julia"}, {"c", "colours"},
                               {"a", "turn"}, {"space", "tour"}, {"[]", "detail"}, {"r", "home"}, {"q", "leave"}}) {
         int Wide = static_cast<int>(std::string_view(Keys).size() + std::string_view(What).size()) + 3;
-        if (Col + Wide > Glass.Cols) break;
-        Col = Glass.Write(Row, Col, Keys, KeyInk, BarPaper);
-        Col = Glass.Write(Row, Col + 1, What, HintInk, BarPaper) + 2;
+        if (Col + Wide > Dimensions.Width) break;
+        Col = static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, BarPaper}));
+        Col = static_cast<int>(FrameBuffer.Write({Col + 1, Row}, What, TextStyle{HintInk, BarPaper})) + 2;
     }
 }
 
@@ -287,12 +302,21 @@ void Explorer::Draw(float Shown)
      * deep picture is colour noise from pixel to pixel. */
     float Wider = std::sqrt(static_cast<float>(FractalSteps(View, Detail)) / 150.0f);
     FractalColour(Picture, FractalPalettes(Palette), Spread * Wider, Turn, Pixels);
-    Glass.Pixels(Pixels);
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    FrameBuffer.PutPixels(Pixels);
     if (Showing == Bar::Keys && Shown >= KeysShown) Showing = Bar::Status;
     if (Showing == Bar::Hidden) return;
-    Glass.Fill(Glass.Rows - 1, 0, Glass.Cols, ' ', BarInk, BarPaper);
+    const painter::core::Size Dimensions = Glass->Size();
+    FrameBuffer.Fill({0, Dimensions.Height - 1, Dimensions.Width, 1}, ' ', TextStyle{BarInk, BarPaper});
     if (Showing == Bar::Keys) KeysBar();
     else StatusBar();
+}
+
+void Say(std::string_view Text)
+{
+    std::string Line(Text);
+    Line += '\n';
+    print_to_screen(Line.c_str());
 }
 
 }
@@ -305,11 +329,12 @@ int main()
         if (form_words(0, &Words, &Count) != 0) return 1;
 
         Explorer Look;
-        if (std::optional<std::string> Refusal = Look.Glass.Take("mandelbrot", 40, 12)) {
-            Look.Glass.Give();
-            StageSay(*Refusal);
+        std::expected<Stage, StageError> Opened = Stage::Open("mandelbrot", 40, 12);
+        if (!Opened) {
+            Say(Opened.error().Describe("mandelbrot"));
             return 1;
         }
+        Look.Glass = std::move(*Opened);
         Look.Begin(Words, Count);
 
         std::uint64_t Began = clock_uptime_us(), Last = Began;
@@ -319,20 +344,19 @@ int main()
             Look.Step(static_cast<float>(Now - Last) / 1e6f);
             Last = Now;
             Look.Draw(static_cast<float>(Now - Began) / 1e6f);
-            if (!(Painted = Look.Glass.Show())) break;
+            if (!(Painted = static_cast<bool>(Look.Glass->Present()))) break;
 
-            kb_event_t Key;
-            StageHeard Heard = Look.Glass.Listen(Key, Look.Wait());
-            if (Heard == StageHeard::Gone) break;
-            if (Heard == StageHeard::Key && !Look.OnKey(Key)) break;
+            const painter::tui::Event Event = Look.Glass->Wait(Look.Wait());
+            if (Event.Kind == EventKind::Gone) break;
+            if (Event.Kind == EventKind::Key && !Look.OnKey(Event.Key)) break;
         }
         double Deepest = Look.HomeWidth / Look.Nearest;
-        Look.Glass.Give();
-        StageSay(Painted ? std::format("[MANDELBROT] looked {:.3g} times nearer than the whole set", Deepest)
-                         : "The screen stopped taking frames.");
+        (void)Look.Glass->Close();
+        Say(Painted ? std::format("[MANDELBROT] looked {:.3g} times nearer than the whole set", Deepest)
+                    : "The screen stopped taking frames.");
         return Painted ? 0 : 1;
     } catch (const std::bad_alloc &) {
-        StageSay("There is not enough memory for a picture the size of this screen.");
+        Say("There is not enough memory for a picture the size of this screen.");
         return 1;
     }
 }

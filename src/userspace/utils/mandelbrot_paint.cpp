@@ -9,6 +9,8 @@
 
 namespace {
 
+using Color = painter::core::Color;
+
 constexpr double Bailout   = 256.0 * 256.0;   /* far past 2: the smooth count settles */
 constexpr double LogTwo    = 0.6931471805599453;
 constexpr int    FirstStep = 8;
@@ -73,7 +75,7 @@ FractalPalette Build(const char *Name, std::initializer_list<Stop> Stops)
         }
         float Span = High->Place - Low->Place;
         float Part = Span > 0 ? (Place - Low->Place) / Span : 0.0f;
-        Out.Ramp[At] = color_mix(Low->Ink, High->Ink, static_cast<std::uint8_t>(Part * 255.0f));
+        Out.Ramp[At] = Color::Mix(Low->Ink, High->Ink, static_cast<std::uint8_t>(Part * 255.0f));
     }
     return Out;
 }
@@ -81,25 +83,25 @@ FractalPalette Build(const char *Name, std::initializer_list<Stop> Stops)
 const FractalPalette *Palettes()
 {
     static const FractalPalette All[] = {
-        Build("classic", {{0.0f, COLOR_RGB(0x00, 0x07, 0x64)}, {0.16f, COLOR_RGB(0x20, 0x6B, 0xCB)},
-                          {0.42f, COLOR_RGB(0xED, 0xFF, 0xFF)}, {0.6425f, COLOR_RGB(0xFF, 0xAA, 0x00)},
-                          {0.8575f, COLOR_RGB(0x30, 0x10, 0x00)}, {1.0f, COLOR_RGB(0x00, 0x07, 0x64)}}),
-        Build("fire", {{0.0f, COLOR_RGB(0x14, 0x00, 0x00)}, {0.2f, COLOR_RGB(0x90, 0x00, 0x00)},
-                       {0.4f, COLOR_RGB(0xFF, 0x50, 0x00)}, {0.55f, COLOR_RGB(0xFF, 0xD0, 0x40)},
-                       {0.65f, COLOR_RGB(0xFF, 0xFF, 0xE0)}, {0.8f, COLOR_RGB(0xFF, 0x80, 0x00)},
-                       {1.0f, COLOR_RGB(0x14, 0x00, 0x00)}}),
-        Build("ocean", {{0.0f, COLOR_RGB(0x00, 0x08, 0x18)}, {0.2f, COLOR_RGB(0x00, 0x30, 0x60)},
-                        {0.4f, COLOR_RGB(0x00, 0x80, 0xC0)}, {0.55f, COLOR_RGB(0x60, 0xE0, 0xFF)},
-                        {0.65f, COLOR_RGB(0xFF, 0xFF, 0xFF)}, {0.8f, COLOR_RGB(0x20, 0x90, 0xD0)},
-                        {1.0f, COLOR_RGB(0x00, 0x08, 0x18)}}),
-        Build("candy", {{0.0f, COLOR_RGB(0x12, 0x06, 0x1A)}, {0.2f, COLOR_RGB(0x81, 0x26, 0x5C)},
-                        {0.4f, COLOR_RGB(0xE8, 0x5C, 0x93)}, {0.55f, COLOR_RGB(0xFF, 0xE2, 0xF0)},
-                        {0.7f, COLOR_RGB(0xB8, 0x3E, 0x79)}, {0.85f, COLOR_RGB(0x3A, 0x0F, 0x40)},
-                        {1.0f, COLOR_RGB(0x12, 0x06, 0x1A)}}),
-        Build("aurora", {{0.0f, COLOR_RGB(0x00, 0x10, 0x10)}, {0.2f, COLOR_RGB(0x00, 0xA0, 0x60)},
-                         {0.4f, COLOR_RGB(0x60, 0xFF, 0x90)}, {0.5f, COLOR_RGB(0xC0, 0xFF, 0xFF)},
-                         {0.7f, COLOR_RGB(0x60, 0x40, 0xE0)}, {0.85f, COLOR_RGB(0x20, 0x00, 0x40)},
-                         {1.0f, COLOR_RGB(0x00, 0x10, 0x10)}}),
+        Build("classic", {{0.0f, Color::Rgb(0x00, 0x07, 0x64)}, {0.16f, Color::Rgb(0x20, 0x6B, 0xCB)},
+                          {0.42f, Color::Rgb(0xED, 0xFF, 0xFF)}, {0.6425f, Color::Rgb(0xFF, 0xAA, 0x00)},
+                          {0.8575f, Color::Rgb(0x30, 0x10, 0x00)}, {1.0f, Color::Rgb(0x00, 0x07, 0x64)}}),
+        Build("fire", {{0.0f, Color::Rgb(0x14, 0x00, 0x00)}, {0.2f, Color::Rgb(0x90, 0x00, 0x00)},
+                       {0.4f, Color::Rgb(0xFF, 0x50, 0x00)}, {0.55f, Color::Rgb(0xFF, 0xD0, 0x40)},
+                       {0.65f, Color::Rgb(0xFF, 0xFF, 0xE0)}, {0.8f, Color::Rgb(0xFF, 0x80, 0x00)},
+                       {1.0f, Color::Rgb(0x14, 0x00, 0x00)}}),
+        Build("ocean", {{0.0f, Color::Rgb(0x00, 0x08, 0x18)}, {0.2f, Color::Rgb(0x00, 0x30, 0x60)},
+                        {0.4f, Color::Rgb(0x00, 0x80, 0xC0)}, {0.55f, Color::Rgb(0x60, 0xE0, 0xFF)},
+                        {0.65f, Color::Rgb(0xFF, 0xFF, 0xFF)}, {0.8f, Color::Rgb(0x20, 0x90, 0xD0)},
+                        {1.0f, Color::Rgb(0x00, 0x08, 0x18)}}),
+        Build("candy", {{0.0f, Color::Rgb(0x12, 0x06, 0x1A)}, {0.2f, Color::Rgb(0x81, 0x26, 0x5C)},
+                        {0.4f, Color::Rgb(0xE8, 0x5C, 0x93)}, {0.55f, Color::Rgb(0xFF, 0xE2, 0xF0)},
+                        {0.7f, Color::Rgb(0xB8, 0x3E, 0x79)}, {0.85f, Color::Rgb(0x3A, 0x0F, 0x40)},
+                        {1.0f, Color::Rgb(0x12, 0x06, 0x1A)}}),
+        Build("aurora", {{0.0f, Color::Rgb(0x00, 0x10, 0x10)}, {0.2f, Color::Rgb(0x00, 0xA0, 0x60)},
+                         {0.4f, Color::Rgb(0x60, 0xFF, 0x90)}, {0.5f, Color::Rgb(0xC0, 0xFF, 0xFF)},
+                         {0.7f, Color::Rgb(0x60, 0x40, 0xE0)}, {0.85f, Color::Rgb(0x20, 0x00, 0x40)},
+                         {1.0f, Color::Rgb(0x00, 0x10, 0x10)}}),
     };
     return All;
 }
@@ -180,19 +182,19 @@ int FractalPaletteCount()
 }
 
 void FractalColour(const FractalPicture &Picture, const FractalPalette &Palette, float Spread, float Turn,
-                   std::vector<Color> &Pixels)
+                   std::vector<PainterColor> &Pixels)
 {
     Pixels.resize(Picture.Counts.size());
     float Scale = 256.0f / Spread;
     for (std::size_t At = 0; At < Picture.Counts.size(); At++) {
         float Count = Picture.Counts[At];
         if (Count < 0) {
-            Pixels[At] = COLOR_BLACK;
+            Pixels[At] = painter::core::Colors::Black;
             continue;
         }
         float Place = std::fmod(Count * Scale + Turn, 256.0f);
         int   Index = static_cast<int>(Place);
         Color Here  = Palette.Ramp[Index & 255], Next = Palette.Ramp[(Index + 1) & 255];
-        Pixels[At]  = color_mix(Here, Next, static_cast<std::uint8_t>((Place - Index) * 255.0f));
+        Pixels[At]  = Color::Mix(Here, Next, static_cast<std::uint8_t>((Place - Index) * 255.0f));
     }
 }
