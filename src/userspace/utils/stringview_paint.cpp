@@ -1,28 +1,27 @@
-/* stringview_paint.cpp — the glass. One frame of cells a paint, laid down by
- * one vga_paint: a title, the texts the filter keeps — where each begins,
+/* stringview_paint.cpp — the glass. One Painter frame a paint: a title, the
+ * texts the filter keeps — where each begins,
  * u16 for the wide ones, the text with what was typed marked in it — and a
  * foot with what is typed. */
 
 #include <format>
 
-#include "box/color.h"
-#include "box/vga.h"
-
 #include "stringview.h"
 
 namespace {
 
-constexpr Color TitleInk   = COLOR_WHITE;
-constexpr Color TitlePaper = COLOR_SLATE;
-constexpr Color Paper      = COLOR_BLACK;
-constexpr Color TextInk    = COLOR_LIGHT_GRAY;
-constexpr Color OffsetInk  = COLOR_SLATE;
-constexpr Color WideInk    = COLOR_AMBER;
-constexpr Color HintInk    = COLOR_DARK_GRAY;
-constexpr Color TroubleInk = COLOR_AMBER;
-constexpr Color FindInk    = COLOR_WHITE;
-constexpr Color MarkInk    = COLOR_BLACK;
-constexpr Color MarkPaper  = COLOR_TEAL;
+using PainterColor = painter::core::Color;
+
+constexpr PainterColor TitleInk   = painter::core::Colors::White;
+constexpr PainterColor TitlePaper = painter::core::Colors::Slate;
+constexpr PainterColor Paper      = painter::core::Colors::Black;
+constexpr PainterColor TextInk    = painter::core::Colors::LightGray;
+constexpr PainterColor OffsetInk  = painter::core::Colors::Slate;
+constexpr PainterColor WideInk    = painter::core::Colors::Amber;
+constexpr PainterColor HintInk    = painter::core::Colors::DarkGray;
+constexpr PainterColor TroubleInk = painter::core::Colors::Amber;
+constexpr PainterColor FindInk    = painter::core::Colors::White;
+constexpr PainterColor MarkInk    = painter::core::Colors::Black;
+constexpr PainterColor MarkPaper  = painter::core::Colors::Teal;
 
 /* How many bytes the UTF-8 character led by Lead takes. */
 std::size_t CharacterBytes(unsigned char Lead)
@@ -35,17 +34,16 @@ std::size_t CharacterBytes(unsigned char Lead)
 
 }
 
-void Stringview::Put(std::uint32_t Row, std::uint32_t Col, char Ch, Color Fg, Color Bg)
+void Stringview::Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::core::Color Fg,
+                     painter::core::Color Bg)
 {
     if (Row >= Rows || Col >= Cols) return;
-    TextCell &Cell = Frame[Row * Cols + Col];
-    Cell = TextCell{};
-    Cell.fg = Fg;
-    Cell.bg = Bg;
-    Cell.ch = Ch;
+    Glass->FrameBuffer().Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
+                              painter::tui::Cell{Ch, Fg, Bg});
 }
 
-std::uint32_t Stringview::Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, Color Fg, Color Bg)
+std::uint32_t Stringview::Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text,
+                                painter::core::Color Fg, painter::core::Color Bg)
 {
     for (char Ch : Text) {
         if (Col >= Cols) break;
@@ -127,12 +125,12 @@ void Stringview::PaintFoot()
     std::string_view Right = !Trouble.empty() ? std::string_view(Trouble)
                              : Filter.empty() ? std::string_view("type to narrow   ESC or ^Q leave")
                                               : std::string_view("Backspace  ESC clear   ^Q leave");
-    Color Ink = Trouble.empty() ? HintInk : TroubleInk;
+    PainterColor Ink = Trouble.empty() ? HintInk : TroubleInk;
     if (Col + 2 + Right.size() + 1 <= Cols)
         Write(Row, Cols - static_cast<std::uint32_t>(Right.size()) - 1, Right, Ink, Paper);
 }
 
-void Stringview::Paint()
+bool Stringview::Paint()
 {
     PaintTitle();
     PaintList();
@@ -140,6 +138,6 @@ void Stringview::Paint()
 
     std::uint32_t CaretCol = 5 + static_cast<std::uint32_t>(Filter.size());
     if (CaretCol >= Cols) CaretCol = Cols - 1;
-    (void)vga_setcursor(static_cast<std::uint8_t>(Rows - 1), static_cast<std::uint8_t>(CaretCol));
-    (void)vga_paint(0, 0, static_cast<std::uint8_t>(Rows), static_cast<std::uint8_t>(Cols), Frame.data());
+    if (!Glass->SetCursor({static_cast<std::int32_t>(CaretCol), static_cast<std::int32_t>(Rows - 1)})) return false;
+    return static_cast<bool>(Glass->Present());
 }

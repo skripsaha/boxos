@@ -18,19 +18,14 @@
  * The sieve is stringview_sift.cpp, the glass stringview_paint.cpp.
  */
 
-#include <cstring>
 #include <format>
 #include <new>
 #include <string>
 #include <string_view>
 
-#include "box/color.h"
 #include "box/file.h"
 #include "box/form.h"
-#include "box/keyboard.h"
 #include "box/print.h"
-#include "box/touch.h"
-#include "box/vga.h"
 
 #include "file_heading.h"
 #include "stringview.h"
@@ -77,12 +72,6 @@ char Lower(char Ch)
     return Ch >= 'A' && Ch <= 'Z' ? static_cast<char>(Ch - 'A' + 'a') : Ch;
 }
 
-/* The screen is given back however the program leaves it. */
-struct ScreenHeld {
-    Stringview &Viewer;
-    ~ScreenHeld() { Viewer.GiveScreenBack(); }
-};
-
 }
 
 std::size_t StringviewFind(std::string_view Text, std::string_view Filter)
@@ -105,18 +94,12 @@ Stringview::Stringview(file_id_t File, std::string Name, std::string Tags, std::
 
 std::optional<std::string> Stringview::TakeScreen()
 {
-    vga_dimensions_t Glass;
-    if (vga_getdimensions(&Glass) != 0) return std::string("This screen would not say how big it is.");
-    if (Glass.rows == 0 || Glass.cols == 0) return std::string("This machine has no console to show text on.");
-    if (Glass.rows < 3) return std::string("This screen has too few rows for a title, a line and a foot.");
-    Rows = Glass.rows;
-    Cols = Glass.cols;
-    if (Digits + 8 > Cols)
-        return std::format("This screen is {} columns wide; stringview needs {}.", Cols, Digits + 8);
-
-    Frame.assign(static_cast<std::size_t>(Rows) * Cols, TextCell{});
-    Ear = console_listen();
-    if (Ear == TOUCH_TAG_INVALID) return std::string("This machine has no way to hear a key.");
+    std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
+        painter::tui::Stage::Open("stringview", static_cast<std::int32_t>(Digits + 8), 3);
+    if (!Opened) return Opened.error().Describe("stringview");
+    Glass.emplace(std::move(*Opened));
+    Rows = static_cast<std::uint32_t>(Glass->Size().Height);
+    Cols = static_cast<std::uint32_t>(Glass->Size().Width);
     return std::nullopt;
 }
 
@@ -176,31 +159,31 @@ void Stringview::Scroll(std::int64_t Lines)
     else           Top = Top + static_cast<std::size_t>(Lines) > Last ? Last : Top + static_cast<std::size_t>(Lines);
 }
 
-void Stringview::OnKey(const kb_event_t &Key)
+void Stringview::OnKey(const painter::tui::KeyEvent &Key)
 {
-    if (Key.mods & KB_MOD_CTRL) {
-        if (Key.ascii == 'q' || Key.ascii == 'Q') Leaving = true;
+    if (Key.IsCtrl()) {
+        if (Key.Ascii == 'q' || Key.Ascii == 'Q') Leaving = true;
         return;
     }
 
     std::int64_t Page = ListRows();
-    if (Key.mods & KB_MOD_EXTENDED) {
-        switch (Key.scancode) {
-        case KEY_UP:     Scroll(-1); break;
-        case KEY_DOWN:   Scroll(1); break;
-        case KEY_PAGEUP: Scroll(-Page); break;
-        case KEY_PAGEDN: Scroll(Page); break;
-        case KEY_HOME:   Top = 0; Left = 0; break;
-        case KEY_END:    Scroll(static_cast<std::int64_t>(Shown.size())); break;
-        case KEY_LEFT:   Left = Left > 8 ? Left - 8 : 0; break;
-        case KEY_RIGHT:  Left += 8; break;
+    if (Key.IsExtended()) {
+        switch (Key.Scancode) {
+        case painter::tui::KeyCodes::Up:      Scroll(-1); break;
+        case painter::tui::KeyCodes::Down:    Scroll(1); break;
+        case painter::tui::KeyCodes::PageUp:  Scroll(-Page); break;
+        case painter::tui::KeyCodes::PageDown: Scroll(Page); break;
+        case painter::tui::KeyCodes::Home:    Top = 0; Left = 0; break;
+        case painter::tui::KeyCodes::End:     Scroll(static_cast<std::int64_t>(Shown.size())); break;
+        case painter::tui::KeyCodes::Left:    Left = Left > 8 ? Left - 8 : 0; break;
+        case painter::tui::KeyCodes::Right:   Left += 8; break;
         default: break;
         }
         return;
     }
 
-    char Ch = Key.ascii;
-    if (Ch == KEY_ESCAPE) {
+    char Ch = Key.Ascii;
+    if (Ch == painter::tui::KeyCodes::Escape) {
         if (Filter.empty()) {
             Leaving = true;
         } else {
@@ -209,7 +192,7 @@ void Stringview::OnKey(const kb_event_t &Key)
         }
         return;
     }
-    if (Ch == KEY_BACKSPACE || Ch == 0x7f) {
+    if (Ch == painter::tui::KeyCodes::Backspace || Ch == 0x7f) {
         if (Filter.empty()) return;
         Filter.pop_back();
         Refilter();
@@ -224,36 +207,37 @@ void Stringview::OnKey(const kb_event_t &Key)
 
 void Stringview::Run()
 {
-    ScreenHeld Held{*this};
     while (!Leaving) {
-        Paint();
-        Touch Event;
+        if (!Paint()) break;
         if (Sifting) {
             for (unsigned Piece = 0; Piece < PiecesAFrame && Sifting; Piece++) Sifting = SiftStep();
-            while (!Leaving && touch_try_pop_tag(Ear, &Event)) {
-                if (Event.payload_len < sizeof(kb_event_t)) continue;
-                kb_event_t Key;
-                std::memcpy(&Key, Event.payload, sizeof(Key));
-                OnKey(Key);
+            for (;;) {
+                painter::tui::Event Event = Glass->Poll();
+                if (Event.Kind == painter::tui::EventKind::Quiet) break;
+                if (Event.Kind == painter::tui::EventKind::Gone) {
+                    Leaving = true;
+                    break;
+                }
+                OnKey(Event.Key);
             }
             continue;
         }
 
         /* Sifted: nothing changes between keys, and a refusal means there is
          * nothing left to hear. */
-        if (touch_await(Ear, &Event, 0) != 0) break;
-        if (Event.payload_len < sizeof(kb_event_t)) continue;
-        kb_event_t Key;
-        std::memcpy(&Key, Event.payload, sizeof(Key));
-        OnKey(Key);
+        painter::tui::Event Event = Glass->Wait();
+        if (Event.Kind != painter::tui::EventKind::Key) break;
+        OnKey(Event.Key);
     }
+    GiveScreenBack();
 }
 
 void Stringview::GiveScreenBack()
 {
-    console_unlisten();
-    (void)vga_clear_rgb(COLOR_LIGHT_GRAY, COLOR_BLACK);
-    (void)vga_setcursor(0, 0);
+    if (Glass) {
+        (void)Glass->Close();
+        Glass.reset();
+    }
 }
 
 std::string Stringview::Summary() const

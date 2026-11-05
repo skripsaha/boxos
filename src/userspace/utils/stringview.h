@@ -15,11 +15,9 @@
 #include <string_view>
 #include <vector>
 
-#include "box/color.h"
 #include "box/file.h"
-#include "box/keyboard.h"
-#include "box/touch.h"
-#include "box/vga.h"
+#include "painter/core/color.h"
+#include "painter/tui/stage.h"
 
 /* A text found: where it begins in the file, whether it was written in
  * UTF-16, and its characters as UTF-8. */
@@ -101,16 +99,18 @@ private:
     bool Matches(const StringviewText &Text) const;
     void Refilter();
     void Narrow();
-    void OnKey(const kb_event_t &Key);
+    void OnKey(const painter::tui::KeyEvent &Key);
     void Scroll(std::int64_t Lines);
 
     /* stringview_paint.cpp */
-    void          Paint();
+    bool          Paint();
     void          PaintTitle();
     void          PaintList();
     void          PaintFoot();
-    void          Put(std::uint32_t Row, std::uint32_t Col, char Ch, Color Fg, Color Bg);
-    std::uint32_t Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, Color Fg, Color Bg);
+    void          Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::core::Color Fg,
+                      painter::core::Color Bg);
+    std::uint32_t Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, painter::core::Color Fg,
+                        painter::core::Color Bg);
     std::uint32_t ListRows() const { return Rows - 2; }
 
     file_id_t     File;
@@ -134,8 +134,7 @@ private:
 
     std::uint32_t         Rows = 0;
     std::uint32_t         Cols = 0;
-    std::vector<TextCell> Frame;
-    TouchTag              Ear = TOUCH_TAG_INVALID;
+    std::optional<painter::tui::Stage> Glass;
     bool                  Leaving = false;
 };
 

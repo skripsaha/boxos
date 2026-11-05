@@ -156,8 +156,8 @@ hexer.elf: $(BOXLIB_START) $(HEXER_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(HEXER_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-stringview.elf: $(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(STRINGVIEW_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+stringview.elf: $(BOXLIB_START) $(STRINGVIEW_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(STRINGVIEW_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # calculate, difference, copy, typer, flame, checksum, passport, aquarium, nyancat,

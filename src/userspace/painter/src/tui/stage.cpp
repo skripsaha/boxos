@@ -181,6 +181,20 @@ box::status Stage::Present() noexcept
     return {};
 }
 
+Event Stage::Poll() noexcept
+{
+    if (!IsOpen()) return Event{EventKind::Gone, {}, box::error{box::errc::invalid_state}};
+
+    Touch EventData{};
+    if (!touch_try_pop_tag(State->Ear, &EventData)) return Event{EventKind::Quiet, {}, {}};
+    if (EventData.payload_len < sizeof(kb_event_t))
+        return Event{EventKind::Gone, {}, box::error{box::errc::corrupted}};
+
+    kb_event_t Key{};
+    std::memcpy(&Key, EventData.payload, sizeof(Key));
+    return Event{EventKind::Key, KeyEvent{Key.ascii, Key.scancode, Key.mods}, {}};
+}
+
 Event Stage::Wait(std::uint32_t TimeoutMs) noexcept
 {
     if (!IsOpen()) return Event{EventKind::Gone, {}, box::error{box::errc::invalid_state}};
