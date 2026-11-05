@@ -20,12 +20,13 @@ struct Stage::Impl {
     Frame                 FrameBuffer;
     TouchTag              Ear = TOUCH_TAG_INVALID;
     std::vector<TextCell> NativeCells;
+    core::Point            Cursor;
     bool                  Opened = true;
 
     Impl(core::Size BoundsValue, Frame FrameValue, TouchTag EarValue,
          std::vector<TextCell> NativeCellsValue) noexcept
         : Bounds(BoundsValue), FrameBuffer(std::move(FrameValue)), Ear(EarValue),
-          NativeCells(std::move(NativeCellsValue))
+          NativeCells(std::move(NativeCellsValue)), Cursor{BoundsValue.Width - 1, BoundsValue.Height - 1}
     {
     }
 };
@@ -156,13 +157,22 @@ const Frame &Stage::FrameBuffer() const noexcept
     return State->FrameBuffer;
 }
 
+box::status Stage::SetCursor(core::Point At) noexcept
+{
+    if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
+    if (At.X < 0 || At.Y < 0 || At.X >= State->Bounds.Width || At.Y >= State->Bounds.Height)
+        return std::unexpected(box::error{box::errc::out_of_range});
+    State->Cursor = At;
+    return {};
+}
+
 box::status Stage::Present() noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
 
     State->FrameBuffer.WriteNative(State->NativeCells.data(), State->NativeCells.size());
-    int Code = vga_setcursor(static_cast<std::uint8_t>(State->Bounds.Height - 1),
-                             static_cast<std::uint8_t>(State->Bounds.Width - 1));
+    int Code = vga_setcursor(static_cast<std::uint8_t>(State->Cursor.Y),
+                             static_cast<std::uint8_t>(State->Cursor.X));
     if (Code != 0) return std::unexpected(Cause(Code));
 
     Code = vga_paint(0, 0, static_cast<std::uint8_t>(State->Bounds.Height),
