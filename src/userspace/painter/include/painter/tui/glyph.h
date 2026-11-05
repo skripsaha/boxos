@@ -16,6 +16,8 @@ inline constexpr char Right      = static_cast<char>(0x1A);
 inline constexpr char Up         = static_cast<char>(0x18);
 inline constexpr char Down       = static_cast<char>(0x19);
 inline constexpr char Pointer    = static_cast<char>(0x10);
+inline constexpr char LeftHalf   = static_cast<char>(0xDD);
+inline constexpr char RightHalf  = static_cast<char>(0xDE);
 
 }  // namespace painter::tui::Glyphs
 

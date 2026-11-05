@@ -22,59 +22,69 @@
 #include "box/clock.h"
 #include "box/cpu.h"
 #include "box/form.h"
+#include "box/print.h"
 
 #include "keep.h"
 #include "minesweeper.h"
-#include "stage.h"
+#include "painter/core/color.h"
+#include "painter/tui/glyph.h"
+#include "painter/tui/stage.h"
 
 BOX_FORM("takes optional words \"the field: beginner, intermediate or expert\"\n");
 
 namespace {
 
+using Color = painter::core::Color;
+namespace Colors = painter::core::Colors;
+using painter::tui::EventKind;
+using painter::tui::KeyEvent;
+using painter::tui::Stage;
+using painter::tui::StageError;
+using painter::tui::TextStyle;
+
 const Keep              Record{"minesweeper.record", "minesweeper,record"};
 constexpr std::uint64_t RevealUs = 30000;   /* between two mines shown after a loss */
 
-const Color Page        = COLOR_RGB(0x12, 0x12, 0x12);
+const Color Page        = Color::Rgb(0x12, 0x12, 0x12);
 /* A big square stands apart by its gaps; a square one row high has none to
  * spare, so its neighbours alternate light and dark grey — two greys a text
  * console tells apart. The one chosen is white. */
-const Color Raised      = COLOR_RGB(0x9A, 0x9A, 0x9A);
-const Color RaisedOdd   = COLOR_RGB(0xA8, 0xA8, 0xA8);
-const Color RaisedEven  = COLOR_RGB(0x78, 0x78, 0x78);
-const Color RaisedHere  = COLOR_RGB(0xE8, 0xE8, 0xE8);
-const Color RaisedLight = COLOR_RGB(0xC8, 0xC8, 0xC8);
-const Color Sunken      = COLOR_RGB(0x2A, 0x2A, 0x2A);
-const Color SunkenHere  = COLOR_RGB(0x4A, 0x4A, 0x4A);
-const Color Blast       = COLOR_RGB(0xC0, 0x30, 0x30);
-const Color FlagInk     = COLOR_RGB(0xE0, 0x30, 0x30);
-const Color MineInk     = COLOR_RGB(0xEE, 0xEE, 0xEE);
-const Color TitleInk    = COLOR_AMBER;
-const Color TextInk     = COLOR_RGB(0xEE, 0xEE, 0xEE);
-const Color HintInk     = COLOR_RGB(0x8C, 0x8C, 0x8C);
-const Color GoodInk     = COLOR_RGB(0x60, 0xE0, 0x70);
-const Color BadInk      = COLOR_RGB(0xFF, 0x60, 0x60);
-const Color FaceInk     = COLOR_RGB(0xF0, 0xD0, 0x40);
-const Color BarPaper    = COLOR_RGB(0x3A, 0x3A, 0x3A);
-const Color KeyInk      = COLOR_AMBER;
+const Color Raised      = Color::Rgb(0x9A, 0x9A, 0x9A);
+const Color RaisedOdd   = Color::Rgb(0xA8, 0xA8, 0xA8);
+const Color RaisedEven  = Color::Rgb(0x78, 0x78, 0x78);
+const Color RaisedHere  = Color::Rgb(0xE8, 0xE8, 0xE8);
+const Color RaisedLight = Color::Rgb(0xC8, 0xC8, 0xC8);
+const Color Sunken      = Color::Rgb(0x2A, 0x2A, 0x2A);
+const Color SunkenHere  = Color::Rgb(0x4A, 0x4A, 0x4A);
+const Color Blast       = Color::Rgb(0xC0, 0x30, 0x30);
+const Color FlagInk     = Color::Rgb(0xE0, 0x30, 0x30);
+const Color MineInk     = Color::Rgb(0xEE, 0xEE, 0xEE);
+const Color TitleInk    = Colors::Amber;
+const Color TextInk     = Color::Rgb(0xEE, 0xEE, 0xEE);
+const Color HintInk     = Color::Rgb(0x8C, 0x8C, 0x8C);
+const Color GoodInk     = Color::Rgb(0x60, 0xE0, 0x70);
+const Color BadInk      = Color::Rgb(0xFF, 0x60, 0x60);
+const Color FaceInk     = Color::Rgb(0xF0, 0xD0, 0x40);
+const Color BarPaper    = Color::Rgb(0x3A, 0x3A, 0x3A);
+const Color KeyInk      = Colors::Amber;
 
 /* The numbers as the game has always had them, lightened for a dark square:
  * blue, green, red, violet, amber, cyan, white, grey. */
 const Color NumberInks[9] = {Sunken,
-                             COLOR_RGB(0x60, 0x90, 0xFF), COLOR_RGB(0x50, 0xC8, 0x50), COLOR_RGB(0xFF, 0x50, 0x50),
-                             COLOR_RGB(0xC0, 0x70, 0xFF), COLOR_RGB(0xE0, 0xA0, 0x30), COLOR_RGB(0x40, 0xD0, 0xD0),
-                             COLOR_RGB(0xEE, 0xEE, 0xEE), COLOR_RGB(0x9A, 0x9A, 0x9A)};
+                             Color::Rgb(0x60, 0x90, 0xFF), Color::Rgb(0x50, 0xC8, 0x50), Color::Rgb(0xFF, 0x50, 0x50),
+                             Color::Rgb(0xC0, 0x70, 0xFF), Color::Rgb(0xE0, 0xA0, 0x30), Color::Rgb(0x40, 0xD0, 0xD0),
+                             Color::Rgb(0xEE, 0xEE, 0xEE), Color::Rgb(0x9A, 0x9A, 0x9A)};
 
-constexpr char FlagGlyph = 0x10;
-constexpr char MineGlyph = 0x0F;
-constexpr char LeftHalf  = static_cast<char>(0xDD);
+constexpr char FlagGlyph = painter::tui::Glyphs::Pointer;
+constexpr char MineGlyph = static_cast<char>(0x0F);
 
 /* Square sizes, biggest first: the first the glass holds is taken. */
 constexpr int TileSizes[][2] = {{6, 3}, {4, 2}, {3, 1}, {2, 1}};
 
 class Board {
 public:
-    Stage     Glass;
-    MineField Field;
+    std::optional<Stage> Glass;
+    MineField            Field;
     int       Played = 0, Cleared = 0;
     int       Best[MineSizeCount] = {};
     std::string Trouble;
@@ -83,7 +93,7 @@ public:
     bool Fits(int Which) const;
     void Draw();
     /* False to leave. */
-    bool OnKey(const kb_event_t &Key);
+    bool OnKey(const KeyEvent &Key);
     std::uint32_t Wait() const;
     int  Level() const { return Which; }
     bool Beaten() const { return NewBest; }
@@ -104,8 +114,9 @@ private:
 
 bool Board::Fits(int Level) const
 {
+    const painter::core::Size Dimensions = Glass->Size();
     const MineSize &Size = MineSizes[Level];
-    return Size.Wide * 2 <= Glass.Cols - 2 && Size.High <= Glass.Rows - 5;
+    return Size.Wide * 2 <= Dimensions.Width - 2 && Size.High <= Dimensions.Height - 5;
 }
 
 void Board::Begin(int Level)
@@ -113,13 +124,14 @@ void Board::Begin(int Level)
     Which = Level;
     const MineSize &Size = MineSizes[Which];
     Field.Start(Size, cpu_rdtsc());
+    const painter::core::Size Dimensions = Glass->Size();
     for (const auto &Tile : TileSizes) {
         TileW = Tile[0];
         TileH = Tile[1];
-        if (Size.Wide * TileW <= Glass.Cols - 2 && Size.High * TileH <= Glass.Rows - 5) break;
+        if (Size.Wide * TileW <= Dimensions.Width - 2 && Size.High * TileH <= Dimensions.Height - 5) break;
     }
-    Left      = (Glass.Cols - Size.Wide * TileW) / 2;
-    Top       = std::max(2, (Glass.Rows - 1 - Size.High * TileH) / 2 + 1);
+    Left      = (Dimensions.Width - Size.Wide * TileW) / 2;
+    Top       = std::max(2, (Dimensions.Height - 1 - Size.High * TileH) / 2 + 1);
     CursorX   = Size.Wide / 2;
     CursorY   = Size.High / 2;
     StartedAt = EndedAt = 0;
@@ -137,6 +149,7 @@ int Board::Seconds() const
  * or a mine shown once the field is lost. */
 void Board::Tile(int X, int Y, const std::vector<int> &Rank, int ShownMines)
 {
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
     const MineCell &Cell = Field.At(X, Y);
     bool  Here   = X == CursorX && Y == CursorY;
     bool  Lost   = Field.State == MineState::Lost;
@@ -170,62 +183,72 @@ void Board::Tile(int X, int Y, const std::vector<int> &Rank, int ShownMines)
     for (int R = 0; R < TileH; R++) {
         for (int C = 0; C < TileW; C++) {
             bool Below = GapBelow && R == TileH - 1, Right = GapRight && C == TileW - 1;
-            if (Below && Right) Glass.Put(Row + R, Col + C, ' ', Page, Page);
-            else if (Right) Glass.Put(Row + R, Col + C, LeftHalf, Paper, Page);
-            else if (Below) Glass.Put(Row + R, Col + C, Glyph::LowerHalf, Page, Paper);
-            else if (R == 0 && TileH > 1 && !Shown) Glass.Put(Row + R, Col + C, Glyph::UpperHalf, RaisedLight, Paper);
-            else Glass.Put(Row + R, Col + C, ' ', Ink, Paper);
+            if (Below && Right) FrameBuffer.Put({Col + C, Row + R}, ' ', TextStyle{Page, Page});
+            else if (Right)
+                FrameBuffer.Put({Col + C, Row + R}, painter::tui::Glyphs::LeftHalf, TextStyle{Paper, Page});
+            else if (Below)
+                FrameBuffer.Put({Col + C, Row + R}, painter::tui::Glyphs::LowerHalf, TextStyle{Page, Paper});
+            else if (R == 0 && TileH > 1 && !Shown)
+                FrameBuffer.Put({Col + C, Row + R}, painter::tui::Glyphs::UpperHalf,
+                                TextStyle{RaisedLight, Paper});
+            else FrameBuffer.Put({Col + C, Row + R}, ' ', TextStyle{Ink, Paper});
         }
     }
-    if (Mark != ' ') Glass.Put(Row + (TileH - 1) / 2, Col + (TileW - 1) / 2, Mark, Ink, Paper);
+    if (Mark != ' ')
+        FrameBuffer.Put({Col + (TileW - 1) / 2, Row + (TileH - 1) / 2}, Mark, TextStyle{Ink, Paper});
 }
 
 /* The flags left, a face, the time. */
 void Board::Head()
 {
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
     int Wide  = std::max(Field.Wide * TileW, 30);
-    int Start = (Glass.Cols - Wide) / 2;
-    Glass.Write(Top - 2, Start, "minesweeper", TitleInk, Page);
+    int Start = (Dimensions.Width - Wide) / 2;
+    FrameBuffer.Write({Start, Top - 2}, "minesweeper", TextStyle{TitleInk, Page});
     std::string Name = MineSizes[Which].Name;
-    Glass.Write(Top - 2, Start + Wide - static_cast<int>(Name.size()), Name, HintInk, Page);
+    FrameBuffer.Write({Start + Wide - static_cast<int>(Name.size()), Top - 2}, Name, TextStyle{HintInk, Page});
 
-    Glass.Put(Top - 1, Start, FlagGlyph, FlagInk, Page);
-    Glass.Write(Top - 1, Start + 2, std::format("{:>3}", Field.FlagsLeft()), TextInk, Page);
+    FrameBuffer.Put({Start, Top - 1}, FlagGlyph, TextStyle{FlagInk, Page});
+    FrameBuffer.Write({Start + 2, Top - 1}, std::format("{:>3}", Field.FlagsLeft()), TextStyle{TextInk, Page});
     const char *Face = Field.State == MineState::Won ? "B)" : Field.State == MineState::Lost ? "X(" : ":)";
-    Glass.Write(Top - 1, Start + Wide / 2 - 1, Face, Field.State == MineState::Lost ? BadInk : FaceInk, Page);
+    FrameBuffer.Write({Start + Wide / 2 - 1, Top - 1}, Face,
+                      TextStyle{Field.State == MineState::Lost ? BadInk : FaceInk, Page});
     std::string Time = std::format("{:03} s", Seconds());
-    Glass.Write(Top - 1, Start + Wide - static_cast<int>(Time.size()), Time, TextInk, Page);
+    FrameBuffer.Write({Start + Wide - static_cast<int>(Time.size()), Top - 1}, Time, TextStyle{TextInk, Page});
 }
 
 /* How the field went, under it, and the keys along the bottom. */
 void Board::Foot()
 {
+    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    const painter::core::Size Dimensions = Glass->Size();
     int Row = Top + Field.High * TileH;
-    if (Row < Glass.Rows - 1) {
+    if (Row < Dimensions.Height - 1) {
         int BestTime = Best[Which];
         if (Field.State == MineState::Won)
-            Glass.Centre(Row, NewBest ? std::format("cleared in {} s, a new best!", Seconds())
-                                      : std::format("cleared in {} s (best {} s)", Seconds(), BestTime),
-                         GoodInk, Page);
+            FrameBuffer.Centre(Row, NewBest ? std::format("cleared in {} s, a new best!", Seconds())
+                                            : std::format("cleared in {} s (best {} s)", Seconds(), BestTime),
+                               TextStyle{GoodInk, Page});
         else if (Field.State == MineState::Lost)
-            Glass.Centre(Row, "boom. r for a new field", BadInk, Page);
+            FrameBuffer.Centre(Row, "boom. r for a new field", TextStyle{BadInk, Page});
         else if (BestTime > 0)
-            Glass.Centre(Row, std::format("best {} s", BestTime), HintInk, Page);
+            FrameBuffer.Centre(Row, std::format("best {} s", BestTime), TextStyle{HintInk, Page});
     }
-    int Bar = Glass.Rows - 1, Col = 1;
-    Glass.Fill(Bar, 0, Glass.Cols, ' ', TextInk, BarPaper);
+    int Bar = Dimensions.Height - 1, Col = 1;
+    FrameBuffer.Fill({0, Bar, Dimensions.Width, 1}, ' ', TextStyle{TextInk, BarPaper});
     for (auto [Keys, What] : {std::pair{"\x1B\x18\x19\x1A", "move"}, {"space", "open"}, {"f", "flag"},
                               {"1 2 3", "field"}, {"r", "new"}, {"q", "leave"}}) {
         int Wide = static_cast<int>(std::string_view(Keys).size() + std::string_view(What).size()) + 3;
-        if (Col + Wide > Glass.Cols) break;
-        Col = Glass.Write(Bar, Col, Keys, KeyInk, BarPaper);
-        Col = Glass.Write(Bar, Col + 1, What, HintInk, BarPaper) + 2;
+        if (Col + Wide > Dimensions.Width) break;
+        Col = static_cast<int>(FrameBuffer.Write({Col, Bar}, Keys, TextStyle{KeyInk, BarPaper}));
+        Col = static_cast<int>(FrameBuffer.Write({Col + 1, Bar}, What, TextStyle{HintInk, BarPaper})) + 2;
     }
 }
 
 void Board::Draw()
 {
-    Glass.Clear(Page);
+    Glass->FrameBuffer().Clear(TextStyle{Page, Page});
     std::vector<int> Order = Field.MinesByDistance();
     std::vector<int> Rank(static_cast<std::size_t>(Field.Wide * Field.High), 1 << 30);
     for (std::size_t At = 0; At < Order.size(); At++) Rank[static_cast<std::size_t>(Order[At])] = static_cast<int>(At);
@@ -264,23 +287,23 @@ void Board::Act(bool Flag)
     }
 }
 
-bool Board::OnKey(const kb_event_t &Key)
+bool Board::OnKey(const KeyEvent &Key)
 {
-    if (Key.mods & KB_MOD_EXTENDED) {
-        switch (Key.scancode) {
-        case KEY_LEFT:  CursorX = std::max(0, CursorX - 1); break;
-        case KEY_RIGHT: CursorX = std::min(Field.Wide - 1, CursorX + 1); break;
-        case KEY_UP:    CursorY = std::max(0, CursorY - 1); break;
-        case KEY_DOWN:  CursorY = std::min(Field.High - 1, CursorY + 1); break;
+    if (Key.IsExtended()) {
+        switch (Key.Scancode) {
+        case painter::tui::KeyCodes::Left:  CursorX = std::max(0, CursorX - 1); break;
+        case painter::tui::KeyCodes::Right: CursorX = std::min(Field.Wide - 1, CursorX + 1); break;
+        case painter::tui::KeyCodes::Up:    CursorY = std::max(0, CursorY - 1); break;
+        case painter::tui::KeyCodes::Down:  CursorY = std::min(Field.High - 1, CursorY + 1); break;
         default: break;
         }
         return true;
     }
-    char Ch = Key.ascii;
+    char Ch = Key.Ascii;
     if (Ch >= 'A' && Ch <= 'Z') Ch = static_cast<char>(Ch - 'A' + 'a');
     switch (Ch) {
     case 'q':
-    case KEY_ESCAPE: return false;
+    case painter::tui::KeyCodes::Escape: return false;
     case ' ':
     case '\n':
     case '\r': Act(false); break;
@@ -339,6 +362,13 @@ int Asked(const char *const *Words, std::size_t Count)
     return -1;
 }
 
+void Say(std::string_view Text)
+{
+    std::string Line(Text);
+    Line += '\n';
+    print_to_screen(Line.c_str());
+}
+
 }
 
 int main()
@@ -349,11 +379,12 @@ int main()
         if (form_words(0, &Words, &Count) != 0) return 1;
 
         Board Desk;
-        if (std::optional<std::string> Refusal = Desk.Glass.Take("minesweeper", 40, 16)) {
-            Desk.Glass.Give();
-            StageSay(*Refusal);
+        std::expected<Stage, StageError> Opened = Stage::Open("minesweeper", 40, 16);
+        if (!Opened) {
+            Say(Opened.error().Describe("minesweeper"));
             return 1;
         }
+        Desk.Glass = std::move(*Opened);
         int Level = Asked(Words, Count);
         if (Level < 0) Level = Desk.Fits(1) ? 1 : 0;
         if (!Desk.Fits(Level)) Level = 0;
@@ -365,23 +396,22 @@ int main()
         bool Painted = true;
         for (;;) {
             Desk.Draw();
-            if (!(Painted = Desk.Glass.Show())) break;
-            kb_event_t Key;
-            StageHeard Heard = Desk.Glass.Listen(Key, Desk.Wait());
-            if (Heard == StageHeard::Gone) break;
-            if (Heard == StageHeard::Key && !Desk.OnKey(Key)) break;
+            if (!(Painted = static_cast<bool>(Desk.Glass->Present()))) break;
+            const painter::tui::Event Event = Desk.Glass->Wait(Desk.Wait());
+            if (Event.Kind == EventKind::Gone) break;
+            if (Event.Kind == EventKind::Key && !Desk.OnKey(Event.Key)) break;
         }
-        Desk.Glass.Give();
+        (void)Desk.Glass->Close();
 
         /* Kept only when beaten, and never over a record that could not be read. */
         if (Desk.Trouble.empty() && !std::equal(std::begin(Kept), std::end(Kept), std::begin(Desk.Best))) {
             if (std::optional<std::string> Refusal = KeepWrite(Record, BestText(Desk))) Desk.Trouble = *Refusal;
         }
-        StageSay(std::format("[MINESWEEPER] {} played, {} cleared", Desk.Played, Desk.Cleared));
-        if (!Desk.Trouble.empty()) StageSay("minesweeper: the best times are not kept: " + Desk.Trouble);
+        Say(std::format("[MINESWEEPER] {} played, {} cleared", Desk.Played, Desk.Cleared));
+        if (!Desk.Trouble.empty()) Say("minesweeper: the best times are not kept: " + Desk.Trouble);
         return Painted ? 0 : 1;
     } catch (const std::bad_alloc &) {
-        StageSay("There is not enough memory for the field.");
+        Say("There is not enough memory for the field.");
         return 1;
     }
 }

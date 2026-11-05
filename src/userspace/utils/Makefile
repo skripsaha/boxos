@@ -183,7 +183,7 @@ TODO_OBJS       = todo.o todo_list.o todo_view.o stage.o keep.o
 TAGMAP_OBJS     = tagmap.o tagmap_tiles.o stage.o keep.o
 MANDELBROT_OBJS = mandelbrot.o mandelbrot_paint.o stage.o
 QR_OBJS         = qr.o qr_code.o
-MINESWEEPER_OBJS = minesweeper.o minesweeper_field.o stage.o keep.o
+MINESWEEPER_OBJS = minesweeper.o minesweeper_field.o keep.o
 EYES_OBJS       = eyes.o
 # The utilities are built without optimisation, for their debug information;
 # a hash is the one place in them where that costs — every byte of a file
@@ -257,8 +257,8 @@ qr.elf: $(BOXLIB_START) $(QR_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(N
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(QR_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-minesweeper.elf: $(BOXLIB_START) $(MINESWEEPER_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(MINESWEEPER_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+minesweeper.elf: $(BOXLIB_START) $(MINESWEEPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(MINESWEEPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 eyes.elf: $(BOXLIB_START) $(EYES_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
