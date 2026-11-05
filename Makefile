@@ -750,6 +750,10 @@ QUILLTEST_BIN    = $(APPS_DIR)/quilltest.elf
 DISPLAY_DIR = $(USERSPACE_DIR)/display
 DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 
+# Painter — the user-facing graphics family above boxcxx and boxlib.
+PAINTER_DIR = $(USERSPACE_DIR)/painter
+PAINTER_LIB = $(PAINTER_DIR)/libpainter.a
+
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase assemble \
@@ -1080,6 +1084,17 @@ $(USERSPACE_DIR)/boxlib/libbox.a:
 $(USERSPACE_DIR)/boxcxx/libboxcxx.a:
 	@echo "Building boxcxx..."
 	@cd $(USERSPACE_DIR)/boxcxx && $(MAKE)
+
+# Painter is a separate userspace library. It is not part of the image until a
+# shipped application links it, but it has a first-class target so its focused
+# build and its dependency chain are always explicit.
+.PHONY: $(PAINTER_LIB)
+$(PAINTER_LIB): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
+	@echo "Building Painter..."
+	@cd $(PAINTER_DIR) && $(MAKE)
+
+.PHONY: painter
+painter: $(PAINTER_LIB)
 
 # Build shell
 $(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
@@ -2160,6 +2175,7 @@ clean:
 	@cd $(APPS_DIR) && $(MAKE) clean
 	@cd $(DISPLAY_DIR) && $(MAKE) clean
 	@cd $(UTILS_DIR) && $(MAKE) clean
+	@cd $(PAINTER_DIR) && $(MAKE) clean
 	@cd $(USERSPACE_DIR)/boxlib && $(MAKE) clean
 	# boxcxx was missing here, and its absence was not cosmetic: no Makefile in
 	# userspace tracks header dependencies, so `make clean && make` is the ONLY
