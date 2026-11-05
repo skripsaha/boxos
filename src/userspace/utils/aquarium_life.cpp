@@ -22,7 +22,7 @@ constexpr float FlakeLasts    = 25.0f;   /* seconds on the sand */
 constexpr float BubblerEvery  = 0.35f;
 constexpr float KnockReach    = 80.0f;
 
-const Color FlakeInks[] = {COLOR_RGB(0xE0, 0xA0, 0x40), COLOR_RGB(0xC0, 0x60, 0x30), COLOR_RGB(0xE8, 0xD0, 0x80)};
+const AquaColor FlakeInks[] = {AquaColor::Rgb(0xE0, 0xA0, 0x40), AquaColor::Rgb(0xC0, 0x60, 0x30), AquaColor::Rgb(0xE8, 0xD0, 0x80)};
 
 const AquaKind &KindOf(const AquaCreature &Creature)
 {

@@ -15,19 +15,19 @@ constexpr int AirRows = 4;     /* above the water, under the lid */
 /* A tank of 240 x 100 pixels holds the counts in AquaKinds; others by area. */
 constexpr float BaseArea = 240.0f * 100.0f;
 
-const Color KelpInks[] = {COLOR_RGB(0x2E, 0x8B, 0x3A), COLOR_RGB(0x3A, 0xA0, 0x4A),
-                          COLOR_RGB(0x1F, 0x70, 0x2E), COLOR_RGB(0x6A, 0x8A, 0x2A)};
-const Color CoralInks[] = {COLOR_RGB(0xFF, 0x6A, 0x50), COLOR_RGB(0xC0, 0x40, 0xA0),
-                           COLOR_RGB(0xFF, 0x9A, 0x30), COLOR_RGB(0xE8, 0xD0, 0x40)};
+const AquaColor KelpInks[] = {AquaColor::Rgb(0x2E, 0x8B, 0x3A), AquaColor::Rgb(0x3A, 0xA0, 0x4A),
+                          AquaColor::Rgb(0x1F, 0x70, 0x2E), AquaColor::Rgb(0x6A, 0x8A, 0x2A)};
+const AquaColor CoralInks[] = {AquaColor::Rgb(0xFF, 0x6A, 0x50), AquaColor::Rgb(0xC0, 0x40, 0xA0),
+                           AquaColor::Rgb(0xFF, 0x9A, 0x30), AquaColor::Rgb(0xE8, 0xD0, 0x40)};
 /* Light enough that the depth's shade leaves them dark grey, not black, on a
  * sixteen-colour console. */
-const Color RockInks[]  = {COLOR_RGB(0x8A, 0x8A, 0x92), COLOR_RGB(0x7E, 0x82, 0x8C),
-                           COLOR_RGB(0x96, 0x8E, 0x82)};
-const Color ShellInks[] = {COLOR_RGB(0xF0, 0xE0, 0xD0), COLOR_RGB(0xF0, 0xB0, 0xB0),
-                           COLOR_RGB(0xE8, 0xE8, 0xF0)};
+const AquaColor RockInks[]  = {AquaColor::Rgb(0x8A, 0x8A, 0x92), AquaColor::Rgb(0x7E, 0x82, 0x8C),
+                           AquaColor::Rgb(0x96, 0x8E, 0x82)};
+const AquaColor ShellInks[] = {AquaColor::Rgb(0xF0, 0xE0, 0xD0), AquaColor::Rgb(0xF0, 0xB0, 0xB0),
+                           AquaColor::Rgb(0xE8, 0xE8, 0xF0)};
 
 template <std::size_t N>
-Color Pick(const Color (&Inks)[N], AquaDice &Dice)
+AquaColor Pick(const AquaColor (&Inks)[N], AquaDice &Dice)
 {
     return Inks[static_cast<std::size_t>(Dice.Count(0, static_cast<int>(N) - 1))];
 }
@@ -78,7 +78,7 @@ AquaCoral GrowCoral(int X, int Floor, AquaDice &Dice)
     Coral.X      = X - Coral.Width / 2;
     Coral.Y      = Floor - Coral.Height + 1;
     Coral.Ink    = Pick(CoralInks, Dice);
-    Coral.Tip    = color_mix(Coral.Ink, COLOR_WHITE, 110);
+    Coral.Tip    = AquaColor::Mix(Coral.Ink, painter::core::Colors::White, 110);
     Coral.Pixels.assign(static_cast<std::size_t>(Coral.Width * Coral.Height), 0);
 
     struct Branch { int X, Y; };

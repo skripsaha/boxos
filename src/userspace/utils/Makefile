@@ -221,8 +221,8 @@ checksum.elf: $(BOXLIB_START) $(CHECKSUM_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(CHECKSUM_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-aquarium.elf: $(BOXLIB_START) $(AQUARIUM_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(AQUARIUM_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+aquarium.elf: $(BOXLIB_START) $(AQUARIUM_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(AQUARIUM_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 nyancat.elf: $(BOXLIB_START) $(NYANCAT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)

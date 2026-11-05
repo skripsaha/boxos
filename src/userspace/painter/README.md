@@ -79,13 +79,13 @@ Design accepted on 2026-11-05. The first implementation slice now provides
 `painter::tui::Stage`, and the regional `painter::tui::Surface`. All direct
 legacy-`stage.h` consumers are now migrated:
 `nyancat`, `fireworks`, `2048`, `tetris`, `minesweeper`, `mandelbrot`,
-`tagmap`, `todo`, `flame`, `stringview`, `hexer`, `qr`, and `passport` link through
+`aquarium`, `tagmap`, `todo`, `flame`, `stringview`, `hexer`, `qr`, and `passport` link through
 `libpainter.a`;
 `qr` and `passport` use the regional `Surface` contract.
 Their models, animation,
 persistence, layout algorithms, and visual composition remain application
-code. The remaining custom screen implementations (`aquarium`, `typer`,
-`eyes`, `taskcenter`) still own
+code. The remaining custom screen implementations (`typer`, `eyes`,
+`taskcenter`) still own
 their frame adapters and are the next migration layer. The Git checkpoint before implementation is tagged
 `painter-preimplementation`, and the implementation branch proceeds in
 bounded commits so that checkpoint remains an immediate rollback point.

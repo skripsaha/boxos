@@ -20,9 +20,10 @@
 #include <string>
 #include <vector>
 
-#include "box/color.h"
+#include "painter/core/color.h"
+#include "painter/tui/stage.h"
 
-struct TextCell;
+using AquaColor = painter::core::Color;
 
 /* ---- numbers ------------------------------------------------------------ */
 
@@ -46,7 +47,7 @@ float AquaWave(float Turns);
 void  AquaMakeWaves();
 
 /* `Light` 0..256 of the colour; 256 leaves it as it is. */
-Color AquaShade(Color Ink, int Light);
+AquaColor AquaShade(AquaColor Ink, int Light);
 
 /* ---- what lives in the tank --------------------------------------------- */
 
@@ -73,11 +74,11 @@ struct AquaSprite {
 };
 
 struct AquaLook {
-    Color Body;
-    Color Second;
-    Color Fin;
-    Color Dark;
-    Color Glow;
+    AquaColor Body;
+    AquaColor Second;
+    AquaColor Fin;
+    AquaColor Dark;
+    AquaColor Glow;
 };
 
 struct AquaKind {
@@ -130,32 +131,32 @@ struct AquaFlake {
     float X, Y;
     float Phase;
     float Lying = 0;       /* seconds on the sand */
-    Color Ink;
+    AquaColor Ink;
 };
 
 struct AquaStalk {         /* kelp or grass, rooted in the sand */
     int   X;
     int   Height;
     float Phase;
-    Color Ink;
+    AquaColor Ink;
     bool  Kelp;
 };
 
 struct AquaCoral {
     int                       X, Y, Width, Height;
     std::vector<std::uint8_t> Pixels;   /* 0 none, 1 coral, 2 its tips */
-    Color                     Ink, Tip;
+    AquaColor                 Ink, Tip;
 };
 
 struct AquaRock {
     int   X, Y, Width, Height;
     bool  Cave;
-    Color Ink;
+    AquaColor Ink;
 };
 
 struct AquaShell {
     int   X, Y;
-    Color Ink;
+    AquaColor Ink;
 };
 
 struct AquaChest {
@@ -237,9 +238,9 @@ struct AquaView {
 
 /* The window onto the tank, as pixels, ViewWidth x ViewHeight, row by row. */
 void AquaPaint(const AquaTank &Tank, const AquaView &View, const AquaDaylight &Daylight,
-               std::vector<Color> &Pixels);
+               std::vector<AquaColor> &Pixels);
 
 /* Two pixels a cell: the upper half block, ink the pixel above. */
-void AquaCells(const std::vector<Color> &Pixels, int Width, TextCell *Frame, int Rows, int Cols);
+void AquaCells(const std::vector<AquaColor> &Pixels, int Width, painter::tui::Frame &Frame, int Rows, int Cols);
 
 #endif
