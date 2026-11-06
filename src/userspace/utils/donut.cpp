@@ -43,8 +43,11 @@ constexpr PainterColor Black = painter::core::Colors::Black;
 /* Change these two colors to retheme the torus. */
 constexpr PainterColor DonutColorLow = PainterColor::Rgb(0x1C, 0x63, 0xC6);
 constexpr PainterColor DonutColorHigh = PainterColor::Rgb(0xF0, 0x83, 0x2E);
-constexpr int DonutMaxWidth = 28;
-constexpr int DonutMaxHeight = 14;
+/* The zone is deliberately larger than the visible torus. Perspective makes
+ * its footprint grow while it turns, so a tight frame would clip the rim. */
+constexpr int DonutZoneMaxWidth = 40;
+constexpr int DonutZoneMaxHeight = 18;
+constexpr float DonutScale = 0.18f;
 
 void Say(std::string_view Text)
 {
@@ -121,7 +124,7 @@ public:
         constexpr float Major = 1.0f;
         constexpr float Minor = 0.43f;
         constexpr float Camera = 3.3f;
-        const float Scale = static_cast<float>(std::min(Width, PixelHeight)) * 0.43f;
+        const float Scale = static_cast<float>(std::min(Width, PixelHeight)) * DonutScale;
 
         constexpr int UCount = 112;
         constexpr int VCount = 56;
@@ -195,8 +198,8 @@ int main()
     }
     painter::tui::Surface Screen = std::move(*Opened);
     const painter::core::Size Dimensions = Screen.Size();
-    const int Width = std::min(DonutMaxWidth, std::max(8, Dimensions.Width - 4));
-    const int Height = std::min(DonutMaxHeight, std::max(5, Dimensions.Height - 4));
+    const int Width = std::min(DonutZoneMaxWidth, std::max(8, Dimensions.Width - 4));
+    const int Height = std::min(DonutZoneMaxHeight, std::max(5, Dimensions.Height - 4));
     const Place At = Where(Words, Count, Dimensions.Width, Dimensions.Height, Width, Height);
 
     std::expected<painter::tui::Frame, box::error> Created =
