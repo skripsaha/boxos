@@ -109,7 +109,7 @@ public:
 private:
     Attempt NewAttempt();
     Verdict Type(Attempt &Run);
-    bool    Handle(Attempt &Run, const kb_event_t &Key, std::vector<Line> &Lines);
+    bool    Handle(Attempt &Run, const painter::tui::KeyEvent &Key, std::vector<Line> &Lines);
     void    Remember(const Attempt &Run, std::uint64_t Ms, bool Kept);
     bool    ShowResults(const Attempt &Run, std::uint64_t Ms);
     Report  Record(const Attempt &Run, std::uint64_t Ms);
@@ -129,14 +129,14 @@ Attempt Trainer::NewAttempt()
 }
 
 /* True while the run goes on. */
-bool Trainer::Handle(Attempt &Run, const kb_event_t &Key, std::vector<Line> &Lines)
+bool Trainer::Handle(Attempt &Run, const painter::tui::KeyEvent &Key, std::vector<Line> &Lines)
 {
-    if (Key.mods & KB_MOD_CTRL) return !(Key.ascii == 'q' || Key.ascii == 'Q');
-    if (Key.mods & KB_MOD_EXTENDED) return true;
+    if (Key.IsCtrl()) return !(Key.Ascii == 'q' || Key.Ascii == 'Q');
+    if (Key.IsExtended()) return true;
 
-    char Ch = Key.ascii;
-    if (Ch == KEY_ESCAPE) return false;
-    if (Ch == KEY_BACKSPACE || Ch == 0x7f) {
+    char Ch = Key.Ascii;
+    if (Ch == painter::tui::KeyCodes::Escape) return false;
+    if (Ch == painter::tui::KeyCodes::Backspace || Ch == 0x7f) {
         Run.Back();
     } else if (Ch >= 0x20 && Ch < 0x7f) {
         Run.Type(Ch, clock_uptime_ms());
@@ -170,7 +170,7 @@ Verdict Trainer::Type(Attempt &Run)
             Wait = static_cast<std::uint32_t>(std::max<std::uint64_t>(std::min<std::uint64_t>(Left, TickMs), 1));
         }
 
-        kb_event_t Key;
+        painter::tui::KeyEvent Key;
         Heard      Got = Glass.Listen(Key, Wait);
         if (Got == Heard::Gone) return Verdict::Left;
         if (Got == Heard::Key && !Handle(Run, Key, Lines)) return Verdict::Left;
@@ -219,16 +219,16 @@ bool Trainer::ShowResults(const Attempt &Run, std::uint64_t Ms)
         PaintResults(Glass, Result, Beat++);
         if (!Glass.Flush()) return false;
 
-        kb_event_t Key;
+        painter::tui::KeyEvent Key;
         Heard      Got = Glass.Listen(Key, Result.Place == Standing::Beaten ? FlourishMs : 0);
         if (Got == Heard::Gone) return false;
         if (Got != Heard::Key) continue;
 
-        if (Key.mods & KB_MOD_CTRL) {
-            if (Key.ascii == 'q' || Key.ascii == 'Q') return false;
-        } else if (!(Key.mods & KB_MOD_EXTENDED)) {
-            if (Key.ascii == KEY_ENTER) return true;
-            if (Key.ascii == KEY_ESCAPE || Key.ascii == 'q' || Key.ascii == 'Q') return false;
+        if (Key.IsCtrl()) {
+            if (Key.Ascii == 'q' || Key.Ascii == 'Q') return false;
+        } else if (!Key.IsExtended()) {
+            if (Key.Ascii == painter::tui::KeyCodes::Enter) return true;
+            if (Key.Ascii == painter::tui::KeyCodes::Escape || Key.Ascii == 'q' || Key.Ascii == 'Q') return false;
         }
     }
 }

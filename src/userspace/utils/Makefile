@@ -209,8 +209,8 @@ copy.elf: $(BOXLIB_START) $(COPY_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(COPY_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-typer.elf: $(BOXLIB_START) $(TYPER_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TYPER_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+typer.elf: $(BOXLIB_START) $(TYPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TYPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 flame.elf: $(BOXLIB_START) $(FLAME_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)

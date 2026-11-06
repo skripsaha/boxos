@@ -8,6 +8,8 @@
 #include <array>
 #include <string>
 
+#include "box/color.h"
+
 #include "typer_glass.h"
 
 namespace {
@@ -24,8 +26,8 @@ constexpr std::uint32_t ChartAxisWide  = 6;
 constexpr std::uint32_t RowsUsedLeast  = 25;
 constexpr std::size_t   MissedShown    = 5;
 
-constexpr Color ChartLow  = COLOR_RGB(0x20, 0x70, 0xB0);
-constexpr Color MissInk   = COLOR_RGB(0xFF, 0x90, 0x90);
+constexpr PainterColor ChartLow  = PainterColor::Rgb(0x20, 0x70, 0xB0);
+constexpr PainterColor MissInk   = PainterColor::Rgb(0xFF, 0x90, 0x90);
 
 constexpr std::array<std::array<std::string_view, BigRows>, 11> BigGlyphs = {{
     {"###", "#.#", "#.#", "#.#", "###"},
@@ -58,12 +60,12 @@ std::uint32_t BigWidth(std::string_view Number, std::uint32_t Scale)
     return Number.empty() ? 0 : static_cast<std::uint32_t>(Number.size()) * BigPitch(Scale) - PixelWide(Scale);
 }
 
-void PaintBig(Screen &Glass, std::uint32_t Row, std::uint32_t Col, std::string_view Number, Color Ink, std::uint32_t Scale)
+void PaintBig(Screen &Glass, std::uint32_t Row, std::uint32_t Col, std::string_view Number, PainterColor Ink, std::uint32_t Scale)
 {
     for (std::size_t At = 0; At < Number.size(); At++) {
         const auto &Glyph = GlyphOf(Number[At]);
         for (std::uint32_t Y = 0; Y < BigRows * Scale; Y++) {
-            Color Shade = color_mix(Ink, COLOR_WHITE, static_cast<std::uint8_t>(60 - Y / Scale * 15));
+            PainterColor Shade = PainterColor::Mix(Ink, painter::core::Colors::White, static_cast<std::uint8_t>(60 - Y / Scale * 15));
             for (std::uint32_t X = 0; X < 3; X++)
                 if (Glyph[Y / Scale][X] == '#')
                     Glass.Fill(Row + Y, Col + static_cast<std::uint32_t>(At) * BigPitch(Scale) + X * PixelWide(Scale),
@@ -86,7 +88,7 @@ std::uint32_t BigScaleFor(const Screen &Glass, const Report &Result)
     return 1;
 }
 
-Color AccuracyInk(unsigned Accuracy)
+PainterColor AccuracyInk(unsigned Accuracy)
 {
     return Accuracy >= 97 ? GoodInk : Accuracy >= 90 ? AmberInk : BadInk;
 }
@@ -138,7 +140,7 @@ void PaintBar(Screen &Glass, std::uint32_t Bottom, std::uint32_t Left, std::uint
 {
     unsigned Halves = (Speed * Rows * 2 + Top / 2) / Top;
     if (Speed != 0 && Halves == 0) Halves = 1;
-    Color Ink = color_mix(ChartLow, AmberInk, static_cast<std::uint8_t>(Speed * 255 / Top));
+    PainterColor Ink = PainterColor::Mix(ChartLow, AmberInk, static_cast<std::uint8_t>(Speed * 255 / Top));
     for (std::uint32_t Up = 0; Up < Rows; Up++) {
         char Ch = Halves >= 2 * (Up + 1) ? FullBlock : Halves == 2 * Up + 1 ? LowerHalf : 0;
         if (Ch != 0) Glass.Fill(Bottom - Up, Left, Wide, Ch, Ink, Paper);
@@ -178,7 +180,8 @@ void PaintStanding(Screen &Glass, std::uint32_t Row, const Report &Result, unsig
         constexpr std::string_view Banner = "*  N E W   P E R S O N A L   B E S T  *";
         std::uint32_t Col = Glass.Centre(Row, Banner, Paper, Paper);
         for (std::size_t I = 0; I < Banner.size(); I++) {
-            Color Hue = color_wheel(static_cast<std::uint16_t>((Beat * 90 + I * 40) % 1536), 220, 255);
+            PainterColor Hue = PainterColor::FromRaw(
+                color_wheel(static_cast<std::uint16_t>((Beat * 90 + I * 40) % 1536), 220, 255));
             Glass.Put(Row, Col + static_cast<std::uint32_t>(I), Banner[I], Hue, Paper);
         }
         Glass.Centre(Row + 1, "the old record was " + std::to_string(Result.Best) + " wpm", HintInk, Paper);
@@ -204,9 +207,10 @@ void Sparkle(Screen &Glass, unsigned Beat)
     for (std::uint32_t I = 0; I < Count; I++) {
         std::uint32_t Row = static_cast<std::uint32_t>(Chance.Below(Glass.Rows));
         std::uint32_t Col = static_cast<std::uint32_t>(Chance.Below(Glass.Cols));
-        const TextCell &Under = Glass.At(Row, Col);
-        if (Under.ch != ' ' || Under.bg != Paper) continue;
-        Color Hue = color_wheel(static_cast<std::uint16_t>(Chance.Below(1536)), 200, 255);
+        const painter::tui::Cell Under = Glass.At(Row, Col);
+        if (Under.Glyph != ' ' || Under.Background != Paper) continue;
+        PainterColor Hue = PainterColor::FromRaw(
+            color_wheel(static_cast<std::uint16_t>(Chance.Below(1536)), 200, 255));
         Glass.Put(Row, Col, Shapes[Chance.Below(Shapes.size())], Hue, Paper);
     }
 }

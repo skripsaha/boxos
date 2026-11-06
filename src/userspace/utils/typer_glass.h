@@ -6,10 +6,7 @@
 
 #include "typer.h"
 
-#include "box/color.h"
-#include "box/keyboard.h"
-#include "box/touch.h"
-#include "box/vga.h"
+#include "painter/tui/stage.h"
 
 constexpr std::uint32_t ScreenColsLeast = 80;
 constexpr std::uint32_t ScreenRowsLeast = 25;
@@ -24,51 +21,57 @@ constexpr std::uint32_t ScreenRowsLeast = 25;
  *   Paper   #0c0c0c L12  black        BarPaper #3a3a3a L58  dark grey
  *   HintInk #8c8c8c L140 light grey   BrightInk #eeeeee L238 white
  *   AmberInk yellow (light), GoodInk light green, BadInk light red */
-constexpr Color Paper      = COLOR_RGB(0x0C, 0x0C, 0x0C);
-constexpr Color BarPaper   = COLOR_RGB(0x3A, 0x3A, 0x3A);
-constexpr Color TitleInk   = COLOR_WHITE;
-constexpr Color HintInk    = COLOR_RGB(0x8C, 0x8C, 0x8C);
-constexpr Color BrightInk  = COLOR_RGB(0xEE, 0xEE, 0xEE);
-constexpr Color AmberInk   = COLOR_AMBER;
-constexpr Color GoodInk    = COLOR_RGB(0x8C, 0xE0, 0x8C);
-constexpr Color BadInk     = COLOR_RGB(0xFF, 0x70, 0x70);
+using PainterColor = painter::core::Color;
+
+constexpr PainterColor Paper      = PainterColor::Rgb(0x0C, 0x0C, 0x0C);
+constexpr PainterColor BarPaper   = PainterColor::Rgb(0x3A, 0x3A, 0x3A);
+constexpr PainterColor TitleInk   = painter::core::Colors::White;
+constexpr PainterColor HintInk    = PainterColor::Rgb(0x8C, 0x8C, 0x8C);
+constexpr PainterColor BrightInk  = PainterColor::Rgb(0xEE, 0xEE, 0xEE);
+constexpr PainterColor AmberInk   = painter::core::Colors::Amber;
+constexpr PainterColor GoodInk    = PainterColor::Rgb(0x8C, 0xE0, 0x8C);
+constexpr PainterColor BadInk     = PainterColor::Rgb(0xFF, 0x70, 0x70);
 
 enum class Heard { Key, Quiet, Gone };
 
 struct Figure {
     std::string Label;
     std::string Value;
-    Color       Ink;
+    PainterColor Ink;
 };
 
-/* The whole glass: a frame of cells laid down by one vga_paint, and the ear
- * that hears the keys. */
+/* The whole screen: a Painter stage owns its frame, cursor, teardown, and
+ * typed keyboard events while the typing model stays independent. */
 class Screen {
 public:
     /* A refusal is a sentence; none means the screen is held. */
     std::optional<std::string> Take();
     void                       Give();
 
-    void          Clear(Color Fill);
-    void          Put(std::uint32_t Row, std::uint32_t Col, char Ch, Color Fg, Color Bg);
-    std::uint32_t Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, Color Fg, Color Bg);
-    void          Fill(std::uint32_t Row, std::uint32_t Col, std::uint32_t Width, char Ch, Color Fg, Color Bg);
+    void          Clear(PainterColor Fill);
+    void          Put(std::uint32_t Row, std::uint32_t Col, char Ch, PainterColor Fg, PainterColor Bg);
+    std::uint32_t Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, PainterColor Fg,
+                        PainterColor Bg);
+    void          Fill(std::uint32_t Row, std::uint32_t Col, std::uint32_t Width, char Ch, PainterColor Fg,
+                       PainterColor Bg);
     /* Centred on the row; the column it began at. */
-    std::uint32_t Centre(std::uint32_t Row, std::string_view Text, Color Fg, Color Bg);
-    const TextCell &At(std::uint32_t Row, std::uint32_t Col) const { return Cells[Row * Cols + Col]; }
+    std::uint32_t Centre(std::uint32_t Row, std::string_view Text, PainterColor Fg, PainterColor Bg);
+    painter::tui::Cell At(std::uint32_t Row, std::uint32_t Col) const
+    {
+        return Glass->FrameBuffer().Read({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)});
+    }
     bool          Flush();
     /* Label-and-value pairs side by side, centred on the row. */
     void          Spread(std::uint32_t Row, const std::vector<Figure> &Figures);
 
     /* Wait up to TimeoutMs for a key (0: until one comes). */
-    Heard Listen(kb_event_t &Key, std::uint32_t TimeoutMs);
+    Heard Listen(painter::tui::KeyEvent &Key, std::uint32_t TimeoutMs);
 
     std::uint32_t Rows = 0;
     std::uint32_t Cols = 0;
 
 private:
-    std::vector<TextCell> Cells;
-    TouchTag              Ear = TOUCH_TAG_INVALID;
+    std::optional<painter::tui::Stage> Glass;
 };
 
 /* The width the passage is wrapped to on a screen this wide. */

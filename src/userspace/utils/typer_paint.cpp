@@ -13,12 +13,12 @@ namespace {
 /* Projected on a text console: RightInk white (a grey of L217), WrongPaper dark
  * red, RestInk and BarEmpty dark grey (L110, L48), CaretPaper light yellow,
  * BarFilled dark cyan, and the bar fades through to AmberInk's yellow. */
-constexpr Color RightInk   = COLOR_RGB(0xC8, 0xEB, 0xC8);
-constexpr Color WrongPaper = COLOR_RGB(0xB0, 0x28, 0x30);
-constexpr Color RestInk    = COLOR_RGB(0x6E, 0x6E, 0x6E);
-constexpr Color CaretPaper = COLOR_RGB(0xF0, 0xC8, 0x60);
-constexpr Color BarFilled  = COLOR_RGB(0x30, 0xB8, 0x98);
-constexpr Color BarEmpty   = COLOR_RGB(0x30, 0x30, 0x30);
+constexpr PainterColor RightInk   = PainterColor::Rgb(0xC8, 0xEB, 0xC8);
+constexpr PainterColor WrongPaper = PainterColor::Rgb(0xB0, 0x28, 0x30);
+constexpr PainterColor RestInk    = PainterColor::Rgb(0x6E, 0x6E, 0x6E);
+constexpr PainterColor CaretPaper = PainterColor::Rgb(0xF0, 0xC8, 0x60);
+constexpr PainterColor BarFilled  = PainterColor::Rgb(0x30, 0xB8, 0x98);
+constexpr PainterColor BarEmpty   = PainterColor::Rgb(0x30, 0x30, 0x30);
 
 constexpr std::uint32_t BarRow      = 2;
 constexpr std::uint32_t TextRow     = 4;
@@ -60,7 +60,7 @@ void PaintBar(Screen &Glass, const TypingView &View, std::uint32_t Left, std::ui
     std::uint32_t Filled = static_cast<std::uint32_t>(Progress(View) * Width / 1000);
     for (std::uint32_t I = 0; I < Width; I++) {
         if (I < Filled) {
-            Color Fade = color_mix(BarFilled, AmberInk, static_cast<std::uint8_t>(I * 255 / Width));
+            PainterColor Fade = PainterColor::Mix(BarFilled, AmberInk, static_cast<std::uint8_t>(I * 255 / Width));
             Glass.Put(BarRow, Left + I, FullBlock, Fade, Paper);
         } else {
             Glass.Put(BarRow, Left + I, LightShade, BarEmpty, Paper);
