@@ -195,7 +195,7 @@ MINESWEEPER_OBJS = minesweeper.o minesweeper_field.o keep.o
 EYES_OBJS       = eyes.o
 DONUT_OBJS      = donut.o
 SLIME_OBJS      = slime.o
-TUMBLEWEED_OBJS = tumbleweed.o
+TUMBLEWEED_OBJS = tumbleweed.o tumbleweed_world.o tumbleweed_scene.o tumbleweed_paint.o
 # The utilities are built without optimisation, for their debug information;
 # a hash is the one place in them where that costs — every byte of a file
 # goes through its rounds — so these three are built as BoxLib is, -O2.
