@@ -4,13 +4,11 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include <vector>
+#include <utility>
 
 #include "box/clock.h"
 #include "box/cxx/console.h"
-#include "box/cxx/keyboard.h"
-#include "box/keyboard.h"
-#include "box/vga.h"
+#include "painter/tui/stage.h"
 
 namespace {
 
@@ -112,12 +110,14 @@ const char *block_glyph_row(char letter, unsigned row) {
   return glyph[row < 5 ? row : 0];
 }
 
-TextCell cell(char ch, box::color fg, box::color bg) {
-  TextCell result{};
-  result.fg = fg.raw();
-  result.bg = bg.raw();
-  result.ch = ch;
-  return result;
+using PaintColor = painter::core::Color;
+
+PaintColor paint_color(box::color color) {
+  return PaintColor::FromRaw(color.raw());
+}
+
+painter::tui::Cell cell(char ch, box::color fg, box::color bg) {
+  return painter::tui::Cell{ch, paint_color(fg), paint_color(bg)};
 }
 
 Date date_from_boxtime(const BoxTime &time) {
@@ -146,34 +146,35 @@ std::string date_text(Date date) {
 
 class Calendar {
 public:
-  Calendar(std::uint8_t rows, std::uint8_t cols)
-      : rows_(rows), cols_(cols), left_width_(cols / 2),
-        frame_(static_cast<std::size_t>(rows) * cols,
-               cell(' ', kWhite, kBackground)) {
+  explicit Calendar(painter::tui::Stage &Screen)
+      : Screen_(Screen), frame_(Screen.FrameBuffer()),
+        rows_(static_cast<std::uint8_t>(Screen.Size().Height)),
+        cols_(static_cast<std::uint8_t>(Screen.Size().Width)),
+        left_width_(cols_ / 2) {
     read_today();
   }
 
-  bool handle(const box::key &key) {
-    if (key.ch() == KEY_ESCAPE)
+  bool handle(const painter::tui::KeyEvent &Key) {
+    if (Key.Ascii == painter::tui::KeyCodes::Escape)
       return false;
     if (!time_ok_)
       return true;
 
-    switch (key.scancode()) {
-    case KEY_LEFT:
+    switch (Key.Scancode) {
+    case painter::tui::KeyCodes::Left:
       shift_days(-1);
       break;
-    case KEY_RIGHT:
+    case painter::tui::KeyCodes::Right:
       shift_days(1);
       break;
-    case KEY_UP:
+    case painter::tui::KeyCodes::Up:
       shift_days(-7);
       break;
-    case KEY_DOWN:
+    case painter::tui::KeyCodes::Down:
       shift_days(7);
       break;
     default:
-      switch (key.ch()) {
+      switch (Key.Ascii) {
       case 'a':
       case 'A':
         shift_days(-1);
@@ -207,36 +208,30 @@ public:
       }
       break;
     }
-    render();
-    return true;
+    return render();
   }
 
-  void render() {
+  bool render() {
     read_today();
-    std::fill(frame_.begin(), frame_.end(), cell(' ', kWhite, kBackground));
+    frame_.Clear({paint_color(kWhite), paint_color(kBackground)});
     if (rows_ < 20 || cols_ < 70) {
       text(1, 2, "calendar needs at least 70x20 console cells", kRed,
            static_cast<std::uint8_t>(cols_ > 4 ? cols_ - 4 : 1));
-      paint();
-      return;
+      return paint();
     }
 
     draw_left();
     draw_right();
     draw_footer();
-    paint();
-  }
-
-  void clear() {
-    box::vga::clear(kBackground);
-    box::vga::move_cursor(0, 0);
+    return paint();
   }
 
 private:
+  painter::tui::Stage &Screen_;
+  painter::tui::Frame &frame_;
   std::uint8_t rows_;
   std::uint8_t cols_;
   std::uint8_t left_width_;
-  std::vector<TextCell> frame_;
   Date today_{};
   Date selected_{};
   bool time_ok_ = false;
@@ -270,7 +265,7 @@ private:
   void put(std::uint8_t row, std::uint8_t col, char ch, box::color fg,
            box::color bg = kBackground) {
     if (row < rows_ && col < cols_)
-      frame_[static_cast<std::size_t>(row) * cols_ + col] = cell(ch, fg, bg);
+      frame_.Put({col, row}, cell(ch, fg, bg));
   }
 
   void text(std::uint8_t row, std::uint8_t col, const std::string &value,
@@ -445,27 +440,31 @@ private:
          static_cast<std::uint8_t>(cols_ - 2));
   }
 
-  void paint() { (void)vga_paint(0, 0, rows_, cols_, frame_.data()); }
+  bool paint() {
+    if (!Screen_.SetCursor({static_cast<std::int32_t>(cols_ - 1),
+                            static_cast<std::int32_t>(rows_ - 1)}))
+      return false;
+    return static_cast<bool>(Screen_.Present());
+  }
 };
 
 } // namespace
 
 int main() {
-  const vga_dimensions_t dimensions = box::vga::size();
-  if (dimensions.rows == 0 || dimensions.cols == 0) {
-    std::printf("calendar: screen is unavailable\n");
+  auto Opened = painter::tui::Stage::Open("calendar", 70, 20);
+  if (!Opened) {
+    std::printf("%s\n", Opened.error().Describe("calendar").c_str());
     return 1;
   }
-
-  Calendar calendar(dimensions.rows, dimensions.cols);
-  calendar.render();
-  box::key_stream keyboard;
+  painter::tui::Stage Screen = std::move(*Opened);
+  Calendar calendar(Screen);
+  if (!calendar.render()) return 1;
   for (;;) {
-    const auto key = keyboard.wait(1000);
-    if (key && !calendar.handle(*key))
+    const painter::tui::Event Event = Screen.Wait(1000);
+    if (Event.Kind == painter::tui::EventKind::Gone) return 1;
+    if (Event.Kind == painter::tui::EventKind::Key &&
+        !calendar.handle(Event.Key))
       break;
-    calendar.render();
   }
-  calendar.clear();
   return 0;
 }

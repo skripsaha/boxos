@@ -49,6 +49,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -Werror=return-type \
          -I../boxcxx/include/std \
          -I../boxcxx/include \
+         -I../painter/include \
          -I../boxlib/include \
          -I../../include
 
@@ -61,10 +62,15 @@ CXXLDFLAGS = $(LDFLAGS) -Wl,--undefined=__boxcxx_tls_bootstrap
 BOXLIB     = ../boxlib/libbox.a
 BOXCXX     = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o
+PAINTER    = ../painter/libpainter.a
 
 .PHONY: all clean
 
 all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf current_test.elf htest.elf cxxtest.elf strandtest.elf brookstrand.elf brookexec.elf currentexec.elf strandpark.elf childspin.elf print_stress.elf quietprint.elf exitpaths.elf quilltest.elf clock.elf pulse.elf calendar.elf bonsai.elf bigclock.elf snake.elf hacker.elf pipes.elf wordle.elf
+
+.PHONY: $(PAINTER)
+$(PAINTER): $(BOXCXX) $(BOXLIB)
+	@cd ../painter && $(MAKE)
 
 # Included AFTER `all`, never before: the fragment's first rule is the tool,
 # and whatever rule make reads first becomes the default goal — an include at
@@ -125,17 +131,17 @@ clock.elf: $(BOXLIB_START) clock.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(N
 pulse.elf: $(BOXLIB_START) pulse.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) pulse.o $(BOXCXX) $(BOXLIB) -lgcc)
 
-calendar.elf: $(BOXLIB_START) calendar.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) calendar.o $(BOXCXX) $(BOXLIB) -lgcc)
+calendar.elf: $(BOXLIB_START) calendar.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) calendar.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
-bonsai.elf: $(BOXLIB_START) bonsai/bonsai.o bonsai/tree.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) bonsai/bonsai.o bonsai/tree.o $(BOXCXX) $(BOXLIB) -lgcc)
+bonsai.elf: $(BOXLIB_START) bonsai/bonsai.o bonsai/tree.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) bonsai/bonsai.o bonsai/tree.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
-bigclock.elf: $(BOXLIB_START) bigclock.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) bigclock.o $(BOXCXX) $(BOXLIB) -lgcc)
+bigclock.elf: $(BOXLIB_START) bigclock.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) bigclock.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
-snake.elf: $(BOXLIB_START) snake.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) snake.o $(BOXCXX) $(BOXLIB) -lgcc)
+snake.elf: $(BOXLIB_START) snake.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) snake.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 hacker.elf: $(BOXLIB_START) hacker.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) hacker.o $(BOXCXX) $(BOXLIB) -lgcc)
@@ -143,8 +149,8 @@ hacker.elf: $(BOXLIB_START) hacker.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $
 pipes.elf: $(BOXLIB_START) pipes.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) pipes.o $(BOXCXX) $(BOXLIB) -lgcc)
 
-wordle.elf: $(BOXLIB_START) wordle.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) wordle.o $(BOXCXX) $(BOXLIB) -lgcc)
+wordle.elf: $(BOXLIB_START) wordle.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) wordle.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # Phase203's child: the only witness to whether teardown runs on a given exit
 # path is a process that took it. Stripped like cxxtest — it needs no debug

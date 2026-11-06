@@ -85,8 +85,8 @@ legacy-`stage.h` consumers are now migrated:
 `qr` and `passport` use the regional `Surface` contract.
 Their models, animation,
 persistence, layout algorithms, and visual composition remain application
-code. The remaining custom screen implementations are in `apps` (`wordle`,
-`snake`, `bigclock`, `calendar`, and `bonsai`) and are the next migration
-layer. The Git checkpoint before implementation is tagged
+code. The five older screen implementations in `apps` (`wordle`, `snake`,
+`bigclock`, `calendar`, and `bonsai`) now also link through `libpainter.a` and
+use Stage, Frame, and typed events. The Git checkpoint before implementation is tagged
 `painter-preimplementation`, and the implementation branch proceeds in
 bounded commits so that checkpoint remains an immediate rollback point.
