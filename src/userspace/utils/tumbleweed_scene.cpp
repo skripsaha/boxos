@@ -11,9 +11,10 @@ using Color = TumbleColor;
 
 int TumbleWorld::GroundHeight(int X) const
 {
-    const float Broad = std::sin(X * 0.026f + 1.1f) * 3.0f;
-    const float Small = std::sin(X * 0.091f + 2.7f) * 1.2f;
-    return Height - 7 - static_cast<int>(Broad + Small);
+    const float Broad = std::sin(X * 0.019f + 1.1f) * 5.0f;
+    const float Shoulder = std::sin(X * 0.047f + 2.7f) * 2.2f;
+    const float Wash = std::sin(X * 0.009f + 0.4f) * 3.5f;
+    return Height - 9 - static_cast<int>(Broad + Shoulder + Wash);
 }
 
 void TumbleWorld::MakeGround()
@@ -22,8 +23,10 @@ void TumbleWorld::MakeGround()
     Mesa.resize(static_cast<std::size_t>(Width));
     for (int X = 0; X < Width; X++) {
         Floor[static_cast<std::size_t>(X)] = GroundHeight(X);
-        const float Hill = std::sin(X * 0.014f + 0.7f) * 3.0f + std::sin(X * 0.039f) * 1.4f;
-        Mesa[static_cast<std::size_t>(X)] = Height / 2 + static_cast<int>(Hill);
+        const float Ridge = std::sin(X * 0.016f + 0.7f) * 4.5f + std::sin(X * 0.039f) * 2.0f;
+        const float Cut = std::sin(X * 0.006f + 2.1f) * 5.0f + std::sin(X * 0.028f) * 2.0f;
+        const int Top = Height * 58 / 100 + static_cast<int>(Ridge + Cut);
+        Mesa[static_cast<std::size_t>(X)] = std::clamp(Top, Height - 30, Height - 13);
     }
 }
 

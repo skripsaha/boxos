@@ -132,8 +132,8 @@ void PaintSun(Frame &Canvas, const TumbleWorld &World, int Columns)
     const int Sun = World.Sun();
     const float Orbit = std::fmod(World.Time * 0.018f, 1.0f);
     const float Arc = std::sin(Orbit * Pi);
-    const int SunX = static_cast<int>(World.CameraX) + 4 + static_cast<int>(Orbit * std::max(4, Columns - 8));
-    const int SunY = static_cast<int>(World.CameraY) + 8 + static_cast<int>((1.0f - Arc) * 18.0f);
+    const int SunX = static_cast<int>(World.Width * (0.36f + Orbit * 0.30f));
+    const int SunY = 8 + static_cast<int>((1.0f - Arc) * 16.0f);
     if (Sun > 0) {
         const Color Sky = World.SkyAt(SunY, Sun);
         const Color SunInk = World.Shade(Color::Rgb(0xFF, 0xD0, 0x62), Sun);
@@ -159,6 +159,59 @@ void PaintSun(Frame &Canvas, const TumbleWorld &World, int Columns)
     }
 }
 
+void PaintClouds(Frame &Canvas, const TumbleWorld &World)
+{
+    const bool Heavy = World.Weather == TumbleWeather::Rain || World.Weather == TumbleWeather::Storm;
+    const bool Broken = World.Weather == TumbleWeather::Wind || World.Weather == TumbleWeather::Dust;
+    const int Count = Heavy ? 9 : Broken ? 4 : 2;
+    const Color Cloud = Heavy ? Color::Rgb(0x5A, 0x69, 0x78) : Color::Rgb(0xA7, 0xB4, 0xB8);
+    for (int Index = 0; Index < Count; Index++) {
+        const float Drift = World.Time * (Heavy ? 1.2f : 0.45f) + Index * 37.0f;
+        const int X = static_cast<int>(std::fmod(Index * 71.0f + Drift * 8.0f,
+                                                 static_cast<float>(World.Width + 40))) - 20;
+        const int Y = 12 + (Index * 17) % 20;
+        const int Width = 8 + (Index % 4) * 3;
+        for (int Puff = 0; Puff < Width; Puff++) {
+            const int At = X + Puff * 2;
+            const int Lift = (Puff % 3 == 1) ? 2 : (Puff % 4 == 0 ? 1 : 0);
+            Disc(Canvas, World, At, Y - Lift, 2 + (Puff % 2), Cloud);
+        }
+    }
+}
+
+void PaintSeason(Frame &Canvas, const TumbleWorld &World)
+{
+    if (World.Season == TumbleSeason::Winter) {
+        for (int Index = 0; Index < World.ViewWidth / 2; Index++) {
+            const int X = static_cast<int>((static_cast<std::uint64_t>(Index * 97 + World.Time * 24) * 13u) %
+                                           static_cast<std::uint64_t>(World.ViewWidth));
+            const int Y = static_cast<int>((static_cast<std::uint64_t>(Index * 53 + World.Time * 17) * 7u) %
+                                           static_cast<std::uint64_t>(std::max(1, World.ViewHeight - 4)));
+            Pixel(Canvas, World, static_cast<int>(World.CameraX) + X, static_cast<int>(World.CameraY) + Y,
+                  Color::Rgb(0xE3, 0xEA, 0xEC));
+        }
+        return;
+    }
+    if (World.Season == TumbleSeason::Spring) {
+        for (int Index = 0; Index < World.ViewWidth / 5; Index++) {
+            const int X = static_cast<int>((static_cast<std::uint64_t>(Index * 71) * 11u) %
+                                           static_cast<std::uint64_t>(World.ViewWidth));
+            const int Ground = World.Ground(static_cast<int>(World.CameraX) + X);
+            Pixel(Canvas, World, static_cast<int>(World.CameraX) + X, Ground - 1,
+                  Index % 2 == 0 ? Color::Rgb(0xD6, 0x8C, 0xB4) : Color::Rgb(0xF0, 0xC8, 0x58));
+        }
+    }
+    if (World.Season == TumbleSeason::Autumn) {
+        for (int Index = 0; Index < World.ViewWidth / 7; Index++) {
+            const int X = static_cast<int>((static_cast<std::uint64_t>(Index * 113 + World.Time * 9) * 17u) %
+                                           static_cast<std::uint64_t>(World.ViewWidth));
+            const int Ground = World.Ground(static_cast<int>(World.CameraX) + X);
+            Pixel(Canvas, World, static_cast<int>(World.CameraX) + X, Ground - 1,
+                  Index % 2 == 0 ? Color::Rgb(0xC0, 0x72, 0x35) : Color::Rgb(0x8A, 0x4B, 0x2E));
+        }
+    }
+}
+
 void PaintBackground(Frame &Canvas, const TumbleWorld &World)
 {
     const int Columns = World.ViewWidth;
@@ -172,22 +225,34 @@ void PaintBackground(Frame &Canvas, const TumbleWorld &World)
             Color Ink;
             if (WorldY >= World.Ground(WorldX)) {
                 const int Depth = WorldY - World.Ground(WorldX);
-                Ink = World.Shade(World.Sand(), Sun + 30 - Depth * 5);
+                Ink = World.Season == TumbleSeason::Winter && Depth < 2
+                          ? Color::Rgb(0xE2, 0xE8, 0xE8)
+                          : World.Shade(World.Sand(), Sun + 30 - Depth * 5);
                 const int Ripple = static_cast<int>(std::sin(WorldX * 0.21f + WorldY * 0.08f) * 10.0f);
                 Ink = Color::Mix(Ink, Color::Rgb(0xF0, 0xBE, 0x6C), static_cast<std::uint8_t>(std::max(0, Ripple)));
             } else if (WorldY >= World.DistantGround(WorldX)) {
-                const Color Mesa = World.Night() ? Color::Rgb(0x32, 0x32, 0x58) : Color::Rgb(0x76, 0x4F, 0x58);
-                Ink = World.Shade(Mesa, Sun + 80);
+                const int Band = WorldY - World.DistantGround(WorldX);
+                if (World.Season == TumbleSeason::Winter && Band < 2) {
+                    Pixels[static_cast<std::size_t>(Y) * Columns + X] = Color::Rgb(0xD8, 0xE0, 0xE2);
+                    continue;
+                }
+                const Color Mesa = World.Night() ? Color::Rgb(0x32, 0x32, 0x58)
+                                                 : (Band % 9 < 3 ? Color::Rgb(0x8B, 0x57, 0x4E)
+                                                                 : Color::Rgb(0x6E, 0x48, 0x50));
+                Ink = World.Shade(Mesa, Sun + 80 - Band * 2);
             } else {
                 Ink = World.SkyAt(WorldY, Sun);
             }
             if (World.Weather == TumbleWeather::Dust || World.Weather == TumbleWeather::Storm)
                 Ink = Color::Mix(Ink, Color::Rgb(0xB7, 0x8B, 0x5D), 55);
+            if (World.Weather == TumbleWeather::Rain || World.Weather == TumbleWeather::Storm)
+                Ink = Color::Mix(Ink, Color::Rgb(0x65, 0x70, 0x79), World.Weather == TumbleWeather::Storm ? 120 : 78);
             Pixels[static_cast<std::size_t>(Y) * Columns + X] = Ink;
         }
     }
     Canvas.PutPixels(Pixels);
     PaintSun(Canvas, World, Columns);
+    PaintClouds(Canvas, World);
 }
 
 void PaintLayer(Frame &Canvas, const TumbleWorld &World, int Layer)
@@ -240,6 +305,7 @@ void TumblePaint(const TumbleWorld &World, painter::tui::Frame &Canvas)
     PaintBackground(Canvas, World);
     PaintLayer(Canvas, World, 0);
     PaintLayer(Canvas, World, 1);
+    PaintSeason(Canvas, World);
     PaintWeather(Canvas, World);
     PaintBar(Canvas, World);
 }
