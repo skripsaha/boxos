@@ -125,11 +125,11 @@ brookexec.elf: $(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/use
 currentexec.elf: $(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) -lgcc)
 
-clock.elf: $(BOXLIB_START) clock.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) clock.o $(BOXCXX) $(BOXLIB) -lgcc)
+clock.elf: $(BOXLIB_START) clock.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) clock.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
-pulse.elf: $(BOXLIB_START) pulse.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) pulse.o $(BOXCXX) $(BOXLIB) -lgcc)
+pulse.elf: $(BOXLIB_START) pulse.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) pulse.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 calendar.elf: $(BOXLIB_START) calendar.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) calendar.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)

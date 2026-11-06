@@ -1,57 +1,67 @@
+/* clock — a notice-layer clock at the upper-right corner. */
+
 #include <chrono>
 #include <cstdint>
 #include <thread>
+#include <utility>
 
 #include "box/clock.h"
-#include "box/cxx/console.h"
+#include "box/error.h"
+
+#include "painter/core/color.h"
+#include "painter/tui/frame.h"
+#include "painter/tui/surface.h"
 
 namespace {
 
-constexpr std::uint8_t kClockWidth = 8;
-// Light digits on a dark ground, the colons quieter; pulse.cpp beside it
-// wears the same. The ground is a grey a text console shows as black.
-constexpr box::color kForeground = box::color::rgb(0xE6, 0xE6, 0xE6);
-constexpr box::color kSeparator = box::color::rgb(0x8C, 0x8C, 0x8C);
-constexpr box::color kBackground = box::color::rgb(0x26, 0x26, 0x26);
+using PainterColor = painter::core::Color;
+constexpr std::int32_t ClockWidth = 8;
+constexpr PainterColor Foreground = PainterColor::Rgb(0xE6, 0xE6, 0xE6);
+constexpr PainterColor Separator = PainterColor::Rgb(0x8C, 0x8C, 0x8C);
+constexpr PainterColor Background = PainterColor::Rgb(0x26, 0x26, 0x26);
 
-char digit(std::int64_t value) { return static_cast<char>('0' + value); }
-
-void paint_time() {
-    BoxTime now{};
-    if (clock_boxtime_local(&now) != OK)
-        return;
-
-    const auto hours = now.hour;
-    const auto minutes = now.minute;
-    const auto seconds = now.second;
-    const char text[kClockWidth] = {
-        digit(hours / 10),   digit(hours % 10),   ':',
-        digit(minutes / 10), digit(minutes % 10), ':',
-        digit(seconds / 10), digit(seconds % 10)};
-
-    TextCell cells[kClockWidth];
-    for (std::uint8_t i = 0; i < kClockWidth; ++i) {
-        cells[i].fg = text[i] == ':' ? kSeparator.raw() : kForeground.raw();
-        cells[i].bg = kBackground.raw();
-        cells[i].ch = text[i];
-        cells[i].pad[0] = 0;
-        cells[i].pad[1] = 0;
-        cells[i].pad[2] = 0;
-    }
-    const auto dimensions = box::vga::size();
-    if (dimensions.rows == 0 || dimensions.cols < kClockWidth)
-        return;
-    (void)vga_paint(0, static_cast<std::uint8_t>(dimensions.cols - kClockWidth),
-                    1, kClockWidth, cells);
+char Digit(std::int64_t Value)
+{
+    return static_cast<char>('0' + Value);
 }
 
-} // namespace
+bool Draw(painter::tui::Surface &Screen, painter::tui::Frame &Canvas)
+{
+    BoxTime Now{};
+    if (clock_boxtime_local(&Now) != OK) return true;
 
-int main() {
-    auto next = std::chrono::steady_clock::now();
+    const char Text[ClockWidth] = {
+        Digit(Now.hour / 10), Digit(Now.hour % 10), ':',
+        Digit(Now.minute / 10), Digit(Now.minute % 10), ':',
+        Digit(Now.second / 10), Digit(Now.second % 10)};
+    Canvas.ClearTransparent();
+    for (std::int32_t Col = 0; Col < ClockWidth; Col++) {
+        const PainterColor Ink = Text[Col] == ':' ? Separator : Foreground;
+        Canvas.Put({Col, 0}, painter::tui::Cell{Text[Col], Ink, Background});
+    }
+    if (!Screen.Clear()) return false;
+    return static_cast<bool>(Screen.Composite({Screen.Size().Width - ClockWidth, 0}, Canvas));
+}
+
+}  // namespace
+
+int main()
+{
+    std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
+        painter::tui::Surface::Open("clock", ClockWidth, 1, painter::tui::SurfaceRole::Notice);
+    if (!Opened) return 1;
+    painter::tui::Surface Screen = std::move(*Opened);
+    if (Screen.Size().Width < ClockWidth || Screen.Size().Height == 0) return 1;
+
+    std::expected<painter::tui::Frame, box::error> Created =
+        painter::tui::Frame::Create({ClockWidth, 1});
+    if (!Created) return 1;
+    painter::tui::Frame Canvas = std::move(*Created);
+
+    auto Next = std::chrono::steady_clock::now();
     for (;;) {
-        paint_time();
-        next += std::chrono::milliseconds(100);
-        std::this_thread::sleep_until(next);
+        if (!Draw(Screen, Canvas)) return 1;
+        Next += std::chrono::milliseconds(100);
+        std::this_thread::sleep_until(Next);
     }
 }

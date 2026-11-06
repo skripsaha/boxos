@@ -10,13 +10,19 @@
 
 namespace painter::tui {
 
+enum class SurfaceRole {
+    Overlay,
+    Notice,
+};
+
 /* A process-owned retained layer. Its cells are composed above the base scene
  * while the owner is alive and disappear when Close() or destruction occurs. */
 class Surface {
 public:
     static std::expected<Surface, StageError> Open(std::string_view Name,
                                                    std::int32_t LeastCols = 0,
-                                                   std::int32_t LeastRows = 0) noexcept;
+                                                   std::int32_t LeastRows = 0,
+                                                   SurfaceRole Role = SurfaceRole::Overlay) noexcept;
 
     Surface(Surface &&) noexcept;
     Surface &operator=(Surface &&) noexcept;

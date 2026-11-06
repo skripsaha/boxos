@@ -73,7 +73,7 @@ UTILS = help create show files tag untag name trash erase assemble \
         timezone logsave lastsaid rgbtest usetest faretest luggagetest rollcall handset headcount \
         draft playtime lavalamp finish taskcenter hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
-        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed
+        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab
 
 .PHONY: all clean
 
@@ -196,6 +196,7 @@ EYES_OBJS       = eyes.o
 DONUT_OBJS      = donut.o
 SLIME_OBJS      = slime.o
 TUMBLEWEED_OBJS = tumbleweed.o tumbleweed_world.o tumbleweed_scene.o tumbleweed_paint.o
+CRAB_OBJS      = crab.o
 # The utilities are built without optimisation, for their debug information;
 # a hash is the one place in them where that costs — every byte of a file
 # goes through its rounds — so these three are built as BoxLib is, -O2.
@@ -286,6 +287,10 @@ slime.elf: $(BOXLIB_START) $(SLIME_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB
 
 tumbleweed.elf: $(BOXLIB_START) $(TUMBLEWEED_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TUMBLEWEED_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+crab.elf: $(BOXLIB_START) $(CRAB_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(CRAB_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)

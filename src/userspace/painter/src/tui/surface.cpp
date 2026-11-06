@@ -15,10 +15,14 @@ struct Surface::Impl {
 
 std::expected<Surface, StageError> Surface::Open(std::string_view Name,
                                                  std::int32_t LeastCols,
-                                                 std::int32_t LeastRows) noexcept
+                                                 std::int32_t LeastRows,
+                                                 SurfaceRole Role) noexcept
 {
+    const DisplayLayerRole LayerRole = Role == SurfaceRole::Notice
+                                           ? DISPLAY_LAYER_NOTICE
+                                           : DISPLAY_LAYER_OVERLAY;
     std::expected<LayerCanvas, StageError> Opened =
-        LayerCanvas::Open(Name, LeastCols, LeastRows, DISPLAY_LAYER_OVERLAY);
+        LayerCanvas::Open(Name, LeastCols, LeastRows, LayerRole);
     if (!Opened) return std::unexpected(Opened.error());
     try {
         return Surface(std::unique_ptr<Impl>(new Impl(std::move(*Opened))));
