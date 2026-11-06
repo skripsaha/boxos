@@ -32,7 +32,7 @@
 #include "painter/tui/keyboard.h"
 #include "painter/tui/surface.h"
 
-BOX_FORM("takes optional words \"where it stands: top, bottom, left, right or middle; bottom right if none\"\n");
+BOX_FORM("takes optional words \"where it stands: top, bottom, left, right or middle; right middle if none\"\n");
 
 namespace {
 
@@ -40,8 +40,11 @@ using PainterColor = painter::core::Color;
 
 constexpr float Pi = 3.14159265358979323846f;
 constexpr PainterColor Black = painter::core::Colors::Black;
-constexpr PainterColor RimLow = PainterColor::Rgb(0x1C, 0x63, 0xC6);
-constexpr PainterColor RimHigh = PainterColor::Rgb(0xF0, 0x83, 0x2E);
+/* Change these two colors to retheme the torus. */
+constexpr PainterColor DonutColorLow = PainterColor::Rgb(0x1C, 0x63, 0xC6);
+constexpr PainterColor DonutColorHigh = PainterColor::Rgb(0xF0, 0x83, 0x2E);
+constexpr int DonutMaxWidth = 28;
+constexpr int DonutMaxHeight = 14;
 
 void Say(std::string_view Text)
 {
@@ -58,7 +61,7 @@ struct Place {
 Place Where(const char *const *Words, std::size_t Count, int Cols, int Rows, int Wide, int High)
 {
     int Across = 2;
-    int Down = 2;
+    int Down = 1;
     for (std::size_t At = 0; At < Count; At++) {
         const std::string_view Word = Words[At];
         if (Word == "left") Across = 0;
@@ -92,7 +95,7 @@ PainterColor SurfaceInk(float V, float Light)
 {
     const float Wrapped = std::clamp((V + 1.0f) * 0.5f, 0.0f, 1.0f);
     const PainterColor Base = PainterColor::Mix(
-        RimLow, RimHigh, static_cast<std::uint8_t>(Wrapped * 255.0f));
+        DonutColorLow, DonutColorHigh, static_cast<std::uint8_t>(Wrapped * 255.0f));
     return PainterColor::Mix(Black, Base,
                              static_cast<std::uint8_t>(std::clamp(Light, 0.0f, 1.0f) * 255.0f));
 }
@@ -192,8 +195,8 @@ int main()
     }
     painter::tui::Surface Screen = std::move(*Opened);
     const painter::core::Size Dimensions = Screen.Size();
-    const int Width = std::min(40, std::max(8, Dimensions.Width - 4));
-    const int Height = std::min(20, std::max(5, Dimensions.Height - 4));
+    const int Width = std::min(DonutMaxWidth, std::max(8, Dimensions.Width - 4));
+    const int Height = std::min(DonutMaxHeight, std::max(5, Dimensions.Height - 4));
     const Place At = Where(Words, Count, Dimensions.Width, Dimensions.Height, Width, Height);
 
     std::expected<painter::tui::Frame, box::error> Created =

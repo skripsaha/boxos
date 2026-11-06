@@ -34,6 +34,9 @@ constexpr PainterColor SlimeBase = PainterColor::Rgb(0x9F, 0xD7, 0x24);
 constexpr PainterColor SlimeLight = PainterColor::Rgb(0xE0, 0xF5, 0x63);
 constexpr PainterColor EyeWhite   = PainterColor::Rgb(0xF6, 0xF8, 0xD8);
 constexpr PainterColor Pupil      = PainterColor::Rgb(0x13, 0x20, 0x0A);
+/* Tune these values to make the creature lazier or more restless. */
+constexpr float SlimeSpeedMin = 0.65f;
+constexpr float SlimeSpeedMax = 1.35f;
 
 void Say(std::string_view Text)
 {
@@ -110,7 +113,7 @@ private:
     {
         TargetX = Between(0.0f, static_cast<float>(ScreenWidth - BodyWidth));
         TargetY = Between(0.0f, static_cast<float>(ScreenHeight - BodyHeight));
-        Speed = Between(0.18f, 0.52f);
+        Speed = Between(SlimeSpeedMin, SlimeSpeedMax);
         Pause = Between(0.45f, 2.4f);
         if (Unit() < 0.28f) Pause = 0.0f;
     }
@@ -123,7 +126,7 @@ private:
     float Y = 0.0f;
     float TargetX = 0.0f;
     float TargetY = 0.0f;
-    float Speed = 0.3f;
+    float Speed = 0.9f;
     float Pause = 0.0f;
     float Phase = 0.0f;
 };
