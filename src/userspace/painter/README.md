@@ -7,7 +7,8 @@ surface:
 - `painter::core` — geometry, rectangles, clipping, and other backend-neutral
   values that are genuinely shared;
 - `painter::tui` — the first implementation: `Frame`, `Stage`, `Surface`, regions,
-  glyphs, half-block pixel drawing, palettes, and typed console input;
+  opaque and transparent cells, compositing, glyphs, half-block pixel drawing,
+  palettes, and typed console input;
 - `painter::gui` — the future home for real pixel graphics, windows, paths,
   brushes, pointer input, and other GUI-specific contracts.
 
@@ -31,11 +32,22 @@ The first TUI implementation is synthesized from the proven utility patterns:
 - RGB-to-half-block pixel mapping;
 - clipping, rectangles, text, palettes, and sprites;
 - explicit full-screen and regional painting contracts;
+- transparent overlays that retain rectangular storage while exposing arbitrary
+  visible shapes;
 - Touch-backed key events and honest presentation errors.
 
 The application keeps its own model, animation, simulation, persistence, and
 TagFS policy. Painter is a drawing and input surface, not a storage layer,
 command parser, game engine, widget tree, or TagFS abstraction.
+
+`Frame::Clear` creates an opaque frame and is the right operation for a full
+screen or a complete rectangular panel. `Frame::ClearTransparent` creates an
+overlay frame whose untouched cells do not replace the destination. A
+`Surface::Paint` is an opaque rectangular blit; `Surface::Composite` turns the
+overlay into horizontal opaque runs and leaves transparent cells alone. The
+kernel still receives its existing rectangular `TextCell` operations, so the
+transparency contract remains a Painter concern and the display ABI stays
+stable.
 
 ## Layering
 
@@ -82,7 +94,9 @@ legacy-`stage.h` consumers are now migrated:
 `aquarium`, `eyes`, `typer`, `tagmap`, `todo`, `flame`, `stringview`, `hexer`,
 `qr`, `passport`, `taskcenter`, `playtime`, `lavalamp`, `donut`, and `slime` link through
 `libpainter.a`;
-`qr` and `passport` use the regional `Surface` contract.
+`qr`, `passport`, `donut`, and `slime` use the regional `Surface` contract.
+The `tumbleweed` utility uses the full-screen `Stage` contract for its
+retained desert frame.
 Their models, animation,
 persistence, layout algorithms, and visual composition remain application
 code. The five older screen implementations in `apps` (`wordle`, `snake`,

@@ -20,10 +20,23 @@ struct TextStyle {
     core::Color Background = core::Colors::Black;
 };
 
+enum class Visibility : std::uint8_t {
+    Transparent,
+    Opaque,
+};
+
 struct Cell {
     char        Glyph      = ' ';
     core::Color Foreground = core::Colors::LightGray;
     core::Color Background = core::Colors::Black;
+    Visibility  VisibilityMode = Visibility::Opaque;
+
+    static constexpr Cell TransparentCell() noexcept
+    {
+        return {' ', core::Colors::LightGray, core::Colors::Black, Visibility::Transparent};
+    }
+
+    bool IsTransparent() const noexcept { return VisibilityMode == Visibility::Transparent; }
 
     friend bool operator==(const Cell &, const Cell &) noexcept = default;
 };
@@ -44,7 +57,10 @@ public:
     core::Size Size() const noexcept { return Bounds; }
     std::int32_t PixelHeight() const noexcept;
 
+    /* Clear writes an opaque background. ClearTransparent leaves every cell
+     * untouched when this frame is passed to Surface::Composite. */
     void Clear(TextStyle Style = {});
+    void ClearTransparent() noexcept;
 
     /* Cell operations clip at the frame boundary and report whether anything
      * was written. This keeps drawing convenient while making the boundary

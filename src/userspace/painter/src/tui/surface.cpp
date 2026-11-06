@@ -132,6 +132,49 @@ box::status Surface::Paint(core::Point Origin, const Frame &FrameBuffer, core::R
     return Code == 0 ? box::status{} : std::unexpected(Cause(Code));
 }
 
+box::status Surface::Composite(core::Point Origin, const Frame &FrameBuffer) noexcept
+{
+    return Composite(Origin, FrameBuffer, {0, 0, FrameBuffer.Size().Width, FrameBuffer.Size().Height});
+}
+
+box::status Surface::Composite(core::Point Origin, const Frame &FrameBuffer, core::Rect Region) noexcept
+{
+    if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
+    const core::Size FrameSize = FrameBuffer.Size();
+    if (Region.Empty() || Region.X < 0 || Region.Y < 0 || Region.X > FrameSize.Width - Region.Width ||
+        Region.Y > FrameSize.Height - Region.Height || Origin.X < 0 || Origin.Y < 0 ||
+        Origin.X > State->Bounds.Width - Region.Width || Origin.Y > State->Bounds.Height - Region.Height)
+        return std::unexpected(box::error{box::errc::out_of_range});
+
+    for (std::int32_t Row = Region.Y; Row < Region.Y + Region.Height; Row++) {
+        std::int32_t Col = Region.X;
+        while (Col < Region.X + Region.Width) {
+            while (Col < Region.X + Region.Width && FrameBuffer.At({Col, Row}).IsTransparent()) Col++;
+            if (Col >= Region.X + Region.Width) break;
+
+            const std::int32_t Start = Col;
+            while (Col < Region.X + Region.Width && !FrameBuffer.At({Col, Row}).IsTransparent()) Col++;
+            const std::int32_t Width = Col - Start;
+            const std::optional<std::size_t> CellCount = core::Size{Width, 1}.CellCount();
+            if (!CellCount)
+                return std::unexpected(box::error{box::errc::invalid_argument});
+            try {
+                State->NativeCells.resize(*CellCount);
+            } catch (const std::bad_alloc &) {
+                return std::unexpected(box::error{box::errc::no_memory});
+            }
+
+            FrameBuffer.WriteNativeRegion(State->NativeCells.data(), State->NativeCells.size(),
+                                          {Start, Row, Width, 1});
+            const int Code = vga_paint(static_cast<std::uint8_t>(Origin.Y + Row - Region.Y),
+                                       static_cast<std::uint8_t>(Origin.X + Start - Region.X), 1,
+                                       static_cast<std::uint8_t>(Width), State->NativeCells.data());
+            if (Code != 0) return std::unexpected(Cause(Code));
+        }
+    }
+    return {};
+}
+
 box::status Surface::SetCursor(core::Point At) noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});

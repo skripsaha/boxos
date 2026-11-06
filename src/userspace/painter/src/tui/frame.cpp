@@ -49,6 +49,11 @@ void Frame::Clear(TextStyle Style)
     std::fill(Cells.begin(), Cells.end(), Cell{' ', Style.Foreground, Style.Background});
 }
 
+void Frame::ClearTransparent() noexcept
+{
+    std::fill(Cells.begin(), Cells.end(), Cell::TransparentCell());
+}
+
 bool Frame::Put(core::Point At, Cell Value)
 {
     if (!InBounds(At)) return false;
@@ -111,6 +116,7 @@ bool Frame::PutPixel(core::Point Pixel, core::Color Ink)
 
     Cell &Target = At({Pixel.X, Pixel.Y / 2});
     Target.Glyph = Glyphs::UpperHalf;
+    Target.VisibilityMode = Visibility::Opaque;
     if ((Pixel.Y & 1) == 0) Target.Foreground = Ink;
     else                    Target.Background = Ink;
     return true;
@@ -122,6 +128,7 @@ bool Frame::BlendPixel(core::Point Pixel, core::Color Ink, std::uint8_t Weight)
 
     Cell &Target = At({Pixel.X, Pixel.Y / 2});
     Target.Glyph = Glyphs::UpperHalf;
+    Target.VisibilityMode = Visibility::Opaque;
     core::Color &Current = (Pixel.Y & 1) == 0 ? Target.Foreground : Target.Background;
     Current = core::Color::Mix(Current, Ink, Weight);
     return true;
@@ -136,6 +143,7 @@ bool Frame::PutPixels(std::span<const core::Color> Pixels)
         for (std::int32_t Col = 0; Col < Bounds.Width; Col++) {
             Cell &Target = At({Col, Row});
             Target.Glyph = Glyphs::UpperHalf;
+            Target.VisibilityMode = Visibility::Opaque;
             Target.Foreground = Pixels[static_cast<std::size_t>(Row * 2) * Bounds.Width + Col];
             Target.Background = Pixels[static_cast<std::size_t>(Row * 2 + 1) * Bounds.Width + Col];
         }

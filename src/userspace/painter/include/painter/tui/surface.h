@@ -28,8 +28,13 @@ public:
     bool       IsOpen() const noexcept;
 
     std::expected<core::Point, box::error> Cursor() const noexcept;
+    /* Paint writes every cell in the selected rectangle, including spaces.
+     * Composite writes only opaque cells and leaves transparent cells on the
+     * destination unchanged. */
     box::status Paint(core::Point Origin, const Frame &FrameBuffer) noexcept;
     box::status Paint(core::Point Origin, const Frame &FrameBuffer, core::Rect Region) noexcept;
+    box::status Composite(core::Point Origin, const Frame &FrameBuffer) noexcept;
+    box::status Composite(core::Point Origin, const Frame &FrameBuffer, core::Rect Region) noexcept;
     box::status SetCursor(core::Point At) noexcept;
     box::status ScrollUp() noexcept;
     box::status Close() noexcept;

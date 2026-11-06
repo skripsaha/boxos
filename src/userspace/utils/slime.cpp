@@ -140,7 +140,7 @@ public:
 
     void Draw(const Slime &Creature)
     {
-        Canvas.Clear({painter::core::Colors::LightGray, Black});
+        Canvas.ClearTransparent();
         const float CenterX = Width * 0.5f;
         const float CenterY = PixelHeight * 0.55f + Creature.Wiggle();
         const float RadiusX = std::max(2.0f, Width * 0.43f);
@@ -259,7 +259,7 @@ int main()
         Picture.Draw(Creature);
         const int Left = Creature.Left();
         const int Top = Creature.Top();
-        if (!Screen.Paint({Left, Top}, Picture.Frame())) break;
+        if (!Screen.Composite({Left, Top}, Picture.Frame())) break;
         OldLeft = Left;
         OldTop = Top;
         Shown = true;

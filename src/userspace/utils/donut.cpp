@@ -119,7 +119,7 @@ class DonutPicture {
           Canvas(std::move(Canvas)) {}
 
     bool Draw(float A, float B) {
-        Canvas.Clear({painter::core::Colors::LightGray, Black});
+        Canvas.ClearTransparent();
         std::fill(Depth.begin(), Depth.end(),
                   std::numeric_limits<float>::lowest());
 
@@ -225,6 +225,14 @@ int main() {
         Say("donut: the picture could not be created");
         return 1;
     }
+    std::expected<painter::tui::Frame, box::error> EraserCreated =
+        painter::tui::Frame::Create({Width, Height});
+    if (!EraserCreated) {
+        Say("donut: the eraser could not be created");
+        return 1;
+    }
+    painter::tui::Frame Eraser = std::move(*EraserCreated);
+    Eraser.Clear({painter::core::Colors::LightGray, Black});
 
     std::expected<painter::tui::Keyboard, painter::tui::StageError> Input =
         painter::tui::Keyboard::Open("donut");
@@ -238,6 +246,7 @@ int main() {
     std::uint64_t Last = clock_uptime_us();
     float A = 0.0f;
     float B = 0.0f;
+    bool Shown = false;
     for (;;) {
         const std::uint64_t Now = clock_uptime_us();
         const float Seconds =
@@ -245,9 +254,11 @@ int main() {
         Last = Now;
         A += Seconds * 1.05f;
         B += Seconds * 0.73f;
+        if (Shown && !Screen.Paint({At.Col, At.Row}, Eraser)) break;
         Picture.Draw(A, B);
-        if (!Screen.Paint({At.Col, At.Row}, Picture.Frame()))
+        if (!Screen.Composite({At.Col, At.Row}, Picture.Frame()))
             break;
+        Shown = true;
 
         const painter::tui::Event Event = Keys.Wait(33);
         if (Event.Kind == painter::tui::EventKind::Gone)
@@ -259,8 +270,7 @@ int main() {
             break;
     }
 
-    Picture.Frame().Clear({painter::core::Colors::LightGray, Black});
-    (void)Screen.Paint({At.Col, At.Row}, Picture.Frame());
+    if (Shown) (void)Screen.Paint({At.Col, At.Row}, Eraser);
     (void)Keys.Close();
     (void)Screen.Close();
     Say(std::format("[DONUT] rotation stopped"));
