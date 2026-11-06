@@ -73,7 +73,7 @@ UTILS = help create show files tag untag name trash erase assemble \
         timezone logsave lastsaid rgbtest usetest faretest luggagetest rollcall handset headcount \
         draft playtime lavalamp finish taskcenter hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
-        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes
+        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime
 
 .PHONY: all clean
 
@@ -193,6 +193,8 @@ MANDELBROT_OBJS = mandelbrot.o mandelbrot_paint.o
 QR_OBJS         = qr.o qr_code.o
 MINESWEEPER_OBJS = minesweeper.o minesweeper_field.o keep.o
 EYES_OBJS       = eyes.o
+DONUT_OBJS      = donut.o
+SLIME_OBJS      = slime.o
 # The utilities are built without optimisation, for their debug information;
 # a hash is the one place in them where that costs — every byte of a file
 # goes through its rounds — so these three are built as BoxLib is, -O2.
@@ -271,6 +273,14 @@ minesweeper.elf: $(BOXLIB_START) $(MINESWEEPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXL
 
 eyes.elf: $(BOXLIB_START) $(EYES_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(EYES_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+donut.elf: $(BOXLIB_START) $(DONUT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(DONUT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+slime.elf: $(BOXLIB_START) $(SLIME_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(SLIME_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)

@@ -80,7 +80,7 @@ Design accepted on 2026-11-05. The first implementation slice now provides
 legacy-`stage.h` consumers are now migrated:
 `nyancat`, `fireworks`, `2048`, `tetris`, `minesweeper`, `mandelbrot`,
 `aquarium`, `eyes`, `typer`, `tagmap`, `todo`, `flame`, `stringview`, `hexer`,
-`qr`, `passport`, `taskcenter`, `playtime`, and `lavalamp` link through
+`qr`, `passport`, `taskcenter`, `playtime`, `lavalamp`, `donut`, and `slime` link through
 `libpainter.a`;
 `qr` and `passport` use the regional `Surface` contract.
 Their models, animation,
