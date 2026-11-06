@@ -110,7 +110,7 @@ std::expected<Stage, StageError> Stage::Open(std::string_view Name, std::int32_t
     }
 
     std::expected<DisplayLayer, box::error> LayerOpened =
-        DisplayLayer::Open(Actual, DISPLAY_LAYER_SCENE);
+        DisplayLayer::Open({0, 0, Actual.Width, Actual.Height}, DISPLAY_LAYER_SCENE);
     if (!LayerOpened)
         return std::unexpected(Error(StageErrorKind::InvalidState, LayerOpened.error(), Actual, Required));
 

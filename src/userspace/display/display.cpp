@@ -1,5 +1,10 @@
 /*
- * display.cpp — the BoxOS display server and compositor.
+ * display.cpp — the BoxOS DisplayServer.
+ *
+ * This is one process and one event loop. "Server" names its ownership of
+ * console transport, keyboard routing, IPC, and process lifetime; "compositor"
+ * names the retained-layer composition performed inside that same process.
+ * There is no second display daemon or second renderer behind this file.
  *
  * One event loop, no timeouts: a rotation of try-steps (keys → deaths → lanes
  * → IPC). A pass that moves nothing does not go round again — the daemon turns
@@ -65,6 +70,7 @@
 
 #include "box/cxx/bay.h"
 #include "box/cxx/error.h"
+#include "box/display_layer_tag.h"
 #include "console_model.h"
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -148,11 +154,14 @@ struct DisplayLayerState {
     std::uint32_t Width = 0;
     std::uint32_t Height = 0;
     std::size_t CellCount = 0;
-    std::string BayTag;
+    std::uint64_t Nonce = 0;
     box::bay<std::byte> Shared;
     DisplayLayerSharedHeader *Header = nullptr;
     std::vector<DisplayLayerCell> Cells;
     std::uint64_t Sequence = 0;
+    std::uint32_t CursorX = 0;
+    std::uint32_t CursorY = 0;
+    bool CursorVisible = false;
     bool HasFrame = false;
 };
 
@@ -193,6 +202,9 @@ static bool LayerConsume(DisplayLayerState &Layer)
             std::memcpy(Layer.Cells.data(), LayerSlot(Layer, Slot),
                         LayerCellCount(Layer) * sizeof(DisplayLayerCell));
             NewestSequence = Sequence;
+            Layer.CursorX = Layer.Header->cursor_x[Slot];
+            Layer.CursorY = Layer.Header->cursor_y[Slot];
+            Layer.CursorVisible = Layer.Header->cursor_visible[Slot] != 0;
             Layer.HasFrame = true;
             Changed = true;
         }
@@ -214,7 +226,12 @@ static bool PresentDisplay()
     if (!g_present_dirty || !g_console_model) return false;
     g_present_dirty = false;
 
-    g_composed_cells = g_console_model->Cells();
+    const std::vector<TextCell> &BaseCells = g_console_model->Cells();
+    if (g_composed_cells.size() != BaseCells.size()) {
+        g_present_dirty = true;
+        return false;
+    }
+    std::copy(BaseCells.begin(), BaseCells.end(), g_composed_cells.begin());
     std::vector<std::size_t> Order;
     try {
         Order.reserve(g_layers.size());
@@ -248,10 +265,10 @@ static bool PresentDisplay()
                     Cell.Cell;
             }
         }
-        if (Layer.Header->cursor_visible != 0) {
-            CursorX = std::min<std::uint32_t>(Layer.Header->cursor_x,
+        if (Layer.CursorVisible) {
+            CursorX = std::min<std::uint32_t>(Layer.CursorX,
                                               g_console_model->Width() - 1u);
-            CursorY = std::min<std::uint32_t>(Layer.Header->cursor_y,
+            CursorY = std::min<std::uint32_t>(Layer.CursorY,
                                               g_console_model->Height() - 1u);
         }
     }
@@ -755,14 +772,19 @@ static void grant_lane(uint32_t requester, uint32_t generation)
 
 
 static void LayerReply(std::uint32_t Requester, error_t Error,
-                       std::uint32_t LayerId)
+                       std::uint32_t LayerId, std::uint64_t Nonce)
 {
     DisplayLayerOpenReply Reply{};
     Reply.command = DISP_CMD_LAYER_OPEN;
     Reply.error = static_cast<std::int32_t>(Error);
     Reply.layer_id = LayerId;
     Reply.display_pid = cabin_info()->pid;
-    (void)send(Requester, &Reply, sizeof(Reply));
+    Reply.nonce = Nonce;
+    const int Code = send(Requester, &Reply, sizeof(Reply));
+    if (Code != 0) {
+        kdbg_print("[display] layer reply to pid %u failed (%d)\n",
+                   Requester, Code);
+    }
 }
 
 static void LayerOpen(std::uint32_t Requester, const DisplayLayerOpenRequest &Request)
@@ -772,48 +794,47 @@ static void LayerOpen(std::uint32_t Requester, const DisplayLayerOpenRequest &Re
         Request.x < 0 || Request.y < 0 ||
         static_cast<std::uint32_t>(Request.x) + Request.width > g_console_model->Width() ||
         static_cast<std::uint32_t>(Request.y) + Request.height > g_console_model->Height()) {
-        LayerReply(Requester, ERR_OUT_OF_RANGE, 0);
+        LayerReply(Requester, ERR_OUT_OF_RANGE, 0, Request.nonce);
         return;
     }
-    if (Request.role < DISPLAY_LAYER_SCENE || Request.role > DISPLAY_LAYER_NOTICE) {
-        LayerReply(Requester, ERR_INVALID_ARGUMENT, 0);
+    if (Request.role < DISPLAY_LAYER_SCENE || Request.role > DISPLAY_LAYER_NOTICE ||
+        Request.flags != 0) {
+        LayerReply(Requester, ERR_INVALID_ARGUMENT, 0, Request.nonce);
         return;
     }
     const std::size_t CellCount = static_cast<std::size_t>(Request.width) * Request.height;
     const std::size_t ExpectedBytes = sizeof(DisplayLayerSharedHeader) +
                                       DISPLAY_LAYER_SLOTS * CellCount * sizeof(DisplayLayerCell);
-    std::size_t TagLength = 0;
-    while (TagLength < DISPLAY_LAYER_TAG_MAX && Request.bay_tag[TagLength] != '\0') TagLength++;
-    if (TagLength == 0 || TagLength >= DISPLAY_LAYER_TAG_MAX) {
-        LayerReply(Requester, ERR_INVALID_TAG, 0);
+    std::expected<std::string, box::error> Tag =
+        box::display::LayerBayTag(Requester, Request.generation, Request.nonce);
+    if (!Tag) {
+        LayerReply(Requester, Tag.error().raw(), 0, Request.nonce);
         return;
     }
-
-    std::string Tag(Request.bay_tag, TagLength);
     for (const DisplayLayerState &Existing : g_layers) {
         if (Existing.OwnerPid != Requester ||
             Existing.OwnerGeneration != Request.generation ||
-            Existing.BayTag != Tag)
+            Existing.Nonce != Request.nonce)
             continue;
         if (Existing.Role != static_cast<DisplayLayerRole>(Request.role) ||
             Existing.X != Request.x || Existing.Y != Request.y ||
             Existing.Width != Request.width || Existing.Height != Request.height) {
-            LayerReply(Requester, ERR_INVALID_ARGUMENT, 0);
+            LayerReply(Requester, ERR_INVALID_ARGUMENT, 0, Request.nonce);
         } else {
-            LayerReply(Requester, OK, Existing.Id);
+            LayerReply(Requester, OK, Existing.Id, Request.nonce);
         }
         return;
     }
-    box::bay<std::byte> Shared = box::bay<std::byte>::open(Tag.c_str());
+    box::bay<std::byte> Shared = box::bay<std::byte>::open(Tag->c_str());
     if (!Shared || Shared.size_bytes() != ExpectedBytes) {
-        LayerReply(Requester, ERR_OBJECT_NOT_FOUND, 0);
+        LayerReply(Requester, ERR_OBJECT_NOT_FOUND, 0, Request.nonce);
         return;
     }
     auto *Header = reinterpret_cast<DisplayLayerSharedHeader *>(Shared.data());
     if (Header->magic != DISPLAY_LAYER_MAGIC || Header->version != DISPLAY_LAYER_VERSION ||
         Header->width != Request.width || Header->height != Request.height ||
         Header->cell_count != CellCount || Header->slot_count != DISPLAY_LAYER_SLOTS) {
-        LayerReply(Requester, ERR_VERSION_MISMATCH, 0);
+        LayerReply(Requester, ERR_VERSION_MISMATCH, 0, Request.nonce);
         return;
     }
 
@@ -822,24 +843,24 @@ static void LayerOpen(std::uint32_t Requester, const DisplayLayerOpenRequest &Re
     if (Layer.Id == 0) Layer.Id = g_next_layer_id++;
     Layer.OwnerPid = Requester;
     Layer.OwnerGeneration = Request.generation;
+    Layer.Nonce = Request.nonce;
     Layer.Role = static_cast<DisplayLayerRole>(Request.role);
     Layer.X = Request.x;
     Layer.Y = Request.y;
     Layer.Width = Request.width;
     Layer.Height = Request.height;
     Layer.CellCount = CellCount;
-    Layer.BayTag = Tag;
     Layer.Shared = std::move(Shared);
     Layer.Header = Header;
     try {
         Layer.Cells.resize(CellCount);
         g_layers.push_back(std::move(Layer));
     } catch (...) {
-        LayerReply(Requester, ERR_NO_MEMORY, 0);
+        LayerReply(Requester, ERR_NO_MEMORY, 0, Request.nonce);
         return;
     }
     g_present_dirty = true;
-    LayerReply(Requester, OK, g_layers.back().Id);
+    LayerReply(Requester, OK, g_layers.back().Id, Request.nonce);
 }
 
 static bool LayerClose(std::uint32_t Requester, std::uint32_t Generation,
@@ -901,7 +922,7 @@ static bool ipc_step(void)
                 memcpy(&Request, data, sizeof(Request));
                 LayerOpen(entry.sender_pid, Request);
             } else {
-                LayerReply(entry.sender_pid, ERR_INVALID_ARGUMENT, 0);
+                LayerReply(entry.sender_pid, ERR_INVALID_ARGUMENT, 0, 0);
             }
             break;
         case DISP_CMD_LAYER_FRAME:

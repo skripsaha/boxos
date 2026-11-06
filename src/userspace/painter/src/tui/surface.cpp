@@ -86,7 +86,7 @@ std::expected<Surface, StageError> Surface::Open(std::string_view Name, std::int
     }
 
     std::expected<DisplayLayer, box::error> LayerOpened =
-        DisplayLayer::Open(Actual, DISPLAY_LAYER_OVERLAY);
+        DisplayLayer::Open({0, 0, Actual.Width, Actual.Height}, DISPLAY_LAYER_OVERLAY);
     if (!LayerOpened)
         return std::unexpected(Error(StageErrorKind::InvalidState, LayerOpened.error(), Actual, Required));
 

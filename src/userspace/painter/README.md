@@ -56,12 +56,16 @@ z-order remain Painter/display-server concerns and the display ABI stays stable.
 ```text
 boxlib       C ABI and low-level BoxOS calls
 boxcxx       BoxOS C++ runtime and native primitives
-Painter      user-facing graphics family
+DisplayServer userspace console transport and composition
+Painter      user-facing graphics family and layer client
 apps/utils   programs and their domain models
 ```
 
-Painter is a separate userspace library built above `boxcxx`; it is not a
-second runtime and it does not replace `boxcxx` or `boxlib`.
+`display.elf` is the single userspace DisplayServer. It owns the console lanes,
+keyboard routing, process cleanup, and final composition. Painter is a client
+library above `boxcxx`; it publishes retained scene/overlay layers to that
+server and does not draw through a second display path. There is no separate
+daemon and compositor binary.
 
 ## TUI plan
 

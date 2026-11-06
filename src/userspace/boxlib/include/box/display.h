@@ -119,9 +119,9 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
 #define DISP_CMD_LAYER_FRAME  0x41
 #define DISP_CMD_LAYER_CLOSE  0x42
 
-#define DISPLAY_LAYER_VERSION 1u
+#define DISPLAY_LAYER_VERSION 2u
 #define DISPLAY_LAYER_SLOTS   3u
-#define DISPLAY_LAYER_TAG_MAX 64u
+#define DISPLAY_LAYER_TAG_PREFIX "display:layer:"
 
 typedef enum {
     DISPLAY_LAYER_SCENE   = 1,
@@ -141,11 +141,11 @@ typedef struct PACKED {
     uint8_t  role;
     uint16_t flags;
     uint32_t generation;
+    uint64_t nonce;
     int16_t  x;
     int16_t  y;
     uint16_t width;
     uint16_t height;
-    char     bay_tag[DISPLAY_LAYER_TAG_MAX];
 } DisplayLayerOpenRequest;
 
 typedef struct PACKED {
@@ -154,6 +154,7 @@ typedef struct PACKED {
     int32_t  error;
     uint32_t layer_id;
     uint32_t display_pid;
+    uint64_t nonce;
 } DisplayLayerOpenReply;
 
 typedef struct PACKED {
@@ -181,9 +182,9 @@ typedef struct {
     uint32_t slot_count;
     uint32_t slot_state[DISPLAY_LAYER_SLOTS];
     uint64_t sequence[DISPLAY_LAYER_SLOTS];
-    uint32_t cursor_x;
-    uint32_t cursor_y;
-    uint32_t cursor_visible;
+    uint32_t cursor_x[DISPLAY_LAYER_SLOTS];
+    uint32_t cursor_y[DISPLAY_LAYER_SLOTS];
+    uint32_t cursor_visible[DISPLAY_LAYER_SLOTS];
 } DisplayLayerSharedHeader;
 
 typedef struct {
@@ -195,12 +196,12 @@ typedef struct {
 #define DISPLAY_LAYER_MAGIC 0x4C594552u /* "LYER" */
 
 #ifdef __cplusplus
-static_assert(sizeof(DisplayLayerSharedHeader) == 80,
-              "DisplayLayerSharedHeader is a Bay ABI and must stay 80 bytes");
-static_assert(sizeof(DisplayLayerOpenRequest) == 80,
-              "DisplayLayerOpenRequest is an IPC ABI and must stay 80 bytes");
-static_assert(sizeof(DisplayLayerOpenReply) == 16,
-              "DisplayLayerOpenReply is an IPC ABI and must stay 16 bytes");
+static_assert(sizeof(DisplayLayerSharedHeader) == 104,
+              "DisplayLayerSharedHeader is a Bay ABI and must stay 104 bytes");
+static_assert(sizeof(DisplayLayerOpenRequest) == 24,
+              "DisplayLayerOpenRequest is an IPC ABI and must stay 24 bytes");
+static_assert(sizeof(DisplayLayerOpenReply) == 24,
+              "DisplayLayerOpenReply is an IPC ABI and must stay 24 bytes");
 static_assert(sizeof(DisplayLayerCell) == 16,
               "DisplayLayerCell is a Bay ABI and must stay 16 bytes");
 static_assert(sizeof(DisplayLayerCloseRequest) == 12,
@@ -208,12 +209,12 @@ static_assert(sizeof(DisplayLayerCloseRequest) == 12,
 static_assert(sizeof(DisplayLayerFrameNotice) == 12,
               "DisplayLayerFrameNotice is an IPC ABI and must stay 12 bytes");
 #else
-_Static_assert(sizeof(DisplayLayerSharedHeader) == 80,
-               "DisplayLayerSharedHeader is a Bay ABI and must stay 80 bytes");
-_Static_assert(sizeof(DisplayLayerOpenRequest) == 80,
-               "DisplayLayerOpenRequest is an IPC ABI and must stay 80 bytes");
-_Static_assert(sizeof(DisplayLayerOpenReply) == 16,
-               "DisplayLayerOpenReply is an IPC ABI and must stay 16 bytes");
+_Static_assert(sizeof(DisplayLayerSharedHeader) == 104,
+               "DisplayLayerSharedHeader is a Bay ABI and must stay 104 bytes");
+_Static_assert(sizeof(DisplayLayerOpenRequest) == 24,
+               "DisplayLayerOpenRequest is an IPC ABI and must stay 24 bytes");
+_Static_assert(sizeof(DisplayLayerOpenReply) == 24,
+               "DisplayLayerOpenReply is an IPC ABI and must stay 24 bytes");
 _Static_assert(sizeof(DisplayLayerCell) == 16,
                "DisplayLayerCell is a Bay ABI and must stay 16 bytes");
 _Static_assert(sizeof(DisplayLayerCloseRequest) == 12,

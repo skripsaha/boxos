@@ -16,7 +16,7 @@ namespace painter::tui {
 
 class DisplayLayer {
 public:
-    static std::expected<DisplayLayer, box::error> Open(core::Size Size,
+    static std::expected<DisplayLayer, box::error> Open(core::Rect Bounds,
                                                          DisplayLayerRole Role) noexcept;
 
     DisplayLayer(DisplayLayer &&) noexcept;
@@ -25,7 +25,7 @@ public:
     DisplayLayer &operator=(const DisplayLayer &) = delete;
     ~DisplayLayer();
 
-    core::Size Size() const noexcept { return Bounds; }
+    core::Size Size() const noexcept { return {Bounds.Width, Bounds.Height}; }
     bool IsOpen() const noexcept { return Opened; }
 
     box::status Present(std::span<const DisplayLayerCell> Cells,
@@ -33,13 +33,13 @@ public:
     box::status Close() noexcept;
 
 private:
-    DisplayLayer(core::Size BoundsValue, std::uint32_t DisplayPidValue,
+    DisplayLayer(core::Rect BoundsValue, std::uint32_t DisplayPidValue,
                  std::uint32_t LayerIdValue, box::bay<std::byte> SharedValue,
                  DisplayLayerSharedHeader *HeaderValue) noexcept;
 
-    box::status Signal(std::uint32_t Slot, std::uint64_t Sequence) noexcept;
+    box::status Notify() noexcept;
 
-    core::Size Bounds;
+    core::Rect Bounds;
     std::uint32_t DisplayPid = 0;
     std::uint32_t LayerId = 0;
     box::bay<std::byte> Shared;
