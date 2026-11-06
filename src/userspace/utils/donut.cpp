@@ -225,15 +225,6 @@ int main() {
         Say("donut: the picture could not be created");
         return 1;
     }
-    std::expected<painter::tui::Frame, box::error> EraserCreated =
-        painter::tui::Frame::Create({Width, Height});
-    if (!EraserCreated) {
-        Say("donut: the eraser could not be created");
-        return 1;
-    }
-    painter::tui::Frame Eraser = std::move(*EraserCreated);
-    Eraser.Clear({painter::core::Colors::LightGray, Black});
-
     std::expected<painter::tui::Keyboard, painter::tui::StageError> Input =
         painter::tui::Keyboard::Open("donut");
     if (!Input) {
@@ -254,7 +245,7 @@ int main() {
         Last = Now;
         A += Seconds * 1.05f;
         B += Seconds * 0.73f;
-        if (Shown && !Screen.Paint({At.Col, At.Row}, Eraser)) break;
+        if (Shown && !Screen.Clear()) break;
         Picture.Draw(A, B);
         if (!Screen.Composite({At.Col, At.Row}, Picture.Frame()))
             break;
@@ -270,7 +261,9 @@ int main() {
             break;
     }
 
-    if (Shown) (void)Screen.Paint({At.Col, At.Row}, Eraser);
+    if (Shown) {
+        (void)Screen.Clear();
+    }
     (void)Keys.Close();
     (void)Screen.Close();
     Say(std::format("[DONUT] rotation stopped"));

@@ -1,5 +1,5 @@
 /*
- * display.c — the console daemon.
+ * display.cpp — the BoxOS display server and compositor.
  *
  * One event loop, no timeouts: a rotation of try-steps (keys → deaths → lanes
  * → IPC). A pass that moves nothing does not go round again — the daemon turns
@@ -54,6 +54,18 @@
 #include "box/core/result.h"
 #include "box/turnin.h"
 #include "box/display.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "box/cxx/bay.h"
+#include "box/cxx/error.h"
+#include "console_model.h"
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Lanes
@@ -126,10 +138,143 @@ static ConsoleLane *g_lanes;         /* append at tail — grant order */
 static FreeNumber  *g_free_numbers;  /* reuse pool for lane numbers */
 static uint32_t     g_next_number;   /* fresh numbers when the pool is dry */
 
-/* The daemon's current on-screen pair — frames set it only when it differs. */
-static uint32_t g_cur_fg;
-static uint32_t g_cur_bg;
-static bool     g_cur_set;
+struct DisplayLayerState {
+    std::uint32_t Id = 0;
+    std::uint32_t OwnerPid = 0;
+    std::uint32_t OwnerGeneration = 0;
+    DisplayLayerRole Role = DISPLAY_LAYER_OVERLAY;
+    std::int32_t X = 0;
+    std::int32_t Y = 0;
+    std::uint32_t Width = 0;
+    std::uint32_t Height = 0;
+    std::size_t CellCount = 0;
+    std::string BayTag;
+    box::bay<std::byte> Shared;
+    DisplayLayerSharedHeader *Header = nullptr;
+    std::vector<DisplayLayerCell> Cells;
+    std::uint64_t Sequence = 0;
+    bool HasFrame = false;
+};
+
+static ConsoleModel *g_console_model;
+static std::vector<TextCell> g_composed_cells;
+static std::vector<DisplayLayerState> g_layers;
+static std::uint32_t g_next_layer_id = 1;
+static bool g_present_dirty = false;
+
+static void render_took(int rc);
+static bool LayersDropProcess(std::uint32_t Pid, std::uint32_t Generation);
+
+static std::size_t LayerCellCount(const DisplayLayerState &Layer)
+{
+    return Layer.CellCount;
+}
+
+static DisplayLayerCell *LayerSlot(DisplayLayerState &Layer, std::uint32_t Slot)
+{
+    auto *Base = reinterpret_cast<DisplayLayerCell *>(
+        reinterpret_cast<std::byte *>(Layer.Header) + sizeof(DisplayLayerSharedHeader));
+    return Base + static_cast<std::size_t>(Slot) * LayerCellCount(Layer);
+}
+
+static bool LayerConsume(DisplayLayerState &Layer)
+{
+    bool Changed = false;
+    std::uint64_t NewestSequence = Layer.Sequence;
+    for (std::uint32_t Slot = 0; Slot < DISPLAY_LAYER_SLOTS; Slot++) {
+        std::uint32_t Expected = DISPLAY_LAYER_READY;
+        if (!__atomic_compare_exchange_n(&Layer.Header->slot_state[Slot], &Expected,
+                                          DISPLAY_LAYER_READING, false,
+                                          __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            continue;
+
+        const std::uint64_t Sequence = Layer.Header->sequence[Slot];
+        if (!Layer.HasFrame || Sequence > NewestSequence) {
+            std::memcpy(Layer.Cells.data(), LayerSlot(Layer, Slot),
+                        LayerCellCount(Layer) * sizeof(DisplayLayerCell));
+            NewestSequence = Sequence;
+            Layer.HasFrame = true;
+            Changed = true;
+        }
+        __atomic_store_n(&Layer.Header->slot_state[Slot], DISPLAY_LAYER_FREE, __ATOMIC_RELEASE);
+    }
+    Layer.Sequence = NewestSequence;
+    if (Changed) g_present_dirty = true;
+    return Changed;
+}
+
+static bool LayerAbove(const DisplayLayerState &Left, const DisplayLayerState &Right)
+{
+    if (Left.Role != Right.Role) return Left.Role < Right.Role;
+    return Left.Id < Right.Id;
+}
+
+static bool PresentDisplay()
+{
+    if (!g_present_dirty || !g_console_model) return false;
+    g_present_dirty = false;
+
+    g_composed_cells = g_console_model->Cells();
+    std::vector<std::size_t> Order;
+    try {
+        Order.reserve(g_layers.size());
+        for (std::size_t Index = 0; Index < g_layers.size(); Index++) {
+            if (g_layers[Index].HasFrame) Order.push_back(Index);
+        }
+        std::sort(Order.begin(), Order.end(), [](std::size_t A, std::size_t B) {
+            return LayerAbove(g_layers[A], g_layers[B]);
+        });
+    } catch (...) {
+        g_present_dirty = true;
+        return false;
+    }
+
+    std::uint32_t CursorX = g_console_model->CursorX();
+    std::uint32_t CursorY = g_console_model->CursorY();
+    for (std::size_t Ordered : Order) {
+        DisplayLayerState &Layer = g_layers[Ordered];
+        for (std::uint32_t Row = 0; Row < Layer.Height; Row++) {
+            for (std::uint32_t Col = 0; Col < Layer.Width; Col++) {
+                const DisplayLayerCell &Cell =
+                    Layer.Cells[static_cast<std::size_t>(Row) * Layer.Width + Col];
+                if (!Cell.Opaque) continue;
+                const std::int32_t ScreenX = Layer.X + static_cast<std::int32_t>(Col);
+                const std::int32_t ScreenY = Layer.Y + static_cast<std::int32_t>(Row);
+                if (ScreenX < 0 || ScreenY < 0 ||
+                    ScreenX >= static_cast<std::int32_t>(g_console_model->Width()) ||
+                    ScreenY >= static_cast<std::int32_t>(g_console_model->Height()))
+                    continue;
+                g_composed_cells[static_cast<std::size_t>(ScreenY) * g_console_model->Width() + ScreenX] =
+                    Cell.Cell;
+            }
+        }
+        if (Layer.Header->cursor_visible != 0) {
+            CursorX = std::min<std::uint32_t>(Layer.Header->cursor_x,
+                                              g_console_model->Width() - 1u);
+            CursorY = std::min<std::uint32_t>(Layer.Header->cursor_y,
+                                              g_console_model->Height() - 1u);
+        }
+    }
+
+    const int PaintCode = vga_paint(0, 0,
+                                    static_cast<std::uint8_t>(g_console_model->Height()),
+                                    static_cast<std::uint8_t>(g_console_model->Width()),
+                                    g_composed_cells.data());
+    if (PaintCode != 0) {
+        g_present_dirty = true;
+        render_took(PaintCode);
+        return false;
+    }
+    (void)vga_setcursor(static_cast<std::uint8_t>(CursorY), static_cast<std::uint8_t>(CursorX));
+    return true;
+}
+
+static bool LayersStep()
+{
+    bool Changed = false;
+    for (DisplayLayerState &Layer : g_layers) Changed |= LayerConsume(Layer);
+    return Changed;
+}
 
 /* Touch tags, interned once at startup. */
 static TouchTag g_kb    = TOUCH_TAG_INVALID;
@@ -193,57 +338,9 @@ static bool kb_step(void);
 
 static void render_run(const ConsoleRun *f)
 {
-    if (f->kind == CONSOLE_RUN_CLEAR) {
-        vga_clear_rgb(f->fg, f->bg);
-        g_cur_fg  = f->fg;
-        g_cur_bg  = f->bg;
-        g_cur_set = true;
-        return;
-    }
-    if (f->kind == CONSOLE_RUN_STEP) {
-        /* One op, in the same batch as the text around it — the kernel is the
-         * only party that knows where the cursor is, so it does the arithmetic
-         * (hardware_ops.c: HwVgaStepCursor). The daemon used to read the
-         * position, work it out here and write it back: three round trips per
-         * keystroke, a flush of the batch in the middle of a render, an answer
-         * that could be stale by the time it was used, and a screen width that
-         * had to be learned in a byte and was wrong past 255 columns. */
-        int32_t delta;
-        memcpy(&delta, f->text, sizeof(delta));
-        vga_step_cursor(delta);
-        return;
-    }
-    if (f->kind != CONSOLE_RUN_TEXT) return;
-
-    if (!g_cur_set || g_cur_fg != f->fg || g_cur_bg != f->bg) {
-        vga_setcolor_rgb(f->fg, f->bg);
-        g_cur_fg  = f->fg;
-        g_cur_bg  = f->bg;
-        g_cur_set = true;
-    }
-
-    uint32_t len = f->len;
-    if (len > CONSOLE_RUN_TEXT_MAX) len = CONSOLE_RUN_TEXT_MAX;
-
-    /* One VGA operation for the whole run, newlines inside it. The console
-     * lock is held per operation, so a line's text in one operation and its
-     * newline in the next left a gap for a kprintf from another core to land
-     * in, and the serial account read `…via=printf[6] [ROLLCALL] …` —
-     * MEASURED on BIOS 16c: 184 and 71 lines of 1600 carried somebody else's.
-     * '\n' and '\b' are content (a line end, an erased cell); other control
-     * bytes below 0x20 are dropped as line noise. Everything from 0x20 up
-     * passes, UTF-8 continuation bytes included — a character is folded to a
-     * glyph at the font (kernel font/glyph_fold.h), never on the way there. */
-    char     seg[CONSOLE_RUN_TEXT_MAX + 1];
-    uint32_t pos = 0;
-    for (uint32_t i = 0; i < len; i++) {
-        char c = f->text[i];
-        if (c == '\n' || c == '\b' || (unsigned char)c >= 0x20) seg[pos++] = c;
-    }
-    if (pos > 0) {
-        seg[pos] = '\0';
-        vga_puts(seg);
-    }
+    if (!g_console_model) return;
+    g_console_model->Apply(*f);
+    g_present_dirty = true;
 }
 
 /* ‼ A RENDER THAT WAS REFUSED IS NEWS, AND IT USED TO BE SWALLOWED.
@@ -327,6 +424,7 @@ static bool lanes_render(uint32_t budget)
         }
     }
     render_took(vga_commit());
+    if (did) (void)PresentDisplay();
     return did;
 }
 
@@ -383,6 +481,7 @@ static bool death_step(void)
 
         TouchProcessDied d;
         memcpy(&d, t.payload, sizeof(d));
+        did |= LayersDropProcess(d.pid, d.generation);
 
         for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
             if (ln->owner_pid != d.pid || ln->owner_gen != d.generation ||
@@ -655,6 +754,133 @@ static void grant_lane(uint32_t requester, uint32_t generation)
 }
 
 
+static void LayerReply(std::uint32_t Requester, error_t Error,
+                       std::uint32_t LayerId)
+{
+    DisplayLayerOpenReply Reply{};
+    Reply.command = DISP_CMD_LAYER_OPEN;
+    Reply.error = static_cast<std::int32_t>(Error);
+    Reply.layer_id = LayerId;
+    Reply.display_pid = cabin_info()->pid;
+    (void)send(Requester, &Reply, sizeof(Reply));
+}
+
+static void LayerOpen(std::uint32_t Requester, const DisplayLayerOpenRequest &Request)
+{
+    if (!g_console_model || Request.width == 0 || Request.height == 0 ||
+        Request.width > g_console_model->Width() || Request.height > g_console_model->Height() ||
+        Request.x < 0 || Request.y < 0 ||
+        static_cast<std::uint32_t>(Request.x) + Request.width > g_console_model->Width() ||
+        static_cast<std::uint32_t>(Request.y) + Request.height > g_console_model->Height()) {
+        LayerReply(Requester, ERR_OUT_OF_RANGE, 0);
+        return;
+    }
+    if (Request.role < DISPLAY_LAYER_SCENE || Request.role > DISPLAY_LAYER_NOTICE) {
+        LayerReply(Requester, ERR_INVALID_ARGUMENT, 0);
+        return;
+    }
+    const std::size_t CellCount = static_cast<std::size_t>(Request.width) * Request.height;
+    const std::size_t ExpectedBytes = sizeof(DisplayLayerSharedHeader) +
+                                      DISPLAY_LAYER_SLOTS * CellCount * sizeof(DisplayLayerCell);
+    std::size_t TagLength = 0;
+    while (TagLength < DISPLAY_LAYER_TAG_MAX && Request.bay_tag[TagLength] != '\0') TagLength++;
+    if (TagLength == 0 || TagLength >= DISPLAY_LAYER_TAG_MAX) {
+        LayerReply(Requester, ERR_INVALID_TAG, 0);
+        return;
+    }
+
+    std::string Tag(Request.bay_tag, TagLength);
+    for (const DisplayLayerState &Existing : g_layers) {
+        if (Existing.OwnerPid != Requester ||
+            Existing.OwnerGeneration != Request.generation ||
+            Existing.BayTag != Tag)
+            continue;
+        if (Existing.Role != static_cast<DisplayLayerRole>(Request.role) ||
+            Existing.X != Request.x || Existing.Y != Request.y ||
+            Existing.Width != Request.width || Existing.Height != Request.height) {
+            LayerReply(Requester, ERR_INVALID_ARGUMENT, 0);
+        } else {
+            LayerReply(Requester, OK, Existing.Id);
+        }
+        return;
+    }
+    box::bay<std::byte> Shared = box::bay<std::byte>::open(Tag.c_str());
+    if (!Shared || Shared.size_bytes() != ExpectedBytes) {
+        LayerReply(Requester, ERR_OBJECT_NOT_FOUND, 0);
+        return;
+    }
+    auto *Header = reinterpret_cast<DisplayLayerSharedHeader *>(Shared.data());
+    if (Header->magic != DISPLAY_LAYER_MAGIC || Header->version != DISPLAY_LAYER_VERSION ||
+        Header->width != Request.width || Header->height != Request.height ||
+        Header->cell_count != CellCount || Header->slot_count != DISPLAY_LAYER_SLOTS) {
+        LayerReply(Requester, ERR_VERSION_MISMATCH, 0);
+        return;
+    }
+
+    DisplayLayerState Layer;
+    Layer.Id = g_next_layer_id++;
+    if (Layer.Id == 0) Layer.Id = g_next_layer_id++;
+    Layer.OwnerPid = Requester;
+    Layer.OwnerGeneration = Request.generation;
+    Layer.Role = static_cast<DisplayLayerRole>(Request.role);
+    Layer.X = Request.x;
+    Layer.Y = Request.y;
+    Layer.Width = Request.width;
+    Layer.Height = Request.height;
+    Layer.CellCount = CellCount;
+    Layer.BayTag = Tag;
+    Layer.Shared = std::move(Shared);
+    Layer.Header = Header;
+    try {
+        Layer.Cells.resize(CellCount);
+        g_layers.push_back(std::move(Layer));
+    } catch (...) {
+        LayerReply(Requester, ERR_NO_MEMORY, 0);
+        return;
+    }
+    g_present_dirty = true;
+    LayerReply(Requester, OK, g_layers.back().Id);
+}
+
+static bool LayerClose(std::uint32_t Requester, std::uint32_t Generation,
+                       std::uint32_t LayerId)
+{
+    for (auto It = g_layers.begin(); It != g_layers.end(); ++It) {
+        if (It->Id != LayerId) continue;
+        if (It->OwnerPid != Requester || It->OwnerGeneration != Generation) return false;
+        g_layers.erase(It);
+        g_present_dirty = true;
+        return true;
+    }
+    return false;
+}
+
+static bool LayerFrame(std::uint32_t Requester, std::uint32_t Generation,
+                       std::uint32_t LayerId)
+{
+    for (DisplayLayerState &Layer : g_layers) {
+        if (Layer.Id != LayerId || Layer.OwnerPid != Requester ||
+            Layer.OwnerGeneration != Generation) continue;
+        return LayerConsume(Layer);
+    }
+    return false;
+}
+
+static bool LayersDropProcess(std::uint32_t Pid, std::uint32_t Generation)
+{
+    bool Changed = false;
+    for (auto It = g_layers.begin(); It != g_layers.end();) {
+        if (It->OwnerPid == Pid && It->OwnerGeneration == Generation) {
+            It = g_layers.erase(It);
+            Changed = true;
+        } else {
+            ++It;
+        }
+    }
+    if (Changed) g_present_dirty = true;
+    return Changed;
+}
+
 static bool ipc_step(void)
 {
     bool   did = false;
@@ -669,6 +895,29 @@ static bool ipc_step(void)
         uint16_t       len  = (uint16_t)entry.data_length;
 
         switch (data[0]) {
+        case DISP_CMD_LAYER_OPEN:
+            if (len >= sizeof(DisplayLayerOpenRequest)) {
+                DisplayLayerOpenRequest Request{};
+                memcpy(&Request, data, sizeof(Request));
+                LayerOpen(entry.sender_pid, Request);
+            } else {
+                LayerReply(entry.sender_pid, ERR_INVALID_ARGUMENT, 0);
+            }
+            break;
+        case DISP_CMD_LAYER_FRAME:
+            if (len >= sizeof(DisplayLayerFrameNotice)) {
+                DisplayLayerFrameNotice Notice{};
+                memcpy(&Notice, data, sizeof(Notice));
+                (void)LayerFrame(entry.sender_pid, Notice.generation, Notice.layer_id);
+            }
+            break;
+        case DISP_CMD_LAYER_CLOSE:
+            if (len >= sizeof(DisplayLayerCloseRequest)) {
+                DisplayLayerCloseRequest Request{};
+                memcpy(&Request, data, sizeof(Request));
+                (void)LayerClose(entry.sender_pid, Request.generation, Request.layer_id);
+            }
+            break;
         case DISP_CMD_LANE:
             /* [cmd][u32 generation]: a request without its generation names
              * nobody and gets nothing. */
@@ -726,6 +975,20 @@ int main(void)
 {
     io_set_mode(IO_MODE_VGA);
 
+    vga_dimensions_t Dimensions{};
+    if (vga_getdimensions(&Dimensions) != 0 || Dimensions.cols == 0 || Dimensions.rows == 0)
+        return 1;
+    try {
+        g_console_model = new ConsoleModel(Dimensions.cols, Dimensions.rows);
+        g_composed_cells.resize(static_cast<std::size_t>(Dimensions.cols) * Dimensions.rows);
+    } catch (...) {
+        delete g_console_model;
+        g_console_model = NULL;
+        return 1;
+    }
+    g_present_dirty = true;
+    (void)PresentDisplay();
+
     g_kb    = touch_pair_choose(touch_intern(TOUCH_TAG_KEYBOARD));
     g_pdied = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));
     if (g_kb    != TOUCH_TAG_INVALID) touch_claim(g_kb,    TOUCH_REST, 0, 0);
@@ -750,7 +1013,9 @@ int main(void)
         progressed |= kb_step();
         progressed |= death_step();
         progressed |= lanes_step();
+        progressed |= LayersStep();
         progressed |= ipc_step();
+        if (g_present_dirty) (void)PresentDisplay();
         if (progressed) continue;
 
         /* Nothing moved. Hang the bells FIRST, then take the mark, then look
@@ -762,7 +1027,8 @@ int main(void)
         lanes_bell_hang(me);
         TurnInMark mark = box_mark();
 
-        if (kb_step() | death_step() | lanes_step() | ipc_step()) {
+        if (kb_step() | death_step() | lanes_step() | LayersStep() | ipc_step()) {
+            if (g_present_dirty) (void)PresentDisplay();
             lanes_bell_take();
             continue;
         }

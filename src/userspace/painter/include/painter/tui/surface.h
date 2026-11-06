@@ -29,12 +29,16 @@ public:
 
     std::expected<core::Point, box::error> Cursor() const noexcept;
     /* Paint writes every cell in the selected rectangle, including spaces.
-     * Composite writes only opaque cells and leaves transparent cells on the
-     * destination unchanged. */
+     * Composite replaces the selected retained-layer rectangle; transparent
+     * cells clear that layer and reveal the surface below. */
     box::status Paint(core::Point Origin, const Frame &FrameBuffer) noexcept;
     box::status Paint(core::Point Origin, const Frame &FrameBuffer, core::Rect Region) noexcept;
     box::status Composite(core::Point Origin, const Frame &FrameBuffer) noexcept;
     box::status Composite(core::Point Origin, const Frame &FrameBuffer, core::Rect Region) noexcept;
+    /* Clear this surface's retained layer without presenting an intermediate
+     * frame. The next Paint/Composite publishes the replacement atomically
+     * with respect to the display server. */
+    box::status Clear() noexcept;
     box::status SetCursor(core::Point At) noexcept;
     box::status ScrollUp() noexcept;
     box::status Close() noexcept;

@@ -13,20 +13,24 @@
 #include "box/vga.h"
 #include "text_cell.h"
 
+#include "display_client.h"
+
 namespace painter::tui {
 
 struct Stage::Impl {
     core::Size            Bounds;
     Frame                 FrameBuffer;
+    DisplayLayer          Layer;
     TouchTag              Ear = TOUCH_TAG_INVALID;
-    std::vector<TextCell> NativeCells;
+    std::vector<DisplayLayerCell> LayerCells;
     core::Point            Cursor;
     bool                  Opened = true;
 
-    Impl(core::Size BoundsValue, Frame FrameValue, TouchTag EarValue,
-         std::vector<TextCell> NativeCellsValue) noexcept
-        : Bounds(BoundsValue), FrameBuffer(std::move(FrameValue)), Ear(EarValue),
-          NativeCells(std::move(NativeCellsValue)), Cursor{BoundsValue.Width - 1, BoundsValue.Height - 1}
+    Impl(core::Size BoundsValue, Frame FrameValue, DisplayLayer LayerValue,
+         TouchTag EarValue, std::vector<DisplayLayerCell> LayerCellsValue) noexcept
+        : Bounds(BoundsValue), FrameBuffer(std::move(FrameValue)), Layer(std::move(LayerValue)),
+          Ear(EarValue), LayerCells(std::move(LayerCellsValue)),
+          Cursor{BoundsValue.Width - 1, BoundsValue.Height - 1}
     {
     }
 };
@@ -97,24 +101,35 @@ std::expected<Stage, StageError> Stage::Open(std::string_view Name, std::int32_t
         return std::unexpected(Error(StageErrorKind::FrameUnavailable, box::error{box::errc::out_of_range}, Actual,
                                       Required));
 
-    std::vector<TextCell> NativeCells;
+    std::vector<DisplayLayerCell> LayerCells;
     try {
-        NativeCells.resize(*CellCount);
+        LayerCells.resize(*CellCount);
     } catch (const std::bad_alloc &) {
         return std::unexpected(Error(StageErrorKind::FrameUnavailable, box::error{box::errc::no_memory}, Actual,
                                       Required));
     }
 
+    std::expected<DisplayLayer, box::error> LayerOpened =
+        DisplayLayer::Open(Actual, DISPLAY_LAYER_SCENE);
+    if (!LayerOpened)
+        return std::unexpected(Error(StageErrorKind::InvalidState, LayerOpened.error(), Actual, Required));
+
     TouchTag Ear = console_listen();
     if (Ear == TOUCH_TAG_INVALID)
+    {
+        (void)LayerOpened->Close();
         return std::unexpected(Error(StageErrorKind::KeyboardUnavailable,
                                      box::error{box::errc::device_not_ready}, Actual, Required));
+    }
 
+    DisplayLayer LayerValue = std::move(*LayerOpened);
     try {
-        auto State = std::make_unique<Impl>(Actual, std::move(*Created), Ear, std::move(NativeCells));
+        auto State = std::make_unique<Impl>(Actual, std::move(*Created), std::move(LayerValue),
+                                            Ear, std::move(LayerCells));
         return Stage(std::move(State));
     } catch (const std::bad_alloc &) {
         console_unlisten();
+        (void)LayerValue.Close();
         return std::unexpected(Error(StageErrorKind::FrameUnavailable, box::error{box::errc::no_memory}, Actual,
                                       Required));
     }
@@ -170,15 +185,17 @@ box::status Stage::Present() noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
 
-    State->FrameBuffer.WriteNative(State->NativeCells.data(), State->NativeCells.size());
-    int Code = vga_setcursor(static_cast<std::uint8_t>(State->Cursor.Y),
-                             static_cast<std::uint8_t>(State->Cursor.X));
-    if (Code != 0) return std::unexpected(Cause(Code));
-
-    Code = vga_paint(0, 0, static_cast<std::uint8_t>(State->Bounds.Height),
-                     static_cast<std::uint8_t>(State->Bounds.Width), State->NativeCells.data());
-    if (Code != 0) return std::unexpected(Cause(Code));
-    return {};
+    for (std::int32_t Row = 0; Row < State->Bounds.Height; Row++) {
+        for (std::int32_t Col = 0; Col < State->Bounds.Width; Col++) {
+            const Cell Value = State->FrameBuffer.Read({Col, Row});
+            DisplayLayerCell &Out = State->LayerCells[
+                static_cast<std::size_t>(Row * State->Bounds.Width + Col)];
+            Out.Cell = TextCell{Value.Foreground.Raw(), Value.Background.Raw(), Value.Glyph, {0, 0, 0}};
+            Out.Opaque = Value.IsTransparent() ? 0u : 1u;
+            Out.Reserved[0] = Out.Reserved[1] = Out.Reserved[2] = 0;
+        }
+    }
+    return State->Layer.Present(State->LayerCells, State->Cursor, true);
 }
 
 Event Stage::Poll() noexcept
@@ -218,11 +235,7 @@ box::status Stage::Close() noexcept
     State->Opened = false;
     console_unlisten();
     State->Ear = TOUCH_TAG_INVALID;
-
-    int First = vga_clear_rgb(COLOR_LIGHT_GRAY, COLOR_BLACK);
-    int Code  = vga_setcursor(0, 0);
-    if (First == 0) First = Code;
-    return First == 0 ? box::status{} : std::unexpected(Cause(First));
+    return State->Layer.Close();
 }
 
 }  // namespace painter::tui

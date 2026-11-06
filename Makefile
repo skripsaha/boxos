@@ -1150,7 +1150,7 @@ $(APP_ELFS): $(APPS_STAMP)
 	@:
 
 # Build display server
-$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
+$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 	@echo "Building display server..."
 	@cd $(DISPLAY_DIR) && $(MAKE)
 	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"

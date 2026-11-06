@@ -1,11 +1,11 @@
 # ============================================================================
 # BoxOS Display Server Makefile
 # ============================================================================
-# Uses x86_64-elf-gcc cross-compiler on ALL platforms for consistency.
+# Uses the BoxOS C++ userspace runtime and existing C boxlib primitives.
 # ============================================================================
 
 # Cross-compiler toolchain - SAME on all platforms
-CC      = x86_64-elf-gcc
+CXX     = x86_64-elf-g++
 
 # Compiler flags
 # -fno-stack-protector: No libc in userspace, canary support unavailable
@@ -18,22 +18,22 @@ CC      = x86_64-elf-gcc
 #                fault inside boxlib (memcpy/ManifestBuilderAddOp). Same
 #                fix the boxlib Makefile already carries — must be on every
 #                userspace binary that links libbox.a.
-CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
+CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti -fcoroutines \
+         -fuse-cxa-atexit -fasynchronous-unwind-tables \
+         -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
          -fno-stack-protector -fno-pic -static -fno-ipa-ra \
          -fcf-protection=full -fstack-clash-protection \
          -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
-         -fno-asynchronous-unwind-tables -fno-unwind-tables \
-         -Wall -Wextra -g \
-         -Werror=implicit-function-declaration \
-         -Werror=incompatible-pointer-types \
-         -Werror=return-type \
-         -Werror=int-conversion \
+         -Wall -Wextra -g -Werror=return-type \
          -I../boxlib/include \
+         -I../boxcxx/include/std -I../boxcxx/include \
          -I../../include
 
 BOXLIB_DIR   = ../boxlib
+BOXCXX_DIR   = ../boxcxx
 LDFLAGS      = -nostdlib -static -T $(BOXLIB_DIR)/user.ld
 BOXLIB       = ../boxlib/libbox.a
+BOXCXX       = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o
 
 .PHONY: all clean
@@ -43,13 +43,13 @@ all: display.elf
 # After `all`: the fragment's first rule would otherwise become the default goal.
 include ../nameplate.mk
 
-display.elf: $(BOXLIB_START) display.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) display.o $(BOXLIB))
+display.elf: $(BOXLIB_START) display.o console_model.o $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) display.o console_model.o $(BOXCXX) $(BOXLIB) -lgcc)
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.
 # See boxcxx/Makefile for what their absence cost.
-%.o: %.c
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
 -include $(wildcard *.d)
 

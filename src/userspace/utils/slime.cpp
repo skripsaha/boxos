@@ -1,9 +1,10 @@
 /* slime — a lazy yellow-green little creature that crawls over the console.
  *
- * The slime owns only its footprint. Every frame Painter paints the old small
- * rectangle away and lays the new one down; the rest of the console is never
- * cleared or redrawn. Its movement is deliberately slow and indecisive: it
- * chooses a new place, crawls there, pauses, and chooses again. */
+ * The slime owns one retained overlay layer. Each frame clears that layer in
+ * memory and publishes the new footprint once, so the display server never
+ * shows the opaque erase frame that caused the old black flicker. Its movement
+ * is deliberately slow and indecisive: it chooses a new place, crawls there,
+ * pauses, and chooses again. */
 
 #include <algorithm>
 #include <cmath>
@@ -241,8 +242,6 @@ int main()
     }
     painter::tui::Keyboard Keys = std::move(*Input);
 
-    int OldLeft = Creature.Left();
-    int OldTop = Creature.Top();
     bool Shown = false;
     std::uint64_t Last = clock_uptime_us();
     for (;;) {
@@ -251,17 +250,11 @@ int main()
         Last = Now;
         Creature.Step(Seconds);
 
-        if (Shown) {
-            Picture.Frame().Clear({painter::core::Colors::LightGray, Black});
-            if (!Screen.Paint({OldLeft, OldTop}, Picture.Frame())) break;
-        }
-
+        if (!Screen.Clear()) break;
         Picture.Draw(Creature);
         const int Left = Creature.Left();
         const int Top = Creature.Top();
         if (!Screen.Composite({Left, Top}, Picture.Frame())) break;
-        OldLeft = Left;
-        OldTop = Top;
         Shown = true;
 
         const painter::tui::Event Event = Keys.Wait(33);
@@ -272,10 +265,7 @@ int main()
             break;
     }
 
-    if (Shown) {
-        Picture.Frame().Clear({painter::core::Colors::LightGray, Black});
-        (void)Screen.Paint({OldLeft, OldTop}, Picture.Frame());
-    }
+    if (Shown) (void)Screen.Clear();
     (void)Keys.Close();
     (void)Screen.Close();
     Say("[SLIME] the creature went to sleep");

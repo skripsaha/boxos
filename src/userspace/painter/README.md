@@ -42,12 +42,14 @@ command parser, game engine, widget tree, or TagFS abstraction.
 
 `Frame::Clear` creates an opaque frame and is the right operation for a full
 screen or a complete rectangular panel. `Frame::ClearTransparent` creates an
-overlay frame whose untouched cells do not replace the destination. A
-`Surface::Paint` is an opaque rectangular blit; `Surface::Composite` turns the
-overlay into horizontal opaque runs and leaves transparent cells alone. The
-kernel still receives its existing rectangular `TextCell` operations, so the
-transparency contract remains a Painter concern and the display ABI stays
-stable.
+overlay frame whose untouched cells expose the layer below. A `Surface` keeps
+one retained layer owned by its process: `Paint` replaces a rectangle with
+opaque cells, while `Composite` replaces the selected rectangle with the frame's
+coverage and clears transparent cells from that layer. `Surface::Clear` removes
+the whole retained layer without publishing an intermediate erase frame; the
+next draw publishes the replacement once. The kernel still receives only its
+existing rectangular `TextCell` operations, so the transparency contract and
+z-order remain Painter/display-server concerns and the display ABI stays stable.
 
 ## Layering
 
