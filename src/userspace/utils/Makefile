@@ -106,7 +106,7 @@ $(ASSEMBLE_ENTRY_BLOB): $(BOXLIB_START)
 	@x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents $< $@
 
-# draft is four parts — the book, the glass, the volume, and what decides —
+# draft is four parts — the book, the screen, the volume, and what decides —
 # and the pattern rule above links exactly one object, so it names its own.
 draft.elf: $(BOXLIB_START) draft.o draft_book.o draft_paint.o draft_file.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) draft.o draft_book.o draft_paint.o draft_file.o $(BOXLIB))
@@ -128,8 +128,16 @@ draft.elf: $(BOXLIB_START) draft.o draft_book.o draft_paint.o draft_file.o $(BOX
 # It must come AFTER the link, because `nameplate verify` reads the symbol
 # table this deletes. cxxtest, timezone and exitpaths are stripped for the same
 # reason and were the precedent.
-$(addsuffix .elf,playtime lavalamp finish): %.elf: $(BOXLIB_START) %.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
+finish.elf: $(BOXLIB_START) finish.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) finish.o $(BOXLIB))
+	@x86_64-elf-objcopy --strip-all $@
+
+playtime.elf: $(BOXLIB_START) playtime.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) playtime.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+lavalamp.elf: $(BOXLIB_START) lavalamp.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) lavalamp.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # The zone database is C++, so `timezone` is. An explicit rule, which overrides
@@ -143,8 +151,8 @@ timezone.elf: $(BOXLIB_START) timezone.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.
 	@# a megabyte of a 24 MB image.
 	@x86_64-elf-objcopy --strip-all $@
 
-taskcenter.elf: $(BOXLIB_START) taskcenter.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) taskcenter.o $(BOXCXX) $(BOXLIB) -lgcc)
+taskcenter.elf: $(BOXLIB_START) taskcenter.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) taskcenter.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # hexer and stringview are C++ in parts, as draft is in C: each names its own
@@ -173,7 +181,7 @@ FLAME_OBJS      = flame.o flame_sim.o flame_palette.o flame_font.o flame_paint.o
 CHECKSUM_OBJS   = checksum.o checksum_small.o checksum_sha2.o checksum_sha3.o checksum_kinds.o
 PASSPORT_OBJS   = passport.o keep.o
 AQUARIUM_OBJS   = aquarium.o aquarium_kinds.o aquarium_scene.o aquarium_life.o aquarium_paint.o
-# The glass a program owns and its own small file on the volume, shared by
+# The screen a program owns and its own small file on the volume, shared by
 # the programs after aquarium (stage.h, keep.h).
 NYANCAT_OBJS    = nyancat.o
 FIREWORKS_OBJS  = fireworks.o

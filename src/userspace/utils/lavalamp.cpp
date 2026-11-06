@@ -36,18 +36,17 @@
  * one op and stays out of the ring — that is exactly what it is for.
  */
 #include "box/print.h"
-#include "box/vga.h"
 #include "box/color.h"
-#include "box/keyboard.h"
-#include "box/touch.h"
 #include "box/clock.h"
 #include "box/cpu.h"
 #include "box/form.h"
-#include "box/system.h"
-#include "box/memory.h"
 #include "box/string.h"
 #include "box/convert.h"
-#include "box/error.h"
+#include "painter/tui/stage.h"
+
+#include <cstdlib>
+#include <string>
+#include <utility>
 
 BOX_FORM("");
 
@@ -180,12 +179,18 @@ static const char *const kHintLeave =
 
 static Lamp      g_lamp;
 static Menu      g_menu;
-static TextCell *g_frame;
+static painter::tui::Stage *g_screen;
+static painter::tui::Frame *g_frame;
 /* One entry per blob, refilled once per row: the vertical half of the field is
  * the same for every cell on a row, and hoisting it out of the column loop is
  * the difference between two multiplies a cell and two multiplies a row. */
 static double   *g_rowterm;
 static uint64_t  g_seed;
+
+static painter::core::Color painter_color(Color Value)
+{
+    return painter::core::Color::FromRaw(Value & 0x00FFFFFFu);
+}
 
 /* ===========================================================================
  * Numbers out of thin air
@@ -303,29 +308,30 @@ static void advance(uint64_t dt_us)
  * The picture
  * =========================================================================== */
 
-static void cell_paint(double f, TextCell *out)
+static painter::tui::Cell cell_paint(double f)
 {
-    out->ch = ' ';                       /* colour is the whole picture */
+    painter::tui::Cell out{' ', painter_color(g_lamp.liquid), painter_color(g_lamp.back)};
 
     if (f >= CORE_LEVEL) {
-        out->bg = g_lamp.liquid;
-        out->fg = g_lamp.back;
-        return;
+        out.Background = painter_color(g_lamp.liquid);
+        out.Foreground = painter_color(g_lamp.back);
+        return out;
     }
     if (f >= EDGE_LEVEL) {
         uint8_t t = (uint8_t)(((f - EDGE_LEVEL) / (CORE_LEVEL - EDGE_LEVEL)) * 255.0);
-        out->bg = color_mix(g_lamp.edge, g_lamp.liquid, t);
-        out->fg = g_lamp.back;
-        return;
+        out.Background = painter_color(color_mix(g_lamp.edge, g_lamp.liquid, t));
+        out.Foreground = painter_color(g_lamp.back);
+        return out;
     }
     if (f >= RIM_LEVEL) {
         uint8_t t = (uint8_t)(((f - RIM_LEVEL) / (EDGE_LEVEL - RIM_LEVEL)) * 255.0);
-        out->bg = color_mix(g_lamp.back, g_lamp.edge, t);
-        out->fg = g_lamp.liquid;
-        return;
+        out.Background = painter_color(color_mix(g_lamp.back, g_lamp.edge, t));
+        out.Foreground = painter_color(g_lamp.liquid);
+        return out;
     }
-    out->bg = g_lamp.back;
-    out->fg = g_lamp.liquid;
+    out.Background = painter_color(g_lamp.back);
+    out.Foreground = painter_color(g_lamp.liquid);
+    return out;
 }
 
 static void paint_lamp(void)
@@ -342,14 +348,13 @@ static void paint_lamp(void)
             g_rowterm[i] = dy * dy + 1.0;
         }
 
-        TextCell *line = &g_frame[row * cols];
         for (int col = 0; col < cols; col++) {
             double f = 0.0;
             for (int i = 0; i < count; i++) {
                 double dx = (double)col - g_lamp.blobs[i].x;
                 f += g_lamp.blobs[i].r2 / (dx * dx + g_rowterm[i]);
             }
-            cell_paint(f, &line[col]);
+            g_frame->Put({col, row}, cell_paint(f));
         }
     }
 }
@@ -357,10 +362,7 @@ static void paint_lamp(void)
 static void put_cell(int row, int col, char ch, Color fg, Color bg)
 {
     if (row < 0 || col < 0 || row >= g_lamp.rows || col >= g_lamp.cols) return;
-    TextCell *c = &g_frame[row * g_lamp.cols + col];
-    c->ch = ch;
-    c->fg = fg;
-    c->bg = bg;
+    g_frame->Put({col, row}, painter::tui::Cell{ch, painter_color(fg), painter_color(bg)});
 }
 
 static void put_text(int row, int col, const char *s, Color fg, Color bg)
@@ -479,18 +481,17 @@ static void draw_menu(void)
  * there is no way to hide it, so it is put somewhere it means something: on
  * the character being typed, on the marker of the chosen row, or out of the
  * way in the corner while the lamp has the screen to itself. */
-static void park_caret(void)
+static bool park_caret(void)
 {
     if (!g_menu.open) {
-        vga_setcursor((uint8_t)(g_lamp.rows - 1), (uint8_t)(g_lamp.cols - 1));
-        return;
+        return static_cast<bool>(g_screen->SetCursor({g_lamp.cols - 1, g_lamp.rows - 1}));
     }
     int row = menu_row_origin() + 1 + g_menu.item;
     int col = menu_col_origin() + 1;
     col += g_menu.editing ? (MENU_VALUE_AT + g_menu.len) : MENU_MARK_AT;
     if (row >= g_lamp.rows) row = g_lamp.rows - 1;
     if (col >= g_lamp.cols) col = g_lamp.cols - 1;
-    vga_setcursor((uint8_t)row, (uint8_t)col);
+    return static_cast<bool>(g_screen->SetCursor({col, row}));
 }
 
 /* ===========================================================================
@@ -562,21 +563,21 @@ static void accept_edit(void)
     g_menu.note    = NULL;
 }
 
-static LampVerdict edit_key(const kb_event_t *k)
+static LampVerdict edit_key(const painter::tui::KeyEvent &Key)
 {
-    if (k->mods & KB_MOD_EXTENDED) return LAMP_RUN;   /* arrows do nothing here */
+    if (Key.IsExtended()) return LAMP_RUN;   /* arrows do nothing here */
 
-    char c = k->ascii;
-    if (c == KEY_ESCAPE) {                            /* cancel: the old value stands */
+    char c = Key.Ascii;
+    if (c == painter::tui::KeyCodes::Escape) {        /* cancel: the old value stands */
         g_menu.editing = false;
         g_menu.note    = NULL;
         return LAMP_RUN;
     }
-    if (c == KEY_ENTER) {
+    if (c == painter::tui::KeyCodes::Enter) {
         accept_edit();
         return LAMP_RUN;
     }
-    if (c == KEY_BACKSPACE || c == 0x7F) {
+    if (c == painter::tui::KeyCodes::Backspace || c == 0x7F) {
         if (g_menu.len > 0) g_menu.text[--g_menu.len] = '\0';
         g_menu.note = NULL;
         return LAMP_RUN;
@@ -589,28 +590,28 @@ static LampVerdict edit_key(const kb_event_t *k)
     return LAMP_RUN;
 }
 
-static LampVerdict menu_key(const kb_event_t *k)
+static LampVerdict menu_key(const painter::tui::KeyEvent &Key)
 {
     /* A note answers the LAST key, so every key clears it first; the two calls
      * below that have something to say set it again. Left standing, it would
      * follow the marker onto a row that never earned it. */
     g_menu.note = NULL;
 
-    if (k->mods & KB_MOD_EXTENDED) {
-        switch (k->scancode) {
-        case KEY_UP:    g_menu.item = (g_menu.item + MENU_ITEMS - 1) % MENU_ITEMS; break;
-        case KEY_DOWN:  g_menu.item = (g_menu.item + 1) % MENU_ITEMS;              break;
-        case KEY_LEFT:  nudge(-1); break;
-        case KEY_RIGHT: nudge(+1); break;
+    if (Key.IsExtended()) {
+        switch (Key.Scancode) {
+        case painter::tui::KeyCodes::Up:    g_menu.item = (g_menu.item + MENU_ITEMS - 1) % MENU_ITEMS; break;
+        case painter::tui::KeyCodes::Down:  g_menu.item = (g_menu.item + 1) % MENU_ITEMS;              break;
+        case painter::tui::KeyCodes::Left:  nudge(-1); break;
+        case painter::tui::KeyCodes::Right: nudge(+1); break;
         default: break;
         }
         return LAMP_RUN;
     }
 
-    switch (k->ascii) {
-    case KEY_ESCAPE: g_menu.open = false;                          break;
-    case KEY_TAB:    g_menu.item = (g_menu.item + 1) % MENU_ITEMS; break;
-    case KEY_ENTER:  begin_edit();                                 break;
+    switch (Key.Ascii) {
+    case painter::tui::KeyCodes::Escape: g_menu.open = false;                          break;
+    case painter::tui::KeyCodes::Tab:    g_menu.item = (g_menu.item + 1) % MENU_ITEMS; break;
+    case painter::tui::KeyCodes::Enter:  begin_edit();                                 break;
     case '-':        nudge(-1);                                    break;
     case '+':        nudge(+1);                                    break;
     default: break;
@@ -618,22 +619,22 @@ static LampVerdict menu_key(const kb_event_t *k)
     return LAMP_RUN;
 }
 
-static LampVerdict handle_key(const kb_event_t *k)
+static LampVerdict handle_key(const painter::tui::KeyEvent &Key)
 {
-    if ((k->mods & KB_MOD_CTRL) && (k->ascii == 'q' || k->ascii == 'Q'))
+    if (Key.IsCtrl() && (Key.Ascii == 'q' || Key.Ascii == 'Q'))
         return LAMP_LEAVE;
 
-    if (g_menu.editing) return edit_key(k);
+    if (g_menu.editing) return edit_key(Key);
 
     /* A bare q, for the console that cannot deliver a modifier at all. It is
      * unreachable while a field is open, where q is not a hex digit anyway. */
-    if (k->ascii == 'q' || k->ascii == 'Q') return LAMP_LEAVE;
+    if (Key.Ascii == 'q' || Key.Ascii == 'Q') return LAMP_LEAVE;
 
     if (!g_menu.open) {
-        if (k->ascii == KEY_ESCAPE) g_menu.open = true;
+        if (Key.Ascii == painter::tui::KeyCodes::Escape) g_menu.open = true;
         return LAMP_RUN;
     }
-    return menu_key(k);
+    return menu_key(Key);
 }
 
 /* ===========================================================================
@@ -650,29 +651,20 @@ static int lamp_ceiling(int rows, int cols)
  * once — every refusal below leaves through here so no path can forget one. */
 static void release_lamp(void)
 {
-    free(g_frame);      g_frame      = NULL;
+    g_frame = nullptr;
+    g_screen = nullptr;
     free(g_rowterm);    g_rowterm    = NULL;
     free(g_lamp.blobs); g_lamp.blobs = NULL;
 }
 
 /* Everything the lamp needs from the machine, asked for once. Returns 0, or 1
  * having already said which refusal it was. */
-static int lamp_setup(void)
+static int lamp_setup(painter::tui::Stage &Screen)
 {
-    vga_dimensions_t dim;
-    if (vga_getdimensions(&dim) != 0) {
-        println("This machine did not say how big its screen is.");
-        return 1;
-    }
-    if (dim.rows == 0 || dim.cols == 0) {
-        /* The kernel clamps the geometry at 255 now rather than truncating it,
-         * so a zero has exactly one meaning left: there is no console. */
-        println("This machine has no console to paint on.");
-        return 1;
-    }
-
-    g_lamp.rows    = dim.rows;
-    g_lamp.cols    = dim.cols;
+    g_screen       = &Screen;
+    g_frame        = &Screen.FrameBuffer();
+    g_lamp.rows    = Screen.Size().Height;
+    g_lamp.cols    = Screen.Size().Width;
     g_lamp.ceiling = lamp_ceiling(g_lamp.rows, g_lamp.cols);
     g_lamp.count   = (BLOB_DEFAULT < g_lamp.ceiling) ? BLOB_DEFAULT : g_lamp.ceiling;
     g_lamp.flow    = FLOW_DEFAULT;
@@ -686,8 +678,6 @@ static int lamp_setup(void)
      * one), and so it is heap and never the user stack. calloc, so the
      * three pad bytes of every cell are zero once and stay zero: the paint op
      * copies them onto the wire as they lie. */
-    g_frame      = (TextCell *)calloc((size_t)g_lamp.rows * (size_t)g_lamp.cols,
-                                      sizeof(TextCell));
     g_lamp.blobs = (Blob *)malloc((size_t)g_lamp.ceiling * sizeof(Blob));
     g_rowterm    = (double *)malloc((size_t)g_lamp.ceiling * sizeof(double));
     if (!g_frame || !g_lamp.blobs || !g_rowterm) {
@@ -704,7 +694,7 @@ static int lamp_setup(void)
 
 /* The lamp, until it is told to leave. Returns 0, or 1 if the screen stopped
  * taking frames — which is not something to keep trying at 25 a second. */
-static int run_lamp(TouchTag ear, uint32_t *frames)
+static int run_lamp(painter::tui::Stage &Screen, uint32_t *frames)
 {
     uint64_t last_us = clock_uptime_us();
     uint64_t next_us = last_us;            /* the first frame is due at once */
@@ -724,9 +714,7 @@ static int run_lamp(TouchTag ear, uint32_t *frames)
              * Painted first, the paint's own commit draws the caret wherever
              * the cursor happened to stand — inside the picture, or on the
              * character typed in the menu one keystroke ago. */
-            park_caret();
-            if (vga_paint(0, 0, (uint8_t)g_lamp.rows, (uint8_t)g_lamp.cols,
-                          g_frame) != 0)
+            if (!park_caret() || !Screen.Present())
                 return 1;
             (*frames)++;
 
@@ -747,13 +735,10 @@ static int run_lamp(TouchTag ear, uint32_t *frames)
         uint32_t left_ms = (uint32_t)((next_us - now) / 1000u);
         if (left_ms == 0) left_ms = 1;
 
-        Touch t;
-        int rc = touch_await(ear, &t, left_ms);
-        if (rc == 0 && t.payload_len >= sizeof(kb_event_t)) {
-            kb_event_t k;
-            memcpy(&k, t.payload, sizeof(k));
-            if (handle_key(&k) == LAMP_LEAVE) return 0;
-        } else if (rc != 0 && rc != -ERR_TIMEOUT) {
+        const painter::tui::Event Event = Screen.Wait(left_ms);
+        if (Event.Kind == painter::tui::EventKind::Key) {
+            if (handle_key(Event.Key) == LAMP_LEAVE) return 0;
+        } else if (Event.Kind == painter::tui::EventKind::Gone) {
             /* -ERR_TIMEOUT is the ONLY refusal that means the frame is due:
              * it is the only one that spent the wait. Bad arguments and a
              * submit that did not go come back at once, and treating every
@@ -772,10 +757,6 @@ static int run_lamp(TouchTag ear, uint32_t *frames)
  * nobody chose. */
 static void say_the_tally(uint32_t frames, int code)
 {
-    console_unlisten();
-    vga_clear_rgb(COLOR_LIGHT_GRAY, COLOR_BLACK);
-    vga_setcursor(0, 0);
-
     char liquid[8], back[8];
     color_format(g_lamp.liquid, liquid);
     color_format(g_lamp.back, back);
@@ -787,25 +768,19 @@ static void say_the_tally(uint32_t frames, int code)
 
 int main(void)
 {
-    if (lamp_setup() != 0) {
-        exit(1);
+    auto Opened = painter::tui::Stage::Open("lavalamp", 1, 1);
+    if (!Opened) {
+        println(Opened.error().Describe("lavalamp").c_str());
         return 1;
     }
-
-    /* The ear is taken last, so no refusal above has to give it back. */
-    TouchTag ear = console_listen();
-    if (ear == TOUCH_TAG_INVALID) {
-        release_lamp();
-        println("This machine has no way to hear a key.");
-        exit(1);
-        return 1;
-    }
+    painter::tui::Stage Screen = std::move(*Opened);
+    if (lamp_setup(Screen) != 0) return 1;
 
     uint32_t frames  = 0;
-    int      verdict = run_lamp(ear, &frames);
+    int      verdict = run_lamp(Screen, &frames);
 
+    const bool Closed = static_cast<bool>(Screen.Close());
     say_the_tally(frames, verdict);
     release_lamp();
-    exit(verdict);
-    return verdict;
+    return verdict != 0 || !Closed ? 1 : 0;
 }

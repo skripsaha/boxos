@@ -80,11 +80,13 @@ Design accepted on 2026-11-05. The first implementation slice now provides
 legacy-`stage.h` consumers are now migrated:
 `nyancat`, `fireworks`, `2048`, `tetris`, `minesweeper`, `mandelbrot`,
 `aquarium`, `eyes`, `typer`, `tagmap`, `todo`, `flame`, `stringview`, `hexer`,
-`qr`, and `passport` link through `libpainter.a`;
+`qr`, `passport`, `taskcenter`, `playtime`, and `lavalamp` link through
+`libpainter.a`;
 `qr` and `passport` use the regional `Surface` contract.
 Their models, animation,
 persistence, layout algorithms, and visual composition remain application
-code. The remaining custom screen implementation (`taskcenter`) still owns
-their frame adapters and are the next migration layer. The Git checkpoint before implementation is tagged
+code. The remaining custom screen implementations are in `apps` (`wordle`,
+`snake`, `bigclock`, `calendar`, and `bonsai`) and are the next migration
+layer. The Git checkpoint before implementation is tagged
 `painter-preimplementation`, and the implementation branch proceeds in
 bounded commits so that checkpoint remains an immediate rollback point.
