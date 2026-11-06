@@ -46,9 +46,9 @@ constexpr PainterColor DonutColorLow = PainterColor::Rgb(0x1C, 0x63, 0xC6);
 constexpr PainterColor DonutColorHigh = PainterColor::Rgb(0xF0, 0x83, 0x2E);
 /* The zone is deliberately larger than the visible torus. Perspective makes
  * its footprint grow while it turns, so a tight frame would clip the rim. */
-constexpr int DonutZoneMaxWidth = 24;
-constexpr int DonutZoneMaxHeight = 14;
-constexpr float DonutScale = 0.14f;
+constexpr int DonutZoneMaxWidth = 32;
+constexpr int DonutZoneMaxHeight = 18;
+constexpr float DonutScale = 0.16f;
 
 void Say(std::string_view Text) {
     std::string Line(Text);
