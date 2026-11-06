@@ -19,7 +19,8 @@
 #include "painter/tui/keyboard.h"
 #include "painter/tui/surface.h"
 
-BOX_FORM("takes no words; q or escape lets the crab go\n");
+/* The crab takes no command words; q or Escape leaves it. */
+BOX_FORM("");
 
 namespace {
 
@@ -166,7 +167,10 @@ int main()
     }
     painter::tui::Surface Screen = std::move(*Opened);
     const painter::core::Size Dimensions = Screen.Size();
-    if (Dimensions.Width < SpriteWidth || Dimensions.Height < SpriteHeight) return 1;
+    if (Dimensions.Width < SpriteWidth || Dimensions.Height < SpriteHeight) {
+        print_to_screen("crab: the screen is too small for the crab\n");
+        return 1;
+    }
 
     std::expected<painter::tui::Frame, box::error> Created =
         painter::tui::Frame::Create({SpriteWidth, SpriteHeight});
@@ -175,7 +179,10 @@ int main()
 
     std::expected<painter::tui::Keyboard, painter::tui::StageError> Input =
         painter::tui::Keyboard::Open("crab");
-    if (!Input) return 1;
+    if (!Input) {
+        print_to_screen((Input.error().Describe("crab") + '\n').c_str());
+        return 1;
+    }
     painter::tui::Keyboard Keys = std::move(*Input);
     Crab Creature;
     std::uint64_t Last = clock_uptime_us();
