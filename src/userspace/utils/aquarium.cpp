@@ -58,7 +58,7 @@ constexpr char FullBlock  = static_cast<char>(0xDB);
 constexpr char LightShade = static_cast<char>(0xB0);
 
 /* Exact greys and saturated hues, so the bar reads the same on a text console
- * (typer_glass.h spells out why). */
+ * (typer_screen.h spells out why). */
 const AquaColor BarPaper = AquaColor::Rgb(0x3A, 0x3A, 0x3A);
 const AquaColor BarInk   = AquaColor::Rgb(0xEE, 0xEE, 0xEE);
 const AquaColor KeyInk   = painter::core::Colors::Amber;

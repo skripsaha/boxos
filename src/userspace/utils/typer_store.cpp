@@ -8,7 +8,7 @@
 #include "box/file.h"
 #include "box/memory.h"
 
-#include "typer_glass.h"
+#include "typer_screen.h"
 
 namespace {
 

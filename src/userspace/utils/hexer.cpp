@@ -177,9 +177,9 @@ std::optional<std::string> Hexer::TakeScreen()
     std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
         painter::tui::Stage::Open("hexer", static_cast<std::int32_t>(LineWidth(8)), 3);
     if (!Opened) return Opened.error().Describe("hexer");
-    Glass.emplace(std::move(*Opened));
-    Rows = static_cast<std::uint32_t>(Glass->Size().Height);
-    Cols = static_cast<std::uint32_t>(Glass->Size().Width);
+    Screen.emplace(std::move(*Opened));
+    Rows = static_cast<std::uint32_t>(Screen->Size().Height);
+    Cols = static_cast<std::uint32_t>(Screen->Size().Width);
 
     if (LineWidth(16) <= Cols)     Width = 16;
     else if (LineWidth(8) <= Cols) Width = 8;
@@ -199,7 +199,7 @@ void Hexer::Run()
         /* No deadline: nothing changes between keys. A refusal means there is
          * nothing left to hear, and a loop on it would be a screen no key
          * could leave. */
-        painter::tui::Event Event = Glass->Wait();
+        painter::tui::Event Event = Screen->Wait();
         if (Event.Kind != painter::tui::EventKind::Key) break;
         Message.clear();        /* a message stands until the next key */
         OnKey(Event.Key);
@@ -209,9 +209,9 @@ void Hexer::Run()
 
 void Hexer::GiveScreenBack()
 {
-    if (Glass) {
-        (void)Glass->Close();
-        Glass.reset();
+    if (Screen) {
+        (void)Screen->Close();
+        Screen.reset();
     }
 }
 

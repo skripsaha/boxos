@@ -84,7 +84,7 @@ void TodoDesk::Cheer()
         Seed ^= Seed << 17;
         return Seed;
     };
-    const painter::core::Size Dimensions = Glass->Size();
+    const painter::core::Size Dimensions = Stage->Size();
     for (int Spark = Dimensions.Height * Dimensions.Width / CellsPerSpark; Spark > 0; Spark--) {
         Confetti.push_back({static_cast<int>(2 + Roll() % static_cast<std::uint64_t>(std::max(1, Dimensions.Height - 3))),
                             static_cast<int>(Roll() % static_cast<std::uint64_t>(Dimensions.Width)),
@@ -263,16 +263,16 @@ int main()
             Say(Opened.error().Describe("todo"));
             return 1;
         }
-        Todo.Glass = std::move(*Opened);
+        Todo.Stage = std::move(*Opened);
         bool Painted = true;
         for (;;) {
             Todo.Draw();
-            if (!(Painted = static_cast<bool>(Todo.Glass->Present()))) break;
-            const painter::tui::Event Event = Todo.Glass->Wait(Todo.Settle());
+            if (!(Painted = static_cast<bool>(Todo.Stage->Present()))) break;
+            const painter::tui::Event Event = Todo.Stage->Wait(Todo.Settle());
             if (Event.Kind == EventKind::Gone) break;
             if (Event.Kind == EventKind::Key && !Todo.OnKey(Event.Key)) break;
         }
-        (void)Todo.Glass->Close();
+        (void)Todo.Stage->Close();
         std::vector<std::size_t> Places = Todo.List.View(Todo.Here());
         std::size_t Left = static_cast<std::size_t>(
             std::count_if(Places.begin(), Places.end(), [&](std::size_t At) { return !Todo.List.Items[At].Done; }));

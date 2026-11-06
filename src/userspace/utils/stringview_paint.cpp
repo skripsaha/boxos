@@ -38,7 +38,7 @@ void Stringview::Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::cor
                      painter::core::Color Bg)
 {
     if (Row >= Rows || Col >= Cols) return;
-    Glass->FrameBuffer().Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
+    Screen->FrameBuffer().Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
                               painter::tui::Cell{Ch, Fg, Bg});
 }
 
@@ -138,6 +138,6 @@ bool Stringview::Paint()
 
     std::uint32_t CaretCol = 5 + static_cast<std::uint32_t>(Filter.size());
     if (CaretCol >= Cols) CaretCol = Cols - 1;
-    if (!Glass->SetCursor({static_cast<std::int32_t>(CaretCol), static_cast<std::int32_t>(Rows - 1)})) return false;
-    return static_cast<bool>(Glass->Present());
+    if (!Screen->SetCursor({static_cast<std::int32_t>(CaretCol), static_cast<std::int32_t>(Rows - 1)})) return false;
+    return static_cast<bool>(Screen->Present());
 }

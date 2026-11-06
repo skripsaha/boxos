@@ -83,7 +83,7 @@ constexpr int TileSizes[][2] = {{6, 3}, {4, 2}, {3, 1}, {2, 1}};
 
 class Board {
 public:
-    std::optional<Stage> Glass;
+    std::optional<Stage> Screen;
     MineField            Field;
     int       Played = 0, Cleared = 0;
     int       Best[MineSizeCount] = {};
@@ -114,7 +114,7 @@ private:
 
 bool Board::Fits(int Level) const
 {
-    const painter::core::Size Dimensions = Glass->Size();
+    const painter::core::Size Dimensions = Screen->Size();
     const MineSize &Size = MineSizes[Level];
     return Size.Wide * 2 <= Dimensions.Width - 2 && Size.High <= Dimensions.Height - 5;
 }
@@ -124,7 +124,7 @@ void Board::Begin(int Level)
     Which = Level;
     const MineSize &Size = MineSizes[Which];
     Field.Start(Size, cpu_rdtsc());
-    const painter::core::Size Dimensions = Glass->Size();
+    const painter::core::Size Dimensions = Screen->Size();
     for (const auto &Tile : TileSizes) {
         TileW = Tile[0];
         TileH = Tile[1];
@@ -149,7 +149,7 @@ int Board::Seconds() const
  * or a mine shown once the field is lost. */
 void Board::Tile(int X, int Y, const std::vector<int> &Rank, int ShownMines)
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     const MineCell &Cell = Field.At(X, Y);
     bool  Here   = X == CursorX && Y == CursorY;
     bool  Lost   = Field.State == MineState::Lost;
@@ -201,8 +201,8 @@ void Board::Tile(int X, int Y, const std::vector<int> &Rank, int ShownMines)
 /* The flags left, a face, the time. */
 void Board::Head()
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
+    const painter::core::Size Dimensions = Screen->Size();
     int Wide  = std::max(Field.Wide * TileW, 30);
     int Start = (Dimensions.Width - Wide) / 2;
     FrameBuffer.Write({Start, Top - 2}, "minesweeper", TextStyle{TitleInk, Page});
@@ -221,8 +221,8 @@ void Board::Head()
 /* How the field went, under it, and the keys along the bottom. */
 void Board::Foot()
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
+    const painter::core::Size Dimensions = Screen->Size();
     int Row = Top + Field.High * TileH;
     if (Row < Dimensions.Height - 1) {
         int BestTime = Best[Which];
@@ -250,7 +250,7 @@ void Board::Foot()
 
 void Board::Draw()
 {
-    Glass->FrameBuffer().Clear(TextStyle{Page, Page});
+    Screen->FrameBuffer().Clear(TextStyle{Page, Page});
     std::vector<int> Order = Field.MinesByDistance();
     std::vector<int> Rank(static_cast<std::size_t>(Field.Wide * Field.High), 1 << 30);
     for (std::size_t At = 0; At < Order.size(); At++) Rank[static_cast<std::size_t>(Order[At])] = static_cast<int>(At);
@@ -386,7 +386,7 @@ int main()
             Say(Opened.error().Describe("minesweeper"));
             return 1;
         }
-        Desk.Glass = std::move(*Opened);
+        Desk.Screen = std::move(*Opened);
         int Level = Asked(Words, Count);
         if (Level < 0) Level = Desk.Fits(1) ? 1 : 0;
         if (!Desk.Fits(Level)) Level = 0;
@@ -398,12 +398,12 @@ int main()
         bool Painted = true;
         for (;;) {
             Desk.Draw();
-            if (!(Painted = static_cast<bool>(Desk.Glass->Present()))) break;
-            const painter::tui::Event Event = Desk.Glass->Wait(Desk.Wait());
+            if (!(Painted = static_cast<bool>(Desk.Screen->Present()))) break;
+            const painter::tui::Event Event = Desk.Screen->Wait(Desk.Wait());
             if (Event.Kind == EventKind::Gone) break;
             if (Event.Kind == EventKind::Key && !Desk.OnKey(Event.Key)) break;
         }
-        (void)Desk.Glass->Close();
+        (void)Desk.Screen->Close();
 
         /* Kept only when beaten, and never over a record that could not be read. */
         if (Desk.Trouble.empty() && !std::equal(std::begin(Kept), std::end(Kept), std::begin(Desk.Best))) {

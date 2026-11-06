@@ -134,7 +134,7 @@ private:
 
     std::uint32_t         Rows = 0;
     std::uint32_t         Cols = 0;
-    std::optional<painter::tui::Stage> Glass;
+    std::optional<painter::tui::Stage> Screen;
     bool                  Leaving = false;
 };
 

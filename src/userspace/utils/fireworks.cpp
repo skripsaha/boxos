@@ -86,11 +86,11 @@ struct Light {
 
 class Show {
 public:
-    std::optional<Stage> Glass;
+    std::optional<Stage> Screen;
 
     void Begin()
     {
-        const painter::core::Size Dimensions = Glass->Size();
+        const painter::core::Size Dimensions = Screen->Size();
         Width  = Dimensions.Width;
         Height = Dimensions.Height * 2;
         Field.assign(static_cast<std::size_t>(Width) * Height, Light{});
@@ -374,11 +374,11 @@ void Show::Draw(float Seconds, float Shown)
         if ((Star * 7 + static_cast<std::size_t>(Time * 2.0f)) % 3 != 0 && Sky[At] != MoonInk)
             Pixels[At] = Color::Mix(Pixels[At], StarInk, 200);
     }
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     FrameBuffer.PutPixels(Pixels);
 
     if (Shown < KeysShown) {
-        const painter::core::Size Dimensions = Glass->Size();
+        const painter::core::Size Dimensions = Screen->Size();
         const int Row = Dimensions.Height - 1;
         int Col = 1;
         const TextStyle BarStyle{BarInk, BarPaper};
@@ -404,7 +404,7 @@ int main()
             print_to_screen((Opened.error().Describe("fireworks") + '\n').c_str());
             return 1;
         }
-        Night.Glass = std::move(*Opened);
+        Night.Screen = std::move(*Opened);
         Night.Begin();
 
         std::uint64_t Began = clock_uptime_us(), Last = Began;
@@ -415,10 +415,10 @@ int main()
             for (float Left = Seconds; Left > 0; Left -= MostStep) Night.Step(std::min(MostStep, Left));
             Last = Now;
             Night.Draw(Seconds, static_cast<float>(Now - Began) / 1e6f);
-            if (!(Shown = static_cast<bool>(Night.Glass->Present()))) break;
+            if (!(Shown = static_cast<bool>(Night.Screen->Present()))) break;
 
             std::uint64_t Spent = clock_uptime_us() - Now;
-            const painter::tui::Event Event = Night.Glass->Wait(
+            const painter::tui::Event Event = Night.Screen->Wait(
                 Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
             if (Event.Kind == EventKind::Gone) break;
             if (Event.Kind != EventKind::Key || Event.Key.IsExtended()) continue;
@@ -431,7 +431,7 @@ int main()
             if (Event.Key.Ascii == 'f' || Event.Key.Ascii == 'F') Night.Finale();
         }
         unsigned Launched = Night.Launched;
-        (void)Night.Glass->Close();
+        (void)Night.Screen->Close();
         const std::string Message = Shown ? std::format("[FIREWORKS] {} rocket{} went up", Launched,
                                                          Launched == 1 ? "" : "s")
                                           : "The screen stopped taking frames.";

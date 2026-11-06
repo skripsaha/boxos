@@ -2,7 +2,7 @@
 
 #include <format>
 
-#include "typer_glass.h"
+#include "typer_screen.h"
 
 using painter::tui::TextStyle;
 
@@ -11,23 +11,23 @@ std::optional<std::string> Screen::Take()
     std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
         painter::tui::Stage::Open("typer", ScreenColsLeast, ScreenRowsLeast);
     if (!Opened) return Opened.error().Describe("typer");
-    Glass.emplace(std::move(*Opened));
-    Rows = static_cast<std::uint32_t>(Glass->Size().Height);
-    Cols = static_cast<std::uint32_t>(Glass->Size().Width);
+    Stage.emplace(std::move(*Opened));
+    Rows = static_cast<std::uint32_t>(Stage->Size().Height);
+    Cols = static_cast<std::uint32_t>(Stage->Size().Width);
     return std::nullopt;
 }
 
 void Screen::Give()
 {
-    if (!Glass) return;
-    (void)Glass->Close();
-    Glass.reset();
+    if (!Stage) return;
+    (void)Stage->Close();
+    Stage.reset();
 }
 
 void Screen::Put(std::uint32_t Row, std::uint32_t Col, char Ch, PainterColor Fg, PainterColor Bg)
 {
     if (Row >= Rows || Col >= Cols) return;
-    Glass->FrameBuffer().Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
+    Stage->FrameBuffer().Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
                               painter::tui::Cell{Ch, Fg, Bg});
 }
 
@@ -39,7 +39,7 @@ void Screen::Fill(std::uint32_t Row, std::uint32_t Col, std::uint32_t Width, cha
 
 void Screen::Clear(PainterColor FillColor)
 {
-    Glass->FrameBuffer().Clear(TextStyle{FillColor, FillColor});
+    Stage->FrameBuffer().Clear(TextStyle{FillColor, FillColor});
 }
 
 std::uint32_t Screen::Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, PainterColor Fg,
@@ -74,15 +74,15 @@ void Screen::Spread(std::uint32_t Row, const std::vector<Figure> &Figures)
 
 bool Screen::Flush()
 {
-    if (!Glass) return false;
-    if (!Glass->SetCursor({static_cast<std::int32_t>(Cols - 1), static_cast<std::int32_t>(Rows - 1)})) return false;
-    return static_cast<bool>(Glass->Present());
+    if (!Stage) return false;
+    if (!Stage->SetCursor({static_cast<std::int32_t>(Cols - 1), static_cast<std::int32_t>(Rows - 1)})) return false;
+    return static_cast<bool>(Stage->Present());
 }
 
 Heard Screen::Listen(painter::tui::KeyEvent &Key, std::uint32_t TimeoutMs)
 {
-    if (!Glass) return Heard::Gone;
-    painter::tui::Event Event = Glass->Wait(TimeoutMs);
+    if (!Stage) return Heard::Gone;
+    painter::tui::Event Event = Stage->Wait(TimeoutMs);
     if (Event.Kind == painter::tui::EventKind::Quiet) return Heard::Quiet;
     if (Event.Kind == painter::tui::EventKind::Gone) return Heard::Gone;
     Key = Event.Key;

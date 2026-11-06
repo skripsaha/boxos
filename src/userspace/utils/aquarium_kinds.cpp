@@ -3,7 +3,7 @@
  * A sprite faces right, a row of letters for each pixel row (aquarium.h says
  * what each letter is); one facing left is read right to left. Every colour is
  * chosen to keep its family on a sixteen-colour text console as well, which
- * projects a saturated #rrggbb by hue and a grey by lightness (typer_glass.h
+ * projects a saturated #rrggbb by hue and a grey by lightness (typer_screen.h
  * spells the rule out): a fish stays orange there, its water dark blue. */
 
 #include <cmath>

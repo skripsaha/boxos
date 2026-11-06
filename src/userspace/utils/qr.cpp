@@ -83,20 +83,20 @@ std::string AsText(const QrCode &Code, std::size_t Bytes)
 
 /* The rows of the console from the cursor down, scrolled up first when the
  * code would not fit under it; the row it begins at, or -1. */
-std::expected<int, box::error> MakeRoom(int Rows, painter::tui::Surface &Glass)
+std::expected<int, box::error> MakeRoom(int Rows, painter::tui::Surface &Screen)
 {
-    std::expected<painter::core::Point, box::error> Cursor = Glass.Cursor();
+    std::expected<painter::core::Point, box::error> Cursor = Screen.Cursor();
     if (!Cursor) return std::unexpected(Cursor.error());
-    int Top = Cursor->Y, Bottom = Glass.Size().Height - Rows - 1;   /* a row left for the prompt */
+    int Top = Cursor->Y, Bottom = Screen.Size().Height - Rows - 1;   /* a row left for the prompt */
     for (; Top > Bottom; Top--)
-        if (auto Scrolled = Glass.ScrollUp(); !Scrolled) return std::unexpected(Scrolled.error());
+        if (auto Scrolled = Screen.ScrollUp(); !Scrolled) return std::unexpected(Scrolled.error());
     return Top;
 }
 
-bool Paint(const QrCode &Code, int Quiet, painter::tui::Surface &Glass)
+bool Paint(const QrCode &Code, int Quiet, painter::tui::Surface &Screen)
 {
     int Side = Code.Size + 2 * Quiet, Rows = (Side + 1) / 2;
-    std::expected<int, box::error> Top = MakeRoom(Rows + 1, Glass);
+    std::expected<int, box::error> Top = MakeRoom(Rows + 1, Screen);
     if (!Top) return false;
 
     std::expected<painter::tui::Frame, box::error> Created = painter::tui::Frame::Create({Side, Rows});
@@ -111,15 +111,15 @@ bool Paint(const QrCode &Code, int Quiet, painter::tui::Surface &Glass)
             Frame.Put({X, Row}, Cell);
         }
     }
-    if (!Glass.Paint({Indent, *Top}, Frame)) return false;
-    return static_cast<bool>(Glass.SetCursor({0, *Top + Rows}));
+    if (!Screen.Paint({Indent, *Top}, Frame)) return false;
+    return static_cast<bool>(Screen.SetCursor({0, *Top + Rows}));
 }
 
 /* The biggest version whose code fits the glass with the least quiet zone,
  * under the code a line for the caption and one for the prompt. */
-int MostVersionFor(const painter::core::Size &Glass)
+int MostVersionFor(const painter::core::Size &Screen)
 {
-    int Side = std::min(Glass.Width - Indent, (Glass.Height - 2) * 2);
+    int Side = std::min(Screen.Width - Indent, (Screen.Height - 2) * 2);
     return (Side - 2 * QuietLeast - 17) / 4;
 }
 
@@ -151,8 +151,8 @@ int Run()
         Say(Opened.error().Describe("qr"));
         return 1;
     }
-    painter::tui::Surface Glass = std::move(*Opened);
-    const painter::core::Size Dimensions = Glass.Size();
+    painter::tui::Surface Screen = std::move(*Opened);
+    const painter::core::Size Dimensions = Screen.Size();
     int Most = std::min(40, MostVersionFor(Dimensions));
     if (Most < 1) {
         Say(std::format("qr: a screen of {} by {} is too small for a code", Dimensions.Width, Dimensions.Height));
@@ -166,7 +166,7 @@ int Run()
     }
     int Room  = std::min(Dimensions.Width - Indent, (Dimensions.Height - 2) * 2) - Code->Size;
     int Quiet = std::clamp(Room / 2, QuietLeast, QuietMost);
-    if (!Paint(*Code, Quiet, Glass)) {
+    if (!Paint(*Code, Quiet, Screen)) {
         Say("qr: the screen would not take the code");
         return 1;
     }

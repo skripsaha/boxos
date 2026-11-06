@@ -183,7 +183,7 @@ void DrawCat(Picture &View, int X, int Y, int Frame)
 }
 
 struct Flight {
-    std::optional<Stage> Glass;
+    std::optional<Stage> Screen;
     Picture            View;
     std::vector<Star>  Stars;
     std::uint64_t      Seed   = cpu_rdtsc() | 1;
@@ -231,10 +231,10 @@ struct Flight {
         DrawRainbow(View, CatX, CatY, static_cast<int>(Seconds * CatFrames));
         DrawCat(View, CatX, CatY, Frame);
 
-        Glass->FrameBuffer().PutPixels(View.Dots);
+        Screen->FrameBuffer().PutPixels(View.Dots);
         std::string Count = std::format(" You have nyaned for {:.1f} seconds! ", Seconds);
-        const painter::core::Size Dimensions = Glass->Size();
-        Glass->FrameBuffer().Centre(Dimensions.Height - 1, Count, TextStyle{White, Space});
+        const painter::core::Size Dimensions = Screen->Size();
+        Screen->FrameBuffer().Centre(Dimensions.Height - 1, Count, TextStyle{White, Space});
     }
 };
 
@@ -256,9 +256,9 @@ int main()
             Say(Opened.error().Describe("nyancat"));
             return 1;
         }
-        Show.Glass = std::move(*Opened);
+        Show.Screen = std::move(*Opened);
         /* The classic cat on 80 x 25; twice and more where the screen is. */
-        const painter::core::Size Dimensions = Show.Glass->Size();
+        const painter::core::Size Dimensions = Show.Screen->Size();
         int Scale = std::max(1, std::min(Dimensions.Width / 80, Dimensions.Height * 2 / 50));
         Show.View.Resize(Dimensions.Width, Dimensions.Height * 2, Scale);
         Show.SowStars();
@@ -271,13 +271,13 @@ int main()
             Show.Step(static_cast<float>(Now - Last) / 1e6f);
             Last = Now;
             Show.Draw(static_cast<float>(Now - Began) / 1e6f);
-            if (auto Presented = Show.Glass->Present(); !Presented) {
+            if (auto Presented = Show.Screen->Present(); !Presented) {
                 Shown = false;
                 break;
             }
 
             std::uint64_t Spent = clock_uptime_us() - Now;
-            painter::tui::Event Event = Show.Glass->Wait(Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
+            painter::tui::Event Event = Show.Screen->Wait(Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
             if (Event.Kind == EventKind::Gone) break;
             if (Event.Kind != EventKind::Key) continue;
             if (Event.Key.IsExtended()) {
@@ -288,7 +288,7 @@ int main()
             }
         }
         float Nyaned = static_cast<float>(clock_uptime_us() - Began) / 1e6f;
-        (void)Show.Glass->Close();
+        (void)Show.Screen->Close();
         Say(Shown ? std::format("[NYANCAT] nyaned for {:.1f} seconds", Nyaned)
                   : "The screen stopped taking frames.");
         return Shown ? 0 : 1;

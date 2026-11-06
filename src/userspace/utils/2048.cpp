@@ -234,12 +234,12 @@ bool Game::Move(Way Toward, std::vector<Slide> &Slides)
 
 class Table {
 public:
-    std::optional<Stage> Glass;
+    std::optional<Stage> Screen;
     Game                Play;
 
     void Measure()
     {
-        const painter::core::Size Dimensions = Glass->Size();
+        const painter::core::Size Dimensions = Screen->Size();
         TileHigh = std::max(3, (Dimensions.Height - 4 - (Side + 1)) / Side);
         TileWide = TileHigh * 2 + 3;
         while (TileWide > 3 && Side * TileWide + Side + 1 > Dimensions.Width - 2) TileWide--;
@@ -262,7 +262,7 @@ private:
 /* A tile at a place in cells, `Shrink` cells in from each side. */
 void Table::Tile(int Row, int Col, int Value, Color Ink, int Shrink)
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     int High = TileHigh - 2 * std::min(Shrink, TileHigh / 2);
     int Wide = TileWide - 4 * std::min(Shrink, TileHigh / 2);
     int Y    = Row + (TileHigh - High) / 2;
@@ -277,8 +277,8 @@ void Table::Tile(int Row, int Col, int Value, Color Ink, int Shrink)
 
 void Table::Head()
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
+    const painter::core::Size Dimensions = Screen->Size();
     FrameBuffer.Write({Left, 1}, "2048", TextStyle{TitleInk, Page});
     std::string Scores = std::format("score {}   best {}", Play.Score, Play.Best);
     FrameBuffer.Write({Left + BoardWide - static_cast<int>(Scores.size()), 1}, Scores, TextStyle{BarInk, Page});
@@ -296,7 +296,7 @@ void Table::Head()
  * flashes while `Flash` lasts, and the new one grows in. */
 void Table::Draw(const std::vector<Slide> &Slides, float Along, float Flash)
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     FrameBuffer.Clear(TextStyle{Page, Page});
     Head();
     for (int R = 0; R < BoardHigh; R++)
@@ -332,7 +332,7 @@ void Table::Draw(const std::vector<Slide> &Slides, float Along, float Flash)
 
 void Table::Overlay(std::string_view Line, std::string_view Hint)
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     int Wide = static_cast<int>(std::max(Line.size(), Hint.size())) + 6;
     int Row  = Top + BoardHigh / 2 - 2, Col = Left + (BoardWide - Wide) / 2;
     const Color Overlay = Color::Rgb(0x3C, 0x3A, 0x32);
@@ -371,10 +371,10 @@ Through Animate(Table &Desk, const std::vector<Slide> &Slides, KeyEvent &Key)
         float Along = std::min(1.0f, static_cast<float>(Gone) / SlideUs);
         float Flash = Gone < SlideUs ? 1.0f : 1.0f - static_cast<float>(Gone - SlideUs) / FlashUs;
         Desk.Draw(Slides, Along, Flash);
-        if (!Desk.Glass->Present()) return Through::Gone;
+        if (!Desk.Screen->Present()) return Through::Gone;
 
         std::uint64_t Spent = clock_uptime_us() - Frame;
-        const painter::tui::Event Event = Desk.Glass->Wait(
+        const painter::tui::Event Event = Desk.Screen->Wait(
             Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
         if (Event.Kind == EventKind::Gone) return Through::Gone;
         if (Event.Kind == EventKind::Key) {
@@ -396,7 +396,7 @@ int main()
             print_to_screen((Message + '\n').c_str());
             return 1;
         }
-        Desk.Glass = std::move(*Opened);
+        Desk.Screen = std::move(*Opened);
         Desk.Measure();
         std::string Trouble;
         int         Kept = ReadBest(Trouble);
@@ -411,8 +411,8 @@ int main()
                 Desk.Draw(Slides, 1.0f, 0.0f);
                 if (Desk.Play.Won && !Desk.Play.Kept) Desk.Overlay("2048!", "c to keep going, r for a new game");
                 else if (Desk.Play.Ended) Desk.Overlay("no move left", "u to take one back, r for a new game");
-                if (!(Painted = static_cast<bool>(Desk.Glass->Present()))) break;
-                const painter::tui::Event Event = Desk.Glass->Wait();
+                if (!(Painted = static_cast<bool>(Desk.Screen->Present()))) break;
+                const painter::tui::Event Event = Desk.Screen->Wait();
                 if (Event.Kind == EventKind::Gone) break;
                 if (Event.Kind != EventKind::Key) continue;
                 Key = Event.Key;
@@ -446,7 +446,7 @@ int main()
         }
 
         int Score = Desk.Play.Score, Best = Desk.Play.Best;
-        (void)Desk.Glass->Close();
+        (void)Desk.Screen->Close();
         /* Kept only when beaten, and never over a record that could not be read. */
         if (Trouble.empty() && Best > Kept) {
             if (std::optional<std::string> Refusal = KeepWrite(Record, std::format("best {}\n", Best))) Trouble = *Refusal;

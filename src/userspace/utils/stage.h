@@ -11,7 +11,7 @@
  *
  * Every colour a program lays here should keep its family on a sixteen-colour
  * text console too, which projects a saturated #rrggbb by hue (dark under
- * lightness 128, light above) and a grey by lightness (typer_glass.h spells
+ * lightness 128, light above) and a grey by lightness (typer_screen.h spells
  * the rule out). */
 
 #include <cstdint>

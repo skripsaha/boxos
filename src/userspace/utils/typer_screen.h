@@ -58,7 +58,7 @@ public:
     std::uint32_t Centre(std::uint32_t Row, std::string_view Text, PainterColor Fg, PainterColor Bg);
     painter::tui::Cell At(std::uint32_t Row, std::uint32_t Col) const
     {
-        return Glass->FrameBuffer().Read({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)});
+        return Stage->FrameBuffer().Read({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)});
     }
     bool          Flush();
     /* Label-and-value pairs side by side, centred on the row. */
@@ -71,7 +71,7 @@ public:
     std::uint32_t Cols = 0;
 
 private:
-    std::optional<painter::tui::Stage> Glass;
+    std::optional<painter::tui::Stage> Stage;
 };
 
 /* The width the passage is wrapped to on a screen this wide. */
@@ -85,7 +85,7 @@ struct TypingView {
     std::uint64_t            NowMs;
 };
 
-void PaintTyping(Screen &Glass, const TypingView &View);
+void PaintTyping(Screen &Stage, const TypingView &View);
 
 enum class Standing { NoRecord, First, Beaten, Short };
 
@@ -99,7 +99,7 @@ struct Report {
 };
 
 /* The results; one beat of the flourish a call. */
-void PaintResults(Screen &Glass, const Report &Result, unsigned Beat);
+void PaintResults(Screen &Stage, const Report &Result, unsigned Beat);
 
 /* The record file's text, empty when there is none yet. A refusal is a sentence. */
 std::optional<std::string> ReadRecordText(std::string &Text);

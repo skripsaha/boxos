@@ -90,8 +90,8 @@ public:
     Progress(std::string_view Kind, std::string_view Label, std::uint64_t Total)
         : Heading(std::format("{} {}", Kind, Label)), Total(Total), Began(Now())
     {
-        vga_dimensions_t Glass;
-        if (vga_getdimensions(&Glass) == 0 && Glass.cols > 8) Width = Glass.cols - 1u;
+        vga_dimensions_t Dimensions;
+        if (vga_getdimensions(&Dimensions) == 0 && Dimensions.cols > 8) Width = Dimensions.cols - 1u;
     }
 
     void Update(std::uint64_t Done)

@@ -24,7 +24,7 @@
 #include "box/form.h"
 #include "box/print.h"
 
-#include "typer_glass.h"
+#include "typer_screen.h"
 
 BOX_FORM("takes optional thing \"a file whose text to type\"\n"
          "takes optional words \"seconds for a timed test, or code for symbols\"\n");
@@ -101,9 +101,9 @@ public:
     {
     }
 
-    std::optional<std::string> Open() { return Glass.Take(); }
+    std::optional<std::string> Open() { return Display.Take(); }
     void                       Play();
-    void                       Close() { Glass.Give(); }
+    void                       Close() { Display.Give(); }
     std::string                Said() const;
 
 private:
@@ -118,7 +118,7 @@ private:
     Prepared    FileText;
     std::string Note;
     Shelf       Books;
-    Screen      Glass;
+    Screen      Display;
     Summary     Last;
 };
 
@@ -144,7 +144,7 @@ bool Trainer::Handle(Attempt &Run, const painter::tui::KeyEvent &Key, std::vecto
             std::string More = " ";
             More += Books.Next();
             Run.Append(More);
-            Lines = Wrap(Run.Text(), TextWidth(Glass.Cols));
+            Lines = Wrap(Run.Text(), TextWidth(Display.Cols));
         }
     }
     return true;
@@ -152,7 +152,7 @@ bool Trainer::Handle(Attempt &Run, const painter::tui::KeyEvent &Key, std::vecto
 
 Verdict Trainer::Type(Attempt &Run)
 {
-    std::vector<Line> Lines = Wrap(Run.Text(), TextWidth(Glass.Cols));
+    std::vector<Line> Lines = Wrap(Run.Text(), TextWidth(Display.Cols));
 
     for (;;) {
         std::uint64_t Now = clock_uptime_ms();
@@ -161,8 +161,8 @@ Verdict Trainer::Type(Attempt &Run)
             return Verdict::Finished;
         }
 
-        PaintTyping(Glass, TypingView{Run, Job, Lines, Run.Started() ? std::string_view() : std::string_view(Note), Now});
-        if (!Glass.Flush()) return Verdict::Left;
+        PaintTyping(Display, TypingView{Run, Job, Lines, Run.Started() ? std::string_view() : std::string_view(Note), Now});
+        if (!Display.Flush()) return Verdict::Left;
 
         std::uint32_t Wait = 0;
         if (Run.Started()) {
@@ -171,7 +171,7 @@ Verdict Trainer::Type(Attempt &Run)
         }
 
         painter::tui::KeyEvent Key;
-        Heard      Got = Glass.Listen(Key, Wait);
+        Heard      Got = Display.Listen(Key, Wait);
         if (Got == Heard::Gone) return Verdict::Left;
         if (Got == Heard::Key && !Handle(Run, Key, Lines)) return Verdict::Left;
     }
@@ -216,11 +216,11 @@ bool Trainer::ShowResults(const Attempt &Run, std::uint64_t Ms)
     Report   Result = Record(Run, Ms);
     unsigned Beat   = 0;
     for (;;) {
-        PaintResults(Glass, Result, Beat++);
-        if (!Glass.Flush()) return false;
+        PaintResults(Display, Result, Beat++);
+        if (!Display.Flush()) return false;
 
         painter::tui::KeyEvent Key;
-        Heard      Got = Glass.Listen(Key, Result.Place == Standing::Beaten ? FlourishMs : 0);
+        Heard      Got = Display.Listen(Key, Result.Place == Standing::Beaten ? FlourishMs : 0);
         if (Got == Heard::Gone) return false;
         if (Got != Heard::Key) continue;
 

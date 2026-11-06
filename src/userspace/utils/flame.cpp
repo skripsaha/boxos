@@ -106,7 +106,7 @@ FlameSettings ReadWords(const char *const *Words, std::size_t Count)
 }
 
 struct Show {
-    painter::tui::Stage Glass;
+    painter::tui::Stage Screen;
     int                   Rows;
     int                   Cols;
     FlameSettings         Settings;
@@ -116,7 +116,7 @@ struct Show {
     std::uint32_t         Frames = 0;
 
     Show(const FlameSettings &Wanted, painter::tui::Stage Screen)
-        : Glass(std::move(Screen)), Rows(Glass.Size().Height), Cols(Glass.Size().Width), Settings(Wanted),
+        : Screen(std::move(Screen)), Rows(Screen.Size().Height), Cols(Screen.Size().Width), Settings(Wanted),
           Palette(FlameMakePalette(Wanted.Ink, Wanted.Custom)),
           Fire(Cols, Rows * 2, cpu_rdtsc() * 0x9E3779B97F4A7C15ull),
           Frames(0)
@@ -127,7 +127,7 @@ struct Show {
 
     bool Draw();
     bool Run();
-    void Close() { (void)Glass.Close(); }
+    void Close() { (void)Screen.Close(); }
     bool OnKey(const painter::tui::KeyEvent &Event);
 };
 
@@ -143,14 +143,14 @@ bool Show::OnKey(const painter::tui::KeyEvent &Event)
  * reach the glass and already carries the caret where it belongs. */
 bool Show::Draw()
 {
-    painter::tui::Frame &Canvas = Glass.FrameBuffer();
+    painter::tui::Frame &Canvas = Screen.FrameBuffer();
     FlamePaintFire(Fire, Palette, Canvas, Rows, Cols);
     if (Menu.Open) Menu.Draw(Canvas, Rows, Cols, Settings);
 
     int Row, Col;
     Menu.Caret(Rows, Cols, Row, Col);
-    if (!Glass.SetCursor({Col, Row})) return false;
-    if (!Glass.Present()) return false;
+    if (!Screen.SetCursor({Col, Row})) return false;
+    if (!Screen.Present()) return false;
     Frames++;
     return true;
 }
@@ -177,7 +177,7 @@ bool Show::Run()
         }
 
         auto  LeftMs = static_cast<std::uint32_t>((Next - Now) / 1000u);
-        painter::tui::Event Event = Glass.Wait(LeftMs == 0 ? 1 : LeftMs);
+        painter::tui::Event Event = Screen.Wait(LeftMs == 0 ? 1 : LeftMs);
         if (Event.Kind == painter::tui::EventKind::Key) {
             if (!OnKey(Event.Key)) return true;
         } else if (Event.Kind == painter::tui::EventKind::Gone) {

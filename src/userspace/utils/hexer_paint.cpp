@@ -50,7 +50,7 @@ void Hexer::Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::core::Co
                 painter::core::Color Bg)
 {
     if (Row >= Rows || Col >= Cols) return;
-    Glass->FrameBuffer().Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
+    Screen->FrameBuffer().Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
                               painter::tui::Cell{Ch, Fg, Bg});
 }
 
@@ -167,6 +167,6 @@ bool Hexer::Paint()
         CaretRow = 1 + static_cast<std::uint32_t>((At - At % Width - Top) / Width);
         CaretCol = InText ? TextColumn(Byte) : HexColumn(Byte) + (LowHalf ? 1 : 0);
     }
-    if (!Glass->SetCursor({static_cast<std::int32_t>(CaretCol), static_cast<std::int32_t>(CaretRow)})) return false;
-    return static_cast<bool>(Glass->Present());
+    if (!Screen->SetCursor({static_cast<std::int32_t>(CaretCol), static_cast<std::int32_t>(CaretRow)})) return false;
+    return static_cast<bool>(Screen->Present());
 }

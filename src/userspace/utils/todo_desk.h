@@ -29,7 +29,7 @@ struct TodoSpark {
 
 class TodoDesk {
 public:
-    std::optional<painter::tui::Stage> Glass;
+    std::optional<painter::tui::Stage> Stage;
     TodoList                         List;
     std::string Context;   /* the Use Context */
     std::string Note;      /* said on the bar until the next key */

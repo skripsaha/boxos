@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <string>
 
-#include "typer_glass.h"
+#include "typer_screen.h"
 
 namespace {
 
@@ -35,13 +35,13 @@ std::string KindWords(const Task &Job)
     return Words;
 }
 
-void PaintTitle(Screen &Glass, const Task &Job)
+void PaintTitle(Screen &Display, const Task &Job)
 {
-    Glass.Fill(0, 0, Glass.Cols, ' ', TitleInk, BarPaper);
-    std::uint32_t Col = Glass.Write(0, 2, "typer", AmberInk, BarPaper);
-    Glass.Write(0, Col + 3, KindWords(Job), TitleInk, BarPaper);
+    Display.Fill(0, 0, Display.Cols, ' ', TitleInk, BarPaper);
+    std::uint32_t Col = Display.Write(0, 2, "typer", AmberInk, BarPaper);
+    Display.Write(0, Col + 3, KindWords(Job), TitleInk, BarPaper);
     constexpr std::string_view Leave = "Esc leaves";
-    Glass.Write(0, Glass.Cols - static_cast<std::uint32_t>(Leave.size()) - 2, Leave, TitleInk, BarPaper);
+    Display.Write(0, Display.Cols - static_cast<std::uint32_t>(Leave.size()) - 2, Leave, TitleInk, BarPaper);
 }
 
 /* How far along, in parts of a thousand: by the clock in a timed test, by the
@@ -55,30 +55,30 @@ std::uint64_t Progress(const TypingView &View)
     return View.Job.Kind == TextKind::File ? std::max(ByText, ByClock) : ByClock;
 }
 
-void PaintBar(Screen &Glass, const TypingView &View, std::uint32_t Left, std::uint32_t Width)
+void PaintBar(Screen &Display, const TypingView &View, std::uint32_t Left, std::uint32_t Width)
 {
     std::uint32_t Filled = static_cast<std::uint32_t>(Progress(View) * Width / 1000);
     for (std::uint32_t I = 0; I < Width; I++) {
         if (I < Filled) {
             PainterColor Fade = PainterColor::Mix(BarFilled, AmberInk, static_cast<std::uint8_t>(I * 255 / Width));
-            Glass.Put(BarRow, Left + I, FullBlock, Fade, Paper);
+            Display.Put(BarRow, Left + I, FullBlock, Fade, Paper);
         } else {
-            Glass.Put(BarRow, Left + I, LightShade, BarEmpty, Paper);
+            Display.Put(BarRow, Left + I, LightShade, BarEmpty, Paper);
         }
     }
 }
 
-void PaintChar(Screen &Glass, std::uint32_t Row, std::uint32_t Col, const Attempt &Run, std::size_t Index)
+void PaintChar(Screen &Display, std::uint32_t Row, std::uint32_t Col, const Attempt &Run, std::size_t Index)
 {
     char Wanted = Run.Text()[Index];
     if (Index == Run.Cursor()) {
-        Glass.Put(Row, Col, Wanted, Paper, CaretPaper);
+        Display.Put(Row, Col, Wanted, Paper, CaretPaper);
         return;
     }
     switch (Run.MarkAt(Index)) {
-    case Mark::Right:   Glass.Put(Row, Col, Wanted, RightInk, Paper); break;
-    case Mark::Wrong:   Glass.Put(Row, Col, Wanted, TitleInk, WrongPaper); break;
-    case Mark::Untyped: Glass.Put(Row, Col, Wanted, RestInk, Paper); break;
+    case Mark::Right:   Display.Put(Row, Col, Wanted, RightInk, Paper); break;
+    case Mark::Wrong:   Display.Put(Row, Col, Wanted, TitleInk, WrongPaper); break;
+    case Mark::Untyped: Display.Put(Row, Col, Wanted, RestInk, Paper); break;
     }
 }
 
@@ -92,10 +92,10 @@ std::size_t LineOfCursor(const std::vector<Line> &Lines, std::size_t Cursor)
 /* A line of text and a blank one between, so the eye keeps its place. The
  * passage is centred in its rows when it all fits, and scrolls with the cursor
  * on its second line when it does not. */
-void PaintText(Screen &Glass, const TypingView &View, std::uint32_t Left)
+void PaintText(Screen &Display, const TypingView &View, std::uint32_t Left)
 {
     const std::vector<Line> &Lines = View.Lines;
-    std::uint32_t Area    = Glass.Rows - TextRow - BelowText;
+    std::uint32_t Area    = Display.Rows - TextRow - BelowText;
     std::size_t   Visible = (Area + 1) / 2;
     std::size_t   Current = LineOfCursor(Lines, View.Run.Cursor());
 
@@ -109,11 +109,11 @@ void PaintText(Screen &Glass, const TypingView &View, std::uint32_t Left)
     for (std::size_t I = 0; I < Shown; I++, Row += 2) {
         const Line &Text = Lines[Top + I];
         for (std::size_t At = 0; At < Text.Length; At++)
-            PaintChar(Glass, Row, Left + static_cast<std::uint32_t>(At), View.Run, Text.Start + At);
+            PaintChar(Display, Row, Left + static_cast<std::uint32_t>(At), View.Run, Text.Start + At);
     }
 }
 
-void PaintFoot(Screen &Glass, const TypingView &View)
+void PaintFoot(Screen &Display, const TypingView &View)
 {
     const Attempt &Run     = View.Run;
     std::uint64_t  Elapsed = Run.ElapsedMs(View.NowMs);
@@ -126,7 +126,7 @@ void PaintFoot(Screen &Glass, const TypingView &View)
     Figures.push_back({"accuracy", std::to_string(Accuracy) + "%", Accuracy >= 97 ? GoodInk : Accuracy >= 90 ? AmberInk : BadInk});
     Figures.push_back({"mistakes", std::to_string(Run.Mistakes()), Run.Mistakes() == 0 ? GoodInk : BadInk});
 
-    Glass.Spread(Glass.Rows - 2, Figures);
+    Display.Spread(Display.Rows - 2, Figures);
 }
 
 }
@@ -136,19 +136,19 @@ std::uint32_t TextWidth(std::uint32_t Cols)
     return std::min(Cols - 2 * MarginLeast, WidthMost);
 }
 
-void PaintTyping(Screen &Glass, const TypingView &View)
+void PaintTyping(Screen &Display, const TypingView &View)
 {
-    std::uint32_t Width = TextWidth(Glass.Cols);
-    std::uint32_t Left  = (Glass.Cols - Width) / 2;
+    std::uint32_t Width = TextWidth(Display.Cols);
+    std::uint32_t Left  = (Display.Cols - Width) / 2;
 
-    Glass.Clear(Paper);
-    PaintTitle(Glass, View.Job);
-    PaintBar(Glass, View, Left, Width);
-    PaintText(Glass, View, Left);
+    Display.Clear(Paper);
+    PaintTitle(Display, View.Job);
+    PaintBar(Display, View, Left, Width);
+    PaintText(Display, View, Left);
 
     std::string_view Under = View.Note;
     if (Under.empty() && !View.Run.Started()) Under = "The clock starts at your first key.";
-    Glass.Centre(Glass.Rows - 3, Under, View.Note.empty() ? HintInk : AmberInk, Paper);
-    PaintFoot(Glass, View);
-    Glass.Centre(Glass.Rows - 1, "Backspace takes a character back", HintInk, Paper);
+    Display.Centre(Display.Rows - 3, Under, View.Note.empty() ? HintInk : AmberInk, Paper);
+    PaintFoot(Display, View);
+    Display.Centre(Display.Rows - 1, "Backspace takes a character back", HintInk, Paper);
 }

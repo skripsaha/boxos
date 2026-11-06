@@ -68,7 +68,7 @@ constexpr char CornerBL = static_cast<char>(0xC8), CornerBR = static_cast<char>(
 
 class Table {
 public:
-    std::optional<Stage> Glass;
+    std::optional<Stage> Screen;
     Well                Game;
     unsigned Best   = 0;
     bool     Paused = false;
@@ -76,7 +76,7 @@ public:
 
     void Measure()
     {
-        const painter::core::Size Dimensions = Glass->Size();
+        const painter::core::Size Dimensions = Screen->Size();
         Scale = std::max(1, std::min((Dimensions.Height - 2) / WellHigh, (Dimensions.Width - 44) / (2 * WellWide)));
         Wide  = 2 * Scale * WellWide + 2;
         High  = Scale * WellHigh + 2;
@@ -100,7 +100,7 @@ private:
  * and its foot shaded, so the pile reads as blocks and not as paint. */
 void Table::Block(int Row, int Col, Color Ink, int Size)
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     if (Size == 1) {
         FrameBuffer.Fill({Col, Row, 2, 1}, ' ', TextStyle{Ink, Ink});
         return;
@@ -127,7 +127,7 @@ void Table::Mini(int Row, int Col, Piece Kind, bool Dim)
 
 void Table::Frame()
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     const TextStyle FrameStyle{FrameInk, Page};
     FrameBuffer.Put({Left, Top}, CornerTL, FrameStyle);
     FrameBuffer.Put({Left + Wide - 1, Top}, CornerTR, FrameStyle);
@@ -143,8 +143,8 @@ void Table::Frame()
 
 void Table::Panels()
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
+    const painter::core::Size Dimensions = Screen->Size();
     const TextStyle TitleStyle{TitleInk, Page};
     const TextStyle LabelStyle{LabelInk, Page};
     const TextStyle ValueStyle{ValueInk, Page};
@@ -179,7 +179,7 @@ void Table::Panels()
 
 void Table::Overlay(std::string_view Line, std::string_view Hint)
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     int Row = Top + High / 2 - 2, Width = Wide - 2;
     FrameBuffer.Fill({Left + 1, Row, Width, 5}, ' ', TextStyle{ValueInk, Page});
     FrameBuffer.Write({Left + 1 + (Width - static_cast<int>(Line.size())) / 2, Row + 1}, Line,
@@ -191,7 +191,7 @@ void Table::Overlay(std::string_view Line, std::string_view Hint)
 
 void Table::Draw()
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     FrameBuffer.Clear(TextStyle{Page, Page});
     Frame();
     Panels();
@@ -296,7 +296,7 @@ int main()
             Say(Opened.error().Describe("tetris"));
             return 1;
         }
-        Desk.Glass = std::move(*Opened);
+        Desk.Screen = std::move(*Opened);
         Desk.Measure();
         std::string Trouble;
         unsigned    Kept = ReadBest(Trouble);
@@ -313,17 +313,17 @@ int main()
             if (!Desk.Paused) Desk.Game.Pass(Seconds);
             Desk.Best = std::max(Desk.Best, Desk.Game.Score);
             Desk.Draw();
-            if (!(Painted = static_cast<bool>(Desk.Glass->Present()))) break;
+            if (!(Painted = static_cast<bool>(Desk.Screen->Present()))) break;
 
             std::uint64_t Spent = clock_uptime_us() - Now;
-            const painter::tui::Event Event = Desk.Glass->Wait(
+            const painter::tui::Event Event = Desk.Screen->Wait(
                 Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
             if (Event.Kind == EventKind::Gone) break;
             if (Event.Kind == EventKind::Key && !OnKey(Desk, Event.Key)) break;
         }
 
         unsigned Score = Desk.Game.Score, Best = Desk.Best;
-        (void)Desk.Glass->Close();
+        (void)Desk.Screen->Close();
         if (Trouble.empty() && Best > Kept) {
             if (std::optional<std::string> Refusal = KeepWrite(Record, std::format("best {}\n", Best))) Trouble = *Refusal;
         }

@@ -115,7 +115,7 @@ private:
     std::uint32_t         Cols = 0;
     std::uint32_t         Width = 16;  /* bytes a line shows; 8 on a narrow screen */
     std::uint32_t         Digits = 8;
-    std::optional<painter::tui::Stage> Glass;
+    std::optional<painter::tui::Stage> Screen;
 
     bool                      CommandOpen = false;
     std::string               Command;

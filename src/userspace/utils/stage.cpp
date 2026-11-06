@@ -17,15 +17,15 @@ void StageSay(std::string_view Text)
 
 std::optional<std::string> Stage::Take(std::string_view Who, int LeastCols, int LeastRows)
 {
-    vga_dimensions_t Glass;
-    if (vga_getdimensions(&Glass) != 0) return std::string("This machine did not say how big its screen is.");
-    if (Glass.rows == 0 || Glass.cols == 0) return std::string("This machine has no console to paint on.");
-    if (Glass.cols < LeastCols || Glass.rows < LeastRows)
-        return std::format("This screen is {} columns by {} rows; {} needs at least {} by {}.", Glass.cols,
-                           Glass.rows, Who, LeastCols, LeastRows);
+    vga_dimensions_t Dimensions;
+    if (vga_getdimensions(&Dimensions) != 0) return std::string("This machine did not say how big its screen is.");
+    if (Dimensions.rows == 0 || Dimensions.cols == 0) return std::string("This machine has no console to paint on.");
+    if (Dimensions.cols < LeastCols || Dimensions.rows < LeastRows)
+        return std::format("This screen is {} columns by {} rows; {} needs at least {} by {}.", Dimensions.cols,
+                           Dimensions.rows, Who, LeastCols, LeastRows);
 
-    Rows = Glass.rows;
-    Cols = Glass.cols;
+    Rows = Dimensions.rows;
+    Cols = Dimensions.cols;
     Cells.assign(static_cast<std::size_t>(Rows) * Cols, TextCell{});
     Ear = console_listen();
     if (Ear == TOUCH_TAG_INVALID) return std::string("This machine has no way to hear a key.");

@@ -73,9 +73,9 @@ void SayLine(std::string_view Text, Color Fg = COLOR_DEFAULT)
 std::size_t GlassWidth()
 {
     if (form_screen_file() != 0) return 0;
-    vga_dimensions_t Glass;
-    if (vga_getdimensions(&Glass) != 0 || Glass.cols == 0) return 80;
-    return Glass.cols;
+    vga_dimensions_t Dimensions;
+    if (vga_getdimensions(&Dimensions) != 0 || Dimensions.cols == 0) return 80;
+    return Dimensions.cols;
 }
 
 bool IsContinuation(char Byte)
@@ -147,9 +147,9 @@ public:
     Painter(const TextFile &First, const TextFile &Second)
         : First(First), Second(Second), Width(Digits(std::max(First.Lines.size(), Second.Lines.size())))
     {
-        std::size_t Glass  = GlassWidth();
+        std::size_t Width = GlassWidth();
         std::size_t Gutter = 2 * Width + 4;
-        Limit = Glass == 0 ? 0 : (Glass > Gutter + LeastTextWidth ? Glass - 1 - Gutter : LeastTextWidth);
+        Limit = Width == 0 ? 0 : (Width > Gutter + LeastTextWidth ? Width - 1 - Gutter : LeastTextWidth);
     }
 
     DifferenceTally Show(const DifferenceMarks &Marks);

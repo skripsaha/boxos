@@ -126,7 +126,7 @@ enum class Act { Stay, Leave, Give };
 
 class Map {
 public:
-    std::optional<Stage>      Glass;
+    std::optional<Stage>      Screen;
     std::vector<MapFile>     Files;
     std::string              Scope;
     std::vector<std::string> Common;
@@ -222,7 +222,7 @@ void Map::Arrange(Level &Here)
         return Weight(A) != Weight(B) ? Weight(A) > Weight(B) : A.Name < B.Name;
     });
 
-    const painter::core::Size Dimensions = Glass->Size();
+    const painter::core::Size Dimensions = Screen->Size();
     int High = Dimensions.Height - 3, Wide = Dimensions.Width;
     std::vector<std::uint64_t> Weights;
     for (const Entry &One : Here.Entries) Weights.push_back(Weight(One));
@@ -258,7 +258,7 @@ std::uint64_t Map::Whole(const Level &Here) const
  * it as many of its name, its size and its count as it has rows for. */
 void Map::Tile(const TagmapTile &Place, const Entry &One, bool Chosen, std::uint64_t Whole)
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     bool  Gathered = One.Is == Kind::More;
     Color Ink      = Gathered ? MoreInk : Tints[Place.Index % (sizeof(Tints) / sizeof(Tints[0]))];
     if (Chosen) Ink = Gathered ? MoreLit : Color::Mix(Ink, Colors::White, 120);
@@ -296,8 +296,8 @@ void Map::Tile(const TagmapTile &Place, const Entry &One, bool Chosen, std::uint
 
 void Map::Head()
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
+    const painter::core::Size Dimensions = Screen->Size();
     FrameBuffer.Fill({0, 0, Dimensions.Width, 1}, ' ', TextStyle{TextInk, Page});
     std::string Weighed = BySize ? "by size" : "by count";
     int         Edge    = Dimensions.Width - 1 - static_cast<int>(Weighed.size());
@@ -315,8 +315,8 @@ void Map::Head()
 /* What the chosen tile is, and the keys. */
 void Map::Foot()
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
+    const painter::core::Size Dimensions = Screen->Size();
     const Level &Here = Path.back();
     int          Row  = Dimensions.Height - 2;
     FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', TextStyle{TextInk, Page});
@@ -358,14 +358,14 @@ void Map::Foot()
 
 void Map::Draw()
 {
-    const painter::core::Size Dimensions = Glass->Size();
-    Glass->FrameBuffer().Clear(TextStyle{Page, Page});
+    const painter::core::Size Dimensions = Screen->Size();
+    Screen->FrameBuffer().Clear(TextStyle{Page, Page});
     Head();
     const Level  &Here  = Path.back();
     std::uint64_t Total = Whole(Here);
     for (std::size_t At = 0; At < Here.Tiles.size(); At++)
         Tile(Here.Tiles[At], Here.Shown(Here.Tiles[At].Index), At == Here.Selected, Total);
-    if (Here.Tiles.empty()) Glass->FrameBuffer().Centre(Dimensions.Height / 2, "nothing here to map",
+    if (Here.Tiles.empty()) Screen->FrameBuffer().Centre(Dimensions.Height / 2, "nothing here to map",
                                                         TextStyle{HintInk, Page});
     Foot();
 }
@@ -494,15 +494,15 @@ int main()
             Say(Opened.error().Describe("tagmap"));
             return 1;
         }
-        Atlas.Glass = std::move(*Opened);
+        Atlas.Screen = std::move(*Opened);
         Atlas.Arrange(Atlas.Path.back());
 
         bool Painted = true;
         Act  Last    = Act::Leave;
         for (;;) {
             Atlas.Draw();
-            if (!(Painted = static_cast<bool>(Atlas.Glass->Present()))) break;
-            const painter::tui::Event Event = Atlas.Glass->Wait();
+            if (!(Painted = static_cast<bool>(Atlas.Screen->Present()))) break;
+            const painter::tui::Event Event = Atlas.Screen->Wait();
             if (Event.Kind == EventKind::Gone) break;
             if (Event.Kind != EventKind::Key) continue;
             if ((Last = Atlas.OnKey(Event.Key)) != Act::Stay) break;
@@ -514,7 +514,7 @@ int main()
         std::string Said = Last == Act::Give ? Give(Atlas)
                                              : std::format("[TAGMAP] {} files, {}, {} tags", Atlas.Files.size(),
                                                            TagmapSize(Bytes), Tags);
-        (void)Atlas.Glass->Close();
+        (void)Atlas.Screen->Close();
         Say(Painted ? Said : "The screen stopped taking frames.");
         return Painted ? 0 : 1;
     } catch (const std::bad_alloc &) {

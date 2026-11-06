@@ -76,8 +76,8 @@ int ChipsWidth(const std::vector<std::string_view> &Tags)
 /* The title, what is in view, and how much of it is done. */
 void TodoDesk::Head(const std::vector<std::size_t> &Places)
 {
-    Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    Frame &FrameBuffer = Stage->FrameBuffer();
+    const painter::core::Size Dimensions = Stage->Size();
     int Col = 1 + static_cast<int>(FrameBuffer.Write({1, 0}, " todo ", TextStyle{TitleText, TitleInk}));
     std::string View = List.Everywhere ? "everywhere" : Context.empty() ? "everything" : "for " + Spoken(Context);
     Col += 2;
@@ -100,8 +100,8 @@ void TodoDesk::Head(const std::vector<std::size_t> &Places)
 /* One thing on its row: the box, the star, the words, the context's chips. */
 void TodoDesk::Thing(int Row, const TodoItem &Item, std::size_t At, bool Chosen)
 {
-    Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    Frame &FrameBuffer = Stage->FrameBuffer();
+    const painter::core::Size Dimensions = Stage->Size();
     Color         Back  = Chosen ? ChosenPaper : Paper;
     std::uint64_t Since = clock_uptime_us() - FlashAt;
     if (At == Flashed && Since < TodoFlashUs)
@@ -135,8 +135,8 @@ void TodoDesk::Thing(int Row, const TodoItem &Item, std::size_t At, bool Chosen)
 /* A box ticked, and what to do about there being nothing. */
 void TodoDesk::Empty()
 {
-    Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    Frame &FrameBuffer = Stage->FrameBuffer();
+    const painter::core::Size Dimensions = Stage->Size();
     int Row = Dimensions.Height / 2 - 2, Col = Dimensions.Width / 2 - 14;
     static const char Box[3][5] = {{'\xDA', '\xC4', '\xC4', '\xC4', '\xBF'},
                                    {'\xB3', ' ', '\xFB', ' ', '\xB3'},
@@ -154,8 +154,8 @@ void TodoDesk::Empty()
 /* The cheer: a banner, and sparks that grow and fade where they fall. */
 void TodoDesk::Sparks()
 {
-    Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    Frame &FrameBuffer = Stage->FrameBuffer();
+    const painter::core::Size Dimensions = Stage->Size();
     std::uint64_t Since = clock_uptime_us() - CheerAt;
     if (CheerAt == 0 || Since >= TodoCheerUs) return;
     static const char Phases[] = {static_cast<char>(0xFA), '+', '*', StarGlyph, '*', '+', static_cast<char>(0xFA)};
@@ -180,8 +180,8 @@ void TodoDesk::Sparks()
  * much they are needed and laid in their own order. */
 void TodoDesk::Bar()
 {
-    Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    Frame &FrameBuffer = Stage->FrameBuffer();
+    const painter::core::Size Dimensions = Stage->Size();
     int Row = Dimensions.Height - 1;
     FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', TextStyle{TextInk, BarPaper});
     if (Now != TodoMode::Browse) {
@@ -224,12 +224,12 @@ void TodoDesk::Bar()
 
 void TodoDesk::Draw()
 {
-    Glass->FrameBuffer().Clear(TextStyle{Paper, Paper});
+    Stage->FrameBuffer().Clear(TextStyle{Paper, Paper});
     std::vector<std::size_t> Places = List.View(Here());
     if (!Places.empty()) Selected = std::min(Selected, Places.size() - 1);
     Head(Places);
 
-    const painter::core::Size Dimensions = Glass->Size();
+    const painter::core::Size Dimensions = Stage->Size();
     int Room = Dimensions.Height - 1 - FirstRow;
     if (Places.empty()) {
         Empty();
@@ -245,7 +245,7 @@ void TodoDesk::Draw()
     bool AllDone = !Places.empty() &&
                    std::all_of(Places.begin(), Places.end(), [&](std::size_t At) { return List.Items[At].Done; });
     if (AllDone && Shown + 1 < Room)
-        Glass->FrameBuffer().Centre(FirstRow + Shown + 1, "all done here, enjoy the quiet", TextStyle{TickInk, Paper});
+        Stage->FrameBuffer().Centre(FirstRow + Shown + 1, "all done here, enjoy the quiet", TextStyle{TickInk, Paper});
     Sparks();
     Bar();
 }

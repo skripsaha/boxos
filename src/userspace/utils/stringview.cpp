@@ -97,9 +97,9 @@ std::optional<std::string> Stringview::TakeScreen()
     std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
         painter::tui::Stage::Open("stringview", static_cast<std::int32_t>(Digits + 8), 3);
     if (!Opened) return Opened.error().Describe("stringview");
-    Glass.emplace(std::move(*Opened));
-    Rows = static_cast<std::uint32_t>(Glass->Size().Height);
-    Cols = static_cast<std::uint32_t>(Glass->Size().Width);
+    Screen.emplace(std::move(*Opened));
+    Rows = static_cast<std::uint32_t>(Screen->Size().Height);
+    Cols = static_cast<std::uint32_t>(Screen->Size().Width);
     return std::nullopt;
 }
 
@@ -212,7 +212,7 @@ void Stringview::Run()
         if (Sifting) {
             for (unsigned Piece = 0; Piece < PiecesAFrame && Sifting; Piece++) Sifting = SiftStep();
             for (;;) {
-                painter::tui::Event Event = Glass->Poll();
+                painter::tui::Event Event = Screen->Poll();
                 if (Event.Kind == painter::tui::EventKind::Quiet) break;
                 if (Event.Kind == painter::tui::EventKind::Gone) {
                     Leaving = true;
@@ -225,7 +225,7 @@ void Stringview::Run()
 
         /* Sifted: nothing changes between keys, and a refusal means there is
          * nothing left to hear. */
-        painter::tui::Event Event = Glass->Wait();
+        painter::tui::Event Event = Screen->Wait();
         if (Event.Kind != painter::tui::EventKind::Key) break;
         OnKey(Event.Key);
     }
@@ -234,9 +234,9 @@ void Stringview::Run()
 
 void Stringview::GiveScreenBack()
 {
-    if (Glass) {
-        (void)Glass->Close();
-        Glass.reset();
+    if (Screen) {
+        (void)Screen->Close();
+        Screen.reset();
     }
 }
 

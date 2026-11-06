@@ -71,7 +71,7 @@ enum class Bar { Keys, Status, Hidden };
 
 class Explorer {
 public:
-    std::optional<Stage> Glass;
+    std::optional<Stage> Screen;
 
     void Begin(const char *const *Words, std::size_t Count);
     /* False to leave. */
@@ -115,7 +115,7 @@ private:
 
 void Explorer::Begin(const char *const *Words, std::size_t Count)
 {
-    const painter::core::Size Dimensions = Glass->Size();
+    const painter::core::Size Dimensions = Screen->Size();
     Picture.Resize(Dimensions.Width, Dimensions.Height * 2);
     /* The set is about 3.4 wide and 2.6 high: the view is as wide as both need. */
     HomeWidth = std::max(3.4, 2.6 * Dimensions.Width / (Dimensions.Height * 2.0));
@@ -263,8 +263,8 @@ std::uint32_t Explorer::Wait() const
 
 void Explorer::StatusBar()
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
+    const painter::core::Size Dimensions = Screen->Size();
     int Row = Dimensions.Height - 1;
     int Col = 1;
     Col += static_cast<int>(FrameBuffer.Write({Col, Row}, View.Julia ? "julia" : "mandelbrot",
@@ -287,8 +287,8 @@ void Explorer::StatusBar()
 
 void Explorer::KeysBar()
 {
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
-    const painter::core::Size Dimensions = Glass->Size();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
+    const painter::core::Size Dimensions = Screen->Size();
     int Row = Dimensions.Height - 1, Col = 1;
     for (auto [Keys, What] : {std::pair{"\x1B\x18\x19\x1A", "look"}, {"+-", "zoom"}, {"j", "julia"}, {"c", "colours"},
                               {"a", "turn"}, {"space", "tour"}, {"[]", "detail"}, {"r", "home"}, {"q", "leave"}}) {
@@ -307,11 +307,11 @@ void Explorer::Draw(float Shown)
      * deep picture is colour noise from pixel to pixel. */
     float Wider = std::sqrt(static_cast<float>(FractalSteps(View, Detail)) / 150.0f);
     FractalColour(Picture, FractalPalettes(Palette), Spread * Wider, Turn, Pixels);
-    painter::tui::Frame &FrameBuffer = Glass->FrameBuffer();
+    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     FrameBuffer.PutPixels(Pixels);
     if (Showing == Bar::Keys && Shown >= KeysShown) Showing = Bar::Status;
     if (Showing == Bar::Hidden) return;
-    const painter::core::Size Dimensions = Glass->Size();
+    const painter::core::Size Dimensions = Screen->Size();
     FrameBuffer.Fill({0, Dimensions.Height - 1, Dimensions.Width, 1}, ' ', TextStyle{BarInk, BarPaper});
     if (Showing == Bar::Keys) KeysBar();
     else StatusBar();
@@ -339,7 +339,7 @@ int main()
             Say(Opened.error().Describe("mandelbrot"));
             return 1;
         }
-        Look.Glass = std::move(*Opened);
+        Look.Screen = std::move(*Opened);
         Look.Begin(Words, Count);
 
         std::uint64_t Began = clock_uptime_us(), Last = Began;
@@ -349,14 +349,14 @@ int main()
             Look.Step(static_cast<float>(Now - Last) / 1e6f);
             Last = Now;
             Look.Draw(static_cast<float>(Now - Began) / 1e6f);
-            if (!(Painted = static_cast<bool>(Look.Glass->Present()))) break;
+            if (!(Painted = static_cast<bool>(Look.Screen->Present()))) break;
 
-            const painter::tui::Event Event = Look.Glass->Wait(Look.Wait());
+            const painter::tui::Event Event = Look.Screen->Wait(Look.Wait());
             if (Event.Kind == EventKind::Gone) break;
             if (Event.Kind == EventKind::Key && !Look.OnKey(Event.Key)) break;
         }
         double Deepest = Look.HomeWidth / Look.Nearest;
-        (void)Look.Glass->Close();
+        (void)Look.Screen->Close();
         Say(Painted ? std::format("[MANDELBROT] looked {:.3g} times nearer than the whole set", Deepest)
                     : "The screen stopped taking frames.");
         return Painted ? 0 : 1;

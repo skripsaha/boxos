@@ -309,21 +309,21 @@ FlameOutcome FlameMenu::OnKey(const painter::tui::KeyEvent &Key, FlameSettings &
 
 void FlameMenu::Draw(painter::tui::Frame &Frame, int Rows, int Cols, const FlameSettings &Settings) const
 {
-    Canvas Glass{Frame, Rows, Cols};
+    Canvas Drawing{Frame, Rows, Cols};
     int    Top  = OriginRow(Rows);
     int    Left = OriginCol(Cols);
 
     auto Rule = [&](int Line, char First, char Last) {
-        Glass.Put(Line, Left, First, Ink, Paper);
-        for (int At = 1; At <= MenuInner; At++) Glass.Put(Line, Left + At, Horizontal, Ink, Paper);
-        Glass.Put(Line, Left + MenuInner + 1, Last, Ink, Paper);
+        Drawing.Put(Line, Left, First, Ink, Paper);
+        for (int At = 1; At <= MenuInner; At++) Drawing.Put(Line, Left + At, Horizontal, Ink, Paper);
+        Drawing.Put(Line, Left + MenuInner + 1, Last, Ink, Paper);
     };
 
     Rule(Top, CornerTopLeft, CornerTopRight);
-    Glass.Write(Top, Left + 2, " flame ", TitleInk, Paper);
+    Drawing.Write(Top, Left + 2, " flame ", TitleInk, Paper);
     if (Note) {
         std::string_view Said = Note;
-        Glass.Write(Top, Left + MenuInner - static_cast<int>(Said.size()) - 1, std::format(" {} ", Said), NoteInk, Paper);
+        Drawing.Write(Top, Left + MenuInner - static_cast<int>(Said.size()) - 1, std::format(" {} ", Said), NoteInk, Paper);
     }
 
     for (int Line = 0; Line < RowCount; Line++) {
@@ -332,24 +332,24 @@ void FlameMenu::Draw(painter::tui::Frame &Frame, int Rows, int Cols, const Flame
         PainterColor Bg = Chosen ? ChosenBg : Paper;
         int   Y      = Top + 1 + Line;
 
-        Glass.Put(Y, Left, Vertical, Ink, Paper);
-        for (int At = 1; At <= MenuInner; At++) Glass.Put(Y, Left + At, ' ', Fg, Bg);
-        Glass.Put(Y, Left + MenuInner + 1, Vertical, Ink, Paper);
-        Glass.Put(Y, Left + MarkAt + 1, Chosen ? '>' : ' ', Fg, Bg);
-        Glass.Write(Y, Left + LabelAt + 1, Labels[Line], Fg, Bg);
+        Drawing.Put(Y, Left, Vertical, Ink, Paper);
+        for (int At = 1; At <= MenuInner; At++) Drawing.Put(Y, Left + At, ' ', Fg, Bg);
+        Drawing.Put(Y, Left + MenuInner + 1, Vertical, Ink, Paper);
+        Drawing.Put(Y, Left + MarkAt + 1, Chosen ? '>' : ' ', Fg, Bg);
+        Drawing.Write(Y, Left + LabelAt + 1, Labels[Line], Fg, Bg);
 
         int X = Left + ValueAt + 1;
         if (Editing && Chosen) {
-            for (int At = 0; At < FieldWidth; At++) Glass.Put(Y, X + At, ' ', FieldInk, FieldBg);
-            Glass.Write(Y, X, Tail(Text, FieldWidth - 1), FieldInk, FieldBg);
+            for (int At = 0; At < FieldWidth; At++) Drawing.Put(Y, X + At, ' ', FieldInk, FieldBg);
+            Drawing.Write(Y, X, Tail(Text, FieldWidth - 1), FieldInk, FieldBg);
         } else {
-            Glass.Write(Y, X, Tail(ValueOf(Line, Settings), FieldWidth), Fg, Bg);
+            Drawing.Write(Y, X, Tail(ValueOf(Line, Settings), FieldWidth), Fg, Bg);
         }
     }
 
     Rule(Top + 1 + RowCount, CornerBottomLeft, CornerBottomRight);
     for (int Line = 0; Line < HintCount; Line++)
-        Glass.Write(Top + 2 + RowCount + Line, Left, Hints[static_cast<std::size_t>(Line)], Ink, Paper);
+        Drawing.Write(Top + 2 + RowCount + Line, Left, Hints[static_cast<std::size_t>(Line)], Ink, Paper);
 }
 
 void FlameMenu::Caret(int Rows, int Cols, int &Row, int &Col) const

@@ -11,7 +11,7 @@
  * it; typer.cpp decides.
  *
  * This header knows nothing of BoxOS — what it names is plain C++ and can be
- * built and tried anywhere; typer_glass.h is the screen, the keys and the volume.
+ * built and tried anywhere; typer_screen.h is the screen, the keys and the volume.
  */
 
 #include <cstddef>
