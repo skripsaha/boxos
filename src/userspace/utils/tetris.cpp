@@ -171,7 +171,8 @@ void Table::Panels()
     for (auto [Keys, What] : {std::pair{"\x1B\x1A", "move"}, {"\x18 x z", "turn"}, {"\x19", "down"},
                               {"space", "drop"}, {"c", "hold"}, {"p", "pause"}, {"q", "leave"}}) {
         if (Row >= Dimensions.Height) break;
-        int Col = static_cast<int>(FrameBuffer.Write({Right, Row}, Keys, KeyStyle));
+        int Col = Right;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, KeyStyle));
         FrameBuffer.Write({Col + 1, Row++}, What, LabelStyle);
     }
 }

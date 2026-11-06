@@ -78,18 +78,20 @@ void TodoDesk::Head(const std::vector<std::size_t> &Places)
 {
     Frame &FrameBuffer = Glass->FrameBuffer();
     const painter::core::Size Dimensions = Glass->Size();
-    int Col = static_cast<int>(FrameBuffer.Write({1, 0}, " todo ", TextStyle{TitleText, TitleInk}));
+    int Col = 1 + static_cast<int>(FrameBuffer.Write({1, 0}, " todo ", TextStyle{TitleText, TitleInk}));
     std::string View = List.Everywhere ? "everywhere" : Context.empty() ? "everything" : "for " + Spoken(Context);
-    Col = static_cast<int>(FrameBuffer.Write({Col + 2, 0}, View, TextStyle{ViewInk, Paper}));
+    Col += 2;
+    Col += static_cast<int>(FrameBuffer.Write({Col, 0}, View, TextStyle{ViewInk, Paper}));
 
     std::size_t Done = static_cast<std::size_t>(
         std::count_if(Places.begin(), Places.end(), [&](std::size_t At) { return List.Items[At].Done; }));
     if (!Places.empty() && Col + 4 + GaugeWidth + 16 < Dimensions.Width) {
         int Lit = static_cast<int>(Done * GaugeWidth / Places.size());
-        Col = static_cast<int>(FrameBuffer.Write({Col + 4, 0}, std::string(static_cast<std::size_t>(Lit), FilledGlyph),
-                                               TextStyle{TickInk, Paper}));
-        Col = static_cast<int>(FrameBuffer.Write({Col, 0}, std::string(static_cast<std::size_t>(GaugeWidth - Lit), Glyphs::Dot),
-                                               TextStyle{GaugeLeft, Paper}));
+        Col += 4;
+        Col += static_cast<int>(FrameBuffer.Write({Col, 0}, std::string(static_cast<std::size_t>(Lit), FilledGlyph),
+                                                   TextStyle{TickInk, Paper}));
+        Col += static_cast<int>(FrameBuffer.Write({Col, 0}, std::string(static_cast<std::size_t>(GaugeWidth - Lit), Glyphs::Dot),
+                                                   TextStyle{GaugeLeft, Paper}));
         FrameBuffer.Write({Col + 1, 0}, std::format("{} of {} done", Done, Places.size()), TextStyle{HintInk, Paper});
     }
     FrameBuffer.Fill({0, 1, Dimensions.Width, 1}, RuleGlyph, TextStyle{RuleInk, Paper});
@@ -124,7 +126,9 @@ void TodoDesk::Thing(int Row, const TodoItem &Item, std::size_t At, bool Chosen)
     for (std::string_view Tag : Tags) {
         Color Ink = Item.Done ? Color::Mix(TagInk(Tag), Back, 150) : TagInk(Tag);
         FrameBuffer.Put({Col, Row}, Glyphs::Bullet, TextStyle{Ink, Back});
-        Col = static_cast<int>(FrameBuffer.Write({Col + 2, Row}, Tag, TextStyle{Ink, Back})) + 2;
+        Col += 2;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Tag, TextStyle{Ink, Back}));
+        Col += 2;
     }
 }
 
@@ -181,8 +185,8 @@ void TodoDesk::Bar()
     int Row = Dimensions.Height - 1;
     FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', TextStyle{TextInk, BarPaper});
     if (Now != TodoMode::Browse) {
-        int Col  = static_cast<int>(FrameBuffer.Write({1, Row}, Now == TodoMode::Adding ? "to do: " : "change: ",
-                                                        TextStyle{KeyInk, BarPaper}));
+        int Col  = 1 + static_cast<int>(FrameBuffer.Write({1, Row}, Now == TodoMode::Adding ? "to do: " : "change: ",
+                                                           TextStyle{KeyInk, BarPaper}));
         int Room = Dimensions.Width - Col - 1;
         std::size_t From = Caret > static_cast<std::size_t>(Room) ? Caret - static_cast<std::size_t>(Room) : 0;
         FrameBuffer.Write({Col, Row}, std::string_view(Line).substr(From, static_cast<std::size_t>(Room)),
@@ -211,8 +215,10 @@ void TodoDesk::Bar()
     int Col = 1;
     for (const Hint &One : Hints) {
         if (One.Need > Most) continue;
-        Col = static_cast<int>(FrameBuffer.Write({Col, Row}, One.Keys, TextStyle{KeyInk, BarPaper}));
-        Col = static_cast<int>(FrameBuffer.Write({Col + 1, Row}, One.What, TextStyle{HintInk, BarPaper})) + 2;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, One.Keys, TextStyle{KeyInk, BarPaper}));
+        Col += 1;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, One.What, TextStyle{HintInk, BarPaper}));
+        Col += 2;
     }
 }
 

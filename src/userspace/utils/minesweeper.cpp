@@ -241,8 +241,10 @@ void Board::Foot()
                               {"1 2 3", "field"}, {"r", "new"}, {"q", "leave"}}) {
         int Wide = static_cast<int>(std::string_view(Keys).size() + std::string_view(What).size()) + 3;
         if (Col + Wide > Dimensions.Width) break;
-        Col = static_cast<int>(FrameBuffer.Write({Col, Bar}, Keys, TextStyle{KeyInk, BarPaper}));
-        Col = static_cast<int>(FrameBuffer.Write({Col + 1, Bar}, What, TextStyle{HintInk, BarPaper})) + 2;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Bar}, Keys, TextStyle{KeyInk, BarPaper}));
+        Col += 1;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Bar}, What, TextStyle{HintInk, BarPaper}));
+        Col += 2;
     }
 }
 

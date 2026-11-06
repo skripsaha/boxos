@@ -301,11 +301,13 @@ void Map::Head()
     FrameBuffer.Fill({0, 0, Dimensions.Width, 1}, ' ', TextStyle{TextInk, Page});
     std::string Weighed = BySize ? "by size" : "by count";
     int         Edge    = Dimensions.Width - 1 - static_cast<int>(Weighed.size());
-    int         Col     = static_cast<int>(FrameBuffer.Write({1, 0}, "tagmap", TextStyle{TitleInk, Page}));
-    Col = static_cast<int>(FrameBuffer.Write({Col + 2, 0}, Scope, TextStyle{ScopeInk, Page}));
+    int         Col = 1;
+    Col += static_cast<int>(FrameBuffer.Write({Col, 0}, "tagmap", TextStyle{TitleInk, Page}));
+    Col += 2;
+    Col += static_cast<int>(FrameBuffer.Write({Col, 0}, Scope, TextStyle{ScopeInk, Page}));
     for (std::size_t Depth = 1; Depth < Path.size(); Depth++) {
-        Col = static_cast<int>(FrameBuffer.Write({Col, 0}, " > ", TextStyle{HintInk, Page}));
-        Col = static_cast<int>(FrameBuffer.Write({Col, 0}, Path[Depth].Crumb, TextStyle{TextInk, Page}));
+        Col += static_cast<int>(FrameBuffer.Write({Col, 0}, " > ", TextStyle{HintInk, Page}));
+        Col += static_cast<int>(FrameBuffer.Write({Col, 0}, Path[Depth].Crumb, TextStyle{TextInk, Page}));
     }
     if (Col < Edge) FrameBuffer.Write({Edge, 0}, Weighed, TextStyle{HintInk, Page});
 }
@@ -331,7 +333,7 @@ void Map::Foot()
         } else {
             About += std::format(": {} file{}, {}", One.Files.size(), One.Files.size() == 1 ? "" : "s", TagmapSize(One.Bytes));
         }
-        int Col = static_cast<int>(FrameBuffer.Write({1, Row}, About, TextStyle{TextInk, Page}));
+        int Col = 1 + static_cast<int>(FrameBuffer.Write({1, Row}, About, TextStyle{TextInk, Page}));
         if (Path.size() == 1 && !Common.empty()) {
             std::string All = "all wear " + Joined(Common);
             if (Col + 2 + static_cast<int>(All.size()) < Dimensions.Width)
@@ -347,8 +349,10 @@ void Map::Foot()
                               {"space", "give"}, {"w", BySize ? "by count" : "by size"}, {"q", "leave"}}) {
         int Wide = static_cast<int>(std::string_view(Keys).size() + 1 + std::string_view(What).size() + 2);
         if (Col + Wide > Dimensions.Width) break;
-        Col = static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, BarPaper}));
-        Col = static_cast<int>(FrameBuffer.Write({Col + 1, Row}, What, TextStyle{HintInk, BarPaper})) + 2;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, BarPaper}));
+        Col += 1;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, What, TextStyle{HintInk, BarPaper}));
+        Col += 2;
     }
 }
 

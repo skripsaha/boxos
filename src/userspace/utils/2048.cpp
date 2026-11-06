@@ -286,7 +286,9 @@ void Table::Head()
     int Row = std::min(Dimensions.Height - 1, Top + BoardHigh), Col = Left;
     for (auto [Keys, What] : {std::pair{"\x1B\x1A\x18\x19", "slide"}, {"u", "undo"}, {"r", "new"}, {"q", "leave"}}) {
         Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, Page}));
-        Col += 2 + static_cast<int>(FrameBuffer.Write({Col + 1, Row}, What, TextStyle{HintInk, Page}));
+        Col += 1;
+        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, What, TextStyle{HintInk, Page}));
+        Col += 2;
     }
 }
 
