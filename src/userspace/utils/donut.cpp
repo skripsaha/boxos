@@ -32,7 +32,8 @@
 #include "painter/tui/keyboard.h"
 #include "painter/tui/surface.h"
 
-BOX_FORM("takes optional words \"where it stands: top, bottom, left, right or middle; right middle if none\"\n");
+BOX_FORM("takes optional words \"where it stands: top, bottom, left, right or "
+         "middle; right middle if none\"\n");
 
 namespace {
 
@@ -45,12 +46,11 @@ constexpr PainterColor DonutColorLow = PainterColor::Rgb(0x1C, 0x63, 0xC6);
 constexpr PainterColor DonutColorHigh = PainterColor::Rgb(0xF0, 0x83, 0x2E);
 /* The zone is deliberately larger than the visible torus. Perspective makes
  * its footprint grow while it turns, so a tight frame would clip the rim. */
-constexpr int DonutZoneMaxWidth = 40;
-constexpr int DonutZoneMaxHeight = 18;
-constexpr float DonutScale = 0.18f;
+constexpr int DonutZoneMaxWidth = 30;
+constexpr int DonutZoneMaxHeight = 30;
+constexpr float DonutScale = 0.1f;
 
-void Say(std::string_view Text)
-{
+void Say(std::string_view Text) {
     std::string Line(Text);
     Line += '\n';
     print_to_screen(Line.c_str());
@@ -61,61 +61,65 @@ struct Place {
     int Col = 0;
 };
 
-Place Where(const char *const *Words, std::size_t Count, int Cols, int Rows, int Wide, int High)
-{
-    int Across = 2;
+Place Where(const char *const *Words, std::size_t Count, int Cols, int Rows,
+            int Wide, int High) {
+    int Across = Count == 0 ? 2 : 1;
     int Down = 1;
+    bool Horizontal = false;
+    bool Vertical = false;
     for (std::size_t At = 0; At < Count; At++) {
         const std::string_view Word = Words[At];
-        if (Word == "left") Across = 0;
-        if (Word == "right") Across = 2;
-        if (Word == "top") Down = 0;
-        if (Word == "bottom") Down = 2;
+        if (Word == "left") {
+            Across = 0;
+            Horizontal = true;
+        }
+        if (Word == "right") {
+            Across = 2;
+            Horizontal = true;
+        }
+        if (Word == "top") {
+            Down = 0;
+            Vertical = true;
+        }
+        if (Word == "bottom") {
+            Down = 2;
+            Vertical = true;
+        }
         if (Word == "middle" || Word == "centre" || Word == "center") {
-            bool SaidSide = false;
-            for (std::size_t Other = 0; Other < Count; Other++) {
-                const std::string_view Side = Words[Other];
-                SaidSide = SaidSide || Side == "left" || Side == "right" ||
-                           Side == "top" || Side == "bottom";
-            }
-            if (!SaidSide) Across = Down = 1;
+            if (!Horizontal) Across = 1;
+            if (!Vertical) Down = 1;
         }
     }
-    if (Count == 1 && (std::string_view(Words[0]) == "top" ||
-                       std::string_view(Words[0]) == "bottom"))
-        Across = 1;
-    if (Count == 1 && (std::string_view(Words[0]) == "left" ||
-                       std::string_view(Words[0]) == "right"))
-        Down = 1;
 
     Place Result;
-    Result.Col = Across == 0 ? 2 : Across == 1 ? (Cols - Wide) / 2 : Cols - Wide - 2;
-    Result.Row = Down == 0 ? 2 : Down == 1 ? (Rows - High) / 2 : Rows - High - 1;
+    const int MaxCol = std::max(0, Cols - Wide);
+    const int MaxRow = std::max(0, Rows - High);
+    Result.Col = Across == 0 ? 0 : Across == 1 ? MaxCol / 2 : MaxCol;
+    Result.Row = Down == 0 ? 0 : Down == 1 ? MaxRow / 2 : MaxRow;
     return Result;
 }
 
-PainterColor SurfaceInk(float V, float Light)
-{
+PainterColor SurfaceInk(float V, float Light) {
     const float Wrapped = std::clamp((V + 1.0f) * 0.5f, 0.0f, 1.0f);
-    const PainterColor Base = PainterColor::Mix(
-        DonutColorLow, DonutColorHigh, static_cast<std::uint8_t>(Wrapped * 255.0f));
-    return PainterColor::Mix(Black, Base,
-                             static_cast<std::uint8_t>(std::clamp(Light, 0.0f, 1.0f) * 255.0f));
+    const PainterColor Base =
+        PainterColor::Mix(DonutColorLow, DonutColorHigh,
+                          static_cast<std::uint8_t>(Wrapped * 255.0f));
+    return PainterColor::Mix(
+        Black, Base,
+        static_cast<std::uint8_t>(std::clamp(Light, 0.0f, 1.0f) * 255.0f));
 }
 
 class DonutPicture {
-public:
+  public:
     DonutPicture(int Width, int Height, painter::tui::Frame Canvas)
         : Width(Width), Height(Height), PixelHeight(Height * 2),
           Depth(static_cast<std::size_t>(Width) * PixelHeight),
-          Canvas(std::move(Canvas))
-    {
-    }
+          Canvas(std::move(Canvas)) {}
 
-    bool Draw(float A, float B)
-    {
+    bool Draw(float A, float B) {
         Canvas.Clear({painter::core::Colors::LightGray, Black});
-        std::fill(Depth.begin(), Depth.end(), std::numeric_limits<float>::lowest());
+        std::fill(Depth.begin(), Depth.end(),
+                  std::numeric_limits<float>::lowest());
 
         const float Ca = std::cos(A);
         const float Sa = std::sin(A);
@@ -124,7 +128,8 @@ public:
         constexpr float Major = 1.0f;
         constexpr float Minor = 0.43f;
         constexpr float Camera = 3.3f;
-        const float Scale = static_cast<float>(std::min(Width, PixelHeight)) * DonutScale;
+        const float Scale =
+            static_cast<float>(std::min(Width, PixelHeight)) * DonutScale;
 
         constexpr int UCount = 112;
         constexpr int VCount = 56;
@@ -155,17 +160,24 @@ public:
                 const float Nzy = -Nx * Sb + Nzx * Cb;
 
                 const float Perspective = Camera / (Camera - Zy);
-                const int PixelX = static_cast<int>(Width * 0.5f + Xy * Scale * Perspective);
-                const int PixelY = static_cast<int>(PixelHeight * 0.5f - Yx * Scale * Perspective);
-                if (PixelX < 0 || PixelX >= Width || PixelY < 0 || PixelY >= PixelHeight)
+                const int PixelX =
+                    static_cast<int>(Width * 0.5f + Xy * Scale * Perspective);
+                const int PixelY = static_cast<int>(PixelHeight * 0.5f -
+                                                    Yx * Scale * Perspective);
+                if (PixelX < 0 || PixelX >= Width || PixelY < 0 ||
+                    PixelY >= PixelHeight)
                     continue;
 
-                const std::size_t At = static_cast<std::size_t>(PixelY) * Width + PixelX;
-                if (Zy <= Depth[At]) continue;
+                const std::size_t At =
+                    static_cast<std::size_t>(PixelY) * Width + PixelX;
+                if (Zy <= Depth[At])
+                    continue;
                 Depth[At] = Zy;
 
-                const float Light = 0.18f +
-                                    std::max(0.0f, Nxy * 0.25f - Nyx * 0.35f + Nzy * 0.9f) * 0.82f;
+                const float Light =
+                    0.18f +
+                    std::max(0.0f, Nxy * 0.25f - Nyx * 0.35f + Nzy * 0.9f) *
+                        0.82f;
                 Canvas.PutPixel({PixelX, PixelY}, SurfaceInk(Sv, Light));
             }
         }
@@ -174,7 +186,7 @@ public:
 
     painter::tui::Frame &Frame() { return Canvas; }
 
-private:
+  private:
     int Width;
     int Height;
     int PixelHeight;
@@ -182,13 +194,13 @@ private:
     painter::tui::Frame Canvas;
 };
 
-}
+} // namespace
 
-int main()
-{
+int main() {
     const char *const *Words = nullptr;
     std::size_t Count = 0;
-    if (form_words(0, &Words, &Count) != 0) return 1;
+    if (form_words(0, &Words, &Count) != 0)
+        return 1;
 
     std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
         painter::tui::Surface::Open("donut", 30, 10);
@@ -198,9 +210,12 @@ int main()
     }
     painter::tui::Surface Screen = std::move(*Opened);
     const painter::core::Size Dimensions = Screen.Size();
-    const int Width = std::min(DonutZoneMaxWidth, std::max(8, Dimensions.Width - 4));
-    const int Height = std::min(DonutZoneMaxHeight, std::max(5, Dimensions.Height - 4));
-    const Place At = Where(Words, Count, Dimensions.Width, Dimensions.Height, Width, Height);
+    const int Width =
+        std::min(DonutZoneMaxWidth, std::max(8, Dimensions.Width - 4));
+    const int Height =
+        std::min(DonutZoneMaxHeight, std::max(5, Dimensions.Height - 4));
+    const Place At =
+        Where(Words, Count, Dimensions.Width, Dimensions.Height, Width, Height);
 
     std::expected<painter::tui::Frame, box::error> Created =
         painter::tui::Frame::Create({Width, Height});
@@ -223,16 +238,20 @@ int main()
     float B = 0.0f;
     for (;;) {
         const std::uint64_t Now = clock_uptime_us();
-        const float Seconds = std::min(0.1f, static_cast<float>(Now - Last) / 1e6f);
+        const float Seconds =
+            std::min(0.1f, static_cast<float>(Now - Last) / 1e6f);
         Last = Now;
         A += Seconds * 1.05f;
         B += Seconds * 0.73f;
         Picture.Draw(A, B);
-        if (!Screen.Paint({At.Col, At.Row}, Picture.Frame())) break;
+        if (!Screen.Paint({At.Col, At.Row}, Picture.Frame()))
+            break;
 
         const painter::tui::Event Event = Keys.Wait(33);
-        if (Event.Kind == painter::tui::EventKind::Gone) break;
-        if (Event.Kind == painter::tui::EventKind::Key && !Event.Key.IsExtended() &&
+        if (Event.Kind == painter::tui::EventKind::Gone)
+            break;
+        if (Event.Kind == painter::tui::EventKind::Key &&
+            !Event.Key.IsExtended() &&
             (Event.Key.Ascii == 'q' || Event.Key.Ascii == 'Q' ||
              Event.Key.Ascii == painter::tui::KeyCodes::Escape))
             break;
