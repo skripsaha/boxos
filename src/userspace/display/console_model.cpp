@@ -170,3 +170,43 @@ void ConsoleModel::Apply(const ConsoleRun &Run)
         return;
     }
 }
+
+bool ConsoleModel::CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Width,
+                               std::uint32_t Height,
+                               std::span<const DisplayLayerCell> Cells,
+                               std::uint32_t ScrollRows,
+                               std::uint32_t CursorX, std::uint32_t CursorY,
+                               bool CursorVisible)
+{
+    if (Width == 0 || Height == 0 || X < 0 || Y < 0 ||
+        static_cast<std::uint32_t>(X) + Width > WidthValue ||
+        static_cast<std::uint32_t>(Y) + Height > HeightValue)
+        return false;
+
+    const std::size_t Count = static_cast<std::size_t>(Width) * Height;
+    if (Cells.size() != Count || ScrollRows > HeightValue) return false;
+    if (CursorVisible &&
+        (CursorX >= Width || CursorY >= Height ||
+         static_cast<std::uint32_t>(X) + CursorX >= WidthValue ||
+         static_cast<std::uint32_t>(Y) + CursorY >= HeightValue))
+        return false;
+
+    for (std::uint32_t Row = 0; Row < ScrollRows; Row++) Scroll();
+    if (ScrollRows != 0)
+        CursorRow = CursorRow > ScrollRows ? CursorRow - ScrollRows : 0;
+
+    for (std::uint32_t Row = 0; Row < Height; Row++) {
+        for (std::uint32_t Col = 0; Col < Width; Col++) {
+            const DisplayLayerCell &Cell = Cells[static_cast<std::size_t>(Row) * Width + Col];
+            if (!Cell.Opaque) continue;
+            Surface[static_cast<std::size_t>(Y + static_cast<std::int32_t>(Row)) * WidthValue +
+                    X + static_cast<std::int32_t>(Col)] = Cell.Cell;
+        }
+    }
+
+    if (CursorVisible) {
+        CursorColumn = static_cast<std::uint32_t>(X) + CursorX;
+        CursorRow = static_cast<std::uint32_t>(Y) + CursorY;
+    }
+    return true;
+}

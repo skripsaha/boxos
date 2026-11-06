@@ -787,6 +787,22 @@ static void LayerReply(std::uint32_t Requester, error_t Error,
     }
 }
 
+static void LayerCommitReply(std::uint32_t Requester, error_t Error,
+                             std::uint32_t LayerId, std::uint64_t Nonce)
+{
+    DisplayLayerCommitReply Reply{};
+    Reply.command = DISP_CMD_LAYER_COMMIT;
+    Reply.error = static_cast<std::int32_t>(Error);
+    Reply.layer_id = LayerId;
+    Reply.display_pid = cabin_info()->pid;
+    Reply.nonce = Nonce;
+    const int Code = send(Requester, &Reply, sizeof(Reply));
+    if (Code != 0) {
+        kdbg_print("[display] layer commit reply to pid %u failed (%d)\n",
+                   Requester, Code);
+    }
+}
+
 static void LayerOpen(std::uint32_t Requester, const DisplayLayerOpenRequest &Request)
 {
     if (!g_console_model || Request.width == 0 || Request.height == 0 ||
@@ -887,6 +903,38 @@ static bool LayerFrame(std::uint32_t Requester, std::uint32_t Generation,
     return false;
 }
 
+static void LayerCommit(std::uint32_t Requester,
+                        const DisplayLayerCommitRequest &Request)
+{
+    for (auto It = g_layers.begin(); It != g_layers.end(); ++It) {
+        if (It->Id != Request.layer_id) continue;
+        if (It->OwnerPid != Requester || It->OwnerGeneration != Request.generation) {
+            LayerCommitReply(Requester, ERR_PERMISSION_DENIED, 0, Request.nonce);
+            return;
+        }
+
+        (void)LayerConsume(*It);
+        if (!It->HasFrame) {
+            LayerCommitReply(Requester, ERR_INVALID_STATE, It->Id, Request.nonce);
+            return;
+        }
+        if (!g_console_model->CommitLayer(It->X, It->Y, It->Width, It->Height,
+                                          It->Cells, Request.scroll_up,
+                                          It->CursorX, It->CursorY,
+                                          It->CursorVisible)) {
+            LayerCommitReply(Requester, ERR_INVALID_ARGUMENT, It->Id, Request.nonce);
+            return;
+        }
+
+        const std::uint32_t LayerId = It->Id;
+        g_layers.erase(It);
+        g_present_dirty = true;
+        LayerCommitReply(Requester, OK, LayerId, Request.nonce);
+        return;
+    }
+    LayerCommitReply(Requester, ERR_INVALID_STATE, 0, Request.nonce);
+}
+
 static bool LayersDropProcess(std::uint32_t Pid, std::uint32_t Generation)
 {
     bool Changed = false;
@@ -937,6 +985,13 @@ static bool ipc_step(void)
                 DisplayLayerCloseRequest Request{};
                 memcpy(&Request, data, sizeof(Request));
                 (void)LayerClose(entry.sender_pid, Request.generation, Request.layer_id);
+            }
+            break;
+        case DISP_CMD_LAYER_COMMIT:
+            if (len >= sizeof(DisplayLayerCommitRequest)) {
+                DisplayLayerCommitRequest Request{};
+                memcpy(&Request, data, sizeof(Request));
+                LayerCommit(entry.sender_pid, Request);
             }
             break;
         case DISP_CMD_LANE:

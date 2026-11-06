@@ -64,6 +64,44 @@ box::result<DisplayLayerOpenReply> AwaitOpenReply(std::uint64_t Nonce)
     }
 }
 
+box::result<DisplayLayerCommitReply> AwaitCommitReply(std::uint64_t Nonce,
+                                                       std::uint32_t LayerId)
+{
+    std::vector<Result> Held;
+    constexpr std::uint64_t ReplyTimeoutUs = 5'000'000;
+    const std::uint64_t Deadline = clock_uptime_us() + ReplyTimeoutUs;
+    for (;;) {
+        const std::uint64_t Now = clock_uptime_us();
+        if (Now >= Deadline) {
+            for (const Result &Other : Held) result_restash(&Other);
+            return std::unexpected(box::error{box::errc::timeout});
+        }
+        const std::uint64_t RemainingUs = Deadline - Now;
+        const std::uint32_t WaitMs = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(1000, (RemainingUs + 999) / 1000));
+        Result Raw{};
+        if (!receive_wait(&Raw, WaitMs)) continue;
+        if (Raw.sender_pid != 0 && Raw.data_addr != 0 &&
+            Raw.data_length >= sizeof(DisplayLayerCommitReply)) {
+            DisplayLayerCommitReply Reply{};
+            std::memcpy(&Reply, reinterpret_cast<const void *>(static_cast<std::uintptr_t>(Raw.data_addr)),
+                        sizeof(Reply));
+            if (Reply.command == DISP_CMD_LAYER_COMMIT && Reply.layer_id == LayerId &&
+                Reply.nonce == Nonce) {
+                for (const Result &Other : Held) result_restash(&Other);
+                return Reply;
+            }
+        }
+        try {
+            Held.push_back(Raw);
+        } catch (...) {
+            for (const Result &Other : Held) result_restash(&Other);
+            result_restash(&Raw);
+            return std::unexpected(box::error{box::errc::no_memory});
+        }
+    }
+}
+
 std::size_t CellCount(core::Size Size) noexcept
 {
     if (Size.Width <= 0 || Size.Height <= 0) return 0;
@@ -221,6 +259,31 @@ box::status DisplayLayer::Present(std::span<const DisplayLayerCell> Cells,
     Header->sequence[Slot] = Sequence;
     __atomic_store_n(&Header->slot_state[Slot], DISPLAY_LAYER_READY, __ATOMIC_RELEASE);
     return Notify();
+}
+
+box::status DisplayLayer::Commit(std::uint32_t ScrollRows) noexcept
+{
+    if (!Opened || !Header) return std::unexpected(box::error{box::errc::invalid_state});
+    if (ScrollRows > static_cast<std::uint32_t>(Bounds.Height))
+        return std::unexpected(box::error{box::errc::out_of_range});
+
+    DisplayLayerCommitRequest Request{};
+    Request.command = DISP_CMD_LAYER_COMMIT;
+    Request.layer_id = LayerId;
+    Request.generation = strand_self_generation();
+    Request.nonce = NextLayerNonce();
+    Request.scroll_up = ScrollRows;
+    const int Code = send(DisplayPid, &Request, sizeof(Request));
+    if (Code != 0) return std::unexpected(box::error{box_errno_of(Code)});
+
+    box::result<DisplayLayerCommitReply> Reply = AwaitCommitReply(Request.nonce, LayerId);
+    if (!Reply) return std::unexpected(Reply.error());
+    if (Reply->error != 0) return std::unexpected(box::error{static_cast<error_t>(Reply->error)});
+
+    Opened = false;
+    Header = nullptr;
+    Shared = {};
+    return {};
 }
 
 box::status DisplayLayer::Close() noexcept

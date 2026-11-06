@@ -5,8 +5,6 @@
 #include <new>
 #include <stdexcept>
 
-#include "text_cell.h"
-
 #include "painter/tui/glyph.h"
 
 namespace painter::tui {
@@ -154,30 +152,6 @@ bool Frame::PutPixels(std::span<const core::Color> Pixels)
 Cell Frame::Read(core::Point At) const noexcept
 {
     return InBounds(At) ? this->At(At) : Cell{};
-}
-
-void Frame::WriteNative(void *RawOut, std::size_t Count) const noexcept
-{
-    WriteNativeRegion(RawOut, Count, {0, 0, Bounds.Width, Bounds.Height});
-}
-
-void Frame::WriteNativeRegion(void *RawOut, std::size_t Count, core::Rect Region) const noexcept
-{
-    if (!RawOut || Region.Empty() || Region.X < 0 || Region.Y < 0 || Region.X > Bounds.Width - Region.Width ||
-        Region.Y > Bounds.Height - Region.Height)
-        return;
-    TextCell *Out = static_cast<TextCell *>(RawOut);
-    std::size_t Used = 0;
-    for (std::int32_t Row = Region.Y; Row < Region.Y + Region.Height; Row++) {
-        for (std::int32_t Col = Region.X; Col < Region.X + Region.Width && Used < Count; Col++) {
-            const Cell &Value = At({Col, Row});
-            Out[Used] = TextCell{};
-            Out[Used].fg = Value.Foreground.Raw();
-            Out[Used].bg = Value.Background.Raw();
-            Out[Used].ch = Value.Glyph;
-            Used++;
-        }
-    }
 }
 
 }  // namespace painter::tui

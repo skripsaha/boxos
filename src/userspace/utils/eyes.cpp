@@ -306,37 +306,24 @@ Place Where(const char *const *Words, std::size_t Count, int Cols, int Rows, int
     return At;
 }
 
-/* The pixels laid as half blocks at `At`, a row of cells at a time, and only
- * the cells an eye covers: the console round them is left as it is. Erased,
- * the same cells are laid blank. */
-box::status Paint(const EyePicture &Picture, painter::tui::Surface &Screen, painter::tui::Frame &Frame, Place At,
-                  bool Erase)
+/* Replace the entire retained footprint at `At`. Transparent cells reveal the
+ * base surface, so a moving eye never leaves its previous frame behind. */
+box::status Paint(const EyePicture &Picture, painter::tui::Surface &Screen,
+                  painter::tui::Frame &Frame, Place At)
 {
+    if (auto Cleared = Screen.Clear(); !Cleared) return Cleared;
+    Frame.ClearTransparent();
     int Rows = (Picture.Height + 1) / 2;
     for (int Row = 0; Row < Rows; Row++) {
-        std::size_t Run = 0;
-        int          Start = 0;
-        for (int X = 0; X <= Picture.Width; X++) {
+        for (int X = 0; X < Picture.Width; X++) {
             PainterColor Top = X < Picture.Width ? Picture.At(X, Row * 2) : Empty;
             PainterColor Low = X < Picture.Width ? Picture.At(X, Row * 2 + 1) : Empty;
             bool  Inked = X < Picture.Width && (Top != Empty || Low != Empty);
-            if (Inked) {
-                if (Run == 0) Start = X;
-                Frame.Put({X, Row}, painter::tui::Cell{Erase ? ' ' : painter::tui::Glyphs::UpperHalf,
-                                                       Erase ? painter::core::Colors::LightGray : Top,
-                                                       Erase ? painter::core::Colors::Black : Low});
-                Run++;
-                continue;
-            }
-            if (Run != 0) {
-                box::status Painted = Screen.Paint({At.Col + Start, At.Row + Row}, Frame,
-                                                    {Start, Row, static_cast<std::int32_t>(Run), 1});
-                if (!Painted) return Painted;
-                Run = 0;
-            }
+            if (Inked)
+                Frame.Put({X, Row}, painter::tui::Cell{painter::tui::Glyphs::UpperHalf, Top, Low});
         }
     }
-    return {};
+    return Screen.Composite({At.Col, At.Row}, Frame);
 }
 
 }
@@ -381,7 +368,7 @@ int main()
         bool          Moving = Eyes.Step(std::min(0.5f, static_cast<float>(Now - Last) / 1e6f));
         Last = Now;
         Picture.Draw(Eyes);
-        if (!Paint(Picture, Screen, Overlay, At, false)) break;
+        if (!Paint(Picture, Screen, Overlay, At)) break;
 
         painter::tui::Event Event = Keys.Wait(Moving ? MovingMs : StillMs);
         if (Event.Kind == painter::tui::EventKind::Gone) break;
@@ -391,7 +378,7 @@ int main()
             break;
     }
     (void)Keys.Close();
-    (void)Paint(Picture, Screen, Overlay, At, true);
+    (void)Screen.Clear();
     (void)Screen.Close();
     Say(std::format("[EYES] {} blink{}", Eyes.Blinks, Eyes.Blinks == 1 ? "" : "s"));
     return 0;

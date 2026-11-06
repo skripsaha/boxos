@@ -21,7 +21,7 @@
 
 #include "painter/core/color.h"
 #include "painter/tui/glyph.h"
-#include "painter/tui/surface.h"
+#include "painter/tui/console_surface.h"
 #include "qr_code.h"
 
 BOX_FORM("takes text \"the words to make a code of\"\n");
@@ -83,7 +83,7 @@ std::string AsText(const QrCode &Code, std::size_t Bytes)
 
 /* The rows of the console from the cursor down, scrolled up first when the
  * code would not fit under it; the row it begins at, or -1. */
-std::expected<int, box::error> MakeRoom(int Rows, painter::tui::Surface &Screen)
+std::expected<int, box::error> MakeRoom(int Rows, painter::tui::ConsoleSurface &Screen)
 {
     std::expected<painter::core::Point, box::error> Cursor = Screen.Cursor();
     if (!Cursor) return std::unexpected(Cursor.error());
@@ -93,7 +93,7 @@ std::expected<int, box::error> MakeRoom(int Rows, painter::tui::Surface &Screen)
     return Top;
 }
 
-bool Paint(const QrCode &Code, int Quiet, painter::tui::Surface &Screen)
+bool Paint(const QrCode &Code, int Quiet, painter::tui::ConsoleSurface &Screen)
 {
     int Side = Code.Size + 2 * Quiet, Rows = (Side + 1) / 2;
     std::expected<int, box::error> Top = MakeRoom(Rows + 1, Screen);
@@ -145,13 +145,13 @@ int Run()
         return 0;
     }
 
-    std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open("qr", 30, 10);
+    std::expected<painter::tui::ConsoleSurface, painter::tui::StageError> Opened =
+        painter::tui::ConsoleSurface::Open("qr", 30, 10);
     if (!Opened) {
         Say(Opened.error().Describe("qr"));
         return 1;
     }
-    painter::tui::Surface Screen = std::move(*Opened);
+    painter::tui::ConsoleSurface Screen = std::move(*Opened);
     const painter::core::Size Dimensions = Screen.Size();
     int Most = std::min(40, MostVersionFor(Dimensions));
     if (Most < 1) {
@@ -168,6 +168,10 @@ int Run()
     int Quiet = std::clamp(Room / 2, QuietLeast, QuietMost);
     if (!Paint(*Code, Quiet, Screen)) {
         Say("qr: the screen would not take the code");
+        return 1;
+    }
+    if (!Screen.Commit()) {
+        Say("qr: the code could not be committed to the console");
         return 1;
     }
     Say(Caption(*Code, Words.size()));

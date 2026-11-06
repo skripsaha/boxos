@@ -30,6 +30,7 @@ public:
 
     box::status Present(std::span<const DisplayLayerCell> Cells,
                         core::Point Cursor, bool CursorVisible) noexcept;
+    box::status Commit(std::uint32_t ScrollRows = 0) noexcept;
     box::status Close() noexcept;
 
 private:

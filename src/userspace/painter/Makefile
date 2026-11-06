@@ -19,7 +19,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -I ../boxlib/include \
          -I ../../include
 
-SRCS = src/tui/frame.cpp src/tui/stage.cpp src/tui/surface.cpp src/tui/keyboard.cpp \
+SRCS = src/tui/frame.cpp src/tui/stage.cpp src/tui/layer_canvas.cpp src/tui/surface.cpp src/tui/console_surface.cpp src/tui/keyboard.cpp \
        src/tui/display_client.cpp
 OBJS = $(SRCS:.cpp=.o)
 DEPS = $(OBJS:.o=.d)

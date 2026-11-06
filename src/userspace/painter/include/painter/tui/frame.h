@@ -41,9 +41,6 @@ struct Cell {
     friend bool operator==(const Cell &, const Cell &) noexcept = default;
 };
 
-class Stage;
-class Surface;
-
 class Frame {
 public:
     static box::result<Frame> Create(core::Size Bounds) noexcept;
@@ -58,7 +55,7 @@ public:
     std::int32_t PixelHeight() const noexcept;
 
     /* Clear writes an opaque background. ClearTransparent leaves every cell
-     * untouched when this frame is passed to Surface::Composite. */
+     * transparent when this frame is passed to an overlay replacement. */
     void Clear(TextStyle Style = {});
     void ClearTransparent() noexcept;
 
@@ -94,15 +91,8 @@ private:
         return Cells[static_cast<std::size_t>(At.Y) * Bounds.Width + At.X];
     }
 
-    /* The kernel-facing representation stays private to Painter. */
-    void WriteNative(void *Out, std::size_t Count) const noexcept;
-    void WriteNativeRegion(void *Out, std::size_t Count, core::Rect Region) const noexcept;
-
     core::Size       Bounds;
     std::vector<Cell> Cells;
-
-    friend class Stage;
-    friend class Surface;
 };
 
 }  // namespace painter::tui

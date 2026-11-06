@@ -118,6 +118,7 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
 #define DISP_CMD_LAYER_OPEN   0x40
 #define DISP_CMD_LAYER_FRAME  0x41
 #define DISP_CMD_LAYER_CLOSE  0x42
+#define DISP_CMD_LAYER_COMMIT 0x43
 
 #define DISPLAY_LAYER_VERSION 2u
 #define DISPLAY_LAYER_SLOTS   3u
@@ -171,6 +172,28 @@ typedef struct PACKED {
     uint32_t generation;
 } DisplayLayerFrameNotice;
 
+/* Commit is an explicit transaction: the display server applies the requested
+ * base-surface scroll, folds the layer's current opaque cells into that base,
+ * applies its cursor, removes the layer, and acknowledges the operation
+ * before the client may exit. */
+typedef struct PACKED {
+    uint8_t  command;
+    uint8_t  reserved[3];
+    uint32_t layer_id;
+    uint32_t generation;
+    uint64_t nonce;
+    uint32_t scroll_up;
+} DisplayLayerCommitRequest;
+
+typedef struct PACKED {
+    uint8_t  command;
+    uint8_t  reserved[3];
+    int32_t  error;
+    uint32_t layer_id;
+    uint32_t display_pid;
+    uint64_t nonce;
+} DisplayLayerCommitReply;
+
 /* The shared Bay header is deliberately fixed-size and contains only POD
  * fields.  Slot state is changed with compiler atomics by both cabins. */
 typedef struct {
@@ -208,6 +231,10 @@ static_assert(sizeof(DisplayLayerCloseRequest) == 12,
               "DisplayLayerCloseRequest is an IPC ABI and must stay 12 bytes");
 static_assert(sizeof(DisplayLayerFrameNotice) == 12,
               "DisplayLayerFrameNotice is an IPC ABI and must stay 12 bytes");
+static_assert(sizeof(DisplayLayerCommitRequest) == 24,
+              "DisplayLayerCommitRequest is an IPC ABI and must stay 24 bytes");
+static_assert(sizeof(DisplayLayerCommitReply) == 24,
+              "DisplayLayerCommitReply is an IPC ABI and must stay 24 bytes");
 #else
 _Static_assert(sizeof(DisplayLayerSharedHeader) == 104,
                "DisplayLayerSharedHeader is a Bay ABI and must stay 104 bytes");
@@ -221,6 +248,10 @@ _Static_assert(sizeof(DisplayLayerCloseRequest) == 12,
                "DisplayLayerCloseRequest is an IPC ABI and must stay 12 bytes");
 _Static_assert(sizeof(DisplayLayerFrameNotice) == 12,
                "DisplayLayerFrameNotice is an IPC ABI and must stay 12 bytes");
+_Static_assert(sizeof(DisplayLayerCommitRequest) == 24,
+               "DisplayLayerCommitRequest is an IPC ABI and must stay 24 bytes");
+_Static_assert(sizeof(DisplayLayerCommitReply) == 24,
+               "DisplayLayerCommitReply is an IPC ABI and must stay 24 bytes");
 #endif
 
 #ifdef __cplusplus

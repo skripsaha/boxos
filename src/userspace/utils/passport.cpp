@@ -32,7 +32,7 @@
 #include "keep.h"
 #include "painter/core/color.h"
 #include "painter/tui/glyph.h"
-#include "painter/tui/surface.h"
+#include "painter/tui/console_surface.h"
 
 BOX_FORM("gives text\n");
 
@@ -508,22 +508,22 @@ bool PaintReport(const std::vector<Line> &Lines)
     std::size_t CardRows   = Lines.size() + 2;
     std::size_t ReportRows = TopMargin + std::max(LogoCellRows, CardRows);
     constexpr std::size_t PromptRows = 1;
-    std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open("passport", MinimumCols, static_cast<std::int32_t>(ReportRows + PromptRows));
+    std::expected<painter::tui::ConsoleSurface, painter::tui::StageError> Opened =
+        painter::tui::ConsoleSurface::Open("passport", MinimumCols, static_cast<std::int32_t>(ReportRows + PromptRows));
     if (!Opened) {
         print_to_screen((Opened.error().Describe("passport") + '\n').c_str());
         return false;
     }
-    painter::tui::Surface Surface = std::move(*Opened);
-    const painter::core::Size Dimensions = Surface.Size();
+    painter::tui::ConsoleSurface Output = std::move(*Opened);
+    const painter::core::Size Dimensions = Output.Size();
 
-    std::expected<painter::core::Point, box::error> Cursor = Surface.Cursor();
+    std::expected<painter::core::Point, box::error> Cursor = Output.Cursor();
     if (!Cursor) return false;
     std::size_t PaintTop = static_cast<std::size_t>(Cursor->Y);
     if (PaintTop + ReportRows + PromptRows > static_cast<std::size_t>(Dimensions.Height)) {
         std::size_t BottomTop = static_cast<std::size_t>(Dimensions.Height) - ReportRows - PromptRows;
         for (std::size_t Scrolls = PaintTop - BottomTop; Scrolls > 0; Scrolls--) {
-            if (!Surface.ScrollUp()) {
+            if (!Output.ScrollUp()) {
                 print_to_screen("passport: the screen would not scroll for its portrait\n");
                 return false;
             }
@@ -538,8 +538,9 @@ bool PaintReport(const std::vector<Line> &Lines)
     Picture.Logo(LogoTop(CardRows));
     Picture.Card(TopMargin, Lines);
 
-    if (!Surface.Paint({0, static_cast<std::int32_t>(PaintTop)}, Picture.Canvas())) return false;
-    return static_cast<bool>(Surface.SetCursor({0, static_cast<std::int32_t>(PaintTop + ReportRows)}));
+    if (!Output.Paint({0, static_cast<std::int32_t>(PaintTop)}, Picture.Canvas())) return false;
+    if (!Output.SetCursor({0, static_cast<std::int32_t>(PaintTop + ReportRows)})) return false;
+    return static_cast<bool>(Output.Commit());
 }
 
 /* ---- the portrait as text ------------------------------------------------- */

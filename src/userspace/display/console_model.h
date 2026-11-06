@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include "box/display.h"
@@ -18,6 +19,11 @@ public:
     const std::vector<TextCell> &Cells() const noexcept { return Surface; }
 
     void Apply(const ConsoleRun &Run);
+    bool CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Width,
+                    std::uint32_t Height, std::span<const DisplayLayerCell> Cells,
+                    std::uint32_t ScrollRows,
+                    std::uint32_t CursorX, std::uint32_t CursorY,
+                    bool CursorVisible);
 
 private:
     void Clear(std::uint32_t Foreground, std::uint32_t Background);
