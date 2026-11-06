@@ -7,81 +7,76 @@ namespace {
 
 using Color = TumbleColor;
 
-}
+}  // namespace
 
 int TumbleWorld::GroundHeight(int X) const
 {
-    const float Broad = std::sin(X * 0.019f + 1.1f) * 5.0f;
-    const float Shoulder = std::sin(X * 0.047f + 2.7f) * 2.2f;
-    const float Wash = std::sin(X * 0.009f + 0.4f) * 3.5f;
-    return Height - 9 - static_cast<int>(Broad + Shoulder + Wash);
+    const float Broad = std::sin(X * 0.017f + 0.8f) * 4.5f;
+    const float Dune = std::sin(X * 0.043f + 2.2f) * 2.2f;
+    const float Wash = std::sin(X * 0.008f + 0.4f) * 3.0f;
+    const float Cut = std::sin(X * 0.091f + 1.3f) * 0.8f;
+    return Height - 10 - static_cast<int>(Broad + Dune + Wash + Cut);
 }
-
 void TumbleWorld::MakeGround()
 {
     Floor.resize(static_cast<std::size_t>(Width));
     Mesa.resize(static_cast<std::size_t>(Width));
     for (int X = 0; X < Width; X++) {
         Floor[static_cast<std::size_t>(X)] = GroundHeight(X);
-        const float Ridge = std::sin(X * 0.016f + 0.7f) * 4.5f + std::sin(X * 0.039f) * 2.0f;
-        const float Cut = std::sin(X * 0.006f + 2.1f) * 5.0f + std::sin(X * 0.028f) * 2.0f;
-        const int Top = Height * 58 / 100 + static_cast<int>(Ridge + Cut);
-        Mesa[static_cast<std::size_t>(X)] = std::clamp(Top, Height - 30, Height - 13);
+        const float Ridge = std::sin(X * 0.014f + 0.7f) * 6.0f + std::sin(X * 0.032f) * 2.3f;
+        const float Canyon = std::sin(X * 0.0045f + 1.8f) * 7.0f + std::sin(X * 0.023f + 0.2f) * 2.0f;
+        const int Top = Height * 52 / 100 + static_cast<int>(Ridge + Canyon);
+        Mesa[static_cast<std::size_t>(X)] = std::clamp(Top, Height - 37, Height - 18);
     }
 }
 
 Color TumbleWorld::SceneInk()
 {
-    return Color::Rgb(static_cast<std::uint8_t>(Dice.Count(80, 150)),
-                      static_cast<std::uint8_t>(Dice.Count(65, 120)),
-                      static_cast<std::uint8_t>(Dice.Count(45, 88)));
+    return Color::Rgb(static_cast<std::uint8_t>(Dice.Count(76, 148)),
+                      static_cast<std::uint8_t>(Dice.Count(60, 116)),
+                      static_cast<std::uint8_t>(Dice.Count(45, 92)));
 }
 
 void TumbleWorld::MakeScene()
 {
-    for (int Made = Width / 18; Made > 0; Made--) {
-        const int X = Dice.Count(4, Width - 5);
-        const int Layer = Dice.Chance(0.28f) ? 0 : 1;
-        Cacti.push_back({X, Dice.Count(Layer == 0 ? 7 : 10, Layer == 0 ? 13 : 22), Dice.Chance(0.72f), Layer,
-                         Dice.Chance(0.5f) ? Color::Rgb(0x49, 0x9B, 0x4B) : Color::Rgb(0x77, 0xA6, 0x45)});
+    Stars.reserve(static_cast<std::size_t>(Width / 2));
+    for (int Made = Width / 2; Made > 0; Made--)
+        Stars.push_back({Dice.Count(0, Width - 1), Dice.Count(4, Height * 45 / 100), Dice.Chance(0.18f) ? 2 : 1,
+                         Dice.Between(0, 6.28f)});
+
+    for (int Made = Width / 24; Made > 0; Made--) {
+        const int X = Dice.Count(5, Width - 6);
+        Cacti.push_back({X, Dice.Count(14, 29), Dice.Chance(0.72f), Dice.Chance(0.2f) ? 0 : 1,
+                         Dice.Chance(0.5f) ? Color::Rgb(0x4D, 0x9A, 0x4D) : Color::Rgb(0x78, 0xA6, 0x45)});
     }
-    for (int Made = Width / 20; Made > 0; Made--) {
-        const int Layer = Dice.Chance(0.35f) ? 0 : 1;
-        Rocks.push_back({Dice.Count(3, Width - 8), Dice.Count(4, 12), Dice.Count(2, 7), Layer,
-                         Layer == 0 ? Color::Rgb(0x71, 0x68, 0x6B) : SceneInk()});
+    for (int Made = Width / 18; Made > 0; Made--) {
+        const int X = Dice.Count(4, Width - 9);
+        Rocks.push_back({X, Dice.Count(5, 13), Dice.Count(3, 8), Dice.Chance(0.3f) ? 0 : 1,
+                         static_cast<std::uint32_t>(Dice.Next()), SceneInk()});
     }
     for (int Made = Width / 72; Made > 0; Made--) {
-        const int Layer = Dice.Chance(0.5f) ? 0 : 1;
-        Ruins.push_back({Dice.Count(8, Width - 10), Dice.Count(Layer == 0 ? 6 : 10, Layer == 0 ? 12 : 20), Layer,
-                         Layer == 0 ? Color::Rgb(0x6B, 0x5E, 0x63) : Color::Rgb(0x78, 0x5A, 0x48)});
+        const int Layer = Dice.Chance(0.45f) ? 0 : 1;
+        Ruins.push_back({Dice.Count(12, Width - 14), Dice.Count(Layer == 0 ? 9 : 13, Layer == 0 ? 16 : 24), Layer,
+                         static_cast<TumbleStructureKind>(Dice.Count(0, 2)),
+                         Layer == 0 ? Color::Rgb(0x68, 0x5E, 0x60) : Color::Rgb(0x78, 0x52, 0x38)});
     }
-    for (int Made = Width / 45; Made > 0; Made--)
-        AddBird(Dice.Between(0, static_cast<float>(Width)), Dice.Between(8, 30));
-    for (int Made = Width / 55; Made > 0; Made--)
+    for (int Made = Width / 52; Made > 0; Made--) {
+        const int Layer = Dice.Chance(0.35f) ? 0 : 1;
+        DeadTrees.push_back({Dice.Count(5, Width - 7), Dice.Count(Layer == 0 ? 9 : 14, Layer == 0 ? 16 : 27), Layer,
+                             Layer == 0 ? Color::Rgb(0x5A, 0x50, 0x4E) : Color::Rgb(0x65, 0x4C, 0x3D)});
+    }
+    for (int Made = Width / 64; Made > 0; Made--) {
+        const int X = Dice.Count(6, Width - 28);
+        Fences.push_back({X, Ground(X), Dice.Count(12, 28), Dice.Chance(0.3f) ? 0 : 1,
+                          Color::Rgb(0x86, 0x61, 0x3D)});
+    }
+    for (int Made = Width / 17; Made > 0; Made--) {
+        const int X = Dice.Count(3, Width - 4);
+        Bones.push_back({X, Ground(X) - Dice.Count(1, 2), Dice.Chance(0.25f) ? 0 : 1, Dice.Chance(0.25f),
+                         Color::Rgb(0xD1, 0xBA, 0x8C)});
+    }
+    for (int Made = Width / 42; Made > 0; Made--)
+        AddBird(Dice.Between(0, static_cast<float>(Width)), Dice.Between(8.0f, Height * 0.42f));
+    for (int Made = Width / 26; Made > 0; Made--)
         AddWeed(Dice.Between(0, static_cast<float>(Width)));
-}
-
-void TumbleWorld::AddWeed(float X)
-{
-    if (Weeds.size() >= 90) return;
-    const int Layer = Dice.Chance(0.25f) ? 0 : 1;
-    const float Direction = Dice.Chance(0.5f) ? 1.0f : -1.0f;
-    Weeds.push_back({std::clamp(X, 2.0f, static_cast<float>(Width - 3)), Direction * Dice.Between(2.5f, 8.0f),
-                     Dice.Between(0, 6.28f), Layer, Color::Rgb(0x9B, 0x72, 0x40)});
-    Spawned++;
-}
-
-void TumbleWorld::AddCactus(float X)
-{
-    if (Cacti.size() >= 100) return;
-    Cacti.push_back({std::clamp(static_cast<int>(X), 4, Width - 5), Dice.Count(10, 22), Dice.Chance(0.72f), 1,
-                     Color::Rgb(0x5F, 0xA1, 0x4A)});
-    Spawned++;
-}
-
-void TumbleWorld::AddBird(float X, float Y)
-{
-    if (Birds.size() >= 80) return;
-    Birds.push_back({X, Y, Dice.Between(4.0f, 10.0f) * (Dice.Chance(0.5f) ? 1.0f : -1.0f), Dice.Between(0, 6.28f),
-                     Dice.Chance(0.45f) ? 0 : 1, Color::Rgb(0xD8, 0xD0, 0xB8)});
 }

@@ -46,7 +46,6 @@ bool OnKey(TumbleWorld &World, const painter::tui::KeyEvent &Key)
         return true;
     }
     switch (Key.Ascii) {
-    case ' ': World.Sunbeam = !World.Sunbeam; break;
     case 's':
     case 'S': World.AddWeed(World.CameraX + World.ViewWidth * 0.5f); break;
     case 'c':
@@ -104,8 +103,8 @@ int main()
             if (Event.Kind == painter::tui::EventKind::Key && !OnKey(World, Event.Key)) break;
         }
         (void)Screen.Close();
-        Say(std::format("[TUMBLEWEED] {} object{} called into the wasteland in {} seconds", World.Spawned,
-                        World.Spawned == 1 ? " was" : "s were", (clock_uptime_us() - Began) / 1000000));
+        Say(std::format("[TUMBLEWEED] {} object{} entered the wasteland after {} seconds", World.Spawned,
+                        World.Spawned == 1 ? "" : "s", (clock_uptime_us() - Began) / 1000000));
         return Painted ? 0 : 1;
     } catch (const std::bad_alloc &) {
         Say("There is not enough memory for a wasteland the size of this screen.");
