@@ -30,11 +30,21 @@ typedef struct {
 
 typedef int (*CommandHandler)(int argc, char *argv[]);
 
+/* What a built-in command's words are — a built-in has no Form, and this is
+ * the part of one the Whisper needs. */
+typedef enum {
+    SHELL_TAKES_NOTHING = 0,
+    SHELL_TAKES_COMMAND,       /* its first word is a command's name */
+    SHELL_TAKES_PROGRAM,       /* its first word is a program's file */
+    SHELL_TAKES_TAGS           /* its words are tags, + or - before each when changing */
+} ShellTakes;
+
 typedef struct {
     const char     *name;
     CommandHandler  handler;
     const char     *usage;
     const char     *description;
+    ShellTakes      takes;
 } ShellCommand;
 
 /* =========================================================================
@@ -44,8 +54,17 @@ typedef struct {
 void        ShellInit(void);
 void        ShellMainLoop(void);
 void        ShellStop(void);
+/* Whether the shell goes on: false once `exit` was said. */
+bool        ShellRunning(void);
+/* One line, whatever its length, run as if typed: the cut words for a
+ * built-in, the line itself for a program. 0 when it went through; anything
+ * else when it did not, and why was said. */
+int         ShellRunLine(const char *line);
 ShellState *ShellGetState(void);
-void        ShellUpdatePrompt(void);
+/* The Use Context as the kernel holds it, comma-joined, into a buffer of its
+ * own size the caller frees: the number of tags, 0 for none (*out NULL),
+ * negative when the kernel refused. */
+int         ShellContextWhole(char **out);
 
 /* Drop everything sitting in the IPC mailbox. Use between operations
  * that could otherwise consume a leftover Result (a late display PING

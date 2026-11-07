@@ -43,6 +43,13 @@
 # build makes when nobody names one: `tools/gates.sh --formats` holds every
 # gate to a part and to a scenario its harness runs on that part's format, and
 # every harness to stand_format (stand.sh).
+# Beside them the host's own stands, which no format touches: boxasm, the
+# in-BoxOS assembler and linker held to GNU ld and tools/nameplate; format,
+# BoxLib's printf conversions and snprintf's bound held to the host's C
+# library and to exact arithmetic; form, BoxLib's Form — its text, its image,
+# the sorting of a line into fields, the Luggage — held to exact outcomes; and
+# recipe, BoxLib's Recipe and its SHA-256 held to exact outcomes and to the
+# host's hashlib.
 #
 # The list is here, in the tree it judges, and not beside a session: a list
 # kept out of the tree can lose a gate without a diff saying so.
@@ -63,10 +70,10 @@ set -u
 
 GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut replug holdground returnfail
                 turns turnsmut cores replugwrite latelaunchmut haltcycle halthog halthogmut panicstop panicstopmut fullvolume roombackmut
-                stand standusb mkfs"
+                stand standusb mkfs crewcrash fare faremut"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross firstflushmut lastflushmut booknextfidmut stitchmut"
-GATES_OTHER="framerefuse concordance formats volread_selftest"
+GATES_OTHER="framerefuse concordance formats volread_selftest boxasm format form recipe"
 GATES_LONG="loggerhour loggerhourmut"
 BACKLIST_LOGCHECK="census censusmut stand standusb standmut abba abbamut"
 BACKLIST_POWERCUT="settlecut chaingrow nextfid nextfidmut poolmut flushmut"
@@ -117,6 +124,10 @@ gate_run() {
         volread_selftest) make VOLUME_FORMAT="$2" && python3 tools/volume-read.py build/boxos.img self-test ;;
         concordance)      python3 tools/concordance.py --self-test && python3 tools/concordance.py ;;
         formats)          gate_formats ;;
+        boxasm)           tools/boxasm_stand.sh ;;
+        format)           tools/format_stand.sh ;;
+        form)             tools/form_stand.sh ;;
+        recipe)           tools/recipe_stand.sh ;;
         heirloom)         HEIRLOOM_FORMAT=$2 HEIRLOOM_FROM=${HEIRLOOM_FROM:-$HEIRLOOM_N} tools/bindery.sh heirloom ;;
         *)                VOLUME_FORMAT=$2 tools/logcheck.sh "$name" ;;
     esac
@@ -220,7 +231,7 @@ for name in $WANTED; do
     # The harness's own closing words: its count, and the caveats and harness
     # failures it owns to — each cut at its explanation.
     verdict=$(sed $'s/\x1b\\[[0-9;]*m//g' "$OUT/$name.out" \
-              | grep -E '^(logcheck|powercut|bindery): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases|^concordance: |^gates --formats: [0-9]+ gates' \
+              | grep -E '^(logcheck|powercut|bindery|boxasm|format|form|recipe): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases|^concordance: |^gates --formats: [0-9]+ gates' \
               | sed 's/ — .*//' | paste -sd '|' - | sed 's/|/; /g')
     line="$name rc=$rc $(( $(date +%s) - t0 ))s ${verdict:-(no verdict line)}"
     echo "$line" | tee -a "$OUT/SUMMARY"

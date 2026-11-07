@@ -1,31 +1,66 @@
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/file.h"
-#include "box/string.h"
+#include "box/memory.h"
 #include "box/system.h"
 
+#include "filename.h"
+
+BOX_FORM("takes things \"the files to tag\"\n"
+         "takes words \"the tags they get\"\n"
+         "gives things\n");
+
+static bool give_tags(file_id_t file, const char *const *tags, size_t tag_count)
+{
+    for (size_t t = 0; t < tag_count; t++) {
+        if (tag_add(file, tags[t]) == 0) continue;
+        char *name = name_of_file(file);
+        printf("Could not give the tag %s to %s\n", tags[t], name ? name : "a file");
+        free(name);
+        return false;
+    }
+    return true;
+}
+
 int main(void) {
-    int argc = (int)luggage_word_count();
+    const file_id_t *files;
+    size_t file_count;
+    const char *const *tags;
+    size_t tag_count;
 
-    if (argc < 3) {
-        println("Usage: tag <filename> <key:value>");
+    if (form_things(0, &files, &file_count) != 0 || form_words(1, &tags, &tag_count) != 0) {
         exit(1);
         return 1;
     }
 
-    file_id_t matches[16];
-    int count = find_file_by_name(luggage_word(1), matches, NULL, 16);
-
-    if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
-    if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
-
-    if (tag_add(matches[0], luggage_word(2)) != 0) {
-        println("Error: Failed to add tag");
+    file_id_t *tagged = malloc(file_count * sizeof(file_id_t));
+    if (!tagged) {
+        println("There is not enough memory to tag these files");
         exit(1);
         return 1;
     }
 
-    println("Tag added");
-    exit(0);
-    return 0;
+    size_t done = 0;
+    for (size_t i = 0; i < file_count; i++) {
+        if (give_tags(files[i], tags, tag_count)) tagged[done++] = files[i];
+    }
+
+    souvenir_things(tagged, done);
+
+    const char *what = tag_count == 1 ? "Tag" : "Tags";
+    if (done > 0) {
+        char *name = done == 1 ? name_of_file(tagged[0]) : NULL;
+        if (done == 1)
+            printf("%s added to %s", what, name ? name : "the file");
+        else
+            printf("%s added to %u files", what, (unsigned)done);
+        if (done < file_count) printf("; %u could not be tagged", (unsigned)(file_count - done));
+        println("");
+        free(name);
+    }
+    free(tagged);
+
+    int failed = done < file_count;
+    exit(failed);
+    return failed;
 }

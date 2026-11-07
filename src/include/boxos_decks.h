@@ -24,7 +24,7 @@
  *  right block and can't collide silently with an existing range.
  * ============================================================================ */
 
-/* ─── Process + info (0x01 – 0x0A) ─────────────────────────────────── */
+/* ─── Process + info (0x01 – 0x0C) ─────────────────────────────────── */
 #define SYSTEM_OP_PROC_SPAWN        0x01
 #define SYSTEM_OP_PROC_KILL         0x02
 #define SYSTEM_OP_PROC_INFO         0x03
@@ -53,16 +53,26 @@
  * names): set and clear answer, in an optional 1-byte out_crate, whether it
  * now does — 1 remembered, 0 not (no volume, no ground on it for the context,
  * a medium that will not take the write, a later word already said); the
- * context is set either way. */
+ * context is set either way. change takes [u32 n][n bytes: the tags to
+ * add][the rest: the tags to take out] — each a comma-separated list, either
+ * empty — and changes the context in one word: added tags go after those it
+ * says, a tag in both lists is taken out, nothing left clears; it needs system
+ * authority and answers as set does. */
 #define SYSTEM_OP_USE_SET           0x04
 #define SYSTEM_OP_USE_GET           0x08
 #define SYSTEM_OP_USE_CLEAR         0x09
+#define SYSTEM_OP_USE_CHANGE        0x0D
 /* () -> u64 microseconds of processor time used by the CALLING cabin. Self
  * only, deliberately: another cabin's processor time is information this op
  * has no business handing out, and a question about yourself needs no
  * authority to check. Backs std::clock(). */
 #define SYSTEM_OP_PROC_CPUTIME      0x05
 #define SYSTEM_OP_PROC_EXEC         0x06
+/* proc.exec.file — proc.exec for one file, named by its id. params =
+ * [u64 file id][caller-tag augment]; in_crate = the Luggage bytes alone (none:
+ * no luggage); out_crate and auth as proc.exec. The file must be what a name
+ * would have started — active, wearing app or utility — else ERR_FILE_NOT_FOUND. */
+#define SYSTEM_OP_PROC_EXEC_FILE    0x0C
 #define SYSTEM_OP_INFO              0x07
 #define SYSTEM_OP_TLS_FSBASE        0x0A  /* set caller's FS base (C++ TLS) */
 
@@ -225,6 +235,11 @@
  * no token, ERR_WOULD_BLOCK — "this moved the cursor, that was its whole
  * job". */
 #define SYSTEM_OP_BELL              0xC7  /* (u32 pid) — wake that strand; carries nothing */
+
+/* strand.exit — the calling strand ends, and only it; its program goes on.
+ * Every other end is the program's, all its strands at once: proc.kill names
+ * another program (any strand of it) or, with target 0, the caller's own. */
+#define SYSTEM_OP_STRAND_EXIT       0xC8  /* () — the calling strand ends; nothing comes back to it */
 
 /* ============================================================================
  *  Storage deck opcodes — SINGLE SOURCE OF TRUTH, like the system deck above.

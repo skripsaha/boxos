@@ -28,6 +28,7 @@
 #include "brook.h"
 #include "tagfs.h"
 #include "use_context.h"    /* UseContextCabinChanged — a cabin's tags decide its verdict */
+#include "cpu_calibrate.h"  /* cpu_get_tsc_freq_khz — the slice in progress, in microseconds */
 #include "per_core.h"
 #include "amp.h"
 #include "cet_lifecycle.h"  /* Phase 2K+ per-process shadow-stack hooks */
@@ -243,9 +244,13 @@ static void process_init_strand_fields(process_t *proc)
 {
     proc->score            = 0;
     proc->last_run_time    = 0;
-    proc->consecutive_runs = 0;
     proc->total_cpu_time   = 0;
     proc->cpu_tsc_stamp    = 0;
+    proc->fare             = 0;
+    proc->fare_tsc         = 0;
+    proc->fare_core        = -1;                  /* placed by its first enqueue */
+    proc->tip              = 0;
+    proc->tip_core         = -1;                  /* placed by its first pocket */
     proc->park_seq         = 0;
     proc->state            = PROC_CREATED;
     spinlock_init(&proc->state_lock);
@@ -400,6 +405,7 @@ static void process_free_kernel_stack(process_t *proc)
 
     proc->kernel_stack_guard_base = NULL;
     proc->kernel_stack            = NULL;
+    proc->kernel_stack_top        = NULL;
 
     vmm_context_t *kernel_ctx = vmm_get_kernel_context();
     pte_t *guard_pte = vmm_get_pte(kernel_ctx, guard_virt);
@@ -454,20 +460,30 @@ static bool process_init_context_base(process_t *proc)
     return true;
 }
 
-/* Unmap + free a strand's hammock user stack.  No-op for the main strand
- * (user_stack_phys == 0), whose stack lives at the top of the address
- * space and is reclaimed wholesale by vmm_destroy_context at cabin
- * teardown.  Used by strand_spawn error-unwind and process cleanup. */
-static void process_free_strand_stack(process_t *proc)
+/* Top of a strand's user stack: the stack runs from the page above the gap at
+ * the bottom of the slot, CONFIG_USER_STACK_PAGES of it. */
+static uint64_t process_strand_stack_top(const process_t *proc)
 {
-    if (!proc || proc->user_stack_phys == 0 || !proc->cabin)
+    return proc->hammock_base +
+           (uint64_t)(CABIN_HAMMOCK_STACK_PAGE_OFF + CONFIG_USER_STACK_PAGES) * VMM_PAGE_SIZE;
+}
+
+/* End a strand's hold on its hammock slot: the stack's pages go (and the
+ * stack with them from the registry), and then the slot is the cabin's to
+ * hand to the next strand. The slot goes back LAST and only after every other
+ * page of it is unmapped — the callers run strand_rings_destroy and
+ * cet_process_destroy first — because the next strand maps its rings and
+ * shadow stack at the same addresses. No-op for the main strand
+ * (hammock_base == 0), whose stack lives at the top of the address space and
+ * is reclaimed wholesale by vmm_destroy_context at cabin teardown.  Used by
+ * strand_spawn error-unwind and process cleanup. */
+static void process_release_strand_slot(process_t *proc)
+{
+    if (!proc || proc->hammock_base == 0 || !proc->cabin)
         return;
-    uint64_t stack_data_base =
-        proc->hammock_base + (uint64_t)CABIN_HAMMOCK_STACK_PAGE_OFF * VMM_PAGE_SIZE;
-    for (uint32_t i = 0; i < CONFIG_USER_STACK_PAGES; i++)
-        vmm_unmap_page(proc->cabin->vmm, stack_data_base + (uint64_t)i * VMM_PAGE_SIZE);
-    pmm_free((void *)proc->user_stack_phys, CONFIG_USER_STACK_PAGES);
-    proc->user_stack_phys = 0;
+    vmm_stack_release(proc->cabin->vmm, process_strand_stack_top(proc));
+    cabin_hammock_give_back(proc->cabin, proc->hammock_base);
+    proc->hammock_base = 0;
 }
 
 process_t *process_create(const char *tags)
@@ -487,7 +503,6 @@ process_t *process_create(const char *tags)
 
     memset(proc, 0, sizeof(process_t));
     proc->magic    = PROCESS_MAGIC;
-    proc->rq_prio  = -1;
     proc->rq_index = -1;
 
     proc->pid = pid_alloc();
@@ -517,6 +532,7 @@ process_t *process_create(const char *tags)
      * falls back to the fixed cabin ring VAs for the main strand. */
     proc->pocket_ring_phys = cabin->pocket_ring_phys;
     proc->result_ring_phys = cabin->result_ring_phys;
+    proc->result_ring_slots = (uint32_t)RESULT_RING_SLOT_MAX;
     proc->touch_ring_phys  = cabin->touch_ring_phys;
 
     process_init_strand_fields(proc);
@@ -644,6 +660,37 @@ uint32_t process_ref_count(process_t *proc)
     return atomic_load_u32(&proc->ref_count);
 }
 
+/* Completed slices, plus the one running right now.
+ *
+ * The in-flight term is measured from cpu_tsc_stamp, and the base matters more
+ * than the arithmetic. An earlier version used last_run_time and was wrong
+ * twice over: schedule() re-stamps it on every pass, and it SURVIVES A PARK, so
+ * the difference spanned a whole sleep and a 300 ms nap read as 300 ms of
+ * processor time. cpu_tsc_stamp exists only while the strand holds the core —
+ * set when it takes it, cleared when it leaves — so a strand that is not
+ * running contributes nothing here, and one that is gets credited to the cycle.
+ *
+ * Without this term the answer would only move at a context switch, and a
+ * strand can run a long time without one: a 50 ms CPU-bound loop on 16 cores
+ * measured as zero, and a strand alone on a core runs without one for as long
+ * as it runs. system.proc.crew read the completed slices alone, and showed such
+ * a strand at no processor at all, then at more than a core once it was
+ * switched out.
+ *
+ * The stamp is taken on the core running the strand and read on the core that
+ * asks; a read that falls behind the stamp adds nothing. */
+uint64_t process_cpu_time_us(const process_t *proc)
+{
+    uint64_t us = __atomic_load_n(&proc->total_cpu_time, __ATOMIC_RELAXED);
+    const uint64_t stamp = proc->cpu_tsc_stamp;
+    if (stamp != 0) {
+        const uint64_t khz = cpu_get_tsc_freq_khz();
+        const uint64_t now = rdtsc();
+        if (khz != 0 && now > stamp) us += ((now - stamp) * 1000ULL) / khz;
+    }
+    return us;
+}
+
 /* The move itself, under the state lock its caller holds: whether it enqueued. */
 static bool ProcessStateMoveLocked(process_t *proc, process_state_t new_state)
 {
@@ -660,9 +707,20 @@ static bool ProcessStateMoveLocked(process_t *proc, process_state_t new_state)
      * the freed kernel stack reused as an iret frame). The 13 wake sites
      * (touch/kring/sync_ops/touch_ring) are best-effort and already tolerate a
      * target that has gone away, so refusing the wake here is the correct
-     * no-op — there is no live strand left to run. */
-    if (new_state == PROC_WORKING &&
-        (old_state == PROC_DONE || old_state == PROC_CRASHED))
+     * no-op — there is no live strand left to run.
+     *
+     * And not only the wake: no live state at all. An op the strand submitted
+     * just before its end can still be served after it — the K-Core that pops
+     * it knows nothing of the end — and the parking ops (addr_park, turn in,
+     * touch await, process gone, the storage jobs) set their own strand
+     * PROC_WAITING. That made a corpse WAITING: the reaper, which takes only
+     * the dead, left it and its cabin for ever, the program read as alive, and
+     * the next wake passed the guard above from WAITING and ran it. Measured:
+     * a program killed while its main strand was parking kept that strand,
+     * CRASHED -> WAITING from SysAddrPark, every time it outlived its end.
+     * Dead to dead (process_destroy's CRASHED over an exit's DONE) stays. */
+    if ((old_state == PROC_DONE || old_state == PROC_CRASHED) &&
+        new_state != PROC_DONE && new_state != PROC_CRASHED)
     {
         return false;
     }
@@ -690,10 +748,20 @@ static bool ProcessStateMoveLocked(process_t *proc, process_state_t new_state)
      * took the submit is the one parking it, and the strand itself is spinning
      * on its App-Core in a reply wait that nothing else will end until the
      * next tick. Asked to step aside, its spin yields at once and the
-     * scheduler takes the WAITING strand off the core. */
-    if (new_state == PROC_WAITING &&
-        __atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE) >= 0)
-        KResultStepAside(proc, true);
+     * scheduler takes the WAITING strand off the core.
+     *
+     * The state is stored before on_cpu is read, with a full barrier between,
+     * because a core may be claiming the strand to dispatch it right now — it
+     * claims first and reads the state after (schedule()). One of the two then
+     * sees the other: that core sees WAITING and does not run it, or this read
+     * sees the claim and the strand it runs is told to step aside. Without the
+     * barrier both could read the old value, and a parked strand would run. */
+    if (new_state == PROC_WAITING)
+    {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE) >= 0)
+            KResultStepAside(proc, true);
+    }
 
     bool enqueued = false;
     if (new_state == PROC_WORKING && old_state != PROC_WORKING)
@@ -804,6 +872,19 @@ void process_destroy(process_t *proc)
         }
     }
 
+    /* A core that has claimed the strand to dispatch it holds on_cpu before it
+     * is anyone's current_process. It asks after the claim whether the strand
+     * is being destroyed (schedule()), and destroying was stored above before
+     * this read with a full barrier between — so either that core sees it and
+     * lets the strand go, or this read sees the claim and the strand is not
+     * torn down under a core about to run it. */
+    int16_t claimed_by = __atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE);
+    if (!is_running && claimed_by >= 0)
+    {
+        is_running      = true;
+        running_on_core = (uint8_t)claimed_by;
+    }
+
     if (is_running)
     {
         __atomic_store_n(&proc->destroying, 0, __ATOMIC_SEQ_CST);
@@ -855,11 +936,21 @@ void process_destroy(process_t *proc)
      * strand), not here: a non-last strand's exit must not strip tags
      * from rings its siblings still use. */
 
-    /* Genuine-fault / kernel-forced teardown. When this is the FIRST cleanup
-     * (a real crash) it publishes process:died with PROC_EXIT_CRASHED; when a
-     * SysProcKill already cleaned this strand (kill or self-exit), the call
-     * no-ops on touch_cleaned and that earlier disposition stands. */
-    TouchCleanupProcess(proc, PROC_EXIT_CRASHED);
+    /* Genuine-fault / kernel-forced teardown: a strand whose death nobody
+     * committed. It takes its program with it — what it held of its program's
+     * (the heap lock above all) is lost with it, and siblings left running
+     * would wait on that for ever — so CabinEnd ends every strand of the
+     * cabin, this one last, with PROC_EXIT_CRASHED, or PROC_EXIT_STACK_OVERFLOW
+     * when the fault handler named that cause. A strand already ended — a kill,
+     * an exit, its own strand_exit — committed its death then (touch_cleaned),
+     * and that disposition stands.
+     *
+     * The strand is off the process list already, so CabinEnd's walks find
+     * only its siblings; its cabin stands, dropped only by the cleanup that
+     * follows its last reference. */
+    if (!__atomic_load_n(&proc->touch_cleaned, __ATOMIC_ACQUIRE))
+        CabinEnd(proc, proc->stack_overran ? PROC_EXIT_STACK_OVERFLOW
+                                           : PROC_EXIT_CRASHED);
 
     /* strand:exited — pairs with strand:spawned.  Fires on every strand
      * exit (main or spawned).  Cabin teardown itself happens later, when
@@ -878,31 +969,40 @@ void process_destroy(process_t *proc)
      * self) bumped the generation first, so the expected word no longer matches
      * and the CAS is a harmless no-op. One atomic, no lock, no allocation.
      *
-     * We re-resolve the bound VA fresh from the live cabin page tables here
-     * instead of trusting a stored phys: if the pool's page were unmapped or
-     * recycled between bind and death, a stored phys could point at a page now
-     * owned by ANOTHER cabin and we would corrupt it. vmm_virt_to_phys walks the
-     * cabin's own tables (no active-CR3 requirement, valid from the reaper
-     * K-Core), and a 0 result — last-strand/cabin teardown already tore the
-     * mapping down — simply skips the stamp, which is harmless. */
+     * Both words are reached through a porthole onto the live cabin, never a
+     * stored phys: if the pool's page were unmapped or recycled between bind
+     * and death, a stored phys could point at a page now owned by ANOTHER
+     * cabin and we would corrupt it. The porthole walks the cabin's own tables
+     * (no active-CR3 requirement, valid from the reaper K-Core), opens only
+     * onto a page the cabin holds user-WRITABLE — the pool is the program's
+     * memory, and a word the program named in a page it cannot write is not
+     * one the kernel writes for it — and keeps the page the cabin's for the
+     * one atomic. A porthole that does not open — last-strand/cabin teardown
+     * already tore the mapping down — simply skips the stamp, which is
+     * harmless. */
     _Static_assert(__builtin_offsetof(StrandPool, GenState) == 116,
                    "kernel StrandPool GenState offset");
     if (proc->strand_pool_va && proc->cabin) {
-        uintptr_t ph = vmm_virt_to_phys(proc->cabin->vmm, proc->strand_pool_va);
-        if (ph) {
-            volatile uint32_t *gs = (volatile uint32_t *)
-                ((uint8_t *)vmm_phys_to_virt(ph) +
-                 __builtin_offsetof(StrandPool, GenState));
+        Porthole porthole;
+        uint32_t *gs = PortholeOpen(&porthole, proc->cabin->vmm,
+                                    proc->strand_pool_va +
+                                        __builtin_offsetof(StrandPool, GenState),
+                                    sizeof(uint32_t), /*for_write=*/true);
+        bool stamped = false;
+        if (gs) {
             uint32_t expect = STRANDPOOL_PACK(proc->strand_pool_gen, STRANDPOOL_LIVE);
             uint32_t orphan = STRANDPOOL_PACK(proc->strand_pool_gen, STRANDPOOL_ORPHANED);
-            bool stamped = __atomic_compare_exchange_n(gs, &expect, orphan, false,
-                                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
-            if (stamped && proc->strand_pool_orphan_va) {
-                uintptr_t fph = vmm_virt_to_phys(proc->cabin->vmm,
-                                                  proc->strand_pool_orphan_va);
-                if (fph)
-                    __atomic_store_n((volatile uint32_t *)vmm_phys_to_virt(fph),
-                                     1u, __ATOMIC_RELEASE);
+            stamped = __atomic_compare_exchange_n(gs, &expect, orphan, false,
+                                                  __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+            PortholeClose(&porthole);
+        }
+        if (stamped && proc->strand_pool_orphan_va) {
+            uint32_t *pending = PortholeOpen(&porthole, proc->cabin->vmm,
+                                             proc->strand_pool_orphan_va,
+                                             sizeof(uint32_t), /*for_write=*/true);
+            if (pending) {
+                __atomic_store_n(pending, 1u, __ATOMIC_RELEASE);
+                PortholeClose(&porthole);
             }
         }
     }
@@ -1028,31 +1128,19 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     if (was_elf)
         pmm_free(code_phys, page_count);
 
-    void *user_stack_phys = pmm_alloc(CONFIG_USER_STACK_TOTAL_PAGES);
-    if (!user_stack_phys)
-    {
-        debug_printf("[PROCESS] ERROR: Failed to allocate user stack\n");
-        pmm_free(code_phys, page_count);
-        return -1;
-    }
+    /* From here the code is the address space's: a flat binary's frames are
+     * mapped and owned by that mapping, an ELF's segments were copied into
+     * frames of their own and the image above was handed back. Neither is
+     * code_phys any longer, so no failure below frees it — the cabin's
+     * teardown frees what is mapped, and a second free of code_phys is a
+     * buddy double-free. */
 
+    /* The stack is registered and nothing is mapped: the first push faults the
+     * first page in, zeroed, and the reserve fills as far as the program goes. */
     uint64_t stack_top = proc->cabin->aslr_stack_top;
-
-    uint64_t guard_page_base = stack_top - (CONFIG_USER_STACK_TOTAL_PAGES * VMM_PAGE_SIZE);
-    uint64_t stack_data_base = guard_page_base + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE);
-
-    vmm_map_result_t map_result = vmm_map_pages(
-        proc->cabin->vmm,
-        stack_data_base,
-        (uintptr_t)user_stack_phys + (CONFIG_USER_STACK_GUARD_PAGES * VMM_PAGE_SIZE),
-        CONFIG_USER_STACK_PAGES,
-        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER);
-
-    if (!map_result.success)
+    if (!vmm_stack_register(proc->cabin->vmm, stack_top))
     {
-        debug_printf("[PROCESS] ERROR: Failed to map user stack: %s\n", map_result.error_msg);
-        pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
-        pmm_free(code_phys, page_count);
+        kprintf("[PROCESS] ERROR: could not register the user stack of PID %u\n", proc->pid);
         return -1;
     }
 
@@ -1061,8 +1149,6 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     if (!heap_phys)
     {
         debug_printf("[PROCESS] ERROR: Failed to allocate initial heap pages\n");
-        pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
-        pmm_free(code_phys, page_count);
         return -1;
     }
 
@@ -1077,13 +1163,10 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     {
         debug_printf("[PROCESS] ERROR: Failed to map user heap: %s\n", heap_map.error_msg);
         pmm_free(heap_phys, CONFIG_USER_HEAP_INITIAL_PAGES);
-        pmm_free(user_stack_phys, CONFIG_USER_STACK_TOTAL_PAGES);
-        pmm_free(code_phys, page_count);
         return -1;
     }
 
     proc->cabin->vmm->heap_start = heap_start;
-    proc->cabin->vmm->stack_top  = stack_top;
 
     CabinInfo *ci = (CabinInfo *)vmm_phys_to_virt(proc->cabin->cabin_info_phys);
     ci->magic       = CABIN_INFO_MAGIC;
@@ -1167,7 +1250,6 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
 
     memset(proc, 0, sizeof(process_t));
     proc->magic    = PROCESS_MAGIC;
-    proc->rq_prio  = -1;
     proc->rq_index = -1;
     /* Zombie-until-join: a joinable strand (std::thread) must not be reaped on
      * exit until join()/detach() releases it, so its pid (== thread::id) stays
@@ -1214,18 +1296,13 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         return NULL;
     }
 
-    /* Carve one hammock slot for this strand's user stack + CET SSP.  The
-     * cursor is bump-allocated under hammock_lock so concurrent spawns from
-     * sibling strands never hand out the same VA (P2 made the VMM safe for
+    /* Take one hammock slot for this strand's user stack + CET SSP + rings.
+     * A slot an earlier strand left comes first, then the next never-used one;
+     * either way it is under hammock_lock, so concurrent spawns from sibling
+     * strands never hand out the same VA (P2 made the VMM safe for
      * intra-cabin concurrency). */
-    spin_lock(&cabin->hammock_lock);
-    uint64_t slot_base = cabin->hammock_va_next;
-    bool hammock_ok = (slot_base + CABIN_HAMMOCK_SLOT_SIZE) <= CABIN_HAMMOCK_END;
-    if (hammock_ok)
-        cabin->hammock_va_next = slot_base + CABIN_HAMMOCK_SLOT_SIZE;
-    spin_unlock(&cabin->hammock_lock);
-
-    if (!hammock_ok)
+    uint64_t slot_base;
+    if (!cabin_hammock_take(cabin, &slot_base))
     {
         kprintf("[STRAND] ERROR: hammock window exhausted (PID %u)\n", proc->pid);
         kfree(proc->context.fpu_state);
@@ -1239,15 +1316,15 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
 
     proc->hammock_base = slot_base;
 
-    uint64_t stack_data_base =
-        slot_base + (uint64_t)CABIN_HAMMOCK_STACK_PAGE_OFF * VMM_PAGE_SIZE;
-    uint64_t stack_top = stack_data_base + (uint64_t)CONFIG_USER_STACK_PAGES * VMM_PAGE_SIZE;
-
-    void *ustack_phys = pmm_alloc(CONFIG_USER_STACK_PAGES);
-    if (!ustack_phys)
+    /* The stack is registered, not mapped: its pages come in zeroed as the
+     * strand touches them (vmm_stack_register), up to the reserve, with the
+     * gap at the bottom of the slot never mapped. Mapped NX like every other
+     * data page of a program. */
+    uint64_t stack_top = process_strand_stack_top(proc);
+    if (!vmm_stack_register(cabin->vmm, stack_top))
     {
-        kprintf("[STRAND] ERROR: user stack alloc failed (%u pages, PID %u)\n",
-                (unsigned)CONFIG_USER_STACK_PAGES, proc->pid);
+        kprintf("[STRAND] ERROR: user stack registration failed (PID %u)\n", proc->pid);
+        cabin_hammock_give_back(cabin, slot_base);
         kfree(proc->context.fpu_state);
         process_free_kernel_stack(proc);
         cabin_ref_dec(cabin);
@@ -1256,27 +1333,6 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         kfree(proc);
         return NULL;
     }
-
-    /* Map the stack into the SHARED cabin address space.  Same flags as the
-     * main strand's user stack (process_load_binary): user RW, no NX (the
-     * main stack is mapped executable too — keep strands consistent). */
-    vmm_map_result_t smap = vmm_map_pages(
-        cabin->vmm, stack_data_base, (uintptr_t)ustack_phys,
-        CONFIG_USER_STACK_PAGES,
-        VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER);
-    if (!smap.success)
-    {
-        kprintf("[STRAND] ERROR: user stack map failed: %s (PID %u)\n", smap.error_msg, proc->pid);
-        pmm_free(ustack_phys, CONFIG_USER_STACK_PAGES);
-        kfree(proc->context.fpu_state);
-        process_free_kernel_stack(proc);
-        cabin_ref_dec(cabin);
-        proc->cabin = NULL;
-        pid_free(proc->pid);
-        kfree(proc);
-        return NULL;
-    }
-    proc->user_stack_phys = (uintptr_t)ustack_phys;
 
     /* Register frame: shared CR3 (already set by process_init_context_base),
      * the strand's entry point, its own stack, and the user argument in rdi
@@ -1319,7 +1375,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         kprintf("[STRAND] ERROR: per-strand rings/TLS setup failed (PID %u)\n", proc->pid);
         cet_process_destroy(proc);
         cet_process_destroy_kernel_ssp(proc);
-        process_free_strand_stack(proc);
+        process_release_strand_slot(proc);
         kfree(proc->context.fpu_state);
         process_free_kernel_stack(proc);
         cabin_ref_dec(cabin);
@@ -1336,20 +1392,26 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
     proc->in_ready     = 0;
 
     spin_lock(&process_lock);
-    if (process_count >= PROCESS_MAX_COUNT)
+    /* A program that is ending takes no new strand: CabinEnd sets `ending`
+     * under this lock before it walks the list, so a strand that joins the
+     * list here is one that walk will find, and one that would join after it
+     * is refused now. */
+    bool ending = cabin->ending != 0;
+    if (ending || process_count >= PROCESS_MAX_COUNT)
     {
         spin_unlock(&process_lock);
         strand_rings_destroy(proc);
         cet_process_destroy(proc);
         cet_process_destroy_kernel_ssp(proc);
-        process_free_strand_stack(proc);
+        process_release_strand_slot(proc);
         kfree(proc->context.fpu_state);
         process_free_kernel_stack(proc);
         cabin_ref_dec(cabin);
         proc->cabin = NULL;
         pid_free(proc->pid);
         kfree(proc);
-        kprintf("[STRAND] ERROR: process limit reached under lock (%u)\n", PROCESS_MAX_COUNT);
+        if (!ending)
+            kprintf("[STRAND] ERROR: process limit reached under lock (%u)\n", PROCESS_MAX_COUNT);
         return NULL;
     }
     proc->prev = NULL;
@@ -1639,30 +1701,41 @@ uint64_t *process_active_memtags(process_t *proc)
 /* ─── Phase 2K+ CET SSP accessors ────────────────────────────────── */
 
 #define PROCESS_USER_SSP_REGION_SIZE       (4u * 4096u)
-#define PROCESS_USER_SSP_STACK_SLACK       (8ULL * 1024ULL * 1024ULL)
 #define PROCESS_USER_SSP_REGION_TOP        \
-    (VMM_USER_STACK_TOP - PROCESS_USER_SSP_STACK_SLACK)
+    (VMM_MAIN_SSP_ZONE_TOP - 0x1000ULL)
 #define PROCESS_USER_SSP_REGION_BASE       \
     (PROCESS_USER_SSP_REGION_TOP - PROCESS_USER_SSP_REGION_SIZE)
 #define PROCESS_USER_SSP_GUARD_HI_BASE     PROCESS_USER_SSP_REGION_TOP
 #define PROCESS_USER_SSP_GUARD_LO_BASE     (PROCESS_USER_SSP_REGION_BASE - 0x1000ULL)
 
+/* The main strand's shadow stack sits under the LOWEST the main data stack can
+ * reach: its zone is the six pages [guard|SSP|guard] just below the gap that
+ * lies under the lowest possible reserve (vmm.h). It used to sit a fixed 8 MiB
+ * below the top of the address space, which the data stack's ASLR range of
+ * 8 MiB made the data stack's own floor — a 64 KiB stack could not reach it,
+ * and the first stack that could, did. */
+_Static_assert(PROCESS_USER_SSP_GUARD_LO_BASE == VMM_USER_STACK_ZONE_BASE,
+               "the main shadow stack's low guard is the bottom of the stack zone");
+
 /* Base VA of a strand's CET user shadow-stack region.
  *
- * The main strand (hammock_base == 0) uses the fixed region 8 MiB below
- * VMM_USER_STACK_TOP, exactly as before.  A strand spawned via
+ * The main strand (hammock_base == 0) uses the fixed region under the main
+ * stack zone.  A strand spawned via
  * strand_spawn (hammock_base != 0) uses the SSP slice of its own hammock
- * slot — see the slot map in cabin_layout.h: [low guard][stack 16pg]
+ * slot — see the slot map in cabin_layout.h: [gap][stack]
  * [mid guard][SSP 4pg][high guard].  Deriving from hammock_base is what
  * keeps sibling strands' shadow stacks from colliding in the shared
  * address space (CET dormant on TCG, so this is real-HW correctness). */
 #define PROCESS_USER_SSP_GUARD_PAGE        0x1000ULL
-/* The hammock slot must hold: low guard + user stack + mid guard +
+/* The hammock slot must hold: gap + user stack + mid guard +
  * 4-page CET SSP + high guard.  If the stack size grows past the slot,
  * fail the build rather than silently overlap the next strand's slot. */
+_Static_assert(CABIN_HAMMOCK_STACK_PAGE_OFF == CONFIG_USER_STACK_GAP_PAGES &&
+                   CABIN_HAMMOCK_STACK_PAGES == CONFIG_USER_STACK_PAGES,
+               "the hammock slot's stack is the kernel's stack reserve and gap");
 _Static_assert(CABIN_HAMMOCK_STACK_PAGE_OFF + CONFIG_USER_STACK_PAGES + 1u + 4u + 1u
                    <= CABIN_HAMMOCK_SLOT_PAGES,
-               "hammock slot too small for [guard|stack|guard|SSP(4pg)|guard]");
+               "hammock slot too small for [gap|stack|guard|SSP(4pg)|guard]");
 _Static_assert(PROCESS_USER_SSP_REGION_SIZE == 4u * 4096u,
                "user SSP region must be 4 pages (matches CET_USER_SSP_PAGES)");
 
@@ -2093,7 +2166,7 @@ static void process_cleanup_immediate(process_t *proc)
      * cabin down. The strand's CET shadow stacks were already unmapped in
      * process_destroy via cet_process_destroy{,_kernel_ssp}. */
     strand_rings_destroy(proc);
-    process_free_strand_stack(proc);
+    process_release_strand_slot(proc);
 
     /* Drop the strand's reference to its cabin.  strand_count goes N→N-1;
      * when it reaches 0 (last strand of the cabin), cabin_ref_dec triggers
@@ -2218,7 +2291,7 @@ void process_reap_strands(void)
          * strand was previously skipped here, leaking its slot/pid/cabin-VMM
          * forever once it exited (nothing else calls process_destroy on it at
          * runtime).  Safe: the teardown chain already no-ops the strand-only
-         * steps for hammock_base == 0 (strand_rings_destroy / free_strand_stack)
+         * steps for hammock_base == 0 (strand_rings_destroy / release_strand_slot)
          * and cabin_ref_dec frees the cabin only as the LAST strand; and pid
          * recycling is harmless — no caller addresses a process by a held pid
          * past its death (SYS_PROC_KILL is self-only; death is observed via the
@@ -2250,10 +2323,10 @@ void process_reap_strands(void)
              * (process_set_state refuses to resurrect a dead strand, and the
              * schedule() re-enqueue re-checks WORKING under the runqueue lock),
              * so this is a defense-in-depth assertion of the invariant; if it
-             * ever holds we just retry next tick. rq_prio/rq_index are -1
-             * exactly when not enqueued (maintained under each runqueue lock; an
-             * aligned scalar read is a safe conservative hint either way). */
-            if (p->rq_prio >= 0 || p->rq_index >= 0)
+             * ever holds we just retry next tick. rq_index is -1 exactly when
+             * not enqueued (maintained under each runqueue lock; an aligned
+             * scalar read is a safe conservative hint either way). */
+            if (p->rq_index >= 0)
                 continue;
             process_ref_inc(p);
             batch[n++] = p;

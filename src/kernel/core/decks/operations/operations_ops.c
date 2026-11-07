@@ -12,8 +12,8 @@
  * Buffers move through the page-walked crate_io primitives (crate_in_buf /
  * crate_out_alloc / crate_out_commit, plus crate_read / crate_write for fixed
  * scalars). A Crate payload that straddles a page boundary is copied across
- * every backing frame instead of being clipped to its first page — the
- * vmm_translate_user_addr straddle bug that silently corrupted every >4 KiB
+ * every backing frame instead of being clipped to its first page — the old
+ * single-page translation's straddle bug that silently corrupted every >4 KiB
  * transform. Inputs are snapshotted into kernel buffers and each transform
  * runs kernel->kernel, which also makes the in-place-looking ops (MOVE / XOR /
  * BIT_SWAP) overlap-safe for free.

@@ -63,9 +63,9 @@ static void StandUseRestore(UseList* saved)
 {
     UseText* text = UseListText(saved);
     if (text)
-        UseContextSet(text->text, text->bytes);
+        UseContextSet(text->text, text->bytes, NULL);
     else
-        UseContextClear();
+        UseContextClear(NULL);
     UseListDrop(saved);
 }
 
@@ -104,7 +104,7 @@ static TestResult TestStandUseLooksUpOnly(void)
     char*      list    = StandUseList(NULL, "standuse", STAND_USE_FRESH, &len);
 
     TEST_ASSERT(list != NULL, "memory for ten thousand tags");
-    TEST_ASSERT_OK(UseContextSet(list, len), "a context of ten thousand new tags is said");
+    TEST_ASSERT_OK(UseContextSet(list, len, NULL), "a context of ten thousand new tags is said");
     now = UseContextHold();
     TEST_ASSERT_EQ(UseListCount(now), STAND_USE_FRESH, "every tag is in it");
     TEST_ASSERT(UseListText(now)->bytes == len && memcmp(UseListText(now)->text, list, len) == 0,
@@ -148,9 +148,9 @@ static TestResult TestStandUseLaterWordStands(void)
     uint64_t    late_saying = 0;
     UseText*    medium      = NULL;
 
-    TEST_ASSERT_OK(UseContextSet(quiet, sizeof(quiet) - 1), "the short word is said");
+    TEST_ASSERT_OK(UseContextSet(quiet, sizeof(quiet) - 1, NULL), "the short word is said");
     early = UseContextHold();
-    TEST_ASSERT_OK(UseContextSet(night, sizeof(night) - 1), "and the long one after it");
+    TEST_ASSERT_OK(UseContextSet(night, sizeof(night) - 1, NULL), "and the long one after it");
     late = UseContextHold();
 
     changed = true;
@@ -233,13 +233,13 @@ static void StandUseWear(cabin_t* cabin, uint32_t tag_id, bool wear)
 
 /* How many tags STAND_USE_ASKS scheduler questions compared on this core, and
  * the last answer. */
-static uint64_t StandUseAsk(const process_t* proc, bool* out_answer)
+static uint64_t StandUseAsk(const process_t* proc, uint32_t* out_fit)
 {
-    uint64_t from   = UseContextCompares();
-    bool     answer = false;
+    uint64_t from = UseContextCompares();
+    uint32_t fit  = 0;
     for (uint32_t i = 0; i < STAND_USE_ASKS; i++)
-        answer = UseContextMatches(proc);
-    *out_answer = answer;
+        fit = UseContextFit(proc);
+    *out_fit = fit;
     return UseContextCompares() - from;
 }
 
@@ -257,7 +257,7 @@ static TestResult TestStandUseVerdictIsOneCompare(void)
     process_t*  proc    = NULL;
     char*       list    = NULL;
     size_t      len     = 0;
-    bool        answer  = false;
+    uint32_t    fit     = 0;
     TagSpelling system  = TagSpellingOfKey("system");
     uint32_t    id      = TagFSLookupSpelling(&system);
 
@@ -265,26 +265,26 @@ static TestResult TestStandUseVerdictIsOneCompare(void)
     proc = StandUseStrand(id, &cabin);
     TEST_ASSERT(proc != NULL, "memory for a stand-in strand");
 
-    TEST_ASSERT_OK(UseContextSet("system", 6), "a context of one tag is said");
+    TEST_ASSERT_OK(UseContextSet("system", 6, NULL), "a context of one tag is said");
     UseContextVerdictRefresh(proc);
-    uint64_t narrow = StandUseAsk(proc, &answer);
-    TEST_ASSERT(answer, "a strand wearing the one tag is in the tier");
+    uint64_t narrow = StandUseAsk(proc, &fit);
+    TEST_ASSERT_EQ(fit, USE_CONTEXT_FIT_FULL, "a strand wearing the one tag fits the context whole");
 
     StandUseWear(cabin, id, false);
     UseContextCabinChanged();
-    TEST_ASSERT(UseContextMatches(proc),
-                "until its recount, a strand that stopped wearing it keeps its previous verdict");
+    TEST_ASSERT_EQ(UseContextFit(proc), USE_CONTEXT_FIT_FULL,
+                   "until its recount, a strand that stopped wearing it keeps its previous verdict");
     UseContextVerdictRefresh(proc);
-    TEST_ASSERT(!UseContextMatches(proc), "recounted, it is out of the tier");
+    TEST_ASSERT_EQ(UseContextFit(proc), 0, "recounted, it fits not at all");
     StandUseWear(cabin, id, true);
     UseContextCabinChanged();
 
     list = StandUseList("system", "standwide", STAND_USE_WIDE - 1, &len);
     TEST_ASSERT(list != NULL, "memory for a hundred thousand tags");
-    TEST_ASSERT_OK(UseContextSet(list, len), "a context of a hundred thousand tags is said");
+    TEST_ASSERT_OK(UseContextSet(list, len, NULL), "a context of a hundred thousand tags is said");
     UseContextVerdictRefresh(proc);
-    uint64_t wide = StandUseAsk(proc, &answer);
-    TEST_ASSERT(!answer, "tags the volume has no number for put nobody in the tier");
+    uint64_t wide = StandUseAsk(proc, &fit);
+    TEST_ASSERT_EQ(fit, 0, "one tag worn of a hundred thousand is too little of the context to count");
 
     TestEvidence("tags compared by 1000 scheduler questions under contexts of 1 and 100000 tags",
                  narrow + wide);

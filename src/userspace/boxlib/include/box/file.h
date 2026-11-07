@@ -25,6 +25,29 @@ typedef struct {
     tag_t tags[5];
 } file_info_t;
 
+/* Full metadata for tools that must preserve a file exactly.  file_info_t is
+ * deliberately a small display structure and may truncate names or tags;
+ * this type owns complete copies returned by STORAGE_OBJ_GET_INFO.
+ *
+ * Filename and Tags are heap-owned by the value.  Tags is a comma-separated
+ * list of complete tag spellings, or NULL when the file has no tags.  The
+ * caller releases both with FileMetadataRelease(). */
+typedef struct {
+    file_id_t FileId;
+    uint32_t  Flags;
+    uint64_t  Size;
+    uint16_t  TagCount;
+    char     *Filename;
+    char     *Tags;
+} FileMetadata;
+
+/* Read the complete self-describing metadata record.  The response buffer is
+ * grown until the kernel can return every byte; no field is truncated. */
+int FileMetadataRead(file_id_t FileId, FileMetadata *Out);
+
+/* Release all heap-owned members and reset Out to its empty state. */
+void FileMetadataRelease(FileMetadata *Metadata);
+
 /*
  * Inside the Use Context by default. When the user has said `use code cpp`,
  * query("project") asks for files that are code AND cpp AND project, and
@@ -54,6 +77,10 @@ int file_info(file_id_t file_id, file_info_t* info);
  * short count; the refusal is the answer of the next call, from there. */
 int64_t fread(file_id_t file_id, uint64_t offset, void* buffer, size_t size);
 int64_t fwrite(file_id_t file_id, uint64_t offset, const void* buffer, size_t size);
+/* fwrite at the file's end as it is when the write reaches the file: writers
+ * adding to one file never lay their bytes over each other's. The same answer
+ * as fwrite. */
+int64_t file_append(file_id_t file_id, const void* buffer, size_t size);
 /* `delete` is a C++ keyword — C++ callers use file_delete(), bound to the
  * same ELF symbol via asm label. C keeps the original name unchanged. */
 #ifdef __cplusplus

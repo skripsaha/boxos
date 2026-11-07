@@ -801,6 +801,7 @@ BROOKSTRAND_BIN  = $(APPS_DIR)/brookstrand.elf
 BROOKEXEC_BIN    = $(APPS_DIR)/brookexec.elf
 CURRENTEXEC_BIN  = $(APPS_DIR)/currentexec.elf
 CLOCK_BIN        = $(APPS_DIR)/clock.elf
+PULSE_BIN        = $(APPS_DIR)/pulse.elf
 CALENDAR_BIN     = $(APPS_DIR)/calendar.elf
 BONSAI_BIN       = $(APPS_DIR)/bonsai.elf
 BIGCLOCK_BIN     = $(APPS_DIR)/bigclock.elf
@@ -819,12 +820,18 @@ QUILLTEST_BIN    = $(APPS_DIR)/quilltest.elf
 DISPLAY_DIR = $(USERSPACE_DIR)/display
 DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 
+# Painter — the user-facing graphics family above boxcxx and boxlib.
+PAINTER_DIR = $(USERSPACE_DIR)/painter
+PAINTER_LIB = $(PAINTER_DIR)/libpainter.a
+
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
-UTIL_NAMES = help create show files tag untag name trash erase \
+UTIL_NAMES = help create show files tag untag name trash erase assemble \
              me info say reboot bye defrag escheat fsck ipc_test memtag hw \
-             timezone logsave lastsaid rgbtest usetest luggagetest headcount \
-             draft playtime lavalamp finish taskcenter
+             timezone logsave lastsaid rgbtest usetest faretest luggagetest headcount \
+             draft playtime lavalamp finish taskcenter hexer stringview \
+             calculate difference copy typer flame checksum passport aquarium \
+             nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -845,7 +852,9 @@ TESTBIN_EMPTY = $(BUILDDIR)/testbin.bin
 # quietly disappears. That is exactly what happened when the ESP first became
 # part of the image — the build got as far as `dd if=` an empty filename.
 UEFI_ESP_IMG = $(BUILDDIR)/esp.img
-VBOX_VDI     = $(BUILDDIR)/boxos.vdi
+# VirtualBox is not used here: its disk is not built (the rule is kept below,
+# commented, for when it is).
+# VBOX_VDI     = $(BUILDDIR)/boxos.vdi
 
 # ==== UEFI BOOTLOADER ====
 # The loader's files, and every header any of them reads: a change to one is a
@@ -897,7 +906,7 @@ CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 .DELETE_ON_ERROR:
 
 # ==== MAIN TARGET ====
-all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) $(VBOX_VDI) uefi check-endbr64
+all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) uefi check-endbr64
 
 # ==== CET / IBT POST-LINK AUDIT ====
 # Verifies every globally-visible function in the kernel ELF begins with
@@ -946,7 +955,7 @@ check-deps:
 	@command -v $(OBJCOPY) >/dev/null || (echo "ERROR: x86_64-elf-objcopy not found" && exit 1)
 	@command -v $(QEMU) >/dev/null || echo "WARNING: qemu-system-x86_64 not found (needed for 'make run')"
 	@command -v bochs   >/dev/null || echo "WARNING: bochs not found (needed for 'make bochs')"
-	@command -v VBoxManage >/dev/null || (echo "WARNING: VBoxManage not found" && sleep 2)
+#	@command -v VBoxManage >/dev/null || (echo "WARNING: VBoxManage not found" && sleep 2)
 	@echo "All dependencies OK."
 
 # ==== BUILD RULES ====
@@ -1171,6 +1180,17 @@ $(USERSPACE_DIR)/boxcxx/libboxcxx.a:
 	@echo "Building boxcxx..."
 	@cd $(USERSPACE_DIR)/boxcxx && $(MAKE)
 
+# Painter is a separate userspace library. It is not part of the image until a
+# shipped application links it, but it has a first-class target so its focused
+# build and its dependency chain are always explicit.
+.PHONY: $(PAINTER_LIB)
+$(PAINTER_LIB): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
+	@echo "Building Painter..."
+	@cd $(PAINTER_DIR) && $(MAKE)
+
+.PHONY: painter
+painter: $(PAINTER_LIB)
+
 # Build shell
 $(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Building shell process..."
@@ -1193,7 +1213,7 @@ $(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 # every binary simply waits for it. The stamp is distrusted whenever any of the
 # binaries it claims to have built is missing, so deleting one by hand heals
 # itself at the next parse instead of silently doing nothing.
-APP_ELFS := $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN)
+APP_ELFS := $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN)
 
 APPS_STAMP  := $(APPS_DIR)/.apps.stamp
 APPS_INPUTS := $(wildcard $(APPS_DIR)/*.c) $(wildcard $(APPS_DIR)/*.cpp) \
@@ -1208,7 +1228,7 @@ endif
 # own files are compiled only under that key (apps/Makefile), so switching it
 # has to reach the apps' sub-make, which then rebuilds quilltest by a mark of
 # its own.
-$(APPS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(APPS_INPUTS) \
+$(APPS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(APPS_INPUTS) \
                $(VOLUME_TESTS_MARK)
 	@echo "Building apps..."
 	@cd $(APPS_DIR) && $(MAKE)
@@ -1225,7 +1245,7 @@ $(APP_ELFS): $(APPS_STAMP)
 	@:
 
 # Build display server
-$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
+$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 	@echo "Building display server..."
 	@cd $(DISPLAY_DIR) && $(MAKE)
 	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"
@@ -1241,13 +1261,14 @@ $(UTILS_DIR)/timezone.elf: $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 # other utilities were being linked.
 UTILS_STAMP  := $(UTILS_DIR)/.utils.stamp
 UTILS_INPUTS := $(wildcard $(UTILS_DIR)/*.c) $(wildcard $(UTILS_DIR)/*.cpp) \
-                $(wildcard $(UTILS_DIR)/*.h) $(UTILS_DIR)/Makefile
+                $(wildcard $(UTILS_DIR)/*.h) $(UTILS_DIR)/Makefile \
+                $(wildcard $(UTILS_DIR)/assemble/*.c) $(wildcard $(UTILS_DIR)/assemble/*.h)
 
 ifneq ($(words $(wildcard $(UTIL_ELFS))),$(words $(UTIL_ELFS)))
 $(shell rm -f $(UTILS_STAMP))
 endif
 
-$(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(UTILS_INPUTS)
+$(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(UTILS_INPUTS)
 	@echo "Building utilities..."
 	@cd $(UTILS_DIR) && $(MAKE)
 	@touch $@
@@ -1437,14 +1458,15 @@ VOLUME_CONTENT = \
 	$(BROOKSTRAND_BIN)   "app,utility,test" \
 	$(BROOKEXEC_BIN)     "app,utility,test,cxx" \
 	$(CURRENTEXEC_BIN)   "app,utility,test,cxx" \
-	$(CLOCK_BIN)         "app,utility,display,clock,autostart" \
-	$(CALENDAR_BIN)      "app,utility,display,calendar" \
-	$(BONSAI_BIN)        "app,utility,display" \
-	$(BIGCLOCK_BIN)      "app,utility,display,clock" \
-	$(SNAKE_BIN)         "app,utility,game,display" \
-	$(HACKER_BIN)        "app,utility,display" \
-	$(PIPES_BIN)         "app,utility,display" \
-	$(WORDLE_BIN)        "app,utility,display,game" \
+	$(CLOCK_BIN)         "app,utility,clock,autostart" \
+	$(PULSE_BIN)         "app,utility,system,autostart" \
+	$(CALENDAR_BIN)      "app,utility,calendar" \
+	$(BONSAI_BIN)        "app,utility,fun" \
+	$(BIGCLOCK_BIN)      "app,utility,clock" \
+	$(SNAKE_BIN)         "app,utility,game,fun" \
+	$(HACKER_BIN)        "app,utility,fun" \
+	$(PIPES_BIN)         "app,utility,fun" \
+	$(WORDLE_BIN)        "app,utility,game,fun" \
 	$(STRANDPARK_BIN)    "app,utility,test" \
 	$(CHILDSPIN_BIN)     "app,utility,test" \
 	$(PRINT_STRESS_BIN)  "app,utility,test" \
@@ -1454,12 +1476,15 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/help.elf    "utility" \
 	$(UTILS_DIR)/create.elf  "utility,storage" \
 	$(UTILS_DIR)/show.elf    "utility,storage" \
+	$(UTILS_DIR)/hexer.elf   "utility,storage" \
+	$(UTILS_DIR)/stringview.elf "utility,storage" \
 	$(UTILS_DIR)/files.elf   "utility,storage" \
 	$(UTILS_DIR)/tag.elf     "utility,storage" \
 	$(UTILS_DIR)/untag.elf   "utility,storage" \
 	$(UTILS_DIR)/name.elf    "utility,storage" \
 	$(UTILS_DIR)/trash.elf   "utility,storage" \
 	$(UTILS_DIR)/erase.elf   "utility,storage" \
+	$(UTILS_DIR)/assemble.elf "utility,toolchain" \
 	$(UTILS_DIR)/me.elf      "utility" \
 	$(UTILS_DIR)/info.elf    "utility,storage" \
 	$(UTILS_DIR)/say.elf     "utility" \
@@ -1470,26 +1495,60 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/fsck.elf    "utility,storage" \
 	$(UTILS_DIR)/timezone.elf "utility,system,clock" \
 	$(USERSPACE_DIR)/hello.txt   "message,text" \
+	$(USERSPACE_DIR)/hello.asm   "code,asm,example" \
+	$(USERSPACE_DIR)/countdown.asm "code,asm,example" \
+	$(USERSPACE_DIR)/machine.asm "code,asm,example" \
+	$(USERSPACE_DIR)/fractions.asm "code,asm,example" \
+	$(USERSPACE_DIR)/macros.asm "code,asm,example" \
+	$(USERSPACE_DIR)/planets.asm "code,asm,example" \
+	$(USERSPACE_DIR)/planets.inc "code,asm,example" \
+	$(USERSPACE_DIR)/lines.inc "code,asm,asmlib" \
+	$(USERSPACE_DIR)/lines_core.inc "code,asm,asmlib" \
+	$(USERSPACE_DIR)/tidy "itinerary,example" \
+	$(USERSPACE_DIR)/try "itinerary,example" \
 	$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
 	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "utility" \
 	$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
 	$(UTILS_DIR)/hw.elf      "utility,system,hardware" \
 	$(UTILS_DIR)/usetest.elf "utility,system,test" \
+	$(UTILS_DIR)/faretest.elf "utility,system,test" \
 	$(UTILS_DIR)/luggagetest.elf "utility,test" \
 	$(UTILS_DIR)/logsave.elf "utility,system,log" \
 	$(UTILS_DIR)/lastsaid.elf "utility,system,log" \
-	$(UTILS_DIR)/rgbtest.elf "utility,test,display" \
+	$(UTILS_DIR)/rgbtest.elf "utility,test" \
 	$(UTILS_DIR)/rollcall.elf "utility,test" \
 	$(UTILS_DIR)/handset.elf "utility,test" \
 	$(UTILS_DIR)/headcount.elf "utility,test" \
 	$(UTILS_DIR)/draft.elf    "utility,storage" \
-	$(UTILS_DIR)/playtime.elf "utility,display" \
-	$(UTILS_DIR)/lavalamp.elf "utility,display" \
+	$(UTILS_DIR)/playtime.elf "utility,fun" \
+	$(UTILS_DIR)/lavalamp.elf "utility,fun" \
 	$(UTILS_DIR)/finish.elf   "utility,system" \
-	$(UTILS_DIR)/taskcenter.elf "utility,display"
+	$(UTILS_DIR)/taskcenter.elf "utility" \
+	$(UTILS_DIR)/calculate.elf "utility" \
+	$(UTILS_DIR)/difference.elf "utility,storage" \
+	$(UTILS_DIR)/copy.elf "utility,storage" \
+	$(UTILS_DIR)/typer.elf "utility,fun" \
+	$(UTILS_DIR)/flame.elf "utility,fun" \
+	$(UTILS_DIR)/checksum.elf "utility,storage" \
+	$(UTILS_DIR)/passport.elf "utility,system" \
+	$(UTILS_DIR)/aquarium.elf "utility,fun" \
+	$(UTILS_DIR)/nyancat.elf "utility,fun" \
+	$(UTILS_DIR)/fireworks.elf "utility,fun" \
+	$(UTILS_DIR)/2048.elf "utility,game,fun" \
+	$(UTILS_DIR)/tetris.elf "utility,game,fun" \
+	$(UTILS_DIR)/todo.elf "utility" \
+	$(UTILS_DIR)/tagmap.elf "utility,storage" \
+	$(UTILS_DIR)/mandelbrot.elf "utility,fun" \
+	$(UTILS_DIR)/qr.elf "utility" \
+	$(UTILS_DIR)/minesweeper.elf "utility,game,fun" \
+	$(UTILS_DIR)/eyes.elf "utility,fun" \
+	$(UTILS_DIR)/donut.elf "utility,fun" \
+	$(UTILS_DIR)/slime.elf "utility,fun" \
+	$(UTILS_DIR)/tumbleweed.elf "utility,fun" \
+	$(UTILS_DIR)/crab.elf      "utility,fun"
 
-$(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
+$(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
 	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) $(VOLUME_CONTENT)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
@@ -1551,10 +1610,10 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 # 1034 the loader could read. They were two build targets that produced two
 # files nobody could start a machine from, and `all` waited on both.
 
-$(VBOX_VDI): $(IMAGE)
-	@echo "Creating VirtualBox VDI..."
-	@rm -f $@
-	@VBoxManage convertfromraw $< $@ --format VDI
+# $(VBOX_VDI): $(IMAGE)
+# 	@echo "Creating VirtualBox VDI..."
+# 	@rm -f $@
+# 	@VBoxManage convertfromraw $< $@ --format VDI
 
 # ==== UEFI BOOTLOADER BUILD ====
 # Build strategy:
@@ -2221,6 +2280,7 @@ clean:
 	@cd $(APPS_DIR) && $(MAKE) clean
 	@cd $(DISPLAY_DIR) && $(MAKE) clean
 	@cd $(UTILS_DIR) && $(MAKE) clean
+	@cd $(PAINTER_DIR) && $(MAKE) clean
 	@cd $(USERSPACE_DIR)/boxlib && $(MAKE) clean
 	# boxcxx was missing here, and its absence was not cosmetic: no Makefile in
 	# userspace tracks header dependencies, so `make clean && make` is the ONLY

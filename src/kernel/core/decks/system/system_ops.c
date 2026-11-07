@@ -47,7 +47,6 @@
 #include "amp.h"
 #include "scheduler.h"
 #include "guide.h"   /* guide_dispatch_stats — enclosed/addressed split for perf.dump */
-#include "atomics.h"        /* rdtsc — system.proc.cputime's in-flight term */
 
 /* TSC frequency, for turning a cycle delta into microseconds. */
 extern uint64_t cpu_get_tsc_freq_khz(void);
@@ -71,7 +70,8 @@ extern uint64_t cpu_get_tsc_freq_khz(void);
  * variable payloads through crate_in_buf / crate_out_alloc / crate_out_commit.
  * Each walks the user page table page-by-page, so a Crate whose payload
  * crosses a page boundary is copied across every backing frame instead of
- * being clipped to its first page (the vmm_translate_user_addr straddle bug).
+ * being clipped to its first page (the old single-page translation's
+ * straddle bug).
  * ------------------------------------------------------------------------- */
 
 /* The whole of in_crate as a NUL-terminated string in the heap, *out the
@@ -355,14 +355,16 @@ static error_t proc_authorize_tag_grant(const char *tags, const process_t *spawn
  * this caller launched. "Own child" is (spawner_pid, spawner_gen) — a pid alone
  * is not identity (pids recycle), so a later process inheriting a dead spawner's
  * pid must NOT inherit authority. Parentless procs (autostart/init,
- * spawner_pid==0) are reachable only via the system ensign. */
+ * spawner_pid==0) are reachable only via the system ensign. A kill never asks
+ * about a cabin-mate: SysProcKill refuses one before this gate, since a
+ * program ends whole. */
 static bool proc_has_authority_over(const process_t *caller, const process_t *target)
 {
     if (!caller || !target) return false;
     if (caller->pid == target->pid) return true;
     /* Same cabin = one trust domain: sibling strands share this address space
-     * and can already read/write each other's memory, so tagging or killing a
-     * cabin-mate is an in-domain act — and is what lets a spawned strand run
+     * and can already read/write each other's memory, so tagging a cabin-mate
+     * is an in-domain act — and is what lets a spawned strand run
      * box::tag_scope (its pid is not the cabin-main pid boxlib addresses). Guard
      * NULL so cabin-less procs don't alias; foreign targets keep a distinct
      * cabin_t and fall through. Cf. the same rule in SysStrandRelease. */
@@ -651,18 +653,26 @@ static int SysProcSpawnTagged(const OpContext *ctx, uint64_t binary_va, uint64_t
     return OK;
 }
 
-/* SYSTEM_OP_PROC_KILL
- *   params:  [u32 target_pid]            (0 == self exit; 4-byte form, code 0)
+/* SYSTEM_OP_PROC_KILL — the end of a PROGRAM: every strand of its cabin.
+ *   params:  [u32 target_pid]            (0 == the caller's own program exits;
+ *                                         4-byte form, code 0)
  *            [u32 target_pid][i32 code]  (optional 8-byte form; `code` is the
- *                                         self-exit disposition, ignored when
- *                                         killing another process)
+ *                                         exit's disposition, ignored when
+ *                                         killing another program)
  *            [u32 target_pid][i32 code][u32 generation]
  *                                        (12-byte form: kill that exact
  *                                         incarnation, or nothing)
  *   out_crate (optional): u32 killed_pid
  *
- * exit_code semantics (proc_exit.h): a self-exit publishes `code` masked to
- * [0, INT32_MAX]; killing another process forces PROC_EXIT_KILLED (-1).
+ * Any strand of another program names that program, and all of it ends
+ * (CabinEnd), its main strand announced last. A strand of the CALLER'S
+ * program other than target 0 is refused, ERR_INVALID_ARGUMENT: a strand ends
+ * only itself (SYSTEM_OP_STRAND_EXIT), and its program ends only whole —
+ * ending a sibling wherever it happens to be would leave what it holds of the
+ * program (the heap lock above all) held for ever over everyone left.
+ *
+ * exit_code semantics (proc_exit.h): an exit publishes `code` masked to
+ * [0, INT32_MAX] for every strand; a kill forces PROC_EXIT_KILLED (-1).
  *
  * WHY THE 12-BYTE FORM. A pid is a seat, and seats are re-let. Between
  * deciding to end a process and saying so, that process can end on its own
@@ -713,36 +723,30 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
         return ERR_PROCESS_NOT_FOUND;
     }
 
-    /* Internal gate (the op stays OP_AUTH_NONE so every process can self-exit):
-     * killing ANOTHER process needs authority over it — self-exit always passes
-     * (caller->pid == target->pid); beyond self, a kill needs a same-cabin
-     * sibling, the god/system ensign, or the exact child this caller spawned.
-     * Without it any app could kill any process. */
+    /* A strand of the caller's own program is not a kill's to end — the
+     * caller's own pid included: its exit is target 0, a strand's own end is
+     * SYSTEM_OP_STRAND_EXIT. */
+    if (!self_exit && target->cabin && target->cabin == ctx->proc->cabin) {
+        process_ref_dec(target);
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    /* Internal gate (the op stays OP_AUTH_NONE so every program can exit):
+     * killing ANOTHER program needs authority over it — the god/system ensign,
+     * or the exact child this caller spawned. Without it any app could kill
+     * any program. */
     if (!proc_has_authority_over(ctx->proc, target)) {
         process_ref_dec(target);
         return ERR_ACCESS_DENIED;
     }
 
-    /* Publish process:died with the CORRECT disposition and claim the cleanup
-     * BEFORE process_set_state exposes this proc to the reaper. If we marked it
-     * PROC_DONE/CRASHED first, the reaper's process_destroy (another K-Core)
-     * could win the touch_cleaned claim in that window and publish
-     * PROC_EXIT_CRASHED for an intentional exit/kill. TouchCleanupProcess reads
-     * no proc state and `target` is pinned (process_find_ref above), so claiming
-     * first is safe; the claim-guard in TouchClaimSet (touch_cleaned check under
-     * subs_lock) already blocks any sub the still-running target might race in.
-     * TouchCleanupProcess is idempotent on touch_cleaned, so the later
-     * process_destroy call no-ops and this disposition stands.
-     *
-     * Disposition (proc_exit.h): a self-exit publishes the caller's code with
-     * the sign bit cleared so it can never look like a negative sentinel; a
-     * kill-other forces PROC_EXIT_KILLED — the victim never chose a code, so
-     * any param code is ignored. */
-    TouchCleanupProcess(target,
-                        self_exit ? (int32_t)(exit_code & 0x7FFFFFFF)
-                                  : PROC_EXIT_KILLED);
-
-    process_set_state(target, self_exit ? PROC_DONE : PROC_CRASHED);
+    /* Disposition (proc_exit.h): an exit publishes the caller's code with the
+     * sign bit cleared so it can never look like a negative sentinel; a kill
+     * forces PROC_EXIT_KILLED — the program never chose a code, so any param
+     * code is ignored. `target` is pinned (process_find_ref above), which
+     * keeps its cabin standing through the whole end. */
+    CabinEnd(target, self_exit ? (int32_t)(exit_code & 0x7FFFFFFF)
+                               : PROC_EXIT_KILLED);
     __sync_synchronize();
 
     if (op->out_crate != CRATE_INDEX_NONE) {
@@ -828,32 +832,7 @@ static int SysProcCpuTime(const ManifestOp *op, Crate *crates, uint16_t crate_co
     Crate *out = &crates[op->out_crate];
     if (out->capacity < sizeof(uint64_t)) return ERR_BUFFER_TOO_SMALL;
 
-    /* Completed slices, plus the one running right now.
-     *
-     * The in-flight term is measured from cpu_tsc_stamp, and the base matters
-     * more than the arithmetic. An earlier version used last_run_time and was
-     * wrong twice over: schedule() re-stamps it on every pass, and it SURVIVES
-     * A PARK, so the difference spanned a whole sleep and a 300 ms nap read as
-     * 300 ms of processor time. cpu_tsc_stamp exists only while the strand
-     * holds the core — set when it takes it, cleared when it leaves — so a
-     * strand that is not running contributes nothing here, and one that is
-     * gets credited to the cycle.
-     *
-     * Without this term the answer would only move at a context switch, and on
-     * a machine with a spare core a strand can run a long time without one: a
-     * 50 ms CPU-bound loop on 16 cores measured as zero. That is what this
-     * paragraph is for.
-     *
-     * The read happens on the core the caller is running on, so the two TSC
-     * values come from the same clock. */
-    uint64_t us = __atomic_load_n(&ctx->proc->total_cpu_time, __ATOMIC_RELAXED);
-    const uint64_t stamp = ctx->proc->cpu_tsc_stamp;
-    if (stamp != 0) {
-        const uint64_t khz = cpu_get_tsc_freq_khz();
-        const uint64_t now = rdtsc();
-        if (khz != 0 && now > stamp) us += ((now - stamp) * 1000ULL) / khz;
-    }
-
+    uint64_t us = process_cpu_time_us(ctx->proc);
     if (crate_write(out, ctx, &us, sizeof(us)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
@@ -992,6 +971,11 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
             for (process_t *iter = process_get_first(); iter; iter = iter->next) {
                 process_state_t s = iter->state;
                 if (s == PROC_CRASHED || s == PROC_DONE) continue;
+                /* Dead from the moment its death is committed: by then its
+                 * process:died is out and process_gone has answered, and its
+                 * state follows a few instructions later. A crew read in
+                 * between must not call it alive. */
+                if (__atomic_load_n(&iter->touch_cleaned, __ATOMIC_ACQUIRE)) continue;
                 if (!process_has_tag_id(iter, tid))      continue;
                 if (total < pid_cap) pid_list[total] = iter->pid;
                 total++;
@@ -1016,7 +1000,7 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
             uint32_t pid   = mate->pid;
             uint32_t gen   = mate->generation;
             uint32_t state = (uint32_t)mate->state;
-            uint64_t cpu   = mate->total_cpu_time;
+            uint64_t cpu   = process_cpu_time_us(mate);
 
             uint64_t room  = alloc_sz - used - PROC_CREW_FIXED;
             size_t   tlen  = process_snapshot_tags(mate,
@@ -1142,6 +1126,10 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
 static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
                             uint64_t found_id, const char *child_tags,
                             const uint8_t *luggage, uint32_t luggage_len);
+static int SysProcExecAugmented(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                                uint64_t found_id, char *found_tags,
+                                const char *augment, size_t aug_len,
+                                const uint8_t *luggage, uint32_t luggage_len);
 
 /* SYSTEM_OP_PROC_EXEC
  *   in_crate: [program name][NUL][luggage bytes…] — the name the program is
@@ -1239,17 +1227,72 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     } while (found_id == 0 && from != 0);
 
     if (found_id == 0) return ERR_FILE_NOT_FOUND;
+    return SysProcExecAugmented(op, crates, ctx, found_id, found_tags,
+                                augment, aug_len, luggage, luggage_len);
+}
+
+/* A found program's keys (`found_tags`, taken over and freed here — NULL when
+ * there was no memory for them) with the caller's augment folded in, then the
+ * program started. The merge comes BEFORE any binary I/O, so a reserved or
+ * unspellable augment costs zero disk reads and never spawns an orphan. */
+static int SysProcExecAugmented(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                                uint64_t found_id, char *found_tags,
+                                const char *augment, size_t aug_len,
+                                const uint8_t *luggage, uint32_t luggage_len)
+{
     if (!found_tags) return ERR_NO_MEMORY;
 
-    /* Fold the caller augment into the file's tags BEFORE any binary I/O, so
-     * a reserved or unspellable augment costs zero disk reads and never
-     * spawns an orphan. */
     char   *child_tags = NULL;
     error_t arc = proc_exec_merge_augment(found_tags, augment, aug_len, &child_tags);
     kfree(found_tags);
     if (arc != OK) return arc;
     int rc = SysProcExecFound(op, crates, ctx, found_id, child_tags, luggage, luggage_len);
     kfree(child_tags);
+    return rc;
+}
+
+/* SYSTEM_OP_PROC_EXEC_FILE
+ *   params:   [u64 file id][caller-tag augment (comma-list, may be empty)]
+ *   in_crate (optional): the program's Luggage bytes, whole — no name, no
+ *             NUL; they may hold NULs. No crate starts it with no luggage.
+ *   out_crate (optional): as SYSTEM_OP_PROC_EXEC
+ * Starts that very file, not whichever one the name picks first. It must be
+ * what a name would have started — ACTIVE and wearing app or utility; a file
+ * that is not (no such id, deleted, data) is ERR_FILE_NOT_FOUND, the answer
+ * for a name that is no program. Tags, Luggage and answer are SysProcExecFound's. */
+static int SysProcExecFile(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                           const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || !ctx->proc)                  return ERR_INVALID_ARGUMENT;
+    if (op->param_size < sizeof(uint64_t))   return ERR_INVALID_ARGUMENT;
+
+    if (process_get_count() >= PROCESS_MAX_COUNT) return ERR_PROCESS_LIMIT_EXCEEDED;
+
+    uint64_t file_id;
+    memcpy(&file_id, op->params, sizeof(file_id));
+
+    uint8_t *raw         = NULL;
+    uint32_t luggage_len = 0;
+    if (op->in_crate != CRATE_INDEX_NONE) {
+        Crate *src = &crates[op->in_crate];
+        if (src->size > UINT32_MAX) return ERR_INVALID_ARGUMENT;
+        if (src->size > 0) {
+            raw = crate_in_buf(src, ctx);
+            if (!raw) return ERR_INVALID_ADDRESS;
+            luggage_len = (uint32_t)src->size;
+        }
+    }
+
+    char *found_tags = NULL;
+    int   rc;
+    if (!SysExecCandidate(file_id, &found_tags))
+        rc = ERR_FILE_NOT_FOUND;
+    else
+        rc = SysProcExecAugmented(op, crates, ctx, file_id, found_tags,
+                                  (const char *)op->params + sizeof(file_id),
+                                  op->param_size - sizeof(file_id), raw, luggage_len);
+    if (raw) crate_buf_free(raw);
     return rc;
 }
 
@@ -1429,6 +1472,30 @@ static int SysStrandRelease(const ManifestOp *op, Crate *crates, uint16_t crate_
 }
 
 /* =========================================================================
+ *  SYSTEM_OP_STRAND_EXIT — the calling strand ends, and only it.
+ *
+ *  The one end that is a single strand's: it comes from that strand itself,
+ *  at a point of its own choosing (boxlib's strand_exit, after it has put down
+ *  everything it held), so nothing of its program is left held. Any other end
+ *  is its program's (SYSTEM_OP_PROC_KILL). Its process:died carries 0.
+ *
+ *  Committed as every end is: the death claimed and announced first, the state
+ *  the reaper reads second, so the reaper never calls this end a crash. The
+ *  op's own strand is pinned for the op's life, as every op's is.
+ * ========================================================================= */
+static int SysStrandExit(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                         const OpContext *ctx)
+{
+    (void)op; (void)crates; (void)crate_count;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
+
+    TouchCleanupProcess(ctx->proc, 0);
+    process_set_state(ctx->proc, PROC_DONE);
+    __sync_synchronize();
+    return OK;
+}
+
+/* =========================================================================
  *  SYSTEM_OP_STRAND_POOL_BIND — register the caller strand's boxlib StrandPool
  *  slab slot for crash-orphan reclaim (Ф20e).
  *
@@ -1482,23 +1549,23 @@ static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate
  *  Use Context (use) — what the user is doing, said in tags
  * ========================================================================= */
 
-/* After a set or a clear: the volume is told, and the caller learns whether
- * it listened. out_crate (optional): u8 — 1 when the volume now remembers
- * exactly this context, 0 when it does not (no volume up, no ground on it for
- * the context, a medium that will not take the write, a later word already
- * said to it). The context itself is set either way; the person is told,
- * never refused. A word the medium does not hold yet is answered when the
- * Settle cycle that carries it settles: the caller waits behind its Chit,
- * never inside the kernel. */
-static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext *ctx)
+/* After a set, a clear or a change: the volume is told the caller's own word,
+ * and the caller learns whether it listened. out_crate (optional): u8 — 1 when
+ * the volume now remembers exactly this word, 0 when it does not (no volume
+ * up, no ground on it for the context, a medium that will not take the write,
+ * a later word already said to it). The context itself is set either way; the
+ * person is told, never refused. A word the medium does not hold yet is
+ * answered when the Settle cycle that carries it settles: the caller waits
+ * behind its Chit, never inside the kernel. The word's text is let go of
+ * here. */
+static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                            UseWord *word)
 {
     Crate *out = (op->out_crate != CRATE_INDEX_NONE && crates[op->out_crate].capacity >= 1)
                      ? &crates[op->out_crate]
                      : NULL;
-    uint64_t saying = 0;
-    UseText *said   = UseContextSaying(&saying);
-    int      rc     = SettleUseRemembered(said, saying, ctx, crates, out);
-    UseTextDrop(said);
+    int rc = SettleUseRemembered(word->said, word->saying, ctx, crates, out);
+    UseTextDrop(word->said);
     return rc;
 }
 
@@ -1515,9 +1582,10 @@ static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     (void)crate_count;
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
 
+    UseWord word = { NULL, 0 };
     if (op->in_crate == CRATE_INDEX_NONE || crates[op->in_crate].size == 0) {
-        UseContextClear();
-        return UseSayRemembered(op, crates, ctx);
+        UseContextClear(&word);
+        return UseSayRemembered(op, crates, ctx, &word);
     }
 
     Crate *src = &crates[op->in_crate];
@@ -1525,10 +1593,44 @@ static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (!raw) return ERR_INVALID_ADDRESS;
 
     /* Read at the crate's own length: the context copies what it keeps. */
-    error_t rc = UseContextSet(raw, src->size);
+    error_t rc = UseContextSet(raw, src->size, &word);
     crate_buf_free(raw);
     if (rc != OK) return rc;   /* refused: the context is as it was, nothing to tell */
-    return UseSayRemembered(op, crates, ctx);
+    return UseSayRemembered(op, crates, ctx, &word);
+}
+
+/* SYSTEM_OP_USE_CHANGE  in_crate: [u32 n][n bytes: the tags to add][the rest:
+ * the tags to take out], each a comma-separated list, either empty. The
+ * context changed in one word — never half of it seen — over whatever was
+ * said meanwhile (UseContextChange). out_crate (optional): u8 remembered, as
+ * use.set's; for a change that changes nothing it is said of the word that
+ * stands. */
+static int SysUseChange(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                        const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
+    if (op->in_crate == CRATE_INDEX_NONE || crates[op->in_crate].size < sizeof(uint32_t))
+        return ERR_INVALID_ARGUMENT;
+
+    Crate      *src = &crates[op->in_crate];
+    const char *raw = crate_in_buf(src, ctx);
+    if (!raw) return ERR_INVALID_ADDRESS;
+
+    uint32_t add_len = 0;
+    memcpy(&add_len, raw, sizeof(add_len));
+    size_t lists = src->size - sizeof(add_len);
+    if (add_len > lists) {
+        crate_buf_free((void *)raw);
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    UseWord word = { NULL, 0 };
+    const char *add = raw + sizeof(add_len);
+    error_t rc = UseContextChange(add, add_len, add + add_len, lists - add_len, &word, NULL);
+    crate_buf_free((void *)raw);
+    if (rc != OK) return rc;   /* refused: the context is as it was, nothing to tell */
+    return UseSayRemembered(op, crates, ctx, &word);
 }
 
 /* SYSTEM_OP_USE_CLEAR  nothing in; out_crate (optional): u8 remembered — see
@@ -1538,8 +1640,9 @@ static int SysUseClear(const ManifestOp *op, Crate *crates, uint16_t crate_count
 {
     (void)crate_count;
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    UseContextClear();
-    return UseSayRemembered(op, crates, ctx);
+    UseWord word = { NULL, 0 };
+    UseContextClear(&word);
+    return UseSayRemembered(op, crates, ctx, &word);
 }
 
 /* SYSTEM_OP_USE_GET  out_crate: [u32 count][u32 needed][(u16 len)(char tag[len])]*
@@ -2286,15 +2389,19 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_PROC_CPUTIME, SysProcCpuTime, OP_AUTH_NONE,   "system.proc.cputime"},
         { SYSTEM_OP_TLS_FSBASE,   SysTlsFsbase,   OP_AUTH_NONE,   "system.tls.fsbase" },
         { SYSTEM_OP_PROC_EXEC,    SysProcExec,    OP_AUTH_UTILITY,"system.proc.exec"  },
+        { SYSTEM_OP_PROC_EXEC_FILE, SysProcExecFile, OP_AUTH_UTILITY,"system.proc.exec.file" },
         { SYSTEM_OP_STRAND_SPAWN, SysStrandSpawn, OP_AUTH_APP,    "system.strand.spawn"},
         { SYSTEM_OP_STRAND_RELEASE, SysStrandRelease, OP_AUTH_APP, "system.strand.release"},
+        /* Open as system.proc.kill is: every strand may end itself. */
+        { SYSTEM_OP_STRAND_EXIT,  SysStrandExit,  OP_AUTH_NONE,   "system.strand.exit"},
         { SYSTEM_OP_STRAND_POOL_BIND, SysStrandPoolBind, OP_AUTH_APP, "system.strand.pool.bind"},
         { SYSTEM_OP_INFO,         SysInfo,        OP_AUTH_NONE,   "system.info"       },
-        /* Use Context: what the user is doing, said in tags. set and clear
-         * speak for the user, so they take system authority — the shell, or a
-         * program wearing `system`. get is anyone's: any program may ask what
-         * the user is doing. */
+        /* Use Context: what the user is doing, said in tags. set, change and
+         * clear speak for the user, so they take system authority — the
+         * shell, or a program wearing `system`. get is anyone's: any program
+         * may ask what the user is doing. */
         { SYSTEM_OP_USE_SET,      SysUseSet,      OP_AUTH_SYSTEM, "system.use.set"    },
+        { SYSTEM_OP_USE_CHANGE,   SysUseChange,   OP_AUTH_SYSTEM, "system.use.change" },
         { SYSTEM_OP_USE_GET,      SysUseGet,      OP_AUTH_NONE,   "system.use.get"    },
         { SYSTEM_OP_USE_CLEAR,    SysUseClear,    OP_AUTH_SYSTEM, "system.use.clear"  },
         /* Tags: app+. */

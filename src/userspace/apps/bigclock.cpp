@@ -2,12 +2,11 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
-#include <vector>
+#include <utility>
 
 #include "box/clock.h"
 #include "box/cxx/console.h"
-#include "box/cxx/keyboard.h"
-#include "box/keyboard.h"
+#include "painter/tui/stage.h"
 
 namespace {
 
@@ -28,26 +27,26 @@ constexpr std::array<std::array<std::uint8_t, kHeight>, 10> kDigits{{
     {0b11111, 0b10001, 0b10001, 0b11111, 0b00001, 0b00001, 0b11111},
 }};
 
-TextCell block(box::color color) {
-  TextCell cell{};
-  cell.ch = ' ';
-  cell.fg = cell.bg = color.raw();
-  return cell;
+using PaintColor = painter::core::Color;
+
+PaintColor paint_color(box::color color) {
+  return PaintColor::FromRaw(color.raw());
+}
+
+painter::tui::Cell block(box::color color) {
+  const PaintColor Ink = paint_color(color);
+  return painter::tui::Cell{' ', Ink, Ink};
 }
 
 class BigClock {
 public:
-  explicit BigClock(box::vga::dimensions size)
-      : size_(size), frame_(static_cast<std::size_t>(size.rows) * size.cols),
-        block_width_(block_width(size.cols)),
-        block_height_(block_height(size.rows)),
-        origin_x_((size.cols - kWidth * block_width_) / 2),
-        origin_y_((size.rows - kHeight * block_height_) / 2) {}
-
-  ~BigClock() {
-    box::vga::clear(kBackground);
-    box::vga::move_cursor(0, 0);
-  }
+  explicit BigClock(painter::tui::Stage &Screen)
+      : Screen_(Screen), frame_(Screen.FrameBuffer()),
+        rows_(static_cast<unsigned>(Screen.Size().Height)),
+        cols_(static_cast<unsigned>(Screen.Size().Width)),
+        block_width_(block_width(cols_)), block_height_(block_height(rows_)),
+        origin_x_((cols_ - kWidth * block_width_) / 2),
+        origin_y_((rows_ - kHeight * block_height_) / 2) {}
 
   bool update() {
     BoxTime now{};
@@ -56,22 +55,26 @@ public:
     const unsigned time = now.hour * 60u + now.minute;
     if (time == displayed_)
       return true;
-    std::fill(frame_.begin(), frame_.end(), block(kBackground));
+    frame_.Clear({paint_color(kBackground), paint_color(kBackground)});
     digit(now.hour / 10, 0);
     digit(now.hour % 10, 6);
     square(12, 2, kDigitsColor);
     square(12, 4, kDigitsColor);
     digit(now.minute / 10, 14);
     digit(now.minute % 10, 20);
-    if (vga_paint(0, 0, size_.rows, size_.cols, frame_.data()) != OK)
+    if (!Screen_.SetCursor({static_cast<std::int32_t>(cols_ - 1),
+                            static_cast<std::int32_t>(rows_ - 1)}))
       return false;
+    if (!Screen_.Present()) return false;
     displayed_ = time;
     return true;
   }
 
 private:
-  box::vga::dimensions size_;
-  std::vector<TextCell> frame_;
+  painter::tui::Stage &Screen_;
+  painter::tui::Frame &frame_;
+  unsigned rows_;
+  unsigned cols_;
   unsigned block_width_;
   unsigned block_height_;
   unsigned origin_x_;
@@ -95,7 +98,8 @@ private:
     const unsigned top = origin_y_ + y * block_height_;
     for (unsigned row = top; row < top + block_height_; ++row)
       for (unsigned col = left; col < left + block_width_; ++col)
-        frame_[row * size_.cols + col] = block(color);
+        frame_.Put({static_cast<std::int32_t>(col), static_cast<std::int32_t>(row)},
+                   block(color));
   }
 
   void digit(unsigned number, unsigned left) {
@@ -107,18 +111,20 @@ private:
 };
 
 int run() {
-  const auto size = box::vga::size();
-  if (size.rows < kHeight || size.cols < kWidth) {
-    std::puts("bigclock: requires at least 25x7 console cells");
+  auto Opened = painter::tui::Stage::Open("bigclock", kWidth, kHeight);
+  if (!Opened) {
+    std::puts(Opened.error().Describe("bigclock").c_str());
     return 1;
   }
-  BigClock clock(size);
-  box::key_stream keyboard;
+  painter::tui::Stage Screen = std::move(*Opened);
+  BigClock clock(Screen);
   for (;;) {
     if (!clock.update())
       return 1;
-    const auto key = keyboard.wait(250);
-    if (key && key->ch() == KEY_ESCAPE)
+    const painter::tui::Event Event = Screen.Wait(250);
+    if (Event.Kind == painter::tui::EventKind::Gone) return 1;
+    if (Event.Kind == painter::tui::EventKind::Key &&
+        Event.Key.Ascii == painter::tui::KeyCodes::Escape)
       return 0;
   }
 }

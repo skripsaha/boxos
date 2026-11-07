@@ -29,8 +29,13 @@ AR  = x86_64-elf-ar
 # every shipped binary linked against it.
 # -fasynchronous-unwind-tables: C++ exceptions unwind THROUGH boxlib
 # frames (C++ callback under a boxlib C caller) — every frame needs CFI.
+# -fstack-clash-protection: a frame or alloca larger than a page touches its
+# pages one after another, so a stack that has used its reserve meets the gap
+# that is never mapped below it (BOXOS_USER_STACK_GAP) and stops there,
+# instead of stepping over it onto whatever lies below. Every userspace
+# Makefile carries it.
 CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
-         -fno-stack-protector -fno-ipa-ra -fcf-protection=full \
+         -fno-stack-protector -fno-ipa-ra -fcf-protection=full -fstack-clash-protection \
          -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
          -fasynchronous-unwind-tables \
          -Iinclude -I../../include -Wall -Wextra -Wno-type-limits -O2 -Wno-unused-parameter \
@@ -46,11 +51,25 @@ SRCS = src/core/notify.c \
        src/core/touch_ring.c \
        src/core/manifest.c \
        src/print.c \
+       src/format.c \
+       src/file_metadata.c \
        src/readline.c \
        src/current.c \
        src/file.c \
        src/use.c \
        src/luggage.c \
+       src/form.c \
+       src/image_section.c \
+       src/form_line.c \
+       src/form_records.c \
+       src/form_luggage.c \
+       src/form_fill.c \
+       src/form_fill_assign.c \
+       src/form_program.c \
+       src/form_souvenir.c \
+       src/recipe.c \
+       src/recipe_check.c \
+       src/sha256.c \
        src/system.c \
        src/ipc.c \
        src/time.c \

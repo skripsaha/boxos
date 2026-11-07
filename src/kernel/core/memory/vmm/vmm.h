@@ -5,6 +5,8 @@
 #include "error.h"
 #include "cabin_layout.h"
 #include "boxos_limits.h"   /* MAX_PROCESSES — the shadow bunk row is cut to it */
+#include "kernel_config.h"  /* CONFIG_USER_STACK_* — what the main stack's zone is cut from */
+#include "aslr.h"           /* ASLR_STACK_RANGE — how far below the top a stack may sit */
 
 #define VMM_PAGE_SIZE           4096
 #define VMM_PAGE_MASK           0xFFFFFFFFFFFFF000ULL
@@ -72,6 +74,20 @@
 #define VMM_USER_BASE           VMM_CABIN_CODE_START   // flat binary entry point (NOT ELF!)
 #define VMM_USER_STACK_TOP      0x00007FFFFFFFE000ULL  // ~128TB user space top
 #define VMM_USER_HEAP_BASE      CABIN_HEAP_BASE        // 256MB: fixed heap base (above identity map)
+
+/* The main stack's zone, from the top of the address space down. Its top is
+ * VMM_USER_STACK_TOP less a random offset below ASLR_STACK_RANGE, and from
+ * there the stack's reserve reaches CONFIG_USER_STACK_RESERVE lower. These
+ * name the lowest the reserve can start at over every offset, the gap that is
+ * never mapped under it, and under that the six pages of the CET shadow
+ * stack (low guard, four pages, high guard). The shadow stack sits below the
+ * LOWEST reach of the data stack, not at one fixed distance from the top, so
+ * no offset can put the two on top of each other. Everything a program may
+ * map of its own — code, heap, Bay, Brook, the hammock — lies below the zone. */
+#define VMM_MAIN_STACK_LOW_MIN      (VMM_USER_STACK_TOP - ASLR_STACK_RANGE - CONFIG_USER_STACK_RESERVE)
+#define VMM_MAIN_SSP_ZONE_TOP       (VMM_MAIN_STACK_LOW_MIN - CONFIG_USER_STACK_GAP)
+#define VMM_MAIN_SSP_ZONE_SIZE      (6 * 4096ULL)
+#define VMM_USER_STACK_ZONE_BASE    (VMM_MAIN_SSP_ZONE_TOP - VMM_MAIN_SSP_ZONE_SIZE)
 
 #define VMM_FLAG_PRESENT        (1ULL << 0)
 #define VMM_FLAG_WRITABLE       (1ULL << 1)
@@ -160,6 +176,14 @@ typedef enum {
     VMM_LAM_U57  = 2,
 } vmm_lam_mode_t;
 
+/* A user stack that is alive in an address space: the reserve [low, top) whose
+ * pages come in on first touch. The gap below it, [low - CONFIG_USER_STACK_GAP,
+ * low), is never mapped. */
+typedef struct {
+    uintptr_t low;
+    uintptr_t top;
+} VmmStack;
+
 typedef struct {
     page_table_t* pml4;
     uintptr_t pml4_phys;
@@ -171,7 +195,14 @@ typedef struct {
     size_t kernel_pages;
     size_t user_pages;
     uintptr_t heap_start;
-    uintptr_t stack_top;
+
+    /* The stacks alive here, sorted by low, one per strand. Guarded by `lock`,
+     * the lock that guards the page tables a stack's pages go into, so that
+     * "this address is in a live stack and nothing maps it" is one fact read
+     * and acted on in one hold. See vmm_stack_register. */
+    VmmStack *stacks;
+    uint32_t stack_count;
+    uint32_t stack_capacity;
 } vmm_context_t;
 
 typedef struct {
@@ -273,6 +304,26 @@ uintptr_t vmm_virt_to_phys(vmm_context_t* ctx, uintptr_t virt_addr);
 bool vmm_is_mapped(vmm_context_t* ctx, uintptr_t virt_addr);
 uint64_t vmm_get_page_flags(vmm_context_t* ctx, uintptr_t virt_addr);
 
+/* The stacks of an address space. A user stack is not mapped when it is made:
+ * vmm_stack_register reserves [top - CONFIG_USER_STACK_RESERVE, top) and the
+ * first touch of each page brings it in — zeroed, user, writable, NX — through
+ * the rule the heap's first touch follows (VmmFirstTouch), so a program's own
+ * fault and a kernel copy into the same page see the same stack. The
+ * CONFIG_USER_STACK_GAP below the reserve is never mapped, and
+ * vmm_stack_gap_hit says whether an address fell in one.
+ *
+ * vmm_stack_release ends a stack that dies before its address space does (a
+ * strand's): it takes the stack out of the registry FIRST, and only then
+ * unmaps and frees what came in — so a sibling's fault can never install a
+ * page into a stack that is being taken apart. A main stack is not released:
+ * vmm_destroy_context frees every page of the space, stack included.
+ *
+ * `top` is page-aligned and the reserve may not overlap a live stack.
+ * vmm_stack_register returns false for a bad `top`, an overlap, or no memory. */
+bool vmm_stack_register(vmm_context_t* ctx, uintptr_t top);
+void vmm_stack_release(vmm_context_t* ctx, uintptr_t top);
+bool vmm_stack_gap_hit(vmm_context_t* ctx, uintptr_t addr);
+
 /* Ensure that the page covering `user_vaddr` is mapped into `ctx` as user memory
  * (NX, and writable when `writable`). Unmapped → allocate a zeroed phys page and
  * map it on those terms. Already mapped ON THOSE TERMS → 0. Already mapped but
@@ -301,6 +352,9 @@ void vmm_flush_tlb_page(uintptr_t virt_addr);
 // Called after vmm_unmap/vmm_map/vmm_protect to flush stale entries on
 // remote cores that share the same address space (vmm_context_t).
 // Single-core: local invlpg only. Multi-core: IPI to affected cores.
+// For a cabin it first waits until every porthole opened onto it before the
+// call is closed (see Porthole), so on return no core's TLB and no kernel copy
+// still reaches what the cleared entries named.
 void vmm_shootdown_page(vmm_context_t* ctx, uintptr_t virt_addr);
 void vmm_shootdown_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count);
 
@@ -726,6 +780,14 @@ static inline bool vmm_is_page_aligned(uintptr_t addr) {
     return (addr & VMM_PAGE_OFFSET_MASK) == 0;
 }
 
+/* Whether a mapping at virt_addr may carry USER: only in the user half. The
+ * kernel's half is shared by every cabin, so a program's page there would be
+ * every cabin's — and a page the kernel later fills with its own objects,
+ * written by a program. Every function that writes a leaf holds to it. */
+static inline bool vmm_user_flag_fits(uintptr_t virt_addr, uint64_t flags) {
+    return !(flags & VMM_FLAG_USER) || virt_addr < CABIN_USER_VA_CANONICAL_END;
+}
+
 static inline uintptr_t vmm_page_align_down(uintptr_t addr) {
     return addr & VMM_PAGE_MASK;
 }
@@ -821,35 +883,49 @@ int vmm_map_pocket_ring(vmm_context_t* ctx, uintptr_t phys_page);
 int vmm_map_result_ring(vmm_context_t* ctx, uintptr_t phys_page);
 int vmm_map_touch_ring(vmm_context_t* ctx, uintptr_t phys_page);
 
-// Translate a user virtual address in a process's page table to a kernel-accessible pointer.
-// Walks the process's page tables to whichever entry is the LEAF for the address — 4 KiB
-// PTE, 2 MiB PDE or 1 GiB PDPTE — and returns the frame it maps as a kernel pointer via
-// Pull Map. Returns NULL if nothing maps the address, if the leaf is not user-accessible,
-// or if the requested range leaves that leaf.
-//
-// LIMITATION: the pointer is good only to the end of the ONE leaf that maps the address.
-// A range that crosses into the next mapping is REFUSED (NULL), never truncated: the
-// user's virtual range may be contiguous while the frames behind it are not. Callers with
-// multi-leaf payloads use the vmm_user_buf_* helpers below, which walk leaf by leaf.
-//
-// READ form, and the only form. The kernel pointer is a supervisor WRITABLE alias (Pull
-// Map: PRESENT|WRITABLE|GLOBAL, no U/S), so a store through it consults neither the
-// cabin's own R/W bit, nor CR0.WP, nor CR4.SMAP — access rights belong to the translation
-// the store actually uses (Intel SDM Vol 3A §5.6/§5.6.1), and this alias is not the
-// cabin's. That makes the function safe for reads and unsafe as a write channel: it
-// deliberately does NOT require VMM_FLAG_WRITABLE, because the kernel legitimately reads
-// a cabin's read-only pages (its .rodata and .text, its CabinInfo).
-//
-// A kernel WRITE into cabin memory therefore never starts here. It goes one of two ways:
-//   • a payload → vmm_user_buf_commit_out, which demands VMM_FLAG_WRITABLE on each leaf
-//     it crosses and answers ERR_INVALID_ADDRESS on a leaf the cabin holds read-only;
-//   • a ring slot at an address derived from user data → vmm_ensure_user_page(writable=1)
-//     first, which now refuses a page the cabin holds read-only instead of reporting it
-//     "already mapped"; only then this translation, for the store.
-// The rule exists because the addresses are not the kernel's: a ring slot VA is
-// hdr.slots_base + (idx % hdr.slot_count_max) * hdr.slot_size, and all three fields sit in
-// a header page the cabin can write.
-void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t size);
+/*
+ * Porthole — the kernel's look into a cabin's memory, and the only one.
+ *
+ * The kernel never touches a cabin's memory through the cabin's own addresses:
+ * it walks the cabin's page tables to the frame and reaches the frame through
+ * the Pull Map. No TLB flush of the cabin's translation reaches that alias, so
+ * a frame the cabin gives up while a kernel copy is on it — a strand's stack
+ * as the strand ends, a Bay window released by a sibling — would be written
+ * after it went back to the PMM, into whoever had it next. A porthole closes
+ * that: while one is open onto a cabin, no frame of that cabin's mappings is
+ * given away. Every path that takes a page from a cabin clears its entry and
+ * then shoots the cabin down (vmm_shootdown_pages), and the shootdown waits
+ * until every porthole opened onto that cabin before the clear is closed; a
+ * porthole opened after it finds the entry clear and opens onto nothing.
+ *
+ * PortholeOpen walks to the leaf that maps `user_vaddr` and answers the Pull
+ * Map pointer to that byte, or NULL — and on NULL nothing is open. It refuses:
+ *   • an address no present USER leaf maps — kernel memory among it;
+ *   • for_write, a leaf the cabin holds read-only: the Pull Map alias is
+ *     supervisor-writable, so a store through it consults neither the cabin's
+ *     R/W bit, nor CR0.WP, nor CR4.SMAP (Intel SDM Vol 3A §5.6.1), and this
+ *     check is all that stands between an address a program chose and a
+ *     kernel store — a ring slot VA comes from a header the cabin can write;
+ *   • a range that leaves the leaf, or is more than a page of bytes.
+ *
+ * An open porthole holds this core: interrupts are off from open to close, so
+ * nothing else runs here and nobody who waits for it waits longer than one
+ * page of work. Between open and close: loads, stores and memcpy through the
+ * window, and nothing that waits — no lock, no kprintf, no second porthole,
+ * and no taking a page from any cabin (each is refused with a panic that says
+ * so). Copies longer than a page go through vmm_user_buf_*, a porthole a page.
+ *
+ * The cabin must outlive the porthole: the opener holds a reference on a
+ * strand of it, as every K-Core serving that strand does.
+ */
+typedef struct {
+    uint64_t  rflags;   /* the interrupt flag the opener had, given back at close */
+    uintptr_t phys;     /* the physical byte the window starts at */
+} Porthole;
+
+void *PortholeOpen(Porthole *porthole, vmm_context_t *ctx, uintptr_t user_vaddr,
+                   size_t size, bool for_write);
+void  PortholeClose(Porthole *porthole);
 
 /*
  * Multi-page user buffer in/out via a kmalloc'd kernel bounce buffer.
@@ -859,9 +935,9 @@ void* vmm_translate_user_addr(vmm_context_t* ctx, uintptr_t user_vaddr, size_t s
  *   vmm_user_buf_commit_out— copy kernel buffer → user pages (after fill)
  *   vmm_user_buf_free      — release the kernel buffer
  *
- * Each helper handles arbitrary cross-page user ranges by walking the
- * page table leaf by leaf and memcpy'ing chunk by chunk — a 4 KiB page,
- * a 2 MiB PDE leaf and a 1 GiB PDPTE leaf are all one chunk. A heap page
+ * Each helper handles arbitrary cross-page user ranges by copying a page
+ * at a time, each page through a porthole of its own (see Porthole above),
+ * so the frames behind contiguous user addresses may be anywhere. A heap page
  * the cabin has not touched yet is brought in on the way, exactly as the
  * cabin's own first touch would bring it in (a read of it reads zeros).
  * The two that answer a code tell a shortage from a bad address:

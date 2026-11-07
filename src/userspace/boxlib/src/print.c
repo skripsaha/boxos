@@ -11,6 +11,7 @@
 #include "box/system.h"
 #include "box/clock.h"
 #include "box/error.h"
+#include "box/core/format.h"
 #include "box/core/notify.h"
 #include "box/core/result.h"
 #include "box/core/strand_self.h"
@@ -18,6 +19,9 @@
 #include "box/display.h"
 #include "box/touch.h"
 #include "box/turnin.h"
+#include "box/file.h"
+#include "box/sync.h"
+#include "box/core/form_internal.h"
 
 /* ===========================================================================
  * Per-strand print state — thread-confined, NO lock.
@@ -667,9 +671,15 @@ static void io_flush_state(StrandPrintState *ps)
         lane_flush_run(ps);
 }
 
+static void arrow_flush(StrandPrintState *ps);
+
+/* The strand's staged run to the screen, and what the arrow gathered to its
+ * file. */
 void io_flush(void)
 {
-    io_flush_state(print_state_self());
+    StrandPrintState *ps = print_state_self();
+    io_flush_state(ps);
+    arrow_flush(ps);
 }
 
 /* ===========================================================================
@@ -795,6 +805,149 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
 }
 
 /* ===========================================================================
+ * The arrow — `cmd -> file`
+ *
+ * When the shell filled the Luggage with a `screen #ID`, what the program
+ * prints is added to the end of that file instead of the screen: bytes only,
+ * the colours a run carries have no place in a file. The end is found once, as
+ * the file's size when the first byte comes, and moved on by what is written;
+ * strands share one offset under one lock. The person's screen is still
+ * reached by print_to_screen — the editor's echo and a prompt are for the
+ * person, not for the file. A file that will not take the output ends the
+ * arrow: it is said on the screen once and everything goes there from then on.
+ *
+ * What is printed is gathered, and added to the file a gathering at a time —
+ * when it is full, and at io_flush, which exit() and strand_exit() call — not a
+ * write a call. A write is a change of the volume, and a run is as short as a
+ * colour: MEASURED, `loupe say.elf -> say.hex`, which colours each byte by its
+ * kind, wrote its 772 KB in 193 thousand writes and took 87 s, longer than the
+ * same lines took to draw; gathered, 1 s. The shell reads the file once the
+ * program is gone, and by then the program's exit has added the rest; a
+ * program that dies without exiting loses what it had gathered, as its
+ * unfinished line on the screen is lost.
+ * =========================================================================== */
+#define ARROW_GATHER 65536u
+
+static struct {
+    umutex_t lock;
+    uint64_t offset;
+    bool     found;
+    bool     given_up;
+    char    *gathered;     /* ARROW_GATHER bytes, had with the first byte */
+    size_t   used;
+} g_arrow = { UMUTEX_INIT, 0, false, false, NULL, 0 };
+
+/* As much of `bytes` as the file takes, added at its end. */
+static size_t arrow_put_locked(file_id_t file, const char *bytes, size_t len)
+{
+    if (!g_arrow.found) {
+        FileMetadata metadata;
+        if (FileMetadataRead(file, &metadata) != 0) return 0;
+        g_arrow.offset = metadata.Size;
+        g_arrow.found  = true;
+        FileMetadataRelease(&metadata);
+    }
+
+    size_t took = 0;
+    while (took < len) {
+        int64_t wrote = fwrite(file, g_arrow.offset, bytes + took, len - took);
+        if (wrote <= 0) break;
+        g_arrow.offset += (uint64_t)wrote;
+        took           += (size_t)wrote;
+    }
+    return took;
+}
+
+/* What was gathered, into the file. False when the file would not take all
+ * of it: the arrow is given up, and *Spill is the part never written. */
+static bool arrow_empty_locked(file_id_t file, const char **spill, size_t *spill_len)
+{
+    size_t took = arrow_put_locked(file, g_arrow.gathered, g_arrow.used);
+    bool   ok   = took == g_arrow.used;
+    if (!ok) {
+        *spill     = g_arrow.gathered + took;
+        *spill_len = g_arrow.used - took;
+    }
+    g_arrow.used = 0;
+    return ok;
+}
+
+/* The arrow given up, by the one who gave it up: said once, and the bytes it
+ * gathered and the file never took shown in its place. Nobody gathers once it
+ * is given up, so the gathering is this caller's alone to show and free. */
+static void arrow_end(StrandPrintState *ps, const char *spill, size_t spill_len)
+{
+    print_to_screen("[print] the file after -> would not take the output; it goes to the screen\n");
+    if (spill_len) emit_run(ps, spill, (int)spill_len, COLOR_DEFAULT, COLOR_DEFAULT);
+
+    umutex_lock(&g_arrow.lock);
+    free(g_arrow.gathered);
+    g_arrow.gathered = NULL;
+    umutex_unlock(&g_arrow.lock);
+}
+
+/* Did the file take these bytes — written, or gathered to be; false sends
+ * them to the screen. Without memory for a gathering each call is written as
+ * it comes, as it always was. */
+static bool arrow_write(StrandPrintState *ps, const char *bytes, size_t len)
+{
+    file_id_t file = form_screen_file();
+    if (file == 0) return false;
+
+    const char *spill     = NULL;
+    size_t      spill_len = 0;
+    bool        ended     = false;
+
+    umutex_lock(&g_arrow.lock);
+    bool ok = !g_arrow.given_up;
+    if (ok && !g_arrow.gathered) g_arrow.gathered = malloc(ARROW_GATHER);
+    if (ok && g_arrow.gathered && len > ARROW_GATHER - g_arrow.used)
+        ok = arrow_empty_locked(file, &spill, &spill_len);
+    if (ok) {
+        if (g_arrow.gathered && len <= ARROW_GATHER - g_arrow.used) {
+            memcpy(g_arrow.gathered + g_arrow.used, bytes, len);
+            g_arrow.used += len;
+        } else {
+            ok = arrow_put_locked(file, bytes, len) == len;
+        }
+    }
+    if (!ok && !g_arrow.given_up) {
+        g_arrow.given_up = true;
+        ended = true;
+    }
+    umutex_unlock(&g_arrow.lock);
+
+    if (ended) arrow_end(ps, spill, spill_len);
+    return ok;
+}
+
+/* The gathering into the file now. */
+static void arrow_flush(StrandPrintState *ps)
+{
+    file_id_t file = form_screen_file();
+    if (file == 0) return;
+
+    const char *spill     = NULL;
+    size_t      spill_len = 0;
+    bool        ended     = false;
+
+    umutex_lock(&g_arrow.lock);
+    if (!g_arrow.given_up && g_arrow.used > 0 && !arrow_empty_locked(file, &spill, &spill_len)) {
+        g_arrow.given_up = true;
+        ended = true;
+    }
+    umutex_unlock(&g_arrow.lock);
+
+    if (ended) arrow_end(ps, spill, spill_len);
+}
+
+static void emit_text(StrandPrintState *ps, const char *bytes, int len, Color fg, Color bg)
+{
+    if (len > 0 && arrow_write(ps, bytes, (size_t)len)) return;
+    emit_run(ps, bytes, len, fg, bg);
+}
+
+/* ===========================================================================
  * Public output API
  *
  * print() streams the input in fixed-size chunks: each chunk is UTF-8
@@ -821,7 +974,7 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
  * code that knows what a cell can hold. A chunk may end mid-sequence; the
  * Canvas assembles across calls, so a split costs nothing. */
 static void emit_chunks(StrandPrintState *ps, const char* data, size_t len,
-                        bool newline)
+                        bool newline, bool screen)
 {
     char   chunk[256];
     size_t src = 0;
@@ -834,13 +987,15 @@ static void emit_chunks(StrandPrintState *ps, const char* data, size_t len,
         int chunk_pos = (int)take;
         if (newline && src >= len) chunk[chunk_pos++] = '\n';
         if (chunk_pos == 0) break;
-        emit_run(ps, chunk, chunk_pos, ps->color_fg, ps->color_bg);
+        if (screen) emit_run(ps, chunk, chunk_pos, ps->color_fg, ps->color_bg);
+        else        emit_text(ps, chunk, chunk_pos, ps->color_fg, ps->color_bg);
     } while (src < len);
 }
 
-void print(const char* str)
+/* One batch round a whole call: a colour and the text it applies to leave
+ * together. `screen` is the person's screen whatever the arrow says. */
+static void print_chunks(const char *data, size_t len, bool screen)
 {
-    if (!str) return;
     StrandPrintState *ps = print_state_self();
 
     /* IO_MODE_IPC batches into the lane frame and flushes lazily;
@@ -851,22 +1006,33 @@ void print(const char* str)
     bool we_began = false;
     if (io_direct(ps)) { vga_begin(); we_began = true; }
 
-    emit_chunks(ps, str, strlen(str), false);
+    emit_chunks(ps, data, len, false, screen);
 
     if (we_began) vga_commit();
+}
+
+void print(const char* str)
+{
+    if (!str) return;
+    print_chunks(str, strlen(str), false);
 }
 
 void print_bytes(const char* data, size_t len)
 {
     if (!data || len == 0) return;
-    StrandPrintState *ps = print_state_self();
+    print_chunks(data, len, false);
+}
 
-    bool we_began = false;
-    if (io_direct(ps)) { vga_begin(); we_began = true; }
+void print_to_screen(const char* str)
+{
+    if (!str) return;
+    print_chunks(str, strlen(str), true);
+}
 
-    emit_chunks(ps, data, len, false);
-
-    if (we_began) vga_commit();
+void print_bytes_to_screen(const char* data, size_t len)
+{
+    if (!data || len == 0) return;
+    print_chunks(data, len, true);
 }
 
 void println(const char* str)
@@ -878,8 +1044,8 @@ void println(const char* str)
     bool we_began = false;
     if (io_direct(ps)) { vga_begin(); we_began = true; }
 
-    if (str) emit_chunks(ps, str, strlen(str), true);
-    else     emit_run(ps, "\n", 1, ps->color_fg, ps->color_bg);
+    if (str) emit_chunks(ps, str, strlen(str), true, false);
+    else     emit_text(ps, "\n", 1, ps->color_fg, ps->color_bg);
 
     if (we_began) vga_commit();
 }
@@ -909,14 +1075,13 @@ void clear(void)
 }
 
 /* ===========================================================================
- * printf — BoxOS extension: %color consumes one Color (uint32_t RGB) and
- * switches the active foreground for following text runs.
+ * printf — C's conversions, written by format.c, and BoxOS's %color and
+ * %bgcolor, which consume one Color (uint32_t RGB) and switch the foreground
+ * or the background of the text that follows.
  *
- * Implementation walks the format string, accumulates text into a working
- * buffer, and emits a colored run whenever:
- *   - %color is encountered (flush + change colour);
- *   - the buffer is about to overflow;
- *   - format string ends.
+ * The text gathers in a working buffer and goes out as a coloured run
+ * whenever %color or %bgcolor changes the colour, the buffer fills, or the
+ * format ends.
  *
  * UTF-8: passes through whole, format string and %s alike. What a character
  * looks like is settled once, at the font, by the only code that holds it
@@ -930,30 +1095,56 @@ void clear(void)
 
 #define PRINTF_BUFLEN 512
 
-static void fmt_htoa64(unsigned long v, char *buf)
+/* The sink printf gives format.c: a run of text in the colours of the moment. */
+typedef struct {
+    BoxFormatSink     sink;
+    StrandPrintState *ps;
+    Color             fg;
+    Color             bg;
+    int               used;
+    char              text[PRINTF_BUFLEN];
+} PrintfRun;
+
+static void printf_flush(PrintfRun *run)
 {
-    static const char hex[] = "0123456789abcdef";
-    if (v == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
-    char tmp[17];
-    int  i = 0;
-    while (v > 0) { tmp[i++] = hex[v & 0xF]; v >>= 4; }
-    int j = 0;
-    while (i > 0) buf[j++] = tmp[--i];
-    buf[j] = '\0';
+    if (run->used > 0) {
+        emit_text(run->ps, run->text, run->used, run->fg, run->bg);
+        run->used = 0;
+    }
 }
 
-static int append_str(char *buf, int pos, int max, const char *s)
+/* A flush may land inside a UTF-8 sequence, and that is harmless: the Canvas
+ * assembles the character across whatever calls carry it. */
+static void printf_put(BoxFormatSink *sink, const char *bytes, size_t count)
 {
-    while (s && *s && pos < max) buf[pos++] = *s++;
-    return pos;
+    PrintfRun *run = (PrintfRun *)sink;
+
+    while (count != 0) {
+        size_t room = (size_t)(PRINTF_BUFLEN - run->used);
+        size_t step = count < room ? count : room;
+
+        memcpy(run->text + run->used, bytes, step);
+        run->used += (int)step;
+        bytes += step;
+        count -= step;
+        if (run->used == PRINTF_BUFLEN)
+            printf_flush(run);
+    }
 }
 
-/* WEAK on purpose. boxlib's printf is BoxOS's coloured-run console printer and
- * converts %s %d %i %u %x %X %c %p %% — the set a C program on this system has
- * always had. boxcxx's <cstdio> defines the full C set, including the floating
- * conversions, and a program that links boxcxx must get THAT one: [cstdio.syn]
- * asks for conversions this function does not have, and two functions cannot
- * share an ELF symbol.
+static void printf_color(BoxFormatSink *sink, int background, uint32_t rgb)
+{
+    PrintfRun *run = (PrintfRun *)sink;
+
+    printf_flush(run);
+    if (background) run->bg = (Color)rgb;
+    else            run->fg = (Color)rgb;
+}
+
+/* WEAK on purpose. boxlib's printf is BoxOS's coloured-run console printer,
+ * and boxcxx's <cstdio> defines a printf of its own: a program that links
+ * boxcxx gets THAT one, since two functions cannot share an ELF symbol. Both
+ * write C's full set of conversions; this one's are format.c's.
  *
  * Weak rather than moved to its own translation unit because printf lives on
  * this file's statics — g_io_mode, the per-strand colour state, the lane
@@ -965,186 +1156,45 @@ __attribute__((weak)) int printf(const char *fmt, ...)
 {
     if (!fmt) return -1;
     StrandPrintState *ps = print_state_self();
-
+    PrintfRun run;
     va_list args;
-    va_start(args, fmt);
+    int written;
+
+    run.sink.Put = printf_put;
+    run.sink.Color = printf_color;
+    run.ps = ps;
+    run.fg = ps->color_fg;
+    run.bg = ps->color_bg;
+    run.used = 0;
 
     /* See print() for rationale — colored runs in VGA mode coalesce
      * into a single Manifest submit instead of N syscalls. */
     bool we_began = false;
     if (io_direct(ps)) { vga_begin(); we_began = true; }
 
-    char buf[PRINTF_BUFLEN];
-    int  pos       = 0;
-    int  total_out = 0;
-    Color cur_fg   = ps->color_fg;
-    Color cur_bg   = ps->color_bg;
-    char  numbuf[24];
-
-    /* Local helpers — re-emit and reset the working buffer. */
-    #define FLUSH() do {                                    \
-        if (pos > 0) {                                      \
-            emit_run(ps, buf, pos, cur_fg, cur_bg);         \
-            total_out += pos;                               \
-            pos = 0;                                        \
-        }                                                   \
-    } while (0)
-
-    #define ENSURE(n) do {                                  \
-        if (pos + (n) > PRINTF_BUFLEN - 4) FLUSH();         \
-    } while (0)
-
-    while (*fmt) {
-        if (*fmt != '%') {
-            /* Every byte of the format string, UTF-8 sequences included, goes
-             * out as it was written. See emit_chunks: the character is folded
-             * at the font, not here. */
-            ENSURE(4);
-            buf[pos++] = *fmt++;
-            continue;
-        }
-
-        /* %... */
-        const char *spec_start = fmt;
-        fmt++;
-        if (*fmt == '\0') { /* trailing % — emit literal */
-            ENSURE(2);
-            buf[pos++] = '%';
-            break;
-        }
-
-        /* %color — extension: switch foreground, no text emitted. */
-        if (*fmt == 'c' && fmt[1] == 'o' && fmt[2] == 'l' &&
-            fmt[3] == 'o' && fmt[4] == 'r') {
-            FLUSH();
-            cur_fg = (Color)va_arg(args, uint32_t);
-            fmt += 5;
-            continue;
-        }
-
-        /* %bgcolor — the same for the background: colour is a (fg, bg)
-         * pair everywhere, and printf can steer both halves. */
-        if (*fmt == 'b' && fmt[1] == 'g' && fmt[2] == 'c' &&
-            fmt[3] == 'o' && fmt[4] == 'l' && fmt[5] == 'o' &&
-            fmt[6] == 'r') {
-            FLUSH();
-            cur_bg = (Color)va_arg(args, uint32_t);
-            fmt += 7;
-            continue;
-        }
-
-        /* Length modifier — `l` / `ll` / `z`. Determines the size of the
-         * va_arg pulled for %d/%u/%x. C99 promotion rules: variadic
-         * int8/int16 promote to int, so %hhd/%hd are not needed; long
-         * stays long; long long stays long long. `z` matches size_t
-         * (== uint64_t in our LP64 userspace).
-         *
-         * width = 0 → int / unsigned int   (default)
-         *         1 → long / unsigned long (also size_t)
-         *         2 → long long / unsigned long long
-         */
-        int  width = 0;
-        if (*fmt == 'l') {
-            width = 1;
-            fmt++;
-            if (*fmt == 'l') { width = 2; fmt++; }
-        } else if (*fmt == 'z') {
-            width = 1;
-            fmt++;
-        }
-
-        switch (*fmt) {
-            case 's': {
-                const char *s = va_arg(args, const char *);
-                if (!s) s = "(null)";
-                /* Stream byte-at-a-time, flushing on overflow. A flush may
-                 * land mid-sequence and that is harmless: the Canvas
-                 * assembles the character across whatever calls carry it. */
-                while (*s) {
-                    ENSURE(4);
-                    buf[pos++] = *s++;
-                }
-                break;
-            }
-            case 'd': case 'i': {
-                int64_t v;
-                if (width == 0)      v = (int64_t)va_arg(args, int);
-                else if (width == 1) v = (int64_t)va_arg(args, long);
-                else                 v = (int64_t)va_arg(args, long long);
-                int64_to_str(v, numbuf, sizeof(numbuf));
-                ENSURE(24);
-                pos = append_str(buf, pos, PRINTF_BUFLEN - 4, numbuf);
-                break;
-            }
-            case 'u': {
-                uint64_t v;
-                if (width == 0)      v = (uint64_t)va_arg(args, unsigned int);
-                else if (width == 1) v = (uint64_t)va_arg(args, unsigned long);
-                else                 v = (uint64_t)va_arg(args, unsigned long long);
-                uint64_to_str(v, numbuf, sizeof(numbuf));
-                ENSURE(24);
-                pos = append_str(buf, pos, PRINTF_BUFLEN - 4, numbuf);
-                break;
-            }
-            case 'x': case 'X': {
-                uint64_t v;
-                if (width == 0)      v = (uint64_t)va_arg(args, unsigned int);
-                else if (width == 1) v = (uint64_t)va_arg(args, unsigned long);
-                else                 v = (uint64_t)va_arg(args, unsigned long long);
-                /* uint64_to_hex emits a "0x" prefix; printf %x in C is
-                 * "no prefix", so write the bare hex digits here. */
-                if (v == 0) {
-                    ENSURE(2);
-                    buf[pos++] = '0';
-                } else {
-                    char hex_tmp[24];
-                    fmt_htoa64((unsigned long)v, hex_tmp);
-                    ENSURE(24);
-                    pos = append_str(buf, pos, PRINTF_BUFLEN - 4, hex_tmp);
-                }
-                break;
-            }
-            case 'c': {
-                char c = (char)va_arg(args, int);
-                ENSURE(2);
-                buf[pos++] = c;
-                break;
-            }
-            case 'p': {
-                unsigned long v = va_arg(args, unsigned long);
-                ENSURE(20);
-                buf[pos++] = '0';
-                buf[pos++] = 'x';
-                fmt_htoa64(v, numbuf);
-                pos = append_str(buf, pos, PRINTF_BUFLEN - 4, numbuf);
-                break;
-            }
-            case '%': {
-                ENSURE(2);
-                buf[pos++] = '%';
-                break;
-            }
-            default: {
-                /* Unknown spec — copy verbatim from spec_start through *fmt. */
-                ENSURE(4);
-                buf[pos++] = '%';
-                buf[pos++] = *fmt;
-                (void)spec_start;
-                break;
-            }
-        }
-        fmt++;
-    }
-
-    FLUSH();
-
-    #undef FLUSH
-    #undef ENSURE
+    va_start(args, fmt);
+    written = BoxFormat(&run.sink, fmt, args);
+    va_end(args);
+    printf_flush(&run);
 
     if (we_began) vga_commit();
+    return written;
+}
 
+/* Weak, as printf is: a C++ program links <cstdio>'s, which is the same
+ * function by name (boxcxx std/cstdio). */
+__attribute__((weak)) int vsnprintf(char *str, size_t n, const char *fmt, va_list args)
+{
+    return BoxFormatInto(str, n, fmt, args);
+}
+
+__attribute__((weak)) int snprintf(char *str, size_t n, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(str, n, fmt, args);
     va_end(args);
-    return total_out;
+    return written;
 }
 
 /* ===========================================================================

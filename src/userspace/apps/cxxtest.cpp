@@ -4789,8 +4789,8 @@ void Phase19()
 
     // ── the Use Context: the user's, one per machine, read by everyone ────
     // cxxtest wears app/utility/test/cxx and not system, so it may ASK what
-    // the user is doing and may not SAY it: set and clear are refused with
-    // access_denied, and the context they could not change is exactly as it
+    // the user is doing and may not SAY it: set, change and clear are refused
+    // with access_denied, and the context they could not change is exactly as it
     // was. What a program without authority can still prove is the shape of
     // the two doors — a query inside the context never sees more than one
     // everywhere, and everywhere sees both probe files whatever the user is
@@ -4802,11 +4802,14 @@ void Phase19()
         box::result<bool> said = box::use::set("p19ctx:alpha");
         Check(!said.has_value() && said.error().code() == box::errc::access_denied,
               "phase19 use::set without system authority is refused (access_denied)");
+        box::result<bool> changed = box::use::change("p19ctx:alpha", "p19ctx:beta");
+        Check(!changed.has_value() && changed.error().code() == box::errc::access_denied,
+              "phase19 use::change without system authority is refused (access_denied)");
         box::result<bool> cleared = box::use::clear();
         Check(!cleared.has_value() && cleared.error().code() == box::errc::access_denied,
               "phase19 use::clear without system authority is refused (access_denied)");
         Check(box::use::current() == before,
-              "phase19 a refused set / clear leaves the context as it was");
+              "phase19 a refused set / change / clear leaves the context as it was");
         Check(box::use::active() == !before.empty(),
               "phase19 use::active agrees with use::current");
 
@@ -11376,7 +11379,7 @@ void Phase61()
         Check(threw, "phase61 stold junk → invalid_argument");
     }
 
-    // stack probe: huge precision must not fault the 64KB stack's guard page
+    // stack probe: huge precision must stay inside the stack
     {
         static char big[10240];
         auto s1 = std::to_chars(big, big + sizeof(big), __LDBL_DENORM_MIN__, F::scientific, 5000);

@@ -1248,17 +1248,17 @@ display:ready mce:migration:completed apei:memory:error apei:ghes:ready"
 healthy_startup_tests() {
     local L=$1
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
-    local said want="TagFS: 44 run, 33 passed, 0 failed, 11 skipped, 0 held under a caveat"
-    local told="33 reads passed and 11 writes stood down"
+    local said want="TagFS: 45 run, 34 passed, 0 failed, 11 skipped, 0 held under a caveat"
+    local told="34 reads passed and 11 writes stood down"
     if [ "$(stand_format)" = v2 ]; then
-        want="TagFS: 44 run, 32 passed, 0 failed, 12 skipped, 0 held under a caveat"
-        told="32 reads passed, 6 written for format v1 stood aside and 6 writes stood down"
+        want="TagFS: 45 run, 33 passed, 0 failed, 12 skipped, 0 held under a caveat"
+        told="33 reads passed, 6 written for format v1 stood aside and 6 writes stood down"
         grep -aq "^\[TESTS\] 6 test(s) stood aside: this volume is format v2" "$L"
         chk $? "TagFS startup tests: on a book the 6 written for format v1's records stand aside"
     fi
     said=$(stand_summary "$L")
     [ "$said" = "$want" ]
-    chk $? "TagFS startup tests: the 44 this tree registers ran, $told (${said:-no summary})"
+    chk $? "TagFS startup tests: the 45 this tree registers ran, $told (${said:-no summary})"
 }
 
 run_healthy() {
@@ -5103,12 +5103,14 @@ runnable_drop_on() {
     python3 - <<'EOF'
 p = "src/kernel/core/scheduler/scheduler.c"
 s = open(p).read()
-anchor = """    // Select next
-    process_t *next = scheduler_select_next();
+anchor = """    process_t *next = (current && !process_is_idle(current) && TagFSIdleOwed())
+                          ? idle_process_get()
+                          : scheduler_select_next();
 """
 assert anchor in s, "runnable drop anchor missing"
-dropped = """    // Select next
-    process_t *next = scheduler_select_next();
+dropped = """    process_t *next = (current && !process_is_idle(current) && TagFSIdleOwed())
+                          ? idle_process_get()
+                          : scheduler_select_next();
     { static uint32_t lcm_seen; if (next && !process_is_idle(next) && next->pid >= 3 && ++lcm_seen == 2000) next = idle_process_get(); } /* logcheck mutation: one application strand is taken out of its runqueue and never dispatched */
 """
 open(p, "w").write(s.replace(anchor, dropped, 1))
@@ -5131,6 +5133,78 @@ run_runnable() {
     chk $? "runnable: bench completed three runs at sixteen cores (rows=$rows)"
     ! grep -q "RUNNABLE UNSCHEDULED" "$L"
     chk $? "runnable: and no strand was accused of being runnable and unscheduled"
+}
+
+# fare — the scheduler's Fare, judged by a program (src/userspace/utils/
+# faretest.c): two children spin without entering the kernel, one wearing the
+# Use Context; with none the two divide their core evenly, with it said before
+# they start or while they spin the one wearing it is given three quarters —
+# two thirds when it wears one of the context's two tags — and a sleep of the
+# program judging them ends on time. On one core and on two —
+# two being one K-Core and one application core, where both children share the
+# only core there is to share: faretest saying SKIP there is a failure, since
+# the shares it skips are the whole point.
+fare_boot() {
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=$2 >/dev/null 2>&1
+    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    sleep 4
+    if type_cmd "faretest"; then
+        sleep 1
+        key_press ret
+        wait_until "$WAIT_QUIET_S" "faretest's verdict" \
+            'grep -qE "\[FARE\] (PASS|FAIL:)" build/serial.log'
+        sleep 1
+    fi
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+}
+
+run_fare() {
+    echo "== fare: two children on one core — even with no Use Context, three quarters to the one wearing it =="
+    build STRICT=on
+    local cores L
+    for cores in 1 2; do
+        fare_boot "fare$cores" "$cores"
+        L="$SCRATCH/serial.fare$cores.log"
+        grep -q "\[FARE\] PASS" "$L"
+        chk $? "fare: faretest passed on $cores core(s)"
+        ! grep -qE "\[FARE\] (FAIL|SKIP)" "$L"
+        chk $? "fare: and on $cores core(s) no check failed and none was skipped"
+        grep "\[FARE\] FAIL\|\[FARE\] SKIP" "$L" | head -4 | sed 's/^/       /'
+    done
+}
+
+# The oracle measured against itself: a Use Context that costs nothing less,
+# and the same run must FAIL on the shares it gives.
+fare_flat_on() {
+    mutate src/kernel/core/scheduler/scheduler.c
+    python3 - <<'PY'
+p = "src/kernel/core/scheduler/scheduler.c"
+s = open(p).read()
+anchor = "#define SCHED_CONTEXT_FARE_SHARE 3"
+assert anchor in s, "fare mutation anchor missing"
+open(p, "w").write(s.replace(anchor, "#define SCHED_CONTEXT_FARE_SHARE 1 /* logcheck mutation: the context pays the full fare */", 1))
+PY
+    mut_done src/kernel/core/scheduler/scheduler.c "logcheck mutation"
+}
+
+fare_flat_off() {
+    restore src/kernel/core/scheduler/scheduler.c
+}
+
+run_faremut() {
+    echo "== faremut: the Use Context pays the full Fare, and faretest must say the shares are wrong =="
+    fare_flat_on; build STRICT=on
+    fare_boot faremut 1
+    fare_flat_off
+    L="$SCRATCH/serial.faremut.log"
+    grep -q "\[FARE\] FAIL .*75% asked" "$L"
+    chk $? "faremut: faretest named the share the context did not get"
+    ! grep -q "\[FARE\] PASS" "$L"
+    chk $? "faremut: and did not pass"
+
+    build   # leave the tree built from clean sources
 }
 
 run_runnablemut() {
@@ -6524,7 +6598,7 @@ finish_boot() {
     local MARK
     MARK=$(wc -l < build/serial.log)
     local cmd
-    for cmd in "finish nobody" "finish display" "finish display anyway" "me"; do
+    for cmd in "finish nobody" "finish display" "finish display anyway" "finish display"; do
         type_cmd "$cmd"
         sleep 1
         key_press ret
@@ -6554,9 +6628,12 @@ run_finish() {
     grep -q "^nothing ended$" "$L" \
         && ok "finish: nothing was ended while the guard stood" \
         || bad "finish: something was ended although the guard spoke"
-    grep -q "Processes: 2 live" "$L" \
+    # Asked again after the word anyway: nobody wears display any more — the
+    # daemon is gone — and the shell answered the asking. Not a count of what
+    # is alive, which is whatever the machine autostarts besides.
+    grep -q "^display: nothing wears that tag$" "$L" \
         && ok "finish: after the word anyway the daemon is gone and the shell still answers" \
-        || bad "finish: the daemon survived the word anyway, or the shell stopped answering ($(grep -m1 'Processes:' "$L" || echo 'no answer at all'))"
+        || bad "finish: the daemon survived the word anyway, or the shell stopped answering ($(grep -m1 '^display: ' "$L" || echo 'no answer at all'))"
     grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
         && bad "finish: the kernel spoke of a stall or fault" \
         || ok "finish: no verdict, no panic"
@@ -7613,6 +7690,34 @@ run_brigademut() {
 }
 
 # ===========================================================================
+# crewcrash — a strand's crash ends its program, every strand of it
+# ===========================================================================
+#
+# A crashed strand takes with it whatever it held of its program — the heap
+# lock above all — and siblings left running would wait on that for ever. So
+# process_destroy ends the whole program of a strand whose death nobody
+# committed (CabinEnd), the main strand last. `strandtest crash` is the
+# instrument, run alone: every other scenario reads a user-mode [EXCEPTION] as
+# a failure, and this one needs exactly one — the worker's own.
+run_crewcrash() {
+    echo "== crewcrash: a worker's crash ends its program, every strand of it =="
+    build STRICT=on
+    if ! util_boot crewcrash "STRICT=on CORES=16 MEM=4G" "strandtest crash" "\[STRAND\] (crash PASS|FAIL crash)"; then
+        bad "crewcrash: never reached a shell"; return
+    fi
+    L="$SCRATCH/serial.crewcrash.log"
+    grep -q "\[STRAND\] crash PASS" "$L" \
+        && ok "crewcrash: the worker's crash ended all of its program, every strand CRASHED" \
+        || bad "crewcrash: $(grep -m1 '\[STRAND\] FAIL' "$L" || echo 'no verdict from strandtest crash at all')"
+    [ "$(grep -c '^\[EXCEPTION\] Killing PID' "$L")" -eq 1 ] \
+        && ok "crewcrash: one fault, the worker's own" \
+        || bad "crewcrash: $(grep -c '^\[EXCEPTION\] Killing PID' "$L") fault(s), want the worker's one"
+    grep -qE "VERDICT|PANIC" "$L" \
+        && bad "crewcrash: the kernel spoke of a stall or panic" \
+        || ok "crewcrash: no verdict, no panic"
+}
+
+# ===========================================================================
 # headcount — every carrier of a tag is told once, and every one answers
 # ===========================================================================
 #
@@ -7724,7 +7829,7 @@ byname_judge() {
     grep -q "Created file: alpha.txt" "$L" \
         && ok "$name: the file was created" \
         || bad "$name: create did not answer"
-    grep -q "File renamed" "$L" \
+    grep -q "alpha.txt is now called beta.txt" "$L" \
         && ok "$name: the file was renamed" \
         || bad "$name: rename did not answer"
     # `files beta` asks by tag: the renamed file must carry its new name's tag
@@ -7737,25 +7842,25 @@ byname_judge() {
     sed -n '/~ info beta.txt/,/~ info alpha.txt/p' "$L" | grep -q "beta.txt" \
         && ok "$name: found by its new name" \
         || bad "$name: 'info beta.txt' did not find the file"
-    sed -n '/~ info alpha.txt/,/~ trash beta.txt/p' "$L" | grep -q "File not found" \
+    sed -n '/~ info alpha.txt/,/~ trash beta.txt/p' "$L" | grep -q "there is no alpha.txt here" \
         && ok "$name: not found by its old name" \
         || bad "$name: 'info alpha.txt' still finds the renamed file"
-    grep -q "Deleted 1 trashed files" "$L" \
+    grep -q "Erased 1 file from the trash" "$L" \
         && ok "$name: erase found the trashed file by its tag" \
-        || bad "$name: 'erase trashed' did not delete the one trashed file ($(grep -m1 'Deleted' "$L" || echo 'no answer'))"
-    sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -q "^File moved to trash"
-    chk $? "$name: gamma.txt went to the trash ($(sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -m1 -E '^(File moved|Error)' || echo 'no answer'))"
+        || bad "$name: 'erase trashed' did not delete the one trashed file ($(grep -m1 'Erased' "$L" || echo 'no answer'))"
+    sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -q "^gamma.txt moved to the trash"
+    chk $? "$name: gamma.txt went to the trash ($(sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -m1 -E '^(gamma.txt moved|Could not)' || echo 'no answer'))"
     local erased said
-    said=$(sed -n '/~ erase gamma.txt/,/~ files trashed/p' "$L" | grep -m1 -E "^(File deleted|Error)")
-    erased=$(echo "$said" | grep -oE "^File deleted: gamma\.txt \(file [0-9]+\)")
+    said=$(sed -n '/~ erase gamma.txt/,/~ files trashed/p' "$L" | grep -m1 -E "^(File deleted|Could not|There is no)")
+    erased=$(echo "$said" | grep -oE "^File deleted: gamma\.txt$")
     [ -n "$erased" ]
     chk $? "$name: erase by name found the trashed file in the trash (${said:-no answer})"
     sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -q "No files found"
     chk $? "$name: and the trash is empty after it ($(sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -m1 -E '^(No files found|gamma\.txt)' || echo 'no answer'))"
-    sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -q "^Error: File must be trashed first"
-    chk $? "$name: a file out of the trash is refused ($(sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -m1 -E '^(File deleted|Error)' || echo 'no answer'))"
-    sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -q "^Error: File not found"
-    chk $? "$name: a name nobody has is not found ($(sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -m1 -E '^(File deleted|Error)' || echo 'no answer'))"
+    sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -q "^delta.txt is not in the trash"
+    chk $? "$name: a file out of the trash is refused ($(sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -m1 -E '^(File deleted|Could not|delta|There is no)' || echo 'no answer'))"
+    sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -q "^There is no file called nosuch.txt"
+    chk $? "$name: a name nobody has is not found ($(sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -m1 -E '^(File deleted|Could not|delta|There is no)' || echo 'no answer'))"
     local halt rows kept refused seen
     halt=$(grep -m1 -E "$STAND_HALT_ENDS" "$L" | cut -c1-120)
     grep -q '^\[HALT\] Storage sync complete' "$L"
@@ -9078,7 +9183,7 @@ STAND_HELD="
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=434
+STAND_RUN=435
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -10630,7 +10735,7 @@ run_quill() {
 # fidhistory keeps one file in a thousand, so its guest must count them. The
 # slab stops counting, so the kernel's heap self-test must say FAILED. The
 # kernel's copies stop bringing in a page the program has not touched
-# (VmmUserCopyWindow), so coldread and coldwrite must turn to a refusal that
+# (VmmPortholeCopy), so coldread and coldwrite must turn to a refusal that
 # reports 0 bytes — never a count, which is the half of the fix that stands
 # without the other. And first, with no machine at all, caveat_judge's three
 # answers in their approved words.
@@ -10680,9 +10785,9 @@ EOF2
     python3 - <<'EOF2'
 p = "src/kernel/core/memory/vmm/vmm.c"
 s = open(p).read()
-a = "    int touched = VmmFirstTouch(ctx, user_vaddr);\n"
+a = "            int touched = VmmFirstTouch(ctx, at);\n"
 assert s.count(a) == 1, "quillmut first-touch anchor missing"
-s = s.replace(a, "    int touched = 0;   /* logcheck mutation: a copy never brings a page in */\n", 1)
+s = s.replace(a, "            int touched = 0;   /* logcheck mutation: a copy never brings a page in */\n", 1)
 open(p, "w").write(s)
 EOF2
     mut_done src/kernel/core/memory/vmm/vmm.c "logcheck mutation"
@@ -11674,10 +11779,10 @@ turnsmut_loop_on() {
     python3 - <<'EOF'
 p = "src/kernel/arch/x86-64/amp/kcore.c"
 s = open(p).read()
-a = "        struct process_t* proc = kcore_queue_pop(q);\n        if (proc)\n            kcore_process_entry(proc);\n"
+a = "        kcore_take_arrivals(q);\n        struct process_t* proc = kcore_next(q);\n        if (proc)\n            kcore_process_entry(proc);\n"
 assert s.count(a) == 1, "turnsmut loop anchor missing"
 s = s.replace(a, "        struct process_t* proc;\n"
-                 "        while ((proc = kcore_queue_pop(q)) != NULL)   /* logcheck mutation: the queue popped until it is empty */\n"
+                 "        while (kcore_take_arrivals(q), (proc = kcore_next(q)) != NULL)   /* logcheck mutation: the queue served until it is empty */\n"
                  "            kcore_process_entry(proc);\n", 1)
 open(p, "w").write(s)
 EOF
@@ -12397,6 +12502,7 @@ case "${1:-both}" in
     handsetdeafmut) run_handsetdeafmut ;;
     brigade)    run_brigade ;;
     brigademut) run_brigademut ;;
+    crewcrash)  run_crewcrash ;;
     headcount)  run_headcount ;;
     headcountmut) run_headcountmut ;;
     deadline)   run_deadline ;;
@@ -12418,6 +12524,8 @@ case "${1:-both}" in
     kcoreclaimmut) run_kcoreclaimmut ;;
     runnable)   run_runnable ;;
     runnablemut) run_runnablemut ;;
+    fare)        run_fare ;;
+    faremut)     run_faremut ;;
     lostwake)   run_lostwake ;;
     lostwakemut) run_lostwakemut ;;
     chit)       run_chit ;;
@@ -12479,7 +12587,7 @@ case "${1:-both}" in
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
     all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all]"; exit 2 ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

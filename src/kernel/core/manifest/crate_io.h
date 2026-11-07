@@ -10,8 +10,8 @@
  * crate_io — page-walked Crate <-> kernel-buffer copy primitives.
  *
  * Deck handlers move bytes between a user Crate and a kernel buffer through
- * here instead of mapping the crate's first page with vmm_translate_user_addr
- * (which fails closed on a page-straddling range). crate_read / crate_write
+ * here instead of opening a single porthole onto the crate's first page
+ * (which refuses a page-straddling range). crate_read / crate_write
  * copy fixed-size payloads via the page-by-page vmm_user_buf_* walk, so a
  * Crate whose payload crosses a page boundary is copied correctly. The
  * crate_in_buf / crate_out_* helpers carry the variable-size bounce-buffer

@@ -61,9 +61,9 @@ typedef struct cabin_t
     TagOverflowRetired *tag_overflow_retired;  /* old buffers, freed at cabin_destroy */
 
     /* The Use Context's verdict on this cabin, one word: the epoch it was
-     * counted at << 1 | whether the cabin wears every context tag. The
-     * scheduler reads it and compares one epoch (use_context.h); 0 is stale
-     * from birth. */
+     * counted at, over the cabin's Fit — how much of the context it wears.
+     * The scheduler reads it and compares one epoch (use_context.h); 0 is
+     * stale from birth. */
     uint64_t use_verdict;
 
     /* MemTag held-tag set, level 1 — see the block above MemCabinGrant in
@@ -88,7 +88,7 @@ typedef struct cabin_t
 
     /* ASLR: per-cabin randomized addresses (set at creation time). */
     uint64_t aslr_heap_base;
-    uint64_t aslr_stack_top;
+    uint64_t aslr_stack_top;    /* main stack: reserve of CONFIG_USER_STACK_RESERVE below it */
     uint64_t aslr_buf_heap_base;
     uint64_t buf_heap_next;
 
@@ -115,13 +115,20 @@ typedef struct cabin_t
     spinlock_t  brook_lock;
     uint64_t    brook_va_next;
 
-    /* Hammock cursor — bump-allocates one fixed-size VA slot per spawned
-     * strand for its user stack + CET shadow stack + per-strand IPC rings +
-     * StrandInfo TLS block (see cabin_layout.h + strand_rings.c). The main
-     * strand does NOT consume a slot. Guarded by hammock_lock so concurrent
-     * strand_spawn from sibling strands never hand out the same VA. Mirrors
-     * bay_va_next / brook_va_next. */
+    /* Hammock slots — one fixed-size VA slot per spawned strand for its user
+     * stack + CET shadow stack + per-strand IPC rings + StrandInfo TLS block
+     * (see cabin_layout.h + strand_rings.c). The main strand does NOT consume
+     * a slot. hammock_va_next is the bump cursor over never-used slots
+     * (mirrors bay_va_next / brook_va_next); a slot a strand has left, every
+     * page of it unmapped, is pushed on hammock_free (hammock_free_count of
+     * hammock_free_capacity entries, kmalloc'd, grown by doubling) and spawn
+     * takes from there before it bumps. All four guarded by hammock_lock, so
+     * concurrent strand_spawn / strand exit from sibling strands never hand
+     * out the same VA. */
     uint64_t    hammock_va_next;
+    uint64_t   *hammock_free;
+    uint32_t    hammock_free_count;
+    uint32_t    hammock_free_capacity;
     spinlock_t  hammock_lock;
 
     /*
@@ -131,6 +138,12 @@ typedef struct cabin_t
      * K-Core / pointer refs to the strand).
      */
     atomic_u32_t strand_count;
+
+    /* The program is ending (CabinEnd): no strand is born into it any more.
+     * Written and read only under process_lock, so a strand_spawn either
+     * finished joining the process list before CabinEnd's walk, and is ended
+     * by it, or sees this and is refused. Never cleared. */
+    uint8_t ending;
 } cabin_t;
 
 _Static_assert(sizeof(cabin_t) < 4096, "cabin_t must fit in one page");
@@ -147,12 +160,53 @@ _Static_assert(sizeof(cabin_t) < 4096, "cabin_t must fit in one page");
 cabin_t *cabin_create(uint32_t pid, const char *tags);
 
 /*
+ * cabin_hammock_take — the base VA of a hammock slot for a new strand: a slot
+ * given back if there is one, else the next never-used one. Returns false when
+ * the window is full of strands alive at once.
+ *
+ * cabin_hammock_give_back — a strand is gone and every page of its slot is
+ * unmapped; the slot is the next spawn's. The list that holds it grows with
+ * the most slots ever waiting at once. If it cannot grow, a slot at the top of
+ * the cursor lowers the cursor instead, and any other is lost to this cabin
+ * (its address space only — nothing is mapped there) and said so.
+ */
+bool cabin_hammock_take(cabin_t *cabin, uint64_t *slot_base);
+void cabin_hammock_give_back(cabin_t *cabin, uint64_t slot_base);
+
+/*
  * cabin_destroy — release all shared resources owned by this cabin.
  *
  * Calls vmm_destroy_context, frees tag_overflow_ids.
  * Takes NO global locks.  Must be called only when strand_count == 0.
  */
 void cabin_destroy(cabin_t *cabin);
+
+/*
+ * CabinEnd — the program `named` belongs to ends: every strand of its cabin.
+ *
+ * A program is its cabin. A strand may end itself alone (strand_exit), but no
+ * other end is the end of one strand: an end that lands while a strand holds a
+ * lock of its program's (boxlib's heap lock above all) would leave that lock
+ * held for ever over every strand still running. So a kill, an exit() from any
+ * strand and a crash all come here.
+ *
+ * `named` is the strand the end came through and carries `disposition`
+ * (proc_exit.h); the others share the program's end — the same exit code, the
+ * same kill, and for any crash cause PROC_EXIT_CRASHED, since the cause was the
+ * named strand's own. The workers are announced first, then `named`, and the
+ * main strand LAST: it is the one the program's spawner knows it by and waits
+ * on, so whoever finds it gone finds the program wholly gone.
+ *
+ * Every strand of the cabin also loses its reap-block: a joinable strand
+ * waits to be joined by its program, and its program is gone.
+ *
+ * Allocates nothing, so it cannot fail halfway. The caller holds a reference
+ * on `named` (which keeps the cabin alive) and holds no process_lock. Ends
+ * strands that are ending already without harm: each end is the death commit
+ * TouchCleanupProcess makes once per strand.
+ */
+struct process_t;
+void CabinEnd(struct process_t *named, int32_t disposition);
 
 /* Reference counting on strand_count. */
 void cabin_ref_inc(cabin_t *cabin);

@@ -22,6 +22,12 @@
 #include "box/luggage.h"
 #include "box/string.h"
 #include "box/error.h"
+#include "box/form.h"
+
+/* The line is a protocol with itself, not words a person types: the parent
+ * starts its children as "headcount answer" without the shell, and a child
+ * reads that word from its Luggage as it always did. */
+BOX_FORM("takes optional text \"the part it plays when it starts itself: answer; leave it out to run the test\"\n");
 
 #define CREW       300
 #define CREW_TAG   "headcount:crew"

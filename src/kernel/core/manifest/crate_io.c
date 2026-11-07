@@ -7,7 +7,7 @@
  * cabin's it has not touched yet is brought in, as its first touch would bring
  * it). A Crate payload that straddles a page boundary is copied across every
  * backing frame instead of being clipped to the first page, which is what a
- * raw vmm_translate_user_addr would do.
+ * single-page translation would do.
  *
  * crate_in_buf / crate_out_alloc / crate_out_commit / crate_buf_free are the
  * variable-size bounce helpers used by handlers that serialize a record whose

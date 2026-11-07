@@ -20,6 +20,7 @@
 #include "baton.h"  /* Never-drop MPSC: async storage continuations */
 #include "tagfs.h"
 #include "use_context.h"
+#include "scheduler.h"  /* sched_fare_for, sched_rebase — a Tip is priced and placed as a Fare is */
 
 KCorePocketQueue *g_kcore_queues = NULL;
 
@@ -39,8 +40,20 @@ void kcore_init(void)
                 n, queue_pages);
         while (1) { __asm__ volatile("cli; hlt"); }
     }
+    /* Each K-Core's held heap, from the PMM for the same reason: sized by
+     * the process limit, kept for the kernel's lifetime. */
+    size_t held_pages = (sizeof(struct process_t *) * KCORE_QUEUE_CAPACITY + PMM_PAGE_SIZE - 1) /
+                        PMM_PAGE_SIZE;
     for (uint32_t i = 0; i < n; i++) {
         g_kcore_queues[i].kcore_idx = (uint8_t)i;
+        if (!g_amp.cores[i].is_kcore) continue;
+        void *held_phys = pmm_alloc_zero(held_pages);
+        if (!held_phys) {
+            kprintf("[KCORE] FATAL: cannot allocate K-Core %u's held heap (%zu pages)\n",
+                    i, held_pages);
+            while (1) { __asm__ volatile("cli; hlt"); }
+        }
+        g_kcore_queues[i].held = (struct process_t **)vmm_phys_to_virt((uintptr_t)held_phys);
     }
     debug_printf("[KCORE] %u K-Core queue(s) initialized (%u bytes)\n",
                  g_amp.k_count, (uint32_t)(sizeof(KCorePocketQueue) * n));
@@ -104,7 +117,7 @@ static error_t kcore_queue_push(KCorePocketQueue* q, struct process_t* proc)
     }
 
     /* Claimed. `count` rises HERE, before the publish, so it says "claimed
-     * and not yet consumed": the consumer's sleep gate reads it under CLI
+     * and not yet served": the consumer's sleep gate reads it under CLI
      * and will not lie down over a claim still in flight, and a consumer
      * that takes the slot the instant it appears cannot drive the count
      * below zero. It used to rise after the publish, and a pop that beat it
@@ -156,6 +169,79 @@ static struct process_t* kcore_queue_pop(KCorePocketQueue* q)
     q->slots[h] = NULL;
     mfence();
     q->head = (h + 1) & KCORE_QUEUE_MASK;
+    /* `count` stays: the strand still waits, held now (kcore_hold), and is
+     * counted off when it is served (kcore_next). */
+    return proc;
+}
+
+/* ---- The held heap: who this K-Core serves next ---------------------------
+ *
+ * A strand's pockets cost it a Tip, the K-Core time spent serving them at a
+ * core's price (sched_fare_for), and the strand that has tipped the least is
+ * served next — so a light call is not kept behind a neighbour's heavy ones,
+ * whose Tip they have already run up, and a strand wearing the Use Context,
+ * which pays less for the same time, is served sooner still. One pocket a
+ * turn stays the rule (RT-11): a strand with more is held again behind the
+ * others, at what it has now tipped. */
+
+static void kcore_held_swap(struct process_t** held, uint32_t a, uint32_t b)
+{
+    struct process_t* t = held[a];
+    held[a] = held[b];
+    held[b] = t;
+}
+
+/* A strand taken from this K-Core's ring is held: its Tip brought onto this
+ * K-Core's Waterline — a newcomer at it, one that comes back no more than a
+ * turn below it — and the strand settled into the heap. */
+static void kcore_hold(KCorePocketQueue* q, struct process_t* proc)
+{
+    int16_t  from  = proc->tip_core;
+    bool     known = from >= 0 && (uint32_t)from < g_amp.total_cores &&
+                     g_amp.cores[from].is_kcore;
+    uint64_t there = known ? __atomic_load_n(&g_kcore_queues[from].waterline, __ATOMIC_RELAXED) : 0;
+
+    proc->tip      = sched_rebase(proc->tip, known, there, q->waterline);
+    proc->tip_core = (int16_t)q->kcore_idx;
+
+    uint32_t i = q->held_count++;
+    q->held[i] = proc;
+    while (i > 0 && q->held[(i - 1) / 2]->tip > q->held[i]->tip) {
+        kcore_held_swap(q->held, i, (i - 1) / 2);
+        i = (i - 1) / 2;
+    }
+}
+
+/* Every strand published to this K-Core's ring, held. */
+static void kcore_take_arrivals(KCorePocketQueue* q)
+{
+    struct process_t* proc;
+    while ((proc = kcore_queue_pop(q)) != NULL)
+        kcore_hold(q, proc);
+}
+
+/* The held strand that has tipped the least, counted off as served; the
+ * Waterline rises to its Tip. NULL when nothing is held. */
+static struct process_t* kcore_next(KCorePocketQueue* q)
+{
+    if (q->held_count == 0)
+        return NULL;
+
+    struct process_t* proc = q->held[0];
+    uint32_t n = --q->held_count;
+    q->held[0] = q->held[n];
+    q->held[n] = NULL;
+    for (uint32_t i = 0;;) {
+        uint32_t least = i, l = 2 * i + 1, r = l + 1;
+        if (l < n && q->held[l]->tip < q->held[least]->tip) least = l;
+        if (r < n && q->held[r]->tip < q->held[least]->tip) least = r;
+        if (least == i) break;
+        kcore_held_swap(q->held, i, least);
+        i = least;
+    }
+
+    if (proc->tip > q->waterline)
+        __atomic_store_n(&q->waterline, proc->tip, __ATOMIC_RELAXED);
     atomic_fetch_sub_u32(&q->count, 1);
     return proc;
 }
@@ -196,6 +282,17 @@ error_t kcore_submit(struct process_t* proc)
     if (!proc)
         return ERR_INVALID_ARGUMENT;
 
+    /* The queue holds the strand, not a pointer to whatever is there when a
+     * K-Core comes round to it. The slot takes a reference here; the K-Core
+     * that pops it gets that reference with it (kcore_process_entry) and drops
+     * it once the pocket is served. The reaper knows nothing of the queues:
+     * without the reference it could tear a strand down and free it while a
+     * slot still named it, and the pop read freed memory — or a strand made
+     * since in the same place, whose ring it then served. The caller holds the
+     * strand alive across this call: the syscall gate runs on it, and the
+     * re-arm holds the reference of the K-Core serving it. */
+    process_ref_inc(proc);
+
     uint8_t target = kcore_find_least_loaded();
     uint8_t my_core = amp_get_core_index();
 
@@ -225,6 +322,7 @@ error_t kcore_submit(struct process_t* proc)
      * rather than being papered over by a retry that cannot succeed. */
     kprintf("[KCORE] DEFECT: no queue slot for PID %u — dedup/capacity invariant broken\n",
             proc->pid);
+    process_ref_dec(proc);
     return ERR_KCORE_SUBMIT_FAILED;
 
 submitted:
@@ -257,11 +355,17 @@ void kcore_wake(uint8_t core_idx)
 
 static void kcore_process_entry(struct process_t* proc)
 {
-    if (!proc || proc->magic != PROCESS_MAGIC) {
+    if (!proc)
+        return;
+
+    /* The slot's reference came with the strand (kcore_submit) and is dropped
+     * at the end, whatever happens here. A strand torn down while it waited in
+     * the queue — process_destroy poisons its magic — is alive only by that
+     * reference, and is not served. */
+    if (proc->magic != PROCESS_MAGIC) {
+        process_ref_dec(proc);
         return;
     }
-
-    process_ref_inc(proc);
 
     uint8_t core_idx = amp_get_core_index();
     KCorePocketQueue* q = &g_kcore_queues[core_idx];
@@ -273,7 +377,9 @@ static void kcore_process_entry(struct process_t* proc)
     __atomic_store_n(&q->serving, proc, __ATOMIC_RELEASE);
     debug_printf("[K%u] Processing PID %u\n", core_idx, proc->pid);
 
+    uint64_t began = rdtsc();
     guide_process_one(proc);
+    proc->tip += sched_fare_for(proc, rdtsc() - began);
 
     __atomic_store_n(&q->serving, NULL, __ATOMIC_RELEASE);
     mfence();
@@ -291,9 +397,9 @@ static void kcore_process_entry(struct process_t* proc)
      * still 1, and would otherwise sit forever.
      *
      * We're allowed to call kcore_submit recursively here — the proc
-     * goes back into a queue, ref_inc balances ref_dec, and the next
-     * pop will land in another kcore_process_entry. No locks held
-     * across this. */
+     * goes back into a queue, whose slot takes a reference of its own while
+     * this one is still held, and the next pop will land in another
+     * kcore_process_entry. No locks held across this. */
     if (!KPocketIsEmpty(proc)) {
         if (atomic_cas_u8(&proc->kcore_pending, 0, 1)) {
             kcore_submit(proc);
@@ -334,7 +440,8 @@ void kcore_run_loop(void)
          * cycle Lull merely permits back (settle.h): it never stands before
          * work already handed in.
          */
-        struct process_t* proc = kcore_queue_pop(q);
+        kcore_take_arrivals(q);
+        struct process_t* proc = kcore_next(q);
         if (proc)
             kcore_process_entry(proc);
 

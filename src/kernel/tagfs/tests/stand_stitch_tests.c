@@ -101,7 +101,7 @@ const char* StandStitchAside(StandStitch* s)
         UseListDrop(held);
     }
     if (s_stitch_context)
-        UseContextClear();
+        UseContextClear(NULL);
     kprintf("[TESTS] stand_stitch: the ribbon is sewn past where it stood — the mounts on it are this test's, "
             "until it is put back\n");
     return NULL;
@@ -111,7 +111,7 @@ bool StandStitchContextBack(void)
 {
     UseText* context = s_stitch_context;
     s_stitch_context = NULL;
-    bool ok = !context || UseContextSet(context->text, context->bytes) == OK;
+    bool ok = !context || UseContextSet(context->text, context->bytes, NULL) == OK;
     UseTextDrop(context);
     if (!ok)
         kprintf("[TESTS] stand_stitch: the machine's Use Context would not be set again\n");
@@ -174,7 +174,7 @@ bool StandStitchPutBack(const StandStitch* s)
         ok &= StandStitchZeroQuire(s, &now.next);
         ok &= StandStitchZeroQuire(s, &now.sewn_hop);
     }
-    UseContextClear();
+    UseContextClear(NULL);
     ok &= StandStitchContextBack();
     kprintf("[TESTS] stand_stitch: the ribbon is %s\n",
             down ? "put back as it was found" : "NOT put back — a caller stayed inside the volume");
@@ -226,7 +226,7 @@ static bool StandStitchCarries(const RibbonUnit* u, uint64_t kind, const uint8_t
 error_t StandStitchSay(const char* text, size_t bytes, uint64_t k, bool* kept)
 {
     uint64_t saying = 0;
-    UseContextClear();
+    UseContextClear(NULL);
     UseTextDrop(tagfs_recall_use_context(&saying));
     UseText* t = bytes ? UseTextMake(text, bytes) : NULL;
     if (bytes && !t)

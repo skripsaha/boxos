@@ -10,9 +10,9 @@
  *
  *   Why this exists
  *   ───────────────
- *   vmm_translate_user_addr returns a kernel pointer valid for only ONE
- *   physical page (cross-page translations silently truncate `size` to the
- *   page-tail in vmm.c). Manifest payloads larger than 4 KiB, or Crate[]
+ *   A single-page translation gives a kernel pointer valid for only ONE
+ *   physical page (cross-page translations once silently truncated `size`
+ *   to the page-tail in vmm.c). Manifest payloads larger than 4 KiB, or Crate[]
  *   arrays wider than ~102 entries, would either truncate or — if the
  *   downstream code dereferenced past the first page — read random kernel
  *   memory mapped at the adjacent kernel VA. ManifestStage stages the

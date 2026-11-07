@@ -2,11 +2,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <string_view>
-#include <vector>
+#include <utility>
 
 #include "box/cxx/console.h"
-#include "box/cxx/keyboard.h"
-#include "box/keyboard.h"
+#include "painter/tui/stage.h"
 
 namespace {
 
@@ -112,19 +111,22 @@ enum class TileState : std::uint8_t {
   correct
 };
 
-TextCell make_cell(char ch, box::color fg, box::color bg) {
-  TextCell cell{};
-  cell.fg = fg.raw();
-  cell.bg = bg.raw();
-  cell.ch = ch;
-  return cell;
+using PaintColor = painter::core::Color;
+
+PaintColor paint_color(box::color color) {
+  return PaintColor::FromRaw(color.raw());
+}
+
+painter::tui::Cell make_cell(char ch, box::color fg, box::color bg) {
+  return painter::tui::Cell{ch, paint_color(fg), paint_color(bg)};
 }
 
 class WordleGame {
 public:
-  WordleGame(std::uint8_t rows, std::uint8_t cols)
-      : rows_(rows), cols_(cols), frame_(static_cast<std::size_t>(rows) * cols),
-        rng_(seed()) {
+  explicit WordleGame(painter::tui::Stage &Screen)
+      : Screen_(Screen), frame_(Screen.FrameBuffer()),
+        rows_(static_cast<std::uint8_t>(Screen.Size().Height)),
+        cols_(static_cast<std::uint8_t>(Screen.Size().Width)), rng_(seed()) {
     reset();
   }
 
@@ -145,16 +147,16 @@ public:
       keyboard_[i] = TileState::empty;
   }
 
-  bool handle_key(const box::key &key) {
-    if (key.ch() == KEY_ESCAPE)
+  bool handle_key(const painter::tui::KeyEvent &Key) {
+    if (Key.Ascii == painter::tui::KeyCodes::Escape)
       return false;
     if (finished_) {
-      if (key.ch() == KEY_ENTER || key.ch() == ' ')
+      if (Key.Ascii == painter::tui::KeyCodes::Enter || Key.Ascii == ' ')
         reset();
       return true;
     }
 
-    char ch = key.ch();
+    char ch = Key.Ascii;
     if (ch >= 'A' && ch <= 'Z')
       ch = static_cast<char>(ch - 'A' + 'a');
     if (ch >= 'a' && ch <= 'z') {
@@ -164,20 +166,19 @@ public:
       }
       return true;
     }
-    if (ch == KEY_BACKSPACE) {
+    if (ch == painter::tui::KeyCodes::Backspace) {
       if (length_ != 0)
         guesses_[row_][--length_] = 0;
       message_ = "Type a five-letter word";
       return true;
     }
-    if (ch == KEY_ENTER)
+    if (ch == painter::tui::KeyCodes::Enter)
       submit();
     return true;
   }
 
   bool render() {
-    for (TextCell &cell : frame_)
-      cell = make_cell(' ', kText, kBackground);
+    frame_.Clear({paint_color(kText), paint_color(kBackground)});
 
     draw_centered(0, "W O R D L E", kAccent);
     const std::uint8_t board_width =
@@ -211,13 +212,17 @@ public:
     } else {
       draw_centered(kKeyboardTop + 4, message_, kText);
     }
-    return vga_paint(0, 0, rows_, cols_, frame_.data()) == 0;
+    if (!Screen_.SetCursor({static_cast<std::int32_t>(cols_ - 1),
+                            static_cast<std::int32_t>(rows_ - 1)}))
+      return false;
+    return static_cast<bool>(Screen_.Present());
   }
 
 private:
+  painter::tui::Stage &Screen_;
+  painter::tui::Frame &frame_;
   std::uint8_t rows_;
   std::uint8_t cols_;
-  std::vector<TextCell> frame_;
   const char *answer_ = nullptr;
   char guesses_[kGuessCount][kWordLength]{};
   TileState states_[kGuessCount][kWordLength]{};
@@ -247,10 +252,6 @@ private:
     return limit == 0 ? 0 : random() % static_cast<std::uint32_t>(limit);
   }
 
-  std::size_t index(std::uint8_t x, std::uint8_t y) const {
-    return static_cast<std::size_t>(y) * cols_ + x;
-  }
-
   void draw_tile(std::uint8_t x, std::uint8_t y, char letter, TileState state) {
     box::color bg = kTileEmpty;
     box::color fg = kText;
@@ -273,14 +274,13 @@ private:
 
     for (std::uint8_t dy = 0; dy < kTileHeight; ++dy) {
       for (std::uint8_t dx = 0; dx < kTileWidth; ++dx)
-        frame_[index(static_cast<std::uint8_t>(x + dx),
-                     static_cast<std::uint8_t>(y + dy))] =
-            make_cell(' ', fg, bg);
+        frame_.Put({static_cast<std::int32_t>(x + dx),
+                    static_cast<std::int32_t>(y + dy)}, make_cell(' ', fg, bg));
     }
     if (letter != 0) {
       const std::uint8_t letter_x =
           static_cast<std::uint8_t>(x + kTileWidth / 2);
-      frame_[index(letter_x, y)] = make_cell(letter, kText, bg);
+      frame_.Put({letter_x, y}, make_cell(letter, kText, bg));
     }
   }
 
@@ -312,10 +312,10 @@ private:
       else if (state == TileState::correct)
         bg = kCorrect;
       for (std::uint8_t dx = 0; dx < key_width; ++dx)
-        frame_[index(static_cast<std::uint8_t>(x + dx), row)] =
-            make_cell(' ', kText, bg);
-      frame_[index(static_cast<std::uint8_t>(x + 1), row)] =
-          make_cell(key, kText, bg);
+        frame_.Put({static_cast<std::int32_t>(x + dx), row},
+                   make_cell(' ', kText, bg));
+      frame_.Put({static_cast<std::int32_t>(x + 1), row},
+                 make_cell(key, kText, bg));
     }
   }
 
@@ -327,8 +327,8 @@ private:
     const std::uint8_t left =
         static_cast<std::uint8_t>(count < cols_ ? (cols_ - count) / 2 : 0);
     for (std::size_t i = 0; i < count; ++i)
-      frame_[index(static_cast<std::uint8_t>(left + i), row)] =
-          make_cell(text[i], color, kBackground);
+      frame_.Put({static_cast<std::int32_t>(left + i), row},
+                 make_cell(text[i], color, kBackground));
   }
 
   bool is_word(const char *guess) const {
@@ -405,38 +405,36 @@ private:
   }
 };
 
-bool is_exit_key(const box::key &key) {
-  return key.ch() == KEY_ESCAPE ||
-         (key.ctrl() && (key.ch() == 'c' || key.ch() == 'C'));
+bool is_exit_key(const painter::tui::KeyEvent &Key) {
+  return Key.Ascii == painter::tui::KeyCodes::Escape ||
+         (Key.IsCtrl() && (Key.Ascii == 'c' || Key.Ascii == 'C'));
 }
 
 } // namespace
 
 int main() {
-  const auto dimensions = box::vga::size();
-  if (dimensions.rows < kKeyboardTop + 5 || dimensions.cols < 32) {
-    printf("wordle: screen is too small\n");
+  auto Opened = painter::tui::Stage::Open("wordle", 32, kKeyboardTop + 5);
+  if (!Opened) {
+    printf("%s\n", Opened.error().Describe("wordle").c_str());
     return 1;
   }
-
-  WordleGame game(dimensions.rows, dimensions.cols);
+  painter::tui::Stage Screen = std::move(*Opened);
+  WordleGame game(Screen);
   if (!game.render())
     return 1;
 
-  box::key_stream keyboard;
   for (;;) {
-    const auto key = keyboard.wait();
-    if (!key)
+    const painter::tui::Event Event = Screen.Wait();
+    if (Event.Kind == painter::tui::EventKind::Gone) return 1;
+    if (Event.Kind != painter::tui::EventKind::Key)
       continue;
-    if (is_exit_key(*key))
+    if (is_exit_key(Event.Key))
       break;
-    if (!game.handle_key(*key))
+    if (!game.handle_key(Event.Key))
       break;
     if (!game.render())
       break;
   }
 
-  box::vga::clear(kBackground);
-  box::vga::move_cursor(0, 0);
   return 0;
 }

@@ -54,7 +54,7 @@ _Static_assert(BOOT_INFO_ADDR == BOOT_INFO_ADDR_FROM_BUILD,
  *
  * fb_format:   0 = RGB (PixelRedGreenBlueReserved8BitPerColor)
  *              1 = BGR (PixelBlueGreenRedReserved8BitPerColor)
- *              2 = BGRX / other
+ *              The boot contract carries only these two 32-bit layouts.
  */
 typedef struct
 {
@@ -78,7 +78,7 @@ typedef struct
     uint32_t fb_width;        /* +48: horizontal resolution in pixels */
     uint32_t fb_height;       /* +52: vertical resolution in pixels */
     uint32_t fb_stride;       /* +56: bytes per scan line */
-    uint32_t fb_format;       /* +60: 0=RGB, 1=BGR, 2=BGRX */
+    uint32_t fb_format;       /* +60: 0=RGB, 1=BGR */
     uint8_t  boot_method;     /* +64: 0=BIOS/MBR, 1=UEFI */
     uint8_t  reserved_v2[3];  /* +65: padding to align */
     uint64_t rsdp_addr;       /* +68: ACPI RSDP physical address (0 if not found) */

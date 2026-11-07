@@ -14,7 +14,6 @@
 #include "notify.h"
 #include "per_core.h"
 #include "amp.h"
-#include "pit.h"
 #include "lapic.h"     /* lapic_send_ipi — directed reschedule IPI on cross-core enqueue */
 #include "irqchip.h"   /* IPI_WAKE_VECTOR */
 #include "kring.h"     /* KResultStepAside — the ask to yield a core */
@@ -22,23 +21,18 @@
 /* TSC frequency for per-process processor-time accounting (see schedule()). */
 extern uint64_t cpu_get_tsc_freq_khz(void);
 
-// ---------------------------------------------------------------------------
-// Dynamic Scheduler Parameters
-// ---------------------------------------------------------------------------
+uint32_t g_timer_frequency = SCHEDULER_DEFAULT_TICK_HZ;
 
-const uint32_t g_scheduler_fairness_base       = 4;
-const uint32_t g_scheduler_starvation_base     = 25;
-const uint32_t g_scheduler_steal_cooldown_base = 10;
-uint32_t g_timer_frequency                     = SCHEDULER_DEFAULT_TICK_HZ;
+/* Ticks an App Core lets pass between two looks for work to steal: ten, and
+ * one more for every two cores there are to look at. Set once, at init. */
+static uint32_t g_steal_cooldown;
 
-// Calculated dynamic values
-uint32_t g_dynamic_fairness_ratio;
-uint32_t g_dynamic_starvation_ticks;
-uint32_t g_dynamic_steal_cooldown;
-
-// Per-core process counters — atomic, lock-free
-static volatile uint32_t *g_core_context_count;
-static volatile uint32_t *g_core_normal_count;
+/* What a strand pays for the time it holds a core is its Fare: the time
+ * itself, the less the more of the Use Context its cabin wears — a third of
+ * it for every tag of the context, half for half of them. The person's work
+ * is given three quarters of a core it shares with one outsider, the share
+ * Linux gives nice -5 over nice 0 (3121 to 1024). */
+#define SCHED_CONTEXT_FARE_SHARE 3
 
 // ---------------------------------------------------------------------------
 // Global monotonic tick
@@ -54,11 +48,6 @@ static uint32_t g_sched_core_count;
 static void scheduler_account_current(scheduler_state_t *s, uint64_t now);
 
 // ---------------------------------------------------------------------------
-// Statistics
-// ---------------------------------------------------------------------------
-scheduler_stats_t g_sched_stats;
-
-// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
@@ -68,7 +57,6 @@ static void sched_init_one(scheduler_state_t *s)
     s->current_process = NULL;
     spinlock_init(&s->scheduler_lock);
     s->total_ticks = 0;
-    s->normal_ticks = 0;
     s->last_steal_tick = 0;
     s->is_parked = false;
     s->idle_tick_count = 0;
@@ -78,11 +66,9 @@ static void sched_init_one(scheduler_state_t *s)
 
 error_t scheduler_init(void)
 {
-    debug_printf("[SCHEDULER] Initializing per-core O(1) scheduler...\n");
+    debug_printf("[SCHEDULER] Initializing per-core Fare scheduler...\n");
 
     UseContextInit();
-
-    memset(&g_sched_stats, 0, sizeof(g_sched_stats));
 
     g_sched_core_count = g_amp.total_cores;
     if (g_sched_core_count == 0 || g_sched_core_count > MAX_CORES) {
@@ -90,29 +76,19 @@ error_t scheduler_init(void)
         return ERR_INVALID_ARGUMENT;
     }
 
-    g_core_sched         = kmalloc(sizeof(scheduler_state_t) * g_sched_core_count);
-    g_core_context_count = kmalloc(sizeof(uint32_t) * g_sched_core_count);
-    g_core_normal_count  = kmalloc(sizeof(uint32_t) * g_sched_core_count);
-
-    if (!g_core_sched || !g_core_context_count || !g_core_normal_count) {
+    g_core_sched = kmalloc(sizeof(scheduler_state_t) * g_sched_core_count);
+    if (!g_core_sched) {
         debug_printf("[SCHEDULER] ERROR: Failed to allocate scheduler structures\n");
-        if (g_core_sched)         { kfree(g_core_sched);                g_core_sched = NULL; }
-        if (g_core_context_count) { kfree((void *)g_core_context_count); g_core_context_count = NULL; }
-        if (g_core_normal_count)  { kfree((void *)g_core_normal_count);  g_core_normal_count = NULL; }
         g_sched_core_count = 0;
         return ERR_NO_MEMORY;
     }
 
     for (uint32_t i = 0; i < g_sched_core_count; i++)
-    {
         sched_init_one(&g_core_sched[i]);
-        __atomic_store_n(&g_core_context_count[i], 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&g_core_normal_count[i], 0, __ATOMIC_RELAXED);
-    }
 
-    scheduler_recalc_parameters();
+    g_steal_cooldown = 10 + g_sched_core_count / 2;
 
-    debug_printf("[SCHEDULER] Per-core O(1) scheduler ready (%u Hz, %u cores, init_cap=%u)\n",
+    debug_printf("[SCHEDULER] Per-core Fare scheduler ready (%u Hz, %u cores, init_cap=%u)\n",
                  g_timer_frequency, g_sched_core_count, RUNQUEUE_INITIAL_CAP);
     return OK;
 }
@@ -127,7 +103,7 @@ void scheduler_init_core(uint8_t core_index)
      * re-kmalloc every runqueue->queues[i].procs array, leaking the original
      * memory and clobbering whatever's already enqueued. APs only need to
      * notice their state was already prepared. */
-    if (s->runqueue.queues[0].procs != NULL) {
+    if (s->runqueue.procs != NULL) {
         debug_printf("[SCHEDULER] Core %u already initialized — skipping double init\n", core_index);
         return;
     }
@@ -145,14 +121,6 @@ void scheduler_shutdown(void)
     }
     kfree(g_core_sched);
     g_core_sched = NULL;
-    if (g_core_context_count) {
-        kfree((void *)g_core_context_count);
-        g_core_context_count = NULL;
-    }
-    if (g_core_normal_count) {
-        kfree((void *)g_core_normal_count);
-        g_core_normal_count = NULL;
-    }
     g_sched_core_count = 0;
     UseContextShutdown();
     debug_printf("[SCHEDULER] Shutdown complete\n");
@@ -230,8 +198,6 @@ void scheduler_park_core(uint8_t core_idx)
     scheduler_state_t *s = &g_core_sched[core_idx];
     if (!__atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE)) {
         __atomic_store_n(&s->is_parked, true, __ATOMIC_RELEASE);
-        g_sched_stats.parked_cores++;
-        g_sched_stats.active_cores--;
         debug_printf("[SCHED] Core %u parked\n", core_idx);
     }
 }
@@ -243,8 +209,6 @@ void scheduler_unpark_core(uint8_t core_idx)
     if (__atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE)) {
         s->idle_tick_count = 0;
         __atomic_store_n(&s->is_parked, false, __ATOMIC_RELEASE);
-        g_sched_stats.parked_cores--;
-        g_sched_stats.active_cores++;
         debug_printf("[SCHED] Core %u unparked\n", core_idx);
     }
 }
@@ -257,13 +221,8 @@ bool scheduler_is_core_parked(uint8_t core_idx)
 }
 
 // ---------------------------------------------------------------------------
-// Statistics
+// Processor accounting
 // ---------------------------------------------------------------------------
-
-scheduler_stats_t scheduler_get_stats(void)
-{
-    return g_sched_stats;
-}
 
 static void scheduler_account_current(scheduler_state_t *s, uint64_t now)
 {
@@ -310,16 +269,14 @@ bool scheduler_core_cpu_usage(uint8_t core_idx, uint64_t *busy_tsc,
 }
 
 // ---------------------------------------------------------------------------
-// Dynamic Parameter Recalculation — O(1), lock-free, called every tick
-// Uses pre-computed atomic counters updated on enqueue/dequeue
+// Core parking — every SCHED_RECALC_INTERVAL global ticks, from the BSP's IRQ0
 // ---------------------------------------------------------------------------
 
 void scheduler_recalc_parameters(void)
 {
-    if (!g_core_sched || !g_core_context_count || !g_core_normal_count || g_sched_core_count == 0)
+    if (!g_core_sched || g_sched_core_count == 0)
         return;
 
-    // Throttle: only recalculate every SCHED_RECALC_INTERVAL global ticks.
     // Called from BSP PIT IRQ only, so no concurrent access to s_last_recalc.
     static uint64_t s_last_recalc = 0;
     uint64_t now = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
@@ -327,15 +284,7 @@ void scheduler_recalc_parameters(void)
         return;
     s_last_recalc = now;
 
-    // Sum atomic counters — O(cores) but very fast (no locks)
-    uint32_t total_context = 0;
-    uint32_t total_normal = 0;
-    uint32_t busy_cores = 0;
-
     for (uint32_t c = 0; c < g_sched_core_count; c++) {
-        total_context += __atomic_load_n(&g_core_context_count[c], __ATOMIC_RELAXED);
-        total_normal += __atomic_load_n(&g_core_normal_count[c], __ATOMIC_RELAXED);
-
         scheduler_state_t *s = &g_core_sched[c];
         uint32_t rq_count = RunqueueAtomicTotal(&s->runqueue);
 
@@ -344,11 +293,6 @@ void scheduler_recalc_parameters(void)
         process_t *cur = s->current_process;
         spin_unlock(&s->scheduler_lock);
 
-        if (rq_count > 0 || (cur && !process_is_idle(cur))) {
-            busy_cores++;
-        }
-
-        // Core parking
         bool parked = __atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE);
         if (!parked && rq_count == 0 && (!cur || process_is_idle(cur))) {
             s->idle_tick_count++;
@@ -361,129 +305,108 @@ void scheduler_recalc_parameters(void)
             s->idle_tick_count = 0;
         }
     }
-
-    // Dynamic fairness
-    if (total_context > 0 && total_normal > 0) {
-        g_dynamic_fairness_ratio = g_scheduler_fairness_base +
-                                   (total_context / (total_normal + 1));
-    } else {
-        g_dynamic_fairness_ratio = 1;
-    }
-
-    if (g_dynamic_fairness_ratio < SCHEDULER_MIN_FAIRNESS)
-        g_dynamic_fairness_ratio = SCHEDULER_MIN_FAIRNESS;
-    if (g_dynamic_fairness_ratio > SCHEDULER_MAX_FAIRNESS)
-        g_dynamic_fairness_ratio = SCHEDULER_MAX_FAIRNESS;
-
-    // Dynamic starvation
-    uint32_t total_procs = total_context + total_normal;
-    g_dynamic_starvation_ticks = g_scheduler_starvation_base + (total_procs / 4);
-
-    if (g_dynamic_starvation_ticks < SCHEDULER_MIN_STARVATION)
-        g_dynamic_starvation_ticks = SCHEDULER_MIN_STARVATION;
-    if (g_dynamic_starvation_ticks > SCHEDULER_MAX_STARVATION)
-        g_dynamic_starvation_ticks = SCHEDULER_MAX_STARVATION;
-
-    // Dynamic steal cooldown
-    g_dynamic_steal_cooldown = g_scheduler_steal_cooldown_base + (g_sched_core_count / 2);
-
-    // Update stats
-    g_sched_stats.active_cores = busy_cores;
-
-    /* PIT frequency policy.
-     *
-     * Past revisions adaptively reprogrammed the 8254 PIT (10-500 Hz
-     * range) based on `busy_cores` to "save power when idle". In
-     * practice this caused three real-HW problems:
-     *
-     *  1. Latency spikes when load dropped to 0: PIT at 10 Hz means
-     *     100 ms before the next scheduler tick can wake new work.
-     *     User-visible as "system feels frozen" right after a job
-     *     ends — exactly what the user reported on Bochs/QEMU.
-     *
-     *  2. Non-deterministic timing for any subsystem that derives
-     *     its rate from g_timer_frequency (keyboard typematic ticks,
-     *     scheduler starvation thresholds). The
-     *     timer rate becoming load-dependent makes every other
-     *     subsystem load-dependent too.
-     *
-     *  3. PIT reprogramming itself is not free — outb to ports 0x43,
-     *     0x40 takes hundreds of cycles and races the in-flight IRQ
-     *     stream on some chipsets (real PCH and Bochs both observed
-     *     to occasionally drop or double-count ticks across a
-     *     reprogram window).
-     *
-     * Linux's dynticks (NO_HZ_FULL) achieves the same power goal
-     * WITHOUT reprogramming hardware — it just skips waking idle
-     * CPUs. BoxOS doesn't have that infrastructure yet, so the
-     * correct production-grade choice is "stable PIT at the boot
-     * frequency".
-     *
-     * Build override: -DCONFIG_SCHED_ADAPTIVE_PIT=1 re-enables the
-     * legacy adaptive path (kept for power-tuning experiments). The
-     * default (0) is the production policy. */
-#if defined(CONFIG_SCHED_ADAPTIVE_PIT) && CONFIG_SCHED_ADAPTIVE_PIT
-    uint32_t target_frequency;
-    if (busy_cores == 0 && g_sched_stats.context_switches == 0) {
-        target_frequency = SCHEDULER_DEFAULT_TICK_HZ;
-    } else if (busy_cores == 0) {
-        target_frequency = SCHEDULER_MIN_TICK_HZ;
-    } else if (busy_cores >= g_sched_core_count) {
-        target_frequency = SCHEDULER_MAX_TICK_HZ;
-    } else {
-        target_frequency = SCHEDULER_MIN_TICK_HZ +
-            ((SCHEDULER_MAX_TICK_HZ - SCHEDULER_MIN_TICK_HZ) * busy_cores) / g_sched_core_count;
-    }
-    if (target_frequency < SCHEDULER_MIN_TICK_HZ)
-        target_frequency = SCHEDULER_MIN_TICK_HZ;
-    if (target_frequency > SCHEDULER_MAX_TICK_HZ)
-        target_frequency = SCHEDULER_MAX_TICK_HZ;
-    if (target_frequency != g_timer_frequency) {
-        pit_set_frequency(target_frequency);
-    }
-#endif
-    /* else: PIT stays at SCHEDULER_DEFAULT_TICK_HZ (250 Hz) for the
-     * lifetime of the kernel. Stable. */
 }
 
 // ---------------------------------------------------------------------------
-// Priority + RunQueue
+// Fare and Waterline
 // ---------------------------------------------------------------------------
 
-int sched_determine_priority(process_t *proc)
+/* One turn on a core — an App Core's tick — in TSC cycles. */
+static inline uint64_t sched_turn(void)
 {
-    if (!proc)
-        return SCHED_PRIO_NORMAL;
+    return (uint64_t)cpu_get_tsc_freq_khz() * 1000u / CONFIG_SCHED_APP_TICK_HZ;
+}
 
-    // Starvation check
-    uint64_t now = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
-    uint64_t ticks_since_run = 0;
-    if (now >= proc->last_run_time)
-    {
-        ticks_since_run = now - proc->last_run_time;
-    }
-    if (ticks_since_run >= g_dynamic_starvation_ticks)
-    {
-        g_sched_stats.starvation_boosts++;
-        return SCHED_PRIO_STARVED;
-    }
+/* The cycles over the strand's weight: one, and as much more as its Fit —
+ * up to SCHED_CONTEXT_FARE_SHARE. */
+uint64_t sched_fare_for(const process_t *proc, uint64_t cycles)
+{
+    uint64_t fit = UseContextFit(proc);
+    return cycles * USE_CONTEXT_FIT_FULL /
+           (USE_CONTEXT_FIT_FULL + (SCHED_CONTEXT_FARE_SHARE - 1) * fit);
+}
 
-    // Tag affinity: track cache-warmth for future scheduling decisions
-    // This does NOT boost priority — it tracks whether process cache is warm
-    // on this core, which helps the scheduler make better placement decisions.
-    uint8_t my_core = amp_get_core_index();
-    if (my_core < g_sched_core_count && proc->home_core == my_core && ticks_since_run < SCHEDULER_AFFINITY_WARM_TICKS) {
-        g_sched_stats.affinity_hits++;
-        // Cache is warm — process stays on this core (no priority change)
-    }
+uint64_t sched_rebase(uint64_t paid, bool known, uint64_t there, uint64_t here)
+{
+    uint64_t turn   = sched_turn();
+    uint64_t lowest = here > turn ? here - turn : 0;
+    uint64_t level  = here;
 
-    // Context match boost
-    if (UseContextMatches(proc))
-    {
-        return SCHED_PRIO_CONTEXT;
+    if (known) {
+        int64_t ahead = (int64_t)(paid - there);
+        level = (ahead < 0 && (uint64_t)-ahead > here) ? 0 : here + (uint64_t)ahead;
     }
+    return level < lowest ? lowest : level;
+}
 
-    return SCHED_PRIO_NORMAL;
+/*
+ * A strand comes to `core` from outside its runqueue — woken, new, moved,
+ * stolen, handed back — and its Fare is brought onto that core's scale
+ * (sched_rebase): a strand that slept is served soon after it wakes, but a
+ * long sleep buys it one turn, not the core. Under `core`'s runqueue lock,
+ * which is what this core's Waterline and a queued strand's Fare are read
+ * and written under.
+ */
+static void sched_place(process_t *proc, uint8_t core)
+{
+    int16_t  from  = proc->fare_core;
+    bool     known = from >= 0 && (uint32_t)from < g_sched_core_count;
+    uint64_t there = known ? __atomic_load_n(&g_core_sched[from].waterline, __ATOMIC_RELAXED) : 0;
+
+    proc->fare = sched_rebase(proc->fare, known, there, g_core_sched[core].waterline);
+    __atomic_store_n(&proc->fare_core, (int16_t)core, __ATOMIC_RELAXED);
+}
+
+/* The Waterline rises to the Fare of the strand this core dispatches from its
+ * runqueue — the least there, the strand it switched out among them — and
+ * never falls. Under this core's runqueue lock. */
+static inline void sched_raise_waterline(scheduler_state_t *s, uint64_t fare)
+{
+    if (fare > s->waterline)
+        __atomic_store_n(&s->waterline, fare, __ATOMIC_RELAXED);
+}
+
+/* The least Fare queued on this core, `proc` aside; false when nobody else is
+ * queued. The heap's root, or — when `proc` is the root — the lesser of its
+ * two children. Under this core's runqueue lock. */
+static bool sched_least_other(RunQueue *rq, const process_t *proc, uint64_t *fare)
+{
+    process_t *first = runqueue_at(rq, 0);
+    if (first == proc) {
+        process_t *left  = runqueue_at(rq, 1);
+        process_t *right = runqueue_at(rq, 2);
+        first = (right && (!left || right->fare < left->fare)) ? right : left;
+    }
+    if (!first)
+        return false;
+    *fare = first->fare;
+    return true;
+}
+
+/*
+ * Whether the core that last switched `proc` out has left its kernel stack.
+ * A core stands on the stack of the strand it switches out until the iretq
+ * that ends its schedule() — the interrupt frame it returns through is at the
+ * top of that stack — and a strand run on another core before then has its
+ * first interrupt frame laid over that one: the core returns into another
+ * strand's registers. The evicting core's quiesce_seq passing the strand's
+ * stamp says it has gone (process.c, strand_stack_in_use, the reaper's own
+ * question). Until then a strand is run where it is, by that core.
+ */
+static bool sched_stack_left(const process_t *proc)
+{
+    uint8_t qc = proc->quiesce_core;
+    if (qc == QUIESCE_CORE_NONE || qc >= g_sched_core_count)
+        return true;
+    return __atomic_load_n(&g_core_sched[qc].quiesce_seq, __ATOMIC_ACQUIRE) >
+           __atomic_load_n(&proc->quiesce_seq, __ATOMIC_ACQUIRE);
+}
+
+void sched_yield_turn(void)
+{
+    scheduler_state_t *s = scheduler_get_state();
+    if (s)
+        s->turn_given = true;
 }
 
 error_t sched_enqueue(process_t *proc)
@@ -507,7 +430,11 @@ error_t sched_enqueue(process_t *proc)
      * dispatch claim (on_cpu) refuses a strand another core still holds, and
      * the strand refused there used to be dropped. So while on_cpu names a
      * core, that core is the target, and cold migration is not considered: the
-     * cache is not cold, it is in use.
+     * cache is not cold, it is in use. And a moment longer, until that core
+     * has left the strand's kernel stack (sched_stack_left): switched out, the
+     * strand is under its feet until its iretq, and run on another core first
+     * it would have its interrupt frames laid over the one that core returns
+     * through.
      *
      * Read under the strand's state_lock (process_set_state holds it), so
      * on_cpu can only move from a core to -1 from here on, never to a new
@@ -522,6 +449,9 @@ error_t sched_enqueue(process_t *proc)
 
     if (owner >= 0 && (uint32_t)owner < g_sched_core_count) {
         target_core = (uint8_t)owner;
+    }
+    else if (!sched_stack_left(proc)) {
+        target_core = proc->quiesce_core;
     }
     // If cache-cold (not run recently), consider load balancing
     // Only migrate if another core has ≥2 fewer processes (avoid thrashing)
@@ -543,7 +473,6 @@ error_t sched_enqueue(process_t *proc)
         if (best_core != target_core) {
             target_core = best_core;
             proc->home_core = target_core;
-            g_sched_stats.affinity_hits++;
         }
     }
 
@@ -553,27 +482,14 @@ error_t sched_enqueue(process_t *proc)
     }
 
     scheduler_state_t *home = &g_core_sched[target_core];
-    int prio = sched_determine_priority(proc);
 
     spin_lock(&home->runqueue.lock);
-    error_t result = ERR_RUNQUEUE_FULL;
-
+    error_t result = OK;
     if (!runqueue_contains(&home->runqueue, proc))
     {
-        if (runqueue_enqueue(&home->runqueue, proc, prio))
-        {
-            result = OK;
-            proc->current_prio = (int8_t)prio;
-            if (prio == SCHED_PRIO_CONTEXT) {
-                __atomic_fetch_add(&g_core_context_count[target_core], 1, __ATOMIC_RELAXED);
-            } else {
-                __atomic_fetch_add(&g_core_normal_count[target_core], 1, __ATOMIC_RELAXED);
-            }
-        }
-    }
-    else
-    {
-        result = OK;
+        sched_place(proc, target_core);
+        if (!runqueue_enqueue(&home->runqueue, proc))
+            result = ERR_RUNQUEUE_FULL;
     }
     spin_unlock(&home->runqueue.lock);
 
@@ -644,55 +560,6 @@ void sched_ring_home(process_t *proc)
     lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
 }
 
-error_t sched_enqueue_on(uint8_t core_idx, process_t *proc)
-{
-    if (!proc || process_is_idle(proc))
-        return ERR_INVALID_ARGUMENT;
-
-    if (!g_core_sched || core_idx >= g_sched_core_count)
-        return ERR_HOME_CORE_INVALID;
-
-    // Unpark core if needed
-    if (scheduler_is_core_parked(core_idx)) {
-        scheduler_unpark_core(core_idx);
-    }
-
-    scheduler_state_t *target = &g_core_sched[core_idx];
-    int prio = sched_determine_priority(proc);
-
-    spin_lock(&target->runqueue.lock);
-    error_t result = ERR_RUNQUEUE_FULL;
-
-    if (!runqueue_contains(&target->runqueue, proc))
-    {
-        if (runqueue_enqueue(&target->runqueue, proc, prio))
-        {
-            result = OK;
-            proc->current_prio = (int8_t)prio;
-            if (prio == SCHED_PRIO_CONTEXT) {
-                __atomic_fetch_add(&g_core_context_count[core_idx], 1, __ATOMIC_RELAXED);
-            } else {
-                __atomic_fetch_add(&g_core_normal_count[core_idx], 1, __ATOMIC_RELAXED);
-            }
-        }
-    }
-    else
-    {
-        result = OK;
-    }
-    spin_unlock(&target->runqueue.lock);
-
-    /* Directed reschedule IPI for a remote target core — see sched_enqueue. */
-    if (result == OK && g_amp.total_cores > 1)
-    {
-        uint8_t self = amp_get_core_index();
-        if (core_idx != self && core_idx < g_amp.total_cores)
-            lapic_send_ipi(g_amp.cores[core_idx].lapic_id, IPI_WAKE_VECTOR);
-    }
-
-    return result;
-}
-
 error_t sched_dequeue(process_t *proc)
 {
     if (!proc || process_is_idle(proc))
@@ -701,40 +568,33 @@ error_t sched_dequeue(process_t *proc)
     if (!g_core_sched || proc->home_core >= g_sched_core_count)
         return ERR_HOME_CORE_INVALID;
 
-    scheduler_state_t *home = &g_core_sched[proc->home_core];
+    /* A queued strand is in the runqueue of the core its Fare is reckoned on
+     * (sched_place), which is not its home while it was queued on the core
+     * that still ran it. Not queued, there is nothing to take out. */
+    int16_t core = __atomic_load_n(&proc->fare_core, __ATOMIC_RELAXED);
+    if (core < 0 || (uint32_t)core >= g_sched_core_count)
+        core = proc->home_core;
+    scheduler_state_t *holder = &g_core_sched[core];
 
-    spin_lock(&home->runqueue.lock);
-    // Read priority UNDER lock to avoid race with concurrent enqueue
-    int prio = proc->current_prio;
-    runqueue_remove(&home->runqueue, proc);
-    if (prio >= 0 && prio < SCHED_PRIO_LEVELS) {
-        if (prio == SCHED_PRIO_CONTEXT) {
-            __atomic_fetch_sub(&g_core_context_count[proc->home_core], 1, __ATOMIC_RELAXED);
-        } else {
-            __atomic_fetch_sub(&g_core_normal_count[proc->home_core], 1, __ATOMIC_RELAXED);
-        }
-    }
-    spin_unlock(&home->runqueue.lock);
+    spin_lock(&holder->runqueue.lock);
+    runqueue_remove(&holder->runqueue, proc);
+    spin_unlock(&holder->runqueue.lock);
 
     return OK;
 }
 
-/* Remove `proc` from whichever core's runqueue currently holds it, if any,
- * keeping that core's tier counter consistent. process_destroy calls this so a
- * torn-down strand is referenced by NO runqueue before it is freed: a dangling
- * runqueue slot would otherwise dispatch a freed/recycled process_t (the
- * strandtest recycle-race). sched_dequeue() only covers proc->home_core; this
- * sweeps every core for the corpse case — process_destroy reaches a DONE strand
- * whose PROC_CRASHED transition never ran sched_dequeue (old state != WORKING),
- * and for the rare event a strand is enqueued off its home core.
+/* Remove `proc` from whichever core's runqueue currently holds it, if any.
+ * process_destroy calls this so a torn-down strand is referenced by NO
+ * runqueue before it is freed: a dangling runqueue slot would otherwise
+ * dispatch a freed/recycled process_t (the strandtest recycle-race).
+ * sched_dequeue() looks in one runqueue; this sweeps
+ * every core for the corpse case — process_destroy reaches a DONE strand whose
+ * PROC_CRASHED transition never ran sched_dequeue (old state != WORKING).
  *
- * A process is in at most one runqueue (single rq_prio/rq_index), and
- * runqueue_contains/runqueue_remove validate slot==proc, so the sweep removes it
- * from the one holder and no-ops on every other core. The tier-counter
- * decrement is gated on runqueue_contains() being true, so this never
- * double-counts against sched_dequeue()'s home-core removal (which clears
- * rq_prio/rq_index, making contains() false here). Each runqueue lock is taken
- * alone — no nesting, no lock-order inversion. */
+ * A process is in at most one runqueue (one rq_index), and runqueue_remove
+ * validates slot==proc, so the sweep removes it from the one holder and no-ops
+ * on every other core. Each runqueue lock is taken alone — no nesting, no
+ * lock-order inversion. */
 void sched_dequeue_all_cores(process_t *proc)
 {
     if (!proc || process_is_idle(proc) || !g_core_sched)
@@ -744,18 +604,7 @@ void sched_dequeue_all_cores(process_t *proc)
     {
         scheduler_state_t *s = &g_core_sched[c];
         spin_lock(&s->runqueue.lock);
-        if (runqueue_contains(&s->runqueue, proc))
-        {
-            int prio = proc->current_prio;
-            runqueue_remove(&s->runqueue, proc);
-            if (prio >= 0 && prio < SCHED_PRIO_LEVELS)
-            {
-                if (prio == SCHED_PRIO_CONTEXT)
-                    __atomic_fetch_sub(&g_core_context_count[c], 1, __ATOMIC_RELAXED);
-                else
-                    __atomic_fetch_sub(&g_core_normal_count[c], 1, __ATOMIC_RELAXED);
-            }
-        }
+        runqueue_remove(&s->runqueue, proc);
         spin_unlock(&s->runqueue.lock);
     }
 }
@@ -763,6 +612,21 @@ void sched_dequeue_all_cores(process_t *proc)
 // ---------------------------------------------------------------------------
 // Process selection (per-core)
 // ---------------------------------------------------------------------------
+
+/* May `proc` be put on a core? Only a strand that is to run — not yet started
+ * (PROC_CREATED, which its first dispatch makes WORKING) or WORKING — and not
+ * being torn down. Exited, crashed, parked or stopped, it may not, wherever it
+ * was found: a runqueue can still hold a strand whose state changed while it
+ * sat there, because a change of state takes a strand out of its home core's
+ * runqueue only on the way out of WORKING (process_set_state), and not at all
+ * from a strand already taken out to be run. Read without the state lock; the
+ * order that makes the answer good enough at dispatch is told in schedule(). */
+static inline bool SchedMayDispatch(process_t *proc)
+{
+    process_state_t st = __atomic_load_n(&proc->state, __ATOMIC_ACQUIRE);
+    return (st == PROC_CREATED || st == PROC_WORKING) &&
+           !__atomic_load_n(&proc->destroying, __ATOMIC_ACQUIRE);
+}
 
 process_t *scheduler_select_next(void)
 {
@@ -774,73 +638,16 @@ process_t *scheduler_select_next(void)
         return idle_process_get();
     }
 
-    bool fairness_round = (s->normal_ticks >= g_dynamic_fairness_ratio);
-
-    uint8_t my_core = amp_get_core_index();
-
     spin_lock(&s->runqueue.lock);
 
-    process_t *next = NULL;
-
-    if (fairness_round)
-    {
-        uint32_t fair_bitmap = s->runqueue.active_bitmap & ~(1u << SCHED_PRIO_CONTEXT);
-        if (fair_bitmap != 0)
-        {
-            int prio = 31 - __builtin_clz(fair_bitmap);
-            SchedQueue *q = &s->runqueue.queues[prio];
-            next = q->procs[q->head];
-            q->procs[q->head] = NULL;
-            next->rq_prio = -1;
-            next->rq_index = -1;
-            q->head = (q->head + 1) % q->capacity;
-            q->count--;
-            if (q->count == 0)
-                s->runqueue.active_bitmap &= ~(1u << prio);
-            __atomic_fetch_sub(&s->runqueue.total, 1, __ATOMIC_RELEASE);
-            // Decrement tier counter: fairness round always pulls from non-CONTEXT queues
-            if (my_core < g_sched_core_count)
-                __atomic_fetch_sub(&g_core_normal_count[my_core], 1, __ATOMIC_RELAXED);
-        }
-        else
-        {
-            next = runqueue_dequeue_best(&s->runqueue);
-            if (next && !process_is_idle(next) && my_core < g_sched_core_count) {
-                if (next->current_prio == SCHED_PRIO_CONTEXT)
-                    __atomic_fetch_sub(&g_core_context_count[my_core], 1, __ATOMIC_RELAXED);
-                else
-                    __atomic_fetch_sub(&g_core_normal_count[my_core], 1, __ATOMIC_RELAXED);
-            }
-        }
-        s->normal_ticks = 0;
-        g_sched_stats.fairness_rounds++;
-    }
-    else
-    {
+    /* The least Fare first. A strand that may not run (SchedMayDispatch)
+     * leaves the runqueue here, and its wake — if it has one coming — queues
+     * it again. */
+    process_t *next = runqueue_dequeue_best(&s->runqueue);
+    while (next && !SchedMayDispatch(next))
         next = runqueue_dequeue_best(&s->runqueue);
-        if (next && !process_is_idle(next) && my_core < g_sched_core_count) {
-            if (next->current_prio == SCHED_PRIO_CONTEXT)
-                __atomic_fetch_sub(&g_core_context_count[my_core], 1, __ATOMIC_RELAXED);
-            else
-                __atomic_fetch_sub(&g_core_normal_count[my_core], 1, __ATOMIC_RELAXED);
-        }
-        s->normal_ticks++;
-    }
-
-    // Skip destroying processes.
-    // `next` was already dequeued and its counter decremented above.
-    // Each replacement also needs its counter decremented.
-    while (next && !process_is_idle(next) &&
-           __atomic_load_n(&next->destroying, __ATOMIC_ACQUIRE))
-    {
-        next = runqueue_dequeue_best(&s->runqueue);
-        if (next && !process_is_idle(next) && my_core < g_sched_core_count) {
-            if (next->current_prio == SCHED_PRIO_CONTEXT)
-                __atomic_fetch_sub(&g_core_context_count[my_core], 1, __ATOMIC_RELAXED);
-            else
-                __atomic_fetch_sub(&g_core_normal_count[my_core], 1, __ATOMIC_RELAXED);
-        }
-    }
+    if (next)
+        sched_raise_waterline(s, next->fare);
 
     spin_unlock(&s->runqueue.lock);
 
@@ -890,23 +697,11 @@ static process_t *sched_try_steal(uint8_t my_core)
         return NULL;
     }
 
-    /* Snapshot the stolen process AND the priority we are pulling it
-     * from INSIDE the victim's lock. The historical bug: prio was
-     * read from `stolen->current_prio` AFTER the unlock — between
-     * unlock and that read, another path on the victim core could
-     * mutate current_prio (e.g. a parallel priority recalculation),
-     * leading to a tier-counter decrement on the wrong queue and
-     * persistent counter drift (eventually wraps negative, makes
-     * `recalc_parameters` think every core is busy, parks live
-     * cores). Reading inside the lock + transferring both counters
-     * before unlocking eliminates the window. */
+    /* Any strand the victim holds, whatever it pays — looked at along the
+     * heap, from the least Fare on. */
     process_t *stolen = NULL;
-    int        stolen_prio = -1;
-    for (int prio = SCHED_PRIO_NORMAL; prio >= SCHED_PRIO_IDLE; prio--)
+    for (uint32_t i = 0; (stolen = runqueue_at(&vs->runqueue, i)) != NULL; i++)
     {
-        SchedQueue *q = &vs->runqueue.queues[prio];
-        if (q->count == 0) continue;
-
         /* Never the strand the victim is still running. schedule() puts its
          * outgoing strand back into its own runqueue BEFORE it picks the next
          * one, so for a moment that strand is both queued and on_cpu. Taken
@@ -915,47 +710,125 @@ static process_t *sched_try_steal(uint8_t my_core)
          * The victim releases it a few instructions later; it is not ours to
          * take until then. Read under the victim's runqueue lock: a queued
          * strand's claim can only be released, never taken, while we hold it. */
-        if (__atomic_load_n(&q->procs[q->head]->on_cpu, __ATOMIC_ACQUIRE) >= 0)
+        if (__atomic_load_n(&stolen->on_cpu, __ATOMIC_ACQUIRE) >= 0)
             continue;
 
-        stolen = q->procs[q->head];
-        q->procs[q->head] = NULL;
-        stolen->rq_prio = -1;
-        stolen->rq_index = -1;
-        q->head = (q->head + 1) % q->capacity;
-        q->count--;
-        if (q->count == 0)
-            vs->runqueue.active_bitmap &= ~(1u << prio);
-        __atomic_fetch_sub(&vs->runqueue.total, 1, __ATOMIC_RELEASE);
-        stolen_prio = stolen->current_prio;
-        break;
-    }
+        /* Nor one that may not run: the victim's own selection lets it go
+         * (scheduler_select_next), and a thief that took it would have nothing
+         * to dispatch. */
+        if (!SchedMayDispatch(stolen))
+            continue;
 
-    /* Transfer the tier counter from victim to stealer while still
-     * holding the victim's lock — no other path on the victim can
-     * be modifying current_prio for this process here because we
-     * already pulled it off the runqueue. */
-    if (stolen && stolen_prio >= 0 && stolen_prio < SCHED_PRIO_LEVELS) {
-        uint8_t core = amp_get_core_index();
-        if (core < g_sched_core_count) {
-            if (stolen_prio == SCHED_PRIO_CONTEXT) {
-                __atomic_fetch_sub(&g_core_context_count[victim], 1, __ATOMIC_RELAXED);
-                __atomic_fetch_add(&g_core_context_count[core], 1, __ATOMIC_RELAXED);
-            } else {
-                __atomic_fetch_sub(&g_core_normal_count[victim], 1, __ATOMIC_RELAXED);
-                __atomic_fetch_add(&g_core_normal_count[core], 1, __ATOMIC_RELAXED);
-            }
-        }
+        /* Nor one whose stack the victim may still stand on: switched out in
+         * the victim's schedule() still running, re-queued before the victim
+         * picked its next, released before the victim's iretq. */
+        if (!sched_stack_left(stolen))
+            continue;
+
+        runqueue_remove(&vs->runqueue, stolen);
+        break;
     }
 
     spin_unlock(&vs->runqueue.lock);
 
     if (stolen) {
-        stolen->home_core = amp_get_core_index();
-        g_sched_stats.steal_successes++;
+        scheduler_state_t *mine = &g_core_sched[my_core];
+        spin_lock(&mine->runqueue.lock);
+        sched_place(stolen, my_core);
+        spin_unlock(&mine->runqueue.lock);
+        stolen->home_core = my_core;
     }
 
     return stolen;
+}
+
+/*
+ * The person's work keeps a core to itself while outsiders can share one. When
+ * this core has just dispatched a strand wearing the Use Context and an
+ * outsider — a strand of no Fit — waits in its runqueue, that outsider moves to
+ * the least loaded application core running no strand of the context (what
+ * waits there and what runs; an idle core first): the outsiders squeeze up
+ * among themselves, and a game is not handed a turn in four of a core while an
+ * outsider has one of its own. One move a dispatch, so nothing ping-pongs.
+ *
+ * The move is one step, under both runqueue locks — the lower core's first,
+ * the only place two are held — and under the outsider's state_lock, taken
+ * without waiting since everywhere else it is taken before a runqueue lock. A
+ * park takes a strand out of the runqueue of the core its Fare is reckoned on
+ * and a wake puts it into its home core's, each under that lock: either sees
+ * the outsider wholly here or wholly there, never in neither — to be queued
+ * here again by a wake and then there by the move, in two runqueues at once.
+ * Only a strand whose stack this core has left (sched_stack_left): never the
+ * one it is switching out right now. Returns whether one moved.
+ */
+static bool sched_make_room(scheduler_state_t *s, uint8_t me)
+{
+    if (RunqueueAtomicTotal(&s->runqueue) == 0)
+        return false;
+
+    uint8_t  target    = 0xFF;
+    uint32_t best_load = UINT32_MAX;
+    for (uint8_t c = 0; c < g_sched_core_count; c++) {
+        if (c == me || g_amp.cores[c].is_kcore || !amp_core_online(&g_amp.cores[c]))
+            continue;
+        if (__atomic_load_n(&g_core_sched[c].context_here, __ATOMIC_RELAXED))
+            continue;
+        uint32_t load = RunqueueAtomicTotal(&g_core_sched[c].runqueue) +
+                        (__atomic_load_n(&g_core_sched[c].busy_here, __ATOMIC_RELAXED) ? 1u : 0u);
+        if (load < best_load) {
+            best_load = load;
+            target    = c;
+        }
+    }
+    if (target == 0xFF)
+        return false;
+
+    scheduler_state_t *t      = &g_core_sched[target];
+    spinlock_t        *first  = me < target ? &s->runqueue.lock : &t->runqueue.lock;
+    spinlock_t        *second = me < target ? &t->runqueue.lock : &s->runqueue.lock;
+    spin_lock(first);
+    spin_lock(second);
+
+    /* Its state is read under its state_lock, where it is decisive. */
+    process_t *outsider = NULL;
+    for (uint32_t i = 0; (outsider = runqueue_at(&s->runqueue, i)) != NULL; i++) {
+        if (__atomic_load_n(&outsider->on_cpu, __ATOMIC_ACQUIRE) >= 0 ||
+            UseContextFit(outsider) != 0 || !sched_stack_left(outsider) ||
+            !spin_trylock(&outsider->state_lock))
+            continue;
+        if (SchedMayDispatch(outsider))
+            break;
+        spin_unlock(&outsider->state_lock);
+    }
+
+    bool moved = false;
+    if (outsider) {
+        uint64_t fare      = outsider->fare;
+        int16_t  fare_core = outsider->fare_core;
+        runqueue_remove(&s->runqueue, outsider);
+        sched_place(outsider, target);
+        moved = runqueue_enqueue(&t->runqueue, outsider);
+        if (moved) {
+            outsider->home_core = target;
+        } else {
+            /* The target's runqueue at its ceiling: the outsider stays here at
+             * the Fare it had, in the room it left under these same locks. */
+            outsider->fare = fare;
+            __atomic_store_n(&outsider->fare_core, fare_core, __ATOMIC_RELAXED);
+            (void)runqueue_enqueue(&s->runqueue, outsider);
+        }
+        spin_unlock(&outsider->state_lock);
+    }
+    spin_unlock(second);
+    spin_unlock(first);
+
+    /* A parked core is woken for it, as an enqueue wakes one. */
+    if (moved) {
+        if (scheduler_is_core_parked(target))
+            scheduler_unpark_core(target);
+        lapic_send_ipi(g_amp.cores[target].lapic_id, IPI_WAKE_VECTOR);
+    }
+    return moved;
 }
 
 /* A dispatch claim lost to the core that still runs the strand. By
@@ -977,19 +850,14 @@ static void sched_hand_back(process_t *proc, int16_t owner)
     if (owner < 0 || (uint32_t)owner >= g_sched_core_count)
         owner = (int16_t)proc->home_core;
     scheduler_state_t *os = &g_core_sched[owner];
-    int prio = sched_determine_priority(proc);
 
     spin_lock(&os->runqueue.lock);
     bool queued = false;
     if (__atomic_load_n(&proc->state, __ATOMIC_ACQUIRE) == PROC_WORKING &&
-        !runqueue_contains(&os->runqueue, proc) &&
-        runqueue_enqueue(&os->runqueue, proc, prio))
+        !runqueue_contains(&os->runqueue, proc))
     {
-        proc->current_prio = (int8_t)prio;
-        __atomic_fetch_add(prio == SCHED_PRIO_CONTEXT ? &g_core_context_count[owner]
-                                                      : &g_core_normal_count[owner],
-                           1, __ATOMIC_RELAXED);
-        queued = true;
+        sched_place(proc, (uint8_t)owner);
+        queued = runqueue_enqueue(&os->runqueue, proc);
     }
     spin_unlock(&os->runqueue.lock);
 
@@ -1012,7 +880,13 @@ void schedule(void *frame_ptr)
         return;
     }
 
-    scheduler_account_current(s, rdtsc());
+    uint64_t now = rdtsc();
+    scheduler_account_current(s, now);
+
+    /* Read and cleared at every entry: a turn given away is settled by the
+     * schedule() that takes it, and by no later one. */
+    bool turn_given = s->turn_given;
+    s->turn_given = false;
 
     /* Quiescence tick — bumped on EVERY schedule entry, BEFORE the parked
      * early-return (a parked-but-still-ticking core must advance it too;
@@ -1062,38 +936,45 @@ void schedule(void *frame_ptr)
         }
     }
 
-    // Re-enqueue current if still WORKING
-    if (current && !process_is_idle(current) &&
-        process_get_state(current) == PROC_WORKING)
+    /* The strand switched out pays its Fare for the time it held this core —
+     * and one that gave its turn away stands behind the strand that pays the
+     * least — and goes back among this core's strands at what it now owes,
+     * while it still works. Paid under the runqueue lock: a strand woken while
+     * it still held this core is queued here already (sched_enqueue), and its
+     * slot follows its Fare. */
+    if (current && !process_is_idle(current))
     {
-        int prio = sched_determine_priority(current);
+        uint8_t me = amp_get_core_index();
         spin_lock(&s->runqueue.lock);
+        if (current->fare_tsc != 0 && now > current->fare_tsc)
+            current->fare += sched_fare_for(current, now - current->fare_tsc);
+        uint64_t next_fare;
+        if (turn_given && sched_least_other(&s->runqueue, current, &next_fare) &&
+            current->fare <= next_fare)
+            current->fare = next_fare + 1;
         /* Re-check state UNDER the runqueue lock before committing the enqueue.
          * process_set_state's WORKING→non-WORKING transition takes THIS same
-         * runqueue lock for its sched_dequeue (on proc->home_core == this core
-         * for a running strand), so observing WORKING here is decisive: either
-         * the transition has not run yet (we enqueue; its later dequeue, under
-         * this lock, removes us) or it already ran (we see non-WORKING and skip).
-         * Without it, the unlocked state read in the `if` above races a
-         * concurrent exit/kill and can leave a DONE/CRASHED strand in the
-         * runqueue — which the runtime reaper then frees while a dangling slot
-         * still points at it, so a freed/recycled process_t gets dispatched
+         * runqueue lock for its sched_dequeue (the core a running strand's
+         * Fare is reckoned on is the core running it), so observing WORKING
+         * here is decisive: either the transition has not run yet (we enqueue;
+         * its later dequeue, under this lock, removes us) or it already ran
+         * (we see non-WORKING and skip).
+         * Read without the lock, the state races a concurrent exit/kill and
+         * can leave a DONE/CRASHED strand in the runqueue — which the runtime
+         * reaper then frees while a dangling slot still points at it, so a
+         * freed/recycled process_t gets dispatched
          * (the strand-churn fault that runtime full-process reaping unmasked).
          * Read state atomically — NOT process_get_state(), which takes
          * state_lock and would invert the state_lock→runqueue_lock order. */
-        if (__atomic_load_n(&current->state, __ATOMIC_ACQUIRE) == PROC_WORKING &&
-            !runqueue_contains(&s->runqueue, current))
+        if (runqueue_contains(&s->runqueue, current))
         {
-            runqueue_enqueue(&s->runqueue, current, prio);
-            current->current_prio = (int8_t)prio;
-            uint8_t core = amp_get_core_index();
-            if (core < g_sched_core_count) {
-                if (prio == SCHED_PRIO_CONTEXT) {
-                    __atomic_fetch_add(&g_core_context_count[core], 1, __ATOMIC_RELAXED);
-                } else {
-                    __atomic_fetch_add(&g_core_normal_count[core], 1, __ATOMIC_RELAXED);
-                }
-            }
+            runqueue_settle(&s->runqueue, current);
+        }
+        else if (__atomic_load_n(&current->state, __ATOMIC_ACQUIRE) == PROC_WORKING)
+        {
+            if (current->fare_core != (int16_t)me)
+                sched_place(current, me);
+            runqueue_enqueue(&s->runqueue, current);
         }
         spin_unlock(&s->runqueue.lock);
     }
@@ -1107,10 +988,9 @@ void schedule(void *frame_ptr)
     if (process_is_idle(next) && amp_is_appcore() && g_amp.multicore_active)
     {
         uint64_t ticks_since_steal = s->total_ticks - s->last_steal_tick;
-        if (ticks_since_steal >= g_dynamic_steal_cooldown)
+        if (ticks_since_steal >= g_steal_cooldown)
         {
             s->last_steal_tick = s->total_ticks;
-            g_sched_stats.steal_attempts++;
             process_t *stolen = sched_try_steal(amp_get_core_index());
             if (stolen)
             {
@@ -1119,41 +999,8 @@ void schedule(void *frame_ptr)
         }
     }
 
-    // Set kernel stack (top + floor) for THIS core — including idle, so the
-    // REACT headroom guard reads the correct geometry while idle runs.
-    if (next->kernel_stack_top)
-    {
-        per_core_set_kernel_rsp((uint64_t)next->kernel_stack_top,
-                                (uint64_t)next->kernel_stack);
-    }
-
     // Switch
     spin_lock(&s->scheduler_lock);
-    /* TOCTOU re-check: between scheduler_select_next (which filtered
-     * destroying processes) and this store, another core may have
-     * called process_destroy on `next` and marked destroying=1. If
-     * we commit `next` as current_process here, process_destroy's
-     * scan finds the just-stored pointer AND the destroyer races
-     * with us through the alive-ref window — net effect is a UAF
-     * when destroy eventually frees the process struct.
-     *
-     * Closing the window: re-read destroying under the same lock
-     * that process_destroy's scan synchronises with (via the
-     * ACQUIRE load on s->current_process in process_destroy.c:662).
-     * If destroying is set we fall back to idle for this tick;
-     * scheduler_select_next will pick a fresh candidate next tick. */
-    if (next && !process_is_idle(next) &&
-        __atomic_load_n(&next->destroying, __ATOMIC_ACQUIRE)) {
-        /* Selected task is being destroyed — don't dispatch it. Fall back to
-         * THIS core's idle task for this tick, NOT to NULL: with next == NULL,
-         * context_restore_to_frame is a no-op, so the IRQ frame is left holding
-         * the OUTGOING `current` and the iretq would resume `current` here —
-         * while `current` was just re-enqueued above, leaving it both running
-         * AND in a runqueue (stealable → the same context dispatched on two
-         * cores). Running idle keeps the running-XOR-runqueue invariant; the
-         * next tick re-runs scheduler_select_next and picks a fresh candidate. */
-        next = idle_process_get();
-    }
 
     /* Running-XOR-runqueue interlock: claim `next` exclusively before committing
      * it as current_process. If another core still owns it (mid-eviction there —
@@ -1166,11 +1013,14 @@ void schedule(void *frame_ptr)
     process_t *refused = NULL;
     int16_t    refused_owner = -1;
     if (next && !process_is_idle(next)) {
-        int16_t me8 = (int16_t)amp_get_core_index();
+        int16_t me8     = (int16_t)amp_get_core_index();
+        bool    claimed = false;
         if (__atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE) != me8) {
             int16_t expect = -1;
-            if (!__atomic_compare_exchange_n(&next->on_cpu, &expect, me8,
-                                             false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            if (__atomic_compare_exchange_n(&next->on_cpu, &expect, me8,
+                                            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                claimed = true;
+            } else {
                 /* Another core still owns `next` — averting double-dispatch.
                  * `next` is already out of every runqueue, so it is handed back
                  * to its owner below, once this core's scheduler_lock is gone. */
@@ -1179,6 +1029,49 @@ void schedule(void *frame_ptr)
                 next = idle_process_get();
             }
         }
+
+        /* Only now, holding the claim, is `next` asked whether it may run.
+         *
+         * Between scheduler_select_next taking it out of the runqueue and this
+         * point it was in no runqueue and on no core, and a change of state made
+         * then — its exit (SysProcKill: PROC_DONE), a park (SysAddrPark,
+         * SysTurnIn: PROC_WAITING), its destruction — found nothing to take it
+         * out of: sched_dequeue looks in a runqueue. Asked before the claim, as
+         * this was, the answer could be stale by the time the strand ran, and
+         * this core started a strand that had exited — whose teardown, seeing it
+         * on no core, then freed its FPU buffer and kernel stack under it
+         * (measured: fxrstor through a NULL fpu_state in context_restore_to_frame,
+         * and a return address read from a kernel stack already freed).
+         *
+         * The claim is a locked compare-exchange, a full barrier, so the reads
+         * below come after it. Whoever changes the state stores first and looks
+         * at on_cpu after a full barrier of its own (process_set_state for a
+         * park, process_destroy for the teardown), so one of the two always sees
+         * the other: either this core sees the new state and lets the strand
+         * go, or the other side sees it claimed and treats it as running — a
+         * strand parked on its CPU is asked to step aside, a strand on a CPU is
+         * not torn down. A consecutive run holds its claim already and needs no
+         * barrier: nothing can tear down the strand this core runs.
+         *
+         * A strand let go is in no runqueue, which is where it belongs: an exited
+         * one is the reaper's, a parked one is queued again by its wake. Idle runs
+         * instead, never NULL — with NULL the IRQ frame would resume `current`,
+         * re-enqueued above, both running and queued. */
+        if (!process_is_idle(next) && !SchedMayDispatch(next)) {
+            if (claimed)
+                __atomic_store_n(&next->on_cpu, (int16_t)-1, __ATOMIC_RELEASE);
+            next = idle_process_get();
+        }
+    }
+
+    // Set kernel stack (top + floor) for THIS core, for the strand that will run
+    // here — including idle, so the REACT headroom guard reads the correct
+    // geometry while idle runs. Set only once `next` is final: a strand let go
+    // above must not leave this core pointing at its stack.
+    if (next->kernel_stack_top)
+    {
+        per_core_set_kernel_rsp((uint64_t)next->kernel_stack_top,
+                                (uint64_t)next->kernel_stack);
     }
 
     /* Stamp the outgoing strand for reap-vs-switch safety. It leaves the run
@@ -1223,6 +1116,10 @@ void schedule(void *frame_ptr)
         }
     }
     s->current_process = next;
+    bool busy_now    = !process_is_idle(next);
+    bool context_now = busy_now && UseContextFit(next) != 0;
+    __atomic_store_n(&s->busy_here, busy_now, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->context_here, context_now, __ATOMIC_RELAXED);
     /* The ask to step aside is recomputed at every dispatch: true exactly when
      * somebody is left waiting in this core's runqueue. */
     if (!process_is_idle(next))
@@ -1238,39 +1135,38 @@ void schedule(void *frame_ptr)
     if (refused)
         sched_hand_back(refused, refused_owner);
 
+    /* The person's work keeps its core to itself while an outsider can move —
+     * and the ask to step aside is asked again if nobody is left to step
+     * aside for. */
+    if (context_now && g_amp.multicore_active && sched_make_room(s, amp_get_core_index())) {
+        spin_lock(&s->scheduler_lock);
+        KResultStepAside(next, RunqueueAtomicTotal(&s->runqueue) != 0);
+        spin_unlock(&s->scheduler_lock);
+    }
+
     /* Nightwatch: real work dispatched here, so this core is no longer idle
      * and a later stall counts as a new episode. One byte store. */
     if (!process_is_idle(next))
         nightwatch_core_busy(amp_get_core_index());
 
-    g_sched_stats.context_switches++;
-
     // PROC_CREATED → PROC_WORKING.  `next` is never NULL: scheduler_select_next
     // returns the idle task when nothing is runnable, and the destroying-task
     // re-check above also falls back to idle — so no NULL guard is needed here.
-    if (process_get_state(next) == PROC_CREATED)
-    {
-        spin_lock(&next->state_lock);
+    // Looked at and written in one hold of the lock: a program ended between
+    // a look and a later write would have its CRASHED written over, and death
+    // is terminal (process_set_state).
+    spin_lock(&next->state_lock);
+    if (next->state == PROC_CREATED)
         next->state = PROC_WORKING;
-        spin_unlock(&next->state_lock);
-    }
+    spin_unlock(&next->state_lock);
     next->last_run_time = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
+    /* What it pays from here: charged at this core's next schedule(). */
+    if (!process_is_idle(next)) next->fare_tsc = rdtsc();
     /* Start of this strand's processor-time slice. Only when it is actually
      * taking the core from someone else: on a consecutive run the slice never
      * ended, and restamping would discard the part already served. The idle
      * task is excluded — time spent idle is not time given to anyone. */
     if (next != current && !process_is_idle(next)) next->cpu_tsc_stamp = rdtsc();
-
-    // Track consecutive runs
-    if (current && current != next)
-    {
-        current->consecutive_runs = 0;
-        next->consecutive_runs = 1;
-    }
-    else if (next)
-    {
-        next->consecutive_runs++;
-    }
 
     // Restore context
     context_restore_to_frame(next, frame);

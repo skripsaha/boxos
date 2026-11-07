@@ -24,6 +24,13 @@
 #include "box/memory.h"
 #include "box/error.h"
 #include "box/convert.h"
+#include "box/form.h"
+
+/* The line is a protocol with itself: the parent starts a child as
+ * "luggagetest carry <words> <bytes> ..." with no shell, and the child
+ * checks that very line through luggage_word() and luggage_tail(). Nothing
+ * here asks the Form, so the Luggage stays read raw, as this test needs. */
+BOX_FORM("takes optional text \"the line it starts itself with, which it checks; leave it out to run the test\"\n");
 
 #define WORD_BYTES 16u            /* "wNNNN-xxxxxxxxxx" */
 #define FIXED_WORDS 4u            /* luggagetest carry <words> <bytes> */

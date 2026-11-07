@@ -27,11 +27,16 @@
  *     than handing back an empty file.
  */
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/current.h"
 #include "box/error.h"
 #include "box/string.h"
 #include "box/system.h"
+
+#include "filename.h"
+
+BOX_FORM("takes optional name \"the file to write it to; leave it out to print it\"\n"
+         "gives things\n");
 
 /* Same size and the same reason as logsave's: the kernel hands over a page per
  * call regardless, so a larger pail would not fill any faster, and this one
@@ -41,12 +46,14 @@ static char s_target[128];
 
 int main(void)
 {
-    int argc = (int)luggage_word_count();
-
-    const char *name = NULL;
-    if (argc > 1 && luggage_word(1)[0] != '\0') {
-        name = luggage_word(1);
+    const char *const *words;
+    size_t word_count;
+    if (form_words(0, &words, &word_count) != 0) {
+        exit(1);
+        return 1;
     }
+
+    const char *name = word_count > 0 ? words[0] : NULL;
 
     error_t  why = OK;
     Current *log = current_open_ex("log:previous", CURRENT_READ, 0, 0, &why);
@@ -82,7 +89,7 @@ int main(void)
              * the file is the commonest reason anybody runs this at all, and
              * refusing to show the log because it cannot also store it would
              * be the tool failing in exactly the case it was built for. */
-            printf("%s could not be written (error %u) — printing it "
+            printf("Could not write %s (error %u) - printing it "
                    "instead\n", name, (unsigned)why);
         }
     }
@@ -147,6 +154,8 @@ int main(void)
     } else if (name && out) {
         printf("%lu byte(s) of the previous run written to %s\n",
                (unsigned long)poured, name);
+        file_id_t written = file_named(name);
+        if (written != 0) souvenir_things(&written, 1);
     } else {
         printf("\n-- %lu byte(s) from the previous run --\n",
                (unsigned long)poured);

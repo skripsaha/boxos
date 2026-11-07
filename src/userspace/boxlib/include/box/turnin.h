@@ -3,6 +3,10 @@
 
 #include "box/types.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Turn In — what a strand does when it has looked at everything it waits on
  * and found nothing.
@@ -48,5 +52,9 @@ bool box_mark_moved(TurnInMark seen);
  * something arrives. Returns when the strand is running with (usually) work to
  * do; the caller must re-look either way. */
 void box_turn_in(TurnInMark seen);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BOX_TURNIN_H */

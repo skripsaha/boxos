@@ -47,14 +47,13 @@
  * ---------------------
  *   - cet_process_create allocates the user shadow stack (16 KiB, four
  *     pages — CET_USER_SSP_PAGES) and maps it R/W=0 + Dirty=1 + U/S=1,
- *     the encoding that makes a page a user shadow stack. The 64 KiB
- *     user data stack it mirrors admits 4096 frames at the ABI's 16-byte
- *     minimum; 16 KiB of shadow stack holds 2048 slots, so it runs out
- *     at half that depth and the push faults in the guard page below the
- *     region rather than corrupting a neighbour. The matching size is 8
- *     pages; the 4 is locked by the hammock slot map, so growing it is
- *     the owner's call. Counted in full at CET_USER_SSP_PAGES in
- *     cet_lifecycle.c.
+ *     the encoding that makes a page a user shadow stack. The 8 MiB
+ *     user data stack it accompanies admits 524288 frames at the ABI's
+ *     16-byte minimum; 16 KiB of shadow stack holds 2048 slots, so on CET
+ *     hardware a deep recursion ends at the shadow stack, by a push that
+ *     faults in the guard page below the region rather than corrupting a
+ *     neighbour. Whether to grow it, or to demand-page it, is the owner's
+ *     call. Counted in full at CET_USER_SSP_PAGES in cet_lifecycle.c.
  *     Stores the live SSP in process_t (user_ssp_va / user_ssp_phys);
  *     user_ssp_va starts at the top of the region and thereafter tracks
  *     whatever the processor last had in IA32_PL3_SSP for this strand.

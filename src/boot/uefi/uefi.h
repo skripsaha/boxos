@@ -107,6 +107,12 @@ typedef struct {
 #define EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID \
     EFI_GUID_INIT(0x9042a9de,0x23dc,0x4a38, 0x96,0xfb,0x7a,0xde,0xd0,0x80,0x51,0x6a)
 
+#define EFI_EDID_DISCOVERED_PROTOCOL_GUID \
+    EFI_GUID_INIT(0x1c0c34f6,0xd380,0x41fa, 0xa0,0x49,0x8a,0xd0,0x6c,0x1a,0x66,0xaa)
+
+#define EFI_EDID_ACTIVE_PROTOCOL_GUID \
+    EFI_GUID_INIT(0xbd8c1056,0x9f36,0x44ec, 0x92,0xa8,0xa6,0x33,0x7f,0x81,0x79,0x86)
+
 #define EFI_LOADED_IMAGE_PROTOCOL_GUID \
     EFI_GUID_INIT(0x5b1b31a1,0x9562,0x11d2, 0x8e,0x3f,0x00,0xa0,0xc9,0x69,0x72,0x3b)
 
@@ -309,6 +315,14 @@ struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
     EFI_GRAPHICS_OUTPUT_PROTOCOL_BLT         blt;
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE       *mode;
 };
+
+/* UEFI 2.10 §12.9.2.4–§12.9.2.5. The buffer is firmware-owned and read-only;
+ * TagBoot may inspect it while boot services are alive, but never retains the
+ * pointer after ExitBootServices. */
+typedef struct {
+    uint32_t size_of_edid;
+    uint8_t *edid;
+} EFI_EDID_PROTOCOL;
 
 /* =========================================================================
  * Loaded Image Protocol

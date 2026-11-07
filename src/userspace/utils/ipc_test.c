@@ -4,6 +4,9 @@
 #include "box/core/result.h"
 #include "box/string.h"
 #include "box/system.h"
+#include "box/form.h"
+
+BOX_FORM("");
 
 int main(void) {
 

@@ -47,3 +47,22 @@ void ParserFree(ParsedCommand *cmd)
     free(cmd->storage);
     memset(cmd, 0, sizeof(ParsedCommand));
 }
+
+static bool IsBlank(char c)
+{
+    return c == ' ' || c == '\t';
+}
+
+const char *ParserRest(const char *line, int words)
+{
+    for (int skipped = 0; skipped < words; skipped++) {
+        while (IsBlank(*line)) line++;
+        bool quoted = false;
+        while (*line && (quoted || !IsBlank(*line))) {
+            if (*line == '"') quoted = !quoted;
+            line++;
+        }
+    }
+    while (IsBlank(*line)) line++;
+    return line;
+}

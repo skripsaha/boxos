@@ -20,7 +20,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -fasynchronous-unwind-tables \
          -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
          -fno-stack-protector -fno-pic -static -fno-ipa-ra \
-         -fcf-protection=full \
+         -fcf-protection=full -fstack-clash-protection \
          -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
          -Wall -Wextra -O2 \
          -Werror=return-type \

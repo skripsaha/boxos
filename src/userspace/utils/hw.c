@@ -13,12 +13,14 @@
  */
 
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/string.h"
 #include "box/cpu.h"
 #include "box/pku.h"
 #include "box/hw.h"
 #include "box/system.h"
+
+BOX_FORM("takes optional words \"what to do: cpu, tme, pku get [key], pku set key ad wd, lam get, lam set none|u48|u57; nothing shows the CPU summary\"\n");
 
 static int parse_uint(const char *s, uint32_t *out)
 {
@@ -215,21 +217,23 @@ static void print_help(void)
 
 int main(void)
 {
-    int argc = (int)luggage_word_count();
+    const char *const *words;
+    size_t count;
+    if (form_words(0, &words, &count) != 0) { exit(1); return 1; }
 
-    if (argc < 2) { do_cpu(); exit(0); return 0; }
+    if (count < 1) { do_cpu(); exit(0); return 0; }
 
-    const char *cmd = luggage_word(1);
+    const char *cmd = words[0];
 
     if (strcmp(cmd, "cpu") == 0) {
         do_cpu();
     } else if (strcmp(cmd, "pku") == 0) {
-        if (argc < 3) { print_help(); exit(1); return 1; }
-        const char *sub = luggage_word(2);
+        if (count < 2) { print_help(); exit(1); return 1; }
+        const char *sub = words[1];
         if (strcmp(sub, "get") == 0) {
-            if (argc >= 4) {
+            if (count >= 3) {
                 uint32_t pkey;
-                if (parse_uint(luggage_word(3), &pkey) != 0 || pkey >= 16) {
+                if (parse_uint(words[2], &pkey) != 0 || pkey >= 16) {
                     println("pkey must be 0..15"); exit(1); return 1;
                 }
                 do_pku_get_one((uint8_t)pkey);
@@ -237,15 +241,15 @@ int main(void)
                 do_pku_get_all();
             }
         } else if (strcmp(sub, "set") == 0) {
-            if (argc < 6) { println("usage: hw pku set <pkey> <ad> <wd>"); exit(1); return 1; }
+            if (count < 5) { println("usage: hw pku set <pkey> <ad> <wd>"); exit(1); return 1; }
             uint32_t pkey, ad, wd;
-            if (parse_uint(luggage_word(3), &pkey) != 0 || pkey >= 16) {
+            if (parse_uint(words[2], &pkey) != 0 || pkey >= 16) {
                 println("pkey must be 0..15"); exit(1); return 1;
             }
-            if (parse_uint(luggage_word(4), &ad) != 0 || ad > 1) {
+            if (parse_uint(words[3], &ad) != 0 || ad > 1) {
                 println("ad must be 0 or 1"); exit(1); return 1;
             }
-            if (parse_uint(luggage_word(5), &wd) != 0 || wd > 1) {
+            if (parse_uint(words[4], &wd) != 0 || wd > 1) {
                 println("wd must be 0 or 1"); exit(1); return 1;
             }
             do_pku_set((uint8_t)pkey, (int)ad, (int)wd);
@@ -255,13 +259,13 @@ int main(void)
     } else if (strcmp(cmd, "tme") == 0) {
         do_tme();
     } else if (strcmp(cmd, "lam") == 0) {
-        if (argc < 3) { print_help(); exit(1); return 1; }
-        const char *sub = luggage_word(2);
+        if (count < 2) { print_help(); exit(1); return 1; }
+        const char *sub = words[1];
         if (strcmp(sub, "get") == 0) {
             do_lam_get();
         } else if (strcmp(sub, "set") == 0) {
-            if (argc < 4) { println("usage: hw lam set none|u48|u57"); exit(1); return 1; }
-            do_lam_set(luggage_word(3));
+            if (count < 3) { println("usage: hw lam set none|u48|u57"); exit(1); return 1; }
+            do_lam_set(words[2]);
         } else {
             print_help(); exit(1); return 1;
         }

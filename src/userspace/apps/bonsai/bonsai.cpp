@@ -1,11 +1,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <utility>
 #include <vector>
 
 #include "box/cxx/console.h"
-#include "box/cxx/keyboard.h"
-#include "box/keyboard.h"
+#include "painter/tui/stage.h"
 #include "tree.h"
 
 namespace {
@@ -18,27 +19,26 @@ constexpr bonsai::Parameters kParameters{32, 5};
 constexpr std::uint32_t kColors[] = {0x398C38, 0x936441, 0x9AED5C, 0xE8BB78};
 constexpr std::string_view kLeaves = "&+*";
 
-TextCell cell(char glyph, box::color foreground) {
-  TextCell result{};
-  result.ch = glyph;
-  result.fg = foreground.raw();
-  result.bg = kBackground.raw();
-  return result;
+using PaintColor = painter::core::Color;
+
+painter::tui::Cell cell(char glyph, box::color foreground) {
+  return painter::tui::Cell{glyph, PaintColor::FromRaw(foreground.raw()),
+                            PaintColor::FromRaw(kBackground.raw())};
 }
 
 class Bonsai {
 public:
-  explicit Bonsai(box::vga::dimensions size)
-      : size_(size), frame_(static_cast<std::size_t>(size.rows) * size.cols),
-        wood_(frame_.size()) { restart(); }
-
-  ~Bonsai() {
-    box::vga::clear(kBackground);
-    box::vga::move_cursor(0, 0);
-  }
+  explicit Bonsai(painter::tui::Stage &Screen)
+      : Screen_(Screen), frame_(Screen.FrameBuffer()),
+        rows_(static_cast<unsigned>(Screen.Size().Height)),
+        cols_(static_cast<unsigned>(Screen.Size().Width)),
+        wood_(static_cast<std::size_t>(rows_) * cols_) { restart(); }
 
   bool paint() const {
-    return vga_paint(0, 0, size_.rows, size_.cols, frame_.data()) == OK;
+    if (!Screen_.SetCursor({static_cast<std::int32_t>(cols_ - 1),
+                            static_cast<std::int32_t>(rows_ - 1)}))
+      return false;
+    return static_cast<bool>(Screen_.Present());
   }
 
   bool finished() const { return next_mark_ == tree_.marks.size(); }
@@ -46,13 +46,14 @@ public:
   void restart() {
     const auto now = static_cast<std::uint32_t>(
         Clock::now().time_since_epoch().count());
-    tree_ = bonsai::generate(size_.rows - 4, size_.cols - 4,
+    tree_ = bonsai::generate(rows_ - 4, cols_ - 4,
                              now + generation_++, kParameters);
-    std::fill(frame_.begin(), frame_.end(), cell(' ', kBackground));
+    frame_.Clear({PaintColor::FromRaw(kBackground.raw()),
+                  PaintColor::FromRaw(kBackground.raw())});
     std::fill(wood_.begin(), wood_.end(), false);
     next_mark_ = 0;
     growth_ = 0;
-    draw_pot(size_.rows - 4, tree_.root_col + 2);
+    draw_pot(rows_ - 4, tree_.root_col + 2);
   }
 
   void step() {
@@ -67,8 +68,10 @@ public:
   }
 
 private:
-  box::vga::dimensions size_;
-  std::vector<TextCell> frame_;
+  painter::tui::Stage &Screen_;
+  painter::tui::Frame &frame_;
+  unsigned rows_;
+  unsigned cols_;
   std::vector<bool> wood_;
   bonsai::Tree tree_;
   std::size_t next_mark_ = 0;
@@ -76,9 +79,9 @@ private:
   float growth_ = 0;
 
   void draw(const bonsai::Mark &mark) {
-    const std::size_t index = (mark.row + 1) * size_.cols + mark.col + 2;
+    const std::size_t index = (mark.row + 1) * cols_ + mark.col + 2;
     const bool wood = mark.material == bonsai::Material::wood;
-    if (index >= frame_.size() || (!wood && wood_[index]))
+    if (index >= wood_.size() || (!wood && wood_[index]))
       return;
     wood_[index] = wood;
     const unsigned dark = wood ? 1 : 0;
@@ -93,32 +96,37 @@ private:
     const char glyph = wood ? mark.glyph
                             : kLeaves[(mark.col + mark.row + mark.shade) %
                                       kLeaves.size()];
-    frame_[index] = cell(glyph, color);
+    frame_.Put({static_cast<std::int32_t>(mark.col + 2),
+                static_cast<std::int32_t>(mark.row + 1)}, cell(glyph, color));
   }
 
   void draw_pot(unsigned top, unsigned root) {
-    const unsigned center = std::min(root, static_cast<unsigned>(size_.cols - 1));
-    const unsigned half = std::min(static_cast<unsigned>(size_.cols / 6),
-                                   std::min(center, static_cast<unsigned>(size_.cols - center - 1)));
+    const unsigned center = std::min(root, cols_ - 1);
+    const unsigned half = std::min(cols_ / 6,
+                                   std::min(center, cols_ - center - 1));
     for (unsigned offset = 0; offset < 2 * half + 1; ++offset) {
       const unsigned col = center - half + offset;
-      frame_[(top + 1) * size_.cols + col] = cell('_', kPot);
+      frame_.Put({static_cast<std::int32_t>(col), static_cast<std::int32_t>(top + 1)},
+                  cell('_', kPot));
       if (offset > 1 && offset + 2 < 2 * half + 1)
-        frame_[(top + 3) * size_.cols + col] = cell('_', kPot);
+        frame_.Put({static_cast<std::int32_t>(col), static_cast<std::int32_t>(top + 3)},
+                    cell('_', kPot));
     }
-    frame_[(top + 2) * size_.cols + center - half] = cell('\\', kPot);
-    frame_[(top + 2) * size_.cols + center + half] = cell('/', kPot);
-    frame_[(top + 3) * size_.cols + center - half + 1] = cell('\\', kPot);
-    frame_[(top + 3) * size_.cols + center + half - 1] = cell('/', kPot);
+    frame_.Put({static_cast<std::int32_t>(center - half), static_cast<std::int32_t>(top + 2)}, cell('\\', kPot));
+    frame_.Put({static_cast<std::int32_t>(center + half), static_cast<std::int32_t>(top + 2)}, cell('/', kPot));
+    frame_.Put({static_cast<std::int32_t>(center - half + 1), static_cast<std::int32_t>(top + 3)}, cell('\\', kPot));
+    frame_.Put({static_cast<std::int32_t>(center + half - 1), static_cast<std::int32_t>(top + 3)}, cell('/', kPot));
   }
 };
 
 int run() {
-  const auto size = box::vga::size();
-  if (size.rows < 16 || size.cols < 32)
+  auto Opened = painter::tui::Stage::Open("bonsai", 32, 16);
+  if (!Opened) {
+    std::printf("%s\n", Opened.error().Describe("bonsai").c_str());
     return 1;
-  Bonsai tree(size);
-  box::key_stream keyboard;
+  }
+  painter::tui::Stage Screen = std::move(*Opened);
+  Bonsai tree(Screen);
   bool paused = false;
   auto deadline = Clock::now() + std::chrono::milliseconds{kStepMs};
   if (!tree.paint())
@@ -133,21 +141,22 @@ int run() {
     }
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
         deadline - Clock::now()).count();
-    const auto key = keyboard.wait(paused || tree.finished()
-                                       ? 0
-                                       : static_cast<std::uint32_t>(
-                                             std::max(1LL, remaining)));
-    if (!key)
+    const painter::tui::Event Event = Screen.Wait(paused || tree.finished()
+                                                       ? 0
+                                                       : static_cast<std::uint32_t>(
+                                                             std::max(1LL, remaining)));
+    if (Event.Kind == painter::tui::EventKind::Quiet)
       continue;
-    if (key->ch() == KEY_ESCAPE)
+    if (Event.Kind == painter::tui::EventKind::Gone) return 1;
+    if (Event.Key.Ascii == painter::tui::KeyCodes::Escape)
       return 0;
-    if (key->ch() == ' ') {
+    if (Event.Key.Ascii == ' ') {
       paused = !paused;
-    } else if (key->ch() == 'r' || key->ch() == 'R') {
+    } else if (Event.Key.Ascii == 'r' || Event.Key.Ascii == 'R') {
       tree.restart();
       paused = false;
       deadline = Clock::now() + std::chrono::milliseconds{kStepMs};
-    } else if (key->ch() == '\n' || key->ch() == '\r') {
+    } else if (Event.Key.Ascii == painter::tui::KeyCodes::Enter || Event.Key.Ascii == '\r') {
       tree.finish();
     } else {
       continue;

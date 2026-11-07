@@ -13,6 +13,8 @@
 #include "atomics.h"
 #include "bay.h"       /* BayCleanupCabin — the claims are the cabin's */
 #include "brook.h"     /* BrookCleanupCabin — the mapping half of a Brook claim */
+#include "touch.h"     /* TouchCleanupProcess — each strand's death, committed once */
+#include "proc_exit.h"
 
 /*
  * cabin_set_tag_bit — intern a single tag id into the cabin's fast-path
@@ -200,6 +202,9 @@ void cabin_destroy(cabin_t *cabin)
         MemTagClearByPhys(cabin->touch_ring_phys, "purpose:touch-ring");
     }
 
+    kfree(cabin->hammock_free);
+    cabin->hammock_free = NULL;
+
     if (cabin->tag_overflow_ids)
     {
         kfree(cabin->tag_overflow_ids);
@@ -266,6 +271,77 @@ void cabin_destroy(cabin_t *cabin)
     kfree(cabin);
 }
 
+bool cabin_hammock_take(cabin_t *cabin, uint64_t *slot_base)
+{
+    bool taken = true;
+
+    spin_lock(&cabin->hammock_lock);
+    if (cabin->hammock_free_count > 0)
+    {
+        *slot_base = cabin->hammock_free[--cabin->hammock_free_count];
+    }
+    else if (cabin->hammock_va_next + CABIN_HAMMOCK_SLOT_SIZE <= CABIN_HAMMOCK_END)
+    {
+        *slot_base = cabin->hammock_va_next;
+        cabin->hammock_va_next += CABIN_HAMMOCK_SLOT_SIZE;
+    }
+    else
+    {
+        taken = false;
+    }
+    spin_unlock(&cabin->hammock_lock);
+    return taken;
+}
+
+void cabin_hammock_give_back(cabin_t *cabin, uint64_t slot_base)
+{
+    for (;;)
+    {
+        spin_lock(&cabin->hammock_lock);
+
+        if (cabin->hammock_free_count < cabin->hammock_free_capacity)
+        {
+            cabin->hammock_free[cabin->hammock_free_count++] = slot_base;
+            spin_unlock(&cabin->hammock_lock);
+            return;
+        }
+
+        uint32_t want = cabin->hammock_free_capacity ? cabin->hammock_free_capacity * 2 : 16;
+        spin_unlock(&cabin->hammock_lock);
+
+        uint64_t *bigger = kmalloc((size_t)want * sizeof(uint64_t));
+        if (!bigger)
+        {
+            spin_lock(&cabin->hammock_lock);
+            if (slot_base + CABIN_HAMMOCK_SLOT_SIZE == cabin->hammock_va_next)
+            {
+                cabin->hammock_va_next = slot_base;
+                spin_unlock(&cabin->hammock_lock);
+                return;
+            }
+            spin_unlock(&cabin->hammock_lock);
+            kprintf("[STRAND] hammock slot 0x%lx not given back: no memory for the list; "
+                    "the cabin's address space keeps it unused\n", (unsigned long)slot_base);
+            return;
+        }
+
+        spin_lock(&cabin->hammock_lock);
+        if (cabin->hammock_free_capacity >= want)
+        {
+            spin_unlock(&cabin->hammock_lock);
+            kfree(bigger);
+            continue;
+        }
+        uint64_t *smaller = cabin->hammock_free;
+        if (smaller)
+            memcpy(bigger, smaller, (size_t)cabin->hammock_free_count * sizeof(uint64_t));
+        cabin->hammock_free = bigger;
+        cabin->hammock_free_capacity = want;
+        spin_unlock(&cabin->hammock_lock);
+        kfree(smaller);
+    }
+}
+
 void cabin_ref_inc(cabin_t *cabin)
 {
     if (!cabin)
@@ -280,4 +356,84 @@ void cabin_ref_dec(cabin_t *cabin)
     uint32_t old = atomic_fetch_sub_u32(&cabin->strand_count, 1);
     if (old == 1)
         cabin_destroy(cabin);
+}
+
+/* One strand's part in its program's end: the death committed and announced
+ * first (TouchCleanupProcess claims it once per strand and publishes
+ * process:died with this disposition), the state the reaper and the
+ * scheduler read second. In that order for the reason SysProcKill always kept
+ * it: with the state first, the reaper on another core could commit the death
+ * itself and call an ordered end a crash. */
+static void cabin_end_strand(process_t *strand, int32_t disposition)
+{
+    TouchCleanupProcess(strand, disposition);
+    process_set_state(strand, disposition >= 0 ? PROC_DONE : PROC_CRASHED);
+}
+
+void CabinEnd(process_t *named, int32_t disposition)
+{
+    if (!named)
+        return;
+    cabin_t *cabin = named->cabin;
+
+    /* The others share the end: an exit's code, a kill — and any crash cause
+     * becomes a crash, the cause having been the named strand's own. */
+    int32_t shared = (disposition < 0 && disposition != PROC_EXIT_KILLED)
+                         ? PROC_EXIT_CRASHED : disposition;
+
+    /* One live sibling a walk. Nothing is allocated, and every walk either
+     * ends a strand — which no later walk picks again, its state being dead —
+     * or finds none, so the loop is done after as many walks as the program
+     * had strands alive. None is born into the cabin meanwhile: `ending` is
+     * set under the lock strand_spawn checks it under.
+     *
+     * The main strand (hammock_base == 0) is kept for the very end, pinned by
+     * the walk that first meets it alive: it is the one the program's spawner
+     * knows it by, and watches. */
+    process_t *main_strand = NULL;
+    while (cabin)
+    {
+        process_t *next = NULL;
+
+        process_list_lock();
+        cabin->ending = 1;
+        for (process_t *p = process_get_first(); p; p = p->next)
+        {
+            if (p->cabin != cabin)
+                continue;
+            /* Nobody is left to join it. */
+            __atomic_store_n(&p->reap_blocked, 0u, __ATOMIC_SEQ_CST);
+            if (p == named)
+                continue;
+            process_state_t st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
+            if (st == PROC_DONE || st == PROC_CRASHED)
+                continue;
+            if (p->hammock_base == 0)
+            {
+                if (!main_strand)
+                {
+                    process_ref_inc(p);
+                    main_strand = p;
+                }
+                continue;
+            }
+            if (next)
+                continue;
+            process_ref_inc(p);
+            next = p;
+        }
+        process_list_unlock();
+
+        if (!next)
+            break;
+        cabin_end_strand(next, shared);
+        process_ref_dec(next);
+    }
+
+    cabin_end_strand(named, disposition);
+    if (main_strand)
+    {
+        cabin_end_strand(main_strand, shared);
+        process_ref_dec(main_strand);
+    }
 }

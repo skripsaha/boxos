@@ -1,59 +1,105 @@
 #include "box/print.h"
-#include "box/luggage.h"
+#include "box/form.h"
 #include "box/file.h"
-#include "box/string.h"
+#include "box/memory.h"
+#include "box/recipe.h"
 #include "box/system.h"
 
-int main(void) {
-    int argc = (int)luggage_word_count();
+BOX_FORM("takes optional thing \"the file to tell about\"\n"
+         "gives things\n");
 
-    if (argc < 2) {
-        system_info_t sys;
-        if (sysinfo(&sys) != 0) {
-            printf("%colorError:%color Failed to get system info\n",
-                   COLOR_RED, COLOR_DEFAULT);
-            exit(1);
-            return 1;
-        }
-
-        uint64_t up_ms = sys.uptime_ns / 1000000ULL;
-        printf("%color%s%color  uptime %u ms  procs %u\n",
-               COLOR_CYAN, sys.version, COLOR_DEFAULT,
-               (unsigned)up_ms, sys.process_count);
-        printf("  RAM:  %u MB used / %u MB total\n",
-               (unsigned)(sys.used_memory  >> 20),
-               (unsigned)(sys.total_memory >> 20));
-        printf("  CPUs: %u (%u K, %u App)%s\n",
-               sys.cpu_total, sys.cpu_k_cores, sys.cpu_app_cores,
-               sys.multicore_active ? " AMP" : "");
-
-        exit(0);
-        return 0;
+static int system_summary(void) {
+    system_info_t sys;
+    if (sysinfo(&sys) != 0) {
+        printf("%colorError:%color Failed to get system info\n",
+               COLOR_RED, COLOR_DEFAULT);
+        return 1;
     }
 
-    file_id_t matches[4];
-    file_info_t infos[4];
-    int count = find_file_by_name(luggage_word(1), matches, infos, 4);
+    uint64_t up_ms = sys.uptime_ns / 1000000ULL;
+    printf("%color%s%color  uptime %u ms  procs %u\n",
+           COLOR_CYAN, sys.version, COLOR_DEFAULT,
+           (unsigned)up_ms, sys.process_count);
+    printf("  RAM:  %u MB used / %u MB total\n",
+           (unsigned)(sys.used_memory  >> 20),
+           (unsigned)(sys.total_memory >> 20));
+    printf("  CPUs: %u (%u K, %u App)%s\n",
+           sys.cpu_total, sys.cpu_k_cores, sys.cpu_app_cores,
+           sys.multicore_active ? " AMP" : "");
+    return 0;
+}
 
-    if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
-    if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }
+/* One tag a line: the comma list the volume keeps, split at its commas. */
+static void print_tags(const char *tags) {
+    println("  Tags:");
+    while (tags && *tags) {
+        const char *end = tags;
+        while (*end && *end != ',') end++;
+        printf("    %.*s\n", (int)(end - tags), tags);
+        tags = *end ? end + 1 : end;
+    }
+}
 
-    file_info_t info = infos[0];
+/* What a program made here was made from, by which tool and in which Use
+ * Context, and how each of those files stands now. Nothing for a file that
+ * carries no Recipe. */
+static void print_recipe(file_id_t file) {
+    BoxRecipe recipe;
+    if (recipe_of_file(file, &recipe) != 0) {
+        println("  Recipe: it cannot be read");
+        return;
+    }
+    if (!recipe.Declared) return;
+
+    uint8_t *states = NULL;
+    bool known = recipe_check(&recipe, &states) == 0;
+    if (recipe.Context[0])
+        printf("  Made by %s in the Use Context %s, from:\n", recipe.By, recipe.Context);
+    else
+        printf("  Made by %s with no Use Context, from:\n", recipe.By);
+    for (size_t i = 0; i < recipe.FileCount; i++) {
+        const char *now = !known                          ? ""
+                          : states[i] == RECIPE_CHANGED ? " (changed since)"
+                          : states[i] == RECIPE_GONE    ? " (gone)"
+                                                        : "";
+        printf("    %s%s\n", recipe.Files[i].Name, now);
+    }
+    if (!known) println("    (whether they changed cannot be read now)");
+    free(states);
+    recipe_release(&recipe);
+}
+
+int main(void) {
+    const file_id_t *file;
+    size_t file_count;
+
+    if (form_things(0, &file, &file_count) != 0) {
+        exit(1);
+        return 1;
+    }
+
+    if (file_count == 0) {
+        int status = system_summary();
+        exit(status);
+        return status;
+    }
+
+    FileMetadata metadata;
+    if (FileMetadataRead(file[0], &metadata) != 0) {
+        println("Could not look at that file; it may have been erased");
+        exit(1);
+        return 1;
+    }
 
     println("File Info:");
-    printf("  Filename: %s\n", info.filename);
-    printf("  File ID: %lu\n", matches[0]);
-    printf("  Size: %u bytes\n", (unsigned)info.size);
-    printf("  Flags: 0x%x\n", info.flags);
+    printf("  Filename: %s\n", metadata.Filename);
+    printf("  Size: %u bytes\n", (unsigned)metadata.Size);
+    printf("  Flags: 0x%x\n", metadata.Flags);
+    print_tags(metadata.Tags);
+    FileMetadataRelease(&metadata);
+    print_recipe(file[0]);
 
-    println("  Tags:");
-    for (uint8_t i = 0; i < info.tag_count && i < 5; i++) {
-        if (info.tags[i].value[0])
-            printf("    %s:%s\n", info.tags[i].key, info.tags[i].value);
-        else
-            printf("    %s\n", info.tags[i].key);
-    }
-
+    souvenir_things(file, 1);
     exit(0);
     return 0;
 }

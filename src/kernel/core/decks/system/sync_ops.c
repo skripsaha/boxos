@@ -67,20 +67,41 @@
  *   params: [u64 user_va][u64 expected][u32 timeout_ms]  (20 bytes)
  *
  * Mirrors SysTouchAwait step-by-step (touch_ops.c:222-321):
- *   1.  VA → phys translate (before taking any bucket lock).
- *   2.  Value pre-check: if *phys != expected → return immediately.
+ *   1.  Read the word through a porthole (before taking any bucket lock),
+ *       and the frame it lies in, which names the park for Nightwatch.
+ *   2.  Value pre-check: if the word != expected → return immediately.
  *   3.  Register AddrWaitEntry under bucket lock.
  *   4.  Arm an IRQ-safe timeout reschedule via TouchQueueArmWake (PROC_WORKING
  *       + IPI on expiry; the caller's result_wait call_timeout yields ERR_TIMEOUT).
  *   5.  process_set_state(PROC_WAITING).
- *   6.  Lost-wakeup recheck under ACQUIRE (reload *phys + entry.done) with
- *       claim arbitration — see the inline comment at step 6.
+ *   6.  Lost-wakeup recheck under ACQUIRE (read the word again + entry.done)
+ *       with claim arbitration — see the inline comment at step 6.
  *   7.  Go ASYNC (set *async_owns_crates) and return ERR_WOULD_BLOCK so guide
  *       pushes NO reply now. The early-wake completion is a real Result
  *       KResultPushed onto this caller's ResultRing by SysAddrWake (on a notify),
  *       which also flips PROC_WAITING -> PROC_WORKING + IPI. That Result is what
  *       ends the caller's result_wait; the IPI alone would only resume a poll.
  * ------------------------------------------------------------------------- */
+/* The word a park is about, read once through a porthole onto the cabin: a
+ * user page the cabin has, the word whole inside it — never the kernel's own
+ * memory, whose half every cabin's page tables share, and never the frame that
+ * happens to follow the page. *phys, when asked for, is the frame byte the word
+ * was read at. */
+static bool SysAddrWord(vmm_context_t *vmm, uint64_t user_va,
+                        uint64_t *value, uintptr_t *phys)
+{
+    Porthole porthole;
+    const uint64_t *word = PortholeOpen(&porthole, vmm, (uintptr_t)user_va,
+                                        sizeof(uint64_t), /*for_write=*/false);
+    if (!word)
+        return false;
+    *value = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    if (phys)
+        *phys = porthole.phys;
+    PortholeClose(&porthole);
+    return true;
+}
+
 static int SysAddrPark(const ManifestOp *op, Crate *crates,
                        uint16_t crate_count, const OpContext *ctx)
 {
@@ -95,17 +116,14 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
     memcpy(&expected,   op->params + 8,  sizeof(uint64_t));
     memcpy(&timeout_ms, op->params + 16, sizeof(uint32_t));
 
-    /* Step 1: VA → phys.  vmm_virt_to_phys holds ctx->lock internally;
-     * it must complete before we take any bucket lock. */
-    uintptr_t phys = 0;
-    if (ctx->proc->cabin) {
-        phys = vmm_virt_to_phys(ctx->proc->cabin->vmm, user_va);
-    }
-    if (phys == 0) return ERR_INVALID_ADDRESS;
+    /* Step 1: the word and its frame, before any bucket lock. */
+    if (!ctx->proc->cabin) return ERR_INVALID_ADDRESS;
+    vmm_context_t *vmm = ctx->proc->cabin->vmm;
+    uint64_t  actual = 0;
+    uintptr_t phys   = 0;
+    if (!SysAddrWord(vmm, user_va, &actual, &phys)) return ERR_INVALID_ADDRESS;
 
     /* Step 2: value pre-check — no park if value already changed. */
-    volatile uint64_t *kaddr = (volatile uint64_t *)vmm_phys_to_virt(phys);
-    uint64_t actual = __atomic_load_n(kaddr, __ATOMIC_ACQUIRE);
     if (actual != expected) return ERR_ADDR_VALUE_MISMATCH;
 
     /* Step 3: register the embedded per-process entry (never stack-allocated).
@@ -200,12 +218,17 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
      *
      * Going async means setting *async_owns_crates so guide does NOT push the
      * transient ERR_WOULD_BLOCK ack as our reply — the real completion arrives
-     * later (mirrors the write_job async path). The ACQUIRE on *kaddr pairs
-     * with the writer's RELEASE store; the claim's bucket lock orders done. */
-    uint64_t recheck = __atomic_load_n(kaddr, __ATOMIC_ACQUIRE);
-    bool completed   = (__atomic_load_n(&entry->done, __ATOMIC_ACQUIRE) != 0);
+     * later (mirrors the write_job async path). The ACQUIRE on the word pairs
+     * with the writer's RELEASE store; the claim's bucket lock orders done.
+     *
+     * A word whose page left the cabin since step 1 — a sibling strand let go
+     * of the Bay it lay in — has nothing left to change: the park ends at
+     * once, as a mismatch does, with the reason that is true. */
+    uint64_t recheck   = expected;
+    bool     word_gone = !SysAddrWord(vmm, user_va, &recheck, NULL);
+    bool     completed = (__atomic_load_n(&entry->done, __ATOMIC_ACQUIRE) != 0);
 
-    if (!completed && recheck != expected) {
+    if (!completed && (word_gone || recheck != expected)) {
         if (AddrWaitClaim(entry)) {
             /* (a) We own delivery — finish synchronously through guide. If our
              * armed timeout later fires, SyncTimeoutDeliver finds the entry
@@ -213,7 +236,7 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
              * PROC_WORKING reschedule — idempotent for an already-running
              * strand (at worst a benign spurious wake if it re-parked). */
             process_set_state(ctx->proc, PROC_WORKING);
-            return ERR_ADDR_VALUE_MISMATCH;
+            return word_gone ? ERR_INVALID_ADDRESS : ERR_ADDR_VALUE_MISMATCH;
         }
         completed = true;   /* lost the claim — a waker owns delivery */
     }

@@ -537,18 +537,20 @@ error_t PlotSourcePull(const PlotSource *src, uint64_t at, void *dst, uint32_t b
     if (!src->vmm)
         return ERR_INVALID_ADDRESS;
 
-    /* Page by page, each a window onto a page the program has; the walk takes
-     * no lock and brings nothing in. */
+    /* Page by page, each through a porthole onto a page the program has; the
+     * walk takes no lock and brings nothing in. */
     uint8_t  *out = dst;
     uintptr_t va  = src->user + (uintptr_t)at;
     while (bytes > 0) {
         uint32_t n = PMM_PAGE_SIZE - (uint32_t)(va & (PMM_PAGE_SIZE - 1));
         if (n > bytes)
             n = bytes;
-        const void *page = vmm_translate_user_addr(src->vmm, va, n);
+        Porthole porthole;
+        const void *page = PortholeOpen(&porthole, src->vmm, va, n, /*for_write=*/false);
         if (!page)
             return ERR_INVALID_ADDRESS;
         memcpy(out, page, n);
+        PortholeClose(&porthole);
         out   += n;
         va    += n;
         bytes -= n;

@@ -13,12 +13,12 @@ struct process_t;
  * One per machine, owned by the kernel, set by the user's shell (`use code
  * cpp`) or by a program with system authority. It is not a property of a
  * process or of a cabin: it is the ship's declared condition, and every station
- * reads it and adjusts itself. Two stations do today. The scheduler runs a
- * strand whose cabin wears every context tag in the context tier
- * (SCHED_PRIO_CONTEXT). TagFS narrows a query to the context and stamps a
- * created file with it, unless the caller asked for the whole volume. A later
- * station asks the same question through the same door and needs nothing
- * added here.
+ * reads it and adjusts itself. Two stations do today. The scheduler charges a
+ * strand the less Fare the more of the context's tags its cabin wears — a
+ * third of it for all of them (scheduler.c). TagFS narrows a query to the
+ * context and stamps a created file with it, unless the caller asked for the
+ * whole volume. A later station asks the same question through the same door
+ * and needs nothing added here.
  *
  * TAGS, NOT NUMBERS. A tag is a name, `key` or `key:value`. Its number is a
  * page in one particular book, and this machine keeps three books: the mounted
@@ -99,24 +99,51 @@ UseText       *UseListText(const UseList *l);
  * tag the volume registry could not hold is refused with the spelling's code
  * (ERR_TAGFS_TAG_TOO_LONG, ERR_TAGFS_INVALID_TAG) and the context is left as
  * it was. The volume's numbers are looked up, never issued.
+ *
+ * Each saying answers with its own word (`word` may be NULL): the text it
+ * said, held for the caller, and its number among the sayings — so the
+ * volume is asked whether it remembers THIS word, never one said after it.
  */
-error_t UseContextSet(const char *list, size_t len);
-void    UseContextClear(void);
+typedef struct UseWord {
+    UseText *said;       /* NULL when the word cleared; the caller drops it */
+    uint64_t saying;
+} UseWord;
+
+error_t UseContextSet(const char *list, size_t len, UseWord *word);
+void    UseContextClear(UseWord *word);
 
 /*
- * The scheduler's question: does this strand's cabin wear EVERY tag of the
- * context? One compare, no lock, nothing of the context read: the cabin's
- * verdict word, previous or current. A stale word is answered with its
- * previous verdict, and the recount it owes is asked for.
+ * The context changed in one word: the tags of `add` put after those it says
+ * — one it already says stays where it is — and the tags of `drop` taken out;
+ * a tag in both is taken out, and nothing left clears. Either list may be
+ * empty, and is spelled as UseContextSet spells; a tag that does not spell
+ * refuses the change and the context is left as it was. A word said by
+ * somebody else while the change was being made is changed in turn, never
+ * overwritten. *changed (optional) is false when the context already said
+ * exactly that: then no word is said, and `word` is the one standing.
  */
-bool    UseContextMatches(const struct process_t *proc);
+error_t UseContextChange(const char *add, size_t add_len, const char *drop, size_t drop_len,
+                         UseWord *word, bool *changed);
+
+/*
+ * The scheduler's question: how much of the context does this strand's cabin
+ * wear? Its Fit — the share of the context's tags the cabin wears, out of
+ * USE_CONTEXT_FIT_FULL: every one of them FULL, half of them half, none 0,
+ * and 0 with no context. One load, no lock, nothing of the context read: the
+ * cabin's verdict word, previous or current. A stale word is answered with
+ * its previous Fit, and the recount it owes is asked for.
+ */
+#define USE_CONTEXT_FIT_FULL 256u
+uint32_t UseContextFit(const struct process_t *proc);
 
 /* The verdict of this strand's cabin made current, counted outside any lock
  * against a snapshot of the context — at the strand's entry into the kernel. */
 void    UseContextVerdictRefresh(struct process_t *proc);
 
 /* The recount for every cabin whose verdict is stale, when one is owed: one
- * load when none is. Called from the service loops, with interrupts on. */
+ * load when none is. Called from the service loops, with interrupts on, and
+ * on one core from the tick that interrupted a program (idt.c), where no
+ * kernel lock can be held. */
 void    UseContextServiceIfPending(void);
 
 /* A cabin's tags changed: every verdict is stale from here on. Said after the
@@ -133,11 +160,6 @@ void    UseContextCabinChanged(void);
  * The context is set all the same — the person is told, never refused.
  */
 void    UseContextRemember(bool *remembered);
-
-/* The context's text as it stands, and which word it is — for a program's
- * `use`, which tells the volume without waiting inside the kernel
- * (SettleUseRemembered). A reference the caller drops; NULL for none. */
-UseText *UseContextSaying(uint64_t *out_saying);
 
 /*
  * A volume is up — said on every road to a mounted volume. A machine holding

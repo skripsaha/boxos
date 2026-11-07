@@ -8,29 +8,34 @@
 #include <vector>
 
 #include "box/clock.h"
-#include "box/cxx/console.h"
-#include "box/cxx/keyboard.h"
 #include "box/error.h"
-#include "box/keyboard.h"
+#include "box/form.h"
 #include "box/system.h"
-#include "box/vga.h"
+#include "painter/core/color.h"
+#include "painter/tui/stage.h"
+
+BOX_FORM("");
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr box::color kBackground = box::color::rgb(0x00, 0x00, 0x00);
-constexpr box::color kPanel = box::color::rgb(0x07, 0x09, 0x0D);
-constexpr box::color kPanelAlt = box::color::rgb(0x18, 0x2E, 0x4A);
-constexpr box::color kBorder = box::color::rgb(0x82, 0x91, 0x9A);
-constexpr box::color kText = box::color::rgb(0xF1, 0xF7, 0xFF);
-constexpr box::color kMuted = box::color::rgb(0xA6, 0xC3, 0xE6);
-constexpr box::color kCyan = box::color::rgb(0x00, 0xE5, 0xFF);
-constexpr box::color kGreen = box::color::rgb(0x5C, 0xFF, 0x8C);
-constexpr box::color kYellow = box::color::rgb(0xFF, 0xD3, 0x4E);
-constexpr box::color kRed = box::color::rgb(0xFF, 0x5C, 0x6C);
-constexpr box::color kSelection = box::color::rgb(0x00, 0xE5, 0xFF);
-constexpr box::color kBrightGreen = box::color::rgb(0x59, 0xDB, 0x0D);
+using Color = painter::core::Color;
+using Cell = painter::tui::Cell;
+using TextStyle = painter::tui::TextStyle;
+
+constexpr Color kBackground = Color::Rgb(0x00, 0x00, 0x00);
+constexpr Color kPanel = Color::Rgb(0x07, 0x09, 0x0D);
+constexpr Color kPanelAlt = Color::Rgb(0x18, 0x2E, 0x4A);
+constexpr Color kBorder = Color::Rgb(0x82, 0x91, 0x9A);
+constexpr Color kText = Color::Rgb(0xF1, 0xF7, 0xFF);
+constexpr Color kMuted = Color::Rgb(0xA6, 0xC3, 0xE6);
+constexpr Color kCyan = Color::Rgb(0x00, 0xE5, 0xFF);
+constexpr Color kGreen = Color::Rgb(0x5C, 0xFF, 0x8C);
+constexpr Color kYellow = Color::Rgb(0xFF, 0xD3, 0x4E);
+constexpr Color kRed = Color::Rgb(0xFF, 0x5C, 0x6C);
+constexpr Color kSelection = Color::Rgb(0x00, 0xE5, 0xFF);
+constexpr Color kBrightGreen = Color::Rgb(0x59, 0xDB, 0x0D);
 
 struct ProcessRow {
   std::uint32_t pid = 0;
@@ -50,14 +55,6 @@ struct MachineSnapshot {
   unsigned ram_percent = 0;
   unsigned disk_percent = 0;
 };
-
-TextCell cell(char ch, box::color fg, box::color bg = kBackground) {
-  TextCell result{};
-  result.fg = fg.raw();
-  result.bg = bg.raw();
-  result.ch = ch;
-  return result;
-}
 
 std::string bytes(std::uint64_t value) {
   constexpr std::uint64_t kKiB = 1ULL << 10;
@@ -183,20 +180,20 @@ std::uint8_t blend_channel(std::uint8_t from, std::uint8_t to,
                                        static_cast<int>(span));
 }
 
-box::color blend_graph_color(box::color from, box::color to, unsigned position,
-                             unsigned span) {
-  return box::color::rgb(blend_channel(from.r(), to.r(), position, span),
-                         blend_channel(from.g(), to.g(), position, span),
-                         blend_channel(from.b(), to.b(), position, span));
+Color blend_graph_color(Color from, Color to, unsigned position,
+                        unsigned span) {
+  return Color::Rgb(blend_channel(from.Red(), to.Red(), position, span),
+                    blend_channel(from.Green(), to.Green(), position, span),
+                    blend_channel(from.Blue(), to.Blue(), position, span));
 }
 
-box::color graph_color(unsigned load) {
+Color graph_color(unsigned load) {
   load = load > 100 ? 100 : load;
-  constexpr box::color cyan = box::color::rgb(0x35, 0xD9, 0xFF);
-  constexpr box::color green = box::color::rgb(0x38, 0xFF, 0x70);
-  constexpr box::color yellow = box::color::rgb(0xFF, 0xE3, 0x4A);
-  constexpr box::color orange = box::color::rgb(0xFF, 0x9A, 0x2F);
-  constexpr box::color red = box::color::rgb(0xFF, 0x30, 0x48);
+  constexpr Color cyan = Color::Rgb(0x35, 0xD9, 0xFF);
+  constexpr Color green = Color::Rgb(0x38, 0xFF, 0x70);
+  constexpr Color yellow = Color::Rgb(0xFF, 0xE3, 0x4A);
+  constexpr Color orange = Color::Rgb(0xFF, 0x9A, 0x2F);
+  constexpr Color red = Color::Rgb(0xFF, 0x30, 0x48);
 
   if (load < 25)
     return blend_graph_color(cyan, green, load, 25);
@@ -209,11 +206,12 @@ box::color graph_color(unsigned load) {
 
 class TaskCenter {
 public:
-  TaskCenter(std::uint8_t rows, std::uint8_t cols)
-      : rows_(rows), cols_(cols), left_width_(cols / 2),
-        history_(graph_width(), 0),
-        frame_(static_cast<std::size_t>(rows) * cols,
-               cell(' ', kText, kBackground)) {}
+  explicit TaskCenter(painter::tui::Stage &Screen)
+      : frame_(Screen.FrameBuffer()),
+        rows_(static_cast<std::uint8_t>(Screen.Size().Height)),
+        cols_(static_cast<std::uint8_t>(Screen.Size().Width)),
+        left_width_(cols_ / 2),
+        history_(graph_width(), 0) {}
 
   bool refresh() {
     const auto now = Clock::now();
@@ -244,32 +242,28 @@ public:
     return true;
   }
 
-  bool handle(const box::key &key) {
-    if (key.ch() == KEY_ESCAPE)
+  bool handle(const painter::tui::KeyEvent &Key) {
+    if (Key.Ascii == painter::tui::KeyCodes::Escape)
       return true;
-    if (key.scancode() == KEY_UP) {
+    if (Key.Scancode == painter::tui::KeyCodes::Up) {
       move_selection(-1);
-    } else if (key.scancode() == KEY_DOWN) {
+    } else if (Key.Scancode == painter::tui::KeyCodes::Down) {
       move_selection(1);
-    } else if (key.ch() == KEY_BACKSPACE || key.scancode() == KEY_DELETE) {
+    } else if (Key.Ascii == painter::tui::KeyCodes::Backspace ||
+               Key.Scancode == painter::tui::KeyCodes::Delete) {
       terminate_selected();
     }
     return false;
   }
 
-  void clear() {
-    box::vga::clear(kBackground);
-    box::vga::move_cursor(0, 0);
-  }
-
 private:
+  painter::tui::Frame &frame_;
   std::uint8_t rows_;
   std::uint8_t cols_;
   std::uint8_t left_width_;
   std::vector<ProcessRow> processes_;
   std::vector<ProcessRow> previous_processes_;
   std::vector<unsigned char> history_;
-  std::vector<TextCell> frame_;
   MachineSnapshot machine_{};
   std::uint64_t last_sample_us_ = 0;
   std::uint32_t selected_pid_ = 0;
@@ -422,22 +416,18 @@ private:
     history_.back() = smoothed_load_;
   }
 
-  void put(std::uint8_t row, std::uint8_t col, char ch, box::color fg,
-           box::color bg = kBackground) {
+  void put(std::uint8_t row, std::uint8_t col, char ch, Color fg,
+           Color bg = kBackground) {
     if (row < rows_ && col < cols_)
-      frame_[static_cast<std::size_t>(row) * cols_ + col] = cell(ch, fg, bg);
+      frame_.Put({col, row}, Cell{ch, fg, bg});
   }
 
   void text(std::uint8_t row, std::uint8_t col, const std::string &value,
-            box::color fg, std::uint8_t max_width = 255,
-            box::color bg = kBackground) {
-    for (std::size_t i = 0; i < value.size() && i < max_width; ++i) {
-      const std::uint16_t x =
-          static_cast<std::uint16_t>(col) + static_cast<std::uint16_t>(i);
-      if (x >= cols_)
-        break;
-      put(row, static_cast<std::uint8_t>(x), value[i], fg, bg);
-    }
+            Color fg, std::uint8_t max_width = 255,
+            Color bg = kBackground) {
+    const std::size_t length = std::min<std::size_t>(value.size(), max_width);
+    frame_.Write({col, row}, std::string_view(value.data(), length),
+                 TextStyle{fg, bg});
   }
 
   void box(std::uint8_t x, std::uint8_t y, std::uint8_t width,
@@ -468,7 +458,7 @@ private:
   }
 
   void bar(std::uint8_t row, std::uint8_t col, std::uint8_t width,
-           unsigned value, box::color color) {
+           unsigned value, Color color) {
     const unsigned filled =
         static_cast<unsigned>(width) * (value > 100 ? 100 : value) / 100;
     for (std::uint8_t i = 0; i < width; ++i)
@@ -487,7 +477,7 @@ private:
     for (std::size_t i = 0; i < history_.size(); ++i) {
       const unsigned value = history_[i];
       const unsigned radius = value * radius_limit / 100;
-      const box::color color = graph_color(value);
+      const Color color = graph_color(value);
       const std::uint8_t x = static_cast<std::uint8_t>(i + 1);
       for (int offset = -static_cast<int>(radius);
            offset <= static_cast<int>(radius); ++offset) {
@@ -568,8 +558,8 @@ private:
          line < visible && first + line < processes_.size(); ++line) {
       const ProcessRow &process = processes_[first + line];
       const bool selected = first + line == selected_;
-      const box::color fg = selected ? kBackground : kText;
-      const box::color bg = selected ? kSelection : kPanel;
+      const Color fg = selected ? kBackground : kText;
+      const Color bg = selected ? kSelection : kPanel;
       const std::uint8_t row = static_cast<std::uint8_t>(first_row + line);
       for (std::uint8_t col = x + 1; col < x + width - 1; ++col)
         put(row, col, ' ', fg, bg);
@@ -597,11 +587,10 @@ private:
   }
 
   void render() {
-    std::fill(frame_.begin(), frame_.end(), cell(' ', kText, kBackground));
+    frame_.Clear(TextStyle{kText, kBackground});
     if (rows_ < 14 || cols_ < 60) {
       text(1, 2, "taskcenter needs at least 60x14 console cells", kRed,
            static_cast<std::uint8_t>(cols_ - 4));
-      (void)vga_paint(0, 0, rows_, cols_, frame_.data());
       return;
     }
 
@@ -619,7 +608,6 @@ private:
     render_stats(stats_top, stats_height);
     render_processes(right_x, right_width);
     render_footer();
-    (void)vga_paint(0, 0, rows_, cols_, frame_.data());
   }
 
   system_resources_t last_resources_{};
@@ -629,25 +617,27 @@ private:
 } // namespace
 
 int main() {
-  const vga_dimensions_t dimensions = box::vga::size();
-  if (dimensions.rows == 0 || dimensions.cols == 0) {
-    std::printf("taskcenter: screen is unavailable\n");
+  auto Opened = painter::tui::Stage::Open("taskcenter", 60, 14);
+  if (!Opened) {
+    std::printf("%s\n", Opened.error().Describe("taskcenter").c_str());
     return 1;
   }
-
-  TaskCenter center(dimensions.rows, dimensions.cols);
+  painter::tui::Stage Screen = std::move(*Opened);
+  TaskCenter center(Screen);
   center.refresh();
-  box::key_stream keyboard;
+  if (!Screen.Present()) return 1;
   auto next_refresh = Clock::now();
   for (;;) {
-    if (const auto key = keyboard.wait(100); key && center.handle(*key))
+    const painter::tui::Event Event = Screen.Wait(100);
+    if (Event.Kind == painter::tui::EventKind::Gone) return 1;
+    if (Event.Kind == painter::tui::EventKind::Key && center.handle(Event.Key))
       break;
     const auto now = Clock::now();
     if (now >= next_refresh) {
       center.refresh();
+      if (!Screen.Present()) return 1;
       next_refresh = now + std::chrono::milliseconds(250);
     }
   }
-  center.clear();
-  return 0;
+  return static_cast<bool>(Screen.Close()) ? 0 : 1;
 }

@@ -88,8 +88,8 @@ void    ManifestSubsystemShutdown(void);
  *   size           : bytes available at user_or_kernel
  *   is_kernel_ptr  : if true, treat user_or_kernel as kernel address (used by
  *                    kernel self-tests and bootstrap manifests). If false,
- *                    user_or_kernel is a user vaddr that gets translated via
- *                    vmm_translate_user_addr against owner->cabin.
+ *                    user_or_kernel is a user vaddr copied out of
+ *                    owner->cabin with vmm_user_buf_in.
  *   out_handle     : on success, opaque handle for later submit/release.
  *
  * Validation performed:

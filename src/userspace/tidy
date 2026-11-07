@@ -1,0 +1,5 @@
+takes things files "the files to tidy"
+takes words label "the tag they get"
+gives things
+tag files label
+files label

@@ -62,7 +62,7 @@ typedef struct
     uint8_t   state;
     uint8_t   home_core;
     int16_t   on_cpu;
-    int8_t    rq_prio;           /* -1 = in no runqueue */
+    int32_t   rq_index;          /* -1 = in no runqueue */
     uint64_t  last_run;          /* global tick of the last dispatch */
     uint8_t   linked;
     uint8_t   done;
@@ -399,7 +399,7 @@ static void nightwatch_verdict(void)
         e->state      = (uint8_t)p->state;
         e->home_core  = p->home_core;
         e->on_cpu     = __atomic_load_n(&p->on_cpu, __ATOMIC_RELAXED);
-        e->rq_prio    = __atomic_load_n(&p->rq_prio, __ATOMIC_RELAXED);
+        e->rq_index   = __atomic_load_n(&p->rq_index, __ATOMIC_RELAXED);
         e->last_run   = __atomic_load_n(&p->last_run_time, __ATOMIC_RELAXED);
         e->linked     = p->addr_wait_entry.linked;
         e->done       = p->addr_wait_entry.done;
@@ -535,17 +535,16 @@ static void nightwatch_verdict(void)
                 unsched++;
                 if (speak)
                 {
-                    if (e->rq_prio < 0)
+                    if (e->rq_index < 0)
                         kprintf("  pid %u gen %u working — ‼ RUNNABLE UNSCHEDULED: "
                                 "on no CPU and in no runqueue across two looks "
                                 "(home=%u)\n",
                                 e->pid, e->generation, e->home_core);
                     else
                         kprintf("  pid %u gen %u working — ‼ RUNNABLE UNSCHEDULED: "
-                                "queued at priority %d and never dispatched across "
-                                "two looks (home=%u)\n",
-                                e->pid, e->generation, (int)e->rq_prio,
-                                e->home_core);
+                                "queued and never dispatched across two looks "
+                                "(home=%u)\n",
+                                e->pid, e->generation, e->home_core);
                 }
             }
         }
@@ -660,18 +659,25 @@ static void nightwatch_verdict(void)
                     const ResultRing *rr =
                         (const ResultRing *)vmm_phys_to_virt(e->result_ring_phys);
                     uintptr_t slot_uva = result_ring_slot_uvaddr(rr, rr_head);
-                    const ResultSlot *slot = (const ResultSlot *)
-                        vmm_translate_user_addr(owner->cabin->vmm, slot_uva,
-                                                sizeof(ResultSlot));
-                    if (slot)
+                    Porthole porthole;
+                    const ResultSlot *window =
+                        PortholeOpen(&porthole, owner->cabin->vmm, slot_uva,
+                                     sizeof(ResultSlot), /*for_write=*/false);
+                    if (window)
+                    {
+                        ResultSlot slot;
+                        slot.seq = __atomic_load_n(&window->seq, __ATOMIC_ACQUIRE);
+                        slot.r   = window->r;
+                        PortholeClose(&porthole);
                         kprintf("        head slot: seq=%lu ctx=%u sender=%u "
                                 "err=%u len=%u addr=0x%lx\n",
-                                (unsigned long)__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE),
-                                (unsigned)slot->r.context,
-                                (unsigned)slot->r.sender_pid,
-                                (unsigned)slot->r.error_code,
-                                (unsigned)slot->r.data_length,
-                                (unsigned long)slot->r.data_addr);
+                                (unsigned long)slot.seq,
+                                (unsigned)slot.r.context,
+                                (unsigned)slot.r.sender_pid,
+                                (unsigned)slot.r.error_code,
+                                (unsigned)slot.r.data_length,
+                                (unsigned long)slot.r.data_addr);
+                    }
                 }
                 if (owner) process_ref_dec(owner);
             }

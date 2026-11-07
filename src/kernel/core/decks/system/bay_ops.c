@@ -23,7 +23,7 @@
  * Tag string read — page-walked snapshot of the in_crate tag into a
  * bounded stack buffer via crate_io. A tag whose bytes straddle a page
  * boundary is copied across every backing frame (the old single-page
- * vmm_translate_user_addr clipped it). The read is capped at the buffer
+ * translation clipped it). The read is capped at the buffer
  * size, so an attacker-set in_crate size can neither overflow the buffer
  * nor drive an oversized allocation.
  * ───────────────────────────────────────────────────────────────────── */
@@ -197,12 +197,16 @@ static int SysHeapPrefault(const ManifestOp *op, Crate *crates,
         for (uint64_t j = 0; j < VMM_LARGE_PAGE_2M_PAGES; j++) {
             void *p = pmm_alloc_zero(1);
             if (!p) return ERR_NO_MEMORY;
-            vmm_map_result_t r = vmm_map_page(ctx->proc->cabin->vmm,
-                                              va + j * PMM_PAGE_SIZE,
+            uintptr_t at = va + j * PMM_PAGE_SIZE;
+            vmm_map_result_t r = vmm_map_page(ctx->proc->cabin->vmm, at,
                                               (uintptr_t)p, pte_flags);
             if (!r.success) {
+                /* A page something already maps — a Bay or Brook window's
+                 * huge page among them, which is never split for this — is
+                 * not the prefault's to fill. */
                 pmm_free(p, 1);
-                return ERR_NO_MEMORY;
+                return vmm_is_mapped(ctx->proc->cabin->vmm, at)
+                           ? ERR_INVALID_ADDRESS : ERR_NO_MEMORY;
             }
         }
     }

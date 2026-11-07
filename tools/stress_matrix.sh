@@ -110,10 +110,10 @@ run_config() {
     # and the long-tail tests (write_stress ~30 s, touch_stress ~30 s
     # plus historical flakiness — see memory:touch_stress_complete*).
     if [ "$MODE" = "fast" ]; then
-        burst="memtest files bench mtest chain cow_test lifecycle usetest luggagetest write_observer decks htest cxxtest current_test strandtest"
+        burst="memtest files bench mtest chain cow_test lifecycle usetest faretest luggagetest write_observer decks htest cxxtest current_test strandtest"
     else
         burst="memtest files bench memtest files bench memtest \
-               mtest chain htest cxxtest current_test strandtest cow_test lifecycle usetest luggagetest write_observer \
+               mtest chain htest cxxtest current_test strandtest cow_test lifecycle usetest faretest luggagetest write_observer \
                write_concurrent write_stress touch_test decks touch_stress"
     fi
     for c in $burst
@@ -173,6 +173,7 @@ run_config() {
             cow_test)         pat="\[COW\] PASS";             want=1 ;;
             lifecycle)        pat="\[LIFECYCLE\] PASS";       want=1 ;;
             usetest)          pat="\[USE\] PASS";             want=1 ;;
+            faretest)         pat="\[FARE\] PASS";            want=1 ;;
             luggagetest)      pat="\[LUGGAGE\] PASS";         want=1 ;;
             write_observer)   pat="\[WO\] PASS";              want=1 ;;
             write_concurrent) pat="\[WC\] PASS";              want=1 ;;

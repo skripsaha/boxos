@@ -148,11 +148,10 @@ typedef struct process_t
 
     int32_t score;
     uint64_t last_run_time;
-    uint32_t consecutive_runs;
     /* Processor time this process has been given, in MICROSECONDS, summed at
-     * every context switch away from it (scheduler.c) and read by
-     * system.proc.cputime, which backs std::clock(). Whole slices only: the
-     * slice in progress is not in it. */
+     * every context switch away from it (scheduler.c). Whole slices only: the
+     * slice in progress is not in it — process_cpu_time_us adds it, and is
+     * what system.proc.cputime (std::clock()) and system.proc.crew read. */
     uint64_t total_cpu_time;
     /* TSC at the moment this process was given the core. The pair above is
      * measured with the TSC and not with the scheduler tick, and that is not a
@@ -163,9 +162,20 @@ typedef struct process_t
      * what made std::clock() indistinguishable from wall time. Zero means "not
      * currently holding the core". */
     uint64_t cpu_tsc_stamp;
-    int8_t current_prio;            // Current scheduler priority level (set on enqueue)
-    int8_t rq_prio;                 // Priority level in runqueue (-1 = not enqueued)
-    int16_t rq_index;               // Index in queue (-1 = not enqueued)
+    /* The Fare: the time this strand has held a core, in TSC cycles, on the
+     * scale of one core's Waterline — fare_core's, -1 until it is first
+     * placed. A strand whose cabin wears the Use Context pays a third of it
+     * (scheduler.c). fare_tsc is when it was last charged, zero before. */
+    uint64_t fare;
+    uint64_t fare_tsc;
+    int16_t fare_core;
+    /* The Tip: the time K-Cores have spent serving this strand's pockets, at
+     * the same price as the Fare, on the scale of one K-Core's Waterline —
+     * tip_core's, -1 until its first pocket is held (kcore.c). Only the K-Core
+     * holding or serving the strand touches the two. */
+    uint64_t tip;
+    int16_t tip_core;
+    int32_t rq_index;               // Slot in its core's runqueue (-1 = not enqueued)
     /* Running-XOR-runqueue interlock: the core index this strand is currently
      * dispatched on, or -1 if on no core. schedule() CAS-claims it before
      * committing the strand as current_process and releases it on switch-out, so
@@ -268,14 +278,19 @@ typedef struct process_t
 
     /* Strands (P4) — set only for a strand spawned via strand_spawn into an
      * EXISTING cabin.  hammock_base is the base VA of this strand's slot in
-     * the cabin's Hammock window (see cabin_layout.h); user_stack_phys is
-     * the PMM allocation backing its user stack, freed on strand exit.
-     * Both stay 0 for the main strand, whose stack lives at the top of the
+     * the cabin's Hammock window (see cabin_layout.h); its user stack is
+     * registered in the cabin's address space (vmm_stack_register) and comes
+     * in as the strand touches it, and goes at strand exit.  hammock_base
+     * stays 0 for the main strand, whose stack lives at the top of the
      * address space and is reclaimed by vmm_destroy_context at cabin
      * teardown.  process_user_ssp_va_for derives the per-strand CET shadow
      * stack VA from hammock_base so sibling strands never collide. */
     uintptr_t         hammock_base;
-    uintptr_t         user_stack_phys;
+
+    /* Set by the fault handler when this strand's stack ran into the gap
+     * below it. process_destroy records the death as PROC_EXIT_STACK_OVERFLOW
+     * instead of PROC_EXIT_CRASHED. */
+    volatile uint8_t  stack_overran;
 
     /* Zombie-until-join (std::thread conformance). When a strand is spawned
      * JOINABLE (strand_spawn joinable=1, used by std::thread), this is 1 and the
@@ -312,6 +327,9 @@ typedef struct process_t
      * the main strand); strand_rings_destroy frees the rings/slots/StrandInfo. */
     uint64_t          pocket_ring_phys;
     uint64_t          result_ring_phys;
+    /* The slots the kernel made that ResultRing with — its own record, never
+     * the header's slot_count_max, which lives in a page the cabin writes. */
+    uint32_t          result_ring_slots;
     uint64_t          touch_ring_phys;
     uint64_t          strandinfo_phys;
 
@@ -519,6 +537,11 @@ size_t process_snapshot_tags(process_t *proc, char *buffer, size_t buffer_size);
 void process_ref_inc(process_t *proc);
 void process_ref_dec(process_t *proc);
 uint32_t process_ref_count(process_t *proc);
+
+/* Processor time `proc` has been given, in microseconds: its completed slices
+ * and the one it is running now. What system.proc.cputime says of the caller
+ * and system.proc.crew of each mate. */
+uint64_t process_cpu_time_us(const process_t *proc);
 
 /* Returns true when this call made the strand runnable AND enqueued it —
  * sched_enqueue rang its core, so the caller must not ring again. */

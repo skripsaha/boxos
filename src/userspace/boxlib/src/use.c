@@ -1,9 +1,10 @@
 /*
  * use.c — the Use Context, spoken to the kernel through the System Deck.
  *
- * Three ops: system.use.set takes the tag list in a crate, system.use.clear
- * takes nothing — both answer whether the volume now remembers the context —
- * and system.use.get writes the tags back as
+ * Four ops: system.use.set takes the tag list in a crate, system.use.change
+ * the tags to add and to take out, system.use.clear nothing — the three
+ * answer whether the volume now remembers the context — and system.use.get
+ * writes the tags back as
  * [u32 count][u32 needed][(u16 len)(bytes)]* — count is how many tags fit the
  * crate, needed is the byte length of the whole context comma-joined, so the
  * caller can tell a full answer from a short one.
@@ -31,6 +32,33 @@ int use_set(const char *tags, bool *remembered)
                      tags, (uint32_t)strlen(tags),
                      &kept, sizeof(kept), &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
+    if (remembered) *remembered = (rc == 0 && out_actual >= 1 && kept != 0);
+    return box_fail(rc);
+}
+
+int use_change(const char *add, const char *drop, bool *remembered)
+{
+    size_t add_len  = add ? strlen(add) : 0;
+    size_t drop_len = drop ? strlen(drop) : 0;
+    if (add_len > UINT32_MAX - sizeof(uint32_t) - drop_len) return -ERR_INVALID_ARGUMENT;
+
+    /* [u32 add length][the tags to add][the tags to take out]. */
+    size_t   wire_len = sizeof(uint32_t) + add_len + drop_len;
+    uint8_t *wire     = malloc(wire_len);
+    if (!wire) return -ERR_NO_MEMORY;
+    uint32_t add_len32 = (uint32_t)add_len;
+    memcpy(wire, &add_len32, sizeof(add_len32));
+    if (add_len)  memcpy(wire + sizeof(uint32_t), add, add_len);
+    if (drop_len) memcpy(wire + sizeof(uint32_t) + add_len, drop, drop_len);
+
+    uint8_t  kept       = 0;
+    uint32_t out_actual = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_USE_CHANGE,
+                     NULL, 0,
+                     wire, (uint32_t)wire_len,
+                     &kept, sizeof(kept), &out_actual,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    free(wire);
     if (remembered) *remembered = (rc == 0 && out_actual >= 1 && kept != 0);
     return box_fail(rc);
 }

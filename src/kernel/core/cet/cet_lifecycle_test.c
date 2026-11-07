@@ -118,8 +118,10 @@ void CetLifecycleTest(void) {
          *   - SSP region is 4 pages (16 KiB).
          *   - HI guard sits ABOVE the region (= VA + SIZE).
          *   - LO guard sits BELOW the region (= VA - 4 KiB).
-         *   - 8 MiB slack separates region top from the max possible
-         *     ASLR-shifted user stack base.
+         *   - the stack zone's gap and the data stack's whole reserve, and
+         *     the whole ASLR range above that, separate the region from the
+         *     top of the address space, so no ASLR offset can bring the
+         *     data stack onto the shadow stack.
          * We assert structural relationships rather than absolute
          * constants so the layout can change without churning this
          * test — the relationships are what real-HW correctness depends
@@ -130,8 +132,9 @@ void CetLifecycleTest(void) {
                   "T4: HI guard at va + 16 KiB");
         CET_CHECK(guard_lo == va - 0x1000ULL,
                   "T4: LO guard at va - 4 KiB");
-        CET_CHECK(guard_hi + (8ULL * 1024ULL * 1024ULL) == VMM_USER_STACK_TOP,
-                  "T4: SSP region clear of max ASLR stack reach");
+        CET_CHECK(guard_hi + 0x1000ULL + CONFIG_USER_STACK_GAP + CONFIG_USER_STACK_RESERVE +
+                      ASLR_STACK_RANGE == VMM_USER_STACK_TOP,
+                  "T4: SSP region clear of the lowest reach of the data stack and its gap");
     }
 
     /* ── T5: stats sane ─────────────────────────────────────────── */

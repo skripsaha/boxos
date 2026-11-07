@@ -302,6 +302,17 @@ public:
     {
         return write_at(offset, buf.data(), buf.size());
     }
+    // At the file's end as it is when the write reaches it (file_append):
+    // writers adding to one file never lay their bytes over each other's.
+    box::result<std::size_t> append(const void *p, std::size_t n)
+    {
+        return box::_detail::from_ret64<std::size_t>(
+            id_ ? ::file_append(id_, p, n) : -ERR_INVALID_ARGUMENT);
+    }
+    box::result<std::size_t> append(std::span<const std::byte> buf)
+    {
+        return append(buf.data(), buf.size());
+    }
 
     // ── async byte I/O — submit now, co_await the returned box::ferry ────────
     // read_async / write_async submit a storage op WITHOUT blocking and hand back

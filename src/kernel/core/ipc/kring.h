@@ -19,14 +19,14 @@ void KRingPocketInitAt(PocketRing *hdr, uint64_t slots_base, uint32_t slot_count
 void KRingResultInitAt(ResultRing *hdr, uint64_t slots_base, uint32_t slot_count_max);
 
 /* Kernel-side PocketRing consumer.
- *   kpocket_peek  — returns kernel VA of head slot, or NULL if empty.
- *                   Walks the cabin's user page tables to translate the
- *                   user-vaddr slot to a kernel pointer. The caller must NOT
- *                   advance head; use kpocket_pop after fully processing.
- *   kpocket_pop   — bumps head by one. */
-/* Look at the pocket at the head of the ring; `*pos_out` names the position
- * looked at, and it is the ONLY thing KPocketPopAt will take. */
-Pocket  *KPocketPeek(process_t *proc, uint64_t *pos_out);
+ *   KPocketPeek   — copies the pocket at the head of the ring into `out`,
+ *                   through a porthole onto the slot; false when the ring is
+ *                   empty or the slot is not the cabin's to read. The caller
+ *                   must NOT advance head; use KPocketPopAt after processing.
+ *   KPocketPopAt  — bumps head by one. */
+/* Take a copy of the pocket at the head of the ring; `*pos_out` names the
+ * position looked at, and it is the ONLY thing KPocketPopAt will take. */
+bool     KPocketPeek(process_t *proc, uint64_t *pos_out, Pocket *out);
 /* Take the ring past exactly `pos`, and only if it is still the head. Returns
  * false when it no longer is — see the note in kring.c. */
 bool     KPocketPopAt(process_t *proc, uint64_t pos);

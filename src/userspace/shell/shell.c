@@ -11,6 +11,8 @@
 #include "shell.h"
 #include "parser.h"
 #include "executor.h"
+#include "history.h"
+#include "whisper.h"
 #include "box/print.h"
 #include "box/string.h"
 #include "box/memory.h"
@@ -56,14 +58,12 @@ void ShellInit(void)
         ShellDrainStaleIpc();
     }
 
-    /* The context this shell was born into — a nested shell inherits the
-     * user's `use`, because the context is the machine's, not a shell's. */
-    ShellUpdatePrompt();
-
     clear();
     println("BoxOS Shell v2.0");
     println("Type 'help' for commands, 'exit' to quit.");
     println("");
+
+    HistoryLoad();
 }
 
 /* =========================================================================
@@ -73,7 +73,7 @@ void ShellInit(void)
 /* The whole context, comma-joined, into a buffer of its own size the caller
  * frees: the number of tags, 0 for none, negative when the kernel refused.
  * Asked for its size first and read again if it grew in between. */
-static int ShellContextWhole(char **out)
+int ShellContextWhole(char **out)
 {
     *out = NULL;
     for (;;) {
@@ -114,12 +114,14 @@ static size_t ShellDecimal(char *out, uint32_t n)
 
 /*
  * The prompt says what the kernel holds as the Use Context — "[code,cpp] ~ " —
- * read fresh each time rather than kept as a copy of what this shell typed, so
- * a nested shell shows the context it was born into and a context set by a
- * system program shows up too. As many whole tags as the prompt has room for
- * are shown, never one torn mid-tag, and the rest are counted: "[code,cpp +3]".
+ * read before every prompt rather than kept as a copy of what this shell
+ * typed: the context is the machine's, so whoever said it last — this shell,
+ * a nested one that has ended, a system program, a volume that came up with
+ * its memory — is what the person sees. As many whole tags as the prompt has
+ * room for are shown, never one torn mid-tag, and the rest are counted:
+ * "[code,cpp +3]".
  */
-void ShellUpdatePrompt(void)
+static void ShellUpdatePrompt(void)
 {
     char *whole = NULL;
     int   total = ShellContextWhole(&whole);
@@ -174,16 +176,15 @@ void ShellDrainStaleIpc(void)
     while (receive(&drain)) { }
 }
 
-/* One typed line, whatever its length, run: the cut words for a built-in,
- * the line itself for a program, which carries it as its Luggage. */
-static void ShellRunLine(const char *input)
+int ShellRunLine(const char *input)
 {
     ParsedCommand cmd;
     if (ParserParse(input, &cmd) != 0) {
         println("Error: no memory to read the command");
-        return;
+        return -1;
     }
-    if (cmd.argc > 0 && ExecutorRun(&cmd, input) != 0) {
+    int rc = cmd.argc > 0 ? ExecutorRun(&cmd, input) : 0;
+    if (rc != 0) {
         const char *err = ExecutorGetError();
         if (err && err[0] != '\0') {
             printf("%colorError: %s%color\n",
@@ -191,19 +192,37 @@ static void ShellRunLine(const char *input)
         }
     }
     ParserFree(&cmd);
+    return rc;
+}
+
+/* The line typed at the prompt, kept with the Use Context it was typed in. */
+static void ShellKeepLine(const char *line)
+{
+    char *context = NULL;
+    ShellContextWhole(&context);
+    HistoryKeep(line, context);
+    free(context);
 }
 
 void ShellMainLoop(void)
 {
     while (g_state.running) {
+        ShellUpdatePrompt();
         print(g_state.prompt);
         io_flush();
 
-        /* The line grows as it is typed: no ceiling but memory. */
+        /* The line grows as it is typed: no ceiling but memory. The Whisper
+         * sees the volume as it is when this line begins. */
+        ShellWhisper whisper;
+        WhisperBegin(&whisper);
         char *input = NULL;
-        int   len   = readline_grow(&input);
-        if (len > 0)
+        int   len   = readline_whispered(&input, &whisper.Line);
+        WhisperEnd(&whisper);
+
+        if (len > 0) {
+            ShellKeepLine(input);
             ShellRunLine(input);
+        }
         free(input);
     }
 }
@@ -211,6 +230,11 @@ void ShellMainLoop(void)
 void ShellStop(void)
 {
     g_state.running = false;
+}
+
+bool ShellRunning(void)
+{
+    return g_state.running;
 }
 
 ShellState *ShellGetState(void)

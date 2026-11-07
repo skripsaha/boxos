@@ -16,8 +16,8 @@
 
 /*
  * For self-test only: the Crate.addr field carries a *kernel* pointer
- * (cast from uintptr_t). Real handlers will translate user vaddr through
- * vmm_translate_user_addr; that path is wired in Phase 6.
+ * (cast from uintptr_t). Real handlers copy through crate_io, which reaches
+ * the user vaddr a page at a time through a porthole onto the cabin.
  */
 
 static int test_op_copy(const ManifestOp *op,

@@ -47,9 +47,11 @@ uint32_t strand_spawn_joinable(void (*fn)(void *arg), void *arg);
  * strand of another cabin. */
 void strand_release(uint32_t pid);
 
-/* Terminate the calling strand.  Does not return.  Unlike exit(), it does
- * NOT run global static destructors or flush shared buffers — those belong
- * to the whole cabin and run when the last (main) strand exits. */
+/* Terminate the calling strand, and only it.  Does not return.  It is the
+ * one end that is a single strand's: exit() — or main returning — ends the
+ * whole program, every strand, as a kill or a crash of any strand does. Unlike
+ * exit(), it does NOT run global static destructors or flush shared buffers —
+ * those belong to the whole program and run at its exit(). */
 void strand_exit(void) __attribute__((noreturn));
 
 #ifdef __cplusplus

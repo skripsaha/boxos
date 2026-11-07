@@ -3,11 +3,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "box/cxx/console.h"
-#include "box/cxx/keyboard.h"
-#include "box/keyboard.h"
+#include "painter/tui/stage.h"
 
 namespace {
 
@@ -28,15 +28,20 @@ constexpr std::chrono::milliseconds kNormalTick{150};
 constexpr std::chrono::milliseconds kFastestTick{35};
 constexpr std::uint8_t kAccelerationPercent = 15;
 
-TextCell make_cell(char ch, box::color fg, box::color bg = kBackground) {
-  TextCell cell{};
-  cell.fg = fg.raw();
-  cell.bg = bg.raw();
-  cell.ch = ch;
-  return cell;
+using PaintColor = painter::core::Color;
+
+PaintColor paint_color(box::color color) {
+  return PaintColor::FromRaw(color.raw());
 }
 
-TextCell make_block(box::color color) { return make_cell(' ', color, color); }
+painter::tui::Cell make_cell(char ch, box::color fg,
+                             box::color bg = kBackground) {
+  return painter::tui::Cell{ch, paint_color(fg), paint_color(bg)};
+}
+
+painter::tui::Cell make_block(box::color color) {
+  return make_cell(' ', color, color);
+}
 
 bool same(Cell a, Cell b) { return a.x == b.x && a.y == b.y; }
 
@@ -53,10 +58,11 @@ enum class InputResult { ignored, accelerated, turned, restarted, quit };
 
 class SnakeGame {
 public:
-  SnakeGame(std::uint8_t board_width, std::uint8_t board_height)
-      : width_(static_cast<std::uint8_t>(board_width / kCellWidth)),
-        height_(board_height), screen_width_(board_width),
-        frame_(static_cast<std::size_t>(screen_width_) * board_height),
+  explicit SnakeGame(painter::tui::Stage &Screen)
+      : Screen_(Screen), frame_(Screen.FrameBuffer()),
+        width_(static_cast<std::uint8_t>(Screen.Size().Width / kCellWidth)),
+        height_(static_cast<std::uint8_t>(Screen.Size().Height - 1)),
+        screen_width_(static_cast<std::uint8_t>(Screen.Size().Width)),
         rng_(seed()) {
     reset();
   }
@@ -78,13 +84,14 @@ public:
 
   bool game_over() const { return game_over_; }
 
-  InputResult handle_key(const box::key &key) {
-    if (key.scancode() == KEY_ESCAPE || key.ch() == KEY_ESCAPE)
+  InputResult handle_key(const painter::tui::KeyEvent &Key) {
+    if (Key.Scancode == painter::tui::KeyCodes::Escape ||
+        Key.Ascii == painter::tui::KeyCodes::Escape)
       return InputResult::quit;
 
     if (game_over_) {
-      const char ch = key.ch();
-      if (ch == KEY_ENTER || ch == '\r' || ch == ' ') {
+      const char ch = Key.Ascii;
+      if (ch == painter::tui::KeyCodes::Enter || ch == '\r' || ch == ' ') {
         reset();
         render();
         return InputResult::restarted;
@@ -93,7 +100,7 @@ public:
     }
 
     Direction requested;
-    if (!decode_direction(key, requested))
+    if (!decode_direction(Key, requested))
       return InputResult::ignored;
 
     if (requested == direction_ && requested == next_direction_) {
@@ -147,8 +154,7 @@ public:
   }
 
   bool render() {
-    for (TextCell &cell : frame_)
-      cell = make_cell(' ', kText);
+    frame_.Clear({paint_color(kText), paint_color(kBackground)});
 
     for (std::uint8_t y = 0; y < height_; ++y) {
       for (std::uint8_t x = 0; x < width_; ++x) {
@@ -161,10 +167,10 @@ public:
       }
       if (screen_width_ % kCellWidth != 0) {
         const bool border = y == 0 || y + 1 == height_;
-        frame_[index(static_cast<std::uint8_t>(screen_width_ - 1), y)] =
-            make_block(border && game_over_ ? kApple
-                       : border             ? kWall
-                                            : kBackground);
+        put_screen(static_cast<std::uint8_t>(screen_width_ - 1), y,
+                   make_block(border && game_over_ ? kApple
+                              : border             ? kWall
+                                                   : kBackground));
       }
     }
 
@@ -181,14 +187,18 @@ public:
                 "ENTER restart  ESC exit", kText);
     }
 
-    return vga_paint(1, 0, height_, screen_width_, frame_.data()) == 0;
+    if (!Screen_.SetCursor({static_cast<std::int32_t>(screen_width_ - 1),
+                            static_cast<std::int32_t>(height_)}))
+      return false;
+    return static_cast<bool>(Screen_.Present());
   }
 
 private:
+  painter::tui::Stage &Screen_;
+  painter::tui::Frame &frame_;
   std::uint8_t width_;
   std::uint8_t height_;
   std::uint8_t screen_width_;
-  std::vector<TextCell> frame_;
   std::vector<Cell> snake_;
   Cell apple_{};
   Direction direction_ = Direction::right;
@@ -214,15 +224,15 @@ private:
     tick_ = std::chrono::milliseconds(next);
   }
 
-  std::size_t index(std::uint8_t x, std::uint8_t y) const {
-    return static_cast<std::size_t>(y) * screen_width_ + x;
+  void put_screen(std::uint8_t x, std::uint8_t y, painter::tui::Cell Value) {
+    frame_.Put({static_cast<std::int32_t>(x),
+                static_cast<std::int32_t>(y) + 1}, Value);
   }
 
   void paint_block(std::uint8_t x, std::uint8_t y, box::color color) {
     const auto screen_x = static_cast<std::uint8_t>(x * kCellWidth);
-    frame_[index(screen_x, y)] = make_block(color);
-    frame_[index(static_cast<std::uint8_t>(screen_x + 1), y)] =
-        make_block(color);
+    put_screen(screen_x, y, make_block(color));
+    put_screen(static_cast<std::uint8_t>(screen_x + 1), y, make_block(color));
   }
 
   bool inside(Cell cell) const {
@@ -264,30 +274,31 @@ private:
         text.size() < screen_width_ ? text.size() : screen_width_;
     for (std::size_t i = 0; i < count; ++i) {
       const std::size_t column = start + i;
-      frame_[index(static_cast<std::uint8_t>(column), row)] =
-          make_cell(text[i], color);
+      put_screen(static_cast<std::uint8_t>(column), row,
+                 make_cell(text[i], color));
     }
   }
 
-  static bool decode_direction(const box::key &key, Direction &direction) {
-    switch (key.scancode()) {
-    case KEY_UP:
+  static bool decode_direction(const painter::tui::KeyEvent &Key,
+                               Direction &direction) {
+    switch (Key.Scancode) {
+    case painter::tui::KeyCodes::Up:
       direction = Direction::up;
       return true;
-    case KEY_RIGHT:
+    case painter::tui::KeyCodes::Right:
       direction = Direction::right;
       return true;
-    case KEY_DOWN:
+    case painter::tui::KeyCodes::Down:
       direction = Direction::down;
       return true;
-    case KEY_LEFT:
+    case painter::tui::KeyCodes::Left:
       direction = Direction::left;
       return true;
     default:
       break;
     }
 
-    char ch = key.ch();
+    char ch = Key.Ascii;
     if (ch >= 'A' && ch <= 'Z')
       ch = static_cast<char>(ch - 'A' + 'a');
     switch (ch) {
@@ -312,23 +323,23 @@ private:
 } // namespace
 
 int main() {
-  const auto dimensions = box::vga::size();
-  if (dimensions.rows < 9 || dimensions.cols < 24) {
-    printf("snake: screen is too small\n");
+  auto Opened = painter::tui::Stage::Open("snake", 24, 9);
+  if (!Opened) {
+    printf("%s\n", Opened.error().Describe("snake").c_str());
     return 1;
   }
-
-  SnakeGame game(dimensions.cols,
-                 static_cast<std::uint8_t>(dimensions.rows - 1));
+  painter::tui::Stage Screen = std::move(*Opened);
+  SnakeGame game(Screen);
   if (!game.render())
     return 1;
 
-  box::key_stream keyboard;
   auto next_tick = std::chrono::steady_clock::now() + game.tick_interval();
   for (;;) {
     if (game.game_over()) {
-      if (const auto key = keyboard.wait()) {
-        const InputResult result = game.handle_key(*key);
+      const painter::tui::Event Event = Screen.Wait();
+      if (Event.Kind == painter::tui::EventKind::Gone) return 1;
+      if (Event.Kind == painter::tui::EventKind::Key) {
+        const InputResult result = game.handle_key(Event.Key);
         if (result == InputResult::quit)
           return 0;
         if (result == InputResult::restarted)
@@ -344,8 +355,10 @@ int main() {
                                                                 now);
       const auto timeout = static_cast<std::uint32_t>(
           remaining.count() < 1 ? 1 : remaining.count());
-      if (const auto key = keyboard.wait(timeout)) {
-        const InputResult result = game.handle_key(*key);
+      const painter::tui::Event Event = Screen.Wait(timeout);
+      if (Event.Kind == painter::tui::EventKind::Gone) return 1;
+      if (Event.Kind == painter::tui::EventKind::Key) {
+        const InputResult result = game.handle_key(Event.Key);
         if (result == InputResult::quit)
           return 0;
         if (result == InputResult::restarted)

@@ -28,10 +28,11 @@
 //     never sets it — it blocks, because a keyboard has no end. That is the
 //     honest shape of the Unix EOF this header has to spell.
 //
-// ‼ FOUR NAMES ARE ALREADY TAKEN in the global namespace, and each needed a
+// ‼ SIX NAMES ARE ALREADY TAKEN in the global namespace, and each needed a
 // different answer.
 //
-//   • **printf and getchar are ONE function each, shared with boxlib.** They
+//   • **printf, getchar, snprintf and vsnprintf are ONE function each,
+//     shared with boxlib.** They
 //     are declared here with exactly boxlib's signature and pulled into std by
 //     a using-declaration, so `printf` inside a `using namespace std;` block
 //     names one entity and cannot be ambiguous. WHICH implementation runs is a
@@ -93,16 +94,20 @@
 #define SEEK_CUR 1
 #define SEEK_END 2
 
-// The two names boxlib also declares. Spelled exactly as box/print.h spells
+// The four names boxlib also declares. Spelled exactly as box/print.h spells
 // them — same linkage, same signature, no noexcept — so a translation unit that
 // includes both headers sees one declaration of one function.
 extern "C" int printf(const char *format, ...);
 extern "C" int getchar(void);
+extern "C" int snprintf(char *s, size_t n, const char *format, ...);
+extern "C" int vsnprintf(char *s, size_t n, const char *format, va_list arg);
 
 namespace std {
 
 using ::getchar;
 using ::printf;
+using ::snprintf;
+using ::vsnprintf;
 
 // C requires fpos_t to record everything needed to specify a position — and
 // NOT to be an arithmetic type a program can do arithmetic on. A struct is the
@@ -149,14 +154,12 @@ int   setvbuf(FILE *stream, char *buf, int mode, size_t size) noexcept;
 int fprintf(FILE *stream, const char *format, ...) noexcept;
 int fscanf(FILE *stream, const char *format, ...) noexcept;
 int scanf(const char *format, ...) noexcept;
-int snprintf(char *s, size_t n, const char *format, ...) noexcept;
 int sprintf(char *s, const char *format, ...) noexcept;
 int sscanf(const char *s, const char *format, ...) noexcept;
 int vfprintf(FILE *stream, const char *format, va_list arg) noexcept;
 int vfscanf(FILE *stream, const char *format, va_list arg) noexcept;
 int vprintf(const char *format, va_list arg) noexcept;
 int vscanf(const char *format, va_list arg) noexcept;
-int vsnprintf(char *s, size_t n, const char *format, va_list arg) noexcept;
 int vsprintf(char *s, const char *format, va_list arg) noexcept;
 int vsscanf(const char *s, const char *format, va_list arg) noexcept;
 
@@ -222,8 +225,9 @@ using std::fsetpos;
 using std::ftell;
 using std::getc;
 using std::perror;
-// printf and getchar are already global — they ARE boxlib's names. fread and
-// fwrite are not injected: boxlib's mean something else. See the top.
+// printf, getchar, snprintf and vsnprintf are already global — they ARE
+// boxlib's names. fread and fwrite are not injected: boxlib's mean something
+// else. See the top.
 using std::putc;
 using std::putchar;
 using std::puts;
@@ -233,7 +237,6 @@ using std::rewind;
 using std::scanf;
 using std::setbuf;
 using std::setvbuf;
-using std::snprintf;
 using std::sprintf;
 using std::sscanf;
 using std::tmpfile;
@@ -243,7 +246,6 @@ using std::vfprintf;
 using std::vfscanf;
 using std::vprintf;
 using std::vscanf;
-using std::vsnprintf;
 using std::vsprintf;
 using std::vsscanf;
 

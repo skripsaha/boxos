@@ -12,32 +12,43 @@ extern "C" {
  *
  * One per machine, kept by the kernel. The shell sets it when the user says
  * `use code cpp`; from then on every station of the system reads it and
- * adjusts itself: a program whose cabin wears every context tag runs in the
- * scheduler's context tier, a file query is narrowed to the context and a
- * created file is stamped with it (see query_everywhere / create_everywhere
- * in box/file.h for the whole-volume spellings). Any program may ask what
- * the user is doing; only the shell and programs with system authority may
- * say it, because the context is the user's, not a program's.
+ * adjusts itself: a program is given the more of a core it shares the more of
+ * the context's tags its cabin wears — three quarters against one outsider
+ * for all of them, two thirds for half — a file query is narrowed to the
+ * context and a created file is stamped with it (see query_everywhere /
+ * create_everywhere in box/file.h for the whole-volume spellings). Any
+ * program may ask what the user is doing; only the shell and programs with
+ * system authority may say it, because the context is the user's, not a
+ * program's.
  *
  * A tag list is comma-separated: "code,cpp" or "code, project:alpha". Blanks
  * around a tag are dropped and "key:" means the bare "key".
  */
 
 /*
- * The volume remembers the context. What is said with use_set / use_clear is
- * written to the mounted volume, and a machine that boots with that volume
- * takes it up again — what one was doing is still what one is doing after
- * the night, and it travels with the medium. `remembered` (optional) receives
- * whether the volume now holds exactly this context: false with no volume
- * up, no ground on it for the context, a medium that will not take the
- * write, or a later word already said. The context is set either way; the
- * person is told, never refused.
+ * The volume remembers the context. What is said with use_set, use_change
+ * and use_clear is written to the mounted volume, and a machine that boots
+ * with that volume takes it up again — what one was doing is still what one
+ * is doing after the night, and it travels with the medium. `remembered`
+ * (optional) receives whether the volume now holds exactly this context:
+ * false with no volume up, no ground on it for the context, a medium that
+ * will not take the write, or a later word already said. The context is set
+ * either way; the person is told, never refused.
  */
 
 /* Replace the context with the tags of `tags`. NULL or "" clears. Returns 0
  * or a negative -error_t: -ERR_ACCESS_DENIED without system authority,
  * -ERR_INVALID_ARGUMENT for a key or value longer than a tag may be. */
 int use_set(const char *tags, bool *remembered);
+
+/* Change the context in one word, never half of it seen: the tags of `add`
+ * go after those it holds — one it holds already stays where it is — and the
+ * tags of `drop` are taken out; a tag in both is taken out, and nothing left
+ * clears. Either may be NULL or "". A word another speaker said meanwhile is
+ * changed in turn, never overwritten. `remembered` as use_set's; for a change
+ * that changes nothing it is said of the context that stands. Returns 0 or a
+ * negative -error_t, as use_set. */
+int use_change(const char *add, const char *drop, bool *remembered);
 
 /* Clear the context. Returns 0 or a negative -error_t. */
 int use_clear(bool *remembered);

@@ -124,8 +124,8 @@ void per_core_record_bsp_tsc_anchor(uint64_t now_us)
  *                   any legitimate user-buffer access.
  *                 - The BoxOS audit (2026-06-08) confirmed every kernel
  *                   path that touches user memory does so via the
- *                   supervisor-aliased kernel VA returned by
- *                   vmm_translate_user_addr (kernel-direct map at
+ *                   supervisor-aliased kernel VA a porthole opens
+ *                   (PortholeOpen; kernel-direct map at
  *                   0xFFFF_8000_..., U=0) — SMAP enforcement is invisible
  *                   on these paths. Any new direct user-VA dereference
  *                   surfaces as a clean kernel #PF that idt.c's panic
@@ -705,7 +705,7 @@ void per_core_init_ap(uint8_t core_index, uint64_t stack_top) {
     } else {
         // App Cores are preemptively scheduled by the LAPIC timer (calibrated
         // against the per-core TSC in lapic_timer_init).
-        lapic_timer_init(LAPIC_TIMER_VECTOR, 100);
+        lapic_timer_init(LAPIC_TIMER_VECTOR, CONFIG_SCHED_APP_TICK_HZ);
     }
 
     pc->initialized = true;

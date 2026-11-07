@@ -40,6 +40,7 @@
 #include "box/file.h"
 #include "box/error.h"
 #include "box/luggage.h"
+#include "box/form.h"
 
 #include "draft.h"
 
@@ -342,18 +343,13 @@ static void handle_command_key(const kb_event_t *k)
  * when the draft is open, or the sentence to say on the way out — a refusal
  * has to be printed while printing is still allowed, and once the frame is on
  * the glass it no longer is. */
-static const char *open_the_draft(int argc)
+static const char *open_the_draft(const char *name, const char *const *words, size_t word_count)
 {
-    const char *name = luggage_word(1);
     if (strlen(name) > DRAFT_NAME_MAX) return "That name is longer than a file's name may be.";
     say_str(s_name, sizeof(s_name), name);
 
-    if (argc > 2) {
-        const char **words = malloc((size_t)(argc - 2) * sizeof(char *));
-        if (!words) return "There is no memory for the tag list.";
-        for (int i = 2; i < argc; i++) words[i - 2] = luggage_word((uint32_t)i);
-        g_tags = join_with_commas(words, (uint32_t)(argc - 2));
-        free(words);
+    if (word_count > 0) {
+        g_tags = join_with_commas(words, (uint32_t)word_count);
         if (!g_tags) return "There is no memory for the tag list.";
     }
 
@@ -363,9 +359,11 @@ static const char *open_the_draft(int argc)
     if (n > 1) {
         println("Several files are called that:");
         for (int i = 0; i < n; i++) {
-            file_info_t info;
-            if (file_info(ids[i], &info) == 0)
-                printf("  %s [file_id=%lu]\n", info.filename, ids[i]);
+            FileMetadata metadata;
+            if (FileMetadataRead(ids[i], &metadata) != 0) continue;
+            printf("  %s [%s]\n", metadata.Filename ? metadata.Filename : "?",
+                   metadata.Tags ? metadata.Tags : "no tags");
+            FileMetadataRelease(&metadata);
         }
         free(ids);
         return "Name a tag that tells them apart, after the filename.";
@@ -426,12 +424,26 @@ static void run_the_editor(TouchTag ear)
     }
 }
 
+/* A name, not a thing: the draft opens a file that is here or makes one that
+ * is not, and a name nobody has is no file for the shell to find. The draft
+ * resolves it itself, with the tags that come after it. */
+BOX_FORM("takes name \"the file to write\"\n"
+         "takes optional words \"its tags\"\n"
+         "gives things\n");
+
 int main(void)
 {
-    int argc = (int)luggage_word_count();
-    if (argc < 2) { println("Usage: draft <filename> [tag...]"); exit(1); return 1; }
+    const char *const *names;
+    size_t name_count;
+    const char *const *words;
+    size_t word_count;
 
-    const char *refusal = open_the_draft(argc);
+    if (form_words(0, &names, &name_count) != 0 || form_words(1, &words, &word_count) != 0) {
+        exit(1);
+        return 1;
+    }
+
+    const char *refusal = open_the_draft(names[0], words, word_count);
     if (refusal) { println(refusal); exit(1); return 1; }
 
     TouchTag ear = TOUCH_TAG_INVALID;
@@ -448,6 +460,8 @@ int main(void)
     if (g_saves == 0) printf("[DRAFT] %s - left unsaved\n", s_name);
     else printf("[DRAFT] %s - %u lines, %u bytes, saved %u time%s\n",
                 s_name, g_book.count, book_bytes(), g_saves, g_saves == 1 ? "" : "s");
+
+    if (g_fid) souvenir_things(&g_fid, 1);
 
     exit(0);
     return 0;

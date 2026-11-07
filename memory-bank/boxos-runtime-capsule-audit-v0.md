@@ -1,6 +1,8 @@
 # BoxOS Runtime Capsule Audit v0
 
-Status: design evidence. Read-only audit; no implementation changes.
+Status: implementation evidence for the bounded v0 capsule in the isolated
+`boxos-native-toolchain` worktree. The audit records the live ABI and the
+decisions that constrain the implementation.
 
 ## Finding
 
@@ -157,10 +159,70 @@ link → ET_EXEC
 
 No intermediate object needs to be created as a TagFS file by default.
 
-## Next bounded design phase
+## Artifact and shell path audit
 
-Before implementation, produce a symbol-level closure for the first complete
-runtime target:
+The existing shell already provides the launch contract: an external command
+is started by `proc_exec_gen(line, NULL, &generation)`, and the complete typed
+line becomes the child's Luggage. The shell waits on that exact `(pid,
+generation)` through `process_gone`; the assembler must not add another
+launcher or another exit-event path.
+
+The storage path is also already sufficient, but it has to be used in the
+right order:
+
+1. Resolve the source name inside the current Use Context. Zero matches and
+   more than one match are distinct human errors; choosing one by array order
+   is forbidden.
+2. Read the source bytes through the existing Manifest-native storage API.
+3. Read full source metadata through the self-describing
+   `STORAGE_OBJ_GET_INFO` response. The public `file_info_t` helper is
+   intentionally lossy and is unsuitable for tag inheritance.
+4. Assemble and link completely in memory. Do not create a destination file
+   while syntax, symbol, relocation or segment validation can still fail.
+5. Create the destination through `create`, passing the inherited source tags
+   plus explicit output tags. `create` also applies the current Use Context and
+   the filename stem, with kernel-side deduplication.
+   The final tag set must contain `app` or `utility`, because the existing
+   `SYSTEM_OP_PROC_EXEC` candidate check refuses every active file without one
+   of those keys.
+6. Set the exact size with `file_span`, write all bytes with checked short-write
+   handling, then call `anchor` so the new artifact is durable.
+7. On a storage failure after creation, attempt `delete` of that exact id and
+   surface both the original refusal and a cleanup refusal; no partial file is
+   silently reported as a successful build.
+
+This path uses only existing storage/user APIs and does not require a TagFS
+kernel change. It does require a small, reusable BoxLib full-metadata adapter
+before the assembler can promise lossless source-tag inheritance.
+
+The adapter and the first assembler/linker implementation are present in the
+isolated `boxos-native-toolchain` worktree. The runtime archive is embedded as
+its original `ar` bytes in the `assemble` utility; the utility parses and
+links the contained ET_REL members at runtime, so the program code is not
+copied into a second hand-written runtime.
+
+Verification on 2026-10-28:
+
+1. `make clean && make` completed with error-parity 179/179, CET audit
+   `checked=2309 violations=0 skipped=9`, and a consistent TagFS image.
+2. The image contained `assemble.elf` as `utility,toolchain` and the source
+   fixture `hello.asm` as `code,asm,example`.
+3. In QEMU, `use code asm example`, `assemble hello.asm -> hello.elf`, and
+   `hello` completed successfully. The program printed through the existing
+   screen Current path and returned to the shell.
+4. The first run failed with a user-mode `#GP` in `ring_take`. The generated
+   `main` had no ABI prologue, so its first BoxLib call used the wrong stack
+   alignment. Adding `endbr64; push rbp; mov rbp,rsp` removed the failure; the
+   second run completed without an exception.
+
+This closes the first vertical runtime capsule slice. `box.wait` and raw
+Manifest authoring remain outside the bounded BoxASM v0 language, even though
+the linked runtime already carries the existing Result/Manifest machinery.
+
+## Future bounded design phase
+
+The first complete runtime target is now linked and launched. Future work may
+extend the closure with:
 
 1. `box.notify` / `box.yield`;
 2. `box.wait` with cookie-correct Result handling;
@@ -178,8 +240,8 @@ For each target, record:
 - async completion paths;
 - whether the current linker script and Nameplate path cover the image.
 
-Only after this closure is complete should the first linker/runtime code be
-written.
+Any extension must record its own closure and acceptance evidence before it is
+added to the user-facing language.
 
 ## First internal linker contract
 
@@ -252,9 +314,17 @@ R_X86_64_TPOFF32 S + A - TP  (only with the exact TLS layout contract)
 
 Relocations against a discarded section, undefined symbol, unsupported type,
 or out-of-range value are hard errors naming object, section, offset, symbol,
-type and computed value. `_GLOBAL_OFFSET_TABLE_`, `__cxa_finalize` and the
-init/fini array symbols are resolved as explicit runtime/linker contracts;
-they are never left as unresolved bytes in an ET_EXEC image.
+type and computed value. The names `user.ld` defines (`__init_array_*`,
+`__fini_array_*`, `__tdata_*`, `__tbss_size`, `__eh_frame_*`,
+`__nameplate_*`, `__bss_*`, `__program_end`) are valued by the layout. A weak
+reference nobody defines (`__cxa_finalize` in `runtime_init.o`) is zero by the
+weak rule. No other name is special: `_GLOBAL_OFFSET_TABLE_` is only an
+undefined symbol in `string.o` with no relocation against it, so any future
+reference to it is refused as undefined rather than given a value.
+
+TPOFF32 uses the variant II thread pointer: the start of the TLS block plus its
+size rounded up to the block's alignment. A TPOFF32 against a non-TLS symbol,
+or any other relocation against a TLS symbol, is refused.
 
 ### Nameplate
 
@@ -262,10 +332,15 @@ Nameplate is part of the first complete image contract, not an optional host
 post-process. After code/rodata addresses are fixed, the linker harvests the
 same executable symbols that `tools/nameplate` accepts, builds the existing
 `NameplateHeader` table, places `.nameplate` before `.data`, and then lays out
-the writable sections. A final verification pass must re-derive each entry
-from the emitted symbol table and reject address drift or a table that would
-not fit the format. This removes the host-only two-pass dependency without
-changing the in-image Nameplate format consumed by the kernel and BoxLib.
+the writable sections. The harvest is `tools/nameplate`'s rule exactly: a
+function or an untyped label in executable code, at a nonzero final address
+inside its output section, one name per address chosen by the same order
+(typed, sized, global, then by name). The linker checks that placing the
+table moved no section before it. Independently, `tools/boxasm_stand.sh` links
+with `BOXASM_LINK_SYMBOLS`, runs `tools/nameplate verify` on the image and
+compares every name and size with GNU ld's two-pass link of the same objects.
+Images assembled inside BoxOS carry no `.symtab`: the Nameplate already names
+their code, and nothing on the machine reads a symbol table.
 
 ### Acceptance criteria for the linker phase
 
@@ -281,9 +356,31 @@ The phase is complete only when one implementation can:
 - produce an ET_EXEC image that the existing loader can launch without a
   kernel or TagFS change.
 
-Until those checks pass, the assembler may produce an in-memory ET_REL object
-for diagnostics, but it must not claim that `assemble ... -> program.elf`
-created a runnable program.
+These checks are the regression criteria for future linker changes and are
+run by `tools/boxasm_stand.sh` (the `boxasm` gate in `tools/gates.sh`).
+Unsupported language constructs still fail before an artifact is created.
+
+### Correction — 2026-10-28
+
+The first v0 commit (`eb541873`) recorded these criteria as satisfied, but a
+check against GNU ld on the same inputs showed four were not:
+
+1. Two strong definitions of one name linked silently (the resolver stopped at
+   the first). Now every global definition enters one hash table when its
+   object is selected, and a second strong one is refused naming both objects.
+2. The Nameplate dropped every function at offset 0 of its input section —
+   23 of 281 names in `hello`, `_start` and `main` among them. It now matches
+   `tools/nameplate` name for name and size for size.
+3. Refusals carried no names ("unresolved symbol"); several carried no text.
+4. The v0 assembler wrote a local symbol after the globals with a wrong
+   `sh_info`, an object GNU ld rejects. The ELF reader now enforces the
+   local/global boundary, and the assembler writes it correctly.
+
+Also corrected: TPOFF32 rounding, the `.tdata` alignment of 64 from `user.ld`,
+the location counter not advancing for an empty output section, GNU ar long
+member names, prioritized `.init_array.N`/`.ctors` refused instead of placed
+out of order, and relocation tables of sections the image does not carry
+skipped instead of refused without a word.
 
 ## Quality constraints
 

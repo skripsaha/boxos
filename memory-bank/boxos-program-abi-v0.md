@@ -1,6 +1,8 @@
 # BoxOS Program ABI v0
 
-Status: design draft. No implementation is implied by this document yet.
+Status: v0 implementation recorded in the isolated `boxos-native-toolchain`
+worktree. The contract remains bounded; future language features must extend
+it deliberately rather than silently changing the entry, I/O or exit rules.
 
 This note defines the proposed contract between a native BoxOS program and the
 existing kernel/userspace runtime. It is intentionally separate from the
@@ -39,6 +41,20 @@ first design pass.
 - Program arguments are not passed as `argc/argv`. The spawner writes the
   command line into CabinInfo as Luggage before the first instruction
   (`src/userspace/boxlib/include/box/luggage.h`, `src/userspace/boxlib/src/luggage.c`).
+  The shell starts a program by its file id (`proc_exec_file`) and the
+  Luggage is then the line, a NUL, and the program's filled Form as
+  NUL-ended records (`filled 1`, `field KIND`, `#ID`, `=TEXT`, `screen #ID`,
+  `souvenir`; `box/form.h`); `luggage_word` still reads the line alone. What a
+  program gives back on its way out is a Souvenir: an IPC message to its
+  spawner (magic "SOUV", count, file ids), sent only when the spawner asked
+  for it with the `souvenir` record.
+- A program made inside BoxOS carries its Recipe in `.boxos.recipe`
+  (`box/recipe.h`): a section after both segments that no segment maps,
+  holding as text the tool that made it (`by assemble`), the Use Context the
+  build looked in, and every file the build read — id, SHA-256 of the bytes
+  read, name — the source first. The shell reads it before starting the
+  program; a file that changed since makes the tool make it again, handed the
+  program as `it`, in the context it was made in.
 - `notify` is a semantic doorbell. The userspace macro emits the x86-64
   `syscall` instruction with `RDI = 0`; `yield` emits the same instruction with
   `RDI = GATE_YIELD` (`src/userspace/boxlib/include/box/core/notify.h`).
@@ -268,6 +284,23 @@ program.asm
   → box.exit
 ```
 
+The artifact step has one additional userspace requirement. `file_info_t` is a
+display convenience with a fixed 32-byte name and five short tags; its own
+implementation reports when it truncates a record. It cannot be used to copy
+source tags into the generated program without violating the no-loss rule.
+The toolchain therefore needs a reusable full-metadata adapter over the
+existing `STORAGE_OBJ_GET_INFO` response before the artifact phase. The
+adapter must grow its output buffer until the complete self-describing answer
+arrives, preserve every tag spelling, and expose an explicit ownership/free
+contract. This is a BoxLib userspace addition; it does not change TagFS.
+
+The current process loader also has a real execution gate: `SYSTEM_OP_PROC_EXEC`
+accepts only an active file wearing the `app` or `utility` tag. The assembler
+must make this visible in its contract. The simple command may supply `app` as
+the default output execution tag, or an explicit tag list may choose `utility`,
+but a successful build must never create an artifact that looks complete and
+then cannot be launched because it lacks both gates.
+
 The raw Manifest/Crate surface can be added to the same assembler after the
 minimal runtime path is proven.
 
@@ -287,33 +320,41 @@ minimal runtime path is proven.
 - A compatibility path must preserve the same BoxOS ABI and lifetime rules,
   rather than creating a second hidden programming model.
 
-## Open decisions before implementation
+## Decisions closed for v0
 
-1. The exact raw syntax for Manifest and Crate construction.
-2. The exact first runtime capsule needed to implement `box.say` through
-   `Current("screen")` without introducing a second output path.
-3. How a standalone assembler program receives and parses Luggage.
-4. Whether a generated Nameplate is part of the first ELF output.
-5. How runtime helpers are represented in the future native executable format.
+1. The first runtime capsule uses the existing `libbox.a` ET_REL modules and
+   keeps the `Current("screen")` output path intact.
+2. `_start` supplies the existing Luggage contract; v0 does not add an
+   `argc/argv` ABI.
+3. Generated ELF images carry the existing Nameplate format.
+4. The v0 source language exposes only `box.say` and `box.exit`; raw Manifest
+   and Crate construction remains a future language surface.
+
+The future native executable format and the final syntax for raw operations
+remain open until the bounded ELF path has more users and measured needs.
 
 ## Planned phases
 
-1. **ABI design** — finish entry, notify, wait, exit, output and lifetime
-   contracts without changing the kernel.
-2. **Standalone assembler** — assemble one source file into a valid `ET_EXEC`
+1. **ABI design** — completed for the bounded entry, output and exit path
+   without changing the kernel.
+2. **Standalone assembler** — completed for one source file into a valid `ET_EXEC`
    ELF with code/data segments and a deterministic entry point.
-3. **Runtime and link stage** — map the dependency closure needed by
+3. **Runtime and link stage** — completed for the dependency closure needed by
    `box.notify`, `box.yield`, `box.wait`, `box.exit` and `box.say`; package it
    as real ELF64 ET_REL runtime modules and link it without duplicating code.
    The first linker must also preserve `.tdata`/`.tbss`, the measured
    relocation set (including `R_X86_64_TPOFF32`) and the existing Nameplate
    contract; unsupported TLS use is a hard diagnostic, never a silent drop.
-4. **Native artifact flow** — resolve the source through the current context,
-   preserve all source tags, add explicitly requested output tags, and create
-   or update the ELF artifact through existing BoxOS storage APIs.
-5. **Shell launch verification** — launch the generated artifact by its name
-   and tags, verify output and exit handling, and exercise ambiguity/error
-   paths.
+4. **Native artifact flow** — completed: resolve the source through the current context,
+   obtain its full metadata without `file_info_t` truncation, preserve all
+   source tags, add explicitly requested output tags, and create or update the
+   ELF artifact through existing BoxOS storage APIs. Publish only after the
+   image is complete: `create` → `file_span` → complete `fwrite` sequence →
+   `anchor`; on a failed write or anchor, attempt a real delete and report the
+   artifact id if cleanup itself fails.
+5. **Shell launch verification** — completed for the fixture: launch the
+   generated artifact by its name and tags, verify output and exit handling.
+   Ambiguity and syntax-error paths remain regression cases for future tests.
 6. **Native format stage** — only after the ELF bootstrap path, runtime ABI and
    linker behavior are proven, design the native BoxOS object/executable format
    around measured needs instead of guesses.
@@ -328,3 +369,52 @@ Every implementation phase must be complete within its stated boundary:
 - all ownership and asynchronous completion rules are explicit;
 - changed behavior is verified on the actual BoxOS path before the next phase;
 - TagFS remains outside the first toolchain implementation boundary.
+
+## Implementation status — 2026-10-28
+
+The first implementation slice now exists on branch `boxos-native-toolchain`:
+
+- `assemble` is a shipped userspace utility, built into the image with the
+  `utility,toolchain` tags;
+- its v0 source language accepts only `section .text`, `global main`, `main:`,
+  `box.say "..."` and `box.exit <signed-32-bit-code>`; unsupported syntax is a
+  hard diagnostic, not a silent no-op;
+- the source is emitted as ET_REL in memory, then linked with the embedded
+  current `boxlib_start.o` and the real `libbox.a` ET_REL archive;
+- the linker performs archive closure, ordinary AMD64 RELA relocations,
+  TPOFF32, W^X PT_LOAD layout, PT_TLS and an in-image Nameplate;
+- the output is published through the existing storage path, with full source
+  metadata, exact sizing, checked writes and `anchor`.
+
+`src/userspace/hello.asm` is the image fixture for the first end-to-end run.
+
+Update 2026-10-28: the toolchain lives in `src/userspace/utils/assemble/`.
+The linker was brought to this contract (see the correction in
+`boxos-runtime-capsule-audit-v0.md`) and is held to GNU ld and
+`tools/nameplate` by `tools/boxasm_stand.sh`. When the result would wear
+neither `app` nor `utility`, `assemble` adds `app` and says so in its output,
+which also prints the tags the new file actually wears (owner decision,
+2026-10-28). The v0 source front-end is replaced by a lexer, an operand model,
+a table-driven x86-64 encoder held to NASM byte for byte, multi-pass layout
+with jump relaxation and an ELF object writer; the language is documented in
+`docs/boxasm/`. The unfinished string-matching encoder begun before that
+decision is kept in `git stash`, not in the tree.
+This is a deliberately bounded first language slice; it is complete within
+that scope and does not pretend to be the future general-purpose assembler.
+
+Update 2026-10-28, Artifact Resolution (owner decisions of the same day):
+assembling again puts the program in place of the one it was, never beside
+it. The program it replaces is the file in the Use Context with its name that
+wears every tag the new program will wear (the source's, the command's, and
+`app` when added); its other tags do not count against it. When no such file
+is one file, `assemble` asks, as the command grammar says (section 6): one
+other file of that name — "there is another NAME, tags ... — replace it?",
+`no` making a new program beside it; several — they are listed with their
+tags and one is chosen by number, or `new`. With no one at the console to
+answer, nothing is written and the command says to name the file by a tag it
+wears. The new program is written whole and anchored before the one it
+replaces is deleted, so a refusal anywhere leaves the old one as it was; a
+failure to delete the old one deletes the new one. The new program wears
+every tag of the old one whose key the build does not give (a rebuild changes
+what the program is made of, never what it was told). Its file id is new.
+An output named like its own source is refused.

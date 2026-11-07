@@ -25,7 +25,15 @@
  *
  * History is the cabin's, shared by its strands: recalled with Up and Down,
  * kept in order, and it grows with what was typed rather than stopping at a
- * number somebody guessed.
+ * number somebody guessed. A line read with a Whisper walks the whisperer's
+ * lines instead, and is kept by the whisperer, not here.
+ *
+ * A Whisper is what the line could go on to be, laid dim past the caret after
+ * every key that leaves the caret at the end of the line, and taken back with
+ * blanks as the line changes — the echo's own means, so it reaches the glass
+ * as everything else does. The dim cells are always past the end of the line;
+ * `dim_end` remembers how far they reach, so the next whisper covers what the
+ * last one left.
  */
 
 #include "box/print.h"
@@ -74,15 +82,15 @@ static void HistoryKeep(const char *line, uint32_t len)
     umutex_unlock(&g_history_lock);
 }
 
-/* Entry `index` (0 = oldest), whole, in a copy of its own the caller frees —
- * a copy, because another strand may grow the history meanwhile. NULL when
- * there is no such entry or no memory for it. */
-static char *HistoryCopy(uint32_t index, uint32_t *out_len)
+/* The entry `back` lines before the newest (1 = the newest), whole, in a copy
+ * of its own the caller frees — a copy, because another strand may grow the
+ * history meanwhile. NULL when there is no such entry or no memory for it. */
+static char *HistoryCopy(uint32_t back, uint32_t *out_len)
 {
     char *copy = NULL;
     umutex_lock(&g_history_lock);
-    if (index < g_history.count) {
-        const char *src = g_history.lines[index];
+    if (back >= 1 && back <= g_history.count) {
+        const char *src = g_history.lines[g_history.count - back];
         uint32_t    n   = (uint32_t)strlen(src);
         copy = (char *)malloc(n + 1);
         if (copy) {
@@ -92,14 +100,6 @@ static char *HistoryCopy(uint32_t index, uint32_t *out_len)
     }
     umutex_unlock(&g_history_lock);
     return copy;
-}
-
-static uint32_t HistoryCount(void)
-{
-    umutex_lock(&g_history_lock);
-    uint32_t n = g_history.count;
-    umutex_unlock(&g_history_lock);
-    return n;
 }
 
 /* ===========================================================================
@@ -112,11 +112,19 @@ typedef struct EditLine {
     bool     grows;    /* the buffer is the line's own, and doubles as it fills */
     uint32_t len;
     uint32_t cursor;
-    uint32_t browse;   /* history index while browsing; == count when not */
-    char    *draft;    /* what was typed before browsing began, or NULL */
+    uint32_t back;     /* lines back from the one being typed while recalling; 0 when not */
+    char    *draft;    /* what was typed before recalling began, or NULL */
     uint32_t draft_len;
     bool     echo_diverged;  /* the echo stopped reading as the line; RestateLine */
+    LineWhisper *whisper;    /* NULL: the cabin's history and nothing whispered */
+    char    *said;     /* what the whisper says the line could go on with, or NULL */
+    uint32_t said_len;
+    uint32_t dim_end;  /* the offset in the line the dim cells reach; 0 when none */
 } EditLine;
+
+/* Dim enough to read as not typed yet, on a framebuffer and on the sixteen
+ * colours of a text console alike. */
+#define READLINE_WHISPER_COLOR COLOR_DARK_GRAY
 
 /* The first room a growing line is given; it doubles whenever the line fills
  * it, so a line is as long as the person types it. */
@@ -158,7 +166,7 @@ static void EchoBlanks(uint32_t n)
     };
     while (n) {
         uint32_t chunk = n < sizeof(spaces) ? n : (uint32_t)sizeof(spaces);
-        print_bytes(spaces, chunk);
+        print_bytes_to_screen(spaces, chunk);
         n -= chunk;
     }
 }
@@ -175,21 +183,120 @@ static void EchoTail(EditLine *l, uint32_t from, uint32_t trailing_blanks)
 
     /* Redraw buf[from..len), then `trailing_blanks` blanks that erase what a
      * shorter line leaves behind, then step back to the cursor. */
-    if (l->len > from) print_bytes(l->buf + from, l->len - from);
+    if (l->len > from) print_bytes_to_screen(l->buf + from, l->len - from);
     EchoBlanks(trailing_blanks);
     int32_t back = (int32_t)(l->len - l->cursor) + (int32_t)trailing_blanks;
     console_step(-back);
     io_flush();   /* an echo is seen as it is typed, not when a line is done */
 }
 
-static void Insert(EditLine *l, char c)
+static void Insert(EditLine *l, const char *text, uint32_t n)
 {
-    if (!EnsureRoom(l, l->len + 1)) return;     /* the caller's buffer is full */
-    memmove(l->buf + l->cursor + 1, l->buf + l->cursor, l->len - l->cursor);
-    l->buf[l->cursor] = c;
-    l->len++;
-    l->cursor++;
-    EchoTail(l, l->cursor - 1, 0);
+    if (n == 0 || !EnsureRoom(l, l->len + n)) return;   /* the caller's buffer is full */
+    memmove(l->buf + l->cursor + n, l->buf + l->cursor, l->len - l->cursor);
+    memcpy(l->buf + l->cursor, text, n);
+    l->len    += n;
+    l->cursor += n;
+    EchoTail(l, l->cursor - n, 0);
+}
+
+/* What the editor would have typed itself: a character is one cell, so the
+ * steps it counts are the cells it laid. */
+static bool Typeable(const char *text, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        if ((unsigned char)text[i] < 0x20 || (unsigned char)text[i] >= 0x7F) return false;
+    }
+    return true;
+}
+
+/* `n` cells of `text` laid dim past the end of the line, blanks over whatever
+ * the dim cells laid before reach beyond them, and the caret stepped back to
+ * where it was — at the end of the line, the only place anything dim is laid. */
+static void DimDraw(EditLine *l, const char *text, uint32_t n)
+{
+    uint32_t reach  = l->len + n;
+    uint32_t blanks = l->dim_end > reach ? l->dim_end - reach : 0;
+    l->dim_end = n ? reach : 0;
+    if (n + blanks == 0) return;
+
+    if (n) {
+        Color was = get_color();
+        set_color(READLINE_WHISPER_COLOR);
+        print_bytes_to_screen(text, n);
+        set_color(was);
+    }
+    EchoBlanks(blanks);
+    console_step(-(int32_t)(n + blanks));
+    io_flush();
+    l->echo_diverged = true;
+}
+
+/* The dim cells taken away, before the caret leaves the end of the line. */
+static void DimHide(EditLine *l)
+{
+    if (l->dim_end) DimDraw(l, NULL, 0);
+}
+
+/* What the whisper says now: laid dim when the caret is at the end of a line
+ * that has something on it, nothing otherwise. The same words laid again are
+ * not laid twice. */
+static void WhisperRefresh(EditLine *l)
+{
+    if (!l->whisper) return;
+
+    char    *said = NULL;
+    uint32_t n    = 0;
+    if (l->cursor == l->len && l->len > 0) {
+        l->buf[l->len] = '\0';
+        said = l->whisper->Continue(l->whisper, l->buf, l->len);
+        n    = said ? (uint32_t)strlen(said) : 0;
+        if (n == 0 || !Typeable(said, n)) {
+            free(said);
+            said = NULL;
+            n    = 0;
+        }
+    }
+
+    bool same = said && l->said && n == l->said_len && memcmp(said, l->said, n) == 0 &&
+                l->dim_end == l->len + n;
+    free(l->said);
+    l->said     = said;
+    l->said_len = n;
+    if (!same && l->cursor == l->len) DimDraw(l, said, n);
+}
+
+/* How much of `text` is its next word: the blanks before it, then up to the
+ * next blank outside "double quotes". */
+static uint32_t WordReach(const char *text, uint32_t n)
+{
+    uint32_t at     = 0;
+    bool     quoted = false;
+    while (at < n && text[at] == ' ') at++;
+    while (at < n && (quoted || text[at] != ' ')) {
+        if (text[at] == '"') quoted = !quoted;
+        at++;
+    }
+    return at;
+}
+
+/* Tab: the next word of the whisper, as if typed — all of it with Shift. With
+ * nothing whispered, what the line still needs, laid dim and never typed.
+ * True when that was laid: it stays until the next key. */
+static bool WhisperTab(EditLine *l, bool all)
+{
+    if (!l->whisper || l->cursor != l->len) return false;
+    if (l->said) {
+        Insert(l, l->said, all ? l->said_len : WordReach(l->said, l->said_len));
+        return false;
+    }
+
+    l->buf[l->len] = '\0';
+    char    *needs = l->whisper->Needs(l->whisper, l->buf, l->len);
+    uint32_t n     = needs ? (uint32_t)strlen(needs) : 0;
+    if (n > 0 && Typeable(needs, n)) DimDraw(l, needs, n);
+    free(needs);
+    return true;
 }
 
 static void Backspace(EditLine *l)
@@ -218,6 +325,7 @@ static void DeleteForward(EditLine *l)
 static void MoveTo(EditLine *l, uint32_t where)
 {
     if (where > l->len) where = l->len;
+    if (where < l->len) DimHide(l);
     console_step((int32_t)where - (int32_t)l->cursor);
     l->cursor = where;
 }
@@ -244,7 +352,7 @@ static void Replace(EditLine *l, const char *text, uint32_t n)
     memcpy(l->buf, text, n);
     l->len    = n;
     l->cursor = n;
-    if (n > 0) print_bytes(l->buf, n);
+    if (n > 0) print_bytes_to_screen(l->buf, n);
 
     uint32_t blanks = was > n ? was - n : 0;
     EchoBlanks(blanks);
@@ -252,29 +360,44 @@ static void Replace(EditLine *l, const char *text, uint32_t n)
     io_flush();
 }
 
+/* The line `back` lines before the one being typed (1 = the newest): the
+ * whisperer's, or the cabin's. A copy the caller frees; NULL past the oldest,
+ * and for a line the editor could not have typed. */
+static char *RecallCopy(const EditLine *l, uint32_t back, uint32_t *out_len)
+{
+    if (!l->whisper) return HistoryCopy(back, out_len);
+
+    char *line = l->whisper->Recall(l->whisper, back - 1);
+    if (!line) return NULL;
+    uint32_t n = (uint32_t)strlen(line);
+    if (!Typeable(line, n)) {
+        free(line);
+        return NULL;
+    }
+    *out_len = n;
+    return line;
+}
+
 static void Recall(EditLine *l, bool older)
 {
-    uint32_t count = HistoryCount();
-    if (older) {
-        if (l->browse == 0) return;
-        if (l->browse == count) {
-            /* Leaving the draft: keep it so Down can bring it back. */
-            free(l->draft);
-            l->draft = (char *)malloc(l->len + 1);
-            if (l->draft) { memcpy(l->draft, l->buf, l->len); l->draft_len = l->len; }
-        }
-        l->browse--;
-    } else {
-        if (l->browse >= count) return;
-        l->browse++;
-        if (l->browse == count) {
-            Replace(l, l->draft ? l->draft : "", l->draft ? l->draft_len : 0);
-            return;
-        }
+    if (!older && l->back == 0) return;
+    uint32_t back = older ? l->back + 1 : l->back - 1;
+    if (back == 0) {
+        l->back = 0;
+        Replace(l, l->draft ? l->draft : "", l->draft ? l->draft_len : 0);
+        return;
     }
+
     uint32_t n     = 0;
-    char    *entry = HistoryCopy(l->browse, &n);
+    char    *entry = RecallCopy(l, back, &n);
     if (!entry) return;
+    if (l->back == 0) {
+        /* Leaving the draft: keep it so Down can bring it back. */
+        free(l->draft);
+        l->draft = (char *)malloc(l->len + 1);
+        if (l->draft) { memcpy(l->draft, l->buf, l->len); l->draft_len = l->len; }
+    }
+    l->back = back;
     Replace(l, entry, n);
     free(entry);
 }
@@ -349,7 +472,53 @@ static void RestateLine(const EditLine *l)
 {
     if (l->len == 0) return;
     console_step(-(int32_t)l->len);
-    print_bytes(l->buf, l->len);
+    print_bytes_to_screen(l->buf, l->len);
+}
+
+/* One key that is not Enter, edited into the line, and what the whisper says
+ * after it. */
+static void EditKey(EditLine *l, const kb_event_t *k)
+{
+    if (k->mods & KB_MOD_EXTENDED) {
+        switch (k->scancode) {
+        case KEY_LEFT:   if (l->cursor > 0) MoveTo(l, l->cursor - 1); break;
+        case KEY_RIGHT:  MoveTo(l, l->cursor + 1);                    break;
+        case KEY_HOME:   MoveTo(l, 0);                                break;
+        case KEY_END:    MoveTo(l, l->len);                           break;
+        case KEY_UP:     Recall(l, true);                             break;
+        case KEY_DOWN:   Recall(l, false);                            break;
+        case KEY_DELETE: DeleteForward(l);                            break;
+        default: break;
+        }
+        WhisperRefresh(l);
+        return;
+    }
+
+    char c = k->ascii;
+    if (c == '\t') {
+        if (WhisperTab(l, (k->mods & KB_MOD_SHIFT) != 0)) return;
+    } else if (c == '\b' || c == 0x7F) {
+        Backspace(l);
+    } else if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F) {
+        Insert(l, &c, 1);
+    }
+    WhisperRefresh(l);
+}
+
+/* The line handed over: the dim cells taken away, the line said whole, the
+ * newline. Kept in the cabin's history unless a whisperer keeps its own. */
+static int Accept(EditLine *l)
+{
+    MoveTo(l, l->len);
+    DimHide(l);
+    /* Before the newline, so the line the log ends up holding is the one that
+     * was accepted and not the keys it was edited out of. */
+    if (l->echo_diverged) RestateLine(l);
+    print_bytes_to_screen("\n", 1);
+    l->buf[l->len] = '\0';
+    if (!l->whisper) HistoryKeep(l->buf, l->len);
+    io_flush();
+    return (int)l->len;
 }
 
 /* Keys edited into `l` until Enter: the line's length, NUL-terminated in
@@ -359,62 +528,40 @@ static int EditUntilEnter(EditLine *l)
     TouchTag ear = console_listen();
     if (ear == TOUCH_TAG_INVALID) return -1;
 
+    int len = -1;
     for (;;) {
         kb_event_t k;
-        if (!NextKey(ear, &k)) { free(l->draft); console_unlisten(); return -1; }
-
-        if (k.mods & KB_MOD_EXTENDED) {
-            switch (k.scancode) {
-            case KEY_LEFT:   if (l->cursor > 0) MoveTo(l, l->cursor - 1); break;
-            case KEY_RIGHT:  MoveTo(l, l->cursor + 1);                    break;
-            case KEY_HOME:   MoveTo(l, 0);                                break;
-            case KEY_END:    MoveTo(l, l->len);                           break;
-            case KEY_UP:     Recall(l, true);                             break;
-            case KEY_DOWN:   Recall(l, false);                            break;
-            case KEY_DELETE: DeleteForward(l);                            break;
-            default: break;
-            }
-            continue;
+        if (!NextKey(ear, &k)) break;
+        if (k.ascii == '\r' || k.ascii == '\n') {
+            len = Accept(l);
+            break;
         }
-
-        char c = k.ascii;
-        if (c == '\r' || c == '\n') {
-            MoveTo(l, l->len);
-            /* Before the newline, so the line the log ends up holding is the
-             * one that was accepted and not the keys it was edited out of. */
-            if (l->echo_diverged) RestateLine(l);
-            print_bytes("\n", 1);
-            l->buf[l->len] = '\0';
-            HistoryKeep(l->buf, l->len);
-            free(l->draft);
-            io_flush();
-            console_unlisten();
-            return (int)l->len;
-        }
-        if (c == '\b' || c == 0x7F) { Backspace(l); continue; }
-        if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F) Insert(l, c);
+        EditKey(l, &k);
     }
+    free(l->draft);
+    free(l->said);
+    console_unlisten();
+    return len;
 }
 
 int readline(char *buffer, size_t max_len)
 {
     if (!buffer || max_len < 2) return -1;
     EditLine l = {
-        .buf = buffer, .cap = (uint32_t)(max_len - 1), .grows = false, .len = 0,
-        .cursor = 0, .browse = HistoryCount(), .draft = NULL, .draft_len = 0,
-        .echo_diverged = false,
+        .buf = buffer, .cap = (uint32_t)(max_len - 1), .grows = false,
     };
     return EditUntilEnter(&l);
 }
 
-int readline_grow(char **line)
+/* A line of its own that grows as it is typed, edited with `whisper` (NULL
+ * for none): its length and *line, or -1 with *line NULL. */
+static int ReadGrowing(char **line, LineWhisper *whisper)
 {
     if (!line) return -1;
     *line = NULL;
     EditLine l = {
         .buf = (char *)malloc(READLINE_FIRST_ROOM + 1), .cap = READLINE_FIRST_ROOM,
-        .grows = true, .len = 0, .cursor = 0, .browse = HistoryCount(), .draft = NULL,
-        .draft_len = 0, .echo_diverged = false,
+        .grows = true, .whisper = whisper,
     };
     if (!l.buf) return -1;
     int len = EditUntilEnter(&l);
@@ -424,6 +571,16 @@ int readline_grow(char **line)
     }
     *line = l.buf;
     return len;
+}
+
+int readline_grow(char **line)
+{
+    return ReadGrowing(line, NULL);
+}
+
+int readline_whispered(char **line, LineWhisper *whisper)
+{
+    return ReadGrowing(line, whisper);
 }
 
 /* WEAK for the same reason as printf in print.c: boxcxx's getchar reads
@@ -446,6 +603,6 @@ __attribute__((weak)) int getchar(void)
 
 int input(const char *prompt, char *buffer, size_t max_len)
 {
-    if (prompt) print(prompt);
+    if (prompt) print_to_screen(prompt);
     return readline(buffer, max_len);
 }
