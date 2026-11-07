@@ -1,7 +1,7 @@
-// boxcxx — box::console  (color, styled text, VGA batch session)
+// boxcxx — box::console  (color, styled text)
 //
-// The idiomatic C++ surface over the boxlib screen-presentation API
-// (box/color.h, box/vga.h). BoxOS color is NOT ANSI escape codes — it is
+// The idiomatic C++ surface over the boxlib colour API (box/color.h). BoxOS
+// color is NOT ANSI escape codes — it is
 // structured metadata attached to a text run (one printf → one syscall), so:
 //
 //   box::color        — a 24-bit RGB value (r/g/b, named ctors, == ).
@@ -9,15 +9,13 @@
 //   box::styled       — RAII: set the process-local text color for a scope and
 //                       restore it on exit (text printed in the scope inherits
 //                       it). It flips state, it does NOT emit escape bytes.
-//   box::vga::session — RAII batch: collect VGA ops between begin/commit into a
-//                       single Manifest, one kernel re-entry for the whole run.
 //   std::formatter<box::color> — formats the color *value* as "#RRGGBB" (a
 //                       representation, never a control sequence).
 //
 // This is a box:: extension, not part of std. The on-screen *rendering* of a
 // color is a display-daemon property (GOP 24-bit / VGA 16-color quantized) —
-// not observable from a byte log; the color STATE, the formatter, and the VGA
-// batch syscall are the parts validated here.
+// not observable from a byte log; the color STATE and the formatter are the
+// parts validated here.
 #ifndef BOXCXX_BOX_CONSOLE_H
 #define BOXCXX_BOX_CONSOLE_H
 
@@ -25,7 +23,6 @@
 #include <format>
 
 #include "box/color.h"  // Color / COLOR_* palette / set_color / get_color[_bg]
-#include "box/vga.h"     // vga_begin/commit + putchar/puts/clear/cursor/color/dims
 
 namespace box {
 
@@ -122,88 +119,6 @@ inline color current_color() noexcept { return color::from_raw(::get_color()); }
 inline color current_background() noexcept { return color::from_raw(::get_color_bg()); }
 inline void  set_color(color fg) noexcept { ::set_color(fg.raw()); }
 inline void  set_background(color bg) noexcept { ::set_color_bg(bg.raw()); }
-
-// ── box::vga — VGA text-mode ops + the batch session ────────────────────────
-namespace vga {
-
-using dimensions = vga_dimensions_t;
-using position   = vga_pos_t;
-
-// RAII batch: ops between construction and commit() / destruction are collected
-// into one Manifest and submitted as a single syscall. Nests correctly (only
-// the outermost commit flushes). Getter ops resolve immediately, bypassing it.
-class session {
-    bool open_{true};
-
-public:
-    session() noexcept { vga_begin(); }
-    ~session() { if (open_) vga_commit(); }
-    // Flush early; further ops in this scope would start a fresh (un-batched) op.
-    int commit() noexcept { if (!open_) return 0; open_ = false; return vga_commit(); }
-    session(const session &)            = delete;
-    session &operator=(const session &) = delete;
-};
-
-// Write. Full #RRGGBB reaches the kernel; only the VGA *text* backend
-// quantizes, at draw time — the GOP framebuffer renders the value exactly.
-inline bool put(char c) noexcept { return vga_putchar(c) == 0; }
-/* vga_puts reports the byte count on success (like the C puts family), so
- * success is "not negative" — `== 0` held only for the empty string and made
- * this wrapper report failure for every string it ever drew. */
-inline bool put(const char *s) noexcept { return vga_puts(s) >= 0; }
-inline bool newline() noexcept { return vga_newline() == 0; }
-
-// Color: the box::color pair for following runs. Sentinels resolve to their
-// role defaults (fg → light gray, bg → black) before the wire.
-inline bool set_color(color fg, color bg = colors::inherit) noexcept
-{
-    return vga_setcolor_rgb(fg.raw(), bg.raw()) == 0;
-}
-// The kernel's current pair — concrete triples, exactly as a setter shipped
-// them (a set_color/get_color round-trip is bit-exact).
-inline bool get_color(color &fg, color &bg) noexcept
-{
-    Color f = 0, b = 0;
-    if (vga_getcolor_rgb(&f, &b) != 0) return false;
-    fg = color::from_raw(f);
-    bg = color::from_raw(b);
-    return true;
-}
-
-inline bool clear(color bg = colors::black) noexcept
-{
-    return vga_clear_rgb(colors::light_gray.raw(), bg.raw()) == 0;
-}
-inline bool clear_to_eol() noexcept
-{
-    return vga_clear_to_eol() == 0;
-}
-inline bool clear_line(std::uint8_t row, color bg = colors::black) noexcept
-{
-    return vga_clear_line_rgb(row, colors::light_gray.raw(), bg.raw()) == 0;
-}
-inline bool scroll_up() noexcept
-{
-    return vga_scroll_up() == 0;
-}
-inline bool move_cursor(std::uint8_t row, std::uint8_t col) noexcept
-{
-    return vga_setcursor(row, col) == 0;
-}
-inline position cursor() noexcept
-{
-    position p{};
-    vga_getcursor(&p);
-    return p;
-}
-inline dimensions size() noexcept
-{
-    dimensions d{};
-    vga_getdimensions(&d);
-    return d;
-}
-
-}  // namespace vga
 
 }  // namespace box
 

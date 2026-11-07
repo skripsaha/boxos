@@ -133,7 +133,7 @@ typedef uint32_t error_t;
     X(INVALID_DEVICE,                invalid_device,                601,  "invalid device",                "hardware") \
     X(DEVICE_BUSY,                   device_busy,                   602,  "device busy",                   "hardware") \
     X(KEYBOARD_BUFFER_FULL,          keyboard_buffer_full,          603,  "keyboard buffer full",          "hardware") \
-    X(VGA_ERROR,                     vga_error,                     604,  "vga error",                     "hardware") \
+    /* 604 was the VGA's; its operations are gone, and the number is not given again. */ \
     X(ATA_ERROR,                     ata_error,                     605,  "ata error",                     "hardware") \
     X(PCI_ERROR,                     pci_error,                     606,  "pci error",                     "hardware") \
     X(USB_ERROR,                     usb_error,                     607,  "usb error",                     "hardware") \

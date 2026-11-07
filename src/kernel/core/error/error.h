@@ -124,7 +124,7 @@ typedef enum {
     ERR_INVALID_DEVICE = 601,
     ERR_DEVICE_BUSY = 602,
     ERR_KEYBOARD_BUFFER_FULL = 603,
-    ERR_VGA_ERROR = 604,
+    // 604 was the VGA's; its operations are gone, and the number is not given again.
     ERR_ATA_ERROR = 605,
     ERR_PCI_ERROR = 606,
     ERR_USB_ERROR = 607,

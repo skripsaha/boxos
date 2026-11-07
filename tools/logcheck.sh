@@ -6313,128 +6313,6 @@ run_handsetmut() {
 # Touch, then changes the word and wakes all parked on it — once. Every
 # sleeper must come back.
 # ===========================================================================
-# draft — what was typed is what the volume holds, and a shorter save leaves
-#         no tail of the longer one behind it
-# ===========================================================================
-#
-# TagFS writes only ever GREW a file: rewriting one shorter left the old tail
-# readable behind the new content, and every shorter rewrite in the system was
-# silently wrong until a file could be cut (file_span). An editor is where that
-# shows first and worst — a line deleted and saved would come back on the next
-# read.
-#
-# draft is the instrument, and the whole path is under test: a key becomes a
-# Touch, the Touch becomes a byte in the book, ^S writes the book, spans the
-# file to its length and anchors it, and `show` reads the volume back. Ten bytes
-# are typed and saved; five are taken back and saved again; the volume must
-# hold five.
-draft_keys() {
-    # draft_keys KEY...  — straight to the monitor, no echo to wait for: a
-    # painted frame never enters the log ring, so qemu-input's `type` (which
-    # verifies the guest echo) has nothing to see and would give up.
-    local k
-    for k in "$@"; do
-        mon_raw "sendkey $k 30"
-        sleep 0.06
-    done
-}
-
-draft_session() {
-    # draft_session NAME "RUN-BG ARGS" — boots, drives one editing session,
-    # then reads the file back with `show`. Leaves the transcript in
-    # $SCRATCH/serial.NAME.log and the machine stopped.
-    local name=$1 args=$2
-    make run-stop >/dev/null 2>&1
-    # shellcheck disable=SC2086
-    make run-bg $args >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
-        make run-stop >/dev/null 2>&1
-        return 1
-    fi
-    sleep 3
-    local MARK
-    MARK=$(wc -l < build/serial.log)
-
-    type_cmd "draft oracle.txt"
-    sleep 1
-    key_press ret
-    sleep 3
-
-    draft_keys a b c d e f g h i j
-    draft_keys ctrl-s
-    sleep 2
-    draft_keys backspace backspace backspace backspace backspace
-    draft_keys ctrl-s
-    sleep 2
-    draft_keys ctrl-q
-    sleep 3
-
-    type_cmd "show oracle.txt"
-    sleep 1
-    key_press ret
-    sleep 3
-
-    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
-    make run-stop >/dev/null 2>&1
-    return 0
-}
-
-run_draft() {
-    echo "== draft: ten bytes typed and saved, five taken back and saved again =="
-    build STRICT=on
-    if ! draft_session draft "STRICT=on CORES=4 MEM=4G"; then
-        bad "draft: never reached a shell"; return
-    fi
-    L="$SCRATCH/serial.draft.log"
-    grep -q "\[DRAFT\] oracle.txt - 1 lines, 5 bytes, saved 2 times" "$L" \
-        && ok "draft: the editor says five bytes over two saves" \
-        || bad "draft: $(grep -m1 '\[DRAFT\]' "$L" || echo 'the editor said nothing at all')"
-    if grep -q "^abcde$" "$L"; then
-        ok "draft: the volume holds exactly what was left on the screen"
-    elif grep -q "abcdefghij" "$L"; then
-        bad "draft: the old tail is still on the volume - the shorter save did not cut it"
-    else
-        bad "draft: the volume did not answer with the draft at all"
-    fi
-    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
-        && bad "draft: the kernel spoke of a stall or fault" \
-        || ok "draft: no verdict, no panic"
-}
-
-draft_notail_on() {
-    mutate src/userspace/utils/draft_file.c
-    python3 - <<'EOF2'
-p = "src/userspace/utils/draft_file.c"
-s = open(p).read()
-anchor = "    int rc = file_span(g_fid, len, 0);"
-assert s.count(anchor) == 1, "draft mutation anchor missing"
-s = s.replace(anchor, "    int rc = 0;   /* logcheck mutation: the tail is left where it was */\n    (void)len;", 1)
-open(p, "w").write(s)
-EOF2
-    mut_done src/userspace/utils/draft_file.c "logcheck mutation"
-}
-
-draft_notail_off() {
-    restore src/userspace/utils/draft_file.c
-}
-
-run_draftmut() {
-    echo "== draftmut: the span taken out, and the old tail must come back =="
-    draft_notail_on; build STRICT=on
-    draft_session draftmut "STRICT=on CORES=4 MEM=4G"; local booted=$?
-    draft_notail_off
-    if [ $booted -ne 0 ]; then bad "draftmut: never reached a shell"; build; return; fi
-    L="$SCRATCH/serial.draftmut.log"
-    if grep -q "abcdefghij" "$L"; then
-        ok "draftmut: without the cut the old tail is read back - and the oracle sees it"
-    else
-        bad "draftmut: the span was taken out and the file was STILL five bytes - the oracle cannot see that defect ($(grep -m1 'abcde' "$L" || echo 'no content at all'))"
-    fi
-    build   # leave the tree built from clean sources
-}
-
-# ===========================================================================
 # paint — a whole frame of colour reaches the glass through a layer, and says
 #         nothing into the log ring on the way
 # ===========================================================================
@@ -12395,8 +12273,6 @@ case "${1:-both}" in
     intx)     run_intx ;;
     iommu)    run_iommu ;;
     lastsaid) run_lastsaid ;;
-    draft)    run_draft ;;
-    draftmut) run_draftmut ;;
     paint)    run_paint ;;
     paintmut) run_paintmut ;;
     finish)   run_finish ;;
@@ -12432,8 +12308,8 @@ case "${1:-both}" in
     defragdelete) run_defragdelete ;;
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

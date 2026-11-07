@@ -198,8 +198,8 @@ panicstop_mc() {
 
 # panicstop_glass TAG — the BIOS glass as text, 25 rows of 80, into
 # $SCRATCH/panicstop.glass.TAG.txt: the VGA text buffer at 0xb8000 read by the
-# monitor, a cell's character its even byte (rgbcheck.sh reads the odd ones,
-# the attributes, the same way). 1 when the monitor showed no whole screen.
+# monitor, a cell's character its even byte. 1 when the monitor showed no
+# whole screen.
 panicstop_glass() {
     local V="$SCRATCH/panicstop.vram.$1.txt" G="$SCRATCH/panicstop.glass.$1.txt"
     rm -f "$G"

@@ -55597,8 +55597,7 @@ void Phase240()
 // ── Phase rgb: the C++ colour surface carries #RRGGBB to the print state ──
 // An arbitrary 24-bit pair goes in through box::set_color/set_background and
 // comes back bit-exactly — nothing on the way quantizes it. What reaches the
-// glass is the display's, and tools/rgbcheck.sh checks it there with the
-// rgbtest utility's probe.
+// glass is the display's.
 void PhaseRgb()
 {
     const box::color fg = box::current_color(), bg = box::current_background();

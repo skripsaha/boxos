@@ -207,8 +207,6 @@ const char* ErrorString(error_t err) {
             return "Device busy";
         case ERR_KEYBOARD_BUFFER_FULL:
             return "Keyboard buffer full";
-        case ERR_VGA_ERROR:
-            return "VGA error";
         case ERR_ATA_ERROR:
             return "ATA error";
         case ERR_PCI_ERROR:
