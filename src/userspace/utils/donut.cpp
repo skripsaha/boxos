@@ -42,13 +42,13 @@ using PainterColor = painter::core::Color;
 constexpr float Pi = 3.14159265358979323846f;
 constexpr PainterColor Black = painter::core::Colors::Black;
 /* Change these two colors to retheme the torus. */
-constexpr PainterColor DonutColorLow = PainterColor::Rgb(0x1C, 0x63, 0xC6);
-constexpr PainterColor DonutColorHigh = PainterColor::Rgb(0xF0, 0x83, 0x2E);
+constexpr PainterColor DonutColorLow = PainterColor::Rgb(0xFF, 0xFF, 0xFF);
+constexpr PainterColor DonutColorHigh = PainterColor::Rgb(0x77, 0x77, 0x77);
 /* The zone is deliberately larger than the visible torus. Perspective makes
  * its footprint grow while it turns, so a tight frame would clip the rim. */
-constexpr int DonutZoneMaxWidth = 32;
-constexpr int DonutZoneMaxHeight = 18;
-constexpr float DonutScale = 0.16f;
+constexpr int DonutZoneMaxWidth = 42;
+constexpr int DonutZoneMaxHeight = 24;
+constexpr float DonutScale = 0.28f;
 
 void Say(std::string_view Text) {
     std::string Line(Text);
@@ -245,7 +245,8 @@ int main() {
         Last = Now;
         A += Seconds * 1.05f;
         B += Seconds * 0.73f;
-        if (Shown && !Screen.Clear()) break;
+        if (Shown && !Screen.Clear())
+            break;
         Picture.Draw(A, B);
         if (!Screen.Composite({At.Col, At.Row}, Picture.Frame()))
             break;
