@@ -7,10 +7,9 @@
  * not the one that could not — the BSP went on, and the account of the panic
  * waited behind it. Here it is put on purpose (logcheck panicstop):
  *
- *   - the BSP says it takes the console, takes the console lock and opens a
- *     Canvas batch under it — what a kprintf stopped in the middle of a line
- *     leaves behind, the lock never given back and the batch never closed —
- *     and from then on reads the clock in a loop with interrupts off, for
+ *   - the BSP says it takes the console and takes the console lock — what a
+ *     kprintf stopped in the middle of a line leaves behind, the lock never
+ *     given back — and from then on reads the clock in a loop with interrupts off, for
  *     ever, saying nothing more; so the only way to see it run is to look at
  *     it, which is what QEMU's monitor does; a core that says nothing is the
  *     case, because a kprintf begun after a panic is claimed stands its core
@@ -25,14 +24,13 @@
  *
  * A machine that stops at its panic has every core standing with interrupts
  * off, the BSP among them. The console the BSP holds is the lock a core
- * stopped where it stands never gives back, and the batch it left open would
- * hold every line after it off the glass: the account has to be said, and
- * seen, with both left as they are. Never in a shipped build. */
+ * stopped where it stands never gives back: the account has to be said, and
+ * seen on the glass the panic takes, with it left as it is. Never in a
+ * shipped build. */
 #include "klib.h"
 #include "amp.h"
 #include "baton.h"
 #include "serial.h"
-#include "video.h"
 
 #ifdef CONFIG_PANIC_STOP_PROOF
 
@@ -95,7 +93,6 @@ __attribute__((noreturn)) void PanicStopProof(void)
     WireDrain();
 
     console_lock_acquire();
-    VideoBatchBegin();
     __atomic_store_n(&s_console_held, 1u, __ATOMIC_RELEASE);
     for (;;) {
         /* The clock read into registers: a core QEMU looks at twice and finds

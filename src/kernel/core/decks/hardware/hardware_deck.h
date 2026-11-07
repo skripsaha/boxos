@@ -33,24 +33,21 @@
 #define HW_DISK_FLUSH         0x52
 #define HW_DISK_INFO          0x53
 
-#define HW_VGA_PUTCHAR          0x70
-#define HW_VGA_PUTSTRING        0x71
-#define HW_VGA_CLEAR_SCREEN     0x72
-#define HW_VGA_CLEAR_LINE       0x73
-#define HW_VGA_CLEAR_TO_EOL     0x74
-#define HW_VGA_GET_CURSOR       0x75
-#define HW_VGA_SET_CURSOR       0x76
-#define HW_VGA_SET_COLOR        0x77
-#define HW_VGA_GET_COLOR        0x78
-#define HW_VGA_SCROLL_UP        0x79
-#define HW_VGA_NEWLINE          0x7A
-#define HW_VGA_GET_DIMENSIONS   0x7B
-/* A rectangle of finished cells, laid down in one op. The others say things;
- * this one draws, and the difference is load-bearing — see HwVgaPaint. */
-#define HW_VGA_PAINT            0x7C
-/* Move the cursor by a signed count of cells, resolved against the console's
- * own position — the only party that knows it. See HwVgaStepCursor. */
-#define HW_VGA_STEP_CURSOR      0x7D
+/* The screen is lent to the one system program that draws (screen.h). */
+#define HW_SCREEN_CLAIM         0x60
+#define HW_SCREEN_RELEASE       0x61
+
+/*
+ * ‼ 0x70-0x7D ARE SPENT, AND NONE OF THEM COMES BACK.
+ *
+ * They were hw.vga.putchar, putstring, clear, clear_line, clear_eol,
+ * cursor.get, cursor.set, color.get, color.set, scroll, newline, dims, paint
+ * and step: fourteen ways for any program to draw through the kernel. The
+ * kernel draws nothing now — the screen is the display program's (0x60) and
+ * a program with no display says its text into the log ring (HW_LOG_SAY). The
+ * numbers stay spent so an old caller is told there is no such op, never
+ * handed a different one.
+ */
 
 #define HW_SYSTEM_REBOOT        0x80
 #define HW_SYSTEM_SHUTDOWN      0x81
@@ -60,6 +57,16 @@
  * fixed physical window (klib_logring.h). Same wire shape as HW_LOG_READ so
  * one reader in userspace serves both. */
 #define HW_LOG_PREVIOUS         0x84
+/* A program's run of text into the log ring, and the bell the screen's holder
+ * hangs on it (klib_logring.h). */
+#define HW_LOG_SAY              0x85
+#define HW_LOG_BELL             0x86
+
+/* HW_LOG_READ's optional flags word. */
+#define HW_LOG_READ_TONES       0x01u
+
+/* The most one HW_LOG_SAY takes: a page. A longer run is several. */
+#define HW_LOG_SAY_MAX          4096u
 
 /*
  * ‼ A RETIRED OPCODE IS NEVER REISSUED.

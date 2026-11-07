@@ -15,7 +15,7 @@ PerfTraceRing g_perf_ring;
    Handles: %u %d %s %x %llu %llx %02x %% and zero-pad widths. */
 static void ring_print(const char *s)
 {
-    while (*s) LogRingPut(*s++);
+    while (*s) LogRingPut(*s++, LOG_TONE_PLAIN);
 }
 
 static void serial_printf(const char *fmt, ...)
@@ -25,7 +25,7 @@ static void serial_printf(const char *fmt, ...)
 
     while (*fmt)
     {
-        if (*fmt != '%') { LogRingPut(*fmt++); continue; }
+        if (*fmt != '%') { LogRingPut(*fmt++, LOG_TONE_PLAIN); continue; }
         fmt++;
 
         /* Parse zero-pad and width */
@@ -55,7 +55,7 @@ static void serial_printf(const char *fmt, ...)
             if (ll >= 2)
             {
                 long long v = va_arg(ap, long long);
-                if (v < 0) { LogRingPut('-'); v = -v; }
+                if (v < 0) { LogRingPut('-', LOG_TONE_PLAIN); v = -v; }
                 utoa64((uint64_t)v, tmp, 10);
             }
             else
@@ -72,7 +72,7 @@ static void serial_printf(const char *fmt, ...)
             /* zero-pad to requested width */
             int len = 0;
             for (const char *p = tmp; *p; p++) len++;
-            while (len < width) { LogRingPut(pad_zero ? '0' : ' '); len++; }
+            while (len < width) { LogRingPut(pad_zero ? '0' : ' ', LOG_TONE_PLAIN); len++; }
             ring_print(tmp);
             break;
         }
@@ -82,17 +82,18 @@ static void serial_printf(const char *fmt, ...)
             break;
         }
         case '%':
-            LogRingPut('%');
+            LogRingPut('%', LOG_TONE_PLAIN);
             break;
         default:
-            LogRingPut('%');
-            LogRingPut(*fmt);
+            LogRingPut('%', LOG_TONE_PLAIN);
+            LogRingPut(*fmt, LOG_TONE_PLAIN);
             break;
         }
         fmt++;
     }
 
     va_end(ap);
+    LogRingSaid();
 }
 
 /* ------------------------------------------------------------------ */

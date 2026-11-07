@@ -171,6 +171,14 @@
 
 #define CABIN_HEAP_MAX_SIZE            BOXOS_USER_HEAP_MAX_SIZE
 
+/* Screen window — where hw.screen.claim puts the glass in the one cabin that
+ * holds it (boxos_screen.h). Fixed rather than allocated: a cabin holds the
+ * screen at most once at a time, so there is nothing to choose. Sits in the
+ * free gap between the slot reservations and the Bay window; 2 GiB is room
+ * for a 16384x16384 framebuffer of four-byte pixels, twice over. */
+#define CABIN_SCREEN_BASE              0x0000400080000000ULL
+#define CABIN_SCREEN_END               0x0000400100000000ULL
+
 /* Bay window — per-cabin VA range for cross-cabin shared memory mapped
  * via bay_open. Anchored well above the slot reservations (which top out
  * at CABIN_TOUCH_SLOTS_END = 0x4000_0030_0000) and well below the bit-47

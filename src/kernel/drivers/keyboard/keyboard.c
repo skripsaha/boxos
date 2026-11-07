@@ -8,6 +8,7 @@
 #include "irqchip.h"
 #include "scheduler.h"   /* g_global_tick, g_timer_frequency */
 #include "touch.h"
+#include "screen.h"      /* ScreenSwapKnock — Ctrl+Alt+Esc is the machine's */
 #include "logbook.h"
 #include "amp.h"         /* amp_get_core_index, MAX_CORES — per-core prefix state */
 #include "kb_event.h"    /* kb_event_t + KB_MOD_* — shared keyboard ABI */
@@ -83,6 +84,13 @@ static volatile uint8_t kb_e0_pending[MAX_CORES];
  * is the only key that carries this prefix, and its bytes must never reach the
  * modifier, lock or repeat logic — see keyboard_handle_scancode. */
 static volatile uint8_t kb_e1_swallow[MAX_CORES];
+
+/* Esc is down as half of Ctrl+Alt+Esc (see keyboard_handle_scancode). A
+ * keyboard's own typematic repeats a held key's make code, and the screen
+ * turns over once per press, not once per repeat: the edge is the first make
+ * after a break. One byte for every transport — PS/2 and USB HID can decode on
+ * two cores at once, hence the exchange. */
+static volatile uint8_t kb_screen_key_down;
 
 /* ─── LED state ─────────────────────────────────────────────────────────── */
 
@@ -876,6 +884,7 @@ void keyboard_handle_scancode(uint8_t scancode)
              * unknown modifiers instead of a repeat nothing can silence. */
             kb_e0_pending[core] = 0;
             kb_e1_swallow[core] = 0;
+            __atomic_store_n(&kb_screen_key_down, 0, __ATOMIC_RELAXED);
             kb_forget_repeat();
             __atomic_store_n(&kb_state.shift_pressed, 0, __ATOMIC_RELAXED);
             __atomic_store_n(&kb_state.ctrl_pressed,  0, __ATOMIC_RELAXED);
@@ -982,6 +991,26 @@ void keyboard_handle_scancode(uint8_t scancode)
                           __atomic_load_n(&kb_state.num_lock,  __ATOMIC_RELAXED),
                           scroll);
         return;
+    }
+
+    /* ‼ CTRL+ALT+ESC IS THE MACHINE'S, AND NO PROGRAM EVER HEARS IT.
+     *
+     * It turns the glass over to the Emergency Screen and back (screen.h) —
+     * the one way to see what the kernel says when the display program has
+     * stopped drawing. It is caught here, in the decoder, because this is the
+     * one place that knows the modifiers AND can keep the key from being
+     * published: a kernel ear on the `keyboard` Touch would hear it after
+     * every program had, and Esc ends half the programs on this machine. The
+     * keyboard knows nothing more of the screen than that one call. */
+    if (key == 0x01) {                     /* Escape */
+        if (is_release) {
+            __atomic_store_n(&kb_screen_key_down, 0, __ATOMIC_RELAXED);
+        } else if (__atomic_load_n(&kb_state.ctrl_pressed, __ATOMIC_RELAXED) &&
+                   __atomic_load_n(&kb_state.alt_pressed,  __ATOMIC_RELAXED)) {
+            if (!__atomic_exchange_n(&kb_screen_key_down, 1, __ATOMIC_ACQ_REL))
+                ScreenSwapKnock();
+            return;
+        }
     }
 
     /* Key release — cancel repeat if it matches */

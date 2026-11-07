@@ -83,6 +83,10 @@ void idt_set_entry(int index, uint64_t handler, uint16_t selector, uint8_t type_
 interrupt_frame_t *IrqFrameInFlight(void);
 
 void IrqTheTickAnswers(void);
+/* True on a core inside its NMI handler — a context where the xAPIC ICR pair,
+ * guarded only by cli, may already be half written by the code the NMI
+ * interrupted, so nothing here may send an IPI (the log ring's bell). */
+bool IdtNmiHere(void);
 void IrqTheKeyboardAnswers(void);
 void idt_load(void);
 void idt_test(void);

@@ -55,7 +55,8 @@ void io_flush(void);
  *
  * UTF-8 input: passes through untouched, every byte of it. A printer does
  * not decide what a character looks like — the code that owns the font does,
- * at the moment it draws (kernel canvas.c, font/glyph_fold.h), where a
+ * at the moment it draws (boxos_glyph_fold.h, in the display program and the
+ * kernel's Emergency Screen), where a
  * codepoint with no glyph becomes a visible box and nothing is lost on the
  * way to the log. Replacing sequences here used to cost the character in the
  * log file as well, because it happened in this cabin, before the syscall.

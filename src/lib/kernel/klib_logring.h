@@ -7,7 +7,7 @@
  * lines that scrolled away. Photographing the screen recovers a frame, not a
  * chronology.
  *
- * So every byte `kputchar()` emits is kept here, in kernel memory: `logsave`
+ * So every byte kprintf says is kept here, in kernel memory: `logsave`
  * writes it to the volume through Current, and the serial line reads it —
  * the Wire (drivers/serial/serial.c) is this ring's reader, driven by the
  * UART's own interrupt, so no core ever waits on a UART. Three reasons this
@@ -35,10 +35,17 @@
  *     zeroed and there is no C world to keep anything in;
  *   - it holds what was SAID, not what a serial line carried: no '\r' is added
  *     here, because none was said;
- *   - userspace output is in it too. Its Manifest VGA ops feed the ring
- *     directly (hardware_ops.c), and deliberately not through the serial
- *     mirror, which a board build turns off. A log with the kernel's answers
- *     and none of the commands is one somebody has to guess at.
+ *   - userspace output is in it too, in the order it reached the screen: the
+ *     display program says what it draws into the ring (hw.log.say), and a
+ *     program with no display says its text there itself. A log with the
+ *     kernel's answers and none of the commands is one somebody has to guess
+ *     at.
+ *
+ * And it is the only thing on the glass. kprintf draws nothing: the display
+ * program draws the ring's lines in their order beside everything else, and
+ * while no program holds the screen the kernel's Emergency Screen draws its
+ * tail (emergency_screen.c). Each byte carries a Tone beside it
+ * (boxos_log_tone.h) — what kind of text it is, never its colour.
  *
  * ‼ debug_printf does NOT reach here — it compiles to nothing unless
  * DEBUG=on. A probe meant to be read on a board is written with kprintf.
@@ -50,6 +57,7 @@
  * fights them (measured: conflicting typedefs for uint_fast32_t on the first
  * build of this file). */
 #include "ktypes.h"
+#include "boxos_log_tone.h"
 
 /* 1 MiB, a power of two so the position maps to a slot by mask. A boot in
  * QEMU is ~21 KB; a board with two controllers, thirty ports and a recovery
@@ -63,16 +71,58 @@
  * has depended on since it was written. */
 void LogRingLockInit(void);
 
-/* One byte, from any core, from any context including an interrupt. Kicks
- * the wire once the byte is in. */
-void LogRingPut(char c);
+/* One byte and its tone, from any core, from any context including an
+ * interrupt. Kicks the wire once the byte is in. */
+void LogRingPut(char c, uint8_t tone);
 
-/* For the wire, lock-free: the position just past the last byte said, and
- * the byte at a position. A byte is stable for as long as it is held — a
- * reader that stays within LOGRING_CAPACITY of `written`, which the wire
- * checks before every read, sees what was said. */
+/* A whole run of bytes in one tone, under one hold of the ring's lock, so
+ * nothing else lands inside it — and the end of an utterance (LogRingSaid).
+ * *out_start and *out_end are the run's positions, [start, end): the display
+ * program says what it draws and then knows which part of the ring was its
+ * own. */
+void LogRingSay(const char *bytes, uint64_t n, uint8_t tone,
+                uint64_t *out_start, uint64_t *out_end);
+
+/* The end of an utterance: one kprintf, one run said by a program. The bytes
+ * before it are a whole thing to show, though a line may not have ended —
+ * a prompt, an echoed key and "\b \b" never end one. Marks the bell due if
+ * one is hung; ringing it is LogRingBellKnock's. */
+void LogRingSaid(void);
+
+/* For the wire and the Emergency Screen, lock-free: the position just past
+ * the last byte said, and the byte and its tone at a position. A byte is
+ * stable for as long as it is held — a reader that stays within
+ * LOGRING_CAPACITY of `written`, and checks again after reading, sees what was
+ * said. */
 uint64_t LogRingWritten(void);
 char     LogRingByteAt(uint64_t pos);
+uint8_t  LogRingToneAt(uint64_t pos);
+
+/* ── The bell — how the screen's holder hears the ring without looking ──
+ *
+ * The display program draws the ring's lines in their order and sleeps when
+ * it has drawn them all. Before it sleeps it hangs a bell with the position
+ * it has read to; the end of the next utterance past that position rings it
+ * once — the same record system.bell pushes (no sender, ERR_WOULD_BLOCK),
+ * which moves the Result cursor its sleep is watching. One bell: the ring
+ * rings the screen's holder and nobody else (the op checks who is asking).
+ *
+ * LogRingBellHang answers true — and hangs nothing — when an utterance past
+ * `from` is already there: the caller has news and must not sleep. That is
+ * what closes the gap between its last read and its hang.
+ *
+ * ‼ THE KNOCK IS NEVER MADE UNDER THE CONSOLE'S OR THE RING'S LOCK. BatonPass
+ * can print — before BatonInit, and on an ICR the LAPIC would not take — and a
+ * print under g_kprintf_lock is a core spinning on its own lock with
+ * interrupts off. So an utterance only marks the bell due, under the ring's
+ * lock; LogRingBellKnock knocks, called once the locks are down — at the end
+ * of kvprintf, at the end of hw.log.say, and from the BSP's tick for the
+ * utterances that could not knock: an NMI handler's line (the xAPIC ICR pair
+ * is guarded only by cli, which an NMI goes through) and a panic's. A bell is
+ * hung only by a running program, so none is due before BatonInit. */
+bool LogRingBellHang(uint32_t pid, uint64_t from);
+void LogRingBellDrop(void);
+void LogRingBellKnock(void);
 
 /* For a panic on a core that may have died holding the ring's lock. */
 void LogRingForceRelease(void);
@@ -93,6 +143,11 @@ void LogRingForceRelease(void);
  */
 uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
                      uint64_t *out_oldest, uint64_t *out_written);
+
+/* The same copy with the tone of every byte copied, into `tones` (as many as
+ * the bytes). */
+uint64_t LogRingReadTones(uint64_t from, void *dst, uint8_t *tones, uint64_t max,
+                          uint64_t *out_oldest, uint64_t *out_written);
 
 /* Write the carry-over window back out of cache, NOW.
  *

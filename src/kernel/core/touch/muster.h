@@ -73,7 +73,6 @@
     X("apei:processor:error")           \
     X("cet:enabled")                    \
     X("cet:fault:cp")                   \
-    X("display:ready")                  \
     X("efi:capsule:armed")              \
     X("efi:capsule:delivered")          \
     X("efi:capsule:set-fail")           \
@@ -104,6 +103,7 @@
     X("pku:fault:denied")               \
     X("process:died")                   \
     X("process:spawned")                \
+    X("screen")                         \
     X("seat:emptied")                   \
     X("seat:ready")                     \
     X("seat:taken")                     \

@@ -31,7 +31,11 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti -fcoroutines \
 
 BOXLIB_DIR   = ../boxlib
 BOXCXX_DIR   = ../boxcxx
-LDFLAGS      = -nostdlib -static -T $(BOXLIB_DIR)/user.ld
+# The C++ link force-pulls tls_init.o out of libboxcxx.a: nothing references it
+# by symbol (it registers itself through .init_array), so without this the
+# daemon ran with FS base 0 and the first thread_local touch — the exception
+# globals of a throw, __cxa_finalize on the way out — faulted at address 0.
+LDFLAGS      = -nostdlib -static -T $(BOXLIB_DIR)/user.ld -Wl,--undefined=__boxcxx_tls_bootstrap
 BOXLIB       = ../boxlib/libbox.a
 BOXCXX       = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o

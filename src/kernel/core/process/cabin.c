@@ -12,6 +12,7 @@
 #include "auth_tags.h"
 #include "atomics.h"
 #include "bay.h"       /* BayCleanupCabin — the claims are the cabin's */
+#include "screen.h"    /* ScreenCleanupCabin — the screen window is a device's */
 #include "brook.h"     /* BrookCleanupCabin — the mapping half of a Brook claim */
 #include "touch.h"     /* TouchCleanupProcess — each strand's death, committed once */
 #include "proc_exit.h"
@@ -182,6 +183,12 @@ void cabin_destroy(cabin_t *cabin)
 {
     if (!cabin)
         return;
+
+    /* The screen window first, before anything else of this cabin goes: its
+     * frames are the glass, a device's, and vmm_destroy_context would hand
+     * every one of them to the PMM. Letting go also gives the glass back to
+     * the Emergency Screen. */
+    ScreenCleanupCabin(cabin);
 
     /* Clear the MemTag bookkeeping on the shared IPC ring pages before
      * vmm_destroy_context frees them.  These tags are CABIN-wide (every

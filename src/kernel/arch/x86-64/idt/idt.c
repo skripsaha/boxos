@@ -26,6 +26,7 @@
 #include "keyboard.h"
 #include "ahci.h"
 #include "amp.h"
+#include "klib_logring.h" /* LogRingBellKnock — the tick knocks for the NMI's lines */
 #include "kcore.h"
 #include "xhci_interrupt.h"
 #include "linker_symbols.h"
@@ -983,6 +984,16 @@ typedef struct NmiVoice
 
 static NmiVoice g_nmi_voice[MAX_CORES];
 
+/* How deep this core is in handle_nmi (IdtNmiHere). Written by its own core
+ * only, so no atomic; an NMI does not nest inside its own handler until its
+ * IRET, but a #MC inside it may print, so it counts rather than flags. */
+static uint8_t g_nmi_here[MAX_CORES];
+
+bool IdtNmiHere(void)
+{
+    return g_nmi_here[amp_get_core_index()] != 0;
+}
+
 /* True exactly once per core per kind — and it closes that kind's mouth in
  * the same breath in which it answers. */
 static bool nmi_first_of_kind(NmiVoice *voice, uint8_t kind)
@@ -1273,7 +1284,10 @@ void exception_handler(interrupt_frame_t *frame)
      * of handle_nmi for why the return is the whole point. */
     if (frame->vector == 2)
     {
+        uint8_t core = amp_get_core_index();
+        g_nmi_here[core]++;
         handle_nmi(frame);
+        g_nmi_here[core]--;
         return;
     }
 
@@ -1938,6 +1952,11 @@ void IrqTheTickAnswers(void)
 
         /* Software key repeat driven by PIT tick */
         keyboard_timer_tick();
+
+        /* The log ring's bell for the utterances that could not knock for
+         * themselves — an NMI handler's line (klib_logring.h). BSP to BSP:
+         * the baton needs no IPI from here. */
+        LogRingBellKnock();
 
         /* Deferred touch event delivery */
         TouchQueueTick(__atomic_load_n(&g_global_tick, __ATOMIC_RELAXED));

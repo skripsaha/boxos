@@ -2,7 +2,6 @@
 #define KEYBOARD_H
 
 #include "ktypes.h"
-#include "video.h"
 #include "boxos_limits.h"
 #include "kernel_config.h"   /* CONFIG_KB_REPEAT_{DELAY,RATE}_MS */
 

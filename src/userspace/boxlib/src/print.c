@@ -970,9 +970,9 @@ static void emit_text(StrandPrintState *ps, const char *bytes, int len, Color fg
  * the same em dash through untouched and it came out as three empty cells on
  * the board. Two printers, two different contracts on one character, and
  * neither of them could see the font. The fold now happens once, at the font
- * — canvas.c print_utf8_byte_locked, font/glyph_fold.h — which is the only
- * code that knows what a cell can hold. A chunk may end mid-sequence; the
- * Canvas assembles across calls, so a split costs nothing. */
+ * — boxos_glyph_fold.h, in the hands that draw — which is the only code that
+ * knows what a cell can hold. A chunk may end mid-sequence; the hand that
+ * draws assembles a character across runs, so a split costs nothing. */
 static void emit_chunks(StrandPrintState *ps, const char* data, size_t len,
                         bool newline, bool screen)
 {
@@ -1085,7 +1085,7 @@ void clear(void)
  *
  * UTF-8: passes through whole, format string and %s alike. What a character
  * looks like is settled once, at the font, by the only code that holds it
- * (kernel canvas.c / font/glyph_fold.h) — not here, where the font cannot be
+ * (boxos_glyph_fold.h, where the glyphs are drawn) — not here, where the font cannot be
  * seen and the substitution reached the log as well as the glass.
  *
  * One printf currently produces N×emit_run calls (N = colour changes). For

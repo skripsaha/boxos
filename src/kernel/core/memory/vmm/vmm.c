@@ -12,7 +12,6 @@
 #include "boxos_addresses.h"
 #include "clockboard.h"
 #include "amp.h"
-#include "video.h"
 #include "e820.h"
 #include "touch.h"
 #include "logbook.h"   /* TouchPublish for pku:fault:denied (Phase 2H) */
@@ -3033,6 +3032,65 @@ bool vmm_unmap_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_count)
     return success;
 }
 
+/* Every entry of [virt_addr, +page_count pages) present, leading to `phys`
+ * onwards — `phys_step` apart: VMM_PAGE_SIZE for a contiguous range, 0 for one
+ * frame behind them all — with `flags`, in one hold of ctx->lock and one
+ * batched shootdown. Present to present: no page table is made, so nothing
+ * can fail halfway, and no address of the range is ever absent — a strand of
+ * the cabin that touches it meanwhile reaches the old frame or the new one,
+ * never a fault. False, and nothing changed, if any entry is absent. */
+bool vmm_retarget_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_count,
+                        uintptr_t phys, uintptr_t phys_step, uint64_t flags)
+{
+    if (!ctx || page_count == 0 || !vmm_is_page_aligned(virt_addr))
+        return false;
+
+    spin_lock(&ctx->lock);
+    for (size_t i = 0; i < page_count; i++)
+    {
+        pte_t *pte = vmm_get_pte(ctx, virt_addr + i * VMM_PAGE_SIZE);
+        if (!pte || !(*pte & VMM_FLAG_PRESENT))
+        {
+            spin_unlock(&ctx->lock);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < page_count; i++)
+    {
+        pte_t *pte = vmm_get_pte(ctx, virt_addr + i * VMM_PAGE_SIZE);
+        *pte = vmm_make_pte(phys + i * phys_step, flags | VMM_FLAG_PRESENT);
+    }
+    spin_unlock(&ctx->lock);
+
+    vmm_shootdown_pages(ctx, virt_addr, page_count);
+    return true;
+}
+
+/* vmm_unmap_pages with one batched shootdown instead of one per page. The
+ * frames are not freed — this is for ranges whose frames are not the cabin's
+ * (a device's, a shared page's). Returns how many entries were present. */
+size_t vmm_unmap_range(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_count)
+{
+    if (!ctx || page_count == 0 || !vmm_is_page_aligned(virt_addr))
+        return 0;
+
+    size_t cleared = 0;
+    spin_lock(&ctx->lock);
+    for (size_t i = 0; i < page_count; i++)
+    {
+        pte_t *pte = vmm_get_pte(ctx, virt_addr + i * VMM_PAGE_SIZE);
+        if (!pte || !(*pte & VMM_FLAG_PRESENT))
+            continue;
+        VmmNoteUnmapped(ctx, vmm_pte_to_flags(*pte));
+        *pte = 0;
+        cleared++;
+    }
+    spin_unlock(&ctx->lock);
+
+    vmm_shootdown_pages(ctx, virt_addr, page_count);
+    return cleared;
+}
+
 /* Try to take `size_aligned` bytes from the kernel-MMIO free list.
  *
  * First-fit on the sorted list. If the chosen node is larger than
@@ -4740,9 +4798,6 @@ void vmm_init(void)
     current_context = kernel_context;
     kernel_context->pml4 = (page_table_t *)vmm_phys_to_virt(saved_pml4_phys);
 
-    // VGA MUST be rebased FIRST — all subsequent prints go through VGA
-    VideoActivatePullMap();
-
     // Rebase PMM bitmap to Pull Map address
     pmm_activate_pull_map();
 
@@ -5351,7 +5406,7 @@ int vmm_map_touch_ring(vmm_context_t *ctx, uintptr_t phys_page)
  * the address to the end of the leaf that maps it. false means the address
  * is not user memory the caller may touch.
  *
- * Two hardware facts decide what this function must do.
+ * Three hardware facts decide what this function must do.
  *
  * 1. PAGE SIZE. A PDE with PS=1 (bit 7) is a LEAF mapping a 2 MiB page,
  *    and a PDPTE with PS=1 is a leaf mapping a 1 GiB page — Intel SDM
@@ -5397,6 +5452,18 @@ static bool vmm_user_window(vmm_context_t *ctx, uintptr_t user_vaddr,
     if (!(entry & VMM_FLAG_PRESENT) || !(entry & VMM_FLAG_USER))
         return false;
     if (for_write && !(entry & VMM_FLAG_WRITABLE))
+        return false;
+
+    /* 3. MEMORY TYPE. The Pull Map reaches RAM write-back, and a porthole
+     *    reaches the frame through it — so a frame the cabin holds under any
+     *    other type (the screen window: write-combining framebuffer, or the
+     *    uncacheable VGA text page) would be reached through a second,
+     *    cacheable alias of device memory, which Intel SDM Vol 3A §12.12.4
+     *    forbids, or not reached at all where the framebuffer lies above the
+     *    Pull Map's top. Only PAT index 0 (WB) is ordinary memory here; every
+     *    other index any mapping of this kernel uses is a device's, and none
+     *    of those is a cabin's to hand to the kernel as a buffer. */
+    if (vmm_pte_pat_index(entry, level != 1) != 0)
         return false;
 
     uintptr_t page_size = (level == 3) ? (1ULL << 30)   /* 1 GiB PDPT leaf */
