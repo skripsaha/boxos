@@ -6508,9 +6508,11 @@ run_finish() {
     # Asked again after the word anyway: nobody wears display any more — the
     # daemon is gone — and the shell answered the asking. Not a count of what
     # is alive, which is whatever the machine autostarts besides.
-    grep -q "^display: nothing wears that tag$" "$L" \
+    # With the display gone, finish says its answer into the ring itself, and
+    # the kernel marks a line of anyone but the screen's holder with its pid.
+    grep -qE "^(\[[0-9]+\] )?display: nothing wears that tag$" "$L" \
         && ok "finish: after the word anyway the daemon is gone and the shell still answers" \
-        || bad "finish: the daemon survived the word anyway, or the shell stopped answering ($(grep -m1 '^display: ' "$L" || echo 'no answer at all'))"
+        || bad "finish: the daemon survived the word anyway, or the shell stopped answering ($(grep -m1 -E '^(\[[0-9]+\] )?display: ' "$L" || echo 'no answer at all'))"
     grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
         && bad "finish: the kernel spoke of a stall or fault" \
         || ok "finish: no verdict, no panic"
