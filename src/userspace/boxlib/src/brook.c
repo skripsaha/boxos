@@ -227,35 +227,40 @@ static inline volatile uint32_t *brook_peer_bell(BrookHeaderUser *h, uint32_t ro
     return (role == BROOK_WRITER) ? &h->reader_bell : &h->writer_bell;
 }
 
+/* The other side has gone: its alive flag is down after it was once there.
+ * A streaming stream waits through a peer's leaving and coming back, so for
+ * it nobody ever departs. */
+static bool brook_peer_departed(const Brook *b)
+{
+    if (b->streaming) return false;
+    BrookHeaderUser   *h     = b->hdr;
+    volatile uint32_t *alive = (b->role == BROOK_WRITER) ? &h->reader_alive : &h->writer_alive;
+    volatile uint32_t *ever  = (b->role == BROOK_WRITER) ? &h->reader_ever_attached
+                                                         : &h->writer_ever_attached;
+    return brook_load_acquire_u32(alive) == 0 && brook_load_acquire_u32(ever) != 0;
+}
+
 /* Has the wait ended? Each is its side's own question — "is there a frame
  * yet", "is there room yet" — asked one last time with the bell already
- * hanging, and it must also answer TRUE for a peer that has DEPARTED. A stream
- * whose other end went away between the caller's look and this one would
- * otherwise be slept on for ever: the departure is a store to `*_alive` that
- * no sleeping strand is going to read.
+ * hanging; brook_sleep_until asks about a departed peer itself.
  *
  * Neither decides anything. The caller's loop re-runs and does the real work —
  * the copy, or the freeze-CAS that turns a departure into EOF. */
-static bool brook_pop_ready(Brook *b)
+static bool brook_pop_ready(void *ctx)
 {
-    BrookHeaderUser *h = b->hdr;
+    BrookHeaderUser *h = ((Brook *)ctx)->hdr;
     uint64_t head = brook_load_relaxed_u64(&h->head);   /* ours; single reader */
     uint64_t tail = brook_load_acquire_u64(&h->tail);
-    if (head != tail) return true;
-    if (b->streaming) return false;
-    return brook_load_acquire_u32(&h->writer_alive) == 0 &&
-           brook_load_acquire_u32(&h->writer_ever_attached) != 0;
+    return head != tail;
 }
 
-static bool brook_push_ready(Brook *b)
+static bool brook_push_ready(void *ctx)
 {
+    Brook           *b = ctx;
     BrookHeaderUser *h = b->hdr;
     uint64_t tail = brook_load_relaxed_u64(&h->tail);   /* ours; single writer */
     uint64_t head = brook_load_acquire_u64(&h->head);
-    if ((tail - head) < b->frame_count) return true;
-    if (b->streaming) return false;
-    return brook_load_acquire_u32(&h->reader_alive) == 0 &&
-           brook_load_acquire_u32(&h->reader_ever_attached) != 0;
+    return (tail - head) < b->frame_count;
 }
 
 /* Go to sleep on this stream, and be reachable while asleep.
@@ -268,13 +273,14 @@ static bool brook_push_ready(Brook *b)
  * the two.
  *
  * `recheck` is the caller's own question — "is there a frame yet", "is there
- * room yet" — asked again with the bell already hanging. It also has to
- * answer true for a peer that has DEPARTED, or a stream whose other end went
- * away between the caller's look and this one would be slept on for ever.
+ * room yet" — asked again with the bell already hanging, and with it whether
+ * the peer has DEPARTED: a stream whose other end went away between the
+ * caller's look and this one would otherwise be slept on for ever, because
+ * the departure is a store to `*_alive` that no sleeping strand reads.
  *
  * Returns with the bell taken back in. The caller loops and looks again: this
  * promises nothing about how long it slept, only that it did not spin. */
-static void brook_sleep_until(Brook *b, bool (*recheck)(Brook *))
+static void brook_sleep_until(Brook *b, bool (*recheck)(void *ctx), void *ctx)
 {
     BrookHeaderUser   *h    = b->hdr;
     volatile uint32_t *mine = brook_own_bell(h, b->role);
@@ -290,7 +296,7 @@ static void brook_sleep_until(Brook *b, bool (*recheck)(Brook *))
                      __ATOMIC_SEQ_CST);
 
     TurnInMark mark = box_mark();
-    if (!recheck(b)) box_turn_in(mark);
+    if (!recheck(ctx) && !brook_peer_departed(b)) box_turn_in(mark);
 
     __atomic_store_n(mine, 0u, __ATOMIC_RELEASE);
 }
@@ -637,9 +643,7 @@ static int brook_push_core(Brook *b, const void *frame,
          *
          * Streaming mode (b->streaming): no terminal decision — keep
          * waiting through reader-leave/re-attach cycles. */
-        if (!b->streaming &&
-            brook_load_acquire_u32(&h->reader_alive) == 0 &&
-            brook_load_acquire_u32(&h->reader_ever_attached) != 0) {
+        if (brook_peer_departed(b)) {
             if (brook_cas_freeze_peer(&h->reader_alive)) {
                 return -ERR_PROCESS_TERMINATED;
             }
@@ -668,7 +672,7 @@ static int brook_push_core(Brook *b, const void *frame,
         /* BLOCK. Nothing to watch for and no deadline to watch it with, so
          * stop watching: hang the bell and go to sleep. A reader that frees a
          * slot rings it; so does the kernel if the reader departs. */
-        brook_sleep_until(b, brook_push_ready);
+        brook_sleep_until(b, brook_push_ready, b);
     }
 }
 
@@ -722,9 +726,7 @@ static int brook_pop_core(Brook *b, void *frame,
          *
          * Streaming mode (b->streaming): skip terminal decision —
          * block through writer-leave/re-attach cycles indefinitely. */
-        if (!b->streaming &&
-            brook_load_acquire_u32(&h->writer_alive) == 0 &&
-            brook_load_acquire_u32(&h->writer_ever_attached) != 0) {
+        if (brook_peer_departed(b)) {
             if (brook_cas_freeze_peer(&h->writer_alive)) {
                 return -ERR_STREAM_CLOSED;
             }
@@ -748,7 +750,7 @@ static int brook_pop_core(Brook *b, void *frame,
         /* BLOCK — hang the bell and sleep. This is the wait that used to hold
          * a core for as long as a stream was quiet, which on a console lane or
          * a Current is most of the time a machine is on. */
-        brook_sleep_until(b, brook_pop_ready);
+        brook_sleep_until(b, brook_pop_ready, b);
     }
 }
 
@@ -850,6 +852,35 @@ uint32_t brook_available(const Brook *b)
     uint64_t head = brook_load_relaxed_u64(&b->hdr->head);
     uint64_t n = tail - head;
     return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
+}
+
+int brook_written(const Brook *b, uint32_t back, void *frame)
+{
+    if (!b || !frame)             return -ERR_INVALID_ARGS;
+    if (b->role != BROOK_WRITER)  return -ERR_INVALID_ARGS;
+    /* The writer's own cursor: nobody else moves it. */
+    uint64_t tail = brook_load_relaxed_u64(&b->hdr->tail);
+    if (back >= b->frame_count || back >= tail) return -ERR_OUT_OF_RANGE;
+    uint64_t pos = tail - 1u - back;
+    const uint8_t *slot = b->slots + ((uint32_t)(pos & (b->frame_count - 1u))) * b->frame_size;
+    memcpy(frame, slot, b->frame_size);
+    return OK;
+}
+
+int brook_wait(Brook *b, bool (*settled)(void *ctx), void *ctx)
+{
+    if (!b || !b->hdr || !settled) return -ERR_INVALID_ARGS;
+    for (;;) {
+        if (settled(ctx))           return OK;
+        if (brook_peer_departed(b)) return -ERR_PROCESS_TERMINATED;
+        brook_sleep_until(b, settled, ctx);
+    }
+}
+
+void brook_ring_peer(Brook *b)
+{
+    if (!b || !b->hdr) return;
+    brook_ring(brook_peer_bell(b->hdr, b->role));
 }
 
 uint32_t brook_free(const Brook *b)

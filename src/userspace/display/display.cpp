@@ -142,6 +142,10 @@ void DrawHeld()
 {
     if (g_held.empty()) return;
     Utter(std::string_view(g_said, g_said_length), [] {
+        // The text is in the ring: the writers are told so before anything
+        // else, the narrower the window a death could fall into (box/display.h,
+        // CONSOLE_ORDER_SAID). A hold is never more than one utterance.
+        LanesSaid(g_held.back().order);
         for (const ConsoleRun &Run : g_held) g_model->Apply(Run);
     });
     g_dirty = true;

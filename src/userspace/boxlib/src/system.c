@@ -142,7 +142,7 @@ void exit(int exit_code)
      * see a quiesced heap with no blocks held out in the magazine. */
     strand_pool_flush_self();
 
-    io_flush();
+    io_depart();
 
     _Exit(exit_code);
 }

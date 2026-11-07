@@ -6122,7 +6122,7 @@ rollcall_defects_on() {
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/strand.c"
 s = open(p).read()
-anchor = "    io_flush();\n"
+anchor = "    io_depart();\n"
 assert s.count(anchor) == 1, "rollcall strand anchor missing"
 s = s.replace(anchor, "    /* logcheck mutation: the strand leaves without handing in its frame */\n", 1)
 open(p, "w").write(s)

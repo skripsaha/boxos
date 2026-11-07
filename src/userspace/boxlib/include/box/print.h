@@ -40,6 +40,11 @@ void print_bytes_to_screen(const char* data, size_t len);
 
 void clear(void);
 void io_flush(void);
+/* The strand is leaving: what it staged is handed in, and it waits until the
+ * display has said everything it pushed — or says it itself if the display
+ * has died meanwhile. exit() and strand_exit() call it; it waits, so nothing
+ * else should. */
+void io_depart(void);
 
 /* printf with BoxOS-native colored runs.
  *

@@ -501,3 +501,14 @@ void LanesBellsTake() noexcept
     for (ConsoleLane *ln = g_lanes; ln; ln = ln->next)
         brook_bell_take(ln->brook);
 }
+
+void LanesSaid(std::uint64_t Order) noexcept
+{
+    // Only ever forward: a late frame numbered below one already said must not
+    // take back what a leaving writer was told (box/display.h).
+    std::uint64_t *Said = &g_console_order[CONSOLE_ORDER_SAID];
+    if (Order > __atomic_load_n(Said, __ATOMIC_RELAXED))
+        __atomic_store_n(Said, Order, __ATOMIC_RELEASE);
+    for (ConsoleLane *ln = g_lanes; ln; ln = ln->next)
+        brook_ring_peer(ln->brook);
+}

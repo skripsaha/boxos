@@ -388,6 +388,29 @@ static bool lane_ensure(StrandPrintState *ps)
     return true;
 }
 
+static void ring_say(const char *bytes, size_t len);
+
+/* The display died with this strand's frames in its lane: the text of every
+ * frame it never took, and of every one it took past what it had said
+ * (CONSOLE_ORDER_SAID), said into the log ring here, oldest first — nothing
+ * this strand pushed is lost to a display that died. The frames are the lane's
+ * own slots, untouched since: only this writer's next push writes one again.
+ * Before lane_fail, which gives the order's page back. */
+static void lane_resay(StrandPrintState *ps, Brook *dead)
+{
+    if (!dead || !ps->order) return;
+    uint64_t   said    = __atomic_load_n(&ps->order[CONSOLE_ORDER_SAID], __ATOMIC_ACQUIRE);
+    uint32_t   untaken = brook_available(dead);
+    ConsoleRun f;
+    uint32_t   count = 0;
+    while (brook_written(dead, count, &f) == OK && (count < untaken || f.order > said))
+        count++;
+    while (count-- > 0) {
+        if (brook_written(dead, count, &f) == OK && f.kind == CONSOLE_RUN_TEXT)
+            ring_say(f.text, f.len < CONSOLE_RUN_TEXT_MAX ? f.len : CONSOLE_RUN_TEXT_MAX);
+    }
+}
+
 /* Push one built frame. A full lane SLOWS the writer — output is never dropped
  * — and until this had a bell, the wait had to be a guess.
  *
@@ -432,6 +455,7 @@ static bool lane_push(StrandPrintState *ps, const ConsoleRun *f)
 
     Brook *dead = (Brook *)ps->lane;
     ps->lane = NULL;
+    lane_resay(ps, dead);
     lane_fail(ps);
     if (dead) brook_release(dead);
     return false;
@@ -533,6 +557,33 @@ void io_flush(void)
     StrandPrintState *ps = print_state_self();
     io_flush_state(ps);
     arrow_flush(ps);
+}
+
+/* Everything this strand pushed into its lane is said: the display's mark has
+ * reached the strand's last number (CONSOLE_ORDER_SAID). */
+static bool lane_said(void *ctx)
+{
+    StrandPrintState *ps = ctx;
+    return __atomic_load_n(&ps->order[CONSOLE_ORDER_SAID], __ATOMIC_ACQUIRE) >= ps->last_order;
+}
+
+/* A strand that leaves with its last lines still in the lane would lose them
+ * to a display that died in that moment — the program that ends the display
+ * is the first to do it. So it waits, on its lane's bell, until the display
+ * has said them, and says them itself if the display goes first. */
+void io_depart(void)
+{
+    StrandPrintState *ps = print_state_self();
+    io_flush_state(ps);
+    arrow_flush(ps);
+    if (g_io_mode != IO_MODE_IPC || ps->lane_state != LANE_OPEN) return;
+    if (brook_wait((Brook *)ps->lane, lane_said, ps) == OK) return;
+
+    Brook *dead = (Brook *)ps->lane;
+    ps->lane = NULL;
+    lane_resay(ps, dead);
+    lane_fail(ps);
+    brook_release(dead);
 }
 
 /* ===========================================================================
@@ -1070,6 +1121,7 @@ TouchTag console_listen(void)
          * here on. */
         Brook *dead = (Brook *)ps->lane;
         ps->lane = NULL;
+        lane_resay(ps, dead);
         lane_fail(ps);
         if (dead) brook_release(dead);
     }

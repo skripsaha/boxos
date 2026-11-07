@@ -160,6 +160,29 @@ uint32_t brook_frame_count(const Brook *b);
 uint32_t brook_available(const Brook *b);
 uint32_t brook_free(const Brook *b);
 
+/* The frame this writer wrote `back` frames ago (0 = its newest), copied into
+ * `frame` while the ring still holds it: a slot is written over only by the
+ * writer's own next push, whether or not the reader has taken it. For a
+ * writer whose reader is gone and left frames unsaid (box/print.c).
+ * Returns:
+ *   OK (0)                     — frame copied into `frame`
+ *   -ERR_OUT_OF_RANGE          — not written that long ago, or written over
+ *   -ERR_INVALID_ARGS          — NULL pointer, or not the writer */
+int brook_written(const Brook *b, uint32_t back, void *frame);
+
+/* Sleep on this side's own bell until `settled(ctx)` says the wait is over,
+ * or the other side has gone. What wakes it to look again: the peer's cursor
+ * moving, the peer's brook_ring_peer, and the kernel when the peer departs.
+ * No clock anywhere in it. Returns:
+ *   OK (0)                     — settled
+ *   -ERR_PROCESS_TERMINATED    — the peer went first
+ *   -ERR_INVALID_ARGS          — NULL pointer */
+int brook_wait(Brook *b, bool (*settled)(void *ctx), void *ctx);
+
+/* Ring the other side's bell, for a sleeper in brook_wait that waits on
+ * something besides a cursor. Nothing happens when nobody sleeps there. */
+void brook_ring_peer(Brook *b);
+
 /* Writer-side history, read from the shared header (no syscall). For a
  * reader holding a checkroom of lanes: ever_attached == false means nobody
  * has ever written — an empty ring is provably empty forever once the

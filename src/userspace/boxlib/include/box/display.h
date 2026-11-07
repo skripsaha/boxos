@@ -127,6 +127,22 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
 #define CONSOLE_ORDER_TAG     "console:order"
 #define CONSOLE_ORDER_BYTES   4096u
 
+/* How far the display has said: the highest order whose text it has said into
+ * the log ring, a word of the same page on a cache line of its own
+ * (CONSOLE_ORDER_SAID words in), stored the moment an utterance is in the ring
+ * and only ever forward. A strand that leaves waits for it to pass its own
+ * last frame (print.c, io_depart). A writer that finds the display dead says
+ * into the ring itself what is still in its lane past it, and what the display
+ * never took (lane_resay) — nothing it pushed is lost to a display that died.
+ *
+ * Two windows stay, and both are said here rather than left to be found.
+ * Killed between saying and storing, the display leaves those lines to be
+ * said twice: a few instructions wide, and a line twice is not a line lost.
+ * And a frame the display took, numbered below one it has already said — two
+ * writers crossing in the merge — is lost if the display dies before saying
+ * it: inside one turn of the display, with two writers racing. */
+#define CONSOLE_ORDER_SAID    8u
+
 /* --------------------------------------------------------------------------
  * Display layers
  * --------------------------------------------------------------------------

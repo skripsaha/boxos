@@ -39,6 +39,10 @@ void LanesGrant(const Result &Asked, std::uint32_t Generation) noexcept;
 // DISP_CMD_LISTEN.
 void LanesListen(std::uint32_t Requester, std::uint32_t Generation, bool Listening) noexcept;
 
+// The frames met up to Order are said into the log ring: the console's order
+// page says so (CONSOLE_ORDER_SAID), and a writer waiting to leave is rung.
+void LanesSaid(std::uint64_t Order) noexcept;
+
 // Before sleeping: this pid hung on every lane, so a writer rings; after, the
 // bells taken in again.
 void LanesBellsHang(std::uint32_t Me) noexcept;
