@@ -156,6 +156,7 @@ constexpr ToneColours ToneTheme[LOG_TONE_COUNT] = {
     {COLOR_GREEN,      COLOR_BLACK},   // SUCCESS
     {COLOR_YELLOW,     COLOR_BLACK},   // WARNING
     {COLOR_CYAN,       COLOR_BLACK},   // HINT
+    {COLOR_LIGHT_GRAY, COLOR_BLACK},   // SAID — a program's own word
 };
 
 const ToneColours &Theme(std::uint8_t Tone) noexcept

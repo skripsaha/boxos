@@ -837,7 +837,7 @@ static int HwLogSay(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         run     = marked;
         run_len = k;
     }
-    LogRingSay(run, run_len, LOG_TONE_PLAIN, &at[0], &at[1]);
+    LogRingSay(run, run_len, LOG_TONE_SAID, &at[0], &at[1]);
     EmergencyScreenFollow();
     console_lock_release();
     LogRingBellKnock();

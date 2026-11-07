@@ -71,6 +71,7 @@ static const uint8_t g_tone_attr[LOG_TONE_COUNT] = {
     [LOG_TONE_SUCCESS] = VIDEO_ATTR_SUCCESS,
     [LOG_TONE_WARNING] = VIDEO_ATTR_WARNING,
     [LOG_TONE_HINT]    = VIDEO_ATTR_HINT,
+    [LOG_TONE_SAID]    = VIDEO_ATTR_DEFAULT,
 };
 
 static uint8_t ToneAttr(uint8_t tone)

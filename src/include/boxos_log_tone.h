@@ -13,7 +13,10 @@
  *
  * kprintf sets a tone with %[E] %[S] %[W] %[H] and returns to PLAIN with %[D];
  * every kprintf begins PLAIN, so a line says its own tone and never inherits
- * the last one's. Text a program says into the ring (hw.log.say) is PLAIN.
+ * the last one's. Text a program says into the ring (hw.log.say) is SAID: the
+ * console is for what programs say, and of the kernel's own account it shows
+ * the lines that hold an error — the rest stays in the log (the Emergency
+ * Screen, the wire, logsave).
  */
 
 #define LOG_TONE_PLAIN    0u
@@ -21,6 +24,7 @@
 #define LOG_TONE_SUCCESS  2u
 #define LOG_TONE_WARNING  3u
 #define LOG_TONE_HINT     4u
-#define LOG_TONE_COUNT    5u
+#define LOG_TONE_SAID     5u
+#define LOG_TONE_COUNT    6u
 
 #endif /* BOXOS_LOG_TONE_H */

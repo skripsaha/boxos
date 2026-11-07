@@ -58,9 +58,41 @@ bool RingFollower::CatchUp(ConsoleModel &Model, std::uint64_t End) noexcept
         // is drawn whole once the bell says more was said.
         const std::size_t Whole = BoxUtf8Whole(Bytes, static_cast<std::size_t>(Copied));
         if (Whole == 0) break;
-        Model.WriteKernel(Bytes, Tones, Whole);
-        Position += Whole;
-        Drew = true;
+
+        // What programs said is shown, and of the kernel's own lines those
+        // that hold an error (boxos_log_tone.h); the rest is the log's. A
+        // kernel line is judged whole, so an error keeps the [TAG] it began
+        // with: it ends at its newline, at a program's word, or at End, where
+        // this display's own word follows. One still being said at the live
+        // end waits unread for the bell; one longer than a whole read is
+        // judged as it stands.
+        std::size_t Done = 0;
+        while (Done < Whole) {
+            std::size_t Stop = Done + 1;
+            if (Tones[Done] == LOG_TONE_SAID) {
+                while (Stop < Whole && Tones[Stop] == LOG_TONE_SAID) Stop++;
+                Model.WriteKernel(Bytes + Done, Tones + Done, Stop - Done);
+                Drew = true;
+                Done = Stop;
+                continue;
+            }
+            bool Error = false;
+            Stop = Done;
+            while (Stop < Whole && Tones[Stop] != LOG_TONE_SAID) {
+                Error |= Tones[Stop] == LOG_TONE_ERROR;
+                if (Bytes[Stop++] == '\n') break;
+            }
+            const bool Ended = Bytes[Stop - 1] == '\n' || Stop < Whole || Position + Stop == End ||
+                               (Done == 0 && static_cast<std::uint32_t>(Copied) == Want);
+            if (!Ended) break;
+            if (Error) {
+                Model.WriteKernel(Bytes + Done, Tones + Done, Stop - Done);
+                Drew = true;
+            }
+            Done = Stop;
+        }
+        Position += Done;
+        if (Done < Whole) break;
     }
     return Drew;
 }
