@@ -27,6 +27,7 @@
 #include "ahci.h"
 #include "amp.h"
 #include "klib_logring.h" /* LogRingBellKnock — the tick knocks for the NMI's lines */
+#include "serial.h"       /* WireTick — the tick pumps a line with no interrupt of its own */
 #include "kcore.h"
 #include "xhci_interrupt.h"
 #include "linker_symbols.h"
@@ -984,14 +985,15 @@ typedef struct NmiVoice
 
 static NmiVoice g_nmi_voice[MAX_CORES];
 
-/* How deep this core is in handle_nmi (IdtNmiHere). Written by its own core
- * only, so no atomic; an NMI does not nest inside its own handler until its
- * IRET, but a #MC inside it may print, so it counts rather than flags. */
-static uint8_t g_nmi_here[MAX_CORES];
+/* How deep this core is in its NMI or machine-check handler (IdtNmiOrMcHere).
+ * Written by its own core only, so no atomic; the two nest inside each other
+ * — a #MC inside an NMI, an NMI inside a #MC on its own IST stack — so it
+ * counts rather than flags. */
+static uint8_t g_nmi_or_mc_here[MAX_CORES];
 
-bool IdtNmiHere(void)
+bool IdtNmiOrMcHere(void)
 {
-    return g_nmi_here[amp_get_core_index()] != 0;
+    return g_nmi_or_mc_here[amp_get_core_index()] != 0;
 }
 
 /* True exactly once per core per kind — and it closes that kind's mouth in
@@ -1285,9 +1287,9 @@ void exception_handler(interrupt_frame_t *frame)
     if (frame->vector == 2)
     {
         uint8_t core = amp_get_core_index();
-        g_nmi_here[core]++;
+        g_nmi_or_mc_here[core]++;
         handle_nmi(frame);
-        g_nmi_here[core]--;
+        g_nmi_or_mc_here[core]--;
         return;
     }
 
@@ -1306,7 +1308,11 @@ void exception_handler(interrupt_frame_t *frame)
     if (frame->vector == 18)
     {
         extern bool mce_handle(interrupt_frame_t *, bool *panic_claimed_here);
-        if (mce_handle(frame, &panic_claimed_here))
+        uint8_t core = amp_get_core_index();
+        g_nmi_or_mc_here[core]++;
+        bool recovered = mce_handle(frame, &panic_claimed_here);
+        g_nmi_or_mc_here[core]--;
+        if (recovered)
         {
             return; /* recovered — IRET back to user/kernel */
         }
@@ -1957,6 +1963,9 @@ void IrqTheTickAnswers(void)
          * themselves — an NMI handler's line (klib_logring.h). BSP to BSP:
          * the baton needs no IPI from here. */
         LogRingBellKnock();
+
+        /* The line, for as long as it has no interrupt of its own (serial.c). */
+        WireTick();
 
         /* Deferred touch event delivery */
         TouchQueueTick(__atomic_load_n(&g_global_tick, __ATOMIC_RELAXED));

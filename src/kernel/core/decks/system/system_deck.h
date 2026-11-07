@@ -6,6 +6,7 @@
 #include "boxos_decks.h"
 
 typedef struct process_t process_t;
+typedef struct Question Question;
 
 /* All SYSTEM_OP_* opcodes live in src/include/boxos_decks.h (included
  * above) — single source of truth for kernel handler tables and boxlib
@@ -29,6 +30,13 @@ uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
  * vaddr or 0 on failure. What system.proc.exec uses to hand a cabin Luggage
  * too long for its CabinInfo page. */
 uint64_t cabin_heap_deposit(process_t *target, const void *kbuf, uint32_t length);
+
+/* Settle one question (system_ops.c, system.ask): the answer into the asker's
+ * answer box, or rc in its place, and the asker answered. Touches the asker's
+ * memory only to put an answer there — a refusal and a death touch none of
+ * it, so a death settles from wherever the life ended (ProcessGoneDeliver).
+ * Frees the question; returns what the asker was answered. */
+error_t QuestionSettle(Question *q, error_t rc, const void *answer, uint32_t length);
 
 /* Register Manifest-native System Deck ops. Defined in system_ops.c. */
 error_t SystemDeckRegister(void);

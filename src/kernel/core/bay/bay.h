@@ -87,6 +87,23 @@
  */
 #define BAY_ENCRYPTED   0x04u
 
+/* With BAY_CREATE: create, and ONLY create — a tag that already names a Bay is
+ * refused with ERR_ALREADY_EXISTS instead of being opened. For a creator that
+ * hands the name to someone else afterwards (the display, naming a layer's
+ * memory to its program): a Bay it did not make could be a cabin's that took
+ * the name first, and would then be shared with a stranger. Not sticky. */
+#define BAY_EXCLUSIVE   0x08u
+
+/* With BAY_CREATE | BAY_EXCLUSIVE: made for one program, named by the (pid,
+ * generation) CabinProgram gives — that program alone may open it; its maker
+ * holds the claim this create makes and nobody else gets one. A Bay's name is
+ * no secret and no capability (anyone may spell it), so a name that is reused
+ * is safe to hand on only when the Bay behind it will not open for anybody
+ * else: the display's layers are named display:layer:N with N reused, and
+ * the tag registry of the volume — which never gives a number back — grows
+ * to the most layers ever shown at once, not by one for every layer opened. */
+#define BAY_FOR         0x10u
+
 /* Per-process quota for BAY_CREATE | BAY_ENCRYPTED.
  *
  * The global TME-MK KeyID pool has N slots (typical 16-64 on shipping
@@ -101,7 +118,7 @@
 /* Mask of all defined flag bits — used by BayOpenInternal to reject
  * unknown bits before allocating anything. Keep in lock-step with the
  * BAY_* definitions above. */
-#define BAY_FLAGS_MASK   (BAY_CREATE | BAY_RO | BAY_ENCRYPTED)
+#define BAY_FLAGS_MASK   (BAY_CREATE | BAY_RO | BAY_ENCRYPTED | BAY_EXCLUSIVE | BAY_FOR)
 
 /* Per-cabin allocation size cap. The kernel handler clamps requested
  * Bay sizes at this value so a runaway userspace can't exhaust PMM
@@ -156,6 +173,8 @@ struct BayObject {
     uint32_t    _pad1;
     uint64_t    create_pid;         /* diagnostic */
     uint64_t    create_tsc;         /* diagnostic */
+    uint32_t    for_pid;            /* BAY_FOR: the one program that may open it; 0 = any */
+    uint32_t    for_generation;
 };
 
 /* BayClaim — one per cabin-open of a Bay. Lives in two places:
@@ -191,6 +210,9 @@ void BayInit(void);
  *     already exists, this acts like BAY_OPEN (existing size wins,
  *     requested size ignored unless caller passes 0).
  *   - flags & BAY_RO: claim mapped without VMM_FLAG_WRITABLE.
+ *   - flags & BAY_FOR (with BAY_CREATE | BAY_EXCLUSIVE): made for the program
+ *     (for_pid, for_generation); any other opener is refused
+ *     ERR_ACCESS_DENIED. Without the flag both are 0.
  *
  * On success, *out_user_va receives the user-VA window base and
  * *out_actual_size the actual size (chunk-rounded). The caller is in
@@ -199,6 +221,8 @@ error_t BayOpenInternal(struct process_t *proc,
                         const char *tag,
                         uint64_t requested_size,
                         uint32_t flags,
+                        uint32_t for_pid,
+                        uint32_t for_generation,
                         uint64_t *out_user_va,
                         uint64_t *out_actual_size);
 

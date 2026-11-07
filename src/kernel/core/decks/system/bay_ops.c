@@ -43,6 +43,7 @@ static error_t bay_crate_string(const Crate *c, const OpContext *ctx,
  * SYSTEM_OP_BAY_OPEN
  *   in_crate:  tag string (null-terminated, payload-bytes is strlen+1)
  *   params:    [u64 size][u32 flags]   (12 bytes)
+ *              + [u32 program pid][u32 program generation] with BAY_FOR (20)
  *   out_crate: 16 bytes — [u64 user_va][u64 actual_size]
  *
  * Returns OK and fills out_crate on success.
@@ -65,6 +66,13 @@ static int SysBayOpen(const ManifestOp *op, Crate *crates,
     memcpy(&size,  op->params,     sizeof(uint64_t));
     memcpy(&flags, op->params + 8, sizeof(uint32_t));
 
+    uint32_t for_pid = 0, for_generation = 0;
+    if (flags & BAY_FOR) {
+        if (op->param_size < 20) return ERR_INVALID_ARGUMENT;
+        memcpy(&for_pid,        op->params + 12, sizeof(uint32_t));
+        memcpy(&for_generation, op->params + 16, sizeof(uint32_t));
+    }
+
     /* Hard size cap — prevent a runaway userspace from asking for the
      * whole physical RAM in one go. The cap is per-call; cabins can
      * still open many separate Bays. */
@@ -72,7 +80,8 @@ static int SysBayOpen(const ManifestOp *op, Crate *crates,
 
     uint64_t user_va     = 0;
     uint64_t actual_size = 0;
-    rc = BayOpenInternal(ctx->proc, tag, size, flags, &user_va, &actual_size);
+    rc = BayOpenInternal(ctx->proc, tag, size, flags, for_pid, for_generation,
+                         &user_va, &actual_size);
     if (rc != OK) return rc;
 
     uint8_t blob[16];

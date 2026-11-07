@@ -56,8 +56,8 @@ static int verify_buf(const uint8_t *buf, uint8_t expected)
 
 int main(void)
 {
-    /* Standalone — bypass display server IPC. */
-    io_set_mode(IO_MODE_VGA);
+    /* Standalone — bypass display server IPC; said into the log ring. */
+    io_set_mode(IO_MODE_RING);
 
     print("[htest] start — ");
     print_int(HTEST_ITERS);

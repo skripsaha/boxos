@@ -18,7 +18,7 @@
 #include "baton.h"          /* Knock — the bell is rung from a K-Core */
 #include "kring.h"          /* KResultPush — the bell's record */
 #include "process.h"        /* process_find_ref */
-#include "idt.h"            /* IdtNmiHere — no knock from an NMI */
+#include "idt.h"            /* IdtNmiOrMcHere — no knock from an NMI or a #MC */
 #include "klib_panic.h"     /* PanicClaimed — nor from a panic */
 
 _Static_assert((LOGRING_CAPACITY & (LOGRING_CAPACITY - 1)) == 0,
@@ -39,10 +39,13 @@ static uint64_t   g_written;
 static uint64_t   g_said;
 
 /* The bell: the pid that hung it, with LOG_BELL_RUNG once an utterance has
- * marked it. Under g_ring_lock. Marked, never erased, by the ring — the next
- * hang replaces it, release and teardown drop it. */
+ * marked it, and that strand's generation — a pid is let again, and the bell
+ * rings the incarnation that hung it or nobody. Under g_ring_lock. The ring
+ * marks it; the knock's visit takes it down as it rings, so one hang rings
+ * once; the next hang replaces it, release and teardown drop it. */
 #define LOG_BELL_RUNG 0x80000000u
 static uint32_t   g_bell;
+static uint32_t   g_bell_generation;
 static uint32_t   g_bell_due;   /* an utterance marked the bell; nobody has knocked yet */
 
 static void LogRingBellRing(void *ctx);
@@ -497,11 +500,14 @@ void LogRingSaid(void)
     spin_unlock(&g_ring_lock);
 }
 
-bool LogRingBellHang(uint32_t pid, uint64_t from)
+bool LogRingBellHang(uint32_t pid, uint32_t generation, uint64_t from)
 {
     spin_lock(&g_ring_lock);
     bool news = g_said > from;
-    if (!news) g_bell = pid;
+    if (!news) {
+        g_bell            = pid;
+        g_bell_generation = generation;
+    }
     spin_unlock(&g_ring_lock);
     return news;
 }
@@ -516,7 +522,8 @@ void LogRingBellDrop(void)
 void LogRingBellKnock(void)
 {
     if (!__atomic_load_n(&g_bell_due, __ATOMIC_ACQUIRE)) return;
-    if (IdtNmiHere() || PanicClaimed()) return;   /* the BSP's tick knocks for them */
+    if (IdtNmiOrMcHere()) return;   /* the BSP's tick knocks for them */
+    if (PanicClaimed())   return;   /* every core stands: nobody to wake */
     if (!__atomic_exchange_n(&g_bell_due, 0u, __ATOMIC_ACQ_REL)) return;
     KnockOn(&g_bell_knock);
 }
@@ -531,16 +538,20 @@ static void LogRingBellRing(void *ctx)
     KnockOpen(&g_bell_knock);
 
     spin_lock(&g_ring_lock);
-    uint32_t bell = g_bell;
+    uint32_t bell       = g_bell;
+    uint32_t generation = g_bell_generation;
+    if (bell & LOG_BELL_RUNG) g_bell = 0;   /* rung: taken down, rung once */
     spin_unlock(&g_ring_lock);
     if (!(bell & LOG_BELL_RUNG)) return;
 
     process_t *holder = process_find_ref(bell & ~LOG_BELL_RUNG);
     if (!holder) return;
-    Result r;
-    memset(&r, 0, sizeof(r));
-    r.error_code = ERR_WOULD_BLOCK;
-    (void)KResultPush(holder, &r);
+    if (holder->generation == generation) {
+        Result r;
+        memset(&r, 0, sizeof(r));
+        r.error_code = ERR_WOULD_BLOCK;
+        (void)KResultPush(holder, &r);
+    }
     process_ref_dec(holder);
 }
 

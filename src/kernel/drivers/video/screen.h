@@ -44,9 +44,11 @@ void ScreenAdoptFramebuffer(uint64_t phys, uint32_t width, uint32_t height,
                             uint32_t stride, uint32_t format);
 
 /* hw.screen.claim / hw.screen.release. A claim by the cabin that already holds
- * the screen answers the same description again. ERR_BUSY: another cabin
- * holds it — wait for the `screen` FREE event. */
-error_t ScreenClaim(struct process_t *proc, ScreenDescription *out);
+ * the screen answers the same description again, *taken false; a claim that
+ * took the screen now says *taken true. ERR_BUSY: another cabin holds it and
+ * its program is ending — wait for the `screen` FREE event. ERR_ACCESS_DENIED:
+ * a living program holds it. */
+error_t ScreenClaim(struct process_t *proc, ScreenDescription *out, bool *taken);
 error_t ScreenRelease(struct process_t *proc);
 
 /* The cabin's end. MUST run first in cabin_destroy: the window's frames are a
@@ -55,6 +57,14 @@ void ScreenCleanupCabin(struct cabin_t *cabin);
 
 /* Is this the cabin that holds the screen? */
 bool ScreenHeldBy(struct cabin_t *cabin);
+
+/* The ring's bell (klib_logring.h), hung for the strand (pid, generation) of
+ * the holder `cabin` under the screen's own lock — a let-go that races it
+ * either comes first and refuses it, or comes after and drops it, so a bell
+ * never outlives the hold. ERR_ACCESS_DENIED when `cabin` holds nothing; with
+ * OK, *news says an utterance past `from` is there already and none was hung. */
+error_t ScreenBellHang(struct cabin_t *cabin, uint32_t pid, uint32_t generation,
+                       uint64_t from, bool *news);
 
 /* Ctrl+Alt+Esc (keyboard.c). Any context, an interrupt's included: counts the
  * press and knocks; a K-Core turns the glass over. */

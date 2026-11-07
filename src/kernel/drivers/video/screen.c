@@ -262,11 +262,12 @@ static void ScreenDescribe(ScreenDescription *out)
     out->va       = CABIN_SCREEN_BASE + w.offset;
 }
 
-error_t ScreenClaim(struct process_t *proc, ScreenDescription *out)
+error_t ScreenClaim(struct process_t *proc, ScreenDescription *out, bool *taken)
 {
-    if (!proc || !proc->cabin || !out) return ERR_INVALID_ARGUMENT;
+    if (!proc || !proc->cabin || !out || !taken) return ERR_INVALID_ARGUMENT;
 
     struct cabin_t *cabin = proc->cabin;
+    *taken = false;
     spin_lock(&s_screen_turn);
 
     if (g_holder.cabin == cabin) {
@@ -275,8 +276,14 @@ error_t ScreenClaim(struct process_t *proc, ScreenDescription *out)
         return OK;
     }
     if (g_holder.cabin) {
+        /* A holder whose program is ending lets go as its cabin is taken
+         * down, and FREE says when: worth waiting for. A living one may hold
+         * the screen for good, and a claimant that waited on it would wait
+         * for ever. `ending` is set once, by CabinEnd, before the death any
+         * waiter could have heard of. */
+        bool ending = __atomic_load_n(&g_holder.cabin->ending, __ATOMIC_ACQUIRE) != 0;
         spin_unlock(&s_screen_turn);
-        return ERR_BUSY;
+        return ending ? ERR_BUSY : ERR_ACCESS_DENIED;
     }
     if (!ScreenStandInReadyLocked()) {
         spin_unlock(&s_screen_turn);
@@ -299,6 +306,7 @@ error_t ScreenClaim(struct process_t *proc, ScreenDescription *out)
     g_holder.away  = false;
     EmergencyHide();
     ScreenDescribe(out);
+    *taken = true;
     spin_unlock(&s_screen_turn);
     return OK;
 }
@@ -339,6 +347,19 @@ bool ScreenHeldBy(struct cabin_t *cabin)
     return held;
 }
 
+error_t ScreenBellHang(struct cabin_t *cabin, uint32_t pid, uint32_t generation,
+                       uint64_t from, bool *news)
+{
+    spin_lock(&s_screen_turn);
+    if (!cabin || g_holder.cabin != cabin) {
+        spin_unlock(&s_screen_turn);
+        return ERR_ACCESS_DENIED;
+    }
+    *news = LogRingBellHang(pid, generation, from);
+    spin_unlock(&s_screen_turn);
+    return OK;
+}
+
 /* =========================================================================
  *  Ctrl+Alt+Esc
  * ========================================================================= */
@@ -365,6 +386,9 @@ static void ScreenSwapKnocked(void *ctx)
         ScreenWindow w = ScreenWindowOf();
         bool turned;
         if (!g_holder.away) {
+            /* The stand-in starts every turn blank: what one holder drew into
+             * it while it was away is nobody else's to see. */
+            memset(vmm_phys_to_virt(g_stand_in), 0, VMM_PAGE_SIZE);
             turned = vmm_retarget_pages(g_holder.cabin->vmm, CABIN_SCREEN_BASE, w.pages,
                                         g_stand_in, 0,
                                         VMM_FLAGS_USER_RW | VMM_FLAG_NO_EXECUTE);

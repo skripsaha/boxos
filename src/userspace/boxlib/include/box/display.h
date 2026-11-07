@@ -18,21 +18,31 @@ extern "C" {
  * values, never an escape sequence inside the text. A full ring blocks the
  * writer (brook_push) instead of dropping the batch.
  *
- * The ResultRing wire keeps only the request/reply commands below.
+ * Everything a strand asks the display is a QUESTION (box/ipc.h ask, the
+ * kernel's system.ask): it gets exactly one answer — the display's, or, if
+ * the display's life ends first, the kernel's -ERR_PROCESS_NOT_FOUND — and
+ * who asked is the kernel's word (AskFrom heads the question: the asker's
+ * generation and its program), never the asker's. What an answer hands out —
+ * a lane, a layer — is taken back when the answer reaches nobody because the
+ * asker died first. What needs no answer (LISTEN, a layer's FRAME and CLOSE)
+ * is a plain message to the display that granted the strand its lane.
  */
 
-/* Request a console lane: [DISP_CMD_LANE][u32 generation] — the asker's own
- * generation (strand_self_generation), because a pid is reused and a lane
- * must belong to (pid, generation), never to a number. Reply:
- * [DISP_CMD_LANE]["console:N" NUL] — the tag of a Brook the daemon is already
- * reading (writer arrives at a laid table). A 1-byte reply (command echo
- * alone) is an honest refusal. */
+/* The tag the display wears: questions are asked of it. */
+#define DISPLAY_TAG       "display"
+
+/* A console lane, asked: [DISP_CMD_LANE]. The lane belongs to the asker's
+ * (pid, generation) as the kernel names them. Answer:
+ * [DISP_CMD_LANE][u32 display pid]["console:N" NUL] — the display that will
+ * read it, and the tag of a Brook it is already reading (the writer arrives
+ * at a laid table). [DISP_CMD_LANE] alone is an honest refusal. */
 #define DISP_CMD_LANE     0x30
 
-/* Listen: [DISP_CMD_LISTEN][u32 generation][u8 listening] — with 1 the lane
- * of (sender, generation) hears the keyboard from now on: the daemon says
- * each key again as a Touch on that lane's own tag ("console:N"), payload
- * kb_event_t, and the program edits its line and echoes through the lane.
+/* Listen, sent to the lane's display: [DISP_CMD_LISTEN][u32 generation]
+ * [u8 listening] — with 1 the lane of (sender, generation) hears the keyboard
+ * from now on: the daemon says each key again as a Touch on that lane's own
+ * tag ("console:N"), payload kb_event_t, and the program edits its line and
+ * echoes through the lane.
  * Listening pushes the lane to the top of the daemon's ear stack; 0 gives the
  * ear back, and so does the lane closing — the one beneath hears again, and
  * with nobody listening the keys wait at the daemon for the next reader. No
@@ -41,6 +51,13 @@ extern "C" {
 /* Ping: the daemon answers with its pid. Kept for bench's IPC round trip;
  * nothing discovers the daemon by it. */
 #define DISP_CMD_PING     0x12
+/* Size, asked: [DISP_CMD_SIZE] — the console in cells. Answer:
+ * [DISP_CMD_SIZE][u32 cols][u32 rows]. The display holds the screen and its
+ * font, so it is the one to ask; the kernel no longer knows cells at all. */
+#define DISP_CMD_SIZE     0x14
+
+/* The console in cells, asked of the display (DISP_CMD_SIZE). */
+int display_size(uint32_t *cols, uint32_t *rows);
 
 /* ConsoleRun — one frame of a console lane. 128 bytes: 20-byte header +
  * up to 108 text bytes. `len` counts valid text; '\n' travels inside the
@@ -65,6 +82,11 @@ extern "C" {
 #define CONSOLE_RUN_TEXT      0x01  /* render text[0..len) in (fg, bg) */
 #define CONSOLE_RUN_CLEAR     0x02  /* clear the screen to (fg, bg) */
 #define CONSOLE_RUN_STEP      0x03  /* move the cursor: text[0..4) = int32 cells, len 4 */
+/* A hint: text[0..len) drawn in (fg, bg) as TEXT is, but it is something the
+ * program shows and never said — a line editor's whisper, the blanks that
+ * take it back — so the display keeps it out of the log ring: the serial
+ * line and `logsave` hold what was typed, not what was suggested. */
+#define CONSOLE_RUN_HINT      0x04
 
 #define CONSOLE_RUN_TEXT_MAX  108u
 
@@ -109,20 +131,43 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
  * Display layers
  * --------------------------------------------------------------------------
  *
- * ConsoleRun remains the text stream contract.  Layers are a separate
- * userspace display-server contract: a client owns a shared Bay containing
- * three publish slots, while display.elf owns composition and the final
- * vga_paint.  The kernel never learns about z-order or layer lifetime.
+ * ConsoleRun is the text stream; a layer is a picture a program keeps on the
+ * screen, composed by the display over the base text by role, then age. The
+ * display makes the layer's shared memory for the asking program alone (a Bay
+ * made for one program, box/bay.h bay_create_for) and names it in the reply;
+ * the program only opens it, and nobody else can. The names are the display's
+ * own and reused — display:layer:N — so the volume, which keeps every tag it
+ * is ever told, learns as many as were ever shown at once. Three publish
+ * slots: the writer fills a FREE one — with none FREE, the oldest READY, a
+ * frame nobody will show — and marks it READY; the display takes the newest
+ * READY and frees the rest.
+ *
+ * What a program may hold is bounded by the screen itself: the area of its
+ * layers in one role, over all its strands, never exceeds the screen's —
+ * there is no more than one screen of picture to show at one depth.
+ *
+ * Opening a layer and folding one into the text are QUESTIONS that care about
+ * the console's order, so they carry it: `order` is the asker's
+ * console_order_mark() (box/print.h) — everything it printed is in its lane,
+ * and that is the number of its last frame. The display draws no frame
+ * numbered past a waiting question's mark until it has answered it, and
+ * answers once the asker's own frames up to the mark are drawn: the caret an
+ * open names stands after the asker's text, and a fold lands exactly where it
+ * was asked — after everything numbered before it, before everything after.
  */
 
+/* Questions: OPEN (DisplayLayerOpenRequest → DisplayLayerOpenReply) and
+ * COMMIT (DisplayLayerCommitRequest → DisplayLayerCommitReply). Messages to
+ * the display that granted the asker its layer: FRAME and CLOSE. */
 #define DISP_CMD_LAYER_OPEN   0x40
 #define DISP_CMD_LAYER_FRAME  0x41
 #define DISP_CMD_LAYER_CLOSE  0x42
 #define DISP_CMD_LAYER_COMMIT 0x43
 
-#define DISPLAY_LAYER_VERSION 2u
-#define DISPLAY_LAYER_SLOTS   3u
+#define DISPLAY_LAYER_VERSION   4u
+#define DISPLAY_LAYER_SLOTS     3u
 #define DISPLAY_LAYER_TAG_PREFIX "display:layer:"
+#define DISPLAY_LAYER_TAG_MAX   48u
 
 typedef enum {
     DISPLAY_LAYER_SCENE   = 1,
@@ -138,25 +183,44 @@ typedef enum {
 } DisplayLayerSlotState;
 
 typedef struct PACKED {
-    uint8_t  command;
-    uint8_t  role;
-    uint16_t flags;
-    uint32_t generation;
-    uint64_t nonce;
-    int16_t  x;
-    int16_t  y;
-    uint16_t width;
-    uint16_t height;
+    uint8_t  command;         /* DISP_CMD_LAYER_OPEN */
+    uint8_t  role;            /* DisplayLayerRole */
+    uint16_t flags;           /* none defined: 0 */
+    uint32_t reserved;
+    uint64_t order;           /* the asker's console_order_mark() */
+    int32_t  x;
+    int32_t  y;
+    uint32_t width;
+    uint32_t height;
 } DisplayLayerOpenRequest;
 
 typedef struct PACKED {
-    uint8_t  command;
+    uint8_t  command;         /* DISP_CMD_LAYER_OPEN */
     uint8_t  reserved[3];
-    int32_t  error;
+    int32_t  error;           /* error_t; the rest is meaningful only with 0 */
     uint32_t layer_id;
-    uint32_t display_pid;
-    uint64_t nonce;
+    uint32_t display_pid;     /* where FRAME and CLOSE go */
+    uint32_t cols;            /* the console, in cells */
+    uint32_t rows;
+    uint32_t cursor_x;        /* where the console's caret stands after the asker's text */
+    uint32_t cursor_y;
+    char     bay_tag[DISPLAY_LAYER_TAG_MAX];   /* the layer's memory, NUL-terminated */
 } DisplayLayerOpenReply;
+
+typedef struct PACKED {
+    uint8_t  command;         /* DISP_CMD_LAYER_COMMIT */
+    uint8_t  reserved[3];
+    uint32_t layer_id;
+    uint32_t scroll_up;       /* base rows scrolled away before the fold */
+    uint32_t reserved2;
+    uint64_t order;           /* the asker's console_order_mark() */
+} DisplayLayerCommitRequest;
+
+typedef struct PACKED {
+    uint8_t  command;         /* DISP_CMD_LAYER_COMMIT */
+    uint8_t  reserved[3];
+    int32_t  error;           /* error_t: 0 — the layer is text now, and gone */
+} DisplayLayerCommitReply;
 
 typedef struct PACKED {
     uint8_t  command;
@@ -172,30 +236,9 @@ typedef struct PACKED {
     uint32_t generation;
 } DisplayLayerFrameNotice;
 
-/* Commit is an explicit transaction: the display server applies the requested
- * base-surface scroll, folds the layer's current opaque cells into that base,
- * applies its cursor, removes the layer, and acknowledges the operation
- * before the client may exit. */
-typedef struct PACKED {
-    uint8_t  command;
-    uint8_t  reserved[3];
-    uint32_t layer_id;
-    uint32_t generation;
-    uint64_t nonce;
-    uint32_t scroll_up;
-} DisplayLayerCommitRequest;
-
-typedef struct PACKED {
-    uint8_t  command;
-    uint8_t  reserved[3];
-    int32_t  error;
-    uint32_t layer_id;
-    uint32_t display_pid;
-    uint64_t nonce;
-} DisplayLayerCommitReply;
-
 /* The shared Bay header is deliberately fixed-size and contains only POD
- * fields.  Slot state is changed with compiler atomics by both cabins. */
+ * fields. The display writes the geometry before it answers; slot state is
+ * changed with compiler atomics by both cabins. */
 typedef struct {
     uint32_t magic;
     uint32_t version;
@@ -218,41 +261,22 @@ typedef struct {
 
 #define DISPLAY_LAYER_MAGIC 0x4C594552u /* "LYER" */
 
-#ifdef __cplusplus
-static_assert(sizeof(DisplayLayerSharedHeader) == 104,
+STATIC_ASSERT(sizeof(DisplayLayerSharedHeader) == 104,
               "DisplayLayerSharedHeader is a Bay ABI and must stay 104 bytes");
-static_assert(sizeof(DisplayLayerOpenRequest) == 24,
-              "DisplayLayerOpenRequest is an IPC ABI and must stay 24 bytes");
-static_assert(sizeof(DisplayLayerOpenReply) == 24,
-              "DisplayLayerOpenReply is an IPC ABI and must stay 24 bytes");
-static_assert(sizeof(DisplayLayerCell) == 16,
+STATIC_ASSERT(sizeof(DisplayLayerOpenRequest) == 32,
+              "DisplayLayerOpenRequest is a question's ABI and must stay 32 bytes");
+STATIC_ASSERT(sizeof(DisplayLayerOpenReply) == 80,
+              "DisplayLayerOpenReply is an answer's ABI and must stay 80 bytes");
+STATIC_ASSERT(sizeof(DisplayLayerCommitRequest) == 24,
+              "DisplayLayerCommitRequest is a question's ABI and must stay 24 bytes");
+STATIC_ASSERT(sizeof(DisplayLayerCommitReply) == 8,
+              "DisplayLayerCommitReply is an answer's ABI and must stay 8 bytes");
+STATIC_ASSERT(sizeof(DisplayLayerCell) == 16,
               "DisplayLayerCell is a Bay ABI and must stay 16 bytes");
-static_assert(sizeof(DisplayLayerCloseRequest) == 12,
-              "DisplayLayerCloseRequest is an IPC ABI and must stay 12 bytes");
-static_assert(sizeof(DisplayLayerFrameNotice) == 12,
-              "DisplayLayerFrameNotice is an IPC ABI and must stay 12 bytes");
-static_assert(sizeof(DisplayLayerCommitRequest) == 24,
-              "DisplayLayerCommitRequest is an IPC ABI and must stay 24 bytes");
-static_assert(sizeof(DisplayLayerCommitReply) == 24,
-              "DisplayLayerCommitReply is an IPC ABI and must stay 24 bytes");
-#else
-_Static_assert(sizeof(DisplayLayerSharedHeader) == 104,
-               "DisplayLayerSharedHeader is a Bay ABI and must stay 104 bytes");
-_Static_assert(sizeof(DisplayLayerOpenRequest) == 24,
-               "DisplayLayerOpenRequest is an IPC ABI and must stay 24 bytes");
-_Static_assert(sizeof(DisplayLayerOpenReply) == 24,
-               "DisplayLayerOpenReply is an IPC ABI and must stay 24 bytes");
-_Static_assert(sizeof(DisplayLayerCell) == 16,
-               "DisplayLayerCell is a Bay ABI and must stay 16 bytes");
-_Static_assert(sizeof(DisplayLayerCloseRequest) == 12,
-               "DisplayLayerCloseRequest is an IPC ABI and must stay 12 bytes");
-_Static_assert(sizeof(DisplayLayerFrameNotice) == 12,
-               "DisplayLayerFrameNotice is an IPC ABI and must stay 12 bytes");
-_Static_assert(sizeof(DisplayLayerCommitRequest) == 24,
-               "DisplayLayerCommitRequest is an IPC ABI and must stay 24 bytes");
-_Static_assert(sizeof(DisplayLayerCommitReply) == 24,
-               "DisplayLayerCommitReply is an IPC ABI and must stay 24 bytes");
-#endif
+STATIC_ASSERT(sizeof(DisplayLayerCloseRequest) == 12,
+              "DisplayLayerCloseRequest is a message ABI and must stay 12 bytes");
+STATIC_ASSERT(sizeof(DisplayLayerFrameNotice) == 12,
+              "DisplayLayerFrameNotice is a message ABI and must stay 12 bytes");
 
 #ifdef __cplusplus
 }

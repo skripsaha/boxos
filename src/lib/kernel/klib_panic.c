@@ -1,6 +1,6 @@
 /* klib_panic.c — one panic, one account, and every other core stopped.
  *
- * Everything an account of a panic prints touches something: the VGA buffer,
+ * Everything an account of a panic prints touches something: the glass,
  * the serial UART, and — for the dump's stack trace — memory the fault may
  * already have proved untrustworthy. A fault raised in the middle of that
  * comes back here, and so does every other core that hit the same bug at the

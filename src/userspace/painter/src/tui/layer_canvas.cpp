@@ -5,8 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "box/display.h"
 #include "box/error.h"
-#include "box/vga.h"
 #include "text_cell.h"
 
 #include "display_client.h"
@@ -62,13 +62,13 @@ std::expected<LayerCanvas, StageError> LayerCanvas::Open(std::string_view Name,
                                       box::error{box::errc::invalid_argument}, {},
                                       {LeastCols, LeastRows}));
 
-    vga_dimensions_t Dimensions{};
-    const int Code = vga_getdimensions(&Dimensions);
+    std::uint32_t Cols = 0, Rows = 0;
+    const int Code = display_size(&Cols, &Rows);
     if (Code != 0)
         return std::unexpected(Error(StageErrorKind::DimensionsUnavailable, Cause(Code), {},
                                       {LeastCols, LeastRows}));
 
-    const core::Size Actual{Dimensions.cols, Dimensions.rows};
+    const core::Size Actual{static_cast<std::int32_t>(Cols), static_cast<std::int32_t>(Rows)};
     const core::Size Required{LeastCols, LeastRows};
     if (Actual.Empty())
         return std::unexpected(Error(StageErrorKind::NoConsole,
@@ -104,19 +104,11 @@ std::expected<LayerCanvas, StageError> LayerCanvas::Open(std::string_view Name,
         return std::unexpected(Error(StageErrorKind::InvalidState,
                                       LayerOpened.error(), Actual, Required));
 
-    vga_pos_t Position{};
-    const int CursorCode = vga_getcursor(&Position);
-    if (CursorCode != 0) {
-        (void)LayerOpened->Close();
-        return std::unexpected(Error(StageErrorKind::DimensionsUnavailable,
-                                      Cause(CursorCode), Actual, Required));
-    }
-
     DisplayLayer LayerValue = std::move(*LayerOpened);
+    const core::Point Cursor = LayerValue.Cursor();
     try {
         std::unique_ptr<Impl> StateValue(new Impl(Actual, std::move(LayerValue),
-                                                   std::move(LayerCells),
-                                                   core::Point{Position.col, Position.row}));
+                                                   std::move(LayerCells), Cursor));
         return LayerCanvas(std::move(StateValue));
     } catch (const std::bad_alloc &) {
         (void)LayerValue.Close();

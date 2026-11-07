@@ -6110,11 +6110,15 @@ run_rollcall() {
 }
 
 # The oracle measured against itself: put both defects back — the strand
-# leaves without handing in its frame, the daemon draws text and newline as
-# two operations — and each symptom above must come back.
+# leaves without handing in its frame, the display says a line's text and its
+# newline into the log ring as two utterances — and each symptom above must
+# come back. Two utterances let a kernel line in between them only if
+# something does come in between, and an emulator's display says the second a
+# few microseconds after the first; on a board its core is taken by an
+# interrupt there. So that is put too: the display is held up between the two.
 rollcall_defects_on() {
     mutate src/userspace/boxlib/src/strand.c
-    mutate src/userspace/display/display.c
+    mutate src/userspace/display/display.cpp
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/strand.c"
 s = open(p).read()
@@ -6122,35 +6126,29 @@ anchor = "    io_flush();\n"
 assert s.count(anchor) == 1, "rollcall strand anchor missing"
 s = s.replace(anchor, "    /* logcheck mutation: the strand leaves without handing in its frame */\n", 1)
 open(p, "w").write(s)
-p = "src/userspace/display/display.c"
+p = "src/userspace/display/display.cpp"
 s = open(p).read()
-anchor = """    for (uint32_t i = 0; i < len; i++) {
-        char c = f->text[i];
-        if (c == '\\n' || c == '\\b' || (unsigned char)c >= 0x20) seg[pos++] = c;
-    }
-    if (pos > 0) {
-        seg[pos] = '\\0';
-        vga_puts(seg);
-    }
+anchor = """        std::memcpy(g_said + g_said_length, Run.text, Length);
+        g_said_length += Length;
 """
 assert s.count(anchor) == 1, "rollcall display anchor missing"
-mutated = """    for (uint32_t i = 0; i <= len; i++) {   /* logcheck mutation: text and newline as two operations */
-        int at_end = (i == len);
-        char c     = at_end ? '\\0' : f->text[i];
-        if (!at_end && c != '\\n' && (c == '\\b' || (unsigned char)c >= 0x20)) { seg[pos++] = c; continue; }
-        if (pos > 0) { seg[pos] = '\\0'; vga_puts(seg); pos = 0; }
-        if (!at_end && c == '\\n') vga_newline();
-    }
+mutated = """        for (std::uint32_t I = 0; I < Length; I++) {   /* logcheck mutation: text and newline as two utterances */
+            if (Run.text[I] == '\\n') {
+                DrawHeld();
+                for (volatile std::uint32_t z = 0; z < 100000u; z++) { }   /* held up between the two */
+            }
+            g_said[g_said_length++] = Run.text[I];
+        }
 """
 open(p, "w").write(s.replace(anchor, mutated, 1))
 EOF
     mut_done src/userspace/boxlib/src/strand.c "logcheck mutation"
-    mut_done src/userspace/display/display.c "logcheck mutation"
+    mut_done src/userspace/display/display.cpp "logcheck mutation"
 }
 
 rollcall_defects_off() {
     restore src/userspace/boxlib/src/strand.c
-    restore src/userspace/display/display.c
+    restore src/userspace/display/display.cpp
 }
 
 run_rollcallmut() {
@@ -6165,8 +6163,8 @@ run_rollcallmut() {
     echo "     $1 of 1600 numbers answered whole; $2 line(s) carrying another record"
     if [ "$1" -lt 1600 ]; then ok "rollcallmut: a strand that leaves without handing in loses lines — $((1600 - $1)) missing, and the oracle sees them"
     else                       bad "rollcallmut: the flush removed and every number STILL answered — the oracle cannot see that defect"; fi
-    if [ "$2" -gt 0 ]; then ok "rollcallmut: text and newline as two operations let $2 line(s) carry another — and the oracle sees them"
-    else                    bad "rollcallmut: two operations per line and NO line carried another — the oracle cannot see that defect"; fi
+    if [ "$2" -gt 0 ]; then ok "rollcallmut: text and newline as two utterances let $2 line(s) carry another — and the oracle sees them"
+    else                    bad "rollcallmut: two utterances per line and NO line carried another — the oracle cannot see that defect"; fi
 
     build   # leave the tree built from clean sources
 }
@@ -6265,22 +6263,22 @@ run_handset() {
 # listens — the very thing "keys wait at the daemon for the next reader"
 # forbids — so the line typed before the child asked is gone.
 handset_deaf_on() {
-    mutate src/userspace/display/display.cpp
+    mutate src/userspace/display/lanes.cpp
     python3 - <<'EOF'
-p = "src/userspace/display/display.cpp"
+p = "src/userspace/display/lanes.cpp"
 s = open(p).read()
-anchor = "    while (g_ear) {\n        if (!g_key_in_hand) {\n"
+anchor = "    while (g_ear) {\n        if (!key_in_hand) {\n"
 assert s.count(anchor) == 1, "handset mutation anchor missing"
 s = s.replace(anchor, "    for (;;) {   /* logcheck mutation: consumed while nobody listens */\n"
-                      "        if (!g_ear) { if (!touch_try_pop_tag(g_kb, &g_key)) break; did = true; continue; }\n"
-                      "        if (!g_key_in_hand) {\n", 1)
+                      "        if (!g_ear) { if (!touch_try_pop_tag(g_kb, &key)) break; did = true; continue; }\n"
+                      "        if (!key_in_hand) {\n", 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/userspace/display/display.cpp "logcheck mutation"
+    mut_done src/userspace/display/lanes.cpp "logcheck mutation"
 }
 
 handset_deaf_off() {
-    restore src/userspace/display/display.cpp
+    restore src/userspace/display/lanes.cpp
 }
 
 run_handsetmut() {
@@ -6437,7 +6435,7 @@ run_draftmut() {
 }
 
 # ===========================================================================
-# paint — a whole frame of colour reaches the glass as ONE op, and says
+# paint — a whole frame of colour reaches the glass through a layer, and says
 #         nothing into the log ring on the way
 # ===========================================================================
 #
@@ -6445,8 +6443,9 @@ run_draftmut() {
 # is one Manifest op per cell AND one LogRingPut per cell — a global spinlock
 # and a wire kick for every one of sixteen thousand cells, twenty-five times a
 # second, burying everything the machine actually says under a screenful of
-# spaces. PAINT lays a rectangle down in one op, one Canvas commit, one blit,
-# and deliberately does not mirror: a picture is not speech.
+# spaces. A layer is the program's frame in memory it shares with the display
+# and one word that it is ready; the display draws it and deliberately says
+# nothing into the ring: a picture is not speech.
 #
 # playtime is the instrument: it paints every cell of the screen every frame
 # and stops on a key. The screendump must show a painted screen (a shell
@@ -6540,24 +6539,24 @@ run_paint() {
 }
 
 paint_blind_on() {
-    mutate src/kernel/core/decks/hardware/hardware_ops.c
+    mutate src/userspace/display/layers.cpp
     python3 - <<'EOF2'
-p = "src/kernel/core/decks/hardware/hardware_ops.c"
+p = "src/userspace/display/layers.cpp"
 s = open(p).read()
-anchor = "    console_lock_acquire();\n    bool fit = VideoPaintCells(row, col, height, width, cells);\n    console_lock_release();"
+anchor = "            std::memcpy(Layer.Cells.data(), LayerSlot(Layer, Slot),\n                        Layer.CellCount * sizeof(DisplayLayerCell));\n"
 assert s.count(anchor) == 1, "paint mutation anchor missing"
-s = s.replace(anchor, "    bool fit = true;   /* logcheck mutation: the op takes the frame and drops it */", 1)
+s = s.replace(anchor, "            /* logcheck mutation: the display takes the frame and drops it */\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/core/decks/hardware/hardware_ops.c "logcheck mutation"
+    mut_done src/userspace/display/layers.cpp "logcheck mutation"
 }
 
 paint_blind_off() {
-    restore src/kernel/core/decks/hardware/hardware_ops.c
+    restore src/userspace/display/layers.cpp
 }
 
 run_paintmut() {
-    echo "== paintmut: the op answers OK and paints nothing, and the screen must stay bare =="
+    echo "== paintmut: the display takes every frame and paints nothing, and the screen must stay bare =="
     paint_blind_on; build STRICT=on
     paint_boot paintmut "UEFI=on STRICT=on CORES=4 MEM=4G"; local booted=$?
     paint_blind_off
@@ -6565,7 +6564,7 @@ run_paintmut() {
     V=$(paint_shot_verdict "$SCRATCH/paintmut.ppm")
     case "$V" in
         bare*) ok "paintmut: nothing was painted and the oracle sees it ($V per cent lit)" ;;
-        *)     bad "paintmut: the op dropped every frame and the screen was STILL painted ($V) - the oracle cannot see that defect" ;;
+        *)     bad "paintmut: the display dropped every frame and the screen was STILL painted ($V) - the oracle cannot see that defect" ;;
     esac
     build   # leave the tree built from clean sources
 }
@@ -6582,8 +6581,8 @@ run_paintmut() {
 # wearing the bare `system` tag: the shell, the display daemon and itself.
 #
 # The display daemon is the instrument, because ending it is survivable — the
-# lane dies, boxlib says so and falls back to writing the glass directly, and
-# the shell keeps answering. So all three answers are provable on one boot.
+# lane dies, boxlib says so and falls back to saying its text into the log
+# ring, and the shell keeps answering. So all three answers are provable on one boot.
 finish_boot() {
     local name=$1 args=$2
     make run-stop >/dev/null 2>&1
@@ -6702,22 +6701,23 @@ run_finishmut() {
 # before the shell woke up. So the second condition is injected too, by making
 # one render cost what a render costs on a real framebuffer.
 overtake_slow_on() {
-    mutate src/userspace/display/display.c
+    mutate src/userspace/display/display.cpp
     python3 - <<'EOF2'
-p = "src/userspace/display/display.c"
+p = "src/userspace/display/display.cpp"
 s = open(p).read()
-a = "    if (f->kind != CONSOLE_RUN_TEXT) return;"
+a = "        for (const ConsoleRun &Run : g_held) g_model->Apply(Run);"
 assert s.count(a) == 1, "overtake slow anchor missing"
-inject = "\n    /* logcheck injection: a render costs what one costs on glass. */"
-inject += "\n    for (volatile uint32_t z = 0; z < 400000u; z++) { }"
-s = s.replace(a, a + inject, 1)
+inject = "        for (const ConsoleRun &Run : g_held) {   /* logcheck injection: a render costs what one costs on glass. */"
+inject += "\n            for (volatile std::uint32_t z = 0; z < 400000u; z++) { }"
+inject += "\n            g_model->Apply(Run);\n        }"
+s = s.replace(a, inject, 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/userspace/display/display.c "logcheck injection"
+    mut_done src/userspace/display/display.cpp "logcheck injection"
 }
 
 overtake_slow_off() {
-    restore src/userspace/display/display.c
+    restore src/userspace/display/display.cpp
 }
 
 overtake_clockonly_on() {
@@ -6725,7 +6725,7 @@ overtake_clockonly_on() {
     python3 - <<'EOF2'
 p = "src/userspace/boxlib/src/print.c"
 s = open(p).read()
-a = "    return __atomic_add_fetch(ps->order, 1u, __ATOMIC_SEQ_CST);"
+a = "    ps->last_order = __atomic_add_fetch(ps->order, 1u, __ATOMIC_SEQ_CST);\n    return ps->last_order;"
 assert s.count(a) == 1, "overtake mutation anchor missing"
 m  = "    /* logcheck mutation: the clock decides again, and two cabins' clocks"
 m += "\n     * differ by a fixed amount — which is exactly what an imperfect TSC"
@@ -6734,6 +6734,7 @@ m += "\n     * one, so this is two processes whose counters disagree. */"
 m += "\n    { static uint32_t n;"
 m += "\n      uint64_t t = cpu_rdtsc();"
 m += "\n      if (cabin_info()->pid > 2u && ++n > 10u) t += 4000000000ull;"
+m += "\n      ps->last_order = t;"
 m += "\n      return t; }"
 s = s.replace(a, m, 1)
 if "box/core/cabin.h" not in s:
@@ -7015,7 +7016,7 @@ run_orderlifemut() {
 # The caret is the part of a console a person actually watches, and until this
 # was measured nobody could say where it was: the serial mirror carries the
 # TEXT a program said and says nothing at all about the cursor. So this reads
-# the glass itself. A screendump is 8x16 cells of pixels; the GOP backend draws
+# the glass itself. A screendump is 8x16 cells of pixels; the display draws
 # the caret as two solid rows at the bottom of a cell, and the 8x16 font is
 # right here in the tree, so a cell can be told back into the character it
 # carries AND whether a caret is standing on it.
@@ -7159,29 +7160,25 @@ run_caret() {
 }
 
 caret_blind_on() {
-    mutate src/kernel/drivers/video/canvas.c
+    mutate src/userspace/display/easel.cpp
     python3 - <<'EOF2'
-p = "src/kernel/drivers/video/canvas.c"
+p = "src/userspace/display/easel.cpp"
 s = open(p).read()
-a = """    bool opened = implicit_open_locked(c);
-    c->col = (uint32_t)x < c->cols ? (uint32_t)x : c->cols - 1u;
-    c->row = (uint32_t)y < c->rows ? (uint32_t)y : c->rows - 1u;
-    implicit_close_locked(c, opened);"""
+a = """    const bool CaretMoved = !ShownKnown || At.X != Drawn.X || At.Y != Drawn.Y ||
+                            At.Visible != Drawn.Visible;"""
 assert s.count(a) == 1, "caret mutation anchor missing"
-s = s.replace(a, """    /* logcheck mutation: the cursor moves and the glass is not told */
-    c->col = (uint32_t)x < c->cols ? (uint32_t)x : c->cols - 1u;
-    c->row = (uint32_t)y < c->rows ? (uint32_t)y : c->rows - 1u;""", 1)
+s = s.replace(a, """    const bool CaretMoved = !ShownKnown;   /* logcheck mutation: the caret moves and the glass is not told */""", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/drivers/video/canvas.c "logcheck mutation"
+    mut_done src/userspace/display/easel.cpp "logcheck mutation"
 }
 
 caret_blind_off() {
-    restore src/kernel/drivers/video/canvas.c
+    restore src/userspace/display/easel.cpp
 }
 
 run_caretmut() {
-    echo "== caretmut: with the commit taken out, the caret must stop following the cursor =="
+    echo "== caretmut: with the caret's move left untold, the caret must stop following the cursor =="
     caret_blind_on; build STRICT=on
     local booted=1
     caret_boot && booted=0
@@ -7196,7 +7193,7 @@ run_caretmut() {
     COL=$(echo "$E" | awk '{print $4}' | cut -d, -f2)
     WANT=$(echo "$LINE" | sed 's/^last [0-9]*|//' | awk '{ i=index($0,"abcdef"); print (i>0 ? i-1+4 : -1) }')
     if [ -n "$COL" ] && [ "$COL" = "$WANT" ]; then
-        bad "caretmut: the commit was removed and the caret STILL followed the arrows — the oracle cannot see that defect"
+        bad "caretmut: the caret's move was left untold and the caret STILL followed the arrows — the oracle cannot see that defect"
     else
         ok "caretmut: the caret stayed at column $COL instead of $WANT, and the caret oracle would have caught it"
     fi
@@ -8327,20 +8324,20 @@ run_handsetdeaf() {
 # The oracle measured against itself: the daemon takes a key nobody heard for
 # heard, so the deaf ear keeps the handset and the line is lost.
 handsetdeaf_blind_on() {
-    mutate src/userspace/display/display.cpp
+    mutate src/userspace/display/lanes.cpp
     python3 - <<'EOF2'
-p = "src/userspace/display/display.cpp"
+p = "src/userspace/display/lanes.cpp"
 s = open(p).read()
 anchor = "        if (heard > 0) {\n"
 assert s.count(anchor) == 1, "handsetdeaf mutation anchor missing"
 s = s.replace(anchor, "        if (heard >= 0) {   /* logcheck mutation: a key nobody heard counts as heard */\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/userspace/display/display.cpp "logcheck mutation"
+    mut_done src/userspace/display/lanes.cpp "logcheck mutation"
 }
 
 handsetdeaf_blind_off() {
-    restore src/userspace/display/display.cpp
+    restore src/userspace/display/lanes.cpp
 }
 
 run_handsetdeafmut() {

@@ -10,7 +10,6 @@
 #include "box/keyboard.h"
 #include "box/print.h"
 #include "box/touch.h"
-#include "box/vga.h"
 #include "text_cell.h"
 
 #include "display_client.h"
@@ -78,12 +77,12 @@ std::expected<Stage, StageError> Stage::Open(std::string_view Name, std::int32_t
         return std::unexpected(Error(StageErrorKind::TooSmall, box::error{box::errc::invalid_argument}, {},
                                       {LeastCols, LeastRows}));
 
-    vga_dimensions_t Dimensions{};
-    int Code = vga_getdimensions(&Dimensions);
+    std::uint32_t Cols = 0, Rows = 0;
+    const int Code = display_size(&Cols, &Rows);
     if (Code != 0)
         return std::unexpected(Error(StageErrorKind::DimensionsUnavailable, Cause(Code), {}, {}));
 
-    const core::Size Actual{Dimensions.cols, Dimensions.rows};
+    const core::Size Actual{static_cast<std::int32_t>(Cols), static_cast<std::int32_t>(Rows)};
     const core::Size Required{LeastCols, LeastRows};
     if (Actual.Empty())
         return std::unexpected(Error(StageErrorKind::NoConsole, box::error{box::errc::device_not_ready}, Actual,

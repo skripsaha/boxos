@@ -54,10 +54,13 @@ static int HwScreenClaim(const ManifestOp *op, Crate *crates, uint16_t crate_cou
     if (out->capacity < sizeof(ScreenDescription)) return ERR_BUFFER_TOO_SMALL;
 
     ScreenDescription d;
-    error_t rc = ScreenClaim(ctx->proc, &d);
+    bool taken = false;
+    error_t rc = ScreenClaim(ctx->proc, &d, &taken);
     if (rc != OK) return rc;
     if (crate_write(out, ctx, &d, sizeof(d)) != OK) {
-        (void)ScreenRelease(ctx->proc);
+        /* A claim that cannot be told is no claim — but only this one goes
+         * back: a holder asking again keeps what it already held. */
+        if (taken) (void)ScreenRelease(ctx->proc);
         return ERR_INVALID_ADDRESS;
     }
     return OK;
@@ -653,9 +656,6 @@ static int HwDebugPrint(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  *  for being asked what it said; a reader that wants more asks again.
  * ========================================================================= */
 
-#define HW_LOG_READ_HEADER  24u
-#define HW_LOG_READ_CHUNK   4096u
-
 /* One reader for both banks: the log this boot is still writing, and the one
  * the boot before it left behind. They differ only in which function supplies
  * the bytes, and a second copy of the crate arithmetic would be a second place
@@ -755,10 +755,7 @@ static int HwLogRead(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint32_t flags = 0;
     if (op->param_size >= 12) memcpy(&flags, op->params + 8, sizeof(flags));
     if (flags & ~HW_LOG_READ_TONES) return ERR_INVALID_ARGUMENT;
-    if (flags & HW_LOG_READ_TONES) {
-        if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
-        return HwLogReadTones(op, crates, ctx);
-    }
+    if (flags & HW_LOG_READ_TONES) return HwLogReadTones(op, crates, ctx);
     return HwLogReadFrom(LogRingRead, op, crates, ctx);
 }
 
@@ -773,34 +770,79 @@ static int HwLogRead(const ManifestOp *op, Crate *crates, uint16_t crate_count,
  *
  *  The bytes are copied in BEFORE the console lock — user memory is never
  *  read under it — and the run goes into the ring under it, so it never lands
- *  inside a kernel line. NONE: what the hardware deck's PUTSTRING let anybody
- *  do, the ring keeps doing for anybody, tone PLAIN.
+ *  inside a kernel line. Tone PLAIN.
+ *
+ *  Who speaks is the kernel's to say, not the speaker's. The screen's holder
+ *  says what the glass shows, unmarked: it is the glass. Anyone else says its
+ *  own lines, and every line it starts carries "[pid] ", as hw.debug.print's
+ *  do — the ring is the machine's account, and a program that could say
+ *  "[HALT] Storage sync complete" unmarked could write the kernel's part of
+ *  it. APP, as hw.debug.print: a frozen program does not write here either.
  * ========================================================================= */
 
 static int HwLogSay(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                     const OpContext *ctx)
 {
     (void)crate_count;
+    if (!ctx || !ctx->proc)               return ERR_INVALID_ARGUMENT;
     if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
 
     Crate *in = &crates[op->in_crate];
     if (in->size == 0)              return ERR_INVALID_ARGUMENT;
     if (in->size > HW_LOG_SAY_MAX)  return ERR_OUT_OF_RANGE;
+    uint32_t n = (uint32_t)in->size;
 
-    char *bytes = kmalloc((size_t)in->size);
+    char     mark[16];
+    uint32_t mark_len = 0;
+    if (!ScreenHeldBy(ctx->proc->cabin))
+        mark_len = (uint32_t)ksnprintf(mark, sizeof(mark), "[%u] ", ctx->proc->pid);
+
+    char *bytes = kmalloc(n);
     if (!bytes) return ERR_NO_MEMORY;
-    if (crate_read(in, ctx, bytes, in->size) != OK) {
+    if (crate_read(in, ctx, bytes, n) != OK) {
         kfree(bytes);
         return ERR_INVALID_ADDRESS;
     }
 
+    /* Room for a mark at every line the run may start, made before the lock;
+     * whether its first byte starts a line is known only under it. */
+    char *marked = NULL;
+    if (mark_len) {
+        uint32_t lines = 1;
+        for (uint32_t i = 0; i + 1 < n; i++)
+            if (bytes[i] == '\n') lines++;
+        marked = kmalloc((size_t)n + (size_t)lines * mark_len);
+        if (!marked) {
+            kfree(bytes);
+            return ERR_NO_MEMORY;
+        }
+    }
+
     uint64_t at[2];
     console_lock_acquire();
-    LogRingSay(bytes, in->size, LOG_TONE_PLAIN, &at[0], &at[1]);
+    const char *run     = bytes;
+    uint32_t    run_len = n;
+    if (marked) {
+        uint64_t written    = LogRingWritten();
+        bool     line_start = written == 0 || LogRingByteAt(written - 1) == '\n';
+        uint32_t k          = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            if (line_start) {
+                memcpy(marked + k, mark, mark_len);
+                k += mark_len;
+            }
+            marked[k++] = bytes[i];
+            line_start  = bytes[i] == '\n';
+        }
+        run     = marked;
+        run_len = k;
+    }
+    LogRingSay(run, run_len, LOG_TONE_PLAIN, &at[0], &at[1]);
     EmergencyScreenFollow();
     console_lock_release();
     LogRingBellKnock();
     kfree(bytes);
+    if (marked) kfree(marked);
 
     if (op->out_crate != CRATE_INDEX_NONE &&
         crate_write(&crates[op->out_crate], ctx, at, sizeof(at)) != OK)
@@ -825,12 +867,15 @@ static int HwLogBell(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (!ctx || !ctx->proc)                return ERR_INVALID_ARGUMENT;
     if (op->param_size < 8)                return ERR_INVALID_ARGUMENT;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    if (!ScreenHeldBy(ctx->proc->cabin))   return ERR_ACCESS_DENIED;
 
     uint64_t from = 0;
     memcpy(&from, op->params, sizeof(from));
-    uint8_t news = LogRingBellHang(ctx->proc->pid, from) ? 1u : 0u;
-    if (crate_write(&crates[op->out_crate], ctx, &news, 1) != OK)
+    bool news = false;
+    error_t rc = ScreenBellHang(ctx->proc->cabin, ctx->proc->pid,
+                                ctx->proc->generation, from, &news);
+    if (rc != OK) return rc;
+    uint8_t said = news ? 1u : 0u;
+    if (crate_write(&crates[op->out_crate], ctx, &said, 1) != OK)
         return ERR_INVALID_ADDRESS;
     return OK;
 }
@@ -868,7 +913,7 @@ error_t HardwareDeckRegister(void)
         { HW_DEBUG_PRINT,        HwDebugPrint,       OP_AUTH_APP,    "hw.debug.print"    },
         { HW_LOG_READ,           HwLogRead,          OP_AUTH_UTILITY,"hw.log.read"       },
         { HW_LOG_PREVIOUS,       HwLogPrevious,      OP_AUTH_UTILITY,"hw.log.previous"   },
-        { HW_LOG_SAY,            HwLogSay,           OP_AUTH_NONE,   "hw.log.say"        },
+        { HW_LOG_SAY,            HwLogSay,           OP_AUTH_APP,    "hw.log.say"        },
         { HW_LOG_BELL,           HwLogBell,          OP_AUTH_SYSTEM, "hw.log.bell"       },
         /* USB: hardware control, system+. Nothing here can leave a controller
          * halfway through anything — see the note above HwUsbReset for the two

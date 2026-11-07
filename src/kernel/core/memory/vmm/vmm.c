@@ -4232,7 +4232,7 @@ static void vmm_init_maxphyaddr(void)
  * megabyte, which means:
  *
  *   • the kernel's own text console writes VGA memory at 0xB8000 through a
- *     cacheable entry (hw_vga reaches it via vmm_phys_to_virt),
+ *     cacheable entry (the Emergency Screen reaches it via vmm_phys_to_virt),
  *   • every vmm_map_mmio consumer — HPET, xHCI, AHCI, the ACPI operation
  *     regions, PCI BARs — holds a strong-UC window onto a physical page
  *     this map simultaneously calls write-back, which Intel SDM Vol 3A
@@ -4610,7 +4610,8 @@ void vmm_init(void)
      * for them — the alias Intel SDM Vol 3A §11.12.4 names.
      *
      * Nothing in the kernel reaches VGA or the ROMs through a higher-half
-     * address; hw_vga goes through vmm_phys_to_virt, which is the Pull Map.
+     * address; the Emergency Screen goes through vmm_phys_to_virt, which is
+     * the Pull Map.
      * So the alias is unused rather than absent, and the question is open
      * rather than closed. It stays because this run is what the kernel's own
      * code, data and boot stack execute from before anything else exists,

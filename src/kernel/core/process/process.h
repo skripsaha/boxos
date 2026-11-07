@@ -12,6 +12,7 @@
 #include "baton.h"
 #include "chit.h"
 #include "touch_queue.h"
+#include "boxos_crate.h"
 
 /*
  * Lock ordering:
@@ -55,6 +56,22 @@ typedef struct GoneWaiter {
     uint32_t           submit_cookie;   /* cloakroom token of its submit */
     struct GoneWaiter *next;
 } GoneWaiter;
+
+/* One question a strand asked and the carrier it asked has not answered yet
+ * (SysAsk). It hangs on the carrier, beside the gone list and under the same
+ * lock, for the same reason: the one place a life ends is the one place that
+ * settles what the life still owed — here with ERR_PROCESS_NOT_FOUND. The
+ * asker's (pid, cookie) names it; the asker's staged crates are the question's
+ * until it is settled, the answer going into the asker's answer box. */
+typedef struct Question {
+    struct process_t *asker;
+    uint32_t          cookie;        /* the asker's submit token */
+    uint16_t          crate_count;
+    uint16_t          answer_box;    /* index of the answer crate, CRATE_INDEX_NONE if none */
+    Crate            *crates;        /* the asker's staged crates, owned until settled */
+    uint64_t          crates_uaddr;
+    struct Question  *next;
+} Question;
 
 typedef enum
 {
@@ -383,6 +400,10 @@ typedef struct process_t
      * alone, and the wake it performs happens after it is dropped. */
     struct GoneWaiter *gone_waiters;
     spinlock_t        gone_lock;
+
+    /* The questions asked of this process and not answered yet (Question,
+     * above). Under gone_lock, settled with the gone list at its end. */
+    struct Question   *questions;
 
     /* Which sleep a wake belongs to.
      *

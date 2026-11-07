@@ -227,8 +227,8 @@ static bool test_retired_opcode_is_unknown(void)
 
 int main(void)
 {
-    /* Standalone — write straight to VGA, no display server. */
-    io_set_mode(IO_MODE_VGA);
+    /* Standalone — said straight into the log ring, no display server. */
+    io_set_mode(IO_MODE_RING);
 
     println("=== BoxOS Decks Stress Test ===");
 

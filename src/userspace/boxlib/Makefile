@@ -84,6 +84,7 @@ SRCS = src/core/notify.c \
        src/memtag.c \
        src/pku.c \
        src/hw.c \
+       src/screen.c \
        src/debug.c \
        src/nameplate.c \
        src/string.c \

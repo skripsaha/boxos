@@ -22,7 +22,7 @@ Painter hides the kernel display path from application authors. A program
 should be able to open a `painter::tui::Stage`, draw a `Frame` using cells,
 text, glyphs, rectangles, or two-pixel-high RGB primitives, present it, and
 receive typed input without knowing about `TextCell`, `TouchTag`, Manifest,
-`vga_paint`, or the kernel Canvas.
+or the display's layer protocol.
 
 The first TUI implementation is synthesized from the proven utility patterns:
 

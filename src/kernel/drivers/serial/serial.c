@@ -203,6 +203,14 @@ static volatile uint32_t g_wire_idle;
  * anywhere that the interrupt just served belonged to this port. */
 static volatile bool g_wire_live;
 
+/* Set by the first tick that pumps the line (WireTick). Until then — early
+ * boot, a crash before the clock runs — a kick drains on the transmitter's
+ * word, as it always has; after, a kick only fills what the transmitter takes
+ * now and the tick carries the rest, so a line with no interrupt of its own
+ * costs a kick nothing but the FIFO, never the line's own speed with every
+ * lock its caller holds. */
+static volatile bool g_wire_ticking;
+
 /* What the line says of itself — the count of bytes it fell behind — is not
  * in the ring: it goes out from here, ahead of the ring's bytes. */
 static char     g_wire_notice[80];
@@ -531,7 +539,8 @@ void WireKick(void)
 
     if (!__atomic_load_n(&g_wire_live, __ATOMIC_SEQ_CST)) {
         spin_lock(&g_serial_lock);
-        wire_drain_locked();
+        if (__atomic_load_n(&g_wire_ticking, __ATOMIC_ACQUIRE)) wire_pump_locked();
+        else                                                    wire_drain_locked();
         spin_unlock(&g_serial_lock);
         return;
     }
@@ -541,6 +550,16 @@ void WireKick(void)
 
     spin_lock(&g_serial_lock);
     __atomic_store_n(&g_wire_idle, 0u, __ATOMIC_SEQ_CST);
+    wire_pump_locked();
+    spin_unlock(&g_serial_lock);
+}
+
+void WireTick(void)
+{
+    if (!g_wire_present || __atomic_load_n(&g_wire_live, __ATOMIC_ACQUIRE)) return;
+    __atomic_store_n(&g_wire_ticking, true, __ATOMIC_RELEASE);
+    /* A kick or a drain already at the line carries it; the tick never waits. */
+    if (!spin_trylock(&g_serial_lock)) return;
     wire_pump_locked();
     spin_unlock(&g_serial_lock);
 }

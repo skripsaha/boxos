@@ -43,8 +43,13 @@
  * belongs to the strand that opened it, so a shared pointer is unmapped under
  * every sibling the moment that strand exits. 168 -> 176 when a Touch tag
  * became 32 bits wide: the ear and the keyboard tag held in 16 cut both, and
- * TOUCH_TAG_INVALID with them. */
-#define STRAND_PRINT_BYTES     176u
+ * TOUCH_TAG_INVALID with them. 176 -> 168 when the road with no display
+ * became the log ring, which carries no colour, and the cache of the colour
+ * last sent to the kernel's console went with the kernel's console. 168 ->
+ * 184 when the display became something a strand asks: the number of its last
+ * frame (the mark an ordered question carries), the display that granted its
+ * lane, and how many of its readers hold the ear. */
+#define STRAND_PRINT_BYTES     184u
 
 typedef struct StrandInfo {
     uint64_t tcb_self;        /* @0  — System V variant-2 TCB self-pointer (fs:0) */

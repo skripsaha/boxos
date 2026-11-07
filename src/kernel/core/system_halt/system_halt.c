@@ -961,7 +961,55 @@ static void halt_stop_hardware(void)
  * drain that follows waits on the work itself and not on a clock. */
 #define HALT_GRACE_MS 50u
 
+/* The halt's own stack.
+ *
+ * ‼ THE HALT USED TO RUN ON WHATEVER STACK CALLED IT, AND ON ONE CORE THAT IS
+ * THE STACK IT FREES. A single core answers a system call on the caller's own
+ * kernel stack (idt.c, sync_syscall_dispatch), so `bye` ran this whole file on
+ * bye's stack — and halt_terminate_all_processes destroys bye with every other
+ * process, hands that stack to the PMM and goes on running on it. MEASURED on
+ * b6f36153 by a probe in process_free_kernel_stack: "freeing the kernel stack
+ * this core runs on: pid 5". Whether the machine then powered off or jumped to
+ * address 0 depended only on whether anything reused those frames before the
+ * next `ret`; the display's teardown did, and a `bye` ended in a #PF at RIP 0.
+ *
+ * So the halt stands on a stack nobody owns and nothing frees: here, in the
+ * image, so that having it cannot fail and asks neither the allocator nor a
+ * shootdown of the very cores the halt is stopping. Twice the 16 KiB a K-Core
+ * runs this path on. No guard page, for the same reason: making one is
+ * page-table work answered by those cores. */
+static uint8_t g_halt_stack[32u * 1024u] __attribute__((aligned(64)));
+
+static __attribute__((noreturn, used)) void HaltMachine(bool reboot);
+
+/* Onto g_halt_stack and into HaltMachine, never to come back: the stack this
+ * leaves may be freed under it. */
+static __attribute__((noreturn)) void HaltOnOwnStack(bool reboot)
+{
+    __asm__ volatile("mov %[top], %%rsp\n\t"
+                     "xor %%ebp, %%ebp\n\t"
+                     "call %P[run]\n\t"
+                     "ud2"
+                     :
+                     : [top] "r"(g_halt_stack + sizeof(g_halt_stack)),
+                       [run] "i"(HaltMachine),
+                       "D"((uint64_t)reboot)
+                     : "memory");
+    __builtin_unreachable();
+}
+
 void system_halt(bool reboot)
+{
+    /* One halt. A second — the power button's continuation on one core while
+     * `bye` is answered on another — would share the one stack, so it stands
+     * here the way the halt's roll call would stand that core. */
+    static uint32_t halting;
+    if (__atomic_exchange_n(&halting, 1u, __ATOMIC_ACQ_REL))
+        HaltFreezeHere();
+    HaltOnOwnStack(reboot);
+}
+
+static void HaltMachine(bool reboot)
 {
     /* Publish system:shutdown/system:reboot BEFORE we cli, so subscribers
      * (e.g. user daemons holding open files / dirty caches) get woken on

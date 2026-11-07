@@ -96,6 +96,16 @@ extern "C" {
  * (the existing Bay's size wins). */
 void   *bay_open(const char *tag, uint64_t size, uint32_t flags);
 
+/* A Bay made for one program: created, never an existing one opened
+ * (-ERR_ALREADY_EXISTS when the tag names a Bay already), and it opens for
+ * (program_pid, program_generation) alone — the program as AskFrom names it
+ * (boxos_kctx.h); any other opener is refused -ERR_ACCESS_DENIED. For a server
+ * that makes memory for a program and hands it the name: a name is no secret,
+ * and this is what keeps the memory that program's. OK and *out set, or
+ * -ERR_*. */
+int     bay_create_for(const char *tag, uint64_t size, uint32_t program_pid,
+                       uint32_t program_generation, void **out);
+
 /* Release this cabin's claim on the Bay, unmapping the window for every
  * strand in the cabin — not just the caller. Drops one ref; if the last
  * cabin releases, the backing pages return to PMM. Returns 0 on

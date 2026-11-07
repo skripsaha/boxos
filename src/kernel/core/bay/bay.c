@@ -48,6 +48,7 @@
 
 #include "bay.h"
 #include "process.h"
+#include "cabin.h"      /* CabinProgram — who may open a Bay made for one program */
 #include "vmm.h"
 #include "pmm.h"
 #include "klib.h"
@@ -556,6 +557,8 @@ error_t BayOpenInternal(struct process_t *proc,
                         const char *tag,
                         uint64_t requested_size,
                         uint32_t flags,
+                        uint32_t for_pid,
+                        uint32_t for_generation,
                         uint64_t *out_user_va,
                         uint64_t *out_actual_size)
 {
@@ -574,6 +577,16 @@ error_t BayOpenInternal(struct process_t *proc,
     if (flags & ~BAY_FLAGS_MASK) return ERR_INVALID_ARGUMENT;
 
     bool wants_create = (flags & BAY_CREATE) != 0;
+    bool exclusive    = (flags & BAY_EXCLUSIVE) != 0;
+    bool made_for     = (flags & BAY_FOR) != 0;
+    if (exclusive && !wants_create) return ERR_INVALID_ARGUMENT;
+    if (made_for && (!exclusive || for_pid == 0)) return ERR_INVALID_ARGUMENT;
+
+    /* Which program is opening: a Bay made for one opens for that one alone.
+     * A cabin with no program in it names nobody, and opens no such Bay. */
+    uint32_t program_pid = 0, program_generation = 0;
+    (void)CabinProgram(cabin, &program_pid, &program_generation);
+
     uint32_t tag_id = bay_resolve_tag(tag, wants_create);
     if (tag_id == TAGFS_INVALID_TAG_ID) return ERR_TAG_NOT_FOUND;
 
@@ -582,6 +595,10 @@ error_t BayOpenInternal(struct process_t *proc,
     /* Phase 1: see if the Bay already exists. */
     spin_lock(&b->lock);
     BayObject *bay = bay_bucket_find_locked(b, tag_id);
+    if (bay && exclusive) {
+        spin_unlock(&b->lock);
+        return ERR_ALREADY_EXISTS;
+    }
     if (bay) {
         /* Encryption capability must match between caller and existing
          * Bay — mismatched maps would decrypt with the wrong key and
@@ -591,6 +608,11 @@ error_t BayOpenInternal(struct process_t *proc,
         if (caller_wants_enc != bay_is_encrypted) {
             spin_unlock(&b->lock);
             return ERR_INVALID_ARGUMENT;
+        }
+        if (bay->for_pid != 0 &&
+            (bay->for_pid != program_pid || bay->for_generation != program_generation)) {
+            spin_unlock(&b->lock);
+            return ERR_ACCESS_DENIED;
         }
     }
     if (!bay) {
@@ -709,10 +731,12 @@ error_t BayOpenInternal(struct process_t *proc,
         fresh->chunk_size  = cs;
         fresh->chunk_count = cc;
         fresh->chunks      = chunks;
-        fresh->flags       = flags & ~BAY_RO;   /* Bay capability: RW by default */
+        fresh->flags       = flags & ~(BAY_RO | BAY_EXCLUSIVE | BAY_FOR);   /* Bay capability: RW by default */
         fresh->ref_count   = 0;
         fresh->create_pid  = proc->pid;
         fresh->create_tsc  = rdtsc();
+        fresh->for_pid        = made_for ? for_pid : 0;
+        fresh->for_generation = made_for ? for_generation : 0;
 
         spin_lock(&b->lock);
         BayObject *winner = bay_bucket_find_locked(b, tag_id);
@@ -731,6 +755,7 @@ error_t BayOpenInternal(struct process_t *proc,
                 spin_unlock(&cabin->bay_lock);
                 alloc_keyid = 0;
             }
+            if (exclusive) return ERR_ALREADY_EXISTS;
             spin_lock(&b->lock);
             bay = bay_bucket_find_locked(b, tag_id);
             if (!bay) {
@@ -749,6 +774,11 @@ error_t BayOpenInternal(struct process_t *proc,
             if (caller_wants_enc != bay_is_encrypted) {
                 spin_unlock(&b->lock);
                 return ERR_INVALID_ARGUMENT;
+            }
+            if (bay->for_pid != 0 &&
+                (bay->for_pid != program_pid || bay->for_generation != program_generation)) {
+                spin_unlock(&b->lock);
+                return ERR_ACCESS_DENIED;
             }
         } else {
             fresh->bucket_next = b->head;

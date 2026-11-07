@@ -34,9 +34,6 @@
 #define SYS_TAG_CHECK   0x22
 #define SYS_PERF_DUMP   0x50
 
-#define HW_SYSTEM_REBOOT    0x80
-#define HW_SYSTEM_SHUTDOWN  0x81
-
 /* Upper bound on a caller-supplied tag augment for proc_exec_tagged: the
  * augment rides in the op's params, and MfCall1 carries at most 256 bytes of
  * them. The kernel reads an augment of any length. */

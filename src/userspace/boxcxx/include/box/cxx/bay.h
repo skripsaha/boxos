@@ -34,12 +34,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <span>
 #include <type_traits>
 #include <utility>
 
 #include "box/bay.h"
 #include "box/error.h"
+#include "box/cxx/error.h"
 
 namespace box {
 
@@ -112,6 +114,23 @@ public:
         std::uint64_t bytes = _S_bytes(count);
         if (bytes == 0) return bay{};
         return bay(bay_open(tag, bytes, BAY_CREATE), false);
+    }
+
+    // create_for(): made for one program — created, never an existing Bay
+    // opened (errc::already_exists), and it opens for (program_pid,
+    // program_generation) alone (box/bay.h bay_create_for). For a server
+    // that hands the name to the program it made the memory for.
+    static std::expected<bay, box::error> create_for(const char *tag, size_type count,
+                                                     std::uint32_t program_pid,
+                                                     std::uint32_t program_generation)
+        requires (!_S_ro)
+    {
+        std::uint64_t bytes = _S_bytes(count);
+        if (bytes == 0) return std::unexpected(box::error{box::errc::invalid_argument});
+        void *p = nullptr;
+        int rc = bay_create_for(tag, bytes, program_pid, program_generation, &p);
+        if (rc != 0) return std::unexpected(box::error{box_errno_of(rc)});
+        return bay(p, false);
     }
 
     // open(): attach to an existing Bay by tag. A const element type maps the

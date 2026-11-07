@@ -183,13 +183,14 @@ typedef uint32_t error_t;
     X(KCORE_SUBMIT_FAILED,           kcore_submit_failed,           909,  "k-core submit failed",          "ipc") \
     X(RESULT_NOT_READY,              result_not_ready,              910,  "result not ready",              "ipc") \
     X(RESULT_STASH_FULL,             result_stash_full,             911,  "result stash full",             "ipc") \
-    /* Routing (940-945) */ \
+    /* Routing (940-946) */ \
     X(ROUTE_TARGET_FULL,             route_target_full,             940,  "route target queue full",       "routing") \
     X(ROUTE_NO_SUBSCRIBERS,          route_no_subscribers,          941,  "no subscribers for route",      "routing") \
     X(ROUTE_SELF,                    route_self,                    942,  "cannot route to self",          "routing") \
     X(LISTEN_TABLE_FULL,             listen_table_full,             943,  "listen table full",             "routing") \
     X(LISTEN_ALREADY,                listen_already,                944,  "already listening on route",    "routing") \
     X(ROUTE_INVALID_TAG,             route_invalid_tag,             945,  "invalid route tag",             "routing") \
+    X(ROUTE_AMBIGUOUS,               route_ambiguous,               946,  "more than one carries the route tag", "routing") \
     /* Pocket failure (950) — its own code, a pocket-class fault */ \
     X(POCKET_FAILED,                 pocket_failed,                 950,  "pocket failed",                 "ipc") \
     /* Scheduler (960-964) */ \

@@ -4,8 +4,6 @@
 #include <cstdint>
 #include <expected>
 #include <span>
-#include <string>
-#include <vector>
 
 #include "box/cxx/bay.h"
 #include "box/cxx/error.h"
@@ -27,6 +25,9 @@ public:
 
     core::Size Size() const noexcept { return {Bounds.Width, Bounds.Height}; }
     bool IsOpen() const noexcept { return Opened; }
+    // Where the console's caret stood when the layer opened — after
+    // everything this strand printed before opening it.
+    core::Point Cursor() const noexcept { return ConsoleCursor; }
 
     box::status Present(std::span<const DisplayLayerCell> Cells,
                         core::Point Cursor, bool CursorVisible) noexcept;
@@ -34,15 +35,15 @@ public:
     box::status Close() noexcept;
 
 private:
-    DisplayLayer(core::Rect BoundsValue, std::uint32_t DisplayPidValue,
-                 std::uint32_t LayerIdValue, box::bay<std::byte> SharedValue,
-                 DisplayLayerSharedHeader *HeaderValue) noexcept;
+    DisplayLayer(core::Rect BoundsValue, const DisplayLayerOpenReply &Reply,
+                 box::bay<std::byte> SharedValue) noexcept;
 
     box::status Notify() noexcept;
 
     core::Rect Bounds;
     std::uint32_t DisplayPid = 0;
     std::uint32_t LayerId = 0;
+    core::Point ConsoleCursor;
     box::bay<std::byte> Shared;
     DisplayLayerSharedHeader *Header = nullptr;
     std::uint64_t NextSequence = 0;

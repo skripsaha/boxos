@@ -117,10 +117,16 @@ uint8_t  LogRingToneAt(uint64_t pos);
  * interrupts off. So an utterance only marks the bell due, under the ring's
  * lock; LogRingBellKnock knocks, called once the locks are down — at the end
  * of kvprintf, at the end of hw.log.say, and from the BSP's tick for the
- * utterances that could not knock: an NMI handler's line (the xAPIC ICR pair
- * is guarded only by cli, which an NMI goes through) and a panic's. A bell is
- * hung only by a running program, so none is due before BatonInit. */
-bool LogRingBellHang(uint32_t pid, uint64_t from);
+ * utterances that could not knock: an NMI's or a machine check's line (the
+ * xAPIC ICR pair is guarded only by cli, which neither respects). A panic's
+ * lines knock nobody: every core but its owner stands, the holder's with
+ * them, and the account is drawn by the kernel (EmergencyScreenPanicTake). A
+ * bell is hung only by a running program, so none is due before BatonInit.
+ *
+ * The bell remembers the generation of the strand that hung it and rings that
+ * incarnation or nobody; it is hung only under the screen's own lock
+ * (ScreenBellHang), so it never outlives the hold that hung it. */
+bool LogRingBellHang(uint32_t pid, uint32_t generation, uint64_t from);
 void LogRingBellDrop(void);
 void LogRingBellKnock(void);
 

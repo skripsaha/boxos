@@ -165,6 +165,7 @@ typedef enum {
     ERR_LISTEN_TABLE_FULL    = 943,
     ERR_LISTEN_ALREADY       = 944,
     ERR_ROUTE_INVALID_TAG    = 945,
+    ERR_ROUTE_AMBIGUOUS      = 946,
 
     ERR_POCKET_FAILED        = 950,
 

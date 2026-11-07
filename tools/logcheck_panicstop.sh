@@ -16,8 +16,7 @@
 # never stopped (quill's used book, boot 2).
 #
 # The kernel built PANICSTOP=panic|fault|nested puts that case on purpose
-# (panic_stop_proof.c): the BSP takes the console lock, opens a Canvas batch
-# under it as a kprintf stopped mid-line leaves one, and runs on with
+# (panic_stop_proof.c): the BSP takes the console lock and runs on with
 # interrupts off, saying nothing; the first K-Core beside it waits until the
 # BSP holds the console and calls panic() — or executes ud2, and the exception
 # dump is the account, or calls panic() with a string that faults inside the
@@ -51,14 +50,13 @@
 #
 # A machine that stood is then held to what its account must be (see
 # panicstop_account): on the glass where the glass is text (the BIOS legs —
-# the batch the BSP left open holds every commit after it, and the screen is
-# what an operator photographs); the dump's count of exceptions the one it
-# tells; and a fault or a panic inside the account no second account but one
-# line that says the account broke off and by what — on the wire whatever
-# else broke, and on the glass where the glass still stands; an exception on
-# the owner after its whole account no break of it, but one line that says
-# what came after it.
-# panicstopmut puts thirteen mutants of the stop, each turning a leg it weighs.
+# the screen is what an operator photographs); the dump's count of
+# exceptions the one it tells; and a fault or a panic inside the account no
+# second account but one line that says the account broke off and by what —
+# on the wire whatever else broke, and on the glass where the glass still
+# stands; an exception on the owner after its whole account no break of it,
+# but one line that says what came after it.
+# panicstopmut puts ten mutants of the stop, each turning a leg it weighs.
 # ---------------------------------------------------------------------------
 
 PANICSTOP_CORES=4
@@ -96,12 +94,15 @@ PANICSTOP_ANYAFTER='After the account: '
 #   - panicwild: the same panic() with its own message the next bug, a string
 #     at a non-canonical address — the line that says by what faults inside
 #     itself, the third coming, which stands at once;
-#   - glass: the glass's own road faulting under the account from the first
-#     colon it is handed on — a read at 0x10 in VideoPrintCharCur on the owner
-#     of the panic, the banner's colon first and every byte after it: a #PF,
-#     no page there since vmm_init took the identity map down — a Canvas or a
-#     framebuffer the bug has broken, the account's line on the wire whatever
-#     the glass does, its CR2 with it;
+#   - glass: the glass's own road faulting under the account from its first
+#     colon on — a read at 0x10 on the owner of the panic as the Emergency
+#     Screen draws a byte it follows out of the ring, from the ':' of "KERNEL
+#     PANIC:" onwards: a #PF, no page there since vmm_init took the identity
+#     map down — a framebuffer the bug has broken mid-account, the account's
+#     first words on the glass, its line on the wire whatever the glass does,
+#     its CR2 with it. Only bytes followed out of the ring: the claim redraws
+#     the ring's tail on the owner before the account begins (DrawTail), and a
+#     fault there would come before the account's first word;
 #   - mcip: the first #MC a core takes stays in its handler, MCG_STATUS.MCIP
 #     set, spinning at mce_handle's first line, and the K-Core's panic waits
 #     for it — so the NMI that stops that core stops it inside its #MC
@@ -118,7 +119,7 @@ PANICSTOP_ANYAFTER='After the account: '
 panicstop_inject() {
     local f
     case $1 in
-        glass) PANICSTOP_INJECTED=src/kernel/drivers/video/video.c ;;
+        glass) PANICSTOP_INJECTED=src/kernel/drivers/video/emergency_screen.c ;;
         draining) PANICSTOP_INJECTED=src/kernel/drivers/serial/serial.c ;;
         mcip)  PANICSTOP_INJECTED="src/kernel/core/mce/mce.c src/kernel/core/system_halt/panic_stop_proof.c" ;;
         *)     PANICSTOP_INJECTED=src/lib/kernel/klib_print.c ;;
@@ -162,13 +163,14 @@ if how == "draining":
              "        if (PanicOwnedHere() && !stood) { stood = true; for (;;) __asm__ volatile(\"cli; hlt\"); }\n"
              "    }\n")
 elif how == "glass":
-    p = "src/kernel/drivers/video/video.c"
-    a = "void VideoPrintCharCur(char ch)\n{\n"
-    b = a + ("    {   /* logcheck injection: the glass breaks under the panic's account */\n"
-             "        extern bool PanicOwnedHere(void);\n"
-             "        static bool broken;\n"
-             "        if (PanicOwnedHere() && (broken || ch == ':')) { const volatile char *at = (const volatile char *)0x10; __asm__ volatile(\"\" : \"+r\"(at)); broken = true; (void)*at; }\n"
-             "    }\n")
+    p = "src/kernel/drivers/video/emergency_screen.c"
+    a = "        uint64_t p = g_glass.drawn++;\n        PenByte(&g_glass.pen, (uint8_t)LogRingByteAt(p), LogRingToneAt(p), true);\n"
+    b = ("        {   /* logcheck injection: the glass breaks under the panic's account */\n"
+         "            extern bool PanicOwnedHere(void);\n"
+         "            static bool broken;\n"
+         "            if (PanicOwnedHere() && (broken || LogRingByteAt(p) == ':')) { const volatile char *at = (const volatile char *)0x10; __asm__ volatile(\"\" : \"+r\"(at)); broken = true; (void)*at; }\n"
+         "        }\n")
+    b = a.replace("        PenByte(", b + "        PenByte(", 1)
 else:
     p = "src/lib/kernel/klib_print.c"
     a = '    kprintf("\\n%[E]KERNEL PANIC:%[D] ");\n    kvprintf(message, args);\n'
@@ -450,8 +452,7 @@ panicstop_after_stood() {
 #     cascade that never was;
 #   - nested: the line the account broke off in on the wire whole, and the line
 #     that says by what: vector 13, its error code and the RIP it faulted at, a
-#     kernel address — both on the glass too: the first was put on the shadow
-#     under the account's own batch, never closed;
+#     kernel address — both on the glass too;
 #   - panicin: panic()'s message and then "Account broken off by panic:" and
 #     the message of the panic inside it, on the wire and the glass;
 #   - panicwild: that line on the wire up to the string that faults inside it,
@@ -472,7 +473,7 @@ panicstop_after_stood() {
 #   - afterdump: the same after the dump, on the wire after its banner and its
 #     last line, the dump counting the one fault it tells;
 #   - a BIOS leg: the account's first words are on the glass, though the BSP
-#     stopped with a Canvas batch open.
+#     stopped with the console in its hand.
 # Not a weight on what the drain at the account's end sends, nor on the drain
 # before and after the line that says by what: the wire is pushed by hand at
 # this point of the boot — it goes over to its interrupt once one arrives with
@@ -554,7 +555,7 @@ $PANICSTOP_AFTER" glass=$PANICSTOP_AFTER ;;
     if [ -n "$PANICSTOP_GLASS" ]; then
         while IFS= read -r want; do
             if ! grep -qE -- "$want" "$PANICSTOP_GLASS"; then
-                PANICSTOP_WRONG="the account never reached the glass: /$want/ is not on the screen the BSP's open Canvas batch was left over (the screen: $(basename "$PANICSTOP_GLASS"))"
+                PANICSTOP_WRONG="the account never reached the glass: /$want/ is not on the screen (the screen: $(basename "$PANICSTOP_GLASS"))"
                 return
             fi
         done <<<"$glass"
@@ -572,7 +573,7 @@ panicstop_leg() {
         stood) if [ -n "$PANICSTOP_WRONG" ]; then
                    bad "panicstop: $what — every core stood, but $PANICSTOP_WRONG"
                else
-                   ok "panicstop: $what — every core stood, the BSP among them with interrupts off, the console in its hand and a Canvas batch open$PANICSTOP_FACTS"
+                   ok "panicstop: $what — every core stood, the BSP among them with interrupts off, the console in its hand$PANICSTOP_FACTS"
                fi ;;
         ran)   bad "panicstop: $what — the K-Core's $kind did not stop every core: $PANICSTOP_RAN ran on a second past it" ;;
         fault|unput) bad "panicstop: $what — $PANICSTOP_STOP (the last said: $PANICSTOP_LAST)" ;;
@@ -596,7 +597,7 @@ run_panicstop() {
 }
 
 # ---------------------------------------------------------------------------
-# panicstopmut — thirteen mutants of the panic's stop: each turns a panicstop leg
+# panicstopmut — ten mutants of the panic's stop: each turns a panicstop leg
 # ---------------------------------------------------------------------------
 #
 # One build per mutant, and the legs it weighs put on it:
@@ -604,19 +605,13 @@ run_panicstop() {
 #     off, runs on past the panic — on both firmwares, panic() and the dump;
 #   - the owner of a panic waiting on a held lock like any core (klib_lock.c):
 #     the console the BSP holds is never given back, and panic() says nothing;
-#   - no line of the account letting go of a Canvas batch another core left
-#     open (klib_print.c): the batch the BSP opened holds panic() off the glass;
 #   - the break of an exception said by no line (klib_panic.c): the fault
 #     inside the account ends it at the line it broke off in, nothing says by
 #     what;
-#   - the line that says by what not letting go of the batch the broken line
-#     left open: neither line reaches the glass;
 #   - the break of a panic said by no line: the panic inside the account ends
 #     it, nothing says by what;
 #   - the third coming saying a line as the second does: the panic whose
 #     message faults is said broken off twice;
-#   - the line said to the glass before the ring: the glass's road faulting
-#     under the account takes the line off the wire too;
 #   - a #PF's line said without its CR2: the glass's #PF says no address;
 #   - the stand leaving MCIP as it finds it: the core stopped inside its #MC
 #     handler stands with it set, and a second #MC on it shuts the machine
@@ -629,12 +624,14 @@ run_panicstop() {
 #   - the dump ending by its own flush, drain and stand (idt.c), as it did
 #     before it ended in PanicEndAccount: a #MC on the owner after the whole
 #     dump is said as a break of it.
-# The last eleven are a leg each, the one their defect shows on; a mutant that
+# The last eight are a leg each, the one their defect shows on; a mutant that
 # leaves its leg green is a mechanism no test holds. Not among them: the drain
 # and the flush around the line that says by what. The wire of every leg is
 # pushed by hand (panicstop_account), and QEMU keeps no cache a warm reset
 # could take the memory the next boot reads out of — a mutant of either
-# leaves every leg as it is, so neither is put.
+# leaves every leg as it is, so neither is put. Nor the glass said before the
+# ring, or a batch it was left holding: the glass draws only what the ring
+# holds and keeps no batch (emergency_screen.c), so neither defect can be put.
 
 panicstopmut_fixed_on() {
     mutate src/lib/kernel/klib_panic.c
@@ -668,30 +665,6 @@ EOF
     mut_done "$1" "logcheck mutation" 1
 }
 
-# panicstopmut_glass_first — the line that says by what said to the glass
-# before the ring, as a kprintf says it: a byte at a time to both.
-panicstopmut_glass_first() {
-    mutate src/lib/kernel/klib_panic.c
-    python3 - <<'EOF'
-p = "src/lib/kernel/klib_panic.c"
-s = open(p).read()
-a = ("    PanicSayBreakBy(KvprintfRing, by, format, args);\n"
-     "    LogKeepFlush();\n"
-     "    WireDrain();\n"
-     "\n"
-     "    CanvasForceReset();\n"
-     "    PanicSayBreakBy(KvprintfGlass, by, format, again);\n")
-b = ("    CanvasForceReset();\n"
-     "    PanicSayBreakBy(KvprintfGlass, by, format, again);   /* logcheck mutation: the glass first */\n"
-     "    PanicSayBreakBy(KvprintfRing, by, format, args);\n"
-     "    LogKeepFlush();\n"
-     "    WireDrain();\n")
-assert s.count(a) == 1, "panicstopmut glass-first anchor missing"
-open(p, "w").write(s.replace(a, b, 1))
-EOF
-    mut_done src/lib/kernel/klib_panic.c "logcheck mutation" 1
-}
-
 # panicstopmut_mcip_kept — the stand clearing no MCIP; the claim's winner still
 # clears its own.
 panicstopmut_mcip_kept() {
@@ -715,10 +688,10 @@ panicstopmut_mark_late() {
 p = "src/lib/kernel/klib_panic.c"
 s = open(p).read()
 a = "    g_panic_account_said = true;\n"
-b = "    WireDrain();\n\n    PanicStand();\n}\n"
+b = "    WireDrain();\n\n    /* And the whole account drawn once more"
 assert s.count(a) == 1 and s.count(b) == 1, "panicstopmut mark anchors missing"
 s = s.replace(a, "    /* logcheck mutation: the mark made after the drain */\n", 1)
-s = s.replace(b, "    WireDrain();\n\n    g_panic_account_said = true;   /* logcheck mutation: the mark made after the drain */\n    PanicStand();\n}\n", 1)
+s = s.replace(b, "    WireDrain();\n    g_panic_account_said = true;   /* logcheck mutation: the mark made after the drain */\n\n    /* And the whole account drawn once more", 1)
 open(p, "w").write(s)
 EOF
     mut_done src/lib/kernel/klib_panic.c "logcheck mutation" 2
@@ -779,7 +752,7 @@ panicstopmut_turns() {
 }
 
 run_panicstopmut() {
-    echo "== panicstopmut: thirteen mutants of the panic's stop — each must turn the panicstop legs it weighs =="
+    echo "== panicstopmut: ten mutants of the panic's stop — each must turn the panicstop legs it weighs =="
     panicstopmut_fixed_on
     panicstopmut_leg mutbios4 "BIOS STRICT 4c, panic()" panic MEM=2G
     panicstopmut_leg mutuefi4 "UEFI STRICT 4c, the exception dump" fault UEFI=on MEM=2G
@@ -790,19 +763,9 @@ run_panicstopmut() {
     panicstopmut_turns "the owner waits on a held lock" mutbust "BIOS STRICT 4c, panic()" panic MEM=2G
     restore src/lib/kernel/klib_lock.c
 
-    panicstopmut_cut src/lib/kernel/klib_print.c $'    if (PanicOwnedHere())\n        CanvasForceReset();\n' \
-        "no line of the account lets go of a batch another core left open"
-    panicstopmut_turns "no line lets go of a batch left open" mutbatch "BIOS STRICT 4c, panic()" panic MEM=2G
-    restore src/lib/kernel/klib_print.c
-
     panicstopmut_cut src/lib/kernel/klib_panic.c $'    else\n        PanicSayBreakf("vector %lu, error 0x%lx, RIP 0x%lx",\n                       frame->vector, frame->error_code, frame->rip);\n' \
         "the break of an exception said by no line"
     panicstopmut_turns "the break said by no line" mutbroke "BIOS STRICT 4c, a fault inside the account" nested MEM=2G
-    restore src/lib/kernel/klib_panic.c
-
-    panicstopmut_cut src/lib/kernel/klib_panic.c $'    CanvasForceReset();\n' \
-        "the line that says by what lets go of no batch the broken line left open"
-    panicstopmut_turns "the break lets go of no batch" mutglass "BIOS STRICT 4c, a fault inside the account" nested MEM=2G
     restore src/lib/kernel/klib_panic.c
 
     panicstopmut_cut src/lib/kernel/klib_panic.c $'    PanicSayBreak("panic: ", message, args);\n' \
@@ -813,10 +776,6 @@ run_panicstopmut() {
     panicstopmut_cut src/lib/kernel/klib_panic.c $'    if (++g_panic_depth != 2)\n        PanicStand();\n' \
         "the third coming says a line as the second does"
     panicstopmut_turns "the third coming says a line" mutdepth "BIOS STRICT 4c, a panic inside the account whose message faults" panicwild MEM=2G
-    restore src/lib/kernel/klib_panic.c
-
-    panicstopmut_glass_first
-    panicstopmut_turns "the glass before the ring" mutorder "BIOS STRICT 4c, the glass's road faulting under the account" glass MEM=2G
     restore src/lib/kernel/klib_panic.c
 
     panicstopmut_cut src/lib/kernel/klib_panic.c $'    if (frame->vector == 14)\n        PanicSayBreakf("vector %lu, error 0x%lx, RIP 0x%lx, CR2 0x%lx",\n                       frame->vector, frame->error_code, frame->rip, cr2);\n    else\n' \

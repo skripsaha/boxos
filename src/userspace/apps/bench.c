@@ -573,11 +573,10 @@ static void print_kv_u64(const char *label, uint64_t v, const char *unit)
 
 int main(void)
 {
-    /* Write straight to VGA: skip the display IPC route so the bench
-     * itself doesn't get amortised through DISP_CMD_render output. The
-     * rows we print are still measured cleanly because print() flushes
-     * synchronously in IO_MODE_VGA. */
-    io_set_mode(IO_MODE_VGA);
+    /* Said straight into the log ring: skip the display's lanes so the
+     * bench itself is not amortised through the console's merge. The rows
+     * we print are measured cleanly because every print is said at once. */
+    io_set_mode(IO_MODE_RING);
 
     println("BoxOS bench v1 — RDTSC microbenchmarks");
 

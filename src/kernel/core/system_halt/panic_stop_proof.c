@@ -52,9 +52,13 @@ static __attribute__((noreturn)) void PanicStopProofStand(const char *why)
 /* Raised by the BSP once it holds the console; the K-Core dies on it. */
 static volatile uint32_t s_console_held;
 
+/* The K-Core is past its pass's own line and in the case. */
+static volatile uint32_t s_die_entered;
+
 static void PanicStopProofDie(void *ctx)
 {
     (void)ctx;
+    __atomic_store_n(&s_die_entered, 1u, __ATOMIC_RELEASE);
     while (!__atomic_load_n(&s_console_held, __ATOMIC_ACQUIRE))
         __asm__ volatile("pause");
 #if CONFIG_PANIC_STOP_PROOF == 2
@@ -92,6 +96,15 @@ __attribute__((noreturn)) void PanicStopProof(void)
     kprintf("[PANICSTOP] the BSP takes the console and runs on with interrupts off\n");
     WireDrain();
 
+    /* ‼ THE PASS SAYS ITS OWN LINE ON ITS WAY IN, AND THAT LINE TAKES THE
+     * CONSOLE. A one-way pass prints "[BATON] core N takes a one-way pass"
+     * before it runs PanicStopProofDie (baton.c). Take the console first and
+     * the K-Core stands at that line, on a lock held for good, with no panic
+     * claimed to let it through — and the case is never put: SEEN once in ten
+     * legs, the BATON line missing and sixty seconds of silence. So the
+     * console is taken only once the K-Core is inside the case. */
+    while (!__atomic_load_n(&s_die_entered, __ATOMIC_ACQUIRE))
+        __asm__ volatile("pause");
     console_lock_acquire();
     __atomic_store_n(&s_console_held, 1u, __ATOMIC_RELEASE);
     for (;;) {

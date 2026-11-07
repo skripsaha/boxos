@@ -96,9 +96,11 @@
 #define SYSTEM_OP_TAG_REMOVE        0x21
 #define SYSTEM_OP_TAG_CHECK         0x22
 
-/* ─── Route / broadcast (0x40 – 0x41) ──────────────────────────────── */
+/* ─── Route / broadcast / question (0x40 – 0x43) ──────────────────── */
 #define SYSTEM_OP_ROUTE             0x40
 #define SYSTEM_OP_ROUTE_TAG         0x41
+#define SYSTEM_OP_ASK               0x42  /* (tag) in: question, out: answer — one answer, or the carrier's end */
+#define SYSTEM_OP_ANSWER            0x43  /* (u32 asker pid)(u32 asker cookie) in: answer */
 
 /* ─── Diagnostics (0x50) ───────────────────────────────────────────── */
 #define SYSTEM_OP_PERF_DUMP         0x50
@@ -332,5 +334,96 @@
  * create: params = [char filename[32]][u8 scope], a 32-byte params = USE. */
 #define STORAGE_SCOPE_USE           0
 #define STORAGE_SCOPE_EVERYWHERE    1
+
+/* ============================================================================
+ *  Hardware deck opcodes — the same single source, for the kernel's handler
+ *  table (hardware_ops.c) and boxlib's wrappers alike. A spent number stays
+ *  spent; the blocks below say which and why.
+ * ============================================================================ */
+#define HW_TIMER_GET_TICKS    0x10
+#define HW_TIMER_GET_MS       0x11
+#define HW_TIMER_GET_FREQ     0x12
+
+#define HW_RTC_GET_TIME       0x15
+#define HW_RTC_GET_UNIX64     0x16
+#define HW_RTC_GET_UPTIME     0x17
+
+/*
+ * ‼ FOURTEEN NUMBERS ARE SPENT HERE, AND NONE OF THEM COMES BACK.
+ *
+ * 0x20-0x25 were hw.port.inb/outb/inw/outw/inl/outl, 0x30-0x36 were
+ * hw.irq.register/unregister/enable/disable/isr/irr/eoi, and 0x40 was
+ * hw.cpu.halt. Not one of them was an operation. The first thirteen were this
+ * kernel's own `in`, `out` and interrupt-controller writes published outside
+ * under a name, and the last was a bare `hlt` reached with interrupts already
+ * masked — hardware_ops.c, above the Disk section, says what each of them
+ * actually did and what it cost. Their numbers stay spent, so an old caller
+ * that still knows one of them can only ever be told there is no such op,
+ * never handed a different one. The same rule, and the same reason, as 0x90
+ * and 0x93 below.
+ */
+
+#define HW_DISK_FLUSH         0x52
+#define HW_DISK_INFO          0x53
+
+/* The screen is lent to the one system program that draws (screen.h). */
+#define HW_SCREEN_CLAIM         0x60
+#define HW_SCREEN_RELEASE       0x61
+
+/*
+ * ‼ 0x70-0x7D ARE SPENT, AND NONE OF THEM COMES BACK.
+ *
+ * They were hw.vga.putchar, putstring, clear, clear_line, clear_eol,
+ * cursor.get, cursor.set, color.get, color.set, scroll, newline, dims, paint
+ * and step: fourteen ways for any program to draw through the kernel. The
+ * kernel draws nothing now — the screen is the display program's (0x60) and
+ * a program with no display says its text into the log ring (HW_LOG_SAY). The
+ * numbers stay spent so an old caller is told there is no such op, never
+ * handed a different one.
+ */
+
+#define HW_SYSTEM_REBOOT        0x80
+#define HW_SYSTEM_SHUTDOWN      0x81
+#define HW_DEBUG_PRINT          0x82
+#define HW_LOG_READ             0x83
+/* The account of the run BEFORE this one, carried through a warm reset in a
+ * fixed physical window (klib_logring.h). Same wire shape as HW_LOG_READ so
+ * one reader in userspace serves both. */
+#define HW_LOG_PREVIOUS         0x84
+/* A program's run of text into the log ring, and the bell the screen's holder
+ * hangs on it (klib_logring.h). */
+#define HW_LOG_SAY              0x85
+#define HW_LOG_BELL             0x86
+
+/* HW_LOG_READ's optional flags word. */
+#define HW_LOG_READ_TONES       0x01u
+
+/* An HW_LOG_READ answer: a header of HW_LOG_READ_HEADER bytes, then at most
+ * HW_LOG_READ_CHUNK bytes of the ring — with HW_LOG_READ_TONES, as many tones
+ * after them. */
+#define HW_LOG_READ_HEADER      24u
+#define HW_LOG_READ_CHUNK       4096u
+
+/* The most one HW_LOG_SAY takes: a page. A longer run is several. */
+#define HW_LOG_SAY_MAX          4096u
+
+/*
+ * ‼ A RETIRED OPCODE IS NEVER REISSUED.
+ *
+ * 0x90 was hw.usb.init and 0x93 was hw.usb.stop. Both are withdrawn: the first
+ * re-ran the driver's boot and took the machine's USB down with it, the second
+ * returned success for doing nothing (hardware_ops.c says what each of them
+ * actually did). Their numbers stay spent, so an old caller that still knows
+ * them can only ever be told there is no such op — never handed a different
+ * one. The Boarding Pass keeps its stamp kinds the same way and for the same
+ * reason: a number that meant one thing must not come back meaning another.
+ */
+#define HW_USB_RESET            0x91
+#define HW_USB_START            0x92
+#define HW_USB_PORT_STATUS      0x94
+#define HW_USB_PORT_RESET       0x95
+#define HW_USB_ENUM_DEVICE      0x96
+#define HW_USB_GET_INFO         0x97
+#define HW_USB_PORT_QUERY       0x98
 
 #endif // BOXOS_DECKS_H

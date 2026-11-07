@@ -76,13 +76,35 @@ int broadcast(const char* tag, const void* data, uint16_t size) {
                              NULL, 0, 0, 0 /* no deadline — reply guaranteed */);
 }
 
-int listen(uint64_t required_tags, uint8_t flags) {
-    uint8_t params[9];
-    memcpy(params, &required_tags, sizeof(uint64_t));
-    params[8] = flags;
-    return ipc_submit_one_op(0x42 /* LISTEN */, CRATE_INDEX_NONE,
-                             params, sizeof(params),
-                             NULL, 0, 0, 0 /* no deadline — reply guaranteed */);
+int ask(const char *tag, const void *question, uint32_t len,
+        void *answer, uint32_t cap, uint32_t *answer_len)
+{
+    if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
+    if (len > 0 && !question)    return -ERR_INVALID_ARGUMENT;
+
+    /* The tag travels whole, NUL included, as it does for broadcast; one too
+     * long for the call's manifest is refused there, never cut. */
+    size_t tlen = strlen(tag);
+    if (tlen >= UINT16_MAX) return -ERR_INVALID_ARGUMENT;
+
+    uint32_t got = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_ASK, tag, (uint16_t)(tlen + 1),
+                     question, len, answer, answer ? cap : 0, &got,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    if (rc != OK) return box_fail(rc);
+    if (answer_len) *answer_len = got;
+    return OK;
+}
+
+int answer(const Result *question, const void *bytes, uint32_t len)
+{
+    if (!question || KCTX_KIND(question->context) != KCTX_ASK) return -ERR_INVALID_ARGUMENT;
+    if (len > 0 && !bytes)                                       return -ERR_INVALID_ARGUMENT;
+
+    uint32_t params[2] = { question->sender_pid, KCTX_COOKIE24(question->context) };
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_ANSWER, params, sizeof(params),
+                     bytes, len, NULL, 0, NULL, BOX_ANSWER_GUARANTEED, NULL);
+    return rc == OK ? OK : box_fail(rc);
 }
 
 bool receive(Result* out) {
