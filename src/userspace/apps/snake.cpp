@@ -323,7 +323,7 @@ private:
 } // namespace
 
 int main() {
-  auto Opened = painter::tui::Stage::Open("snake", 24, 9);
+  auto Opened = painter::tui::Stage::Open(24, 9);
   if (!Opened) {
     printf("%s\n", Opened.error().Describe("snake").c_str());
     return 1;

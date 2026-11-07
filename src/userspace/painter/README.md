@@ -18,7 +18,7 @@ contract exist, only `painter::tui` is implemented.
 
 ## Purpose
 
-Painter hides the kernel display path from application authors. A program
+Painter hides the display path from application authors. A program
 should be able to open a `painter::tui::Stage`, draw a `Frame` using cells,
 text, glyphs, rectangles, or two-pixel-high RGB primitives, present it, and
 receive typed input without knowing about `TextCell`, `TouchTag`, Manifest,
@@ -47,9 +47,9 @@ one retained layer owned by its process: `Paint` replaces a rectangle with
 opaque cells, while `Composite` replaces the selected rectangle with the frame's
 coverage and clears transparent cells from that layer. `Surface::Clear` removes
 the whole retained layer without publishing an intermediate erase frame; the
-next draw publishes the replacement once. The kernel still receives only its
-existing rectangular `TextCell` operations, so the transparency contract and
-z-order remain Painter/display-server concerns and the display ABI stays stable.
+next draw publishes the replacement once. The kernel draws none of it: the
+display composes the layers, so the transparency contract and z-order are
+Painter's and the display's alone.
 
 ## Layering
 
@@ -105,8 +105,8 @@ The `tumbleweed` utility uses the full-screen `Stage` contract for its
 retained desert frame.
 Their models, animation,
 persistence, layout algorithms, and visual composition remain application
-code. The five older screen implementations in `apps` (`wordle`, `snake`,
-`bigclock`, `calendar`, and `bonsai`) now also link through `libpainter.a` and
-use Stage, Frame, and typed events. The Git checkpoint before implementation is tagged
+code. The older screen implementations in `apps` (`wordle`, `snake`,
+`bigclock`, `calendar`, `bonsai`, `hacker`, and `pipes`) now also link through
+`libpainter.a` and use Stage, Frame, and typed events. The Git checkpoint before implementation is tagged
 `painter-preimplementation`, and the implementation branch proceeds in
 bounded commits so that checkpoint remains an immediate rollback point.

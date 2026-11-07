@@ -334,7 +334,7 @@ int main()
         if (form_words(0, &Words, &Count) != 0) return 1;
 
         Explorer Look;
-        std::expected<Stage, StageError> Opened = Stage::Open("mandelbrot", 40, 12);
+        std::expected<Stage, StageError> Opened = Stage::Open(40, 12);
         if (!Opened) {
             Say(Opened.error().Describe("mandelbrot"));
             return 1;

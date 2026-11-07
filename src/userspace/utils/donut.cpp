@@ -205,7 +205,7 @@ int main() {
         return 1;
 
     std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open("donut", 30, 10);
+        painter::tui::Surface::Open(30, 10);
     if (!Opened) {
         Say(Opened.error().Describe("donut"));
         return 1;
@@ -226,7 +226,7 @@ int main() {
         return 1;
     }
     std::expected<painter::tui::Keyboard, painter::tui::StageError> Input =
-        painter::tui::Keyboard::Open("donut");
+        painter::tui::Keyboard::Open();
     if (!Input) {
         Say(Input.error().Describe("donut"));
         return 1;

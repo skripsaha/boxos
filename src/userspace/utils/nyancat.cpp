@@ -7,7 +7,7 @@
  *
  * The cat is drawn, not copied: every part of it is laid in units of the
  * screen's own scale, so a wide framebuffer gets a big cat and a text console
- * the classic one. Pixels are two to a cell's height (stage.h). */
+ * the classic one. Pixels are two to a cell's height (painter/tui/frame.h). */
 
 #include <algorithm>
 #include <format>
@@ -251,7 +251,7 @@ int main()
 {
     try {
         Flight Show;
-        std::expected<Stage, StageError> Opened = Stage::Open("nyancat", 40, 14);
+        std::expected<Stage, StageError> Opened = Stage::Open(40, 14);
         if (!Opened) {
             Say(Opened.error().Describe("nyancat"));
             return 1;

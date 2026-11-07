@@ -381,7 +381,7 @@ int main()
         if (form_words(0, &Words, &Count) != 0) return 1;
 
         Board Desk;
-        std::expected<Stage, StageError> Opened = Stage::Open("minesweeper", 40, 16);
+        std::expected<Stage, StageError> Opened = Stage::Open(40, 16);
         if (!Opened) {
             Say(Opened.error().Describe("minesweeper"));
             return 1;

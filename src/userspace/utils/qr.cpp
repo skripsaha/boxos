@@ -146,7 +146,7 @@ int Run()
     }
 
     std::expected<painter::tui::ConsoleSurface, painter::tui::StageError> Opened =
-        painter::tui::ConsoleSurface::Open("qr", 30, 10);
+        painter::tui::ConsoleSurface::Open(30, 10);
     if (!Opened) {
         Say(Opened.error().Describe("qr"));
         return 1;

@@ -175,7 +175,7 @@ std::optional<std::string> Hexer::TakeScreen()
     /* Sixteen bytes a line, or eight where sixteen do not fit. */
     auto LineWidth = [this](std::uint32_t Bytes) { return Digits + 4 * Bytes + 4; };
     std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
-        painter::tui::Stage::Open("hexer", static_cast<std::int32_t>(LineWidth(8)), 3);
+        painter::tui::Stage::Open(static_cast<std::int32_t>(LineWidth(8)), 3);
     if (!Opened) return Opened.error().Describe("hexer");
     Screen.emplace(std::move(*Opened));
     Rows = static_cast<std::uint32_t>(Screen->Size().Height);

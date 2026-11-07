@@ -48,7 +48,7 @@ bool Draw(painter::tui::Surface &Screen, painter::tui::Frame &Canvas)
 int main()
 {
     std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open("clock", ClockWidth, 1, painter::tui::SurfaceRole::Notice);
+        painter::tui::Surface::Open(ClockWidth, 1, painter::tui::SurfaceRole::Notice);
     if (!Opened) return 1;
     painter::tui::Surface Screen = std::move(*Opened);
     if (Screen.Size().Width < ClockWidth || Screen.Size().Height == 0) return 1;

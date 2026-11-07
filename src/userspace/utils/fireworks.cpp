@@ -399,7 +399,7 @@ int main()
 {
     try {
         Show Night;
-        std::expected<Stage, StageError> Opened = Stage::Open("fireworks", 40, 12);
+        std::expected<Stage, StageError> Opened = Stage::Open(40, 12);
         if (!Opened) {
             print_to_screen((Opened.error().Describe("fireworks") + '\n').c_str());
             return 1;

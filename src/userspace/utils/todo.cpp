@@ -258,7 +258,7 @@ int main()
             return 0;
         }
 
-        std::expected<Stage, StageError> Opened = Stage::Open("todo", 40, 8);
+        std::expected<Stage, StageError> Opened = Stage::Open(40, 8);
         if (!Opened) {
             Say(Opened.error().Describe("todo"));
             return 1;

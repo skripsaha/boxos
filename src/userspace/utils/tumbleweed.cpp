@@ -75,7 +75,7 @@ int main()
 {
     try {
         std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
-            painter::tui::Stage::Open("tumbleweed", LeastCols, LeastRows);
+            painter::tui::Stage::Open(LeastCols, LeastRows);
         if (!Opened) {
             Say(Opened.error().Describe("tumbleweed"));
             return 1;

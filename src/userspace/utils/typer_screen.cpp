@@ -9,7 +9,7 @@ using painter::tui::TextStyle;
 std::optional<std::string> Screen::Take()
 {
     std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
-        painter::tui::Stage::Open("typer", ScreenColsLeast, ScreenRowsLeast);
+        painter::tui::Stage::Open(ScreenColsLeast, ScreenRowsLeast);
     if (!Opened) return Opened.error().Describe("typer");
     Stage.emplace(std::move(*Opened));
     Rows = static_cast<std::uint32_t>(Stage->Size().Height);

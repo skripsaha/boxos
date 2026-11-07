@@ -790,16 +790,31 @@ static void serial_com1_irq(void)
             break;
 
         case IIR_RX:
-        case IIR_RX_TIMEOUT:
+        case IIR_RX_TIMEOUT: {
             /* Drain the whole FIFO. CR->LF so a terminal's Enter submits the
              * line (the PS/2 path delivers '\n' for Enter, which is what the
-             * line editor expects). */
+             * line editor expects).
+             *
+             * Handed over as one burst, with whether the line has fallen
+             * silent after it: a timeout says the UART saw four character
+             * times of nothing, so a terminal's sequence ended inside this
+             * burst and an ESC alone was a lone Escape. A UART with no FIFO
+             * has no such word, and every byte stands alone. */
+            char     got[16];
+            uint32_t n     = 0;
+            bool     quiet = g_wire_fifo == 1u || (iir & IIR_ID_MASK) == IIR_RX_TIMEOUT;
             while (uart_in(SERIAL_LINE_STATUS) & LSR_DATA_READY) {
                 char c = (char)uart_in(SERIAL_DATA);
                 if (c == '\r') c = '\n';
-                keyboard_inject(&c, 1);
+                got[n++] = c;
+                if (n == sizeof(got)) {
+                    keyboard_inject(got, n, false);
+                    n = 0;
+                }
             }
+            keyboard_inject(got, n, quiet);
             break;
+        }
 
         case IIR_LINE_STATUS:
             (void)uart_in(SERIAL_LINE_STATUS);
@@ -875,10 +890,13 @@ void serial_console_init(void)
         return;
     }
 
-    /* 1-byte RX trigger so a single character interrupts immediately, and
-     * the receive FIFO cleared of boot-time noise. The transmit FIFO is left
-     * alone: it may hold bytes the synchronous kicks put there. */
-    uart_out(SERIAL_FIFO_CTRL, 0x03);
+    /* 14-byte RX trigger, and the receive FIFO cleared of boot-time noise. A
+     * single key still interrupts at once: the UART raises its timeout when
+     * the line has been quiet for four character times (under half a
+     * millisecond at this speed), and that quiet is how a terminal's escape
+     * sequence is told from a lone Escape (keyboard_inject). The transmit
+     * FIFO is left alone: it may hold bytes the synchronous kicks put there. */
+    uart_out(SERIAL_FIFO_CTRL, 0xC3);
     /* The Wire drains the log ring onto the line. Late means bytes fall
      * behind and the reader is told how many; nothing in flight is lost.
      *

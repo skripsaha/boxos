@@ -143,11 +143,11 @@ bigclock.elf: $(BOXLIB_START) bigclock.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB
 snake.elf: $(BOXLIB_START) snake.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) snake.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
-hacker.elf: $(BOXLIB_START) hacker.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) hacker.o $(BOXCXX) $(BOXLIB) -lgcc)
+hacker.elf: $(BOXLIB_START) hacker.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) hacker.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
-pipes.elf: $(BOXLIB_START) pipes.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) pipes.o $(BOXCXX) $(BOXLIB) -lgcc)
+pipes.elf: $(BOXLIB_START) pipes.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) pipes.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 wordle.elf: $(BOXLIB_START) wordle.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) wordle.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
@@ -196,4 +196,4 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	nasm -f elf64 $< -o $@
 
 clean:
-	rm -f *.o *.d *.elf
+	rm -f *.o *.d *.elf bonsai/*.o bonsai/*.d

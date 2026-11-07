@@ -8,8 +8,6 @@
 #include "box/cpu.h"
 
 namespace {
-
-using Color = TumbleColor;
 namespace Colors = painter::core::Colors;
 constexpr float Pi = 3.14159265358979323846f;
 
@@ -155,66 +153,66 @@ TumbleSky TumbleWorld::Sky() const
 int TumbleWorld::Sun() const { return Sky().Sunlight; }
 bool TumbleWorld::Night() const { return Sky().Night; }
 
-Color TumbleWorld::Shade(Color Ink, int Amount) const
+TumbleColor TumbleWorld::Shade(TumbleColor Ink, int Amount) const
 {
-    return Color::Mix(Colors::Black, Ink, static_cast<std::uint8_t>(std::clamp(Amount, 0, 255)));
+    return TumbleColor::Mix(Colors::Black, Ink, static_cast<std::uint8_t>(std::clamp(Amount, 0, 255)));
 }
 
-Color TumbleWorld::Illuminate(Color Ink, int WorldY, int Layer) const
+TumbleColor TumbleWorld::Illuminate(TumbleColor Ink, int WorldY, int Layer) const
 {
     const TumbleSky State = Sky();
     const int HeightLight = std::clamp(255 - WorldY * 2, 0, 96);
     const int Ambient = State.Night ? 64 : 104;
     const int SunLight = State.Sunlight * (Layer == 0 ? 3 : 4) / 5;
     const int Amount = std::clamp(Ambient + SunLight / 2 + HeightLight - (Layer == 0 ? 14 : 0), 42, 255);
-    Color Out = Shade(Ink, Amount);
+    TumbleColor Out = Shade(Ink, Amount);
     if (State.Warmth < 150) {
-        const Color Cool = Season == TumbleSeason::Winter ? Color::Rgb(0x70, 0x94, 0xBA)
-                                                           : Color::Rgb(0x68, 0x78, 0xB0);
-        Out = Color::Mix(Out, Cool, static_cast<std::uint8_t>((150 - State.Warmth) * 3 / 5));
+        const TumbleColor Cool = Season == TumbleSeason::Winter ? TumbleColor::Rgb(0x70, 0x94, 0xBA)
+                                                           : TumbleColor::Rgb(0x68, 0x78, 0xB0);
+        Out = TumbleColor::Mix(Out, Cool, static_cast<std::uint8_t>((150 - State.Warmth) * 3 / 5));
     } else if (State.Warmth > 205 && State.Sunlight < 210) {
-        Out = Color::Mix(Out, Color::Rgb(0xE0, 0x91, 0x5B), static_cast<std::uint8_t>((State.Warmth - 205) * 2));
+        Out = TumbleColor::Mix(Out, TumbleColor::Rgb(0xE0, 0x91, 0x5B), static_cast<std::uint8_t>((State.Warmth - 205) * 2));
     }
     return Out;
 }
 
-Color TumbleWorld::SkyAt(int WorldY, const TumbleSky &State) const
+TumbleColor TumbleWorld::SkyAt(int WorldY, const TumbleSky &State) const
 {
     const int Span = std::max(1, Height * 62 / 100);
     const std::uint8_t Gradient = static_cast<std::uint8_t>(std::clamp((WorldY - 2) * 255 / Span, 0, 255));
-    Color Top;
-    Color Horizon;
+    TumbleColor Top;
+    TumbleColor Horizon;
 
     if (State.Night) {
-        Top = Season == TumbleSeason::Winter ? Color::Rgb(0x10, 0x1D, 0x36) : Color::Rgb(0x08, 0x16, 0x32);
-        Horizon = Season == TumbleSeason::Winter ? Color::Rgb(0x42, 0x4D, 0x72) : Color::Rgb(0x2C, 0x35, 0x68);
+        Top = Season == TumbleSeason::Winter ? TumbleColor::Rgb(0x10, 0x1D, 0x36) : TumbleColor::Rgb(0x08, 0x16, 0x32);
+        Horizon = Season == TumbleSeason::Winter ? TumbleColor::Rgb(0x42, 0x4D, 0x72) : TumbleColor::Rgb(0x2C, 0x35, 0x68);
     } else if (State.Sunlight < 150) {
-        Top = Season == TumbleSeason::Winter ? Color::Rgb(0x43, 0x4E, 0x72) : Color::Rgb(0x51, 0x3B, 0x68);
-        Horizon = Season == TumbleSeason::Winter ? Color::Rgb(0xB4, 0x8B, 0x88) : Color::Rgb(0xE0, 0x78, 0x54);
+        Top = Season == TumbleSeason::Winter ? TumbleColor::Rgb(0x43, 0x4E, 0x72) : TumbleColor::Rgb(0x51, 0x3B, 0x68);
+        Horizon = Season == TumbleSeason::Winter ? TumbleColor::Rgb(0xB4, 0x8B, 0x88) : TumbleColor::Rgb(0xE0, 0x78, 0x54);
     } else {
         switch (Season) {
         case TumbleSeason::Spring:
-            Top = Color::Rgb(0x3A, 0x8E, 0xB0); Horizon = Color::Rgb(0xF0, 0xBD, 0x7B); break;
+            Top = TumbleColor::Rgb(0x3A, 0x8E, 0xB0); Horizon = TumbleColor::Rgb(0xF0, 0xBD, 0x7B); break;
         case TumbleSeason::Summer:
-            Top = Color::Rgb(0x20, 0x76, 0xB2); Horizon = Color::Rgb(0xF4, 0xB1, 0x68); break;
+            Top = TumbleColor::Rgb(0x20, 0x76, 0xB2); Horizon = TumbleColor::Rgb(0xF4, 0xB1, 0x68); break;
         case TumbleSeason::Autumn:
-            Top = Color::Rgb(0x47, 0x70, 0xA4); Horizon = Color::Rgb(0xE4, 0x9D, 0x65); break;
+            Top = TumbleColor::Rgb(0x47, 0x70, 0xA4); Horizon = TumbleColor::Rgb(0xE4, 0x9D, 0x65); break;
         case TumbleSeason::Winter:
-            Top = Color::Rgb(0x59, 0x80, 0x9C); Horizon = Color::Rgb(0xB9, 0xC8, 0xC9); break;
+            Top = TumbleColor::Rgb(0x59, 0x80, 0x9C); Horizon = TumbleColor::Rgb(0xB9, 0xC8, 0xC9); break;
         }
     }
-    return Color::Mix(Top, Horizon, Gradient);
+    return TumbleColor::Mix(Top, Horizon, Gradient);
 }
 
-Color TumbleWorld::Sand() const
+TumbleColor TumbleWorld::Sand() const
 {
     switch (Season) {
-    case TumbleSeason::Spring: return Color::Rgb(0xA9, 0x79, 0x43);
-    case TumbleSeason::Summer: return Color::Rgb(0xC9, 0x8A, 0x43);
-    case TumbleSeason::Autumn: return Color::Rgb(0x9F, 0x5F, 0x36);
-    case TumbleSeason::Winter: return Color::Rgb(0xA9, 0x9A, 0x82);
+    case TumbleSeason::Spring: return TumbleColor::Rgb(0xA9, 0x79, 0x43);
+    case TumbleSeason::Summer: return TumbleColor::Rgb(0xC9, 0x8A, 0x43);
+    case TumbleSeason::Autumn: return TumbleColor::Rgb(0x9F, 0x5F, 0x36);
+    case TumbleSeason::Winter: return TumbleColor::Rgb(0xA9, 0x9A, 0x82);
     }
-    return Color::Rgb(0xC9, 0x8A, 0x43);
+    return TumbleColor::Rgb(0xC9, 0x8A, 0x43);
 }
 
 void TumbleWorld::Step(float Seconds)
@@ -252,7 +250,7 @@ void TumbleWorld::Step(float Seconds)
             Dusts.push_back({CameraX + ViewWidth + 2.0f,
                              CameraY + Dice.Between(8.0f, static_cast<float>(ViewHeight - 4)),
                              Dice.Between(-8.0f, -2.0f), Dice.Between(0.8f, 2.5f),
-                             Color::Rgb(0xC0, 0x97, 0x62)});
+                             TumbleColor::Rgb(0xC0, 0x97, 0x62)});
     }
     for (std::size_t At = Dusts.size(); At-- > 0;) {
         TumbleDust &One = Dusts[At];
@@ -295,7 +293,7 @@ void TumbleWorld::AddWeed(float X)
     const float Direction = Dice.Chance(0.5f) ? 1.0f : -1.0f;
     Weeds.push_back({std::clamp(X, 2.0f, static_cast<float>(Width - 3)),
                      Direction * Dice.Between(2.5f, 8.0f), Dice.Between(0, 6.28f), Layer,
-                     Color::Rgb(0x9B, 0x72, 0x40)});
+                     TumbleColor::Rgb(0x9B, 0x72, 0x40)});
     Spawned++;
 }
 
@@ -303,7 +301,7 @@ void TumbleWorld::AddCactus(float X)
 {
     if (Cacti.size() >= 120) return;
     Cacti.push_back({std::clamp(static_cast<int>(X), 4, Width - 5), Dice.Count(14, 29), Dice.Chance(0.72f), 1,
-                     Dice.Chance(0.5f) ? Color::Rgb(0x4D, 0x9A, 0x4D) : Color::Rgb(0x78, 0xA6, 0x45)});
+                     Dice.Chance(0.5f) ? TumbleColor::Rgb(0x4D, 0x9A, 0x4D) : TumbleColor::Rgb(0x78, 0xA6, 0x45)});
     Spawned++;
 }
 
@@ -312,6 +310,6 @@ void TumbleWorld::AddBird(float X, float Y)
     if (Birds.size() >= 90) return;
     const float Speed = Dice.Between(4.0f, 10.0f) * (Dice.Chance(0.5f) ? 1.0f : -1.0f);
     Birds.push_back({X, Y, Speed, Dice.Between(0, 6.28f), Dice.Chance(0.45f) ? 0 : 1, Speed < 0,
-                     Color::Rgb(0xC0, 0xB8, 0xA0)});
+                     TumbleColor::Rgb(0xC0, 0xB8, 0xA0)});
     Spawned++;
 }

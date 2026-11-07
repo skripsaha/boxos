@@ -19,6 +19,11 @@ box::error Cause(int Code)
     return Code == 0 ? box::error{} : box::error{box_errno_of(Code)};
 }
 
+StageError Error(StageErrorKind Kind, box::error CauseValue, core::Size Actual, core::Size Required)
+{
+    return StageError{Kind, CauseValue, Actual, Required};
+}
+
 std::size_t CellCount(core::Size Size) noexcept
 {
     if (Size.Width <= 0 || Size.Height <= 0) return 0;
@@ -40,22 +45,43 @@ DisplayLayer::DisplayLayer(core::Rect BoundsValue, const DisplayLayerOpenReply &
 {
 }
 
-std::expected<DisplayLayer, box::error> DisplayLayer::Open(core::Rect Bounds,
-                                                            DisplayLayerRole Role) noexcept
+std::expected<DisplayLayer, StageError> DisplayLayer::Open(std::int32_t LeastCols,
+                                                           std::int32_t LeastRows,
+                                                           DisplayLayerRole Role) noexcept
 {
-    const core::Size Size{Bounds.Width, Bounds.Height};
+    const core::Size Required{LeastCols, LeastRows};
+    if (LeastCols < 0 || LeastRows < 0)
+        return std::unexpected(Error(StageErrorKind::TooSmall, box::error{box::errc::invalid_argument}, {},
+                                     Required));
+
+    std::uint32_t Cols = 0, Rows = 0;
+    const int Asked = display_size(&Cols, &Rows);
+    if (Asked != 0)
+        return std::unexpected(Error(StageErrorKind::DimensionsUnavailable, Cause(Asked), {}, Required));
+
+    const core::Size Size{static_cast<std::int32_t>(Cols), static_cast<std::int32_t>(Rows)};
+    if (Size.Empty())
+        return std::unexpected(Error(StageErrorKind::NoConsole, box::error{box::errc::device_not_ready}, Size,
+                                     Required));
+    if (Size.Width < LeastCols || Size.Height < LeastRows)
+        return std::unexpected(Error(StageErrorKind::TooSmall, box::error{box::errc::out_of_range}, Size,
+                                     Required));
+
     const std::size_t Cells = CellCount(Size);
-    if (Cells == 0 || Bounds.X < 0 || Bounds.Y < 0 ||
-        Cells > std::numeric_limits<std::uint32_t>::max() ||
+    if (Cells == 0 || Cells > std::numeric_limits<std::uint32_t>::max() ||
         Cells > (std::numeric_limits<std::size_t>::max() - sizeof(DisplayLayerSharedHeader)) /
                     (DISPLAY_LAYER_SLOTS * sizeof(DisplayLayerCell)))
-        return std::unexpected(box::error{box::errc::out_of_range});
+        return std::unexpected(Error(StageErrorKind::FrameUnavailable, box::error{box::errc::out_of_range},
+                                     Size, Required));
+    const auto Refused = [&](box::error Why) {
+        return std::unexpected(Error(StageErrorKind::InvalidState, Why, Size, Required));
+    };
 
     DisplayLayerOpenRequest Request{};
     Request.command = DISP_CMD_LAYER_OPEN;
     Request.role = static_cast<std::uint8_t>(Role);
-    Request.x = Bounds.X;
-    Request.y = Bounds.Y;
+    Request.x = 0;
+    Request.y = 0;
     Request.width = static_cast<std::uint32_t>(Size.Width);
     Request.height = static_cast<std::uint32_t>(Size.Height);
     // Everything this strand printed goes out first, and the mark says how
@@ -66,19 +92,19 @@ std::expected<DisplayLayer, box::error> DisplayLayer::Open(core::Rect Bounds,
     DisplayLayerOpenReply Reply{};
     std::uint32_t Got = 0;
     const int Code = ask(DISPLAY_TAG, &Request, sizeof(Request), &Reply, sizeof(Reply), &Got);
-    if (Code != 0) return std::unexpected(Cause(Code));
+    if (Code != 0) return Refused(Cause(Code));
     if (Got != sizeof(Reply) || Reply.command != DISP_CMD_LAYER_OPEN)
-        return std::unexpected(box::error{box::errc::corrupted});
-    if (Reply.error != 0) return std::unexpected(box::error{static_cast<error_t>(Reply.error)});
+        return Refused(box::error{box::errc::corrupted});
+    if (Reply.error != 0) return Refused(box::error{static_cast<error_t>(Reply.error)});
     if (Reply.display_pid == 0 || Reply.layer_id == 0 ||
         std::memchr(Reply.bay_tag, '\0', sizeof(Reply.bay_tag)) == nullptr)
-        return std::unexpected(box::error{box::errc::corrupted});
+        return Refused(box::error{box::errc::corrupted});
 
     // The display made the layer's memory and holds the layer from here on;
     // anything wrong with what it named is told back by closing the layer
     // (the destructor of the layer made below).
-    DisplayLayer Layer(Bounds, Reply, box::bay<std::byte>::open(Reply.bay_tag));
-    if (!Layer.Shared) return std::unexpected(box::error{box::errc::tag_not_found});
+    DisplayLayer Layer({0, 0, Size.Width, Size.Height}, Reply, box::bay<std::byte>::open(Reply.bay_tag));
+    if (!Layer.Shared) return Refused(box::error{box::errc::tag_not_found});
 
     const DisplayLayerSharedHeader *Header = Layer.Header;
     if (Layer.Shared.size_bytes() < sizeof(DisplayLayerSharedHeader) +
@@ -86,7 +112,7 @@ std::expected<DisplayLayer, box::error> DisplayLayer::Open(core::Rect Bounds,
         Header->magic != DISPLAY_LAYER_MAGIC || Header->version != DISPLAY_LAYER_VERSION ||
         Header->width != Request.width || Header->height != Request.height ||
         Header->cell_count != Cells || Header->slot_count != DISPLAY_LAYER_SLOTS)
-        return std::unexpected(box::error{box::errc::corrupted});
+        return Refused(box::error{box::errc::corrupted});
     return Layer;
 }
 
@@ -137,12 +163,11 @@ box::status DisplayLayer::Notify() noexcept
     }
 }
 
-box::status DisplayLayer::Present(std::span<const DisplayLayerCell> Cells,
-                                  core::Point Cursor, bool CursorVisible) noexcept
+box::status DisplayLayer::Present(const Frame &Picture, core::Point Cursor, bool CursorVisible) noexcept
 {
     if (!Opened || !Header) return std::unexpected(box::error{box::errc::invalid_state});
-    const std::size_t Count = CellCount({Bounds.Width, Bounds.Height});
-    if (Cells.size() != Count) return std::unexpected(box::error{box::errc::invalid_argument});
+    if (Picture.Size() != Size()) return std::unexpected(box::error{box::errc::invalid_argument});
+    const std::size_t Count = CellCount(Size());
 
     // A FREE slot, or — when the display is behind and all it has not taken
     // yet are READY — the oldest of those: a frame nobody will show is the
@@ -174,8 +199,15 @@ box::status DisplayLayer::Present(std::span<const DisplayLayerCell> Cells,
 
     auto *Base = reinterpret_cast<DisplayLayerCell *>(
         reinterpret_cast<std::byte *>(Header) + sizeof(DisplayLayerSharedHeader));
-    auto *Destination = Base + static_cast<std::size_t>(Slot) * Count;
-    std::memcpy(Destination, Cells.data(), Count * sizeof(DisplayLayerCell));
+    DisplayLayerCell *Out = Base + static_cast<std::size_t>(Slot) * Count;
+    for (std::int32_t Row = 0; Row < Bounds.Height; Row++) {
+        for (std::int32_t Col = 0; Col < Bounds.Width; Col++) {
+            const Cell Value = Picture.Read({Col, Row});
+            *Out++ = DisplayLayerCell{
+                TextCell{Value.Foreground.Raw(), Value.Background.Raw(), Value.Glyph, {0, 0, 0}},
+                static_cast<std::uint8_t>(Value.IsTransparent() ? 0u : 1u), {0, 0, 0}};
+        }
+    }
     Header->cursor_x[Slot] = Cursor.X < 0 ? 0u : static_cast<std::uint32_t>(Cursor.X);
     Header->cursor_y[Slot] = Cursor.Y < 0 ? 0u : static_cast<std::uint32_t>(Cursor.Y);
     Header->cursor_visible[Slot] = CursorVisible ? 1u : 0u;

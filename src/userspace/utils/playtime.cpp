@@ -17,12 +17,11 @@
  *
  *   playtime           -> pours until a key is pressed
  *
- * Two things here must not be undone. Nothing is printed between the first
- * paint and the final clear: printed text travels the display daemon's lane
- * and would land on top of the picture at a moment nobody chose. And a frame
- * is laid down by ONE vga_paint, never by a loop of vga_putchar_at — a
- * per-cell op would also put sixteen thousand characters a frame into the log
- * ring the serial line reads, and bury everything the machine actually said.
+ * Two things here must not be undone. Nothing is printed while the picture is
+ * up: printed text lands in the console beneath it, at a moment nobody chose.
+ * And a frame is one Stage frame, never printed cells — printed, it would put
+ * sixteen thousand characters a frame into the log ring the serial line reads,
+ * and bury everything the machine actually said.
  */
 
 #include "box/print.h"
@@ -179,12 +178,9 @@ static void compose(unsigned rows, unsigned cols)
     }
 }
 
-/* Where the caret belongs. It is drawn wherever the kernel cursor stands and
- * there is no way to hide it, so it is parked in the far corner rather than
- * left blinking in the middle of the picture. vga_paint never moves it — but
- * a kernel line does, and so does the display daemon rendering another lane,
- * and this used to be called once before the loop: one such line and the caret
- * blinked inside the picture for the rest of the run. */
+/* Where the caret belongs. A Stage always shows its caret, where it was last
+ * set, so it is parked in the far corner rather than left blinking in the
+ * middle of the picture. */
 static bool park_caret(void)
 {
     return static_cast<bool>(g_screen->SetCursor({g_screen->Size().Width - 1,
@@ -293,7 +289,7 @@ static void say_the_tally(uint64_t frames, uint64_t ran_ms, int code)
 
 int main(void)
 {
-    auto Opened = painter::tui::Stage::Open("playtime", 1, 1);
+    auto Opened = painter::tui::Stage::Open(1, 1);
     if (!Opened) {
         println(Opened.error().Describe("playtime").c_str());
         return 1;

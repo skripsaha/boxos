@@ -451,7 +451,7 @@ private:
 } // namespace
 
 int main() {
-  auto Opened = painter::tui::Stage::Open("calendar", 70, 20);
+  auto Opened = painter::tui::Stage::Open(70, 20);
   if (!Opened) {
     std::printf("%s\n", Opened.error().Describe("calendar").c_str());
     return 1;

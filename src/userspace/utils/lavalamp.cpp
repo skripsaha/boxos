@@ -30,10 +30,10 @@
  * the keys a framebuffer user would reach for. Take them away and this becomes
  * a program a person on a serial line can enter and cannot leave.
  *
- * Do not paint this with vga_putchar_at. One frame is thousands of cells; as
- * ops they would be thousands of Manifest entries AND thousands of lines in
- * the log ring the serial line reads, twenty-five times a second. vga_paint is
- * one op and stays out of the ring — that is exactly what it is for.
+ * The picture is one Stage frame, written into the layer's memory and shown by
+ * the display. One frame is thousands of cells: printed, they would be
+ * thousands of characters in the log ring the serial line reads, twenty-five
+ * times a second. A layer is drawn and never said.
  */
 #include "box/print.h"
 #include "box/color.h"
@@ -768,7 +768,7 @@ static void say_the_tally(uint32_t frames, int code)
 
 int main(void)
 {
-    auto Opened = painter::tui::Stage::Open("lavalamp", 1, 1);
+    auto Opened = painter::tui::Stage::Open(1, 1);
     if (!Opened) {
         println(Opened.error().Describe("lavalamp").c_str());
         return 1;

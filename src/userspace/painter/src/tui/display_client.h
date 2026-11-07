@@ -3,19 +3,24 @@
 
 #include <cstdint>
 #include <expected>
-#include <span>
 
 #include "box/cxx/bay.h"
 #include "box/cxx/error.h"
 #include "painter/core/geometry.h"
+#include "painter/tui/frame.h"
+#include "painter/tui/stage.h"
 #include "box/display.h"
 
 namespace painter::tui {
 
+/* One layer of the display, the whole screen in size. Open asks the display
+ * how big the screen is and refuses one smaller than the least asked for, so
+ * the checks every Painter surface needs are made here once. */
 class DisplayLayer {
 public:
-    static std::expected<DisplayLayer, box::error> Open(core::Rect Bounds,
-                                                         DisplayLayerRole Role) noexcept;
+    static std::expected<DisplayLayer, StageError> Open(std::int32_t LeastCols,
+                                                        std::int32_t LeastRows,
+                                                        DisplayLayerRole Role) noexcept;
 
     DisplayLayer(DisplayLayer &&) noexcept;
     DisplayLayer &operator=(DisplayLayer &&) noexcept;
@@ -29,8 +34,9 @@ public:
     // everything this strand printed before opening it.
     core::Point Cursor() const noexcept { return ConsoleCursor; }
 
-    box::status Present(std::span<const DisplayLayerCell> Cells,
-                        core::Point Cursor, bool CursorVisible) noexcept;
+    // The picture is written straight into a slot of the layer's memory:
+    // a transparent cell shows what lies beneath it.
+    box::status Present(const Frame &Picture, core::Point Cursor, bool CursorVisible) noexcept;
     box::status Commit(std::uint32_t ScrollRows = 0) noexcept;
     box::status Close() noexcept;
 

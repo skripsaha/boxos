@@ -1217,7 +1217,7 @@ APP_ELFS := $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $
 
 APPS_STAMP  := $(APPS_DIR)/.apps.stamp
 APPS_INPUTS := $(wildcard $(APPS_DIR)/*.c) $(wildcard $(APPS_DIR)/*.cpp) \
-               $(wildcard $(APPS_DIR)/*.h) $(wildcard $(APPS_DIR)/bonsai/*) \
+               $(wildcard $(APPS_DIR)/*.h) $(wildcard $(APPS_DIR)/bonsai/*.cpp) $(wildcard $(APPS_DIR)/bonsai/*.h) \
                $(APPS_DIR)/Makefile
 
 ifneq ($(words $(wildcard $(APP_ELFS))),$(words $(APP_ELFS)))

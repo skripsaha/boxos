@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+#include "box/color.h"
+
 namespace painter::core {
 
 class Color {
@@ -23,20 +25,10 @@ public:
     constexpr std::uint8_t  Green() const noexcept { return static_cast<std::uint8_t>((Value >> 8) & 0xFFu); }
     constexpr std::uint8_t  Blue() const noexcept { return static_cast<std::uint8_t>(Value & 0xFFu); }
 
-    static constexpr Color Mix(Color A, Color B, std::uint8_t Weight) noexcept
+    // The colour from A toward B by Weight of 255 — boxlib's one blend.
+    static Color Mix(Color A, Color B, std::uint8_t Weight) noexcept
     {
-        const std::uint32_t Inverse = 255u - Weight;
-        const std::uint32_t Red     = (static_cast<std::uint32_t>(A.Red()) * Inverse +
-                                   static_cast<std::uint32_t>(B.Red()) * Weight) /
-                                  255u;
-        const std::uint32_t Green   = (static_cast<std::uint32_t>(A.Green()) * Inverse +
-                                     static_cast<std::uint32_t>(B.Green()) * Weight) /
-                                    255u;
-        const std::uint32_t Blue    = (static_cast<std::uint32_t>(A.Blue()) * Inverse +
-                                    static_cast<std::uint32_t>(B.Blue()) * Weight) /
-                                   255u;
-        return Rgb(static_cast<std::uint8_t>(Red), static_cast<std::uint8_t>(Green),
-                   static_cast<std::uint8_t>(Blue));
+        return FromRaw(color_mix(A.Raw(), B.Raw(), Weight));
     }
 
     friend constexpr bool operator==(Color, Color) noexcept = default;
@@ -47,31 +39,32 @@ private:
     std::uint32_t Value = 0;
 };
 
+// The console's named colours (box/color.h), named for Painter.
 namespace Colors {
-inline constexpr Color Black     = Color::Rgb(0x00, 0x00, 0x00);
-inline constexpr Color White     = Color::Rgb(0xFF, 0xFF, 0xFF);
-inline constexpr Color DarkGray  = Color::Rgb(0x55, 0x55, 0x55);
-inline constexpr Color LightGray = Color::Rgb(0xAA, 0xAA, 0xAA);
-inline constexpr Color Red       = Color::Rgb(0xE0, 0x40, 0x40);
-inline constexpr Color Green     = Color::Rgb(0x40, 0xC0, 0x40);
-inline constexpr Color Blue      = Color::Rgb(0x40, 0x80, 0xE0);
-inline constexpr Color Yellow    = Color::Rgb(0xE0, 0xC0, 0x40);
-inline constexpr Color Cyan      = Color::Rgb(0x40, 0xC0, 0xC0);
-inline constexpr Color Magenta   = Color::Rgb(0xC0, 0x40, 0xC0);
-inline constexpr Color DarkRed   = Color::Rgb(0xA0, 0x00, 0x00);
-inline constexpr Color DarkGreen = Color::Rgb(0x00, 0x80, 0x00);
-inline constexpr Color DarkBlue  = Color::Rgb(0x00, 0x00, 0xA0);
-inline constexpr Color Brown     = Color::Rgb(0xA0, 0x60, 0x00);
-inline constexpr Color DarkCyan  = Color::Rgb(0x00, 0x80, 0x80);
-inline constexpr Color DarkMagenta = Color::Rgb(0x80, 0x00, 0x80);
-inline constexpr Color Berry     = Color::Rgb(0xE0, 0x4F, 0x90);
-inline constexpr Color Ocean     = Color::Rgb(0x10, 0x80, 0xC0);
-inline constexpr Color Leaf      = Color::Rgb(0x60, 0xC0, 0x30);
-inline constexpr Color Amber     = Color::Rgb(0xFF, 0xB0, 0x40);
-inline constexpr Color Violet    = Color::Rgb(0x90, 0x60, 0xFF);
-inline constexpr Color Teal      = Color::Rgb(0x00, 0xB0, 0xA0);
-inline constexpr Color Coral     = Color::Rgb(0xFF, 0x80, 0x70);
-inline constexpr Color Slate     = Color::Rgb(0x60, 0x70, 0x80);
+inline constexpr Color Black     = Color::FromRaw(COLOR_BLACK);
+inline constexpr Color White     = Color::FromRaw(COLOR_WHITE);
+inline constexpr Color DarkGray  = Color::FromRaw(COLOR_DARK_GRAY);
+inline constexpr Color LightGray = Color::FromRaw(COLOR_LIGHT_GRAY);
+inline constexpr Color Red       = Color::FromRaw(COLOR_RED);
+inline constexpr Color Green     = Color::FromRaw(COLOR_GREEN);
+inline constexpr Color Blue      = Color::FromRaw(COLOR_BLUE);
+inline constexpr Color Yellow    = Color::FromRaw(COLOR_YELLOW);
+inline constexpr Color Cyan      = Color::FromRaw(COLOR_CYAN);
+inline constexpr Color Magenta   = Color::FromRaw(COLOR_MAGENTA);
+inline constexpr Color DarkRed   = Color::FromRaw(COLOR_DARK_RED);
+inline constexpr Color DarkGreen = Color::FromRaw(COLOR_DARK_GREEN);
+inline constexpr Color DarkBlue  = Color::FromRaw(COLOR_DARK_BLUE);
+inline constexpr Color Brown     = Color::FromRaw(COLOR_BROWN);
+inline constexpr Color DarkCyan  = Color::FromRaw(COLOR_DARK_CYAN);
+inline constexpr Color DarkMagenta = Color::FromRaw(COLOR_DARK_MAGENTA);
+inline constexpr Color Berry     = Color::FromRaw(COLOR_BERRY);
+inline constexpr Color Ocean     = Color::FromRaw(COLOR_OCEAN);
+inline constexpr Color Leaf      = Color::FromRaw(COLOR_LEAF);
+inline constexpr Color Amber     = Color::FromRaw(COLOR_AMBER);
+inline constexpr Color Violet    = Color::FromRaw(COLOR_VIOLET);
+inline constexpr Color Teal      = Color::FromRaw(COLOR_TEAL);
+inline constexpr Color Coral     = Color::FromRaw(COLOR_CORAL);
+inline constexpr Color Slate     = Color::FromRaw(COLOR_SLATE);
 }  // namespace Colors
 
 }  // namespace painter::core

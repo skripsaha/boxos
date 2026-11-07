@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
-#include <string_view>
 
 #include "box/display.h"
 #include "painter/tui/stage.h"
@@ -15,8 +14,7 @@ namespace painter::tui {
  * Surface is temporary and ConsoleSurface is committed by the TUI target. */
 class LayerCanvas {
 public:
-    static std::expected<LayerCanvas, StageError> Open(std::string_view Name,
-                                                        std::int32_t LeastCols,
+    static std::expected<LayerCanvas, StageError> Open(std::int32_t LeastCols,
                                                         std::int32_t LeastRows,
                                                         DisplayLayerRole Role) noexcept;
 

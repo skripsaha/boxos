@@ -215,7 +215,7 @@ private:
 int main()
 {
     std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open("slime", 30, 10);
+        painter::tui::Surface::Open(30, 10);
     if (!Opened) {
         Say(Opened.error().Describe("slime"));
         return 1;
@@ -235,7 +235,7 @@ int main()
     SlimePicture Picture(BodyWidth, BodyHeight, std::move(*Created));
 
     std::expected<painter::tui::Keyboard, painter::tui::StageError> Input =
-        painter::tui::Keyboard::Open("slime");
+        painter::tui::Keyboard::Open();
     if (!Input) {
         Say(Input.error().Describe("slime"));
         return 1;

@@ -181,8 +181,8 @@ FLAME_OBJS      = flame.o flame_sim.o flame_palette.o flame_font.o flame_paint.o
 CHECKSUM_OBJS   = checksum.o checksum_small.o checksum_sha2.o checksum_sha3.o checksum_kinds.o
 PASSPORT_OBJS   = passport.o keep.o
 AQUARIUM_OBJS   = aquarium.o aquarium_kinds.o aquarium_scene.o aquarium_life.o aquarium_paint.o
-# The screen a program owns and its own small file on the volume, shared by
-# the programs after aquarium (stage.h, keep.h).
+# A small file of its own on the volume, shared by the programs after aquarium
+# (keep.h).
 NYANCAT_OBJS    = nyancat.o
 FIREWORKS_OBJS  = fireworks.o
 2048_OBJS       = 2048.o keep.o

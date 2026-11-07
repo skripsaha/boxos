@@ -216,18 +216,79 @@ static spinlock_t kb_repeat_lock;
    Internal helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* A terminal on the serial line has no byte for an arrow, Home or Delete,
+ * and spells each as a short sequence — ESC [ A for Up, ESC [ 3 ~ for
+ * Delete, ESC O A where it is in application mode. kb_seq holds one begun
+ * and not yet ended; only the COM1 IRQ handler touches it. */
+static char     kb_seq[8];
+static uint32_t kb_seq_len;
+
+/* What a sequence names: the key's scancode, 0 for one that is no key
+ * below, -1 while it may still become one. */
+static int kb_seq_key(const char *seq, uint32_t len)
+{
+    if (len < 3) return (len < 2 || seq[1] == '[' || seq[1] == 'O') ? -1 : 0;
+    switch (seq[2]) {
+    case 'A': return len == 3 ? KEY_UP    : 0;
+    case 'B': return len == 3 ? KEY_DOWN  : 0;
+    case 'C': return len == 3 ? KEY_RIGHT : 0;
+    case 'D': return len == 3 ? KEY_LEFT  : 0;
+    case 'H': return len == 3 ? KEY_HOME  : 0;
+    case 'F': return len == 3 ? KEY_END   : 0;
+    }
+    if (seq[1] != '[' || seq[2] < '1' || seq[2] > '8') return 0;
+    if (len == 3)       return -1;
+    if (seq[3] != '~')  return 0;
+    static const uint8_t tilde[8] = { KEY_HOME, KEY_INSERT, KEY_DELETE, KEY_END,
+                                      KEY_PAGEUP, KEY_PAGEDN, KEY_HOME, KEY_END };
+    return tilde[seq[2] - '1'];
+}
+
 /* Public: feed characters from an external input source (the COM1 serial
  * console — see serial_console_init) as "keyboard" Touch events, so a real
  * keypress and an injected byte are indistinguishable to whoever listens.
  * Deferred (IRQ-safe) publish is mandatory: keyboard_inject runs in the COM1
  * IRQ handler, same as the PS/2 site — a direct TouchPublish would take TagFS
  * registry locks with IF=0 (the deadlock pattern the ring exists to break). scancode 0 says
- * the key is synthetic. */
-void keyboard_inject(const char *chars, uint32_t count)
+ * the key is synthetic.
+ *
+ * A terminal's sequence becomes the key it names, published as PS/2 publishes
+ * one. `quiet` says the line fell silent after these bytes — the UART's own
+ * measure — so an ESC still held then was a lone Escape. A sequence the line
+ * cut in two goes on in the next call. */
+void keyboard_inject(const char *chars, uint32_t count, bool quiet)
 {
     for (uint32_t i = 0; i < count; i++) {
-        kb_event_t kb_ev = { .scancode = 0, .ascii = chars[i], .mods = 0 };
-        kb_publish_event(&kb_ev);
+        char c = chars[i];
+        if (kb_seq_len == 0 && c != KEY_ESCAPE) {
+            kb_event_t kb_ev = { .scancode = 0, .ascii = c, .mods = 0 };
+            kb_publish_event(&kb_ev);
+            continue;
+        }
+        kb_seq[kb_seq_len++] = c;
+        int key = kb_seq_key(kb_seq, kb_seq_len);
+        if (key < 0) continue;
+        if (key > 0) {
+            kb_event_t kb_ev = { .scancode = (uint8_t)key, .ascii = 0, .mods = KB_MOD_EXTENDED };
+            kb_publish_event(&kb_ev);
+            kb_seq_len = 0;
+            continue;
+        }
+        /* No key: what was held is bytes after all, and the last one is
+         * looked at again — it may begin a sequence of its own. */
+        for (uint32_t k = 0; k + 1 < kb_seq_len; k++) {
+            kb_event_t kb_ev = { .scancode = 0, .ascii = kb_seq[k], .mods = 0 };
+            kb_publish_event(&kb_ev);
+        }
+        kb_seq_len = 0;
+        i--;
+    }
+    if (quiet) {
+        for (uint32_t k = 0; k < kb_seq_len; k++) {
+            kb_event_t kb_ev = { .scancode = 0, .ascii = kb_seq[k], .mods = 0 };
+            kb_publish_event(&kb_ev);
+        }
+        kb_seq_len = 0;
     }
 }
 

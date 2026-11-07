@@ -50,8 +50,10 @@ void keyboard_init(void);
 void keyboard_handle_scancode(uint8_t scancode);
 
 /* Feed characters from an external input source (the COM1 serial console)
- * into the keyboard input ring, delivered to the shell as if typed. */
-void keyboard_inject(const char *chars, uint32_t count);
+ * into the keyboard input ring, delivered to the shell as if typed; a
+ * terminal's escape sequence arrives as the key it names. `quiet`: the line
+ * fell silent after these bytes. */
+void keyboard_inject(const char *chars, uint32_t count, bool quiet);
 
 
 keyboard_state_t* keyboard_get_state(void);

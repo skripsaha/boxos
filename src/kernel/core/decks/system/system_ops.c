@@ -322,7 +322,9 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  * The question reaches the carrier as an IPC message of kind KCTX_ASK —
  * sender_pid the asker, the asker's cookie in the context — whose payload
  * begins with AskFrom (boxos_kctx.h): who asked, and in which program, is the
- * kernel's word, not the asker's. One strand must carry the tag; several is
+ * kernel's word, not the asker's. The cookie is the asker's, so the record
+ * answers nothing of the carrier's: having a sender makes it a message
+ * (kring.c, kring_answer_token). One strand must carry the tag; several is
  * ERR_ROUTE_AMBIGUOUS, never a guess at which of them meant to answer.
  *
  * An answer to an asker whose death is committed is written nowhere and comes

@@ -111,7 +111,7 @@ private:
 };
 
 int run() {
-  auto Opened = painter::tui::Stage::Open("bigclock", kWidth, kHeight);
+  auto Opened = painter::tui::Stage::Open(kWidth, kHeight);
   if (!Opened) {
     std::puts(Opened.error().Describe("bigclock").c_str());
     return 1;

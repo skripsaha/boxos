@@ -291,7 +291,7 @@ int main()
 {
     try {
         Table Desk;
-        std::expected<Stage, StageError> Opened = Stage::Open("tetris", 64, 22);
+        std::expected<Stage, StageError> Opened = Stage::Open(64, 22);
         if (!Opened) {
             Say(Opened.error().Describe("tetris"));
             return 1;

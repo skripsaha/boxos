@@ -14,12 +14,11 @@ struct ConsoleSurface::Impl {
     explicit Impl(LayerCanvas Value) noexcept : Canvas(std::move(Value)) {}
 };
 
-std::expected<ConsoleSurface, StageError> ConsoleSurface::Open(std::string_view Name,
-                                                                std::int32_t LeastCols,
+std::expected<ConsoleSurface, StageError> ConsoleSurface::Open(std::int32_t LeastCols,
                                                                 std::int32_t LeastRows) noexcept
 {
     std::expected<LayerCanvas, StageError> Opened =
-        LayerCanvas::Open(Name, LeastCols, LeastRows, DISPLAY_LAYER_OVERLAY);
+        LayerCanvas::Open(LeastCols, LeastRows, DISPLAY_LAYER_OVERLAY);
     if (!Opened) return std::unexpected(Opened.error());
     try {
         return ConsoleSurface(std::unique_ptr<Impl>(new Impl(std::move(*Opened))));

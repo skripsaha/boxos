@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
-#include <string_view>
 
 #include "painter/tui/stage.h"
 
@@ -15,8 +14,7 @@ namespace painter::tui {
  * base text surface and closes the temporary transaction atomically. */
 class ConsoleSurface {
 public:
-    static std::expected<ConsoleSurface, StageError> Open(std::string_view Name,
-                                                          std::int32_t LeastCols = 0,
+    static std::expected<ConsoleSurface, StageError> Open(std::int32_t LeastCols = 0,
                                                           std::int32_t LeastRows = 0) noexcept;
 
     ConsoleSurface(ConsoleSurface &&) noexcept;

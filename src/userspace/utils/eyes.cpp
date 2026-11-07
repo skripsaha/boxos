@@ -335,7 +335,7 @@ int main()
     if (form_words(0, &Words, &Count) != 0) return 1;
 
     std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open("eyes", 30, 10);
+        painter::tui::Surface::Open(30, 10);
     if (!Opened) {
         Say(Opened.error().Describe("eyes"));
         return 1;
@@ -346,7 +346,7 @@ int main()
     Picture.Size(Dimensions.Height >= 40 && Dimensions.Width >= 120 ? 2 : 1);
     Place At = Where(Words, Count, Dimensions.Width, Dimensions.Height, Picture.Width, (Picture.Height + 1) / 2);
 
-    std::expected<painter::tui::Keyboard, painter::tui::StageError> Input = painter::tui::Keyboard::Open("eyes");
+    std::expected<painter::tui::Keyboard, painter::tui::StageError> Input = painter::tui::Keyboard::Open();
     if (!Input) {
         Say(Input.error().Describe("eyes"));
         return 1;
