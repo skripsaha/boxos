@@ -4894,7 +4894,7 @@ everything else matched.
 # 5. `box::` — the BoxOS-native surface
 
 Everything above is about the ISO library. `include/box/cxx/` is the other half of
-boxcxx: 35 headers that give BoxOS's own concepts a C++ face. They are not
+boxcxx: 36 headers that give BoxOS's own concepts a C++ face. They are not
 replacements for standard facilities and they do not shadow them — they exist
 because the kernel has ideas Unix does not, and a standard library has no words
 for them.
@@ -4906,6 +4906,7 @@ for them.
 | Execution | `strand.h`, `executor.h`, `ferry.h`, `timing.h`, `timeouts.h` | In-cabin execution contexts, a cooperative executor, `co_await`-able async file I/O. |
 | Memory | `heap.h`, `bay.h`, `bay_memory_resource.h`, `memtag.h`, `pku.h`, `hw.h` | Tagged allocation and accounting, cross-cabin shared memory, tagged-RAM introspection, protection keys, LAM/TME. |
 | Storage | `tagfs.h` | Tag-addressed files: query by tags, RAII contexts and snapshots, anchor events. |
+| Clipboard | `clipboard.h` | The machine's list of what was copied: clips under numbers never given twice, newest first, taken by number, never let go on their own; terms for secrets (a count of whole takes, the putter's lifetime). |
 | Time | `clock.h` | Which reckoning of time the machine keeps: validate a zone name against the database, store it under `clock:zone`, announce the change. Reading it is `std::chrono::current_zone()`; only the writing half needed a name. |
 | Messaging | `message.h`, `brook.h` | Process-to-process messages and ordered SPSC streams. |
 | Launch | `luggage.h`, `form.h` | The line a program was started with, and its Form: the fields the shell (or BoxLib) filled — files, words, text — and the files it gives back as `them`. Failures are `box::result`; a line that could not be filled answers `invalid_argument`. |

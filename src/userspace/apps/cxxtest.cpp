@@ -607,6 +607,7 @@
 #include "box/cxx/bay_memory_resource.h"
 #include "box/cxx/brook.h"
 #include "box/cxx/child.h"
+#include "box/cxx/clipboard.h"
 #include "box/cxx/ferry.h"
 #include "box/cxx/flat_hash_map.h"
 #include "box/cxx/flat_hash_set.h"
@@ -55613,6 +55614,201 @@ void PhaseRgb()
     printf("[CXX] PASS phase rgb: full #rrggbb survives to the print state\n");
 }
 
+// ── Phase clipboard: the machine's list of what was copied ─────────────────
+// The list is the machine's, and another program may put a clip while this
+// runs: every check is made of numbers this phase put, never of the list's
+// head or its length.
+
+// The clip numbered `number` in the list, if it is there.
+static std::optional<box::clip> ClipListed(std::uint64_t number)
+{
+    box::result<std::vector<box::clip>> clips = box::clipboard::list();
+    if (!clips) return std::nullopt;
+    for (const box::clip &c : *clips)
+        if (c.number == number) return c;
+    return std::nullopt;
+}
+
+// The change `what` of clip `number` heard on `changes`; the others heard
+// before it are passed over. False when it is not heard within the budget.
+static bool HeardChange(box::subscription &changes, std::uint32_t what, std::uint64_t number)
+{
+    constexpr std::uint32_t budget_ms = 5000;
+    while (std::optional<box::touch> ev = changes.wait(budget_ms)) {
+        std::optional<ClipboardChange> change = ev->payload_as<ClipboardChange>();
+        if (change && change->what == what && change->number == number) return true;
+    }
+    return false;
+}
+
+// What `cxxtest clipkeep` does, as the child of the clipboard phase: put a
+// clip to live as long as this program, see it listed so, and end — and the
+// list lets it go with the program. Its exit code is its verdict; it prints
+// no suite marker, so a gate reading the parent's never reads this one.
+static int ClipKeep()
+{
+    box::result<std::uint64_t> kept = box::clipboard::put("kept while cxxtest clipkeep lives", {0, true});
+    if (!kept) return 1;
+    std::optional<box::clip> listed = ClipListed(*kept);
+    return listed && listed->while_alive ? 0 : 2;
+}
+
+void PhaseClipboard()
+{
+    box::subscription changes = box::clipboard::on_change();
+    Check(static_cast<bool>(changes), "phase clipboard claims clipboard:changed");
+
+    // 1. Numbers grow, the newest is listed first, and a take gives the bytes back.
+    box::result<std::uint64_t> alpha = box::clipboard::put("alpha");
+    box::result<std::uint64_t> beta  = box::clipboard::put("beta");
+    Check(alpha && beta && *beta > *alpha, "phase clipboard.1 a later clip has a greater number");
+    if (!alpha || !beta) return;
+    Check(HeardChange(changes, CLIPBOARD_PUT, *beta), "phase clipboard.1 the put is heard on clipboard:changed");
+    {
+        box::result<std::vector<box::clip>> clips = box::clipboard::list();
+        std::size_t at_alpha = 0, at_beta = 0;
+        for (std::size_t i = 0; clips && i < clips->size(); i++) {
+            if ((*clips)[i].number == *alpha) at_alpha = i + 1;
+            if ((*clips)[i].number == *beta) at_beta = i + 1;
+        }
+        Check(at_alpha != 0 && at_beta != 0 && at_beta < at_alpha, "phase clipboard.1 newest first");
+    }
+    std::optional<box::clip> listed = ClipListed(*alpha);
+    Check(listed && listed->bytes == 5 && listed->takes_left == 0 && !listed->while_alive,
+          "phase clipboard.1 a plain clip is listed with its length and no terms");
+    if (listed) {
+        box::result<std::string> bytes = box::clipboard::take(*listed);
+        Check(bytes && *bytes == "alpha", "phase clipboard.1 a take gives the bytes put");
+        Check(ClipListed(*alpha).has_value(), "phase clipboard.1 a plain clip stays after it is taken");
+    }
+
+    // 2. A clip longer than a leaf, taken whole and in pieces that cross leaves.
+    std::string long_bytes(200000, '\0');
+    for (std::size_t i = 0; i < long_bytes.size(); i++)
+        long_bytes[i] = static_cast<char>((i * 31 + 7) % 251);
+    box::result<std::uint64_t> longer = box::clipboard::put(long_bytes);
+    Check(longer.has_value(), "phase clipboard.2 a 200000-byte clip is put");
+    if (longer) {
+        std::optional<box::clip> rec = ClipListed(*longer);
+        Check(rec && rec->bytes == long_bytes.size(), "phase clipboard.2 it is listed with its length");
+        if (rec) {
+            box::result<std::string> whole = box::clipboard::take(*rec);
+            Check(whole && *whole == long_bytes, "phase clipboard.2 taken whole, every byte as put");
+        }
+
+        std::string           piece(70000, '\0');
+        box::result<std::size_t> came = box::clipboard::take(*longer, 65530, piece);
+        Check(came && *came == 70000 && piece == long_bytes.substr(65530, 70000),
+              "phase clipboard.2 a piece across a leaf's end comes as put");
+        came = box::clipboard::take(*longer, 190000, piece);
+        Check(came && *came == 10000 &&
+                  std::string_view(piece).substr(0, 10000) == std::string_view(long_bytes).substr(190000),
+              "phase clipboard.2 a piece at the end gives what is left");
+        came = box::clipboard::take(*longer, long_bytes.size(), piece);
+        Check(!came && came.error().code() == box::errc::invalid_argument,
+              "phase clipboard.2 a take from the clip's end is refused");
+        (void)box::clipboard::drop(*longer);
+    }
+
+    // 3. Takes: whole or not at all, and gone when the last is spent.
+    box::result<std::uint64_t> secret = box::clipboard::put("secret", {1, false});
+    Check(secret.has_value(), "phase clipboard.3 a clip with one take is put");
+    if (secret) {
+        std::optional<box::clip> rec = ClipListed(*secret);
+        Check(rec && rec->takes_left == 1, "phase clipboard.3 it is listed with its one take");
+        char                     small[3];
+        box::result<std::size_t> part = box::clipboard::take(*secret, 0, small);
+        Check(!part && part.error().code() == box::errc::buffer_too_small,
+              "phase clipboard.3 a take of less than all of it is refused");
+        rec = ClipListed(*secret);
+        Check(rec && rec->takes_left == 1, "phase clipboard.3 and the refusal spends nothing");
+        if (rec) {
+            box::result<std::string> bytes = box::clipboard::take(*rec);
+            Check(bytes && *bytes == "secret", "phase clipboard.3 the whole take gives it");
+        }
+        char                     again[8];
+        box::result<std::size_t> second = box::clipboard::take(*secret, 0, again);
+        Check(!second && second.error().code() == box::errc::object_not_found,
+              "phase clipboard.3 a second take finds it gone");
+        Check(!ClipListed(*secret), "phase clipboard.3 and the list no longer has it");
+        Check(HeardChange(changes, CLIPBOARD_GONE, *secret), "phase clipboard.3 its going is heard");
+    }
+
+    // 4. Of many takers at once, a clip with one take goes to exactly one. The
+    // takers start together and the clip is long enough that its copy out
+    // lasts; a take spent anywhere but under the hold that found the clip
+    // hands it to more than one of them in some round of the sixteen.
+    std::string once_bytes(4u << 20, '\0');
+    for (std::size_t i = 0; i < once_bytes.size(); i++)
+        once_bytes[i] = static_cast<char>((i * 13 + 5) % 253);
+    {
+        constexpr int rounds = 16;
+        constexpr int takers = 8;
+        int           exact  = 0;
+        for (int round = 0; round < rounds; round++) {
+            box::result<std::uint64_t> once = box::clipboard::put(once_bytes, {1, false});
+            if (!once) break;
+            std::atomic<bool> go{false};
+            std::atomic<int>  got{0}, missed{0};
+            {
+                std::vector<box::strand> strands;
+                for (int i = 0; i < takers; i++)
+                    strands.emplace_back([&] {
+                        std::string into(once_bytes.size(), '\0');
+                        while (!go.load(std::memory_order_acquire)) { }
+                        box::result<std::size_t> n = box::clipboard::take(*once, 0, into);
+                        if (n && *n == once_bytes.size() && into == once_bytes) got++;
+                        else if (!n && n.error().code() == box::errc::object_not_found) missed++;
+                    });
+                go.store(true, std::memory_order_release);
+            }
+            if (got.load() == 1 && missed.load() == takers - 1) exact++;
+        }
+        Check(exact == rounds, "phase clipboard.4 sixteen rounds of eight takers at once: each time one has it, seven find it gone");
+    }
+
+    // 5. A dropped clip is gone, and so is its number.
+    Check(box::clipboard::drop(*alpha).has_value(), "phase clipboard.5 a clip is dropped");
+    {
+        char                     buf[8];
+        box::result<std::size_t> after = box::clipboard::take(*alpha, 0, buf);
+        Check(!after && after.error().code() == box::errc::object_not_found,
+              "phase clipboard.5 its number takes nothing");
+        box::status twice = box::clipboard::drop(*alpha);
+        Check(!twice && twice.error().code() == box::errc::object_not_found,
+              "phase clipboard.5 and a second drop finds nothing");
+    }
+    (void)box::clipboard::drop(*beta);
+
+    // 6. A clip put to live as long as its program goes when the program ends.
+    // Every clip put before the child starts has a number no greater than the
+    // newest now, so the child's is the first put heard above it.
+    box::result<std::vector<box::clip>> newest = box::clipboard::list(1);
+    const std::uint64_t before = newest && !newest->empty() ? newest->front().number : 0;
+    box::result<box::child> keeper = box::child::spawn("cxxtest clipkeep");
+    if (!keeper) {
+        printf("[CXX] note phase clipboard: spawn unavailable (%.*s); while-alive skipped\n",
+               (int)keeper.error().message().size(), keeper.error().message().data());
+    } else {
+        box::result<int> verdict = keeper->wait();
+        Check(verdict && *verdict == 0, "phase clipboard.6 the child put its clip and saw it listed while alive");
+        std::uint64_t kept = 0;
+        while (std::optional<box::touch> ev = changes.wait(5000)) {
+            std::optional<ClipboardChange> change = ev->payload_as<ClipboardChange>();
+            if (change && change->what == CLIPBOARD_PUT && change->number > before) {
+                kept = change->number;
+                break;
+            }
+        }
+        Check(kept != 0, "phase clipboard.6 the child's put is heard");
+        Check(kept != 0 && HeardChange(changes, CLIPBOARD_GONE, kept),
+              "phase clipboard.6 and its clip goes with the child");
+        Check(kept != 0 && !ClipListed(kept), "phase clipboard.6 the list no longer has it");
+    }
+
+    printf("[CXX] PASS phase clipboard: numbers, order, pieces, takes, one of eight sixteen times, drop, while-alive\n");
+}
+
 const PhaseRow kPhases[] = {
     {"0", Phase0},
     {"1", Phase1},
@@ -55869,6 +56065,7 @@ const PhaseRow kPhases[] = {
     {"239", Phase239},
     {"240", Phase240},
     {"rgb", PhaseRgb},
+    {"clipboard", PhaseClipboard},
     // ‼ Last on purpose: it reloads the zone database, and a reload cannot be
     // undone from inside a process — [time.zone.db.list] only ever erases the
     // entry AFTER a position, never the front one.
@@ -55943,6 +56140,10 @@ int main()
     }
 
     constexpr int kTotal = (int)(sizeof(kPhases) / sizeof(kPhases[0]));
+
+    /* "cxxtest clipkeep" is not a phase: it is the child the clipboard phase
+     * starts, and it answers with its exit code alone. */
+    if (nsel == 1 && NameEq(sel[0], "clipkeep")) return ClipKeep();
 
     if (nsel == 0) {
         for (const PhaseRow &row : kPhases) row.run();

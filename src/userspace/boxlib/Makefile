@@ -57,6 +57,7 @@ SRCS = src/core/notify.c \
        src/current.c \
        src/file.c \
        src/use.c \
+       src/clipboard.c \
        src/luggage.c \
        src/form.c \
        src/image_section.c \
