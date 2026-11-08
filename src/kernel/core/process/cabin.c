@@ -14,6 +14,7 @@
 #include "bay.h"       /* BayCleanupCabin — the claims are the cabin's */
 #include "screen.h"    /* ScreenCleanupCabin — the screen window is a device's */
 #include "brook.h"     /* BrookCleanupCabin — the mapping half of a Brook claim */
+#include "clipboard.h" /* ClipboardCleanupCabin — clips that live as long as the program */
 #include "touch.h"     /* TouchCleanupProcess — each strand's death, committed once */
 #include "proc_exit.h"
 #include "cabin_info.h"  /* CabinProgram — the program is what the cabin's own page says */
@@ -200,6 +201,11 @@ void cabin_destroy(cabin_t *cabin)
      * every one of them to the PMM. Letting go also gives the glass back to
      * the Emergency Screen. */
     ScreenCleanupCabin(cabin);
+
+    /* The clips its program put to live only as long as it does. Asked
+     * while CabinInfo still names the program — vmm_destroy_context below
+     * takes that page. */
+    ClipboardCleanupCabin(cabin);
 
     /* Clear the MemTag bookkeeping on the shared IPC ring pages before
      * vmm_destroy_context frees them.  These tags are CABIN-wide (every

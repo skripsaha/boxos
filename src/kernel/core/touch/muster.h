@@ -73,6 +73,7 @@
     X("apei:processor:error")           \
     X("cet:enabled")                    \
     X("cet:fault:cp")                   \
+    X("clipboard:changed")              \
     X("efi:capsule:armed")              \
     X("efi:capsule:delivered")          \
     X("efi:capsule:set-fail")           \

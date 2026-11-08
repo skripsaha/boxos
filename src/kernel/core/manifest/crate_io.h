@@ -25,6 +25,11 @@
  *   ctx == NULL / no cabin -> direct memcpy from c->addr (kernel selftest) */
 error_t crate_read(const Crate *c, const OpContext *ctx, void *dst, uint64_t n);
 
+/* `n` bytes of the crate from byte `offset` on into `dst`: a crate read a
+ * piece at a time, so the kernel never holds more of it than one piece.
+ * ERR_INVALID_ARGUMENT past the crate's size. */
+error_t crate_read_at(const Crate *c, const OpContext *ctx, uint64_t offset, void *dst, uint64_t n);
+
 /* Fixed-size ALL-OR-NOTHING write: caller's kernel buffer -> user crate.
  *   n > c->capacity        -> ERR_INVALID_ARGUMENT
  *   on success sets c->size = n

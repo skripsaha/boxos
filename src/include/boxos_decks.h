@@ -149,6 +149,36 @@
 #define SYSTEM_OP_MANIFEST_COMPILE  0x80
 #define SYSTEM_OP_MANIFEST_RELEASE  0x81
 
+/* ─── Clipboard — the machine's list of what was copied (0x90 – 0x94) ── */
+/* One list per machine, kept by the kernel (core/clipboard; the records and
+ * the Touch it speaks in boxos_clipboard.h). Every op is open to any
+ * program: the list is the person's, and what to put and what to take is the
+ * program's to say.
+ *
+ *   put    params [u32 takes][u32 flags]; in_crate: the bytes, at least one;
+ *          out_crate (optional): u64 the clip's number. takes is how many
+ *          whole takes the clip stands, 0 for no such term; flags
+ *          CLIPBOARD_WHILE_ALIVE. Memory that will not hold it is
+ *          ERR_NO_MEMORY — nothing already in the list is let go for it.
+ *   list   params [u64 from] — the newest clip numbered `from` or below, 0
+ *          for the newest of all; out_crate: a ClipboardPage, then as many
+ *          ClipboardRecords, newest first, as the crate holds whole.
+ *   take   params [u64 number][u64 offset]; out_crate: the clip's bytes from
+ *          `offset`, as many as the crate holds — its size says how many. A
+ *          clip with takes left is taken only whole, from 0 into a crate
+ *          that holds all of it, else ERR_BUFFER_TOO_SMALL and nothing is
+ *          spent; a take that spends its last take ends the clip.
+ *   drop   params [u64 number].
+ *   clear  out_crate (optional): u64 how many clips went.
+ *
+ * A number no clip holds now — never given, or its clip gone — is
+ * ERR_OBJECT_NOT_FOUND. */
+#define SYSTEM_OP_CLIPBOARD_PUT     0x90
+#define SYSTEM_OP_CLIPBOARD_LIST    0x91
+#define SYSTEM_OP_CLIPBOARD_TAKE    0x92
+#define SYSTEM_OP_CLIPBOARD_DROP    0x93
+#define SYSTEM_OP_CLIPBOARD_CLEAR   0x94
+
 /* ─── MemTag — RAM-region tagging (0xA0 – 0xAF) ────────────────────── */
 
 /* Phase 1 — read-only surface. */

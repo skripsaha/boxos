@@ -34,6 +34,20 @@ error_t crate_read(const Crate *c, const OpContext *ctx, void *dst, uint64_t n)
     return OK;
 }
 
+error_t crate_read_at(const Crate *c, const OpContext *ctx, uint64_t offset, void *dst, uint64_t n)
+{
+    if (!c || !dst) return ERR_INVALID_ARGUMENT;
+    if (offset > c->size || n > c->size - offset) return ERR_INVALID_ARGUMENT;
+    if (n == 0) return OK;
+
+    if (ctx && ctx->proc && ctx->proc->cabin) {
+        return vmm_user_buf_in_into(ctx->proc->cabin->vmm,
+                                    (uintptr_t)(c->addr + offset), (size_t)n, dst);
+    }
+    memcpy(dst, (const void *)(uintptr_t)(c->addr + offset), (size_t)n);
+    return OK;
+}
+
 error_t crate_write(Crate *c, const OpContext *ctx, const void *src, uint64_t n)
 {
     if (!c || !src)      return ERR_INVALID_ARGUMENT;

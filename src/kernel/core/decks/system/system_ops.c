@@ -2722,6 +2722,9 @@ error_t SystemDeckRegister(void)
     error_t turnin_rc = TurnInOpsRegister();
     if (turnin_rc != OK) return turnin_rc;
 
+    error_t clipboard_rc = ClipboardOpsRegister();
+    if (clipboard_rc != OK) return clipboard_rc;
+
     debug_printf("[SystemDeck] registered %zu ops (full surface, gated)\n",
                  sizeof(table) / sizeof(table[0]));
     return OK;

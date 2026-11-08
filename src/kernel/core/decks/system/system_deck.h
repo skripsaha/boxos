@@ -74,4 +74,8 @@ error_t SyncOpsRegister(void);
  * nothing it waits on has arrived yet. Called from SystemDeckRegister. */
 error_t TurnInOpsRegister(void);
 
+/* Register the Clipboard ops (clipboard_ops.c) — the machine's list of what
+ * was copied. Called from SystemDeckRegister. */
+error_t ClipboardOpsRegister(void);
+
 #endif /* SYSTEM_DECK_H */
