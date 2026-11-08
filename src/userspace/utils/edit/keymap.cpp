@@ -22,6 +22,7 @@ constexpr Binding Table[] = {
     {{true, false, false, 0, true}, Command::GoToTab, Part::Files, "go to that tab; 0 is the tenth", "Ctrl+1..0"},
     {KeyOnly(KeyCodes::PageDown, true), Command::NextTab, Part::Files, "the next tab"},
     {KeyOnly(KeyCodes::PageUp, true), Command::PriorTab, Part::Files, "the tab before"},
+    {CtrlLetter('e'), Command::Scope, Part::Files, "the whole volume, or the Use Context again"},
     {Plain(KeyCodes::Escape), Command::Leave, Part::Files, "leave edit"},
 
     {KeyOnly(KeyCodes::Left), Command::Left, Part::Moving, "move; with Shift, select", "Arrows"},
@@ -157,7 +158,6 @@ bool Writes(Command Does) noexcept
     switch (Does) {
     case Command::NewLine: case Command::Backspace: case Command::Delete: case Command::Indent:
     case Command::Unindent: case Command::Undo: case Command::Redo: case Command::Cut: case Command::Paste:
-    case Command::Replace: case Command::Card:
         return true;
     default:
         return false;

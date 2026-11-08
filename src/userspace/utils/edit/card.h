@@ -1,43 +1,47 @@
 #ifndef EDIT_CARD_H
 #define EDIT_CARD_H
 
-/* The file's card: its name and its tags, Ctrl+T. A file that is not on the
- * volume yet is made from its card by its first save — named and tagged as
- * it is born, the Use Context's tags stamped on it with the rest.
+/* The file's card, Ctrl+T: its name and every tag it wears, as the volume
+ * says them — the Use Context's it was born with and the one for its name
+ * among them. What the card changes is what changed between the tags it was
+ * opened with and the tags it is left with; the name after them. Tab in the
+ * tags offers the tags files wear (Suggest).
  */
 
 #include <string>
+#include <vector>
 
 #include "field.h"
 #include "paint.h"
+#include "suggest.h"
 #include "tab.h"
 
 namespace edit {
 
 class Card {
 public:
-    /* What edit does once the card has done its work. */
-    enum class Then { Stay, GoOnLeaving };
-    /* Closed with words in Said: the file was made and its text was not
-     * written, and Said says why. */
     enum class Outcome { Stay, Closed, Done };
 
-    void    Begin(const Tab &For, Then After, core::Size Screen);
+    void    Begin(const Tab &For, Scope Looking, core::Size Screen);
+    /* edit now looks elsewhere: an open list of tags is asked again. */
+    void    Rescope(Scope Looking);
     Outcome OnKey(const tui::KeyEvent &Key, Tab &For, std::string &Said);
-    Then    After() const noexcept { return Next; }
-    void    Paint(tui::Frame &Out, const Tab &For) const;
+    void    Paint(tui::Frame &Out) const;
 
 private:
-    bool Make(Tab &For, std::string &Said);
-    bool Change(Tab &For, std::string &Said);
+    bool       Keep(Tab &For, std::string &Said);
+    void       Offer();
+    void       Take(const std::string &Tag);
+    core::Rect Area() const noexcept;
 
-    Field       Name{"name"};
-    Field       Tags{"tags"};
-    bool        OnTags = false;
-    Then        Next   = Then::Stay;
-    std::string Context;
-    std::string Trouble;
-    core::Size  Screen;
+    Field                    Name{"name"};
+    Field                    Tags{"tags"};
+    Suggest                  Hints;
+    std::vector<std::string> Had;
+    Scope                    Looking = Scope::InContext;
+    bool                     OnTags  = false;
+    std::string              Trouble;
+    core::Size               Screen;
 };
 
 /* The tab's text into its file, and the tab marked saved; the sentence that

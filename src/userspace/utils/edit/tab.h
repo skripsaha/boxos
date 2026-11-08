@@ -5,8 +5,7 @@
  * selection are, which part of it is in view, and whether it may be written.
  *
  * Every change of the text goes through Replace, so every change is in the
- * history and leaves the caret after what it put in. A tab whose file is not on
- * the volume yet has File 0: the file is made by its first save.
+ * history and leaves the caret after what it put in.
  */
 
 #include <cstddef>
@@ -37,6 +36,7 @@ public:
     std::string Name;
     std::string Tags;          /* as the volume says them, comma-joined */
     bool        Safety = false;
+    bool        Born   = false; /* made by this edit and never written: let go with its tab */
 
     Text    Body;
     History Past;

@@ -104,7 +104,8 @@ Search::Outcome Search::OnKey(const tui::KeyEvent &Key, Tab &Active, std::size_t
         Seek(Active, Active.Caret, false, Rows);
         return Outcome::Stay;
     }
-    if (Enter && Swapping) {
+    /* With the tab's safety on, a replace only finds. */
+    if (Enter && Swapping && !Active.Safety) {
         if (Key.IsCtrl()) SwapAll(Active, Said);
         else              SwapOne(Active, Rows, Said);
         return Outcome::Stay;
@@ -147,8 +148,9 @@ void Search::Paint(tui::Frame &Out, Tab &Active)
         else                                          Count = std::format("{} found", All.size());
     }
 
-    const char *Hint = Swapping ? "Enter one  Ctrl+Enter all  Tab field  Esc done"
-                                : "Enter next  Shift+Enter back  Esc done";
+    const char *Hint = !Swapping      ? "Enter next  Shift+Enter back  Esc done"
+                       : Active.Safety ? "SAFETY: Enter finds, nothing is replaced  Esc done"
+                                       : "Enter one  Ctrl+Enter all  Tab field  Esc done";
     const core::Rect Inside = DrawWindow(Out, Area(), Swapping ? "Replace" : "Find", Count, Hint);
     What.Paint(Out, {Inside.X, Inside.Y}, Inside.Width, !OnWith);
     if (Swapping) With.Paint(Out, {Inside.X, Inside.Y + 1}, Inside.Width, OnWith);

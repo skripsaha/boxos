@@ -18,7 +18,7 @@
 namespace edit {
 
 enum class Command : std::uint8_t {
-    Save, Open, CloseTab, Card, GoToTab, NextTab, PriorTab, Leave,
+    Save, Open, CloseTab, Card, GoToTab, NextTab, PriorTab, Scope, Leave,
     Left, Right, Up, Down, WordLeft, WordRight, LineStart, LineEnd, PageUp, PageDown,
     FileStart, FileEnd, GoToLine, SelectAll,
     NewLine, Backspace, Delete, Indent, Unindent, Undo, Redo, Copy, Cut, Paste, Overtype, Safety,
@@ -56,7 +56,8 @@ struct Heard {
 
 std::span<const Binding> Bindings() noexcept;
 std::optional<Heard>     Hear(const painter::tui::KeyEvent &Key) noexcept;
-/* A command that changes the text, refused while the tab's safety is on. */
+/* A command that changes the text: while the tab's safety is on, it does
+ * nothing. */
 bool        Writes(Command Does) noexcept;
 std::string NameOf(const Binding &One);
 std::string_view PartName(Part In) noexcept;

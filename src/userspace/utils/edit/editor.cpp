@@ -64,18 +64,40 @@ void Editor::Open(file_id_t File)
 
 void Editor::OpenNew(std::string Name)
 {
-    for (std::size_t Index = 0; Index < Tabs.size(); Index++) {
-        if (Tabs[Index]->File != 0 || Tabs[Index]->Name != Name) continue;
-        Current = Index;
+    std::expected<file_id_t, std::string> Made = MakeFile(Name, Looking);
+    if (!Made) {
+        Note(Made.error(), true);
         return;
     }
-    Tabs.push_back(std::make_unique<Tab>(std::move(Name), 0, std::string(), Text()));
-    Current = Tabs.size() - 1;
+    Open(*Made);
+    if (!Tabs.empty() && Active().File == *Made) Active().Born = true;
+}
+
+/* A file this edit made and never wrote is let go with its tab: it holds
+ * nothing anybody asked to keep. Any other is one edit had open. */
+void Editor::LetGo(const Tab &One)
+{
+    if (!One.Born) {
+        Remember(One.File);
+        return;
+    }
+    if (std::optional<std::string> Refused = EraseFile(One.File))
+        Note(std::format("{} was made and left empty: {}", One.Name, *Refused), true);
+    std::erase(Touched, One.File);
+}
+
+/* The other way of looking, for every window at once. */
+void Editor::Rescope()
+{
+    Looking = Looking == Scope::InContext ? Scope::Everywhere : Scope::InContext;
+    Note(Looking == Scope::Everywhere ? "looking at the whole volume" : "looking through the Use Context");
+    if (Now == Mode::Picking) Chooser.Rescope(Looking);
+    if (Now == Mode::Carding) FileCard.Rescope(Looking);
 }
 
 void Editor::Close(std::size_t Index)
 {
-    Remember(Tabs[Index]->File);
+    LetGo(*Tabs[Index]);
     Tabs.erase(Tabs.begin() + static_cast<std::ptrdiff_t>(Index));
     if (Current >= Index && Current > 0) Current--;
     Now = Mode::Writing;
@@ -85,20 +107,14 @@ void Editor::Close(std::size_t Index)
 void Editor::OpenChooser()
 {
     std::vector<file_id_t> Open;
-    for (const std::unique_ptr<Tab> &One : Tabs)
-        if (One->File != 0) Open.push_back(One->File);
-    Chooser.Begin(Bounds, std::move(Open));
+    for (const std::unique_ptr<Tab> &One : Tabs) Open.push_back(One->File);
+    Chooser.Begin(Bounds, std::move(Open), Looking);
     Now = Mode::Picking;
 }
 
 void Editor::Save()
 {
-    Tab &Here = Active();
-    if (Here.File == 0) {
-        FileCard.Begin(Here, Card::Then::Stay, Bounds);
-        Now = Mode::Carding;
-        return;
-    }
+    Tab        &Here = Active();
     std::string Said;
     const bool  Saved = SaveTab(Here, Said);
     if (Saved) SavedNames.push_back(Here.Name);
@@ -123,18 +139,12 @@ void Editor::AskToLeave(bool All)
     else     Close(Current);
 }
 
-/* Saves the unsaved one after another; a new file is saved through its card,
- * and this goes on when the card is done. Any refusal stops the leaving. */
+/* Saves the unsaved one after another. Any refusal stops the leaving. */
 void Editor::GoOnLeaving()
 {
     while (!Unsaved.empty()) {
         Tab &Next = *Unsaved.front();
         Current   = IndexOf(&Next);
-        if (Next.File == 0) {
-            FileCard.Begin(Next, Card::Then::GoOnLeaving, Bounds);
-            Now = Mode::Carding;
-            return;
-        }
         std::string Said;
         if (!SaveTab(Next, Said)) {
             Note(std::move(Said), true);
@@ -153,7 +163,7 @@ std::vector<file_id_t> Editor::Given() const
 {
     std::vector<file_id_t> Files = Touched;
     for (const std::unique_ptr<Tab> &One : Tabs)
-        if (One->File != 0 && std::find(Files.begin(), Files.end(), One->File) == Files.end())
+        if (std::find(Files.begin(), Files.end(), One->File) == Files.end())
             Files.push_back(One->File);
     return Files;
 }
@@ -188,11 +198,16 @@ void Editor::Run()
         OnKey(Heard.Key);
     }
     (void)Screen.Close();
+    for (const std::unique_ptr<Tab> &One : Tabs) LetGo(*One);
 }
 
 void Editor::OnKey(const tui::KeyEvent &Key)
 {
     Message.clear();
+    if (const std::optional<Heard> Asked = Hear(Key); Asked && Asked->Does == Command::Scope) {
+        Rescope();
+        return;
+    }
     switch (Now) {
     case Mode::Writing: OnWriting(Key); break;
     case Mode::Picking: OnPicking(Key); break;
@@ -214,19 +229,16 @@ void Editor::OnKey(const tui::KeyEvent &Key)
 
 void Editor::OnWriting(const tui::KeyEvent &Key)
 {
+    /* With the tab's safety on, a key that would change the text does
+     * nothing; the badge says why. */
     Tab                       &Here  = Active();
     const std::optional<Heard> Asked = Hear(Key);
     if (!Asked) {
         const bool Typed = !Key.IsExtended() && !Key.IsCtrl() && !Key.IsAlt() && Key.Ascii >= 0x20 && Key.Ascii < 0x7F;
-        if (!Typed) return;
-        if (Here.Safety) Note("SAFETY is on: Ctrl+Tab lets this tab be written", true);
-        else             Here.Type(Key.Ascii, Overtype);
+        if (Typed && !Here.Safety) Here.Type(Key.Ascii, Overtype);
         return;
     }
-    if (Writes(Asked->Does) && Here.Safety) {
-        Note("SAFETY is on: Ctrl+Tab lets this tab be written", true);
-        return;
-    }
+    if (Writes(Asked->Does) && Here.Safety) return;
     Do(*Asked);
 }
 
@@ -280,7 +292,7 @@ void Editor::DoBeyondText(const Heard &Asked)
     case Command::CloseTab: AskToLeave(false); break;
     case Command::Leave:    AskToLeave(true); break;
     case Command::Card:
-        FileCard.Begin(Active(), Card::Then::Stay, Bounds);
+        FileCard.Begin(Active(), Looking, Bounds);
         Now = Mode::Carding;
         break;
     case Command::GoToTab: {
@@ -372,26 +384,15 @@ void Editor::OnHelping(const tui::KeyEvent &Key)
 
 void Editor::OnCarding(const tui::KeyEvent &Key)
 {
-    const bool  Born = Active().File == 0;
     std::string Said;
     switch (FileCard.OnKey(Key, Active(), Said)) {
     case Card::Outcome::Stay: return;
     case Card::Outcome::Closed:
-        Unsaved.clear();
         Now = Mode::Writing;
-        if (!Said.empty()) Note(std::move(Said), true);
-        Remember(Active().File);
         return;
     case Card::Outcome::Done:
         Note(std::move(Said));
-        Remember(Active().File);
-        if (Born) SavedNames.push_back(Active().Name);
-        if (FileCard.After() == Card::Then::GoOnLeaving) {
-            Unsaved.erase(Unsaved.begin());
-            GoOnLeaving();
-        } else {
-            Now = Mode::Writing;
-        }
+        Now = Mode::Writing;
         return;
     }
 }

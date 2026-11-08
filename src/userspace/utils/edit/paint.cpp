@@ -23,8 +23,9 @@ namespace {
  * tabs of a project's files all read alike. */
 constexpr std::int32_t LeastName = 8;
 
-/* How far a window's shadow darkens what lies under it, of 255. */
-constexpr std::uint8_t ShadowDepth = 150;
+/* How far a window's shadow darkens what lies under it, of 255: enough to lift
+ * the window off the text, little enough that the text under it still reads. */
+constexpr std::uint8_t ShadowDepth = 72;
 
 std::int32_t DigitsOf(std::size_t Number)
 {
@@ -208,7 +209,7 @@ bool Editor::Paint()
     case Mode::Finding: Finder.Paint(Out, Active()); break;
     case Mode::GoingTo: PaintGoTo(Out); break;
     case Mode::Helping: PaintHelp(Out); break;
-    case Mode::Carding: FileCard.Paint(Out, Active()); break;
+    case Mode::Carding: FileCard.Paint(Out); break;
     case Mode::Leaving: PaintLeaving(Out); break;
     }
     return static_cast<bool>(Screen.Present());
@@ -387,10 +388,11 @@ void Editor::PaintStatus(tui::Frame &Out) const
     }
 
     const Tab &Here = Active();
-    if (Here.Safety) Put(" SAFETY ", BadgeInk, SafetyPaper);
-    if (Overtype)    Put(" OVERTYPE ", BadgeInk, OvertypePaper);
+    if (Looking == Scope::Everywhere) Put(" EVERYWHERE ", BadgeInk, EverywherePaper);
+    if (Here.Safety)                  Put(" SAFETY ", BadgeInk, SafetyPaper);
+    if (Overtype)                     Put(" OVERTYPE ", BadgeInk, OvertypePaper);
     Put(Shortened(Here.Name, 32), ShownTabInk, BarPaper);
-    if (Here.File == 0) Put("(new)", HintInk, BarPaper);
+    if (Here.Born) Put("(new)", HintInk, BarPaper);
 
     std::string Place = std::format("{}:{}", Here.Caret.Line + 1, Here.Body.ColumnOf(Here.Caret) + 1);
     if (Here.HasSelection()) {
@@ -401,7 +403,7 @@ void Editor::PaintStatus(tui::Frame &Out) const
     if (Here.Body.Crlf()) Place += "  CRLF";
     Put(Place, BarInk, BarPaper);
 
-    const std::vector<std::string> Worn = ShownTags(Here.Tags, Here.Name);
+    const std::vector<std::string> Worn = TagWords(Here.Tags);
     if (!Worn.empty()) Put(Shortened("[" + Joined(Worn, ", ") + "]", static_cast<std::size_t>(std::max(0, End - X))),
                            HintInk, BarPaper);
 }
@@ -469,7 +471,7 @@ void Editor::PaintLeaving(tui::Frame &Out) const
     for (std::size_t Index = 0; Index < Listed; Index++) {
         const Tab &One = *Unsaved[Index];
         PutText(Out, {Inside.X, Inside.Y + static_cast<std::int32_t>(Index)},
-                One.File == 0 ? One.Name + "  (new)" : One.Name, Inside.Width, TitleInk, WindowPaper);
+                One.Born ? One.Name + "  (new)" : One.Name, Inside.Width, TitleInk, WindowPaper);
     }
     if (More)
         PutText(Out, {Inside.X, Inside.Y + static_cast<std::int32_t>(Listed)},

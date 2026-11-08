@@ -2,10 +2,10 @@
 #define EDIT_PICKER_H
 
 /* The window a file is chosen in: Ctrl+N, and edit started with nothing to
- * open. It lists the files of the Use Context — the whole volume when the
- * person has said none, or when Tab asks for it — and every word typed
- * narrows the list: a word is a piece of a file's name or the beginning of
- * one of its tags. A name that no file has is offered as a new file. */
+ * open. It lists the files edit sees — the Use Context's, or the whole
+ * volume's (Ctrl+E) — and every word typed narrows the list: a word is a
+ * piece of a file's name or the beginning of one of its tags. A name that no
+ * file has is offered as a new file. */
 
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +16,7 @@
 
 #include "field.h"
 #include "paint.h"
+#include "volume.h"
 
 namespace edit {
 
@@ -29,7 +30,9 @@ public:
         std::string Name;
     };
 
-    void           Begin(core::Size Screen, std::vector<file_id_t> Open);
+    void           Begin(core::Size Screen, std::vector<file_id_t> Open, Scope Looking);
+    /* edit now looks elsewhere: the list is read again. */
+    void           Rescope(Scope Looking);
     Outcome        OnKey(const tui::KeyEvent &Key);
     const Choice  &Chosen() const noexcept { return Picked; }
     void           Paint(tui::Frame &Out) const;
@@ -39,7 +42,7 @@ private:
         file_id_t                File = 0;
         std::string              Name;
         std::string              Folded;      /* the name in small letters, to match against */
-        std::vector<std::string> Tags;        /* as shown: not the one for its name */
+        std::vector<std::string> Tags;
         std::uint64_t            Size = 0;
     };
 
@@ -58,9 +61,9 @@ private:
     std::vector<std::size_t> Shown;
     std::string              NewName;
     std::vector<file_id_t>   AlreadyOpen;
-    std::string              Context;
+    std::string              Where;
     std::string              Trouble;
-    bool                     Everywhere = false;
+    Scope                    Looking = Scope::InContext;
     std::size_t              Row = 0;
     std::size_t              First = 0;
     Choice                   Picked;

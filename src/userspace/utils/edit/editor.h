@@ -36,7 +36,9 @@ public:
 
     /* A file of the volume in a tab of its own, or the tab it is in already. */
     void Open(file_id_t File);
-    /* A name no file has yet: an empty tab, the file made by its first save. */
+    /* A name no file has yet: the file made now, empty, where edit is looking
+     * — so it wears from the start what the volume gives a file there — and
+     * let go again if its tab closes with nothing ever written to it. */
     void OpenNew(std::string Name);
     void Run();
 
@@ -67,6 +69,8 @@ private:
     void        Save();
     void        AskToLeave(bool All);
     void        GoOnLeaving();
+    void        LetGo(const Tab &One);
+    void        Rescope();
     void        Remember(file_id_t File);
     void        Note(std::string Words, bool Trouble = false);
 
@@ -88,6 +92,7 @@ private:
     std::vector<std::unique_ptr<Tab>> Tabs;
     std::size_t                       Current = 0;
     Mode                              Now = Mode::Writing;
+    Scope                             Looking = Scope::InContext;
     bool                              Done = false;
     bool                              Overtype = false;
     Clip                              Clipboard;

@@ -46,6 +46,7 @@ inline constexpr core::Color TabNumberInk   = core::Color::Rgb(0xFF, 0xB0, 0x20)
 inline constexpr core::Color DirtyInk       = core::Color::Rgb(0xFF, 0xB0, 0x20);
 inline constexpr core::Color SafetyPaper    = core::Color::Rgb(0x8C, 0x24, 0x24);
 inline constexpr core::Color OvertypePaper  = core::Color::Rgb(0x22, 0x55, 0x88);
+inline constexpr core::Color EverywherePaper = core::Color::Rgb(0x2A, 0x6A, 0x4A);
 inline constexpr core::Color BadgeInk       = core::Color::Rgb(0xF4, 0xF4, 0xF4);
 inline constexpr core::Color GoodInk        = core::Color::Rgb(0x7C, 0xD6, 0x8A);
 inline constexpr core::Color TroubleInk     = core::Color::Rgb(0xFF, 0x6E, 0x6E);

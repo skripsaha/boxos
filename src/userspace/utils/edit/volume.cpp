@@ -1,4 +1,5 @@
-/* The volume side of edit: reading, making, writing, renaming, retagging. */
+/* The volume side of edit: reading, making, writing, renaming, retagging,
+ * and the tags files wear. */
 
 #include "volume.h"
 
@@ -8,6 +9,7 @@
 
 #include "box/cxx/error.h"
 #include "box/error.h"
+#include "box/memory.h"
 #include "box/use.h"
 
 namespace edit {
@@ -19,15 +21,14 @@ std::string Why(std::int64_t Answer)
     return std::string(box::error(static_cast<::error_t>(-Answer)).message());
 }
 
-std::string_view StemOf(std::string_view Name)
-{
-    const std::size_t Dot = Name.rfind('.');
-    return Dot == std::string_view::npos ? Name : Name.substr(0, Dot);
-}
-
 std::string_view KeyOf(std::string_view Tag)
 {
     return Tag.substr(0, Tag.find(':'));
+}
+
+bool Holds(const std::vector<std::string> &List, std::string_view Tag)
+{
+    return std::find(List.begin(), List.end(), Tag) != List.end();
 }
 
 }  // namespace
@@ -69,12 +70,20 @@ std::expected<std::string, std::string> ReadBytes(file_id_t File, std::uint64_t 
     return Bytes;
 }
 
-std::expected<file_id_t, std::string> MakeFile(std::string_view Name, std::string_view Tags)
+std::expected<file_id_t, std::string> MakeFile(std::string_view Name, Scope Looking)
 {
-    const std::string  NameText(Name), TagText(Tags);
-    const std::int64_t Made = create(NameText.c_str(), TagText.c_str());
+    const std::string  Text(Name);
+    const std::int64_t Made = Looking == Scope::InContext ? create(Text.c_str(), "")
+                                                          : create_everywhere(Text.c_str(), "");
     if (Made <= 0) return std::unexpected(std::format("the volume would not make {}: {}", Name, Why(Made)));
     return static_cast<file_id_t>(Made);
+}
+
+std::optional<std::string> EraseFile(file_id_t File)
+{
+    if (const int Answer = file_delete(File); Answer != 0)
+        return std::format("the volume would not erase it: {}", Why(Answer));
+    return std::nullopt;
 }
 
 std::optional<std::string> WriteBytes(file_id_t File, std::string_view Bytes)
@@ -107,36 +116,64 @@ std::optional<std::string> Rename(file_id_t File, std::string_view Name)
 
 /* What comes off goes first, so a key whose value changes is taken off and put
  * on again rather than worn twice. */
-std::optional<std::string> Retag(file_id_t File, std::string_view Name, std::string_view Had,
+std::optional<std::string> Retag(file_id_t File, const std::vector<std::string> &Had,
                                  const std::vector<std::string> &Wanted)
 {
-    const std::vector<std::string> Before = ShownTags(Had, Name);
-    auto Holds = [](const std::vector<std::string> &List, std::string_view Tag) {
-        return std::find(List.begin(), List.end(), Tag) != List.end();
-    };
-
-    for (const std::string &Tag : Before) {
+    for (const std::string &Tag : Had) {
         if (Holds(Wanted, Tag)) continue;
         const std::string Key(KeyOf(Tag));
         if (const int Answer = tag_remove(File, Key.c_str()); Answer != 0)
             return std::format("{} would not come off: {}", Tag, Why(Answer));
     }
     for (const std::string &Tag : Wanted) {
-        if (Holds(Before, Tag)) continue;
+        if (Holds(Had, Tag)) continue;
         if (const int Answer = tag_add(File, Tag.c_str()); Answer != 0)
             return std::format("{} would not go on: {}", Tag, Why(Answer));
     }
     return std::nullopt;
 }
 
+std::expected<std::vector<file_id_t>, std::string> FilesSeen(Scope Looking)
+{
+    file_id_t *Ids   = nullptr;
+    const int  Count = Looking == Scope::InContext ? query_all(nullptr, &Ids) : query_all_everywhere(nullptr, &Ids);
+    if (Count < 0) return std::unexpected(std::format("the volume would not say what files it has: {}", Why(Count)));
+    std::vector<file_id_t> Seen(Ids, Ids + Count);
+    free(Ids);
+    return Seen;
+}
+
+std::vector<box::tagfs::tag_count> TagsWorn(Scope Looking)
+{
+    std::vector<box::tagfs::tag_count> Worn =
+        Looking == Scope::InContext ? box::tagfs::tags() : box::tagfs::tags_everywhere();
+    std::stable_sort(Worn.begin(), Worn.end(), [](const box::tagfs::tag_count &A, const box::tagfs::tag_count &B) {
+        return A.files != B.files ? A.files > B.files : Spelled(A.what) < Spelled(B.what);
+    });
+    return Worn;
+}
+
+std::string Spelled(const box::tagfs::tag &One)
+{
+    return One.value.empty() ? One.key : One.key + ":" + One.value;
+}
+
 std::string ContextTags()
 {
+    /* Asked with no room, the answer is how many tags it wrote — none — and
+     * Needed says how much room the context takes: one byte is its NUL alone. */
     std::size_t Needed = 0;
-    if (use_get(nullptr, 0, &Needed) <= 0 || Needed == 0) return {};
+    if (use_get(nullptr, 0, &Needed) < 0 || Needed <= 1) return {};
     std::string Tags(Needed, '\0');
-    if (use_get(Tags.data(), Tags.size(), nullptr) <= 0) return {};
-    Tags.resize(Tags.find('\0') == std::string::npos ? Tags.size() : Tags.find('\0'));
+    if (use_get(Tags.data(), Tags.size(), &Needed) < 0) return {};
+    Tags.resize(Tags.find('\0'));
     return Tags;
+}
+
+std::string ScopeNote(Scope Looking)
+{
+    const std::string Context = Looking == Scope::InContext ? ContextTags() : std::string();
+    return Context.empty() ? std::string("the whole volume") : "in " + Joined(TagWords(Context), ", ");
 }
 
 std::vector<std::string> TagWords(std::string_view Text)
@@ -147,17 +184,10 @@ std::vector<std::string> TagWords(std::string_view Text)
         while (At < Text.size() && (Text[At] == ' ' || Text[At] == ',')) At++;
         const std::size_t Start = At;
         while (At < Text.size() && Text[At] != ' ' && Text[At] != ',') At++;
-        if (At > Start && std::find(Words.begin(), Words.end(), Text.substr(Start, At - Start)) == Words.end())
+        if (At > Start && !Holds(Words, Text.substr(Start, At - Start)))
             Words.emplace_back(Text.substr(Start, At - Start));
     }
     return Words;
-}
-
-std::vector<std::string> ShownTags(std::string_view Tags, std::string_view Name)
-{
-    std::vector<std::string> Shown = TagWords(Tags);
-    std::erase(Shown, std::string(StemOf(Name)));
-    return Shown;
 }
 
 std::string Joined(const std::vector<std::string> &Words, std::string_view Between)

@@ -5,10 +5,7 @@
 #include <algorithm>
 #include <format>
 
-#include "box/memory.h"
 #include "painter/tui/glyph.h"
-
-#include "volume.h"
 
 namespace edit {
 
@@ -31,13 +28,18 @@ std::string SizeText(std::uint64_t Bytes)
 
 }  // namespace
 
-void Picker::Begin(core::Size ScreenValue, std::vector<file_id_t> Open)
+void Picker::Begin(core::Size ScreenValue, std::vector<file_id_t> Open, Scope LookingValue)
 {
     Screen      = ScreenValue;
     AlreadyOpen = std::move(Open);
-    Context     = ContextTags();
-    Everywhere  = Context.empty();
     Filter.Clear();
+    Rescope(LookingValue);
+}
+
+void Picker::Rescope(Scope LookingValue)
+{
+    Looking = LookingValue;
+    Where   = ScopeNote(Looking);
     Load();
 }
 
@@ -46,16 +48,13 @@ void Picker::Load()
     Entries.clear();
     Trouble.clear();
 
-    file_id_t *Ids   = nullptr;
-    const int  Count = Everywhere ? query_all_everywhere(nullptr, &Ids) : query_all(nullptr, &Ids);
-    if (Count < 0) Trouble = "the volume would not say what files it has";
-    for (int Index = 0; Index < Count; Index++) {
-        std::expected<FileFacts, std::string> Facts = ReadFacts(Ids[Index]);
+    std::expected<std::vector<file_id_t>, std::string> Seen = FilesSeen(Looking);
+    if (!Seen) Trouble = Seen.error();
+    for (const file_id_t File : Seen ? *Seen : std::vector<file_id_t>()) {
+        std::expected<FileFacts, std::string> Facts = ReadFacts(File);
         if (!Facts || Facts->Trashed) continue;
-        Entries.push_back({Ids[Index], Facts->Name, Folded(Facts->Name), ShownTags(Facts->Tags, Facts->Name),
-                           Facts->Size});
+        Entries.push_back({File, Facts->Name, Folded(Facts->Name), TagWords(Facts->Tags), Facts->Size});
     }
-    free(Ids);
 
     std::sort(Entries.begin(), Entries.end(), [](const Entry &A, const Entry &B) {
         return A.Folded != B.Folded ? A.Folded < B.Folded : A.File < B.File;
@@ -126,13 +125,6 @@ Picker::Outcome Picker::OnKey(const tui::KeyEvent &Key)
 
     const char Ch = Key.Ascii;
     if (Ch == tui::KeyCodes::Escape) return Outcome::Closed;
-    if (Ch == tui::KeyCodes::Tab && !Key.IsCtrl()) {
-        if (!Context.empty()) {
-            Everywhere = !Everywhere;
-            Load();
-        }
-        return Outcome::Stay;
-    }
     if (Ch == tui::KeyCodes::Enter || Ch == '\r') {
         if (Row < Shown.size()) {
             Picked = {Entries[Shown[Row]].File, Entries[Shown[Row]].Name};
@@ -178,10 +170,8 @@ void Picker::PaintRow(tui::Frame &Out, core::Rect Inside, std::int32_t Y, std::s
 
 void Picker::Paint(tui::Frame &Out) const
 {
-    const std::string Where = Everywhere ? "the whole volume" : "in " + Context;
-    const char       *Hint  = Context.empty() ? "Enter open  Esc close"
-                              : Everywhere    ? "Enter open  Tab only the context  Esc close"
-                                              : "Enter open  Tab the whole volume  Esc close";
+    const char *Hint = Looking == Scope::Everywhere ? "Enter open  Ctrl+E the Use Context  Esc close"
+                                                    : "Enter open  Ctrl+E the whole volume  Esc close";
     const core::Rect Inside = DrawWindow(Out, Area(), "Open", Where, Hint);
     Filter.Paint(Out, {Inside.X, Inside.Y}, Inside.Width, true);
     DrawRule(Out, Inside, Inside.Y + 1);

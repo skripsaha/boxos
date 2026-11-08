@@ -14,6 +14,7 @@ Tab::Tab(std::string NameValue, file_id_t FileValue, std::string TagsValue, Text
 void Tab::MarkSaved() noexcept
 {
     SavedState = Past.State();
+    Born       = false;
     Past.Seal();
 }
 

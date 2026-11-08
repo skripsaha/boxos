@@ -11,11 +11,22 @@ namespace edit {
 
 namespace {
 
+/* The list of tags under the card: eight of them and its frame, or what room
+ * the glass has below the card. */
+constexpr std::int32_t HintsHeight = 10;
+
 std::string Trimmed(std::string_view Text)
 {
     while (!Text.empty() && Text.front() == ' ') Text.remove_prefix(1);
     while (!Text.empty() && Text.back() == ' ') Text.remove_suffix(1);
     return std::string(Text);
+}
+
+/* Where the word being typed begins: past the last blank or comma. */
+std::size_t WordStart(std::string_view Text)
+{
+    const std::size_t Cut = Text.find_last_of(" ,");
+    return Cut == std::string_view::npos ? 0 : Cut + 1;
 }
 
 /* The name and the tags as the volume now holds them. */
@@ -42,104 +53,127 @@ bool SaveTab(Tab &For, std::string &Said)
     return true;
 }
 
-void Card::Begin(const Tab &For, Then After, core::Size ScreenValue)
+void Card::Begin(const Tab &For, Scope LookingValue, core::Size ScreenValue)
 {
     Screen  = ScreenValue;
-    Next    = After;
-    OnTags  = For.File == 0;
-    Context = For.File == 0 ? ContextTags() : std::string();
+    Looking = LookingValue;
+    OnTags  = false;
     Trouble.clear();
+    Had = TagWords(For.Tags);
     Name.Set(For.Name);
-    Tags.Set(Joined(ShownTags(For.Tags, For.Name), ", "));
+    Tags.Set(Joined(Had, ", "));
+    Hints.Close();
 }
 
-/* A file born: made with its name and tags, then its text written. */
-bool Card::Make(Tab &For, std::string &Said)
+void Card::Rescope(Scope LookingValue)
+{
+    Looking = LookingValue;
+    if (!Hints.Open()) return;
+    Hints.Begin(Looking);
+    Offer();
+}
+
+/* The list narrowed to the word being typed, the words before it left out. */
+void Card::Offer()
+{
+    const std::string_view Text = Tags.Value();
+    const std::size_t      From = WordStart(Text);
+    Hints.Narrow(Text.substr(From), TagWords(Text.substr(0, From)));
+}
+
+/* The chosen tag in place of the word being typed, and room for the next. */
+void Card::Take(const std::string &Tag)
+{
+    const std::string &Text = Tags.Value();
+    Tags.Set(Text.substr(0, WordStart(Text)) + Tag + ", ");
+}
+
+/* What changed between the tags the card was opened with and those it holds,
+ * then the name. A refusal leaves what was typed to be put right, and the next
+ * Enter is judged against what the file wears then. */
+bool Card::Keep(Tab &For, std::string &Said)
 {
     const std::string Named = Trimmed(Name.Value());
     if (Named.empty()) {
         Trouble = "a file needs a name";
         return false;
     }
-    std::expected<file_id_t, std::string> Made = MakeFile(Named, Joined(TagWords(Tags.Value()), ","));
-    if (!Made) {
-        Trouble = Made.error();
-        return false;
-    }
-    For.File = *Made;
-    For.Name = Named;
+    std::optional<std::string> Refused = Retag(For.File, Had, TagWords(Tags.Value()));
+    if (!Refused && Named != For.Name) Refused = Rename(For.File, Named);
     Refresh(For);
-    return SaveTab(For, Said);
-}
-
-/* A file renamed and retagged: the name first, as the volume holds the tag
- * for a name with the name. */
-bool Card::Change(Tab &For, std::string &Said)
-{
-    const std::string Named = Trimmed(Name.Value());
-    if (Named.empty()) {
-        Trouble = "a file needs a name";
-        return false;
-    }
-    if (Named != For.Name) {
-        if (std::optional<std::string> Refused = Rename(For.File, Named)) {
-            Trouble = *Refused;
-            return false;
-        }
-        Refresh(For);
-    }
-    std::optional<std::string> Refused = Retag(For.File, For.Name, For.Tags, TagWords(Tags.Value()));
-    Refresh(For);
+    Had = TagWords(For.Tags);
     if (Refused) {
         Trouble = *Refused;
-        Tags.Set(Joined(ShownTags(For.Tags, For.Name), ", "));
         return false;
     }
-    const std::vector<std::string> Worn = ShownTags(For.Tags, For.Name);
-    Said = Worn.empty() ? std::format("{} wears no tags", For.Name)
-                        : std::format("{} wears {}", For.Name, Joined(Worn, ", "));
+    /* A file named and tagged on purpose is one to keep, written or not. */
+    For.Born = false;
+    Said = Had.empty() ? std::format("{} wears no tags", For.Name)
+                       : std::format("{} wears {}", For.Name, Joined(Had, ", "));
     return true;
 }
 
 Card::Outcome Card::OnKey(const tui::KeyEvent &Key, Tab &For, std::string &Said)
 {
-    const char Ch = Key.Ascii;
-    if (!Key.IsExtended() && Ch == tui::KeyCodes::Escape) return Outcome::Closed;
-    if (!Key.IsExtended() && Ch == tui::KeyCodes::Tab) {
-        OnTags = !OnTags;
+    if (Hints.Open()) {
+        switch (Hints.OnKey(Key)) {
+        case Suggest::Outcome::Stay:
+        case Suggest::Outcome::Closed: return Outcome::Stay;
+        case Suggest::Outcome::Chosen: Take(Hints.Chosen()); return Outcome::Stay;
+        case Suggest::Outcome::Passed: break;
+        }
+    }
+
+    const char Ch    = Key.Ascii;
+    const bool Plain = !Key.IsExtended() && !Key.IsCtrl() && !Key.IsAlt();
+    if (Plain && Ch == tui::KeyCodes::Escape) return Outcome::Closed;
+    if (Plain && Ch == tui::KeyCodes::Tab) {
+        if (!OnTags) {
+            OnTags = true;
+        } else if (Hints.Open()) {
+            Hints.Close();
+        } else {
+            Hints.Begin(Looking);
+            Offer();
+        }
         return Outcome::Stay;
     }
     if (Key.IsExtended() && (Key.Scancode == tui::KeyCodes::Up || Key.Scancode == tui::KeyCodes::Down)) {
         OnTags = Key.Scancode == tui::KeyCodes::Down;
+        Hints.Close();
         return Outcome::Stay;
     }
-    if (!Key.IsExtended() && (Ch == tui::KeyCodes::Enter || Ch == '\r')) {
+    if (Plain && (Ch == tui::KeyCodes::Enter || Ch == '\r')) {
         Trouble.clear();
-        if (For.File != 0) return Change(For, Said) ? Outcome::Done : Outcome::Stay;
-        /* Made but not written: the card has done what it can, and what was to
-         * follow it — a tab closed, edit left — must not. */
-        if (!Make(For, Said)) return For.File == 0 ? Outcome::Stay : Outcome::Closed;
-        return Outcome::Done;
+        return Keep(For, Said) ? Outcome::Done : Outcome::Stay;
     }
-    (void)(OnTags ? Tags : Name).OnKey(Key);
+    if ((OnTags ? Tags : Name).OnKey(Key) && OnTags && Hints.Open()) Offer();
     return Outcome::Stay;
 }
 
-void Card::Paint(tui::Frame &Out, const Tab &For) const
+core::Rect Card::Area() const noexcept
 {
-    const bool       Born  = For.File == 0;
-    const core::Rect Area  = Centred(Screen, std::min(Screen.Width - 4, 64), 5);
-    const core::Rect Inside = DrawWindow(Out, Area, Born ? "Save a new file" : "The file's card", Born ? "new" : "",
-                                         Born ? "Enter save  Tab next  Esc cancel" : "Enter keep  Tab next  Esc cancel");
+    return Centred(Screen, std::min(Screen.Width - 4, 64), 5);
+}
+
+void Card::Paint(tui::Frame &Out) const
+{
+    const core::Rect Box    = Area();
+    const core::Rect Inside = DrawWindow(Out, Box, "The file's card", "",
+                                         OnTags ? "Enter keep  Tab the tags there are  Esc cancel"
+                                                : "Enter keep  Tab to the tags  Esc cancel");
     Name.Paint(Out, {Inside.X, Inside.Y}, Inside.Width, !OnTags);
     Tags.Paint(Out, {Inside.X, Inside.Y + 1}, Inside.Width, OnTags);
     if (!Trouble.empty())
         PutText(Out, {Inside.X, Inside.Y + 2}, Trouble, Inside.Width, TroubleInk, WindowPaper);
-    else if (Born && !Context.empty())
-        PutText(Out, {Inside.X, Inside.Y + 2}, "the Use Context adds " + Context, Inside.Width, HintInk, WindowPaper);
     else
         PutText(Out, {Inside.X, Inside.Y + 2}, "tags go between blanks or commas: work, idea", Inside.Width, HintInk,
                 WindowPaper);
+
+    if (!Hints.Open()) return;
+    const std::int32_t Top    = Box.Y + Box.Height;
+    const std::int32_t Height = std::min(HintsHeight, Screen.Height - Top - 1);
+    if (Height >= 3) Hints.Paint(Out, {Box.X, Top, Box.Width, Height});
 }
 
 }  // namespace edit
