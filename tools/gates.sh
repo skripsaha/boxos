@@ -49,9 +49,11 @@
 # library and to exact arithmetic; form, BoxLib's Form — its text, its image,
 # the sorting of a line into fields, the Luggage — held to exact outcomes;
 # recipe, BoxLib's Recipe and its SHA-256 held to exact outcomes and to the
-# host's hashlib; and elf, the kernel's ELF reader held to an exact verdict for
+# host's hashlib; elf, the kernel's ELF reader held to an exact verdict for
 # every way a program file can be wrong, and to accepting every program the
-# tree builds.
+# tree builds; and box, the one reader and the one pen of a box built as the
+# kernel and BoxLib build them, a box of every kind of part written and read
+# back, and broken one way at a time, each to its exact verdict.
 #
 # The list is here, in the tree it judges, and not beside a session: a list
 # kept out of the tree can lose a gate without a diff saying so.
@@ -75,7 +77,7 @@ GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut repl
                 stand standusb mkfs crewcrash fare faremut"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross firstflushmut lastflushmut booknextfidmut stitchmut"
-GATES_OTHER="framerefuse concordance formats volread_selftest boxasm format form recipe elf"
+GATES_OTHER="framerefuse concordance formats volread_selftest boxasm format form recipe elf box"
 GATES_LONG="loggerhour loggerhourmut"
 BACKLIST_LOGCHECK="census censusmut stand standusb standmut abba abbamut"
 BACKLIST_POWERCUT="settlecut chaingrow nextfid nextfidmut poolmut flushmut"
@@ -131,6 +133,7 @@ gate_run() {
         form)             tools/form_stand.sh ;;
         recipe)           tools/recipe_stand.sh ;;
         elf)              tools/elf_stand.sh ;;
+        box)              tools/box_stand.sh ;;
         heirloom)         HEIRLOOM_FORMAT=$2 HEIRLOOM_FROM=${HEIRLOOM_FROM:-$HEIRLOOM_N} tools/bindery.sh heirloom ;;
         *)                VOLUME_FORMAT=$2 tools/logcheck.sh "$name" ;;
     esac
@@ -234,7 +237,7 @@ for name in $WANTED; do
     # The harness's own closing words: its count, and the caveats and harness
     # failures it owns to — each cut at its explanation.
     verdict=$(sed $'s/\x1b\\[[0-9;]*m//g' "$OUT/$name.out" \
-              | grep -E '^(logcheck|powercut|bindery|boxasm|format|form|recipe|elf): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases|^concordance: |^gates --formats: [0-9]+ gates' \
+              | grep -E '^(logcheck|powercut|bindery|boxasm|format|form|recipe|elf|box): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases|^concordance: |^gates --formats: [0-9]+ gates' \
               | sed 's/ — .*//' | paste -sd '|' - | sed 's/|/; /g')
     line="$name rc=$rc $(( $(date +%s) - t0 ))s ${verdict:-(no verdict line)}"
     echo "$line" | tee -a "$OUT/SUMMARY"
