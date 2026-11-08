@@ -885,7 +885,7 @@ static int SysProcSpawnTagged(const OpContext *ctx, uint64_t binary_va, uint64_t
      * an ELF is ever started this way — which the head above already holds. */
     char name[48];
     ksnprintf(name, sizeof(name), "image held by PID %u", ctx->proc->pid);
-    ImageSource source = { binary_size, NULL, elf };
+    ImageSource source = { binary_size, NULL, elf, 0 };
     error_t     load   = process_load_binary(new_proc, &source, name, false);
     pmm_free(stage_phys, pages);
     if (load != OK) {
@@ -1582,7 +1582,7 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
 
     /* Raw code only when the FILE says so — never by the caller's augment,
      * which reaches the process's tags and not the volume's word. */
-    ImageSource source     = { file_size, fh, NULL };
+    ImageSource source     = { file_size, fh, NULL, found_id };
     bool        tagged_raw = TagFSKeyAmong(meta->tag_ids, meta->tag_count, "raw");
     error_t     load       = process_load_binary(new_proc, &source, meta->filename, tagged_raw);
     tagfs_close(fh);

@@ -18,7 +18,9 @@ struct TagFSFileHandle;
  *        of its image goes from the file straight into the pages it will live
  *        in, a page at a time, its hash taken as it comes; the box is placed
  *        at a base of the kernel's choosing when it carries fixups, where it
- *        says otherwise; every page gets exactly its rights. box_load.c.
+ *        says otherwise; every page gets exactly its rights. The parts it
+ *        marks to be loaded at start follow the image read-only, and a table
+ *        of what is where names them all to the program. box_load.c.
  *
  *   ELF  begins 7F 'E' 'L' 'F', and is read whole before anything is mapped
  *        (elf_image.h). Each segment gets pages of its own with exactly its
@@ -47,14 +49,19 @@ typedef struct {
     uint64_t                Bytes;    /* the image's length */
     struct TagFSFileHandle *File;     /* opened to read, or NULL ... */
     const uint8_t          *Memory;   /* ... and these bytes instead */
+    uint64_t                FileId;   /* the volume's id of File; 0 with Memory */
 } ImageSource;
 
-/* What a load leaves for the process: where it starts, and where the image's
- * names for its functions are mapped (0 when it carries none). */
+/* What a load leaves for the process: where it starts, where the image's
+ * names for its functions are mapped (0 when it carries none), what was added
+ * to every place of the image, and where the table of a box's parts in memory
+ * is (box_loaded.h; 0 for an image that is no box). */
 typedef struct {
     uintptr_t Entry;
     uintptr_t NameplateVa;
     uint64_t  NameplateBytes;
+    uintptr_t ImageBase;
+    uintptr_t PartsVa;
 } ImageLoaded;
 
 /* `count` bytes of the image from `offset` into `into`, whole or a refusal

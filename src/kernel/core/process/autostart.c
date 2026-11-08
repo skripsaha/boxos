@@ -97,7 +97,7 @@ static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
 
     /* Raw code only when the FILE says so: the volume's word, never one the
      * process could be given some other way. */
-    ImageSource source     = { file_size, fh, NULL };
+    ImageSource source     = { file_size, fh, NULL, file_id };
     bool        tagged_raw = TagFSKeyAmong(meta->tag_ids, meta->tag_count, "raw");
     int         load_result = process_load_binary(proc, &source, meta->filename, tagged_raw);
     tagfs_close(fh);

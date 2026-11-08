@@ -1081,7 +1081,7 @@ void kernel_main(void)
             panic("Invalid embedded shell binary size");
         }
 
-        ImageSource source = { shell_size, NULL, (const uint8_t *)_binary_shell_stripped_elf_start };
+        ImageSource source = { shell_size, NULL, (const uint8_t *)_binary_shell_stripped_elf_start, 0 };
         int load_result = process_load_binary(shell_proc, &source, "embedded shell", false);
         if (load_result != 0)
         {

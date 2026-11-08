@@ -1,6 +1,7 @@
 #include "box_load.h"
 #include "box_reader.h"
 #include "box_needs.h"
+#include "box_loaded.h"
 #include "nameplate_format.h"
 #include "cabin_layout.h"
 #include "aslr.h"
@@ -154,10 +155,10 @@ static error_t BoxCheckNeeds(BoxLoading *load, const BoxPart *part, const uint8_
 /* ── the image ──────────────────────────────────────────────────────────── */
 
 /*
- * One part of the image in memory: code, const, data, or the names. Its pages
- * are taken one at a time — no part needs memory that happens to be in one
- * piece — the frame of each kept in an array in pages of its own, and each
- * page filled straight from the file, its hash taken as it comes.
+ * One part of the box in memory: code, const, data, the names, a part carried
+ * in, or the table of them all. Its pages are taken one at a time — no part
+ * needs memory that happens to be in one piece — the frame of each kept in an
+ * array in pages of its own.
  */
 typedef struct {
     bool       Present;
@@ -174,54 +175,64 @@ typedef struct {
 
 enum { BOX_IMAGE_CODE, BOX_IMAGE_CONST, BOX_IMAGE_DATA, BOX_IMAGE_NAMES, BOX_IMAGE_PARTS };
 
-/* What a part not mapped still holds, given back. */
-static void BoxImageLetGo(BoxImagePart *parts)
+#define BOX_RIGHTS_READ (VMM_FLAG_PRESENT | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE)
+
+static uint64_t BoxPagesOf(uint64_t bytes)
 {
-    for (unsigned i = 0; i < BOX_IMAGE_PARTS; i++) {
-        BoxImagePart *part = &parts[i];
-        for (uint64_t page = part->Mapped; page < part->Taken; page++)
-            pmm_free((void *)part->Frames[page], 1);
-        if (part->FramesHeld)
-            pmm_free(part->FramesHeld, part->FramesPages);
-        part->FramesHeld = NULL;
-        part->Taken = part->Mapped = 0;
-    }
+    return (bytes + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
 }
 
-/* The part's pages taken and filled from the file, and its hash held. */
-static error_t BoxImageRead(BoxLoading *load, BoxImagePart *part)
+/* What a part not mapped still holds, given back. */
+static void BoxImageLetGo(BoxImagePart *part)
 {
-    part->Pages       = (part->Part.Memory + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
-    part->FramesPages = (size_t)((part->Pages * sizeof(uintptr_t) + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE);
-    if (part->Pages == 0)
+    for (uint64_t page = part->Mapped; page < part->Taken; page++)
+        pmm_free((void *)part->Frames[page], 1);
+    if (part->FramesHeld)
+        pmm_free(part->FramesHeld, part->FramesPages);
+    part->FramesHeld = NULL;
+    part->Taken = part->Mapped = 0;
+}
+
+/* `pages` zeroed pages for the part, and the list of their frames. */
+static error_t BoxImageTake(BoxLoading *load, BoxImagePart *part, uint64_t pages)
+{
+    part->Pages       = pages;
+    part->FramesPages = (size_t)BoxPagesOf(pages * sizeof(uintptr_t));
+    if (pages == 0)
         return OK;
     part->FramesHeld = pmm_alloc(part->FramesPages);
     if (!part->FramesHeld) {
-        kprintf("[IMAGE] '%s' is not started: no room to list the %llu pages of its part %.*s\n",
-                load->Name, (unsigned long long)part->Pages, (int)part->Part.NameLength,
-                (const char *)part->Part.Name);
+        kprintf("[IMAGE] '%s' is not started: no room to list the %llu pages it takes at 0x%llx\n",
+                load->Name, (unsigned long long)pages, (unsigned long long)part->Place);
         return ERR_NO_MEMORY;
     }
     part->Frames = (uintptr_t *)vmm_phys_to_virt((uintptr_t)part->FramesHeld);
-
-    uint8_t digest[BOX_HASH_BYTES];
-    load->Hasher.Begin(load->Hasher.State);
-    for (uint64_t page = 0; page < part->Pages; page++) {
+    for (uint64_t page = 0; page < pages; page++) {
         void *frame = pmm_alloc_zero(1);
         if (!frame) {
-            kprintf("[IMAGE] '%s' is not started: no page for its part %.*s\n", load->Name,
-                    (int)part->Part.NameLength, (const char *)part->Part.Name);
+            kprintf("[IMAGE] '%s' is not started: memory has no page left for it\n", load->Name);
             return ERR_NO_MEMORY;
         }
         part->Frames[page] = (uintptr_t)frame;
         part->Taken        = page + 1;
+    }
+    return OK;
+}
 
-        uint64_t from = page * VMM_PAGE_SIZE;
-        if (from >= part->Part.Size)
-            continue;   /* data's zeros past the file's bytes */
+/* The part's pages taken and filled straight from the file, its hash taken as
+ * the bytes come and held to the table's. */
+static error_t BoxImageRead(BoxLoading *load, BoxImagePart *part)
+{
+    error_t rc = BoxImageTake(load, part, BoxPagesOf(part->Part.Memory));
+    if (rc != OK)
+        return rc;
+
+    uint8_t digest[BOX_HASH_BYTES];
+    load->Hasher.Begin(load->Hasher.State);
+    for (uint64_t from = 0; from < part->Part.Size; from += VMM_PAGE_SIZE) {
         uint64_t count = part->Part.Size - from < VMM_PAGE_SIZE ? part->Part.Size - from : VMM_PAGE_SIZE;
-        uint8_t *bytes = (uint8_t *)vmm_phys_to_virt((uintptr_t)frame);
-        error_t  rc    = ImageSourceRead(load->Source, part->Part.Offset + from, bytes, count, load->Name);
+        uint8_t *bytes = (uint8_t *)vmm_phys_to_virt(part->Frames[from / VMM_PAGE_SIZE]);
+        rc = ImageSourceRead(load->Source, part->Part.Offset + from, bytes, count, load->Name);
         if (rc != OK)
             return rc;
         load->Hasher.Add(load->Hasher.State, bytes, count);
@@ -230,6 +241,20 @@ static error_t BoxImageRead(BoxLoading *load, BoxImagePart *part)
     if (!BoxSameHash(digest, part->Part.Hash))
         return BoxRefuse(load, BOX_PART_HASH, &part->Part);
     return OK;
+}
+
+/* `count` bytes into the part's pages from `at` on, across their seams. */
+static void BoxImagePut(const BoxImagePart *part, uint64_t at, const void *bytes, uint64_t count)
+{
+    const uint8_t *from = (const uint8_t *)bytes;
+    while (count > 0) {
+        uint64_t within = at % VMM_PAGE_SIZE;
+        uint64_t piece  = VMM_PAGE_SIZE - within < count ? VMM_PAGE_SIZE - within : count;
+        memcpy((uint8_t *)vmm_phys_to_virt(part->Frames[at / VMM_PAGE_SIZE]) + within, from, piece);
+        at    += piece;
+        from  += piece;
+        count -= piece;
+    }
 }
 
 /* Every fixup of an accepted `fixups` part: the base added to the word it
@@ -260,9 +285,8 @@ static error_t BoxImageMap(BoxLoading *load, BoxImagePart *part, uint64_t base)
         uintptr_t        at     = (uintptr_t)(base + part->Place + page * VMM_PAGE_SIZE);
         vmm_map_result_t mapped = vmm_map_page(load->Vmm, at, part->Frames[page], part->Rights);
         if (!mapped.success) {
-            kprintf("[IMAGE] '%s' is not started: its part %.*s was not mapped at 0x%llx: %s\n",
-                    load->Name, (int)part->Part.NameLength, (const char *)part->Part.Name,
-                    (unsigned long long)at, mapped.error_msg);
+            kprintf("[IMAGE] '%s' is not started: its page at 0x%llx was not mapped: %s\n",
+                    load->Name, (unsigned long long)at, mapped.error_msg);
             return ERR_SPAWN_FAILED;
         }
         part->Mapped = page + 1;
@@ -270,41 +294,187 @@ static error_t BoxImageMap(BoxLoading *load, BoxImagePart *part, uint64_t base)
     return OK;
 }
 
-/* Where the image goes: anywhere in the room a program's image has, chosen at
+/* ── where everything goes ──────────────────────────────────────────────── */
+
+/*
+ * Everything of the box that goes into memory, placed from the base before a
+ * byte of it is read: code, const and data where their places say; on the
+ * pages after them the names; after those each part carried in, on pages of
+ * its own, in the order of the box's table; and last the table of what is
+ * where (box_loaded.h).
+ */
+typedef struct {
+    BoxImagePart Parts[BOX_IMAGE_PARTS];
+    uint64_t     Low;          /* the image's first page */
+    uint64_t     CarriedAt;    /* the first page after the names */
+    uint64_t     TableAt;
+    uint64_t     TableBytes;
+    uint64_t     End;          /* past the table's last page */
+    uint32_t     Listed;       /* the parts the table names */
+} BoxPlan;
+
+/* Every page of it lies in the room a program's image has, under 4 GiB from
+ * the base: an offset or a length in the table fits its 32 bits. */
+_Static_assert(CABIN_CODE_END_ADDR - CABIN_CODE_START_ADDR <= 0xFFFFFFFFull,
+               "the table of loaded parts measures its image in 32 bits");
+_Static_assert(BOX_LOADED_SEAL_BYTES == BOX_HASH_BYTES, "the table carries the box's seal");
+
+/* `bytes` more, on whole pages, after `*at` — unless that reaches past where
+ * any image can. */
+static bool BoxPlanAdd(uint64_t *at, uint64_t bytes)
+{
+    uint64_t span;
+    if (!BoxAlignUp(bytes, VMM_PAGE_SIZE, BOX_PLACE_LIMIT, &span) || span > BOX_PLACE_LIMIT - *at)
+        return false;
+    *at += span;
+    return true;
+}
+
+/* The image part that is the box's part `index`, if one is. */
+static BoxImagePart *BoxPlanFixed(BoxPlan *plan, uint32_t index)
+{
+    for (unsigned i = 0; i < BOX_IMAGE_PARTS; i++)
+        if (plan->Parts[i].Present && plan->Parts[i].Part.Index == index)
+            return &plan->Parts[i];
+    return NULL;
+}
+
+static error_t BoxPlanLay(BoxLoading *load, BoxPlan *plan)
+{
+    static const BoxKind  kinds[BOX_IMAGE_PARTS]  = { BOX_KIND_CODE, BOX_KIND_CONST, BOX_KIND_DATA,
+                                                      BOX_KIND_NAMES };
+    static const uint64_t rights[BOX_IMAGE_PARTS] = {
+        VMM_FLAG_PRESENT | VMM_FLAG_USER,
+        BOX_RIGHTS_READ,
+        VMM_FLAG_PRESENT | VMM_FLAG_USER | VMM_FLAG_WRITABLE | VMM_FLAG_NO_EXECUTE,
+        BOX_RIGHTS_READ,
+    };
+
+    /* The reader holds code, const and data below the limit, each from a
+     * page of its own; code is always there. */
+    uint64_t image_end = 0;
+    plan->Low = BOX_PLACE_LIMIT;
+    for (unsigned i = 0; i < BOX_IMAGE_PARTS; i++) {
+        BoxImagePart *part = &plan->Parts[i];
+        part->Rights  = rights[i];
+        part->Present = BoxPartOfKind(&load->Table, kinds[i], &part->Part);
+        if (!part->Present || i == BOX_IMAGE_NAMES)
+            continue;
+        part->Place  = part->Part.Place;
+        uint64_t end = part->Place + BoxPagesOf(part->Part.Memory) * VMM_PAGE_SIZE;
+        if (part->Place < plan->Low) plan->Low = part->Place;
+        if (end > image_end) image_end = end;
+    }
+
+    BoxImagePart *names = &plan->Parts[BOX_IMAGE_NAMES];
+    names->Place     = image_end;
+    plan->CarriedAt  = image_end;
+    bool     fits    = !names->Present || BoxPlanAdd(&plan->CarriedAt, names->Part.Size);
+    uint64_t at      = plan->CarriedAt;
+    uint64_t letters = 0;
+    for (uint32_t i = 0; i < load->Table.Head.PartCount && fits; i++) {
+        BoxPart part;
+        BoxPartAt(&load->Table, i, &part);
+        if (!BoxPlanFixed(plan, i)) {
+            if ((part.Flags & BOX_FLAG_LOAD_AT_START) == 0)
+                continue;
+            fits = BoxPlanAdd(&at, part.Size);
+        }
+        plan->Listed++;
+        letters += part.NameLength;
+    }
+
+    plan->TableAt    = at;
+    plan->TableBytes = sizeof(BoxLoadedHead) + (uint64_t)plan->Listed * sizeof(BoxLoadedPart) + letters;
+    plan->End        = at;
+    if (!fits || !BoxPlanAdd(&plan->End, plan->TableBytes)) {
+        kprintf("[IMAGE] '%s' is not started: what it puts into memory reaches past where any "
+                "image can\n", load->Name);
+        return ERR_BINARY_TOO_LARGE;
+    }
+    return OK;
+}
+
+/* Where it all goes: anywhere in the room a program's image has, chosen at
  * random, when the box carries fixups; where its places say, which must lie in
  * that room, when it does not. */
-static error_t BoxImageBase(BoxLoading *load, BoxImagePart *parts, bool movable, uint64_t *base)
+static error_t BoxPlanBase(BoxLoading *load, const BoxPlan *plan, bool movable, uint64_t *base)
 {
-    uint64_t low = BOX_PLACE_LIMIT, high = 0;
-    for (unsigned i = 0; i < BOX_IMAGE_PARTS; i++) {
-        if (!parts[i].Present || parts[i].Pages == 0)
-            continue;
-        uint64_t end = parts[i].Place + parts[i].Pages * VMM_PAGE_SIZE;
-        if (parts[i].Place < low) low = parts[i].Place;
-        if (end > high) high = end;
-    }
-    if (high == 0)
-        low = 0;
-
     uint64_t room = CABIN_CODE_END_ADDR - CABIN_CODE_START_ADDR;
     if (movable) {
-        if (high > room) {
-            kprintf("[IMAGE] '%s' is not started: its image of %llu bytes is larger than the room "
-                    "a program's image has (%llu)\n", load->Name, (unsigned long long)high,
-                    (unsigned long long)room);
+        if (plan->End > room) {
+            kprintf("[IMAGE] '%s' is not started: what it puts into memory, %llu bytes, is larger "
+                    "than the room a program's image has (%llu)\n", load->Name,
+                    (unsigned long long)plan->End, (unsigned long long)room);
             return ERR_BINARY_TOO_LARGE;
         }
-        *base = CABIN_CODE_START_ADDR + aslr_random_offset(room - high + VMM_PAGE_SIZE);
+        *base = CABIN_CODE_START_ADDR + aslr_random_offset(room - plan->End + VMM_PAGE_SIZE);
         return OK;
     }
-    if (low < CABIN_CODE_START_ADDR || high > CABIN_CODE_END_ADDR) {
-        kprintf("[IMAGE] '%s' is not started: it cannot be moved, and its image at 0x%llx-0x%llx "
-                "lies outside the room a program's image has\n", load->Name,
-                (unsigned long long)low, (unsigned long long)high);
+    if (plan->Low < CABIN_CODE_START_ADDR || plan->End > CABIN_CODE_END_ADDR) {
+        kprintf("[IMAGE] '%s' is not started: it cannot be moved, and what it puts into memory at "
+                "0x%llx-0x%llx lies outside the room a program's image has\n", load->Name,
+                (unsigned long long)plan->Low, (unsigned long long)plan->End);
         return ERR_INVALID_ELF;
     }
     *base = 0;
     return OK;
+}
+
+/*
+ * The parts carried in and the table of what is where, on the pages after the
+ * names: each part the box marks to be loaded at start, read from the file,
+ * held to its hash and mapped read-only; then the table naming those and the
+ * image's parts, in the order of the box's table, mapped read-only after them.
+ */
+static error_t BoxCarry(BoxLoading *load, BoxPlan *plan, uint64_t base)
+{
+    BoxImagePart table;
+    memset(&table, 0, sizeof(table));
+    table.Place  = plan->TableAt;
+    table.Rights = BOX_RIGHTS_READ;
+    error_t rc   = BoxImageTake(load, &table, BoxPagesOf(plan->TableBytes));
+
+    BoxLoadedHead head = { plan->Listed, (uint32_t)plan->TableBytes, { 0 } };
+    memcpy(head.Seal, load->Table.Prefix + BOX_AT_SEAL, BOX_HASH_BYTES);
+    if (rc == OK)
+        BoxImagePut(&table, 0, &head, sizeof(head));
+
+    uint64_t entry_at = sizeof(head);
+    uint64_t name_at  = entry_at + (uint64_t)plan->Listed * sizeof(BoxLoadedPart);
+    uint64_t carried  = plan->CarriedAt;
+    for (uint32_t i = 0; i < load->Table.Head.PartCount && rc == OK; i++) {
+        BoxImagePart  carry;
+        BoxImagePart *part = BoxPlanFixed(plan, i);
+        if (!part) {
+            memset(&carry, 0, sizeof(carry));
+            BoxPartAt(&load->Table, i, &carry.Part);
+            if ((carry.Part.Flags & BOX_FLAG_LOAD_AT_START) == 0)
+                continue;
+            carry.Present = true;
+            carry.Place   = carried;
+            carry.Rights  = BOX_RIGHTS_READ;
+            rc = BoxImageRead(load, &carry);
+            if (rc == OK)
+                rc = BoxImageMap(load, &carry, base);
+            BoxImageLetGo(&carry);
+            if (rc != OK)
+                break;
+            carried += carry.Pages * VMM_PAGE_SIZE;
+            part = &carry;
+        }
+        BoxLoadedPart entry = { base + part->Place, part->Part.Memory, (uint32_t)name_at,
+                                part->Part.NameLength, part->Part.Version };
+        BoxImagePut(&table, entry_at, &entry, sizeof(entry));
+        BoxImagePut(&table, name_at, part->Part.Name, part->Part.NameLength);
+        entry_at += sizeof(entry);
+        name_at  += part->Part.NameLength;
+    }
+
+    if (rc == OK)
+        rc = BoxImageMap(load, &table, base);
+    BoxImageLetGo(&table);
+    return rc;
 }
 
 /* ── the box ────────────────────────────────────────────────────────────── */
@@ -312,51 +482,29 @@ static error_t BoxImageBase(BoxLoading *load, BoxImagePart *parts, bool movable,
 static error_t BoxLoadImage(BoxLoading *load, ImageLoaded *loaded, uint64_t start, const BoxHeld *fixups,
                             const BoxPart *fixups_part)
 {
-    static const BoxKind  kinds[BOX_IMAGE_PARTS]  = { BOX_KIND_CODE, BOX_KIND_CONST, BOX_KIND_DATA,
-                                                      BOX_KIND_NAMES };
-    static const uint64_t rights[BOX_IMAGE_PARTS] = {
-        VMM_FLAG_PRESENT | VMM_FLAG_USER,
-        VMM_FLAG_PRESENT | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE,
-        VMM_FLAG_PRESENT | VMM_FLAG_USER | VMM_FLAG_WRITABLE | VMM_FLAG_NO_EXECUTE,
-        VMM_FLAG_PRESENT | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE,
-    };
-    BoxImagePart parts[BOX_IMAGE_PARTS];
-    memset(parts, 0, sizeof(parts));
-
-    /* The names go on the pages after the image, read-only: a fault dump finds
-     * them there, and nothing ever runs them. */
-    uint64_t image_end = 0;
-    for (unsigned i = 0; i < BOX_IMAGE_PARTS; i++) {
-        parts[i].Rights  = rights[i];
-        parts[i].Present = BoxPartOfKind(&load->Table, kinds[i], &parts[i].Part);
-        if (!parts[i].Present)
-            continue;
-        if (i == BOX_IMAGE_NAMES) {
-            parts[i].Place = image_end;
-        } else {
-            parts[i].Place = parts[i].Part.Place;
-            uint64_t end   = parts[i].Place + (parts[i].Part.Memory + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE * VMM_PAGE_SIZE;
-            if (end > image_end) image_end = end;
-        }
-    }
-
-    error_t rc = OK;
-    for (unsigned i = 0; i < BOX_IMAGE_PARTS && rc == OK; i++)
-        if (parts[i].Present)
-            rc = BoxImageRead(load, &parts[i]);
+    BoxPlan plan;
+    memset(&plan, 0, sizeof(plan));
 
     uint64_t base = 0;
+    error_t  rc   = BoxPlanLay(load, &plan);
     if (rc == OK)
-        rc = BoxImageBase(load, parts, fixups_part != NULL, &base);
-    if (rc == OK && fixups_part)
-        BoxImageFix(parts, fixups->Bytes, fixups_part->Size, base);
+        rc = BoxPlanBase(load, &plan, fixups_part != NULL, &base);
     for (unsigned i = 0; i < BOX_IMAGE_PARTS && rc == OK; i++)
-        if (parts[i].Present)
-            rc = BoxImageMap(load, &parts[i], base);
+        if (plan.Parts[i].Present)
+            rc = BoxImageRead(load, &plan.Parts[i]);
+    if (rc == OK && fixups_part)
+        BoxImageFix(plan.Parts, fixups->Bytes, fixups_part->Size, base);
+    for (unsigned i = 0; i < BOX_IMAGE_PARTS && rc == OK; i++)
+        if (plan.Parts[i].Present)
+            rc = BoxImageMap(load, &plan.Parts[i], base);
+    if (rc == OK)
+        rc = BoxCarry(load, &plan, base);
 
     if (rc == OK) {
-        loaded->Entry = (uintptr_t)(base + start);
-        BoxImagePart *names = &parts[BOX_IMAGE_NAMES];
+        loaded->Entry     = (uintptr_t)(base + start);
+        loaded->ImageBase = (uintptr_t)base;
+        loaded->PartsVa   = (uintptr_t)(base + plan.TableAt);
+        BoxImagePart *names = &plan.Parts[BOX_IMAGE_NAMES];
         if (names->Present && names->Pages > 0 && names->Part.Size >= sizeof(NameplateHeader)) {
             const NameplateHeader *header = (const NameplateHeader *)vmm_phys_to_virt(names->Frames[0]);
             if (NameplateHeaderValid(header, names->Part.Size)) {
@@ -364,10 +512,13 @@ static error_t BoxLoadImage(BoxLoading *load, ImageLoaded *loaded, uint64_t star
                 loaded->NameplateBytes = header->TotalBytes;
             }
         }
-        debug_printf("[IMAGE] '%s': a box at 0x%llx, %s\n", load->Name, (unsigned long long)base,
-                     fixups_part ? "placed where the kernel chose" : "where it was linked");
+        debug_printf("[IMAGE] '%s': a box at 0x%llx, %s; %u parts named at 0x%llx\n", load->Name,
+                     (unsigned long long)base,
+                     fixups_part ? "placed where the kernel chose" : "where it was linked",
+                     (unsigned)plan.Listed, (unsigned long long)loaded->PartsVa);
     }
-    BoxImageLetGo(parts);
+    for (unsigned i = 0; i < BOX_IMAGE_PARTS; i++)
+        BoxImageLetGo(&plan.Parts[i]);
     return rc;
 }
 

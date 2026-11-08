@@ -354,6 +354,25 @@ static void TestPartRules(void)
     Expect("a part loaded at start and compressed", f, g_bytes, BOX_PART_FLAGS, "form");
     f = Fresh(); BoxPut32(EntryIn(f, "about:ru") + BOX_ENTRY_FLAGS, BOX_FLAG_COMPRESSED);
     Expect("a description compressed", f, g_bytes, BOX_OK, "");
+    f = Fresh(); BoxPut32(EntryIn(f, "paint:brushes") + BOX_ENTRY_FLAGS, BOX_FLAG_LOAD_AT_START);
+    Expect("a part nobody here knows, loaded at start", f, g_bytes, BOX_OK, "");
+    f = Fresh(); BoxPut32(EntryIn(f, "paint:brushes") + BOX_ENTRY_FLAGS,
+                          BOX_FLAG_LOAD_AT_START | BOX_FLAG_COMPRESSED);
+    Expect("a part nobody here knows, loaded at start compressed", f, g_bytes, BOX_PART_FLAGS,
+           "paint:brushes");
+    f = Fresh(); BoxPut32(EntryIn(f, "paint:brushes") + BOX_ENTRY_FLAGS, BOX_FLAG_LOAD_AT_START);
+    BoxPut64(EntryIn(f, "paint:brushes") + BOX_ENTRY_MEMORY, 64);
+    Expect("a part nobody here knows, loaded at start larger in memory", f, g_bytes, BOX_PART_MEMORY,
+           "paint:brushes");
+    f = Fresh(); BoxPut32(EntryIn(f, "paint:brushes") + BOX_ENTRY_FLAGS, BOX_FLAG_LOAD_AT_START);
+    BoxPut64(EntryIn(f, "paint:brushes") + BOX_ENTRY_PLACE, 0x1000);
+    Expect("a part nobody here knows, loaded at start at a place of its own", f, g_bytes,
+           BOX_PART_PLACE, "paint:brushes");
+    f = Fresh(); BoxPut16(EntryIn(f, "life") + BOX_ENTRY_VERSION, 2);
+    BoxPut32(EntryIn(f, "life") + BOX_ENTRY_FLAGS, BOX_FLAG_LOAD_AT_START);
+    BoxPut64(EntryIn(f, "life") + BOX_ENTRY_MEMORY, 0);
+    Expect("life in a later version, loaded at start shorter in memory", f, g_bytes,
+           BOX_PART_MEMORY, "life");
     f = Fresh(); BoxPut32(EntryIn(f, "paint:brushes") + BOX_ENTRY_FLAGS, BOX_FLAG_MUST_UNDERSTAND);
     Expect("a part nobody here knows, to be understood", f, g_bytes, BOX_PART_UNKNOWN_REQUIRED,
            "paint:brushes");

@@ -12,6 +12,12 @@
 // the bytes are (inside this page, right after the header, when they fit; in
 // the cabin's buffer heap when they do not) and luggage_length how many. Both
 // zero for a cabin that was given nothing (autostart, a bare proc_exec).
+//
+// The program: program_file is the volume's id of the file it was started
+// from (0 when the spawner handed the image over as bytes); image_base what
+// was added to every place of its image (0 for an image where it was linked);
+// parts_addr where the table of its parts in memory is (box_loaded.h), 0 for
+// a program that is no box.
 
 typedef struct __packed {
     uint32_t magic;              // CABIN_INFO_MAGIC ("CABN")
@@ -25,9 +31,12 @@ typedef struct __packed {
     uint64_t luggage_addr;       // user VA of the luggage bytes, 0 = none
     uint32_t luggage_length;     // byte count, not NUL-terminated on the wire
     uint32_t luggage_reserved;
+    uint64_t program_file;       // the volume's id of the program's file, 0 = none
+    uint64_t image_base;         // added to every place of the image
+    uint64_t parts_addr;         // user VA of the table of its parts in memory, 0 = none
 } CabinInfo;
 
-_Static_assert(sizeof(CabinInfo) == 64, "CabinInfo header must be 64 bytes");
+_Static_assert(sizeof(CabinInfo) == 88, "CabinInfo header must be 88 bytes");
 
 /* Luggage that fits the rest of the page lives right after the header. */
 #define CABIN_LUGGAGE_INLINE_OFFSET  ((uint32_t)sizeof(CabinInfo))

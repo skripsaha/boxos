@@ -16,6 +16,12 @@ extern "C" {
  * luggage_addr points at the bytes (in this very page when they fit, in the
  * buffer heap when they do not), luggage_length counts them; both zero for
  * a cabin given nothing. Read it through box/luggage.h.
+ *
+ * And the program itself: program_file is the volume's id of the file it was
+ * started from (0 when its spawner handed the image over as bytes), image_base
+ * what was added to every place of its image (0 for an image where it was
+ * linked), parts_addr where the table of its parts in memory is
+ * (box_loaded.h) — 0 for a program that is no box.
  */
 typedef struct PACKED {
     uint32_t magic;           /* CABIN_INFO_MAGIC ("CABN") */
@@ -29,9 +35,12 @@ typedef struct PACKED {
     uint64_t luggage_addr;
     uint32_t luggage_length;
     uint32_t luggage_reserved;
+    uint64_t program_file;
+    uint64_t image_base;
+    uint64_t parts_addr;
 } CabinInfo;
 
-STATIC_ASSERT(sizeof(CabinInfo) == 64, "CabinInfo must be 64 bytes");
+STATIC_ASSERT(sizeof(CabinInfo) == 88, "CabinInfo must be 88 bytes");
 
 INLINE CabinInfo* cabin_info(void) {
     return (CabinInfo*)CABIN_INFO_VADDR;

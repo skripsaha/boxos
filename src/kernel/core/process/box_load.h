@@ -9,6 +9,8 @@
  * table to the seal, its image a page at a time from the file into the pages
  * it will live in, at the base the kernel chooses when the box carries fixups
  * and where it says otherwise, with exactly the rights each part's kind gives.
+ * After the image, read-only: its names, every part it marks to be loaded at
+ * start, and the table of what is where (box_loaded.h) — loaded->PartsVa.
  */
 error_t BoxLoad(vmm_context_t *vmm, const ImageSource *source, const char *name, ImageLoaded *loaded);
 

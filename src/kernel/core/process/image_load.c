@@ -211,6 +211,8 @@ error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *nam
     loaded->Entry          = 0;
     loaded->NameplateVa    = 0;
     loaded->NameplateBytes = 0;
+    loaded->ImageBase      = 0;
+    loaded->PartsVa        = 0;
 
     error_t rc = ImageSourceRead(source, 0, head, look, name);
     if (rc != OK)

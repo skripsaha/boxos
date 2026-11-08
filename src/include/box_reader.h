@@ -326,23 +326,9 @@ static inline void BoxEntryRead(const BoxTable *table, uint32_t index, BoxPart *
     if (out->Version != BOX_PART_VERSION) out->Kind = BOX_KIND_UNKNOWN;
 }
 
-/* The rules of one part's entry, its name already held to its place. The
- * name's own kind decides what the name may say and what must be understood;
- * the rules of a kind's layout bind only a part this reader understands
- * (part->Kind) — one in a later version of its kind, not required, is passed
- * over whole. */
-static inline BoxVerdict BoxPartRules(const BoxPart *part)
+/* The rules of a part of a kind this reader understands, by its kind. */
+static inline BoxVerdict BoxKindRules(const BoxPart *part, bool required)
 {
-    bool    bare;
-    BoxKind named    = BoxKindOf(part->Name, part->NameLength, &bare);
-    bool    required = (part->Flags & BOX_FLAG_MUST_UNDERSTAND) != 0;
-
-    if (named != BOX_KIND_UNKNOWN && !bare && !BoxKindTakesValue(named)) return BOX_NAME_NOT_STANDARD;
-    if (named == BOX_KIND_UNKNOWN && required) return BOX_PART_UNKNOWN_REQUIRED;
-    if (named != BOX_KIND_UNKNOWN && part->Version != BOX_PART_VERSION && required)
-        return BOX_PART_VERSION_REQUIRED;
-    if (part->Kind == BOX_KIND_UNKNOWN) return BOX_OK;
-
     if (part->Kind == BOX_KIND_DATA ? part->Memory < part->Size : part->Memory != part->Size)
         return BOX_PART_MEMORY;
 
@@ -361,8 +347,35 @@ static inline BoxVerdict BoxPartRules(const BoxPart *part)
         return BOX_PART_FLAGS;
     if (part->Kind == BOX_KIND_NAMES && (part->Flags & BOX_FLAG_LOAD_AT_START) != 0)
         return BOX_PART_FLAGS;
-    if ((part->Flags & BOX_FLAG_LOAD_AT_START) && (part->Flags & BOX_FLAG_COMPRESSED))
-        return BOX_PART_FLAGS;
+    return BOX_OK;
+}
+
+/* The rules of one part's entry, its name already held to its place. The
+ * name's own kind decides what the name may say and what must be understood;
+ * the rules of a kind's layout bind only a part this reader understands
+ * (part->Kind) — one in a later version of its kind, not required, is passed
+ * over. A part marked to be loaded at start is put into the program's memory
+ * whatever its kind, one passed over too, and so as it is: its bytes exactly,
+ * never compressed, on pages the kernel chooses. */
+static inline BoxVerdict BoxPartRules(const BoxPart *part)
+{
+    bool    bare;
+    BoxKind named    = BoxKindOf(part->Name, part->NameLength, &bare);
+    bool    required = (part->Flags & BOX_FLAG_MUST_UNDERSTAND) != 0;
+
+    if (named != BOX_KIND_UNKNOWN && !bare && !BoxKindTakesValue(named)) return BOX_NAME_NOT_STANDARD;
+    if (named == BOX_KIND_UNKNOWN && required) return BOX_PART_UNKNOWN_REQUIRED;
+    if (named != BOX_KIND_UNKNOWN && part->Version != BOX_PART_VERSION && required)
+        return BOX_PART_VERSION_REQUIRED;
+    if (part->Kind != BOX_KIND_UNKNOWN) {
+        BoxVerdict verdict = BoxKindRules(part, required);
+        if (verdict != BOX_OK) return verdict;
+    }
+
+    if ((part->Flags & BOX_FLAG_LOAD_AT_START) == 0) return BOX_OK;
+    if (part->Flags & BOX_FLAG_COMPRESSED) return BOX_PART_FLAGS;
+    if (part->Memory != part->Size) return BOX_PART_MEMORY;
+    if (part->Place != 0) return BOX_PART_PLACE;
     return BOX_OK;
 }
 
