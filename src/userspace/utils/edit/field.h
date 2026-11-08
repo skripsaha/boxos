@@ -2,9 +2,11 @@
 #define EDIT_FIELD_H
 
 /* One line typed into a window: what to find, a line's number, a name, tags.
- * The same keys move in it everywhere, and it draws itself the same way in
- * every window, its caret placed in the frame when the window is listening to
- * it. */
+ * The same keys move in it everywhere — Ctrl+V among them, which puts the
+ * newest clip's first line in — and it draws itself the same way in every
+ * window, its caret placed in the frame when the window is listening to it.
+ * Its caret moves a whole character at a time, however many bytes the
+ * character is. */
 
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +37,8 @@ public:
     void Paint(painter::tui::Frame &Out, painter::core::Point At, std::int32_t Width, bool Listening) const;
 
 private:
+    void Put(std::string_view Bytes);
+
     std::string Label;
     std::string Words;
     std::size_t Caret   = 0;

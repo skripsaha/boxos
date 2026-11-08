@@ -21,7 +21,7 @@ enum class Command : std::uint8_t {
     Save, Open, CloseTab, Card, GoToTab, NextTab, PriorTab, Scope, Leave,
     Left, Right, Up, Down, WordLeft, WordRight, LineStart, LineEnd, PageUp, PageDown,
     FileStart, FileEnd, GoToLine, SelectAll,
-    NewLine, Backspace, Delete, Indent, Unindent, Undo, Redo, Copy, Cut, Paste, Overtype, Safety,
+    NewLine, Backspace, Delete, Indent, Unindent, Undo, Redo, Copy, Cut, Paste, Clips, Overtype, Safety,
     Find, Replace, Help,
 };
 

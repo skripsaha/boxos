@@ -87,6 +87,13 @@ std::size_t SplitOf(const std::vector<HelpLine> &Lines)
 
 /* ---- the shared ways ---------------------------------------------------- */
 
+std::string SizeText(std::uint64_t Bytes)
+{
+    if (Bytes < 1024) return std::format("{} B", Bytes);
+    if (Bytes < 1024 * 1024) return std::format("{} KB", (Bytes + 1023) / 1024);
+    return std::format("{}.{} MB", Bytes / (1024 * 1024), Bytes % (1024 * 1024) * 10 / (1024 * 1024));
+}
+
 std::size_t CellsOf(std::string_view Text) noexcept
 {
     std::size_t Cells = 0;
@@ -210,6 +217,7 @@ bool Editor::Paint()
     case Mode::GoingTo: PaintGoTo(Out); break;
     case Mode::Helping: PaintHelp(Out); break;
     case Mode::Carding: FileCard.Paint(Out); break;
+    case Mode::Clipping: Clipboard.Paint(Out); break;
     case Mode::Leaving: PaintLeaving(Out); break;
     }
     return static_cast<bool>(Screen.Present());

@@ -296,7 +296,7 @@ passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(
 # linked and stripped as hexer.
 EDIT_DIR  = edit
 EDIT_OBJS = $(addprefix $(EDIT_DIR)/,edit.o editor.o tab.o text.o history.o keymap.o field.o \
-                                     picker.o search.o card.o suggest.o volume.o paint.o)
+                                     picker.o search.o card.o suggest.o volume.o clipboard.o clips.o paint.o)
 
 edit.elf: $(BOXLIB_START) $(EDIT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(EDIT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)

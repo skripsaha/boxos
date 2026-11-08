@@ -21,8 +21,9 @@
 
 namespace edit {
 
-/* What Ctrl+C and Ctrl+X took. A whole line is taken when nothing is
- * selected, and is put back as a line of its own, above the caret's. */
+/* What Ctrl+C and Ctrl+X take, and what a paste puts back. A whole line is
+ * taken when nothing is selected, and is put back as a line of its own,
+ * above the caret's. */
 struct Clip {
     std::string Bytes;
     bool        WholeLine = false;
@@ -76,7 +77,8 @@ public:
     void Unindent();
     void Paste(const Clip &From);
     Clip Copy() const;
-    Clip Cut();
+    /* What Copy takes, taken out of the text. */
+    void Cut();
     bool Undo();
     bool Redo();
 

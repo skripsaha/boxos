@@ -3,7 +3,6 @@
 #include "picker.h"
 
 #include <algorithm>
-#include <format>
 
 #include "painter/tui/glyph.h"
 
@@ -17,13 +16,6 @@ std::string Folded(std::string_view Text)
     for (char &Ch : Out)
         if (Ch >= 'A' && Ch <= 'Z') Ch = static_cast<char>(Ch - 'A' + 'a');
     return Out;
-}
-
-std::string SizeText(std::uint64_t Bytes)
-{
-    if (Bytes < 1024) return std::format("{} B", Bytes);
-    if (Bytes < 1024 * 1024) return std::format("{} KB", (Bytes + 1023) / 1024);
-    return std::format("{}.{} MB", Bytes / (1024 * 1024), Bytes % (1024 * 1024) * 10 / (1024 * 1024));
 }
 
 }  // namespace

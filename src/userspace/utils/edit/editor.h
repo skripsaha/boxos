@@ -5,10 +5,10 @@
  * open, the keys, and leaving.
  *
  * One window at a time is in front, and while it is the keys are its own: the
- * file chooser, find and replace, go to a line, the help, the file's card, and
- * the question of what to do with changes not saved. Every frame is the whole
- * picture drawn again from what is held here, so nothing on the glass can
- * disagree with the text.
+ * file chooser, find and replace, go to a line, the help, the file's card, the
+ * clipboard, and the question of what to do with changes not saved. Every
+ * frame is the whole picture drawn again from what is held here, so nothing
+ * on the glass can disagree with the text.
  */
 
 #include <cstddef>
@@ -21,6 +21,7 @@
 #include "painter/tui/stage.h"
 
 #include "card.h"
+#include "clips.h"
 #include "field.h"
 #include "keymap.h"
 #include "paint.h"
@@ -47,17 +48,20 @@ public:
     std::string            Summary() const;
 
 private:
-    enum class Mode { Writing, Picking, Finding, GoingTo, Helping, Carding, Leaving };
+    enum class Mode { Writing, Picking, Finding, GoingTo, Helping, Carding, Clipping, Leaving };
 
     /* editor.cpp — keys */
     void OnKey(const tui::KeyEvent &Key);
     void OnWriting(const tui::KeyEvent &Key);
     void Do(const Heard &Asked);
     void DoBeyondText(const Heard &Asked);
+    void Keep(bool Cutting);
+    void PasteNewest();
     void OnPicking(const tui::KeyEvent &Key);
     void OnGoingTo(const tui::KeyEvent &Key);
     void OnHelping(const tui::KeyEvent &Key);
     void OnCarding(const tui::KeyEvent &Key);
+    void OnClipping(const tui::KeyEvent &Key);
     void OnLeaving(const tui::KeyEvent &Key);
 
     /* editor.cpp — tabs and files */
@@ -95,11 +99,11 @@ private:
     Scope                             Looking = Scope::InContext;
     bool                              Done = false;
     bool                              Overtype = false;
-    Clip                              Clipboard;
 
     Picker   Chooser;
     Search   Finder;
     Card     FileCard;
+    Clips    Clipboard;
     Field    LineField{"line"};
     Position LineOrigin;
     std::size_t HelpFirst = 0;

@@ -220,6 +220,7 @@ void Editor::OnKey(const tui::KeyEvent &Key)
     case Mode::GoingTo: OnGoingTo(Key); break;
     case Mode::Helping: OnHelping(Key); break;
     case Mode::Carding: OnCarding(Key); break;
+    case Mode::Clipping: OnClipping(Key); break;
     case Mode::Leaving: OnLeaving(Key); break;
     }
     if (!Tabs.empty()) Active().Follow(TextRows(), TextCols());
@@ -268,12 +269,9 @@ void Editor::Do(const Heard &Asked)
     case Command::Unindent:  Here.Unindent(); break;
     case Command::Undo:      if (!Here.Undo()) Note("there is nothing to undo"); break;
     case Command::Redo:      if (!Here.Redo()) Note("there is nothing undone to do again"); break;
-    case Command::Copy:      Clipboard = Here.Copy(); Note(Clipboard.WholeLine ? "copied the line" : "copied"); break;
-    case Command::Cut:       Clipboard = Here.Cut(); Note(Clipboard.WholeLine ? "cut the line" : "cut"); break;
-    case Command::Paste:
-        if (Clipboard.Bytes.empty()) Note("nothing has been copied yet");
-        else                         Here.Paste(Clipboard);
-        break;
+    case Command::Copy:
+    case Command::Cut:       Keep(Asked.Does == Command::Cut); break;
+    case Command::Paste:     PasteNewest(); break;
     case Command::Overtype: Overtype = !Overtype; break;
     case Command::Safety:
         Here.Safety = !Here.Safety;
@@ -281,6 +279,29 @@ void Editor::Do(const Heard &Asked)
         break;
     default: DoBeyondText(Asked); break;
     }
+}
+
+/* Ctrl+C and Ctrl+X: what the selection holds — or the caret's line — put as
+ * the newest clip, and for a cut taken out of the text once the clipboard
+ * has it, so a refusal loses nothing. */
+void Editor::Keep(bool Cutting)
+{
+    Tab       &Here = Active();
+    const Clip Took = Here.Copy();
+    if (std::optional<std::string> Refused = Clipboard.Put(Took)) {
+        Note(*Refused, true);
+        return;
+    }
+    if (Cutting) Here.Cut();
+    Note(std::string(Cutting ? "cut" : "copied") + (Took.WholeLine ? " the line" : ""));
+}
+
+void Editor::PasteNewest()
+{
+    std::expected<std::optional<Clip>, std::string> Newest = Clipboard.Newest();
+    if (!Newest)       Note(Newest.error(), true);
+    else if (!*Newest) Note("the clipboard is empty");
+    else               Active().Paste(**Newest);
 }
 
 /* The commands that open a window, or move between tabs and files. */
@@ -294,6 +315,10 @@ void Editor::DoBeyondText(const Heard &Asked)
     case Command::Card:
         FileCard.Begin(Active(), Looking, Bounds);
         Now = Mode::Carding;
+        break;
+    case Command::Clips:
+        Clipboard.Begin(Bounds);
+        Now = Mode::Clipping;
         break;
     case Command::GoToTab: {
         const std::size_t Wanted = Asked.Digit == 0 ? 9 : Asked.Digit - 1u;
@@ -395,6 +420,21 @@ void Editor::OnCarding(const tui::KeyEvent &Key)
         Now = Mode::Writing;
         return;
     }
+}
+
+/* With the tab's safety on the window works as ever, and Enter only shuts it. */
+void Editor::OnClipping(const tui::KeyEvent &Key)
+{
+    std::string Said;
+    switch (Clipboard.OnKey(Key, !Active().Safety, Said)) {
+    case Clips::Outcome::Stay: break;
+    case Clips::Outcome::Closed: Now = Mode::Writing; break;
+    case Clips::Outcome::Chosen:
+        Active().Paste(Clipboard.Chosen());
+        Now = Mode::Writing;
+        break;
+    }
+    if (!Said.empty()) Note(std::move(Said));
 }
 
 void Editor::OnLeaving(const tui::KeyEvent &Key)

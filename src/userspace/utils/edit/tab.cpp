@@ -262,20 +262,18 @@ Clip Tab::Copy() const
 }
 
 /* With nothing selected Ctrl+X takes the caret's whole line. */
-Clip Tab::Cut()
+void Tab::Cut()
 {
-    Clip Taken = Copy();
     if (HasSelection()) {
         const auto [From, To] = Selection();
         Replace(From, To, {}, Merge::Never);
-        return Taken;
+        return;
     }
     const std::size_t Line = Caret.Line;
     if (Line + 1 < Body.LineCount()) Replace({Line, 0}, {Line + 1, 0}, {}, Merge::Never);
     else if (Line > 0)               Replace({Line - 1, Body.Line(Line - 1).size()}, {Line, Body.Line(Line).size()}, {}, Merge::Never);
     else                             Replace({0, 0}, {0, Body.Line(0).size()}, {}, Merge::Never);
     Land({std::min(Line, Body.LineCount() - 1), 0});
-    return Taken;
 }
 
 bool Tab::Undo()

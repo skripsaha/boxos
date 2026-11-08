@@ -72,6 +72,8 @@ inline constexpr char TeeRight   = static_cast<char>(0xB4);
 inline constexpr char MoreLeft   = static_cast<char>(0xAE);   /* « a line goes on to the left */
 inline constexpr char MoreRight  = static_cast<char>(0xAF);   /* » and to the right */
 
+/* A length the way a person reads one: "12 B", "3 KB", "1.4 MB". */
+std::string SizeText(std::uint64_t Bytes);
 /* The cells Text takes on the glass. */
 std::size_t CellsOf(std::string_view Text) noexcept;
 /* Text in no more than Width cells: its end cut off for "..." when it is longer. */
