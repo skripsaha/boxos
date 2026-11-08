@@ -4,7 +4,7 @@
 
 #include <algorithm>
 
-#include "glyph.h"
+#include "kin/glyph.h"
 
 namespace read {
 
@@ -66,29 +66,31 @@ List::Outcome List::OnKey(const tui::KeyEvent &Key)
     }
     if (Key.Ascii == tui::KeyCodes::Enter || Key.Ascii == '\r')
         return Lines.empty() ? Outcome::Closed : Outcome::Chosen;
-    return Outcome::Closed;
+    return Key.Ascii == tui::KeyCodes::Escape ? Outcome::Closed : Outcome::Stay;
 }
 
-void List::Paint(tui::Frame &Out, const Theme &Look) const
+void List::Paint(tui::Frame &Out) const
 {
-    const core::Rect Inside = DrawWindow(Out, Area(), Look, Title, Hint);
+    const core::Rect Inside = DrawWindow(Out, Area(), Title, "", Hint);
     if (Lines.empty()) {
-        PutText(Out, {Inside.X, Inside.Y}, "nothing here yet", Inside.Width, Look.Faint, Look.WindowPaper);
+        PutText(Out, {Inside.X, Inside.Y}, "nothing here yet", Inside.Width, HintInk, WindowPaper);
         return;
     }
     const std::size_t Shown = Rows();
     for (std::size_t Line = 0; Line < Shown && First + Line < Lines.size(); Line++) {
         const Entry       &One   = Lines[First + Line];
         const bool         Here  = First + Line == Row;
-        const core::Color  Paper = Here ? Look.ChosenPaper : Look.WindowPaper;
+        const core::Color  Under = Here ? ChosenPaper : WindowPaper;
         const std::int32_t Y     = Inside.Y + static_cast<std::int32_t>(Line);
-        Out.Fill({Inside.X - 1, Y, Inside.Width + 2, 1}, tui::Cell{' ', Look.Ink, Paper});
+        Out.Fill({Inside.X - 1, Y, Inside.Width + 2, 1}, tui::Cell{' ', WindowInk, Under});
 
         const std::int32_t NoteCells = static_cast<std::int32_t>(CellsOf(One.Note));
         const std::int32_t Room      = Inside.Width - One.Indent - (NoteCells > 0 ? NoteCells + 2 : 0);
         PutText(Out, {Inside.X + One.Indent, Y}, Shortened(One.Text, static_cast<std::size_t>(std::max(Room, 1))),
-                Room, Look.Ink, Paper);
-        if (NoteCells > 0) PutText(Out, {Inside.X + Inside.Width - NoteCells, Y}, One.Note, NoteCells, Look.Faint, Paper);
+                Room, Here ? TitleInk : WindowInk, Under);
+        if (NoteCells > 0)
+            PutText(Out, {Inside.X + Inside.Width - NoteCells, Y}, One.Note, NoteCells, One.Odd ? TroubleInk : HintInk,
+                    Under);
     }
 }
 

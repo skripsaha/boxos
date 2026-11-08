@@ -302,11 +302,18 @@ passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
+# What edit and read share, so the two are one family: their look, their bars,
+# the help of their keys, a field, the file chooser and the file's card, the
+# volume and the clipboard. Linked into each; included as "kin/...".
+KIN_DIR  = kin
+KIN_OBJS = $(addprefix $(KIN_DIR)/,glyph.o look.o bars.o keys.o field.o clipboard.o volume.o picker.o \
+                                   suggest.o card.o)
+
 # The editor is C++ in parts of its own directory, each named for what it is;
 # linked and stripped as hexer.
 EDIT_DIR  = edit
-EDIT_OBJS = $(addprefix $(EDIT_DIR)/,edit.o editor.o tab.o text.o history.o keymap.o field.o \
-                                     picker.o search.o card.o suggest.o volume.o clipboard.o clips.o paint.o)
+EDIT_OBJS = $(addprefix $(EDIT_DIR)/,edit.o editor.o tab.o text.o history.o keymap.o search.o clips.o paint.o) \
+            $(KIN_OBJS)
 
 edit.elf: $(BOXLIB_START) $(EDIT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(EDIT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
@@ -314,11 +321,16 @@ edit.elf: $(BOXLIB_START) $(EDIT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_D
 
 # The reader likewise, in a directory of its own.
 READ_DIR  = read
-READ_OBJS = $(addprefix $(READ_DIR)/,read.o reader.o page.o book.o layout.o glyph.o theme.o marks.o draw.o lists.o)
+READ_OBJS = $(addprefix $(READ_DIR)/,read.o reader.o tab.o page.o keymap.o search.o lists.o marks.o book.o \
+                                     layout.o) \
+            $(KIN_OBJS)
 
 read.elf: $(BOXLIB_START) $(READ_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(READ_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
+
+# The family's parts are named from the utilities' root: "kin/look.h".
+$(sort $(EDIT_OBJS) $(READ_OBJS)): CXXFLAGS += -I.
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.
 # See boxcxx/Makefile for what their absence cost.
@@ -328,11 +340,11 @@ read.elf: $(BOXLIB_START) $(READ_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_D
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d)
+-include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
 	nasm -f elf64 $< -o $@
 
 clean:
-	rm -f *.o *.d *.elf $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d
+	rm -f *.o *.d *.elf $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d

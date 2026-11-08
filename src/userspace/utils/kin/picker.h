@@ -1,11 +1,11 @@
-#ifndef EDIT_PICKER_H
-#define EDIT_PICKER_H
+#ifndef KIN_PICKER_H
+#define KIN_PICKER_H
 
-/* The window a file is chosen in: Ctrl+N, and edit started with nothing to
- * open. It lists the files edit sees — the Use Context's, or the whole
- * volume's (Ctrl+E) — and every word typed narrows the list: a word is a
- * piece of a file's name or the beginning of one of its tags. A name that no
- * file has is offered as a new file. */
+/* The window a file is chosen in: Ctrl+N, and edit or read started with
+ * nothing to open. It lists the files the program sees — the Use Context's,
+ * or the whole volume's (Ctrl+E) — and every word typed narrows the list: a
+ * word is a piece of a file's name or the beginning of one of its tags. To a
+ * program that makes files, a name that no file has is offered as a new one. */
 
 #include <cstddef>
 #include <cstdint>
@@ -15,10 +15,10 @@
 #include "box/file.h"
 
 #include "field.h"
-#include "paint.h"
+#include "look.h"
 #include "volume.h"
 
-namespace edit {
+namespace kin {
 
 class Picker {
 public:
@@ -30,8 +30,10 @@ public:
         std::string Name;
     };
 
-    void           Begin(core::Size Screen, std::vector<file_id_t> Open, Scope Looking);
-    /* edit now looks elsewhere: the list is read again. */
+    /* Open: the files the program has open already, marked in the list.
+     * Makes: the program makes files, so a new name may be chosen. */
+    void           Begin(core::Size Screen, std::vector<file_id_t> Open, Scope Looking, bool Makes);
+    /* The program now looks elsewhere: the list is read again. */
     void           Rescope(Scope Looking);
     Outcome        OnKey(const tui::KeyEvent &Key);
     const Choice  &Chosen() const noexcept { return Picked; }
@@ -64,11 +66,12 @@ private:
     std::string              Where;
     std::string              Trouble;
     Scope                    Looking = Scope::InContext;
+    bool                     Makes   = false;
     std::size_t              Row = 0;
     std::size_t              First = 0;
     Choice                   Picked;
 };
 
-}  // namespace edit
+}  // namespace kin
 
 #endif

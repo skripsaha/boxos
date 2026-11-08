@@ -3,18 +3,14 @@
 #include "book.h"
 
 #include <algorithm>
-#include <format>
-#include <optional>
 
-#include "box/cxx/error.h"
-
-#include "glyph.h"
+#include "kin/glyph.h"
 
 namespace read {
 
-namespace {
+using namespace kin;
 
-constexpr std::size_t TabStop = 4;
+namespace {
 
 /* A line of the file: where it begins, and its text with its tabs as blanks. */
 struct SourceLine {
@@ -27,15 +23,9 @@ std::string Expanded(std::string_view Raw)
     std::string Out;
     std::size_t Column = 0;
     for (std::size_t Byte = 0; Byte < Raw.size();) {
-        if (Raw[Byte] == '\t') {
-            const std::size_t Blanks = TabStop - Column % TabStop;
-            Out.append(Blanks, ' ');
-            Column += Blanks;
-            Byte++;
-            continue;
-        }
-        const Glyph Shape = GlyphAt(Raw, Byte);
-        Out.append(Raw.substr(Byte, Shape.Length));
+        const Glyph Shape = GlyphAt(Raw, Byte, Column);
+        if (Raw[Byte] == '\t') Out.append(Shape.Width, ' ');
+        else                    Out.append(Raw.substr(Byte, Shape.Length));
         Column += Shape.Width;
         Byte += Shape.Length;
     }
@@ -540,32 +530,6 @@ Reading ReadingFor(std::string_view Name) noexcept
         if (Ch >= 'A' && Ch <= 'Z') Ch = static_cast<char>(Ch - 'A' + 'a');
     return Ending == "md" || Ending == "markdown" || Ending == "txt" || Ending == "text" ? Reading::Prose
                                                                                        : Reading::Lines;
-}
-
-std::expected<Book, std::string> Open(file_id_t File)
-{
-    FileMetadata Facts;
-    if (const int Answer = FileMetadataRead(File, &Facts); Answer != 0)
-        return std::unexpected(std::format("that file would not say what it is: {}",
-                                           box::error(box_errno_of(Answer)).message()));
-    const std::string   Name = Facts.Filename ? Facts.Filename : "";
-    const std::uint64_t Size = Facts.Size;
-    FileMetadataRelease(&Facts);
-
-    std::string   Bytes(static_cast<std::size_t>(Size), '\0');
-    std::uint64_t Got = 0;
-    while (Got < Size) {
-        const std::int64_t Read = fread(File, Got, Bytes.data() + Got, static_cast<std::size_t>(Size - Got));
-        if (Read < 0)
-            return std::unexpected(std::format("{} would not be read past byte {}: {}", Name, Got,
-                                               box::error(box_errno_of(static_cast<int>(Read))).message()));
-        if (Read == 0) break;
-        Got += static_cast<std::uint64_t>(Read);
-    }
-    Bytes.resize(static_cast<std::size_t>(Got));
-    if (Bytes.find('\0') != std::string::npos)
-        return std::unexpected(std::format("{} holds bytes that are no text", Name));
-    return Book::Make(File, Name, std::move(Bytes), ReadingFor(Name));
 }
 
 }  // namespace read

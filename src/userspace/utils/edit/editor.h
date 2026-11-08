@@ -20,16 +20,21 @@
 #include "box/file.h"
 #include "painter/tui/stage.h"
 
-#include "card.h"
+#include "kin/bars.h"
+#include "kin/card.h"
+#include "kin/field.h"
+#include "kin/keys.h"
+#include "kin/look.h"
+#include "kin/picker.h"
+
 #include "clips.h"
-#include "field.h"
 #include "keymap.h"
-#include "paint.h"
-#include "picker.h"
 #include "search.h"
 #include "tab.h"
 
 namespace edit {
+
+using namespace kin;
 
 class Editor {
 public:
@@ -80,12 +85,10 @@ private:
 
     /* paint.cpp — the picture */
     bool         Paint();
-    void         PaintTabs(tui::Frame &Out) const;
     void         PaintText(tui::Frame &Out);
     void         PaintLine(tui::Frame &Out, std::int32_t Y, std::size_t Line);
     void         PaintStatus(tui::Frame &Out) const;
     void         PaintGoTo(tui::Frame &Out) const;
-    void         PaintHelp(tui::Frame &Out) const;
     void         PaintLeaving(tui::Frame &Out) const;
     std::int32_t GutterWidth() const noexcept;
     std::size_t  TextRows() const noexcept;
@@ -106,7 +109,7 @@ private:
     Clips    Clipboard;
     Field    LineField{"line"};
     Position LineOrigin;
-    std::size_t HelpFirst = 0;
+    Help     Keys;
 
     std::vector<Tab *> Unsaved;      /* the tabs the question of leaving is about */
     bool               LeavingAll = false;

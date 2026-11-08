@@ -95,6 +95,10 @@ private:
     std::uint64_t SavedState = 0;
 };
 
+/* The tab's text into its file, and the tab marked saved; the sentence that
+ * says what happened. False when the volume refused, and Said says why. */
+bool SaveTab(Tab &For, std::string &Said);
+
 }  // namespace edit
 
 #endif

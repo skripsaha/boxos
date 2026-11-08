@@ -23,12 +23,15 @@
 #include <string>
 #include <vector>
 
-#include "clipboard.h"
-#include "field.h"
-#include "paint.h"
+#include "kin/clipboard.h"
+#include "kin/field.h"
+#include "kin/look.h"
+
 #include "tab.h"
 
 namespace edit {
+
+using namespace kin;
 
 class Clips {
 public:

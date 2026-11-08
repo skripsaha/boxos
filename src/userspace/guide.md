@@ -10,26 +10,31 @@ This guide is itself a file of the volume, written in Markdown. Read it with
 
 ## Reading
 
-`read` is for reading quietly; `edit` is for changing a file. The text stands
-in a column across the middle of the glass, the line you are reading is lit,
-and the bottom row says how far through you are and how long the rest takes.
+`read` is for reading quietly; `edit` is for changing a file. The two are one
+family: the same tabs, the same windows, the same keys for the same things.
+`read` alone opens the file chooser, as `edit` does. The text stands in a
+column across the middle of the glass, the line you are reading is lit, and
+the bottom row says how far through you are and how long the rest takes.
 Letters beyond ASCII that the console font holds are drawn as themselves:
 café, naïve, Straße, α, π, ±, ≥ and ½.
 
-| keys              | what they do                        |
-|-------------------|-------------------------------------|
-| Space, PgDn, f    | the next page                       |
-| PgUp, b           | the page before                     |
-| Down, Up, j, k    | the next line, the one before       |
-| }, {              | the next heading, the one before    |
-| c                 | the contents                        |
-| /, n, N           | look for words, the next, the last  |
-| m, '              | a bookmark here, all the bookmarks  |
-| t, +, -           | dark, sepia or light; column width  |
-| Ctrl+C            | copy the paragraph or the selection |
+| keys                       | what they do                         |
+|----------------------------|--------------------------------------|
+| Space, PgDn, Ctrl+Down     | the next page                        |
+| Shift+Space, PgUp, Ctrl+Up | the page before                      |
+| Down, Up                   | the next line, the one before        |
+| Tab, Shift+Tab             | the next heading, the one before     |
+| Ctrl+L                     | the contents                         |
+| Ctrl+F                     | find                                 |
+| Ctrl+M, Ctrl+Shift+M       | a bookmark here, all the bookmarks   |
+| Ctrl+=, Ctrl+-             | a wider column, a narrower one       |
+| Ctrl+C                     | copy the paragraph or the selection  |
+| Ctrl+N, Ctrl+1..0          | open a file in a new tab, go to one  |
+| Ctrl+?                     | every key                            |
 
-A book opens where you left it. Where you were, your bookmarks, the theme and
-the width you like are kept in one file of their own, `read.marks`; the files
+A book opens where you left it. Where you stopped and the bookmarks you put
+are kept in one file of their own, `read.marks`. A bookmark keeps the words it
+was put on, so when the file is changed it goes where they went; the files
 you read are never written.
 
 ## Finding
@@ -81,4 +86,4 @@ a program.
 
 ---
 
-*Read on with `}`, or press `c` for the contents. `q` leaves.*
+*Read on with Tab, or press Ctrl+L for the contents. Esc leaves.*

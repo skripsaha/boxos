@@ -7,10 +7,12 @@
  *                           its first save, named and tagged on its card
  *
  * Ctrl+? shows every key. What it is made of: text (the lines of a file),
- * history (undo), tab (one open file), keymap (the keys), field (a line typed
- * into a window), picker, search and card (the windows), volume (the files),
- * paint (the picture), editor (all of it together); this part takes what the
- * person typed, and gives back the files that were open.
+ * history (undo), tab (one open file), keymap (the keys), search and clips
+ * (its own windows), paint (the picture), editor (all of it together); and
+ * what it shares with read, its kin (../kin): the look, the bars, the keys'
+ * help, a field, the file chooser and the file's card, the volume and the
+ * clipboard. This part takes what the person typed, and gives back the files
+ * that were open.
  */
 
 #include <cstddef>

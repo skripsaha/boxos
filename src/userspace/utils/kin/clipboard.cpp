@@ -1,11 +1,11 @@
-/* The clipboard side of edit. */
+/* The clipboard as edit and read ask it. */
 
 #include "clipboard.h"
 
 #include <algorithm>
 #include <format>
 
-namespace edit {
+namespace kin {
 
 namespace {
 
@@ -83,4 +83,4 @@ std::string FirstLine(std::string_view Bytes)
     return Line;
 }
 
-}  // namespace edit
+}  // namespace kin

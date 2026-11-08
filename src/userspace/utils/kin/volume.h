@@ -1,11 +1,12 @@
-#ifndef EDIT_VOLUME_H
-#define EDIT_VOLUME_H
+#ifndef KIN_VOLUME_H
+#define KIN_VOLUME_H
 
-/* The volume side: what a file is called and wears, its bytes in and out, its
- * name and tags changed, the tags files wear. Every refusal is a sentence for
- * the person, and every word of it is the volume's own: edit keeps no copy of
- * the rules a file's tags or name follow — the volume says no, edit says why,
- * and what a file wears is shown as the volume says it.
+/* The volume as edit and read ask it: what a file is called and wears, its
+ * bytes in and out, its name and tags changed, the tags files wear. Every
+ * refusal is a sentence for the person, and every word of it is the volume's
+ * own: neither program keeps a copy of the rules a file's tags or name follow
+ * — the volume says no, the program says why, and what a file wears is shown
+ * as the volume says it.
  */
 
 #include <cstdint>
@@ -18,9 +19,9 @@
 #include "box/cxx/tagfs.h"
 #include "box/file.h"
 
-namespace edit {
+namespace kin {
 
-/* How edit looks at the volume: through the Use Context, as every ask of the
+/* How a program looks at the volume: through the Use Context, as every ask of the
  * volume is by default, or at all of it. */
 enum class Scope { InContext, Everywhere };
 
@@ -32,6 +33,9 @@ struct FileFacts {
 };
 
 std::expected<FileFacts, std::string>   ReadFacts(file_id_t File);
+/* True only when the volume says it has no file of that id: a file it would
+ * not speak of for another reason is not called gone. */
+bool                                    FileGone(file_id_t File);
 std::expected<std::string, std::string> ReadBytes(file_id_t File, std::uint64_t Size);
 
 /* A new, empty file: inside the Use Context the volume stamps the context's
@@ -48,7 +52,7 @@ std::optional<std::string> Rename(file_id_t File, std::string_view Name);
 std::optional<std::string> Retag(file_id_t File, const std::vector<std::string> &Had,
                                  const std::vector<std::string> &Wanted);
 
-/* The ids of the files edit can see. */
+/* The ids of the files the program can see. */
 std::expected<std::vector<file_id_t>, std::string> FilesSeen(Scope Looking);
 /* The tags files wear, the most worn first. */
 std::vector<box::tagfs::tag_count> TagsWorn(Scope Looking);
@@ -57,7 +61,7 @@ std::string Spelled(const box::tagfs::tag &One);
 
 /* The Use Context's tags, comma-joined; "" when the person has said none. */
 std::string ContextTags();
-/* Where edit is looking, for a window's title: "in code, cpp", or "the whole
+/* Where the program is looking, for a window's title: "in code, cpp", or "the whole
  * volume" — which is also what the Use Context is when it holds nothing. */
 std::string ScopeNote(Scope Looking);
 
@@ -65,6 +69,6 @@ std::string ScopeNote(Scope Looking);
 std::vector<std::string> TagWords(std::string_view Text);
 std::string              Joined(const std::vector<std::string> &Words, std::string_view Between);
 
-}  // namespace edit
+}  // namespace kin
 
 #endif

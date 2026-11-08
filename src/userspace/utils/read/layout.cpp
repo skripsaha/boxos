@@ -4,9 +4,11 @@
 
 #include <algorithm>
 
-#include "glyph.h"
+#include "kin/glyph.h"
 
 namespace read {
+
+using namespace kin;
 
 namespace {
 

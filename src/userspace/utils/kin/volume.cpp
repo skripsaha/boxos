@@ -1,5 +1,5 @@
-/* The volume side of edit: reading, making, writing, renaming, retagging,
- * and the tags files wear. */
+/* The volume as edit and read ask it: reading, making, writing, renaming,
+ * retagging, and the tags files wear. */
 
 #include "volume.h"
 
@@ -12,7 +12,7 @@
 #include "box/memory.h"
 #include "box/use.h"
 
-namespace edit {
+namespace kin {
 
 namespace {
 
@@ -46,6 +46,14 @@ std::expected<FileFacts, std::string> ReadFacts(file_id_t File)
     Facts.Trashed = (Metadata.Flags & FILE_FLAG_TRASHED) != 0;
     FileMetadataRelease(&Metadata);
     return Facts;
+}
+
+bool FileGone(file_id_t File)
+{
+    FileMetadata Metadata;
+    const int    Answer = FileMetadataRead(File, &Metadata);
+    if (Answer == 0) FileMetadataRelease(&Metadata);
+    return box_errno_of(Answer) == ERR_FILE_NOT_FOUND;
 }
 
 /* A short read is the volume answering with what it had in hand: the next
@@ -200,4 +208,4 @@ std::string Joined(const std::vector<std::string> &Words, std::string_view Betwe
     return Out;
 }
 
-}  // namespace edit
+}  // namespace kin

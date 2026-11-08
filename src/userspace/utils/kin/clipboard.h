@@ -1,10 +1,10 @@
-#ifndef EDIT_CLIPBOARD_H
-#define EDIT_CLIPBOARD_H
+#ifndef KIN_CLIPBOARD_H
+#define KIN_CLIPBOARD_H
 
-/* The clipboard side of edit: the machine's list of what was copied, said in
- * edit's words. The list is every program's, and its clips are bytes; what
- * they mean to edit is edit's to keep (clips.h). Every refusal comes back as
- * a sentence for the status line.
+/* The clipboard as edit and read ask it: the machine's list of what was
+ * copied, said in their words. The list is every program's, and its clips are
+ * bytes; what one means to a program is the program's to keep (edit's
+ * clips.h). Every refusal comes back as a sentence for the status line.
  */
 
 #include <cstddef>
@@ -17,7 +17,7 @@
 
 #include "box/cxx/clipboard.h"
 
-namespace edit {
+namespace kin {
 
 /* A clip's bytes, with the number they were taken under. */
 struct Taken {
@@ -44,6 +44,6 @@ std::optional<std::string>              DropClip(std::uint64_t Number);
  * which holds one line, makes of it. */
 std::string FirstLine(std::string_view Bytes);
 
-}  // namespace edit
+}  // namespace kin
 
 #endif

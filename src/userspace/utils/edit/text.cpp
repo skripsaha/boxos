@@ -6,40 +6,9 @@
 #include <algorithm>
 #include <iterator>
 
-#include "boxos_glyph_fold.h"
-
 namespace edit {
 
 namespace {
-
-/* The UTF-8 sequence at Bytes[At]: its length and its codepoint, or 0 when
- * the bytes there are no sequence — an overlong form, a surrogate, a
- * continuation with no lead, or one cut short. */
-std::size_t Decode(std::string_view Bytes, std::size_t At, std::uint32_t &Codepoint) noexcept
-{
-    const auto Lead = static_cast<unsigned char>(Bytes[At]);
-    if (Lead < 0x80) {
-        Codepoint = Lead;
-        return 1;
-    }
-
-    std::size_t   Need;
-    std::uint32_t Value, Least;
-    if (Lead >= 0xC2 && Lead <= 0xDF)      Need = 2, Value = Lead & 0x1Fu, Least = 0x80;
-    else if (Lead >= 0xE0 && Lead <= 0xEF) Need = 3, Value = Lead & 0x0Fu, Least = 0x800;
-    else if (Lead >= 0xF0 && Lead <= 0xF4) Need = 4, Value = Lead & 0x07u, Least = 0x10000;
-    else return 0;
-    if (Need > Bytes.size() - At) return 0;
-
-    for (std::size_t Index = 1; Index < Need; Index++) {
-        const auto Next = static_cast<unsigned char>(Bytes[At + Index]);
-        if ((Next & 0xC0u) != 0x80u) return 0;
-        Value = Value << 6 | (Next & 0x3Fu);
-    }
-    if (Value < Least || Value > 0x10FFFF || (Value >= 0xD800 && Value <= 0xDFFF)) return 0;
-    Codepoint = Value;
-    return Need;
-}
 
 char Lower(char Ch) noexcept
 {
@@ -86,26 +55,6 @@ Position After(Position At, std::string_view Bytes) noexcept
     if (Last == std::string_view::npos) return {At.Line, At.Byte + Bytes.size()};
     return {At.Line + static_cast<std::size_t>(std::count(Bytes.begin(), Bytes.end(), '\n')),
             Bytes.size() - Last - 1};
-}
-
-Glyph GlyphAt(std::string_view Line, std::size_t Byte, std::size_t Column) noexcept
-{
-    Glyph Out;
-    if (Line[Byte] == '\t') {
-        Out.Width = TabStop - Column % TabStop;
-        return Out;
-    }
-
-    std::uint32_t     Codepoint = 0;
-    const std::size_t Length    = Decode(Line, Byte, Codepoint);
-    if (Length == 0 || Codepoint < 0x20 || Codepoint == 0x7F) {
-        Out.Cells[0] = BOXOS_GLYPH_FOLD_BOX;
-        Out.Odd      = true;
-        return Out;
-    }
-    Out.Length = Length;
-    Out.Width  = static_cast<std::size_t>(BoxGlyphFoldCodepoint(Codepoint, Out.Cells));
-    return Out;
 }
 
 Kind KindAt(std::string_view Line, std::size_t Byte) noexcept

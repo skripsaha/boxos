@@ -1,21 +1,25 @@
 #ifndef READ_MARKS_H
 #define READ_MARKS_H
 
-/* What read remembers from one reading to the next, in a file of its own on
- * the volume, read.marks: where each book was left, its bookmarks, and how
- * the person likes the page — the theme and the column's width. A place is
- * where a block begins in the file (book.h). The file is found by its name
- * on the whole volume, whatever the Use Context, and made by the first save;
- * a file being read is never written. Its text is one fact a line:
+/* The bookmarks read keeps from one reading to the next, in a file of its own
+ * on the volume, read.marks: those the person puts, and the one read puts
+ * where a book was left, so the book opens there again.
  *
- *     theme sepia
- *     width 72
- *     place 12 4096        the file, and where it was left
- *     mark 12 120          the file, and a bookmark in it
+ * A bookmark is where a paragraph begins in the file, and the words it begins
+ * with. When the file is changed and other words stand there, the bookmark
+ * goes where its words went — to the place nearest the old one where they
+ * stand; when they are in the file no more, it stays where it was and is lost,
+ * and is shown so. A bookmark of a file the volume no longer has is let go.
+ *
+ * read.marks is found by its name on the whole volume, whatever the Use
+ * Context, and made by the first save; a book read is never written. Its text
+ * is one bookmark a line — what it is, the file, the place, and the words:
+ *
+ *     place 12 4096 ## The clipboard
+ *     mark 12 120 BoxOS keeps no folders. A file is
  */
 
 #include <cstddef>
-#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -25,6 +29,11 @@
 
 namespace read {
 
+struct Mark {
+    std::size_t Source = 0;      /* where its paragraph begins in the file */
+    bool        Lost   = false;  /* its words are in the file no more */
+};
+
 class Memory {
 public:
     /* What the volume holds; nothing yet when there is no read.marks. A
@@ -33,33 +42,28 @@ public:
     /* Written when anything changed; a refusal says why. */
     std::optional<std::string> Save();
 
-    std::optional<std::size_t> Place(file_id_t File) const;
-    void                       SetPlace(file_id_t File, std::size_t Source);
+    /* The bookmarks of File found again in its bytes as they are now. */
+    void              Settle(file_id_t File, std::string_view Bytes);
+    std::optional<Mark> Place(file_id_t File) const;
+    void              SetPlace(file_id_t File, std::size_t Source, std::string_view Bytes);
     /* A book's bookmarks, first in the file first. */
-    std::vector<std::size_t>   Marks(file_id_t File) const;
-    /* A bookmark put where there is none, taken away where there is one;
-     * true when one is there now. */
-    bool                       Toggle(file_id_t File, std::size_t Source);
-    void                       Unmark(file_id_t File, std::size_t Source);
-
-    const std::string &ThemeName() const noexcept { return Theme; }
-    std::int32_t       Width() const noexcept { return Cols; }
-    void               SetTheme(std::string_view Name);
-    void               SetWidth(std::int32_t Width);
+    std::vector<Mark> Marks(file_id_t File) const;
+    void              Put(file_id_t File, std::size_t Source, std::string_view Bytes);
+    void              Unmark(file_id_t File, std::size_t Source);
 
 private:
     struct Fact {
+        bool        Left   = false;  /* where the book was left, not a bookmark the person put */
         file_id_t   File   = 0;
         std::size_t Source = 0;
-        bool        operator==(const Fact &) const = default;
+        std::string Words;
+        bool        Lost   = false;
     };
 
     void Read(std::string_view Text);
+    void LetGoOfTheGone();
 
-    std::vector<Fact> Places;
-    std::vector<Fact> Marked;
-    std::string       Theme;
-    std::int32_t      Cols    = 0;
+    std::vector<Fact> Facts;
     file_id_t         Kept    = 0;        /* the file read.marks is; 0 before the first save */
     bool              Changed = false;
 };

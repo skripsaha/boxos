@@ -6,7 +6,7 @@
 
 #include "painter/tui/glyph.h"
 
-namespace edit {
+namespace kin {
 
 namespace {
 
@@ -20,10 +20,11 @@ std::string Folded(std::string_view Text)
 
 }  // namespace
 
-void Picker::Begin(core::Size ScreenValue, std::vector<file_id_t> Open, Scope LookingValue)
+void Picker::Begin(core::Size ScreenValue, std::vector<file_id_t> Open, Scope LookingValue, bool MakesValue)
 {
     Screen      = ScreenValue;
     AlreadyOpen = std::move(Open);
+    Makes       = MakesValue;
     Filter.Clear();
     Rescope(LookingValue);
 }
@@ -75,7 +76,7 @@ void Picker::Narrow()
 
     /* One word that is no file's whole name may become a new file's name. */
     const std::string &Typed = Filter.Value();
-    const bool         OneWord = !Typed.empty() && Typed.find_first_of(" ,") == std::string::npos;
+    const bool         OneWord = Makes && !Typed.empty() && Typed.find_first_of(" ,") == std::string::npos;
     const bool         Taken = std::any_of(Entries.begin(), Entries.end(),
                                            [&](const Entry &One) { return One.Name == Typed; });
     NewName = OneWord && !Taken ? Typed : std::string();
@@ -181,4 +182,4 @@ void Picker::Paint(tui::Frame &Out) const
         PaintRow(Out, Inside, Inside.Y + 2 + static_cast<std::int32_t>(Line), First + Line);
 }
 
-}  // namespace edit
+}  // namespace kin

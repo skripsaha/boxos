@@ -13,11 +13,14 @@
 #include <string>
 #include <vector>
 
-#include "field.h"
-#include "paint.h"
+#include "kin/field.h"
+#include "kin/look.h"
+
 #include "tab.h"
 
 namespace edit {
+
+using namespace kin;
 
 class Search {
 public:

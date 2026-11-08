@@ -8,18 +8,14 @@ namespace {
 
 namespace KeyCodes = painter::tui::KeyCodes;
 
-constexpr Chord CtrlLetter(char Letter) { return {true, false, false, static_cast<std::uint8_t>(Letter)}; }
-constexpr Chord Plain(char Ch) { return {false, false, false, static_cast<std::uint8_t>(Ch)}; }
-constexpr Chord KeyOnly(std::uint8_t Code, bool Ctrl = false, bool Shift = false) { return {Ctrl, Shift, true, Code}; }
+using Binding = kin::Binding<Command, Part>;
 
-/* A binding whose words are empty is said by the line before it: its key is
- * named there too, unless that line names its keys in words of its own. */
 constexpr Binding Table[] = {
     {CtrlLetter('s'), Command::Save, Part::Files, "save"},
     {CtrlLetter('n'), Command::Open, Part::Files, "open a file in a new tab"},
     {CtrlLetter('t'), Command::Card, Part::Files, "the file's name and tags"},
     {CtrlLetter('q'), Command::CloseTab, Part::Files, "close this tab"},
-    {{true, false, false, 0, true}, Command::GoToTab, Part::Files, "go to that tab; 0 is the tenth", "Ctrl+1..0"},
+    {CtrlDigit(), Command::GoToTab, Part::Files, "go to that tab; 0 is the tenth", "Ctrl+1..0"},
     {KeyOnly(KeyCodes::PageDown, true), Command::NextTab, Part::Files, "the next tab"},
     {KeyOnly(KeyCodes::PageUp, true), Command::PriorTab, Part::Files, "the tab before"},
     {CtrlLetter('e'), Command::Scope, Part::Files, "the whole volume, or the Use Context again"},
@@ -43,8 +39,7 @@ constexpr Binding Table[] = {
     {CtrlLetter('a'), Command::SelectAll, Part::Moving, "select everything"},
 
     {Plain(KeyCodes::Tab), Command::Indent, Part::Writing, "indent; a selection, every line"},
-    {{false, true, false, static_cast<std::uint8_t>(KeyCodes::Tab)}, Command::Unindent, Part::Writing,
-     "take an indent back"},
+    {Plain(KeyCodes::Tab, true), Command::Unindent, Part::Writing, "take an indent back"},
     {Plain(KeyCodes::Enter), Command::NewLine, Part::Writing, "a new line, indented as this one"},
     {Plain(KeyCodes::Backspace), Command::Backspace, Part::Writing, ""},
     {KeyOnly(KeyCodes::Delete), Command::Delete, Part::Writing, ""},
@@ -53,16 +48,15 @@ constexpr Binding Table[] = {
     {CtrlLetter('c'), Command::Copy, Part::Writing, "copy; nothing selected, the line"},
     {CtrlLetter('x'), Command::Cut, Part::Writing, "cut; nothing selected, the line"},
     {CtrlLetter('v'), Command::Paste, Part::Writing, "paste the newest clip"},
-    {{true, true, false, 'v'}, Command::Clips, Part::Writing, "paste one chosen from the clipboard"},
+    {CtrlLetter('v', true), Command::Clips, Part::Writing, "paste one chosen from the clipboard"},
     {CtrlLetter('i'), Command::Overtype, Part::Writing, "type over what is there"},
     {KeyOnly(KeyCodes::Insert), Command::Overtype, Part::Writing, ""},
-    {{true, false, false, static_cast<std::uint8_t>(KeyCodes::Tab)}, Command::Safety, Part::Writing,
-     "safety: look, never write"},
+    {CtrlLetter(KeyCodes::Tab), Command::Safety, Part::Writing, "safety: look, never write"},
 
     {CtrlLetter('f'), Command::Find, Part::Finding, "find"},
     {CtrlLetter('r'), Command::Replace, Part::Finding, "find and replace"},
-    {{true, true, false, '?'}, Command::Help, Part::Finding, "these keys"},
-    {{true, false, false, '/'}, Command::Help, Part::Finding, ""},
+    {CtrlLetter('?', true), Command::Help, Part::Finding, "these keys"},
+    {CtrlLetter('/'), Command::Help, Part::Finding, ""},
 };
 
 bool Moves(Command Does) noexcept
@@ -77,81 +71,22 @@ bool Moves(Command Does) noexcept
     }
 }
 
-char Lower(char Ch) noexcept
+std::string_view PartName(Part In) noexcept
 {
-    return Ch >= 'A' && Ch <= 'Z' ? static_cast<char>(Ch - 'A' + 'a') : Ch;
-}
-
-/* Ctrl and a letter is the letter whether Caps Lock was on or not. */
-const Binding *Matching(bool IsKey, std::uint8_t Code, bool Ctrl, bool Shift) noexcept
-{
-    for (const Binding &One : Table) {
-        const Chord &Keys = One.Keys;
-        if (Keys.AnyDigit || Keys.Key != IsKey || Keys.Ctrl != Ctrl || Keys.Shift != Shift) continue;
-        if (IsKey ? Keys.Code == Code : Lower(static_cast<char>(Keys.Code)) == Lower(static_cast<char>(Code)))
-            return &One;
+    switch (In) {
+    case Part::Files:   return "Files and tabs";
+    case Part::Moving:  return "Moving";
+    case Part::Writing: return "Writing";
+    case Part::Finding: return "Finding";
     }
-    return nullptr;
-}
-
-std::string KeyName(const Chord &Keys)
-{
-    if (Keys.Key) {
-        switch (Keys.Code) {
-        case KeyCodes::Left:     return "Left";
-        case KeyCodes::Right:    return "Right";
-        case KeyCodes::Up:       return "Up";
-        case KeyCodes::Down:     return "Down";
-        case KeyCodes::Home:     return "Home";
-        case KeyCodes::End:      return "End";
-        case KeyCodes::PageUp:   return "PgUp";
-        case KeyCodes::PageDown: return "PgDn";
-        case KeyCodes::Insert:   return "Insert";
-        case KeyCodes::Delete:   return "Delete";
-        default:                 return "?";
-        }
-    }
-    switch (static_cast<char>(Keys.Code)) {
-    case KeyCodes::Escape:    return "Esc";
-    case KeyCodes::Tab:       return "Tab";
-    case KeyCodes::Enter:     return "Enter";
-    case KeyCodes::Backspace: return "Backspace";
-    default: {
-        const char Ch = static_cast<char>(Keys.Code);
-        return std::string(1, Ch >= 'a' && Ch <= 'z' ? static_cast<char>(Ch - 'a' + 'A') : Ch);
-    }
-    }
+    return "";
 }
 
 }  // namespace
 
-std::span<const Binding> Bindings() noexcept
-{
-    return Table;
-}
-
-/* Shift on a key that moves makes the selection grow. On any other key it
- * means nothing more than the key without it — unless that very chord is
- * bound, as Ctrl+Shift+Up is. */
 std::optional<Heard> Hear(const painter::tui::KeyEvent &Key) noexcept
 {
-    if (Key.IsAlt()) return std::nullopt;
-    const bool Ctrl = Key.IsCtrl(), Shift = Key.IsShift();
-
-    std::uint8_t Code = Key.Scancode;
-    if (!Key.IsExtended()) {
-        /* A terminal's Enter and Backspace on the serial line. */
-        char Ch = Key.Ascii == '\r' ? KeyCodes::Enter : Key.Ascii == 0x7F ? KeyCodes::Backspace : Key.Ascii;
-        if (Ctrl && !Shift && Ch >= '0' && Ch <= '9')
-            return Heard{Command::GoToTab, false, static_cast<std::uint8_t>(Ch - '0')};
-        Code = static_cast<std::uint8_t>(Ch);
-    }
-
-    if (const Binding *Exact = Matching(Key.IsExtended(), Code, Ctrl, Shift)) return Heard{Exact->Does};
-    if (!Shift) return std::nullopt;
-    const Binding *Unshifted = Matching(Key.IsExtended(), Code, Ctrl, false);
-    if (!Unshifted) return std::nullopt;
-    return Heard{Unshifted->Does, Moves(Unshifted->Does)};
+    return kin::Hear(std::span<const Binding>(Table), Key, Moves);
 }
 
 bool Writes(Command Does) noexcept
@@ -165,24 +100,9 @@ bool Writes(Command Does) noexcept
     }
 }
 
-std::string NameOf(const Binding &One)
+std::vector<KeyLine> HelpLines()
 {
-    if (!One.Named.empty()) return std::string(One.Named);
-    std::string Name;
-    if (One.Keys.Ctrl) Name += "Ctrl+";
-    if (One.Keys.Shift && One.Keys.Code != '?') Name += "Shift+";
-    return Name + KeyName(One.Keys);
-}
-
-std::string_view PartName(Part In) noexcept
-{
-    switch (In) {
-    case Part::Files:   return "Files and tabs";
-    case Part::Moving:  return "Moving";
-    case Part::Writing: return "Writing";
-    case Part::Finding: return "Finding";
-    }
-    return "";
+    return KeyLines(std::span<const Binding>(Table), PartName);
 }
 
 }  // namespace edit

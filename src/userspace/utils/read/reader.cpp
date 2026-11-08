@@ -1,219 +1,19 @@
-/* read as a whole: books and places, moving, the keys, and finding. */
+/* read as a whole: the tabs and their books, the keys, and leaving. */
 
 #include "reader.h"
 
 #include <algorithm>
 #include <format>
 
-#include "box/cxx/clipboard.h"
-
-#include "glyph.h"
+#include "kin/clipboard.h"
+#include "kin/volume.h"
 
 namespace read {
 
-namespace {
-
-char Fold(char Ch) noexcept
-{
-    return Ch >= 'A' && Ch <= 'Z' ? static_cast<char>(Ch - 'A' + 'a') : Ch;
-}
-
-std::string Folded(std::string_view Text)
-{
-    std::string Out(Text);
-    for (char &Ch : Out) Ch = Fold(Ch);
-    return Out;
-}
-
-/* The first line of a clip, every control character a blank. */
-std::string FirstLine(std::string_view Bytes)
-{
-    std::string Line(Bytes.substr(0, Bytes.find('\n')));
-    for (char &Ch : Line)
-        if (static_cast<unsigned char>(Ch) < 0x20 || Ch == 0x7F) Ch = ' ';
-    return Line;
-}
-
-}  // namespace
-
 Reader::Reader(tui::Stage ScreenValue, Memory RememberedValue)
-    : Screen(std::move(ScreenValue)),
-      Bounds(Screen.Size()),
-      Remembered(std::move(RememberedValue)),
-      Scheme(&ThemeNamed(Remembered.ThemeName())),
-      Width(Remembered.Width())
+    : Screen(std::move(ScreenValue)), Bounds(Screen.Size()), Remembered(std::move(RememberedValue))
 {
 }
-
-/* ---- books and places ----------------------------------------------------- */
-
-/* The book at Index, opened where it was left; false, said, when it would not
- * open, and the book in front stays. */
-bool Reader::Show(std::size_t Index)
-{
-    std::expected<Book, std::string> Opening = Open(Files[Index]);
-    if (!Opening) {
-        Troubles.push_back(Opening.error());
-        Note(Opening.error(), true);
-        return false;
-    }
-    Current = Index;
-    Here    = std::move(*Opening);
-    if (std::find(Opened.begin(), Opened.end(), Here.File) == Opened.end()) Opened.push_back(Here.File);
-    Marked = Remembered.Marks(Here.File);
-    Anchor.reset();
-    Lay();
-
-    const std::optional<std::size_t> Place = Remembered.Place(Here.File);
-    if (Place && !Here.Blocks.empty()) {
-        Reading = Lines.RowOf(Here.BlockAt(*Place));
-        Top     = std::min(Reading > PageRows() / 3 ? Reading - PageRows() / 3 : 0, MostTop());
-    } else {
-        Edge(false);
-    }
-    Search();
-    return true;
-}
-
-/* Where the book in front was left, remembered. */
-void Reader::Leave()
-{
-    if (Here.File != 0 && !Lines.Rows().empty()) Remembered.SetPlace(Here.File, PlaceOfReading());
-}
-
-void Reader::Lay()
-{
-    Lines.Make(Here, Column());
-}
-
-/* Laid again — a new width, the other way of reading — the reading line kept
- * on the same words and as far down the page as it was. */
-void Reader::Relay()
-{
-    if (Lines.Rows().empty()) {
-        Lay();
-        return;
-    }
-    const Row         Was   = Lines.Rows()[Reading];
-    const std::size_t Down  = Reading - std::min(Reading, Top);
-    Lay();
-    Reading = Lines.RowOf(Was.Block, Was.From);
-    Top     = std::min(Reading > Down ? Reading - Down : 0, MostTop());
-}
-
-std::size_t Reader::PlaceOfReading() const
-{
-    if (Lines.Rows().empty() || Here.Blocks.empty()) return 0;
-    const std::size_t Block = std::min(Lines.Rows()[Reading].Block, Here.Blocks.size() - 1);
-    return Here.Blocks[Block].Source;
-}
-
-/* The reading line on that byte of that block, and the page about it when it
- * is not on the page already: a third of the way down, where the eye goes. */
-void Reader::GoToBlock(std::size_t Block, std::size_t Byte)
-{
-    if (Lines.Rows().empty()) return;
-    Reading = Lines.RowOf(Block, Byte);
-    Anchor.reset();
-    if (Reading < Top || Reading >= Top + PageRows())
-        Top = std::min(Reading > PageRows() / 3 ? Reading - PageRows() / 3 : 0, MostTop());
-}
-
-/* ---- moving ------------------------------------------------------------- */
-
-bool Reader::TextRow(std::size_t Row) const noexcept
-{
-    return Row < Lines.Rows().size() && Lines.Rows()[Row].Is == RowKind::Text;
-}
-
-std::size_t Reader::MostTop() const noexcept
-{
-    const std::size_t Rows = Lines.Rows().size(), Page = PageRows();
-    return Rows > Page ? Rows - Page : 0;
-}
-
-void Reader::Follow() noexcept
-{
-    if (Reading < Top) Top = Reading;
-    if (Reading >= Top + PageRows()) Top = Reading - PageRows() + 1;
-}
-
-/* The reading line to the next line of text, or the one before; with Shift
- * the selection grows from where the line was. */
-void Reader::Step(bool Down, bool Extend)
-{
-    if (Extend && !Anchor) Anchor = Reading;
-    if (!Extend) Anchor.reset();
-    std::size_t Row = Reading;
-    while (Down ? Row + 1 < Lines.Rows().size() : Row > 0) {
-        Row = Down ? Row + 1 : Row - 1;
-        if (TextRow(Row)) {
-            Reading = Row;
-            break;
-        }
-    }
-    Follow();
-}
-
-/* A page on, or back — one line of the old page kept, so the eye has where
- * it was — and the reading line at the top of it. At the end of the book the
- * reading line goes to its last line instead. */
-void Reader::Page(bool Down)
-{
-    Anchor.reset();
-    const std::size_t Stride = this->Stride();
-    if (Down && Top >= MostTop()) {
-        Edge(true);
-        return;
-    }
-    if (!Down && Top == 0) {
-        Edge(false);
-        return;
-    }
-    Top = Down ? std::min(Top + Stride, MostTop()) : (Top > Stride ? Top - Stride : 0);
-    for (Reading = Top; Reading + 1 < Lines.Rows().size() && !TextRow(Reading);) Reading++;
-}
-
-void Reader::Edge(bool End)
-{
-    Anchor.reset();
-    if (Lines.Rows().empty()) {
-        Top = Reading = 0;
-        return;
-    }
-    Top = End ? MostTop() : 0;
-    if (End) {
-        for (Reading = Lines.Rows().size() - 1; Reading > 0 && !TextRow(Reading);) Reading--;
-    } else {
-        for (Reading = 0; Reading + 1 < Lines.Rows().size() && !TextRow(Reading);) Reading++;
-    }
-}
-
-/* The next heading, or the one this part is under — the one before it when
- * the reading line stands on a heading already — near the top of the page. */
-void Reader::Heading(bool Next)
-{
-    if (Lines.Rows().empty()) return;
-    const std::size_t              Block    = Lines.Rows()[Reading].Block;
-    const std::vector<std::size_t> Headings = Here.Headings();
-    std::optional<std::size_t>     To;
-    for (const std::size_t One : Headings) {
-        if (Next && One > Block) {
-            To = One;
-            break;
-        }
-        if (!Next && One < Block) To = One;
-    }
-    if (!To) {
-        Note(Headings.empty() ? "this book has no headings" : Next ? "no heading comes after this" : "no heading comes before this");
-        return;
-    }
-    Anchor.reset();
-    Reading = Lines.RowOf(*To);
-    Top     = std::min(Reading > 0 ? Reading - 1 : 0, MostTop());
-}
-
-/* ---- keys --------------------------------------------------------------- */
 
 void Reader::Note(std::string Words, bool Trouble)
 {
@@ -221,22 +21,84 @@ void Reader::Note(std::string Words, bool Trouble)
     MessageTrouble = Trouble;
 }
 
-void Reader::Run()
+/* ---- tabs and files ----------------------------------------------------- */
+
+/* A zero byte is no text anybody wrote: such a file is edit's to look at,
+ * not read's. The book opens where it was left. */
+void Reader::Open(file_id_t File)
 {
-    bool Showing = false;
-    for (std::size_t Index = 0; Index < Files.size() && !Showing; Index++) Showing = Show(Index);
-    if (Showing) {
-        while (!Done) {
-            if (!Paint()) break;
-            const tui::Event Heard = Screen.Wait();
-            if (Heard.Kind != tui::EventKind::Key) break;
-            OnKey(Heard.Key);
-        }
-        Leave();
+    for (std::size_t Index = 0; Index < Tabs.size(); Index++) {
+        if (Tabs[Index]->Body.File != File) continue;
+        Show(Index);
+        return;
     }
-    (void)Screen.Close();
-    if (std::optional<std::string> Refused = Remembered.Save())
-        Troubles.push_back("where the books were left could not be remembered: " + *Refused);
+
+    std::expected<FileFacts, std::string> Facts = ReadFacts(File);
+    if (!Facts) {
+        Note(std::format("that file would not open: {}", Facts.error()), true);
+        return;
+    }
+    std::expected<std::string, std::string> Bytes = ReadBytes(File, Facts->Size);
+    if (!Bytes) {
+        Note(std::format("{} would not open: {}", Facts->Name, Bytes.error()), true);
+        return;
+    }
+    if (Bytes->find('\0') != std::string::npos) {
+        Note(std::format("{} holds bytes that are no text: edit shows them", Facts->Name), true);
+        return;
+    }
+
+    Remembered.Settle(File, *Bytes);
+    auto One    = std::make_unique<Tab>(Book::Make(File, Facts->Name, std::move(*Bytes), ReadingFor(Facts->Name)),
+                                        Facts->Tags);
+    One->Marked = Remembered.Marks(File);
+    One->Lay(Column(), PageRows());
+    if (const std::optional<Mark> Place = Remembered.Place(File); Place && !One->Body.Blocks.empty())
+        One->GoTo(One->Body.BlockAt(Place->Source), 0, PageRows());
+
+    Tabs.push_back(std::move(One));
+    if (std::find(Opened.begin(), Opened.end(), File) == Opened.end()) Opened.push_back(File);
+    Show(Tabs.size() - 1);
+}
+
+/* A tab laid at another width while it was behind is laid again now. */
+void Reader::Show(std::size_t Index)
+{
+    Current = Index;
+    Active().Lay(Column(), PageRows());
+}
+
+/* Where the book was left, remembered: it opens there again. */
+void Reader::Leave(const Tab &One)
+{
+    if (!One.Lines.Rows().empty()) Remembered.SetPlace(One.Body.File, One.PlaceOfReading(), One.Body.FileBytes());
+}
+
+void Reader::Close(std::size_t Index)
+{
+    Leave(*Tabs[Index]);
+    Tabs.erase(Tabs.begin() + static_cast<std::ptrdiff_t>(Index));
+    if (Current >= Index && Current > 0) Current--;
+    Now = Mode::Reading;
+    if (Tabs.empty()) OpenChooser();
+    else              Show(Current);
+}
+
+void Reader::OpenChooser()
+{
+    std::vector<file_id_t> Open;
+    for (const std::unique_ptr<Tab> &One : Tabs) Open.push_back(One->Body.File);
+    Chooser.Begin(Bounds, std::move(Open), Looking, false);
+    Now = Mode::Picking;
+}
+
+/* The other way of looking, for every window at once. */
+void Reader::Rescope()
+{
+    Looking = Looking == Scope::InContext ? Scope::Everywhere : Scope::InContext;
+    Note(Looking == Scope::Everywhere ? "looking at the whole volume" : "looking through the Use Context");
+    if (Now == Mode::Picking) Chooser.Rescope(Looking);
+    if (Now == Mode::Carding) FileCard.Rescope(Looking);
 }
 
 std::string Reader::Afterwords() const
@@ -246,232 +108,112 @@ std::string Reader::Afterwords() const
     return Said;
 }
 
+/* ---- the loop ----------------------------------------------------------- */
+
+void Reader::Run()
+{
+    if (Tabs.empty()) OpenChooser();
+    while (!Done) {
+        if (!Paint()) break;
+        /* No deadline: nothing changes between keys, and the cabin sleeps
+         * until one comes. A wait that ends without a key means there is
+         * nothing left to hear. */
+        const tui::Event Heard = Screen.Wait();
+        if (Heard.Kind != tui::EventKind::Key) break;
+        OnKey(Heard.Key);
+    }
+    for (const std::unique_ptr<Tab> &One : Tabs) Leave(*One);
+    (void)Screen.Close();
+    if (std::optional<std::string> Refused = Remembered.Save())
+        Troubles.push_back("the bookmarks could not be kept: " + *Refused);
+}
+
 void Reader::OnKey(const tui::KeyEvent &Key)
 {
     Message.clear();
+    if (const std::optional<Heard> Asked = Hear(Key); Asked && Asked->Does == Command::Scope) {
+        Rescope();
+        return;
+    }
     switch (Now) {
     case Mode::Reading: OnReading(Key); break;
-    case Mode::Finding: OnFinding(Key); break;
+    case Mode::Picking: OnPicking(Key); break;
+    case Mode::Finding:
+        if (Finder.OnKey(Key, Active(), PageRows()) == Search::Outcome::Closed) Now = Mode::Reading;
+        break;
     case Mode::Listing: OnListing(Key); break;
+    case Mode::Helping:
+        if (Keys.OnKey(Key) == Help::Outcome::Closed) Now = Mode::Reading;
+        break;
+    case Mode::Carding: OnCarding(Key); break;
     }
 }
+
+/* ---- keys over the page ------------------------------------------------- */
 
 void Reader::OnReading(const tui::KeyEvent &Key)
 {
-    if (Key.IsCtrl() && !Key.IsExtended()) {
-        if (Fold(Key.Ascii) == 'c') Copy();
-        return;
-    }
-    if (Key.IsExtended()) {
-        switch (Key.Scancode) {
-        case tui::KeyCodes::Up:       Step(false, Key.IsShift()); break;
-        case tui::KeyCodes::Down:     Step(true, Key.IsShift()); break;
-        case tui::KeyCodes::PageUp:   Page(false); break;
-        case tui::KeyCodes::PageDown: Page(true); break;
-        case tui::KeyCodes::Home:     Edge(false); break;
-        case tui::KeyCodes::End:      Edge(true); break;
-        default: break;
-        }
-        return;
-    }
+    if (const std::optional<Heard> Asked = Hear(Key)) Do(*Asked);
+}
 
-    const auto Turn = [&](bool Forward) {
-        Leave();
-        for (std::size_t Index = Current; Forward ? Index + 1 < Files.size() : Index > 0;) {
-            Index = Forward ? Index + 1 : Index - 1;
-            if (Show(Index)) return;
-        }
-        if (Message.empty()) Note(Files.size() == 1 ? "this is the one book" : Forward ? "this is the last book" : "this is the first book");
-    };
-
-    switch (Key.Ascii) {
-    case ' ':  Page(!Key.IsShift()); break;
-    case 'f':  Page(true); break;
-    case 'b':  Page(false); break;
-    case 'j':  Step(true, false); break;
-    case 'k':  Step(false, false); break;
-    case 'g':  Edge(false); break;
-    case 'G':  Edge(true); break;
-    case '}':  Heading(true); break;
-    case '{':  Heading(false); break;
-    case ']':  Turn(true); break;
-    case '[':  Turn(false); break;
-    case 'n':  NextMatch(true); break;
-    case 'N':  NextMatch(false); break;
-    case 'c':  OpenList(Window::Contents); break;
-    case '\'': OpenList(Window::Bookmarks); break;
-    case '?':  OpenList(Window::Keys); break;
-    case 'm':  ToggleMark(); break;
-    case '+':
-    case '=':  Widen(WidthStep); break;
-    case '-':  Widen(-WidthStep); break;
-    case 'q':  Done = true; break;
-    case '/':
+void Reader::Do(const Heard &Asked)
+{
+    Tab              &Here = Active();
+    const std::size_t Rows = PageRows();
+    const bool        More = Asked.Extend;
+    switch (Asked.Does) {
+    case Command::Up:        Here.Step(false, More, Rows); break;
+    case Command::Down:      Here.Step(true, More, Rows); break;
+    case Command::PageUp:    Here.Page(false, More, Rows); break;
+    case Command::PageDown:  Here.Page(true, More, Rows); break;
+    case Command::FileStart: Here.Edge(false, Rows); break;
+    case Command::FileEnd:   Here.Edge(true, Rows); break;
+    case Command::SelectAll: Here.SelectAll(Rows); break;
+    case Command::NextHeading:
+    case Command::PriorHeading: {
+        const bool Next = Asked.Does == Command::NextHeading;
+        if (!Here.Heading(Next, Rows))
+            Note(Here.Body.Headings().empty() ? "this file has no headings"
+                 : Next                        ? "no heading comes after this"
+                                               : "no heading comes before this");
+        break;
+    }
+    case Command::Contents: OpenList(Window::Contents); break;
+    case Command::Copy:     Copy(); break;
+    case Command::Mark:     ToggleMark(); break;
+    case Command::Marks:    OpenList(Window::Bookmarks); break;
+    case Command::Wider:    Widen(WidthStep); break;
+    case Command::Narrower: Widen(-WidthStep); break;
+    case Command::Turn:
+        Here.Turn(Column(), Rows);
+        Note(Here.Body.As == Reading::Prose ? "read as prose: lines joined into paragraphs, marks shown as what they mean"
+                                            : "read as lines: every line as it stands");
+        break;
+    case Command::Find:
+        Finder.Begin(Here, Bounds);
         Now = Mode::Finding;
-        Needle.clear();
-        Find();
         break;
-    case 't':
-        Scheme = &ThemeAfter(*Scheme);
-        Remembered.SetTheme(Scheme->Name);
-        Note(std::format("the page is {}", Scheme->Name));
+    case Command::Help:
+        Keys.Begin(HelpLines(), "read");
+        Now = Mode::Helping;
         break;
-    case 'w': {
-        const std::size_t Place = PlaceOfReading();
-        Here                    = Here.Other();
-        Lay();
-        GoToBlock(Here.BlockAt(Place));
-        Search();
-        Note(Here.As == Reading::Prose ? "read as prose: lines joined into paragraphs, marks shown as what they mean"
-                                       : "read as lines: every line as it stands");
+    case Command::Open: OpenChooser(); break;
+    case Command::Card:
+        FileCard.Begin(Here.Body.File, Here.Body.Name, Here.Tags, Looking, Bounds);
+        Now = Mode::Carding;
+        break;
+    case Command::CloseTab: Close(Current); break;
+    case Command::Leave:    Done = true; break;
+    case Command::GoToTab: {
+        const std::size_t Wanted = Asked.Digit == 0 ? 9 : Asked.Digit - 1u;
+        if (Wanted < Tabs.size()) Show(Wanted);
+        else                      Note(std::format("there is no tab {}", Wanted + 1));
         break;
     }
-    case tui::KeyCodes::Escape:
-        if (Anchor) {
-            Anchor.reset();
-        } else if (!Needle.empty()) {
-            Needle.clear();
-            Search();
-        } else {
-            Done = true;
-        }
-        break;
-    default: break;
+    case Command::NextTab:  Show((Current + 1) % Tabs.size()); break;
+    case Command::PriorTab: Show((Current + Tabs.size() - 1) % Tabs.size()); break;
+    case Command::Scope:    Rescope(); break;
     }
-}
-
-/* What is typed is looked for as it is typed; Enter keeps what was found
- * lit, Esc lets it go. Ctrl+V types the newest clip's first line. */
-void Reader::OnFinding(const tui::KeyEvent &Key)
-{
-    if (Key.IsExtended()) return;
-    if (Key.IsCtrl()) {
-        if (Fold(Key.Ascii) != 'v') return;
-        box::result<std::vector<box::clip>> Newest = box::clipboard::list(1);
-        if (!Newest || Newest->empty()) return;
-        box::result<std::string> Bytes = box::clipboard::take(Newest->front());
-        if (!Bytes) return;
-        Needle += FirstLine(*Bytes);
-        Find();
-        return;
-    }
-    switch (Key.Ascii) {
-    case tui::KeyCodes::Escape:
-        Now = Mode::Reading;
-        Needle.clear();
-        Search();
-        return;
-    case tui::KeyCodes::Enter:
-    case '\r':
-        Now = Mode::Reading;
-        if (!Needle.empty() && Matches.empty()) Note(std::format("nothing here says {}", Needle));
-        return;
-    case tui::KeyCodes::Backspace:
-    case 0x7F: {
-        std::size_t Cut = 0;
-        for (std::size_t Byte = 0; Byte < Needle.size(); Byte += GlyphAt(Needle, Byte).Length) Cut = Byte;
-        Needle.resize(Needle.empty() ? 0 : Cut);
-        Find();
-        return;
-    }
-    default:
-        if (Key.Ascii >= 0x20 && Key.Ascii < 0x7F) {
-            Needle += Key.Ascii;
-            Find();
-        }
-        return;
-    }
-}
-
-void Reader::OnListing(const tui::KeyEvent &Key)
-{
-    switch (Shown.OnKey(Key)) {
-    case List::Outcome::Stay: return;
-    case List::Outcome::Closed: Now = Mode::Reading; return;
-    case List::Outcome::Chosen:
-        Now = Mode::Reading;
-        if (Front == Window::Contents) {
-            Reading = Lines.RowOf(Shown.Picked().Target);
-            Anchor.reset();
-            Top = std::min(Reading > 0 ? Reading - 1 : 0, MostTop());
-        } else if (Front == Window::Bookmarks) {
-            GoToBlock(Here.BlockAt(Marked[Shown.Picked().Target]));
-        }
-        return;
-    case List::Outcome::Dropped:
-        Remembered.Unmark(Here.File, Marked[Shown.Picked().Target]);
-        Marked.erase(Marked.begin() + static_cast<std::ptrdiff_t>(Shown.Picked().Target));
-        OpenList(Window::Bookmarks);
-        Note("the bookmark is taken away");
-        if (Marked.empty()) Now = Mode::Reading;
-        return;
-    }
-}
-
-/* The contents, the bookmarks, or the keys, in a window in front. */
-void Reader::OpenList(Window Which)
-{
-    std::vector<Entry> Entries;
-    std::size_t        Chosen = 0;
-    const std::size_t  AtBlock  = Lines.Rows().empty() ? 0 : Lines.Rows()[Reading].Block;
-    const auto         PageNote = [&](std::size_t Block) { return std::format("p {}", PageOf(Lines.RowOf(Block))); };
-
-    if (Which == Window::Contents) {
-        for (const std::size_t Block : Here.Headings()) {
-            const read::Block &One = Here.Blocks[Block];
-            if (Block <= AtBlock) Chosen = Entries.size();
-            Entries.push_back({One.Text, PageNote(Block), 2 * std::max(0, One.Level - 1), Block});
-        }
-        if (Entries.empty()) {
-            Note("this book has no headings");
-            return;
-        }
-        Shown.Begin("Contents", "Enter go there  Esc close", std::move(Entries), Chosen, false, Bounds);
-    } else if (Which == Window::Bookmarks) {
-        for (std::size_t Index = 0; Index < Marked.size(); Index++) {
-            const std::size_t Block = Here.BlockAt(Marked[Index]);
-            if (Block <= AtBlock) Chosen = Index;
-            Entries.push_back({FirstLine(Here.Blocks.empty() ? std::string() : Here.Blocks[Block].Text), PageNote(Block),
-                               0, Index});
-        }
-        if (Entries.empty()) {
-            Note("no bookmarks yet: m puts one on the reading line");
-            return;
-        }
-        Shown.Begin("Bookmarks", "Enter go there  Del take away  Esc close", std::move(Entries), Chosen, true, Bounds);
-    } else {
-        const std::pair<const char *, const char *> Keys[] = {
-            {"the next page", "Space  PgDn  f"},
-            {"the page before", "Shift+Space  PgUp  b"},
-            {"the next line, the one before", "Down  Up  j  k"},
-            {"the start, the end", "Home  End  g  G"},
-            {"the next heading, the one before", "}  {"},
-            {"the next book, the one before", "]  ["},
-            {"the contents", "c"},
-            {"look for words, found as they are typed", "/"},
-            {"the next found, the one before", "n  N"},
-            {"a bookmark here, or none", "m"},
-            {"the bookmarks", "'"},
-            {"dark, sepia, light", "t"},
-            {"a wider column, a narrower one", "+  -"},
-            {"prose, or every line as it stands", "w"},
-            {"lines selected", "Shift+Down  Shift+Up"},
-            {"copy what is selected, or the paragraph", "Ctrl+C"},
-            {"leave read", "q  Esc"},
-        };
-        for (const auto &[Says, Pressed] : Keys) Entries.push_back({Says, Pressed, 0, 0});
-        Shown.Begin("Keys", "any key closes", std::move(Entries), 0, false, Bounds);
-    }
-    Front = Which;
-    Now  = Mode::Listing;
-}
-
-void Reader::ToggleMark()
-{
-    if (Lines.Rows().empty()) return;
-    const bool Put = Remembered.Toggle(Here.File, PlaceOfReading());
-    Marked         = Remembered.Marks(Here.File);
-    Note(Put ? "a bookmark is put here" : "the bookmark here is taken away");
 }
 
 /* The selection, or the paragraph at the reading line, as the newest clip:
@@ -479,17 +221,18 @@ void Reader::ToggleMark()
  * code block's lines kept. */
 void Reader::Copy()
 {
-    if (Lines.Rows().empty()) return;
-    const std::vector<Row> &Rows = Lines.Rows();
-    std::string             Text;
-    std::string             Said;
-    if (Anchor && *Anchor != Reading) {
-        const std::size_t From = std::min(*Anchor, Reading), To = std::max(*Anchor, Reading);
-        std::size_t       Was = Rows.size(), Count = 0;
+    const Tab              &Here = Active();
+    const std::vector<Row> &Rows = Here.Lines.Rows();
+    if (Rows.empty()) return;
+    std::string Text;
+    std::string Said;
+    if (Here.HasSelection()) {
+        const auto [From, To] = Here.Selection();
+        std::size_t Was = Rows.size(), Count = 0;
         for (std::size_t Row = From; Row <= To; Row++) {
-            if (!TextRow(Row)) continue;
-            const Block      &One   = Here.Blocks[Rows[Row].Block];
-            const bool        Lined = One.Is == Kind::Code || One.Is == Kind::Table || One.Is == Kind::Line;
+            if (!Here.TextRow(Row)) continue;
+            const Block &One   = Here.Body.Blocks[Rows[Row].Block];
+            const bool   Lined = One.Is == Kind::Code || One.Is == Kind::Table || One.Is == Kind::Line;
             if (Was != Rows.size()) Text += Rows[Row].Block == Was ? (Lined ? "\n" : " ") : (Lined ? "\n" : "\n\n");
             Text += std::string_view(One.Text).substr(Rows[Row].From, Rows[Row].To - Rows[Row].From);
             Was = Rows[Row].Block;
@@ -497,79 +240,151 @@ void Reader::Copy()
         }
         Said = std::format("copied {} line{}", Count, Count == 1 ? "" : "s");
     } else {
-        const Block &One = Here.Blocks[Rows[Reading].Block];
+        const Block &One = Here.Body.Blocks[Rows[Here.Reading].Block];
         Text             = One.Text;
-        Said             = One.Is == Kind::Line ? "copied the line" : One.Is == Kind::Code ? "copied the code" : "copied the paragraph";
+        Said = One.Is == Kind::Line ? "copied the line" : One.Is == Kind::Code ? "copied the code" : "copied the paragraph";
     }
     if (Text.empty()) {
         Note("there is nothing there to copy");
         return;
     }
-    box::result<std::uint64_t> Put = box::clipboard::put(Text);
-    if (!Put) Note(std::format("the clipboard would not keep it: {}", Put.error().message()), true);
-    else      Note(std::move(Said));
+    if (std::expected<std::uint64_t, std::string> Put = PutClip(Text); !Put) Note(Put.error(), true);
+    else                                                                       Note(std::move(Said));
 }
 
+/* A bookmark is on a paragraph: the one on the reading line's paragraph is
+ * taken away, wherever in it the reading line stands. */
+void Reader::ToggleMark()
+{
+    Tab &Here = Active();
+    if (Here.Lines.Rows().empty()) return;
+    const std::size_t Block = Here.BlockOfReading();
+    const auto        On    = std::find_if(Here.Marked.begin(), Here.Marked.end(),
+                                           [&](const Mark &One) { return Here.Body.BlockAt(One.Source) == Block; });
+    if (On != Here.Marked.end()) {
+        Remembered.Unmark(Here.Body.File, On->Source);
+        Note("the bookmark here is taken away");
+    } else {
+        Remembered.Put(Here.Body.File, Here.PlaceOfReading(), Here.Body.FileBytes());
+        Note("a bookmark is put here");
+    }
+    Here.Marked = Remembered.Marks(Here.Body.File);
+}
+
+/* Held to what the glass allows, and kept only while read runs: a column is
+ * the glass's as much as the person's. */
 void Reader::Widen(std::int32_t By)
 {
     const std::int32_t Was = Column();
     Width                  = Was + By;
-    Width                  = Column();   /* held to what the glass allows */
+    Width                  = Column();
     if (Width == Was) {
         Note(By > 0 ? "the column is as wide as the glass lets it be" : "the column is as narrow as it goes");
         return;
     }
-    Remembered.SetWidth(Width);
-    Relay();
+    Active().Lay(Width, PageRows());
     Note(std::format("the column is {} wide", Width));
 }
 
-/* ---- finding ------------------------------------------------------------ */
+/* ---- the windows -------------------------------------------------------- */
 
-/* Every place the needle is said, big and small letters one. */
-void Reader::Search()
+/* The contents or the bookmarks, the line the reading line is in or after
+ * chosen. A bookmark whose words are gone from the file says so. */
+void Reader::OpenList(Window Which)
 {
-    Matches.clear();
-    AtMatch = 0;
-    if (Needle.empty()) return;
-    const std::string Wanted = Folded(Needle);
-    for (std::size_t Block = 0; Block < Here.Blocks.size(); Block++) {
-        const std::string Low = Folded(Here.Blocks[Block].Text);
-        for (std::size_t At = Low.find(Wanted); At != std::string::npos; At = Low.find(Wanted, At + Wanted.size()))
-            Matches.push_back({Block, At, At + Wanted.size()});
-    }
-}
+    const Tab         &Here    = Active();
+    const std::size_t  AtBlock = Here.BlockOfReading();
+    std::vector<Entry> Entries;
+    std::size_t        Chosen   = 0;
+    const auto         PageNote = [&](std::size_t Block) {
+        return std::format("p {}", Here.PageOf(Here.Lines.RowOf(Block), PageRows()));
+    };
 
-/* Searched, and the reading line at the first place found from where it
- * stands. */
-void Reader::Find()
-{
-    Search();
-    if (Matches.empty() || Lines.Rows().empty()) return;
-
-    const Row &From = Lines.Rows()[Reading];
-    for (std::size_t Index = 0; Index < Matches.size(); Index++)
-        if (Matches[Index].Block > From.Block || (Matches[Index].Block == From.Block && Matches[Index].From >= From.From)) {
-            AtMatch = Index;
-            break;
+    if (Which == Window::Contents) {
+        for (const std::size_t Block : Here.Body.Headings()) {
+            const read::Block &One = Here.Body.Blocks[Block];
+            if (Block <= AtBlock) Chosen = Entries.size();
+            Entries.push_back({One.Text, PageNote(Block), 2 * std::max(0, One.Level - 1), Block});
         }
-    ShowMatch();
+        if (Entries.empty()) {
+            Note("this file has no headings");
+            return;
+        }
+        Shown.Begin("Contents", "Enter go there  Esc close", std::move(Entries), Chosen, false, Bounds);
+    } else {
+        for (std::size_t Index = 0; Index < Here.Marked.size(); Index++) {
+            const Mark       &One   = Here.Marked[Index];
+            const std::size_t Block = Here.Body.BlockAt(One.Source);
+            if (Block <= AtBlock) Chosen = Index;
+            const std::string Words = Here.Body.Blocks.empty() ? std::string() : FirstLine(Here.Body.Blocks[Block].Text);
+            Entries.push_back({Words, One.Lost ? PageNote(Block) + ", its words are gone" : PageNote(Block), 0, Index,
+                               One.Lost});
+        }
+        if (Entries.empty()) {
+            Note("no bookmarks yet: Ctrl+M puts one on the reading line");
+            return;
+        }
+        Shown.Begin("Bookmarks", "Enter go there  Delete take away  Esc close", std::move(Entries), Chosen, true,
+                    Bounds);
+    }
+    Front = Which;
+    Now   = Mode::Listing;
 }
 
-void Reader::NextMatch(bool Forward)
+void Reader::OnListing(const tui::KeyEvent &Key)
 {
-    if (Matches.empty()) {
-        Note(Needle.empty() ? "nothing is being looked for: / looks" : std::format("nothing here says {}", Needle));
+    Tab &Here = Active();
+    switch (Shown.OnKey(Key)) {
+    case List::Outcome::Stay: return;
+    case List::Outcome::Closed: Now = Mode::Reading; return;
+    case List::Outcome::Chosen:
+        Now = Mode::Reading;
+        if (Front == Window::Contents) Here.Land(Shown.Picked().Target, PageRows());
+        else                           Here.GoTo(Here.Body.BlockAt(Here.Marked[Shown.Picked().Target].Source), 0, PageRows());
+        return;
+    case List::Outcome::Dropped:
+        Remembered.Unmark(Here.Body.File, Here.Marked[Shown.Picked().Target].Source);
+        Here.Marked = Remembered.Marks(Here.Body.File);
+        Note("the bookmark is taken away");
+        if (Here.Marked.empty()) Now = Mode::Reading;
+        else                     OpenList(Window::Bookmarks);
         return;
     }
-    AtMatch = Forward ? (AtMatch + 1) % Matches.size() : (AtMatch + Matches.size() - 1) % Matches.size();
-    ShowMatch();
 }
 
-void Reader::ShowMatch()
+void Reader::OnPicking(const tui::KeyEvent &Key)
 {
-    const Match &One = Matches[AtMatch];
-    GoToBlock(One.Block, One.From);
+    switch (Chooser.OnKey(Key)) {
+    case Picker::Outcome::Stay: return;
+    case Picker::Outcome::Closed:
+        if (Tabs.empty()) Done = true;
+        else              Now = Mode::Reading;
+        return;
+    case Picker::Outcome::Chosen:
+        Now = Mode::Reading;
+        Open(Chooser.Chosen().File);
+        if (Tabs.empty()) OpenChooser();
+        return;
+    }
+}
+
+/* The tab says the name and tags the volume holds since the card last asked
+ * to change them, kept or refused. */
+void Reader::OnCarding(const tui::KeyEvent &Key)
+{
+    std::string         Said;
+    const Card::Outcome Answer = FileCard.OnKey(Key, Said);
+    Tab                &Here   = Active();
+    Here.Body.Name             = FileCard.Name();
+    Here.Tags                  = FileCard.Tags();
+    switch (Answer) {
+    case Card::Outcome::Stay: return;
+    case Card::Outcome::Closed: Now = Mode::Reading; return;
+    case Card::Outcome::Done:
+        Note(std::move(Said));
+        Now = Mode::Reading;
+        return;
+    }
 }
 
 }  // namespace read

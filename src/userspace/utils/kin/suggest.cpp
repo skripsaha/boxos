@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <format>
 
-namespace edit {
+namespace kin {
 
 void Suggest::Begin(Scope Looking)
 {
@@ -80,4 +80,4 @@ void Suggest::Paint(tui::Frame &Out, core::Rect Area) const
     }
 }
 
-}  // namespace edit
+}  // namespace kin

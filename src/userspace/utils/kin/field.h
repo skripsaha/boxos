@@ -1,5 +1,5 @@
-#ifndef EDIT_FIELD_H
-#define EDIT_FIELD_H
+#ifndef KIN_FIELD_H
+#define KIN_FIELD_H
 
 /* One line typed into a window: what to find, a line's number, a name, tags.
  * The same keys move in it everywhere — Ctrl+V among them, which puts the
@@ -16,7 +16,7 @@
 #include "painter/tui/frame.h"
 #include "painter/tui/stage.h"
 
-namespace edit {
+namespace kin {
 
 class Field {
 public:
@@ -45,6 +45,6 @@ private:
     bool        Offered = false;
 };
 
-}  // namespace edit
+}  // namespace kin
 
 #endif

@@ -3,10 +3,10 @@
 #include "field.h"
 
 #include "clipboard.h"
-#include "paint.h"
-#include "text.h"
+#include "glyph.h"
+#include "look.h"
 
-namespace edit {
+namespace kin {
 
 namespace {
 
@@ -129,4 +129,4 @@ void Field::Paint(tui::Frame &Out, core::Point At, std::int32_t Width, bool List
     }
 }
 
-}  // namespace edit
+}  // namespace kin

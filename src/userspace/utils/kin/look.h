@@ -1,13 +1,15 @@
-#ifndef EDIT_PAINT_H
-#define EDIT_PAINT_H
+#ifndef KIN_LOOK_H
+#define KIN_LOOK_H
 
-/* The look of edit: its colours and the few ways it draws — text cut to a
- * width, a name shortened with "...", a window with a frame and a shadow.
+/* The look edit and read share, so the two are seen to be one family: their
+ * colours and the few ways they draw — text cut to a width, a name shortened
+ * with "...", a window with a frame and a shadow.
  *
  * The colours are chosen for a framebuffer and checked against the sixteen of
- * a VGA text screen they are folded into there: the paper is black, the
- * caret's line dark grey, a selection dark blue, a match brown, the match at
- * the caret light yellow — still told apart where only sixteen exist.
+ * a VGA text screen they are folded into there: the paper is black, the line
+ * the caret or the reader is on dark grey, a selection dark blue, a match
+ * brown, the match being looked at light yellow — still told apart where only
+ * sixteen exist.
  */
 
 #include <cstddef>
@@ -19,13 +21,13 @@
 #include "painter/core/geometry.h"
 #include "painter/tui/frame.h"
 
-namespace edit {
+namespace kin {
 
 namespace core = painter::core;
 namespace tui  = painter::tui;
 
 inline constexpr core::Color Paper          = core::Color::Rgb(0x16, 0x16, 0x16);
-inline constexpr core::Color CaretLinePaper = core::Color::Rgb(0x2C, 0x2C, 0x2C);
+inline constexpr core::Color LinePaper      = core::Color::Rgb(0x2C, 0x2C, 0x2C);
 inline constexpr core::Color TextInk        = core::Color::Rgb(0xD4, 0xD4, 0xD4);
 inline constexpr core::Color NumberInk      = core::Color::Rgb(0x5C, 0x5C, 0x5C);
 inline constexpr core::Color CaretNumberInk = core::Color::Rgb(0xF0, 0xF0, 0xF0);
@@ -62,6 +64,7 @@ inline constexpr core::Color ChosenPaper    = core::Color::Rgb(0x2E, 0x4A, 0x6A)
 
 /* Box-drawing glyphs of the console font. */
 inline constexpr char RuleAcross = static_cast<char>(0xC4);
+inline constexpr char DoubleRule = static_cast<char>(0xCD);
 inline constexpr char RuleDown   = static_cast<char>(0xB3);
 inline constexpr char CornerTL   = static_cast<char>(0xDA);
 inline constexpr char CornerTR   = static_cast<char>(0xBF);
@@ -73,11 +76,9 @@ inline constexpr char MoreLeft   = static_cast<char>(0xAE);   /* « a line goes 
 inline constexpr char MoreRight  = static_cast<char>(0xAF);   /* » and to the right */
 
 /* A length the way a person reads one: "12 B", "3 KB", "1.4 MB". */
-std::string SizeText(std::uint64_t Bytes);
-/* The cells Text takes on the glass. */
-std::size_t CellsOf(std::string_view Text) noexcept;
+std::string  SizeText(std::uint64_t Bytes);
 /* Text in no more than Width cells: its end cut off for "..." when it is longer. */
-std::string Shortened(std::string_view Text, std::size_t Width);
+std::string  Shortened(std::string_view Text, std::size_t Width);
 /* Text from At, no further than Width cells; the cells it took. */
 std::int32_t PutText(tui::Frame &Out, core::Point At, std::string_view Text, std::int32_t Width, core::Color Ink,
                      core::Color Under);
@@ -89,8 +90,8 @@ core::Rect Centred(core::Size Screen, std::int32_t Width, std::int32_t Height) n
 core::Rect DrawWindow(tui::Frame &Out, core::Rect Area, std::string_view Title, std::string_view Note,
                       std::string_view Hint);
 /* A line across a window's inside, joined to its frame. */
-void DrawRule(tui::Frame &Out, core::Rect Area, std::int32_t Row);
+void       DrawRule(tui::Frame &Out, core::Rect Inside, std::int32_t Row);
 
-}  // namespace edit
+}  // namespace kin
 
 #endif

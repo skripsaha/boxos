@@ -1,9 +1,9 @@
-#ifndef EDIT_SUGGEST_H
-#define EDIT_SUGGEST_H
+#ifndef KIN_SUGGEST_H
+#define KIN_SUGGEST_H
 
 /* The tags a tags field can take, shown under it: the tags files wear, the
  * most worn first, from the volume's own list of them (box::tagfs::tags) —
- * of the Use Context or of the whole volume, as edit is looking. The word
+ * of the Use Context or of the whole volume, as the program is looking. The word
  * being typed narrows them to those that begin with it, the tags already
  * typed are left out, and Up, Down and Enter take one.
  */
@@ -15,10 +15,10 @@
 
 #include "painter/tui/stage.h"
 
-#include "paint.h"
+#include "look.h"
 #include "volume.h"
 
-namespace edit {
+namespace kin {
 
 class Suggest {
 public:
@@ -45,6 +45,6 @@ private:
     bool                               Showing = false;
 };
 
-}  // namespace edit
+}  // namespace kin
 
 #endif

@@ -19,7 +19,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <expected>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -62,6 +61,8 @@ public:
     std::vector<Block> Blocks;
     std::size_t        Words = 0;
 
+    /* The file's bytes, as the book was made from them. */
+    std::string_view FileBytes() const noexcept { return Bytes; }
     /* The same file read the other way. */
     Book Other() const { return Make(File, Name, Bytes, As == Reading::Prose ? Reading::Lines : Reading::Prose); }
     /* The block a place in the file falls in. */
@@ -78,10 +79,6 @@ private:
 /* How a file is read when nobody said: as prose when its name says text —
  * .md, .markdown, .txt, .text, or no ending at all — and as lines otherwise. */
 Reading ReadingFor(std::string_view Name) noexcept;
-
-/* A file of the volume as a book; a sentence when it will not open, or holds
- * bytes that are no text. */
-std::expected<Book, std::string> Open(file_id_t File);
 
 }  // namespace read
 

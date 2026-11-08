@@ -1,4 +1,4 @@
-/* What read remembers from one reading to the next. */
+/* The bookmarks read keeps from one reading to the next. */
 
 #include "marks.h"
 
@@ -6,8 +6,10 @@
 #include <charconv>
 #include <format>
 
-#include "box/cxx/error.h"
 #include "box/memory.h"
+
+#include "kin/glyph.h"
+#include "kin/volume.h"
 
 namespace read {
 
@@ -16,11 +18,9 @@ namespace {
 constexpr std::string_view FileName = "read.marks";
 /* The tag a file is found by its name with: the name before its last dot. */
 constexpr std::string_view NameTag  = "read";
-
-std::string Why(std::int64_t Answer)
-{
-    return std::string(box::error(box_errno_of(static_cast<int>(Answer))).message());
-}
+/* The words a bookmark keeps: enough to find its paragraph again among the
+ * others, few enough that read.marks stays a file a person can read. */
+constexpr std::size_t      WordsBytes = 40;
 
 /* read.marks, wherever on the volume it is; 0 when there is none. */
 file_id_t Find()
@@ -29,10 +29,8 @@ file_id_t Find()
     const int  Count = query_all_everywhere(std::string(NameTag).c_str(), &Ids);
     file_id_t  Found = 0;
     for (int Index = 0; Index < Count && Found == 0; Index++) {
-        FileMetadata Facts;
-        if (FileMetadataRead(Ids[Index], &Facts) != 0) continue;
-        if (Facts.Filename && FileName == Facts.Filename && !(Facts.Flags & FILE_FLAG_TRASHED)) Found = Ids[Index];
-        FileMetadataRelease(&Facts);
+        std::expected<kin::FileFacts, std::string> Facts = kin::ReadFacts(Ids[Index]);
+        if (Facts && Facts->Name == FileName && !Facts->Trashed) Found = Ids[Index];
     }
     free(Ids);
     return Found;
@@ -45,6 +43,31 @@ bool NumberOf(std::string_view Word, Number &Out)
     return Read.ec == std::errc{} && Read.ptr == Word.data() + Word.size();
 }
 
+/* The words at Source, to the end of their line: whole characters only. */
+std::string WordsAt(std::string_view Bytes, std::size_t Source)
+{
+    if (Source >= Bytes.size()) return {};
+    const std::string_view Line = Bytes.substr(Source, Bytes.find_first_of("\r\n", Source) - Source);
+    std::size_t            End  = 0;
+    while (End < Line.size()) {
+        const std::size_t Next = End + kin::GlyphAt(Line, End).Length;
+        if (Next > WordsBytes) break;
+        End = Next;
+    }
+    return std::string(Line.substr(0, End));
+}
+
+/* Where Words stand in Bytes nearest Near; nothing when they stand nowhere. */
+std::optional<std::size_t> Nearest(std::string_view Bytes, std::string_view Words, std::size_t Near)
+{
+    std::optional<std::size_t> Best;
+    for (std::size_t At = Bytes.find(Words); At != std::string_view::npos; At = Bytes.find(Words, At + 1)) {
+        const std::size_t Far = At > Near ? At - Near : Near - At;
+        if (!Best || Far < (*Best > Near ? *Best - Near : Near - *Best)) Best = At;
+    }
+    return Best;
+}
+
 }  // namespace
 
 std::optional<std::string> Memory::Load()
@@ -52,22 +75,12 @@ std::optional<std::string> Memory::Load()
     Kept = Find();
     if (Kept == 0) return std::nullopt;
 
-    FileMetadata Facts;
-    if (const int Answer = FileMetadataRead(Kept, &Facts); Answer != 0)
-        return std::format("{} would not say what it holds: {}", FileName, Why(Answer));
-    const std::uint64_t Size = Facts.Size;
-    FileMetadataRelease(&Facts);
-
-    std::string   Text(static_cast<std::size_t>(Size), '\0');
-    std::uint64_t Got = 0;
-    while (Got < Size) {
-        const std::int64_t Read = fread(Kept, Got, Text.data() + Got, static_cast<std::size_t>(Size - Got));
-        if (Read < 0) return std::format("{} would not be read: {}", FileName, Why(Read));
-        if (Read == 0) break;
-        Got += static_cast<std::uint64_t>(Read);
-    }
-    Text.resize(static_cast<std::size_t>(Got));
-    Read(Text);
+    std::expected<kin::FileFacts, std::string> Facts = kin::ReadFacts(Kept);
+    if (!Facts) return std::format("{}: {}", FileName, Facts.error());
+    std::expected<std::string, std::string> Text = kin::ReadBytes(Kept, Facts->Size);
+    if (!Text) return std::format("{}: {}", FileName, Text.error());
+    Read(*Text);
+    LetGoOfTheGone();
     return std::nullopt;
 }
 
@@ -77,26 +90,40 @@ void Memory::Read(std::string_view Text)
 {
     std::size_t At = 0;
     while (At < Text.size()) {
-        const std::size_t      End  = std::min(Text.find('\n', At), Text.size());
-        const std::string_view Line = Text.substr(At, End - At);
-        At                          = End + 1;
+        const std::size_t End = std::min(Text.find('\n', At), Text.size());
+        std::string_view  Line = Text.substr(At, End - At);
+        At                     = End + 1;
 
-        std::vector<std::string_view> Words;
-        for (std::size_t From = 0; From < Line.size();) {
-            const std::size_t Blank = std::min(Line.find(' ', From), Line.size());
-            if (Blank > From) Words.push_back(Line.substr(From, Blank - From));
-            From = Blank + 1;
+        std::string_view Fields[3];
+        bool             Whole = true;
+        for (std::string_view &Field : Fields) {
+            const std::size_t Blank = std::min(Line.find(' '), Line.size());
+            Field                   = Line.substr(0, Blank);
+            Line.remove_prefix(std::min(Blank + 1, Line.size()));
+            Whole = Whole && !Field.empty();
         }
-        if (Words.size() == 2 && Words[0] == "theme") {
-            Theme = std::string(Words[1]);
-        } else if (Words.size() == 2 && Words[0] == "width") {
-            (void)NumberOf(Words[1], Cols);
-        } else if (Words.size() == 3 && (Words[0] == "place" || Words[0] == "mark")) {
-            Fact One;
-            if (!NumberOf(Words[1], One.File) || !NumberOf(Words[2], One.Source)) continue;
-            (Words[0] == "place" ? Places : Marked).push_back(One);
-        }
+        if (!Whole || (Fields[0] != "place" && Fields[0] != "mark")) continue;
+
+        Fact One;
+        One.Left = Fields[0] == "place";
+        if (!NumberOf(Fields[1], One.File) || !NumberOf(Fields[2], One.Source)) continue;
+        One.Words = std::string(Line);
+        Facts.push_back(std::move(One));
     }
+}
+
+/* The volume is asked once a file, whatever the number of its bookmarks. */
+void Memory::LetGoOfTheGone()
+{
+    std::vector<file_id_t> Asked, Gone;
+    for (const Fact &One : Facts) {
+        if (std::find(Asked.begin(), Asked.end(), One.File) != Asked.end()) continue;
+        Asked.push_back(One.File);
+        if (kin::FileGone(One.File)) Gone.push_back(One.File);
+    }
+    if (Gone.empty()) return;
+    std::erase_if(Facts, [&](const Fact &One) { return std::find(Gone.begin(), Gone.end(), One.File) != Gone.end(); });
+    Changed = true;
 }
 
 std::optional<std::string> Memory::Save()
@@ -104,91 +131,94 @@ std::optional<std::string> Memory::Save()
     if (!Changed) return std::nullopt;
 
     std::string Text;
-    if (!Theme.empty()) Text += std::format("theme {}\n", Theme);
-    if (Cols != 0) Text += std::format("width {}\n", Cols);
-    for (const Fact &One : Places) Text += std::format("place {} {}\n", One.File, One.Source);
-    for (const Fact &One : Marked) Text += std::format("mark {} {}\n", One.File, One.Source);
+    for (const Fact &One : Facts)
+        Text += std::format("{} {} {} {}\n", One.Left ? "place" : "mark", One.File, One.Source, One.Words);
 
     if (Kept == 0) {
-        const std::int64_t Made = create_everywhere(std::string(FileName).c_str(), "");
-        if (Made <= 0) return std::format("{} could not be made: {}", FileName, Why(Made));
-        Kept = static_cast<file_id_t>(Made);
+        std::expected<file_id_t, std::string> Made = kin::MakeFile(FileName, kin::Scope::Everywhere);
+        if (!Made) return Made.error();
+        Kept = *Made;
     }
-    std::uint64_t Done = 0;
-    while (Done < Text.size()) {
-        const std::int64_t Wrote = fwrite(Kept, Done, Text.data() + Done, Text.size() - Done);
-        if (Wrote <= 0)
-            return std::format("{} stopped taking bytes after {}{}", FileName, Done,
-                               Wrote < 0 ? ": " + Why(Wrote) : std::string());
-        Done += static_cast<std::uint64_t>(Wrote);
-    }
-    if (const int Cut = file_span(Kept, Text.size(), 0); Cut != 0)
-        return std::format("{} was written, but its old end could not be cut: {}", FileName, Why(Cut));
-    if (const int Settled = anchor(Kept); Settled != 0)
-        return std::format("{} was written, but is not yet safe on the medium: {}", FileName, Why(Settled));
+    if (std::optional<std::string> Refused = kin::WriteBytes(Kept, Text))
+        return std::format("{}: {}", FileName, *Refused);
     Changed = false;
     return std::nullopt;
 }
 
-std::optional<std::size_t> Memory::Place(file_id_t File) const
+/* A bookmark kept before it kept its words learns them from where it stands. */
+void Memory::Settle(file_id_t File, std::string_view Bytes)
 {
-    for (const Fact &One : Places)
-        if (One.File == File) return One.Source;
+    for (Fact &One : Facts) {
+        if (One.File != File) continue;
+        One.Lost = false;
+        if (One.Words.empty()) {
+            One.Words = WordsAt(Bytes, One.Source);
+            One.Lost  = One.Source > Bytes.size();
+            Changed   = Changed || !One.Words.empty();
+            continue;
+        }
+        if (Bytes.substr(std::min(One.Source, Bytes.size())).starts_with(One.Words)) continue;
+        if (const std::optional<std::size_t> Moved = Nearest(Bytes, One.Words, One.Source)) {
+            One.Source = *Moved;
+            Changed    = true;
+        } else {
+            One.Lost = true;
+        }
+    }
+    /* Two bookmarks whose words went to one place are one bookmark. */
+    for (auto Each = Facts.begin(); Each != Facts.end(); ++Each)
+        Facts.erase(std::remove_if(std::next(Each), Facts.end(),
+                                   [&](const Fact &Other) {
+                                       return Other.File == Each->File && Other.Left == Each->Left &&
+                                              Other.Source == Each->Source;
+                                   }),
+                    Facts.end());
+}
+
+std::optional<Mark> Memory::Place(file_id_t File) const
+{
+    for (const Fact &One : Facts)
+        if (One.Left && One.File == File) return Mark{One.Source, One.Lost};
     return std::nullopt;
 }
 
-void Memory::SetPlace(file_id_t File, std::size_t Source)
+void Memory::SetPlace(file_id_t File, std::size_t Source, std::string_view Bytes)
 {
-    for (Fact &One : Places)
-        if (One.File == File) {
-            if (One.Source != Source) Changed = true;
-            One.Source = Source;
-            return;
-        }
-    Places.push_back({File, Source});
+    for (Fact &One : Facts) {
+        if (!One.Left || One.File != File) continue;
+        if (One.Source == Source && !One.Lost) return;
+        One.Source = Source;
+        One.Words  = WordsAt(Bytes, Source);
+        One.Lost   = false;
+        Changed    = true;
+        return;
+    }
+    Facts.push_back({true, File, Source, WordsAt(Bytes, Source), false});
     Changed = true;
 }
 
-std::vector<std::size_t> Memory::Marks(file_id_t File) const
+std::vector<Mark> Memory::Marks(file_id_t File) const
 {
-    std::vector<std::size_t> Found;
-    for (const Fact &One : Marked)
-        if (One.File == File) Found.push_back(One.Source);
-    std::sort(Found.begin(), Found.end());
+    std::vector<Mark> Found;
+    for (const Fact &One : Facts)
+        if (!One.Left && One.File == File) Found.push_back({One.Source, One.Lost});
+    std::sort(Found.begin(), Found.end(), [](const Mark &A, const Mark &B) { return A.Source < B.Source; });
     return Found;
 }
 
-bool Memory::Toggle(file_id_t File, std::size_t Source)
+void Memory::Put(file_id_t File, std::size_t Source, std::string_view Bytes)
 {
-    const Fact One{File, Source};
+    for (const Fact &One : Facts)
+        if (!One.Left && One.File == File && One.Source == Source) return;
+    Facts.push_back({false, File, Source, WordsAt(Bytes, Source), false});
     Changed = true;
-    if (const auto At = std::find(Marked.begin(), Marked.end(), One); At != Marked.end()) {
-        Marked.erase(At);
-        return false;
-    }
-    Marked.push_back(One);
-    return true;
 }
 
 void Memory::Unmark(file_id_t File, std::size_t Source)
 {
-    const auto Before = Marked.size();
-    std::erase(Marked, Fact{File, Source});
-    if (Marked.size() != Before) Changed = true;
-}
-
-void Memory::SetTheme(std::string_view Name)
-{
-    if (Theme == Name) return;
-    Theme   = std::string(Name);
-    Changed = true;
-}
-
-void Memory::SetWidth(std::int32_t Width)
-{
-    if (Cols == Width) return;
-    Cols    = Width;
-    Changed = true;
+    const std::size_t Before = Facts.size();
+    std::erase_if(Facts, [&](const Fact &One) { return !One.Left && One.File == File && One.Source == Source; });
+    if (Facts.size() != Before) Changed = true;
 }
 
 }  // namespace read

@@ -6,7 +6,7 @@
 #include <charconv>
 #include <format>
 
-#include "volume.h"
+#include "kin/volume.h"
 
 namespace edit {
 
@@ -108,7 +108,7 @@ void Editor::OpenChooser()
 {
     std::vector<file_id_t> Open;
     for (const std::unique_ptr<Tab> &One : Tabs) Open.push_back(One->File);
-    Chooser.Begin(Bounds, std::move(Open), Looking);
+    Chooser.Begin(Bounds, std::move(Open), Looking, true);
     Now = Mode::Picking;
 }
 
@@ -313,7 +313,7 @@ void Editor::DoBeyondText(const Heard &Asked)
     case Command::CloseTab: AskToLeave(false); break;
     case Command::Leave:    AskToLeave(true); break;
     case Command::Card:
-        FileCard.Begin(Active(), Looking, Bounds);
+        FileCard.Begin(Active().File, Active().Name, Active().Tags, Looking, Bounds);
         Now = Mode::Carding;
         break;
     case Command::Clips:
@@ -339,8 +339,8 @@ void Editor::DoBeyondText(const Heard &Asked)
         Now = Mode::Finding;
         break;
     case Command::Help:
-        HelpFirst = 0;
-        Now       = Mode::Helping;
+        Keys.Begin(HelpLines(), "edit");
+        Now = Mode::Helping;
         break;
     default: break;
     }
@@ -402,20 +402,26 @@ void Editor::OnGoingTo(const tui::KeyEvent &Key)
 
 void Editor::OnHelping(const tui::KeyEvent &Key)
 {
-    if (Key.IsExtended() && Key.Scancode == tui::KeyCodes::Down) HelpFirst++;
-    else if (Key.IsExtended() && Key.Scancode == tui::KeyCodes::Up) HelpFirst = HelpFirst > 0 ? HelpFirst - 1 : 0;
-    else Now = Mode::Writing;
+    if (Keys.OnKey(Key) == Help::Outcome::Closed) Now = Mode::Writing;
 }
 
+/* The tab says the name and tags the volume holds since the card last asked
+ * to change them, kept or refused. */
 void Editor::OnCarding(const tui::KeyEvent &Key)
 {
-    std::string Said;
-    switch (FileCard.OnKey(Key, Active(), Said)) {
+    std::string         Said;
+    const Card::Outcome Answer = FileCard.OnKey(Key, Said);
+    Tab                &Here   = Active();
+    Here.Name                  = FileCard.Name();
+    Here.Tags                  = FileCard.Tags();
+    switch (Answer) {
     case Card::Outcome::Stay: return;
     case Card::Outcome::Closed:
         Now = Mode::Writing;
         return;
     case Card::Outcome::Done:
+        /* A file named and tagged on purpose is one to keep, written or not. */
+        Here.Born = false;
         Note(std::move(Said));
         Now = Mode::Writing;
         return;

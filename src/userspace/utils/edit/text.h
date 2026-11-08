@@ -22,9 +22,11 @@
 #include <string_view>
 #include <vector>
 
+#include "kin/glyph.h"
+
 namespace edit {
 
-inline constexpr std::size_t TabStop = 4;
+using namespace kin;
 
 struct Position {
     std::size_t Line = 0;
@@ -35,17 +37,6 @@ struct Position {
 
 /* Where Bytes end when they are laid down at At. */
 Position After(Position At, std::string_view Bytes) noexcept;
-
-/* One character as the glass shows it. */
-struct Glyph {
-    std::size_t Length = 1;            /* its bytes */
-    std::size_t Width  = 1;            /* its cells */
-    char        Cells[2] = {' ', ' '};
-    bool        Odd = false;           /* a control, or a byte that is no UTF-8: drawn as a box */
-};
-
-/* The character at Byte of Line, when it stands at Column. */
-Glyph GlyphAt(std::string_view Line, std::size_t Byte, std::size_t Column) noexcept;
 
 /* What a character is to a jump by words. */
 enum class Kind { Blank, Word, Mark };

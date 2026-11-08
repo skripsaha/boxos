@@ -1,9 +1,9 @@
 #ifndef READ_LISTS_H
 #define READ_LISTS_H
 
-/* A window that is a list: the contents (c), the bookmarks ('), the keys (?).
- * Up and Down choose, Enter goes where the chosen line leads, Delete takes a
- * bookmark away, Esc shuts it. */
+/* A window that is a list: the contents (Ctrl+L) and the bookmarks
+ * (Ctrl+Shift+M). Up and Down choose, Enter goes where the chosen line leads,
+ * Delete takes a bookmark away, Esc shuts it. */
 
 #include <cstddef>
 #include <cstdint>
@@ -12,15 +12,18 @@
 
 #include "painter/tui/stage.h"
 
-#include "draw.h"
+#include "kin/look.h"
 
 namespace read {
 
+using namespace kin;
+
 struct Entry {
     std::string  Text;
-    std::string  Note;           /* on the right: a page, a key */
+    std::string  Note;           /* on the right: its page */
     std::int32_t Indent = 0;
-    std::size_t  Target = 0;     /* what choosing it leads to: a block */
+    std::size_t  Target = 0;     /* what choosing it leads to */
+    bool         Odd    = false; /* its note in trouble's ink: a bookmark whose words are gone */
 };
 
 class List {
@@ -32,7 +35,7 @@ public:
     Outcome      OnKey(const tui::KeyEvent &Key);
     const Entry &Picked() const noexcept { return Lines[Row]; }
     bool         Empty() const noexcept { return Lines.empty(); }
-    void         Paint(tui::Frame &Out, const Theme &Look) const;
+    void         Paint(tui::Frame &Out) const;
 
 private:
     core::Rect  Area() const noexcept;

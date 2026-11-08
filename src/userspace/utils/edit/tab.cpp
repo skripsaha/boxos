@@ -1,8 +1,12 @@
-/* One open file: moving the caret, writing through Replace, and the view. */
+/* One open file: moving the caret, writing through Replace, the view, and
+ * saving. */
 
 #include "tab.h"
 
 #include <algorithm>
+#include <format>
+
+#include "kin/volume.h"
 
 namespace edit {
 
@@ -312,6 +316,19 @@ void Tab::Follow(std::size_t Rows, std::size_t Cols) noexcept
 void Tab::Centre(std::size_t Rows) noexcept
 {
     Top = Caret.Line > Rows / 2 ? Caret.Line - Rows / 2 : 0;
+}
+
+bool SaveTab(Tab &For, std::string &Said)
+{
+    const std::string Bytes = For.Body.ToBytes();
+    if (std::optional<std::string> Refused = WriteBytes(For.File, Bytes)) {
+        Said = std::format("{} was not saved: {}", For.Name, *Refused);
+        return false;
+    }
+    For.MarkSaved();
+    Said = std::format("saved {}: {} line{}, {} byte{}", For.Name, For.Body.LineCount(),
+                       For.Body.LineCount() == 1 ? "" : "s", Bytes.size(), Bytes.size() == 1 ? "" : "s");
+    return true;
 }
 
 }  // namespace edit
