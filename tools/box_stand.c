@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "box_pen.h"
+#include "box_needs.h"
 #include "box_host.h"
 
 static int g_passed;
@@ -703,6 +704,64 @@ static void TestNames(void)
     Check(all, "names are spelled as tags, each side at most 255 bytes");
 }
 
+static uint64_t CountFacts(const char *text, BoxKind kind, BoxVerdict *verdict)
+{
+    BoxText        reading;
+    const uint8_t *line;
+    uint64_t       length, facts = 0;
+    uint8_t       *exact = Exact((const uint8_t *)text, strlen(text));
+    *verdict = BoxTextBegin(exact, strlen(text), kind, &reading);
+    while (*verdict == BOX_OK && BoxTextLine(&reading, &line, &length)) facts++;
+    free(exact);
+    return facts;
+}
+
+static void TestTextParts(void)
+{
+    BoxVerdict verdict;
+    Check(CountFacts("needs 1\ncpu avx2\ncpu bmi2\n", BOX_KIND_NEEDS, &verdict) == 2 && verdict == BOX_OK,
+          "needs: two facts after its first line");
+    Check(CountFacts("\n  \nneeds 1\n\n   cpu avx2   \n\ncpu bmi2", BOX_KIND_NEEDS, &verdict) == 2 && verdict == BOX_OK,
+          "blank lines and blanks around words are nothing; the last newline may be left off");
+    Check(CountFacts("needs 1", BOX_KIND_NEEDS, &verdict) == 0 && verdict == BOX_OK, "a part of its first line alone");
+    CountFacts("hints 1\n", BOX_KIND_NEEDS, &verdict);
+    Check(verdict == BOX_TEXT_LAYOUT, "a first line of another kind");
+    CountFacts("needs 2\n", BOX_KIND_NEEDS, &verdict);
+    Check(verdict == BOX_TEXT_LAYOUT, "a first line of another version");
+    CountFacts("needs 1 more\n", BOX_KIND_NEEDS, &verdict);
+    Check(verdict == BOX_TEXT_LAYOUT, "a first line of three words");
+    CountFacts("", BOX_KIND_NEEDS, &verdict);
+    Check(verdict == BOX_TEXT_LAYOUT, "no first line");
+    CountFacts("needs 1\ncpu\tavx2\n", BOX_KIND_NEEDS, &verdict);
+    Check(verdict == BOX_TEXT_LAYOUT, "a tab in a text part");
+    CountFacts("needs 1\r\ncpu avx2\r\n", BOX_KIND_NEEDS, &verdict);
+    Check(verdict == BOX_TEXT_LAYOUT, "a carriage return in a text part");
+
+    const uint8_t *line = (const uint8_t *)"  cpu   sse4.1 ", *word;
+    uint64_t       at = 0, length;
+    Check(BoxTextWord(line, 15, &at, &word, &length) && length == 3 && memcmp(word, "cpu", 3) == 0 &&
+              BoxTextWord(line, 15, &at, &word, &length) && length == 6 && memcmp(word, "sse4.1", 6) == 0 &&
+              !BoxTextWord(line, 15, &at, &word, &length),
+          "a line's words between blanks");
+
+    bool words = true;
+    for (unsigned a = 0; a < BOX_NEEDS_CPU_COUNT; a++) {
+        const BoxNeedsCpu *need = &BoxNeedsCpuWords[a];
+        words = words && BoxNeedsCpuFind((const uint8_t *)need->Word, strlen(need->Word)) == need &&
+                need->Bit < 32 && need->Register <= BOX_NEEDS_EDX;
+        for (unsigned b = 0; b < a; b++)
+            words = words && strcmp(need->Word, BoxNeedsCpuWords[b].Word) != 0 &&
+                    !(need->Leaf == BoxNeedsCpuWords[b].Leaf && need->Subleaf == BoxNeedsCpuWords[b].Subleaf &&
+                      need->Register == BoxNeedsCpuWords[b].Register && need->Bit == BoxNeedsCpuWords[b].Bit);
+    }
+    Check(words, "every cpu word of needs is found as itself, once, and names a bit of its own");
+    Check(BoxNeedsCpuFind((const uint8_t *)"avx", 3)->State == BOX_NEEDS_STATE_AVX &&
+              BoxNeedsCpuFind((const uint8_t *)"avx512bw", 8)->State == BOX_NEEDS_STATE_AVX512 &&
+              BoxNeedsCpuFind((const uint8_t *)"popcnt", 6)->State == 0 &&
+              !BoxNeedsCpuFind((const uint8_t *)"avx2x", 5) && !BoxNeedsCpuFind((const uint8_t *)"avx", 2),
+          "the words that need saved state say which; a word not in the list is not found");
+}
+
 static void TestTexts(void)
 {
     const char *fallback = BoxVerdictText(BOX_VERDICT_COUNT);
@@ -750,6 +809,7 @@ int main(void)
     TestDoors();
     TestThread();
     TestFixups();
+    TestTextParts();
     TestWritten();
     TestTexts();
 

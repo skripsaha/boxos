@@ -72,6 +72,7 @@ typedef enum {
     BOX_FIXUPS_LAYOUT,
     BOX_FIXUP_ORDER,
     BOX_FIXUP_OUTSIDE,
+    BOX_TEXT_LAYOUT,
     BOX_VERDICT_COUNT
 } BoxVerdict;
 
@@ -742,6 +743,83 @@ static inline BoxVerdict BoxFixupsCheck(const uint8_t *bytes, uint64_t size, con
     return BOX_OK;
 }
 
+/* ── parts written as text ───────────────────────────────────────────────── *
+ *
+ * needs, hints, life, form and the rest are written for people and programs
+ * alike: lines ended by '\n' (the last one's may be left off), a line's words
+ * between blanks, no byte below a blank but the newline and no DEL. The first
+ * line with words says the kind and its version, "needs 1"; after it, a line
+ * is a fact. A reader passes over a line it does not know and reads one it
+ * knows strictly.
+ */
+
+typedef struct {
+    const uint8_t *Bytes;
+    uint64_t       Size;
+    uint64_t       At;      /* where the next line starts */
+} BoxText;
+
+/* The next line that has words, from text->At on. */
+static inline bool BoxTextLine(BoxText *text, const uint8_t **line, uint64_t *length)
+{
+    while (text->At < text->Size) {
+        uint64_t start = text->At, end = start;
+        while (end < text->Size && text->Bytes[end] != '\n') end++;
+        text->At = end < text->Size ? end + 1 : end;
+        for (uint64_t i = start; i < end; i++) {
+            if (text->Bytes[i] != ' ') {
+                *line   = text->Bytes + start;
+                *length = end - start;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* The next word of a line, from *at on. */
+static inline bool BoxTextWord(const uint8_t *line, uint64_t length, uint64_t *at, const uint8_t **word,
+                               uint64_t *word_length)
+{
+    while (*at < length && line[*at] == ' ') (*at)++;
+    if (*at == length) return false;
+    uint64_t start = *at;
+    while (*at < length && line[*at] != ' ') (*at)++;
+    *word        = line + start;
+    *word_length = *at - start;
+    return true;
+}
+
+/* How many words a line has. */
+static inline uint64_t BoxTextWordCount(const uint8_t *line, uint64_t length)
+{
+    const uint8_t *word;
+    uint64_t       at = 0, word_length, count = 0;
+    while (BoxTextWord(line, length, &at, &word, &word_length)) count++;
+    return count;
+}
+
+/* The `size` bytes at `bytes`, a part of kind `kind` written as text, opened
+ * past its first line, which must be "<kind> 1". */
+static inline BoxVerdict BoxTextBegin(const uint8_t *bytes, uint64_t size, BoxKind kind, BoxText *out)
+{
+    for (uint64_t i = 0; i < size; i++)
+        if ((bytes[i] < 0x20u && bytes[i] != '\n') || bytes[i] == 0x7Fu) return BOX_TEXT_LAYOUT;
+
+    out->Bytes = bytes;
+    out->Size  = size;
+    out->At    = 0;
+
+    const uint8_t *line, *word;
+    uint64_t       length, at = 0, word_length;
+    if (!BoxTextLine(out, &line, &length) || BoxTextWordCount(line, length) != 2) return BOX_TEXT_LAYOUT;
+    BoxTextWord(line, length, &at, &word, &word_length);
+    if (!BoxSpanIs(word, word_length, BoxKindWord(kind))) return BOX_TEXT_LAYOUT;
+    BoxTextWord(line, length, &at, &word, &word_length);
+    if (!BoxSpanIs(word, word_length, "1")) return BOX_TEXT_LAYOUT;
+    return BOX_OK;
+}
+
 /* ── words for a refusal ─────────────────────────────────────────────────── */
 
 /* The reason a verdict refuses, said so it follows "is not started: "; a
@@ -786,6 +864,7 @@ static inline const char *BoxVerdictText(BoxVerdict verdict)
     case BOX_FIXUPS_LAYOUT:         return "its fixups are not laid out as fixups are";
     case BOX_FIXUP_ORDER:           return "its fixups do not rise";
     case BOX_FIXUP_OUTSIDE:         return "a fixup lies outside the bytes of its image";
+    case BOX_TEXT_LAYOUT:           return "a part written as text is not written as such a part is";
     case BOX_VERDICT_COUNT:         break;
     }
     return "it was refused for a reason this system has no words for";

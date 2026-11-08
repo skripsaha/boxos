@@ -24,11 +24,11 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/box_stand.XXXXXX") || exit 2
 trap 'rm -rf "$WORK"' EXIT
 
 CROSS="-std=gnu11 -ffreestanding -nostdlib -fno-builtin -mno-red-zone -O2 -Wall -Wextra -Werror"
-printf '#include "ktypes.h"\n#include "box_pen.h"\n' > "$WORK/kernel.c"
+printf '#include "ktypes.h"\n#include "box_pen.h"\n#include "box_needs.h"\n' > "$WORK/kernel.c"
 $CC_CROSS $CROSS -Isrc/lib/kernel -Isrc/include -c "$WORK/kernel.c" -o "$WORK/kernel.o" \
     > "$WORK/cc.log" 2>&1 ||
     { cat "$WORK/cc.log"; echo "box: harness failed — the headers do not build as the kernel builds them"; exit 2; }
-printf '#include "box/defs.h"\n#include "box_pen.h"\n' > "$WORK/boxlib.c"
+printf '#include "box/defs.h"\n#include "box_pen.h"\n#include "box_needs.h"\n' > "$WORK/boxlib.c"
 $CC_CROSS $CROSS -I$LIB/include -Isrc/include -c "$WORK/boxlib.c" -o "$WORK/boxlib.o" \
     > "$WORK/cc.log" 2>&1 ||
     { cat "$WORK/cc.log"; echo "box: harness failed — the headers do not build as BoxLib builds them"; exit 2; }
