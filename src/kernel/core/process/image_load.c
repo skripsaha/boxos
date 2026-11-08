@@ -1,13 +1,53 @@
 #include "image_load.h"
+#include "box_load.h"
 #include "elf_image.h"
+#include "box_format.h"
 #include "cabin_layout.h"
+#include "nameplate.h"
+#include "tagfs.h"
 #include "pmm.h"
 #include "klib.h"
 
-static bool ImageIsElf(const uint8_t *image, uint64_t bytes)
+/*
+ * ‼ THE WHOLE OF WHAT IS ASKED, OR NONE OF IT
+ *
+ * The count is checked beside the answer. A read that stops early leaves the
+ * rest of its buffer as it was — zeros, in pages allocated zeroed — and a page
+ * of zeros is not an empty program: 0x00 0x00 decodes as `add [rax], al`, so
+ * code that was never read starts, writes to address zero with every register
+ * still clear and dies with a page fault at 0x0 — which is what a machine
+ * whose flash drive stopped answering showed on the screen, having first
+ * announced that it had started the program.
+ */
+error_t ImageSourceRead(const ImageSource *source, uint64_t offset, void *into, uint64_t count,
+                        const char *name)
 {
-    return bytes >= 4 && image[0] == 0x7F && image[1] == 'E' && image[2] == 'L' && image[3] == 'F';
+    if (offset > source->Bytes || count > source->Bytes - offset) {
+        kprintf("[IMAGE] '%s' is not started: %llu bytes at %llu lie past its %llu\n", name,
+                (unsigned long long)count, (unsigned long long)offset,
+                (unsigned long long)source->Bytes);
+        return ERR_INVALID_ELF;
+    }
+    if (count == 0)
+        return OK;
+    if (source->Memory) {
+        memcpy(into, source->Memory + offset, count);
+        return OK;
+    }
+
+    uint64_t got = 0;
+    source->File->offset = offset;
+    error_t rd = tagfs_read(source->File, into, count, &got);
+    if (rd != OK || got != count) {
+        kprintf("[IMAGE] '%s' is not started: %llu of its %llu bytes at %llu came back (error %u) — "
+                "an image that is not all here is not started\n", name, (unsigned long long)got,
+                (unsigned long long)count, (unsigned long long)offset, (unsigned)rd);
+        return rd != OK ? rd : ERR_READ_FAILED;
+    }
+    return OK;
 }
+
+/* ── ELF ─────────────────────────────────────────────────────────────────── */
 
 /* One segment of an accepted ELF on pages of its own, its bytes copied in and
  * the rest left zero, mapped with exactly its rights. */
@@ -49,12 +89,12 @@ static error_t ImagePlaceSegment(vmm_context_t *vmm, const ElfImage *elf,
     return OK;
 }
 
-static error_t ImageLoadElf(vmm_context_t *vmm, const void *image, uint64_t bytes,
-                            const char *name, uintptr_t *entry)
+/* The ELF in `file`, read whole, put into `vmm`. */
+static error_t ImageLoadElfFrom(vmm_context_t *vmm, const uint8_t *file, uint64_t bytes,
+                                const char *name, ImageLoaded *loaded)
 {
     ElfImage        elf;
-    ElfImageVerdict verdict = ElfImageRead(image, bytes, CABIN_CODE_START_ADDR,
-                                           CABIN_CODE_END_ADDR, &elf);
+    ElfImageVerdict verdict = ElfImageRead(file, bytes, CABIN_CODE_START_ADDR, CABIN_CODE_END_ADDR, &elf);
     if (verdict != ELF_IMAGE_OK) {
         if (elf.Header != ELF_IMAGE_NO_HEADER)
             kprintf("[IMAGE] '%s' is not started: %s (program header %u)\n",
@@ -72,46 +112,74 @@ static error_t ImageLoadElf(vmm_context_t *vmm, const void *image, uint64_t byte
             return placed;
     }
 
-    *entry = (uintptr_t)elf.Entry;
+    loaded->Entry = (uintptr_t)elf.Entry;
+    (void)nameplate_locate(file, bytes, CABIN_CODE_START_ADDR, &loaded->NameplateVa,
+                           &loaded->NameplateBytes);
     return OK;
 }
 
-static error_t ImageLoadRaw(vmm_context_t *vmm, const uint8_t *code, uint64_t bytes,
-                            const char *name, uintptr_t *entry)
+/* An ELF is read whole: its headers say where everything is, and every byte
+ * of it is checked before a page is given to it. A file is staged in pages of
+ * its own for the length of the load; bytes already held are read in place. */
+static error_t ImageLoadElf(vmm_context_t *vmm, const ImageSource *source, const char *name,
+                            ImageLoaded *loaded)
 {
+    if (source->Memory)
+        return ImageLoadElfFrom(vmm, source->Memory, source->Bytes, name, loaded);
+
+    size_t pages = (size_t)((source->Bytes + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE);
+    void  *stage = pmm_alloc(pages);
+    if (!stage) {
+        kprintf("[IMAGE] '%s' is not started: no %zu pages to read it into\n", name, pages);
+        return ERR_NO_MEMORY;
+    }
+    uint8_t *file = (uint8_t *)vmm_phys_to_virt((uintptr_t)stage);
+    error_t  rc   = ImageSourceRead(source, 0, file, source->Bytes, name);
+    if (rc == OK)
+        rc = ImageLoadElfFrom(vmm, file, source->Bytes, name, loaded);
+    pmm_free(stage, pages);
+    return rc;
+}
+
+/* ── raw ─────────────────────────────────────────────────────────────────── */
+
+static error_t ImageLoadRaw(vmm_context_t *vmm, const ImageSource *source, const char *name,
+                            ImageLoaded *loaded)
+{
+    uint64_t bytes = source->Bytes;
     if (bytes > CABIN_CODE_END_ADDR - CABIN_CODE_START_ADDR) {
         kprintf("[IMAGE] '%s' is not started: %llu bytes of raw code do not fit the room a "
                 "program's image has\n", name, (unsigned long long)bytes);
         return ERR_BINARY_TOO_LARGE;
     }
 
-    /*
-     * ‼ RAW CODE THAT BEGINS WITH ZEROS IS A READ THAT DID NOT HAPPEN.
-     *
-     * Every caller reads the whole file and checks the count, and this is the
-     * check that does not depend on any of them being right: 0x00 0x00 is
-     * `add [rax], al`, so raw code of zeros does not fail to start — it runs,
-     * writes to address zero with every register clear and dies with a page
-     * fault at 0x0 that names the program, not the medium that would not read.
-     * Sixteen zero bytes at the front is no instruction anybody wrote.
-     */
-    uint64_t look = bytes < 16 ? bytes : 16;
-    bool     anything = false;
-    for (uint64_t i = 0; i < look && !anything; i++)
-        anything = code[i] != 0;
-    if (!anything) {
-        kprintf("[IMAGE] '%s' is not started: its first %llu bytes are all zero — this is a "
-                "read that did not happen, not a program\n", name, (unsigned long long)look);
-        return ERR_INVALID_ELF;
-    }
-
+    /* Read straight into the pages it will run in: raw code is the image byte
+     * for byte, so there is nothing to place and no second copy. */
     size_t pages  = (size_t)((bytes + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE);
     void  *frames = pmm_alloc_zero(pages);
     if (!frames) {
         kprintf("[IMAGE] '%s' is not started: no %zu pages for its raw code\n", name, pages);
         return ERR_NO_MEMORY;
     }
-    memcpy(vmm_phys_to_virt((uintptr_t)frames), code, bytes);
+    uint8_t *code = (uint8_t *)vmm_phys_to_virt((uintptr_t)frames);
+    error_t  rc   = ImageSourceRead(source, 0, code, bytes, name);
+    if (rc != OK) {
+        pmm_free(frames, pages);
+        return rc;
+    }
+
+    /* Raw code that begins with sixteen zero bytes is a read that did not
+     * happen, whatever its count said: no instruction anybody wrote. */
+    uint64_t look = bytes < 16 ? bytes : 16;
+    bool     anything = false;
+    for (uint64_t i = 0; i < look && !anything; i++)
+        anything = code[i] != 0;
+    if (!anything) {
+        pmm_free(frames, pages);
+        kprintf("[IMAGE] '%s' is not started: its first %llu bytes are all zero — this is a "
+                "read that did not happen, not a program\n", name, (unsigned long long)look);
+        return ERR_INVALID_ELF;
+    }
 
     vmm_map_result_t mapped = vmm_map_pages(vmm, CABIN_CODE_START_ADDR, (uintptr_t)frames, pages,
                                             VMM_FLAG_PRESENT | VMM_FLAG_USER | VMM_FLAG_WRITABLE);
@@ -124,28 +192,46 @@ static error_t ImageLoadRaw(vmm_context_t *vmm, const uint8_t *code, uint64_t by
 
     kprintf("[IMAGE] '%s' runs as raw code: its %zu pages at 0x%llx are writable and "
             "executable at once\n", name, pages, (unsigned long long)CABIN_CODE_START_ADDR);
-    *entry = (uintptr_t)CABIN_CODE_START_ADDR;
+    loaded->Entry = (uintptr_t)CABIN_CODE_START_ADDR;
+    (void)nameplate_locate(code, bytes, CABIN_CODE_START_ADDR, &loaded->NameplateVa,
+                           &loaded->NameplateBytes);
     return OK;
 }
 
-error_t ImageLoad(vmm_context_t *vmm, const void *image, uint64_t bytes, const char *name,
-                  bool tagged_raw, uintptr_t *entry)
+/* ── which kind ──────────────────────────────────────────────────────────── */
+
+error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *name, bool tagged_raw,
+                  ImageLoaded *loaded)
 {
-    const uint8_t *head = (const uint8_t *)image;
+    static const uint8_t box_magic[8] = { BOX_MAGIC_0, BOX_MAGIC_1, BOX_MAGIC_2, BOX_MAGIC_3,
+                                          BOX_MAGIC_4, BOX_MAGIC_5, BOX_MAGIC_6, BOX_MAGIC_7 };
+    uint8_t  head[8] = { 0 };
+    uint64_t look    = source->Bytes < sizeof(head) ? source->Bytes : sizeof(head);
 
-    *entry = 0;
-    if (ImageIsElf(head, bytes)) {
-        if (tagged_raw) {
-            kprintf("[IMAGE] '%s' is not started: it is tagged raw, and it is an ELF "
-                    "program — one of the two is wrong\n", name);
-            return ERR_INVALID_ELF;
-        }
-        return ImageLoadElf(vmm, image, bytes, name, entry);
+    loaded->Entry          = 0;
+    loaded->NameplateVa    = 0;
+    loaded->NameplateBytes = 0;
+
+    error_t rc = ImageSourceRead(source, 0, head, look, name);
+    if (rc != OK)
+        return rc;
+
+    bool is_box = look == 8 && memcmp(head, box_magic, 8) == 0;
+    bool is_elf = look >= 4 && head[0] == 0x7F && head[1] == 'E' && head[2] == 'L' && head[3] == 'F';
+
+    if ((is_box || is_elf) && tagged_raw) {
+        kprintf("[IMAGE] '%s' is not started: it is tagged raw, and it is %s — one of the two "
+                "is wrong\n", name, is_box ? "a box" : "an ELF program");
+        return ERR_INVALID_ELF;
     }
+    if (is_box)
+        return BoxLoad(vmm, source, name, loaded);
+    if (is_elf)
+        return ImageLoadElf(vmm, source, name, loaded);
     if (tagged_raw)
-        return ImageLoadRaw(vmm, head, bytes, name, entry);
+        return ImageLoadRaw(vmm, source, name, loaded);
 
-    kprintf("[IMAGE] '%s' is not started: it is no program this system knows — not ELF, "
-            "and not tagged raw\n", name);
+    kprintf("[IMAGE] '%s' is not started: it is no program this system knows — not a box, "
+            "not ELF, and not tagged raw\n", name);
     return ERR_INVALID_ELF;
 }

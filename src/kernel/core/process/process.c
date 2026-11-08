@@ -1037,29 +1037,26 @@ void process_destroy(process_t *proc)
     process_ref_dec(proc);
 }
 
-error_t process_load_binary(process_t *proc, const void *image, size_t size,
-                            const char *name, bool tagged_raw)
+error_t process_load_binary(process_t *proc, const ImageSource *source, const char *name,
+                            bool tagged_raw)
 {
-    if (!proc || !proc->cabin || !image || size == 0 || !name)
+    if (!proc || !proc->cabin || !source || source->Bytes == 0 || !name)
     {
         debug_printf("[PROCESS] ERROR: Invalid arguments to process_load_binary\n");
         return ERR_INVALID_ARGUMENT;
     }
 
-    uintptr_t entry_point = 0;
-    error_t loaded = ImageLoad(proc->cabin->vmm, image, size, name, tagged_raw, &entry_point);
-    if (loaded != OK)
-        return loaded;
+    ImageLoaded loaded;
+    error_t rc = ImageLoad(proc->cabin->vmm, source, name, tagged_raw, &loaded);
+    if (rc != OK)
+        return rc;
+    uintptr_t entry_point = loaded.Entry;
 
     /* Where this image keeps the names of its own functions, so a fault dump
-     * can print them instead of a column of hex. Read here and nowhere else:
-     * this is the one moment the WHOLE file is in kernel memory — the caller's,
-     * until the call returns; after it only what the loader mapped exists.
-     * Costs nothing when the image has no table. */
-    proc->nameplate_va    = 0;
-    proc->nameplate_bytes = 0;
-    (void)nameplate_locate(image, size, VMM_CABIN_CODE_START,
-                           &proc->nameplate_va, &proc->nameplate_bytes);
+     * can print them instead of a column of hex — found by the loader while
+     * the image was in its hands. 0 when the image carries none. */
+    proc->nameplate_va    = loaded.NameplateVa;
+    proc->nameplate_bytes = loaded.NameplateBytes;
 
     /* From here the image is the address space's: what the loader mapped is
      * freed with the cabin, so no failure below frees any of it. */
@@ -1112,7 +1109,7 @@ error_t process_load_binary(process_t *proc, const void *image, size_t size,
     ci->luggage_length   = 0;
     ci->luggage_reserved = 0;
 
-    proc->cabin->code_size = size;
+    proc->cabin->code_size = (size_t)source->Bytes;
     proc->context.rip = entry_point;
     proc->context.rsp = stack_top;
 

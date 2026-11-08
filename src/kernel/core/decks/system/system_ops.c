@@ -885,7 +885,8 @@ static int SysProcSpawnTagged(const OpContext *ctx, uint64_t binary_va, uint64_t
      * an ELF is ever started this way — which the head above already holds. */
     char name[48];
     ksnprintf(name, sizeof(name), "image held by PID %u", ctx->proc->pid);
-    error_t load = process_load_binary(new_proc, elf, (size_t)binary_size, name, false);
+    ImageSource source = { binary_size, NULL, elf };
+    error_t     load   = process_load_binary(new_proc, &source, name, false);
     pmm_free(stage_phys, pages);
     if (load != OK) {
         process_destroy(new_proc);
@@ -1566,35 +1567,14 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
     uint64_t file_size = meta->size;
     if (file_size == 0 || file_size > CONFIG_PROC_MAX_BINARY_SIZE) return ERR_BINARY_TOO_LARGE;
 
-    size_t pages = (file_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-    void  *phys  = pmm_alloc_zero(pages);
-    if (!phys) return ERR_NO_MEMORY;
-
-    void *virt = vmm_phys_to_virt((uintptr_t)phys);
-
+    /* The file is read where the loader asks: a box only as far as starting
+     * it needs, an image of another kind whole (image_load.h). */
     TagFSFileHandle *fh = tagfs_open(found_id, TAGFS_HANDLE_READ);
-    if (!fh) {
-        pmm_free(phys, pages);
-        return ERR_SPAWN_FAILED;
-    }
-    /* The whole image or none of it — see the same check in autostart.c. A
-     * short read leaves the rest of the buffer as the zeros it was allocated
-     * with, and a process started on those runs `add [rax], al` off the first
-     * page and dies writing to address zero. */
-    uint64_t got = 0;
-    error_t  rd  = tagfs_read(fh, virt, file_size, &got);
-    tagfs_close(fh);
-    if (rd != OK || got != file_size) {
-        kprintf("[Spawn] not starting file %llu: %llu of %llu bytes came back (error %u)\n",
-                found_id, (unsigned long long)got, (unsigned long long)file_size,
-                (unsigned)rd);
-        pmm_free(phys, pages);
-        return ERR_SPAWN_FAILED;
-    }
+    if (!fh) return ERR_SPAWN_FAILED;
 
     process_t *new_proc = process_create(child_tags);
     if (!new_proc) {
-        pmm_free(phys, pages);
+        tagfs_close(fh);
         return ERR_SPAWN_FAILED;
     }
     new_proc->cabin->spawner_pid = ctx->proc->pid;
@@ -1602,10 +1582,10 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
 
     /* Raw code only when the FILE says so — never by the caller's augment,
      * which reaches the process's tags and not the volume's word. */
-    bool    tagged_raw = TagFSKeyAmong(meta->tag_ids, meta->tag_count, "raw");
-    error_t load = process_load_binary(new_proc, virt, (size_t)file_size,
-                                       meta->filename, tagged_raw);
-    pmm_free(phys, pages);
+    ImageSource source     = { file_size, fh, NULL };
+    bool        tagged_raw = TagFSKeyAmong(meta->tag_ids, meta->tag_count, "raw");
+    error_t     load       = process_load_binary(new_proc, &source, meta->filename, tagged_raw);
+    tagfs_close(fh);
     if (load != OK) {
         process_destroy(new_proc);
         return load;

@@ -366,14 +366,14 @@ static inline BoxVerdict BoxPartRules(const BoxPart *part)
     return BOX_OK;
 }
 
-/* Whether two loadable parts share a page. */
+/* Whether two loadable parts share a page — or, past the user half, could. */
 static inline bool BoxLoadablesMeet(const BoxPart *a, const BoxPart *b)
 {
-    uint64_t a_end = a->Place + a->Memory, b_end = b->Place + b->Memory;
-    uint64_t a_pages_end, b_pages_end;
-    BoxAlignUp(a_end, BOX_LOADABLE_ALIGN, BOX_PLACE_LIMIT, &a_pages_end);
-    BoxAlignUp(b_end, BOX_LOADABLE_ALIGN, BOX_PLACE_LIMIT, &b_pages_end);
-    return a->Place < b_pages_end && b->Place < a_pages_end;
+    uint64_t a_end, b_end;
+    if (!BoxAlignUp(a->Place + a->Memory, BOX_LOADABLE_ALIGN, BOX_PLACE_LIMIT, &a_end) ||
+        !BoxAlignUp(b->Place + b->Memory, BOX_LOADABLE_ALIGN, BOX_PLACE_LIMIT, &b_end))
+        return true;
+    return a->Place < b_end && b->Place < a_end;
 }
 
 /*

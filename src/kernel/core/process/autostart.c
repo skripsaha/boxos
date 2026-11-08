@@ -80,57 +80,27 @@ static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
         return NULL;
     }
 
-    size_t pages_needed = (file_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-    void  *phys_buf = pmm_alloc_zero(pages_needed);
-    if (!phys_buf) {
-        kprintf("[AUTOSTART] Skip '%s': memory allocation failed\n", meta->filename);
-        return NULL;
-    }
-    void *virt_buf = vmm_phys_to_virt((uintptr_t)phys_buf);
-
+    /* The file is read where the loader asks: a box only as far as starting
+     * it needs, an image of another kind whole (image_load.h). */
     TagFSFileHandle *fh = tagfs_open(file_id, TAGFS_HANDLE_READ);
     if (!fh) {
-        pmm_free(phys_buf, pages_needed);
         kprintf("[AUTOSTART] Skip '%s': tagfs_open failed\n", meta->filename);
-        return NULL;
-    }
-    /*
-     * ‼ THE WHOLE IMAGE, OR NONE OF IT
-     *
-     * The count is checked beside the answer: a read that stopped early hands
-     * over a buffer allocated zeroed, an image partly, or entirely, zeros.
-     *
-     * A page of zeros is not an empty program. 0x00 0x00 decodes as
-     * `add [rax], al`, so the process starts, writes to address zero with
-     * every register still clear, and dies with a page fault at 0x0 — which is
-     * exactly what a machine whose flash drive stopped answering showed on the
-     * screen, having first announced that it had started the program.
-     */
-    uint64_t got = 0;
-    error_t  rd  = tagfs_read(fh, virt_buf, file_size, &got);
-    tagfs_close(fh);
-    if (rd != OK || got != file_size) {
-        pmm_free(phys_buf, pages_needed);
-        kprintf("[AUTOSTART] not starting '%s': %llu of %llu bytes came back (error %u) — "
-                "an image that is not all here is not started\n",
-                meta->filename, (unsigned long long)got, (unsigned long long)file_size,
-                (unsigned)rd);
         return NULL;
     }
 
     process_t *proc = process_create(tags);
     if (!proc) {
-        pmm_free(phys_buf, pages_needed);
+        tagfs_close(fh);
         kprintf("[AUTOSTART] Skip '%s': process_create failed\n", meta->filename);
         return NULL;
     }
 
     /* Raw code only when the FILE says so: the volume's word, never one the
      * process could be given some other way. */
-    bool tagged_raw  = TagFSKeyAmong(meta->tag_ids, meta->tag_count, "raw");
-    int  load_result = process_load_binary(proc, virt_buf, (size_t)file_size,
-                                           meta->filename, tagged_raw);
-    pmm_free(phys_buf, pages_needed);
+    ImageSource source     = { file_size, fh, NULL };
+    bool        tagged_raw = TagFSKeyAmong(meta->tag_ids, meta->tag_count, "raw");
+    int         load_result = process_load_binary(proc, &source, meta->filename, tagged_raw);
+    tagfs_close(fh);
     if (load_result != 0) {
         process_destroy(proc);
         kprintf("[AUTOSTART] Skip '%s': load_binary failed (%d)\n",
