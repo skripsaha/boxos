@@ -140,9 +140,12 @@ typedef struct cabin_t
     atomic_u32_t strand_count;
 
     /* The program is ending (CabinEnd): no strand is born into it any more.
-     * Written and read only under process_lock, so a strand_spawn either
+     * Written under process_lock and read there, so a strand_spawn either
      * finished joining the process list before CabinEnd's walk, and is ended
-     * by it, or sees this and is refused. Never cleared. */
+     * by it, or sees this and is refused. Never cleared — which is why
+     * ScreenClaim may also read it without the lock: it is set before any
+     * death of the program is said, so a claimant that heard the death sees
+     * it set. */
     uint8_t ending;
 } cabin_t;
 
@@ -207,6 +210,13 @@ void cabin_destroy(cabin_t *cabin);
  */
 struct process_t;
 void CabinEnd(struct process_t *named, int32_t disposition);
+
+/* The program this cabin is: the (pid, generation) of the strand that founded
+ * it, as its CabinInfo says — the same words every strand of it reads at
+ * CABIN_INFO_VADDR, in a page no strand of it can write. A server that keeps
+ * something per program, and a Bay made for one, name the program by this.
+ * False while the cabin has no program loaded into it yet. */
+bool CabinProgram(const cabin_t *cabin, uint32_t *pid, uint32_t *generation);
 
 /* Reference counting on strand_count. */
 void cabin_ref_inc(cabin_t *cabin);

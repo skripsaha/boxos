@@ -1,6 +1,6 @@
 /* klib_panic.c — one panic, one account, and every other core stopped.
  *
- * Everything an account of a panic prints touches something: the VGA buffer,
+ * Everything an account of a panic prints touches something: the glass,
  * the serial UART, and — for the dump's stack trace — memory the fault may
  * already have proved untrustworthy. A fault raised in the middle of that
  * comes back here, and so does every other core that hit the same bug at the
@@ -32,7 +32,7 @@
 #include "klib.h"
 #include "klib_logring.h" /* LogKeepFlush — what was said outlives a warm reset */
 #include "serial.h"       /* WireDrain — and reaches the wire */
-#include "canvas.h"       /* CanvasForceReset — and reaches the glass */
+#include "emergency_screen.h" /* the glass the account is drawn on, whoever held it */
 #include "amp.h"          /* g_amp — the cores there are to stop */
 #include "lapic.h"        /* lapic_is_mapped, LapicSendNmi */
 #include "mce.h"          /* MCE_MSR_MCG_STATUS — no machine check left in progress */
@@ -141,9 +141,8 @@ static __attribute__((noreturn)) void PanicStand(void)
  * which the fixed vector never could reach (spin_lock runs with interrupts off
  * to its unlock). So a lock such a core held is never given back, and the
  * account must be said without waiting on one: the owner takes a held lock as
- * it stands (klib_lock.c, spin_lock), a kprintf begun after the claim stands
- * before it touches the console, and each line of the account lets go of a
- * Canvas batch such a core left open (klib_print.c).
+ * it stands (klib_lock.c, spin_lock), and a kprintf begun after the claim
+ * stands before it touches the console (klib_print.c).
  *
  * An NMI on a core already standing is harmless. A loser stands in `cli; hlt`
  * at the claim; the NMI wakes it, finds the claim another core's and stands it
@@ -199,28 +198,24 @@ static void PanicSayBreakBy(int (*say)(const char *, va_list), const char *by,
 /* That line, said where it is read whatever else broke first. What the account
  * said goes out to the memory the next boot reads (which takes nothing) and to
  * the wire — driven by nothing while interrupts are off once it has gone over
- * to its interrupt (serial.c) — then the line into the ring alone, and out
- * after it; only then the glass: the batch the broken line left open let go
- * of, what it held committed (CanvasForceReset), and the line onto the glass
- * alone, in a batch of its own. The glass comes last because its road — the
- * Canvas, a framebuffer — is the longer one, and a fault on it, which this
- * coming may itself be, would otherwise cost the wire the line too; a machine
- * with no wire loses nothing by the order (WireDrain returns at once). A fault
- * anywhere in here is the third coming, and stands at once (PanicClaim). */
+ * to its interrupt (serial.c) — then the line into the ring, and out after it;
+ * only then the glass, which draws it from the ring. The glass comes last
+ * because its road — a framebuffer — is the longer one, and a fault on it,
+ * which this coming may itself be, would otherwise cost the wire the line too;
+ * a machine with no wire loses nothing by the order (WireDrain returns at
+ * once). A fault anywhere in here is the third coming, and stands at once
+ * (PanicClaim). */
 static void PanicSayBreak(const char *by, const char *format, va_list args)
 {
-    va_list again;
-    va_copy(again, args);
-
     LogKeepFlush();
     WireDrain();
     PanicSayBreakBy(KvprintfRing, by, format, args);
     LogKeepFlush();
     WireDrain();
 
-    CanvasForceReset();
-    PanicSayBreakBy(KvprintfGlass, by, format, again);
-    va_end(again);
+    console_lock_acquire();
+    EmergencyScreenFollow();
+    console_lock_release();
 }
 
 /* The same, for the numbers an exception's line is made of. */
@@ -254,6 +249,11 @@ static bool PanicClaim(bool *already_claimed_here)
          * the winner only: a loser that sent them would stop the winner
          * mid-sentence. */
         PanicHaltPeers();
+
+        /* And the glass taken, whoever held it: the display's core is among
+         * the stopped, and the account is drawn by the kernel's own hand
+         * through the kernel's own mapping, its window left as it is. */
+        EmergencyScreenPanicTake();
         return false;
     }
 
@@ -306,7 +306,7 @@ void PanicClaimForMessage(bool *already_claimed_here, const char *message, va_li
 void PanicEndAccount(void)
 {
     /* Said whole: its last line is said — in the ring, and on the glass, every
-     * line of it having closed its own Canvas batch (klib_print.c, kvprintf).
+     * line of it drawn from the ring as it was said (klib_print.c, kvprintf).
      * Marked here, before it goes out, not after: once the wire has gone over
      * to its interrupt, what the transmitter has not taken of the account
      * waits in the ring for the drain below — a byte every 86.8 us at 115200
@@ -331,6 +331,13 @@ void PanicEndAccount(void)
      * as it stands (klib_lock.c). */
     WireDrain();
 
+    /* And the whole account drawn once more: a core stopped in the middle of
+     * a draw — the display's, or one still in the Emergency Screen when the
+     * claim was made — may have had pixels in its write-combining buffers,
+     * and the NMI that stopped it let them go onto the glass after the
+     * account began. */
+    EmergencyScreenRedraw();
+
     PanicStand();
 }
 
@@ -345,4 +352,9 @@ bool PanicOwnedHere(void)
 {
     uint32_t owner = __atomic_load_n(&g_panic_owner, __ATOMIC_ACQUIRE);
     return owner != 0 && owner == PanicMe();
+}
+
+bool PanicClaimed(void)
+{
+    return __atomic_load_n(&g_panic_owner, __ATOMIC_ACQUIRE) != 0;
 }

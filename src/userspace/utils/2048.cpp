@@ -390,7 +390,7 @@ int main()
 {
     try {
         Table Desk;
-        std::expected<Stage, StageError> Opened = Stage::Open("2048", 40, 20);
+        std::expected<Stage, StageError> Opened = Stage::Open(40, 20);
         if (!Opened) {
             const std::string Message = Opened.error().Describe("2048");
             print_to_screen((Message + '\n').c_str());

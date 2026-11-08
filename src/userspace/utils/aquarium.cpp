@@ -333,7 +333,7 @@ int main()
         if (!ReadWords(Words, Count, Want)) return 1;
 
         std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
-            painter::tui::Stage::Open("aquarium", LeastCols, LeastRows);
+            painter::tui::Stage::Open(LeastCols, LeastRows);
         if (!Opened) {
             Say(Opened.error().Describe("aquarium"));
             return 1;

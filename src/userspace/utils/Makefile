@@ -70,8 +70,8 @@ ASSEMBLE_ENTRY_BLOB = $(ASSEMBLE_DIR)/entry_blob.o
 
 UTILS = help create show files tag untag name trash erase assemble \
         me info say reboot bye defrag escheat fsck ipc_test memtag hw \
-        timezone logsave lastsaid rgbtest usetest faretest luggagetest rollcall handset headcount \
-        draft playtime lavalamp finish taskcenter hexer stringview \
+        timezone logsave lastsaid usetest faretest luggagetest rollcall handset headcount \
+        playtime lavalamp finish taskcenter hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab
 
@@ -106,16 +106,10 @@ $(ASSEMBLE_ENTRY_BLOB): $(BOXLIB_START)
 	@x86_64-elf-objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents $< $@
 
-# draft is four parts — the book, the screen, the volume, and what decides —
-# and the pattern rule above links exactly one object, so it names its own.
-draft.elf: $(BOXLIB_START) draft.o draft_book.o draft_paint.o draft_file.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) draft.o draft_book.o draft_paint.o draft_file.o $(BOXLIB))
-	@x86_64-elf-objcopy --strip-all $@
-
-# ‼ THE FOUR NEWEST UTILITIES ARE STRIPPED, AND THE REASON IS THE VOLUME.
+# ‼ THE NEWEST UTILITIES ARE STRIPPED, AND THE REASON IS THE VOLUME.
 #
 # The medium holds 24 MB and the image was already using all but 946 KB of it.
-# These four unstripped came to 530 KB, which left 400 KB — and the C++
+# Four of them unstripped came to 530 KB, which left 400 KB — and the C++
 # conformance suite, which CREATES files as it tests <fstream>, then failed
 # seventy checks on a volume with nowhere to put them. Measured: UEFI STRICT 4c
 # went from no cxxtest failures at all to seventy, every one of them in a phase
@@ -124,7 +118,7 @@ draft.elf: $(BOXLIB_START) draft.o draft_book.o draft_paint.o draft_file.o $(BOX
 # What is dropped is .symtab and .debug_*, and dropping them costs nothing that
 # can be read from the running machine: the Nameplate linked in above already
 # carries the address-to-name table a crash needs, in a section the loader maps
-# (`tools/nameplate list` still reads all 362 names out of a stripped draft).
+# (`tools/nameplate list` read all 362 names out of a stripped program).
 # It must come AFTER the link, because `nameplate verify` reads the symbol
 # table this deletes. cxxtest, timezone and exitpaths are stripped for the same
 # reason and were the precedent.
@@ -155,8 +149,8 @@ taskcenter.elf: $(BOXLIB_START) taskcenter.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BO
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) taskcenter.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-# hexer and stringview are C++ in parts, as draft is in C: each names its own
-# objects, links libboxcxx.a before libbox.a, and is stripped like taskcenter.
+# hexer and stringview are C++ in parts: each names its own objects, links
+# libboxcxx.a before libbox.a, and is stripped like taskcenter.
 HEXER_OBJS      = hexer.o hexer_bytes.o hexer_paint.o hexer_list.o
 STRINGVIEW_OBJS = stringview.o stringview_sift.o stringview_paint.o
 
@@ -181,8 +175,8 @@ FLAME_OBJS      = flame.o flame_sim.o flame_palette.o flame_font.o flame_paint.o
 CHECKSUM_OBJS   = checksum.o checksum_small.o checksum_sha2.o checksum_sha3.o checksum_kinds.o
 PASSPORT_OBJS   = passport.o keep.o
 AQUARIUM_OBJS   = aquarium.o aquarium_kinds.o aquarium_scene.o aquarium_life.o aquarium_paint.o
-# The screen a program owns and its own small file on the volume, shared by
-# the programs after aquarium (stage.h, keep.h).
+# A small file of its own on the volume, shared by the programs after aquarium
+# (keep.h).
 NYANCAT_OBJS    = nyancat.o
 FIREWORKS_OBJS  = fireworks.o
 2048_OBJS       = 2048.o keep.o

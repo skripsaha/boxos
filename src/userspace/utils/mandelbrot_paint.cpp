@@ -194,7 +194,7 @@ void FractalColour(const FractalPicture &Picture, const FractalPalette &Palette,
         }
         float Place = std::fmod(Count * Scale + Turn, 256.0f);
         int   Index = static_cast<int>(Place);
-        Color Here  = Palette.Ramp[Index & 255], Next = Palette.Ramp[(Index + 1) & 255];
-        Pixels[At]  = Color::Mix(Here, Next, static_cast<std::uint8_t>((Place - Index) * 255.0f));
+        PainterColor Here = Palette.Ramp[Index & 255], Next = Palette.Ramp[(Index + 1) & 255];
+        Pixels[At]  = PainterColor::Mix(Here, Next, static_cast<std::uint8_t>((Place - Index) * 255.0f));
     }
 }

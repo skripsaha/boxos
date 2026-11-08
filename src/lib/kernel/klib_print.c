@@ -2,8 +2,8 @@
  *
  * Single source of truth for `%`-format parsing lives in `kvformat()`, which
  * runs against a `kfmt_ops_t` callback set. Two callback sets are wired:
- *   SCREEN_OPS  emits to serial + framebuffer with colour and cursor state
- *   BUF_OPS     emits into a bounded char buffer
+ *   RING_OPS  emits into the log ring, each byte with its Tone
+ *   BUF_OPS   emits into a bounded char buffer
  *
  * Why callback-driven rather than two parsers: the legacy split parser had
  * silently divergent feature sets — kvsnprintf knew %d/%u/%x/%s/%c only,
@@ -13,21 +13,30 @@
  * place of an address — fatal for real-HW post-mortem diagnostics. Now both
  * surfaces walk the same parser so feature parity is structural.
  *
+ * kprintf draws NOTHING. What the kernel says goes into the log ring and only
+ * there (klib_logring.h): the display program draws it in its order with
+ * everything else, and while no program holds the screen the Emergency Screen
+ * follows the ring onto the glass (emergency_screen.c) — from here, at the end
+ * of each kprintf, under the same lock.
+ *
  * Locking: kprintf serialises behind `g_kprintf_lock` (IRQ-safe spinlock),
- * which `console_lock_acquire/release` expose so other producers of the
- * framebuffer (HwVga* writes from interrupt handlers) can serialise too.
- * The lock is BSS-zero before mem_init() runs spinlock_init(); BSS-zero
- * happens to mean unlocked for the current spinlock_t layout. */
+ * which `console_lock_acquire/release` expose to the other hand that says
+ * things into the ring (hw.log.say) and to whoever changes what the Emergency
+ * Screen shows. The lock is BSS-zero before mem_init() runs spinlock_init();
+ * BSS-zero happens to mean unlocked for the current spinlock_t layout. */
 #include "klib.h"
 #include "klib_logring.h"
-#include "video.h"
-#include "canvas.h"
+#include "emergency_screen.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
 #include "klib_panic.h" /* PanicClaimForMessage, PanicEndAccount — one claim, every other core stopped */
 
 /* Module-local state — neither escapes outside this TU. */
 static spinlock_t g_kprintf_lock;
+
+/* The Tone the next byte of this kprintf is said in. Under g_kprintf_lock;
+ * every kprintf begins PLAIN (boxos_log_tone.h). */
+static uint8_t g_tone;
 
 void console_lock_acquire(void)
 {
@@ -44,79 +53,17 @@ void klib_print_lock_init(void)
     LogRingLockInit();
 }
 
-int kputnl(void)
-{
-    VideoClearToEol();
-    VideoPrintNewline();
-    VideoUpdateCursor();
-    return 1;
-}
-
-/* kputchar's half on the glass, the ring left as it is: one byte of the
- * console at the cursor. Apart, because the line that ends a panic's broken
- * account is said to the ring and the glass one after the other
- * (KvprintfRing, KvprintfGlass). */
-static void GlassPutChar(char c)
-{
-    if (c == '\n')
-    {
-        kputnl();
-    }
-    else if (c == '\r')
-    {
-        VideoSetCursor(0, VideoGetCursorY());
-    }
-    else if (c == '\b')
-    {
-        int x = VideoGetCursorX();
-        if (x > 0)
-        {
-            VideoSetCursor(x - 1, VideoGetCursorY());
-            VideoUpdateCursor();
-        }
-    }
-    else
-    {
-        VideoPrintCharCur(c);
-        VideoUpdateCursor();
-    }
-}
-
-void kputchar(char c)
-{
-    /* kprintf's own bytes, one at a time, and nobody else's: the only caller
-     * is screen_emit below, so everything arriving here is already under
-     * g_kprintf_lock and inside the Canvas batch kprintf opened around its
-     * whole format string. That is what lets the Canvas assemble a multi-byte
-     * character out of these separate calls — it holds the part-built
-     * character only until the batch closes (canvas.c, print_utf8_byte_locked
-     * and batch_end_locked), and kprintf's batch does not close in the middle
-     * of one.
-     *
-     * This used to say that the keyboard's echo also came through here, and
-     * without the console lock. It has not since the line editor moved to
-     * boxlib: the echo is userspace text now and reaches the console as a
-     * HW_VGA_PUTSTRING, which mirrors its own bytes into the log ring at the
-     * hardware deck. So this is where the KERNEL's half of the ring is fed,
-     * not the whole of it. The serial line reads the ring (the Wire,
-     * serial.c): nothing here waits on a UART. */
-    LogRingPut(c);
-    GlassPutChar(c);
-}
-
 /* ============================================================================
  *  Unified formatter
  * ========================================================================== */
 
 typedef int  (*kfmt_emit_t)(void *ctx, char c);
-typedef void (*kfmt_attr_t)(void *ctx, uint8_t attr);
-typedef void (*kfmt_cursor_t)(void *ctx, int x, int y);
+typedef void (*kfmt_tone_t)(void *ctx, uint8_t tone);
 
 typedef struct
 {
-    kfmt_emit_t   emit_char;
-    kfmt_attr_t   set_attr;    /* NULL → attribute escapes are no-ops */
-    kfmt_cursor_t set_cursor;  /* NULL → cursor escapes are no-ops    */
+    kfmt_emit_t emit_char;
+    kfmt_tone_t set_tone;   /* NULL → tone escapes are no-ops */
 } kfmt_ops_t;
 
 static int kvformat(const kfmt_ops_t *ops, void *ctx,
@@ -137,36 +84,29 @@ static int kvformat(const kfmt_ops_t *ops, void *ctx,
 
         ++fmt;  /* past '%' */
 
-        /* BoxOS extensions: %[X] for colour/cursor/codepoint. Buffer-mode
-         * emitters supply NULL set_attr/set_cursor so these escapes drop
-         * silently when formatting into a string. */
+        /* BoxOS extensions: %[X] for tone/codepoint. The buffer emitter
+         * supplies a NULL set_tone, so tone escapes drop silently when
+         * formatting into a string. */
         if (*fmt == '[')
         {
             ++fmt;
             switch (*fmt)
             {
             case 'E':
-                if (ops->set_attr) ops->set_attr(ctx, VIDEO_ATTR_ERROR);
+                if (ops->set_tone) ops->set_tone(ctx, LOG_TONE_ERROR);
                 break;
             case 'S':
-                if (ops->set_attr) ops->set_attr(ctx, VIDEO_ATTR_SUCCESS);
+                if (ops->set_tone) ops->set_tone(ctx, LOG_TONE_SUCCESS);
                 break;
             case 'H':
-                if (ops->set_attr) ops->set_attr(ctx, VIDEO_ATTR_HINT);
+                if (ops->set_tone) ops->set_tone(ctx, LOG_TONE_HINT);
                 break;
             case 'D':
-                if (ops->set_attr) ops->set_attr(ctx, VIDEO_ATTR_DEFAULT);
+                if (ops->set_tone) ops->set_tone(ctx, LOG_TONE_PLAIN);
                 break;
             case 'W':
-                if (ops->set_attr) ops->set_attr(ctx, VIDEO_ATTR_WARNING);
+                if (ops->set_tone) ops->set_tone(ctx, LOG_TONE_WARNING);
                 break;
-            case 'P':
-            {
-                int x = va_arg(args, int);
-                int y = va_arg(args, int);
-                if (ops->set_cursor) ops->set_cursor(ctx, x, y);
-                break;
-            }
             case 'U':
             {
                 uint32_t codepoint = va_arg(args, uint32_t);
@@ -407,55 +347,21 @@ static int kvformat(const kfmt_ops_t *ops, void *ctx,
     return count;
 }
 
-/* --- Screen ops: drives kputchar + colour/cursor state for kprintf. --- */
-static int screen_emit(void *ctx, char c)
-{
-    (void)ctx;
-    kputchar(c);
-    return 1;
-}
-/* The attribute escape drives the live video colour.  This used to write a
- * module-local shadow that nothing ever read — %[E]/%[S]/%[W] had silently
- * stopped colouring kernel output (the panic banner printed in whatever
- * colour the last user op happened to leave behind). */
-static void screen_set_attr(void *ctx, uint8_t attr)
-{
-    (void)ctx;
-    VideoSetColor(attr);
-}
-static void screen_set_cursor(void *ctx, int x, int y)
-{
-    (void)ctx;
-    VideoSetCursor(x, y);
-}
-static const kfmt_ops_t SCREEN_OPS = {
-    .emit_char  = screen_emit,
-    .set_attr   = screen_set_attr,
-    .set_cursor = screen_set_cursor,
-};
-
-/* --- Ring ops and glass ops: the two halves of the screen ops apart. --- */
+/* --- Ring ops: kprintf's bytes into the log ring, each in its tone. --- */
 static int RingEmit(void *ctx, char c)
 {
     (void)ctx;
-    LogRingPut(c);
+    LogRingPut(c, g_tone);
     return 1;
 }
-static const kfmt_ops_t RING_OPS = {
-    .emit_char  = RingEmit,
-    .set_attr   = NULL,
-    .set_cursor = NULL,
-};
-static int GlassEmit(void *ctx, char c)
+static void RingTone(void *ctx, uint8_t tone)
 {
     (void)ctx;
-    GlassPutChar(c);
-    return 1;
+    g_tone = tone;
 }
-static const kfmt_ops_t GLASS_OPS = {
-    .emit_char  = GlassEmit,
-    .set_attr   = screen_set_attr,
-    .set_cursor = screen_set_cursor,
+static const kfmt_ops_t RING_OPS = {
+    .emit_char = RingEmit,
+    .set_tone  = RingTone,
 };
 
 /* --- Buffer ops: drives a bounded char buffer for ksnprintf/kvsnprintf. --- */
@@ -472,63 +378,45 @@ static int buf_emit(void *ctx, char c)
     return 0;  /* buffer full — parser will stop */
 }
 static const kfmt_ops_t BUF_OPS = {
-    .emit_char  = buf_emit,
-    .set_attr   = NULL,
-    .set_cursor = NULL,
+    .emit_char = buf_emit,
+    .set_tone  = NULL,
 };
+
+/* Said into the ring under the console lock: tone PLAIN to begin with, the
+ * utterance ended (LogRingSaid), and nothing drawn. */
+static int kvprintf_said_locked(const char *format, va_list args)
+{
+    g_tone = LOG_TONE_PLAIN;
+    int n = kvformat(&RING_OPS, NULL, format, args);
+    LogRingSaid();
+    return n;
+}
 
 int kvprintf(const char *format, va_list args)
 {
     spin_lock(&g_kprintf_lock);
     /* Once a panic is claimed the console is its account's alone. A core that
      * comes to it after the claim stands here, before it puts a byte in the
-     * ring or opens a Canvas batch: the NMI that stops it may still be on its
-     * way. The lock it stands holding is taken by the owner as it stands
-     * (klib_lock.c). */
+     * ring: the NMI that stops it may still be on its way. The lock it stands
+     * holding is taken by the owner as it stands (klib_lock.c). */
     PanicStandIfClaimedElsewhere();
-    /* And on the owner, every line of the account first lets go of whatever
-     * Canvas batch another core left open, committing what it held. Not once
-     * at the claim: the claim's NMIs are not waited for, so a core already
-     * past the stand above, or in a Manifest op (manifest_exec.c), or any
-     * other road that opens a batch, can open one between the claim and the
-     * NMI that stops it — and a batch nobody closes keeps every commit after
-     * it, the whole account, off the glass. Each line before this one closed
-     * its own batch, so the owner lets go of nothing of its own. */
-    if (PanicOwnedHere())
-        CanvasForceReset();
-    /* Wrap the per-char emit loop in one Canvas batch.  A multi-line
-     * banner used to fire one full-frame blit per '\n'-induced scroll;
-     * batched, the whole banner ends in a single coalesced blit. */
-    VideoBatchBegin();
-    int n = kvformat(&SCREEN_OPS, NULL, format, args);
-    VideoBatchEnd();
+    int n = kvprintf_said_locked(format, args);
+    EmergencyScreenFollow();
     spin_unlock(&g_kprintf_lock);
+    /* With the locks down: BatonPass can print, and a print under the
+     * console lock would be this core spinning on its own lock. */
+    LogRingBellKnock();
     return n;
 }
 
-/* kvprintf's two halves apart, for the line that ends a panic's account a
- * fault or a panic broke off (klib_panic.c): the ring alone first — and so the
- * wire, and the memory the next boot reads — then the glass alone, so a fault
- * in the glass's own path costs the wire nothing. Under the console lock,
- * which the owner of a panic takes as it stands; KvprintfGlass in a Canvas
- * batch of its own and lets go of none another left open, which the owner
- * does before it (CanvasForceReset). */
+/* The ring alone, for the line that ends a panic's account a fault or a panic
+ * broke off (klib_panic.c): it goes out to the wire before the glass is
+ * touched, so a fault on the glass's road costs the wire nothing. */
 int KvprintfRing(const char *format, va_list args)
 {
     spin_lock(&g_kprintf_lock);
     PanicStandIfClaimedElsewhere();
-    int n = kvformat(&RING_OPS, NULL, format, args);
-    spin_unlock(&g_kprintf_lock);
-    return n;
-}
-
-int KvprintfGlass(const char *format, va_list args)
-{
-    spin_lock(&g_kprintf_lock);
-    PanicStandIfClaimedElsewhere();
-    VideoBatchBegin();
-    int n = kvformat(&GLASS_OPS, NULL, format, args);
-    VideoBatchEnd();
+    int n = kvprintf_said_locked(format, args);
     spin_unlock(&g_kprintf_lock);
     return n;
 }
@@ -571,8 +459,8 @@ __attribute__((noreturn)) void panic(const char *message, ...)
      * composed: a core still running keeps writing into the same console and
      * the same ring while the account of the crash is being written into
      * them. A core that lost it to another stands there without a word; the
-     * winner has every other online core stopped by an NMI, and each line it
-     * says lets go of the Canvas batch a stopped core left open (kvprintf);
+     * winner has every other online core stopped by an NMI and the glass
+     * taken for its account, whoever held the screen (EmergencyScreenPanicTake);
      * and the core that holds it already, this panic inside its own account,
      * ends that account with this message as the line that says by what.
      * No lock is broken up front: every lock the banner takes on its way

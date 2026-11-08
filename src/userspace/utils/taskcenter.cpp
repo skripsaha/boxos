@@ -617,7 +617,7 @@ private:
 } // namespace
 
 int main() {
-  auto Opened = painter::tui::Stage::Open("taskcenter", 60, 14);
+  auto Opened = painter::tui::Stage::Open(60, 14);
   if (!Opened) {
     std::printf("%s\n", Opened.error().Describe("taskcenter").c_str());
     return 1;

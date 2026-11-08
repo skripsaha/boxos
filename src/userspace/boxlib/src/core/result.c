@@ -438,20 +438,20 @@ static bool result_wait_umwait(Result* out, uint32_t timeout_ms) {
     }
 }
 
-/* The WAITPKG-less fallback for a synchronous submit's reply: a hot spin on
- * PAUSE, never a yield.
+/* The WAITPKG-less wait for a synchronous submit's reply.
  *
- * It was called result_wait_yield and it never yielded once — the name was a
- * description of the OTHER fallback shape in this file (result_wait_ipc_yield,
- * which really does hand the core back) pasted onto a loop that only ever
- * spins. A name that says the loop re-enters the kernel when it does not is
- * worse than no name at all: it invites the reader to account for a syscall
- * per turn that is not there, and to look elsewhere for the spin that is.
+ * ‼ AN ANSWER THAT IS OWED FOR A WHOLE LIFE IS NOT WAITED FOR ON PAUSE.
+ * This was a hot spin, on the reasoning that the reply is a K-Core's few
+ * microseconds away. For most submits it is; for system.process.gone it is a
+ * child's whole life, and for system.ask the answerer's. The kernel parks
+ * such a strand — but anything that lands for it meanwhile (a key, a message)
+ * wakes it, and from then on it spun here until the answer came. MEASURED on
+ * one core: the shell at 100% for as long as the program it ran lived.
  *
- * The spin is correct here and the yield would not be: the answer is written
- * by a K-Core on another core, so nothing this strand can be scheduled behind
- * is in the way, and the reply lands whether this core gives itself away or
- * not. Every caller of this path is a submit already in flight. */
+ * So a wait with no deadline looks hot, as box_turn_in does, and then turns
+ * in: it costs nothing until something arrives, and a reply that comes at
+ * once is still caught by the look. A wait with a deadline keeps the spin —
+ * a sleep cannot be woken by a clock, and the deadline already bounds it. */
 static bool result_wait_spin(Result* out, uint32_t timeout_ms) {
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
@@ -459,13 +459,18 @@ static bool result_wait_spin(Result* out, uint32_t timeout_ms) {
     }
 
     while (1) {
+        TurnInMark mark = box_mark();
         __sync_synchronize();
 
         if (result_available()) {
             if (result_pop_non_ipc(out)) return true;
         }
 
-        if (timeout_ms > 0 && rdtsc() >= deadline) return false;
+        if (timeout_ms == 0) {
+            box_turn_in(mark);
+            continue;
+        }
+        if (rdtsc() >= deadline) return false;
 
         /* The one exception to "never a yield": the kernel asking this strand
          * to step aside. Either somebody is queued behind it on this core, or

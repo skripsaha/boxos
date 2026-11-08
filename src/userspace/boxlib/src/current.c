@@ -15,16 +15,8 @@
 #include "box/memory.h"   /* malloc, free                         */
 #include "box/string.h"   /* strcmp, strncmp, memcpy, memset      */
 #include "box/core/manifest.h" /* MfCall1                          */
-#include "boxos_decks.h"  /* DECK_HARDWARE                        */
+#include "boxos_decks.h"  /* DECK_HARDWARE, HW_LOG_READ, HW_LOG_PREVIOUS */
 #include "box/timeouts.h" /* BOX_ANSWER_GUARANTEED                */
-
-/* The hardware deck's log-ring door. Named here the way debug.c names
- * HW_DEBUG_PRINT next to it: userspace does not include kernel headers, and
- * the opcode's home is src/kernel/core/decks/hardware/hardware_deck.h. */
-#define HW_LOG_READ      0x83
-/* The account of the run BEFORE this one, carried through a warm reset. Same
- * wire shape, so one reader here serves both banks — see klib_logring.h. */
-#define HW_LOG_PREVIOUS  0x84
 
 /* --------------------------------------------------------------------------
  * Backend selection + handle layout
@@ -79,9 +71,6 @@ struct Current {
  * Wire: [u64 oldest][u64 written][u64 copied][bytes...]
  * ------------------------------------------------------------------------ */
 
-#define CUR_LOG_HEADER  24u
-#define CUR_LOG_CHUNK   4096u    /* the kernel copies a page per call at most */
-
 /* One HW_LOG_READ into the handle's staging frame. Returns bytes staged (0 is
  * a legitimate answer — the pure "what have you got" question), or -ERR_*. */
 static int cur_log_pull(Current *c, uint64_t from, uint32_t want,
@@ -90,12 +79,12 @@ static int cur_log_pull(Current *c, uint64_t from, uint32_t want,
     uint8_t params[8];
     for (unsigned i = 0; i < 8; i++) params[i] = (uint8_t)(from >> (i * 8));
 
-    if (want > CUR_LOG_CHUNK) want = CUR_LOG_CHUNK;
+    if (want > HW_LOG_READ_CHUNK) want = HW_LOG_READ_CHUNK;
 
     int rc = MfCall1(DECK_HARDWARE, c->log_op,
                      params, sizeof(params),
                      NULL, 0,
-                     c->log_buf, CUR_LOG_HEADER + want,
+                     c->log_buf, HW_LOG_READ_HEADER + want,
                      /* A memcpy of at most a page, answered on the spot. It
                       * used to carry a 5 s deadline, and it matters here more
                       * than most that it no longer does: logsave issues
@@ -200,7 +189,7 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
         c->log_op = (strcmp(tag, "log:previous") == 0) ? HW_LOG_PREVIOUS
                                                        : HW_LOG_READ;
 
-        c->log_buf = (uint8_t *)malloc(CUR_LOG_HEADER + CUR_LOG_CHUNK);
+        c->log_buf = (uint8_t *)malloc(HW_LOG_READ_HEADER + HW_LOG_READ_CHUNK);
         if (!c->log_buf) { free(c); CUR_FAIL(ERR_NO_MEMORY); }
 
         uint64_t oldest = 0, written = 0;
@@ -484,7 +473,7 @@ int current_read(Current *c, void *buf, size_t len)
         }
         if (n == 0) return CURRENT_CLOSED;   /* nothing left within our bound */
 
-        memcpy(buf, c->log_buf + CUR_LOG_HEADER, (size_t)n);
+        memcpy(buf, c->log_buf + HW_LOG_READ_HEADER, (size_t)n);
         c->log_pos += (uint64_t)n;
         return n;
     }

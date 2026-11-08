@@ -25,10 +25,8 @@ box::error Cause(int Code)
     return Code == 0 ? box::error{} : box::error{box_errno_of(Code)};
 }
 
-Event Decode(Touch &Data)
+Event Decode(const Touch &Data)
 {
-    if (Data.payload_len < sizeof(kb_event_t))
-        return Event{EventKind::Gone, {}, box::error{box::errc::corrupted}};
     kb_event_t Key{};
     std::memcpy(&Key, Data.payload, sizeof(Key));
     return Event{EventKind::Key, KeyEvent{Key.ascii, Key.scancode, Key.mods}, {}};
@@ -36,9 +34,8 @@ Event Decode(Touch &Data)
 
 }  // namespace
 
-std::expected<Keyboard, StageError> Keyboard::Open(std::string_view Name) noexcept
+std::expected<Keyboard, StageError> Keyboard::Open() noexcept
 {
-    (void)Name;
     TouchTag Ear = console_listen();
     if (Ear == TOUCH_TAG_INVALID)
         return std::unexpected(StageError{StageErrorKind::KeyboardUnavailable,
@@ -77,17 +74,24 @@ Event Keyboard::Poll() noexcept
 {
     if (!IsOpen()) return Event{EventKind::Gone, {}, box::error{box::errc::invalid_state}};
     Touch Data{};
-    return touch_try_pop_tag(State->Ear, &Data) ? Decode(Data) : Event{EventKind::Quiet, {}, {}};
+    while (touch_try_pop_tag(State->Ear, &Data))
+        if (Data.payload_len >= sizeof(kb_event_t)) return Decode(Data);
+    return Event{EventKind::Quiet, {}, {}};
 }
 
 Event Keyboard::Wait(std::uint32_t TimeoutMs) noexcept
 {
     if (!IsOpen()) return Event{EventKind::Gone, {}, box::error{box::errc::invalid_state}};
-    Touch Data{};
-    int Code = touch_await(State->Ear, &Data, TimeoutMs);
-    if (Code == -ERR_TIMEOUT) return Event{EventKind::Quiet, {}, {}};
-    if (Code != 0) return Event{EventKind::Gone, {}, Cause(Code)};
-    return Decode(Data);
+    for (;;) {
+        Touch Data{};
+        int Code = touch_await(State->Ear, &Data, TimeoutMs);
+        if (Code == -ERR_TIMEOUT) return Event{EventKind::Quiet, {}, {}};
+        if (Code != 0) return Event{EventKind::Gone, {}, Cause(Code)};
+        if (Data.payload_len >= sizeof(kb_event_t)) return Decode(Data);
+        // Not a key, so nothing for the caller: a bounded wait says so, and
+        // one that waits until a key waits on.
+        if (TimeoutMs != 0) return Event{EventKind::Quiet, {}, {}};
+    }
 }
 
 box::status Keyboard::Close() noexcept

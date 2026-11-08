@@ -1,12 +1,9 @@
 /* klib_logring.c — the log ring. See klib_logring.h for why it exists.
  *
- * Locking: its own IRQ-safe spinlock, never the console lock. kputchar() is
- * reached two ways — from kprintf, which already holds the console lock, and
- * from the keyboard echo, which does not — so the ring cannot borrow that lock
- * without either missing what was typed or nesting into a lock the caller may
- * already hold. One lock of its own, taken last and never held while taking
- * another, is the whole of the ordering: console -> ring on one path, ring
- * alone on the other two, and no third path exists.
+ * Locking: its own IRQ-safe spinlock, taken last and never held while taking
+ * another. kprintf reaches it holding the console lock, hw.log.say the same
+ * way, and perf_trace with no lock at all; console -> ring is the whole of the
+ * ordering, and no path takes the console lock holding this one.
  *
  * spin_lock() disables interrupts on the acquiring core, so a timer or a
  * controller interrupt that lands mid-append and prints cannot deadlock
@@ -18,6 +15,11 @@
 #include "vmm.h"
 #include "cpu.h"            /* cpu_cpuid — which write-back this part has */
 #include "kernel_config.h"  /* CONFIG_CACHE_LINE_SIZE */
+#include "baton.h"          /* Knock — the bell is rung from a K-Core */
+#include "kring.h"          /* KResultPush — the bell's record */
+#include "process.h"        /* process_find_ref */
+#include "idt.h"            /* IdtNmiOrMcHere — no knock from an NMI or a #MC */
+#include "klib_panic.h"     /* PanicClaimed — nor from a panic */
 
 _Static_assert((LOGRING_CAPACITY & (LOGRING_CAPACITY - 1)) == 0,
                "LOGRING_CAPACITY must be a power of two — the position maps "
@@ -27,10 +29,30 @@ _Static_assert((LOGRING_CAPACITY & (LOGRING_CAPACITY - 1)) == 0,
 
 static spinlock_t g_ring_lock;
 static char       g_ring[LOGRING_CAPACITY];
+static uint8_t    g_ring_tone[LOGRING_CAPACITY];   /* the Tone of the byte at the same slot */
 
 /* Counted from the first byte this kernel ever said; never restarts, so a
  * position names the same byte for the life of the boot. */
 static uint64_t   g_written;
+
+/* The position just past the end of the last utterance (LogRingSaid). */
+static uint64_t   g_said;
+
+/* The bell: the pid that hung it, with LOG_BELL_RUNG once an utterance has
+ * marked it, and that strand's generation — a pid is let again, and the bell
+ * rings the incarnation that hung it or nobody. Under g_ring_lock. The ring
+ * marks it; the knock's visit takes it down as it rings, so one hang rings
+ * once; the next hang replaces it, release and teardown drop it. */
+#define LOG_BELL_RUNG 0x80000000u
+static uint32_t   g_bell;
+static uint32_t   g_bell_generation;
+static uint32_t   g_bell_due;   /* an utterance marked the bell; nobody has knocked yet */
+
+static void LogRingBellRing(void *ctx);
+static Knock g_bell_knock = {
+    .baton  = { .next = NULL, .run = LogRingBellRing, .ctx = NULL },
+    .raised = 0,
+};
 
 void LogRingLockInit(void)
 {
@@ -50,6 +72,11 @@ uint64_t LogRingWritten(void)
 char LogRingByteAt(uint64_t pos)
 {
     return g_ring[pos & LOGRING_MASK];
+}
+
+uint8_t LogRingToneAt(uint64_t pos)
+{
+    return g_ring_tone[pos & LOGRING_MASK];
 }
 
 #ifdef CONFIG_PRINTTOFILE
@@ -420,20 +447,116 @@ const char *LogKeepWriteBackName(void) { return "none"; }
 
 #endif /* CONFIG_PRINTTOFILE */
 
-void LogRingPut(char c)
+/* One byte in, under the lock. The tone goes in before the store that
+ * publishes the position, so a lock-free reader never sees a byte without
+ * its tone. */
+static inline void ring_put_locked(char c, uint8_t tone)
 {
-    spin_lock(&g_ring_lock);
-    g_ring[g_written & LOGRING_MASK] = c;
+    g_ring[g_written & LOGRING_MASK]      = c;
+    g_ring_tone[g_written & LOGRING_MASK] = tone;
     __atomic_store_n(&g_written, g_written + 1u, __ATOMIC_RELEASE);
     keep_put(c);
+}
+
+static inline void ring_said_locked(void)
+{
+    g_said = g_written;
+    if (g_bell && !(g_bell & LOG_BELL_RUNG)) {
+        g_bell |= LOG_BELL_RUNG;
+        __atomic_store_n(&g_bell_due, 1u, __ATOMIC_RELEASE);
+    }
+}
+
+void LogRingPut(char c, uint8_t tone)
+{
+    spin_lock(&g_ring_lock);
+    ring_put_locked(c, tone);
     spin_unlock(&g_ring_lock);
 
     /* The lock is down: the wire takes its own, and never this one. */
     WireKick();
 }
 
-uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
-                     uint64_t *out_oldest, uint64_t *out_written)
+void LogRingSay(const char *bytes, uint64_t n, uint8_t tone,
+                uint64_t *out_start, uint64_t *out_end)
+{
+    spin_lock(&g_ring_lock);
+    uint64_t start = g_written;
+    for (uint64_t i = 0; i < n; i++)
+        ring_put_locked(bytes[i], tone);
+    ring_said_locked();
+    uint64_t end = g_written;
+    spin_unlock(&g_ring_lock);
+
+    WireKick();
+    if (out_start) *out_start = start;
+    if (out_end)   *out_end   = end;
+}
+
+void LogRingSaid(void)
+{
+    spin_lock(&g_ring_lock);
+    ring_said_locked();
+    spin_unlock(&g_ring_lock);
+}
+
+bool LogRingBellHang(uint32_t pid, uint32_t generation, uint64_t from)
+{
+    spin_lock(&g_ring_lock);
+    bool news = g_said > from;
+    if (!news) {
+        g_bell            = pid;
+        g_bell_generation = generation;
+    }
+    spin_unlock(&g_ring_lock);
+    return news;
+}
+
+void LogRingBellDrop(void)
+{
+    spin_lock(&g_ring_lock);
+    g_bell = 0;
+    spin_unlock(&g_ring_lock);
+}
+
+void LogRingBellKnock(void)
+{
+    if (!__atomic_load_n(&g_bell_due, __ATOMIC_ACQUIRE)) return;
+    if (IdtNmiOrMcHere()) return;   /* the BSP's tick knocks for them */
+    if (PanicClaimed())   return;   /* every core stands: nobody to wake */
+    if (!__atomic_exchange_n(&g_bell_due, 0u, __ATOMIC_ACQ_REL)) return;
+    KnockOn(&g_bell_knock);
+}
+
+/* On a K-Core, every lock down. The bell is read again rather than carried:
+ * a holder that woke for something else, read the ring and hung a fresh bell
+ * in the meantime has nothing new to be woken for, and finds its bell
+ * unmarked here. */
+static void LogRingBellRing(void *ctx)
+{
+    (void)ctx;
+    KnockOpen(&g_bell_knock);
+
+    spin_lock(&g_ring_lock);
+    uint32_t bell       = g_bell;
+    uint32_t generation = g_bell_generation;
+    if (bell & LOG_BELL_RUNG) g_bell = 0;   /* rung: taken down, rung once */
+    spin_unlock(&g_ring_lock);
+    if (!(bell & LOG_BELL_RUNG)) return;
+
+    process_t *holder = process_find_ref(bell & ~LOG_BELL_RUNG);
+    if (!holder) return;
+    if (holder->generation == generation) {
+        Result r;
+        memset(&r, 0, sizeof(r));
+        r.error_code = ERR_WOULD_BLOCK;
+        (void)KResultPush(holder, &r);
+    }
+    process_ref_dec(holder);
+}
+
+static uint64_t ring_read(uint64_t from, void *dst, uint8_t *tones, uint64_t max,
+                          uint64_t *out_oldest, uint64_t *out_written)
 {
     char    *out    = (char *)dst;
     uint64_t copied = 0;
@@ -467,6 +590,11 @@ uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
         if (copied > first) {
             memcpy(out + first, &g_ring[0], (size_t)(copied - first));
         }
+        if (tones) {
+            memcpy(tones, &g_ring_tone[off], (size_t)first);
+            if (copied > first)
+                memcpy(tones + first, &g_ring_tone[0], (size_t)(copied - first));
+        }
     }
 
     spin_unlock(&g_ring_lock);
@@ -474,4 +602,16 @@ uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
     if (out_oldest)  *out_oldest  = oldest;
     if (out_written) *out_written = written;
     return copied;
+}
+
+uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
+                     uint64_t *out_oldest, uint64_t *out_written)
+{
+    return ring_read(from, dst, NULL, max, out_oldest, out_written);
+}
+
+uint64_t LogRingReadTones(uint64_t from, void *dst, uint8_t *tones, uint64_t max,
+                          uint64_t *out_oldest, uint64_t *out_written)
+{
+    return ring_read(from, dst, tones, max, out_oldest, out_written);
 }

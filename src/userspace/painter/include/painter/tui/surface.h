@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
-#include <string_view>
 
 #include "painter/tui/stage.h"
 
@@ -19,8 +18,7 @@ enum class SurfaceRole {
  * while the owner is alive and disappear when Close() or destruction occurs. */
 class Surface {
 public:
-    static std::expected<Surface, StageError> Open(std::string_view Name,
-                                                   std::int32_t LeastCols = 0,
+    static std::expected<Surface, StageError> Open(std::int32_t LeastCols = 0,
                                                    std::int32_t LeastRows = 0,
                                                    SurfaceRole Role = SurfaceRole::Overlay) noexcept;
 

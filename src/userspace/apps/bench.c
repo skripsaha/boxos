@@ -40,7 +40,6 @@
 #include "box/cpu.h"
 #include "box/system.h"
 #include "box/time.h"
-#include "box/vga.h"
 #include "box/file.h"
 #include "box/string.h"
 #include "box/convert.h"
@@ -300,17 +299,6 @@ static int b_uptime_ms(uint32_t i, void *ctx)
     (void)ctx;
     uint64_t ms = 0;
     return time_uptime_ms(&ms);
-}
-
-/* (5) HW deck — vga_setcolor_rgb: an 8-byte pair param, no out crate.
- *     Slightly cheaper than uptime because there's no payload to copy
- *     back. */
-static int b_vga_setcolor(uint32_t i, void *ctx)
-{
-    (void)ctx;
-    /* alternate to defeat any kernel-side "no-op" optimisation */
-    return vga_setcolor_rgb((i & 1) ? COLOR_LIGHT_GRAY : COLOR_WHITE,
-                            COLOR_BLACK);
 }
 
 /* (6) Cross-process IPC roundtrip: broadcast a 1-byte DISP_CMD_PING,
@@ -573,11 +561,10 @@ static void print_kv_u64(const char *label, uint64_t v, const char *unit)
 
 int main(void)
 {
-    /* Write straight to VGA: skip the display IPC route so the bench
-     * itself doesn't get amortised through DISP_CMD_render output. The
-     * rows we print are still measured cleanly because print() flushes
-     * synchronously in IO_MODE_VGA. */
-    io_set_mode(IO_MODE_VGA);
+    /* Said straight into the log ring: skip the display's lanes so the
+     * bench itself is not amortised through the console's merge. The rows
+     * we print are measured cleanly because every print is said at once. */
+    io_set_mode(IO_MODE_RING);
 
     println("BoxOS bench v1 — RDTSC microbenchmarks");
 
@@ -602,7 +589,6 @@ int main(void)
     bench_run("yield (notify pocket)", b_yield, NULL, 2000);
 
     /* Manifest dispatch costs */
-    bench_run("vga_setcolor (HW deck min)", b_vga_setcolor, NULL, 1000);
     bench_run("time_uptime_ms (HW deck)", b_uptime_ms, NULL, 1000);
 
     /* IPC */

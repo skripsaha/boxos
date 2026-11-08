@@ -8,6 +8,7 @@
 #include "irqchip.h"
 #include "scheduler.h"   /* g_global_tick, g_timer_frequency */
 #include "touch.h"
+#include "screen.h"      /* ScreenSwapKnock — Ctrl+Alt+Esc is the machine's */
 #include "logbook.h"
 #include "amp.h"         /* amp_get_core_index, MAX_CORES — per-core prefix state */
 #include "kb_event.h"    /* kb_event_t + KB_MOD_* — shared keyboard ABI */
@@ -83,6 +84,13 @@ static volatile uint8_t kb_e0_pending[MAX_CORES];
  * is the only key that carries this prefix, and its bytes must never reach the
  * modifier, lock or repeat logic — see keyboard_handle_scancode. */
 static volatile uint8_t kb_e1_swallow[MAX_CORES];
+
+/* Esc is down as half of Ctrl+Alt+Esc (see keyboard_handle_scancode). A
+ * keyboard's own typematic repeats a held key's make code, and the screen
+ * turns over once per press, not once per repeat: the edge is the first make
+ * after a break. One byte for every transport — PS/2 and USB HID can decode on
+ * two cores at once, hence the exchange. */
+static volatile uint8_t kb_screen_key_down;
 
 /* ─── LED state ─────────────────────────────────────────────────────────── */
 
@@ -208,18 +216,79 @@ static spinlock_t kb_repeat_lock;
    Internal helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* A terminal on the serial line has no byte for an arrow, Home or Delete,
+ * and spells each as a short sequence — ESC [ A for Up, ESC [ 3 ~ for
+ * Delete, ESC O A where it is in application mode. kb_seq holds one begun
+ * and not yet ended; only the COM1 IRQ handler touches it. */
+static char     kb_seq[8];
+static uint32_t kb_seq_len;
+
+/* What a sequence names: the key's scancode, 0 for one that is no key
+ * below, -1 while it may still become one. */
+static int kb_seq_key(const char *seq, uint32_t len)
+{
+    if (len < 3) return (len < 2 || seq[1] == '[' || seq[1] == 'O') ? -1 : 0;
+    switch (seq[2]) {
+    case 'A': return len == 3 ? KEY_UP    : 0;
+    case 'B': return len == 3 ? KEY_DOWN  : 0;
+    case 'C': return len == 3 ? KEY_RIGHT : 0;
+    case 'D': return len == 3 ? KEY_LEFT  : 0;
+    case 'H': return len == 3 ? KEY_HOME  : 0;
+    case 'F': return len == 3 ? KEY_END   : 0;
+    }
+    if (seq[1] != '[' || seq[2] < '1' || seq[2] > '8') return 0;
+    if (len == 3)       return -1;
+    if (seq[3] != '~')  return 0;
+    static const uint8_t tilde[8] = { KEY_HOME, KEY_INSERT, KEY_DELETE, KEY_END,
+                                      KEY_PAGEUP, KEY_PAGEDN, KEY_HOME, KEY_END };
+    return tilde[seq[2] - '1'];
+}
+
 /* Public: feed characters from an external input source (the COM1 serial
  * console — see serial_console_init) as "keyboard" Touch events, so a real
  * keypress and an injected byte are indistinguishable to whoever listens.
  * Deferred (IRQ-safe) publish is mandatory: keyboard_inject runs in the COM1
  * IRQ handler, same as the PS/2 site — a direct TouchPublish would take TagFS
  * registry locks with IF=0 (the deadlock pattern the ring exists to break). scancode 0 says
- * the key is synthetic. */
-void keyboard_inject(const char *chars, uint32_t count)
+ * the key is synthetic.
+ *
+ * A terminal's sequence becomes the key it names, published as PS/2 publishes
+ * one. `quiet` says the line fell silent after these bytes — the UART's own
+ * measure — so an ESC still held then was a lone Escape. A sequence the line
+ * cut in two goes on in the next call. */
+void keyboard_inject(const char *chars, uint32_t count, bool quiet)
 {
     for (uint32_t i = 0; i < count; i++) {
-        kb_event_t kb_ev = { .scancode = 0, .ascii = chars[i], .mods = 0 };
-        kb_publish_event(&kb_ev);
+        char c = chars[i];
+        if (kb_seq_len == 0 && c != KEY_ESCAPE) {
+            kb_event_t kb_ev = { .scancode = 0, .ascii = c, .mods = 0 };
+            kb_publish_event(&kb_ev);
+            continue;
+        }
+        kb_seq[kb_seq_len++] = c;
+        int key = kb_seq_key(kb_seq, kb_seq_len);
+        if (key < 0) continue;
+        if (key > 0) {
+            kb_event_t kb_ev = { .scancode = (uint8_t)key, .ascii = 0, .mods = KB_MOD_EXTENDED };
+            kb_publish_event(&kb_ev);
+            kb_seq_len = 0;
+            continue;
+        }
+        /* No key: what was held is bytes after all, and the last one is
+         * looked at again — it may begin a sequence of its own. */
+        for (uint32_t k = 0; k + 1 < kb_seq_len; k++) {
+            kb_event_t kb_ev = { .scancode = 0, .ascii = kb_seq[k], .mods = 0 };
+            kb_publish_event(&kb_ev);
+        }
+        kb_seq_len = 0;
+        i--;
+    }
+    if (quiet) {
+        for (uint32_t k = 0; k < kb_seq_len; k++) {
+            kb_event_t kb_ev = { .scancode = 0, .ascii = kb_seq[k], .mods = 0 };
+            kb_publish_event(&kb_ev);
+        }
+        kb_seq_len = 0;
     }
 }
 
@@ -876,6 +945,7 @@ void keyboard_handle_scancode(uint8_t scancode)
              * unknown modifiers instead of a repeat nothing can silence. */
             kb_e0_pending[core] = 0;
             kb_e1_swallow[core] = 0;
+            __atomic_store_n(&kb_screen_key_down, 0, __ATOMIC_RELAXED);
             kb_forget_repeat();
             __atomic_store_n(&kb_state.shift_pressed, 0, __ATOMIC_RELAXED);
             __atomic_store_n(&kb_state.ctrl_pressed,  0, __ATOMIC_RELAXED);
@@ -982,6 +1052,26 @@ void keyboard_handle_scancode(uint8_t scancode)
                           __atomic_load_n(&kb_state.num_lock,  __ATOMIC_RELAXED),
                           scroll);
         return;
+    }
+
+    /* ‼ CTRL+ALT+ESC IS THE MACHINE'S, AND NO PROGRAM EVER HEARS IT.
+     *
+     * It turns the glass over to the Emergency Screen and back (screen.h) —
+     * the one way to see what the kernel says when the display program has
+     * stopped drawing. It is caught here, in the decoder, because this is the
+     * one place that knows the modifiers AND can keep the key from being
+     * published: a kernel ear on the `keyboard` Touch would hear it after
+     * every program had, and Esc ends half the programs on this machine. The
+     * keyboard knows nothing more of the screen than that one call. */
+    if (key == 0x01) {                     /* Escape */
+        if (is_release) {
+            __atomic_store_n(&kb_screen_key_down, 0, __ATOMIC_RELAXED);
+        } else if (__atomic_load_n(&kb_state.ctrl_pressed, __ATOMIC_RELAXED) &&
+                   __atomic_load_n(&kb_state.alt_pressed,  __ATOMIC_RELAXED)) {
+            if (!__atomic_exchange_n(&kb_screen_key_down, 1, __ATOMIC_ACQ_REL))
+                ScreenSwapKnock();
+            return;
+        }
     }
 
     /* Key release — cancel repeat if it matches */

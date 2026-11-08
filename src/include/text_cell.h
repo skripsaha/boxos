@@ -2,15 +2,11 @@
 #define BOXOS_TEXT_CELL_H
 
 /*
- * Shared kernel/userspace ABI header — one cell of the text console.
- *
- * The Canvas has always held the screen as an array of these; what is new is
- * that userspace may hand a rectangle of them over as one op (HW_VGA_PAINT,
- * box/vga.h vga_paint). So the layout stopped being the video driver's
- * private business and became a wire: kernel and userspace include THIS
- * header, and the static assert below guards the size, because a stray field
- * or a change of order would be read as a screenful of the wrong colours
- * rather than as an error.
+ * One cell of the text console — a wire between programs and the display
+ * program: a layer is a rectangle of these in shared memory (box/display.h).
+ * The static assert below guards the size, because a stray field or a change
+ * of order would be read as a screenful of the wrong colours rather than as
+ * an error.
  *
  * Includer must provide uint*_t BEFORE including this header.
  *   Kernel:    #include "ktypes.h"

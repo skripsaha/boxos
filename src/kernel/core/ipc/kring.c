@@ -174,9 +174,20 @@ static ResultSlot *kring_slot_open(Porthole *porthole, process_t *target,
                         sizeof(ResultSlot), for_write);
 }
 
+/* The cloakroom token of the submit a record ANSWERS, or 0 when it answers
+ * none. An answer is the kernel's own — no sender — and carries the token of
+ * the submit it answers. A record from another strand is a message even when
+ * it carries a token: a question (KCTX_ASK) names its asker's, for the carrier
+ * to answer by, and nobody is parked on it. boxlib routes the same way, the
+ * sender first (result.c, route_of). */
+static inline uint32_t kring_answer_token(uint32_t sender_pid, uint64_t context)
+{
+    return sender_pid == 0 ? KCTX_COOKIE24((uint32_t)context) : 0u;
+}
+
 /* True when the process's ResultRing holds a PUBLISHED, unconsumed entry
- * whose context carries a non-zero cloakroom token — i.e. an answer to a
- * synchronous submit its owner has not read yet. Such a process must never
+ * that answers a submit (kring_answer_token) — an answer to a synchronous
+ * submit its owner has not read yet. Such a process must never
  * be committed to PROC_WAITING: every kernel-parked wait (addr_park,
  * touch_await, storage) ends exactly when this reply is consumed, so
  * sleeping past it is the "undelivered result" Nightwatch names — the
@@ -211,10 +222,11 @@ bool KResultRingHasPendingReply(process_t *proc)
         if (!slot) continue;
         uint64_t seq     = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
         uint64_t context = slot->r.context;
+        uint32_t sender  = slot->r.sender_pid;
         PortholeClose(&porthole);
         if (seq != 2u * (pos / cap) + 1u)
             continue;                    /* in-flight reservation or consumed */
-        if (KCTX_COOKIE24(context) != 0) return true;
+        if (kring_answer_token(sender, context) != 0) return true;
     }
     return false;
 }
@@ -275,7 +287,7 @@ static volatile uint64_t g_krp_token_astray;
 static void krp_refused(const process_t *target, const Result *r, const char *why)
 {
     uint64_t n     = __atomic_fetch_add(&g_krp_refused, 1, __ATOMIC_RELAXED);
-    uint32_t token = KCTX_COOKIE24(r->context);
+    uint32_t token = kring_answer_token(r->sender_pid, r->context);
     if (token != 0) {
         kprintf("[KRP] ERROR: dropped an ANSWER for pid %u (token %u): %s. The "
                 "strand waiting on that answer will not be woken by it\n",
@@ -315,6 +327,9 @@ bool KResultPush(process_t *target, const Result *r)
 
     uint32_t cap = rr->hdr.slot_count_max;
     if (cap == 0) { krp_refused(target, r, "its reply ring has no slots"); return false; }
+
+    /* The waiter's half of the token, if this answers a submit at all. */
+    uint32_t token = kring_answer_token(r->sender_pid, r->context);
 
     /* ── Claim a position, or refuse. Nothing here waits on the consumer. ──
      *
@@ -357,13 +372,14 @@ bool KResultPush(process_t *target, const Result *r)
      * Two different things arrive in a strand's reply ring, and only one of
      * them has somebody asleep on it:
      *
-     *   an ANSWER carries a cloakroom token (KCTX_COOKIE24) — it is the reply
-     *   to a Pocket this strand submitted, and its owner is parked on it. Lose
-     *   it and the strand sleeps forever on a question already answered.
+     *   an ANSWER is the kernel's and carries a cloakroom token
+     *   (kring_answer_token) — it is the reply to a Pocket this strand
+     *   submitted, and its owner is parked on it. Lose it and the strand
+     *   sleeps forever on a question already answered.
      *
-     *   UNSOLICITED traffic — IPC another process chose to send — has no
-     *   token. Nobody is committed to it, and its sender learns of the refusal
-     *   and may act on it.
+     *   UNSOLICITED traffic — IPC another process chose to send, a question
+     *   with its asker's token among it — answers nothing. Nobody is committed
+     *   to it, and its sender learns of the refusal and may act on it.
      *
      * A strand can have at most `pocket_cap` submits outstanding, because that
      * is how many Pockets fit in the ring it submits through — so if the last
@@ -381,7 +397,7 @@ bool KResultPush(process_t *target, const Result *r)
      * be read and written by the K-Core (see boxlib manifest.c ManifestSubmit).
      * Reserve the room here, and that whole class of bug has nowhere to live. */
     uint32_t limit = cap;
-    if (KCTX_COOKIE24(r->context) == 0) {
+    if (token == 0) {
         PocketRing *pr = kring_pocket_hdr(target);
         uint32_t reserve = pr ? pr->hdr.slot_count_max : (cap / 2u);
         limit = (cap > reserve) ? (cap - reserve) : (cap / 2u);
@@ -418,12 +434,12 @@ bool KResultPush(process_t *target, const Result *r)
              * refusal would otherwise be perfectly silent — and the strand
              * would simply never wake. Say it, name the victim, and rate-limit
              * so a saturated ring cannot drown the console it is warning. */
-            if (KCTX_COOKIE24(r->context) != 0 && (n & 0x3Fu) == 0) {
+            if (token != 0 && (n & 0x3Fu) == 0) {
                 kprintf("[KRP] ERROR: dropped an ANSWER for pid %u (token %u) — "
                         "reply ring full at %u of %u slots. The strand waiting "
                         "on that answer will not be woken by it\n",
                         (unsigned int)target->pid,
-                        (unsigned int)KCTX_COOKIE24(r->context),
+                        (unsigned int)token,
                         (unsigned int)(pos - head), (unsigned int)cap);
             }
             return false;
@@ -474,9 +490,8 @@ bool KResultPush(process_t *target, const Result *r)
 
     slot->r = *r;
 
-    /* The waiter's half of the token, read before the publish: once the
+    /* What the waiter says it waits on, read before the publish: once the
      * answer is out, its consumer may take it and say the next token. */
-    uint32_t token    = KCTX_COOKIE24(r->context);
     uint64_t awaiting = __atomic_load_n(&rr->hdr.awaiting, __ATOMIC_ACQUIRE);
 
     /* Publish — the RELEASE store makes the payload above visible to the
@@ -513,7 +528,7 @@ bool KResultPush(process_t *target, const Result *r)
     /* The chit this answer redeems, if one was left for it — BEFORE the wake,
      * so a strand that wakes and asks again finds its old promise KEPT and not
      * still DUE, which its next chit would call an answer dropped. */
-    ChitKeep(target, KCTX_COOKIE24(r->context));
+    ChitKeep(target, token);
 
     /* Wake.
      *
@@ -527,7 +542,7 @@ bool KResultPush(process_t *target, const Result *r)
      * A flip that enqueued has rung the core (sched_enqueue); otherwise the
      * scheduler's doorbell rings it only if the strand is not on a CPU. */
     bool enqueued = false;
-    if (KCTX_COOKIE24(r->context) != 0) {
+    if (token != 0) {
         enqueued = process_set_state(target, PROC_WORKING);
     } else if (process_get_state(target) == PROC_WAITING) {
         enqueued = process_set_state(target, PROC_WORKING);

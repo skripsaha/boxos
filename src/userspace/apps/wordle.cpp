@@ -413,7 +413,7 @@ bool is_exit_key(const painter::tui::KeyEvent &Key) {
 } // namespace
 
 int main() {
-  auto Opened = painter::tui::Stage::Open("wordle", 32, kKeyboardTop + 5);
+  auto Opened = painter::tui::Stage::Open(32, kKeyboardTop + 5);
   if (!Opened) {
     printf("%s\n", Opened.error().Describe("wordle").c_str());
     return 1;

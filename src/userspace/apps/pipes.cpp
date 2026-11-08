@@ -1,11 +1,10 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
-#include "box/cxx/console.h"
-#include "box/cxx/keyboard.h"
-#include "box/keyboard.h"
+#include "painter/tui/stage.h"
 
 namespace {
 
@@ -13,7 +12,7 @@ constexpr std::chrono::milliseconds kFrame{45};
 constexpr std::chrono::seconds kResetPeriod{30};
 constexpr std::uint8_t kWalkerCount = 5;
 constexpr std::uint8_t kCellWidth = 2;
-constexpr box::color kBackground = box::color::rgb(0x00, 0x00, 0x00);
+constexpr painter::core::Color kBackground = painter::core::Color::Rgb(0x00, 0x00, 0x00);
 
 enum class Direction : std::uint8_t { up, right, down, left };
 
@@ -23,8 +22,8 @@ struct Cell {
 };
 
 struct Walker {
-  std::uint8_t x = 0;
-  std::uint8_t y = 0;
+  std::int32_t x = 0;
+  std::int32_t y = 0;
   Direction direction = Direction::right;
   std::uint8_t color = 0;
   bool active = false;
@@ -48,42 +47,28 @@ Direction opposite(Direction direction) {
   return Direction::right;
 }
 
-box::color pipe_color(std::uint8_t index) {
+painter::core::Color pipe_color(std::uint8_t index) {
   switch (index % 6) {
   case 0:
-    return box::color::rgb(0x00, 0xFF, 0xFF);
+    return painter::core::Color::Rgb(0x00, 0xFF, 0xFF);
   case 1:
-    return box::color::rgb(0xFF, 0x00, 0xA8);
+    return painter::core::Color::Rgb(0xFF, 0x00, 0xA8);
   case 2:
-    return box::color::rgb(0xFF, 0xD0, 0x00);
+    return painter::core::Color::Rgb(0xFF, 0xD0, 0x00);
   case 3:
-    return box::color::rgb(0xB0, 0xFF, 0x20);
+    return painter::core::Color::Rgb(0xB0, 0xFF, 0x20);
   case 4:
-    return box::color::rgb(0x90, 0x00, 0xFF);
+    return painter::core::Color::Rgb(0x90, 0x00, 0xFF);
   default:
-    return box::color::rgb(0xFF, 0xA0, 0x00);
+    return painter::core::Color::Rgb(0xFF, 0xA0, 0x00);
   }
-}
-
-TextCell make_cell(char ch, box::color fg, box::color bg = kBackground) {
-  TextCell cell{};
-  cell.fg = fg.raw();
-  cell.bg = bg.raw();
-  cell.ch = ch;
-  return cell;
-}
-
-TextCell make_block(box::color color) {
-  return make_cell(' ', color, color);
 }
 
 class PipeField {
 public:
-  PipeField(std::uint8_t rows, std::uint8_t screen_cols)
-      : rows_(rows), screen_cols_(screen_cols),
-        cols_(static_cast<std::uint8_t>(screen_cols / kCellWidth)),
-        cells_(static_cast<std::size_t>(rows) * cols_),
-        frame_(static_cast<std::size_t>(rows) * screen_cols),
+  PipeField(std::int32_t rows, std::int32_t screen_cols)
+      : rows_(rows), cols_(screen_cols / kCellWidth),
+        cells_(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols_)),
         walkers_(kWalkerCount), rng_(seed()) {
     reset();
   }
@@ -106,35 +91,26 @@ public:
       reset();
   }
 
-  bool render() {
-    for (TextCell &cell : frame_)
-      cell = make_cell(' ', kBackground);
+  void render(painter::tui::Frame &frame) {
+    frame.Clear({kBackground, kBackground});
 
-    for (std::uint8_t y = 0; y < rows_; ++y) {
-      for (std::uint8_t x = 0; x < cols_; ++x) {
+    for (std::int32_t y = 0; y < rows_; ++y) {
+      for (std::int32_t x = 0; x < cols_; ++x) {
         const Cell &cell = cells_[index(x, y)];
         if (cell.links == 0)
           continue;
-        const box::color color = pipe_color(cell.color);
-        const std::uint8_t screen_x =
-            static_cast<std::uint8_t>(x * kCellWidth);
-        for (std::uint8_t offset = 0; offset < kCellWidth; ++offset)
-          frame_[screen_index(static_cast<std::uint8_t>(screen_x + offset), y)] =
-              make_block(color);
+        const painter::core::Color color = pipe_color(cell.color);
+        frame.Fill({x * kCellWidth, y, kCellWidth, 1}, ' ', {color, color});
       }
     }
-
-    return vga_paint(0, 0, rows_, screen_cols_, frame_.data()) == 0;
   }
 
   void restart() { reset(); }
 
 private:
-  std::uint8_t rows_;
-  std::uint8_t screen_cols_;
-  std::uint8_t cols_;
+  std::int32_t rows_;
+  std::int32_t cols_;
   std::vector<Cell> cells_;
-  std::vector<TextCell> frame_;
   std::vector<Walker> walkers_;
   std::uint32_t rng_;
 
@@ -152,22 +128,17 @@ private:
     return limit == 0 ? 0 : random() % limit;
   }
 
-  std::size_t index(std::uint8_t x, std::uint8_t y) const {
-    return static_cast<std::size_t>(y) * cols_ + x;
+  std::size_t index(std::int32_t x, std::int32_t y) const {
+    return static_cast<std::size_t>(y) * static_cast<std::size_t>(cols_) +
+           static_cast<std::size_t>(x);
   }
 
-  std::size_t screen_index(std::uint8_t x, std::uint8_t y) const {
-    return static_cast<std::size_t>(y) * screen_cols_ + x;
-  }
-
-  bool inside(std::int16_t x, std::int16_t y) const {
+  bool inside(std::int32_t x, std::int32_t y) const {
     return x >= 0 && y >= 0 && x < cols_ && y < rows_;
   }
 
-  bool empty(std::int16_t x, std::int16_t y) const {
-    return inside(x, y) && cells_[index(static_cast<std::uint8_t>(x),
-                                        static_cast<std::uint8_t>(y))]
-                              .links == 0;
+  bool empty(std::int32_t x, std::int32_t y) const {
+    return inside(x, y) && cells_[index(x, y)].links == 0;
   }
 
   bool has_empty_cell() const {
@@ -197,8 +168,8 @@ private:
       if (cells_[candidate].links != 0)
         continue;
 
-      walker.x = static_cast<std::uint8_t>(candidate % cols_);
-      walker.y = static_cast<std::uint8_t>(candidate / cols_);
+      walker.x = static_cast<std::int32_t>(candidate % static_cast<std::size_t>(cols_));
+      walker.y = static_cast<std::int32_t>(candidate / static_cast<std::size_t>(cols_));
       walker.direction = static_cast<Direction>(random_below(4));
       walker.color = static_cast<std::uint8_t>(random_below(6));
       walker.active = true;
@@ -232,25 +203,21 @@ private:
       next = turns[random_below(turn_count)];
     }
 
-    const std::int16_t next_x = static_cast<std::int16_t>(walker.x) + dx(next);
-    const std::int16_t next_y = static_cast<std::int16_t>(walker.y) + dy(next);
+    const std::int32_t next_x = walker.x + dx(next);
+    const std::int32_t next_y = walker.y + dy(next);
     Cell &current = cells_[index(walker.x, walker.y)];
-    Cell &destination =
-        cells_[index(static_cast<std::uint8_t>(next_x),
-                     static_cast<std::uint8_t>(next_y))];
+    Cell &destination = cells_[index(next_x, next_y)];
     current.links = static_cast<std::uint8_t>(current.links | bit(next));
     destination.links =
         static_cast<std::uint8_t>(destination.links | bit(opposite(next)));
     destination.color = walker.color;
-    walker.x = static_cast<std::uint8_t>(next_x);
-    walker.y = static_cast<std::uint8_t>(next_y);
+    walker.x = next_x;
+    walker.y = next_y;
     walker.direction = next;
   }
 
   bool can_move(const Walker &walker, Direction direction) const {
-    const std::int16_t next_x = static_cast<std::int16_t>(walker.x) + dx(direction);
-    const std::int16_t next_y = static_cast<std::int16_t>(walker.y) + dy(direction);
-    return empty(next_x, next_y);
+    return empty(walker.x + dx(direction), walker.y + dy(direction));
   }
 
   static Direction turn_left(Direction direction) {
@@ -281,41 +248,43 @@ private:
     return Direction::right;
   }
 
-  static std::int16_t dx(Direction direction) {
+  static std::int32_t dx(Direction direction) {
     return direction == Direction::right ? 1 : direction == Direction::left ? -1 : 0;
   }
 
-  static std::int16_t dy(Direction direction) {
+  static std::int32_t dy(Direction direction) {
     return direction == Direction::down ? 1 : direction == Direction::up ? -1 : 0;
   }
 
 };
 
-bool is_exit_key(const box::key &key) {
-  return key.ch() == KEY_ESCAPE || key.ch() == 'q' || key.ch() == 'Q';
+bool is_exit_key(const painter::tui::KeyEvent &key) {
+  return key.Ascii == painter::tui::KeyCodes::Escape || key.Ascii == 'q' || key.Ascii == 'Q';
 }
 
 } // namespace
 
 int main() {
-  const auto dimensions = box::vga::size();
-  if (dimensions.rows == 0 || dimensions.cols < kCellWidth) {
-    printf("pipes: screen is unavailable\n");
+  auto opened = painter::tui::Stage::Open(kCellWidth, 1);
+  if (!opened) {
+    printf("%s\n", opened.error().Describe("pipes").c_str());
     return 1;
   }
+  painter::tui::Stage screen = std::move(*opened);
 
-  PipeField field(dimensions.rows, dimensions.cols);
-  if (!field.render())
+  PipeField field(screen.Size().Height, screen.Size().Width);
+  field.render(screen.FrameBuffer());
+  if (!screen.Present())
     return 1;
 
-  box::key_stream keyboard;
   auto next_frame = std::chrono::steady_clock::now() + kFrame;
   auto next_reset = std::chrono::steady_clock::now() + kResetPeriod;
   for (;;) {
     const auto now = std::chrono::steady_clock::now();
     if (now >= next_reset) {
       field.restart();
-      if (!field.render())
+      field.render(screen.FrameBuffer());
+      if (!screen.Present())
         break;
       do {
         next_reset += kResetPeriod;
@@ -327,20 +296,22 @@ int main() {
           std::chrono::duration_cast<std::chrono::milliseconds>(next_frame - now);
       const auto timeout = static_cast<std::uint32_t>(
           remaining.count() < 1 ? 1 : remaining.count());
-      if (const auto key = keyboard.wait(timeout); key && is_exit_key(*key))
+      const painter::tui::Event event = screen.Wait(timeout);
+      if (event.Kind == painter::tui::EventKind::Gone)
+        break;
+      if (event.Kind == painter::tui::EventKind::Key && is_exit_key(event.Key))
         break;
       continue;
     }
 
     field.step();
-    if (!field.render())
+    field.render(screen.FrameBuffer());
+    if (!screen.Present())
       break;
     next_frame += kFrame;
     if (next_frame < std::chrono::steady_clock::now())
       next_frame = std::chrono::steady_clock::now() + kFrame;
   }
 
-  box::vga::clear(kBackground);
-  box::vga::move_cursor(0, 0);
   return 0;
 }

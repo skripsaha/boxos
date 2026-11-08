@@ -27,12 +27,12 @@
 #include <vector>
 
 #include "box/cxx/error.h"
+#include "box/display.h"
 #include "box/file.h"
 #include "box/form.h"
 #include "box/print.h"
 #include "box/time.h"
 #include "box/use.h"
-#include "box/vga.h"
 
 BOX_FORM("takes thing \"the file to copy\"\n"
          "takes into \"the copy's name\"\n"
@@ -277,8 +277,8 @@ class Progress {
 public:
     explicit Progress(std::uint64_t Total) : Total(Total), Began(Now())
     {
-        vga_dimensions_t Dimensions;
-        if (vga_getdimensions(&Dimensions) == 0 && Dimensions.cols > 8) Width = Dimensions.cols - 1u;
+        std::uint32_t Cols = 0, Rows = 0;
+        if (display_size(&Cols, &Rows) == 0 && Cols > 8) Width = Cols - 1u;
     }
 
     void Update(std::uint64_t Done)

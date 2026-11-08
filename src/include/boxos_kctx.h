@@ -31,6 +31,12 @@ typedef enum {
                           * (waybill != 0); synchronous fread/fwrite keep
                           * KCTX_GUIDE. Fully isolated: boxlib routes these to
                           * the ferry stash so no other consumer ever sees one. */
+    KCTX_ASK    = 11,    /* a question (system.ask) delivered to the carrier
+                          * it was asked of: sender_pid is the asker, the high
+                          * 24 bits its cookie — the pair names the question
+                          * for system.answer — and the payload begins with
+                          * AskFrom (below). Only the kernel stamps this kind,
+                          * so a plain send cannot pass for one. */
 } KResultContext;
 
 /*
@@ -48,5 +54,16 @@ typedef enum {
 #define KCTX_KIND(ctx)        ((uint32_t)(ctx) & 0xFFu)
 #define KCTX_COOKIE24(ctx)    ((uint32_t)(ctx) >> 8)
 #define KCTX_PACK24(kind, ck) ((uint32_t)(kind) | ((uint32_t)(ck) << 8))
+
+/* Who asked, in the kernel's words: the head of every KCTX_ASK payload, the
+ * question after it. The asking strand is sender_pid in this incarnation; its
+ * program is the cabin it runs in, named by the strand that founded it — the
+ * (pid, generation) that cabin's own CabinInfo carries. A carrier that keeps
+ * something per program counts it here, never by what the question says. */
+typedef struct AskFrom {
+    uint32_t generation;
+    uint32_t program_pid;
+    uint32_t program_generation;
+} AskFrom;
 
 #endif /* BOXOS_KCTX_H */

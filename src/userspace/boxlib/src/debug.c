@@ -6,8 +6,6 @@
 #include "box/timeouts.h"
 #include "boxos_decks.h"
 
-#define HW_DEBUG_PRINT  0x82
-
 static void uint64_to_dec(uint64_t v, char *buf, int *len)
 {
     char tmp[24];

@@ -828,8 +828,8 @@ PAINTER_LIB = $(PAINTER_DIR)/libpainter.a
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase assemble \
              me info say reboot bye defrag escheat fsck ipc_test memtag hw \
-             timezone logsave lastsaid rgbtest usetest faretest luggagetest headcount \
-             draft playtime lavalamp finish taskcenter hexer stringview \
+             timezone logsave lastsaid usetest faretest luggagetest headcount \
+             playtime lavalamp finish taskcenter hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
@@ -1217,7 +1217,7 @@ APP_ELFS := $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $
 
 APPS_STAMP  := $(APPS_DIR)/.apps.stamp
 APPS_INPUTS := $(wildcard $(APPS_DIR)/*.c) $(wildcard $(APPS_DIR)/*.cpp) \
-               $(wildcard $(APPS_DIR)/*.h) $(wildcard $(APPS_DIR)/bonsai/*) \
+               $(wildcard $(APPS_DIR)/*.h) $(wildcard $(APPS_DIR)/bonsai/*.cpp) $(wildcard $(APPS_DIR)/bonsai/*.h) \
                $(APPS_DIR)/Makefile
 
 ifneq ($(words $(wildcard $(APP_ELFS))),$(words $(APP_ELFS)))
@@ -1516,11 +1516,9 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/luggagetest.elf "utility,test" \
 	$(UTILS_DIR)/logsave.elf "utility,system,log" \
 	$(UTILS_DIR)/lastsaid.elf "utility,system,log" \
-	$(UTILS_DIR)/rgbtest.elf "utility,test" \
 	$(UTILS_DIR)/rollcall.elf "utility,test" \
 	$(UTILS_DIR)/handset.elf "utility,test" \
 	$(UTILS_DIR)/headcount.elf "utility,test" \
-	$(UTILS_DIR)/draft.elf    "utility,storage" \
 	$(UTILS_DIR)/playtime.elf "utility,fun" \
 	$(UTILS_DIR)/lavalamp.elf "utility,fun" \
 	$(UTILS_DIR)/finish.elf   "utility,system" \

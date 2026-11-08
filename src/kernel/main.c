@@ -1,4 +1,4 @@
-#include "video.h"
+#include "screen.h"
 #include "klib.h"
 #include "klib_logring.h"
 #include "serial.h"
@@ -86,13 +86,13 @@ void kernel_main(void)
      * survives — a warm reset, not a power cut. */
     LogKeepInit();
 
-    VideoInit();
+    ScreenInit();
 
     /*
      * ‼ THE FIRST THING THIS KERNEL SAYS ABOUT ITSELF, AND IT SAYS WHAT IT WAS
      * MADE FROM.
      *
-     * The slot is exact and there is only one. After VideoInit, so the line is
+     * The slot is exact and there is only one. After ScreenInit, so the line is
      * on the glass of a machine with no cable; before serial_init, so it is in
      * the log ring before the UART complains about not being there — the ring
      * keeps it either way and the Wire drains it the moment it exists.
@@ -264,22 +264,17 @@ void kernel_main(void)
      * invalid.  Re-fetch via pull map so all further bi accesses are safe. */
     bi = boot_info_get();
 
-    /* Switch to GOP framebuffer rendering if we booted via UEFI.
-     * Must happen after vmm_init() so vmm_map_mmio() is available. */
-    if (bi->version >= BOOT_INFO_VERSION2 && bi->fb_addr) {
-        VideoInitFramebuffer(bi->fb_addr, bi->fb_width, bi->fb_height,
-                             bi->fb_stride, bi->fb_format);
-        if (VideoGetMode() == DISPLAY_GOP_FB) {
-            kprintf("[DISPLAY] GOP framebuffer active: %ux%u (stride=%u fmt=%u)\n",
-                    bi->fb_width, bi->fb_height, bi->fb_stride, bi->fb_format);
-        }
-    }
+    /* The UEFI loader's framebuffer becomes the glass. After vmm_init(), so
+     * the kernel can map it. */
+    if (bi->version >= BOOT_INFO_VERSION2 && bi->fb_addr)
+        ScreenAdoptFramebuffer(bi->fb_addr, bi->fb_width, bi->fb_height,
+                               bi->fb_stride, bi->fb_format);
 
-    /* Said once, in both backends, because a box on the screen is the first
-     * thing the owner will ask about standing in front of the board — and
-     * because for three years the same em dash came out of this kernel as
-     * three empty cells and out of userspace as a '?'. */
-    kprintf("[DISPLAY] one cell of this glass holds one CP437 glyph, so UTF-8 is folded "
+    /* Said once, because a box on the screen is the first thing the owner
+     * will ask about standing in front of the board — and because for three
+     * years the same em dash came out of this kernel as three empty cells and
+     * out of userspace as a '?'. */
+    kprintf("[SCREEN] one cell of this glass holds one CP437 glyph, so UTF-8 is folded "
             "at the font and nowhere earlier — the log ring still keeps every byte it "
             "was handed, and a character this font cannot draw appears as one solid box "
             "rather than two or three wrong glyphs\n");
@@ -672,10 +667,6 @@ void kernel_main(void)
      * process exists yet, and listening before there is any userspace to
      * listen for you is the entire reason TouchWatch exists. */
     { extern void TouchWatchSelfTest(void); TouchWatchSelfTest(); }
-
-    /* Touch is up after guide_init — let the Canvas surface broadcast
-     * its readiness so log collectors / power daemons can subscribe. */
-    VideoNotifyReady();
 
     /* MemTag's lifecycle publishes (memtag:region:*, memtag:tag:*) become
      * live once Touch resolves tags. Until now they silently no-op'd. */

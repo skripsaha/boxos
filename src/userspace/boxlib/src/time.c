@@ -9,11 +9,7 @@
 #include "box/core/result.h"
 #include "box/clock.h"
 #include "box/timeouts.h"
-
-#define HW_TIMER_GET_MS    0x11
-#define HW_RTC_GET_TIME    0x15
-#define HW_RTC_GET_UNIX64  0x16
-#define HW_RTC_GET_UPTIME  0x17
+#include "boxos_decks.h"
 
 
 int time_get(BoxTime *out)

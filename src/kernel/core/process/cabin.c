@@ -12,9 +12,11 @@
 #include "auth_tags.h"
 #include "atomics.h"
 #include "bay.h"       /* BayCleanupCabin — the claims are the cabin's */
+#include "screen.h"    /* ScreenCleanupCabin — the screen window is a device's */
 #include "brook.h"     /* BrookCleanupCabin — the mapping half of a Brook claim */
 #include "touch.h"     /* TouchCleanupProcess — each strand's death, committed once */
 #include "proc_exit.h"
+#include "cabin_info.h"  /* CabinProgram — the program is what the cabin's own page says */
 
 /*
  * cabin_set_tag_bit — intern a single tag id into the cabin's fast-path
@@ -178,10 +180,26 @@ cabin_t *cabin_create(uint32_t pid, const char *tags)
     return cabin;
 }
 
+bool CabinProgram(const cabin_t *cabin, uint32_t *pid, uint32_t *generation)
+{
+    if (!cabin || !cabin->cabin_info_phys) return false;
+    const CabinInfo *info = (const CabinInfo *)vmm_phys_to_virt(cabin->cabin_info_phys);
+    if (!cabin_info_valid(info)) return false;
+    *pid        = info->pid;
+    *generation = info->generation;
+    return true;
+}
+
 void cabin_destroy(cabin_t *cabin)
 {
     if (!cabin)
         return;
+
+    /* The screen window first, before anything else of this cabin goes: its
+     * frames are the glass, a device's, and vmm_destroy_context would hand
+     * every one of them to the PMM. Letting go also gives the glass back to
+     * the Emergency Screen. */
+    ScreenCleanupCabin(cabin);
 
     /* Clear the MemTag bookkeeping on the shared IPC ring pages before
      * vmm_destroy_context frees them.  These tags are CABIN-wide (every

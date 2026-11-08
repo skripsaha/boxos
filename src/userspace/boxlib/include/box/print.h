@@ -9,14 +9,14 @@ extern "C" {
 #include "box/color.h"
 #include "box/touch.h"
 
-#define IO_MODE_VGA 0
-#define IO_MODE_IPC 1
+/* IO_MODE_IPC: text rides this strand's console lane to the display program.
+ * IO_MODE_RING: text is said straight into the log ring (log_say), which the
+ * display draws in its order, or the kernel's Emergency Screen shows while
+ * no display holds the screen. A cabin with no display lands here by itself. */
+#define IO_MODE_RING 0
+#define IO_MODE_IPC  1
 
 void io_set_mode(uint8_t mode);
-uint8_t io_get_mode(void);
-
-void io_set_display_pid(uint32_t pid);
-uint32_t io_get_display_pid(void);
 
 /* With `cmd -> file` (box/form.h) everything a program prints — print, println,
  * print_bytes, printf, and std::cout above them — is added to the end of that
@@ -27,8 +27,8 @@ void print(const char* str);
 void println(const char* str);
 
 /* Write exactly `len` bytes to the console (not NUL-terminated). Same
- * VGA/IPC routing, colour state and UTF-8->'?' filtering as print(); the
- * byte-count form std::print and other length-carrying writers need. */
+ * routing and colour state as print(); the byte-count form std::print and
+ * other length-carrying writers need. */
 void print_bytes(const char* data, size_t len);
 
 /* The same two, to the person's screen whatever `->` says. What a program
@@ -40,6 +40,11 @@ void print_bytes_to_screen(const char* data, size_t len);
 
 void clear(void);
 void io_flush(void);
+/* The strand is leaving: what it staged is handed in, and it waits until the
+ * display has said everything it pushed — or says it itself if the display
+ * has died meanwhile. exit() and strand_exit() call it; it waits, so nothing
+ * else should. */
+void io_depart(void);
 
 /* printf with BoxOS-native colored runs.
  *
@@ -50,18 +55,19 @@ void io_flush(void);
  *                        in the same printf call.
  *             %bgcolor — the same for the background. Colour is a full
  *                        24-bit (fg, bg) pair the whole way to the screen;
- *                        the VGA text backend alone projects it onto its
+ *                        the VGA text page alone projects it onto its
  *                        16 colours, by dominant hue, at draw time.
  *
  * UTF-8 input: passes through untouched, every byte of it. A printer does
  * not decide what a character looks like — the code that owns the font does,
- * at the moment it draws (kernel canvas.c, font/glyph_fold.h), where a
+ * at the moment it draws (boxos_glyph_fold.h, in the display program and the
+ * kernel's Emergency Screen), where a
  * codepoint with no glyph becomes a visible box and nothing is lost on the
  * way to the log. Replacing sequences here used to cost the character in the
  * log file as well, because it happened in this cabin, before the syscall.
  *
- * The whole printf produces ONE syscall — output runs are batched as ops
- * inside a single Manifest submit.
+ * With a display, the runs ride this strand's console lane and cost no call
+ * into the kernel; without one, each run is said into the log ring.
  */
 int printf(const char* fmt, ...);
 
@@ -126,8 +132,23 @@ TouchTag console_listen(void);
 void console_unlisten(void);
 
 /* Move the cursor `delta` cells along the console (negative = back), across
- * line ends, erasing nothing — the editor's step inside a line. */
-void console_step(int32_t delta);
+ * line ends, erasing nothing — the editor's step inside a line. False when
+ * this console has no caret to move: no display reads this strand's lane, and
+ * the log ring it says its text into is an account, not a screen — nothing
+ * moved. A step of 0 moves nothing and only says which it is. */
+bool console_step(int32_t delta);
+
+/* A hint laid on the glass in the current colours: drawn like text, never
+ * said into the log ring (box/display.h, CONSOLE_RUN_HINT) — what a program
+ * shows without saying it, like a line editor's whisper. In its place among
+ * what the strand prints. With no display there is no glass to lay it on, and
+ * nothing is done. */
+void console_hint(const char *bytes, uint32_t len);
+
+/* Everything this strand has printed, into its console lane, and the number
+ * of its last frame there — 0 when it has no lane. A question to the display
+ * that cares about the console's order carries it (box/display.h). */
+uint64_t console_order_mark(void);
 
 void print_int(int num);
 void print_hex(uint32_t num);

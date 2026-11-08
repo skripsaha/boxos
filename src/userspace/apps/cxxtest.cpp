@@ -5519,33 +5519,8 @@ void Phase28()
     }
     Check(box::current_color() == box::colors::white, "phase28 styled(fg,bg) restores fg");
 
-    // ── box::vga — batch session + dimensions (text-mode; rendering display-
-    //    side). Non-destructive: no clear/scroll/visible text, just the batch
-    //    syscall path and introspection. ──────────────────────────────────────
-    box::vga::dimensions dim = box::vga::size();
-    (void)box::vga::cursor();
-    if (dim.rows > 0 && dim.cols > 0) {
-        {
-            box::vga::session s;  // ops batch into one Manifest
-            box::vga::set_color(box::colors::light_gray, box::colors::black);
-        }  // commit on scope exit
-        box::vga::session s2;
-        Check(s2.commit() == 0, "phase28 vga batch session commits");
-        // color set/get round-trip (outside a session — getters resolve at once,
-        // a batched set would be deferred). The pair comes back bit-exact:
-        // nothing between userspace and the kernel quantizes any more.
-        box::vga::set_color(box::colors::cyan, box::colors::black);
-        box::color rt_fg, rt_bg;
-        Check(box::vga::get_color(rt_fg, rt_bg) &&
-              rt_fg == box::colors::cyan && rt_bg == box::colors::black,
-              "phase28 vga set_color/get_color round-trip is exact rgb");
-        box::vga::set_color(box::colors::light_gray, box::colors::black);  // restore a sane default
-    } else {
-        printf("[CXX] note phase28: vga text mode unavailable on this config\n");
-    }
-
     printf("[CXX] PASS phase28: box::color/colors + std::formatter<color> + "
-           "box::styled (scoped) + box::vga::session (batch)\n");
+           "box::styled (scoped)\n");
 }
 
 void Phase29()
@@ -10485,7 +10460,7 @@ void Phase54()
 }
 
 // ── Ф25e: explicit snapshot model (record snapshot vs live handle) + typed
-//    tags + anchor_all + vga::clear_line ──
+//    tags + anchor_all ──
 void Phase55()
 {
     using box::tagfs::file;
@@ -10569,13 +10544,8 @@ void Phase55()
         for (auto f2 : box::tagfs::query("p55")) (void)f2.remove();
     }
 
-    // (5) vga::clear_line — the physical clear is dormant on the serial log
-    //     (like every box::vga op); the syscall round-trip is what's checked.
-    Check(box::vga::clear_line(0, box::colors::black), "phase55 vga::clear_line syscall ok");
-
     printf("[CXX] PASS phase55: box::tagfs::record (captured snapshot vs live/reread) "
-           "+ typed tags (tag::as<T> / file::add_tag<T>) + anchor_all + "
-           "vga::clear_line\n");
+           "+ typed tags (tag::as<T> / file::add_tag<T>) + anchor_all\n");
 }
 
 void Phase56()
@@ -55624,36 +55594,23 @@ void Phase240()
            "are one answer\n");
 }
 
-// ── Phase rgb: the C++ colour surface carries #RRGGBB end to end ───────────
-// In-band only: set_color/get_color round-trips an arbitrary 24-bit pair
-// bit-exactly through box::vga (the setter fires the kernel op; the getter
-// answers from boxlib's coherent cache — kernel truth is read raw by the
-// rgbtest utility, which also paints the screen probe for the host-side
-// screendump oracle tools/rgbcheck.sh).
+// ── Phase rgb: the C++ colour surface carries #RRGGBB to the print state ──
+// An arbitrary 24-bit pair goes in through box::set_color/set_background and
+// comes back bit-exactly — nothing on the way quantizes it. What reaches the
+// glass is the display's.
 void PhaseRgb()
 {
-    box::vga::dimensions dim = box::vga::size();
-    if (dim.rows == 0 || dim.cols == 0) {
-        printf("[CXX] note phase rgb: vga unavailable on this config\n");
-        return;
-    }
+    const box::color fg = box::current_color(), bg = box::current_background();
 
-    box::color f, b;
-    Check(box::vga::set_color(box::color(0x12, 0x34, 0x56), box::color(0x65, 0x43, 0x21)),
-          "phase rgb set_color(#123456,#654321)");
-    Check(box::vga::get_color(f, b) &&
-          f == box::color(0x12, 0x34, 0x56) && b == box::color(0x65, 0x43, 0x21),
-          "phase rgb get_color returns the exact pair");
+    box::set_color(box::color(0x12, 0x34, 0x56));
+    box::set_background(box::color(0x65, 0x43, 0x21));
+    Check(box::current_color() == box::color(0x12, 0x34, 0x56) &&
+          box::current_background() == box::color(0x65, 0x43, 0x21),
+          "phase rgb the pair #123456/#654321 comes back exact");
 
-    // Sentinels resolve to concrete role defaults before the wire.
-    Check(box::vga::set_color(box::colors::use_default, box::colors::inherit),
-          "phase rgb set_color(default,inherit)");
-    Check(box::vga::get_color(f, b) &&
-          f == box::colors::light_gray && b == box::colors::black,
-          "phase rgb sentinels resolve to light_gray/black");
-
-    box::vga::set_color(box::colors::light_gray, box::colors::black);
-    printf("[CXX] PASS phase rgb: full #rrggbb survives the whole path\n");
+    box::set_color(fg);
+    box::set_background(bg);
+    printf("[CXX] PASS phase rgb: full #rrggbb survives to the print state\n");
 }
 
 const PhaseRow kPhases[] = {

@@ -160,7 +160,7 @@ void DrawCrab(const Crab &Creature, painter::tui::Frame &Canvas)
 int main()
 {
     std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open("crab", SpriteWidth + 2, SpriteHeight + 2);
+        painter::tui::Surface::Open(SpriteWidth + 2, SpriteHeight + 2);
     if (!Opened) {
         print_to_screen((Opened.error().Describe("crab") + '\n').c_str());
         return 1;
@@ -178,7 +178,7 @@ int main()
     painter::tui::Frame Canvas = std::move(*Created);
 
     std::expected<painter::tui::Keyboard, painter::tui::StageError> Input =
-        painter::tui::Keyboard::Open("crab");
+        painter::tui::Keyboard::Open();
     if (!Input) {
         print_to_screen((Input.error().Describe("crab") + '\n').c_str());
         return 1;

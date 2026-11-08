@@ -83,30 +83,24 @@ int main(void)
     }
     print("[mtest] PASS — fill+move via Manifest worked\n");
 
-    /* Phase 2 of demo: print a message via Hardware Deck PUTSTRING using the
-     * Manifest path — proves hw ops are reachable through the new dispatch. */
+    /* Phase 2 of demo: say a line into the log ring through Hardware Deck
+     * LOG_SAY on the Manifest path — proves hw ops are reachable through the
+     * new dispatch. */
     static uint8_t mbuf2[128];
-    static const char hw_msg[] = "[mtest] HW VGA via Manifest works\n";
-    /* [u32 fg][u32 bg][u8 flags] — light gray on black, flags=0. */
-    uint8_t  hw_params[9];
-    uint32_t hw_fg = 0xAAAAAAu, hw_bg = 0x000000u;
-    memcpy(&hw_params[0], &hw_fg, 4);
-    memcpy(&hw_params[4], &hw_bg, 4);
-    hw_params[8] = 0;
+    static const char hw_msg[] = "[mtest] HW log.say via Manifest works\n";
 
     ManifestBuilder mb2;
     if (ManifestBuilderInit(&mb2, mbuf2, sizeof(mbuf2)) != 0) exit(1);
-    if (ManifestBuilderAddOp(&mb2, DECK_HARDWARE, 0x71u /* HW_VGA_PUTSTRING */,
-                             0, 0, CRATE_INDEX_NONE,
-                             hw_params, sizeof(hw_params)) != 0) exit(1);
+    if (ManifestBuilderAddOp(&mb2, DECK_HARDWARE, HW_LOG_SAY,
+                             0, 0, CRATE_INDEX_NONE, NULL, 0) != 0) exit(1);
     if (ManifestBuilderFinalize(&mb2) != 0) exit(1);
 
-    Crate vga_in;
-    /* PUTSTRING reads in_crate.size bytes; do not include the trailing NUL. */
-    CrateSetInput(&vga_in, (void *)hw_msg, sizeof(hw_msg) - 1);
+    Crate hw_in;
+    /* LOG_SAY reads in_crate.size bytes; do not include the trailing NUL. */
+    CrateSetInput(&hw_in, (void *)hw_msg, sizeof(hw_msg) - 1);
 
     Result r2;
-    int rc2 = ManifestSubmit((Manifest *)mbuf2, &vga_in, 1, &r2);
+    int rc2 = ManifestSubmit((Manifest *)mbuf2, &hw_in, 1, &r2);
     if (rc2 != 0) {
         print("[mtest] HW manifest submit failed\n");
         exit(1);

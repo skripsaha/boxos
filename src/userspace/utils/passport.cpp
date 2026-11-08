@@ -509,7 +509,7 @@ bool PaintReport(const std::vector<Line> &Lines)
     std::size_t ReportRows = TopMargin + std::max(LogoCellRows, CardRows);
     constexpr std::size_t PromptRows = 1;
     std::expected<painter::tui::ConsoleSurface, painter::tui::StageError> Opened =
-        painter::tui::ConsoleSurface::Open("passport", MinimumCols, static_cast<std::int32_t>(ReportRows + PromptRows));
+        painter::tui::ConsoleSurface::Open(MinimumCols, static_cast<std::int32_t>(ReportRows + PromptRows));
     if (!Opened) {
         print_to_screen((Opened.error().Describe("passport") + '\n').c_str());
         return false;

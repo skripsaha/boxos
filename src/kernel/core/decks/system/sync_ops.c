@@ -570,8 +570,10 @@ void ProcessGoneDeliver(process_t *proc, int32_t exit_code)
      * touch_cleaned is already committed, so SysProcessGone answers them
      * directly instead of linking. */
     spin_lock(&proc->gone_lock);
-    GoneWaiter *list = proc->gone_waiters;
+    GoneWaiter *list  = proc->gone_waiters;
+    Question   *asked = proc->questions;
     proc->gone_waiters = NULL;
+    proc->questions    = NULL;
     spin_unlock(&proc->gone_lock);
 
     while (list) {
@@ -596,6 +598,14 @@ void ProcessGoneDeliver(process_t *proc, int32_t exit_code)
         process_ref_dec(proc);          /* the awaited record, one per waiter  */
         kfree(list);
         list = next;
+    }
+
+    /* Every question asked of this life and not answered is answered here,
+     * by its end (system.ask). */
+    while (asked) {
+        Question *next = asked->next;
+        QuestionSettle(asked, ERR_PROCESS_NOT_FOUND, NULL, 0);
+        asked = next;
     }
 }
 

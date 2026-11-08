@@ -134,7 +134,7 @@ private:
 int main()
 {
     std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open("pulse", 12, 1, painter::tui::SurfaceRole::Notice);
+        painter::tui::Surface::Open(12, 1, painter::tui::SurfaceRole::Notice);
     if (!Opened) return 1;
     painter::tui::Surface Screen = std::move(*Opened);
     const painter::core::Size Dimensions = Screen.Size();

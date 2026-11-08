@@ -5,6 +5,7 @@
 
 #include "box/color.h"
 #include "boxos_glyph_fold.h"
+#include "boxos_log_tone.h"
 
 namespace {
 
@@ -140,6 +141,43 @@ void ConsoleModel::Write(const char *Bytes, std::size_t Length,
     }
 }
 
+namespace {
+
+// What each tone of the kernel's lines looks like on this console. The kernel
+// says what kind of text a line is; the colour is the display's.
+struct ToneColours {
+    std::uint32_t Foreground;
+    std::uint32_t Background;
+};
+
+constexpr ToneColours ToneTheme[LOG_TONE_COUNT] = {
+    {COLOR_LIGHT_GRAY, COLOR_BLACK},   // PLAIN
+    {COLOR_RED,        COLOR_BLACK},   // ERROR
+    {COLOR_GREEN,      COLOR_BLACK},   // SUCCESS
+    {COLOR_YELLOW,     COLOR_BLACK},   // WARNING
+    {COLOR_CYAN,       COLOR_BLACK},   // HINT
+    {COLOR_LIGHT_GRAY, COLOR_BLACK},   // SAID — a program's own word
+};
+
+const ToneColours &Theme(std::uint8_t Tone) noexcept
+{
+    return ToneTheme[Tone < LOG_TONE_COUNT ? Tone : LOG_TONE_PLAIN];
+}
+
+}  // namespace
+
+void ConsoleModel::WriteKernel(const char *Bytes, const std::uint8_t *Tones, std::size_t Count)
+{
+    std::size_t Begin = 0;
+    while (Begin < Count) {
+        std::size_t End = Begin + 1;
+        while (End < Count && Tones[End] == Tones[Begin]) End++;
+        const ToneColours &Colours = Theme(Tones[Begin]);
+        Write(Bytes + Begin, End - Begin, Colours.Foreground, Colours.Background);
+        Begin = End;
+    }
+}
+
 void ConsoleModel::Step(std::int32_t Delta)
 {
     if (WidthValue == 0 || HeightValue == 0) return;
@@ -164,6 +202,7 @@ void ConsoleModel::Apply(const ConsoleRun &Run)
         return;
     }
     case CONSOLE_RUN_TEXT:
+    case CONSOLE_RUN_HINT:
         Write(Run.text, std::min<std::size_t>(Run.len, CONSOLE_RUN_TEXT_MAX), Run.fg, Run.bg);
         return;
     default:
@@ -171,26 +210,13 @@ void ConsoleModel::Apply(const ConsoleRun &Run)
     }
 }
 
-bool ConsoleModel::CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Width,
+void ConsoleModel::CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Width,
                                std::uint32_t Height,
                                std::span<const DisplayLayerCell> Cells,
                                std::uint32_t ScrollRows,
                                std::uint32_t CursorX, std::uint32_t CursorY,
                                bool CursorVisible)
 {
-    if (Width == 0 || Height == 0 || X < 0 || Y < 0 ||
-        static_cast<std::uint32_t>(X) + Width > WidthValue ||
-        static_cast<std::uint32_t>(Y) + Height > HeightValue)
-        return false;
-
-    const std::size_t Count = static_cast<std::size_t>(Width) * Height;
-    if (Cells.size() != Count || ScrollRows > HeightValue) return false;
-    if (CursorVisible &&
-        (CursorX >= Width || CursorY >= Height ||
-         static_cast<std::uint32_t>(X) + CursorX >= WidthValue ||
-         static_cast<std::uint32_t>(Y) + CursorY >= HeightValue))
-        return false;
-
     for (std::uint32_t Row = 0; Row < ScrollRows; Row++) Scroll();
     if (ScrollRows != 0)
         CursorRow = CursorRow > ScrollRows ? CursorRow - ScrollRows : 0;
@@ -208,5 +234,4 @@ bool ConsoleModel::CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Wid
         CursorColumn = static_cast<std::uint32_t>(X) + CursorX;
         CursorRow = static_cast<std::uint32_t>(Y) + CursorY;
     }
-    return true;
 }

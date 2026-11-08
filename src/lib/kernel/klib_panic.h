@@ -55,8 +55,12 @@ void PanicStandIfClaimedElsewhere(void);
 /* True on the core that holds the claim — once a panic is claimed, the one core
  * still running, and running nothing but its account (klib_panic.c says why
  * it never leaves it). spin_lock asks it before it waits: no other core will
- * ever give a lock back to it (klib_lock.c). kprintf asks it to take the
- * glass back from a Canvas batch another core left open (klib_print.c). */
+ * ever give a lock back to it (klib_lock.c). */
 bool PanicOwnedHere(void);
+
+/* True once any core holds the claim. The log ring asks it before it knocks
+ * for its bell: a panic's account is for the glass and the wire, and nobody is
+ * left running to be woken. */
+bool PanicClaimed(void);
 
 #endif /* KLIB_PANIC_H */

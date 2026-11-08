@@ -1,22 +1,26 @@
 /*
- * vga_font.h — 8×16 VGA BIOS character font (256 glyphs × 16 row bytes each).
+ * boxos_font.h — the 8×16 IBM VGA ROM font (256 glyphs × 16 row bytes),
+ * shared kernel/userspace.
  *
- * This is the standard IBM VGA ROM 8×16 font used in 80×25 text mode.
- * Included here so the GOP software renderer produces output identical to
- * hardware VGA text mode.
+ * One font for every hand that draws a glyph: the display program, which owns
+ * the screen, and the kernel's Emergency Screen, which draws only while nobody
+ * does. A cell byte means the same picture in both, and it is the picture
+ * hardware VGA text mode draws from its own copy of this ROM, so a line looks
+ * the same on a BIOS glass and a GOP one. Codepoints reach a cell through
+ * boxos_glyph_fold.h, which cites this table.
  *
  * Source: public-domain VGA BIOS character set, originally from the IBM PC
- * VGA ROM at segment 0xC000.  No copyright applies.
+ * VGA ROM at segment 0xC000. No copyright applies.
  */
 
-#ifndef VGA_FONT_H
-#define VGA_FONT_H
+#ifndef BOXOS_FONT_H
+#define BOXOS_FONT_H
 
-#define FONT_W  8
-#define FONT_H  16
+#define BOXOS_FONT_WIDTH   8
+#define BOXOS_FONT_HEIGHT  16
 
 /* Each entry is 16 bytes, one byte per scanline, MSB = leftmost pixel. */
-static const unsigned char vga_font_8x16[256][16] = {
+static const unsigned char BoxFontGlyphs[256][16] = {
     /* 0x00 NUL */ {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
     /* 0x01 ☺  */ {0x00,0x00,0x7E,0x81,0xA5,0x81,0x81,0xBD,0x99,0x81,0x81,0x7E,0x00,0x00,0x00,0x00},
     /* 0x02 ☻  */ {0x00,0x00,0x7E,0xFF,0xDB,0xFF,0xFF,0xC3,0xE7,0xFF,0xFF,0x7E,0x00,0x00,0x00,0x00},
@@ -279,4 +283,4 @@ static const unsigned char vga_font_8x16[256][16] = {
     /* 0xFF   */ {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
 };
 
-#endif /* VGA_FONT_H */
+#endif /* BOXOS_FONT_H */

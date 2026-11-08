@@ -241,6 +241,14 @@ vmm_map_result_t vmm_map_pages(vmm_context_t* ctx, uintptr_t virt_addr,
 bool vmm_unmap_page(vmm_context_t* ctx, uintptr_t virt_addr);
 bool vmm_unmap_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count);
 
+/* Batched forms, one shootdown for the whole range (vmm.c says what each
+ * promises). vmm_retarget_pages points present entries at other frames
+ * without the range ever being absent; vmm_unmap_range clears entries and
+ * frees nothing. Both for ranges whose frames are not the cabin's own. */
+bool   vmm_retarget_pages(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count,
+                          uintptr_t phys, uintptr_t phys_step, uint64_t flags);
+size_t vmm_unmap_range(vmm_context_t* ctx, uintptr_t virt_addr, size_t page_count);
+
 /* TME-MK aware map. phys_addr must already contain the KeyID bits in
  * the upper part of the phys field (use tme_phys_with_keyid /
  * vmm_phys_with_keyid to compose). Uses vmm_pte_addr_mask_with_keyid

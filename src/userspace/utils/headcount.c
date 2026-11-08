@@ -33,7 +33,7 @@ BOX_FORM("takes optional text \"the part it plays when it starts itself: answer;
 #define CREW_TAG   "headcount:crew"
 #define ANSWER_TAG "headcount:answer"
 
-static int answer(void)
+static int Answer(void)
 {
     Result word;
     if (!receive_wait(&word, 0)) return 1;   /* no deadline: the word is coming */
@@ -43,7 +43,7 @@ static int answer(void)
 int main(void)
 {
     const char *role = luggage_word(1);
-    if (role && strcmp(role, "answer") == 0) return answer();
+    if (role && strcmp(role, "answer") == 0) return Answer();
 
     TouchTag answers = touch_pair_choose(touch_intern(ANSWER_TAG));
     if (answers == TOUCH_TAG_INVALID || touch_claim(answers, TOUCH_REST, 0, 0) != OK) {

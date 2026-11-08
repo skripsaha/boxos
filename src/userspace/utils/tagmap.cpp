@@ -489,7 +489,7 @@ int main()
             return 0;
         }
 
-        std::expected<Stage, StageError> Opened = Stage::Open("tagmap", 40, 12);
+        std::expected<Stage, StageError> Opened = Stage::Open(40, 12);
         if (!Opened) {
             Say(Opened.error().Describe("tagmap"));
             return 1;

@@ -20,7 +20,7 @@
  *      storage_deck_init, main.c) got TOUCH_TAG_INVALID and stayed dead for
  *      the life of the boot. That is most of the kernel's vocabulary on
  *      EVERY boot, healthy volume or not — mce, apei, cet, tme, pku,
- *      mce:migration, acpi:ready, aml:ready, display:ready and the early
+ *      mce:migration, acpi:ready, aml:ready, display:ready (since retired) and the early
  *      memtag traffic. Every publish through them was a silent no-op.
  *
  *   2. A machine with no volume lost the vocabulary entirely, which is how

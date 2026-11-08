@@ -155,7 +155,7 @@ bool Hexer::Paint()
     PaintLines();
     PaintFoot();
 
-    /* The caret first and the picture last, as draft does: a caret that
+    /* The caret first and the picture last: a caret that
      * arrives before its frame is not seen, one that arrives after is. */
     std::uint32_t CaretRow, CaretCol;
     if (CommandOpen) {

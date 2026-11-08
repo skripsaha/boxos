@@ -12,16 +12,28 @@
  * Echo travels the road every print takes — the strand's lane — so it keeps
  * its place among everything else the strand said. Everything the editor does
  * to the caret is a STEP (console_step): a signed count of cells, resolved by
- * the console itself. Nothing here ever sends a '\b' — Canvas's backspace
- * erases the cell it steps onto but does nothing at column zero, which is
- * exactly where a line that wrapped past the right edge needs it to work.
+ * the console itself. Nothing here sends a '\b' to a console with a caret —
+ * its backspace erases the cell it steps onto but does nothing at column
+ * zero, which is exactly where a line that wrapped past the right edge needs
+ * it to work.
  *
- * A step is right for the glass and invisible to the log: the kernel mirrors
- * text into its log ring, never caret movement, so a saved log holds the keys
- * and not the line they became. An edited line therefore writes itself over
- * itself at Enter (RestateLine) — the same characters onto the same cells, so
- * the glass gains nothing and the ring gains the line that was handed over. A
- * line typed straight through says nothing: its echo already is the line.
+ * A step is right for the glass and invisible to the log: the display says
+ * every run of text it draws into the log ring, and a caret step is no text,
+ * so a saved log holds the keys and not the line they became. An edited line
+ * therefore writes itself over itself at Enter (RestateLine) — the same
+ * characters onto the same cells, so the glass gains nothing and the ring
+ * gains the line that was handed over. A line typed straight through says
+ * nothing: its echo already is the line.
+ *
+ * Without a display there is no caret at all (console_step says so), and the
+ * echo goes the way a teletype's does: into the log ring, which the kernel's
+ * Emergency Screen draws and the serial line carries, and where '\b' takes
+ * back the cell it steps onto. A teletype edits a line only at its end: keys
+ * typed onto it, the last one rubbed out with "\b \b", a recall rubbing the
+ * whole line out and typing the other; the caret keys move it no further back
+ * than it is, and nothing is laid dim. It is asked at every edit, so a display
+ * that dies in the middle of a line leaves the rest of the line to the
+ * teletype.
  *
  * History is the cabin's, shared by its strands: recalled with Up and Down,
  * kept in order, and it grows with what was typed rather than stopping at a
@@ -30,10 +42,11 @@
  *
  * A Whisper is what the line could go on to be, laid dim past the caret after
  * every key that leaves the caret at the end of the line, and taken back with
- * blanks as the line changes — the echo's own means, so it reaches the glass
- * as everything else does. The dim cells are always past the end of the line;
- * `dim_end` remembers how far they reach, so the next whisper covers what the
- * last one left.
+ * blanks as the line changes. Both are hints (console_hint): on the glass in
+ * their place among the echo, and never in the log ring, which keeps what was
+ * typed and not what was suggested. The dim cells are always past the end of
+ * the line; `dim_end` remembers how far they reach, so the next whisper covers
+ * what the last one left.
  */
 
 #include "box/print.h"
@@ -148,14 +161,14 @@ static bool EnsureRoom(EditLine *l, uint32_t need)
     return true;
 }
 
-/* Lay down `n` blanks in as few calls as the road takes.
+/* Lay down `n` blanks in as few calls as the road takes — text, or hints when
+ * they take a hint back.
  *
  * One call per blank is free on a lane — the run accumulates — and expensive
- * without a daemon, where every print_bytes is its own Manifest, its own
- * Canvas commit and its own blit. Recalling a two-character line over a
- * three-hundred-character one is 298 of them, which is the crawl this editor
- * was rewritten to remove. */
-static void EchoBlanks(uint32_t n)
+ * without a daemon, where every print_bytes is its own call into the kernel.
+ * Recalling a two-character line over a three-hundred-character one is 298 of
+ * them, which is the crawl this editor was rewritten to remove. */
+static void EchoBlanks(uint32_t n, bool hint)
 {
     /* Not a string: it is never read as one and a NUL would only cost a cell. */
     static const char spaces[32] = {
@@ -166,7 +179,8 @@ static void EchoBlanks(uint32_t n)
     };
     while (n) {
         uint32_t chunk = n < sizeof(spaces) ? n : (uint32_t)sizeof(spaces);
-        print_bytes_to_screen(spaces, chunk);
+        if (hint) console_hint(spaces, chunk);
+        else      print_bytes_to_screen(spaces, chunk);
         n -= chunk;
     }
 }
@@ -184,14 +198,17 @@ static void EchoTail(EditLine *l, uint32_t from, uint32_t trailing_blanks)
     /* Redraw buf[from..len), then `trailing_blanks` blanks that erase what a
      * shorter line leaves behind, then step back to the cursor. */
     if (l->len > from) print_bytes_to_screen(l->buf + from, l->len - from);
-    EchoBlanks(trailing_blanks);
+    EchoBlanks(trailing_blanks, false);
     int32_t back = (int32_t)(l->len - l->cursor) + (int32_t)trailing_blanks;
     console_step(-back);
     io_flush();   /* an echo is seen as it is typed, not when a line is done */
 }
 
+static void MoveTo(EditLine *l, uint32_t where);
+
 static void Insert(EditLine *l, const char *text, uint32_t n)
 {
+    if (!console_step(0)) MoveTo(l, l->len);          /* a teletype types at the end */
     if (n == 0 || !EnsureRoom(l, l->len + n)) return;   /* the caller's buffer is full */
     memmove(l->buf + l->cursor + n, l->buf + l->cursor, l->len - l->cursor);
     memcpy(l->buf + l->cursor, text, n);
@@ -215,6 +232,10 @@ static bool Typeable(const char *text, uint32_t n)
  * where it was — at the end of the line, the only place anything dim is laid. */
 static void DimDraw(EditLine *l, const char *text, uint32_t n)
 {
+    if (!console_step(0)) {   /* a teletype lays nothing it would have to take back */
+        l->dim_end = 0;
+        return;
+    }
     uint32_t reach  = l->len + n;
     uint32_t blanks = l->dim_end > reach ? l->dim_end - reach : 0;
     l->dim_end = n ? reach : 0;
@@ -223,13 +244,12 @@ static void DimDraw(EditLine *l, const char *text, uint32_t n)
     if (n) {
         Color was = get_color();
         set_color(READLINE_WHISPER_COLOR);
-        print_bytes_to_screen(text, n);
+        console_hint(text, n);
         set_color(was);
     }
-    EchoBlanks(blanks);
+    EchoBlanks(blanks, true);
     console_step(-(int32_t)(n + blanks));
     io_flush();
-    l->echo_diverged = true;
 }
 
 /* The dim cells taken away, before the caret leaves the end of the line. */
@@ -301,22 +321,32 @@ static bool WhisperTab(EditLine *l, bool all)
 
 static void Backspace(EditLine *l)
 {
+    if (!console_step(0)) {
+        MoveTo(l, l->len);
+        if (l->len == 0) return;
+        l->len--;
+        l->cursor--;
+        print_bytes_to_screen("\b \b", 3);   /* back, blank, back: a rub-out */
+        io_flush();
+        return;
+    }
     if (l->cursor == 0) return;
     memmove(l->buf + l->cursor - 1, l->buf + l->cursor, l->len - l->cursor);
     l->len--;
     l->cursor--;
-    /* A STEP back, not a '\b'. Canvas '\b' erases the cell it steps onto and
-     * does nothing at all at column zero, so on a line that had wrapped past
-     * the right edge one character refused to disappear and every step after
-     * it was one cell out. A step is linear across line ends; the erasing is
-     * done by the blank EchoTail lays down after the tail. */
+    /* A STEP back, not a '\b'. The console's '\b' erases the cell it steps
+     * onto and does nothing at all at column zero, so on a line that had
+     * wrapped past the right edge one character refused to disappear and
+     * every step after it was one cell out. A step is linear across line
+     * ends; the erasing is done by the blank EchoTail lays down after the
+     * tail. */
     console_step(-1);
     EchoTail(l, l->cursor, 1);
 }
 
 static void DeleteForward(EditLine *l)
 {
-    if (l->cursor == l->len) return;
+    if (l->cursor == l->len || !console_step(0)) return;
     memmove(l->buf + l->cursor, l->buf + l->cursor + 1, l->len - l->cursor - 1);
     l->len--;
     EchoTail(l, l->cursor, 1);
@@ -325,6 +355,16 @@ static void DeleteForward(EditLine *l)
 static void MoveTo(EditLine *l, uint32_t where)
 {
     if (where > l->len) where = l->len;
+    if (!console_step(0)) {
+        /* A teletype goes on only by typing what it passes over, and back
+         * not at all. */
+        if (where > l->cursor) {
+            print_bytes_to_screen(l->buf + l->cursor, where - l->cursor);
+            io_flush();
+            l->cursor = where;
+        }
+        return;
+    }
     if (where < l->len) DimHide(l);
     console_step((int32_t)where - (int32_t)l->cursor);
     l->cursor = where;
@@ -334,13 +374,33 @@ static void MoveTo(EditLine *l, uint32_t where)
  *
  * One step back to the first cell of the line, the new line laid over the old
  * one, and blanks for whatever the old one had beyond it. The old way walked
- * backwards one '\b' per character — a frame, a Manifest and a blit each, so
- * recalling a long line visibly crawled — and it could not erase a line that
- * had wrapped, because Canvas '\b' does nothing at column zero. */
+ * backwards one '\b' per character — a frame and a call into the kernel each,
+ * so recalling a long line visibly crawled — and it could not erase a line
+ * that had wrapped, because '\b' does nothing at column zero. A teletype has
+ * only that way: the old line rubbed out from its end, the new one typed. */
 static void Replace(EditLine *l, const char *text, uint32_t n)
 {
     uint32_t was = l->len;
     if (!EnsureRoom(l, n)) n = l->cap;
+
+    if (!console_step(0)) {
+        /* "\b \b" for each character, eight to a call. A rub-out stops at the
+         * left edge of the glass, so a line that wrapped keeps its first rows
+         * standing there. */
+        static const char rub[] = "\b \b\b \b\b \b\b \b\b \b\b \b\b \b\b \b";
+        MoveTo(l, l->len);
+        for (uint32_t left = was; left > 0;) {
+            uint32_t chunk = left < 8 ? left : 8;
+            print_bytes_to_screen(rub, chunk * 3);
+            left -= chunk;
+        }
+        memcpy(l->buf, text, n);
+        l->len    = n;
+        l->cursor = n;
+        if (n > 0) print_bytes_to_screen(l->buf, n);
+        io_flush();
+        return;
+    }
 
     /* A recall laid over a line that had characters says them both, in the
      * one place the log cannot tell them apart — see EchoTail's note and
@@ -355,7 +415,7 @@ static void Replace(EditLine *l, const char *text, uint32_t n)
     if (n > 0) print_bytes_to_screen(l->buf, n);
 
     uint32_t blanks = was > n ? was - n : 0;
-    EchoBlanks(blanks);
+    EchoBlanks(blanks, false);
     if (blanks) console_step(-(int32_t)blanks);
     io_flush();
 }
@@ -441,13 +501,12 @@ static bool NextKey(TouchTag ear, kb_event_t *out)
  * itself, so the glass gains nothing at all.
  *
  * ‼ THE LOG KEEPS WHAT THE CONSOLE WAS TOLD, AND A CARET STEP TELLS IT
- * NOTHING. The hardware deck mirrors into the log ring every character that
- * reaches the screen (hardware_ops.c, HwVgaPutString) and no cursor movement
- * whatsoever (HwVgaStepCursor). So the ring holds every key that was echoed
- * and no record that any of them was taken back: on the board run of
- * 2026-09-20 watch.log carried "memtagt" directly above the output of a
- * `memtag` whose last letter had been erased before Enter — a log naming a
- * command this machine never ran.
+ * NOTHING. The display says into the log ring every run of text it draws
+ * (display.cpp) and no caret movement whatsoever, because a step is no text.
+ * So the ring holds every key that was echoed and no record that any of them
+ * was taken back: on the board run of 2026-09-20 watch.log carried "memtagt"
+ * directly above the output of a `memtag` whose last letter had been erased
+ * before Enter — a log naming a command this machine never ran.
  *
  * The line is therefore said once more at Enter, and said the only way a
  * program can reach that ring without spending a line of the person's screen
@@ -456,21 +515,22 @@ static bool NextKey(TouchTag ear, kb_event_t *out)
  * the same cells, so the glass does not change and nothing is duplicated in
  * front of anybody; the ring gains the accepted line immediately before the
  * newline, which makes it the last word on what was handed over. Speaking it
- * instead — kdbg — costs a printed paragraph per edited line, because the one
- * operation that writes the ring from userspace, HW_DEBUG_PRINT, goes through
- * kprintf and kprintf writes the glass too.
+ * instead — kdbg — costs a printed paragraph per edited line: whatever is
+ * said into the ring is drawn on the glass too, because the glass and the
+ * ring are one account.
  *
  * The backward step is the one Home and a history recall already take across
- * the same line, so it is sound exactly where those are.
+ * the same line, so it is sound exactly where those are. A teletype has no
+ * such step, and needs none: what it echoed — "\b \b" and all — is in the
+ * ring as typed, and any terminal reading it shows the line that was handed
+ * over.
  *
  * A line edited down to NOTHING has nothing to write and stays silent: the
  * ring keeps the withdrawn keys with no line after them. Correcting that
- * needs a sentence, and a sentence is a line on the glass nobody typed. It
- * wants a ring-only operation on the hardware deck, which this cabin has no
- * way to ask for today. */
+ * needs a sentence, and a sentence is a line on the glass nobody typed. */
 static void RestateLine(const EditLine *l)
 {
-    if (l->len == 0) return;
+    if (l->len == 0 || !console_step(0)) return;
     console_step(-(int32_t)l->len);
     print_bytes_to_screen(l->buf, l->len);
 }

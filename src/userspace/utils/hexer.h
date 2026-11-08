@@ -3,7 +3,7 @@
 
 /* hexer — a file's bytes on the glass, changed in place and put back.
  *
- * Four parts, as draft is: hexer.cpp decides — the Form, the words, the keys,
+ * Four parts: hexer.cpp decides — the Form, the words, the keys,
  * the word line, opening and leaving; hexer_bytes.cpp holds the file — what is
  * read, what was changed, saving and finding; hexer_paint.cpp turns both into
  * one frame; hexer_list.cpp is the text an arrow takes instead of a frame.

@@ -8,34 +8,36 @@
 #include <string_view>
 
 #include "box/cxx/error.h"
+#include "box/keyboard.h"
 
 #include "painter/core/geometry.h"
 #include "painter/tui/frame.h"
 
 namespace painter::tui {
 
+// The keyboard's own numbers (box/keyboard.h), named for Painter.
 namespace Modifiers {
-inline constexpr std::uint8_t Shift     = 0x01u;
-inline constexpr std::uint8_t Ctrl      = 0x02u;
-inline constexpr std::uint8_t Alt       = 0x04u;
-inline constexpr std::uint8_t Extended  = 0x08u;
+inline constexpr std::uint8_t Shift     = KB_MOD_SHIFT;
+inline constexpr std::uint8_t Ctrl      = KB_MOD_CTRL;
+inline constexpr std::uint8_t Alt       = KB_MOD_ALT;
+inline constexpr std::uint8_t Extended  = KB_MOD_EXTENDED;
 }  // namespace Modifiers
 
 namespace KeyCodes {
-inline constexpr char Escape    = 27;
-inline constexpr char Backspace = '\b';
-inline constexpr char Enter     = '\n';
-inline constexpr char Tab       = '\t';
-inline constexpr std::uint8_t Home     = 0x47;
-inline constexpr std::uint8_t Up       = 0x48;
-inline constexpr std::uint8_t PageUp   = 0x49;
-inline constexpr std::uint8_t Left     = 0x4B;
-inline constexpr std::uint8_t Right    = 0x4D;
-inline constexpr std::uint8_t End      = 0x4F;
-inline constexpr std::uint8_t Down     = 0x50;
-inline constexpr std::uint8_t PageDown = 0x51;
-inline constexpr std::uint8_t Insert   = 0x52;
-inline constexpr std::uint8_t Delete   = 0x53;
+inline constexpr char Escape    = KEY_ESCAPE;
+inline constexpr char Backspace = KEY_BACKSPACE;
+inline constexpr char Enter     = KEY_ENTER;
+inline constexpr char Tab       = KEY_TAB;
+inline constexpr std::uint8_t Home     = KEY_HOME;
+inline constexpr std::uint8_t Up       = KEY_UP;
+inline constexpr std::uint8_t PageUp   = KEY_PAGEUP;
+inline constexpr std::uint8_t Left     = KEY_LEFT;
+inline constexpr std::uint8_t Right    = KEY_RIGHT;
+inline constexpr std::uint8_t End      = KEY_END;
+inline constexpr std::uint8_t Down     = KEY_DOWN;
+inline constexpr std::uint8_t PageDown = KEY_PAGEDN;
+inline constexpr std::uint8_t Insert   = KEY_INSERT;
+inline constexpr std::uint8_t Delete   = KEY_DELETE;
 }  // namespace KeyCodes
 
 enum class StageErrorKind {
@@ -78,8 +80,7 @@ struct Event {
 
 class Stage {
 public:
-    static std::expected<Stage, StageError> Open(std::string_view Name, std::int32_t LeastCols,
-                                                  std::int32_t LeastRows) noexcept;
+    static std::expected<Stage, StageError> Open(std::int32_t LeastCols, std::int32_t LeastRows) noexcept;
 
     Stage(Stage &&Other) noexcept;
     Stage &operator=(Stage &&Other) noexcept;

@@ -111,19 +111,14 @@ bool     HeapFailFired(void);
 __attribute__((noreturn)) void panic(const char* message, ...);
 int kprintf(const char* format, ...);
 int kvprintf(const char* format, va_list args);
-int KvprintfRing(const char* format, va_list args);  /* the ring alone */
-int KvprintfGlass(const char* format, va_list args); /* the glass alone */
+int KvprintfRing(const char* format, va_list args);  /* nothing drawn — see klib_print.c */
 int ksnprintf(char* buf, size_t size, const char* fmt, ...);
 int kvsnprintf(char* buf, size_t size, const char* fmt, va_list args);
-void kputchar(char c);
-int kputnl(void);
 
-/* Console lock — acquired by kprintf, exposed so any other producer of
- * VGA framebuffer + serial writes (HwVgaPutString, HwVgaPutChar,
- * HwVgaNewline, …) can serialise against kprintf and against other
- * cores doing the same. Without this, two cores writing the
- * framebuffer concurrently race on cursor + cell stores → visible
- * character salad on screen and interleaved binary in serial.log. */
+/* Console lock — acquired by kprintf, exposed to the other hands on what the
+ * machine says and shows: hw.log.say, which puts a program's run into the log
+ * ring whole, never inside a kernel line; and the Screen, which turns the
+ * Emergency Screen on and off. The Emergency Screen draws only under it. */
 void console_lock_acquire(void);
 void console_lock_release(void);
 

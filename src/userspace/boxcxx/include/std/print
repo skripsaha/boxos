@@ -1,8 +1,9 @@
 // boxcxx — <print>  (Ф9B-2: std::print / std::println over the BoxOS console)
 //
 // std::print / println format through <format> and write the bytes to the
-// console via boxlib's print_bytes (src/print.c) — the same VGA / display-
-// daemon path printf uses, with its colour state and UTF-8->'?' filtering.
+// console via boxlib's print_bytes (src/print.c) — the same road printf
+// takes: the display's console lane, or the log ring when there is no display,
+// with printf's colour state and its UTF-8 passed through whole.
 //
 // Deviations from the standard synopsis (documented; BoxOS has no <cstdio>
 // FILE*):
@@ -43,8 +44,8 @@
 #define BOXCXX_OWNS_print
 #include <__bits/version_print>
 
-// boxlib console byte writer — routes to VGA or the display daemon, applies
-// the current colour and the console's UTF-8->'?' filtering. Declared here so
+// boxlib console byte writer — to the display's console lane, or to the log
+// ring when there is no display, in the current colour. Declared here so
 // <print> need not pull the C header into namespace std.
 extern "C" void print_bytes(const char *data, size_t len);
 

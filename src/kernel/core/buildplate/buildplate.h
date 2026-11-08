@@ -12,7 +12,7 @@ const BuildPlate *BuildPlateRead(void);
 /*
  * Say what this kernel was made from, in one or two lines.
  *
- * ‼ THE FIRST THING THE KERNEL SAYS. It runs after VideoInit and BEFORE
+ * ‼ THE FIRST THING THE KERNEL SAYS. It runs after ScreenInit and BEFORE
  * serial_init, which is the only slot where the line is on the glass and in
  * the log ring for every boot — including the boots where there is no UART to
  * carry it. kprintf and never debug_printf: the whole point is that a shipped

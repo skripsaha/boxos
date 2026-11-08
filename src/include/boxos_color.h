@@ -4,13 +4,13 @@
 /*
  * Shared kernel/userspace colour model — full 24-bit #RRGGBB end to end.
  *
- * BoxOS colour is metadata, never an in-band escape sequence (the
- * Color/Canvas principle). A colour travels the whole path as a packed
- * 0x00RRGGBB value: printf run → Manifest op params → TextCell → backend.
- * The GOP framebuffer renders the value exactly; the VGA text backend
- * quantises to its 16-entry hardware palette AT DRAW TIME — the last
- * moment, in the one place that actually has a 4-bit limitation. Nothing
- * upstream ever rounds.
+ * BoxOS colour is metadata, never an in-band escape sequence. A colour
+ * travels the whole path as a packed 0x00RRGGBB value: printf run → console
+ * lane frame → TextCell → the glass. A framebuffer renders the value exactly;
+ * the VGA text page quantises to its 16-entry hardware palette AT DRAW TIME —
+ * the last moment, in the one place that actually has a 4-bit limitation.
+ * Nothing upstream ever rounds. (The kernel's own lines carry no colour at
+ * all, only a Tone — boxos_log_tone.h.)
  *
  * Sentinels live in the high byte, which a real RGB triple never uses:
  *   COLOR_DEFAULT  "use the role's default" (fg → light gray, bg → black)

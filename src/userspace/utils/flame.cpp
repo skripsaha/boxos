@@ -116,7 +116,7 @@ struct Show {
     std::uint32_t         Frames = 0;
 
     Show(const FlameSettings &Wanted, painter::tui::Stage Screen)
-        : Screen(std::move(Screen)), Rows(Screen.Size().Height), Cols(Screen.Size().Width), Settings(Wanted),
+        : Screen(std::move(Screen)), Rows(this->Screen.Size().Height), Cols(this->Screen.Size().Width), Settings(Wanted),
           Palette(FlameMakePalette(Wanted.Ink, Wanted.Custom)),
           Fire(Cols, Rows * 2, cpu_rdtsc() * 0x9E3779B97F4A7C15ull),
           Frames(0)
@@ -211,7 +211,7 @@ int main()
         FlameSettings Wanted = ReadWords(Words, Count);
 
         std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
-            painter::tui::Stage::Open("flame", FlameMinCols, FlameMinRows);
+            painter::tui::Stage::Open(FlameMinCols, FlameMinRows);
         if (!Opened) {
             Say(Opened.error().Describe("flame"));
             return 1;

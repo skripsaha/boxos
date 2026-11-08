@@ -1230,7 +1230,7 @@ run_stranger() {
 # Occurrence names that measurement showed were resolving to INVALID before
 # the split, because they are named before any volume mounts.
 DEAD_BEFORE="mce:fault:detected mce:fault:fatal cet:fault:cp acpi:ready aml:ready \
-display:ready mce:migration:completed apei:memory:error apei:ghes:ready"
+mce:migration:completed apei:memory:error apei:ghes:ready"
 
 # healthy_startup_tests LOG — (6) of healthy: TagFS itself still healthy, and
 # every test it counts is one this tree registers. The numbers are the code's,
@@ -6110,47 +6110,45 @@ run_rollcall() {
 }
 
 # The oracle measured against itself: put both defects back — the strand
-# leaves without handing in its frame, the daemon draws text and newline as
-# two operations — and each symptom above must come back.
+# leaves without handing in its frame, the display says a line's text and its
+# newline into the log ring as two utterances — and each symptom above must
+# come back. Two utterances let a kernel line in between them only if
+# something does come in between, and an emulator's display says the second a
+# few microseconds after the first; on a board its core is taken by an
+# interrupt there. So that is put too: the display is held up between the two.
 rollcall_defects_on() {
     mutate src/userspace/boxlib/src/strand.c
-    mutate src/userspace/display/display.c
+    mutate src/userspace/display/display.cpp
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/strand.c"
 s = open(p).read()
-anchor = "    io_flush();\n"
+anchor = "    io_depart();\n"
 assert s.count(anchor) == 1, "rollcall strand anchor missing"
 s = s.replace(anchor, "    /* logcheck mutation: the strand leaves without handing in its frame */\n", 1)
 open(p, "w").write(s)
-p = "src/userspace/display/display.c"
+p = "src/userspace/display/display.cpp"
 s = open(p).read()
-anchor = """    for (uint32_t i = 0; i < len; i++) {
-        char c = f->text[i];
-        if (c == '\\n' || c == '\\b' || (unsigned char)c >= 0x20) seg[pos++] = c;
-    }
-    if (pos > 0) {
-        seg[pos] = '\\0';
-        vga_puts(seg);
-    }
+anchor = """        std::memcpy(g_said + g_said_length, Run.text, Length);
+        g_said_length += Length;
 """
 assert s.count(anchor) == 1, "rollcall display anchor missing"
-mutated = """    for (uint32_t i = 0; i <= len; i++) {   /* logcheck mutation: text and newline as two operations */
-        int at_end = (i == len);
-        char c     = at_end ? '\\0' : f->text[i];
-        if (!at_end && c != '\\n' && (c == '\\b' || (unsigned char)c >= 0x20)) { seg[pos++] = c; continue; }
-        if (pos > 0) { seg[pos] = '\\0'; vga_puts(seg); pos = 0; }
-        if (!at_end && c == '\\n') vga_newline();
-    }
+mutated = """        for (std::uint32_t I = 0; I < Length; I++) {   /* logcheck mutation: text and newline as two utterances */
+            if (Run.text[I] == '\\n') {
+                DrawHeld();
+                for (volatile std::uint32_t z = 0; z < 100000u; z++) { }   /* held up between the two */
+            }
+            g_said[g_said_length++] = Run.text[I];
+        }
 """
 open(p, "w").write(s.replace(anchor, mutated, 1))
 EOF
     mut_done src/userspace/boxlib/src/strand.c "logcheck mutation"
-    mut_done src/userspace/display/display.c "logcheck mutation"
+    mut_done src/userspace/display/display.cpp "logcheck mutation"
 }
 
 rollcall_defects_off() {
     restore src/userspace/boxlib/src/strand.c
-    restore src/userspace/display/display.c
+    restore src/userspace/display/display.cpp
 }
 
 run_rollcallmut() {
@@ -6165,8 +6163,8 @@ run_rollcallmut() {
     echo "     $1 of 1600 numbers answered whole; $2 line(s) carrying another record"
     if [ "$1" -lt 1600 ]; then ok "rollcallmut: a strand that leaves without handing in loses lines — $((1600 - $1)) missing, and the oracle sees them"
     else                       bad "rollcallmut: the flush removed and every number STILL answered — the oracle cannot see that defect"; fi
-    if [ "$2" -gt 0 ]; then ok "rollcallmut: text and newline as two operations let $2 line(s) carry another — and the oracle sees them"
-    else                    bad "rollcallmut: two operations per line and NO line carried another — the oracle cannot see that defect"; fi
+    if [ "$2" -gt 0 ]; then ok "rollcallmut: text and newline as two utterances let $2 line(s) carry another — and the oracle sees them"
+    else                    bad "rollcallmut: two utterances per line and NO line carried another — the oracle cannot see that defect"; fi
 
     build   # leave the tree built from clean sources
 }
@@ -6265,22 +6263,22 @@ run_handset() {
 # listens — the very thing "keys wait at the daemon for the next reader"
 # forbids — so the line typed before the child asked is gone.
 handset_deaf_on() {
-    mutate src/userspace/display/display.c
+    mutate src/userspace/display/lanes.cpp
     python3 - <<'EOF'
-p = "src/userspace/display/display.c"
+p = "src/userspace/display/lanes.cpp"
 s = open(p).read()
-anchor = "    while (g_ear) {\n        if (!g_key_in_hand) {\n"
+anchor = "    while (g_ear) {\n        if (!key_in_hand) {\n"
 assert s.count(anchor) == 1, "handset mutation anchor missing"
 s = s.replace(anchor, "    for (;;) {   /* logcheck mutation: consumed while nobody listens */\n"
-                      "        if (!g_ear) { if (!touch_try_pop_tag(g_kb, &g_key)) break; did = true; continue; }\n"
-                      "        if (!g_key_in_hand) {\n", 1)
+                      "        if (!g_ear) { if (!touch_try_pop_tag(g_kb, &key)) break; did = true; continue; }\n"
+                      "        if (!key_in_hand) {\n", 1)
 open(p, "w").write(s)
 EOF
-    mut_done src/userspace/display/display.c "logcheck mutation"
+    mut_done src/userspace/display/lanes.cpp "logcheck mutation"
 }
 
 handset_deaf_off() {
-    restore src/userspace/display/display.c
+    restore src/userspace/display/lanes.cpp
 }
 
 run_handsetmut() {
@@ -6315,129 +6313,7 @@ run_handsetmut() {
 # Touch, then changes the word and wakes all parked on it — once. Every
 # sleeper must come back.
 # ===========================================================================
-# draft — what was typed is what the volume holds, and a shorter save leaves
-#         no tail of the longer one behind it
-# ===========================================================================
-#
-# TagFS writes only ever GREW a file: rewriting one shorter left the old tail
-# readable behind the new content, and every shorter rewrite in the system was
-# silently wrong until a file could be cut (file_span). An editor is where that
-# shows first and worst — a line deleted and saved would come back on the next
-# read.
-#
-# draft is the instrument, and the whole path is under test: a key becomes a
-# Touch, the Touch becomes a byte in the book, ^S writes the book, spans the
-# file to its length and anchors it, and `show` reads the volume back. Ten bytes
-# are typed and saved; five are taken back and saved again; the volume must
-# hold five.
-draft_keys() {
-    # draft_keys KEY...  — straight to the monitor, no echo to wait for: a
-    # painted frame never enters the log ring, so qemu-input's `type` (which
-    # verifies the guest echo) has nothing to see and would give up.
-    local k
-    for k in "$@"; do
-        mon_raw "sendkey $k 30"
-        sleep 0.06
-    done
-}
-
-draft_session() {
-    # draft_session NAME "RUN-BG ARGS" — boots, drives one editing session,
-    # then reads the file back with `show`. Leaves the transcript in
-    # $SCRATCH/serial.NAME.log and the machine stopped.
-    local name=$1 args=$2
-    make run-stop >/dev/null 2>&1
-    # shellcheck disable=SC2086
-    make run-bg $args >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
-        make run-stop >/dev/null 2>&1
-        return 1
-    fi
-    sleep 3
-    local MARK
-    MARK=$(wc -l < build/serial.log)
-
-    type_cmd "draft oracle.txt"
-    sleep 1
-    key_press ret
-    sleep 3
-
-    draft_keys a b c d e f g h i j
-    draft_keys ctrl-s
-    sleep 2
-    draft_keys backspace backspace backspace backspace backspace
-    draft_keys ctrl-s
-    sleep 2
-    draft_keys ctrl-q
-    sleep 3
-
-    type_cmd "show oracle.txt"
-    sleep 1
-    key_press ret
-    sleep 3
-
-    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
-    make run-stop >/dev/null 2>&1
-    return 0
-}
-
-run_draft() {
-    echo "== draft: ten bytes typed and saved, five taken back and saved again =="
-    build STRICT=on
-    if ! draft_session draft "STRICT=on CORES=4 MEM=4G"; then
-        bad "draft: never reached a shell"; return
-    fi
-    L="$SCRATCH/serial.draft.log"
-    grep -q "\[DRAFT\] oracle.txt - 1 lines, 5 bytes, saved 2 times" "$L" \
-        && ok "draft: the editor says five bytes over two saves" \
-        || bad "draft: $(grep -m1 '\[DRAFT\]' "$L" || echo 'the editor said nothing at all')"
-    if grep -q "^abcde$" "$L"; then
-        ok "draft: the volume holds exactly what was left on the screen"
-    elif grep -q "abcdefghij" "$L"; then
-        bad "draft: the old tail is still on the volume - the shorter save did not cut it"
-    else
-        bad "draft: the volume did not answer with the draft at all"
-    fi
-    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
-        && bad "draft: the kernel spoke of a stall or fault" \
-        || ok "draft: no verdict, no panic"
-}
-
-draft_notail_on() {
-    mutate src/userspace/utils/draft_file.c
-    python3 - <<'EOF2'
-p = "src/userspace/utils/draft_file.c"
-s = open(p).read()
-anchor = "    int rc = file_span(g_fid, len, 0);"
-assert s.count(anchor) == 1, "draft mutation anchor missing"
-s = s.replace(anchor, "    int rc = 0;   /* logcheck mutation: the tail is left where it was */\n    (void)len;", 1)
-open(p, "w").write(s)
-EOF2
-    mut_done src/userspace/utils/draft_file.c "logcheck mutation"
-}
-
-draft_notail_off() {
-    restore src/userspace/utils/draft_file.c
-}
-
-run_draftmut() {
-    echo "== draftmut: the span taken out, and the old tail must come back =="
-    draft_notail_on; build STRICT=on
-    draft_session draftmut "STRICT=on CORES=4 MEM=4G"; local booted=$?
-    draft_notail_off
-    if [ $booted -ne 0 ]; then bad "draftmut: never reached a shell"; build; return; fi
-    L="$SCRATCH/serial.draftmut.log"
-    if grep -q "abcdefghij" "$L"; then
-        ok "draftmut: without the cut the old tail is read back - and the oracle sees it"
-    else
-        bad "draftmut: the span was taken out and the file was STILL five bytes - the oracle cannot see that defect ($(grep -m1 'abcde' "$L" || echo 'no content at all'))"
-    fi
-    build   # leave the tree built from clean sources
-}
-
-# ===========================================================================
-# paint — a whole frame of colour reaches the glass as ONE op, and says
+# paint — a whole frame of colour reaches the glass through a layer, and says
 #         nothing into the log ring on the way
 # ===========================================================================
 #
@@ -6445,8 +6321,9 @@ run_draftmut() {
 # is one Manifest op per cell AND one LogRingPut per cell — a global spinlock
 # and a wire kick for every one of sixteen thousand cells, twenty-five times a
 # second, burying everything the machine actually says under a screenful of
-# spaces. PAINT lays a rectangle down in one op, one Canvas commit, one blit,
-# and deliberately does not mirror: a picture is not speech.
+# spaces. A layer is the program's frame in memory it shares with the display
+# and one word that it is ready; the display draws it and deliberately says
+# nothing into the ring: a picture is not speech.
 #
 # playtime is the instrument: it paints every cell of the screen every frame
 # and stops on a key. The screendump must show a painted screen (a shell
@@ -6540,24 +6417,24 @@ run_paint() {
 }
 
 paint_blind_on() {
-    mutate src/kernel/core/decks/hardware/hardware_ops.c
+    mutate src/userspace/display/layers.cpp
     python3 - <<'EOF2'
-p = "src/kernel/core/decks/hardware/hardware_ops.c"
+p = "src/userspace/display/layers.cpp"
 s = open(p).read()
-anchor = "    console_lock_acquire();\n    bool fit = VideoPaintCells(row, col, height, width, cells);\n    console_lock_release();"
+anchor = "            std::memcpy(Layer.Cells.data(), LayerSlot(Layer, Slot),\n                        Layer.CellCount * sizeof(DisplayLayerCell));\n"
 assert s.count(anchor) == 1, "paint mutation anchor missing"
-s = s.replace(anchor, "    bool fit = true;   /* logcheck mutation: the op takes the frame and drops it */", 1)
+s = s.replace(anchor, "            /* logcheck mutation: the display takes the frame and drops it */\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/core/decks/hardware/hardware_ops.c "logcheck mutation"
+    mut_done src/userspace/display/layers.cpp "logcheck mutation"
 }
 
 paint_blind_off() {
-    restore src/kernel/core/decks/hardware/hardware_ops.c
+    restore src/userspace/display/layers.cpp
 }
 
 run_paintmut() {
-    echo "== paintmut: the op answers OK and paints nothing, and the screen must stay bare =="
+    echo "== paintmut: the display takes every frame and paints nothing, and the screen must stay bare =="
     paint_blind_on; build STRICT=on
     paint_boot paintmut "UEFI=on STRICT=on CORES=4 MEM=4G"; local booted=$?
     paint_blind_off
@@ -6565,7 +6442,7 @@ run_paintmut() {
     V=$(paint_shot_verdict "$SCRATCH/paintmut.ppm")
     case "$V" in
         bare*) ok "paintmut: nothing was painted and the oracle sees it ($V per cent lit)" ;;
-        *)     bad "paintmut: the op dropped every frame and the screen was STILL painted ($V) - the oracle cannot see that defect" ;;
+        *)     bad "paintmut: the display dropped every frame and the screen was STILL painted ($V) - the oracle cannot see that defect" ;;
     esac
     build   # leave the tree built from clean sources
 }
@@ -6582,8 +6459,8 @@ run_paintmut() {
 # wearing the bare `system` tag: the shell, the display daemon and itself.
 #
 # The display daemon is the instrument, because ending it is survivable — the
-# lane dies, boxlib says so and falls back to writing the glass directly, and
-# the shell keeps answering. So all three answers are provable on one boot.
+# lane dies, boxlib says so and falls back to saying its text into the log
+# ring, and the shell keeps answering. So all three answers are provable on one boot.
 finish_boot() {
     local name=$1 args=$2
     make run-stop >/dev/null 2>&1
@@ -6631,9 +6508,11 @@ run_finish() {
     # Asked again after the word anyway: nobody wears display any more — the
     # daemon is gone — and the shell answered the asking. Not a count of what
     # is alive, which is whatever the machine autostarts besides.
-    grep -q "^display: nothing wears that tag$" "$L" \
+    # With the display gone, finish says its answer into the ring itself, and
+    # the kernel marks a line of anyone but the screen's holder with its pid.
+    grep -qE "^(\[[0-9]+\] )?display: nothing wears that tag$" "$L" \
         && ok "finish: after the word anyway the daemon is gone and the shell still answers" \
-        || bad "finish: the daemon survived the word anyway, or the shell stopped answering ($(grep -m1 '^display: ' "$L" || echo 'no answer at all'))"
+        || bad "finish: the daemon survived the word anyway, or the shell stopped answering ($(grep -m1 -E '^(\[[0-9]+\] )?display: ' "$L" || echo 'no answer at all'))"
     grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
         && bad "finish: the kernel spoke of a stall or fault" \
         || ok "finish: no verdict, no panic"
@@ -6702,22 +6581,23 @@ run_finishmut() {
 # before the shell woke up. So the second condition is injected too, by making
 # one render cost what a render costs on a real framebuffer.
 overtake_slow_on() {
-    mutate src/userspace/display/display.c
+    mutate src/userspace/display/display.cpp
     python3 - <<'EOF2'
-p = "src/userspace/display/display.c"
+p = "src/userspace/display/display.cpp"
 s = open(p).read()
-a = "    if (f->kind != CONSOLE_RUN_TEXT) return;"
+a = "        for (const ConsoleRun &Run : g_held) g_model->Apply(Run);"
 assert s.count(a) == 1, "overtake slow anchor missing"
-inject = "\n    /* logcheck injection: a render costs what one costs on glass. */"
-inject += "\n    for (volatile uint32_t z = 0; z < 400000u; z++) { }"
-s = s.replace(a, a + inject, 1)
+inject = "        for (const ConsoleRun &Run : g_held) {   /* logcheck injection: a render costs what one costs on glass. */"
+inject += "\n            for (volatile std::uint32_t z = 0; z < 400000u; z++) { }"
+inject += "\n            g_model->Apply(Run);\n        }"
+s = s.replace(a, inject, 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/userspace/display/display.c "logcheck injection"
+    mut_done src/userspace/display/display.cpp "logcheck injection"
 }
 
 overtake_slow_off() {
-    restore src/userspace/display/display.c
+    restore src/userspace/display/display.cpp
 }
 
 overtake_clockonly_on() {
@@ -6725,7 +6605,7 @@ overtake_clockonly_on() {
     python3 - <<'EOF2'
 p = "src/userspace/boxlib/src/print.c"
 s = open(p).read()
-a = "    return __atomic_add_fetch(ps->order, 1u, __ATOMIC_SEQ_CST);"
+a = "    ps->last_order = __atomic_add_fetch(ps->order, 1u, __ATOMIC_SEQ_CST);\n    return ps->last_order;"
 assert s.count(a) == 1, "overtake mutation anchor missing"
 m  = "    /* logcheck mutation: the clock decides again, and two cabins' clocks"
 m += "\n     * differ by a fixed amount — which is exactly what an imperfect TSC"
@@ -6734,6 +6614,7 @@ m += "\n     * one, so this is two processes whose counters disagree. */"
 m += "\n    { static uint32_t n;"
 m += "\n      uint64_t t = cpu_rdtsc();"
 m += "\n      if (cabin_info()->pid > 2u && ++n > 10u) t += 4000000000ull;"
+m += "\n      ps->last_order = t;"
 m += "\n      return t; }"
 s = s.replace(a, m, 1)
 if "box/core/cabin.h" not in s:
@@ -6999,163 +6880,14 @@ run_orderlifemut() {
 }
 
 # ===========================================================================
-# batchfail — one refused op costs its own cell, and nothing behind it
+# batchfail — RETIRED with the kernel's drawing ops (screen-ownership, stage 1)
 # ===========================================================================
 #
-# A Manifest stops at its first refusal: manifest_exec.c breaks out of the
-# dispatch loop on an op that fails and is not marked OPTIONAL, so every op
-# BEHIND it never runs. That is right for a Manifest that is one transaction
-# and wrong for the display daemon's, which packs a whole burst of output into
-# one batch — a single cell the kernel would not draw took the entire rest of
-# the burst with it, silently, up to and including the prompt printed at the
-# end. Reported from the board: after `files` there was no prompt, after `me`
-# there was, over and over.
-#
-# The instrument has to MAKE an op refuse, because on a desk nothing does. One
-# PUTSTRING in the middle of the run is made to fail, and the question is what
-# reaches the log ring afterwards — the ring is written by the op as it prints,
-# so it is a faithful witness of what was EXECUTED, not of what was asked.
-#
-#   with the ops OPTIONAL : one line of output is missing and everything after
-#                           it is there, prompt included
-#   without               : the tail of the burst is gone
-
-batchfail_inject_on() {
-    mutate src/kernel/core/decks/hardware/hardware_ops.c
-    python3 - <<'EOF2'
-p = "src/kernel/core/decks/hardware/hardware_ops.c"
-s = open(p).read()
-a = """    uint32_t fg    = hw_color_param(&op->params[0]);
-    uint32_t bg    = hw_color_param(&op->params[4]);
-    uint8_t  flags = op->params[8];"""
-assert s.count(a) == 1, "batchfail inject anchor missing"
-s = s.replace(a, """    /* logcheck injection: one run in sixteen refuses.
-     * ‼ A REFUSAL COUNTED FROM BOOT IS NOT A REFUSAL INSIDE THE BURST. The
-     * first try failed exactly once, at the tenth run of the session — which
-     * is somewhere in the boot banner, hundreds of runs before the listing
-     * this scenario measures. The mutation caught it: the tail arrived with
-     * the ops made non-optional, because nothing had refused inside that
-     * batch at all. It has to keep refusing, so that a burst of seventy runs
-     * is certain to contain one. */
-    { static uint32_t n; if ((++n % 16u) == 0) return ERR_INVALID_ARGUMENT; }
-""" + a, 1)
-open(p, "w").write(s)
-EOF2
-    mut_done src/kernel/core/decks/hardware/hardware_ops.c "logcheck injection"
-}
-
-batchfail_inject_off() {
-    restore src/kernel/core/decks/hardware/hardware_ops.c
-}
-
-batchfail_optional_off() {
-    mutate src/userspace/boxlib/src/vga.c
-    python3 - <<'EOF2'
-p = "src/userspace/boxlib/src/vga.c"
-s = open(p).read()
-a = "    return ManifestBuilderAddOp(&s_mb, DECK_HARDWARE, opcode, OP_FLAG_OPTIONAL,"
-assert s.count(a) == 1, "batchfail optional anchor missing"
-s = s.replace(a, "    return ManifestBuilderAddOp(&s_mb, DECK_HARDWARE, opcode, 0,   /* logcheck mutation */", 1)
-open(p, "w").write(s)
-EOF2
-    mut_done src/userspace/boxlib/src/vga.c "logcheck mutation"
-}
-
-batchfail_optional_on() {
-    restore src/userspace/boxlib/src/vga.c
-}
-
-batchfail_run() {
-    # batchfail_run NAME — boot, list the volume, keep the window of the log.
-    make run-stop >/dev/null 2>&1
-    make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
-        make run-stop >/dev/null 2>&1; return 1
-    fi
-    sleep 3
-    local MARK
-    MARK=$(wc -l < build/serial.log)
-    type_cmd "files"
-    key_press ret
-    # Started when the utility prints its heading, over when the log stops
-    # growing. A flat six seconds was a guess that would cut the very tail this
-    # scenario is about, on any host slower than the one it was written on.
-    wait_for_line build/serial.log "Files:" "$WAIT_QUIET_S" $((MARK + 1))
-    wait_for_quiet "$OVERTAKE_DRAIN_QUIET_S"
-    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$1.log"
-    # The mount line is in the BOOT, before the window — and it is the only
-    # place the guest states how many files the volume holds, which is what the
-    # listing below is measured against.
-    tr -d '\r' < build/serial.log > "$SCRATCH/serial.$1.full.log"
-    make run-stop >/dev/null 2>&1
-    return 0
-}
-
-# How many files the guest itself says the volume holds, and how many listing
-# rows arrived. A row is a filename, spaces, then the bracket that opens its
-# tags — the shape files.c prints and nothing else in the log has.
-batchfail_tally() {
-    BF_TOTAL=$(grep -oE "MOUNTED — [0-9]+ file" "$2" | tail -1 | grep -oE "[0-9]+")
-    BF_ROWS=$(grep -cE "^[^ ]+ +\[" "$1")
-}
-
-run_batchfail() {
-    echo "== batchfail: a refused op costs its own cell and nothing behind it =="
-    batchfail_inject_on; build STRICT=on
-    local booted=1
-    batchfail_run batchfail && booted=0
-    batchfail_inject_off
-    if [ $booted -ne 0 ]; then bad "batchfail: never reached a shell"; build; return; fi
-
-    local L="$SCRATCH/serial.batchfail.log"
-    batchfail_tally "$L" "$SCRATCH/serial.batchfail.full.log"
-
-    # ‼ 50 WAS A NUMBER TYPED IN AGAINST THE FILES THIS VOLUME HELD THAT DAY.
-    #
-    # The quantity is now taken from the run: the guest states how many files
-    # it mounted, and the listing is measured against that. The line between
-    # the two behaviours is not narrow and does not need to be guessed — with
-    # the ops OPTIONAL a refusal costs its own cell and the burst carries on,
-    # so nearly every row arrives; without, each batch dies at its first
-    # refusal and roughly half the listing is gone. Measured on this listing:
-    # 60 rows against 30. Half the volume's own count sits between them and
-    # moves with the volume, which a typed-in 50 could not.
-    #
-    # Naming a PARTICULAR row instead would be too strict: with one run in
-    # sixteen refused the casualty can be any row, the last one included.
-    if [ -z "$BF_TOTAL" ]; then
-        bad "batchfail: the mount never said how many files the volume holds — the harness has nothing to measure the listing against"
-    else
-        [ "$BF_ROWS" -gt $((BF_TOTAL / 2)) ]
-        chk $? "batchfail: $BF_ROWS of the volume's $BF_TOTAL files reached the log with one run in sixteen refused"
-    fi
-
-    grep -qE "^~" "$L"
-    chk $? "batchfail: and the prompt printed after the burst"
-
-    build   # leave the tree built from clean sources
-}
-
-run_batchfailmut() {
-    echo "== batchfailmut: with the ops not optional, the tail must disappear =="
-    batchfail_inject_on; batchfail_optional_off; build STRICT=on
-    local booted=1
-    batchfail_run batchfailmut && booted=0
-    batchfail_inject_off; batchfail_optional_on
-    if [ $booted -ne 0 ]; then bad "batchfailmut: never reached a shell"; build; return; fi
-
-    local L="$SCRATCH/serial.batchfailmut.log"
-    batchfail_tally "$L" "$SCRATCH/serial.batchfailmut.full.log"
-    if [ -z "$BF_TOTAL" ]; then
-        bad "batchfailmut: the mount never said how many files the volume holds — the harness has nothing to measure the listing against"
-    elif [ "$BF_ROWS" -gt $((BF_TOTAL / 2)) ]; then
-        bad "batchfailmut: the ops were made non-optional and $BF_ROWS of $BF_TOTAL rows STILL arrived - the oracle cannot see that defect"
-    else
-        ok "batchfailmut: the refusal took the rest of the burst with it — $BF_ROWS of the volume's $BF_TOTAL files reached the log, and the oracle sees it"
-    fi
-    build
-}
+# It measured that one refused HW_VGA op in the display daemon's batched
+# Manifest cost only its own cell. There is no such Manifest any more: the
+# kernel draws nothing, the display program draws into the glass it holds and
+# says its text into the log ring with hw.log.say, one run at a time. The
+# defect has no road left to come back by, so the oracle and its mutant go.
 
 # ===========================================================================
 # caret — there is one cursor on the screen, and it is where the program put it
@@ -7164,7 +6896,7 @@ run_batchfailmut() {
 # The caret is the part of a console a person actually watches, and until this
 # was measured nobody could say where it was: the serial mirror carries the
 # TEXT a program said and says nothing at all about the cursor. So this reads
-# the glass itself. A screendump is 8x16 cells of pixels; the GOP backend draws
+# the glass itself. A screendump is 8x16 cells of pixels; the display draws
 # the caret as two solid rows at the bottom of a cell, and the 8x16 font is
 # right here in the tree, so a cell can be told back into the character it
 # carries AND whether a caret is standing on it.
@@ -7185,8 +6917,8 @@ caret_read() {
     python3 - "$1" <<'EOF2'
 import re, sys, collections
 ROOT = "."
-src = open(ROOT + "/src/kernel/drivers/video/font/vga_font.h").read()
-body = src[src.index("vga_font_8x16[256][16] = {"):]
+src = open(ROOT + "/src/include/boxos_font.h").read()
+body = src[src.index("BoxFontGlyphs[256][16] = {"):]
 rows = re.findall(r"\{([^{}]*)\}", body)
 FONT = []
 for r in rows[:256]:
@@ -7308,29 +7040,25 @@ run_caret() {
 }
 
 caret_blind_on() {
-    mutate src/kernel/drivers/video/canvas.c
+    mutate src/userspace/display/easel.cpp
     python3 - <<'EOF2'
-p = "src/kernel/drivers/video/canvas.c"
+p = "src/userspace/display/easel.cpp"
 s = open(p).read()
-a = """    bool opened = implicit_open_locked(c);
-    c->col = (uint32_t)x < c->cols ? (uint32_t)x : c->cols - 1u;
-    c->row = (uint32_t)y < c->rows ? (uint32_t)y : c->rows - 1u;
-    implicit_close_locked(c, opened);"""
+a = """    const bool CaretMoved = !ShownKnown || At.X != Drawn.X || At.Y != Drawn.Y ||
+                            At.Visible != Drawn.Visible;"""
 assert s.count(a) == 1, "caret mutation anchor missing"
-s = s.replace(a, """    /* logcheck mutation: the cursor moves and the glass is not told */
-    c->col = (uint32_t)x < c->cols ? (uint32_t)x : c->cols - 1u;
-    c->row = (uint32_t)y < c->rows ? (uint32_t)y : c->rows - 1u;""", 1)
+s = s.replace(a, """    const bool CaretMoved = !ShownKnown;   /* logcheck mutation: the caret moves and the glass is not told */""", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/drivers/video/canvas.c "logcheck mutation"
+    mut_done src/userspace/display/easel.cpp "logcheck mutation"
 }
 
 caret_blind_off() {
-    restore src/kernel/drivers/video/canvas.c
+    restore src/userspace/display/easel.cpp
 }
 
 run_caretmut() {
-    echo "== caretmut: with the commit taken out, the caret must stop following the cursor =="
+    echo "== caretmut: with the caret's move left untold, the caret must stop following the cursor =="
     caret_blind_on; build STRICT=on
     local booted=1
     caret_boot && booted=0
@@ -7345,7 +7073,7 @@ run_caretmut() {
     COL=$(echo "$E" | awk '{print $4}' | cut -d, -f2)
     WANT=$(echo "$LINE" | sed 's/^last [0-9]*|//' | awk '{ i=index($0,"abcdef"); print (i>0 ? i-1+4 : -1) }')
     if [ -n "$COL" ] && [ "$COL" = "$WANT" ]; then
-        bad "caretmut: the commit was removed and the caret STILL followed the arrows — the oracle cannot see that defect"
+        bad "caretmut: the caret's move was left untold and the caret STILL followed the arrows — the oracle cannot see that defect"
     else
         ok "caretmut: the caret stayed at column $COL instead of $WANT, and the caret oracle would have caught it"
     fi
@@ -8476,20 +8204,20 @@ run_handsetdeaf() {
 # The oracle measured against itself: the daemon takes a key nobody heard for
 # heard, so the deaf ear keeps the handset and the line is lost.
 handsetdeaf_blind_on() {
-    mutate src/userspace/display/display.c
+    mutate src/userspace/display/lanes.cpp
     python3 - <<'EOF2'
-p = "src/userspace/display/display.c"
+p = "src/userspace/display/lanes.cpp"
 s = open(p).read()
 anchor = "        if (heard > 0) {\n"
 assert s.count(anchor) == 1, "handsetdeaf mutation anchor missing"
 s = s.replace(anchor, "        if (heard >= 0) {   /* logcheck mutation: a key nobody heard counts as heard */\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/userspace/display/display.c "logcheck mutation"
+    mut_done src/userspace/display/lanes.cpp "logcheck mutation"
 }
 
 handsetdeaf_blind_off() {
-    restore src/userspace/display/display.c
+    restore src/userspace/display/lanes.cpp
 }
 
 run_handsetdeafmut() {
@@ -12547,8 +12275,6 @@ case "${1:-both}" in
     intx)     run_intx ;;
     iommu)    run_iommu ;;
     lastsaid) run_lastsaid ;;
-    draft)    run_draft ;;
-    draftmut) run_draftmut ;;
     paint)    run_paint ;;
     paintmut) run_paintmut ;;
     finish)   run_finish ;;
@@ -12557,8 +12283,6 @@ case "${1:-both}" in
     overtakemut) run_overtakemut ;;
     orderlife) run_orderlife ;;
     orderlifemut) run_orderlifemut ;;
-    batchfail) run_batchfail ;;
-    batchfailmut) run_batchfailmut ;;
     caret)    run_caret ;;
     caretmut) run_caretmut ;;
     grow)     run_grow ;;
@@ -12586,8 +12310,8 @@ case "${1:-both}" in
     defragdelete) run_defragdelete ;;
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|badpool|framerefuse|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

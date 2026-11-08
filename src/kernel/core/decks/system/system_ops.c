@@ -25,6 +25,7 @@
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
 #include "crate_io.h"
+#include "crate_stage.h"   /* the asker's crates, held by its question until settled */
 #include "system_deck.h"
 #include "touch.h"
 #include "result.h"
@@ -304,6 +305,261 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     }
     kfree(pid_list);
     return delivered > 0 ? OK : ERR_ROUTE_NO_SUBSCRIBERS;
+}
+
+/* =========================================================================
+ *  Questions — system.ask / system.answer
+ * =========================================================================
+ *
+ * A question has exactly one answer, and the kernel is what makes that so.
+ * The asker stands — as it does on system.process.gone, without a clock and
+ * without looking — until the strand it asked answers, or that strand's life
+ * ends and the kernel answers ERR_PROCESS_NOT_FOUND in its place. Nothing in
+ * userspace has to watch for a death, hold other messages aside or tell an
+ * answer from a stranger's message by its first byte: the answer is the
+ * reply to the asker's own submit, matched by its own cookie.
+ *
+ * The question reaches the carrier as an IPC message of kind KCTX_ASK —
+ * sender_pid the asker, the asker's cookie in the context — whose payload
+ * begins with AskFrom (boxos_kctx.h): who asked, and in which program, is the
+ * kernel's word, not the asker's. The cookie is the asker's, so the record
+ * answers nothing of the carrier's: having a sender makes it a message
+ * (kring.c, kring_answer_token). One strand must carry the tag; several is
+ * ERR_ROUTE_AMBIGUOUS, never a guess at which of them meant to answer.
+ *
+ * An answer to an asker whose death is committed is written nowhere and comes
+ * back ERR_PROCESS_NOT_FOUND, so the answerer knows that what it handed out —
+ * a lane, a layer — went to nobody. The death is committed before process:died
+ * is said, so an answer that does reach a living asker is always followed by
+ * the death the answerer will hear of, and never preceded by it.
+ * ========================================================================= */
+
+error_t QuestionSettle(Question *q, error_t rc, const void *answer, uint32_t length)
+{
+    process_t     *asker = q->asker;
+    vmm_context_t *vmm   = asker->cabin ? asker->cabin->vmm : NULL;
+    uint32_t       put   = 0;
+
+    if (rc == OK && length > 0) {
+        Crate *box = q->answer_box != CRATE_INDEX_NONE ? &q->crates[q->answer_box] : NULL;
+        if (!box || length > box->capacity)
+            rc = ERR_BUFFER_TOO_SMALL;
+        else if (!vmm || vmm_user_buf_commit_out(vmm, (uintptr_t)box->addr, answer, length) != OK)
+            rc = ERR_INVALID_ADDRESS;
+        else {
+            box->size = length;
+            put       = length;
+        }
+    }
+
+    /* The descriptors go back only with an answer in the box: a refusal and a
+     * death leave them as the asker wrote them, and touch none of its memory
+     * — a death answers from wherever the life ended (ProcessGoneDeliver). */
+    if (put) crate_stage_commit_and_release(q->crates, q->crate_count, vmm, q->crates_uaddr);
+    else     crate_stage_release_no_commit(q->crates);
+
+    Result r;
+    memset(&r, 0, sizeof(r));
+    r.error_code  = (uint32_t)rc;
+    r.data_length = put;
+    r.context     = KCTX_PACK24(KCTX_GUIDE, q->cookie);
+    ChitDue(asker, q->cookie);
+    KResultPush(asker, &r);
+
+    process_ref_dec(asker);   /* the ref taken when the question was asked */
+    kfree(q);
+    return rc;
+}
+
+/* The one strand carrying the tag, pinned — or why there is none to ask. */
+static error_t AskCarrier(const ManifestOp *op, const process_t *asker, process_t **out)
+{
+    TagSpelling tag;
+    error_t spelled = TagSpell((const char *)op->params, op->param_size, &tag);
+    if (spelled != OK) return spelled;
+
+    uint32_t tid = TagFSLookupSpelling(&tag);
+    if (tid == TAGFS_INVALID_TAG_ID) return ERR_ROUTE_NO_SUBSCRIBERS;
+
+    uint32_t pid = 0, carriers = 0;
+    process_list_lock();
+    for (process_t *iter = process_get_first(); iter; iter = iter->next) {
+        if (iter->pid == asker->pid)               continue;
+        process_state_t st = iter->state;
+        if (st == PROC_CRASHED || st == PROC_DONE) continue;
+        if (!process_has_tag_id(iter, tid))         continue;
+        pid = iter->pid;
+        carriers++;
+    }
+    process_list_unlock();
+
+    if (carriers == 0) return ERR_ROUTE_NO_SUBSCRIBERS;
+    if (carriers > 1)  return ERR_ROUTE_AMBIGUOUS;
+
+    process_t *carrier = process_find_ref(pid);
+    if (!carrier) return ERR_ROUTE_NO_SUBSCRIBERS;
+    if (!target_alive(carrier)) {
+        process_ref_dec(carrier);
+        return ERR_ROUTE_NO_SUBSCRIBERS;
+    }
+    *out = carrier;
+    return OK;
+}
+
+static int SysAsk(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                  const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
+    /* A question is waited for; one nobody waits for has nobody to answer. */
+    if (ctx->submit_cookie == 0) return ERR_INVALID_ARGUMENT;
+
+    process_t *carrier = NULL;
+    error_t rc = AskCarrier(op, ctx->proc, &carrier);
+    if (rc != OK) return rc;
+
+    /* Everything that can fail happens before the question is linked, and is
+     * answered synchronously: the bytes, the deposit, the record. */
+    AskFrom from = { .generation = ctx->proc->generation };
+    if (!CabinProgram(ctx->proc->cabin, &from.program_pid, &from.program_generation)) {
+        process_ref_dec(carrier);
+        return ERR_INVALID_STATE;
+    }
+
+    uint64_t asked = 0;
+    if (op->in_crate != CRATE_INDEX_NONE) asked = crates[op->in_crate].size;
+    if (asked > UINT32_MAX - sizeof(from)) {
+        process_ref_dec(carrier);
+        return ERR_OUT_OF_RANGE;
+    }
+    uint32_t length = (uint32_t)asked + (uint32_t)sizeof(from);
+    uint8_t *payload = kmalloc(length);
+    Question *q = kmalloc(sizeof(Question));
+    if (!payload || !q) {
+        if (payload) kfree(payload);
+        if (q) kfree(q);
+        process_ref_dec(carrier);
+        return ERR_NO_MEMORY;
+    }
+    memcpy(payload, &from, sizeof(from));
+    if (asked && crate_read(&crates[op->in_crate], ctx, payload + sizeof(from), asked) != OK) {
+        kfree(payload);
+        kfree(q);
+        process_ref_dec(carrier);
+        return ERR_INVALID_ADDRESS;
+    }
+    uint64_t deposit = cabin_heap_deposit(carrier, payload, length);
+    kfree(payload);
+    if (!deposit) {
+        kfree(q);
+        process_ref_dec(carrier);
+        return ERR_NO_MEMORY;
+    }
+
+    q->asker        = ctx->proc;
+    q->cookie       = ctx->submit_cookie;
+    q->crate_count  = ctx->crate_count;
+    q->answer_box   = op->out_crate;
+    q->crates       = crates;
+    q->crates_uaddr = ctx->crates_uaddr;
+    process_ref_inc(ctx->proc);   /* QuestionSettle's to give back */
+
+    /* From here the crates are the question's and every outcome reaches the
+     * asker through QuestionSettle — so the chit is given and the asker
+     * stands BEFORE the question can be found: a settle that comes at once,
+     * by an answer or by the carrier's end, then finds both already so. */
+    ChitGive(ctx, "system.ask", ((uint64_t)carrier->generation << 32) | carrier->pid);
+    process_set_state(ctx->proc, PROC_WAITING);
+
+    /* Linked under gone_lock, against the carrier's death commit: a carrier
+     * whose end is committed is never asked, and one that is not yet will
+     * find this question when its end settles what it owes. */
+    spin_lock(&carrier->gone_lock);
+    if (__atomic_load_n(&carrier->touch_cleaned, __ATOMIC_ACQUIRE)) {
+        spin_unlock(&carrier->gone_lock);
+        ipc_deposit_release(carrier, deposit, length);
+        QuestionSettle(q, ERR_PROCESS_NOT_FOUND, NULL, 0);
+        process_ref_dec(carrier);
+        return ERR_WOULD_BLOCK;
+    }
+    q->next            = carrier->questions;
+    carrier->questions = q;
+    spin_unlock(&carrier->gone_lock);
+
+    Result r;
+    memset(&r, 0, sizeof(r));
+    r.error_code  = OK;
+    r.data_length = length;
+    r.data_addr   = deposit;
+    r.sender_pid  = ctx->proc->pid;
+    r.context     = KCTX_PACK24(KCTX_ASK, ctx->submit_cookie);
+    if (!KResultPushOrOwe(carrier, &r)) {
+        /* Not delivered: take the question back, unless the carrier's end or
+         * an answer — impossible before delivery — already took it. */
+        Question **at;
+        Question  *taken = NULL;
+        spin_lock(&carrier->gone_lock);
+        for (at = &carrier->questions; *at; at = &(*at)->next) {
+            if (*at == q) { taken = q; *at = q->next; break; }
+        }
+        spin_unlock(&carrier->gone_lock);
+        ipc_deposit_release(carrier, deposit, length);
+        if (taken) QuestionSettle(taken, ERR_NO_MEMORY, NULL, 0);
+    }
+
+    process_ref_dec(carrier);
+    return ERR_WOULD_BLOCK;
+}
+
+static int SysAnswer(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                     const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || !ctx->proc)  return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 8)  return ERR_INVALID_ARGUMENT;
+
+    uint32_t asker_pid, cookie;
+    memcpy(&asker_pid, op->params,     sizeof(uint32_t));
+    memcpy(&cookie,    op->params + 4, sizeof(uint32_t));
+
+    /* Only a question asked of THIS strand, and only once. */
+    process_t *me = ctx->proc;
+    Question  *q  = NULL;
+    spin_lock(&me->gone_lock);
+    for (Question **at = &me->questions; *at; at = &(*at)->next) {
+        if ((*at)->asker->pid == asker_pid && (*at)->cookie == cookie) {
+            q   = *at;
+            *at = q->next;
+            break;
+        }
+    }
+    spin_unlock(&me->gone_lock);
+    if (!q) return ERR_INVALID_STATE;   /* answered already, or never asked */
+
+    if (__atomic_load_n(&q->asker->touch_cleaned, __ATOMIC_ACQUIRE)) {
+        QuestionSettle(q, ERR_PROCESS_NOT_FOUND, NULL, 0);
+        return ERR_PROCESS_NOT_FOUND;
+    }
+
+    uint8_t *answer = NULL;
+    uint32_t length = 0;
+    if (op->in_crate != CRATE_INDEX_NONE && crates[op->in_crate].size > 0) {
+        uint64_t size = crates[op->in_crate].size;
+        answer = size <= UINT32_MAX ? kmalloc((size_t)size) : NULL;
+        if (!answer) {
+            QuestionSettle(q, ERR_NO_MEMORY, NULL, 0);
+            return ERR_NO_MEMORY;
+        }
+        if (crate_read(&crates[op->in_crate], ctx, answer, size) != OK) {
+            kfree(answer);
+            QuestionSettle(q, ERR_INVALID_ADDRESS, NULL, 0);
+            return ERR_INVALID_ADDRESS;
+        }
+        length = (uint32_t)size;
+    }
+    error_t rc = QuestionSettle(q, OK, answer, length);
+    if (answer) kfree(answer);
+    return rc;
 }
 
 /* =========================================================================
@@ -2378,6 +2634,8 @@ error_t SystemDeckRegister(void)
         /* IPC: app+ — IPC is the lifeblood of any process. */
         { SYSTEM_OP_ROUTE,        SysRoute,       OP_AUTH_APP,    "system.route"      },
         { SYSTEM_OP_ROUTE_TAG,    SysBroadcast,   OP_AUTH_APP,    "system.broadcast"  },
+        { SYSTEM_OP_ASK,          SysAsk,         OP_AUTH_APP,    "system.ask"        },
+        { SYSTEM_OP_ANSWER,       SysAnswer,      OP_AUTH_APP,    "system.answer"     },
         /* Process lifecycle: spawn/exec are utility+; info/kill/exit are open
          * (kill of pid==0 is self-exit, used by every process). */
         { SYSTEM_OP_PROC_SPAWN,   SysProcSpawn,   OP_AUTH_UTILITY,"system.proc.spawn" },

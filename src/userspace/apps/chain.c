@@ -33,9 +33,9 @@ static uint8_t  s_buf[CHAIN_BUF_BYTES];
 
 int main(void)
 {
-    /* Bypass the display-server IPC route and write straight to VGA — this
-     * test is meant to run standalone without a display server. */
-    io_set_mode(IO_MODE_VGA);
+    /* Bypass the display-server IPC route and say straight into the log
+     * ring — this test is meant to run standalone without a display server. */
+    io_set_mode(IO_MODE_RING);
 
     print("[chain] building ");
     print_int(CHAIN_OPS);

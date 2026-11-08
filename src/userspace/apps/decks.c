@@ -14,7 +14,6 @@
 #include "box/file.h"
 #include "box/system.h"
 #include "box/time.h"
-#include "box/vga.h"
 #include "box/core/manifest.h"
 #include "box/core/crate.h"
 #include "box/core/notify.h"
@@ -78,15 +77,8 @@ static bool test_operations(void)
 }
 
 /* -------------------------------------------------------------------------
- *  Hardware Deck — VGA dimensions + timer + RTC
+ *  Hardware Deck — timer + RTC
  * ------------------------------------------------------------------------- */
-
-static bool test_hw_vga_dims(void)
-{
-    vga_dimensions_t d = {0};
-    if (vga_getdimensions(&d) != 0) return false;
-    return d.cols > 0 && d.rows > 0;
-}
 
 static bool test_hw_timer_monotonic(void)
 {
@@ -227,13 +219,12 @@ static bool test_retired_opcode_is_unknown(void)
 
 int main(void)
 {
-    /* Standalone — write straight to VGA, no display server. */
-    io_set_mode(IO_MODE_VGA);
+    /* Standalone — said straight into the log ring, no display server. */
+    io_set_mode(IO_MODE_RING);
 
     println("=== BoxOS Decks Stress Test ===");
 
     check("Operations: fill + move",   test_operations());
-    check("Hardware:   vga.dims",      test_hw_vga_dims());
     check("Hardware:   timer.ms",      test_hw_timer_monotonic());
     check("Hardware:   rtc.unix64",    test_hw_rtc_unix());
     check("System:     proc.info self",test_sys_proc_info_self());

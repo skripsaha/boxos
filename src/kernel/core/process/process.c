@@ -285,6 +285,7 @@ static void process_init_strand_fields(process_t *proc)
     spinlock_init(&proc->result_owed_lock);
 
     proc->gone_waiters    = NULL;
+    proc->questions       = NULL;
     spinlock_init(&proc->gone_lock);
     ChitInit(&proc->chit);
 

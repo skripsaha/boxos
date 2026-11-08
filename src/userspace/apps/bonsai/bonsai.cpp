@@ -120,7 +120,7 @@ private:
 };
 
 int run() {
-  auto Opened = painter::tui::Stage::Open("bonsai", 32, 16);
+  auto Opened = painter::tui::Stage::Open(32, 16);
   if (!Opened) {
     std::printf("%s\n", Opened.error().Describe("bonsai").c_str());
     return 1;

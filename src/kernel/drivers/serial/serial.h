@@ -46,10 +46,15 @@ void WireFollowTheFirmware(void);
  * WireKick: the ring grew. If the line is quiet, start it; if it is busy, the
  * transmitter's own interrupt will reach the new bytes. Called by LogRingPut
  * for every byte, from any core and any context, so it must be — and is —
- * one fenced load on the busy path. Before the line drives itself (before
- * serial_console_init) a kick drains the ring synchronously, on the THRE
- * fact, so early boot and an early panic are heard in full. */
+ * one fenced load on the busy path. Before the line drives itself, and until
+ * the first tick pumps it (WireTick), a kick drains the ring synchronously,
+ * on the THRE fact, so early boot and an early panic are heard in full; once
+ * the tick runs, a kick only fills what the transmitter takes now. */
 void WireKick(void);
+
+/* The BSP's tick: while the line has no interrupt of its own, the tick fills
+ * what the transmitter takes, so a kick never waits on the line's speed. */
+void WireTick(void);
 
 /* Everything said so far, onto the wire, before going on: panic, the
  * exception halt, reboot and shutdown. Waits on the transmitter's own word

@@ -12,9 +12,9 @@
 #include <vector>
 
 #include "box/color.h"
+#include "box/display.h"
 #include "box/form.h"
 #include "box/print.h"
-#include "box/vga.h"
 
 #include "difference.h"
 
@@ -73,9 +73,9 @@ void SayLine(std::string_view Text, Color Fg = COLOR_DEFAULT)
 std::size_t GlassWidth()
 {
     if (form_screen_file() != 0) return 0;
-    vga_dimensions_t Dimensions;
-    if (vga_getdimensions(&Dimensions) != 0 || Dimensions.cols == 0) return 80;
-    return Dimensions.cols;
+    std::uint32_t Cols = 0, Rows = 0;
+    if (display_size(&Cols, &Rows) != 0 || Cols == 0) return 80;
+    return Cols;
 }
 
 bool IsContinuation(char Byte)
@@ -147,9 +147,9 @@ public:
     Painter(const TextFile &First, const TextFile &Second)
         : First(First), Second(Second), Width(Digits(std::max(First.Lines.size(), Second.Lines.size())))
     {
-        std::size_t Width = GlassWidth();
+        std::size_t Glass  = GlassWidth();
         std::size_t Gutter = 2 * Width + 4;
-        Limit = Width == 0 ? 0 : (Width > Gutter + LeastTextWidth ? Width - 1 - Gutter : LeastTextWidth);
+        Limit = Glass == 0 ? 0 : (Glass > Gutter + LeastTextWidth ? Glass - 1 - Gutter : LeastTextWidth);
     }
 
     DifferenceTally Show(const DifferenceMarks &Marks);

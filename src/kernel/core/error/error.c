@@ -207,8 +207,6 @@ const char* ErrorString(error_t err) {
             return "Device busy";
         case ERR_KEYBOARD_BUFFER_FULL:
             return "Keyboard buffer full";
-        case ERR_VGA_ERROR:
-            return "VGA error";
         case ERR_ATA_ERROR:
             return "ATA error";
         case ERR_PCI_ERROR:
@@ -276,6 +274,8 @@ const char* ErrorString(error_t err) {
             return "Already listening on route";
         case ERR_ROUTE_INVALID_TAG:
             return "Invalid route tag";
+        case ERR_ROUTE_AMBIGUOUS:
+            return "More than one carries the route tag";
 
         case ERR_POCKET_FAILED:
             return "Pocket failed";

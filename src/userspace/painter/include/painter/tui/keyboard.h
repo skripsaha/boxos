@@ -3,7 +3,6 @@
 
 #include <expected>
 #include <memory>
-#include <string_view>
 
 #include "painter/tui/stage.h"
 
@@ -14,7 +13,7 @@ namespace painter::tui {
  * interactive overlays and regional applications. */
 class Keyboard {
 public:
-    static std::expected<Keyboard, StageError> Open(std::string_view Name) noexcept;
+    static std::expected<Keyboard, StageError> Open() noexcept;
 
     Keyboard(Keyboard &&) noexcept;
     Keyboard &operator=(Keyboard &&) noexcept;

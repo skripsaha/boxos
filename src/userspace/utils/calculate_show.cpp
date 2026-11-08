@@ -17,7 +17,7 @@ constexpr std::size_t SignificantDigits = 30;
 constexpr std::size_t LongestEnding     = 100;
 constexpr std::size_t DoubleDigits      = 15;
 /* Three dots, not the one character U+2026: the glass draws a 256-glyph font
- * that holds no such character, and it would be a solid box (font/glyph_fold.h). */
+ * that holds no such character, and it would be a solid box (boxos_glyph_fold.h). */
 constexpr const char  Goes[]            = "...";
 
 /* How many digits a decimal of 1/Denominator has after the point when it ends:

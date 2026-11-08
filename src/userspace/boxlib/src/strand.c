@@ -112,8 +112,9 @@ void strand_exit(void)
      * die with the strand (MEASURED on BIOS 16c: the last of 400 numbered
      * lines, every printf strand, every run). The frame is the strand's, not
      * the cabin's, so it is the strand's to hand in; exit() does the same for
-     * the main strand. */
-    io_flush();
+     * the main strand. It waits until the display has said it, so a display
+     * dying in that moment cannot take it along (io_depart). */
+    io_depart();
 
     /* Ф20e — return this strand's StrandPool cache to the global heap and free
      * its slab slot BEFORE we ask the kernel to terminate the strand. The slot's

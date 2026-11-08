@@ -95,7 +95,7 @@ Stringview::Stringview(file_id_t File, std::string Name, std::string Tags, std::
 std::optional<std::string> Stringview::TakeScreen()
 {
     std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
-        painter::tui::Stage::Open("stringview", static_cast<std::int32_t>(Digits + 8), 3);
+        painter::tui::Stage::Open(static_cast<std::int32_t>(Digits + 8), 3);
     if (!Opened) return Opened.error().Describe("stringview");
     Screen.emplace(std::move(*Opened));
     Rows = static_cast<std::uint32_t>(Screen->Size().Height);

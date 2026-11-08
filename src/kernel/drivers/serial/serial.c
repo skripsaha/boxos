@@ -203,6 +203,14 @@ static volatile uint32_t g_wire_idle;
  * anywhere that the interrupt just served belonged to this port. */
 static volatile bool g_wire_live;
 
+/* Set by the first tick that pumps the line (WireTick). Until then — early
+ * boot, a crash before the clock runs — a kick drains on the transmitter's
+ * word, as it always has; after, a kick only fills what the transmitter takes
+ * now and the tick carries the rest, so a line with no interrupt of its own
+ * costs a kick nothing but the FIFO, never the line's own speed with every
+ * lock its caller holds. */
+static volatile bool g_wire_ticking;
+
 /* What the line says of itself — the count of bytes it fell behind — is not
  * in the ring: it goes out from here, ahead of the ring's bytes. */
 static char     g_wire_notice[80];
@@ -531,7 +539,8 @@ void WireKick(void)
 
     if (!__atomic_load_n(&g_wire_live, __ATOMIC_SEQ_CST)) {
         spin_lock(&g_serial_lock);
-        wire_drain_locked();
+        if (__atomic_load_n(&g_wire_ticking, __ATOMIC_ACQUIRE)) wire_pump_locked();
+        else                                                    wire_drain_locked();
         spin_unlock(&g_serial_lock);
         return;
     }
@@ -541,6 +550,16 @@ void WireKick(void)
 
     spin_lock(&g_serial_lock);
     __atomic_store_n(&g_wire_idle, 0u, __ATOMIC_SEQ_CST);
+    wire_pump_locked();
+    spin_unlock(&g_serial_lock);
+}
+
+void WireTick(void)
+{
+    if (!g_wire_present || __atomic_load_n(&g_wire_live, __ATOMIC_ACQUIRE)) return;
+    __atomic_store_n(&g_wire_ticking, true, __ATOMIC_RELEASE);
+    /* A kick or a drain already at the line carries it; the tick never waits. */
+    if (!spin_trylock(&g_serial_lock)) return;
     wire_pump_locked();
     spin_unlock(&g_serial_lock);
 }
@@ -771,16 +790,31 @@ static void serial_com1_irq(void)
             break;
 
         case IIR_RX:
-        case IIR_RX_TIMEOUT:
+        case IIR_RX_TIMEOUT: {
             /* Drain the whole FIFO. CR->LF so a terminal's Enter submits the
              * line (the PS/2 path delivers '\n' for Enter, which is what the
-             * line editor expects). */
+             * line editor expects).
+             *
+             * Handed over as one burst, with whether the line has fallen
+             * silent after it: a timeout says the UART saw four character
+             * times of nothing, so a terminal's sequence ended inside this
+             * burst and an ESC alone was a lone Escape. A UART with no FIFO
+             * has no such word, and every byte stands alone. */
+            char     got[16];
+            uint32_t n     = 0;
+            bool     quiet = g_wire_fifo == 1u || (iir & IIR_ID_MASK) == IIR_RX_TIMEOUT;
             while (uart_in(SERIAL_LINE_STATUS) & LSR_DATA_READY) {
                 char c = (char)uart_in(SERIAL_DATA);
                 if (c == '\r') c = '\n';
-                keyboard_inject(&c, 1);
+                got[n++] = c;
+                if (n == sizeof(got)) {
+                    keyboard_inject(got, n, false);
+                    n = 0;
+                }
             }
+            keyboard_inject(got, n, quiet);
             break;
+        }
 
         case IIR_LINE_STATUS:
             (void)uart_in(SERIAL_LINE_STATUS);
@@ -856,10 +890,13 @@ void serial_console_init(void)
         return;
     }
 
-    /* 1-byte RX trigger so a single character interrupts immediately, and
-     * the receive FIFO cleared of boot-time noise. The transmit FIFO is left
-     * alone: it may hold bytes the synchronous kicks put there. */
-    uart_out(SERIAL_FIFO_CTRL, 0x03);
+    /* 14-byte RX trigger, and the receive FIFO cleared of boot-time noise. A
+     * single key still interrupts at once: the UART raises its timeout when
+     * the line has been quiet for four character times (under half a
+     * millisecond at this speed), and that quiet is how a terminal's escape
+     * sequence is told from a lone Escape (keyboard_inject). The transmit
+     * FIFO is left alone: it may hold bytes the synchronous kicks put there. */
+    uart_out(SERIAL_FIFO_CTRL, 0xC3);
     /* The Wire drains the log ring onto the line. Late means bytes fall
      * behind and the reader is told how many; nothing in flight is lost.
      *
