@@ -74,7 +74,7 @@ UTILS = help create show files tag untag name trash erase assemble \
         playtime lavalamp finish taskcenter hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
-        edit
+        edit seek
 
 .PHONY: all clean
 
@@ -170,6 +170,7 @@ CALCULATE_OBJS  = calculate.o calculate_integer.o calculate_fraction.o calculate
                   calculate_show.o calculate_read.o calculate_parse.o
 DIFFERENCE_OBJS = difference.o difference_myers.o difference_text.o difference_print.o
 COPY_OBJS       = copy.o
+SEEK_OBJS       = seek.o
 TYPER_OBJS      = typer.o typer_passages.o typer_text.o typer_attempt.o typer_record.o \
                   typer_store.o typer_screen.o typer_paint.o typer_results.o
 FLAME_OBJS      = flame.o flame_sim.o flame_palette.o flame_font.o flame_paint.o flame_menu.o
@@ -214,6 +215,10 @@ difference.elf: $(BOXLIB_START) $(DIFFERENCE_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_
 
 copy.elf: $(BOXLIB_START) $(COPY_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(COPY_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+seek.elf: $(BOXLIB_START) $(SEEK_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(SEEK_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 typer.elf: $(BOXLIB_START) $(TYPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
