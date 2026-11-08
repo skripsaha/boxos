@@ -71,7 +71,7 @@ static int resolve(BoxFormFiller *filler, FormItem *item)
         file_id_t *ids = NULL;
         bool       bounded = false;
         int n = item->Role == FORM_ROLE_ALL
-                    ? lookup->All(lookup, &ids, &bounded)
+                    ? lookup->All(lookup, item->Everywhere != 0, &ids, &bounded)
                     : lookup->Find(lookup, item->Token.Text, item->Everywhere != 0, &ids);
         if (n < 0) {
             free(ids);

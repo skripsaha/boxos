@@ -21,10 +21,11 @@ extern "C" {
  * `gives things`.) The shell reads it before the program starts and sorts the
  * words the person typed by what each one IS — a file that is here, `them`
  * or `it` (what the last command gave), `all` (everything in the Use
- * Context), or a plain word — into the fields, in their order. It asks only
- * when it must: a name that means more than one file, a field left empty,
- * `all` with no context (the whole volume). The program reads its fields
- * filled — file ids, words, text — and never parses its own line.
+ * Context; `everywhere all`, the whole volume), or a plain word — into the
+ * fields, in their order. It asks only when it must: a name that means more
+ * than one file, a field left empty, an `all` that is the whole volume. The
+ * program reads its fields filled — file ids, words, text — and never parses
+ * its own line.
  *
  *     tag a.txt done            things [a.txt]          words [done]
  *     tag done a.txt, b.txt     things [a.txt, b.txt]   words [done]
@@ -201,9 +202,10 @@ struct BoxFormLookup {
     /* Every file called Name in the Use Context, or on the whole volume
      * when Everywhere. */
     int (*Find)(BoxFormLookup *lookup, const char *name, bool everywhere, file_id_t **ids);
-    /* Every file in the Use Context (`all`); *Bounded 0 when there is no
-     * context and the answer is the whole volume. */
-    int (*All)(BoxFormLookup *lookup, file_id_t **ids, bool *bounded);
+    /* Every file in the Use Context (`all`), or on the whole volume when
+     * Everywhere (`everywhere all`); *Bounded 0 when the answer is the whole
+     * volume — asked for, or the Use Context being none. */
+    int (*All)(BoxFormLookup *lookup, bool everywhere, file_id_t **ids, bool *bounded);
     const file_id_t *Them;     /* `them` all of it, `it` one of it: what the last command gave */
     size_t           ThemCount;
     bool             ThemKnown;
@@ -221,7 +223,7 @@ typedef enum {
     BOX_FORM_DONE = 0,
     BOX_FORM_ASK_WHICH,        /* Word (a name, or `it`) means several files: choose one of Choices */
     BOX_FORM_ASK_FIELD,        /* Field is required and empty: words for it */
-    BOX_FORM_ASK_SURE,         /* `all` is the whole volume, Count files: yes or no */
+    BOX_FORM_ASK_SURE,         /* an `all` is the whole volume, Count files: yes or no */
     BOX_FORM_REFUSED           /* the line cannot be filled: Word is the sentence */
 } BoxFormStep;
 
@@ -244,8 +246,9 @@ typedef struct BoxFormFiller BoxFormFiller;
  * it are the arrow; `them` `it` `all` `everywhere` are the shell's words —
  * alone or in a list alike, plain when quoted — but only for a Form with a
  * thing or things field — to any other they are plain words. A file is in a
- * field once, however many words name it. `everywhere` makes the lookups of the names after it span the whole
- * volume. The words are looked up as a field asks for them, and a Form whose
+ * field once, however many words name it. `everywhere` makes the lookups of
+ * the names after it span the whole volume, and an `all` after it the whole
+ * volume's files. The words are looked up as a field asks for them, and a Form whose
  * first field is text looks up nothing. Form and lookup outlive the filler. */
 int  form_fill_begin(const BoxForm *form, const char *line, BoxFormLookup *lookup,
                      BoxFormFiller **out);

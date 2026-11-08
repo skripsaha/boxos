@@ -160,11 +160,11 @@ static int SightFind(BoxFormLookup *lookup, const char *name, bool everywhere, f
     return ViewFind(((Sight *)lookup)->View, name, everywhere, ids);
 }
 
-static int SightAll(BoxFormLookup *lookup, file_id_t **ids, bool *bounded)
+static int SightAll(BoxFormLookup *lookup, bool everywhere, file_id_t **ids, bool *bounded)
 {
     Sight *sight = (Sight *)lookup;
-    *bounded = sight->Bounded;
-    return ViewAll(sight->View, ids);
+    *bounded = !everywhere && sight->Bounded;
+    return ViewAll(sight->View, everywhere, ids);
 }
 
 static void ReleaseForm(ShellWhisper *whisper)

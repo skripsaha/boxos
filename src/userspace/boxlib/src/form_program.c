@@ -86,13 +86,17 @@ static int lookup_find(BoxFormLookup *lookup, const char *name, bool everywhere,
     return kept;
 }
 
-static int lookup_all(BoxFormLookup *lookup, file_id_t **ids, bool *bounded)
+static int lookup_all(BoxFormLookup *lookup, bool everywhere, file_id_t **ids, bool *bounded)
 {
+    *ids = NULL;
+    if (everywhere) {
+        *bounded = false;
+        return query_all_everywhere(NULL, ids);
+    }
+
     char   tags[256];
     size_t needed = 0;
     int    tag_count = use_get(tags, sizeof(tags), &needed);
-
-    *ids = NULL;
     *bounded = tag_count > 0 || needed > 1;
     return query_all(NULL, ids);
 }

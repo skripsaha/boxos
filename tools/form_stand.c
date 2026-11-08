@@ -146,15 +146,15 @@ static int stand_find(BoxFormLookup *lookup, const char *name, bool everywhere, 
     return count;
 }
 
-static int stand_all(BoxFormLookup *lookup, file_id_t **ids, bool *bounded)
+static int stand_all(BoxFormLookup *lookup, bool everywhere, file_id_t **ids, bool *bounded)
 {
     (void)lookup;
     file_id_t found[FILE_COUNT];
     int count = 0;
     for (size_t i = 0; i < FILE_COUNT; i++) {
-        if (g_files[i].InContext && g_files[i].Id != 10) found[count++] = g_files[i].Id;
+        if ((everywhere || g_files[i].InContext) && g_files[i].Id != 10) found[count++] = g_files[i].Id;
     }
-    *bounded = g_bounded;
+    *bounded = g_bounded && !everywhere;
     *ids = malloc((size_t)count * sizeof(file_id_t));
     memcpy(*ids, found, (size_t)count * sizeof(file_id_t));
     return count;
@@ -413,6 +413,13 @@ static void test_shell_words(void)
     expect(TAG, "all done", yes, "SURE(7) => things(#1 #2 #3 #4 #7 #8 #9) words(=done)");
     expect(TAG, "all done", no, "SURE(7) REFUSED: the whole volume was not agreed to");
     expect(TAG, "all done", NULL, "SURE(7) UNANSWERED");
+
+    /* `everywhere all` is the whole volume however the Use Context stands,
+     * and is asked about as the whole volume always is. */
+    reset_volume();
+    expect(TAG, "everywhere all done", yes, "SURE(8) => things(#1 #2 #3 #4 #5 #7 #8 #9) words(=done)");
+    expect(TAG, "everywhere all done", no, "SURE(8) REFUSED: the whole volume was not agreed to");
+    expect(TAG, "done everywhere all, a.txt", yes, "SURE(8) => things(#1 #2 #3 #4 #5 #7 #8 #9) words(=done)");
 
     reset_volume();
     g_done_exists = true;

@@ -63,10 +63,10 @@ bool ViewHolds(const ViewShelf *shelf, const char *name, size_t length);
 file_id_t ViewProgram(ShellView *view, const char *name);
 
 /* As BoxFormLookup's Find and All answer, from what the view holds: the files
- * called `name` in the Use Context (or on the whole volume), and every file in
- * the Use Context. A heap array the caller frees. */
+ * called `name`, and every file — in the Use Context, or on the whole volume
+ * when everywhere. A heap array the caller frees. */
 int ViewFind(ShellView *view, const char *name, bool everywhere, file_id_t **ids);
-int ViewAll(ShellView *view, file_id_t **ids);
+int ViewAll(ShellView *view, bool everywhere, file_id_t **ids);
 
 /* `items` sorted in place by `order` (negative: a before b), equals kept in
  * the order they came. False, and nothing moved, when there is no memory for

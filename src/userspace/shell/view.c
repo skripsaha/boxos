@@ -158,10 +158,10 @@ int ViewFind(ShellView *view, const char *name, bool everywhere, file_id_t **ids
     return Collect(view->Files[everywhere], view->FileCount[everywhere], name, ids);
 }
 
-int ViewAll(ShellView *view, file_id_t **ids)
+int ViewAll(ShellView *view, bool everywhere, file_id_t **ids)
 {
-    ReadFiles(view, false);
-    return Collect(view->Files[0], view->FileCount[0], NULL, ids);
+    ReadFiles(view, everywhere);
+    return Collect(view->Files[everywhere], view->FileCount[everywhere], NULL, ids);
 }
 
 /* ---- sorting ----------------------------------------------------------- */
