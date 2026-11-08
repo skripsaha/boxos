@@ -5,6 +5,18 @@ ENTRY(_start)
 /* MUST match VMM_CABIN_CODE_START (0xC000) */
 USER_BASE = 0xC000;
 
+/* Three segments, each with one set of rights, and the thread template. Code
+ * alone is executable; what is only read — constants, the unwinder's tables,
+ * the Nameplate, the Form — is not, and lies on pages of its own; tools/pack
+ * makes each segment the part of its kind (code, const, data). */
+PHDRS
+{
+    text   PT_LOAD FLAGS(5);   /* R+X */
+    rodata PT_LOAD FLAGS(4);   /* R   */
+    data   PT_LOAD FLAGS(6);   /* R+W */
+    tls    PT_TLS  FLAGS(4);
+}
+
 SECTIONS
 {
     . = USER_BASE;
@@ -13,12 +25,12 @@ SECTIONS
     {
         *boxlib_start.o(.text)     /* entry point MUST be first for flat binary loading */
         *(.text .text.*)
-    }
+    } :text
 
     .rodata : ALIGN(4096)
     {
         *(.rodata .rodata.*)
-    }
+    } :rodata
 
     /* ── C++ EH metadata (read-only, lives with .rodata) ──────────────
      * .eh_frame: DWARF CFI for the boxcxx unwinder. Bounded by
@@ -75,7 +87,7 @@ SECTIONS
     .data : ALIGN(4096)
     {
         *(.data .data.*)
-    }
+    } :data
 
     /* ── C++ ctor/dtor arrays (writable segment — legacy .ctors input
      * sections carry the W flag; keeping them next to .text would turn
@@ -119,13 +131,13 @@ SECTIONS
         __tdata_start = .;
         *(.tdata .tdata.*)
         __tdata_end = .;
-    }
+    } :data :tls
 
     .tbss :
     {
         *(.tbss .tbss.*)
         *(.tcommon)
-    }
+    } :data :tls
 
     __tdata_size = SIZEOF(.tdata);
     __tbss_size  = SIZEOF(.tbss);
@@ -136,7 +148,7 @@ SECTIONS
         *(.bss .bss.*)
         *(COMMON)
         __bss_end = .;
-    }
+    } :data
 
     __program_end = .;
 

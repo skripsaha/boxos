@@ -37,7 +37,7 @@ FLAGS="-std=gnu11 -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno
 $CC_HOST $FLAGS -fno-builtin -I$LIB/include -Isrc/include -c $LIB/src/sha256.c -o "$WORK/sha256.o" \
     > "$WORK/cc.log" 2>&1 ||
     { cat "$WORK/cc.log"; echo "box: harness failed — sha256.c did not build"; exit 2; }
-$CC_HOST $FLAGS -Isrc/include tools/box_stand.c "$WORK/sha256.o" -o "$WORK/box_stand" \
+$CC_HOST $FLAGS -Isrc/include -Itools tools/box_stand.c "$WORK/sha256.o" -o "$WORK/box_stand" \
     > "$WORK/cc.log" 2>&1 ||
     { cat "$WORK/cc.log"; echo "box: harness failed — the stand did not build"; exit 2; }
 

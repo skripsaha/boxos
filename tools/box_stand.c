@@ -25,8 +25,7 @@
 #include <string.h>
 
 #include "box_pen.h"
-
-void sha256(const void *bytes, size_t length, uint8_t digest[32]);
+#include "box_host.h"
 
 static int g_passed;
 static int g_failed;
@@ -41,42 +40,8 @@ static void Check(bool ok, const char *label)
     printf("FAIL %s\n", label);
 }
 
-/* ── the hasher ───────────────────────────────────────────────────────────── */
-
-typedef struct {
-    uint8_t *Bytes;
-    uint64_t Used;
-    uint64_t Room;
-} StandHash;
-
-static void HashBegin(void *state)
-{
-    ((StandHash *)state)->Used = 0;
-}
-
-static void HashAdd(void *state, const uint8_t *bytes, uint64_t count)
-{
-    StandHash *hash = state;
-    if (hash->Used + count > hash->Room) {
-        hash->Room  = (hash->Used + count) * 2 + 64;
-        hash->Bytes = realloc(hash->Bytes, hash->Room);
-        if (!hash->Bytes) {
-            printf("box: harness failed — no memory for the hasher\n");
-            exit(2);
-        }
-    }
-    memcpy(hash->Bytes + hash->Used, bytes, count);
-    hash->Used += count;
-}
-
-static void HashEnd(void *state, uint8_t digest[BOX_HASH_BYTES])
-{
-    StandHash *hash = state;
-    sha256(hash->Bytes, hash->Used, digest);
-}
-
-static StandHash       g_hash;
-static const BoxHasher g_hasher = { &g_hash, HashBegin, HashAdd, HashEnd };
+static BoxHostHash g_hash;
+static BoxHasher   g_hasher;
 
 /* ── the sample box ──────────────────────────────────────────────────────── */
 
@@ -757,13 +722,11 @@ static void TestTexts(void)
 
 int main(void)
 {
-    uint8_t digest[32];
-    sha256("abc", 3, digest);
-    if (memcmp(digest, "\xba\x78\x16\xbf\x8f\x01\xcf\xea\x41\x41\x40\xde\x5d\xae\x22\x23"
-                       "\xb0\x03\x61\xa3\x96\x17\x7a\x9c\xb4\x10\xff\x61\xf2\x00\x15\xad", 32) != 0) {
+    if (!BoxHostHashTrue()) {
         printf("box: harness failed — SHA-256 of \"abc\" is not FIPS 180-4's\n");
         return 2;
     }
+    g_hasher = BoxHostHasher(&g_hash);
 
     Sample     sample;
     BoxVerdict verdict;
@@ -792,7 +755,7 @@ int main(void)
 
     free(g_copy);
     free(g_box);
-    free(g_hash.Bytes);
+    BoxHostHashFree(&g_hash);
     printf("box: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }
