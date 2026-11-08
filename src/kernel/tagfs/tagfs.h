@@ -881,6 +881,11 @@ bool     TagFSTagMatches(uint32_t tag_id, const TagSpelling* pattern);
  * NULL when there is no memory, or no volume. */
 char*    TagFSKeyList(const uint32_t* tag_ids, uint32_t count);
 
+/* Whether one of `count` tags has the key `key` — "raw" is the key of "raw" and
+ * of "raw:anything" — read in place in the volume's registry. False when none
+ * has, and when there is no volume. */
+bool     TagFSKeyAmong(const uint32_t* tag_ids, uint32_t count, const char* key);
+
 /* A tag's key and value as spans into the volume's registry, and whether the
  * volume calls the tag its own — no copy, for a caller that is INSIDE THE
  * DOOR (tagfs_enter) and reads them before it leaves: the registry is freed

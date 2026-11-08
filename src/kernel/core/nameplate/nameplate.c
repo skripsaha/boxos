@@ -12,9 +12,9 @@
 
 #include "nameplate_format.h"
 
-/* ELF64, only the parts the section-header walk touches. vmm.c keeps its own
- * copy of the header and the PROGRAM headers for the loading side; these two
- * are the section-header side and are needed nowhere else. */
+/* ELF64, only the parts the section-header walk touches. elf_image.c keeps its
+ * own copy of the header and the PROGRAM headers for the loading side; these
+ * two are the section-header side and are needed nowhere else. */
 typedef struct
 {
     uint8_t  e_ident[16];

@@ -1429,10 +1429,14 @@ $(VOLUME_FORMAT_MARK): | $(BUILDDIR)
 # about one list, so the medium can never be made too small for what is about
 # to go in it. A second copy of the list is how those two answers would come
 # to disagree.
+#
+# shell.bin is raw code (objcopy -O binary), and wears `raw` for it: the kernel
+# starts bytes that are no ELF only when the volume declares them raw code
+# (src/kernel/core/process/image_load.h).
 VOLUME_CONTENT = \
 	$(KERNEL_BIN)   "system" \
 	$(DISPLAY_BIN)  "display,system,utility,autostart" \
-	$(SHELL_BIN)    "utility,system,app,autostart" \
+	$(SHELL_BIN)    "utility,system,app,autostart,raw" \
 	$(PROCA_BIN)    "app" \
 	$(PROCB_BIN)    "app" \
 	$(TODAY_BIN)    "app,utility" \

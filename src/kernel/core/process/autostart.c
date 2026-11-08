@@ -125,7 +125,11 @@ static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
         return NULL;
     }
 
-    int load_result = process_load_binary(proc, virt_buf, (size_t)file_size);
+    /* Raw code only when the FILE says so: the volume's word, never one the
+     * process could be given some other way. */
+    bool tagged_raw  = TagFSKeyAmong(meta->tag_ids, meta->tag_count, "raw");
+    int  load_result = process_load_binary(proc, virt_buf, (size_t)file_size,
+                                           meta->filename, tagged_raw);
     pmm_free(phys_buf, pages_needed);
     if (load_result != 0) {
         process_destroy(proc);

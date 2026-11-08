@@ -2956,6 +2956,19 @@ char *TagFSKeyList(const uint32_t *tag_ids, uint32_t count)
     return list;
 }
 
+bool TagFSKeyAmong(const uint32_t *tag_ids, uint32_t count, const char *key)
+{
+    if (!key || !tagfs_enter())
+        return false;
+
+    TagSpelling tag;
+    bool        found = false;
+    for (uint32_t i = 0; i < count && !found; i++)
+        found = TagFSTagSpelling(tag_ids[i], &tag, NULL) && TagSpanIs(key, tag.key, tag.key_len);
+    tagfs_leave();
+    return found;
+}
+
 // ----------------------------------------------------------------------------
 // Defrag
 // ----------------------------------------------------------------------------

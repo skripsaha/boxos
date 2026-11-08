@@ -1081,7 +1081,8 @@ void kernel_main(void)
             panic("Invalid embedded shell binary size");
         }
 
-        int load_result = process_load_binary(shell_proc, _binary_shell_stripped_elf_start, shell_size);
+        int load_result = process_load_binary(shell_proc, _binary_shell_stripped_elf_start, shell_size,
+                                              "embedded shell", false);
         if (load_result != 0)
         {
             panic("Failed to load embedded shell binary");

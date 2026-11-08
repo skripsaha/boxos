@@ -881,11 +881,15 @@ static int SysProcSpawnTagged(const OpContext *ctx, uint64_t binary_va, uint64_t
     new_proc->cabin->spawner_pid = ctx->proc->pid;
     new_proc->cabin->spawner_gen = pid_generation(ctx->proc->pid);
 
-    int load = process_load_binary(new_proc, elf, (size_t)binary_size);
+    /* An image out of a cabin has no volume to declare it raw code, so only
+     * an ELF is ever started this way — which the head above already holds. */
+    char name[48];
+    ksnprintf(name, sizeof(name), "image held by PID %u", ctx->proc->pid);
+    error_t load = process_load_binary(new_proc, elf, (size_t)binary_size, name, false);
     pmm_free(stage_phys, pages);
-    if (load != 0) {
+    if (load != OK) {
         process_destroy(new_proc);
-        return ERR_SPAWN_FAILED;
+        return load;
     }
 
     /* Publish process:spawned so monitors / shells can react. Pair with
@@ -1552,16 +1556,14 @@ static int SysProcExecFile(const ManifestOp *op, Crate *crates, uint16_t crate_c
     return rc;
 }
 
-/* The found program read in, made a process wearing `child_tags`, given its
- * Luggage and started. */
-static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                            uint64_t found_id, const char *child_tags,
+/* The file `found_id`, described by `meta`, read in, made a process wearing
+ * `child_tags`, given its Luggage and started. */
+static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                            uint64_t found_id, const TagFSMetadata *meta,
+                            const char *child_tags,
                             const uint8_t *luggage, uint32_t luggage_len)
 {
-    TagFSMetadata exec_meta;
-    if (tagfs_get_metadata(found_id, &exec_meta) != 0) return ERR_FILE_NOT_FOUND;
-    uint64_t file_size = exec_meta.size;
-    tagfs_metadata_free(&exec_meta);
+    uint64_t file_size = meta->size;
     if (file_size == 0 || file_size > CONFIG_PROC_MAX_BINARY_SIZE) return ERR_BINARY_TOO_LARGE;
 
     size_t pages = (file_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
@@ -1598,11 +1600,15 @@ static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext
     new_proc->cabin->spawner_pid = ctx->proc->pid;
     new_proc->cabin->spawner_gen = pid_generation(ctx->proc->pid);
 
-    int load = process_load_binary(new_proc, virt, (size_t)file_size);
+    /* Raw code only when the FILE says so — never by the caller's augment,
+     * which reaches the process's tags and not the volume's word. */
+    bool    tagged_raw = TagFSKeyAmong(meta->tag_ids, meta->tag_count, "raw");
+    error_t load = process_load_binary(new_proc, virt, (size_t)file_size,
+                                       meta->filename, tagged_raw);
     pmm_free(phys, pages);
-    if (load != 0) {
+    if (load != OK) {
         process_destroy(new_proc);
-        return ERR_SPAWN_FAILED;
+        return load;
     }
 
     /* The luggage goes aboard after the cabin is built and before the child
@@ -1649,6 +1655,21 @@ static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext
     }
     return OK;
 }
+
+/* The found program read in, made a process wearing `child_tags`, given its
+ * Luggage and started. Its metadata is held throughout: the file's name is what
+ * the loader calls it, and the file's own tags say whether it is raw code. */
+static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                            uint64_t found_id, const char *child_tags,
+                            const uint8_t *luggage, uint32_t luggage_len)
+{
+    TagFSMetadata meta;
+    if (tagfs_get_metadata(found_id, &meta) != 0) return ERR_FILE_NOT_FOUND;
+    int rc = SysProcExecImage(op, crates, ctx, found_id, &meta, child_tags, luggage, luggage_len);
+    tagfs_metadata_free(&meta);
+    return rc;
+}
+
 
 /* =========================================================================
  *  SYSTEM_OP_STRAND_SPAWN — spawn an additional strand in the caller's cabin

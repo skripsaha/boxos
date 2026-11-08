@@ -103,6 +103,13 @@
  * at the same value so existing user ELFs (linked at 0xC000) load unchanged. */
 #define CABIN_CODE_START_ADDR          0x000000000000C000ULL
 
+/* Where a program's image ends at the latest: the lowest base the heap can be
+ * given (CABIN_HEAP_BASE, before its random offset). Every page of code, data
+ * and bss lies in [CABIN_CODE_START_ADDR, CABIN_CODE_END_ADDR) — the loader
+ * refuses an image that reaches past it, because above it the heap, the buffer
+ * heap and the kernel's own windows would be found already taken. */
+#define CABIN_CODE_END_ADDR            CABIN_HEAP_BASE
+
 /* High-VA slot regions. 64 TiB into user space — well clear of the heap and
  * buffer-heap regions below, AND well below the 128 TiB canonical-address
  * boundary (bit 47). Crossing 0x0000_8000_0000_0000 produces non-canonical

@@ -519,7 +519,13 @@ void process_destroy(process_t *proc);
  * keeps the eager-reap behavior. */
 process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool joinable);
 
-int process_load_binary(process_t *proc, const void *binary_data, size_t size);
+/* The program `image` (`size` bytes, the caller's and only read) made this
+ * process's: put into its cabin by ImageLoad (image_load.h) — `name` is what
+ * every line about it calls it, `tagged_raw` whether the volume declares it raw
+ * code — then given its stack, its heap and its CabinInfo. OK, or why not; a
+ * process whose load failed is the caller's to destroy, never to start. */
+error_t process_load_binary(process_t *proc, const void *image, size_t size,
+                            const char *name, bool tagged_raw);
 
 process_t *process_find(uint32_t pid);
 process_t *process_find_ref(uint32_t pid); // returns ref-counted pointer, caller must process_ref_dec()
@@ -539,10 +545,6 @@ uint32_t process_get_count(void);
  * Returns number written. Used by Touch to bypass linked-list corruption
  * paths and remain robust against transient process_list races. */
 uint32_t process_snapshot_pids(uint32_t *out, uint32_t max);
-
-#ifdef CONFIG_KERNEL_TESTS
-void process_test(void);
-#endif
 
 void process_start_initial(process_t *proc);
 

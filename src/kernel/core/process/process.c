@@ -11,6 +11,7 @@
 #include "touch_ring.h"
 #include "vmm.h"
 #include "nameplate.h"   /* nameplate_locate — where this image keeps its names */
+#include "image_load.h"  /* ImageLoad — the image put into the cabin, or refused */
 #include "scheduler.h"
 #include "gdt.h"
 #include "tss.h"
@@ -1036,105 +1037,32 @@ void process_destroy(process_t *proc)
     process_ref_dec(proc);
 }
 
-int process_load_binary(process_t *proc, const void *binary_data, size_t size)
+error_t process_load_binary(process_t *proc, const void *image, size_t size,
+                            const char *name, bool tagged_raw)
 {
-    if (!proc || !binary_data || size == 0)
+    if (!proc || !proc->cabin || !image || size == 0 || !name)
     {
         debug_printf("[PROCESS] ERROR: Invalid arguments to process_load_binary\n");
-        return -1;
+        return ERR_INVALID_ARGUMENT;
     }
 
-    if (!proc->cabin)
-    {
-        debug_printf("[PROCESS] ERROR: Process has no cabin\n");
-        return -1;
-    }
-
-    size_t page_count = (size + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
-
-    if (page_count < 5)
-        page_count = 5;
-
-    void *code_phys = pmm_alloc_zero(page_count);
-    if (!code_phys)
-    {
-        debug_printf("[PROCESS] ERROR: Failed to allocate %zu pages for binary\n", page_count);
-        return -1;
-    }
-
-    void *code_virt = vmm_phys_to_virt((uintptr_t)code_phys);
-    memcpy(code_virt, binary_data, size);
-
-    /*
-     * ‼ THE LAST PLACE THAT CAN TELL A PROGRAM FROM A PAGE OF ZEROS
-     *
-     * Every caller is supposed to have read the whole image before getting
-     * here, and each of them now checks. This is the check that does not
-     * depend on any of them being right, because the cost of being wrong is
-     * paid in a way that looks like something else entirely:
-     *
-     *   0x00 0x00  is  add [rax], al
-     *
-     * so a process handed an image of zeros does not fail to start. It starts,
-     * executes the zeros, writes to whatever address RAX holds — which at
-     * entry is zero — and dies with a user-mode page fault at 0x0 with every
-     * register clear. That fault names the process, not the medium that would
-     * not read, and says nothing at all about why.
-     *
-     * A real image begins with something: 0x7F 'E' 'L' 'F', or the first
-     * instruction of a flat binary. Sixteen zero bytes at the front is not a
-     * program under any of those.
-     */
-    {
-        const uint8_t *head = (const uint8_t *)code_virt;
-        size_t look = size < 16 ? size : 16;
-        bool anything = false;
-        for (size_t i = 0; i < look; i++) {
-            if (head[i]) { anything = true; break; }
-        }
-        if (!anything) {
-            kprintf("[PROCESS] refusing to start an image whose first %zu "
-                    "bytes are all zero — this is a read that did not happen, "
-                    "not a program\n", look);
-            pmm_free(code_phys, page_count);
-            return -1;
-        }
-    }
-
-    uintptr_t entry_point = VMM_CABIN_CODE_START;
-    int result = vmm_map_code_region(proc->cabin->vmm, (uintptr_t)code_phys,
-                                     page_count * VMM_PAGE_SIZE, &entry_point);
-    if (result != 0)
-    {
-        debug_printf("[PROCESS] ERROR: Failed to map code region\n");
-        debug_printf("[PROCESS] Physical address: 0x%lx, Size: %zu bytes\n",
-                     (uintptr_t)code_phys, size);
-        pmm_free(code_phys, page_count);
-        return -1;
-    }
+    uintptr_t entry_point = 0;
+    error_t loaded = ImageLoad(proc->cabin->vmm, image, size, name, tagged_raw, &entry_point);
+    if (loaded != OK)
+        return loaded;
 
     /* Where this image keeps the names of its own functions, so a fault dump
      * can print them instead of a column of hex. Read here and nowhere else:
-     * this is the one moment the WHOLE file is in kernel memory — for an ELF
-     * the pages below are handed straight back, and after that only the
-     * mapped segments exist. Costs nothing when the image has no table. */
+     * this is the one moment the WHOLE file is in kernel memory — the caller's,
+     * until the call returns; after it only what the loader mapped exists.
+     * Costs nothing when the image has no table. */
     proc->nameplate_va    = 0;
     proc->nameplate_bytes = 0;
-    (void)nameplate_locate(code_virt, size, VMM_CABIN_CODE_START,
+    (void)nameplate_locate(image, size, VMM_CABIN_CODE_START,
                            &proc->nameplate_va, &proc->nameplate_bytes);
 
-    const uint8_t *probe = (const uint8_t *)code_virt;
-    bool was_elf = (size >= 4 && probe[0] == 0x7F && probe[1] == 'E' &&
-                    probe[2] == 'L' && probe[3] == 'F');
-    if (was_elf)
-        pmm_free(code_phys, page_count);
-
-    /* From here the code is the address space's: a flat binary's frames are
-     * mapped and owned by that mapping, an ELF's segments were copied into
-     * frames of their own and the image above was handed back. Neither is
-     * code_phys any longer, so no failure below frees it — the cabin's
-     * teardown frees what is mapped, and a second free of code_phys is a
-     * buddy double-free. */
+    /* From here the image is the address space's: what the loader mapped is
+     * freed with the cabin, so no failure below frees any of it. */
 
     /* The stack is registered and nothing is mapped: the first push faults the
      * first page in, zeroed, and the reserve fills as far as the program goes. */
@@ -1142,7 +1070,7 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     if (!vmm_stack_register(proc->cabin->vmm, stack_top))
     {
         kprintf("[PROCESS] ERROR: could not register the user stack of PID %u\n", proc->pid);
-        return -1;
+        return ERR_NO_MEMORY;
     }
 
     uintptr_t heap_start = proc->cabin->aslr_heap_base;
@@ -1150,7 +1078,7 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     if (!heap_phys)
     {
         debug_printf("[PROCESS] ERROR: Failed to allocate initial heap pages\n");
-        return -1;
+        return ERR_NO_MEMORY;
     }
 
     vmm_map_result_t heap_map = vmm_map_pages(
@@ -1164,7 +1092,7 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     {
         debug_printf("[PROCESS] ERROR: Failed to map user heap: %s\n", heap_map.error_msg);
         pmm_free(heap_phys, CONFIG_USER_HEAP_INITIAL_PAGES);
-        return -1;
+        return ERR_SPAWN_FAILED;
     }
 
     proc->cabin->vmm->heap_start = heap_start;
@@ -1195,7 +1123,7 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
                  proc->pid, heap_start, stack_top, proc->cabin->aslr_buf_heap_base,
                  (unsigned long)proc->user_ssp_va);
 
-    return 0;
+    return OK;
 }
 
 /*
@@ -1602,73 +1530,6 @@ uint32_t process_get_count(void)
 {
     return atomic_load_u32(&process_count);
 }
-
-#ifdef CONFIG_KERNEL_TESTS
-void process_test(void)
-{
-    kprintf("\n");
-    kprintf("====================================\n");
-    kprintf("PROCESS MANAGEMENT TEST\n");
-    kprintf("====================================\n");
-
-    debug_printf("[TEST] Creating test process...\n");
-    process_t *proc = process_create("app test");
-
-    if (!proc)
-    {
-        debug_printf("[TEST] FAILED: Could not create process\n");
-        return;
-    }
-
-    debug_printf("[TEST] SUCCESS: Process created\n");
-    debug_printf("[TEST]   PID: %u\n", proc->pid);
-    debug_printf("[TEST]   State: %s\n", proc->state == PROC_CREATED ? "CREATED" : "UNKNOWN");
-    debug_printf("[TEST]   Cabin: %p\n", proc->cabin);
-    debug_printf("[TEST]   CabinInfo (phys): 0x%lx\n", proc->cabin->cabin_info_phys);
-    debug_printf("[TEST]   PocketRing (phys): 0x%lx\n", proc->cabin->pocket_ring_phys);
-    debug_printf("[TEST]   ResultRing (phys): 0x%lx\n", proc->cabin->result_ring_phys);
-    debug_printf("[TEST]   Code start (virt): 0x%lx\n", proc->cabin->code_start);
-    debug_printf("[TEST]   TagBits: 0x%lx\n", proc->cabin->tag_bits);
-
-    uint8_t test_binary[64];
-    for (int i = 0; i < 64; i++)
-        test_binary[i] = (uint8_t)i;
-
-    debug_printf("[TEST] Loading test binary (64 bytes)...\n");
-    int result = process_load_binary(proc, test_binary, sizeof(test_binary));
-
-    if (result != 0)
-    {
-        debug_printf("[TEST] FAILED: Could not load binary\n");
-        process_destroy(proc);
-        return;
-    }
-
-    debug_printf("[TEST] SUCCESS: Binary loaded\n");
-    debug_printf("[TEST]   State: %s\n", proc->state == PROC_WORKING ? "WORKING" : "UNKNOWN");
-    debug_printf("[TEST]   Code size: %zu bytes\n", proc->cabin->code_size);
-
-    debug_printf("[TEST] Verifying process lookup...\n");
-    process_t *found = process_find(proc->pid);
-    if (found == proc)
-        debug_printf("[TEST] SUCCESS: Process lookup working\n");
-    else
-        debug_printf("[TEST] FAILED: Process lookup failed\n");
-
-    debug_printf("[TEST] Process count: %u\n", process_get_count());
-
-    debug_printf("[TEST] Destroying process...\n");
-    process_destroy(proc);
-
-    debug_printf("[TEST] SUCCESS: Process destroyed\n");
-    debug_printf("[TEST] Process count: %u\n", process_get_count());
-
-    kprintf("====================================\n");
-    kprintf("PROCESS TEST COMPLETE\n");
-    kprintf("====================================\n");
-    kprintf("\n");
-}
-#endif // CONFIG_KERNEL_TESTS
 
 bool process_has_tag_id(process_t *proc, uint32_t tag_id)
 {
