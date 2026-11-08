@@ -831,7 +831,8 @@ UTIL_NAMES = help create show files tag untag name trash erase assemble \
              timezone logsave lastsaid usetest faretest luggagetest headcount \
              playtime lavalamp finish taskcenter hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
-             nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab
+             nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
+             edit
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1477,6 +1478,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/create.elf  "utility,storage" \
 	$(UTILS_DIR)/show.elf    "utility,storage" \
 	$(UTILS_DIR)/hexer.elf   "utility,storage" \
+	$(UTILS_DIR)/edit.elf    "utility,storage" \
 	$(UTILS_DIR)/stringview.elf "utility,storage" \
 	$(UTILS_DIR)/files.elf   "utility,storage" \
 	$(UTILS_DIR)/tag.elf     "utility,storage" \

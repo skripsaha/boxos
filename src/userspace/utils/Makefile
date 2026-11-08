@@ -73,7 +73,8 @@ UTILS = help create show files tag untag name trash erase assemble \
         timezone logsave lastsaid usetest faretest luggagetest rollcall handset headcount \
         playtime lavalamp finish taskcenter hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
-        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab
+        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
+        edit
 
 .PHONY: all clean
 
@@ -291,6 +292,16 @@ passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
+# The editor is C++ in parts of its own directory, each named for what it is;
+# linked and stripped as hexer.
+EDIT_DIR  = edit
+EDIT_OBJS = $(addprefix $(EDIT_DIR)/,edit.o editor.o tab.o text.o history.o keymap.o field.o \
+                                     picker.o search.o card.o volume.o paint.o)
+
+edit.elf: $(BOXLIB_START) $(EDIT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(EDIT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.
 # See boxcxx/Makefile for what their absence cost.
 %.o: %.c
@@ -299,11 +310,11 @@ passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d)
+-include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(EDIT_DIR)/*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
 	nasm -f elf64 $< -o $@
 
 clean:
-	rm -f *.o *.d *.elf $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d
+	rm -f *.o *.d *.elf $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d
