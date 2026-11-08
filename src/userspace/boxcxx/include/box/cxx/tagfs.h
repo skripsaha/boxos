@@ -24,7 +24,8 @@
 //     the error arm. bytes(role) stays a stream (an open channel, not a scalar).
 //
 //   * box::tagfs::create(name, {tags…}) / query(tagspec) / all() / find(name) —
-//     creation and tag-query. The return types are honestly asymmetric: find /
+//     creation and tag-query; box::tagfs::tags() — the tags files wear, each
+//     with how many files wear it. The return types are honestly asymmetric: find /
 //     find_all hand back box::tagfs::record — an immutable metadata snapshot,
 //     because the kernel already returned the descriptor — while query / all
 //     hand back live box::tagfs::file handles, because the C query returns ids
@@ -523,6 +524,51 @@ inline box::result<file> create_everywhere(const char *name, const char *tagspec
     if (id > 0) return file(static_cast<file_id_t>(id));
     return std::unexpected(box::error{
         id < 0 ? box_errno_of(static_cast<int>(id)) : static_cast<::error_t>(ERR_INTERNAL)});
+}
+
+// ── the volume's tags ───────────────────────────────────────────────────
+// tags() — every tag a file wears, with how many files wear it, inside the Use
+// Context (counted among its files); tags_everywhere() the same of the whole
+// volume. One ask of the volume's own list of its tags (storage.tag.list), not
+// a walk of its files: a tag no file wears — a process's, a Touch's — is not
+// in it. In the order the volume first knew the tags; a refusal is an empty
+// list, as query()'s is.
+struct tag_count {
+    tag           what;
+    std::uint32_t files = 0;
+};
+namespace _detail {
+inline std::vector<tag_count> tags_of(int rc, TagListed *list, std::size_t n)
+{
+    std::vector<tag_count> out;
+    if (rc == 0 && n > 0) {
+        out.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::string_view text(list[i].Tag);
+            const std::size_t      colon = text.find(':');
+            tag what{std::string(text.substr(0, colon)),
+                     colon == std::string_view::npos ? std::string() : std::string(text.substr(colon + 1)),
+                     list[i].System};
+            out.push_back(tag_count{std::move(what), list[i].Files});
+        }
+    }
+    ::free(list);
+    return out;
+}
+}  // namespace _detail
+inline std::vector<tag_count> tags()
+{
+    TagListed  *list = nullptr;
+    std::size_t n    = 0;
+    int         rc   = ::tag_list(&list, &n);
+    return _detail::tags_of(rc, list, n);
+}
+inline std::vector<tag_count> tags_everywhere()
+{
+    TagListed  *list = nullptr;
+    std::size_t n    = 0;
+    int         rc   = ::tag_list_everywhere(&list, &n);
+    return _detail::tags_of(rc, list, n);
 }
 
 // ── lookup by name (TagFS names are not unique; find returns the first) ──

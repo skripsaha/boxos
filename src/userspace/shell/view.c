@@ -25,7 +25,6 @@ struct ViewCommand {
 
 struct ViewFile {
     char      *Name;
-    char      *Tags;        /* comma-joined, NULL for none */
     file_id_t  Id;
 };
 
@@ -126,14 +125,8 @@ static void ReadFiles(ShellView *view, bool everywhere)
         if (metadata.Filename && !(metadata.Flags & FILE_FLAG_TRASHED)) {
             ViewFile *file = &files[kept];
             file->Name = Copy(metadata.Filename, strlen(metadata.Filename));
-            file->Tags = metadata.Tags ? Copy(metadata.Tags, strlen(metadata.Tags)) : NULL;
             file->Id   = ids[i];
-            if (file->Name && (!metadata.Tags || file->Tags)) {
-                kept++;
-            } else {
-                free(file->Name);
-                free(file->Tags);
-            }
+            if (file->Name) kept++;
         }
         FileMetadataRelease(&metadata);
     }
@@ -210,31 +203,27 @@ static void Put(Pile *pile, const char *name)
         pile->Names[pile->Count++] = name;
 }
 
-/* The comma-joined `tags` laid on the pile, each a string of the view's own
- * — but those in `worn`. */
-static void PutTags(ShellView *view, Pile *pile, const char *tags, const char *worn)
+/* The comma-joined `worn` hold `tag`. */
+static bool Worn(const char *worn, const char *tag)
 {
-    while (*tags) {
-        const char *comma  = strchr(tags, ',');
-        size_t      length = comma ? (size_t)(comma - tags) : strlen(tags);
-        bool        own    = false;
-        for (const char *w = worn; w && *w && !own;) {
-            const char *next = strchr(w, ',');
-            size_t      n    = next ? (size_t)(next - w) : strlen(w);
-            own = n == length && memcmp(w, tags, length) == 0;
-            w   = next ? next + 1 : w + n;
-        }
-        if (length > 0 && !own &&
-            Room((void **)&view->Tags, &view->TagRoom, view->TagCount, sizeof(char *))) {
-            char *tag = Copy(tags, length);
-            if (tag) {
-                view->Tags[view->TagCount++] = tag;
-                Put(pile, tag);
-            }
-        }
-        if (!comma) break;
-        tags = comma + 1;
+    size_t length = strlen(tag);
+    for (const char *w = worn; w && *w;) {
+        const char *next = strchr(w, ',');
+        size_t      n    = next ? (size_t)(next - w) : strlen(w);
+        if (n == length && memcmp(w, tag, length) == 0) return true;
+        w = next ? next + 1 : w + n;
     }
+    return false;
+}
+
+/* The tags the files wear, from the volume's own list of them. */
+static void ReadTags(ShellView *view, bool everywhere)
+{
+    int where = everywhere ? 1 : 0;
+    if (view->ListedRead[where]) return;
+    view->ListedRead[where] = true;
+    if (everywhere) (void)tag_list_everywhere(&view->Listed[where], &view->ListedCount[where]);
+    else            (void)tag_list(&view->Listed[where], &view->ListedCount[where]);
 }
 
 static void Gather(ShellView *view, ViewShelfKind kind, Pile *pile)
@@ -249,13 +238,18 @@ static void Gather(ShellView *view, ViewShelfKind kind, Pile *pile)
         return;
     }
 
-    ReadFiles(view, everywhere);
-    const char *worn = everywhere ? NULL : view->Context;
-    for (size_t i = 0; i < view->FileCount[everywhere]; i++) {
-        const ViewFile *file = &view->Files[everywhere][i];
-        if (kind == VIEW_FILES_HERE || kind == VIEW_FILES_EVERYWHERE) Put(pile, file->Name);
-        else if (file->Tags) PutTags(view, pile, file->Tags, worn);
+    if (kind == VIEW_TAGS_HERE || kind == VIEW_TAGS_EVERYWHERE) {
+        /* In the Use Context its own tags are on every file, so they say
+         * nothing and are left off. */
+        ReadTags(view, everywhere);
+        const char *worn = everywhere ? NULL : view->Context;
+        for (size_t i = 0; i < view->ListedCount[everywhere]; i++)
+            if (!Worn(worn, view->Listed[everywhere][i].Tag)) Put(pile, view->Listed[everywhere][i].Tag);
+        return;
     }
+
+    ReadFiles(view, everywhere);
+    for (size_t i = 0; i < view->FileCount[everywhere]; i++) Put(pile, view->Files[everywhere][i].Name);
 }
 
 static int NameOrder(const void *a, const void *b)
@@ -318,14 +312,10 @@ void ViewEnd(ShellView *view)
     }
     free(view->Commands);
     for (int where = 0; where < 2; where++) {
-        for (size_t i = 0; i < view->FileCount[where]; i++) {
-            free(view->Files[where][i].Name);
-            free(view->Files[where][i].Tags);
-        }
+        for (size_t i = 0; i < view->FileCount[where]; i++) free(view->Files[where][i].Name);
         free(view->Files[where]);
+        free(view->Listed[where]);
     }
     for (int kind = 0; kind < VIEW_SHELVES; kind++) free(view->Shelves[kind].Names);
-    for (size_t i = 0; i < view->TagCount; i++) free(view->Tags[i]);
-    free(view->Tags);
     memset(view, 0, sizeof(*view));
 }

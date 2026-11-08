@@ -1,5 +1,7 @@
 #include "../tagfs.h"
 #include "../file_map/file_map.h"
+#include "../tag_registry/tag_registry.h"
+#include "boxos_decks.h"
 #include "klib.h"
 
 /*
@@ -113,41 +115,58 @@ error_t TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_tot
 // The files that wear every tag asked
 // ----------------------------------------------------------------------------
 
+/* The asked tags as the index knows them: a plain tag's id into `tag_ids`, a
+ * wildcard's ids as one of `groups`. *wearable false when one of them is a tag
+ * — or a key — the registry has not: no file wears them all. A wildcard's ids
+ * are copies (TagRegistryKeyIds): the registry frees its own array of a key
+ * when the key's next tag outgrows it, and that can happen on another core
+ * while the question is asked. The groups' ids are the caller's to kfree, as
+ * many groups as *group_count says, whatever the answer. */
+static error_t QueryResolve(const TagSpelling* tags, uint32_t count, uint32_t* tag_ids,
+                            uint32_t* tag_count, TagIdList* groups, uint32_t* group_count,
+                            bool* wearable)
+{
+    TagFSState* fs = tagfs_get_state();
+    *tag_count   = 0;
+    *group_count = 0;
+    *wearable    = false;
+    for (uint32_t i = 0; i < count; i++) {
+        if (TagSpellingIsWildcard(&tags[i])) {
+            TagIdList* grp = &groups[*group_count];
+            if (TagRegistryKeyIds(fs->registry, tags[i].key, tags[i].key_len, grp) != OK)
+                return ERR_NO_MEMORY;
+            if (grp->count == 0)
+                return OK;              /* a key no tag has: no file wears one */
+            (*group_count)++;
+        } else {
+            uint32_t tid = TagRegistryLookup(fs->registry, &tags[i]);
+            if (tid == TAGFS_INVALID_TAG_ID)
+                return OK;              /* a tag the registry has not: no file wears it */
+            tag_ids[(*tag_count)++] = tid;
+        }
+    }
+    *wearable = true;
+    return OK;
+}
+
 static error_t QueryPageInside(const TagSpelling* tags, uint32_t count, uint64_t from,
                                uint64_t* out, uint32_t room, bool want_total, TagFSPage* page)
 {
     TagFSState* fs          = tagfs_get_state();
     uint32_t    tag_count   = 0;
     uint32_t    group_count = 0;
+    bool        wearable    = false;
     error_t     rc          = OK;
 
-    /* A wildcard's ids are copies (TagRegistryKeyIds): the registry frees its
-     * own array of a key when the key's next tag outgrows it, and that can
-     * happen on another core while this query reads. */
     uint32_t*  tag_ids = kmalloc(sizeof(uint32_t) * count);
     TagIdList* groups  = kmalloc(sizeof(TagIdList) * count);
     if (!tag_ids || !groups) {
         rc = ERR_NO_MEMORY;
         goto out;
     }
-
-    for (uint32_t i = 0; i < count; i++) {
-        if (TagSpellingIsWildcard(&tags[i])) {
-            TagIdList* grp = &groups[group_count];
-            if (TagRegistryKeyIds(fs->registry, tags[i].key, tags[i].key_len, grp) != OK) {
-                rc = ERR_NO_MEMORY;
-                goto out;
-            }
-            if (grp->count == 0)
-                goto out;               /* a key no tag has: no file wears one */
-            group_count++;
-        } else {
-            uint32_t tid = TagRegistryLookup(fs->registry, &tags[i]);
-            if (tid == TAGFS_INVALID_TAG_ID)
-                goto out;               /* a tag the registry has not: no file wears it */
-            tag_ids[tag_count++] = tid;
-        }
-    }
+    rc = QueryResolve(tags, count, tag_ids, &tag_count, groups, &group_count, &wearable);
+    if (rc != OK || !wearable)
+        goto out;
 
     uint32_t hide[2];
     uint32_t hides = QueryHides(tag_ids, tag_count, groups, group_count, hide);
@@ -173,6 +192,99 @@ error_t TagFSQueryPage(const TagSpelling* tags, uint32_t count, uint64_t from,
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
     error_t rc = QueryPageInside(tags, count, from, out, room, want_total, page);
+    tagfs_leave();
+    return rc;
+}
+
+// ----------------------------------------------------------------------------
+// The tags files wear
+// ----------------------------------------------------------------------------
+
+/* One tag's STORAGE_TAG_LIST record after the `*used` bytes of `out`; false
+ * when it does not fit the `room` left. */
+static bool TagRecordPut(uint8_t* out, uint32_t room, uint32_t* used, const TagSpelling* tag,
+                         uint32_t files, bool system)
+{
+    const uint64_t need = STORAGE_TAG_LISTED_HEAD + (uint64_t)tag->key_len + tag->value_len;
+    if (need > room - *used)
+        return false;
+    uint8_t*       at        = out + *used;
+    const uint16_t value_len = (uint16_t)tag->value_len;
+    memcpy(at, &files, sizeof(files));
+    at[4] = system ? STORAGE_TAG_LISTED_SYSTEM : 0;
+    at[5] = (uint8_t)tag->key_len;
+    memcpy(at + 6, &value_len, sizeof(value_len));
+    memcpy(at + STORAGE_TAG_LISTED_HEAD, tag->key, tag->key_len);
+    if (tag->value_len)
+        memcpy(at + STORAGE_TAG_LISTED_HEAD + tag->key_len, tag->value, tag->value_len);
+    *used += (uint32_t)need;
+    return true;
+}
+
+/* Each tag the registry holds is put to the index as one more asked tag
+ * beside `within`, and the answer's count alone is wanted: how many of the
+ * files that wear `within` wear it too. The registry's spellings are its own
+ * and live while the volume is entered, so they are copied out before it is
+ * left. */
+error_t TagFSTagPage(const TagSpelling* within, uint32_t within_count, uint32_t from,
+                     uint8_t* out, uint32_t room, uint32_t* used, uint32_t* delivered,
+                     uint32_t* next)
+{
+    *used      = 0;
+    *delivered = 0;
+    *next      = 0;
+    if ((within_count && !within) || (room && !out))
+        return ERR_INVALID_ARGUMENT;
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+
+    TagFSState* fs          = tagfs_get_state();
+    uint32_t    tag_count   = 0;
+    uint32_t    group_count = 0;
+    bool        wearable    = false;
+    error_t     rc          = OK;
+
+    /* The asked tags and room for one more: the tag being counted. */
+    uint32_t*  tag_ids = kmalloc(sizeof(uint32_t) * ((size_t)within_count + 1));
+    TagIdList* groups  = within_count ? kmalloc(sizeof(TagIdList) * within_count) : NULL;
+    if (!tag_ids || (within_count && !groups)) {
+        rc = ERR_NO_MEMORY;
+        goto out;
+    }
+    rc = QueryResolve(within, within_count, tag_ids, &tag_count, groups, &group_count, &wearable);
+    if (rc != OK || !wearable)
+        goto out;                       /* no file wears `within`: none wears a tag among them */
+
+    uint32_t    id = 0;
+    TagSpelling tag;
+    for (uint32_t at = from; TagRoll(fs->registry, at, UINT32_MAX, &id, &tag); at = id + 1) {
+        tag_ids[tag_count] = id;
+        uint32_t  hide[2];
+        uint32_t  hides = QueryHides(tag_ids, tag_count + 1, groups, group_count, hide);
+        TagFSPage page;
+        if (TagBitmapQueryPage(fs->bitmap_index, tag_ids, tag_count + 1, groups, group_count,
+                               hide, hides, 1, NULL, 0, true, &page) != 0) {
+            rc = ERR_TAGFS_NOT_INITIALIZED;
+            break;
+        }
+        if (page.total == 0)
+            continue;                   /* a process's, a Touch's, a Bay's — no file's */
+
+        bool system = false;
+        (void)TagRegistrySpelling(fs->registry, id, &tag, &system);
+        if (!TagRecordPut(out, room, used, &tag, page.total, system)) {
+            *next = id;
+            if (*delivered == 0)
+                rc = ERR_BUFFER_TOO_SMALL;
+            break;
+        }
+        (*delivered)++;
+    }
+out:
+    for (uint32_t g = 0; g < group_count; g++)
+        kfree(groups[g].ids);
+    kfree(tag_ids);
+    kfree(groups);
     tagfs_leave();
     return rc;
 }

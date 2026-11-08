@@ -3,9 +3,10 @@
 
 #include "box/defs.h"
 #include "box/types.h"
+#include "box/file.h"
 
-/* What a line being typed can see: the commands, and the files with their
- * tags, read from the volume once for the line, the first time each is
+/* What a line being typed can see: the commands, the files, and the tags the
+ * files wear, read from the volume once for the line, the first time each is
  * wanted, and let go with the line. Each kind of name stands on a shelf of
  * its own — sorted, each name once — so a name is found by halving and the
  * names that begin with a word stand side by side. */
@@ -38,9 +39,9 @@ typedef struct {
     bool         FilesRead[2];
     ViewShelf    Shelves[VIEW_SHELVES];
     bool         ShelvesBuilt[VIEW_SHELVES];
-    char       **Tags;              /* the tags the shelves of tags hold */
-    size_t       TagCount;
-    size_t       TagRoom;
+    TagListed   *Listed[2];         /* the volume's list of tags: in the Use Context, everywhere */
+    size_t       ListedCount[2];
+    bool         ListedRead[2];
 } ShellView;
 
 /* A view of the volume from the Use Context `context` (comma-joined tags,

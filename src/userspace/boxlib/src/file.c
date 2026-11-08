@@ -102,6 +102,117 @@ static int query_scoped(const char *tags, file_id_t *file_ids, size_t max_files,
     return (int)delivered;
 }
 
+/* A page of storage.tag.list: room for many tags at a time, and for any one
+ * of them — a tag's whole text is narrower than a block of the registry. */
+#define TAG_LIST_PAGE (16u * 1024u)
+
+/* The bytes of the records of a page that are whole and inside it, and the
+ * text their tags will take as "key:value" strings. 0 when a record is cut. */
+static size_t tag_list_page_bytes(const uint8_t *page, uint32_t delivered, size_t *text)
+{
+    size_t at = STORAGE_TAG_LIST_HEAD;
+    for (uint32_t i = 0; i < delivered; i++) {
+        if (at + STORAGE_TAG_LISTED_HEAD > TAG_LIST_PAGE) return 0;
+        uint16_t value_len;
+        memcpy(&value_len, page + at + 6, sizeof(value_len));
+        size_t one = STORAGE_TAG_LISTED_HEAD + page[at + 5] + (size_t)value_len;
+        if (at + one > TAG_LIST_PAGE) return 0;
+        *text += page[at + 5] + (value_len ? 1u + value_len : 0u) + 1u;
+        at += one;
+    }
+    return at - STORAGE_TAG_LIST_HEAD;
+}
+
+/* Every page asked for in turn, its records gathered; then the list and the
+ * text laid out in one block. */
+static int tag_list_scoped(uint8_t scope, TagListed **out, size_t *count)
+{
+    if (!out || !count) return -ERR_INVALID_ARGUMENT;
+    *out   = NULL;
+    *count = 0;
+
+    uint8_t *page = malloc(TAG_LIST_PAGE);
+    if (!page) return -ERR_NO_MEMORY;
+
+    uint8_t *records = NULL;
+    size_t   bytes = 0, listed = 0, text = 0;
+    uint32_t from = 0;
+    int      rc = 0;
+    for (;;) {
+        uint8_t params[5];
+        memcpy(params, &from, sizeof(from));
+        params[4] = scope;
+        rc = MfCall1(DECK_STORAGE, STORAGE_TAG_LIST, params, sizeof(params), NULL, 0,
+                     page, TAG_LIST_PAGE, NULL, BOX_ANSWER_GUARANTEED, NULL);
+        if (rc != 0) { rc = box_fail(rc); break; }
+
+        uint32_t delivered, next;
+        memcpy(&delivered, page, sizeof(delivered));
+        memcpy(&next, page + 4, sizeof(next));
+        size_t got = tag_list_page_bytes(page, delivered, &text);
+        /* A page cut short, or one that gave nothing and still says there is
+         * more from where it was asked, is no answer to go on from. */
+        if ((delivered > 0 && got == 0) || (next != 0 && (delivered == 0 || next <= from))) {
+            rc = -ERR_INTERNAL;
+            break;
+        }
+        if (got > 0) {
+            uint8_t *grown = realloc(records, bytes + got);
+            if (!grown) { rc = -ERR_NO_MEMORY; break; }
+            records = grown;
+            memcpy(records + bytes, page + STORAGE_TAG_LIST_HEAD, got);
+            bytes  += got;
+            listed += delivered;
+        }
+        if (next == 0) break;
+        from = next;
+    }
+    free(page);
+    if (rc < 0 || listed == 0) {
+        free(records);
+        return rc;
+    }
+
+    TagListed *list = malloc(listed * sizeof(TagListed) + text);
+    if (!list) {
+        free(records);
+        return -ERR_NO_MEMORY;
+    }
+    char  *pen = (char *)(list + listed);
+    size_t at  = 0;
+    for (size_t i = 0; i < listed; i++) {
+        const uint8_t *record = records + at;
+        uint16_t       value_len;
+        memcpy(&list[i].Files, record, sizeof(list[i].Files));
+        memcpy(&value_len, record + 6, sizeof(value_len));
+        list[i].System = (record[4] & STORAGE_TAG_LISTED_SYSTEM) != 0;
+        list[i].Tag    = pen;
+        memcpy(pen, record + STORAGE_TAG_LISTED_HEAD, record[5]);
+        pen += record[5];
+        if (value_len) {
+            *pen++ = ':';
+            memcpy(pen, record + STORAGE_TAG_LISTED_HEAD + record[5], value_len);
+            pen += value_len;
+        }
+        *pen++ = '\0';
+        at += STORAGE_TAG_LISTED_HEAD + record[5] + (size_t)value_len;
+    }
+    free(records);
+    *out   = list;
+    *count = listed;
+    return 0;
+}
+
+int tag_list(TagListed **out, size_t *count)
+{
+    return tag_list_scoped(STORAGE_SCOPE_USE, out, count);
+}
+
+int tag_list_everywhere(TagListed **out, size_t *count)
+{
+    return tag_list_scoped(STORAGE_SCOPE_EVERYWHERE, out, count);
+}
+
 int query(const char *tags, file_id_t *file_ids, size_t max_files)
 {
     return query_scoped(tags, file_ids, max_files, STORAGE_SCOPE_USE, NULL);

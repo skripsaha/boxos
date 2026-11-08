@@ -318,6 +318,21 @@
  * refused (ERR_ACCESS_DENIED at the gate, ERR_PERMISSION_DENIED past it).
  * ERR_OBJECT_NOT_FOUND when there is nothing to let go. */
 #define STORAGE_OBJ_ESCHEAT         0x26
+/* tag.list — the tags files wear, each with how many files wear it, in the
+ * order of the volume's numbers for them. The volume's registry names more
+ * than files' tags — a process's, a Touch's, a Bay's — and a tag no file wears
+ * is left out. params = [u32 from][u8 scope]: from the tag numbered `from` on
+ * (0: the first), the files counted inside the Use Context (STORAGE_SCOPE_USE,
+ * the files that wear its tags) or on the whole volume; the trashed and the
+ * hidden are counted as a query counts them. out_crate = [u32 delivered]
+ * [u32 next], then `delivered` records [u32 files][u8 flags][u8 key_len]
+ * [u16 value_len][key][value] while they fit; `next` is the number to ask from
+ * for the rest, 0 when there are none. A crate too small for even the first
+ * record is refused ERR_BUFFER_TOO_SMALL. */
+#define STORAGE_TAG_LIST            0x27
+#define STORAGE_TAG_LIST_HEAD       8u      /* [u32 delivered][u32 next] */
+#define STORAGE_TAG_LISTED_HEAD     8u      /* a record before its text */
+#define STORAGE_TAG_LISTED_SYSTEM   0x01u   /* flags: a tag the system keeps */
 /* snap.info — structured per-snapshot record by id. params = [u32 snap_id].
  * out_crate = [u32 id][u64 parent_file_id][u64 created_time][u32 file_count]
  *             [u64 total_size][u8 flags][char name[32]]. Gives the name-by-id

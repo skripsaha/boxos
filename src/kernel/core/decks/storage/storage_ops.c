@@ -712,6 +712,87 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
+/* The bytes of records the kernel holds at a time on the way to the caller's
+ * crate: any one record fits, a tag's text being narrower (TAG_TEXT_WIDTH). */
+#define STORAGE_TAG_LIST_PIECE 4096u
+
+/* STORAGE_TAG_LIST  params: [u32 from][u8 scope] (scope optional, as a
+ *                   query's) — out_crate as boxos_decks.h says: the tags the
+ *                   files wear, inside the Use Context counted among its files.
+ *                   The records go into the crate a piece at a time, straight
+ *                   from the volume's pages, until the crate is full or the
+ *                   tags run out; `next` says where the rest begin. */
+static int ObjTagList(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                      const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->param_size < 4 || op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < STORAGE_TAG_LIST_HEAD) return ERR_BUFFER_TOO_SMALL;
+
+    uint8_t scope;
+    error_t rc = storage_scope_of(op, 4, &scope);
+    if (rc != OK) return rc;
+
+    TagFSState *state = tagfs_get_state();
+    if (!state || !state->initialized) return ERR_NOT_INITIALIZED;
+
+    TagSpelling *within = NULL;
+    UseList     *use    = NULL;
+    uint32_t     own    = 0;
+    uint32_t     count  = 0;
+    rc = storage_tags_spelled(scope, NULL, 0, &within, &use, &own, &count);
+    if (rc != OK) return rc;
+
+    uint8_t *piece = kmalloc(STORAGE_TAG_LIST_PIECE);
+    if (!piece) {
+        kfree(within);
+        UseListDrop(use);
+        return ERR_NO_MEMORY;
+    }
+
+    uint32_t hdr[2]  = { 0, 0 };   /* delivered, next */
+    uint64_t written = STORAGE_TAG_LIST_HEAD;
+    uint32_t from    = param_u32(op, 0);
+    for (;;) {
+        const uint64_t left = out->capacity - written;
+        const uint32_t room = left < STORAGE_TAG_LIST_PIECE ? (uint32_t)left : STORAGE_TAG_LIST_PIECE;
+        uint32_t used = 0, delivered = 0, next = 0;
+        rc = TagFSTagPage(within, count, from, piece, room, &used, &delivered, &next);
+        if (rc == ERR_BUFFER_TOO_SMALL && hdr[0] > 0) {
+            hdr[1] = next;              /* the crate is full: the rest from here */
+            rc     = OK;
+            break;
+        }
+        if (rc != OK) break;
+        if (used > 0) {
+            int wrc = crate_out_commit_at(out, ctx, written, piece, used);
+            if (wrc != OK) {
+                rc = (error_t)wrc;
+                break;
+            }
+            written += used;
+            hdr[0]  += delivered;
+        }
+        if (next == 0 || room == left) {
+            hdr[1] = next;
+            break;
+        }
+        from = next;
+    }
+    kfree(piece);
+    kfree(within);
+    UseListDrop(use);
+    if (rc != OK) return rc;
+
+    /* The header last: a crate whose records did not all go in says nothing. */
+    int crc = crate_out_commit_at(out, ctx, 0, hdr, sizeof(hdr));
+    if (crc != OK) return crc;   /* fail closed: leave out->size unset */
+    out->size = written;
+    return OK;
+}
+
 /* One tag's text out of the in_crate, spelled. The width is judged on the
  * crate's size before anything is copied: a text longer than any tag can be
  * is refused as the too-long tag it is. *out_text is the caller's to free. */
@@ -953,6 +1034,7 @@ error_t StorageDeckRegister(void)
     } table[] = {
         /* Read-only / cooperative: app+ (any process can list and read). */
         { STORAGE_TAG_QUERY,    ObjQuery,        OP_AUTH_APP, "storage.query"    },
+        { STORAGE_TAG_LIST,     ObjTagList,      OP_AUTH_APP, "storage.tag.list" },
         { STORAGE_OBJ_READ,     ObjRead,         OP_AUTH_APP, "storage.read"     },
         { STORAGE_OBJ_GET_INFO, ObjGetInfo,      OP_AUTH_APP, "storage.getinfo"  },
         /* Mutating: app+ — TagFS context further restricts what's visible. */

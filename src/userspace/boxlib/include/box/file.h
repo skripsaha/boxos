@@ -109,6 +109,23 @@ int file_span(file_id_t file_id, uint64_t size, uint32_t flags);
 int tag_add(file_id_t file_id, const char* tag);
 int tag_remove(file_id_t file_id, const char* key);
 
+/* A tag files wear, and how many of them wear it: one entry of the volume's
+ * own list of its tags (storage.tag.list), not a walk of its files. */
+typedef struct {
+    char    *Tag;       /* "key" or "key:value", as the volume spells it */
+    uint32_t Files;     /* how many files wear it — inside the Use Context, of its files */
+    bool     System;    /* a tag the system keeps */
+} TagListed;
+
+/* Every tag a file wears, each with how many files wear it, in the order the
+ * volume first knew them: inside the Use Context, counted among the files that
+ * wear its tags, or on the whole volume. A tag no file wears — a process's, a
+ * Touch's — is not listed. The list and the text of every Tag are one heap
+ * block the caller frees (NULL when nothing is listed). 0, or a negative
+ * -error_t. */
+int tag_list(TagListed **out, size_t *count);
+int tag_list_everywhere(TagListed **out, size_t *count);
+
 /* Every file called `filename`, inside the Use Context. Returns how many
  * there are; the first `max` of them are written to file_ids (and out_infos,
  * when given). Asked with max == 0 it only counts. */

@@ -694,6 +694,22 @@ error_t  TagFSQueryPage(const TagSpelling* tags, uint32_t count, uint64_t from,
                         uint64_t* out, uint32_t room, bool want_total, TagFSPage* page);
 error_t  TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
+/*
+ * The tags files wear, a page at a time and in the order of their numbers
+ * (query/query.c): from the tag numbered `from` on, every tag at least one
+ * live file wears — one of the files that wear all of `within`, every file for
+ * none — with how many of them do, written into `out` as STORAGE_TAG_LIST
+ * records (boxos_decks.h) while they fit its `room` bytes. A tag no such file
+ * wears — a process's, a Touch's, a Bay's, which the registry names too — is
+ * passed over; the trashed and the hidden are counted as a question counts
+ * them. *used the bytes written, *delivered the records, *next the number to
+ * ask from for the rest, 0 when there are none. OK, or the refusal:
+ * ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY, or
+ * ERR_BUFFER_TOO_SMALL when not even the first record fits.
+ */
+error_t  TagFSTagPage(const TagSpelling* within, uint32_t within_count, uint32_t from,
+                      uint8_t* out, uint32_t room, uint32_t* used, uint32_t* delivered,
+                      uint32_t* next);
 /* The file id the next create takes — no id of this volume has reached it.
  * 0 when no volume is mounted. */
 uint64_t tagfs_file_ceiling(void);
