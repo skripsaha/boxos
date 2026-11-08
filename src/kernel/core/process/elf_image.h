@@ -11,7 +11,9 @@
  * could wrap; every segment held to the zone of the address space a program's
  * image may take; the segments in ascending order and never two on one page;
  * no segment writable and executable at once; the entry inside code the file
- * supplies. What passes is what the loader maps, and the loader reads it
+ * supplies; at most one template of thread-local storage, inside the file,
+ * aligned to a power of two no larger than a page. What passes is what the
+ * loader maps, and the loader reads it
  * through ElfImageNextSegment — the same decoding the check used — so it
  * cannot be handed a segment the check did not see.
  *
@@ -44,6 +46,9 @@ typedef enum {
     ELF_IMAGE_INTERPRETER,
     ELF_IMAGE_NOTHING_TO_LOAD,
     ELF_IMAGE_ENTRY_OUTSIDE_CODE,
+    ELF_IMAGE_THREAD_TWICE,
+    ELF_IMAGE_THREAD_ALIGN,
+    ELF_IMAGE_THREAD_TOO_LARGE,
     ELF_IMAGE_VERDICT_COUNT
 } ElfImageVerdict;
 
@@ -51,11 +56,22 @@ typedef enum {
  * PN_XNUM, which an accepted table never reaches as an index. */
 #define ELF_IMAGE_NO_HEADER 0xFFFFu
 
+/* The template of each strand's thread-local storage (PT_TLS): `InitBytes`
+ * from `FileOffset` of the file, zeros after them up to `TotalBytes`. */
+typedef struct {
+    uint64_t Align;        /* a power of two, at most a page */
+    uint64_t FileOffset;
+    uint64_t InitBytes;
+    uint64_t TotalBytes;   /* 0: the image keeps nothing per strand */
+} ElfImageThread;
+
 typedef struct {
     const uint8_t *File;
     uint64_t       FileBytes;
     uint64_t       Entry;
     uint64_t       HeadersAt;    /* where the program header table starts */
+    uint64_t       End;          /* the first page past the last segment */
+    ElfImageThread Thread;
     uint16_t       HeaderCount;
     uint16_t       Header;       /* the program header a refusal is about */
 } ElfImage;

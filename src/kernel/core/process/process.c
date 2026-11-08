@@ -530,7 +530,7 @@ process_t *process_create(const char *tags)
 
     /* P5a: the main strand's per-strand ring fields ALIAS the cabin's
      * fixed-VA rings (kring.c / touch_ring.c route by proc->*_ring_phys).
-     * strandinfo_phys stays 0 → its FS base stays 0 / the C++ TCB, so boxlib
+     * strandinfo_phys stays 0 → its FS base is 0 or its own TCB, so boxlib
      * falls back to the fixed cabin ring VAs for the main strand. */
     proc->pocket_ring_phys = cabin->pocket_ring_phys;
     proc->result_ring_phys = cabin->result_ring_phys;
@@ -1058,6 +1058,10 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
     proc->nameplate_va    = loaded.NameplateVa;
     proc->nameplate_bytes = loaded.NameplateBytes;
 
+    /* The template the kernel makes every strand's thread-local storage from,
+     * the cabin's from here and let go with it. */
+    proc->cabin->thread = loaded.Thread;
+
     /* From here the image is the address space's: what the loader mapped is
      * freed with the cabin, so no failure below frees any of it. */
 
@@ -1116,6 +1120,13 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
     proc->context.rip = entry_point;
     proc->context.rsp = stack_top;
 
+    /* The main strand's thread pointer, its block already made by the loader:
+     * the first dispatch installs it. A CPU without FSGSBASE has it written
+     * through the MSR, which the restore does only once a base is in use. */
+    proc->context.user_fsbase = loaded.ThreadPointer;
+    if (loaded.ThreadPointer && !g_fsgsbase_active)
+        g_user_fsbase_used = 1;
+
     (void)cet_process_create(proc);
     (void)cet_process_create_kernel_ssp(proc, entry_point);
 
@@ -1165,6 +1176,16 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
     if (!g_fsgsbase_active)
     {
         debug_printf("[STRAND] ERROR: strand_spawn requires FSGSBASE (per-strand TLS)\n");
+        return NULL;
+    }
+    /* A strand keeps its thread-local storage in the one page below its
+     * StrandInfo (strand_rings.c); a program whose storage is larger has no
+     * strand but its main one. */
+    if (!ImageThreadFitsStrand(&cabin->thread))
+    {
+        kprintf("[STRAND] a strand is not spawned: its program keeps %llu bytes of thread-local "
+                "storage, and a strand holds a page of it\n",
+                (unsigned long long)ImageThreadBelow(&cabin->thread));
         return NULL;
     }
     if (atomic_load_u32(&process_count) >= PROCESS_MAX_COUNT)

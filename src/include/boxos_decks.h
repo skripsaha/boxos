@@ -74,7 +74,7 @@
  * would have started — active, wearing app or utility — else ERR_FILE_NOT_FOUND. */
 #define SYSTEM_OP_PROC_EXEC_FILE    0x0C
 #define SYSTEM_OP_INFO              0x07
-#define SYSTEM_OP_TLS_FSBASE        0x0A  /* set caller's FS base (C++ TLS) */
+#define SYSTEM_OP_TLS_FSBASE        0x0A  /* set caller's FS base (its own thread pointer) */
 
 /* 0x10 – 0x12 were the buffer registry — an allocator no program ever
  * submitted to, removed with it; the numbers stay unassigned. */

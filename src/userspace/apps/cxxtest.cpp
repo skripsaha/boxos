@@ -21,7 +21,7 @@
 #include "box/strand.h"   // strand_spawn / strand_exit (phase35 sibling strand)
 #include "box/sync.h"     // addr_park / addr_wake (phase35 join)
 #include "box/cpu.h"      // cpu_has_fsgsbase (phase35 spawn guard)
-#include "box/cxx/tls_strand.h"  // __boxcxx_tls_strand_init + thread-storage hooks (phase36)
+#include "box/cxx/tls_strand.h"  // thread-storage hooks (phase36)
 
 // ── Ф31a-3: per-header feature-test-macro visibility ────────────────────
 // [support.limits.general] requires every __cpp_lib_* macro to be visible to
@@ -951,7 +951,7 @@ void Phase1()
     printf("[CXX] PASS phase1: runtime\n");
 }
 
-// ── phase3 fixtures: TLS (local-exec, FS base via boxcxx tls_init) ─────
+// ── phase3 fixtures: TLS (local-exec, FS base set by the kernel) ───────
 
 thread_local int g_tls_counter = 1000;        // .tdata — template copy check
 thread_local uint64_t g_tls_zeroed;           // .tbss  — zero-fill check
@@ -6171,8 +6171,8 @@ void Phase35()
 // ── phase36: per-strand thread_local FOUNDATION (Ф20b-1, raw strand_spawn) ──
 // Proves the three pieces of the per-strand TLS foundation WITHOUT std::thread:
 //   1. tdata copy   — a non-zero static-init thread_local reads its value in a
-//                     spawned strand (would be 0 if __boxcxx_tls_strand_init had
-//                     not copied .tdata into the strand's neg-TLS page).
+//                     spawned strand (would be 0 if the kernel had not poured
+//                     the program's template into the strand's TLS page).
 //   2. isolation    — each strand writes a distinct value into the SAME
 //                     thread_local and reads back exactly its own (no cross-talk,
 //                     and main's value is untouched).
@@ -6205,9 +6205,8 @@ static void p36_worker(void *arg)
 {
     uint32_t id = (uint32_t)(uintptr_t)arg;
 
-    // (1) Stand up THIS strand's neg-TLS first — must precede any thread_local
-    //     access. Then arm this strand's thread_local destructor list.
-    __boxcxx_tls_strand_init();
+    // The kernel made this strand's thread-local storage before it ran; arm its
+    // thread_local destructor list.
     __boxcxx_thread_storage_enter();
 
     // (1) tdata copied: the static initializer 0xABCD is present.
@@ -6391,8 +6390,8 @@ void Phase37()
               "phase37 std::string argument decay-copied by value");
     }
 
-    // (b) thread_local INSIDE a std::thread. This is the proof the entry
-    //     trampoline wires __boxcxx_tls_strand_init / _storage_exit: each thread
+    // (b) thread_local INSIDE a std::thread. This is the proof each thread gets
+    //     storage of its own and the trampoline wires _storage_exit: each thread
     //     gets its OWN thread_local cell (no cross-talk), and a thread_local with
     //     a dtor runs that dtor at thread end (counted into g_p37_tls_dtors).
     {
@@ -6406,8 +6405,8 @@ void Phase37()
         for (int i = 0; i < kP37TlsThreads; i++) {
             ts[i] = std::thread(
                 [](int id) {
-                    // Read the copied .tdata init (0x7777) before writing — would
-                    // be 0 if the trampoline had not run __boxcxx_tls_strand_init.
+                    // Read the .tdata init (0x7777) before writing — would be 0 if
+                    // the kernel had not poured the template into this strand.
                     bool tdata = (g_p37_tls == 0x7777);
                     g_p37_tls  = 0x2000 + id;                 // this thread's own cell
                     std::this_thread::sleep_for(milliseconds(8)); // overlap window
@@ -6927,7 +6926,6 @@ static void p39_cva_worker(void *)
 // the wake has fired.
 static void p39_atexit_worker(void *)
 {
-    __boxcxx_tls_strand_init();
     __boxcxx_thread_storage_enter();
 
     {
@@ -7250,7 +7248,6 @@ static std::promise<void>    *g_p40_pong;       // [kP40PingPong] worker → mai
 
 static void p40_pingpong_worker(void *)
 {
-    __boxcxx_tls_strand_init();
     __boxcxx_thread_storage_enter();
     for (int i = 0; i < kP40PingPong; i++) {
         g_p40_ping_fut[i].wait();   // block on main's ping[i]
@@ -7273,7 +7270,6 @@ static volatile uint64_t        g_p40_sf_ready;   // event-driven readiness gate
 static std::atomic<int>         g_p40_sf_got{0};
 static void p40_sf_waiter(void *)
 {
-    __boxcxx_tls_strand_init();
     __boxcxx_thread_storage_enter();
     std::shared_future<int> local = *g_p40_sf;   // a copy (ref_inc)
     __atomic_add_fetch(&g_p40_sf_ready, 1u, __ATOMIC_RELEASE);
@@ -7291,7 +7287,6 @@ static void p40_sf_waiter(void *)
 static std::promise<int> *g_p40_atexit_prom;
 static void p40_atexit_worker(void *)
 {
-    __boxcxx_tls_strand_init();
     __boxcxx_thread_storage_enter();
     g_p40_atexit_prom->set_value_at_thread_exit(123);
     __boxcxx_thread_storage_exit();             // runs the publish+notify
@@ -7304,7 +7299,6 @@ static void p40_atexit_worker(void *)
 static std::packaged_task<int(int, int)> *g_p40_pt;
 static void p40_pt_worker(void *)
 {
-    __boxcxx_tls_strand_init();
     __boxcxx_thread_storage_enter();
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     (*g_p40_pt)(20, 22);
@@ -36011,11 +36005,11 @@ void Phase140()
            "block, and whose invariant survives a throw on every relocation path\n");
 }
 
-// ── phase141: one mold, two casts — the TLS image cannot drift (Ф31c-3) ─────
-// tls_init.cpp casts the main strand's C++ TLS block on the heap; tls_strand.cpp
-// casts a spawned strand's into the kernel's neg-TLS page. Both must place a
-// thread_local on the ONE negative offset the linker fixed for it. Ф31c-3 moved
-// that arithmetic into src/tls/tls_mold.h so it exists once instead of twice.
+// ── phase141: one template, two blocks — the TLS image cannot drift ─────────
+// The kernel makes every strand's thread-local storage from the one template
+// the image carries (image_thread.h): the main strand's block on the pages after
+// the image, a spawned strand's in the page below its StrandInfo. Both must put
+// a thread_local on the ONE negative offset the linker fixed for it.
 //
 // What this phase can and cannot see is worth stating, because the obvious test
 // is vacuous: (&var - fsbase) is NOT evidence of anything. The compiler forms
@@ -36026,8 +36020,8 @@ void Phase140()
 // puts the block at the wrong distance below the thread pointer, the compiler
 // still reads at fs_base + var_offset — now landing beside the variable's real
 // bytes. So the net here is a .tdata fixture that is distinctive at 64-byte
-// granularity (kAlign): a mold off by one alignment step reads a neighbouring
-// cell, and no word of the fixture survives.
+// granularity (its alignment): a block off by one alignment step reads a
+// neighbouring cell, and no word of the fixture survives.
 //
 //   (1) main strand reads its whole .tdata image, word for word.
 //   (2) main strand's .tbss half is zero.
@@ -36035,26 +36029,17 @@ void Phase140()
 //       exactly like a passing block).
 //   (4) every spawned strand reads the whole .tdata image, word for word.
 //   (5) no worker saw main's sentinel: main overwrites its OWN copy before
-//       spawning, so a cast sourcing the image from the wrong place shows up.
+//       spawning, so a block poured from the wrong place shows up.
 //   (6) every spawned strand's .tbss half is zero.
 //   (7) the strands hold different storage — without this, (4) could pass by
-//       reading main's block rather than a per-strand cast.
-//   (8) the image still fits the single page the kernel maps and tls_strand.cpp
-//       Panics above: a build-shape guard for future thread_local growth.
+//       reading main's block rather than a block of their own.
+//   (8) the image still fits the single page a strand keeps it in — past it
+//       the kernel spawns no strand: a build-shape guard for thread_local growth.
 //   (9) main's poisoned copy is restored for the phases that follow.
-//
-// Measured non-emptiness (Ф31c-3, bios1), rather than assumed:
-//   * image shifted one kAlign step  -> (4) red. phase36/37 red too.
-//   * .tdata copy 4 bytes short      -> (4) red, and phase36/37 stay GREEN —
-//     so this phase is not a restatement of the older TLS coverage.
-//   * main strand's memset dropped   -> SURVIVES. The bootstrap runs as the
-//     first .init_array ctor, so its heap block is still pristine and reads
-//     zero anyway. (2) therefore pins the contract, not the memset; the memset
-//     stays because malloc'd storage is not zero by rule, only by luck here.
 
 static constexpr uint32_t kP141Workers = 4;
 
-// 64 bytes of .tdata, every word distinct: an image shifted by one kAlign step
+// 64 bytes of .tdata, every word distinct: an image shifted by one 64-byte step
 // lands on a neighbouring cell and no word survives.
 alignas(64) thread_local uint32_t g_p141_cell[16] = {
     0xC0FFEE00u, 0xC0FFEE11u, 0xC0FFEE22u, 0xC0FFEE33u,
@@ -36086,7 +36071,6 @@ static void p141_worker(void *arg)
 {
     uint32_t id = (uint32_t)(uintptr_t)arg;
 
-    __boxcxx_tls_strand_init();
     __boxcxx_thread_storage_enter();
 
     uint32_t ok = 0, leaked = 0;
@@ -36125,13 +36109,13 @@ void Phase141()
     const uint64_t main_addr = (uint64_t)(uintptr_t)&g_p141_cell[0];
 
     if (!cpu_has_fsgsbase()) {
-        printf("[CXX] note phase141: spawned strands need FSGSBASE — skipping the second cast\n");
-        printf("[CXX] PASS phase141: one mold, two casts (main cast only, no FSGSBASE)\n");
+        printf("[CXX] note phase141: spawned strands need FSGSBASE — skipping the second block\n");
+        printf("[CXX] PASS phase141: one template, two blocks (main block only, no FSGSBASE)\n");
         return;
     }
 
     // Poison the main strand's OWN copy. A worker must still read the pristine
-    // linker image: seeing 0xDEADBEEF would mean the cast copied from the wrong
+    // template: seeing 0xDEADBEEF would mean its block was poured from the wrong
     // place, and (7) below rules out the workers simply sharing this block.
     for (unsigned i = 0; i < 16; i++) g_p141_cell[i] = 0xDEADBEEFu;
 
@@ -36160,7 +36144,7 @@ void Phase141()
         __atomic_sub_fetch(&g_p141_remaining, kP141Workers - spawned, __ATOMIC_RELEASE);
     if (spawned == 0) {
         for (unsigned i = 0; i < 16; i++) g_p141_cell[i] = P141Expected(i);
-        printf("[CXX] PASS phase141: one mold, two casts (second cast unreachable, no strand)\n");
+        printf("[CXX] PASS phase141: one template, two blocks (second block unreachable, no strand)\n");
         return;
     }
 
@@ -36204,9 +36188,8 @@ void Phase141()
         if (g_p141_cell[i] == P141Expected(i)) restored++;
     Check(restored == 16, "phase141 (9) main strand's copy restored for later phases");
 
-    printf("[CXX] PASS phase141: one mold, two casts — the main strand's heap block and a "
-           "spawned strand's neg-TLS page carry the same image, cast from the one formula in "
-           "src/tls/tls_mold.h\n");
+    printf("[CXX] PASS phase141: one template, two blocks — the main strand's block after the "
+           "image and a spawned strand's TLS page carry the same image, both made by the kernel\n");
 }
 
 // ── phase142: the diagnostic formatters accept the standard spec (Ф31c-3) ───

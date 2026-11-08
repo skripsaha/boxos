@@ -54,9 +54,10 @@
 //   message is worse than not distinguishing it. The distinction is available
 //   under its own name; it is not smuggled into cerr.
 //
-// The stream objects are built by a constructor at priority 102 — after the
-// TLS bootstrap at 101, and before every default-priority global in the
-// program, so a user's own global constructor may write to std::cout.
+// The stream objects are built by a constructor at priority 102 — before every
+// default-priority global in the program, so a user's own global constructor
+// may write to std::cout. Thread-local storage, which their allocation
+// touches, the kernel made before the program's first instruction.
 #ifndef BOXCXX_IOSTREAM
 #define BOXCXX_IOSTREAM
 

@@ -14,8 +14,9 @@ extern "C" {
  * A spawned strand carries its own StrandInfo TLS block (kernel-populated in
  * its Hammock slot) and the kernel sets the strand's FS base to it. boxlib
  * reads the FS base via RDFSBASE to find "which rings are mine". The main
- * strand has no StrandInfo (FS base is 0 for a C program, or the C++ TCB for a
- * boxcxx program) and falls back to the fixed cabin ring VAs.
+ * strand has no StrandInfo (its FS base is 0, or the TCB of the thread-local
+ * storage the kernel made after the program's image) and falls back to the
+ * fixed cabin ring VAs.
  *
  * This header deliberately does NOT include the ring headers (pocket.h /
  * result.h / touch_ring.h) — those include this one. Ring VAs are returned as
@@ -33,7 +34,7 @@ typedef struct {
  * Safe on any CPU and against any FS-base value: returns NULL when FSGSBASE is
  * absent (spawned strands require it), and identifies the main strand purely
  * by the FS base NOT lying inside the Hammock window — so it never dereferences
- * an unknown base (a C++ TCB on the heap is never read). */
+ * an unknown base (the main strand's TCB is never read). */
 StrandInfo *strand_info_or_null(void);
 
 /* Per-strand ring header VAs (main strand → the fixed cabin ring VAs). */

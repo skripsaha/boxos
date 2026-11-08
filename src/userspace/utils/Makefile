@@ -54,10 +54,6 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
 
 BOXLIB_DIR = ../boxlib
 LDFLAGS    = -nostdlib -static -T $(BOXLIB_DIR)/user.ld
-# C++ links force-pull tls_init.o out of libboxcxx.a (nothing references it by
-# symbol — it self-registers via .init_array, the classic archive dead-pull
-# trap).
-CXXLDFLAGS = $(LDFLAGS) -Wl,--undefined=__boxcxx_tls_bootstrap
 BOXLIB     = ../boxlib/libbox.a
 BOXCXX     = ../boxcxx/libboxcxx.a
 PAINTER    = ../painter/libpainter.a
@@ -128,18 +124,18 @@ finish.elf: $(BOXLIB_START) finish.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE
 	@x86_64-elf-objcopy --strip-all $@
 
 playtime.elf: $(BOXLIB_START) playtime.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) playtime.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) playtime.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 lavalamp.elf: $(BOXLIB_START) lavalamp.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) lavalamp.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) lavalamp.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # The zone database is C++, so `timezone` is. An explicit rule, which overrides
 # the pattern rule above: a different driver, and libboxcxx.a BEFORE libbox.a
 # (boxcxx pulls malloc/printf out of boxlib, never the other way).
 timezone.elf: $(BOXLIB_START) timezone.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) timezone.o $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) timezone.o $(BOXCXX) $(BOXLIB) -lgcc)
 	@# Stripped like cxxtest: the Nameplate linked in above already carries the
 	@# address-to-name table, so .symtab and .debug_* would be a second copy of
 	@# what the image can already tell you at runtime — and this one costs half
@@ -147,7 +143,7 @@ timezone.elf: $(BOXLIB_START) timezone.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.
 	@x86_64-elf-objcopy --strip-all $@
 
 taskcenter.elf: $(BOXLIB_START) taskcenter.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) taskcenter.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) taskcenter.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # hexer and stringview are C++ in parts: each names its own objects, links
@@ -156,11 +152,11 @@ HEXER_OBJS      = hexer.o hexer_bytes.o hexer_paint.o hexer_list.o
 STRINGVIEW_OBJS = stringview.o stringview_sift.o stringview_paint.o
 
 hexer.elf: $(BOXLIB_START) $(HEXER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(HEXER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(HEXER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 stringview.elf: $(BOXLIB_START) $(STRINGVIEW_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(STRINGVIEW_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(STRINGVIEW_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # calculate, difference, copy, typer, flame, checksum, passport, aquarium, nyancat,
@@ -207,99 +203,99 @@ fireworks.o: CXXFLAGS += -O2
 mandelbrot_paint.o: CXXFLAGS += -O2
 
 calculate.elf: $(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(CALCULATE_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 difference.elf: $(BOXLIB_START) $(DIFFERENCE_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(DIFFERENCE_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DIFFERENCE_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 copy.elf: $(BOXLIB_START) $(COPY_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(COPY_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(COPY_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 seek.elf: $(BOXLIB_START) $(SEEK_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(SEEK_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(SEEK_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 retag.elf: $(BOXLIB_START) $(RETAG_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(RETAG_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(RETAG_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 typer.elf: $(BOXLIB_START) $(TYPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TYPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TYPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 flame.elf: $(BOXLIB_START) $(FLAME_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(FLAME_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(FLAME_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 checksum.elf: $(BOXLIB_START) $(CHECKSUM_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(CHECKSUM_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(CHECKSUM_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 aquarium.elf: $(BOXLIB_START) $(AQUARIUM_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(AQUARIUM_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(AQUARIUM_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 nyancat.elf: $(BOXLIB_START) $(NYANCAT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(NYANCAT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(NYANCAT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 fireworks.elf: $(BOXLIB_START) $(FIREWORKS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(FIREWORKS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(FIREWORKS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 2048.elf: $(BOXLIB_START) $(2048_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(2048_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(2048_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 tetris.elf: $(BOXLIB_START) $(TETRIS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TETRIS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TETRIS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 todo.elf: $(BOXLIB_START) $(TODO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TODO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TODO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 tagmap.elf: $(BOXLIB_START) $(TAGMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TAGMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TAGMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 mandelbrot.elf: $(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 qr.elf: $(BOXLIB_START) $(QR_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(QR_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(QR_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 minesweeper.elf: $(BOXLIB_START) $(MINESWEEPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(MINESWEEPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(MINESWEEPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 eyes.elf: $(BOXLIB_START) $(EYES_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(EYES_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(EYES_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 donut.elf: $(BOXLIB_START) $(DONUT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(DONUT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DONUT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 slime.elf: $(BOXLIB_START) $(SLIME_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(SLIME_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(SLIME_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 tumbleweed.elf: $(BOXLIB_START) $(TUMBLEWEED_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(TUMBLEWEED_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TUMBLEWEED_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 crab.elf: $(BOXLIB_START) $(CRAB_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(CRAB_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(CRAB_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # What edit and read share, so the two are one family: their look, their bars,
@@ -316,7 +312,7 @@ EDIT_OBJS = $(addprefix $(EDIT_DIR)/,edit.o editor.o tab.o text.o history.o keym
             $(KIN_OBJS)
 
 edit.elf: $(BOXLIB_START) $(EDIT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(EDIT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(EDIT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # The reader likewise, in a directory of its own.
@@ -326,7 +322,7 @@ READ_OBJS = $(addprefix $(READ_DIR)/,read.o reader.o tab.o page.o keymap.o searc
             $(KIN_OBJS)
 
 read.elf: $(BOXLIB_START) $(READ_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) $(READ_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(READ_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # The family's parts are named from the utilities' root: "kin/look.h".

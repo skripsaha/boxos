@@ -6,9 +6,9 @@
  * constructor: [iostream.objects] requires the objects to be usable from any
  * other global constructor in the program, and ordinary namespace-scope
  * globals give no such guarantee across translation units. Priority 102 puts
- * them after the TLS bootstrap (tls_init.cpp, priority 101 — the streams
- * allocate, and allocation touches thread_local state) and ahead of every
- * default-priority global anywhere in the program. Destruction is the mirror
+ * them ahead of every default-priority global anywhere in the program; the
+ * thread_local state their allocation touches the kernel made before the
+ * program's first instruction. Destruction is the mirror
  * of construction, so they are torn down last, after the ios_base::Init in
  * any user translation unit has already flushed them.
  *

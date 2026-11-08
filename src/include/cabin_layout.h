@@ -247,7 +247,7 @@
  *   [guard 2309]
  *   [Pocket hdr 2310][Result hdr 2311][Touch hdr 2312][guard 2313]
  *   [Pocket slots 2314..2317][Result slots 2318..2321][Touch slots 2322..2323][guard 2324]
- *   [C++ neg-TLS page 2325 (eager-mapped Ф20b)][StrandInfo 2326..2329][guard 2330]
+ *   [thread-local storage page 2325][StrandInfo 2326..2329][guard 2330]
  *   [unused 2331..2559]
  * The gap and the guards are unmapped VA — any access faults. The stack is the
  * only part of a slot that is not mapped whole when the slot is made: its

@@ -112,10 +112,26 @@ static error_t ImageLoadElfFrom(vmm_context_t *vmm, const uint8_t *file, uint64_
             return placed;
     }
 
+    /* The main strand's thread-local storage on the pages after the image. */
+    ImageThread thread = { elf.Thread.Align, elf.Thread.InitBytes, elf.Thread.TotalBytes,
+                           file + elf.Thread.FileOffset };
+    uint64_t    pages  = ImageThreadPages(&thread);
+    if (pages > (CABIN_CODE_END_ADDR - elf.End) / VMM_PAGE_SIZE) {
+        kprintf("[IMAGE] '%s' is not started: its thread-local storage does not fit after its "
+                "image in the room a program's image has\n", name);
+        return ERR_BINARY_TOO_LARGE;
+    }
+    if (pages > 0) {
+        error_t placed = ImageThreadPlace(vmm, &thread, (uintptr_t)elf.End, name,
+                                          &loaded->ThreadPointer);
+        if (placed != OK)
+            return placed;
+    }
+
     loaded->Entry = (uintptr_t)elf.Entry;
     (void)nameplate_locate(file, bytes, CABIN_CODE_START_ADDR, &loaded->NameplateVa,
                            &loaded->NameplateBytes);
-    return OK;
+    return ImageThreadKeep(&thread, name, &loaded->Thread);
 }
 
 /* An ELF is read whole: its headers say where everything is, and every byte
@@ -213,6 +229,8 @@ error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *nam
     loaded->NameplateBytes = 0;
     loaded->ImageBase      = 0;
     loaded->PartsVa        = 0;
+    loaded->Thread         = (ImageThread){ 0 };
+    loaded->ThreadPointer  = 0;
 
     error_t rc = ImageSourceRead(source, 0, head, look, name);
     if (rc != OK)

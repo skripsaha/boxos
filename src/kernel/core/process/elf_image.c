@@ -38,6 +38,7 @@ typedef struct __attribute__((packed)) {
 
 #define ELF_PT_LOAD         1u
 #define ELF_PT_INTERP       3u
+#define ELF_PT_TLS          7u
 #define ELF_PT_GNU_STACK    0x6474E551u
 
 #define ELF_PF_X            1u
@@ -101,6 +102,28 @@ static ElfImageVerdict ReadHeader(const uint8_t *file, uint64_t bytes, ElfImage 
     return ELF_IMAGE_OK;
 }
 
+/* The template of thread-local storage, held to the file, its alignment to a
+ * power of two no larger than a page — 0 and 1 both mean none, as ELF says —
+ * and its size to the zone a block of it must be placed in. */
+static ElfImageVerdict ThreadVerdict(const ElfProgramHeader *header, uint64_t file_bytes,
+                                     uint64_t zone_bytes, ElfImageThread *out)
+{
+    uint64_t align = header->p_align > 1 ? header->p_align : 1;
+    if (header->p_filesz > header->p_memsz)
+        return ELF_IMAGE_SEGMENT_FILE_OVER_MEMORY;
+    if (header->p_offset > file_bytes || header->p_filesz > file_bytes - header->p_offset)
+        return ELF_IMAGE_SEGMENT_OUTSIDE_FILE;
+    if ((align & (align - 1)) != 0 || align > ELF_PAGE)
+        return ELF_IMAGE_THREAD_ALIGN;
+    if (header->p_memsz > zone_bytes)
+        return ELF_IMAGE_THREAD_TOO_LARGE;
+    out->Align      = align;
+    out->FileOffset = header->p_offset;
+    out->InitBytes  = header->p_filesz;
+    out->TotalBytes = header->p_memsz;
+    return ELF_IMAGE_OK;
+}
+
 /* One segment to load, held to the file and the zone — each side asked as a
  * subtraction from the limit, once the start is known to be under it. */
 static ElfImageVerdict SegmentVerdict(const ElfImageSegment *segment, uint64_t file_bytes,
@@ -126,6 +149,8 @@ ElfImageVerdict ElfImageRead(const void *file, uint64_t bytes, uint64_t zone_sta
     out->FileBytes   = bytes;
     out->Entry       = 0;
     out->HeadersAt   = 0;
+    out->End         = 0;
+    out->Thread      = (ElfImageThread){ 0 };
     out->HeaderCount = 0;
     out->Header      = ELF_IMAGE_NO_HEADER;
 
@@ -138,6 +163,7 @@ ElfImageVerdict ElfImageRead(const void *file, uint64_t bytes, uint64_t zone_sta
     uint64_t free_from     = zone_start;
     bool     loads         = false;
     bool     entry_in_code = false;
+    bool     thread        = false;
 
     for (uint16_t i = 0; i < out->HeaderCount; i++) {
         const ElfProgramHeader *header = HeaderAt(out, i);
@@ -148,6 +174,15 @@ ElfImageVerdict ElfImageRead(const void *file, uint64_t bytes, uint64_t zone_sta
             return ELF_IMAGE_INTERPRETER;
         if (header->p_type == ELF_PT_GNU_STACK && (header->p_flags & ELF_PF_X))
             return ELF_IMAGE_STACK_EXECUTABLE;
+        if (header->p_type == ELF_PT_TLS) {
+            if (thread)
+                return ELF_IMAGE_THREAD_TWICE;
+            verdict = ThreadVerdict(header, bytes, zone_end - zone_start, &out->Thread);
+            if (verdict != ELF_IMAGE_OK)
+                return verdict;
+            thread = true;
+            continue;
+        }
         if (header->p_type != ELF_PT_LOAD)
             continue;
 
@@ -168,6 +203,7 @@ ElfImageVerdict ElfImageRead(const void *file, uint64_t bytes, uint64_t zone_sta
     }
 
     out->Header = ELF_IMAGE_NO_HEADER;
+    out->End    = free_from;
     if (!loads)
         return ELF_IMAGE_NOTHING_TO_LOAD;
     if (!entry_in_code)
@@ -222,6 +258,12 @@ const char *ElfImageVerdictText(ElfImageVerdict verdict)
     case ELF_IMAGE_NOTHING_TO_LOAD:   return "it has no segment to load";
     case ELF_IMAGE_ENTRY_OUTSIDE_CODE:
         return "its entry point is not in code the file supplies";
+    case ELF_IMAGE_THREAD_TWICE:
+        return "it has two templates of thread-local storage";
+    case ELF_IMAGE_THREAD_ALIGN:
+        return "its thread-local storage asks for an alignment that is not a power of two up to a page";
+    case ELF_IMAGE_THREAD_TOO_LARGE:
+        return "its thread-local storage is larger than the room a program's image has";
     case ELF_IMAGE_VERDICT_COUNT:     break;
     }
     return "it was refused for a reason this kernel has no words for";

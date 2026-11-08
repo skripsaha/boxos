@@ -229,6 +229,8 @@ void cabin_destroy(cabin_t *cabin)
     kfree(cabin->hammock_free);
     cabin->hammock_free = NULL;
 
+    ImageThreadLetGo(&cabin->thread);
+
     if (cabin->tag_overflow_ids)
     {
         kfree(cabin->tag_overflow_ids);

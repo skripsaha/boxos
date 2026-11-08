@@ -16,8 +16,8 @@
 
 /* ── User FS base (TLS) save/restore on the SCHEDULER frame path ──────────
  *
- * Strands P5a: each strand owns its own FS base (its StrandInfo / C++ TCB
- * pointer). The asm SAVE/RESTORE_USER_FSBASE macros (context_switch.asm)
+ * Strands P5a: each strand owns its own FS base (its StrandInfo, or the main
+ * strand's TCB). The asm SAVE/RESTORE_USER_FSBASE macros (context_switch.asm)
  * only cover the task_* entries — NOT this frame path, which is the single
  * live scheduler dispatch. Before P5a there was exactly one FS-base user per
  * cabin so the register survived untouched across switches "by accident";

@@ -10,7 +10,7 @@
 //                        std::terminate. Dropping a strand handle winds the strand
 //                        down cleanly; you are never punished for forgetting an
 //                        explicit join (decision: join-on-destroy). Everything else
-//                        (spawn + per-strand TLS bootstrap + the UAF-safe join
+//                        (spawn + thread_local destructors + the UAF-safe join
 //                        rendezvous) is inherited verbatim from std::thread, which
 //                        this class COMPOSES — zero duplicated lifecycle code.
 //   box::park / box::wake
@@ -77,7 +77,7 @@
 #include <tuple>                    // std::tuple / std::apply (box::spawn_detached decay-copy)
 
 #include "box/strand.h"             // strand_spawn / strand_exit — the detached substrate (C)
-#include "box/cxx/tls_strand.h"     // __boxcxx_tls_strand_init / thread_storage_enter / exit
+#include "box/cxx/tls_strand.h"     // thread_storage_enter / exit
 
 namespace box {
 
@@ -238,7 +238,7 @@ private:
 // An in-cabin execution context with std::thread semantics, except the destructor
 // JOINS a still-joinable strand instead of calling std::terminate (decision:
 // join-on-destroy). The class composes a std::thread, so spawn, the per-strand
-// TLS bootstrap, and the UAF/double-free-safe join rendezvous are all inherited;
+// thread_local destructors, and the UAF/double-free-safe join rendezvous are all inherited;
 // only the lifetime policy differs.
 class strand {
 public:
@@ -281,7 +281,7 @@ public:
     strand() noexcept = default;
 
     // Spawn a strand running f(args...). Delegates to the composed std::thread,
-    // which does the decay-copy, joinable spawn, TLS bootstrap and Join wiring.
+    // which does the decay-copy, joinable spawn, thread storage and Join wiring.
     // Constrained so it is never chosen as the move ctor.
     template <class F, class... Args,
               class = std::enable_if_t<!std::is_same_v<std::remove_cvref_t<F>, strand>>>
@@ -381,9 +381,9 @@ struct strand_info {
 namespace _strand_detail {
 // The detached strand entry: mirrors std::thread::Trampoline MINUS the Join
 // rendezvous (a fire-and-forget strand has no joiner, so there is no flag to
-// publish and nobody to wake). Bootstrap C++ TLS FIRST — the raw kernel
-// strand_spawn does NOT, unlike std::thread's joinable path — then run the
-// callable, then run this strand's thread_local destructors while its neg-TLS
+// publish and nobody to wake). The kernel made this strand's thread-local
+// storage before it ran; arm its destructor registry, run the callable, then
+// run this strand's thread_local destructors while its thread-local storage
 // page is still mapped, then strand_exit (boxlib frees the per-strand Touch
 // stash + StrandPool slab on the way out). An exception escaping the callable or
 // a thread_local destructor is std::terminate, exactly as [thread.thread.constr].
@@ -403,7 +403,6 @@ template <class Closure>
 inline void detached_trampoline(void *p)
 {
     auto *c = static_cast<Closure *>(p);
-    __boxcxx_tls_strand_init();
     __boxcxx_thread_storage_enter();
     try {
         {

@@ -6,6 +6,7 @@
 #include "klib.h"
 #include "vmm.h"
 #include "memtag.h"   /* MEMTAG_HELD_L1_ENTRIES — the held-tag set's geometry */
+#include "image_thread.h"
 
 /*
  * cabin_t — shared address-space object.
@@ -85,6 +86,11 @@ typedef struct cabin_t
 
     uintptr_t code_start;
     size_t    code_size;
+
+    /* The template every strand's thread-local storage is made from, as the
+     * loader kept it (ImageThreadKeep): written once, before any strand of
+     * the cabin runs, and let go with the cabin. */
+    ImageThread thread;
 
     /* ASLR: per-cabin randomized addresses (set at creation time). */
     uint64_t aslr_heap_base;

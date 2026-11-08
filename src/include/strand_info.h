@@ -12,10 +12,11 @@
  * reads FS base via RDFSBASE, validates `magic`, and routes ring access to
  * the per-strand VAs carried here.
  *
- * The MAIN strand has NO StrandInfo: its FS base is either 0 or points at the
- * boxcxx C++ TCB. boxlib distinguishes the two by reading `magic` at its
- * fixed offset — a C++ TCB will not carry STRAND_INFO_MAGIC, so the main
- * strand falls back to the fixed cabin ring VAs and the large static stashes.
+ * The MAIN strand has NO StrandInfo: its FS base is either 0 or the TCB of the
+ * thread-local storage the kernel made for it after the program's image.
+ * boxlib tells it apart by the base lying outside the Hammock window — and a
+ * TCB of that kind never carries STRAND_INFO_MAGIC — so the main strand falls
+ * back to the fixed cabin ring VAs and the large static stashes.
  *
  * This is the SINGLE source of truth for the layout: the kernel producer
  * (strand_rings.c) and the userspace consumer (strand_self.c / result.c)
@@ -29,7 +30,7 @@
 
 /* "STRNDINF" packed big-endian — distinctive 8-byte tag at StrandInfo.magic
  * (offset 16). The fs-base probe reads this offset off a base that may be a
- * C++ TCB; the value is specific enough that a false positive is a 1-in-2^64
+ * main strand's TCB; the value is specific enough that a false positive is a 1-in-2^64
  * accident. */
 #define STRAND_INFO_MAGIC      0x5354524E44494E46ULL
 
@@ -54,7 +55,7 @@
 typedef struct StrandInfo {
     uint64_t tcb_self;        /* @0  — System V variant-2 TCB self-pointer (fs:0) */
     uint64_t tcb_reserved;    /* @8  — TCB DTV slot (reserved, unused in P5a) */
-    uint64_t magic;           /* @16 — STRAND_INFO_MAGIC; discriminates from a C++ TCB */
+    uint64_t magic;           /* @16 — STRAND_INFO_MAGIC; discriminates from a main strand's TCB */
     uint32_t strand_pid;      /* @24 — this strand's pid (strand_self) */
     uint32_t generation;      /* @28 — pid_generation at spawn: (pid, generation) is who this strand is */
     uint64_t pocket_ring_va;  /* @32 — per-strand PocketRing header VA */

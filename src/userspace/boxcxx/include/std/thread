@@ -22,7 +22,7 @@
 #include "box/strand.h"             // strand_spawn / strand_exit — a thread is a strand
 #include "box/system.h"             // sysinfo / system_info_t (hardware_concurrency)
 #include "box/core/strand_self.h"   // strand_self — this_thread::get_id
-#include "box/cxx/tls_strand.h"     // per-strand thread_local bootstrap the trampoline drives
+#include "box/cxx/tls_strand.h"     // per-strand thread_local destructors the trampoline drives
 
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
@@ -290,10 +290,8 @@ private:
         auto *c = static_cast<Closure *>(p);
         Join *j = c->j;
 
-        // CARRY: the kernel strand trampoline does NOT bootstrap C++ TLS, so do it
-        // here FIRST — before any thread_local in the user callable is touched —
-        // then arm this strand's thread_local destructor registry.
-        __boxcxx_tls_strand_init();
+        // The kernel made this strand's thread-local storage before it ran; arm
+        // its thread_local destructor registry before the user callable runs.
         __boxcxx_thread_storage_enter();
 
         // [thread.thread.constr]/5 + [basic.start.term]: an exception escaping the

@@ -7,7 +7,7 @@
  *   [gap 0..255][user stack 256..2303][guard 2304][CET SSP 2305..2308][guard 2309]
  *   [Pocket hdr 2310][Result hdr 2311][Touch hdr 2312][guard 2313]
  *   [Pocket slots 2314..2317][Result slots 2318..2321][Touch slots 2322..2323][guard 2324]
- *   [C++ neg-TLS page 2325 (eager-mapped Ф20b)][StrandInfo 2326..2329][guard 2330]
+ *   [thread-local storage page 2325][StrandInfo 2326..2329][guard 2330]
  *   [unused 2331..2559]
  *
  * The stack/SSP page offsets are what process_strand_ssp_base relies on. The
@@ -62,13 +62,12 @@
 #define HAMMOCK_POCKET_SLOTS_PAGE   (HAMMOCK_TOUCH_HDR_PAGE + 2u)                             /* 2314 */
 #define HAMMOCK_RESULT_SLOTS_PAGE   (HAMMOCK_POCKET_SLOTS_PAGE + HAMMOCK_POCKET_SLOT_PAGES)   /* 2318 */
 #define HAMMOCK_TOUCH_SLOTS_PAGE    (HAMMOCK_RESULT_SLOTS_PAGE + HAMMOCK_RESULT_SLOT_PAGES)   /* 2322 */
-/* guard at +2 (2324), C++ neg-TLS page at 2325 (eager-mapped Ф20b) */
+/* guard at +2 (2324), thread-local storage page at 2325 */
 #define HAMMOCK_STRANDINFO_PAGE     (HAMMOCK_TOUCH_SLOTS_PAGE + HAMMOCK_TOUCH_SLOT_PAGES + 2u)/* 2326 */
-/* The single page directly below StrandInfo (the fs:0 TCB) backs the C++
- * variant-2 negative-offset TLS block: __boxcxx_tls_strand_init copies .tdata
- * and zeroes .tbss into [fsbase - tp_off, fsbase). One page is enough — the
- * boxcxx link-time check caps the per-strand TLS image below 4 KiB; tls_strand
- * panics if tp_off ever exceeds it. */
+/* The single page directly below StrandInfo (the fs:0 TCB) holds the strand's
+ * variant-II thread-local storage, [fsbase - below, fsbase): the kernel pours
+ * the program's template into it here (image_thread.h). A program whose
+ * storage does not fit the page has no strand spawned (strand_spawn). */
 #define HAMMOCK_NEGTLS_PAGE         (HAMMOCK_STRANDINFO_PAGE - 1u)                            /* 2325 */
 /* guard at HAMMOCK_STRANDINFO_PAGE + HAMMOCK_STRANDINFO_PAGES (2330) */
 #define HAMMOCK_END_PAGE            (HAMMOCK_STRANDINFO_PAGE + HAMMOCK_STRANDINFO_PAGES + 1u) /* 2331 */
@@ -76,7 +75,7 @@
 _Static_assert(HAMMOCK_POCKET_HDR_PAGE == 2310,
                "Hammock ring base must be page 2310 — 256 gap + 2048 stack + guard + 4 SSP + guard");
 _Static_assert(HAMMOCK_NEGTLS_PAGE == HAMMOCK_POCKET_HDR_PAGE + 15u,
-               "C++ neg-TLS page must be directly below the StrandInfo TCB, 15 pages into the rings");
+               "the thread-local storage page must be directly below the StrandInfo TCB, 15 pages into the rings");
 _Static_assert(HAMMOCK_END_PAGE <= CABIN_HAMMOCK_SLOT_PAGES,
                "Hammock slot too small for stack+SSP+rings+StrandInfo");
 _Static_assert((CABIN_HAMMOCK_SLOT_SIZE % 0x200000ULL) == 0 &&
@@ -89,7 +88,7 @@ _Static_assert((CABIN_HAMMOCK_SLOT_SIZE % 0x200000ULL) == 0 &&
 #define HAMMOCK_TOUCH_CAP    (HAMMOCK_TOUCH_SLOT_PAGES  * VMM_PAGE_SIZE / TOUCH_SLOT_SIZE)    /* 64  */
 
 /* Teardown span: ring headers (2310) through the end of the StrandInfo block
- * (2329, inclusive). The eager-mapped C++ neg-TLS page (2325) falls inside and is
+ * (2329, inclusive). The thread-local storage page (2325) falls inside and is
  * freed by the present-check; the guards (absent VA) are skipped. Stack
  * (256..2303) and SSP (2305..2308) are NOT here — they are freed by
  * process_release_strand_slot / cet_process_destroy. */
@@ -188,12 +187,13 @@ bool strand_rings_create(process_t *proc)
     ok = ok && (hammock_map_pages(vmm, result_slots_va, HAMMOCK_RESULT_SLOT_PAGES) != 0);
     ok = ok && (hammock_map_pages(vmm, touch_slots_va,  HAMMOCK_TOUCH_SLOT_PAGES)  != 0);
 
-    /* (2b) C++ neg-TLS page (Ф20b): __boxcxx_tls_strand_init populates the
-     * variant-2 negative-offset TLS block here. Same eager-map rationale as the
-     * slot regions — the #PF demand-map handler only knows the fixed cabin VAs,
-     * so this Hammock page must be present before the strand first touches a
+    /* (2b) The thread-local storage page, poured below once the strand's
+     * StrandInfo is in place. Same eager-map rationale as the slot regions —
+     * the #PF demand-map handler only knows the fixed cabin VAs, so this
+     * Hammock page must be present before the strand first touches a
      * thread_local. Unwound by the full-range teardown below on any failure. */
-    ok = ok && (hammock_map_pages(vmm, negtls_va, 1) != 0);
+    uintptr_t negtls_phys = ok ? hammock_map_pages(vmm, negtls_va, 1) : 0;
+    ok = negtls_phys != 0;
 
     /* (3) StrandInfo block. */
     uintptr_t si_phys = ok ? hammock_map_pages(vmm, strandinfo_va, HAMMOCK_STRANDINFO_PAGES) : 0;
@@ -225,6 +225,9 @@ bool strand_rings_create(process_t *proc)
     /* The stash pointers and strand_pool_ptr are already zero — pmm_alloc_zero
      * cleared the whole 4-page block, so every lazily-made boxlib field starts
      * at 0 ("not yet"). */
+
+    /* (5b) The program's thread-local storage, right below that TCB. */
+    ImageThreadPour(&proc->cabin->thread, (uint8_t *)vmm_phys_to_virt(negtls_phys));
 
     /* (6) Wire the strand: per-strand routing + FS base = StrandInfo VA. The
      * first scheduler dispatch installs user_fsbase via context_restore. */

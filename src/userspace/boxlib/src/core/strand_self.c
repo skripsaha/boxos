@@ -4,10 +4,11 @@
  * See box/core/strand_self.h. The discriminator between a spawned strand and
  * the main strand is the FS base: a spawned strand's FS base is its StrandInfo,
  * which the kernel ALWAYS places inside the per-cabin Hammock window. The main
- * strand's FS base is either 0 (a plain C program) or its C++ TCB on the heap
- * (a boxcxx program) — both outside the Hammock window. Testing the range
- * first means we never dereference an unknown base (no read of a C++ TCB), so
- * the probe is airtight regardless of TCB size or layout.
+ * strand's FS base is either 0 (a program that keeps nothing per strand) or
+ * the TCB of the thread-local storage the kernel made after its image — both
+ * outside the Hammock window. Testing the range first means we never
+ * dereference an unknown base (no read of the main strand's TCB), so the
+ * probe is airtight regardless of TCB size or layout.
  */
 
 #include "box/core/strand_self.h"
@@ -48,8 +49,8 @@ StrandInfo *strand_info_or_null(void)
     uint64_t fsb = strand_read_fsbase();
 
     /* Identify the main strand by the FS base lying OUTSIDE the Hammock window
-     * — no dereference of a possibly-foreign base. Covers FS==0 (plain C main)
-     * and a heap C++ TCB alike. */
+     * — no dereference of a possibly-foreign base. Covers FS==0 and the main
+     * strand's TCB after the image alike. */
     if (fsb < CABIN_HAMMOCK_BASE || fsb >= CABIN_HAMMOCK_END)
         return NULL;
 

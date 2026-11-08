@@ -177,8 +177,8 @@ extern "C" int __cxa_atexit(void (*fn)(void *), void *arg, void *dso)
 }
 
 // thread_local destructors — Itanium __cxa_thread_atexit. PER-STRAND: the list
-// head lives in this strand's own neg-TLS (zeroed by the kernel for a spawned
-// strand, by tls_init for main), so each strand owns an independent LIFO list
+// head lives in this strand's own thread-local storage (made zeroed by the
+// kernel for every strand, main among them), so each strand owns an independent LIFO list
 // with zero locking. Nodes are heap-allocated (malloc is strand-safe). Drained
 // by __boxcxx_thread_storage_exit when the strand ends — for main strand, that
 // call sits in __cxa_finalize BEFORE the static dtors ([basic.start.term]:

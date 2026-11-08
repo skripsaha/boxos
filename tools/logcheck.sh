@@ -1194,10 +1194,9 @@ run_nofsgsbase() {
 
     grep -q "BoxOS Shell" "$L"; chk $? "boot reaches the shell without fsgsbase"
 
-    # The C++ runtime installs its TLS through the kernel here, and the first
-    # fs-relative instruction is two after the request. Nothing may fault.
-    ! grep -q "__boxcxx_tls_bootstrap" "$L"
-    chk $? "no C++ program died in its TLS bootstrap"
+    # The kernel installs every program's thread pointer here through the MSR,
+    # before its first instruction: a thread_local touched at once, by a C++
+    # utility or by boxlib's own, must not fault.
     ! grep -q "EXCEPTION" "$L"; chk $? "no user-mode exception at all"
 
     grep -q "timezone: not set\|now:" "$L"

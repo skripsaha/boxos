@@ -4,6 +4,7 @@
 #include "ktypes.h"
 #include "error.h"
 #include "vmm.h"
+#include "image_thread.h"
 
 struct TagFSFileHandle;
 
@@ -25,6 +26,10 @@ struct TagFSFileHandle;
  *   ELF  begins 7F 'E' 'L' 'F', and is read whole before anything is mapped
  *        (elf_image.h). Each segment gets pages of its own with exactly its
  *        rights: R, R+W or R+X — a segment that asks for W+X is refused.
+ *
+ * Of a box and of an ELF the kernel makes the main strand's thread-local
+ * storage from the template the image carries, on the pages after the image
+ * (image_thread.h) — no program has to make its own before it can use it.
  *
  *   raw  code run from its first byte, the image byte for byte at the code
  *        start. Only when the volume declares it so with the tag `raw`: bytes
@@ -54,14 +59,19 @@ typedef struct {
 
 /* What a load leaves for the process: where it starts, where the image's
  * names for its functions are mapped (0 when it carries none), what was added
- * to every place of the image, and where the table of a box's parts in memory
- * is (box_loaded.h; 0 for an image that is no box). */
+ * to every place of the image, where the table of a box's parts in memory is
+ * (box_loaded.h; 0 for an image that is no box), the template of its strands'
+ * thread-local storage — kept for the cabin (ImageThreadKeep), the cabin's to
+ * let go — and the main strand's thread pointer, its block already placed
+ * after the image (0 when the image keeps nothing per strand). */
 typedef struct {
-    uintptr_t Entry;
-    uintptr_t NameplateVa;
-    uint64_t  NameplateBytes;
-    uintptr_t ImageBase;
-    uintptr_t PartsVa;
+    uintptr_t   Entry;
+    uintptr_t   NameplateVa;
+    uint64_t    NameplateBytes;
+    uintptr_t   ImageBase;
+    uintptr_t   PartsVa;
+    ImageThread Thread;
+    uintptr_t   ThreadPointer;
 } ImageLoaded;
 
 /* `count` bytes of the image from `offset` into `into`, whole or a refusal

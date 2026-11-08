@@ -15,7 +15,8 @@
  * race that capped P4 at one concurrent IPC strand per cabin.
  *
  * The main strand has NO carved rings (hammock_base == 0); its rings alias the
- * cabin's fixed-VA rings and its FS base stays 0 / the C++ TCB.
+ * cabin's fixed-VA rings and its FS base is 0 or the TCB of the thread-local
+ * storage the loader placed after the image.
  */
 
 typedef struct process_t process_t;

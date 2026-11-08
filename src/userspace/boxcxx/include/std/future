@@ -17,10 +17,9 @@
 // EARLY, it does not burn its budget; the deadline is exact, kernel b88b313).
 //
 // async(launch::async) launches a std::thread (NOT a raw strand_spawn): its
-// trampoline already stands up this strand's per-strand thread_local image and
-// its per-strand exception bookkeeping (__boxcxx_tls_strand_init /
-// __boxcxx_thread_storage_enter / exit) and the terminate-on-escape contract, so
-// async inherits all of it for free. The std::thread is moved INTO the shared
+// trampoline already drives this strand's thread_local destructors and its
+// per-strand exception bookkeeping (__boxcxx_thread_storage_enter / exit) and
+// the terminate-on-escape contract, so async inherits all of it for free. The std::thread is moved INTO the shared
 // state; the LAST shared-state owner joins it exactly once in ref_dec (a
 // __join_owner CAS), which is the conformant ~future blocking-join of an async
 // future ([futures.async]/5 + /6). Plain (non-async) futures never arm a worker,

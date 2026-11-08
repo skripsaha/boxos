@@ -152,6 +152,8 @@ static void TestAccepted(void)
          segment.Virt == 0xD000 && segment.FileOffset == 0x2000 && segment.FileBytes == 0x10 &&
          segment.MemoryBytes == 0x2000 && segment.Writable && !segment.Executable;
     ok = ok && !ElfImageNextSegment(&image, &at, &segment) && at == 3;
+    ok = ok && image.End == 0xF000 && image.Thread.Align == 8 && image.Thread.FileOffset == 0x2008 &&
+         image.Thread.InitBytes == 0 && image.Thread.TotalBytes == 8;
     free(copy);
 
     if (ok) {
@@ -284,6 +286,53 @@ static void TestOtherHeaders(void)
     Expect("a note that is no segment, whatever it says", ELF_IMAGE_OK, WHOLE);
 }
 
+/* The template the kernel makes every strand's thread-local storage from. */
+static void ExpectThread(const char *label, uint64_t align, uint64_t init, uint64_t total)
+{
+    ElfImage        image;
+    uint8_t        *copy;
+    ElfImageVerdict got = Read(&image, &copy);
+    free(copy);
+
+    if (got == ELF_IMAGE_OK && image.Thread.Align == align && image.Thread.InitBytes == init &&
+        image.Thread.TotalBytes == total) {
+        g_passed++;
+        return;
+    }
+    g_failed++;
+    printf("FAIL %s\n  got:  %s, align %llu, %llu of %llu bytes\n", label, ElfImageVerdictText(got),
+           (unsigned long long)image.Thread.Align, (unsigned long long)image.Thread.InitBytes,
+           (unsigned long long)image.Thread.TotalBytes);
+}
+
+static void TestThread(void)
+{
+    Reset(); Head()->Count = 4; *Segment(3) = *Segment(2);
+    Expect("two templates of thread-local storage", ELF_IMAGE_THREAD_TWICE, 3);
+    Reset(); Segment(2)->Align = 3;
+    Expect("thread-local storage aligned to three", ELF_IMAGE_THREAD_ALIGN, 2);
+    Reset(); Segment(2)->Align = 0x2000;
+    Expect("thread-local storage aligned past a page", ELF_IMAGE_THREAD_ALIGN, 2);
+    Reset(); Segment(2)->Align = 0x1000;
+    ExpectThread("thread-local storage aligned to a page", 0x1000, 0, 8);
+    Reset(); Segment(2)->Align = 0;
+    ExpectThread("thread-local storage that asks no alignment", 1, 0, 8);
+    Reset(); Segment(2)->FileBytes = 9;
+    Expect("a template longer than its storage", ELF_IMAGE_SEGMENT_FILE_OVER_MEMORY, 2);
+    Reset(); Segment(2)->FileBytes = 8; Segment(2)->Offset = 0x2FF9;
+    Expect("a template one byte past the end", ELF_IMAGE_SEGMENT_OUTSIDE_FILE, 2);
+    Reset(); Segment(2)->FileBytes = 8; Segment(2)->Offset = UINT64_MAX - 3;
+    Expect("a template whose end wraps past 2^64", ELF_IMAGE_SEGMENT_OUTSIDE_FILE, 2);
+    Reset(); Segment(2)->FileBytes = 8; Segment(2)->Offset = 0x2FF8;
+    ExpectThread("a template ending on the last byte", 8, 8, 8);
+    Reset(); Segment(2)->MemoryBytes = ZONE_END - ZONE_START + 1;
+    Expect("thread-local storage larger than the zone", ELF_IMAGE_THREAD_TOO_LARGE, 2);
+    Reset(); Segment(2)->MemoryBytes = ZONE_END - ZONE_START;
+    ExpectThread("thread-local storage as large as the zone", 8, 0, ZONE_END - ZONE_START);
+    Reset(); Segment(2)->Type = PT_NOTE;
+    ExpectThread("no thread-local storage", 0, 0, 0);
+}
+
 static void TestNothingAndEntry(void)
 {
     Reset(); Segment(0)->Type = PT_NOTE; Segment(1)->Type = PT_NOTE;
@@ -379,6 +428,7 @@ int main(int argc, char **argv)
     TestSegmentRights();
     TestSegmentOrder();
     TestOtherHeaders();
+    TestThread();
     TestNothingAndEntry();
     TestFirstReasonNamed();
     TestTexts();

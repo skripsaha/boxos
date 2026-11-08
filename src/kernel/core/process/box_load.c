@@ -33,7 +33,8 @@ static void BoxHashEnd(void *state, uint8_t digest[BOX_HASH_BYTES])
     KSha256Final((KSha256Ctx *)state, digest);
 }
 
-/* One load: the box's table, read from its start, and what reads it. */
+/* One load: the box's table, read from its start, what reads it, and the
+ * template of its thread-local storage (its `thread` part, held). */
 typedef struct {
     vmm_context_t     *Vmm;
     const ImageSource *Source;
@@ -41,6 +42,7 @@ typedef struct {
     KSha256Ctx         HashState;
     BoxHasher          Hasher;
     BoxTable           Table;
+    ImageThread        Thread;
 } BoxLoading;
 
 static error_t BoxRefuse(const BoxLoading *load, BoxVerdict verdict, const BoxPart *part)
@@ -300,8 +302,8 @@ static error_t BoxImageMap(BoxLoading *load, BoxImagePart *part, uint64_t base)
  * Everything of the box that goes into memory, placed from the base before a
  * byte of it is read: code, const and data where their places say; on the
  * pages after them the names; after those each part carried in, on pages of
- * its own, in the order of the box's table; and last the table of what is
- * where (box_loaded.h).
+ * its own, in the order of the box's table; then the table of what is where
+ * (box_loaded.h); and last the main strand's thread-local storage.
  */
 typedef struct {
     BoxImagePart Parts[BOX_IMAGE_PARTS];
@@ -309,7 +311,8 @@ typedef struct {
     uint64_t     CarriedAt;    /* the first page after the names */
     uint64_t     TableAt;
     uint64_t     TableBytes;
-    uint64_t     End;          /* past the table's last page */
+    uint64_t     ThreadAt;     /* the main strand's thread-local storage */
+    uint64_t     End;          /* past the last page of it all */
     uint32_t     Listed;       /* the parts the table names */
 } BoxPlan;
 
@@ -386,8 +389,10 @@ static error_t BoxPlanLay(BoxLoading *load, BoxPlan *plan)
 
     plan->TableAt    = at;
     plan->TableBytes = sizeof(BoxLoadedHead) + (uint64_t)plan->Listed * sizeof(BoxLoadedPart) + letters;
-    plan->End        = at;
-    if (!fits || !BoxPlanAdd(&plan->End, plan->TableBytes)) {
+    plan->ThreadAt   = at;
+    fits             = fits && BoxPlanAdd(&plan->ThreadAt, plan->TableBytes);
+    plan->End        = plan->ThreadAt;
+    if (!fits || !BoxPlanAdd(&plan->End, ImageThreadPages(&load->Thread) * VMM_PAGE_SIZE)) {
         kprintf("[IMAGE] '%s' is not started: what it puts into memory reaches past where any "
                 "image can\n", load->Name);
         return ERR_BINARY_TOO_LARGE;
@@ -499,6 +504,11 @@ static error_t BoxLoadImage(BoxLoading *load, ImageLoaded *loaded, uint64_t star
             rc = BoxImageMap(load, &plan.Parts[i], base);
     if (rc == OK)
         rc = BoxCarry(load, &plan, base);
+    if (rc == OK && load->Thread.TotalBytes > 0)
+        rc = ImageThreadPlace(load->Vmm, &load->Thread, (uintptr_t)(base + plan.ThreadAt), load->Name,
+                              &loaded->ThreadPointer);
+    if (rc == OK)
+        rc = ImageThreadKeep(&load->Thread, load->Name, &loaded->Thread);
 
     if (rc == OK) {
         loaded->Entry     = (uintptr_t)(base + start);
@@ -562,7 +572,7 @@ error_t BoxLoad(vmm_context_t *vmm, const ImageSource *source, const char *name,
 
     /* The parts it is started by, each read whole and held to its hash. */
     BoxPart part, fixups_part;
-    BoxHeld held = { 0 }, fixups = { 0 };
+    BoxHeld held = { 0 }, fixups = { 0 }, thread = { 0 };
     bool    movable = false;
     uint64_t start  = 0;
 
@@ -582,11 +592,13 @@ error_t BoxLoad(vmm_context_t *vmm, const ImageSource *source, const char *name,
         BoxLetGo(&held);
     }
     if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_THREAD, &part)) {
-        BoxThread thread;
-        rc = BoxHoldPart(&load, &part, &held);
-        if (rc == OK && (verdict = BoxThreadRead(held.Bytes, part.Size, &thread)) != BOX_OK)
+        BoxThread layout;
+        rc = BoxHoldPart(&load, &part, &thread);
+        if (rc == OK && (verdict = BoxThreadRead(thread.Bytes, part.Size, &layout)) != BOX_OK)
             rc = BoxRefuse(&load, verdict, &part);
-        BoxLetGo(&held);
+        if (rc == OK)
+            load.Thread = (ImageThread){ layout.Align, layout.InitBytes, layout.TotalBytes,
+                                         layout.Init };
     }
     if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_FIXUPS, &fixups_part)) {
         movable = true;
@@ -598,6 +610,7 @@ error_t BoxLoad(vmm_context_t *vmm, const ImageSource *source, const char *name,
     if (rc == OK)
         rc = BoxLoadImage(&load, loaded, start, &fixups, movable ? &fixups_part : NULL);
 
+    BoxLetGo(&thread);
     BoxLetGo(&fixups);
     BoxLetGo(&prefix);
     return rc;

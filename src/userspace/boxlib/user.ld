@@ -127,13 +127,12 @@ SECTIONS
     }
 
     /* ── TLS template (local-exec model) ──────────────────────────────
-     * The kernel loader ignores PT_TLS; boxcxx tls_init reads these
-     * linker symbols instead, copies .tdata, zero-fills .tbss into a
-     * heap block and points FS at the TCB. .tbss is NOBITS and does
-     * NOT advance the location counter — only SIZEOF() is meaningful,
-     * never its addresses. ALIGN(64) matches the boxcxx TLS anchor's
-     * alignment cap (checked post-link). */
-    .tdata : ALIGN(64)
+     * PT_TLS is the template the kernel makes every strand's thread-local
+     * storage from (a box carries it as its `thread` part): .tdata copied,
+     * .tbss zeros after it. .tbss is NOBITS and does NOT advance the
+     * location counter — only SIZEOF() is meaningful, never its
+     * addresses. */
+    .tdata :
     {
         __tdata_start = .;
         *(.tdata .tdata.*)

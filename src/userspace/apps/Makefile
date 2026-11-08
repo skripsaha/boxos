@@ -55,10 +55,6 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
 
 BOXLIB_DIR = ../boxlib
 LDFLAGS    = -nostdlib -static -T $(BOXLIB_DIR)/user.ld
-# C++ links force-pull tls_init.o out of libboxcxx.a (nothing references
-# it by symbol — it self-registers via .init_array, the classic archive
-# dead-pull trap).
-CXXLDFLAGS = $(LDFLAGS) -Wl,--undefined=__boxcxx_tls_bootstrap
 BOXLIB     = ../boxlib/libbox.a
 BOXCXX     = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o
@@ -88,7 +84,7 @@ include ../nameplate.mk
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
 
 today.elf: $(BOXLIB_START) today.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) today.o $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) today.o $(BOXCXX) $(BOXLIB) -lgcc)
 
 # Seven objects, one program: the red tests of the Quill write core, the ones
 # only a throwaway image may be asked, the modes the power-cut stand drives
@@ -120,50 +116,50 @@ $(QUILLTEST_KEY_MARK):
 	@touch $@
 
 brookexec.elf: $(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) -lgcc)
 
 currentexec.elf: $(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) -lgcc)
 
 clock.elf: $(BOXLIB_START) clock.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) clock.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) clock.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 pulse.elf: $(BOXLIB_START) pulse.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) pulse.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) pulse.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 calendar.elf: $(BOXLIB_START) calendar.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) calendar.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) calendar.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 bonsai.elf: $(BOXLIB_START) bonsai/bonsai.o bonsai/tree.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) bonsai/bonsai.o bonsai/tree.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) bonsai/bonsai.o bonsai/tree.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 bigclock.elf: $(BOXLIB_START) bigclock.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) bigclock.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) bigclock.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 snake.elf: $(BOXLIB_START) snake.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) snake.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) snake.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 hacker.elf: $(BOXLIB_START) hacker.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) hacker.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) hacker.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 pipes.elf: $(BOXLIB_START) pipes.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) pipes.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) pipes.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 wordle.elf: $(BOXLIB_START) wordle.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) wordle.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) wordle.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # Phase203's child: the only witness to whether teardown runs on a given exit
 # path is a process that took it. Stripped like cxxtest — it needs no debug
 # info to die.
 exitpaths.elf: $(BOXLIB_START) exitpaths.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) exitpaths.o $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) exitpaths.o $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # ---- C++ binaries (linked with the g++ driver) ----
 # Link order matters: libboxcxx.a BEFORE libbox.a (boxcxx pulls malloc/printf
 # from boxlib) and before any future libgcc so our runtime symbols always win.
 cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) -lgcc)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) -lgcc)
 	@# Drop .debug_* AND the symbol table. The debug info has to go because the
 	@# correctly-rounded cmath suite bakes tens of thousands of MPFR-reference
 	@# vectors, whose -g info bloats the ELF ~10x past the 16 MB TagFS image.
@@ -172,11 +168,6 @@ cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BO
 	@# image comes out SMALLER than it was while gaining names at runtime. The
 	@# offline answer nm used to give is `tools/nameplate list cxxtest.elf`.
 	@x86_64-elf-objcopy --strip-all $@
-	@align=$$(x86_64-elf-readelf -lW $@ | awk '$$1=="TLS"{print $$NF}'); \
-	if [ -n "$$align" ] && [ $$((align)) -gt 64 ]; then \
-		echo "ERROR: $@ PT_TLS p_align=$$align > 64 — boxcxx tls_init layout contract broken (alignas(>64) thread_local?)"; \
-		exit 1; \
-	fi
 
 # ---- object files ----
 # -MMD -MP: header dependencies. Their absence is what let a boxcxx header

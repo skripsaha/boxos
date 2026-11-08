@@ -211,10 +211,12 @@ int perf_dump(void);
 
 void yield(void);
 
-/* TLS thread-pointer fallback for CPUs without FSGSBASE: asks the kernel
- * to program this process's FS base (SYSTEM_OP_TLS_FSBASE). The value
- * lands at the next context restore — call yield() afterwards before
- * touching any thread_local. boxcxx tls_init is the intended caller. */
+/* A thread pointer of the program's own choosing on a CPU without FSGSBASE,
+ * where ring 3 cannot write it: asks the kernel to program this process's FS
+ * base (SYSTEM_OP_TLS_FSBASE). The value lands at the next context restore —
+ * call yield() afterwards before relying on it. The kernel has already set a
+ * thread pointer for the program's own thread-local storage; this is for a
+ * program that keeps another. */
 int tls_set_fsbase(uint64_t base);
 
 /* =========================================================================
