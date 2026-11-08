@@ -832,7 +832,7 @@ UTIL_NAMES = help create show files tag untag name trash erase assemble \
              playtime lavalamp finish taskcenter hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
-             edit seek retag
+             edit seek retag read
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1481,6 +1481,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/edit.elf    "utility,storage" \
 	$(UTILS_DIR)/seek.elf    "utility,storage" \
 	$(UTILS_DIR)/retag.elf   "utility,storage" \
+	$(UTILS_DIR)/read.elf    "utility,storage" \
 	$(UTILS_DIR)/stringview.elf "utility,storage" \
 	$(UTILS_DIR)/files.elf   "utility,storage" \
 	$(UTILS_DIR)/tag.elf     "utility,storage" \
@@ -1511,6 +1512,7 @@ VOLUME_CONTENT = \
 	$(USERSPACE_DIR)/tidy "itinerary,example" \
 	$(USERSPACE_DIR)/try "itinerary,example" \
 	$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
+	$(USERSPACE_DIR)/guide.md    "guide,text" \
 	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "utility" \
 	$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
