@@ -75,7 +75,6 @@ void Screen::Spread(std::uint32_t Row, const std::vector<Figure> &Figures)
 bool Screen::Flush()
 {
     if (!Stage) return false;
-    if (!Stage->SetCursor({static_cast<std::int32_t>(Cols - 1), static_cast<std::int32_t>(Rows - 1)})) return false;
     return static_cast<bool>(Stage->Present());
 }
 

@@ -92,9 +92,7 @@ int main()
             Last = Now;
 
             TumblePaint(World, Screen.FrameBuffer());
-            if (!Screen.SetCursor({World.ViewWidth - 1, World.ViewHeight / 2}) ||
-                !(Painted = static_cast<bool>(Screen.Present())))
-                break;
+            if (!(Painted = static_cast<bool>(Screen.Present()))) break;
 
             const std::uint64_t Spent = clock_uptime_us() - Now;
             const painter::tui::Event Event = Screen.Wait(

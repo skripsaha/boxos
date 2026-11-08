@@ -35,6 +35,8 @@ public:
     box::status Composite(core::Point Origin, const Frame &FrameBuffer,
                           core::Rect Region) noexcept;
     box::status Clear() noexcept;
+    /* The console's caret, for ConsoleSurface: where the console goes on
+     * once the layer is part of its text. */
     box::status SetCursor(core::Point At) noexcept;
     box::status Commit(std::uint32_t ScrollRows = 0) noexcept;
     box::status Close() noexcept;

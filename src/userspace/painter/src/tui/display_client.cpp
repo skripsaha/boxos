@@ -163,7 +163,7 @@ box::status DisplayLayer::Notify() noexcept
     }
 }
 
-box::status DisplayLayer::Present(const Frame &Picture, core::Point Cursor, bool CursorVisible) noexcept
+box::status DisplayLayer::Present(const Frame &Picture) noexcept
 {
     if (!Opened || !Header) return std::unexpected(box::error{box::errc::invalid_state});
     if (Picture.Size() != Size()) return std::unexpected(box::error{box::errc::invalid_argument});
@@ -208,9 +208,10 @@ box::status DisplayLayer::Present(const Frame &Picture, core::Point Cursor, bool
                 static_cast<std::uint8_t>(Value.IsTransparent() ? 0u : 1u), {0, 0, 0}};
         }
     }
-    Header->cursor_x[Slot] = Cursor.X < 0 ? 0u : static_cast<std::uint32_t>(Cursor.X);
-    Header->cursor_y[Slot] = Cursor.Y < 0 ? 0u : static_cast<std::uint32_t>(Cursor.Y);
-    Header->cursor_visible[Slot] = CursorVisible ? 1u : 0u;
+    const std::optional<core::Point> Caret = Picture.Caret();
+    Header->cursor_x[Slot] = Caret ? static_cast<std::uint32_t>(Caret->X) : 0u;
+    Header->cursor_y[Slot] = Caret ? static_cast<std::uint32_t>(Caret->Y) : 0u;
+    Header->cursor_visible[Slot] = Caret ? 1u : 0u;
     const std::uint64_t Sequence = ++NextSequence;
     Header->sequence[Slot] = Sequence;
     __atomic_store_n(&Header->slot_state[Slot], DISPLAY_LAYER_READY, __ATOMIC_RELEASE);

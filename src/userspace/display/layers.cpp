@@ -54,6 +54,15 @@ DisplayLayerCell *LayerSlot(DisplayLayerState &Layer, std::uint32_t Slot) noexce
     return Base + static_cast<std::size_t>(Slot) * Layer.CellCount;
 }
 
+// Whether the layer's picture is opaque at that cell of the screen.
+bool LayerCovers(const DisplayLayerState &Layer, std::uint32_t ScreenX, std::uint32_t ScreenY) noexcept
+{
+    const std::int64_t Col = static_cast<std::int64_t>(ScreenX) - Layer.X;
+    const std::int64_t Row = static_cast<std::int64_t>(ScreenY) - Layer.Y;
+    if (Col < 0 || Row < 0 || Col >= Layer.Width || Row >= Layer.Height) return false;
+    return Layer.Cells[static_cast<std::size_t>(Row) * Layer.Width + static_cast<std::size_t>(Col)].Opaque != 0;
+}
+
 // The newest READY slot becomes the layer's picture; every slot read is
 // handed back FREE.
 bool LayerConsume(DisplayLayerState &Layer) noexcept
@@ -412,8 +421,11 @@ void LayersCompose(const ConsoleModel &Model, std::vector<TextCell> &Composed, C
             }
         }
         if (Layer.CursorVisible) {
-            At.X = std::min(static_cast<std::uint32_t>(Layer.X) + Layer.CursorX, Width - 1u);
-            At.Y = std::min(static_cast<std::uint32_t>(Layer.Y) + Layer.CursorY, Height - 1u);
+            At.X       = std::min(static_cast<std::uint32_t>(Layer.X) + Layer.CursorX, Width - 1u);
+            At.Y       = std::min(static_cast<std::uint32_t>(Layer.Y) + Layer.CursorY, Height - 1u);
+            At.Visible = true;
+        } else if (At.Visible && LayerCovers(Layer, At.X, At.Y)) {
+            At.Visible = false;
         }
     }
 }

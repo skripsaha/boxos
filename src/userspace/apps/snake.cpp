@@ -187,9 +187,6 @@ public:
                 "ENTER restart  ESC exit", kText);
     }
 
-    if (!Screen_.SetCursor({static_cast<std::int32_t>(screen_width_ - 1),
-                            static_cast<std::int32_t>(height_)}))
-      return false;
     return static_cast<bool>(Screen_.Present());
   }
 

@@ -94,7 +94,6 @@ public:
     Frame &FrameBuffer() noexcept;
     const Frame &FrameBuffer() const noexcept;
 
-    box::status SetCursor(core::Point At) noexcept;
     box::status Present() noexcept;
     Event       Poll() noexcept;
     Event       Wait(std::uint32_t TimeoutMs = 0) noexcept;

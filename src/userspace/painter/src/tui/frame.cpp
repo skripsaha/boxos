@@ -45,11 +45,23 @@ bool Frame::PixelInBounds(core::Point At) const noexcept
 void Frame::Clear(TextStyle Style)
 {
     std::fill(Cells.begin(), Cells.end(), Cell{' ', Style.Foreground, Style.Background});
+    CaretAt.reset();
 }
 
 void Frame::ClearTransparent() noexcept
 {
     std::fill(Cells.begin(), Cells.end(), Cell::TransparentCell());
+    CaretAt.reset();
+}
+
+bool Frame::SetCaret(std::optional<core::Point> At) noexcept
+{
+    if (At && !InBounds(*At)) {
+        CaretAt.reset();
+        return false;
+    }
+    CaretAt = At;
+    return true;
 }
 
 bool Frame::Put(core::Point At, Cell Value)

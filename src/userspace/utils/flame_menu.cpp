@@ -352,19 +352,16 @@ void FlameMenu::Draw(painter::tui::Frame &Frame, int Rows, int Cols, const Flame
         Drawing.Write(Top + 2 + RowCount + Line, Left, Hints[static_cast<std::size_t>(Line)], Ink, Paper);
 }
 
-void FlameMenu::Caret(int Rows, int Cols, int &Row, int &Col) const
+std::optional<painter::core::Point> FlameMenu::Caret(int Rows, int Cols) const
 {
-    Row = Rows - 1;
-    Col = Cols - 1;
-    if (!Open) return;
-    Row = OriginRow(Rows) + 1 + Item;
-    Col = OriginCol(Cols) + 1;
+    if (!Open) return std::nullopt;
+    int Row = OriginRow(Rows) + 1 + Item;
+    int Col = OriginCol(Cols) + 1;
     if (Editing) {
         std::size_t Shown = std::min<std::size_t>(Text.size(), FieldWidth - 1);
         Col += ValueAt + static_cast<int>(Shown);
     } else {
         Col += MarkAt;
     }
-    Row = std::min(Row, Rows - 1);
-    Col = std::min(Col, Cols - 1);
+    return painter::core::Point{std::min(Col, Cols - 1), std::min(Row, Rows - 1)};
 }

@@ -1,6 +1,7 @@
 #include "layer_canvas.h"
 
 #include <new>
+#include <optional>
 #include <utility>
 
 #include "display_client.h"
@@ -9,9 +10,8 @@ namespace painter::tui {
 
 struct LayerCanvas::Impl {
     DisplayLayer Layer;
-    Frame        LayerCells;
-    core::Point  Cursor;
-    bool         CursorVisible = false;
+    Frame        LayerCells;   /* its caret is the layer's */
+    core::Point  Cursor;       /* where the console's caret stands */
     bool         Opened = true;
 
     Impl(DisplayLayer LayerValue, Frame LayerCellsValue, core::Point CursorValue) noexcept
@@ -32,6 +32,24 @@ void StoreCell(Frame &Out, core::Point At, Cell Value, bool ForceOpaque)
 {
     if (ForceOpaque) Value.VisibilityMode = Visibility::Opaque;
     (void)Out.Put(At, Value);
+}
+
+bool Holds(core::Rect Area, core::Point At)
+{
+    return At.X >= Area.X && At.Y >= Area.Y && At.X - Area.X < Area.Width && At.Y - Area.Y < Area.Height;
+}
+
+/* The caret is part of the picture: what replaces a rectangle replaces the
+ * caret in it, and the caret Source carries inside Region lands where its
+ * cell lands. */
+void CarryCaret(Frame &Out, core::Point Origin, const Frame &Source, core::Rect Region)
+{
+    const std::optional<core::Point> Held = Out.Caret();
+    if (Held && Holds({Origin.X, Origin.Y, Region.Width, Region.Height}, *Held)) (void)Out.SetCaret(std::nullopt);
+
+    const std::optional<core::Point> Brought = Source.Caret();
+    if (Brought && Holds(Region, *Brought))
+        (void)Out.SetCaret(core::Point{Origin.X + Brought->X - Region.X, Origin.Y + Brought->Y - Region.Y});
 }
 
 }  // namespace
@@ -121,7 +139,8 @@ box::status LayerCanvas::Paint(core::Point Origin, const Frame &FrameBuffer,
                       FrameBuffer.Read({Region.X + Col, Region.Y + Row}), true);
         }
     }
-    return State->Layer.Present(State->LayerCells, State->Cursor, State->CursorVisible);
+    CarryCaret(State->LayerCells, Origin, FrameBuffer, Region);
+    return State->Layer.Present(State->LayerCells);
 }
 
 box::status LayerCanvas::Composite(core::Point Origin, const Frame &FrameBuffer) noexcept
@@ -148,7 +167,8 @@ box::status LayerCanvas::Composite(core::Point Origin, const Frame &FrameBuffer,
                       FrameBuffer.Read({Region.X + Col, Region.Y + Row}), false);
         }
     }
-    return State->Layer.Present(State->LayerCells, State->Cursor, State->CursorVisible);
+    CarryCaret(State->LayerCells, Origin, FrameBuffer, Region);
+    return State->Layer.Present(State->LayerCells);
 }
 
 box::status LayerCanvas::Clear() noexcept
@@ -161,12 +181,9 @@ box::status LayerCanvas::Clear() noexcept
 box::status LayerCanvas::SetCursor(core::Point At) noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
-    if (At.X < 0 || At.Y < 0 || At.X >= State->LayerCells.Size().Width ||
-        At.Y >= State->LayerCells.Size().Height)
-        return std::unexpected(box::error{box::errc::out_of_range});
+    if (!State->LayerCells.SetCaret(At)) return std::unexpected(box::error{box::errc::out_of_range});
     State->Cursor = At;
-    State->CursorVisible = true;
-    return State->Layer.Present(State->LayerCells, State->Cursor, State->CursorVisible);
+    return State->Layer.Present(State->LayerCells);
 }
 
 box::status LayerCanvas::Commit(std::uint32_t ScrollRows) noexcept

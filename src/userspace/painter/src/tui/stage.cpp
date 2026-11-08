@@ -14,12 +14,10 @@ struct Stage::Impl {
     Frame        FrameBuffer;
     DisplayLayer Layer;
     Keyboard     Ear;
-    core::Point  Cursor;
     bool         Opened = true;
 
     Impl(Frame FrameValue, DisplayLayer LayerValue, Keyboard EarValue) noexcept
-        : FrameBuffer(std::move(FrameValue)), Layer(std::move(LayerValue)), Ear(std::move(EarValue)),
-          Cursor{Layer.Size().Width - 1, Layer.Size().Height - 1}
+        : FrameBuffer(std::move(FrameValue)), Layer(std::move(LayerValue)), Ear(std::move(EarValue))
     {
     }
 };
@@ -104,19 +102,10 @@ const Frame &Stage::FrameBuffer() const noexcept
     return State->FrameBuffer;
 }
 
-box::status Stage::SetCursor(core::Point At) noexcept
-{
-    if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
-    if (At.X < 0 || At.Y < 0 || At.X >= Size().Width || At.Y >= Size().Height)
-        return std::unexpected(box::error{box::errc::out_of_range});
-    State->Cursor = At;
-    return {};
-}
-
 box::status Stage::Present() noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
-    return State->Layer.Present(State->FrameBuffer, State->Cursor, true);
+    return State->Layer.Present(State->FrameBuffer);
 }
 
 Event Stage::Poll() noexcept

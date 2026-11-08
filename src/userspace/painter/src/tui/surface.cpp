@@ -82,12 +82,6 @@ box::status Surface::Clear() noexcept
     return State->Canvas.Clear();
 }
 
-box::status Surface::SetCursor(core::Point At) noexcept
-{
-    if (!State) return std::unexpected(box::error{box::errc::invalid_state});
-    return State->Canvas.SetCursor(At);
-}
-
 box::status Surface::Close() noexcept
 {
     if (!State) return {};

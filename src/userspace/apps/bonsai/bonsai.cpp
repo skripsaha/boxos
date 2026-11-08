@@ -35,9 +35,6 @@ public:
         wood_(static_cast<std::size_t>(rows_) * cols_) { restart(); }
 
   bool paint() const {
-    if (!Screen_.SetCursor({static_cast<std::int32_t>(cols_ - 1),
-                            static_cast<std::int32_t>(rows_ - 1)}))
-      return false;
     return static_cast<bool>(Screen_.Present());
   }
 

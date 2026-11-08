@@ -155,8 +155,6 @@ bool Hexer::Paint()
     PaintLines();
     PaintFoot();
 
-    /* The caret first and the picture last: a caret that
-     * arrives before its frame is not seen, one that arrives after is. */
     std::uint32_t CaretRow, CaretCol;
     if (CommandOpen) {
         CaretRow = Rows - 1;
@@ -167,6 +165,7 @@ bool Hexer::Paint()
         CaretRow = 1 + static_cast<std::uint32_t>((At - At % Width - Top) / Width);
         CaretCol = InText ? TextColumn(Byte) : HexColumn(Byte) + (LowHalf ? 1 : 0);
     }
-    if (!Screen->SetCursor({static_cast<std::int32_t>(CaretCol), static_cast<std::int32_t>(CaretRow)})) return false;
+    (void)Screen->FrameBuffer().SetCaret(
+        painter::core::Point{static_cast<std::int32_t>(CaretCol), static_cast<std::int32_t>(CaretRow)});
     return static_cast<bool>(Screen->Present());
 }

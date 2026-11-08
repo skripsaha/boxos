@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -77,6 +78,13 @@ public:
 
     Cell Read(core::Point At) const noexcept;
 
+    /* The caret is part of the picture: the one mark a cell cannot draw, a
+     * line under the glyph where text goes. A frame has none until one is
+     * placed, and Clear and ClearTransparent take it away with the rest.
+     * Placed outside the frame it is placed nowhere, and false says so. */
+    bool                       SetCaret(std::optional<core::Point> At) noexcept;
+    std::optional<core::Point> Caret() const noexcept { return CaretAt; }
+
 private:
     explicit Frame(core::Size Bounds, std::vector<Cell> Cells) noexcept
         : Bounds(Bounds), Cells(std::move(Cells))
@@ -91,8 +99,9 @@ private:
         return Cells[static_cast<std::size_t>(At.Y) * Bounds.Width + At.X];
     }
 
-    core::Size       Bounds;
-    std::vector<Cell> Cells;
+    core::Size                 Bounds;
+    std::vector<Cell>          Cells;
+    std::optional<core::Point> CaretAt;
 };
 
 }  // namespace painter::tui

@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -128,7 +129,7 @@ public:
 
     FlameOutcome OnKey(const painter::tui::KeyEvent &Key, FlameSettings &Settings);
     void         Draw(painter::tui::Frame &Frame, int Rows, int Cols, const FlameSettings &Settings) const;
-    void         Caret(int Rows, int Cols, int &Row, int &Col) const;
+    std::optional<painter::core::Point> Caret(int Rows, int Cols) const;
 
 private:
     FlameOutcome Quick(const painter::tui::KeyEvent &Key, FlameSettings &Settings);

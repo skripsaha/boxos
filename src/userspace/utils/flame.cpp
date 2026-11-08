@@ -139,17 +139,12 @@ bool Show::OnKey(const painter::tui::KeyEvent &Event)
     return !Outcome.Leave;
 }
 
-/* The caret is parked before the paint: the frame is then the last thing to
- * reach the glass and already carries the caret where it belongs. */
 bool Show::Draw()
 {
     painter::tui::Frame &Canvas = Screen.FrameBuffer();
     FlamePaintFire(Fire, Palette, Canvas, Rows, Cols);
     if (Menu.Open) Menu.Draw(Canvas, Rows, Cols, Settings);
-
-    int Row, Col;
-    Menu.Caret(Rows, Cols, Row, Col);
-    if (!Screen.SetCursor({Col, Row})) return false;
+    (void)Canvas.SetCaret(Menu.Caret(Rows, Cols));
     if (!Screen.Present()) return false;
     Frames++;
     return true;

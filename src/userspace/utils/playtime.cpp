@@ -178,15 +178,6 @@ static void compose(unsigned rows, unsigned cols)
     }
 }
 
-/* Where the caret belongs. A Stage always shows its caret, where it was last
- * set, so it is parked in the far corner rather than left blinking in the
- * middle of the picture. */
-static bool park_caret(void)
-{
-    return static_cast<bool>(g_screen->SetCursor({g_screen->Size().Width - 1,
-                                                   g_screen->Size().Height - 1}));
-}
-
 /* The three things the pour holds while it runs, released together so no
  * refusal below can forget one. */
 static void release_pour(void)
@@ -240,12 +231,7 @@ static int run_pour(painter::tui::Stage &Screen, uint64_t *frames)
              * and there is nothing to watch — leave, and let the tally say
              * why: this used to return through the same door as a keypress
              * and the only word about it was "0 frames in 0 ms". */
-            /* Parked BEFORE the frame, so the frame is the last thing to
-             * reach the glass and it carries the caret already in the corner.
-             * The other way round, the paint's own commit draws the caret at
-             * whatever position the last line of somebody else's output left,
-             * and it stands inside the picture until the next op lands. */
-            if (!park_caret() || !Screen.Present()) return 1;
+            if (!Screen.Present()) return 1;
             (*frames)++;
 
             /* The next deadline is taken AFTER the paint, not from the `now`

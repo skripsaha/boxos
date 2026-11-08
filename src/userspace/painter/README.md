@@ -51,6 +51,14 @@ next draw publishes the replacement once. The kernel draws none of it: the
 display composes the layers, so the transparency contract and z-order are
 Painter's and the display's alone.
 
+The caret is part of the picture. `Frame::SetCaret` places the one mark a cell
+cannot draw — a line under the glyph where text goes — and a frame has none
+until one is placed, so a picture without text input shows no caret at all. A
+`Stage` shows the caret of the frame it presents; a `Surface` keeps the caret
+of what is composited into it, and what replaces a rectangle replaces the
+caret in it. Only `ConsoleSurface` has a cursor of its own: the point where the
+console goes on once the layer is part of its text.
+
 ## Layering
 
 ```text

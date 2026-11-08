@@ -35,7 +35,6 @@ public:
     box::status Composite(core::Point Origin, const Frame &FrameBuffer,
                           core::Rect Region) noexcept;
     box::status Clear() noexcept;
-    box::status SetCursor(core::Point At) noexcept;
     box::status Close() noexcept;
 
 private:

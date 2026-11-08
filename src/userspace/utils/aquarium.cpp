@@ -228,7 +228,6 @@ bool Show::Draw()
     painter::tui::Frame &Canvas = Screen.FrameBuffer();
     AquaCells(Pixels, Cols, Canvas, Rows, Cols);
     if (Tank.Time < KeysUntil) Bar(Canvas);
-    if (!Screen.SetCursor({Cols - 1, Rows - 1})) return false;
     if (!Screen.Present()) return false;
     Frames++;
     return true;

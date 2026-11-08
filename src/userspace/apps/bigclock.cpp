@@ -62,9 +62,6 @@ public:
     square(12, 4, kDigitsColor);
     digit(now.minute / 10, 14);
     digit(now.minute % 10, 20);
-    if (!Screen_.SetCursor({static_cast<std::int32_t>(cols_ - 1),
-                            static_cast<std::int32_t>(rows_ - 1)}))
-      return false;
     if (!Screen_.Present()) return false;
     displayed_ = time;
     return true;

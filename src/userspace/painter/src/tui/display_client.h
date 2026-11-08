@@ -35,8 +35,9 @@ public:
     core::Point Cursor() const noexcept { return ConsoleCursor; }
 
     // The picture is written straight into a slot of the layer's memory:
-    // a transparent cell shows what lies beneath it.
-    box::status Present(const Frame &Picture, core::Point Cursor, bool CursorVisible) noexcept;
+    // a transparent cell shows what lies beneath it, and the picture's caret
+    // is the layer's.
+    box::status Present(const Frame &Picture) noexcept;
     box::status Commit(std::uint32_t ScrollRows = 0) noexcept;
     box::status Close() noexcept;
 

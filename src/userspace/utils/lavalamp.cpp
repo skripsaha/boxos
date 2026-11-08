@@ -477,21 +477,22 @@ static void draw_menu(void)
     put_text(foot + 2, col, kHintLeave,  MENU_FG, MENU_BG);
 }
 
-/* Where the caret belongs. It is drawn wherever the kernel cursor stands and
- * there is no way to hide it, so it is put somewhere it means something: on
- * the character being typed, on the marker of the chosen row, or out of the
- * way in the corner while the lamp has the screen to itself. */
-static bool park_caret(void)
+/* The caret is part of the picture: in the open menu it stands on the
+ * character being typed or on the marker of the chosen row; while the lamp
+ * has the screen to itself there is none. */
+static void place_caret(void)
 {
+    painter::tui::Frame &frame = g_screen->FrameBuffer();
     if (!g_menu.open) {
-        return static_cast<bool>(g_screen->SetCursor({g_lamp.cols - 1, g_lamp.rows - 1}));
+        (void)frame.SetCaret(std::nullopt);
+        return;
     }
     int row = menu_row_origin() + 1 + g_menu.item;
     int col = menu_col_origin() + 1;
     col += g_menu.editing ? (MENU_VALUE_AT + g_menu.len) : MENU_MARK_AT;
     if (row >= g_lamp.rows) row = g_lamp.rows - 1;
     if (col >= g_lamp.cols) col = g_lamp.cols - 1;
-    return static_cast<bool>(g_screen->SetCursor({col, row}));
+    (void)frame.SetCaret(painter::core::Point{col, row});
 }
 
 /* ===========================================================================
@@ -709,12 +710,8 @@ static int run_lamp(painter::tui::Stage &Screen, uint32_t *frames)
             paint_lamp();
             if (g_menu.open) draw_menu();
 
-            /* Parked BEFORE the frame: the frame is then the last thing to
-             * reach the glass and already carries the caret where it belongs.
-             * Painted first, the paint's own commit draws the caret wherever
-             * the cursor happened to stand — inside the picture, or on the
-             * character typed in the menu one keystroke ago. */
-            if (!park_caret() || !Screen.Present())
+            place_caret();
+            if (!Screen.Present())
                 return 1;
             (*frames)++;
 

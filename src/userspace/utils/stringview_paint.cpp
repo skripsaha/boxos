@@ -138,6 +138,7 @@ bool Stringview::Paint()
 
     std::uint32_t CaretCol = 5 + static_cast<std::uint32_t>(Filter.size());
     if (CaretCol >= Cols) CaretCol = Cols - 1;
-    if (!Screen->SetCursor({static_cast<std::int32_t>(CaretCol), static_cast<std::int32_t>(Rows - 1)})) return false;
+    (void)Screen->FrameBuffer().SetCaret(
+        painter::core::Point{static_cast<std::int32_t>(CaretCol), static_cast<std::int32_t>(Rows - 1)});
     return static_cast<bool>(Screen->Present());
 }
