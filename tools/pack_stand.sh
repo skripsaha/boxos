@@ -59,6 +59,11 @@ $LD_CROSS $LINK -T $LIB/user.ld "$WORK/small.o" -o "$WORK/small_fixed.elf" > "$W
 $LD_CROSS $LINK -pie -T "$WORK/pie.ld" "$WORK/small.o" -o "$WORK/small_rela.elf" >> "$WORK/ld.log" 2>&1 &&
 $LD_CROSS $LINK -pie -z pack-relative-relocs -T "$WORK/pie.ld" "$WORK/small.o" -o "$WORK/small_relr.elf" \
     >> "$WORK/ld.log" 2>&1 || { cat "$WORK/ld.log"; harness "the small program did not link"; }
+# And a static PIE with not one address in it: its box must still say it can go anywhere.
+printf 'int square(int x) { return x * x; }\nvoid _start(void) { square(3); for (;;) { } }\n' > "$WORK/bare.c"
+$CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/bare.c" -o "$WORK/bare.o" > "$WORK/cc.log" 2>&1 &&
+$LD_CROSS $LINK -pie -T "$WORK/pie.ld" "$WORK/bare.o" -o "$WORK/bare_pie.elf" > "$WORK/ld.log" 2>&1 ||
+    { cat "$WORK/cc.log" "$WORK/ld.log"; harness "the bare program did not build"; }
 
 # ── a copy of a program broken, or changed, one way ─────────────────────────
 # patch FILE OUT KIND: a copy of FILE broken one way.
@@ -135,7 +140,7 @@ while IFS= read -r elf; do
     pairs+=("$elf" "$box")
 done < <( { find src/userspace build -maxdepth 4 -name '*.elf' ! -name 'kernel*' ! -name '._*' 2>/dev/null | sort
             echo "$WORK/small_fixed.elf"; echo "$WORK/small_rela.elf"; echo "$WORK/small_relr.elf"
-            echo "$WORK/small_zeroed.elf"; } )
+            echo "$WORK/small_zeroed.elf"; echo "$WORK/bare_pie.elf"; } )
 
 "$WORK/pack_stand" "${pairs[@]}" > "$WORK/stand.out" 2>&1
 stand=$?

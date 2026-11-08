@@ -9,6 +9,7 @@
  *   PT_LOAD R+X        code     at its address, MUST_UNDERSTAND
  *   PT_LOAD R          const
  *   PT_LOAD R+W        data     its zeros past the file's bytes as memory only
+ *   PT_LOAD, no rights —          the linker's tables for a dynamic linker
  *   PT_TLS             thread   the template every thread's block is made from
  *   e_entry            doors    the door `start`
  *   .nameplate         names    the program's names for its functions
@@ -17,8 +18,9 @@
  *
  * An executable linked at a fixed address (ET_EXEC) keeps its addresses: its
  * box has no fixups and is loaded where it was linked. A static PIE (ET_DYN)
- * linked at 0 can go anywhere: its R_X86_64_RELATIVE relocations (.rela.dyn)
- * and its RELR (.relr.dyn) become the box's fixups, each word they name set
+ * linked at 0 can go anywhere, and its box always has fixups to say so: its
+ * R_X86_64_RELATIVE relocations (.rela.dyn) and its RELR (.relr.dyn), none
+ * when it has none, each word they name set
  * to the address it means at base 0 — and anything else a dynamic linker
  * would be asked for is refused, because there is none.
  *
@@ -45,6 +47,7 @@
 #define PT_TLS           7u
 #define PF_X             1u
 #define PF_W             2u
+#define PF_R             4u
 #define SHT_RELA         4u
 #define SHT_NOBITS       8u
 #define SHT_REL          9u
@@ -156,6 +159,10 @@ static void ReadSegments(const Elf *elf, Segments *out)
             out->ThreadAlign  = U64(header + 48) ? U64(header + 48) : 1;
         }
         if (type != PT_LOAD || U64(header + 40) == 0) continue;
+        /* A segment with no rights is no part of the program: the linker's
+         * own tables for a dynamic linker (see user.ld), the relocations among
+         * them read from the file below. */
+        if ((flags & (PF_R | PF_W | PF_X)) == 0) continue;
         if ((flags & PF_X) && (flags & PF_W)) Refuse("a segment is writable and executable at once");
         if (flags & PF_X)      TakeLoad(elf, header, &out->Code, "R+X");
         else if (flags & PF_W) TakeLoad(elf, header, &out->Data, "R+W");
@@ -374,11 +381,13 @@ int main(int argc, char **argv)
     BoxPenDoors(doors, 1, doors_bytes, &doors_size);
     Add(parts, &count, "doors", doors_bytes, doors_size, doors_size, 0, BOX_FLAG_MUST_UNDERSTAND);
 
+    /* The fixups part is what says the box can go anywhere — a static PIE
+     * carries one even when nothing in it needs fixing. */
     uint8_t *fixups_bytes = NULL;
-    if (places.Count > 0) {
+    if (type == ET_DYN) {
         uint64_t fixups_size;
         BoxPenFixups(places.Places, places.Count, NULL, &fixups_size);
-        fixups_bytes = malloc(fixups_size);
+        fixups_bytes = malloc(fixups_size ? fixups_size : 1);
         BoxPenFixups(places.Places, places.Count, fixups_bytes, &fixups_size);
         Add(parts, &count, "fixups", fixups_bytes, fixups_size, fixups_size, 0, BOX_FLAG_MUST_UNDERSTAND);
     }

@@ -15,6 +15,7 @@ PHDRS
     rodata PT_LOAD FLAGS(4);   /* R   */
     data   PT_LOAD FLAGS(6);   /* R+W */
     tls    PT_TLS  FLAGS(4);
+    linker PT_LOAD FLAGS(0);   /* no rights, no part of the program: see the end of SECTIONS */
 }
 
 SECTIONS
@@ -26,6 +27,10 @@ SECTIONS
         *boxlib_start.o(.text)     /* entry point MUST be first for flat binary loading */
         *(.text .text.*)
     } :text
+
+    /* Each segment starts on a page of its own even when the sections that
+     * open it are empty: the location moves, not only a section's start. */
+    . = ALIGN(4096);
 
     .rodata : ALIGN(4096)
     {
@@ -83,6 +88,8 @@ SECTIONS
         KEEP(*(.boxos.form))
         PROVIDE(__boxos_form_end = .);
     }
+
+    . = ALIGN(4096);
 
     .data : ALIGN(4096)
     {
@@ -151,6 +158,20 @@ SECTIONS
     } :data
 
     __program_end = .;
+
+    /* What a linker writes for a dynamic linker, in a static PIE: its symbols,
+     * its relocations, its table. Nothing links a program at start, so it is
+     * kept out of every loaded segment, in one of type PT_NULL that every
+     * loader passes over — tools/pack reads the relocations from the file and
+     * makes them the box's fixups. An executable at a fixed address has none
+     * of these at all. */
+    .dynsym   : { *(.dynsym) }   :linker
+    .dynstr   : { *(.dynstr) }   :linker
+    .hash     : { *(.hash) }     :linker
+    .gnu.hash : { *(.gnu.hash) } :linker
+    .dynamic  : { *(.dynamic) }  :linker
+    .rela.dyn : { *(.rela.dyn .rela.*) } :linker
+    .relr.dyn : { *(.relr.dyn) } :linker
 
     /DISCARD/ :
     {

@@ -112,7 +112,7 @@ static void ReadProgram(Program *program)
     for (uint16_t i = 0; i < U16(file + 0x38); i++) {
         const uint8_t *header = file + U64(file + 0x20) + (uint64_t)i * 56;
         Segment segment = { U64(header + 8), U64(header + 16), U64(header + 32), U64(header + 40), U32(header + 4) };
-        if (U32(header) == 1 && segment.MemoryBytes > 0 && program->LoadCount < 8)
+        if (U32(header) == 1 && segment.MemoryBytes > 0 && (segment.Flags & 7) != 0 && program->LoadCount < 8)
             program->Loads[program->LoadCount++] = segment;
         if (U32(header) == 7) {
             program->Thread   = true;
@@ -238,7 +238,7 @@ static void CheckPair(const char *elf_path, const char *box_path, const BoxHashe
         Check(!BoxPartOfKind(&table, BOX_KIND_THREAD, &part), elf_path, "no thread template without PT_TLS");
     }
 
-    if (program.RelocationCount > 0) {
+    if (program.Type == 3) {
         bool same = BoxPartOfKind(&table, BOX_KIND_FIXUPS, &part) &&
                     BoxFixupsCheck(box + part.Offset, part.Size, &table) == BOX_OK;
         BoxFixupWalk walk;
@@ -261,7 +261,7 @@ static void CheckPair(const char *elf_path, const char *box_path, const BoxHashe
               "every relocation is a fixup, the word it names the address it means at base 0");
         expected++;
     } else {
-        Check(!BoxPartOfKind(&table, BOX_KIND_FIXUPS, &part), elf_path, "no fixups where nothing is relocated");
+        Check(!BoxPartOfKind(&table, BOX_KIND_FIXUPS, &part), elf_path, "no fixups for a program at a fixed address");
     }
 
     static const char *const carried[3][2] = { { ".nameplate", "names" }, { ".boxos.form", "form" },
