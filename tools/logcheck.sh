@@ -10929,7 +10929,7 @@ run_lockrankmut() {
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
-a = "static WellKnownTags g_well_known = { TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID };\n"
+a = "static TagFSState g_state = { .lock = TAGFS_LOCK_INIT(\"state\", LOCK_RANK_STATE) };\n"
 assert s.count(a) == 1, "lockrankmut: the bare-lock anchor is missing"
 open(p, "w").write(s.replace(a, a + "static spinlock_t g_lockrankmut_bare;   /* logcheck mutation: a TagFS lock with no rank */\n", 1))
 EOF
