@@ -465,7 +465,7 @@ run_latearrival() {
     # Waited out to the END of the chain.
     #
     # This used to break on the FIRST "AUTOSTART Started" — which is
-    # display.elf — and then stop the machine two seconds later. Reading the
+    # display.box — and then stop the machine two seconds later. Reading the
     # rest of the volume's programs off a USB stick takes longer than that
     # often enough that the two checks below were passing on luck: the machine
     # was killed mid-launch and the log was then searched for a line it had
@@ -527,7 +527,7 @@ run_latearrival() {
     chk $? "and recognised it by the boarding pass, not by a rule"
     grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
     chk $? "TagFS mounted it"
-    grep -q "AUTOSTART. Started .display.elf" "$L"; chk $? "the volume's display daemon started"
+    grep -q "AUTOSTART. Started .display.box" "$L"; chk $? "the volume's display daemon started"
     grep -q "AUTOSTART. Started .shell.bin" "$L";   chk $? "the volume's shell started"
     grep -q "the stand-in .PID 1. hands over" "$L"; chk $? "and the stand-in handed over"
 
@@ -1298,8 +1298,8 @@ run_healthy() {
     done
     [ $dead = 0 ] && ok "all previously-dead occurrences now resolve"
 
-    # (3) the volume's own vocabulary is untouched — display.elf keeps its tag
-    autostart_wears "$L" 'display\.elf' display; chk $? "volume tags unshifted (display.elf still 'display')"
+    # (3) the volume's own vocabulary is untouched — display.box keeps its tag
+    autostart_wears "$L" 'display\.box' display; chk $? "volume tags unshifted (display.box still 'display')"
     autostart_wears "$L" 'shell\.bin' shell; chk $? "volume tags unshifted (shell.bin still 'shell')"
 
     # (4) nothing collided in the on-disk registry
@@ -1579,7 +1579,7 @@ run_uefi() {
     pci_low=$(grep "logbook 'pci:" "$L" | grep -vc 'bare=0x8')
     [ "$pci_low" = 0 ]; chk $? "no pci:* name took a volume id"
 
-    autostart_wears "$L" 'display\.elf' display; chk $? "uefi: volume tags unshifted"
+    autostart_wears "$L" 'display\.box' display; chk $? "uefi: volume tags unshifted"
 
     # A family the muster DECLARED must not be reported as a stranger. It was:
     # the warning judged the full name, which is new for every device that has
@@ -2745,7 +2745,7 @@ run_logsave() {
 
     # A RUNTIME value, not a label. The first form of this check looked for
     # "invariant TSC : " and passed with the ring deliberately broken — that
-    # string is the format literal in hw.elf's rodata, sitting in the same
+    # string is the format literal in hw's constants, sitting in the same
     # image, and the check was reading the binary rather than the log. The
     # number here is printed through %u and exists nowhere but in the account.
     img_carries "$I" 'TSC freq      : \d+ kHz'
@@ -3418,7 +3418,7 @@ run_stillthere() {
     #
     # Everything below is "and now it does not work", which is worth nothing
     # unless the machine has been shown to work first. It has: reaching a shell
-    # at all means display.elf and shell.bin were read off this stick and run.
+    # at all means display.box and shell.bin were read off this stick and run.
     #
     # ‼ IT USED TO BE A `files` TYPED HERE, AND THAT MADE THE RUN UNRELIABLE.
     # TagFS reads ahead, so running the program once put it in memory and the

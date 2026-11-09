@@ -131,12 +131,12 @@ def _Escheated(bt, content, plan, leaf, dig=None, wrong=False, unheld=None):
 
 def _LockedBesides(bt, content):
     """B4's content with a file of the base locked for a reason other than
-    the rot — snake.elf, which neither the boot nor the stand runs, its header
+    the rot — snake.box, which neither the boot nor the stand runs, its header
     two blocks longer than its Parcels cover (PARCEL_GAP) — and its plan.
     (content, plan, fid, the runs it names)."""
-    fid = next((f for f, fs in content.files.items() if fs.name == b"snake.elf"), None)
+    fid = next((f for f, fs in content.files.items() if fs.name == b"snake.box"), None)
     if fid is None:
-        raise Unreadable("the base holds no snake.elf to lock beside the rotten range")
+        raise Unreadable("the base holds no snake.box to lock beside the rotten range")
     locked = tally.Content.Copy(content)
     fs = locked.files[fid].Copy()
     fs.size += 2 * BLOCK

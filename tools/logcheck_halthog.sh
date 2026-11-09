@@ -18,9 +18,9 @@
 # program. Measured on 045e7b5e with the word mustered: of four presses two
 # were taken there, and both machines ran on a minute later, every look at the
 # core in QuillShutdownHog or an interrupt handler, none in the halt. powercut
-# race's base met the same with clock.elf, which paints every millisecond:
+# race's base met the same with clock.box, which paints every millisecond:
 # twice in some 270 boots its halt said "[HALT] Draining async writes..." and
-# two lines more, the core at ring 3 in one result_wait of clock.elf. And
+# two lines more, the core at ring 3 in one result_wait of clock.box. And
 # before the word was mustered it reached nobody: the kernel named
 # system:shutdown outside its muster (logbook.c), and the program that asked
 # for it held another id.
@@ -29,9 +29,9 @@
 # line is said and the machine is quiet, and the machine must switch itself
 # off within WAIT_QUIET_S, its halt having said it powers off, with the program
 # its word woke computing beside it. A press the tick takes over ring 3 puts
-# no case — the program never runs to be told — and with clock.elf at boot the
+# no case — the program never runs to be told — and with clock.box at boot the
 # tick took it in five boots of twelve on BIOS 1c and in all eight on UEFI 1c,
-# whose clock paints a framebuffer. So the leg boots an image on which clock.elf
+# whose clock paints a framebuffer. So the leg boots an image on which clock.box
 # is not started (halthog_quiet): on it twelve boots of twelve, six BIOS 1c and
 # six UEFI STRICT 1c, put the case. A boot that still puts none is booted
 # again, HALTHOG_ROUNDS at the most, and said as the harness's when none did.
@@ -44,10 +44,10 @@ HALTHOG_WAITS='^\[QUILL\] shutdownhog: pid [0-9]+ waits for the machine to stop'
 HALTHOG_TOLD='^\[QUILL\] shutdownhog: the machine is stopping — pid [0-9]+ computes'
 HALTHOG_OFF='^\[HALT\] Powering off'
 HALTHOG_UNMUSTERED="the kernel named 'system:shutdown', which is not in its muster"
-HALTHOG_CLOCK="^\[AUTOSTART\] Started 'clock.elf'"
+HALTHOG_CLOCK="^\[AUTOSTART\] Started 'clock.box'"
 
 # halthog_quiet KEYS... — $SCRATCH/halthog.quiet.img: a copy of the image as
-# built, booted once on one core to take clock.elf off its autostart (untag)
+# built, booted once on one core to take clock.box off its autostart (untag)
 # and halted by bye. 0 when it is made; 1 when the guest did not do it, 2 when
 # no machine was started or the host could not speak to it — HALTHOG_STOP
 # says what, HALTHOG_LAST the last line said.
@@ -58,13 +58,13 @@ halthog_quiet() {
     rm -f "$L"
     cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
     if ! make run-bg BOOTDISK="$img" CORES=1 "$@" >"$SCRATCH/runbg.halthog.quiet.log" 2>&1; then
-        HALTHOG_STOP="no machine was started to take clock.elf off its autostart: $(tail -1 "$SCRATCH/runbg.halthog.quiet.log")"
+        HALTHOG_STOP="no machine was started to take clock.box off its autostart: $(tail -1 "$SCRATCH/runbg.halthog.quiet.log")"
         rm -f "$img"
         return 2
     fi
     pid=$(cat build/qemu.pid)
     if wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
-       type_line "untag clock.elf autostart" && wait_for_line build/serial.log "Tag removed" "$WAIT_QUIET_S" &&
+       type_line "untag clock.box autostart" && wait_for_line build/serial.log "Tag removed" "$WAIT_QUIET_S" &&
        wait_for_prompt && type_line "bye"; then
         wait_until "$WAIT_QUIET_S" "the machine to switch itself off by bye" "! kill -0 $pid 2>/dev/null"
         off=$?
@@ -76,10 +76,10 @@ halthog_quiet() {
     rm -f "$img"
     HALTHOG_LAST=$(tr -d '\r' < "$L" | grep -av '^\s*$' | tail -1 | cut -c1-200)
     if [ $HARNESS -gt $h0 ]; then
-        HALTHOG_STOP="the host could not speak to the machine that was to take clock.elf off its autostart"
+        HALTHOG_STOP="the host could not speak to the machine that was to take clock.box off its autostart"
         return 2
     fi
-    HALTHOG_STOP="clock.elf taken off its autostart and the machine halted by bye — not done"
+    HALTHOG_STOP="clock.box taken off its autostart and the machine halted by bye — not done"
     return 1
 }
 
@@ -104,7 +104,7 @@ halthog_round() {
     if ! wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" || ! wait_for_prompt; then
         HALTHOG_STOP="the machine never came to its shell's prompt"
     elif grep -aqE "$HALTHOG_CLOCK" build/serial.log; then
-        HALTHOG_STOP="clock.elf was started at boot though the machine was halted by bye with its autostart taken off"
+        HALTHOG_STOP="clock.box was started at boot though the machine was halted by bye with its autostart taken off"
     elif ! type_line "quilltest shutdownhog" ||
          ! wait_for_line -E build/serial.log "$HALTHOG_WAITS" "$WAIT_QUIET_S"; then
         HALTHOG_STOP="shutdownhog never said it waits for the machine to stop"

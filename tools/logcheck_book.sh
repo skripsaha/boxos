@@ -737,7 +737,7 @@ BIG_EOF
     set -- $parts
     if [ $# != 4 ] || ! python3 tools/make_mbr.py "$img" "$1,$2,7f,boot" "$3,$4,ef" >"$SCRATCH/big.mbr" 2>&1 ||
        ! tools/create_tagfs --v2 "$img" src/userspace/shell/shell.bin "utility,system" \
-            src/userspace/apps/quilltest.elf "app,utility,test,system" src/userspace/utils/bye.elf "utility,system" \
+            build/box/quilltest.box "app,utility,test,system" build/box/bye.box "utility,system" \
             build/kernel.bin "system" \
             >"$SCRATCH/big.mkfs" 2>&1; then
         harness "big: the grown image could not be made — ${parts:-no partitions} $(tail -1 "$SCRATCH/big.mkfs" 2>/dev/null)"

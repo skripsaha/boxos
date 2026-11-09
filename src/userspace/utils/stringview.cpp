@@ -53,13 +53,13 @@ std::optional<std::string> ReadShortest(const char *const *Words, std::size_t Co
 {
     Shortest = ShortestUsual;
     if (Count == 0) return std::nullopt;
-    if (Count > 1) return std::string("stringview takes one number, the fewest characters a text has: stringview say.elf 8");
+    if (Count > 1) return std::string("stringview takes one number, the fewest characters a text has: stringview say.box 8");
 
     std::string_view Word  = Words[0];
     std::uint64_t    Value = 0;
     for (char Ch : Word) {
         if (Ch < '0' || Ch > '9' || Value > (UINT64_MAX - 9) / 10)
-            return std::format("'{}' is no file here, nor a number of characters: stringview say.elf 8", Word);
+            return std::format("'{}' is no file here, nor a number of characters: stringview say.box 8", Word);
         Value = Value * 10 + static_cast<std::uint64_t>(Ch - '0');
     }
     if (Value < 2) return std::string("a text is 2 characters or more: one character is any printable byte");

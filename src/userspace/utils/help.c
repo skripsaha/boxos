@@ -39,7 +39,7 @@ static void list_utilities(void)
     int named = 0;
     for (int i = 0; i < count; i++) {
         if (FileMetadataRead(ids[i], &metadata[i]) != 0 || !metadata[i].Filename) continue;
-        if (strcmp(metadata[i].Filename, "display.elf") == 0) continue;
+        if (strcmp(metadata[i].Filename, "display.box") == 0) continue;
         if (strcmp(metadata[i].Filename, "shell.bin") == 0) continue;
         names[named++] = metadata[i].Filename;
     }

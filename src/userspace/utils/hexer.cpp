@@ -90,7 +90,7 @@ std::optional<std::string> ReadPart(const char *const *Words, std::size_t Count,
         std::string_view Word   = Words[I];
         bool             IsFrom = Word == "from";
         if (!IsFrom && Word != "for")
-            return std::format("'{}' is no file here, nor from or for: hexer say.elf from 0x40 for 64", Word);
+            return std::format("'{}' is no file here, nor from or for: hexer say.box from 0x40 for 64", Word);
         if (IsFrom ? FromSaid : ManySaid) return std::format("{} is said twice", Word);
 
         std::uint64_t Value = 0;

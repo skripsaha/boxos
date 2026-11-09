@@ -996,6 +996,25 @@ $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tag
 	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $(filter %.c,$^) -Wall -Wextra
 	@echo "TagFS tool built: $@"
 
+# tools/pack — a program as the tree links it made a box (box_format.h), the
+# kind every program on the volume is. Built for the host like the TagFS tool,
+# its SHA-256 BoxLib's own (sha256.c, compiled apart: BoxLib's headers are not
+# the host's). Its prerequisites are every file it is made of, the format's
+# headers among them, so a change to the format remakes the tool and then
+# every box.
+PACK_TOOL   = $(BUILDDIR)/pack
+PACK_SHA256 = $(BUILDDIR)/pack_sha256.o
+
+$(PACK_SHA256): $(USERSPACE_DIR)/boxlib/src/sha256.c $(USERSPACE_DIR)/boxlib/include/box/sha256.h \
+                $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
+	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -fno-builtin -I$(USERSPACE_DIR)/boxlib/include \
+	    -I$(SRCDIR)/include -c $< -o $@
+
+$(PACK_TOOL): tools/pack.c tools/box_host.h $(SRCDIR)/include/box_format.h \
+              $(SRCDIR)/include/box_reader.h $(SRCDIR)/include/box_pen.h $(PACK_SHA256) | $(BUILDDIR)
+	@echo "Compiling the pack tool for $(UNAME_S) ($(UNAME_M))..."
+	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -I$(SRCDIR)/include -Itools tools/pack.c $(PACK_SHA256) -o $@
+
 # parcel-host: tools/parcel_host.mk (a host test, its own file).
 include tools/parcel_host.mk
 
@@ -1556,8 +1575,25 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/tumbleweed.elf "utility,fun" \
 	$(UTILS_DIR)/crab.elf      "utility,fun"
 
-$(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
-	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) $(VOLUME_CONTENT)); \
+# ‼ EVERY PROGRAM ON THE VOLUME IS A BOX. VOLUME_CONTENT names the programs as
+# the tree links them; each ELF there goes onto the volume as the box tools/pack
+# makes of it, under its stem — edit.elf is edit.box, and the command is still
+# `edit`. The kernel and shell.bin are not ELF programs and go as they are.
+Box = $(BUILDDIR)/box/$(basename $(notdir $(1))).box
+
+VOLUME_ELFS  = $(filter %.elf,$(VOLUME_CONTENT))
+VOLUME_BOXES = $(foreach elf,$(VOLUME_ELFS),$(call Box,$(elf)))
+VOLUME_LAID  = $(foreach word,$(VOLUME_CONTENT),$(if $(filter %.elf,$(word)),$(call Box,$(word)),$(word)))
+
+define BoxRule
+$(call Box,$(1)): $(1) $(PACK_TOOL)
+	@mkdir -p $$(dir $$@)
+	@$(PACK_TOOL) $(1) $$@
+endef
+$(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
+
+$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
+	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
 	START=$$(( $(ESP_START_SECTOR) + $$ESP )); \
@@ -1575,7 +1611,7 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 	    $$START,$$GROUND,7f,boot \
 	    $(ESP_START_SECTOR),$$ESP,ef
 	@echo "  Making the volume on it, format $(VOLUME_FORMAT)..."
-	@$(TAGFS_TOOL) $(VOLUME_FORMAT_FLAG) $@ $(VOLUME_CONTENT)
+	@$(TAGFS_TOOL) $(VOLUME_FORMAT_FLAG) $@ $(VOLUME_LAID)
 	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.
 	@#
 	@# volume-read is the format's second reader, written apart from the tool

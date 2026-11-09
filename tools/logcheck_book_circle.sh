@@ -37,7 +37,7 @@
 # ---------------------------------------------------------------------------
 
 BOOK_CIRCLE_USE="circle,sewn"
-BOOK_CIRCLE_GROUND="proca.elf"
+BOOK_CIRCLE_GROUND="proca.box"
 
 book_circle() {
     local name=book_circle img="$SCRATCH/circle.img" json="$SCRATCH/census.book_circle.json" line rc

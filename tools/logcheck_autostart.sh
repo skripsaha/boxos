@@ -16,7 +16,7 @@
 # TAG among the tags its process wears, where the format keeps it: format v1
 # keeps a file's tags as create_tagfs gave them, its name's stem first, so it
 # is held first there, as it always was; a book keeps them by ascending id
-# (spec_v2 §2.8, Born), the well-known tags before the stem — `display.elf`
+# (spec_v2 §2.8, Born), the well-known tags before the stem — `display.box`
 # wears `system,utility,autostart,display` off a book — so it is held among.
 autostart_wears() {
     local at='([^)]*,)?' end='[,)]'

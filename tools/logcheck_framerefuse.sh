@@ -190,7 +190,7 @@ framerefuse_leg() {
     local rec="$SCRATCH/framerefuse.$leg.record" L="$SCRATCH/serial.framerefuse.$leg.log" pid verdict uuid
     local anchor=""
     # A book the machine mounts carries the program that asks it to anchor.
-    [ -n "$mounts" ] && anchor="src/userspace/apps/anchor_test.elf app,utility,test"
+    [ -n "$mounts" ] && anchor="build/box/anchor_test.box app,utility,test"
     rm -f "$img" "$before" "$rec" "$L"
     cp build/boxos.img "$img" || { harness "framerefuse ($leg): could not copy build/boxos.img"; return; }
     # shellcheck disable=SC2086
