@@ -6231,19 +6231,17 @@ run_handset() {
         || bad "handset: the line typed before the ask was lost"
 }
 
-# The oracle measured against itself: the daemon consumes keys while nobody
-# listens — the very thing "keys wait at the daemon for the next reader"
-# forbids — so the line typed before the child asked is gone.
+# The oracle measured against itself: the daemon drops the keys typed while
+# nobody listens — the very thing "keys wait at the daemon for the next
+# reader" forbids — so the line typed before the child asked is gone.
 handset_deaf_on() {
     mutate src/userspace/display/lanes.cpp
     python3 - <<'EOF'
 p = "src/userspace/display/lanes.cpp"
 s = open(p).read()
-anchor = "    while (g_ear) {\n        if (!key_in_hand) {\n"
+anchor = "        if (FrontChord(typed)) continue;\n"
 assert s.count(anchor) == 1, "handset mutation anchor missing"
-s = s.replace(anchor, "    for (;;) {   /* logcheck mutation: consumed while nobody listens */\n"
-                      "        if (!g_ear) { if (!touch_try_pop_tag(g_kb, &key)) break; did = true; continue; }\n"
-                      "        if (!key_in_hand) {\n", 1)
+s = s.replace(anchor, anchor + "        if (!g_ear) continue;   /* logcheck mutation: dropped while nobody listens */\n", 1)
 open(p, "w").write(s)
 EOF
     mut_done src/userspace/display/lanes.cpp "logcheck mutation"
@@ -6557,11 +6555,11 @@ overtake_slow_on() {
     python3 - <<'EOF2'
 p = "src/userspace/display/display.cpp"
 s = open(p).read()
-a = "        for (const ConsoleRun &Run : g_held) g_model->Apply(Run);"
+a = "        for (const HeldRun &Held : g_held) g_model->Apply(Held.Run, Held.Lane);"
 assert s.count(a) == 1, "overtake slow anchor missing"
-inject = "        for (const ConsoleRun &Run : g_held) {   /* logcheck injection: a render costs what one costs on glass. */"
+inject = "        for (const HeldRun &Held : g_held) {   /* logcheck injection: a render costs what one costs on glass. */"
 inject += "\n            for (volatile std::uint32_t z = 0; z < 400000u; z++) { }"
-inject += "\n            g_model->Apply(Run);\n        }"
+inject += "\n            g_model->Apply(Held.Run, Held.Lane);\n        }"
 s = s.replace(a, inject, 1)
 open(p, "w").write(s)
 EOF2
