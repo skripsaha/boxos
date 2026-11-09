@@ -44,7 +44,7 @@ static inline file_id_t file_named(const char *name)
     }
 
     file_id_t *ids = NULL;
-    int        count = query_all(stem, &ids);
+    int        count = query_all(stem, "trashed", &ids);
     free(stem);
     if (count <= 0) return 0;
 

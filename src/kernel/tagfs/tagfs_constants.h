@@ -43,9 +43,10 @@
 
 // File flags
 #define TAGFS_FILE_ACTIVE           (1 << 0)
-#define TAGFS_FILE_TRASHED          (1 << 1)
-#define TAGFS_FILE_HIDDEN           (1 << 2)
-/* Bit 3 is spent on v1: kernels before Quill step 1.1 took it for copy-on-write, so it is never set and never trusted. */
+/* Bits 1 and 2 named trashed and hidden once, which are tags a file wears and
+ * never bits of its record: no kernel set them, and none reads them. Bit 3 is
+ * spent on v1: kernels before Quill step 1.1 took it for copy-on-write, so it
+ * is never set and never trusted. */
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)

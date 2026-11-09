@@ -23,8 +23,10 @@
 //     stay plain values: they read info() once and report a sensible neutral on
 //     the error arm. bytes(role) stays a stream (an open channel, not a scalar).
 //
-//   * box::tagfs::create(name, {tags…}) / query(tagspec) / all() / find(name) —
-//     creation and tag-query; box::tagfs::tags() — the tags files wear, each
+//   * box::tagfs::create(name, {tags…}) / query(tagspec, without) / all(without)
+//     / find(name, without) — creation and tag-query, `without` the tags whose
+//     files the asker leaves out (nullptr: none; the volume leaves out nothing
+//     of its own accord); box::tagfs::tags(without) — the tags files wear, each
 //     with how many files wear it. The return types are honestly asymmetric: find /
 //     find_all hand back box::tagfs::record — an immutable metadata snapshot,
 //     because the kernel already returned the descriptor — while query / all
@@ -32,7 +34,7 @@
 //     only. A record reads its captured fields with zero syscalls; reach a live
 //     handle for mutations or a fresh read through record::live(). Richer
 //     predicates compose over either result with std::views:
-//         for (auto& f : box::tagfs::query("video:cam0")
+//         for (auto& f : box::tagfs::query("video:cam0", "trashed")
 //                        | std::views::filter([](auto& f){ return f.size() > 0; }))
 //
 //   * The Use Context (box/cxx/use.h) is the user's, one per machine, and
@@ -168,8 +170,6 @@ public:
         return i ? std::string(field_view(i->filename, sizeof(i->filename))) : std::string{};
     }
     std::uint64_t size()  const { auto i = info(); return i ? i->size  : 0u; }
-    std::uint32_t flags() const { auto i = info(); return i ? i->flags : 0u; }
-    bool trashed() const { return (flags() & FILE_FLAG_TRASHED) != 0u; }
 
     std::vector<tag> tags() const
     {
@@ -407,8 +407,6 @@ public:
     // so reading from a temporary record — find("x")->name() — is safe.
     std::string name() const { return std::string(field_view(info_.filename, sizeof(info_.filename))); }
     std::uint64_t    size() const noexcept { return info_.size; }
-    std::uint32_t    flags() const noexcept { return info_.flags; }
-    bool             trashed() const noexcept { return (info_.flags & FILE_FLAG_TRASHED) != 0u; }
     std::vector<tag> tags() const;
     bool             has_tag(const char *key) const noexcept;
     box::result<tag> tag_named(const char *key) const;
@@ -471,7 +469,10 @@ inline box::result<file> create(const char *name, const char *tagspec = "")
 }
 
 // ── tag query → range of files ──────────────────────────────────────────
-// tagspec == nullptr lists every file. Compose richer (non-tag) predicates
+// tagspec == nullptr lists every file; `without` (a comma list, nullptr for
+// none) the tags no file of the answer wears. The volume sets aside nothing of
+// its own accord — trashed and hidden are tags like any other — so the asker
+// says what it leaves out (box/file.h). Compose richer (non-tag) predicates
 // over the result with std::views. Every match: the kernel says how many
 // there are and boxlib sizes the list to that (query_all), so no file is
 // past the end of the answer.
@@ -487,24 +488,24 @@ inline std::vector<file> files_of(int n, file_id_t *ids)
     return out;
 }
 } // namespace _detail
-inline std::vector<file> query(const char *tagspec)
+inline std::vector<file> query(const char *tagspec, const char *without)
 {
     file_id_t *ids = nullptr;
-    int        n   = ::query_all(tagspec, &ids);
+    int        n   = ::query_all(tagspec, without, &ids);
     return _detail::files_of(n, ids);
 }
-inline std::vector<file> all() { return query(nullptr); }
+inline std::vector<file> all(const char *without) { return query(nullptr, without); }
 
 // ── the same, of the whole volume — the user's Use Context left out ─────
 // query / all / create above are asked inside the Use Context; these ask the
 // same question of everything on the volume. See box/cxx/use.h.
-inline std::vector<file> query_everywhere(const char *tagspec)
+inline std::vector<file> query_everywhere(const char *tagspec, const char *without)
 {
     file_id_t *ids = nullptr;
-    int        n   = ::query_all_everywhere(tagspec, &ids);
+    int        n   = ::query_all_everywhere(tagspec, without, &ids);
     return _detail::files_of(n, ids);
 }
-inline std::vector<file> all_everywhere() { return query_everywhere(nullptr); }
+inline std::vector<file> all_everywhere(const char *without) { return query_everywhere(nullptr, without); }
 
 inline box::result<file> create_everywhere(const char *name, std::initializer_list<const char *> tags)
 {
@@ -532,7 +533,7 @@ inline box::result<file> create_everywhere(const char *name, const char *tagspec
 // volume. One ask of the volume's own list of its tags (storage.tag.list), not
 // a walk of its files: a tag no file wears — a process's, a Touch's — is not
 // in it. In the order the volume first knew the tags; a refusal is an empty
-// list, as query()'s is.
+// list, as query()'s is. The files wearing a tag of `without` are not counted.
 struct tag_count {
     tag           what;
     std::uint32_t files = 0;
@@ -556,18 +557,18 @@ inline std::vector<tag_count> tags_of(int rc, TagListed *list, std::size_t n)
     return out;
 }
 }  // namespace _detail
-inline std::vector<tag_count> tags()
+inline std::vector<tag_count> tags(const char *without)
 {
     TagListed  *list = nullptr;
     std::size_t n    = 0;
-    int         rc   = ::tag_list(&list, &n);
+    int         rc   = ::tag_list(without, &list, &n);
     return _detail::tags_of(rc, list, n);
 }
-inline std::vector<tag_count> tags_everywhere()
+inline std::vector<tag_count> tags_everywhere(const char *without)
 {
     TagListed  *list = nullptr;
     std::size_t n    = 0;
-    int         rc   = ::tag_list_everywhere(&list, &n);
+    int         rc   = ::tag_list_everywhere(without, &list, &n);
     return _detail::tags_of(rc, list, n);
 }
 
@@ -578,12 +579,13 @@ inline std::vector<tag_count> tags_everywhere()
 // On success the first matching record; the error arm separates the two no-result
 // outcomes — a failed lookup (n < 0) surfaces its recovered cause, while a clean
 // "no file by that name" (n == 0) is file_not_found, a queryable cause rather
-// than a transport error. (For every same-named match use find_all.)
-inline box::result<record> find(const char *name)
+// than a transport error. (For every same-named match use find_all.) Files
+// wearing a tag of `without` are not matched, as query() leaves them out.
+inline box::result<record> find(const char *name, const char *without)
 {
     file_id_t   ids[1];
     file_info_t infos[1];
-    int         n = ::find_file_by_name(name, ids, infos, 1);
+    int         n = ::find_file_by_name(name, without, ids, infos, 1);
     if (n > 0) return record(ids[0], infos[0]);
     if (n < 0) return std::unexpected(box::error{box_errno_of(n)});
     return std::unexpected(box::error{box::errc::file_not_found});
@@ -594,14 +596,14 @@ inline box::result<record> find(const char *name)
 // the second answer larger, and the ask is repeated with room for it. A
 // transport failure is reported as an empty range, consistent with
 // query()/all(); use find() when you need the recovered cause of a lookup.
-inline std::vector<record> find_all(const char *name)
+inline std::vector<record> find_all(const char *name, const char *without)
 {
     std::vector<record> out;
-    int n = ::find_file_by_name(name, nullptr, nullptr, 0);
+    int n = ::find_file_by_name(name, without, nullptr, nullptr, 0);
     while (n > 0) {
         std::vector<file_id_t>   ids(static_cast<std::size_t>(n));
         std::vector<file_info_t> infos(static_cast<std::size_t>(n));
-        int got = ::find_file_by_name(name, ids.data(), infos.data(), ids.size());
+        int got = ::find_file_by_name(name, without, ids.data(), infos.data(), ids.size());
         if (got <= n) {
             for (int i = 0; i < got; ++i) out.emplace_back(ids[i], infos[i]);
             break;

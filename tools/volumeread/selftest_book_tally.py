@@ -76,7 +76,7 @@ def Circles(bt):
             stitch.Shaped(fid=S.fid, base=seq - S.gen, size=n * BLOCK + 1, mtime_ns=7,
                           splices=[(0, 1, [stitch.Data(bt.F + 1, 1)]), (n - 1, 0, [stitch.Hole(1)])],
                           digests=d[1:], slip=(0, b"\x01")),
-            stitch.Labeled(fid=L.fid, base=seq - L.gen, name=b"renamed", flags=(ondisk.FILE_HIDDEN, 0),
+            stitch.Labeled(fid=L.fid, base=seq - L.gen, name=b"renamed", flags=(ondisk.FILE_LAID_BIT, 0),
                            add=[bt.tag], drop=list(L.tags[:1])),
             stitch.Quitclaim(fid=gone, base=seq - 1)], flags=stitch.DATA_FLUSHED)
         second = pen.Sew([stitch.Undone(seq_back=1, why=1, fids=[bt.fid])], flags=stitch.DATA_FLUSHED)

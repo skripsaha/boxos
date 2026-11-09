@@ -80,12 +80,14 @@ static bool called(file_id_t id, const char *name)
 {
     FileMetadata metadata;
     if (FileMetadataRead(id, &metadata) != 0) return false;
-    bool same = metadata.Filename && strcmp(metadata.Filename, name) == 0 &&
-                !(metadata.Flags & FILE_FLAG_TRASHED);
+    bool same = metadata.Filename && strcmp(metadata.Filename, name) == 0;
     FileMetadataRelease(&metadata);
     return same;
 }
 
+/* A name the person typed means a file in use: one set aside in the trash is
+ * not it. A hidden file is reached by its name all the same — hidden keeps it
+ * out of what is listed, not out of reach. */
 static int lookup_find(BoxFormLookup *lookup, const char *name, bool everywhere, file_id_t **ids)
 {
     char       stem[STEM_MAX + 1];
@@ -93,7 +95,7 @@ static int lookup_find(BoxFormLookup *lookup, const char *name, bool everywhere,
     *ids = NULL;
 
     const char *tag = stem_tag(name, stem);
-    int n = everywhere ? query_all_everywhere(tag, &found) : query_all(tag, &found);
+    int n = everywhere ? query_all_everywhere(tag, "trashed", &found) : query_all(tag, "trashed", &found);
     if (n < 0) return n;
 
     int kept = 0;
@@ -108,19 +110,20 @@ static int lookup_find(BoxFormLookup *lookup, const char *name, bool everywhere,
     return kept;
 }
 
+/* `all` lists what there is: the trashed and the hidden are not among it. */
 static int lookup_all(BoxFormLookup *lookup, bool everywhere, file_id_t **ids, bool *bounded)
 {
     *ids = NULL;
     if (everywhere) {
         *bounded = false;
-        return query_all_everywhere(NULL, ids);
+        return query_all_everywhere(NULL, "trashed,hidden", ids);
     }
 
     char   tags[256];
     size_t needed = 0;
     int    tag_count = use_get(tags, sizeof(tags), &needed);
     *bounded = tag_count > 0 || needed > 1;
-    return query_all(NULL, ids);
+    return query_all(NULL, "trashed,hidden", ids);
 }
 
 void form_lookup_volume(BoxFormLookup *lookup)

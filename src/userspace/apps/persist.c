@@ -59,7 +59,7 @@ static int do_write(uint32_t sequence)
     file_id_t earlier[8];
     int      gone = 0;
     for (;;) {
-        int found = find_file_by_name(PERSIST_NAME, earlier, NULL, 8);
+        int found = find_file_by_name(PERSIST_NAME, "trashed,hidden", earlier, NULL, 8);
         if (found < 0) {
             kdbg_print("[PERSIST] FAIL: could not ask the volume for an earlier '%s' (error %d)",
                        PERSIST_NAME, found);
@@ -115,7 +115,7 @@ static int do_verify(void)
 {
     file_id_t  fids[8];
     file_info_t infos[8];
-    int found = find_file_by_name(PERSIST_NAME, fids, infos, 8);
+    int found = find_file_by_name(PERSIST_NAME, "trashed,hidden", fids, infos, 8);
     if (found < 0) {
         kdbg_print("[PERSIST] FAIL: could not ask the volume for '%s' (error %d)",
                    PERSIST_NAME, found);

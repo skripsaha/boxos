@@ -156,7 +156,7 @@ std::optional<std::string> Map::Gather(const file_id_t *Given, std::size_t Count
 {
     file_id_t *Owned = nullptr;
     if (Count == 0) {
-        int Found = query_all(nullptr, &Owned);
+        int Found = query_all(nullptr, "trashed,hidden", &Owned);
         if (Found < 0) return std::format("the volume would not list its files (error {})", -Found);
         Given = Owned;
         Count = static_cast<std::size_t>(Found);
@@ -168,7 +168,7 @@ std::optional<std::string> Map::Gather(const file_id_t *Given, std::size_t Count
     for (std::size_t At = 0; At < Count; At++) {
         FileMetadata Metadata;
         if (FileMetadataRead(Given[At], &Metadata) != 0) continue;
-        if (Metadata.Filename && !(Metadata.Flags & FILE_FLAG_TRASHED))
+        if (Metadata.Filename)
             Files.push_back({Given[At], Metadata.Filename, Metadata.Size, Split(Metadata.Tags ? Metadata.Tags : "")});
         FileMetadataRelease(&Metadata);
     }

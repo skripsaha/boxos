@@ -233,7 +233,7 @@ NameSettled SettleTakenName(std::string_view NewName)
     NameSettled Settled;
     std::string Name(NewName);
     file_id_t   Found[2];
-    int         Count = find_file_by_name(Name.c_str(), Found, nullptr, 2);
+    int         Count = find_file_by_name(Name.c_str(), "trashed", Found, nullptr, 2);
     if (Count < 0) {
         Settled.Refusal = std::format("could not look for a file called {}: {}", NewName, Why(Count));
         return Settled;

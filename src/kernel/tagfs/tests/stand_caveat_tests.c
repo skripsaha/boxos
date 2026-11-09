@@ -110,8 +110,8 @@ out:
 // ----------------------------------------------------------------------------
 
 /* Does the tag index count this file id among the name's? Asked of the index
- * itself, so neither a Use Context nor the hidden/trashed filter can stand
- * between the question and the answer. */
+ * itself, so neither a Use Context nor a tag a question sets aside can
+ * stand between the question and the answer. */
 static bool StandNameFinds(uint32_t stem, uint64_t file_id)
 {
     return TagBitmapHas(tagfs_get_state()->bitmap_index, stem, file_id);

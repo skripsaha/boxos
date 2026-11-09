@@ -6,9 +6,10 @@
 #include "box/string.h"
 #include "box/system.h"
 
-/* Takes words, not things: a trashed file is hidden from every query, so the
- * shell's lookup of a name would never find the one this command exists to
- * delete. The names are looked for in the trash itself, below. */
+/* Takes words, not things: the shell's lookup of a name looks among the files
+ * in use (box/form.h), never in the trash, so it would never find the one this
+ * command exists to delete. The names are looked for in the trash itself,
+ * below. */
 BOX_FORM("takes words \"the trashed files to erase, or trashed for all of them\"\n");
 
 /* True when the volume still knows the file's name; then the caller releases
@@ -85,7 +86,7 @@ static int erase_named(const file_id_t *trashed, int total, const char *name)
     if (count == 0) {
         /* Not in the trash: the look-up by name tells a name nobody has from
          * a file still out of the trash. */
-        if (find_file_by_name(name, NULL, NULL, 0) <= 0)
+        if (find_file_by_name(name, "trashed", NULL, NULL, 0) <= 0)
             printf("There is no file called %s\n", name);
         else
             printf("%s is not in the trash; put it there first with trash %s\n", name, name);
@@ -105,7 +106,7 @@ int main(void) {
     }
 
     file_id_t *trashed = NULL;
-    int total = query_all("trashed", &trashed);
+    int total = query_all("trashed", NULL, &trashed);
     if (total < 0) { println("Could not look in the trash"); exit(1); return 1; }
 
     int failed = 0;

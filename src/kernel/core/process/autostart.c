@@ -195,15 +195,21 @@ static int AutostartWalk(process_t **out_first, AutostartHeld *held)
 
     if (!AutostartVolumeHere()) return 0;
 
-    /* Every live file, a page at a time: what stood here was one array as
-     * long as the Ledger's count of files — or 1024 when it said none — and
-     * the files past it were never asked whether they start. */
-    uint64_t  file_ids[32];
-    TagFSPage page;
-    uint64_t  from     = 1;
-    int       launched = 0;
+    /* Every file that wears autostart, a page at a time: what stood here was
+     * one array as long as the Ledger's count of files — or 1024 when it said
+     * none — and the files past it were never asked whether they start. A
+     * file the person set aside in the trash is not started: that is this
+     * launcher's own word, put to the volume as its question — the volume
+     * leaves out no file of its own accord. */
+    const TagSpelling wanted   = { "autostart", "...", 9, 3 };   /* any tag of the key, as autostart_wanted reads it */
+    const TagSpelling aside    = TagSpellingOfKey("trashed");
+    uint64_t          file_ids[32];
+    TagFSPage         page;
+    uint64_t          from     = 1;
+    int               launched = 0;
     do {
-        if (TagFSListPage(from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK) break;
+        if (TagFSQueryPage(&wanted, 1, &aside, 1, from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK)
+            break;
         for (uint32_t i = 0; i < page.delivered; i++) {
             process_t *proc = autostart_consider(file_ids[i]);
             if (!proc) continue;

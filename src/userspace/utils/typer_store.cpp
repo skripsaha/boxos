@@ -20,7 +20,7 @@ constexpr std::uint64_t TailMost     = 262144;
 int FindRecord(file_id_t &Id)
 {
     file_id_t *Ids   = nullptr;
-    int        Count = query_all_everywhere(RecordTags, &Ids);
+    int        Count = query_all_everywhere(RecordTags, "trashed", &Ids);
     if (Count > 0) Id = Ids[0];
     free(Ids);
     return Count > 0 ? 1 : Count;

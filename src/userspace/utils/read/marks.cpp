@@ -26,7 +26,7 @@ constexpr std::size_t      WordsBytes = 40;
 file_id_t Find()
 {
     file_id_t *Ids   = nullptr;
-    const int  Count = query_all_everywhere(std::string(NameTag).c_str(), &Ids);
+    const int  Count = query_all_everywhere(std::string(NameTag).c_str(), "trashed", &Ids);
     file_id_t  Found = 0;
     for (int Index = 0; Index < Count && Found == 0; Index++) {
         std::expected<kin::FileFacts, std::string> Facts = kin::ReadFacts(Ids[Index]);

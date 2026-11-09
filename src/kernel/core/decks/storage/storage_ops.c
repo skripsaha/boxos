@@ -394,11 +394,11 @@ static int ObjRename(const ManifestOp *op,
  * OBJ_GET_INFO — serialize file metadata into out_crate.
  *
  * Every tag goes out whole, however long: its key and value are copied
- * straight out of the volume's registry into the answer.
+ * straight out of the volume's registry into the answer. What a file is —
+ * trashed, hidden, anything — is the tags it wears; the answer has no flags.
  *
  * Layout written into out_crate (little-endian):
  *   [u64 file_id]
- *   [u32 flags]
  *   [u64 size]
  *   [u16 tag_count]
  *   [u16 filename_len]
@@ -467,7 +467,7 @@ static int ObjGetInfo(const ManifestOp *op,
 
     /* The answer's tag count is u16 on the wire; a record holds no more. */
     uint16_t tag_count = (uint16_t)md.tag_count;
-    uint64_t need = 8u + 4u + 8u + 2u + 2u + filename_len;
+    uint64_t need = 8u + 8u + 2u + 2u + filename_len;
     for (uint32_t i = 0; i < tag_count; i++)
         need = info_tag_record(NULL, need, md.tag_ids[i]);
 
@@ -480,19 +480,9 @@ static int ObjGetInfo(const ManifestOp *op,
 
     uint64_t pos = 0;
     if (rc == OK) {
-        /* trashed and hidden are tags, not bits the kernel ever set in the
-         * record — so the flags a program read said "not trashed" of every
-         * file, and `erase <name>` refused every file as not trashed yet. The
-         * record carries the bits; the tags decide them. */
-        const WellKnownTags *wk    = tagfs_get_well_known_tags();
-        uint32_t             flags = md.flags;
-        for (uint32_t i = 0; i < tag_count; i++) {
-            if (md.tag_ids[i] == wk->trashed) flags |= TAGFS_FILE_TRASHED;
-            if (md.tag_ids[i] == wk->hidden)  flags |= TAGFS_FILE_HIDDEN;
-        }
-
+        /* What a file is — trashed, hidden, anything else — is the tags it
+         * wears, and only they say it: the answer carries no bits beside them. */
         memcpy(kp + pos, &file_id,    8); pos += 8;   /* the id asked: the record's own */
-        memcpy(kp + pos, &flags,      4); pos += 4;
         memcpy(kp + pos, &md.size,    8); pos += 8;
         memcpy(kp + pos, &tag_count,  2); pos += 2;
         memcpy(kp + pos, &filename_len, 2); pos += 2;
@@ -590,6 +580,37 @@ static error_t storage_tags_spelled(uint8_t scope, const char *text, size_t len,
     return OK;
 }
 
+/*
+ * The tags a question sets aside: the comma list in the op's params from byte
+ * `at` to their end, spelled in place (the params are the kernel's copy of the
+ * manifest). *out is the caller's to kfree; NULL and 0 when the question sets
+ * none aside. A tag that does not spell refuses the question, as one of its
+ * own tags would.
+ */
+static error_t storage_without_spelled(const ManifestOp *op, size_t at, TagSpelling **out,
+                                       uint32_t *out_count)
+{
+    *out       = NULL;
+    *out_count = 0;
+    if (op->param_size <= at)
+        return OK;
+    const char  *text = (const char *)op->params + at;
+    const size_t len  = op->param_size - at;
+    uint32_t     n    = 0;
+    error_t      rc   = TagListCount(text, len, &n);
+    if (rc != OK || n == 0)
+        return rc;
+    TagSpelling *without = kmalloc(sizeof(TagSpelling) * n);
+    if (!without)
+        return ERR_NO_MEMORY;
+    size_t from = 0;
+    for (uint32_t i = 0; i < n; i++)
+        (void)TagListNext(text, len, &from, &without[i]);   /* judged whole above */
+    *out       = without;
+    *out_count = n;
+    return OK;
+}
+
 /* The in_crate's bytes copied in, or NULL with *out_len 0 when there is no
  * in_crate or it is empty. ERR_INVALID_ADDRESS when the copy failed. */
 static error_t storage_crate_text(const ManifestOp *op, Crate *crates, const OpContext *ctx,
@@ -618,8 +639,9 @@ static error_t storage_crate_text(const ManifestOp *op, Crate *crates, const OpC
  * never less than what went in, since a file made while the pages are taken
  * is delivered too.
  */
-static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const Crate *out,
-                                  const OpContext *ctx, uint32_t hdr[2])
+static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const TagSpelling *without,
+                                  uint32_t without_count, const Crate *out, const OpContext *ctx,
+                                  uint32_t hdr[2])
 {
     uint64_t room_ids = (out->capacity - 8) / sizeof(uint64_t);
     uint32_t most     = room_ids > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)room_ids;
@@ -632,7 +654,7 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
     for (;;) {
         uint32_t  room = most - hdr[0] < STORAGE_QUERY_PIECE ? most - hdr[0] : STORAGE_QUERY_PIECE;
         TagFSPage page;
-        rc = TagFSQueryPage(tags, count, from, piece, room, first, &page);
+        rc = TagFSQueryPage(tags, count, without, without_count, from, piece, room, first, &page);
         if (rc != OK) break;
         if (first) hdr[1] = page.total;
         first = false;
@@ -653,8 +675,13 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
     return rc;
 }
 
-/* STORAGE_TAG_QUERY  params (optional): [u8 scope] — inside the Use Context
- *                    (absent, STORAGE_SCOPE_USE) or STORAGE_SCOPE_EVERYWHERE
+/* STORAGE_TAG_QUERY  params (optional): [u8 scope][tags set aside] — inside
+ *                    the Use Context (absent, STORAGE_SCOPE_USE) or
+ *                    STORAGE_SCOPE_EVERYWHERE; after the scope, a comma list
+ *                    of tags no file of the answer wears ("key:..." any tag of
+ *                    the key). The volume sets aside nothing of its own
+ *                    accord: trashed, hidden and every other tag are left out
+ *                    when the asker names them, and only then.
  *                    in_crate (optional): comma-separated tag string
  *                    out_crate: [u32 delivered][u32 total][u64 file_ids[delivered]]
  *                    `total` is how many files match; `delivered` is how many
@@ -688,19 +715,29 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     error_t rc = storage_crate_text(op, crates, ctx, &text, &tlen);
     if (rc != OK) return rc;
 
+    TagSpelling *without       = NULL;
+    uint32_t     without_count = 0;
+    rc = storage_without_spelled(op, 1, &without, &without_count);
+    if (rc != OK) {
+        crate_buf_free(text);
+        return rc;
+    }
+
     TagSpelling *tags  = NULL;
     UseList     *use   = NULL;
     uint32_t     own   = 0;
     uint32_t     total = 0;
     rc = storage_tags_spelled(scope, text, tlen, &tags, &use, &own, &total);
     if (rc != OK) {
+        kfree(without);
         crate_buf_free(text);
         return rc;
     }
 
     uint32_t hdr[2] = { 0, 0 };   /* delivered, total */
-    rc = storage_query_into(tags, total, out, ctx, hdr);
+    rc = storage_query_into(tags, total, without, without_count, out, ctx, hdr);
     kfree(tags);
+    kfree(without);
     UseListDrop(use);
     crate_buf_free(text);
     if (rc != OK) return rc;
@@ -716,9 +753,11 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
  * crate: any one record fits, a tag's text being narrower (TAG_TEXT_WIDTH). */
 #define STORAGE_TAG_LIST_PIECE 4096u
 
-/* STORAGE_TAG_LIST  params: [u32 from][u8 scope] (scope optional, as a
- *                   query's) — out_crate as boxos_decks.h says: the tags the
- *                   files wear, inside the Use Context counted among its files.
+/* STORAGE_TAG_LIST  params: [u32 from][u8 scope][tags set aside] (scope and
+ *                   the comma list optional, as a query's) — out_crate as
+ *                   boxos_decks.h says: the tags the files wear, inside the
+ *                   Use Context counted among its files, the files set aside
+ *                   not counted.
  *                   The records go into the crate a piece at a time, straight
  *                   from the volume's pages, until the crate is full or the
  *                   tags run out; `next` says where the rest begin. */
@@ -738,16 +777,25 @@ static int ObjTagList(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     TagFSState *state = tagfs_get_state();
     if (!state || !state->initialized) return ERR_NOT_INITIALIZED;
 
+    TagSpelling *without       = NULL;
+    uint32_t     without_count = 0;
+    rc = storage_without_spelled(op, 5, &without, &without_count);
+    if (rc != OK) return rc;
+
     TagSpelling *within = NULL;
     UseList     *use    = NULL;
     uint32_t     own    = 0;
     uint32_t     count  = 0;
     rc = storage_tags_spelled(scope, NULL, 0, &within, &use, &own, &count);
-    if (rc != OK) return rc;
+    if (rc != OK) {
+        kfree(without);
+        return rc;
+    }
 
     uint8_t *piece = kmalloc(STORAGE_TAG_LIST_PIECE);
     if (!piece) {
         kfree(within);
+        kfree(without);
         UseListDrop(use);
         return ERR_NO_MEMORY;
     }
@@ -759,7 +807,7 @@ static int ObjTagList(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         const uint64_t left = out->capacity - written;
         const uint32_t room = left < STORAGE_TAG_LIST_PIECE ? (uint32_t)left : STORAGE_TAG_LIST_PIECE;
         uint32_t used = 0, delivered = 0, next = 0;
-        rc = TagFSTagPage(within, count, from, piece, room, &used, &delivered, &next);
+        rc = TagFSTagPage(within, count, without, without_count, from, piece, room, &used, &delivered, &next);
         if (rc == ERR_BUFFER_TOO_SMALL && hdr[0] > 0) {
             hdr[1] = next;              /* the crate is full: the rest from here */
             rc     = OK;
@@ -783,6 +831,7 @@ static int ObjTagList(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     }
     kfree(piece);
     kfree(within);
+    kfree(without);
     UseListDrop(use);
     if (rc != OK) return rc;
 

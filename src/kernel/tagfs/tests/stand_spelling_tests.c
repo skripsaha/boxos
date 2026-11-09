@@ -30,7 +30,7 @@ static uint32_t s_answer[2 + STAND_ANSWER_IDS];
 static uint8_t  s_info[1024];
 static uint8_t  s_op[sizeof(ManifestOp) + 40] __attribute__((aligned(8)));
 static Crate    s_crates[2];
-static char     s_well_text[2][40];
+static char     s_aside_text[40];
 
 /* One storage-deck op, asked the way a program asks it. The params are copied
  * in after the op's head; `in` and `out` are the two crates, either absent. */
@@ -236,15 +236,15 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// trashed and hidden past tag 63
+// A question's tags set aside, past tag 63, and trashed a tag like any other
 // ----------------------------------------------------------------------------
 
-/* A fresh "stand_well:<k>" numbered past 63, its text left in `text`. A tag
+/* A fresh "stand_aside:<k>" numbered past 63, its text left in `text`. A tag
  * is interned for good, so a stand volume carries a few more of them. */
 static bool StandHighTag(char* text, size_t text_size, uint32_t* out_id)
 {
     for (uint32_t k = 0; k < 2u * (TAGFS_MAX_TAG_ID + 1u); k++) {
-        ksnprintf(text, text_size, "stand_well:%u", k);
+        ksnprintf(text, text_size, "stand_aside:%u", k);
         if (tagfs_tag_lookup(text) != TAGFS_INVALID_TAG_ID)
             continue;
         if (tagfs_tag_intern(text, out_id) != OK)
@@ -255,77 +255,64 @@ static bool StandHighTag(char* text, size_t text_size, uint32_t* out_id)
     return false;
 }
 
-/* Whether a query of `count` spellings lists `file_id`: its page from that id
- * on begins with it. */
-static bool StandListed(const TagSpelling* tags, uint32_t count, uint64_t file_id)
+static bool StandInfoHasWhole(uint64_t file_id, const char* text);
+
+/* Whether a question of `count` spellings, `aside_count` of them set aside,
+ * lists `file_id`: its page from that id on begins with it. */
+static bool StandListed(const TagSpelling* tags, uint32_t count, const TagSpelling* aside,
+                        uint32_t aside_count, uint64_t file_id)
 {
     TagFSPage page;
     uint64_t  first = 0;
-    return TagFSQueryPage(tags, count, file_id, &first, 1, false, &page) == OK &&
+    return TagFSQueryPage(tags, count, aside, aside_count, file_id, &first, 1, false, &page) == OK &&
            page.delivered == 1 && first == file_id;
 }
 
-/* The flags storage.getinfo gives a file, 0 when it would not answer. */
-static uint32_t StandInfoFlags(uint64_t file_id)
+/* The tags a question sets aside were once two of the volume's own, kept as
+ * 1ULL << id, which is 0 for every id past 63: a file wearing one numbered
+ * that high was listed with everything else. The volume leaves out nothing of
+ * its own accord now, and a question names what it sets aside: a tag numbered
+ * past 63 must leave out the file that wears it — from a question of its name
+ * and from one of no tags at all — and only that file; and a file wearing
+ * trashed is a file like any other to a question that sets nothing aside,
+ * the tag said whole in what storage.getinfo answers. */
+static TestResult TestStandAsidePastTag63(void)
 {
-    uint64_t said  = 0;
-    uint32_t flags = 0;
-    uint64_t id    = file_id;   /* a program's file_id_t */
-    if (StandStorageOp(STORAGE_OBJ_GET_INFO, &id, sizeof(id), NULL, 0,
-                       s_info, sizeof(s_info), &said) != OK || said < 12)
-        return 0;
-    memcpy(&flags, s_info + 8, sizeof(flags));
-    return flags;
-}
+    TestResult verdict  = TEST_PASS;
+    uint64_t   files[3] = { 0, 0, 0 };
+    uint32_t   high     = TAGFS_INVALID_TAG_ID;
+    static const char* const names[3] = { "stand_aside_w", "stand_aside_n", "stand_aside_t" };
 
-/* trashed and hidden were kept as 1ULL << id, which is 0 for every id past 63:
- * on a volume that interned them late, a trashed file was listed with
- * everything else and a program read it as not trashed. Here the two are made
- * tags numbered past 63, for the length of the test, and a file wearing each
- * must leave a listing that does not ask for it and carry its flag. */
-static TestResult TestStandWellKnownPastTag63(void)
-{
-    TestResult     verdict  = TEST_PASS;
-    WellKnownTags* wk       = tagfs_get_well_known_tags();
-    WellKnownTags  saved    = *wk;
-    bool           swapped  = false;
-    uint64_t       files[2] = { 0, 0 };
-    uint32_t       ids[2]   = { TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID };
-    static const char* const names[2] = { "stand_well_t", "stand_well_h" };
-
-    for (uint32_t i = 0; i < 2; i++) {
-        TEST_ASSERT(StandHighTag(s_well_text[i], sizeof(s_well_text[i]), &ids[i]),
-                    "a tag numbered past 63");
+    TEST_ASSERT(StandHighTag(s_aside_text, sizeof(s_aside_text), &high), "a tag numbered past 63");
+    for (uint32_t i = 0; i < 3; i++)
         TEST_ASSERT(StandMakeFile(names[i], NULL, 0, &files[i]), "a file of the test's own");
-        TEST_ASSERT_EQ(tagfs_add_tag(files[i], ids[i], INK_UNWARRANTED), 0, "wears it");
-    }
+    const TagSpelling trashed = TagSpellingOfKey("trashed");
+    TEST_ASSERT_EQ(tagfs_add_tag(files[0], high, INK_UNWARRANTED), 0, "the first wears the tag");
+    TEST_ASSERT_OK(tagfs_add_tag_string(files[2], &trashed, INK_UNWARRANTED), "the third wears trashed");
 
-    wk->trashed = ids[0];
-    wk->hidden  = ids[1];
-    swapped     = true;
+    TagSpelling named[3], aside;
+    for (uint32_t i = 0; i < 3; i++)
+        TEST_ASSERT_OK(TagSpellKey(names[i], strlen(names[i]), &named[i]), "its name spells");
+    TEST_ASSERT_OK(TagSpell(s_aside_text, strlen(s_aside_text), &aside), "the tag spells");
 
-    uint32_t shown = 0, unflagged = 0;
-    for (uint32_t i = 0; i < 2; i++) {
-        TagSpelling asked[2];
-        TEST_ASSERT_OK(TagSpellKey(names[i], strlen(names[i]), &asked[0]), "its name spells");
-        TEST_ASSERT_OK(TagSpell(s_well_text[i], strlen(s_well_text[i]), &asked[1]),
-                       "its tag spells");
-        shown += StandListed(asked, 1, files[i]);
-        TEST_ASSERT(StandListed(asked, 2, files[i]), "a query that names the tag lists the file");
-        uint32_t want = i == 0 ? TAGFS_FILE_TRASHED : TAGFS_FILE_HIDDEN;
-        unflagged += (StandInfoFlags(files[i]) & want) == 0;
-    }
-    TestEvidence("files past tag 63 listed unasked or read without their flag", shown + unflagged);
-    if (shown + unflagged)
+    uint32_t wrong = 0;
+    wrong += !StandListed(&named[0], 1, NULL, 0, files[0]);     /* nothing set aside: listed */
+    wrong += StandListed(&named[0], 1, &aside, 1, files[0]);    /* its tag set aside: left out */
+    wrong += StandListed(NULL, 0, &aside, 1, files[0]);         /* left out of every file too */
+    wrong += !StandListed(&named[1], 1, &aside, 1, files[1]);   /* one not wearing it: listed */
+    wrong += !StandListed(&named[2], 1, NULL, 0, files[2]);     /* trashed, set aside by no one */
+    wrong += !StandInfoHasWhole(files[2], "trashed");
+    TestEvidence("questions answered against the tags they set aside, or a trashed file left out "
+                 "unasked", wrong);
+    if (wrong)
         verdict = TEST_DEFECT;
 out:
-    if (swapped)
-        *wk = saved;
-    for (uint32_t i = 0; i < 2; i++)
+    for (uint32_t i = 0; i < 3; i++)
         if (files[i])
             tagfs_delete_file(files[i], INK_UNWARRANTED);
     return verdict;
 }
+
 
 // ----------------------------------------------------------------------------
 // The create, tag and info stations
@@ -373,9 +360,9 @@ out:
 }
 
 /* Whether storage.getinfo gives back the tag `text` spells whole: its key and
- * value, each at its own length. The record is [u64 id][u32 flags][u64 size]
- * [u16 tags][u16 name_len][name], then per tag [u16 key_len][u16 val_len]
- * [u8 type][key][val]. */
+ * value, each at its own length. The record is [u64 id][u64 size][u16 tags]
+ * [u16 name_len][name], then per tag [u16 key_len][u16 val_len][u8 type][key]
+ * [val]. */
 static bool StandInfoHasWhole(uint64_t file_id, const char* text)
 {
     TagSpelling tag;
@@ -383,13 +370,13 @@ static bool StandInfoHasWhole(uint64_t file_id, const char* text)
     uint64_t    id   = file_id;   /* a program's file_id_t */
     if (TagSpell(text, strlen(text), &tag) != OK ||
         StandStorageOp(STORAGE_OBJ_GET_INFO, &id, sizeof(id), NULL, 0,
-                       s_info, sizeof(s_info), &said) != OK || said < 24)
+                       s_info, sizeof(s_info), &said) != OK || said < 20)
         return false;
 
     uint16_t tags, name_len;
-    memcpy(&tags, s_info + 20, 2);
-    memcpy(&name_len, s_info + 22, 2);
-    for (uint64_t at = 24u + name_len, t = 0; t < tags && at + 5 <= said; t++) {
+    memcpy(&tags, s_info + 16, 2);
+    memcpy(&name_len, s_info + 18, 2);
+    for (uint64_t at = 20u + name_len, t = 0; t < tags && at + 5 <= said; t++) {
         uint16_t kl, vl;
         memcpy(&kl, s_info + at, 2);
         memcpy(&vl, s_info + at + 2, 2);
@@ -460,10 +447,10 @@ static const TestCase g_stand_spelling_tests[] = {
       .reach = TEST_READS_ONLY,
       .caveat_defect = "a registry that has given out every number answers an invalid id and says "
                        "nothing a shipped kernel prints" },
-    { .name  = "stand_well_known_past_tag_63", .func = TestStandWellKnownPastTag63,
+    { .name  = "stand_aside_past_tag_63", .func = TestStandAsidePastTag63,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "trashed and hidden kept as 1ULL << id are 0 past id 63, so a trashed file "
-                       "is listed with everything else and read as not trashed" },
+      .caveat_defect = "a tag a question sets aside, numbered past 63, leaves out no file — or the "
+                       "volume leaves out a trashed file no question set aside" },
     { .name  = "stand_create_refuses_what_it_cannot_tag",
       .func  = TestStandCreateRefusesWhatItCannotTag, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a create cuts its name's tag to 127 bytes, or makes the file without a tag "

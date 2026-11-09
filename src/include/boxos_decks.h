@@ -351,10 +351,11 @@
 /* tag.list — the tags files wear, each with how many files wear it, in the
  * order of the volume's numbers for them. The volume's registry names more
  * than files' tags — a process's, a Touch's, a Bay's — and a tag no file wears
- * is left out. params = [u32 from][u8 scope]: from the tag numbered `from` on
- * (0: the first), the files counted inside the Use Context (STORAGE_SCOPE_USE,
- * the files that wear its tags) or on the whole volume; the trashed and the
- * hidden are counted as a query counts them. out_crate = [u32 delivered]
+ * is left out. params = [u32 from][u8 scope][tags set aside]: from the tag
+ * numbered `from` on (0: the first), the files counted inside the Use Context
+ * (STORAGE_SCOPE_USE, the files that wear its tags) or on the whole volume,
+ * those wearing a tag the comma list after the scope names left uncounted, as
+ * a query leaves them out. out_crate = [u32 delivered]
  * [u32 next], then `delivered` records [u32 files][u8 flags][u8 key_len]
  * [u16 value_len][key][value] while they fit; `next` is the number to ask from
  * for the rest, 0 when there are none. A crate too small for even the first

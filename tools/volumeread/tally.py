@@ -820,7 +820,7 @@ def GoldenNode():
     items = [((1, 0), FileHeadEncode(FileState(1, 1, ondisk.FILE_ACTIVE, 5000, 1700000000000000000,
                                                1700000000000000007, b"golden", [3, 5, 300], []))),
              ((1, 1), ParcelEncode([Run(False, 1024, 2, 1)], 1)),
-             ((2, 0), FileHeadEncode(FileState(2, 9, ondisk.FILE_ACTIVE | ondisk.FILE_HIDDEN, 0, 1, 0, b"", [],
+             ((2, 0), FileHeadEncode(FileState(2, 9, ondisk.FILE_ACTIVE | ondisk.FILE_LAID_BIT, 0, 1, 0, b"", [],
                                                []))),
              ((3, 0), FileHeadEncode(FileState(3, 1, ondisk.FILE_ACTIVE, 9000, 2, 2, b"three", [0], []))),
              ((3, 1), ParcelEncode([Run(True, 0, 1, 1), Run(False, 4096, 1, 1), Run(False, 10, 1, 0, ext)], 1))]

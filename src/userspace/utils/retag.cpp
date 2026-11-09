@@ -191,7 +191,7 @@ std::optional<Plan> PlanFor(file_id_t File, const Change &Asked)
     One.File        = File;
     One.Name        = Facts.Filename ? Facts.Filename : "";
     One.Wears       = TagsOf(Facts.Tags ? Facts.Tags : "");
-    const bool Gone = (Facts.Flags & FILE_FLAG_TRASHED) != 0;
+    const bool Gone = FileMetadataWears(&Facts, "trashed");
     FileMetadataRelease(&Facts);
     if (Gone) return std::nullopt;
 
@@ -362,7 +362,7 @@ int Retag(const std::vector<std::string> &Words, std::vector<file_id_t> Where, b
     } else {
         const std::string Text  = From->Spelled();
         file_id_t        *Ids   = nullptr;
-        const int         Count = query_all(Text.c_str(), &Ids);
+        const int         Count = query_all(Text.c_str(), "trashed", &Ids);
         if (Count < 0) {
             Say(std::format("retag: the volume would not say which files wear {}: {}\n", Text, Why(Count)));
             return 1;

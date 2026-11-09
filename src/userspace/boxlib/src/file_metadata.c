@@ -149,15 +149,13 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
     if (Rc != 0)
         return Rc;
 
-    if (BlobSize < 24u) {
+    if (BlobSize < 20u) {
         free(Blob);
         return -ERR_INTERNAL;
     }
 
     memcpy(&Out->FileId, Blob + Position, sizeof(Out->FileId));
     Position += sizeof(Out->FileId);
-    memcpy(&Out->Flags, Blob + Position, sizeof(Out->Flags));
-    Position += sizeof(Out->Flags);
     memcpy(&Out->Size, Blob + Position, sizeof(Out->Size));
     Position += sizeof(Out->Size);
     if (ReadU16(Blob, BlobSize, &Position, &TagCount) != 0 ||
@@ -170,6 +168,7 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
         free(Blob);
         return -ERR_INTERNAL;
     }
+    const uint32_t TagsAt = Position;   /* the first tag's record, right after the name */
     Rc = MetadataTagBytes(Blob, BlobSize, Position, TagCount, &TagBytes);
     if (Rc != 0) {
         free(Blob);
@@ -193,7 +192,7 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
         }
     }
 
-    Position = 24u + FilenameLength;
+    Position = TagsAt;
     size_t TagPosition = 0;
     for (Index = 0; Index < TagCount; Index++) {
         uint16_t KeyLength;
@@ -252,4 +251,18 @@ void FileMetadataRelease(FileMetadata *Metadata)
     free(Metadata->Filename);
     free(Metadata->Tags);
     memset(Metadata, 0, sizeof(*Metadata));
+}
+
+bool FileMetadataWears(const FileMetadata *Metadata, const char *Key)
+{
+    if (!Metadata || !Key) return false;
+    size_t Length = strlen(Key);
+    for (const char *At = Metadata->Tags; At && *At;) {
+        const char *End  = strchr(At, ',');
+        size_t      Word = End ? (size_t)(End - At) : strlen(At);
+        if (Word >= Length && memcmp(At, Key, Length) == 0 && (Word == Length || At[Length] == ':'))
+            return true;
+        At = End ? End + 1 : NULL;
+    }
+    return false;
 }

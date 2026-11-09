@@ -35,28 +35,13 @@ int settings_program_name(file_id_t program, char out[32])
     return 0;
 }
 
-/* Whether a comma list of tags has one whose key is `key`. */
-static bool tags_have_key(const char *tags, const char *key)
-{
-    size_t length = strlen(key);
-    for (const char *at = tags; at && *at;) {
-        const char *end = strchr(at, ',');
-        size_t      word = end ? (size_t)(end - at) : strlen(at);
-        if (word >= length && memcmp(at, key, length) == 0 && (word == length || at[length] == ':')) return true;
-        at = end ? end + 1 : NULL;
-    }
-    return false;
-}
-
-/* Whether the file is called `name`, is not in the trash, and wears the tag
- * settings. */
+/* Whether the file is called `name`, and wears the tag settings. */
 static bool file_called(file_id_t file, const char *name, bool *tagged)
 {
     FileMetadata metadata;
     if (FileMetadataRead(file, &metadata) != 0) return false;
-    bool called = metadata.Filename && strcmp(metadata.Filename, name) == 0 &&
-                  (metadata.Flags & FILE_FLAG_TRASHED) == 0;
-    *tagged = called && tags_have_key(metadata.Tags, "settings");
+    bool called = metadata.Filename && strcmp(metadata.Filename, name) == 0;
+    *tagged = called && FileMetadataWears(&metadata, "settings");
     FileMetadataRelease(&metadata);
     return called;
 }
@@ -74,8 +59,10 @@ int settings_file_find(const char *program, file_id_t *file, char **saying)
      * has no settings file. */
     if (strlen(program) > SETTINGS_NAME_MAX || strchr(program, ':') || strchr(program, ',')) return 0;
     snprintf(name, sizeof(name), "%s.settings", program);
-    /* Every file wears the stem of its name as a tag: clock.settings wears clock. */
-    int count = query_all_everywhere(program, &ids);
+    /* Every file wears the stem of its name as a tag: clock.settings wears
+     * clock. A settings file in the trash says nothing: the person set it
+     * aside. */
+    int count = query_all_everywhere(program, "trashed", &ids);
     if (count < 0) return count;
     for (int i = 0; i < count; i++) {
         bool tagged;

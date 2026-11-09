@@ -315,7 +315,7 @@ static bool StandIndexWalkQuery(const TagSpelling* name, uint32_t made, uint32_t
     uint64_t  from = 1;
     uint32_t  seen = 0;
     do {
-        if (TagFSQueryPage(name, 1, from, s_page, STAND_INDEX_PAGE, seen == 0, &page) != OK)
+        if (TagFSQueryPage(name, 1, NULL, 0, from, s_page, STAND_INDEX_PAGE, seen == 0, &page) != OK)
             return false;
         if (seen == 0 && page.total != made)
             return false;

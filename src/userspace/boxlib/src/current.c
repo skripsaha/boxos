@@ -220,9 +220,11 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
 
     case CurFile: {
         if (!name || name[0] == '\0') { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
+        /* A file in the trash is not the one a name opens: one is made in
+         * its place when the open may make one. */
         file_id_t   ids[4];
         file_info_t infos[4];
-        int n = find_file_by_name(name, ids, infos, 4);
+        int n = find_file_by_name(name, "trashed", ids, infos, 4);
         if (n > 0) {
             c->file_id = ids[0];
         } else if ((role & CURRENT_WRITE) && (flags & CURRENT_CREATE)) {

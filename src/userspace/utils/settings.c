@@ -62,7 +62,7 @@ static int find_program(const char *word, file_id_t *out)
     }
     memcpy(stem, word, length);
     stem[length] = '\0';
-    int n = query_all_everywhere(stem, &ids);
+    int n = query_all_everywhere(stem, "trashed", &ids);
     for (int i = 0; i < n; i++) {
         FileMetadata metadata;
         if (FileMetadataRead(ids[i], &metadata) != 0) continue;
@@ -71,7 +71,7 @@ static int find_program(const char *word, file_id_t *out)
         size_t      its_length = its_dot ? (size_t)(its_dot - name) : strlen(name);
         bool        named = dot ? strcmp(name, word) == 0
                                 : its_length == length && memcmp(name, stem, length) == 0;
-        if (named && runnable(&metadata) && (metadata.Flags & FILE_FLAG_TRASHED) == 0 &&
+        if (named && runnable(&metadata) &&
             count < (int)(sizeof(found) / sizeof(found[0])))
             found[count++] = ids[i];
         FileMetadataRelease(&metadata);

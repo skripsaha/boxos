@@ -693,7 +693,7 @@ static TestResult TestStandHelmGuardedFileRefused(void)
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT_OK(TagFSQueryPage(&system, 1, 1, &file_id, 1, false, &page),
+    TEST_ASSERT_OK(TagFSQueryPage(&system, 1, NULL, 0, 1, &file_id, 1, false, &page),
                    "the volume is asked for a file that wears system");
     if (page.delivered == 0)
         return test_steps_aside("no file of this volume wears system");

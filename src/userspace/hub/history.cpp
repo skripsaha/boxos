@@ -39,7 +39,7 @@ bool Usable(std::string_view Text)
 file_id_t Find()
 {
     file_id_t *Ids = nullptr;
-    const int  Count = query_all_everywhere(FileTags, &Ids);
+    const int  Count = query_all_everywhere(FileTags, "trashed", &Ids);
     for (file_id_t Id : volume::Taken(Ids, Count)) {
         const std::expected<volume::Record, int> Held = volume::Record::Of(Id);
         if (Held && Held->Name() == FileName) return Id;

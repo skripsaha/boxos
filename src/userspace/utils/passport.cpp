@@ -205,7 +205,7 @@ void WaitForSampleWindow(uint32_t Milliseconds)
 int CountFiles(bool Everywhere)
 {
     file_id_t *Ids   = nullptr;
-    int        Count = Everywhere ? query_all_everywhere(nullptr, &Ids) : query_all(nullptr, &Ids);
+    int        Count = Everywhere ? query_all_everywhere(nullptr, "trashed,hidden", &Ids) : query_all(nullptr, "trashed,hidden", &Ids);
     free(Ids);
     return Count;
 }

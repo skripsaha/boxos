@@ -399,6 +399,10 @@ out:
 
 /* What the golden node's files wear, and the extension its last run carries
  * (volume_tally.h, TALLY_GOLDEN_NODE_CRC). */
+/* A bit of a header's flags no kernel names (tagfs_constants.h): the header
+ * keeps it exactly as it was laid. */
+#define BOOK_TEST_LAID_BIT (1u << 2)
+
 static const uint32_t g_golden_tags_one[3]   = { 3, 5, 300 };
 static const uint32_t g_golden_tags_three[1] = { 0 };
 static const uint8_t  g_golden_ext[3]        = { 0x02, 0x01, 0x07 };
@@ -441,7 +445,7 @@ static uint32_t TallyTestGoldenNode(uint8_t *stream, uint32_t *starts, uint8_t *
         else if (i == 1)
             len = TallyParcelPut(scratch, g_golden_one, 1, 1);
         else if (i == 2)
-            len = TallyTestHead(scratch, 9, TALLY_FILE_ACTIVE | TAGFS_FILE_HIDDEN, 0, 1, 0, "", NULL, 0);
+            len = TallyTestHead(scratch, 9, TALLY_FILE_ACTIVE | BOOK_TEST_LAID_BIT, 0, 1, 0, "", NULL, 0);
         else if (i == 3)
             len = TallyTestHead(scratch, 1, TALLY_FILE_ACTIVE, 9000, 2, 2, "three", g_golden_tags_three, 1);
         else
@@ -562,8 +566,8 @@ static TestResult TestTallyNodeCircle(void)
         else if (i == 1)
             TEST_ASSERT(TallyTestParcelIs(b, len, g_golden_one, 1, 1), "fid 1's Parcel");
         else if (i == 2)
-            TEST_ASSERT(TallyTestHeadIs(b, len, 9, TALLY_FILE_ACTIVE | TAGFS_FILE_HIDDEN, 0, 1, 0, "", NULL, 0),
-                        "fid 2's header: hidden, empty, no name, modified before it was made");
+            TEST_ASSERT(TallyTestHeadIs(b, len, 9, TALLY_FILE_ACTIVE | BOOK_TEST_LAID_BIT, 0, 1, 0, "", NULL, 0),
+                        "fid 2's header: a flag bit kept as laid, empty, no name, modified before it was made");
         else if (i == 3)
             TEST_ASSERT(TallyTestHeadIs(b, len, 1, TALLY_FILE_ACTIVE, 9000, 2, 2, "three",
                                         g_golden_tags_three, 1), "fid 3's header");

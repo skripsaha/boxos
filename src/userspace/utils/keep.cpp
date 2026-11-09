@@ -22,13 +22,12 @@ std::string Refused(std::string_view What, std::int64_t Code)
 int Find(const Keep &File, file_id_t &Id)
 {
     file_id_t *Ids   = nullptr;
-    int        Count = query_all_everywhere(File.Tags, &Ids);
+    int        Count = query_all_everywhere(File.Tags, "trashed", &Ids);
     int        Found = Count < 0 ? Count : 0;
     for (int At = 0; At < Count && Found == 0; At++) {
         FileMetadata Metadata;
         if (FileMetadataRead(Ids[At], &Metadata) != 0) continue;
-        if (Metadata.Filename && std::strcmp(Metadata.Filename, File.Name) == 0 &&
-            !(Metadata.Flags & FILE_FLAG_TRASHED)) {
+        if (Metadata.Filename && std::strcmp(Metadata.Filename, File.Name) == 0) {
             Id    = Ids[At];
             Found = 1;
         }

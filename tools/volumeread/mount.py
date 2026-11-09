@@ -50,7 +50,7 @@ import struct
 
 from . import ondisk
 from .ondisk import (CHAIN_HEADER, MPOOL_DATA, MPOOL_MAGIC, REGISTRY_DATA, REGISTRY_MAGIC,
-                     FILETBL_MAGIC, FTABLE_PER_BLOCK, FILE_ACTIVE, FILE_TRASHED, MAX_TAG_ID,
+                     FILETBL_MAGIC, FTABLE_PER_BLOCK, FILE_ACTIVE, MAX_TAG_ID,
                      SECTOR, SECTORS_PER_BLOCK, LEDGER_COPIES, U16, U32, Crc32)
 
 
@@ -784,8 +784,6 @@ class Volume:
         model = MountModel(self.read_block, self.layout, self.ledgers())
         out = []
         for fid, r in sorted(model.Mounted().items()):
-            if r.flags & FILE_TRASHED:
-                continue
             out.append({"fid": fid, "name": r.name, "size": r.size, "flags": r.flags,
                         "extents": r.extents, "extents_at_mount": r.extents_at_mount})
         return out

@@ -272,7 +272,7 @@ public:
         if (p.exclusive) {
             file_id_t   ids[1];
             file_info_t infos[1];
-            if (::find_file_by_name(s, ids, infos, 1) > 0) return nullptr;
+            if (::find_file_by_name(s, "trashed", ids, infos, 1) > 0) return nullptr;
         }
 
         uint32_t role = 0;

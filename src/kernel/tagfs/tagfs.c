@@ -39,13 +39,6 @@
 #include "baton.h"          /* the Knock that wakes a service pass for that mount */
 
 static TagFSState g_state = { .lock = TAGFS_LOCK_INIT("state", LOCK_RANK_STATE) };
-static WellKnownTags g_well_known = { TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID };
-
-// Accessor function for well-known tags (tagfs_get_state already defined below)
-WellKnownTags *tagfs_get_well_known_tags(void) { return &g_well_known; }
-
-// Internal macro for accessing well-known tags
-#define g_wk (*tagfs_get_well_known_tags())
 
 // ----------------------------------------------------------------------------
 // The door — who is inside the mounted volume, and which mounting it is
@@ -1872,15 +1865,8 @@ error_t tagfs_write_block(uint64_t block, const void *buffer)
 }
 
 // ----------------------------------------------------------------------------
-// tagfs_init_well_known_tags
+// The reserved vocabulary
 // ----------------------------------------------------------------------------
-
-static uint32_t register_well_known(TagRegistry *reg, const char *key)
-{
-    TagSpelling tag = TagSpellingOfKey(key);
-    uint32_t    tid;
-    return TagRegistryIntern(reg, &tag, &tid) == OK ? tid : TAGFS_INVALID_TAG_ID;
-}
 
 // The reserved-key vocabulary. A tag is "system" iff it is the bare (value=NULL)
 // registry entry for one of these keys; a value-bearing tag like "system:foo" is
@@ -1897,7 +1883,7 @@ _Static_assert(sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]) == TAGFS
 
 /* The auth-privilege keys in TAGFS_AUTH_KEYS order. The fixed auth bit
  * AUTH_TAG_X (auth_tags.h) is 1u<<position here; cabin sync resolves it from the
- * key string. tagfs_init_well_known_tags asserts these are the exact prefix of
+ * key string. tagfs_stamp_reserved_tags asserts these are the exact prefix of
  * TagFsReservedKeys[] so the two vocabularies cannot silently diverge. */
 static const char *const AuthReservedKeys[] = {
 #define X(id, key) key,
@@ -1920,21 +1906,17 @@ bool tagfs_key_is_reserved(const char *key, size_t key_len)
     return false;
 }
 
-void tagfs_init_well_known_tags(void)
+/* The reserved vocabulary stamped as the system's tags at every mount, and
+ * its order held to the auth keys'. Every reserved tag is a tag like any
+ * other to a question: none is filtered, none is kept by number. The auth
+ * keys' op-authority is the FIXED cabin_t.auth_bits (auth_tags.h),
+ * independent of the registry id. */
+static void tagfs_stamp_reserved_tags(void)
 {
-    g_well_known.trashed = TAGFS_INVALID_TAG_ID;
-    g_well_known.hidden  = TAGFS_INVALID_TAG_ID;
     TagFSState *fs = tagfs_get_state();
     if (!fs || !fs->registry)
         return;
     TagRegistry *reg = fs->registry;
-
-    /* trashed/hidden are membership filters for file listing (not security),
-     * kept as the registry's ids. The 7 auth-privilege tags are not registered
-     * here — their op-authority is the FIXED cabin_t.auth_bits (auth_tags.h),
-     * independent of the registry id. */
-    g_wk.trashed = register_well_known(reg, "trashed");
-    g_wk.hidden  = register_well_known(reg, "hidden");
 
     // Stamp the reserved vocabulary as system tags. Runs after tag_registry_load,
     // so it self-heals over whatever flags the disk carried; mark_system sets no
@@ -2172,8 +2154,7 @@ error_t tagfs_init(void) {
         return read;
     }
 
-    // Populate well-known tag bitmasks for O(1) checks
-    tagfs_init_well_known_tags();
+    tagfs_stamp_reserved_tags();
 
     /* Nothing is inked, nothing settled and nothing rests: every record the
      * pool holds is on the medium. And nobody waits for a cycle: a volume let

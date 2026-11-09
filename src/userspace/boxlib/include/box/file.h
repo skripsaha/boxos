@@ -8,8 +8,6 @@ extern "C" {
 #include "box/defs.h"
 #include "box/types.h"
 
-#define FILE_FLAG_TRASHED  (1 << 1)
-
 typedef struct {
     uint8_t type;        // 0=user, 1=system
     char key[11];
@@ -18,7 +16,6 @@ typedef struct {
 
 typedef struct {
     file_id_t file_id;
-    uint32_t flags;
     uint64_t size;
     uint8_t tag_count;
     char filename[32];
@@ -34,7 +31,6 @@ typedef struct {
  * caller releases both with FileMetadataRelease(). */
 typedef struct {
     file_id_t FileId;
-    uint32_t  Flags;
     uint64_t  Size;
     uint16_t  TagCount;
     char     *Filename;
@@ -48,6 +44,10 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out);
 /* Release all heap-owned members and reset Out to its empty state. */
 void FileMetadataRelease(FileMetadata *Metadata);
 
+/* Whether the file wears a tag whose key is `Key`, bare or with a value:
+ * "trashed", "settings", "log:file". What a file is, the tags it wears say. */
+bool FileMetadataWears(const FileMetadata *Metadata, const char *Key);
+
 /*
  * Inside the Use Context by default. When the user has said `use code cpp`,
  * query("project") asks for files that are code AND cpp AND project, and
@@ -60,14 +60,21 @@ void FileMetadataRelease(FileMetadata *Metadata);
  */
 int64_t create(const char* filename, const char* tags);
 int64_t create_everywhere(const char* filename, const char* tags);
-/* query writes up to max_files ids and returns how many it wrote. A caller
+/* The files that wear every tag of `tags` (every file, for NULL or "") and
+ * none of `without` (a comma list too; NULL or "" sets nothing aside). The
+ * volume sets aside no file of its own accord — trashed and hidden are tags
+ * like any other — so each asker says what it leaves out: a listing for the
+ * person "trashed,hidden" until the person names them, a name looked up to
+ * act on "trashed".
+ *
+ * query writes up to max_files ids and returns how many it wrote. A caller
  * that wants every match asks query_all: it learns the count from the kernel,
  * hands back a malloc'd list of that many ids (NULL when there are none) and
  * returns the count; the caller frees the list. */
-int query(const char* tags, file_id_t* file_ids, size_t max_files);
-int query_everywhere(const char* tags, file_id_t* file_ids, size_t max_files);
-int query_all(const char* tags, file_id_t** out_ids);
-int query_all_everywhere(const char* tags, file_id_t** out_ids);
+int query(const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
+int query_everywhere(const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
+int query_all(const char* tags, const char* without, file_id_t** out_ids);
+int query_all_everywhere(const char* tags, const char* without, file_id_t** out_ids);
 int file_info(file_id_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
  * is capped to one syscall — loop for more), or a negative -error_t on failure.
@@ -119,17 +126,20 @@ typedef struct {
 
 /* Every tag a file wears, each with how many files wear it, in the order the
  * volume first knew them: inside the Use Context, counted among the files that
- * wear its tags, or on the whole volume. A tag no file wears — a process's, a
- * Touch's — is not listed. The list and the text of every Tag are one heap
- * block the caller frees (NULL when nothing is listed). 0, or a negative
- * -error_t. */
-int tag_list(TagListed **out, size_t *count);
-int tag_list_everywhere(TagListed **out, size_t *count);
+ * wear its tags, or on the whole volume — the files wearing a tag of `without`
+ * left uncounted, as a query leaves them out. A tag no file wears — a
+ * process's, a Touch's — is not listed. The list and the text of every Tag are
+ * one heap block the caller frees (NULL when nothing is listed). 0, or a
+ * negative -error_t. */
+int tag_list(const char *without, TagListed **out, size_t *count);
+int tag_list_everywhere(const char *without, TagListed **out, size_t *count);
 
-/* Every file called `filename`, inside the Use Context. Returns how many
- * there are; the first `max` of them are written to file_ids (and out_infos,
- * when given). Asked with max == 0 it only counts. */
-int find_file_by_name(const char* filename, file_id_t* file_ids, file_info_t* out_infos, size_t max);
+/* Every file called `filename`, inside the Use Context, but those wearing a
+ * tag of `without` (as query). Returns how many there are; the first `max` of
+ * them are written to file_ids (and out_infos, when given). Asked with max ==
+ * 0 it only counts. */
+int find_file_by_name(const char* filename, const char* without, file_id_t* file_ids,
+                      file_info_t* out_infos, size_t max);
 
 /* Snapshots. On a format-v1 volume every one of these four answers
  * -ERR_UNSUPPORTED and fills in nothing: a snapshot there could be taken and

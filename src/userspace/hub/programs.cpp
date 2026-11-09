@@ -78,7 +78,7 @@ void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
     std::unordered_set<file_id_t> Seen;
     for (const char *Tag : {"app", "utility", "itinerary"}) {
         file_id_t *Ids = nullptr;
-        const int  Count = query_all_everywhere(Tag, &Ids);
+        const int  Count = query_all_everywhere(Tag, "trashed", &Ids);
         for (file_id_t File : volume::Taken(Ids, Count)) {
             if (!Seen.insert(File).second) continue;
             const std::expected<volume::Record, int> Held = volume::Record::Of(File);
@@ -90,7 +90,7 @@ void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
 Picked Pick(std::string_view Name)
 {
     file_id_t *Ids   = nullptr;
-    const int  Total = query_all_everywhere(std::string(Name).c_str(), &Ids);
+    const int  Total = query_all_everywhere(std::string(Name).c_str(), "trashed", &Ids);
     if (Total < 0) return std::unexpected(Total);
 
     // A name whose files the volume will not show — its medium gone — is

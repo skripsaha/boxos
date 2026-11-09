@@ -44,7 +44,7 @@ void View::ReadFiles(bool Everywhere)
     if (FilesRead[Everywhere]) return;
     FilesRead[Everywhere] = true;
     file_id_t *Ids   = nullptr;
-    const int  Found = Everywhere ? query_all_everywhere(nullptr, &Ids) : query_all(nullptr, &Ids);
+    const int  Found = Everywhere ? query_all_everywhere(nullptr, "trashed,hidden", &Ids) : query_all(nullptr, "trashed,hidden", &Ids);
     for (file_id_t Id : volume::Taken(Ids, Found)) {
         const std::expected<volume::Record, int> Held = volume::Record::Of(Id);
         if (Held && !Held->Name().empty())
@@ -84,7 +84,7 @@ void View::ReadTags(bool Everywhere)
     TagsRead[Everywhere] = true;
     TagListed  *Listed = nullptr;
     std::size_t Count  = 0;
-    const int   Rc     = Everywhere ? tag_list_everywhere(&Listed, &Count) : tag_list(&Listed, &Count);
+    const int   Rc     = Everywhere ? tag_list_everywhere("trashed,hidden", &Listed, &Count) : tag_list("trashed,hidden", &Listed, &Count);
     const HeldHeap<TagListed> Held(Listed);
     if (Rc == 0)
         for (std::size_t I = 0; I < Count; I++) TagList[Everywhere].emplace_back(Listed[I].Tag);

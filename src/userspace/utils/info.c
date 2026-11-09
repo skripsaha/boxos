@@ -94,7 +94,6 @@ int main(void) {
     println("File Info:");
     printf("  Filename: %s\n", metadata.Filename);
     printf("  Size: %u bytes\n", (unsigned)metadata.Size);
-    printf("  Flags: 0x%x\n", metadata.Flags);
     print_tags(metadata.Tags);
     FileMetadataRelease(&metadata);
     print_recipe(file[0]);

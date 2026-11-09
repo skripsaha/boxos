@@ -43,7 +43,7 @@ std::expected<FileFacts, std::string> ReadFacts(file_id_t File)
     Facts.Name    = Metadata.Filename ? Metadata.Filename : "";
     Facts.Tags    = Metadata.Tags ? Metadata.Tags : "";
     Facts.Size    = Metadata.Size;
-    Facts.Trashed = (Metadata.Flags & FILE_FLAG_TRASHED) != 0;
+    Facts.Trashed = FileMetadataWears(&Metadata, "trashed");
     FileMetadataRelease(&Metadata);
     return Facts;
 }
@@ -144,7 +144,7 @@ std::optional<std::string> Retag(file_id_t File, const std::vector<std::string> 
 std::expected<std::vector<file_id_t>, std::string> FilesSeen(Scope Looking)
 {
     file_id_t *Ids   = nullptr;
-    const int  Count = Looking == Scope::InContext ? query_all(nullptr, &Ids) : query_all_everywhere(nullptr, &Ids);
+    const int  Count = Looking == Scope::InContext ? query_all(nullptr, "trashed,hidden", &Ids) : query_all_everywhere(nullptr, "trashed,hidden", &Ids);
     if (Count < 0) return std::unexpected(std::format("the volume would not say what files it has: {}", Why(Count)));
     std::vector<file_id_t> Seen(Ids, Ids + Count);
     free(Ids);
@@ -154,7 +154,7 @@ std::expected<std::vector<file_id_t>, std::string> FilesSeen(Scope Looking)
 std::vector<box::tagfs::tag_count> TagsWorn(Scope Looking)
 {
     std::vector<box::tagfs::tag_count> Worn =
-        Looking == Scope::InContext ? box::tagfs::tags() : box::tagfs::tags_everywhere();
+        Looking == Scope::InContext ? box::tagfs::tags("trashed,hidden") : box::tagfs::tags_everywhere("trashed,hidden");
     std::stable_sort(Worn.begin(), Worn.end(), [](const box::tagfs::tag_count &A, const box::tagfs::tag_count &B) {
         return A.files != B.files ? A.files > B.files : Spelled(A.what) < Spelled(B.what);
     });

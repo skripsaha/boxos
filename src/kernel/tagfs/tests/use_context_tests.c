@@ -223,7 +223,7 @@ static TestResult test_use_context_walls(void)
     now = UseContextHold();
     TEST_ASSERT_EQ(UseListCount(now), 1, "one tag");
     TEST_ASSERT(use_spelled(now), "the context's tags spell");
-    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, 1, 1, ids, ARRAY_SIZE(ids), true, &page),
+    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, 1, NULL, 0, 1, ids, ARRAY_SIZE(ids), true, &page),
                    "the context's question is put to the volume");
     TEST_ASSERT_EQ(page.total, 0, "inside walls nobody has built, nothing is visible");
 
@@ -280,7 +280,7 @@ static TestResult test_use_context_narrows(void)
     now = UseContextHold();
 
     TEST_ASSERT(use_spelled(now), "the context's tags spell");
-    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, UseListCount(now), 1, s_inside,
+    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, UseListCount(now), NULL, 0, 1, s_inside,
                                   ARRAY_SIZE(s_inside), true, &page),
                    "the context's question is put to the volume");
     uint32_t n_inside = page.total;

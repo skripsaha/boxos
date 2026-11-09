@@ -294,19 +294,6 @@ typedef struct {
     TagFSLock        lock;
 } TagFSState;
 
-/* The ids of trashed and hidden, which listings leave out unless asked for
- * (tagfs_init_well_known_tags); TAGFS_INVALID_TAG_ID when the registry has no
- * such tag. Membership filters, not security: authority is the fixed
- * cabin_t.auth_bits (auth_tags.h). They were kept as 1ULL << id, which is 0
- * for every id past 63 — a volume that interned trashed late had no trash. */
-typedef struct {
-    uint32_t trashed;
-    uint32_t hidden;
-} WellKnownTags;
-
-// Accessor functions (no extern needed)
-WellKnownTags* tagfs_get_well_known_tags(void);
-
 // ----------------------------------------------------------------------------
 // Tag Registry API
 // ----------------------------------------------------------------------------
@@ -682,34 +669,36 @@ bool tagfs_key_is_reserved(const char *key, size_t key_len);
 
 /*
  * The live files a question matches, a page at a time and in file id order
- * (query/query.c): every file wearing all of `tags` ("key:..." is any tag of
- * the key) — a question of no tags is every file, TagFSListPage — leaving out
- * the trashed and the hidden unless the question names them. From file id
- * `from` on, up to `room` ids into `out`; the page says where the rest begin
- * and, when `want_total`, how many match from `from` on. OK, or the refusal:
- * ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY when the question
- * could not be put to the index.
+ * (query/query.c): every file wearing all of `tags` and none of `without`
+ * ("key:..." is any tag of the key, in either list) — a question of no tags is
+ * every file but those `without` names, and of neither every file,
+ * TagFSListPage. Every tag is a tag like any other: which files are set aside
+ * is the asker's to say, and the volume leaves out none of its own accord.
+ * From file id `from` on, up to `room` ids into `out`; the page says where the
+ * rest begin and, when `want_total`, how many match from `from` on. OK, or the
+ * refusal: ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY when the
+ * question could not be put to the index.
  */
-error_t  TagFSQueryPage(const TagSpelling* tags, uint32_t count, uint64_t from,
-                        uint64_t* out, uint32_t room, bool want_total, TagFSPage* page);
+error_t  TagFSQueryPage(const TagSpelling* tags, uint32_t count, const TagSpelling* without,
+                        uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
+                        bool want_total, TagFSPage* page);
 error_t  TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
 /*
  * The tags files wear, a page at a time and in the order of their numbers
  * (query/query.c): from the tag numbered `from` on, every tag at least one
- * live file wears — one of the files that wear all of `within`, every file for
- * none — with how many of them do, written into `out` as STORAGE_TAG_LIST
- * records (boxos_decks.h) while they fit its `room` bytes. A tag no such file
- * wears — a process's, a Touch's, a Bay's, which the registry names too — is
- * passed over; the trashed and the hidden are counted as a question counts
- * them. *used the bytes written, *delivered the records, *next the number to
- * ask from for the rest, 0 when there are none. OK, or the refusal:
- * ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY, or
- * ERR_BUFFER_TOO_SMALL when not even the first record fits.
+ * live file wears — one of the files that wear all of `within` and none of
+ * `without`, as TagFSQueryPage asks — with how many of them do, written into
+ * `out` as STORAGE_TAG_LIST records (boxos_decks.h) while they fit its `room`
+ * bytes. A tag no such file wears — a process's, a Touch's, a Bay's, which the
+ * registry names too — is passed over. *used the bytes written, *delivered the
+ * records, *next the number to ask from for the rest, 0 when there are none.
+ * OK, or the refusal: ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY,
+ * or ERR_BUFFER_TOO_SMALL when not even the first record fits.
  */
-error_t  TagFSTagPage(const TagSpelling* within, uint32_t within_count, uint32_t from,
-                      uint8_t* out, uint32_t room, uint32_t* used, uint32_t* delivered,
-                      uint32_t* next);
+error_t  TagFSTagPage(const TagSpelling* within, uint32_t within_count, const TagSpelling* without,
+                      uint32_t without_count, uint32_t from, uint8_t* out, uint32_t room, uint32_t* used,
+                      uint32_t* delivered, uint32_t* next);
 /* The file id the next create takes — no id of this volume has reached it.
  * 0 when no volume is mounted. */
 uint64_t tagfs_file_ceiling(void);
@@ -898,7 +887,6 @@ bool     TagFSTagSpelling(uint32_t tag_id, TagSpelling* out, bool* is_system);
 // Accessor Functions
 // ============================================================================
 
-WellKnownTags* tagfs_get_well_known_tags(void);
 TagFSState* tagfs_get_state(void);
 
 // ============================================================================

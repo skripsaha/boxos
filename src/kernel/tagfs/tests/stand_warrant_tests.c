@@ -293,7 +293,7 @@ static TestResult TestStandWarrantBootRunRefusedToBoth(void)
         return test_steps_aside(aside);
 
     TEST_ASSERT(fs->boot.kernel_blocks > 0, "the Deed names the blocks the loader reads");
-    TEST_ASSERT_OK(TagFSQueryPage(&key, 1, 1, &kernel, 1, false, &page), "the kernel is asked for");
+    TEST_ASSERT_OK(TagFSQueryPage(&key, 1, NULL, 0, 1, &kernel, 1, false, &page), "the kernel is asked for");
     TEST_ASSERT_EQ(page.delivered, 1, "and found");
     TEST_ASSERT(StandBlockOf(kernel, 0, &block) &&
                 block == fs->boot.kernel_block - fs->layout.data_block,

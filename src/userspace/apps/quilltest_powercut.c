@@ -479,7 +479,7 @@ static void QuillCrowdName(uint32_t number, char out[QUILL_CROWD_NAME])
 static int QuillCrowdClear(const char *name, uint32_t *deleted, file_id_t *other)
 {
     file_id_t *ids = NULL;
-    int n  = query_all_everywhere(name, &ids);
+    int n  = query_all_everywhere(name, "trashed,hidden", &ids);
     int rc = n < 0 ? n : 0;
     for (int i = 0; i < n && rc == 0; i++) {
         file_info_t info;

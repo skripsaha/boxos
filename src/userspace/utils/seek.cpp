@@ -275,7 +275,7 @@ int Seek(const std::vector<std::string> &Words, std::vector<file_id_t> Where, bo
         Place = "among " + Plural(Where.size(), "file given", "files given");
     } else {
         file_id_t *Ids   = nullptr;
-        const int  Count = query_all(nullptr, &Ids);
+        const int  Count = query_all(nullptr, "trashed,hidden", &Ids);
         if (Count < 0) {
             Print("seek: the volume would not say what files it has\n");
             return 1;
@@ -298,7 +298,7 @@ int Seek(const std::vector<std::string> &Words, std::vector<file_id_t> Where, bo
         }
         const std::string   Name    = Facts.Filename ? Facts.Filename : "";
         const std::uint64_t Size    = Facts.Size;
-        const bool          Trashed = (Facts.Flags & FILE_FLAG_TRASHED) != 0;
+        const bool          Trashed = FileMetadataWears(&Facts, "trashed");
         FileMetadataRelease(&Facts);
         if (Trashed) continue;
 

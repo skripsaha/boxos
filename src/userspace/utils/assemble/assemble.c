@@ -167,7 +167,7 @@ static int RecipeSourceThere(const BoxRecipe *Recipe, const char *Program)
         AssembleSayError(Recipe->Files[0].Name, Rc, NULL);
         return Rc;
     }
-    Trashed = Rc == 0 && (Metadata.Flags & FILE_FLAG_TRASHED) != 0;
+    Trashed = Rc == 0 && FileMetadataWears(&Metadata, "trashed");
     if (Rc == 0)
         FileMetadataRelease(&Metadata);
     if (Rc == 0 && !Trashed)

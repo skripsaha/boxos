@@ -66,15 +66,36 @@ int64_t create_everywhere(const char *filename, const char *tags)
  * it handed over, and how many there are. The crate is sized to the caller's
  * room, not to a buffer of ours — what stood here was a 1 KiB stack buffer
  * that quietly cut every ask down to 254 files. */
-static int query_scoped(const char *tags, file_id_t *file_ids, size_t max_files,
+/* The params of a question: what comes first, then the tags it sets aside,
+ * as storage.query and storage.tag.list take them — a heap block the caller
+ * frees, *size its bytes. NULL when there is no memory for it, or when the
+ * list would not fit a manifest op's params. */
+static uint8_t *question_params(const void *head, uint32_t head_size, const char *without,
+                                uint16_t *size)
+{
+    const size_t aside = without ? strlen(without) : 0;
+    if (head_size + aside > UINT16_MAX) return NULL;
+    uint8_t *params = malloc(head_size + aside);
+    if (!params) return NULL;
+    memcpy(params, head, head_size);
+    if (aside) memcpy(params + head_size, without, aside);
+    *size = (uint16_t)(head_size + aside);
+    return params;
+}
+
+static int query_scoped(const char *tags, const char *without, file_id_t *file_ids, size_t max_files,
                         uint8_t scope, uint32_t *out_total)
 {
     if (max_files > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
     if (max_files > (UINT32_MAX - 8u) / sizeof(file_id_t)) return -ERR_INVALID_ARGUMENT;
 
+    uint16_t params_size = 0;
+    uint8_t *params = question_params(&scope, sizeof(scope), without, &params_size);
+    if (!params) return without && strlen(without) >= UINT16_MAX ? -ERR_INVALID_ARGUMENT : -ERR_NO_MEMORY;
+
     uint32_t out_cap = (uint32_t)(8 + max_files * sizeof(file_id_t));
     uint8_t *out = malloc(out_cap);
-    if (!out) return -ERR_NO_MEMORY;
+    if (!out) { free(params); return -ERR_NO_MEMORY; }
 
     const void *in = NULL;
     uint32_t    in_size = 0;
@@ -85,10 +106,11 @@ static int query_scoped(const char *tags, file_id_t *file_ids, size_t max_files,
 
     uint32_t out_actual = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_QUERY,
-                     &scope, sizeof(scope),
+                     params, params_size,
                      in, in_size,
                      out, out_cap, &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
+    free(params);
     if (rc != 0) { free(out); return box_fail(rc); }
     if (out_actual < 8) { free(out); return -ERR_INTERNAL; }
 
@@ -125,7 +147,7 @@ static size_t tag_list_page_bytes(const uint8_t *page, uint32_t delivered, size_
 
 /* Every page asked for in turn, its records gathered; then the list and the
  * text laid out in one block. */
-static int tag_list_scoped(uint8_t scope, TagListed **out, size_t *count)
+static int tag_list_scoped(uint8_t scope, const char *without, TagListed **out, size_t *count)
 {
     if (!out || !count) return -ERR_INVALID_ARGUMENT;
     *out   = NULL;
@@ -139,11 +161,15 @@ static int tag_list_scoped(uint8_t scope, TagListed **out, size_t *count)
     uint32_t from = 0;
     int      rc = 0;
     for (;;) {
-        uint8_t params[5];
-        memcpy(params, &from, sizeof(from));
-        params[4] = scope;
-        rc = MfCall1(DECK_STORAGE, STORAGE_TAG_LIST, params, sizeof(params), NULL, 0,
+        uint8_t head[5];
+        memcpy(head, &from, sizeof(from));
+        head[4] = scope;
+        uint16_t params_size = 0;
+        uint8_t *params = question_params(head, sizeof(head), without, &params_size);
+        if (!params) { rc = -ERR_NO_MEMORY; break; }
+        rc = MfCall1(DECK_STORAGE, STORAGE_TAG_LIST, params, params_size, NULL, 0,
                      page, TAG_LIST_PAGE, NULL, BOX_ANSWER_GUARANTEED, NULL);
+        free(params);
         if (rc != 0) { rc = box_fail(rc); break; }
 
         uint32_t delivered, next;
@@ -203,36 +229,36 @@ static int tag_list_scoped(uint8_t scope, TagListed **out, size_t *count)
     return 0;
 }
 
-int tag_list(TagListed **out, size_t *count)
+int tag_list(const char *without, TagListed **out, size_t *count)
 {
-    return tag_list_scoped(STORAGE_SCOPE_USE, out, count);
+    return tag_list_scoped(STORAGE_SCOPE_USE, without, out, count);
 }
 
-int tag_list_everywhere(TagListed **out, size_t *count)
+int tag_list_everywhere(const char *without, TagListed **out, size_t *count)
 {
-    return tag_list_scoped(STORAGE_SCOPE_EVERYWHERE, out, count);
+    return tag_list_scoped(STORAGE_SCOPE_EVERYWHERE, without, out, count);
 }
 
-int query(const char *tags, file_id_t *file_ids, size_t max_files)
+int query(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    return query_scoped(tags, file_ids, max_files, STORAGE_SCOPE_USE, NULL);
+    return query_scoped(tags, without, file_ids, max_files, STORAGE_SCOPE_USE, NULL);
 }
 
-int query_everywhere(const char *tags, file_id_t *file_ids, size_t max_files)
+int query_everywhere(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    return query_scoped(tags, file_ids, max_files, STORAGE_SCOPE_EVERYWHERE, NULL);
+    return query_scoped(tags, without, file_ids, max_files, STORAGE_SCOPE_EVERYWHERE, NULL);
 }
 
 /* Every match, however many: ask how many there are, then ask for that many.
  * The volume may grow between the two asks — then the second answer says so,
  * and the ask is repeated with room for the new count. */
-static int query_all_scoped(const char *tags, file_id_t **out_ids, uint8_t scope)
+static int query_all_scoped(const char *tags, const char *without, file_id_t **out_ids, uint8_t scope)
 {
     if (!out_ids) return -ERR_INVALID_ARGUMENT;
     *out_ids = NULL;
 
     uint32_t total = 0;
-    int rc = query_scoped(tags, NULL, 0, scope, &total);
+    int rc = query_scoped(tags, without, NULL, 0, scope, &total);
     if (rc < 0) return rc;
 
     for (;;) {
@@ -240,7 +266,7 @@ static int query_all_scoped(const char *tags, file_id_t **out_ids, uint8_t scope
         file_id_t *ids = malloc(total * sizeof(file_id_t));
         if (!ids) return -ERR_NO_MEMORY;
         uint32_t now = 0;
-        rc = query_scoped(tags, ids, total, scope, &now);
+        rc = query_scoped(tags, without, ids, total, scope, &now);
         if (rc < 0) { free(ids); return rc; }
         if (now <= total) { *out_ids = ids; return rc; }
         free(ids);
@@ -248,14 +274,14 @@ static int query_all_scoped(const char *tags, file_id_t **out_ids, uint8_t scope
     }
 }
 
-int query_all(const char *tags, file_id_t **out_ids)
+int query_all(const char *tags, const char *without, file_id_t **out_ids)
 {
-    return query_all_scoped(tags, out_ids, STORAGE_SCOPE_USE);
+    return query_all_scoped(tags, without, out_ids, STORAGE_SCOPE_USE);
 }
 
-int query_all_everywhere(const char *tags, file_id_t **out_ids)
+int query_all_everywhere(const char *tags, const char *without, file_id_t **out_ids)
 {
-    return query_all_scoped(tags, out_ids, STORAGE_SCOPE_EVERYWHERE);
+    return query_all_scoped(tags, without, out_ids, STORAGE_SCOPE_EVERYWHERE);
 }
 
 /* =========================================================================
@@ -296,13 +322,12 @@ int file_info(file_id_t file_id, file_info_t *info)
                      out, sizeof(out), &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
-    if (out_actual < 24) return -ERR_INTERNAL;
+    if (out_actual < 20) return -ERR_INTERNAL;
 
     memset(info, 0, sizeof(*info));
 
     size_t pos = 0;
     memcpy(&info->file_id, out + pos, 8); pos += 8;
-    memcpy(&info->flags,   out + pos, 4); pos += 4;
     memcpy(&info->size,    out + pos, 8); pos += 8;
     uint16_t tag_count_raw = 0, fn_len = 0;
     memcpy(&tag_count_raw, out + pos, 2); pos += 2;
@@ -516,7 +541,7 @@ int tag_remove(file_id_t file_id, const char *key)
     return box_fail(rc);
 }
 
-int find_file_by_name(const char *filename, file_id_t *file_ids,
+int find_file_by_name(const char *filename, const char *without, file_id_t *file_ids,
                       file_info_t *out_infos, size_t max)
 {
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
@@ -543,7 +568,7 @@ int find_file_by_name(const char *filename, file_id_t *file_ids,
     }
 
     file_id_t *ids = NULL;
-    int n = query_all(by_tag ? stem : NULL, &ids);
+    int n = query_all(by_tag ? stem : NULL, without, &ids);
     if (n < 0) return n;
 
     int found = 0;
