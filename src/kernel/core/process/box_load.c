@@ -657,6 +657,16 @@ error_t BoxLoad(vmm_context_t *vmm, const ImageSource *source, const char *name,
             rc = BoxCheckHints(&load, &part, held.Bytes, &loaded->StackReserve);
         BoxLetGo(&held);
     }
+    /* How it lives, for the one word the system acts on: rise (rise.h). */
+    if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_LIFE, &part)) {
+        BoxLife life;
+        rc = BoxHoldPart(&load, &part, &held);
+        if (rc == OK && (verdict = BoxLifeRead(held.Bytes, part.Size, &life, NULL)) != BOX_OK)
+            rc = BoxRefuse(&load, verdict, &part);
+        if (rc == OK)
+            loaded->Rise = life.Rise != 0;
+        BoxLetGo(&held);
+    }
     if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_DOORS, &part)) {
         BoxDoors doors;
         rc = BoxHoldPart(&load, &part, &held);

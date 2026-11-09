@@ -24,6 +24,7 @@
 #include "fpu.h"
 #include "process.h"
 #include "autostart.h"
+#include "rise.h"
 #include "guide.h"
 #include "scheduler.h"
 #include "keyboard.h"
@@ -1057,6 +1058,7 @@ void kernel_main(void)
      * line happened to be reached — and a machine whose medium finished
      * enumerating a second later came up empty and stayed that way. */
     process_t *initial_proc = NULL;
+    RiseInit();
     int autostart_count = AutostartLaunchFromVolume(&initial_proc);
 
     /* Nothing is started in its place: with no program from a volume the

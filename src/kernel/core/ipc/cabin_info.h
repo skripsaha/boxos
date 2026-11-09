@@ -17,7 +17,8 @@
 // from (0 when the spawner handed the image over as bytes); image_base what
 // was added to every place of its image (0 for an image where it was linked);
 // parts_addr where the table of its parts in memory is (box_loaded.h), 0 for
-// a program that is no box.
+// a program that is no box; raised how many times the system raised it again
+// after it fell (rise.h), 0 at its first start.
 
 typedef struct __packed {
     uint32_t magic;              // CABIN_INFO_MAGIC ("CABN")
@@ -30,7 +31,7 @@ typedef struct __packed {
     uint64_t stack_top;          // ASLR randomized stack top
     uint64_t luggage_addr;       // user VA of the luggage bytes, 0 = none
     uint32_t luggage_length;     // byte count, not NUL-terminated on the wire
-    uint32_t luggage_reserved;
+    uint32_t raised;             // times the system raised it again after a fall
     uint64_t program_file;       // the volume's id of the program's file, 0 = none
     uint64_t image_base;         // added to every place of the image
     uint64_t parts_addr;         // user VA of the table of its parts in memory, 0 = none

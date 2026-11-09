@@ -2,14 +2,19 @@
  * the Use Context meet.
  *
  * Started by the system it begins on a clear screen with its one line of
- * greeting; started from another hub it keeps what is on the screen. */
+ * greeting; started from another hub, or raised again by the system after it
+ * fell (its life says rise), it keeps what is on the screen — the kernel's
+ * word of the fall among it. */
 
 #include "box/core/cabin.h"
+#include "box/life.h"
 #include "box/print.h"
 
 #include "hub.h"
 #include "say.h"
 #include "session.h"
+
+BOX_LIFE("task\nrise");
 
 int main()
 {
@@ -18,7 +23,7 @@ int main()
     if (!Self.Started.Begin(Self.Shown)) return 1;
     Self.Lines.Begin();
 
-    if (cabin_info()->spawner_pid == 0) clear();
+    if (cabin_info()->spawner_pid == 0 && cabin_info()->raised == 0) clear();
     if (Self.Shown.Greeting) hub::Say("BoxOS Hub — help shows what there is\n");
 
     if (!hub::Converse(Self)) {

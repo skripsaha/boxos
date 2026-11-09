@@ -25,4 +25,11 @@ void AutostartNoteVolumeLaunched(void);
  * this only ever catches a volume that arrived too late for it. */
 void AutostartWatchVolume(void);
 
+/* The file started again as the volume's programs are started — it still
+ * wears autostart and a program's tag, and is not in the trash — made and
+ * held, not yet let run: the caller lets it run (ProcessStartCreated) and
+ * gives the reference back. NULL when it no longer asks to be started, or
+ * could not be (said). For rise.h. */
+struct process_t *AutostartAgain(uint64_t file_id);
+
 #endif /* AUTOSTART_H */

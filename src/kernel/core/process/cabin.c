@@ -18,7 +18,7 @@
 #include "touch.h"     /* TouchCleanupProcess — each strand's death, committed once */
 #include "proc_exit.h"
 #include "cabin_info.h"  /* CabinProgram — the program is what the cabin's own page says */
-
+#include "rise.h"        /* RiseProgramEnded — a fall the system raises again */
 /*
  * cabin_set_tag_bit — intern a single tag id into the cabin's fast-path
  * bitfield or overflow array.  Mirrors the former process_set_tag_bit logic.
@@ -462,4 +462,10 @@ void CabinEnd(process_t *named, int32_t disposition)
         cabin_end_strand(main_strand, shared);
         process_ref_dec(main_strand);
     }
+
+    /* The program's end, as its main strand ended — the named one's own end,
+     * or the one the others share: a fall the system raises again (rise.h). */
+    uint32_t program = 0, program_generation = 0;
+    if (cabin && CabinProgram(cabin, &program, &program_generation))
+        RiseProgramEnded(program, program_generation, named->hammock_base == 0 ? disposition : shared);
 }

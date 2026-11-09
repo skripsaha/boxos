@@ -1112,12 +1112,13 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
      * after this load and before the first dispatch); autostart never does. */
     ci->luggage_addr     = 0;
     ci->luggage_length   = 0;
-    ci->luggage_reserved = 0;
+    ci->raised           = 0;
     ci->program_file     = source->FileId;
     ci->image_base       = loaded.ImageBase;
     ci->parts_addr       = loaded.PartsVa;
 
     proc->cabin->code_size = (size_t)source->Bytes;
+    proc->cabin->rise      = loaded.Rise;
     proc->context.rip = entry_point;
     proc->context.rsp = stack_top;
 

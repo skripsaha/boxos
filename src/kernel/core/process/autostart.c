@@ -1,5 +1,6 @@
 #include "autostart.h"
 #include "process.h"
+#include "rise.h"
 #include "tagfs.h"
 #include "tag_registry/tag_registry.h"
 #include "touch.h"
@@ -40,18 +41,23 @@ void AutostartNoteVolumeLaunched(void)
     __atomic_store_n(&g_volume_launched, 1u, __ATOMIC_RELEASE);
 }
 
+/* A file the system starts: it wears autostart and a program's tag, and is
+ * not in the trash. The walk's question leaves the trash out already; a file
+ * started again (AutostartAgain) is held to the same word here. */
 static bool autostart_wanted(const TagFSMetadata *meta)
 {
     bool has_autostart = false;
     bool has_exec_tag  = false;
+    bool trashed       = false;
     for (uint32_t t = 0; t < meta->tag_count; t++) {
         char key[128];
         if (!tagfs_tag_key(meta->tag_ids[t], key, sizeof(key))) continue;
         if (strcmp(key, "autostart") == 0) has_autostart = true;
         if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0)
             has_exec_tag = true;
+        if (strcmp(key, "trashed") == 0) trashed = true;
     }
-    return has_autostart && has_exec_tag;
+    return has_autostart && has_exec_tag && !trashed;
 }
 
 /* Read one file out of the volume and turn it into a process. Returns the
@@ -155,8 +161,10 @@ static void AutostartLetRun(AutostartHeld *held)
  * loaded, not yet let run and referenced for the walk — its caller lets it run
  * and gives the reference back — or NULL when it does not ask or could not be
  * started (said by the launch). The reference is taken before the line names
- * the PID: a kill by that PID cannot free what the walk still holds. */
-static process_t *autostart_consider(uint64_t file_id)
+ * the PID: a kill by that PID cannot free what the walk still holds. A program
+ * whose box says rise is watched from here, before it runs (rise.h); `again`
+ * says it is a rise's start, not the volume's first. */
+static process_t *autostart_consider(uint64_t file_id, bool again)
 {
     TagFSMetadata meta;
     if (tagfs_get_metadata(file_id, &meta) != 0) return NULL;
@@ -177,7 +185,9 @@ static process_t *autostart_consider(uint64_t file_id)
     process_t *proc = autostart_launch_one(file_id, &meta, tags);
     if (proc) {
         process_ref_inc(proc);
-        kprintf("[AUTOSTART] Started '%s' (PID %u, tags: %s)\n",
+        RiseWatch(proc, file_id, meta.filename);
+        kprintf(again ? "[RISE] '%s' raised again (PID %u, tags: %s)\n"
+                      : "[AUTOSTART] Started '%s' (PID %u, tags: %s)\n",
                 meta.filename, proc->pid, tags);
     }
     kfree(tags);
@@ -211,7 +221,7 @@ static int AutostartWalk(process_t **out_first, AutostartHeld *held)
         if (TagFSQueryPage(&wanted, 1, &aside, 1, from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK)
             break;
         for (uint32_t i = 0; i < page.delivered; i++) {
-            process_t *proc = autostart_consider(file_ids[i]);
+            process_t *proc = autostart_consider(file_ids[i], false);
             if (!proc) continue;
             launched++;
             if (out_first && !*out_first) *out_first = proc;
@@ -241,6 +251,11 @@ bool AutostartVolumeHere(void)
 int AutostartLaunchFromVolume(process_t **out_first)
 {
     return AutostartWalk(out_first, NULL);
+}
+
+process_t *AutostartAgain(uint64_t file_id)
+{
+    return AutostartVolumeHere() ? autostart_consider(file_id, true) : NULL;
 }
 
 static void autostart_on_volume_mounted(TouchTag tag, const void *payload,

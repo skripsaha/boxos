@@ -164,6 +164,10 @@ typedef struct cabin_t
     uint8_t  fell_vector;
     uint32_t fell_offset;
     char     fell_in[PROC_FELL_IN_MAX];
+
+    /* Its box says `rise`: when the system started it, a fall raises it again
+     * (rise.h). Set by the load, before the program runs. */
+    uint8_t  rise;
 } cabin_t;
 
 _Static_assert(sizeof(cabin_t) < 4096, "cabin_t must fit in one page");

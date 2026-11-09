@@ -175,6 +175,7 @@ error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *nam
     loaded->Thread         = (ImageThread){ 0 };
     loaded->ThreadPointer  = 0;
     loaded->StackReserve   = CONFIG_USER_STACK_RESERVE;
+    loaded->Rise           = false;
 
     error_t rc = ImageSourceRead(source, 0, head, look, name);
     if (rc != OK)

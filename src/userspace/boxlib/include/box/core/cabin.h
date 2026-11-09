@@ -22,7 +22,9 @@ extern "C" {
  * started from (0 when its spawner handed the image over as bytes), image_base
  * what was added to every place of its image (0 for an image where it was
  * linked), parts_addr where the table of its parts in memory is
- * (box_loaded.h) — 0 for a program that is no box.
+ * (box_loaded.h) — 0 for a program that is no box — and raised, how many
+ * times the system raised it again after it fell (its life says rise), 0 at
+ * its first start.
  */
 typedef struct PACKED {
     uint32_t magic;           /* CABIN_INFO_MAGIC ("CABN") */
@@ -35,7 +37,7 @@ typedef struct PACKED {
     uint64_t stack_top;
     uint64_t luggage_addr;
     uint32_t luggage_length;
-    uint32_t luggage_reserved;
+    uint32_t raised;
     uint64_t program_file;
     uint64_t image_base;
     uint64_t parts_addr;

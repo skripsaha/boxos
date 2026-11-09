@@ -63,7 +63,7 @@
 #include "layers.h"
 #include "ring.h"
 
-BOX_LIFE("serves");
+BOX_LIFE("serves\nrise");
 
 namespace {
 
