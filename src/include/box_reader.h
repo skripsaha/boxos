@@ -633,15 +633,30 @@ static inline BoxVerdict BoxDoorsRead(const uint8_t *bytes, uint64_t size, const
     return start ? BOX_OK : BOX_NO_START;
 }
 
+/* Door `index` of doors BoxDoorsRead accepted: its name and its offset from
+ * the image base. False past the last. */
+static inline bool BoxDoorAt(const BoxDoors *doors, uint32_t index, const uint8_t **name,
+                             uint16_t *length, uint64_t *offset)
+{
+    if (index >= doors->Count) return false;
+    const uint8_t *entry = BoxDoorEntry(doors, index);
+    *name   = doors->Bytes + BOX_DOORS_HEAD_BYTES + (uint64_t)doors->Count * BOX_DOOR_BYTES +
+              BoxU32(entry + 8);
+    *length = BoxU16(entry + 12);
+    *offset = BoxU64(entry);
+    return true;
+}
+
 /* The door named `name` of doors BoxDoorsRead accepted: its offset from the
  * image base. */
 static inline bool BoxDoorFind(const BoxDoors *doors, const char *name, uint64_t *offset)
 {
-    uint64_t names_at = BOX_DOORS_HEAD_BYTES + (uint64_t)doors->Count * BOX_DOOR_BYTES;
-    for (uint32_t i = 0; i < doors->Count; i++) {
-        const uint8_t *entry = BoxDoorEntry(doors, i);
-        if (BoxSpanIs(doors->Bytes + names_at + BoxU32(entry + 8), BoxU16(entry + 12), name)) {
-            *offset = BoxU64(entry);
+    const uint8_t *door;
+    uint16_t       length;
+    uint64_t       at;
+    for (uint32_t i = 0; BoxDoorAt(doors, i, &door, &length, &at); i++) {
+        if (BoxSpanIs(door, length, name)) {
+            *offset = at;
             return true;
         }
     }

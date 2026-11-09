@@ -461,6 +461,13 @@ static void TestDoors(void)
               !BoxDoorFind(&doors, "stop", &offset),
           "the doors read as written");
 
+    const uint8_t *name;
+    uint16_t       length;
+    Check(BoxDoorAt(&doors, 0, &name, &length, &offset) && length == 7 && memcmp(name, "service", 7) == 0 &&
+              offset == 0x2F0 && BoxDoorAt(&doors, 1, &name, &length, &offset) && length == 5 &&
+              memcmp(name, "start", 5) == 0 && offset == 0x10 && !BoxDoorAt(&doors, 2, &name, &length, &offset),
+          "the doors one by one, in the order of their names");
+
     uint8_t    bytes[128];
     uint64_t   size;
     BoxPenDoor one[1] = { { "help", 0x10 } };

@@ -71,7 +71,7 @@ UTILS = help create show files tag untag name trash erase assemble \
         playtime lavalamp finish taskcenter hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
-        edit seek retag read
+        edit seek retag read inside
 
 .PHONY: all clean
 
@@ -90,6 +90,13 @@ include ../nameplate.mk
 
 %.elf: $(BOXLIB_START) %.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
+
+# inside is its one source shared with tools/inside (inside/inside_show.c) and
+# the utility's own main.
+INSIDE_OBJS = inside.o inside/inside_show.o
+
+inside.elf: $(BOXLIB_START) $(INSIDE_OBJS) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $(INSIDE_OBJS) $(BOXLIB))
 
 assemble.elf: $(BOXLIB_START) $(ASSEMBLE_OBJS) $(ASSEMBLE_RUNTIME_BLOB) \
 		$(ASSEMBLE_ENTRY_BLOB) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
@@ -344,4 +351,4 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	nasm -f elf64 $< -o $@
 
 clean:
-	rm -f *.o *.d *.elf $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d
+	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d

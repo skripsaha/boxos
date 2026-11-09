@@ -741,6 +741,8 @@ LDFLAGS        = -g -T $(ENTRYDIR)/linker.ld -nostdlib -z max-page-size=0x1000 -
 # ==== DIRECTORIES ====
 SRCDIR      = src
 BUILDDIR    = build
+# What a program file is made of, said on the build machine (tools/inside.c).
+INSIDE_TOOL = $(BUILDDIR)/inside
 BOOTDIR     = $(SRCDIR)/boot
 KERNELDIR   = $(SRCDIR)/kernel
 ENTRYDIR    = $(KERNELDIR)/entry
@@ -835,7 +837,7 @@ UTIL_NAMES = help create show files tag untag name trash erase assemble \
              playtime lavalamp finish taskcenter hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
-             edit seek retag read rollcall handset
+             edit seek retag read rollcall handset inside
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -910,7 +912,7 @@ CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 .DELETE_ON_ERROR:
 
 # ==== MAIN TARGET ====
-all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) uefi check-endbr64
+all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) uefi check-endbr64 $(INSIDE_TOOL)
 
 # ==== CET / IBT POST-LINK AUDIT ====
 # Verifies every globally-visible function in the kernel ELF begins with
@@ -1017,6 +1019,17 @@ $(PACK_TOOL): tools/pack.c tools/box_host.h $(SRCDIR)/include/box_format.h \
               $(SRCDIR)/include/box_reader.h $(SRCDIR)/include/box_pen.h $(PACK_SHA256) | $(BUILDDIR)
 	@echo "Compiling the pack tool for $(UNAME_S) ($(UNAME_M))..."
 	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -I$(SRCDIR)/include -Itools tools/pack.c $(PACK_SHA256) -o $@
+
+# tools/inside — what a program file is made of, on the build machine: the
+# same source as the utility inside (utils/inside/inside_show.c), built with
+# INSIDE_HOST, its SHA-256 BoxLib's own like the pack tool's. INSIDE_TOOL is
+# named beside BUILDDIR, before `all` names it.
+$(INSIDE_TOOL): tools/inside.c tools/box_host.h $(UTILS_DIR)/inside/inside_show.c \
+                $(UTILS_DIR)/inside/inside_show.h $(SRCDIR)/include/box_format.h \
+                $(SRCDIR)/include/box_reader.h $(SRCDIR)/include/nameplate_format.h $(PACK_SHA256) | $(BUILDDIR)
+	@echo "Compiling the inside tool for $(UNAME_S) ($(UNAME_M))..."
+	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -DINSIDE_HOST -I$(SRCDIR)/include -Itools \
+	    -I$(UTILS_DIR)/inside tools/inside.c $(UTILS_DIR)/inside/inside_show.c $(PACK_SHA256) -o $@
 
 # parcel-host: tools/parcel_host.mk (a host test, its own file).
 include tools/parcel_host.mk
@@ -1285,7 +1298,8 @@ $(UTILS_DIR)/timezone.elf: $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 UTILS_STAMP  := $(UTILS_DIR)/.utils.stamp
 UTILS_INPUTS := $(wildcard $(UTILS_DIR)/*.c) $(wildcard $(UTILS_DIR)/*.cpp) \
                 $(wildcard $(UTILS_DIR)/*.h) $(UTILS_DIR)/Makefile \
-                $(wildcard $(UTILS_DIR)/assemble/*.c) $(wildcard $(UTILS_DIR)/assemble/*.h)
+                $(wildcard $(UTILS_DIR)/assemble/*.c) $(wildcard $(UTILS_DIR)/assemble/*.h) \
+                $(wildcard $(UTILS_DIR)/inside/*.c) $(wildcard $(UTILS_DIR)/inside/*.h)
 
 ifneq ($(words $(wildcard $(UTIL_ELFS))),$(words $(UTIL_ELFS)))
 $(shell rm -f $(UTILS_STAMP))
@@ -1518,6 +1532,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/assemble.elf "utility,toolchain" \
 	$(UTILS_DIR)/me.elf      "utility" \
 	$(UTILS_DIR)/info.elf    "utility,storage" \
+	$(UTILS_DIR)/inside.elf  "utility,storage" \
 	$(UTILS_DIR)/say.elf     "utility" \
 	$(UTILS_DIR)/reboot.elf  "utility,system" \
 	$(UTILS_DIR)/bye.elf     "utility,system" \
