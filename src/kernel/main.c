@@ -381,6 +381,7 @@ void kernel_main(void)
     XhciRingSelfTest();
     slab_identity_selftest();
     KHeapLiveSelfTest();
+    KHeapReallocSelfTest();
 
     debug_printf("[INIT] TSS Dynamic Stacks...\n");
     tss_setup_dynamic_stacks();

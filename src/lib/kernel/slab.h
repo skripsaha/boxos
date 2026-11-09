@@ -52,6 +52,9 @@ void* SlabAllocFor(size_t size, KHeapCharge charge);
 void  slab_free(void* ptr);
 void  slab_activate_pull_map(void);
 bool  slab_owns(void* ptr);
+/* The bytes the slab object at `ptr` may hold — its size class — held to its
+ * page's grid as slab_free holds it. Only of an object slab_owns. */
+size_t SlabObjectSize(void* ptr);
 /* Bytes the slab holds for somebody right now: every object handed out and
  * not given back, at its class size. */
 size_t SlabLiveBytes(void);

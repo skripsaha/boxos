@@ -253,22 +253,25 @@ void* SlabAllocFor(size_t size, KHeapCharge charge) {
     return ptr;
 }
 
-void slab_free(void* ptr) {
-    if (!ptr || !g_slab.initialized) return;
-
+/* The page of the slab object at `ptr`, held to its grid, and the index of
+ * its size class: NULL when the page's header names no size class at all.
+ * `why` names the call in what stops the machine, and — laid into its caller —
+ * the return address it names is the caller's caller's. */
+static inline __attribute__((always_inline)) SlabPage* SlabPageOnGrid(void* ptr, const char* why,
+                                                                       int* class_index) {
     // Find the SlabPage header at the start of the 4KB page
     uintptr_t addr = (uintptr_t)ptr;
     uintptr_t page_base = addr & ~(uintptr_t)(SLAB_PAGE_SIZE - 1);
     SlabPage* page = (SlabPage*)page_base;
 
     // Validate this looks like a slab page
-    if (page->obj_size == 0 || page->obj_size > SLAB_LARGE_THRESHOLD) return;
+    if (page->obj_size == 0 || page->obj_size > SLAB_LARGE_THRESHOLD) return NULL;
 
     int idx = slab_size_class(page->obj_size);
-    if (idx < 0) return;
+    if (idx < 0) return NULL;
     if (page->charge >= KHEAP_CHARGE_COUNT)
-        panic("[SLAB] free of %p: its page %p names charge %u — the header was "
-              "overwritten\n", ptr, (void *)page, page->charge);
+        panic("[SLAB] %s of %p: its page %p names charge %u — the header was "
+              "overwritten\n", why, ptr, (void *)page, page->charge);
 
     /* A genuine slab block sits ON the object grid of its page: at or past
      * the header, and an exact multiple of obj_size from it. A pointer that
@@ -286,16 +289,37 @@ void slab_free(void* ptr) {
         if (off < header_size ||
             ((uint32_t)(off - header_size) % page->obj_size) != 0 ||
             (uint32_t)off + page->obj_size > SLAB_PAGE_SIZE) {
-            panic("[SLAB] free of non-slab pointer %p: off-grid for page %p "
+            panic("[SLAB] %s of non-slab pointer %p: off-grid for page %p "
                   "(obj_size=%u header=%u free=%u/%u bit=%d) caller=%p — "
                   "double free across a page reincarnation, or a foreign "
                   "pointer routed here\n",
-                  ptr, (void *)page, page->obj_size, header_size,
+                  why, ptr, (void *)page, page->obj_size, header_size,
                   page->free_count, page->total_slots,
                   (int)slab_bit_test(vmm_virt_to_phys_direct(ptr) & ~(uintptr_t)(SLAB_PAGE_SIZE-1)),
                   __builtin_return_address(0));
         }
     }
+    *class_index = idx;
+    return page;
+}
+
+size_t SlabObjectSize(void* ptr) {
+    int       idx  = 0;
+    SlabPage* page = SlabPageOnGrid(ptr, "resize", &idx);
+    if (!page)
+        panic("[SLAB] resize of %p: the page registry holds its page, and the page's "
+              "header names no size class — the header was overwritten\n", ptr);
+    return page->obj_size;
+}
+
+void slab_free(void* ptr) {
+    if (!ptr || !g_slab.initialized) return;
+
+    int       idx  = 0;
+    SlabPage* page = SlabPageOnGrid(ptr, "free", &idx);
+    if (!page) return;
+    uintptr_t addr      = (uintptr_t)ptr;
+    uintptr_t page_base = (uintptr_t)page;
 
     SlabClass* cls = &g_slab.classes[page->charge][idx];
     spin_lock(&cls->lock);

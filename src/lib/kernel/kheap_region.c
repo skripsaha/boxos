@@ -495,23 +495,46 @@ bool KHeapLargeOwns(const void *ptr)
     return PageMapTest(&g_large_heads, vmm_virt_to_phys_direct((void *)head));
 }
 
-void KHeapLargeGive(void *ptr)
+/* A large piece's head, its guards held: a destroyed one stops the machine
+ * with the piece named and `why` — the call that met it. */
+static KHeapLargeHead *LargeHeadChecked(void *ptr, const char *why)
 {
     KHeapLargeHead *head = (KHeapLargeHead *)ptr - 1;
 
     if (head->magic != KHEAP_LARGE_MAGIC || head->canary != HEAP_CANARY_MAGIC)
-        panic("[HEAP] kfree(%p): a large piece's head is destroyed (magic 0x%llx, "
+        panic("[HEAP] %s(%p): a large piece's head is destroyed (magic 0x%llx, "
               "canary 0x%llx) — an underflow of the piece, or a block of another "
-              "allocator", ptr, (unsigned long long)head->magic,
+              "allocator", why, ptr, (unsigned long long)head->magic,
               (unsigned long long)head->canary);
     if (head->pages != LargePages(head->size))
-        panic("[HEAP] kfree(%p): a large piece says %zu pages for %zu bytes — its head "
-              "was overwritten", ptr, head->pages, head->size);
+        panic("[HEAP] %s(%p): a large piece says %zu pages for %zu bytes — its head "
+              "was overwritten", why, ptr, head->pages, head->size);
     uint64_t end = *(uint64_t *)((uint8_t *)ptr + head->size);
     if (end != HEAP_CANARY_MAGIC)
-        panic("[HEAP] kfree(%p): end canary destroyed (size=%zu, expected 0x%llx, got "
+        panic("[HEAP] %s(%p): end canary destroyed (size=%zu, expected 0x%llx, got "
               "0x%llx) — buffer overflow in this block\n",
-              ptr, head->size, HEAP_CANARY_MAGIC, (unsigned long long)end);
+              why, ptr, head->size, HEAP_CANARY_MAGIC, (unsigned long long)end);
+    return head;
+}
+
+size_t KHeapLargeSize(void *ptr)
+{
+    return LargeHeadChecked(ptr, "krealloc")->size;
+}
+
+bool KHeapLargeResize(void *ptr, size_t size)
+{
+    KHeapLargeHead *head = LargeHeadChecked(ptr, "krealloc");
+    if (LargePages(size) != head->pages)
+        return false;
+    head->size = size;
+    *(uint64_t *)((uint8_t *)ptr + size) = HEAP_CANARY_MAGIC;
+    return true;
+}
+
+void KHeapLargeGive(void *ptr)
+{
+    KHeapLargeHead *head = LargeHeadChecked(ptr, "kfree");
 
     size_t      pages  = head->pages;
     KHeapCharge charge = (KHeapCharge)head->charge;

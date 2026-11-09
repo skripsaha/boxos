@@ -92,6 +92,14 @@ bool   KHeapIsLarge(size_t size);
 void  *KHeapLargeTake(size_t size, KHeapCharge charge);
 bool   KHeapLargeOwns(const void *ptr);
 void   KHeapLargeGive(void *ptr);
+/* The bytes a large piece holds for its owner: its size as asked, or as last
+ * resized. */
+size_t KHeapLargeSize(void *ptr);
+/* The large piece made to hold `size` bytes in the pages it has: true when
+ * that takes as many pages as it holds — its size and end canary moved, the
+ * bytes before them as they were — false, nothing changed, when it would take
+ * another count of pages. */
+bool   KHeapLargeResize(void *ptr, size_t size);
 size_t KHeapLiveOutsideSlab(void);
 size_t KHeapRegionSlack(void);
 

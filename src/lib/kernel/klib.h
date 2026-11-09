@@ -77,11 +77,21 @@ void list_for_each(list_t* list, void (*func)(void*));
  * the heap serves, and what it keeps back, is kheap.h. */
 size_t KHeapLiveBytes(void);
 void   KHeapLiveSelfTest(void);
+/* krealloc proven on every road of the heap, at boot (klib_mem.c). */
+void   KHeapReallocSelfTest(void);
 
 void mem_init(void);
 void mem_activate_pull_map(void);
 void* kmalloc(size_t size);
 void kfree(void* ptr);
+/* The block at `ptr` made to hold `size` bytes, its first bytes kept — the
+ * fewer of what it held and of `size`: where it lies when what it holds takes
+ * them (a slab object's class, a large piece's pages, the payload the pool
+ * gave a block), else in a block of its own, the old one given back. NULL
+ * `ptr` is kmalloc(size); `size` 0 gives the block back and answers NULL.
+ * NULL when the heap would not give the room: the old block is then as it
+ * was, and still the caller's. */
+void* krealloc(void* ptr, size_t size);
 
 #ifdef CONFIG_VOLUME_TESTS
 /*

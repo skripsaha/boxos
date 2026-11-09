@@ -1,4 +1,4 @@
-/* klib_mem.c — the kernel heap's front: kmalloc and kfree.
+/* klib_mem.c — the kernel heap's front: kmalloc, krealloc and kfree.
  *
  * Four roads, and each allocation takes one:
  *   1. The reserve, for the kernel's own paths (kheap.h), first.
@@ -141,6 +141,102 @@ void KHeapLiveSelfTest(void)
                 pool_rise, large_rise, large_road ? "on its road" : "NOT on its road",
                 slab_rise, got, obj_count, back, start);
     }
+}
+
+/* Bytes laid and read back in a pattern no other byte of the test lays. */
+static void ReallocFill(uint8_t *bytes, size_t count, uint8_t seed)
+{
+    for (size_t i = 0; i < count; i++)
+        bytes[i] = (uint8_t)(seed + i * 7u);
+}
+
+static bool ReallocHolds(const uint8_t *bytes, size_t count, uint8_t seed)
+{
+    for (size_t i = 0; i < count; i++)
+        if (bytes[i] != (uint8_t)(seed + i * 7u))
+            return false;
+    return true;
+}
+
+/* krealloc proven on every road before anything leans on it, as the figure
+ * above is — from kernel_main, on the BSP alone and after the Pull Map: a slab
+ * object grown inside its class stays where it lies, and grown past the slab
+ * moves to the pool with its bytes; a pool block shrunk stays; a large piece
+ * grown inside its pages stays, and grown past them moves with its bytes; a
+ * NULL block is a fresh one and size 0 gives a block back; and once all is
+ * given back the heap holds, to the byte, what it held before. */
+void KHeapReallocSelfTest(void)
+{
+    const size_t start = KHeapLiveBytes();
+    const char  *broke = NULL;
+    uint8_t     *next;
+
+    /* One block through the slab and the pool — always the one still held,
+     * since a krealloc refused leaves the old block the caller's. */
+    uint8_t *block = kmalloc(40);
+    if (!block)
+        broke = "no slab object of 40 bytes was given";
+    if (!broke) {
+        ReallocFill(block, 40, 1);
+        next = krealloc(block, 48);
+        if (!next || next != block || !ReallocHolds(next, 40, 1))
+            broke = "a slab object grown inside its class did not stay where it lay, its bytes as they were";
+        if (next) block = next;
+    }
+    if (!broke) {
+        next = krealloc(block, 3000);
+        if (!next || next == block || slab_owns(next) || !ReallocHolds(next, 40, 1))
+            broke = "a slab object grown past the slab did not move to the pool with its bytes";
+        if (next) block = next;
+    }
+    if (!broke) {
+        ReallocFill(block, 3000, 2);
+        next = krealloc(block, 2000);
+        if (!next || next != block || !ReallocHolds(next, 2000, 2))
+            broke = "a pool block shrunk did not stay where it lay, its bytes as they were";
+        if (next) block = next;
+    }
+
+    /* And one large piece. */
+    uint8_t *piece = broke ? NULL : kmalloc(65536);
+    if (!broke && (!piece || !KHeapLargeOwns(piece)))
+        broke = "a piece of 64 KiB was not a large piece";
+    if (!broke) {
+        ReallocFill(piece, 65536, 3);
+        next = krealloc(piece, 69000);
+        if (!next || next != piece || !ReallocHolds(next, 65536, 3))
+            broke = "a large piece grown inside its pages did not stay where it lay, its bytes as they were";
+        if (next) piece = next;
+    }
+    if (!broke) {
+        next = krealloc(piece, 131072);
+        if (!next || next == piece || !ReallocHolds(next, 65536, 3))
+            broke = "a large piece grown past its pages did not move with its bytes";
+        if (next) piece = next;
+    }
+
+    if (!broke) {
+        uint8_t *fresh = krealloc(NULL, 100);
+        if (!fresh)
+            broke = "a NULL block was not made a fresh one";
+        else if (krealloc(fresh, 0) != NULL)
+            broke = "size 0 did not give a block back";
+    }
+
+    kfree(block);
+    kfree(piece);
+    const size_t back = KHeapLiveBytes();
+    if (!broke && back != start)
+        broke = "what the heap held did not come back to where it started";
+
+    if (!broke)
+        kprintf("[KLIB] heap krealloc self-test passed — a slab object grown in its class and "
+                "past it, a pool block shrunk, a large piece grown in its pages and past them, "
+                "a NULL block and a block given back with size 0 (%zu bytes live before and after)\n",
+                back);
+    else
+        kprintf("[KLIB] heap krealloc self-test FAILED: %s (%zu bytes live before, %zu after)\n",
+                broke, start, back);
 }
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -309,6 +405,105 @@ void *kmalloc(size_t size)
     return KHeapGuardedTake(size, (KHeapCharge)who.charge, false);
 }
 
+/* The guard of a pool block, its canaries held: a pointer no pool region holds,
+ * or a block whose guards are destroyed, stops the machine with the pointer and
+ * `why` — the call that met it. The guard is reached through its Pull Map
+ * alias. */
+static heap_guard_t *PoolGuardChecked(void *ptr, const char *why)
+{
+    /* Ask the page map BEFORE dereferencing the guard header. A garbage
+     * pointer (an overwritten local, a stale handle) used to reach the canary
+     * loads below, read whatever happened to live at ptr-0x20, and die in a
+     * SILENT cli;hlt behind debug_printf — which compiles to nothing in a
+     * normal build. The machine froze without a word; naming the pointer
+     * and halting loudly is the whole difference between a diagnosis and a
+     * morning of guessing. panic() prints, dumps and stops every core. */
+    heap_guard_t *guard = (heap_guard_t *)((uint8_t *)ptr - sizeof(heap_guard_t));
+
+    if (!KHeapPoolOwns((uint8_t *)guard - sizeof(mem_block_t)))
+        panic("[HEAP] %s(%p): not a heap pointer — no slab page, no large piece, "
+              "no pool region holds it: freed twice, never allocated, or an "
+              "overwritten local\n", why, ptr);
+
+    /* A block handed out through the boot identity window and given back after
+     * the Pull Map took over is reached through its Pull Map alias, as its
+     * region's free list is: blocks of one region are ordered by address. */
+    ptr   = vmm_phys_to_virt(vmm_virt_to_phys_direct(ptr));
+    guard = (heap_guard_t *)((uint8_t *)ptr - sizeof(heap_guard_t));
+
+    if (guard->canary_start != HEAP_CANARY_MAGIC) {
+        /* Slab-lens on the pointer's page: a destroyed "canary" of 0 with a
+         * page whose first words parse as a plausible SlabPage is the
+         * signature of an impostor page handed out by the slab free-list
+         * (see slab.c recruitment gates) — print the page's claimed
+         * geometry so the corpse names its allocator. */
+        const SlabPage *lens = (const SlabPage *)((uintptr_t)ptr & ~(uintptr_t)0xFFF);
+        panic("[HEAP] %s(%p): start canary destroyed "
+              "(expected 0x%llx, got 0x%llx); page lens: obj_size=%u "
+              "slots=%u free=%u head=%u — impostor slab page, a neighbour "
+              "overflow, or not a block start\n",
+              why, ptr, HEAP_CANARY_MAGIC, guard->canary_start,
+              lens->obj_size, lens->total_slots, lens->free_count, lens->free_head);
+    }
+
+    uint64_t *end_canary = (uint64_t *)((uint8_t *)guard + guard->canary_end_offset);
+    if (*end_canary != HEAP_CANARY_MAGIC)
+        panic("[HEAP] %s(%p): end canary destroyed (size=%zu, "
+              "expected 0x%llx, got 0x%llx) — buffer overflow in this block\n",
+              why, ptr, guard->size, HEAP_CANARY_MAGIC, *end_canary);
+    return guard;
+}
+
+/* The pool block made to hold `size` bytes where it lies: true when its
+ * payload — what the pool gave, which may be more than was asked — holds them
+ * with its guards, its end canary moved; false, nothing changed, otherwise. */
+static bool PoolResize(heap_guard_t *guard, size_t size)
+{
+    const mem_block_t *block = (const mem_block_t *)((const uint8_t *)guard - sizeof(mem_block_t));
+    if (block->size < sizeof(heap_guard_t) + sizeof(uint64_t) ||
+        size > block->size - sizeof(heap_guard_t) - sizeof(uint64_t))
+        return false;
+    guard->size              = size;
+    guard->canary_end_offset = sizeof(heap_guard_t) + size;
+    *(uint64_t *)((uint8_t *)guard + guard->canary_end_offset) = HEAP_CANARY_MAGIC;
+    return true;
+}
+
+void *krealloc(void *ptr, size_t size)
+{
+    if (!ptr)
+        return kmalloc(size);
+    if (size == 0) {
+        kfree(ptr);
+        return NULL;
+    }
+
+    /* Where the block lies, when what it holds takes `size`; else the bytes of
+     * it that are its owner's, carried into a block of their own. */
+    size_t held;
+    if (slab_owns(ptr)) {
+        held = SlabObjectSize(ptr);
+        if (size <= held)
+            return ptr;
+    } else if (KHeapLargeOwns(ptr)) {
+        held = KHeapLargeSize(ptr);
+        if (KHeapLargeResize(ptr, size))
+            return ptr;
+    } else {
+        heap_guard_t *guard = PoolGuardChecked(ptr, "krealloc");
+        held = guard->size;
+        if (PoolResize(guard, size))
+            return ptr;
+    }
+
+    void *fresh = kmalloc(size);
+    if (!fresh)
+        return NULL;
+    memcpy(fresh, ptr, held < size ? held : size);
+    kfree(ptr);
+    return fresh;
+}
+
 void kfree(void *ptr)
 {
     if (!ptr)
@@ -326,46 +521,5 @@ void kfree(void *ptr)
         return;
     }
 
-    /* Ask the page map BEFORE dereferencing the guard header. A garbage
-     * pointer (an overwritten local, a stale handle) used to reach the canary
-     * loads below, read whatever happened to live at ptr-0x20, and die in a
-     * SILENT cli;hlt behind debug_printf — which compiles to nothing in a
-     * normal build. The machine froze without a word; naming the pointer
-     * and halting loudly is the whole difference between a diagnosis and a
-     * morning of guessing. panic() prints, dumps and stops every core. */
-    heap_guard_t *guard = (heap_guard_t *)((uint8_t *)ptr - sizeof(heap_guard_t));
-
-    if (!KHeapPoolOwns((uint8_t *)guard - sizeof(mem_block_t)))
-        panic("[HEAP] kfree(%p): not a heap pointer — no slab page, no large piece, "
-              "no pool region holds it: freed twice, never allocated, or an "
-              "overwritten local\n", ptr);
-
-    /* A block handed out through the boot identity window and given back after
-     * the Pull Map took over is reached through its Pull Map alias, as its
-     * region's free list is: blocks of one region are ordered by address. */
-    ptr   = vmm_phys_to_virt(vmm_virt_to_phys_direct(ptr));
-    guard = (heap_guard_t *)((uint8_t *)ptr - sizeof(heap_guard_t));
-
-    if (guard->canary_start != HEAP_CANARY_MAGIC) {
-        /* Slab-lens on the pointer's page: a destroyed "canary" of 0 with a
-         * page whose first words parse as a plausible SlabPage is the
-         * signature of an impostor page handed out by the slab free-list
-         * (see slab.c recruitment gates) — print the page's claimed
-         * geometry so the corpse names its allocator. */
-        const SlabPage *lens = (const SlabPage *)((uintptr_t)ptr & ~(uintptr_t)0xFFF);
-        panic("[HEAP] kfree(%p): start canary destroyed "
-              "(expected 0x%llx, got 0x%llx); page lens: obj_size=%u "
-              "slots=%u free=%u head=%u — impostor slab page, a neighbour "
-              "overflow, or not a block start\n",
-              ptr, HEAP_CANARY_MAGIC, guard->canary_start,
-              lens->obj_size, lens->total_slots, lens->free_count, lens->free_head);
-    }
-
-    uint64_t *end_canary = (uint64_t *)((uint8_t *)guard + guard->canary_end_offset);
-    if (*end_canary != HEAP_CANARY_MAGIC)
-        panic("[HEAP] kfree(%p): end canary destroyed (size=%zu, "
-              "expected 0x%llx, got 0x%llx) — buffer overflow in this block\n",
-              ptr, guard->size, HEAP_CANARY_MAGIC, *end_canary);
-
-    KHeapPoolGive(guard);
+    KHeapPoolGive(PoolGuardChecked(ptr, "kfree"));
 }
