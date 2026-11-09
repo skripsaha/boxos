@@ -94,6 +94,10 @@ private:
     std::size_t   Others = 0;
     std::uint32_t OthersLane = 0;
 
+    // The typing line while it is lifted off the console (AsAnother), its
+    // room made once for a whole console.
+    std::vector<TextCell> Lifted;
+
     // The lines of lanes gone behind while they read.
     struct Kept {
         std::uint32_t         Lane = 0;

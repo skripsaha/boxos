@@ -16,7 +16,8 @@
  * was started from, was let go. A program behind hears no key — a strand of
  * it that asks to listen waits, and the keeper is told, once until the
  * program comes forward — and coming forward, or going behind, its whole
- * family goes with it. A record goes with the death of either side.
+ * family goes with it. A record goes with the death of either side — but the
+ * programs a let-go one started stay behind when it dies, kept as it was.
  */
 
 #include "front.h"
@@ -144,7 +145,13 @@ bool FrontStart() noexcept
     g_news    = touch_intern(DISPLAY_FRONT_TAG);
     g_spawned = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_SPAWNED));
     if (g_spawned == TOUCH_TAG_INVALID || touch_claim(g_spawned, TOUCH_REST, 0, 0) != 0) return false;
-    return touch_pair_choose(g_news) != TOUCH_TAG_INVALID;
+    if (touch_pair_choose(g_news) == TOUCH_TAG_INVALID) return false;
+    // Here: every keeper says again what it keeps — this display may be one
+    // raised after a fall, and knows nothing of what the one before was told.
+    // Their questions wait for the loop; nobody listening is a boot's quiet.
+    const DisplayFrontNews Here{0, 0, DISPLAY_FRONT_HERE, {0, 0, 0}, 0, 0};
+    (void)touch_send(g_news, &Here, sizeof(Here), 0);
+    return true;
 }
 
 void FrontAsked(const Result &Asked, const AskFrom &From, const DisplayFrontRequest &Request) noexcept
@@ -212,8 +219,30 @@ void FrontDeath(std::uint32_t Pid, std::uint32_t Generation) noexcept
     FrontSpawnStep();
     const Program Dead{Pid, Generation};
     std::erase_if(g_front, [&](const Kept &One) { return One.Front == Dead || One.Keeper == Dead; });
-    // A program whose keeper died is nobody's to hold back: it hears again.
+
+    // A program let go that dies leaves what it started behind, kept by its
+    // keeper: the family stays whole, and none of it takes the keyboard from
+    // the one in front. A program whose keeper died is nobody's to hold back:
+    // it hears again.
+    std::vector<Behind> Heirs;
+    try {
+        for (const Behind &One : g_behind) {
+            if (One.Back != Dead || One.Keeper == Dead) continue;
+            for (const Started &Child : g_started)
+                if (Child.Parent == Dead) Heirs.push_back(Behind{One.Keeper, Child.Child, false});
+        }
+    } catch (...) {
+        Heirs.clear();
+        kdbg_print("[display] no room to keep behind what pid %u started; it hears again", Pid);
+    }
     std::erase_if(g_behind, [&](const Behind &One) { return One.Back == Dead || One.Keeper == Dead; });
+    for (const Behind &Heir : Heirs) {
+        try {
+            g_behind.push_back(Heir);
+        } catch (...) {
+            kdbg_print("[display] no room to keep pid %u behind; it hears again", Heir.Back.Pid);
+        }
+    }
 
     // What the dead started is counted as started by the one that started the
     // dead, so a family behind stays whole; with nobody above, it is nobody's.

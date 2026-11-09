@@ -11,6 +11,7 @@
 #include "klib.h"
 #include "proc_exit.h"
 #include "process.h"
+#include "system_halt.h"
 #include "touch_queue.h"
 #include "vmm.h"
 
@@ -87,38 +88,41 @@ static void RiseArmLocked(void)
 }
 
 /* Every raise whose tick came, started: one at a time, the lock let go while
- * the volume is read. A Riser being raised is freed by no one else — its life
- * is 0, so no end finds it — and the start's own watch takes it back. */
+ * the volume is read. Past the lock the Riser is looked for again by its file:
+ * the start's own watch gives it a life, and that life may end — and free it —
+ * before the lock is taken back. One still raising was not watched. */
 static void RiseRun(void *ctx)
 {
     (void)ctx;
     KnockOpen(&g_door);
     for (;;) {
-        Riser *due = NULL;
+        uint64_t file = 0;
         spin_lock(&g_lock);
         const uint64_t now = kernel_tick_get();
-        for (Riser *r = g_risers; r && !due; r = r->next)
-            if (r->due != 0 && r->due <= now) due = r;
-        if (due) {
-            due->due     = 0;
-            due->raising = true;
-            due->raised++;
+        for (Riser *r = g_risers; r && file == 0; r = r->next) {
+            if (r->due == 0 || r->due > now) continue;
+            r->due     = 0;
+            r->raising = true;
+            r->raised++;
+            file = r->file;
         }
         RiseArmLocked();
         spin_unlock(&g_lock);
-        if (!due) return;
+        if (file == 0) return;
 
-        process_t *proc = AutostartAgain(due->file);
+        process_t *proc      = AutostartAgain(file);
+        Riser     *unwatched = NULL;
         spin_lock(&g_lock);
-        const bool watched = !due->raising;
-        if (!watched) {
-            RiserUnlink(due);
-            kprintf("[RISE] '%s' is not raised again: %s\n", due->name,
+        Riser *r = RiserOfFile(file);
+        if (r && r->raising) {
+            RiserUnlink(r);
+            unwatched = r;
+            kprintf("[RISE] '%s' is not raised again: %s\n", r->name,
                     proc ? "its box no longer says rise"
                          : "its file no longer asks to be started, or could not be");
         }
         spin_unlock(&g_lock);
-        if (!watched) kfree(due);
+        kfree(unwatched);
         if (proc) {
             if (!ProcessStartCreated(proc))
                 kprintf("[RISE] PID %u was stopped or ended before it could run\n", proc->pid);
@@ -178,6 +182,9 @@ void RiseWatch(process_t *proc, uint64_t file, const char *name)
 
 void RiseProgramEnded(uint32_t pid, uint32_t generation, int32_t disposition)
 {
+    /* The machine is going off: its programs are ended by the halt's sweep,
+     * and no end of one is a fall. */
+    if (__atomic_load_n(&g_halt_orderly, __ATOMIC_ACQUIRE)) return;
     const bool fell = disposition == PROC_EXIT_CRASHED || disposition == PROC_EXIT_STACK_OVERFLOW;
     Riser     *gone = NULL;
 

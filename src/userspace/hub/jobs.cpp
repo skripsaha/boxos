@@ -45,7 +45,7 @@ bool Jobs::Begin(const Look &Shown)
     WakeTag = touch_intern(WakeTagName);
     bool Ready = false, Heard = false;
     try {
-        std::thread([this, &Ready, &Heard] {
+        Keeper = std::thread([this, &Ready, &Heard] {
             // Claimed on the keeping strand itself, before the first start:
             // no death can come before its ear.
             Deaths = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));
@@ -62,7 +62,7 @@ bool Jobs::Begin(const Look &Shown)
             }
             Settle.notify_all();
             if (Claimed) Keep();
-        }).detach();
+        });
     } catch (...) {
         Say("hub: no strand could be made to keep its programs; nothing can be started\n");
         return false;
@@ -73,12 +73,20 @@ bool Jobs::Begin(const Look &Shown)
     return Heard;
 }
 
-// The programs living behind, under the lock: not those that serve.
-std::vector<BehindNow> Jobs::LivingNow() const
+Jobs::~Jobs()
+{
+    if (!Keeper.joinable()) return;
+    Stopping.store(true);
+    Wake();
+    Keeper.join();
+}
+
+// The programs living behind, under the lock: those that serve only when asked.
+std::vector<BehindNow> Jobs::LivingNow(bool WithServing) const
 {
     std::vector<BehindNow> Now;
     for (const Job &One : Running)
-        if (!One.Front && !One.Over && One.What.Living != PROGRAM_SERVES)
+        if (!One.Front && !One.Over && (WithServing || One.What.Living != PROGRAM_SERVES))
             Now.push_back(BehindNow{One.What.Who, One.Pid, One.Generation, One.Wants});
     return Now;
 }
@@ -104,7 +112,7 @@ bool Jobs::DrawBehind()
         if (!BehindStale) return false;
         BehindStale = false;
         Shown       = Seen;
-        Now         = LivingNow();
+        Now         = LivingNow(false);
     }
     windows::ShowBehind(Shown, Now);
     return true;
@@ -123,15 +131,17 @@ void Jobs::Wake()
 // at before the deaths, so the death of a program just started finds it kept.
 void Jobs::Keep()
 {
-    for (;;) {
+    while (!Stopping.load()) {
         const TurnInMark Mark  = box_mark();
         bool             Moved = HearWake();
         Moved |= StartAsked();
         Moved |= HearDeaths();
         Moved |= HearDisplay();
         Moved |= DrawBehind();
-        if (!Moved) box_turn_in(Mark);
+        if (!Moved && !Stopping.load()) box_turn_in(Mark);
     }
+    // The line of who lives behind is this strand's layer: taken down by it.
+    windows::ShowBehind(Look{}, {});
 }
 
 bool Jobs::HearWake()
@@ -160,10 +170,10 @@ bool Jobs::StartAsked()
     if (Pid > 0) {
         const auto    Started = static_cast<std::uint32_t>(Pid);
         std::uint32_t Display = 0;
-        const int     Kept    = Next->Front ? display_front(Started, Generation, &Display)
+        const int     Rc      = Next->Front ? display_front(Started, Generation, &Display)
                                             : display_back(Started, Generation, &Display);
+        Kept(Rc, Display);
         std::lock_guard Held(Lock);
-        if (Kept == OK) DisplayPid = Display;
         Job One;
         One.What = Next->What;
         One.What.Luggage.clear();
@@ -243,6 +253,38 @@ void Jobs::Died(const TouchProcessDied &Death)
     BehindChanged();
 }
 
+// The display's answer to a question about a program the hub keeps: who the
+// display is, for the news it sends.
+void Jobs::Kept(int Rc, std::uint32_t Display)
+{
+    if (Rc != OK) return;
+    std::lock_guard Held(Lock);
+    DisplayPid = Display;
+}
+
+// A display came — raised again after a fall, it knows nothing of what the
+// hub told the one before: every program the hub keeps said again, in front
+// or behind, and who the display is learnt from its answers.
+void Jobs::Rekeep()
+{
+    struct Said {
+        std::uint32_t Pid, Generation;
+        bool          Front;
+    };
+    std::vector<Said> Keeping;
+    {
+        std::lock_guard Held(Lock);
+        for (const Job &One : Running)
+            if (!One.Over) Keeping.push_back(Said{One.Pid, One.Generation, One.Front});
+    }
+    for (const Said &One : Keeping) {
+        std::uint32_t Display = 0;
+        const int     Rc      = One.Front ? display_front(One.Pid, One.Generation, &Display)
+                                          : display_back(One.Pid, One.Generation, &Display);
+        Kept(Rc, Display);
+    }
+}
+
 bool Jobs::HearDisplay()
 {
     bool  Heard = false;
@@ -250,8 +292,18 @@ bool Jobs::HearDisplay()
     while (News != TOUCH_TAG_INVALID && touch_try_pop_tag(News, &Event)) {
         Heard = true;
         DisplayFrontNews Said;
-        if (Event.payload_len < sizeof(Said) || DisplayPid == 0 || Event.source_pid != DisplayPid) continue;
+        if (Event.payload_len < sizeof(Said)) continue;
         std::memcpy(&Said, Event.payload, sizeof(Said));
+        if (Said.what == DISPLAY_FRONT_HERE) {
+            Rekeep();
+            continue;
+        }
+        std::uint32_t Display = 0;
+        {
+            std::lock_guard Held(Lock);
+            Display = DisplayPid;
+        }
+        if (Display == 0 || Event.source_pid != Display) continue;
         if (Said.keeper_pid != cabin_info()->pid || Said.keeper_generation != cabin_info()->generation) continue;
         Pressed(Said.what, Said.pid, Said.generation);
     }
@@ -284,7 +336,8 @@ void Jobs::Pressed(std::uint8_t What, std::uint32_t Pid, std::uint32_t Generatio
         One.LetGo = true;
         Held.unlock();
         std::uint32_t Display = 0;
-        (void)display_back(Pid, Generation, &Display);
+        const int     Rc      = display_back(Pid, Generation, &Display);
+        Kept(Rc, Display);
         Settle.notify_all();
         BehindChanged();
         return;
@@ -371,14 +424,15 @@ std::expected<Settled, int> Jobs::Forward(std::uint32_t Pid, std::uint32_t Gener
     }
     BehindChanged();
     std::uint32_t Display = 0;
-    (void)display_front(Pid, Generation, &Display);
+    const int     Rc      = display_front(Pid, Generation, &Display);
+    Kept(Rc, Display);
     return StandBy(Pid, Generation);
 }
 
-std::vector<BehindNow> Jobs::Living() const
+std::vector<BehindNow> Jobs::Living(bool WithServing) const
 {
     std::lock_guard Held(Lock);
-    return LivingNow();
+    return LivingNow(WithServing);
 }
 
 std::optional<std::vector<file_id_t>> Jobs::TakeGift()

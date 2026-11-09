@@ -47,6 +47,9 @@ ConsoleModel::ConsoleModel(std::uint32_t Width, std::uint32_t Height)
     : WidthValue(Width), HeightValue(Height),
       Surface(static_cast<std::size_t>(Width) * Height)
 {
+    // A line is never longer than the console: lifting one never allocates,
+    // so no frame drawn while a line is typed can fail for want of memory.
+    Lifted.reserve(Surface.size());
     Clear(COLOR_LIGHT_GRAY, COLOR_BLACK);
 }
 
@@ -259,10 +262,10 @@ void ConsoleModel::Begin(std::uint32_t Lane, bool Text) noexcept
 template <typename Drawing>
 void ConsoleModel::AsAnother(std::uint32_t Lane, bool Text, Drawing &&Said)
 {
-    const std::size_t           End = std::min(LineEnd, Surface.size());
-    const std::vector<TextCell> Line(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
-                                     Surface.begin() + static_cast<std::ptrdiff_t>(End));
-    const std::size_t Caret = std::min(Here() >= LineStart ? Here() - LineStart : 0, Line.size());
+    const std::size_t End = std::min(LineEnd, Surface.size());
+    Lifted.assign(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
+                  Surface.begin() + static_cast<std::ptrdiff_t>(End));
+    const std::size_t Caret = std::min(Here() >= LineStart ? Here() - LineStart : 0, Lifted.size());
     const TextCell    Blank{COLOR_LIGHT_GRAY, COLOR_BLACK, ' ', {0, 0, 0}};
     std::fill(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
               Surface.begin() + static_cast<std::ptrdiff_t>(End), Blank);
@@ -276,7 +279,7 @@ void ConsoleModel::AsAnother(std::uint32_t Lane, bool Text, Drawing &&Said)
 
     if (CursorColumn != 0) Newline();
     LineStart = Here();
-    for (const TextCell &Cell : Line) Lay(Cell);
+    for (const TextCell &Cell : Lifted) Lay(Cell);
     LineEnd  = Here();
     LastLane = TypingLane;
     MoveTo(LineStart + Caret);

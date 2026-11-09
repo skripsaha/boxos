@@ -16,6 +16,7 @@
 #ifndef HUB_JOBS_H
 #define HUB_JOBS_H
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -23,6 +24,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "box/life.h"
@@ -71,6 +73,13 @@ struct BehindNow {
 
 class Jobs {
 public:
+    Jobs() = default;
+    Jobs(const Jobs &)            = delete;
+    Jobs &operator=(const Jobs &) = delete;
+    // The keeping strand stopped and waited for: it uses what the hub holds,
+    // and goes before it.
+    ~Jobs();
+
     // The keeping strand started, with the hub set as Shown. False: no
     // program can be started here, and why was said.
     bool Begin(const Look &Shown);
@@ -86,8 +95,9 @@ public:
     // -ERR_PROCESS_NOT_FOUND when it lives behind no more.
     std::expected<Settled, int> Forward(std::uint32_t Pid, std::uint32_t Generation);
 
-    // The programs living behind, the oldest first — not those that serve.
-    std::vector<BehindNow> Living() const;
+    // The programs living behind, the oldest first — not those that serve,
+    // unless WithServing: they are brought forward only by name.
+    std::vector<BehindNow> Living(bool WithServing = false) const;
 
     // What the newest program that finished behind gave back to be kept as
     // `them`, taken; nothing when none gave anything since.
@@ -120,16 +130,20 @@ private:
     void BehindChanged();
     bool DrawBehind();
     void Wake();
-    std::vector<BehindNow> LivingNow() const;
+    std::vector<BehindNow> LivingNow(bool WithServing) const;
     bool StartAsked();
     bool HearDeaths();
     bool HearDisplay();
     bool HearWake();
     void Died(const TouchProcessDied &Death);
     void Pressed(std::uint8_t What, std::uint32_t Pid, std::uint32_t Generation);
+    void Rekeep();
+    void Kept(int Rc, std::uint32_t Display);
     std::expected<void, int> Ask(Asked &One);
     std::expected<Settled, int> StandBy(std::uint32_t Pid, std::uint32_t Generation);
 
+    std::thread                           Keeper;
+    std::atomic<bool>                     Stopping{false};
     Look                                  Seen{};   // the keeping strand's own copy
     mutable std::mutex                    Lock;     // all of the below
     std::condition_variable               Settle;

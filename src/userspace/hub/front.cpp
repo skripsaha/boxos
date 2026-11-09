@@ -67,8 +67,10 @@ bool Front(Hub &Self, const Words &Typed)
     if (const std::size_t Number = Numbered(Word, Living.size()); Number != 0)
         return launch::Forward(Self, Living[Number - 1]);
 
+    // By name, one that serves comes forward too: it is never listed, but it
+    // may ask for the keyboard, and then it is told how to give it.
     std::vector<BehindNow> Named;
-    for (const BehindNow &One : Living)
+    for (const BehindNow &One : Self.Started.Living(true))
         if (One.Who == Word) Named.push_back(One);
     if (Named.empty()) {
         Say("front: nothing called {} lives behind\n", Word);

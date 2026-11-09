@@ -32,7 +32,8 @@ bool FrontBehind(std::uint32_t ProgramPid, std::uint32_t ProgramGeneration) noex
 void FrontWants(std::uint32_t ProgramPid, std::uint32_t ProgramGeneration) noexcept;
 
 // A death: what the dead kept or was kept as let go, and the programs it
-// started counted as started by the one that started it.
+// started counted as started by the one that started it — those of one let
+// go staying behind, kept by its keeper.
 void FrontDeath(std::uint32_t Pid, std::uint32_t Generation) noexcept;
 
 // The programs started since, each with the program it was started from.

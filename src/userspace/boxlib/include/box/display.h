@@ -176,7 +176,10 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
  * What the display tells a keeper is a Touch on DISPLAY_FRONT_TAG, a
  * DisplayFrontNews, sent by the display (source_pid the reply's display_pid):
  * the chord pressed over the program it keeps in front, or a program it keeps
- * behind asking for the keyboard.
+ * behind asking for the keyboard. And to every keeper at once, when a display
+ * comes — at the boot, or raised again after a fall, knowing nothing of what
+ * the one before it was told — that it is here: each keeper says again what it
+ * keeps, and learns the display's pid from the answers, never from the news.
  */
 #define DISP_CMD_FRONT     0x50
 #define DISP_CMD_BACK      0x51
@@ -188,6 +191,7 @@ typedef enum {
     DISPLAY_FRONT_END    = 1,   /* end the program in front */
     DISPLAY_FRONT_LET_GO = 2,   /* let it go to live behind */
     DISPLAY_FRONT_WANTS  = 3,   /* a program behind asks for the keyboard */
+    DISPLAY_FRONT_HERE   = 4,   /* a display came: keeper and program are 0 */
 } DisplayFrontWhat;
 
 typedef struct PACKED {
