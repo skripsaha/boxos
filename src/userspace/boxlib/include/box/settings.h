@@ -41,7 +41,8 @@ extern "C" {
  * program does not declare (another version's) is left in the file.
  *
  * A program reads its own settings by name. The text an accessor answers
- * lives until the settings are read again (settings_reload). Asking for a name the program does not declare, or for a
+ * lives until the settings are read again (settings_reload, or a watch that
+ * saw them change). Asking for a name the program does not declare, or for a
  * setting as a kind it is not, is the program's mistake: said once, and the
  * answer is false, 0, "" or black.
  */
@@ -64,6 +65,17 @@ uint32_t    settings_color(const char *name);     /* 0xRRGGBB */
 
 /* The person's file read again: true when a value changed. */
 bool settings_reload(void);
+
+/* Watching the person's file: the program's settings are read again when the
+ * file is saved whole (anchored, as the utility settings and edit save it) —
+ * Touch on the tag settings, which every settings file wears. Begun on the
+ * strand that polls it: the events are that strand's. */
+typedef struct SettingsWatch SettingsWatch;
+int  settings_watch_begin(SettingsWatch **out);
+/* Without waiting: true when the program's settings file was saved since the
+ * last poll and the settings were read again with a value changed. */
+bool settings_watch_poll(SettingsWatch *watch);
+void settings_watch_end(SettingsWatch *watch);
 
 /* ---- Any program's settings: what the utility settings shows and writes -- */
 

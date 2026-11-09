@@ -3,7 +3,8 @@
  * is the part settings the kernel put into its memory at start (a box), or
  * the bytes between the symbols round .boxos.settings (an ELF image); the
  * person's file is found by the program's own name. Both are read at the
- * first ask, and the file again when the program asks.
+ * first ask, and the file again when the program asks — or when a watch sees
+ * the file saved.
  */
 
 #include "box/core/settings_internal.h"
@@ -15,12 +16,15 @@
 #include "box/program_part.h"
 #include "box/string.h"
 #include "box/sync.h"
+#include "box/touch.h"
 
 /* PROVIDEd by user.ld (and defined by BoxASM's linker) round an ELF image's
  * declaration — hidden, reached relative to the code. A box has its
  * declaration elsewhere: these name nothing loaded there. */
 extern const char __boxos_settings_start[] __attribute__((visibility("hidden")));
 extern const char __boxos_settings_end[] __attribute__((visibility("hidden")));
+
+#define TOUCH_FILE_ANCHORED 2u   /* the op of a file's anchor: saved whole */
 
 static umutex_t    g_lock = UMUTEX_INIT;
 static BoxSettings g_own;
@@ -189,4 +193,67 @@ bool settings_reload(void)
     changed = changed || count != g_own.Count;
     umutex_unlock(&g_lock);
     return changed;
+}
+
+/* ---- the watch ---------------------------------------------------------- */
+
+struct SettingsWatch {
+    TouchTag Tag;
+};
+
+int settings_watch_begin(SettingsWatch **out)
+{
+    if (!out) return -ERR_INVALID_ARGUMENT;
+    *out = NULL;
+    TouchTag tag = touch_pair_choose(touch_intern("settings"));
+    if (tag == TOUCH_TAG_INVALID) return -ERR_TAG_NOT_FOUND;
+    SettingsWatch *watch = malloc(sizeof(*watch));
+    if (!watch) return -ERR_NO_MEMORY;
+    int rc = touch_claim(tag, TOUCH_REST, 0, 0);
+    if (rc != 0) {
+        free(watch);
+        return rc;
+    }
+    watch->Tag = tag;
+    *out       = watch;
+    return 0;
+}
+
+/* Whether the anchored file is this program's settings file: the one it read,
+ * or one of that name made since. */
+static bool own_file(file_id_t file)
+{
+    char         name[40];
+    FileMetadata metadata;
+    umutex_lock(&g_lock);
+    own_read_locked();
+    bool mine = g_own.File != 0 && file == g_own.File;
+    snprintf(name, sizeof(name), "%s.settings", g_own.Program);
+    bool named = g_own.Program[0] != '\0';
+    umutex_unlock(&g_lock);
+    if (mine || !named || FileMetadataRead(file, &metadata) != 0) return mine;
+    mine = metadata.Filename && strcmp(metadata.Filename, name) == 0;
+    FileMetadataRelease(&metadata);
+    return mine;
+}
+
+bool settings_watch_poll(SettingsWatch *watch)
+{
+    Touch touch;
+    bool  saved = false;
+    if (!watch) return false;
+    while (touch_try_pop_tag(watch->Tag, &touch)) {
+        uint64_t file;
+        if (touch.payload_len < 9 || touch.payload[8] != TOUCH_FILE_ANCHORED) continue;
+        memcpy(&file, touch.payload, sizeof(file));
+        if (own_file((file_id_t)file)) saved = true;
+    }
+    return saved && settings_reload();
+}
+
+void settings_watch_end(SettingsWatch *watch)
+{
+    if (!watch) return;
+    touch_release(watch->Tag);
+    free(watch);
 }

@@ -22,7 +22,9 @@ namespace {
 using PainterColor = painter::core::Color;
 
 constexpr auto         Beat        = std::chrono::milliseconds(500);
-constexpr std::int32_t ClockWidth  = 8;
+/* The clock's corner at its widest — 12:59:59 PM, as the person may set it
+ * (settings clock): pulse stands left of all of it, however the clock is set. */
+constexpr std::int32_t ClockWidth  = 11;
 constexpr std::int32_t Gap         = 1;
 constexpr std::size_t  HistoryMost = 10;
 constexpr std::int32_t WideScreen  = 120;
