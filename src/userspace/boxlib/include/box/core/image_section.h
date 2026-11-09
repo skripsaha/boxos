@@ -9,9 +9,10 @@ extern "C" {
 #include "box/types.h"
 
 /*
- * One named section of a program's image on the volume — .boxos.form,
+ * One named section of a program's ELF image on the volume — .boxos.form,
  * .boxos.recipe — read at offsets: the ELF header, the section headers, the
- * name table and that one section, never the whole image.
+ * name table and that one section, never the whole image. What an ELF image
+ * has of a program's parts (box/program_part.h).
  */
 
 /* The section called Name in File. 1: found, *Bytes a heap copy with a NUL

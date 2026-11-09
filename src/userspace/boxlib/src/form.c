@@ -1,22 +1,21 @@
 /*
- * form.c — a program's Form: its text read into fields, and found in an image.
+ * form.c — a program's Form: its text read into fields, and found in a program.
  *
- * The text is whatever a program put in .boxos.form, so it is untrusted
+ * The text is whatever a program carries as its part `form`, so it is untrusted
  * bytes: every line is read inside its own bounds, a field the reader cannot
  * fill is refused rather than passed over (a shifted field would sort every
  * word wrong), and a line of a kind the reader does not know is passed over,
- * as the contract says. The image is read at offsets (image_section.c).
+ * as the contract says. The program is read by that part (program_part.c).
  */
 
 #include "box/form.h"
 #include "box/core/form_internal.h"
-#include "box/core/image_section.h"
+#include "box/program_part.h"
 #include "box/error.h"
 #include "box/memory.h"
 #include "box/string.h"
 
 #define FORM_TEXT_MAX      65536u
-#define FORM_SECTION_NAME  ".boxos.form"
 
 static const char *const g_kind_names[] = {
     "thing", "things", "name", "words", "text", "into"
@@ -236,7 +235,7 @@ int form_of_file(file_id_t program, BoxForm *out)
 
     char  *text;
     size_t size;
-    int    rc = image_section_read(program, FORM_SECTION_NAME, FORM_TEXT_MAX, &text, &size, NULL);
+    int    rc = program_part_read(program, "form", FORM_TEXT_MAX, &text, &size, NULL);
     /* BoxASM's linker writes the section's header in every image, empty for
      * a program that declares no Form: that is a program without one. */
     if (rc <= 0 || !text) return rc < 0 ? rc : 0;

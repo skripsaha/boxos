@@ -19,6 +19,7 @@
 #include "box/sha256.h"
 #include "box/string.h"
 #include "box/memory.h"
+#include "stand_box.h"
 
 int printf(const char *format, ...);
 
@@ -435,6 +436,47 @@ static void test_image(void)
     check_int("image no file", recipe_of_file(99, &recipe), -ERR_FILE_NOT_FOUND);
 }
 
+/* ---- the box ------------------------------------------------------------- */
+
+/* The volume's file 7 made the box of code, doors and the part `recipe` of
+ * `text`, or of nothing when `text` is NULL. */
+static void use_box(const char *text, size_t length)
+{
+    BoxPenPart recipe = { "recipe", (const uint8_t *)text, length, length, 0, 0, BOX_PART_VERSION };
+    uint64_t   bytes  = 0;
+    free(g_image);
+    g_image      = StandBox(&recipe, text ? 1 : 0, &bytes);
+    g_image_size = g_image ? (size_t)bytes : 0;
+    check_int("the pen writes the box a case asks for", g_image != NULL, 1);
+}
+
+static void test_box(void)
+{
+    BoxRecipe recipe;
+
+    use_box(g_text, sizeof(g_text) - 1);
+    check_int("box good", recipe_of_file(7, &recipe), 0);
+    check_int("box declared", recipe.Declared, 1);
+    check_int("box is a program", recipe.Image, 1);
+    check_int("box files", (long)recipe.FileCount, 2);
+    check_text("box by", recipe.By, "assemble");
+    recipe_release(&recipe);
+
+    use_box(NULL, 0);
+    check_int("box without recipe", recipe_of_file(7, &recipe), 0);
+    check_int("box without recipe declared", recipe.Declared, 0);
+    check_int("box without recipe is a program", recipe.Image, 1);
+
+    use_box(g_text, sizeof(g_text) - 1);
+    StandBoxFind(g_image, g_image_size, "by assemble")[3] ^= 0x20;
+    check_int("box recipe damaged", recipe_of_file(7, &recipe), -ERR_CORRUPTED);
+    check_int("box recipe damaged declared", recipe.Declared, 0);
+
+    free(g_image);
+    g_image      = NULL;
+    g_image_size = 0;
+}
+
 /* ---- the check ------------------------------------------------------------ */
 
 static long states_of(const BoxRecipe *recipe, char *out)
@@ -515,6 +557,7 @@ int main(void)
     test_sha256();
     test_text();
     test_image();
+    test_box();
     test_check();
     free(g_image);
     printf("recipe: %d passed, %d failed\n", g_passed, g_failed);

@@ -1,20 +1,19 @@
 /*
  * recipe.c — a program's Recipe: its text read and written, and found in the
- * program's image.
+ * program.
  *
- * The text is whatever an image carries in .boxos.recipe, so it is untrusted
+ * The text is whatever a program carries as its part `recipe`, so it is untrusted
  * bytes: a line of a kind the reader knows is read exactly or the whole
  * Recipe is refused — a rebuild follows it, and a misread file or context
  * would make something else than the program was.
  */
 
 #include "box/recipe.h"
-#include "box/core/image_section.h"
+#include "box/program_part.h"
 #include "box/error.h"
 #include "box/memory.h"
 #include "box/string.h"
 
-#define RECIPE_SECTION_NAME ".boxos.recipe"
 #define RECIPE_HEX_DIGITS   (2u * SHA256_BYTES)
 
 void recipe_release(BoxRecipe *recipe)
@@ -160,13 +159,13 @@ int recipe_of_file(file_id_t program, BoxRecipe *out)
     if (!out) return -ERR_INVALID_ARGUMENT;
     memset(out, 0, sizeof(*out));
 
-    char  *text;
-    size_t size;
-    bool   image;
-    int    rc = image_section_read(program, RECIPE_SECTION_NAME, SIZE_MAX, &text, &size, &image);
+    char       *text;
+    size_t      size;
+    ProgramKind kind;
+    int         rc = program_part_read(program, "recipe", SIZE_MAX, &text, &size, &kind);
     if (rc < 0) return rc;
     if (rc == 0 || !text) {
-        out->Image = image;
+        out->Image = kind != PROGRAM_NONE;
         return 0;
     }
     rc = recipe_parse(text, size, out);

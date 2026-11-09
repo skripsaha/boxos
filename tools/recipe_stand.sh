@@ -23,7 +23,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 FLAGS="-std=gnu11 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-builtin -I$LIB/include -Isrc/include -Dfread=StandRead -DFileMetadataRead=StandMetadata -DFileMetadataRelease=StandMetadataRelease"
 
-SOURCES="sha256 image_section recipe recipe_check"
+SOURCES="sha256 image_section program_part recipe recipe_check"
 objects=""
 for name in $SOURCES; do
     $CC_HOST $FLAGS -c "$LIB/src/$name.c" -o "$WORK/$name.o" > "$WORK/cc.log" 2>&1 ||

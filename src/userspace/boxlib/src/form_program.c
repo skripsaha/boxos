@@ -23,11 +23,32 @@
 #include "box/string.h"
 #include "box/system.h"
 #include "box/core/result.h"
+#include "box/core/cabin.h"
+#include "box/program_part.h"
 
-/* The Form this image carries, between the symbols user.ld or the BoxASM
+/* The Form an ELF image carries, between the symbols user.ld or the BoxASM
  * linker puts round .boxos.form. Weak: an image linked without them has none. */
 extern const char __boxos_form_start[] __attribute__((weak));
 extern const char __boxos_form_end[] __attribute__((weak));
+
+/* This program's own Form text, *text NULL for none: a box's part `form`, which
+ * the kernel put into its memory at start (a box names everything it has in
+ * memory in its table, so a box without it there has none); an ELF image's,
+ * between the symbols round its section. */
+static void own_form_text(const char **text, size_t *size)
+{
+    *text = NULL;
+    *size = 0;
+    if (cabin_info()->parts_addr != 0) {
+        const uint8_t *loaded;
+        if (program_part_loaded("form", &loaded, size) == 1) *text = (const char *)loaded;
+        return;
+    }
+    if (__boxos_form_start && (uintptr_t)__boxos_form_end > (uintptr_t)__boxos_form_start) {
+        *text = __boxos_form_start;
+        *size = (size_t)(__boxos_form_end - __boxos_form_start);
+    }
+}
 
 /* ---- the lookups ------------------------------------------------------- */
 
@@ -240,9 +261,10 @@ static int fill_program(FormValues *values)
     BoxForm form;
     memset(&form, 0, sizeof(form));
 
-    int rc = 0;
-    if (__boxos_form_start && (uintptr_t)__boxos_form_end > (uintptr_t)__boxos_form_start)
-        rc = form_parse(__boxos_form_start, (size_t)(__boxos_form_end - __boxos_form_start), &form);
+    const char *text;
+    size_t      size;
+    own_form_text(&text, &size);
+    int rc = text ? form_parse(text, size, &form) : 0;
     if (rc != 0) {
         say(program_name(), "its Form is not one this library reads", NULL);
         return rc;

@@ -49,15 +49,16 @@ typedef struct {
     BoxRecipeFile *Files;      /* Files[0] is the one the build began with */
     size_t         FileCount;
     uint8_t        Declared;   /* the image carries a Recipe */
-    uint8_t        Image;      /* the file is a program image at all */
+    uint8_t        Image;      /* the file is a program at all, a box or an ELF image */
 } BoxRecipe;
 
 /* The Recipe from its text: 0, or -ERR_INVALID_ARGUMENT for text that is no
  * Recipe one could follow (no `recipe 1` first, no `by`, no `context`, no
  * `from`, a line of a known kind spelled wrong) — nothing is kept then. */
 int  recipe_parse(const char *text, size_t length, BoxRecipe *out);
-/* The Recipe a program on the volume carries. 0 with Declared 0 when it has
- * none; Image says whether the file is a program image at all. */
+/* The Recipe a program on the volume carries — a box's part `recipe`, an ELF
+ * image's .boxos.recipe. 0 with Declared 0 when it has none; Image says
+ * whether the file is a program at all. */
 int  recipe_of_file(file_id_t program, BoxRecipe *out);
 void recipe_release(BoxRecipe *recipe);
 

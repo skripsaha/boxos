@@ -61,6 +61,7 @@ SRCS = src/core/notify.c \
        src/luggage.c \
        src/form.c \
        src/image_section.c \
+       src/program_part.c \
        src/form_line.c \
        src/form_records.c \
        src/form_luggage.c \

@@ -20,6 +20,8 @@
 #include "box/string.h"
 #include "box/memory.h"
 #include "box/luggage.h"
+#include "box/program_part.h"
+#include "stand_box.h"
 
 int printf(const char *format, ...);
 
@@ -942,6 +944,121 @@ static void test_image(void)
     g_image_size = 0;
 }
 
+/* ---- the box ------------------------------------------------------------- */
+
+/* The volume's file 7 made the box of code, doors and `parts`. */
+static void use_box(const BoxPenPart *parts, uint32_t count)
+{
+    uint64_t bytes = 0;
+    free(g_image);
+    g_image      = StandBox(parts, count, &bytes);
+    g_image_size = g_image ? (size_t)bytes : 0;
+    check(g_image != NULL, "the pen writes the box a case asks for", g_image ? "a box" : "nothing", "a box");
+}
+
+static BoxPenPart form_part(const char *text, uint32_t flags)
+{
+    BoxPenPart part = { "form", (const uint8_t *)text, strlen(text), strlen(text), 0, flags, BOX_PART_VERSION };
+    return part;
+}
+
+static void test_box(void)
+{
+    BoxForm    form;
+    BoxPenPart part = form_part(TAG, BOX_FLAG_LOAD_AT_START);
+
+    use_box(&part, 1);
+    check_int("box good", form_of_file(7, &form), 0);
+    check_int("box declared", form.Declared, 1);
+    check_int("box fields", form.FieldCount, 2);
+    check_text("box what", form.Fields[1].What, "the tags they get");
+    form_release(&form);
+
+    use_box(NULL, 0);
+    check_int("box without a form", form_of_file(7, &form), 0);
+    check_int("box without a form declared", form.Declared, 0);
+
+    BoxPenPart empty = form_part("", BOX_FLAG_LOAD_AT_START);
+    use_box(&empty, 1);
+    check_int("box with an empty form", form_of_file(7, &form), 0);
+    check_int("box with an empty form declared", form.Declared, 0);
+
+    use_box(&part, 1);
+    StandBoxFind(g_image, g_image_size, "the tags they get")[4] ^= 0x20;
+    check_int("box form damaged", form_of_file(7, &form), -ERR_CORRUPTED);
+
+    use_box(&part, 1);
+    g_image[BOX_HEADER_BYTES + BOX_ENTRY_HASH] ^= 1;
+    check_int("box table off its seal", form_of_file(7, &form), -ERR_CORRUPTED);
+
+    use_box(&part, 1);
+    g_image_size -= 1;
+    check_int("box cut short", form_of_file(7, &form), -ERR_CORRUPTED);
+
+    use_box(&part, 1);
+    g_image[8] = 9;
+    check_int("box of a version nobody here reads", form_of_file(7, &form), -ERR_CORRUPTED);
+
+    use_box(&part, 1);
+    g_image_size = 8;
+    check_int("box magic and nothing after", form_of_file(7, &form), -ERR_CORRUPTED);
+
+    BoxPenPart squeezed = form_part(TAG, BOX_FLAG_COMPRESSED);
+    use_box(&squeezed, 1);
+    check_int("box form compressed", form_of_file(7, &form), -ERR_UNSUPPORTED);
+
+    static char huge[70000];
+    memset(huge, 'x', sizeof(huge) - 1);
+    memcpy(huge, "form 1\n", 7);
+    BoxPenPart large = form_part(huge, BOX_FLAG_LOAD_AT_START);
+    use_box(&large, 1);
+    check_int("box form past what a Form may be", form_of_file(7, &form), -ERR_CORRUPTED);
+
+    BoxPenPart later = form_part("form 2\n", BOX_FLAG_LOAD_AT_START);
+    use_box(&later, 1);
+    check_int("box form 2", form_of_file(7, &form), -ERR_INVALID_ARGUMENT);
+
+    /* Any part by its name, and what the file is. */
+    BoxPenPart parts[2] = { form_part(TAG, BOX_FLAG_LOAD_AT_START),
+                            { "about", (const uint8_t *)"about 1\n", 8, 8, 0, 0, BOX_PART_VERSION } };
+    char       *bytes;
+    size_t      size;
+    ProgramKind kind;
+    use_box(parts, 2);
+    check_int("box part about", program_part_read(7, "about", 64, &bytes, &size, &kind), 1);
+    check(bytes && size == 8 && memcmp(bytes, "about 1\n", 9) == 0, "box part about bytes", bytes,
+          "about 1\n");
+    check_int("box part about kind", kind, PROGRAM_BOX);
+    free(bytes);
+    check_int("box part not there", program_part_read(7, "recipe", 64, &bytes, &size, &kind), 0);
+    check_int("box part not there kind", kind, PROGRAM_BOX);
+    check_int("box part prefix of a name", program_part_read(7, "abou", 64, &bytes, &size, &kind), 0);
+
+    Fault clean = { 0 };
+    build_image(TAG, clean);
+    check_int("ELF part about", program_part_read(7, "about", 64, &bytes, &size, &kind), 0);
+    check_int("ELF part about kind", kind, PROGRAM_ELF);
+    check_int("ELF part form", program_part_read(7, "form", 4096, &bytes, &size, &kind), 1);
+    check_int("ELF part form kind", kind, PROGRAM_ELF);
+    free(bytes);
+    g_image_size = 20;
+    check_int("ELF ident in a file shorter than its header", program_part_read(7, "about", 64, &bytes, &size, &kind), 0);
+    check_int("ELF ident in a file shorter than its header kind", kind, PROGRAM_NONE);
+    Fault class32 = { .class32 = true };
+    build_image(TAG, class32);
+    check_int("no program", program_part_read(7, "form", 64, &bytes, &size, &kind), 0);
+    check_int("no program kind", kind, PROGRAM_NONE);
+
+    use_box(&part, 1);
+    g_image[7] ^= 0x01;
+    check_int("box magic but its last byte", program_part_read(7, "form", 4096, &bytes, &size, &kind), 0);
+    check_int("box magic but its last byte kind", kind, PROGRAM_NONE);
+
+    free(g_image);
+    g_image = NULL;
+    g_image_size = 0;
+}
+
 static void test_cut(void)
 {
     FormTokens tokens;
@@ -1116,6 +1233,7 @@ int main(void)
     test_form_parse();
     test_form_refused();
     test_image();
+    test_box();
     test_examples();
     test_order_and_lists();
     test_shell_words();
