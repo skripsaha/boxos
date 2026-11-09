@@ -427,10 +427,10 @@ static inline SettingsVerdict SettingKindWords(SettingSpan line, uint64_t *at, S
 
     if (out->Kind == SETTING_ONE_OF) {
         uint64_t count = 0, start = *at, end = *at, look = *at;
-        while (SettingWord(line, &look, &word, &quoted, &verdict) && !SettingSpanIs(word, "default")) {
+        /* The choices are bare words: a quoted one ends them, as `default` does. */
+        while (SettingWord(line, &look, &word, &quoted, &verdict) && !quoted && !SettingSpanIs(word, "default")) {
             SettingSpan before = { line.At + start, end - start };
-            if (quoted || !SettingWordUsable(word) || SettingSpanIs(word, "next-start") ||
-                SettingChoiceIs(before, word))
+            if (!SettingWordUsable(word) || SettingSpanIs(word, "next-start") || SettingChoiceIs(before, word))
                 return SETTING_CHOICES_BAD;
             count++;
             end = look;
@@ -705,8 +705,8 @@ static inline const char *SettingsVerdictText(SettingsVerdict verdict)
     case SETTINGS_NOT_TEXT:           return "is not text: it holds a byte below a blank other than a newline";
     case SETTINGS_NO_HEAD:            return "does not begin with the line \"settings 1\"";
     case SETTING_LINE_UNREAD:         return "cannot be read: a quote is not closed, or not followed by a blank";
-    case SETTING_NAME_BAD:            return "has no name a setting can have: a small letter, then small letters, "
-                                             "digits and -, at most 32, not settings or when";
+    case SETTING_NAME_BAD:            return "has a name a setting cannot have: a small letter, then small "
+                                             "letters, digits and -, at most 32, not settings or when";
     case SETTING_NAME_TWICE:          return "is declared twice";
     case SETTING_KIND_UNKNOWN:        return "is of a kind this reader does not know";
     case SETTING_LIMITS_BAD:          return "does not say from and to as two whole numbers, the smaller first";

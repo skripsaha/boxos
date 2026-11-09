@@ -164,6 +164,8 @@ static void TestDeclaredWrong(void)
     LineVerdict("setting l one-of dark \"light\" default dark \"x\"", SETTING_CHOICES_BAD, "a quoted choice");
     LineVerdict("setting l one-of dark next-start default dark \"x\"", SETTING_CHOICES_BAD, "next-start as a choice");
     LineVerdict("setting l one-of dark light", SETTING_NO_DEFAULT, "choices and no default after them");
+    LineVerdict("setting l one-of dark light \"how it looks\"", SETTING_NO_DEFAULT,
+                "choices, then the description and no default");
     LineVerdict("setting p word \"x\"", SETTING_NO_DEFAULT, "no default");
     LineVerdict("setting p word default", SETTING_NO_DEFAULT, "default and no value");
     LineVerdict("setting p word default default \"x\"", SETTING_DEFAULT_BAD, "the bare word default as a default");

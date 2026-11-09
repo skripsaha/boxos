@@ -10,9 +10,9 @@ USER_BASE = DEFINED(USER_BASE) ? USER_BASE : 0x0;
 
 /* Three segments, each with one set of rights, and the thread template. Code
  * alone is executable; what is only read — constants, the unwinder's tables,
- * the Nameplate, the Form — is not, and lies on pages of its own; tools/pack
- * makes each segment the part of its kind (code, const, data), the Nameplate
- * and the Form parts of their own. */
+ * the Nameplate, the Form, the settings — is not, and lies on pages of its
+ * own; tools/pack makes each segment the part of its kind (code, const,
+ * data), the Nameplate, the Form and the settings parts of their own. */
 PHDRS
 {
     text   PT_LOAD FLAGS(5);   /* R+X */
@@ -99,6 +99,20 @@ SECTIONS
         PROVIDE(__boxos_form_start = .);
         KEEP(*(.boxos.form))
         PROVIDE(__boxos_form_end = .);
+    }
+
+    /* ── Settings: what a person can set in this program ─────────────────
+     * The declaration BOX_SETTINGS (box/settings.h) or the assembler's
+     * `setting` put in .boxos.settings, last, for the Form's reason. An ELF
+     * image has it mapped with the read-only segment, read between these
+     * symbols; a box carries it as its part `settings`, put into memory at
+     * start, and not among its constants. PROVIDE: an image that declares no
+     * settings has the two symbols at one address. */
+    .boxos.settings : ALIGN(1)
+    {
+        PROVIDE(__boxos_settings_start = .);
+        KEEP(*(.boxos.settings))
+        PROVIDE(__boxos_settings_end = .);
     }
 
     . = ALIGN(4096);

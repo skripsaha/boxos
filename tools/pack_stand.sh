@@ -13,8 +13,9 @@
 # found in it as the ELF has them, by a reading of the ELF that shares nothing
 # with pack. Then ELF files pack must refuse — writable and executable code,
 # two code segments, a program interpreter, a relocation that is not
-# R_X86_64_RELATIVE, an object file, an address in the thread template, a file
-# that is no ELF — each refused with
+# R_X86_64_RELATIVE, an object file, an address in the thread template,
+# settings with a setting it cannot read, a file that is no ELF — each refused
+# with
 # its reason. Built under the address and undefined-behaviour sanitizers. The
 # last line counts the cases that held.
 
@@ -48,6 +49,8 @@ int *table[] = { &counter, 0 };
 const int *const fixed[] = { &counter };
 __thread int local = 7;
 __thread char space[64];
+__attribute__((section(".boxos.settings"), used)) static const char settings[] =
+    "settings 1\nsetting look one-of dark light default dark \"how the page looks\"\n";
 int helper(int x) { return x + counter + local + space[x & 63] + *fixed[0]; }
 const char **said(void) { return &greeting; }
 void _start(void) { table[1] = &counter; helper(3); for (;;) { } }
@@ -75,6 +78,14 @@ printf 'static int x;\n__thread int *pointer = &x;\nvoid _start(void) { *pointer
 $CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/tlsptr.c" -o "$WORK/tlsptr.o" > "$WORK/cc.log" 2>&1 &&
 $LD_CROSS $LINK -pie -z pack-relative-relocs -T $LIB/user.ld "$WORK/tlsptr.o" -o "$WORK/tlsptr.elf" \
     > "$WORK/ld.log" 2>&1 || { cat "$WORK/cc.log" "$WORK/ld.log"; harness "the thread-pointer program did not build"; }
+
+# A static PIE whose settings declare one with no default: a setting no
+# program could have, refused at the build.
+printf '__attribute__((section(".boxos.settings"), used)) static const char s[] =\n    "settings 1\\nsetting look one-of dark light \\"how it looks\\"\\n";\nvoid _start(void) { for (;;) { } }\n' \
+    > "$WORK/badsettings.c"
+$CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/badsettings.c" -o "$WORK/badsettings.o" > "$WORK/cc.log" 2>&1 &&
+$LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/badsettings.o" -o "$WORK/badsettings.elf" > "$WORK/ld.log" 2>&1 ||
+    { cat "$WORK/cc.log" "$WORK/ld.log"; harness "the program with bad settings did not build"; }
 
 # ── a copy of a program broken, or changed, one way ─────────────────────────
 # patch FILE OUT KIND: a copy of FILE broken one way.
@@ -198,6 +209,8 @@ patch "$WORK/small_rela.elf" "$WORK/reloc64.elf" reloc64 || harness "could not b
 refuse "an R_X86_64_64 relocation" "$WORK/reloc64.elf" "other than R_X86_64_RELATIVE"
 refuse "an object file" "$WORK/small.o" "not an executable or a static PIE"
 refuse "an address in the thread template" "$WORK/tlsptr.elf" "a word of its thread template holds an address"
+refuse "settings with a setting it cannot read" "$WORK/badsettings.elf" \
+    "its settings, line 2: the setting look has no default"
 refuse "a text file" "$LIB/user.ld" "not an ELF file"
 patch src/userspace/utils/hw.elf "$WORK/badform.elf" badform || harness "could not break hw's Form (badform)"
 refuse "a Form that is no text" "$WORK/badform.elf" "is not text as a box keeps its part form"

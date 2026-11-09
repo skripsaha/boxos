@@ -9,7 +9,8 @@
 # said whole; one with one of each thing it counts, said in the singular; then
 # the first box damaged one way at a time — a byte of its code, a byte of its
 # table, a byte between two parts, its last byte cut off — each said where it
-# does not hold; a Form that is no text; an ELF image and a text file,
+# does not hold; a Form that is no text and settings without a default; an
+# ELF image and a text file,
 # no box. Built under the address and undefined-behaviour sanitizers. The last
 # line counts the cases that held.
 
@@ -102,6 +103,10 @@ look "a box with a part of every kind" "$WORK/full.box" 0 \
     "each strand keeps 64 bytes of its own, the first 4 of them from this template, aligned to 16" \
     "the names of 2 functions" \
     "cpu sse4.2" "stack 1 MiB" "name Stand" \
+    "setting hours: one of 24, 12; 24 by default — how the hours are counted" \
+    "setting width: a whole number from -5 to 200 cells, 72 by default, from the next start — how wide the column is" \
+    "setting greeting: text, empty by default — what it says at start" \
+    "line 5: the setting future is of a kind this reader does not know" \
     "takes words \"what to say\"" "holds to its hash, put into memory at start" \
     "kept compressed: what it says is not read here" \
     "of a later version of its kind than this reader knows" \
@@ -133,6 +138,9 @@ look "a box cut short" "$WORK/cut.box" 1 "cut.box: a box this reader cannot read
 
 look "a Form that is no text" "$WORK/badform.box" 1 \
     "NOT WRITTEN as a part of its kind is" "NOT WHOLE"
+
+look "settings with one that has no default" "$WORK/badsettings.box" 1 \
+    "line 2: the setting prompt has no default" "NOT WRITTEN as a part of its kind is" "NOT WHOLE"
 
 printf '\177ELF\002\001\001' > "$WORK/image.elf"
 look "an ELF image" "$WORK/image.elf" 2 "image.elf: an ELF image, not a box"

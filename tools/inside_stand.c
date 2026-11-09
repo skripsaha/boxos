@@ -1,9 +1,10 @@
 /* inside_stand — the boxes tools/inside_stand.sh looks inside, written by the
  * one pen (box_pen.h): one with a part of every kind inside says something of,
- * one with one of each thing inside counts, and one whose Form is not written
- * as text.
+ * one with one of each thing inside counts, one whose Form is not written as
+ * text, and one whose settings miss a default.
  *
- *     inside_stand DIR     writes DIR/full.box, DIR/single.box and DIR/badform.box
+ *     inside_stand DIR     writes DIR/full.box, DIR/single.box, DIR/badform.box and
+ *                          DIR/badsettings.box
  */
 
 #include <stdbool.h>
@@ -88,6 +89,13 @@ int main(int argc, char **argv)
     Text("needs", "needs 1\ncpu sse4.2\n", must, BOX_PART_VERSION);
     Text("hints", "hints 1\nstack 1 MiB\n", 0, BOX_PART_VERSION);
     Text("form", "form 1\ntakes words \"what to say\"\n", BOX_FLAG_LOAD_AT_START, BOX_PART_VERSION);
+    Text("settings",
+         "settings 1\n"
+         "setting hours one-of 24 12 default 24 \"how the hours are counted\"\n"
+         "setting width number from -5 to 200 cells default 72 next-start \"how wide the column is\"\n"
+         "setting greeting text default \"\" \"what it says at start\"\n"
+         "setting future gradient default x \"a kind of later\"\n",
+         BOX_FLAG_LOAD_AT_START, BOX_PART_VERSION);
     Text("about", "about 1\nname Stand\n", 0, BOX_PART_VERSION);
     Text("about:ru", "about 1\nname Stand\n", BOX_FLAG_COMPRESSED, BOX_PART_VERSION);
     Text("life", "life 2\nsomething later\n", 0, 2);
@@ -128,6 +136,16 @@ int main(int argc, char **argv)
     Text("form", "form 1\ntakes\twords\n", BOX_FLAG_LOAD_AT_START, BOX_PART_VERSION);
     if (!Write(argv[1], "badform.box")) {
         fprintf(stderr, "inside_stand: badform.box was not written\n");
+        return 2;
+    }
+
+    g_count = 0;
+    Part("code", code, sizeof(code), sizeof(code), 0, must, BOX_PART_VERSION);
+    Part("doors", doors, doors_bytes, doors_bytes, 0, must, BOX_PART_VERSION);
+    Text("settings", "settings 1\nsetting prompt word \"what stands before\"\n", BOX_FLAG_LOAD_AT_START,
+         BOX_PART_VERSION);
+    if (!Write(argv[1], "badsettings.box")) {
+        fprintf(stderr, "inside_stand: badsettings.box was not written\n");
         return 2;
     }
     return 0;

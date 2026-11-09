@@ -20,6 +20,7 @@
 
 #include "inside_show.h"
 #include "nameplate_format.h"
+#include "settings_reader.h"
 
 /* How much of a part is held at a time while its hash is taken. */
 #define INSIDE_CHUNK       (64u * 1024u)
@@ -61,6 +62,13 @@ static void SayNumber(const InsideFile *file, uint64_t number, unsigned width)
     } while (number != 0);
     if (width > sizeof(digits) - at) SayBlanks(file, width - (sizeof(digits) - at));
     file->Say(file->Context, digits + at, sizeof(digits) - at);
+}
+
+/* A whole number with its sign. */
+static void SaySigned(const InsideFile *file, int64_t number)
+{
+    if (number < 0) Say(file, "-");
+    SayNumber(file, number < 0 ? 0u - (uint64_t)number : (uint64_t)number, 0);
 }
 
 /* A number and what it counts: "1 place", "2 places". */
@@ -181,6 +189,90 @@ static bool SayText(const InsideFile *file, const BoxPart *part, const uint8_t *
     return true;
 }
 
+static void SaySetting(const InsideFile *file, const Setting *setting)
+{
+    SettingValue value;
+    SayUnder(file);
+    Say(file, "setting ");
+    SaySpan(file, setting->Name.At, setting->Name.Length);
+    switch (setting->Kind) {
+    case SETTING_YES_OR_NO: Say(file, ": yes or no, "); break;
+    case SETTING_NUMBER:
+        Say(file, ": a whole number from ");
+        SaySigned(file, setting->From);
+        Say(file, " to ");
+        SaySigned(file, setting->To);
+        if (setting->Unit.Length != 0) {
+            Say(file, " ");
+            SaySpan(file, setting->Unit.At, setting->Unit.Length);
+        }
+        Say(file, ", ");
+        break;
+    case SETTING_WORD: Say(file, ": a word, "); break;
+    case SETTING_TEXT: Say(file, ": text, "); break;
+    case SETTING_ONE_OF: {
+        SettingSpan     choice;
+        uint64_t        at = 0;
+        bool            quoted, first = true;
+        SettingsVerdict ignored;
+        Say(file, ": one of ");
+        while (SettingWord(setting->Choices, &at, &choice, &quoted, &ignored)) {
+            if (!first) Say(file, ", ");
+            SaySpan(file, choice.At, choice.Length);
+            first = false;
+        }
+        Say(file, "; ");
+        break;
+    }
+    case SETTING_COLOR: Say(file, ": a colour, "); break;
+    default: break;
+    }
+    if (setting->Kind == SETTING_TEXT) {
+        if (setting->Default.Length == 0) {
+            Say(file, "empty");
+        } else {
+            Say(file, "\"");
+            SaySpan(file, setting->Default.At, setting->Default.Length);
+            Say(file, "\"");
+        }
+    } else {
+        SettingValueRead(setting, setting->Default, &value);
+        SaySpan(file, value.Text.At, value.Text.Length);
+    }
+    Say(file, setting->NextStart ? " by default, from the next start — " : " by default — ");
+    SaySpan(file, setting->What.At, setting->What.Length);
+    Say(file, "\n");
+}
+
+/* Each setting a declaration says, as a person reads it. A setting of a kind
+ * this reader does not know is named and passed over, as a program passes
+ * it over; any other line it cannot read means the part is not written as a
+ * declaration is. */
+static bool SaySettings(const InsideFile *file, const BoxPart *part, const uint8_t *bytes)
+{
+    SettingsDeclared declared;
+    Setting          setting;
+    SettingsVerdict  verdict;
+    bool             written = true;
+    if (SettingsDeclaredBegin(bytes, part->Size, &declared) != SETTINGS_OK) return false;
+    while (SettingsDeclaredNext(&declared, &setting, &verdict)) {
+        if (verdict == SETTINGS_OK) {
+            SaySetting(file, &setting);
+            continue;
+        }
+        SayUnder(file);
+        Say(file, "line ");
+        SayNumber(file, setting.Line, 0);
+        Say(file, ": the setting ");
+        SaySpan(file, setting.Name.At, setting.Name.Length);
+        Say(file, " ");
+        Say(file, SettingsVerdictText(verdict));
+        Say(file, "\n");
+        if (verdict != SETTING_KIND_UNKNOWN) written = false;
+    }
+    return written;
+}
+
 static bool SayDoors(const InsideFile *file, const BoxTable *table, const BoxPart *part,
                      const uint8_t *bytes)
 {
@@ -292,6 +384,7 @@ static bool Describe(const InsideFile *file, const BoxTable *table, const BoxPar
     case BOX_KIND_THREAD: written = SayThread(file, part, bytes); break;
     case BOX_KIND_FIXUPS: written = SayFixups(file, table, part, bytes); break;
     case BOX_KIND_NAMES:  written = SayNames(file, part, bytes); break;
+    case BOX_KIND_SETTINGS: written = SaySettings(file, part, bytes); break;
     default:              written = SayText(file, part, bytes); break;
     }
     free(bytes);

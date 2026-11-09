@@ -135,7 +135,7 @@ static int BoxAsmIsDirective(const BoxAsmToken *Token)
 {
     static const char *const Words[] = {
         "section", "segment", "global", "extern", "default", "bits", "align", "times", "equ",
-        "struc", "endstruc", "istruc", "iend", "alignb", "takes", "gives", "incbin"
+        "struc", "endstruc", "istruc", "iend", "alignb", "takes", "gives", "setting", "incbin"
     };
     uint8_t Reserve;
     size_t Index;
@@ -590,6 +590,8 @@ static int BoxAsmParseStatement(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsm
 
     if (BoxAsmTokenIs(Word, "takes") || BoxAsmTokenIs(Word, "gives"))
         return BoxAsmParseForm(Asm, Lexer, Token, Word);
+    if (BoxAsmTokenIs(Word, "setting"))
+        return BoxAsmParseProgramSetting(Asm, Lexer, Token, Word);
     if (Asm->Struc.Open)
         return BoxAsmParseField(Asm, Lexer, Token, Word, Times);
     if (Times == 0 && BoxAsmTokenIs(Word, "struc"))

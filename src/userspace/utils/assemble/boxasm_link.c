@@ -11,17 +11,18 @@
 
 static const char *const BoxAsmSlotNames[BOXASM_SLOT_COUNT] = {
     "", ".text", ".rodata", ".eh_frame", ".gcc_except_table", ".nameplate",
-    ".boxos.form", ".data", ".init_array", ".fini_array", ".tdata", ".tbss", ".bss"
+    ".boxos.form", ".boxos.settings", ".data", ".init_array", ".fini_array", ".tdata", ".tbss", ".bss"
 };
 
 /* The alignment user.ld gives each output section; inputs may raise it. */
 static const uint64_t BoxAsmSlotAlign[BOXASM_SLOT_COUNT] = {
-    1, BOXASM_PAGE, BOXASM_PAGE, 8, 8, 8, 1, BOXASM_PAGE, 8, 8, 1, 1, BOXASM_PAGE
+    1, BOXASM_PAGE, BOXASM_PAGE, 8, 8, 8, 1, 1, BOXASM_PAGE, 8, 8, 1, 1, BOXASM_PAGE
 };
 
 static const uint64_t BoxAsmSlotFlags[BOXASM_SLOT_COUNT] = {
     0,
     BOXASM_SHF_ALLOC | BOXASM_SHF_EXECINSTR,
+    BOXASM_SHF_ALLOC,
     BOXASM_SHF_ALLOC,
     BOXASM_SHF_ALLOC,
     BOXASM_SHF_ALLOC,
@@ -285,6 +286,7 @@ static int BoxAsmSlotOf(const BoxAsmElfObject *Object, uint16_t Index)
     else if (BoxAsmNameIs(Name, ".eh_frame"))          Slot = BOXASM_SLOT_EH_FRAME;
     else if (BoxAsmNameIs(Name, ".gcc_except_table"))  Slot = BOXASM_SLOT_EXCEPT_TABLE;
     else if (strcmp(Name, ".boxos.form") == 0)         Slot = BOXASM_SLOT_FORM;
+    else if (strcmp(Name, ".boxos.settings") == 0)     Slot = BOXASM_SLOT_SETTINGS;
     else if (BoxAsmNameIs(Name, ".data"))              Slot = BOXASM_SLOT_DATA;
     else if (strcmp(Name, ".init_array") == 0)         Slot = BOXASM_SLOT_INIT_ARRAY;
     else if (strcmp(Name, ".fini_array") == 0)         Slot = BOXASM_SLOT_FINI_ARRAY;
@@ -454,14 +456,14 @@ void BoxAsmSegmentOf(const BoxAsmLinkImage *Image, BoxAsmSegmentKind Kind, BoxAs
 {
     static const BoxAsmSegment Segments[BOXASM_SEGMENT_COUNT] = {
         { BOXASM_SLOT_TEXT,   BOXASM_SLOT_TEXT, BOXASM_PF_R | BOXASM_PF_X, 0, 0, 0 },
-        { BOXASM_SLOT_RODATA, BOXASM_SLOT_FORM, BOXASM_PF_R,               0, 0, 0 },
+        { BOXASM_SLOT_RODATA, BOXASM_SLOT_SETTINGS, BOXASM_PF_R,           0, 0, 0 },
         { BOXASM_SLOT_DATA,   BOXASM_SLOT_BSS,  BOXASM_PF_R | BOXASM_PF_W, 0, 0, 0 },
     };
     size_t Slot;
 
     *Out = Segments[Kind];
-    /* The Nameplate and the Form close the constants of an ELF image; a box
-     * carries them as the parts names and form, not a second time here. */
+    /* The Nameplate, the Form and the settings close the constants of an ELF
+     * image; a box carries them as parts of their own, not a second time here. */
     if (Image->Box && Kind == BOXASM_SEGMENT_CONST)
         Out->Last = BOXASM_SLOT_EXCEPT_TABLE;
     Out->Address = Image->Sections[Out->First].Address;
@@ -510,6 +512,8 @@ static int BoxAsmLinkerSymbol(const BoxAsmLinkImage *Image, const char *Name,
         { "__nameplate_end",    BOXASM_SLOT_NAMEPLATE,  1 },
         { "__boxos_form_start", BOXASM_SLOT_FORM,       0 },
         { "__boxos_form_end",   BOXASM_SLOT_FORM,       1 },
+        { "__boxos_settings_start", BOXASM_SLOT_SETTINGS, 0 },
+        { "__boxos_settings_end",   BOXASM_SLOT_SETTINGS, 1 },
         { "__init_array_start", BOXASM_SLOT_INIT_ARRAY, 0 },
         { "__init_array_end",   BOXASM_SLOT_INIT_ARRAY, 1 },
         { "__fini_array_start", BOXASM_SLOT_FINI_ARRAY, 0 },

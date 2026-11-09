@@ -105,6 +105,7 @@ static int box_part_read(file_id_t file, uint64_t file_size, const char *name, s
 static const char *elf_section_of(const char *name)
 {
     if (strcmp(name, "form") == 0) return ".boxos.form";
+    if (strcmp(name, "settings") == 0) return ".boxos.settings";
     if (strcmp(name, "recipe") == 0) return ".boxos.recipe";
     return NULL;
 }

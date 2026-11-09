@@ -223,6 +223,7 @@ static void BoxAsmEnd(BoxAsmAssembler *Asm)
     BoxAsmBufferRelease(&Asm->StringBytes);
     BoxAsmBufferRelease(&Asm->Form.Text);
     BoxAsmBufferRelease(&Asm->Form.Names);
+    BoxAsmBufferRelease(&Asm->Settings);
     BoxAsmNameIndexRelease(&Asm->SymbolIndex);
     memset(Asm, 0, sizeof(*Asm));
 }

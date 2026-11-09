@@ -7,14 +7,15 @@
  * on the volume. What goes where:
  *
  *   PT_LOAD R+X        code     at its address, MUST_UNDERSTAND
- *   PT_LOAD R          const    its own sections — the Nameplate and the Form, last in
- *                               it, are parts of their own and are left out of it
+ *   PT_LOAD R          const    its own sections — the Nameplate, the Form and the settings,
+ *                               last in it, are parts of their own and are left out of it
  *   PT_LOAD R+W        data     its zeros past the file's bytes as memory only
  *   PT_LOAD, no rights —          the linker's tables for a dynamic linker
  *   PT_TLS             thread   the template every thread's block is made from
  *   e_entry            doors    the door `start`
  *   .nameplate         names    the program's names for its functions
  *   .boxos.form        form     loaded at start, read-only; the text, its C string's zeros dropped
+ *   .boxos.settings    settings loaded at start, read-only; the text, every setting read
  *   .boxos.recipe      recipe   the text, its C string's zeros dropped
  *
  * An executable linked at a fixed address (ET_EXEC) keeps its addresses: its
@@ -38,6 +39,7 @@
 
 #include "box_pen.h"
 #include "box_host.h"
+#include "settings_reader.h"
 
 #define ET_EXEC          2u
 #define ET_DYN           3u
@@ -229,7 +231,8 @@ static bool SectionNamed(const Elf *elf, const char *name, const uint8_t **bytes
 /* The sections a box carries as parts of their own, not in its constants. */
 static bool CarriedApart(const char *name)
 {
-    return strcmp(name, ".nameplate") == 0 || strcmp(name, ".boxos.form") == 0;
+    return strcmp(name, ".nameplate") == 0 || strcmp(name, ".boxos.form") == 0 ||
+           strcmp(name, ".boxos.settings") == 0;
 }
 
 /* The constants without the Nameplate and the Form: the linker script puts
@@ -254,7 +257,7 @@ static void LeaveOutCarried(const Elf *elf, Loadable *constants)
     }
     if (carried == UINT64_MAX) return;
     if (carried - constants->Place < end)
-        Refuse("its Nameplate or its Form lies among its constants; the linker script puts them last");
+        Refuse("its Nameplate, its Form or its settings lie among its constants; the linker script puts them last");
     constants->Size = constants->Memory = end;
     constants->Present = end > 0;
 }
@@ -353,6 +356,25 @@ static void CheckDynamic(const Elf *elf, const Segments *segments)
 
 /* ── the box ─────────────────────────────────────────────────────────────── */
 
+/* Every setting the declaration says, read as a program will read it: a line
+ * a program would pass over is a setting it would never have, and the build
+ * says so instead. */
+static void CheckSettings(const uint8_t *bytes, uint64_t size)
+{
+    SettingsDeclared declared;
+    Setting          setting;
+    SettingsVerdict  verdict;
+    char             why[300];
+    if (SettingsDeclaredBegin(bytes, size, &declared) != SETTINGS_OK)
+        Refuse("its settings do not begin with the line \"settings 1\"");
+    while (SettingsDeclaredNext(&declared, &setting, &verdict)) {
+        if (verdict == SETTINGS_OK) continue;
+        snprintf(why, sizeof(why), "its settings, line %u: the setting %.*s %s", setting.Line,
+                 (int)setting.Name.Length, (const char *)setting.Name.At, SettingsVerdictText(verdict));
+        Refuse(why);
+    }
+}
+
 static void Add(BoxPenPart *parts, uint32_t *count, const char *name, const uint8_t *bytes, uint64_t size,
                 uint64_t memory, uint64_t place, uint32_t flags)
 {
@@ -448,9 +470,10 @@ int main(int argc, char **argv)
     /* The Form and the Recipe are parts written as text: the section holds the
      * text as a C string, and the zeros that end it are not the text's. */
     static const struct { const char *Section, *Part; BoxKind Text; uint32_t Flags; } carried[] = {
-        { ".nameplate",    "names",  BOX_KIND_UNKNOWN, 0 },
-        { ".boxos.form",   "form",   BOX_KIND_FORM,    BOX_FLAG_LOAD_AT_START },
-        { ".boxos.recipe", "recipe", BOX_KIND_RECIPE,  0 },
+        { ".nameplate",      "names",    BOX_KIND_UNKNOWN,  0 },
+        { ".boxos.form",     "form",     BOX_KIND_FORM,     BOX_FLAG_LOAD_AT_START },
+        { ".boxos.settings", "settings", BOX_KIND_SETTINGS, BOX_FLAG_LOAD_AT_START },
+        { ".boxos.recipe",   "recipe",   BOX_KIND_RECIPE,   0 },
     };
     for (unsigned i = 0; i < sizeof(carried) / sizeof(carried[0]); i++) {
         const uint8_t *bytes;
@@ -468,6 +491,7 @@ int main(int argc, char **argv)
                          carried[i].Section, carried[i].Part);
                 Refuse(why);
             }
+            if (carried[i].Text == BOX_KIND_SETTINGS) CheckSettings(bytes, size);
         }
         Add(parts, &count, carried[i].Part, bytes, size, size, 0, carried[i].Flags);
     }

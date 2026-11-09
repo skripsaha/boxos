@@ -6,6 +6,7 @@
 #include "box/string.h"
 
 #include "box_pen.h"
+#include "settings_reader.h"
 
 /*
  * The link written as a box (src/include/box_format.h) by the one pen
@@ -17,10 +18,11 @@
  *   fixups              every word that holds an address, the base added at start
  *   thread              the template every strand's TLS block is made from
  *   names               the Nameplate
- *   form                the Form, loaded at start; recipe, the Recipe — as text
+ *   form, settings      the Form and the settings, loaded at start; recipe, the
+ *                       Recipe — as text
  */
 
-#define BOXASM_BOX_PARTS 9u
+#define BOXASM_BOX_PARTS 10u
 
 typedef struct {
     BoxPenPart Parts[BOXASM_BOX_PARTS];
@@ -217,6 +219,39 @@ static int BoxAsmBoxText(BoxAsmLinker *Link, BoxAsmBox *Box, const char *Name, B
     return 0;
 }
 
+/* Every setting the declaration says, read as the program will read it: one
+ * it would pass over is refused, as assemble refuses it where it is written. */
+static int BoxAsmBoxSettings(BoxAsmLinker *Link, const BoxAsmOutputSection *Section)
+{
+    SettingsDeclared Declared;
+    Setting Setting;
+    SettingsVerdict Verdict;
+    BoxAsmMessage Message;
+    uint64_t Size = Section->Data.Size;
+
+    while (Size > 0 && Section->Data.Data[Size - 1u] == 0)
+        Size--;
+    if (Size == 0)
+        return 0;
+    BoxAsmMessageBegin(&Message, Link->Error, Link->ErrorCapacity);
+    if (SettingsDeclaredBegin(Section->Data.Data, Size, &Declared) != SETTINGS_OK) {
+        BoxAsmMessageText(&Message, "the program's settings do not begin with the line \"settings 1\"");
+        return -ERR_INVALID_ARGUMENT;
+    }
+    while (SettingsDeclaredNext(&Declared, &Setting, &Verdict)) {
+        if (Verdict == SETTINGS_OK)
+            continue;
+        BoxAsmMessageText(&Message, "the program's settings, line ");
+        BoxAsmMessageDecimal(&Message, Setting.Line);
+        BoxAsmMessageText(&Message, ": the setting ");
+        BoxAsmMessageSpan(&Message, (const char *)Setting.Name.At, (size_t)Setting.Name.Length);
+        BoxAsmMessageText(&Message, " ");
+        BoxAsmMessageText(&Message, SettingsVerdictText(Verdict));
+        return -ERR_INVALID_ARGUMENT;
+    }
+    return 0;
+}
+
 static void BoxAsmHashBegin(void *State)
 {
     sha256_begin((Sha256 *)State);
@@ -270,6 +305,7 @@ int BoxAsmWriteBox(BoxAsmLinker *Link, BoxAsmBlob *Out)
 {
     const BoxAsmOutputSection *Names = &Link->Image.Sections[BOXASM_SLOT_NAMEPLATE];
     const BoxAsmOutputSection *Form = &Link->Image.Sections[BOXASM_SLOT_FORM];
+    const BoxAsmOutputSection *Settings = &Link->Image.Sections[BOXASM_SLOT_SETTINGS];
     BoxAsmBox Box;
     int Rc;
 
@@ -283,6 +319,11 @@ int BoxAsmWriteBox(BoxAsmLinker *Link, BoxAsmBlob *Out)
         BoxAsmBoxPart(&Box, "names", Names->Data.Data, Names->Size, Names->Size, 0, 0);
     if (Rc == 0)
         Rc = BoxAsmBoxText(Link, &Box, "form", BOX_KIND_FORM, Form->Data.Data, Form->Size,
+                           BOX_FLAG_LOAD_AT_START);
+    if (Rc == 0)
+        Rc = BoxAsmBoxSettings(Link, Settings);
+    if (Rc == 0)
+        Rc = BoxAsmBoxText(Link, &Box, "settings", BOX_KIND_SETTINGS, Settings->Data.Data, Settings->Size,
                            BOX_FLAG_LOAD_AT_START);
     if (Rc == 0 && Link->Recipe)
         Rc = BoxAsmBoxText(Link, &Box, "recipe", BOX_KIND_RECIPE, Link->Recipe->Data,

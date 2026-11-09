@@ -285,6 +285,7 @@ typedef struct {
     uint32_t            FailFrame;       /* while it works: the macro call of its line */
     BoxAsmStruc         Struc;
     BoxAsmProgramForm   Form;
+    BoxAsmBuffer        Settings;        /* `setting` lines: the program's settings so far, from `settings 1` */
     uintptr_t           StackBase;       /* the stack where the work began */
 } BoxAsmAssembler;
 
@@ -351,6 +352,10 @@ int BoxAsmParseBox(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
 /* boxasm_form.c */
 int BoxAsmParseForm(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
                     const BoxAsmToken *Word);
+
+/* boxasm_settings.c */
+int BoxAsmParseProgramSetting(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
+                              const BoxAsmToken *Word);
 
 /* boxasm_struc.c */
 int BoxAsmStrucOpen(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,

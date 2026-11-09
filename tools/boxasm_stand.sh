@@ -330,6 +330,107 @@ EOF
     else fail "form_symbols_$form" "$got"; fi
 done
 
+# ---- the settings: what a person can set ------------------------------------
+
+# Each `setting` line is read whole by the one reader of settings and written
+# into .boxos.settings its words apart by single blanks: a tab between words
+# and a comment go, a ';' between quotes stays.
+cat > "$WORK/settings.asm" <<'EOF'
+section .text
+global main
+extern exit
+extern __boxos_settings_start
+extern __boxos_settings_end
+setting hours one-of 24 12 default 24 "how the hours are counted"
+setting  width	number from -5 to 200 cells default 72 next-start "how wide the column is"   ; said once
+setting greeting text default "" "what it says; at start"
+setting prompt-color color default #FFB020 "the colour of the prompt"
+main:
+    endbr64
+    xor edi, edi
+    call exit
+section .rodata
+align 8
+global bounds
+bounds: dq __boxos_settings_start, __boxos_settings_end
+EOF
+SETTINGS_TEXT='settings 1
+setting hours one-of 24 12 default 24 "how the hours are counted"
+setting width number from -5 to 200 cells default 72 next-start "how wide the column is"
+setting greeting text default "" "what it says; at start"
+setting prompt-color color default #FFB020 "the colour of the prompt"'
+if "$STAND" assemble "$WORK/settings.asm" "$WORK/settings.o" 2> "$WORK/asm.err" &&
+   x86_64-elf-objcopy -O binary --only-section=.boxos.settings "$WORK/settings.o" "$WORK/settings.got" 2>/dev/null &&
+   printf '%s\n' "$SETTINGS_TEXT" > "$WORK/settings.want" && cmp -s "$WORK/settings.got" "$WORK/settings.want"; then
+    ok settings_section
+else
+    fail settings_section "$(cat "$WORK/asm.err" 2>/dev/null; diff "$WORK/settings.got" "$WORK/settings.want" 2>&1)"
+fi
+
+# In an ELF image the two symbols bound the section; in a box the declaration
+# is the part settings, put into memory at start, and among the constants no
+# second time (the box's ELF twin is the witness, as for every program).
+if "$STAND" link "$ENTRY" "$WORK/settings.o" "$ARCHIVE" "$WORK/settings.elf" symbols 2> "$WORK/link.err"; then
+    got=$(python3 - "$WORK/settings.elf" <<'PY'
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+shoff, = struct.unpack_from('<Q', d, 0x28)
+count, names = struct.unpack_from('<HH', d, 0x3c)
+sec = [struct.unpack_from('<IIQQQQIIQQ', d, shoff + 64 * i) for i in range(count)]
+def name(s):
+    at = sec[names][4] + s[0]
+    return d[at:d.index(b'\0', at)].decode()
+by = {name(s): s for s in sec}
+symtab, strtab = by['.symtab'], by['.strtab']
+for i in range(symtab[5] // 24):
+    n, info, other, shndx, value, size = struct.unpack_from('<IBBHQQ', d, symtab[4] + 24 * i)
+    at = strtab[4] + n
+    if d[at:d.index(b'\0', at)] == b'bounds':
+        sh = sec[shndx]
+        start, end = struct.unpack_from('<QQ', d, sh[4] + value - sh[3])
+        s = by['.boxos.settings']
+        print(start == s[3], end == s[3] + s[5])
+PY
+)
+    if [ "$got" = "True True" ]; then ok settings_symbols; else fail settings_symbols "$got"; fi
+else
+    fail settings_symbols "$(cat "$WORK/link.err")"
+fi
+
+# What the reader would not read is refused where it is written, word for word.
+setting_refuses() {
+    local name=$1 line=$2 want=$3 said
+    printf 'section .text\nglobal main\nmain:\n    ret\n%s\n' "$line" > "$WORK/$name.asm"
+    said=$("$STAND" assemble "$WORK/$name.asm" "$WORK/$name.o" 2>&1 | head -1)
+    if [ -s "$WORK/$name.o" ]; then fail "$name" "assembled instead of refusing"
+    elif [ "$said" != "$want" ]; then fail "$name" "said '$said', expected '$want'"
+    else ok "$name"; fi
+}
+setting_refuses setting_no_default 'setting look one-of dark light "how it looks"' \
+    "setting_no_default.asm:5:1: the setting look has no default"
+setting_refuses setting_unknown_kind 'setting look gradient default x "how it looks"' \
+    "setting_unknown_kind.asm:5:1: the setting look is of a kind this reader does not know"
+setting_refuses setting_bad_name 'setting Look word default x "how it looks"' \
+    "setting_bad_name.asm:5:1: the setting Look has a name a setting cannot have: a small letter, then small letters, digits and -, at most 32, not settings or when"
+setting_refuses setting_twice $'setting look word default x "how it looks"\nsetting look word default y "again"' \
+    "setting_twice.asm:6:1: the setting look is declared already"
+setting_refuses setting_outside_limits 'setting width number from 1 to 9 default 10 "how wide"' \
+    "setting_outside_limits.asm:5:1: the setting width has a default that does not fit it"
+setting_refuses setting_tab_in_quotes $'setting greeting text default "a\tb" "what it says"' \
+    "setting_tab_in_quotes.asm:5:1: the setting greeting holds a tab between its quotes, which a declaration cannot hold"
+setting_refuses setting_in_struc $'struc point\nsetting look word default x "how"\nendstruc' \
+    "setting_in_struc.asm:6:1: setting stands outside struc and istruc: it is the program's, not a layout's"
+
+# A declaration that comes to the linker from another assembler is read too:
+# a box with a setting no program could have is not made.
+program badsettings $' nop\n.section .boxos.settings,"a"\n.ascii "settings 1\\nsetting look word \\"how it looks\\"\\n"'
+said=$("$STAND" link "$ENTRY" "$WORK/badsettings.o" "$ARCHIVE" "$WORK/badsettings.box" 2>&1)
+if [ $? = 1 ] && [ "$said" = "the program's settings, line 2: the setting look has no default" ]; then
+    ok settings_read_at_link
+else
+    fail settings_read_at_link "said '$said'"
+fi
+
 # ---- the Recipe: what a program was made from --------------------------------
 
 # The same program linked with a Recipe and without: the section carries the
@@ -390,10 +491,10 @@ fi
 # objects linked as an ELF image at the code start are the witness: the box,
 # read by a reader of its own here (box_format.h) and moved to 0xC000 by its
 # fixups, is that image byte for byte — each part where its segment is, the
-# constants up to the end of their own sections (the Nameplate and the Form
-# after them are parts of their own), the door where the entry is, the thread
-# template where PT_TLS is, the Nameplate, the Form and the Recipe as the
-# sections hold them (the Nameplate's BaseAddress names a link address,
+# constants up to the end of their own sections (the Nameplate, the Form and
+# the settings after them are parts of their own), the door where the entry
+# is, the thread template where PT_TLS is, the Nameplate, the Form, the
+# settings and the Recipe as the sections hold them (the Nameplate's BaseAddress names a link address,
 # 0xC000 apart). A fixup too many moves a word the image does not; one too
 # few leaves one that it does.
 box_is_elf() {
@@ -410,8 +511,14 @@ for i in range(count):
     offset, size, memory, place, flags = struct.unpack_from('<QQQQI', box, table + 80 * i)
     length, at = struct.unpack_from('<HI', box, table + 80 * i + 38)
     parts[box[names + at:names + at + length].decode()] = (box[offset:offset + size], memory, place, flags)
-known = {'code', 'const', 'data', 'doors', 'fixups', 'thread', 'names', 'form', 'recipe'}
+known = {'code', 'const', 'data', 'doors', 'fixups', 'thread', 'names', 'form', 'settings', 'recipe'}
 if set(parts) - known: fail('parts nobody makes: %s' % sorted(set(parts) - known))
+# MUST_UNDERSTAND what the program cannot run without; LOAD_AT_START what it
+# reads of itself at start; nothing for the rest.
+flags = {'code': 1, 'const': 1, 'data': 1, 'doors': 1, 'fixups': 1, 'thread': 1, 'names': 0, 'form': 2,
+         'settings': 2, 'recipe': 0}
+for name, (_, _, _, flag) in parts.items():
+    if flag != flags[name]: fail('part %s has the flags %#x, not %#x' % (name, flag, flags[name]))
 
 words, places = parts['fixups'][0], []
 for (word,) in struct.iter_unpack('<Q', words):
@@ -439,7 +546,7 @@ if 'const' in segments:
     off, vaddr, filesz, memsz = segments['const']
     end = max([addr + len(data) - vaddr for name, (addr, data, flags, kind) in sections.items()
                if flags & 2 and kind != 8 and data and vaddr <= addr < vaddr + memsz
-               and name not in ('.nameplate', '.boxos.form')] + [0])
+               and name not in ('.nameplate', '.boxos.form', '.boxos.settings')] + [0])
     segments['const'] = [off, vaddr, end, end]
     if end == 0: del segments['const']
 image = elf
@@ -474,7 +581,8 @@ if tls and tls[1]:
         fail('thread %d of %d aligned %d; PT_TLS %d of %d aligned %d' % (init, total, align, len(tls[0]), tls[1], tls[2]))
 elif 'thread' in parts: fail('a thread part with no TLS block')
 
-for part, section in (('names', '.nameplate'), ('form', '.boxos.form'), ('recipe', '.boxos.recipe')):
+for part, section in (('names', '.nameplate'), ('form', '.boxos.form'), ('settings', '.boxos.settings'),
+                      ('recipe', '.boxos.recipe')):
     want = sections.get(section, (0, b''))[1]
     if part == 'names' and want:
         want = want[:16] + struct.pack('<Q', struct.unpack_from('<Q', want, 16)[0] - BASE) + want[24:]
@@ -511,6 +619,7 @@ $CC_HOST -std=gnu11 -O1 -DINSIDE_HOST -Isrc/include -Itools -Isrc/userspace/util
 box_builds hello "$WORK/hello.o" "recipe=$WORK/recipe.txt"
 box_builds countdown "$WORK/countdown.o"
 box_builds planets "$WORK/planets.o"
+box_builds settings "$WORK/settings.o"
 
 # Every way a word comes to hold an address, and the ways one does not: a
 # table of them read-only and another written, the names the linker gives

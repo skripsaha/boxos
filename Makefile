@@ -1016,7 +1016,8 @@ $(PACK_SHA256): $(USERSPACE_DIR)/boxlib/src/sha256.c $(USERSPACE_DIR)/boxlib/inc
 	    -I$(SRCDIR)/include -c $< -o $@
 
 $(PACK_TOOL): tools/pack.c tools/box_host.h $(SRCDIR)/include/box_format.h \
-              $(SRCDIR)/include/box_reader.h $(SRCDIR)/include/box_pen.h $(PACK_SHA256) | $(BUILDDIR)
+              $(SRCDIR)/include/box_reader.h $(SRCDIR)/include/box_pen.h \
+              $(SRCDIR)/include/settings_reader.h $(PACK_SHA256) | $(BUILDDIR)
 	@echo "Compiling the pack tool for $(UNAME_S) ($(UNAME_M))..."
 	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -I$(SRCDIR)/include -Itools tools/pack.c $(PACK_SHA256) -o $@
 
@@ -1026,7 +1027,8 @@ $(PACK_TOOL): tools/pack.c tools/box_host.h $(SRCDIR)/include/box_format.h \
 # named beside BUILDDIR, before `all` names it.
 $(INSIDE_TOOL): tools/inside.c tools/box_host.h $(UTILS_DIR)/inside/inside_show.c \
                 $(UTILS_DIR)/inside/inside_show.h $(SRCDIR)/include/box_format.h \
-                $(SRCDIR)/include/box_reader.h $(SRCDIR)/include/nameplate_format.h $(PACK_SHA256) | $(BUILDDIR)
+                $(SRCDIR)/include/box_reader.h $(SRCDIR)/include/nameplate_format.h \
+                $(SRCDIR)/include/settings_reader.h $(PACK_SHA256) | $(BUILDDIR)
 	@echo "Compiling the inside tool for $(UNAME_S) ($(UNAME_M))..."
 	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -DINSIDE_HOST -I$(SRCDIR)/include -Itools \
 	    -I$(UTILS_DIR)/inside tools/inside.c $(UTILS_DIR)/inside/inside_show.c $(PACK_SHA256) -o $@

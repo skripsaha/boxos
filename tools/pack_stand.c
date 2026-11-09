@@ -8,10 +8,11 @@
  * reading of its own, written here from the System V ABI and sharing nothing
  * with pack: every loadable segment must be the box's part of its kind, at its
  * page, byte for byte, its zeros counted — the R segment up to the end of its
- * own sections, the Nameplate and the Form after them left to their parts;
+ * own sections, the Nameplate, the Form and the settings after them left to
+ * their parts;
  * the entry the door `start`; PT_TLS
- * the thread template; the Nameplate, the Form and the Recipe the parts of
- * those names; and for a static PIE every relocation a fixup and every fixup a
+ * the thread template; the Nameplate, the Form, the settings and the Recipe
+ * the parts of those names; and for a static PIE every relocation a fixup and every fixup a
  * relocation, the word it names holding the address it means at base 0. Each
  * box holds nothing else. */
 
@@ -159,8 +160,8 @@ static void ReadProgram(Program *program)
 }
 
 /* Where the constants of the R segment end, from the page it starts on: the
- * end of its last allocated section with bytes that is not the Nameplate or
- * the Form, 0 when it holds nothing else. */
+ * end of its last allocated section with bytes that is not the Nameplate, the
+ * Form or the settings, 0 when it holds nothing else. */
 static uint64_t ConstantsEnd(const Program *program, const Segment *segment)
 {
     const uint8_t *file    = program->File;
@@ -174,7 +175,7 @@ static uint64_t ConstantsEnd(const Program *program, const Segment *segment)
         uint64_t       addr   = U64(header + 16), size = U64(header + 32);
         if (!(U64(header + 8) & 2) || U32(header + 4) == 8 || size == 0 || addr < segment->Virt ||
             addr >= segment->Virt + segment->MemoryBytes || strcmp(name, ".nameplate") == 0 ||
-            strcmp(name, ".boxos.form") == 0)
+            strcmp(name, ".boxos.form") == 0 || strcmp(name, ".boxos.settings") == 0)
             continue;
         if (addr + size - page > end) end = addr + size - page;
     }
@@ -295,21 +296,25 @@ static void CheckPair(const char *elf_path, const char *box_path, const BoxHashe
         Check(!BoxPartOfKind(&table, BOX_KIND_FIXUPS, &part), elf_path, "no fixups for a program at a fixed address");
     }
 
-    static const char *const carried[3][2] = { { ".nameplate", "names" }, { ".boxos.form", "form" },
-                                               { ".boxos.recipe", "recipe" } };
-    for (unsigned i = 0; i < 3; i++) {
+    static const struct { const char *Section, *Part; bool Text; uint32_t Flags; } carried[] = {
+        { ".nameplate", "names", false, 0 },
+        { ".boxos.form", "form", true, BOX_FLAG_LOAD_AT_START },
+        { ".boxos.settings", "settings", true, BOX_FLAG_LOAD_AT_START },
+        { ".boxos.recipe", "recipe", true, 0 },
+    };
+    for (unsigned i = 0; i < sizeof(carried) / sizeof(carried[0]); i++) {
         uint32_t       type;
         uint64_t       size;
-        const uint8_t *bytes = Section(&program, carried[i][0], &type, &size);
-        /* The Form and the Recipe are text: the zeros ending their C string stay behind. */
-        if (bytes && type != 8 && i > 0)
+        const uint8_t *bytes = Section(&program, carried[i].Section, &type, &size);
+        /* The Form, the settings and the Recipe are text: the zeros ending their C string stay behind. */
+        if (bytes && type != 8 && carried[i].Text)
             while (size > 0 && bytes[size - 1] == 0) size--;
         bool           there = bytes && type != 8 && size > 0;
-        bool           found = BoxPartFind(&table, (const uint8_t *)carried[i][1], strlen(carried[i][1]), &part);
+        bool           found = BoxPartFind(&table, (const uint8_t *)carried[i].Part, strlen(carried[i].Part), &part);
         char           what[96];
-        snprintf(what, sizeof(what), "its %s section is the part %s", carried[i][0], carried[i][1]);
+        snprintf(what, sizeof(what), "its %s section is the part %s", carried[i].Section, carried[i].Part);
         Check(there ? found && part.Size == size && memcmp(box + part.Offset, bytes, size) == 0 &&
-                          part.Flags == (i == 1 ? BOX_FLAG_LOAD_AT_START : 0u)
+                          part.Flags == carried[i].Flags
                     : !found,
               elf_path, what);
         if (there) expected++;
