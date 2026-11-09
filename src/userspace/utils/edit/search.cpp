@@ -151,7 +151,7 @@ void Search::Paint(tui::Frame &Out, Tab &Active)
     const char *Hint = !Swapping      ? "Enter next  Shift+Enter back  Esc done"
                        : Active.Safety ? "SAFETY: Enter finds, nothing is replaced  Esc done"
                                        : "Enter one  Ctrl+Enter all  Tab field  Esc done";
-    const core::Rect Inside = DrawWindow(Out, Area(), Swapping ? "Replace" : "Find", Count, Hint);
+    const core::Rect Inside = tui::DrawWindow(Out, Area(), Swapping ? "Replace" : "Find", Count, Hint);
     What.Paint(Out, {Inside.X, Inside.Y}, Inside.Width, !OnWith);
     if (Swapping) With.Paint(Out, {Inside.X, Inside.Y + 1}, Inside.Width, OnWith);
 }

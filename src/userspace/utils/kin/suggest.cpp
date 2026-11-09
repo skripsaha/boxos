@@ -56,10 +56,10 @@ Suggest::Outcome Suggest::OnKey(const tui::KeyEvent &Key)
  * shown from where it ends on it. */
 void Suggest::Paint(tui::Frame &Out, core::Rect Area) const
 {
-    const core::Rect Inside = DrawWindow(Out, Area, "tags", Where, "Up/Down Enter take  Esc close");
+    const core::Rect Inside = tui::DrawWindow(Out, Area, "tags", Where, "Up/Down Enter take  Esc close");
     if (Shown.empty()) {
-        PutText(Out, {Inside.X, Inside.Y}, All.empty() ? "no file wears a tag here" : "no tag begins so",
-                Inside.Width, HintInk, WindowPaper);
+        tui::PutText(Out, {Inside.X, Inside.Y}, All.empty() ? "no file wears a tag here" : "no tag begins so",
+                Inside.Width, tui::HintInk, tui::WindowPaper);
         return;
     }
 
@@ -68,15 +68,15 @@ void Suggest::Paint(tui::Frame &Out, core::Rect Area) const
     for (std::size_t Line = 0; Line < Rows && First + Line < Shown.size(); Line++) {
         const box::tagfs::tag_count &One   = All[Shown[First + Line]];
         const bool                   Here  = First + Line == Row;
-        const core::Color            Under = Here ? ChosenPaper : WindowPaper;
+        const core::Color            Under = Here ? ChosenPaper : tui::WindowPaper;
         const std::int32_t           Y     = Inside.Y + static_cast<std::int32_t>(Line);
         const std::string            Count = std::format("{}", One.files);
         const auto                   Room  = Inside.Width - static_cast<std::int32_t>(Count.size()) - 1;
-        Out.Fill({Inside.X, Y, Inside.Width, 1}, tui::Cell{' ', WindowInk, Under});
-        PutText(Out, {Inside.X, Y}, Shortened(Spelled(One.what), static_cast<std::size_t>(std::max(0, Room))),
-                Room, Here ? TitleInk : WindowInk, Under);
-        PutText(Out, {Inside.X + Inside.Width - static_cast<std::int32_t>(Count.size()), Y}, Count,
-                static_cast<std::int32_t>(Count.size()), HintInk, Under);
+        Out.Fill({Inside.X, Y, Inside.Width, 1}, tui::Cell{' ', tui::WindowInk, Under});
+        tui::PutText(Out, {Inside.X, Y}, tui::Shortened(Spelled(One.what), static_cast<std::size_t>(std::max(0, Room))),
+                Room, Here ? tui::TitleInk : tui::WindowInk, Under);
+        tui::PutText(Out, {Inside.X + Inside.Width - static_cast<std::int32_t>(Count.size()), Y}, Count,
+                static_cast<std::int32_t>(Count.size()), tui::HintInk, Under);
     }
 }
 

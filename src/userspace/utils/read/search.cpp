@@ -106,7 +106,7 @@ void Search::Paint(tui::Frame &Out) const
         else               Count = std::format("{} found", Found.size());
     }
     const std::int32_t Width  = std::min(Screen.Width - 2, 52);
-    const core::Rect   Inside = DrawWindow(Out, {Screen.Width - Width - 1, 1, Width, static_cast<std::int32_t>(Covered)},
+    const core::Rect   Inside = tui::DrawWindow(Out, {Screen.Width - Width - 1, 1, Width, static_cast<std::int32_t>(Covered)},
                                            "Find", Count, "Enter next  Shift+Enter back  Esc done");
     What.Paint(Out, {Inside.X, Inside.Y}, Inside.Width, true);
 }

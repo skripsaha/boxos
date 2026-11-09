@@ -195,7 +195,7 @@ Position Text::Next(Position At) const noexcept
 {
     At = Clamp(At);
     const std::string &One = Lines[At.Line];
-    if (At.Byte < One.size()) return {At.Line, At.Byte + GlyphAt(One, At.Byte, 0).Length};
+    if (At.Byte < One.size()) return {At.Line, At.Byte + tui::GlyphAt(One, At.Byte, 0).Length};
     if (At.Line + 1 < Lines.size()) return {At.Line + 1, 0};
     return At;
 }
@@ -212,7 +212,7 @@ Position Text::Prior(Position At) const noexcept
     std::size_t        Byte = 0, Before = 0;
     while (Byte < At.Byte) {
         Before = Byte;
-        Byte += GlyphAt(One, Byte, 0).Length;
+        Byte += tui::GlyphAt(One, Byte, 0).Length;
     }
     return {At.Line, Before};
 }
@@ -223,7 +223,7 @@ std::size_t Text::ColumnOf(Position At) const noexcept
     const std::string &One = Lines[At.Line];
     std::size_t        Column = 0;
     for (std::size_t Byte = 0; Byte < At.Byte;) {
-        const Glyph Shape = GlyphAt(One, Byte, Column);
+        const tui::Glyph Shape = tui::GlyphAt(One, Byte, Column);
         Column += Shape.Width;
         Byte += Shape.Length;
     }
@@ -235,7 +235,7 @@ std::size_t Text::ByteAtColumn(std::size_t Line, std::size_t Column) const noexc
     const std::string &One = Lines[std::min(Line, Lines.size() - 1)];
     std::size_t        At = 0, Byte = 0;
     while (Byte < One.size()) {
-        const Glyph Shape = GlyphAt(One, Byte, At);
+        const tui::Glyph Shape = tui::GlyphAt(One, Byte, At);
         if (At + Shape.Width > Column) break;
         At += Shape.Width;
         Byte += Shape.Length;

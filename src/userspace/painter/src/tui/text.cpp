@@ -1,12 +1,12 @@
-/* Text as cells of the glass. */
+/* text.cpp — text as cells of the glass. */
 
-#include "glyph.h"
+#include "painter/tui/text.h"
 
 #include <cstdint>
 
 #include "boxos_glyph_fold.h"
 
-namespace kin {
+namespace painter::tui {
 
 namespace {
 
@@ -84,4 +84,27 @@ std::size_t BytesWithin(std::string_view Text, std::size_t Cells) noexcept
     return Byte;
 }
 
-}  // namespace kin
+std::string Shortened(std::string_view Text, std::size_t Width)
+{
+    if (CellsOf(Text) <= Width) return std::string(Text);
+    if (Width <= 3) return std::string(Width, '.');
+    return std::string(Text.substr(0, BytesWithin(Text, Width - 3))) + "...";
+}
+
+std::int32_t PutText(Frame &Out, core::Point At, std::string_view Text, std::int32_t Width, core::Color Ink,
+                     core::Color Under)
+{
+    std::int32_t Col = 0;
+    for (std::size_t Byte = 0; Byte < Text.size();) {
+        const Glyph Shape = GlyphAt(Text, Byte, static_cast<std::size_t>(Col));
+        if (Col + static_cast<std::int32_t>(Shape.Width) > Width) break;
+        const bool Blank = Text[Byte] == '\t';
+        for (std::size_t Part = 0; Part < Shape.Width; Part++)
+            (void)Out.Put({At.X + Col++, At.Y},
+                          Cell{Blank ? ' ' : Shape.Cells[Part], Shape.Odd ? OddInk : Ink, Under});
+        Byte += Shape.Length;
+    }
+    return Col;
+}
+
+}  // namespace painter::tui

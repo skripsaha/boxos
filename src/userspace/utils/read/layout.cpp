@@ -4,7 +4,7 @@
 
 #include <algorithm>
 
-#include "kin/glyph.h"
+#include "kin/look.h"
 
 namespace read {
 
@@ -46,7 +46,7 @@ void Layout::Make(const Book &Of, std::int32_t Width)
         case Kind::Rule:  All.push_back({RowKind::RuleLine, Index, 0, 0, 0, true}); break;
         case Kind::Quote: Wrap(One, Index, MarkerAt(One) + 2); break;
         case Kind::Item: {
-            const std::int32_t Marker = One.Marker.empty() ? 1 : static_cast<std::int32_t>(CellsOf(One.Marker));
+            const std::int32_t Marker = One.Marker.empty() ? 1 : static_cast<std::int32_t>(tui::CellsOf(One.Marker));
             Wrap(One, Index, MarkerAt(One) + Marker + 1);
             break;
         }
@@ -68,7 +68,7 @@ void Layout::Wrap(const Block &One, std::size_t Index, std::int32_t Indent)
     std::size_t            At    = 0;
     bool                   First = true;
     do {
-        std::size_t End = At + BytesWithin(Text.substr(At), Room);
+        std::size_t End = At + tui::BytesWithin(Text.substr(At), Room);
         std::size_t Next = End;
         if (End < Text.size()) {
             const std::size_t Blank = Words ? Text.rfind(' ', End) : std::string_view::npos;
@@ -76,7 +76,7 @@ void Layout::Wrap(const Block &One, std::size_t Index, std::int32_t Indent)
                 End  = Blank;
                 Next = Blank + 1;
             } else if (End == At) {
-                End  = At + GlyphAt(Text, At).Length;
+                End  = At + tui::GlyphAt(Text, At).Length;
                 Next = End;
             }
         }

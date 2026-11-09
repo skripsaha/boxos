@@ -5,7 +5,7 @@
 
 #include "painter/tui/glyph.h"
 
-#include "kin/glyph.h"
+#include "kin/look.h"
 
 #include "reader.h"
 
@@ -74,8 +74,8 @@ bool Reader::Paint()
         const Tab &Here = Active();
         if (Here.Lines.Rows().empty()) {
             const std::string_view Empty = "there is nothing in this file to read";
-            PutText(Out, {(Bounds.Width - static_cast<std::int32_t>(Empty.size())) / 2, Bounds.Height / 2}, Empty,
-                    Bounds.Width, HintInk, Paper);
+            tui::PutText(Out, {(Bounds.Width - static_cast<std::int32_t>(Empty.size())) / 2, Bounds.Height / 2}, Empty,
+                    Bounds.Width, tui::HintInk, Paper);
         }
         for (std::size_t Line = 0; Line < PageRows() && Here.Top + Line < Here.Lines.Rows().size(); Line++)
             PaintRow(Out, 1 + static_cast<std::int32_t>(Line), Here.Top + Line);
@@ -106,16 +106,16 @@ void Reader::PaintRow(tui::Frame &Out, std::int32_t Y, std::size_t Index) const
 
     switch (One.Is) {
     case RowKind::Space: return;
-    case RowKind::RuleLine: Out.Fill({X, Y, Cols, 1}, tui::Cell{RuleAcross, HintInk, Under}); return;
+    case RowKind::RuleLine: Out.Fill({X, Y, Cols, 1}, tui::Cell{tui::Glyphs::RuleAcross, tui::HintInk, Under}); return;
     case RowKind::Underline: {
         const Block &Heading = Here.Body.Blocks[One.Block];
         std::size_t  Longest = 0;
         for (std::size_t Row = Index; Row > 0 && Here.Lines.Rows()[Row - 1].Block == One.Block; Row--) {
             const read::Row &Above = Here.Lines.Rows()[Row - 1];
-            Longest = std::max(Longest, CellsOf(std::string_view(Heading.Text).substr(Above.From, Above.To - Above.From)));
+            Longest = std::max(Longest, tui::CellsOf(std::string_view(Heading.Text).substr(Above.From, Above.To - Above.From)));
         }
         Out.Fill({X, Y, std::min(static_cast<std::int32_t>(Longest), Cols), 1},
-                 tui::Cell{Heading.Level == 1 ? DoubleRule : RuleAcross, HeadingInk, Under});
+                 tui::Cell{Heading.Level == 1 ? tui::Glyphs::DoubleRule : tui::Glyphs::RuleAcross, HeadingInk, Under});
         return;
     }
     case RowKind::Text: break;
@@ -146,13 +146,13 @@ void Reader::PaintText(tui::Frame &Out, std::int32_t Y, std::size_t Index, core:
     if (Of.Is == Kind::Item && One.First) {
         const std::int32_t At = X + Layout::MarkerAt(Of);
         if (Of.Marker.empty()) (void)Out.Put({At, Y}, tui::Glyphs::Bullet, {AccentInk, Under});
-        else                   PutText(Out, {At, Y}, Of.Marker, Cols, AccentInk, Under);
+        else                   tui::PutText(Out, {At, Y}, Of.Marker, Cols, AccentInk, Under);
     }
-    if (Of.Is == Kind::Quote) (void)Out.Put({X + Layout::MarkerAt(Of), Y}, RuleDown, {HintInk, Under});
+    if (Of.Is == Kind::Quote) (void)Out.Put({X + Layout::MarkerAt(Of), Y}, tui::Glyphs::RuleDown, {tui::HintInk, Under});
 
     core::Color Base = TextInk;
     if (Of.Is == Kind::Heading)    Base = Of.Level <= 2 ? HeadingInk : SubheadingInk;
-    else if (Of.Is == Kind::Quote) Base = HintInk;
+    else if (Of.Is == Kind::Quote) Base = tui::HintInk;
     else if (Code)                 Base = CodeInk;
 
     /* The places found in this block, found by halves: they are in the
@@ -165,11 +165,11 @@ void Reader::PaintText(tui::Frame &Out, std::int32_t Y, std::size_t Index, core:
 
     const std::string_view Text  = Of.Text;
     const std::int32_t     End   = X + Cols;
-    const bool             Cut   = Kept && static_cast<std::int32_t>(CellsOf(Text.substr(One.From, One.To - One.From))) > Cols - One.Indent;
+    const bool             Cut   = Kept && static_cast<std::int32_t>(tui::CellsOf(Text.substr(One.From, One.To - One.From))) > Cols - One.Indent;
     const std::int32_t     Limit = Cut ? End - 1 : End;
     std::int32_t           Col   = X + One.Indent;
     for (std::size_t Byte = One.From; Byte < One.To;) {
-        const Glyph Shape = GlyphAt(Text, Byte);
+        const tui::Glyph Shape = tui::GlyphAt(Text, Byte);
         if (Col + static_cast<std::int32_t>(Shape.Width) > Limit) break;
 
         core::Color Ink = Base, Behind = Ground;
@@ -195,10 +195,10 @@ void Reader::PaintText(tui::Frame &Out, std::int32_t Y, std::size_t Index, core:
             break;
         }
         for (std::size_t Cell = 0; Cell < Shape.Width; Cell++)
-            (void)Out.Put({Col++, Y}, tui::Cell{Shape.Cells[Cell], Shape.Odd ? OddInk : Ink, Behind});
+            (void)Out.Put({Col++, Y}, tui::Cell{Shape.Cells[Cell], Shape.Odd ? tui::OddInk : Ink, Behind});
         Byte += Shape.Length;
     }
-    if (Cut) (void)Out.Put({End - 1, Y}, MoreRight, {HintInk, Ground});
+    if (Cut) (void)Out.Put({End - 1, Y}, tui::Glyphs::MoreRight, {tui::HintInk, Ground});
 }
 
 /* Left: what the book is, and how far through it the reading line is — the
@@ -216,7 +216,7 @@ void Reader::PaintStatus(tui::Frame &Out) const
     if (Looking == Scope::Everywhere) Line.Badge("EVERYWHERE", EverywherePaper);
     if (Here.Body.As != ReadingFor(Here.Body.Name))
         Line.Badge(Here.Body.As == Reading::Lines ? "LINES" : "PROSE", WayPaper);
-    Line.Put(Shortened(Here.Body.Name, 32), ShownTabInk);
+    Line.Put(tui::Shortened(Here.Body.Name, 32), ShownTabInk);
 
     const std::size_t Rows = Here.Lines.Rows().size();
     if (Rows == 0) return;
@@ -232,12 +232,12 @@ void Reader::PaintStatus(tui::Frame &Out) const
     Line.Put(Place, BarInk);
 
     const std::size_t Minutes = (Here.Body.WordsFrom(Here.BlockOfReading()) + WordsAMinute - 1) / WordsAMinute;
-    if (Minutes == 0)      Line.Put("the end", HintInk);
-    else if (Minutes < 60) Line.Put(std::format("≈ {} min left", Minutes), HintInk);
-    else                   Line.Put(std::format("≈ {} h {} min left", Minutes / 60, Minutes % 60), HintInk);
+    if (Minutes == 0)      Line.Put("the end", tui::HintInk);
+    else if (Minutes < 60) Line.Put(std::format("≈ {} min left", Minutes), tui::HintInk);
+    else                   Line.Put(std::format("≈ {} h {} min left", Minutes / 60, Minutes % 60), tui::HintInk);
 
     const std::string Under = HeadingAbove();
-    if (!Under.empty()) Line.Put(Shortened(Under, static_cast<std::size_t>(Line.Room())), HintInk);
+    if (!Under.empty()) Line.Put(tui::Shortened(Under, static_cast<std::size_t>(Line.Room())), tui::HintInk);
 }
 
 }  // namespace read

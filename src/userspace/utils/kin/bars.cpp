@@ -7,7 +7,7 @@
 
 #include "painter/tui/glyph.h"
 
-#include "glyph.h"
+#include "look.h"
 
 namespace kin {
 
@@ -36,9 +36,9 @@ void PaintTabs(tui::Frame &Out, std::int32_t Room, std::span<const TabFace> Tabs
 
     auto Fixed = [&](std::size_t Index) { return 3 + DigitsOf(Index + 1) + (Tabs[Index].Dirty ? 2 : 0); };
     std::int32_t Longest = 0;
-    for (const TabFace &One : Tabs) Longest = std::max(Longest, static_cast<std::int32_t>(CellsOf(One.Name)));
+    for (const TabFace &One : Tabs) Longest = std::max(Longest, static_cast<std::int32_t>(tui::CellsOf(One.Name)));
     auto WidthOf = [&](std::size_t Index, std::int32_t Cap) {
-        return Fixed(Index) + std::min(Cap, static_cast<std::int32_t>(CellsOf(Tabs[Index].Name)));
+        return Fixed(Index) + std::min(Cap, static_cast<std::int32_t>(tui::CellsOf(Tabs[Index].Name)));
     };
     auto Total = [&](std::int32_t Cap) {
         std::int32_t Sum = 0;
@@ -68,7 +68,7 @@ void PaintTabs(tui::Frame &Out, std::int32_t Room, std::span<const TabFace> Tabs
     }
 
     std::int32_t X = 0;
-    if (First > 0) (void)Out.Put({X++, 0}, MoreLeft, {HintInk, BarPaper});
+    if (First > 0) (void)Out.Put({X++, 0}, tui::Glyphs::MoreLeft, {tui::HintInk, BarPaper});
     for (std::size_t Index = First; Index < Last; Index++) {
         const TabFace     &One   = Tabs[Index];
         const bool         Front = Index == Current;
@@ -77,15 +77,15 @@ void PaintTabs(tui::Frame &Out, std::int32_t Room, std::span<const TabFace> Tabs
         Out.Fill({X, 0, Wide, 1}, tui::Cell{' ', BarInk, Under});
 
         std::int32_t Col = X + 1;
-        Col += PutText(Out, {Col, 0}, std::to_string(Index + 1), Wide,
-                       One.Warned ? TroubleInk : Front ? TabNumberInk : HintInk, Under) + 1;
-        Col += PutText(Out, {Col, 0}, Shortened(One.Name, static_cast<std::size_t>(Cap)), Wide,
+        Col += tui::PutText(Out, {Col, 0}, std::to_string(Index + 1), Wide,
+                       One.Warned ? TroubleInk : Front ? TabNumberInk : tui::HintInk, Under) + 1;
+        Col += tui::PutText(Out, {Col, 0}, tui::Shortened(One.Name, static_cast<std::size_t>(Cap)), Wide,
                        Front ? ShownTabInk : BarInk, Under);
         if (One.Dirty) (void)Out.Put({Col + 1, 0}, tui::Glyphs::Bullet, {DirtyInk, Under});
         X += Wide;
-        if (!Front && Index + 1 < Last && Index + 1 != Current) (void)Out.Put({X - 1, 0}, RuleDown, {RuleInk, BarPaper});
+        if (!Front && Index + 1 < Last && Index + 1 != Current) (void)Out.Put({X - 1, 0}, tui::Glyphs::RuleDown, {RuleInk, BarPaper});
     }
-    if (Last < Count) (void)Out.Put({X, 0}, MoreRight, {HintInk, BarPaper});
+    if (Last < Count) (void)Out.Put({X, 0}, tui::Glyphs::MoreRight, {tui::HintInk, BarPaper});
 }
 
 StatusLine::StatusLine(tui::Frame &OutValue, core::Size Screen, std::string_view Said, bool Trouble,
@@ -94,9 +94,9 @@ StatusLine::StatusLine(tui::Frame &OutValue, core::Size Screen, std::string_view
 {
     Out.Fill({0, Y, Screen.Width, 1}, tui::Cell{' ', BarInk, BarPaper});
     const std::string_view Right = Said.empty() ? Hint : Said;
-    const core::Color      Ink   = Said.empty() ? HintInk : Trouble ? TroubleInk : GoodInk;
-    const std::int32_t     Cells = std::min(static_cast<std::int32_t>(CellsOf(Right)), Screen.Width - 2);
-    PutText(Out, {Screen.Width - 1 - Cells, Y}, Shortened(Right, static_cast<std::size_t>(std::max(Cells, 0))), Cells,
+    const core::Color      Ink   = Said.empty() ? tui::HintInk : Trouble ? TroubleInk : GoodInk;
+    const std::int32_t     Cells = std::min(static_cast<std::int32_t>(tui::CellsOf(Right)), Screen.Width - 2);
+    tui::PutText(Out, {Screen.Width - 1 - Cells, Y}, tui::Shortened(Right, static_cast<std::size_t>(std::max(Cells, 0))), Cells,
             Ink, BarPaper);
     End = Screen.Width - 1 - Cells - 2;
 }
@@ -104,7 +104,7 @@ StatusLine::StatusLine(tui::Frame &OutValue, core::Size Screen, std::string_view
 void StatusLine::Put(std::string_view Text, core::Color Ink, core::Color Under)
 {
     if (X >= End) return;
-    X += PutText(Out, {X, Y}, Text, End - X, Ink, Under) + 1;
+    X += tui::PutText(Out, {X, Y}, Text, End - X, Ink, Under) + 1;
 }
 
 void StatusLine::Badge(std::string_view Word, core::Color Under)

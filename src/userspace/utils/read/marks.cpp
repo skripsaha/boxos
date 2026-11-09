@@ -8,7 +8,7 @@
 
 #include "box/memory.h"
 
-#include "kin/glyph.h"
+#include "kin/look.h"
 #include "kin/volume.h"
 
 namespace read {
@@ -50,7 +50,7 @@ std::string WordsAt(std::string_view Bytes, std::size_t Source)
     const std::string_view Line = Bytes.substr(Source, Bytes.find_first_of("\r\n", Source) - Source);
     std::size_t            End  = 0;
     while (End < Line.size()) {
-        const std::size_t Next = End + kin::GlyphAt(Line, End).Length;
+        const std::size_t Next = End + painter::tui::GlyphAt(Line, End).Length;
         if (Next > WordsBytes) break;
         End = Next;
     }

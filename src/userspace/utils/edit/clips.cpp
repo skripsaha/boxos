@@ -168,7 +168,7 @@ Clips::Outcome Clips::OnKey(const tui::KeyEvent &Key, bool MayPaste, std::string
 /* No wider than a text screen and no taller than one, as the file chooser. */
 core::Rect Clips::Area() const noexcept
 {
-    return Centred(Screen, std::min(Screen.Width - 4, 80), std::min(Screen.Height - 2, 24));
+    return tui::Centred(Screen, std::min(Screen.Width - 4, 80), std::min(Screen.Height - 2, 24));
 }
 
 std::size_t Clips::ListRows() const noexcept
@@ -180,8 +180,8 @@ std::size_t Clips::ListRows() const noexcept
 void Clips::PaintRow(tui::Frame &Out, core::Rect Inside, std::int32_t Y, std::size_t Index) const
 {
     const bool        Here  = Index == Row;
-    const core::Color Under = Here ? ChosenPaper : WindowPaper;
-    Out.Fill({Inside.X, Y, Inside.Width, 1}, tui::Cell{' ', WindowInk, Under});
+    const core::Color Under = Here ? ChosenPaper : tui::WindowPaper;
+    Out.Fill({Inside.X, Y, Inside.Width, 1}, tui::Cell{' ', tui::WindowInk, Under});
 
     const Entry       &One    = Entries[Shown[Index]];
     const std::string  Age    = Ago(One.Facts.put_us, OpenedUs);
@@ -189,31 +189,31 @@ void Clips::PaintRow(tui::Frame &Out, core::Rect Inside, std::int32_t Y, std::si
     const std::int32_t TextAt = Inside.X + 6;
     const std::int32_t SizeAt = Inside.X + Inside.Width - 8;
     const std::int32_t Cols   = SizeAt - 1 - TextAt;
-    PutText(Out, {Inside.X + 4 - static_cast<std::int32_t>(Age.size()), Y}, Age, 4, HintInk, Under);
+    tui::PutText(Out, {Inside.X + 4 - static_cast<std::int32_t>(Age.size()), Y}, Age, 4, tui::HintInk, Under);
     if (One.Facts.takes_left != 0) {
         const std::uint32_t Left = One.Facts.takes_left;
-        PutText(Out, {TextAt, Y}, std::format("a secret: {} take{} left", Left, Left == 1 ? "" : "s"), Cols, HintInk,
+        tui::PutText(Out, {TextAt, Y}, std::format("a secret: {} take{} left", Left, Left == 1 ? "" : "s"), Cols, tui::HintInk,
                 Under);
     } else {
-        PutText(Out, {TextAt, Y}, Shortened(FirstLine(One.Head), static_cast<std::size_t>(Cols)), Cols,
-                Here ? TitleInk : WindowInk, Under);
+        tui::PutText(Out, {TextAt, Y}, tui::Shortened(FirstLine(One.Head), static_cast<std::size_t>(Cols)), Cols,
+                Here ? tui::TitleInk : tui::WindowInk, Under);
     }
-    PutText(Out, {SizeAt + 8 - static_cast<std::int32_t>(Size.size()), Y}, Size, 8, HintInk, Under);
+    tui::PutText(Out, {SizeAt + 8 - static_cast<std::int32_t>(Size.size()), Y}, Size, 8, tui::HintInk, Under);
 }
 
 void Clips::Paint(tui::Frame &Out) const
 {
     const std::string Count  = Entries.size() == 1 ? std::string("1 clip") : std::format("{} clips", Entries.size());
-    const core::Rect  Inside = DrawWindow(Out, Area(), "Clipboard", Count, "Enter paste  Del drop  Esc close");
+    const core::Rect  Inside = tui::DrawWindow(Out, Area(), "Clipboard", Count, "Enter paste  Del drop  Esc close");
     Filter.Paint(Out, {Inside.X, Inside.Y}, Inside.Width, true);
-    DrawRule(Out, Inside, Inside.Y + 1);
+    tui::DrawRule(Out, Inside, Inside.Y + 1);
 
     if (Shown.empty()) {
         const std::string_view Why = !Trouble.empty()  ? std::string_view(Trouble)
                                      : Entries.empty() ? std::string_view("the clipboard is empty")
                                                        : std::string_view("no clip's beginning holds that");
-        PutText(Out, {Inside.X + 2, Inside.Y + 2}, Why, Inside.Width - 2, Trouble.empty() ? HintInk : TroubleInk,
-                WindowPaper);
+        tui::PutText(Out, {Inside.X + 2, Inside.Y + 2}, Why, Inside.Width - 2, Trouble.empty() ? tui::HintInk : TroubleInk,
+                tui::WindowPaper);
         return;
     }
     const std::size_t Rows = ListRows();

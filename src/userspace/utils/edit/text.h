@@ -22,7 +22,7 @@
 #include <string_view>
 #include <vector>
 
-#include "kin/glyph.h"
+#include "kin/look.h"
 
 namespace edit {
 

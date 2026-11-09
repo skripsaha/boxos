@@ -4,7 +4,7 @@
 
 #include <algorithm>
 
-#include "kin/glyph.h"
+#include "kin/look.h"
 
 namespace read {
 
@@ -23,7 +23,7 @@ std::string Expanded(std::string_view Raw)
     std::string Out;
     std::size_t Column = 0;
     for (std::size_t Byte = 0; Byte < Raw.size();) {
-        const Glyph Shape = GlyphAt(Raw, Byte, Column);
+        const tui::Glyph Shape = tui::GlyphAt(Raw, Byte, Column);
         if (Raw[Byte] == '\t') Out.append(Shape.Width, ' ');
         else                    Out.append(Raw.substr(Byte, Shape.Length));
         Column += Shape.Width;

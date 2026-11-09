@@ -104,9 +104,9 @@ void Editor::PaintLine(tui::Frame &Out, std::int32_t Y, std::size_t Line)
     /* The numbers stand on the plain paper, the caret's one brighter: the
      * line it is on is lit only where its text is. */
     const std::string Number = std::to_string(Line + 1);
-    PutText(Out, {Gutter - 3 - static_cast<std::int32_t>(Number.size()), Y}, Number, Gutter,
+    tui::PutText(Out, {Gutter - 3 - static_cast<std::int32_t>(Number.size()), Y}, Number, Gutter,
             AtCaret ? CaretNumberInk : NumberInk, Paper);
-    (void)Out.Put({Gutter - 2, Y}, Here.Left > 0 && !Words.empty() ? MoreLeft : RuleDown, {RuleInk, Paper});
+    (void)Out.Put({Gutter - 2, Y}, Here.Left > 0 && !Words.empty() ? tui::Glyphs::MoreLeft : tui::Glyphs::RuleDown, {RuleInk, Paper});
 
     /* The matches on this line, while the find window is open. */
     struct Mark { std::size_t From, To; bool Chosen; };
@@ -125,12 +125,12 @@ void Editor::PaintLine(tui::Frame &Out, std::int32_t Y, std::size_t Line)
 
     std::size_t Column = 0, Byte = 0;
     while (Byte < Words.size() && Column < Here.Left + Cols) {
-        const Glyph Shape = GlyphAt(Words, Byte, Column);
+        const tui::Glyph Shape = tui::GlyphAt(Words, Byte, Column);
         const Mark *Over  = nullptr;
         for (const Mark &One : Marks)
             if (Byte >= One.From && Byte < One.To) Over = &One;
         const core::Color Ground = Selected(Byte) ? SelectedPaper : Over ? (Over->Chosen ? HerePaper : MatchPaper) : Under;
-        const core::Color Ink    = Over && Over->Chosen ? HereInk : Shape.Odd ? OddInk : TextInk;
+        const core::Color Ink    = Over && Over->Chosen ? HereInk : Shape.Odd ? tui::OddInk : TextInk;
         const bool        Blank  = Words[Byte] == '\t';
         for (std::size_t Cell = 0; Cell < Shape.Width; Cell++, Column++)
             if (Column >= Here.Left && Column < Here.Left + Cols)
@@ -143,7 +143,7 @@ void Editor::PaintLine(tui::Frame &Out, std::int32_t Y, std::size_t Line)
     if (Byte == Words.size() && Selected(Byte) && Column >= Here.Left && Column < Here.Left + Cols)
         (void)Out.Put({Gutter + static_cast<std::int32_t>(Column - Here.Left), Y}, ' ', {TextInk, SelectedPaper});
     if (Byte < Words.size() || Column > Here.Left + Cols)
-        (void)Out.Put({Gutter + static_cast<std::int32_t>(Cols), Y}, MoreRight, {RuleInk, Under});
+        (void)Out.Put({Gutter + static_cast<std::int32_t>(Cols), Y}, tui::Glyphs::MoreRight, {RuleInk, Under});
 }
 
 /* Left: what the tab is and where the caret stands; right: what edit has just
@@ -160,8 +160,8 @@ void Editor::PaintStatus(tui::Frame &Out) const
     if (Looking == Scope::Everywhere) Line.Badge("EVERYWHERE", EverywherePaper);
     if (Here.Safety)                  Line.Badge("SAFETY", SafetyPaper);
     if (Overtype)                     Line.Badge("OVERTYPE", OvertypePaper);
-    Line.Put(Shortened(Here.Name, 32), ShownTabInk);
-    if (Here.Born) Line.Put("(new)", HintInk);
+    Line.Put(tui::Shortened(Here.Name, 32), ShownTabInk);
+    if (Here.Born) Line.Put("(new)", tui::HintInk);
 
     std::string Place = std::format("{}:{}", Here.Caret.Line + 1, Here.Body.ColumnOf(Here.Caret) + 1);
     if (Here.HasSelection()) {
@@ -174,13 +174,13 @@ void Editor::PaintStatus(tui::Frame &Out) const
 
     const std::vector<std::string> Worn = TagWords(Here.Tags);
     if (!Worn.empty())
-        Line.Put(Shortened("[" + Joined(Worn, ", ") + "]", static_cast<std::size_t>(Line.Room())), HintInk);
+        Line.Put(tui::Shortened("[" + Joined(Worn, ", ") + "]", static_cast<std::size_t>(Line.Room())), tui::HintInk);
 }
 
 void Editor::PaintGoTo(tui::Frame &Out) const
 {
     const std::int32_t Width  = std::min(Bounds.Width - 2, 40);
-    const core::Rect   Inside = DrawWindow(Out, {Bounds.Width - Width - 1, 1, Width, 3}, "Go to line",
+    const core::Rect   Inside = tui::DrawWindow(Out, {Bounds.Width - Width - 1, 1, Width, 3}, "Go to line",
                                            std::format("of {}", Active().Body.LineCount()), "line or line:column");
     LineField.Paint(Out, {Inside.X, Inside.Y}, Inside.Width, true);
 }
@@ -190,19 +190,19 @@ void Editor::PaintLeaving(tui::Frame &Out) const
     const std::size_t Room   = Bounds.Height > 6 ? static_cast<std::size_t>(Bounds.Height - 6) : 1;
     const std::size_t Listed = std::min(Unsaved.size(), Room);
     const bool        More   = Listed < Unsaved.size();
-    const core::Rect  Area   = Centred(Bounds, std::min(Bounds.Width - 4, 60),
+    const core::Rect  Area   = tui::Centred(Bounds, std::min(Bounds.Width - 4, 60),
                                        static_cast<std::int32_t>(Listed + (More ? 1 : 0)) + 2);
-    const core::Rect  Inside = DrawWindow(Out, Area, "Changes not saved", "",
+    const core::Rect  Inside = tui::DrawWindow(Out, Area, "Changes not saved", "",
                                           LeavingAll ? "S save all  D leave without saving  Esc stay"
                                                      : "S save  D close without saving  Esc keep it");
     for (std::size_t Index = 0; Index < Listed; Index++) {
         const Tab &One = *Unsaved[Index];
-        PutText(Out, {Inside.X, Inside.Y + static_cast<std::int32_t>(Index)},
-                One.Born ? One.Name + "  (new)" : One.Name, Inside.Width, TitleInk, WindowPaper);
+        tui::PutText(Out, {Inside.X, Inside.Y + static_cast<std::int32_t>(Index)},
+                One.Born ? One.Name + "  (new)" : One.Name, Inside.Width, tui::TitleInk, tui::WindowPaper);
     }
     if (More)
-        PutText(Out, {Inside.X, Inside.Y + static_cast<std::int32_t>(Listed)},
-                std::format("and {} more", Unsaved.size() - Listed), Inside.Width, HintInk, WindowPaper);
+        tui::PutText(Out, {Inside.X, Inside.Y + static_cast<std::int32_t>(Listed)},
+                std::format("and {} more", Unsaved.size() - Listed), Inside.Width, tui::HintInk, tui::WindowPaper);
 }
 
 }  // namespace edit

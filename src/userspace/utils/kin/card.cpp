@@ -134,22 +134,22 @@ Card::Outcome Card::OnKey(const tui::KeyEvent &Key, std::string &Said)
 
 core::Rect Card::Area() const noexcept
 {
-    return Centred(Screen, std::min(Screen.Width - 4, 64), 5);
+    return tui::Centred(Screen, std::min(Screen.Width - 4, 64), 5);
 }
 
 void Card::Paint(tui::Frame &Out) const
 {
     const core::Rect Box    = Area();
-    const core::Rect Inside = DrawWindow(Out, Box, "The file's card", "",
+    const core::Rect Inside = tui::DrawWindow(Out, Box, "The file's card", "",
                                          OnTags ? "Enter keep  Tab the tags there are  Esc cancel"
                                                 : "Enter keep  Tab to the tags  Esc cancel");
     NameField.Paint(Out, {Inside.X, Inside.Y}, Inside.Width, !OnTags);
     TagsField.Paint(Out, {Inside.X, Inside.Y + 1}, Inside.Width, OnTags);
     if (!Trouble.empty())
-        PutText(Out, {Inside.X, Inside.Y + 2}, Trouble, Inside.Width, TroubleInk, WindowPaper);
+        tui::PutText(Out, {Inside.X, Inside.Y + 2}, Trouble, Inside.Width, TroubleInk, tui::WindowPaper);
     else
-        PutText(Out, {Inside.X, Inside.Y + 2}, "tags go between blanks or commas: work, idea", Inside.Width, HintInk,
-                WindowPaper);
+        tui::PutText(Out, {Inside.X, Inside.Y + 2}, "tags go between blanks or commas: work, idea", Inside.Width, tui::HintInk,
+                tui::WindowPaper);
 
     if (!Hints.Open()) return;
     const std::int32_t Top    = Box.Y + Box.Height;

@@ -170,7 +170,7 @@ void Tab::Backspace()
         Caret.Byte > 0 && std::all_of(Line.begin(), Line.begin() + static_cast<std::ptrdiff_t>(Caret.Byte),
                                       [](char Ch) { return Ch == ' '; });
     if (OnlySpaces) {
-        const std::size_t Back = Caret.Byte % TabStop == 0 ? TabStop : Caret.Byte % TabStop;
+        const std::size_t Back = Caret.Byte % tui::TabStop == 0 ? tui::TabStop : Caret.Byte % tui::TabStop;
         From                   = {Caret.Line, Caret.Byte - Back};
     }
     Replace(From, Caret, {}, Merge::ErasingBack);
@@ -200,21 +200,21 @@ std::pair<std::size_t, std::size_t> Tab::TouchedLines() const noexcept
 void Tab::Indent()
 {
     if (!HasSelection()) {
-        const std::size_t Room = TabStop - Body.ColumnOf(Caret) % TabStop;
+        const std::size_t Room = tui::TabStop - Body.ColumnOf(Caret) % tui::TabStop;
         Replace(Caret, Caret, std::string(Room, ' '), Merge::Never);
         return;
     }
 
     const auto [First, Last] = TouchedLines();
-    const std::string Stop(TabStop, ' ');
+    const std::string Stop(tui::TabStop, ' ');
     Position          KeptAnchor = *Anchor, KeptCaret = Caret;
     Past.Begin(Caret);
     for (std::size_t Line = First; Line <= Last; Line++) {
         if (Body.Line(Line).empty()) continue;
         Body.Insert({Line, 0}, Stop);
         Past.Record(Change{{Line, 0}, {}, Stop}, Merge::Never, Caret, Caret);
-        if (KeptAnchor.Line == Line && KeptAnchor.Byte > 0) KeptAnchor.Byte += TabStop;
-        if (KeptCaret.Line == Line && KeptCaret.Byte > 0) KeptCaret.Byte += TabStop;
+        if (KeptAnchor.Line == Line && KeptAnchor.Byte > 0) KeptAnchor.Byte += tui::TabStop;
+        if (KeptCaret.Line == Line && KeptCaret.Byte > 0) KeptCaret.Byte += tui::TabStop;
     }
     Caret  = KeptCaret;
     Anchor = KeptAnchor;
@@ -232,7 +232,7 @@ void Tab::Unindent()
         const std::string &Words = Body.Line(Line);
         std::size_t        Cut   = 0;
         if (!Words.empty() && Words[0] == '\t') Cut = 1;
-        else while (Cut < TabStop && Cut < Words.size() && Words[Cut] == ' ') Cut++;
+        else while (Cut < tui::TabStop && Cut < Words.size() && Words[Cut] == ' ') Cut++;
         if (Cut == 0) continue;
         std::string Removed = Body.Erase({Line, 0}, {Line, Cut});
         Past.Record(Change{{Line, 0}, std::move(Removed), {}}, Merge::Never, Caret, Caret);

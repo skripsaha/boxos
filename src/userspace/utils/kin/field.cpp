@@ -3,7 +3,6 @@
 #include "field.h"
 
 #include "clipboard.h"
-#include "glyph.h"
 #include "look.h"
 
 namespace kin {
@@ -12,9 +11,9 @@ namespace {
 
 /* A field holds no tab and no control character, so a glyph's shape in it
  * does not hang on its column. */
-Glyph GlyphOf(std::string_view Words, std::size_t Byte) noexcept
+tui::Glyph GlyphOf(std::string_view Words, std::size_t Byte) noexcept
 {
-    return GlyphAt(Words, Byte, 0);
+    return tui::GlyphAt(Words, Byte, 0);
 }
 
 /* Where the glyph that ends at Byte begins. */
@@ -112,19 +111,19 @@ bool Field::OnKey(const tui::KeyEvent &Key)
 void Field::Paint(tui::Frame &Out, core::Point At, std::int32_t Width, bool Listening) const
 {
     std::int32_t Col = At.X;
-    if (!Label.empty()) Col += PutText(Out, {Col, At.Y}, Label, Width, HintInk, WindowPaper) + 1;
+    if (!Label.empty()) Col += tui::PutText(Out, {Col, At.Y}, Label, Width, tui::HintInk, tui::WindowPaper) + 1;
     const std::int32_t Room = At.X + Width - Col;
     if (Room <= 0) return;
 
     Out.Fill({Col, At.Y, Room, 1}, tui::Cell{' ', FieldInk, FieldPaper});
     const auto  Visible = static_cast<std::size_t>(Room - 1);
     std::size_t From    = 0;
-    while (CellsOf(std::string_view(Words).substr(From, Caret - From)) > Visible)
+    while (tui::CellsOf(std::string_view(Words).substr(From, Caret - From)) > Visible)
         From += GlyphOf(Words, From).Length;
-    PutText(Out, {Col, At.Y}, std::string_view(Words).substr(From), Room, FieldInk,
+    tui::PutText(Out, {Col, At.Y}, std::string_view(Words).substr(From), Room, FieldInk,
             Offered ? SelectedPaper : FieldPaper);
     if (Listening) {
-        const auto Before = static_cast<std::int32_t>(CellsOf(std::string_view(Words).substr(From, Caret - From)));
+        const auto Before = static_cast<std::int32_t>(tui::CellsOf(std::string_view(Words).substr(From, Caret - From)));
         (void)Out.SetCaret(core::Point{Col + Before, At.Y});
     }
 }

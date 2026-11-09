@@ -4,7 +4,7 @@
 
 #include <algorithm>
 
-#include "glyph.h"
+#include "look.h"
 
 namespace kin {
 
@@ -118,8 +118,8 @@ void Help::Paint(tui::Frame &Out, core::Size Screen) const
     std::size_t KeyCells = 0, SayCells = 0;
     for (const KeyLine &One : Lines) {
         if (One.Heading) continue;
-        KeyCells = std::max(KeyCells, CellsOf(One.Keys));
-        SayCells = std::max(SayCells, CellsOf(One.Says));
+        KeyCells = std::max(KeyCells, tui::CellsOf(One.Keys));
+        SayCells = std::max(SayCells, tui::CellsOf(One.Says));
     }
     const auto LineCells = static_cast<std::int32_t>(KeyCells + 2 + SayCells);
 
@@ -129,10 +129,10 @@ void Help::Paint(tui::Frame &Out, core::Size Screen) const
     const bool         Two    = Split != 0 && 2 * LineCells + 3 <= Screen.Width - 6;
     const std::size_t  Tall   = Two ? std::max(Split - 1, Lines.size() - Split) : Lines.size();
     const std::int32_t Width  = Two ? 2 * LineCells + 3 + 4 : LineCells + 4;
-    const core::Rect   Area   = Centred(Screen, Width, static_cast<std::int32_t>(Tall) + 2);
+    const core::Rect   Area   = tui::Centred(Screen, Width, static_cast<std::int32_t>(Tall) + 2);
     const auto         Rows   = static_cast<std::size_t>(Area.Height - 2);
     const std::size_t  From   = std::min(First, Tall > Rows ? Tall - Rows : 0);
-    const core::Rect   Inside = DrawWindow(Out, Area, "Keys", Program,
+    const core::Rect   Inside = tui::DrawWindow(Out, Area, "Keys", Program,
                                            Tall > Rows ? "Up/Down scroll  any other key closes" : "any key closes");
 
     auto PaintColumn = [&](std::size_t Begin, std::size_t End, std::int32_t X) {
@@ -140,12 +140,12 @@ void Help::Paint(tui::Frame &Out, core::Size Screen) const
             const KeyLine     &One = Lines[Begin + From + Row];
             const std::int32_t Y   = Inside.Y + static_cast<std::int32_t>(Row);
             if (One.Heading) {
-                PutText(Out, {X, Y}, One.Keys, LineCells, TabNumberInk, WindowPaper);
+                tui::PutText(Out, {X, Y}, One.Keys, LineCells, TabNumberInk, tui::WindowPaper);
                 continue;
             }
-            PutText(Out, {X, Y}, One.Keys, static_cast<std::int32_t>(KeyCells), TitleInk, WindowPaper);
-            PutText(Out, {X + static_cast<std::int32_t>(KeyCells) + 2, Y}, One.Says, static_cast<std::int32_t>(SayCells),
-                    WindowInk, WindowPaper);
+            tui::PutText(Out, {X, Y}, One.Keys, static_cast<std::int32_t>(KeyCells), tui::TitleInk, tui::WindowPaper);
+            tui::PutText(Out, {X + static_cast<std::int32_t>(KeyCells) + 2, Y}, One.Says, static_cast<std::int32_t>(SayCells),
+                    tui::WindowInk, tui::WindowPaper);
         }
     };
     PaintColumn(0, Two ? Split - 1 : Lines.size(), Inside.X);

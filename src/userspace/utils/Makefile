@@ -313,7 +313,7 @@ passport.elf: $(BOXLIB_START) $(PASSPORT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(
 # the help of their keys, a field, the file chooser and the file's card, the
 # volume and the clipboard. Linked into each; included as "kin/...".
 KIN_DIR  = kin
-KIN_OBJS = $(addprefix $(KIN_DIR)/,glyph.o look.o bars.o keys.o field.o clipboard.o volume.o picker.o \
+KIN_OBJS = $(addprefix $(KIN_DIR)/,look.o bars.o keys.o field.o clipboard.o volume.o picker.o \
                                    suggest.o card.o)
 
 # The editor is C++ in parts of its own directory, each named for what it is;

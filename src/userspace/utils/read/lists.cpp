@@ -4,7 +4,7 @@
 
 #include <algorithm>
 
-#include "kin/glyph.h"
+#include "kin/look.h"
 
 namespace read {
 
@@ -25,13 +25,13 @@ void List::Begin(std::string TitleValue, std::string HintValue, std::vector<Entr
  * page; as tall as its lines, no taller than the glass leaves room for. */
 core::Rect List::Area() const noexcept
 {
-    std::int32_t Widest = static_cast<std::int32_t>(std::max(CellsOf(Title), CellsOf(Hint))) + 6;
+    std::int32_t Widest = static_cast<std::int32_t>(std::max(tui::CellsOf(Title), tui::CellsOf(Hint))) + 6;
     for (const Entry &One : Lines)
-        Widest = std::max(Widest, One.Indent + static_cast<std::int32_t>(CellsOf(One.Text) + CellsOf(One.Note)) + 8);
+        Widest = std::max(Widest, One.Indent + static_cast<std::int32_t>(tui::CellsOf(One.Text) + tui::CellsOf(One.Note)) + 8);
     const std::int32_t Width  = std::min({Widest, Screen.Width - 4, 76});
     const std::int32_t Height = std::min(static_cast<std::int32_t>(std::max<std::size_t>(Lines.size(), 1)) + 2,
                                          Screen.Height - 2);
-    return Centred(Screen, Width, Height);
+    return tui::Centred(Screen, Width, Height);
 }
 
 std::size_t List::Rows() const noexcept
@@ -71,25 +71,25 @@ List::Outcome List::OnKey(const tui::KeyEvent &Key)
 
 void List::Paint(tui::Frame &Out) const
 {
-    const core::Rect Inside = DrawWindow(Out, Area(), Title, "", Hint);
+    const core::Rect Inside = tui::DrawWindow(Out, Area(), Title, "", Hint);
     if (Lines.empty()) {
-        PutText(Out, {Inside.X, Inside.Y}, "nothing here yet", Inside.Width, HintInk, WindowPaper);
+        tui::PutText(Out, {Inside.X, Inside.Y}, "nothing here yet", Inside.Width, tui::HintInk, tui::WindowPaper);
         return;
     }
     const std::size_t Shown = Rows();
     for (std::size_t Line = 0; Line < Shown && First + Line < Lines.size(); Line++) {
         const Entry       &One   = Lines[First + Line];
         const bool         Here  = First + Line == Row;
-        const core::Color  Under = Here ? ChosenPaper : WindowPaper;
+        const core::Color  Under = Here ? ChosenPaper : tui::WindowPaper;
         const std::int32_t Y     = Inside.Y + static_cast<std::int32_t>(Line);
-        Out.Fill({Inside.X - 1, Y, Inside.Width + 2, 1}, tui::Cell{' ', WindowInk, Under});
+        Out.Fill({Inside.X - 1, Y, Inside.Width + 2, 1}, tui::Cell{' ', tui::WindowInk, Under});
 
-        const std::int32_t NoteCells = static_cast<std::int32_t>(CellsOf(One.Note));
+        const std::int32_t NoteCells = static_cast<std::int32_t>(tui::CellsOf(One.Note));
         const std::int32_t Room      = Inside.Width - One.Indent - (NoteCells > 0 ? NoteCells + 2 : 0);
-        PutText(Out, {Inside.X + One.Indent, Y}, Shortened(One.Text, static_cast<std::size_t>(std::max(Room, 1))),
-                Room, Here ? TitleInk : WindowInk, Under);
+        tui::PutText(Out, {Inside.X + One.Indent, Y}, tui::Shortened(One.Text, static_cast<std::size_t>(std::max(Room, 1))),
+                Room, Here ? tui::TitleInk : tui::WindowInk, Under);
         if (NoteCells > 0)
-            PutText(Out, {Inside.X + Inside.Width - NoteCells, Y}, One.Note, NoteCells, One.Odd ? TroubleInk : HintInk,
+            tui::PutText(Out, {Inside.X + Inside.Width - NoteCells, Y}, One.Note, NoteCells, One.Odd ? TroubleInk : tui::HintInk,
                     Under);
     }
 }

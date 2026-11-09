@@ -89,7 +89,7 @@ void Picker::Narrow()
  * list reads as a list rather than as a line across the room. */
 core::Rect Picker::Area() const noexcept
 {
-    return Centred(Screen, std::min(Screen.Width - 4, 80), std::min(Screen.Height - 2, 24));
+    return tui::Centred(Screen, std::min(Screen.Width - 4, 80), std::min(Screen.Height - 2, 24));
 }
 
 std::size_t Picker::ListRows() const noexcept
@@ -136,12 +136,12 @@ Picker::Outcome Picker::OnKey(const tui::KeyEvent &Key)
 void Picker::PaintRow(tui::Frame &Out, core::Rect Inside, std::int32_t Y, std::size_t Index) const
 {
     const bool        Here  = Index == Row;
-    const core::Color Under = Here ? ChosenPaper : WindowPaper;
-    Out.Fill({Inside.X, Y, Inside.Width, 1}, tui::Cell{' ', WindowInk, Under});
+    const core::Color Under = Here ? ChosenPaper : tui::WindowPaper;
+    Out.Fill({Inside.X, Y, Inside.Width, 1}, tui::Cell{' ', tui::WindowInk, Under});
 
     if (Index == Shown.size()) {
-        const std::int32_t Said = PutText(Out, {Inside.X + 2, Y}, "+ new file ", Inside.Width - 2, GoodInk, Under);
-        PutText(Out, {Inside.X + 2 + Said, Y}, NewName, Inside.Width - 2 - Said, TitleInk, Under);
+        const std::int32_t Said = tui::PutText(Out, {Inside.X + 2, Y}, "+ new file ", Inside.Width - 2, GoodInk, Under);
+        tui::PutText(Out, {Inside.X + 2 + Said, Y}, NewName, Inside.Width - 2 - Said, tui::TitleInk, Under);
         return;
     }
 
@@ -149,33 +149,33 @@ void Picker::PaintRow(tui::Frame &Out, core::Rect Inside, std::int32_t Y, std::s
     const bool         IsOpen   = std::find(AlreadyOpen.begin(), AlreadyOpen.end(), One.File) != AlreadyOpen.end();
     const std::int32_t NameCols = std::min(32, Inside.Width / 2);
     if (IsOpen) Out.Put({Inside.X, Y}, tui::Cell{tui::Glyphs::Bullet, DirtyInk, Under});
-    PutText(Out, {Inside.X + 2, Y}, Shortened(One.Name, static_cast<std::size_t>(NameCols)), NameCols,
-            Here ? TitleInk : WindowInk, Under);
+    tui::PutText(Out, {Inside.X + 2, Y}, tui::Shortened(One.Name, static_cast<std::size_t>(NameCols)), NameCols,
+            Here ? tui::TitleInk : tui::WindowInk, Under);
 
     const std::string  Size   = SizeText(One.Size);
     const std::int32_t SizeAt = Inside.X + 2 + NameCols + 1;
-    PutText(Out, {SizeAt + 8 - static_cast<std::int32_t>(Size.size()), Y}, Size, 8, HintInk, Under);
+    tui::PutText(Out, {SizeAt + 8 - static_cast<std::int32_t>(Size.size()), Y}, Size, 8, tui::HintInk, Under);
     const std::int32_t TagsAt = SizeAt + 10;
     if (TagsAt < Inside.X + Inside.Width)
-        PutText(Out, {TagsAt, Y}, Shortened(Joined(One.Tags, ", "), static_cast<std::size_t>(Inside.X + Inside.Width - TagsAt)),
-                Inside.X + Inside.Width - TagsAt, HintInk, Under);
+        tui::PutText(Out, {TagsAt, Y}, tui::Shortened(Joined(One.Tags, ", "), static_cast<std::size_t>(Inside.X + Inside.Width - TagsAt)),
+                Inside.X + Inside.Width - TagsAt, tui::HintInk, Under);
 }
 
 void Picker::Paint(tui::Frame &Out) const
 {
     const char *Hint = Looking == Scope::Everywhere ? "Enter open  Ctrl+E the Use Context  Esc close"
                                                     : "Enter open  Ctrl+E the whole volume  Esc close";
-    const core::Rect Inside = DrawWindow(Out, Area(), "Open", Where, Hint);
+    const core::Rect Inside = tui::DrawWindow(Out, Area(), "Open", Where, Hint);
     Filter.Paint(Out, {Inside.X, Inside.Y}, Inside.Width, true);
-    DrawRule(Out, Inside, Inside.Y + 1);
+    tui::DrawRule(Out, Inside, Inside.Y + 1);
 
     const std::size_t Rows = ListRows();
     if (RowCount() == 0) {
         const std::string_view Why = !Trouble.empty()    ? std::string_view(Trouble)
                                      : Entries.empty()   ? std::string_view("there are no files here")
                                                          : std::string_view("no file here fits those words");
-        PutText(Out, {Inside.X + 2, Inside.Y + 2}, Why, Inside.Width - 2, Trouble.empty() ? HintInk : TroubleInk,
-                WindowPaper);
+        tui::PutText(Out, {Inside.X + 2, Inside.Y + 2}, Why, Inside.Width - 2, Trouble.empty() ? tui::HintInk : TroubleInk,
+                tui::WindowPaper);
         return;
     }
     for (std::size_t Line = 0; Line < Rows && First + Line < RowCount(); Line++)
