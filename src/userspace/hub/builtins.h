@@ -1,4 +1,5 @@
-/* builtins.h — the hub's own commands: help, use, said, run, clear, exit.
+/* builtins.h — the hub's own commands: help, use, said, run, clear, exit,
+ * front.
  *
  * A built-in has no Form; what its words are is the part of one the
  * Whisper needs. Each takes the line cut into words — the rest of the line as
@@ -35,6 +36,7 @@ const Builtin           *BuiltinNamed(std::string_view Name);
 bool Help(Hub &Self, const Words &Typed);
 bool Use(Hub &Self, const Words &Typed);
 bool Said(Hub &Self, const Words &Typed);
+bool Front(Hub &Self, const Words &Typed);
 
 }  // namespace hub
 

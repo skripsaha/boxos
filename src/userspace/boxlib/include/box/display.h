@@ -156,9 +156,11 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
  *   Ctrl+Alt+Home, Ctrl+Alt+=    let it go to live behind, and back to its keeper
  *
  * A program behind hears no key: a strand of it that asks to listen waits,
- * and its keeper is told it wants the keyboard. A program it starts, however
- * far down, lives behind with it, and comes forward with it; the strand that
- * asked hears then.
+ * and its keeper is told it wants the keyboard. Nor is its scene or any
+ * overlay of it shown — the glass is the program's in front — but its notices
+ * are, made to be seen beside whatever is in front. A program it starts,
+ * however far down, lives behind with it, and comes forward with it; the
+ * strand that asked hears then, and its pictures are shown again.
  *
  * Three QUESTIONS, a DisplayFrontRequest each, answered with a
  * DisplayFrontReply — asked only by a program that wears `system`

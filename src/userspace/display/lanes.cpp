@@ -123,6 +123,7 @@ FreeNumber  *g_free_numbers;          /* reuse pool for lane numbers */
 uint32_t     g_next_number;           /* fresh numbers when the pool is dry */
 
 TouchTag g_kb = TOUCH_TAG_INVALID;
+LaneTold g_told;   /* whom a lane's turn is told */
 
 /* The keys taken from the keyboard that no lane has heard yet, in the order
  * they were typed: said to the next lane that listens before anything newer. */
@@ -306,9 +307,10 @@ int lane_answer(const Result &asked, const char *tag)
 
 }  // namespace
 
-bool LanesStart() noexcept
+bool LanesStart(LaneTold Told) noexcept
 {
-    g_kb = touch_pair_choose(touch_intern(TOUCH_TAG_KEYBOARD));
+    g_told = Told;
+    g_kb   = touch_pair_choose(touch_intern(TOUCH_TAG_KEYBOARD));
     if (g_kb == TOUCH_TAG_INVALID || touch_claim(g_kb, TOUCH_REST, 0, 0) != 0) return false;
     /* Before the first grant can be asked for: the console's order exists,
      * or this daemon grants no lanes. BAY_CREATE of a page the kernel zeroes —
@@ -411,6 +413,7 @@ bool LanesStep(FrameSink Sink, FrameFlush Flush, std::uint64_t Ceiling) noexcept
         ConsoleLane *ln = *pp;
         if (ln->closed && !ln->has_pending) {
             *pp = ln->next;
+            g_told(ln->number + 1u, LaneTurn::Closed);
             lane_free(ln);
             did = true;
             continue;
@@ -534,8 +537,9 @@ void LanesListen(std::uint32_t Requester, std::uint32_t Generation, bool Listeni
 /* A lane hears while its strand reads and its program is not behind: each
  * lane held to that again, after a program came forward, went behind or died.
  * One that comes forward goes on top of the ear — its program is the one in
- * front now; one that goes behind waits, and nobody is told: its keeper let it
- * go reading. */
+ * front now; one that goes behind waits, and its keeper is not told: it let it
+ * go reading. The console is told both, so the line being read is kept and
+ * laid again (console_model.h). */
 void LanesRecheck() noexcept
 {
     for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
@@ -544,9 +548,11 @@ void LanesRecheck() noexcept
         if (behind && EarHas(ln)) {
             EarDrop(ln);
             ln->wants = true;
+            g_told(ln->number + 1u, LaneTurn::Behind);
         } else if (!behind && ln->wants) {
             ln->wants = false;
             EarListen(ln);
+            g_told(ln->number + 1u, LaneTurn::Forward);
         }
     }
 }

@@ -10,12 +10,15 @@
 #include <vector>
 
 #include "box/error.h"
+#include "box/life.h"
 #include "box/system.h"
 
 #include "painter/core/color.h"
 #include "painter/tui/frame.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/surface.h"
+
+BOX_LIFE("stays");
 
 namespace {
 

@@ -52,6 +52,10 @@ void ShowPrompt(const Hub &Self, std::string_view Context)
     if (Shown.Context && !Context.empty()) SayIn(Shown.ContextColor, "[{}] ", Fitted(Context));
     if (Shown.Them && Self.Given.Known() && !Self.Given.Files().empty())
         SayIn(Shown.ThemColor, "{} ", Self.Given.Files().size());
+    if (Shown.Behind == BehindShown::Prompt) {
+        const std::size_t Living = Self.Started.Living().size();
+        if (Living > 0) SayIn(Shown.BehindColor, "+{} ", Living);
+    }
     SayIn(Shown.SignColor, "{} ", Shown.Sign);
     io_flush();
 }

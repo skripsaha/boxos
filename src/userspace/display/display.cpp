@@ -50,6 +50,7 @@
 #include "box/debug.h"
 #include "box/error.h"
 #include "box/ipc.h"
+#include "box/life.h"
 #include "box/print.h"
 #include "box/touch.h"
 #include "box/turnin.h"
@@ -61,6 +62,8 @@
 #include "lanes.h"
 #include "layers.h"
 #include "ring.h"
+
+BOX_LIFE("serves");
 
 namespace {
 
@@ -249,6 +252,25 @@ bool ScreenStep()
     const bool Again = g_easel->Step();
     g_dirty |= Again;
     return Again;
+}
+
+// A lane's turn (lanes.h): what is held drawn first, so the line kept, or
+// laid again, is the one on the glass. No room to keep a line: it is not laid
+// again, and the reader goes on where the caret is.
+void LaneTurned(std::uint32_t Lane, LaneTurn Turn) noexcept
+{
+    if (Turn == LaneTurn::Closed) {
+        g_model->Forget(Lane);
+        return;
+    }
+    DrawHeld();
+    try {
+        if (Turn == LaneTurn::Behind) g_model->Away(Lane);
+        else g_model->Back(Lane);
+    } catch (...) {
+        g_model->Forget(Lane);
+    }
+    g_dirty = true;
 }
 
 bool LaneStep()
@@ -485,7 +507,7 @@ int main(void)
     g_dirty = true;
     Present();
 
-    if (!LanesStart()) {
+    if (!LanesStart(LaneTurned)) {
         kdbg_print("[display] the keyboard's tag could not be claimed; nobody can type");
         return 1;
     }

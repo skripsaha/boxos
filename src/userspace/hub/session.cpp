@@ -5,6 +5,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "box/memory.h"
 #include "box/print.h"
@@ -46,13 +47,25 @@ void Typed(Hub &Self, std::string_view Line, std::string_view Context)
     if (Unkept) SayUnkept(Self, *Unkept);
 }
 
+// What a program that lived behind gave when it finished becomes `them` —
+// before the prompt shows how many files `them` holds, and before a line
+// typed after its news is run.
+void TakeGift(Hub &Self)
+{
+    if (std::optional<std::vector<file_id_t>> Gift = Self.Started.TakeGift()) Self.Given.Keep(std::move(*Gift));
+}
+
 }  // namespace
 
 bool Converse(Hub &Self)
 {
     box::settings::watch Watch;
     while (Self.Going) {
-        if (Watch.changed()) Self.Shown = ReadLook();
+        if (Watch.changed()) {
+            Self.Shown = ReadLook();
+            Self.Started.Show(Self.Shown);
+        }
+        TakeGift(Self);
         const std::string Context = context::Whole().value_or(std::string());
         ShowPrompt(Self, Context);
 
@@ -64,8 +77,12 @@ bool Converse(Hub &Self)
             Whisper Hints(Self, Context);
             Length = readline_whispered(&Input, Hints.Hook());
         }
+        // Asked to finish (Ctrl+Alt+End over it, said by its keeper): the hub
+        // ends as it ends at `exit`.
+        if (Length == READLINE_ASKED_TO_END) return true;
         if (Length < 0) return false;
         const HeldHeap<char> Held(Input);
+        TakeGift(Self);
         if (Length > 0) Typed(Self, std::string_view(Input, static_cast<std::size_t>(Length)), Context);
     }
     return true;

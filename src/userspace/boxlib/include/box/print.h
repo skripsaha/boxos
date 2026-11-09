@@ -83,7 +83,10 @@ int vsnprintf(char* str, size_t n, const char* fmt, va_list args);
  * A line's length; -1 when the ear is gone; READLINE_ASKED_TO_END when the
  * program is asked to finish while it reads (Ctrl+Alt+End over it, said by
  * its keeper through the display) — a program that does nothing else with it
- * ends, as one does at the end of its input. */
+ * ends, as one does at the end of its input. Its input is over then: every
+ * later read answers READLINE_ASKED_TO_END at once (getchar, -1). A program
+ * that answers the asking with a question of its own asks it on a Stage that
+ * hears the end itself (painter Stage::HearEnd). */
 #define READLINE_ASKED_TO_END (-2)
 int readline(char* buffer, size_t max_len);
 

@@ -13,10 +13,15 @@ BOX_SETTINGS("setting greeting yes-or-no default yes \"the one line said when th
              "setting sign-color color default #AAAAAA \"the colour of the sign\"\n"
              "setting context-color color default #40C0C0 \"the colour of the Use Context\"\n"
              "setting them-color color default #40C040 \"the colour of the number of files them holds\"\n"
+             "setting background one-of prompt nowhere default prompt "
+             "\"where the hub shows how many programs live behind: before the sign, or nowhere\"\n"
+             "setting background-color color default #E0C040 \"the colour of how many programs live behind\"\n"
              "setting news-color color default #FFB040 "
              "\"the colour of what the hub says of a program that ended, and how long a command took\"\n"
              "setting refusal-color color default #E04040 \"the colour of what could not be done, and why\"\n"
              "setting ended yes-or-no default yes \"say how a program ended when it did not end well\"\n"
+             "setting finished yes-or-no default yes "
+             "\"say when a program living behind finishes, and how many files it gave\"\n"
              "setting long-command number from 0 to 86400 seconds default 10 "
              "\"say how long a command took when it took this long or longer; 0 for never\"\n"
              "setting whisper yes-or-no default yes \"lay what the line could go on to be, dim, past the caret\"\n"
@@ -37,9 +42,13 @@ Look ReadLook()
                 .SignColor       = box::settings::color("sign-color"),
                 .ContextColor    = box::settings::color("context-color"),
                 .ThemColor       = box::settings::color("them-color"),
+                .Behind          = box::settings::choice("background") == "nowhere" ? BehindShown::Nowhere
+                                                                                    : BehindShown::Prompt,
+                .BehindColor     = box::settings::color("background-color"),
                 .NewsColor       = box::settings::color("news-color"),
                 .RefusalColor    = box::settings::color("refusal-color"),
                 .Ended           = box::settings::yes("ended"),
+                .Finished        = box::settings::yes("finished"),
                 .LongCommand     = box::settings::number("long-command"),
                 .Whisper         = box::settings::yes("whisper"),
                 .Needs           = box::settings::yes("needs"),

@@ -191,10 +191,10 @@ void ConsoleModel::WriteKernel(const char *Bytes, const std::uint8_t *Tones, std
         }
     };
     if (Holds(0)) {
-        AsAnother(Lines);
+        AsAnother(0, true, Lines);
         return;
     }
-    Begin(0);
+    Begin(0, true);
     Lines();
 }
 
@@ -239,10 +239,14 @@ bool ConsoleModel::Holds(std::uint32_t Lane) const noexcept
     return TypingLane != 0 && LastLane == TypingLane && Lane != TypingLane && LineEnd > LineStart;
 }
 
-// Another lane's text after the last lane's: its line begins where the caret is.
-void ConsoleModel::Begin(std::uint32_t Lane) noexcept
+// Another lane's text after the last lane's: its line begins where the caret
+// is — on a row of its own when the last left its row unfinished, so no two
+// lanes' words share a row. A fold (Text false) lies where it was asked to.
+void ConsoleModel::Begin(std::uint32_t Lane, bool Text) noexcept
 {
-    if (Lane != 0 && Lane == LastLane) return;
+    const bool Another = Lane != LastLane;
+    if (Lane != 0 && !Another) return;
+    if (Text && Another && CursorColumn != 0) Newline();
     LastLane  = Lane;
     Held      = false;
     LineStart = LineEnd = Here();
@@ -253,7 +257,7 @@ void ConsoleModel::Begin(std::uint32_t Lane) noexcept
 // text left off — and the line laid back under it, on a row of its own when
 // that text left a row unfinished, the caret where it stood in the line.
 template <typename Drawing>
-void ConsoleModel::AsAnother(Drawing &&Said)
+void ConsoleModel::AsAnother(std::uint32_t Lane, bool Text, Drawing &&Said)
 {
     const std::size_t           End = std::min(LineEnd, Surface.size());
     const std::vector<TextCell> Line(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
@@ -264,9 +268,11 @@ void ConsoleModel::AsAnother(Drawing &&Said)
               Surface.begin() + static_cast<std::ptrdiff_t>(End), Blank);
 
     MoveTo(Held ? Others : LineStart);
+    if (Held && Text && Lane != OthersLane && CursorColumn != 0) Newline();
     Said();
-    Others = Here();
-    Held   = true;
+    Others     = Here();
+    OthersLane = Lane;
+    Held       = true;
 
     if (CursorColumn != 0) Newline();
     LineStart = Here();
@@ -276,13 +282,51 @@ void ConsoleModel::AsAnother(Drawing &&Said)
     MoveTo(LineStart + Caret);
 }
 
+void ConsoleModel::Away(std::uint32_t Lane)
+{
+    Forget(Lane);
+    if (TypingLane == Lane) TypingLane = 0;   // its line stays where it is, held under nothing
+    if (Lane == 0 || LastLane != Lane || LineEnd <= LineStart) return;
+    const std::size_t End = std::min(LineEnd, Surface.size());
+    Kept              One;
+    One.Lane = Lane;
+    One.Line.assign(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
+                    Surface.begin() + static_cast<std::ptrdiff_t>(End));
+    One.Caret = std::min(Here() >= LineStart ? Here() - LineStart : 0, One.Line.size());
+    KeptLines.push_back(std::move(One));
+}
+
+void ConsoleModel::Back(std::uint32_t Lane)
+{
+    const auto It =
+        std::find_if(KeptLines.begin(), KeptLines.end(), [&](const Kept &One) { return One.Lane == Lane; });
+    if (It == KeptLines.end()) return;
+    const Kept One = std::move(*It);
+    KeptLines.erase(It);
+
+    if (CursorColumn != 0) Newline();
+    LineStart = Here();
+    for (const TextCell &Cell : One.Line) Lay(Cell);
+    LineEnd    = Here();
+    LastLane   = Lane;
+    TypingLane = Lane;
+    Held       = false;
+    MoveTo(LineStart + One.Caret);
+}
+
+void ConsoleModel::Forget(std::uint32_t Lane) noexcept
+{
+    std::erase_if(KeptLines, [&](const Kept &One) { return One.Lane == Lane; });
+}
+
 void ConsoleModel::Apply(const ConsoleRun &Run, std::uint32_t Lane)
 {
+    const bool Text = Run.kind == CONSOLE_RUN_TEXT || Run.kind == CONSOLE_RUN_HINT;
     if (Holds(Lane)) {
-        AsAnother([&] { Draw(Run); });
+        AsAnother(Lane, Text, [&] { Draw(Run); });
         return;
     }
-    Begin(Lane);
+    Begin(Lane, Text);
     Draw(Run);
 }
 
@@ -316,10 +360,10 @@ void ConsoleModel::CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Wid
 {
     const auto Fold = [&] { Folded(X, Y, Width, Height, Cells, ScrollRows, CursorX, CursorY, CursorVisible); };
     if (Holds(0)) {
-        AsAnother(Fold);
+        AsAnother(0, false, Fold);
         return;
     }
-    Begin(0);
+    Begin(0, false);
     Fold();
 }
 

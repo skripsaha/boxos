@@ -10,6 +10,9 @@
 
 namespace hub {
 
+// Where the hub shows how many programs live behind.
+enum class BehindShown { Prompt, Nowhere };
+
 struct Look {
     bool         Greeting;
     std::string  Sign;
@@ -18,9 +21,12 @@ struct Look {
     Color        SignColor;
     Color        ContextColor;
     Color        ThemColor;
+    BehindShown  Behind;
+    Color        BehindColor;
     Color        NewsColor;
     Color        RefusalColor;
     bool         Ended;
+    bool         Finished;          // a program behind that finished is said
     std::int64_t LongCommand;       // seconds; 0: never said
     bool         Whisper;
     bool         Needs;

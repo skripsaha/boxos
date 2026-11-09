@@ -17,8 +17,15 @@
 using FrameSink  = void (*)(const ConsoleRun &Run, std::uint32_t Lane);
 using FrameFlush = void (*)();
 
-// The keyboard's tag claimed, the console's order made. False: no keyboard.
-bool LanesStart() noexcept;
+// What became of a lane, as FrameSink numbers it, that the console keeps
+// something of: it went behind while its strand read (front.h), came forward
+// to read again, or closed — its number free for another.
+enum class LaneTurn { Behind, Forward, Closed };
+using LaneTold = void (*)(std::uint32_t Lane, LaneTurn Turn);
+
+// The keyboard's tag claimed, the console's order made, and whom a lane's turn
+// is told. False: no keyboard.
+bool LanesStart(LaneTold Told) noexcept;
 
 // Every key the keyboard said taken — the two chords told (front.h), the rest
 // kept in order — and the kept ones said again on the lane that listens. True

@@ -10,6 +10,8 @@
 #include "box/ipc.h"
 #include "boxos_glyph_fold.h"
 
+#include "front.h"
+
 namespace {
 
 struct DisplayLayerState {
@@ -393,10 +395,17 @@ void LayersCompose(const ConsoleModel &Model, std::vector<TextCell> &Composed, C
     std::copy(Base.begin(), Base.end(), Composed.begin());
     At = Caret{Model.CursorX(), Model.CursorY(), true};
 
+    // A program behind (front.h) shows no scene and no overlay — the glass is
+    // the program's in front — and keeps its notices, which are made to be
+    // seen beside whatever is in front.
     g_order.clear();
     try {
-        for (std::size_t Index = 0; Index < g_layers.size(); Index++)
-            if (g_layers[Index].HasFrame) g_order.push_back(Index);
+        for (std::size_t Index = 0; Index < g_layers.size(); Index++) {
+            const DisplayLayerState &Layer = g_layers[Index];
+            if (!Layer.HasFrame) continue;
+            if (Layer.Role != DISPLAY_LAYER_NOTICE && FrontBehind(Layer.ProgramPid, Layer.ProgramGeneration)) continue;
+            g_order.push_back(Index);
+        }
     } catch (...) {
         // No room to order the layers: the console's text alone this time;
         // the next present asks again.

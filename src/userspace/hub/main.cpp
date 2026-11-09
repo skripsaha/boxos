@@ -15,7 +15,7 @@ int main()
 {
     hub::Hub Self;
     Self.Shown = hub::ReadLook();
-    Self.Started.Begin();
+    if (!Self.Started.Begin(Self.Shown)) return 1;
     Self.Lines.Begin();
 
     if (cabin_info()->spawner_pid == 0) clear();

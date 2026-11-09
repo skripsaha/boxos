@@ -1,9 +1,9 @@
 /* prompt.h — what stands before the line the person types.
  *
- *   [code,cpp] 3 ~
+ *   [code,cpp] 3 +1 ~
  *
  * The Use Context in brackets, as the kernel holds it now; how many files
- * `them` holds; the sign. Each as the person set it (look.h): shown or not,
+ * `them` holds; how many programs live behind; the sign. Each as the person set it (look.h): shown or not,
  * and its colour. As many whole tags as there is room for are shown, never
  * one torn mid-tag, and the rest are counted: "[code,cpp +3]". */
 #ifndef HUB_PROMPT_H

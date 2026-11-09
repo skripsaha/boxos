@@ -14,12 +14,35 @@ namespace hub::news {
 void Ended(const Look &Shown, std::string_view Who, const Ending &End)
 {
     if (!Shown.Ended || !End.Seen || End.Code == 0) return;
+    if (End.Asked && End.Code == PROC_EXIT_KILLED) return;
     const std::string Where = End.Fell && !End.In.empty() ? " in " + End.In : std::string();
     if (End.Code > 0) SayIn(Shown.NewsColor, "{} ended: {}\n", Who, static_cast<int>(End.Code));
     else if (End.Code == PROC_EXIT_KILLED) SayIn(Shown.NewsColor, "{} was ended by another program\n", Who);
     else if (End.Code == PROC_EXIT_STACK_OVERFLOW) SayIn(Shown.NewsColor, "{} stopped: its stack ran out{}\n", Who, Where);
     else if (End.Fell) SayIn(Shown.NewsColor, "{} stopped: {}{}\n", Who, process_fault_said(End.Vector), Where);
     else SayIn(Shown.NewsColor, "{} stopped: the system stopped it\n", Who);
+}
+
+void LetGo(const Look &Shown, std::string_view Who)
+{
+    SayIn(Shown.NewsColor, "{} lives on behind: front {} brings it back\n", Who, Who);
+}
+
+void Finished(const Look &Shown, std::string_view Who, bool Serves, const Ending &End)
+{
+    if (!End.Seen || End.Code != 0) {
+        Ended(Shown, Who, End);
+        return;
+    }
+    if (Serves || !Shown.Finished) return;
+    const std::size_t Gave = End.Kept ? End.Kept->size() : 0;
+    if (Gave == 0) SayIn(Shown.NewsColor, "{} finished\n", Who);
+    else SayIn(Shown.NewsColor, "{} finished; gave {} {} — them\n", Who, Gave, Gave == 1 ? "file" : "files");
+}
+
+void Wants(const Look &Shown, std::string_view Who)
+{
+    SayIn(Shown.NewsColor, "{} wants the keyboard: front {} brings it forward\n", Who, Who);
 }
 
 void Took(const Look &Shown, std::chrono::steady_clock::duration Spent)

@@ -27,6 +27,16 @@ public:
     // where it stood, and laid again below, the caret where it was in it.
     void Typing(std::uint32_t Lane) noexcept { TypingLane = Lane; }
 
+    // A lane's program went behind while it read: its unfinished line — the
+    // prompt and what is typed after it, when it is the line drawn last — is
+    // kept. Back: the lane reads in front again, and the line kept is laid
+    // again on a row of its own, the caret where it stood in it, so what the
+    // reader echoes next lands where it means to. Forget: the lane closed,
+    // and nothing of it is kept for whichever lane takes its number.
+    void Away(std::uint32_t Lane);
+    void Back(std::uint32_t Lane);
+    void Forget(std::uint32_t Lane) noexcept;
+
     // The kernel's lines, from the log ring: `Count` bytes, each with its Tone
     // (boxos_log_tone.h), drawn in this console's colours for that tone.
     void WriteKernel(const char *Bytes, const std::uint8_t *Tones, std::size_t Count);
@@ -44,8 +54,8 @@ public:
 
 private:
     template <typename Drawing>
-    void AsAnother(Drawing &&Said);
-    void Begin(std::uint32_t Lane) noexcept;
+    void AsAnother(std::uint32_t Lane, bool Text, Drawing &&Said);
+    void Begin(std::uint32_t Lane, bool Text) noexcept;
     bool Holds(std::uint32_t Lane) const noexcept;
     std::size_t Here() const noexcept;
     void MoveTo(std::size_t Linear) noexcept;
@@ -74,13 +84,23 @@ private:
     // The lane whose text was drawn last (0: the kernel's lines, or a fold),
     // and its unfinished line: where it began and how far it reaches, as cells
     // counted from the console's first. While the typing lane's line is held
-    // under another's text, Others is where that text goes on.
+    // under another's text, Others is where that text goes on, and OthersLane
+    // the lane that wrote there last.
     std::uint32_t TypingLane = 0;
     std::uint32_t LastLane = 0;
     std::size_t   LineStart = 0;
     std::size_t   LineEnd = 0;
     bool          Held = false;
     std::size_t   Others = 0;
+    std::uint32_t OthersLane = 0;
+
+    // The lines of lanes gone behind while they read.
+    struct Kept {
+        std::uint32_t         Lane = 0;
+        std::vector<TextCell> Line;
+        std::size_t           Caret = 0;   // where the caret stood in it
+    };
+    std::vector<Kept> KeptLines;
 };
 
 #endif

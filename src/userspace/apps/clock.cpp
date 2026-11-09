@@ -8,12 +8,15 @@
 
 #include "box/clock.h"
 #include "box/error.h"
+#include "box/life.h"
 #include "box/settings.h"
 #include "box/cxx/settings.h"
 
 #include "painter/core/color.h"
 #include "painter/tui/frame.h"
 #include "painter/tui/surface.h"
+
+BOX_LIFE("stays");
 
 BOX_SETTINGS("setting hours one-of 24 12 default 24 \"how the hours are counted\"\n"
              "setting seconds yes-or-no default yes \"whether the seconds are shown\"\n"
