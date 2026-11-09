@@ -79,7 +79,10 @@ UTILS = create show files tag untag name trash erase assemble \
 # the complete utility set when this Makefile is invoked recursively.
 .DEFAULT_GOAL := all
 
-.PHONY: $(PAINTER)
+# A file, not a phony: a phony prerequisite is never there, and every program
+# that names it would be linked again at every make — and the volume laid
+# down again, under whatever a run had made of it. The top-level Makefile
+# builds Painter before this one runs; this rule makes it when it is missing.
 $(PAINTER): $(BOXCXX) $(BOXLIB)
 	@cd ../painter && $(MAKE)
 

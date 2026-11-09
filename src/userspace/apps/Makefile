@@ -65,7 +65,10 @@ PAINTER    = ../painter/libpainter.a
 
 all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf current_test.elf htest.elf cxxtest.elf strandtest.elf brookstrand.elf brookexec.elf currentexec.elf strandpark.elf childspin.elf print_stress.elf quietprint.elf exitpaths.elf quilltest.elf clock.elf pulse.elf calendar.elf bonsai.elf bigclock.elf snake.elf hacker.elf pipes.elf wordle.elf
 
-.PHONY: $(PAINTER)
+# A file, not a phony: a phony prerequisite is never there, and every program
+# that names it would be linked again at every make — and the volume laid
+# down again, under whatever a run had made of it. The top-level Makefile
+# builds Painter before this one runs; this rule makes it when it is missing.
 $(PAINTER): $(BOXCXX) $(BOXLIB)
 	@cd ../painter && $(MAKE)
 
