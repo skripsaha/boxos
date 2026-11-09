@@ -90,6 +90,12 @@ uint64_t ReadEncoded(const uint8_t **p, uint8_t enc)
     case 0x0C: { int64_t t; __builtin_memcpy(&t, *p, 8); *p += 8; v = uint64_t(t); break; }
     default: boxcxx::Panic("lsda: unsupported DW_EH_PE format");
     }
+    // A value of 0 is no address at all — it is how a type table says
+    // catch(...) — so no base is added to it and nothing is read through it,
+    // as libgcc reads one. Position-independent code writes its type tables
+    // pc-relative and indirect (0x9b); one at a fixed address wrote them
+    // absolute, where 0 stayed 0 by itself.
+    if (v == 0) return 0;
     if ((enc & 0x70) == 0x10) v += uint64_t(uintptr_t(field));   // pcrel
     else if ((enc & 0x70) != 0) boxcxx::Panic("lsda: unsupported application");
     if (enc & 0x80) v = *reinterpret_cast<const uint64_t *>(v);

@@ -98,6 +98,12 @@ uint64_t ReadEncoded(const uint8_t **p, uint8_t enc)
         Panic("dwarf: unsupported DW_EH_PE value format");
     }
 
+    // 0 is no address — an FDE's LSDA pointer when the function has none — so
+    // it gets no base and is read through no pointer, as libgcc reads one.
+    // Position-independent code writes these pc-relative, where 0 would
+    // otherwise become the address of the field itself.
+    if (value == 0) return 0;
+
     switch (enc & 0x70) {
     case 0x00: break;                                       // abs
     case kPePcrel: value += uint64_t(uintptr_t(field)); break;
