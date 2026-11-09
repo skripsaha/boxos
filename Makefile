@@ -28,6 +28,9 @@ NM       = x86_64-elf-nm
 ASM      = nasm
 QEMU     = qemu-system-x86_64
 TAGFS_TOOL = tools/create_tagfs
+# Every link of the kernel and of a program runs it (the Nameplate), so every
+# rule that links one names it — here, before any of them is read.
+NAMEPLATE_TOOL = tools/nameplate
 
 # ==== DEBUG CONFIGURATION ====
 DEBUG    ?= off
@@ -832,7 +835,7 @@ UTIL_NAMES = help create show files tag untag name trash erase assemble \
              playtime lavalamp finish taskcenter hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
-             edit seek retag read
+             edit seek retag read rollcall handset
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1212,7 +1215,7 @@ $(PAINTER_LIB): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxc
 painter: $(PAINTER_LIB)
 
 # Build shell
-$(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
+$(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(NAMEPLATE_TOOL)
 	@echo "Building shell process..."
 	@cd $(SHELL_DIR) && $(MAKE)
 	@echo "Shell binary: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
@@ -1249,7 +1252,7 @@ endif
 # has to reach the apps' sub-make, which then rebuilds quilltest by a mark of
 # its own.
 $(APPS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(APPS_INPUTS) \
-               $(VOLUME_TESTS_MARK)
+               $(VOLUME_TESTS_MARK) $(NAMEPLATE_TOOL)
 	@echo "Building apps..."
 	@cd $(APPS_DIR) && $(MAKE)
 	@echo "proca.elf: $$(stat -f%z $(PROCA_BIN) 2>/dev/null || stat -c%s $(PROCA_BIN) 2>/dev/null) bytes"
@@ -1265,7 +1268,7 @@ $(APP_ELFS): $(APPS_STAMP)
 	@:
 
 # Build display server
-$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
+$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(NAMEPLATE_TOOL)
 	@echo "Building display server..."
 	@cd $(DISPLAY_DIR) && $(MAKE)
 	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"
@@ -1288,7 +1291,8 @@ ifneq ($(words $(wildcard $(UTIL_ELFS))),$(words $(UTIL_ELFS)))
 $(shell rm -f $(UTILS_STAMP))
 endif
 
-$(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(UTILS_INPUTS)
+$(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(UTILS_INPUTS) \
+                $(NAMEPLATE_TOOL)
 	@echo "Building utilities..."
 	@cd $(UTILS_DIR) && $(MAKE)
 	@touch $@
@@ -1335,7 +1339,6 @@ $(SHELL_EMBED): $(BUILDDIR)/shell.elf
 # that claim against the binary's own symbols on every build.
 KERNEL_NP_OBJ   = $(BUILDDIR)/kernel.np.o
 KERNEL_PASS1    = $(BUILDDIR)/kernel.pass1.elf
-NAMEPLATE_TOOL  = tools/nameplate
 KERNEL_LINK_IN  = $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
 # ---- The stack guard -------------------------------------------------------
