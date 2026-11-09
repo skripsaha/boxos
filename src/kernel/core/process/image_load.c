@@ -158,67 +158,9 @@ static error_t ImageLoadElf(vmm_context_t *vmm, const ImageSource *source, const
     return rc;
 }
 
-/* ── raw ─────────────────────────────────────────────────────────────────── */
-
-static error_t ImageLoadRaw(vmm_context_t *vmm, const ImageSource *source, const char *name,
-                            ImageLoaded *loaded)
-{
-    uint64_t bytes = source->Bytes;
-    if (bytes > CABIN_CODE_END_ADDR - CABIN_CODE_START_ADDR) {
-        kprintf("[IMAGE] '%s' is not started: %llu bytes of raw code do not fit the room a "
-                "program's image has\n", name, (unsigned long long)bytes);
-        return ERR_BINARY_TOO_LARGE;
-    }
-
-    /* Read straight into the pages it will run in: raw code is the image byte
-     * for byte, so there is nothing to place and no second copy. */
-    size_t pages  = (size_t)((bytes + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE);
-    void  *frames = pmm_alloc_zero(pages);
-    if (!frames) {
-        kprintf("[IMAGE] '%s' is not started: no %zu pages for its raw code\n", name, pages);
-        return ERR_NO_MEMORY;
-    }
-    uint8_t *code = (uint8_t *)vmm_phys_to_virt((uintptr_t)frames);
-    error_t  rc   = ImageSourceRead(source, 0, code, bytes, name);
-    if (rc != OK) {
-        pmm_free(frames, pages);
-        return rc;
-    }
-
-    /* Raw code that begins with sixteen zero bytes is a read that did not
-     * happen, whatever its count said: no instruction anybody wrote. */
-    uint64_t look = bytes < 16 ? bytes : 16;
-    bool     anything = false;
-    for (uint64_t i = 0; i < look && !anything; i++)
-        anything = code[i] != 0;
-    if (!anything) {
-        pmm_free(frames, pages);
-        kprintf("[IMAGE] '%s' is not started: its first %llu bytes are all zero — this is a "
-                "read that did not happen, not a program\n", name, (unsigned long long)look);
-        return ERR_INVALID_ELF;
-    }
-
-    vmm_map_result_t mapped = vmm_map_pages(vmm, CABIN_CODE_START_ADDR, (uintptr_t)frames, pages,
-                                            VMM_FLAG_PRESENT | VMM_FLAG_USER | VMM_FLAG_WRITABLE);
-    if (!mapped.success) {
-        pmm_free(frames, pages);
-        kprintf("[IMAGE] '%s' is not started: its raw code was not mapped: %s\n",
-                name, mapped.error_msg);
-        return ERR_SPAWN_FAILED;
-    }
-
-    kprintf("[IMAGE] '%s' runs as raw code: its %zu pages at 0x%llx are writable and "
-            "executable at once\n", name, pages, (unsigned long long)CABIN_CODE_START_ADDR);
-    loaded->Entry = (uintptr_t)CABIN_CODE_START_ADDR;
-    (void)nameplate_locate(code, bytes, CABIN_CODE_START_ADDR, &loaded->NameplateVa,
-                           &loaded->NameplateBytes);
-    return OK;
-}
-
 /* ── which kind ──────────────────────────────────────────────────────────── */
 
-error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *name, bool tagged_raw,
-                  ImageLoaded *loaded)
+error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *name, ImageLoaded *loaded)
 {
     static const uint8_t box_magic[8] = { BOX_MAGIC_0, BOX_MAGIC_1, BOX_MAGIC_2, BOX_MAGIC_3,
                                           BOX_MAGIC_4, BOX_MAGIC_5, BOX_MAGIC_6, BOX_MAGIC_7 };
@@ -241,19 +183,12 @@ error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *nam
     bool is_box = look == 8 && memcmp(head, box_magic, 8) == 0;
     bool is_elf = look >= 4 && head[0] == 0x7F && head[1] == 'E' && head[2] == 'L' && head[3] == 'F';
 
-    if ((is_box || is_elf) && tagged_raw) {
-        kprintf("[IMAGE] '%s' is not started: it is tagged raw, and it is %s — one of the two "
-                "is wrong\n", name, is_box ? "a box" : "an ELF program");
-        return ERR_INVALID_ELF;
-    }
     if (is_box)
         return BoxLoad(vmm, source, name, loaded);
     if (is_elf)
         return ImageLoadElf(vmm, source, name, loaded);
-    if (tagged_raw)
-        return ImageLoadRaw(vmm, source, name, loaded);
 
-    kprintf("[IMAGE] '%s' is not started: it is no program this system knows — not a box, "
-            "not ELF, and not tagged raw\n", name);
+    kprintf("[IMAGE] '%s' is not started: it is no program this system knows — neither a box "
+            "nor ELF\n", name);
     return ERR_INVALID_ELF;
 }

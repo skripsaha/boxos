@@ -93,11 +93,11 @@ run_replugwritebook() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latelaunch_off; return; }
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
-    if ! wait_for_line build/serial.log "the stand-in .PID 1. hands over" "$WAIT_QUIET_S"; then
+    if ! wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"; then
         make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latelaunch_off
         harness "replugwrite, a book: the stick never became this machine's volume"
         return
@@ -108,7 +108,7 @@ run_replugwritebook() {
     latelaunch_held build/serial.log
     chk $? "replugwrite, a book: every program the late launch made is held, not let run, when the launch is said"
     replugwrite_spoke_after build/serial.log
-    chk $? "replugwrite, a book: the volume's shell speaks after the kernel says what it started — its banner past the hand-over"
+    chk $? "replugwrite, a book: the volume's hub speaks after the kernel says what it started — its greeting past the launch's line"
     for r in $REPLUGWRITE_ROUNDS; do
         IFS=: read -r change name seed <<REPLUGWRITEBOOK_ROUND
 $r

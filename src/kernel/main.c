@@ -57,7 +57,6 @@
 #include "pvclock.h"
 #include "hvclock.h"
 #include "aslr.h"
-#include "linker_symbols.h"
 #include "memtag.h"
 #include "mce.h"
 #include "op_registry.h"
@@ -1059,43 +1058,16 @@ void kernel_main(void)
     process_t *initial_proc = NULL;
     int autostart_count = AutostartLaunchFromVolume(&initial_proc);
 
-    // Fallback: if no autostart files found, the hub the kernel carries
+    /* Nothing is started in its place: with no program from a volume the
+     * machine waits, saying for what, on the Emergency Screen. A volume that
+     * comes starts its own (AutostartWatchVolume). */
     if (!initial_proc)
     {
-        kprintf("[AUTOSTART] No autostart files found, falling back to the hub the kernel carries\n");
-
-        process_t *hub_proc = process_create("hub");
-        if (!hub_proc)
-        {
-            panic("Failed to create fallback hub process");
-        }
-
-        process_add_tag(hub_proc, "system");
-        process_add_tag(hub_proc, "utility");
-        process_add_tag(hub_proc, "app");
-
-        size_t hub_size = (size_t)(_binary_hub_stripped_elf_end - _binary_hub_stripped_elf_start);
-
-        if (hub_size == 0 || hub_size > CONFIG_PROC_MAX_BINARY_SIZE)
-        {
-            panic("Invalid embedded hub binary size");
-        }
-
-        ImageSource source = { hub_size, NULL, (const uint8_t *)_binary_hub_stripped_elf_start, 0 };
-        int load_result = process_load_binary(hub_proc, &source, "embedded hub", false);
-        if (load_result != 0)
-        {
-            panic("Failed to load embedded hub binary");
-        }
-
-        hub_proc->state = PROC_WORKING;
-        initial_proc = hub_proc;
-        kprintf("[AUTOSTART] Fallback hub ready (PID %u)\n", hub_proc->pid);
-
-        /* It is standing in, not filling the post. If this machine's own
-         * volume turns up later carrying a display daemon and a hub of its
-         * own, this one hands over rather than sharing a keyboard with it. */
-        AutostartNoteStandIn(hub_proc->pid);
+        if (AutostartVolumeHere())
+            kprintf("[AUTOSTART] the volume asks for no program at start; a volume that arrives "
+                    "later starts its own\n");
+        else
+            kprintf("[AUTOSTART] no volume is here yet — its programs start when it arrives\n");
     }
     else
     {
@@ -1194,6 +1166,17 @@ void kernel_main(void)
      * itself (it becomes current_process in process_start_initial).
      * ---------------------------------------------------------------- */
     kprintf("[KERNEL] Single-core mode: BSP scheduling all processes\n");
+
+    /* No program yet: the core waits for one. The timer that schedules every
+     * process here hands it the volume's programs the moment the late launch
+     * lets them run (autostart.c); until then it rests. */
+    if (!initial_proc)
+    {
+        kprintf("[KERNEL] nothing to run until a volume's programs start; the core waits\n");
+        asm volatile("sti");
+        for (;;)
+            asm volatile("hlt");
+    }
 
     process_list_lock();
     process_t *sp = process_get_first();

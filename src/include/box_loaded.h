@@ -18,8 +18,8 @@
  *   BoxLoadedPart[Count]       in the order of the box's table: by name
  *   names                      each name's bytes at NameAt, no terminator
  *
- * Everything lies inside the table's Bytes. A program started from an ELF or
- * from raw code has no table: parts_addr is 0.
+ * Everything lies inside the table's Bytes. A program started from an ELF has
+ * no table: parts_addr is 0.
  *
  * Integer types come from the includer, as everywhere in src/include.
  */

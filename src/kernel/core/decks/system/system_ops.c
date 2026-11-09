@@ -881,12 +881,10 @@ static int SysProcSpawnTagged(const OpContext *ctx, uint64_t binary_va, uint64_t
     new_proc->cabin->spawner_pid = ctx->proc->pid;
     new_proc->cabin->spawner_gen = pid_generation(ctx->proc->pid);
 
-    /* An image out of a cabin has no volume to declare it raw code, so only
-     * an ELF is ever started this way — which the head above already holds. */
     char name[48];
     ksnprintf(name, sizeof(name), "image held by PID %u", ctx->proc->pid);
     ImageSource source = { binary_size, NULL, elf, 0 };
-    error_t     load   = process_load_binary(new_proc, &source, name, false);
+    error_t     load   = process_load_binary(new_proc, &source, name);
     pmm_free(stage_phys, pages);
     if (load != OK) {
         process_destroy(new_proc);
@@ -1580,11 +1578,8 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
     new_proc->cabin->spawner_pid = ctx->proc->pid;
     new_proc->cabin->spawner_gen = pid_generation(ctx->proc->pid);
 
-    /* Raw code only when the FILE says so — never by the caller's augment,
-     * which reaches the process's tags and not the volume's word. */
-    ImageSource source     = { file_size, fh, NULL, found_id };
-    bool        tagged_raw = TagFSKeyAmong(meta->tag_ids, meta->tag_count, "raw");
-    error_t     load       = process_load_binary(new_proc, &source, meta->filename, tagged_raw);
+    ImageSource source = { file_size, fh, NULL, found_id };
+    error_t     load   = process_load_binary(new_proc, &source, meta->filename);
     tagfs_close(fh);
     if (load != OK) {
         process_destroy(new_proc);
@@ -1638,7 +1633,7 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
 
 /* The found program read in, made a process wearing `child_tags`, given its
  * Luggage and started. Its metadata is held throughout: the file's name is what
- * the loader calls it, and the file's own tags say whether it is raw code. */
+ * the loader calls it. */
 static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
                             uint64_t found_id, const char *child_tags,
                             const uint8_t *luggage, uint32_t luggage_len)

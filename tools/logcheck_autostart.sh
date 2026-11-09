@@ -24,13 +24,13 @@ autostart_wears() {
     grep -qE "\[AUTOSTART\] Started '$2' \(PID [0-9]+, tags: $at$3$end" "$1"
 }
 
-# replugwrite_spoke_after LOG — the volume's shell printed its banner after
-# the kernel said that the stand-in hands over: the banner is not among the
-# kernel's lines about the launch. What the banner is followed by — a kernel
-# line a remount prints after the prompt — it does not hold; the typer reads
-# past that (type_line, typer_selfcheck).
+# replugwrite_spoke_after LOG — the volume's hub greeted after the kernel said
+# what its late launch started: the greeting is not among the kernel's lines
+# about the launch. What the greeting is followed by — a kernel line a
+# remount prints after the prompt — it does not hold; the typer reads past
+# that (type_line, typer_selfcheck).
 replugwrite_spoke_after() {
-    tr -d '\r' < "$1" | awk '/the stand-in .PID 1. hands over/ { h = NR }
+    tr -d '\r' < "$1" | awk '/a volume arrived after the boot had given up/ { h = NR }
         /^BoxOS Hub/ && h { b = NR } END { exit !(h && b > h) }'
 }
 
@@ -218,8 +218,8 @@ prompt_selfcheck() {
 }
 
 # latelaunch_leg MODE LOG — latearrival's machine with its late launch said
-# (latelaunch_on MODE), the stick plugged in, and LOG once the stand-in has
-# handed over and the console gone quiet; 1, said, when that never came.
+# (latelaunch_on MODE), the stick plugged in, and LOG once the volume's hub
+# has greeted and the console gone quiet; 1, said, when that never came.
 latelaunch_leg() {
     local mode=$1 L=$2 rc
     latelaunch_on "$mode"; build
@@ -227,11 +227,11 @@ latelaunch_leg() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latelaunch_off; return 1; }
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
-    wait_for_line build/serial.log "the stand-in .PID 1. hands over" "$WAIT_QUIET_S" &&
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" &&
         wait_for_quiet "$BOOT_BURST_QUIET_S"
     rc=$?
     make run-stop >/dev/null 2>&1

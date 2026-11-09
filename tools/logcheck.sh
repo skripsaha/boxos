@@ -170,6 +170,18 @@ boot() {
     cp build/serial.log "$SCRATCH/serial.$1.log"
 }
 
+# A boot with no volume of its own. Nothing is started in a volume's place, so
+# there is no hub to type at: the kernel says on the Emergency Screen that it
+# waits for a volume, and that is the line waited for.
+boot_bare() {
+    make run-stop >/dev/null 2>&1
+    make run-bg   >/dev/null 2>&1
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
+    sleep 3
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+}
+
 # Did the machine answer a keystroke? The shell prints its command list in
 # response to "help", so one line out of that list is the proof.
 typed_ok() {
@@ -256,8 +268,8 @@ stranger_off() {
 # the machine is running. Mutation: the internal disk is declared not to be
 # this machine's, so the boot finds nothing; then a USB stick carrying the real
 # image is hot-plugged through the QEMU monitor and the whole chain has to run
-# by itself — enumerate, seat, recognise by boarding pass, mount, start the
-# volume's programs, and relieve the stand-in shell.
+# by itself — enumerate, seat, recognise by boarding pass, mount, and start
+# the volume's programs, its hub among them.
 #
 # Four cores, because that chain is driven from the K-Core guide loop. On a
 # single core it does not run at all — see the note at the end of this file.
@@ -455,51 +467,22 @@ run_latearrival() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
 
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
 
     #
-    # Waited out to the END of the chain.
-    #
-    # This used to break on the FIRST "AUTOSTART Started" — which is
-    # display.box — and then stop the machine two seconds later. Reading the
-    # rest of the volume's programs off a USB stick takes longer than that
-    # often enough that the two checks below were passing on luck: the machine
-    # was killed mid-launch and the log was then searched for a line it had
-    # not had time to print. Measured — it went red on a tree whose kernel had
-    # nothing wrong with it.
-    wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
+    # Waited out to the END of the chain: the volume's own hub greeting, which
+    # comes after every program the late launch started — display.box first —
+    # has been read off the stick. Breaking on the first "AUTOSTART Started"
+    # and stopping two seconds later once passed on luck: the machine was
+    # killed mid-launch and the log searched for a line it had not had time to
+    # print. Measured — it went red on a tree whose kernel had nothing wrong
+    # with it.
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
-
-    #
-    # ‼ IF IT DID NOT HAND OVER, FIND OUT WHETHER THE MACHINE IS STILL ALIVE.
-    #
-    # Measured 2026-08-29: this scenario failed once, inside a forty-minute
-    # matrix, with the log ending at `[AUTOSTART] Started 'display.elf'` and
-    # nothing after it for sixty seconds. Standing alone it then passed three
-    # times on that tree and three times on the tree before it — so it is not a
-    # regression, and it is not reproducible on demand either.
-    #
-    # What was missing was not another run. It was the one fact that separates
-    # the two things this can be: a machine WEDGED between two autostart
-    # launches, and a machine perfectly alive and merely slow reading a
-    # 772 KB program off a stick. The stand-in shell is still on the keyboard
-    # at that moment, so asking it is free — and a `help` that answers proves
-    # the cores are running, which moves the hunt onto the volume read and off
-    # the scheduler entirely.
-    #
-    # Costs four seconds on a run that fails and nothing at all on one that
-    # does not.
-    if ! grep -q "hands over" build/serial.log 2>/dev/null; then
-        echo "-- it did not hand over; asking whether the machine is alive --"
-        type_cmd "help"
-        sleep 1
-        key_press ret
-        sleep 3
-    fi
 
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.latearrival.log"
@@ -507,7 +490,7 @@ run_latearrival() {
     L="$SCRATCH/serial.latearrival.log"
 
     grep -q "no volume yet" "$L";      chk $? "the boot found no volume of its own"
-    grep -q "Fallback hub ready" "$L"; chk $? "and stood a hub in for one"
+    grep -q "$NO_VOLUME_YET" "$L";     chk $? "and waited for one, saying so, with nothing started in its place"
     grep -q "mass storage" "$L";       chk $? "the stick enumerated after the boot"
     grep -q "took a seat while the machine was\|seat 1:" "$L"
     chk $? "the room seated it"
@@ -529,17 +512,20 @@ run_latearrival() {
     chk $? "TagFS mounted it"
     grep -q "AUTOSTART. Started .display.box" "$L"; chk $? "the volume's display daemon started"
     grep -q "AUTOSTART. Started .hub.box" "$L";   chk $? "the volume's hub started"
-    grep -q "the stand-in .PID 1. hands over" "$L"; chk $? "and the stand-in handed over"
+    grep -q "BoxOS Hub" "$L";                       chk $? "and greeted, the only hub this machine had"
 
     # Only meaningful when the line above went red — and then it is the whole
-    # of what the next session needs. Not a check: a fact, printed.
-    if ! grep -q "the stand-in .PID 1. hands over" "$L"; then
-        if typed_ok "$L"; then
-            echo "       the machine was ALIVE and answering the keyboard"
-            echo "       => the stall is in reading the volume, not in the scheduler"
+    # of what the next session needs. Not a check: a fact, printed. With no
+    # hub there is nobody at the keyboard to ask whether the cores still run;
+    # whether the late launch said what it started is what tells a wedged
+    # launch from a hub that would not come up.
+    if ! grep -q "BoxOS Hub" "$L"; then
+        if grep -q "a volume arrived after the boot had given up" "$L"; then
+            echo "       the late launch started the volume's programs"
+            echo "       => the hub did not come up after it"
         else
-            echo "       the machine did NOT answer the keyboard"
-            echo "       => it was wedged, and the last line it printed says where"
+            echo "       the late launch never said what it started"
+            echo "       => it stalled reading the volume, and the last line it printed says where"
         fi
         echo "       last line: $(tail -1 "$L")"
     fi
@@ -614,17 +600,17 @@ run_replug() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
 
     # First arrival — the same one latearrival proves.
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
-    # Waited out to the END of the chain, not to its first sign. The stand-in
-    # handing over is the last thing the first arrival does; pulling the stick
+    # Waited out to the END of the chain, not to its first sign. The volume's
+    # hub greeting is the last thing the first arrival does; pulling the stick
     # before then tests something else entirely — a medium yanked out from
     # under a program being loaded — and reports it as this.
-    wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
 
     # A file on the stick before anything leaves, and every write under a
@@ -709,7 +695,7 @@ run_replug() {
     grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
     chk $? "the stick was mounted on its first arrival"
     grep -q "AUTOSTART. Started .hub.box" "$L"; chk $? "and its hub started"
-    grep -q "the stand-in .PID 1. hands over" "$L"; chk $? "and the stand-in handed over"
+    grep -q "BoxOS Hub" "$L"; chk $? "and greeted"
     head -n "$FIRST_LINES" "$L" | grep -q "\[ANCHOR\] WROTE+ANCHORED"
     chk $? "a file was written and anchored on it before it left"
 
@@ -1119,11 +1105,11 @@ run_replugwrite() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latelaunch_off; return; }
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
-    if ! wait_for_line build/serial.log "the stand-in .PID 1. hands over" "$WAIT_QUIET_S"; then
+    if ! wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"; then
         make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latelaunch_off
         harness "replugwrite: the stick never became this machine's volume"
         return
@@ -1132,7 +1118,7 @@ run_replugwrite() {
     latelaunch_held build/serial.log
     chk $? "replugwrite: every program the late launch made is held, not let run, when the launch is said"
     replugwrite_spoke_after build/serial.log
-    chk $? "replugwrite: the volume's shell speaks after the kernel says what it started — its banner past the hand-over"
+    chk $? "replugwrite: the volume's hub speaks after the kernel says what it started — its greeting past the launch's line"
     for r in $REPLUGWRITE_ROUNDS; do
         IFS=: read -r change name seed <<REPLUGWRITE_ROUND
 $r
@@ -1207,7 +1193,7 @@ run_nofsgsbase() {
 
 run_stranger() {
     echo "== stranger: the pass names a volume that is not here =="
-    stranger_on; build; boot stranger; stranger_off
+    stranger_on; build; boot_bare stranger; stranger_off
     L="$SCRATCH/serial.stranger.log"
 
     grep -q "no seat is carrying it" "$L"; chk $? "the room says the volume it wants is absent"
@@ -1217,10 +1203,10 @@ run_stranger() {
     ! grep -q "TagFS. volume on seat" "$L"; chk $? "no stranger was mounted"
     grep -q "Storage Deck. no volume yet" "$L"; chk $? "the deck says it has no volume"
 
-    # The whole point of declining: the machine must still be usable, because
-    # the person who has to re-seat the medium types on it.
-    grep -q "BoxOS Hub" "$L"; chk $? "the machine still reaches a shell"
-    typed_ok "$L"; chk $? "and answers a keystroke"
+    # Declining is honest only if the machine then says what it waits for:
+    # the person re-seats the medium, and that volume's programs start.
+    grep -q "$NO_VOLUME_YET" "$L"; chk $? "and says it waits for a volume of its own"
+    ! grep -qE "AUTOSTART. Started|BoxOS Hub" "$L"; chk $? "with nothing started in a volume's place"
 
     # And it must be LISTENING, not polling on a clock.
     ! grep -q "falling back to the rule" "$L"; chk $? "the guess-rule never ran"
@@ -1499,17 +1485,8 @@ run_badpool() {
     echo "== badpool: the metadata pool holds something that is not a pool =="
     build
     badpool_on
-    # boot() rebuilds nothing — it runs what is on disk now.
-    make run-stop >/dev/null 2>&1
-    make run-bg   >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
-    sleep 3
-    type_cmd "help"
-    sleep 1
-    key_press ret
-    sleep 3
-    make run-stop >/dev/null 2>&1
-    cp build/serial.log "$SCRATCH/serial.badpool.log"
+    # boot_bare() rebuilds nothing — it runs what is on disk now.
+    boot_bare badpool
     badpool_off
     build   # leave the tree with an image built from clean sources
     L="$SCRATCH/serial.badpool.log"
@@ -1523,21 +1500,17 @@ run_badpool() {
     ! grep -qE "AUTOSTART. Started" "$L"
     chk $? "nothing from the volume was started off it"
 
-    grep -q "BoxOS Hub" "$L"
-    chk $? "the machine still reaches a shell"
-
-    typed_ok "$L"
-    chk $? "and answers a keystroke"
+    grep -q "$NO_VOLUME_YET" "$L"
+    chk $? "and the machine says it waits for a volume, starting nothing in its place"
 }
 
 run_novolume() {
     echo "== novolume: tagfs_recognise() forced false =="
-    probe_on; mutate_on; build; boot novolume; mutate_off; probe_off
+    probe_on; mutate_on; build; boot_bare novolume; mutate_off; probe_off
     L="$SCRATCH/serial.novolume.log"
 
-    grep -q "no volume\|No autostart" "$L"; chk $? "boot proceeds with no volume"
-    grep -q "BoxOS Hub" "$L"; chk $? "a machine with no medium still reaches a shell"
-    typed_ok "$L"; chk $? "and answers a keystroke"
+    grep -q "no volume" "$L"; chk $? "boot proceeds with no volume"
+    grep -q "$NO_VOLUME_YET" "$L"; chk $? "and waits for one, saying so, with nothing started in its place"
 
     # THE point of the whole change: the console tag survives having no medium
     grep -q "logbook 'keyboard'.*bare=0x8" "$L"; chk $? "'keyboard' resolves with NO volume"
@@ -2942,7 +2915,7 @@ run_yank() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
     sleep 2
     local MARK
     MARK=$(wc -l < build/serial.log)
@@ -3108,14 +3081,14 @@ run_holdground() {
     make run-bg HOLDGROUND=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
 
     # First arrival: the stick becomes this machine's volume, and the probe
     # opens a file on it.
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
-    wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
 
     local FIRST_LINES AT
@@ -3280,13 +3253,13 @@ run_returnfail() {
     make run-bg RETURNFAIL=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
 
     # First arrival — the mount that succeeds, and the one the stamp counts.
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
-    wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
 
     local FIRST_LINES AT
@@ -3406,12 +3379,12 @@ run_stillthere() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
 
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
-    wait_for_line build/serial.log "hands over" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
 
     # ── the control is the boot itself ──────────────────────────────────────
@@ -11993,10 +11966,10 @@ run_appenders() {
     build
     make run-stop >/dev/null 2>&1
     if make run-bg USB=on CORES=16 MEM=8G >"$SCRATCH/runbg.cores.log" 2>&1 && stick_from_boot_image &&
-       wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" &&
+       wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S" &&
        mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" &&
        mon_raw "device_add usb-storage,drive=stick,id=usbstick" &&
-       wait_for_line build/serial.log "hands over" "$WAIT_QUIET_SLOW_S" && wait_for_quiet "$BOOT_BURST_QUIET_S"; then
+       wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_SLOW_S" && wait_for_quiet "$BOOT_BURST_QUIET_S"; then
         cores_case "quilltest append 2 $CORES_APPEND_RECORDS 0" "$WAIT_QUIET_SLOW_S"
         cores_said "appenders: a USB stick, two appenders"
         grep -aq "a medium arrived carrying a volume, and this machine had none" build/serial.log
@@ -12009,7 +11982,7 @@ run_appenders() {
     else
         make run-stop >/dev/null 2>&1
         cp build/serial.log "$L2" 2>/dev/null
-        bad "appenders: the stick never became the volume at a shell ($(tr -d '\r' < "$L2" 2>/dev/null | grep -aE 'hands over|mass storage|KERNEL PANIC' | tail -1 | cut -c1-120))"
+        bad "appenders: the stick never became the volume at a shell ($(tr -d '\r' < "$L2" 2>/dev/null | grep -aE 'BoxOS Hub|mass storage|KERNEL PANIC' | tail -1 | cut -c1-120))"
     fi
     latearrival_off
     rm -f "$SCRATCH/stick.img"

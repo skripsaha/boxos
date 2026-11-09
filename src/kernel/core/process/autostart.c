@@ -8,7 +8,6 @@
 #include "vmm.h"
 #include "klib.h"
 #include "kernel_config.h"
-#include "proc_exit.h"
 
 /*
  * Autostart — the programs the volume asks for, whenever the volume turns up.
@@ -24,12 +23,6 @@
  * once more if the boot found no volume and one arrived afterwards.
  */
 
-/* The stand-in the kernel starts when there is nothing to start from a volume.
- * Held as a pid rather than a pointer: by the time the relief arrives this
- * process may have exited on its own and been reaped, and a pid that has gone
- * away simply fails to resolve, where a pointer would be a dangling read. */
-static volatile uint32_t g_stand_in_pid = 0;
-
 /* Whether a volume's programs have ever been launched. One-shot: a volume that
  * leaves and comes back does not start second copies of everything, because
  * the first copies are still there. */
@@ -41,11 +34,6 @@ static volatile uint32_t g_volume_launched = 0;
 static volatile uint32_t g_busy = 0;
 
 static TouchWatch *g_mount_watch = NULL;
-
-void AutostartNoteStandIn(uint32_t pid)
-{
-    __atomic_store_n(&g_stand_in_pid, pid, __ATOMIC_RELEASE);
-}
 
 void AutostartNoteVolumeLaunched(void)
 {
@@ -95,11 +83,8 @@ static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
         return NULL;
     }
 
-    /* Raw code only when the FILE says so: the volume's word, never one the
-     * process could be given some other way. */
-    ImageSource source     = { file_size, fh, NULL, file_id };
-    bool        tagged_raw = TagFSKeyAmong(meta->tag_ids, meta->tag_count, "raw");
-    int         load_result = process_load_binary(proc, &source, meta->filename, tagged_raw);
+    ImageSource source      = { file_size, fh, NULL, file_id };
+    int         load_result = process_load_binary(proc, &source, meta->filename);
     tagfs_close(fh);
     if (load_result != 0) {
         process_destroy(proc);
@@ -118,11 +103,9 @@ static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
  * line about them (main.c). A volume that turns up later had each program let
  * run the moment it was made, so the volume's shell printed its banner and
  * prompt in among the kernel's lines — on a book on the stick, two runs of
- * three: `~ [AUTOSTART] the volume brought its own shell — the stand-in (PID 1)
- * hands over`, the prompt buried in the middle of the console. So the late
- * launch holds what it makes, says the launch, relieves the stand-in, and only
- * then lets them run, in the order made. Grown as they are found: a volume
- * asks for as many as it likes.
+ * three, the prompt buried in the middle of the console. So the late launch
+ * holds what it makes, says the launch, and only then lets them run, in the
+ * order made. Grown as they are found: a volume asks for as many as it likes.
  */
 typedef struct {
     process_t **procs;
@@ -210,10 +193,7 @@ static int AutostartWalk(process_t **out_first, AutostartHeld *held)
 {
     if (out_first) *out_first = NULL;
 
-    /* Is there a volume? Asked of the flag rather than of the registry
-     * pointer beside it, which a re-mount frees. */
-    TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->initialized) return 0;
+    if (!AutostartVolumeHere()) return 0;
 
     /* Every live file, a page at a time: what stood here was one array as
      * long as the Ledger's count of files — or 1024 when it said none — and
@@ -244,38 +224,17 @@ static int AutostartWalk(process_t **out_first, AutostartHeld *held)
     return launched;
 }
 
+/* Asked of the flag rather than of the registry pointer beside it, which a
+ * re-mount frees. */
+bool AutostartVolumeHere(void)
+{
+    TagFSState *fs = tagfs_get_state();
+    return fs && fs->initialized;
+}
+
 int AutostartLaunchFromVolume(process_t **out_first)
 {
     return AutostartWalk(out_first, NULL);
-}
-
-/*
- * The relief has arrived, so the stand-in hands over the watch.
- *
- * A machine that came up with no volume is running the embedded shell. When
- * its own volume turns up carrying a display daemon and a shell of its own,
- * leaving both running would put two shells on one keyboard and two writers on
- * one screen. The one that was only ever standing in is the one that goes.
- *
- * Ended the way SysProcKill ends a program: whole (CabinEnd), each strand's
- * disposition claimed BEFORE its state changes, so the reaper on another core
- * cannot get there first and call an orderly hand-over a crash. The code is a
- * clean zero — this program did nothing wrong.
- */
-static void autostart_relieve_stand_in(void)
-{
-    uint32_t pid = __atomic_exchange_n(&g_stand_in_pid, 0u, __ATOMIC_ACQ_REL);
-    if (pid == 0) return;
-
-    process_t *p = process_find_ref(pid);
-    if (!p) return;
-
-    kprintf("[AUTOSTART] the volume brought its own hub — the stand-in "
-            "(PID %u) hands over\n", pid);
-
-    CabinEnd(p, 0);
-    __sync_synchronize();
-    process_ref_dec(p);
 }
 
 static void autostart_on_volume_mounted(TouchTag tag, const void *payload,
@@ -296,7 +255,6 @@ static void autostart_on_volume_mounted(TouchTag tag, const void *payload,
             __atomic_store_n(&g_volume_launched, 1u, __ATOMIC_RELEASE);
             kprintf("[AUTOSTART] a volume arrived after the boot had given up "
                     "— %d process(es) started from it\n", n);
-            autostart_relieve_stand_in();
         }
         AutostartLetRun(&held);
     }

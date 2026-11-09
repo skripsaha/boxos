@@ -31,15 +31,7 @@ struct TagFSFileHandle;
  * storage from the template the image carries, on the pages after the image
  * (image_thread.h) — no program has to make its own before it can use it.
  *
- *   raw  code run from its first byte, the image byte for byte at the code
- *        start. Only when the volume declares it so with the tag `raw`: bytes
- *        that are no program this kernel knows are not run as code on the
- *        strength of being here. Raw code has no segments to keep apart, so its
- *        pages are writable and executable at once, and the journal says so
- *        each time one starts.
- *
- * A box or an ELF tagged raw is refused: the bytes say one thing and the
- * volume another, and starting either reading would be a guess.
+ * Bytes that are neither are no program, and nothing of them is run as code.
  *
  * Every refusal is said in the journal with the image's name and the reason,
  * and answered ERR_INVALID_ELF — the image is no program that can be started;
@@ -84,11 +76,10 @@ error_t ImageSourceRead(const ImageSource *source, uint64_t offset, void *into, 
 
 /*
  * The image `source` loaded into `vmm`: `name` is what every line about it
- * calls it, `tagged_raw` whether the volume declares it raw code. A load that
- * fails can leave pages mapped in `vmm`; they are the cabin's, freed when it
- * is torn down, and a cabin a load failed in is never started.
+ * calls it. A load that fails can leave pages mapped in `vmm`; they are the
+ * cabin's, freed when it is torn down, and a cabin a load failed in is never
+ * started.
  */
-error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *name, bool tagged_raw,
-                  ImageLoaded *loaded);
+error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *name, ImageLoaded *loaded);
 
 #endif /* IMAGE_LOAD_H */

@@ -194,7 +194,7 @@ framerefuse_leg() {
     rm -f "$img" "$before" "$rec" "$L"
     cp build/boxos.img "$img" || { harness "framerefuse ($leg): could not copy build/boxos.img"; return; }
     # shellcheck disable=SC2086
-    if ! tools/create_tagfs "$mode" "$img" build/box/hub.box "utility,system" $anchor \
+    if ! tools/create_tagfs "$mode" "$img" build/box/hub.box "utility,system,app,autostart" $anchor \
             "$kernel" "system" >"$SCRATCH/framerefuse.$leg.mkfs.log" 2>&1; then
         bad "framerefuse ($leg): create_tagfs $mode would not make the image: $(tail -1 "$SCRATCH/framerefuse.$leg.mkfs.log")"
         return
@@ -234,16 +234,17 @@ PY
            make run-stop >/dev/null 2>&1
            return ;;
     esac
-    if wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"; then
-        sleep 2
-        type_cmd "help"
-        sleep 1
-        key_press ret
-        sleep 2
-        if [ -n "$mounts" ]; then
+    # A book the machine mounts starts its hub, which is typed at; a volume it
+    # turns away starts nothing, and the machine says it waits for one.
+    if [ -n "$mounts" ]; then
+        if wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"; then
+            sleep 2
+            type_cmd "help"; sleep 1; key_press ret; sleep 2
             type_cmd "use framerefuse"; sleep 1; key_press ret; sleep 2
             type_cmd "anchor_test"; sleep 1; key_press ret; sleep 3
         fi
+    else
+        wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S" && sleep 2
     fi
     mon_raw system_powerdown
     wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
@@ -261,8 +262,13 @@ PY
         ! grep -qE "MOUNTED — [0-9]+ file" "$L"
         chk $? "framerefuse ($leg): nothing is mounted off it"
     fi
-    grep -q "BoxOS Hub" "$L" && typed_ok "$L"
-    chk $? "framerefuse ($leg): the machine still reaches a shell, and answers a keystroke"
+    if [ -n "$mounts" ]; then
+        grep -q "BoxOS Hub" "$L" && typed_ok "$L"
+        chk $? "framerefuse ($leg): the book's hub comes up, and answers a keystroke"
+    else
+        grep -q "$NO_VOLUME_YET" "$L" && ! grep -q "BoxOS Hub" "$L"
+        chk $? "framerefuse ($leg): the machine says it waits for a volume of its own, starting nothing in its place"
+    fi
     ! grep -qE "PANIC|\[EXCEPTION\]|\[TAGBOOT FATAL\]" "$L"
     chk $? "framerefuse ($leg): no panic, no fault"
 
@@ -365,7 +371,7 @@ framerefuse_tagboot() {
     local L="$SCRATCH/serial.framerefuse.tagboot.$1.log" pid same
     rm -f "$img" "$before" "$L"
     cp build/boxos.img "$img" || { harness "framerefuse ($leg): could not copy build/boxos.img"; return; }
-    if ! tools/create_tagfs --frame-only "$img" build/box/hub.box "utility,system" \
+    if ! tools/create_tagfs --frame-only "$img" build/box/hub.box "utility,system,app,autostart" \
             build/kernel.bin "system" >"$SCRATCH/framerefuse.tagboot.mkfs.log" 2>&1; then
         bad "framerefuse ($leg): create_tagfs --frame-only would not make the image: $(tail -1 "$SCRATCH/framerefuse.tagboot.mkfs.log")"
         return

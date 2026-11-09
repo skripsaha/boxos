@@ -658,6 +658,9 @@ WAIT_LOG=build/serial.log
 # WRITE ITS RECORDS", which comes BEFORE the flush, and a machine stopped
 # there is stopped in the middle of it.
 STAND_HALT_ENDS='^\[HALT\] (Storage sync complete|the medium on seat [0-9]+ took|‼ THE VOLUME ON SEAT [0-9]+ .* WAS NOT MADE DURABLE|the volume on seat [0-9]+ stands under glass)'
+# What a boot with no volume of its own says, and then waits: nothing is
+# started in a volume's place (main.c), and a volume that comes starts its own.
+NO_VOLUME_YET='no volume is here yet'
 # How long a burst of console output may pause and still be the same burst.
 # This is the other kind of number: not "how long does the machine take", which
 # is unbounded, but "how big a gap inside one program's output still counts as

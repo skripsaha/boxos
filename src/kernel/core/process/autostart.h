@@ -13,10 +13,9 @@ struct process_t;
  */
 int AutostartLaunchFromVolume(struct process_t **out_first);
 
-/* Remember the embedded shell the kernel started because there was nothing to
- * start from a volume. It is relieved of the watch if a volume turns up later
- * carrying programs of its own. Pass 0 to forget it. */
-void AutostartNoteStandIn(uint32_t pid);
+/* Whether a volume is mounted: the boot says which it waits for — a volume,
+ * or nothing at all, the volume here asking to start no program. */
+bool AutostartVolumeHere(void);
 
 /* Say that a volume's programs are already running, so a later mount does not
  * start second copies. The boot calls this when it launched anything. */

@@ -435,7 +435,7 @@ pc_stick_pull() {
 
 # pc_stick_boot IMG [RECORD [append|paced]] — the machine booted from a clone
 # of this tree's image, which the late arrival passes over, and IMG handed to it
-# as its stick (pc_stick_add): booted once the stand-in hands over to the volume.
+# as its stick (pc_stick_add): booted once the volume's hub has greeted.
 pc_stick_boot() {
     local record=${2:-} how=${3:-}
     make run-stop >/dev/null 2>&1
@@ -443,9 +443,9 @@ pc_stick_boot() {
     if ! make run-bg BOOTDISK="$PC_DIR/inside.img" ${PC_KEYS[@]+"${PC_KEYS[@]}"} >"$PC_DIR/run-bg.out" 2>&1; then
         harness "$PC_NAME: run-bg would not start: $(tail -1 "$PC_DIR/run-bg.out")"; return 1
     fi
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" || return 1
+    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S" || return 1
     pc_stick_add "$1" "$record" "$how" || { harness "$PC_NAME: QEMU would not take $1 as a stick"; return 1; }
-    wait_for_line build/serial.log "the stand-in .PID 1. hands over" "$WAIT_QUIET_S" || return 1
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" || return 1
     wait_for_quiet "$BOOT_BURST_QUIET_S"
 }
 

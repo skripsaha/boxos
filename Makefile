@@ -771,8 +771,6 @@ KERNEL_ENTRY_OBJ := $(patsubst $(SRCDIR)/%.asm,$(BUILDDIR)/%.o,$(KERNEL_ENTRY_SR
 USERSPACE_DIR = $(SRCDIR)/userspace
 USERSPACE_BUILD = $(USERSPACE_DIR)/build
 
-# The hub the kernel carries, for a machine that comes up with no volume
-HUB_EMBED = $(BUILDDIR)/hub_embed.o
 
 # App ELF binaries (proca, procb)
 APPS_DIR  = $(USERSPACE_DIR)/apps
@@ -1317,16 +1315,6 @@ $(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxc
 $(UTIL_ELFS): $(UTILS_STAMP)
 	@:
 
-$(HUB_EMBED): $(HUB_BIN)
-	@echo "Stripping debug symbols from the hub..."
-	@$(OBJCOPY) --strip-debug $(HUB_BIN) $(BUILDDIR)/hub_stripped.elf
-	@echo "Embedding the hub into the kernel (stripped: $$(stat -f%z $(BUILDDIR)/hub_stripped.elf 2>/dev/null || stat -c%s $(BUILDDIR)/hub_stripped.elf 2>/dev/null) bytes)..."
-	@cd $(BUILDDIR) && \
-	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
-	    --rename-section .data=.rodata,alloc,load,readonly,data,contents \
-	    hub_stripped.elf hub_embed.o
-	@echo "Embedded object: $@"
-
 # ==== KERNEL BUILD RULES ====
 # ---- Kernel Nameplate ------------------------------------------------------
 # The kernel carries its own address->name table, for the same reason every
@@ -1343,7 +1331,7 @@ $(HUB_EMBED): $(HUB_BIN)
 # that claim against the binary's own symbols on every build.
 KERNEL_NP_OBJ   = $(BUILDDIR)/kernel.np.o
 KERNEL_PASS1    = $(BUILDDIR)/kernel.pass1.elf
-KERNEL_LINK_IN  = $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(HUB_EMBED)
+KERNEL_LINK_IN  = $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS)
 
 # ---- The stack guard -------------------------------------------------------
 # A block buffer belongs to the job that moves the block, or to its OpContext —
@@ -1412,8 +1400,8 @@ $(KERNEL_BIN): $(KERNEL_LINK_IN) $(KERNEL_NP_OBJ) $(BUILDPLATE_TOOL)
 	@$(BUILDPLATE_TOOL) stamp $@ --root . --keys "$(BUILD_KEYS)" \
 		$(if $(filter on,$(HARNESS)),--allow-harness,)
 
-$(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(HUB_EMBED) | $(STACK_USAGE_STAMP)
-	@echo "Linking kernel ELF (with the hub it carries)..."
+$(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) | $(STACK_USAGE_STAMP)
+	@echo "Linking kernel ELF..."
 	@$(LD) -g -nostdlib -T $(ENTRYDIR)/linker.ld -o $@ $^
 
 

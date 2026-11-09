@@ -1037,8 +1037,7 @@ void process_destroy(process_t *proc)
     process_ref_dec(proc);
 }
 
-error_t process_load_binary(process_t *proc, const ImageSource *source, const char *name,
-                            bool tagged_raw)
+error_t process_load_binary(process_t *proc, const ImageSource *source, const char *name)
 {
     if (!proc || !proc->cabin || !source || source->Bytes == 0 || !name)
     {
@@ -1047,7 +1046,7 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
     }
 
     ImageLoaded loaded;
-    error_t rc = ImageLoad(proc->cabin->vmm, source, name, tagged_raw, &loaded);
+    error_t rc = ImageLoad(proc->cabin->vmm, source, name, &loaded);
     if (rc != OK)
         return rc;
     uintptr_t entry_point = loaded.Entry;

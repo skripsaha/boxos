@@ -13,8 +13,4 @@ extern uint8_t ap_trampoline_start;
 extern uint8_t ap_trampoline_end;
 extern uint8_t ap_trampoline_data;
 
-// The hub the kernel carries (objcopy'd into the kernel image)
-extern uint8_t _binary_hub_stripped_elf_start[];
-extern uint8_t _binary_hub_stripped_elf_end[];
-
 #endif // LINKER_SYMBOLS_H
