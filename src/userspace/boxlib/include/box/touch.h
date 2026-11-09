@@ -149,10 +149,19 @@ STATIC_ASSERT(sizeof(TouchProcessDied) == 84,
               "TouchProcessDied: pid@0, exit_code@4, generation@8 are frozen for every reader "
               "of the first 12 bytes; how the program fell follows them");
 
+/* Said before the new program takes its first step: whoever keeps something
+ * by the program a program started from hears of it before it can ask. */
 typedef struct __attribute__((packed)) {
-    uint32_t pid;
-    uint32_t parent_pid;
+    uint32_t pid;                        /* @0  — the new program, by its main strand */
+    uint32_t parent_pid;                 /* @4  — the strand that started it          */
+    uint32_t generation;                 /* @8  — the new program's incarnation       */
+    uint32_t parent_program_pid;         /* @12 — the program that strand belongs to,  */
+    uint32_t parent_program_generation;  /* @16 —   in its incarnation                */
 } TouchProcessSpawned;
+
+STATIC_ASSERT(sizeof(TouchProcessSpawned) == 20,
+              "TouchProcessSpawned: pid@0, parent_pid@4 are frozen for every reader of the "
+              "first 8 bytes; the incarnations follow them");
 
 typedef struct __attribute__((packed)) {
     uint32_t reason;

@@ -57,6 +57,7 @@
 
 #include "console_model.h"
 #include "easel.h"
+#include "front.h"
 #include "lanes.h"
 #include "layers.h"
 #include "ring.h"
@@ -72,8 +73,12 @@ TouchTag g_died = TOUCH_TAG_INVALID;
 
 // The frames one render pass has met, in the console's order, waiting for
 // their text to take its place in the ring: the text of all of them, as one
-// run said at once, and the frames themselves.
-std::vector<ConsoleRun> g_held;
+// run said at once, and the frames themselves with the lane each came on.
+struct HeldRun {
+    ConsoleRun    Run;
+    std::uint32_t Lane;
+};
+std::vector<HeldRun> g_held;
 char g_said[LOG_SAY_MAX];
 std::uint32_t g_said_length;
 
@@ -145,15 +150,16 @@ void DrawHeld()
         // The text is in the ring: the writers are told so before anything
         // else, the narrower the window a death could fall into (box/display.h,
         // CONSOLE_ORDER_SAID). A hold is never more than one utterance.
-        LanesSaid(g_held.back().order);
-        for (const ConsoleRun &Run : g_held) g_model->Apply(Run);
+        LanesSaid(g_held.back().Run.order);
+        g_model->Typing(LanesTyping());
+        for (const HeldRun &Held : g_held) g_model->Apply(Held.Run, Held.Lane);
     });
     g_dirty = true;
     g_held.clear();
     g_said_length = 0;
 }
 
-void HoldFrame(const ConsoleRun &Run)
+void HoldFrame(const ConsoleRun &Run, std::uint32_t Lane)
 {
     // The room is made at start for what a pass holds between two draws; a
     // fuller hold is drawn first rather than grown.
@@ -164,7 +170,7 @@ void HoldFrame(const ConsoleRun &Run)
         std::memcpy(g_said + g_said_length, Run.text, Length);
         g_said_length += Length;
     }
-    g_held.push_back(Run);
+    g_held.push_back(HeldRun{Run, Lane});
 }
 
 void Present()
@@ -220,6 +226,7 @@ bool DeathStep()
         TouchProcessDied Died;
         std::memcpy(&Died, Event.payload, sizeof(Died));
         LanesDeath(Died.pid, Died.generation);
+        FrontDeath(Died.pid, Died.generation);
         g_dirty |= LayersDropProcess(Died.pid, Died.generation);
 
         // A dead asker's question waits for nothing now. It is answered all
@@ -293,8 +300,21 @@ void HearQuestion(const Result &Entry)
 
     switch (Question[0]) {
     case DISP_CMD_LANE:
-        LanesGrant(Entry, From.generation);
+        LanesGrant(Entry, From);
         return;
+    case DISP_CMD_FRONT:
+    case DISP_CMD_BACK:
+    case DISP_CMD_ASK_END: {
+        DisplayFrontRequest Request{};
+        if (Length < sizeof(Request)) {
+            (void)answer(&Entry, nullptr, 0);
+            return;
+        }
+        std::memcpy(&Request, Question, sizeof(Request));
+        FrontAsked(Entry, From, Request);
+        g_dirty = true;
+        return;
+    }
     case DISP_CMD_SIZE:
         AnswerSize(Entry);
         return;
@@ -421,6 +441,7 @@ bool Rotate()
     bool Moved = false;
     Moved |= LanesKeys();
     Moved |= DeathStep();
+    Moved |= FrontSpawnStep();
     Moved |= ScreenStep();
     Moved |= LaneStep();
     Moved |= RingStep();
@@ -466,6 +487,10 @@ int main(void)
 
     if (!LanesStart()) {
         kdbg_print("[display] the keyboard's tag could not be claimed; nobody can type");
+        return 1;
+    }
+    if (!FrontStart()) {
+        kdbg_print("[display] process:spawned could not be claimed; the program in front could not be kept");
         return 1;
     }
     g_died = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));

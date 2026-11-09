@@ -9,8 +9,10 @@
  * numbers are reused from a free pool — the tag registry grows to the peak
  * number of simultaneous lanes and no further.
  *
- * Input: the daemon is the cabin's ear at the keyboard. It consumes
- * "keyboard" Touch events only while some lane LISTENS, and says each key
+ * Input: the daemon is the cabin's ear at the keyboard. It takes every
+ * "keyboard" Touch as it comes — the two chords of the program in front
+ * (front.h) are heard there, before any program, even one too busy to read —
+ * and keeps the other keys in order until a lane listens, then says each
  * again as a Touch on the tag of the lane at the top of the listening stack
  * — the program edits its own line and echoes through its own lane. A lane
  * listens for exactly as long as its program reads (DISP_CMD_LISTEN with 1
@@ -18,9 +20,11 @@
  * dropped wherever it stands, and the one beneath hears again — and so is a
  * lane whose reader nobody can find: the kernel says how many heard each
  * key, and a key nobody heard — or one the kernel would not say on that
- * lane's tag at all — drops the ear on top and is said again to the next. Keys typed while nobody listens are NOT consumed — the kernel
- * TouchRing and the per-strand tag stash bank them for whoever reads next,
- * so type-ahead needs no third buffer.
+ * lane's tag at all — drops the ear on top and is said again to the next.
+ * A key typed while nobody listens waits in the daemon's keeping for whoever
+ * reads next, ahead of everything typed after it. A lane of a program behind
+ * (front.h) never hears: asking to listen, it waits for its program to come
+ * forward.
  *
  * process:died closes what the dead leave behind: granted-but-never-
  * attached lanes are revoked, attached lanes are drained to the last frame
@@ -32,6 +36,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <deque>
 
 #include "box/bay.h"
 #include "box/brook.h"
@@ -44,12 +49,17 @@
 #include "box/string.h"
 #include "box/touch.h"
 
+#include "front.h"
+
 namespace {
 
 typedef struct ConsoleLane {
     Brook              *brook;
     uint32_t            owner_pid;   /* the strand the lane was granted to … */
     uint32_t            owner_gen;   /* … in this incarnation: (pid, generation) */
+    uint32_t            program_pid; /* the program the strand belongs to, by the kernel's word */
+    uint32_t            program_gen;
+    bool                wants;       /* asked to listen while its program was behind */
     uint32_t            number;      /* N of "console:N" */
     TouchTagPair        ear;         /* "console:N" as a Touch tag: where its keys are said */
     bool                closed;      /* drained to STREAM_CLOSED / revoked */
@@ -114,6 +124,10 @@ uint32_t     g_next_number;           /* fresh numbers when the pool is dry */
 
 TouchTag g_kb = TOUCH_TAG_INVALID;
 
+/* The keys taken from the keyboard that no lane has heard yet, in the order
+ * they were typed: said to the next lane that listens before anything newer. */
+std::deque<kb_event_t> g_typed;
+
 /* ─────────────────────────────────────────────────────────────────────────
  * The ear — which lane hears the keyboard
  *
@@ -129,6 +143,13 @@ typedef struct Ear {
 } Ear;
 
 Ear *g_ear;   /* top of the stack, NULL when nobody listens */
+
+bool EarHas(const ConsoleLane *lane)
+{
+    for (const Ear *e = g_ear; e; e = e->below)
+        if (e->lane == lane) return true;
+    return false;
+}
 
 void EarListen(ConsoleLane *lane)
 {
@@ -212,7 +233,7 @@ bool lanes_render(uint32_t budget, uint64_t ceiling, FrameSink sink, FrameFlush 
         }
         if (!best || best->pending.order > ceiling) break;
 
-        sink(best->pending);
+        sink(best->pending, best->number + 1u);
         best->has_pending = false;
         did = true;
         if ((++rendered & 31u) == 0) {
@@ -297,33 +318,45 @@ bool LanesStart() noexcept
     return true;
 }
 
-/* Consume keys ONLY while someone listens — otherwise they stay banked on
- * the TouchRing/stash as type-ahead for whoever listens next. Each key is
+/* Every key the keyboard says is taken as it comes, whoever listens or not:
+ * the two chords of the program in front are heard there, before any program
+ * — a program too busy to read is ended or let go all the same — and taken;
+ * the rest are kept, in order, and said again on the lane that listens, each
  * the daemon's own Touch on the lane's tag, payload as heard.
  *
  * The kernel says how many heard it. Nobody means the lane on top has no
  * reader any more — it died in the middle of its reading, or gave its claim
  * up without giving the ear back — and its ear is dropped right here, before
  * the daemon has heard of the death by any other road. The key is not lost
- * with it: it stays in hand and is said again to whoever is beneath, or, when
- * nobody is, to the next lane that listens — ahead of everything typed after
- * it, which is still banked in the ring. One key in hand at most. */
+ * with it: it stays first in the keeping and is said again to whoever is
+ * beneath, or to the next lane that listens, ahead of everything typed after
+ * it. */
 bool LanesKeys() noexcept
 {
-    static Touch key;           /* taken from the keyboard, not yet heard by anyone */
-    static bool  key_in_hand;
-
-    bool did = false;
-    while (g_ear) {
-        if (!key_in_hand) {
-            if (!touch_try_pop_tag(g_kb, &key)) break;
-            did = true;
-            if (key.payload_len < sizeof(kb_event_t)) continue;
-            key_in_hand = true;
+    bool  did = false;
+    Touch key;
+    while (touch_try_pop_tag(g_kb, &key)) {
+        did = true;
+        if (key.payload_len != sizeof(kb_event_t)) continue;
+        kb_event_t typed;
+        memcpy(&typed, key.payload, sizeof(typed));
+        if (FrontChord(typed)) continue;
+        try {
+            g_typed.push_back(typed);
+        } catch (...) {
+            static bool said = false;
+            if (!said) {
+                said = true;
+                kdbg_print("[display] no room to keep a key until somebody reads; it is dropped");
+            }
         }
-        int heard = touch_send(g_ear->lane->ear, key.payload, key.payload_len, 0);
+    }
+
+    while (g_ear && !g_typed.empty()) {
+        int heard = touch_send(g_ear->lane->ear, &g_typed.front(), sizeof(kb_event_t), 0);
         if (heard > 0) {
-            key_in_hand = false;
+            g_typed.pop_front();
+            did = true;
             continue;
         }
         /* Nobody wears the tag of the lane on top: its reader is gone. Or the
@@ -398,9 +431,10 @@ bool LanesDrawnTo(std::uint32_t Pid, std::uint32_t Generation, std::uint64_t Mar
     return true;
 }
 
-void LanesGrant(const Result &Asked, std::uint32_t Generation) noexcept
+void LanesGrant(const Result &Asked, const AskFrom &From) noexcept
 {
-    const std::uint32_t Requester = Asked.sender_pid;
+    const std::uint32_t Requester  = Asked.sender_pid;
+    const std::uint32_t Generation = From.generation;
     const uint8_t       refusal   = DISP_CMD_LANE;   /* the answer alone = an honest no */
 
     /* No order, no lane. A granted lane whose frames cannot be numbered would
@@ -457,6 +491,9 @@ void LanesGrant(const Result &Asked, std::uint32_t Generation) noexcept
     ln->brook       = b;
     ln->owner_pid   = Requester;
     ln->owner_gen   = Generation;
+    ln->program_pid = From.program_pid;
+    ln->program_gen = From.program_generation;
+    ln->wants       = false;
     ln->number      = number;
     ln->ear         = touch_intern(tag);
     ln->closed      = false;
@@ -477,14 +514,62 @@ void LanesGrant(const Result &Asked, std::uint32_t Generation) noexcept
 
 void LanesListen(std::uint32_t Requester, std::uint32_t Generation, bool Listening) noexcept
 {
-    /* Listening is a property of a lane, and a closed one cannot hear. */
+    /* Listening is a property of a lane, and a closed one cannot hear; a lane
+     * of a program behind waits for it to come forward, its keeper told. */
     for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
-        if (ln->owner_pid == Requester && ln->owner_gen == Generation && !ln->closed) {
-            if (Listening) EarListen(ln);
-            else           EarDrop(ln);
-            return;
+        if (ln->owner_pid != Requester || ln->owner_gen != Generation || ln->closed) continue;
+        ln->wants = false;
+        if (!Listening) {
+            EarDrop(ln);
+        } else if (FrontBehind(ln->program_pid, ln->program_gen)) {
+            ln->wants = true;
+            FrontWants(ln->program_pid, ln->program_gen);
+        } else {
+            EarListen(ln);
+        }
+        return;
+    }
+}
+
+/* A lane hears while its strand reads and its program is not behind: each
+ * lane held to that again, after a program came forward, went behind or died.
+ * One that comes forward goes on top of the ear — its program is the one in
+ * front now; one that goes behind waits, and nobody is told: its keeper let it
+ * go reading. */
+void LanesRecheck() noexcept
+{
+    for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
+        if (ln->closed) continue;
+        const bool behind = FrontBehind(ln->program_pid, ln->program_gen);
+        if (behind && EarHas(ln)) {
+            EarDrop(ln);
+            ln->wants = true;
+        } else if (!behind && ln->wants) {
+            ln->wants = false;
+            EarListen(ln);
         }
     }
+}
+
+/* Said only on the lanes that read now — on top of the ear, or waiting behind:
+ * a strand that reads hears it at once, and a program none of whose strands
+ * reads is no program that will answer. */
+bool LanesNotice(std::uint32_t ProgramPid, std::uint32_t ProgramGeneration, std::uint8_t Kind) noexcept
+{
+    const ConsoleNotice notice = { CONSOLE_NOTICE_MARK, Kind, { 0, 0, 0 } };
+    bool                heard  = false;
+    for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
+        if (ln->closed || ln->program_pid != ProgramPid || ln->program_gen != ProgramGeneration ||
+            !(ln->wants || EarHas(ln)))
+            continue;
+        if (touch_send(ln->ear, &notice, sizeof(notice), 0) > 0) heard = true;
+    }
+    return heard;
+}
+
+std::uint32_t LanesTyping() noexcept
+{
+    return g_ear ? g_ear->lane->number + 1u : 0u;
 }
 
 /* Only lanes that still carry frames matter, but hanging on all of them is

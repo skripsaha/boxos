@@ -79,12 +79,18 @@ int printf(const char* fmt, ...);
 int snprintf(char* str, size_t n, const char* fmt, ...);
 int vsnprintf(char* str, size_t n, const char* fmt, va_list args);
 
-/* Input — the line editor (readline.c), event-driven over the console's ear. */
+/* Input — the line editor (readline.c), event-driven over the console's ear.
+ * A line's length; -1 when the ear is gone; READLINE_ASKED_TO_END when the
+ * program is asked to finish while it reads (Ctrl+Alt+End over it, said by
+ * its keeper through the display) — a program that does nothing else with it
+ * ends, as one does at the end of its input. */
+#define READLINE_ASKED_TO_END (-2)
 int readline(char* buffer, size_t max_len);
 
 /* The same editor over a line of its own that grows as it is typed, with no
  * ceiling but memory: its length, and *line — NUL-terminated, the caller's to
- * free — or -1 with *line NULL when the ear is gone or no memory was had. */
+ * free — or -1 with *line NULL when the ear is gone or no memory was had, or
+ * READLINE_ASKED_TO_END. */
 int readline_grow(char** line);
 
 /* A Whisper: what a line could go on to be, laid dim past the caret while it

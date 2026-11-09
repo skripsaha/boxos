@@ -44,7 +44,7 @@ all: display.elf
 # After `all`: the fragment's first rule would otherwise become the default goal.
 include ../nameplate.mk
 
-OBJS = display.o lanes.o layers.o console_model.o ring.o easel.o
+OBJS = display.o lanes.o front.o layers.o console_model.o ring.o easel.o
 
 display.elf: $(BOXLIB_START) $(OBJS) $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(BOXCXX) $(BOXLIB) -lgcc)

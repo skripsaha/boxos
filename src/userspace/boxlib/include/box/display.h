@@ -144,6 +144,102 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
 #define CONSOLE_ORDER_SAID    8u
 
 /* --------------------------------------------------------------------------
+ * The program in front, and the ones behind
+ * --------------------------------------------------------------------------
+ *
+ * A hub keeps one program in front of the person — the one it started and
+ * waits for — and may let one go to live behind. The display hears two chords
+ * before any program does, and says them to whoever keeps the program in
+ * front, the newest keeper first:
+ *
+ *   Ctrl+Alt+End,  Ctrl+Alt+-    end the program in front
+ *   Ctrl+Alt+Home, Ctrl+Alt+=    let it go to live behind, and back to its keeper
+ *
+ * A program behind hears no key: a strand of it that asks to listen waits,
+ * and its keeper is told it wants the keyboard. A program it starts, however
+ * far down, lives behind with it, and comes forward with it; the strand that
+ * asked hears then.
+ *
+ * Three QUESTIONS, a DisplayFrontRequest each, answered with a
+ * DisplayFrontReply — asked only by a program that wears `system`
+ * (-ERR_ACCESS_DENIED otherwise), the asker the keeper by the kernel's word:
+ *
+ *   DISP_CMD_FRONT     the program is in front, kept by the asker
+ *   DISP_CMD_BACK      the program lives behind, kept by the asker
+ *   DISP_CMD_ASK_END   the program asked to finish: a ConsoleNotice
+ *                      CONSOLE_NOTICE_END said on each of its lanes that
+ *                      reads now; heard 1 when a strand that reads was told —
+ *                      0 says no strand of it will answer
+ *
+ * What the display tells a keeper is a Touch on DISPLAY_FRONT_TAG, a
+ * DisplayFrontNews, sent by the display (source_pid the reply's display_pid):
+ * the chord pressed over the program it keeps in front, or a program it keeps
+ * behind asking for the keyboard.
+ */
+#define DISP_CMD_FRONT     0x50
+#define DISP_CMD_BACK      0x51
+#define DISP_CMD_ASK_END   0x52
+
+#define DISPLAY_FRONT_TAG  "display:front"
+
+typedef enum {
+    DISPLAY_FRONT_END    = 1,   /* end the program in front */
+    DISPLAY_FRONT_LET_GO = 2,   /* let it go to live behind */
+    DISPLAY_FRONT_WANTS  = 3,   /* a program behind asks for the keyboard */
+} DisplayFrontWhat;
+
+typedef struct PACKED {
+    uint8_t  command;           /* DISP_CMD_FRONT, _BACK or _ASK_END */
+    uint8_t  reserved[3];
+    uint32_t pid;               /* the program, by its main strand ... */
+    uint32_t generation;        /* ... in this incarnation */
+} DisplayFrontRequest;
+
+typedef struct PACKED {
+    uint8_t  command;
+    uint8_t  heard;             /* DISP_CMD_ASK_END: a strand of it was told */
+    uint8_t  reserved[2];
+    int32_t  error;             /* OK, or the display's refusal */
+    uint32_t display_pid;       /* who sends the news on DISPLAY_FRONT_TAG */
+} DisplayFrontReply;
+
+typedef struct PACKED {
+    uint32_t keeper_pid;        /* the program the news is for */
+    uint32_t keeper_generation;
+    uint8_t  what;              /* DisplayFrontWhat */
+    uint8_t  reserved[3];
+    uint32_t pid;               /* the program it is about */
+    uint32_t generation;
+} DisplayFrontNews;
+
+/* The asking program keeps the program (pid, generation) in front of the
+ * person, or behind; *display — may be NULL — is the display's pid, the
+ * source of its news. OK, or a refusal: the display's, or the ask's. */
+int display_front(uint32_t pid, uint32_t generation, uint32_t *display);
+int display_back(uint32_t pid, uint32_t generation, uint32_t *display);
+
+/* The program asked to finish: 1 when a strand of it that reads was told, 0
+ * when none of its strands reads, or a refusal. */
+int display_ask_end(uint32_t pid, uint32_t generation);
+
+/* A word of the display on a lane's own tag, in place of a key — told from a
+ * key, which is a kb_event_t of three bytes, by its length and its mark. */
+#define CONSOLE_NOTICE_MARK  0x4E4F5445u   /* "ETON", the bytes of NOTE */
+
+typedef enum {
+    CONSOLE_NOTICE_END = 1,     /* the program is asked to finish */
+} ConsoleNoticeKind;
+
+typedef struct PACKED {
+    uint32_t mark;              /* CONSOLE_NOTICE_MARK */
+    uint8_t  kind;              /* ConsoleNoticeKind */
+    uint8_t  reserved[3];
+} ConsoleNotice;
+
+/* The kind of notice `payload` is, 0 when it is none (a key, most often). */
+uint8_t console_notice_of(const void *payload, uint32_t length);
+
+/* --------------------------------------------------------------------------
  * Display layers
  * --------------------------------------------------------------------------
  *
@@ -293,6 +389,10 @@ STATIC_ASSERT(sizeof(DisplayLayerCloseRequest) == 12,
               "DisplayLayerCloseRequest is a message ABI and must stay 12 bytes");
 STATIC_ASSERT(sizeof(DisplayLayerFrameNotice) == 12,
               "DisplayLayerFrameNotice is a message ABI and must stay 12 bytes");
+STATIC_ASSERT(sizeof(DisplayFrontRequest) == 12 && sizeof(DisplayFrontReply) == 12,
+              "the questions of the program in front and their answer are an ABI of 12 bytes each");
+STATIC_ASSERT(sizeof(DisplayFrontNews) == 20, "DisplayFrontNews is a Touch payload ABI of 20 bytes");
+STATIC_ASSERT(sizeof(ConsoleNotice) == 8, "ConsoleNotice is a Touch payload ABI of 8 bytes, never a key's 3");
 
 #ifdef __cplusplus
 }

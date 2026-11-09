@@ -120,6 +120,11 @@ Event Stage::Wait(std::uint32_t TimeoutMs) noexcept
     return State->Ear.Wait(TimeoutMs);
 }
 
+void Stage::HearEnd() noexcept
+{
+    if (State) State->Ear.HearEnd();
+}
+
 box::status Stage::Close() noexcept
 {
     if (!State || !State->Opened) return {};

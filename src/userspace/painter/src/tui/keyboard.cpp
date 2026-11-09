@@ -3,7 +3,9 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <optional>
 
+#include "box/display.h"
 #include "box/error.h"
 #include "box/keyboard.h"
 #include "box/print.h"
@@ -14,6 +16,7 @@ namespace painter::tui {
 struct Keyboard::Impl {
     TouchTag Ear = TOUCH_TAG_INVALID;
     bool     Opened = true;
+    bool     HearsEnd = false;   // a request to finish is the program's to answer
 
     explicit Impl(TouchTag EarValue) noexcept : Ear(EarValue) {}
 };
@@ -30,6 +33,17 @@ Event Decode(const Touch &Data)
     kb_event_t Key{};
     std::memcpy(&Key, Data.payload, sizeof(Key));
     return Event{EventKind::Key, KeyEvent{Key.ascii, Key.scancode, Key.mods}, {}};
+}
+
+// A key is three bytes (kb_event_t); the display's word that the program is
+// asked to finish is a ConsoleNotice. Anything else said on the tag is no
+// event.
+std::optional<Event> Heard(const Touch &Data, bool HearsEnd)
+{
+    if (console_notice_of(Data.payload, Data.payload_len) == CONSOLE_NOTICE_END)
+        return Event{HearsEnd ? EventKind::EndAsked : EventKind::Gone, {}, {}};
+    if (Data.payload_len == sizeof(kb_event_t)) return Decode(Data);
+    return std::nullopt;
 }
 
 }  // namespace
@@ -75,7 +89,7 @@ Event Keyboard::Poll() noexcept
     if (!IsOpen()) return Event{EventKind::Gone, {}, box::error{box::errc::invalid_state}};
     Touch Data{};
     while (touch_try_pop_tag(State->Ear, &Data))
-        if (Data.payload_len >= sizeof(kb_event_t)) return Decode(Data);
+        if (std::optional<Event> Said = Heard(Data, State->HearsEnd)) return *Said;
     return Event{EventKind::Quiet, {}, {}};
 }
 
@@ -87,11 +101,16 @@ Event Keyboard::Wait(std::uint32_t TimeoutMs) noexcept
         int Code = touch_await(State->Ear, &Data, TimeoutMs);
         if (Code == -ERR_TIMEOUT) return Event{EventKind::Quiet, {}, {}};
         if (Code != 0) return Event{EventKind::Gone, {}, Cause(Code)};
-        if (Data.payload_len >= sizeof(kb_event_t)) return Decode(Data);
+        if (std::optional<Event> Said = Heard(Data, State->HearsEnd)) return *Said;
         // Not a key, so nothing for the caller: a bounded wait says so, and
         // one that waits until a key waits on.
         if (TimeoutMs != 0) return Event{EventKind::Quiet, {}, {}};
     }
+}
+
+void Keyboard::HearEnd() noexcept
+{
+    if (State) State->HearsEnd = true;
 }
 
 box::status Keyboard::Close() noexcept

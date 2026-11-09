@@ -8,8 +8,9 @@
 //
 //   box::process_died / process_spawned / system_halt / usb_device
 //                       — the four kernel payload shapes (aliases of the C
-//                         structs in box/touch.h; process_died is 12 bytes
-//                         (pid, exit_code, generation), the other three 8).
+//                         structs in box/touch.h; process_died is 84 bytes
+//                         (pid, exit_code, generation, how it fell),
+//                         process_spawned 20, the other two 8).
 //   box::system_touch   — one decoded event: a kind, the publisher pid, and the
 //                         matching payload in the union; pid() is the subject.
 //   box::system_watch   — a RAII multiplexer holding one box::subscription per
@@ -49,15 +50,17 @@ namespace box {
 // (single source of truth, kept in lock-step with the kernel's TouchPublish
 // call sites). usb_device serves BOTH connect and disconnect (one C struct).
 using process_died    = ::TouchProcessDied;     // { u32 pid; i32 exit_code; u32 generation; how it fell }
-using process_spawned = ::TouchProcessSpawned;  // { uint32_t pid;   uint32_t parent_pid }
+using process_spawned = ::TouchProcessSpawned;  // { u32 pid; u32 parent_pid; the incarnations }
 using system_halt     = ::TouchSystemHalt;      // { uint32_t reason; uint32_t grace_ms }
 using usb_device      = ::TouchUsbConnect;      // { u8 port, speed; u16 vendor_id, product_id }
 
 static_assert(sizeof(process_died) == 84,
               "box::process_died must match the kernel's process:died emit "
               "(pid@0, exit_code@4, generation@8, how it fell after them)");
-static_assert(sizeof(process_spawned) == 8 && sizeof(system_halt) == 8 &&
-                  sizeof(usb_device) == 8,
+static_assert(sizeof(process_spawned) == 20,
+              "box::process_spawned must match the kernel's process:spawned emit "
+              "(pid@0, parent_pid@4, the incarnations after them)");
+static_assert(sizeof(system_halt) == 8 && sizeof(usb_device) == 8,
               "box system payloads must match the kernel's 8-byte Touch emit");
 
 // ── box::system_touch — one decoded system lifecycle event ──────────────────

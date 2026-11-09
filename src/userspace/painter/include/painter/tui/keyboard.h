@@ -24,6 +24,8 @@ public:
     bool  IsOpen() const noexcept;
     Event Poll() noexcept;
     Event Wait(std::uint32_t TimeoutMs = 0) noexcept;
+    // The program answers a request to finish itself: EndAsked, not Gone.
+    void  HearEnd() noexcept;
     box::status Close() noexcept;
 
 private:

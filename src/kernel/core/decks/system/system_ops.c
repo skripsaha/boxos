@@ -735,6 +735,29 @@ static error_t SpawnRefuseForeignMemory(const process_t *proc, uint64_t va,
     return why;
 }
 
+/* process:spawned — a program started: the new program, by its main strand in
+ * its incarnation, and who started it: the strand, and the program that strand
+ * belongs to (CabinProgram). With process:died it is the stream of programs'
+ * lives that watchers follow instead of asking. Said before the new program
+ * takes its first step, so one who keeps something by the program a program
+ * started from — the display keeps what a program behind starts behind with it
+ * — has heard of it before the new program can ask anything. The first eight
+ * bytes, pid and parent_pid, are frozen for every reader of them; the rest
+ * follows them (box/touch.h, TouchProcessSpawned). */
+static void SpawnedSay(uint32_t pid, uint32_t generation, const process_t *parent)
+{
+    uint32_t program = 0, program_generation = 0;
+    (void)CabinProgram(parent->cabin, &program, &program_generation);
+    struct __attribute__((packed)) {
+        uint32_t pid;
+        uint32_t parent_pid;
+        uint32_t generation;
+        uint32_t parent_program_pid;
+        uint32_t parent_program_generation;
+    } ev = { pid, parent->pid, generation, program, program_generation };
+    TouchPublish("process:spawned", &ev, sizeof(ev));
+}
+
 /* SysProcSpawn starts a process from an ELF image the caller is holding IN ITS
  * OWN CABIN, with caller-supplied tags. Two gates, and each answers a different
  * question about the same call:
@@ -891,16 +914,7 @@ static int SysProcSpawnTagged(const OpContext *ctx, uint64_t binary_va, uint64_t
         return load;
     }
 
-    /* Publish process:spawned so monitors / shells can react. Pair with
-     * the process:died event in TouchCleanupProcess — together they form
-     * the lifecycle stream apps subscribe to instead of polling. */
-    {
-        struct __attribute__((packed)) {
-            uint32_t pid;
-            uint32_t parent_pid;
-        } ev = { new_proc->pid, ctx->proc->pid };
-        TouchPublish("process:spawned", &ev, sizeof(ev));
-    }
+    SpawnedSay(new_proc->pid, new_proc->generation, ctx->proc);
 
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
@@ -1605,19 +1619,10 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
     uint32_t child_pid = new_proc->pid;
     uint32_t child_gen = new_proc->generation;
 
+    SpawnedSay(child_pid, child_gen, ctx->proc);
+
     __sync_synchronize();
     process_set_state(new_proc, PROC_WORKING);
-
-    /* Publish process:spawned (mirrors SysProcSpawn). proc_exec is the
-     * primary userspace entry — without this hook subscribers see only
-     * binary-from-memory spawns and miss every shell-invoked one. */
-    {
-        struct __attribute__((packed)) {
-            uint32_t pid;
-            uint32_t parent_pid;
-        } ev = { child_pid, ctx->proc->pid };
-        TouchPublish("process:spawned", &ev, sizeof(ev));
-    }
 
     /* Out crate is capacity-gated: an 8-byte reader (proc_exec_gen) receives
      * {pid, generation}; a legacy 4-byte reader (proc_exec / proc_exec_tagged)

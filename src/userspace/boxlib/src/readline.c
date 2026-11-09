@@ -49,6 +49,7 @@
  * what the last one left.
  */
 
+#include "box/display.h"
 #include "box/print.h"
 #include "box/touch.h"
 #include "box/keyboard.h"   /* kb_event_t, KB_MOD_*, KEY_* */
@@ -485,15 +486,21 @@ static void Recall(EditLine *l, bool older)
  * and thrown away. The compare is kept all the same — it costs one integer and
  * it is the line that states, where a reader will look, that these bytes are a
  * key because the tag says so and not because the length allows it. */
-static bool NextKey(TouchTag ear, kb_event_t *out)
+typedef enum { HEARD_KEY, HEARD_END, HEARD_NOTHING } Heard;
+
+/* A key — three bytes, kb_event_t — or the display's word that the program is
+ * asked to finish (box/display.h ConsoleNotice), told apart by length; anything
+ * else said on the tag is passed over. */
+static Heard NextKey(TouchTag ear, kb_event_t *out)
 {
     for (;;) {
         Touch t;
-        if (touch_await(ear, &t, 0) != 0) return false;
+        if (touch_await(ear, &t, 0) != 0) return HEARD_NOTHING;
         if (t.tag_id != ear) continue;
-        if (t.payload_len < sizeof(kb_event_t)) continue;
+        if (console_notice_of(t.payload, t.payload_len) == CONSOLE_NOTICE_END) return HEARD_END;
+        if (t.payload_len != sizeof(kb_event_t)) continue;
         memcpy(out, t.payload, sizeof(kb_event_t));
-        return true;
+        return HEARD_KEY;
     }
 }
 
@@ -582,7 +589,9 @@ static int Accept(EditLine *l)
 }
 
 /* Keys edited into `l` until Enter: the line's length, NUL-terminated in
- * l->buf, or -1 when the ear is gone. */
+ * l->buf; -1 when the ear is gone, READLINE_ASKED_TO_END when the program is
+ * asked to finish — the line left as it stands on the screen, a line end after
+ * it. */
 static int EditUntilEnter(EditLine *l)
 {
     TouchTag ear = console_listen();
@@ -591,7 +600,13 @@ static int EditUntilEnter(EditLine *l)
     int len = -1;
     for (;;) {
         kb_event_t k;
-        if (!NextKey(ear, &k)) break;
+        Heard      heard = NextKey(ear, &k);
+        if (heard == HEARD_END) {
+            print_bytes_to_screen("\n", 1);
+            io_flush();
+            len = READLINE_ASKED_TO_END;
+        }
+        if (heard != HEARD_KEY) break;
         if (k.ascii == '\r' || k.ascii == '\n') {
             len = Accept(l);
             break;
@@ -614,7 +629,8 @@ int readline(char *buffer, size_t max_len)
 }
 
 /* A line of its own that grows as it is typed, edited with `whisper` (NULL
- * for none): its length and *line, or -1 with *line NULL. */
+ * for none): its length and *line, or -1 or READLINE_ASKED_TO_END with *line
+ * NULL. */
 static int ReadGrowing(char **line, LineWhisper *whisper)
 {
     if (!line) return -1;
@@ -627,7 +643,7 @@ static int ReadGrowing(char **line, LineWhisper *whisper)
     int len = EditUntilEnter(&l);
     if (len < 0) {
         free(l.buf);
-        return -1;
+        return len;
     }
     *line = l.buf;
     return len;
@@ -653,7 +669,7 @@ __attribute__((weak)) int getchar(void)
     if (ear == TOUCH_TAG_INVALID) return -1;
     for (;;) {
         kb_event_t k;
-        if (!NextKey(ear, &k)) { console_unlisten(); return -1; }
+        if (NextKey(ear, &k) != HEARD_KEY) { console_unlisten(); return -1; }
         if (!(k.mods & KB_MOD_EXTENDED) && k.ascii != 0) {
             console_unlisten();
             return (unsigned char)k.ascii;

@@ -56,6 +56,8 @@ void ConsoleModel::Clear(std::uint32_t Foreground, std::uint32_t Background)
     std::fill(Surface.begin(), Surface.end(), Blank);
     CursorColumn = 0;
     CursorRow = 0;
+    LineStart = LineEnd = Others = 0;
+    Held = false;
 }
 
 void ConsoleModel::Scroll()
@@ -66,6 +68,9 @@ void ConsoleModel::Scroll()
                  static_cast<std::size_t>(HeightValue - 1u) * RowBytes);
     const TextCell Blank{COLOR_LIGHT_GRAY, COLOR_BLACK, ' ', {0, 0, 0}};
     std::fill(Surface.end() - WidthValue, Surface.end(), Blank);
+    // What is kept as places on the console moves up with it.
+    for (std::size_t *Place : {&LineStart, &LineEnd, &Others})
+        *Place = *Place >= WidthValue ? *Place - WidthValue : 0;
 }
 
 void ConsoleModel::Newline()
@@ -106,6 +111,7 @@ void ConsoleModel::WriteCell(char Glyph, std::uint32_t Foreground, std::uint32_t
     }
     CursorColumn++;
     if (CursorColumn >= WidthValue) Newline();
+    LineEnd = std::max(LineEnd, Here());
 }
 
 void ConsoleModel::Write(const char *Bytes, std::size_t Length,
@@ -116,7 +122,13 @@ void ConsoleModel::Write(const char *Bytes, std::size_t Length,
         const char Byte = Bytes[Offset];
         if (static_cast<std::uint8_t>(Byte) < 0x80u) {
             switch (Byte) {
-            case '\n': Newline(); break;
+            case '\n':
+                // The line is done: a new one begins, and nothing is held
+                // under another's text any more.
+                Newline();
+                LineStart = LineEnd = Here();
+                Held      = false;
+                break;
             case '\r': CarriageReturn(); break;
             case '\b': Backspace(Foreground, Background); break;
             case '\t': Tab(); break;
@@ -168,14 +180,22 @@ const ToneColours &Theme(std::uint8_t Tone) noexcept
 
 void ConsoleModel::WriteKernel(const char *Bytes, const std::uint8_t *Tones, std::size_t Count)
 {
-    std::size_t Begin = 0;
-    while (Begin < Count) {
-        std::size_t End = Begin + 1;
-        while (End < Count && Tones[End] == Tones[Begin]) End++;
-        const ToneColours &Colours = Theme(Tones[Begin]);
-        Write(Bytes + Begin, End - Begin, Colours.Foreground, Colours.Background);
-        Begin = End;
+    const auto Lines = [&] {
+        std::size_t First = 0;
+        while (First < Count) {
+            std::size_t End = First + 1;
+            while (End < Count && Tones[End] == Tones[First]) End++;
+            const ToneColours &Colours = Theme(Tones[First]);
+            Write(Bytes + First, End - First, Colours.Foreground, Colours.Background);
+            First = End;
+        }
+    };
+    if (Holds(0)) {
+        AsAnother(Lines);
+        return;
     }
+    Begin(0);
+    Lines();
 }
 
 void ConsoleModel::Step(std::int32_t Delta)
@@ -189,7 +209,84 @@ void ConsoleModel::Step(std::int32_t Delta)
     CursorColumn = static_cast<std::uint32_t>(Linear % WidthValue);
 }
 
-void ConsoleModel::Apply(const ConsoleRun &Run)
+std::size_t ConsoleModel::Here() const noexcept
+{
+    return static_cast<std::size_t>(CursorRow) * WidthValue + CursorColumn;
+}
+
+void ConsoleModel::MoveTo(std::size_t Linear) noexcept
+{
+    if (WidthValue == 0 || HeightValue == 0) return;
+    Linear       = std::min(Linear, Surface.size() - 1u);
+    CursorRow    = static_cast<std::uint32_t>(Linear / WidthValue);
+    CursorColumn = static_cast<std::uint32_t>(Linear % WidthValue);
+}
+
+// One cell laid as it was, the caret after it — at the end of a row on the
+// next, the console scrolled when that is past its last.
+void ConsoleModel::Lay(const TextCell &Cell)
+{
+    if (CursorRow < HeightValue && CursorColumn < WidthValue)
+        Surface[static_cast<std::size_t>(CursorRow) * WidthValue + CursorColumn] = Cell;
+    CursorColumn++;
+    if (CursorColumn >= WidthValue) Newline();
+}
+
+// Whether text of the lane `Lane` (0: the kernel's, or a fold) must go above
+// the typing lane's unfinished line rather than after it.
+bool ConsoleModel::Holds(std::uint32_t Lane) const noexcept
+{
+    return TypingLane != 0 && LastLane == TypingLane && Lane != TypingLane && LineEnd > LineStart;
+}
+
+// Another lane's text after the last lane's: its line begins where the caret is.
+void ConsoleModel::Begin(std::uint32_t Lane) noexcept
+{
+    if (Lane != 0 && Lane == LastLane) return;
+    LastLane  = Lane;
+    Held      = false;
+    LineStart = LineEnd = Here();
+}
+
+// What another says while a line is typed: the line lifted off the console,
+// the other text laid where the line stood — or, once held, where the other
+// text left off — and the line laid back under it, on a row of its own when
+// that text left a row unfinished, the caret where it stood in the line.
+template <typename Drawing>
+void ConsoleModel::AsAnother(Drawing &&Said)
+{
+    const std::size_t           End = std::min(LineEnd, Surface.size());
+    const std::vector<TextCell> Line(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
+                                     Surface.begin() + static_cast<std::ptrdiff_t>(End));
+    const std::size_t Caret = std::min(Here() >= LineStart ? Here() - LineStart : 0, Line.size());
+    const TextCell    Blank{COLOR_LIGHT_GRAY, COLOR_BLACK, ' ', {0, 0, 0}};
+    std::fill(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
+              Surface.begin() + static_cast<std::ptrdiff_t>(End), Blank);
+
+    MoveTo(Held ? Others : LineStart);
+    Said();
+    Others = Here();
+    Held   = true;
+
+    if (CursorColumn != 0) Newline();
+    LineStart = Here();
+    for (const TextCell &Cell : Line) Lay(Cell);
+    LineEnd  = Here();
+    LastLane = TypingLane;
+    MoveTo(LineStart + Caret);
+}
+
+void ConsoleModel::Apply(const ConsoleRun &Run, std::uint32_t Lane)
+{
+    if (Holds(Lane)) {
+        AsAnother([&] { Draw(Run); });
+        return;
+    }
+    Begin(Lane);
+    Draw(Run);
+}
+
+void ConsoleModel::Draw(const ConsoleRun &Run)
 {
     switch (Run.kind) {
     case CONSOLE_RUN_CLEAR:
@@ -216,6 +313,19 @@ void ConsoleModel::CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Wid
                                std::uint32_t ScrollRows,
                                std::uint32_t CursorX, std::uint32_t CursorY,
                                bool CursorVisible)
+{
+    const auto Fold = [&] { Folded(X, Y, Width, Height, Cells, ScrollRows, CursorX, CursorY, CursorVisible); };
+    if (Holds(0)) {
+        AsAnother(Fold);
+        return;
+    }
+    Begin(0);
+    Fold();
+}
+
+void ConsoleModel::Folded(std::int32_t X, std::int32_t Y, std::uint32_t Width, std::uint32_t Height,
+                          std::span<const DisplayLayerCell> Cells, std::uint32_t ScrollRows,
+                          std::uint32_t CursorX, std::uint32_t CursorY, bool CursorVisible)
 {
     for (std::uint32_t Row = 0; Row < ScrollRows; Row++) Scroll();
     if (ScrollRows != 0)

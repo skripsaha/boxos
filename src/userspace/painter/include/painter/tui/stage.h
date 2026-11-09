@@ -70,7 +70,11 @@ struct KeyEvent {
     bool IsAlt() const noexcept { return (Mods & Modifiers::Alt) != 0; }
 };
 
-enum class EventKind { Key, Quiet, Gone };
+// EndAsked: the program is asked to finish — Ctrl+Alt+End over it, said by
+// its keeper through the display. Only a program that said it answers that
+// itself (HearEnd) hears it; any other hears Gone, and ends as it ends when
+// there is nothing left to hear.
+enum class EventKind { Key, Quiet, Gone, EndAsked };
 
 struct Event {
     EventKind Kind = EventKind::Gone;
@@ -97,6 +101,8 @@ public:
     box::status Present() noexcept;
     Event       Poll() noexcept;
     Event       Wait(std::uint32_t TimeoutMs = 0) noexcept;
+    // The program answers a request to finish itself: EndAsked, not Gone.
+    void        HearEnd() noexcept;
     box::status Close() noexcept;
 
 private:

@@ -10,7 +10,12 @@
 
 namespace edit {
 
-Editor::Editor(tui::Stage ScreenValue) : Screen(std::move(ScreenValue)), Bounds(Screen.Size()) {}
+/* edit answers a request to finish itself: what is not saved is asked about
+ * first, as when it is left by its own key. */
+Editor::Editor(tui::Stage ScreenValue) : Screen(std::move(ScreenValue)), Bounds(Screen.Size())
+{
+    Screen.HearEnd();
+}
 
 /* ---- tabs and files ----------------------------------------------------- */
 
@@ -194,6 +199,11 @@ void Editor::Run()
          * until one comes. A wait that ends without a key means there is
          * nothing left to hear. */
         const tui::Event Heard = Screen.Wait();
+        if (Heard.Kind == tui::EventKind::EndAsked) {
+            Message.clear();
+            AskToLeave(true);
+            continue;
+        }
         if (Heard.Kind != tui::EventKind::Key) break;
         OnKey(Heard.Key);
     }
