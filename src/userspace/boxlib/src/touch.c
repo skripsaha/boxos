@@ -451,7 +451,7 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
      * What that cost, in callers that had no guard of their own: a Touch
      * payload is opaque bytes and every interesting payload is LONGER than a
      * three-byte key event, so a length check cannot tell them apart. A child
-     * dying (a twelve-byte TouchProcessDied) or a stick being plugged in (a
+     * dying (a TouchProcessDied) or a stick being plugged in (a
      * sixteen-byte TouchUsbDevice) was copied into a kb_event_t and acted on —
      * an animation ended as though a key had been pressed, and in the draft
      * editor the first three bytes of a usb:arrived event ({port, slot_id,

@@ -103,6 +103,8 @@ look "a box with a part of every kind" "$WORK/full.box" 0 \
     "each strand keeps 64 bytes of its own, the first 4 of them from this template, aligned to 16" \
     "the names of 2 functions" \
     "cpu sse4.2" "stack 1 MiB" "name Stand" \
+    "it stays: it lives on by itself, and whoever starts it does not wait; raised again when it falls" \
+    "line 4: a word this reader does not know, passed over" \
     "setting hours: one of 24, 12; 24 by default — how the hours are counted" \
     "setting width: a whole number from -5 to 200 cells, 72 by default, from the next start — how wide the column is" \
     "setting greeting: text, empty by default — what it says at start" \

@@ -26,4 +26,11 @@
 #define PROC_EXIT_CRASHED  (-2)
 #define PROC_EXIT_STACK_OVERFLOW (-3)
 
+/* How a program that crashed fell, said with each of its deaths
+ * (TouchProcessDied, after the three fields above): the vector of the first
+ * exception any of its strands took, and the function the faulting
+ * instruction lies in, named from the program's own Nameplate — at most
+ * PROC_FELL_IN_MAX - 1 bytes and a NUL, "" when it carries no names. */
+#define PROC_FELL_IN_MAX 64
+
 #endif /* BOXOS_PROC_EXIT_H */

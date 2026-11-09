@@ -88,6 +88,7 @@ int main(int argc, char **argv)
     Part("names", names, sizeof(names), sizeof(names), 0, 0, BOX_PART_VERSION);
     Text("needs", "needs 1\ncpu sse4.2\n", must, BOX_PART_VERSION);
     Text("hints", "hints 1\nstack 1 MiB\n", 0, BOX_PART_VERSION);
+    Text("life", "life 1\nstays\nrise\nlonely\n", 0, BOX_PART_VERSION);
     Text("form", "form 1\ntakes words \"what to say\"\n", BOX_FLAG_LOAD_AT_START, BOX_PART_VERSION);
     Text("settings",
          "settings 1\n"
@@ -98,7 +99,7 @@ int main(int argc, char **argv)
          BOX_FLAG_LOAD_AT_START, BOX_PART_VERSION);
     Text("about", "about 1\nname Stand\n", 0, BOX_PART_VERSION);
     Text("about:ru", "about 1\nname Stand\n", BOX_FLAG_COMPRESSED, BOX_PART_VERSION);
-    Text("life", "life 2\nsomething later\n", 0, 2);
+    Text("works", "works 2\nsomething later\n", 0, 2);
     Text("paint:brushes", "brushes", 0, BOX_PART_VERSION);
     if (!Write(argv[1], "full.box")) {
         fprintf(stderr, "inside_stand: full.box was not written\n");

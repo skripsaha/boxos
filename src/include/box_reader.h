@@ -838,8 +838,8 @@ static inline BoxVerdict BoxTextBegin(const uint8_t *bytes, uint64_t size, BoxKi
     out->Size  = size;
     out->At    = 0;
 
-    const uint8_t *line, *word;
-    uint64_t       length, at = 0, word_length;
+    const uint8_t *line, *word = NULL;
+    uint64_t       length, at = 0, word_length = 0;
     if (!BoxTextLine(out, &line, &length) || BoxTextWordCount(line, length) != 2) return BOX_TEXT_LAYOUT;
     BoxTextWord(line, length, &at, &word, &word_length);
     if (!BoxSpanIs(word, word_length, BoxKindWord(kind))) return BOX_TEXT_LAYOUT;
@@ -873,6 +873,73 @@ static inline bool BoxTextSize(const uint8_t *number, uint64_t number_length, co
     if (value > (~(uint64_t)0 >> shift)) return false;
     *bytes = value << shift;
     return true;
+}
+
+/* ── life ────────────────────────────────────────────────────────────────── *
+ *
+ * How a program lives, a word a line after "life 1":
+ *
+ *   task     it does its work and ends — what a program without the part does;
+ *            whoever starts it waits for its end
+ *   stays    it lives on by itself: whoever starts it does not wait
+ *   serves   it serves others for as long as the machine runs
+ *   rise     when it falls, the system raises it again
+ *
+ * One of the first three at most, and rise at most once. A line of a word this
+ * reader does not know is passed over, and *unknown says the first: a newer
+ * word an older system lets be, and that the toolchain, which writes the part,
+ * refuses.
+ */
+
+typedef enum {
+    BOX_LIFE_TASK = 0,
+    BOX_LIFE_STAYS,
+    BOX_LIFE_SERVES
+} BoxLifeKind;
+
+typedef struct {
+    uint8_t Kind;   /* BoxLifeKind */
+    uint8_t Rise;
+} BoxLife;
+
+/* The words of a `life` part. *unknown (when asked for) is the number of the
+ * first line it passed over, counted from 1 with the head; 0 when none. */
+static inline BoxVerdict BoxLifeRead(const uint8_t *bytes, uint64_t size, BoxLife *out, uint64_t *unknown)
+{
+    static const char *const kinds[] = { "task", "stays", "serves" };
+    BoxText    text;
+    BoxVerdict verdict = BoxTextBegin(bytes, size, BOX_KIND_LIFE, &text);
+    out->Kind = BOX_LIFE_TASK;
+    out->Rise = 0;
+    if (unknown) *unknown = 0;
+    if (verdict != BOX_OK) return verdict;
+
+    bool           said_kind = false;
+    const uint8_t *line, *word = NULL;
+    uint64_t       length, word_length = 0;
+    while (BoxTextLine(&text, &line, &length)) {
+        uint64_t at = 0;
+        BoxTextWord(line, length, &at, &word, &word_length);
+        int  kind = -1;
+        bool rise = BoxSpanIs(word, word_length, "rise");
+        for (unsigned i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
+            if (BoxSpanIs(word, word_length, kinds[i])) kind = (int)i;
+        if (kind < 0 && !rise) {
+            if (unknown && *unknown == 0) {
+                uint64_t number = 1;
+                for (const uint8_t *at_byte = bytes; at_byte < line; at_byte++) number += *at_byte == '\n';
+                *unknown = number;
+            }
+            continue;
+        }
+        if (BoxTextWordCount(line, length) != 1 || (rise ? out->Rise : said_kind)) return BOX_TEXT_LAYOUT;
+        if (rise) out->Rise = 1;
+        else {
+            said_kind = true;
+            out->Kind = (uint8_t)kind;
+        }
+    }
+    return BOX_OK;
 }
 
 /* ── words for a refusal ─────────────────────────────────────────────────── */

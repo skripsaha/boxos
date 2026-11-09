@@ -203,7 +203,7 @@ static int fill_own_line(const BoxForm *form, FormValues *values)
     const char *create;
     if (rc == 0) rc = form_fill_arrow(filler, &screen, &create);
     if (rc == 0 && (screen != 0 || create != NULL)) {
-        say(program_name(), "-> is the shell's: this program was not started by it", NULL);
+        say(program_name(), "-> is the hub's: this program was not started by it", NULL);
         rc = -ERR_INVALID_ARGUMENT;
     }
 

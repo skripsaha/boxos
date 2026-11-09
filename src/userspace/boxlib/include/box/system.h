@@ -137,6 +137,10 @@ int proc_exec_file(file_id_t program, const void* luggage, size_t length,
  * issued (a mistyped pid must not read as success).
  */
 int process_gone(uint32_t pid, uint32_t generation, int32_t* out_exit);
+
+/* What a program fell on, in a person's words, for the vector its death says
+ * (TouchProcessDied.vector): "page fault", "invalid instruction". */
+const char *process_fault_said(uint8_t vector);
 /* End another PROGRAM, named by the pid of any strand of it: every strand of
  * it ends, each with PROC_EXIT_KILLED, its main strand — the pid it was started
  * as — announced last, so process_gone on that one returns when nothing of the

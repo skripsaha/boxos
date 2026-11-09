@@ -22,7 +22,7 @@
  *                       Recipe — as text
  */
 
-#define BOXASM_BOX_PARTS 10u
+#define BOXASM_BOX_PARTS 11u
 
 typedef struct {
     BoxPenPart Parts[BOXASM_BOX_PARTS];
@@ -252,6 +252,34 @@ static int BoxAsmBoxSettings(BoxAsmLinker *Link, const BoxAsmOutputSection *Sect
     return 0;
 }
 
+/* How the program lives, read as whoever starts it reads it: a word that
+ * reader would pass over is one nobody would ever hear, refused here. */
+static int BoxAsmBoxLife(BoxAsmLinker *Link, const BoxAsmOutputSection *Section)
+{
+    BoxAsmMessage Message;
+    BoxLife Life;
+    uint64_t Unknown;
+    uint64_t Size = Section->Data.Size;
+
+    while (Size > 0 && Section->Data.Data[Size - 1u] == 0)
+        Size--;
+    if (Size == 0)
+        return 0;
+    BoxAsmMessageBegin(&Message, Link->Error, Link->ErrorCapacity);
+    if (BoxLifeRead(Section->Data.Data, Size, &Life, &Unknown) != BOX_OK) {
+        BoxAsmMessageText(&Message, "the program's life is not written as one: one of task, stays and serves at "
+                                    "most, rise at most once, a word a line");
+        return -ERR_INVALID_ARGUMENT;
+    }
+    if (Unknown != 0) {
+        BoxAsmMessageText(&Message, "the program's life, line ");
+        BoxAsmMessageDecimal(&Message, (uint32_t)Unknown);
+        BoxAsmMessageText(&Message, ": no word of how a program lives — task, stays, serves or rise");
+        return -ERR_INVALID_ARGUMENT;
+    }
+    return 0;
+}
+
 static void BoxAsmHashBegin(void *State)
 {
     sha256_begin((Sha256 *)State);
@@ -306,6 +334,7 @@ int BoxAsmWriteBox(BoxAsmLinker *Link, BoxAsmBlob *Out)
     const BoxAsmOutputSection *Names = &Link->Image.Sections[BOXASM_SLOT_NAMEPLATE];
     const BoxAsmOutputSection *Form = &Link->Image.Sections[BOXASM_SLOT_FORM];
     const BoxAsmOutputSection *Settings = &Link->Image.Sections[BOXASM_SLOT_SETTINGS];
+    const BoxAsmOutputSection *Life = &Link->Image.Sections[BOXASM_SLOT_LIFE];
     BoxAsmBox Box;
     int Rc;
 
@@ -325,6 +354,10 @@ int BoxAsmWriteBox(BoxAsmLinker *Link, BoxAsmBlob *Out)
     if (Rc == 0)
         Rc = BoxAsmBoxText(Link, &Box, "settings", BOX_KIND_SETTINGS, Settings->Data.Data, Settings->Size,
                            BOX_FLAG_LOAD_AT_START);
+    if (Rc == 0)
+        Rc = BoxAsmBoxLife(Link, Life);
+    if (Rc == 0)
+        Rc = BoxAsmBoxText(Link, &Box, "life", BOX_KIND_LIFE, Life->Data.Data, Life->Size, 0);
     if (Rc == 0 && Link->Recipe)
         Rc = BoxAsmBoxText(Link, &Box, "recipe", BOX_KIND_RECIPE, Link->Recipe->Data,
                            Link->Recipe->Size, 0);

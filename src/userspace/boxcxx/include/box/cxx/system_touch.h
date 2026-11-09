@@ -48,14 +48,14 @@ namespace box {
 // Aliases, not redefinitions: the packed structs already live in box/touch.h
 // (single source of truth, kept in lock-step with the kernel's TouchPublish
 // call sites). usb_device serves BOTH connect and disconnect (one C struct).
-using process_died    = ::TouchProcessDied;     // { u32 pid; i32 exit_code; u32 generation }
+using process_died    = ::TouchProcessDied;     // { u32 pid; i32 exit_code; u32 generation; how it fell }
 using process_spawned = ::TouchProcessSpawned;  // { uint32_t pid;   uint32_t parent_pid }
 using system_halt     = ::TouchSystemHalt;      // { uint32_t reason; uint32_t grace_ms }
 using usb_device      = ::TouchUsbConnect;      // { u8 port, speed; u16 vendor_id, product_id }
 
-static_assert(sizeof(process_died) == 12,
-              "box::process_died must match the kernel's 12-byte process:died emit "
-              "(pid@0, exit_code@4, generation@8)");
+static_assert(sizeof(process_died) == 84,
+              "box::process_died must match the kernel's process:died emit "
+              "(pid@0, exit_code@4, generation@8, how it fell after them)");
 static_assert(sizeof(process_spawned) == 8 && sizeof(system_halt) == 8 &&
                   sizeof(usb_device) == 8,
               "box system payloads must match the kernel's 8-byte Touch emit");

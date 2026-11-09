@@ -175,7 +175,8 @@ static uint64_t ConstantsEnd(const Program *program, const Segment *segment)
         uint64_t       addr   = U64(header + 16), size = U64(header + 32);
         if (!(U64(header + 8) & 2) || U32(header + 4) == 8 || size == 0 || addr < segment->Virt ||
             addr >= segment->Virt + segment->MemoryBytes || strcmp(name, ".nameplate") == 0 ||
-            strcmp(name, ".boxos.form") == 0 || strcmp(name, ".boxos.settings") == 0)
+            strcmp(name, ".boxos.form") == 0 || strcmp(name, ".boxos.settings") == 0 ||
+            strcmp(name, ".boxos.life") == 0)
             continue;
         if (addr + size - page > end) end = addr + size - page;
     }
@@ -300,13 +301,14 @@ static void CheckPair(const char *elf_path, const char *box_path, const BoxHashe
         { ".nameplate", "names", false, 0 },
         { ".boxos.form", "form", true, BOX_FLAG_LOAD_AT_START },
         { ".boxos.settings", "settings", true, BOX_FLAG_LOAD_AT_START },
+        { ".boxos.life", "life", true, 0 },
         { ".boxos.recipe", "recipe", true, 0 },
     };
     for (unsigned i = 0; i < sizeof(carried) / sizeof(carried[0]); i++) {
         uint32_t       type;
         uint64_t       size;
         const uint8_t *bytes = Section(&program, carried[i].Section, &type, &size);
-        /* The Form, the settings and the Recipe are text: the zeros ending their C string stay behind. */
+        /* The Form, the settings, the life and the Recipe are text: the zeros ending their C string stay behind. */
         if (bytes && type != 8 && carried[i].Text)
             while (size > 0 && bytes[size - 1] == 0) size--;
         bool           there = bytes && type != 8 && size > 0;

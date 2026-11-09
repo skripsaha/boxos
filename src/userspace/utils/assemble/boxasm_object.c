@@ -18,6 +18,7 @@ typedef struct {
     uint16_t Section[BOXASM_SECTION_COUNT];   /* 0: not in the object */
     uint16_t Form;                            /* .boxos.form: the program's Form */
     uint16_t Settings;                        /* .boxos.settings: the settings it declares */
+    uint16_t Life;                            /* .boxos.life: how it lives */
     uint16_t Rela[BOXASM_SECTION_COUNT];
     uint16_t Symtab;
     uint16_t Strtab;
@@ -44,6 +45,8 @@ static void BoxAsmPlanHeaders(const BoxAsmAssembler *Asm, BoxAsmPlan *Plan)
         Plan->Form = Next++;
     if (Asm->Settings.Size != 0)
         Plan->Settings = Next++;
+    if (Asm->Life.Size != 0)
+        Plan->Life = Next++;
     for (Index = 0; Index < BOXASM_SECTION_COUNT; Index++)
         if (Asm->Sections[Index].RelocationCount != 0)
             Plan->Rela[Index] = Next++;
@@ -141,7 +144,7 @@ static int BoxAsmAppendSectionName(BoxAsmBuffer *Names, const char *Prefix, cons
     return 0;
 }
 
-/* A declaration the program carries as text — its Form, its settings — as a
+/* A declaration the program carries as text — its Form, its settings, its life — as a
  * section of its own name. */
 static int BoxAsmLayText(uint16_t Index, const char *Name, const BoxAsmBuffer *Text,
                          BoxAsmBuffer *Names, BoxAsmBuffer *File, BoxAsmElfSectionHeader *Header)
@@ -190,6 +193,8 @@ static int BoxAsmLayContents(BoxAsmAssembler *Asm, const BoxAsmPlan *Plan,
     if (Rc == 0)
         Rc = BoxAsmLayText(Plan->Settings, ".boxos.settings", &Asm->Settings, &Names, File,
                            &Headers[Plan->Settings]);
+    if (Rc == 0)
+        Rc = BoxAsmLayText(Plan->Life, ".boxos.life", &Asm->Life, &Names, File, &Headers[Plan->Life]);
     for (Index = 0; Rc == 0 && Index < BOXASM_SECTION_COUNT; Index++) {
         BoxAsmElfSectionHeader *Header = &Headers[Plan->Rela[Index]];
 

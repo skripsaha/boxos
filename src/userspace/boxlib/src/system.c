@@ -90,6 +90,32 @@ int process_gone(uint32_t pid, uint32_t generation, int32_t *out_exit)
     return 0;
 }
 
+const char *process_fault_said(uint8_t vector)
+{
+    switch (vector) {
+    case 0:  return "division by zero";
+    case 1:  return "debug trap";
+    case 3:  return "breakpoint";
+    case 4:  return "overflow trap";
+    case 5:  return "bound range exceeded";
+    case 6:  return "invalid instruction";
+    case 7:  return "no floating-point unit";
+    case 8:  return "double fault";
+    case 10: return "invalid task state";
+    case 11: return "segment not present";
+    case 12: return "stack segment fault";
+    case 13: return "general protection fault";
+    case 14: return "page fault";
+    case 16: return "floating-point error";
+    case 17: return "misaligned access";
+    case 18: return "machine check";
+    case 19: return "SIMD floating-point error";
+    case 20: return "virtualization fault";
+    case 21: return "control-protection fault";
+    default: return "fault";
+    }
+}
+
 int proc_info(uint16_t pid, proc_info_t *info)
 {
     if (!info) return -ERR_INVALID_ARGUMENT;

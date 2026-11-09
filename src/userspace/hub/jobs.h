@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -22,6 +23,9 @@ struct Hub;
 struct Ending {
     bool                   Seen = false;        // its end was seen: Code is its own
     std::int32_t           Code = 0;            // proc_exit.h: its exit, or why it was ended
+    bool                   Fell = false;        // the kernel said how it fell: Vector, In
+    std::uint8_t           Vector = 0;          // the exception it fell on
+    std::string            In;                  // the function it fell in; "" unnamed
     bool                   Collected = false;   // what it queued was read off
     std::vector<file_id_t> Given;               // its Souvenir
 };
@@ -43,7 +47,8 @@ private:
 };
 
 // How a program ended, said in the hub's words when it did not end well:
-// "edit ended: 3". A program that ended well is not spoken of.
+// "edit ended: 3", "checksum stopped: page fault in Hash". A program that
+// ended well is not spoken of.
 void SayEnding(const Hub &Self, std::string_view Who, const Ending &End);
 
 }  // namespace hub

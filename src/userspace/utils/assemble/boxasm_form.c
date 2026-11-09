@@ -91,7 +91,7 @@ static int BoxAsmFormName(BoxAsmAssembler *Asm, const BoxAsmToken *Token)
     }
     for (Index = 0; Index < sizeof(ShellWords) / sizeof(ShellWords[0]); Index++)
         if (BoxAsmTokenIs(Token, ShellWords[Index]))
-            return BoxAsmFormFail(Asm, Token, "'", "' is the shell's own word and names no field");
+            return BoxAsmFormFail(Asm, Token, "'", "' is the hub's own word and names no field");
     for (At = 0; At < Asm->Form.Names.Size; At += strlen((const char *)Asm->Form.Names.Data + At) + 1u)
         if (BoxAsmTokenIs(Token, (const char *)Asm->Form.Names.Data + At))
             return BoxAsmFormFail(Asm, Token, "'", "' names a field already");

@@ -348,7 +348,7 @@ static void SayPublished(const AssembleRequest *Request, file_id_t FileId,
     }
     if (Request->AddedApp &&
         !(Replaced && AssembleTagsHaveKey(Replaced->Metadata.Tags, "app")))
-        println("added app: without app or utility the shell cannot start it");
+        println("added app: without app or utility the hub cannot start it");
 }
 
 /* A program made again by its Recipe takes its own place: no name is looked

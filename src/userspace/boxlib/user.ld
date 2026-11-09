@@ -116,6 +116,16 @@ SECTIONS
         PROVIDE(__boxos_settings_end = .);
     }
 
+    /* ── Life: how this program lives ─────────────────────────────────────
+     * The words BOX_LIFE (box/life.h) or the assembler's `life` put in
+     * .boxos.life, last, for the Form's reason. Whoever starts the program
+     * reads it from the file — an ELF image's section, a box's part `life`,
+     * which stays in the file — and the program itself never does. */
+    .boxos.life : ALIGN(1)
+    {
+        KEEP(*(.boxos.life))
+    }
+
     . = ALIGN(4096);
 
     .data : ALIGN(4096)

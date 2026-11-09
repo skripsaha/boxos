@@ -1660,14 +1660,29 @@ void TouchCleanupProcess(process_t *proc, int32_t exit_code)
      * recycled pid. Read AFTER the touch_cleaned claim above — generation is
      * set once at creation and never changes, so this neither races nor weakens
      * the exactly-once death-publish. */
+    /* A crash says how the program fell, from its cabin's record (idt.c),
+     * after the three fields every reader already reads. */
     struct __attribute__((packed)) {
         uint32_t pid;
         int32_t  exit;
         uint32_t gen;
-    } died = { proc->pid, exit_code, proc->generation };
-    _Static_assert(sizeof(died) == 12,
-                   "process:died wire payload must stay 12 bytes "
-                   "(box/touch.h TouchProcessDied: pid@0, exit_code@4, generation@8)");
+        uint8_t  fell;
+        uint8_t  vector;
+        uint8_t  reserved[2];
+        uint32_t offset;
+        char     in[PROC_FELL_IN_MAX];
+    } died = { proc->pid, exit_code, proc->generation, 0, 0, { 0, 0 }, 0, { 0 } };
+    _Static_assert(sizeof(died) == 84 && sizeof(died) <= BOXOS_TOUCH_PAYLOAD_MAX,
+                   "process:died wire payload is box/touch.h TouchProcessDied: pid@0, exit_code@4, "
+                   "generation@8 frozen for every reader, how it fell after them");
+    cabin_t *cabin = proc->cabin;
+    if (exit_code < 0 && exit_code != PROC_EXIT_KILLED && cabin &&
+        __atomic_load_n(&cabin->fell_said, __ATOMIC_ACQUIRE)) {
+        died.fell   = 1;
+        died.vector = cabin->fell_vector;
+        died.offset = cabin->fell_offset;
+        memcpy(died.in, cabin->fell_in, sizeof(died.in));
+    }
     TouchPublish("process:died", &died, sizeof(died));
 
     /* Answer everyone parked on this incarnation being gone.

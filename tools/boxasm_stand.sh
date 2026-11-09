@@ -431,6 +431,60 @@ else
     fail settings_read_at_link "said '$said'"
 fi
 
+# ---- the life: how the program lives -------------------------------------------
+
+# `life` words go into .boxos.life a word a line after "life 1", said on one
+# line or on several, a comment going with the rest of its line. In a box they
+# are the part life, which stays in the file: whoever starts the program reads
+# it, the program never does (the box's ELF twin is the witness).
+cat > "$WORK/life.asm" <<'EOF'
+section .text
+global main
+extern exit
+life serves	; it serves others
+life rise
+main:
+    endbr64
+    xor edi, edi
+    call exit
+EOF
+printf 'life 1\nserves\nrise\n' > "$WORK/life.want"
+if "$STAND" assemble "$WORK/life.asm" "$WORK/life.o" 2> "$WORK/asm.err" &&
+   x86_64-elf-objcopy -O binary --only-section=.boxos.life "$WORK/life.o" "$WORK/life.got" 2>/dev/null &&
+   cmp -s "$WORK/life.got" "$WORK/life.want"; then
+    ok life_section
+else
+    fail life_section "$(cat "$WORK/asm.err" 2>/dev/null; diff "$WORK/life.got" "$WORK/life.want" 2>&1)"
+fi
+printf 'section .text\nglobal main\nmain:\n    ret\nlife stays rise\n' > "$WORK/lifeline.asm"
+printf 'life 1\nstays\nrise\n' > "$WORK/lifeline.want"
+if "$STAND" assemble "$WORK/lifeline.asm" "$WORK/lifeline.o" 2> "$WORK/asm.err" &&
+   x86_64-elf-objcopy -O binary --only-section=.boxos.life "$WORK/lifeline.o" "$WORK/lifeline.got" 2>/dev/null &&
+   cmp -s "$WORK/lifeline.got" "$WORK/lifeline.want"; then
+    ok life_words_on_one_line
+else
+    fail life_words_on_one_line "$(cat "$WORK/asm.err" 2>/dev/null; diff "$WORK/lifeline.got" "$WORK/lifeline.want" 2>&1)"
+fi
+
+setting_refuses life_unknown_word 'life lonely' \
+    "life_unknown_word.asm:5:1: lonely is no word of how a program lives: task, stays, serves or rise"
+setting_refuses life_two_ways $'life stays\nlife serves' \
+    "life_two_ways.asm:6:1: a program lives one way: it says task, stays or serves once"
+setting_refuses life_rise_twice 'life rise rise' "life_rise_twice.asm:5:1: rise is said once"
+setting_refuses life_no_word 'life' "life_no_word.asm:5:1: life says how the program lives: task, stays, serves or rise"
+setting_refuses life_in_struc $'struc point\nlife stays\nendstruc' \
+    "life_in_struc.asm:6:1: life stands outside struc and istruc: it is the program's, not a layout's"
+
+# A life that comes to the linker from another assembler is read too: a box
+# with a word nobody who starts it would hear is not made.
+program badlife $' nop\n.section .boxos.life,"a"\n.ascii "life 1\\nstays\\nlonely\\n"'
+said=$("$STAND" link "$ENTRY" "$WORK/badlife.o" "$ARCHIVE" "$WORK/badlife.box" 2>&1)
+if [ $? = 1 ] && [ "$said" = "the program's life, line 3: no word of how a program lives — task, stays, serves or rise" ]; then
+    ok life_read_at_link
+else
+    fail life_read_at_link "said '$said'"
+fi
+
 # ---- the Recipe: what a program was made from --------------------------------
 
 # The same program linked with a Recipe and without: the section carries the
@@ -511,12 +565,12 @@ for i in range(count):
     offset, size, memory, place, flags = struct.unpack_from('<QQQQI', box, table + 80 * i)
     length, at = struct.unpack_from('<HI', box, table + 80 * i + 38)
     parts[box[names + at:names + at + length].decode()] = (box[offset:offset + size], memory, place, flags)
-known = {'code', 'const', 'data', 'doors', 'fixups', 'thread', 'names', 'form', 'settings', 'recipe'}
+known = {'code', 'const', 'data', 'doors', 'fixups', 'thread', 'names', 'form', 'settings', 'life', 'recipe'}
 if set(parts) - known: fail('parts nobody makes: %s' % sorted(set(parts) - known))
 # MUST_UNDERSTAND what the program cannot run without; LOAD_AT_START what it
 # reads of itself at start; nothing for the rest.
 flags = {'code': 1, 'const': 1, 'data': 1, 'doors': 1, 'fixups': 1, 'thread': 1, 'names': 0, 'form': 2,
-         'settings': 2, 'recipe': 0}
+         'settings': 2, 'life': 0, 'recipe': 0}
 for name, (_, _, _, flag) in parts.items():
     if flag != flags[name]: fail('part %s has the flags %#x, not %#x' % (name, flag, flags[name]))
 
@@ -546,7 +600,7 @@ if 'const' in segments:
     off, vaddr, filesz, memsz = segments['const']
     end = max([addr + len(data) - vaddr for name, (addr, data, flags, kind) in sections.items()
                if flags & 2 and kind != 8 and data and vaddr <= addr < vaddr + memsz
-               and name not in ('.nameplate', '.boxos.form', '.boxos.settings')] + [0])
+               and name not in ('.nameplate', '.boxos.form', '.boxos.settings', '.boxos.life')] + [0])
     segments['const'] = [off, vaddr, end, end]
     if end == 0: del segments['const']
 image = elf
@@ -582,7 +636,7 @@ if tls and tls[1]:
 elif 'thread' in parts: fail('a thread part with no TLS block')
 
 for part, section in (('names', '.nameplate'), ('form', '.boxos.form'), ('settings', '.boxos.settings'),
-                      ('recipe', '.boxos.recipe')):
+                      ('life', '.boxos.life'), ('recipe', '.boxos.recipe')):
     want = sections.get(section, (0, b''))[1]
     if part == 'names' and want:
         want = want[:16] + struct.pack('<Q', struct.unpack_from('<Q', want, 16)[0] - BASE) + want[24:]
@@ -620,6 +674,7 @@ box_builds hello "$WORK/hello.o" "recipe=$WORK/recipe.txt"
 box_builds countdown "$WORK/countdown.o"
 box_builds planets "$WORK/planets.o"
 box_builds settings "$WORK/settings.o"
+box_builds life "$WORK/life.o"
 
 # Every way a word comes to hold an address, and the ways one does not: a
 # table of them read-only and another written, the names the linker gives
@@ -996,7 +1051,7 @@ assembly_refuses form_two_into "${HEAD}takes into \"a\""$'\ntakes into "b"\n' \
 assembly_refuses form_in_struc $'struc s\ntakes things "x"\nendstruc\n'"$HEAD" \
     "form_in_struc.asm:2:1: takes stands outside struc and istruc: it is the program's, not a layout's"
 assembly_refuses form_name_shell "${HEAD}takes words them \"w\""$'\n' \
-    "form_name_shell.asm:4:13: 'them' is the shell's own word and names no field"
+    "form_name_shell.asm:4:13: 'them' is the hub's own word and names no field"
 assembly_refuses form_name_twice "${HEAD}takes words a \"w\""$'\ntakes things a "t"\n' \
     "form_name_twice.asm:5:14: 'a' names a field already"
 assembly_refuses form_name_spelled "${HEAD}takes words la.bel \"w\""$'\n' \

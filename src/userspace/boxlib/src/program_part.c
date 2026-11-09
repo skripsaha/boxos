@@ -106,6 +106,7 @@ static const char *elf_section_of(const char *name)
 {
     if (strcmp(name, "form") == 0) return ".boxos.form";
     if (strcmp(name, "settings") == 0) return ".boxos.settings";
+    if (strcmp(name, "life") == 0) return ".boxos.life";
     if (strcmp(name, "recipe") == 0) return ".boxos.recipe";
     return NULL;
 }

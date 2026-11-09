@@ -273,6 +273,29 @@ static bool SaySettings(const InsideFile *file, const BoxPart *part, const uint8
     return written;
 }
 
+/* How the program lives, said as whoever starts it will act on it. */
+static bool SayLife(const InsideFile *file, const BoxPart *part, const uint8_t *bytes)
+{
+    static const char *const ways[] = {
+        "a task: whoever starts it waits for its end",
+        "it stays: it lives on by itself, and whoever starts it does not wait",
+        "it serves others for as long as the machine runs",
+    };
+    BoxLife  life;
+    uint64_t unknown;
+    if (BoxLifeRead(bytes, part->Size, &life, &unknown) != BOX_OK) return false;
+    SayUnder(file);
+    Say(file, ways[life.Kind]);
+    Say(file, life.Rise ? "; raised again when it falls\n" : "\n");
+    if (unknown != 0) {
+        SayUnder(file);
+        Say(file, "line ");
+        SayNumber(file, unknown, 0);
+        Say(file, ": a word this reader does not know, passed over\n");
+    }
+    return true;
+}
+
 static bool SayDoors(const InsideFile *file, const BoxTable *table, const BoxPart *part,
                      const uint8_t *bytes)
 {
@@ -385,6 +408,7 @@ static bool Describe(const InsideFile *file, const BoxTable *table, const BoxPar
     case BOX_KIND_FIXUPS: written = SayFixups(file, table, part, bytes); break;
     case BOX_KIND_NAMES:  written = SayNames(file, part, bytes); break;
     case BOX_KIND_SETTINGS: written = SaySettings(file, part, bytes); break;
+    case BOX_KIND_LIFE:   written = SayLife(file, part, bytes); break;
     default:              written = SayText(file, part, bytes); break;
     }
     free(bytes);

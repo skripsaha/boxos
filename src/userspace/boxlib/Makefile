@@ -73,6 +73,7 @@ SRCS = src/core/notify.c \
        src/form_program.c \
        src/form_souvenir.c \
        src/settings_read.c \
+       src/life.c \
        src/settings_file.c \
        src/settings_own.c \
        src/recipe.c \

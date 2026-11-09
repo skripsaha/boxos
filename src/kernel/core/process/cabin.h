@@ -7,6 +7,7 @@
 #include "vmm.h"
 #include "memtag.h"   /* MEMTAG_HELD_L1_ENTRIES — the held-tag set's geometry */
 #include "image_thread.h"
+#include "proc_exit.h"
 
 /*
  * cabin_t — shared address-space object.
@@ -153,6 +154,16 @@ typedef struct cabin_t
      * death of the program is said, so a claimant that heard the death sees
      * it set. */
     uint8_t ending;
+
+    /* How the program fell, when it did: the first exception of any of its
+     * strands (idt.c), said with every death of it (process:died). Taken once
+     * by fell_claimed; vector, place and name are written by the taker before
+     * fell_said is set, and read only after it is. */
+    uint8_t  fell_claimed;
+    uint8_t  fell_said;
+    uint8_t  fell_vector;
+    uint32_t fell_offset;
+    char     fell_in[PROC_FELL_IN_MAX];
 } cabin_t;
 
 _Static_assert(sizeof(cabin_t) < 4096, "cabin_t must fit in one page");

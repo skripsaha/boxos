@@ -51,6 +51,7 @@ __thread int local = 7;
 __thread char space[64];
 __attribute__((section(".boxos.settings"), used)) static const char settings[] =
     "settings 1\nsetting look one-of dark light default dark \"how the page looks\"\n";
+__attribute__((section(".boxos.life"), used)) static const char life[] = "life 1\nstays\nrise\n";
 int helper(int x) { return x + counter + local + space[x & 63] + *fixed[0]; }
 const char **said(void) { return &greeting; }
 void _start(void) { table[1] = &counter; helper(3); for (;;) { } }
@@ -86,6 +87,20 @@ printf '__attribute__((section(".boxos.settings"), used)) static const char s[] 
 $CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/badsettings.c" -o "$WORK/badsettings.o" > "$WORK/cc.log" 2>&1 &&
 $LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/badsettings.o" -o "$WORK/badsettings.elf" > "$WORK/ld.log" 2>&1 ||
     { cat "$WORK/cc.log" "$WORK/ld.log"; harness "the program with bad settings did not build"; }
+
+# A static PIE whose life says a word nobody who starts it knows: one it meant
+# and nobody would hear, refused at the build.
+printf '__attribute__((section(".boxos.life"), used)) static const char l[] = "life 1\\nstays\\nlonely\\n";\nvoid _start(void) { for (;;) { } }\n' \
+    > "$WORK/badlife.c"
+$CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/badlife.c" -o "$WORK/badlife.o" > "$WORK/cc.log" 2>&1 &&
+$LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/badlife.o" -o "$WORK/badlife.elf" > "$WORK/ld.log" 2>&1 ||
+    { cat "$WORK/cc.log" "$WORK/ld.log"; harness "the program with a bad life did not build"; }
+# And one that lives two ways at once.
+printf '__attribute__((section(".boxos.life"), used)) static const char l[] = "life 1\\nstays\\nserves\\n";\nvoid _start(void) { for (;;) { } }\n' \
+    > "$WORK/twolives.c"
+$CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/twolives.c" -o "$WORK/twolives.o" > "$WORK/cc.log" 2>&1 &&
+$LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/twolives.o" -o "$WORK/twolives.elf" > "$WORK/ld.log" 2>&1 ||
+    { cat "$WORK/cc.log" "$WORK/ld.log"; harness "the program that lives two ways did not build"; }
 
 # ── a copy of a program broken, or changed, one way ─────────────────────────
 # patch FILE OUT KIND: a copy of FILE broken one way.
@@ -211,6 +226,9 @@ refuse "an object file" "$WORK/small.o" "not an executable or a static PIE"
 refuse "an address in the thread template" "$WORK/tlsptr.elf" "a word of its thread template holds an address"
 refuse "settings with a setting it cannot read" "$WORK/badsettings.elf" \
     "its settings, line 2: the setting look has no default"
+refuse "a life with a word nobody knows" "$WORK/badlife.elf" \
+    "its life, line 3: no word of how a program lives — task, stays, serves or rise"
+refuse "a life of two ways" "$WORK/twolives.elf" "its life is not written as one"
 refuse "a text file" "$LIB/user.ld" "not an ELF file"
 patch src/userspace/utils/hw.elf "$WORK/badform.elf" badform || harness "could not break hw's Form (badform)"
 refuse "a Form that is no text" "$WORK/badform.elf" "is not text as a box keeps its part form"

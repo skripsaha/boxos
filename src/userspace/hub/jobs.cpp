@@ -2,6 +2,7 @@
 
 #include "jobs.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "box/color.h"
@@ -50,6 +51,12 @@ Ending Jobs::WaitGone(std::uint32_t Pid, std::uint32_t Generation)
             if (Death.pid != Pid || Death.generation != Generation) continue;
             End.Seen = true;
             End.Code = Death.exit_code;
+            End.Fell = Death.fell != 0;
+            if (End.Fell) {
+                End.Vector = Death.vector;
+                const char *Named = std::find(Death.in, Death.in + sizeof(Death.in), '\0');
+                End.In.assign(Death.in, static_cast<std::size_t>(Named - Death.in));
+            }
             break;
         }
     }
@@ -77,10 +84,12 @@ void SayEnding(const Hub &Self, std::string_view Who, const Ending &End)
 {
     if (!Self.Shown.Ended || !End.Seen || End.Code == 0) return;
     set_color(Self.Shown.NewsColor);
+    const std::string Where = End.Fell && !End.In.empty() ? " in " + End.In : std::string();
     if (End.Code > 0) Say("{} ended: {}\n", Who, static_cast<int>(End.Code));
     else if (End.Code == PROC_EXIT_KILLED) Say("{} was ended by another program\n", Who);
-    else if (End.Code == PROC_EXIT_STACK_OVERFLOW) Say("{} stopped: its stack ran out\n", Who);
-    else Say("{} stopped: it faulted\n", Who);
+    else if (End.Code == PROC_EXIT_STACK_OVERFLOW) Say("{} stopped: its stack ran out{}\n", Who, Where);
+    else if (End.Fell) Say("{} stopped: {}{}\n", Who, process_fault_said(End.Vector), Where);
+    else Say("{} stopped: the system stopped it\n", Who);
     set_color(COLOR_DEFAULT);
 }
 

@@ -7,6 +7,7 @@ extern "C" {
 
 #include "box/types.h"
 #include "box/error.h"
+#include "proc_exit.h"
 
 /*
  * Touch — tag-multicast event API (handle-based ABI, real-HW audit 2026-05-30).
@@ -135,11 +136,18 @@ typedef struct __attribute__((packed)) {
                             *      so (pid, generation) names the exact death.
                             *      16-bit value widened to u32 (future-proof;
                             *      generation wrap at 2^16 reuses = accepted LOW). */
+    /* How a crashed program fell (proc_exit.h): said by the kernel, read only
+     * when fell is 1 — an end by exit or by another program says nothing. */
+    uint8_t  fell;         /* @12 — 1: the next three are the program's fall    */
+    uint8_t  vector;       /* @13 — the exception's vector (process_fault_said) */
+    uint8_t  reserved[2];
+    uint32_t offset;       /* @16 — how far into `in` the instruction lies      */
+    char     in[PROC_FELL_IN_MAX]; /* @20 — the function, NUL-ended; "" unnamed */
 } TouchProcessDied;
 
-STATIC_ASSERT(sizeof(TouchProcessDied) == 12,
-              "TouchProcessDied must be 12 bytes (pid@0, exit_code@4, generation@8) "
-              "— pid/exit_code offsets are frozen for all existing readers");
+STATIC_ASSERT(sizeof(TouchProcessDied) == 84,
+              "TouchProcessDied: pid@0, exit_code@4, generation@8 are frozen for every reader "
+              "of the first 12 bytes; how the program fell follows them");
 
 typedef struct __attribute__((packed)) {
     uint32_t pid;

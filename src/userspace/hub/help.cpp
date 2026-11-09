@@ -12,6 +12,7 @@
 
 #include "box/color.h"
 #include "box/form.h"
+#include "box/life.h"
 #include "box/print.h"
 #include "box/settings.h"
 #include "say.h"
@@ -134,6 +135,22 @@ void ShowSettings(file_id_t Program, const std::string &Name)
     settings_release(&Settings);
 }
 
+// How the program lives, said as the hub will act on it — nothing for a task,
+// what most programs are.
+void ShowLife(file_id_t Program, const std::string &Name)
+{
+    ProgramLife Life;
+    if (program_life(Program, &Life) != 0) {
+        Say("help: how {} lives cannot be read\n", Name);
+        return;
+    }
+    if (Life.Living == PROGRAM_STAYS) Say("{} lives on by itself: the hub does not wait for it", Name);
+    else if (Life.Living == PROGRAM_SERVES) Say("{} serves others for as long as the machine runs", Name);
+    else if (Life.Rise) Say("{} is a task", Name);
+    else return;
+    Say(Life.Rise ? "; when it falls, the system raises it again.\n" : ".\n");
+}
+
 bool HelpProgram(std::string_view Asked)
 {
     const std::string Name(Asked);
@@ -156,7 +173,9 @@ bool HelpProgram(std::string_view Asked)
         return false;
     }
     ShowForm(Name, *Declared);
-    if (!Itinerary) ShowSettings(*Program, Name);
+    if (Itinerary) return true;
+    ShowLife(*Program, Name);
+    ShowSettings(*Program, Name);
     return true;
 }
 

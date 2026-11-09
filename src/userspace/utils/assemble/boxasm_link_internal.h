@@ -17,6 +17,7 @@ typedef enum {
     BOXASM_SLOT_NAMEPLATE,
     BOXASM_SLOT_FORM,
     BOXASM_SLOT_SETTINGS,
+    BOXASM_SLOT_LIFE,
     BOXASM_SLOT_DATA,
     BOXASM_SLOT_INIT_ARRAY,
     BOXASM_SLOT_FINI_ARRAY,
@@ -41,7 +42,7 @@ typedef struct {
  * set of rights, beginning on a page of its own. */
 typedef enum {
     BOXASM_SEGMENT_CODE = 0,    /* .text: R+X */
-    BOXASM_SEGMENT_CONST,       /* .rodata to .boxos.settings — in a box to .gcc_except_table: R */
+    BOXASM_SEGMENT_CONST,       /* .rodata to .boxos.life — in a box to .gcc_except_table: R */
     BOXASM_SEGMENT_DATA,        /* .data to .bss: R+W */
     BOXASM_SEGMENT_COUNT
 } BoxAsmSegmentKind;

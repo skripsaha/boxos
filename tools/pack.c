@@ -7,8 +7,8 @@
  * on the volume. What goes where:
  *
  *   PT_LOAD R+X        code     at its address, MUST_UNDERSTAND
- *   PT_LOAD R          const    its own sections — the Nameplate, the Form and the settings,
- *                               last in it, are parts of their own and are left out of it
+ *   PT_LOAD R          const    its own sections — the Nameplate, the Form, the settings and
+ *                               the life, last in it, are parts of their own and are left out of it
  *   PT_LOAD R+W        data     its zeros past the file's bytes as memory only
  *   PT_LOAD, no rights —          the linker's tables for a dynamic linker
  *   PT_TLS             thread   the template every thread's block is made from
@@ -16,6 +16,7 @@
  *   .nameplate         names    the program's names for its functions
  *   .boxos.form        form     loaded at start, read-only; the text, its C string's zeros dropped
  *   .boxos.settings    settings loaded at start, read-only; the text, every setting read
+ *   .boxos.life        life     the text, each word known
  *   .boxos.recipe      recipe   the text, its C string's zeros dropped
  *
  * An executable linked at a fixed address (ET_EXEC) keeps its addresses: its
@@ -232,7 +233,7 @@ static bool SectionNamed(const Elf *elf, const char *name, const uint8_t **bytes
 static bool CarriedApart(const char *name)
 {
     return strcmp(name, ".nameplate") == 0 || strcmp(name, ".boxos.form") == 0 ||
-           strcmp(name, ".boxos.settings") == 0;
+           strcmp(name, ".boxos.settings") == 0 || strcmp(name, ".boxos.life") == 0;
 }
 
 /* The constants without the Nameplate and the Form: the linker script puts
@@ -375,6 +376,24 @@ static void CheckSettings(const uint8_t *bytes, uint64_t size)
     }
 }
 
+/* How the program lives, read as whoever starts it reads it: a word it would
+ * pass over is a word the program meant and nobody would ever hear, and the
+ * build says so instead. */
+static void CheckLife(const uint8_t *bytes, uint64_t size)
+{
+    BoxLife  life;
+    uint64_t unknown;
+    char     why[200];
+    if (BoxLifeRead(bytes, size, &life, &unknown) != BOX_OK)
+        Refuse("its life is not written as one: one of task, stays and serves at most, rise at most once, "
+               "a word a line");
+    if (unknown != 0) {
+        snprintf(why, sizeof(why), "its life, line %llu: no word of how a program lives — task, stays, serves "
+                 "or rise", (unsigned long long)unknown);
+        Refuse(why);
+    }
+}
+
 static void Add(BoxPenPart *parts, uint32_t *count, const char *name, const uint8_t *bytes, uint64_t size,
                 uint64_t memory, uint64_t place, uint32_t flags)
 {
@@ -473,6 +492,7 @@ int main(int argc, char **argv)
         { ".nameplate",      "names",    BOX_KIND_UNKNOWN,  0 },
         { ".boxos.form",     "form",     BOX_KIND_FORM,     BOX_FLAG_LOAD_AT_START },
         { ".boxos.settings", "settings", BOX_KIND_SETTINGS, BOX_FLAG_LOAD_AT_START },
+        { ".boxos.life",     "life",     BOX_KIND_LIFE,     0 },
         { ".boxos.recipe",   "recipe",   BOX_KIND_RECIPE,   0 },
     };
     for (unsigned i = 0; i < sizeof(carried) / sizeof(carried[0]); i++) {
@@ -492,6 +512,7 @@ int main(int argc, char **argv)
                 Refuse(why);
             }
             if (carried[i].Text == BOX_KIND_SETTINGS) CheckSettings(bytes, size);
+            if (carried[i].Text == BOX_KIND_LIFE) CheckLife(bytes, size);
         }
         Add(parts, &count, carried[i].Part, bytes, size, size, 0, carried[i].Flags);
     }

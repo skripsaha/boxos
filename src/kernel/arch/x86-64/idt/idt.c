@@ -1216,6 +1216,31 @@ static void ExceptionCpReport(const interrupt_frame_t *frame)
     }
 }
 
+/* How the program fell: the first exception any of its strands takes, named
+ * from the program's own Nameplate while its pages are the ones mapped, kept
+ * on its cabin for every death of it to say (process:died). A second strand
+ * that falls while the first is being written finds the record taken. */
+static void exception_record_fall(process_t *proc, uint8_t vector, uintptr_t rip)
+{
+    cabin_t *cabin = proc->cabin;
+    if (!cabin || __atomic_exchange_n(&cabin->fell_claimed, 1u, __ATOMIC_ACQ_REL) != 0)
+        return;
+    cabin->fell_vector = vector;
+    cabin->fell_offset = 0;
+    cabin->fell_in[0]  = '\0';
+    NameplateName here;
+    if (proc->nameplate_va && proc->nameplate_bytes &&
+        nameplate_name_at(proc->nameplate_va, proc->nameplate_bytes, proc->image_base, rip, &here)) {
+        size_t length = strlen(here.Text);
+        if (length >= sizeof(cabin->fell_in)) length = sizeof(cabin->fell_in) - 1;
+        memcpy(cabin->fell_in, here.Text, length);
+        cabin->fell_in[length] = '\0';
+        cabin->fell_offset     = here.Offset > UINT32_MAX ? UINT32_MAX : (uint32_t)here.Offset;
+    }
+    __atomic_store_n(&cabin->fell_said, 1u, __ATOMIC_RELEASE);
+}
+
+
 void exception_handler(interrupt_frame_t *frame)
 {
     /* Scoped to THIS invocation. A kernel #PF claims the dump at the [VMM]
@@ -1467,6 +1492,8 @@ void exception_handler(interrupt_frame_t *frame)
     if ((frame->cs & 3) == 3)
     {
         process_t *proc = process_get_current();
+        if (proc)
+            exception_record_fall(proc, (uint8_t)frame->vector, (uintptr_t)frame->rip);
         if (proc)
         {
             kprintf("\n");

@@ -824,6 +824,44 @@ static void TestTextSize(void)
     Check(!SizeOf("64", "MiBs", &bytes), "a unit with more after it");
 }
 
+/* How a program lives, read from `text` held in a buffer of exactly its length. */
+static BoxVerdict LifeOf(const char *text, BoxLife *life, uint64_t *unknown)
+{
+    uint8_t   *exact   = Exact((const uint8_t *)text, strlen(text));
+    BoxVerdict verdict = BoxLifeRead(exact, strlen(text), life, unknown);
+    free(exact);
+    return verdict;
+}
+
+static void TestLife(void)
+{
+    BoxLife  life;
+    uint64_t unknown = 9;
+    Check(LifeOf("life 1\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_TASK && !life.Rise && unknown == 0,
+          "life: one that says nothing is a task, not raised");
+    Check(LifeOf("life 1\nstays\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_STAYS && !life.Rise,
+          "life: stays");
+    Check(LifeOf("life 1\nserves\nrise", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_SERVES && life.Rise,
+          "life: serves and rise, the last newline left off");
+    Check(LifeOf("life 1\nrise\ntask\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_TASK && life.Rise,
+          "life: rise said before the way of living");
+    Check(LifeOf("life 1\n\n   stays   \n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_STAYS,
+          "life: blank lines and blanks around the word are nothing");
+    Check(LifeOf("life 1\nstays\nserves\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: two ways of living");
+    Check(LifeOf("life 1\nstays\nstays\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: one way said twice");
+    Check(LifeOf("life 1\nrise\nrise\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: rise said twice");
+    Check(LifeOf("life 1\nstays rise\n", &life, &unknown) == BOX_TEXT_LAYOUT,
+          "life: a word it knows with another on its line");
+    Check(LifeOf("life 1\nlonely\nstays\nhermit\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_STAYS &&
+              unknown == 2,
+          "life: a word this reader does not know is passed over, and the first such line is named");
+    Check(LifeOf("life 2\nstays\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: another version");
+    Check(LifeOf("hints 1\nstays\n", &life, &unknown) == BOX_TEXT_LAYOUT && life.Kind == BOX_LIFE_TASK,
+          "life: a part of another kind is refused, and says a task");
+    Check(LifeOf("life 1\nserves\n", &life, NULL) == BOX_OK && life.Kind == BOX_LIFE_SERVES,
+          "life: read without asking what it passed over");
+}
+
 static void TestTexts(void)
 {
     const char *fallback = BoxVerdictText(BOX_VERDICT_COUNT);
@@ -873,6 +911,7 @@ int main(void)
     TestFixups();
     TestTextParts();
     TestTextSize();
+    TestLife();
     TestWritten();
     TestTexts();
 
