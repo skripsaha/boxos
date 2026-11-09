@@ -6,9 +6,10 @@
 #     tools/inside_stand.sh
 #
 # a box with a part of every kind inside says something of (tools/inside_stand.c),
-# said whole; then that box damaged one way at a time — a byte of its code, a
-# byte of its table, a byte between two parts, its last byte cut off — each said
-# where it does not hold; a Form that is no text; an ELF image and a text file,
+# said whole; one with one of each thing it counts, said in the singular; then
+# the first box damaged one way at a time — a byte of its code, a byte of its
+# table, a byte between two parts, its last byte cut off — each said where it
+# does not hold; a Form that is no text; an ELF image and a text file,
 # no box. Built under the address and undefined-behaviour sanitizers. The last
 # line counts the cases that held.
 
@@ -107,6 +108,13 @@ look "a box with a part of every kind" "$WORK/full.box" 0 \
     "of a kind this reader does not know" \
     "— the table and its names hold to it" \
     "whole: the seal holds, every part holds to its hash, and only zeros lie between them"
+
+look "a box with one of each thing counted" "$WORK/single.box" 0 \
+    "1 place the base is added to: the kernel places the box where it chooses" \
+    "the names of 1 function, for a fault and a stack trace to say" \
+    "each strand keeps 8 bytes of its own, all zeros at first, aligned to 8" \
+    "read and written, and 1 byte of zeros after it" \
+    "1 byte, holds to its hash"
 
 damage "$WORK/full.box" "$WORK/code.box" code || harness "could not damage the code"
 look "a byte of the code changed" "$WORK/code.box" 1 \

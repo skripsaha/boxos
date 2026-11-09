@@ -63,6 +63,14 @@ static void SayNumber(const InsideFile *file, uint64_t number, unsigned width)
     file->Say(file->Context, digits + at, sizeof(digits) - at);
 }
 
+/* A number and what it counts: "1 place", "2 places". */
+static void SayCount(const InsideFile *file, uint64_t number, const char *one, const char *many)
+{
+    SayNumber(file, number, 0);
+    Say(file, " ");
+    Say(file, number == 1 ? one : many);
+}
+
 static void SayHex(const InsideFile *file, uint64_t number)
 {
     static const char hex[] = "0123456789abcdef";
@@ -152,8 +160,8 @@ static void SayLoadable(const InsideFile *file, const BoxPart *part)
     Say(file, rights[part->Kind - BOX_KIND_CODE]);
     if (part->Memory > part->Size) {
         Say(file, ", and ");
-        SayNumber(file, part->Memory - part->Size, 0);
-        Say(file, " bytes of zeros after it");
+        SayCount(file, part->Memory - part->Size, "byte", "bytes");
+        Say(file, " of zeros after it");
     }
     Say(file, "\n");
 }
@@ -198,10 +206,14 @@ static bool SayThread(const InsideFile *file, const BoxPart *part, const uint8_t
     if (BoxThreadRead(bytes, part->Size, &thread) != BOX_OK) return false;
     SayUnder(file);
     Say(file, "each strand keeps ");
-    SayNumber(file, thread.TotalBytes, 0);
-    Say(file, " bytes of its own, the first ");
-    SayNumber(file, thread.InitBytes, 0);
-    Say(file, " of them from this template, aligned to ");
+    SayCount(file, thread.TotalBytes, "byte", "bytes");
+    if (thread.InitBytes == 0) {
+        Say(file, " of its own, all zeros at first, aligned to ");
+    } else {
+        Say(file, " of its own, the first ");
+        SayNumber(file, thread.InitBytes, 0);
+        Say(file, " of them from this template, aligned to ");
+    }
     SayNumber(file, thread.Align, 0);
     Say(file, "\n");
     return true;
@@ -216,8 +228,8 @@ static bool SayFixups(const InsideFile *file, const BoxTable *table, const BoxPa
     BoxFixupBegin(bytes, part->Size, &walk);
     while (BoxFixupNext(&walk, &offset)) count++;
     SayUnder(file);
-    SayNumber(file, count, 0);
-    Say(file, " places the base is added to: the kernel places the box where it chooses\n");
+    SayCount(file, count, "place", "places");
+    Say(file, " the base is added to: the kernel places the box where it chooses\n");
     return true;
 }
 
@@ -227,8 +239,8 @@ static bool SayNames(const InsideFile *file, const BoxPart *part, const uint8_t 
     if (part->Size < sizeof(NameplateHeader) || !NameplateHeaderValid(header, part->Size)) return false;
     SayUnder(file);
     Say(file, "the names of ");
-    SayNumber(file, header->EntryCount, 0);
-    Say(file, " functions, for a fault and a stack trace to say\n");
+    SayCount(file, header->EntryCount, "function", "functions");
+    Say(file, ", for a fault and a stack trace to say\n");
     return true;
 }
 
@@ -307,7 +319,8 @@ static bool ShowPart(const InsideFile *file, const BoxTable *table, const BoxPar
     SaySpan(file, part->Name, part->NameLength);
     SayBlanks(file, part->NameLength < INSIDE_NAME_COLUMN ? INSIDE_NAME_COLUMN - part->NameLength : 1);
     SayNumber(file, part->Size, INSIDE_SIZE_COLUMN);
-    Say(file, holds ? " bytes, holds to its hash" : " bytes, DAMAGED: its hash differs");
+    Say(file, part->Size == 1 ? " byte" : " bytes");
+    Say(file, holds ? ", holds to its hash" : ", DAMAGED: its hash differs");
     SayFlags(file, part->Flags);
     Say(file, "\n");
 
@@ -390,8 +403,8 @@ static InsideVerdict ShowBox(const InsideFile *file, const uint8_t *first, uint6
     Say(file, ": a box, format ");
     SayNumber(file, head.Version, 0);
     Say(file, ", ");
-    SayNumber(file, file->Size, 0);
-    Say(file, " bytes, ");
+    SayCount(file, file->Size, "byte", "bytes");
+    Say(file, ", ");
     SayNumber(file, head.PartCount, 0);
     Say(file, head.PartCount == 1 ? " part\n" : " parts\n");
 

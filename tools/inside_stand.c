@@ -1,8 +1,9 @@
 /* inside_stand — the boxes tools/inside_stand.sh looks inside, written by the
  * one pen (box_pen.h): one with a part of every kind inside says something of,
- * and one whose Form is not written as text.
+ * one with one of each thing inside counts, and one whose Form is not written
+ * as text.
  *
- *     inside_stand DIR     writes DIR/full.box and DIR/badform.box
+ *     inside_stand DIR     writes DIR/full.box, DIR/single.box and DIR/badform.box
  */
 
 #include <stdbool.h>
@@ -93,6 +94,31 @@ int main(int argc, char **argv)
     Text("paint:brushes", "brushes", 0, BOX_PART_VERSION);
     if (!Write(argv[1], "full.box")) {
         fprintf(stderr, "inside_stand: full.box was not written\n");
+        return 2;
+    }
+
+    /* One fixup, one function, a byte of zeros, a template of zeros only. */
+    uint8_t  one_thread[64], one_fixup[8];
+    uint64_t one_thread_bytes, one_fixup_bytes, one_place = 0x1000;
+    uint8_t  one_name[NAMEPLATE_TOTAL_BYTES(1, 2)];
+    NameplateHeader one_header = { NAMEPLATE_MAGIC, NAMEPLATE_VERSION, 1, 2, 0, sizeof(one_name) };
+    uint32_t one_arrays[3] = { 0, 8, 0 };
+    memset(one_name, 0, sizeof(one_name));
+    memcpy(one_name, &one_header, sizeof(one_header));
+    memcpy(one_name + NAMEPLATE_OFFSETS_AT(1), one_arrays, sizeof(one_arrays));
+    memcpy(one_name + NAMEPLATE_NAMES_AT(1), "a\0", 2);
+    BoxPenThread(8, NULL, 0, 8, one_thread, &one_thread_bytes);
+    BoxPenFixups(&one_place, 1, one_fixup, &one_fixup_bytes);
+    g_count = 0;
+    Part("code", code, sizeof(code), sizeof(code), 0, must, BOX_PART_VERSION);
+    Part("data", data, 8, 9, 0x1000, must, BOX_PART_VERSION);
+    Part("doors", doors, doors_bytes, doors_bytes, 0, must, BOX_PART_VERSION);
+    Part("thread", one_thread, one_thread_bytes, one_thread_bytes, 0, must, BOX_PART_VERSION);
+    Part("fixups", one_fixup, one_fixup_bytes, one_fixup_bytes, 0, must, BOX_PART_VERSION);
+    Part("names", one_name, sizeof(one_name), sizeof(one_name), 0, 0, BOX_PART_VERSION);
+    Part("paint:dot", data, 1, 1, 0, 0, BOX_PART_VERSION);
+    if (!Write(argv[1], "single.box")) {
+        fprintf(stderr, "inside_stand: single.box was not written\n");
         return 2;
     }
 
