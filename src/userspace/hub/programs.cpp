@@ -2,7 +2,6 @@
 
 #include "programs.h"
 
-#include <cstring>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -10,56 +9,30 @@
 #include "box/error.h"
 #include "box/file.h"
 #include "box/form.h"
-#include "box/memory.h"
-#include "box/print.h"
 
 #include "asking.h"
 #include "hub.h"
 #include "say.h"
+#include "tags.h"
+#include "volume.h"
 
 namespace hub::programs {
 
 namespace {
 
-constexpr std::uint32_t FileActive = 1u << 0;   // the volume's flag of a file in use
-
-// The comma-joined tags hold Key, bare or with a value.
-bool Wears(const char *Tags, std::string_view Key)
+bool ProgramFile(const volume::Record &File)
 {
-    std::string_view Rest = Tags ? Tags : "";
-    while (!Rest.empty()) {
-        const std::size_t Comma = Rest.find(',');
-        std::string_view  Tag   = Rest.substr(0, Comma);
-        if (Tag.substr(0, Tag.find(':')) == Key) return true;
-        if (Comma == std::string_view::npos) break;
-        Rest.remove_prefix(Comma + 1);
-    }
-    return false;
+    return tags::Wears(File.Tags(), "app") || tags::Wears(File.Tags(), "utility");
 }
 
-bool ProgramFile(const FileMetadata &Metadata)
+bool ItineraryFile(const volume::Record &File)
 {
-    return (Metadata.Flags & FileActive) && (Wears(Metadata.Tags, "app") || Wears(Metadata.Tags, "utility"));
+    return tags::Wears(File.Tags(), "itinerary");
 }
 
-bool ItineraryFile(const FileMetadata &Metadata)
+bool CommandFile(const volume::Record &File)
 {
-    return (Metadata.Flags & FileActive) && Wears(Metadata.Tags, "itinerary");
-}
-
-bool CommandFile(const FileMetadata &Metadata)
-{
-    return ProgramFile(Metadata) || ItineraryFile(Metadata);
-}
-
-template <typename Question>
-bool Ask(file_id_t File, Question &&Asked)
-{
-    FileMetadata Metadata;
-    if (FileMetadataRead(File, &Metadata) != 0) return false;
-    const bool Answer = Asked(Metadata);
-    FileMetadataRelease(&Metadata);
-    return Answer;
+    return ProgramFile(File) || ItineraryFile(File);
 }
 
 // One of Ids, asked for when there are several.
@@ -73,33 +46,25 @@ Picked ChooseOne(std::string_view Word, const std::vector<file_id_t> &Ids)
     return std::unexpected(Said);
 }
 
-std::vector<file_id_t> Taken(file_id_t *Ids, int Count)
-{
-    std::vector<file_id_t> Found(Ids, Ids + (Count > 0 ? Count : 0));
-    free(Ids);
-    return Found;
-}
-
 }  // namespace
 
 bool IsProgram(file_id_t File)
 {
-    return Ask(File, ProgramFile);
+    const std::expected<volume::Record, int> Held = volume::Record::Of(File);
+    return Held && ProgramFile(*Held);
 }
 
 bool IsItinerary(file_id_t File)
 {
-    return Ask(File, ItineraryFile);
+    const std::expected<volume::Record, int> Held = volume::Record::Of(File);
+    return Held && ItineraryFile(*Held);
 }
 
 std::optional<std::string> NameOf(file_id_t File)
 {
-    FileMetadata Metadata;
-    if (FileMetadataRead(File, &Metadata) != 0) return std::nullopt;
-    std::optional<std::string> Name;
-    if (Metadata.Filename) Name.emplace(Metadata.Filename);
-    FileMetadataRelease(&Metadata);
-    return Name;
+    const std::expected<volume::Record, int> Held = volume::Record::Of(File);
+    if (!Held || Held->Name().empty()) return std::nullopt;
+    return std::string(Held->Name());
 }
 
 std::size_t StemLength(std::string_view FileName)
@@ -113,12 +78,11 @@ void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
     std::unordered_set<file_id_t> Seen;
     for (const char *Tag : {"app", "utility", "itinerary"}) {
         file_id_t *Ids = nullptr;
-        for (file_id_t File : Taken(Ids, query_all_everywhere(Tag, &Ids))) {
+        const int  Count = query_all_everywhere(Tag, &Ids);
+        for (file_id_t File : volume::Taken(Ids, Count)) {
             if (!Seen.insert(File).second) continue;
-            FileMetadata Metadata;
-            if (FileMetadataRead(File, &Metadata) != 0) continue;
-            if (CommandFile(Metadata) && Metadata.Filename) Visit(File, Metadata.Filename);
-            FileMetadataRelease(&Metadata);
+            const std::expected<volume::Record, int> Held = volume::Record::Of(File);
+            if (Held && CommandFile(*Held) && !Held->Name().empty()) Visit(File, Held->Name());
         }
     }
 }
@@ -126,22 +90,20 @@ void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
 Picked Pick(std::string_view Name)
 {
     file_id_t *Ids   = nullptr;
-    int        Total = query_all_everywhere(std::string(Name).c_str(), &Ids);
+    const int  Total = query_all_everywhere(std::string(Name).c_str(), &Ids);
     if (Total < 0) return std::unexpected(Total);
 
     // A name whose files the volume will not show — its medium gone — is
     // there and would not start, not a name nobody has.
     std::vector<file_id_t> Commands;
     int                    Unread = 0;
-    for (file_id_t File : Taken(Ids, Total)) {
-        FileMetadata Metadata;
-        int          Rc = FileMetadataRead(File, &Metadata);
-        if (Rc != 0) {
-            if (Unread == 0) Unread = Rc;
+    for (file_id_t File : volume::Taken(Ids, Total)) {
+        const std::expected<volume::Record, int> Held = volume::Record::Of(File);
+        if (!Held) {
+            if (Unread == 0) Unread = Held.error();
             continue;
         }
-        if (CommandFile(Metadata)) Commands.push_back(File);
-        FileMetadataRelease(&Metadata);
+        if (CommandFile(*Held)) Commands.push_back(File);
     }
     if (!Commands.empty()) return ChooseOne(Name, Commands);
     return std::unexpected(Unread != 0 ? Unread : -ERR_FILE_NOT_FOUND);
@@ -149,7 +111,8 @@ Picked Pick(std::string_view Name)
 
 namespace {
 
-// The files called Thing: here, or else anywhere on the volume.
+// The files called Thing: here, or else anywhere on the volume. A negative
+// -error_t when the volume would not answer.
 int FindThing(std::string_view Thing, std::vector<file_id_t> &Found)
 {
     BoxFormLookup Lookup;
@@ -157,8 +120,8 @@ int FindThing(std::string_view Thing, std::vector<file_id_t> &Found)
     const std::string Name(Thing);
     for (bool Everywhere : {false, true}) {
         file_id_t *Ids   = nullptr;
-        int        Count = Lookup.Find(&Lookup, Name.c_str(), Everywhere, &Ids);
-        Found = Taken(Ids, Count);
+        const int  Count = Lookup.Find(&Lookup, Name.c_str(), Everywhere, &Ids);
+        Found = volume::Taken(Ids, Count);
         if (Count != 0) return Count;
     }
     return 0;
@@ -178,7 +141,7 @@ Picked PickThing(Hub &Self, std::string_view Thing)
     } else {
         int Count = FindThing(Thing, Found);
         if (Count < 0) {
-            Say("run: the volume would not answer for {} (error {})\n", Thing, -Count);
+            Say("run: the volume would not answer for {} ({})\n", Thing, Reason(Count));
             return std::unexpected(Said);
         }
         if (Count == 0) {

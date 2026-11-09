@@ -50,13 +50,13 @@ Asks ReadLine(const Words &Typed)
             continue;
         }
         if (Word.size() == 1) {
-            print("use: a sign wants a tag right after it: use +draft, use -cpp\n");
+            Say("use: a sign wants a tag right after it: use +draft, use -cpp\n");
             return Asks::Unreadable;
         }
         Signed = true;
     }
     if (Plain && Signed) {
-        print("use: say the whole context, or change it with + and -, not both at once: "
+        Say("use: say the whole context, or change it with + and -, not both at once: "
               "use code cpp, or use +draft -cpp\n");
         return Asks::Unreadable;
     }
@@ -81,7 +81,7 @@ std::string Joined(const Words &Typed, char Sign)
 
 }  // namespace
 
-bool Use(Hub &, const Words &Typed, std::string_view)
+bool Use(Hub &, const Words &Typed)
 {
     bool Remembered = false, Unchanged = false;
     int  Rc         = 0;
@@ -104,18 +104,18 @@ bool Use(Hub &, const Words &Typed, std::string_view)
 
     if (Rc < 0) {
         const error_t Why = box_errno_of(Rc);
-        if (Why == ERR_ACCESS_DENIED) print("use: only the hub and system programs may set the Use Context\n");
+        if (Why == ERR_ACCESS_DENIED) Say("use: only the hub and system programs may set the Use Context\n");
         else if (Why == ERR_INVALID_ARGUMENT || Why == ERR_TAGFS_TAG_TOO_LONG)
-            print("use: a tag is longer than a tag may be\n");
-        else Say("use: refused (error {})\n", static_cast<int>(Why));
+            Say("use: a tag is longer than a tag may be\n");
+        else Say("use: refused ({})\n", Reason(Why));
         return false;
     }
     // The volume remembers the context across the night; when it cannot, the
     // person hears it now rather than at the next boot.
     if (Typed.Count() == 1)
-        print(Remembered ? "Context cleared\n" : "Context cleared; this volume still remembers the old one\n");
-    else if (Unchanged) print("Context unchanged\n");
-    else print(Remembered ? "Context set\n" : "Context set; this volume will not remember it\n");
+        Say(Remembered ? "Context cleared\n" : "Context cleared; this volume still remembers the old one\n");
+    else if (Unchanged) Say("Context unchanged\n");
+    else Say(Remembered ? "Context set\n" : "Context set; this volume will not remember it\n");
     return true;
 }
 

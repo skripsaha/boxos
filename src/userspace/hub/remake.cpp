@@ -4,13 +4,11 @@
 
 #include <cstdint>
 
-#include "box/error.h"
-#include "box/memory.h"
-#include "box/print.h"
 #include "box/recipe.h"
 
-#include "fill.h"
+#include "held.h"
 #include "hub.h"
+#include "launch.h"
 #include "programs.h"
 #include "say.h"
 
@@ -33,8 +31,8 @@ void SayNames(const BoxRecipe &Recipe, const std::uint8_t *States, std::uint8_t 
     std::size_t Said = 0;
     for (std::size_t I = First; I < Recipe.FileCount; I++) {
         if (States[I] != State) continue;
-        if (Said > 0) print(Said + 1 == Count ? " and " : ", ");
-        print(Recipe.Files[I].Name);
+        if (Said > 0) Say(Said + 1 == Count ? " and " : ", ");
+        Say(Recipe.Files[I].Name);
         Said++;
     }
 }
@@ -49,7 +47,7 @@ bool MakeAgain(Hub &Self, const BoxRecipe &Recipe, file_id_t &Program, std::stri
         return false;
     }
     file_id_t Made = 0;
-    if (!fill::AndRunOn(Self, *Tool, Recipe.By, Program, Made)) {
+    if (!launch::OnThing(Self, *Tool, Recipe.By, Program, Made)) {
         Say("{}: not started: it could not be made again\n", Who);
         return false;
     }
@@ -74,7 +72,7 @@ bool FollowStates(Hub &Self, const BoxRecipe &Recipe, const std::uint8_t *States
     if (Changed > 0) {
         Say("{}: ", Who);
         SayNames(Recipe, States, RECIPE_CHANGED, 0, Changed);
-        print(" changed since it was made; making it again\n");
+        Say(" changed since it was made; making it again\n");
         return MakeAgain(Self, Recipe, Program, Who);
     }
     if (Gone > 0) {
@@ -89,25 +87,22 @@ bool FollowStates(Hub &Self, const BoxRecipe &Recipe, const std::uint8_t *States
 
 bool WhenChanged(Hub &Self, file_id_t &Program, std::string_view Who)
 {
-    BoxRecipe Recipe;
-    int       Rc = recipe_of_file(Program, &Recipe);
+    HeldRecipe Recipe;
+    int        Rc = Recipe.Read(Program);
     if (Rc != 0) {
-        Say("{}: its Recipe cannot be read (error {}); started as it is\n", Who, static_cast<int>(box_errno_of(Rc)));
+        Say("{}: its Recipe cannot be read ({}); started as it is\n", Who, Reason(Rc));
         return true;
     }
-    if (!Recipe.Declared) return true;
+    if (!Recipe->Declared) return true;
 
     std::uint8_t *States = nullptr;
-    bool          Start  = true;
-    Rc = recipe_check(&Recipe, &States);
-    if (Rc != 0)
-        Say("{}: the files it was made from cannot be read (error {}); started as it was made\n", Who,
-            static_cast<int>(box_errno_of(Rc)));
-    else
-        Start = FollowStates(Self, Recipe, States, Program, Who);
-    free(States);
-    recipe_release(&Recipe);
-    return Start;
+    Rc = recipe_check(&*Recipe, &States);
+    const HeldHeap<std::uint8_t> Checked(States);
+    if (Rc != 0) {
+        Say("{}: the files it was made from cannot be read ({}); started as it was made\n", Who, Reason(Rc));
+        return true;
+    }
+    return FollowStates(Self, *Recipe, States, Program, Who);
 }
 
 }  // namespace hub::remake

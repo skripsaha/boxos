@@ -1,13 +1,17 @@
-/* fill.h — a program's Form filled from the typed line, then the program started.
+/* fill.h — a program's Form filled from the typed line: what the program is
+ * started with.
  *
  * BoxLib's filler sorts the words by what each one is and says when it needs
  * the person: a name that means several files, a field left empty, `all` with
  * no Use Context. The hub only asks those questions and hands the answers
  * back. Every program goes through here, with a Form or without one: a program
- * with none still gets the arrow. */
+ * with none still gets the arrow. What is filled is started elsewhere
+ * (launch.h); here nothing starts. */
 #ifndef HUB_FILL_H
 #define HUB_FILL_H
 
+#include <optional>
+#include <string>
 #include <string_view>
 
 #include "box/form.h"
@@ -21,6 +25,15 @@ struct Hub;
 
 namespace fill {
 
+// A Form filled: the program and the Luggage it is started with, and where
+// what it gives back goes.
+struct Filled {
+    file_id_t   Program  = 0;
+    std::string Luggage;            // word 0 the name the person used, then its words as filled
+    file_id_t   Screen   = 0;       // the file its screen goes into (->); 0: the person sees it
+    bool        Souvenir = false;   // its Souvenir was asked for, to be kept as `them`
+};
+
 // The hub's view for a filler: the volume, `them`, and the names of the
 // running Itinerary's fields.
 void Lookup(const Hub &Self, BoxFormLookup &Out);
@@ -30,19 +43,14 @@ void Lookup(const Hub &Self, BoxFormLookup &Out);
 // when the line could not be filled, and why was said.
 HeldFiller Form(const BoxForm &Declared, BoxFormLookup &Lookup, std::string_view Who, std::string_view Line);
 
-// Program's Form filled from Line — the words after its name, as typed — and
-// the program started. Who is the name the person used: word 0 of the
-// program's Luggage and what every sentence begins with. A program made here
-// whose files changed since is made again first (remake.h). Stands by until
-// it is gone and keeps what it gave as `them`. True when it started and
-// ended with 0.
-bool AndRun(Hub &Self, file_id_t Program, std::string_view Who, std::string_view Line);
+// Program's Form filled from Line — the words after its name, as typed. Who
+// is the name the person used: word 0 of the Luggage and what every sentence
+// begins with. Nothing when it could not be filled, and why was said.
+std::optional<Filled> FromLine(const Hub &Self, file_id_t Program, std::string_view Who, std::string_view Line);
 
-// Program started on the one file Thing — its Form filled from `it`, that
-// file, asking nobody — and stood by until gone. True when it ended with 0;
-// Given is then the first file it gave back, 0 for none. The person's `them`
-// is neither read nor changed.
-bool AndRunOn(Hub &Self, file_id_t Program, std::string_view Who, file_id_t Thing, file_id_t &Given);
+// Program's Form filled from `it`, the one file Thing, asking nobody: the
+// person's own `them` is neither read nor changed.
+std::optional<Filled> OnThing(file_id_t Program, std::string_view Who, file_id_t Thing);
 
 }  // namespace fill
 }  // namespace hub

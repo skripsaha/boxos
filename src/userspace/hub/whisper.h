@@ -20,7 +20,8 @@
  *
  * Tab with nothing whispered says what the command still needs: the fields of
  * its Form the line has not filled, or what a built-in takes. Up and Down walk
- * the history. One Whisper for each line: made before it is read, gone after. */
+ * the history. One Whisper for each line: made before it is read, gone after.
+ * The line is read as typing.h reads it. */
 #ifndef HUB_WHISPER_H
 #define HUB_WHISPER_H
 
@@ -33,6 +34,7 @@
 #include "box/print.h"
 
 #include "held.h"
+#include "typing.h"
 #include "view.h"
 
 namespace hub {
@@ -50,18 +52,6 @@ public:
     LineWhisper *Hook() noexcept { return &Hooked.Line; }
 
 private:
-    // The line as typed, cut as the Luggage and the Form cut it.
-    struct Typing {
-        std::string_view Line;
-        std::size_t      Words      = 0;       // whole words before the one typed; 0: it is the command's name
-        std::size_t      NameStart  = 0;       // the command's name, once it is a whole word
-        std::size_t      NameEnd    = 0;
-        std::size_t      WordStart  = 0;       // the word being typed, its pieces before a comma and all
-        std::size_t      PieceStart = 0;       // its piece being typed: after a comma, or its opening quote
-        bool             Quoted     = false;   // that piece is inside "double quotes"
-        bool             AfterArrow = false;   // the word before it is ->
-        bool             Everywhere = false;   // `everywhere` stands before it
-    };
     // What the word being typed can be.
     struct Offer {
         bool Commands   = false;   // a command's name
@@ -72,6 +62,11 @@ private:
         bool Them       = false;   // `them` or `it` can stand here
         bool Several    = false;   // and several files, not only one
         bool Signed     = false;   // a + or - may come before it
+
+        // Widened by what a field of a Form takes: files or tags.
+        void Take(std::uint8_t Kind) noexcept;
+        // The shelves its names stand on.
+        std::vector<View::Shelf> Shelves() const;
     };
     // The editor's whisperer, and the way back to this one: the editor hands
     // its whisperer back, and it begins with what the editor reads.
@@ -97,7 +92,7 @@ private:
     bool        HoldForm(std::string_view Name);
     Sorted      SortForm(std::string_view Words, std::vector<bool> &Filled, std::string *Refusal);
     void        OfferProgram(const Typing &Line, std::string_view Name, Offer &Out);
-    void        MakeOffer(const Typing &Line, Offer &Out);
+    Offer       MakeOffer(const Typing &Line);
     bool        Named(const Offer &Offered, std::string_view Word);
     void        ReadRecent();
     bool        Latest(const Offer &Offered, std::string_view Typed, bool Quoted, std::string_view &Out);
@@ -116,7 +111,6 @@ private:
     std::string              FormOf;          // the command whose Form was asked for
     bool                     FormAsked = false;
     HeldForm                 Form;
-    bool                     FormHeld = false;
     std::vector<Recent>      Words;           // every word of the history, each once, in byte order
     bool                     WordsRead = false;
     std::vector<std::size_t> Walk;            // Up's order, into the history

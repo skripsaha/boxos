@@ -11,23 +11,19 @@
  * the next line. */
 
 #include "history.h"
-#include "say.h"
-
-#include <cstring>
 
 #include "box/error.h"
 #include "box/file.h"
-#include "box/memory.h"
-#include "box/print.h"
+
+#include "volume.h"
 
 namespace hub {
 
 namespace {
 
-constexpr const char   *FileName = "history";
-constexpr const char   *FileTags = "hub,history";
-constexpr const char   *GrownTag = "history";
-constexpr std::size_t   Piece    = 64 * 1024;
+constexpr const char *FileName = "history";
+constexpr const char *FileTags = "hub,history";
+constexpr const char *GrownTag = "history";
 
 // What a line may hold: anything but a byte below a blank — a tab or a line
 // end would cut it — and DEL. Bytes past ASCII are kept as they are.
@@ -38,23 +34,17 @@ bool Usable(std::string_view Text)
     return true;
 }
 
-// The file on the whole volume: called history, wearing both tags, not in
-// the trash. 0 when there is none.
+// The file on the whole volume: called history, wearing both tags. 0 when
+// there is none.
 file_id_t Find()
 {
-    file_id_t *Ids   = nullptr;
-    int        Count = query_all_everywhere(FileTags, &Ids);
-    file_id_t  Found = 0;
-    for (int I = 0; I < Count && Found == 0; I++) {
-        FileMetadata Metadata;
-        if (FileMetadataRead(Ids[I], &Metadata) != 0) continue;
-        if (Metadata.Filename && std::strcmp(Metadata.Filename, FileName) == 0 &&
-            !(Metadata.Flags & FILE_FLAG_TRASHED))
-            Found = Ids[I];
-        FileMetadataRelease(&Metadata);
+    file_id_t *Ids = nullptr;
+    const int  Count = query_all_everywhere(FileTags, &Ids);
+    for (file_id_t Id : volume::Taken(Ids, Count)) {
+        const std::expected<volume::Record, int> Held = volume::Record::Of(Id);
+        if (Held && Held->Name() == FileName) return Id;
     }
-    free(Ids);
-    return Found;
+    return 0;
 }
 
 }  // namespace
@@ -74,42 +64,36 @@ void History::Remember(std::string_view Text, std::string_view Context)
     Lines.push_back(Line{std::string(Text), std::string(Context)});
 }
 
-// The file read on from where it was read to, a whole line at a time.
+// The file read on from where it was read to, a whole line at a time. A file
+// other than the one read so far — the person erased that one — or the same
+// made shorter is the account now: what it says replaces what was read of
+// the old, rather than coming in twice.
 void History::ReadOn()
 {
-    FileMetadata Metadata;
-    if (FileMetadataRead(File, &Metadata) != 0) return;
-    const std::uint64_t Size = Metadata.Size;
-    FileMetadataRelease(&Metadata);
-    if (Size < Known) Known = 0;   // the file was made shorter: read it again whole
-    if (Size == Known) return;
-
-    std::string Text(static_cast<std::size_t>(Size - Known), '\0');
-    std::size_t Read = 0;
-    while (Read < Text.size()) {
-        const std::size_t Want = Text.size() - Read < Piece ? Text.size() - Read : Piece;
-        int64_t           Got  = fread(File, Known + Read, Text.data() + Read, Want);
-        if (Got <= 0) break;
-        Read += static_cast<std::size_t>(Got);
+    const std::expected<volume::Record, int> Held = volume::Record::Of(File);
+    if (!Held) return;
+    if (File != KnownOf || Held->Size() < Known) {
+        if (KnownOf != 0) Lines.clear();
+        KnownOf = File;
+        Known   = 0;
     }
-    Text.resize(Read);
+    if (Held->Size() == Known) return;
 
+    const std::expected<std::string, int> Text = volume::Read(File, Known, Held->Size() - Known);
+    if (!Text) return;
     std::size_t At = 0;
-    for (;;) {
-        const std::size_t End = Text.find('\n', At);
-        if (End == std::string::npos) break;   // a line not ended yet is read when it is
-        std::string_view Record(Text.data() + At, End - At);
-        const std::size_t Tab = Record.find('\t');
-        if (Tab == std::string_view::npos) Remember(Record, {});
-        else Remember(Record.substr(Tab + 1), Record.substr(0, Tab));
-        At = End + 1;
+    for (std::size_t End; (End = Text->find('\n', At)) != std::string::npos; At = End + 1) {
+        const std::string_view Entry(Text->data() + At, End - At);
+        const std::size_t      Tab = Entry.find('\t');
+        if (Tab == std::string_view::npos) Remember(Entry, {});
+        else Remember(Entry.substr(Tab + 1), Entry.substr(0, Tab));
     }
-    Known += At;
+    Known += At;   // a line not ended yet is read when it is
 }
 
 void History::Catch()
 {
-    bool Added = false;
+    bool  Added = false;
     Touch Said{};
     while (Grown != TOUCH_TAG_INVALID && touch_try_pop_tag(Grown, &Said))
         Added |= (Said.flags & TOUCH_FLAG_TAGFS) != 0;
@@ -119,61 +103,59 @@ void History::Catch()
 }
 
 // The file found, or made when there is none — outside the Use Context, so it
-// wears only its own tags. False when the volume has none to give.
-bool History::Reach()
+// wears only its own tags. Not reached: the volume's refusal.
+std::expected<file_id_t, int> History::Reach()
 {
-    if (File != 0) return true;
-    File  = Find();
-    Known = 0;
-    if (File == 0) {
-        int64_t Made = create_everywhere(FileName, FileTags);
-        if (Made > 0) File = static_cast<file_id_t>(Made);
-    }
-    return File != 0;
+    if (File != 0) return File;
+    File = Find();
+    if (File != 0) return File;
+    const int64_t Made = create_everywhere(FileName, FileTags);
+    if (Made < 0) return std::unexpected(static_cast<int>(Made));
+    File = static_cast<file_id_t>(Made);
+    if (File == 0) return std::unexpected(-ERR_UNKNOWN);   // create answers an id or a refusal, never 0
+    return File;
 }
 
 // One record added to the end of the file and read back. The file known may
 // have been erased since: then it is found or made again, and the record goes
-// there. A record the volume would not keep is held here.
-void History::Write(std::string_view Record)
+// there. Not kept whole: why.
+std::optional<History::Unkept> History::Write(const std::string &Record)
 {
-    int64_t Wrote = -ERR_IO;
-    if (Reach()) {
-        Wrote = file_append(File, Record.data(), Record.size());
-        if (Wrote < 0) {
-            File = 0;
-            if (Reach()) Wrote = file_append(File, Record.data(), Record.size());
-        }
+    std::expected<file_id_t, int> Reached = Reach();
+    int64_t                       Wrote   = Reached ? file_append(*Reached, Record.data(), Record.size()) : 0;
+    if (Reached && Wrote < 0) {
+        File    = 0;
+        Reached = Reach();
+        if (Reached) Wrote = file_append(*Reached, Record.data(), Record.size());
     }
-    if (Wrote == static_cast<int64_t>(Record.size())) {
-        ReadOn();
-        return;
-    }
-
-    const std::size_t Tab = Record.find('\t');
-    Remember(Record.substr(Tab + 1, Record.size() - Tab - 2), Record.substr(0, Tab));
-    if (Told) return;
-    Told = true;
-    if (Wrote < 0)
-        Say("history: the volume would not keep the line (error {}); this hub remembers it until it ends\n",
-            static_cast<int>(box_errno_of(static_cast<int>(Wrote))));
-    else
-        print("history: the volume kept only part of the line; this hub remembers it whole until it ends\n");
+    if (!Reached) return Unkept{Reached.error()};
+    if (Wrote < 0) return Unkept{static_cast<int>(Wrote)};
+    ReadOn();
+    if (Wrote != static_cast<int64_t>(Record.size())) return Unkept{0};
+    return std::nullopt;
 }
 
-void History::Keep(std::string_view Text, std::string_view Context, bool ToFile)
+std::optional<History::Unkept> History::Keep(std::string_view Text, std::string_view Context, bool ToFile)
 {
-    if (Text.empty() || !Usable(Text) || !Usable(Context)) return;
+    if (Text.empty() || !Usable(Text) || !Usable(Context)) return std::nullopt;
     Catch();
-    if (!Lines.empty() && Lines.back().Text == Text && Lines.back().Context == Context) return;
+    if (!Lines.empty() && Lines.back().Text == Text && Lines.back().Context == Context) return std::nullopt;
     if (!ToFile) {
         Remember(Text, Context);
-        return;
+        return std::nullopt;
     }
+
     std::string Record;
     Record.reserve(Context.size() + Text.size() + 2);
     Record.append(Context).append(1, '\t').append(Text).append(1, '\n');
-    Write(Record);
+    const std::optional<Unkept> Trouble = Write(Record);
+    if (!Trouble) return std::nullopt;
+
+    // Read back, a line the volume took only in part is held as it was typed.
+    if (Lines.empty() || Lines.back().Text != Text || Lines.back().Context != Context) Remember(Text, Context);
+    if (Told) return std::nullopt;
+    Told = true;
+    return Trouble;
 }
 
 std::vector<std::size_t> History::Walk(std::string_view Context, bool HereFirst) const

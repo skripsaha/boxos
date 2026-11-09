@@ -30,22 +30,22 @@ namespace hub {
 
 Look ReadLook()
 {
-    return Look{box::settings::yes("greeting"),
-                box::settings::word("sign"),
-                box::settings::yes("context"),
-                box::settings::yes("them"),
-                box::settings::color("sign-color"),
-                box::settings::color("context-color"),
-                box::settings::color("them-color"),
-                box::settings::color("news-color"),
-                box::settings::color("refusal-color"),
-                box::settings::yes("ended"),
-                box::settings::number("long-command"),
-                box::settings::yes("whisper"),
-                box::settings::yes("needs"),
-                box::settings::yes("did-you-mean"),
-                box::settings::yes("history"),
-                box::settings::choice("recall") == "here-first"};
+    return Look{.Greeting        = box::settings::yes("greeting"),
+                .Sign            = box::settings::word("sign"),
+                .Context         = box::settings::yes("context"),
+                .Them            = box::settings::yes("them"),
+                .SignColor       = box::settings::color("sign-color"),
+                .ContextColor    = box::settings::color("context-color"),
+                .ThemColor       = box::settings::color("them-color"),
+                .NewsColor       = box::settings::color("news-color"),
+                .RefusalColor    = box::settings::color("refusal-color"),
+                .Ended           = box::settings::yes("ended"),
+                .LongCommand     = box::settings::number("long-command"),
+                .Whisper         = box::settings::yes("whisper"),
+                .Needs           = box::settings::yes("needs"),
+                .DidYouMean      = box::settings::yes("did-you-mean"),
+                .History         = box::settings::yes("history"),
+                .RecallHereFirst = box::settings::choice("recall") == "here-first"};
 }
 
 }  // namespace hub

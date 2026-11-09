@@ -1,10 +1,10 @@
 /* programs.h — find the program a name or a thing means.
  *
  * The rule is the kernel's (SysExecCandidate): a file counts as a program when
- * it is active and wears app or utility. The hub holds the files that wear the
- * name to the same rule before it asks the kernel to start one, so what it
- * lists is exactly what would start. An active file that wears itinerary is a
- * command too: the hub runs its steps itself. */
+ * it wears app or utility. The hub holds the files that wear the name to the
+ * same rule before it asks the kernel to start one, so what it lists is
+ * exactly what would start. A file that wears itinerary is a command too: the
+ * hub runs its steps itself. */
 #ifndef HUB_PROGRAMS_H
 #define HUB_PROGRAMS_H
 

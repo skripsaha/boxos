@@ -5,16 +5,10 @@
 #include <algorithm>
 #include <cstring>
 
-#include "box/color.h"
 #include "box/error.h"
 #include "box/form.h"
 #include "box/memory.h"
-#include "box/print.h"
 #include "box/system.h"
-#include "proc_exit.h"
-
-#include "hub.h"
-#include "say.h"
 
 namespace hub {
 
@@ -78,19 +72,6 @@ std::expected<Ending, int> Jobs::Run(file_id_t Program, std::string_view Luggage
     int           Pid = proc_exec_file(Program, Luggage.data(), Luggage.size(), nullptr, &Generation);
     if (Pid <= 0) return std::unexpected(Pid == 0 ? -ERR_SPAWN_FAILED : Pid);
     return WaitGone(static_cast<std::uint32_t>(Pid), Generation);
-}
-
-void SayEnding(const Hub &Self, std::string_view Who, const Ending &End)
-{
-    if (!Self.Shown.Ended || !End.Seen || End.Code == 0) return;
-    set_color(Self.Shown.NewsColor);
-    const std::string Where = End.Fell && !End.In.empty() ? " in " + End.In : std::string();
-    if (End.Code > 0) Say("{} ended: {}\n", Who, static_cast<int>(End.Code));
-    else if (End.Code == PROC_EXIT_KILLED) Say("{} was ended by another program\n", Who);
-    else if (End.Code == PROC_EXIT_STACK_OVERFLOW) Say("{} stopped: its stack ran out{}\n", Who, Where);
-    else if (End.Fell) Say("{} stopped: {}{}\n", Who, process_fault_said(End.Vector), Where);
-    else Say("{} stopped: the system stopped it\n", Who);
-    set_color(COLOR_DEFAULT);
 }
 
 }  // namespace hub

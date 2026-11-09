@@ -1,8 +1,9 @@
-/* asking.h — the questions the hub puts to the person while it fills a Form.
+/* asking.h — the questions the hub puts to the person: the ones a Form's
+ * filler raises, and the hub's own.
  *
  * One look for all of them: what is asked, the choices numbered, a short
  * prompt. An empty answer, or no one to answer, ends the question, and the
- * caller starts nothing. */
+ * caller does not go on. */
 #ifndef HUB_ASKING_H
 #define HUB_ASKING_H
 
@@ -24,6 +25,9 @@ Answer Line(std::string_view Prompt, std::string &Text);
 // "<word> could be any of these:", each file numbered and wearing its tags,
 // then "which one? (a number)" — asked again for a number not on the list.
 Answer Which(std::string_view Word, std::span<const file_id_t> Ids, file_id_t &Chosen);
+
+// "<question> (yes or no)" — asked again for anything else.
+Answer YesNo(std::string_view Question, bool &Yes);
 
 // "all is the whole volume here: N files. sure? (yes or no)"
 Answer Sure(std::size_t Count, bool &Yes);

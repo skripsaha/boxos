@@ -5,6 +5,8 @@
 #include <memory>
 
 #include "box/form.h"
+#include "box/memory.h"
+#include "box/recipe.h"
 
 namespace hub {
 
@@ -21,6 +23,7 @@ public:
     const BoxForm *operator->() const noexcept { return &Value; }
     BoxForm       *Take() noexcept { Let(); Held = true; return &Value; }  // for a reader to fill
     void           Drop() noexcept { Held = false; }                       // the reader refused: nothing held
+    bool           Holds() const noexcept { return Held; }
     void           Let() noexcept
     {
         if (Held) form_release(&Value);
@@ -32,10 +35,43 @@ private:
     bool    Held = false;
 };
 
+// A program's Recipe, read from its file, released with its holder.
+class HeldRecipe {
+public:
+    HeldRecipe() = default;
+    HeldRecipe(const HeldRecipe &) = delete;
+    HeldRecipe &operator=(const HeldRecipe &) = delete;
+    ~HeldRecipe()
+    {
+        if (Held) recipe_release(&Value);
+    }
+
+    // Read from Program: 0, or a negative -error_t and nothing held.
+    int Read(file_id_t Program) noexcept
+    {
+        const int Rc = recipe_of_file(Program, &Value);
+        Held = Rc == 0;
+        return Rc;
+    }
+    const BoxRecipe &operator*() const noexcept { return Value; }
+    const BoxRecipe *operator->() const noexcept { return &Value; }
+
+private:
+    BoxRecipe Value{};
+    bool      Held = false;
+};
+
 struct FillerEnd {
     void operator()(BoxFormFiller *Filler) const noexcept { form_fill_end(Filler); }
 };
 using HeldFiller = std::unique_ptr<BoxFormFiller, FillerEnd>;
+
+// What boxlib handed over on its heap, freed with its holder.
+struct HeapFree {
+    void operator()(void *Bytes) const noexcept { free(Bytes); }
+};
+template <typename Value>
+using HeldHeap = std::unique_ptr<Value, HeapFree>;
 
 }  // namespace hub
 

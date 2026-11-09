@@ -661,6 +661,9 @@ STAND_HALT_ENDS='^\[HALT\] (Storage sync complete|the medium on seat [0-9]+ took
 # What a boot with no volume of its own says, and then waits: nothing is
 # started in a volume's place (main.c), and a volume that comes starts its own.
 NO_VOLUME_YET='no volume is here yet'
+# What a boot says once it has started a volume's programs, none or some
+# (main.c, AutostartLaunchFromVolume): the last word of the boot's own.
+AUTOSTART_DONE='process(es) launched'
 # How long a burst of console output may pause and still be the same burst.
 # This is the other kind of number: not "how long does the machine take", which
 # is unbounded, but "how big a gap inside one program's output still counts as

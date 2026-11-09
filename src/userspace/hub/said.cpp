@@ -41,12 +41,12 @@ constexpr std::size_t Pail = 4096;
 // and false when it stopped being readable or Out stopped taking bytes.
 bool Pour(Current *Log, Current *Out, const std::string &Name, const char *What, std::uint64_t &Poured)
 {
-    static std::array<char, Pail> Bytes;
+    std::array<char, Pail> Bytes;
     for (;;) {
         int Read = current_read(Log, Bytes.data(), Bytes.size());
         if (Read == CURRENT_CLOSED) return true;
         if (Read < 0) {
-            Say("\n{} stopped being readable after {} byte(s) (error {})\n", What, Poured, -Read);
+            Say("\n{} stopped being readable after {} byte(s) ({})\n", What, Poured, Reason(Read));
             return false;
         }
         if (!Out) {
@@ -59,7 +59,8 @@ bool Pour(Current *Log, Current *Out, const std::string &Name, const char *What,
         for (int At = 0; At < Read;) {
             int Wrote = current_write(Out, Bytes.data() + At, static_cast<std::size_t>(Read - At));
             if (Wrote <= 0) {
-                Say("{} stopped taking bytes after {} (error {})\n", Name, Poured, Wrote < 0 ? -Wrote : 0);
+                Say("{} stopped taking bytes after {}{}\n", Name, Poured,
+                    Wrote < 0 ? " (" + std::string(Reason(Wrote)) + ")" : std::string());
                 return false;
             }
             At += Wrote;
@@ -70,7 +71,7 @@ bool Pour(Current *Log, Current *Out, const std::string &Name, const char *What,
 
 }  // namespace
 
-bool Said(Hub &, const Words &Typed, std::string_view)
+bool Said(Hub &, const Words &Typed)
 {
     const bool        Before = Typed.Count() > 1 && Typed[1] == "before";
     const char       *Tag    = Before ? "log:previous" : "log:file";
@@ -82,8 +83,8 @@ bool Said(Hub &, const Words &Typed, std::string_view)
     Current *Log = current_open_ex(Tag, CURRENT_READ, 0, 0, &Why);
     if (!Log) {
         if (Why == ERR_UNSUPPORTED)
-            print("This kernel does not keep what it says. Build it with PRINTTOFILE=on and it will be here.\n");
-        else Say("{} could not be opened (error {})\n", What, static_cast<unsigned>(Why));
+            Say("This kernel does not keep what it says. Build it with PRINTTOFILE=on and it will be here.\n");
+        else Say("{} could not be opened ({})\n", What, Reason(Why));
         return false;
     }
 
@@ -96,7 +97,7 @@ bool Said(Hub &, const Words &Typed, std::string_view)
         Out = current_open_ex(("file:" + Name).c_str(), CURRENT_WRITE, 0, CURRENT_CREATE | CURRENT_FRESH, &Why);
         if (!Out) {
             Refused = Why;
-            Say("{} could not be written (error {}) — printing it instead\n", Name, static_cast<unsigned>(Why));
+            Say("{} could not be written ({}) — printing it instead\n", Name, Reason(Why));
         }
     }
 
@@ -126,7 +127,7 @@ bool Said(Hub &, const Words &Typed, std::string_view)
     Say("\n-- {} byte(s): {} --\n", Poured, What);
     // Said again at the bottom: the refusal printed above is a thousand lines
     // up by now, scrolled off the glass before anyone with a camera reads it.
-    if (Refused != OK) Say("-- and {} was NOT written: error {} --\n", Name, static_cast<unsigned>(Refused));
+    if (Refused != OK) Say("-- and {} was NOT written: {} --\n", Name, Reason(Refused));
     return true;
 }
 

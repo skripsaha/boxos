@@ -1,59 +1,32 @@
 /* asking.cpp — a question, and the line that answers it. */
 
 #include "asking.h"
-#include "say.h"
 
-#include "box/file.h"
 #include "box/memory.h"
 #include "box/print.h"
+
+#include "say.h"
+#include "tags.h"
+#include "text.h"
+#include "volume.h"
 
 namespace hub::asking {
 
 namespace {
 
-bool Blank(char C)
-{
-    return C == ' ' || C == '\t';
-}
-
-// The answer is the word, in either case.
-bool Says(std::string_view Typed, std::string_view Word)
-{
-    if (Typed.size() != Word.size()) return false;
-    for (std::size_t I = 0; I < Typed.size(); I++) {
-        char C = Typed[I];
-        if (C >= 'A' && C <= 'Z') C = static_cast<char>(C - 'A' + 'a');
-        if (C != Word[I]) return false;
-    }
-    return true;
-}
-
-// The tags a file wears, in brackets, a comma and a blank between.
-void SayTags(std::string_view Tags)
-{
-    print("  (");
-    for (bool First = true; !Tags.empty(); First = false) {
-        const std::size_t Comma = Tags.find(',');
-        if (!First) print(", ");
-        const std::string_view Tag = Tags.substr(0, Comma);
-        print_bytes(Tag.data(), Tag.size());
-        if (Comma == std::string_view::npos) break;
-        Tags.remove_prefix(Comma + 1);
-    }
-    print(")");
-}
-
+// "  2  notes.txt  (text, draft)": a choice as the person tells it from the others.
 void SayChoice(std::size_t Number, file_id_t File)
 {
-    FileMetadata Metadata;
-    if (FileMetadataRead(File, &Metadata) != 0) {
+    const std::expected<volume::Record, int> Held = volume::Record::Of(File);
+    if (!Held) {
         Say("  {}  file #{}\n", Number, static_cast<unsigned long long>(File));
         return;
     }
-    Say("  {}  {}", Number, Metadata.Filename ? Metadata.Filename : "");
-    if (Metadata.Tags) SayTags(Metadata.Tags);
-    print("\n");
-    FileMetadataRelease(&Metadata);
+    std::string Line = std::format("  {}  {}", Number, Held->Name());
+    const std::vector<std::string_view> Tags = tags::Split(Held->Tags());
+    for (std::size_t I = 0; I < Tags.size(); I++) Line.append(I == 0 ? "  (" : ", ").append(Tags[I]);
+    if (!Tags.empty()) Line += ')';
+    Say(Line + "\n");
 }
 
 // The number typed, 1 to Count, or 0 when the answer is not one.
@@ -73,16 +46,13 @@ std::size_t Number(std::string_view Typed, std::size_t Count)
 Answer Line(std::string_view Prompt, std::string &Text)
 {
     Text.clear();
-    print_bytes(Prompt.data(), Prompt.size());
+    Say(Prompt);
     io_flush();
 
-    char *Read   = nullptr;
-    int   Length = readline_grow(&Read);
+    char     *Read   = nullptr;
+    const int Length = readline_grow(&Read);
     if (Length < 0) return Answer::NoOne;
-    std::string_view Typed(Read, static_cast<std::size_t>(Length));
-    while (!Typed.empty() && Blank(Typed.front())) Typed.remove_prefix(1);
-    while (!Typed.empty() && Blank(Typed.back())) Typed.remove_suffix(1);
-    Text.assign(Typed);
+    Text.assign(text::Trimmed(std::string_view(Read, static_cast<std::size_t>(Length))));
     free(Read);
     return Text.empty() ? Answer::Empty : Answer::Given;
 }
@@ -93,8 +63,8 @@ Answer Which(std::string_view Word, std::span<const file_id_t> Ids, file_id_t &C
     for (std::size_t I = 0; I < Ids.size(); I++) SayChoice(I + 1, Ids[I]);
 
     for (;;) {
-        std::string Typed;
-        Answer      Asked = Line("which one? (a number) ", Typed);
+        std::string  Typed;
+        const Answer Asked = Line("which one? (a number) ", Typed);
         if (Asked != Answer::Given) return Asked;
         const std::size_t Chose = Number(Typed, Ids.size());
         if (Chose != 0) {
@@ -105,21 +75,27 @@ Answer Which(std::string_view Word, std::span<const file_id_t> Ids, file_id_t &C
     }
 }
 
-Answer Sure(std::size_t Count, bool &Yes)
+Answer YesNo(std::string_view Question, bool &Yes)
 {
-    Say("all is the whole volume here: {} {}. ", Count, Count == 1 ? "file" : "files");
+    const std::string Prompt = std::string(Question) + " (yes or no) ";
     for (;;) {
-        std::string Typed;
-        Answer      Asked = Line("sure? (yes or no) ", Typed);
+        std::string  Typed;
+        const Answer Asked = Line(Prompt, Typed);
         if (Asked != Answer::Given) return Asked;
-        const bool SaidYes = Says(Typed, "yes") || Says(Typed, "y");
-        const bool SaidNo  = Says(Typed, "no") || Says(Typed, "n");
+        const bool SaidYes = text::Says(Typed, "yes") || text::Says(Typed, "y");
+        const bool SaidNo  = text::Says(Typed, "no") || text::Says(Typed, "n");
         if (SaidYes || SaidNo) {
             Yes = SaidYes;
             return Answer::Given;
         }
-        print("please answer yes or no. ");
+        Say("please answer yes or no. ");
     }
+}
+
+Answer Sure(std::size_t Count, bool &Yes)
+{
+    Say("all is the whole volume here: {} {}. ", Count, Count == 1 ? "file" : "files");
+    return YesNo("sure?", Yes);
 }
 
 void SayCancelled(std::string_view Who, Answer Ended)

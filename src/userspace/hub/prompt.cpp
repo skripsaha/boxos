@@ -4,12 +4,12 @@
 
 #include <string>
 
-#include "box/color.h"
 #include "box/display.h"
 #include "box/print.h"
 
-#include "context.h"
 #include "hub.h"
+#include "say.h"
+#include "tags.h"
 
 namespace hub {
 
@@ -28,29 +28,19 @@ std::size_t TagsRoom()
     return Room;
 }
 
-void Say(std::string_view Text, Color Ink)
-{
-    set_color(Ink);
-    print_bytes(Text.data(), Text.size());
-}
-
 // The tags that fit, whole, and how many more there are: "code,cpp +3".
-std::string Fitted(std::string_view Tags)
+std::string Fitted(std::string_view Context)
 {
-    const std::size_t Total = context::Count(Tags);
-    std::string       Shown;
-    std::size_t       Count = 0;
-    while (!Tags.empty()) {
-        const std::size_t      Comma = Tags.find(',');
-        const std::string_view Tag   = Tags.substr(0, Comma);
+    const std::vector<std::string_view> Tags = tags::Split(Context);
+    std::string                         Shown;
+    std::size_t                         Count = 0;
+    for (std::string_view Tag : Tags) {
         if (Count > 0 && Shown.size() + 1 + Tag.size() > TagsRoom()) break;
         if (Count > 0) Shown += ',';
         Shown += Tag;
         Count++;
-        if (Comma == std::string_view::npos) break;
-        Tags.remove_prefix(Comma + 1);
     }
-    if (Count < Total) Shown += " +" + std::to_string(Total - Count);
+    if (Count < Tags.size()) Shown += " +" + std::to_string(Tags.size() - Count);
     return Shown;
 }
 
@@ -59,16 +49,10 @@ std::string Fitted(std::string_view Tags)
 void ShowPrompt(const Hub &Self, std::string_view Context)
 {
     const Look &Shown = Self.Shown;
-    if (Shown.Context && !Context.empty()) {
-        Say("[", Shown.ContextColor);
-        Say(Fitted(Context), Shown.ContextColor);
-        Say("] ", Shown.ContextColor);
-    }
+    if (Shown.Context && !Context.empty()) SayIn(Shown.ContextColor, "[{}] ", Fitted(Context));
     if (Shown.Them && Self.Given.Known() && !Self.Given.Files().empty())
-        Say(std::to_string(Self.Given.Files().size()) + " ", Shown.ThemColor);
-    Say(Shown.Sign, Shown.SignColor);
-    Say(" ", Shown.SignColor);
-    set_color(COLOR_DEFAULT);
+        SayIn(Shown.ThemColor, "{} ", Self.Given.Files().size());
+    SayIn(Shown.SignColor, "{} ", Shown.Sign);
     io_flush();
 }
 

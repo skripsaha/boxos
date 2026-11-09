@@ -13,10 +13,11 @@
 #include "box/system.h"
 
 #include "asking.h"
-#include "fill.h"
 #include "hub.h"
 #include "itinerary.h"
+#include "launch.h"
 #include "programs.h"
+#include "say.h"
 #include "words.h"
 
 namespace hub {
@@ -26,22 +27,21 @@ namespace {
 // run — a program (or an Itinerary) given as a thing rather than by name:
 // `run planets.elf`, `run it`. The rest of the line is the program's own,
 // sorted into its Form like the words after a program's name.
-bool Run(Hub &Self, const Words &Typed, std::string_view Line)
+bool Run(Hub &Self, const Words &Typed)
 {
     if (Typed.Count() < 2) {
-        print("run: run what? A file such as planets.elf, or it\n");
+        Say("run: run what? A file such as planets.elf, or it\n");
         return false;
     }
-    programs::Picked Program = programs::PickThing(Self, Typed[1]);
+    const programs::Picked Program = programs::PickThing(Self, Typed[1]);
     if (!Program) return false;
     const std::optional<std::string> Name = programs::NameOf(*Program);
     const std::string_view           Who  = Name ? std::string_view(*Name) : Typed[1];
-    const std::string_view           Rest = hub::Rest(Line, 2);
-    return programs::IsItinerary(*Program) ? itinerary::Run(Self, *Program, Who, Rest)
-                                           : fill::AndRun(Self, *Program, Who, Rest);
+    return programs::IsItinerary(*Program) ? itinerary::Run(Self, *Program, Who, Typed.Tail(2))
+                                           : launch::Program(Self, *Program, Who, Typed.Tail(2));
 }
 
-bool Clear(Hub &, const Words &, std::string_view)
+bool Clear(Hub &, const Words &)
 {
     clear();
     return true;
@@ -63,15 +63,12 @@ bool AnotherHub()
 
 // exit — the hub ends. When it is the last one, the person is asked first:
 // with no hub left, nothing on this machine takes a typed line.
-bool Exit(Hub &Self, const Words &, std::string_view)
+bool Exit(Hub &Self, const Words &)
 {
-    if (!AnotherHub()) {
-        std::string    Typed;
-        asking::Answer Asked = asking::Line("no hub will be left — sure? (yes or no) ", Typed);
-        if (Asked != asking::Answer::Given || (Typed != "yes" && Typed != "y")) {
-            print("exit: the hub stays\n");
-            return true;
-        }
+    bool Sure = true;
+    if (!AnotherHub() && (asking::YesNo("no hub will be left — sure?", Sure) != asking::Answer::Given || !Sure)) {
+        Say("exit: the hub stays\n");
+        return true;
     }
     Self.Going = false;
     return true;

@@ -13,8 +13,10 @@
 #include "box/memory.h"
 
 #include "builtins.h"
-#include "context.h"
+#include "held.h"
 #include "programs.h"
+#include "tags.h"
+#include "volume.h"
 
 namespace hub {
 
@@ -42,15 +44,12 @@ void View::ReadFiles(bool Everywhere)
     if (FilesRead[Everywhere]) return;
     FilesRead[Everywhere] = true;
     file_id_t *Ids   = nullptr;
-    int        Found = Everywhere ? query_all_everywhere(nullptr, &Ids) : query_all(nullptr, &Ids);
-    for (int I = 0; I < Found; I++) {
-        FileMetadata Metadata;
-        if (FileMetadataRead(Ids[I], &Metadata) != 0) continue;
-        if (Metadata.Filename && !(Metadata.Flags & FILE_FLAG_TRASHED))
-            FileList[Everywhere].push_back(File{Metadata.Filename, Ids[I]});
-        FileMetadataRelease(&Metadata);
+    const int  Found = Everywhere ? query_all_everywhere(nullptr, &Ids) : query_all(nullptr, &Ids);
+    for (file_id_t Id : volume::Taken(Ids, Found)) {
+        const std::expected<volume::Record, int> Held = volume::Record::Of(Id);
+        if (Held && !Held->Name().empty())
+            FileList[Everywhere].push_back(File{std::string(Held->Name()), Id});
     }
-    free(Ids);
 }
 
 int View::Collect(bool Everywhere, const std::string_view *Name, file_id_t **Ids)
@@ -85,9 +84,10 @@ void View::ReadTags(bool Everywhere)
     TagsRead[Everywhere] = true;
     TagListed  *Listed = nullptr;
     std::size_t Count  = 0;
-    if ((Everywhere ? tag_list_everywhere(&Listed, &Count) : tag_list(&Listed, &Count)) == 0)
+    const int   Rc     = Everywhere ? tag_list_everywhere(&Listed, &Count) : tag_list(&Listed, &Count);
+    const HeldHeap<TagListed> Held(Listed);
+    if (Rc == 0)
         for (std::size_t I = 0; I < Count; I++) TagList[Everywhere].emplace_back(Listed[I].Tag);
-    free(Listed);
 }
 
 const View::Names &View::ShelfOf(Shelf Kind)
@@ -108,7 +108,7 @@ const View::Names &View::ShelfOf(Shelf Kind)
         // nothing and are left off.
         ReadTags(Everywhere);
         for (const std::string &Tag : TagList[Everywhere])
-            if (Everywhere || !context::Holds(Context, Tag)) Shelf.push_back(Tag);
+            if (Everywhere || !tags::Holds(Context, Tag)) Shelf.push_back(Tag);
     } else {
         ReadFiles(Everywhere);
         for (const File &One : FileList[Everywhere]) Shelf.push_back(One.Name);

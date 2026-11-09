@@ -4,24 +4,21 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 
 #include "box/form.h"
 #include "box/memory.h"
 
 #include "builtins.h"
-#include "context.h"
 #include "hub.h"
 #include "itinerary.h"
 #include "programs.h"
+#include "tags.h"
+#include "text.h"
 
 namespace hub {
 
 namespace {
-
-bool Blank(char C)
-{
-    return C == ' ' || C == '\t';
-}
 
 // A heap string for the editor, which frees it; NULL for nothing.
 char *Handed(const std::string &Text)
@@ -30,31 +27,6 @@ char *Handed(const std::string &Text)
     char *Copy = static_cast<char *>(malloc(Text.size() + 1));
     if (Copy) std::memcpy(Copy, Text.c_str(), Text.size() + 1);
     return Copy;
-}
-
-bool TakesFiles(std::uint8_t Kind)
-{
-    return Kind == BOX_FORM_THING || Kind == BOX_FORM_THINGS;
-}
-
-// The next word of a history line from At — a piece of a comma list, its
-// quotes left off — or false at the end.
-bool NextPiece(std::string_view &Rest, std::string_view &Piece)
-{
-    while (!Rest.empty() && (Blank(Rest.front()) || Rest.front() == ',')) Rest.remove_prefix(1);
-    if (Rest.empty()) return false;
-    if (Rest.front() == '"') {
-        Rest.remove_prefix(1);
-        const std::size_t End = Rest.find('"');
-        Piece = Rest.substr(0, End);
-        Rest.remove_prefix(End == std::string_view::npos ? Rest.size() : End + 1);
-        return true;
-    }
-    std::size_t End = 0;
-    while (End < Rest.size() && !Blank(Rest[End]) && Rest[End] != ',') End++;
-    Piece = Rest.substr(0, End);
-    Rest.remove_prefix(End);
-    return true;
 }
 
 // Name can follow the typed bytes in a word: it begins with them, goes on
@@ -151,91 +123,20 @@ std::string Whisper::Recall(std::uint32_t Back)
     return Self.Lines.Before(Walk[Back]).Text;
 }
 
-// ---- the line as typed ------------------------------------------------------------
-
-namespace {
-
-// The line cut as the Luggage and the Form cut it: blanks between words,
-// "double quotes" round one, a comma between the pieces of a list.
-template <typename TypingT>
-TypingT ReadTyping(std::string_view Line)
-{
-    TypingT Typed;
-    Typed.Line = Line;
-    bool        InWord = false, Quoted = false;
-    std::size_t Word = 0, Piece = 0;
-    auto Done = [&](std::size_t End) {
-        const std::string_view Whole = Line.substr(Word, End - Word);
-        if (Typed.Words == 0) {
-            Typed.NameStart = Word;
-            Typed.NameEnd   = End;
-        }
-        Typed.AfterArrow = Whole == "->";
-        if (Whole == "everywhere") Typed.Everywhere = true;
-        Typed.Words++;
-    };
-    for (std::size_t I = 0; I < Line.size(); I++) {
-        const char C = Line[I];
-        if (Quoted) {
-            if (C == '"') Quoted = false;
-            continue;
-        }
-        if (Blank(C)) {
-            if (InWord) Done(I);
-            InWord = false;
-            continue;
-        }
-        if (!InWord) {
-            InWord = true;
-            Word   = I;
-            Piece  = I;
-        }
-        if (C == '"') {
-            Quoted = true;
-            Piece  = I + 1;
-        } else if (C == ',') {
-            Piece = I + 1;
-        }
-    }
-    Typed.Quoted     = Quoted;
-    Typed.WordStart  = InWord ? Word : Line.size();
-    Typed.PieceStart = InWord ? Piece : Line.size();
-    return Typed;
-}
-
-}  // namespace
-
-namespace {
-
-// The command's name: the first word, whole or being typed.
-template <typename TypingT>
-std::string_view NameOf(const TypingT &Typed)
-{
-    if (Typed.Words == 0) return Typed.Line.substr(Typed.WordStart);
-    return Typed.Line.substr(Typed.NameStart, Typed.NameEnd - Typed.NameStart);
-}
-
-}  // namespace
-
 // ---- the command's Form, sorted over what the line can see ---------------------------
 
 // The Form of the program the name means, read once for the line.
 bool Whisper::HoldForm(std::string_view Name)
 {
-    if (FormAsked && FormOf == Name) return FormHeld;
+    if (FormAsked && FormOf == Name) return Form.Holds();
     FormAsked = true;
-    Form.Let();
-    FormHeld = false;
     FormOf.assign(Name);
+    Form.Let();
     const file_id_t Program = Seen.Program(Name);
     if (Program == 0) return false;
-    if (programs::IsItinerary(Program)) {
-        FormHeld = itinerary::FormOf(Program, Form) == 0;
-    } else {
-        FormHeld = form_of_file(Program, Form.Take()) == 0;
-        if (!FormHeld) Form.Drop();
-    }
-    return FormHeld;
+    if (programs::IsItinerary(Program)) (void)itinerary::FormOf(Program, Form);
+    else if (form_of_file(Program, Form.Take()) != 0) Form.Drop();
+    return Form.Holds();
 }
 
 // The words sorted into the held Form as Enter will sort them, over what the
@@ -257,8 +158,8 @@ Whisper::Sorted Whisper::SortForm(std::string_view WordsTyped, std::vector<bool>
 
     const std::string Typed(WordsTyped);
     BoxFormFiller    *Begun = nullptr;
-    int               Rc    = form_fill_begin(&Loose, Typed.c_str(), &Sighted.Lookup, &Begun);
-    HeldFiller        Filler(Begun);
+    const int         Rc    = form_fill_begin(&Loose, Typed.c_str(), &Sighted.Lookup, &Begun);
+    const HeldFiller  Filler(Begun);
     if (Rc != 0) return Sorted::Failed;
 
     Sorted End = Sorted::Failed;
@@ -274,10 +175,10 @@ Whisper::Sorted Whisper::SortForm(std::string_view WordsTyped, std::vector<bool>
             End = Sorted::Refused;
             break;
         }
-        Rc = Question.Step == BOX_FORM_ASK_WHICH  ? form_fill_choose(Filler.get(), Question.Choices[0])
-             : Question.Step == BOX_FORM_ASK_SURE ? form_fill_sure(Filler.get(), true)
-                                                  : -1;
-        if (Rc != 0) break;
+        const int Answered = Question.Step == BOX_FORM_ASK_WHICH  ? form_fill_choose(Filler.get(), Question.Choices[0])
+                             : Question.Step == BOX_FORM_ASK_SURE ? form_fill_sure(Filler.get(), true)
+                                                                  : -1;
+        if (Answered != 0) break;
     }
 
     Filled = std::vector<bool>(Loose.FieldCount, false);
@@ -293,18 +194,22 @@ Whisper::Sorted Whisper::SortForm(std::string_view WordsTyped, std::vector<bool>
 
 // ---- what the word being typed can be ------------------------------------------------
 
-namespace {
-
-// The field a Form kind fills with what can be whispered: files or tags.
-template <typename OfferT>
-void OfferKind(OfferT &Offered, std::uint8_t Kind)
+void Whisper::Offer::Take(std::uint8_t Kind) noexcept
 {
-    if (TakesFiles(Kind)) Offered.Files = true;
-    if (Kind == BOX_FORM_THINGS) Offered.Several = true;
-    if (Kind == BOX_FORM_WORDS) Offered.Tags = true;
+    if (Kind == BOX_FORM_THING || Kind == BOX_FORM_THINGS) Files = true;
+    if (Kind == BOX_FORM_THINGS) Several = true;
+    if (Kind == BOX_FORM_WORDS) Tags = true;
 }
 
-}  // namespace
+std::vector<View::Shelf> Whisper::Offer::Shelves() const
+{
+    std::vector<View::Shelf> Kinds;
+    if (Commands) Kinds.push_back(View::Commands);
+    if (Programs) Kinds.push_back(View::ProgramFiles);
+    if (Files) Kinds.push_back(Everywhere ? View::FilesEverywhere : View::FilesHere);
+    if (Tags) Kinds.push_back(Everywhere ? View::TagsEverywhere : View::TagsHere);
+    return Kinds;
+}
 
 // What a program's Form takes now, the words before this one sorted. A word
 // begun may be anything the Form still takes; an empty one only what it
@@ -320,66 +225,46 @@ void Whisper::OfferProgram(const Typing &Typed, std::string_view Name, Offer &Ou
 
     Out.Everywhere = Typed.Everywhere;
     const BoxForm &Declared = *Form;
-    if (Typed.PieceStart == Typed.Line.size()) {
+    if (Typed.Fresh()) {
         for (std::uint32_t I = 0; I < Declared.FieldCount; I++) {
             if (Declared.Fields[I].Optional || Filled[I]) continue;
-            OfferKind(Out, Declared.Fields[I].Kind);
+            Out.Take(Declared.Fields[I].Kind);
             Out.Them = Out.Files;
             return;
         }
         return;
     }
     for (std::uint32_t I = 0; I < Declared.FieldCount; I++)
-        if (Declared.Fields[I].Kind != BOX_FORM_THING || !Filled[I]) OfferKind(Out, Declared.Fields[I].Kind);
+        if (Declared.Fields[I].Kind != BOX_FORM_THING || !Filled[I]) Out.Take(Declared.Fields[I].Kind);
 }
 
-void Whisper::MakeOffer(const Typing &Typed, Offer &Out)
+Whisper::Offer Whisper::MakeOffer(const Typing &Typed)
 {
-    Out = Offer{};
+    Offer Out;
     if (Typed.Words == 0) {
         Out.Commands = true;
-        return;
+        return Out;
     }
     if (Typed.AfterArrow) {
         Out.Files      = true;
         Out.Everywhere = Typed.Everywhere;
-        return;
+        return Out;
     }
-    const std::string_view Name     = NameOf(Typed);
-    const Builtin         *Own = BuiltinNamed(Name);
-    if (!Own) {
-        OfferProgram(Typed, Name, Out);
-    } else if (Own->Kind == Takes::Command) {
-        Out.Commands = Typed.Words == 1;
-    } else if (Own->Kind == Takes::Program) {
-        Out.Programs = Out.Them = Typed.Words == 1;
-    } else if (Own->Kind == Takes::Tags) {
-        Out.Tags = Out.Everywhere = Out.Signed = true;
-    }
+    const std::string_view Name = Typed.Name();
+    const Builtin         *Own  = BuiltinNamed(Name);
+    if (!Own) OfferProgram(Typed, Name, Out);
+    else if (Own->Kind == Takes::Command) Out.Commands = Typed.Words == 1;
+    else if (Own->Kind == Takes::Program) Out.Programs = Out.Them = Typed.Words == 1;
+    else if (Own->Kind == Takes::Tags) Out.Tags = Out.Everywhere = Out.Signed = true;
+    return Out;
 }
 
 // ---- the names it can be --------------------------------------------------------------
 
-namespace {
-
-// The shelves the offer's names stand on.
-template <typename OfferT>
-std::vector<View::Shelf> ShelvesOf(const OfferT &Offered)
-{
-    std::vector<View::Shelf> Kinds;
-    if (Offered.Commands) Kinds.push_back(View::Commands);
-    if (Offered.Programs) Kinds.push_back(View::ProgramFiles);
-    if (Offered.Files) Kinds.push_back(Offered.Everywhere ? View::FilesEverywhere : View::FilesHere);
-    if (Offered.Tags) Kinds.push_back(Offered.Everywhere ? View::TagsEverywhere : View::TagsHere);
-    return Kinds;
-}
-
-}  // namespace
-
 // The word is one of the names the offer allows.
 bool Whisper::Named(const Offer &Offered, std::string_view Word)
 {
-    for (View::Shelf Kind : ShelvesOf(Offered))
+    for (View::Shelf Kind : Offered.Shelves())
         if (View::Holds(Seen.ShelfOf(Kind), Word)) return true;
     return false;
 }
@@ -390,11 +275,8 @@ void Whisper::ReadRecent()
 {
     if (WordsRead) return;
     WordsRead = true;
-    for (std::size_t Back = 0; Back < Self.Lines.Count(); Back++) {
-        std::string_view Rest = Self.Lines.Before(Back).Text;
-        std::string_view Piece;
-        while (NextPiece(Rest, Piece)) Words.push_back(Recent{Piece, Back});
-    }
+    for (std::size_t Back = 0; Back < Self.Lines.Count(); Back++)
+        for (std::string_view Piece : Pieces(Self.Lines.Before(Back).Text)) Words.push_back(Recent{Piece, Back});
     std::stable_sort(Words.begin(), Words.end(), [](const Recent &A, const Recent &B) {
         return A.Word != B.Word ? A.Word < B.Word : A.Back < B.Back;
     });
@@ -426,7 +308,7 @@ bool Whisper::Shortest(const Offer &Offered, std::string_view Typed, bool Quoted
 {
     bool Found = false;
     Kinds      = 0;
-    for (View::Shelf Kind : ShelvesOf(Offered)) {
+    for (View::Shelf Kind : Offered.Shelves()) {
         const View::Names &Shelf = Seen.ShelfOf(Kind);
         for (std::size_t I = View::From(Shelf, Typed); I < Shelf.size(); I++) {
             const std::string_view Name = Shelf[I];
@@ -474,7 +356,7 @@ std::string Whisper::FromHistory(std::string_view Line) const
     for (int Pass = Self.Shown.RecallHereFirst ? 0 : 1; Pass < 2; Pass++) {
         for (std::size_t Back = 0; Back < Self.Lines.Count(); Back++) {
             const History::Line &Entry = Self.Lines.Before(Back);
-            if (Pass == 0 && !context::Same(Context, Entry.Context)) continue;
+            if (Pass == 0 && !tags::Same(Context, Entry.Context)) continue;
             if (Entry.Text.size() > Line.size() && std::string_view(Entry.Text).substr(0, Line.size()) == Line)
                 return Entry.Text.substr(Line.size());
         }
@@ -484,7 +366,7 @@ std::string Whisper::FromHistory(std::string_view Line) const
 
 std::string Whisper::FromNames(const Typing &Typed, const Offer &Offered)
 {
-    std::string_view Word = Typed.Line.substr(Typed.PieceStart);
+    std::string_view Word = Typed.Piece();
     if (Offered.Signed && !Word.empty() && (Word.front() == '+' || Word.front() == '-')) Word.remove_prefix(1);
     std::string_view Chosen;
     if (!Choose(Offered, Word, Typed.Quoted, Chosen)) return {};
@@ -496,19 +378,17 @@ std::string Whisper::FromNames(const Typing &Typed, const Offer &Offered)
 std::string Whisper::Continue(std::string_view Line)
 {
     if (!Self.Shown.Whisper) return {};
-    const Typing Typed   = ReadTyping<Typing>(Line);
-    Offer        Offered;
-    bool         Made    = false;
-    if (Typed.Words > 0 && !Typed.Quoted && Typed.PieceStart == Line.size()) {
-        MakeOffer(Typed, Offered);
-        Made = true;
-        std::string Them = FromThem(Offered);
-        if (!Them.empty()) return Them;
+    // The offer sorts the command's Form: made only when it is needed, as
+    // the line read from the history needs none.
+    const Typing         Typed = Typing::Of(Line);
+    std::optional<Offer> Offered;
+    if (Typed.Words > 0 && !Typed.Quoted && Typed.Fresh()) {
+        Offered = MakeOffer(Typed);
+        if (std::string Them = FromThem(*Offered); !Them.empty()) return Them;
     }
-    std::string Rest = FromHistory(Line);
-    if (!Rest.empty()) return Rest;
-    if (!Made) MakeOffer(Typed, Offered);
-    return FromNames(Typed, Offered);
+    if (std::string Rest = FromHistory(Line); !Rest.empty()) return Rest;
+    if (!Offered) Offered = MakeOffer(Typed);
+    return FromNames(Typed, *Offered);
 }
 
 // ---- what the command still needs -------------------------------------------------------
@@ -544,11 +424,11 @@ std::string Whisper::FormNeeds(std::string_view Name, std::string_view WordsType
 std::string Whisper::Needs(std::string_view Line)
 {
     if (!Self.Shown.Needs) return {};
-    const Typing Typed = ReadTyping<Typing>(Line);
+    const Typing Typed = Typing::Of(Line);
     if (Typed.Quoted || (Typed.Words == 0 && Typed.WordStart == Line.size())) return {};
 
-    const std::string_view Name     = NameOf(Typed);
-    const Builtin         *Own = BuiltinNamed(Name);
+    const std::string_view Name = Typed.Name();
+    const Builtin         *Own  = BuiltinNamed(Name);
     std::string            Said;
     if (Own) {
         const std::size_t Blank = Own->Usage.find(' ');
@@ -557,7 +437,7 @@ std::string Whisper::Needs(std::string_view Line)
         Said = FormNeeds(Name, Typed.Words == 0 ? std::string_view() : Line.substr(Typed.NameEnd));
     }
     // Laid straight after the last word, it would read as part of it.
-    if (Said.empty() || Blank(Line.back())) return Said;
+    if (Said.empty() || text::Blank(Line.back())) return Said;
     return " " + Said;
 }
 

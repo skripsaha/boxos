@@ -30,16 +30,16 @@ namespace {
 
 void ListCommands()
 {
-    print("The hub's own commands:\n\n");
+    Say("The hub's own commands:\n\n");
     // The descriptions stand in one column, two blanks past the longest usage.
     std::size_t Column = 0;
     for (const Builtin &One : Builtins()) Column = std::max(Column, One.Usage.size());
     for (const Builtin &One : Builtins()) {
         std::string Line = "  ";
         Line.append(One.Usage).append(Column + 2 - One.Usage.size(), ' ').append(One.What).append(1, '\n');
-        print_bytes(Line.data(), Line.size());
+        Say(Line);
     }
-    print("\nAny other name runs a program. help NAME shows what it takes and how it is set.\n");
+    Say("\nAny other name runs a program. help NAME shows what it takes and how it is set.\n");
 }
 
 const char *KindSaid(const BoxFormField &Field)
@@ -76,7 +76,7 @@ void ShowForm(const std::string &Name, const BoxForm &Declared)
         for (std::uint32_t I = 0; I < Declared.FieldCount; I++) {
             const BoxFormField &Field = Declared.Fields[I];
             if (Field.Name) Say("  {}: ", Field.Name);
-            else print("  ");
+            else Say("  ");
             Say("{} - {}{}\n", Field.What, KindSaid(Field), Field.Optional ? " (optional)" : "");
         }
     }
@@ -95,25 +95,21 @@ void ShowSetting(const BoxSettings &Settings, const BoxSetting &Setting)
 {
     char Wants[160];
     settings_wants(&Setting, Wants, sizeof(Wants));
-    print("  ");
-    set_color(COLOR_CYAN);
-    print(Setting.Name);
-    set_color(COLOR_DEFAULT);
-    print(" ");
+    Say("  ");
+    SayIn(COLOR_CYAN, Setting.Name);
+    Say(" ");
     SayValue(Setting.Value);
     if (Setting.Kind == SETTING_NUMBER && Setting.Unit[0]) Say(" {}", Setting.Unit);
     Say(" — {}\n      {}; ", Setting.What, Wants);
     if (Setting.Chosen) {
-        set_color(COLOR_GREEN);
-        print("you set it");
-        set_color(COLOR_DEFAULT);
+        SayIn(COLOR_GREEN, "you set it");
         Say(" in {}.settings, ", Settings.Program);
         SayValue(Setting.Default);
-        print(" as it came");
+        Say(" as it came");
     } else {
-        print("as it came");
+        Say("as it came");
     }
-    print(Setting.NextStart ? "; takes effect when it starts next\n" : "\n");
+    Say(Setting.NextStart ? "; takes effect when it starts next\n" : "\n");
 }
 
 // What can be set in the program, as it is set now. Nothing is said of a
@@ -129,9 +125,7 @@ void ShowSettings(file_id_t Program, const std::string &Name)
         Say("{} can be set — settings {} NAME VALUE:\n", Name.c_str(), Name.c_str());
         for (std::size_t I = 0; I < Settings.Count; I++) ShowSetting(Settings, Settings.Settings[I]);
     }
-    set_color(COLOR_YELLOW);
-    for (std::size_t I = 0; I < Settings.ProblemCount; I++) Say("{}\n", Settings.Problems[I]);
-    set_color(COLOR_DEFAULT);
+    for (std::size_t I = 0; I < Settings.ProblemCount; I++) SayIn(COLOR_YELLOW, "{}\n", Settings.Problems[I]);
     settings_release(&Settings);
 }
 
@@ -169,7 +163,7 @@ bool HelpProgram(std::string_view Asked)
         if (Rc != 0) Declared.Drop();
     }
     if (Rc != 0) {
-        Say("help: cannot read what {} takes (error {})\n", Name.c_str(), -Rc);
+        Say("help: cannot read what {} takes ({})\n", Name, Reason(Rc));
         return false;
     }
     ShowForm(Name, *Declared);
@@ -181,7 +175,7 @@ bool HelpProgram(std::string_view Asked)
 
 }  // namespace
 
-bool Help(Hub &, const Words &Typed, std::string_view)
+bool Help(Hub &, const Words &Typed)
 {
     if (Typed.Count() < 2) {
         ListCommands();

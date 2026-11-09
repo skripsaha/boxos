@@ -8,6 +8,7 @@
 #include "box/print.h"
 
 #include "hub.h"
+#include "say.h"
 #include "session.h"
 
 int main()
@@ -18,10 +19,10 @@ int main()
     Self.Lines.Begin();
 
     if (cabin_info()->spawner_pid == 0) clear();
-    if (Self.Shown.Greeting) print("BoxOS Hub — help shows what there is\n");
+    if (Self.Shown.Greeting) hub::Say("BoxOS Hub — help shows what there is\n");
 
     if (!hub::Converse(Self)) {
-        print("hub: no keyboard can be heard here, so nothing can be typed; the hub ends\n");
+        hub::Say("hub: no keyboard can be heard here, so nothing can be typed; the hub ends\n");
         return 1;
     }
     return 0;

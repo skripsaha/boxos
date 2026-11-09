@@ -1,4 +1,5 @@
-/* jobs.h — the programs this hub starts, and how each ended.
+/* jobs.h — the programs this hub starts, and how each ended; what is said
+ * of them is news.h's.
  *
  * A program's end is learnt from the kernel's word that it died
  * (process:died), claimed before the first program starts, so no end can be
@@ -16,8 +17,6 @@
 #include "box/types.h"
 
 namespace hub {
-
-struct Hub;
 
 // How a started program ended, and what it gave back.
 struct Ending {
@@ -45,11 +44,6 @@ private:
 
     TouchTag Died = TOUCH_TAG_INVALID;
 };
-
-// How a program ended, said in the hub's words when it did not end well:
-// "edit ended: 3", "checksum stopped: page fault in Hash". A program that
-// ended well is not spoken of.
-void SayEnding(const Hub &Self, std::string_view Who, const Ending &End);
 
 }  // namespace hub
 

@@ -5,13 +5,13 @@
 #include <string>
 
 #include "box/error.h"
-#include "box/file.h"
-#include "box/print.h"
 
 #include "fill.h"
 #include "hub.h"
+#include "line.h"
 #include "say.h"
-#include "session.h"
+#include "text.h"
+#include "volume.h"
 
 namespace hub {
 
@@ -32,53 +32,29 @@ namespace itinerary {
 
 namespace {
 
-constexpr std::size_t Piece = 64 * 1024;
-
 // The file read and cut: its Form, as form_parse reads one, and its steps.
 struct Text {
     std::string              FormText = "form 1\n";
     std::vector<std::string> Steps;
 };
 
-bool Blank(char C)
-{
-    return C == ' ' || C == '\t';
-}
-
 // The line's first word is takes or gives: a line of the Form.
 bool FormLine(std::string_view Line)
 {
-    while (!Line.empty() && Blank(Line.front())) Line.remove_prefix(1);
+    Line = text::Trimmed(Line);
     std::size_t Length = 0;
-    while (Length < Line.size() && !Blank(Line[Length])) Length++;
+    while (Length < Line.size() && !text::Blank(Line[Length])) Length++;
     const std::string_view First = Line.substr(0, Length);
     return First == "takes" || First == "gives";
 }
 
-bool BlankLine(std::string_view Line)
-{
-    for (char C : Line)
-        if (!Blank(C)) return false;
-    return true;
-}
-
-// Its bytes, whole; a short read is the volume answering with what it had in
-// hand, asked again. -ERR_INVALID_ARGUMENT: a NUL in it, so no text.
+// Its bytes, whole: 0, or a negative -error_t — -ERR_INVALID_ARGUMENT for a
+// NUL among them, so no text.
 int ReadWhole(file_id_t File, std::string &Out)
 {
-    FileMetadata Metadata;
-    int          Rc = FileMetadataRead(File, &Metadata);
-    if (Rc != 0) return Rc;
-    const std::uint64_t Size = Metadata.Size;
-    FileMetadataRelease(&Metadata);
-
-    Out.assign(static_cast<std::size_t>(Size), '\0');
-    for (std::uint64_t At = 0; At < Size;) {
-        const std::uint64_t Left = Size - At;
-        int64_t Got = fread(File, At, Out.data() + At, Left > Piece ? Piece : static_cast<std::size_t>(Left));
-        if (Got <= 0 || static_cast<std::uint64_t>(Got) > Left) return Got < 0 ? static_cast<int>(Got) : -ERR_IO;
-        At += static_cast<std::uint64_t>(Got);
-    }
+    std::expected<std::string, int> Read = volume::ReadAll(File);
+    if (!Read) return Read.error();
+    Out = std::move(*Read);
     return Out.find('\0') == std::string::npos ? 0 : -ERR_INVALID_ARGUMENT;
 }
 
@@ -92,7 +68,7 @@ void Split(std::string_view Whole, Text &Out)
         std::string_view  Line = Whole.substr(0, End);
         Whole.remove_prefix(End == std::string_view::npos ? Whole.size() : End + 1);
         if (!Line.empty() && Line.back() == '\r') Line.remove_suffix(1);
-        if (BlankLine(Line)) continue;
+        if (text::Trimmed(Line).empty()) continue;
         if (InForm && FormLine(Line)) {
             Out.FormText.append(Line).append(1, '\n');
         } else {
@@ -220,7 +196,7 @@ bool Run(Hub &Self, file_id_t File, std::string_view Who, std::string_view Line)
         if (Unreadable) Say("{}: it is no text: there is a NUL in it\n", Who);
         else if (Rc == -ERR_INVALID_ARGUMENT)
             Say("{}: its takes and gives lines are no Form that can be filled\n", Who);
-        else Say("{}: it cannot be read (error {})\n", Who, static_cast<int>(box_errno_of(Rc)));
+        else Say("{}: it cannot be read ({})\n", Who, Reason(Rc));
         return false;
     }
 

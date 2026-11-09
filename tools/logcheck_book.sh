@@ -262,7 +262,7 @@ census_fresh() {
 # landings makes the image once (census_book) and not once a landing — a make
 # of the image took 30 of the 35 seconds a landing of a book's census cost.
 census_plant() {
-    local img="$SCRATCH/census.$1.img"
+    local img="$SCRATCH/census.$1.img" want
     make run-stop >/dev/null 2>&1
     if ! python3 tools/volume-read.py build/boxos.img self-test --emit "$2" --out "$img" \
             >"$SCRATCH/census.$1.emit" 2>&1; then
@@ -270,16 +270,41 @@ census_plant() {
         return 1
     fi
     python3 tools/volume-read.py "$img" check --json >"$SCRATCH/census.$1.json"
+    want=$(census_awaits "$SCRATCH/census.$1.json")
+    if [ -z "$want" ]; then
+        harness "census: volume-read's census of the volume planted with $2 could not be read"
+        return 1
+    fi
     if ! make run-bg BOOTDISK="$img" >"$SCRATCH/census.$1.run-bg" 2>&1; then
         harness "census: run-bg would not start the volume planted with $2: $(tail -1 "$SCRATCH/census.$1.run-bg")"
         return 1
     fi
-    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "$want" "$WAIT_QUIET_S"
     local rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$1.log"
-    [ $rc = 0 ] || bad "census: the volume planted with $2 never reached a shell"
+    [ $rc = 0 ] || bad "census: the volume planted with $2 never said '$want', as its census says its boot ends"
     return $rc
+}
+
+# census_awaits JSON — what the boot of a planted volume says last, as
+# volume-read's census of it says: a volume the kernel does not mount is no
+# volume, and the kernel says it waits for one; one with a live hub.box ends
+# in the hub's greeting; one without ends when the kernel has started what it
+# starts (main.c). Nothing when the census cannot be read.
+census_awaits() {
+    case "$(python3 -c 'import json, sys
+c = json.load(open(sys.argv[1]))
+if not c["kernel"].get("mounts"):
+    print("none")
+elif any(f.get("name") == "hub.box" and f.get("visible") for f in c.get("files", [])):
+    print("hub")
+else:
+    print("started")' "$1" 2>/dev/null)" in
+        none)    echo "$NO_VOLUME_YET" ;;
+        hub)     echo "BoxOS Hub" ;;
+        started) echo "$AUTOSTART_DONE" ;;
+    esac
 }
 
 # census_book LANDING... — every landing named planted on a fresh image,

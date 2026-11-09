@@ -36,9 +36,9 @@ all: hub.elf
 # After `all`: the fragment's first rule would otherwise become the default goal.
 include ../nameplate.mk
 
-OBJS = main.o session.o look.o prompt.o context.o history.o words.o programs.o \
-       asking.o them.o jobs.o fill.o remake.o itinerary.o nearest.o view.o whisper.o \
-       builtins.o help.o use.o said.o
+OBJS = main.o session.o line.o look.o prompt.o context.o history.o words.o typing.o \
+       text.o tags.o volume.o programs.o asking.o them.o jobs.o news.o fill.o launch.o \
+       remake.o itinerary.o nearest.o view.o whisper.o builtins.o help.o use.o said.o
 
 hub.elf: $(BOXLIB_START) $(OBJS) $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
