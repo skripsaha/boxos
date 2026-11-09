@@ -443,7 +443,7 @@ pc_stick_boot() {
     if ! make run-bg BOOTDISK="$PC_DIR/inside.img" ${PC_KEYS[@]+"${PC_KEYS[@]}"} >"$PC_DIR/run-bg.out" 2>&1; then
         harness "$PC_NAME: run-bg would not start: $(tail -1 "$PC_DIR/run-bg.out")"; return 1
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" || return 1
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" || return 1
     pc_stick_add "$1" "$record" "$how" || { harness "$PC_NAME: QEMU would not take $1 as a stick"; return 1; }
     wait_for_line build/serial.log "the stand-in .PID 1. hands over" "$WAIT_QUIET_S" || return 1
     wait_for_quiet "$BOOT_BURST_QUIET_S"

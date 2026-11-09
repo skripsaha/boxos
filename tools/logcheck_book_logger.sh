@@ -124,7 +124,7 @@ loggerhour_record() {
         harness "$tag: run-bg would not start the book's image: $(tail -1 "$SCRATCH/$tag.run-bg")"
         return 1
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest logger loggerh $seconds $every" &&
         wait_for_line -E -P "$LOGGERHOUR_PROGRESS" build/serial.log '\[QUILL\] logger: (PASS|FAIL)' &&
         wait_for_prompt && type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
@@ -168,7 +168,7 @@ print(json.load(open(sys.argv[1])).get("verdict", "no verdict"))' "$SCRATCH/cens
         harness "loggerhour: run-bg would not start the written book again: $(tail -1 "$SCRATCH/$name.again.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$name.log"

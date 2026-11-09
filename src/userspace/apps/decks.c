@@ -125,7 +125,7 @@ static bool test_sys_tag_check_negative(void)
 }
 
 /* -------------------------------------------------------------------------
- *  Storage Deck — query (list all files) + getinfo on shell.bin
+ *  Storage Deck — query (list all files) + getinfo on the first of them
  * ------------------------------------------------------------------------- */
 
 static bool test_storage_query(void)

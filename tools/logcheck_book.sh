@@ -219,7 +219,7 @@ print(" ".join(f["name"] for f in json.load(open(sys.argv[1]))["kernel"].get("sl
         harness "census: run-bg would not start $1 again to read its Slips"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt
     for n in $names; do
         type_line "show $n" && wait_for_prompt
     done
@@ -274,7 +274,7 @@ census_plant() {
         harness "census: run-bg would not start the volume planted with $2: $(tail -1 "$SCRATCH/census.$1.run-bg")"
         return 1
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     local rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$1.log"
@@ -736,7 +736,7 @@ BIG_EOF
     # shellcheck disable=SC2086
     set -- $parts
     if [ $# != 4 ] || ! python3 tools/make_mbr.py "$img" "$1,$2,7f,boot" "$3,$4,ef" >"$SCRATCH/big.mbr" 2>&1 ||
-       ! tools/create_tagfs --v2 "$img" src/userspace/shell/shell.bin "utility,system" \
+       ! tools/create_tagfs --v2 "$img" build/box/hub.box "utility,system" \
             build/box/quilltest.box "app,utility,test,system" build/box/bye.box "utility,system" \
             build/kernel.bin "system" \
             >"$SCRATCH/big.mkfs" 2>&1; then
@@ -753,7 +753,7 @@ BIG_EOF
         rm -f "$img"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest big big $BOOK_BIG_MIB" &&
         wait_for_line -E build/serial.log '\[QUILL\] big: ' "$WAIT_QUIET_SLOW_S" && wait_for_prompt &&
         type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
@@ -791,7 +791,7 @@ print("%u 0x%016X" % (n, h))' 2>/dev/null)
         rm -f "$img"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest big big" && wait_for_line -E build/serial.log '\[QUILL\] big: ' "$WAIT_QUIET_SLOW_S"
     rc=$?
     make run-stop >/dev/null 2>&1
@@ -848,7 +848,7 @@ book_stitchcut() {
         harness "stitchcut: run-bg would not start the book's image: $(tail -1 "$SCRATCH/stitchcut.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest namecut cut" && wait_for_line -E build/serial.log "$BOOK_STITCHCUT_CUT" "$WAIT_QUIET_S"
     rc=$?
     make run-stop >/dev/null 2>&1
@@ -889,7 +889,7 @@ STITCHCUT_EOF
         harness "stitchcut: run-bg would not start the cut book again: $(tail -1 "$SCRATCH/stitchcut.again.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest namecheck cut" && wait_for_line -E build/serial.log '\[QUILL\] namecheck: ' "$WAIT_QUIET_S"
     rc=$?
     make run-stop >/dev/null 2>&1

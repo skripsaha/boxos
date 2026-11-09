@@ -30,7 +30,7 @@ for run in $(seq 1 20); do
     UEFI=on STRICT=on CORES=16 MEM=8G make run-bg >/dev/null 2>&1
     # Poll for shell prompt (UEFI GOP slow under 16c).
     for i in $(seq 1 240); do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        grep -q "BoxOS Hub" build/serial.log 2>/dev/null && break
         sleep 0.5
     done
     sleep 2

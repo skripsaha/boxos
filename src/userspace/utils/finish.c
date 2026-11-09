@@ -14,10 +14,10 @@
  *
  *   finish playtime           -> ends every cabin wearing "playtime"
  *   finish playtime utility   -> only those wearing BOTH tags
- *   finish shell anyway       -> ends it although it runs the machine
+ *   finish hub anyway         -> ends it although it runs the machine
  *
  * The guard on the bare tag "system" is the part a future reader must not
- * undo: the shell, the display daemon and this very command wear it, and
+ * undo: the hub, the display daemon and this very command wear it, and
  * ending one leaves a person at a screen that cannot answer. "anyway" as the
  * last word is the whole of that consent — typed by hand, on purpose — and it
  * must stay the only way past the guard.
@@ -229,9 +229,9 @@ static void say_shortfall(const Crew *crew, const char *ask)
 
 /* The guard names the CABIN it is holding back, by the tags that cabin
  * actually wears — not the tag that was asked for. "finish utility" reaches
- * the shell, and answering "utility wears system" would be a sentence about
- * the wrong thing: utility does not wear system, the shell does, and the
- * shell is what the person has to recognise before typing anyway. */
+ * the hub, and answering "utility wears system" would be a sentence about
+ * the wrong thing: utility does not wear system, the hub does, and the hub
+ * is what the person has to recognise before typing anyway. */
 static void say_guarded(const Crew *crew, const char *phrase)
 {
     if (crew->guarded == 0) return;
@@ -341,7 +341,7 @@ int main(void)
     if (anyway) count--;
 
     if (count < 1) {
-        println("anyway is only a consent; say which program to end, as in: finish shell anyway");
+        println("anyway is only a consent; say which program to end, as in: finish hub anyway");
         exit(1);
         return 1;
     }

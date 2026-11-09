@@ -255,7 +255,7 @@ class Judge:
         dead, wrong = [], []
         for b in self.boots:
             r = self.run.results.get(b["id"], {})
-            if "KERNEL PANIC" in b["log"] or "BoxOS Shell" not in b["log"]:
+            if "KERNEL PANIC" in b["log"] or "BoxOS Hub" not in b["log"]:
                 dead.append("%s: %s" % (b["id"], "KERNEL PANIC" if "KERNEL PANIC" in b["log"]
                                         else "no shell"))
             elif r and "error" not in r:

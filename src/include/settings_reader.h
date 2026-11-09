@@ -679,12 +679,15 @@ static inline bool SettingsChosenNext(SettingsChosen *chosen, SettingsLine *out)
 }
 
 /* The line of the person's file that sets `name` — the last one, as the last
- * one is what counts. */
+ * one is what counts. With none, *out is a blank line numbered 0, which no
+ * line of a file is. */
 static inline bool SettingsChosenFind(const uint8_t *bytes, uint64_t size, SettingSpan name, SettingsLine *out)
 {
     SettingsChosen chosen;
     SettingsLine   line;
     bool           found = false;
+    out->Kind = SETTINGS_LINE_BLANK;
+    out->Line = 0;
     SettingsChosenBegin(bytes, size, &chosen);
     while (SettingsChosenNext(&chosen, &line)) {
         if (line.Kind == SETTINGS_LINE_SET && SettingSpanSame(line.Name, name)) {

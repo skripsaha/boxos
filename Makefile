@@ -771,11 +771,8 @@ KERNEL_ENTRY_OBJ := $(patsubst $(SRCDIR)/%.asm,$(BUILDDIR)/%.o,$(KERNEL_ENTRY_SR
 USERSPACE_DIR = $(SRCDIR)/userspace
 USERSPACE_BUILD = $(USERSPACE_DIR)/build
 
-# Shell binary
-SHELL_DIR = $(USERSPACE_DIR)/shell
-SHELL_BIN = $(SHELL_DIR)/shell.bin
-SHELL_ELF = $(SHELL_DIR)/shell.elf
-SHELL_EMBED = $(BUILDDIR)/shell_embed.o
+# The hub the kernel carries, for a machine that comes up with no volume
+HUB_EMBED = $(BUILDDIR)/hub_embed.o
 
 # App ELF binaries (proca, procb)
 APPS_DIR  = $(USERSPACE_DIR)/apps
@@ -825,13 +822,17 @@ QUILLTEST_BIN    = $(APPS_DIR)/quilltest.elf
 DISPLAY_DIR = $(USERSPACE_DIR)/display
 DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 
+# The hub: the line typed, the programs on the volume and the Use Context meet there.
+HUB_DIR = $(USERSPACE_DIR)/hub
+HUB_BIN = $(HUB_DIR)/hub.elf
+
 # Painter — the user-facing graphics family above boxcxx and boxlib.
 PAINTER_DIR = $(USERSPACE_DIR)/painter
 PAINTER_LIB = $(PAINTER_DIR)/libpainter.a
 
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
-UTIL_NAMES = help create show files tag untag name trash erase assemble \
+UTIL_NAMES = create show files tag untag name trash erase assemble \
              me info say reboot bye defrag escheat fsck ipc_test memtag hw \
              timezone logsave lastsaid usetest faretest luggagetest headcount \
              playtime lavalamp finish taskcenter hexer stringview \
@@ -1205,7 +1206,7 @@ $(KERNEL_ENTRY_OBJ): $(KERNEL_ENTRY_SRC) | $(BUILDDIR)
 	@$(ASM) $(ASMFLAGS_ELF) $< -o $@
 
 # ==== USERSPACE BUILD RULES ====
-# Build boxlib (must be built before shell)
+# Build boxlib (must be built before every program)
 # PHONY so make always delegates to boxlib's own Makefile for dependency checking
 .PHONY: $(USERSPACE_DIR)/boxlib/libbox.a
 $(USERSPACE_DIR)/boxlib/libbox.a:
@@ -1228,12 +1229,6 @@ $(PAINTER_LIB): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxc
 
 .PHONY: painter
 painter: $(PAINTER_LIB)
-
-# Build shell
-$(SHELL_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(NAMEPLATE_TOOL)
-	@echo "Building shell process..."
-	@cd $(SHELL_DIR) && $(MAKE)
-	@echo "Shell binary: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 # Build apps (proca, procb, today, memtest)
 #
@@ -1282,6 +1277,12 @@ $(APPS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcx
 $(APP_ELFS): $(APPS_STAMP)
 	@:
 
+# Build the hub
+$(HUB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(NAMEPLATE_TOOL)
+	@echo "Building the hub..."
+	@cd $(HUB_DIR) && $(MAKE)
+	@echo "hub.elf: $$(stat -f%z $(HUB_BIN) 2>/dev/null || stat -c%s $(HUB_BIN) 2>/dev/null) bytes"
+
 # Build display server
 $(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(NAMEPLATE_TOOL)
 	@echo "Building display server..."
@@ -1316,27 +1317,14 @@ $(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxc
 $(UTIL_ELFS): $(UTILS_STAMP)
 	@:
 
-$(SHELL_ELF): $(SHELL_BIN)
-	@echo "Shell ELF: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
-
-$(BUILDDIR)/shell.bin: $(SHELL_BIN)
-	@echo "Copying shell binary to build directory..."
-	@cp $< $@
-	@echo "Shell binary: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
-
-$(BUILDDIR)/shell.elf: $(SHELL_ELF)
-	@echo "Copying shell ELF to build directory..."
-	@cp $< $@
-	@echo "Shell ELF: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
-
-$(SHELL_EMBED): $(BUILDDIR)/shell.elf
-	@echo "Stripping debug symbols from shell..."
-	@$(OBJCOPY) --strip-debug $(BUILDDIR)/shell.elf $(BUILDDIR)/shell_stripped.elf
-	@echo "Embedding shell ELF into kernel (stripped: $$(stat -f%z $(BUILDDIR)/shell_stripped.elf 2>/dev/null || stat -c%s $(BUILDDIR)/shell_stripped.elf 2>/dev/null) bytes)..."
+$(HUB_EMBED): $(HUB_BIN)
+	@echo "Stripping debug symbols from the hub..."
+	@$(OBJCOPY) --strip-debug $(HUB_BIN) $(BUILDDIR)/hub_stripped.elf
+	@echo "Embedding the hub into the kernel (stripped: $$(stat -f%z $(BUILDDIR)/hub_stripped.elf 2>/dev/null || stat -c%s $(BUILDDIR)/hub_stripped.elf 2>/dev/null) bytes)..."
 	@cd $(BUILDDIR) && \
 	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
 	    --rename-section .data=.rodata,alloc,load,readonly,data,contents \
-	    shell_stripped.elf shell_embed.o
+	    hub_stripped.elf hub_embed.o
 	@echo "Embedded object: $@"
 
 # ==== KERNEL BUILD RULES ====
@@ -1355,7 +1343,7 @@ $(SHELL_EMBED): $(BUILDDIR)/shell.elf
 # that claim against the binary's own symbols on every build.
 KERNEL_NP_OBJ   = $(BUILDDIR)/kernel.np.o
 KERNEL_PASS1    = $(BUILDDIR)/kernel.pass1.elf
-KERNEL_LINK_IN  = $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
+KERNEL_LINK_IN  = $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(HUB_EMBED)
 
 # ---- The stack guard -------------------------------------------------------
 # A block buffer belongs to the job that moves the block, or to its OpContext —
@@ -1424,8 +1412,8 @@ $(KERNEL_BIN): $(KERNEL_LINK_IN) $(KERNEL_NP_OBJ) $(BUILDPLATE_TOOL)
 	@$(BUILDPLATE_TOOL) stamp $@ --root . --keys "$(BUILD_KEYS)" \
 		$(if $(filter on,$(HARNESS)),--allow-harness,)
 
-$(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED) | $(STACK_USAGE_STAMP)
-	@echo "Linking kernel ELF (with embedded shell binary)..."
+$(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(HUB_EMBED) | $(STACK_USAGE_STAMP)
+	@echo "Linking kernel ELF (with the hub it carries)..."
 	@$(LD) -g -nostdlib -T $(ENTRYDIR)/linker.ld -o $@ $^
 
 
@@ -1467,14 +1455,10 @@ $(VOLUME_FORMAT_MARK): | $(BUILDDIR)
 # about one list, so the medium can never be made too small for what is about
 # to go in it. A second copy of the list is how those two answers would come
 # to disagree.
-#
-# shell.bin is raw code (objcopy -O binary), and wears `raw` for it: the kernel
-# starts bytes that are no ELF only when the volume declares them raw code
-# (src/kernel/core/process/image_load.h).
 VOLUME_CONTENT = \
 	$(KERNEL_BIN)   "system" \
 	$(DISPLAY_BIN)  "display,system,utility,autostart" \
-	$(SHELL_BIN)    "utility,system,app,autostart,raw" \
+	$(HUB_BIN)      "utility,system,app,autostart" \
 	$(PROCA_BIN)    "app" \
 	$(PROCB_BIN)    "app" \
 	$(TODAY_BIN)    "app,utility" \
@@ -1516,7 +1500,6 @@ VOLUME_CONTENT = \
 	$(QUIETPRINT_BIN)    "app,utility,test" \
 	$(EXITPATHS_BIN)     "app,utility,test,cxx" \
 	$(QUILLTEST_BIN)     "app,utility,test,system" \
-	$(UTILS_DIR)/help.elf    "utility" \
 	$(UTILS_DIR)/create.elf  "utility,storage" \
 	$(UTILS_DIR)/show.elf    "utility,storage" \
 	$(UTILS_DIR)/hexer.elf   "utility,storage" \
@@ -1599,7 +1582,7 @@ VOLUME_CONTENT = \
 # ‼ EVERY PROGRAM ON THE VOLUME IS A BOX. VOLUME_CONTENT names the programs as
 # the tree links them; each ELF there goes onto the volume as the box tools/pack
 # makes of it, under its stem — edit.elf is edit.box, and the command is still
-# `edit`. The kernel and shell.bin are not ELF programs and go as they are.
+# `edit`. The kernel is no ELF program and goes as it is.
 Box = $(BUILDDIR)/box/$(basename $(notdir $(1))).box
 
 VOLUME_ELFS  = $(filter %.elf,$(VOLUME_CONTENT))
@@ -1613,7 +1596,7 @@ $(call Box,$(1)): $(1) $(PACK_TOOL)
 endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 
-$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
+$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
 	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
@@ -2055,7 +2038,7 @@ endif
 # - Monitor on a Unix socket (sendkey, screendump, info ...)
 # - Serial output to a file (kernel debug_printf, panic markers)
 # - VGA framebuffer dumpable via tools/qemu-input.sh shot
-# - Drive interactively from the shell with tools/qemu-input.sh.
+# - Drive interactively from the hub with tools/qemu-input.sh.
 # Same vars as `run`: UEFI=on, CORES=N, MEM=size, USB=on, AHCI=on; and the
 # two of its own, BOOTDISK=path and POWERCUT=on (see RUN CONFIGURATION).
 # The sub-make below names no goal without UEFI, and no goal is `all`: for the
@@ -2295,11 +2278,11 @@ run-stop:
 	fi
 	@BENCHES=$(BENCHES) BENCH_DIR=$(BENCH_DIR) tools/benches.sh give $(BUILDDIR)
 
-# Headless Bochs with COM1 on a TCP socket — drive the shell entirely over the
+# Headless Bochs with COM1 on a TCP socket — drive the hub entirely over the
 # serial console (kernel serial_console_init), no GUI. Bochs blocks until a
 # client connects, then boots; connect + interact via tools/serial-console.py.
 # Bochs is single-CPU here (homebrew build has no --enable-smp), so the multi-
-# core BMIDE watchdog stays dormant — this target is for headless shell access
+# core BMIDE watchdog stays dormant — this target is for headless hub access
 # and log capture, not SMP tests (use QEMU run-bg for those).
 BOCHS_SERIAL_PORT ?= 14400
 bochs-bg: $(IMAGE)
@@ -2341,9 +2324,9 @@ clean:
 	@rm -f $(APPS_STAMP) $(UTILS_STAMP)
 	@rm -f $(TAGBOOT_SO) $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
 	@cd $(USERSPACE_DIR) && $(MAKE) clean
-	@cd $(SHELL_DIR) && $(MAKE) clean
 	@cd $(APPS_DIR) && $(MAKE) clean
 	@cd $(DISPLAY_DIR) && $(MAKE) clean
+	@cd $(HUB_DIR) && $(MAKE) clean
 	@cd $(UTILS_DIR) && $(MAKE) clean
 	@cd $(PAINTER_DIR) && $(MAKE) clean
 	@cd $(USERSPACE_DIR)/boxlib && $(MAKE) clean

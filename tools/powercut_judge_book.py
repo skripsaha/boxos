@@ -248,7 +248,7 @@ def TwoBoots(run, mid, r1, shell=True):
     from powercut_judge import Reconcile
     d = os.path.join(run.dir, "boots")
     logs = [Log(os.path.join(d, mid + x)) for x in (".serial.log", ".again.serial.log")]
-    dead = [n for n, log in zip(("first", "second"), logs) if "KERNEL PANIC" in log or (shell and "BoxOS Shell" not in log)]
+    dead = [n for n, log in zip(("first", "second"), logs) if "KERNEL PANIC" in log or (shell and "BoxOS Hub" not in log)]
     if dead:
         return None, ["the %s boot panicked or never reached a shell" % " and ".join(dead)]
     wrong = ["first boot: " + w for w in Reconcile(r1, logs[0])]

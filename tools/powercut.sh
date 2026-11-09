@@ -231,7 +231,7 @@ pc_boot() {
         harness "$PC_NAME: run-bg would not start $disk: $(tail -1 "$PC_DIR/run-bg.out")"
         return 1
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" || return 1
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" || return 1
     wait_for_quiet "$BOOT_BURST_QUIET_S"
 }
 

@@ -35,8 +35,8 @@ AR  = x86_64-elf-ar
 # instead of stepping over it onto whatever lies below. Every userspace
 # Makefile carries it.
 # -fpie: every program is a box the kernel places where it chooses, and
-# BoxLib is linked into each — and into shell.bin at its one place — so it is
-# position-independent, and reaches nothing through a GOT (runtime_init.c).
+# BoxLib is linked into each, so it is position-independent, and reaches
+# nothing through a GOT (runtime_init.c).
 CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone -fpie \
          -fno-stack-protector -fno-ipa-ra -fcf-protection=full -fstack-clash-protection \
          -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \

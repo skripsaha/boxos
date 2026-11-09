@@ -818,7 +818,7 @@ def ChainTests(pc, Want, Synthetic, pjb):
     shape = Synthetic([[1, (1, None, "stitch", "stitch seq 1")], [1, (1, None, "stitch", "stitch seq 2")], [1]])
     landed = [("NOT_LANDED", "note", "fid 1's data in stitch 2 did not land (block 9 of 1 checked does not "
                "match its digest): its record is rolled back by its splice — ERR_TAGFS_NOT_LANDED")]
-    mount = "[TagFS] 9 data blocks, 5 free, 1 files\n[TagFS] the volume is MOUNTED — 1 file(s)\nBoxOS Shell\n"
+    mount = "[TagFS] 9 data blocks, 5 free, 1 files\n[TagFS] the volume is MOUNTED — 1 file(s)\nBoxOS Hub\n"
 
     def Chain(second=mount, tags=("settle:undone",)):
         j = Judged(pc, shape, lambda cid: Book([[1, "a", 3, "aa"]], landed if cid == "e1-s1" else []))

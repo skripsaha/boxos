@@ -24,7 +24,7 @@ Notes:
 import socket, sys, time, threading, select, os
 
 PROMPT = b"~ "
-BOOT_MARK = b"BoxOS Shell"
+BOOT_MARK = b"BoxOS Hub"
 
 
 def connect(endpoint, retry_secs=20):

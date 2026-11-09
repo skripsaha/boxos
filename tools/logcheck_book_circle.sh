@@ -55,7 +55,7 @@ book_circle() {
         harness "circle: run-bg would not start the book's image: $(tail -1 "$SCRATCH/circle.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "use circle sewn" && wait_for_prompt && type_line "quilltest names circle" &&
         wait_for_line -E build/serial.log '\[QUILL\] names: ' "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest ground circle $BOOK_CIRCLE_GROUND" &&
@@ -109,7 +109,7 @@ CIRCLE_EOF
         harness "circle: run-bg would not start the written book again: $(tail -1 "$SCRATCH/circle.again.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$name.log"

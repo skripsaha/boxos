@@ -31,7 +31,7 @@ autostart_wears() {
 # past that (type_line, typer_selfcheck).
 replugwrite_spoke_after() {
     tr -d '\r' < "$1" | awk '/the stand-in .PID 1. hands over/ { h = NR }
-        /^BoxOS Shell/ && h { b = NR } END { exit !(h && b > h) }'
+        /^BoxOS Hub/ && h { b = NR } END { exit !(h && b > h) }'
 }
 
 # ‼ THE ORDER ON THE CONSOLE IS A RACE; THE STATE AS THE LAUNCH IS SAID IS NOT.
@@ -227,7 +227,7 @@ latelaunch_leg() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latelaunch_off; return 1; }
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"

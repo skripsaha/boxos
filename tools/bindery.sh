@@ -264,11 +264,12 @@ heirloom_machine() {
         make run-stop >/dev/null 2>&1
         return 2
     fi
-    # The volume's own shell, which is the one that comes up AFTER the mount:
-    # a stand-in may have stood at a prompt while the stick was still arriving.
+    # The volume's own shell — kernel N carries the shell, N+1 the hub — the one
+    # that comes up AFTER the mount: a stand-in may have stood at a prompt while
+    # the stick was still arriving.
     if wait_for_line -E build/serial.log 'is MOUNTED — [0-9]+ file|KERNEL PANIC' "$WAIT_QUIET_S" &&
        mark=$(grep -an 'is MOUNTED — [0-9]* file' build/serial.log | head -1 | cut -d: -f1) &&
-       [ -n "$mark" ] && wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" "$mark" &&
+       [ -n "$mark" ] && wait_for_line -E build/serial.log "BoxOS (Shell|Hub)" "$WAIT_QUIET_S" "$mark" &&
        heirloom_prompt "$mark"; then
         ran=0
         for cmd in "$@"; do

@@ -96,7 +96,7 @@ run_config() {
     eval "DEBUG=$DEBUG_FLAG ${extra} make run-bg" >/dev/null 2>&1
     # Wait for shell prompt (UEFI GOP is slow). Poll instead of fixed sleep.
     for i in $(seq 1 120); do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        grep -q "BoxOS Hub" build/serial.log 2>/dev/null && break
         sleep 0.5
     done
     sleep 2

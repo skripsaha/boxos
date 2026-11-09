@@ -53,7 +53,7 @@ book_escheat() {
         harness "escheat $what: run-bg would not start the planted book: $(tail -1 "$SCRATCH/escheat.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest escheat refused" &&
         wait_for_line -E build/serial.log '\[QUILL\] escheat (refused|NOT REFUSED): ' "$WAIT_QUIET_S" &&
         wait_for_prompt && book_escheat_written "$written" && type_line "quilltest escheat act" &&
@@ -102,7 +102,7 @@ ESCHEAT_EOF
         harness "escheat $what: run-bg would not start the book again: $(tail -1 "$SCRATCH/escheat.again.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$name.log"

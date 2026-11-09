@@ -140,7 +140,7 @@ STAND_NAME=logcheck
 boot() {
     make run-stop >/dev/null 2>&1
     make run-bg   >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
 
 
@@ -173,7 +173,7 @@ boot() {
 # Did the machine answer a keystroke? The shell prints its command list in
 # response to "help", so one line out of that list is the proof.
 typed_ok() {
-    grep -q "Show available commands" "$1"
+    grep -q "The hub's own commands" "$1"
 }
 
 # Did the shell come BACK after running a program?
@@ -319,8 +319,8 @@ latearrival_off() {
 # WHAT LAYS THE IMAGE DOWN AGAIN IS THE MUTATION, NOT `make`.
 #
 # An idle `make` does NOT re-lay it, and the two ways of asking that suggest
-# otherwise are both wrong. $(SHELL_BIN) has a .PHONY prerequisite, so its
-# recipe does run on every make — but the sub-make writes nothing, shell.bin's
+# otherwise are both wrong. $(HUB_BIN) has a .PHONY prerequisite, so its
+# recipe does run on every make — but the sub-make writes nothing, hub.elf's
 # mtime does not move, make re-stats it, and $(IMAGE) is left alone. And
 # `make -n` / `make -q` are not evidence at all: under both, make still runs
 # the $(MAKE) lines of a recipe and then counts that target remade, so a dry
@@ -455,7 +455,7 @@ run_latearrival() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
 
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
@@ -507,7 +507,7 @@ run_latearrival() {
     L="$SCRATCH/serial.latearrival.log"
 
     grep -q "no volume yet" "$L";      chk $? "the boot found no volume of its own"
-    grep -q "Fallback shell ready" "$L"; chk $? "and stood a shell in for one"
+    grep -q "Fallback hub ready" "$L"; chk $? "and stood a hub in for one"
     grep -q "mass storage" "$L";       chk $? "the stick enumerated after the boot"
     grep -q "took a seat while the machine was\|seat 1:" "$L"
     chk $? "the room seated it"
@@ -528,7 +528,7 @@ run_latearrival() {
     grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
     chk $? "TagFS mounted it"
     grep -q "AUTOSTART. Started .display.box" "$L"; chk $? "the volume's display daemon started"
-    grep -q "AUTOSTART. Started .shell.bin" "$L";   chk $? "the volume's shell started"
+    grep -q "AUTOSTART. Started .hub.box" "$L";   chk $? "the volume's hub started"
     grep -q "the stand-in .PID 1. hands over" "$L"; chk $? "and the stand-in handed over"
 
     # Only meaningful when the line above went red — and then it is the whole
@@ -614,7 +614,7 @@ run_replug() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
 
     # First arrival — the same one latearrival proves.
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
@@ -708,7 +708,7 @@ run_replug() {
     # The first arrival happened at all — otherwise the rest is vacuous.
     grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
     chk $? "the stick was mounted on its first arrival"
-    grep -q "AUTOSTART. Started .shell.bin" "$L"; chk $? "and its shell started"
+    grep -q "AUTOSTART. Started .hub.box" "$L"; chk $? "and its hub started"
     grep -q "the stand-in .PID 1. hands over" "$L"; chk $? "and the stand-in handed over"
     head -n "$FIRST_LINES" "$L" | grep -q "\[ANCHOR\] WROTE+ANCHORED"
     chk $? "a file was written and anchored on it before it left"
@@ -790,7 +790,7 @@ run_replug() {
     [ "$units" = 1 ]; chk $? "one stick was one disk throughout ($units named)"
 
     # And the machine is still usable afterwards, which is the point.
-    grep -q "BoxOS Shell" "$L"; chk $? "the machine still has a shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "the machine still has a shell"
 }
 
 # ── replugwrite: the stick leaves while a write is in flight ───────────────
@@ -1119,7 +1119,7 @@ run_replugwrite() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latelaunch_off; return; }
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
@@ -1182,7 +1182,7 @@ run_nofsgsbase() {
     build
     make run-stop >/dev/null 2>&1
     make run-bg FSGSBASE=off CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
     for c in timezone me; do
         type_cmd "$c"
@@ -1192,7 +1192,7 @@ run_nofsgsbase() {
     cp build/serial.log "$SCRATCH/serial.nofsgsbase.log"
     L="$SCRATCH/serial.nofsgsbase.log"
 
-    grep -q "BoxOS Shell" "$L"; chk $? "boot reaches the shell without fsgsbase"
+    grep -q "BoxOS Hub" "$L"; chk $? "boot reaches the shell without fsgsbase"
 
     # The kernel installs every program's thread pointer here through the MSR,
     # before its first instruction: a thread_local touched at once, by a C++
@@ -1219,7 +1219,7 @@ run_stranger() {
 
     # The whole point of declining: the machine must still be usable, because
     # the person who has to re-seat the medium types on it.
-    grep -q "BoxOS Shell" "$L"; chk $? "the machine still reaches a shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "the machine still reaches a shell"
     typed_ok "$L"; chk $? "and answers a keystroke"
 
     # And it must be LISTENING, not polling on a clock.
@@ -1265,7 +1265,7 @@ run_healthy() {
     probe_on; build; boot healthy; probe_off
     L="$SCRATCH/serial.healthy.log"
 
-    grep -q "BoxOS Shell" "$L"; chk $? "boot reaches the shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "boot reaches the shell"
     typed_ok "$L"; chk $? "and answers a keystroke"
 
     # ‼ THE MOUNT FINISHED, WHICH IS NOT WHAT ANY OTHER LINE HERE SAYS.
@@ -1300,7 +1300,7 @@ run_healthy() {
 
     # (3) the volume's own vocabulary is untouched — display.box keeps its tag
     autostart_wears "$L" 'display\.box' display; chk $? "volume tags unshifted (display.box still 'display')"
-    autostart_wears "$L" 'shell\.bin' shell; chk $? "volume tags unshifted (shell.bin still 'shell')"
+    autostart_wears "$L" 'hub\.box' hub; chk $? "volume tags unshifted (hub.box still 'hub')"
 
     # (4) nothing collided in the on-disk registry
     ! grep -q "slot .* already used" "$L"; chk $? "no registry slot collision"
@@ -1502,7 +1502,7 @@ run_badpool() {
     # boot() rebuilds nothing — it runs what is on disk now.
     make run-stop >/dev/null 2>&1
     make run-bg   >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
     type_cmd "help"
     sleep 1
@@ -1523,7 +1523,7 @@ run_badpool() {
     ! grep -qE "AUTOSTART. Started" "$L"
     chk $? "nothing from the volume was started off it"
 
-    grep -q "BoxOS Shell" "$L"
+    grep -q "BoxOS Hub" "$L"
     chk $? "the machine still reaches a shell"
 
     typed_ok "$L"
@@ -1536,7 +1536,7 @@ run_novolume() {
     L="$SCRATCH/serial.novolume.log"
 
     grep -q "no volume\|No autostart" "$L"; chk $? "boot proceeds with no volume"
-    grep -q "BoxOS Shell" "$L"; chk $? "a machine with no medium still reaches a shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "a machine with no medium still reaches a shell"
     typed_ok "$L"; chk $? "and answers a keystroke"
 
     # THE point of the whole change: the console tag survives having no medium
@@ -1562,14 +1562,14 @@ run_uefi() {
     probe_on; build
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.uefi.log"
     probe_off
     L="$SCRATCH/serial.uefi.log"
 
-    grep -q "BoxOS Shell" "$L"; chk $? "uefi boot reaches the shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "uefi boot reaches the shell"
 
     local pci_n
     pci_n=$(grep -c "logbook 'pci:" "$L")
@@ -1664,13 +1664,13 @@ run_noexec() {
     build
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.noexec.log"
     L="$SCRATCH/serial.noexec.log"
 
-    grep -q "BoxOS Shell" "$L"; chk $? "uefi boot reaches the shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "uefi boot reaches the shell"
 
     grep -q "\[CPU\] no-execute taken up" "$L"
     chk $? "the kernel says it took no-execute up"
@@ -1759,7 +1759,7 @@ run_noexec() {
     fi
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on NOEXEC=off >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.noexec_off.log"
@@ -1768,7 +1768,7 @@ run_noexec() {
     grep -q "no-execute refused by this build" "$N"
     chk $? "the kernel says bit 63 stays out of every entry"
 
-    grep -q "BoxOS Shell" "$N"
+    grep -q "BoxOS Hub" "$N"
     chk $? "a machine with NXE clear still boots to a shell"
 
     ! grep -q "reserved bit set in a paging entry" "$N"
@@ -1812,13 +1812,13 @@ run_earlyirq() {
     build
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.earlyirq.log"
     L="$SCRATCH/serial.earlyirq.log"
 
-    grep -q "BoxOS Shell" "$L"; chk $? "uefi boot reaches the shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "uefi boot reaches the shell"
 
     grep -q "\[BOOT\] the loader handed over RFLAGS=" "$L"
     chk $? "the kernel says what interrupt state the loader handed it"
@@ -1832,7 +1832,7 @@ run_earlyirq() {
     # The BIOS half, because the two loaders disagreed and only one was right.
     make run-stop >/dev/null 2>&1
     make run-bg >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.earlyirq_bios.log"
@@ -1852,7 +1852,7 @@ run_earlyirq() {
     fi
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on EARLYIRQ=on >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell\|System halted" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub\|System halted" "$WAIT_QUIET_S"
     sleep 3
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.earlyirq_on.log"
@@ -1867,7 +1867,7 @@ run_earlyirq() {
     ! grep -q "KERNEL PANIC" "$E"
     chk $? "and does not panic"
 
-    grep -q "BoxOS Shell" "$E"
+    grep -q "BoxOS Hub" "$E"
     chk $? "and the machine boots through it to a shell"
 
     make >"$SCRATCH/build.log" 2>&1
@@ -1959,8 +1959,8 @@ iommu_boot() {
         make run-stop >/dev/null 2>&1
         return 1
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
     fi
@@ -1984,7 +1984,7 @@ iommu_boot() {
     TYPE_SILENCE_IS_JUDGED=1
     type_line "help"
     TYPE_SILENCE_IS_JUDGED=0
-    wait_for_line build/serial.log "Show available commands" "$REACT_QUIET_S" $((MARK + 1))
+    wait_for_line build/serial.log "The hub's own commands" "$REACT_QUIET_S" $((MARK + 1))
     tr -d '\r' < build/serial.log > "$SCRATCH/serial.$name.log"
     make run-stop >/dev/null 2>&1
     return 0
@@ -2060,7 +2060,7 @@ run_iommu() {
 
     # (5) The scenario itself. A controller whose rings the unit does not
     #     translate is a controller that does nothing and says nothing.
-    grep -q "BoxOS Shell" "$L"
+    grep -q "BoxOS Hub" "$L"
     chk $? "the machine reaches a shell with translation on"
     typed_ok "$L"
     chk $? "and answers a keystroke — xHCI reaches its rings through the tables"
@@ -2155,7 +2155,7 @@ run_iommu() {
     chk $? "off: and the kernel says out loud which build this is"
     ! grep -q "^\[IOMMU\] translation ON:" "$N"
     chk $? "off: nothing was switched on"
-    grep -q "BoxOS Shell" "$N"
+    grep -q "BoxOS Hub" "$N"
     chk $? "off: the machine boots"
     typed_ok "$N"
     chk $? "off: and answers a keystroke"
@@ -2274,8 +2274,8 @@ run_intx() {
         harness "no machine was started for intx ($MACHINE QEMUEXTRA=$EXTRA): $(tail -3 "$SCRATCH/runbg.log" | tr '\n' ' ')"
         make run-stop >/dev/null 2>&1; buildkey_restore; return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         bad "intx: never reached a shell with its interrupts on a wire"
         make run-stop >/dev/null 2>&1; buildkey_restore; return
     fi
@@ -2303,7 +2303,7 @@ run_intx() {
     # command's output, which is the fact the checks below read anyway.
     TYPE_SILENCE_IS_JUDGED=1
     type_cmd "help" && key_press ret
-    wait_for_line build/serial.log "Show available commands" "$REACT_QUIET_S" $((MARK + 1))
+    wait_for_line build/serial.log "The hub's own commands" "$REACT_QUIET_S" $((MARK + 1))
     type_cmd "hw" && key_press ret
     TYPE_SILENCE_IS_JUDGED=0
     wait_for_line build/serial.log "CPU features" "$REACT_QUIET_S" $((MARK + 1))
@@ -2468,7 +2468,7 @@ run_intx() {
     ! grep -q "and this line is exclusive" "$L"
     chk $? "the second answerer was not refused as if the line were exclusive"
 
-    grep -q "BoxOS Shell" "$L"
+    grep -q "BoxOS Hub" "$L"
     chk $? "the machine reaches a shell with its interrupts on a wire"
     grep -q "\[TagFS\] the volume on seat .* is MOUNTED" "$L"
     chk $? "and mounts its volume"
@@ -2508,7 +2508,7 @@ run_lastsaid() {
 
     make run-stop >/dev/null 2>&1
     make run-bg PRINTTOFILE=on >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
 
     grep -q "nothing came through the last reset" build/serial.log
@@ -2517,7 +2517,7 @@ run_lastsaid() {
     # Warm reset: devices and CPU reset, guest RAM untouched.
     mon_raw "system_reset"
     wait_until "$WAIT_QUIET_S" "a SECOND shell banner after the warm reset" \
-        '[ "$(grep -c "BoxOS Shell" build/serial.log 2>/dev/null)" = "2" ]'
+        '[ "$(grep -c "BoxOS Hub" build/serial.log 2>/dev/null)" = "2" ]'
     sleep 4
 
     grep -qE "the previous run left [0-9]+ byte\(s\) behind" build/serial.log
@@ -2560,10 +2560,10 @@ run_lastsaid() {
     # ── the copy that cannot be taken away ──────────────────────────────────
     #
     # Both tools above are ELF files ON the volume. The board failure being
-    # chased is one where the volume mounts, reports its files, and the shell
+    # chased is one where the volume mounts, reports its files, and the hub
     # can find none of them — so at the moment the log is worth having,
-    # nothing that could write it can be started. `said` is compiled into
-    # shell.bin and needs no lookup and no spawn.
+    # nothing that could write it can be started. `said` is the hub's own
+    # and needs no lookup and no spawn.
     type_cmd "said"
     key_press ret
     wait_for_line -E build/serial.log "^-- [0-9]+ byte\(s\): what this boot has said --" "$WAIT_QUIET_S"
@@ -2635,7 +2635,7 @@ run_mountfail() {
     # and a bare `make run-bg` rebuilds the whole kernel without it — measured,
     # and it cost a run that looked like the reproduction had failed.
     make run-bg MOUNTFAIL=on >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
 
     type_cmd "hw"
@@ -2677,8 +2677,8 @@ run_mountfail() {
     # Autostart reads its files off the volume. A machine whose volume did not
     # come back says "No autostart files found" and falls back to the embedded
     # shell — which is exactly what the board did, with a stick in the socket.
-    grep -q "\[AUTOSTART\] Started 'shell.bin'" "$L"
-    chk $? "shell.bin is found on the volume and started"
+    grep -q "\[AUTOSTART\] Started 'hub.box'" "$L"
+    chk $? "hub.box is found on the volume and started"
     ! grep -q "No autostart files found" "$L"
     chk $? "and the machine does not fall back to the shell built into it"
 
@@ -2706,7 +2706,7 @@ run_logsave() {
 
     make run-stop >/dev/null 2>&1
     make run-bg PRINTTOFILE=on >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
 
     # A command FIRST, so the file is asked to carry both what a photograph of
@@ -2723,7 +2723,7 @@ run_logsave() {
     L="$SCRATCH/serial.logsave.log"
     I="$SCRATCH/logsave.img"
 
-    grep -q "BoxOS Shell" "$L"; chk $? "boot reaches the shell with the log kept"
+    grep -q "BoxOS Hub" "$L"; chk $? "boot reaches the shell with the log kept"
 
     grep -qE "[0-9]+ byte\(s\) written to watch.log" "$L"
     chk $? "logsave says how much it wrote, and where"
@@ -2755,7 +2755,7 @@ run_logsave() {
     build
     make run-stop >/dev/null 2>&1
     make run-bg >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
     type_cmd "logsave"
     sleep 1; key_press ret; sleep 8
@@ -2796,13 +2796,13 @@ run_manyports() {
 
     make run-stop >/dev/null 2>&1
     make run-bg USB=on XHCIPORTS=15 >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.manyports.log"
     L="$SCRATCH/serial.manyports.log"
 
-    grep -q "BoxOS Shell" "$L"
+    grep -q "BoxOS Hub" "$L"
     chk $? "boot reaches the shell with thirty root ports"
 
     # What the controller says it has, taken from its own summary line rather
@@ -2849,7 +2849,7 @@ run_usbrecover() {
 
     make run-stop >/dev/null 2>&1
     make run-bg USBRECOVER=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
 
     # Typed AFTER the controller has been taken down and brought back. The
@@ -2942,7 +2942,7 @@ run_yank() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
     local MARK
     MARK=$(wc -l < build/serial.log)
@@ -3108,7 +3108,7 @@ run_holdground() {
     make run-bg HOLDGROUND=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
 
     # First arrival: the stick becomes this machine's volume, and the probe
     # opens a file on it.
@@ -3220,7 +3220,7 @@ run_holdground() {
     chk $? "the volume was mounted anew from the medium as it now is"
     grep -q "\[ANCHOR\] WROTE+ANCHORED" "$S"
     chk $? "and it takes a write and anchors it"
-    grep -q "BoxOS Shell" "$L"
+    grep -q "BoxOS Hub" "$L"
     chk $? "the machine still has a shell"
 }
 
@@ -3280,7 +3280,7 @@ run_returnfail() {
     make run-bg RETURNFAIL=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
 
     # First arrival — the mount that succeeds, and the one the stamp counts.
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
@@ -3383,7 +3383,7 @@ run_returnfail() {
     # ── and the machine is usable afterwards, which is the point ───────────
     grep -q "\[ANCHOR\] WROTE+ANCHORED" "$S"
     chk $? "the volume it asked for takes a write and anchors it"
-    grep -q "BoxOS Shell" "$L"; chk $? "the machine still has a shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "the machine still has a shell"
 }
 
 run_stillthere() {
@@ -3406,7 +3406,7 @@ run_stillthere() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latearrival_off; return; }
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
 
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
@@ -3417,8 +3417,8 @@ run_stillthere() {
     # ── the control is the boot itself ──────────────────────────────────────
     #
     # Everything below is "and now it does not work", which is worth nothing
-    # unless the machine has been shown to work first. It has: reaching a shell
-    # at all means display.box and shell.bin were read off this stick and run.
+    # unless the machine has been shown to work first. It has: reaching a hub
+    # at all means display.box and hub.box were read off this stick and run.
     #
     # ‼ IT USED TO BE A `files` TYPED HERE, AND THAT MADE THE RUN UNRELIABLE.
     # TagFS reads ahead, so running the program once put it in memory and the
@@ -3499,7 +3499,7 @@ run_stillthere() {
     local C="$SCRATCH/serial.stillthere.control.log"
     local L="$SCRATCH/serial.stillthere.log"
 
-    grep -q "AUTOSTART. Started .shell.bin" "$C"
+    grep -q "AUTOSTART. Started .hub.box" "$C"
     chk $? "the machine reads programs off this stick at full speed"
 
     # ‼ THE POINT OF THE WHOLE CHANGE. On bulk, a device that is busy NAKs, and
@@ -3557,7 +3557,7 @@ run_slowdisk() {
 
     make run-stop >/dev/null 2>&1
     make run-bg AHCI=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     wait_for_prompt
 
     # 1536 bytes a second puts ONE 4 KiB filesystem block at not quite three
@@ -3572,7 +3572,7 @@ run_slowdisk() {
     sleep 1
     type_line "files"
 
-    wait_for_line build/serial.log "^shell.bin " "$WAIT_QUIET_SLOW_S"
+    wait_for_line build/serial.log "^hub.box " "$WAIT_QUIET_SLOW_S"
 
     mon_raw "block_set_io_throttle disk0 0 0 0 0 0 0"
     sleep 2
@@ -3590,7 +3590,7 @@ run_slowdisk() {
 
     # The point. A disk that takes seconds is a disk, and the machine has to go
     # on using it.
-    grep -q "^shell.bin " "$L"
+    grep -q "^hub.box " "$L"
     chk $? "the filesystem still answers with the disk at 1536 bytes a second"
 
     ! grep -q "did not answer a" "$L"
@@ -3655,7 +3655,7 @@ haltslow_boot() {
         return 2
     fi
     pid=$(cat build/qemu.pid)
-    if wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    if wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
        base=$(haltslow_writes) && [ -n "$base" ] &&
        mon_raw "block_set_io_throttle ide0-hd0 0 0 $bps 0 0 0" && type_line "$cmd" &&
        wait_until "$WAIT_QUIET_SLOW_S" "$want writes of '$cmd' to land" \
@@ -3814,7 +3814,7 @@ haltcycle_leg() {
         return 1
     fi
     pid=$(cat build/qemu.pid)
-    if wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_quiet "$BOOT_BURST_QUIET_S" &&
+    if wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_quiet "$BOOT_BURST_QUIET_S" &&
        type_line "quilltest keeper $HALTCYCLE_NAME" &&
        wait_for_line -E build/serial.log "$HALTCYCLE_ANCHORED" "$WAIT_QUIET_S" && haltcycle_press; then
         wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
@@ -3831,7 +3831,7 @@ haltcycle_leg() {
     python3 tools/volume-read.py "$img" check >"$SCRATCH/haltcycle.$tag.check" 2>&1
     echo "rc=$?" >>"$SCRATCH/haltcycle.$tag.check"
     if make run-bg BOOTDISK="$img" "$@" >"$SCRATCH/runbg.haltcycle.$tag.again.log" 2>&1 &&
-       wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_quiet "$BOOT_BURST_QUIET_S"; then
+       wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_quiet "$BOOT_BURST_QUIET_S"; then
         mark=$(wc -l < build/serial.log)
         type_line "quilltest verify $HALTCYCLE_NAME" &&
             wait_for_line -E build/serial.log '\[QUILL\] verify: (PASS|FAIL)' "$WAIT_QUIET_S" $((mark + 1))
@@ -4031,7 +4031,7 @@ fullvolume_leg() {
         return 1
     fi
     pid=$(cat build/qemu.pid)
-    if ! { wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" &&
+    if ! { wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" &&
            wait_for_quiet "$BOOT_BURST_QUIET_S" && fullvolume_type "$cmd"; }; then
         cp build/serial.log "$L"
         make run-stop >/dev/null 2>&1
@@ -4267,7 +4267,7 @@ EOF
 
         make run-stop >/dev/null 2>&1
         make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-        wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+        wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
 
         local MARK
         MARK=$(wc -l < build/serial.log)
@@ -4339,7 +4339,7 @@ run_twoctrl() {
 
     make run-stop >/dev/null 2>&1
     make run-bg USB=on XHCI2=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
     local MARK
     MARK=$(wc -l < build/serial.log)
@@ -4504,7 +4504,7 @@ run_seal() {
 
     # ‼ AND THE MACHINE STILL BOOTS. A corrupted pass is not a reason to
     # refuse a machine: the pass is an optimisation over a rule that works.
-    grep -q "BoxOS Shell" "$L";  chk $? "the machine still reaches a shell"
+    grep -q "BoxOS Hub" "$L";  chk $? "the machine still reaches a shell"
     typed_ok "$L";               chk $? "and still answers a keystroke"
 
     # ── and now a pass this kernel is too old to have heard of ─────────────
@@ -4567,7 +4567,7 @@ run_enumsilence() {
     # whether a silenced pipe costs it.
     make run-stop >/dev/null 2>&1
     make run-bg ENUMSILENCE=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
 
     type_cmd "help"
@@ -4619,7 +4619,7 @@ run_enumsilence() {
     grep -q "transfer event(s) ever raised on it 0 came from the device" "$L"
     chk $? "the report says the device itself answered nothing"
 
-    grep -q "BoxOS Shell" "$L"
+    grep -q "BoxOS Hub" "$L"
     chk $? "the machine still reaches a shell"
 
     typed_ok "$L"
@@ -4640,7 +4640,7 @@ run_ctrlgiveup() {
     # one core neither runs.
     make run-stop >/dev/null 2>&1
     make run-bg CTRLGIVEUP=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
 
     # USB=on gives this machine a KEYBOARD, not a disk. The proof runs on the
@@ -4691,7 +4691,7 @@ run_ctrlgiveup() {
     # And the device carried on being a disk afterwards.
     grep -qE "\[USB disk [0-9]+\] .* sectors, .* MiB" "$L"
     chk $? "the disk still enumerated after its control pipe was given up on"
-    grep -q "BoxOS Shell" "$L"; chk $? "the machine still has a shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "the machine still has a shell"
     typed_ok "$L";              chk $? "and still answers a keystroke"
 }
 
@@ -4707,7 +4707,7 @@ run_isoch() {
     build
     make run-stop >/dev/null 2>&1
     make run-bg USB=on ISOCH=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
     type_cmd "help"
     sleep 1; key_press ret; sleep 3
@@ -4725,7 +4725,7 @@ run_isoch() {
     chk $? "and the isochronous endpoints it has are named, not dropped in silence"
 
     # A device nobody drives must not cost the machine anything.
-    grep -q "BoxOS Shell" "$L"; chk $? "the machine still reaches a shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "the machine still reaches a shell"
     typed_ok "$L";              chk $? "and still answers a keystroke"
     grep -q "endpoint-context self-test 15/15" "$L"
     chk $? "and the endpoint-context fields still agree with the specification"
@@ -4781,8 +4781,8 @@ run_sleeps() {
 
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    grep -q "BoxOS Shell" build/serial.log 2>/dev/null || { bad "sleeps: never reached a shell"; make run-stop >/dev/null 2>&1; return; }
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    grep -q "BoxOS Hub" build/serial.log 2>/dev/null || { bad "sleeps: never reached a shell"; make run-stop >/dev/null 2>&1; return; }
 
     # ── IT SLEEPS ───────────────────────────────────────────────────────────
     sleep $QUIET_SETTLE_S
@@ -5003,7 +5003,7 @@ EOF
 claim_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 4
     local run=0
     while [ $run -lt 3 ]; do
@@ -5078,7 +5078,7 @@ run_kcoreclaimmut() {
 runnable_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 4
     local run=0
     while [ $run -lt 3 ]; do
@@ -5146,7 +5146,7 @@ run_runnable() {
 fare_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=$2 >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 4
     if type_cmd "faretest"; then
         sleep 1
@@ -5356,7 +5356,7 @@ lostwake_boot() {
     local rounds=$2 want_looks=${3:-0}
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 4
     local run=0
     while [ $run -lt "$rounds" ] ||
@@ -5453,7 +5453,7 @@ run_lostwakemut() {
 chit_boot_and_prompt() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 4
 }
 # Type one command and wait for either its marker or a Nightwatch verdict.
@@ -5734,7 +5734,7 @@ cursoronly_off() {
 turnin_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 4
     local run=0
     while [ $run -lt 3 ]; do
@@ -5836,7 +5836,7 @@ run_sleepsmut() {
     bell_off; build STRICT=on
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 4
     local MARK EARLY
     MARK=$(wc -l < build/serial.log)
@@ -5874,7 +5874,7 @@ run_sleepsmut() {
     turnin_off; build STRICT=on
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep $QUIET_SETTLE_S
     local A B USED
     A=$(qemu_cpu_cs); sleep $QUIET_SAMPLE_S; B=$(qemu_cpu_cs)
@@ -5892,7 +5892,7 @@ run_sleepsmut() {
     brookpop_off; build STRICT=on
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
     type_cmd "quietprint"
     sleep 1
@@ -5945,8 +5945,8 @@ run_lines() {
 
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    grep -q "BoxOS Shell" build/serial.log 2>/dev/null || { bad "lines: never reached a shell"; make run-stop >/dev/null 2>&1; return; }
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    grep -q "BoxOS Hub" build/serial.log 2>/dev/null || { bad "lines: never reached a shell"; make run-stop >/dev/null 2>&1; return; }
 
     local MARK
     MARK=$(wc -l < build/serial.log)
@@ -6006,7 +6006,7 @@ run_linesmut() {
 
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     local MARK
     MARK=$(wc -l < build/serial.log)
     type_cmd "print_stress"
@@ -6057,8 +6057,8 @@ run_linesmut() {
 rollcall_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
     fi
@@ -6189,8 +6189,8 @@ run_rollcallmut() {
 handset_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
     fi
@@ -6354,8 +6354,8 @@ paint_boot() {
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
     fi
@@ -6465,8 +6465,8 @@ finish_boot() {
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
     fi
@@ -6634,8 +6634,8 @@ overtake_listing() {
     # shortest run of listing that reached the log before a prompt did.
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1; return 1
     fi
     sleep 3
@@ -6820,8 +6820,8 @@ orderlife_strandkill_off() { restore src/kernel/core/process/process.c; }
 orderlife_run() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1; return 1
     fi
     local MARK
@@ -6975,9 +6975,9 @@ EOF2
 caret_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
-    grep -q "BoxOS Shell" build/serial.log 2>/dev/null
+    grep -q "BoxOS Hub" build/serial.log 2>/dev/null
 }
 
 caret_run() {
@@ -7137,10 +7137,10 @@ grow_boot() {
     # grow_boot NAME — boot the image as it stands and keep the log window.
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 2
     cp build/serial.log "$SCRATCH/serial.$1.log"
-    grep -q "BoxOS Shell" build/serial.log 2>/dev/null
+    grep -q "BoxOS Hub" build/serial.log 2>/dev/null
 }
 
 grow_rollback_head() {
@@ -7349,8 +7349,8 @@ util_boot() {
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
     fi
@@ -7527,8 +7527,8 @@ byname_session() {
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
     fi
@@ -7737,9 +7737,9 @@ wire_session() {
     local name=$1
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     local reached=0
-    grep -q "BoxOS Shell" build/serial.log 2>/dev/null && reached=1
+    grep -q "BoxOS Hub" build/serial.log 2>/dev/null && reached=1
     sleep 3
     # Typed through the monitor's keyboard, not the serial line, so the wire's
     # own state cannot stop the command from landing.
@@ -7814,7 +7814,7 @@ run_wiremut() {
     [ $reached -ne 0 ] \
         && ok "wiremut: with nobody telling the line, the shell never reached the wire — the oracle sees the stall" \
         || bad "wiremut: the shell reached the wire with nobody telling the line — the oracle cannot see a dead line"
-    grep -q "BoxOS Shell" "$L" && grep -q "\[HALT\] Rebooting" "$L" \
+    grep -q "BoxOS Hub" "$L" && grep -q "\[HALT\] Rebooting" "$L" \
         && ok "wiremut: the drain at halt brought the whole ring out, shell banner and last words alike" \
         || bad "wiremut: the drain at halt did not bring the ring out"
     build   # leave the tree built from clean sources
@@ -7840,7 +7840,7 @@ run_wiremut() {
 run_knock() {
     echo "== knock: a keystroke rides the ring and one knock, on 16 cores and on one =="
     build STRICT=on
-    if ! util_boot knock16 "STRICT=on CORES=16 MEM=8G" help "Show available commands" "$REACT_QUIET_S"; then
+    if ! util_boot knock16 "STRICT=on CORES=16 MEM=8G" help "The hub's own commands" "$REACT_QUIET_S"; then
         bad "knock: never reached a shell (16c)"; return
     fi
     L="$SCRATCH/serial.knock16.log"
@@ -7894,7 +7894,7 @@ knock_deaf_off() {
 run_knockmut() {
     echo "== knockmut: nobody knocks — the machine must boot and be deaf, and the oracle must see it =="
     knock_deaf_on; build STRICT=on
-    util_boot knockmut "STRICT=on CORES=4 MEM=4G" help "Show available commands" "$REACT_QUIET_S"; local booted=$?
+    util_boot knockmut "STRICT=on CORES=4 MEM=4G" help "The hub's own commands" "$REACT_QUIET_S"; local booted=$?
     knock_deaf_off
     if [ $booted -ne 0 ]; then bad "knockmut: never reached a shell"; build; return; fi
     L="$SCRATCH/serial.knockmut.log"
@@ -7928,8 +7928,8 @@ storm_session() {
     make run-stop >/dev/null 2>&1
     # shellcheck disable=SC2086
     make run-bg $args >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
     fi
@@ -8162,8 +8162,8 @@ run_deadlinemut() {
 handsetdeaf_boot() {
     make run-stop >/dev/null 2>&1
     make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
-    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+    if ! grep -q "BoxOS Hub" build/serial.log 2>/dev/null; then
         make run-stop >/dev/null 2>&1
         return 1
     fi
@@ -8253,7 +8253,7 @@ unattended_boot() {   # $1 = tag, the rest = run-bg arguments
     local tag=$1; shift
     make run-stop >/dev/null 2>&1
     make run-bg "$@" >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
     type_cmd "hw"
     sleep 1
@@ -8268,7 +8268,7 @@ run_unattended() {
     build STRICT=on
     unattended_boot unattended UEFI=on STRICT=on CORES=4 MEM=4G
     L="$SCRATCH/serial.unattended.log"
-    grep -q "BoxOS Shell" "$L"; chk $? "unattended: UEFI 4c reaches the shell"
+    grep -q "BoxOS Hub" "$L"; chk $? "unattended: UEFI 4c reaches the shell"
     grep -qE "\[UNATTENDED READ\] seat [0-9]+ \(AHCI port [0-9]+\): PASSED — 4096 bytes read" "$L"
     chk $? "unattended: the AHCI seat under the volume answered, and the bytes agree"
     ! grep -q "\[UNATTENDED READ\].*FAILED" "$L"; chk $? "unattended: and nothing about it failed"
@@ -8363,7 +8363,7 @@ run_unattendedmut() {
     grep -qE "\[UNATTENDED READ\] seat [0-9]+ \(AHCI port [0-9]+\): FAILED — the medium refused the read \(error -?[0-9]+\)" "$L"
     chk $? "unattendedmut: and the proof said the medium refused"
     ! grep -q "\[UNATTENDED READ\].*PASSED" "$L"; chk $? "unattendedmut: no PASSED was said"
-    grep -q "BoxOS Shell" "$L"; chk $? "unattendedmut: the machine still boots"
+    grep -q "BoxOS Hub" "$L"; chk $? "unattendedmut: the machine still boots"
     external_ok "$L"; chk $? "unattendedmut: and runs a program afterwards"
     ! grep -qE "PANIC|^\[EXCEPTION\]" "$L"; chk $? "unattendedmut: no panic, no exception"
 
@@ -8373,7 +8373,7 @@ run_unattendedmut() {
     L="$SCRATCH/serial.unattendedwrong.log"
     grep -qE "\[UNATTENDED READ\] seat [0-9]+ \(AHCI port [0-9]+\): FAILED — the two reads disagree, first at byte [0-9]+" "$L"
     chk $? "unattendedwrong: the bytes disagreed and the proof said where"
-    grep -q "BoxOS Shell" "$L"; chk $? "unattendedwrong: the machine still boots"
+    grep -q "BoxOS Hub" "$L"; chk $? "unattendedwrong: the machine still boots"
 }
 
 # ---------------------------------------------------------------------------
@@ -8399,9 +8399,9 @@ run_footing() {
     build STRICT=on
     make run-stop >/dev/null 2>&1
     make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     local reached=0
-    grep -q "BoxOS Shell" build/serial.log 2>/dev/null && reached=1
+    grep -q "BoxOS Hub" build/serial.log 2>/dev/null && reached=1
     sleep 3
     type_cmd "reboot"
     sleep 1; key_press ret
@@ -8442,7 +8442,7 @@ run_footing() {
 
     # And the machine actually came back.
     local boots
-    boots=$(grep -c "BoxOS Shell" "$L")
+    boots=$(grep -c "BoxOS Hub" "$L")
     [ "${boots:-0}" -ge 2 ]; chk $? "footing: the machine rebooted and came back up ($boots boot(s))"
 
     grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
@@ -10038,7 +10038,7 @@ quill_boot() {
     [ -n "${2:-}" ] && keys+=("MEM=$2")
     make run-stop >/dev/null 2>&1
     make run-bg VOLUME_TESTS=on ${keys[@]+"${keys[@]}"} >/dev/null 2>&1
-    if ! wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"; then
+    if ! wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"; then
         quill_keep "$1"
         bad "quill: boot $1 never reached a shell"
         return 1
@@ -11417,7 +11417,7 @@ turns_leg() {
     rm -f "$L"
     make run-stop >/dev/null 2>&1
     if ! make run-bg "$@" >"$SCRATCH/runbg.turns.$tag.log" 2>&1 ||
-       ! wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"; then
+       ! wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"; then
         make run-stop >/dev/null 2>&1
         cp build/serial.log "$L" 2>/dev/null
         bad "turns: $tag ($*) never reached a shell"
@@ -11687,7 +11687,7 @@ cores_boot() {
         make run-stop >/dev/null 2>&1
         return 1
     fi
-    if ! wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"; then
+    if ! wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"; then
         make run-stop >/dev/null 2>&1
         cp build/serial.log "$SCRATCH/serial.cores.$tag.log"
         bad "$what: the machine never reached a shell ($*)"
@@ -11993,7 +11993,7 @@ run_appenders() {
     build
     make run-stop >/dev/null 2>&1
     if make run-bg USB=on CORES=16 MEM=8G >"$SCRATCH/runbg.cores.log" 2>&1 && stick_from_boot_image &&
-       wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" &&
+       wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" &&
        mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" &&
        mon_raw "device_add usb-storage,drive=stick,id=usbstick" &&
        wait_for_line build/serial.log "hands over" "$WAIT_QUIET_SLOW_S" && wait_for_quiet "$BOOT_BURST_QUIET_S"; then

@@ -270,7 +270,7 @@ static void autostart_relieve_stand_in(void)
     process_t *p = process_find_ref(pid);
     if (!p) return;
 
-    kprintf("[AUTOSTART] the volume brought its own shell — the stand-in "
+    kprintf("[AUTOSTART] the volume brought its own hub — the stand-in "
             "(PID %u) hands over\n", pid);
 
     CabinEnd(p, 0);

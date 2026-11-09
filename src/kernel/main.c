@@ -1059,43 +1059,43 @@ void kernel_main(void)
     process_t *initial_proc = NULL;
     int autostart_count = AutostartLaunchFromVolume(&initial_proc);
 
-    // Fallback: if no autostart files found, use embedded shell binary
+    // Fallback: if no autostart files found, the hub the kernel carries
     if (!initial_proc)
     {
-        kprintf("[AUTOSTART] No autostart files found, falling back to embedded shell\n");
+        kprintf("[AUTOSTART] No autostart files found, falling back to the hub the kernel carries\n");
 
-        process_t *shell_proc = process_create("shell");
-        if (!shell_proc)
+        process_t *hub_proc = process_create("hub");
+        if (!hub_proc)
         {
-            panic("Failed to create fallback shell process");
+            panic("Failed to create fallback hub process");
         }
 
-        process_add_tag(shell_proc, "system");
-        process_add_tag(shell_proc, "utility");
-        process_add_tag(shell_proc, "app");
+        process_add_tag(hub_proc, "system");
+        process_add_tag(hub_proc, "utility");
+        process_add_tag(hub_proc, "app");
 
-        size_t shell_size = (size_t)(_binary_shell_stripped_elf_end - _binary_shell_stripped_elf_start);
+        size_t hub_size = (size_t)(_binary_hub_stripped_elf_end - _binary_hub_stripped_elf_start);
 
-        if (shell_size == 0 || shell_size > CONFIG_PROC_MAX_BINARY_SIZE)
+        if (hub_size == 0 || hub_size > CONFIG_PROC_MAX_BINARY_SIZE)
         {
-            panic("Invalid embedded shell binary size");
+            panic("Invalid embedded hub binary size");
         }
 
-        ImageSource source = { shell_size, NULL, (const uint8_t *)_binary_shell_stripped_elf_start, 0 };
-        int load_result = process_load_binary(shell_proc, &source, "embedded shell", false);
+        ImageSource source = { hub_size, NULL, (const uint8_t *)_binary_hub_stripped_elf_start, 0 };
+        int load_result = process_load_binary(hub_proc, &source, "embedded hub", false);
         if (load_result != 0)
         {
-            panic("Failed to load embedded shell binary");
+            panic("Failed to load embedded hub binary");
         }
 
-        shell_proc->state = PROC_WORKING;
-        initial_proc = shell_proc;
-        kprintf("[AUTOSTART] Fallback shell ready (PID %u)\n", shell_proc->pid);
+        hub_proc->state = PROC_WORKING;
+        initial_proc = hub_proc;
+        kprintf("[AUTOSTART] Fallback hub ready (PID %u)\n", hub_proc->pid);
 
         /* It is standing in, not filling the post. If this machine's own
-         * volume turns up later carrying a display daemon and a shell of its
+         * volume turns up later carrying a display daemon and a hub of its
          * own, this one hands over rather than sharing a keyboard with it. */
-        AutostartNoteStandIn(shell_proc->pid);
+        AutostartNoteStandIn(hub_proc->pid);
     }
     else
     {

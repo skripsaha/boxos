@@ -669,7 +669,7 @@ OVERTAKE_DRAIN_QUIET_S=${OVERTAKE_DRAIN_QUIET_S:-8}
 # especially the ones that exist to prove it did NOT — use this shorter window,
 # because waiting out the ordinary one would only be waiting.
 REACT_QUIET_S=${REACT_QUIET_S:-20}
-# The banner is not the prompt: a boot goes on printing after "BoxOS Shell".
+# The banner is not the prompt: a boot goes on printing after "BoxOS Hub".
 # This is how long that burst may pause and still be the same burst — the same
 # kind of number as OVERTAKE_DRAIN_QUIET_S, a property of the writer, not a
 # guess at how long a boot takes. A log that has been quiet this long is a

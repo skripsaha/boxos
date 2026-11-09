@@ -238,23 +238,23 @@ mkfs_image() {
 mkfs_grounds() {
     local work=$1 img=$1/big.img kb sb blocks before rc
     mkfs_py ground "$img" $((17 * 2147483648))
-    tools/create_tagfs --v2 "$img" src/userspace/shell/shell.bin "utility,system" build/kernel.bin "system" \
+    tools/create_tagfs --v2 "$img" build/box/hub.box "utility,system" build/kernel.bin "system" \
         >"$work/big.log" 2>&1
     chk $? "mkfs: --v2 lays a volume on a ground of 17 TiB ($(grep -a 'Ground' "$work/big.log" | head -1 | sed 's/^ *//'))"
     [ "$(python3 tools/volume-read.py "$img" check | tail -1)" = "$MKFS_CLEAN" ]
     chk $? "mkfs: and its census reads it clean"
-    ! tools/create_tagfs --v1 "$img" src/userspace/shell/shell.bin "utility,system" >"$work/big.v1.log" 2>&1 \
+    ! tools/create_tagfs --v1 "$img" build/box/hub.box "utility,system" >"$work/big.v1.log" 2>&1 \
         && grep -aq '16 TiB' "$work/big.v1.log"
     chk $? "mkfs: format v1 refuses the same ground ($(grep -a '16 TiB' "$work/big.v1.log" | head -1 | cut -c1-90))"
     rm -f "$img"
 
     img=$work/small.img
     kb=$(( ($(wc -c <build/kernel.bin) + 4095) / 4096 ))
-    sb=$(( ($(wc -c <src/userspace/shell/shell.bin) + 4095) / 4096 ))
+    sb=$(( ($(wc -c <build/box/hub.box) + 4095) / 4096 ))
     blocks=$(( ( (1024 + kb + sb + 255) / 256 ) * 256 + 256 + 1 ))
     mkfs_py ground "$img" $((blocks * 8))
     before=$(shasum -a 256 <"$img")
-    tools/create_tagfs --v2 "$img" src/userspace/shell/shell.bin "utility,system" build/kernel.bin "system" \
+    tools/create_tagfs --v2 "$img" build/box/hub.box "utility,system" build/kernel.bin "system" \
         >"$work/small.log" 2>&1
     rc=$?
     [ $rc -ne 0 ] && grep -aq "does not fit" "$work/small.log"

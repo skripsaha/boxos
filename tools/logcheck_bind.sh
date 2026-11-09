@@ -56,7 +56,7 @@ book_bind() {
         harness "bind: run-bg would not start the book's image: $(tail -1 "$SCRATCH/bind.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "use bind sewn" && wait_for_prompt && type_line "quilltest names bind" &&
         wait_for_line -E build/serial.log '\[QUILL\] names: ' "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest ground bind $BOOK_CIRCLE_GROUND" &&
@@ -131,7 +131,7 @@ BIND_EOF
         harness "bind: run-bg would not start the written book again: $(tail -1 "$SCRATCH/bind.again.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$name.log"
@@ -225,7 +225,7 @@ book_bindcut() {
         harness "bindcut $point: run-bg would not start the book's image: $(tail -1 "$SCRATCH/bindcut.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt && book_bindcut_before "$point" "$second"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt && book_bindcut_before "$point" "$second"
     rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$w"
@@ -262,7 +262,7 @@ BINDCUT_EOF
         harness "bindcut $point: run-bg would not start the cut book again: $(tail -1 "$SCRATCH/bindcut.again.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$name.log"
@@ -315,7 +315,7 @@ book_bindrot() {
         harness "bindrot $plant: run-bg would not start the planted book: $(tail -1 "$SCRATCH/bindrot.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest log rot $BOOK_BINDROT_LINES" &&
         wait_for_line -E build/serial.log '\[QUILL\] log: ' "$WAIT_QUIET_SLOW_S" && wait_for_prompt &&
         type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
@@ -356,7 +356,7 @@ BINDROT_EOF
         harness "bindrot $plant: run-bg would not start the written book again: $(tail -1 "$SCRATCH/bindrot.again.run-bg")"
         return
     fi
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     rc=$?
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$name.log"

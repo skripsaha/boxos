@@ -66,11 +66,11 @@ grow_book_boot() {
         make run-stop >/dev/null 2>&1
         return 2
     fi
-    wait_for_line -E build/serial.log 'BoxOS Shell|KERNEL PANIC' "$WAIT_QUIET_S"
+    wait_for_line -E build/serial.log 'BoxOS Hub|KERNEL PANIC' "$WAIT_QUIET_S"
     sleep 2
     make run-stop >/dev/null 2>&1
     tr -d '\r' < build/serial.log > "$SCRATCH/serial.$tag.log"
-    grep -aq "BoxOS Shell" "$SCRATCH/serial.$tag.log"
+    grep -aq "BoxOS Hub" "$SCRATCH/serial.$tag.log"
 }
 
 # grow_book_line LOG ERE — the number of the first line of LOG ERE matches; 0

@@ -63,7 +63,7 @@ halthog_quiet() {
         return 2
     fi
     pid=$(cat build/qemu.pid)
-    if wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" && wait_for_prompt &&
+    if wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
        type_line "untag clock.box autostart" && wait_for_line build/serial.log "Tag removed" "$WAIT_QUIET_S" &&
        wait_for_prompt && type_line "bye"; then
         wait_until "$WAIT_QUIET_S" "the machine to switch itself off by bye" "! kill -0 $pid 2>/dev/null"
@@ -101,7 +101,7 @@ halthog_round() {
         return 2
     fi
     pid=$(cat build/qemu.pid)
-    if ! wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S" || ! wait_for_prompt; then
+    if ! wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" || ! wait_for_prompt; then
         HALTHOG_STOP="the machine never came to its shell's prompt"
     elif grep -aqE "$HALTHOG_CLOCK" build/serial.log; then
         HALTHOG_STOP="clock.box was started at boot though the machine was halted by bye with its autostart taken off"

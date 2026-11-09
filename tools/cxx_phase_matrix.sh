@@ -81,7 +81,7 @@ for cfg in $CONFIGS; do
 
     up=0
     for i in $(seq 1 160); do
-        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && { up=1; break; }
+        grep -q "BoxOS Hub" build/serial.log 2>/dev/null && { up=1; break; }
         sleep 0.5
     done
     if [ "$up" != 1 ]; then

@@ -194,7 +194,7 @@ framerefuse_leg() {
     rm -f "$img" "$before" "$rec" "$L"
     cp build/boxos.img "$img" || { harness "framerefuse ($leg): could not copy build/boxos.img"; return; }
     # shellcheck disable=SC2086
-    if ! tools/create_tagfs "$mode" "$img" src/userspace/shell/shell.bin "utility,system" $anchor \
+    if ! tools/create_tagfs "$mode" "$img" build/box/hub.box "utility,system" $anchor \
             "$kernel" "system" >"$SCRATCH/framerefuse.$leg.mkfs.log" 2>&1; then
         bad "framerefuse ($leg): create_tagfs $mode would not make the image: $(tail -1 "$SCRATCH/framerefuse.$leg.mkfs.log")"
         return
@@ -234,7 +234,7 @@ PY
            make run-stop >/dev/null 2>&1
            return ;;
     esac
-    if wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"; then
+    if wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"; then
         sleep 2
         type_cmd "help"
         sleep 1
@@ -261,7 +261,7 @@ PY
         ! grep -qE "MOUNTED — [0-9]+ file" "$L"
         chk $? "framerefuse ($leg): nothing is mounted off it"
     fi
-    grep -q "BoxOS Shell" "$L" && typed_ok "$L"
+    grep -q "BoxOS Hub" "$L" && typed_ok "$L"
     chk $? "framerefuse ($leg): the machine still reaches a shell, and answers a keystroke"
     ! grep -qE "PANIC|\[EXCEPTION\]|\[TAGBOOT FATAL\]" "$L"
     chk $? "framerefuse ($leg): no panic, no fault"
@@ -365,7 +365,7 @@ framerefuse_tagboot() {
     local L="$SCRATCH/serial.framerefuse.tagboot.$1.log" pid same
     rm -f "$img" "$before" "$L"
     cp build/boxos.img "$img" || { harness "framerefuse ($leg): could not copy build/boxos.img"; return; }
-    if ! tools/create_tagfs --frame-only "$img" src/userspace/shell/shell.bin "utility,system" \
+    if ! tools/create_tagfs --frame-only "$img" build/box/hub.box "utility,system" \
             build/kernel.bin "system" >"$SCRATCH/framerefuse.tagboot.mkfs.log" 2>&1; then
         bad "framerefuse ($leg): create_tagfs --frame-only would not make the image: $(tail -1 "$SCRATCH/framerefuse.tagboot.mkfs.log")"
         return

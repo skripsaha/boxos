@@ -93,7 +93,7 @@ run_replugwritebook() {
     make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
     stick_from_boot_image \
         || { make run-stop >/dev/null 2>&1; latelaunch_off; return; }
-    wait_for_line build/serial.log "BoxOS Shell" "$WAIT_QUIET_S"
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"

@@ -65,7 +65,7 @@ ASSEMBLE_OBJS = $(patsubst %.c,%.o,$(wildcard $(ASSEMBLE_DIR)/*.c))
 ASSEMBLE_RUNTIME_BLOB = $(ASSEMBLE_DIR)/runtime_blob.o
 ASSEMBLE_ENTRY_BLOB = $(ASSEMBLE_DIR)/entry_blob.o
 
-UTILS = help create show files tag untag name trash erase assemble \
+UTILS = create show files tag untag name trash erase assemble \
         me info say reboot bye defrag escheat fsck ipc_test memtag hw \
         timezone logsave lastsaid usetest faretest luggagetest rollcall handset headcount \
         playtime lavalamp finish taskcenter hexer stringview \
