@@ -102,7 +102,7 @@ static const uint8_t *Span(const Elf *elf, uint64_t offset, uint64_t count, cons
 typedef struct {
     Loadable Code, Const, Data;
     bool     Thread;
-    uint64_t ThreadAlign, ThreadMemory, ThreadOffset, ThreadSize;
+    uint64_t ThreadAlign, ThreadMemory, ThreadOffset, ThreadSize, ThreadPlace;
     bool     Dynamic;
     uint64_t DynamicOffset, DynamicSize;
 } Segments;
@@ -154,6 +154,7 @@ static void ReadSegments(const Elf *elf, Segments *out)
         if (type == PT_TLS) {
             out->Thread       = true;
             out->ThreadOffset = U64(header + 8);
+            out->ThreadPlace  = U64(header + 16);
             out->ThreadSize   = U64(header + 32);
             out->ThreadMemory = U64(header + 40);
             out->ThreadAlign  = U64(header + 48) ? U64(header + 48) : 1;
@@ -295,8 +296,13 @@ static void ReadFixups(const Elf *elf, Segments *segments, uint16_t type, Places
     }
 
     qsort(places->Places, places->Count, sizeof(uint64_t), PlaceOrder);
-    for (uint64_t i = 1; i < places->Count; i++)
-        if (places->Places[i] == places->Places[i - 1]) Refuse("two relocations name one word");
+    for (uint64_t i = 0; i < places->Count; i++) {
+        if (i > 0 && places->Places[i] == places->Places[i - 1]) Refuse("two relocations name one word");
+        if (segments->Thread && places->Places[i] + 8 > segments->ThreadPlace &&
+            places->Places[i] < segments->ThreadPlace + segments->ThreadSize)
+            Refuse("a word of its thread template holds an address; every thread's block is copied from the "
+                   "template as it is, with no base added");
+    }
 }
 
 static void CheckDynamic(const Elf *elf, const Segments *segments)

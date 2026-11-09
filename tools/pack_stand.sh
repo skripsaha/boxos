@@ -13,7 +13,8 @@
 # found in it as the ELF has them, by a reading of the ELF that shares nothing
 # with pack. Then ELF files pack must refuse — writable and executable code,
 # two code segments, a program interpreter, a relocation that is not
-# R_X86_64_RELATIVE, an object file, a file that is no ELF — each refused with
+# R_X86_64_RELATIVE, an object file, an address in the thread template, a file
+# that is no ELF — each refused with
 # its reason. Built under the address and undefined-behaviour sanitizers. The
 # last line counts the cases that held.
 
@@ -66,6 +67,14 @@ printf 'int square(int x) { return x * x; }\nvoid _start(void) { square(3); for 
 $CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/bare.c" -o "$WORK/bare.o" > "$WORK/cc.log" 2>&1 &&
 $LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/bare.o" -o "$WORK/bare_pie.elf" > "$WORK/ld.log" 2>&1 ||
     { cat "$WORK/cc.log" "$WORK/ld.log"; harness "the bare program did not build"; }
+
+# A static PIE whose thread template holds an address: no base is added to the
+# template a thread's block is copied from, so pack must refuse it.
+printf 'static int x;\n__thread int *pointer = &x;\nvoid _start(void) { *pointer = 1; for (;;) { } }\n' \
+    > "$WORK/tlsptr.c"
+$CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/tlsptr.c" -o "$WORK/tlsptr.o" > "$WORK/cc.log" 2>&1 &&
+$LD_CROSS $LINK -pie -z pack-relative-relocs -T $LIB/user.ld "$WORK/tlsptr.o" -o "$WORK/tlsptr.elf" \
+    > "$WORK/ld.log" 2>&1 || { cat "$WORK/cc.log" "$WORK/ld.log"; harness "the thread-pointer program did not build"; }
 
 # ── a copy of a program broken, or changed, one way ─────────────────────────
 # patch FILE OUT KIND: a copy of FILE broken one way.
@@ -188,6 +197,7 @@ refuse "a program interpreter" "$WORK/interp.elf" "program interpreter"
 patch "$WORK/small_rela.elf" "$WORK/reloc64.elf" reloc64 || harness "could not break the small program (reloc64)"
 refuse "an R_X86_64_64 relocation" "$WORK/reloc64.elf" "other than R_X86_64_RELATIVE"
 refuse "an object file" "$WORK/small.o" "not an executable or a static PIE"
+refuse "an address in the thread template" "$WORK/tlsptr.elf" "a word of its thread template holds an address"
 refuse "a text file" "$LIB/user.ld" "not an ELF file"
 patch src/userspace/utils/hw.elf "$WORK/badform.elf" badform || harness "could not break hw's Form (badform)"
 refuse "a Form that is no text" "$WORK/badform.elf" "is not text as a box keeps its part form"
