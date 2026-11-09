@@ -837,7 +837,7 @@ UTIL_NAMES = help create show files tag untag name trash erase assemble \
              playtime lavalamp finish taskcenter hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
-             edit seek retag read rollcall handset inside
+             edit seek retag read rollcall handset inside settings
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1535,6 +1535,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/me.elf      "utility" \
 	$(UTILS_DIR)/info.elf    "utility,storage" \
 	$(UTILS_DIR)/inside.elf  "utility,storage" \
+	$(UTILS_DIR)/settings.elf "utility,storage" \
 	$(UTILS_DIR)/say.elf     "utility" \
 	$(UTILS_DIR)/reboot.elf  "utility,system" \
 	$(UTILS_DIR)/bye.elf     "utility,system" \

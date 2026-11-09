@@ -26,7 +26,8 @@
  *
  *   NAME    a small letter, then small letters, digits and '-', not ending in
  *           '-'; at most SETTING_NAME_MAX bytes; not `settings` nor `when`,
- *           which begin other lines of the person's file; one setting's only
+ *           which begin other lines of the person's file, nor `default`, the
+ *           word for as it came; one setting's only
  *   KIND    yes-or-no                 yes or no
  *           number from A to B [UNIT] a whole number from A to B, A no more
  *                                     than B; UNIT a word that says what it
@@ -223,7 +224,7 @@ static inline bool SettingNameUsable(SettingSpan name)
         uint8_t c = name.At[i];
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
     }
-    return !SettingSpanIs(name, "settings") && !SettingSpanIs(name, "when");
+    return !SettingSpanIs(name, "settings") && !SettingSpanIs(name, "when") && !SettingSpanIs(name, "default");
 }
 
 /* Text on one line: no byte below a blank but a tab, and no DEL. */
@@ -706,7 +707,7 @@ static inline const char *SettingsVerdictText(SettingsVerdict verdict)
     case SETTINGS_NO_HEAD:            return "does not begin with the line \"settings 1\"";
     case SETTING_LINE_UNREAD:         return "cannot be read: a quote is not closed, or not followed by a blank";
     case SETTING_NAME_BAD:            return "has a name a setting cannot have: a small letter, then small "
-                                             "letters, digits and -, at most 32, not settings or when";
+                                             "letters, digits and -, at most 32, not settings, when or default";
     case SETTING_NAME_TWICE:          return "is declared twice";
     case SETTING_KIND_UNKNOWN:        return "is of a kind this reader does not know";
     case SETTING_LIMITS_BAD:          return "does not say from and to as two whole numbers, the smaller first";

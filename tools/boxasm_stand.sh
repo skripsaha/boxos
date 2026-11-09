@@ -411,7 +411,7 @@ setting_refuses setting_no_default 'setting look one-of dark light "how it looks
 setting_refuses setting_unknown_kind 'setting look gradient default x "how it looks"' \
     "setting_unknown_kind.asm:5:1: the setting look is of a kind this reader does not know"
 setting_refuses setting_bad_name 'setting Look word default x "how it looks"' \
-    "setting_bad_name.asm:5:1: the setting Look has a name a setting cannot have: a small letter, then small letters, digits and -, at most 32, not settings or when"
+    "setting_bad_name.asm:5:1: the setting Look has a name a setting cannot have: a small letter, then small letters, digits and -, at most 32, not settings, when or default"
 setting_refuses setting_twice $'setting look word default x "how it looks"\nsetting look word default y "again"' \
     "setting_twice.asm:6:1: the setting look is declared already"
 setting_refuses setting_outside_limits 'setting width number from 1 to 9 default 10 "how wide"' \

@@ -58,7 +58,7 @@ static inline void SettingsPenLine(uint8_t *out, uint64_t *at, SettingSpan name,
 static inline void SettingsPenSet(const uint8_t *file, uint64_t size, SettingSpan name, SettingSpan value,
                                   uint8_t *out, uint64_t *bytes)
 {
-    SettingsLine   last, line;
+    SettingsLine   last = { 0 }, line;
     SettingsChosen chosen;
     uint64_t       at    = 0;
     bool           found = SettingsChosenFind(file, size, name, &last);

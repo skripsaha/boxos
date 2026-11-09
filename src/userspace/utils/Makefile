@@ -71,7 +71,7 @@ UTILS = help create show files tag untag name trash erase assemble \
         playtime lavalamp finish taskcenter hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
-        edit seek retag read inside
+        edit seek retag read inside settings
 
 .PHONY: all clean
 

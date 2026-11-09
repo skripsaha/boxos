@@ -141,6 +141,7 @@ static void TestDeclaredWrong(void)
     LineVerdict("setting prompt_x word default ~ \"x\"", SETTING_NAME_BAD, "an underscore in the name");
     LineVerdict("setting when word default ~ \"x\"", SETTING_NAME_BAD, "the name when");
     LineVerdict("setting settings word default ~ \"x\"", SETTING_NAME_BAD, "the name settings");
+    LineVerdict("setting default word default ~ \"x\"", SETTING_NAME_BAD, "the name default");
     LineVerdict("setting abcdefghijklmnopqrstuvwxyzabcdefg word default ~ \"x\"", SETTING_NAME_BAD,
                 "a name of 33 bytes");
     LineVerdict("setting abcdefghijklmnopqrstuvwxyzabcdef word default ~ \"x\"", SETTINGS_OK, "a name of 32 bytes");

@@ -72,6 +72,9 @@ SRCS = src/core/notify.c \
        src/form_fill_assign.c \
        src/form_program.c \
        src/form_souvenir.c \
+       src/settings_read.c \
+       src/settings_file.c \
+       src/settings_own.c \
        src/recipe.c \
        src/recipe_check.c \
        src/sha256.c \
