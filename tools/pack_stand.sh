@@ -122,6 +122,19 @@ elif kind == 'reloc64':
             break
     else:
         raise SystemExit('no RELA')
+elif kind == 'badform':
+    # A Form with a control byte in it: no text as a box keeps one.
+    shoff, = struct.unpack_from('<Q', b, 0x28)
+    shnum, strndx = struct.unpack_from('<HH', b, 0x3C)
+    names = struct.unpack_from('<Q', b, shoff + 64 * strndx + 24)[0]
+    for i in range(shnum):
+        s = shoff + 64 * i
+        at = names + struct.unpack_from('<I', b, s)[0]
+        if bytes(b[at:at + 12]) == b'.boxos.form\0':
+            b[struct.unpack_from('<Q', b, s + 24)[0] + 3] = 1
+            break
+    else:
+        raise SystemExit('no .boxos.form')
 open(out, 'wb').write(b)
 PY
 }
@@ -176,6 +189,8 @@ patch "$WORK/small_rela.elf" "$WORK/reloc64.elf" reloc64 || harness "could not b
 refuse "an R_X86_64_64 relocation" "$WORK/reloc64.elf" "other than R_X86_64_RELATIVE"
 refuse "an object file" "$WORK/small.o" "not an executable or a static PIE"
 refuse "a text file" "$LIB/user.ld" "not an ELF file"
+patch src/userspace/utils/hw.elf "$WORK/badform.elf" badform || harness "could not break hw's Form (badform)"
+refuse "a Form that is no text" "$WORK/badform.elf" "is not text as a box keeps its part form"
 
 echo "pack: $passed passed, $failed failed — $(( ${#pairs[@]} / 2 )) programs packed"
 [ "$failed" -eq 0 ]

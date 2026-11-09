@@ -270,6 +270,9 @@ static void CheckPair(const char *elf_path, const char *box_path, const BoxHashe
         uint32_t       type;
         uint64_t       size;
         const uint8_t *bytes = Section(&program, carried[i][0], &type, &size);
+        /* The Form and the Recipe are text: the zeros ending their C string stay behind. */
+        if (bytes && type != 8 && i > 0)
+            while (size > 0 && bytes[size - 1] == 0) size--;
         bool           there = bytes && type != 8 && size > 0;
         bool           found = BoxPartFind(&table, (const uint8_t *)carried[i][1], strlen(carried[i][1]), &part);
         char           what[96];

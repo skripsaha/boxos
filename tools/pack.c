@@ -13,8 +13,8 @@
  *   PT_TLS             thread   the template every thread's block is made from
  *   e_entry            doors    the door `start`
  *   .nameplate         names    the program's names for its functions
- *   .boxos.form        form     loaded at start, read-only
- *   .boxos.recipe      recipe
+ *   .boxos.form        form     loaded at start, read-only; the text, its C string's zeros dropped
+ *   .boxos.recipe      recipe   the text, its C string's zeros dropped
  *
  * An executable linked at a fixed address (ET_EXEC) keeps its addresses: its
  * box has no fixups and is loaded where it was linked. A static PIE (ET_DYN)
@@ -403,16 +403,31 @@ int main(int argc, char **argv)
         Add(parts, &count, "thread", thread_bytes, thread_size, thread_size, 0, BOX_FLAG_MUST_UNDERSTAND);
     }
 
-    static const struct { const char *Section, *Part; uint32_t Flags; } carried[] = {
-        { ".nameplate",    "names",  0 },
-        { ".boxos.form",   "form",   BOX_FLAG_LOAD_AT_START },
-        { ".boxos.recipe", "recipe", 0 },
+    /* The Form and the Recipe are parts written as text: the section holds the
+     * text as a C string, and the zeros that end it are not the text's. */
+    static const struct { const char *Section, *Part; BoxKind Text; uint32_t Flags; } carried[] = {
+        { ".nameplate",    "names",  BOX_KIND_UNKNOWN, 0 },
+        { ".boxos.form",   "form",   BOX_KIND_FORM,    BOX_FLAG_LOAD_AT_START },
+        { ".boxos.recipe", "recipe", BOX_KIND_RECIPE,  0 },
     };
     for (unsigned i = 0; i < sizeof(carried) / sizeof(carried[0]); i++) {
         const uint8_t *bytes;
         uint64_t       size;
-        if (SectionNamed(&elf, carried[i].Section, &bytes, &size))
-            Add(parts, &count, carried[i].Part, bytes, size, size, 0, carried[i].Flags);
+        BoxText        text;
+        if (!SectionNamed(&elf, carried[i].Section, &bytes, &size))
+            continue;
+        if (carried[i].Text != BOX_KIND_UNKNOWN) {
+            while (size > 0 && bytes[size - 1] == 0) size--;
+            if (size == 0)
+                continue;
+            if (BoxTextBegin(bytes, size, carried[i].Text, &text) != BOX_OK) {
+                char why[160];
+                snprintf(why, sizeof(why), "its %s is not text as a box keeps its part %s",
+                         carried[i].Section, carried[i].Part);
+                Refuse(why);
+            }
+        }
+        Add(parts, &count, carried[i].Part, bytes, size, size, 0, carried[i].Flags);
     }
 
     BoxHostHash state  = { 0 };
