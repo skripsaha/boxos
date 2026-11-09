@@ -146,11 +146,17 @@ else
 fi
 
 segments() { x86_64-elf-readelf -lW "$1" | awk '$1 == "LOAD" || $1 == "TLS"'; }
-if segments "$WORK/hello.elf" | awk '$1 == "LOAD" && $7 ~ /W/ && $7 ~ /E/ { bad = 1 } END { exit bad }' &&
-   [ "$(segments "$WORK/hello.elf" | awk '$1 == "LOAD"' | wc -l)" -eq 2 ]; then
-    ok segments_wx
+# The segments user.ld's PHDRS make, in order, by their rights: code R+X,
+# constants R, data RW. The linker's own segment has no memory in a link at a
+# fixed place and is passed by.
+rights() {
+    x86_64-elf-readelf -lW "$1" |
+        awk '$1 == "LOAD" && $6 != "0x000000" { r = ""; for (i = 7; i < NF; i++) r = r $i; printf "%s ", r }'
+}
+if [ "$(rights "$WORK/ref.elf")" = "RE R RW " ] && [ "$(rights "$WORK/hello.elf")" = "$(rights "$WORK/ref.elf")" ]; then
+    ok segments_match_gnu_ld
 else
-    fail segments_wx "$(segments "$WORK/hello.elf" | tr '\n' ';')"
+    fail segments_match_gnu_ld "ours '$(rights "$WORK/hello.elf")', GNU ld '$(rights "$WORK/ref.elf")'"
 fi
 
 tls() { segments "$1" | awk '$1 == "TLS" { print $5, $6, $NF }'; }
@@ -230,6 +236,32 @@ boxasm_long_probe: ret
 boxasm_long_probe2: ret'
 link_refuses long_member_name "$WORK/long.o" "$WORK/libbox_long.a" \
     "'boxasm_long_probe' is defined twice: in long.o and in libbox_long.a(a_member_name_longer_than_sixteen.o)"
+
+# A constant that holds an address (.data.rel.ro, what a compiler makes of
+# one in position-independent code) lies with the constants, read-only, as
+# user.ld lays it.
+rights_at() {
+    local at address memory rights
+    at=$((16#$(x86_64-elf-readelf -sW "$1" | awk -v name="$2" '$NF == name { print $2 }')))
+    x86_64-elf-readelf -lW "$1" |
+        awk '$1 == "LOAD" { r = ""; for (i = 7; i < NF; i++) r = r $i; print $3, $6, r }' |
+        while read -r address memory rights; do
+            [ "$at" -ge $((address)) ] && [ "$at" -lt $((address + memory)) ] && echo "$rights"
+        done
+}
+program relro ' lea rax, [rip + table]
+.section .data.rel.ro,"aw"
+.globl table
+table: .quad main'
+if "$STAND" link "$ENTRY" "$WORK/relro.o" "$ARCHIVE" "$WORK/relro.elf" symbols 2> "$WORK/link.err" &&
+   x86_64-elf-ld -nostdlib -static $REF_PLACE -T "$LD_SCRIPT" -o "$WORK/relro_ref.elf" "$ENTRY" \
+       "$WORK/relro.o" "$ARCHIVE" &&
+   [ "$(rights_at "$WORK/relro_ref.elf" table)" = R ] && [ "$(rights_at "$WORK/relro.elf" table)" = R ]; then
+    ok relro_with_constants
+else
+    fail relro_with_constants "ours '$(rights_at "$WORK/relro.elf" table 2>/dev/null)', GNU ld '$(rights_at \
+        "$WORK/relro_ref.elf" table 2>/dev/null)' $(cat "$WORK/link.err")"
+fi
 
 # ---- the Form: takes and gives ------------------------------------------------
 

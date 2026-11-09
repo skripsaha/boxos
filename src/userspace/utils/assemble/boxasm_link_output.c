@@ -14,9 +14,8 @@ typedef struct {
 } BoxAsmTrailer;
 
 typedef struct {
-    uint64_t ReadOnlyEnd;    /* file offset where the R+X segment's bytes end */
-    uint64_t DataStart;      /* file offset of the RW segment */
-    uint64_t DataEnd;        /* file offset where the RW segment's bytes end */
+    BoxAsmSegment Segments[BOXASM_SEGMENT_COUNT];
+    uint64_t SegmentOffset[BOXASM_SEGMENT_COUNT];
     uint64_t RecipeOffset;
     uint64_t SymtabOffset;
     uint64_t StrtabOffset;
@@ -60,69 +59,42 @@ static int BoxAsmBuildSectionNames(const BoxAsmLinkImage *Image,
     return Rc;
 }
 
-/* The R+X segment: the image's first page of file holds the headers, and from
- * the second on, file offset and address advance together from USER_BASE. */
-static int BoxAsmWriteReadOnly(BoxAsmLinkImage *Image, BoxAsmBuffer *File,
+/* Each segment from a fresh page of file, its file offset and its address
+ * advancing together; the first page holds the headers. A section without
+ * bytes is placed, as GNU ld places one, where its segment's bytes end. */
+static int BoxAsmWriteSegments(BoxAsmLinkImage *Image, BoxAsmBuffer *File,
                                BoxAsmFileLayout *Layout)
 {
-    size_t Slot;
+    size_t Kind;
 
-    for (Slot = BOXASM_SLOT_TEXT; Slot <= BOXASM_SLOT_FORM; Slot++) {
-        BoxAsmOutputSection *Section = &Image->Sections[Slot];
+    for (Kind = 0; Kind < BOXASM_SEGMENT_COUNT; Kind++) {
+        const BoxAsmSegment *Segment = &Layout->Segments[Kind];
+        uint64_t Offset = BoxAsmAlignUp(File->Size, BOXASM_PAGE);
+        size_t Slot;
         int Rc;
 
-        Section->FileOffset = BOXASM_PAGE + Section->Address - BOXASM_USER_BASE;
-        if (Section->Size == 0)
-            continue;
-        Rc = BoxAsmPadTo(File, Section->FileOffset);
+        if (Offset == UINT64_MAX)
+            return -ERR_NO_MEMORY;
+        Rc = BoxAsmPadTo(File, Offset);
         if (Rc == 0)
-            Rc = BoxAsmBufferAppend(File, Section->Data.Data, Section->Data.Size);
+            Rc = BoxAsmBufferAppendZeroes(File, Segment->FileBytes);
         if (Rc != 0)
             return Rc;
-        Layout->ReadOnlyEnd = File->Size;
+        BoxAsmSegmentCopy(Image, Segment, File->Data + Offset);
+        Layout->SegmentOffset[Kind] = Offset;
+        for (Slot = Segment->First; Slot <= Segment->Last; Slot++) {
+            BoxAsmOutputSection *Section = &Image->Sections[Slot];
+
+            Section->FileOffset = Section->Type == BOXASM_SHT_NOBITS
+                                  ? Offset + Segment->FileBytes
+                                  : Offset + Section->Address - Segment->Address;
+        }
     }
     return 0;
 }
 
-/* The RW segment starts on a fresh page of file, congruent with its address.
- * Sections without bytes are placed, as GNU ld places them, where the
- * segment's bytes end. */
-static int BoxAsmWriteWritable(BoxAsmLinkImage *Image, BoxAsmBuffer *File,
-                               BoxAsmFileLayout *Layout)
-{
-    uint64_t DataAddress = Image->Sections[BOXASM_SLOT_DATA].Address;
-    size_t Slot;
-    int Rc;
-
-    Layout->DataStart = BoxAsmAlignUp(File->Size, BOXASM_PAGE);
-    if (Layout->DataStart == UINT64_MAX)
-        return -ERR_NO_MEMORY;
-    Rc = BoxAsmPadTo(File, Layout->DataStart);
-    if (Rc != 0)
-        return Rc;
-    Layout->DataEnd = Layout->DataStart;
-    for (Slot = BOXASM_SLOT_DATA; Slot < BOXASM_SLOT_COUNT; Slot++) {
-        BoxAsmOutputSection *Section = &Image->Sections[Slot];
-
-        if (Section->Type == BOXASM_SHT_NOBITS)
-            continue;
-        Section->FileOffset = Layout->DataStart + Section->Address - DataAddress;
-        if (Section->Size == 0)
-            continue;
-        Rc = BoxAsmPadTo(File, Section->FileOffset);
-        if (Rc == 0)
-            Rc = BoxAsmBufferAppend(File, Section->Data.Data, Section->Data.Size);
-        if (Rc != 0)
-            return Rc;
-        Layout->DataEnd = File->Size;
-    }
-    Image->Sections[BOXASM_SLOT_TBSS].FileOffset = Layout->DataEnd;
-    Image->Sections[BOXASM_SLOT_BSS].FileOffset = Layout->DataEnd;
-    return 0;
-}
-
-/* After both segments, where no segment maps it: the Recipe, then the
- * symbols and the section names. */
+/* After the segments, where none maps it: the Recipe, then the symbols and
+ * the section names. */
 static int BoxAsmWriteTrailer(BoxAsmLinkImage *Image, const BoxAsmBlob *Recipe,
                               BoxAsmBuffer *File, const BoxAsmBuffer *SectionNames,
                               BoxAsmFileLayout *Layout)
@@ -207,31 +179,29 @@ static int BoxAsmAppendSectionHeaders(const BoxAsmLinkImage *Image,
 
 static void BoxAsmWriteFileHeaders(const BoxAsmLinkImage *Image,
                                    const BoxAsmTrailer *Trailer,
-                                   const BoxAsmFileLayout *Layout,
-                                   uint16_t ProgramCount, BoxAsmBuffer *File)
+                                   const BoxAsmFileLayout *Layout, BoxAsmBuffer *File)
 {
-    const BoxAsmOutputSection *Data = &Image->Sections[BOXASM_SLOT_DATA];
-    const BoxAsmOutputSection *Tdata = &Image->Sections[BOXASM_SLOT_TDATA];
-    BoxAsmElfProgramHeader Programs[3];
+    const BoxAsmSegment *Data = &Layout->Segments[BOXASM_SEGMENT_DATA];
+    BoxAsmElfProgramHeader Programs[BOXASM_SEGMENT_COUNT + 1];
     BoxAsmElfHeader Header;
+    uint16_t Count = 0;
+    size_t Kind;
 
-    memset(Programs, 0, sizeof(Programs));
-    Programs[0] = (BoxAsmElfProgramHeader){
-        BOXASM_PT_LOAD, BOXASM_PF_R | BOXASM_PF_X, BOXASM_PAGE,
-        BOXASM_USER_BASE, BOXASM_USER_BASE,
-        Layout->ReadOnlyEnd - BOXASM_PAGE, Layout->ReadOnlyEnd - BOXASM_PAGE,
-        BOXASM_PAGE
-    };
-    Programs[1] = (BoxAsmElfProgramHeader){
-        BOXASM_PT_LOAD, BOXASM_PF_R | BOXASM_PF_W, Layout->DataStart,
-        Data->Address, Data->Address, Layout->DataEnd - Layout->DataStart,
-        Image->ProgramEnd - Data->Address, BOXASM_PAGE
-    };
-    if (ProgramCount == 3u)
-        Programs[2] = (BoxAsmElfProgramHeader){
+    for (Kind = 0; Kind < BOXASM_SEGMENT_COUNT; Kind++) {
+        const BoxAsmSegment *Segment = &Layout->Segments[Kind];
+
+        if (Segment->Memory != 0)
+            Programs[Count++] = (BoxAsmElfProgramHeader){
+                BOXASM_PT_LOAD, Segment->Rights, Layout->SegmentOffset[Kind],
+                Segment->Address, Segment->Address, Segment->FileBytes, Segment->Memory,
+                BOXASM_PAGE
+            };
+    }
+    if (Image->TlsMemorySize != 0)
+        Programs[Count++] = (BoxAsmElfProgramHeader){
             BOXASM_PT_TLS, BOXASM_PF_R,
-            Layout->DataStart + Image->TlsAddress - Data->Address,
-            Image->TlsAddress, Image->TlsAddress, Tdata->Size,
+            Layout->SegmentOffset[BOXASM_SEGMENT_DATA] + Image->TlsAddress - Data->Address,
+            Image->TlsAddress, Image->TlsAddress, Image->Sections[BOXASM_SLOT_TDATA].Size,
             Image->TlsMemorySize, Image->TlsAlign
         };
 
@@ -251,18 +221,18 @@ static void BoxAsmWriteFileHeaders(const BoxAsmLinkImage *Image,
     Header.SectionHeaderOffset = Layout->HeadersOffset;
     Header.HeaderSize = sizeof(Header);
     Header.ProgramHeaderSize = sizeof(BoxAsmElfProgramHeader);
-    Header.ProgramHeaderCount = ProgramCount;
+    Header.ProgramHeaderCount = Count;
     Header.SectionHeaderSize = sizeof(BoxAsmElfSectionHeader);
     Header.SectionHeaderCount = Trailer->Count;
     Header.SectionNameIndex = Trailer->Shstrtab;
     memcpy(File->Data, &Header, sizeof(Header));
-    memcpy(File->Data + sizeof(Header), Programs,
-           ProgramCount * sizeof(BoxAsmElfProgramHeader));
+    memcpy(File->Data + sizeof(Header), Programs, Count * sizeof(BoxAsmElfProgramHeader));
 }
 
 /* The image as the BoxOS loader takes it: ELF header and program headers in
- * the first page, two W^X PT_LOAD segments, PT_TLS when there is a TLS block,
- * then the Recipe when there is one, the section names and headers. */
+ * the first page, a PT_LOAD for each segment with the rights user.ld gives
+ * it, PT_TLS when there is a TLS block, then the Recipe when there is one,
+ * the section names and headers. */
 int BoxAsmWriteOutput(BoxAsmLinker *Link, BoxAsmBlob *Out)
 {
     BoxAsmLinkImage *Image = &Link->Image;
@@ -270,7 +240,7 @@ int BoxAsmWriteOutput(BoxAsmLinker *Link, BoxAsmBlob *Out)
     BoxAsmBuffer SectionNames = { 0 };
     BoxAsmFileLayout Layout;
     BoxAsmTrailer Trailer;
-    uint16_t ProgramCount = Image->TlsMemorySize != 0 ? 3u : 2u;
+    size_t Kind;
     int Rc;
 
     memset(&Layout, 0, sizeof(Layout));
@@ -283,15 +253,15 @@ int BoxAsmWriteOutput(BoxAsmLinker *Link, BoxAsmBlob *Out)
         Trailer.Strtab = Trailer.Count++;
     }
     Trailer.Shstrtab = Trailer.Count++;
+    for (Kind = 0; Kind < BOXASM_SEGMENT_COUNT; Kind++)
+        BoxAsmSegmentOf(Image, (BoxAsmSegmentKind)Kind, &Layout.Segments[Kind]);
 
     Rc = BoxAsmBuildSectionNames(Image, &Trailer, &SectionNames, &Layout);
-    if (Rc == 0)
+    if (Rc == 0)                               /* room for every program header there can be */
         Rc = BoxAsmBufferAppendZeroes(&File, sizeof(BoxAsmElfHeader) +
-                                      ProgramCount * sizeof(BoxAsmElfProgramHeader));
+                                      (BOXASM_SEGMENT_COUNT + 1u) * sizeof(BoxAsmElfProgramHeader));
     if (Rc == 0)
-        Rc = BoxAsmWriteReadOnly(Image, &File, &Layout);
-    if (Rc == 0)
-        Rc = BoxAsmWriteWritable(Image, &File, &Layout);
+        Rc = BoxAsmWriteSegments(Image, &File, &Layout);
     if (Rc == 0)
         Rc = BoxAsmWriteTrailer(Image, Link->Recipe, &File, &SectionNames, &Layout);
     if (Rc == 0)
@@ -299,7 +269,7 @@ int BoxAsmWriteOutput(BoxAsmLinker *Link, BoxAsmBlob *Out)
                                         Link->Recipe ? Link->Recipe->Size : 0,
                                         SectionNames.Size, &File);
     if (Rc == 0) {
-        BoxAsmWriteFileHeaders(Image, &Trailer, &Layout, ProgramCount, &File);
+        BoxAsmWriteFileHeaders(Image, &Trailer, &Layout, &File);
         Out->Data = File.Data;
         Out->Size = File.Size;
         File.Data = NULL;

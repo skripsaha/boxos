@@ -277,8 +277,11 @@ static int BoxAsmSlotOf(const BoxAsmElfObject *Object, uint16_t Index)
     if (strcmp(Name, ".comment") == 0 || strncmp(Name, ".note", 5u) == 0 ||
         (Section->Flags & BOXASM_SHF_ALLOC) == 0)
         return BOXASM_SLOT_NONE;
+    /* .data.rel.ro is named before .data, whose name it begins with: a
+     * constant that holds an address is a constant still (user.ld). */
     if (BoxAsmNameIs(Name, ".text"))                   Slot = BOXASM_SLOT_TEXT;
-    else if (BoxAsmNameIs(Name, ".rodata"))            Slot = BOXASM_SLOT_RODATA;
+    else if (BoxAsmNameIs(Name, ".rodata") ||
+             BoxAsmNameIs(Name, ".data.rel.ro"))       Slot = BOXASM_SLOT_RODATA;
     else if (BoxAsmNameIs(Name, ".eh_frame"))          Slot = BOXASM_SLOT_EH_FRAME;
     else if (BoxAsmNameIs(Name, ".gcc_except_table"))  Slot = BOXASM_SLOT_EXCEPT_TABLE;
     else if (strcmp(Name, ".boxos.form") == 0)         Slot = BOXASM_SLOT_FORM;
@@ -418,9 +421,10 @@ static int BoxAsmLayoutSections(BoxAsmLinker *Link)
             return -ERR_NO_MEMORY;
         }
         Section->Address = Aligned;
-        /* .data opens the RW segment: the writable pages begin there even
-         * when it is empty, so no writable byte shares a page with code. */
-        if (Slot == BOXASM_SLOT_DATA)
+        /* .rodata and .data open a segment: its pages begin there even when
+         * the section is empty, so no byte shares a page with another
+         * segment's rights. */
+        if (Slot == BOXASM_SLOT_RODATA || Slot == BOXASM_SLOT_DATA)
             Address = Aligned;
         if (Section->Size != 0 && Slot != BOXASM_SLOT_TBSS)
             Address = Aligned + Section->Size;
@@ -443,6 +447,45 @@ static int BoxAsmLayoutSections(BoxAsmLinker *Link)
     Image->ThreadPointer = Image->TlsAddress +
                            BoxAsmAlignUp(Image->TlsMemorySize, Image->TlsAlign);
     return 0;
+}
+
+void BoxAsmSegmentOf(const BoxAsmLinkImage *Image, BoxAsmSegmentKind Kind, BoxAsmSegment *Out)
+{
+    static const BoxAsmSegment Segments[BOXASM_SEGMENT_COUNT] = {
+        { BOXASM_SLOT_TEXT,   BOXASM_SLOT_TEXT, BOXASM_PF_R | BOXASM_PF_X, 0, 0, 0 },
+        { BOXASM_SLOT_RODATA, BOXASM_SLOT_FORM, BOXASM_PF_R,               0, 0, 0 },
+        { BOXASM_SLOT_DATA,   BOXASM_SLOT_BSS,  BOXASM_PF_R | BOXASM_PF_W, 0, 0, 0 },
+    };
+    size_t Slot;
+
+    *Out = Segments[Kind];
+    Out->Address = Image->Sections[Out->First].Address;
+    for (Slot = Out->First; Slot <= Out->Last; Slot++) {
+        const BoxAsmOutputSection *Section = &Image->Sections[Slot];
+        uint64_t End = Section->Address + Section->Size - Out->Address;
+
+        /* .tbss's addresses are the TLS template's, not memory. */
+        if (Section->Size == 0 || Slot == BOXASM_SLOT_TBSS)
+            continue;
+        if (Section->Type != BOXASM_SHT_NOBITS && End > Out->FileBytes)
+            Out->FileBytes = End;
+        if (End > Out->Memory)
+            Out->Memory = End;
+    }
+}
+
+void BoxAsmSegmentCopy(const BoxAsmLinkImage *Image, const BoxAsmSegment *Segment, uint8_t *Into)
+{
+    size_t Slot;
+
+    memset(Into, 0, (size_t)Segment->FileBytes);
+    for (Slot = Segment->First; Slot <= Segment->Last; Slot++) {
+        const BoxAsmOutputSection *Section = &Image->Sections[Slot];
+
+        if (Section->Type != BOXASM_SHT_NOBITS && Section->Data.Size != 0)
+            memcpy(Into + (Section->Address - Segment->Address), Section->Data.Data,
+                   (size_t)Section->Data.Size);
+    }
 }
 
 /* ---- Symbols ----------------------------------------------------------- */

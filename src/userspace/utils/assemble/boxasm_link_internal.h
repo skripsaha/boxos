@@ -36,6 +36,24 @@ typedef struct {
     BoxAsmBuffer Data;
 } BoxAsmOutputSection;
 
+/* The segments of user.ld's PHDRS, each the run of output sections with one
+ * set of rights, beginning on a page of its own. */
+typedef enum {
+    BOXASM_SEGMENT_CODE = 0,    /* .text: R+X */
+    BOXASM_SEGMENT_CONST,       /* .rodata to .boxos.form: R */
+    BOXASM_SEGMENT_DATA,        /* .data to .bss: R+W */
+    BOXASM_SEGMENT_COUNT
+} BoxAsmSegmentKind;
+
+typedef struct {
+    uint8_t  First;             /* its first and last slot */
+    uint8_t  Last;
+    uint32_t Rights;            /* BOXASM_PF_* */
+    uint64_t Address;
+    uint64_t FileBytes;         /* to the end of its last section with bytes */
+    uint64_t Memory;            /* to the end of its last section; 0: the image has none of it */
+} BoxAsmSegment;
+
 typedef struct {
     BoxAsmElfObject Elf;
     char           *Name;          /* "hello.asm", "libbox.a(print.o)"; owned */
@@ -107,6 +125,10 @@ int  BoxAsmSymbolPrevails(const BoxAsmLinker *Link, uint32_t ObjectIndex,
 /* boxasm_link.c */
 int  BoxAsmSymbolAddress(const BoxAsmLinker *Link, const BoxAsmLinkObject *Object,
                          const BoxAsmElfSymbol *Symbol, uint64_t *Out);
+/* The segment as the layout made it, and its bytes: FileBytes of them, its
+ * sections' with zeros between, written at Into. */
+void BoxAsmSegmentOf(const BoxAsmLinkImage *Image, BoxAsmSegmentKind Kind, BoxAsmSegment *Out);
+void BoxAsmSegmentCopy(const BoxAsmLinkImage *Image, const BoxAsmSegment *Segment, uint8_t *Into);
 
 /* boxasm_link_names.c */
 int BoxAsmBuildNameplate(BoxAsmLinker *Link);
