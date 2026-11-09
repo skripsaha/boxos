@@ -181,6 +181,10 @@ static inline uint64_t cet_supv_token_free(uintptr_t top) {
  * is — the size, or a demand-paged shadow stack — is the owner's, and it is
  * open.
  *
+ * A box whose hints ask for a larger main stack is prepared up to
+ * BOXOS_USER_STACK_RESERVE_MAX of data stack; its shadow stack stays these
+ * four pages, so on CET hardware the depth it reaches is the one above.
+ *
  * Running out is a fault, not corruption: the push lands in the unmapped
  * guard page below the region (PROCESS_USER_SSP_GUARD_LO_BASE in
  * process.c, the [mid guard] page of a strand's hammock slot). */

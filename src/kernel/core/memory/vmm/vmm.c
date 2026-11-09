@@ -3792,14 +3792,13 @@ static bool VmmStackFind(const vmm_context_t *ctx, uintptr_t addr, uint32_t *ind
     return lo < ctx->stack_count && ctx->stacks[lo].low <= addr;
 }
 
-bool vmm_stack_register(vmm_context_t *ctx, uintptr_t top)
+bool vmm_stack_register(vmm_context_t *ctx, uintptr_t top, uint64_t reserve)
 {
-    if (!ctx || !vmm_is_page_aligned(top) ||
-        top < CONFIG_USER_STACK_RESERVE + CONFIG_USER_STACK_GAP ||
-        top > VMM_USER_STACK_TOP)
+    if (!ctx || !vmm_is_page_aligned(top) || !vmm_is_page_aligned(reserve) || reserve == 0 ||
+        top > VMM_USER_STACK_TOP || reserve > top || top - reserve < CONFIG_USER_STACK_GAP)
         return false;
 
-    uintptr_t low = top - CONFIG_USER_STACK_RESERVE;
+    uintptr_t low = top - reserve;
 
     for (;;)
     {
@@ -3854,19 +3853,20 @@ bool vmm_stack_register(vmm_context_t *ctx, uintptr_t top)
     }
 }
 
-bool vmm_stack_gap_hit(vmm_context_t *ctx, uintptr_t addr)
+uint64_t vmm_stack_gap_hit(vmm_context_t *ctx, uintptr_t addr)
 {
     if (!ctx)
-        return false;
+        return 0;
 
     spin_lock(&ctx->lock);
     uint32_t at;
     VmmStackFind(ctx, addr, &at);
-    bool hit = at < ctx->stack_count &&
-               addr >= ctx->stacks[at].low - CONFIG_USER_STACK_GAP &&
-               addr < ctx->stacks[at].low;
+    uint64_t reserve = 0;
+    if (at < ctx->stack_count && addr >= ctx->stacks[at].low - CONFIG_USER_STACK_GAP &&
+        addr < ctx->stacks[at].low)
+        reserve = ctx->stacks[at].top - ctx->stacks[at].low;
     spin_unlock(&ctx->lock);
-    return hit;
+    return reserve;
 }
 
 /* Frames one pass of vmm_stack_release holds between clearing the entries and
@@ -6047,11 +6047,11 @@ int vmm_handle_page_fault(uintptr_t fault_addr, uint64_t error_code)
          * and a program that recursed too deep would otherwise die as an
          * anonymous page fault. The death is recorded as this and not as any
          * crash (PROC_EXIT_STACK_OVERFLOW), and the generic dump follows. */
-        if (current && vmm_stack_gap_hit(ctx, fault_addr))
+        uint64_t overrun = current ? vmm_stack_gap_hit(ctx, fault_addr) : 0;
+        if (overrun)
         {
-            kprintf("[EXCEPTION] PID %u: its stack ran out — %lu MiB, the gap below it "
-                    "touched at 0x%lx\n", current->pid,
-                    (unsigned long)(CONFIG_USER_STACK_RESERVE >> 20),
+            kprintf("[EXCEPTION] PID %u: its stack ran out — %lu KiB, the gap below it "
+                    "touched at 0x%lx\n", current->pid, (unsigned long)(overrun >> 10),
                     (unsigned long)fault_addr);
             current->stack_overran = 1;
             return -1;

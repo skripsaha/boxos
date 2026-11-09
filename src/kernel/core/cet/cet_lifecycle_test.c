@@ -132,7 +132,7 @@ void CetLifecycleTest(void) {
                   "T4: HI guard at va + 16 KiB");
         CET_CHECK(guard_lo == va - 0x1000ULL,
                   "T4: LO guard at va - 4 KiB");
-        CET_CHECK(guard_hi + 0x1000ULL + CONFIG_USER_STACK_GAP + CONFIG_USER_STACK_RESERVE +
+        CET_CHECK(guard_hi + 0x1000ULL + CONFIG_USER_STACK_GAP + CONFIG_USER_STACK_RESERVE_MAX +
                       ASLR_STACK_RANGE == VMM_USER_STACK_TOP,
                   "T4: SSP region clear of the lowest reach of the data stack and its gap");
     }

@@ -11,7 +11,8 @@ extern "C" {
  * CabinInfo — read-only metadata at CABIN_INFO_VADDR (0x1000).
  * Kernel writes this once at process creation. Userspace reads pid,
  * spawner_pid, heap layout, stack top (the stack grows down from it as it is
- * touched, up to BOXOS_USER_STACK_RESERVE) — and the Luggage: what the spawner
+ * touched, up to its reserve: BOXOS_USER_STACK_RESERVE, or what a box's hints
+ * asked, between BOXOS_USER_STACK_RESERVE_MIN and _MAX) — and the Luggage: what the spawner
  * said to this cabin at boarding, the command line as the person typed it.
  * luggage_addr points at the bytes (in this very page when they fit, in the
  * buffer heap when they do not), luggage_length counts them; both zero for

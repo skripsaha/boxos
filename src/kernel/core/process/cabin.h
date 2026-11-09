@@ -94,7 +94,7 @@ typedef struct cabin_t
 
     /* ASLR: per-cabin randomized addresses (set at creation time). */
     uint64_t aslr_heap_base;
-    uint64_t aslr_stack_top;    /* main stack: reserve of CONFIG_USER_STACK_RESERVE below it */
+    uint64_t aslr_stack_top;    /* main stack: its reserve below it, as its program was prepared */
     uint64_t aslr_buf_heap_base;
     uint64_t buf_heap_next;
 

@@ -4,6 +4,7 @@
 #include "box_loaded.h"
 #include "nameplate_format.h"
 #include "cabin_layout.h"
+#include "kernel_config.h"
 #include "aslr.h"
 #include "cpuid.h"
 #include "fpu.h"
@@ -149,6 +150,74 @@ static error_t BoxCheckNeeds(BoxLoading *load, const BoxPart *part, const uint8_
             kprintf("[IMAGE] '%s' is not started: it needs %s, and this machine has none\n",
                     load->Name, need->Word);
             return ERR_INVALID_ELF;
+        }
+    }
+    return OK;
+}
+
+/* ── hints ──────────────────────────────────────────────────────────────── */
+
+/* The main stack's reserve for a box that asks `asked` bytes of it: whole
+ * pages, between the least and the most the system gives a main stack. A hint
+ * prepares; it raises no limit — what is cut is said. */
+static uint64_t BoxStackPrepared(const BoxLoading *load, uint64_t asked)
+{
+    uint64_t reserve;
+    if (!BoxAlignUp(asked, VMM_PAGE_SIZE, CONFIG_USER_STACK_RESERVE_MAX, &reserve)) {
+        kprintf("[IMAGE] '%s' asks for a stack of %llu KiB; a main stack is given at most %llu KiB, "
+                "and that is what it has\n", load->Name, (unsigned long long)(asked >> 10),
+                (unsigned long long)(CONFIG_USER_STACK_RESERVE_MAX >> 10));
+        return CONFIG_USER_STACK_RESERVE_MAX;
+    }
+    if (reserve < CONFIG_USER_STACK_RESERVE_MIN) {
+        kprintf("[IMAGE] '%s' asks for a stack of %llu bytes; a main stack is given at least %llu KiB, "
+                "and that is what it has\n", load->Name, (unsigned long long)asked,
+                (unsigned long long)(CONFIG_USER_STACK_RESERVE_MIN >> 10));
+        return CONFIG_USER_STACK_RESERVE_MIN;
+    }
+    return reserve;
+}
+
+/* What the box's `hints` part asks, prepared within what the system gives: the
+ * main stack's reserve into *stack, and the memory it says it uses held to
+ * what a cabin's heap holds — said when it is more, changing nothing, for this
+ * system keeps no other limit on memory yet. A hint this system does not know
+ * is passed over; one it knows is read strictly, and said once. */
+static error_t BoxCheckHints(BoxLoading *load, const BoxPart *part, const uint8_t *bytes, uint64_t *stack)
+{
+    BoxText    text;
+    BoxVerdict verdict = BoxTextBegin(bytes, part->Size, BOX_KIND_HINTS, &text);
+    if (verdict != BOX_OK)
+        return BoxRefuse(load, verdict, part);
+
+    bool           said_stack = false, said_memory = false;
+    const uint8_t *line, *word, *number, *unit;
+    uint64_t       length, word_length, number_length, unit_length, asked;
+    while (BoxTextLine(&text, &line, &length)) {
+        uint64_t at = 0;
+        BoxTextWord(line, length, &at, &word, &word_length);
+        bool is_stack  = BoxSpanIs(word, word_length, "stack");
+        bool is_memory = BoxSpanIs(word, word_length, "memory");
+        if (!is_stack && !is_memory)
+            continue;   /* a hint this system does not know: passed over */
+        if (BoxTextWordCount(line, length) != 3 || (is_stack ? said_stack : said_memory))
+            return BoxRefuse(load, BOX_TEXT_LAYOUT, part);
+        BoxTextWord(line, length, &at, &number, &number_length);
+        BoxTextWord(line, length, &at, &unit, &unit_length);
+        if (!BoxTextSize(number, number_length, unit, unit_length, &asked)) {
+            kprintf("[IMAGE] '%s' is not started: its hints say '%.*s', and that is no size this "
+                    "system reads\n", load->Name, (int)length, (const char *)line);
+            return ERR_INVALID_ELF;
+        }
+        if (is_stack) {
+            said_stack = true;
+            *stack     = BoxStackPrepared(load, asked);
+        } else {
+            said_memory = true;
+            if (asked > CABIN_HEAP_MAX_SIZE)
+                kprintf("[IMAGE] '%s' says it uses %llu MiB of memory; a cabin's heap holds %llu MiB\n",
+                        load->Name, (unsigned long long)(asked >> 20),
+                        (unsigned long long)(CABIN_HEAP_MAX_SIZE >> 20));
         }
     }
     return OK;
@@ -580,6 +649,12 @@ error_t BoxLoad(vmm_context_t *vmm, const ImageSource *source, const char *name,
         rc = BoxHoldPart(&load, &part, &held);
         if (rc == OK)
             rc = BoxCheckNeeds(&load, &part, held.Bytes);
+        BoxLetGo(&held);
+    }
+    if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_HINTS, &part)) {
+        rc = BoxHoldPart(&load, &part, &held);
+        if (rc == OK)
+            rc = BoxCheckHints(&load, &part, held.Bytes, &loaded->StackReserve);
         BoxLetGo(&held);
     }
     if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_DOORS, &part)) {

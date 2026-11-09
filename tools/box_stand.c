@@ -781,6 +781,42 @@ static void TestTextParts(void)
           "the words that need saved state say which; a word not in the list is not found");
 }
 
+/* A size read from `number` and `unit`, each in a buffer of exactly its length. */
+static bool SizeOf(const char *number, const char *unit, uint64_t *bytes)
+{
+    uint8_t *n    = Exact((const uint8_t *)number, strlen(number));
+    uint8_t *u    = Exact((const uint8_t *)unit, strlen(unit));
+    bool     read = BoxTextSize(n, strlen(number), u, strlen(unit), bytes);
+    free(n);
+    free(u);
+    return read;
+}
+
+static void TestTextSize(void)
+{
+    uint64_t bytes = 0;
+    Check(SizeOf("64", "MiB", &bytes) && bytes == 64ull << 20, "64 MiB");
+    Check(SizeOf("1", "B", &bytes) && bytes == 1, "a size in bytes");
+    Check(SizeOf("3", "KiB", &bytes) && bytes == 3072, "a size in KiB");
+    Check(SizeOf("16", "GiB", &bytes) && bytes == 16ull << 30, "a size in GiB");
+    Check(SizeOf("0", "KiB", &bytes) && bytes == 0, "zero, written as itself");
+    Check(SizeOf("18446744073709551615", "B", &bytes) && bytes == ~0ull, "the largest size there is");
+    Check(!SizeOf("18446744073709551616", "B", &bytes), "a number past 2^64");
+    Check(!SizeOf("99999999999999999999", "B", &bytes), "twenty nines");
+    Check(SizeOf("17179869183", "GiB", &bytes) && bytes == 17179869183ull << 30,
+          "the most GiB that fit");
+    Check(!SizeOf("17179869184", "GiB", &bytes), "a number of GiB that does not fit 2^64");
+    Check(!SizeOf("064", "MiB", &bytes), "a leading zero");
+    Check(!SizeOf("6a", "MiB", &bytes), "a letter in the number");
+    Check(!SizeOf("-1", "MiB", &bytes), "a sign");
+    Check(!SizeOf("", "MiB", &bytes), "no number");
+    Check(!SizeOf("64", "", &bytes), "no unit");
+    Check(!SizeOf("64", "mib", &bytes), "a unit in the wrong case");
+    Check(!SizeOf("64", "MB", &bytes), "a decimal unit");
+    Check(!SizeOf("64", "TiB", &bytes), "a unit this reader does not have");
+    Check(!SizeOf("64", "MiBs", &bytes), "a unit with more after it");
+}
+
 static void TestTexts(void)
 {
     const char *fallback = BoxVerdictText(BOX_VERDICT_COUNT);
@@ -829,6 +865,7 @@ int main(void)
     TestThread();
     TestFixups();
     TestTextParts();
+    TestTextSize();
     TestWritten();
     TestTexts();
 

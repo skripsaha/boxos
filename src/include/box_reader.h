@@ -833,6 +833,33 @@ static inline BoxVerdict BoxTextBegin(const uint8_t *bytes, uint64_t size, BoxKi
     return BOX_OK;
 }
 
+/* A size as a text part writes one: a number — digits, with no leading zero
+ * but in "0" itself — and its unit, B, KiB, MiB or GiB. False for anything
+ * else, and for a size past 2^64. */
+static inline bool BoxTextSize(const uint8_t *number, uint64_t number_length, const uint8_t *unit,
+                               uint64_t unit_length, uint64_t *bytes)
+{
+    static const char *const units[] = { "B", "KiB", "MiB", "GiB" };
+    unsigned shift = 0;
+    bool     known = false;
+    for (unsigned i = 0; i < sizeof(units) / sizeof(units[0]) && !known; i++) {
+        known = BoxSpanIs(unit, unit_length, units[i]);
+        shift = 10u * i;
+    }
+    if (!known || number_length == 0 || (number_length > 1 && number[0] == '0')) return false;
+
+    uint64_t value = 0;
+    for (uint64_t i = 0; i < number_length; i++) {
+        if (number[i] < '0' || number[i] > '9') return false;
+        uint64_t digit = (uint64_t)(number[i] - '0');
+        if (value > (~(uint64_t)0 - digit) / 10u) return false;
+        value = value * 10u + digit;
+    }
+    if (value > (~(uint64_t)0 >> shift)) return false;
+    *bytes = value << shift;
+    return true;
+}
+
 /* ── words for a refusal ─────────────────────────────────────────────────── */
 
 /* The reason a verdict refuses, said so it follows "is not started: "; a

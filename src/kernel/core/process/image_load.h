@@ -62,8 +62,10 @@ typedef struct {
  * to every place of the image, where the table of a box's parts in memory is
  * (box_loaded.h; 0 for an image that is no box), the template of its strands'
  * thread-local storage — kept for the cabin (ImageThreadKeep), the cabin's to
- * let go — and the main strand's thread pointer, its block already placed
- * after the image (0 when the image keeps nothing per strand). */
+ * let go — the main strand's thread pointer, its block already placed after
+ * the image (0 when the image keeps nothing per strand), and the reserve its
+ * main stack is prepared: what a box's hints ask, held between
+ * CONFIG_USER_STACK_RESERVE_MIN and _MAX, CONFIG_USER_STACK_RESERVE otherwise. */
 typedef struct {
     uintptr_t   Entry;
     uintptr_t   NameplateVa;
@@ -72,6 +74,7 @@ typedef struct {
     uintptr_t   PartsVa;
     ImageThread Thread;
     uintptr_t   ThreadPointer;
+    uint64_t    StackReserve;
 } ImageLoaded;
 
 /* `count` bytes of the image from `offset` into `into`, whole or a refusal

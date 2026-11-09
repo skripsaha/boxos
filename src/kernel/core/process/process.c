@@ -1066,9 +1066,10 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
      * freed with the cabin, so no failure below frees any of it. */
 
     /* The stack is registered and nothing is mapped: the first push faults the
-     * first page in, zeroed, and the reserve fills as far as the program goes. */
+     * first page in, zeroed, and the reserve — what the image asked for, as
+     * the loader prepared it — fills as far as the program goes. */
     uint64_t stack_top = proc->cabin->aslr_stack_top;
-    if (!vmm_stack_register(proc->cabin->vmm, stack_top))
+    if (!vmm_stack_register(proc->cabin->vmm, stack_top, loaded.StackReserve))
     {
         kprintf("[PROCESS] ERROR: could not register the user stack of PID %u\n", proc->pid);
         return ERR_NO_MEMORY;
@@ -1271,7 +1272,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
      * gap at the bottom of the slot never mapped. Mapped NX like every other
      * data page of a program. */
     uint64_t stack_top = process_strand_stack_top(proc);
-    if (!vmm_stack_register(cabin->vmm, stack_top))
+    if (!vmm_stack_register(cabin->vmm, stack_top, CONFIG_USER_STACK_RESERVE))
     {
         kprintf("[STRAND] ERROR: user stack registration failed (PID %u)\n", proc->pid);
         cabin_hammock_give_back(cabin, slot_base);
@@ -1599,6 +1600,8 @@ uint64_t *process_active_memtags(process_t *proc)
  * and the first stack that could, did. */
 _Static_assert(PROCESS_USER_SSP_GUARD_LO_BASE == VMM_USER_STACK_ZONE_BASE,
                "the main shadow stack's low guard is the bottom of the stack zone");
+_Static_assert(VMM_USER_STACK_ZONE_BASE >= CABIN_HAMMOCK_END,
+               "the stack zone, at the largest main stack, lies above everything a program maps");
 
 /* Base VA of a strand's CET user shadow-stack region.
  *

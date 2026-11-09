@@ -3,6 +3,7 @@
 #include "elf_image.h"
 #include "box_format.h"
 #include "cabin_layout.h"
+#include "kernel_config.h"
 #include "nameplate.h"
 #include "tagfs.h"
 #include "pmm.h"
@@ -231,6 +232,7 @@ error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *nam
     loaded->PartsVa        = 0;
     loaded->Thread         = (ImageThread){ 0 };
     loaded->ThreadPointer  = 0;
+    loaded->StackReserve   = CONFIG_USER_STACK_RESERVE;
 
     error_t rc = ImageSourceRead(source, 0, head, look, name);
     if (rc != OK)
