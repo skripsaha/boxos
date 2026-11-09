@@ -7,7 +7,8 @@
  * on the volume. What goes where:
  *
  *   PT_LOAD R+X        code     at its address, MUST_UNDERSTAND
- *   PT_LOAD R          const
+ *   PT_LOAD R          const    its own sections — the Nameplate and the Form, last in
+ *                               it, are parts of their own and are left out of it
  *   PT_LOAD R+W        data     its zeros past the file's bytes as memory only
  *   PT_LOAD, no rights —          the linker's tables for a dynamic linker
  *   PT_TLS             thread   the template every thread's block is made from
@@ -49,6 +50,7 @@
 #define PF_W             2u
 #define PF_R             4u
 #define SHT_RELA         4u
+#define SHF_ALLOC        2u
 #define SHT_NOBITS       8u
 #define SHT_REL          9u
 #define SHT_RELR         19u
@@ -224,6 +226,39 @@ static bool SectionNamed(const Elf *elf, const char *name, const uint8_t **bytes
     return false;
 }
 
+/* The sections a box carries as parts of their own, not in its constants. */
+static bool CarriedApart(const char *name)
+{
+    return strcmp(name, ".nameplate") == 0 || strcmp(name, ".boxos.form") == 0;
+}
+
+/* The constants without the Nameplate and the Form: the linker script puts
+ * them last in the read-only segment, and the box carries them as the parts
+ * names and form — a copy of each among the constants would be a second one
+ * nothing reads. Const ends where its own last section ends. */
+static void LeaveOutCarried(const Elf *elf, Loadable *constants)
+{
+    Section  section;
+    uint64_t end = 0, carried = UINT64_MAX;
+    if (!constants->Present) return;
+    for (uint16_t i = 0; SectionAt(elf, i, &section); i++) {
+        uint64_t address = U64(section.Header + 16), size = U64(section.Header + 32);
+        if ((U64(section.Header + 8) & SHF_ALLOC) == 0 || U32(section.Header + 4) == SHT_NOBITS || size == 0 ||
+            address < constants->Place || address - constants->Place >= constants->Memory)
+            continue;
+        if (CarriedApart(section.Name)) {
+            if (address < carried) carried = address;
+        } else if (address + size - constants->Place > end) {
+            end = address + size - constants->Place;
+        }
+    }
+    if (carried == UINT64_MAX) return;
+    if (carried - constants->Place < end)
+        Refuse("its Nameplate or its Form lies among its constants; the linker script puts them last");
+    constants->Size = constants->Memory = end;
+    constants->Present = end > 0;
+}
+
 /* ── fixups ──────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -371,6 +406,7 @@ int main(int argc, char **argv)
     Segments segments;
     Places   places = { 0 };
     ReadSegments(&elf, &segments);
+    LeaveOutCarried(&elf, &segments.Const);
     CheckDynamic(&elf, &segments);
     ReadFixups(&elf, &segments, type, &places);
 

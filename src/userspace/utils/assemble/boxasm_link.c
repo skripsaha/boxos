@@ -460,6 +460,10 @@ void BoxAsmSegmentOf(const BoxAsmLinkImage *Image, BoxAsmSegmentKind Kind, BoxAs
     size_t Slot;
 
     *Out = Segments[Kind];
+    /* The Nameplate and the Form close the constants of an ELF image; a box
+     * carries them as the parts names and form, not a second time here. */
+    if (Image->Box && Kind == BOXASM_SEGMENT_CONST)
+        Out->Last = BOXASM_SLOT_EXCEPT_TABLE;
     Out->Address = Image->Sections[Out->First].Address;
     for (Slot = Out->First; Slot <= Out->Last; Slot++) {
         const BoxAsmOutputSection *Section = &Image->Sections[Slot];
@@ -760,7 +764,7 @@ static int BoxAsmApplyRelocation(BoxAsmRelocationSite *Site, const BoxAsmElfRela
         return BoxAsmRelocationRefuse(Site,
             ": a thread-local symbol is reached only through R_X86_64_TPOFF32", NULL);
     }
-    if (Site->Link->Image.Movable &&
+    if (Site->Link->Image.Box &&
         (Rc = BoxAsmRelocationHolds(Site, &Resolved, SectionAddress + Entry->Address)) != 0)
         return Rc;
     Rc = BoxAsmRelocationValue(Site, &Resolved, Entry->Addend,
@@ -902,8 +906,8 @@ int BoxAsmLink(const BoxAsmBlob *Entry, const BoxAsmBlob *Program,
     Link.Recipe = Recipe && Recipe->Size != 0 ? Recipe : NULL;
     Link.ArchiveName = RuntimeArchive->Name ? RuntimeArchive->Name : "runtime archive";
     BoxAsmImageInit(&Link.Image);
-    Link.Image.Movable = (Flags & BOXASM_LINK_ELF) == 0;
-    Link.Image.Base = Link.Image.Movable ? 0 : BOXASM_USER_BASE;
+    Link.Image.Box = (Flags & BOXASM_LINK_ELF) == 0;
+    Link.Image.Base = Link.Image.Box ? 0 : BOXASM_USER_BASE;
 
     Rc = BoxAsmObjectAdd(&Link, Entry, Entry->Name ? Entry->Name : "entry object", 1);
     if (Rc == 0)
@@ -925,7 +929,7 @@ int BoxAsmLink(const BoxAsmBlob *Entry, const BoxAsmBlob *Program,
     if (Rc == 0 && (Flags & BOXASM_LINK_SYMBOLS) != 0)
         Rc = BoxAsmBuildSymbolTable(&Link);
     if (Rc == 0)
-        Rc = Link.Image.Movable ? BoxAsmWriteBox(&Link, Out) : BoxAsmWriteElf(&Link, Out);
+        Rc = Link.Image.Box ? BoxAsmWriteBox(&Link, Out) : BoxAsmWriteElf(&Link, Out);
     if (Rc == -ERR_NO_MEMORY && Error && ErrorCapacity != 0 && Error[0] == '\0')
         BoxAsmMessageSet(Error, ErrorCapacity, "out of memory while linking");
 

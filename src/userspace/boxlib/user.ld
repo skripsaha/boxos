@@ -11,7 +11,8 @@ USER_BASE = DEFINED(USER_BASE) ? USER_BASE : 0x0;
 /* Three segments, each with one set of rights, and the thread template. Code
  * alone is executable; what is only read — constants, the unwinder's tables,
  * the Nameplate, the Form — is not, and lies on pages of its own; tools/pack
- * makes each segment the part of its kind (code, const, data). */
+ * makes each segment the part of its kind (code, const, data), the Nameplate
+ * and the Form parts of their own. */
 PHDRS
 {
     text   PT_LOAD FLAGS(5);   /* R+X */
@@ -71,8 +72,11 @@ SECTIONS
      * instead, which it does not describe — and `nameplate verify` proves
      * that rather than trusting it.
      *
-     * SHF_ALLOC, so the loader maps it with the rest of the read-only
-     * segment and no kernel change is needed to reach it. PROVIDE, so a
+     * In an ELF image the loader maps it with the rest of the read-only
+     * segment, and a program reads it between these symbols. A box carries
+     * it as its part `names` and its constants end before it (tools/pack):
+     * there the symbols name nothing loaded, and a program finds the part in
+     * the table of what the kernel loaded (box/program_part.h). PROVIDE, so a
      * binary linked without a table still links: the two symbols collapse
      * to the same address and the lookup reports "no names". */
     .nameplate : ALIGN(8)
@@ -85,11 +89,11 @@ SECTIONS
     /* ── Form: what this program takes and gives ─────────────────────────
      * The text BOX_FORM (box/form.h) or the assembler's `takes` and `gives`
      * put in .boxos.form. It sits here for the nameplate's reason — read-only,
-     * after the code, moving nothing that comes before — and the loader maps
-     * it with the rest of the read-only segment, so a program reads its own
-     * Form from memory between these symbols while the shell reads it from the
-     * image's section headers. PROVIDE: an image without a Form has the two
-     * symbols at one address and reads as no Form. */
+     * after the code, moving nothing that comes before — and last, after the
+     * Nameplate. An ELF image has it mapped with the read-only segment, read
+     * between these symbols; a box carries it as its part `form`, put into
+     * memory at start, and not among its constants. PROVIDE: an image without
+     * a Form has the two symbols at one address and reads as no Form. */
     .boxos.form : ALIGN(1)
     {
         PROVIDE(__boxos_form_start = .);

@@ -7,7 +7,9 @@
  * between them, its doors, thread template and fixups), and the ELF with a
  * reading of its own, written here from the System V ABI and sharing nothing
  * with pack: every loadable segment must be the box's part of its kind, at its
- * page, byte for byte, its zeros counted; the entry the door `start`; PT_TLS
+ * page, byte for byte, its zeros counted — the R segment up to the end of its
+ * own sections, the Nameplate and the Form after them left to their parts;
+ * the entry the door `start`; PT_TLS
  * the thread template; the Nameplate, the Form and the Recipe the parts of
  * those names; and for a static PIE every relocation a fixup and every fixup a
  * relocation, the word it names holding the address it means at base 0. Each
@@ -156,6 +158,29 @@ static void ReadProgram(Program *program)
     qsort(program->Relocations, program->RelocationCount, sizeof(Relocation), RelocationOrder);
 }
 
+/* Where the constants of the R segment end, from the page it starts on: the
+ * end of its last allocated section with bytes that is not the Nameplate or
+ * the Form, 0 when it holds nothing else. */
+static uint64_t ConstantsEnd(const Program *program, const Segment *segment)
+{
+    const uint8_t *file    = program->File;
+    uint64_t       table   = U64(file + 0x28);
+    uint16_t       count   = U16(file + 0x3C), names = U16(file + 0x3E);
+    const char    *strings = (const char *)file + U64(file + table + (uint64_t)names * 64 + 24);
+    uint64_t       page    = segment->Virt - segment->Virt % 4096, end = 0;
+    for (uint16_t i = 0; i < count; i++) {
+        const uint8_t *header = file + table + (uint64_t)i * 64;
+        const char    *name   = strings + U32(header);
+        uint64_t       addr   = U64(header + 16), size = U64(header + 32);
+        if (!(U64(header + 8) & 2) || U32(header + 4) == 8 || size == 0 || addr < segment->Virt ||
+            addr >= segment->Virt + segment->MemoryBytes || strcmp(name, ".nameplate") == 0 ||
+            strcmp(name, ".boxos.form") == 0)
+            continue;
+        if (addr + size - page > end) end = addr + size - page;
+    }
+    return end;
+}
+
 /* The word a relocation at `place` names, as the box must hold it. */
 static uint64_t WantedWord(const Program *program, const Relocation *relocation, const Segment *segment)
 {
@@ -197,10 +222,16 @@ static void CheckPair(const char *elf_path, const char *box_path, const BoxHashe
     for (unsigned i = 0; i < program.LoadCount; i++) {
         const Segment *segment = &program.Loads[i];
         BoxKind kind = (segment->Flags & 1) ? BOX_KIND_CODE : (segment->Flags & 2) ? BOX_KIND_DATA : BOX_KIND_CONST;
-        uint64_t lead = segment->Virt % 4096;
+        uint64_t lead   = segment->Virt % 4096;
+        uint64_t memory = lead + segment->MemoryBytes;
+        uint64_t size   = kind == BOX_KIND_DATA ? lead + segment->FileBytes : memory;
+        if (kind == BOX_KIND_CONST) memory = size = ConstantsEnd(&program, segment);
+        if (memory == 0) {
+            Check(!BoxPartOfKind(&table, kind, &part), elf_path, "no constants when its R segment holds none");
+            continue;
+        }
         bool     same = BoxPartOfKind(&table, kind, &part) && part.Place == segment->Virt - lead &&
-                        part.Memory == lead + segment->MemoryBytes &&
-                        part.Size == (kind == BOX_KIND_DATA ? lead + segment->FileBytes : lead + segment->MemoryBytes);
+                        part.Memory == memory && part.Size == size;
         for (uint64_t at = 0; same && at < part.Size; at++) {
             uint8_t want = 0;
             if (at >= lead && at - lead < segment->FileBytes) want = program.File[segment->Offset + at - lead];

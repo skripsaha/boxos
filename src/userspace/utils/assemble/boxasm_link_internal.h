@@ -40,7 +40,7 @@ typedef struct {
  * set of rights, beginning on a page of its own. */
 typedef enum {
     BOXASM_SEGMENT_CODE = 0,    /* .text: R+X */
-    BOXASM_SEGMENT_CONST,       /* .rodata to .boxos.form: R */
+    BOXASM_SEGMENT_CONST,       /* .rodata to .boxos.form — in a box to .gcc_except_table: R */
     BOXASM_SEGMENT_DATA,        /* .data to .bss: R+W */
     BOXASM_SEGMENT_COUNT
 } BoxAsmSegmentKind;
@@ -93,7 +93,8 @@ typedef struct {
 
 typedef struct {
     BoxAsmOutputSection Sections[BOXASM_SLOT_COUNT];
-    uint8_t      Movable;        /* a box, linked at 0, its addresses fixed up wherever it goes */
+    uint8_t      Box;            /* a box: linked at 0, its addresses fixed up wherever it goes,
+                                    the Nameplate and the Form parts of their own */
     uint64_t     Base;           /* 0 for a box, BOXASM_USER_BASE for an ELF image */
     BoxAsmFixups Fixups;
     uint64_t     TlsAddress;

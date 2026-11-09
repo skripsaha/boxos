@@ -1,21 +1,26 @@
 /*
- * nameplate.c — resolve an address to a name, out of this image's own table.
+ * nameplate.c — resolve an address to a name, out of this program's own table.
  *
- * The table is linked into the image by tools/nameplate (see
- * src/include/nameplate_format.h); the two symbols below are what the linker
- * script hands us. Everything here is a read of read-only memory: no syscall,
- * no allocation, no lock — because the caller is usually in the middle of
- * something going wrong, and may well be holding a lock of its own.
+ * The table is made by tools/nameplate or the BoxASM linker (see
+ * src/include/nameplate_format.h). A box carries it as its part `names`,
+ * which the kernel puts into memory at start and names in the table of the
+ * parts it loaded; an ELF image carries it in its read-only segment, between
+ * the two symbols below. Everything here is a read of read-only memory: no
+ * syscall, no allocation, no lock — because the caller is usually in the
+ * middle of something going wrong, and may well be holding a lock of its own.
  */
 
 #include "box/nameplate.h"
 #include "box/defs.h"
+#include "box/program_part.h"
 #include "box/core/cabin.h"
 
 #include "nameplate_format.h"
 
-/* PROVIDEd by user.ld (and defined by BoxASM's linker) — inside the image, so
- * hidden: reached relative to the code. Without a table, start == end. */
+/* PROVIDEd by user.ld (and defined by BoxASM's linker) round an ELF image's
+ * table — inside the image, so hidden: reached relative to the code. Without a
+ * table, start == end. A box has its table elsewhere: these name nothing
+ * loaded there. */
 extern const char __nameplate_start[] __attribute__((visibility("hidden")));
 extern const char __nameplate_end[] __attribute__((visibility("hidden")));
 
@@ -37,11 +42,21 @@ typedef struct NameplateView {
  */
 static int NameplateOpen(NameplateView *View)
 {
-    const NameplateHeader *Header = (const NameplateHeader *)(const void *)__nameplate_start;
-    uint64_t Bytes = (uint64_t)(__nameplate_end - __nameplate_start);
+    const NameplateHeader *Header;
     const char *Base = __nameplate_start;
+    uint64_t Bytes = (uint64_t)(__nameplate_end - __nameplate_start);
     uint32_t Count;
 
+    if (cabin_info()->parts_addr != 0) {
+        const uint8_t *Loaded;
+        size_t Size;
+
+        if (program_part_loaded("names", &Loaded, &Size) != 1)
+            return 0;
+        Base = (const char *)Loaded;
+        Bytes = Size;
+    }
+    Header = (const NameplateHeader *)(const void *)Base;
     if (Bytes < sizeof(NameplateHeader))
         return 0;
     if (!NameplateHeaderValid(Header, Bytes))

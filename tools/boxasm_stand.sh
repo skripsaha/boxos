@@ -390,10 +390,12 @@ fi
 # objects linked as an ELF image at the code start are the witness: the box,
 # read by a reader of its own here (box_format.h) and moved to 0xC000 by its
 # fixups, is that image byte for byte — each part where its segment is, the
-# door where the entry is, the thread template where PT_TLS is, the Nameplate,
-# the Form and the Recipe as the sections hold them (the Nameplate's
-# BaseAddress names a link address, 0xC000 apart). A fixup too many moves a
-# word the image does not; one too few leaves one that it does.
+# constants up to the end of their own sections (the Nameplate and the Form
+# after them are parts of their own), the door where the entry is, the thread
+# template where PT_TLS is, the Nameplate, the Form and the Recipe as the
+# sections hold them (the Nameplate's BaseAddress names a link address,
+# 0xC000 apart). A fixup too many moves a word the image does not; one too
+# few leaves one that it does.
 box_is_elf() {
     python3 -I - "$1" "$2" <<'PY'
 import struct, sys
@@ -422,22 +424,25 @@ entry, phoff = struct.unpack_from('<QQ', elf, 0x18)
 shoff, = struct.unpack_from('<Q', elf, 0x28)
 phnum, = struct.unpack_from('<H', elf, 0x38)
 shnum, shstr = struct.unpack_from('<HH', elf, 0x3c)
+headers = [struct.unpack_from('<IIQQQQ', elf, shoff + 64 * i) for i in range(shnum)]
+strings = elf[headers[shstr][4]:headers[shstr][4] + headers[shstr][5]]
 sections = {}
-for i in range(shnum):
-    name, kind, _, addr, off, size = struct.unpack_from('<IIQQQQ', elf, shoff + 64 * i)
-    sections[name] = (addr, elf[off:off + size] if kind != 8 else b'')
-strings = sections[[k for k in sections][shstr]][1]
-sections = {strings[k:strings.index(b'\0', k)].decode(): v for k, v in sections.items()}
-image = bytearray(elf)
-nameplate = sections.get('.nameplate', (0, b''))
+for name, kind, flags, addr, off, size in headers:
+    name = strings[name:strings.index(b'\0', name)].decode()
+    sections[name] = (addr, elf[off:off + size] if kind != 8 else b'', flags, kind)
 segments, tls = {}, None
 for i in range(phnum):
     kind, rights, off, vaddr, _, filesz, memsz, align = struct.unpack_from('<IIQQQQQQ', elf, phoff + 56 * i)
     if kind == 7: tls = (elf[off:off + filesz], memsz, align)
-    if kind == 1 and memsz: segments[{5: 'code', 4: 'const', 6: 'data'}[rights]] = (off, vaddr, filesz, memsz)
-    if kind == 1 and nameplate[1] and vaddr <= nameplate[0] < vaddr + memsz:
-        at = off + nameplate[0] - vaddr + 16
-        struct.pack_into('<Q', image, at, struct.unpack_from('<Q', image, at)[0] - BASE)
+    if kind == 1 and memsz: segments[{5: 'code', 4: 'const', 6: 'data'}[rights]] = [off, vaddr, filesz, memsz]
+if 'const' in segments:
+    off, vaddr, filesz, memsz = segments['const']
+    end = max([addr + len(data) - vaddr for name, (addr, data, flags, kind) in sections.items()
+               if flags & 2 and kind != 8 and data and vaddr <= addr < vaddr + memsz
+               and name not in ('.nameplate', '.boxos.form')] + [0])
+    segments['const'] = [off, vaddr, end, end]
+    if end == 0: del segments['const']
+image = elf
 
 if set(segments) != {p for p in parts if p in ('code', 'const', 'data')}:
     fail('parts %s, segments %s' % (sorted(p for p in parts if p in ('code', 'const', 'data')), sorted(segments)))
