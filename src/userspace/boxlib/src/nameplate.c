@@ -13,9 +13,10 @@
 
 #include "nameplate_format.h"
 
-/* PROVIDEd by user.ld. A binary linked without a table gets start == end. */
-extern const char __nameplate_start[];
-extern const char __nameplate_end[];
+/* PROVIDEd by user.ld (and defined by BoxASM's linker) — inside the image, so
+ * hidden: reached relative to the code. Without a table, start == end. */
+extern const char __nameplate_start[] __attribute__((visibility("hidden")));
+extern const char __nameplate_end[] __attribute__((visibility("hidden")));
 
 typedef struct NameplateView {
     const NameplateHeader *Header;

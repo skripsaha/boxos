@@ -157,10 +157,17 @@ size_t       g_atexit_cap     = 0;
 
 } // namespace
 
+// BoxLib runs at exit what it is handed here (runtime_init.c): __cxa_finalize,
+// from the first registration on — a program that registers nothing for its
+// end has nothing for it to do.
+extern "C" void __box_runtime_finalize_with(void (*finalize)(void *));
+extern "C" void __cxa_finalize(void *dso);
+
 extern "C" int __cxa_atexit(void (*fn)(void *), void *arg, void *dso)
 {
     (void)dso;   // static linking — single image, no DSO handles
     if (!fn) return -1;
+    __box_runtime_finalize_with(__cxa_finalize);
 
     if (g_atexit_count == g_atexit_cap) {
         size_t new_cap = g_atexit_cap ? g_atexit_cap * 2 : 32;
@@ -197,6 +204,7 @@ extern "C" int __cxa_thread_atexit(void (*fn)(void *), void *arg, void *dso)
 {
     (void)dso;
     if (!fn) return -1;
+    __box_runtime_finalize_with(__cxa_finalize);
 
     auto *node = static_cast<ThreadExitNode *>(malloc(sizeof(ThreadExitNode)));
     if (!node) return -1;

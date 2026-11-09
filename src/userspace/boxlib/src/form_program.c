@@ -27,9 +27,10 @@
 #include "box/program_part.h"
 
 /* The Form an ELF image carries, between the symbols user.ld or the BoxASM
- * linker puts round .boxos.form. Weak: an image linked without them has none. */
-extern const char __boxos_form_start[] __attribute__((weak));
-extern const char __boxos_form_end[] __attribute__((weak));
+ * linker puts round .boxos.form — at one address when it declares none.
+ * Inside the image, so hidden: reached relative to the code. */
+extern const char __boxos_form_start[] __attribute__((visibility("hidden")));
+extern const char __boxos_form_end[] __attribute__((visibility("hidden")));
 
 /* This program's own Form text, *text NULL for none: a box's part `form`, which
  * the kernel put into its memory at start (a box names everything it has in
@@ -44,7 +45,7 @@ static void own_form_text(const char **text, size_t *size)
         if (program_part_loaded("form", &loaded, size) == 1) *text = (const char *)loaded;
         return;
     }
-    if (__boxos_form_start && (uintptr_t)__boxos_form_end > (uintptr_t)__boxos_form_start) {
+    if ((uintptr_t)__boxos_form_end > (uintptr_t)__boxos_form_start) {
         *text = __boxos_form_start;
         *size = (size_t)(__boxos_form_end - __boxos_form_start);
     }

@@ -15,17 +15,28 @@
 
 typedef void (*RuntimeHook)(void);
 
-extern RuntimeHook __init_array_start[];
-extern RuntimeHook __init_array_end[];
-extern RuntimeHook __fini_array_start[];
-extern RuntimeHook __fini_array_end[];
+/* Defined by whichever links the program — user.ld, or BoxASM's linker — and
+ * so inside it: hidden, they are reached relative to the code, as a program
+ * placed at any base reaches them, and never through a table of addresses. */
+extern RuntimeHook __init_array_start[] __attribute__((visibility("hidden")));
+extern RuntimeHook __init_array_end[] __attribute__((visibility("hidden")));
+extern RuntimeHook __fini_array_start[] __attribute__((visibility("hidden")));
+extern RuntimeHook __fini_array_end[] __attribute__((visibility("hidden")));
 
-/* Provided by boxcxx when the binary contains C++; resolves to NULL in
- * pure-C binaries (weak reference against a static link). */
-void __cxa_finalize(void *dso) __attribute__((weak));
+/* What a runtime in the program runs at exit before the .fini_array entries:
+ * C++'s __cxa_finalize, handed over by boxcxx when something is first
+ * registered for the end (__box_runtime_finalize_with). A program in which
+ * nothing was has nothing to finalize. */
+static void (*g_finalize)(void *);
 
 void __box_runtime_init(void);
 void __box_runtime_fini(void);
+void __box_runtime_finalize_with(void (*finalize)(void *));
+
+void __box_runtime_finalize_with(void (*finalize)(void *))
+{
+    g_finalize = finalize;
+}
 
 void __box_runtime_init(void)
 {
@@ -41,7 +52,7 @@ void __box_runtime_fini(void)
     if (done) return;
     done = 1;
 
-    if (__cxa_finalize) __cxa_finalize(NULL);
+    if (g_finalize) g_finalize(NULL);
 
     for (RuntimeHook *fn = __fini_array_end; fn != __fini_array_start; )
     {
