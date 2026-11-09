@@ -37,7 +37,9 @@ CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
 
 # Linker flags
 BOXLIB_DIR = ../boxlib
-LDFLAGS = -nostdlib -static -T $(BOXLIB_DIR)/user.ld
+# shell.bin is raw code, run from its first byte at the code start: linked
+# there, where user.ld puts a program that does not say otherwise at 0.
+LDFLAGS = -nostdlib -static -T $(BOXLIB_DIR)/user.ld -Wl,--defsym=USER_BASE=0xC000
 
 # BoxLib path
 BOXLIB = ../boxlib/libbox.a

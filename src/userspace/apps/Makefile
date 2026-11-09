@@ -10,7 +10,8 @@ CXX     = x86_64-elf-g++
 
 # Compiler flags
 # -fno-stack-protector: No libc in userspace, canary support unavailable
-# -fno-pic: Position-independent code not needed for static binary
+# -fpie: a program is a box the kernel places where it chooses (box_format.h):
+#        linked position-independent (LDFLAGS), its fixups the box's
 # -mno-red-zone: Required for interrupt context compatibility
 # -fno-ipa-ra:   Disable IPRA. Without it GCC parks live values in caller-
 #                saved registers across calls. Any clobber (kernel
@@ -20,7 +21,7 @@ CXX     = x86_64-elf-g++
 #                fix the boxlib Makefile already carries — must be on every
 #                userspace binary that links libbox.a.
 CFLAGS = -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
-         -fno-stack-protector -fno-pic -static -fno-ipa-ra \
+         -fno-stack-protector -fpie -static -fno-ipa-ra \
          -fcf-protection=full -fstack-clash-protection \
          -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
          -fno-asynchronous-unwind-tables -fno-unwind-tables \
@@ -42,7 +43,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -fuse-cxa-atexit \
          -fasynchronous-unwind-tables \
          -nostdlib -ffreestanding -fno-builtin -mno-red-zone \
-         -fno-stack-protector -fno-pic -static -fno-ipa-ra \
+         -fno-stack-protector -fpie -static -fno-ipa-ra \
          -fcf-protection=full -fstack-clash-protection \
          -fno-delete-null-pointer-checks -fno-strict-aliasing -fwrapv \
          -Wall -Wextra -g \
@@ -54,7 +55,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -I../../include
 
 BOXLIB_DIR = ../boxlib
-LDFLAGS    = -nostdlib -static -T $(BOXLIB_DIR)/user.ld
+LDFLAGS    = -nostdlib -static -T $(BOXLIB_DIR)/user.ld -Wl,-pie -Wl,--no-dynamic-linker -Wl,-z,pack-relative-relocs
 BOXLIB     = ../boxlib/libbox.a
 BOXCXX     = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o

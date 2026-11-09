@@ -2,8 +2,11 @@ OUTPUT_FORMAT(elf64-x86-64)
 OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
-/* MUST match VMM_CABIN_CODE_START (0xC000) */
-USER_BASE = 0xC000;
+/* A program is linked at 0, position-independent, and made a box the kernel
+ * places where it chooses: every address in it is the place from the base.
+ * shell.bin, raw code the kernel runs from its first byte at the code start,
+ * is linked there instead (its Makefile: --defsym=USER_BASE=0xC000). */
+USER_BASE = DEFINED(USER_BASE) ? USER_BASE : 0x0;
 
 /* Three segments, each with one set of rights, and the thread template. Code
  * alone is executable; what is only read — constants, the unwinder's tables,
@@ -32,9 +35,14 @@ SECTIONS
      * open it are empty: the location moves, not only a section's start. */
     . = ALIGN(4096);
 
+    /* Constants that hold addresses (.data.rel.ro, what the compiler makes of
+     * them in position-independent code) are constants still: the kernel
+     * fixes them before it maps the box, so they are read-only like the
+     * rest. Named here, before .data, whose pattern would take them. */
     .rodata : ALIGN(4096)
     {
         *(.rodata .rodata.*)
+        *(.data.rel.ro .data.rel.ro.*)
     } :rodata
 
     /* ── C++ EH metadata (read-only, lives with .rodata) ──────────────
@@ -159,11 +167,10 @@ SECTIONS
     __program_end = .;
 
     /* What a linker writes for a dynamic linker, in a static PIE: its symbols,
-     * its relocations, its table. Nothing links a program at start, so it is
-     * kept out of every loaded segment, in one of type PT_NULL that every
-     * loader passes over — tools/pack reads the relocations from the file and
-     * makes them the box's fixups. An executable at a fixed address has none
-     * of these at all. */
+     * its relocations, its table. Nothing links a program at start, so none of
+     * it is any part of the program: it goes into a segment with no rights,
+     * which tools/pack passes over — reading the relocations from the file and
+     * making them the box's fixups. shell.bin, at its fixed place, has none. */
     .dynsym   : { *(.dynsym) }   :linker
     .dynstr   : { *(.dynstr) }   :linker
     .hash     : { *(.hash) }     :linker

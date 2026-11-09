@@ -60,7 +60,9 @@ int nameplate_locate(const void *image, uint64_t bytes, uintptr_t load_base,
 /*
  * Name the function containing `addr` in a process whose address space is the
  * one currently installed. `table_va`/`table_bytes` come from the process
- * record, where nameplate_locate() put them.
+ * record, where nameplate_locate() put them, and so does `image_base`: what
+ * the loader added to every place of the image, taken back from `addr` first,
+ * since the table names addresses where the image was linked.
  *
  * Returns 1 and fills *out on a hit; 0 when the process has no table, the
  * table does not survive validation, the address is outside it, or it lands
@@ -73,7 +75,7 @@ int nameplate_locate(const void *image, uint64_t bytes, uintptr_t load_base,
 int nameplate_name_at_kernel(uintptr_t table_va, uint64_t table_bytes,
                              uintptr_t addr, NameplateName *out);
 
-int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
-                      NameplateName *out);
+int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t image_base,
+                      uintptr_t addr, NameplateName *out);
 
 #endif /* KERNEL_NAMEPLATE_H */

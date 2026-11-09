@@ -301,8 +301,9 @@ static size_t SymbolsHarvest(const Image *Img, Symbol **Out)
         if (Sym->st_shndx == SHN_UNDEF || Sym->st_shndx == SHN_ABS ||
             Sym->st_shndx == SHN_COMMON || Sym->st_shndx >= Ehdr->e_shnum)
             continue;
-        if (Sym->st_value == 0)
-            continue;
+        /* Address 0 is no reason to pass a symbol over: a program linked
+         * position-independent begins its code there, _start first. What is
+         * not code is passed over below — an undefined weak was above. */
         if (Sym->st_name >= Strtab->sh_size)
             continue;
 

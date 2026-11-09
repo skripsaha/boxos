@@ -53,16 +53,18 @@ void _start(void) { table[1] = &counter; helper(3); for (;;) { } }
 EOF
 $CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/small.c" -o "$WORK/small.o" > "$WORK/cc.log" 2>&1 ||
     { cat "$WORK/cc.log"; harness "the small program did not build"; }
-sed 's/USER_BASE = 0xC000;/USER_BASE = 0x0;/' $LIB/user.ld > "$WORK/pie.ld"
+# user.ld links a program at 0, position-independent, as the tree does; the
+# executable at a fixed address is linked at the code start, where BoxASM's
+# linker puts one (USER_BASE).
 LINK="-static --no-dynamic-linker -e _start"
-$LD_CROSS $LINK -T $LIB/user.ld "$WORK/small.o" -o "$WORK/small_fixed.elf" > "$WORK/ld.log" 2>&1 &&
-$LD_CROSS $LINK -pie -T "$WORK/pie.ld" "$WORK/small.o" -o "$WORK/small_rela.elf" >> "$WORK/ld.log" 2>&1 &&
-$LD_CROSS $LINK -pie -z pack-relative-relocs -T "$WORK/pie.ld" "$WORK/small.o" -o "$WORK/small_relr.elf" \
+$LD_CROSS $LINK --defsym=USER_BASE=0xC000 -T $LIB/user.ld "$WORK/small.o" -o "$WORK/small_fixed.elf" > "$WORK/ld.log" 2>&1 &&
+$LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/small.o" -o "$WORK/small_rela.elf" >> "$WORK/ld.log" 2>&1 &&
+$LD_CROSS $LINK -pie -z pack-relative-relocs -T $LIB/user.ld "$WORK/small.o" -o "$WORK/small_relr.elf" \
     >> "$WORK/ld.log" 2>&1 || { cat "$WORK/ld.log"; harness "the small program did not link"; }
 # And a static PIE with not one address in it: its box must still say it can go anywhere.
 printf 'int square(int x) { return x * x; }\nvoid _start(void) { square(3); for (;;) { } }\n' > "$WORK/bare.c"
 $CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/bare.c" -o "$WORK/bare.o" > "$WORK/cc.log" 2>&1 &&
-$LD_CROSS $LINK -pie -T "$WORK/pie.ld" "$WORK/bare.o" -o "$WORK/bare_pie.elf" > "$WORK/ld.log" 2>&1 ||
+$LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/bare.o" -o "$WORK/bare_pie.elf" > "$WORK/ld.log" 2>&1 ||
     { cat "$WORK/cc.log" "$WORK/ld.log"; harness "the bare program did not build"; }
 
 # ── a copy of a program broken, or changed, one way ─────────────────────────

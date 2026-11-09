@@ -1057,6 +1057,7 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
      * the image was in its hands. 0 when the image carries none. */
     proc->nameplate_va    = loaded.NameplateVa;
     proc->nameplate_bytes = loaded.NameplateBytes;
+    proc->image_base      = loaded.ImageBase;
 
     /* The template the kernel makes every strand's thread-local storage from,
      * the cabin's from here and let go with it. */

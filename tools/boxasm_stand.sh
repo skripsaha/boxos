@@ -124,9 +124,13 @@ fi
 
 # ---- the linker, held to GNU ld and tools/nameplate -------------------------
 
-x86_64-elf-ld -nostdlib -static -T "$LD_SCRIPT" -o "$WORK/ref.pass1" "$ENTRY" "$WORK/hello.o" "$ARCHIVE" &&
+# GNU ld links the reference where BoxASM's linker puts a program: at the code
+# start, which user.ld takes from USER_BASE (a program the tree builds itself
+# is linked at 0, position-independent, and goes onto the volume as a box).
+REF_PLACE=--defsym=USER_BASE=0xC000
+x86_64-elf-ld -nostdlib -static $REF_PLACE -T "$LD_SCRIPT" -o "$WORK/ref.pass1" "$ENTRY" "$WORK/hello.o" "$ARCHIVE" &&
     "$NAMEPLATE" build "$WORK/ref.pass1" "$WORK/ref.np.o" > /dev/null &&
-    x86_64-elf-ld -nostdlib -static -T "$LD_SCRIPT" -o "$WORK/ref.elf" "$ENTRY" "$WORK/hello.o" \
+    x86_64-elf-ld -nostdlib -static $REF_PLACE -T "$LD_SCRIPT" -o "$WORK/ref.elf" "$ENTRY" "$WORK/hello.o" \
         "$ARCHIVE" "$WORK/ref.np.o" ||
     { echo "boxasm: harness failed — GNU ld did not link the reference"; exit 2; }
 

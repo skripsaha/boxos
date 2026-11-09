@@ -443,6 +443,10 @@ typedef struct process_t
      * user-mode fault dump, and only through get_user. */
     uintptr_t         nameplate_va;
     uint64_t          nameplate_bytes;
+    /* What the loader added to every place of the image: the table names
+     * addresses where the image was linked, so an address it is asked about
+     * is taken back by this first. 0 for an image where it was linked. */
+    uintptr_t         image_base;
 
     struct process_t *hash_next;    // hash table collision chain
     struct process_t *next;         // global process list (forward)

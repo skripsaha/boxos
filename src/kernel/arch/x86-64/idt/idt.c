@@ -1482,7 +1482,7 @@ void exception_handler(interrupt_frame_t *frame)
             {
                 NameplateName here;
                 if (proc->nameplate_va && proc->nameplate_bytes &&
-                    nameplate_name_at(proc->nameplate_va, proc->nameplate_bytes,
+                    nameplate_name_at(proc->nameplate_va, proc->nameplate_bytes, proc->image_base,
                                       (uintptr_t)frame->rip, &here))
                     kprintf("[EXCEPTION]   in %s+0x%lx\n", here.Text, here.Offset);
             }
@@ -1578,7 +1578,7 @@ void exception_handler(interrupt_frame_t *frame)
                      * that belongs to the call is ret-1; naming ret itself
                      * would name the next function whenever a call is the
                      * last instruction of its own. */
-                    if (nameplate_name_at(proc->nameplate_va, proc->nameplate_bytes,
+                    if (nameplate_name_at(proc->nameplate_va, proc->nameplate_bytes, proc->image_base,
                                           (uintptr_t)(ret - 1), &site))
                         /* +1 turns the offset of the looked-up byte back into
                          * the offset of the return address, which is what a

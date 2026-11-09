@@ -434,7 +434,7 @@ int main(int argc, char **argv)
     TestTexts();
     for (int i = 1; i < argc; i++)
         TestBuilt(argv[i]);
-    printf("elf: %d passed, %d failed — %d built programs among them\n",
+    printf("elf: %d passed, %d failed — %d built executables among them\n",
            g_passed, g_failed, argc - 1);
     return g_failed == 0 ? 0 : 1;
 }

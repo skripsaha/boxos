@@ -284,10 +284,11 @@ static int NameAt(NameplateReadWord Read, uintptr_t table_va,
 /* ── the two entry points ─────────────────────────────────────────────── */
 
 /* A faulted process's table, read across the address-space boundary. */
-int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
-                      NameplateName *out)
+int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t image_base,
+                      uintptr_t addr, NameplateName *out)
 {
-    return NameAt(ReadWordUser, table_va, table_bytes, addr, out);
+    if (addr < image_base) return 0;
+    return NameAt(ReadWordUser, table_va, table_bytes, addr - image_base, out);
 }
 
 /* The kernel's own table, read directly. This is what turns a kernel panic

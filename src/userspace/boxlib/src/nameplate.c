@@ -10,6 +10,7 @@
 
 #include "box/nameplate.h"
 #include "box/defs.h"
+#include "box/core/cabin.h"
 
 #include "nameplate_format.h"
 
@@ -60,13 +61,18 @@ int nameplate_lookup(uintptr_t address, NameplateSite *site)
     NameplateView View;
     uint64_t Want, Start, Delta;
     uint32_t Low, High, Hit, NameOffset;
+    /* The table names addresses where the image was linked; the kernel placed
+     * it this much further on. */
+    uint64_t Slide = cabin_info()->image_base;
 
     if (!site)
         return 0;
     if (!NameplateOpen(&View))
         return 0;
+    if ((uint64_t)address < Slide)
+        return 0;
 
-    Want = (uint64_t)address;
+    Want = (uint64_t)address - Slide;
     if (Want < View.Header->BaseAddress)
         return 0;
     Want -= View.Header->BaseAddress;
@@ -90,7 +96,7 @@ int nameplate_lookup(uintptr_t address, NameplateSite *site)
     Hit = Low;
 
     Start = View.Header->BaseAddress + View.Offsets[Hit];
-    Delta = (uint64_t)address - Start;
+    Delta = (uint64_t)address - Slide - Start;
 
     /* Past the end of the function it landed nearest to: padding, or code no
      * symbol claims. Say nothing rather than name the neighbour. */
@@ -107,7 +113,7 @@ int nameplate_lookup(uintptr_t address, NameplateSite *site)
         return 0;
 
     site->Name   = View.Names + NameOffset;
-    site->Start  = (uintptr_t)Start;
+    site->Start  = (uintptr_t)(Start + Slide);
     site->Offset = Delta;
     return 1;
 }
