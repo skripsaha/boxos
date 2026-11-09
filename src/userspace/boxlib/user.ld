@@ -138,13 +138,10 @@ SECTIONS
      * PT_TLS is the template the kernel makes every strand's thread-local
      * storage from (a box carries it as its `thread` part): .tdata copied,
      * .tbss zeros after it. .tbss is NOBITS and does NOT advance the
-     * location counter — only SIZEOF() is meaningful, never its
-     * addresses. */
+     * location counter: its addresses describe the template, not memory. */
     .tdata :
     {
-        __tdata_start = .;
         *(.tdata .tdata.*)
-        __tdata_end = .;
     } :data :tls
 
     .tbss :
@@ -152,9 +149,6 @@ SECTIONS
         *(.tbss .tbss.*)
         *(.tcommon)
     } :data :tls
-
-    __tdata_size = SIZEOF(.tdata);
-    __tbss_size  = SIZEOF(.tbss);
 
     .bss : ALIGN(4096)
     {

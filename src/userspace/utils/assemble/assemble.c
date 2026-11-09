@@ -14,7 +14,7 @@
 #define ASSEMBLE_ERROR_BYTES 8192u
 
 BOX_FORM("takes thing \"the source\"\n"
-         "takes optional into \"the program\"\n"
+         "takes optional into \"the program: a box, or an ELF image named .elf\"\n"
          "takes optional words \"the program's tags\"\n"
          "gives things\n");
 
@@ -31,12 +31,16 @@ void AssembleSayError(const char *Stage, int Rc, const char *Detail)
         printf("assemble: %s: %s\n", Stage, BoxAsmErrorText(Rc));
 }
 
-static int EndsWithAsm(const char *Name)
+static int EndsWith(const char *Name, const char *Ending)
 {
     size_t Length = strlen(Name);
-    return Length >= 4u && strcmp(Name + Length - 4u, ".asm") == 0;
+    size_t EndingLength = strlen(Ending);
+
+    return Length >= EndingLength && strcmp(Name + Length - EndingLength, Ending) == 0;
 }
 
+/* The program's name: the one -> points at, or the source's stem made a
+ * box — hello.asm makes hello.box. */
 static int BuildOutputName(const char *Source, const char *Requested,
                            char *Out, size_t Capacity)
 {
@@ -52,12 +56,12 @@ static int BuildOutputName(const char *Source, const char *Requested,
         return 0;
     }
     Length = strlen(Source);
-    if (EndsWithAsm(Source))
+    if (EndsWith(Source, ".asm"))
         Length -= 4u;
     if (Length > SIZE_MAX - 4u || Length + 4u >= Capacity)
         return -ERR_INVALID_ARGUMENT;
     memcpy(Out, Source, Length);
-    memcpy(Out + Length, ".elf", 5u);
+    memcpy(Out + Length, ".box", 5u);
     return 0;
 }
 
@@ -108,8 +112,11 @@ static int AppendExplicitTags(AssembleRequest *Request)
     return 0;
 }
 
-static int LinkEmbedded(const char *SourceName, BoxAsmBlob *Program, const BoxAsmBlob *Recipe,
-                        BoxAsmBlob *Image, char *Error, size_t ErrorCapacity)
+/* The program linked as a box, which the kernel places where it chooses — or,
+ * for a program named name.elf, as an ELF image at the code start. */
+static int LinkEmbedded(const char *SourceName, const char *OutputName, BoxAsmBlob *Program,
+                        const BoxAsmBlob *Recipe, BoxAsmBlob *Image, char *Error,
+                        size_t ErrorCapacity)
 {
     BoxAsmBlob Entry = { _binary____build_boxlib_start_o_start,
                          (uint64_t)(_binary____build_boxlib_start_o_end -
@@ -122,8 +129,9 @@ static int LinkEmbedded(const char *SourceName, BoxAsmBlob *Program, const BoxAs
     int Rc;
 
     Program->Name = SourceName;
-    Rc = BoxAsmLink(&Entry, Program, &RuntimeArchive, Recipe, 0, Image,
-                    Error, ErrorCapacity);
+    Rc = BoxAsmLink(&Entry, Program, &RuntimeArchive, Recipe,
+                    EndsWith(OutputName, ".elf") ? BOXASM_LINK_ELF : 0, Image, Error,
+                    ErrorCapacity);
     free((void *)Program->Data);
     Program->Data = NULL;
     Program->Size = 0;
@@ -343,8 +351,8 @@ static int BuildImage(AssembleRequest *Request, BoxAsmBlob *Image)
         } else {
             Recipe.Data = (const uint8_t *)Text;
             Recipe.Size = Length;
-            Rc = LinkEmbedded(Request->SourceName, &Program, &Recipe, Image, Error,
-                              ASSEMBLE_ERROR_BYTES);
+            Rc = LinkEmbedded(Request->SourceName, Request->OutputName, &Program, &Recipe, Image,
+                              Error, ASSEMBLE_ERROR_BYTES);
             free(Text);
             if (Rc != 0)
                 AssembleSayError("link", Rc, Error);

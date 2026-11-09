@@ -3,7 +3,7 @@
 
 #include "boxasm_link.h"
 
-#define BOXASM_USER_BASE 0xC000ull
+#define BOXASM_USER_BASE 0xC000ull   /* where an ELF image is linked: the code start */
 #define BOXASM_PAGE      0x1000ull
 
 /* The output sections of src/userspace/boxlib/user.ld, in address order.
@@ -84,8 +84,18 @@ typedef struct {
     size_t          Capacity;
 } BoxAsmGlobalMap;
 
+/* The places, from the base, of the words a box's kernel adds the base to. */
+typedef struct {
+    uint64_t *Places;
+    size_t    Count;
+    size_t    Capacity;
+} BoxAsmFixups;
+
 typedef struct {
     BoxAsmOutputSection Sections[BOXASM_SLOT_COUNT];
+    uint8_t      Movable;        /* a box, linked at 0, its addresses fixed up wherever it goes */
+    uint64_t     Base;           /* 0 for a box, BOXASM_USER_BASE for an ELF image */
+    BoxAsmFixups Fixups;
     uint64_t     TlsAddress;
     uint64_t     TlsMemorySize;
     uint64_t     TlsAlign;
@@ -108,11 +118,14 @@ typedef struct {
 } BoxAsmLinker;
 
 /* A symbol followed to its prevailing definition. Object is NULL for a name
- * the linker itself defines and for a weak name nobody defines. */
+ * the linker itself defines and for a weak name nobody defines. Moves: the
+ * address is a place in the image, which moves with its base — not an
+ * absolute value or the zero of a weak name nobody defines. */
 typedef struct {
     uint64_t                Address;
     const BoxAsmLinkObject *Object;
     const BoxAsmElfSymbol  *Symbol;
+    uint8_t                 Moves;
 } BoxAsmResolved;
 
 /* boxasm_link_symbols.c */
@@ -134,7 +147,12 @@ void BoxAsmSegmentCopy(const BoxAsmLinkImage *Image, const BoxAsmSegment *Segmen
 int BoxAsmBuildNameplate(BoxAsmLinker *Link);
 int BoxAsmBuildSymbolTable(BoxAsmLinker *Link);
 
-/* boxasm_link_output.c */
-int BoxAsmWriteOutput(BoxAsmLinker *Link, BoxAsmBlob *Out);
+/* boxasm_link_elf.c */
+int BoxAsmWriteElf(BoxAsmLinker *Link, BoxAsmBlob *Out);
+
+/* boxasm_link_box.c */
+int  BoxAsmFixupAdd(BoxAsmFixups *Fixups, uint64_t Place);
+void BoxAsmFixupsRelease(BoxAsmFixups *Fixups);
+int  BoxAsmWriteBox(BoxAsmLinker *Link, BoxAsmBlob *Out);
 
 #endif

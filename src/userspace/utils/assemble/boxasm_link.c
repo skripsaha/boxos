@@ -16,7 +16,7 @@ static const char *const BoxAsmSlotNames[BOXASM_SLOT_COUNT] = {
 
 /* The alignment user.ld gives each output section; inputs may raise it. */
 static const uint64_t BoxAsmSlotAlign[BOXASM_SLOT_COUNT] = {
-    1, BOXASM_PAGE, BOXASM_PAGE, 8, 8, 8, 1, BOXASM_PAGE, 8, 8, 64, 1, BOXASM_PAGE
+    1, BOXASM_PAGE, BOXASM_PAGE, 8, 8, 8, 1, BOXASM_PAGE, 8, 8, 1, 1, BOXASM_PAGE
 };
 
 static const uint64_t BoxAsmSlotFlags[BOXASM_SLOT_COUNT] = {
@@ -322,6 +322,7 @@ static void BoxAsmImageRelease(BoxAsmLinkImage *Image)
 
     for (Slot = 0; Slot < BOXASM_SLOT_COUNT; Slot++)
         BoxAsmBufferRelease(&Image->Sections[Slot].Data);
+    BoxAsmFixupsRelease(&Image->Fixups);
     BoxAsmBufferRelease(&Image->Symbols);
     BoxAsmBufferRelease(&Image->SymbolNames);
 }
@@ -408,7 +409,7 @@ static int BoxAsmLayoutSections(BoxAsmLinker *Link)
     BoxAsmLinkImage *Image = &Link->Image;
     const BoxAsmOutputSection *Tdata = &Image->Sections[BOXASM_SLOT_TDATA];
     const BoxAsmOutputSection *Tbss = &Image->Sections[BOXASM_SLOT_TBSS];
-    uint64_t Address = BOXASM_USER_BASE;
+    uint64_t Address = Image->Base;
     size_t Slot;
 
     for (Slot = 1; Slot < BOXASM_SLOT_COUNT; Slot++) {
@@ -490,7 +491,7 @@ void BoxAsmSegmentCopy(const BoxAsmLinkImage *Image, const BoxAsmSegment *Segmen
 
 /* ---- Symbols ----------------------------------------------------------- */
 
-/* The names user.ld defines, valued by the layout. */
+/* The names user.ld defines, valued by the layout: places in the image. */
 static int BoxAsmLinkerSymbol(const BoxAsmLinkImage *Image, const char *Name,
                               uint64_t *Out)
 {
@@ -509,8 +510,6 @@ static int BoxAsmLinkerSymbol(const BoxAsmLinkImage *Image, const char *Name,
         { "__init_array_end",   BOXASM_SLOT_INIT_ARRAY, 1 },
         { "__fini_array_start", BOXASM_SLOT_FINI_ARRAY, 0 },
         { "__fini_array_end",   BOXASM_SLOT_FINI_ARRAY, 1 },
-        { "__tdata_start",      BOXASM_SLOT_TDATA,      0 },
-        { "__tdata_end",        BOXASM_SLOT_TDATA,      1 },
         { "__bss_start",        BOXASM_SLOT_BSS,        0 },
         { "__bss_end",          BOXASM_SLOT_BSS,        1 },
     };
@@ -521,14 +520,6 @@ static int BoxAsmLinkerSymbol(const BoxAsmLinkImage *Image, const char *Name,
         if (strcmp(Name, Bounds[Index].Name) != 0)
             continue;
         *Out = Section->Address + (Bounds[Index].End ? Section->Size : 0);
-        return 0;
-    }
-    if (strcmp(Name, "__tdata_size") == 0) {
-        *Out = Image->Sections[BOXASM_SLOT_TDATA].Size;
-        return 0;
-    }
-    if (strcmp(Name, "__tbss_size") == 0) {
-        *Out = Image->Sections[BOXASM_SLOT_TBSS].Size;
         return 0;
     }
     if (strcmp(Name, "__program_end") == 0) {
@@ -573,6 +564,7 @@ static int BoxAsmResolve(const BoxAsmLinker *Link, const BoxAsmLinkObject *Objec
     if (Symbol->SectionIndex != BOXASM_SHN_UNDEF) {
         Out->Object = Object;
         Out->Symbol = Symbol;
+        Out->Moves = Symbol->SectionIndex != BOXASM_SHN_ABS;
         return BoxAsmSymbolAddress(Link, Object, Symbol, &Out->Address);
     }
     Name = BoxAsmElfSymbolName(&Object->Elf, Index);
@@ -583,10 +575,13 @@ static int BoxAsmResolve(const BoxAsmLinker *Link, const BoxAsmLinkObject *Objec
     if (Global) {
         Out->Object = &Link->Objects.Items[Global->Object];
         Out->Symbol = &Out->Object->Elf.Symbols[Global->Symbol];
+        Out->Moves = Out->Symbol->SectionIndex != BOXASM_SHN_ABS;
         return BoxAsmSymbolAddress(Link, Out->Object, Out->Symbol, &Out->Address);
     }
-    if (BoxAsmLinkerSymbol(&Link->Image, Name, &Out->Address) == 0)
+    if (BoxAsmLinkerSymbol(&Link->Image, Name, &Out->Address) == 0) {
+        Out->Moves = 1;
         return 0;
+    }
     if (BOXASM_SYMBOL_BIND(Symbol->Info) == BOXASM_STB_WEAK)
         return 0;
     return -ERR_FILE_NOT_FOUND;
@@ -683,6 +678,50 @@ static int BoxAsmRelocationValue(const BoxAsmRelocationSite *Site,
     return 0;
 }
 
+/* What a box asks of a relocation: that the word it writes holds wherever the
+ * kernel places the box. An address in 64 bits is a fixup, the base added to
+ * it at start — on a whole word, and not in the thread template, which every
+ * strand's block is copied from as it is. Anything else must come out the
+ * same at any base: a 32-bit field holds no place in the image, and code
+ * reaches nothing fixed relative to itself. TPOFF32 is measured from the
+ * thread pointer, which moves with the block. */
+static int BoxAsmRelocationHolds(BoxAsmRelocationSite *Site, const BoxAsmResolved *Resolved,
+                                 uint64_t Place)
+{
+    BoxAsmLinkImage *Image = &Site->Link->Image;
+
+    switch (Site->Type) {
+    case BOXASM_R_X86_64_64:
+        if (!Resolved->Moves)
+            return 0;
+        if (Place % 8u != 0)
+            return BoxAsmRelocationRefuse(Site,
+                " holds an address at a place that is not a multiple of 8, and a box adds its "
+                "base only to whole words: align it on 8, or reach it rip-relative", NULL);
+        if (Site->Object->SectionSlot[Site->Section] == BOXASM_SLOT_TDATA)
+            return BoxAsmRelocationRefuse(Site,
+                " puts an address into the thread template, which every strand's block is "
+                "copied from as it is, with no base added", NULL);
+        return BoxAsmFixupAdd(&Image->Fixups, Place - Image->Base);
+    case BOXASM_R_X86_64_PC32:
+    case BOXASM_R_X86_64_PLT32:
+        if (Resolved->Moves)
+            return 0;
+        return BoxAsmRelocationRefuse(Site,
+            " reaches a fixed address from code that a box moves wherever it goes: reach it "
+            "through a register, or name the program .elf to make it an ELF image", NULL);
+    case BOXASM_R_X86_64_32:
+    case BOXASM_R_X86_64_32S:
+        if (!Resolved->Moves)
+            return 0;
+        return BoxAsmRelocationRefuse(Site,
+            " holds an address in 32 bits, and a box goes wherever the system places it: "
+            "reach it rip-relative, or name the program .elf to make it an ELF image", NULL);
+    default:
+        return 0;
+    }
+}
+
 static int BoxAsmApplyRelocation(BoxAsmRelocationSite *Site, const BoxAsmElfRela *Entry,
                                  uint64_t TargetSize, uint8_t *Bytes,
                                  uint64_t SectionAddress)
@@ -721,6 +760,9 @@ static int BoxAsmApplyRelocation(BoxAsmRelocationSite *Site, const BoxAsmElfRela
         return BoxAsmRelocationRefuse(Site,
             ": a thread-local symbol is reached only through R_X86_64_TPOFF32", NULL);
     }
+    if (Site->Link->Image.Movable &&
+        (Rc = BoxAsmRelocationHolds(Site, &Resolved, SectionAddress + Entry->Address)) != 0)
+        return Rc;
     Rc = BoxAsmRelocationValue(Site, &Resolved, Entry->Addend,
                                SectionAddress + Entry->Address, &Value);
     if (Rc != 0)
@@ -849,6 +891,10 @@ int BoxAsmLink(const BoxAsmBlob *Entry, const BoxAsmBlob *Program,
         BoxAsmMessageSet(Error, ErrorCapacity, "link input is missing");
         return -ERR_INVALID_ARGUMENT;
     }
+    if ((Flags & BOXASM_LINK_SYMBOLS) != 0 && (Flags & BOXASM_LINK_ELF) == 0) {
+        BoxAsmMessageSet(Error, ErrorCapacity, "a symbol table is written only into an ELF image");
+        return -ERR_INVALID_ARGUMENT;
+    }
     memset(Out, 0, sizeof(*Out));
     memset(&Link, 0, sizeof(Link));
     Link.Error = Error;
@@ -856,6 +902,8 @@ int BoxAsmLink(const BoxAsmBlob *Entry, const BoxAsmBlob *Program,
     Link.Recipe = Recipe && Recipe->Size != 0 ? Recipe : NULL;
     Link.ArchiveName = RuntimeArchive->Name ? RuntimeArchive->Name : "runtime archive";
     BoxAsmImageInit(&Link.Image);
+    Link.Image.Movable = (Flags & BOXASM_LINK_ELF) == 0;
+    Link.Image.Base = Link.Image.Movable ? 0 : BOXASM_USER_BASE;
 
     Rc = BoxAsmObjectAdd(&Link, Entry, Entry->Name ? Entry->Name : "entry object", 1);
     if (Rc == 0)
@@ -877,7 +925,7 @@ int BoxAsmLink(const BoxAsmBlob *Entry, const BoxAsmBlob *Program,
     if (Rc == 0 && (Flags & BOXASM_LINK_SYMBOLS) != 0)
         Rc = BoxAsmBuildSymbolTable(&Link);
     if (Rc == 0)
-        Rc = BoxAsmWriteOutput(&Link, Out);
+        Rc = Link.Image.Movable ? BoxAsmWriteBox(&Link, Out) : BoxAsmWriteElf(&Link, Out);
     if (Rc == -ERR_NO_MEMORY && Error && ErrorCapacity != 0 && Error[0] == '\0')
         BoxAsmMessageSet(Error, ErrorCapacity, "out of memory while linking");
 

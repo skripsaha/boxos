@@ -233,7 +233,7 @@ static void BoxAsmWriteFileHeaders(const BoxAsmLinkImage *Image,
  * the first page, a PT_LOAD for each segment with the rights user.ld gives
  * it, PT_TLS when there is a TLS block, then the Recipe when there is one,
  * the section names and headers. */
-int BoxAsmWriteOutput(BoxAsmLinker *Link, BoxAsmBlob *Out)
+int BoxAsmWriteElf(BoxAsmLinker *Link, BoxAsmBlob *Out)
 {
     BoxAsmLinkImage *Image = &Link->Image;
     BoxAsmBuffer File = { 0 };

@@ -7,10 +7,12 @@
 #
 # The witnesses are NASM (every instruction form, byte for byte, through
 # tools/boxasm_oracle.py), GNU ld with src/userspace/boxlib/user.ld (the
-# layout, the TLS block and the refusals it shares with us) and
-# tools/nameplate (the table of names, re-derived from the image's own
-# symbols). Each case prints "ok" or "FAIL" with what differed; the last
-# line counts them.
+# layout, the TLS block and the refusals it shares with us), tools/nameplate
+# (the table of names, re-derived from the image's own symbols), and for the
+# box `assemble` makes, the ELF image of the same link with a reader of the
+# box's own (the box moved by its fixups is that image) and tools/inside.
+# Each case prints "ok" or "FAIL" with what differed; the last line counts
+# them.
 
 set -u
 
@@ -41,10 +43,11 @@ make -s -C src/userspace/boxlib > "$WORK/make.log" 2>&1 &&
     { cat "$WORK/make.log"; echo "boxasm: harness failed — the runtime inputs did not build"; exit 2; }
 
 STAND=$WORK/boxasm_stand
-# Every part of the toolchain but the BoxOS command's own files.
+# Every part of the toolchain but the BoxOS command's own files, and BoxLib's
+# SHA-256, which a box is sealed with.
 $CC_HOST -std=c11 -O1 -Wall -Wextra -I"$ASM_DIR" -Isrc/userspace/boxlib/include -Isrc/include \
     tools/boxasm_stand.c $(ls "$ASM_DIR"/*.c | grep -v '/assemble[^/]*\.c$') \
-    -o "$STAND" > "$WORK/cc.log" 2>&1 ||
+    src/userspace/boxlib/src/sha256.c -o "$STAND" > "$WORK/cc.log" 2>&1 ||
     { cat "$WORK/cc.log"; echo "boxasm: harness failed — the stand did not compile"; exit 2; }
 if [ -s "$WORK/cc.log" ]; then
     cat "$WORK/cc.log"; echo "boxasm: harness failed — the toolchain compiles with warnings on the host"; exit 2
@@ -380,6 +383,213 @@ EOF
 else
     fail recipe_link "$(cat "$WORK/link.err")"
 fi
+
+# ---- the box: what assemble makes ---------------------------------------------
+
+# A box is linked at 0 and the kernel adds its base to every fixup. The same
+# objects linked as an ELF image at the code start are the witness: the box,
+# read by a reader of its own here (box_format.h) and moved to 0xC000 by its
+# fixups, is that image byte for byte — each part where its segment is, the
+# door where the entry is, the thread template where PT_TLS is, the Nameplate,
+# the Form and the Recipe as the sections hold them (the Nameplate's
+# BaseAddress names a link address, 0xC000 apart). A fixup too many moves a
+# word the image does not; one too few leaves one that it does.
+box_is_elf() {
+    python3 -I - "$1" "$2" <<'PY'
+import struct, sys
+box, elf = (open(path, 'rb').read() for path in sys.argv[1:3])
+BASE = 0xC000
+def fail(why):
+    print(why); sys.exit(1)
+
+count, table, names = struct.unpack_from('<IQQ', box, 12)
+parts = {}
+for i in range(count):
+    offset, size, memory, place, flags = struct.unpack_from('<QQQQI', box, table + 80 * i)
+    length, at = struct.unpack_from('<HI', box, table + 80 * i + 38)
+    parts[box[names + at:names + at + length].decode()] = (box[offset:offset + size], memory, place, flags)
+known = {'code', 'const', 'data', 'doors', 'fixups', 'thread', 'names', 'form', 'recipe'}
+if set(parts) - known: fail('parts nobody makes: %s' % sorted(set(parts) - known))
+
+words, places = parts['fixups'][0], []
+for (word,) in struct.iter_unpack('<Q', words):
+    if word & 1 == 0:
+        places.append(word); where = word + 8
+    else:
+        places += [where + 8 * k for k in range(63) if word >> (k + 1) & 1]; where += 63 * 8
+
+entry, phoff = struct.unpack_from('<QQ', elf, 0x18)
+shoff, = struct.unpack_from('<Q', elf, 0x28)
+phnum, = struct.unpack_from('<H', elf, 0x38)
+shnum, shstr = struct.unpack_from('<HH', elf, 0x3c)
+sections = {}
+for i in range(shnum):
+    name, kind, _, addr, off, size = struct.unpack_from('<IIQQQQ', elf, shoff + 64 * i)
+    sections[name] = (addr, elf[off:off + size] if kind != 8 else b'')
+strings = sections[[k for k in sections][shstr]][1]
+sections = {strings[k:strings.index(b'\0', k)].decode(): v for k, v in sections.items()}
+image = bytearray(elf)
+nameplate = sections.get('.nameplate', (0, b''))
+segments, tls = {}, None
+for i in range(phnum):
+    kind, rights, off, vaddr, _, filesz, memsz, align = struct.unpack_from('<IIQQQQQQ', elf, phoff + 56 * i)
+    if kind == 7: tls = (elf[off:off + filesz], memsz, align)
+    if kind == 1 and memsz: segments[{5: 'code', 4: 'const', 6: 'data'}[rights]] = (off, vaddr, filesz, memsz)
+    if kind == 1 and nameplate[1] and vaddr <= nameplate[0] < vaddr + memsz:
+        at = off + nameplate[0] - vaddr + 16
+        struct.pack_into('<Q', image, at, struct.unpack_from('<Q', image, at)[0] - BASE)
+
+if set(segments) != {p for p in parts if p in ('code', 'const', 'data')}:
+    fail('parts %s, segments %s' % (sorted(p for p in parts if p in ('code', 'const', 'data')), sorted(segments)))
+moved = 0
+for name, (off, vaddr, filesz, memsz) in segments.items():
+    bytes_, memory, place, _ = parts[name]
+    if place + BASE != vaddr or len(bytes_) != filesz or memory != memsz:
+        fail('%s at %#x, %d bytes, %d in memory; its segment at %#x, %d, %d'
+             % (name, place, len(bytes_), memory, vaddr, filesz, memsz))
+    fixed = bytearray(bytes_)
+    for at in places:
+        if place <= at and at + 8 <= place + len(fixed):
+            struct.pack_into('<Q', fixed, at - place, struct.unpack_from('<Q', fixed, at - place)[0] + BASE)
+            moved += 1
+    if bytes(fixed) != bytes(image[off:off + filesz]):
+        at = next(i for i in range(filesz) if fixed[i] != image[off + i])
+        fail('%s moved to %#x differs from its segment at %#x' % (name, BASE, vaddr + at))
+if moved != len(places): fail('%d fixups name no word of a part' % (len(places) - moved))
+
+doors = parts['doors'][0]
+door_count, = struct.unpack_from('<I', doors, 0)
+start = [struct.unpack_from('<Q', doors, 8 + 16 * i)[0] for i in range(door_count)
+         if doors[8 + 16 * door_count + struct.unpack_from('<I', doors, 16 + 16 * i)[0]:][:5] == b'start']
+if start != [entry - BASE]: fail('door start %s, entry %#x' % (start, entry))
+
+if tls and tls[1]:
+    align, init, total = struct.unpack_from('<QQQ', parts['thread'][0], 0)
+    if (parts['thread'][0][32:], total, align) != tls:
+        fail('thread %d of %d aligned %d; PT_TLS %d of %d aligned %d' % (init, total, align, len(tls[0]), tls[1], tls[2]))
+elif 'thread' in parts: fail('a thread part with no TLS block')
+
+for part, section in (('names', '.nameplate'), ('form', '.boxos.form'), ('recipe', '.boxos.recipe')):
+    want = sections.get(section, (0, b''))[1]
+    if part == 'names' and want:
+        want = want[:16] + struct.pack('<Q', struct.unpack_from('<Q', want, 16)[0] - BASE) + want[24:]
+    elif part != 'names':
+        want = want.rstrip(b'\0')
+    if parts.get(part, (b'',))[0] != want: fail('part %s is not %s' % (part, section))
+print('%d fixups' % len(places))
+PY
+}
+
+# box_builds NAME OBJECT [recipe=FILE] — the object linked as a box and as an
+# ELF image, the box whole as tools/inside reads it and its ELF's twin.
+box_builds() {
+    local name=$1 object=$2 said
+    shift 2
+    if ! "$STAND" link "$ENTRY" "$object" "$ARCHIVE" "$WORK/$name.box" "$@" 2> "$WORK/link.err" ||
+       ! "$STAND" link "$ENTRY" "$object" "$ARCHIVE" "$WORK/${name}_twin.elf" "$@" 2>> "$WORK/link.err"; then
+        fail "${name}_box" "$(cat "$WORK/link.err")"
+    elif ! said=$("$INSIDE" "$WORK/$name.box"); then
+        fail "${name}_box" "inside does not find it whole: $said"
+    elif ! said=$(box_is_elf "$WORK/$name.box" "$WORK/${name}_twin.elf"); then
+        fail "${name}_box" "$said"
+    else
+        ok "${name}_box ($said)"
+    fi
+}
+
+INSIDE=$WORK/inside
+$CC_HOST -std=gnu11 -O1 -DINSIDE_HOST -Isrc/include -Itools -Isrc/userspace/utils/inside tools/inside.c \
+    src/userspace/utils/inside/inside_show.c src/userspace/boxlib/src/sha256.c \
+    -Isrc/userspace/boxlib/include -o "$INSIDE" > "$WORK/cc.log" 2>&1 ||
+    { cat "$WORK/cc.log"; echo "boxasm: harness failed — tools/inside did not build"; exit 2; }
+
+box_builds hello "$WORK/hello.o" "recipe=$WORK/recipe.txt"
+box_builds countdown "$WORK/countdown.o"
+box_builds planets "$WORK/planets.o"
+
+# Every way a word comes to hold an address, and the ways one does not: a
+# table of them read-only and another written, the names the linker gives
+# places, an absolute value, a thread-local word reached from the thread
+# pointer in a template aligned past 8, and a Form.
+program movable ' lea rax, [rip + table]
+ mov eax, DWORD PTR fs:tv@tpoff
+.set absolute, 0x1234
+.section .data.rel.ro,"aw"
+.balign 8
+table: .quad main, msg, table + 8, absolute
+.data
+.balign 8
+pointers: .quad msg, __program_end, __bss_start, __eh_frame_start
+.section .rodata
+msg: .asciz "x"
+.section .tdata,"awT",@progbits
+.balign 16
+tv: .long 7
+.section .boxos.form,"a"
+.ascii "form 1\ntakes words \"what\"\n"'
+box_builds movable "$WORK/movable.o"
+if x86_64-elf-ld -nostdlib -static $REF_PLACE -T "$LD_SCRIPT" -o "$WORK/movable_ref.elf" "$ENTRY" \
+       "$WORK/movable.o" "$ARCHIVE" &&
+   [ "$(tls "$WORK/movable_twin.elf")" = "$(tls "$WORK/movable_ref.elf")" ]; then
+    ok tls_template_matches_gnu_ld
+else
+    fail tls_template_matches_gnu_ld "ours '$(tls "$WORK/movable_twin.elf")', GNU ld '$(tls "$WORK/movable_ref.elf")'"
+fi
+
+# What would not hold at another base is refused, word for word — and makes an
+# ELF image at the code start.
+box_refuses() {
+    local name=$1 want=$2 said
+    said=$("$STAND" link "$ENTRY" "$WORK/$name.o" "$ARCHIVE" "$WORK/$name.box" 2>&1)
+    if [ $? -ne 1 ]; then fail "box_$name" "linked, or failed otherwise, instead of refusing: $said"
+    elif [ "$said" != "$want" ]; then fail "box_$name" "said '$said', expected '$want'"
+    elif ! said=$("$STAND" link "$ENTRY" "$WORK/$name.o" "$ARCHIVE" "$WORK/$name.elf" 2>&1); then
+        fail "box_$name" "no ELF image either: $said"
+    else ok "box_$name"; fi
+}
+MSG=$'\n.section .rodata\n.globl msg\nmsg: .asciz "x"'
+
+program address32 " mov eax, OFFSET msg$MSG"
+box_refuses address32 \
+    "address32.o(.text+0x9): R_X86_64_32 against 'msg' holds an address in 32 bits, and a box goes wherever the system places it: reach it rip-relative, or name the program .elf to make it an ELF image"
+
+program absolute32 " mov rax, QWORD PTR [msg]$MSG"
+box_refuses absolute32 \
+    "absolute32.o(.text+0xc): R_X86_64_32S against 'msg' holds an address in 32 bits, and a box goes wherever the system places it: reach it rip-relative, or name the program .elf to make it an ELF image"
+
+program movabs " movabs rax, OFFSET msg$MSG"
+box_refuses movabs \
+    "movabs.o(.text+0xa): R_X86_64_64 against 'msg' holds an address at a place that is not a multiple of 8, and a box adds its base only to whole words: align it on 8, or reach it rip-relative"
+
+program unaligned $' nop\n.data\n.byte 1\n.quad msg'"$MSG"
+box_refuses unaligned \
+    "unaligned.o(.data+0x1): R_X86_64_64 against 'msg' holds an address at a place that is not a multiple of 8, and a box adds its base only to whole words: align it on 8, or reach it rip-relative"
+
+program fixed $' call fixed\n.globl fixed\n.set fixed, 0x5000'
+box_refuses fixed \
+    "fixed.o(.text+0x9): R_X86_64_PLT32 against 'fixed' reaches a fixed address from code that a box moves wherever it goes: reach it through a register, or name the program .elf to make it an ELF image"
+
+program weak $' call nothere\n.weak nothere'
+box_refuses weak \
+    "weak.o(.text+0x9): R_X86_64_PLT32 against 'nothere' reaches a fixed address from code that a box moves wherever it goes: reach it through a register, or name the program .elf to make it an ELF image"
+
+program threadptr $' nop\n.section .tdata,"awT",@progbits\n.balign 8\n.quad msg'"$MSG"
+box_refuses threadptr \
+    "threadptr.o(.tdata+0x0): R_X86_64_64 against 'msg' puts an address into the thread template, which every strand's block is copied from as it is, with no base added"
+
+# Two relocations that write one word: one fixup could not say which of them
+# the word is, so neither is made one.
+program twice $' nop\n.data\n.balign 8\nslot: .quad 0\n.reloc slot, R_X86_64_64, msg\n.reloc slot, R_X86_64_64, msg'"$MSG"
+said=$("$STAND" link "$ENTRY" "$WORK/twice.o" "$ARCHIVE" "$WORK/twice.box" 2>&1)
+if [ $? = 1 ] && printf '%s' "$said" | grep -qxE 'two relocations write the address at 0x[0-9a-f]+ from the base'; then
+    ok box_twice
+else
+    fail box_twice "said '$said'"
+fi
+
+said=$("$STAND" link "$ENTRY" "$WORK/hello.o" "$ARCHIVE" "$WORK/symbols.box" symbols 2>&1)
+if [ $? = 1 ] && [ "$said" = "a symbol table is written only into an ELF image" ]; then ok box_without_symbols
+else fail box_without_symbols "said '$said'"; fi
 
 # ---- what the assembler says about a wrong program ---------------------------
 
@@ -932,7 +1142,8 @@ else fail nul_source "said '$said'"; fi
 # ran short.
 STAND0=$WORK/boxasm_stand_o0
 $CC_HOST -std=c11 -O0 -w -I"$ASM_DIR" -Isrc/userspace/boxlib/include -Isrc/include \
-    tools/boxasm_stand.c $(ls "$ASM_DIR"/*.c | grep -v '/assemble[^/]*\.c$') -o "$STAND0" ||
+    tools/boxasm_stand.c $(ls "$ASM_DIR"/*.c | grep -v '/assemble[^/]*\.c$') \
+    src/userspace/boxlib/src/sha256.c -o "$STAND0" ||
     { echo "boxasm: harness failed — the unoptimised stand did not compile"; exit 2; }
 python3 - "$WORK" <<'EOF'
 import sys

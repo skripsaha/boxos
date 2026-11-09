@@ -12,14 +12,14 @@ extern "C" {
 /*
  * Recipe — what a program was made from, kept in its own image.
  *
- * The tool that makes a program writes it into the image's .boxos.recipe
- * section, beside the Form: every file the build read, by id, with the
- * SHA-256 of the bytes read and the name the file had; the Use Context the
- * build looked in; and the tool's own name. The Form says what a program
- * takes; the Recipe says where it came from. Whoever starts the program can
- * tell whether it is still what its files make, and have the tool make it
- * again — in the context it was made in — by handing it the program:
- * `assemble it`, `it` being the program.
+ * The tool that makes a program writes it into the program beside the Form —
+ * a box's part recipe, an ELF image's .boxos.recipe section: every file the
+ * build read, by id, with the SHA-256 of the bytes read and the name the file
+ * had; the Use Context the build looked in; and the tool's own name. The Form
+ * says what a program takes; the Recipe says where it came from. Whoever
+ * starts the program can tell whether it is still what its files make, and
+ * have the tool make it again — in the context it was made in — by handing it
+ * the program: `assemble it`, `it` being the program.
  *
  *     recipe 1
  *     by assemble

@@ -129,7 +129,8 @@ static int BoxAsmNameSort(BoxAsmNameList *List)
 }
 
 /* tools/nameplate's harvest: a function, or an untyped label, in executable
- * code, at a nonzero address inside its own output section. */
+ * code, inside its own output section. Address 0 is a place like any other:
+ * a box is linked at 0 and begins its code there, _start first. */
 static int BoxAsmHarvestName(BoxAsmLinker *Link, const BoxAsmLinkObject *Object,
                              uint32_t Index, uint64_t Address, void *Context)
 {
@@ -140,7 +141,7 @@ static int BoxAsmHarvestName(BoxAsmLinker *Link, const BoxAsmLinkObject *Object,
 
     if (Object->SectionSlot[Symbol->SectionIndex] != BOXASM_SLOT_TEXT ||
         (Type != BOXASM_STT_FUNC && Type != BOXASM_STT_NOTYPE) ||
-        Address == 0 || Address < Text->Address ||
+        Address < Text->Address ||
         Address > Text->Address + Text->Size)
         return 0;
     if (List->Count == List->Capacity) {

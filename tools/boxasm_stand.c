@@ -7,12 +7,16 @@
  *
  *     boxasm_stand assemble <source.asm> <out.o>
  *     boxasm_stand volume <dir> <context> <source.asm> <out.o>
- *     boxasm_stand link <entry.o> <program.o> <archive.a> <out.elf> [symbols]
+ *     boxasm_stand link <entry.o> <program.o> <archive.a> <out> [symbols] [recipe=<file>]
  *
  * `volume` stands a set of tagged files in for a BoxOS volume: <dir>/volume
  * lists them a line each, "<id> <name> <tags>", and <dir>/<id> holds each
  * one's bytes. The source is found among the tags of <context> as `assemble`
  * finds it in the Use Context, and its %includes are found on that volume.
+ *
+ * `link` makes what `assemble` makes of a program by its name: a box, or an
+ * ELF image at the code start when <out> ends in .elf — the only kind that
+ * takes `symbols`.
  *
  * A refusal prints the toolchain's own sentence on stderr and exits 1.
  */
@@ -321,6 +325,10 @@ int main(int Argc, char **Argv)
         if (Known == 2)
             return 2;
         if (Known) {
+            size_t Length = strlen(Argv[5]);
+
+            if (Length >= 4 && strcmp(Argv[5] + Length - 4, ".elf") == 0)
+                Flags |= BOXASM_LINK_ELF;
             if (!Load(Argv[2], &Entry) || !Load(Argv[3], &Program) || !Load(Argv[4], &Archive))
                 return 2;
             return Finish(BoxAsmLink(&Entry, &Program, &Archive, Recipe.Data ? &Recipe : NULL,
@@ -331,7 +339,7 @@ int main(int Argc, char **Argv)
     fprintf(stderr,
             "usage: %s assemble <source.asm> <out.o>\n"
             "       %s volume <dir> <context> <source.asm> <out.o>\n"
-            "       %s link <entry.o> <program.o> <archive.a> <out.elf> [symbols] [recipe=<file>]\n",
+            "       %s link <entry.o> <program.o> <archive.a> <out.box|out.elf> [symbols] [recipe=<file>]\n",
             Argv[0], Argv[0], Argv[0]);
     return 2;
 }
