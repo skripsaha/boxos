@@ -13,8 +13,9 @@ BOX_SETTINGS("setting greeting yes-or-no default yes \"the one line said when th
              "setting sign-color color default #AAAAAA \"the colour of the sign\"\n"
              "setting context-color color default #40C0C0 \"the colour of the Use Context\"\n"
              "setting them-color color default #40C040 \"the colour of the number of files them holds\"\n"
-             "setting background one-of prompt nowhere default prompt "
-             "\"where the hub shows how many programs live behind: before the sign, or nowhere\"\n"
+             "setting background one-of prompt line nowhere default prompt "
+             "\"where the hub shows the programs living behind: how many, before the sign; their names, on a "
+             "line at the top of the screen; or nowhere\"\n"
              "setting background-color color default #E0C040 \"the colour of how many programs live behind\"\n"
              "setting news-color color default #FFB040 "
              "\"the colour of what the hub says of a program that ended, and how long a command took\"\n"
@@ -29,9 +30,21 @@ BOX_SETTINGS("setting greeting yes-or-no default yes \"the one line said when th
              "setting did-you-mean yes-or-no default yes \"say the names close to a command that is not there\"\n"
              "setting history yes-or-no default yes \"keep every line typed in the file history\"\n"
              "setting recall one-of here-first everywhere default here-first "
-             "\"which lines Up brings back first: those typed in this Use Context, or all of them\"\n");
+             "\"which lines Up brings back first: those typed in this Use Context, or all of them\"\n"
+             "setting choose one-of window list default window "
+             "\"how the hub asks which one is meant — of the files a name could mean, or of the programs "
+             "living behind: in a window, or as a numbered list\"\n");
 
 namespace hub {
+
+namespace {
+
+BehindShown BehindAt(std::string_view Where)
+{
+    return Where == "line" ? BehindShown::Line : Where == "nowhere" ? BehindShown::Nowhere : BehindShown::Prompt;
+}
+
+}  // namespace
 
 Look ReadLook()
 {
@@ -42,8 +55,7 @@ Look ReadLook()
                 .SignColor       = box::settings::color("sign-color"),
                 .ContextColor    = box::settings::color("context-color"),
                 .ThemColor       = box::settings::color("them-color"),
-                .Behind          = box::settings::choice("background") == "nowhere" ? BehindShown::Nowhere
-                                                                                    : BehindShown::Prompt,
+                .Behind          = BehindAt(box::settings::choice("background")),
                 .BehindColor     = box::settings::color("background-color"),
                 .NewsColor       = box::settings::color("news-color"),
                 .RefusalColor    = box::settings::color("refusal-color"),
@@ -54,7 +66,8 @@ Look ReadLook()
                 .Needs           = box::settings::yes("needs"),
                 .DidYouMean      = box::settings::yes("did-you-mean"),
                 .History         = box::settings::yes("history"),
-                .RecallHereFirst = box::settings::choice("recall") == "here-first"};
+                .RecallHereFirst = box::settings::choice("recall") == "here-first",
+                .ChooseInWindow  = box::settings::choice("choose") == "window"};
 }
 
 }  // namespace hub

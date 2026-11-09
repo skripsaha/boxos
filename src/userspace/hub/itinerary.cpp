@@ -202,7 +202,7 @@ bool Run(Hub &Self, file_id_t File, std::string_view Who, std::string_view Line)
 
     BoxFormLookup View;
     fill::Lookup(Self, View);
-    HeldFiller Filler = fill::Form(*Declared, View, Who, Line);
+    HeldFiller Filler = fill::Form(Self.Shown, *Declared, View, Who, Line);
     if (!Filler || !ArrowFits(Filler.get(), Who)) return false;
     return Travel(Self, Read, *Declared, Filler.get(), File, Who);
 }

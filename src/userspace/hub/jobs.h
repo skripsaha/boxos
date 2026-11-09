@@ -117,6 +117,10 @@ private:
     };
 
     void Keep();
+    void BehindChanged();
+    bool DrawBehind();
+    void Wake();
+    std::vector<BehindNow> LivingNow() const;
     bool StartAsked();
     bool HearDeaths();
     bool HearDisplay();
@@ -132,6 +136,7 @@ private:
     std::vector<Job>                      Running;
     std::deque<Asked *>                   Starts;
     std::optional<std::vector<file_id_t>> Gift;
+    bool                                  BehindStale = false;   // the line of who lives behind is old
     TouchTag                              Deaths = TOUCH_TAG_INVALID;
     TouchTag                              News = TOUCH_TAG_INVALID;
     TouchTag                              Woken = TOUCH_TAG_INVALID;

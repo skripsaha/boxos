@@ -18,6 +18,7 @@
 
 #include "news.h"
 #include "say.h"
+#include "windows.h"
 
 namespace hub {
 
@@ -72,6 +73,49 @@ bool Jobs::Begin(const Look &Shown)
     return Heard;
 }
 
+// The programs living behind, under the lock: not those that serve.
+std::vector<BehindNow> Jobs::LivingNow() const
+{
+    std::vector<BehindNow> Now;
+    for (const Job &One : Running)
+        if (!One.Front && !One.Over && One.What.Living != PROGRAM_SERVES)
+            Now.push_back(BehindNow{One.What.Who, One.Pid, One.Generation, One.Wants});
+    return Now;
+}
+
+// Who lives behind changed, or how the person set it shown: the line at the
+// top of the screen is drawn again by the keeping strand — a layer is the
+// strand's that opened it, so one strand alone ever draws it.
+void Jobs::BehindChanged()
+{
+    {
+        std::lock_guard Held(Lock);
+        BehindStale = true;
+    }
+    Wake();
+}
+
+bool Jobs::DrawBehind()
+{
+    Look                   Shown;
+    std::vector<BehindNow> Now;
+    {
+        std::lock_guard Held(Lock);
+        if (!BehindStale) return false;
+        BehindStale = false;
+        Shown       = Seen;
+        Now         = LivingNow();
+    }
+    windows::ShowBehind(Shown, Now);
+    return true;
+}
+
+void Jobs::Wake()
+{
+    const std::uint32_t Me = cabin_info()->pid;
+    (void)touch_send(WakeTag, &Me, sizeof(Me), 0);
+}
+
 // ---- the keeping strand ------------------------------------------------------
 
 // Everything it waits on looked at, and asleep when nothing came: the mark
@@ -85,6 +129,7 @@ void Jobs::Keep()
         Moved |= StartAsked();
         Moved |= HearDeaths();
         Moved |= HearDisplay();
+        Moved |= DrawBehind();
         if (!Moved) box_turn_in(Mark);
     }
 }
@@ -127,6 +172,7 @@ bool Jobs::StartAsked()
         One.Front      = Next->Front;
         Running.push_back(std::move(One));
     }
+    if (Pid > 0 && !Next->Front) BehindChanged();
     {
         std::lock_guard Held(Lock);
         Next->Rc         = Pid > 0 ? 0 : (Pid == 0 ? -ERR_SPAWN_FAILED : Pid);
@@ -194,6 +240,7 @@ void Jobs::Died(const TouchProcessDied &Death)
     const Look Shown = Seen;
     Held.unlock();
     news::Finished(Shown, Ended.What.Who, Ended.What.Living == PROGRAM_SERVES, Ended.End);
+    BehindChanged();
 }
 
 bool Jobs::HearDisplay()
@@ -239,6 +286,7 @@ void Jobs::Pressed(std::uint8_t What, std::uint32_t Pid, std::uint32_t Generatio
         std::uint32_t Display = 0;
         (void)display_back(Pid, Generation, &Display);
         Settle.notify_all();
+        BehindChanged();
         return;
     }
     if (What == DISPLAY_FRONT_WANTS && !One.Front && !One.Wants) {
@@ -247,6 +295,7 @@ void Jobs::Pressed(std::uint8_t What, std::uint32_t Pid, std::uint32_t Generatio
         const Look        Shown = Seen;
         Held.unlock();
         news::Wants(Shown, Who);
+        BehindChanged();
     }
 }
 
@@ -259,8 +308,7 @@ std::expected<void, int> Jobs::Ask(Asked &One)
         std::lock_guard Held(Lock);
         Starts.push_back(&One);
     }
-    const std::uint32_t Me = cabin_info()->pid;
-    (void)touch_send(WakeTag, &Me, sizeof(Me), 0);
+    Wake();
     std::unique_lock Held(Lock);
     Settle.wait(Held, [&] { return One.Done; });
     if (One.Rc != 0) return std::unexpected(One.Rc);
@@ -321,6 +369,7 @@ std::expected<Settled, int> Jobs::Forward(std::uint32_t Pid, std::uint32_t Gener
         It->Wants     = false;
         It->End.Asked = false;
     }
+    BehindChanged();
     std::uint32_t Display = 0;
     (void)display_front(Pid, Generation, &Display);
     return StandBy(Pid, Generation);
@@ -328,12 +377,8 @@ std::expected<Settled, int> Jobs::Forward(std::uint32_t Pid, std::uint32_t Gener
 
 std::vector<BehindNow> Jobs::Living() const
 {
-    std::lock_guard        Held(Lock);
-    std::vector<BehindNow> Now;
-    for (const Job &One : Running)
-        if (!One.Front && !One.Over && One.What.Living != PROGRAM_SERVES)
-            Now.push_back(BehindNow{One.What.Who, One.Pid, One.Generation, One.Wants});
-    return Now;
+    std::lock_guard Held(Lock);
+    return LivingNow();
 }
 
 std::optional<std::vector<file_id_t>> Jobs::TakeGift()
@@ -344,8 +389,11 @@ std::optional<std::vector<file_id_t>> Jobs::TakeGift()
 
 void Jobs::Show(const Look &Shown)
 {
-    std::lock_guard Held(Lock);
-    Seen = Shown;
+    {
+        std::lock_guard Held(Lock);
+        Seen = Shown;
+    }
+    BehindChanged();
 }
 
 }  // namespace hub

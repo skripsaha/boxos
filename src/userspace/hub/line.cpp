@@ -28,7 +28,7 @@ namespace {
 bool RunProgram(Hub &Self, const Words &Cut)
 {
     const std::string_view Name    = Cut[0];
-    const programs::Picked Program = programs::Pick(Name);
+    const programs::Picked Program = programs::Pick(Self.Shown, Name);
     if (Program)
         return programs::IsItinerary(*Program) ? itinerary::Run(Self, *Program, Name, Cut.Tail(1))
                                                : launch::Program(Self, *Program, Name, Cut.Tail(1));

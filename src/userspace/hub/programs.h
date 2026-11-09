@@ -17,6 +17,8 @@
 
 #include "box/types.h"
 
+#include "look.h"
+
 namespace hub {
 
 struct Hub;
@@ -44,8 +46,8 @@ using Picked = std::expected<file_id_t, int>;
 
 // The program a command's name means: the files wearing the tag NAME that are
 // programs or Itineraries. One is taken; of several the person is asked
-// which; none is -ERR_FILE_NOT_FOUND.
-Picked Pick(std::string_view Name);
+// which, as Shown says; none is -ERR_FILE_NOT_FOUND.
+Picked Pick(const Look &Shown, std::string_view Name);
 
 // The program a thing typed means: a file here (or else anywhere) by that
 // name, or `it` / `them`, which must be a program. Asked which when it names

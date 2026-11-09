@@ -80,7 +80,7 @@ void List::Paint(tui::Frame &Out) const
     for (std::size_t Line = 0; Line < Shown && First + Line < Lines.size(); Line++) {
         const Entry       &One   = Lines[First + Line];
         const bool         Here  = First + Line == Row;
-        const core::Color  Under = Here ? ChosenPaper : tui::WindowPaper;
+        const core::Color  Under = Here ? tui::ChosenPaper : tui::WindowPaper;
         const std::int32_t Y     = Inside.Y + static_cast<std::int32_t>(Line);
         Out.Fill({Inside.X - 1, Y, Inside.Width + 2, 1}, tui::Cell{' ', tui::WindowInk, Under});
 

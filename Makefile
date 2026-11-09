@@ -1276,7 +1276,7 @@ $(APP_ELFS): $(APPS_STAMP)
 	@:
 
 # Build the hub
-$(HUB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(NAMEPLATE_TOOL)
+$(HUB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(NAMEPLATE_TOOL)
 	@echo "Building the hub..."
 	@cd $(HUB_DIR) && $(MAKE)
 	@echo "hub.elf: $$(stat -f%z $(HUB_BIN) 2>/dev/null || stat -c%s $(HUB_BIN) 2>/dev/null) bytes"

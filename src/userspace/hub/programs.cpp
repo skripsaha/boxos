@@ -36,11 +36,11 @@ bool CommandFile(const volume::Record &File)
 }
 
 // One of Ids, asked for when there are several.
-Picked ChooseOne(std::string_view Word, const std::vector<file_id_t> &Ids)
+Picked ChooseOne(const Look &Shown, std::string_view Word, const std::vector<file_id_t> &Ids)
 {
     if (Ids.size() == 1) return Ids[0];
     file_id_t      Chosen = 0;
-    asking::Answer Asked  = asking::Which(Word, Ids, Chosen);
+    asking::Answer Asked  = asking::Which(Shown, Word, Ids, Chosen);
     if (Asked == asking::Answer::Given) return Chosen;
     asking::SayCancelled(Word, Asked);
     return std::unexpected(Said);
@@ -87,7 +87,7 @@ void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
     }
 }
 
-Picked Pick(std::string_view Name)
+Picked Pick(const Look &Shown, std::string_view Name)
 {
     file_id_t *Ids   = nullptr;
     const int  Total = query_all_everywhere(std::string(Name).c_str(), "trashed", &Ids);
@@ -105,7 +105,7 @@ Picked Pick(std::string_view Name)
         }
         if (CommandFile(*Held)) Commands.push_back(File);
     }
-    if (!Commands.empty()) return ChooseOne(Name, Commands);
+    if (!Commands.empty()) return ChooseOne(Shown, Name, Commands);
     return std::unexpected(Unread != 0 ? Unread : -ERR_FILE_NOT_FOUND);
 }
 
@@ -150,7 +150,7 @@ Picked PickThing(Hub &Self, std::string_view Thing)
         }
     }
 
-    Picked Program = ChooseOne(Thing, Found);
+    Picked Program = ChooseOne(Self.Shown, Thing, Found);
     if (Program && !IsProgram(*Program) && !IsItinerary(*Program)) {
         Say("run: {} is not a program: it wears neither app, utility nor itinerary\n", Thing);
         return std::unexpected(Said);

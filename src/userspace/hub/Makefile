@@ -2,7 +2,8 @@
 # BoxOS Hub Makefile
 # ============================================================================
 # The hub is the place where everything meets: the line typed, the programs on
-# the volume, the Use Context. C++ over the BoxOS runtime (boxcxx) and boxlib.
+# the volume, the Use Context. C++ over the BoxOS runtime (boxcxx) and boxlib;
+# its windows are Painter's.
 # ============================================================================
 
 CXX     = x86_64-elf-g++
@@ -21,12 +22,14 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti -fcoroutines \
          -Wall -Wextra -g -Werror=return-type \
          -I../boxlib/include \
          -I../boxcxx/include/std -I../boxcxx/include \
+         -I../painter/include \
          -I../../include
 
 BOXLIB_DIR   = ../boxlib
 LDFLAGS      = -nostdlib -static -T $(BOXLIB_DIR)/user.ld -Wl,-pie -Wl,--no-dynamic-linker -Wl,-z,pack-relative-relocs
 BOXLIB       = ../boxlib/libbox.a
 BOXCXX       = ../boxcxx/libboxcxx.a
+PAINTER      = ../painter/libpainter.a
 BOXLIB_START = ../build/boxlib_start.o
 
 .PHONY: all clean
@@ -38,10 +41,17 @@ include ../nameplate.mk
 
 OBJS = main.o session.o line.o look.o prompt.o context.o history.o words.o typing.o \
        text.o tags.o volume.o programs.o asking.o them.o jobs.o news.o fill.o launch.o \
-       remake.o itinerary.o nearest.o view.o whisper.o builtins.o help.o use.o said.o front.o
+       remake.o itinerary.o nearest.o view.o whisper.o builtins.o help.o use.o said.o front.o \
+       windows.o
 
-hub.elf: $(BOXLIB_START) $(OBJS) $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+hub.elf: $(BOXLIB_START) $(OBJS) $(PAINTER) $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# A file, not a phony: a phony prerequisite would link the hub again at every
+# make. The top-level Makefile builds Painter before the hub; this rule makes it
+# when it is missing.
+$(PAINTER): $(BOXCXX) $(BOXLIB)
+	@cd ../painter && $(MAKE)
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.
 # See boxcxx/Makefile for what their absence cost.

@@ -83,10 +83,10 @@ int vsnprintf(char* str, size_t n, const char* fmt, va_list args);
  * A line's length; -1 when the ear is gone; READLINE_ASKED_TO_END when the
  * program is asked to finish while it reads (Ctrl+Alt+End over it, said by
  * its keeper through the display) — a program that does nothing else with it
- * ends, as one does at the end of its input. Its input is over then: every
- * later read answers READLINE_ASKED_TO_END at once (getchar, -1). A program
- * that answers the asking with a question of its own asks it on a Stage that
- * hears the end itself (painter Stage::HearEnd). */
+ * ends, as one does at the end of its input. Its input is over then
+ * (console_input_ended): every later read answers so at once. A program that
+ * answers the asking with a question of its own asks it on a Stage that hears
+ * the end itself (painter Stage::HearEnd). */
 #define READLINE_ASKED_TO_END (-2)
 int readline(char* buffer, size_t max_len);
 
@@ -139,6 +139,14 @@ TouchTag console_listen(void);
 /* The reading is over: the ear goes back to the daemon. Whoever reads next
  * hears; a key typed while nobody reads waits at the daemon for that reader. */
 void console_unlisten(void);
+
+/* The program was asked to finish (box/display.h CONSOLE_NOTICE_END) and does
+ * not answer the asking itself: its input is over, for every reader of it. The
+ * reader that heard it says so (console_input_ends); every read after answers
+ * that its input is over at once — readline READLINE_ASKED_TO_END, getchar
+ * -1, a Painter keyboard Gone. */
+void console_input_ends(void);
+bool console_input_ended(void);
 
 /* Move the cursor `delta` cells along the console (negative = back), across
  * line ends, erasing nothing — the editor's step inside a line. False when

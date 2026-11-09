@@ -18,6 +18,7 @@
 #include "box/types.h"
 
 #include "held.h"
+#include "look.h"
 
 namespace hub {
 
@@ -41,7 +42,8 @@ void Lookup(const Hub &Self, BoxFormLookup &Out);
 // Form filled from Line over Lookup — which outlives the filler — asking the
 // person only what the filler cannot settle: the filler, done, or nothing
 // when the line could not be filled, and why was said.
-HeldFiller Form(const BoxForm &Declared, BoxFormLookup &Lookup, std::string_view Who, std::string_view Line);
+HeldFiller Form(const Look &Shown, const BoxForm &Declared, BoxFormLookup &Lookup, std::string_view Who,
+                std::string_view Line);
 
 // Program's Form filled from Line — the words after its name, as typed. Who
 // is the name the person used: word 0 of the Luggage and what every sentence

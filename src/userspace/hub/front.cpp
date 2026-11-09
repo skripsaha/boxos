@@ -1,7 +1,9 @@
 /* front.cpp — front: the programs living behind, and one of them brought
  * forward.
  *
- *   front            who lives behind, numbered, and who wants the keyboard
+ *   front            who lives behind, and who wants the keyboard: in a
+ *                    window, where Enter brings the one marked forward — or
+ *                    numbered, as the person set the hub (choose)
  *   front radio      radio brought forward, stood by as one in front
  *   front 2          the second of the list brought forward
  *
@@ -15,6 +17,7 @@
 #include "hub.h"
 #include "launch.h"
 #include "say.h"
+#include "windows.h"
 #include "words.h"
 
 namespace hub {
@@ -48,6 +51,13 @@ bool Front(Hub &Self, const Words &Typed)
             Say("front: nothing lives behind\n");
             return true;
         }
+        if (Self.Shown.ChooseInWindow) {
+            std::vector<std::string> Choices;
+            for (const BehindNow &One : Living) Choices.push_back(Told(One));
+            std::size_t Chosen = 0;
+            if (const std::optional<asking::Answer> Asked = windows::Choose("living behind", Choices, Chosen))
+                return *Asked == asking::Answer::Given ? launch::Forward(Self, Living[Chosen]) : true;
+        }
         Say("living behind:\n");
         for (std::size_t I = 0; I < Living.size(); I++) Say("  {}  {}\n", I + 1, Told(Living[I]));
         return true;
@@ -69,7 +79,8 @@ bool Front(Hub &Self, const Words &Typed)
     std::vector<std::string> Choices;
     for (const BehindNow &One : Named) Choices.push_back(Told(One));
     std::size_t          Chosen = 0;
-    const asking::Answer Asked  = asking::Choose(std::string(Word) + " lives behind more than once:", Choices, Chosen);
+    const asking::Answer Asked =
+        asking::Choose(Self.Shown, std::string(Word) + " lives behind more than once:", Choices, Chosen);
     if (Asked != asking::Answer::Given) {
         if (Asked != asking::Answer::Ended) Say("front: no answer given, so {} stays behind\n", Word);
         return false;

@@ -20,6 +20,7 @@
 
 #include "builtins.h"
 #include "held.h"
+#include "hub.h"
 #include "itinerary.h"
 #include "programs.h"
 #include "words.h"
@@ -145,10 +146,10 @@ void ShowLife(file_id_t Program, const std::string &Name)
     Say(Life.Rise ? "; when it falls, the system raises it again.\n" : ".\n");
 }
 
-bool HelpProgram(std::string_view Asked)
+bool HelpProgram(const Look &Shown, std::string_view Asked)
 {
     const std::string Name(Asked);
-    programs::Picked  Program = programs::Pick(Asked);
+    programs::Picked  Program = programs::Pick(Shown, Asked);
     if (!Program) {
         if (Program.error() != programs::Said) Say("help: {} is neither a command nor a program\n", Name.c_str());
         return false;
@@ -175,7 +176,7 @@ bool HelpProgram(std::string_view Asked)
 
 }  // namespace
 
-bool Help(Hub &, const Words &Typed)
+bool Help(Hub &Self, const Words &Typed)
 {
     if (Typed.Count() < 2) {
         ListCommands();
@@ -185,7 +186,7 @@ bool Help(Hub &, const Words &Typed)
         Say("{} - {}\n", Own->Usage, Own->What);
         return true;
     }
-    return HelpProgram(Typed[1]);
+    return HelpProgram(Self.Shown, Typed[1]);
 }
 
 }  // namespace hub

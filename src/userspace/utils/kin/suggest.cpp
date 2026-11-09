@@ -68,7 +68,7 @@ void Suggest::Paint(tui::Frame &Out, core::Rect Area) const
     for (std::size_t Line = 0; Line < Rows && First + Line < Shown.size(); Line++) {
         const box::tagfs::tag_count &One   = All[Shown[First + Line]];
         const bool                   Here  = First + Line == Row;
-        const core::Color            Under = Here ? ChosenPaper : tui::WindowPaper;
+        const core::Color            Under = Here ? tui::ChosenPaper : tui::WindowPaper;
         const std::int32_t           Y     = Inside.Y + static_cast<std::int32_t>(Line);
         const std::string            Count = std::format("{}", One.files);
         const auto                   Room  = Inside.Width - static_cast<std::int32_t>(Count.size()) - 1;

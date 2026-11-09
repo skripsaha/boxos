@@ -136,7 +136,7 @@ Picker::Outcome Picker::OnKey(const tui::KeyEvent &Key)
 void Picker::PaintRow(tui::Frame &Out, core::Rect Inside, std::int32_t Y, std::size_t Index) const
 {
     const bool        Here  = Index == Row;
-    const core::Color Under = Here ? ChosenPaper : tui::WindowPaper;
+    const core::Color Under = Here ? tui::ChosenPaper : tui::WindowPaper;
     Out.Fill({Inside.X, Y, Inside.Width, 1}, tui::Cell{' ', tui::WindowInk, Under});
 
     if (Index == Shown.size()) {

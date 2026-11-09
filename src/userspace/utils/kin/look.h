@@ -56,7 +56,6 @@ inline constexpr core::Color TroubleInk     = core::Color::Rgb(0xFF, 0x6E, 0x6E)
 
 inline constexpr core::Color FieldPaper     = core::Color::Rgb(0x3A, 0x3A, 0x3A);
 inline constexpr core::Color FieldInk       = core::Color::Rgb(0xF4, 0xF4, 0xF4);
-inline constexpr core::Color ChosenPaper    = core::Color::Rgb(0x2E, 0x4A, 0x6A);
 
 /* A length the way a person reads one: "12 B", "3 KB", "1.4 MB". */
 std::string SizeText(std::uint64_t Bytes);

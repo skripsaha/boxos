@@ -40,7 +40,7 @@ void SayNames(const BoxRecipe &Recipe, const std::uint8_t *States, std::uint8_t 
 // The tool the Recipe names, started on the program; Program the one it gave back.
 bool MakeAgain(Hub &Self, const BoxRecipe &Recipe, file_id_t &Program, std::string_view Who)
 {
-    programs::Picked Tool = programs::Pick(Recipe.By);
+    programs::Picked Tool = programs::Pick(Self.Shown, Recipe.By);
     if (!Tool && Tool.error() == programs::Said) return false;
     if (!Tool) {
         Say("{}: not started: {}, which made it, is not here to make it again\n", Who, Recipe.By);

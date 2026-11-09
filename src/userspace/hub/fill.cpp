@@ -31,13 +31,14 @@ asking::Answer AnswerField(BoxFormFiller *Filler, const BoxForm &Declared, std::
 
 // One question put and its answer given to the filler: 0, Stopped when the
 // person did not answer, or a negative -error_t.
-int Answer(BoxFormFiller *Filler, const BoxForm &Declared, std::string_view Who, const BoxFormQuestion &Question)
+int Answer(const Look &Shown, BoxFormFiller *Filler, const BoxForm &Declared, std::string_view Who,
+           const BoxFormQuestion &Question)
 {
     int            Rc = 0;
     asking::Answer Asked;
     if (Question.Step == BOX_FORM_ASK_WHICH) {
         file_id_t Chosen = 0;
-        Asked = asking::Which(Question.Word, {Question.Choices, Question.ChoiceCount}, Chosen);
+        Asked = asking::Which(Shown, Question.Word, {Question.Choices, Question.ChoiceCount}, Chosen);
         if (Asked == asking::Answer::Given) Rc = form_fill_choose(Filler, Chosen);
     } else if (Question.Step == BOX_FORM_ASK_FIELD) {
         Asked = AnswerField(Filler, Declared, Who, Question, Rc);
@@ -55,7 +56,7 @@ int Answer(BoxFormFiller *Filler, const BoxForm &Declared, std::string_view Who,
 
 // The filler stepped until the line is filled: 0, Stopped (refused or not
 // answered, said), or a negative -error_t.
-int FillLine(BoxFormFiller *Filler, const BoxForm &Declared, std::string_view Who)
+int FillLine(const Look &Shown, BoxFormFiller *Filler, const BoxForm &Declared, std::string_view Who)
 {
     for (;;) {
         BoxFormQuestion Question;
@@ -66,7 +67,7 @@ int FillLine(BoxFormFiller *Filler, const BoxForm &Declared, std::string_view Wh
             Say("{}: {}\n", Who, Question.Word);
             return Stopped;
         }
-        Rc = Answer(Filler, Declared, Who, Question);
+        Rc = Answer(Shown, Filler, Declared, Who, Question);
         if (Rc != 0) return Rc;
     }
 }
@@ -133,13 +134,14 @@ void Lookup(const Hub &Self, BoxFormLookup &Out)
     Self.Travelling.Show(Out);
 }
 
-HeldFiller Form(const BoxForm &Declared, BoxFormLookup &Lookup, std::string_view Who, std::string_view Line)
+HeldFiller Form(const Look &Shown, const BoxForm &Declared, BoxFormLookup &Lookup, std::string_view Who,
+                std::string_view Line)
 {
     const std::string Typed(Line);
     BoxFormFiller    *Begun = nullptr;
     int               Rc    = form_fill_begin(&Declared, Typed.c_str(), &Lookup, &Begun);
     HeldFiller        Filler(Begun);
-    if (Rc == 0) Rc = FillLine(Filler.get(), Declared, Who);
+    if (Rc == 0) Rc = FillLine(Shown, Filler.get(), Declared, Who);
     if (Rc < 0) Say("{}: could not be started ({})\n", Who, Reason(Rc));
     if (Rc != 0) Filler.reset();
     return Filler;
@@ -151,7 +153,7 @@ std::optional<Filled> FromLine(const Hub &Self, file_id_t Program, std::string_v
     if (!ReadForm(Program, Who, Declared)) return std::nullopt;
     BoxFormLookup View;
     Lookup(Self, View);
-    const HeldFiller Filler = Form(*Declared, View, Who, Line);
+    const HeldFiller Filler = Form(Self.Shown, *Declared, View, Who, Line);
     if (!Filler) return std::nullopt;
     return Finish(Filler.get(), *Declared, Program, Who);
 }

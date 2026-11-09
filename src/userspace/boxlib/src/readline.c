@@ -592,14 +592,13 @@ static int Accept(EditLine *l)
  * l->buf; -1 when the ear is gone, READLINE_ASKED_TO_END when the program is
  * asked to finish — the line left as it stands on the screen, a line end after
  * it. */
-/* Once the program was asked to finish, its input is over: every later read
- * answers so at once, as every read past the end of input does — a program
- * that read on after the first answer ends at its next read all the same. */
-static bool s_asked_to_end;
-
+/* Once the program was asked to finish, its input is over (box/print.h):
+ * every later read answers so at once, as every read past the end of input
+ * does — a program that read on after the first answer ends at its next read
+ * all the same. */
 static int EditUntilEnter(EditLine *l)
 {
-    if (__atomic_load_n(&s_asked_to_end, __ATOMIC_ACQUIRE)) return READLINE_ASKED_TO_END;
+    if (console_input_ended()) return READLINE_ASKED_TO_END;
     TouchTag ear = console_listen();
     if (ear == TOUCH_TAG_INVALID) return -1;
 
@@ -608,7 +607,7 @@ static int EditUntilEnter(EditLine *l)
         kb_event_t k;
         Heard      heard = NextKey(ear, &k);
         if (heard == HEARD_END) {
-            __atomic_store_n(&s_asked_to_end, true, __ATOMIC_RELEASE);
+            console_input_ends();
             print_bytes_to_screen("\n", 1);
             io_flush();
             len = READLINE_ASKED_TO_END;
@@ -672,13 +671,13 @@ int readline_whispered(char **line, LineWhisper *whisper)
  * a C program that has no FILE and wrong for a C++ one that does. */
 __attribute__((weak)) int getchar(void)
 {
-    if (__atomic_load_n(&s_asked_to_end, __ATOMIC_ACQUIRE)) return -1;
+    if (console_input_ended()) return -1;
     TouchTag ear = console_listen();
     if (ear == TOUCH_TAG_INVALID) return -1;
     for (;;) {
         kb_event_t k;
         const Heard heard = NextKey(ear, &k);
-        if (heard == HEARD_END) __atomic_store_n(&s_asked_to_end, true, __ATOMIC_RELEASE);
+        if (heard == HEARD_END) console_input_ends();
         if (heard != HEARD_KEY) { console_unlisten(); return -1; }
         if (!(k.mods & KB_MOD_EXTENDED) && k.ascii != 0) {
             console_unlisten();

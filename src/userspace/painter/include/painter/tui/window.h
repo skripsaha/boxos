@@ -21,6 +21,7 @@ inline constexpr core::Color WindowRule  = core::Color::Rgb(0x9A, 0x9A, 0x9A);
 inline constexpr core::Color WindowInk   = core::Color::Rgb(0xD4, 0xD4, 0xD4);
 inline constexpr core::Color TitleInk    = core::Color::Rgb(0xF4, 0xF4, 0xF4);
 inline constexpr core::Color HintInk     = core::Color::Rgb(0x8C, 0x8C, 0x8C);
+inline constexpr core::Color ChosenPaper = core::Color::Rgb(0x2E, 0x4A, 0x6A);   /* the row marked in a list */
 
 /* A Width by Height area in the middle of Screen, no larger than it. */
 core::Rect Centred(core::Size Screen, std::int32_t Width, std::int32_t Height) noexcept;

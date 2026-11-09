@@ -1158,6 +1158,19 @@ void console_unlisten(void)
     (void)daemon_say(ps, req, sizeof(req));
 }
 
+/* Once heard, for the whole program: every strand reads the same input. */
+static bool g_input_over;
+
+void console_input_ends(void)
+{
+    __atomic_store_n(&g_input_over, true, __ATOMIC_RELEASE);
+}
+
+bool console_input_ended(void)
+{
+    return __atomic_load_n(&g_input_over, __ATOMIC_ACQUIRE);
+}
+
 /* A cursor step is a frame on the lane, after whatever text is pending, so it
  * lands in the order it was said. Nothing here knows, or needs to know, where
  * the caret is or how wide the screen is: a step says how FAR, and where that

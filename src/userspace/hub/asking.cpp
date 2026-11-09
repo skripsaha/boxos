@@ -9,6 +9,7 @@
 #include "tags.h"
 #include "text.h"
 #include "volume.h"
+#include "windows.h"
 
 namespace hub::asking {
 
@@ -55,8 +56,11 @@ Answer Line(std::string_view Prompt, std::string &Text)
     return Text.empty() ? Answer::Empty : Answer::Given;
 }
 
-Answer Choose(std::string_view Heading, std::span<const std::string> Choices, std::size_t &Chosen)
+Answer Choose(const Look &Shown, std::string_view Heading, std::span<const std::string> Choices,
+              std::size_t &Chosen)
 {
+    if (Shown.ChooseInWindow)
+        if (const std::optional<Answer> Windowed = windows::Choose(Heading, Choices, Chosen)) return *Windowed;
     Say("{}\n", Heading);
     for (std::size_t I = 0; I < Choices.size(); I++) Say("  {}  {}\n", I + 1, Choices[I]);
 
@@ -73,13 +77,13 @@ Answer Choose(std::string_view Heading, std::span<const std::string> Choices, st
     }
 }
 
-Answer Which(std::string_view Word, std::span<const file_id_t> Ids, file_id_t &Chosen)
+Answer Which(const Look &Shown, std::string_view Word, std::span<const file_id_t> Ids, file_id_t &Chosen)
 {
     std::vector<std::string> Choices;
     Choices.reserve(Ids.size());
     for (file_id_t File : Ids) Choices.push_back(FileChoice(File));
     std::size_t  Index = 0;
-    const Answer Asked = Choose(std::format("{} could be any of these:", Word), Choices, Index);
+    const Answer Asked = Choose(Shown, std::format("{} could be any of these:", Word), Choices, Index);
     if (Asked == Answer::Given) Chosen = Ids[Index];
     return Asked;
 }

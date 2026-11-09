@@ -37,11 +37,15 @@ Event Decode(const Touch &Data)
 
 // A key is three bytes (kb_event_t); the display's word that the program is
 // asked to finish is a ConsoleNotice. Anything else said on the tag is no
-// event.
+// event. A program that does not answer the asking itself has its input over
+// (box/print.h), for this keyboard and every other reader of it.
 std::optional<Event> Heard(const Touch &Data, bool HearsEnd)
 {
-    if (console_notice_of(Data.payload, Data.payload_len) == CONSOLE_NOTICE_END)
-        return Event{HearsEnd ? EventKind::EndAsked : EventKind::Gone, {}, {}};
+    if (console_notice_of(Data.payload, Data.payload_len) == CONSOLE_NOTICE_END) {
+        if (HearsEnd) return Event{EventKind::EndAsked, {}, {}};
+        console_input_ends();
+        return Event{EventKind::Gone, {}, {}};
+    }
     if (Data.payload_len == sizeof(kb_event_t)) return Decode(Data);
     return std::nullopt;
 }
@@ -87,6 +91,7 @@ bool Keyboard::IsOpen() const noexcept
 Event Keyboard::Poll() noexcept
 {
     if (!IsOpen()) return Event{EventKind::Gone, {}, box::error{box::errc::invalid_state}};
+    if (!State->HearsEnd && console_input_ended()) return Event{EventKind::Gone, {}, {}};
     Touch Data{};
     while (touch_try_pop_tag(State->Ear, &Data))
         if (std::optional<Event> Said = Heard(Data, State->HearsEnd)) return *Said;
@@ -96,6 +101,7 @@ Event Keyboard::Poll() noexcept
 Event Keyboard::Wait(std::uint32_t TimeoutMs) noexcept
 {
     if (!IsOpen()) return Event{EventKind::Gone, {}, box::error{box::errc::invalid_state}};
+    if (!State->HearsEnd && console_input_ended()) return Event{EventKind::Gone, {}, {}};
     for (;;) {
         Touch Data{};
         int Code = touch_await(State->Ear, &Data, TimeoutMs);

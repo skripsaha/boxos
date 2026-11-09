@@ -14,6 +14,8 @@
 
 #include "box/types.h"
 
+#include "look.h"
+
 namespace hub::asking {
 
 // Answered, answered with nothing, asked of no one (the console's ear is
@@ -24,12 +26,15 @@ enum class Answer { Given, Empty, NoOne, Ended };
 // The prompt said and one line read, blanks trimmed off both ends.
 Answer Line(std::string_view Prompt, std::string &Text);
 
-// Heading, then each of Choices numbered, then "which one? (a number)" —
-// asked again for a number not on the list. Chosen is the index of the one.
-Answer Choose(std::string_view Heading, std::span<const std::string> Choices, std::size_t &Chosen);
+// One of Choices: in a window titled Heading (windows.h), or — as the person
+// set the hub, or where no window can be shown — Heading, each choice
+// numbered, then "which one? (a number)", asked again for a number not on the
+// list. Chosen is the index of the one.
+Answer Choose(const Look &Shown, std::string_view Heading, std::span<const std::string> Choices,
+              std::size_t &Chosen);
 
-// "<word> could be any of these:", each file numbered and wearing its tags.
-Answer Which(std::string_view Word, std::span<const file_id_t> Ids, file_id_t &Chosen);
+// "<word> could be any of these:", each file named with its tags.
+Answer Which(const Look &Shown, std::string_view Word, std::span<const file_id_t> Ids, file_id_t &Chosen);
 
 // "<question> (yes or no)" — asked again for anything else.
 Answer YesNo(std::string_view Question, bool &Yes);

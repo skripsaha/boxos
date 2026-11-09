@@ -10,8 +10,9 @@
 
 namespace hub {
 
-// Where the hub shows how many programs live behind.
-enum class BehindShown { Prompt, Nowhere };
+// Where the hub shows how many programs live behind: before the sign, on the
+// line at the top of the screen that names them (windows.h), or nowhere.
+enum class BehindShown { Prompt, Line, Nowhere };
 
 struct Look {
     bool         Greeting;
@@ -33,6 +34,7 @@ struct Look {
     bool         DidYouMean;
     bool         History;
     bool         RecallHereFirst;   // Up brings back this Use Context's lines first
+    bool         ChooseInWindow;    // which one is meant is asked in a window, not a list
 };
 
 Look ReadLook();
