@@ -3,7 +3,11 @@ OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
 /* A program is linked at 0, position-independent, and made a box the kernel
- * places where it chooses: every address in it is the place from the base. */
+ * places where it chooses: every address in it is the place from the base.
+ * An executable linked at a fixed place — BoxASM's ELF image is one, and the
+ * stands link its twin and pack's fixed program with GNU ld — names the place:
+ * --defsym=USER_BASE=0xC000. */
+USER_BASE = DEFINED(USER_BASE) ? USER_BASE : 0x0;
 
 /* Three segments, each with one set of rights, and the thread template. Code
  * alone is executable; what is only read — constants, the unwinder's tables,
@@ -21,7 +25,7 @@ PHDRS
 
 SECTIONS
 {
-    . = 0;
+    . = USER_BASE;
 
     .text : ALIGN(4096)
     {
