@@ -2,6 +2,7 @@
 
 #include "prompt.h"
 
+#include <algorithm>
 #include <string>
 
 #include "box/display.h"
@@ -52,9 +53,11 @@ void ShowPrompt(const Hub &Self, std::string_view Context)
     if (Shown.Context && !Context.empty()) SayIn(Shown.ContextColor, "[{}] ", Fitted(Context));
     if (Shown.Them && Self.Given.Known() && !Self.Given.Files().empty())
         SayIn(Shown.ThemColor, "{} ", Self.Given.Files().size());
+    // "+2", and "+2!" while one of them asks for the keyboard.
     if (Shown.Behind == BehindShown::Prompt) {
-        const std::size_t Living = Self.Started.Living().size();
-        if (Living > 0) SayIn(Shown.BehindColor, "+{} ", Living);
+        const std::vector<BehindOne> Living = Self.Started.Living();
+        const bool Asks = std::any_of(Living.begin(), Living.end(), [](const BehindOne &One) { return One.Asks; });
+        if (!Living.empty()) SayIn(Shown.BehindColor, "+{}{} ", Living.size(), Asks ? "!" : "");
     }
     SayIn(Shown.SignColor, "{} ", Shown.Sign);
     io_flush();

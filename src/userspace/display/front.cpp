@@ -6,8 +6,16 @@
  * which it lets live behind; the keeper is the asking program, by the kernel's
  * word, and only a program that wears `system` keeps others. In front is a
  * stack of who keeps whom, the newest on top: a hub that starts a hub that
- * starts edit keeps the second hub, which keeps edit, and a chord pressed is
- * told to the keeper on top, about the program it keeps there.
+ * starts edit keeps the second hub, which keeps edit. The keys a keeper acts
+ * on are its own word, kept in a stack too, the newest on top; one pressed is
+ * told to the keeper whose screen is shown — the keeper on top of who keeps
+ * whom, about the program it keeps there, or that program itself when it is
+ * a keeper with nothing of its own in front.
+ *
+ * A keeper that ends leaves what it kept behind behind: given to the keeper
+ * that kept it, or, with none, to the next keeper that says its keys — so a
+ * program let go to live on its own outlives the hub that let it go, even
+ * one that fell, and comes back on the screen through the one that follows.
  *
  * Behind is a set of the programs keepers let go. With them live behind the
  * programs they start, however far down: the display hears every program
@@ -64,15 +72,22 @@ struct Behind {
     bool    Told = false;   // its keeper heard that it wants the keyboard
 };
 
+// The keys a keeper said it acts on, in the order it told them.
+struct Keys {
+    Program               Keeper;
+    std::vector<KeyChord> Chords;
+};
+
 std::vector<Started> g_started;
 std::vector<Kept>    g_front;    // the newest keeper on top, at the back
 std::vector<Behind>  g_behind;
+std::vector<Keys>    g_keys;     // the newest word on top, at the back
 TouchTagPair         g_news;     // DISPLAY_FRONT_TAG
 TouchTag             g_spawned = TOUCH_TAG_INVALID;
 
-void Tell(const Program &Keeper, DisplayFrontWhat What, const Program &About) noexcept
+void Tell(const Program &Keeper, DisplayFrontWhat What, const Program &About, std::uint8_t Key = 0) noexcept
 {
-    const DisplayFrontNews News{Keeper.Pid, Keeper.Generation, static_cast<std::uint8_t>(What), {0, 0, 0},
+    const DisplayFrontNews News{Keeper.Pid, Keeper.Generation, static_cast<std::uint8_t>(What), Key, {0, 0},
                                 About.Pid, About.Generation};
     if (touch_send(g_news, &News, sizeof(News), 0) > 0) return;
     static bool Said = false;
@@ -150,7 +165,7 @@ bool FrontStart() noexcept
     // Here: every keeper says again what it keeps — this display may be one
     // raised after a fall, and knows nothing of what the one before was told.
     // Their questions wait for the loop; nobody listening is a boot's quiet.
-    const DisplayFrontNews Here{0, 0, DISPLAY_FRONT_HERE, {0, 0, 0}, 0, 0};
+    const DisplayFrontNews Here{0, 0, DISPLAY_FRONT_HERE, 0, {0, 0}, 0, 0};
     (void)touch_send(g_news, &Here, sizeof(Here), 0);
     return true;
 }
@@ -178,21 +193,63 @@ void FrontAsked(const Result &Asked, const AskFrom &From, const DisplayFrontRequ
     Reply(Asked, Request.command, OK, false);
 }
 
+void FrontKeysAsked(const Result &Asked, const AskFrom &From, const KeyChord *Chords, std::uint32_t Count) noexcept
+{
+    if (!FrontKeeper(From)) {
+        Reply(Asked, DISP_CMD_KEYS, ERR_ACCESS_DENIED, false);
+        return;
+    }
+    // A key alone, or with shift alone, is typing: never taken from everybody.
+    for (std::uint32_t I = 0; I < Count; I++) {
+        const KeyChord &One = Chords[I];
+        if (!(One.Mods & (KB_MOD_CTRL | KB_MOD_ALT)) || (One.Mods & ~KEY_CHORD_MODS) || One.Extended > 1) {
+            Reply(Asked, DISP_CMD_KEYS, ERR_INVALID_ARGUMENT, false);
+            return;
+        }
+    }
+    const Program Keeper{From.program_pid, From.program_generation};
+    try {
+        Keys Said{Keeper, std::vector<KeyChord>(Chords, Chords + Count)};
+        g_keys.reserve(g_keys.size() + 1);
+        std::erase_if(g_keys, [&](const Keys &One) { return One.Keeper == Keeper; });
+        if (Count > 0) g_keys.push_back(std::move(Said));
+    } catch (...) {
+        Reply(Asked, DISP_CMD_KEYS, ERR_NO_MEMORY, false);
+        return;
+    }
+    Reply(Asked, DISP_CMD_KEYS, OK, false);
+    // What lives behind kept by nobody — its keeper ended with none above
+    // it — is this keeper's from here.
+    for (Behind &One : g_behind) {
+        if (One.Keeper != Program{}) continue;
+        One.Keeper = Keeper;
+        Tell(Keeper, DISPLAY_FRONT_GIVEN, One.Back);
+    }
+}
+
 bool FrontChord(const kb_event_t &Key) noexcept
 {
-    const std::uint8_t Both = KB_MOD_CTRL | KB_MOD_ALT;
-    if ((Key.mods & Both) != Both) return false;
-    const bool Extended = (Key.mods & KB_MOD_EXTENDED) != 0;
-    const bool End      = Extended ? Key.scancode == KEY_END : Key.ascii == '-';
-    const bool LetGo    = Extended ? Key.scancode == KEY_HOME : Key.ascii == '=';
-    if (!End && !LetGo) return false;
-    // The chord is about the newest program kept in front that is not behind
-    // with a family let go. With none it is nobody's: taken all the same, for
-    // it is the system's and never a program's key.
+    if (g_keys.empty()) return false;
+    const std::vector<KeyChord> &Chords = g_keys.back().Chords;
+    std::size_t                  Place  = 0;
+    while (Place < Chords.size() && !KeyChordMatches(&Chords[Place], &Key)) Place++;
+    if (Place == Chords.size()) return false;
+    const auto Which = static_cast<std::uint8_t>(Place);
+    const auto Keeps = [](const Program &One) {
+        return std::any_of(g_keys.begin(), g_keys.end(), [&](const Keys &Said) { return Said.Keeper == One; });
+    };
+    // The keeper whose screen is shown: on top of who keeps whom, unless what
+    // it keeps there keeps others itself — then that one, its own screen.
     FrontSpawnStep();
     for (auto Top = g_front.rbegin(); Top != g_front.rend(); ++Top) {
         if (HeldBehind(Top->Front)) continue;
-        Tell(Top->Keeper, End ? DISPLAY_FRONT_END : DISPLAY_FRONT_LET_GO, Top->Front);
+        if (Keeps(Top->Front)) Tell(Top->Front, DISPLAY_FRONT_KEY, Program{}, Which);
+        else Tell(Top->Keeper, DISPLAY_FRONT_KEY, Top->Front, Which);
+        return true;
+    }
+    for (auto Said = g_keys.rbegin(); Said != g_keys.rend(); ++Said) {
+        if (HeldBehind(Said->Keeper)) continue;
+        Tell(Said->Keeper, DISPLAY_FRONT_KEY, Program{}, Which);
         break;
     }
     return true;
@@ -209,7 +266,7 @@ bool FrontBehind(std::uint32_t ProgramPid, std::uint32_t ProgramGeneration) noex
 void FrontWants(std::uint32_t ProgramPid, std::uint32_t ProgramGeneration) noexcept
 {
     Behind *Root = HeldBehind(Program{ProgramPid, ProgramGeneration});
-    if (!Root || Root->Told) return;
+    if (!Root || Root->Told || Root->Keeper == Program{}) return;
     Root->Told = true;
     Tell(Root->Keeper, DISPLAY_FRONT_WANTS, Root->Back);
 }
@@ -219,12 +276,26 @@ void FrontDeath(std::uint32_t Pid, std::uint32_t Generation) noexcept
     // Its start heard first: said before its first step, so before its death.
     FrontSpawnStep();
     const Program Dead{Pid, Generation};
+    // Who kept the dead, in front or behind: none when nobody did.
+    Program Above;
+    for (const Kept &One : g_front)
+        if (One.Front == Dead) Above = One.Keeper;
+    for (const Behind &One : g_behind)
+        if (One.Back == Dead) Above = One.Keeper;
     std::erase_if(g_front, [&](const Kept &One) { return One.Front == Dead || One.Keeper == Dead; });
+
+    // What the dead kept behind stays behind, given to the one that kept the
+    // dead, or kept by nobody until the next keeper says its keys.
+    for (Behind &One : g_behind) {
+        if (One.Keeper != Dead || One.Back == Dead) continue;
+        One.Keeper = Above;
+        One.Told   = false;
+        if (Above != Program{}) Tell(Above, DISPLAY_FRONT_GIVEN, One.Back);
+    }
 
     // A program let go that dies leaves what it started behind, kept by its
     // keeper: the family stays whole, and none of it takes the keyboard from
-    // the one in front. A program whose keeper died is nobody's to hold back:
-    // it hears again.
+    // the one in front.
     std::vector<Behind> Heirs;
     try {
         for (const Behind &One : g_behind) {
@@ -236,7 +307,8 @@ void FrontDeath(std::uint32_t Pid, std::uint32_t Generation) noexcept
         Heirs.clear();
         kdbg_print("[display] no room to keep behind what pid %u started; it hears again", Pid);
     }
-    std::erase_if(g_behind, [&](const Behind &One) { return One.Back == Dead || One.Keeper == Dead; });
+    std::erase_if(g_behind, [&](const Behind &One) { return One.Back == Dead; });
+    std::erase_if(g_keys, [&](const Keys &One) { return One.Keeper == Dead; });
     for (const Behind &Heir : Heirs) {
         try {
             g_behind.push_back(Heir);

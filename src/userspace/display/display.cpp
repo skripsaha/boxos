@@ -356,6 +356,22 @@ void HearQuestion(const Result &Entry)
     case DISP_CMD_SIZE:
         AnswerSize(Entry);
         return;
+    case DISP_CMD_KEYS: {
+        DisplayKeysRequest Head{};
+        if (Length < sizeof(Head)) {
+            (void)answer(&Entry, nullptr, 0);
+            return;
+        }
+        std::memcpy(&Head, Question, sizeof(Head));
+        if (Length != sizeof(Head) + Head.count * sizeof(KeyChord)) {
+            (void)answer(&Entry, nullptr, 0);
+            return;
+        }
+        KeyChord Chords[255];
+        std::memcpy(Chords, Question + sizeof(Head), Head.count * sizeof(KeyChord));
+        FrontKeysAsked(Entry, From, Chords, Head.count);
+        return;
+    }
     case DISP_CMD_PAGE: {
         DisplayPageRequest Request{};
         if (Length < sizeof(Request)) {

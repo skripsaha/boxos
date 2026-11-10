@@ -1,5 +1,5 @@
 /* builtins.cpp — the table of the hub's own commands, and the small ones:
- * run, clear and exit. help, use, said and front have files of their own. */
+ * run, clear and exit. help, use and said have files of their own. */
 
 #include "builtins.h"
 
@@ -77,7 +77,7 @@ bool Exit(Hub &Self, const Words &)
     return true;
 }
 
-constexpr std::array<Builtin, 7> Table{{
+constexpr std::array<Builtin, 6> Table{{
     {"help", "help [NAME]", "what there is: these commands, or what a program takes and how it is set",
      Takes::Command, Help},
     {"use", "use [tags] [+tag] [-tag]", "set, change or clear the Use Context", Takes::Tags, Use},
@@ -86,8 +86,6 @@ constexpr std::array<Builtin, 7> Table{{
     {"run", "run THING", "start a program given as a file, or it", Takes::Program, Run},
     {"clear", "clear", "clear the screen", Takes::Nothing, Clear},
     {"exit", "exit", "end this hub", Takes::Nothing, Exit},
-    {"front", "front [NAME]", "who lives behind; with a name or its number, that one brought forward",
-     Takes::Nothing, Front},
 }};
 
 }  // namespace

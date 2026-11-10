@@ -1,6 +1,7 @@
 /* news.h — what the hub says of the programs it starts, each as the person
  * set it (look.h): how one ended when it did not end well, how long a command
- * took when it took long, and what becomes of the programs living behind. */
+ * took when it took long, one going behind, and one behind asking for the
+ * keyboard. Of one behind that ends nothing is said: it lives on its own. */
 #ifndef HUB_NEWS_H
 #define HUB_NEWS_H
 
@@ -17,16 +18,16 @@ namespace hub::news {
 // was ended for it.
 void Ended(const Look &Shown, std::string_view Who, const Ending &End);
 
-// "edit lives on behind: front edit brings it back" — let go by the person.
+// "edit lives on its own behind the hub: ctrl+alt+v brings it back" — let go
+// by the person, the key next as they set it.
 void LetGo(const Look &Shown, std::string_view Who);
 
-// A program that lived behind ended: "radio finished", "radio finished; gave
-// 2 files — them", or how it ended when it did not end well. One that serves
-// is spoken of only then.
-void Finished(const Look &Shown, std::string_view Who, bool Serves, const Ending &End);
+// "edit asks for the keyboard: ctrl+alt+v brings it"
+void Asks(const Look &Shown, std::string_view Who);
 
-// "edit wants the keyboard: front edit brings it forward"
-void Wants(const Look &Shown, std::string_view Who);
+// "edit lives on behind this hub now: ctrl+alt+v brings it" — given by the
+// display when the hub that let it go ended.
+void Given(const Look &Shown, std::string_view Who);
 
 // "took 12 s", "took 3 min 20 s", "took 1 h 2 min" — when it is as long as
 // the person set, or longer.

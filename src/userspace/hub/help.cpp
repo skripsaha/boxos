@@ -1,6 +1,7 @@
 /* help — what there is.
  *
- *   help          the hub's own commands
+ *   help          the hub's own commands, and the keys it hears over every
+ *                 program
  *   help NAME     the command, or the program NAME: each field its Form
  *                 takes, what it gives back, and what can be set in it —
  *                 each setting as it is now, said as the utility settings
@@ -30,18 +31,32 @@ namespace hub {
 
 namespace {
 
-void ListCommands()
+void ListCommands(const Look &Shown)
 {
     Say("The hub's own commands:\n\n");
-    // The descriptions stand in one column, two blanks past the longest usage.
+    // The descriptions stand in one column, two blanks past the longest usage
+    // or key.
+    constexpr const char *KeyWhat[KeyCount] = {
+        "end the program on the screen: once it is asked to finish, twice it ends",
+        "let it live on its own behind the hub, and come back here",
+        "bring those behind to the screen one by one, and after the last the hub",
+    };
+    char        Keys[KeyCount][KEY_CHORD_SPELLED_MAX];
     std::size_t Column = 0;
     for (const Builtin &One : Builtins()) Column = std::max(Column, One.Usage.size());
-    for (const Builtin &One : Builtins()) {
-        std::string Line = "  ";
-        Line.append(One.Usage).append(Column + 2 - One.Usage.size(), ' ').append(One.What).append(1, '\n');
-        Say(Line);
+    for (std::uint8_t Key = 0; Key < KeyCount; Key++) {
+        KeyChordSpell(&Shown.Keys[Key], Keys[Key], sizeof(Keys[Key]));
+        Column = std::max(Column, std::char_traits<char>::length(Keys[Key]));
     }
-    Say("\nAny other name runs a program. help NAME shows what it takes and how it is set.\n");
+    const auto Row = [&](std::string_view Left, std::string_view What) {
+        std::string Line = "  ";
+        Line.append(Left).append(Column + 2 - Left.size(), ' ').append(What).append(1, '\n');
+        Say(Line);
+    };
+    for (const Builtin &One : Builtins()) Row(One.Usage, One.What);
+    Say("\nAny other name runs a program. help NAME shows what it takes and how it is set.\n\n"
+        "Over every program — settings hub keys:\n\n");
+    for (std::uint8_t Key = 0; Key < KeyCount; Key++) Row(Keys[Key], KeyWhat[Key]);
 }
 
 const char *KindSaid(const BoxFormField &Field)
@@ -199,7 +214,7 @@ bool HelpProgram(const Look &Shown, std::string_view Asked)
 bool Help(Hub &Self, const Words &Typed)
 {
     if (Typed.Count() < 2) {
-        ListCommands();
+        ListCommands(Self.Shown);
         return true;
     }
     if (const Builtin *Own = BuiltinNamed(Typed[1])) {

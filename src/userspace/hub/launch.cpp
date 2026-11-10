@@ -37,17 +37,18 @@ Start StartOf(const fill::Filled &What, std::string_view Who, ProgramLiving Livi
     return Start{What.Program, std::string(Who), What.Luggage, Living, What.Screen, What.Souvenir};
 }
 
-// A program the prompt stood by for, settled: let go to live behind, which is
-// said; or ended, how said when not well, and what it gave kept as `them`.
-// True when it lives on, or ended with 0.
+// A program the prompt stood by for, settled: gone behind to live on its
+// own, which is said when the person let it go; or ended, how said when not
+// well, and what it gave kept as `them`. True when it lives on, or ended
+// with 0.
 bool Settle(Hub &Self, std::string_view Who, std::expected<Settled, int> Ran)
 {
     if (!Ran) {
         SayRefused(Who, Ran.error());
         return false;
     }
-    if (Ran->LetGo) {
-        news::LetGo(Self.Shown, Who);
+    if (Ran->Behind) {
+        if (!Ran->Quietly) news::LetGo(Self.Shown, Who);
         return true;
     }
     news::Ended(Self.Shown, Who, Ran->End);
@@ -64,7 +65,7 @@ bool Program(Hub &Self, file_id_t Program, std::string_view Who, std::string_vie
     if (!What) return false;
 
     const ProgramLiving Living = LivingOf(Program);
-    if (Living == PROGRAM_TASK) return Settle(Self, Who, Self.Started.InFront(StartOf(*What, Who, Living)));
+    if (Living == PROGRAM_TASK) return Settle(Self, Who, Self.Started.OnScreen(StartOf(*What, Who, Living)));
     if (const std::expected<void, int> Started = Self.Started.Behind(StartOf(*What, Who, Living)); !Started) {
         SayRefused(Who, Started.error());
         return false;
@@ -78,24 +79,19 @@ bool OnThing(Hub &Self, file_id_t Program, std::string_view Who, file_id_t Thing
     const std::optional<fill::Filled> What = fill::OnThing(Program, Who, Thing);
     if (!What) return false;
     // What it gives is wanted now, so it is stood by for however it lives.
-    std::expected<Settled, int> Ran = Self.Started.InFront(StartOf(*What, Who, PROGRAM_TASK));
+    std::expected<Settled, int> Ran = Self.Started.OnScreen(StartOf(*What, Who, PROGRAM_TASK));
     if (!Ran) {
         SayRefused(Who, Ran.error());
         return false;
     }
-    if (Ran->LetGo) {
-        news::LetGo(Self.Shown, Who);
+    if (Ran->Behind) {
+        if (!Ran->Quietly) news::LetGo(Self.Shown, Who);
         return false;
     }
     news::Ended(Self.Shown, Who, Ran->End);
     if (!Ran->End.Seen || Ran->End.Code != 0) return false;
     if (Ran->End.Kept && !Ran->End.Kept->empty()) Given = Ran->End.Kept->front();
     return true;
-}
-
-bool Forward(Hub &Self, const BehindNow &Which)
-{
-    return Settle(Self, Which.Who, Self.Started.Forward(Which.Pid, Which.Generation));
 }
 
 }  // namespace hub::launch

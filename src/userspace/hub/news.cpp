@@ -23,26 +23,31 @@ void Ended(const Look &Shown, std::string_view Who, const Ending &End)
     else SayIn(Shown.NewsColor, "{} stopped: the system stopped it\n", Who);
 }
 
+namespace {
+
+// The key next, as the person set it.
+std::string NextKey(const Look &Shown)
+{
+    char Spelled[KEY_CHORD_SPELLED_MAX];
+    KeyChordSpell(&Shown.Keys[KeyNext], Spelled, sizeof(Spelled));
+    return Spelled;
+}
+
+}  // namespace
+
 void LetGo(const Look &Shown, std::string_view Who)
 {
-    SayIn(Shown.NewsColor, "{} lives on behind: front {} brings it back\n", Who, Who);
+    SayIn(Shown.NewsColor, "{} lives on its own behind the hub: {} brings it back\n", Who, NextKey(Shown));
 }
 
-void Finished(const Look &Shown, std::string_view Who, bool Serves, const Ending &End)
+void Asks(const Look &Shown, std::string_view Who)
 {
-    if (!End.Seen || End.Code != 0) {
-        Ended(Shown, Who, End);
-        return;
-    }
-    if (Serves || !Shown.Finished) return;
-    const std::size_t Gave = End.Kept ? End.Kept->size() : 0;
-    if (Gave == 0) SayIn(Shown.NewsColor, "{} finished\n", Who);
-    else SayIn(Shown.NewsColor, "{} finished; gave {} {} — them\n", Who, Gave, Gave == 1 ? "file" : "files");
+    SayIn(Shown.NewsColor, "{} asks for the keyboard: {} brings it\n", Who, NextKey(Shown));
 }
 
-void Wants(const Look &Shown, std::string_view Who)
+void Given(const Look &Shown, std::string_view Who)
 {
-    SayIn(Shown.NewsColor, "{} wants the keyboard: front {} brings it forward\n", Who, Who);
+    SayIn(Shown.NewsColor, "{} lives on behind this hub now: {} brings it\n", Who, NextKey(Shown));
 }
 
 void Took(const Look &Shown, std::chrono::steady_clock::duration Spent)

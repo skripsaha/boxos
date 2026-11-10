@@ -16,8 +16,11 @@
 #include "box/system.h"
 #include "box/turnin.h"
 
+#include "context.h"
 #include "news.h"
+#include "programs.h"
 #include "say.h"
+#include "tags.h"
 #include "windows.h"
 
 namespace hub {
@@ -41,12 +44,38 @@ std::optional<std::vector<file_id_t>> KeptOf(const Start &What, bool Collected, 
     return std::nullopt;
 }
 
+// The name a running program goes by: its file's stem, which it wears among
+// its tags — the first of them that names a program on the volume. Looked for
+// among those a hub starts, that wear app or utility.
+std::string NameOf(const Which &Program)
+{
+    std::string Tags;
+    for (const char *Kind : {"app", "utility"}) {
+        ProcMate     *Mates = nullptr;
+        std::uint32_t Total = 0;
+        const int     Delivered = proc_crew(Kind, &Mates, &Total);
+        for (int I = 0; I < Delivered && Tags.empty(); I++)
+            if (Mates[I].pid == Program.Pid && Mates[I].generation == Program.Generation && Mates[I].tags)
+                Tags = Mates[I].tags;
+        free(Mates);
+        if (!Tags.empty()) break;
+    }
+    std::vector<std::string> Stems;
+    programs::EachCommand([&](file_id_t, std::string_view FileName) {
+        Stems.emplace_back(FileName.substr(0, programs::StemLength(FileName)));
+    });
+    for (std::string_view Tag : tags::Split(Tags))
+        if (std::find(Stems.begin(), Stems.end(), Tag) != Stems.end()) return std::string(Tag);
+    return "a program";
+}
+
 }  // namespace
 
 bool Jobs::Begin(const Look &Shown)
 {
-    Seen      = Shown;
-    PageStale = true;
+    Seen       = Shown;
+    PageStale  = true;
+    KeysStale  = true;
     WakeTag    = touch_intern(WakeTagName);
     SettledTag = touch_intern(SettledTagName);
     Woken      = touch_pair_choose(WakeTag);
@@ -92,14 +121,11 @@ Jobs::~Jobs()
     Keeper.join();
 }
 
-// The programs living behind, under the lock: those that serve only when asked.
-std::vector<BehindNow> Jobs::LivingNow(bool WithServing) const
+// Under the lock: the program the prompt stands by for, not yet collected.
+Jobs::Job *Jobs::TaskOf(const Which &Program)
 {
-    std::vector<BehindNow> Now;
-    for (const Job &One : Running)
-        if (!One.Front && !One.Over && (WithServing || One.What.Living != PROGRAM_SERVES))
-            Now.push_back(BehindNow{One.What.Who, One.Pid, One.Generation, One.Wants});
-    return Now;
+    const auto It = std::find_if(Tasks.begin(), Tasks.end(), [&](const Job &One) { return One.Program == Program; });
+    return It == Tasks.end() ? nullptr : &*It;
 }
 
 // Who lives behind changed, or how the person set it shown: the line at the
@@ -117,15 +143,17 @@ void Jobs::BehindChanged()
 bool Jobs::DrawBehind()
 {
     Look                   Shown;
-    std::vector<BehindNow> Now;
+    std::vector<BehindOne> Now;
+    std::optional<Which>   On;
     {
         std::lock_guard Held(Lock);
         if (!BehindStale) return false;
         BehindStale = false;
         Shown       = Seen;
-        Now         = LivingNow(false);
+        Now         = Away.OnCircle();
+        On          = Screen;
     }
-    windows::ShowBehind(Shown, Now);
+    windows::ShowBehind(Shown, Now, On);
     return true;
 }
 
@@ -154,12 +182,13 @@ void Jobs::Keep()
         Moved |= StartAsked();
         Moved |= HearDeaths();
         Moved |= HearDisplay();
+        Moved |= TellKeys();
         Moved |= TellPage();
         Moved |= DrawBehind();
         if (!Moved && !Stopping.load()) box_turn_in(Mark);
     }
     // The line of who lives behind is this strand's layer: taken down by it.
-    windows::ShowBehind(Look{}, {});
+    windows::ShowBehind(Look{}, {}, std::nullopt);
 }
 
 bool Jobs::HearWake()
@@ -171,8 +200,9 @@ bool Jobs::HearWake()
 }
 
 // The next program the prompt asked for, started — the keeping strand's
-// child — and kept by the display in front of the person, or behind. A
-// machine with no display has nobody to keep it from, and nothing is lost.
+// child — and kept by the display on the screen, the one from behind that was
+// there going behind again; or one that lives on by itself or serves, behind.
+// A machine with no display has nobody to keep it from, and nothing is lost.
 bool Jobs::StartAsked()
 {
     Asked *Next = nullptr;
@@ -182,31 +212,39 @@ bool Jobs::StartAsked()
         Next = Starts.front();
         Starts.pop_front();
     }
-    std::uint32_t Generation = 0;
-    const int     Pid = proc_exec_file(Next->What.Program, Next->What.Luggage.data(), Next->What.Luggage.size(),
-                                       nullptr, &Generation);
+    const std::string   Context = Next->OnScreen ? std::string() : context::Whole().value_or(std::string());
+    std::uint32_t       Generation = 0;
+    const int           Pid = proc_exec_file(Next->What.Program, Next->What.Luggage.data(),
+                                             Next->What.Luggage.size(), nullptr, &Generation);
+    const Which         Started{Pid > 0 ? static_cast<std::uint32_t>(Pid) : 0, Generation};
+    std::optional<Which> Displaced;
     if (Pid > 0) {
-        const auto    Started = static_cast<std::uint32_t>(Pid);
-        std::uint32_t Display = 0;
-        const int     Rc      = Next->Front ? display_front(Started, Generation, &Display)
-                                            : display_back(Started, Generation, &Display);
-        Kept(Rc, Display);
         std::lock_guard Held(Lock);
-        Job One;
-        One.What = Next->What;
-        One.What.Luggage.clear();
-        One.Pid        = Started;
-        One.Generation = Generation;
-        One.Front      = Next->Front;
-        Running.push_back(std::move(One));
+        if (Next->OnScreen) {
+            Job One;
+            One.What = Next->What;
+            One.What.Luggage.clear();
+            One.Program = Started;
+            Tasks.push_back(std::move(One));
+            Displaced = std::exchange(Screen, Started);
+            Away.Forget();
+        } else {
+            Away.Add(BehindOne{Next->What.Who, Started, Context, 0, 0, Next->What.Living == PROGRAM_SERVES});
+        }
     }
-    if (Pid > 0 && !Next->Front) BehindChanged();
+    if (Pid > 0) {
+        std::uint32_t Display = 0;
+        if (Displaced) Kept(display_back(Displaced->Pid, Displaced->Generation, &Display), Display);
+        Kept(Next->OnScreen ? display_front(Started.Pid, Started.Generation, &Display)
+                            : display_back(Started.Pid, Started.Generation, &Display),
+             Display);
+        BehindChanged();
+    }
     {
         std::lock_guard Held(Lock);
-        Next->Rc         = Pid > 0 ? 0 : (Pid == 0 ? -ERR_SPAWN_FAILED : Pid);
-        Next->Pid        = Pid > 0 ? static_cast<std::uint32_t>(Pid) : 0;
-        Next->Generation = Generation;
-        Next->Done       = true;
+        Next->Rc      = Pid > 0 ? 0 : (Pid == 0 ? -ERR_SPAWN_FAILED : Pid);
+        Next->Program = Started;
+        Next->Done    = true;
     }
     SaySettled();
     return true;
@@ -227,53 +265,52 @@ bool Jobs::HearDeaths()
 }
 
 // A death — the main strand's, the last a program announces — of one of the
-// hub's programs: its end and what it gave are read. The prompt's strand is
-// told of the one in front; the end of one behind is said now.
+// hub's programs. One behind is gone from the circle, and nothing is said:
+// it lived on its own. One the prompt stands by for has its end and what it
+// gave read, and the prompt is told.
 void Jobs::Died(const TouchProcessDied &Death)
 {
-    std::unique_lock Held(Lock);
-    const auto       It = std::find_if(Running.begin(), Running.end(), [&](const Job &One) {
-        return One.Pid == Death.pid && One.Generation == Death.generation;
-    });
-    if (It == Running.end()) return;
-    Job &One     = *It;
-    One.Over     = true;
-    One.End.Seen = true;
-    One.End.Code = Death.exit_code;
-    One.End.Fell = Death.fell != 0;
-    if (One.End.Fell) {
-        One.End.Vector    = Death.vector;
-        const char *Named = std::find(Death.in, Death.in + sizeof(Death.in), '\0');
-        One.End.In.assign(Death.in, static_cast<std::size_t>(Named - Death.in));
+    const Which Dead{Death.pid, Death.generation};
+    bool        Changed = false, Settle = false;
+    {
+        std::lock_guard Held(Lock);
+        Changed = Away.Remove(Dead);
+        if (Screen == Dead) {
+            Screen.reset();
+            Settle = true;
+        }
+        Job *One = TaskOf(Dead);
+        if (One && !One->Away) {
+            One->Over     = true;
+            One->End.Seen = true;
+            One->End.Code = Death.exit_code;
+            One->End.Fell = Death.fell != 0;
+            if (One->End.Fell) {
+                One->End.Vector   = Death.vector;
+                const char *Named = std::find(Death.in, Death.in + sizeof(Death.in), '\0');
+                One->End.In.assign(Death.in, static_cast<std::size_t>(Named - Death.in));
+            }
+            // What it queued is read off whether it is kept or not, so no
+            // stale gift is met later. It came to this strand, the one that
+            // started it.
+            file_id_t *Ids       = nullptr;
+            size_t     Count     = 0;
+            const bool Collected = souvenir_collect(Dead.Pid, &Ids, &Count) == 0;
+            One->End.Kept        = KeptOf(One->What, Collected,
+                                          Collected && Ids ? std::vector<file_id_t>(Ids, Ids + Count)
+                                                           : std::vector<file_id_t>());
+            free(Ids);
+            Settle = true;
+        }
     }
-    // What it queued is read off whether it is kept or not, so no stale gift
-    // is met later. It came to this strand, the one that started it.
-    file_id_t *Ids       = nullptr;
-    size_t     Count     = 0;
-    const bool Collected = souvenir_collect(One.Pid, &Ids, &Count) == 0;
-    One.End.Kept = KeptOf(One.What, Collected, Collected && Ids ? std::vector<file_id_t>(Ids, Ids + Count)
-                                                                : std::vector<file_id_t>());
-    free(Ids);
-
-    // The prompt stands by for it, or has not yet heard it was let go: the
-    // prompt is told, and takes its end as that of one in front.
-    if (One.Front || One.LetGo) {
-        Held.unlock();
-        SaySettled();
-        return;
-    }
-    const Job Ended = std::move(One);
-    Running.erase(It);
-    if (Ended.End.Kept && !Ended.End.Kept->empty()) Gift = Ended.End.Kept;
-    const Look Shown = Seen;
-    Held.unlock();
-    news::Finished(Shown, Ended.What.Who, Ended.What.Living == PROGRAM_SERVES, Ended.End);
-    BehindChanged();
+    if (Settle) SaySettled();
+    if (Changed) BehindChanged();
 }
 
-// The display's answer to a question about a program the hub keeps: who the
-// display is, for the news it sends.
-void Jobs::Kept(int Rc, std::uint32_t Display)
+// The display's answer to a question about what the hub keeps: who the
+// display is, for the news it sends. Display is read here, by reference, once
+// the question is answered — whichever of the two arguments was made first.
+void Jobs::Kept(int Rc, const std::uint32_t &Display)
 {
     if (Rc != OK) return;
     std::lock_guard Held(Lock);
@@ -281,28 +318,24 @@ void Jobs::Kept(int Rc, std::uint32_t Display)
 }
 
 // A display came — raised again after a fall, it knows nothing of what the
-// hub told the one before: every program the hub keeps said again, in front
-// or behind, and the page the person chose; who the display is learnt from
-// its answers.
+// hub told the one before: what is on the screen and every one behind said
+// again, and the hub's keys and the page the person chose; who the display is
+// learnt from its answers.
 void Jobs::Rekeep()
 {
-    struct Said {
-        std::uint32_t Pid, Generation;
-        bool          Front;
-    };
-    std::vector<Said> Keeping;
+    std::optional<Which> On;
+    std::vector<Which>   Back;
     {
         std::lock_guard Held(Lock);
         PageStale = true;
-        for (const Job &One : Running)
-            if (!One.Over) Keeping.push_back(Said{One.Pid, One.Generation, One.Front});
+        KeysStale = true;
+        On        = Screen;
+        for (const BehindOne &One : Away.All())
+            if (One.Program != On) Back.push_back(One.Program);
     }
-    for (const Said &One : Keeping) {
-        std::uint32_t Display = 0;
-        const int     Rc      = One.Front ? display_front(One.Pid, One.Generation, &Display)
-                                          : display_back(One.Pid, One.Generation, &Display);
-        Kept(Rc, Display);
-    }
+    std::uint32_t Display = 0;
+    for (const Which &One : Back) Kept(display_back(One.Pid, One.Generation, &Display), Display);
+    if (On) Kept(display_front(On->Pid, On->Generation, &Display), Display);
 }
 
 bool Jobs::HearDisplay()
@@ -325,51 +358,132 @@ bool Jobs::HearDisplay()
         }
         if (Display == 0 || Event.source_pid != Display) continue;
         if (Said.keeper_pid != cabin_info()->pid || Said.keeper_generation != cabin_info()->generation) continue;
-        Pressed(Said.what, Said.pid, Said.generation);
+        const Which About{Said.pid, Said.generation};
+        if (Said.what == DISPLAY_FRONT_KEY) {
+            Pressed(Said.key, About);
+            continue;
+        }
+        if (Said.what == DISPLAY_FRONT_GIVEN) {
+            Given(About);
+            continue;
+        }
+        if (Said.what != DISPLAY_FRONT_WANTS) continue;
+        std::string Who;
+        Look        Shown;
+        {
+            std::lock_guard Held(Lock);
+            if (!Away.Asks(About)) continue;
+            Who   = Away.Find(About)->Who;
+            Shown = Seen;
+        }
+        news::Asks(Shown, Who);
+        BehindChanged();
     }
     return Heard;
 }
 
-// What the person pressed over a program the hub keeps in front, or what a
-// program it keeps behind asked.
-void Jobs::Pressed(std::uint8_t What, std::uint32_t Pid, std::uint32_t Generation)
+// One behind that a hub which ended kept, given to this one by the display:
+// on this hub's circle from here, and said.
+void Jobs::Given(const Which &Program)
 {
-    std::unique_lock Held(Lock);
-    const auto       It = std::find_if(Running.begin(), Running.end(), [&](const Job &One) {
-        return One.Pid == Pid && One.Generation == Generation && !One.Over;
-    });
-    if (It == Running.end()) return;
-    Job &One = *It;
+    const std::string Who     = NameOf(Program);
+    const std::string Context = context::Whole().value_or(std::string());
+    Look              Shown;
+    {
+        std::lock_guard Held(Lock);
+        if (Away.Find(Program)) return;
+        Away.Add(BehindOne{Who, Program, Context, 0, 0, false});
+        Shown = Seen;
+    }
+    news::Given(Shown, Who);
+    BehindChanged();
+}
 
-    if (What == DISPLAY_FRONT_END && One.Front) {
-        // Asked first: a program that hears it ends as it chooses — edit asks
-        // what to do with what is not saved. One none of whose strands reads,
-        // or one asked already, ends at once.
-        const bool Again = One.End.Asked;
-        One.End.Asked    = true;
-        Held.unlock();
-        if (Again || display_ask_end(Pid, Generation) != 1) (void)proc_finish(Pid, Generation);
-        return;
+// ---- the keys ------------------------------------------------------------------
+
+// One of the hub's keys, pressed over About — the program on the screen as
+// the display saw it, none when the hub's own prompt was. Stop and let-go act
+// on the program only while it is the one on the screen still.
+void Jobs::Pressed(std::uint8_t Key, const Which &About)
+{
+    if (Key == KeyStop) Stop(About);
+    else if (Key == KeyLetGo) LetGo(About);
+    else if (Key == KeyNext) Next();
+}
+
+// Asked first: a program that hears it ends as it chooses — edit asks what
+// to do with what is not saved. One none of whose strands reads, or one asked
+// already, ends at once.
+void Jobs::Stop(const Which &About)
+{
+    bool Again = false;
+    {
+        std::lock_guard Held(Lock);
+        if (Screen != About) return;
+        if (Job *One = TaskOf(About)) {
+            Again          = One->End.Asked;
+            One->End.Asked = true;
+        } else if (BehindOne *One = Away.Find(About)) {
+            Again           = One->AskedToEnd;
+            One->AskedToEnd = true;
+        } else {
+            return;
+        }
     }
-    if (What == DISPLAY_FRONT_LET_GO && One.Front) {
-        One.Front = false;
-        One.LetGo = true;
-        Held.unlock();
-        std::uint32_t Display = 0;
-        const int     Rc      = display_back(Pid, Generation, &Display);
-        Kept(Rc, Display);
-        SaySettled();
-        BehindChanged();
-        return;
+    if (Again || display_ask_end(About.Pid, About.Generation) != 1) (void)proc_finish(About.Pid, About.Generation);
+}
+
+// Under the lock: the program the prompt stands by for gone behind — on the
+// circle from here, the prompt told; quietly when another takes the screen.
+// False when it is not one to go: ended, or behind already.
+bool Jobs::SendBehind(Job &One, bool Quietly, const std::string &Context)
+{
+    if (One.Over || One.Away) return false;
+    One.Away    = true;
+    One.Quietly = Quietly;
+    Away.Add(BehindOne{One.What.Who, One.Program, Context, 0, 0, false});
+    return true;
+}
+
+void Jobs::LetGo(const Which &About)
+{
+    const std::string Context = context::Whole().value_or(std::string());
+    {
+        std::lock_guard Held(Lock);
+        if (Screen != About) return;
+        if (Job *One = TaskOf(About)) SendBehind(*One, false, Context);
+        Screen.reset();
+        Away.Forget();
     }
-    if (What == DISPLAY_FRONT_WANTS && !One.Front && !One.Wants) {
-        One.Wants             = true;
-        const std::string Who = One.What.Who;
-        const Look        Shown = Seen;
-        Held.unlock();
-        news::Wants(Shown, Who);
-        BehindChanged();
+    std::uint32_t Display = 0;
+    Kept(display_back(About.Pid, About.Generation, &Display), Display);
+    SaySettled();
+    BehindChanged();
+}
+
+// The next place on the circle: the program on the screen goes behind — one
+// the prompt stood by for joins the circle as it goes — and the next one
+// comes, or the hub's own prompt after the last.
+void Jobs::Next()
+{
+    const std::string    Context = context::Whole().value_or(std::string());
+    std::optional<Which> Back;
+    std::optional<BehindOne> Coming;
+    {
+        std::lock_guard Held(Lock);
+        Back = Screen;
+        if (Back)
+            if (Job *One = TaskOf(*Back)) SendBehind(*One, true, Context);
+        Coming = Away.Next(Back, Seen, Context);
+        if (!Back && !Coming) return;
+        Screen.reset();
+        if (Coming) Screen = Coming->Program;
     }
+    std::uint32_t Display = 0;
+    if (Back) Kept(display_back(Back->Pid, Back->Generation, &Display), Display);
+    if (Coming) Kept(display_front(Coming->Program.Pid, Coming->Program.Generation, &Display), Display);
+    SaySettled();
+    BehindChanged();
 }
 
 // ---- what the prompt's strand asks -------------------------------------------
@@ -404,39 +518,35 @@ std::expected<void, int> Jobs::Ask(Asked &One)
     return {};
 }
 
-std::expected<Settled, int> Jobs::StandBy(std::uint32_t Pid, std::uint32_t Generation)
+// Gone behind comes first: a program that went behind and ended before the
+// prompt looked lived on its own, and its end is not said.
+std::expected<Settled, int> Jobs::StandBy(const Which &Program)
 {
-    const auto Find = [&] {
-        return std::find_if(Running.begin(), Running.end(),
-                            [&](const Job &One) { return One.Pid == Pid && One.Generation == Generation; });
-    };
     Await([&] {
-        const auto It = Find();
-        return It == Running.end() || It->Over || It->LetGo;
+        const Job *One = TaskOf(Program);
+        return !One || One->Over || One->Away;
     });
     std::lock_guard Held(Lock);
-    const auto      It = Find();
-    if (It == Running.end()) return std::unexpected(-ERR_PROCESS_NOT_FOUND);
-    // An end comes first: one let go that ended before the prompt looked has
-    // ended, and is not said to live on.
+    const auto      It = std::find_if(Tasks.begin(), Tasks.end(), [&](const Job &One) { return One.Program == Program; });
+    if (It == Tasks.end()) return std::unexpected(-ERR_PROCESS_NOT_FOUND);
     Settled Done;
-    if (!It->Over) {
-        It->LetGo  = false;
-        Done.LetGo = true;
-        return Done;
+    if (It->Away) {
+        Done.Behind  = true;
+        Done.Quietly = It->Quietly;
+    } else {
+        Done.End = std::move(It->End);
     }
-    Done.End = std::move(It->End);
-    Running.erase(It);
+    Tasks.erase(It);
     return Done;
 }
 
-std::expected<Settled, int> Jobs::InFront(Start What)
+std::expected<Settled, int> Jobs::OnScreen(Start What)
 {
     Asked One;
-    One.What  = std::move(What);
-    One.Front = true;
+    One.What     = std::move(What);
+    One.OnScreen = true;
     if (std::expected<void, int> Started = Ask(One); !Started) return std::unexpected(Started.error());
-    return StandBy(One.Pid, One.Generation);
+    return StandBy(One.Program);
 }
 
 std::expected<void, int> Jobs::Behind(Start What)
@@ -446,35 +556,15 @@ std::expected<void, int> Jobs::Behind(Start What)
     return Ask(One);
 }
 
-std::expected<Settled, int> Jobs::Forward(std::uint32_t Pid, std::uint32_t Generation)
+void Jobs::AwaitScreen()
 {
-    {
-        std::lock_guard Held(Lock);
-        const auto      It = std::find_if(Running.begin(), Running.end(), [&](const Job &One) {
-            return One.Pid == Pid && One.Generation == Generation && !One.Over && !One.Front;
-        });
-        if (It == Running.end()) return std::unexpected(-ERR_PROCESS_NOT_FOUND);
-        It->Front     = true;
-        It->Wants     = false;
-        It->End.Asked = false;
-    }
-    BehindChanged();
-    std::uint32_t Display = 0;
-    const int     Rc      = display_front(Pid, Generation, &Display);
-    Kept(Rc, Display);
-    return StandBy(Pid, Generation);
+    Await([&] { return !Screen; });
 }
 
-std::vector<BehindNow> Jobs::Living(bool WithServing) const
+std::vector<BehindOne> Jobs::Living() const
 {
     std::lock_guard Held(Lock);
-    return LivingNow(WithServing);
-}
-
-std::optional<std::vector<file_id_t>> Jobs::TakeGift()
-{
-    std::lock_guard Held(Lock);
-    return std::exchange(Gift, std::nullopt);
+    return Away.OnCircle();
 }
 
 void Jobs::Show(const Look &Shown)
@@ -482,7 +572,10 @@ void Jobs::Show(const Look &Shown)
     {
         std::lock_guard Held(Lock);
         PageStale = PageStale || Shown.Text != Seen.Text || Shown.Page != Seen.Page;
-        Seen      = Shown;
+        for (std::uint8_t Key = 0; Key < KeyCount; Key++)
+            KeysStale = KeysStale || !KeyChordSame(&Shown.Keys[Key], &Seen.Keys[Key]);
+        if (Shown.Order != Seen.Order || Shown.BehindContextFirst != Seen.BehindContextFirst) Away.Forget();
+        Seen = Shown;
     }
     BehindChanged();
 }
@@ -502,6 +595,22 @@ bool Jobs::TellPage()
     }
     std::uint32_t Display = 0;
     Kept(display_page(Text, Page, &Display), Display);
+    return true;
+}
+
+// The hub's keys, told to the display when it has not heard them: it takes
+// them before any program, and tells the hub which was pressed.
+bool Jobs::TellKeys()
+{
+    KeyChord Keys[KeyCount];
+    {
+        std::lock_guard Held(Lock);
+        if (!KeysStale) return false;
+        KeysStale = false;
+        std::copy(std::begin(Seen.Keys), std::end(Seen.Keys), Keys);
+    }
+    std::uint32_t Display = 0;
+    Kept(display_keys(Keys, KeyCount, &Display), Display);
     return true;
 }
 

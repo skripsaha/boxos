@@ -1,8 +1,8 @@
 /* windows.h — the hub's windows: Painter layers over the console's text, in
  * the look every program's windows share (painter/tui/window.h). One of
- * several chosen — the files a name could mean, the programs living behind —
- * and the line at the top of the screen that says who lives behind. What is
- * asked and said is asking's and news's; here it is only shown. */
+ * several chosen — the files a name could mean — and the line at the top of
+ * the screen that says who lives behind. What is asked and said is asking's
+ * and news's; here it is only shown. */
 #ifndef HUB_WINDOWS_H
 #define HUB_WINDOWS_H
 
@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "asking.h"
-#include "jobs.h"
+#include "circle.h"
 #include "look.h"
 
 namespace hub::windows {
@@ -26,10 +26,11 @@ namespace hub::windows {
 std::optional<asking::Answer> Choose(std::string_view Title, std::span<const std::string> Choices,
                                      std::size_t &Chosen);
 
-// The line at the top of the screen that says who lives behind, when the
-// person set the hub to show it there: shown, changed, or taken away. Said by
-// one strand alone, always the same: a layer is the strand's that opened it.
-void ShowBehind(const Look &Shown, const std::vector<BehindNow> &Living);
+// The line at the top of the screen that says who lives behind — the one on
+// the screen marked, and one asking for the keyboard — when the person set
+// the hub to show it there: shown, changed, or taken away. Said by one strand
+// alone, always the same: a layer is the strand's that opened it.
+void ShowBehind(const Look &Shown, const std::vector<BehindOne> &Living, const std::optional<Which> &OnScreen);
 
 }  // namespace hub::windows
 

@@ -41,7 +41,7 @@ include ../nameplate.mk
 
 OBJS = main.o session.o line.o look.o prompt.o context.o history.o words.o typing.o \
        text.o tags.o volume.o programs.o asking.o them.o jobs.o news.o fill.o launch.o \
-       remake.o itinerary.o nearest.o view.o whisper.o builtins.o help.o use.o said.o front.o \
+       remake.o itinerary.o nearest.o view.o whisper.o builtins.o help.o use.o said.o circle.o \
        windows.o
 
 hub.elf: $(BOXLIB_START) $(OBJS) $(PAINTER) $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)

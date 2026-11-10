@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "box/types.h"
+#include "key_chord.h"
 #include "text_cell.h"
 
 /*
@@ -153,13 +154,23 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
  * The program in front, and the ones behind
  * --------------------------------------------------------------------------
  *
- * A hub keeps one program in front of the person — the one it started and
- * waits for — and may let one go to live behind. The display hears two chords
- * before any program does, and says them to whoever keeps the program in
- * front, the newest keeper first:
+ * A hub keeps one program in front of the person — one it started and waits
+ * for, or one it brings back — and lets others live behind. The keys it acts
+ * on are its own: it says them (DISP_CMD_KEYS), and the display takes them
+ * before any program hears them and tells which was pressed, and over what.
+ * What each one does is the keeper's; the display only hears. The newest
+ * keeper's keys are the ones taken, and with it gone the ones beneath again.
  *
- *   Ctrl+Alt+End,  Ctrl+Alt+-    end the program in front
- *   Ctrl+Alt+Home, Ctrl+Alt+=    let it go to live behind, and back to its keeper
+ * Told is the keeper of the program in front, about that program. When that
+ * program keeps others itself — a hub started from a hub — and has nothing
+ * of its own in front, it is told, about nothing: it is the hub the person
+ * looks at. With nothing kept in front, the newest keeper that said keys and
+ * is not itself behind, about nothing.
+ *
+ * A keeper that ends does not leave what it kept behind loose: each stays
+ * behind, given to the keeper that kept the one that ended — or, with none,
+ * to the next keeper that says its keys — and that keeper is told. What it
+ * kept in front is nobody's: shown, and hearing, as before.
  *
  * A program behind hears no key: a strand of it that asks to listen waits,
  * and its keeper is told it wants the keyboard. Nor is its scene or any
@@ -168,7 +179,7 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
  * however far down, lives behind with it, and comes forward with it; the
  * strand that asked hears then, and its pictures are shown again.
  *
- * Four QUESTIONS, answered with a DisplayFrontReply — asked only by a
+ * Five QUESTIONS, answered with a DisplayFrontReply — asked only by a
  * program that wears `system` (-ERR_ACCESS_DENIED otherwise), the asker the
  * keeper by the kernel's word. Three are a DisplayFrontRequest:
  *
@@ -179,37 +190,43 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
  *                      reads now; heard 1 when a strand that reads was told —
  *                      0 says no strand of it will answer
  *
- * and one a DisplayPageRequest, the look the person chose for the screen,
- * which the display draws and keeps no setting of:
+ * and two say what the person chose, which the display keeps no setting of:
  *
- *   DISP_CMD_PAGE      the screen's text colour and page colour: every colour
- *                      no program chose (COLOR_DEFAULT) drawn in them from now
- *                      on, what the screen shows too; two #RRGGBB, else
+ *   DISP_CMD_PAGE      a DisplayPageRequest: the screen's text colour and
+ *                      page colour — every colour no program chose
+ *                      (COLOR_DEFAULT) drawn in them from now on, what the
+ *                      screen shows too; two #RRGGBB, else
  *                      -ERR_INVALID_ARGUMENT
+ *   DISP_CMD_KEYS      a DisplayKeysRequest and its KeyChords: the keys this
+ *                      keeper acts on, from now on — each held with ctrl or
+ *                      alt, else -ERR_INVALID_ARGUMENT; none takes its keys
+ *                      back
  *
  * What the display tells a keeper is a Touch on DISPLAY_FRONT_TAG, a
  * DisplayFrontNews, sent by the display (source_pid the reply's display_pid):
- * the chord pressed over the program it keeps in front, or a program it keeps
- * behind asking for the keyboard. And to every keeper at once, when a display
- * comes — at the boot, or raised again after a fall, knowing nothing of what
- * the one before it was told — that it is here: each keeper says again what it
- * keeps and the page it chose, and learns the display's pid from the answers,
- * never from the news.
+ * one of its keys pressed, a program it keeps behind asking for the keyboard,
+ * or one behind given to it. And to every keeper at once, when a display comes — at the boot,
+ * or raised again after a fall, knowing nothing of what the one before it was
+ * told — that it is here: each keeper says again what it keeps, the page it
+ * chose and its keys, and learns the display's pid from the answers, never
+ * from the news.
  */
 #define DISP_CMD_FRONT     0x50
 #define DISP_CMD_BACK      0x51
 #define DISP_CMD_ASK_END   0x52
 #define DISP_CMD_PAGE      0x53
+#define DISP_CMD_KEYS      0x54
 
 /* An occurrence the kernel's muster books (touch/muster.h): it stands on any
  * volume, whatever its tags, and never takes a name of a volume's. */
 #define DISPLAY_FRONT_TAG  "keeper:news"
 
 typedef enum {
-    DISPLAY_FRONT_END    = 1,   /* end the program in front */
-    DISPLAY_FRONT_LET_GO = 2,   /* let it go to live behind */
-    DISPLAY_FRONT_WANTS  = 3,   /* a program behind asks for the keyboard */
-    DISPLAY_FRONT_HERE   = 4,   /* a display came: keeper and program are 0 */
+    DISPLAY_FRONT_KEY   = 1,    /* one of its keys: `key` its place among those it said;
+                                 * the program 0 when the keeper's own screen is shown */
+    DISPLAY_FRONT_WANTS = 2,    /* a program behind asks for the keyboard */
+    DISPLAY_FRONT_HERE  = 3,    /* a display came: keeper and program are 0 */
+    DISPLAY_FRONT_GIVEN = 4,    /* one behind, kept by a keeper that ended, is this keeper's */
 } DisplayFrontWhat;
 
 typedef struct PACKED {
@@ -227,6 +244,12 @@ typedef struct PACKED {
 } DisplayPageRequest;
 
 typedef struct PACKED {
+    uint8_t command;            /* DISP_CMD_KEYS */
+    uint8_t count;              /* the KeyChords that follow, in the order told back */
+    uint8_t reserved[2];
+} DisplayKeysRequest;
+
+typedef struct PACKED {
     uint8_t  command;
     uint8_t  heard;             /* DISP_CMD_ASK_END: a strand of it was told */
     uint8_t  reserved[2];
@@ -238,7 +261,8 @@ typedef struct PACKED {
     uint32_t keeper_pid;        /* the program the news is for */
     uint32_t keeper_generation;
     uint8_t  what;              /* DisplayFrontWhat */
-    uint8_t  reserved[3];
+    uint8_t  key;               /* DISPLAY_FRONT_KEY: which of the keeper's keys */
+    uint8_t  reserved[2];
     uint32_t pid;               /* the program it is about */
     uint32_t generation;
 } DisplayFrontNews;
@@ -256,6 +280,10 @@ int display_ask_end(uint32_t pid, uint32_t generation);
 /* The screen's text colour and page colour, #RRGGBB, said by the asking
  * keeper; *display — may be NULL — as display_front's. OK, or a refusal. */
 int display_page(uint32_t text, uint32_t page, uint32_t *display);
+
+/* The keys the asking keeper acts on, at most 255: told back by their place
+ * in `keys` (DISPLAY_FRONT_KEY). 0 takes them back. *display as above. */
+int display_keys(const KeyChord *keys, uint32_t count, uint32_t *display);
 
 /* A word of the display on a lane's own tag, in place of a key — told from a
  * key, which is a kb_event_t of three bytes, by its length and its mark. */
@@ -440,7 +468,7 @@ STATIC_ASSERT(sizeof(DisplayLayerCloseRequest) == 12,
 STATIC_ASSERT(sizeof(DisplayLayerFrameNotice) == 12,
               "DisplayLayerFrameNotice is a message ABI and must stay 12 bytes");
 STATIC_ASSERT(sizeof(DisplayFrontRequest) == 12 && sizeof(DisplayPageRequest) == 12 &&
-                  sizeof(DisplayFrontReply) == 12,
+                  sizeof(DisplayFrontReply) == 12 && sizeof(DisplayKeysRequest) == 4 && sizeof(KeyChord) == 4,
               "a keeper's questions and their answer are an ABI of 12 bytes each");
 STATIC_ASSERT(sizeof(DisplayFrontNews) == 20, "DisplayFrontNews is a Touch payload ABI of 20 bytes");
 STATIC_ASSERT(sizeof(ConsoleNotice) == 8, "ConsoleNotice is a Touch payload ABI of 8 bytes, never a key's 3");

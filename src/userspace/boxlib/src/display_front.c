@@ -59,6 +59,23 @@ int display_page(uint32_t text, uint32_t page, uint32_t *display)
     return reply.error == OK ? OK : -reply.error;
 }
 
+int display_keys(const KeyChord *keys, uint32_t count, uint32_t *display)
+{
+    uint8_t            question[sizeof(DisplayKeysRequest) + 255u * sizeof(KeyChord)];
+    DisplayKeysRequest head = { DISP_CMD_KEYS, (uint8_t)count, { 0, 0 } };
+    DisplayFrontReply  reply;
+    uint32_t           got = 0;
+    if (count > 255u || (count && !keys)) return -ERR_INVALID_ARGUMENT;
+    memcpy(question, &head, sizeof(head));
+    if (count) memcpy(question + sizeof(head), keys, count * sizeof(KeyChord));
+    int rc = ask(DISPLAY_TAG, question, (uint32_t)(sizeof(head) + count * sizeof(KeyChord)), &reply, sizeof(reply),
+                 &got);
+    if (rc != OK) return rc;
+    if (got != sizeof(reply) || reply.command != DISP_CMD_KEYS) return -ERR_CORRUPTED;
+    if (display) *display = reply.display_pid;
+    return reply.error == OK ? OK : -reply.error;
+}
+
 uint8_t console_notice_of(const void *payload, uint32_t length)
 {
     ConsoleNotice notice;

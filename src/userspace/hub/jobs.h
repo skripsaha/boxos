@@ -1,20 +1,28 @@
-/* jobs.h — the programs this hub starts: the one in front of the person,
- * stood by until it ends or is let go, and the ones living behind. What is
- * said of them is news.h's.
+/* jobs.h — the programs this hub starts: the one on the screen, stood by
+ * until it ends or goes behind, and the ones living on their own behind the
+ * hub (circle.h). What is said of them is news.h's.
  *
  * One strand of the hub keeps them all, the keeping strand. It starts every
  * program, so each is its child and gives back to it what it gives; it hears
  * every death (process:died, claimed before the first start, so no end is
- * missed) and the display's news (box/display.h): Ctrl+Alt+End over the
- * program in front asks it to finish — and ends it at once when no strand of
- * it reads, or when it was asked already — Ctrl+Alt+Home lets it go to live
- * behind and gives the person back the prompt, and a program behind asking
- * for the keyboard is said. It tells the display the screen's colours the
- * person chose — the text and page settings — at the start, when they change,
- * and to a display that comes. What becomes of a program behind is said when it
- * happens, and the display keeps the line being typed under it. The prompt's
- * strand only asks — start this, bring that forward — and stands by while a
- * program is in front. Each wakes the other on a tag of its own (keeper:wake,
+ * missed) and the display's news (box/display.h): the keys the hub said it
+ * acts on, pressed over whatever is on the screen —
+ *
+ *   stop     the program on the screen asked to finish, ended when pressed
+ *            again or when no strand of it reads
+ *   let-go   the program on the screen goes behind and lives on its own: the
+ *            hub neither waits for it nor speaks of its end; the screen is
+ *            the hub's again
+ *   next     those behind come to the screen one by one, the hub's own prompt
+ *            after the last
+ *
+ * — a program behind asking for the keyboard, which is said, and one behind
+ * that a hub which ended kept, given to this one, which joins the circle
+ * (box/display.h DISPLAY_FRONT_GIVEN). It tells
+ * the display the hub's keys and the screen's colours the person chose, at
+ * the start, when they change, and to a display that comes. The prompt's
+ * strand only asks — start this — and stands by while a program is on the
+ * screen. Each wakes the other on a tag of its own (keeper:wake,
  * keeper:settled): a strand that waits on its Touch keeps every other event
  * that comes for it — the history's growth, a settings file saved — in its
  * stash for its reader, where a strand asleep on anything else would leave
@@ -36,6 +44,7 @@
 #include "box/touch.h"
 #include "box/types.h"
 
+#include "circle.h"
 #include "look.h"
 
 namespace hub {
@@ -61,19 +70,13 @@ struct Start {
     bool          Souvenir = false;       // its Souvenir is asked for, and kept when it ends
 };
 
-// How a program the prompt stood by for settled: it ended, or it was let go
-// to live behind and End says nothing yet.
+// How a program the prompt stood by for settled: it ended, or it went behind
+// and End says nothing — quietly when another came to the screen in its
+// place, so nothing is said of it.
 struct Settled {
-    bool   LetGo = false;
+    bool   Behind = false;
+    bool   Quietly = false;
     Ending End;
-};
-
-// A program living behind, as `front` lists it.
-struct BehindNow {
-    std::string   Who;
-    std::uint32_t Pid = 0;
-    std::uint32_t Generation = 0;
-    bool          Wants = false;   // it asked for the keyboard
 };
 
 class Jobs {
@@ -89,46 +92,38 @@ public:
     // program can be started here, and why was said.
     bool Begin(const Look &Shown);
 
-    // A program started and kept in front of the person, stood by until it
-    // ends or is let go. Not started: the kernel's refusal, a -error_t.
-    std::expected<Settled, int> InFront(Start What);
-
-    // A program started to live behind. Not started: a -error_t.
+    // A program started on the screen, stood by until it ends or goes behind.
+    // Not started: the kernel's refusal, a -error_t.
+    std::expected<Settled, int> OnScreen(Start What);
+    // A program that lives on by itself or serves, started behind. Not
+    // started: a -error_t.
     std::expected<void, int> Behind(Start What);
+    // Stood by while one from behind is on the screen: back when the hub's
+    // own prompt is.
+    void AwaitScreen();
 
-    // A program living behind brought forward, and stood by as one in front.
-    // -ERR_PROCESS_NOT_FOUND when it lives behind no more.
-    std::expected<Settled, int> Forward(std::uint32_t Pid, std::uint32_t Generation);
+    // Those on the circle, and whether one of them asks for the keyboard.
+    std::vector<BehindOne> Living() const;
 
-    // The programs living behind, the oldest first — not those that serve,
-    // unless WithServing: they are brought forward only by name.
-    std::vector<BehindNow> Living(bool WithServing = false) const;
-
-    // What the newest program that finished behind gave back to be kept as
-    // `them`, taken; nothing when none gave anything since.
-    std::optional<std::vector<file_id_t>> TakeGift();
-
-    // How the person set the hub, for what the keeping strand says.
+    // How the person set the hub, for what the keeping strand says and does.
     void Show(const Look &Shown);
 
 private:
+    // A program the prompt stands by for.
     struct Job {
-        Start         What;
-        std::uint32_t Pid = 0;
-        std::uint32_t Generation = 0;
-        bool          Front = false;      // the prompt stands by for it
-        bool          Wants = false;      // behind, it asked for the keyboard
-        bool          Over = false;       // its end was heard
-        bool          LetGo = false;      // in front, it was let go: the prompt is told
-        Ending        End;
+        Start  What;
+        Which  Program;
+        bool   Over = false;      // its end was heard
+        bool   Away = false;      // it went behind: the prompt is told
+        bool   Quietly = false;   // another came to the screen in its place
+        Ending End;
     };
     struct Asked {
         Start         What;
-        bool          Front = false;
+        bool          OnScreen = false;
         bool          Done = false;
         int           Rc = 0;
-        std::uint32_t Pid = 0;
-        std::uint32_t Generation = 0;
+        Which         Program;
     };
 
     void Keep();
@@ -136,29 +131,37 @@ private:
     bool DrawBehind();
     void Wake();
     void SaySettled();
-    std::vector<BehindNow> LivingNow(bool WithServing) const;
     bool StartAsked();
     bool HearDeaths();
     bool HearDisplay();
     bool HearWake();
     bool TellPage();
+    bool TellKeys();
     void Died(const TouchProcessDied &Death);
-    void Pressed(std::uint8_t What, std::uint32_t Pid, std::uint32_t Generation);
+    void Given(const Which &Program);
+    void Pressed(std::uint8_t Key, const Which &About);
+    void Stop(const Which &About);
+    void LetGo(const Which &About);
+    void Next();
+    bool SendBehind(Job &One, bool Quietly, const std::string &Context);
     void Rekeep();
-    void Kept(int Rc, std::uint32_t Display);
+    void Kept(int Rc, const std::uint32_t &Display);
     std::expected<void, int> Ask(Asked &One);
     template <typename Ready> void Await(Ready &&Done);
-    std::expected<Settled, int> StandBy(std::uint32_t Pid, std::uint32_t Generation);
+    std::expected<Settled, int> StandBy(const Which &Program);
+    Job *TaskOf(const Which &Program);
 
     std::thread                           Keeper;
     std::atomic<bool>                     Stopping{false};
     Look                                  Seen{};   // the keeping strand's own copy
     mutable std::mutex                    Lock;     // all of the below
-    std::vector<Job>                      Running;
+    std::vector<Job>                      Tasks;    // those the prompt stands by
+    Circle                                Away;
+    std::optional<Which>                  Screen;   // the program on the screen; none: the hub's prompt
     std::deque<Asked *>                   Starts;
-    std::optional<std::vector<file_id_t>> Gift;
     bool                                  BehindStale = false;   // the line of who lives behind is old
     bool                                  PageStale = false;     // the display has not been told Seen's page
+    bool                                  KeysStale = false;     // nor Seen's keys
     TouchTag                              Deaths = TOUCH_TAG_INVALID;
     TouchTag                              News = TOUCH_TAG_INVALID;
     TouchTag                              Woken = TOUCH_TAG_INVALID;      // the keeping strand's ear

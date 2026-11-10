@@ -16,14 +16,24 @@ BOX_SETTINGS("greeting on-or-off default on \"the line the hub says when it star
              "\"how many files the last command gave — them — before the sign\"\n"
              "    color color default green \"its color\"\n"
              "behind one-of before-sign top-line off default before-sign "
-             "\"the programs living behind: how many, before the sign; their names, on a line at the top of the "
-             "screen; or off\"\n"
+             "\"the programs living on their own behind the hub: how many, before the sign; their names, on a line "
+             "at the top of the screen; or off\"\n"
              "    color color default yellow \"its color\"\n"
+             "    order one-of newest-first oldest-first last-shown default newest-first "
+             "\"which of them the key next brings first: the one gone behind last, the one gone behind first, or the "
+             "one on the screen last\"\n"
+             "    context-first on-or-off default on "
+             "\"those gone behind in the Use Context you are in come first\"\n"
+             "keys \"the keys the hub hears over every program\"\n"
+             "    stop key default ctrl+alt+q "
+             "\"end the program on the screen: pressed once it is asked to finish, twice it ends\"\n"
+             "    let-go key default ctrl+alt+b "
+             "\"let the program on the screen live on its own behind the hub, and come back to the hub\"\n"
+             "    next key default ctrl+alt+v "
+             "\"bring those behind to the screen one by one, and after the last the hub again\"\n"
              "messages \"what the hub says of programs and commands\"\n"
              "    color color default amber \"their color\"\n"
              "    crashes on-or-off default on \"say how a program ended when it did not end well\"\n"
-             "    finished on-or-off default on "
-             "\"say when a program living behind finishes, and how many files it gave\"\n"
              "    timing number from 1 to 86400 seconds or off default 10 "
              "\"say how long a command took when it took this long or longer\"\n"
              "errors color default red \"the color of what could not be done, and why\"\n"
@@ -34,8 +44,8 @@ BOX_SETTINGS("greeting on-or-off default on \"the line the hub says when it star
              "    up one-of context-first all default context-first "
              "\"which lines Up brings back first: those typed in this Use Context, or all of them\"\n"
              "choices one-of window list default window "
-             "\"how the hub asks which one is meant — of the files a name could mean, or of the programs "
-             "living behind: in a window, or as a numbered list\"\n");
+             "\"how the hub asks which one is meant of the files a name could mean: in a window, or as a numbered "
+             "list\"\n");
 
 namespace hub {
 
@@ -44,6 +54,13 @@ namespace {
 BehindShown BehindAt(std::string_view Where)
 {
     return Where == "top-line" ? BehindShown::Line : Where == "off" ? BehindShown::Nowhere : BehindShown::Prompt;
+}
+
+BehindOrder OrderOf(std::string_view Order)
+{
+    return Order == "oldest-first" ? BehindOrder::OldestFirst
+         : Order == "last-shown"   ? BehindOrder::LastShown
+                                   : BehindOrder::NewestFirst;
 }
 
 }  // namespace
@@ -61,10 +78,13 @@ Look ReadLook()
                 .ThemColor       = box::settings::color("results color"),
                 .Behind          = BehindAt(box::settings::choice("behind")),
                 .BehindColor     = box::settings::color("behind color"),
+                .Order           = OrderOf(box::settings::choice("behind order")),
+                .BehindContextFirst = box::settings::on("behind context-first"),
+                .Keys            = {box::settings::key("keys stop"), box::settings::key("keys let-go"),
+                                    box::settings::key("keys next")},
                 .NewsColor       = box::settings::color("messages color"),
                 .RefusalColor    = box::settings::color("errors"),
                 .Ended           = box::settings::on("messages crashes"),
-                .Finished        = box::settings::on("messages finished"),
                 .LongCommand     = box::settings::number("messages timing"),
                 .Whisper         = box::settings::on("suggestions"),
                 .Needs           = box::settings::on("hints"),

@@ -9,8 +9,8 @@
 #include "boxos_kctx.h"
 
 // The program in front of the person and the ones behind (box/display.h):
-// what keepers ask, the two chords told to the keeper of the program in
-// front, and which programs hear no key.
+// what keepers ask, the keys they said told back to them, and which programs
+// hear no key.
 
 // The news tag, and the ear for programs being started. False: neither.
 bool FrontStart() noexcept;
@@ -22,8 +22,13 @@ bool FrontKeeper(const AskFrom &From) noexcept;
 // keeper From names: answered here, a refusal too.
 void FrontAsked(const Result &Asked, const AskFrom &From, const DisplayFrontRequest &Request) noexcept;
 
-// A key the keyboard said: true when it is one of the two chords — told to the
-// keeper of the program in front, and taken, never typed.
+// DISP_CMD_KEYS, asked of this display (Asked) by the keeper From names, its
+// keys the Count chords: answered here, a refusal too.
+void FrontKeysAsked(const Result &Asked, const AskFrom &From, const KeyChord *Chords,
+                    std::uint32_t Count) noexcept;
+
+// A key the keyboard said: true when it is one of the keys a keeper said —
+// told to the keeper whose screen is shown, and taken, never typed.
 bool FrontChord(const kb_event_t &Key) noexcept;
 
 // Whether the program lives behind — let go itself, or started, however far

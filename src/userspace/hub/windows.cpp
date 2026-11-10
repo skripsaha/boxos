@@ -81,14 +81,15 @@ std::optional<tui::Surface> BehindLayer;
 std::string                 BehindSaid;
 std::int32_t                BehindWidth = 0;   // the cells the line took last
 
-// "behind: radio, edit — wants the keyboard"
-std::string BehindLine(const std::vector<BehindNow> &Living)
+// "behind: radio, [edit], copy — asks for the keyboard": the one on the
+// screen in brackets.
+std::string BehindLine(const std::vector<BehindOne> &Living, const std::optional<Which> &OnScreen)
 {
     std::string Line = " behind: ";
     for (std::size_t I = 0; I < Living.size(); I++) {
         if (I > 0) Line += ", ";
-        Line += Living[I].Who;
-        if (Living[I].Wants) Line += " — wants the keyboard";
+        Line += Living[I].Program == OnScreen ? "[" + Living[I].Who + "]" : Living[I].Who;
+        if (Living[I].Asks) Line += " — asks for the keyboard";
     }
     return Line + " ";
 }
@@ -139,9 +140,10 @@ std::optional<asking::Answer> Choose(std::string_view Title, std::span<const std
     }
 }
 
-void ShowBehind(const Look &Shown, const std::vector<BehindNow> &Living)
+void ShowBehind(const Look &Shown, const std::vector<BehindOne> &Living, const std::optional<Which> &OnScreen)
 {
-    const std::string Line = Shown.Behind == BehindShown::Line && !Living.empty() ? BehindLine(Living) : std::string();
+    const std::string Line =
+        Shown.Behind == BehindShown::Line && !Living.empty() ? BehindLine(Living, OnScreen) : std::string();
     if (Line == BehindSaid) return;
     BehindSaid = Line;
     if (Line.empty()) {
