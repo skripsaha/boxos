@@ -74,6 +74,7 @@ void settings_wants(const BoxSetting *setting, char *out, size_t capacity)
         return;
     }
     case SETTING_COLOR: snprintf(out, capacity, "a color: a name such as amber, or #RRGGBB"); return;
+    case SETTING_KEY: snprintf(out, capacity, "a key held with ctrl or alt, such as ctrl+alt+q"); return;
     default: snprintf(out, capacity, "what this reader does not know"); return;
     }
 }
@@ -105,6 +106,7 @@ static int read_value(const Setting *declared, SettingSpan text, BoxSettingValue
     value->On     = read.On;
     value->Number = read.Number;
     value->Color  = read.Color;
+    value->Key    = read.Key;
     return 0;
 }
 

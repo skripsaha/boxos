@@ -47,6 +47,8 @@
  *           one-of W1 W2 ...          one of two or more different words
  *           color                     a color's name (SettingColorNames) or
  *                                     #RRGGBB
+ *           key                       a key held with ctrl or alt, as a person
+ *                                     spells it: ctrl+alt+q (key_chord.h)
  *   VALUE   a word, or text between double quotes — the only way to write a
  *           text with blanks at its ends, an empty one, or the word default
  *   next-start   the setting takes effect when the program starts next; one
@@ -69,8 +71,11 @@
  * the names, values and verdicts said here.
  *
  * No allocation and no library: every span points into the bytes it was read
- * from. Integer types and bool come from the includer (see box_format.h).
+ * from. Integer types, bool and size_t come from the includer (see
+ * box_format.h).
  */
+
+#include "key_chord.h"
 
 #define SETTING_NAME_MAX      32u
 #define SETTINGS_DEPTH_MAX    8u
@@ -85,6 +90,7 @@ typedef enum {
     SETTING_TEXT,
     SETTING_ONE_OF,
     SETTING_COLOR,
+    SETTING_KEY,
     SETTING_KIND_COUNT
 } SettingKind;
 
@@ -115,6 +121,7 @@ typedef struct {
     bool        On;             /* on-or-off */
     int64_t     Number;         /* number: 0 for off */
     uint32_t    Color;          /* color: 0xRRGGBB */
+    KeyChord    Key;            /* key */
     SettingSpan Text;           /* the value itself: a number's digits, or off */
 } SettingValue;
 
@@ -152,7 +159,8 @@ typedef enum {
     SETTING_VALUE_NOT_WORD,
     SETTING_VALUE_NOT_TEXT,
     SETTING_VALUE_NOT_CHOICE,
-    SETTING_VALUE_NOT_COLOR
+    SETTING_VALUE_NOT_COLOR,
+    SETTING_VALUE_NOT_KEY
 } SettingsVerdict;
 
 /* ── spans ───────────────────────────────────────────────────────────────── */
@@ -398,9 +406,11 @@ static inline bool SettingChoiceIs(SettingSpan choices, SettingSpan word)
  * setting counts in: "500 ms". A thing that only holds others takes none. */
 static inline SettingsVerdict SettingValueRead(const Setting *setting, SettingSpan value, SettingValue *out)
 {
+    const KeyChord none = { 0, 0, 0, 0 };
     out->On     = false;
     out->Number = 0;
     out->Color  = 0;
+    out->Key    = none;
     out->Text   = value;
     if (!SettingTextUsable(value)) return SETTING_VALUE_NOT_TEXT;
     if (value.Length == 0 && setting->Kind != SETTING_TEXT) return SETTING_VALUE_EMPTY;
@@ -435,6 +445,8 @@ static inline SettingsVerdict SettingValueRead(const Setting *setting, SettingSp
         return SettingChoiceIs(setting->Choices, value) ? SETTINGS_OK : SETTING_VALUE_NOT_CHOICE;
     case SETTING_COLOR:
         return SettingColorRead(value, &out->Color) ? SETTINGS_OK : SETTING_VALUE_NOT_COLOR;
+    case SETTING_KEY:
+        return KeyChordRead(value.At, value.Length, &out->Key) ? SETTINGS_OK : SETTING_VALUE_NOT_KEY;
     default:
         return SETTING_KIND_UNKNOWN;
     }
@@ -445,7 +457,7 @@ static inline SettingsVerdict SettingValueRead(const Setting *setting, SettingSp
 static inline const char *SettingKindWord(SettingKind kind)
 {
     static const char *const words[SETTING_KIND_COUNT] = {
-        "", "on-or-off", "number", "word", "text", "one-of", "color"
+        "", "on-or-off", "number", "word", "text", "one-of", "color", "key"
     };
     return (unsigned)kind < SETTING_KIND_COUNT ? words[kind] : "";
 }
@@ -874,6 +886,7 @@ static inline const char *SettingsVerdictText(SettingsVerdict verdict)
     case SETTING_VALUE_NOT_TEXT:      return "is not text";
     case SETTING_VALUE_NOT_CHOICE:    return "is not one of its choices";
     case SETTING_VALUE_NOT_COLOR:     return "is not a color: a name such as amber, or #RRGGBB";
+    case SETTING_VALUE_NOT_KEY:       return "is not a key held with ctrl or alt, such as ctrl+alt+q";
     }
     return "is refused";
 }

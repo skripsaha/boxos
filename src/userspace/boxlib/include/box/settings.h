@@ -25,7 +25,7 @@ extern "C" {
  * the kind takes] default VALUE [next-start] "what it does"`, or `NAME "what
  * it holds"` for a thing that only holds the lines indented under it — the
  * kinds on-or-off, number from A to B [UNIT] [or off], word, text, one-of W1
- * W2 ... and color, as src/include/settings_reader.h defines them; the
+ * W2 ..., color and key, as src/include/settings_reader.h defines them; the
  * toolchain refuses a line it could not read. The declaration is the one
  * source of what each setting is: the utility settings and help show it, the
  * values are checked against it, and its defaults are what a program has
@@ -64,7 +64,7 @@ extern "C" {
  * the settings are read again (settings_reload, or a watch that saw the file
  * saved or the context change). Asking for a path the program does not
  * declare, or for a setting as a kind it is not, is the program's mistake:
- * said once, and the answer is false, 0, "" or black.
+ * said once, and the answer is false, 0, "", black or no key.
  */
 
 /* BOX_SETTINGS(text): the program's declaration, text as above without its
@@ -82,6 +82,7 @@ const char *settings_word(const char *path);
 const char *settings_text(const char *path);
 const char *settings_choice(const char *path);
 uint32_t    settings_color(const char *path);      /* 0xRRGGBB */
+KeyChord    settings_key(const char *path);        /* key_chord.h; all 0 for none */
 
 /* The person's file and the Use Context read again: true when a value that
  * holds changed. */
@@ -109,6 +110,7 @@ typedef struct {
     bool        On;             /* on-or-off */
     int64_t     Number;         /* number: 0 for off */
     uint32_t    Color;          /* color: 0xRRGGBB */
+    KeyChord    Key;            /* key */
 } BoxSettingValue;
 
 /* One setting: as declared, and what it is everywhere now. Strings are

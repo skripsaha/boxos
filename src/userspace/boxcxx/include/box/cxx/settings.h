@@ -12,6 +12,7 @@
 //   box::settings::text("greeting")
 //   box::settings::choice("hours")
 //   box::settings::color("digits color") — a color, 0xRRGGBB
+//   box::settings::key("keys stop")      — a key held with ctrl or alt (key_chord.h)
 //   box::settings::reload()              — the person's file and the Use Context read again:
 //                                          did a value that holds change
 //
@@ -25,7 +26,7 @@
 // watch looks without waiting, so a program that draws in a loop asks it once
 // a turn; the file is read again only when it was saved whole. Asking for a
 // setting the program does not declare, or as a kind it is not, is the
-// program's mistake: said once, and the answer is false, 0, "" or black.
+// program's mistake: said once, and the answer is false, 0, "", black or no key.
 //
 // This is a box:: extension, not part of std.
 #ifndef BOXCXX_BOX_SETTINGS_H
@@ -45,6 +46,7 @@ struct settings {
     static std::string   text(const char *path) { return ::settings_text(path); }
     static std::string   choice(const char *path) { return ::settings_choice(path); }
     static std::uint32_t color(const char *path) { return ::settings_color(path); }
+    static KeyChord      key(const char *path) { return ::settings_key(path); }
     static bool          reload() { return ::settings_reload(); }
 
     // The person's file and the Use Context watched: Touch on the tag every

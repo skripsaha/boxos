@@ -399,6 +399,32 @@ static void TestInContext(void)
     settings_release(&s);
 }
 
+/* A key: read as its kind into the value, in a context's block too, and what
+ * it takes said for a person. */
+static void TestKey(void)
+{
+    BoxSettings s;
+    char        wants[120];
+    Assemble(&s, "settings 1\nkeys \"the keys\"\n    stop key default ctrl+alt+q \"end it\"\n",
+             "keys stop alt+shift+end\n[work]\n    keys stop ctrl+alt+x\n    keys stop q\n");
+    const BoxSetting *stop = settings_find(&s, "keys stop");
+    Check(stop && strcmp(stop->Value.Text, "alt+shift+end") == 0 && stop->Value.Key.Extended &&
+              stop->Value.Key.Code == KEY_END && stop->Value.Key.Mods == (KB_MOD_ALT | KB_MOD_SHIFT),
+          "a key set everywhere, read as its kind");
+    const BoxSettingInContext *in = stop ? settings_in_context(&s, (size_t)(stop - s.Settings), "work") : NULL;
+    Check(in && in->Value.Key.Code == 'x' && in->Value.Key.Mods == (KB_MOD_CTRL | KB_MOD_ALT),
+          "a key set for a context, read as its kind");
+    ProblemsAre(&s,
+                (const char *const[]){ "clock.settings, line 4: [work] keys stop is set before, on line 3; this "
+                                       "line is taken",
+                                       "clock.settings, line 4: [work] keys stop wants a key held with ctrl or alt, "
+                                       "such as ctrl+alt+q; the line is passed over" },
+                2, "a key that is no chord, said");
+    if (stop) settings_wants(stop, wants, sizeof(wants));
+    Check(stop && strcmp(wants, "a key held with ctrl or alt, such as ctrl+alt+q") == 0, "what a key takes, said");
+    settings_release(&s);
+}
+
 int main(void)
 {
     TestNoFile();
@@ -408,6 +434,7 @@ int main(void)
     TestCheck();
     TestReassemble();
     TestInContext();
+    TestKey();
     printf("settings, put together: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

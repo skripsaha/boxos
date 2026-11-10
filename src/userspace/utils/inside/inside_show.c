@@ -234,6 +234,7 @@ static void SaySetting(const InsideFile *file, const Setting *setting)
         break;
     }
     case SETTING_COLOR: Say(file, ": a color, "); break;
+    case SETTING_KEY: Say(file, ": a key held with ctrl or alt, "); break;
     default: break;
     }
     if (setting->Kind == SETTING_TEXT) {

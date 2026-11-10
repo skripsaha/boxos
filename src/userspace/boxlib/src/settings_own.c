@@ -244,6 +244,16 @@ static bool own_refresh(bool file, bool context)
     return changed;
 }
 
+KeyChord settings_key(const char *path)
+{
+    const KeyChord none = { 0, 0, 0, 0 };
+    umutex_lock(&g_lock);
+    const BoxSetting *setting = own_setting(path, SETTING_KEY);
+    KeyChord          key     = setting ? own_value(setting)->Key : none;
+    umutex_unlock(&g_lock);
+    return key;
+}
+
 bool settings_reload(void)
 {
     return own_refresh(true, true);

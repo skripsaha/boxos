@@ -429,6 +429,108 @@ static void TestValues(void)
           "a thing that only holds others reads no value");
 }
 
+/* ── keys ────────────────────────────────────────────────────────────────── */
+
+/* `text` read as a chord: whether it is one, and what — Mods, Extended and
+ * Code — when `want` says it is. */
+static void ChordIs(const char *text, bool want, uint8_t mods, uint8_t extended, uint8_t code)
+{
+    KeyChord chord;
+    char     label[200];
+    bool     read = KeyChordRead((const uint8_t *)text, strlen(text), &chord);
+    snprintf(label, sizeof(label), "the chord '%s' %s", text, want ? "reads" : "is refused");
+    Check(read == want && (!want || (chord.Mods == mods && chord.Extended == extended && chord.Code == code)), label);
+}
+
+static void SpelledIs(const char *text, const char *spelled)
+{
+    KeyChord chord;
+    char     said[KEY_CHORD_SPELLED_MAX], label[200];
+    bool     read = KeyChordRead((const uint8_t *)text, strlen(text), &chord);
+    if (read) KeyChordSpell(&chord, said, sizeof(said));
+    snprintf(label, sizeof(label), "'%s' is said '%s' (said '%s')", text, spelled, read ? said : "nothing");
+    Check(read && strcmp(said, spelled) == 0, label);
+}
+
+static void TestKeys(void)
+{
+    const uint8_t CA = KB_MOD_CTRL | KB_MOD_ALT;
+    ChordIs("ctrl+alt+q", true, CA, 0, 'q');
+    ChordIs("Alt+Ctrl+Q", true, CA, 0, 'q');
+    ChordIs("ctrl+shift+left", true, KB_MOD_CTRL | KB_MOD_SHIFT, 1, KEY_LEFT);
+    ChordIs("alt+tab", true, KB_MOD_ALT, 0, KEY_TAB);
+    ChordIs("ctrl+alt+space", true, CA, 0, ' ');
+    ChordIs("ctrl+alt+page-down", true, CA, 1, KEY_PAGEDN);
+    ChordIs("ctrl+alt+shift+b", true, CA | KB_MOD_SHIFT, 0, 'b');
+    ChordIs("ctrl+/", true, KB_MOD_CTRL, 0, '/');
+    ChordIs("ctrl+alt+7", true, CA, 0, '7');
+    ChordIs("q", false, 0, 0, 0);
+    ChordIs("shift+q", false, 0, 0, 0);
+    ChordIs("shift+left", false, 0, 0, 0);
+    ChordIs("ctrl+", false, 0, 0, 0);
+    ChordIs("+q", false, 0, 0, 0);
+    ChordIs("ctrl+alt", false, 0, 0, 0);
+    ChordIs("ctrl+ctrl+q", false, 0, 0, 0);
+    ChordIs("ctrl+alt+qq", false, 0, 0, 0);
+    ChordIs("ctrl+alt+f1", false, 0, 0, 0);
+    ChordIs("ctrl+shift+1", false, 0, 0, 0);
+    ChordIs("ctrl+alt+q+w", false, 0, 0, 0);
+    ChordIs("ctrl alt q", false, 0, 0, 0);
+    ChordIs("ctrl+alt+!", false, 0, 0, 0);
+    ChordIs("", false, 0, 0, 0);
+
+    SpelledIs("Alt+Shift+Ctrl+A", "ctrl+alt+shift+a");
+    SpelledIs("ctrl+alt+PAGE-UP", "ctrl+alt+page-up");
+    SpelledIs("alt+escape", "alt+escape");
+    const KeyChordName *names = KeyChordNames();
+    unsigned            held  = 0;
+    for (unsigned i = 0; i < KEY_CHORD_NAMES; i++) {
+        char text[40], said[KEY_CHORD_SPELLED_MAX];
+        KeyChord chord;
+        snprintf(text, sizeof(text), "ctrl+%s", names[i].Name);
+        if (!KeyChordRead((const uint8_t *)text, strlen(text), &chord)) continue;
+        KeyChordSpell(&chord, said, sizeof(said));
+        held += strcmp(said, text) == 0;
+    }
+    Check(held == KEY_CHORD_NAMES, "every key's name read and said back as it was");
+
+    KeyChord chord, other;
+    KeyChordRead((const uint8_t *)"ctrl+alt+q", 10, &chord);
+    KeyChordRead((const uint8_t *)"alt+ctrl+q", 10, &other);
+    const kb_event_t typed = { 0x10, 'q', KB_MOD_CTRL | KB_MOD_ALT };
+    const kb_event_t shifted = { 0x10, 'Q', KB_MOD_CTRL | KB_MOD_ALT | KB_MOD_SHIFT };
+    const kb_event_t alone = { 0x10, 'q', KB_MOD_CTRL };
+    Check(KeyChordSame(&chord, &other) && KeyChordMatches(&chord, &typed) && !KeyChordMatches(&chord, &shifted) &&
+              !KeyChordMatches(&chord, &alone),
+          "ctrl+alt+q is the key q with ctrl and alt held, and with nothing more or less");
+    KeyChordRead((const uint8_t *)"ctrl+alt+shift+q", 16, &chord);
+    Check(KeyChordMatches(&chord, &shifted), "with shift held the letter comes as a capital, and matches");
+    KeyChordRead((const uint8_t *)"ctrl+left", 9, &chord);
+    const kb_event_t left = { KEY_LEFT, 0, KB_MOD_CTRL | KB_MOD_EXTENDED };
+    const kb_event_t four = { KEY_LEFT, '4', KB_MOD_CTRL };
+    Check(KeyChordMatches(&chord, &left) && !KeyChordMatches(&chord, &four),
+          "left is the key of the 0xE0 set, not the keypad's 4 with the same scancode");
+
+    SettingsDeclared declared;
+    Setting          setting;
+    SettingsVerdict  verdict = SETTINGS_OK;
+    const char      *text    = "settings 1\nstop key default ctrl+alt+q \"end the program on the screen\"\n";
+    Check(SettingsDeclaredBegin((const uint8_t *)text, strlen(text), &declared) == SETTINGS_OK &&
+              SettingsDeclaredNext(&declared, &setting, &verdict) && verdict == SETTINGS_OK &&
+              setting.Kind == SETTING_KEY && Is(setting.Default, "ctrl+alt+q"),
+          "a key declared, its default read");
+    LineVerdict("stop key default q \"x\"", SETTING_DEFAULT_BAD, "a key's default that is no chord");
+    SettingValue value;
+    Check(SettingValueRead(&setting, Span("Ctrl+Alt+B"), &value) == SETTINGS_OK && value.Key.Code == 'b' &&
+              value.Key.Mods == CA && Is(value.Text, "Ctrl+Alt+B"),
+          "a key's value read, kept as written");
+    Check(SettingValueRead(&setting, Span("ctrl+b"), &value) == SETTINGS_OK && value.Key.Mods == KB_MOD_CTRL,
+          "ctrl alone is held");
+    Check(SettingValueRead(&setting, Span("b"), &value) == SETTING_VALUE_NOT_KEY &&
+              SettingValueRead(&setting, Span(""), &value) == SETTING_VALUE_EMPTY,
+          "a letter alone is no key, and nothing is empty");
+}
+
 /* ── the person's file ───────────────────────────────────────────────────── */
 
 static unsigned Lines(const char *file, SettingsLine *lines, unsigned room)
@@ -862,6 +964,7 @@ int main(void)
     TestDeclaredWrong();
     TestFind();
     TestValues();
+    TestKeys();
     TestChosenTree();
     TestChosenContext();
     TestPenSet();
