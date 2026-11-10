@@ -5,6 +5,8 @@
 #include "process.h"
 #include "cabin.h"
 #include "amp.h"
+#include "touch.h"
+#include "boxos_decks.h"
 
 /* One tag of a list: where its canonical text lies in the list's text, and
  * how much of it is the key. */
@@ -359,27 +361,32 @@ typedef struct UseSeen {
  * word (`over` NULL); for a volume's memory or a change only while the
  * context is still what was seen and nobody has said anything since. One
  * store under the lock, the word's text and number taken under it for `word`;
- * the old list is let go of outside it.
+ * the old list is let go of outside it. A word that says something else than
+ * the context did is said on USE_TOUCH_TAG after it is made, outside every
+ * lock.
  */
 static bool UseContextInstall(UseList *l, const UseSeen *over, UseWord *word)
 {
     UseListHold(l);
     spin_lock(&g_use.lock);
-    bool     take = !over || (g_use.list == over->list && g_use.said == over->said);
-    UseList *gone = l;
+    bool     take   = !over || (g_use.list == over->list && g_use.said == over->said);
+    UseList *gone   = l;
+    uint64_t saying = 0;
     if (take) {
         gone       = g_use.list;
         g_use.list = l;
-        g_use.said++;
+        saying     = ++g_use.said;
         __atomic_store_n(&g_use_waiting, (l && l->count) ? 1u : 0u, __ATOMIC_SEQ_CST);
         if (word) {
             word->said   = UseTextHold(l ? l->said : NULL);
-            word->saying = g_use.said;
+            word->saying = saying;
         }
     }
     spin_unlock(&g_use.lock);
+    bool differs = take && !UseTextSame(gone ? gone->said : NULL, l ? l->said : NULL);
     UseListDrop(gone);
     if (take) UseContextChanged();
+    if (differs) TouchPublish(USE_TOUCH_TAG, &saying, sizeof(saying));
     return take;
 }
 

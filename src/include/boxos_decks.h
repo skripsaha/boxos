@@ -62,6 +62,12 @@
 #define SYSTEM_OP_USE_GET           0x08
 #define SYSTEM_OP_USE_CLEAR         0x09
 #define SYSTEM_OP_USE_CHANGE        0x0D
+/* The Touch tag the kernel says on that the Use Context says something else
+ * than it did — set, changed, cleared, or taken up from a volume's memory —
+ * after the change is made, so whoever hears it and asks get hears the new
+ * context or a later one. Payload: one u64, the saying's number, counting
+ * every word said since boot. */
+#define USE_TOUCH_TAG               "use:changed"
 /* () -> u64 microseconds of processor time used by the CALLING cabin. Self
  * only, deliberately: another cabin's processor time is information this op
  * has no business handing out, and a question about yourself needs no

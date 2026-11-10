@@ -4,8 +4,8 @@
  *   help NAME     the command, or the program NAME: each field its Form
  *                 takes, what it gives back, and what can be set in it —
  *                 each setting as it is now, said as the utility settings
- *                 says it, and the lines of the person's file it could not
- *                 take */
+ *                 says it — a context's line that holds now said so — and
+ *                 the lines of the person's file it could not take */
 
 #include <algorithm>
 #include <string>
@@ -19,6 +19,7 @@
 #include "settings_pen.h"
 
 #include "builtins.h"
+#include "context.h"
 #include "held.h"
 #include "hub.h"
 #include "itinerary.h"
@@ -123,7 +124,8 @@ void ShowSetting(const BoxSettings &Settings, const BoxSetting &Setting)
 }
 
 // What can be set in the program, as it is set now, and what its file sets
-// for a context. Nothing is said of a program that declares no settings.
+// for a context — the line that holds in the Use Context now said so.
+// Nothing is said of a program that declares no settings.
 void ShowSettings(file_id_t Program, const std::string &Name)
 {
     BoxSettings Settings;
@@ -134,13 +136,14 @@ void ShowSettings(file_id_t Program, const std::string &Name)
     if (Settings.Count > 0) {
         Say("{} can be set — settings {} PATH VALUE:\n", Name.c_str(), Name.c_str());
         for (std::size_t I = 0; I < Settings.Count; I++) ShowSetting(Settings, Settings.Settings[I]);
+        const std::string Context = context::Whole().value_or(std::string());
         for (std::size_t I = 0; I < Settings.InContextCount; I++) {
             const BoxSettingInContext &In = Settings.InContext[I];
             Say("  ");
             SayIn(COLOR_GREEN, "[{}]", In.Tags);
             Say(" {} ", Settings.Settings[In.Setting].Path);
             SayValue(In.Value.Text);
-            Say("\n");
+            Say(settings_in_context(&Settings, In.Setting, Context.c_str()) == &In ? " — holds now\n" : "\n");
         }
     }
     for (std::size_t I = 0; I < Settings.ProblemCount; I++) SayIn(COLOR_YELLOW, "{}\n", Settings.Problems[I]);

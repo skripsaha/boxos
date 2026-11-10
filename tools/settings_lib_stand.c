@@ -329,6 +329,76 @@ static void TestReassemble(void)
     settings_release(&s);
 }
 
+/* What holds for `path` while the Use Context is `context`: the block of
+ * `tags` with `value`, or for NULL tags none — what is set everywhere. */
+static void HoldsIs(const BoxSettings *settings, const char *context, const char *path, const char *tags,
+                    const char *value)
+{
+    char                       label[200];
+    const BoxSetting          *setting = settings_find(settings, path);
+    const BoxSettingInContext *in      = setting ? settings_in_context(settings, (size_t)(setting - settings->Settings),
+                                                                        context)
+                                                 : NULL;
+    bool                       held    = setting && (tags ? in && strcmp(in->Tags, tags) == 0 &&
+                                                               strcmp(in->Value.Text, value) == 0
+                                                          : !in && strcmp(setting->Value.Text, value) == 0);
+    snprintf(label, sizeof(label), "in the Use Context '%s' %s holds %s from %s%s%s (it is %s%s%s)",
+             context ? context : "(none)", path, value, tags ? "[" : "everywhere", tags ? tags : "", tags ? "]" : "",
+             in ? "[" : "everywhere", in ? in->Tags : "", in ? "]" : "");
+    Check(held, label);
+}
+
+/* Which block holds in which Use Context: the one whose tags the context
+ * holds every one of, of those the one of the most tags, of as many the one
+ * written last; "key:" is the bare key, as the kernel spells it. */
+static void TestInContext(void)
+{
+    BoxSettings s;
+    Assemble(&s, g_clock,
+             "hours 12\n"
+             "[work]\n"
+             "    hours 24\n"
+             "    blink 500 ms\n"
+             "[work, late]\n"
+             "    hours 12\n"
+             "[home]\n"
+             "    hours 24\n"
+             "[project:alpha]\n"
+             "    blink 1000 ms\n"
+             "[late]\n"
+             "    digits color red\n"
+             "[work:]\n"
+             "    seconds off\n"
+             "[late work]\n"
+             "    digits color green\n"
+             "[late]\n"
+             "    digits color blue\n");
+    ProblemsAre(&s,
+                (const char *const[]){
+                    "clock.settings, line 18: [late] digits color is set before, on line 12; this line is taken" },
+                1, "a setting set again in a block of the same tags: the last line counts");
+    HoldsIs(&s, NULL, "hours", NULL, "12");
+    HoldsIs(&s, "", "hours", NULL, "12");
+    HoldsIs(&s, "other", "hours", NULL, "12");
+    HoldsIs(&s, "work", "hours", "work", "24");
+    HoldsIs(&s, "work", "blink", "work", "500");
+    HoldsIs(&s, "work", "seconds", "work:", "off");
+    HoldsIs(&s, "work", "digits color", NULL, "#E6E6E6");
+    HoldsIs(&s, "work,late", "hours", "work, late", "12");
+    HoldsIs(&s, "late,work", "hours", "work, late", "12");
+    HoldsIs(&s, "late, work, home", "hours", "work, late", "12");
+    HoldsIs(&s, "home,work", "hours", "home", "24");
+    HoldsIs(&s, "work,home", "hours", "home", "24");
+    HoldsIs(&s, "late", "hours", NULL, "12");
+    HoldsIs(&s, "late", "digits color", "late", "blue");
+    HoldsIs(&s, "late,work", "digits color", "late work", "green");
+    HoldsIs(&s, "project:alpha", "blink", "project:alpha", "1000");
+    HoldsIs(&s, "project", "blink", NULL, "off");
+    HoldsIs(&s, "project:beta", "blink", NULL, "off");
+    HoldsIs(&s, "work,project:alpha", "blink", "project:alpha", "1000");
+    settings_release(&s);
+}
+
 int main(void)
 {
     TestNoFile();
@@ -337,6 +407,7 @@ int main(void)
     TestDeclarationWrong();
     TestCheck();
     TestReassemble();
+    TestInContext();
     printf("settings, put together: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

@@ -211,6 +211,25 @@ const BoxSetting *settings_find(const BoxSettings *settings, const char *path)
     return NULL;
 }
 
+/* InContext is in the file's order, so of two blocks of as many tags the
+ * later one found is the one written last. */
+const BoxSettingInContext *settings_in_context(const BoxSettings *settings, size_t index, const char *context)
+{
+    const BoxSettingInContext *holds = NULL;
+    uint32_t                   most  = 0;
+    if (!settings || !context) return NULL;
+    for (size_t i = 0; i < settings->InContextCount; i++) {
+        const BoxSettingInContext *in = &settings->InContext[i];
+        if (in->Setting != index || !SettingTagsWithin(span_of(in->Tags), span_of(context))) continue;
+        uint32_t tags = SettingTagsCount(span_of(in->Tags));
+        if (tags >= most) {
+            holds = in;
+            most  = tags;
+        }
+    }
+    return holds;
+}
+
 /* "clock has no setting digts — did you mean digits?"; "digits has no
  * setting colr inside it — did you mean digits color?"; "clock has no
  * setting color — did you mean digits color?" for a name that is only

@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-#include "box/defs.h"
+#include "box/types.h"   /* USE_TOUCH_TAG, by boxos_decks.h */
 
 /*
  * Use Context — what the person at this machine is doing, said in tags.
@@ -23,6 +23,11 @@ extern "C" {
  *
  * A tag list is comma-separated: "code,cpp" or "code, project:alpha". Blanks
  * around a tag are dropped and "key:" means the bare "key".
+ *
+ * Every change is said: once the context says something else than it did,
+ * the kernel says so on the Touch tag use:changed (USE_TOUCH_TAG, payload the
+ * u64 number of the word) — whoever adjusts itself to the context asks
+ * use_get again then, and hears the new context or a later one.
  */
 
 /*

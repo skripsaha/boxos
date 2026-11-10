@@ -138,14 +138,17 @@ static inline bool SettingTagSeparator(uint8_t c)
     return SettingBlank(c) || c == ',';
 }
 
-/* The next tag of a list from *at on: apart by blanks or commas. */
+/* The next tag of a list from *at on: apart by blanks or commas, and spelled
+ * as the kernel spells a tag — "key:" is the bare "key". */
 static inline bool SettingTag(SettingSpan tags, uint64_t *at, SettingSpan *tag)
 {
     while (*at < tags.Length && SettingTagSeparator(tags.At[*at])) (*at)++;
     if (*at == tags.Length) return false;
     uint64_t start = *at;
     while (*at < tags.Length && !SettingTagSeparator(tags.At[*at])) (*at)++;
-    *tag = SettingSpanOf(tags.At + start, *at - start);
+    uint64_t length = *at - start;
+    if (length > 1 && tags.At[start + length - 1] == ':') length--;
+    *tag = SettingSpanOf(tags.At + start, length);
     return true;
 }
 
@@ -168,6 +171,17 @@ static inline uint32_t SettingTagsCount(SettingSpan tags)
     return count;
 }
 
+/* Whether `context` holds every tag of `tags`: the Use Context, comma-joined
+ * as use_get says it, holding a block's tags. */
+static inline bool SettingTagsWithin(SettingSpan tags, SettingSpan context)
+{
+    uint64_t    at = 0;
+    SettingSpan one;
+    while (SettingTag(tags, &at, &one))
+        if (!SettingTagsHold(context, one)) return false;
+    return true;
+}
+
 /* Whether two lists name the same tags, in any order: an empty one names
  * none — everywhere. */
 static inline bool SettingTagsSame(SettingSpan a, SettingSpan b)
@@ -181,7 +195,8 @@ static inline bool SettingTagsSame(SettingSpan a, SettingSpan b)
 }
 
 /* The tags between the brackets of a [ ] line, read: at least one, none
- * twice, each without a bracket or a quote, nothing after the ]. */
+ * twice, each with a key before any colon, without a bracket or a quote,
+ * nothing after the ]. */
 static inline bool SettingContextRead(SettingSpan line, uint64_t lead, SettingSpan *tags)
 {
     SettingSpan rest = SettingTrimmed(SettingSpanOf(line.At + lead, line.Length - lead));
@@ -191,6 +206,7 @@ static inline bool SettingContextRead(SettingSpan line, uint64_t lead, SettingSp
     SettingSpan tag;
     uint32_t    count = 0;
     while (SettingTag(*tags, &at, &tag)) {
+        if (tag.At[0] == ':') return false;
         for (uint64_t i = 0; i < tag.Length; i++)
             if (tag.At[i] == '[' || tag.At[i] == ']' || tag.At[i] == '"') return false;
         SettingSpan before = SettingSpanOf(tags->At, (uint64_t)(tag.At - tags->At));

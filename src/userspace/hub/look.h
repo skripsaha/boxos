@@ -1,5 +1,6 @@
 /* look.h — how the person set the hub: its settings (hub.settings), read
- * through box::settings, and read again as soon as the file is saved. */
+ * through box::settings as they hold in the Use Context, and read again as
+ * soon as the file is saved or the context changes. */
 #ifndef HUB_LOOK_H
 #define HUB_LOOK_H
 

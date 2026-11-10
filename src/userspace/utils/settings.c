@@ -10,6 +10,10 @@
  *     settings clock [work] default          everything set for work, as it came
  *     settings clock default                 every setting as it came, in every context
  *
+ * What is set for a context holds while the Use Context holds its tags (box/
+ * settings.h says which block of several); the line of a block that holds
+ * now is said so.
+ *
  * What can be set the program declares (box/settings.h), a tree of things and
  * what each has; a setting is named by its path, its names from the top down.
  * What the person sets goes into the file <program>.settings, the lines of
@@ -30,6 +34,7 @@
 #include "box/settings.h"
 #include "box/string.h"
 #include "box/system.h"
+#include "box/use.h"
 #include "settings_pen.h"
 
 BOX_FORM("takes name program \"the program\"\n"
@@ -146,13 +151,28 @@ static void show_setting(const BoxSettings *settings, const BoxSetting *setting)
     printf("%s\n", setting->NextStart ? "; takes effect when it starts next" : "");
 }
 
+/* The Use Context as it is now, comma-joined; NULL for none — or when the
+ * kernel would not say, and then no block holds. The caller frees it. */
+static char *context_now(void)
+{
+    for (;;) {
+        size_t needed = 0, again = 0;
+        char  *context;
+        if (use_get(NULL, 0, &needed) < 0 || needed <= 1 || !(context = malloc(needed))) return NULL;
+        if (use_get(context, needed, &again) > 0 && again <= needed) return context;
+        free(context);
+        if (again <= needed) return NULL;
+    }
+}
+
 /* What the person's file sets in a context: [TAGS] PATH VALUE — as the
- * command would set it. Only those of the settings `under` holds (all for
- * NULL), and of the context `tags` (any for NULL). */
+ * command would set it, and whether it holds now. Only those of the settings
+ * `under` holds (all for NULL), and of the context `tags` (any for NULL). */
 static void show_in_contexts(const BoxSettings *settings, const BoxSetting *under, const char *tags)
 {
-    size_t      length = under ? strlen(under->Path) : 0;
-    SettingSpan wanted = { (const uint8_t *)(tags ? tags : ""), tags ? strlen(tags) : 0 };
+    size_t      length  = under ? strlen(under->Path) : 0;
+    SettingSpan wanted  = { (const uint8_t *)(tags ? tags : ""), tags ? strlen(tags) : 0 };
+    char       *context = context_now();
     for (size_t i = 0; i < settings->InContextCount; i++) {
         const BoxSettingInContext *in      = &settings->InContext[i];
         const BoxSetting          *setting = &settings->Settings[in->Setting];
@@ -163,8 +183,28 @@ static void show_in_contexts(const BoxSettings *settings, const BoxSetting *unde
         if (tags && !SettingTagsSame(its, wanted)) continue;
         printf("%color[%s]%color %s ", COLOR_GREEN, in->Tags, COLOR_DEFAULT, setting->Path);
         print_value(in->Value.Text);
-        printf("\n");
+        printf("%s\n", settings_in_context(settings, in->Setting, context) == in ? " — holds now" : "");
     }
+    free(context);
+}
+
+/* Whether the value just set for the context `tags` holds now: said after
+ * it — and which block holds over it, when the context holds its tags and
+ * one of more tags holds too. */
+static void say_holds(const BoxSettings *settings, const BoxSetting *setting, const char *tags)
+{
+    char                      *context = context_now();
+    SettingSpan                its     = { (const uint8_t *)tags, strlen(tags) };
+    SettingSpan                now     = { (const uint8_t *)(context ? context : ""), context ? strlen(context) : 0 };
+    const BoxSettingInContext *holds   = NULL;
+    if (setting && context && SettingTagsWithin(its, now))
+        holds = settings_in_context(settings, (size_t)(setting - settings->Settings), context);
+    if (holds && SettingTagsSame(SettingSpanOf((const uint8_t *)holds->Tags, strlen(holds->Tags)), its))
+        printf(" — it does now");
+    else if (holds)
+        printf(" — now [%s] holds over it", holds->Tags);
+    printf("\n");
+    free(context);
 }
 
 static void show_problems(const BoxSettings *settings)
@@ -378,7 +418,8 @@ static int change(BoxSettings *settings, char *typed)
         if (bare_default) printf("as it came there\n");
         else {
             print_value(value);
-            printf(", for the context %s\n", asked.Tags);
+            printf(", while the Use Context holds %s", asked.Tags);
+            say_holds(settings, setting, asked.Tags);
         }
         return 0;
     }

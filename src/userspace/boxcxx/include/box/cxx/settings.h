@@ -12,15 +12,19 @@
 //   box::settings::text("greeting")
 //   box::settings::choice("hours")
 //   box::settings::color("digits color") — a color, 0xRRGGBB
-//   box::settings::reload()              — the person's file read again: did a value change
+//   box::settings::reload()              — the person's file and the Use Context read again:
+//                                          did a value that holds change
 //
-//   box::settings::watch watch;          — the person's file watched, on this strand
-//   if (watch.changed()) ...             — saved since the last look, and a value changed:
-//                                          read what the program shows again
+//   box::settings::watch watch;          — the person's file and the Use Context watched,
+//                                          on this strand
+//   if (watch.changed()) ...             — saved or changed since the last look, and a value
+//                                          changed: read what the program shows again
 //
-// A watch looks without waiting, so a program that draws in a loop asks it
-// once a turn; the file is read again only when it was saved whole. Asking
-// for a setting the program does not declare, or as a kind it is not, is the
+// What the person set in a context's block, [work], holds while the Use
+// Context holds its tags (box/settings.h says which block of several). A
+// watch looks without waiting, so a program that draws in a loop asks it once
+// a turn; the file is read again only when it was saved whole. Asking for a
+// setting the program does not declare, or as a kind it is not, is the
 // program's mistake: said once, and the answer is false, 0, "" or black.
 //
 // This is a box:: extension, not part of std.
@@ -43,9 +47,10 @@ struct settings {
     static std::uint32_t color(const char *path) { return ::settings_color(path); }
     static bool          reload() { return ::settings_reload(); }
 
-    // The person's file watched: Touch on the tag every settings file wears,
-    // claimed on the strand that makes the watch, released with it. False
-    // when it could not be claimed — changed() then never answers true.
+    // The person's file and the Use Context watched: Touch on the tag every
+    // settings file wears and on the context's word, claimed on the strand
+    // that makes the watch, released with it. False when they could not be
+    // claimed — changed() then never answers true.
     class watch {
         SettingsWatch *watch_ = nullptr;
 

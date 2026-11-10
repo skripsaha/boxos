@@ -52,6 +52,13 @@ struct process_t;
  * up under a machine that holds no context is asked what it remembers
  * (UseContextRecall) — so what one was doing is still what one is doing
  * after the night, and it travels with the medium rather than the machine.
+ *
+ * EVERY CHANGE IS SAID. A word that leaves the context saying something else
+ * than it did — a set, a change, a clear, a volume's memory taken up — is said
+ * on the Touch tag use:changed (USE_TOUCH_TAG, boxos_decks.h) once it is
+ * made, outside every lock. A program that holds anything by the context —
+ * the settings a person set for one context, box/settings.h — takes the new
+ * one up at once rather than at its next look.
  */
 
 /*

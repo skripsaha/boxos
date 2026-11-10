@@ -3,8 +3,8 @@
  * is the part settings the kernel put into its memory at start (a box), or
  * the bytes between the symbols round .boxos.settings (an ELF image); the
  * person's file is found by the program's own name. Both are read at the
- * first ask, and the file again when the program asks — or when a watch sees
- * the file saved.
+ * first ask, with the Use Context its values hold in; the file and the
+ * context again when the program asks — or each when a watch hears it change.
  */
 
 #include "box/core/settings_internal.h"
@@ -17,6 +17,7 @@
 #include "box/string.h"
 #include "box/sync.h"
 #include "box/touch.h"
+#include "box/use.h"
 
 /* PROVIDEd by user.ld (and defined by BoxASM's linker) round an ELF image's
  * declaration — hidden, reached relative to the code. A box has its
@@ -28,6 +29,7 @@ extern const char __boxos_settings_end[] __attribute__((visibility("hidden")));
 
 static umutex_t    g_lock = UMUTEX_INIT;
 static BoxSettings g_own;
+static char       *g_context;   /* the Use Context the values hold in, comma-joined; NULL for none */
 static bool        g_read;
 static bool        g_mistake_said;
 
@@ -87,6 +89,24 @@ static void own_assemble(void)
     free(saying);
 }
 
+/* The Use Context as it is now, into g_context: asked for its size first,
+ * and read again if it grew in between. A kernel that would not say is no
+ * context — what is set everywhere holds. */
+static void own_context(void)
+{
+    free(g_context);
+    g_context = NULL;
+    for (;;) {
+        size_t needed = 0, again = 0;
+        if (use_get(NULL, 0, &needed) < 0 || needed <= 1) return;
+        if (!(g_context = malloc(needed))) return;
+        if (use_get(g_context, needed, &again) > 0 && again <= needed) return;
+        free(g_context);
+        g_context = NULL;
+        if (again <= needed) return;
+    }
+}
+
 static void own_read_locked(void)
 {
     if (g_read) return;
@@ -95,6 +115,15 @@ static void own_read_locked(void)
     if (program == 0 || settings_program_name(program, g_own.Program) != 0) g_own.Program[0] = '\0';
     own_declaration(&g_own);
     own_assemble();
+    own_context();
+}
+
+/* What the setting is in the context the settings were read in. Under the
+ * lock. */
+static const BoxSettingValue *own_value(const BoxSetting *setting)
+{
+    const BoxSettingInContext *in = settings_in_context(&g_own, (size_t)(setting - g_own.Settings), g_context);
+    return in ? &in->Value : &setting->Value;
 }
 
 /* The setting at `path`, when it is of `kind` — else the program's mistake,
@@ -121,7 +150,7 @@ bool settings_on(const char *path)
 {
     umutex_lock(&g_lock);
     const BoxSetting *setting = own_setting(path, SETTING_ON_OR_OFF);
-    bool              on      = setting && setting->Value.On;
+    bool              on      = setting && own_value(setting)->On;
     umutex_unlock(&g_lock);
     return on;
 }
@@ -130,7 +159,7 @@ int64_t settings_number(const char *path)
 {
     umutex_lock(&g_lock);
     const BoxSetting *setting = own_setting(path, SETTING_NUMBER);
-    int64_t           number  = setting ? setting->Value.Number : 0;
+    int64_t           number  = setting ? own_value(setting)->Number : 0;
     umutex_unlock(&g_lock);
     return number;
 }
@@ -139,7 +168,7 @@ static const char *own_text(const char *path, SettingKind kind)
 {
     umutex_lock(&g_lock);
     const BoxSetting *setting = own_setting(path, kind);
-    const char       *text    = setting ? setting->Value.Text : "";
+    const char       *text    = setting ? own_value(setting)->Text : "";
     umutex_unlock(&g_lock);
     return text;
 }
@@ -163,12 +192,42 @@ uint32_t settings_color(const char *path)
 {
     umutex_lock(&g_lock);
     const BoxSetting *setting = own_setting(path, SETTING_COLOR);
-    uint32_t          color   = setting ? setting->Value.Color : 0;
+    uint32_t          color   = setting ? own_value(setting)->Color : 0;
     umutex_unlock(&g_lock);
     return color;
 }
 
-bool settings_reload(void)
+/* What each setting holds now, its text copied — to tell afterwards whether
+ * one changed; NULL when there was no room, and then each counts as changed.
+ * Under the lock. */
+static char **own_held(void)
+{
+    char **held = calloc(g_own.Count ? g_own.Count : 1, sizeof(char *));
+    for (size_t i = 0; held && i < g_own.Count; i++) {
+        const char *text = own_value(&g_own.Settings[i])->Text;
+        size_t      size = strlen(text) + 1;
+        if ((held[i] = malloc(size)) != NULL) memcpy(held[i], text, size);
+    }
+    return held;
+}
+
+/* Whether a setting holds another value now than in `held`, of `count`
+ * settings; `held` let go of. Under the lock. */
+static bool own_changed(char **held, size_t count)
+{
+    bool changed = !held || count != g_own.Count;
+    for (size_t i = 0; held && i < count; i++) {
+        if (!held[i] || i >= g_own.Count || strcmp(held[i], own_value(&g_own.Settings[i])->Text) != 0)
+            changed = true;
+        free(held[i]);
+    }
+    free(held);
+    return changed;
+}
+
+/* The person's file read again when `file`, the Use Context when `context`:
+ * true when a value that holds changed. */
+static bool own_refresh(bool file, bool context)
 {
     umutex_lock(&g_lock);
     if (!g_read) {
@@ -176,47 +235,49 @@ bool settings_reload(void)
         umutex_unlock(&g_lock);
         return false;
     }
-    /* What each setting was, to tell whether anything changed. */
-    size_t count   = g_own.Count;
-    char **before  = calloc(count ? count : 1, sizeof(char *));
-    bool   changed = before == NULL;
-    for (size_t i = 0; before && i < count; i++) {
-        const char *value = g_own.Settings[i].Value.Text;
-        if ((before[i] = malloc(strlen(value) + 1)) != NULL) memcpy(before[i], value, strlen(value) + 1);
-        else changed = true;
-    }
-    own_assemble();
-    for (size_t i = 0; before && i < count; i++) {
-        if (before[i] && (i >= g_own.Count || strcmp(before[i], g_own.Settings[i].Value.Text) != 0)) changed = true;
-        free(before[i]);
-    }
-    free(before);
-    changed = changed || count != g_own.Count;
+    size_t count = g_own.Count;
+    char **held  = own_held();
+    if (file) own_assemble();
+    if (context) own_context();
+    bool changed = own_changed(held, count);
     umutex_unlock(&g_lock);
     return changed;
+}
+
+bool settings_reload(void)
+{
+    return own_refresh(true, true);
 }
 
 /* ---- the watch ---------------------------------------------------------- */
 
 struct SettingsWatch {
-    TouchTag Tag;
+    TouchTag Saved;     /* settings: a settings file anchored */
+    TouchTag Context;   /* USE_TOUCH_TAG: the Use Context changed */
 };
+
+static int watch_claim(const char *name, TouchTag *out)
+{
+    TouchTag tag = touch_pair_choose(touch_intern(name));
+    if (tag == TOUCH_TAG_INVALID) return -ERR_TAG_NOT_FOUND;
+    int rc = touch_claim(tag, TOUCH_REST, 0, 0);
+    if (rc == 0) *out = tag;
+    return rc;
+}
 
 int settings_watch_begin(SettingsWatch **out)
 {
     if (!out) return -ERR_INVALID_ARGUMENT;
     *out = NULL;
-    TouchTag tag = touch_pair_choose(touch_intern("settings"));
-    if (tag == TOUCH_TAG_INVALID) return -ERR_TAG_NOT_FOUND;
     SettingsWatch *watch = malloc(sizeof(*watch));
     if (!watch) return -ERR_NO_MEMORY;
-    int rc = touch_claim(tag, TOUCH_REST, 0, 0);
+    int rc = watch_claim("settings", &watch->Saved);
+    if (rc == 0 && (rc = watch_claim(USE_TOUCH_TAG, &watch->Context)) != 0) touch_release(watch->Saved);
     if (rc != 0) {
         free(watch);
         return rc;
     }
-    watch->Tag = tag;
-    *out       = watch;
+    *out = watch;
     return 0;
 }
 
@@ -241,20 +302,22 @@ static bool own_file(file_id_t file)
 bool settings_watch_poll(SettingsWatch *watch)
 {
     Touch touch;
-    bool  saved = false;
+    bool  saved = false, context = false;
     if (!watch) return false;
-    while (touch_try_pop_tag(watch->Tag, &touch)) {
+    while (touch_try_pop_tag(watch->Saved, &touch)) {
         uint64_t file;
         if (touch.payload_len < 9 || touch.payload[8] != TOUCH_FILE_ANCHORED) continue;
         memcpy(&file, touch.payload, sizeof(file));
         if (own_file((file_id_t)file)) saved = true;
     }
-    return saved && settings_reload();
+    while (touch_try_pop_tag(watch->Context, &touch)) context = true;
+    return (saved || context) && own_refresh(saved, context);
 }
 
 void settings_watch_end(SettingsWatch *watch)
 {
     if (!watch) return;
-    touch_release(watch->Tag);
+    touch_release(watch->Saved);
+    touch_release(watch->Context);
     free(watch);
 }

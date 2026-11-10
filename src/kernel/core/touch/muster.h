@@ -142,6 +142,7 @@
     X("usb:connect")                    \
     X("usb:disconnect")                 \
     X("usb:left")                       \
+    X("use:changed")                    \
     X("volume:mounted")                 \
     X("watchtest:inner")                \
     X("watchtest:one")                  \

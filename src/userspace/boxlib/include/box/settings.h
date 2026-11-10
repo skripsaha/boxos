@@ -45,7 +45,10 @@ extern "C" {
  * A setting is named by its path: its names from the top down, apart by
  * blanks — "digits color". The lines of a context's block, [TAGS], are held
  * to the declaration like any other and kept apart from what is set
- * everywhere, in the context they were written for.
+ * everywhere, in the context they were written for. They hold while the Use
+ * Context (box/use.h) holds every tag of the block: of two blocks that both
+ * do, the one of more tags — [work, late] over [work] — and of two of as
+ * many, the one written last; when none does, what is set everywhere holds.
  *
  * The file is found by the program's name everywhere on the volume, not only
  * in the Use Context; with two of that name, the one tagged settings is read,
@@ -56,11 +59,12 @@ extern "C" {
  * digits?". A line for a name the program does not declare (another
  * version's) is left in the file.
  *
- * A program reads its own settings by path. The text an accessor answers
- * lives until the settings are read again (settings_reload, or a watch that
- * saw them change). Asking for a path the program does not declare, or for a
- * setting as a kind it is not, is the program's mistake: said once, and the
- * answer is false, 0, "" or black.
+ * A program reads its own settings by path, as they hold in the Use Context
+ * the settings were last read in. The text an accessor answers lives until
+ * the settings are read again (settings_reload, or a watch that saw the file
+ * saved or the context change). Asking for a path the program does not
+ * declare, or for a setting as a kind it is not, is the program's mistake:
+ * said once, and the answer is false, 0, "" or black.
  */
 
 /* BOX_SETTINGS(text): the program's declaration, text as above without its
@@ -79,18 +83,20 @@ const char *settings_text(const char *path);
 const char *settings_choice(const char *path);
 uint32_t    settings_color(const char *path);      /* 0xRRGGBB */
 
-/* The person's file read again: true when a value changed. */
+/* The person's file and the Use Context read again: true when a value that
+ * holds changed. */
 bool settings_reload(void);
 
-/* Watching the person's file: the program's settings are read again when the
- * file is saved whole (anchored, as the utility settings and edit save it) —
- * Touch on the tag settings, which every settings file wears. Begun on the
+/* Watching the person's file and the Use Context: the program's settings are
+ * read again when the file is saved whole (anchored, as the utility settings
+ * and edit save it) — Touch on the tag settings, which every settings file
+ * wears — and when the context changes (Touch on USE_TOUCH_TAG). Begun on the
  * strand that polls it: the events are that strand's. */
 typedef struct SettingsWatch SettingsWatch;
 
 int  settings_watch_begin(SettingsWatch **out);
-/* Without waiting: true when the program's settings file was saved since the
- * last poll and the settings were read again with a value changed. */
+/* Without waiting: true when the program's settings file was saved or the Use
+ * Context changed since the last poll, and a value that holds changed. */
 bool settings_watch_poll(SettingsWatch *watch);
 void settings_watch_end(SettingsWatch *watch);
 
@@ -121,12 +127,13 @@ typedef struct {
     const char     *Unit;       /* number: "" for none */
     const char     *Choices;    /* one-of: the words apart by blanks */
     bool            NextStart;
-    BoxSettingValue Value;      /* the person's when it holds, else the default */
+    BoxSettingValue Value;      /* everywhere: the person's when it holds, else the default */
     bool            Chosen;     /* the person's file sets it everywhere, and the value holds */
 } BoxSetting;
 
 /* A value the person's file sets in a context's block, held to the
- * declaration: the setting Settings[Setting] there, its line in the file. */
+ * declaration: the setting Settings[Setting] there, its line in the file —
+ * of a setting set twice in one block, the last line. */
 typedef struct {
     const char     *Tags;       /* the context's tags as the file writes them: "work, home" */
     size_t          Setting;
@@ -159,6 +166,13 @@ void settings_release(BoxSettings *settings);
 
 /* The setting a path names — names apart by blanks — or NULL. */
 const BoxSetting *settings_find(const BoxSettings *settings, const char *path);
+
+/* Which value of the setting Settings[index] holds while the Use Context is
+ * `context` — its tags apart by commas or blanks, as use_get says them; NULL
+ * or "" for none: the value of the block whose tags the context holds every
+ * one of, the block of the most tags, and of those the one written last — or
+ * NULL when no block does, and the setting's own Value holds. */
+const BoxSettingInContext *settings_in_context(const BoxSettings *settings, size_t index, const char *context);
 
 /* What a setting takes, said for a person: "one of 24, 12", "a whole number
  * from 100 to 5000 ms, or off". */
