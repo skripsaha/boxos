@@ -49,8 +49,9 @@ struct settings {
     static KeyChord      key(const char *path) { return ::settings_key(path); }
     static bool          reload() { return ::settings_reload(); }
 
-    // The person's file and the Use Context watched: Touch on the tag every
-    // settings file wears and on the context's word, claimed on the strand
+    // The person's file and the Use Context watched: Touch on the program's
+    // own name, which its settings file wears whoever made it, and on the
+    // context's word, claimed on the strand
     // that makes the watch, released with it. False when they could not be
     // claimed — changed() then never answers true.
     class watch {

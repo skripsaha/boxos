@@ -261,8 +261,12 @@ bool settings_reload(void)
 
 /* ---- the watch ---------------------------------------------------------- */
 
+/* Saved is the program's own name: every file wears the stem of its name, so
+ * <program>.settings wears it whoever made the file — the utility settings,
+ * edit, any program — as settings_file_find finds it by. The tag settings is
+ * worn only by a file the utility made, and a file edit made never hears of it. */
 struct SettingsWatch {
-    TouchTag Saved;     /* settings: a settings file anchored */
+    TouchTag Saved;     /* the program's name: a file of that stem anchored */
     TouchTag Context;   /* USE_TOUCH_TAG: the Use Context changed */
 };
 
@@ -279,9 +283,14 @@ int settings_watch_begin(SettingsWatch **out)
 {
     if (!out) return -ERR_INVALID_ARGUMENT;
     *out = NULL;
+    char program[sizeof(g_own.Program)];
+    umutex_lock(&g_lock);
+    own_read_locked();
+    memcpy(program, g_own.Program, sizeof(program));
+    umutex_unlock(&g_lock);
     SettingsWatch *watch = malloc(sizeof(*watch));
     if (!watch) return -ERR_NO_MEMORY;
-    int rc = watch_claim("settings", &watch->Saved);
+    int rc = watch_claim(program, &watch->Saved);
     if (rc == 0 && (rc = watch_claim(USE_TOUCH_TAG, &watch->Context)) != 0) touch_release(watch->Saved);
     if (rc != 0) {
         free(watch);

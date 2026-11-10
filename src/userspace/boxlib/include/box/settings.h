@@ -90,9 +90,11 @@ bool settings_reload(void);
 
 /* Watching the person's file and the Use Context: the program's settings are
  * read again when the file is saved whole (anchored, as the utility settings
- * and edit save it) — Touch on the tag settings, which every settings file
- * wears — and when the context changes (Touch on USE_TOUCH_TAG). Begun on the
- * strand that polls it: the events are that strand's. */
+ * and edit save it) — Touch on the program's own name, which a file called
+ * <program>.settings wears whoever made it, every file wearing the stem of its
+ * name — and when the context changes (Touch on USE_TOUCH_TAG). Begun on the
+ * strand that polls it: the events are that strand's, and the program's name
+ * is a tag it does not claim for anything else. */
 typedef struct SettingsWatch SettingsWatch;
 
 int  settings_watch_begin(SettingsWatch **out);
