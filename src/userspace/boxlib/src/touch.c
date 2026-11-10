@@ -473,81 +473,90 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
      * So this becomes the parked form of the filter that already existed forty
      * lines above it, and nothing foreign is dropped any more — it goes to the
      * per-strand stash, for its own consumer, instead of being consumed by a
-     * caller it was never addressed to. */
-    if (touch_try_pop_tag(tag, out)) {
-        __atomic_add_fetch(&g_ta_entries_popped,   1, __ATOMIC_RELAXED);
-        __atomic_add_fetch(&g_ta_touches_returned, 1, __ATOMIC_RELAXED);
-        return 0;
-    }
-
-    /* Slow path: submit SYSTEM_OP_TOUCH_AWAIT — this both ensures the
-     * REST claim and parks the process in PROC_WAITING with the kernel
-     * timeout. KTouchPush flips us back to PROC_WORKING the moment a
-     * slot is published into our TouchRing. */
+     * caller it was never addressed to.
+     *
+     * ‼ AND A FOREIGN EVENT PUTS THE STRAND BACK TO SLEEP IN THE KERNEL. A
+     * wake carries whatever was published, so the park can end on an event of
+     * another tag; it used to be followed by touch_wait_tag, whose waits never
+     * park — on a core without WAITPKG they pause and yield, a strand running
+     * flat out until its own tag came. MEASURED: the hub's prompt, waiting for
+     * a key, woke on its own strand's keeper:settled and spun some six million
+     * turns a second until the next key was typed — the machine at 100% with
+     * nothing to do. Each round now parks again for what is left of the one
+     * deadline, and a foreign event only costs a stash place and a park. */
     uint8_t mbuf[200];
     ManifestBuilder mb;
-    if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return -ERR_INVALID_ARGS;
-
-    /* params: [u32 tag][u32 timeout_ms]. Zero goes through as zero:
-     * the kernel arms no timer for it (SysTouchAwait) and the park lasts until
-     * an event is published. It used to be turned into 30 s here, so a strand
-     * that asked to wait forever was woken every half minute for nothing — and
-     * a lost wakeup was blanketed instead of being seen, which Nightwatch does
-     * now (TOUCH UNDELIVERED). */
     uint8_t params[8];
-    memcpy(params,     &tag,        sizeof(TouchTag));
-    memcpy(params + 4, &timeout_ms, sizeof(uint32_t));
+    memcpy(params, &tag, sizeof(TouchTag));
 
-    if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_TOUCH_AWAIT, 0,
-                             CRATE_INDEX_NONE, CRATE_INDEX_NONE, params, 8) != 0)
-        return -ERR_INVALID_ARGS;
-    if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INVALID_ARGS;
-
-    /* ONE deadline for the whole call, taken before the park.
-     *
-     * The park below consumes real time — up to the whole timeout — and
-     * touch_wait used to be handed the ORIGINAL figure afterwards, starting a
-     * second clock of the same length. touch_await(tag, out, T) therefore took
-     * 2T, and the second T was not a sleep: the kernel park had already ended,
-     * so those milliseconds were spent in touch_wait's pause-and-yield spin,
-     * burning the core this call exists to give away. MEASURED, not deduced —
-     * quietprint asked for 3000 ms of silence and reported 6004.
-     *
-     * So the deadline is fixed here, and what is left of it after the park is
-     * what touch_wait gets. A park that ran to its own deadline leaves nothing
-     * left, and the timeout is reported at once instead of being spun out. */
+    /* ONE deadline for the whole call, taken before the first park. A park
+     * consumes real time — up to the whole timeout — so each round is given
+     * what is left of it, never the original figure again; a park that ran to
+     * the deadline leaves nothing, and the timeout is reported at once
+     * instead of being spun out. (Measured once: quietprint asked for 3000 ms
+     * of silence and reported 6004.) */
     uint64_t began = touch_rdtsc();
+    for (;;) {
+        if (touch_try_pop_tag(tag, out)) {
+            __atomic_add_fetch(&g_ta_entries_popped,   1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_ta_touches_returned, 1, __ATOMIC_RELAXED);
+            return 0;
+        }
+        uint32_t left = 0;   /* 0: until an event, to the kernel and to touch_wait alike */
+        if (timeout_ms != 0) {
+            uint64_t spent = cpu_tsc_to_ms(touch_rdtsc() - began);
+            if (spent >= (uint64_t)timeout_ms) {
+                __atomic_add_fetch(&g_ta_timeouts, 1, __ATOMIC_RELAXED);
+                return -ERR_TIMEOUT;
+            }
+            left = (uint32_t)((uint64_t)timeout_ms - spent);
+        }
 
-    int push_rc = ManifestSubmitNoWait((Manifest *)mbuf, NULL, 0, 0);
-    if (push_rc != OK) return push_rc;
-
-    /* Wait on TouchRing for an event. The kernel will wake us via
-     * KTouchPush's PROC_WAITING→PROC_WORKING flip; touch_wait covers
-     * both the UMWAIT and pause-spin paths. With no deadline `left` stays 0
-     * and means to touch_wait what it meant to the kernel: until an event. */
-    uint32_t left = 0;
-    if (timeout_ms != 0) {
-        uint64_t spent = cpu_tsc_to_ms(touch_rdtsc() - began);
-        if (spent >= (uint64_t)timeout_ms) {
-            /* The park used the entire deadline. A zero must NOT reach
-             * touch_wait, where it would spell "wait forever". */
+        /* A place for one event of another tag BEFORE sleeping: what the wake
+         * hands over is out of the ring, and must have somewhere to go. */
+        Stash *st = touch_stash_self(true);
+        if (!st || !stash_reserve(st)) {
+            touch_no_room();
             __atomic_add_fetch(&g_ta_timeouts, 1, __ATOMIC_RELAXED);
             return -ERR_TIMEOUT;
         }
-        left = (uint32_t)((uint64_t)timeout_ms - spent);
-    }
 
-    /* And the same filter after the park. A wake carries whatever was
-     * published, not necessarily ours; touch_wait_tag re-arms against the
-     * deadline already fixed above, so a foreign event costs this call none of
-     * its own budget. */
-    if (!touch_wait_tag(tag, out, left)) {
-        __atomic_add_fetch(&g_ta_timeouts, 1, __ATOMIC_RELAXED);
-        return -ERR_TIMEOUT;
+        /* SYSTEM_OP_TOUCH_AWAIT — this both ensures the REST claim and parks
+         * the strand in PROC_WAITING with the kernel timeout; KTouchPush flips
+         * it back to PROC_WORKING the moment a slot is published into its
+         * TouchRing. params: [u32 tag][u32 timeout_ms]. Zero goes through as
+         * zero: the kernel arms no timer for it and the park lasts until an
+         * event is published (it used to be turned into 30 s here, so a strand
+         * that asked to wait forever was woken every half minute for nothing —
+         * and a lost wakeup was blanketed instead of being seen, which
+         * Nightwatch does now: TOUCH UNDELIVERED). */
+        memcpy(params + 4, &left, sizeof(uint32_t));
+        if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return -ERR_INVALID_ARGS;
+        if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_TOUCH_AWAIT, 0,
+                                 CRATE_INDEX_NONE, CRATE_INDEX_NONE, params, 8) != 0)
+            return -ERR_INVALID_ARGS;
+        if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INVALID_ARGS;
+        int push_rc = ManifestSubmitNoWait((Manifest *)mbuf, NULL, 0, 0);
+        if (push_rc != OK) return push_rc;
+
+        /* The event the wake was for — ours, or one kept for its own tag
+         * before the next park — given what the park left of the deadline;
+         * none left, and the top of the round says so. */
+        if (timeout_ms != 0) {
+            uint64_t spent = cpu_tsc_to_ms(touch_rdtsc() - began);
+            if (spent >= (uint64_t)timeout_ms) continue;
+            left = (uint32_t)((uint64_t)timeout_ms - spent);
+        }
+        Touch got;
+        if (!touch_wait(&got, left)) continue;
+        if (got.tag_id == tag) {
+            *out = got;
+            __atomic_add_fetch(&g_ta_entries_popped,   1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_ta_touches_returned, 1, __ATOMIC_RELAXED);
+            return 0;
+        }
+        stash_put(st, &got);
     }
-    __atomic_add_fetch(&g_ta_entries_popped,   1, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&g_ta_touches_returned, 1, __ATOMIC_RELAXED);
-    return 0;
 }
 
 int touch_irq_return(void)
