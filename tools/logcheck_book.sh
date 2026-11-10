@@ -117,10 +117,20 @@ torn = count(r"^\[TagFS\] Spine slot \d+ at block \d+ does not hold: ")
 say(torn == k["torn_slots"], "it says %u torn slot(s); the census predicted %u" % (torn, k["torn_slots"]))
 fell = count(r"^\[TagFS\] slot \d+ \(seq \d+\) names a Tally that does not read")
 say(fell == k["fell_back"], "it falls back %u slot(s); the census predicted %u" % (fell, k["fell_back"]))
+# The kernel names the first 32 runs two owners share and says the rest by
+# their count (mount/ground_census.c MeetingSay) — which 32 is the order its
+# sweep closes them in: the runs named are judged as the census's, and with
+# the count as all of them.
 double = sorted([int(b), int(n)] for b, n in
                 re.findall(r"\[TagFS FSCK\] data block (\d+) is named by [^\n]* at once, (\d+) block\(s\) from it", log))
-say(double == sorted(k["double"]), "it names run(s) %s [start, blocks] twice owned; the census predicted %s"
-    % (double or "none", sorted(k["double"]) or "none"))
+m = re.search(r"^\[TagFS FSCK\] and (\d+) more run\(s\) of blocks named by two owners at once", log, re.M)
+more = int(m.group(1)) if m else 0
+want = sorted(k["double"])
+named = {tuple(r) for r in double}
+say(len(named) == len(double) == min(len(want), 32) and named <= {tuple(r) for r in want}
+    and len(double) + more == len(want),
+    "it names run(s) %s [start, blocks] twice owned and %u more by their count; the census predicted %s"
+    % (double or "none", more, want or "none"))
 m = re.search(r"^\[TagFS\] the next file id (\d+), tag id (\d+), bookmark (\d+)", log, re.M)
 have = tuple(int(x) for x in m.groups()) if m else None
 want = (k["next_fid"], k["next_tag"], k["next_bookmark"])
