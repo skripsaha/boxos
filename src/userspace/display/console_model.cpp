@@ -50,7 +50,7 @@ ConsoleModel::ConsoleModel(std::uint32_t Width, std::uint32_t Height)
     // A line is never longer than the console: lifting one never allocates,
     // so no frame drawn while a line is typed can fail for want of memory.
     Lifted.reserve(Surface.size());
-    Clear(COLOR_LIGHT_GRAY, COLOR_BLACK);
+    Clear(COLOR_DEFAULT, COLOR_DEFAULT);
 }
 
 void ConsoleModel::Clear(std::uint32_t Foreground, std::uint32_t Background)
@@ -69,7 +69,7 @@ void ConsoleModel::Scroll()
     const std::size_t RowBytes = static_cast<std::size_t>(WidthValue) * sizeof(TextCell);
     std::memmove(Surface.data(), Surface.data() + WidthValue,
                  static_cast<std::size_t>(HeightValue - 1u) * RowBytes);
-    const TextCell Blank{COLOR_LIGHT_GRAY, COLOR_BLACK, ' ', {0, 0, 0}};
+    const TextCell Blank{COLOR_DEFAULT, COLOR_DEFAULT, ' ', {0, 0, 0}};
     std::fill(Surface.end() - WidthValue, Surface.end(), Blank);
     // What is kept as places on the console moves up with it.
     for (std::size_t *Place : {&LineStart, &LineEnd, &Others})
@@ -159,19 +159,20 @@ void ConsoleModel::Write(const char *Bytes, std::size_t Length,
 namespace {
 
 // What each tone of the kernel's lines looks like on this console. The kernel
-// says what kind of text a line is; the colour is the display's.
+// says what kind of text a line is; the colour is the display's — the plain
+// ones in the screen's text colour, every one on its page.
 struct ToneColours {
     std::uint32_t Foreground;
     std::uint32_t Background;
 };
 
 constexpr ToneColours ToneTheme[LOG_TONE_COUNT] = {
-    {COLOR_LIGHT_GRAY, COLOR_BLACK},   // PLAIN
-    {COLOR_RED,        COLOR_BLACK},   // ERROR
-    {COLOR_GREEN,      COLOR_BLACK},   // SUCCESS
-    {COLOR_YELLOW,     COLOR_BLACK},   // WARNING
-    {COLOR_CYAN,       COLOR_BLACK},   // HINT
-    {COLOR_LIGHT_GRAY, COLOR_BLACK},   // SAID — a program's own word
+    {COLOR_DEFAULT, COLOR_DEFAULT},   // PLAIN
+    {COLOR_RED,     COLOR_DEFAULT},   // ERROR
+    {COLOR_GREEN,   COLOR_DEFAULT},   // SUCCESS
+    {COLOR_YELLOW,  COLOR_DEFAULT},   // WARNING
+    {COLOR_CYAN,    COLOR_DEFAULT},   // HINT
+    {COLOR_DEFAULT, COLOR_DEFAULT},   // SAID — a program's own word
 };
 
 const ToneColours &Theme(std::uint8_t Tone) noexcept
@@ -266,7 +267,7 @@ void ConsoleModel::AsAnother(std::uint32_t Lane, bool Text, Drawing &&Said)
     Lifted.assign(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
                   Surface.begin() + static_cast<std::ptrdiff_t>(End));
     const std::size_t Caret = std::min(Here() >= LineStart ? Here() - LineStart : 0, Lifted.size());
-    const TextCell    Blank{COLOR_LIGHT_GRAY, COLOR_BLACK, ' ', {0, 0, 0}};
+    const TextCell    Blank{COLOR_DEFAULT, COLOR_DEFAULT, ' ', {0, 0, 0}};
     std::fill(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
               Surface.begin() + static_cast<std::ptrdiff_t>(End), Blank);
 

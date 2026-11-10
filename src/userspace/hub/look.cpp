@@ -6,6 +6,8 @@
 #include "box/cxx/settings.h"
 
 BOX_SETTINGS("greeting on-or-off default on \"the line the hub says when it starts\"\n"
+             "text color default light-gray \"the color of text no program chose a color for, on the whole screen\"\n"
+             "page color default black \"the color of the whole screen behind the text\"\n"
              "sign word default ~ \"what stands before what you type\"\n"
              "    color color default light-gray \"its color\"\n"
              "context on-or-off default on \"the Use Context in brackets before the sign\"\n"
@@ -49,6 +51,8 @@ BehindShown BehindAt(std::string_view Where)
 Look ReadLook()
 {
     return Look{.Greeting        = box::settings::on("greeting"),
+                .Text            = box::settings::color("text"),
+                .Page            = box::settings::color("page"),
                 .Sign            = box::settings::word("sign"),
                 .Context         = box::settings::on("context"),
                 .Them            = box::settings::on("results"),

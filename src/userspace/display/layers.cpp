@@ -389,10 +389,10 @@ bool LayersStep() noexcept
     return Changed;
 }
 
-void LayersCompose(const ConsoleModel &Model, std::vector<TextCell> &Composed, Caret &At) noexcept
+void LayersCompose(const ConsoleModel &Model, std::vector<GlassCell> &Composed, Caret &At) noexcept
 {
     const std::vector<TextCell> &Base = Model.Cells();
-    std::copy(Base.begin(), Base.end(), Composed.begin());
+    for (std::size_t Index = 0; Index < Base.size(); Index++) Composed[Index] = GlassCell{Base[Index]};
     At = Caret{Model.CursorX(), Model.CursorY(), true};
 
     // A program behind (front.h) shows no scene and no overlay — the glass is
@@ -426,7 +426,9 @@ void LayersCompose(const ConsoleModel &Model, std::vector<TextCell> &Composed, C
                 if (!Cell.Opaque) continue;
                 const std::uint32_t ScreenX = static_cast<std::uint32_t>(Layer.X) + Col;
                 const std::uint32_t ScreenY = static_cast<std::uint32_t>(Layer.Y) + Row;
-                Composed[static_cast<std::size_t>(ScreenY) * Width + ScreenX] = Cell.Cell;
+                const bool Marked = Cell.Mark == DISPLAY_CELL_MARK_UNDER || Cell.Mark == DISPLAY_CELL_MARK_BAR;
+                Composed[static_cast<std::size_t>(ScreenY) * Width + ScreenX] =
+                    Marked ? GlassCell{Cell.Cell, Cell.MarkColor, Cell.Mark} : GlassCell{Cell.Cell};
             }
         }
         if (Layer.CursorVisible) {

@@ -15,6 +15,9 @@
 // The news tag, and the ear for programs being started. False: neither.
 bool FrontStart() noexcept;
 
+// Whether the asker From names may keep others: its program wears `system`.
+bool FrontKeeper(const AskFrom &From) noexcept;
+
 // DISP_CMD_FRONT, _BACK and _ASK_END, asked of this display (Asked) by the
 // keeper From names: answered here, a refusal too.
 void FrontAsked(const Result &Asked, const AskFrom &From, const DisplayFrontRequest &Request) noexcept;

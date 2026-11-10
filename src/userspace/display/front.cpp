@@ -82,20 +82,6 @@ void Tell(const Program &Keeper, DisplayFrontWhat What, const Program &About) no
     }
 }
 
-// Only a program that wears `system` keeps others: whom another program hears
-// the keyboard through is no ordinary program's to say.
-bool MayKeep(const AskFrom &From) noexcept
-{
-    ProcMate     *Mates = nullptr;
-    std::uint32_t Total = 0;
-    const int     Delivered = proc_crew("system", &Mates, &Total);
-    bool          Found = false;
-    for (int I = 0; I < Delivered && !Found; I++)
-        Found = Mates[I].pid == From.program_pid && Mates[I].generation == From.program_generation;
-    free(Mates);
-    return Found;
-}
-
 void Reply(const Result &Asked, std::uint8_t Command, error_t Error, bool Heard) noexcept
 {
     const DisplayFrontReply Answer{Command, static_cast<std::uint8_t>(Heard ? 1 : 0), {0, 0},
@@ -140,6 +126,21 @@ void SendBehind(const Program &Keeper, const Program &Which)
 
 }  // namespace
 
+// Only a program that wears `system` keeps others: whom another program hears
+// the keyboard through, and the screen's colours, are no ordinary program's to
+// say.
+bool FrontKeeper(const AskFrom &From) noexcept
+{
+    ProcMate     *Mates = nullptr;
+    std::uint32_t Total = 0;
+    const int     Delivered = proc_crew("system", &Mates, &Total);
+    bool          Found = false;
+    for (int I = 0; I < Delivered && !Found; I++)
+        Found = Mates[I].pid == From.program_pid && Mates[I].generation == From.program_generation;
+    free(Mates);
+    return Found;
+}
+
 bool FrontStart() noexcept
 {
     g_news    = touch_intern(DISPLAY_FRONT_TAG);
@@ -156,7 +157,7 @@ bool FrontStart() noexcept
 
 void FrontAsked(const Result &Asked, const AskFrom &From, const DisplayFrontRequest &Request) noexcept
 {
-    if (!MayKeep(From)) {
+    if (!FrontKeeper(From)) {
         Reply(Asked, Request.command, ERR_ACCESS_DENIED, false);
         return;
     }

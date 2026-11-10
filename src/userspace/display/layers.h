@@ -54,10 +54,11 @@ bool LayersDropProcess(std::uint32_t Pid, std::uint32_t Generation) noexcept;
 // Take every layer's newest published frame.
 bool LayersStep() noexcept;
 
-// The model's text with every layer laid over it, and the caret. A caret is
-// part of the picture it stands in — the console's, or a layer's that shows
-// one — and a layer above it covers it as it covers the cell it stands on.
-void LayersCompose(const ConsoleModel &Model, std::vector<TextCell> &Composed,
+// The model's text with every layer laid over it, each cell with its mark, and
+// the caret. A caret is part of the picture it stands in — the console's, or a
+// layer's that shows one — and a layer above it covers it as it covers the
+// cell it stands on.
+void LayersCompose(const ConsoleModel &Model, std::vector<GlassCell> &Composed,
                    Caret &At) noexcept;
 
 #endif

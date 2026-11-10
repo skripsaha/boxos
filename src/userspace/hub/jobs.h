@@ -9,7 +9,9 @@
  * program in front asks it to finish — and ends it at once when no strand of
  * it reads, or when it was asked already — Ctrl+Alt+Home lets it go to live
  * behind and gives the person back the prompt, and a program behind asking
- * for the keyboard is said. What becomes of a program behind is said when it
+ * for the keyboard is said. It tells the display the screen's colours the
+ * person chose — the text and page settings — at the start, when they change,
+ * and to a display that comes. What becomes of a program behind is said when it
  * happens, and the display keeps the line being typed under it. The prompt's
  * strand only asks — start this, bring that forward — and stands by while a
  * program is in front. Each wakes the other on a tag of its own (keeper:wake,
@@ -139,6 +141,7 @@ private:
     bool HearDeaths();
     bool HearDisplay();
     bool HearWake();
+    bool TellPage();
     void Died(const TouchProcessDied &Death);
     void Pressed(std::uint8_t What, std::uint32_t Pid, std::uint32_t Generation);
     void Rekeep();
@@ -155,6 +158,7 @@ private:
     std::deque<Asked *>                   Starts;
     std::optional<std::vector<file_id_t>> Gift;
     bool                                  BehindStale = false;   // the line of who lives behind is old
+    bool                                  PageStale = false;     // the display has not been told Seen's page
     TouchTag                              Deaths = TOUCH_TAG_INVALID;
     TouchTag                              News = TOUCH_TAG_INVALID;
     TouchTag                              Woken = TOUCH_TAG_INVALID;      // the keeping strand's ear

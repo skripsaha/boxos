@@ -18,6 +18,12 @@ extern "C" {
  * values, never an escape sequence inside the text. A full ring blocks the
  * writer (brook_push) instead of dropping the batch.
  *
+ * A colour the program did not choose travels as COLOR_DEFAULT (boxos_color.h)
+ * and is the display's to draw: as text, the screen's text colour; behind it,
+ * the screen's page colour — light gray on black until the keeper of the
+ * programs in front says others (DISP_CMD_PAGE). What is on the screen in them
+ * is drawn again in the new ones.
+ *
  * Everything a strand asks the display is a QUESTION (box/ipc.h ask, the
  * kernel's system.ask): it gets exactly one answer — the display's, or, if
  * the display's life ends first, the kernel's -ERR_PROCESS_NOT_FOUND — and
@@ -94,7 +100,7 @@ typedef struct PACKED {
     uint8_t  kind;                        /* CONSOLE_RUN_* */
     uint8_t  len;                         /* valid bytes in text[] */
     uint16_t _reserved;
-    uint32_t fg;                          /* #RRGGBB, resolved — no sentinels */
+    uint32_t fg;                          /* #RRGGBB, or COLOR_DEFAULT */
     uint32_t bg;
     uint64_t order;                       /* the console's shared order — see
                                            * console_order_next in print.c */
@@ -162,9 +168,9 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
  * however far down, lives behind with it, and comes forward with it; the
  * strand that asked hears then, and its pictures are shown again.
  *
- * Three QUESTIONS, a DisplayFrontRequest each, answered with a
- * DisplayFrontReply — asked only by a program that wears `system`
- * (-ERR_ACCESS_DENIED otherwise), the asker the keeper by the kernel's word:
+ * Four QUESTIONS, answered with a DisplayFrontReply — asked only by a
+ * program that wears `system` (-ERR_ACCESS_DENIED otherwise), the asker the
+ * keeper by the kernel's word. Three are a DisplayFrontRequest:
  *
  *   DISP_CMD_FRONT     the program is in front, kept by the asker
  *   DISP_CMD_BACK      the program lives behind, kept by the asker
@@ -173,17 +179,27 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
  *                      reads now; heard 1 when a strand that reads was told —
  *                      0 says no strand of it will answer
  *
+ * and one a DisplayPageRequest, the look the person chose for the screen,
+ * which the display draws and keeps no setting of:
+ *
+ *   DISP_CMD_PAGE      the screen's text colour and page colour: every colour
+ *                      no program chose (COLOR_DEFAULT) drawn in them from now
+ *                      on, what the screen shows too; two #RRGGBB, else
+ *                      -ERR_INVALID_ARGUMENT
+ *
  * What the display tells a keeper is a Touch on DISPLAY_FRONT_TAG, a
  * DisplayFrontNews, sent by the display (source_pid the reply's display_pid):
  * the chord pressed over the program it keeps in front, or a program it keeps
  * behind asking for the keyboard. And to every keeper at once, when a display
  * comes — at the boot, or raised again after a fall, knowing nothing of what
  * the one before it was told — that it is here: each keeper says again what it
- * keeps, and learns the display's pid from the answers, never from the news.
+ * keeps and the page it chose, and learns the display's pid from the answers,
+ * never from the news.
  */
 #define DISP_CMD_FRONT     0x50
 #define DISP_CMD_BACK      0x51
 #define DISP_CMD_ASK_END   0x52
+#define DISP_CMD_PAGE      0x53
 
 /* An occurrence the kernel's muster books (touch/muster.h): it stands on any
  * volume, whatever its tags, and never takes a name of a volume's. */
@@ -202,6 +218,13 @@ typedef struct PACKED {
     uint32_t pid;               /* the program, by its main strand ... */
     uint32_t generation;        /* ... in this incarnation */
 } DisplayFrontRequest;
+
+typedef struct PACKED {
+    uint8_t  command;           /* DISP_CMD_PAGE */
+    uint8_t  reserved[3];
+    uint32_t text;              /* #RRGGBB: text no program chose a colour for */
+    uint32_t page;              /* #RRGGBB: the screen behind it */
+} DisplayPageRequest;
 
 typedef struct PACKED {
     uint8_t  command;
@@ -230,6 +253,10 @@ int display_back(uint32_t pid, uint32_t generation, uint32_t *display);
  * when none of its strands reads, or a refusal. */
 int display_ask_end(uint32_t pid, uint32_t generation);
 
+/* The screen's text colour and page colour, #RRGGBB, said by the asking
+ * keeper; *display — may be NULL — as display_front's. OK, or a refusal. */
+int display_page(uint32_t text, uint32_t page, uint32_t *display);
+
 /* A word of the display on a lane's own tag, in place of a key — told from a
  * key, which is a kb_event_t of three bytes, by its length and its mark. */
 #define CONSOLE_NOTICE_MARK  0x4E4F5445u   /* "ETON", the bytes of NOTE */
@@ -255,7 +282,11 @@ uint8_t console_notice_of(const void *payload, uint32_t length);
  * screen, composed by the display over the base text by role, then age. The
  * display makes the layer's shared memory for the asking program alone (a Bay
  * made for one program, box/bay.h bay_create_for) and names it in the reply;
- * the program only opens it, and nobody else can. The names are the display's
+ * the program only opens it, and nobody else can. A cell may carry a mark the
+ * display draws over its glyph in a colour of its own — a line under it, a
+ * bar down its left side — so a caret a program draws stands on a letter and
+ * covers nothing; folded into the text, a cell keeps its glyph and colours,
+ * not its mark. The names are the display's
  * own and reused — display:layer:N — so the volume, which keeps every tag it
  * is ever told, learns as many as were ever shown at once. Three publish
  * slots: the writer fills a FREE one — with none FREE, the oldest READY, a
@@ -284,7 +315,7 @@ uint8_t console_notice_of(const void *payload, uint32_t length);
 #define DISP_CMD_LAYER_CLOSE  0x42
 #define DISP_CMD_LAYER_COMMIT 0x43
 
-#define DISPLAY_LAYER_VERSION   4u
+#define DISPLAY_LAYER_VERSION   5u
 #define DISPLAY_LAYER_SLOTS     3u
 #define DISPLAY_LAYER_TAG_PREFIX "display:layer:"
 #define DISPLAY_LAYER_TAG_MAX   48u
@@ -373,10 +404,21 @@ typedef struct {
     uint32_t cursor_visible[DISPLAY_LAYER_SLOTS];
 } DisplayLayerSharedHeader;
 
+/* What a cell's mark is: drawn in the cell's MarkColor over its glyph, on a
+ * framebuffer as pixels; the text page has none, and shows a marked cell in
+ * the mark's colour behind its glyph instead. */
+typedef enum {
+    DISPLAY_CELL_MARK_NONE  = 0,
+    DISPLAY_CELL_MARK_UNDER = 1,   /* a line under the glyph: the cell's two lowest pixel rows */
+    DISPLAY_CELL_MARK_BAR   = 2,   /* a bar down its left side: the cell's two leftmost pixel columns */
+} DisplayCellMark;
+
 typedef struct {
-    TextCell Cell;
+    TextCell Cell;            /* fg and bg: #RRGGBB, or COLOR_DEFAULT */
+    uint32_t MarkColor;       /* #RRGGBB, or COLOR_DEFAULT: the screen's text colour */
     uint8_t  Opaque;
-    uint8_t  Reserved[3];
+    uint8_t  Mark;            /* DisplayCellMark; another is none */
+    uint8_t  Reserved[2];
 } DisplayLayerCell;
 
 #define DISPLAY_LAYER_MAGIC 0x4C594552u /* "LYER" */
@@ -391,14 +433,15 @@ STATIC_ASSERT(sizeof(DisplayLayerCommitRequest) == 24,
               "DisplayLayerCommitRequest is a question's ABI and must stay 24 bytes");
 STATIC_ASSERT(sizeof(DisplayLayerCommitReply) == 8,
               "DisplayLayerCommitReply is an answer's ABI and must stay 8 bytes");
-STATIC_ASSERT(sizeof(DisplayLayerCell) == 16,
-              "DisplayLayerCell is a Bay ABI and must stay 16 bytes");
+STATIC_ASSERT(sizeof(DisplayLayerCell) == 20,
+              "DisplayLayerCell is a Bay ABI and must stay 20 bytes");
 STATIC_ASSERT(sizeof(DisplayLayerCloseRequest) == 12,
               "DisplayLayerCloseRequest is a message ABI and must stay 12 bytes");
 STATIC_ASSERT(sizeof(DisplayLayerFrameNotice) == 12,
               "DisplayLayerFrameNotice is a message ABI and must stay 12 bytes");
-STATIC_ASSERT(sizeof(DisplayFrontRequest) == 12 && sizeof(DisplayFrontReply) == 12,
-              "the questions of the program in front and their answer are an ABI of 12 bytes each");
+STATIC_ASSERT(sizeof(DisplayFrontRequest) == 12 && sizeof(DisplayPageRequest) == 12 &&
+                  sizeof(DisplayFrontReply) == 12,
+              "a keeper's questions and their answer are an ABI of 12 bytes each");
 STATIC_ASSERT(sizeof(DisplayFrontNews) == 20, "DisplayFrontNews is a Touch payload ABI of 20 bytes");
 STATIC_ASSERT(sizeof(ConsoleNotice) == 8, "ConsoleNotice is a Touch payload ABI of 8 bytes, never a key's 3");
 

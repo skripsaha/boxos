@@ -24,7 +24,9 @@ extern "C" {
  * shared palette + quantizer).
  *
  * Reserved sentinels (defined in boxos_color.h):
- *   COLOR_DEFAULT   "use the role's default" — fg: light gray, bg: black.
+ *   COLOR_DEFAULT   "use the role's default" — the screen's own: fg its text
+ *                   colour, bg its page colour, as the display draws them
+ *                   (light gray on black until the person chooses others).
  *   COLOR_INHERIT   "keep currently set background" (use as bg only).
  */
 

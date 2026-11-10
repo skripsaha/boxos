@@ -17,6 +17,8 @@ enum class BehindShown { Prompt, Line, Nowhere };
 
 struct Look {
     bool         Greeting;
+    Color        Text;              // the screen's own, told to the display (box/display.h DISP_CMD_PAGE)
+    Color        Page;
     std::string  Sign;
     bool         Context;
     bool         Them;

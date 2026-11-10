@@ -1,5 +1,6 @@
-/* display_front.c — the program in front of the person, and the ones behind:
- * the questions a keeper asks the display (box/display.h). */
+/* display_front.c — the program in front of the person, the ones behind, and
+ * the page they are shown on: the questions a keeper asks the display
+ * (box/display.h). */
 
 #include "box/display.h"
 #include "box/error.h"
@@ -44,6 +45,18 @@ int display_ask_end(uint32_t pid, uint32_t generation)
     if (rc != OK) return rc;
     if (reply.error != OK) return -reply.error;
     return reply.heard ? 1 : 0;
+}
+
+int display_page(uint32_t text, uint32_t page, uint32_t *display)
+{
+    DisplayPageRequest question = { DISP_CMD_PAGE, { 0, 0, 0 }, text, page };
+    DisplayFrontReply  reply;
+    uint32_t           got = 0;
+    int rc = ask(DISPLAY_TAG, &question, sizeof(question), &reply, sizeof(reply), &got);
+    if (rc != OK) return rc;
+    if (got != sizeof(reply) || reply.command != DISP_CMD_PAGE) return -ERR_CORRUPTED;
+    if (display) *display = reply.display_pid;
+    return reply.error == OK ? OK : -reply.error;
 }
 
 uint8_t console_notice_of(const void *payload, uint32_t length)

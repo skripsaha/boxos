@@ -45,7 +45,8 @@ std::optional<std::vector<file_id_t>> KeptOf(const Start &What, bool Collected, 
 
 bool Jobs::Begin(const Look &Shown)
 {
-    Seen    = Shown;
+    Seen      = Shown;
+    PageStale = true;
     WakeTag    = touch_intern(WakeTagName);
     SettledTag = touch_intern(SettledTagName);
     Woken      = touch_pair_choose(WakeTag);
@@ -153,6 +154,7 @@ void Jobs::Keep()
         Moved |= StartAsked();
         Moved |= HearDeaths();
         Moved |= HearDisplay();
+        Moved |= TellPage();
         Moved |= DrawBehind();
         if (!Moved && !Stopping.load()) box_turn_in(Mark);
     }
@@ -280,7 +282,8 @@ void Jobs::Kept(int Rc, std::uint32_t Display)
 
 // A display came — raised again after a fall, it knows nothing of what the
 // hub told the one before: every program the hub keeps said again, in front
-// or behind, and who the display is learnt from its answers.
+// or behind, and the page the person chose; who the display is learnt from
+// its answers.
 void Jobs::Rekeep()
 {
     struct Said {
@@ -290,6 +293,7 @@ void Jobs::Rekeep()
     std::vector<Said> Keeping;
     {
         std::lock_guard Held(Lock);
+        PageStale = true;
         for (const Job &One : Running)
             if (!One.Over) Keeping.push_back(Said{One.Pid, One.Generation, One.Front});
     }
@@ -477,9 +481,28 @@ void Jobs::Show(const Look &Shown)
 {
     {
         std::lock_guard Held(Lock);
-        Seen = Shown;
+        PageStale = PageStale || Shown.Text != Seen.Text || Shown.Page != Seen.Page;
+        Seen      = Shown;
     }
     BehindChanged();
+}
+
+// The screen's colours the person chose, told to the display when it has not
+// heard them: it draws in them every colour no program chose. With no display
+// to hear, the next one that comes is told.
+bool Jobs::TellPage()
+{
+    Color Text = 0, Page = 0;
+    {
+        std::lock_guard Held(Lock);
+        if (!PageStale) return false;
+        PageStale = false;
+        Text      = Seen.Text;
+        Page      = Seen.Page;
+    }
+    std::uint32_t Display = 0;
+    Kept(display_page(Text, Page, &Display), Display);
+    return true;
 }
 
 }  // namespace hub

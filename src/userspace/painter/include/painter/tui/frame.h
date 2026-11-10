@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "box/cxx/error.h"
+#include "box/display.h"
 
 #include "painter/core/color.h"
 #include "painter/core/geometry.h"
@@ -26,11 +27,23 @@ enum class Visibility : std::uint8_t {
     Opaque,
 };
 
+/* A mark the display draws over a cell's glyph in a colour of its own, so a
+ * caret can stand on a letter and cover nothing: a line under the glyph, or a
+ * bar down its left side (box/display.h DisplayCellMark). It is part of the
+ * picture only — folded into the console's text, a cell keeps no mark. */
+enum class CellMark : std::uint8_t {
+    None  = DISPLAY_CELL_MARK_NONE,
+    Under = DISPLAY_CELL_MARK_UNDER,
+    Bar   = DISPLAY_CELL_MARK_BAR,
+};
+
 struct Cell {
     char        Glyph      = ' ';
     core::Color Foreground = core::Colors::LightGray;
     core::Color Background = core::Colors::Black;
     Visibility  VisibilityMode = Visibility::Opaque;
+    CellMark    Mark       = CellMark::None;
+    core::Color MarkColor  = core::Colors::LightGray;
 
     static constexpr Cell TransparentCell() noexcept
     {

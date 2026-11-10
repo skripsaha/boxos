@@ -13,12 +13,14 @@
  * all, only a Tone — boxos_log_tone.h.)
  *
  * Sentinels live in the high byte, which a real RGB triple never uses:
- *   COLOR_DEFAULT  "use the role's default" (fg → light gray, bg → black)
- *   COLOR_INHERIT  "keep what is set" (accepted as bg; resolves to black
- *                  on the wire — the kernel stores concrete values only)
- * BoxColorResolveFg/Bg turn any sentinel (any non-zero high byte) into the
- * concrete default for its role, so the value entering a TextCell is
- * always a real triple.
+ *   COLOR_DEFAULT  "use the role's default" — the screen's own: as text its
+ *                  text colour, behind it its page colour, which the display
+ *                  holds (light gray on black until the keeper of the programs
+ *                  in front says others, box/display.h DISP_CMD_PAGE)
+ *   COLOR_INHERIT  "keep what is set" (accepted as bg)
+ * On the wire — a console frame, a layer's cell — a colour is a real triple or
+ * COLOR_DEFAULT (BoxColorOnWire), and only the display, at the glass, turns
+ * COLOR_DEFAULT into the colour it stands for.
  *
  * This is the SINGLE definition of the IBM VGA palette triples and of the
  * dominant-hue quantiser. The quantiser is exact on palette entries, so an
@@ -69,16 +71,13 @@ static inline uint32_t BoxVgaPaletteRgb(uint8_t idx)
     return pal[idx & 0x0Fu];
 }
 
-/* ───── Sentinel resolution (role-aware) ───── */
+/* ───── A colour on the wire ───── */
 
-static inline uint32_t BoxColorResolveFg(uint32_t c)
+/* A real triple as it is; any sentinel (any non-zero high byte) as
+ * COLOR_DEFAULT — the display's to draw. */
+static inline uint32_t BoxColorOnWire(uint32_t c)
 {
-    return (c >> 24) ? BoxVgaPaletteRgb(7) /* light gray */ : c;
-}
-
-static inline uint32_t BoxColorResolveBg(uint32_t c)
-{
-    return (c >> 24) ? 0x000000u /* black */ : c;
+    return (c >> 24) ? COLOR_DEFAULT : c;
 }
 
 /* ───── RGB → VGA palette index — by DOMINANT hue, exact on the palette ─────
@@ -129,10 +128,12 @@ static inline uint8_t BoxColorToVga4(uint32_t rgb)
 
 /* ───── VGA attribute byte ⇄ RGB pair ───── */
 
+/* The attribute of a pair of real triples — a sentinel is the display's to
+ * turn into one first. */
 static inline uint8_t BoxColorPairToAttr(uint32_t fg, uint32_t bg)
 {
-    uint8_t f = BoxColorToVga4(BoxColorResolveFg(fg));
-    uint8_t b = BoxColorToVga4(BoxColorResolveBg(bg));
+    uint8_t f = BoxColorToVga4(fg);
+    uint8_t b = BoxColorToVga4(bg);
     return (uint8_t)((b << 4) | f);
 }
 

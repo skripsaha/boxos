@@ -70,7 +70,7 @@ namespace {
 std::optional<Easel> g_easel;
 ConsoleModel *g_model;
 RingFollower g_ring;
-std::vector<TextCell> g_composed;
+std::vector<GlassCell> g_composed;
 bool g_dirty;                      // the picture changed since it was last presented
 TouchTag g_died = TOUCH_TAG_INVALID;
 
@@ -305,6 +305,22 @@ void AnswerSize(const Result &Asked)
     (void)answer(&Asked, Reply, sizeof(Reply));
 }
 
+// DISP_CMD_PAGE: the screen's colours, said by a keeper — kept as long as
+// this display lives, and drawn from the next present; a keeper says them
+// again to a display that comes after it.
+void AnswerPage(const Result &Asked, const AskFrom &From, const DisplayPageRequest &Request)
+{
+    error_t Error = OK;
+    if (!FrontKeeper(From)) Error = ERR_ACCESS_DENIED;
+    else if ((Request.text >> 24) != 0 || (Request.page >> 24) != 0) Error = ERR_INVALID_ARGUMENT;
+    if (Error == OK) {
+        g_easel->Page(Request.text, Request.page);
+        g_dirty = true;
+    }
+    const DisplayFrontReply Reply{DISP_CMD_PAGE, 0, {0, 0}, static_cast<std::int32_t>(Error), cabin_info()->pid};
+    (void)answer(&Asked, &Reply, sizeof(Reply));
+}
+
 // A question (KCTX_ASK): AskFrom, then what is asked. Every branch answers —
 // nothing at all when the question is not one this display knows.
 void HearQuestion(const Result &Entry)
@@ -340,6 +356,16 @@ void HearQuestion(const Result &Entry)
     case DISP_CMD_SIZE:
         AnswerSize(Entry);
         return;
+    case DISP_CMD_PAGE: {
+        DisplayPageRequest Request{};
+        if (Length < sizeof(Request)) {
+            (void)answer(&Entry, nullptr, 0);
+            return;
+        }
+        std::memcpy(&Request, Question, sizeof(Request));
+        AnswerPage(Entry, From, Request);
+        return;
+    }
     case DISP_CMD_LAYER_OPEN:
     case DISP_CMD_LAYER_COMMIT: {
         WaitingQuestion Waiting{};

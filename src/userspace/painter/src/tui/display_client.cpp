@@ -205,7 +205,8 @@ box::status DisplayLayer::Present(const Frame &Picture) noexcept
             const Cell Value = Picture.Read({Col, Row});
             *Out++ = DisplayLayerCell{
                 TextCell{Value.Foreground.Raw(), Value.Background.Raw(), Value.Glyph, {0, 0, 0}},
-                static_cast<std::uint8_t>(Value.IsTransparent() ? 0u : 1u), {0, 0, 0}};
+                Value.MarkColor.Raw(), static_cast<std::uint8_t>(Value.IsTransparent() ? 0u : 1u),
+                static_cast<std::uint8_t>(Value.Mark), {0, 0}};
         }
     }
     const std::optional<core::Point> Caret = Picture.Caret();

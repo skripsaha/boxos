@@ -50,7 +50,8 @@
  * The kernel zero-inits that block, so `initialized` starts false and
  * print_state_self() corrects fg/bg to the process defaults on first touch.
  * Per owner decision, a spawned strand's colours always start FRESH
- * (COLOR_DEFAULT / COLOR_BLACK) — no inheritance from whoever spawned it.
+ * (COLOR_DEFAULT both: the screen's own) — no inheritance from whoever
+ * spawned it.
  * =========================================================================== */
 
 enum {
@@ -80,7 +81,7 @@ _Static_assert(sizeof(StrandPrintState) == STRAND_PRINT_BYTES,
               "StrandPrintState must match strand_info.h STRAND_PRINT_BYTES");
 
 static StrandPrintState g_main_print_state = {
-    .color_fg = COLOR_DEFAULT, .color_bg = COLOR_BLACK, .initialized = 1
+    .color_fg = COLOR_DEFAULT, .color_bg = COLOR_DEFAULT, .initialized = 1
 };
 
 static StrandPrintState *print_state_self(void)
@@ -91,7 +92,7 @@ static StrandPrintState *print_state_self(void)
     StrandPrintState *ps = (StrandPrintState *)(void *)si->print_state;
     if (!ps->initialized) {
         ps->color_fg    = COLOR_DEFAULT;
-        ps->color_bg    = COLOR_BLACK;
+        ps->color_bg    = COLOR_DEFAULT;
         ps->initialized = 1;
     }
     return ps;
@@ -474,8 +475,8 @@ static void lane_flush_run(StrandPrintState *ps)
     if (!ok) {
         /* The frame never reached the daemon; its text still must be said.
          * lane_fail moved this strand onto the ring, so this re-emit goes
-         * there (run.fg/bg are already resolved — resolving again is the
-         * identity). */
+         * there (run.fg/bg are already on the wire — putting them there
+         * again is the identity). */
         emit_run(ps, ps->run.text, len, ps->run.fg, ps->run.bg);
     }
 }
@@ -589,8 +590,9 @@ void io_depart(void)
 /* ===========================================================================
  * Color state.
  *
- * Colour is frame METADATA — every ConsoleRun carries its resolved (fg, bg)
- * pair, so set_color is pure state and the pair rides the next emitted run.
+ * Colour is frame METADATA — every ConsoleRun carries its (fg, bg) pair, a
+ * real triple each or COLOR_DEFAULT for the screen's own (BoxColorOnWire), so
+ * set_color is pure state and the pair rides the next emitted run.
  * The log ring carries no colour at all: text said there is drawn in the
  * plain tone.
  * =========================================================================== */
@@ -657,8 +659,8 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
 {
     if (len <= 0) return;
 
-    fg = BoxColorResolveFg(fg);
-    bg = BoxColorResolveBg(bg);
+    fg = BoxColorOnWire(fg);
+    bg = BoxColorOnWire(bg);
 
     if (g_io_mode == IO_MODE_IPC && lane_ensure(ps)) {
         if (ps->run.len > 0 && (ps->run.fg != fg || ps->run.bg != bg))
@@ -948,8 +950,8 @@ void clear(void)
             ConsoleRun f;
             memset(&f, 0, sizeof(f));
             f.kind = CONSOLE_RUN_CLEAR;
-            f.fg   = COLOR_LIGHT_GRAY;
-            f.bg   = COLOR_BLACK;
+            f.fg   = COLOR_DEFAULT;
+            f.bg   = COLOR_DEFAULT;
             f.order = console_order_next(ps);
             (void)lane_push(ps, &f);
         }
@@ -1189,8 +1191,8 @@ bool console_step(int32_t delta)
     f.kind = CONSOLE_RUN_STEP;
     f.len  = sizeof(delta);
     memcpy(f.text, &delta, sizeof(delta));
-    f.fg   = BoxColorResolveFg(ps->color_fg);
-    f.bg   = BoxColorResolveBg(ps->color_bg);
+    f.fg   = BoxColorOnWire(ps->color_fg);
+    f.bg   = BoxColorOnWire(ps->color_bg);
     f.order = console_order_next(ps);
     return lane_push(ps, &f);
 }
@@ -1215,8 +1217,8 @@ void console_hint(const char *bytes, uint32_t len)
         f.kind  = CONSOLE_RUN_HINT;
         f.len   = (uint8_t)take;
         memcpy(f.text, bytes + off, take);
-        f.fg    = BoxColorResolveFg(ps->color_fg);
-        f.bg    = BoxColorResolveBg(ps->color_bg);
+        f.fg    = BoxColorOnWire(ps->color_fg);
+        f.bg    = BoxColorOnWire(ps->color_bg);
         f.order = console_order_next(ps);
         if (!lane_push(ps, &f)) return;
         off += take;
