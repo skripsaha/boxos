@@ -7484,15 +7484,16 @@ run_headcountmut() {
 # file — the index, not a walk of the first 255 files. rename used to change
 # the string and leave the tag, so a renamed file answered to its old name and
 # not its new one. The scenario creates a file, renames it, and asks the volume
-# by tag and by name; then trashes it and erases the trash, which asks for the
-# trashed files by their tag (a plain listing leaves them out on purpose).
+# by tag and by name; then trashes it and empties the trash with delete,
+# which asks for the trashed files by their tag (a plain listing leaves them
+# out on purpose) and goes only on a yes.
 #
-# Then a second file is trashed and erased BY NAME. erase looked the name up
-# the way a listing does — and a listing leaves the trash out — then refused
-# any file that was not trashed, so `erase NAME` could delete nothing at all.
-# A third file, never trashed, must still be refused, and a name nobody has
-# must be not found. The machine is halted through `bye` and the host lists
-# the volume it left: the refused file on it, the erased one not.
+# Then a second file is trashed and deleted BY NAME: the shell's look-up, like
+# a listing, leaves the trash out, so the name comes to delete as a word and
+# delete looks it up in the trash itself. A third file, never trashed, is
+# shown and kept on a no — delete takes any file, and only with a yes — and a
+# name nobody has must be not found. The machine is halted through `bye` and
+# the host lists the volume it left: the kept file on it, the deleted one not.
 byname_session() {
     local name=$1 args=$2
     make run-stop >/dev/null 2>&1
@@ -7506,12 +7507,20 @@ byname_session() {
     sleep 3
     local MARK
     MARK=$(wc -l < build/serial.log)
-    local cmd
-    for cmd in "create alpha.txt" "name alpha.txt beta.txt" "files beta" "files alpha" \
-               "info beta.txt" "info alpha.txt" "trash beta.txt" "erase trashed" "files beta" \
-               "create gamma.txt" "trash gamma.txt" "erase gamma.txt" "files trashed" \
-               "create delta.txt" "erase delta.txt" "erase nosuch.txt"; do
+    # A command, and the answer typed once delete asks for it: "CMD|ANSWER".
+    local entry cmd answer asked
+    for entry in "create alpha.txt" "name alpha.txt beta.txt" "files beta" "files alpha" \
+                 "info beta.txt" "info alpha.txt" "trash beta.txt" "delete trashed|yes" "files beta" \
+                 "create gamma.txt" "trash gamma.txt" "delete gamma.txt|yes" "files trashed" \
+                 "create delta.txt" "delete delta.txt|no" "delete nosuch.txt"; do
+        cmd=${entry%%|*}
+        answer=${entry#"$cmd"}; answer=${answer#|}
+        asked=$(($(wc -l < build/serial.log) + 1))
         type_line "$cmd" || break
+        if [ -n "$answer" ]; then
+            wait_for_line build/serial.log "(yes or no)" "$WAIT_QUIET_S" "$asked" || break
+            type_line "$answer" || break
+        fi
         wait_for_prompt || break
     done
     type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" $((MARK + 1))
@@ -7543,22 +7552,22 @@ byname_judge() {
     sed -n '/~ info alpha.txt/,/~ trash beta.txt/p' "$L" | grep -q "there is no alpha.txt here" \
         && ok "$name: not found by its old name" \
         || bad "$name: 'info alpha.txt' still finds the renamed file"
-    grep -q "Erased 1 file from the trash" "$L" \
-        && ok "$name: erase found the trashed file by its tag" \
-        || bad "$name: 'erase trashed' did not delete the one trashed file ($(grep -m1 'Erased' "$L" || echo 'no answer'))"
-    sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -q "^gamma.txt moved to the trash"
-    chk $? "$name: gamma.txt went to the trash ($(sed -n '/~ trash gamma.txt/,/~ erase gamma.txt/p' "$L" | grep -m1 -E '^(gamma.txt moved|Could not)' || echo 'no answer'))"
-    local erased said
-    said=$(sed -n '/~ erase gamma.txt/,/~ files trashed/p' "$L" | grep -m1 -E "^(File deleted|Could not|There is no)")
-    erased=$(echo "$said" | grep -oE "^File deleted: gamma\.txt$")
-    [ -n "$erased" ]
-    chk $? "$name: erase by name found the trashed file in the trash (${said:-no answer})"
+    sed -n '/~ delete trashed/,/~ files beta/p' "$L" | grep -q "^Deleted 1 file$" \
+        && ok "$name: delete found the trashed file by its tag, and deleted it on a yes" \
+        || bad "$name: 'delete trashed' did not delete the one trashed file ($(sed -n '/~ delete trashed/,/~ files beta/p' "$L" | grep -m1 -E '^(Deleted|Nothing|The trash)' || echo 'no answer'))"
+    sed -n '/~ trash gamma.txt/,/~ delete gamma.txt/p' "$L" | grep -q "^gamma.txt moved to the trash"
+    chk $? "$name: gamma.txt went to the trash ($(sed -n '/~ trash gamma.txt/,/~ delete gamma.txt/p' "$L" | grep -m1 -E '^(gamma.txt moved|Could not)' || echo 'no answer'))"
+    local section
+    section=$(sed -n '/~ delete gamma.txt/,/~ files trashed/p' "$L")
+    echo "$section" | grep -q "^  gamma\.txt  " && echo "$section" | grep -q "^Deleted 1 file$"
+    chk $? "$name: delete by name found the trashed file in the trash, showed it, and deleted it on a yes ($(echo "$section" | grep -m1 -E '^(Deleted|Nothing|There is no)' || echo 'no answer'))"
     sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -q "No files found"
     chk $? "$name: and the trash is empty after it ($(sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -m1 -E '^(No files found|gamma\.txt)' || echo 'no answer'))"
-    sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -q "^delta.txt is not in the trash"
-    chk $? "$name: a file out of the trash is refused ($(sed -n '/~ erase delta.txt/,/~ erase nosuch.txt/p' "$L" | grep -m1 -E '^(File deleted|Could not|delta|There is no)' || echo 'no answer'))"
-    sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -q "^There is no file called nosuch.txt"
-    chk $? "$name: a name nobody has is not found ($(sed -n '/~ erase nosuch.txt/,/~ bye/p' "$L" | grep -m1 -E '^(File deleted|Could not|delta|There is no)' || echo 'no answer'))"
+    section=$(sed -n '/~ delete delta.txt/,/~ delete nosuch.txt/p' "$L")
+    echo "$section" | grep -q "does not go to the trash" && echo "$section" | grep -q "^Nothing was deleted$"
+    chk $? "$name: a file out of the trash is shown with the warning that it is gone for good, and kept on a no ($(echo "$section" | grep -m1 -E '^(Deleted|Nothing|There is no)' || echo 'no answer'))"
+    sed -n '/~ delete nosuch.txt/,/~ bye/p' "$L" | grep -q "^There is no file called nosuch.txt"
+    chk $? "$name: a name nobody has is not found ($(sed -n '/~ delete nosuch.txt/,/~ bye/p' "$L" | grep -m1 -E '^(Deleted|Nothing|There is no)' || echo 'no answer'))"
     local halt rows kept refused seen
     halt=$(grep -m1 -E "$STAND_HALT_ENDS" "$L" | cut -c1-120)
     grep -q '^\[HALT\] Storage sync complete' "$L"
@@ -7566,8 +7575,8 @@ byname_judge() {
     rows=$(grep -cE ' bytes +[0-9]+ extent\(s\), [0-9]+ block\(s\)$' "$SCRATCH/$name.list")
     kept=$(grep -m1 -E '^ +gamma\.txt +[0-9]+ bytes ' "$SCRATCH/$name.list" | sed 's/^ *//; s/  */ /g')
     refused=$(grep -m1 -E '^ +delta\.txt +[0-9]+ bytes ' "$SCRATCH/$name.list" | sed 's/^ *//; s/  */ /g')
-    if [ -n "$refused" ]; then seen="delta.txt, which erase refused, is on it ($refused)"
-    else seen="delta.txt, which erase refused, is NOT on it"; fi
+    if [ -n "$refused" ]; then seen="delta.txt, which delete was told no for, is on it ($refused)"
+    else seen="delta.txt, which delete was told no for, is NOT on it"; fi
     if [ -n "$kept" ]; then seen="$seen, and gamma.txt IS ($kept)"
     else seen="$seen, and gamma.txt is not"; fi
     grep -qE '^ground sector [0-9]+ ' "$SCRATCH/$name.list" && [ -n "$refused" ] && [ -z "$kept" ]
@@ -10349,19 +10358,18 @@ def systemtag():
     word, rest = verdict(logs[2], "systemtag")
     listed = len(re.findall(r"^ +\S+ +\d+ bytes +\d+ (?:extent|run)\(s\)", lists[1], re.M))
     present = host(lists[1], "kernel.bin") is not None
-    m = re.match(r"kernel\.bin \(file (\d+)\) gave up its system tag to untag and was then deleted by erase "
-                 r"trashed, programs that do not wear system \(exit 0 each\); asked about it now, the volume "
-                 r"answers error (\d+)", rest)
-    if word == "DEFECT" and m and listed and not present:
-        return "defect", "kernel.bin (file %s) gave up its system tag to untag and was deleted by erase trashed, " \
-                         "programs that do not wear system (error %s when asked after); the host lists %d files " \
-                         "and no kernel.bin" % (m.group(1), m.group(2), listed)
+    m = re.match(r"kernel\.bin \(file (\d+)\) gave up its system tag to untag, a program that does not wear "
+                 r"system \(exit 0\)", rest)
+    if word == "DEFECT" and m and listed:
+        return "defect", "kernel.bin (file %s) gave up its system tag to untag, a program that does not wear " \
+                         "system; the host lists %d files, kernel.bin %s" \
+                         % (m.group(1), listed, "among them" if present else "not among them")
     p = re.match(r"kernel\.bin \(file (\d+)\) kept its system tag against untag \(exit (\d+)\), and its place "
-                 r"against erase trashed with it in the trash \(trash and erase exit 0\), programs that do not "
-                 r"wear system", rest)
-    if word == "PASS" and p and present and p.group(2) != "0":
-        return "behaves", "kernel.bin (file %s) refused untag (exit %s) and stayed through erase trashed, programs " \
-                          "that do not wear system, and the host still lists it" % p.groups()
+                 r"in the trash against delete trashed, which with nobody at its screen to say yes deleted "
+                 r"nothing \(exit (\d+)\), programs that do not wear system", rest)
+    if word == "PASS" and p and present and p.group(2) != "0" and p.group(3) != "0":
+        return "behaves", "kernel.bin (file %s) refused untag (exit %s) and stayed through delete trashed, which " \
+                          "with nobody to say yes deleted nothing (exit %s), and the host still lists it" % p.groups()
     return "fail", "%s; the host lists %d files, kernel.bin %s" % (said(logs[2], "systemtag"), listed,
                                                                  "among them" if present else "not among them")
 
@@ -10422,7 +10430,7 @@ run_quill() {
 # nothing put in. Two fixes that used to be emulated here are the tree's own
 # as well, and so they are taken OUT, and their oracle must see the defect
 # come back: the Ink guard (step 1.4, ink.c) — down, untag takes the system
-# tag off kernel.bin and erase deletes it (systemtag); the Use Context's
+# tag off kernel.bin (systemtag); the Use Context's
 # chain (step 1.6B, use_memory.c) — never staked, a context of 1000 bytes is
 # carried by nothing and the volume does not remember it (usememory). A book
 # carries the word in its stitch, not on a chain, so its stitch takes it out
@@ -10568,7 +10576,7 @@ run_quillmut() {
                           fidhistory)            want="fail:[0-9]+ files were live before and [0-9]+ after" ;;
                           coldread)              want="fail:a read of [0-9]+ bytes into memory this program never touched answered -[0-9]+ \(error [0-9]+\); 0 of the bytes" ;;
                           coldwrite)             want="fail:a write of [0-9]+ bytes out of memory this program never touched answered -[0-9]+ \(error [0-9]+\); the file holds 0 bytes" ;;
-                          systemtag)             want="defect:kernel\.bin \(file [0-9]+\) gave up its system tag to untag and was deleted by erase trashed" ;;
+                          systemtag)             want="defect:kernel\.bin \(file [0-9]+\) gave up its system tag to untag, a program that does not wear system" ;;
                           usememory)             want="defect:a Use Context of 1000 bytes in 91 tags was set and the volume did not remember it" ;;
                           *)                     want="behaves:" ;;
                       esac

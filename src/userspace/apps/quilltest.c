@@ -678,9 +678,9 @@ static const QuillCase g_cases[] = {
       "what 50000 file ids spent on deleted files cost the next mount",
       "50000 file ids spent for good, and their dead records in the pool", true },
     { "systemtag", "", 0, 0, QUILL_THROWAWAY(QuillSystemTag),
-      "may programs that do not wear system — untag, trash, erase — take the system tag off "
+      "may programs that do not wear system — untag, trash, delete — take the system tag off "
       "kernel.bin and delete it",
-      "DESTRUCTIVE: where the answer is yes, kernel.bin is gone and the volume will not boot", true },
+      "DESTRUCTIVE: where the answer is yes, kernel.bin loses its guard; it is given back before the verdict", true },
     { "hog", "", 0, 0, QuillHog, "nothing: it computes without end",
       "a cabin spinning until the machine stops; never returns", false },
     { "settle", "NAME", 1, 0, QuillSettle,

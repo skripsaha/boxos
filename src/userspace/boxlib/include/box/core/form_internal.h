@@ -36,8 +36,8 @@ int         form_kind_of(const char *name, size_t length);
 
 /* The Luggage records for Values, after Line (Length bytes; the NUL after it
  * is written here). Screen 0 for none; Souvenir: the starter reads what the
- * program gives back. */
-int form_records_encode(const FormValues *values, file_id_t screen, bool souvenir,
+ * program gives back; Here: a person stands at the screen it is on. */
+int form_records_encode(const FormValues *values, file_id_t screen, bool souvenir, bool here,
                         const char *line, size_t length, char **bytes, size_t *total);
 
 /* The records of Luggage bytes read against Form (NULL: a program with no
@@ -52,6 +52,8 @@ file_id_t form_records_screen(const char *bytes, size_t length);
 /* Only the `souvenir` record, read without a Form: true when it is there
  * once; none, two, or records that do not end, false. */
 bool      form_records_souvenir(const char *bytes, size_t length);
+/* Only the `here` record, the same way. */
+bool      form_records_here(const char *bytes, size_t length);
 
 /* Walking the records of Luggage bytes. */
 typedef struct {

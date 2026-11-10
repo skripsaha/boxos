@@ -52,6 +52,7 @@ struct BoxFormFiller {
     char           *Line;
     char           *Program;
     uint8_t         Souvenir;        /* the starter reads what the program gives back */
+    uint8_t         Here;            /* a person stands at the screen the program is on */
     FormItem       *Items;
     size_t          ItemCount;
     size_t          ItemCapacity;

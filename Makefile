@@ -830,7 +830,7 @@ PAINTER_LIB = $(PAINTER_DIR)/libpainter.a
 
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
-UTIL_NAMES = create show files tag untag name trash erase assemble \
+UTIL_NAMES = create show files tag untag name trash delete assemble \
              me info say reboot bye defrag escheat fsck ipc_test memtag hw \
              timezone logsave lastsaid usetest faretest luggagetest headcount \
              playtime lavalamp finish taskcenter hexer stringview \
@@ -1501,7 +1501,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/untag.elf   "utility,storage" \
 	$(UTILS_DIR)/name.elf    "utility,storage" \
 	$(UTILS_DIR)/trash.elf   "utility,storage" \
-	$(UTILS_DIR)/erase.elf   "utility,storage" \
+	$(UTILS_DIR)/delete.elf  "utility,storage" \
 	$(UTILS_DIR)/assemble.elf "utility,toolchain" \
 	$(UTILS_DIR)/me.elf      "utility" \
 	$(UTILS_DIR)/info.elf    "utility,storage" \

@@ -61,10 +61,10 @@ bool Settle(Hub &Self, std::string_view Who, std::expected<Settled, int> Ran)
 bool Program(Hub &Self, file_id_t Program, std::string_view Who, std::string_view Line)
 {
     if (!remake::WhenChanged(Self, Program, Who)) return false;
-    const std::optional<fill::Filled> What = fill::FromLine(Self, Program, Who, Line);
+    const ProgramLiving               Living = LivingOf(Program);
+    const std::optional<fill::Filled> What   = fill::FromLine(Self, Program, Who, Line, Living == PROGRAM_TASK);
     if (!What) return false;
 
-    const ProgramLiving Living = LivingOf(Program);
     if (Living == PROGRAM_TASK) return Settle(Self, Who, Self.Started.OnScreen(StartOf(*What, Who, Living)));
     if (const std::expected<void, int> Started = Self.Started.Behind(StartOf(*What, Who, Living)); !Started) {
         SayRefused(Who, Started.error());

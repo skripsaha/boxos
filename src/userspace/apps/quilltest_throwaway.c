@@ -296,15 +296,16 @@ static int QuillRunProgram(const char *line, int32_t *code)
     return pid > 0 ? process_gone((uint32_t)pid, gen, code) : pid;
 }
 
-/* Asked by the shell's own tools — untag, trash, erase — which wear utility
+/* Asked by the shell's own tools — untag, trash, delete — which wear utility
  * and storage and not system. The defect is that ANY program may do this;
  * asked by this program, which wears system, a fix that weighed the asker's
- * authority would hide it. The trash is emptied with `erase trashed` — on a
- * throwaway image the whole trash, which asks erase the same question its
- * name would (erase by name, since it looks the name up in the trash itself,
- * takes the same road). A kernel still on the
- * volume afterwards is given back what the tools took, out of the trash and
- * wearing its guard, before anything is reported. */
+ * authority would hide it. The trash is emptied with `delete trashed`, started
+ * by this program and not by the shell: nobody stands at its screen to say
+ * yes (box/form.h form_person_here), so it deletes nothing and says so — the
+ * volume's own guard on a file the system keeps is the stand's
+ * (stand_warrant_tests.c). A kernel still on the volume afterwards is given
+ * back what the tools took, out of the trash and wearing its guard, before
+ * anything is reported. */
 QuillVerdict QuillSystemTag(const char *const *args)
 {
     (void)args;
@@ -322,10 +323,10 @@ QuillVerdict QuillSystemTag(const char *const *args)
         return QUILL_FAIL;
     }
 
-    int32_t ucode = -1, tcode = -1, ecode = -1;
+    int32_t ucode = -1, tcode = -1, dcode = -1;
     int  urc = QuillRunProgram("untag kernel.bin system", &ucode);
     int  trc = QuillRunProgram("trash kernel.bin", &tcode);
-    int  erc = QuillRunProgram("erase trashed", &ecode);
+    int  drc = QuillRunProgram("delete trashed", &dcode);
     file_info_t info;
     int  irc     = file_info(kid, &info);
     bool present = irc == 0;
@@ -333,26 +334,26 @@ QuillVerdict QuillSystemTag(const char *const *args)
     int  out     = present && QuillWears(kid, "trashed") ? tag_remove(kid, "trashed") : 0;
     int  back    = present && !wears ? tag_add(kid, "system") : 0;
     int  arc     = anchor(0);
-    bool ran     = urc == 0 && trc == 0 && erc == 0;
+    bool ran     = urc == 0 && trc == 0 && drc == 0;
 
-    if (ran && arc == 0 && out == 0 && ucode != 0 && tcode == 0 && ecode == 0 && present &&
+    if (ran && arc == 0 && out == 0 && ucode != 0 && tcode == 0 && dcode != 0 && present &&
         wears) {
         printf("[QUILL] systemtag: PASS — kernel.bin (file %lu) kept its system tag against "
-               "untag (exit %d), and its place against erase trashed with it in the trash "
-               "(trash and erase exit 0), programs that do not wear system; it is still on the "
-               "volume, out of the trash again\n", kid, ucode);
+               "untag (exit %d), and its place in the trash against delete trashed, which with "
+               "nobody at its screen to say yes deleted nothing (exit %d), programs that do not "
+               "wear system; it is still on the volume, out of the trash again\n", kid, ucode, dcode);
         return QUILL_PASS;
     }
-    if (ran && arc == 0 && ucode == 0 && tcode == 0 && ecode == 0 && !present) {
+    if (ran && arc == 0 && ucode == 0) {
         printf("[QUILL] systemtag: DEFECT — kernel.bin (file %lu) gave up its system tag to "
-               "untag and was then deleted by erase trashed, programs that do not wear system "
-               "(exit 0 each); asked about it now, the volume answers error %u — the kernel "
-               "this volume boots is gone\n", kid, box_errno_of(irc));
+               "untag, a program that does not wear system (exit 0) — the guard on the kernel "
+               "this volume boots is gone; %s\n", kid,
+               present ? "it was given back" : "the file is gone from the volume");
         return QUILL_DEFECT;
     }
     printf("[QUILL] systemtag: FAIL — kernel.bin (file %lu): untag answered %d (exit %d), trash "
-           "%d (exit %d), erase %d (exit %d); it is %s the volume%s (out of the trash: %d, "
-           "system put back: %d, anchor %d)\n", kid, urc, ucode, trc, tcode, erc, ecode,
+           "%d (exit %d), delete %d (exit %d); it is %s the volume%s (out of the trash: %d, "
+           "system put back: %d, anchor %d)\n", kid, urc, ucode, trc, tcode, drc, dcode,
            present ? "still on" : "gone from",
            present ? (wears ? " and wears system" : " without system") : "", out, back, arc);
     return QUILL_FAIL;

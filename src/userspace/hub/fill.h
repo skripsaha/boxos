@@ -47,11 +47,14 @@ HeldFiller Form(const Look &Shown, const BoxForm &Declared, BoxFormLookup &Looku
 
 // Program's Form filled from Line — the words after its name, as typed. Who
 // is the name the person used: word 0 of the Luggage and what every sentence
-// begins with. Nothing when it could not be filled, and why was said.
-std::optional<Filled> FromLine(const Hub &Self, file_id_t Program, std::string_view Who, std::string_view Line);
+// begins with. OnScreen: it is started on the screen, so the person is there
+// to answer what it asks (box/form.h form_person_here). Nothing when it could
+// not be filled, and why was said.
+std::optional<Filled> FromLine(const Hub &Self, file_id_t Program, std::string_view Who, std::string_view Line,
+                               bool OnScreen);
 
 // Program's Form filled from `it`, the one file Thing, asking nobody: the
-// person's own `them` is neither read nor changed.
+// person's own `them` is neither read nor changed. It runs on the screen.
 std::optional<Filled> OnThing(file_id_t Program, std::string_view Who, file_id_t Thing);
 
 }  // namespace fill

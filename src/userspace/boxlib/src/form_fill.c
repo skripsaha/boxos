@@ -389,6 +389,13 @@ int form_fill_souvenir(BoxFormFiller *filler)
     return 0;
 }
 
+int form_fill_here(BoxFormFiller *filler)
+{
+    if (!filler) return -ERR_INVALID_ARGUMENT;
+    filler->Here = 1;
+    return 0;
+}
+
 int form_fill_arrow(BoxFormFiller *filler, file_id_t *screen, const char **create)
 {
     if (!filler || !screen || !create || !filler->Finished) return -ERR_INVALID_ARGUMENT;
@@ -533,7 +540,8 @@ int form_fill_luggage(BoxFormFiller *filler, file_id_t screen, char **bytes, siz
     at += words_length;
     free(words);
 
-    int rc = form_records_encode(&filler->Values, screen, filler->Souvenir, line, at, bytes, length);
+    int rc = form_records_encode(&filler->Values, screen, filler->Souvenir, filler->Here, line, at, bytes,
+                                 length);
     free(line);
     return rc;
 }

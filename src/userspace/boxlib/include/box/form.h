@@ -70,6 +70,8 @@ extern "C" {
  *     =TEXT             a word of the field (a name and the text are one each)
  *     screen #ID        what the program prints is added to the end of this file
  *     souvenir          the starter reads what the program gives back
+ *     here              a person stands at the screen the program is on, to
+ *                       answer what it asks (form_person_here)
  *
  * ---- The arrow and what a command gives --------------------------------
  *
@@ -140,6 +142,12 @@ const char *form_text(uint32_t field);
  * the files add up. 0, or a negative -error_t (nobody asked, or the one who
  * did is gone: 0, given to no one). */
 int souvenir_things(const file_id_t *ids, size_t count);
+
+/* Whether a person stands at the screen this program is on, to answer what it
+ * asks — the starter said so (`here`): the shell, for a program it started on
+ * the screen. False for one started behind, or by another program: what it
+ * would ask, nobody answers, and its reading would wait for ever. */
+bool form_person_here(void);
 
 /* The file this program's screen is, when an arrow made it one (`screen #ID`):
  * what it prints is added to that file. 0 when what it prints reaches the
@@ -279,6 +287,10 @@ int  form_fill_program(BoxFormFiller *filler, const char *name);
  * program for its Souvenir. Without it the program gives back to no one.
  * Optional; before form_fill_luggage. */
 int  form_fill_souvenir(BoxFormFiller *filler);
+/* A person stands at the screen the program will be on, and may be asked:
+ * the Luggage says so (`here`). Without it the program asks nobody — it was
+ * started behind, or by another program. Optional; before form_fill_luggage. */
+int  form_fill_here(BoxFormFiller *filler);
 /* DONE: the arrow's file when the program has no `into` — its id, or 0 with
  * *create the name of a file to make first (the shell makes it); none: 0
  * and NULL. *create lives until form_fill_end. */

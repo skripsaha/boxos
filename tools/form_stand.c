@@ -532,7 +532,7 @@ static void test_arrow(void)
 }
 
 static void check_luggage(const char *label, const char *form_text, const char *line, const char *program,
-                          bool souvenir, const char *want, size_t want_length)
+                          bool souvenir, bool here, const char *want, size_t want_length)
 {
     BoxForm        form;
     BoxFormLookup  lookup = { stand_find, stand_all, g_them, g_them_count, g_them_known, NULL, 0 };
@@ -547,6 +547,7 @@ static void check_luggage(const char *label, const char *form_text, const char *
     check_int(label, question.Step, BOX_FORM_DONE);
     if (program) form_fill_program(filler, program);
     if (souvenir) check_int(label, form_fill_souvenir(filler), 0);
+    if (here) check_int(label, form_fill_here(filler), 0);
     check_int(label, form_fill_luggage(filler, 77, &bytes, &length), 0);
     check(length == want_length && memcmp(bytes, want, want_length) == 0, label, bytes, want);
     free(bytes);
@@ -557,9 +558,11 @@ static void check_luggage(const char *label, const char *form_text, const char *
 #define TAG_BYTES "tag a.txt done\0filled 1\0field things\0#1\0field words\0=done\0screen #77\0"
 
 #define BYTES(label, form, line, program, text) \
-    check_luggage(label, form, line, program, false, text, sizeof(text) - 1)
+    check_luggage(label, form, line, program, false, false, text, sizeof(text) - 1)
 #define SOUVENIR_BYTES(label, form, line, program, text) \
-    check_luggage(label, form, line, program, true, text, sizeof(text) - 1)
+    check_luggage(label, form, line, program, true, false, text, sizeof(text) - 1)
+#define HERE_BYTES(label, form, line, program, souvenir, text) \
+    check_luggage(label, form, line, program, souvenir, true, text, sizeof(text) - 1)
 
 static void test_luggage_bytes(void)
 {
@@ -575,6 +578,9 @@ static void test_luggage_bytes(void)
     SOUVENIR_BYTES("bytes souvenir undeclared", "form 1\n", "", "prog",
                    "prog\0filled 1\0screen #77\0souvenir\0");
     check_int("souvenir no filler", form_fill_souvenir(NULL), -ERR_INVALID_ARGUMENT);
+    HERE_BYTES("bytes here", TAG, "a.txt done", "tag", false, TAG_BYTES "here\0");
+    HERE_BYTES("bytes souvenir and here", TAG, "a.txt done", "tag", true, TAG_BYTES "souvenir\0here\0");
+    check_int("here no filler", form_fill_here(NULL), -ERR_INVALID_ARGUMENT);
 }
 
 /* ---- the Luggage, read ---------------------------------------------------- */
@@ -657,6 +663,15 @@ static void test_luggage_read(void)
     check_int("souvenir as a word", form_records_souvenir("t\0filled 1\0field words\0=souvenir\0", 33), 0);
     check_int("souvenir unended", form_records_souvenir("t\0filled 1\0souvenir", 19), 0);
     check_int("souvenir line only", form_records_souvenir("souvenir", 8), 0);
+    const char here[] = "t\0filled 1\0field things\0#1\0field words\0=a\0souvenir\0here\0";
+    check_int("luggage here", decode(TAG, here, sizeof(here) - 1), 1);
+    BAD("two heres", TAG, "t\0filled 1\0field things\0#1\0field words\0=a\0here\0here\0");
+    BAD("here with a word", TAG, "t\0filled 1\0field things\0#1\0field words\0=a\0here x\0");
+    check_int("here read", form_records_here(here, sizeof(here) - 1), 1);
+    check_int("here absent", form_records_here(asked, sizeof(asked) - 1), 0);
+    check_int("here twice", form_records_here("t\0here\0here\0", 12), 0);
+    check_int("here as a word", form_records_here("t\0filled 1\0field words\0=here\0", 29), 0);
+    check_int("here line only", form_records_here("here", 4), 0);
 }
 
 /* ---- the Form's text ------------------------------------------------------ */
@@ -1226,6 +1241,29 @@ static void test_souvenir_wanted(void)
     check_int("souvenir no luggage", form_souvenir_wanted(), 0);
 }
 
+/* A person is here only when the starter said so: the shell's bytes with
+ * `here`, never a line alone — started by another program — nor records that
+ * leave it out. */
+static void test_person_here(void)
+{
+    static const char shell[] = "delete a.txt\0filled 1\0field things\0#1\0here\0";
+    static const char quiet[] = "delete a.txt\0filled 1\0field things\0#1\0";
+    static const char line[]  = "delete a.txt";
+
+    g_luggage_bytes  = shell;
+    g_luggage_length = sizeof(shell) - 1;
+    check_int("person here", form_person_here(), 1);
+    g_luggage_bytes  = quiet;
+    g_luggage_length = sizeof(quiet) - 1;
+    check_int("person not said", form_person_here(), 0);
+    g_luggage_bytes  = line;
+    g_luggage_length = sizeof(line) - 1;
+    check_int("person here line only", form_person_here(), 0);
+    g_luggage_bytes  = NULL;
+    g_luggage_length = 0;
+    check_int("person here no luggage", form_person_here(), 0);
+}
+
 int main(void)
 {
     reset_volume();
@@ -1249,6 +1287,7 @@ int main(void)
     test_undeclared();
     test_screen_file();
     test_souvenir_wanted();
+    test_person_here();
     test_given();
     test_given_names();
     test_lists_of_things();

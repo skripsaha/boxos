@@ -4,7 +4,8 @@
  * The Luggage is the line as typed, a NUL, then records each ended by a NUL:
  * `filled 1`, a `field KIND` for every field of the Form in its order and
  * under it `#ID` for a file or `=TEXT` for a word, `screen #ID` for the
- * arrow, and `souvenir` when the starter reads what the program gives back.
+ * arrow, `souvenir` when the starter reads what the program gives back, and
+ * `here` when a person stands at the screen the program is on.
  * The kernel hands these bytes over verbatim and any program may be
  * started with any bytes, so reading them is strict: a record that is not
  * exactly one of these, a field that does not match the program's own Form,
@@ -126,7 +127,7 @@ static int put_field(FormBytes *out, const FormFieldValue *field)
     return rc;
 }
 
-int form_records_encode(const FormValues *values, file_id_t screen, bool souvenir,
+int form_records_encode(const FormValues *values, file_id_t screen, bool souvenir, bool here,
                         const char *line, size_t length, char **bytes, size_t *total)
 {
     FormBytes out = { NULL, 0, 0 };
@@ -138,6 +139,7 @@ int form_records_encode(const FormValues *values, file_id_t screen, bool souveni
         rc = put_field(&out, &values->Fields[i]);
     if (rc == 0 && screen != 0) rc = put_record(&out, "screen #", NULL, 0, true, screen);
     if (rc == 0 && souvenir) rc = put_record(&out, "souvenir", NULL, 0, false, 0);
+    if (rc == 0 && here) rc = put_record(&out, "here", NULL, 0, false, 0);
     if (rc != 0) {
         free(out.Bytes);
         return rc;
@@ -161,6 +163,7 @@ typedef struct {
     file_id_t       Screen;
     bool            Seen;
     bool            Souvenir;
+    bool            Here;
 } FormReader;
 
 static int read_field(FormReader *reader, const char *name, size_t length)
@@ -213,6 +216,11 @@ static int read_record(FormReader *reader, const char *text, size_t length)
         reader->Souvenir = true;
         return 0;
     }
+    if (length == 4 && memcmp(text, "here", 4) == 0) {
+        if (reader->Here) return -ERR_INVALID_ARGUMENT;
+        reader->Here = true;
+        return 0;
+    }
     if (length > 0 && (text[0] == '#' || text[0] == '=')) return read_item(reader, text, length);
     return -ERR_INVALID_ARGUMENT;
 }
@@ -238,7 +246,7 @@ int form_records_decode(const BoxForm *form, const char *bytes, size_t length,
     FormRecords records;
     if (!form_records_start(&records, bytes, length)) return 0;
 
-    FormReader  reader = { form, values, 0, false, false };
+    FormReader  reader = { form, values, 0, false, false, false };
     const char *text;
     size_t      size;
     int         rc = 0;

@@ -91,9 +91,10 @@ int ArrowScreen(BoxFormFiller *Filler, std::string_view Who, file_id_t &Screen)
 // The filler, done, made into what the program starts with: the arrow's file
 // made when it names one not there yet, word 0 the name the person used, the
 // Souvenir asked for when it is kept — the Form gives things and the arrow did
-// not make the screen a file — and the Luggage. Nothing when it cannot be,
-// and why was said.
-std::optional<Filled> Finish(BoxFormFiller *Filler, const BoxForm &Declared, file_id_t Program, std::string_view Who)
+// not make the screen a file — the person said to be here when it runs on the
+// screen, and the Luggage. Nothing when it cannot be, and why was said.
+std::optional<Filled> Finish(BoxFormFiller *Filler, const BoxForm &Declared, file_id_t Program, std::string_view Who,
+                             bool OnScreen)
 {
     Filled What;
     What.Program = Program;
@@ -101,6 +102,7 @@ std::optional<Filled> Finish(BoxFormFiller *Filler, const BoxForm &Declared, fil
     if (Rc == 0) Rc = form_fill_program(Filler, std::string(Who).c_str());
     What.Souvenir = What.Screen == 0 && Declared.Gives == BOX_FORM_GIVES_THINGS;
     if (Rc == 0 && What.Souvenir) Rc = form_fill_souvenir(Filler);
+    if (Rc == 0 && OnScreen) Rc = form_fill_here(Filler);
 
     char  *Bytes  = nullptr;
     size_t Length = 0;
@@ -147,7 +149,8 @@ HeldFiller Form(const Look &Shown, const BoxForm &Declared, BoxFormLookup &Looku
     return Filler;
 }
 
-std::optional<Filled> FromLine(const Hub &Self, file_id_t Program, std::string_view Who, std::string_view Line)
+std::optional<Filled> FromLine(const Hub &Self, file_id_t Program, std::string_view Who, std::string_view Line,
+                               bool OnScreen)
 {
     HeldForm Declared;
     if (!ReadForm(Program, Who, Declared)) return std::nullopt;
@@ -155,7 +158,7 @@ std::optional<Filled> FromLine(const Hub &Self, file_id_t Program, std::string_v
     Lookup(Self, View);
     const HeldFiller Filler = Form(Self.Shown, *Declared, View, Who, Line);
     if (!Filler) return std::nullopt;
-    return Finish(Filler.get(), *Declared, Program, Who);
+    return Finish(Filler.get(), *Declared, Program, Who, OnScreen);
 }
 
 std::optional<Filled> OnThing(file_id_t Program, std::string_view Who, file_id_t Thing)
@@ -188,7 +191,7 @@ std::optional<Filled> OnThing(file_id_t Program, std::string_view Who, file_id_t
         Say("{}: it would have to ask what it takes, and no one is asked here\n", Who);
         return std::nullopt;
     }
-    return Finish(Filler.get(), *Declared, Program, Who);
+    return Finish(Filler.get(), *Declared, Program, Who, true);
 }
 
 }  // namespace hub::fill

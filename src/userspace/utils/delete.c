@@ -1,123 +1,228 @@
-#include "box/print.h"
-#include "box/form.h"
+/* delete — files gone for good, after a look at what goes and a yes.
+ *
+ *   delete notes.txt              that file
+ *   delete them                   what the last command gave
+ *   delete trashed                everything in the trash
+ *   delete old.txt                a file in the trash, by its name
+ *
+ * Any file, in the trash or out of it. What goes is shown first — each file's
+ * name, size and tags — with what is worth a warning: a file out of the trash
+ * does not go there, it is gone for good, and a program among them will not
+ * start again. Nothing is deleted until the person says yes; with nobody at
+ * the screen to say it — started behind, or by another program — nothing is
+ * (box/form.h form_person_here). A file the system keeps the volume refuses,
+ * and it stays; the rest go. trash is the gentle way: what is there can be
+ * taken back.
+ *
+ * A name the shell found no file for among those in use comes as a word, and
+ * is looked for in the trash: the shell's look-up, like a listing, leaves the
+ * trash out.
+ *
+ * Its exit: 0 when everything asked for went, or the person said no; 1 when
+ * something could not go, or nobody was there to be asked.
+ */
+
 #include "box/error.h"
 #include "box/file.h"
+#include "box/form.h"
 #include "box/memory.h"
+#include "box/print.h"
 #include "box/string.h"
 #include "box/system.h"
 
-/* Takes words, not things: the shell's lookup of a name looks among the files
- * in use (box/form.h), never in the trash, so it would never find the one this
- * command exists to delete. The names are looked for in the trash itself,
- * below. */
-BOX_FORM("takes words \"the trashed files to erase, or trashed for all of them\"\n");
+BOX_FORM("takes optional things \"the files to delete\"\n"
+         "takes optional words \"trashed for everything in the trash, or the name of a file in it\"\n");
 
-/* True when the volume still knows the file's name; then the caller releases
- * the metadata with FileMetadataRelease. */
-static bool read_name(file_id_t file, FileMetadata *metadata)
-{
-    return FileMetadataRead(file, metadata) == 0 && metadata->Filename;
-}
+/* How many files are shown before the rest are counted. */
+#define SHOWN_FILES 12u
 
-static int erase_one(file_id_t file, const char *name)
+typedef struct {
+    file_id_t *Ids;
+    size_t     Count;
+    size_t     Room;
+} Going;
+
+/* Into what goes, once each. False with no room. */
+static bool going_add(Going *going, file_id_t id)
 {
-    if (delete(file) != 0) {
-        printf("Could not erase %s\n", name);
-        return 1;
+    for (size_t i = 0; i < going->Count; i++)
+        if (going->Ids[i] == id) return true;
+    if (going->Count == going->Room) {
+        size_t     room  = going->Room ? going->Room * 2 : 16;
+        file_id_t *grown = realloc(going->Ids, room * sizeof(file_id_t));
+        if (!grown) return false;
+        going->Ids  = grown;
+        going->Room = room;
     }
-    printf("File deleted: %s\n", name);
-    return 0;
+    going->Ids[going->Count++] = id;
+    return true;
 }
 
-/* Emptying the trash is not asking for any one file: a file the system keeps
- * (one wearing system or boot, refused to every program that does not) stays
- * in the trash and is said so, and the trash was still emptied of the rest —
- * only a file that could not be erased for any other reason is a failure. */
-static int erase_all_trashed(const file_id_t *trashed, int total)
+/* A name looked for in the trash: the one file there called so goes. False
+ * when it cannot: none, or more than one — said. */
+static bool from_trash(Going *going, const file_id_t *trashed, int total, const char *name)
 {
-    int deleted = 0;
-    int kept = 0;
-    int failed = 0;
+    file_id_t found = 0;
+    int       count = 0;
     for (int i = 0; i < total; i++) {
         FileMetadata metadata;
-        bool named = read_name(trashed[i], &metadata);
-        const char *name = named ? metadata.Filename : "a file in the trash";
-        int rc = delete(trashed[i]);
-        if (rc == 0) {
-            deleted++;
-        } else if (box_errno_of(rc) == ERR_PERMISSION_DENIED) {
-            printf("%s is kept by the system; it stays in the trash\n", name);
-            kept++;
-        } else {
-            printf("Could not erase %s\n", name);
-            failed++;
-        }
-        if (named) FileMetadataRelease(&metadata);
-    }
-    if (deleted == 0 && kept == 0 && failed == 0) println("The trash is empty");
-    else if (deleted > 0 || failed > 0)
-        printf("Erased %d file%s from the trash\n", deleted, deleted == 1 ? "" : "s");
-    return failed > 0;
-}
-
-/* The name is looked for in the trash itself. A look-up by name asks the
- * index the way a listing does, and a listing leaves the trash out - so it
- * never found a trashed file, and the file it did find was refused as not
- * trashed yet: `erase NAME` could delete nothing at all. */
-static int erase_named(const file_id_t *trashed, int total, const char *name)
-{
-    file_id_t file_id = 0;
-    int count = 0;
-    for (int i = 0; i < total; i++) {
-        FileMetadata metadata;
-        if (!read_name(trashed[i], &metadata)) continue;
-        if (strcmp(metadata.Filename, name) == 0) {
-            file_id = trashed[i];
+        if (FileMetadataRead(trashed[i], &metadata) != 0) continue;
+        if (metadata.Filename && strcmp(metadata.Filename, name) == 0) {
+            found = trashed[i];
             count++;
         }
         FileMetadataRelease(&metadata);
     }
-
-    if (count > 1) {
-        printf("%s is in the trash more than once; erase them by their tags\n", name);
-        return 1;
-    }
-
     if (count == 0) {
-        /* Not in the trash: the look-up by name tells a name nobody has from
-         * a file still out of the trash. */
-        if (find_file_by_name(name, "trashed", NULL, NULL, 0) <= 0)
-            printf("There is no file called %s\n", name);
-        else
-            printf("%s is not in the trash; put it there first with trash %s\n", name, name);
-        return 1;
+        printf("There is no file called %s\n", name);
+        return false;
     }
-
-    return erase_one(file_id, name);
+    if (count > 1) {
+        printf("%s is in the trash %d times; delete trashed takes them all\n", name, count);
+        return false;
+    }
+    if (!going_add(going, found)) {
+        println("delete: there is no memory to keep what goes");
+        return false;
+    }
+    return true;
 }
 
-int main(void) {
-    const char *const *names;
-    size_t name_count;
+static void say_size(uint64_t bytes)
+{
+    if (bytes < 1024) printf("%llu bytes", (unsigned long long)bytes);
+    else if (bytes < 1024ull * 1024) printf("%llu KiB", (unsigned long long)(bytes / 1024));
+    else printf("%llu MiB", (unsigned long long)(bytes / (1024ull * 1024)));
+}
 
-    if (form_words(0, &names, &name_count) != 0) {
+/* What goes, one line a file, and what is worth a warning. */
+static void show_going(const Going *going)
+{
+    size_t out = 0, programs = 0;
+    for (size_t i = 0; i < going->Count; i++) {
+        FileMetadata metadata;
+        bool         read = FileMetadataRead(going->Ids[i], &metadata) == 0;
+        bool         trashed = read && FileMetadataWears(&metadata, "trashed");
+        bool         program = read && (FileMetadataWears(&metadata, "app") || FileMetadataWears(&metadata, "utility"));
+        out += !trashed;
+        programs += program;
+        if (i < SHOWN_FILES) {
+            printf("  %s  ", read && metadata.Filename ? metadata.Filename : "a file with no name");
+            if (read) {
+                say_size(metadata.Size);
+                printf("  %s%s\n", metadata.Tags ? metadata.Tags : "", program ? "  — a program" : "");
+            } else {
+                printf("(cannot be read)\n");
+            }
+        }
+        if (read) FileMetadataRelease(&metadata);
+    }
+    if (going->Count > SHOWN_FILES) printf("  and %zu more\n", going->Count - SHOWN_FILES);
+    if (out == going->Count)
+        printf("%s not go to the trash: deleted, %s gone for good\n", going->Count == 1 ? "It does" : "They do",
+               going->Count == 1 ? "it is" : "they are");
+    else if (out > 0)
+        printf("%zu of them %s not in the trash: deleted, %s gone for good\n", out, out == 1 ? "is" : "are",
+               out == 1 ? "it is" : "they are");
+    if (programs > 0)
+        printf("%s: once deleted, %s will not start again\n", programs == 1 ? "One is a program" : "Some are programs",
+               programs == 1 ? "it" : "they");
+}
+
+/* Yes or no from the person at the screen. */
+static bool agreed(size_t count)
+{
+    for (;;) {
+        printf("delete %s? (yes or no) ", count == 1 ? "it" : "them");
+        char *typed = NULL;
+        if (readline_grow(&typed) < 0) {
+            println("");
+            return false;
+        }
+        size_t from = 0, to = strlen(typed);
+        while (from < to && typed[from] == ' ') from++;
+        while (to > from && typed[to - 1] == ' ') to--;
+        typed[to] = '\0';
+        bool yes = strcmp(typed + from, "yes") == 0 || strcmp(typed + from, "y") == 0;
+        bool no  = strcmp(typed + from, "no") == 0 || strcmp(typed + from, "n") == 0;
+        free(typed);
+        if (yes || no) return yes;
+        printf("please answer yes or no. ");
+    }
+}
+
+/* Each file deleted; one the system keeps stays, and is said. True when every
+ * one went. */
+static bool delete_all(const Going *going)
+{
+    size_t deleted = 0, stayed = 0;
+    for (size_t i = 0; i < going->Count; i++) {
+        FileMetadata metadata;
+        bool         named = FileMetadataRead(going->Ids[i], &metadata) == 0 && metadata.Filename;
+        const char  *name  = named ? metadata.Filename : "a file";
+        int          rc    = delete(going->Ids[i]);
+        if (rc == 0) {
+            deleted++;
+        } else {
+            stayed++;
+            if (box_errno_of(rc) == ERR_PERMISSION_DENIED) printf("%s is kept by the system; it stays\n", name);
+            else printf("%s could not be deleted (error %d); it stays\n", name, (int)box_errno_of(rc));
+        }
+        if (named) FileMetadataRelease(&metadata);
+    }
+    printf("Deleted %zu file%s\n", deleted, deleted == 1 ? "" : "s");
+    return stayed == 0;
+}
+
+int main(void)
+{
+    const file_id_t   *things = NULL;
+    const char *const *words  = NULL;
+    size_t             thing_count = 0, word_count = 0;
+    if (form_things(0, &things, &thing_count) != 0 || form_words(1, &words, &word_count) != 0) {
+        exit(1);
+        return 1;
+    }
+    if (thing_count == 0 && word_count == 0) {
+        println("delete: say which files — their names, them, or trashed for everything in the trash");
         exit(1);
         return 1;
     }
 
-    file_id_t *trashed = NULL;
-    int total = query_all("trashed", NULL, &trashed);
-    if (total < 0) { println("Could not look in the trash"); exit(1); return 1; }
+    Going going = { NULL, 0, 0 };
+    bool  whole = true;
+    for (size_t i = 0; i < thing_count && whole; i++) whole = going_add(&going, things[i]);
 
-    int failed = 0;
-    for (size_t i = 0; i < name_count; i++) {
-        if (strcmp(names[i], "trashed") == 0)
-            failed |= erase_all_trashed(trashed, total);
-        else
-            failed |= erase_named(trashed, total, names[i]);
+    file_id_t *trashed = NULL;
+    int        total   = word_count ? query_all("trashed", NULL, &trashed) : 0;
+    if (total < 0) {
+        println("delete: the trash could not be looked in");
+        whole = false;
+        total = 0;
+    }
+    for (size_t i = 0; i < word_count; i++) {
+        if (strcmp(words[i], "trashed") == 0) {
+            if (total == 0) println("The trash is empty");
+            for (int t = 0; t < total && whole; t++) whole = going_add(&going, trashed[t]);
+        } else {
+            whole &= from_trash(&going, trashed, total, words[i]);
+        }
     }
     free(trashed);
 
-    exit(failed);
-    return failed;
+    int status = whole ? 0 : 1;
+    if (going.Count > 0) {
+        show_going(&going);
+        if (!form_person_here()) {
+            println("delete: nobody is at the screen to say yes, so nothing was deleted");
+            status = 1;
+        } else if (!agreed(going.Count)) {
+            println("Nothing was deleted");
+        } else if (!delete_all(&going)) {
+            status = 1;
+        }
+    }
+    free(going.Ids);
+    exit(status);
+    return status;
 }
