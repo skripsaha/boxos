@@ -1,14 +1,19 @@
 /* setting: a line of the settings a program declares, as box/settings.h and
- * src/include/settings_reader.h define them. Its words are the declaration's,
- * not the assembler's — yes-or-no, #FFB020, -3, » stay as written — so the
- * line is taken from the source whole, read by the one reader of settings,
- * and written into the program's declaration, .boxos.settings, its words
- * apart by single blanks. A line the reader would not read is refused here,
- * where it was written, rather than skipped by the program that has it. */
+ * src/include/settings_reader.h define them — a tree, so the line names the
+ * path of what holds it first, by the names already declared: `setting
+ * cursor shape one-of block bar default bar "its shape"`. Its words are the
+ * declaration's, not the assembler's — on-or-off, #FFB020, -3, » stay as
+ * written — so the line is taken from the source whole, read by the one
+ * reader of settings, and written into the program's declaration,
+ * .boxos.settings: indented four spaces for each thing that holds it, its
+ * words apart by single blanks, right under the last line of what holds it.
+ * A line the reader would not read is refused here, where it was written,
+ * rather than skipped by the program that has it. */
 
 #include "boxasm_asm.h"
 
 #include "box/error.h"
+#include "box/memory.h"
 #include "box/string.h"
 
 #include "settings_reader.h"
@@ -47,48 +52,118 @@ static SettingSpan BoxAsmSettingRest(const BoxAsmLexer *Lexer, const BoxAsmToken
     return (SettingSpan){ (const uint8_t *)Start, (uint64_t)(End - Start) };
 }
 
-/* "setting" and the line's words, each apart by one blank, quoted ones in
- * their quotes. Text between quotes holds nothing below a blank: the
+/* The setting called `Name` inside the declared line `Parent` (0: the top)
+ * in the declaration so far — a thing that holds others found while it holds
+ * nothing yet, as it does until the lines that go under it are assembled:
+ * the linker holds the whole tree to the reader. */
+static bool BoxAsmSettingChild(const BoxAsmBuffer *Settings, uint32_t Parent, SettingSpan Name, Setting *Out)
+{
+    SettingsDeclared Declared;
+    SettingsVerdict Verdict;
+
+    if (SettingsDeclaredBegin(Settings->Data, Settings->Size, &Declared) != SETTINGS_OK)
+        return false;
+    while (SettingsDeclaredStep(&Declared, Out, &Verdict, false))
+        if ((Verdict == SETTINGS_OK || Verdict == SETTING_HOLDS_NOTHING) && Out->Parent == Parent &&
+            SettingSpanSame(Out->Name, Name))
+            return true;
+    return false;
+}
+
+/* The line's words from `From` on, each apart by one blank, quoted ones in
+ * their quotes, indented four spaces for each of `Depth` things that hold
+ * it, into `Line`. Text between quotes holds nothing below a blank: the
  * declaration is a part written as text, which holds no tab. */
-static int BoxAsmSettingWrite(BoxAsmAssembler *Asm, const BoxAsmToken *Word, SettingSpan Rest,
-                              SettingSpan Name)
+static int BoxAsmSettingLine(BoxAsmAssembler *Asm, const BoxAsmToken *Word, SettingSpan Rest, uint64_t From,
+                             uint32_t Depth, SettingSpan Name, BoxAsmBuffer *Line)
 {
     SettingSpan Piece;
     SettingsVerdict Ignored;
-    uint64_t At = 0;
+    uint64_t At = From;
     bool Quoted;
-    int Rc;
+    bool First = true;
+    uint32_t Level;
 
-    if (Asm->Settings.Size == 0 && BoxAsmBufferAppend(&Asm->Settings, "settings 1\n", 11u) != 0)
-        return -ERR_NO_MEMORY;
-    if (BoxAsmBufferAppend(&Asm->Settings, "setting", 7u) != 0)
-        return -ERR_NO_MEMORY;
+    for (Level = 0; Level < Depth; Level++)
+        if (BoxAsmBufferAppend(Line, "    ", 4u) != 0)
+            return -ERR_NO_MEMORY;
     while (SettingWord(Rest, &At, &Piece, &Quoted, &Ignored)) {
         uint64_t Index;
+        int Rc;
 
         for (Index = 0; Quoted && Index < Piece.Length; Index++)
             if (Piece.At[Index] < 0x20u)
                 return BoxAsmSettingFail(Asm, Word, Name,
                                          "holds a tab between its quotes, which a declaration cannot hold");
-        Rc = BoxAsmBufferAppend(&Asm->Settings, Quoted ? " \"" : " ", Quoted ? 2u : 1u);
-        if (Rc == 0)
-            Rc = BoxAsmBufferAppend(&Asm->Settings, Piece.At, Piece.Length);
+        Rc = First ? 0 : BoxAsmBufferAppend(Line, " ", 1u);
         if (Rc == 0 && Quoted)
-            Rc = BoxAsmBufferAppend(&Asm->Settings, "\"", 1u);
+            Rc = BoxAsmBufferAppend(Line, "\"", 1u);
+        if (Rc == 0)
+            Rc = BoxAsmBufferAppend(Line, Piece.At, Piece.Length);
+        if (Rc == 0 && Quoted)
+            Rc = BoxAsmBufferAppend(Line, "\"", 1u);
         if (Rc != 0)
             return -ERR_NO_MEMORY;
+        First = false;
     }
-    return BoxAsmBufferAppend(&Asm->Settings, "\n", 1u) != 0 ? -ERR_NO_MEMORY : 0;
+    return BoxAsmBufferAppend(Line, "\n", 1u) != 0 ? -ERR_NO_MEMORY : 0;
 }
 
-/* setting NAME KIND [what the kind takes] default VALUE [next-start] "what it does" */
+/* Where a line inside the declared line `Parent` goes: past the last line
+ * that stands under it — at the end, for one at the top. */
+static uint64_t BoxAsmSettingPlace(const BoxAsmBuffer *Settings, uint32_t Parent)
+{
+    SettingsDeclared Declared;
+    Setting Setting;
+    SettingsVerdict Verdict;
+    uint64_t End = Settings->Size;
+    uint32_t Depth = 0;
+    bool Inside = false;
+
+    if (Parent == 0 || SettingsDeclaredBegin(Settings->Data, Settings->Size, &Declared) != SETTINGS_OK)
+        return End;
+    while (SettingsDeclaredStep(&Declared, &Setting, &Verdict, false)) {
+        if (Setting.Line == Parent) {
+            Inside = true;
+            Depth = Setting.Depth;
+            End = Declared.At;
+        } else if (Inside) {
+            if (Setting.Depth <= Depth)
+                break;
+            End = Declared.At;
+        }
+    }
+    return End;
+}
+
+/* `Line` put into the declaration at `At`. */
+static int BoxAsmSettingInsert(BoxAsmBuffer *Settings, uint64_t At, const BoxAsmBuffer *Line)
+{
+    uint64_t Tail = Settings->Size - At;
+
+    if (BoxAsmBufferAppend(Settings, Line->Data, Line->Size) != 0)
+        return -ERR_NO_MEMORY;
+    memmove(Settings->Data + At + Line->Size, Settings->Data + At, (size_t)Tail);
+    memcpy(Settings->Data + At, Line->Data, (size_t)Line->Size);
+    return 0;
+}
+
+/* setting [PATH ...] NAME KIND [what the kind takes] default VALUE [next-start] "what it does"
+ * setting [PATH ...] NAME "what it holds" */
 int BoxAsmParseProgramSetting(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmToken *Token,
                               const BoxAsmToken *Word)
 {
     SettingSpan Rest = BoxAsmSettingRest(Lexer, Word);
+    uint32_t Chain[SETTINGS_DEPTH_MAX];
+    uint64_t Starts[SETTINGS_DEPTH_MAX + 1];
+    uint32_t Held = 0;
+    uint32_t Depth;
     Setting Declared;
     Setting Before;
     SettingsVerdict Verdict;
+    SettingsVerdict First = SETTINGS_OK;
+    SettingSpan FirstName = { Rest.At, 0 };
+    BoxAsmBuffer Line = { NULL, 0, 0 };
     int Rc;
 
     if (Asm->Struc.Open || Asm->Struc.Instance)
@@ -98,12 +173,50 @@ int BoxAsmParseProgramSetting(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmTo
     while (Rest.Length > 0 && (Rest.At[Rest.Length - 1] == ' ' || Rest.At[Rest.Length - 1] == '\t' ||
                                Rest.At[Rest.Length - 1] == '\r'))
         Rest.Length--;
-    Verdict = SettingRead(Rest, 0, Word->Where.Line, &Declared);
+    if (Asm->Settings.Size == 0 &&
+        BoxAsmBufferAppend(&Asm->Settings, "settings " SETTINGS_VERSION_WORD "\n",
+                           sizeof("settings " SETTINGS_VERSION_WORD "\n") - 1u) != 0)
+        return -ERR_NO_MEMORY;
+
+    /* What holds it: the leading words that name, from the top down,
+     * settings declared already — as many of them as leave the rest of the
+     * line a setting it can read, so a name that is also a kind's word reads
+     * as the one the line means. */
+    Starts[0] = 0;
+    while (Held < SETTINGS_DEPTH_MAX) {
+        uint64_t At = Starts[Held];
+        SettingSpan Name;
+        bool Quoted;
+        SettingsVerdict Ignored = SETTINGS_OK;
+
+        if (!SettingWord(Rest, &At, &Name, &Quoted, &Ignored) || Quoted ||
+            !BoxAsmSettingChild(&Asm->Settings, Held ? Chain[Held - 1u] : 0, Name, &Before))
+            break;
+        Chain[Held++] = Before.Line;
+        Starts[Held] = At;
+    }
+    for (Depth = Held + 1u; Depth-- > 0;) {
+        Verdict = SettingRead(Rest, Starts[Depth], Word->Where.Line, &Declared);
+        if (Depth == Held) {
+            First = Verdict;
+            FirstName = Declared.Name;
+        }
+        if (Verdict == SETTINGS_OK)
+            break;
+    }
     if (Verdict != SETTINGS_OK)
-        return BoxAsmSettingFail(Asm, Word, Declared.Name, SettingsVerdictText(Verdict));
-    if (SettingsDeclaredFind(Asm->Settings.Data, Asm->Settings.Size, Declared.Name, &Before))
+        return BoxAsmSettingFail(Asm, Word, FirstName, SettingsVerdictText(First));
+    if (Depth >= SETTINGS_DEPTH_MAX)
+        return BoxAsmSettingFail(Asm, Word, Declared.Name, SettingsVerdictText(SETTING_TOO_DEEP));
+    if (BoxAsmSettingChild(&Asm->Settings, Depth ? Chain[Depth - 1u] : 0, Declared.Name, &Before))
         return BoxAsmSettingFail(Asm, Word, Declared.Name, "is declared already");
-    if ((Rc = BoxAsmSettingWrite(Asm, Word, Rest, Declared.Name)) != 0)
+
+    Rc = BoxAsmSettingLine(Asm, Word, Rest, Starts[Depth], Depth, Declared.Name, &Line);
+    if (Rc == 0)
+        Rc = BoxAsmSettingInsert(&Asm->Settings,
+                                 BoxAsmSettingPlace(&Asm->Settings, Depth ? Chain[Depth - 1u] : 0), &Line);
+    free(Line.Data);
+    if (Rc != 0)
         return Rc;
     Lexer->Position = (size_t)((const char *)Rest.At + Rest.Length - Lexer->Source);
     return BoxAsmNextToken(Asm, Lexer, Token);

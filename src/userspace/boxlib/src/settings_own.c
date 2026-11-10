@@ -97,72 +97,73 @@ static void own_read_locked(void)
     own_assemble();
 }
 
-/* The setting called `name`, when it is of `kind` — else the program's
- * mistake, said once. Under the lock. */
-static const BoxSetting *own_setting(const char *name, SettingKind kind)
+/* The setting at `path`, when it is of `kind` — else the program's mistake,
+ * said once. Under the lock. */
+static const BoxSetting *own_setting(const char *path, SettingKind kind)
 {
     own_read_locked();
-    const BoxSetting *setting = settings_find(&g_own, name);
+    const BoxSetting *setting = settings_find(&g_own, path);
     if (setting && setting->Kind == kind) return setting;
     if (!g_mistake_said) {
         g_mistake_said = true;
         if (!setting)
             printf("settings: %s asks for its setting %s, which it does not declare\n", g_own.Program,
-                   name ? name : "(none)");
+                   path ? path : "(none)");
         else
-            printf("settings: %s asks for its setting %s as %s, and it is %s\n", g_own.Program, name,
-                   SettingKindWord(kind), SettingKindWord(setting->Kind));
+            printf("settings: %s asks for its setting %s as %s, and it is %s\n", g_own.Program, path,
+                   SettingKindWord(kind), setting->Kind == SETTING_GROUP ? "a thing that only holds others"
+                                                                       : SettingKindWord(setting->Kind));
     }
     return NULL;
 }
 
-bool settings_yes(const char *name)
+bool settings_on(const char *path)
 {
     umutex_lock(&g_lock);
-    const BoxSetting *setting = own_setting(name, SETTING_YES_OR_NO);
-    bool              yes     = setting && setting->Yes;
+    const BoxSetting *setting = own_setting(path, SETTING_ON_OR_OFF);
+    bool              on      = setting && setting->Value.On;
     umutex_unlock(&g_lock);
-    return yes;
+    return on;
 }
 
-int64_t settings_number(const char *name)
+int64_t settings_number(const char *path)
 {
     umutex_lock(&g_lock);
-    const BoxSetting *setting = own_setting(name, SETTING_NUMBER);
-    int64_t           number  = setting ? setting->Number : 0;
+    const BoxSetting *setting = own_setting(path, SETTING_NUMBER);
+    int64_t           number  = setting ? setting->Value.Number : 0;
     umutex_unlock(&g_lock);
     return number;
 }
 
-static const char *own_text(const char *name, SettingKind kind)
+static const char *own_text(const char *path, SettingKind kind)
 {
     umutex_lock(&g_lock);
-    const BoxSetting *setting = own_setting(name, kind);
-    const char       *text    = setting ? setting->Value : "";
+    const BoxSetting *setting = own_setting(path, kind);
+    const char       *text    = setting ? setting->Value.Text : "";
     umutex_unlock(&g_lock);
     return text;
 }
 
-const char *settings_word(const char *name)
+const char *settings_word(const char *path)
 {
-    return own_text(name, SETTING_WORD);
+    return own_text(path, SETTING_WORD);
 }
 
-const char *settings_text(const char *name)
+const char *settings_text(const char *path)
 {
-    return own_text(name, SETTING_TEXT);
+    return own_text(path, SETTING_TEXT);
 }
 
-const char *settings_choice(const char *name)
+const char *settings_choice(const char *path)
 {
-    return own_text(name, SETTING_ONE_OF);
+    return own_text(path, SETTING_ONE_OF);
 }
 
-uint32_t settings_color(const char *name)
+uint32_t settings_color(const char *path)
 {
     umutex_lock(&g_lock);
-    const BoxSetting *setting = own_setting(name, SETTING_COLOR);
-    uint32_t          color   = setting ? setting->Color : 0;
+    const BoxSetting *setting = own_setting(path, SETTING_COLOR);
+    uint32_t          color   = setting ? setting->Value.Color : 0;
     umutex_unlock(&g_lock);
     return color;
 }
@@ -180,13 +181,13 @@ bool settings_reload(void)
     char **before  = calloc(count ? count : 1, sizeof(char *));
     bool   changed = before == NULL;
     for (size_t i = 0; before && i < count; i++) {
-        const char *value = g_own.Settings[i].Value;
+        const char *value = g_own.Settings[i].Value.Text;
         if ((before[i] = malloc(strlen(value) + 1)) != NULL) memcpy(before[i], value, strlen(value) + 1);
         else changed = true;
     }
     own_assemble();
     for (size_t i = 0; before && i < count; i++) {
-        if (before[i] && (i >= g_own.Count || strcmp(before[i], g_own.Settings[i].Value) != 0)) changed = true;
+        if (before[i] && (i >= g_own.Count || strcmp(before[i], g_own.Settings[i].Value.Text) != 0)) changed = true;
         free(before[i]);
     }
     free(before);

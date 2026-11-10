@@ -92,16 +92,25 @@ void SayValue(const char *Value)
     else Say(Value);
 }
 
+// NAME VALUE — what it does, and under it what it takes and whether the
+// person set it; a thing that only holds others by its name and what it
+// holds. Indented as deep as it stands.
 void ShowSetting(const BoxSettings &Settings, const BoxSetting &Setting)
 {
+    const std::string Indent(2 + 4 * Setting.Depth, ' ');
+    Say(Indent);
+    SayIn(COLOR_CYAN, Setting.Name);
+    if (Setting.Kind == SETTING_GROUP) {
+        Say(" — {}\n", Setting.What);
+        return;
+    }
     char Wants[160];
     settings_wants(&Setting, Wants, sizeof(Wants));
-    Say("  ");
-    SayIn(COLOR_CYAN, Setting.Name);
     Say(" ");
-    SayValue(Setting.Value);
-    if (Setting.Kind == SETTING_NUMBER && Setting.Unit[0]) Say(" {}", Setting.Unit);
-    Say(" — {}\n      {}; ", Setting.What, Wants);
+    SayValue(Setting.Value.Text);
+    if (Setting.Kind == SETTING_NUMBER && Setting.Unit[0] && std::string_view(Setting.Value.Text) != "off")
+        Say(" {}", Setting.Unit);
+    Say(" — {}\n{}    {}; ", Setting.What, Indent, Wants);
     if (Setting.Chosen) {
         SayIn(COLOR_GREEN, "you set it");
         Say(" in {}.settings, ", Settings.Program);
@@ -113,8 +122,8 @@ void ShowSetting(const BoxSettings &Settings, const BoxSetting &Setting)
     Say(Setting.NextStart ? "; takes effect when it starts next\n" : "\n");
 }
 
-// What can be set in the program, as it is set now. Nothing is said of a
-// program that declares no settings.
+// What can be set in the program, as it is set now, and what its file sets
+// for a context. Nothing is said of a program that declares no settings.
 void ShowSettings(file_id_t Program, const std::string &Name)
 {
     BoxSettings Settings;
@@ -123,8 +132,16 @@ void ShowSettings(file_id_t Program, const std::string &Name)
         return;
     }
     if (Settings.Count > 0) {
-        Say("{} can be set — settings {} NAME VALUE:\n", Name.c_str(), Name.c_str());
+        Say("{} can be set — settings {} PATH VALUE:\n", Name.c_str(), Name.c_str());
         for (std::size_t I = 0; I < Settings.Count; I++) ShowSetting(Settings, Settings.Settings[I]);
+        for (std::size_t I = 0; I < Settings.InContextCount; I++) {
+            const BoxSettingInContext &In = Settings.InContext[I];
+            Say("  ");
+            SayIn(COLOR_GREEN, "[{}]", In.Tags);
+            Say(" {} ", Settings.Settings[In.Setting].Path);
+            SayValue(In.Value.Text);
+            Say("\n");
+        }
     }
     for (std::size_t I = 0; I < Settings.ProblemCount; I++) SayIn(COLOR_YELLOW, "{}\n", Settings.Problems[I]);
     settings_release(&Settings);

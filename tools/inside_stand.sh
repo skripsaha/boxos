@@ -106,9 +106,12 @@ look "a box with a part of every kind" "$WORK/full.box" 0 \
     "it stays: it lives on by itself, and whoever starts it does not wait; raised again when it falls" \
     "line 4: a word this reader does not know, passed over" \
     "setting hours: one of 24, 12; 24 by default — how the hours are counted" \
-    "setting width: a whole number from -5 to 200 cells, 72 by default, from the next start — how wide the column is" \
+    "setting column: holds what stands under it — the column" \
+    "  setting width: a whole number from -5 to 200 cells, 72 by default, from the next start — how wide the column is" \
+    "  setting blink: a whole number from 100 to 900 ms, or off, off by default — how often it blinks" \
     "setting greeting: text, empty by default — what it says at start" \
-    "line 5: the setting future is of a kind this reader does not know" \
+    "line 7: the setting future is of a kind this reader does not know" \
+    "line 8: the setting inner stands inside a line that is not taken" \
     "takes words \"what to say\"" "holds to its hash, put into memory at start" \
     "kept compressed: what it says is not read here" \
     "of a later version of its kind than this reader knows" \

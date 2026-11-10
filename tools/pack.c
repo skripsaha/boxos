@@ -366,12 +366,19 @@ static void CheckSettings(const uint8_t *bytes, uint64_t size)
     Setting          setting;
     SettingsVerdict  verdict;
     char             why[300];
-    if (SettingsDeclaredBegin(bytes, size, &declared) != SETTINGS_OK)
-        Refuse("its settings do not begin with the line \"settings 1\"");
+    verdict = SettingsDeclaredBegin(bytes, size, &declared);
+    if (verdict == SETTINGS_NOT_TEXT)
+        Refuse("its settings are not text: they hold a byte below a blank other than a newline");
+    if (verdict != SETTINGS_OK)
+        Refuse("its settings do not begin with the line \"settings " SETTINGS_VERSION_WORD "\"");
     while (SettingsDeclaredNext(&declared, &setting, &verdict)) {
         if (verdict == SETTINGS_OK) continue;
-        snprintf(why, sizeof(why), "its settings, line %u: the setting %.*s %s", setting.Line,
-                 (int)setting.Name.Length, (const char *)setting.Name.At, SettingsVerdictText(verdict));
+        if (setting.Name.Length > 0)
+            snprintf(why, sizeof(why), "its settings, line %u: the setting %.*s %s", setting.Line,
+                     (int)setting.Name.Length, (const char *)setting.Name.At, SettingsVerdictText(verdict));
+        else
+            snprintf(why, sizeof(why), "its settings, line %u: the line %s", setting.Line,
+                     SettingsVerdictText(verdict));
         Refuse(why);
     }
 }

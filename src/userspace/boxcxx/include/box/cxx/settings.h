@@ -1,15 +1,17 @@
 // boxcxx — box::settings  (what the person set in this program)
 //
 // The C++ face of box/settings.h for a program's own settings. The program
-// says what can be set with BOX_SETTINGS; the person sets it with the utility
-// settings (`settings clock hours 12`) or by hand in <program>.settings:
+// says what can be set with BOX_SETTINGS — a tree of things and what each
+// has; the person sets it with the utility settings (`settings clock digits
+// color amber`) or by hand in <program>.settings. A setting is named by its
+// path, its names from the top down:
 //
-//   box::settings::yes("seconds")        — a yes-or-no setting
-//   box::settings::number("width")       — a number setting
+//   box::settings::on("seconds")         — an on-or-off setting
+//   box::settings::number("width")       — a number setting: 0 for off
 //   box::settings::word("label")         — a word, text or one-of setting, as a copy
 //   box::settings::text("greeting")
 //   box::settings::choice("hours")
-//   box::settings::color("digits")       — a colour, 0xRRGGBB
+//   box::settings::color("digits color") — a color, 0xRRGGBB
 //   box::settings::reload()              — the person's file read again: did a value change
 //
 //   box::settings::watch watch;          — the person's file watched, on this strand
@@ -33,12 +35,12 @@
 namespace box {
 
 struct settings {
-    static bool          yes(const char *name) { return ::settings_yes(name); }
-    static std::int64_t  number(const char *name) { return ::settings_number(name); }
-    static std::string   word(const char *name) { return ::settings_word(name); }
-    static std::string   text(const char *name) { return ::settings_text(name); }
-    static std::string   choice(const char *name) { return ::settings_choice(name); }
-    static std::uint32_t color(const char *name) { return ::settings_color(name); }
+    static bool          on(const char *path) { return ::settings_on(path); }
+    static std::int64_t  number(const char *path) { return ::settings_number(path); }
+    static std::string   word(const char *path) { return ::settings_word(path); }
+    static std::string   text(const char *path) { return ::settings_text(path); }
+    static std::string   choice(const char *path) { return ::settings_choice(path); }
+    static std::uint32_t color(const char *path) { return ::settings_color(path); }
     static bool          reload() { return ::settings_reload(); }
 
     // The person's file watched: Touch on the tag every settings file wears,

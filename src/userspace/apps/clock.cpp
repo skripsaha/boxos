@@ -18,11 +18,11 @@
 
 BOX_LIFE("stays");
 
-BOX_SETTINGS("setting hours one-of 24 12 default 24 \"how the hours are counted\"\n"
-             "setting seconds yes-or-no default yes \"whether the seconds are shown\"\n"
-             "setting digits color default #E6E6E6 \"the colour of the digits\"\n"
-             "setting colons color default #8C8C8C \"the colour of the colons\"\n"
-             "setting background color default #262626 \"the colour behind the time\"\n");
+BOX_SETTINGS("hours one-of 24 12 default 24 \"how the hours are counted\"\n"
+             "seconds on-or-off default on \"whether the seconds are shown\"\n"
+             "digits color default #E6E6E6 \"the color of the digits\"\n"
+             "colons color default #8C8C8C \"the color of the colons\"\n"
+             "background color default #262626 \"the color behind the time\"\n");
 
 namespace {
 
@@ -46,7 +46,7 @@ PainterColor Rgb(std::uint32_t Value)
 
 Look ReadLook()
 {
-    return Look{box::settings::choice("hours") == "12", box::settings::yes("seconds"),
+    return Look{box::settings::choice("hours") == "12", box::settings::on("seconds"),
                 Rgb(box::settings::color("digits")), Rgb(box::settings::color("colons")),
                 Rgb(box::settings::color("background"))};
 }

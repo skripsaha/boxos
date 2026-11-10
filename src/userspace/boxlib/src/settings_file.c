@@ -140,42 +140,87 @@ static int chosen_refresh(BoxSettings *settings)
 
 typedef enum { CHANGE_SET, CHANGE_ERASE, CHANGE_CLEAR } SettingsChange;
 
-static void pen(const BoxSettings *settings, SettingsChange change, const char *name, const char *value,
-                uint8_t *out, uint64_t *bytes)
+/* A change: what it does, to the setting on declared line Node, in the block
+ * of Tags (empty: everywhere). */
+typedef struct {
+    SettingsChange What;
+    SettingSpan    Tags;
+    uint32_t       Node;
+    SettingSpan    Value;
+} SettingsChangeAsked;
+
+/* `file` changed by the pen into a buffer of its own, *out — the caller's to
+ * free. */
+static int pen(const BoxSettings *settings, const SettingsChangeAsked *change, const uint8_t *file, uint64_t size,
+               uint8_t **out, uint64_t *out_size)
 {
-    const uint8_t *file  = (const uint8_t *)settings->Chosen;
-    uint64_t       size  = settings->ChosenSize;
-    SettingSpan    named = { (const uint8_t *)name, name ? strlen(name) : 0 };
-    if (change == CHANGE_SET)
-        SettingsPenSet(file, size, named, (SettingSpan){ (const uint8_t *)value, strlen(value) }, out, bytes);
-    else if (change == CHANGE_ERASE)
-        SettingsPenErase(file, size, named, out, bytes);
-    else
-        SettingsPenClear(file, size, (const uint8_t *)settings->Declared, settings->DeclaredSize, out, bytes);
+    const uint8_t *declared = (const uint8_t *)settings->Declared;
+    for (int pass = 0; pass < 2; pass++) {
+        uint8_t *into = pass ? *out : NULL;
+        if (change->What == CHANGE_SET)
+            SettingsPenSet(declared, settings->DeclaredSize, file, size, change->Tags, change->Node, change->Value,
+                           into, out_size);
+        else if (change->What == CHANGE_ERASE)
+            SettingsPenErase(declared, settings->DeclaredSize, file, size, change->Tags, change->Node, into,
+                             out_size);
+        else
+            SettingsPenClear(declared, settings->DeclaredSize, file, size, into, out_size);
+        if (!pass && !(*out = malloc(*out_size ? (size_t)*out_size : 1))) return -ERR_NO_MEMORY;
+    }
+    return 0;
 }
 
-/* The person's file as it is on the volume now, changed by the pen, written
- * whole — made first when there is none and the change sets something — and
- * the settings put together again from it. */
-static int change_file(BoxSettings *settings, SettingsChange change, const char *name, const char *value)
+/* The change made to the person's file as it is: a thing that only holds
+ * others erased is every setting inside it erased, the file written once. */
+static int changed(const BoxSettings *settings, const SettingsChangeAsked *change, uint8_t **out,
+                   uint64_t *out_size)
+{
+    size_t index = 0;
+    while (index < settings->Count && settings->Settings[index].Line != change->Node) index++;
+    if (change->What != CHANGE_ERASE || index == settings->Count ||
+        settings->Settings[index].Kind != SETTING_GROUP)
+        return pen(settings, change, (const uint8_t *)settings->Chosen, settings->ChosenSize, out, out_size);
+
+    const char *group  = settings->Settings[index].Path;
+    size_t      length = strlen(group);
+    uint8_t    *bytes  = malloc(settings->ChosenSize ? settings->ChosenSize : 1);
+    uint64_t    size   = settings->ChosenSize;
+    if (!bytes) return -ERR_NO_MEMORY;
+    memcpy(bytes, settings->Chosen, settings->ChosenSize);
+    for (size_t i = 0; i < settings->Count; i++) {
+        const BoxSetting *inside = &settings->Settings[i];
+        if (inside->Kind == SETTING_GROUP || strncmp(inside->Path, group, length) != 0 || inside->Path[length] != ' ')
+            continue;
+        SettingsChangeAsked one = *change;
+        uint8_t            *next;
+        one.Node = inside->Line;
+        int rc   = pen(settings, &one, bytes, size, &next, &size);
+        free(bytes);
+        if (rc != 0) return rc;
+        bytes = next;
+    }
+    *out      = bytes;
+    *out_size = size;
+    return 0;
+}
+
+/* The person's file as it is on the volume now, changed, written whole —
+ * made first when there is none and the change sets something — and the
+ * settings put together again from it. */
+static int change_file(BoxSettings *settings, const SettingsChangeAsked *change)
 {
     char     refusal[SETTINGS_SAYING_MAX];
+    uint8_t *bytes;
     uint64_t size;
     int      rc;
-
     if (strlen(settings->Program) > SETTINGS_NAME_MAX) {
         snprintf(refusal, sizeof(refusal), "%s has a name too long for a settings file: %u letters at most",
                  settings->Program, SETTINGS_NAME_MAX);
         return settings_refuse(settings, refusal);
     }
     if ((rc = chosen_refresh(settings)) != 0) return rc;
-    if (settings->File == 0 && change != CHANGE_SET) return settings_reassemble(settings);
-
-    pen(settings, change, name, value, NULL, &size);
-    uint8_t *bytes = malloc(size ? (size_t)size : 1);
-    if (!bytes) return -ERR_NO_MEMORY;
-    pen(settings, change, name, value, bytes, &size);
-
+    if (settings->File == 0 && change->What != CHANGE_SET) return settings_reassemble(settings);
+    if ((rc = changed(settings, change, &bytes, &size)) != 0) return rc;
     if (settings->File == 0) {
         char    file_name[32];
         snprintf(file_name, sizeof(file_name), "%s.settings", settings->Program);
@@ -195,6 +240,24 @@ static int change_file(BoxSettings *settings, SettingsChange change, const char 
     settings->Chosen     = (char *)bytes;
     settings->ChosenSize = (size_t)size;
     return settings_reassemble(settings);
+}
+
+/* The context a change is for, read: its tags as a [ ] line would hold
+ * them, or none for NULL or blanks — everywhere. */
+static int change_tags(BoxSettings *settings, const char *tags, SettingSpan *out)
+{
+    char        line[SETTINGS_SAYING_MAX];
+    SettingSpan typed = SettingTrimmed(SettingSpanOf((const uint8_t *)(tags ? tags : ""), tags ? strlen(tags) : 0));
+    SettingSpan read;
+    *out = typed;
+    if (typed.Length == 0) return 0;
+    snprintf(line, sizeof(line), "[%.*s]", (int)typed.Length, (const char *)typed.At);
+    if (typed.Length < sizeof(line) - 2 && SettingContextRead(SettingSpanOf((const uint8_t *)line, strlen(line)), 0,
+                                                              &read))
+        return 0;
+    snprintf(line, sizeof(line), "[%.*s] is no context: tags apart by blanks or commas, none twice, no bracket or "
+             "quote in one", (int)typed.Length, (const char *)typed.At);
+    return settings_refuse(settings, line);
 }
 
 int settings_read(file_id_t program, BoxSettings *out)
@@ -223,21 +286,32 @@ int settings_read(file_id_t program, BoxSettings *out)
     return rc;
 }
 
-int settings_set(BoxSettings *settings, const char *name, const char *value, const char **why)
+int settings_set(BoxSettings *settings, const char *tags, const char *path, const char *value, const char **why)
 {
-    if (!settings || !name || !value) return -ERR_INVALID_ARGUMENT;
-    int rc = settings_check(settings, name, value);
-    if (rc == 0) rc = change_file(settings, CHANGE_SET, name, value);
+    if (!settings || !path || !value) return -ERR_INVALID_ARGUMENT;
+    SettingsChangeAsked change = { CHANGE_SET, SettingSpanOf(NULL, 0), 0,
+                                   SettingSpanOf((const uint8_t *)value, strlen(value)) };
+    int rc = change_tags(settings, tags, &change.Tags);
+    if (rc == 0) rc = settings_check(settings, path, value);
+    if (rc == 0) {
+        change.Node = settings_find(settings, path)->Line;
+        rc          = change_file(settings, &change);
+    }
     if (why) *why = rc == -ERR_INVALID_ARGUMENT ? settings->Why : NULL;
     return rc;
 }
 
-int settings_erase(BoxSettings *settings, const char *name, const char **why)
+int settings_erase(BoxSettings *settings, const char *tags, const char *path, const char **why)
 {
-    if (!settings || !name) return -ERR_INVALID_ARGUMENT;
-    const BoxSetting *setting = settings_find(settings, name);
-    int rc = setting ? change_file(settings, CHANGE_ERASE, name, NULL)
-                     : settings_check(settings, name, "");
+    if (!settings || !path) return -ERR_INVALID_ARGUMENT;
+    SettingsChangeAsked change = { CHANGE_ERASE, SettingSpanOf(NULL, 0), 0, SettingSpanOf(NULL, 0) };
+    const BoxSetting   *setting = settings_find(settings, path);
+    int                 rc      = change_tags(settings, tags, &change.Tags);
+    if (rc == 0 && !setting) rc = settings_check(settings, path, "");
+    if (rc == 0) {
+        change.Node = setting->Line;
+        rc          = change_file(settings, &change);
+    }
     if (why) *why = rc == -ERR_INVALID_ARGUMENT ? settings->Why : NULL;
     return rc;
 }
@@ -245,5 +319,6 @@ int settings_erase(BoxSettings *settings, const char *name, const char **why)
 int settings_clear(BoxSettings *settings)
 {
     if (!settings) return -ERR_INVALID_ARGUMENT;
-    return change_file(settings, CHANGE_CLEAR, NULL, NULL);
+    SettingsChangeAsked change = { CHANGE_CLEAR, SettingSpanOf(NULL, 0), 0, SettingSpanOf(NULL, 0) };
+    return change_file(settings, &change);
 }

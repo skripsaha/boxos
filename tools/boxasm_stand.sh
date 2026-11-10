@@ -334,7 +334,9 @@ done
 
 # Each `setting` line is read whole by the one reader of settings and written
 # into .boxos.settings its words apart by single blanks: a tab between words
-# and a comment go, a ';' between quotes stays.
+# and a comment go, a ';' between quotes stays. A line naming the path of
+# what holds it goes right under the last line of that, indented four spaces
+# for each — a name that is also a kind's word read as the line means it.
 cat > "$WORK/settings.asm" <<'EOF'
 section .text
 global main
@@ -342,9 +344,11 @@ extern exit
 extern __boxos_settings_start
 extern __boxos_settings_end
 setting hours one-of 24 12 default 24 "how the hours are counted"
-setting  width	number from -5 to 200 cells default 72 next-start "how wide the column is"   ; said once
+setting  digits	"the digits"   ; a thing that holds others
+setting digits  width	number from -5 to 200 cells default 72 next-start "how wide the column is"   ; said once
 setting greeting text default "" "what it says; at start"
-setting prompt-color color default #FFB020 "the colour of the prompt"
+setting digits color color default #FFB020 "their color"
+setting digits color glow on-or-off default off "whether it glows"
 main:
     endbr64
     xor edi, edi
@@ -355,10 +359,12 @@ global bounds
 bounds: dq __boxos_settings_start, __boxos_settings_end
 EOF
 SETTINGS_TEXT='settings 1
-setting hours one-of 24 12 default 24 "how the hours are counted"
-setting width number from -5 to 200 cells default 72 next-start "how wide the column is"
-setting greeting text default "" "what it says; at start"
-setting prompt-color color default #FFB020 "the colour of the prompt"'
+hours one-of 24 12 default 24 "how the hours are counted"
+digits "the digits"
+    width number from -5 to 200 cells default 72 next-start "how wide the column is"
+    color color default #FFB020 "their color"
+        glow on-or-off default off "whether it glows"
+greeting text default "" "what it says; at start"'
 if "$STAND" assemble "$WORK/settings.asm" "$WORK/settings.o" 2> "$WORK/asm.err" &&
    x86_64-elf-objcopy -O binary --only-section=.boxos.settings "$WORK/settings.o" "$WORK/settings.got" 2>/dev/null &&
    printf '%s\n' "$SETTINGS_TEXT" > "$WORK/settings.want" && cmp -s "$WORK/settings.got" "$WORK/settings.want"; then
@@ -411,9 +417,13 @@ setting_refuses setting_no_default 'setting look one-of dark light "how it looks
 setting_refuses setting_unknown_kind 'setting look gradient default x "how it looks"' \
     "setting_unknown_kind.asm:5:1: the setting look is of a kind this reader does not know"
 setting_refuses setting_bad_name 'setting Look word default x "how it looks"' \
-    "setting_bad_name.asm:5:1: the setting Look has a name a setting cannot have: a small letter, then small letters, digits and -, at most 32, not settings, when or default"
+    "setting_bad_name.asm:5:1: the setting Look has a name a setting cannot have: a small letter, then small letters, digits and -, at most 32, not settings or default"
 setting_refuses setting_twice $'setting look word default x "how it looks"\nsetting look word default y "again"' \
     "setting_twice.asm:6:1: the setting look is declared already"
+setting_refuses setting_twice_inside $'setting a "x"\nsetting a b word default x "y"\nsetting a b word default z "w"' \
+    "setting_twice_inside.asm:7:1: the setting b is declared already"
+setting_refuses setting_old_kind 'setting look yes-or-no default yes "how it looks"' \
+    "setting_old_kind.asm:5:1: the setting look is of a kind this reader does not know"
 setting_refuses setting_outside_limits 'setting width number from 1 to 9 default 10 "how wide"' \
     "setting_outside_limits.asm:5:1: the setting width has a default that does not fit it"
 setting_refuses setting_tab_in_quotes $'setting greeting text default "a\tb" "what it says"' \
@@ -423,12 +433,24 @@ setting_refuses setting_in_struc $'struc point\nsetting look word default x "how
 
 # A declaration that comes to the linker from another assembler is read too:
 # a box with a setting no program could have is not made.
-program badsettings $' nop\n.section .boxos.settings,"a"\n.ascii "settings 1\\nsetting look word \\"how it looks\\"\\n"'
+program badsettings $' nop\n.section .boxos.settings,"a"\n.ascii "settings 1\\nlook word \\"how it looks\\"\\n"\n.text'
 said=$("$STAND" link "$ENTRY" "$WORK/badsettings.o" "$ARCHIVE" "$WORK/badsettings.box" 2>&1)
 if [ $? = 1 ] && [ "$said" = "the program's settings, line 2: the setting look has no default" ]; then
     ok settings_read_at_link
 else
     fail settings_read_at_link "said '$said'"
+fi
+# A thing declared to hold others, and nothing put under it: the whole tree
+# is held to the reader when the program is linked.
+printf 'section .text\nglobal main\nextern exit\nsetting cursor "the mark where what you type goes"\nmain:\n    endbr64\n    xor edi, edi\n    call exit\n' \
+    > "$WORK/emptygroup.asm"
+said=$("$STAND" assemble "$WORK/emptygroup.asm" "$WORK/emptygroup.o" 2>&1 &&
+       "$STAND" link "$ENTRY" "$WORK/emptygroup.o" "$ARCHIVE" "$WORK/emptygroup.box" 2>&1)
+if [ $? = 1 ] &&
+   [ "$said" = "the program's settings, line 2: the setting cursor holds nothing: what it holds goes below it, indented" ]; then
+    ok settings_holding_nothing
+else
+    fail settings_holding_nothing "said '$said'"
 fi
 
 # ---- the life: how the program lives -------------------------------------------

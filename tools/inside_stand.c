@@ -92,10 +92,13 @@ int main(int argc, char **argv)
     Text("form", "form 1\ntakes words \"what to say\"\n", BOX_FLAG_LOAD_AT_START, BOX_PART_VERSION);
     Text("settings",
          "settings 1\n"
-         "setting hours one-of 24 12 default 24 \"how the hours are counted\"\n"
-         "setting width number from -5 to 200 cells default 72 next-start \"how wide the column is\"\n"
-         "setting greeting text default \"\" \"what it says at start\"\n"
-         "setting future gradient default x \"a kind of later\"\n",
+         "hours one-of 24 12 default 24 \"how the hours are counted\"\n"
+         "column \"the column\"\n"
+         "  width number from -5 to 200 cells default 72 next-start \"how wide the column is\"\n"
+         "  blink number from 100 to 900 ms or off default off \"how often it blinks\"\n"
+         "greeting text default \"\" \"what it says at start\"\n"
+         "future gradient default x \"a kind of later\"\n"
+         "  inner color default red \"inside a later kind\"\n",
          BOX_FLAG_LOAD_AT_START, BOX_PART_VERSION);
     Text("about", "about 1\nname Stand\n", 0, BOX_PART_VERSION);
     Text("about:ru", "about 1\nname Stand\n", BOX_FLAG_COMPRESSED, BOX_PART_VERSION);
@@ -143,7 +146,7 @@ int main(int argc, char **argv)
     g_count = 0;
     Part("code", code, sizeof(code), sizeof(code), 0, must, BOX_PART_VERSION);
     Part("doors", doors, doors_bytes, doors_bytes, 0, must, BOX_PART_VERSION);
-    Text("settings", "settings 1\nsetting prompt word \"what stands before\"\n", BOX_FLAG_LOAD_AT_START,
+    Text("settings", "settings 1\nprompt word \"what stands before\"\n", BOX_FLAG_LOAD_AT_START,
          BOX_PART_VERSION);
     if (!Write(argv[1], "badsettings.box")) {
         fprintf(stderr, "inside_stand: badsettings.box was not written\n");

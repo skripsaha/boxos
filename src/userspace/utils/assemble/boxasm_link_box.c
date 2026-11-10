@@ -235,7 +235,8 @@ static int BoxAsmBoxSettings(BoxAsmLinker *Link, const BoxAsmOutputSection *Sect
         return 0;
     BoxAsmMessageBegin(&Message, Link->Error, Link->ErrorCapacity);
     if (SettingsDeclaredBegin(Section->Data.Data, Size, &Declared) != SETTINGS_OK) {
-        BoxAsmMessageText(&Message, "the program's settings do not begin with the line \"settings 1\"");
+        BoxAsmMessageText(&Message, "the program's settings do not begin with the line \"settings "
+                                    SETTINGS_VERSION_WORD "\"");
         return -ERR_INVALID_ARGUMENT;
     }
     while (SettingsDeclaredNext(&Declared, &Setting, &Verdict)) {
@@ -243,7 +244,7 @@ static int BoxAsmBoxSettings(BoxAsmLinker *Link, const BoxAsmOutputSection *Sect
             continue;
         BoxAsmMessageText(&Message, "the program's settings, line ");
         BoxAsmMessageDecimal(&Message, Setting.Line);
-        BoxAsmMessageText(&Message, ": the setting ");
+        BoxAsmMessageText(&Message, Setting.Name.Length != 0 ? ": the setting " : ": the line");
         BoxAsmMessageSpan(&Message, (const char *)Setting.Name.At, (size_t)Setting.Name.Length);
         BoxAsmMessageText(&Message, " ");
         BoxAsmMessageText(&Message, SettingsVerdictText(Verdict));

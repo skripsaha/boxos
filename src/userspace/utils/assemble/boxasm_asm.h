@@ -285,7 +285,7 @@ typedef struct {
     uint32_t            FailFrame;       /* while it works: the macro call of its line */
     BoxAsmStruc         Struc;
     BoxAsmProgramForm   Form;
-    BoxAsmBuffer        Settings;        /* `setting` lines: the program's settings so far, from `settings 1` */
+    BoxAsmBuffer        Settings;        /* `setting` lines: the program's settings so far, a tree from `settings 1` */
     BoxAsmBuffer        Life;            /* `life` words: how the program lives, from `life 1` */
     uintptr_t           StackBase;       /* the stack where the work began */
 } BoxAsmAssembler;

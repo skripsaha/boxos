@@ -189,14 +189,23 @@ static bool SayText(const InsideFile *file, const BoxPart *part, const uint8_t *
     return true;
 }
 
+/* A setting as a person reads it, indented as deep as it stands in the
+ * tree; a thing that only holds others by what it holds. */
 static void SaySetting(const InsideFile *file, const Setting *setting)
 {
     SettingValue value;
     SayUnder(file);
+    for (uint32_t depth = 0; depth < setting->Depth; depth++) Say(file, "  ");
     Say(file, "setting ");
     SaySpan(file, setting->Name.At, setting->Name.Length);
+    if (setting->Kind == SETTING_GROUP) {
+        Say(file, ": holds what stands under it — ");
+        SaySpan(file, setting->What.At, setting->What.Length);
+        Say(file, "\n");
+        return;
+    }
     switch (setting->Kind) {
-    case SETTING_YES_OR_NO: Say(file, ": yes or no, "); break;
+    case SETTING_ON_OR_OFF: Say(file, ": on or off, "); break;
     case SETTING_NUMBER:
         Say(file, ": a whole number from ");
         SaySigned(file, setting->From);
@@ -206,7 +215,7 @@ static void SaySetting(const InsideFile *file, const Setting *setting)
             Say(file, " ");
             SaySpan(file, setting->Unit.At, setting->Unit.Length);
         }
-        Say(file, ", ");
+        Say(file, setting->Off ? ", or off, " : ", ");
         break;
     case SETTING_WORD: Say(file, ": a word, "); break;
     case SETTING_TEXT: Say(file, ": text, "); break;
@@ -224,7 +233,7 @@ static void SaySetting(const InsideFile *file, const Setting *setting)
         Say(file, "; ");
         break;
     }
-    case SETTING_COLOR: Say(file, ": a colour, "); break;
+    case SETTING_COLOR: Say(file, ": a color, "); break;
     default: break;
     }
     if (setting->Kind == SETTING_TEXT) {
@@ -246,8 +255,8 @@ static void SaySetting(const InsideFile *file, const Setting *setting)
 
 /* Each setting a declaration says, as a person reads it. A setting of a kind
  * this reader does not know is named and passed over, as a program passes
- * it over; any other line it cannot read means the part is not written as a
- * declaration is. */
+ * it over, and so is all it holds; any other line it cannot read means the
+ * part is not written as a declaration is. */
 static bool SaySettings(const InsideFile *file, const BoxPart *part, const uint8_t *bytes)
 {
     SettingsDeclared declared;
@@ -263,12 +272,12 @@ static bool SaySettings(const InsideFile *file, const BoxPart *part, const uint8
         SayUnder(file);
         Say(file, "line ");
         SayNumber(file, setting.Line, 0);
-        Say(file, ": the setting ");
+        Say(file, setting.Name.Length != 0 ? ": the setting " : ": the line");
         SaySpan(file, setting.Name.At, setting.Name.Length);
         Say(file, " ");
         Say(file, SettingsVerdictText(verdict));
         Say(file, "\n");
-        if (verdict != SETTING_KIND_UNKNOWN) written = false;
+        if (verdict != SETTING_KIND_UNKNOWN && verdict != SETTING_INSIDE_UNTAKEN) written = false;
     }
     return written;
 }

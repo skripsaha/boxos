@@ -7,7 +7,8 @@
  * when they carry a declaration, inside when it says one, the stands on the
  * build machine. Written with settings_pen.h.
  *
- * Two knowledges, two owners.
+ * Two knowledges, two owners — and both are trees: things, and what each
+ * thing has.
  *
  * WHAT CAN BE SET the program knows, and says once, in its declaration: the
  * part `settings` of its box (in an ELF image the section .boxos.settings),
@@ -15,72 +16,70 @@
  * what each setting is, takes and starts as.
  *
  *     settings 1
- *     setting history yes-or-no default yes next-start "keep what is typed from one start to the next"
- *     setting prompt word default ~ "what stands before what you type"
- *     setting width number from 24 to 200 cells default 72 "how wide the column is"
- *     setting look one-of dark light default dark "how the page looks"
- *     setting prompt-color color default #FFB020 "the colour of the prompt"
- *     setting greeting text default "BoxOS Hub" "the line said at start"
+ *     greeting on-or-off default on "the line said when the program starts"
+ *     cursor "the mark where what you type goes"
+ *         shape one-of block underline bar off default underline "its shape"
+ *         color color default light-gray "its color"
+ *         blink number from 100 to 5000 ms or off default off "how often it blinks"
+ *     sign word default ~ "what stands before what you type"
+ *         color color default light-gray "its color"
+ *     history on-or-off default on next-start "keep what is typed from one start to the next"
  *
- *   setting NAME KIND [what the kind takes] default VALUE [next-start] "what it does"
+ *   NAME "what it holds"                                   a thing that only holds others
+ *   NAME KIND [what the kind takes] default VALUE [next-start] "what it does"
+ *
+ * A line indented under another is inside it: what it has. Siblings stand at
+ * one indent, in spaces; a thing that only holds others holds at least one.
+ * Any setting may hold others too — the sign has a value, and a color.
  *
  *   NAME    a small letter, then small letters, digits and '-', not ending in
- *           '-'; at most SETTING_NAME_MAX bytes; not `settings` nor `when`,
- *           which begin other lines of the person's file, nor `default`, the
- *           word for as it came; one setting's only
- *   KIND    yes-or-no                 yes or no
- *           number from A to B [UNIT] a whole number from A to B, A no more
+ *           '-'; at most SETTING_NAME_MAX bytes; not `settings` nor `default`;
+ *           one sibling's only
+ *   KIND    on-or-off                 on or off
+ *           number from A to B [UNIT] [or off]
+ *                                     a whole number from A to B, A no more
  *                                     than B; UNIT a word that says what it
- *                                     counts, which a value may repeat
+ *                                     counts, which a value may repeat; `or
+ *                                     off` lets the word off stand for 0, so
+ *                                     A is then 1 or more
  *           word                      one word: no blank, no '"'
  *           text                      any text on one line, "" for none
  *           one-of W1 W2 ...          one of two or more different words
- *           color                     #RRGGBB
+ *           color                     a color's name (SettingColorNames) or
+ *                                     #RRGGBB
  *   VALUE   a word, or text between double quotes — the only way to write a
  *           text with blanks at its ends, an empty one, or the word default
  *   next-start   the setting takes effect when the program starts next; one
  *           without it takes effect at once
  *
+ * Things inside things go SETTINGS_DEPTH_MAX deep. The reader reads without
+ * memory of its own, one line at a time, so what is open above a line is
+ * held in a stack of that many levels; a declaration deeper than that is
+ * refused where it is made — and a person reading a tree of settings would
+ * be lost long before.
+ *
  * The declaration is a part written as text (box_reader.h's rules: lines,
- * no byte below a blank but the newline). A line that does not begin with
- * `setting` is passed over; a setting line of a kind this reader does not
- * know, or one it cannot read, is a verdict the caller says — a program skips
- * that setting and keeps the rest, a tool that writes the declaration
- * refuses it.
+ * no byte below a blank but the newline). A line whose first byte past
+ * blanks is '#' is a comment. A line this reader cannot read is a verdict the
+ * caller says — a program passes over that setting, and all inside it, and
+ * keeps the rest; a tool that writes the declaration refuses it.
  *
  * WHAT THE PERSON CHOSE the person knows: the file <program>.settings on the
- * volume, which holds only what they changed. There is none until they change
- * something; with none, everything is as the program came.
- *
- *     settings 1
- *     # the prompt I like
- *     prompt »
- *     history no
- *     prompt-color #7CD68A
- *     when work prompt w»
- *
- *   settings 1     the first line, written by the library; a file without it
- *                  is read as settings 1
- *   # ...          a comment: a whole line whose first byte past blanks is '#'
- *                  (a value may hold '#': a colour does)
- *   NAME VALUE     VALUE the rest of the line, its blanks at both ends taken
- *                  off; between double quotes it is taken as it stands; the
- *                  bare word default means the program's own value
- *   when TAGS NAME VALUE   a setting for a Use Context, for later: known, and
- *                  passed over by this version
- *
- * Blanks are spaces and tabs, and a line may end in CR LF. A line that says
- * nothing this reader knows is the caller's to name, never a reason to stop.
+ * volume, which holds only what they changed — read by settings_chosen.h, in
+ * the names, values and verdicts said here.
  *
  * No allocation and no library: every span points into the bytes it was read
  * from. Integer types and bool come from the includer (see box_format.h).
  */
 
-#define SETTING_NAME_MAX    32u
+#define SETTING_NAME_MAX      32u
+#define SETTINGS_DEPTH_MAX    8u
+#define SETTINGS_TAB_STOP     4u
 #define SETTINGS_VERSION_WORD "1"
 
 typedef enum {
-    SETTING_YES_OR_NO = 0,
+    SETTING_GROUP = 0,          /* holds others, and has no value of its own */
+    SETTING_ON_OR_OFF,
     SETTING_NUMBER,
     SETTING_WORD,
     SETTING_TEXT,
@@ -99,20 +98,24 @@ typedef struct {
     SettingSpan Name;
     SettingKind Kind;
     int64_t     From, To;       /* number */
+    bool        Off;            /* number: `or off`, the word off read as 0 */
     SettingSpan Unit;           /* number: empty for none */
     SettingSpan Choices;        /* one-of: the words, as the line has them */
-    SettingSpan Default;        /* the value, its quotes taken off */
-    SettingSpan What;           /* what it does */
+    SettingSpan Default;        /* the value, its quotes taken off; empty for a group */
+    SettingSpan What;           /* what it does, or holds */
     bool        NextStart;
     uint32_t    Line;           /* its line in the declaration, from 1 */
+    uint32_t    Parent;         /* the line of what it is inside; 0 at the top */
+    uint32_t    Depth;          /* how many it is inside: 0 at the top */
+    uint32_t    Indent;         /* its indent, in columns */
 } Setting;
 
 /* A value read for a setting: what the kind makes of it. */
 typedef struct {
-    bool        Yes;            /* yes-or-no */
-    int64_t     Number;         /* number */
+    bool        On;             /* on-or-off */
+    int64_t     Number;         /* number: 0 for off */
     uint32_t    Color;          /* color: 0xRRGGBB */
-    SettingSpan Text;           /* word, text, one-of: the value itself */
+    SettingSpan Text;           /* the value itself: a number's digits, or off */
 } SettingValue;
 
 typedef enum {
@@ -120,10 +123,19 @@ typedef enum {
     /* the declaration as a whole */
     SETTINGS_NOT_TEXT,          /* a byte below a blank but the newline, or DEL */
     SETTINGS_NO_HEAD,           /* the first line is not "settings 1" */
-    /* a setting line */
+    /* where a line stands */
+    SETTING_INDENT_BAD,         /* the declaration: indented unlike its siblings */
+    SETTING_TOO_DEEP,           /* inside more than SETTINGS_DEPTH_MAX levels */
+    SETTING_INSIDE_UNTAKEN,     /* inside a line that is not taken */
+    SETTING_NOT_THERE,          /* the person's file: a name nothing declares where it stands */
+    SETTING_CONTEXT_BAD,        /* a [ ] line that does not read as tags */
+    SETTING_CONTEXT_INSIDE,     /* a [ ] line inside another line */
+    SETTING_CONTEXT_EMPTY,      /* a [ ] line with nothing indented under it */
+    /* a line of the declaration */
     SETTING_LINE_UNREAD,        /* an unclosed quote, or a quote not ended by a blank */
     SETTING_NAME_BAD,
     SETTING_NAME_TWICE,
+    SETTING_HOLDS_NOTHING,      /* a thing that only holds others, with nothing inside */
     SETTING_KIND_UNKNOWN,
     SETTING_LIMITS_BAD,
     SETTING_UNIT_BAD,
@@ -134,7 +146,7 @@ typedef enum {
     SETTING_WORDS_AFTER,
     /* a value */
     SETTING_VALUE_EMPTY,
-    SETTING_VALUE_NOT_YES_OR_NO,
+    SETTING_VALUE_NOT_ON_OR_OFF,
     SETTING_VALUE_NOT_NUMBER,
     SETTING_VALUE_OUTSIDE,
     SETTING_VALUE_NOT_WORD,
@@ -144,6 +156,14 @@ typedef enum {
 } SettingsVerdict;
 
 /* ── spans ───────────────────────────────────────────────────────────────── */
+
+static inline SettingSpan SettingSpanOf(const uint8_t *at, uint64_t length)
+{
+    SettingSpan span;
+    span.At     = at;
+    span.Length = length;
+    return span;
+}
 
 static inline bool SettingSpanIs(SettingSpan span, const char *word)
 {
@@ -166,7 +186,18 @@ static inline bool SettingBlank(uint8_t c)
     return c == ' ' || c == '\t';
 }
 
-/* ── words of a line ─────────────────────────────────────────────────────── */
+/* A span with its blanks at both ends taken off. */
+static inline SettingSpan SettingTrimmed(SettingSpan span)
+{
+    while (span.Length > 0 && SettingBlank(span.At[0])) {
+        span.At++;
+        span.Length--;
+    }
+    while (span.Length > 0 && SettingBlank(span.At[span.Length - 1])) span.Length--;
+    return span;
+}
+
+/* ── words and lines ─────────────────────────────────────────────────────── */
 
 /* The next word of a line from *at on: a run of bytes up to a blank, or text
  * between double quotes, the quotes taken off (*quoted). A quote must close
@@ -186,15 +217,13 @@ static inline bool SettingWord(SettingSpan line, uint64_t *at, SettingSpan *word
             *verdict = SETTING_LINE_UNREAD;
             return false;
         }
-        word->At     = line.At + start;
-        word->Length = *at - start;
+        *word = SettingSpanOf(line.At + start, *at - start);
         (*at)++;
         return true;
     }
     uint64_t start = *at;
     while (*at < line.Length && !SettingBlank(line.At[*at])) (*at)++;
-    word->At     = line.At + start;
-    word->Length = *at - start;
+    *word = SettingSpanOf(line.At + start, *at - start);
     return true;
 }
 
@@ -206,12 +235,46 @@ static inline bool SettingLine(const uint8_t *bytes, uint64_t size, uint64_t *at
     if (*at >= size) return false;
     uint64_t start = *at, end = start;
     while (end < size && bytes[end] != '\n') end++;
-    *at          = end < size ? end + 1 : end;
-    line->At     = bytes + start;
-    line->Length = end - start;
+    *at   = end < size ? end + 1 : end;
+    *line = SettingSpanOf(bytes + start, end - start);
     if (line->Length > 0 && line->At[line->Length - 1] == '\r') line->Length--;
     (*number)++;
     return true;
+}
+
+/* A line's indent: *columns as wide as its blanks before the first word —
+ * a tab reaching the next multiple of SETTINGS_TAB_STOP — and *bytes their
+ * count. */
+static inline void SettingIndent(SettingSpan line, uint32_t *columns, uint64_t *bytes)
+{
+    uint32_t width = 0;
+    uint64_t at    = 0;
+    while (at < line.Length && SettingBlank(line.At[at])) {
+        width = line.At[at] == '\t' ? (width / SETTINGS_TAB_STOP + 1u) * SETTINGS_TAB_STOP : width + 1u;
+        at++;
+    }
+    *columns = width;
+    *bytes   = at;
+}
+
+/* Whether a line says something: not blank, not a comment. */
+static inline bool SettingLineSays(SettingSpan line, uint64_t lead)
+{
+    return lead < line.Length && line.At[lead] != '#';
+}
+
+/* The indent of the next line from `at` on that says something; false when
+ * none is left. */
+static inline bool SettingNextIndent(const uint8_t *bytes, uint64_t size, uint64_t at, uint32_t *indent)
+{
+    SettingSpan line;
+    uint32_t    number = 0;
+    uint64_t    lead;
+    while (SettingLine(bytes, size, &at, &line, &number)) {
+        SettingIndent(line, indent, &lead);
+        if (SettingLineSays(line, lead)) return true;
+    }
+    return false;
 }
 
 /* ── names and values ────────────────────────────────────────────────────── */
@@ -224,7 +287,7 @@ static inline bool SettingNameUsable(SettingSpan name)
         uint8_t c = name.At[i];
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
     }
-    return !SettingSpanIs(name, "settings") && !SettingSpanIs(name, "when") && !SettingSpanIs(name, "default");
+    return !SettingSpanIs(name, "settings") && !SettingSpanIs(name, "default");
 }
 
 /* Text on one line: no byte below a blank but a tab, and no DEL. */
@@ -275,6 +338,49 @@ static inline int SettingHex(uint8_t c)
     return -1;
 }
 
+/* The colors a person may call by name, and what each is. */
+typedef struct {
+    const char *Name;
+    uint32_t    Rgb;
+} SettingColorName;
+
+#define SETTING_COLOR_NAMES 15u
+
+static inline const SettingColorName *SettingColorNames(void)
+{
+    static const SettingColorName names[SETTING_COLOR_NAMES] = {
+        { "black", 0x000000u },  { "dark-gray", 0x555555u }, { "gray", 0x808080u },
+        { "light-gray", 0xAAAAAAu }, { "white", 0xFFFFFFu }, { "red", 0xE04040u },
+        { "green", 0x40C040u },  { "blue", 0x4060E0u },      { "cyan", 0x40C0C0u },
+        { "yellow", 0xE0C040u }, { "amber", 0xFFB040u },     { "orange", 0xFF8020u },
+        { "purple", 0xA060E0u }, { "pink", 0xFF80C0u },      { "brown", 0xA06030u },
+    };
+    return names;
+}
+
+/* A color as a person writes it: a name, or #RRGGBB in either case. */
+static inline bool SettingColorRead(SettingSpan text, uint32_t *rgb)
+{
+    if (text.Length == 7 && text.At[0] == '#') {
+        uint32_t value = 0;
+        for (uint64_t i = 1; i < 7; i++) {
+            int digit = SettingHex(text.At[i]);
+            if (digit < 0) return false;
+            value = value << 4 | (uint32_t)digit;
+        }
+        *rgb = value;
+        return true;
+    }
+    const SettingColorName *names = SettingColorNames();
+    for (unsigned i = 0; i < SETTING_COLOR_NAMES; i++) {
+        if (SettingSpanIs(text, names[i].Name)) {
+            *rgb = names[i].Rgb;
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Whether a word is one of a one-of's choices. */
 static inline bool SettingChoiceIs(SettingSpan choices, SettingSpan word)
 {
@@ -289,10 +395,10 @@ static inline bool SettingChoiceIs(SettingSpan choices, SettingSpan word)
 
 /* `value` read for the setting: SETTINGS_OK and what it is in *out, or the
  * verdict on why it does not fit. A number may be followed by the unit its
- * setting counts in: "72 cells". */
+ * setting counts in: "500 ms". A thing that only holds others takes none. */
 static inline SettingsVerdict SettingValueRead(const Setting *setting, SettingSpan value, SettingValue *out)
 {
-    out->Yes    = false;
+    out->On     = false;
     out->Number = 0;
     out->Color  = 0;
     out->Text   = value;
@@ -300,20 +406,20 @@ static inline SettingsVerdict SettingValueRead(const Setting *setting, SettingSp
     if (value.Length == 0 && setting->Kind != SETTING_TEXT) return SETTING_VALUE_EMPTY;
 
     switch (setting->Kind) {
-    case SETTING_YES_OR_NO:
-        if (SettingSpanIs(value, "yes")) out->Yes = true;
-        else if (!SettingSpanIs(value, "no")) return SETTING_VALUE_NOT_YES_OR_NO;
+    case SETTING_ON_OR_OFF:
+        if (SettingSpanIs(value, "on")) out->On = true;
+        else if (!SettingSpanIs(value, "off")) return SETTING_VALUE_NOT_ON_OR_OFF;
         return SETTINGS_OK;
     case SETTING_NUMBER: {
+        if (setting->Off && SettingSpanIs(value, "off")) return SETTINGS_OK;
         SettingSpan number = value;
         uint64_t    end    = 0;
         while (end < value.Length && !SettingBlank(value.At[end])) end++;
         if (end < value.Length) {
-            uint64_t    unit_at = end;
+            uint64_t unit_at = end;
             while (unit_at < value.Length && SettingBlank(value.At[unit_at])) unit_at++;
-            SettingSpan unit = { value.At + unit_at, value.Length - unit_at };
-            if (setting->Unit.Length == 0 || !SettingSpanSame(unit, setting->Unit))
-                return SETTING_VALUE_NOT_NUMBER;
+            SettingSpan unit = SettingSpanOf(value.At + unit_at, value.Length - unit_at);
+            if (setting->Unit.Length == 0 || !SettingSpanSame(unit, setting->Unit)) return SETTING_VALUE_NOT_NUMBER;
             number.Length = end;
         }
         if (!SettingNumber(number, &out->Number)) return SETTING_VALUE_NOT_NUMBER;
@@ -328,62 +434,27 @@ static inline SettingsVerdict SettingValueRead(const Setting *setting, SettingSp
     case SETTING_ONE_OF:
         return SettingChoiceIs(setting->Choices, value) ? SETTINGS_OK : SETTING_VALUE_NOT_CHOICE;
     case SETTING_COLOR:
-        if (value.Length != 7 || value.At[0] != '#') return SETTING_VALUE_NOT_COLOR;
-        for (uint64_t i = 1; i < 7; i++) {
-            int digit = SettingHex(value.At[i]);
-            if (digit < 0) return SETTING_VALUE_NOT_COLOR;
-            out->Color = out->Color << 4 | (uint32_t)digit;
-        }
-        return SETTINGS_OK;
+        return SettingColorRead(value, &out->Color) ? SETTINGS_OK : SETTING_VALUE_NOT_COLOR;
     default:
         return SETTING_KIND_UNKNOWN;
     }
 }
 
-/* ── the declaration ─────────────────────────────────────────────────────── */
+/* ── one line of the declaration ─────────────────────────────────────────── */
 
-typedef struct {
-    const uint8_t *Bytes;
-    uint64_t       Size;
-    uint64_t       At;          /* where the next line starts */
-    uint32_t       Line;        /* the line read last */
-} SettingsDeclared;
-
-/* The declaration's `size` bytes at `bytes`, opened past its first line,
- * which must be "settings 1". */
-static inline SettingsVerdict SettingsDeclaredBegin(const uint8_t *bytes, uint64_t size, SettingsDeclared *out)
-{
-    out->Bytes = bytes;
-    out->Size  = size;
-    out->At    = 0;
-    out->Line  = 0;
-    for (uint64_t i = 0; i < size; i++)
-        if ((bytes[i] < 0x20u && bytes[i] != '\n') || bytes[i] == 0x7Fu) return SETTINGS_NOT_TEXT;
-
-    SettingSpan     line, word;
-    uint64_t        at = 0;
-    bool            quoted;
-    SettingsVerdict verdict = SETTINGS_OK;
-    while (SettingLine(bytes, size, &out->At, &line, &out->Line)) {
-        at = 0;
-        if (!SettingWord(line, &at, &word, &quoted, &verdict)) continue;
-        if (quoted || !SettingSpanIs(word, "settings")) return SETTINGS_NO_HEAD;
-        if (!SettingWord(line, &at, &word, &quoted, &verdict) || quoted ||
-            !SettingSpanIs(word, SETTINGS_VERSION_WORD))
-            return SETTINGS_NO_HEAD;
-        return SettingWord(line, &at, &word, &quoted, &verdict) ? SETTINGS_NO_HEAD : SETTINGS_OK;
-    }
-    return SETTINGS_NO_HEAD;
-}
-
-/* The kind a word names. */
-static inline bool SettingKindOf(SettingSpan word, SettingKind *kind)
+static inline const char *SettingKindWord(SettingKind kind)
 {
     static const char *const words[SETTING_KIND_COUNT] = {
-        "yes-or-no", "number", "word", "text", "one-of", "color"
+        "", "on-or-off", "number", "word", "text", "one-of", "color"
     };
-    for (unsigned i = 0; i < SETTING_KIND_COUNT; i++) {
-        if (SettingSpanIs(word, words[i])) {
+    return (unsigned)kind < SETTING_KIND_COUNT ? words[kind] : "";
+}
+
+/* The kind a word names; a thing that only holds others is named by none. */
+static inline bool SettingKindOf(SettingSpan word, SettingKind *kind)
+{
+    for (unsigned i = SETTING_ON_OR_OFF; i < SETTING_KIND_COUNT; i++) {
+        if (SettingSpanIs(word, SettingKindWord((SettingKind)i))) {
             *kind = (SettingKind)i;
             return true;
         }
@@ -391,16 +462,8 @@ static inline bool SettingKindOf(SettingSpan word, SettingKind *kind)
     return false;
 }
 
-static inline const char *SettingKindWord(SettingKind kind)
-{
-    static const char *const words[SETTING_KIND_COUNT] = {
-        "yes-or-no", "number", "word", "text", "one-of", "color"
-    };
-    return (unsigned)kind < SETTING_KIND_COUNT ? words[kind] : "";
-}
-
-/* What a number or one-of takes, after its kind: from A to B [UNIT], or the
- * choices up to `default`. *at is left on the word after them. */
+/* What a number or one-of takes, after its kind: from A to B [UNIT] [or off],
+ * or the choices up to `default`. *at is left on the word after them. */
 static inline SettingsVerdict SettingKindWords(SettingSpan line, uint64_t *at, Setting *out)
 {
     SettingSpan     word;
@@ -416,12 +479,21 @@ static inline SettingsVerdict SettingKindWords(SettingSpan line, uint64_t *at, S
             out->From > out->To)
             return verdict != SETTINGS_OK ? verdict : SETTING_LIMITS_BAD;
         uint64_t look = *at;
-        if (SettingWord(line, &look, &word, &quoted, &verdict) && !quoted && !SettingSpanIs(word, "default")) {
+        if (SettingWord(line, &look, &word, &quoted, &verdict) && !quoted && !SettingSpanIs(word, "default") &&
+            !SettingSpanIs(word, "or")) {
             for (uint64_t i = 0; i < word.Length; i++)
                 if (!((word.At[i] >= 'a' && word.At[i] <= 'z') || (word.At[i] >= 'A' && word.At[i] <= 'Z')))
                     return SETTING_UNIT_BAD;
             out->Unit = word;
             *at       = look;
+        }
+        look = *at;
+        if (SettingWord(line, &look, &word, &quoted, &verdict) && !quoted && SettingSpanIs(word, "or")) {
+            if (!SettingWord(line, &look, &word, &quoted, &verdict) || quoted || !SettingSpanIs(word, "off") ||
+                out->From < 1)
+                return verdict != SETTINGS_OK ? verdict : SETTING_LIMITS_BAD;
+            out->Off = true;
+            *at      = look;
         }
         return verdict;
     }
@@ -430,7 +502,7 @@ static inline SettingsVerdict SettingKindWords(SettingSpan line, uint64_t *at, S
         uint64_t count = 0, start = *at, end = *at, look = *at;
         /* The choices are bare words: a quoted one ends them, as `default` does. */
         while (SettingWord(line, &look, &word, &quoted, &verdict) && !quoted && !SettingSpanIs(word, "default")) {
-            SettingSpan before = { line.At + start, end - start };
+            SettingSpan before = SettingSpanOf(line.At + start, end - start);
             if (!SettingWordUsable(word) || SettingSpanIs(word, "next-start") || SettingChoiceIs(before, word))
                 return SETTING_CHOICES_BAD;
             count++;
@@ -440,25 +512,42 @@ static inline SettingsVerdict SettingKindWords(SettingSpan line, uint64_t *at, S
         if (verdict != SETTINGS_OK) return verdict;
         if (count < 2) return SETTING_CHOICES_BAD;
         while (start < end && SettingBlank(line.At[start])) start++;
-        out->Choices.At     = line.At + start;
-        out->Choices.Length = end - start;
+        out->Choices = SettingSpanOf(line.At + start, end - start);
     }
     return SETTINGS_OK;
 }
 
-/* The setting a line declares, from its first word past `setting`. */
+/* The setting a line declares, from its name at `at` on — what stands in
+ * the tree round it is the caller's (SettingsDeclaredNext). */
 static inline SettingsVerdict SettingRead(SettingSpan line, uint64_t at, uint32_t number, Setting *out)
 {
     SettingSpan     word;
     bool            quoted;
     SettingsVerdict verdict = SETTINGS_OK;
+    SettingSpan     none    = SettingSpanOf(line.At, 0);
 
-    *out      = (Setting){ { line.At, 0 }, SETTING_KIND_COUNT, 0, 0, { line.At, 0 }, { line.At, 0 },
-                           { line.At, 0 }, { line.At, 0 }, false, number };
+    out->Name = out->Unit = out->Choices = out->Default = out->What = none;
+    out->Kind      = SETTING_KIND_COUNT;
+    out->From      = out->To = 0;
+    out->Off       = false;
+    out->NextStart = false;
+    out->Line      = number;
+    out->Parent    = out->Depth = out->Indent = 0;
     if (!SettingWord(line, &at, &out->Name, &quoted, &verdict) || quoted || !SettingNameUsable(out->Name))
         return verdict != SETTINGS_OK ? verdict : SETTING_NAME_BAD;
-    if (!SettingWord(line, &at, &word, &quoted, &verdict) || quoted || !SettingKindOf(word, &out->Kind))
+    if (!SettingWord(line, &at, &word, &quoted, &verdict))
         return verdict != SETTINGS_OK ? verdict : SETTING_KIND_UNKNOWN;
+
+    if (quoted) {
+        /* A thing that only holds others: its name and what it holds. */
+        out->Kind = SETTING_GROUP;
+        if (word.Length == 0 || !SettingTextUsable(word)) return SETTING_WHAT_MISSING;
+        out->What = word;
+        if (SettingWord(line, &at, &word, &quoted, &verdict) || verdict != SETTINGS_OK)
+            return verdict != SETTINGS_OK ? verdict : SETTING_WORDS_AFTER;
+        return SETTINGS_OK;
+    }
+    if (!SettingKindOf(word, &out->Kind)) return SETTING_KIND_UNKNOWN;
     if ((verdict = SettingKindWords(line, &at, out)) != SETTINGS_OK) return verdict;
 
     if (!SettingWord(line, &at, &word, &quoted, &verdict) || quoted || !SettingSpanIs(word, "default") ||
@@ -482,54 +571,201 @@ static inline SettingsVerdict SettingRead(SettingSpan line, uint64_t at, uint32_
     return SettingValueRead(out, out->Default, &value) == SETTINGS_OK ? SETTINGS_OK : SETTING_DEFAULT_BAD;
 }
 
-/* Whether a setting line before line `before` declares `name`. */
-static inline bool SettingsDeclaredBefore(const SettingsDeclared *declared, SettingSpan name, uint32_t before)
+/* ── the declaration ─────────────────────────────────────────────────────── */
+
+/* A line of the declaration open above the one being read. */
+typedef struct {
+    uint32_t Indent;
+    uint32_t Line;
+    uint32_t ChildIndent;       /* where its first line inside stood */
+    bool     HasChild;
+    bool     Held;              /* it holds: what is inside it may be read */
+} SettingsDeclaredLevel;
+
+typedef struct {
+    const uint8_t        *Bytes;
+    uint64_t              Size;
+    uint64_t              At;           /* where the next line starts */
+    uint32_t              Line;         /* the line read last */
+    SettingsDeclaredLevel Open[SETTINGS_DEPTH_MAX];
+    uint32_t              Opened;
+    uint32_t              TopIndent;    /* where the first line at the top stood */
+    bool                  TopSeen;
+    bool                  Deep;         /* a line was too deep: */
+    uint32_t              DeepIndent;   /* what is indented past it is too */
+} SettingsDeclared;
+
+/* The declaration's `size` bytes at `bytes`, opened past its first line,
+ * which must be "settings 1". */
+static inline SettingsVerdict SettingsDeclaredBegin(const uint8_t *bytes, uint64_t size, SettingsDeclared *out)
 {
-    uint64_t        at = 0, word_at;
-    uint32_t        number = 0;
+    out->Bytes   = bytes;
+    out->Size    = size;
+    out->At      = 0;
+    out->Line    = 0;
+    out->Opened  = 0;
+    out->TopSeen = false;
+    out->Deep    = false;
+    for (uint64_t i = 0; i < size; i++)
+        if ((bytes[i] < 0x20u && bytes[i] != '\n') || bytes[i] == 0x7Fu) return SETTINGS_NOT_TEXT;
+
     SettingSpan     line, word;
+    uint64_t        at = 0;
     bool            quoted;
-    SettingsVerdict ignored;
-    while (SettingLine(declared->Bytes, declared->Size, &at, &line, &number) && number < before) {
-        word_at = 0;
-        if (SettingWord(line, &word_at, &word, &quoted, &ignored) && !quoted && SettingSpanIs(word, "setting") &&
-            SettingWord(line, &word_at, &word, &quoted, &ignored) && !quoted && SettingSpanSame(word, name))
-            return true;
+    SettingsVerdict verdict = SETTINGS_OK;
+    while (SettingLine(bytes, size, &out->At, &line, &out->Line)) {
+        at = 0;
+        if (!SettingWord(line, &at, &word, &quoted, &verdict)) continue;
+        if (quoted || !SettingSpanIs(word, "settings")) return SETTINGS_NO_HEAD;
+        if (!SettingWord(line, &at, &word, &quoted, &verdict) || quoted ||
+            !SettingSpanIs(word, SETTINGS_VERSION_WORD))
+            return SETTINGS_NO_HEAD;
+        return SettingWord(line, &at, &word, &quoted, &verdict) ? SETTINGS_NO_HEAD : SETTINGS_OK;
     }
+    return SETTINGS_NO_HEAD;
+}
+
+static inline bool SettingsDeclaredStep(SettingsDeclared *declared, Setting *out, SettingsVerdict *verdict,
+                                        bool siblings);
+
+/* Whether a line before `before`, inside the line `parent` (0: the top),
+ * declares `name` — by where lines stand, every line read as it is. */
+static inline bool SettingsDeclaredSiblingBefore(const uint8_t *bytes, uint64_t size, uint32_t parent,
+                                                 SettingSpan name, uint32_t before)
+{
+    SettingsDeclared declared;
+    Setting          setting;
+    SettingsVerdict  verdict;
+    if (SettingsDeclaredBegin(bytes, size, &declared) != SETTINGS_OK) return false;
+    while (SettingsDeclaredStep(&declared, &setting, &verdict, false) && setting.Line < before)
+        if (verdict == SETTINGS_OK && setting.Parent == parent && SettingSpanSame(setting.Name, name)) return true;
     return false;
 }
 
-/* The next setting line of the declaration: true with SETTINGS_OK and the
- * setting in *out, or with the verdict on a line that cannot be read —
- * out->Line says which, and out->Name is its name when that much was read.
- * False when no setting line is left. */
-static inline bool SettingsDeclaredNext(SettingsDeclared *declared, Setting *out, SettingsVerdict *verdict)
+/* The next line that says something, read as a setting where it stands:
+ * true with *verdict, and out->Line the line; false when none is left.
+ * `siblings` asks whether an earlier sibling had the name — a lookup by name
+ * needs not ask: it takes the first, which is the one that holds. */
+static inline bool SettingsDeclaredStep(SettingsDeclared *declared, Setting *out, SettingsVerdict *verdict,
+                                        bool siblings)
 {
-    SettingSpan     line, word;
-    bool            quoted;
-    SettingsVerdict unread = SETTINGS_OK;
+    SettingSpan line;
     while (SettingLine(declared->Bytes, declared->Size, &declared->At, &line, &declared->Line)) {
-        uint64_t at = 0;
-        if (!SettingWord(line, &at, &word, &quoted, &unread) || quoted || !SettingSpanIs(word, "setting"))
-            continue;
-        *verdict = SettingRead(line, at, declared->Line, out);
-        if (*verdict == SETTINGS_OK && SettingsDeclaredBefore(declared, out->Name, declared->Line))
+        uint32_t indent;
+        uint64_t lead;
+        SettingIndent(line, &indent, &lead);
+        if (!SettingLineSays(line, lead)) continue;
+
+        *verdict      = SettingRead(line, lead, declared->Line, out);
+        out->Indent   = indent;
+        if (declared->Deep && indent > declared->DeepIndent) {
+            *verdict = SETTING_TOO_DEEP;
+            return true;
+        }
+        declared->Deep = false;
+        while (declared->Opened > 0 && declared->Open[declared->Opened - 1].Indent >= indent) declared->Opened--;
+
+        SettingsDeclaredLevel *parent = declared->Opened ? &declared->Open[declared->Opened - 1] : (SettingsDeclaredLevel *)0;
+        bool                  *seen   = parent ? &parent->HasChild : &declared->TopSeen;
+        uint32_t              *at     = parent ? &parent->ChildIndent : &declared->TopIndent;
+        out->Parent = parent ? parent->Line : 0;
+        out->Depth  = declared->Opened;
+
+        if (declared->Opened == SETTINGS_DEPTH_MAX) {
+            declared->Deep       = true;
+            declared->DeepIndent = indent;
+            *verdict             = SETTING_TOO_DEEP;
+            return true;
+        }
+        if (parent && !parent->Held) {
+            *verdict = SETTING_INSIDE_UNTAKEN;
+        } else if (*seen && indent != *at) {
+            *verdict = SETTING_INDENT_BAD;
+        } else if (*verdict == SETTINGS_OK && siblings &&
+                   SettingsDeclaredSiblingBefore(declared->Bytes, declared->Size, out->Parent, out->Name,
+                                                 out->Line)) {
             *verdict = SETTING_NAME_TWICE;
+        } else if (*verdict == SETTINGS_OK && out->Kind == SETTING_GROUP) {
+            uint32_t next;
+            if (!SettingNextIndent(declared->Bytes, declared->Size, declared->At, &next) || next <= indent)
+                *verdict = SETTING_HOLDS_NOTHING;
+        }
+        if (!*seen) {
+            *seen = true;
+            *at   = indent;
+        }
+        SettingsDeclaredLevel *level = &declared->Open[declared->Opened++];
+        level->Indent      = indent;
+        level->Line        = out->Line;
+        level->ChildIndent = 0;
+        level->HasChild    = false;
+        level->Held        = *verdict == SETTINGS_OK;
         return true;
     }
     return false;
 }
 
-/* The setting called `name`, as the declaration says it, when a line that can
- * be read declares it (the first such line). */
-static inline bool SettingsDeclaredFind(const uint8_t *bytes, uint64_t size, SettingSpan name, Setting *out)
+/* The next line of the declaration that says something: true with
+ * SETTINGS_OK and the setting in *out, or with the verdict on a line that is
+ * not taken — out->Line says which, and out->Name is its name when that much
+ * was read. False when no line is left. */
+static inline bool SettingsDeclaredNext(SettingsDeclared *declared, Setting *out, SettingsVerdict *verdict)
+{
+    return SettingsDeclaredStep(declared, out, verdict, true);
+}
+
+/* The setting declared on line `line`, when it is taken there. */
+static inline bool SettingsDeclaredAt(const uint8_t *bytes, uint64_t size, uint32_t line, Setting *out)
+{
+    SettingsDeclared declared;
+    SettingsVerdict  verdict;
+    if (line == 0 || SettingsDeclaredBegin(bytes, size, &declared) != SETTINGS_OK) return false;
+    while (SettingsDeclaredStep(&declared, out, &verdict, false)) {
+        if (out->Line == line) return verdict == SETTINGS_OK;
+        if (out->Line > line) return false;
+    }
+    return false;
+}
+
+/* The setting called `name` inside the line `parent` (0: at the top). */
+static inline bool SettingsDeclaredChild(const uint8_t *bytes, uint64_t size, uint32_t parent, SettingSpan name,
+                                         Setting *out)
 {
     SettingsDeclared declared;
     SettingsVerdict  verdict;
     if (SettingsDeclaredBegin(bytes, size, &declared) != SETTINGS_OK) return false;
-    while (SettingsDeclaredNext(&declared, out, &verdict))
-        if (verdict == SETTINGS_OK && SettingSpanSame(out->Name, name)) return true;
+    while (SettingsDeclaredStep(&declared, out, &verdict, false))
+        if (verdict == SETTINGS_OK && out->Parent == parent && SettingSpanSame(out->Name, name)) return true;
     return false;
+}
+
+/* Whether the line `line` holds a setting inside it. */
+static inline bool SettingsDeclaredHolds(const uint8_t *bytes, uint64_t size, uint32_t line)
+{
+    SettingsDeclared declared;
+    SettingsVerdict  verdict;
+    Setting          setting;
+    if (SettingsDeclaredBegin(bytes, size, &declared) != SETTINGS_OK) return false;
+    while (SettingsDeclaredStep(&declared, &setting, &verdict, false))
+        if (verdict == SETTINGS_OK && setting.Parent == line) return true;
+    return false;
+}
+
+/* The setting a path names — names apart by blanks, from the top down:
+ * "cursor blink". */
+static inline bool SettingsDeclaredPath(const uint8_t *bytes, uint64_t size, SettingSpan path, Setting *out)
+{
+    uint64_t        at     = 0;
+    uint32_t        parent = 0;
+    SettingSpan     name;
+    bool            quoted, named = false;
+    SettingsVerdict ignored = SETTINGS_OK;
+    while (SettingWord(path, &at, &name, &quoted, &ignored)) {
+        if (quoted || !SettingsDeclaredChild(bytes, size, parent, name, out)) return false;
+        parent = out->Line;
+        named  = true;
+    }
+    return named && ignored == SETTINGS_OK;
 }
 
 /* ── names near each other ───────────────────────────────────────────────── */
@@ -561,18 +797,20 @@ static inline uint32_t SettingDistance(SettingSpan a, SettingSpan b)
     return previous[b.Length];
 }
 
-/* The declared setting whose name is nearest `name`, when one is near enough
- * to be what was meant: at most two edits, and fewer than the name is long. */
-static inline bool SettingsDeclaredNearest(const uint8_t *bytes, uint64_t size, SettingSpan name, Setting *out)
+/* The setting inside `parent` (0: the top) whose name is nearest `name`,
+ * when one is near enough to be what was meant: at most two edits, and fewer
+ * than the name is long. */
+static inline bool SettingsDeclaredNearest(const uint8_t *bytes, uint64_t size, uint32_t parent, SettingSpan name,
+                                           Setting *out)
 {
     SettingsDeclared declared;
     SettingsVerdict  verdict;
     Setting          setting;
-    uint32_t         best = 3;
+    uint32_t         best  = 3;
     bool             found = false;
     if (SettingsDeclaredBegin(bytes, size, &declared) != SETTINGS_OK) return false;
-    while (SettingsDeclaredNext(&declared, &setting, &verdict)) {
-        if (verdict != SETTINGS_OK) continue;
+    while (SettingsDeclaredStep(&declared, &setting, &verdict, false)) {
+        if (verdict != SETTINGS_OK || setting.Parent != parent) continue;
         uint32_t distance = SettingDistance(name, setting.Name);
         if (distance < best && distance < name.Length) {
             best  = distance;
@@ -583,137 +821,45 @@ static inline bool SettingsDeclaredNearest(const uint8_t *bytes, uint64_t size, 
     return found;
 }
 
-/* ── the person's file ───────────────────────────────────────────────────── */
-
-typedef enum {
-    SETTINGS_LINE_BLANK = 0,
-    SETTINGS_LINE_COMMENT,
-    SETTINGS_LINE_HEAD,         /* settings N: Value is N */
-    SETTINGS_LINE_SET,          /* NAME VALUE */
-    SETTINGS_LINE_WHEN,         /* when TAGS NAME VALUE: passed over by this version */
-    SETTINGS_LINE_NOT_TEXT      /* a byte below a blank but a tab, or DEL */
-} SettingsLineKind;
-
-typedef struct {
-    SettingsLineKind Kind;
-    SettingSpan      Whole;     /* the line as it stands, its CR and LF aside */
-    SettingSpan      Name;      /* SET */
-    SettingSpan      Value;     /* SET: its blanks at both ends and its quotes taken off; HEAD: N */
-    bool             Quoted;    /* SET: the value was between double quotes */
-    bool             Default;   /* SET: the bare word default — the program's own value */
-    uint32_t         Line;      /* from 1 */
-    uint64_t         Start;     /* where the line starts in the file */
-    uint64_t         End;       /* where the next one starts */
-} SettingsLine;
-
-typedef struct {
-    const uint8_t *Bytes;
-    uint64_t       Size;
-    uint64_t       At;
-    uint32_t       Line;
-} SettingsChosen;
-
-static inline void SettingsChosenBegin(const uint8_t *bytes, uint64_t size, SettingsChosen *out)
+/* The first setting called `name` anywhere in the tree: where a line meant
+ * for it belongs when it stands where nothing has that name. */
+static inline bool SettingsDeclaredSomewhere(const uint8_t *bytes, uint64_t size, SettingSpan name, Setting *out)
 {
-    out->Bytes = bytes;
-    out->Size  = size;
-    out->At    = 0;
-    out->Line  = 0;
-}
-
-/* A value as the rest of a line gives it: blanks at both ends taken off; text
- * between double quotes as it stands; the bare word default. */
-static inline SettingSpan SettingsValueOf(SettingSpan rest, bool *quoted, bool *is_default)
-{
-    while (rest.Length > 0 && SettingBlank(rest.At[0])) {
-        rest.At++;
-        rest.Length--;
-    }
-    while (rest.Length > 0 && SettingBlank(rest.At[rest.Length - 1])) rest.Length--;
-    *is_default = SettingSpanIs(rest, "default");
-    *quoted     = rest.Length >= 2 && rest.At[0] == '"' && rest.At[rest.Length - 1] == '"';
-    if (*quoted) {
-        rest.At++;
-        rest.Length -= 2;
-    }
-    return rest;
-}
-
-/* The next line of the person's file, whatever it says. */
-static inline bool SettingsChosenNext(SettingsChosen *chosen, SettingsLine *out)
-{
-    uint64_t    start = chosen->At;
-    SettingSpan line;
-    if (!SettingLine(chosen->Bytes, chosen->Size, &chosen->At, &line, &chosen->Line)) return false;
-
-    *out = (SettingsLine){ SETTINGS_LINE_BLANK, line, { line.At, 0 }, { line.At, 0 }, false, false, chosen->Line,
-                           start, chosen->At };
-    if (!SettingTextUsable(line)) {
-        out->Kind = SETTINGS_LINE_NOT_TEXT;
-        return true;
-    }
-    uint64_t at = 0;
-    while (at < line.Length && SettingBlank(line.At[at])) at++;
-    if (at == line.Length) return true;
-    if (line.At[at] == '#') {
-        out->Kind = SETTINGS_LINE_COMMENT;
-        return true;
-    }
-
-    uint64_t name_at = at;
-    while (at < line.Length && !SettingBlank(line.At[at])) at++;
-    SettingSpan first = { line.At + name_at, at - name_at };
-    SettingSpan rest  = { line.At + at, line.Length - at };
-    if (SettingSpanIs(first, "settings")) {
-        bool quoted, is_default;
-        out->Kind  = SETTINGS_LINE_HEAD;
-        out->Value = SettingsValueOf(rest, &quoted, &is_default);
-    } else if (SettingSpanIs(first, "when")) {
-        out->Kind = SETTINGS_LINE_WHEN;
-    } else {
-        out->Kind  = SETTINGS_LINE_SET;
-        out->Name  = first;
-        out->Value = SettingsValueOf(rest, &out->Quoted, &out->Default);
-    }
-    return true;
-}
-
-/* The line of the person's file that sets `name` — the last one, as the last
- * one is what counts. With none, *out is a blank line numbered 0, which no
- * line of a file is. */
-static inline bool SettingsChosenFind(const uint8_t *bytes, uint64_t size, SettingSpan name, SettingsLine *out)
-{
-    SettingsChosen chosen;
-    SettingsLine   line;
-    bool           found = false;
-    out->Kind = SETTINGS_LINE_BLANK;
-    out->Line = 0;
-    SettingsChosenBegin(bytes, size, &chosen);
-    while (SettingsChosenNext(&chosen, &line)) {
-        if (line.Kind == SETTINGS_LINE_SET && SettingSpanSame(line.Name, name)) {
-            *out  = line;
-            found = true;
-        }
-    }
-    return found;
+    SettingsDeclared declared;
+    SettingsVerdict  verdict;
+    if (SettingsDeclaredBegin(bytes, size, &declared) != SETTINGS_OK) return false;
+    while (SettingsDeclaredStep(&declared, out, &verdict, false))
+        if (verdict == SETTINGS_OK && SettingSpanSame(out->Name, name)) return true;
+    return false;
 }
 
 /* ── words for a verdict ─────────────────────────────────────────────────── */
 
-/* Why a declaration or a setting line is refused, said so it follows the
- * setting's name or "line N: "; a value's verdict as it follows the value. */
+/* Why a line of the declaration is refused, said so it follows "the setting
+ * NAME" or "line N"; why a line of the person's file is not taken, said so
+ * it follows "line N"; a value's verdict, said so it follows the value. */
 static inline const char *SettingsVerdictText(SettingsVerdict verdict)
 {
     switch (verdict) {
     case SETTINGS_OK:                 return "it holds";
     case SETTINGS_NOT_TEXT:           return "is not text: it holds a byte below a blank other than a newline";
     case SETTINGS_NO_HEAD:            return "does not begin with the line \"settings 1\"";
+    case SETTING_INDENT_BAD:          return "is indented unlike the lines beside it";
+    case SETTING_TOO_DEEP:            return "stands deeper than 8 levels of things inside things";
+    case SETTING_INSIDE_UNTAKEN:      return "stands inside a line that is not taken";
+    case SETTING_NOT_THERE:           return "names a setting there is none of there";
+    case SETTING_CONTEXT_BAD:         return "is no context: tags between [ and ], at least one, none twice, "
+                                             "nothing after the ]";
+    case SETTING_CONTEXT_INSIDE:      return "is a context inside another line: a [ ] line stands at the top";
+    case SETTING_CONTEXT_EMPTY:       return "holds nothing: the lines for that context go below it, indented";
     case SETTING_LINE_UNREAD:         return "cannot be read: a quote is not closed, or not followed by a blank";
     case SETTING_NAME_BAD:            return "has a name a setting cannot have: a small letter, then small "
-                                             "letters, digits and -, at most 32, not settings, when or default";
-    case SETTING_NAME_TWICE:          return "is declared twice";
+                                             "letters, digits and -, at most 32, not settings or default";
+    case SETTING_NAME_TWICE:          return "is declared twice in one place";
+    case SETTING_HOLDS_NOTHING:       return "holds nothing: what it holds goes below it, indented";
     case SETTING_KIND_UNKNOWN:        return "is of a kind this reader does not know";
-    case SETTING_LIMITS_BAD:          return "does not say from and to as two whole numbers, the smaller first";
+    case SETTING_LIMITS_BAD:          return "does not say from and to as two whole numbers, the smaller first "
+                                             "(and from 1 or more with or off)";
     case SETTING_UNIT_BAD:            return "has a unit that is not a word of letters";
     case SETTING_CHOICES_BAD:         return "does not have two or more different words to choose from";
     case SETTING_NO_DEFAULT:          return "has no default";
@@ -721,13 +867,13 @@ static inline const char *SettingsVerdictText(SettingsVerdict verdict)
     case SETTING_WHAT_MISSING:        return "does not say what it does, in double quotes, last";
     case SETTING_WORDS_AFTER:         return "has words after what it does";
     case SETTING_VALUE_EMPTY:         return "is empty";
-    case SETTING_VALUE_NOT_YES_OR_NO: return "is not yes or no";
+    case SETTING_VALUE_NOT_ON_OR_OFF: return "is not on or off";
     case SETTING_VALUE_NOT_NUMBER:    return "is not a whole number";
     case SETTING_VALUE_OUTSIDE:       return "is outside its limits";
     case SETTING_VALUE_NOT_WORD:      return "is not one word";
     case SETTING_VALUE_NOT_TEXT:      return "is not text";
     case SETTING_VALUE_NOT_CHOICE:    return "is not one of its choices";
-    case SETTING_VALUE_NOT_COLOR:     return "is not a colour written #RRGGBB";
+    case SETTING_VALUE_NOT_COLOR:     return "is not a color: a name such as amber, or #RRGGBB";
     }
     return "is refused";
 }

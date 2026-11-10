@@ -50,7 +50,7 @@ const int *const fixed[] = { &counter };
 __thread int local = 7;
 __thread char space[64];
 __attribute__((section(".boxos.settings"), used)) static const char settings[] =
-    "settings 1\nsetting look one-of dark light default dark \"how the page looks\"\n";
+    "settings 1\nlook one-of dark light default dark \"how the page looks\"\n";
 __attribute__((section(".boxos.life"), used)) static const char life[] = "life 1\nstays\nrise\n";
 int helper(int x) { return x + counter + local + space[x & 63] + *fixed[0]; }
 const char **said(void) { return &greeting; }
@@ -82,7 +82,7 @@ $LD_CROSS $LINK -pie -z pack-relative-relocs -T $LIB/user.ld "$WORK/tlsptr.o" -o
 
 # A static PIE whose settings declare one with no default: a setting no
 # program could have, refused at the build.
-printf '__attribute__((section(".boxos.settings"), used)) static const char s[] =\n    "settings 1\\nsetting look one-of dark light \\"how it looks\\"\\n";\nvoid _start(void) { for (;;) { } }\n' \
+printf '__attribute__((section(".boxos.settings"), used)) static const char s[] =\n    "settings 1\\nlook one-of dark light \\"how it looks\\"\\n";\nvoid _start(void) { for (;;) { } }\n' \
     > "$WORK/badsettings.c"
 $CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/badsettings.c" -o "$WORK/badsettings.o" > "$WORK/cc.log" 2>&1 &&
 $LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/badsettings.o" -o "$WORK/badsettings.elf" > "$WORK/ld.log" 2>&1 ||
