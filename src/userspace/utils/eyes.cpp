@@ -2,7 +2,11 @@
  *
  *   eyes                    in the bottom right corner
  *   eyes top left           top, bottom, left, right, middle, in any pair
- *   q, ESC                  leave; the eyes close and are gone
+ *   finish eyes             they close and are gone
+ *
+ * They live on by themselves, as the clock does (box/life.h stays): whoever
+ * starts them gets the prompt back at once, and they stay in their corner,
+ * seen over whatever the screen shows — a notice, not a window.
  *
  * There is no pointer to follow, so they look where they please: a glance
  * and a while held there, now and then a look round, a roll of the eyes, a
@@ -15,23 +19,25 @@
  * once over whatever was written on them. */
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
-#include <format>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "box/clock.h"
 #include "box/cpu.h"
 #include "box/form.h"
+#include "box/life.h"
 #include "box/print.h"
 
 #include "painter/core/color.h"
 #include "painter/tui/glyph.h"
-#include "painter/tui/keyboard.h"
 #include "painter/tui/surface.h"
 
 BOX_FORM("takes optional words \"where they stand: top, bottom, left, right or middle; bottom right if none\"\n");
+BOX_LIFE("stays");
 
 namespace {
 
@@ -91,8 +97,7 @@ public:
     bool Step(float Seconds);
     const Look &Eye(int Which) const { return Now[Which]; }
 
-    int   Blinks = 0;
-    PainterColor Iris   = Irises[0];
+    PainterColor Iris = Irises[0];
 
 private:
     void Next();
@@ -194,7 +199,6 @@ bool Pair::Step(float Seconds)
         Blinking = 0;
         Winking  = Unit() < 0.08f ? static_cast<int>(Unit() * 2) : -1;
         ToBlink  = Between(2.0f, 6.5f);
-        Blinks++;
     }
     for (Look &One : Now) One.Shut = 0;
     if (Blinking >= 0) {
@@ -335,7 +339,7 @@ int main()
     if (form_words(0, &Words, &Count) != 0) return 1;
 
     std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open(30, 10);
+        painter::tui::Surface::Open(30, 10, painter::tui::SurfaceRole::Notice);
     if (!Opened) {
         Say(Opened.error().Describe("eyes"));
         return 1;
@@ -346,22 +350,15 @@ int main()
     Picture.Size(Dimensions.Height >= 40 && Dimensions.Width >= 120 ? 2 : 1);
     Place At = Where(Words, Count, Dimensions.Width, Dimensions.Height, Picture.Width, (Picture.Height + 1) / 2);
 
-    std::expected<painter::tui::Keyboard, painter::tui::StageError> Input = painter::tui::Keyboard::Open();
-    if (!Input) {
-        Say(Input.error().Describe("eyes"));
-        return 1;
-    }
-    painter::tui::Keyboard Keys = std::move(*Input);
     std::expected<painter::tui::Frame, box::error> Created =
         painter::tui::Frame::Create({Picture.Width, (Picture.Height + 1) / 2});
-    if (!Created) {
-        (void)Keys.Close();
-        return 1;
-    }
+    if (!Created) return 1;
     painter::tui::Frame Overlay = std::move(*Created);
     Pair Eyes;
     Eyes.Begin();
 
+    // Painted until they can be no more — the display gone, or the eyes
+    // ended: nothing but their end stops them.
     std::uint64_t Last = clock_uptime_us();
     for (;;) {
         std::uint64_t Now    = clock_uptime_us();
@@ -369,17 +366,8 @@ int main()
         Last = Now;
         Picture.Draw(Eyes);
         if (!Paint(Picture, Screen, Overlay, At)) break;
-
-        painter::tui::Event Event = Keys.Wait(Moving ? MovingMs : StillMs);
-        if (Event.Kind == painter::tui::EventKind::Gone) break;
-        if (Event.Kind == painter::tui::EventKind::Key && !Event.Key.IsExtended() &&
-            (Event.Key.Ascii == 'q' || Event.Key.Ascii == 'Q' ||
-             Event.Key.Ascii == painter::tui::KeyCodes::Escape))
-            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(Moving ? MovingMs : StillMs));
     }
-    (void)Keys.Close();
-    (void)Screen.Clear();
     (void)Screen.Close();
-    Say(std::format("[EYES] {} blink{}", Eyes.Blinks, Eyes.Blinks == 1 ? "" : "s"));
-    return 0;
+    return 1;
 }
