@@ -23,9 +23,10 @@ bool FrontKeeper(const AskFrom &From) noexcept;
 void FrontAsked(const Result &Asked, const AskFrom &From, const DisplayFrontRequest &Request) noexcept;
 
 // DISP_CMD_KEYS, asked of this display (Asked) by the keeper From names, its
-// keys the Count chords: answered here, a refusal too.
-void FrontKeysAsked(const Result &Asked, const AskFrom &From, const KeyChord *Chords,
-                    std::uint32_t Count) noexcept;
+// keys the Count chords, the first OnScreen about the program on the screen:
+// answered here, a refusal too.
+void FrontKeysAsked(const Result &Asked, const AskFrom &From, const KeyChord *Chords, std::uint32_t Count,
+                    std::uint32_t OnScreen) noexcept;
 
 // A key the keyboard said: true when it is one of the keys a keeper said —
 // told to the keeper whose screen is shown, and taken, never typed.

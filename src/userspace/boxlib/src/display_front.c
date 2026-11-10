@@ -59,13 +59,13 @@ int display_page(uint32_t text, uint32_t page, uint32_t *display)
     return reply.error == OK ? OK : -reply.error;
 }
 
-int display_keys(const KeyChord *keys, uint32_t count, uint32_t *display)
+int display_keys(const KeyChord *keys, uint32_t count, uint32_t on_screen, uint32_t *display)
 {
     uint8_t            question[sizeof(DisplayKeysRequest) + 255u * sizeof(KeyChord)];
-    DisplayKeysRequest head = { DISP_CMD_KEYS, (uint8_t)count, { 0, 0 } };
+    DisplayKeysRequest head = { DISP_CMD_KEYS, (uint8_t)count, (uint8_t)on_screen, 0 };
     DisplayFrontReply  reply;
     uint32_t           got = 0;
-    if (count > 255u || (count && !keys)) return -ERR_INVALID_ARGUMENT;
+    if (count > 255u || on_screen > count || (count && !keys)) return -ERR_INVALID_ARGUMENT;
     memcpy(question, &head, sizeof(head));
     if (count) memcpy(question + sizeof(head), keys, count * sizeof(KeyChord));
     int rc = ask(DISPLAY_TAG, question, (uint32_t)(sizeof(head) + count * sizeof(KeyChord)), &reply, sizeof(reply),

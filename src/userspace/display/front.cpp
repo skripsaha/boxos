@@ -10,7 +10,9 @@
  * on are its own word, kept in a stack too, the newest on top; one pressed is
  * told to the keeper whose screen is shown — the keeper on top of who keeps
  * whom, about the program it keeps there, or that program itself when it is
- * a keeper with nothing of its own in front.
+ * a keeper with nothing of its own in front. A key the keeper said is about
+ * the program on the screen goes to whoever keeps that program even then: a
+ * hub on the screen is stopped, or let go, by the hub that started it.
  *
  * A keeper that ends leaves what it kept behind behind: given to the keeper
  * that kept it, or, with none, to the next keeper that says its keys — so a
@@ -72,10 +74,12 @@ struct Behind {
     bool    Told = false;   // its keeper heard that it wants the keyboard
 };
 
-// The keys a keeper said it acts on, in the order it told them.
+// The keys a keeper said it acts on, in the order it told them; the first
+// OnScreen about the program on the screen.
 struct Keys {
     Program               Keeper;
     std::vector<KeyChord> Chords;
+    std::uint32_t         OnScreen = 0;
 };
 
 std::vector<Started> g_started;
@@ -193,10 +197,15 @@ void FrontAsked(const Result &Asked, const AskFrom &From, const DisplayFrontRequ
     Reply(Asked, Request.command, OK, false);
 }
 
-void FrontKeysAsked(const Result &Asked, const AskFrom &From, const KeyChord *Chords, std::uint32_t Count) noexcept
+void FrontKeysAsked(const Result &Asked, const AskFrom &From, const KeyChord *Chords, std::uint32_t Count,
+                    std::uint32_t OnScreen) noexcept
 {
     if (!FrontKeeper(From)) {
         Reply(Asked, DISP_CMD_KEYS, ERR_ACCESS_DENIED, false);
+        return;
+    }
+    if (OnScreen > Count) {
+        Reply(Asked, DISP_CMD_KEYS, ERR_INVALID_ARGUMENT, false);
         return;
     }
     // A key alone, or with shift alone, is typing: never taken from everybody.
@@ -209,7 +218,7 @@ void FrontKeysAsked(const Result &Asked, const AskFrom &From, const KeyChord *Ch
     }
     const Program Keeper{From.program_pid, From.program_generation};
     try {
-        Keys Said{Keeper, std::vector<KeyChord>(Chords, Chords + Count)};
+        Keys Said{Keeper, std::vector<KeyChord>(Chords, Chords + Count), OnScreen};
         g_keys.reserve(g_keys.size() + 1);
         std::erase_if(g_keys, [&](const Keys &One) { return One.Keeper == Keeper; });
         if (Count > 0) g_keys.push_back(std::move(Said));
@@ -234,16 +243,19 @@ bool FrontChord(const kb_event_t &Key) noexcept
     std::size_t                  Place  = 0;
     while (Place < Chords.size() && !KeyChordMatches(&Chords[Place], &Key)) Place++;
     if (Place == Chords.size()) return false;
-    const auto Which = static_cast<std::uint8_t>(Place);
-    const auto Keeps = [](const Program &One) {
+    const auto Which    = static_cast<std::uint8_t>(Place);
+    const bool OnScreen = Place < g_keys.back().OnScreen;
+    const auto Keeps    = [](const Program &One) {
         return std::any_of(g_keys.begin(), g_keys.end(), [&](const Keys &Said) { return Said.Keeper == One; });
     };
-    // The keeper whose screen is shown: on top of who keeps whom, unless what
-    // it keeps there keeps others itself — then that one, its own screen.
+    // A key about the program on the screen: to whoever keeps it, keeper or
+    // not. Any other: to the keeper whose screen is shown — on top of who
+    // keeps whom, unless what it keeps there keeps others itself, then that
+    // one, its own screen.
     FrontSpawnStep();
     for (auto Top = g_front.rbegin(); Top != g_front.rend(); ++Top) {
         if (HeldBehind(Top->Front)) continue;
-        if (Keeps(Top->Front)) Tell(Top->Front, DISPLAY_FRONT_KEY, Program{}, Which);
+        if (!OnScreen && Keeps(Top->Front)) Tell(Top->Front, DISPLAY_FRONT_KEY, Program{}, Which);
         else Tell(Top->Keeper, DISPLAY_FRONT_KEY, Top->Front, Which);
         return true;
     }

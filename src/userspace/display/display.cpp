@@ -369,7 +369,7 @@ void HearQuestion(const Result &Entry)
         }
         KeyChord Chords[255];
         std::memcpy(Chords, Question + sizeof(Head), Head.count * sizeof(KeyChord));
-        FrontKeysAsked(Entry, From, Chords, Head.count);
+        FrontKeysAsked(Entry, From, Chords, Head.count, Head.on_screen);
         return;
     }
     case DISP_CMD_PAGE: {

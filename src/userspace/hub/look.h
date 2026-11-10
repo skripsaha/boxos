@@ -22,7 +22,9 @@ enum class BehindShown { Prompt, Line, Nowhere };
 enum class BehindOrder { NewestFirst, OldestFirst, LastShown };
 
 // The keys the hub acts on over every program, in the order the display is
-// told them and tells them back (box/display.h DISP_CMD_KEYS).
+// told them and tells them back (box/display.h DISP_CMD_KEYS). Those before
+// next are about the program on the screen — a hub on it too, which the hub
+// that started it stops or lets go; next is about this hub's own circle.
 enum HubKey : std::uint8_t { KeyStop, KeyLetGo, KeyNext, KeyCount };
 
 struct Look {

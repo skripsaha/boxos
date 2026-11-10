@@ -200,7 +200,11 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
  *   DISP_CMD_KEYS      a DisplayKeysRequest and its KeyChords: the keys this
  *                      keeper acts on, from now on — each held with ctrl or
  *                      alt, else -ERR_INVALID_ARGUMENT; none takes its keys
- *                      back
+ *                      back. The first on_screen of them are about the
+ *                      program on the screen, and told to whoever keeps it
+ *                      even when it is a keeper itself — a hub started from
+ *                      a hub is stopped by the one that started it; the rest
+ *                      to the keeper whose screen is shown
  *
  * What the display tells a keeper is a Touch on DISPLAY_FRONT_TAG, a
  * DisplayFrontNews, sent by the display (source_pid the reply's display_pid):
@@ -246,7 +250,8 @@ typedef struct PACKED {
 typedef struct PACKED {
     uint8_t command;            /* DISP_CMD_KEYS */
     uint8_t count;              /* the KeyChords that follow, in the order told back */
-    uint8_t reserved[2];
+    uint8_t on_screen;          /* the first of them are about the program on the screen */
+    uint8_t reserved;
 } DisplayKeysRequest;
 
 typedef struct PACKED {
@@ -282,8 +287,9 @@ int display_ask_end(uint32_t pid, uint32_t generation);
 int display_page(uint32_t text, uint32_t page, uint32_t *display);
 
 /* The keys the asking keeper acts on, at most 255: told back by their place
- * in `keys` (DISPLAY_FRONT_KEY). 0 takes them back. *display as above. */
-int display_keys(const KeyChord *keys, uint32_t count, uint32_t *display);
+ * in `keys` (DISPLAY_FRONT_KEY), the first `on_screen` about the program on
+ * the screen (DISP_CMD_KEYS). 0 takes them back. *display as above. */
+int display_keys(const KeyChord *keys, uint32_t count, uint32_t on_screen, uint32_t *display);
 
 /* A word of the display on a lane's own tag, in place of a key — told from a
  * key, which is a kb_event_t of three bytes, by its length and its mark. */

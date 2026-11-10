@@ -610,7 +610,7 @@ bool Jobs::TellKeys()
         std::copy(std::begin(Seen.Keys), std::end(Seen.Keys), Keys);
     }
     std::uint32_t Display = 0;
-    Kept(display_keys(Keys, KeyCount, &Display), Display);
+    Kept(display_keys(Keys, KeyCount, KeyNext, &Display), Display);
     return true;
 }
 
