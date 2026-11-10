@@ -11,7 +11,6 @@
 #include "klib.h"
 #include "proc_exit.h"
 #include "process.h"
-#include "system_halt.h"
 #include "touch_queue.h"
 #include "vmm.h"
 
@@ -45,6 +44,7 @@ static spinlock_t     g_lock;   /* every Riser, and the node's arming — taken 
 static Riser         *g_risers;
 static TouchQueueNode g_due;    /* the touch queue's call at the earliest raise owed */
 static Knock          g_door;   /* the call's knock: a K-Core starts the raise */
+static volatile bool  g_halting; /* the machine is going off: nothing is raised */
 
 static Riser *RiserOfFile(uint64_t file)
 {
@@ -98,6 +98,10 @@ static void RiseRun(void *ctx)
     for (;;) {
         uint64_t file = 0;
         spin_lock(&g_lock);
+        if (__atomic_load_n(&g_halting, __ATOMIC_ACQUIRE)) {
+            spin_unlock(&g_lock);
+            return;
+        }
         const uint64_t now = kernel_tick_get();
         for (Riser *r = g_risers; r && file == 0; r = r->next) {
             if (r->due == 0 || r->due > now) continue;
@@ -129,6 +133,14 @@ static void RiseRun(void *ctx)
             process_ref_dec(proc);
         }
     }
+}
+
+void RiseHalt(void)
+{
+    spin_lock(&g_lock);
+    __atomic_store_n(&g_halting, true, __ATOMIC_RELEASE);
+    TouchQueueDisarm(&g_due);
+    spin_unlock(&g_lock);
 }
 
 void RiseInit(void)
@@ -184,7 +196,7 @@ void RiseProgramEnded(uint32_t pid, uint32_t generation, int32_t disposition)
 {
     /* The machine is going off: its programs are ended by the halt's sweep,
      * and no end of one is a fall. */
-    if (__atomic_load_n(&g_halt_orderly, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_load_n(&g_halting, __ATOMIC_ACQUIRE)) return;
     const bool fell = disposition == PROC_EXIT_CRASHED || disposition == PROC_EXIT_STACK_OVERFLOW;
     Riser     *gone = NULL;
 

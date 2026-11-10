@@ -29,7 +29,7 @@
 #include "nameplate.h"        /* nameplate_name_at_kernel — name a stuck continuation */
 #include "nameplate_format.h" /* NameplateHeader — the table's own minimum size */
 #include "vmm.h"              /* vmm_tlb_shootdown_poll — the roll call answers by hand */
-
+#include "rise.h"             /* RiseHalt — from the sweep on, no end is a fall */
 /* WHOSE deadline may judge a drain that has stopped moving — decided on the
  * machine in front of us, from what is actually holding the un-drained work.
  *
@@ -1074,6 +1074,7 @@ static void HaltMachine(bool reboot)
     WireForceRelease();
     WireDrain();
 
+    RiseHalt();
     halt_terminate_all_processes();
     WireForceRelease();
     WireDrain();

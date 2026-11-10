@@ -185,7 +185,9 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
 #define DISP_CMD_BACK      0x51
 #define DISP_CMD_ASK_END   0x52
 
-#define DISPLAY_FRONT_TAG  "display:front"
+/* An occurrence the kernel's muster books (touch/muster.h): it stands on any
+ * volume, whatever its tags, and never takes a name of a volume's. */
+#define DISPLAY_FRONT_TAG  "keeper:news"
 
 typedef enum {
     DISPLAY_FRONT_END    = 1,   /* end the program in front */

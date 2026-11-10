@@ -24,9 +24,13 @@ namespace hub {
 
 namespace {
 
-// The tag a hub's prompt wakes its keeping strand on: one for every hub, the
-// payload the pid of the hub it is for.
-constexpr const char *WakeTagName = "hub:wake";
+// The tags a hub's two strands wake each other on — the keeping strand on
+// keeper:wake, the prompt's on keeper:settled — the payload the pid of the hub
+// it is for. Two, for a Touch tag is claimed once by a program and heard by
+// the strand that claimed it first. Occurrences the kernel's muster books, so
+// they stand on any volume and take none of a volume's names.
+constexpr const char *WakeTagName    = "keeper:wake";
+constexpr const char *SettledTagName = "keeper:settled";
 
 // What of what a program gave back is kept as `them`: the file its screen
 // went into, or its Souvenir when it was asked for and could be read off.
@@ -42,14 +46,21 @@ std::optional<std::vector<file_id_t>> KeptOf(const Start &What, bool Collected, 
 bool Jobs::Begin(const Look &Shown)
 {
     Seen    = Shown;
-    WakeTag = touch_intern(WakeTagName);
+    WakeTag    = touch_intern(WakeTagName);
+    SettledTag = touch_intern(SettledTagName);
+    Woken      = touch_pair_choose(WakeTag);
+    Settling   = touch_pair_choose(SettledTag);
+    // The prompt's strand hears keeper:settled before the keeping strand can say it.
+    if (Settling == TOUCH_TAG_INVALID || touch_claim(Settling, TOUCH_REST, 0, 0) != 0) {
+        Say("hub: keeper:settled cannot be heard; nothing can be started\n");
+        return false;
+    }
     bool Ready = false, Heard = false;
     try {
         Keeper = std::thread([this, &Ready, &Heard] {
             // Claimed on the keeping strand itself, before the first start:
             // no death can come before its ear.
             Deaths = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));
-            Woken  = touch_pair_choose(WakeTag);
             News   = touch_pair_choose(touch_intern(DISPLAY_FRONT_TAG));
             const bool Claimed = Deaths != TOUCH_TAG_INVALID && touch_claim(Deaths, TOUCH_REST, 0, 0) == 0 &&
                                  Woken != TOUCH_TAG_INVALID && touch_claim(Woken, TOUCH_REST, 0, 0) == 0;
@@ -60,15 +71,14 @@ bool Jobs::Begin(const Look &Shown)
                 Heard = Claimed;
                 Ready = true;
             }
-            Settle.notify_all();
+            SaySettled();
             if (Claimed) Keep();
         });
     } catch (...) {
         Say("hub: no strand could be made to keep its programs; nothing can be started\n");
         return false;
     }
-    std::unique_lock Held(Lock);
-    Settle.wait(Held, [&] { return Ready; });
+    Await([&] { return Ready; });
     if (!Heard) Say("hub: the ends of programs cannot be heard; nothing can be started\n");
     return Heard;
 }
@@ -122,6 +132,12 @@ void Jobs::Wake()
 {
     const std::uint32_t Me = cabin_info()->pid;
     (void)touch_send(WakeTag, &Me, sizeof(Me), 0);
+}
+
+void Jobs::SaySettled()
+{
+    const std::uint32_t Me = cabin_info()->pid;
+    (void)touch_send(SettledTag, &Me, sizeof(Me), 0);
 }
 
 // ---- the keeping strand ------------------------------------------------------
@@ -190,7 +206,7 @@ bool Jobs::StartAsked()
         Next->Generation = Generation;
         Next->Done       = true;
     }
-    Settle.notify_all();
+    SaySettled();
     return true;
 }
 
@@ -241,7 +257,7 @@ void Jobs::Died(const TouchProcessDied &Death)
     // prompt is told, and takes its end as that of one in front.
     if (One.Front || One.LetGo) {
         Held.unlock();
-        Settle.notify_all();
+        SaySettled();
         return;
     }
     const Job Ended = std::move(One);
@@ -338,7 +354,7 @@ void Jobs::Pressed(std::uint8_t What, std::uint32_t Pid, std::uint32_t Generatio
         std::uint32_t Display = 0;
         const int     Rc      = display_back(Pid, Generation, &Display);
         Kept(Rc, Display);
-        Settle.notify_all();
+        SaySettled();
         BehindChanged();
         return;
     }
@@ -354,6 +370,23 @@ void Jobs::Pressed(std::uint8_t What, std::uint32_t Pid, std::uint32_t Generatio
 
 // ---- what the prompt's strand asks -------------------------------------------
 
+// The prompt's strand waits until Done — looked at under the lock — says so,
+// woken on keeper:settled after every change the keeping strand makes.
+// Looked at before each wait, so a change between the look and the wait is
+// already a Touch in its ring.
+template <typename Ready>
+void Jobs::Await(Ready &&Done)
+{
+    for (;;) {
+        {
+            std::lock_guard Held(Lock);
+            if (Done()) return;
+        }
+        Touch Event{};
+        (void)touch_await(Settling, &Event, 0);
+    }
+}
+
 // A start handed to the keeping strand, and waited for until it is done.
 std::expected<void, int> Jobs::Ask(Asked &One)
 {
@@ -362,24 +395,23 @@ std::expected<void, int> Jobs::Ask(Asked &One)
         Starts.push_back(&One);
     }
     Wake();
-    std::unique_lock Held(Lock);
-    Settle.wait(Held, [&] { return One.Done; });
+    Await([&] { return One.Done; });
     if (One.Rc != 0) return std::unexpected(One.Rc);
     return {};
 }
 
 std::expected<Settled, int> Jobs::StandBy(std::uint32_t Pid, std::uint32_t Generation)
 {
-    std::unique_lock Held(Lock);
-    const auto       Find = [&] {
+    const auto Find = [&] {
         return std::find_if(Running.begin(), Running.end(),
                             [&](const Job &One) { return One.Pid == Pid && One.Generation == Generation; });
     };
-    Settle.wait(Held, [&] {
+    Await([&] {
         const auto It = Find();
         return It == Running.end() || It->Over || It->LetGo;
     });
-    const auto It = Find();
+    std::lock_guard Held(Lock);
+    const auto      It = Find();
     if (It == Running.end()) return std::unexpected(-ERR_PROCESS_NOT_FOUND);
     // An end comes first: one let go that ended before the prompt looked has
     // ended, and is not said to live on.

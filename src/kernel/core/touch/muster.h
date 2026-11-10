@@ -51,6 +51,17 @@
  * and the halt's first publish took "system" into this book all the same.
  * Nothing in the tree listens to files by "system".
  *
+ * ‼ THREE NAMES HERE ARE SPOKEN BY PROGRAMS, NOT BY THE KERNEL: keeper:*
+ *
+ * keeper:news is the display's word to whoever keeps a program in front of the
+ * person; keeper:wake and keeper:settled are the words a keeper's two strands
+ * wake each other with (box/display.h, the hub). Interned like any name, they
+ * fell through to the volume's registry: on a volume whose tag numbers are
+ * spent the display could not be kept and the hub never started (logcheck
+ * census B16, B50), and on any other they took names that are the volume's to
+ * give. Mustered, they stand on every volume. Their key is no file's, so
+ * nothing a volume's files are watched by is taken here.
+ *
  * Keep it sorted. It is read by people.
  */
 #define TOUCH_KERNEL_MUSTER(X)          \
@@ -85,6 +96,9 @@
     X("iommu:domain:attached")          \
     X("iommu:fault")                    \
     X("iommu:ready")                    \
+    X("keeper:news")                    \
+    X("keeper:settled")                 \
+    X("keeper:wake")                    \
     X("keyboard")                       \
     X("mce:fault:detected")             \
     X("mce:fault:fatal")                \

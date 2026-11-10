@@ -11,13 +11,16 @@
  * behind and gives the person back the prompt, and a program behind asking
  * for the keyboard is said. What becomes of a program behind is said when it
  * happens, and the display keeps the line being typed under it. The prompt's
- * strand only asks — start this, bring that forward — waking the keeping
- * strand on hub:wake, and stands by while a program is in front. */
+ * strand only asks — start this, bring that forward — and stands by while a
+ * program is in front. Each wakes the other on a tag of its own (keeper:wake,
+ * keeper:settled): a strand that waits on its Touch keeps every other event
+ * that comes for it — the history's growth, a settings file saved — in its
+ * stash for its reader, where a strand asleep on anything else would leave
+ * them unread. */
 #ifndef HUB_JOBS_H
 #define HUB_JOBS_H
 
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <expected>
@@ -130,6 +133,7 @@ private:
     void BehindChanged();
     bool DrawBehind();
     void Wake();
+    void SaySettled();
     std::vector<BehindNow> LivingNow(bool WithServing) const;
     bool StartAsked();
     bool HearDeaths();
@@ -140,21 +144,23 @@ private:
     void Rekeep();
     void Kept(int Rc, std::uint32_t Display);
     std::expected<void, int> Ask(Asked &One);
+    template <typename Ready> void Await(Ready &&Done);
     std::expected<Settled, int> StandBy(std::uint32_t Pid, std::uint32_t Generation);
 
     std::thread                           Keeper;
     std::atomic<bool>                     Stopping{false};
     Look                                  Seen{};   // the keeping strand's own copy
     mutable std::mutex                    Lock;     // all of the below
-    std::condition_variable               Settle;
     std::vector<Job>                      Running;
     std::deque<Asked *>                   Starts;
     std::optional<std::vector<file_id_t>> Gift;
     bool                                  BehindStale = false;   // the line of who lives behind is old
     TouchTag                              Deaths = TOUCH_TAG_INVALID;
     TouchTag                              News = TOUCH_TAG_INVALID;
-    TouchTag                              Woken = TOUCH_TAG_INVALID;
+    TouchTag                              Woken = TOUCH_TAG_INVALID;      // the keeping strand's ear
+    TouchTag                              Settling = TOUCH_TAG_INVALID;   // the prompt's strand's
     TouchTagPair                          WakeTag{};
+    TouchTagPair                          SettledTag{};
     std::uint32_t                         DisplayPid = 0;   // who says the display's news
 };
 

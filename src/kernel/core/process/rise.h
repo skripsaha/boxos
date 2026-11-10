@@ -40,4 +40,8 @@ void RiseWatch(struct process_t *proc, uint64_t file, const char *name);
  * callable wherever a program ends. */
 void RiseProgramEnded(uint32_t pid, uint32_t generation, int32_t disposition);
 
+/* The machine is going off (system_halt.c, before its sweep ends every
+ * program): no end from here on is a fall, and nothing is raised again. */
+void RiseHalt(void);
+
 #endif /* RISE_H */
