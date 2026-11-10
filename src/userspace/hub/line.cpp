@@ -42,9 +42,17 @@ bool RunProgram(Hub &Self, const Words &Cut)
         SayIn(Self.Shown.RefusalColor, "{}: is there and would not start\n", Name);
         return false;
     }
+    // What is guessed is offered to the next line only when this one was
+    // typed at the prompt: a step of an Itinerary has no next line typed.
     std::string Said = "Unknown command: " + std::string(Name);
-    if (Self.Shown.DidYouMean)
-        if (const std::optional<std::string> Close = nearest::For(Name)) Said += "\n" + *Close;
+    if (Self.Shown.DidYouMean) {
+        nearest::Guess Guessed{nearest::Names(Name), std::string(Cut.Tail(1))};
+        const bool     Offered = !Self.Travelling.Travels();
+        if (!Guessed.Names.empty()) {
+            Said += "\n" + nearest::Said(Guessed, Offered);
+            if (Offered) Self.Guessed = std::move(Guessed);
+        }
+    }
     SayIn(Self.Shown.RefusalColor, Said + "\n");
     return false;
 }

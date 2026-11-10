@@ -5,7 +5,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
-#include <vector>
+#include <utility>
 
 #include "box/memory.h"
 #include "box/print.h"
@@ -37,12 +37,25 @@ void SayUnkept(const Hub &Self, const History::Unkept &Why)
 }
 
 // The line typed at the prompt: kept, run, how long it took said when it took
-// long, and what the history could not keep said last.
+// long, and what the history could not keep said last. Right after a command
+// was not found, `yes` stands for the name guessed for it and the rest of that
+// line: that is what is said, kept and run; `yes` alone of several names is
+// asked which, and offered again.
 void Typed(Hub &Self, std::string_view Line, std::string_view Context)
 {
-    const std::optional<History::Unkept> Unkept = Self.Lines.Keep(Line, Context, Self.Shown.History);
+    const std::optional<nearest::Guess> Guessed = std::exchange(Self.Guessed, std::nullopt);
+    const nearest::Answer               Answer  = Guessed ? nearest::Answered(*Guessed, Line) : nearest::Answer{};
+    if (Answer.Is == nearest::Answer::Kind::Which) {
+        SayIn(Self.Shown.NewsColor, "which one? {}\n", nearest::Said(*Guessed, true));
+        Self.Guessed = Guessed;
+        return;
+    }
+    const bool             Meant = Answer.Is == nearest::Answer::Kind::Meant;
+    const std::string_view Run   = Meant ? std::string_view(Answer.Line) : Line;
+    if (Meant) Say("{}\n", Run);
+    const std::optional<History::Unkept> Unkept = Self.Lines.Keep(Run, Context, Self.Shown.History);
     const auto                           Began  = std::chrono::steady_clock::now();
-    RunLine(Self, Line);
+    RunLine(Self, Run);
     news::Took(Self.Shown, std::chrono::steady_clock::now() - Began);
     if (Unkept) SayUnkept(Self, *Unkept);
 }

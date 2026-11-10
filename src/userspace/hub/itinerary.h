@@ -48,6 +48,8 @@ public:
     // A filler's lookup told the innermost trip's fields; none when no trip runs.
     void Show(BoxFormLookup &Lookup) const noexcept;
     bool Runs(file_id_t File) const noexcept;
+    // Whether an Itinerary runs now: the line being run is one of its steps.
+    bool Travels() const noexcept { return !Running.empty(); }
     void Begin(Trip Started) { Running.push_back(std::move(Started)); }
     void End() noexcept { Running.pop_back(); }
 

@@ -6,10 +6,13 @@
 #ifndef HUB_HUB_H
 #define HUB_HUB_H
 
+#include <optional>
+
 #include "history.h"
 #include "itinerary.h"
 #include "jobs.h"
 #include "look.h"
+#include "nearest.h"
 #include "them.h"
 
 namespace hub {
@@ -21,6 +24,7 @@ struct Hub {
     Jobs    Started;        // the programs this hub started
     Trips   Travelling;     // the Itineraries running, the innermost last
     bool    Going = true;   // false once `exit` was said
+    std::optional<nearest::Guess> Guessed;   // for the command the last line did not find, offered to the next
 };
 
 }  // namespace hub

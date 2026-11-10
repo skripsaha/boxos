@@ -7,6 +7,7 @@
 
 #include "builtins.h"
 #include "programs.h"
+#include "words.h"
 
 namespace hub::nearest {
 
@@ -55,23 +56,49 @@ struct Closest {
 
 }  // namespace
 
-std::optional<std::string> For(std::string_view Typed)
+std::vector<std::string> Names(std::string_view Typed)
 {
-    if (Typed.empty()) return std::nullopt;
+    if (Typed.empty()) return {};
     Closest Found;
     Found.Limit = Typed.size() <= Short ? 1 : 2;
     for (const Builtin &One : Builtins()) Found.Consider(Typed, One.Name);
     programs::EachCommand([&](file_id_t, std::string_view FileName) {
         Found.Consider(Typed, FileName.substr(0, programs::StemLength(FileName)));
     });
-    if (Found.Names.empty()) return std::nullopt;
+    return Found.Names;
+}
 
-    std::string Said = "did you mean ";
-    for (std::size_t I = 0; I < Found.Names.size(); I++) {
-        if (I > 0) Said += I + 1 == Found.Names.size() ? " or " : ", ";
-        Said += Found.Names[I];
+std::string Said(const Guess &Guessed, bool Offered)
+{
+    const std::vector<std::string> &Names = Guessed.Names;
+    const bool                      Several = Names.size() > 1;
+    std::string                     Line  = "did you mean ";
+    for (std::size_t I = 0; I < Names.size(); I++) {
+        if (I > 0) Line += I + 1 == Names.size() ? " or " : ", ";
+        if (Offered && Several) Line += std::to_string(I + 1) + " ";
+        Line += Names[I];
     }
-    return Said + "?";
+    Line += "?";
+    if (Offered) Line += Several ? " yes and its number runs it" : " yes runs it";
+    return Line;
+}
+
+Answer Answered(const Guess &Guessed, std::string_view Line)
+{
+    const Words Cut(Line);
+    if (Cut.Empty() || Cut[0] != "yes" || Cut.Count() > 2 || Guessed.Names.empty()) return {};
+    std::size_t Chosen = 1;
+    if (Cut.Count() == 2) {
+        const std::string_view Number = Cut[1];
+        if (Number.size() != 1 || Number[0] < '1' || Number[0] > '0' + static_cast<int>(Guessed.Names.size()))
+            return {};
+        Chosen = static_cast<std::size_t>(Number[0] - '0');
+    } else if (Guessed.Names.size() > 1) {
+        return Answer{Answer::Kind::Which, {}};
+    }
+    std::string Meant = Guessed.Names[Chosen - 1];
+    if (!Guessed.Rest.empty()) Meant += " " + Guessed.Rest;
+    return Answer{Answer::Kind::Meant, std::move(Meant)};
 }
 
 }  // namespace hub::nearest
