@@ -44,10 +44,14 @@ all: display.elf
 # After `all`: the fragment's first rule would otherwise become the default goal.
 include ../nameplate.mk
 
-OBJS = display.o lanes.o front.o layers.o console_model.o ring.o easel.o effects.o
+OBJS = display.o lanes.o front.o layers.o console_model.o ring.o easel.o effects.o effects_warp.o effects_ink.o
 
 display.elf: $(BOXLIB_START) $(OBJS) $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# An effect works out every cell of the glass every frame: built -O2, as the
+# utilities' per-pixel parts are.
+effects.o effects_warp.o effects_ink.o: CXXFLAGS += -O2
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.
 # See boxcxx/Makefile for what their absence cost.

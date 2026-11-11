@@ -336,7 +336,9 @@ int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count);
  * What an effect is: a set of kinds, laid together, with one strength shared
  * by them, which swells in at the start and ebbs out at the end (a mirror has
  * no half-strength and comes and goes at once). Geometry first, then colour,
- * then the sparkles:
+ * then the sparkles and the snow. A cell is the unit of every one of them: a
+ * program that draws in half-block pixels has them moved and coloured by the
+ * pixel pair, and the snow and the sparkles settle in the halves.
  *
  *   DISPLAY_EFFECT_SWAY      rows swing sideways (AXIS_X) and columns up and
  *                            down (AXIS_Y) in slow waves, the cells at the
@@ -352,6 +354,30 @@ int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count);
  *   DISPLAY_EFFECT_SHIMMER   sparkles come and go on the glass, in `color`
  *                            brightened — on the empty cells as stars, on the
  *                            text as a flash; the stronger, the more of them
+ *   DISPLAY_EFFECT_RIPPLE    rings spread from the middle of the glass and the
+ *                            picture is seen through them, bent outward and
+ *                            inward as water bends it; the stronger, the higher
+ *   DISPLAY_EFFECT_QUAKE     the whole picture shakes, by a new jolt each frame:
+ *                            sideways (AXIS_X), up and down (AXIS_Y) or both
+ *   DISPLAY_EFFECT_MOSAIC    the picture coarsened into blocks of cells, each as
+ *                            the cell in its middle; the stronger, the larger
+ *   DISPLAY_EFFECT_RAINBOW   the hues turned in waves that run over the glass
+ *                            and over time, and the glass tinted in the colours
+ *                            of the band that lies over it (grey is coloured too)
+ *   DISPLAY_EFFECT_MELT      every column slides down by a length of its own,
+ *                            its top row smeared behind it, and slowly comes back
+ *   DISPLAY_EFFECT_GLITCH    bands of rows torn sideways for an instant, their
+ *                            red and blue pulled apart, new ones every few frames
+ *   DISPLAY_EFFECT_SPOTLIGHT only a circle of light that wanders over the glass
+ *                            is seen; what is outside it goes dark. The
+ *                            stronger, the smaller the circle and the darker
+ *   DISPLAY_EFFECT_SEPIA     an old film: the colours toned brown, the corners
+ *                            darker, the light flickering, a scratch now and then
+ *   DISPLAY_EFFECT_SNOW      flakes of `color` brightened fall in two layers, the
+ *                            far ones slow and faint, over the empty cells and the
+ *                            drawn pixels alike, the written text left alone
+ *   DISPLAY_EFFECT_PULSE     the picture breathes: it swells a little about the
+ *                            middle of the glass and shrinks again
  *
  * On a text page, with its sixteen colours and its whole cells, every kind
  * is shown as nearly as that allows: a colour is quantized after the
@@ -379,7 +405,17 @@ enum {
     DISPLAY_EFFECT_SWAY    = 8,
     DISPLAY_EFFECT_MIRROR  = 16,
     DISPLAY_EFFECT_SHIMMER = 32,
-    DISPLAY_EFFECT_KINDS   = 63,    /* every kind there is */
+    DISPLAY_EFFECT_RIPPLE    = 64,
+    DISPLAY_EFFECT_QUAKE     = 128,
+    DISPLAY_EFFECT_MOSAIC    = 256,
+    DISPLAY_EFFECT_RAINBOW   = 512,
+    DISPLAY_EFFECT_MELT      = 1024,
+    DISPLAY_EFFECT_GLITCH    = 2048,
+    DISPLAY_EFFECT_SPOTLIGHT = 4096,
+    DISPLAY_EFFECT_SEPIA     = 8192,
+    DISPLAY_EFFECT_SNOW      = 16384,
+    DISPLAY_EFFECT_PULSE     = 32768,
+    DISPLAY_EFFECT_KINDS   = 65535,    /* every kind there is */
 };
 
 enum {
@@ -392,10 +428,10 @@ enum {
 typedef struct PACKED {
     uint8_t  command;           /* DISP_CMD_EFFECT */
     uint8_t  strength;          /* 1..255 */
-    uint8_t  axes;              /* DISPLAY_EFFECT_AXIS_*: for SWAY and MIRROR, at least one */
+    uint8_t  axes;              /* DISPLAY_EFFECT_AXIS_*: for SWAY, MIRROR and QUAKE, at least one */
     uint8_t  reserved;
     uint32_t kinds;             /* DISPLAY_EFFECT_*, at least one, none outside DISPLAY_EFFECT_KINDS */
-    uint32_t color;             /* #RRGGBB: the tint, and the sparkles' */
+    uint32_t color;             /* #RRGGBB: the tint, the sparkles' and the snow's */
     uint32_t duration_ms;       /* 1..DISPLAY_EFFECT_LONGEST_MS */
 } DisplayEffectRequest;
 

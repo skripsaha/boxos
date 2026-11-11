@@ -19,7 +19,9 @@
 // an end is due (EffectsDue).
 
 // How many frames a second an animated effect is drawn at: the screen's to
-// say, as a framebuffer takes more than a text page can show.
+// say, as a framebuffer takes more than a text page can show. The kinds that
+// only drift (rainbow, sepia, spotlight, snow, melt, ripple, pulse) are drawn
+// at two thirds of it at most, 15 a second, which costs them no looks.
 void EffectsFrameRate(std::uint32_t PerSecond) noexcept;
 
 // DISP_CMD_EFFECT asked by the program From names: the effect laid in place of
