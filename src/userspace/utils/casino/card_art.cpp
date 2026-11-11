@@ -1,14 +1,17 @@
-/* card_art.cpp — playing cards drawn from shapes (card_art.h). */
+/* card_art.cpp — playing cards drawn from the font and half-block pixels
+ * (card_art.h). */
 
 #include "card_art.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <span>
+#include <string>
 
 #include "canvas.h"
+#include "ornament.h"
 #include "painter/tui/glyph.h"
-#include "suit_shape.h"
 
 namespace casino {
 
@@ -17,22 +20,24 @@ namespace {
 namespace tui    = painter::tui;
 namespace Glyphs = painter::tui::Glyphs;
 
-// A card is described in a space 64 across and 100 down, whatever its size.
+// The back, and a card in flight, are described in a space 64 across and 100
+// down, whatever the size.
 constexpr float SpaceWide = 64.0f;
 constexpr float SpaceHigh = 100.0f;
 constexpr float Rounding  = 7.0f;
 constexpr int   Samples   = 3;
 
-// Where the pips and the court figures go.
-constexpr float PipMiddle = 32.0f;
-constexpr float PipStep   = 15.0f;
-constexpr float PipTop    = 25.0f;
-constexpr float PipSpan   = 50.0f;
-constexpr float PipRadius = 8.0f;
-constexpr float AceRadius = 17.0f;
+// The corner of a card at rest, in pixels of the glass.
+constexpr float CornerReach = 5.0f;
 
-const Color Skin = Color::Rgb(0xF0, 0xC8, 0xA0);
+const Color Skin = Color::Rgb(0xE8, 0xB8, 0x90);
 
+constexpr char Head      = 0x02;
+constexpr char FullBlock = static_cast<char>(0xDB);
+constexpr char LowerHalf = static_cast<char>(0xDC);
+constexpr char UpperHalf = static_cast<char>(0xDF);
+
+// Where a pip stands: a column from -1 to 1 and a share of the way down.
 struct Pip {
     std::int8_t Col;
     float       Row;
@@ -79,113 +84,7 @@ bool InCard(float X, float Y)
     return Beyond <= 0.0f;
 }
 
-bool InEllipse(float A, float B, float CenterA, float CenterB, float ReachA, float ReachB)
-{
-    const float Over = (A - CenterA) / ReachA, Under = (B - CenterB) / ReachB;
-    return Over * Over + Under * Under <= 1.0f;
-}
-
-// The upper half of a court figure, seen from the middle of the panel up: A
-// across from -1 to 1, B up from 0 to 1. The lower half is the same turned round.
-bool Figure(const Look &Shown, Card One, float A, float B, Color &Ink)
-{
-    const Color Suit  = InkOf(Shown, One.Of);
-    const float Mark  = 0.27f;
-    const float Across = (A + 0.7f) / Mark, Up = (B - 0.82f) / (Mark * 0.7f);
-    if (std::fabs(Across) <= 1.0f && std::fabs(Up) <= 1.0f && InSuit(One.Of, Across, Up)) {
-        Ink = Suit;
-        return true;
-    }
-    if (One.Rank == 13) {
-        if (B >= 0.8f && B < 0.86f && std::fabs(A) <= 0.36f) {
-            Ink = Shown.Gold;
-            return true;
-        }
-        for (const float Peak : {-0.26f, 0.0f, 0.26f})
-            if (std::fabs(A - Peak) < 0.1f && B >= 0.86f && B < 0.86f + 0.13f * (1.0f - std::fabs(A - Peak) / 0.1f)) {
-                Ink = Shown.Gold;
-                return true;
-            }
-    }
-    if (One.Rank == 12) {
-        if (B >= 0.8f && B < 0.88f && std::fabs(A) <= 0.36f) {
-            Ink = Shown.Gold;
-            return true;
-        }
-        for (const float Ball : {-0.3f, 0.0f, 0.3f})
-            if (InEllipse(A, B, Ball, 0.93f, 0.09f, 0.06f)) {
-                Ink = Shown.Gold;
-                return true;
-            }
-    }
-    if (One.Rank == 11) {
-        if (B > 0.74f && InEllipse(A, B, 0.0f, 0.74f, 0.34f, 0.17f)) {
-            Ink = Suit;
-            return true;
-        }
-        if (std::fabs(A - 0.22f - (B - 0.86f) * 1.2f) < 0.06f && B > 0.86f && B < 0.99f) {
-            Ink = Shown.Gold;
-            return true;
-        }
-    }
-    if (InEllipse(A, B, 0.0f, 0.6f, 0.3f, 0.19f)) {
-        Ink = Skin;
-        return true;
-    }
-    if (B >= 0.38f && B < 0.46f && std::fabs(A) <= 0.55f) {
-        Ink = Shown.CardFace;
-        return true;
-    }
-    if (B < 0.46f && std::fabs(A) <= 0.98f - 0.45f * B) {
-        Ink = std::fabs(A) < 0.04f ? Shade(Suit, 0.6f) : B < 0.1f ? Shown.Gold : Suit;
-        return true;
-    }
-    return false;
-}
-
-// The court card's panel and the figure in it, the lower half turned round.
-bool Court(const Look &Shown, Card One, float X, float Y, Color &Ink)
-{
-    constexpr float Left = 11.0f, Right = 53.0f, Top = 20.0f, Bottom = 80.0f;
-    if (X < Left || X >= Right || Y < Top || Y >= Bottom) return false;
-    if (std::min(std::min(X - Left, Right - X), std::min(Y - Top, Bottom - Y)) < 1.4f) {
-        Ink = InkOf(Shown, One.Of);
-        return true;
-    }
-    float A = (X - 32.0f) / 21.0f, B = (50.0f - Y) / 30.0f;
-    if (B < 0.0f) {
-        A = -A;
-        B = -B;
-    }
-    Ink = Shade(Shown.CardFace, 0.9f);
-    Figure(Shown, One, A, B, Ink);
-    return true;
-}
-
-// The color of a face at a point of the card's space; false outside the card.
-bool FaceAt(const Look &Shown, Card One, bool Pips, float X, float Y, Color &Ink)
-{
-    if (!InCard(X, Y)) return false;
-    Ink = Shown.CardFace;
-    if (!Pips) return true;
-    if (IsCourt(One)) {
-        Court(Shown, One, X, Y, Ink);
-        return true;
-    }
-    for (const Pip &Spot : PipsOf(One.Rank)) {
-        const float Radius = One.Rank == 1 ? AceRadius : PipRadius;
-        const float CenterY = PipTop + Spot.Row * PipSpan;
-        const float U = (X - (PipMiddle + Spot.Col * PipStep)) / Radius;
-        float       V = (CenterY - Y) / Radius;
-        if (Spot.Row > 0.5f) V = -V;
-        if (std::fabs(U) <= 1.0f && std::fabs(V) <= 1.0f && InSuit(One.Of, U, V)) {
-            Ink = InkOf(Shown, One.Of);
-            return true;
-        }
-    }
-    return true;
-}
-
+// The color of the back at a point of the card's space; false outside the card.
 bool BackAt(const Look &Shown, float X, float Y, Color &Ink)
 {
     if (!InCard(X, Y)) return false;
@@ -238,71 +137,155 @@ void Raster(Canvas &Draw, float Left, float Top, float Wide, float High, Sampler
     }
 }
 
-void Shadow(Canvas &Draw, float Left, float Top, float Wide, float High)
+// A card seen as pixels: its back, or a blank face while it turns.
+void Body(Canvas &Pixels, const Look &Shown, bool Back, float Left, float Top, float Wide, float High)
 {
-    if (!Draw.Smooth()) return;
-    const float Round = std::max(1.0f, Wide * Rounding / SpaceWide);
-    Draw.Rounded(Left + 0.5f, Top + 0.8f, Wide + 0.9f, High + 0.9f, Round + 0.8f, painter::core::Colors::Black, 0.16f);
-    Draw.Rounded(Left + 1.0f, Top + 1.0f, Wide, High, Round, painter::core::Colors::Black, 0.3f);
+    if (Pixels.Smooth()) {
+        const float Round = std::max(1.0f, Wide * Rounding / SpaceWide);
+        Pixels.Rounded(Left + 0.5f, Top + 0.8f, Wide + 0.9f, High + 0.9f, Round + 0.8f, painter::core::Colors::Black, 0.16f);
+        Pixels.Rounded(Left + 1.0f, Top + 1.0f, Wide, High, Round, painter::core::Colors::Black, 0.3f);
+    }
+    if (Back) Raster(Pixels, Left, Top, Wide, High, [&](float X, float Y, Color &Ink) { return BackAt(Shown, X, Y, Ink); });
+    else Raster(Pixels, Left, Top, Wide, High, [&](float X, float Y, Color &Ink) {
+        Ink = Shown.CardFace;
+        return InCard(X, Y);
+    });
 }
 
-void Body(Canvas &Pixels, const Look &Shown, const Card *Face, bool Pips, float Left, float Top, float Wide, float High)
+void Put(tui::Frame &Out, std::int32_t Col, std::int32_t Row, char Glyph, Color Ink, Color Paper)
 {
-    Shadow(Pixels, Left, Top, Wide, High);
-    if (Face) Raster(Pixels, Left, Top, Wide, High, [&](float X, float Y, Color &Ink) { return FaceAt(Shown, *Face, Pips, X, Y, Ink); });
-    else Raster(Pixels, Left, Top, Wide, High, [&](float X, float Y, Color &Ink) { return BackAt(Shown, X, Y, Ink); });
+    Out.Put({Col, Row}, Glyph, tui::TextStyle{Ink, Paper});
 }
 
-void Put(tui::Frame &Out, std::int32_t Col, std::int32_t Row, char Glyph, Color Ink, Color Face)
+// The corners of a face rounded, to the pixel, and the shadow it casts to the
+// right and below, as thin as a half cell.
+void Shape(tui::Frame &Out, const Look &Shown, painter::core::Point At, CardSize Size, const std::array<Color, 4> &Under)
 {
-    Out.Put({Col, Row}, Glyph, tui::TextStyle{Ink, Face});
+    const Color Paper = Shown.CardFace;
+    const auto  Round = [&](std::int32_t Col, std::int32_t Row, bool Left, bool Top, Color Beneath) {
+        FitCell(Out, {Col, Row}, Paper, Beneath, [&](float X, float Y) {
+            const float Across = Left ? CornerReach - X : X - (8.0f - CornerReach);
+            const float Down   = Top ? CornerReach - Y : Y - (16.0f - CornerReach);
+            return Across <= 0.0f || Down <= 0.0f || Across * Across + Down * Down <= CornerReach * CornerReach;
+        }, !Hard(Out));
+    };
+    Round(At.X, At.Y, true, true, Under[0]);
+    Round(At.X + Size.Cols - 1, At.Y, false, true, Under[1]);
+    Round(At.X, At.Y + Size.Rows - 1, true, false, Under[2]);
+    Round(At.X + Size.Cols - 1, At.Y + Size.Rows - 1, false, false, Under[3]);
 }
 
-void Write(tui::Frame &Out, std::int32_t Col, std::int32_t Row, std::string_view Words, Color Ink, Color Face)
+void Shadow(tui::Frame &Out, const Look &Shown, painter::core::Point At, CardSize Size)
 {
-    Out.Write({Col, Row}, Words, tui::TextStyle{Ink, Face});
+    const auto Cast = [&](std::int32_t Col, std::int32_t Row, char Glyph) {
+        const tui::Cell Beneath = Out.Read({Col, Row});
+        if (Beneath.Background == Shown.CardFace || Beneath.Glyph != ' ') return;
+        Put(Out, Col, Row, Glyph, Shade(Beneath.Background, 0.45f), Beneath.Background);
+    };
+    for (std::int32_t Row = At.Y + 1; Row <= At.Y + Size.Rows; Row++) Cast(At.X + Size.Cols, Row, static_cast<char>(0xDD));
+    for (std::int32_t Col = At.X + 1; Col < At.X + Size.Cols; Col++) Cast(Col, At.Y + Size.Rows, UpperHalf);
 }
 
 // The rank over the suit in the top left corner, and under it in the bottom
 // right where the card is read upside down.
 void Indices(tui::Frame &Out, const Look &Shown, Card One, painter::core::Point At, CardSize Size)
 {
-    const Color        Ink  = InkOf(Shown, One.Of);
+    const Color            Ink  = InkOf(Shown, One.Of);
     const std::string_view Rank = RankName(One.Rank);
-    const auto         Len  = static_cast<std::int32_t>(Rank.size());
-    const std::int32_t Mark = At.X + Size.Cols - 2;
-    Write(Out, At.X + 1, At.Y, Rank, Ink, Shown.CardFace);
+    const auto             Len  = static_cast<std::int32_t>(Rank.size());
+    const std::int32_t     Mark = At.X + Size.Cols - 2;
+    Out.Write({At.X + 1, At.Y}, Rank, tui::TextStyle{Ink, Shown.CardFace});
     Put(Out, At.X + 1, At.Y + 1, SuitGlyph(One.Of), Ink, Shown.CardFace);
-    Write(Out, Mark - Len + 1, At.Y + Size.Rows - 1, Rank, Ink, Shown.CardFace);
+    Out.Write({Mark - Len + 1, At.Y + Size.Rows - 1}, Rank, tui::TextStyle{Ink, Shown.CardFace});
     Put(Out, Mark, At.Y + Size.Rows - 2, SuitGlyph(One.Of), Ink, Shown.CardFace);
 }
 
-// A small card has no room for drawn pips: the suit's mark in the font stands
-// for each, in the same places, and a court card has a plaque.
-void GlyphPips(tui::Frame &Out, const Look &Shown, Card One, painter::core::Point At, CardSize Size)
+// A court card on a small card: a plaque of rules with the letter and the
+// suit between.
+void Plaque(tui::Frame &Out, const Look &Shown, Card One, painter::core::Point At, CardSize Size)
 {
     const Color        Ink    = InkOf(Shown, One.Of);
-    const char         Mark   = SuitGlyph(One.Of);
     const std::int32_t Middle = At.X + Size.Cols / 2;
-    if (IsCourt(One)) {
-        const char         Letter = RankName(One.Rank)[0];
-        const std::int32_t Top    = At.Y + 1, Bottom = At.Y + Size.Rows - 2;
-        Put(Out, Middle - 1, Top, Glyphs::CornerTL, Ink, Shown.CardFace);
-        Put(Out, Middle, Top, Glyphs::RuleAcross, Ink, Shown.CardFace);
-        Put(Out, Middle + 1, Top, Glyphs::CornerTR, Ink, Shown.CardFace);
-        for (std::int32_t Row = Top + 1; Row < Bottom; Row++) {
-            const bool Edge = Row == Top + 1 || Row == Bottom - 1;
-            Put(Out, Middle - 1, Row, Glyphs::RuleDown, Ink, Shown.CardFace);
-            Put(Out, Middle + 1, Row, Glyphs::RuleDown, Ink, Shown.CardFace);
-            Put(Out, Middle, Row, Edge ? Letter : Mark, Ink, Shown.CardFace);
-        }
-        Put(Out, Middle - 1, Bottom, Glyphs::CornerBL, Ink, Shown.CardFace);
-        Put(Out, Middle, Bottom, Glyphs::RuleAcross, Ink, Shown.CardFace);
-        Put(Out, Middle + 1, Bottom, Glyphs::CornerBR, Ink, Shown.CardFace);
-        return;
+    const char         Letter = RankName(One.Rank)[0];
+    const std::int32_t Top = At.Y + 1, Bottom = At.Y + Size.Rows - 2;
+    Put(Out, Middle - 1, Top, Glyphs::CornerTL, Ink, Shown.CardFace);
+    Put(Out, Middle, Top, Glyphs::RuleAcross, Ink, Shown.CardFace);
+    Put(Out, Middle + 1, Top, Glyphs::CornerTR, Ink, Shown.CardFace);
+    for (std::int32_t Row = Top + 1; Row < Bottom; Row++) {
+        const bool Edge = Row == Top + 1 || Row == Bottom - 1;
+        Put(Out, Middle - 1, Row, Glyphs::RuleDown, Ink, Shown.CardFace);
+        Put(Out, Middle + 1, Row, Glyphs::RuleDown, Ink, Shown.CardFace);
+        Put(Out, Middle, Row, Edge ? Letter : SuitGlyph(One.Of), Ink, Shown.CardFace);
     }
+    Put(Out, Middle - 1, Bottom, Glyphs::CornerBL, Ink, Shown.CardFace);
+    Put(Out, Middle, Bottom, Glyphs::RuleAcross, Ink, Shown.CardFace);
+    Put(Out, Middle + 1, Bottom, Glyphs::CornerBR, Ink, Shown.CardFace);
+}
+
+// The head-dress of a court card, as wide as the portrait allows, and its
+// color; Turned for the half that stands on its head.
+std::string Crown(int Rank, std::int32_t Wide, bool Turned, Color &Ink, const Look &Shown)
+{
+    std::string Full = Rank == 13 ? std::string{LowerHalf, UpperHalf, LowerHalf, UpperHalf, LowerHalf}
+                       : Rank == 12 ? std::string{LowerHalf, 0x07, LowerHalf, 0x07, LowerHalf}
+                                    : std::string{LowerHalf, LowerHalf, LowerHalf, LowerHalf, LowerHalf};
+    Ink = Rank == 11 ? Shown.Black : Shown.Gold;
+    const auto Keep = std::min<std::size_t>(static_cast<std::size_t>(Wide), Full.size());
+    std::string Cut = Full.substr((Full.size() - Keep) / 2, Keep);
+    if (Turned)
+        for (char &Glyph : Cut) Glyph = Glyph == LowerHalf ? UpperHalf : Glyph == UpperHalf ? LowerHalf : Glyph;
+    return Cut;
+}
+
+// A court card as a framed portrait: a crowned head and shoulders, turned
+// round for the lower half, the suit on the line between.
+void Portrait(tui::Frame &Out, const Look &Shown, Card One, painter::core::Point At, CardSize Size)
+{
+    const Color        Ink    = InkOf(Shown, One.Of);
+    const std::int32_t Left   = At.X + 3, Wide = Size.Cols - 6, Top = At.Y + 1, High = Size.Rows - 2;
+    const std::int32_t Middle = Left + Wide / 2;
+    const tui::TextStyle Rule{Ink, Shown.CardFace};
+    Out.Put({Left, Top}, Glyphs::CornerTL, Rule);
+    Out.Put({Left + Wide - 1, Top}, Glyphs::CornerTR, Rule);
+    Out.Put({Left, Top + High - 1}, Glyphs::CornerBL, Rule);
+    Out.Put({Left + Wide - 1, Top + High - 1}, Glyphs::CornerBR, Rule);
+    for (std::int32_t Col = Left + 1; Col < Left + Wide - 1; Col++) {
+        Out.Put({Col, Top}, Glyphs::RuleAcross, Rule);
+        Out.Put({Col, Top + High - 1}, Glyphs::RuleAcross, Rule);
+    }
+    for (std::int32_t Row = Top + 1; Row < Top + High - 1; Row++) {
+        Out.Put({Left, Row}, Glyphs::RuleDown, Rule);
+        Out.Put({Left + Wide - 1, Row}, Glyphs::RuleDown, Rule);
+    }
+    const std::int32_t Inner = Wide - 2, Half = (High - 3) / 2, Line = Top + 1 + Half;
+    for (std::int32_t Col = Left + 1; Col < Left + Wide - 1; Col++) Out.Put({Col, Line}, Glyphs::RuleAcross, Rule);
+    Out.Put({Middle, Line}, SuitGlyph(One.Of), Rule);
+    for (int Turned = 0; Turned < 2; Turned++) {
+        const std::int32_t Dir = Turned ? 1 : -1, Start = Turned ? Line + 1 : Line - 1;
+        std::int32_t       Row = Start + Dir * (Half - 1);
+        Color              CrownInk;
+        const std::string  Hat = Crown(One.Rank, Inner, Turned != 0, CrownInk, Shown);
+        const auto         Width = static_cast<std::int32_t>(Hat.size());
+        for (std::int32_t At2 = 0; At2 < Width; At2++) Put(Out, Middle - Width / 2 + At2, Row, Hat[static_cast<std::size_t>(At2)], CrownInk, Shown.CardFace);
+        Row -= Dir;
+        if (Half >= 2) Put(Out, Middle, Row, Head, Skin, Shown.CardFace);
+        for (std::int32_t Down = 2; Down < Half; Down++) {
+            Row -= Dir;
+            const std::int32_t Reach = std::min(Inner, 3 + 2 * (Down - 2)) / 2;
+            for (std::int32_t Off = -Reach; Off <= Reach; Off++)
+                Put(Out, Middle + Off, Row, FullBlock, Ink, Shown.CardFace);
+        }
+    }
+}
+
+// Pips as the font's suit mark, laid on the cells in the classic arrangement.
+void Pips(tui::Frame &Out, const Look &Shown, Card One, painter::core::Point At, CardSize Size)
+{
+    const Color        Ink    = InkOf(Shown, One.Of);
+    const std::int32_t Middle = At.X + Size.Cols / 2;
+    const std::int32_t Gap    = Size.Cols >= 11 ? 3 : 2;
     for (const Pip &Spot : PipsOf(One.Rank))
-        Put(Out, Middle + Spot.Col, At.Y + 1 + static_cast<std::int32_t>(Spot.Row * static_cast<float>(Size.Rows - 3) + 0.5f), Mark, Ink,
+        Put(Out, Middle + Spot.Col * Gap, At.Y + 1 + static_cast<std::int32_t>(Spot.Row * static_cast<float>(Size.Rows - 3) + 0.5f), SuitGlyph(One.Of), Ink,
             Shown.CardFace);
 }
 
@@ -311,26 +294,38 @@ void GlyphPips(tui::Frame &Out, const Look &Shown, Card One, painter::core::Poin
 CardSize CardSizeFor(std::int32_t GlassRows)
 {
     if (GlassRows < 34) return CardSize{9, 7};
-    if (GlassRows < 42) return CardSize{13, 10};
-    if (GlassRows < 60) return CardSize{19, 15};
-    return CardSize{23, 18};
+    if (GlassRows < 46) return CardSize{11, 9};
+    if (GlassRows < 60) return CardSize{13, 11};
+    return CardSize{15, 13};
 }
 
 void PaintCard(tui::Frame &Out, const Look &Shown, const Card *Face, painter::core::Point At, CardSize Size)
 {
-    Canvas Pixels(Out, Hard(Out));
-    Body(Pixels, Shown, Face, !Size.Glyphs(), static_cast<float>(At.X), static_cast<float>(At.Y * 2), static_cast<float>(Size.Wide()),
-         static_cast<float>(Size.High()));
-    if (!Face) return;
+    if (!Face) {
+        Canvas Pixels(Out, Hard(Out));
+        Body(Pixels, Shown, true, static_cast<float>(At.X), static_cast<float>(At.Y * 2), static_cast<float>(Size.Wide()), static_cast<float>(Size.High()));
+        return;
+    }
+    const std::array<Color, 4> Under = {Out.Read(At).Background, Out.Read({At.X + Size.Cols - 1, At.Y}).Background,
+                                        Out.Read({At.X, At.Y + Size.Rows - 1}).Background,
+                                        Out.Read({At.X + Size.Cols - 1, At.Y + Size.Rows - 1}).Background};
+    if (!Hard(Out)) Shadow(Out, Shown, At, Size);
+    Out.Fill(painter::core::Rect{At.X, At.Y, Size.Cols, Size.Rows}, ' ', tui::TextStyle{Shown.CardFace, Shown.CardFace});
+    Shape(Out, Shown, At, Size, Under);
+    if (IsCourt(*Face)) {
+        if (Size.Rows >= 9) Portrait(Out, Shown, *Face, At, Size);
+        else Plaque(Out, Shown, *Face, At, Size);
+    } else {
+        Pips(Out, Shown, *Face, At, Size);
+    }
     Indices(Out, Shown, *Face, At, Size);
-    if (Size.Glyphs()) GlyphPips(Out, Shown, *Face, At, Size);
 }
 
 void PaintMoving(tui::Frame &Out, const Look &Shown, const Card *Face, float Across, float Down, CardSize Size, float Squeeze)
 {
     Canvas      Pixels(Out, Hard(Out));
     const float Wide = std::max(static_cast<float>(Size.Wide()) * Squeeze, 0.5f);
-    Body(Pixels, Shown, Face, true, Across + (static_cast<float>(Size.Wide()) - Wide) / 2.0f, Down, Wide, static_cast<float>(Size.High()));
+    Body(Pixels, Shown, Face == nullptr, Across + (static_cast<float>(Size.Wide()) - Wide) / 2.0f, Down, Wide, static_cast<float>(Size.High()));
 }
 
 }  // namespace casino

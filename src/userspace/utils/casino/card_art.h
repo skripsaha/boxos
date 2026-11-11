@@ -1,11 +1,13 @@
 /* card_art.h — playing cards as they are drawn: a white card with rounded
- * corners and a soft shadow, its rank and suit in the font at two corners,
- * pips and court figures described as shapes and drawn at whatever size the
- * glass has room for, and a patterned back.
+ * corners and a thin shadow, its rank and suit in the font at two corners and
+ * its pips the font's own suit marks laid on the cells in the classic
+ * arrangement; a court card is a framed portrait of a crowned head and
+ * shoulders, turned round for its lower half; the back is a lattice with an
+ * emblem.
  *
- * A card at rest stands on whole cells so that its indices are the font's own
- * and sharp. A card in flight (sliding from the shoe, or turning over) is
- * drawn to the pixel and a fraction of one, from shapes alone. */
+ * A card at rest stands on whole cells. A card in flight (sliding from the
+ * shoe, or turning over) is drawn to the pixel and a fraction of one, as a
+ * blank face or a back. */
 #ifndef CASINO_CARD_ART_H
 #define CASINO_CARD_ART_H
 
@@ -25,8 +27,6 @@ struct CardSize {
 
     std::int32_t Wide() const { return Cols; }
     std::int32_t High() const { return Rows * 2; }
-    // Too small for drawn pips: the font's suit marks stand in rows.
-    bool Glyphs() const { return Cols < 11; }
 };
 
 // The largest card the glass has the rows for.

@@ -196,13 +196,13 @@ void Blackjack::PaintLabels(tui::Frame &Out, const Layout &Where, std::uint64_t 
             const auto Wide = static_cast<std::int32_t>(Words.size());
             Print(Out, {(Of.Left + Of.Right) / 2 - Wide / 2, Row}, Words, With);
         };
+        const bool Settled = !Playing && Held.Result != Outcome::Open;
+        const bool Alone   = Says.empty() || (Settled && (Says == "BUST" || Says == "BLACKJACK"));
         if (Where.LabelRows >= 2) {
-            Centered(Where.LabelRow, Mark + Says, TotalInk);
+            if (!Alone) Centered(Where.LabelRow, Mark + Says, TotalInk);
             Centered(Where.LabelRow + 1, Under, Ink);
         } else {
-            const bool        Settled = !Playing && Held.Result != Outcome::Open;
-            const bool        Alone   = Says.empty() || (Settled && (Says == "BUST" || Says == "BLACKJACK"));
-            const std::string Both    = Alone ? Under : Mark + Says + "  " + (Settled ? Under : std::format("bet {}", Counted(Held.Bet)));
+            const std::string Both = Alone ? Under : Mark + Says + "  " + (Settled ? Under : std::format("bet {}", Counted(Held.Bet)));
             Centered(Where.LabelRow, Both, Settled ? Ink : TotalInk);
         }
     }
