@@ -71,7 +71,7 @@ UTILS = create show files tag untag name trash delete assemble \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest \
-        edit seek retag read inside settings scratchpad garden gardener random sand
+        edit seek retag read inside settings scratchpad garden gardener random sand coinflip
 
 .PHONY: all clean
 
@@ -228,6 +228,16 @@ $(FOREST_DIR)/paint%.o: CXXFLAGS += -O2
 
 forest.elf: $(BOXLIB_START) $(FOREST_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(FOREST_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# The coin is C++ in parts of its own directory, each named for what it is.
+COINFLIP_DIR  = coinflip
+COINFLIP_OBJS = $(addprefix $(COINFLIP_DIR)/,coinflip.o game.o game_paint.o coin.o emblem.o toss.o tally.o word.o \
+                                             look.o)
+# Every pixel of the coin is sampled four times over, every frame.
+$(COINFLIP_DIR)/coin.o: CXXFLAGS += -O2
+
+coinflip.elf: $(BOXLIB_START) $(COINFLIP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(COINFLIP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # hexer and stringview are C++ in parts: each names its own objects, links
@@ -420,7 +430,7 @@ $(sort $(EDIT_OBJS) $(READ_OBJS)): CXXFLAGS += -I.
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.d $(SAND_DIR)/*.d $(FOREST_DIR)/*.d)
+-include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.d $(SAND_DIR)/*.d $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
@@ -428,4 +438,4 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 
 clean:
 	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d \
-	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d
+	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.o $(COINFLIP_DIR)/*.d
