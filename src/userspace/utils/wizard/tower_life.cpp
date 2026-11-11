@@ -13,8 +13,6 @@ namespace wizard {
 
 namespace {
 
-constexpr std::uint64_t FlightMs = 650;
-
 // Moves Value towards Target at Rate a millisecond, without overshooting.
 float Eased(float Value, float Target, float Rate, std::uint32_t ElapsedMs)
 {

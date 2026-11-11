@@ -18,7 +18,6 @@ namespace {
 namespace tui = painter::tui;
 
 constexpr std::uint32_t FrameMs = 70;             // the picture moves some fourteen times a second
-constexpr std::uint64_t FlightMs = 650;           // a thing's way from his hand to the pot
 constexpr std::uint64_t DrinkLayMs = 760;         // the vial is at his lips, and the potion takes hold
 constexpr std::uint64_t CastLayMs = 480;          // the staff is up, and the spell takes hold
 

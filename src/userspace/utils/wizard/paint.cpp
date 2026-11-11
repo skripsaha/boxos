@@ -101,7 +101,7 @@ void Tower::Paint()
     Wizard.Draw(Picture, Where, Posed(), Now, Hall.Light());
     if (Falling) {
         const Spot Surface = SurfaceOf(Where);
-        const float T = std::min(1.0f, static_cast<float>(LastMs - Falling->Began) / 650.0f);
+        const float T = std::min(1.0f, static_cast<float>(LastMs - Falling->Began) / static_cast<float>(FlightMs));
         const float X = Falling->FromX + (Surface.X - Falling->FromX) * T;
         const float Y = Falling->FromY + (Surface.Y - Falling->FromY) * T - 10.0f * Where.Unit * Wave(T * 0.5f);
         DrawIcon(Picture, static_cast<int>(X) - IconSize / 2, static_cast<int>(Y) - IconSize / 2, Falling->Which, 380, 50);

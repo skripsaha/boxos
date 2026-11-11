@@ -234,6 +234,40 @@ void DrawSleeve(Canvas &Out, const Scene &Where, Joint Shoulder, Joint Elbow, Jo
     });
 }
 
+// The other arm: at rest, stirring, casting or drinking, whichever he does most;
+// the ladle in its hand goes down into the pot, the vial up to his mouth.
+void DrawRightArm(Canvas &Out, const Scene &Where, const Pose &Now, const Show &Shown, const Tint &Body)
+{
+    const float Unit = Where.Unit;
+    const float Total = std::max(1.0f, Now.Stir + Now.Cast + Now.Drink);
+    const float Rest = 1.0f - Clamped(Now.Stir + Now.Cast + Now.Drink);
+    const Joint StirHand{40.0f + 3.0f * Wave(Now.Spin), 69.0f + 2.0f * Wave(Now.Spin + 0.25f)};
+    const Joint CastHand{46.0f, 30.0f + 2.0f * Wave(static_cast<float>(Shown.Ms % 900u) / 900.0f)};
+    const Joint DrinkHand{15.0f, 50.0f};
+    const Joint Idle{34.0f + 0.6f * Wave(static_cast<float>(Shown.Ms % 4100u) / 4100.0f), 79.0f - 0.8f * Now.Breath};
+    const Joint RightShoulder{23.0f, 57.0f};
+    const Joint RightHand{(Idle.X * Rest + StirHand.X * Now.Stir / Total + CastHand.X * Now.Cast / Total + DrinkHand.X * Now.Drink / Total),
+                          Idle.Y * Rest + StirHand.Y * Now.Stir / Total + CastHand.Y * Now.Cast / Total + DrinkHand.Y * Now.Drink / Total};
+    const Joint RightElbow = ElbowOf(RightShoulder, RightHand, 17.0f, 17.0f);
+    if (Now.Stir > 0.05f) {
+        const Spot Pot = SurfaceOf(Where);
+        const float Tip = Pot.Y + std::max(1.0f, Unit * 2.0f);
+        FillStroke(Out, WizardPixelX(Where, RightHand.X), WizardPixelY(Where, RightHand.Y), Pot.X + 2.5f * Wave(Now.Spin), Tip, std::max(0.8f, Unit * 1.1f), std::max(0.7f, Unit * 0.9f),
+                   [&](float, float Across, float) { return Lit(OnRamp(WoodTones, 0.6f - 0.3f * Across), Body); });
+    }
+    DrawSleeve(Out, Where, RightShoulder, RightElbow, RightHand, Body);
+    DrawHand(Out, Where, RightHand, Now.Cast > 0.4f ? -1.2f : 0.5f, Now.Cast > 0.4f, Body);
+    if (Now.Drink > 0.05f) {
+        const float X = WizardPixelX(Where, RightHand.X + 3.0f), Y = WizardPixelY(Where, RightHand.Y - 3.0f);
+        const Color Brew = Color::FromRaw(Shown.Brew == 0 ? 0x70B090u : Shown.Brew);
+        FillStroke(Out, X, Y, X + 1.5f * Unit, Y - 9.0f * Unit, std::max(0.9f, 2.4f * Unit), std::max(0.9f, 2.2f * Unit), [&](float Along, float Across, float Inside) {
+            Color Here = Along > 0.85f ? Rgb(0x90, 0x60, 0x30) : Mixed(Rgb(0xB8, 0xD8, 0xE8), Brew, 0.78f);
+            if (Across < -0.4f) Here = Lighter(Here, 80);
+            return Lit(Inside < 0.7f ? Toned(Here, 0.7f) : Here, Body);
+        });
+    }
+}
+
 }  // namespace
 
 void Figure::Draw(Canvas &Out, const Scene &Where, const Pose &Now, const Show &Shown, const Lighting &Lights)
@@ -263,34 +297,7 @@ void Figure::Draw(Canvas &Out, const Scene &Where, const Pose &Now, const Show &
     DrawMouth(Out, Where, Now, Body, HeadX, HeadY);
     DrawCrystal(Out, Where, Shown, Lift);
 
-    // The other arm: at rest, stirring, casting or drinking, whichever he does most.
-    const float Total = std::max(1.0f, Now.Stir + Now.Cast + Now.Drink);
-    const float Rest = 1.0f - Clamped(Now.Stir + Now.Cast + Now.Drink);
-    const Joint StirHand{40.0f + 3.0f * Wave(Now.Spin), 69.0f + 2.0f * Wave(Now.Spin + 0.25f)};
-    const Joint CastHand{46.0f, 30.0f + 2.0f * Wave(static_cast<float>(Shown.Ms % 900u) / 900.0f)};
-    const Joint DrinkHand{15.0f, 50.0f};
-    const Joint Idle{34.0f + 0.6f * Wave(static_cast<float>(Shown.Ms % 4100u) / 4100.0f), 79.0f - 0.8f * Now.Breath};
-    const Joint RightShoulder{23.0f, 57.0f};
-    const Joint RightHand{(Idle.X * Rest + StirHand.X * Now.Stir / Total + CastHand.X * Now.Cast / Total + DrinkHand.X * Now.Drink / Total),
-                          Idle.Y * Rest + StirHand.Y * Now.Stir / Total + CastHand.Y * Now.Cast / Total + DrinkHand.Y * Now.Drink / Total};
-    const Joint RightElbow = ElbowOf(RightShoulder, RightHand, 17.0f, 17.0f);
-    if (Now.Stir > 0.05f) {
-        const Spot Pot = SurfaceOf(Where);
-        const float Tip = Pot.Y + std::max(1.0f, Unit * 2.0f);
-        FillStroke(Out, WizardPixelX(Where, RightHand.X), WizardPixelY(Where, RightHand.Y), Pot.X + 2.5f * Wave(Now.Spin), Tip, std::max(0.8f, Unit * 1.1f), std::max(0.7f, Unit * 0.9f),
-                   [&](float, float Across, float) { return Lit(OnRamp(WoodTones, 0.6f - 0.3f * Across), Body); });
-    }
-    DrawSleeve(Out, Where, RightShoulder, RightElbow, RightHand, Body);
-    DrawHand(Out, Where, RightHand, Now.Cast > 0.4f ? -1.2f : 0.5f, Now.Cast > 0.4f, Body);
-    if (Now.Drink > 0.05f) {
-        const float X = WizardPixelX(Where, RightHand.X + 3.0f), Y = WizardPixelY(Where, RightHand.Y - 3.0f);
-        const Color Brew = Color::FromRaw(Shown.Brew == 0 ? 0x70B090u : Shown.Brew);
-        FillStroke(Out, X, Y, X + 1.5f * Unit, Y - 9.0f * Unit, std::max(0.9f, 2.4f * Unit), std::max(0.9f, 2.2f * Unit), [&](float Along, float Across, float Inside) {
-            Color Here = Along > 0.85f ? Rgb(0x90, 0x60, 0x30) : Mixed(Rgb(0xB8, 0xD8, 0xE8), Brew, 0.78f);
-            if (Across < -0.4f) Here = Lighter(Here, 80);
-            return Lit(Inside < 0.7f ? Toned(Here, 0.7f) : Here, Body);
-        });
-    }
+    DrawRightArm(Out, Where, Now, Shown, Body);
 }
 
 }  // namespace wizard

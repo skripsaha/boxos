@@ -28,6 +28,9 @@
 
 namespace wizard {
 
+// A thing's way from his hand to the pot.
+inline constexpr std::uint64_t FlightMs = 650;
+
 // A thing on its way from his hand to the cauldron.
 struct Flight {
     std::size_t   Which;
