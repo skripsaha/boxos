@@ -47,7 +47,8 @@ constexpr PainterColor BubbleLight = PainterColor::Rgb(0xFF, 0xE2, 0xF0);
 constexpr PainterColor BubbleBlack = PainterColor::Rgb(0x0F, 0x0F, 0x12);
 constexpr PainterColor PupilGlow   = PainterColor::Rgb(0x3A, 0x3A, 0x40);
 
-constexpr PainterColor PanelBackground = PainterColor::Rgb(0x12, 0x09, 0x12);
+constexpr PainterColor Screen          = PainterColor::Screen();
+constexpr PainterColor PanelBackground = Screen;
 constexpr PainterColor TitleInk        = BubbleLight;
 constexpr PainterColor LabelInk        = BubbleLight;
 constexpr PainterColor ValueInk        = painter::core::Colors::LightGray;
@@ -80,6 +81,7 @@ constexpr std::size_t MinimumCols  = PanelOriginX + PanelWidth;
 
 namespace Glyph {
 constexpr char UpperHalf = static_cast<char>(0xDF);
+constexpr char LowerHalf = static_cast<char>(0xDC);
 constexpr char Across    = static_cast<char>(0xC4);
 constexpr char Down      = static_cast<char>(0xB3);
 constexpr char TopLeft   = static_cast<char>(0xDA);
@@ -361,7 +363,7 @@ PainterColor BubblePixel(int X, int Y)
     constexpr int Pupil  = 6 * 6;
 
     int Distance = DistanceSquared(X, Y, Center, Center);
-    if (Distance > Outer) return painter::core::Colors::Black;
+    if (Distance > Outer) return Screen;
 
     if (Distance <= Pupil) {
         if (X < 13 && Y < 13 && Distance > 15)
@@ -380,18 +382,18 @@ PainterColor SatellitePixel(int X, int Y, int CenterX, int CenterY, int Radius)
 {
     int RadiusSquared = Radius * Radius;
     int Distance      = DistanceSquared(X, Y, CenterX, CenterY);
-    return Distance <= RadiusSquared ? SurfaceColor(Distance, RadiusSquared) : painter::core::Colors::Black;
+    return Distance <= RadiusSquared ? SurfaceColor(Distance, RadiusSquared) : Screen;
 }
 
 PainterColor LogoPixel(int X, int Y)
 {
     PainterColor Main = BubblePixel(X, Y);
-    if (Main != painter::core::Colors::Black) return Main;
+    if (Main != Screen) return Main;
 
     PainterColor TopLeft = SatellitePixel(X, Y, 3, 4, 3);
-    if (TopLeft != painter::core::Colors::Black) return TopLeft;
+    if (TopLeft != Screen) return TopLeft;
     PainterColor Right = SatellitePixel(X, Y, 30, 12, 2);
-    if (Right != painter::core::Colors::Black) return Right;
+    if (Right != Screen) return Right;
     return SatellitePixel(X, Y, 27, 28, 4);
 }
 
@@ -402,7 +404,7 @@ std::string TextLogoLine(std::size_t Row)
     for (std::size_t Col = 0; Col < LogoPixelWidth; Col++) {
         PainterColor Top    = LogoPixel(static_cast<int>(Col), static_cast<int>(Row * 2));
         PainterColor Bottom = LogoPixel(static_cast<int>(Col), static_cast<int>(Row * 2 + 1));
-        if (Top == painter::core::Colors::Black && Bottom == painter::core::Colors::Black) Line += ' ';
+        if (Top == Screen && Bottom == Screen) Line += ' ';
         else if (Top == BubbleBlack || Bottom == BubbleBlack) Line += '@';
         else if (Top == BubbleLight || Bottom == BubbleLight) Line += 'o';
         else Line += '#';
@@ -445,8 +447,11 @@ void Portrait::Logo(std::size_t Top)
         for (std::size_t PixelCol = 0; PixelCol < LogoPixelWidth; PixelCol++) {
             PainterColor Upper = LogoPixel(static_cast<int>(PixelCol), static_cast<int>(PixelRow));
             PainterColor Lower = LogoPixel(static_cast<int>(PixelCol), static_cast<int>(PixelRow + 1));
-            char  Ch    = Upper == painter::core::Colors::Black && Lower == painter::core::Colors::Black ? ' ' : Glyph::UpperHalf;
-            Put(Top + PixelRow / 2, LogoOriginX + PixelCol, Ch, Upper, Lower);
+            std::size_t Row = Top + PixelRow / 2;
+            std::size_t Col = LogoOriginX + PixelCol;
+            if (Upper == Screen && Lower == Screen) Put(Row, Col, ' ', Screen, Screen);
+            else if (Upper == Screen) Put(Row, Col, Glyph::LowerHalf, Lower, Screen);
+            else Put(Row, Col, Glyph::UpperHalf, Upper, Lower);
         }
     }
 }
@@ -534,6 +539,7 @@ bool PaintReport(const std::vector<Line> &Lines)
     std::expected<painter::tui::Frame, box::error> Created =
         painter::tui::Frame::Create({static_cast<std::int32_t>(MinimumCols), static_cast<std::int32_t>(ReportRows)});
     if (!Created) return false;
+    Created->Clear({Screen, Screen});
     Portrait Picture(ReportRows, MinimumCols, std::move(*Created));
     Picture.Logo(LogoTop(CardRows));
     Picture.Card(TopMargin, Lines);
