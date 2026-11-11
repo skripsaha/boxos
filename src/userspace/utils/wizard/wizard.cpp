@@ -1,19 +1,23 @@
-/* wizard — an old bearded wizard in his tower. He casts a spell on request — a
- * charm chosen by chance, with words nobody has said before — and mixes
- * potions: put things in the cauldron, drink it, and what the mix is decides
- * what the glass does for a while: it sways like a drunk's, turns over, drains,
- * glows, sparkles. Every one of them is laid over the whole screen by the
- * display (box::glass), which ends it at its time, when it is lifted, and when
- * the wizard leaves.
+/* wizard — an old bearded wizard in his stone tower, drawn in the glass's own
+ * half-block pixels. He casts a spell on request — a charm chosen by chance,
+ * with words nobody has said before — and mixes potions: choose a thing from
+ * the shelf, drop it in the pot, drink the brew with enter, and what the mix
+ * is decides what the glass does for a while: it sways, ripples, shakes, melts,
+ * glitches, snows, glows in rainbows. Every one of them is laid over the whole
+ * screen by the display (box::glass), which ends it at its time, when it is
+ * lifted, and when the wizard leaves. What he says is in a bubble by his head;
+ * the potions he has found are in his grimoire, kept in a file of its own.
  *
  *   wizard                   the tower: spells and potions by the keys
- *   wizard giddy             that charm cast at once (settings: see the keys with ctrl+?)
- *   wizard toadstool stardust  those two mixed and drunk at once
+ *   wizard giddy             that charm cast at once (the keys: ctrl+? in the tower)
+ *   wizard toadstool cobweb  those two mixed and drunk at once
  *
- * What it is made of: lore (the charms, the things in the cauldron, the
- * words), look (the settings), art (the room, the wizard, the cauldron), tower
- * (the cauldron, the casting and the keys) and paint (all of it as a picture).
- * Only art and paint know the screen; only tower asks the display.
+ * What it is made of: lore (the charms, the things in the pot, the potions),
+ * look (the settings), scene, room and cauldron (where things stand, the room,
+ * the pot), figure (the wizard), speech (his bubble), specks, icons, grimoire
+ * and book, tower (the keys and what moves of itself) and paint (all of it as a
+ * picture). Only the pictures and paint know the screen; only tower asks the
+ * display.
  */
 
 #include <cstdint>
@@ -28,8 +32,9 @@
 
 #include "tower.h"
 
-BOX_FORM("takes optional words \"a charm to cast at once (giddy, mirror, upside, ghost, grey, ember, frost, starfall, "
-         "moonlit, fever), or things to mix and drink (toadstool, moonwater, pepper, berry, moss, stardust, shard, ink)\"\n");
+BOX_FORM("takes optional words \"a charm to cast at once (giddy, mirror, upside, ghost, grey, ember, frost, starfall, moonlit, fever, "
+         "pond, tremor, pixie, prism, drip, hex, lantern, yore, blizzard, heartbeat, carnival, nightmare, tide, avalanche), or things to mix and "
+         "drink (mandrake, toadstool, feather, moonstone, scale, eye, stardust, tail, fern, bone, berry, shard, moss, beetle, cobweb, parchment)\"\n");
 
 namespace {
 

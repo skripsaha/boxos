@@ -195,7 +195,17 @@ memmap.elf: $(BOXLIB_START) $(MEMMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXL
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(MEMMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 WIZARD_DIR  = wizard
-WIZARD_OBJS = $(addprefix $(WIZARD_DIR)/,wizard.o tower.o paint.o art.o lore.o look.o)
+WIZARD_OBJS = $(addprefix $(WIZARD_DIR)/,wizard.o tower.o tower_life.o paint.o book.o lore.o look.o scene.o canvas.o light.o \
+                                         room.o room_parts.o room_shelves.o room_life.o room_beasts.o cauldron.o \
+                                         figure_build.o figure_robe.o figure_live.o speech.o specks.o icons.o grimoire.o) \
+              keep.o
+
+# The pictures work out every pixel of every frame: built -O2, as the forest's are.
+$(addprefix $(WIZARD_DIR)/,canvas.o light.o room.o room_parts.o room_shelves.o room_life.o room_beasts.o cauldron.o figure_build.o \
+           figure_robe.o figure_live.o specks.o icons.o paint.o): CXXFLAGS += -O2
+
+# The grimoire is kept with keep.o; its parts are named from the utilities' root.
+$(WIZARD_OBJS): CXXFLAGS += -I.
 
 wizard.elf: $(BOXLIB_START) $(WIZARD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(WIZARD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)

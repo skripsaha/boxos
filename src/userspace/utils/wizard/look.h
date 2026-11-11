@@ -15,15 +15,20 @@ using Color = painter::core::Color;
 
 // The keys a person chooses, in the order of Look::Keys; the digits, backspace
 // and esc are fixed, as typing is.
-enum WizardKey : std::uint8_t { KeySpell, KeyDrink, KeyEmpty, KeyLift, KeyHelp, KeyCount };
+enum WizardKey : std::uint8_t { KeySpell, KeyDrink, KeyEmpty, KeyLift, KeyBook, KeyHelp, KeyCount };
 
 struct Look {
     std::uint32_t DurationSeconds;   // how long a spell or a potion lasts, at most
     std::uint32_t StrengthPercent;   // how strongly it is felt, at most
     std::uint32_t Allowed;           // the DISPLAY_EFFECT_* kinds that may be cast
-    Color         Room;              // the wall,
+    std::uint32_t TalkPerSecond;     // how many letters of his words come out in a second
+    bool          Critters;          // the owl and the cat
+    Color         Room;              // the wall's stone,
     Color         Floor;             //   the floor,
     Color         Glow;              //   what magic glows in
+    Color         Fire;              //   the fire,
+    Color         Candle;            //   the candles,
+    Color         Moon;              //   and the moon at the window
     Color         Paper;             // the wizard's speech
     Color         Ink;
     Color         Bars;              // the lines at the top and the bottom

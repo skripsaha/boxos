@@ -1,4 +1,4 @@
-/* tower.cpp — the wizard's tower: the cauldron, the casting and the keys. */
+/* tower.cpp — the wizard's tower: the loop, the keys and what they do. */
 
 #include "tower.h"
 
@@ -9,22 +9,27 @@
 #include "box/clock.h"
 #include "box/cxx/glass.h"
 
+#include "cauldron.h"
+
 namespace wizard {
 
 namespace {
 
 namespace tui = painter::tui;
-namespace core = painter::core;
 
-constexpr std::uint32_t FrameMs = 70;          // the picture moves some fourteen times a second
-constexpr std::uint64_t StatusMs = 4500;       // how long a word of the tower's own stays up
+constexpr std::uint32_t FrameMs = 70;             // the picture moves some fourteen times a second
+constexpr std::uint64_t FlightMs = 650;           // a thing's way from his hand to the pot
+constexpr std::uint64_t DrinkLayMs = 760;         // the vial is at his lips, and the potion takes hold
+constexpr std::uint64_t CastLayMs = 480;          // the staff is up, and the spell takes hold
 
 }  // namespace
 
 Tower::Tower(tui::Stage Opened, std::vector<std::string> Asked)
-    : Screen(std::move(Opened)), Shown(ReadLook()), Luck(static_cast<std::uint32_t>(clock_uptime_us())),
-      Words(std::move(Asked))
+    : Screen(std::move(Opened)), Chosen(ReadLook()), Luck(static_cast<std::uint32_t>(clock_uptime_us())), Words(std::move(Asked)),
+      Where(Arranged(Screen.Size().Width, Screen.Size().Height)), Picture(Where.Width, Where.Height)
 {
+    Hall.Build(Where, Chosen);
+    Wizard.Build(Where, Chosen);
 }
 
 std::optional<std::string> Tower::Misunderstood(const std::vector<std::string> &Words)
@@ -45,7 +50,11 @@ void Tower::Run()
     LastMs = clock_uptime_ms();
     Door();
     for (;;) {
-        if (Watch.changed()) Shown = ReadLook();
+        if (Watch.changed()) {
+            Chosen = ReadLook();
+            Hall.Build(Where, Chosen);
+            Wizard.Build(Where, Chosen);
+        }
         const std::uint64_t Now = clock_uptime_ms();
         Step(static_cast<std::uint32_t>(Now - LastMs));
         LastMs = Now;
@@ -60,104 +69,184 @@ void Tower::Run()
 }
 
 // What was asked at the door: a charm cast at once, or the things put in and
-// drunk.
+// drunk; and with nothing asked, a greeting.
 void Tower::Door()
 {
-    if (Words.empty()) return;
-    if (const Charm *Asked = CharmNamed(Words[0]); Asked != nullptr) {
-        Lay(Spell(*Asked, Luck, Shown));
+    if (Words.empty()) {
+        Tell("The Old Wizard", std::format("Ah, a visitor! Choose a thing with the arrows, drop it in the pot with space and drink the brew with enter. "
+                                           "Or ask for a spell with {}.", Spelled(KeySpell)));
         return;
     }
-    for (const std::string &One : Words) Put(IngredientNamed(One));
+    if (const Charm *Asked = CharmNamed(Words[0]); Asked != nullptr) {
+        Cast(*Asked);
+        return;
+    }
+    for (const std::string &One : Words)
+        if (Brewing.size() < CauldronMost) Brewing.push_back(static_cast<std::uint8_t>(IngredientNamed(One)));
     Drink();
 }
 
 std::string Tower::Spelled(WizardKey Key) const
 {
     char Spelling[KEY_CHORD_SPELLED_MAX];
-    KeyChordSpell(&Shown.Keys[Key], Spelling, sizeof(Spelling));
+    KeyChordSpell(&Chosen.Keys[Key], Spelling, sizeof(Spelling));
     return Spelling;
-}
-
-void Tower::Remark(std::string Words)
-{
-    Status = std::move(Words);
-    StatusUntilMs = clock_uptime_ms() + StatusMs;
-}
-
-std::uint32_t Tower::LeftSeconds() const
-{
-    const std::uint64_t Now = clock_uptime_ms();
-    return LaidUntilMs > Now ? static_cast<std::uint32_t>((LaidUntilMs - Now + 999) / 1000) : 0;
 }
 
 bool Tower::OnKey(const tui::KeyEvent &Key)
 {
+    if (Reading.Open) return OnBookKey(Key);
     if (Help) {
         Help = false;
         return true;
     }
     const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
-    const auto       Is = [&](WizardKey Which) { return KeyChordMatches(&Shown.Keys[Which], &Raw); };
+    const auto       Is = [&](WizardKey Which) { return KeyChordMatches(&Chosen.Keys[Which], &Raw); };
     if (Is(KeyHelp)) Help = true;
-    else if (Is(KeySpell)) CastSpell();
+    else if (Is(KeySpell)) CastRandom();
     else if (Is(KeyDrink)) Drink();
     else if (Is(KeyEmpty)) Empty();
     else if (Is(KeyLift)) Lift();
-    else if (Key.IsCtrl() || Key.IsAlt() || Key.IsExtended()) return true;
-    else if (Key.Ascii == tui::KeyCodes::Escape) return false;
-    else if (Key.Ascii == tui::KeyCodes::Backspace && !Mixed.empty()) {
-        Remark(std::format("{} comes out again", Ingredients()[Mixed.back()].Name));
-        Mixed.pop_back();
-    } else if (Key.Ascii >= '1' && Key.Ascii < '1' + static_cast<char>(IngredientCount)) {
-        Put(static_cast<std::size_t>(Key.Ascii - '1'));
+    else if (Is(KeyBook)) Reading.Open = true;
+    else if (Key.IsExtended()) {
+        switch (Key.Scancode) {
+        case tui::KeyCodes::Left:     Browse(-1); break;
+        case tui::KeyCodes::Right:    Browse(1); break;
+        case tui::KeyCodes::PageUp:   Browse(-4); break;
+        case tui::KeyCodes::PageDown: Browse(4); break;
+        case tui::KeyCodes::Home:     Browse(-static_cast<int>(IngredientCount)); break;
+        case tui::KeyCodes::End:      Browse(static_cast<int>(IngredientCount)); break;
+        default: break;
+        }
+    } else if (Key.IsCtrl() || Key.IsAlt()) {
+        return true;
+    } else if (Key.Ascii == tui::KeyCodes::Escape) {
+        return false;
+    } else if (Key.Ascii == tui::KeyCodes::Enter) {
+        Drink();
+    } else if (Key.Ascii == ' ') {
+        Throw();
+    } else if (Key.Ascii == tui::KeyCodes::Backspace) {
+        TakeBack();
     }
     return true;
 }
 
-void Tower::CastSpell()
+// The grimoire's keys: tab or the arrows turn the page, up and down choose, enter casts a spell chosen.
+bool Tower::OnBookKey(const tui::KeyEvent &Key)
 {
-    Lay(Spell(Luck, Shown, LastCharm));
+    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const std::size_t Count = Reading.Page == 0 ? RecipeCount : CharmCount;
+    int &Cursor = Reading.Cursor[Reading.Page];
+    if (KeyChordMatches(&Chosen.Keys[KeyBook], &Raw) || (!Key.IsExtended() && Key.Ascii == tui::KeyCodes::Escape)) {
+        Reading.Open = false;
+    } else if (!Key.IsExtended() && Key.Ascii == tui::KeyCodes::Tab) {
+        Reading.Page = 1 - Reading.Page;
+    } else if (Key.IsExtended()) {
+        switch (Key.Scancode) {
+        case tui::KeyCodes::Left:
+        case tui::KeyCodes::Right:    Reading.Page = 1 - Reading.Page; break;
+        case tui::KeyCodes::Up:       Cursor = (Cursor + static_cast<int>(Count) - 1) % static_cast<int>(Count); break;
+        case tui::KeyCodes::Down:     Cursor = (Cursor + 1) % static_cast<int>(Count); break;
+        case tui::KeyCodes::PageUp:   Cursor = std::max(0, Cursor - 6); break;
+        case tui::KeyCodes::PageDown: Cursor = std::min(static_cast<int>(Count) - 1, Cursor + 6); break;
+        default: break;
+        }
+    } else if (Key.Ascii == tui::KeyCodes::Enter && Reading.Page == 1) {
+        Reading.Open = false;
+        Cast(Charms()[static_cast<std::size_t>(Cursor)]);
+    }
+    return true;
 }
 
-void Tower::Put(std::size_t Ingredient)
+void Tower::Browse(int By)
 {
-    if (Mixed.size() >= CauldronMost) {
-        Remark(std::format("The cauldron is full: drink it with {}, or pour it out with {}", Spelled(KeyDrink),
-                        Spelled(KeyEmpty)));
+    const int Count = static_cast<int>(IngredientCount);
+    int Next = static_cast<int>(Pick) + By;
+    Next = std::abs(By) == 1 ? (Next + Count) % Count : std::clamp(Next, 0, Count - 1);
+    Pick = static_cast<std::size_t>(Next);
+    const Ingredient &Thing = Ingredients()[Pick];
+    Tell(std::string(Thing.Name), std::string(Thing.Looks));
+    GazeUntilMs = LastMs + 1500;
+    GazeToward = 0.0f;
+    GazeTowardUp = -0.8f;
+}
+
+// The chosen thing leaves his hand for the pot; it is in the brew when it lands.
+void Tower::Throw()
+{
+    if (Falling) return;
+    if (Brewing.size() >= CauldronMost) {
+        Tell("The cauldron is full", std::format("Drink it with enter, take the last thing out with backspace, or pour it all out with {}.", Spelled(KeyEmpty)));
         return;
     }
-    Mixed.push_back(static_cast<std::uint8_t>(Ingredient));
-    const Scene Where = Placed();
-    const core::Point Surface = SurfaceOf(Where.CauldronX, Where.CauldronY);
-    Burst(Surface.X, Surface.Y, Color::FromRaw(Liquid(Mixed)), 6);
-    Remark(std::format("{} goes in", Ingredients()[Ingredient].Name));
+    Falling = Flight{Pick, LastMs, WizardPixelX(Where, 36.0f), WizardPixelY(Where, 74.0f)};
+    GazeUntilMs = LastMs + FlightMs + 500;
+    GazeToward = 1.0f;
+    GazeTowardUp = -0.3f;
+}
+
+void Tower::TakeBack()
+{
+    if (Brewing.empty()) {
+        Tell("Nothing to take out", "The cauldron is empty. Choose a thing with the arrows and drop it in with space.");
+        return;
+    }
+    const Ingredient &Thing = Ingredients()[Brewing.back()];
+    const Spot Surface = SurfaceOf(Where);
+    Burst(Surface.X, Surface.Y, Color::FromRaw(Thing.Color), 8, SpeckKind::Drop);
+    Tell(std::string(Thing.Name), std::format("{} comes out again.", Thing.Name));
+    Brewing.pop_back();
+    Splash = 0.8f;
 }
 
 void Tower::Drink()
 {
-    if (Mixed.empty()) {
-        Remark("The cauldron is empty: put things in it with 1 to 8");
+    if (Soon) return;
+    if (Brewing.empty()) {
+        Tell("The cauldron is empty", "Choose a thing with the arrows and drop it in with space; then enter drinks the brew.");
         return;
     }
-    Casting Brewed = Potion(Mixed, Luck, Shown);
-    Mixed.clear();
-    Lay(std::move(Brewed));
+    Soon = Pending{Potion(Brewing, Luck, Chosen), LastMs + DrinkLayMs, true};
+    DrinkUntilMs = LastMs + DrinkLayMs + 700;
+    GazeUntilMs = DrinkUntilMs;
+    GazeToward = 0.0f;
+    GazeTowardUp = -0.2f;
+    Tell("Down the hatch", "Bottoms up!");
+}
+
+void Tower::CastRandom()
+{
+    Cast(ChooseCharm(Luck, Chosen, LastCharm));
+}
+
+void Tower::Cast(const Charm &Which)
+{
+    if (Soon) return;
+    Soon = Pending{Spell(Which, Luck, Chosen), LastMs + CastLayMs, false};
+    CastUntilMs = LastMs + CastLayMs + 1300;
+    GazeUntilMs = CastUntilMs;
+    GazeToward = 0.0f;
+    GazeTowardUp = 0.9f;
+    Excite = std::max(Excite, 0.35f);
 }
 
 void Tower::Empty()
 {
-    if (Mixed.empty()) return;
-    Mixed.clear();
-    Remark("Poured out");
+    if (Brewing.empty()) return;
+    const Spot Surface = SurfaceOf(Where);
+    Burst(Surface.X, Surface.Y, Color::FromRaw(Liquid(Brewing)), 14, SpeckKind::Drop);
+    Brewing.clear();
+    Splash = 1.0f;
+    Tell("Poured out", "Hiss! A waste of good toad.");
 }
 
 void Tower::Lift()
 {
     const box::result<bool> Lifted = box::glass::lift();
     LaidUntilMs = 0;
-    if (!Lifted) Remark(std::format("The glass would not let go: {}", Lifted.error().message()));
-    else if (*Lifted) Remark("The spell is lifted");
+    if (!Lifted) Tell("Stuck", std::format("The glass would not let go: {}", Lifted.error().message()));
+    else if (*Lifted) Tell("Lifted", "The spell is lifted. The room is as it was.");
 }
 
 // What is to be laid over the glass, laid — or why it is not.
@@ -165,8 +254,8 @@ void Tower::Lay(Casting Spelt)
 {
     LastCharm = Spelt.Of != nullptr ? Spelt.Of : LastCharm;
     if (Spelt.Kinds == 0) {
+        Tell(Spelt.Name, "Nothing comes of it: settings wizard effects says which may be cast.");
         Spoken = std::move(Spelt);
-        Remark("Nothing comes of it: settings wizard effects says which may be cast");
         return;
     }
     const box::status Laid = box::glass::lay({.kinds = Spelt.Kinds,
@@ -175,57 +264,21 @@ void Tower::Lay(Casting Spelt)
                                               .color = Spelt.Color,
                                               .duration = std::chrono::milliseconds(Spelt.DurationMs)});
     if (!Laid) {
-        Remark(std::format("The glass would not take it: {}", Laid.error().message()));
+        Tell("The glass is deaf", std::format("The glass would not take it: {}", Laid.error().message()));
         return;
     }
-    LaidUntilMs = clock_uptime_ms() + Spelt.DurationMs;
-    Excitement = 255;
-    const Scene Where = Placed();
-    const core::Point Stone = StoneOf(Where.WizardX, Where.WizardY);
-    Burst(Stone.X, Stone.Y, Shown.Glow, 28);
+    LaidUntilMs = LastMs + Spelt.DurationMs;
+    Excite = 1.0f;
+    Face = Spelt.Face;
+    MoodWeight = 1.0f;
+    Burst(WizardPixelX(Where, -38.0f), WizardPixelY(Where, 8.0f), Chosen.Glow, 34, SpeckKind::Spark);
+    if (Spelt.Of != nullptr) Book.CountCast();
+    else Book.CountDrunk();
+    if (Spelt.Found != NoIngredient && Book.Learn(Spelt.Found))
+        Tell(std::format("NEW: {}", Spelt.Name), std::format("{} It is written in the grimoire ({}).", Spelt.Verse, Spelled(KeyBook)));
+    else
+        Tell(Spelt.Name, Spelt.Verse);
     Spoken = std::move(Spelt);
-}
-
-// A handful of specks leaving X, Y in every direction.
-void Tower::Burst(std::int32_t X, std::int32_t Y, Color Ink, std::uint32_t Count)
-{
-    for (std::uint32_t One = 0; One < Count; One++) {
-        const auto Around = static_cast<std::int32_t>(Luck.Below(61)) - 30;
-        const auto Up = static_cast<std::int32_t>(Luck.Below(50)) + 10;
-        Sparks.Add(Speck{X * 16, Y * 16, -Up * 16, Around * 16, 700u + Luck.Below(700), 0, Ink, true});
-    }
-}
-
-// What moves of itself: the specks, the bubbles, the stone's excitement, and
-// the spell wearing off.
-void Tower::Step(std::uint32_t ElapsedMs)
-{
-    const std::uint64_t Now = LastMs;
-    if (LaidUntilMs != 0 && Now >= LaidUntilMs) {
-        LaidUntilMs = 0;
-        Remark("The spell wears off");
-    }
-    Excitement -= std::min<std::uint32_t>(Excitement, ElapsedMs * 255u / 1500u);
-    Sparks.Step(ElapsedMs);
-
-    const Scene Where = Placed();
-    const core::Point Surface = SurfaceOf(Where.CauldronX, Where.CauldronY);
-    const core::Point Stone = StoneOf(Where.WizardX, Where.WizardY);
-    BubbleMs += ElapsedMs;
-    const std::uint32_t Every = 700u / (static_cast<std::uint32_t>(Mixed.size()) * 2u + 1u) + 60u;
-    while (BubbleMs >= Every) {
-        BubbleMs -= Every;
-        const auto Across = static_cast<std::int32_t>(Luck.Below(9)) - 4;
-        const Color Ink = Mixed.empty() ? Color::Rgb(0x70, 0x90, 0x78) : Color::Mix(Color::FromRaw(Liquid(Mixed)), Color::Rgb(255, 255, 255), 80);
-        Sparks.Add(Speck{(Surface.X + Across) * 16, Surface.Y * 16, -static_cast<std::int32_t>(10 + Luck.Below(14)) * 16, 0,
-                         900u + Luck.Below(700), 0, Ink, true});
-        if (Mixed.size() >= 2)
-            Sparks.Add(Speck{(Surface.X + Across) * 16, (Surface.Y - 2) * 16, -static_cast<std::int32_t>(5 + Luck.Below(5)) * 16,
-                             (static_cast<std::int32_t>(Luck.Below(7)) - 3) * 16, 1800, 0, Color::Rgb(0xD0, 0xD0, 0xD8), false});
-        if (Luck.Below(4) == 0)
-            Sparks.Add(Speck{Stone.X * 16, Stone.Y * 16, -static_cast<std::int32_t>(4 + Luck.Below(10)) * 16,
-                             (static_cast<std::int32_t>(Luck.Below(21)) - 10) * 16, 1000, 0, Shown.Glow, true});
-    }
 }
 
 }  // namespace wizard
