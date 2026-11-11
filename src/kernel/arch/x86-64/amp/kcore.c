@@ -409,6 +409,49 @@ static void kcore_process_entry(struct process_t* proc)
     process_ref_dec(proc);
 }
 
+/* The time since the mark counted, awake or asleep. This K-Core alone writes
+ * it; a reader takes the three only between two even counts of count_seq. */
+static void kcore_count(KCorePocketQueue* q, bool awake)
+{
+    const uint64_t now  = rdtsc();
+    const uint64_t span = now > q->count_mark ? now - q->count_mark : 0;
+    __atomic_store_n(&q->count_seq, q->count_seq + 1, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    q->count_total += span;
+    if (awake) q->count_awake += span;
+    q->count_mark = now;
+    __atomic_store_n(&q->count_seq, q->count_seq + 1, __ATOMIC_RELEASE);
+}
+
+bool kcore_cpu_usage(uint8_t core_idx, uint64_t* busy_tsc, uint64_t* total_tsc)
+{
+    if (!g_kcore_queues || core_idx >= g_amp.total_cores || !g_amp.cores[core_idx].is_kcore)
+        return false;
+    const KCorePocketQueue* q = &g_kcore_queues[core_idx];
+    uint64_t mark, awake, total;
+    bool     sleeping;
+    for (;;) {
+        const uint32_t before = __atomic_load_n(&q->count_seq, __ATOMIC_ACQUIRE);
+        if (before & 1u) { __asm__ volatile("pause"); continue; }
+        mark     = q->count_mark;
+        awake    = q->count_awake;
+        total    = q->count_total;
+        sleeping = __atomic_load_n(&q->in_hlt, __ATOMIC_RELAXED) != 0;
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&q->count_seq, __ATOMIC_RELAXED) == before) break;
+    }
+    /* The span since the mark, as it goes: a K-Core busy for minutes on one
+     * pocket reads as busy now, not when it next sleeps. */
+    const uint64_t now = rdtsc();
+    if (mark != 0 && now > mark) {
+        total += now - mark;
+        if (!sleeping) awake += now - mark;
+    }
+    *busy_tsc  = awake;
+    *total_tsc = total;
+    return true;
+}
+
 void kcore_run_loop(void)
 {
     uint8_t my_idx = amp_get_core_index();
@@ -416,6 +459,7 @@ void kcore_run_loop(void)
     uint32_t loop_count = 0;
 
     kprintf("[KCORE] Core %u guide loop started\n", (uint32_t)my_idx);
+    q->count_mark = rdtsc();
 
     __asm__ volatile("sti");
 
@@ -583,12 +627,14 @@ void kcore_run_loop(void)
          * a cycle due, or one owed later that no Lull is armed yet to wake
          * this core for. */
         __asm__ volatile("cli");
+        kcore_count(q, true);               /* awake until the sleep */
         __atomic_store_n(&q->in_hlt, 1u, __ATOMIC_SEQ_CST);  /* before the last look */
         if (kcore_queue_depth(my_idx) != 0 || BatonPending(my_idx) || TagFSStepOwedHere()) {
             __atomic_store_n(&q->in_hlt, 0u, __ATOMIC_RELEASE);
             __asm__ volatile("sti");        /* raced submit — loop, don't sleep */
         } else {
             __asm__ volatile("sti; hlt");   /* atomic arm-and-sleep */
+            kcore_count(q, false);          /* asleep until now: counted before it says it woke */
             __atomic_store_n(&q->in_hlt, 0u, __ATOMIC_RELEASE);
         }
     }

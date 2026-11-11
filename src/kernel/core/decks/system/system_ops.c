@@ -46,6 +46,7 @@
 #include "block_map_derived.h"   /* a book's free count is its derived block map's */
 #include "kernel_config.h"
 #include "amp.h"
+#include "kcore.h"     /* kcore_cpu_usage — a K-Core's time, counted by its own loop */
 #include "scheduler.h"
 #include "guide.h"   /* guide_dispatch_stats — enclosed/addressed split for perf.dump */
 
@@ -2197,9 +2198,17 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     }
     blob[24] = volume_present ? 1 : 0;
 
+    /* The App Cores as their scheduler counts them, and each K-Core as its
+     * loop does. */
     uint64_t busy_tsc = 0;
     uint64_t total_tsc = 0;
     scheduler_cpu_usage(&busy_tsc, &total_tsc);
+    for (uint8_t core = 0; core < g_amp.total_cores; core++) {
+        uint64_t core_busy = 0, core_total = 0;
+        if (!kcore_cpu_usage(core, &core_busy, &core_total)) continue;
+        busy_tsc += core_busy;
+        total_tsc += core_total;
+    }
     memcpy(blob + 32, &busy_tsc,  sizeof(busy_tsc));
     memcpy(blob + 40, &total_tsc, sizeof(total_tsc));
 
@@ -2209,9 +2218,10 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 
 /* SYSTEM_OP_CORE_USAGE params:[u32 core index] out_crate:
  * [u64 busy TSC ticks][u64 total TSC ticks][u8 parked][u8 a K-Core: it runs
- * the system's work, not programs][6 bytes padding].
- * The counters are cumulative; userspace compares two snapshots to obtain
- * utilization over its display interval. */
+ * the system's work, not programs][6 bytes padding]. An App Core's ticks are
+ * its scheduler's, a K-Core's its loop's: awake, and in all. The counters are
+ * cumulative; userspace compares two snapshots to obtain utilization over its
+ * display interval. */
 #define SYSCORE_USAGE_BLOB_SIZE 24
 
 static int SysCoreUsage(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -2230,8 +2240,9 @@ static int SysCoreUsage(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     uint64_t busy_tsc = 0;
     uint64_t total_tsc = 0;
     bool parked = false;
-    if (!scheduler_core_cpu_usage((uint8_t)core_index, &busy_tsc, &total_tsc,
-                                  &parked))
+    const bool kernel = g_amp.cores[core_index].is_kcore;
+    if (kernel ? !kcore_cpu_usage((uint8_t)core_index, &busy_tsc, &total_tsc)
+               : !scheduler_core_cpu_usage((uint8_t)core_index, &busy_tsc, &total_tsc, &parked))
         return ERR_INTERNAL;
 
     Crate *out = &crates[op->out_crate];
@@ -2242,7 +2253,7 @@ static int SysCoreUsage(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     memcpy(blob + 0, &busy_tsc, sizeof(busy_tsc));
     memcpy(blob + 8, &total_tsc, sizeof(total_tsc));
     blob[16] = parked ? 1 : 0;
-    blob[17] = g_amp.cores[core_index].is_kcore ? 1 : 0;
+    blob[17] = kernel ? 1 : 0;
     if (crate_write(out, ctx, blob, sizeof(blob)) != OK)
         return ERR_INVALID_ADDRESS;
     return OK;

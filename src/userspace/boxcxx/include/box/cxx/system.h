@@ -79,18 +79,19 @@ struct core_usage_snapshot {
     std::uint64_t busy_tsc = 0;
     std::uint64_t total_tsc = 0;
     bool parked = false;
+    bool kernel = false;   // a K-Core: the system's work, not programs
 };
 
-// Cumulative accounting for one scheduler core. Compare two snapshots to
-// calculate that core's utilization over an interval.
+// Cumulative accounting for one core — an App Core's by its scheduler, a
+// K-Core's by its own loop. Compare two snapshots to calculate that core's
+// utilization over an interval.
 inline result<core_usage_snapshot> core_usage(std::uint32_t core_index) noexcept
 {
     system_core_usage_t raw{};
     const int rc = ::system_core_usage(core_index, &raw);
     if (rc != 0)
         return std::unexpected(error{box_errno_of(rc)});
-    return core_usage_snapshot{raw.cpu_busy_tsc, raw.cpu_total_tsc,
-                               raw.parked != 0};
+    return core_usage_snapshot{raw.cpu_busy_tsc, raw.cpu_total_tsc, raw.parked != 0, raw.kernel != 0};
 }
 
 // A snapshot of the machine; on success the view, otherwise the recovered

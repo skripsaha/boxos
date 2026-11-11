@@ -58,8 +58,9 @@ typedef struct {
     uint64_t volume_used_bytes;
 } system_resources_t;
 
-/* Per-core cumulative CPU accounting. Compare two snapshots for the
- * utilization of one core over that interval. */
+/* Per-core cumulative CPU accounting — an App Core's by its scheduler, a
+ * K-Core's by its own loop. Compare two snapshots for the utilization of one
+ * core over that interval. */
 typedef struct {
     uint64_t cpu_busy_tsc;
     uint64_t cpu_total_tsc;

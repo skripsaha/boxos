@@ -58,6 +58,15 @@ typedef struct {
      * it last served one, and never lower than it was. Written by this
      * K-Core; read by another when a strand comes from it (sched_rebase). */
     volatile uint64_t  waterline;
+    /* Where this K-Core's time goes, counted by its own loop, which no
+     * scheduler sees: the TSC ticks it spent awake — serving, pumping,
+     * servicing — and in all, up to `count_mark`; the time since the mark is
+     * awake unless in_hlt says it sleeps (kcore_cpu_usage). Written by this
+     * K-Core alone, under `count_seq`, odd while it writes. */
+    volatile uint32_t  count_seq;
+    volatile uint64_t  count_mark;
+    volatile uint64_t  count_awake;
+    volatile uint64_t  count_total;
 } __attribute__((aligned(64))) KCorePocketQueue;
 
 extern KCorePocketQueue *g_kcore_queues;
@@ -68,6 +77,10 @@ void kcore_run_loop(void) __attribute__((noreturn));
 uint32_t kcore_queue_depth(uint8_t core_idx);
 /* True while some K-Core is inside guide_process_one for this strand. */
 bool kcore_is_serving(const struct process_t* proc);
+/* A K-Core's time, as scheduler_core_cpu_usage says an App Core's: the TSC
+ * ticks it was awake and in all since it began its loop, counted to now.
+ * False for a core that is no K-Core. */
+bool kcore_cpu_usage(uint8_t core_idx, uint64_t* busy_tsc, uint64_t* total_tsc);
 /* A K-Core asleep in its HLT gate woken to go round its loop again — for work
  * it finds at a service point rather than in its queue. The work is published
  * before the call; from any context, an interrupt's included — it is one load
