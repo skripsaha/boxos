@@ -10,20 +10,26 @@ namespace {
 using painter::core::Color;
 
 /* A blue whale: a deep blue back that turns to slate along the flank and to
- * pale at the belly, which has its throat grooves. Every one keeps its
- * family on a sixteen-colour console too: blue, light blue, white. */
-constexpr Color BackTop = Color::Rgb(0x14, 0x32, 0x7A);
-constexpr Color Back    = Color::Rgb(0x1E, 0x4A, 0x98);
-constexpr Color Mottle  = Color::Rgb(0x2E, 0x62, 0xB0);
-constexpr Color Flank   = Color::Rgb(0x3A, 0x70, 0xBA);
-constexpr Color Lower   = Color::Rgb(0x78, 0xA8, 0xDC);
-constexpr Color Belly   = Color::Rgb(0xC4, 0xDE, 0xF2);
-constexpr Color Groove  = Color::Rgb(0x92, 0xB8, 0xDC);
-constexpr Color Fluke   = Color::Rgb(0x1A, 0x3C, 0x86);
-constexpr Color Fin     = Color::Rgb(0x56, 0x8C, 0xCE);
+ * pale at the belly, which has its throat grooves. Each shade is the default
+ * back or belly colour moved with them, by the share of the belly it leans to,
+ * so the default is the blue whale exactly. */
 constexpr Color Lip     = Color::Rgb(0x10, 0x26, 0x58);
 constexpr Color Pupil   = Color::Rgb(0x04, 0x08, 0x16);
 constexpr Color Glint   = Color::Rgb(0xF0, 0xF6, 0xFF);
+
+std::uint8_t Moved(std::uint8_t Base, int ByBack, int ByBelly, float Belly)
+{
+    return static_cast<std::uint8_t>(std::clamp(std::lround(Base + ByBack * (1.0f - Belly) + ByBelly * Belly), 0l, 255l));
+}
+
+/* A shade of the default whale at a place between its back (0) and belly (1). */
+Color Shaded(std::uint32_t Default, float Belly, Color Back, Color Under)
+{
+    Color Base = Color::FromRaw(Default);
+    return Color::Rgb(Moved(Base.Red(), Back.Red() - DefaultBack.Red(), Under.Red() - DefaultBelly.Red(), Belly),
+                      Moved(Base.Green(), Back.Green() - DefaultBack.Green(), Under.Green() - DefaultBelly.Green(), Belly),
+                      Moved(Base.Blue(), Back.Blue() - DefaultBack.Blue(), Under.Blue() - DefaultBelly.Blue(), Belly));
+}
 
 std::uint32_t Hash(int A, int B)
 {
@@ -44,6 +50,15 @@ Vec Unity(Vec Direction)
 }
 
 }  // namespace
+
+Hues Dress(Color Back, Color Belly)
+{
+    return Hues{Shaded(0x14327A, 0.0f, Back, Belly), Back,
+                Shaded(0x2E62B0, 0.0f, Back, Belly), Shaded(0x3A70BA, 0.17f, Back, Belly),
+                Shaded(0x78A8DC, 0.54f, Back, Belly), Belly,
+                Shaded(0x92B8DC, 1.0f, Back, Belly), Shaded(0x1A3C86, 0.0f, Back, Belly),
+                Shaded(0x568CCE, 0.25f, Back, Belly)};
+}
 
 Figure::Figure()
 {
@@ -82,13 +97,13 @@ void Figure::Pose(const Swimmer &Whale)
     float          Swing = 0.55f + 0.4f * Whale.FinSwing;
     Vec Root = Arm.From + Arm.Side * (Arm.Facing * Radius(Arm.Along) * 0.5f);
     Vec Dir  = Arm.Toward * std::cos(Swing) + Arm.Side * (Arm.Facing * std::sin(Swing));
-    Pectoral = {Root, Root + Dir * (Length * 0.2f), Length * 0.05f * (0.4f + 0.6f * std::fabs(Arm.Facing)), Fin};
+    Pectoral = {Root, Root + Dir * (Length * 0.2f), Length * 0.05f * (0.4f + 0.6f * std::fabs(Arm.Facing)), Ink.Fin};
 
     TailCount = 0;
     const Segment &Ridge = Segments[17];
     Vec Up   = Ridge.Side * (Ridge.Facing >= 0.0f ? -1.0f : 1.0f);
     Vec Base = Ridge.From + Up * (Radius(Ridge.Along) * 0.7f);
-    AddLeaf(Base, Base + (Up * 0.6f + Ridge.Toward * 0.8f) * (Length * 0.075f), Length * 0.022f, Back);
+    AddLeaf(Base, Base + (Up * 0.6f + Ridge.Toward * 0.8f) * (Length * 0.075f), Length * 0.022f, Ink.Back);
 
     const Segment &End   = Segments[SpineSegments - 1];
     Vec            Tip   = End.From + End.Toward * End.Length;
@@ -96,7 +111,7 @@ void Figure::Pose(const Swimmer &Whale)
     constexpr float Spread = 1.3f;
     for (float Way : {1.0f, -1.0f}) {
         Vec Out = End.Toward * std::cos(Spread) + End.Side * (Way * std::sin(Spread));
-        AddLeaf(Joint, Joint + Out * (Length * 0.24f), Length * 0.045f, Fluke);
+        AddLeaf(Joint, Joint + Out * (Length * 0.24f), Length * 0.045f, Ink.Fluke);
     }
 
     const Segment &Head = Segments[4];
@@ -139,13 +154,13 @@ Color Figure::Skin(float Along, float Facing, float Offset, float Radius) const
     float Across = std::clamp(Facing * Offset / Radius, -1.0f, 1.0f);
 
     if (std::fabs(Facing) > 0.35f && Along < 0.2f && std::fabs(Across - (0.58f - 1.5f * Along)) * Radius < 0.55f) return Lip;
-    if (Across > 0.62f && Along > 0.07f && Along < 0.55f && static_cast<int>((Across - 0.62f) * 13.0f) % 2 == 1) return Groove;
-    if (Across < -0.2f && Hash(static_cast<int>(Along * Length), static_cast<int>(std::floor(Offset))) % 29 == 0) return Mottle;
-    if (Across < -0.68f) return BackTop;
-    if (Across < -0.2f) return Back;
-    if (Across < 0.22f) return Flank;
-    if (Across < 0.58f) return Lower;
-    return Belly;
+    if (Across > 0.62f && Along > 0.07f && Along < 0.55f && static_cast<int>((Across - 0.62f) * 13.0f) % 2 == 1) return Ink.Groove;
+    if (Across < -0.2f && Hash(static_cast<int>(Along * Length), static_cast<int>(std::floor(Offset))) % 29 == 0) return Ink.Mottle;
+    if (Across < -0.68f) return Ink.BackTop;
+    if (Across < -0.2f) return Ink.Back;
+    if (Across < 0.22f) return Ink.Flank;
+    if (Across < 0.58f) return Ink.Lower;
+    return Ink.Belly;
 }
 
 Pixel Figure::BodyAt(Vec Place) const

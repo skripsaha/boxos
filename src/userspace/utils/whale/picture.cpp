@@ -37,6 +37,13 @@ Picture::Picture(painter::core::Size Glass)
 {
 }
 
+void Picture::Dress(const Hues &Colours, bool Edged)
+{
+    Body.Wear(Colours);
+    Outlined = Edged;
+    Dark     = Edged ? Outline : painter::core::Colors::Black;
+}
+
 painter::core::Rect Picture::Draw(const Swimmer &Whale, painter::tui::Frame &Overlay)
 {
     Overlay.Fill(Shown, Cell::TransparentCell());
@@ -48,7 +55,7 @@ painter::core::Rect Picture::Draw(const Swimmer &Whale, painter::tui::Frame &Ove
     Rect Pixels = Rect{Left, Top, Right - Left, Bottom - Top}.Intersect(Rect{0, 2, Cells.Width, Cells.Height * 2 - 2});
 
     Pixels = Paint(Pixels);
-    Edge(Pixels);
+    if (Outlined) Edge(Pixels);
     Reached = {Pixels.X, Pixels.Y / 2, Pixels.Width, Pixels.Height / 2};
     Lay(Reached, Overlay);
     Sprinkle(Whale, Overlay);
@@ -114,15 +121,15 @@ void Picture::Edge(Rect Pixels)
 }
 
 /* Two pixels to a cell, the upper and the lower; the half of a cell the whale
- * leaves empty is the dark of its edge. */
+ * leaves empty is the dark of its edge, or the console's black without an edge. */
 void Picture::Lay(Rect Area, painter::tui::Frame &Overlay) const
 {
     for (std::int32_t Row = Area.Y; Row < Area.Y + Area.Height; Row++) {
         for (std::int32_t Col = Area.X; Col < Area.X + Area.Width; Col++) {
             std::size_t Upper = static_cast<std::size_t>(Row * 2) * Cells.Width + Col, Lower = Upper + Cells.Width;
             if (Parts[Upper] == Part::None && Parts[Lower] == Part::None) continue;
-            Color Top = Parts[Upper] == Part::None ? Outline : Dots[Upper];
-            Color Low = Parts[Lower] == Part::None ? Outline : Dots[Lower];
+            Color Top = Parts[Upper] == Part::None ? Dark : Dots[Upper];
+            Color Low = Parts[Lower] == Part::None ? Dark : Dots[Lower];
             Overlay.Put({Col, Row}, Cell{painter::tui::Glyphs::UpperHalf, Top, Low});
         }
     }

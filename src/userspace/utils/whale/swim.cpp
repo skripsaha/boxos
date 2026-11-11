@@ -56,18 +56,29 @@ float Swimmer::Girth(float Along)
     return 0.12f + 0.88f * std::pow(1.0f - Back, 1.1f);
 }
 
-void Swimmer::Begin(int PixelsAcross, int PixelsDown)
+void Swimmer::Fit(float Size)
 {
-    Seed   = cpu_rdtsc() | 1;
-    Across = PixelsAcross;
-    Down   = PixelsDown;
-
-    Length = std::min(std::clamp(Across / 3.2f, 28.0f, 80.0f), Down * 0.6f);
+    Length = std::min(std::clamp(Across / 3.2f, 28.0f, 80.0f) * Size, Down * 0.6f);
     Cruise = Length * 0.3f;
     MinX   = Length * 0.2f;
     MaxX   = Across - MinX;
     MinY   = 4.0f + Length * 0.2f;
     MaxY   = Down - Length * 0.2f - 2.0f;
+}
+
+void Swimmer::Tune(float Speed, bool SpoutsNow, bool BubblesNow)
+{
+    Pace    = Speed;
+    Spouts  = SpoutsNow;
+    Bubbles = BubblesNow;
+}
+
+void Swimmer::Begin(int PixelsAcross, int PixelsDown, float Size)
+{
+    Seed   = cpu_rdtsc() | 1;
+    Across = PixelsAcross;
+    Down   = PixelsDown;
+    Fit(Size);
 
     Heading = Unit() < 0.5f ? 0.0f : Pi;
     Course  = Heading;
@@ -88,7 +99,14 @@ void Swimmer::Begin(int PixelsAcross, int PixelsDown)
     Shape();
 }
 
+/* Time at the whale's own pace, in steps short enough for its trail to stay smooth. */
 void Swimmer::Step(float Seconds)
+{
+    constexpr float Longest = 0.1f;
+    for (float Rest = Seconds * Pace; Rest > 0.0f; Rest -= Longest) Move(std::min(Rest, Longest));
+}
+
+void Swimmer::Move(float Seconds)
 {
     Time += Seconds;
     Beat += Seconds * BeatRate;
@@ -187,7 +205,7 @@ void Swimmer::Release(float Seconds)
     const int Hole = static_cast<int>(BlowholeAt * SpineSegments);
 
     ToSpout -= Seconds;
-    if (ToSpout <= 0.0f && Spouting <= 0.0f && std::fabs(Facing[Hole]) > 0.8f && std::fabs(std::sin(Heading)) < 0.5f) {
+    if (Spouts && ToSpout <= 0.0f && Spouting <= 0.0f && std::fabs(Facing[Hole]) > 0.8f && std::fabs(std::sin(Heading)) < 0.5f) {
         Spouting = 0.9f;
         ToSpout  = Between(9.0f, 15.0f);
     }
@@ -208,7 +226,7 @@ void Swimmer::Release(float Seconds)
     }
 
     ToBubble -= Seconds;
-    if (ToBubble <= 0.0f && Drops.size() < MostDrops) {
+    if (Bubbles && ToBubble <= 0.0f && Drops.size() < MostDrops) {
         ToBubble = Between(0.3f, 0.8f);
         Drop Bubble;
         Bubble.At    = Spine[SpineSegments] + Vec{Between(-1.0f, 1.0f), Between(-1.5f, 1.5f)};

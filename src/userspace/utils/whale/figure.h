@@ -19,6 +19,17 @@ namespace whale {
  * leaves empty. */
 inline constexpr painter::core::Color Outline = painter::core::Color::Rgb(0x07, 0x12, 0x30);
 
+/* The whale's colours, all worked from two the person names: the back and the
+ * belly. The blue whale is the default of both. */
+inline constexpr painter::core::Color DefaultBack  = painter::core::Color::Rgb(0x1E, 0x4A, 0x98);
+inline constexpr painter::core::Color DefaultBelly = painter::core::Color::Rgb(0xC4, 0xDE, 0xF2);
+
+struct Hues {
+    painter::core::Color BackTop, Back, Mottle, Flank, Lower, Belly, Groove, Fluke, Fin;
+};
+
+Hues Dress(painter::core::Color Back, painter::core::Color Belly);
+
 enum class Part : std::uint8_t { None, Body, Fin, Tail };
 
 struct Pixel {
@@ -31,6 +42,7 @@ public:
     Figure();
 
     void Pose(const Swimmer &Whale);
+    void Wear(const Hues &Colours) { Ink = Colours; }
 
     /* What of the whale is at a place, in pixels; Kind is None when nothing. */
     Pixel At(Vec Place) const;
@@ -64,6 +76,7 @@ private:
     Pixel BodyAt(Vec Place) const;
     painter::core::Color Skin(float Along, float Facing, float Offset, float Radius) const;
 
+    Hues                                   Ink = Dress(DefaultBack, DefaultBelly);
     Segment                                Segments[SpineSegments];
     std::array<float, 65>                  Girths;
     float                                  Length = 0.0f;

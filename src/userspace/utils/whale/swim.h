@@ -44,8 +44,12 @@ struct Drop {
 
 class Swimmer {
 public:
-    /* The glass in pixels, across and down. */
-    void Begin(int PixelsAcross, int PixelsDown);
+    /* The glass in pixels, across and down, and the whale's size as a share of its usual. */
+    void Begin(int PixelsAcross, int PixelsDown, float Size);
+    /* A new size while it swims: the body grows into it or shrinks by the path it walks. */
+    void Fit(float Size);
+    /* How fast it lives, as a share of the usual, and whether it spouts and leaves bubbles. */
+    void Tune(float Speed, bool SpoutsNow, bool BubblesNow);
     void Step(float Seconds);
 
     /* How thick the body is at a place along it, 0 at the snout to 1 at the
@@ -69,9 +73,12 @@ private:
     void Shape();
     Mark Behind(float Distance) const;
     void Release(float Seconds);
+    void Move(float Seconds);
     void Advance(float Seconds);
 
     int               Across = 0, Down = 0;
+    float             Pace = 1.0f;
+    bool              Spouts = true, Bubbles = true;
     float             MinX = 0, MaxX = 0, MinY = 0, MaxY = 0;
     float             Cruise = 0.0f;
     Vec               Head;
