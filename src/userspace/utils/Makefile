@@ -71,7 +71,7 @@ UTILS = create show files tag untag name trash delete assemble \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
-        edit seek retag read inside settings scratchpad garden gardener random sand coinflip dice casino
+        edit seek retag read inside settings scratchpad garden gardener random sand coinflip dice casino seabattle
 
 .PHONY: all clean
 
@@ -459,8 +459,22 @@ casino.elf: $(BOXLIB_START) $(CASINO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXL
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(CASINO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
+# The sea battle is C++ in parts of its own directory; it keeps its hall of records with keep.o.
+SEABATTLE_DIR  = seabattle
+SEABATTLE_OBJS = $(addprefix $(SEABATTLE_DIR)/,seabattle.o app.o context.o pages.o look.o luck.o rules.o board.o match.o hunter.o \
+                                               records.o canvas.o sea.o ship_art.o effects.o radar.o layout.o board_view.o hud.o keys.o \
+                                               title.o setup.o rules_page.o hall.o handover.o place.o battle.o battle_paint.o victory.o) \
+                 keep.o
+
+# The pictures work out every pixel of every frame: built -O2, as the wizard's are.
+$(addprefix $(SEABATTLE_DIR)/,canvas.o sea.o ship_art.o effects.o radar.o board_view.o title.o battle.o battle_paint.o place.o victory.o): CXXFLAGS += -O2
+
+seabattle.elf: $(BOXLIB_START) $(SEABATTLE_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(SEABATTLE_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
 # The family's parts are named from the utilities' root: "kin/look.h".
-$(sort $(EDIT_OBJS) $(READ_OBJS) $(CASINO_OBJS)): CXXFLAGS += -I.
+$(sort $(EDIT_OBJS) $(READ_OBJS) $(CASINO_OBJS) $(SEABATTLE_OBJS)): CXXFLAGS += -I.
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.
 # See boxcxx/Makefile for what their absence cost.
