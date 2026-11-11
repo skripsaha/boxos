@@ -11,14 +11,17 @@
  * The names, apart by '+', in any case: ctrl, alt and shift, each once and in
  * any order, then the key. A key that types a character is named by the
  * character it types alone — a letter, a digit, or one of ` - = [ ] \ ; ' ,
- * . / — and a letter matches whichever case shift gives it. A key that types
+ * . / — and a letter matches whichever case shift gives it. A character typed
+ * with shift held — ~ ! @ # $ % ^ & * ( ) _ { } | : < > ? — is named alone
+ * too, and holds shift by being named: "ctrl+?" is ctrl, shift and the key
+ * under ?, as the keyboard says it. A key that types
  * none, or types space, by its name: tab, enter, space, escape, backspace,
  * up, down, left, right, home, end, page-up, page-down, insert, delete.
  *
  * Ctrl or alt is always among them: a key alone, or with shift alone, is
  * typing, and a chord taken from typing would take a letter from everybody.
- * Shift goes only with a letter or a named key: with any other character it
- * types another character, and that chord would never come.
+ * Shift is named only with a letter or a named key: with any other character
+ * it types another character, the one to name instead.
  *
  * Includer must provide uint*_t, bool and size_t BEFORE including this header.
  */
@@ -85,6 +88,16 @@ static inline bool KeyChordCharacter(uint8_t c)
     return false;
 }
 
+/* A character a key types with shift held, that a chord may name: shift is in
+ * it. '+' parts a chord's names and '"' a setting's words, so neither is one. */
+static inline bool KeyChordShifted(uint8_t c)
+{
+    const char *shifted = "~!@#$%^&*()_{}|:<>?";
+    for (unsigned i = 0; shifted[i]; i++)
+        if ((uint8_t)shifted[i] == c) return true;
+    return false;
+}
+
 /* The chord `length` bytes at `text` spell, into *out: false when they spell
  * none — a name not known, one said twice, no key last, no ctrl or alt, or
  * shift with a character it would change. */
@@ -109,6 +122,11 @@ static inline bool KeyChordRead(const uint8_t *text, uint64_t length, KeyChord *
         } else if (size == 1 && KeyChordCharacter(KeyChordLower(name[0]))) {
             chord.Code = KeyChordLower(name[0]);
             keyed      = true;
+        } else if (size == 1 && KeyChordShifted(name[0])) {
+            if (chord.Mods & KB_MOD_SHIFT) return false;   /* shift is in the character */
+            chord.Mods |= KB_MOD_SHIFT;
+            chord.Code = name[0];
+            keyed      = true;
         } else {
             const KeyChordName *names = KeyChordNames();
             unsigned            i     = 0;
@@ -121,9 +139,10 @@ static inline bool KeyChordRead(const uint8_t *text, uint64_t length, KeyChord *
         at = end + 1;
     }
     if (!keyed || !(chord.Mods & (KB_MOD_CTRL | KB_MOD_ALT))) return false;
-    bool letter = !chord.Extended && chord.Code >= 'a' && chord.Code <= 'z';
-    bool named  = chord.Extended || !KeyChordCharacter(chord.Code);
-    if ((chord.Mods & KB_MOD_SHIFT) && !letter && !named) return false;
+    bool letter  = !chord.Extended && chord.Code >= 'a' && chord.Code <= 'z';
+    bool shifted = !chord.Extended && KeyChordShifted(chord.Code);
+    bool named   = chord.Extended || (!KeyChordCharacter(chord.Code) && !shifted);
+    if ((chord.Mods & KB_MOD_SHIFT) && !letter && !named && !shifted) return false;
     *out = chord;
     return true;
 }
@@ -155,10 +174,13 @@ static inline void KeyChordSpell(const KeyChord *chord, char *out, size_t capaci
     const KeyChordName *names = KeyChordNames();
     for (unsigned i = 0; i < KEY_CHORD_NAMES; i++)
         if (names[i].Extended == chord->Extended && names[i].Code == chord->Code) key = names[i].Name;
+    /* A character typed with shift holds it: it is not named apart. */
+    const uint8_t said = !chord->Extended && KeyChordShifted(chord->Code) ? (uint8_t)(chord->Mods & ~KB_MOD_SHIFT)
+                                                                          : chord->Mods;
     size_t used = 0;
     if (capacity == 0) return;
     for (unsigned m = 0; m < 3; m++) {
-        if (!(chord->Mods & mods[m].Mod)) continue;
+        if (!(said & mods[m].Mod)) continue;
         for (const char *c = mods[m].Name; *c && used + 1 < capacity; c++) out[used++] = *c;
     }
     for (const char *c = key; *c && used + 1 < capacity; c++) out[used++] = *c;

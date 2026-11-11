@@ -476,11 +476,16 @@ static void TestKeys(void)
     ChordIs("ctrl+shift+1", false, 0, 0, 0);
     ChordIs("ctrl+alt+q+w", false, 0, 0, 0);
     ChordIs("ctrl alt q", false, 0, 0, 0);
-    ChordIs("ctrl+alt+!", false, 0, 0, 0);
+    ChordIs("ctrl+alt+!", true, CA | KB_MOD_SHIFT, 0, '!');
+    ChordIs("ctrl+?", true, KB_MOD_CTRL | KB_MOD_SHIFT, 0, '?');
+    ChordIs("ctrl+shift+?", false, 0, 0, 0);
+    ChordIs("ctrl++", false, 0, 0, 0);
+    ChordIs("ctrl+\"", false, 0, 0, 0);
     ChordIs("", false, 0, 0, 0);
 
     SpelledIs("Alt+Shift+Ctrl+A", "ctrl+alt+shift+a");
     SpelledIs("ctrl+alt+PAGE-UP", "ctrl+alt+page-up");
+    SpelledIs("ctrl+?", "ctrl+?");
     SpelledIs("alt+escape", "alt+escape");
     const KeyChordName *names = KeyChordNames();
     unsigned            held  = 0;
@@ -510,6 +515,11 @@ static void TestKeys(void)
     const kb_event_t four = { KEY_LEFT, '4', KB_MOD_CTRL };
     Check(KeyChordMatches(&chord, &left) && !KeyChordMatches(&chord, &four),
           "left is the key of the 0xE0 set, not the keypad's 4 with the same scancode");
+    KeyChordRead((const uint8_t *)"ctrl+?", 6, &chord);
+    const kb_event_t asked = { 0x35, '?', KB_MOD_CTRL | KB_MOD_SHIFT };
+    const kb_event_t slash = { 0x35, '/', KB_MOD_CTRL };
+    Check(KeyChordMatches(&chord, &asked) && !KeyChordMatches(&chord, &slash),
+          "ctrl+? is the key under ? with ctrl and shift held, as the keyboard says it, not ctrl+/");
 
     SettingsDeclared declared;
     Setting          setting;
