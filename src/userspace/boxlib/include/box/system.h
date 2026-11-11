@@ -64,7 +64,8 @@ typedef struct {
     uint64_t cpu_busy_tsc;
     uint64_t cpu_total_tsc;
     uint8_t  parked;
-    uint8_t  _pad[7];
+    uint8_t  kernel;   /* a K-Core: it runs the system's work, not programs */
+    uint8_t  _pad[6];
 } system_core_usage_t;
 
 /* Which part is actually producing the system tick. Read it before reporting
@@ -192,6 +193,39 @@ typedef struct ProcMate {
  * not a flaw in the answer but the nature of the question, and it is why
  * each member carries its generation — see proc_finish. */
 int proc_crew(const char *tag, ProcMate **out_mates, uint32_t *out_total);
+
+/* One strand of a program, as proc_roster found it. */
+typedef struct RosterStrand {
+    uint32_t pid;
+    uint32_t generation;
+    uint32_t state;        /* process_state_t */
+    uint32_t core;         /* the core it is scheduled on */
+    uint64_t cpu_us;       /* processor time this strand has been given */
+} RosterStrand;
+
+/* One program aboard: its cabin, named by its main strand. */
+typedef struct RosterProgram {
+    uint32_t            pid;                  /* its main strand */
+    uint32_t            generation;
+    uint32_t            spawner_pid;          /* the program it was started from; 0 the system */
+    uint32_t            spawner_generation;
+    uint64_t            program_file;         /* the volume's id of its file; 0 none */
+    uint64_t            began_us;             /* the machine's uptime when it began */
+    uint64_t            memory_bytes;         /* memory mapped for it */
+    uint32_t            raised;               /* times the system raised it again after a fall */
+    uint32_t            strand_count;
+    const RosterStrand *strands;              /* strand_count of them, its main strand first */
+    const char         *tags;                 /* comma-joined, NUL-terminated */
+} RosterProgram;
+
+/* Every program aboard, each with its strands — proc_crew answers by strand
+ * for one tag, this by program for all. Returns how many were delivered
+ * (>= 0) and a malloc'd array of them, whose strands and tags live in the same
+ * allocation — free(programs) frees them all — or a negative -error_t.
+ * `out_total` (optional): how many there are, differing from the return only
+ * when more than one answer holds. Every program was live at the walk; one
+ * found here may have ended by the time it is used, as for proc_crew. */
+int proc_roster(RosterProgram **out_programs, uint32_t *out_total);
 
 int proc_tag_add(const char* tag);
 int proc_tag_remove(const char* tag);

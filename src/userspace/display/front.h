@@ -22,6 +22,9 @@ bool FrontKeeper(const AskFrom &From) noexcept;
 // keeper From names: answered here, a refusal too.
 void FrontAsked(const Result &Asked, const AskFrom &From, const DisplayFrontRequest &Request) noexcept;
 
+// DISP_CMD_PLACES, asked of this display (Asked) by any program: answered here.
+void FrontPlacesAsked(const Result &Asked) noexcept;
+
 // DISP_CMD_KEYS, asked of this display (Asked) by the keeper From names, its
 // keys the Count chords, the first OnScreen about the program on the screen:
 // answered here, a refusal too.

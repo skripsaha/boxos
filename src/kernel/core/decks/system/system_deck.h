@@ -78,4 +78,8 @@ error_t TurnInOpsRegister(void);
  * was copied. Called from SystemDeckRegister. */
 error_t ClipboardOpsRegister(void);
 
+/* Register SYSTEM_OP_ROSTER (roster_ops.c) — every program aboard, each with
+ * its strands. Called from SystemDeckRegister. */
+error_t RosterOpsRegister(void);
+
 #endif /* SYSTEM_DECK_H */

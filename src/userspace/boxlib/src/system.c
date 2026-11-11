@@ -412,6 +412,106 @@ int proc_crew(const char *tag, ProcMate **out_mates, uint32_t *out_total)
     return (int)delivered;
 }
 
+/* The roster's answer — boxos_decks.h SYSTEM_OP_ROSTER holds the layout — and
+ * its asks, which grow as the crew's do. */
+#define ROSTER_HEADER   8u
+#define ROSTER_PROGRAM  56u
+#define ROSTER_STRAND   24u
+
+/* The answer laid out for the caller: the programs, then every strand, then
+ * every tag list — one allocation. False when the answer does not hold what
+ * it says. */
+static bool roster_lay(const uint8_t *blob, uint32_t got, uint32_t delivered, RosterProgram *programs,
+                       RosterStrand *strands, char *names)
+{
+    uint32_t at = ROSTER_HEADER;
+    for (uint32_t i = 0; i < delivered; i++) {
+        RosterProgram *one = &programs[i];
+        uint32_t       tags_len = 0;
+        if (at + ROSTER_PROGRAM > got) return false;
+        memcpy(&one->pid, blob + at + 0, sizeof(uint32_t));
+        memcpy(&one->generation, blob + at + 4, sizeof(uint32_t));
+        memcpy(&one->spawner_pid, blob + at + 8, sizeof(uint32_t));
+        memcpy(&one->spawner_generation, blob + at + 12, sizeof(uint32_t));
+        memcpy(&one->program_file, blob + at + 16, sizeof(uint64_t));
+        memcpy(&one->began_us, blob + at + 24, sizeof(uint64_t));
+        memcpy(&one->memory_bytes, blob + at + 32, sizeof(uint64_t));
+        memcpy(&one->raised, blob + at + 40, sizeof(uint32_t));
+        memcpy(&one->strand_count, blob + at + 44, sizeof(uint32_t));
+        memcpy(&tags_len, blob + at + 48, sizeof(uint32_t));
+        at += ROSTER_PROGRAM;
+        if ((uint64_t)at + (uint64_t)one->strand_count * ROSTER_STRAND + tags_len > got) return false;
+        one->strands = strands;
+        for (uint32_t s = 0; s < one->strand_count; s++, strands++, at += ROSTER_STRAND) {
+            memcpy(&strands->pid, blob + at + 0, sizeof(uint32_t));
+            memcpy(&strands->generation, blob + at + 4, sizeof(uint32_t));
+            memcpy(&strands->state, blob + at + 8, sizeof(uint32_t));
+            memcpy(&strands->core, blob + at + 12, sizeof(uint32_t));
+            memcpy(&strands->cpu_us, blob + at + 16, sizeof(uint64_t));
+        }
+        memcpy(names, blob + at, tags_len);
+        names[tags_len] = '\0';
+        one->tags = names;
+        names += tags_len + 1;
+        at += tags_len;
+    }
+    return true;
+}
+
+int proc_roster(RosterProgram **out_programs, uint32_t *out_total)
+{
+    if (!out_programs) return -ERR_INVALID_ARGUMENT;
+    *out_programs = NULL;
+    if (out_total) *out_total = 0;
+
+    uint32_t cap = PROC_CREW_FIRST_ASK, got = 0, delivered = 0, total = 0;
+    uint8_t *blob = NULL;
+    for (;;) {
+        uint8_t *fresh = (uint8_t *)malloc(cap);
+        if (!fresh) { free(blob); return -ERR_NO_MEMORY; }
+        free(blob);
+        blob = fresh;
+        got  = 0;
+        int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_ROSTER, NULL, 0, NULL, 0, blob, cap, &got,
+                         BOX_ANSWER_GUARANTEED, NULL);
+        if (rc != 0) { free(blob); return box_fail(rc); }
+        if (got < ROSTER_HEADER) { free(blob); return -ERR_INTERNAL; }
+        memcpy(&delivered, blob + 0, sizeof(uint32_t));
+        memcpy(&total, blob + 4, sizeof(uint32_t));
+        if (delivered >= total || cap >= PROC_CREW_MAX_ASK) break;
+        cap = cap * 2u > PROC_CREW_MAX_ASK ? PROC_CREW_MAX_ASK : cap * 2u;
+    }
+    if (out_total) *out_total = total;
+    if (delivered == 0) { free(blob); return 0; }
+
+    /* Every strand and every name of the answer counted first, for the one
+     * allocation that holds them. */
+    uint64_t strand_total = 0, name_bytes = 0;
+    uint64_t at = ROSTER_HEADER;
+    for (uint32_t i = 0; i < delivered; i++) {
+        uint32_t strand_count = 0, tags_len = 0;
+        if (at + ROSTER_PROGRAM > got) { free(blob); return -ERR_INTERNAL; }
+        memcpy(&strand_count, blob + at + 44, sizeof(uint32_t));
+        memcpy(&tags_len, blob + at + 48, sizeof(uint32_t));
+        strand_total += strand_count;
+        name_bytes += (uint64_t)tags_len + 1;
+        at += ROSTER_PROGRAM + (uint64_t)strand_count * ROSTER_STRAND + tags_len;
+    }
+    size_t bytes = (size_t)delivered * sizeof(RosterProgram) + (size_t)strand_total * sizeof(RosterStrand) +
+                   (size_t)name_bytes;
+    RosterProgram *programs = (RosterProgram *)malloc(bytes);
+    if (!programs) { free(blob); return -ERR_NO_MEMORY; }
+    RosterStrand *strands = (RosterStrand *)(programs + delivered);
+    if (!roster_lay(blob, got, delivered, programs, strands, (char *)(strands + strand_total))) {
+        free(programs);
+        free(blob);
+        return -ERR_INTERNAL;
+    }
+    free(blob);
+    *out_programs = programs;
+    return (int)delivered;
+}
+
 /* =========================================================================
  *  Tags
  * ========================================================================= */
@@ -542,6 +642,7 @@ int system_core_usage(uint32_t core_index, system_core_usage_t *out)
     memcpy(&out->cpu_busy_tsc, blob + 0, 8);
     memcpy(&out->cpu_total_tsc, blob + 8, 8);
     out->parked = blob[16];
+    out->kernel = blob[17];
     memset(out->_pad, 0, sizeof(out->_pad));
     return 0;
 }

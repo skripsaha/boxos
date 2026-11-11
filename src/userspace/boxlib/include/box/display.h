@@ -221,6 +221,19 @@ STATIC_ASSERT(sizeof(ConsoleRun) == 128,
 #define DISP_CMD_PAGE      0x53
 #define DISP_CMD_KEYS      0x54
 
+/* Where programs are, asked of the display by any program: [DISP_CMD_PLACES].
+ * Answer: a DisplayPlacesReply, then `count` DisplayPlaces — the program whose
+ * screen is shown, each program let go to live behind, each keeper; what the
+ * display keeps of who is in front and who behind, and no more (a program
+ * started from one behind is behind with it, and not named). */
+#define DISP_CMD_PLACES    0x55
+
+enum {
+    DISPLAY_PLACE_SHOWN  = 1,   /* its screen is the one shown */
+    DISPLAY_PLACE_BEHIND = 2,   /* let go: it lives behind, on its own */
+    DISPLAY_PLACE_KEEPER = 4,   /* it keeps others: it said its keys */
+};
+
 /* An occurrence the kernel's muster books (touch/muster.h): it stands on any
  * volume, whatever its tags, and never takes a name of a volume's. */
 #define DISPLAY_FRONT_TAG  "keeper:news"
@@ -290,6 +303,24 @@ int display_page(uint32_t text, uint32_t page, uint32_t *display);
  * in `keys` (DISPLAY_FRONT_KEY), the first `on_screen` about the program on
  * the screen (DISP_CMD_KEYS). 0 takes them back. *display as above. */
 int display_keys(const KeyChord *keys, uint32_t count, uint32_t on_screen, uint32_t *display);
+
+typedef struct PACKED {
+    uint8_t  command;           /* DISP_CMD_PLACES */
+    uint8_t  reserved;
+    uint16_t count;             /* the DisplayPlaces that follow */
+} DisplayPlacesReply;
+
+typedef struct PACKED {
+    uint32_t pid;               /* a program, by its main strand */
+    uint32_t generation;
+    uint8_t  place;             /* DISPLAY_PLACE_*, as many as hold */
+    uint8_t  reserved[3];
+} DisplayPlace;
+
+/* Where programs are (DISP_CMD_PLACES), into `places`, *count of them: OK;
+ * -ERR_BUFFER_TOO_SMALL when there are more than `capacity` (at most 65535);
+ * or the ask's refusal. */
+int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count);
 
 /* A word of the display on a lane's own tag, in place of a key — told from a
  * key, which is a kb_event_t of three bytes, by its length and its mark. */
@@ -474,8 +505,9 @@ STATIC_ASSERT(sizeof(DisplayLayerCloseRequest) == 12,
 STATIC_ASSERT(sizeof(DisplayLayerFrameNotice) == 12,
               "DisplayLayerFrameNotice is a message ABI and must stay 12 bytes");
 STATIC_ASSERT(sizeof(DisplayFrontRequest) == 12 && sizeof(DisplayPageRequest) == 12 &&
-                  sizeof(DisplayFrontReply) == 12 && sizeof(DisplayKeysRequest) == 4 && sizeof(KeyChord) == 4,
-              "a keeper's questions and their answer are an ABI of 12 bytes each");
+                  sizeof(DisplayFrontReply) == 12 && sizeof(DisplayKeysRequest) == 4 && sizeof(KeyChord) == 4 &&
+                  sizeof(DisplayPlacesReply) == 4 && sizeof(DisplayPlace) == 12,
+              "the front's questions and answers are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(DisplayFrontNews) == 20, "DisplayFrontNews is a Touch payload ABI of 20 bytes");
 STATIC_ASSERT(sizeof(ConsoleNotice) == 8, "ConsoleNotice is a Touch payload ABI of 8 bytes, never a key's 3");
 

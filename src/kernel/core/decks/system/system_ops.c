@@ -2208,7 +2208,8 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 }
 
 /* SYSTEM_OP_CORE_USAGE params:[u32 core index] out_crate:
- * [u64 busy TSC ticks][u64 total TSC ticks][u8 parked][7 bytes padding].
+ * [u64 busy TSC ticks][u64 total TSC ticks][u8 parked][u8 a K-Core: it runs
+ * the system's work, not programs][6 bytes padding].
  * The counters are cumulative; userspace compares two snapshots to obtain
  * utilization over its display interval. */
 #define SYSCORE_USAGE_BLOB_SIZE 24
@@ -2241,6 +2242,7 @@ static int SysCoreUsage(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     memcpy(blob + 0, &busy_tsc, sizeof(busy_tsc));
     memcpy(blob + 8, &total_tsc, sizeof(total_tsc));
     blob[16] = parked ? 1 : 0;
+    blob[17] = g_amp.cores[core_index].is_kcore ? 1 : 0;
     if (crate_write(out, ctx, blob, sizeof(blob)) != OK)
         return ERR_INVALID_ADDRESS;
     return OK;
@@ -2728,6 +2730,9 @@ error_t SystemDeckRegister(void)
 
     error_t clipboard_rc = ClipboardOpsRegister();
     if (clipboard_rc != OK) return clipboard_rc;
+
+    error_t roster_rc = RosterOpsRegister();
+    if (roster_rc != OK) return roster_rc;
 
     debug_printf("[SystemDeck] registered %zu ops (full surface, gated)\n",
                  sizeof(table) / sizeof(table[0]));

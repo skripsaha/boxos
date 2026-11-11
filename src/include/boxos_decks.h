@@ -96,6 +96,16 @@
 #define SYSTEM_OP_FRAG_SCORE        0x19
 #define SYSTEM_OP_RESOURCES         0x1A
 #define SYSTEM_OP_CORE_USAGE        0x1B
+/* Every program aboard, each with its strands (roster_ops.c). params: none.
+ * out_crate: [u32 delivered][u32 total] then `delivered` programs, each
+ * [u32 pid][u32 generation] its main strand, [u32 pid][u32 generation] the
+ * program it was started from (0 the system), [u64 program file][u64 began,
+ * the uptime in us][u64 memory mapped for it, bytes][u32 times raised again]
+ * [u32 strands][u32 tags_len][u32 0], then `strands` of [u32 pid]
+ * [u32 generation][u32 state][u32 core][u64 processor time, us] — the main
+ * strand first — then the tags, comma-joined, no NUL. A program live at the
+ * walk; one that would not fit whole is the shortfall against `total`. */
+#define SYSTEM_OP_ROSTER            0x1C
 
 /* ─── Process tags (0x20 – 0x22) ───────────────────────────────────── */
 #define SYSTEM_OP_TAG_ADD           0x20

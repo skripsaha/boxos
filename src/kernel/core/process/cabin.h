@@ -107,6 +107,10 @@ typedef struct cabin_t
      * inherits no authority. Zeroed by cabin_create's memset. */
     uint32_t spawner_gen;
 
+    /* When the program began: the machine's uptime at cabin_create, in
+     * microseconds (system.roster says it). */
+    uint64_t began_us;
+
     /* Touch subscriber list. */
     void       *subs_head;
     spinlock_t  subs_lock;

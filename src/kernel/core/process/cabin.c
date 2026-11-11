@@ -19,6 +19,7 @@
 #include "proc_exit.h"
 #include "cabin_info.h"  /* CabinProgram — the program is what the cabin's own page says */
 #include "rise.h"        /* RiseProgramEnded — a fall the system raises again */
+#include "rtc.h"         /* rtc_get_uptime_ns — when the program began */
 /*
  * cabin_set_tag_bit — intern a single tag id into the cabin's fast-path
  * bitfield or overflow array.  Mirrors the former process_set_tag_bit logic.
@@ -108,6 +109,7 @@ cabin_t *cabin_create(uint32_t pid, const char *tags)
         return NULL;
 
     memset(cabin, 0, sizeof(cabin_t));
+    cabin->began_us = rtc_get_uptime_ns() / 1000u;
 
     uint64_t info_phys   = 0;
     uint64_t pocket_phys = 0;

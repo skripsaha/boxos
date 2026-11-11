@@ -356,6 +356,9 @@ void HearQuestion(const Result &Entry)
     case DISP_CMD_SIZE:
         AnswerSize(Entry);
         return;
+    case DISP_CMD_PLACES:
+        FrontPlacesAsked(Entry);
+        return;
     case DISP_CMD_KEYS: {
         DisplayKeysRequest Head{};
         if (Length < sizeof(Head)) {

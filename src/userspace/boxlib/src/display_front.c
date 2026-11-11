@@ -5,6 +5,7 @@
 #include "box/display.h"
 #include "box/error.h"
 #include "box/ipc.h"
+#include "box/memory.h"
 #include "box/string.h"
 
 /* One question about the program (pid, generation): OK with *reply, or the
@@ -74,6 +75,29 @@ int display_keys(const KeyChord *keys, uint32_t count, uint32_t on_screen, uint3
     if (got != sizeof(reply) || reply.command != DISP_CMD_KEYS) return -ERR_CORRUPTED;
     if (display) *display = reply.display_pid;
     return reply.error == OK ? OK : -reply.error;
+}
+
+int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count)
+{
+    const uint8_t question = DISP_CMD_PLACES;
+    if (!count || (capacity && !places) || capacity > 65535u) return -ERR_INVALID_ARGUMENT;
+    *count = 0;
+    const uint32_t room  = (uint32_t)sizeof(DisplayPlacesReply) + capacity * (uint32_t)sizeof(DisplayPlace);
+    uint8_t       *reply = malloc(room);
+    uint32_t       got   = 0;
+    if (!reply) return -ERR_NO_MEMORY;
+    int                rc = ask(DISPLAY_TAG, &question, sizeof(question), reply, room, &got);
+    DisplayPlacesReply head;
+    if (rc == OK && got >= sizeof(head)) memcpy(&head, reply, sizeof(head));
+    if (rc == OK && (got < sizeof(head) || head.command != DISP_CMD_PLACES ||
+                     got != sizeof(head) + (uint32_t)head.count * sizeof(DisplayPlace)))
+        rc = -ERR_CORRUPTED;
+    if (rc == OK) {
+        *count = head.count;
+        memcpy(places, reply + sizeof(head), (size_t)head.count * sizeof(DisplayPlace));
+    }
+    free(reply);
+    return rc;
 }
 
 uint8_t console_notice_of(const void *payload, uint32_t length)

@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 #include "box/core/cabin.h"
@@ -233,6 +234,41 @@ void FrontKeysAsked(const Result &Asked, const AskFrom &From, const KeyChord *Ch
         if (One.Keeper != Program{}) continue;
         One.Keeper = Keeper;
         Tell(Keeper, DISPLAY_FRONT_GIVEN, One.Back);
+    }
+}
+
+void FrontPlacesAsked(const Result &Asked) noexcept
+{
+    FrontSpawnStep();
+    try {
+        std::vector<DisplayPlace> Places;
+        const auto Mark = [&](const Program &Who, std::uint8_t Place) {
+            for (DisplayPlace &One : Places)
+                if (One.pid == Who.Pid && One.generation == Who.Generation) {
+                    One.place = static_cast<std::uint8_t>(One.place | Place);
+                    return;
+                }
+            Places.push_back(DisplayPlace{Who.Pid, Who.Generation, Place, {0, 0, 0}});
+        };
+        for (const Behind &One : g_behind) Mark(One.Back, DISPLAY_PLACE_BEHIND);
+        for (const Keys &One : g_keys) Mark(One.Keeper, DISPLAY_PLACE_KEEPER);
+        // Whose screen is shown: what is in front on top of who keeps whom,
+        // or, with nothing in front, the newest keeper not behind.
+        std::optional<Program> Shown;
+        for (auto Top = g_front.rbegin(); Top != g_front.rend() && !Shown; ++Top)
+            if (!HeldBehind(Top->Front)) Shown = Top->Front;
+        for (auto Said = g_keys.rbegin(); Said != g_keys.rend() && !Shown; ++Said)
+            if (!HeldBehind(Said->Keeper)) Shown = Said->Keeper;
+        if (Shown) Mark(*Shown, DISPLAY_PLACE_SHOWN);
+        if (Places.size() > 65535u) Places.resize(65535u);
+
+        const DisplayPlacesReply Head{DISP_CMD_PLACES, 0, static_cast<std::uint16_t>(Places.size())};
+        std::vector<std::uint8_t> Reply(sizeof(Head) + Places.size() * sizeof(DisplayPlace));
+        std::memcpy(Reply.data(), &Head, sizeof(Head));
+        if (!Places.empty()) std::memcpy(Reply.data() + sizeof(Head), Places.data(), Places.size() * sizeof(DisplayPlace));
+        (void)answer(&Asked, Reply.data(), static_cast<std::uint32_t>(Reply.size()));
+    } catch (...) {
+        (void)answer(&Asked, nullptr, 0);
     }
 }
 
