@@ -6,6 +6,7 @@
 #include <cmath>
 #include <format>
 
+#include "chips.h"
 #include "common.h"
 #include "trig.h"
 

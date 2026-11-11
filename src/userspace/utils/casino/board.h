@@ -6,6 +6,8 @@
 #ifndef CASINO_BOARD_H
 #define CASINO_BOARD_H
 
+#include <vector>
+
 #include "bets.h"
 
 namespace casino {
@@ -21,6 +23,9 @@ struct Place {
     int  Top   = 0;
     int  Bottom = 0;
 };
+
+// Every place on the board.
+const std::vector<Place> &AllPlaces();
 
 // The number in the grid cell (Across, Down) of the numbers' block: 1 to 36.
 int NumberIn(int Across, int Down);

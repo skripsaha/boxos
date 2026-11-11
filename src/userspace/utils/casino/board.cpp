@@ -27,13 +27,13 @@ std::vector<Place> Build()
     return All;
 }
 
-const std::vector<Place> &Places()
+}  // namespace
+
+const std::vector<Place> &AllPlaces()
 {
     static const std::vector<Place> All = Build();
     return All;
 }
-
-}  // namespace
 
 int NumberIn(int Across, int Down)
 {
@@ -42,14 +42,14 @@ int NumberIn(int Across, int Down)
 
 const Place *PlaceAt(int Across, int Down)
 {
-    for (const Place &One : Places())
+    for (const Place &One : AllPlaces())
         if (Across >= One.Left && Across <= One.Right && Down >= One.Top && Down <= One.Bottom) return &One;
     return nullptr;
 }
 
 const Place *PlaceOf(const Spot &On)
 {
-    for (const Place &One : Places())
+    for (const Place &One : AllPlaces())
         if (One.On == On) return &One;
     return nullptr;
 }

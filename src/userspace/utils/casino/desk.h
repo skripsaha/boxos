@@ -1,11 +1,12 @@
-/* desk.h — the casino floor: the glass, the header over both tables, the
- * line said to the player, the keys that are the casino's own (the other
- * table, the pay table, help, leaving), and the loop that moves time. */
+/* desk.h — the casino floor: the glass, the header over the tables, the line
+ * said to the player, the keys that are the casino's own (the other table,
+ * the pay table, help, leaving), and the loop that moves time. */
 #ifndef CASINO_DESK_H
 #define CASINO_DESK_H
 
 #include <cstdint>
 
+#include "blackjack.h"
 #include "box/cxx/settings.h"
 #include "painter/tui/frame.h"
 #include "painter/tui/stage.h"
@@ -15,7 +16,9 @@
 
 namespace casino {
 
-enum class Sitting : std::uint8_t { Roulette, Slots };
+enum class Sitting : std::uint8_t { Roulette, Slots, Blackjack };
+
+inline constexpr int TableCount = 3;
 
 class Desk {
 public:
@@ -30,7 +33,7 @@ public:
 
 private:
     bool OnKey(const painter::tui::KeyEvent &Key, std::uint64_t NowUs);
-    void Change();
+    void Sit(int Which);
     void Refill();
 
     void Paint(std::uint64_t NowUs);
@@ -43,7 +46,9 @@ private:
     Context              Ctx;
     Roulette             Wheel;
     Slots                Machine;
-    Table               *Seat;
+    Blackjack            Cards;
+    Table               *Tables[TableCount];
+    int                  Seat   = 0;
     bool                 Help   = false;
     bool                 Paying = false;
 };

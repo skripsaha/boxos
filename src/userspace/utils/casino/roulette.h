@@ -42,12 +42,15 @@ private:
         float        WheelAcross = 0;     // the wheel's center and radius, in pixels
         float        WheelDown   = 0;
         float        Radius      = 0;
-        std::int32_t BoardLeft   = 0;     // the board's top left cell, in cells of text
+        std::int32_t Inset       = 1;     // cells of rail round the table
+        std::int32_t BoardLeft   = 0;     // the board's top left corner, in cells of text
         std::int32_t BoardTop    = 0;
-        std::int32_t CellWide    = 3;
+        std::int32_t CellWide    = 3;     // a cell of the board, its rule on the left and above it included
         std::int32_t CellHigh    = 2;
         std::int32_t PanelTop    = 0;     // under the board
+        std::int32_t PanelRows   = 0;
         std::int32_t TrayTop     = 0;     // under the wheel: results and chips
+        std::int32_t Floor       = 0;     // the last row inside the rail
         std::int32_t Cols        = 0;
         std::int32_t Rows        = 0;
     };
@@ -65,17 +68,20 @@ private:
     std::int64_t ChipNow() const;
     float        Seconds(std::uint64_t NowUs) const;
 
-    // roulette_paint.cpp: the picture.
+    // roulette_paint.cpp: the wheel, the panels and the hints.
     Layout Measure(const painter::tui::Frame &Out) const;
     void   PaintWheel(Canvas &Draw, const Layout &Where, std::uint64_t NowUs);
-    void   PaintBoard(painter::tui::Frame &Out, const Layout &Where, std::uint64_t NowUs);
-    void   PaintCell(painter::tui::Frame &Out, const Layout &Where, const Place &One, std::uint64_t NowUs);
-    void   PaintSplits(painter::tui::Frame &Out, const Layout &Where);
     void   PaintPanel(painter::tui::Frame &Out, const Layout &Where);
     void   PaintTray(painter::tui::Frame &Out, const Layout &Where);
-    void   PaintHints(painter::tui::Frame &Out, const Layout &Where);
+    void   PaintHints(painter::tui::Frame &Out) const;
     bool   Lit(std::uint64_t NowUs) const;
     bool   Blinking(std::uint64_t NowUs) const;
+
+    // roulette_board.cpp: the betting board, printed with thin rules.
+    void PaintBoard(painter::tui::Frame &Out, const Layout &Where, std::uint64_t NowUs);
+    void PaintPlace(painter::tui::Frame &Out, const Layout &Where, const Place &One, std::uint64_t NowUs);
+    void PaintSplits(painter::tui::Frame &Out, const Layout &Where);
+    void PaintCursor(painter::tui::Frame &Out, const Layout &Where);
 
     Context            &Ctx;
     Bets                Laid;

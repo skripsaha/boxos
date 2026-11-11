@@ -17,9 +17,19 @@ using Color = painter::core::Color;
 // The color toward black (Factor under 1) or toward white (over 1).
 Color Shade(Color Ink, float Factor);
 
+// Whether the glass is the text console's: its 16 colors turn every softened
+// edge into noise, so what is new is drawn there with hard edges and no shadows.
+inline bool Hard(const painter::tui::Frame &Out)
+{
+    return Out.Size().Height < 34;
+}
+
 class Canvas {
 public:
-    explicit Canvas(painter::tui::Frame &Target) : Out(Target) {}
+    explicit Canvas(painter::tui::Frame &Target, bool Crisp = false) : Out(Target), Edged(Crisp) {}
+
+    // Whether edges are softened and shadows soft: false on the text console.
+    bool Smooth() const { return !Edged; }
 
     std::int32_t Wide() const { return Out.Size().Width; }
     std::int32_t High() const { return Out.PixelHeight(); }
@@ -27,9 +37,11 @@ public:
     // One pixel, Cover of it (0 to 1) the ink.
     void Plot(std::int32_t X, std::int32_t Y, Color Ink, float Cover = 1.0f);
     void Fill(std::int32_t X, std::int32_t Y, std::int32_t Across, std::int32_t Down, Color Ink);
-    void Disc(float Across, float Down, float Radius, Color Ink);
-    void Ellipse(float Across, float Down, float ReachAcross, float ReachDown, Color Ink);
+    void Disc(float Across, float Down, float Radius, Color Ink, float Opacity = 1.0f);
+    void Ellipse(float Across, float Down, float ReachAcross, float ReachDown, Color Ink, float Opacity = 1.0f);
     void Ring(float Across, float Down, float Outer, float Inner, Color Ink);
+    // A box with rounded corners, Left and Top fractions of a pixel allowed.
+    void Rounded(float Left, float Top, float Across, float Down, float Radius, Color Ink, float Opacity = 1.0f);
     void Line(float FromAcross, float FromDown, float ToAcross, float ToDown, float Thick, Color Ink);
     // A chip seen from above: a rim, the body, and the stripes between.
     void Chip(float Across, float Down, float Radius, Color Body);
@@ -42,6 +54,7 @@ public:
 
 private:
     painter::tui::Frame &Out;
+    bool                 Edged;
 };
 
 }  // namespace casino

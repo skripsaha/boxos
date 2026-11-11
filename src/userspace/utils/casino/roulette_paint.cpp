@@ -1,13 +1,15 @@
 /* roulette_paint.cpp — the roulette table as it is drawn: the wheel in
- * pixels, seen from above, the betting board in cells, the chips, the
- * results. */
+ * pixels, seen from above, the panel and the results in the font, the chips,
+ * the hints (the board is in roulette_board.cpp). */
 
 #include <algorithm>
 #include <cmath>
 #include <format>
 #include <string>
 
+#include "chips.h"
 #include "common.h"
+#include "ornament.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/text.h"
 #include "roulette.h"
@@ -18,13 +20,10 @@ namespace casino {
 
 namespace {
 
-namespace tui    = painter::tui;
-namespace Glyphs = painter::tui::Glyphs;
+namespace tui = painter::tui;
 
 constexpr std::uint64_t BlinkUs = 4000000;
 
-const Color Dark  = Color::Rgb(0x14, 0x14, 0x14);
-const Color Paper = Color::Rgb(0xF0, 0xF0, 0xF0);
 const Color Ivory = Color::Rgb(0xFA, 0xF8, 0xEC);
 
 const char *Ordinal(int Index)
@@ -33,47 +32,31 @@ const char *Ordinal(int Index)
     return Words[Index];
 }
 
-std::string Label(const Spot &On, std::int32_t Room)
-{
-    switch (On.What) {
-    case Kind::Straight: return std::to_string(On.A);
-    case Kind::Column:   return Room >= 3 ? "2:1" : std::format("C{}", 3 - On.A);
-    case Kind::Dozen:    return std::format("{} 12", Ordinal(On.A));
-    case Kind::Low:      return "1-18";
-    case Kind::Even:     return "EVEN";
-    case Kind::Odd:      return "ODD";
-    case Kind::Red:      return "RED";
-    case Kind::Black:    return "BLACK";
-    case Kind::High:     return "19-36";
-    default:             return {};
-    }
-}
-
 }  // namespace
 
 Roulette::Layout Roulette::Measure(const tui::Frame &Out) const
 {
     Layout Where;
-    Where.Cols = Out.Size().Width;
-    Where.Rows = Out.Size().Height;
-    const std::int32_t Body = Where.Rows - 3;
-    Where.CellWide          = std::clamp(Where.Cols * 55 / 100 / BoardWide, 3, 7);
-    Where.CellHigh          = Where.Rows >= 40 && Where.CellWide >= 5 ? 3 : 2;
-    Where.BoardLeft         = Where.Cols - BoardWide * Where.CellWide - 1;
-    Where.BoardTop          = 2;
-    Where.PanelTop          = Where.BoardTop + BoardHigh * Where.CellHigh + 1;
-    const std::int32_t Tray = std::clamp(Body / 5, 3, 6);
-    const std::int32_t Disc = std::min(Where.BoardLeft - 3, (Body - Tray) * 2) - 8;
-    Where.Radius            = static_cast<float>(Disc) / 2.0f;
-    Where.WheelAcross       = static_cast<float>(Where.BoardLeft - 1) / 2.0f;
-    Where.WheelDown         = 2.0f + static_cast<float>(Body - Tray);
-    Where.TrayTop           = 1 + Body - Tray;
+    Where.Cols  = Out.Size().Width;
+    Where.Rows  = Out.Size().Height;
+    Where.Inset = Where.Rows >= 40 ? 2 : 1;
+    Where.Floor = Where.Rows - 3 - Where.Inset;
+    const std::int32_t Top  = 1 + Where.Inset;
+    Where.CellWide          = std::clamp((Where.Cols * 55 / 100 - 1) / BoardWide, 3, 7);
+    Where.CellHigh          = Where.Rows >= 56 && Where.CellWide >= 6 ? 4 : Where.Rows >= 40 && Where.CellWide >= 5 ? 3 : 2;
+    const std::int32_t Wide = BoardWide * Where.CellWide + 1;
+    Where.BoardLeft         = Where.Cols - Where.Inset - 1 - Wide;
+    Where.BoardTop          = Top;
+    Where.PanelTop          = Where.BoardTop + BoardHigh * Where.CellHigh + 2;
+    Where.PanelRows         = 8;
+    const std::int32_t Tray = std::clamp((Where.Floor - Top) / 5, 4, 6);
+    const std::int32_t Rows = Where.Floor - Tray + 1 - Top;
+    const float        Room = std::min(static_cast<float>(Where.BoardLeft - Where.Inset - 1) / 2.0f, static_cast<float>(Rows));
+    Where.Radius            = Room - 5.1f;
+    Where.WheelAcross       = static_cast<float>(Where.Inset + Where.BoardLeft - 1) / 2.0f;
+    Where.WheelDown         = static_cast<float>(2 * Top) + Room + 0.5f;
+    Where.TrayTop           = Top + Rows;
     return Where;
-}
-
-bool Roulette::Lit(std::uint64_t NowUs) const
-{
-    return (NowUs / 350000) % 2 == 0;
 }
 
 // The winning number blinks for a while after the wheel is still, and then
@@ -115,175 +98,98 @@ void Roulette::PaintWheel(Canvas &Draw, const Layout &Where, std::uint64_t NowUs
     Draw.Disc(BallAcross - Ball * 0.3f, BallDown - Rise - Ball * 0.3f, Ball * 0.35f, painter::core::Colors::White);
 }
 
-void Roulette::PaintCell(tui::Frame &Out, const Layout &Where, const Place &One, std::uint64_t NowUs)
-{
-    const Spot &On = One.On;
-    Color       Back = Shade(Ctx.Shown.Felt, 0.5f);
-    Color       Text = Ctx.Shown.Text;
-    if (On.What == Kind::Straight) Back = HueColor(Ctx.Shown, HueOf(On.A));
-    if (On.What == Kind::Red) Back = Ctx.Shown.Red;
-    if (On.What == Kind::Black) Back = Ctx.Shown.Black;
-    const bool Winning = Number >= 0 && !Turning && On.What == Kind::Straight && On.A == Number && (!Blinking(NowUs) || Lit(NowUs));
-    if (Laid.On(On) > 0) {
-        Back = Ctx.Shown.Gold;
-        Text = Dark;
-    }
-    if (Winning || &Aim.Here() == &One) {
-        Back = Paper;
-        Text = Dark;
-    }
-
-    const painter::core::Rect Area{Where.BoardLeft + One.Left * Where.CellWide, Where.BoardTop + One.Top * Where.CellHigh,
-                                   (One.Right - One.Left + 1) * Where.CellWide, (One.Bottom - One.Top + 1) * Where.CellHigh};
-    const Color Shadow = Shade(Back, 0.5f);
-    Out.Fill(Area, ' ', tui::TextStyle{Text, Back});
-    for (std::int32_t Row = Area.Y; Row < Area.Y + Area.Height; Row++)
-        Out.Put({Area.X + Area.Width - 1, Row}, Glyphs::RuleDown, tui::TextStyle{Shadow, Back});
-    for (std::int32_t Col = Area.X; Col < Area.X + Area.Width - 1; Col++)
-        Out.Put({Col, Area.Y + Area.Height - 1}, Glyphs::LowerHalf, tui::TextStyle{Shadow, Back});
-
-    const std::int32_t Room = Area.Width - 1;
-    const std::string Words = Label(On, Room);
-    const std::int32_t Wide = std::min<std::int32_t>(static_cast<std::int32_t>(Words.size()), Room);
-    Out.Write({Area.X + (Room - Wide) / 2, Area.Y + (Area.Height - 1) / 2}, Words.substr(0, static_cast<std::size_t>(Wide)),
-              tui::TextStyle{Text, Back});
-}
-
-void Roulette::PaintSplits(tui::Frame &Out, const Layout &Where)
-{
-    for (const Placed &One : Laid.All()) {
-        if (One.On.What != Kind::Split) continue;
-        const Place *First  = PlaceOf(Spot{Kind::Straight, One.On.A, 0});
-        const Place *Second = PlaceOf(Spot{Kind::Straight, One.On.B, 0});
-        if (!First || !Second) continue;
-        painter::core::Point At;
-        if (First->Top == Second->Top) {
-            const Place *Left = First->Left < Second->Left ? First : Second;
-            At = {Where.BoardLeft + (Left->Right + 1) * Where.CellWide - 1,
-                  Where.BoardTop + Second->Top * Where.CellHigh + (Where.CellHigh - 1) / 2};
-        } else {
-            const Place *Upper = First->Top < Second->Top ? First : Second;
-            At = {Where.BoardLeft + Upper->Left * Where.CellWide + (Where.CellWide - 1) / 2,
-                  Where.BoardTop + (Upper->Top + 1) * Where.CellHigh - 1};
-        }
-        Out.Put(At, Glyphs::Bullet, tui::TextStyle{Ctx.Shown.Lights, Out.Read(At).Background});
-    }
-}
-
-void Roulette::PaintBoard(tui::Frame &Out, const Layout &Where, std::uint64_t NowUs)
-{
-    const painter::core::Rect Edge{Where.BoardLeft - 1, Where.BoardTop - 1, BoardWide * Where.CellWide + 2,
-                                   BoardHigh * Where.CellHigh + 2};
-    Out.Fill(Edge, ' ', tui::TextStyle{Shade(Ctx.Shown.Felt, 0.5f), Shade(Ctx.Shown.Felt, 0.5f)});
-    for (int Down = 0; Down < BoardHigh; Down++) {
-        for (int Across = 0; Across < BoardWide;) {
-            const Place *One = PlaceAt(Across, Down);
-            if (!One) {
-                Across++;
-                continue;
-            }
-            if (One->Left == Across && One->Top == Down) PaintCell(Out, Where, *One, NowUs);
-            Across = One->Right + 1;
-        }
-    }
-    PaintSplits(Out, Where);
-}
-
+// The chip in hand, the sums, and the number that came up.
 void Roulette::PaintPanel(tui::Frame &Out, const Layout &Where)
 {
     const Look        &Shown = Ctx.Shown;
-    const tui::TextStyle Said{Shown.Text, Shade(Shown.Felt, 1.0f)};
-    const tui::TextStyle Quiet{Shown.Quiet, Shade(Shown.Felt, 1.0f)};
-    Canvas Draw(Out);
-    const std::int32_t Row = Where.PanelTop;
-    Draw.Chip(static_cast<float>(Where.BoardLeft) + 2.5f, static_cast<float>(Row * 2) + 2.5f, 2.6f, ChipColor(Size));
-    Out.Write({Where.BoardLeft + 6, Row}, std::format("chip in hand {}", Counted(ChipNow())), Said);
-    Out.Write({Where.BoardLeft + 6, Row + 1},
-              std::format("on the table {} ({} bets)", Counted(Laid.Total()), Laid.All().size()), Quiet);
+    const Color        Back  = Color::Rgb(0x12, 0x12, 0x12);
+    const std::int32_t Wide  = BoardWide * Where.CellWide + 1;
+    const painter::core::Rect Area{Where.BoardLeft, Where.PanelTop, Wide, Where.PanelRows};
+    Panel(Out, Area, Shade(Shown.Gold, 0.7f), Back, "Table", Shown.Gold);
+    const tui::TextStyle Said{Shown.Text, Back};
+    const tui::TextStyle Quiet{Shown.Quiet, Back};
+    const std::int32_t   Left = Area.X + 2, Row = Area.Y + 1;
+    Canvas               Draw(Out);
+    Draw.Chip(static_cast<float>(Left) + 2.5f, static_cast<float>(Row * 2) + 3.0f, 2.6f, ChipColor(Size));
+    Out.Write({Left + 6, Row}, "chip in hand", Quiet);
+    Out.Write({Left + 22, Row}, Counted(ChipNow()), Said);
+    Out.Write({Left + 6, Row + 1}, "on the table", Quiet);
+    Out.Write({Left + 22, Row + 1}, std::format("{} ({} bets)", Counted(Laid.Total()), Laid.All().size()), Said);
+    BoxRule(Out, Area, Row + 2, Shade(Shown.Gold, 0.7f), Back);
     const std::int64_t Net = Ctx.Chips.Net();
-    Out.Write({Where.BoardLeft + 6, Row + 2}, std::format("this visit {}{}", Net > 0 ? "+" : "", Counted(Net)),
-              tui::TextStyle{Net >= 0 ? Shown.Won : Shown.Lost, Shown.Felt});
-
-    Out.Write({Where.BoardLeft, Row + 3},
-              std::format("won {} of {} rounds, best win {}", Ctx.Chips.Now().Wins, Ctx.Chips.Now().Rounds, Counted(Ctx.Chips.Now().Biggest)),
-              Quiet);
-    const std::int32_t Free = Where.Rows - 2 - (Row + 5);
+    Out.Write({Left, Row + 3}, "this visit", Quiet);
+    Out.Write({Left + 11, Row + 3}, std::format("{}{}", Net > 0 ? "+" : "", Counted(Net)), tui::TextStyle{Net >= 0 ? Shown.Won : Shown.Lost, Back});
+    Out.Write({Left + 22, Row + 3}, std::format("won {} of {}  best {}", Ctx.Chips.Now().Wins, Ctx.Chips.Now().Rounds, Counted(Ctx.Chips.Now().Biggest)), Quiet);
     if (Number < 0) {
-        Out.Write({Where.BoardLeft, Row + 5}, "No spin yet: lay chips, then space.", Quiet);
+        Out.Write({Left, Row + 4}, "No spin yet: lay chips, then space.", Quiet);
         return;
     }
-    const int           Scale = Free >= 8 ? 2 : 1;
-    const std::string   Digits = std::to_string(Number);
-    const std::int32_t  Wide  = Draw.LettersWide(Digits, Scale) + 6;
-    const std::int32_t  High  = 7 * Scale + 2;
-    const std::int32_t  Left  = Where.BoardLeft;
-    const std::int32_t  Top   = (Row + 5) * 2;
-    Draw.Fill(Left, Top, Wide, High, HueColor(Shown, HueOf(Number)));
-    Draw.Fill(Left, Top, Wide, 1, Shown.Gold);
-    Draw.Fill(Left, Top + High - 1, Wide, 1, Shown.Gold);
-    Draw.Letters(Left + 3, Top + 1, Digits, Scale, painter::core::Colors::White);
-
-    const std::int32_t Beside = Left + Wide + 2;
     const bool Zero = Number == 0;
-    Out.Write({Beside, Row + 5}, std::format("{} comes up", Zero ? "zero" : std::to_string(Number)), Said);
-    Out.Write({Beside, Row + 6}, std::string(HueName(HueOf(Number))), tui::TextStyle{Said.Foreground, Said.Background});
-    if (!Zero) {
-        Out.Write({Beside, Row + 7}, std::format("{}, {}", Number % 2 ? "odd" : "even", Number > 18 ? "high" : "low"), Quiet);
-        Out.Write({Beside, Row + 8}, std::format("{} dozen, {} column", Ordinal((Number - 1) / 12), Ordinal((Number + 2) % 3)), Quiet);
-    }
+    Out.Write({Left, Row + 4}, std::format(" {:^4} ", Number), tui::TextStyle{painter::core::Colors::White, HueColor(Shown, HueOf(Number))});
+    Out.Write({Left + 8, Row + 4}, std::format("{} comes up, {}", Zero ? "zero" : std::to_string(Number), HueName(HueOf(Number))), Said);
+    if (!Zero)
+        Out.Write({Left + 8, Row + 5}, std::format("{}, {}; {} dozen, {} column", Number % 2 ? "odd" : "even", Number > 18 ? "high" : "low",
+                                                    Ordinal((Number - 1) / 12), Ordinal((Number + 2) % 3)), Quiet);
 }
 
+// The numbers that came up, newest last, and the chips in hand's purse.
 void Roulette::PaintTray(tui::Frame &Out, const Layout &Where)
 {
-    const std::int32_t Room = Where.BoardLeft - 2;
-    const tui::TextStyle Quiet{Ctx.Shown.Quiet, Ctx.Shown.Felt};
-    Out.Write({1, Where.TrayTop}, "last", Quiet);
-    const std::int32_t Fit = std::max(0, (Room - 6) / 3);
+    const Look        &Shown = Ctx.Shown;
+    const std::int32_t Left  = Where.Inset + 1;
+    const std::int32_t Room  = Where.BoardLeft - Where.Inset - 3;
+    Out.Write({Left, Where.TrayTop}, "last", tui::TextStyle{Shown.Quiet, Out.Read({Left, Where.TrayTop}).Background});
+    const std::int32_t Fit  = std::max(0, (Room - 5) / 4);
     const std::int32_t Skip = std::max<std::int32_t>(0, static_cast<std::int32_t>(Results.size()) - Fit);
     for (std::int32_t At = Skip; At < static_cast<std::int32_t>(Results.size()); At++) {
-        const int Shown = Results[static_cast<std::size_t>(At)];
-        Out.Write({6 + (At - Skip) * 3, Where.TrayTop}, std::format("{:^3}", Shown),
-                  tui::TextStyle{painter::core::Colors::White, HueColor(Ctx.Shown, HueOf(Shown))});
+        const int Seen = Results[static_cast<std::size_t>(At)];
+        Out.Write({Left + 5 + (At - Skip) * 4, Where.TrayTop}, std::format("{:^3}", Seen),
+                  tui::TextStyle{painter::core::Colors::White, HueColor(Shown, HueOf(Seen))});
     }
-    const std::int32_t Tallest = 2 * (Where.Rows - 2 - (Where.TrayTop + 1)) - 1;
-    if (Tallest >= 4) {
-        Canvas Draw(Out);
-        Stacks(Draw, Ctx.Shown, Ctx.Chips.Now().Chips, 2, 2 * (Where.Rows - 2), Tallest);
-    }
+    const std::int32_t Tallest = 2 * (Where.Floor - Where.TrayTop - 1);
+    if (Tallest >= 4) Stacks(Out, Shown, Ctx.Chips.Now().Chips, Left, Where.Floor, Tallest, Room);
 }
 
-void Roulette::PaintHints(tui::Frame &Out, const Layout &Where)
+void Roulette::PaintHints(tui::Frame &Out) const
 {
-    const std::string Hints = std::format("arrows move  enter chip  space spin  +/- size  s split  r repeat  x clear  tab slots  {} keys",
-                                          Spelled(Ctx.Shown.Keys[KeyHelp]));
-    Out.Write({1, Where.Rows - 1}, tui::Shortened(Hints, static_cast<std::size_t>(Where.Cols - 2)),
-              tui::TextStyle{Ctx.Shown.Quiet, Ctx.Shown.Page});
+    const std::vector<Hint> Hints = {{"arrows", "move"}, {"enter", "chip"}, {"space", "spin"}, {"+/-", std::format("chip {}", Counted(ChipNow()))},
+                                     {"s", "split"},     {"r", "repeat"},   {"x", "clear"}};
+    HintBar(Out, Ctx.Shown, Hints);
 }
 
 void Roulette::Paint(tui::Frame &Out, std::uint64_t NowUs)
 {
     const Layout Where = Measure(Out);
-    Felt(Out, painter::core::Rect{0, 1, Where.Cols, Where.Rows - 3}, Ctx.Shown.Felt);
+    Cloth(Out, painter::core::Rect{0, 1, Where.Cols, Where.Rows - 3}, Ctx.Shown.Felt);
+    Rail(Out, painter::core::Rect{0, 1, Where.Cols, Where.Rows - 3}, Ctx.Shown.Rail, Shade(Ctx.Shown.Gold, 0.65f), Where.Inset > 1);
     Canvas Draw(Out);
     PaintWheel(Draw, Where, NowUs);
     PaintBoard(Out, Where, NowUs);
     PaintPanel(Out, Where);
     PaintTray(Out, Where);
-    PaintHints(Out, Where);
+    Weave(Out, painter::core::Rect{0, 1, Where.Cols, Where.Rows - 3});
+    PaintHints(Out);
 }
 
 void Roulette::PaintPay(tui::Frame &Out)
 {
-    const std::int32_t Wide = 54, High = 11;
+    const Look        &Shown = Ctx.Shown;
+    const Color        Back  = Color::Rgb(0x10, 0x10, 0x10);
+    const std::int32_t Wide = 58, High = 12;
     const painter::core::Rect Area{(Out.Size().Width - Wide) / 2, (Out.Size().Height - High) / 2, Wide, High};
-    Box(Out, Area, Ctx.Shown.Gold, Color::Rgb(0x10, 0x10, 0x10), "Roulette pays", Ctx.Shown.Gold);
-    const tui::TextStyle Said{Ctx.Shown.Text, Color::Rgb(0x10, 0x10, 0x10)};
-    const tui::TextStyle Quiet{Ctx.Shown.Quiet, Color::Rgb(0x10, 0x10, 0x10)};
-    const char *const Lines[] = {"one number (straight)            35 to 1", "two numbers (split)               17 to 1",
-                                 "twelve: a dozen or a column        2 to 1", "red, black, odd, even, low, high   1 to 1"};
-    for (int At = 0; At < 4; At++) Out.Write({Area.X + 3, Area.Y + 2 + At}, Lines[At], Said);
-    Out.Write({Area.X + 3, Area.Y + 7}, "One zero on the wheel: 37 pockets, 36 paid.", Quiet);
-    Out.Write({Area.X + 3, Area.Y + 8}, "Over time the house keeps 1 chip in 37 (2.70%).", Quiet);
+    Box(Out, Area, Shown.Gold, Back, "Roulette pays", Shown.Gold);
+    const char *const Lines[][2] = {{"one number (straight)", "35 to 1"},
+                                    {"two numbers (split)", "17 to 1"},
+                                    {"twelve: a dozen or a column", "2 to 1"},
+                                    {"red, black, odd, even, low, high", "1 to 1"}};
+    for (int At = 0; At < 4; At++) {
+        Out.Write({Area.X + 3, Area.Y + 2 + At}, Lines[At][0], tui::TextStyle{Shown.Text, Back});
+        Out.Write({Area.X + Wide - 3 - static_cast<std::int32_t>(std::string_view(Lines[At][1]).size()), Area.Y + 2 + At}, Lines[At][1],
+                  tui::TextStyle{Shown.Gold, Back});
+    }
+    BoxRule(Out, Area, Area.Y + 7, Shown.Gold, Back);
+    Out.Write({Area.X + 3, Area.Y + 8}, "One zero on the wheel: 37 pockets, 36 paid.", tui::TextStyle{Shown.Quiet, Back});
+    Out.Write({Area.X + 3, Area.Y + 9}, "Over time the house keeps 1 chip in 37 (2.70%).", tui::TextStyle{Shown.Quiet, Back});
 }
 
 }  // namespace casino

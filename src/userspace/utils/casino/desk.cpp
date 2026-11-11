@@ -7,6 +7,8 @@
 
 #include "box/clock.h"
 #include "common.h"
+#include "ornament.h"
+#include "painter/tui/glyph.h"
 #include "painter/tui/text.h"
 
 namespace casino {
@@ -19,11 +21,13 @@ namespace tui = painter::tui;
 // changed setting, before it looks again.
 constexpr std::uint32_t IdleMs = 500;
 
+constexpr const char *TableNames[TableCount] = {"Roulette", "Slots", "Blackjack"};
+
 }  // namespace
 
 Desk::Desk(tui::Stage Opened, Sitting Start)
-    : Screen(std::move(Opened)), Ctx(ReadLook()), Wheel(Ctx), Machine(Ctx),
-      Seat(Start == Sitting::Slots ? static_cast<Table *>(&Machine) : static_cast<Table *>(&Wheel))
+    : Screen(std::move(Opened)), Ctx(ReadLook()), Wheel(Ctx), Machine(Ctx), Cards(Ctx),
+      Tables{&Wheel, &Machine, &Cards}, Seat(static_cast<int>(Start))
 {
 }
 
@@ -39,9 +43,9 @@ void Desk::Run()
             Drawn = false;
         }
         const std::uint64_t Now = clock_uptime_us();
-        Seat->Advance(Now);
-        if (!Seat->Busy()) Refill();
-        const std::uint32_t Frame = Seat->FrameMs(Now);
+        Tables[Seat]->Advance(Now);
+        if (!Tables[Seat]->Busy()) Refill();
+        const std::uint32_t Frame = Tables[Seat]->FrameMs(Now);
         if (!Drawn || Frame > 0) {
             Paint(Now);
             if (!Screen.Present()) break;
@@ -55,8 +59,7 @@ void Desk::Run()
             Drawn = false;
         }
     }
-    Wheel.Leave();
-    Machine.Leave();
+    for (Table *One : Tables) One->Leave();
     Ctx.Chips.Save();
 }
 
@@ -67,14 +70,15 @@ void Desk::Refill()
         Ctx.Say(Ctx.Notice.empty() ? *Words : Ctx.Notice + "  " + *Words, Mood::Good);
 }
 
-void Desk::Change()
+void Desk::Sit(int Which)
 {
-    if (Seat->Busy()) {
+    if (Which == Seat) return;
+    if (Tables[Seat]->Busy()) {
         Ctx.Say("Wait until the round is over before going to the other table.");
         return;
     }
-    Seat->Leave();
-    Seat = Seat == &Wheel ? static_cast<Table *>(&Machine) : static_cast<Table *>(&Wheel);
+    Tables[Seat]->Leave();
+    Seat = Which;
     Ctx.Notice.clear();
 }
 
@@ -95,31 +99,39 @@ bool Desk::OnKey(const tui::KeyEvent &Key, std::uint64_t NowUs)
         return true;
     }
     if (KeyChordMatches(&Ctx.Shown.Keys[KeyTable], &Raw) || (Plain && Key.Ascii == tui::KeyCodes::Tab)) {
-        Change();
+        Sit((Seat + 1) % TableCount);
         return true;
     }
     if (Plain && Key.Ascii == tui::KeyCodes::Escape) return false;
-    if (Plain && (Key.Ascii == '1' || Key.Ascii == '2')) {
-        Table *Wanted = Key.Ascii == '1' ? static_cast<Table *>(&Wheel) : static_cast<Table *>(&Machine);
-        if (Wanted != Seat) Change();
+    if (Plain && Key.Ascii >= '1' && Key.Ascii < '1' + TableCount) {
+        Sit(Key.Ascii - '1');
         return true;
     }
-    Seat->OnKey(Key, NowUs);
+    Tables[Seat]->OnKey(Key, NowUs);
     return true;
 }
 
+// The casino's name and a tab for each table, the one in front lit.
 void Desk::PaintHeader(tui::Frame &Out) const
 {
-    const Look        &Shown = Ctx.Shown;
+    const Look          &Shown = Ctx.Shown;
     const tui::TextStyle Bar{Shown.Text, Shown.Page};
     Out.Write({1, 0}, "CASINO", tui::TextStyle{Shown.Gold, Shown.Page});
-    const bool OnWheel = Seat == &Wheel;
-    const tui::TextStyle Chosen{Shown.Page, Shown.Gold};
-    Out.Write({9, 0}, " 1 Roulette ", OnWheel ? Chosen : Bar);
-    Out.Write({22, 0}, " 2 Slots ", OnWheel ? Bar : Chosen);
-    Out.Write({33, 0}, std::format("chips {}", Counted(Ctx.Chips.Now().Chips)), Bar);
+    std::int32_t Col = 8;
+    for (int At = 0; At < TableCount; At++) {
+        const std::string Tab = std::format(" {} {} ", At + 1, TableNames[At]);
+        if (At > 0) Out.Put({Col++, 0}, tui::Glyphs::RuleDown, tui::TextStyle{Shown.Quiet, Shown.Page});
+        if (At == Seat) {
+            Out.Write({Col, 0}, Tab, tui::TextStyle{Shown.Page, Shown.Gold});
+        } else {
+            Out.Write({Col, 0}, Tab, Bar);
+            Out.Put({Col + 1, 0}, static_cast<char>('1' + At), tui::TextStyle{Shown.Gold, Shown.Page});
+        }
+        Col += static_cast<std::int32_t>(Tab.size());
+    }
 }
 
+// The line said, and the chips on the right of it.
 void Desk::PaintNotice(tui::Frame &Out) const
 {
     const std::int32_t Row   = Out.Size().Height - 2;
@@ -127,31 +139,45 @@ void Desk::PaintNotice(tui::Frame &Out) const
     const Look        &Shown = Ctx.Shown;
     const std::string  Words = Fault.empty() ? Ctx.Notice : "The chips are not kept: " + Fault;
     const Color        Ink   = !Fault.empty() || Ctx.Feeling == Mood::Bad ? Shown.Lost : Ctx.Feeling == Mood::Good ? Shown.Won : Shown.Text;
-    Out.Write({1, Row}, tui::Shortened(Words, static_cast<std::size_t>(Out.Size().Width - 2)), tui::TextStyle{Ink, Shown.Page});
+    const std::string  Purse = Counted(Ctx.Chips.Now().Chips);
+    const auto         Wide  = static_cast<std::int32_t>(Purse.size()) + 6;
+    Out.Write({1, Row}, tui::Shortened(Words, static_cast<std::size_t>(std::max(0, Out.Size().Width - 3 - Wide))), tui::TextStyle{Ink, Shown.Page});
+    Out.Write({Out.Size().Width - 1 - Wide, Row}, "chips ", tui::TextStyle{Shown.Quiet, Shown.Page});
+    Out.Write({Out.Size().Width - 1 - Wide + 6, Row}, Purse, tui::TextStyle{Shown.Gold, Shown.Page});
 }
 
 void Desk::PaintHelp(tui::Frame &Out) const
 {
-    std::vector<std::string> Lines = Seat->Keys();
-    Lines.push_back(Entry(std::format("tab, 1, 2, {}", Spelled(Ctx.Shown.Keys[KeyTable])), "the other table"));
-    Lines.push_back(Entry(Spelled(Ctx.Shown.Keys[KeyPay]), "the pay table and the odds"));
-    Lines.push_back(Entry("esc", "leave: the chips are kept for next time"));
-    const Color        Back = Color::Rgb(0x10, 0x10, 0x10);
-    const std::int32_t Wide = 68, High = static_cast<std::int32_t>(Lines.size()) + 4;
+    constexpr std::size_t KeysWide = 18;
+    const Look           &Shown    = Ctx.Shown;
+    const std::vector<std::string> Own = Tables[Seat]->Keys();
+    const std::vector<std::string> Common = {
+        Entry(std::format("tab, 1 2 3, {}", Spelled(Shown.Keys[KeyTable])), "go to another table"),
+        Entry(Spelled(Shown.Keys[KeyPay]), "the pay table and the odds"),
+        Entry("esc", "leave: the chips are kept for next time")};
+    const Color          Back = Color::Rgb(0x10, 0x10, 0x10);
+    const std::int32_t   Wide = 70, High = static_cast<std::int32_t>(Own.size() + Common.size()) + 5;
     const painter::core::Rect Area{(Out.Size().Width - Wide) / 2, std::max(1, (Out.Size().Height - High) / 2), Wide, High};
-    Box(Out, Area, Ctx.Shown.Gold, Back, "Keys", Ctx.Shown.Gold);
-    for (std::size_t At = 0; At < Lines.size(); At++)
-        Out.Write({Area.X + 3, Area.Y + 2 + static_cast<std::int32_t>(At)}, Lines[At], tui::TextStyle{Ctx.Shown.Text, Back});
+    Box(Out, Area, Shown.Gold, Back, "Keys", Shown.Gold);
+    std::int32_t Row = Area.Y + 2;
+    const auto   Put = [&](const std::string &Line) {
+        Out.Write({Area.X + 3, Row}, Line.substr(0, KeysWide), tui::TextStyle{Shown.Gold, Back});
+        if (Line.size() > KeysWide) Out.Write({Area.X + 3 + static_cast<std::int32_t>(KeysWide), Row}, Line.substr(KeysWide), tui::TextStyle{Shown.Text, Back});
+        Row++;
+    };
+    for (const std::string &Line : Own) Put(Line);
+    BoxRule(Out, Area, Row++, Shade(Shown.Gold, 0.6f), Back);
+    for (const std::string &Line : Common) Put(Line);
 }
 
 void Desk::Paint(std::uint64_t NowUs)
 {
     tui::Frame &Out = Screen.FrameBuffer();
     Out.Clear(tui::TextStyle{Ctx.Shown.Page, Ctx.Shown.Page});
-    Seat->Paint(Out, NowUs);
+    Tables[Seat]->Paint(Out, NowUs);
     PaintHeader(Out);
     PaintNotice(Out);
-    if (Paying) Seat->PaintPay(Out);
+    if (Paying) Tables[Seat]->PaintPay(Out);
     if (Help) PaintHelp(Out);
 }
 

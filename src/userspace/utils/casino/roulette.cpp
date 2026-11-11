@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <format>
 
+#include "chips.h"
 #include "common.h"
 
 namespace casino {

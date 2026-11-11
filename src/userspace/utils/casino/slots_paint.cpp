@@ -6,7 +6,9 @@
 #include <cmath>
 #include <format>
 
+#include "chips.h"
 #include "common.h"
+#include "ornament.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/text.h"
 #include "slots.h"
@@ -57,11 +59,11 @@ Slots::Layout Slots::Measure(const tui::Frame &Out)
     Where.MarqueeHigh = 7 * Where.Letters + 5;
     Where.CabHigh     = Where.MarqueeHigh + 3 * Where.Edge + 4 + 4;
     Where.CabWide     = 3 * (Where.Edge + 2) + 2 * 2 + 2 * ReelPad;
-    Where.PanelWide   = std::clamp(Where.Cols - Where.CabWide - LeverWide - 6, 20, 34);
-    Where.CabLeft     = std::max(1, (Where.Cols - (Where.CabWide + LeverWide + 2 + Where.PanelWide)) / 2);
+    Where.PanelWide   = std::clamp(Where.Cols - Where.CabWide - LeverWide - 8, 18, 34);
+    Where.CabLeft     = std::max(1, (Where.Cols - (Where.CabWide + LeverWide + 4 + Where.PanelWide)) / 2);
     Where.CabTop      = 2 + std::max(0, (2 * Body - Where.CabHigh) / 2);
     Where.WindowTop   = Where.CabTop + Where.MarqueeHigh;
-    Where.PanelLeft   = Where.CabLeft + Where.CabWide + LeverWide + 2;
+    Where.PanelLeft   = Where.CabLeft + Where.CabWide + LeverWide + 3;
     if (!Art || Art->Edge() != Where.Edge) Art.emplace(Where.Edge);
     return Where;
 }
@@ -210,34 +212,33 @@ void Slots::PaintLever(Canvas &Draw, const Layout &Where, std::uint64_t NowUs)
 void Slots::PaintPanel(tui::Frame &Out, const Layout &Where)
 {
     const Look        &Shown = Ctx.Shown;
-    const tui::TextStyle Said{Shown.Text, Shown.Page};
-    const tui::TextStyle Quiet{Shown.Quiet, Shown.Page};
-    const Standing    &Now = Ctx.Chips.Now();
-    std::int32_t       Row = 2;
+    const Color        Back  = Color::Rgb(0x14, 0x10, 0x10);
+    const Standing    &Now   = Ctx.Chips.Now();
+    const tui::TextStyle Said{Shown.Text, Back};
+    const tui::TextStyle Quiet{Shown.Quiet, Back};
+    const painter::core::Rect Area{Where.PanelLeft - 1, 2, Where.PanelWide + 2, 17};
+    Panel(Out, Area, Shade(Shown.Gold, 0.7f), Back, "SLOT MACHINE", Shown.Gold);
+    std::int32_t Row = Area.Y + 1;
     const auto Line = [&](std::string_view Label, const std::string &Value, tui::TextStyle Style) {
         Out.Write({Where.PanelLeft, Row}, Label, Quiet);
         Out.Write({Where.PanelLeft + Where.PanelWide - static_cast<std::int32_t>(Value.size()), Row}, Value, Style);
         Row++;
     };
-    Out.Write({Where.PanelLeft, Row++}, "SLOT MACHINE", tui::TextStyle{Shown.Gold, Shown.Page});
-    Row++;
     Line("chips", Counted(Now.Chips), Said);
     Line("bet on a line", Counted(Bet()), Said);
     Line("lines", std::to_string(Lines), Said);
     Line("total bet", Counted(Stake()), Said);
-    Row++;
-    Line("last win", Running ? std::string("...") : Counted(Paid), Paid > 0 && !Running ? tui::TextStyle{Shown.Won, Shown.Page} : Said);
+    BoxRule(Out, Area, Row++, Shade(Shown.Gold, 0.7f), Back);
+    Line("last win", Running ? std::string("...") : Counted(Paid), Paid > 0 && !Running ? tui::TextStyle{Shown.Won, Back} : Said);
     const std::int64_t Net = Ctx.Chips.Net();
-    Line("this visit", (Net > 0 ? "+" : "") + Counted(Net), Net >= 0 ? tui::TextStyle{Shown.Won, Shown.Page} : tui::TextStyle{Shown.Lost, Shown.Page});
+    Line("this visit", (Net > 0 ? "+" : "") + Counted(Net), Net >= 0 ? tui::TextStyle{Shown.Won, Back} : tui::TextStyle{Shown.Lost, Back});
+    BoxRule(Out, Area, Row++, Shade(Shown.Gold, 0.7f), Back);
     Line("rounds won", std::format("{} of {}", Now.Wins, Now.Rounds), Said);
     Line("biggest win", Counted(Now.Biggest), Said);
     Line("jackpots", std::to_string(Now.Jackpots), Said);
-    Row++;
-    const std::int32_t Tallest = 2 * (Where.Rows - 2 - Row) - 1;
-    if (Tallest >= 6) {
-        Canvas Draw(Out);
-        Stacks(Draw, Shown, Now.Chips, Where.PanelLeft + 1, 2 * (Where.Rows - 2), Tallest);
-    }
+    const std::int32_t Floor   = Where.Rows - 3;
+    const std::int32_t Tallest = 2 * (Floor - (Area.Y + Area.Height)) - 1;
+    if (Tallest >= 4) Stacks(Out, Shown, Now.Chips, Where.PanelLeft, Floor, Tallest, Where.PanelWide);
 }
 
 void Slots::Paint(tui::Frame &Out, std::uint64_t NowUs)
@@ -254,10 +255,9 @@ void Slots::Paint(tui::Frame &Out, std::uint64_t NowUs)
     PaintLever(Draw, Where, NowUs);
     Coins.Paint(Draw, Ctx.Shown.Gold);
     PaintPanel(Out, Where);
-    const std::string Hints = std::format("space pull  +/- bet  l lines  {} pay table  tab roulette  {} keys", Spelled(Ctx.Shown.Keys[KeyPay]),
-                                          Spelled(Ctx.Shown.Keys[KeyHelp]));
-    Out.Write({1, Where.Rows - 1}, tui::Shortened(Hints, static_cast<std::size_t>(Where.Cols - 2)),
-              tui::TextStyle{Ctx.Shown.Quiet, Ctx.Shown.Page});
+    const std::vector<Hint> Hints = {{"space", "pull"}, {"+/-", std::format("bet {}", Counted(Bet()))}, {"l", std::format("lines {}", Lines)},
+                                     {Spelled(Ctx.Shown.Keys[KeyPay]), "pay table"}};
+    HintBar(Out, Ctx.Shown, Hints);
 }
 
 void Slots::PaintPay(tui::Frame &Out)
@@ -267,10 +267,12 @@ void Slots::PaintPay(tui::Frame &Out)
     const tui::TextStyle Said{Shown.Text, Back};
     const tui::TextStyle Quiet{Shown.Quiet, Back};
     const std::span<const Pay> Table = PayTable();
-    const std::int32_t Wide = 66, High = static_cast<std::int32_t>(Table.size()) + 10;
+    const std::int32_t Wide = 66, High = static_cast<std::int32_t>(Table.size()) + 8;
     const painter::core::Rect Area{(Out.Size().Width - Wide) / 2, std::max(1, (Out.Size().Height - High) / 2), Wide, High};
     Box(Out, Area, Shown.Gold, Back, "Pay table: what a line pays for each chip bet on it", Shown.Gold);
-    std::int32_t Row = Area.Y + 2;
+    const Color        Grid = Shade(Shown.Gold, 0.55f);
+    std::int32_t       Row  = Area.Y + 2;
+    const std::int32_t Cut  = Area.X + 33;
     for (const Pay &One : Table) {
         for (int Reel = 0; Reel < ReelCount; Reel++) {
             const std::string Name = One.Any[Reel] ? "any" : std::string(NameOf(One.Needs[Reel]));
@@ -278,11 +280,12 @@ void Slots::PaintPay(tui::Frame &Out)
             std::transform(Upper.begin(), Upper.end(), Upper.begin(), [](char Letter) { return static_cast<char>(Letter - 'a' + 'A'); });
             Out.Write({Area.X + 3 + Reel * 9, Row}, Upper, One.Any[Reel] ? Quiet : tui::TextStyle{SymbolInk(One.Needs[Reel]), Back});
         }
-        Out.Write({Area.X + 31, Row}, std::format("{:>4} x", One.Multiple), Said);
-        if (&One == &Table[0]) Out.Write({Area.X + 40, Row}, "THE JACKPOT", tui::TextStyle{Shown.Gold, Back});
+        Out.Put({Cut, Row}, tui::Glyphs::RuleDown, tui::TextStyle{Grid, Back});
+        Out.Write({Cut + 2, Row}, std::format("{:>4} x", One.Multiple), tui::TextStyle{Shown.Gold, Back});
+        if (&One == &Table[0]) Out.Write({Cut + 11, Row}, "THE JACKPOT", tui::TextStyle{Shown.Gold, Back});
         Row++;
     }
-    Row++;
+    BoxRule(Out, Area, Row++, Grid, Back);
     int Counts[SymbolKinds] = {};
     for (int Stop = 0; Stop < StripLength; Stop++) Counts[static_cast<int>(OnStrip(Stop))]++;
     Out.Write({Area.X + 3, Row++}, std::format("Each reel is {} stops:", StripLength), Quiet);

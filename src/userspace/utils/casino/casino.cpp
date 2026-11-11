@@ -1,8 +1,9 @@
-/* casino — a little play casino: a roulette table and a slot machine, played
- * with chips that are only chips.
+/* casino — a little play casino: a roulette table, a slot machine and a
+ * blackjack table, played with chips that are only chips.
  *
  *   casino               at the roulette table
  *   casino slots         at the slot machine
+ *   casino blackjack     at the blackjack table
  *
  * Roulette is a single-zero wheel drawn from above with a ball that runs
  * against it, slows, rattles over the frets and drops into a pocket; chips go
@@ -15,11 +16,14 @@
  *
  * The chips are kept on the volume in casino.purse and found again at the next
  * start; a player who has none left may be given a fresh stack, as settings
- * casino says. Tab goes to the other table, ctrl+? shows every key, esc leaves.
- * What it is made of: look (the settings), luck (the draws), purse (the chips),
- * canvas and trig (the pixels), common and shower (what both tables draw),
- * wheel, bets and board (roulette's rules and board), roulette and its picture,
- * reels, faces and slots with its picture, and desk (the glass and the keys).
+ * casino says. Tab and 1 2 3 go to another table, ctrl+? shows every key, esc
+ * leaves. What it is made of: look (the settings), luck (the draws), purse (the
+ * chips), canvas and trig (the pixels), ornament (rules, boxes and cloth drawn
+ * with the font), chips, common and shower (what the tables draw alike), wheel,
+ * bets and board (roulette's rules and board), roulette and its picture, reels,
+ * faces and slots with its picture, cards, hands and blackjack_game (the rules
+ * of blackjack), card_art, blackjack and its pictures, and desk (the glass and
+ * the keys).
  */
 
 #include <format>
@@ -34,7 +38,7 @@
 #include "common.h"
 #include "desk.h"
 
-BOX_FORM("takes optional words \"where to sit: roulette or slots; at roulette if none\"\n");
+BOX_FORM("takes optional words \"where to sit: roulette, slots or blackjack; at roulette if none\"\n");
 
 namespace {
 
@@ -61,8 +65,9 @@ int main()
         if (Count > 0) {
             const std::string_view Table = Words[0];
             if (Table == "slots") Start = casino::Sitting::Slots;
+            else if (Table == "blackjack") Start = casino::Sitting::Blackjack;
             else if (Table != "roulette") {
-                Say(std::format("casino: there is no table called \"{}\": it is roulette or slots", Table));
+                Say(std::format("casino: there is no table called \"{}\": it is roulette, slots or blackjack", Table));
                 return 1;
             }
         }

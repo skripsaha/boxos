@@ -32,6 +32,10 @@ Color Shade(Color Ink, float Factor)
 
 void Canvas::Plot(std::int32_t X, std::int32_t Y, Color Ink, float Cover)
 {
+    if (Edged) {
+        if (Cover >= 0.5f) Out.PutPixel({X, Y}, Ink);
+        return;
+    }
     if (Cover >= 0.99f) Out.PutPixel({X, Y}, Ink);
     else if (Cover > 0.0f) Out.BlendPixel({X, Y}, Ink, Weight(Cover));
 }
@@ -51,7 +55,7 @@ void Canvas::Fill(std::int32_t X, std::int32_t Y, std::int32_t Across, std::int3
     }
 }
 
-void Canvas::Disc(float Across, float Down, float Radius, Color Ink)
+void Canvas::Disc(float Across, float Down, float Radius, Color Ink, float Opacity)
 {
     const std::int32_t Left = std::max(static_cast<std::int32_t>(Across - Radius - 1), 0);
     const std::int32_t Top = std::max(static_cast<std::int32_t>(Down - Radius - 1), 0);
@@ -60,12 +64,12 @@ void Canvas::Disc(float Across, float Down, float Radius, Color Ink)
     for (std::int32_t Row = Top; Row < Bottom; Row++) {
         for (std::int32_t Col = Left; Col < Right; Col++) {
             const float Across2 = Col + 0.5f - Across, Down2 = Row + 0.5f - Down;
-            Plot(Col, Row, Ink, Inside(std::sqrt(Across2 * Across2 + Down2 * Down2) - Radius));
+            Plot(Col, Row, Ink, Inside(std::sqrt(Across2 * Across2 + Down2 * Down2) - Radius) * Opacity);
         }
     }
 }
 
-void Canvas::Ellipse(float Across, float Down, float ReachAcross, float ReachDown, Color Ink)
+void Canvas::Ellipse(float Across, float Down, float ReachAcross, float ReachDown, Color Ink, float Opacity)
 {
     const std::int32_t Left = std::max(static_cast<std::int32_t>(Across - ReachAcross - 1), 0);
     const std::int32_t Top = std::max(static_cast<std::int32_t>(Down - ReachDown - 1), 0);
@@ -76,7 +80,7 @@ void Canvas::Ellipse(float Across, float Down, float ReachAcross, float ReachDow
         for (std::int32_t Col = Left; Col < Right; Col++) {
             const float Over = (Col + 0.5f - Across) / std::max(ReachAcross, 0.5f);
             const float Under = (Row + 0.5f - Down) / std::max(ReachDown, 0.5f);
-            Plot(Col, Row, Ink, Inside((std::sqrt(Over * Over + Under * Under) - 1.0f) * Reach));
+            Plot(Col, Row, Ink, Inside((std::sqrt(Over * Over + Under * Under) - 1.0f) * Reach) * Opacity);
         }
     }
 }
@@ -92,6 +96,26 @@ void Canvas::Ring(float Across, float Down, float Outer, float Inner, Color Ink)
             const float Across2 = Col + 0.5f - Across, Down2 = Row + 0.5f - Down;
             const float Far     = std::sqrt(Across2 * Across2 + Down2 * Down2);
             Plot(Col, Row, Ink, std::min(Inside(Far - Outer), Inside(Inner - Far)));
+        }
+    }
+}
+
+void Canvas::Rounded(float Left, float Top, float Across, float Down, float Radius, Color Ink, float Opacity)
+{
+    const float HalfAcross = Across / 2.0f, HalfDown = Down / 2.0f;
+    const float MiddleAcross = Left + HalfAcross, MiddleDown = Top + HalfDown;
+    const std::int32_t From = std::max(static_cast<std::int32_t>(std::floor(Left)) - 1, 0);
+    const std::int32_t Up = std::max(static_cast<std::int32_t>(std::floor(Top)) - 1, 0);
+    const std::int32_t To = std::min(static_cast<std::int32_t>(std::ceil(Left + Across)) + 1, Wide());
+    const std::int32_t Bottom = std::min(static_cast<std::int32_t>(std::ceil(Top + Down)) + 1, High());
+    for (std::int32_t Row = Up; Row < Bottom; Row++) {
+        for (std::int32_t Col = From; Col < To; Col++) {
+            const float OverAcross = std::fabs(Col + 0.5f - MiddleAcross) - (HalfAcross - Radius);
+            const float OverDown   = std::fabs(Row + 0.5f - MiddleDown) - (HalfDown - Radius);
+            const float Beyond = std::sqrt(std::max(OverAcross, 0.0f) * std::max(OverAcross, 0.0f) +
+                                           std::max(OverDown, 0.0f) * std::max(OverDown, 0.0f)) +
+                                 std::min(std::max(OverAcross, OverDown), 0.0f) - Radius;
+            Plot(Col, Row, Ink, Inside(Beyond) * Opacity);
         }
     }
 }

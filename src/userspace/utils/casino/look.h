@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "blackjack_rules.h"
 #include "key_chord.h"
 #include "painter/core/color.h"
 
@@ -27,6 +28,9 @@ struct Look {
     Color        Felt;           // the table's cloth
     Color        Wheel;          // the wheel's wood
     Color        Cabinet;        // the slot machine's body
+    Color        Rail;           // the wood round the tables
+    Color        CardFace;       // the white of a playing card
+    Color        CardBack;       // the pattern on the back of a card
     Color        Lights;         // the bulbs round the table and the cabinet
     Color        Red;            // red pockets and cells
     Color        Black;          // black pockets and cells
@@ -35,6 +39,7 @@ struct Look {
     Color        Quiet;
     Color        Won;
     Color        Lost;
+    BlackjackRules Blackjack;
     KeyChord     Keys[KeyCount];
 };
 

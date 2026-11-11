@@ -440,8 +440,9 @@ read.elf: $(BOXLIB_START) $(READ_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_D
 # The casino is C++ in parts of its own directory; it keeps its chips with keep.o.
 CASINO_DIR  = casino
 CASINO_OBJS = $(addprefix $(CASINO_DIR)/,casino.o desk.o look.o luck.o purse.o canvas.o canvas_text.o common.o shower.o \
-                                         wheel.o bets.o board.o roulette.o roulette_paint.o reels.o faces.o slots.o \
-                                         slots_paint.o wheel_plate.o) \
+                                         ornament.o chips.o wheel.o bets.o board.o roulette.o roulette_paint.o roulette_board.o reels.o \
+                                         faces.o slots.o slots_paint.o wheel_plate.o cards.o hands.o blackjack_game.o \
+                                         card_art.o blackjack.o blackjack_paint.o blackjack_table.o) \
               keep.o
 
 casino.elf: $(BOXLIB_START) $(CASINO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
