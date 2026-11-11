@@ -835,7 +835,7 @@ UTIL_NAMES = create show files tag untag name trash delete assemble \
              timezone logsave lastsaid usetest faretest luggagetest headcount \
              playtime lavalamp finish taskboard memmap hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
-             nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
+             nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard \
              edit seek retag read rollcall handset inside settings scratchpad garden gardener
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
@@ -1569,7 +1569,8 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/tumbleweed.elf "utility,fun" \
 	$(UTILS_DIR)/crab.elf      "utility,fun" \
 	$(UTILS_DIR)/garden.elf    "utility,fun" \
-	$(UTILS_DIR)/gardener.elf  "utility,system,gardener,autostart"
+	$(UTILS_DIR)/gardener.elf  "utility,system,gardener,autostart" \
+	$(UTILS_DIR)/wizard.elf    "utility,fun,game"
 
 # ‼ EVERY PROGRAM ON THE VOLUME IS A BOX. VOLUME_CONTENT names the programs as
 # the tree links them; each ELF there goes onto the volume as the box tools/pack
