@@ -322,6 +322,93 @@ typedef struct PACKED {
  * or the ask's refusal. */
 int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count);
 
+/* --------------------------------------------------------------------------
+ * An effect over the whole glass
+ * --------------------------------------------------------------------------
+ *
+ * Any program may ask the display to lay an effect over everything it shows —
+ * the console's text, every layer, the caret — for a while. The display only
+ * changes how the picture is presented: what the programs drew, and what the
+ * keeper's page colours are, stay as they are underneath, and are shown
+ * as they were the moment the effect ends. Nothing a program reads back from
+ * the display, a layer's cells or the console's, is touched.
+ *
+ * What an effect is: a set of kinds, laid together, with one strength shared
+ * by them, which swells in at the start and ebbs out at the end (a mirror has
+ * no half-strength and comes and goes at once). Geometry first, then colour,
+ * then the sparkles:
+ *
+ *   DISPLAY_EFFECT_SWAY      rows swing sideways (AXIS_X) and columns up and
+ *                            down (AXIS_Y) in slow waves, the cells at the
+ *                            edge coming round the other side — the glass
+ *                            seen drunk; the stronger, the wider the swing
+ *   DISPLAY_EFFECT_MIRROR    the picture turned over: left for right (AXIS_X),
+ *                            upside down (AXIS_Y), the glyphs themselves
+ *                            as they are drawn
+ *   DISPLAY_EFFECT_FADE      the colours drained towards grey
+ *   DISPLAY_EFFECT_INVERT    the colours turned to their opposites
+ *   DISPLAY_EFFECT_TINT      the colours seen through glass of `color`: each
+ *                            of a cell's colours is multiplied by it
+ *   DISPLAY_EFFECT_SHIMMER   sparkles come and go on the glass, in `color`
+ *                            brightened — on the empty cells as stars, on the
+ *                            text as a flash; the stronger, the more of them
+ *
+ * On a text page, with its sixteen colours and its whole cells, every kind
+ * is shown as nearly as that allows: a colour is quantized after the
+ * effect changed it, and a swing moves whole cells.
+ *
+ * Who may ask: any program. An effect is time-limited and changes nothing but
+ * the picture, so it asks no badge — and there is one at a time: a new one
+ * takes the place of the one laid, whoever laid it, so no program can hold
+ * the glass against the next one's asking. How long it lasts is the asker's word,
+ * at most DISPLAY_EFFECT_LONGEST_MS: the display ends it itself. It also ends
+ * when the program that laid it ends, and when its asker lifts it
+ * (DISP_CMD_EFFECT_LIFT) — which a keeper (a program that wears `system`) may
+ * do to any effect, the person's way out of one a program laid and forgot.
+ *
+ * Both are QUESTIONS, answered with a DisplayFrontReply: the display's refusal
+ * in `error`; for a lift, `heard` is 1 when an effect was lifted.
+ */
+#define DISP_CMD_EFFECT       0x56
+#define DISP_CMD_EFFECT_LIFT  0x57
+
+enum {
+    DISPLAY_EFFECT_TINT    = 1,
+    DISPLAY_EFFECT_FADE    = 2,
+    DISPLAY_EFFECT_INVERT  = 4,
+    DISPLAY_EFFECT_SWAY    = 8,
+    DISPLAY_EFFECT_MIRROR  = 16,
+    DISPLAY_EFFECT_SHIMMER = 32,
+    DISPLAY_EFFECT_KINDS   = 63,    /* every kind there is */
+};
+
+enum {
+    DISPLAY_EFFECT_AXIS_X = 1,
+    DISPLAY_EFFECT_AXIS_Y = 2,
+};
+
+#define DISPLAY_EFFECT_LONGEST_MS  300000u
+
+typedef struct PACKED {
+    uint8_t  command;           /* DISP_CMD_EFFECT */
+    uint8_t  strength;          /* 1..255 */
+    uint8_t  axes;              /* DISPLAY_EFFECT_AXIS_*: for SWAY and MIRROR, at least one */
+    uint8_t  reserved;
+    uint32_t kinds;             /* DISPLAY_EFFECT_*, at least one, none outside DISPLAY_EFFECT_KINDS */
+    uint32_t color;             /* #RRGGBB: the tint, and the sparkles' */
+    uint32_t duration_ms;       /* 1..DISPLAY_EFFECT_LONGEST_MS */
+} DisplayEffectRequest;
+
+/* The asking program lays an effect over the glass (DISP_CMD_EFFECT). OK, or
+ * -ERR_INVALID_ARGUMENT for a request outside what is said above, or the ask's
+ * refusal. */
+int display_effect(uint32_t kinds, uint8_t strength, uint8_t axes, uint32_t color, uint32_t duration_ms);
+
+/* The effect on the glass lifted by the asking program, which laid it, or by
+ * a keeper: 1 when one was lifted, 0 when there was none; -ERR_ACCESS_DENIED
+ * when another program's lies there and the asker is no keeper. */
+int display_effect_lift(void);
+
 /* A word of the display on a lane's own tag, in place of a key — told from a
  * key, which is a kb_event_t of three bytes, by its length and its mark. */
 #define CONSOLE_NOTICE_MARK  0x4E4F5445u   /* "ETON", the bytes of NOTE */
@@ -506,7 +593,8 @@ STATIC_ASSERT(sizeof(DisplayLayerFrameNotice) == 12,
               "DisplayLayerFrameNotice is a message ABI and must stay 12 bytes");
 STATIC_ASSERT(sizeof(DisplayFrontRequest) == 12 && sizeof(DisplayPageRequest) == 12 &&
                   sizeof(DisplayFrontReply) == 12 && sizeof(DisplayKeysRequest) == 4 && sizeof(KeyChord) == 4 &&
-                  sizeof(DisplayPlacesReply) == 4 && sizeof(DisplayPlace) == 12,
+                  sizeof(DisplayPlacesReply) == 4 && sizeof(DisplayPlace) == 12 &&
+                  sizeof(DisplayEffectRequest) == 16,
               "the front's questions and answers are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(DisplayFrontNews) == 20, "DisplayFrontNews is a Touch payload ABI of 20 bytes");
 STATIC_ASSERT(sizeof(ConsoleNotice) == 8, "ConsoleNotice is a Touch payload ABI of 8 bytes, never a key's 3");

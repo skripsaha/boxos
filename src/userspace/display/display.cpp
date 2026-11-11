@@ -24,7 +24,7 @@
  * and a mark that lies holds no one but its asker.
  *
  * One event loop, no timeouts: a rotation of try-steps (keys → deaths →
- * screen turns → lanes → ring → layers → IPC). A pass that moves nothing does
+ * screen turns → effect → lanes → ring → layers → IPC). A pass that moves nothing does
  * not go round again — the program turns in and stops costing a core until
  * something arrives for it. A Touch and a Result the kernel sees land, so the
  * sleep watches those cursors itself; a lane frame and a kernel line are not
@@ -35,6 +35,12 @@
  * the mark refuses the sleep it was taken for: in the last look only a step
  * that has moved something calls into the kernel, and then the pass goes
  * round again rather than sleeping.
+ *
+ * Time is the one thing nobody rings for, and an effect over the glass
+ * (effects.cpp) lives by it: a frame to draw, an end to come. So the program
+ * sets an alarm (box/alarm.h) for the nearest of them before it goes down, and
+ * the kernel's Touch at that moment is one more arrival the sleep watches;
+ * with no effect over the glass there is no alarm, and the sleep costs nothing.
  */
 
 #include <algorithm>
@@ -46,6 +52,7 @@
 #include <vector>
 
 #include "box/core/cabin.h"
+#include "box/alarm.h"
 #include "box/core/result.h"
 #include "box/debug.h"
 #include "box/error.h"
@@ -58,6 +65,7 @@
 
 #include "console_model.h"
 #include "easel.h"
+#include "effects.h"
 #include "front.h"
 #include "lanes.h"
 #include "layers.h"
@@ -71,6 +79,7 @@ std::optional<Easel> g_easel;
 ConsoleModel *g_model;
 RingFollower g_ring;
 std::vector<GlassCell> g_composed;
+std::vector<GlassCell> g_glass;    // g_composed as an effect over the glass shows it
 bool g_dirty;                      // the picture changed since it was last presented
 TouchTag g_died = TOUCH_TAG_INVALID;
 
@@ -182,7 +191,13 @@ void Present()
     g_dirty = false;
     Caret At;
     LayersCompose(*g_model, g_composed, At);
-    g_easel->Present(g_composed, At);
+    if (!EffectsOn()) {
+        g_easel->Present(g_composed, At);
+        return;
+    }
+    EffectsApply(g_composed, g_glass, At, g_easel->Cols(), g_easel->Rows(), g_easel->TextColor(),
+                 g_easel->PageColor());
+    g_easel->Present(g_glass, At);
 }
 
 // The waiting questions whose askers' frames up to their marks are drawn,
@@ -231,6 +246,7 @@ bool DeathStep()
         LanesDeath(Died.pid, Died.generation);
         FrontDeath(Died.pid, Died.generation);
         g_dirty |= LayersDropProcess(Died.pid, Died.generation);
+        g_dirty |= EffectsDrop(Died.pid, Died.generation);
 
         // A dead asker's question waits for nothing now. It is answered all
         // the same — with nothing, which the kernel delivers nowhere — so the
@@ -252,6 +268,38 @@ bool ScreenStep()
     const bool Again = g_easel->Step();
     g_dirty |= Again;
     return Again;
+}
+
+// The moment the alarm is set for, 0 when none is.
+std::uint64_t g_alarm;
+
+// An effect over the glass: the alarm's Touches taken, a frame drawn when one
+// is due, the effect ended when its time is up. A Touch for a moment since
+// replaced is taken all the same: the step judges by the clock, not by which
+// moment woke it.
+bool EffectStep()
+{
+    std::uint64_t Moment;
+    bool Heard = false;
+    while (alarm_heard(&Moment)) {
+        Heard = true;
+        if (Moment == g_alarm) g_alarm = 0;
+    }
+    const bool Changed = EffectsStep();
+    g_dirty |= Changed;
+    return Changed || Heard;
+}
+
+// The alarm for the effect's next frame or its end, in place of the one set:
+// only when that moment has changed, and none while no effect lies over the
+// glass.
+void SetAlarm()
+{
+    const std::uint64_t Due = EffectsDue();
+    if (Due == g_alarm) return;
+    if (Due == 0) alarm_cancel();
+    else alarm_set(Due);
+    g_alarm = Due;
 }
 
 // A lane's turn (lanes.h): what is held drawn first, so the line kept, or
@@ -321,6 +369,29 @@ void AnswerPage(const Result &Asked, const AskFrom &From, const DisplayPageReque
     (void)answer(&Asked, &Reply, sizeof(Reply));
 }
 
+// DISP_CMD_EFFECT and DISP_CMD_EFFECT_LIFT: any program may lay an effect over
+// the glass and lift its own; a keeper may lift any (box/display.h).
+void AnswerEffect(const Result &Asked, const AskFrom &From, const std::uint8_t *Question, std::uint32_t Length)
+{
+    error_t Error = OK;
+    bool Lifted = false;
+    if (Question[0] == DISP_CMD_EFFECT_LIFT) {
+        Error = EffectsLift(From, FrontKeeper(From), Lifted);
+    } else {
+        DisplayEffectRequest Request{};
+        if (Length < sizeof(Request)) {
+            (void)answer(&Asked, nullptr, 0);
+            return;
+        }
+        std::memcpy(&Request, Question, sizeof(Request));
+        Error = EffectsLay(From, Request);
+    }
+    g_dirty |= Error == OK;
+    const DisplayFrontReply Reply{Question[0], static_cast<std::uint8_t>(Lifted), {0, 0},
+                                  static_cast<std::int32_t>(Error), cabin_info()->pid};
+    (void)answer(&Asked, &Reply, sizeof(Reply));
+}
+
 // A question (KCTX_ASK): AskFrom, then what is asked. Every branch answers —
 // nothing at all when the question is not one this display knows.
 void HearQuestion(const Result &Entry)
@@ -385,6 +456,10 @@ void HearQuestion(const Result &Entry)
         AnswerPage(Entry, From, Request);
         return;
     }
+    case DISP_CMD_EFFECT:
+    case DISP_CMD_EFFECT_LIFT:
+        AnswerEffect(Entry, From, Question, Length);
+        return;
     case DISP_CMD_LAYER_OPEN:
     case DISP_CMD_LAYER_COMMIT: {
         WaitingQuestion Waiting{};
@@ -515,6 +590,7 @@ bool Rotate()
     Moved |= DeathStep();
     Moved |= FrontSpawnStep();
     Moved |= ScreenStep();
+    Moved |= EffectStep();
     Moved |= LaneStep();
     Moved |= RingStep();
     Moved |= LayerStep();
@@ -545,6 +621,8 @@ int main(void)
     try {
         g_model = new ConsoleModel(g_easel->Cols(), g_easel->Rows());
         g_composed.resize(static_cast<std::size_t>(g_easel->Cols()) * g_easel->Rows());
+        g_glass.resize(g_composed.size());
+        EffectsFrameRate(g_easel->Pixels() ? 30 : 12);
         g_held.reserve(32);
     } catch (...) {
         kdbg_print("[display] no room for a %ux%u console", g_easel->Cols(), g_easel->Rows());
@@ -583,6 +661,7 @@ int main(void)
         Present();
         if (Moved) continue;
 
+        SetAlarm();
         /* Nothing moved. Hang the bells FIRST, then take the mark, then look
          * one last time — in that order, and the order is the whole proof.
          * Anything arriving from here on either rings a bell (itself an

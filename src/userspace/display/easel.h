@@ -57,6 +57,13 @@ public:
     std::uint32_t Cols() const noexcept { return ColsValue; }
     std::uint32_t Rows() const noexcept { return RowsValue; }
 
+    // Whether the glass is a framebuffer, not a text page.
+    bool Pixels() const noexcept { return Description.kind == SCREEN_KIND_PIXELS; }
+
+    // The screen's own colours, as COLOR_DEFAULT is drawn in them.
+    std::uint32_t TextColor() const noexcept { return TextColour; }
+    std::uint32_t PageColor() const noexcept { return PageColour; }
+
     // The screen's turns, said on the `screen` Touch: Ctrl+Alt+Esc showing the
     // kernel's Emergency Screen (nothing is drawn while it does) and giving
     // the glass back (all of it is drawn again). True when the next Present
