@@ -71,7 +71,7 @@ UTILS = create show files tag untag name trash delete assemble \
         playtime lavalamp finish taskboard hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
-        edit seek retag read inside settings scratchpad
+        edit seek retag read inside settings scratchpad garden gardener
 
 .PHONY: all clean
 
@@ -168,6 +168,24 @@ SCRATCHPAD_OBJS = $(addprefix $(SCRATCHPAD_DIR)/,scratchpad.o pad.o paint.o look
 
 scratchpad.elf: $(BOXLIB_START) $(SCRATCHPAD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(SCRATCHPAD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# The garden is C++ in parts of its own directory, each named for what it is;
+# gardener, its keeper in the background, is the file and the Touch it shares
+# with it (record.o) and its own part. Both keep the plants' file with keep.o.
+GARDEN_DIR     = garden
+GARDEN_SHARED  = $(addprefix $(GARDEN_DIR)/,record.o) keep.o
+GARDEN_OBJS    = $(addprefix $(GARDEN_DIR)/,garden.o view.o paint.o growth.o look.o sky.o flora.o air.o) $(GARDEN_SHARED)
+GARDENER_OBJS  = $(GARDEN_DIR)/gardener.o $(GARDEN_SHARED)
+
+# The parts are named from the utilities' root: "keep.h".
+$(sort $(GARDEN_OBJS) $(GARDENER_OBJS)): CXXFLAGS += -I.
+
+garden.elf: $(BOXLIB_START) $(GARDEN_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(GARDEN_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+gardener.elf: $(BOXLIB_START) $(GARDENER_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(GARDENER_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # hexer and stringview are C++ in parts: each names its own objects, links
@@ -360,7 +378,7 @@ $(sort $(EDIT_OBJS) $(READ_OBJS)): CXXFLAGS += -I.
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d)
+-include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
@@ -368,4 +386,4 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 
 clean:
 	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d \
-	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d
+	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d
