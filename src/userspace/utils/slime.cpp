@@ -45,7 +45,8 @@ BOX_LIFE("stays");
 BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the slime hops and rests\"\n"
              "size number from 40 to 250 percent default 100 \"how large the slime is\"\n"
              "color color default #9FD724 \"the slime's body\"\n"
-             "trail on-or-off default on \"a wet slick where the slime lands\"\n");
+             "trail on-or-off default on \"a wet slick where the slime lands\"\n"
+             "shadow on-or-off default on \"a dark shadow on the ground under the slime\"\n");
 
 namespace {
 
@@ -96,6 +97,7 @@ struct Look {
     float        Size  = 1.0f;
     PainterColor Body  = PainterColor::Rgb(0x9F, 0xD7, 0x24);
     bool         Trail = true;
+    bool         Shadowed = true;
 };
 
 Look ReadLook()
@@ -104,7 +106,8 @@ Look ReadLook()
     return Look{.Speed = static_cast<float>(settings::number("speed")) / 100.0f,
                 .Size  = static_cast<float>(settings::number("size")) / 100.0f,
                 .Body  = PainterColor::FromRaw(settings::color("color")),
-                .Trail = settings::on("trail")};
+                .Trail = settings::on("trail"),
+                .Shadowed = settings::on("shadow")};
 }
 
 /* Five tones from shadow to highlight, and the line around a shape. */
@@ -472,15 +475,17 @@ void DrawFace(Pixmap &Art, const Palette &Ink, const Slime &Creature, const Figu
         Art.Put(Whole(Shape.Cx + Across), Whole(MouthY + 1.2f * Zoom * (1.0f - Across * Across / (Reach * Reach))), Ink.Body.Outline);
 }
 
-void Draw(Pixmap &Art, const Palette &Ink, const Slime &Creature, float Zoom)
+void Draw(Pixmap &Art, const Palette &Ink, const Slime &Creature, float Zoom, bool Shadowed)
 {
     for (const Slick &One : Creature.Slicks) {
         float Left = 1.0f - One.Age / SlickLife, Rx = std::max(1.0f, One.Wide * 0.5f * std::sqrt(Left));
         if (Left > 0.02f) Art.Oval(One.At.X, One.At.Y, Rx, std::max(0.9f, Rx * 0.16f), Ink.Body);
     }
     float Height = Creature.Air;
-    float Shade  = Creature.Round * 0.46f * (1.0f - std::min(0.5f, Height / (Creature.Round * 1.2f)));
-    Art.Oval(Creature.Foot.X, Creature.Foot.Y + 0.5f, Shade, std::max(1.0f, Shade * 0.16f), Flat(Shadow));
+    if (Shadowed) {
+        float Shade = Creature.Round * 0.46f * (1.0f - std::min(0.5f, Height / (Creature.Round * 1.2f)));
+        Art.Oval(Creature.Foot.X, Creature.Foot.Y + 0.5f, Shade, std::max(1.0f, Shade * 0.16f), Flat(Shadow));
+    }
     Figure Shape{Creature.Foot.X, Creature.Foot.Y - Height, Creature.Wide() * 0.5f, Creature.High() * 0.5f, Creature.Ripple, Creature.Phase};
     DrawBody(Art, Ink.Body, Shape);
     DrawFace(Art, Ink, Creature, Shape, Zoom);
@@ -571,7 +576,7 @@ int main()
         Last = Now;
         Reach Box = Holding(Creature, Dimensions.Width, Dimensions.Height);
         Art.Place(Box.Left, Box.Top, Box.Right - Box.Left, Box.Bottom - Box.Top);
-        Draw(Art, Ink, Creature, Zoom);
+        Draw(Art, Ink, Creature, Zoom, Set.Shadowed);
         if (!Paint(Art, Screen, Glass, Box)) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(Moving ? ActiveMs : RestMs));
     }
