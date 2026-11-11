@@ -40,7 +40,8 @@ BOX_FORM("");
 BOX_LIFE("stays");
 BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the crab walks and works\"\n"
              "size number from 40 to 250 percent default 100 \"how large the crab is\"\n"
-             "color color default #D8453B \"the crab's shell\"\n");
+             "color color default #D8453B \"the crab's shell\"\n"
+             "shadow on-or-off default on \"a dark shadow on the ground under the crab\"\n");
 
 namespace {
 
@@ -107,6 +108,7 @@ struct Look {
     float        Speed = 1.0f;
     float        Size  = 1.0f;
     PainterColor Shell = PainterColor::Rgb(0xD8, 0x45, 0x3B);
+    bool         Shadowed = true;
 };
 
 Look ReadLook()
@@ -114,7 +116,8 @@ Look ReadLook()
     using box::settings;
     return Look{.Speed = static_cast<float>(settings::number("speed")) / 100.0f,
                 .Size  = static_cast<float>(settings::number("size")) / 100.0f,
-                .Shell = PainterColor::FromRaw(settings::color("color"))};
+                .Shell = PainterColor::FromRaw(settings::color("color")),
+                .Shadowed = settings::on("shadow")};
 }
 
 /* Five tones from shadow to highlight, and the line around a shape. */
@@ -615,11 +618,11 @@ void DrawSpecks(Pixmap &Art, const std::vector<Speck> &Specks)
     }
 }
 
-void Draw(Pixmap &Art, const Palette &Ink, const Crab &Creature, int Shift)
+void Draw(Pixmap &Art, const Palette &Ink, const Crab &Creature, int Shift, bool Shadowed)
 {
     Art.Clear(Shift);
     const Pose &Now = Creature.Now;
-    Art.Oval(MiddleX, GroundY + 0.4f, 17.0f, 2.2f, Flat(Shadow));
+    if (Shadowed) Art.Oval(MiddleX, GroundY + 0.4f, 17.0f, 2.2f, Flat(Shadow));
     DrawLegs(Art, Ink, Now);
     DrawArms(Art, Ink, Now);
     DrawEye(Art, Ink, Now, -1.0f);
@@ -698,7 +701,7 @@ int main()
         bool          Moving = Creature.Step(std::min(0.5f, static_cast<float>(Now - Last) / 1e6f));
         Last = Now;
         int Top = static_cast<int>(std::lround(Creature.Where.Y * 2.0f));
-        Draw(Art, Ink, Creature, Top & 1);
+        Draw(Art, Ink, Creature, Top & 1, Set.Shadowed);
         if (!Paint(Art, Screen, Overlay, {static_cast<int>(std::lround(Creature.Where.X)), Top >> 1})) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(Moving ? ActiveMs : RestMs));
     }
