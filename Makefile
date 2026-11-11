@@ -836,7 +836,7 @@ UTIL_NAMES = create show files tag untag name trash delete assemble \
              playtime lavalamp finish taskboard memmap hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
-             edit seek retag read rollcall handset inside settings scratchpad garden gardener random sand coinflip dice casino seabattle
+             edit seek retag read rollcall handset inside settings scratchpad garden gardener random sand coinflip dice casino seabattle whale
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1578,7 +1578,8 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/dice.elf      "utility,fun,game" \
 	$(UTILS_DIR)/orbits.elf    "utility,fun" \
 	$(UTILS_DIR)/casino.elf "utility,fun,game" \
-	$(UTILS_DIR)/seabattle.elf "utility,fun,game"
+	$(UTILS_DIR)/seabattle.elf "utility,fun,game" \
+	$(UTILS_DIR)/whale.elf "utility,fun"
 
 # ‼ EVERY PROGRAM ON THE VOLUME IS A BOX. VOLUME_CONTENT names the programs as
 # the tree links them; each ELF there goes onto the volume as the box tools/pack
