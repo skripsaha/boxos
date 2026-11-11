@@ -36,15 +36,20 @@ void Sky::SetGravity(double Strength)
 }
 
 // The pull on every body: each pair once, softened so that a pass through a
-// body costs a bounded kick.
+// body costs a bounded kick. The same pass sees whether any two touch, so the
+// steps in which none do never look again.
 void Sky::Pull()
 {
     Pulled.assign(Bodies.size(), Vec{});
+    Touching = false;
     const double Softer = Softening * Softening;
     for (std::size_t First = 0; First < Bodies.size(); First++) {
         for (std::size_t Second = First + 1; Second < Bodies.size(); Second++) {
             const Vec    Between = Bodies[Second].At - Bodies[First].At;
-            const double Square  = Between.X * Between.X + Between.Y * Between.Y + Softer;
+            const double Apart   = Between.X * Between.X + Between.Y * Between.Y;
+            const double Square  = Apart + Softer;
+            const double Reach   = Bodies[First].Radius + Bodies[Second].Radius;
+            if (Apart <= Reach * Reach) Touching = true;
             const double Factor  = Gravity / (Square * std::sqrt(Square));
             Pulled[First]  = Pulled[First] + Between * (Bodies[Second].Mass * Factor);
             Pulled[Second] = Pulled[Second] - Between * (Bodies[First].Mass * Factor);
@@ -65,7 +70,7 @@ void Sky::Advance(double Seconds)
     for (Body &One : Bodies) One.At = One.At + One.Speed * Seconds;
     Pull();
     Kick(Seconds / 2);
-    Merge();
+    if (Touching) Merge();
     Leave();
 }
 

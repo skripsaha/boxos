@@ -45,7 +45,7 @@ private:
     bool     OnChord(const painter::tui::KeyEvent &Key);
     void     OnExtended(const painter::tui::KeyEvent &Key);
     void     OnCharacter(char Typed);
-    Aiming   Foresee() const;
+    const Aiming &Foresee();
     Readout  Reading();
     void     Paint();
 
@@ -62,9 +62,13 @@ private:
     std::size_t            MassAt   = 0;
     std::uint32_t          Thrown   = 0;
     double                 Speed    = 1.0;
+    int                    SinceTrail = 0;
     double                 Owed     = 0.0;   // time that has passed and is not yet stepped
     bool                   Paused   = false;
     bool                   Helping  = false;
+    Aiming                 Foreseen;
+    std::uint64_t          ForeseenAt = 0;
+    bool                   Stale    = true;   // a key or a setting may have changed the path
     std::string            Note;
     std::uint64_t          NoteEnds = 0;
     std::uint64_t          Began    = 0;

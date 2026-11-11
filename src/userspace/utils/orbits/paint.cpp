@@ -12,13 +12,18 @@ namespace {
 
 constexpr double ViewHalf     = 1.5;      // how much of the sky is seen above the middle at zoom 1
 constexpr double FadeTo       = 1.0 / 48; // what a trail is left with when its time is out
-constexpr float  GlowFloor    = 0.4f;     // below this a trail is gone, not a number ever smaller
 constexpr double BurstSeconds = 0.8;
+constexpr double FadeEvery    = 0.05;    // the trails dim in steps this far apart: a step is the whole glass
 constexpr double FullHeight   = 100.0;   // pixels high from which the glows are as wide as they are drawn
 constexpr int    LeastCells   = 1;
 
 const Color Dust = Color::Rgb(0xC8, 0xD4, 0xFF);
 const Color Hot  = Color::Rgb(0xFF, 0xFF, 0xFF);
+
+double Distance(double Along, double Down)
+{
+    return std::sqrt(Along * Along + Down * Down);
+}
 
 int Floor(double Value)
 {
@@ -76,23 +81,31 @@ void Canvas::Age(double Seconds, const Look &Shown)
 {
     if (Seconds <= 0.0) return;
     Time += Seconds;
-    const float Fading = static_cast<float>(std::pow(FadeTo, Seconds / std::max<double>(Shown.TrailSeconds, 1.0)));
-    for (Glow &One : Glows) {
-        One.Red   = One.Red * Fading < GlowFloor ? 0.0f : One.Red * Fading;
-        One.Green = One.Green * Fading < GlowFloor ? 0.0f : One.Green * Fading;
-        One.Blue  = One.Blue * Fading < GlowFloor ? 0.0f : One.Blue * Fading;
-    }
+    FadeDue += Seconds;
     for (Burst &One : Bursts) One.Age += Seconds / BurstSeconds;
     std::erase_if(Bursts, [](const Burst &One) { return One.Age >= 1.0; });
+    if (FadeDue < FadeEvery) return;
+    // Whole numbers all the way: the trails are the most of the glass, and a
+    // step of the fade takes at least one off every lit channel, so none lingers.
+    const unsigned Fading = static_cast<unsigned>(256.0 * std::pow(FadeTo, FadeDue / std::max<double>(Shown.TrailSeconds, 1.0)));
+    FadeDue               = 0.0;
+    const auto Dim = [Fading](std::uint8_t Level) {
+        return static_cast<std::uint8_t>(Level == 0 ? 0 : std::min<unsigned>(Level * Fading >> 8, Level - 1u));
+    };
+    for (Glow &One : Glows) {
+        One.Red   = Dim(One.Red);
+        One.Green = Dim(One.Green);
+        One.Blue  = Dim(One.Blue);
+    }
 }
 
-void Canvas::Lay(int X, int Y, Color Ink, double Strength)
+void Canvas::Lay(int X, int Y, Glow Ink)
 {
     if (X < 0 || Y < 0 || X >= Wide || Y >= High) return;
     Glow &One = Glows[static_cast<std::size_t>(Y) * Wide + X];
-    One.Red   = std::max(One.Red, static_cast<float>(Ink.Red() * Strength));
-    One.Green = std::max(One.Green, static_cast<float>(Ink.Green() * Strength));
-    One.Blue  = std::max(One.Blue, static_cast<float>(Ink.Blue() * Strength));
+    One.Red   = std::max(One.Red, Ink.Red);
+    One.Green = std::max(One.Green, Ink.Green);
+    One.Blue  = std::max(One.Blue, Ink.Blue);
 }
 
 void Canvas::Trail(Body &One, const Look &Shown)
@@ -103,11 +116,13 @@ void Canvas::Trail(Body &One, const Look &Shown)
     const int    Steps = static_cast<int>(std::ceil(std::max(std::fabs(Along), std::fabs(Down))));
     if (Steps < 1) return;
     if (Steps <= 4 * Wide) {
-        const Color  Ink      = InkOf(Shown, One);
+        const Color  Shade    = InkOf(Shown, One);
         const double Strength = One.IsStar() ? 0.55 : 0.85;
+        const Glow   Ink{static_cast<std::uint8_t>(Shade.Red() * Strength), static_cast<std::uint8_t>(Shade.Green() * Strength),
+                       static_cast<std::uint8_t>(Shade.Blue() * Strength)};
         for (int Step = 0; Step <= Steps; Step++) {
             const double Part = static_cast<double>(Step) / Steps;
-            Lay(Floor(From.X + Along * Part), Floor(From.Y + Down * Part), Ink, Strength);
+            Lay(Floor(From.X + Along * Part), Floor(From.Y + Down * Part), Ink);
         }
     }
     One.Drawn = One.At;
@@ -133,7 +148,7 @@ void Canvas::Disc(Spot At, double Radius, Color Ink, double Weight)
     const int Top = std::max(Floor(At.Y - Radius - 1), 0), Bottom = std::min(Floor(At.Y + Radius + 1), High - 1);
     for (int Y = Top; Y <= Bottom; Y++) {
         for (int X = Left; X <= Right; X++) {
-            const double Away  = std::hypot(X + 0.5 - At.X, Y + 0.5 - At.Y);
+            const double Away  = Distance(X + 0.5 - At.X, Y + 0.5 - At.Y);
             const double Cover = std::clamp(Radius + 0.5 - Away, 0.0, 1.0);
             if (Cover > 0.0) Blend(X, Y, Ink, Cover * Weight);
         }
@@ -146,7 +161,7 @@ void Canvas::Halo(Spot At, double Inner, double Outer, Color Ink, double Strengt
     const int Top = std::max(Floor(At.Y - Outer), 0), Bottom = std::min(Floor(At.Y + Outer), High - 1);
     for (int Y = Top; Y <= Bottom; Y++) {
         for (int X = Left; X <= Right; X++) {
-            const double Away = std::hypot(X + 0.5 - At.X, Y + 0.5 - At.Y);
+            const double Away = Distance(X + 0.5 - At.X, Y + 0.5 - At.Y);
             if (Away >= Outer) continue;
             const double Rest = 1.0 - std::max(0.0, (Away - Inner) / (Outer - Inner));
             Blend(X, Y, Ink, Strength * Rest * Rest);
@@ -154,26 +169,36 @@ void Canvas::Halo(Spot At, double Inner, double Outer, Color Ink, double Strengt
     }
 }
 
-// The night: the background, a sparse dust of faint stars that glimmer, and the
-// trails laid over it.
-void Canvas::Background(const Look &Shown)
+// The night is laid once for a glass and a background: the colour, and a sparse
+// dust of faint stars whose places and brightness are fixed by their pixel.
+void Canvas::LayNight(Color Base)
 {
-    const Color Base = Shown.Background;
+    Night.assign(static_cast<std::size_t>(Wide) * High, Base);
+    Specks.clear();
     for (int Y = 0; Y < High; Y++) {
         for (int X = 0; X < Wide; X++) {
             const std::uint32_t Chance = Hash(X, Y);
-            Color               Night  = Base;
-            if (((Chance >> 4) & 0x1FF) == 0) {
-                const double Glimmer = 0.75 + 0.25 * std::sin(Time * (0.6 + ((Chance >> 24) & 7) * 0.3) + (Chance & 0xFFF));
-                Night = Color::Mix(Base, Dust, Byte((0.10 + 0.20 * ((Chance >> 16) & 0xFF) / 255.0) * Glimmer));
-            }
-            const Glow &Trail = Glows[static_cast<std::size_t>(Y) * Wide + X];
-            const auto  Sum   = [](std::uint8_t Under, float Over) {
-                return static_cast<std::uint8_t>(std::min(255.0f, Under + Over));
-            };
-            Pixels[static_cast<std::size_t>(Y) * Wide + X] =
-                Color::Rgb(Sum(Night.Red(), Trail.Red), Sum(Night.Green(), Trail.Green), Sum(Night.Blue(), Trail.Blue));
+            if (((Chance >> 4) & 0x1FF) != 0) continue;
+            Specks.push_back(Speck{static_cast<std::size_t>(Y) * Wide + X, 0.10 + 0.20 * ((Chance >> 16) & 0xFF) / 255.0,
+                                   0.6 + ((Chance >> 24) & 7) * 0.3, static_cast<double>(Chance & 0xFFF)});
         }
+    }
+    NightBase = Base;
+}
+
+// The night, the dust glimmering, and the trails laid over it.
+void Canvas::Background(const Look &Shown)
+{
+    if (Night.size() != Pixels.size() || !(NightBase == Shown.Background)) LayNight(Shown.Background);
+    Pixels = Night;
+    for (const Speck &One : Specks)
+        Pixels[One.At] = Color::Mix(Shown.Background, Dust, Byte(One.Level * (0.75 + 0.25 * std::sin(Time * One.Rate + One.Phase))));
+    const auto Sum = [](std::uint8_t Under, std::uint8_t Over) { return static_cast<std::uint8_t>(std::min(255, Under + Over)); };
+    for (std::size_t At = 0; At < Glows.size(); At++) {
+        const Glow &Trail = Glows[At];
+        if ((Trail.Red | Trail.Green | Trail.Blue) == 0) continue;
+        const Color Under = Pixels[At];
+        Pixels[At] = Color::Rgb(Sum(Under.Red(), Trail.Red), Sum(Under.Green(), Trail.Green), Sum(Under.Blue(), Trail.Blue));
     }
 }
 
@@ -192,7 +217,7 @@ void Canvas::PaintBody(const Body &One, const Look &Shown)
     const Color  Ink    = BodyColor(Shown, One.Tone);
     const Spot   At     = Where(One.At);
     const double Radius = std::max(One.Radius * Scale, 0.6 + 0.45 * std::cbrt(One.Mass));
-    Halo(At, 0.0, Radius + 2.5 * Reach, Ink, 0.3);
+    if (Radius > 1.4) Halo(At, 0.0, Radius + 2.5 * Reach, Ink, 0.3);
     Disc(At, Radius, Ink, 1.0);
     if (Radius > 1.4) Disc(At, Radius * 0.5, Color::Mix(Ink, Hot, 150), 0.8);
 }
@@ -208,7 +233,7 @@ void Canvas::PaintBursts()
         const int    Top = std::max(Floor(At.Y - Radius - 2), 0), Bottom = std::min(Floor(At.Y + Radius + 2), High - 1);
         for (int Y = Top; Y <= Bottom; Y++) {
             for (int X = Left; X <= Right; X++) {
-                const double Away = std::hypot(X + 0.5 - At.X, Y + 0.5 - At.Y);
+                const double Away = Distance(X + 0.5 - At.X, Y + 0.5 - At.Y);
                 const double Ring = std::max(0.0, 1.0 - std::fabs(Away - Radius * 0.9) / 1.6);
                 const double Fill = Away < Radius ? 0.55 * (1.0 - Away / Radius) : 0.0;
                 Blend(X, Y, Ink, std::max(Ring, Fill) * Fading);
@@ -231,7 +256,7 @@ void Canvas::PaintAim(const Aiming &Aim, const Look &Shown)
     for (double Along = 5.0; Along <= 8.0; Along += 1.0)
         Blend(Floor(At.X + Along * std::cos(Aim.Angle)), Floor(At.Y - Along * std::sin(Aim.Angle)), Ink, 0.9);
     const std::size_t Count = Aim.Places.size();
-    for (std::size_t Place = 0; Place < Count; Place += 2) {
+    for (std::size_t Place = 0; Place < Count; Place += 3) {
         const Spot Dot = Where(Aim.Places[Place]);
         Blend(Floor(Dot.X), Floor(Dot.Y), Ink, 0.95 * (1.0 - 0.75 * static_cast<double>(Place) / Count));
     }

@@ -96,6 +96,7 @@ private:
     double           Gravity   = BaseGravity;
     std::vector<Vec> Pulled;
     bool             PullKnown = false;
+    bool             Touching  = false;   // two bodies touch at the places Pulled was worked out for
     std::uint32_t    NextId    = 1;
 };
 

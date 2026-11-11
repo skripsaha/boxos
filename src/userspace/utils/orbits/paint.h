@@ -44,7 +44,7 @@ public:
 
 private:
     struct Glow {
-        float Red = 0, Green = 0, Blue = 0;
+        std::uint8_t Red = 0, Green = 0, Blue = 0;
     };
     struct Burst {
         Vec    At;
@@ -55,12 +55,17 @@ private:
     struct Spot {
         double X, Y;
     };
+    struct Speck {
+        std::size_t At;
+        double      Level, Rate, Phase;
+    };
 
     Spot Where(Vec At) const;
-    void Lay(int X, int Y, Color Ink, double Strength);
+    void Lay(int X, int Y, Glow Ink);
     void Blend(int X, int Y, Color Ink, double Weight);
     void Disc(Spot At, double Radius, Color Ink, double Weight);
     void Halo(Spot At, double Inner, double Outer, Color Ink, double Strength);
+    void LayNight(Color Base);
     void Background(const Look &Shown);
     void PaintStar(const Body &One, const Look &Shown);
     void PaintBody(const Body &One, const Look &Shown);
@@ -76,6 +81,10 @@ private:
     std::vector<Glow>  Glows;
     std::vector<Color> Pixels;
     std::vector<Burst> Bursts;
+    std::vector<Color> Night;
+    std::vector<Speck> Specks;
+    Color              NightBase;
+    double             FadeDue = 0.0;   // time the trails have not yet faded for
 };
 
 }  // namespace orbits

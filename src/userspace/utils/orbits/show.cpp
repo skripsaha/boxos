@@ -17,11 +17,13 @@ namespace {
 
 namespace tui = painter::tui;
 
-constexpr std::uint64_t FrameUs      = 33333;    // a frame of thirty in a second
+constexpr std::uint64_t FrameUs      = 66667;    // a frame of fifteen in a second
 constexpr std::uint64_t WorkUs       = 22000;    // the most of one frame given to stepping time
 constexpr std::uint64_t PausedWaitMs = 100;      // how often a paused sky looks at its settings
+constexpr std::uint64_t ForecastEveryUs = 1000000;   // how old a path may be while nothing is touched
 constexpr std::uint64_t NoteUs       = 3000000;
 constexpr std::uint64_t KeysShownUs  = 8000000;
+constexpr int           TrailEvery   = 6;        // steps between two marks of a trail: 1/120 s of sky
 constexpr double        MostPassed   = 0.1;      // longer than this since the last frame is not caught up
 constexpr double        LeastSpeed   = 1.0 / 16.0;
 constexpr double        MostSpeed    = 32.0;
@@ -30,9 +32,9 @@ constexpr double        MostZoom     = 6.0;
 constexpr double        MostPower    = 6.0;
 constexpr double        LeastPower   = 0.05;
 constexpr double        MoveStep     = 0.05;
-constexpr std::size_t   ForecastPlaces = 100;
-constexpr int           ForecastSteps  = 6;
-constexpr double        ForecastSeconds = 4.0 * StepSeconds;
+constexpr std::size_t   ForecastPlaces = 80;
+constexpr int           ForecastSteps  = 4;
+constexpr double        ForecastSeconds = 6.0 * StepSeconds;
 
 constexpr double Masses[] = {0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0};
 constexpr std::size_t FirstMass = 2;
@@ -94,6 +96,7 @@ void Show::Apply(const Look &Fresh)
     Bodies.SetGravity(BaseGravity * Shown.GravityPercent / 100.0);
     if (Shown.SpeedPercent != Was.SpeedPercent) Speed = std::clamp(Shown.SpeedPercent / 100.0, LeastSpeed, MostSpeed);
     if (Shown.Preset != Was.Preset) Begin(Shown.Preset);
+    Stale = true;
 }
 
 // Time of Seconds, as many fixed steps as it holds; when the glass wants a
@@ -107,7 +110,10 @@ void Show::Simulate(double Seconds)
     while (Owed >= StepSeconds) {
         Bodies.Advance(StepSeconds);
         Owed -= StepSeconds;
-        for (Body &One : Bodies.Bodies) Picture.Trail(One, Shown);
+        if (++SinceTrail == TrailEvery) {
+            SinceTrail = 0;
+            for (Body &One : Bodies.Bodies) Picture.Trail(One, Shown);
+        }
         if ((++Steps & 15) == 0 && clock_uptime_us() > Limit) {
             Owed = 0.0;
             break;
@@ -190,6 +196,7 @@ void Show::OnCharacter(char Typed)
 
 bool Show::OnKey(const tui::KeyEvent &Key)
 {
+    Stale = true;
     if (Helping) {
         Helping = false;
         return true;
@@ -205,19 +212,24 @@ bool Show::OnKey(const tui::KeyEvent &Key)
     return true;
 }
 
-Aiming Show::Foresee() const
+// The aim, its path worked out again only when a key may have changed what it
+// depends on, or its time is out: the sky moves on, and a path from a second
+// ago is a little stale, not wrong.
+const Aiming &Show::Foresee()
 {
-    Aiming Aim;
-    Aim.Shown    = Shown.ShowAim && !Helping;
-    Aim.Launcher = Launcher;
-    Aim.Angle    = Angle;
-    if (!Aim.Shown) return Aim;
+    const std::uint64_t Now = clock_uptime_us();
+    Foreseen.Shown          = Shown.ShowAim && !Helping;
+    if (!Shown.ShowAim || (!Stale && Now - ForeseenAt < ForecastEveryUs)) return Foreseen;
+    Foreseen.Launcher = Launcher;
+    Foreseen.Angle    = Angle;
     const Vec      Way{std::cos(Angle), std::sin(Angle)};
     const Forecast Ahead =
         Bodies.Foretell(Launcher, Way * Power, Masses[MassAt], ForecastPlaces, ForecastSteps, ForecastSeconds);
-    Aim.Places = Ahead.Places;
-    Aim.Ends   = Ahead.Ends;
-    return Aim;
+    Foreseen.Places = Ahead.Places;
+    Foreseen.Ends   = Ahead.Ends;
+    ForeseenAt      = Now;
+    Stale           = false;
+    return Foreseen;
 }
 
 Readout Show::Reading()
